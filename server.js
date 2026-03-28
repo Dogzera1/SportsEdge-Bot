@@ -16,11 +16,16 @@ const PANDASCORE_TOKEN = process.env.PANDASCORE_TOKEN || '';
 const ODDS_API_KEY = process.env.ODDS_API_KEY || '';
 
 // DB_PATH allows pointing to a Railway volume (e.g. /data/sportsedge.db)
-const DB_PATH = process.env.DB_PATH || 'sportsedge.db';
-// Ensure the directory exists (needed when using Railway volumes)
 const fs = require('fs');
-const dbDir = path.dirname(path.resolve(DB_PATH));
-if (!fs.existsSync(dbDir)) { fs.mkdirSync(dbDir, { recursive: true }); }
+let DB_PATH = process.env.DB_PATH || 'sportsedge.db';
+// Ensure the directory exists — fall back to local path if creation fails (no volume mounted)
+try {
+  const dbDir = path.dirname(path.resolve(DB_PATH));
+  if (!fs.existsSync(dbDir)) fs.mkdirSync(dbDir, { recursive: true });
+} catch(e) {
+  log('WARN', 'DB', `Não foi possível criar diretório para ${DB_PATH}: ${e.message}. Usando sportsedge.db local.`);
+  DB_PATH = 'sportsedge.db';
+}
 const { db, stmts } = initDatabase(DB_PATH);
 
 // ── Scrapers (opcionais) ──
@@ -567,6 +572,9 @@ async function getLeagueName(leagueId) {
 const server = http.createServer(async (req, res) => {
   const parsed = url.parse(req.url, true);
   const p = parsed.pathname;
+  // Global safety net — prevents hanging requests on unhandled async errors
+  res.on('error', (e) => log('ERROR', 'RES', e.message));
+  try {
 
   if (req.method === 'OPTIONS') {
     res.writeHead(204, {
@@ -1717,6 +1725,10 @@ const server = http.createServer(async (req, res) => {
   }
 
   sendJson(res, { error: 'Not found' }, 404);
+  } catch(e) {
+    log('ERROR', 'SERVER', `Unhandled in ${p}: ${e.message}`);
+    if (!res.headersSent) sendJson(res, { error: e.message }, 500);
+  }
 });
 
 server.listen(PORT, () => {
