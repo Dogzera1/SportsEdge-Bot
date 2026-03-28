@@ -392,3 +392,4 @@ lol betting/
 - Comandos admin protegidos por whitelist `ADMIN_USER_IDS`
 - Usuários que bloqueiam o bot removidos automaticamente (erro 403)
 - Claude API key transmitida via header `x-claude-key`, nunca no body
+"# SportsEdge-Bot" 
