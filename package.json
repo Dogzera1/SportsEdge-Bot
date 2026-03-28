@@ -1,0 +1,19 @@
+{
+  "name": "sportsedge-unified",
+  "version": "1.0.0",
+  "description": "Unified multi-sport betting bot system",
+  "main": "server.js",
+  "scripts": {
+    "start": "node start.js",
+    "server": "node server.js",
+    "bot": "node bot.js",
+    "dev": "nodemon server.js & nodemon bot.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.0.0",
+    "dotenv": "^16.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

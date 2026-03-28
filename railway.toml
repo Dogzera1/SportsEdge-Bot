@@ -1,0 +1,12 @@
+[build]
+builder = "nixpacks"
+
+[deploy]
+startCommand = "node start.js"
+restartPolicyType = "on_failure"
+restartPolicyMaxRetries = 5
+
+[[deploy.healthchecks]]
+type = "tcp"
+port = 3000
+initialDelaySeconds = 10

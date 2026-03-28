@@ -1,0 +1,10 @@
+node_modules/
+.env
+tokens.txt
+*.zip
+*.db
+*.db-wal
+*.db-shm
+data/
+start-bot.bat
+mma betting/
