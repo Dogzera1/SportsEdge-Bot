@@ -17,6 +17,10 @@ const ODDS_API_KEY = process.env.ODDS_API_KEY || '';
 
 // DB_PATH allows pointing to a Railway volume (e.g. /data/sportsedge.db)
 const DB_PATH = process.env.DB_PATH || 'sportsedge.db';
+// Ensure the directory exists (needed when using Railway volumes)
+const fs = require('fs');
+const dbDir = path.dirname(path.resolve(DB_PATH));
+if (!fs.existsSync(dbDir)) { fs.mkdirSync(dbDir, { recursive: true }); }
 const { db, stmts } = initDatabase(DB_PATH);
 
 // ── Scrapers (opcionais) ──
