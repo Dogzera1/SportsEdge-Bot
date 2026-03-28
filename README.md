@@ -393,3 +393,4 @@ lol betting/
 - Usuários que bloqueiam o bot removidos automaticamente (erro 403)
 - Claude API key transmitida via header `x-claude-key`, nunca no body
 "# SportsEdge-Bot" 
+"# SportsEdge-Bot" 
