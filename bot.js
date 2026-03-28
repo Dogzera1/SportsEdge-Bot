@@ -197,6 +197,7 @@ async function runAutoAnalysis() {
       const lolLive = Array.isArray(lolRaw) ? lolRaw.filter(m => m.status === 'live') : [];
       const dotaLive = Array.isArray(dotaRaw) ? dotaRaw.filter(m => m.status === 'live') : [];
       const allLive = [...lolLive, ...dotaLive];
+      log('INFO', 'AUTO', `Esports: ${lolRaw?.length||0} LoL, ${dotaRaw?.length||0} Dota (${allLive.length} ao vivo)`);
 
       for (const match of allLive) {
         const matchKey = `${match.game}_${match.id}`;
@@ -320,7 +321,7 @@ async function runAutoAnalysis() {
         const text = resp.content?.map(b => b.text || '').join('');
         if (!text) { analyzedFights.set(key, { ts: now, phase }); continue; }
 
-        const tipResult = text.match(/TIP_ML:([^@]+)@([^|]+)\|EV:([^|]+)\|STAKE:([^|]+?)(?:\|CONF:(\w+))?(?:\]|$)/);
+        const tipResult = text.match(/TIP_ML:\s*([^@]+?)\s*@\s*([^|\]]+?)\s*\|EV:\s*([^|]+?)\s*\|STAKE:\s*([^|\]]+?)(?:\s*\|CONF:\s*(\w+))?(?:\]|$)/);
         const fairOddsMatch = text.match(/FAIR_ODDS:([^=]+)=([^|]+)\|([^=]+)=([^\s\n\]]+)/);
         analyzedFights.set(key, { ts: now, phase });
 
@@ -900,10 +901,15 @@ async function autoAnalyzeMatch(token, match) {
     }, null, { 'x-claude-key': CLAUDE_KEY });
 
     const text = resp.content?.map(b => b.text || '').join('');
-    if (!text) return null;
+    if (!text) {
+      log('WARN', 'AUTO', `Claude sem resposta para ${match.team1} vs ${match.team2}`);
+      return null;
+    }
 
-    const tipResult = text.match(/TIP_ML:([^@]+)@([^|]+)\|EV:([^|]+)\|STAKE:([^|]+?)(?:\|CONF:(\w+))?(?:\]|$)/);
+    const tipResult = text.match(/TIP_ML:\s*([^@]+?)\s*@\s*([^|\]]+?)\s*\|EV:\s*([^|]+?)\s*\|STAKE:\s*([^|\]]+?)(?:\s*\|CONF:\s*(\w+))?(?:\]|$)/);
     const fairOddsMatch = text.match(/FAIR_ODDS:([^=]+)=([^|]+)\|([^=]+)=([^\s\n\]]+)/);
+    const hasRealOdds = !!(o?.t1 && parseFloat(o.t1) > 1);
+    log('INFO', 'AUTO', `${match.team1} vs ${match.team2} | odds=${o?.t1||'N/A'} hasRealOdds=${hasRealOdds} tipMatch=${!!tipResult}`);
     return { text, tipMatch: tipResult, fairOdds: fairOddsMatch, hasLiveStats, match, o };
   } catch(e) {
     log('ERROR', 'AUTO', `Error for ${match.team1} vs ${match.team2}: ${e.message}`);
@@ -1054,7 +1060,7 @@ function buildEsportsPrompt(match, game, gamesContext, o, enrichSection) {
   }
 
   const oddsInstructions = hasRealOdds
-    ? `5. Compare as odds implícitas da casa com sua probabilidade estimada\n6. Calcule o EV: EV = (prob_real × odd) - 1. EV > 0.05 = valor`
+    ? `5. Compare as odds implícitas da casa com sua probabilidade estimada\n6. Calcule o EV: EV = (prob_real × odd) - 1. EV >= 0.02 (2%) = valor`
     : `5. Estime a probabilidade de vitória de cada time (soma = 100%)\n   Odd justa c/ juice 6%: odd = 1/(prob * 1.06)\n   FAIR_ODDS:[time1]=[odd1]|[time2]=[odd2]`;
 
   const tipInstruction = hasRealOdds
@@ -1449,6 +1455,7 @@ async function runAutoAnalysisTennis() {
 
   try {
     const events = await serverGet('/tennis-tournaments').catch(() => []);
+    log('INFO', 'AUTO-TENNIS', `${events?.length || 0} torneios encontrados`);
     if (!Array.isArray(events) || !events.length) return;
 
     // Priorizar por tier: Grand Slam > Masters/WTA 1000 > ATP/WTA 500 > ATP 250 > Challenger > ITF
@@ -1503,7 +1510,7 @@ async function runAutoAnalysisTennis() {
         const text = resp.content?.map(b => b.text || '').join('');
         if (!text) continue;
 
-        const tipResult = text.match(/TIP_ML:([^@]+)@([^|]+)\|EV:([^|]+)\|STAKE:([^|]+?)(?:\|CONF:(\w+))?(?:\]|$)/);
+        const tipResult = text.match(/TIP_ML:\s*([^@]+?)\s*@\s*([^|\]]+?)\s*\|EV:\s*([^|]+?)\s*\|STAKE:\s*([^|\]]+?)(?:\s*\|CONF:\s*(\w+))?(?:\]|$)/);
         const hasRealOdds = !!(odds?.t1 && parseFloat(odds.t1) > 1);
 
         if (tipResult && hasRealOdds) {
