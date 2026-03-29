@@ -163,7 +163,9 @@ O bot opera em **modo automático**. Não há navegação manual de eventos ou l
 
 ### 🥊 MMA
 
-- **Auto-análise** a cada 6h: processa lutas nas 48h pré-evento em duas fases — `early` (>24h) e `final` (≤24h, pós-pesagem)
+- **Auto-análise** a cada 6h: processa lutas nos **próximos 5 dias** em duas fases:
+  - `early` (>24h até 5 dias antes): análise antecipada com stats e forma disponíveis
+  - `final` (≤24h, pós-pesagem): re-análise com informações de peso e camp confirmados
 - **Notificação dia do evento** (a cada 1h): avisa inscritos com card completo quando o UFC é hoje ou amanhã
 - **Late replacements** (a cada 2h): compara card atual com snapshot anterior, alerta admins + inscritos em caso de troca
 - **Line movement** (a cada 30 min): alerta quando odds mudam ≥ 10%
@@ -171,14 +173,15 @@ O bot opera em **modo automático**. Não há navegação manual de eventos ou l
 
 ### 🎮 Esports (LoL + Dota 2)
 
-- **Auto-análise** a cada 3 min: partidas ao vivo e próximas com stats de composições, gold, patch meta
+- **Auto-análise ao vivo** a cada 3 min: analisa partidas `live` com dados de gold, composições, KDA e objetivos em tempo real
+- **Auto-análise pré-jogo** a cada 3 min: analisa partidas `upcoming` nas **próximas 24h** — re-análise a cada 2h por partida, sem repetir se tip já enviada
 - **Notificação ao vivo** (a cada 1 min): avisa inscritos quando draft começa (🟡) e quando a partida vai ao vivo (🔴)
 - **Patch meta stale** (a cada 24h): alerta admins se `LOL_PATCH_META` não foi atualizado há >14 dias
 - **Settlement** via LoL Esports API e OpenDota API
 
 ### 🎾 Tênis
 
-- **Auto-análise** a cada 30 min: prioriza por tier (Grand Slam > Masters 1000 > ATP/WTA 500 > ATP/WTA 250 > Challenger > ITF), máx. 6 torneios/ciclo
+- **Auto-análise** a cada 4h: cobre partidas nas **próximas 48h**, prioriza por tier (Grand Slam > Masters 1000 > ATP/WTA 500 > ATP/WTA 250 > Challenger > ITF), máx. 8 torneios/ciclo, 3 partidas por torneio
 - **Notificação pré-partida** (a cada 5 min): avisa inscritos ~30 min antes do início com superfície e horário de Brasília
 - **Withdrawals/lucky losers** (a cada 2h): compara draw com snapshot anterior
 - **Settlement** (a cada 24h): via The Odds API scores endpoint
@@ -188,16 +191,34 @@ O bot opera em **modo automático**. Não há navegação manual de eventos ou l
 
 ## Sistema de Análise IA
 
+### Janelas de Análise por Esporte
+
+| Esporte | Partidas elegíveis | Re-análise |
+|---|---|---|
+| Esports (ao vivo) | `status=live` — sem limite de tempo | A cada 10 min por partida |
+| Esports (pré-jogo) | `status=upcoming` nas próximas 24h | A cada 2h por partida |
+| MMA | Próximos 5 dias (120h) — fases `early` e `final` | Uma vez por fase |
+| Tênis | Próximas 48h — prioridade por tier de torneio | Uma vez por partida por ciclo de 4h |
+
 ### Fluxo Automático
 
-1. Ciclo detecta partida elegível (ao vivo para esports; dentro de 48h para MMA; próximos 14 dias para tênis)
-2. Coleta em paralelo: stats ao vivo, odds de mercado, forma recente, H2H, line movement
+1. Ciclo detecta partida elegível dentro da janela do esporte
+2. Coleta em paralelo: stats ao vivo (se disponíveis), odds de mercado, forma recente, H2H, line movement
 3. Para LoL: busca composições e stats ao vivo (Riot API ou PandaScore para torneios não-Riot) + patch meta
-4. Monta prompt estruturado e envia ao Claude (`claude-sonnet-4-6`)
-5. Claude estima probabilidades reais e calcula EV
-6. **Com odds de mercado:** tip emitida se EV ≥ 2% e confiança ALTA/MÉDIA/BAIXA
-7. **Sem odds de mercado:** Claude estima fair odds (juice 6%) e emite tip se confiança ALTA/MÉDIA — mensagem inclui aviso `⚠️ Odds estimadas`
+4. Monta prompt com **raciocínio em duas etapas**: estimativa cega de probabilidade → comparação com odds
+5. Claude declara probabilidade antes de ver odds, depois verifica se há edge real (gate de 3pp)
+6. **Com odds de mercado:** tip emitida se EV ≥ 2%
+7. **Sem odds de mercado:** Claude estima fair odds (juice 6%) e emite tip se confiança ALTA/MÉDIA — mensagem marcada com `⚠️ Odds estimadas`
 8. Tip registrada no banco + enviada por DM a todos os inscritos no esporte (¼ Kelly)
+
+### Proteções Anti-Viés nos Prompts
+
+- **"Sem edge" é uma resposta válida** — instrução explícita em todos os prompts para não forçar recomendação
+- **Gate de 3pp** — se a estimativa do Claude diferir das odds implícitas em menos de 3 pontos percentuais, a análise retorna "SEM EDGE"
+- **Line movement como sinal contrário** — instrução para ajustar probabilidade 2-3pp na direção do movimento de mercado
+- **MMA: teto de 65-70%** — mesmo com vantagem técnica clara, o Claude é instruído a respeitar a variância do esporte
+- **Esports: desconto de alto fluxo** — jogos com menos de 15 min ou objetivo maior recente rebaixam confiança para BAIXA automaticamente
+- **Tênis: baseline de ranking** — fórmula logarítmica gera probabilidade de referência; Claude justifica quando diverge >8pp
 
 ### Prompts por Esporte
 
@@ -266,7 +287,7 @@ Para adicionar ligas extras além da whitelist interna, use `LOL_EXTRA_LEAGUES` 
 O plano gratuito tem **500 requisições/mês**. O sistema gerencia o consumo automaticamente:
 
 - **TTL MMA**: 4h por refresh (≈ 180 req/mês)
-- **TTL Tênis**: 12h por refresh, máx. 6 torneios por ciclo (≈ 180 req/mês)
+- **TTL Tênis**: 12h por refresh, máx. 8 torneios por ciclo (≈ 180 req/mês)
 - **Hard cap**: 450 req/mês (50 de buffer). Ao atingir, usa cache existente e loga aviso
 - Contador em memória (`oddsApiAllowed()`) — reinicia com restart do processo
 
