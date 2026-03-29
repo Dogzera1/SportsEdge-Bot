@@ -1402,8 +1402,11 @@ ${hasRealOdds
   ? `Odds implícitas do mercado: ${t1}=${(1/parseFloat(o.t1)*100).toFixed(1)}% | ${t2}=${(1/parseFloat(o.t2)*100).toFixed(1)}%
 → Se diferença entre sua estimativa e odds implícitas < 3pp: escreva "SEM EDGE" e não emita TIP_ML.
 → Se diferença ≥ 3pp a seu favor: calcule EV = (prob_real × odd) - 1. Só emita tip se EV >= +2%.`
-  : `Sem odds de mercado — estime fair odds com juice 6%: odd = 1/(prob × 1.06)
-→ Só emita tip se vantagem for clara (>58%) E confiança for ALTA ou MÉDIA.`}
+  : `Sem odds de mercado disponíveis.
+→ Estime FAIR_ODDS (sem juice) = 1/prob. Exemplo: P1=65% → odd=1.538
+→ AVISO DE PRECISÃO: sem dados de roster atual, patch, bootcamp ou draft, sua estimativa pode divergir 15-20pp do mercado real. Seja conservador.
+→ Só emita TIP_ML se vantagem for clara (>65%) E confiança for ALTA E tiver múltiplos fatores convergindo.
+→ Se vantagem entre 58-65%: emita FAIR_ODDS como referência, mas NÃO emita TIP_ML.`}
 
 ANÁLISE DE VIRADA:
 ${game === 'lol' ? `• Composição late-game/scaling no time perdedor → virada possível
@@ -1425,9 +1428,9 @@ ETAPA 1 — P(${t1})=__% | P(${t2})=__% | Fator principal: [X] | Incerteza: [Y]
 ETAPA 2 — ${hasRealOdds ? `EV(${t1})=[X%] | EV(${t2})=[X%] | Edge: [SIM/NÃO]` : `Fair odds: ${t1}=[X.XX] | ${t2}=[X.XX] | Vantagem clara: [SIM/NÃO]`}
 Confiança: [ALTA/MÉDIA/BAIXA] | Motivo do nível: [1 frase]
 
-FAIR_ODDS:${t1}=[odd]|${t2}=[odd]
+FAIR_ODDS:${t1}=[1/prob_sem_juice]|${t2}=[1/prob_sem_juice]
 ${tipInstruction}
-
+${!hasRealOdds ? `\n⚠️ Lembre: sua estimativa sem dados de mercado pode divergir muito do preço real. Só emita TIP_ML com alta convicção (>65% + múltiplos fatores).` : ''}
 Máximo 450 palavras.`;
 }
 
@@ -1526,7 +1529,7 @@ function buildMMAPrompt(match, p1Stats, p2Stats, odds, form1, form2, h2h, oddsMo
     const p2 = (1 / parseFloat(odds.t2) * 100).toFixed(1);
     oddsSection = `Odds: ${f1}=${odds.t1} (imp. ${p1}%) | ${f2}=${odds.t2} (imp. ${p2}%)\nBookmaker: ${odds.bookmaker || 'N/A'}`;
   } else {
-    oddsSection = `Odds: Não disponíveis\n⚠️ SEM ODDS REAIS — estime FAIR_ODDS c/ juice 6%`;
+    oddsSection = `Odds: Não disponíveis\n⚠️ SEM ODDS REAIS — estime FAIR_ODDS = 1/prob (sem juice)`;
   }
 
   let lineMovement = '';
@@ -1592,8 +1595,10 @@ ${hasOdds
   ? `Odds implícitas: ${f1}=${(1/parseFloat(odds.t1)*100).toFixed(1)}% | ${f2}=${(1/parseFloat(odds.t2)*100).toFixed(1)}%
 → Se diferença < 3pp: escreva "SEM EDGE" — não emita TIP_ML.
 → Se diferença ≥ 3pp a seu favor: EV = (prob_real × odd) - 1. Tip só se EV >= +2%.`
-  : `Sem odds — estime fair odds c/ juice 6%: odd = (1/prob) / 1.06
-→ Só emita tip se vantagem for clara (>60%) E confiança ALTA ou MÉDIA.`}
+  : `Sem odds de mercado disponíveis.
+→ Estime FAIR_ODDS (sem juice) = 1/prob. Exemplo: P1=65% → odd=1.538
+→ AVISO: sem odds reais, sua estimativa pode divergir significativamente do mercado. Seja conservador.
+→ Só emita TIP_ML se vantagem for clara (>63%) E confiança ALTA E múltiplos fatores convergindo.`}
 
 NÃO invente estatísticas. Se faltar dado, declare explicitamente "dado não disponível".
 
@@ -1629,7 +1634,7 @@ function buildTennisPrompt(match, p1Stats, p2Stats, odds, surfForm1, surfForm2, 
     const prob2 = (1 / parseFloat(odds.t2) * 100).toFixed(1);
     oddsSection = `Odds: ${p1}=${odds.t1} (imp. ${prob1}%) | ${p2}=${odds.t2} (imp. ${prob2}%)\nBookmaker: ${odds.bookmaker || 'N/A'}`;
   } else {
-    oddsSection = `Odds: Não disponíveis\n⚠️ SEM ODDS REAIS — estime FAIR_ODDS c/ juice 5%`;
+    oddsSection = `Odds: Não disponíveis\n⚠️ SEM ODDS REAIS — estime FAIR_ODDS = 1/prob (sem juice)`;
   }
 
   let lineMovement = '';
@@ -1735,8 +1740,10 @@ ${hasOdds
   ? `Odds implícitas: ${p1}=${(1/parseFloat(odds.t1)*100).toFixed(1)}% | ${p2}=${(1/parseFloat(odds.t2)*100).toFixed(1)}%
 → Se diferença < 3pp: escreva "SEM EDGE" — não emita TIP_ML.
 → Se diferença ≥ 3pp: EV = (prob_real × odd) - 1. Tip só se EV >= +2%.`
-  : `Sem odds — estime fair odds c/ juice 5%: odd = (1/prob) / 1.05
-→ Só emita tip se vantagem clara (>58%) E confiança ALTA ou MÉDIA.`}
+  : `Sem odds de mercado disponíveis.
+→ Estime FAIR_ODDS (sem juice) = 1/prob. Exemplo: P1=65% → odd=1.538
+→ AVISO: sem odds reais, sua estimativa pode divergir do mercado real. Seja conservador.
+→ Só emita TIP_ML se vantagem for clara (>62%) E confiança ALTA.`}
 
 NÃO invente dados. Se estatística não estiver disponível, declare "dado não disponível".
 
