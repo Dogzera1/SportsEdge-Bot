@@ -68,6 +68,11 @@ PANDASCORE_TOKEN=seu_token                 # PandaScore — torneios não-Riot
 
 # ── Servidor ──
 SERVER_PORT=3000
+DB_PATH=sportsedge.db                      # Railway: use /data/sportsedge.db com volume montado
+
+# ── Admin ──
+# Obrigatório: ID numérico do Telegram do admin (obtenha via @userinfobot)
+# O admin é inscrito automaticamente em todos os esportes a cada restart
 ADMIN_USER_IDS=123456789,987654321
 
 # ── Feature flags ──
@@ -76,7 +81,7 @@ ESPORTS_ENABLED=true
 TENNIS_ENABLED=true                         # false para desativar
 
 # ── LoL — ligas extras (slugs adicionais além da whitelist interna) ──
-LOL_EXTRA_LEAGUES=road_to_ewc_lpl,outro_slug  # opcional; separado por vírgula
+LOL_EXTRA_LEAGUES=cd,north_regional_league,south_regional_league  # opcional; separado por vírgula
 
 # ── Meta LoL (atualizar a cada patch — afeta qualidade da análise) ──
 LOL_PATCH_META=Patch 26.X — descrição do meta atual
@@ -89,12 +94,22 @@ PATCH_META_DATE=YYYY-MM-DD
 
 ```bash
 npm install
-npm start           # inicia servidor + todos os bots simultaneamente
+npm start           # inicia servidor + todos os bots via start.js
 
 # Ou separadamente (servidor DEVE iniciar primeiro)
-npm run server      # node server.js  →  porta 3000
+npm run server      # node server.js  →  porta configurada em SERVER_PORT/PORT
 npm run bot         # node bot.js     →  polling de todos os bots ativos
 ```
+
+### Deploy no Railway
+
+1. Faça push para o repositório GitHub vinculado ao projeto Railway
+2. Configure as variáveis de ambiente no painel **Variables** do Railway (todas as do `.env` acima)
+3. Para persistência do banco entre redeploys, crie um volume no Railway e defina `DB_PATH=/data/sportsedge.db`
+4. O `start.js` gerencia os dois processos (server + bot) com auto-restart em caso de falha
+5. **Importante:** configure `ADMIN_USER_IDS` com seu ID do Telegram — o admin é inscrito automaticamente a cada boot, garantindo recebimento de tips mesmo após redeploys
+
+> O `railway.toml` já está configurado com healthcheck TCP na porta 3000 e restart policy `on_failure`.
 
 ---
 
@@ -148,7 +163,7 @@ O bot opera em **modo automático**. Não há navegação manual de eventos ou l
 
 ### 🥊 MMA
 
-- **Auto-análise** a cada 3 min: processa lutas nas 48h pré-evento em duas fases — `early` (>24h) e `final` (≤24h, pós-pesagem)
+- **Auto-análise** a cada 6h: processa lutas nas 48h pré-evento em duas fases — `early` (>24h) e `final` (≤24h, pós-pesagem)
 - **Notificação dia do evento** (a cada 1h): avisa inscritos com card completo quando o UFC é hoje ou amanhã
 - **Late replacements** (a cada 2h): compara card atual com snapshot anterior, alerta admins + inscritos em caso de troca
 - **Line movement** (a cada 30 min): alerta quando odds mudam ≥ 10%
@@ -175,13 +190,14 @@ O bot opera em **modo automático**. Não há navegação manual de eventos ou l
 
 ### Fluxo Automático
 
-1. Ciclo detecta partida com odds disponíveis
-2. Coleta em paralelo: stats, odds, forma recente, H2H, line movement
-3. Para LoL: busca composições ao vivo (Riot API ou PandaScore para torneios não-Riot) e patch meta
+1. Ciclo detecta partida elegível (ao vivo para esports; dentro de 48h para MMA; próximos 14 dias para tênis)
+2. Coleta em paralelo: stats ao vivo, odds de mercado, forma recente, H2H, line movement
+3. Para LoL: busca composições e stats ao vivo (Riot API ou PandaScore para torneios não-Riot) + patch meta
 4. Monta prompt estruturado e envia ao Claude (`claude-sonnet-4-6`)
-5. Claude emite probabilidade justa e EV
-6. **Se EV ≥ 2%** → tip registrada no banco + enviada por DM aos inscritos (¼ Kelly)
-7. Confidence ALTA, MÉDIA ou BAIXA são aceitas
+5. Claude estima probabilidades reais e calcula EV
+6. **Com odds de mercado:** tip emitida se EV ≥ 2% e confiança ALTA/MÉDIA/BAIXA
+7. **Sem odds de mercado:** Claude estima fair odds (juice 6%) e emite tip se confiança ALTA/MÉDIA — mensagem inclui aviso `⚠️ Odds estimadas`
+8. Tip registrada no banco + enviada por DM a todos os inscritos no esporte (¼ Kelly)
 
 ### Prompts por Esporte
 
@@ -364,11 +380,13 @@ Campo `sport TEXT` presente em todas as tabelas para separação por esporte. Pa
 
 ```
 lol betting/
-├── server.js           # Servidor HTTP unificado (porta 3000)
+├── server.js           # Servidor HTTP unificado (porta configurada via PORT/SERVER_PORT)
 ├── bot.js              # Bot multi-esporte (polling simultâneo, modo automático)
+├── start.js            # Launcher Railway: spawna server.js + bot.js com auto-restart
+├── railway.toml        # Configuração Railway (builder nixpacks, healthcheck TCP, restart policy)
 ├── package.json
 ├── .env                # Credenciais (não commitar)
-├── sportsedge.db       # SQLite unificado (criado automaticamente)
+├── sportsedge.db       # SQLite unificado (criado automaticamente; path via DB_PATH)
 ├── lib/
 │   ├── database.js     # Schema SQLite, prepared statements e índices
 │   ├── sports.js       # Registry de esportes (tokens, flags, sport keys)
@@ -392,5 +410,3 @@ lol betting/
 - Comandos admin protegidos por whitelist `ADMIN_USER_IDS`
 - Usuários que bloqueiam o bot removidos automaticamente (erro 403)
 - Claude API key transmitida via header `x-claude-key`, nunca no body
-"# SportsEdge-Bot" 
-"# SportsEdge-Bot" 
