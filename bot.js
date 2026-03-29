@@ -15,7 +15,8 @@ if (!CLAUDE_KEY) {
   process.exit(1);
 }
 
-const { db, stmts } = initDatabase();
+const DB_PATH = process.env.DB_PATH || 'sportsedge.db';
+const { db, stmts } = initDatabase(DB_PATH);
 
 // ── Bot Instances ──
 const bots = {};
@@ -175,10 +176,29 @@ async function loadSubscribedUsers() {
         const prefs = safeParse(u.sport_prefs, []);
         subscribedUsers.set(u.user_id, new Set(prefs));
       }
-      log('INFO', 'BOOT', `${users.length} usuários carregados`);
+      log('INFO', 'BOOT', `${users.length} usuários carregados do DB`);
     }
   } catch(e) {
     log('WARN', 'BOOT', 'Erro ao carregar usuários: ' + e.message);
+  }
+
+  // Auto-subscribe admin users to all enabled sports (ensures tips are sent after cold redeploys)
+  const allSports = new Set(Object.keys(SPORTS).filter(k => SPORTS[k]?.enabled && SPORTS[k]?.token));
+  for (const adminId of ADMIN_IDS) {
+    const id = parseInt(adminId);
+    if (isNaN(id)) continue;
+    if (!subscribedUsers.has(id) || subscribedUsers.get(id).size === 0) {
+      subscribedUsers.set(id, new Set(allSports));
+      log('INFO', 'BOOT', `Admin ${id} auto-inscrito em: ${[...allSports].join(', ')}`);
+      // Persist to DB via server so it survives future restarts
+      serverPost('/save-user', { userId: id, subscribed: true, sportPrefs: [...allSports] }).catch(() => {});
+    }
+  }
+
+  if (subscribedUsers.size === 0) {
+    log('WARN', 'BOOT', 'Nenhum usuário inscrito. Configure ADMIN_USER_IDS no .env para receber tips automaticamente.');
+  } else {
+    log('INFO', 'BOOT', `Total: ${subscribedUsers.size} usuários com notificações ativas`);
   }
 }
 
@@ -188,7 +208,7 @@ async function runAutoAnalysis() {
 
   // ── ESPORTS: Analyze LIVE matches every RE_ANALYZE_INTERVAL ──
   const esportsConfig = SPORTS['esports'];
-  if (esportsConfig?.enabled && subscribedUsers.size > 0) {
+  if (esportsConfig?.enabled) {
     try {
       const [lolRaw, dotaRaw] = await Promise.all([
         serverGet('/lol-matches').catch(() => []),
@@ -197,7 +217,7 @@ async function runAutoAnalysis() {
       const lolLive = Array.isArray(lolRaw) ? lolRaw.filter(m => m.status === 'live') : [];
       const dotaLive = Array.isArray(dotaRaw) ? dotaRaw.filter(m => m.status === 'live') : [];
       const allLive = [...lolLive, ...dotaLive];
-      log('INFO', 'AUTO', `Esports: ${lolRaw?.length||0} LoL, ${dotaRaw?.length||0} Dota (${allLive.length} ao vivo)`);
+      log('INFO', 'AUTO', `Esports: ${lolRaw?.length||0} LoL, ${dotaRaw?.length||0} Dota (${allLive.length} ao vivo) | inscritos=${subscribedUsers.size}`);
 
       for (const match of allLive) {
         const matchKey = `${match.game}_${match.id}`;
@@ -270,7 +290,7 @@ async function runAutoAnalysis() {
 
   // ── MMA: Analyze upcoming fights every 6h with phase tracking ──
   const mmaConfig = SPORTS['mma'];
-  if (mmaConfig?.enabled && subscribedUsers.size > 0 && now - lastAutoAnalyze >= AUTO_ANALYZE_INTERVAL) {
+  if (mmaConfig?.enabled && now - lastAutoAnalyze >= AUTO_ANALYZE_INTERVAL) {
     lastAutoAnalyze = now;
     try {
       const fights = await serverGet('/upcoming-fights?days=3', 'mma');
@@ -1451,7 +1471,7 @@ async function runAutoAnalysisTennis() {
   lastTennisAutoAnalyze = Date.now();
 
   const tennisConfig = SPORTS['tennis'];
-  if (!tennisConfig?.enabled || !tennisConfig.token || subscribedUsers.size === 0) return;
+  if (!tennisConfig?.enabled || !tennisConfig.token) return;
 
   try {
     const events = await serverGet('/tennis-tournaments').catch(() => []);
