@@ -169,6 +169,43 @@ function getMenu(sport) {
   return kb([['🔔 Notificações', '📊 Tracking'], ['📅 Próximas', '❓ Ajuda']]);
 }
 
+// ── Hydrate tip maps from DB on startup (prevents re-sending after restart) ──
+async function loadExistingTips() {
+  try {
+    // Esports
+    const esportsTips = await serverGet('/unsettled-tips', 'esports').catch(() => []);
+    if (Array.isArray(esportsTips)) {
+      for (const tip of esportsTips) {
+        if (!tip.match_id) continue;
+        const id = tip.match_id;
+        // Mark all possible key formats for this match ID
+        for (const prefix of ['lol_', 'dota_', 'upcoming_lol_', 'upcoming_dota_']) {
+          analyzedMatches.set(`${prefix}${id}`, { ts: Date.now(), tipSent: true });
+        }
+      }
+      if (esportsTips.length) log('INFO', 'BOOT', `Esports: ${esportsTips.length} tips existentes carregadas (não serão repetidas)`);
+    }
+    // MMA
+    const mmaTips = await serverGet('/unsettled-tips', 'mma').catch(() => []);
+    if (Array.isArray(mmaTips)) {
+      for (const tip of mmaTips) {
+        if (tip.match_id) analyzedFights.set(tip.match_id, { ts: Date.now(), phase: 'final', tipSent: true });
+      }
+      if (mmaTips.length) log('INFO', 'BOOT', `MMA: ${mmaTips.length} tips existentes carregadas`);
+    }
+    // Tennis
+    const tennisTips = await serverGet('/unsettled-tips', 'tennis').catch(() => []);
+    if (Array.isArray(tennisTips)) {
+      for (const tip of tennisTips) {
+        if (tip.match_id) analyzedTennisMatches.set(`tennis_${tip.match_id}`, { ts: Date.now(), tipSent: true });
+      }
+      if (tennisTips.length) log('INFO', 'BOOT', `Tênis: ${tennisTips.length} tips existentes carregadas`);
+    }
+  } catch(e) {
+    log('WARN', 'BOOT', `Erro ao carregar tips existentes: ${e.message}`);
+  }
+}
+
 // ── Load Subscribers ──
 async function loadSubscribedUsers() {
   try {
@@ -224,6 +261,7 @@ async function runAutoAnalysis() {
       for (const match of allLive) {
         const matchKey = `${match.game}_${match.id}`;
         const prev = analyzedMatches.get(matchKey);
+        if (prev?.tipSent) continue; // uma tip por partida — não repetir
         if (prev && (now - prev.ts < RE_ANALYZE_INTERVAL)) continue;
 
         log('INFO', 'AUTO', `Esports: ${match.team1} vs ${match.team2} (${match.league})`);
@@ -397,6 +435,7 @@ async function runAutoAnalysis() {
 
         const entry = analyzedFights.get(key);
         if (entry) {
+          if (entry.tipSent) continue; // uma tip por luta — não repetir mesmo após pesagem
           // Re-análise pós-pesagem: analisou cedo (>24h) e agora estamos dentro de 24h
           if (entry.phase === 'early' && hoursToEvent <= 24) {
             log('INFO', 'AUTO-MMA', `Re-análise pós-pesagem: ${fight.participant1_name} vs ${fight.participant2_name}`);
@@ -445,7 +484,7 @@ async function runAutoAnalysis() {
 
         const tipResult = text.match(/TIP_ML:\s*([^@]+?)\s*@\s*([^|\]]+?)\s*\|EV:\s*([^|]+?)\s*\|STAKE:\s*([^|\]]+?)(?:\s*\|CONF:\s*(\w+))?(?:\]|$)/);
         const fairOddsMatch = text.match(/FAIR_ODDS:([^=]+)=([^|]+)\|([^=]+)=([^\s\n\]]+)/);
-        analyzedFights.set(key, { ts: now, phase });
+        analyzedFights.set(key, { ts: now, phase, tipSent: false });
 
         const hasRealOdds = !!(effectiveOdds?.t1 && parseFloat(effectiveOdds.t1) > 1);
 
@@ -477,6 +516,7 @@ async function runAutoAnalysis() {
             try { await sendDM(mmaConfig.token, userId, tipMsg); }
             catch(e) { if (e.message?.includes('403')) subscribedUsers.delete(userId); }
           }
+          analyzedFights.set(key, { ts: now, phase, tipSent: true });
           log('INFO', 'AUTO-TIP-MMA', `${tipFighter} @ ${tipOdd} (odds ${hasRealOdds ? 'reais' : 'estimadas'})`);
         } else if (fairOddsMatch && !hasRealOdds) {
           const fo1 = parseFloat(fairOddsMatch[2]).toFixed(2), fo2 = parseFloat(fairOddsMatch[4]).toFixed(2);
@@ -1869,7 +1909,8 @@ async function runAutoAnalysisTennis() {
         if (analyzed >= MAX_ANALYSES) break;
         const key = `tennis_${match.id}`;
         const prev = analyzedTennisMatches.get(key);
-        if (prev && Date.now() - prev < TENNIS_AUTO_INTERVAL) continue;
+        if (prev?.tipSent) continue; // uma tip por partida — não repetir
+        if (prev?.ts && Date.now() - prev.ts < TENNIS_AUTO_INTERVAL) continue;
 
         const p1enc = encodeURIComponent(match.participant1_name);
         const p2enc = encodeURIComponent(match.participant2_name);
@@ -1888,11 +1929,11 @@ async function runAutoAnalysisTennis() {
         // Pre-filter: skip if surface-adjusted model agrees with market within 6pp
         if (!tennisPreFilter(p1Stats, p2Stats, form1, form2, odds, surface)) {
           log('INFO', 'AUTO-TENNIS', `Pré-filtro: modelo alinhado com odds — pulando ${match.participant1_name} vs ${match.participant2_name}`);
-          analyzedTennisMatches.set(key, Date.now()); // mark to avoid re-checking this cycle
+          analyzedTennisMatches.set(key, { ts: Date.now(), tipSent: false });
           continue;
         }
 
-        analyzedTennisMatches.set(key, Date.now());
+        analyzedTennisMatches.set(key, { ts: Date.now(), tipSent: false });
         analyzed++;
 
         const matchTimeBRT = match.match_time
@@ -1942,6 +1983,7 @@ async function runAutoAnalysisTennis() {
             try { await sendDM(tennisConfig.token, userId, tipMsg); }
             catch(e) { if (e.message?.includes('403')) subscribedUsers.delete(userId); }
           }
+          analyzedTennisMatches.set(key, { ts: Date.now(), tipSent: true });
           log('INFO', 'AUTO-TIP-TENNIS', `${tipPlayer} @ ${tipOdd} (odds ${hasRealOdds ? 'reais' : 'estimadas'})`);
         }
 
@@ -2359,6 +2401,7 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
 
 (async () => {
   await loadSubscribedUsers();
+  await loadExistingTips();
   
   // Start polling for each enabled sport
   for (const [sport, config] of Object.entries(SPORTS)) {
