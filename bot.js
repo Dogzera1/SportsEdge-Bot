@@ -336,7 +336,7 @@ async function runAutoAnalysis() {
         const prompt = buildMMAPrompt(fight, p1Stats, p2Stats, effectiveOdds, form1, form2, h2h, null);
 
         const resp = await serverPost('/claude', {
-          model: 'claude-sonnet-4-6', max_tokens: 1500,
+          model: 'claude-sonnet-4-6', max_tokens: 1800,
           messages: [{ role: 'user', content: prompt }]
         }, null, { 'x-claude-key': CLAUDE_KEY });
 
@@ -920,7 +920,7 @@ async function autoAnalyzeMatch(token, match) {
 
     const resp = await serverPost('/claude', {
       model: 'claude-sonnet-4-6',
-      max_tokens: 1500,
+      max_tokens: 1800,
       messages: [{ role: 'user', content: prompt }]
     }, null, { 'x-claude-key': CLAUDE_KEY });
 
@@ -1080,19 +1080,31 @@ function buildEsportsPrompt(match, game, gamesContext, o, enrichSection) {
     const prob2 = (1 / parseFloat(o.t2) * 100).toFixed(1);
     oddsSection = `Odds ML: ${t1}=${o.t1} | ${t2}=${o.t2}${o.bookmaker ? ' (' + o.bookmaker + ')' : ''}\nOdds implícitas: ${t1}=${prob1}% | ${t2}=${prob2}%`;
   } else {
-    oddsSection = `Odds ML: Não disponíveis\n⚠️ SEM ODDS REAIS — estime FAIR_ODDS com juice 6%`;
+    oddsSection = `Odds ML: Não disponíveis — você irá estimar FAIR_ODDS`;
   }
 
-  const oddsInstructions = hasRealOdds
-    ? `5. Compare as odds implícitas da casa com sua probabilidade estimada\n6. Calcule o EV: EV = (prob_real × odd) - 1. EV >= 0.02 (2%) = valor`
-    : `5. Estime a probabilidade de vitória de cada time (soma = 100%)\n   Odd justa c/ juice 6%: odd = 1/(prob * 1.06)\n   FAIR_ODDS:[time1]=[odd1]|[time2]=[odd2]\n6. Se confiança ALTA ou MÉDIA e vantagem clara (>55%), emita TIP_ML usando a FAIR_ODD estimada`;
+  // Detect high-flux game state from gamesContext
+  const gameTimeMatch = gamesContext.match(/(\d+)\s*(?:min|:)/);
+  const gameMinute = gameTimeMatch ? parseInt(gameTimeMatch[1]) : null;
+  const isEarlyGame = gameMinute !== null && gameMinute < 15;
+  const hasRecentObjective = /baron|elder|roshan|aegis|soul/i.test(gamesContext);
+  const highFlux = isEarlyGame || hasRecentObjective;
+
+  const lineMovementWarning = enrichSection.includes('LINE MOVEMENT')
+    ? `⚠️ LINE MOVEMENT DETECTADO: mercado se moveu. Trate isso como sinal contrário — o mercado provavelmente sabe algo. Ajuste sua estimativa de probabilidade 2-3pp na direção do movimento antes de calcular EV. Só mantenha sua estimativa original se tiver dados concretos que justifiquem a divergência.`
+    : '';
+
+  const highFluxWarning = highFlux
+    ? `🚨 ATENÇÃO — ESTADO DE ALTO FLUXO: ${isEarlyGame ? `Jogo com apenas ${gameMinute}min (muito cedo para análise confiável).` : ''} ${hasRecentObjective ? 'Objetivo maior recente detectado — estado do jogo pode ter mudado completamente.' : ''} Com delay de ~90s, o que você está vendo já pode ser história. Confiança máxima neste contexto: BAIXA.`
+    : '';
 
   const tipInstruction = hasRealOdds
-    ? `[Se +EV >= 2% e confiança ALTA, MÉDIA ou BAIXA: TIP_ML:[time]@[odd]|EV:[%]|STAKE:[u]|CONF:[ALTA/MÉDIA/BAIXA]]`
-    : `[Se confiança ALTA ou MÉDIA: TIP_ML:[time]@[fair_odd]|EV:estimado|STAKE:[u]|CONF:[ALTA/MÉDIA]]`;
+    ? `[Se EV >= +2% E confiança não foi rebaixada para BAIXA por alto fluxo: TIP_ML:[time]@[odd]|EV:[%]|STAKE:[u]|CONF:[ALTA/MÉDIA/BAIXA]]`
+    : `[Se confiança ALTA ou MÉDIA e sem rebaixamento por alto fluxo: TIP_ML:[time]@[fair_odd]|EV:estimado|STAKE:[u]|CONF:[ALTA/MÉDIA]]`;
 
-  return `Você é um analista profissional de apostas esportivas de ${game === 'lol' ? 'League of Legends' : 'Dota 2'}.
-Sua análise deve ser 100% baseada nos dados fornecidos.
+  return `Você é um analista de apostas de ${game === 'lol' ? 'League of Legends' : 'Dota 2'}. Seu trabalho é identificar edge REAL — não fabricar recomendações.
+
+REGRA FUNDAMENTAL: "Sem edge identificado" é uma resposta válida e frequentemente a correta. A maioria das partidas não tem EV real. Resist the urge to always find a bet.
 
 ═══════════════════════════════════════
 SÉRIE: ${t1} vs ${t2}
@@ -1105,42 +1117,48 @@ ${gamesContext || '\n[Sem dados ao vivo — análise pré-jogo]\n'}
 ═══════════════════════════════════════
 ${enrichSection}
 ═══════════════════════════════════════
+${highFluxWarning ? '\n' + highFluxWarning + '\n' : ''}${lineMovementWarning ? '\n' + lineMovementWarning + '\n' : ''}
+RACIOCÍNIO EM DUAS ETAPAS OBRIGATÓRIO:
 
-INSTRUÇÕES:
-1. Analise os dados ao vivo com PESO BALANCEADO
-2. Considere forma recente e H2H
-3. Verifique line movement — odds caindo indicam sharp money
+ETAPA 1 — ESTIMATIVA CEGA (antes de comparar com odds):
+Baseado SOMENTE nos dados de estado do jogo, composições, forma e H2H:
+→ Estime: P(${t1})=__% | P(${t2})=__%
+→ Principal fator que justifica essa estimativa: [1 frase]
+→ Principal fator de incerteza: [1 frase]
+${highFlux ? '→ Aplicar desconto de alto fluxo: SIM — confiança rebaixada para BAIXA automaticamente' : ''}
 
-${game === 'lol' ? `4. ANÁLISE DE VIRADA (LoL):
-   a) COMPOSIÇÃO: time perdendo tem comp de late-game/scaling? Virada é plausível
-   b) OBJETIVOS: mais dragões? Soul point? Baron buff?
-   c) GOLD DIFF < 3k COM torres intactas ≠ jogo decidido
-   d) TIMING: antes dos 20min = cedo demais. 25-35min = janela crítica
-   e) KDA dos carries: carry com KDA positivo e item core completo = ameaça real` : `4. ANÁLISE DE VIRADA (Dota 2):
-   a) Roshan/Aegis ativo muda completamente a equação
-   b) Barracks destruídas = mega creeps = jogo quase encerrado
-   c) BKB nos carries não prontos = janela de virada aberta`}
+ETAPA 2 — VERIFICAÇÃO DE EDGE:
+${hasRealOdds
+  ? `Odds implícitas do mercado: ${t1}=${(1/parseFloat(o.t1)*100).toFixed(1)}% | ${t2}=${(1/parseFloat(o.t2)*100).toFixed(1)}%
+→ Se diferença entre sua estimativa e odds implícitas < 3pp: escreva "SEM EDGE" e não emita TIP_ML.
+→ Se diferença ≥ 3pp a seu favor: calcule EV = (prob_real × odd) - 1. Só emita tip se EV >= +2%.`
+  : `Sem odds de mercado — estime fair odds com juice 6%: odd = 1/(prob × 1.06)
+→ Só emita tip se vantagem for clara (>58%) E confiança for ALTA ou MÉDIA.`}
 
-5. PROBABILIDADE REAL: seja honesto. Gold diff de 2k em 20min = 50-55% para quem lidera, NÃO 70%+
-${oddsInstructions}
-7. NÃO invente dados históricos
-8. ⏱️ DELAY: stats LoL têm ~90s de atraso — calibre a confiança
+ANÁLISE DE VIRADA:
+${game === 'lol' ? `• Composição late-game/scaling no time perdedor → virada possível
+• Gold diff < 3k com torres intactas → jogo aberto
+• Soul point ou Baron buff → fator decisivo
+• Carries com KDA+ e item core completo → ameaça real
+• Antes dos 20min = cedo demais; 25-35min = janela crítica` : `• Roshan/Aegis ativo → equação muda completamente
+• Barracks destruídas → mega creeps, jogo quase encerrado
+• BKB nos carries não prontos → janela de virada aberta`}
 
-FORMATO:
-📊 ANÁLISE — [Time1] vs [Time2]
-Estado atual: [quem lidera e por quê]
-⚠️ Potencial de virada: [ALTO/MÉDIO/BAIXO]
+NÃO invente dados históricos. Se não tiver dado, diga explicitamente.
 
-⚡ VEREDITO ML:
-- Favorito: [time] (X% prob) | Underdog: [time] (Y% prob)
-- Odd justa (c/ juice 6%): ${t1}=X.XX | ${t2}=Y.YY
-${hasRealOdds ? '- EV: [+X% ou -X%]' : '- Busque odds ACIMA dos valores estimados'}
-- Confiança: [ALTA/MÉDIA/BAIXA]
+FORMATO DE RESPOSTA:
+📊 ${t1} vs ${t2}
+Estado: [situação atual em 1-2 frases]
+Potencial de virada: [ALTO/MÉDIO/BAIXO + motivo]
+
+ETAPA 1 — P(${t1})=__% | P(${t2})=__% | Fator principal: [X] | Incerteza: [Y]
+ETAPA 2 — ${hasRealOdds ? `EV(${t1})=[X%] | EV(${t2})=[X%] | Edge: [SIM/NÃO]` : `Fair odds: ${t1}=[X.XX] | ${t2}=[X.XX] | Vantagem clara: [SIM/NÃO]`}
+Confiança: [ALTA/MÉDIA/BAIXA] | Motivo do nível: [1 frase]
 
 FAIR_ODDS:${t1}=[odd]|${t2}=[odd]
 ${tipInstruction}
 
-Máximo 500 palavras.`;
+Máximo 450 palavras.`;
 }
 
 // ── MMA Prompt Builder ──
@@ -1171,15 +1189,26 @@ function buildMMAPrompt(match, p1Stats, p2Stats, odds, form1, form2, h2h, oddsMo
     h2hStr = `\nH2H: ${f1} ${h2h.t1Wins}-${h2h.t2Wins} ${f2} (${h2h.totalMatches} luta${h2h.totalMatches > 1 ? 's' : ''})`;
   }
 
-  const oddsInstructions = hasOdds
-    ? `5. Compare probabilidades implícitas com sua estimativa\n6. EV = (prob_real × odd) - 1. Value se EV > 2%`
-    : `5. Estime prob de vitória (soma = 100%)\n6. Odd justa c/ juice 6%: odd = (1/prob) / 1.06\n   Marque: FAIR_ODDS:[lutador1]=[odd1]|[lutador2]=[odd2]\n   Se confiança ALTA ou MÉDIA, use a FAIR_ODD estimada para emitir TIP_ML`;
+  const lineMovementWarning = oddsMovement?.history?.length >= 2
+    ? `⚠️ LINE MOVEMENT DETECTADO: o mercado se moveu. Isso significa que apostadores informados (sharpies) ajustaram. Trate como sinal contrário — ajuste sua estimativa de probabilidade 2-3pp na direção do movimento. Só ignore se tiver dados concretos que justifiquem a divergência (ex: informação de camp não precificada).`
+    : '';
+
+  const lateReplacementWarning = match.is_replacement
+    ? `🚨 LATE REPLACEMENT: esse lutador entrou sem camp completo. Isso é uma desvantagem estrutural real. Confiança máxima: MÉDIA.`
+    : '';
+
+  const highVarianceWarning = `⚠️ VARIÂNCIA MMA: MMA é o esporte de maior variância individual. Um soco muda tudo. Mesmo vantagem técnica clara → máximo 65-70% de probabilidade para o favorito. Confiança ALTA só se vantagem for esmagadora em múltiplas dimensões (striking + grappling + forma + físico).`;
 
   const tipInstruction = hasOdds
-    ? `[Se +EV >= 2% e confiança ALTA, MÉDIA ou BAIXA: TIP_ML:[lutador]@[odd]|EV:[%]|STAKE:[u]|CONF:[ALTA/MÉDIA/BAIXA]]`
+    ? `[Se EV >= +2% E confiança não foi rebaixada: TIP_ML:[lutador]@[odd]|EV:[%]|STAKE:[u]|CONF:[ALTA/MÉDIA/BAIXA]]`
     : `[Se confiança ALTA ou MÉDIA: TIP_ML:[lutador]@[fair_odd]|EV:estimado|STAKE:[u]|CONF:[ALTA/MÉDIA]]`;
 
-  return `Você é analista especializado em apostas de MMA. Análise 100% baseada em dados estatísticos objetivos.
+  return `Você é analista de apostas de MMA. Seu trabalho é identificar edge REAL — não fabricar recomendações.
+
+REGRA FUNDAMENTAL: "Sem edge identificado" é frequentemente a resposta correta. MMA tem a maior variância de qualquer esporte. Seja conservador.
+
+${highVarianceWarning}
+${lateReplacementWarning ? '\n' + lateReplacementWarning : ''}${lineMovementWarning ? '\n' + lineMovementWarning : ''}
 
 ═══════════════════════════════════════
 LUTA: ${f1} vs ${f2}
@@ -1196,41 +1225,40 @@ ${formatAthleteBlock(f2, p2Stats, form2)}
 
 ═══════════════════════════════════════
 
-INSTRUÇÕES:
-1. MATCHUP TÉCNICO — compare diretamente:
-   • Striking: SLpM, Str Acc, SApM, Str Def
-   • Grappling: TD Avg vs TD Def adversária
-   • Sub game: Sub Avg vs TD Def
-   • Reach/Stance: southpaw vs orthodox
-2. FORMA RECENTE — vitórias por KO/TKO/SUB indicam poder
-3. ESTILO implícito: SLpM > 6 = striker. TD Avg > 3 = wrestler. Sub Avg > 1 = finalizador
-4. CONTEXTO: title fights → maior motivação. Late replacement = desvantagem de camp
-${oddsInstructions}
-7. NÃO invente estatísticas. Se faltar dado, diga explicitamente
-8. MMA tem alta variância — calibre confiança com honestidade
+RACIOCÍNIO EM DUAS ETAPAS OBRIGATÓRIO:
+
+ETAPA 1 — ESTIMATIVA CEGA (analise o matchup técnico ANTES de comparar com odds):
+→ Analise: Striking (SLpM, Acc, Def), Grappling (TD Avg vs TD Def), Estilo implícito, Forma, H2H
+→ Estime: P(${f1})=__% | P(${f2})=__%  [soma = 100%]
+→ Principal vantagem técnica: [1 frase específica com dado]
+→ Principal fator de incerteza: [1 frase — MMA SEMPRE tem incerteza real]
+→ Baseline de mercado implícito: ${hasOdds ? `odds sugerem ${f1}=${(1/parseFloat(odds.t1)*100).toFixed(0)}% | ${f2}=${(1/parseFloat(odds.t2)*100).toFixed(0)}%` : 'sem odds disponíveis'}
+   → Se sua estimativa divergir do mercado em >10pp, justifique explicitamente.
+
+ETAPA 2 — VERIFICAÇÃO DE EDGE:
+${hasOdds
+  ? `Odds implícitas: ${f1}=${(1/parseFloat(odds.t1)*100).toFixed(1)}% | ${f2}=${(1/parseFloat(odds.t2)*100).toFixed(1)}%
+→ Se diferença < 3pp: escreva "SEM EDGE" — não emita TIP_ML.
+→ Se diferença ≥ 3pp a seu favor: EV = (prob_real × odd) - 1. Tip só se EV >= +2%.`
+  : `Sem odds — estime fair odds c/ juice 6%: odd = (1/prob) / 1.06
+→ Só emita tip se vantagem for clara (>60%) E confiança ALTA ou MÉDIA.`}
+
+NÃO invente estatísticas. Se faltar dado, declare explicitamente "dado não disponível".
 
 FORMATO:
-🥊 ANÁLISE — ${f1} vs ${f2}
-Categoria: ${match.category || '—'} | ${context}
+🥊 ${f1} vs ${f2} | ${match.category || '—'} | ${context}
 
-📊 MATCHUP:
-- Striking: [comparação direta]
-- Grappling: [TD Avg vs TD Def]
-- Físico: [reach/stance se relevante]
+MATCHUP: Striking=[X tem vantagem porque dado], Grappling=[Y tem vantagem porque dado], Físico=[reach/stance]
+FORMA: [análise objetiva de ambos — sem dramatização]
 
-📋 FORMA RECENTE:
-- [análise de ambos]
-
-⚡ VEREDITO ML:
-- Favorito: [lutador] (X% prob) | Underdog: [lutador] (Y% prob)
-- Odd justa (c/ juice 6%): ${f1}=X.XX | ${f2}=Y.YY
-${hasOdds ? `- EV: [+X% ou -X%]` : `- 💡 Busque odds ACIMA desses valores`}
-- Confiança: [ALTA/MÉDIA/BAIXA]
+ETAPA 1 — P(${f1})=__% | P(${f2})=__% | Vantagem principal: [dado específico] | Incerteza: [fator]
+ETAPA 2 — ${hasOdds ? `EV(${f1})=[X%] | EV(${f2})=[X%] | Edge: [SIM/NÃO]` : `Fair: ${f1}=[X.XX] | ${f2}=[X.XX] | Vantagem clara: [SIM/NÃO]`}
+Confiança: [ALTA/MÉDIA/BAIXA] | Justificativa: [por que esse nível — cite a incerteza real]
 
 FAIR_ODDS:${f1}=[odd]|${f2}=[odd]
 ${tipInstruction}
 
-Máximo 500 palavras.`;
+Máximo 450 palavras.`;
 }
 
 // ── Tennis Prompt Builder ──
@@ -1295,17 +1323,32 @@ function buildTennisPrompt(match, p1Stats, p2Stats, odds, surfForm1, surfForm2, 
     return block;
   };
 
+  // Baseline probability from ranking differential (simple Elo-like estimate)
+  let rankingBaseline = '';
+  if (p1Stats?.ranking && p2Stats?.ranking) {
+    const r1 = parseInt(p1Stats.ranking), r2 = parseInt(p2Stats.ranking);
+    if (!isNaN(r1) && !isNaN(r2)) {
+      // Simple log-based estimate: P1 = ln(r2) / (ln(r1) + ln(r2)) — higher rank = lower number = higher prob
+      const logR1 = Math.log(r1), logR2 = Math.log(r2);
+      const baseProb1 = (logR2 / (logR1 + logR2) * 100).toFixed(0);
+      const baseProb2 = (100 - parseInt(baseProb1));
+      rankingBaseline = `Baseline por ranking: ${p1}≈${baseProb1}% | ${p2}≈${baseProb2}% — use como ponto de partida, ajuste pela superfície e forma.`;
+    }
+  }
+
+  const lineMovementWarning = oddsMovement?.history?.length >= 2
+    ? `⚠️ LINE MOVEMENT: mercado se moveu. Trate como sinal contrário — ajuste sua estimativa 2-3pp na direção do movimento. Só ignore com dados concretos.`
+    : '';
+
   const tipInstruction = hasOdds
-    ? `[Se +EV >= 2% e confiança ALTA, MÉDIA ou BAIXA: TIP_ML:[jogador]@[odd]|EV:[%]|STAKE:[u]|CONF:[ALTA/MÉDIA/BAIXA]]`
+    ? `[Se EV >= +2% e confiança ALTA, MÉDIA ou BAIXA: TIP_ML:[jogador]@[odd]|EV:[%]|STAKE:[u]|CONF:[ALTA/MÉDIA/BAIXA]]`
     : `[Se confiança ALTA ou MÉDIA: TIP_ML:[jogador]@[fair_odd]|EV:estimado|STAKE:[u]|CONF:[ALTA/MÉDIA]]`;
 
-  const oddsInstructions = hasOdds
-    ? `5. Compare probabilidades implícitas com sua estimativa\n6. EV = (prob_real × odd) - 1. Value se EV > 2%`
-    : `5. Estime prob de vitória (soma = 100%)\n6. Odd justa c/ juice 5%: odd = (1/prob) / 1.05\n   Marque: FAIR_ODDS:[jogador1]=[odd1]|[jogador2]=[odd2]\n   Se confiança ALTA ou MÉDIA, use a FAIR_ODD para emitir TIP_ML`;
+  return `Você é analista de apostas de tênis especializado em mercados ineficientes (Challenger/ITF). Seu trabalho é encontrar edge REAL.
 
-  return `Você é analista especializado em apostas de tênis, com foco em mercados ineficientes (Challenger/ITF).
-Análise 100% baseada em dados objetivos. Superfície é o fator mais importante — ignore rankings gerais.
-
+REGRA FUNDAMENTAL: "Sem edge identificado" é frequentemente a resposta correta. Tênis tem alta variância individual — partidas únicas são imprevisíveis. Seja conservador.
+${lineMovementWarning ? '\n' + lineMovementWarning : ''}
+${rankingBaseline ? rankingBaseline + '\n' : ''}
 ═══════════════════════════════════════
 PARTIDA: ${p1} vs ${p2}
 Torneio: ${tournament}
@@ -1321,45 +1364,51 @@ ${fmtPlayerBlock(p2, p2Stats, surfForm2)}
 
 ═══════════════════════════════════════
 
-INSTRUÇÕES:
-1. SUPERFÍCIE é o contexto central:
-   • Clay: baseliners, construtores de pontos, alta defesa. 1º serviço menos dominante.
-   • Hard: equilibrado, serve + volta mais direto.
-   • Grass: serve-and-volley, aces, rallies curtos. Grande favorece servidor.
-2. MÉTRICAS CHAVE (se disponíveis):
-   • % 1º serviço, pontos ganhos com 1º e 2º serviço
-   • Break points convertidos/salvos — decisivo em Challenger
-   • Tie-breaks: vencedor de sets fechados tem vantagem psicológica
-3. RANKING vs FORMA RECENTE — em Challenger, forma recente supera ranking
-4. H2H NA MESMA SUPERFÍCIE tem mais peso que H2H geral
-${oddsInstructions}
-7. NÃO invente dados. Se faltar info, declare explicitamente
-8. Challengers têm alta variância — calibre confiança com honestidade
+RACIOCÍNIO EM DUAS ETAPAS OBRIGATÓRIO:
+
+ETAPA 1 — ESTIMATIVA CEGA (analise performance ANTES de comparar com odds):
+Fatores por ordem de importância:
+  1. SUPERFÍCIE: forma histórica específica na superfície atual
+  2. FORMA RECENTE (últimas 4-6 semanas superam ranking)
+  3. H2H NA MESMA SUPERFÍCIE (>H2H geral)
+  4. RANKING como desempate — em ATP/WTA mais decisivo; em Challenger menos
+  5. Métricas se disponíveis: % 1º serviço, break points convertidos/salvos
+→ Estime: P(${p1})=__% | P(${p2})=__%  [soma = 100%]
+→ Baseline de ranking sugeria: ${rankingBaseline || 'rankings não disponíveis'}
+→ Divergência do baseline: [explique se sua estimativa se afasta >8pp do baseline]
+→ Principal fator de incerteza: [1 frase honesta]
+
+ETAPA 2 — VERIFICAÇÃO DE EDGE:
+${hasOdds
+  ? `Odds implícitas: ${p1}=${(1/parseFloat(odds.t1)*100).toFixed(1)}% | ${p2}=${(1/parseFloat(odds.t2)*100).toFixed(1)}%
+→ Se diferença < 3pp: escreva "SEM EDGE" — não emita TIP_ML.
+→ Se diferença ≥ 3pp: EV = (prob_real × odd) - 1. Tip só se EV >= +2%.`
+  : `Sem odds — estime fair odds c/ juice 5%: odd = (1/prob) / 1.05
+→ Só emita tip se vantagem clara (>58%) E confiança ALTA ou MÉDIA.`}
+
+NÃO invente dados. Se estatística não estiver disponível, declare "dado não disponível".
+
+CONTEXTO DE SUPERFÍCIE:
+• Clay: baseliners, rallies longos, 1º serviço menos dominante
+• Hard: equilibrado, serve + devolução direto
+• Grass: serve-and-volley, aces, rallies curtos — favorece servidores
+• Em Challenger/ITF: forma recente supera ranking quase sempre
 
 FORMATO:
-🎾 ANÁLISE — ${p1} vs ${p2}
-Torneio: ${tournament} | ${surfLabel}
+🎾 ${p1} vs ${p2} | ${tournament} | ${surfLabel}
 
-🏟️ CONTEXTO DE SUPERFÍCIE:
-- [como cada jogador performa nessa superfície]
+SUPERFÍCIE: [como cada jogador performa + dado concreto]
+MATCHUP: [serviço, devolução, H2H na superfície]
+FORMA: [objetiva, ambos, últimas semanas]
 
-📊 MATCHUP:
-- [comparação técnica: serviço, devolução, movimento]
-- H2H: [análise]
-
-📋 FORMA RECENTE:
-- [análise de ambos na superfície]
-
-⚡ VEREDITO ML:
-- Favorito: [jogador] (X% prob) | Underdog: [jogador] (Y% prob)
-- Odd justa (c/ juice 5%): ${p1}=X.XX | ${p2}=Y.YY
-${hasOdds ? `- EV: [+X% ou -X%]` : `- 💡 Busque odds ACIMA desses valores`}
-- Confiança: [ALTA/MÉDIA/BAIXA]
+ETAPA 1 — P(${p1})=__% | P(${p2})=__% | Fator decisivo: [X] | Incerteza: [Y]
+ETAPA 2 — ${hasOdds ? `EV(${p1})=[X%] | EV(${p2})=[X%] | Edge: [SIM/NÃO]` : `Fair: ${p1}=[X.XX] | ${p2}=[X.XX] | Vantagem clara: [SIM/NÃO]`}
+Confiança: [ALTA/MÉDIA/BAIXA] | Justificativa: [por que esse nível]
 
 FAIR_ODDS:${p1}=[odd]|${p2}=[odd]
 ${tipInstruction}
 
-Máximo 500 palavras.`;
+Máximo 450 palavras.`;
 }
 
 // ── Generic Prompt Dispatcher ──
@@ -1527,7 +1576,7 @@ async function runAutoAnalysisTennis() {
 
         const resp = await serverPost('/claude', {
           model: 'claude-sonnet-4-6',
-          max_tokens: 1200,
+          max_tokens: 1600,
           messages: [{ role: 'user', content: prompt }]
         }, null, { 'x-claude-key': CLAUDE_KEY });
 
