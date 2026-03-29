@@ -166,7 +166,7 @@ function kb(buttons) {
 
 // ── Sport-specific Menus ──
 function getMenu(sport) {
-  return kb([['🔔 Notificações', '📊 Tracking'], ['❓ Ajuda']]);
+  return kb([['🔔 Notificações', '📊 Tracking'], ['📅 Próximas', '❓ Ajuda']]);
 }
 
 // ── Load Subscribers ──
@@ -1160,6 +1160,134 @@ async function handleNotificacoes(token, chatId, sport, action) {
   }
 }
 
+// ── Próximas Partidas Handler ──
+async function handleProximas(token, chatId, sport) {
+  await send(token, chatId, '⏳ Buscando próximas partidas...');
+  try {
+    if (sport === 'esports') {
+      const [lolRaw, dotaRaw] = await Promise.all([
+        serverGet('/lol-matches').catch(() => []),
+        serverGet('/dota-matches').catch(() => [])
+      ]);
+      const now = Date.now();
+      const window48h = now + 48 * 60 * 60 * 1000;
+
+      const lolAll = Array.isArray(lolRaw) ? lolRaw : [];
+      const dotaAll = Array.isArray(dotaRaw) ? dotaRaw : [];
+
+      const live = [...lolAll, ...dotaAll].filter(m => m.status === 'live');
+      const upcoming = [...lolAll, ...dotaAll].filter(m => {
+        if (m.status !== 'upcoming') return false;
+        const t = m.time ? new Date(m.time).getTime() : 0;
+        return t > now && t <= window48h;
+      }).sort((a, b) => (a.time || '').localeCompare(b.time || ''));
+
+      let txt = `🎮 *ESPORTS — PARTIDAS*\n━━━━━━━━━━━━━━━━\n\n`;
+
+      if (live.length) {
+        txt += `🔴 *AO VIVO (${live.length})*\n`;
+        for (const m of live) {
+          const icon = m.game === 'lol' ? '⚽' : '🛡️';
+          txt += `${icon} *${m.team1}* ${m.score1||0}-${m.score2||0} *${m.team2}*\n`;
+          txt += `   _${m.league || 'Esports'}_\n`;
+        }
+        txt += '\n';
+      }
+
+      if (upcoming.length) {
+        txt += `📅 *PRÓXIMAS 48H (${upcoming.length})*\n`;
+        for (const m of upcoming) {
+          const icon = m.game === 'lol' ? '⚽' : '🛡️';
+          const timeBRT = m.time
+            ? new Date(m.time).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo', weekday: 'short', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
+            : '—';
+          txt += `${icon} *${m.team1}* vs *${m.team2}*\n`;
+          txt += `   🕐 ${timeBRT} | _${m.league || 'Esports'}_\n`;
+        }
+      }
+
+      if (!live.length && !upcoming.length) {
+        txt += `_Nenhuma partida ao vivo ou prevista para as próximas 48h._`;
+      }
+
+      await send(token, chatId, txt);
+
+    } else if (sport === 'mma') {
+      const fights = await serverGet('/upcoming-fights?days=5', 'mma').catch(() => []);
+      if (!Array.isArray(fights) || !fights.length) {
+        await send(token, chatId, '🥊 Nenhuma luta prevista nos próximos 5 dias.');
+        return;
+      }
+
+      // Group by event
+      const byEvent = new Map();
+      for (const f of fights) {
+        const key = f.event_id || f.event_name || 'ev';
+        if (!byEvent.has(key)) byEvent.set(key, { name: f.event_name || '—', date: f.event_date, fights: [] });
+        byEvent.get(key).fights.push(f);
+      }
+
+      let txt = `🥊 *MMA — PRÓXIMAS LUTAS (5 DIAS)*\n━━━━━━━━━━━━━━━━\n`;
+      for (const [, ev] of byEvent) {
+        txt += `\n📅 *${ev.name}* — ${fmtDate(ev.date)}\n`;
+        for (const f of ev.fights) {
+          const odds1 = f.odds?.t1 ? ` _(${f.odds.t1})_` : '';
+          const odds2 = f.odds?.t2 ? ` _(${f.odds.t2})_` : '';
+          const main = f.is_main ? ' 🏆' : f.is_title ? ' 🎖️' : '';
+          txt += `⚖️ *${f.participant1_name}*${odds1} vs *${f.participant2_name}*${odds2}${main}\n`;
+          if (f.category) txt += `   _${f.category}_\n`;
+        }
+      }
+
+      await send(token, chatId, txt);
+
+    } else if (sport === 'tennis') {
+      const events = await serverGet('/tennis-tournaments').catch(() => []);
+      if (!Array.isArray(events) || !events.length) {
+        await send(token, chatId, '🎾 Nenhum torneio com partidas disponíveis.');
+        return;
+      }
+
+      const now = Date.now();
+      const window48h = new Date(now + 48 * 60 * 60 * 1000).toISOString();
+      const surfIcon = { clay: '🟠', grass: '🟢', hard: '🔵' };
+      const tierOrder = { 'Grand Slam': 0, 'Masters 1000': 1, 'WTA 1000': 1, 'ATP 500': 2, 'WTA 500': 2, 'ATP 250': 3, 'WTA': 3, 'Challenger': 4, 'ITF': 5 };
+      const sorted = [...events].sort((a, b) => (tierOrder[a.tier] ?? 99) - (tierOrder[b.tier] ?? 99));
+
+      let txt = `🎾 *TÊNIS — PRÓXIMAS PARTIDAS (48H)*\n━━━━━━━━━━━━━━━━\n`;
+      let found = 0;
+
+      for (const ev of sorted.slice(0, 6)) {
+        const matches = await serverGet(`/tennis-matches?tournamentId=${encodeURIComponent(ev.id)}`).catch(() => []);
+        if (!Array.isArray(matches)) continue;
+
+        const due = matches
+          .filter(m => m.match_time && m.match_time <= window48h)
+          .sort((a, b) => (a.match_time || '').localeCompare(b.match_time || ''));
+        if (!due.length) continue;
+
+        const surf = surfIcon[ev.surface] || '🎾';
+        txt += `\n${surf} *${ev.name}*${ev.tier ? ` _(${ev.tier})_` : ''}\n`;
+        for (const m of due.slice(0, 4)) {
+          const timeBRT = m.match_time
+            ? new Date(m.match_time).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo', weekday: 'short', hour: '2-digit', minute: '2-digit' })
+            : '—';
+          const o1 = m.odds?.t1 ? ` _(${m.odds.t1})_` : '';
+          const o2 = m.odds?.t2 ? ` _(${m.odds.t2})_` : '';
+          txt += `🕐 ${timeBRT} | *${m.participant1_name}*${o1} vs *${m.participant2_name}*${o2}\n`;
+          found++;
+        }
+      }
+
+      if (!found) txt += `\n_Nenhuma partida prevista para as próximas 48h._`;
+      await send(token, chatId, txt);
+    }
+  } catch(e) {
+    log('ERROR', 'PROXIMAS', e.message);
+    await send(token, chatId, '❌ Erro ao buscar partidas: ' + e.message);
+  }
+}
+
 // ── Esports Prompt Builder ──
 function buildEsportsPrompt(match, game, gamesContext, o, enrichSection) {
   const hasRealOdds = !!(o && o.t1 && parseFloat(o.t1) > 1);
@@ -1999,6 +2127,8 @@ async function poll(token, sport) {
               `⚠️ _Aposte com responsabilidade._`,
               getMenu(sport)
             );
+          } else if (text === '📅 Próximas') {
+            await handleProximas(token, chatId, sport);
           } else if (text.startsWith('/notificacoes') || text.startsWith('/notificações')) {
             const action = text.split(' ')[1];
             await handleNotificacoes(token, chatId, sport, action);
