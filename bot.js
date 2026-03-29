@@ -333,7 +333,8 @@ async function runAutoAnalysis() {
               (match.time ? `🕐 Início: *${matchTime}* (BRT)\n` : '') +
               `\n🎯 Aposta: *${tipTeam}* ML @ *${tipOdd}*\n` +
               `📈 EV: *${tipEV}*\n💵 Stake: *${tipStake}* _(¼ Kelly)_` +
-              `${oddsLabel}\n\n` +
+              `${oddsLabel}\n` +
+              `📋 _Análise pré-draft: baseada em forma e histórico (sem acesso às comps)_\n\n` +
               `⚠️ _Aposte com responsabilidade._`;
 
             for (const [userId, prefs] of subscribedUsers) {
@@ -2280,6 +2281,27 @@ async function poll(token, sport) {
                     const ce = confEmoji[c.confidence] || '⚪';
                     txt += `${ce} ${c.confidence}: ${c.wins}/${c.total} (${c.win_rate}%)\n`;
                   });
+                }
+
+                // Pré-jogo vs Ao Vivo (esports only)
+                if (roi.byPhase && sport === 'esports') {
+                  const { live: lv, preGame: pg } = roi.byPhase;
+                  txt += `\n🎮 *Pré-jogo vs Ao Vivo:*\n`;
+                  if (pg.total > 0) {
+                    const pgWR = Math.round((pg.wins / pg.total) * 100);
+                    const pgRoi = parseFloat(pg.roi);
+                    txt += `📋 Pré-jogo: ${pg.wins}/${pg.total} (${pgWR}%) | ROI ${pgRoi >= 0 ? '+' : ''}${pgRoi}%\n`;
+                    txt += `   _⚠️ Sem draft — baseia-se em forma/histórico_\n`;
+                  } else {
+                    txt += `📋 Pré-jogo: sem tips registradas\n`;
+                  }
+                  if (lv.total > 0) {
+                    const lvWR = Math.round((lv.wins / lv.total) * 100);
+                    const lvRoi = parseFloat(lv.roi);
+                    txt += `⚡ Ao Vivo: ${lv.wins}/${lv.total} (${lvWR}%) | ROI ${lvRoi >= 0 ? '+' : ''}${lvRoi}%\n`;
+                  } else {
+                    txt += `⚡ Ao Vivo: sem tips registradas\n`;
+                  }
                 }
 
                 // Últimas tips resolvidas

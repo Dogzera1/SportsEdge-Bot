@@ -139,7 +139,8 @@ O bot opera em **modo automático**. Não há navegação manual de eventos ou l
 | Botão / Comando | Função |
 |---|---|
 | `🔔 Notificações` | Ativa/desativa recebimento de tips automáticas por DM |
-| `📊 Tracking` | Exibe acertos, ROI, profit, calibração e últimas tips |
+| `📊 Tracking` | Exibe acertos, ROI, profit, calibração, split pré-jogo vs ao vivo (esports) e últimas tips |
+| `📅 Próximas` | Lista partidas ao vivo e próximas 24–48h para o esporte do bot |
 | `❓ Ajuda` | Explica como o bot funciona |
 | `/tracking` | Mesmo que o botão Tracking |
 | `/meustats` | Resumo rápido de performance (win rate, ROI) |
@@ -204,12 +205,29 @@ O bot opera em **modo automático**. Não há navegação manual de eventos ou l
 
 1. Ciclo detecta partida elegível dentro da janela do esporte
 2. Coleta em paralelo: stats ao vivo (se disponíveis), odds de mercado, forma recente, H2H, line movement
-3. Para LoL: busca composições e stats ao vivo (Riot API ou PandaScore para torneios não-Riot) + patch meta
-4. Monta prompt com **raciocínio em duas etapas**: estimativa cega de probabilidade → comparação com odds
-5. Claude declara probabilidade antes de ver odds, depois verifica se há edge real (gate de 3pp)
-6. **Com odds de mercado:** tip emitida se EV ≥ 2%
-7. **Sem odds de mercado:** Claude estima fair odds (juice 6%) e emite tip se confiança ALTA/MÉDIA — mensagem marcada com `⚠️ Odds estimadas`
-8. Tip registrada no banco + enviada por DM a todos os inscritos no esporte (¼ Kelly)
+3. **Pré-filtro quantitativo** (MMA e Tênis): modelo estatístico compara probabilidade estimada com odds de mercado. Se a divergência for menor que o limiar (5pp MMA / 6pp Tênis), a análise é pulada silenciosamente — sem chamar o Claude. Partidas sem odds de mercado sempre chegam ao Claude (comportamento Option A preservado).
+4. Para LoL: busca composições e stats ao vivo (Riot API ou PandaScore para torneios não-Riot) + patch meta
+5. Monta prompt com **raciocínio em duas etapas**: estimativa cega de probabilidade → comparação com odds
+6. Claude declara probabilidade antes de ver odds, depois verifica se há edge real (gate de 3pp)
+7. **Com odds de mercado:** tip emitida se EV ≥ 2%
+8. **Sem odds de mercado:** Claude estima fair odds (juice 6%) e emite tip se confiança ALTA/MÉDIA — mensagem marcada com `⚠️ Odds estimadas`
+9. Tip registrada no banco + enviada por DM a todos os inscritos no esporte (¼ Kelly)
+
+#### Pré-filtro MMA — Score de Vantagem
+
+Calcula um score composto a partir de diferenciais reais entre os lutadores: strike accuracy (`str_acc`), striking defense (`str_def`), takedown defense (`td_def`) e win rate recente. Os diferenciais são convertidos via função logística para uma probabilidade de modelo (P1), limitada ao intervalo 35–65% para respeitar a variância do MMA. Se `|modelP1 - impliedP1| < 5pp`, a luta é pulada.
+
+#### Pré-filtro Tênis — Mini-Elo por Superfície
+
+Calcula probabilidade baseline via fórmula logarítmica de ranking (`P1 = ln(r2) / (ln(r1) + ln(r2))`). Quando o jogador tem ≥3 partidas na superfície, o baseline é ajustado 40% pelo win rate na superfície e 60% pelo ranking. Se `|modelP1 - impliedP1| < 6pp`, a partida é pulada.
+
+#### Esports Pré-Jogo — Nota sobre Draft
+
+Tips emitidas para partidas `upcoming` são baseadas exclusivamente em **forma histórica e H2H** — sem acesso ao draft/composições, que só ficam disponíveis quando a partida começa. As mensagens de tip pré-jogo incluem o aviso:
+
+> _Análise pré-draft: baseada em forma e histórico (sem acesso às comps)_
+
+O tracking esports exibe os resultados separados por fase (**ao vivo vs pré-jogo**) para que você avalie empiricamente se as tips pré-draft têm ROI positivo ao longo do tempo.
 
 ### Proteções Anti-Viés nos Prompts
 
@@ -219,6 +237,7 @@ O bot opera em **modo automático**. Não há navegação manual de eventos ou l
 - **MMA: teto de 65-70%** — mesmo com vantagem técnica clara, o Claude é instruído a respeitar a variância do esporte
 - **Esports: desconto de alto fluxo** — jogos com menos de 15 min ou objetivo maior recente rebaixam confiança para BAIXA automaticamente
 - **Tênis: baseline de ranking** — fórmula logarítmica gera probabilidade de referência; Claude justifica quando diverge >8pp
+- **Pré-filtro quantitativo (MMA + Tênis)** — modelo estatístico simples roda antes do Claude; se o modelo concordar com o mercado dentro do limiar, o Claude não é chamado, reduzindo custo de API e aumentando taxa de acerto das análises que chegam ao prompt
 
 ### Prompts por Esporte
 
@@ -332,7 +351,7 @@ Campo `sport TEXT` presente em todas as tabelas para separação por esporte. Pa
 | `/record-tip` | POST | Registrar tip no banco |
 | `/settle-tip?sport=X` | POST | Liquidar tip por vencedor |
 | `/unsettled-tips?sport=X` | GET | Tips aguardando resultado |
-| `/roi?sport=X` | GET | ROI total e calibração por confiança |
+| `/roi?sport=X` | GET | ROI total, calibração por confiança e split pré-jogo/ao vivo (esports) |
 | `/tips-history?sport=X&filter=X&limit=N` | GET | Histórico de tips (all/settled/pending) |
 | `/db-status?sport=X` | GET | Contagem por tabela |
 | `/save-user` | POST | Criar/atualizar usuário |

@@ -1474,6 +1474,23 @@ const server = http.createServer(async (req, res) => {
       else totalProfit -= s;
     }
 
+    // Phase breakdown (live vs pre-game) — only relevant for esports
+    let byPhase = null;
+    if (sport === 'esports') {
+      const calcPhase = (isLiveVal) => {
+        const pts = db.prepare(`SELECT odds, stake, result FROM tips WHERE sport = ? AND is_live = ? AND result IS NOT NULL`).all(sport, isLiveVal);
+        let staked = 0, profit = 0, wins = 0;
+        for (const tip of pts) {
+          const s = parseFloat(String(tip.stake).replace('u', '')) || 1;
+          staked += s;
+          if (tip.result === 'win') { profit += s * (parseFloat(tip.odds) - 1); wins++; }
+          else profit -= s;
+        }
+        return { total: pts.length, wins, losses: pts.length - wins, staked: staked.toFixed(1), profit: profit.toFixed(2), roi: staked > 0 ? ((profit / staked) * 100).toFixed(1) : '0' };
+      };
+      byPhase = { live: calcPhase(1), preGame: calcPhase(0) };
+    }
+
     sendJson(res, {
       overall: {
         ...overall,
@@ -1481,7 +1498,8 @@ const server = http.createServer(async (req, res) => {
         totalProfit: totalProfit.toFixed(2),
         roi: totalStaked > 0 ? ((totalProfit / totalStaked) * 100).toFixed(1) : '0'
       },
-      calibration
+      calibration,
+      byPhase
     });
     return;
   }
