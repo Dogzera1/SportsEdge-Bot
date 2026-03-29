@@ -424,6 +424,14 @@ async function runAutoAnalysis() {
         ]);
 
         const effectiveOdds = odds?.t1 ? odds : fight.odds?.t1 ? fight.odds : null;
+
+        // Pre-filter: skip if quantitative model agrees with market (no edge detected)
+        if (!mmaPreFilter(p1Stats, p2Stats, form1, form2, effectiveOdds)) {
+          log('INFO', 'AUTO-MMA', `Pré-filtro: modelo alinhado com odds — pulando ${fight.participant1_name} vs ${fight.participant2_name}`);
+          analyzedFights.set(key, { ts: now, phase });
+          continue;
+        }
+
         const prompt = buildMMAPrompt(fight, p1Stats, p2Stats, effectiveOdds, form1, form2, h2h, null);
 
         const resp = await serverPost('/claude', {
@@ -1382,6 +1390,88 @@ ${tipInstruction}
 Máximo 450 palavras.`;
 }
 
+// ── Pre-Filter: MMA Quantitative Edge Score ──
+// Returns true = analyze with Claude | false = skip (model agrees with market)
+function mmaPreFilter(p1Stats, p2Stats, form1, form2, odds) {
+  if (!odds?.t1 || parseFloat(odds.t1) <= 1) return true; // no odds → always analyze
+
+  const o1 = parseFloat(odds.t1), o2 = parseFloat(odds.t2 || '2.00');
+  if (isNaN(o1) || isNaN(o2) || o1 <= 1 || o2 <= 1) return true;
+
+  // De-juiced implied probabilities
+  const raw1 = 1 / o1, raw2 = 1 / o2;
+  const impliedP1 = raw1 / (raw1 + raw2);
+
+  const safeNum = (v) => { const n = parseFloat(v); return isNaN(n) ? null : n; };
+
+  let scorePoints = 0, factorCount = 0;
+
+  // Striking accuracy differential (% points, weight 0.45)
+  const sa1 = safeNum(p1Stats?.str_acc), sa2 = safeNum(p2Stats?.str_acc);
+  if (sa1 !== null && sa2 !== null) { scorePoints += (sa1 - sa2) * 0.45; factorCount++; }
+
+  // Striking defense differential (weight 0.35)
+  const sd1 = safeNum(p1Stats?.str_def), sd2 = safeNum(p2Stats?.str_def);
+  if (sd1 !== null && sd2 !== null) { scorePoints += (sd1 - sd2) * 0.35; factorCount++; }
+
+  // Takedown defense differential (weight 0.25)
+  const td1 = safeNum(p1Stats?.td_def), td2 = safeNum(p2Stats?.td_def);
+  if (td1 !== null && td2 !== null) { scorePoints += (td1 - td2) * 0.25; factorCount++; }
+
+  // Recent form win rate differential (weight 0.20)
+  const wr1 = safeNum(form1?.winRate), wr2 = safeNum(form2?.winRate);
+  if (wr1 !== null && wr2 !== null) { scorePoints += (wr1 - wr2) * 0.20; factorCount++; }
+
+  if (factorCount < 2) return true; // not enough data → always analyze
+
+  // Logistic conversion: scorePoints ~ [-30, +30] → modelP1 ~ [0.35, 0.65]
+  const modelP1 = 1 / (1 + Math.exp(-scorePoints / 20));
+  const edgePP = Math.abs(modelP1 - impliedP1) * 100;
+
+  // Analyze only if model disagrees with market by ≥5pp
+  return edgePP >= 5;
+}
+
+// ── Pre-Filter: Tennis Surface-Adjusted Model ──
+// Returns true = analyze | false = skip
+function tennisPreFilter(p1Stats, p2Stats, form1, form2, odds, surface) {
+  if (!odds?.t1 || parseFloat(odds.t1) <= 1) return true; // no odds → always analyze
+
+  const o1 = parseFloat(odds.t1), o2 = parseFloat(odds.t2 || '2.00');
+  if (isNaN(o1) || isNaN(o2) || o1 <= 1 || o2 <= 1) return true;
+
+  // De-juiced implied probability
+  const raw1 = 1 / o1, raw2 = 1 / o2;
+  const impliedP1 = raw1 / (raw1 + raw2);
+
+  // Ranking-based baseline (lower rank number = better player = higher prob)
+  const r1 = parseInt(p1Stats?.ranking), r2 = parseInt(p2Stats?.ranking);
+  if (isNaN(r1) || isNaN(r2) || r1 <= 0 || r2 <= 0) return true;
+
+  const logR1 = Math.log(r1), logR2 = Math.log(r2);
+  let modelP1 = logR2 / (logR1 + logR2); // baseline from ranking
+
+  // Surface form adjustment: blend 60% ranking baseline + 40% surface win rate
+  if (form1?.recentMatches?.length && form2?.recentMatches?.length) {
+    const surf1 = form1.recentMatches.filter(m => m.surface === surface);
+    const surf2 = form2.recentMatches.filter(m => m.surface === surface);
+    if (surf1.length >= 3 && surf2.length >= 3) {
+      const sw1 = surf1.filter(m => m.result === 'W').length / surf1.length;
+      const sw2 = surf2.filter(m => m.result === 'W').length / surf2.length;
+      const surfSum = sw1 + sw2;
+      if (surfSum > 0) {
+        const surfP1 = sw1 / surfSum;
+        modelP1 = modelP1 * 0.60 + surfP1 * 0.40;
+      }
+    }
+  }
+
+  const edgePP = Math.abs(modelP1 - impliedP1) * 100;
+
+  // Analyze only if model disagrees with market by ≥6pp
+  return edgePP >= 6;
+}
+
 // ── MMA Prompt Builder ──
 function buildMMAPrompt(match, p1Stats, p2Stats, odds, form1, form2, h2h, oddsMovement) {
   const hasOdds = !!(odds?.t1 && parseFloat(odds.t1) > 1);
@@ -1780,14 +1870,6 @@ async function runAutoAnalysisTennis() {
         const prev = analyzedTennisMatches.get(key);
         if (prev && Date.now() - prev < TENNIS_AUTO_INTERVAL) continue;
 
-        analyzedTennisMatches.set(key, Date.now());
-        analyzed++;
-
-        const matchTimeBRT = match.match_time
-          ? new Date(match.match_time).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo', weekday: 'short', hour: '2-digit', minute: '2-digit' })
-          : null;
-        log('INFO', 'AUTO-TENNIS', `Analisando ${match.participant1_name} vs ${match.participant2_name} — ${matchTimeBRT || 'horário não definido'}`);
-
         const p1enc = encodeURIComponent(match.participant1_name);
         const p2enc = encodeURIComponent(match.participant2_name);
         const surface = match.category || '';
@@ -1801,6 +1883,21 @@ async function runAutoAnalysisTennis() {
           serverGet(`/h2h?p1=${p1enc}&p2=${p2enc}&sport=tennis`).catch(() => null),
           serverGet(`/odds-movement?p1=${p1enc}&p2=${p2enc}&sport=tennis`).catch(() => null)
         ]);
+
+        // Pre-filter: skip if surface-adjusted model agrees with market within 6pp
+        if (!tennisPreFilter(p1Stats, p2Stats, form1, form2, odds, surface)) {
+          log('INFO', 'AUTO-TENNIS', `Pré-filtro: modelo alinhado com odds — pulando ${match.participant1_name} vs ${match.participant2_name}`);
+          analyzedTennisMatches.set(key, Date.now()); // mark to avoid re-checking this cycle
+          continue;
+        }
+
+        analyzedTennisMatches.set(key, Date.now());
+        analyzed++;
+
+        const matchTimeBRT = match.match_time
+          ? new Date(match.match_time).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo', weekday: 'short', hour: '2-digit', minute: '2-digit' })
+          : null;
+        log('INFO', 'AUTO-TENNIS', `Analisando ${match.participant1_name} vs ${match.participant2_name} — ${matchTimeBRT || 'horário não definido'}`);
 
         const prompt = buildTennisPrompt(match, p1Stats, p2Stats, odds, form1, form2, h2h, oddsMovement);
 
