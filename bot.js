@@ -231,12 +231,13 @@ async function runAutoAnalysis() {
         if (!result) continue;
         const hasRealOdds = !!(result.o?.t1 && parseFloat(result.o.t1) > 1);
 
-        if (result.tipMatch && hasRealOdds) {
+        if (result.tipMatch) {
           const tipTeam = result.tipMatch[1].trim();
           const tipOdd = result.tipMatch[2].trim();
           const tipEV = result.tipMatch[3].trim();
           const tipStake = calcKelly(tipEV, tipOdd);
           const gameIcon = match.game === 'lol' ? '⚽' : '🛡️';
+          const oddsLabel = hasRealOdds ? '' : '\n⚠️ _Odds estimadas (sem mercado disponível)_';
 
           await serverPost('/record-tip', {
             matchId: String(match.id), eventName: match.league,
@@ -250,7 +251,8 @@ async function runAutoAnalysis() {
             `🎯 Aposta: *${tipTeam}* ML @ *${tipOdd}*\n` +
             `📈 EV: *${tipEV}*\n💵 Stake: *${tipStake}* _(¼ Kelly)_\n` +
             `📋 ${match.league}\n` +
-            `_${result.hasLiveStats ? '📊 Baseado em dados ao vivo' : '📋 Análise pré-jogo'}_\n\n` +
+            `_${result.hasLiveStats ? '📊 Baseado em dados ao vivo' : '📋 Análise pré-jogo'}_` +
+            `${oddsLabel}\n\n` +
             `⚠️ _Aposte com responsabilidade._`;
 
           for (const [userId, prefs] of subscribedUsers) {
@@ -259,7 +261,7 @@ async function runAutoAnalysis() {
             catch(e) { if (e.message?.includes('403')) subscribedUsers.delete(userId); }
           }
           analyzedMatches.set(matchKey, { ts: now, tipSent: true });
-          log('INFO', 'AUTO-TIP', `Esports: ${tipTeam} @ ${tipOdd}`);
+          log('INFO', 'AUTO-TIP', `Esports: ${tipTeam} @ ${tipOdd} (odds ${hasRealOdds ? 'reais' : 'estimadas'})`);
         } else if (result.fairOdds && !prev?.tipSent) {
           const fo = result.fairOdds;
           const fo1 = parseFloat(fo[2]).toFixed(2), fo2 = parseFloat(fo[4]).toFixed(2);
@@ -347,9 +349,10 @@ async function runAutoAnalysis() {
 
         const hasRealOdds = !!(effectiveOdds?.t1 && parseFloat(effectiveOdds.t1) > 1);
 
-        if (tipResult && hasRealOdds) {
+        if (tipResult) {
           const tipFighter = tipResult[1].trim(), tipOdd = tipResult[2].trim(), tipEV = tipResult[3].trim();
           const tipStake = calcKelly(tipEV, tipOdd);
+          const oddsLabel = hasRealOdds ? '' : '\n⚠️ _Odds estimadas (sem mercado disponível)_';
 
           await serverPost('/record-tip', {
             matchId: String(fight.id), eventName: fight.event_name || '',
@@ -363,7 +366,8 @@ async function runAutoAnalysis() {
             `🎯 Aposte: *${tipFighter}* ML @ *${tipOdd}*\n` +
             `📈 EV: *${tipEV}*\n💵 Stake: *${tipStake}* _(¼ Kelly)_\n` +
             `⚖️ ${fight.category || '—'} | ${fight.event_name || ''}\n` +
-            `📅 ${fmtDate(fight.event_date)}\n\n` +
+            `📅 ${fmtDate(fight.event_date)}` +
+            `${oddsLabel}\n\n` +
             `⚠️ _Aposte com responsabilidade._`;
 
           for (const [userId, prefs] of subscribedUsers) {
@@ -371,7 +375,7 @@ async function runAutoAnalysis() {
             try { await sendDM(mmaConfig.token, userId, tipMsg); }
             catch(e) { if (e.message?.includes('403')) subscribedUsers.delete(userId); }
           }
-          log('INFO', 'AUTO-TIP-MMA', `${tipFighter} @ ${tipOdd}`);
+          log('INFO', 'AUTO-TIP-MMA', `${tipFighter} @ ${tipOdd} (odds ${hasRealOdds ? 'reais' : 'estimadas'})`);
         } else if (fairOddsMatch && !hasRealOdds) {
           const fo1 = parseFloat(fairOddsMatch[2]).toFixed(2), fo2 = parseFloat(fairOddsMatch[4]).toFixed(2);
           const msg = `🥊 💡 *ODDS DE REFERÊNCIA MMA*\n` +
@@ -1081,11 +1085,11 @@ function buildEsportsPrompt(match, game, gamesContext, o, enrichSection) {
 
   const oddsInstructions = hasRealOdds
     ? `5. Compare as odds implícitas da casa com sua probabilidade estimada\n6. Calcule o EV: EV = (prob_real × odd) - 1. EV >= 0.02 (2%) = valor`
-    : `5. Estime a probabilidade de vitória de cada time (soma = 100%)\n   Odd justa c/ juice 6%: odd = 1/(prob * 1.06)\n   FAIR_ODDS:[time1]=[odd1]|[time2]=[odd2]`;
+    : `5. Estime a probabilidade de vitória de cada time (soma = 100%)\n   Odd justa c/ juice 6%: odd = 1/(prob * 1.06)\n   FAIR_ODDS:[time1]=[odd1]|[time2]=[odd2]\n6. Se confiança ALTA ou MÉDIA e vantagem clara (>55%), emita TIP_ML usando a FAIR_ODD estimada`;
 
   const tipInstruction = hasRealOdds
     ? `[Se +EV >= 2% e confiança ALTA, MÉDIA ou BAIXA: TIP_ML:[time]@[odd]|EV:[%]|STAKE:[u]|CONF:[ALTA/MÉDIA/BAIXA]]`
-    : `[Sem odds reais, apenas FAIR_ODDS — não emita TIP_ML]`;
+    : `[Se confiança ALTA ou MÉDIA: TIP_ML:[time]@[fair_odd]|EV:estimado|STAKE:[u]|CONF:[ALTA/MÉDIA]]`;
 
   return `Você é um analista profissional de apostas esportivas de ${game === 'lol' ? 'League of Legends' : 'Dota 2'}.
 Sua análise deve ser 100% baseada nos dados fornecidos.
@@ -1169,11 +1173,11 @@ function buildMMAPrompt(match, p1Stats, p2Stats, odds, form1, form2, h2h, oddsMo
 
   const oddsInstructions = hasOdds
     ? `5. Compare probabilidades implícitas com sua estimativa\n6. EV = (prob_real × odd) - 1. Value se EV > 2%`
-    : `5. Estime prob de vitória (soma = 100%)\n6. Odd justa c/ juice 6%: odd = (1/prob) / 1.06\n   Marque: FAIR_ODDS:[lutador1]=[odd1]|[lutador2]=[odd2]`;
+    : `5. Estime prob de vitória (soma = 100%)\n6. Odd justa c/ juice 6%: odd = (1/prob) / 1.06\n   Marque: FAIR_ODDS:[lutador1]=[odd1]|[lutador2]=[odd2]\n   Se confiança ALTA ou MÉDIA, use a FAIR_ODD estimada para emitir TIP_ML`;
 
   const tipInstruction = hasOdds
     ? `[Se +EV >= 2% e confiança ALTA, MÉDIA ou BAIXA: TIP_ML:[lutador]@[odd]|EV:[%]|STAKE:[u]|CONF:[ALTA/MÉDIA/BAIXA]]`
-    : `[Sem odds reais, NÃO emita TIP_ML. Apenas FAIR_ODDS]`;
+    : `[Se confiança ALTA ou MÉDIA: TIP_ML:[lutador]@[fair_odd]|EV:estimado|STAKE:[u]|CONF:[ALTA/MÉDIA]]`;
 
   return `Você é analista especializado em apostas de MMA. Análise 100% baseada em dados estatísticos objetivos.
 
@@ -1293,11 +1297,11 @@ function buildTennisPrompt(match, p1Stats, p2Stats, odds, surfForm1, surfForm2, 
 
   const tipInstruction = hasOdds
     ? `[Se +EV >= 2% e confiança ALTA, MÉDIA ou BAIXA: TIP_ML:[jogador]@[odd]|EV:[%]|STAKE:[u]|CONF:[ALTA/MÉDIA/BAIXA]]`
-    : `[Sem odds reais, NÃO emita TIP_ML. Apenas FAIR_ODDS]`;
+    : `[Se confiança ALTA ou MÉDIA: TIP_ML:[jogador]@[fair_odd]|EV:estimado|STAKE:[u]|CONF:[ALTA/MÉDIA]]`;
 
   const oddsInstructions = hasOdds
     ? `5. Compare probabilidades implícitas com sua estimativa\n6. EV = (prob_real × odd) - 1. Value se EV > 2%`
-    : `5. Estime prob de vitória (soma = 100%)\n6. Odd justa c/ juice 5%: odd = (1/prob) / 1.05\n   Marque: FAIR_ODDS:[jogador1]=[odd1]|[jogador2]=[odd2]`;
+    : `5. Estime prob de vitória (soma = 100%)\n6. Odd justa c/ juice 5%: odd = (1/prob) / 1.05\n   Marque: FAIR_ODDS:[jogador1]=[odd1]|[jogador2]=[odd2]\n   Se confiança ALTA ou MÉDIA, use a FAIR_ODD para emitir TIP_ML`;
 
   return `Você é analista especializado em apostas de tênis, com foco em mercados ineficientes (Challenger/ITF).
 Análise 100% baseada em dados objetivos. Superfície é o fator mais importante — ignore rankings gerais.
@@ -1533,12 +1537,13 @@ async function runAutoAnalysisTennis() {
         const tipResult = text.match(/TIP_ML:\s*([^@]+?)\s*@\s*([^|\]]+?)\s*\|EV:\s*([^|]+?)\s*\|STAKE:\s*([^|\]]+?)(?:\s*\|CONF:\s*(\w+))?(?:\]|$)/);
         const hasRealOdds = !!(odds?.t1 && parseFloat(odds.t1) > 1);
 
-        if (tipResult && hasRealOdds) {
+        if (tipResult) {
           const tipPlayer = tipResult[1].trim();
           const tipOdd = tipResult[2].trim();
           const tipEV = tipResult[3].trim();
           const tipStake = calcKelly(tipEV, tipOdd);
           const surfIcon = { clay: '🟠', grass: '🟢', hard: '🔵' };
+          const oddsLabel = hasRealOdds ? '' : '\n⚠️ _Odds estimadas (sem mercado disponível)_';
 
           await serverPost('/record-tip', {
             matchId: String(match.id), eventName: match.event_name || ev.name,
@@ -1554,14 +1559,14 @@ async function runAutoAnalysisTennis() {
             `📋 ${match.event_name || ev.name}\n` +
             `🏟️ Superfície: *${match.category || 'hard'}*\n` +
             (match.match_time ? `📅 ${fmtMatchTime(match.match_time)}\n` : '') +
-            `\n⚠️ _Aposte com responsabilidade._`;
+            `${oddsLabel}\n⚠️ _Aposte com responsabilidade._`;
 
           for (const [userId, prefs] of subscribedUsers) {
             if (!prefs.has('tennis')) continue;
             try { await sendDM(tennisConfig.token, userId, tipMsg); }
             catch(e) { if (e.message?.includes('403')) subscribedUsers.delete(userId); }
           }
-          log('INFO', 'AUTO-TIP-TENNIS', `${tipPlayer} @ ${tipOdd}`);
+          log('INFO', 'AUTO-TIP-TENNIS', `${tipPlayer} @ ${tipOdd} (odds ${hasRealOdds ? 'reais' : 'estimadas'})`);
         }
 
         await new Promise(r => setTimeout(r, 3000));
