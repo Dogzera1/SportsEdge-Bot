@@ -57,6 +57,13 @@ const ESPORTS_ODDS_TTL = 6 * 60 * 60 * 1000; // 6h — ~2 fetches/dia = 4 req/di
 let cachedTournamentIds = null; // { lol: [...], dota: [...], ts: epoch }
 const TOURNAMENT_CACHE_TTL = 24 * 60 * 60 * 1000; // 24h
 
+// MMA OddsPapi tracking
+let mmaSportId = null; // discovered at runtime via /v4/sports
+let lastMMAOddsUpdate = 0;
+const MMA_ODDS_TTL = 4 * 60 * 60 * 1000; // 4h
+
+let lastAnalysisAt = null; // ISO timestamp of last successful auto-analysis cycle
+
 
 // ── LoL Esports ──
 const LOL_BASE = 'https://esports-api.lolesports.com/persisted/gw';
@@ -115,6 +122,22 @@ function getHeroName(heroId) {
   return DOTA_HEROES[heroId] || `Hero #${heroId}`;
 }
 
+// ── OddsPapi Quota (MMA) ──
+function oddspapiDbAllowed(provider) {
+  const month = new Date().toISOString().slice(0, 7); // YYYY-MM
+  const row = stmts.getApiUsage.get(provider, month);
+  const count = row?.count || 0;
+  if (count >= 230) {
+    log('WARN', 'ODDS', `OddsPapi quota ${provider}: ${count}/230 — bloqueado até próximo mês`);
+    return false;
+  }
+  stmts.incrementApiUsage.run(provider, month);
+  if ((count + 1) % 20 === 0 || (count + 1) >= 210) {
+    log('INFO', 'ODDS', `Quota OddsPapi ${provider}: ${count + 1}/230`);
+  }
+  return true;
+}
+
 // ── Dota T1 Keywords ──
 const DOTA_T1_KEYWORDS = ['esl', 'dreamleague', 'the international', 'pgl', 'betboom',
   'dpc', 'riyadh masters', 'bali major', 'major', 'champions league',
@@ -140,8 +163,16 @@ async function fetchOdds(sport) {
     } else if (sport === 'tennis') {
       // Tennis: usa The Odds API exclusivamente (quota 500/mês)
       return await fetchTennisOdds();
-    } else if (sportConfig.sportKey && THE_ODDS_KEY) {
-      // MMA e outros: The Odds API (OddsPapi é esports-only e não cobre MMA)
+    } else if (sport === 'mma') {
+      // MMA: try OddsPapi first, fall back to The Odds API
+      await fetchMMAOddsOddspapi();
+      // Check if we got odds from OddsPapi; if so, skip The Odds API
+      const cacheKey = Object.keys(oddsCache).find(k => k.startsWith('mma_'));
+      if (cacheKey) return; // OddsPapi populated cache
+      // OddsPapi didn't work or returned 0 results; fall through to The Odds API
+    }
+
+    if (sportConfig.sportKey && THE_ODDS_KEY) {
       if (!oddsApiAllowed()) return;
       url = `https://api.the-odds-api.com/v4/sports/${sportConfig.sportKey}/odds/?apiKey=${THE_ODDS_KEY}&regions=eu,us&markets=h2h&oddsFormat=decimal`;
     } else {
@@ -219,6 +250,114 @@ async function fetchTennisOdds() {
     log('INFO', 'ODDS', `tennis: ${count} odds cached`);
   } catch(e) {
     log('ERROR', 'ODDS', `tennis: ${e.message}`);
+  }
+}
+
+// ── MMA OddsPapi Odds ──
+async function fetchMMAOddsOddspapi() {
+  if (!ODDS_API_KEY) return;
+  const now = Date.now();
+  if (now - lastMMAOddsUpdate < MMA_ODDS_TTL) return;
+
+  if (!oddspapiDbAllowed('mma')) return; // quota check
+
+  try {
+    // Step 1: discover MMA sport ID on first call
+    if (mmaSportId === null) {
+      const r = await httpGet(`https://api.oddspapi.io/v4/sports?apiKey=${ODDS_API_KEY}`);
+      if (r.status !== 200) {
+        log('WARN', 'ODDS', `OddsPapi /sports returned ${r.status}`);
+        return;
+      }
+      const sports = safeParse(r.body, []);
+      if (!Array.isArray(sports)) return;
+
+      // Log all sports and look for MMA
+      for (const s of sports) {
+        const name = (s.name || '').toLowerCase();
+        if (name.includes('mma') || name.includes('mixed martial') || name.includes('ufc')) {
+          mmaSportId = s.id;
+          log('INFO', 'ODDS', `MMA OddsPapi sport discovered: ${s.name} (ID: ${mmaSportId})`);
+          break;
+        }
+      }
+
+      if (mmaSportId === null) {
+        log('WARN', 'ODDS', 'MMA OddsPapi: sport ID not found in sports list');
+        // List all sport names for debugging
+        const names = sports.map(s => `${s.name} (${s.id})`).join(', ');
+        log('INFO', 'ODDS', `Available OddsPapi sports: ${names.slice(0, 300)}`);
+        return;
+      }
+    }
+
+    // Step 2: fetch MMA fixtures
+    if (!oddspapiDbAllowed('mma')) return; // additional quota check
+
+    const r = await httpGet(`https://api.oddspapi.io/v4/fixtures?sportId=${mmaSportId}&apiKey=${ODDS_API_KEY}`);
+    if (r.status === 429) {
+      log('WARN', 'ODDS', 'OddsPapi MMA fixtures 429 — quota exhausted');
+      return;
+    }
+    if (r.status !== 200) {
+      log('WARN', 'ODDS', `OddsPapi MMA fixtures returned ${r.status}`);
+      return;
+    }
+
+    const fixtures = safeParse(r.body, []);
+    if (!Array.isArray(fixtures)) return;
+
+    let oddsCount = 0;
+    for (const fix of fixtures) {
+      if (!oddspapiDbAllowed('mma')) break; // quota exhausted
+
+      const { fixtureId, home, away } = fix;
+      if (!fixtureId || !home?.name || !away?.name) continue;
+
+      // Step 3: fetch odds for each fixture
+      const r2 = await httpGet(`https://api.oddspapi.io/v4/odds?fixtureId=${fixtureId}&bookmaker=pinnacle&apiKey=${ODDS_API_KEY}`);
+      if (r2.status === 429) {
+        log('WARN', 'ODDS', 'OddsPapi MMA odds 429 — quota exhausted mid-fetch');
+        break;
+      }
+      if (r2.status !== 200) continue;
+
+      const oddsData = safeParse(r2.body, {});
+      if (!oddsData.bookmakers?.length) continue;
+
+      const bk = oddsData.bookmakers[0];
+      const market = bk?.markets?.find(m => m.key === 'h2h' || m.key === '1x2');
+      if (!market?.outcomes?.length) continue;
+
+      const outcomes = market.outcomes;
+      if (outcomes.length < 2) continue;
+
+      const o1 = outcomes[0], o2 = outcomes[1];
+      const key = norm(home.name) + '_' + norm(away.name);
+
+      oddsCache[`mma_${key}`] = {
+        t1: parseFloat(o1.value || o1.price).toFixed(2),
+        t2: parseFloat(o2.value || o2.price).toFixed(2),
+        t1Name: home.name,
+        t2Name: away.name,
+        bookmaker: 'pinnacle'
+      };
+
+      try {
+        stmts.insertOddsHistory.run(
+          'mma', key, home.name, away.name,
+          parseFloat(o1.value || o1.price), parseFloat(o2.value || o2.price), 'pinnacle'
+        );
+      } catch(_) {}
+      oddsCount++;
+    }
+
+    if (oddsCount > 0) {
+      lastMMAOddsUpdate = now;
+      log('INFO', 'ODDS', `MMA: ${oddsCount} fighters com odds (OddsPapi)`);
+    }
+  } catch(e) {
+    log('ERROR', 'ODDS', `MMA OddsPapi: ${e.message}`);
   }
 }
 
@@ -1199,6 +1338,38 @@ const server = http.createServer(async (req, res) => {
       log('ERROR', 'LIVE-GAME', e.message);
       sendJson(res, { error: e.message, hasLiveStats: false }, 500);
     }
+    return;
+  }
+
+  if (p === '/health') {
+    const sport = 'mma';
+    const dbOk = (() => {
+      try {
+        stmts.getDBStatus.get(sport, sport, sport, sport, sport, sport);
+        return true;
+      } catch(_) {
+        return false;
+      }
+    })();
+    const pendingRow = db.prepare("SELECT COUNT(*) as c FROM tips WHERE sport='mma' AND result IS NULL").get();
+    const month = new Date().toISOString().slice(0, 7);
+    const usageRow = stmts.getApiUsage.get('mma', month);
+    const stale = !lastAnalysisAt || (Date.now() - new Date(lastAnalysisAt).getTime() > 8 * 60 * 60 * 1000);
+    const status = dbOk && !stale ? 'ok' : 'degraded';
+    sendJson(res, {
+      status,
+      sport: 'mma',
+      db: dbOk ? 'connected' : 'error',
+      lastAnalysis: lastAnalysisAt,
+      pendingTips: pendingRow?.c || 0,
+      oddsApiUsage: { used: usageRow?.count || 0, limit: 230 }
+    });
+    return;
+  }
+
+  if (p === '/record-analysis' && req.method === 'POST') {
+    lastAnalysisAt = new Date().toISOString();
+    sendJson(res, { ok: true });
     return;
   }
 

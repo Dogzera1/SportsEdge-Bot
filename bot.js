@@ -421,7 +421,7 @@ async function runAutoAnalysis() {
   if (mmaConfig?.enabled && now - lastAutoAnalyze >= AUTO_ANALYZE_INTERVAL) {
     lastAutoAnalyze = now;
     try {
-      const fights = await serverGet('/upcoming-fights?days=5', 'mma');
+      const fights = await serverGet('/upcoming-fights?days=2', 'mma');
       if (!Array.isArray(fights) || !fights.length) {
         log('INFO', 'AUTO-MMA', 'Nenhuma luta nos próximos 5 dias');
         return;
@@ -538,6 +538,9 @@ async function runAutoAnalysis() {
       // Clean old MMA analyses (> 3 days)
       const cutoff3d = now - 3 * 24 * 60 * 60 * 1000;
       for (const [k, v] of analyzedFights) { if (v.ts < cutoff3d) analyzedFights.delete(k); }
+
+      // Record successful analysis cycle
+      await serverPost('/record-analysis', {}).catch(() => {});
     } catch(e) {
       log('ERROR', 'AUTO-MMA', e.message);
     }
@@ -2151,6 +2154,43 @@ async function handleAdmin(token, chatId, command) {
       }
       await send(token, chatId, txt);
     } catch(e) { await send(token, chatId, `❌ ${e.message}`); }
+  } else if (cmd === '/debug') {
+    if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
+    try {
+      const month = new Date().toISOString().slice(0, 7);
+      const [events, dbStatus] = await Promise.all([
+        serverGet('/mma-events').catch(() => []),
+        serverGet('/db-status?sport=mma').catch(() => null)
+      ]);
+
+      const nextEvent = Array.isArray(events) ? events.find(e => e.date >= new Date().toISOString().slice(0, 10)) : null;
+      let fights48h = [];
+      if (nextEvent) {
+        const all = await serverGet(`/upcoming-fights?days=2`, 'mma').catch(() => []);
+        fights48h = Array.isArray(all) ? all : [];
+      }
+
+      const oddsUsageRow = stmts.getApiUsage.get('mma', month);
+      const oddsUsed = oddsUsageRow?.count || 0;
+
+      const unsettled = await serverGet('/unsettled-tips', 'mma').catch(() => []);
+
+      const lastA = lastAutoAnalyze > 0 ? new Date(lastAutoAnalyze).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' }) : 'nunca';
+
+      let msg = `🔍 *DEBUG — MMA Bot*\n\n`;
+      msg += `📅 *Próximo evento:* ${nextEvent ? `${nextEvent.name} (${nextEvent.date})` : 'nenhum detectado'}\n`;
+      msg += `🥊 *Lutas próx. 48h:* ${fights48h.length} com odds\n`;
+      msg += `⏱ *Última análise:* ${lastA}\n`;
+      msg += `📊 *Tips pendentes:* ${Array.isArray(unsettled) ? unsettled.length : '?'}\n`;
+      msg += `🔑 *OddsPapi mês:* ${oddsUsed}/230 req\n`;
+      if (dbStatus) {
+        msg += `💾 *DB:* ${dbStatus.athletes} lutadores | ${dbStatus.tips} tips | ${dbStatus.events} eventos\n`;
+      }
+
+      await send(token, chatId, msg);
+    } catch(e) {
+      await send(token, chatId, `❌ Erro no debug: ${e.message}`);
+    }
   } else {
     await send(token, chatId,
       `📋 *Comandos Admin*\n\n` +
@@ -2409,6 +2449,26 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
 
 (async () => {
   await loadSubscribedUsers();
+
+  // Garantir que admins estão inscritos em MMA no banco
+  for (const adminId of ADMIN_IDS) {
+    const id = parseInt(adminId);
+    if (!id) continue;
+    const existing = stmts.getUser.get(id);
+    const prefs = JSON.stringify(['mma']);
+    if (!existing) {
+      stmts.upsertUser.run(id, 'admin', 1, prefs);
+      log('INFO', 'BOOT', `Admin ${id} inserido no banco com subscribed=1`);
+    } else if (!existing.subscribed) {
+      stmts.upsertUser.run(id, existing.username || 'admin', 1, prefs);
+      log('INFO', 'BOOT', `Admin ${id} reativado (subscribed=1)`);
+    }
+    // Always ensure admin is in subscribedUsers map for MMA
+    if (!subscribedUsers.has(id)) subscribedUsers.set(id, new Set());
+    subscribedUsers.get(id).add('mma');
+    log('INFO', 'BOOT', `Admin ${id} inscrito em: mma`);
+  }
+
   await loadExistingTips();
   
   // Start polling for each enabled sport
@@ -2430,16 +2490,16 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   }
   
   // Background tasks
-  // Run auto-analysis frequently (esports checks live, MMA has internal rate limiting)
-  setInterval(() => runAutoAnalysis().catch(e => log('ERROR', 'AUTO', e.message)), 3 * 60 * 1000);
+  // Run auto-analysis frequently (MMA-only now, 6min interval for stability)
+  setInterval(() => runAutoAnalysis().catch(e => log('ERROR', 'AUTO', e.message)), 6 * 60 * 1000);
   setInterval(() => settleCompletedTips().catch(e => log('ERROR', 'SETTLE', e.message)), SETTLEMENT_INTERVAL);
   setInterval(() => checkLineMovement().catch(e => log('ERROR', 'LINE', e.message)), LINE_CHECK_INTERVAL);
   setInterval(() => checkLateReplacements().catch(e => log('ERROR', 'REPLACE', e.message)), REPLACEMENT_INTERVAL);
-  setInterval(() => checkLiveNotifications().catch(e => log('ERROR', 'NOTIFY', e.message)), LIVE_CHECK_INTERVAL);
+  if (SPORTS.esports?.enabled) setInterval(() => checkLiveNotifications().catch(e => log('ERROR', 'NOTIFY', e.message)), LIVE_CHECK_INTERVAL);
   setInterval(() => checkMMAEventDay().catch(e => log('ERROR', 'MMA-DAY', e.message)), MMA_DAY_CHECK_INTERVAL);
-  setInterval(() => checkTennisMatchStart().catch(e => log('ERROR', 'TENNIS-START', e.message)), TENNIS_START_CHECK_INTERVAL);
-  setInterval(() => checkTennisWithdrawals().catch(e => log('ERROR', 'TENNIS-WITHDRAW', e.message)), WITHDRAW_CHECK_INTERVAL);
-  setInterval(() => runAutoAnalysisTennis().catch(e => log('ERROR', 'AUTO-TENNIS', e.message)), 30 * 60 * 1000);
+  if (SPORTS.tennis?.enabled) setInterval(() => checkTennisMatchStart().catch(e => log('ERROR', 'TENNIS-START', e.message)), TENNIS_START_CHECK_INTERVAL);
+  if (SPORTS.tennis?.enabled) setInterval(() => checkTennisWithdrawals().catch(e => log('ERROR', 'TENNIS-WITHDRAW', e.message)), WITHDRAW_CHECK_INTERVAL);
+  if (SPORTS.tennis?.enabled) setInterval(() => runAutoAnalysisTennis().catch(e => log('ERROR', 'AUTO-TENNIS', e.message)), 30 * 60 * 1000);
   
   log('INFO', 'BOOT', `Bots ativos: ${Object.keys(bots).join(', ')}`);
   log('INFO', 'BOOT', 'Pronto! Mande /start em cada bot no Telegram');
