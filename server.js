@@ -235,7 +235,8 @@ async function fetchEsportsOdds() {
   if (!oddspapiAllowed('ODDS')) return; // quota mensal
 
   esportsOddsFetching = true;
-  lastEsportsOddsUpdate = now;
+  // Nota: lastEsportsOddsUpdate só é definido após sucesso — em caso de 429 não é tocado,
+  // permitindo nova tentativa assim que o backoff expirar.
   try {
     // ── Passo 1: obter tournament IDs (cache 24h para economizar requisições) ──
     const needsTournamentRefresh = !cachedTournamentIds ||
@@ -248,8 +249,9 @@ async function fetchEsportsOdds() {
         const r = await httpGet(`https://api.oddspapi.io/v4/tournaments?sportId=${sportId}&apiKey=${ODDS_API_KEY}`);
         if (r.status === 429) {
           esportsBackoffUntil = Date.now() + ESPORTS_BACKOFF_TTL;
-          log('WARN', 'ODDS', `OddsPapi 429 (tournaments sportId=${sportId}) — backoff 2h`);
-          return; // sai sem atualizar timestamp para tentar novamente após backoff
+          // Logar body para diagnóstico (quota mensal esgotada vs. rate limit por minuto)
+          log('WARN', 'ODDS', `OddsPapi 429 (tournaments sportId=${sportId}) — backoff 2h | body: ${String(r.body || '').slice(0, 120)}`);
+          return; // NÃO definir lastEsportsOddsUpdate — próxima tentativa após backoff
         }
         if (r.status !== 200) { log('WARN', 'ODDS', `OddsPapi tournaments ${r.status} (sportId=${sportId})`); continue; }
         const tours = safeParse(r.body, []);
@@ -280,8 +282,8 @@ async function fetchEsportsOdds() {
     );
     if (oddsR.status === 429) {
       esportsBackoffUntil = Date.now() + ESPORTS_BACKOFF_TTL;
-      log('WARN', 'ODDS', 'OddsPapi 429 (odds-by-tournaments) — backoff 2h');
-      return;
+      log('WARN', 'ODDS', `OddsPapi 429 (odds-by-tournaments) — backoff 2h | body: ${String(oddsR.body || '').slice(0, 120)}`);
+      return; // NÃO definir lastEsportsOddsUpdate
     }
     if (oddsR.status !== 200) { log('WARN', 'ODDS', `OddsPapi odds-by-tournaments ${oddsR.status}`); return; }
 
@@ -324,6 +326,7 @@ async function fetchEsportsOdds() {
       } catch(_) {}
     }
     log('INFO', 'ODDS', `Esports: ${cached} fixtures com odds (OddsPapi/Pinnacle)`);
+    lastEsportsOddsUpdate = Date.now(); // só marca sucesso aqui — 429 não toca neste valor
   } catch(e) {
     log('ERROR', 'ODDS', `Esports odds: ${e.message}`);
   } finally {
