@@ -213,23 +213,63 @@ async function fetchEsportsOdds() {
     // LoL (sportId=18), Dota (sportId=16)
     for (const sportId of [18, 16]) {
       const r = await httpGet(`https://api.oddspapi.io/v4/tournaments?sportId=${sportId}&apiKey=${ODDS_API_KEY}`);
-      if (r.status !== 200) continue;
+      if (r.status !== 200) {
+        log('WARN', 'ODDS', `Esports tournaments status ${r.status} (sportId=${sportId})`);
+        continue;
+      }
 
       const tournaments = safeParse(r.body, []);
-      if (!Array.isArray(tournaments)) continue;
+      if (!Array.isArray(tournaments) || !tournaments.length) {
+        log('WARN', 'ODDS', `Esports: nenhum torneio retornado (sportId=${sportId})`);
+        continue;
+      }
 
-      const active = tournaments.filter(t => t.liveFixtures > 0 || t.upcomingFixtures > 0).slice(0, 10);
-      if (!active.length) continue;
+      // Log first tournament keys for debugging field names
+      if (tournaments[0]) {
+        log('DEBUG', 'ODDS', `Tournament fields: ${Object.keys(tournaments[0]).join(', ')}`);
+      }
+
+      // Filter for active tournaments — try multiple field name conventions
+      const hasFixtures = (t) =>
+        (t.liveFixtures > 0 || t.upcomingFixtures > 0) ||         // original
+        (t.live_fixtures > 0 || t.upcoming_fixtures > 0) ||        // snake_case
+        (t.liveCount > 0 || t.upcomingCount > 0) ||                // Count suffix
+        (t.activeFixtures > 0) ||                                   // combined
+        (t.fixtures > 0);                                           // simple
+      let active = tournaments.filter(hasFixtures).slice(0, 10);
+
+      // Fallback: if filter yields nothing, take all tournaments (first 10)
+      if (!active.length) {
+        log('WARN', 'ODDS', `Esports: filtro de torneios ativos vazio — usando todos (${Math.min(tournaments.length, 10)})`);
+        active = tournaments.slice(0, 10);
+      }
 
       const tIds = active.map(t => t.tournamentId).join(',');
       const bk = 'pinnacle';
       const oddsR = await httpGet(`https://api.oddspapi.io/v4/odds-by-tournaments?bookmaker=${bk}&tournamentIds=${tIds}&apiKey=${ODDS_API_KEY}`);
-      if (oddsR.status !== 200) continue;
+      if (oddsR.status !== 200) {
+        log('WARN', 'ODDS', `Esports odds-by-tournaments status ${oddsR.status}`);
+        continue;
+      }
 
       const fixtures = safeParse(oddsR.body, []);
+      if (!fixtures.length) {
+        log('WARN', 'ODDS', `Esports: sem fixtures retornados para sportId=${sportId}`);
+        continue;
+      }
+
+      // Log first fixture keys to debug structure
+      if (fixtures[0]) {
+        log('DEBUG', 'ODDS', `Fixture fields: ${Object.keys(fixtures[0]).join(', ')}`);
+      }
+
       for (const fix of fixtures) {
         const bkOdds = fix.bookmakerOdds?.[bk];
         if (!bkOdds?.bookmakerIsActive) continue;
+
+        // Extract team names — try multiple field name conventions
+        const p1Name = fix.participant1Name || fix.participant1?.name || fix.homeTeam?.name || String(fix.participant1Id || '');
+        const p2Name = fix.participant2Name || fix.participant2?.name || fix.awayTeam?.name || String(fix.participant2Id || '');
 
         // Extrair odds do mercado ML (moneyline)
         const markets = bkOdds.markets || {};
@@ -249,17 +289,21 @@ async function fetchEsportsOdds() {
 
         if (homePrice < 1.01 || awayPrice < 1.01) continue;
 
-        const key = 'fix_' + fix.fixtureId;
-        oddsCache[`esports_${key}`] = {
+        // Key by team names for direct lookup; also keep fixtureId key as fallback
+        const nameKey = p1Name && p2Name ? norm(p1Name) + '_' + norm(p2Name) : null;
+        const entry = {
           t1: homePrice.toFixed(2),
           t2: awayPrice.toFixed(2),
           bookmaker: 'Pinnacle',
-          p1Id: fix.participant1Id,
-          p2Id: fix.participant2Id
+          t1Name: p1Name,
+          t2Name: p2Name
         };
+        if (nameKey) oddsCache[`esports_${nameKey}`] = entry;
+        oddsCache[`esports_fix_${fix.fixtureId}`] = entry; // fallback by ID
       }
     }
-    log('INFO', 'ODDS', `Esports: ${Object.keys(oddsCache).filter(k => k.startsWith('esports_')).length} fixtures`);
+    const cnt = Object.keys(oddsCache).filter(k => k.startsWith('esports_') && !k.includes('fix_')).length;
+    log('INFO', 'ODDS', `Esports: ${cnt} fixtures com odds`);
   } catch(e) {
     log('ERROR', 'ODDS', `Esports: ${e.message}`);
   }
@@ -270,12 +314,22 @@ function findOdds(sport, t1, t2) {
   const cached = oddsCache[`${sport}_${key}`];
   if (cached) return { t1: cached.t1, t2: cached.t2, bookmaker: cached.bookmaker };
 
+  // Reverse key (t2_t1 order)
+  const revKey = norm(t2) + '_' + norm(t1);
+  const revCached = oddsCache[`${sport}_${revKey}`];
+  if (revCached) return { t1: revCached.t2, t2: revCached.t1, bookmaker: revCached.bookmaker };
+
+  // Fuzzy fallback — only for entries that have real team names stored
+  const nt1 = norm(t1), nt2 = norm(t2);
   for (const [cacheKey, val] of Object.entries(oddsCache)) {
     if (!cacheKey.startsWith(`${sport}_`)) continue;
-    if ((norm(t1).includes(norm(val.t1Name || '')) && norm(t2).includes(norm(val.t2Name || ''))) ||
-        (norm(t1).includes(norm(val.t2Name || '')) && norm(t2).includes(norm(val.t1Name || '')))) {
+    if (!val.t1Name || !val.t2Name) continue; // skip entries without names (prevents empty-string match)
+    const vt1 = norm(val.t1Name), vt2 = norm(val.t2Name);
+    if (!vt1 || !vt2) continue;
+    if ((nt1.includes(vt1) || vt1.includes(nt1)) && (nt2.includes(vt2) || vt2.includes(nt2)))
       return { t1: val.t1, t2: val.t2, bookmaker: val.bookmaker };
-    }
+    if ((nt1.includes(vt2) || vt2.includes(nt1)) && (nt2.includes(vt1) || vt1.includes(nt2)))
+      return { t1: val.t2, t2: val.t1, bookmaker: val.bookmaker }; // swapped
   }
   return null;
 }
