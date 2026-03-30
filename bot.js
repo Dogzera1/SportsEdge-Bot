@@ -2154,6 +2154,21 @@ async function handleAdmin(token, chatId, command) {
       }
       await send(token, chatId, txt);
     } catch(e) { await send(token, chatId, `❌ ${e.message}`); }
+  } else if (cmd === '/health') {
+    if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
+    try {
+      const h = await serverGet('/health').catch(e => ({ error: e.message }));
+      const icon = h.status === 'ok' ? '✅' : '⚠️';
+      let msg = `${icon} *Health — MMA Bot*\n\n`;
+      msg += `Status: \`${h.status || 'erro'}\`\n`;
+      msg += `DB: \`${h.db || 'desconhecido'}\`\n`;
+      msg += `Última análise: ${h.lastAnalysis ? new Date(h.lastAnalysis).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' }) : 'nunca'}\n`;
+      msg += `Tips pendentes: ${h.pendingTips ?? '?'}\n`;
+      msg += `OddsPapi: ${h.oddsApiUsage?.used ?? '?'}/${h.oddsApiUsage?.limit ?? 230} req\n`;
+      if (h.error) msg += `\n❌ Erro: ${h.error}`;
+      await send(token, chatId, msg);
+    } catch(e) { await send(token, chatId, `❌ ${e.message}`); }
+
   } else if (cmd === '/debug') {
     if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
     try {
@@ -2194,6 +2209,8 @@ async function handleAdmin(token, chatId, command) {
   } else {
     await send(token, chatId,
       `📋 *Comandos Admin*\n\n` +
+      `/health — status do bot e DB\n` +
+      `/debug — próximo evento, lutas 48h, uso de API\n` +
       `/stats [sport] — ROI e calibração\n` +
       `/users — status do bot\n` +
       `/pending — tips pendentes\n` +
