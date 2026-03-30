@@ -119,6 +119,10 @@ const DOTA_T1_KEYWORDS = ['esl', 'dreamleague', 'the international', 'pgl', 'bet
 
 // ── Odds APIs ──
 async function fetchOdds(sport) {
+  // Esports manages its own TTL (15 min) and concurrency lock inside fetchEsportsOdds.
+  // Bypassing the shared 4h gate here so the inner TTL is actually respected.
+  if (sport === 'esports') return await fetchEsportsOdds();
+
   if (Date.now() - lastOddsUpdate < ODDS_TTL) return;
   lastOddsUpdate = Date.now();
 
@@ -128,7 +132,7 @@ async function fetchOdds(sport) {
   try {
     let url;
     if (sport === 'esports') {
-      return await fetchEsportsOdds();
+      return await fetchEsportsOdds(); // unreachable now, kept for safety
     } else if (sport === 'tennis') {
       return await fetchTennisOdds();
     } else if (sportConfig.sportKey && THE_ODDS_KEY) {
@@ -213,8 +217,8 @@ async function fetchTennisOdds() {
 }
 
 async function fetchEsportsOdds() {
-  if (!ODDS_API_KEY) return;
-  if (esportsOddsFetching) return; // prevent concurrent fetches (race condition → 429)
+  if (!ODDS_API_KEY) { log('WARN', 'ODDS', 'ODDS_API_KEY não configurada — esports odds desativadas'); return; }
+  if (esportsOddsFetching) { log('DEBUG', 'ODDS', 'Esports fetch já em curso, ignorando'); return; } // prevent concurrent fetches (race condition → 429)
   const now = Date.now();
   if (now - lastEsportsOddsUpdate < ESPORTS_ODDS_TTL) return; // own TTL independent of shared lastOddsUpdate
   esportsOddsFetching = true;
