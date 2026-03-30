@@ -216,98 +216,13 @@ async function fetchTennisOdds() {
   }
 }
 
-// fetchEsportsOdds — fonte: PandaScore /odds/matches (upcoming + running)
-// Formato de resposta PandaScore odds:
-//   [{ id, name, opponents:[{opponent:{name}}], bookmakers:[{name, bets:[{name:"winner",values:[{value:"1",odd:"1.85"},{value:"2",odd:"1.95"}]}]}] }]
-// "value":"1" = primeira equipa (opponents[0]), "value":"2" = segunda equipa (opponents[1])
+// fetchEsportsOdds — sem fonte de odds gratuita disponível para esports
+// PandaScore não fornece odds no tier gratuito; oddspapi.io tem rate limits muito restritivos.
+// A função existe para manter a interface, mas não faz chamadas externas.
+// Se no futuro uma fonte for adicionada, implementar aqui.
 async function fetchEsportsOdds() {
-  if (!PANDASCORE_TOKEN || PANDASCORE_TOKEN === 'your-pandascore-token') {
-    log('WARN', 'ODDS', 'PANDASCORE_TOKEN não configurado — esports odds desativadas');
-    return;
-  }
-  if (esportsOddsFetching) { log('DEBUG', 'ODDS', 'Esports fetch já em curso, ignorando'); return; }
-  const now = Date.now();
-  if (now - lastEsportsOddsUpdate < ESPORTS_ODDS_TTL) return;
-  esportsOddsFetching = true;
-  lastEsportsOddsUpdate = now;
-  try {
-    const headers = { 'Authorization': `Bearer ${PANDASCORE_TOKEN}` };
-    // Buscar partidas com odds: upcoming e running em paralelo
-    const [upcomingR, runningR] = await Promise.all([
-      httpGet('https://api.pandascore.co/odds/matches/upcoming?per_page=50&videogame=lol,dota-2', headers).catch(() => ({ status: 0, body: '[]' })),
-      httpGet('https://api.pandascore.co/odds/matches/running?per_page=20&videogame=lol,dota-2', headers).catch(() => ({ status: 0, body: '[]' }))
-    ]);
-
-    // Verificar se o plano suporta odds
-    if (upcomingR.status === 403 || runningR.status === 403) {
-      log('WARN', 'ODDS', 'PandaScore: odds endpoint retornou 403 — plano atual não inclui odds. Upgrade necessário em pandascore.co/pricing');
-      return;
-    }
-    if (upcomingR.status === 401 || runningR.status === 401) {
-      log('WARN', 'ODDS', 'PandaScore: 401 — token inválido');
-      return;
-    }
-    // Log estrutura para debug (primeira vez)
-    const upcomingData = safeParse(upcomingR.body, []);
-    const runningData  = safeParse(runningR.body,  []);
-
-    if (!Array.isArray(upcomingData) || !Array.isArray(runningData)) {
-      log('WARN', 'ODDS', `PandaScore odds: resposta inesperada (upcoming=${upcomingR.status}, running=${runningR.status})`);
-      // Log raw para diagnóstico
-      if (upcomingR.body) log('DEBUG', 'ODDS', `Upcoming body: ${upcomingR.body.slice(0, 200)}`);
-      return;
-    }
-
-    log('DEBUG', 'ODDS', `PandaScore odds: ${upcomingData.length} upcoming + ${runningData.length} running`);
-    if (upcomingData[0]) log('DEBUG', 'ODDS', `Odds match fields: ${Object.keys(upcomingData[0]).join(', ')}`);
-
-    const allMatches = [...upcomingData, ...runningData];
-    let cached = 0;
-
-    for (const match of allMatches) {
-      const opponents = match.opponents || [];
-      if (opponents.length < 2) continue;
-      const t1Name = opponents[0]?.opponent?.name || opponents[0]?.name || '';
-      const t2Name = opponents[1]?.opponent?.name || opponents[1]?.name || '';
-      if (!t1Name || !t2Name) continue;
-
-      // Procurar bookmaker preferido: Pinnacle > primeiro disponível
-      const bookmakers = match.bookmakers || [];
-      const bm = bookmakers.find(b => /pinnacle/i.test(b.name)) || bookmakers[0];
-      if (!bm) continue;
-
-      // Encontrar mercado "winner" / "match winner"
-      const winnerBet = (bm.bets || []).find(b => /winner/i.test(b.name));
-      if (!winnerBet) continue;
-
-      let t1Odd = 0, t2Odd = 0;
-      for (const v of winnerBet.values || []) {
-        const price = parseFloat(v.odd || v.price || 0);
-        if (price < 1.01) continue;
-        if (v.value === '1' || v.name === t1Name || v.label === '1') t1Odd = price;
-        else if (v.value === '2' || v.name === t2Name || v.label === '2') t2Odd = price;
-      }
-      if (t1Odd < 1.01 || t2Odd < 1.01) continue;
-
-      const entry = {
-        t1: t1Odd.toFixed(2),
-        t2: t2Odd.toFixed(2),
-        bookmaker: bm.name || 'PandaScore',
-        t1Name,
-        t2Name
-      };
-      const nameKey = norm(t1Name) + '_' + norm(t2Name);
-      oddsCache[`esports_${nameKey}`] = entry;
-      if (match.id) oddsCache[`esports_ps_${match.id}`] = entry;
-      cached++;
-    }
-
-    log('INFO', 'ODDS', `Esports: ${cached} fixtures com odds (PandaScore)`);
-  } catch(e) {
-    log('ERROR', 'ODDS', `Esports odds: ${e.message}`);
-  } finally {
-    esportsOddsFetching = false;
-  }
+  // Sem operação — odds esports não disponíveis via API gratuita
+  // O bot analisa partidas sem odds de mercado (Claude estima fair odds)
 }
 
 function findOdds(sport, t1, t2) {

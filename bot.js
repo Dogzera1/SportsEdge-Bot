@@ -341,26 +341,16 @@ async function runAutoAnalysis() {
           const prev = analyzedMatches.get(matchKey);
           if (prev?.tipSent) continue; // já enviou tip — não repetir
 
-          // Sem odds: recheck em 30min. Com odds (ou nunca visto): recheck padrão 2h
-          const recheckMs = prev?.waitingOdds ? 30 * 60 * 1000 : UPCOMING_ANALYZE_INTERVAL;
-          if (prev && (now - prev.ts < recheckMs)) continue;
+          if (prev && (now - prev.ts < UPCOMING_ANALYZE_INTERVAL)) continue;
 
-          // Pré-verificar odds ANTES de chamar Claude
-          // Sem odds de mercado reais → aguardar; o mercado abre 2-6h antes do início
+          // Verificar odds (enriquece contexto se disponíveis, mas não bloqueia análise)
           const oddsCheck = await serverGet(`/odds?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}`).catch(() => null);
-          const hasRealOddsNow = !!(oddsCheck?.t1 && parseFloat(oddsCheck.t1) > 1);
-
-          if (!hasRealOddsNow) {
-            log('INFO', 'AUTO', `Esports upcoming: sem odds reais para ${match.team1} vs ${match.team2} — aguardando mercado (recheck 30min)`);
-            analyzedMatches.set(matchKey, { ts: now, tipSent: false, waitingOdds: true });
-            continue;
-          }
-
+          const hasRealOdds = !!(oddsCheck?.t1 && parseFloat(oddsCheck.t1) > 1);
           const matchTime = match.time ? new Date(match.time).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit' }) : '—';
-          log('INFO', 'AUTO', `Esports upcoming: ${match.team1} vs ${match.team2} (${match.league}) às ${matchTime} — odds disponíveis`);
+          log('INFO', 'AUTO', `Esports upcoming: ${match.team1} vs ${match.team2} (${match.league}) às ${matchTime}${hasRealOdds ? ' — odds disponíveis' : ' — odds estimadas'}`);
 
           const result = await autoAnalyzeMatch(esportsConfig.token, match);
-          analyzedMatches.set(matchKey, { ts: now, tipSent: false, waitingOdds: false });
+          analyzedMatches.set(matchKey, { ts: now, tipSent: false });
 
           if (!result) { await new Promise(r => setTimeout(r, 2000)); continue; }
 
