@@ -269,24 +269,34 @@ async function fetchMMAOddsOddspapi() {
         log('WARN', 'ODDS', `OddsPapi /sports returned ${r.status}`);
         return;
       }
-      const sports = safeParse(r.body, []);
-      if (!Array.isArray(sports)) return;
+      const raw = safeParse(r.body, []);
+      // Response may be array or { data: [...] }
+      const sports = Array.isArray(raw) ? raw : (Array.isArray(raw?.data) ? raw.data : []);
+      if (!sports.length) {
+        log('WARN', 'ODDS', `OddsPapi /sports empty — raw: ${String(r.body).slice(0, 200)}`);
+        return;
+      }
 
-      // Log all sports and look for MMA
+      // Log raw structure of first item for debugging
+      log('INFO', 'ODDS', `OddsPapi sports[0] keys: ${JSON.stringify(sports[0]).slice(0, 200)}`);
+
+      // Support multiple field name patterns
+      const getId  = s => s.id   ?? s.sportId   ?? s.sport_id   ?? s.Id;
+      const getName = s => s.name ?? s.sportName ?? s.sport_name ?? s.Name ?? s.title ?? '';
+
       for (const s of sports) {
-        const name = (s.name || '').toLowerCase();
+        const name = getName(s).toLowerCase();
         if (name.includes('mma') || name.includes('mixed martial') || name.includes('ufc')) {
-          mmaSportId = s.id;
-          log('INFO', 'ODDS', `MMA OddsPapi sport discovered: ${s.name} (ID: ${mmaSportId})`);
+          mmaSportId = getId(s);
+          log('INFO', 'ODDS', `MMA OddsPapi sport discovered: ${getName(s)} (ID: ${mmaSportId})`);
           break;
         }
       }
 
       if (mmaSportId === null) {
         log('WARN', 'ODDS', 'MMA OddsPapi: sport ID not found in sports list');
-        // List all sport names for debugging
-        const names = sports.map(s => `${s.name} (${s.id})`).join(', ');
-        log('INFO', 'ODDS', `Available OddsPapi sports: ${names.slice(0, 300)}`);
+        const names = sports.map(s => `${getName(s)} (${getId(s)})`).join(', ');
+        log('INFO', 'ODDS', `Available OddsPapi sports: ${names.slice(0, 400)}`);
         return;
       }
     }

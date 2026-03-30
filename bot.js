@@ -423,10 +423,10 @@ async function runAutoAnalysis() {
     try {
       const fights = await serverGet('/upcoming-fights?days=2', 'mma');
       if (!Array.isArray(fights) || !fights.length) {
-        log('INFO', 'AUTO-MMA', 'Nenhuma luta nos próximos 5 dias');
+        log('INFO', 'AUTO-MMA', 'Nenhuma luta nos próximos 2 dias');
         return;
       }
-      log('INFO', 'AUTO-MMA', `${fights.length} lutas nos próximos 5 dias`);
+      log('INFO', 'AUTO-MMA', `${fights.length} lutas nos próximos 2 dias`);
 
       for (const fight of fights) {
         const key = fight.id;
