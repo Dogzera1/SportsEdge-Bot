@@ -339,17 +339,30 @@ async function runAutoAnalysis() {
         for (const match of allUpcoming) {
           const matchKey = `upcoming_${match.game}_${match.id}`;
           const prev = analyzedMatches.get(matchKey);
-          if (prev?.tipSent) continue; // já enviou tip para essa partida
-          if (prev && (now - prev.ts < UPCOMING_ANALYZE_INTERVAL)) continue;
+          if (prev?.tipSent) continue; // já enviou tip — não repetir
+
+          // Sem odds: recheck em 30min. Com odds (ou nunca visto): recheck padrão 2h
+          const recheckMs = prev?.waitingOdds ? 30 * 60 * 1000 : UPCOMING_ANALYZE_INTERVAL;
+          if (prev && (now - prev.ts < recheckMs)) continue;
+
+          // Pré-verificar odds ANTES de chamar Claude
+          // Sem odds de mercado reais → aguardar; o mercado abre 2-6h antes do início
+          const oddsCheck = await serverGet(`/odds?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}`).catch(() => null);
+          const hasRealOddsNow = !!(oddsCheck?.t1 && parseFloat(oddsCheck.t1) > 1);
+
+          if (!hasRealOddsNow) {
+            log('INFO', 'AUTO', `Esports upcoming: sem odds reais para ${match.team1} vs ${match.team2} — aguardando mercado (recheck 30min)`);
+            analyzedMatches.set(matchKey, { ts: now, tipSent: false, waitingOdds: true });
+            continue;
+          }
 
           const matchTime = match.time ? new Date(match.time).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit' }) : '—';
-          log('INFO', 'AUTO', `Esports upcoming: ${match.team1} vs ${match.team2} (${match.league}) às ${matchTime}`);
+          log('INFO', 'AUTO', `Esports upcoming: ${match.team1} vs ${match.team2} (${match.league}) às ${matchTime} — odds disponíveis`);
 
           const result = await autoAnalyzeMatch(esportsConfig.token, match);
-          analyzedMatches.set(matchKey, { ts: now, tipSent: prev?.tipSent || false });
+          analyzedMatches.set(matchKey, { ts: now, tipSent: false, waitingOdds: false });
 
           if (!result) { await new Promise(r => setTimeout(r, 2000)); continue; }
-          const hasRealOdds = !!(result.o?.t1 && parseFloat(result.o.t1) > 1);
 
           if (result.tipMatch) {
             const tipTeam = result.tipMatch[1].trim();
@@ -357,7 +370,6 @@ async function runAutoAnalysis() {
             const tipEV = result.tipMatch[3].trim();
             const tipStake = calcKelly(tipEV, tipOdd);
             const gameIcon = match.game === 'lol' ? '⚽' : '🛡️';
-            const oddsLabel = hasRealOdds ? '' : '\n⚠️ _Odds estimadas (sem mercado disponível)_';
 
             await serverPost('/record-tip', {
               matchId: String(match.id), eventName: match.league,
@@ -370,9 +382,8 @@ async function runAutoAnalysis() {
               `*${match.team1}* vs *${match.team2}*\n📋 ${match.league}\n` +
               (match.time ? `🕐 Início: *${matchTime}* (BRT)\n` : '') +
               `\n🎯 Aposta: *${tipTeam}* ML @ *${tipOdd}*\n` +
-              `📈 EV: *${tipEV}*\n💵 Stake: *${tipStake}* _(¼ Kelly)_` +
-              `${oddsLabel}\n` +
-              `📋 _Análise pré-draft: baseada em forma e histórico (sem acesso às comps)_\n\n` +
+              `📈 EV: *${tipEV}*\n💵 Stake: *${tipStake}* _(¼ Kelly)_\n` +
+              `📋 _Análise pré-draft: forma e histórico (sem acesso às comps)_\n\n` +
               `⚠️ _Aposte com responsabilidade._`;
 
             for (const [userId, prefs] of subscribedUsers) {
