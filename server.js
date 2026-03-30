@@ -216,132 +216,97 @@ async function fetchTennisOdds() {
   }
 }
 
-const ESPORTS_BACKOFF_TTL = 60 * 60 * 1000; // 1h backoff after 429
-let esportsBackoffUntil = 0;
-
+// fetchEsportsOdds — fonte: PandaScore /odds/matches (upcoming + running)
+// Formato de resposta PandaScore odds:
+//   [{ id, name, opponents:[{opponent:{name}}], bookmakers:[{name, bets:[{name:"winner",values:[{value:"1",odd:"1.85"},{value:"2",odd:"1.95"}]}]}] }]
+// "value":"1" = primeira equipa (opponents[0]), "value":"2" = segunda equipa (opponents[1])
 async function fetchEsportsOdds() {
-  if (!ODDS_API_KEY) { log('WARN', 'ODDS', 'ODDS_API_KEY não configurada — esports odds desativadas'); return; }
-  if (esportsOddsFetching) { log('DEBUG', 'ODDS', 'Esports fetch já em curso, ignorando'); return; } // prevent concurrent fetches (race condition → 429)
-  const now = Date.now();
-  if (now < esportsBackoffUntil) {
-    const mins = Math.ceil((esportsBackoffUntil - now) / 60000);
-    log('DEBUG', 'ODDS', `Esports em backoff por 429 — aguardando ${mins}min`);
+  if (!PANDASCORE_TOKEN || PANDASCORE_TOKEN === 'your-pandascore-token') {
+    log('WARN', 'ODDS', 'PANDASCORE_TOKEN não configurado — esports odds desativadas');
     return;
   }
-  if (now - lastEsportsOddsUpdate < ESPORTS_ODDS_TTL) return; // own TTL independent of shared lastOddsUpdate
+  if (esportsOddsFetching) { log('DEBUG', 'ODDS', 'Esports fetch já em curso, ignorando'); return; }
+  const now = Date.now();
+  if (now - lastEsportsOddsUpdate < ESPORTS_ODDS_TTL) return;
   esportsOddsFetching = true;
   lastEsportsOddsUpdate = now;
   try {
-    // LoL (sportId=18), Dota (sportId=16) — sequential with delay to respect rate limits
-    for (const sportId of [18, 16]) {
-      const r = await httpGet(`https://api.oddspapi.io/v4/tournaments?sportId=${sportId}&apiKey=${ODDS_API_KEY}`);
-      if (r.status === 429) {
-        esportsBackoffUntil = Date.now() + ESPORTS_BACKOFF_TTL;
-        log('WARN', 'ODDS', `Esports 429 (sportId=${sportId}) — backoff 1h`);
-        break; // stop loop entirely, don't hammer API
-      }
-      if (r.status !== 200) {
-        log('WARN', 'ODDS', `Esports tournaments status ${r.status} (sportId=${sportId})`);
-        continue;
-      }
+    const headers = { 'Authorization': `Bearer ${PANDASCORE_TOKEN}` };
+    // Buscar partidas com odds: upcoming e running em paralelo
+    const [upcomingR, runningR] = await Promise.all([
+      httpGet('https://api.pandascore.co/odds/matches/upcoming?per_page=50&videogame=lol,dota-2', headers).catch(() => ({ status: 0, body: '[]' })),
+      httpGet('https://api.pandascore.co/odds/matches/running?per_page=20&videogame=lol,dota-2', headers).catch(() => ({ status: 0, body: '[]' }))
+    ]);
 
-      const tournaments = safeParse(r.body, []);
-      if (!Array.isArray(tournaments) || !tournaments.length) {
-        log('WARN', 'ODDS', `Esports: nenhum torneio retornado (sportId=${sportId})`);
-        continue;
-      }
-
-      // Log first tournament keys for debugging field names
-      if (tournaments[0]) {
-        log('DEBUG', 'ODDS', `Tournament fields: ${Object.keys(tournaments[0]).join(', ')}`);
-      }
-
-      // Filter for active tournaments — try multiple field name conventions
-      const hasFixtures = (t) =>
-        (t.liveFixtures > 0 || t.upcomingFixtures > 0) ||         // original
-        (t.live_fixtures > 0 || t.upcoming_fixtures > 0) ||        // snake_case
-        (t.liveCount > 0 || t.upcomingCount > 0) ||                // Count suffix
-        (t.activeFixtures > 0) ||                                   // combined
-        (t.fixtures > 0);                                           // simple
-      let active = tournaments.filter(hasFixtures).slice(0, 10);
-
-      // Fallback: if filter yields nothing, take all tournaments (first 10)
-      if (!active.length) {
-        log('WARN', 'ODDS', `Esports: filtro de torneios ativos vazio — usando todos (${Math.min(tournaments.length, 10)})`);
-        active = tournaments.slice(0, 10);
-      }
-
-      const tIds = active.map(t => t.tournamentId).join(',');
-      const bk = 'pinnacle';
-      // Small delay between sportId calls to stay under rate limit
-      await new Promise(r => setTimeout(r, 2000));
-      const oddsR = await httpGet(`https://api.oddspapi.io/v4/odds-by-tournaments?bookmaker=${bk}&tournamentIds=${tIds}&apiKey=${ODDS_API_KEY}`);
-      if (oddsR.status === 429) {
-        esportsBackoffUntil = Date.now() + ESPORTS_BACKOFF_TTL;
-        log('WARN', 'ODDS', `Esports 429 em odds-by-tournaments — backoff 1h`);
-        break;
-      }
-      if (oddsR.status !== 200) {
-        log('WARN', 'ODDS', `Esports odds-by-tournaments status ${oddsR.status}`);
-        continue;
-      }
-
-      const fixtures = safeParse(oddsR.body, []);
-      if (!fixtures.length) {
-        log('WARN', 'ODDS', `Esports: sem fixtures retornados para sportId=${sportId}`);
-        continue;
-      }
-
-      // Log first fixture keys to debug structure
-      if (fixtures[0]) {
-        log('DEBUG', 'ODDS', `Fixture fields: ${Object.keys(fixtures[0]).join(', ')}`);
-      }
-
-      for (const fix of fixtures) {
-        const bkOdds = fix.bookmakerOdds?.[bk];
-        if (!bkOdds?.bookmakerIsActive) continue;
-
-        // Extract team names — try multiple field name conventions
-        const p1Name = fix.participant1Name || fix.participant1?.name || fix.homeTeam?.name || String(fix.participant1Id || '');
-        const p2Name = fix.participant2Name || fix.participant2?.name || fix.awayTeam?.name || String(fix.participant2Id || '');
-
-        // Extrair odds do mercado ML (moneyline)
-        const markets = bkOdds.markets || {};
-        let homePrice = 0, awayPrice = 0;
-        for (const market of Object.values(markets)) {
-          const outcomes = market.outcomes || {};
-          for (const oc of Object.values(outcomes)) {
-            const p = oc.players?.['0'];
-            if (!p) continue;
-            const price = parseFloat(p.price || 0);
-            if (price < 1.01) continue;
-            if (p.bookmakerOutcomeId === 'home') homePrice = price;
-            if (p.bookmakerOutcomeId === 'away') awayPrice = price;
-          }
-          if (homePrice > 1.01 && awayPrice > 1.01) break;
-        }
-
-        if (homePrice < 1.01 || awayPrice < 1.01) continue;
-
-        // Key by team names for direct lookup; also keep fixtureId key as fallback
-        const nameKey = p1Name && p2Name ? norm(p1Name) + '_' + norm(p2Name) : null;
-        const entry = {
-          t1: homePrice.toFixed(2),
-          t2: awayPrice.toFixed(2),
-          bookmaker: 'Pinnacle',
-          t1Name: p1Name,
-          t2Name: p2Name
-        };
-        if (nameKey) oddsCache[`esports_${nameKey}`] = entry;
-        oddsCache[`esports_fix_${fix.fixtureId}`] = entry; // fallback by ID
-      }
+    // Verificar se o plano suporta odds
+    if (upcomingR.status === 403 || runningR.status === 403) {
+      log('WARN', 'ODDS', 'PandaScore: odds endpoint retornou 403 — plano atual não inclui odds. Upgrade necessário em pandascore.co/pricing');
+      return;
     }
-    const cnt = Object.keys(oddsCache).filter(k => k.startsWith('esports_') && !k.includes('fix_')).length;
-    log('INFO', 'ODDS', `Esports: ${cnt} fixtures com odds`);
+    if (upcomingR.status === 401 || runningR.status === 401) {
+      log('WARN', 'ODDS', 'PandaScore: 401 — token inválido');
+      return;
+    }
+    // Log estrutura para debug (primeira vez)
+    const upcomingData = safeParse(upcomingR.body, []);
+    const runningData  = safeParse(runningR.body,  []);
+
+    if (!Array.isArray(upcomingData) || !Array.isArray(runningData)) {
+      log('WARN', 'ODDS', `PandaScore odds: resposta inesperada (upcoming=${upcomingR.status}, running=${runningR.status})`);
+      // Log raw para diagnóstico
+      if (upcomingR.body) log('DEBUG', 'ODDS', `Upcoming body: ${upcomingR.body.slice(0, 200)}`);
+      return;
+    }
+
+    log('DEBUG', 'ODDS', `PandaScore odds: ${upcomingData.length} upcoming + ${runningData.length} running`);
+    if (upcomingData[0]) log('DEBUG', 'ODDS', `Odds match fields: ${Object.keys(upcomingData[0]).join(', ')}`);
+
+    const allMatches = [...upcomingData, ...runningData];
+    let cached = 0;
+
+    for (const match of allMatches) {
+      const opponents = match.opponents || [];
+      if (opponents.length < 2) continue;
+      const t1Name = opponents[0]?.opponent?.name || opponents[0]?.name || '';
+      const t2Name = opponents[1]?.opponent?.name || opponents[1]?.name || '';
+      if (!t1Name || !t2Name) continue;
+
+      // Procurar bookmaker preferido: Pinnacle > primeiro disponível
+      const bookmakers = match.bookmakers || [];
+      const bm = bookmakers.find(b => /pinnacle/i.test(b.name)) || bookmakers[0];
+      if (!bm) continue;
+
+      // Encontrar mercado "winner" / "match winner"
+      const winnerBet = (bm.bets || []).find(b => /winner/i.test(b.name));
+      if (!winnerBet) continue;
+
+      let t1Odd = 0, t2Odd = 0;
+      for (const v of winnerBet.values || []) {
+        const price = parseFloat(v.odd || v.price || 0);
+        if (price < 1.01) continue;
+        if (v.value === '1' || v.name === t1Name || v.label === '1') t1Odd = price;
+        else if (v.value === '2' || v.name === t2Name || v.label === '2') t2Odd = price;
+      }
+      if (t1Odd < 1.01 || t2Odd < 1.01) continue;
+
+      const entry = {
+        t1: t1Odd.toFixed(2),
+        t2: t2Odd.toFixed(2),
+        bookmaker: bm.name || 'PandaScore',
+        t1Name,
+        t2Name
+      };
+      const nameKey = norm(t1Name) + '_' + norm(t2Name);
+      oddsCache[`esports_${nameKey}`] = entry;
+      if (match.id) oddsCache[`esports_ps_${match.id}`] = entry;
+      cached++;
+    }
+
+    log('INFO', 'ODDS', `Esports: ${cached} fixtures com odds (PandaScore)`);
   } catch(e) {
-    log('ERROR', 'ODDS', `Esports: ${e.message}`);
+    log('ERROR', 'ODDS', `Esports odds: ${e.message}`);
   } finally {
-    esportsOddsFetching = false; // release lock so next call can proceed
+    esportsOddsFetching = false;
   }
 }
 
