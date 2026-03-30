@@ -46,8 +46,8 @@ Um único processo Node.js executa todos os bots em paralelo, cada um em seu pr�
 - Bots Telegram criados via [@BotFather](https://t.me/BotFather) — um por esporte
 - Chave Claude API (Anthropic)
 - The Odds API key (MMA + Tênis)
-- LoL Esports API key + OddsAPI key (Esports)
-- PandaScore token (Esports — torneios não-Riot como qualificatórias EWC)
+- LoL Esports API key (Esports — Riot)
+- PandaScore token (Esports — torneios não-Riot + odds de mercado para LoL/Dota 2)
 
 ---
 
@@ -63,8 +63,7 @@ TELEGRAM_TOKEN_TENNIS=seu_token_tennis      # deixe em branco para desativar
 CLAUDE_API_KEY=sk-ant-api03-...            # Anthropic Claude (claude-sonnet-4-6)
 THE_ODDS_API_KEY=sua_chave_the_odds        # MMA + Tênis
 LOL_API_KEY=sua_chave_lol                  # LoL Esports (Riot)
-ODDS_API_KEY=sua_chave_oddspapi            # Odds Esports (oddspapi.io)
-PANDASCORE_TOKEN=seu_token                 # PandaScore — torneios não-Riot
+PANDASCORE_TOKEN=seu_token                 # PandaScore — torneios não-Riot + odds esports
 
 # ── Servidor ──
 SERVER_PORT=3000
@@ -175,7 +174,7 @@ O bot opera em **modo automático**. Não há navegação manual de eventos ou l
 ### 🎮 Esports (LoL + Dota 2)
 
 - **Auto-análise ao vivo** a cada 3 min: analisa partidas `live` com dados de gold, composições, KDA e objetivos em tempo real
-- **Auto-análise pré-jogo** a cada 3 min: analisa partidas `upcoming` nas **próximas 24h** — re-análise a cada 2h por partida, sem repetir se tip já enviada
+- **Auto-análise pré-jogo** a cada 3 min: analisa partidas `upcoming` nas **próximas 24h** — exige odds de mercado reais para chamar o Claude; se ainda não houver odds, aguarda 30 min e tenta novamente. Re-análise a cada 2h, sem repetir se tip já enviada
 - **Notificação ao vivo** (a cada 1 min): avisa inscritos quando draft começa (🟡) e quando a partida vai ao vivo (🔴)
 - **Patch meta stale** (a cada 24h): alerta admins se `LOL_PATCH_META` não foi atualizado há >14 dias
 - **Settlement** via LoL Esports API e OpenDota API
@@ -205,13 +204,14 @@ O bot opera em **modo automático**. Não há navegação manual de eventos ou l
 
 1. Ciclo detecta partida elegível dentro da janela do esporte
 2. Coleta em paralelo: stats ao vivo (se disponíveis), odds de mercado, forma recente, H2H, line movement
-3. **Pré-filtro quantitativo** (MMA e Tênis): modelo estatístico compara probabilidade estimada com odds de mercado. Se a divergência for menor que o limiar (5pp MMA / 6pp Tênis), a análise é pulada silenciosamente — sem chamar o Claude. Partidas sem odds de mercado sempre chegam ao Claude (comportamento Option A preservado).
-4. Para LoL: busca composições e stats ao vivo (Riot API ou PandaScore para torneios não-Riot) + patch meta
-5. Monta prompt com **raciocínio em duas etapas**: estimativa cega de probabilidade → comparação com odds
-6. Claude declara probabilidade antes de ver odds, depois verifica se há edge real (gate de 3pp)
-7. **Com odds de mercado:** tip emitida se EV ≥ 2%
-8. **Sem odds de mercado:** Claude estima fair odds (juice 6%) e emite tip se confiança ALTA/MÉDIA — mensagem marcada com `⚠️ Odds estimadas`
+3. **Pré-filtro quantitativo** (MMA e Tênis): modelo estatístico compara probabilidade estimada com odds de mercado. Se a divergência for menor que o limiar (5pp MMA / 6pp Tênis), a análise é pulada silenciosamente — sem chamar o Claude.
+4. **Gate de odds esports pré-jogo**: se não houver odds reais de mercado disponíveis, a partida é marcada como `waitingOdds` e re-verificada em 30 min — o Claude nunca é chamado sem odds (análise pré-jogo sem mercado tem divergência esperada de 15–20pp, tornando-a estruturalmente pouco fiável).
+5. Para LoL: busca composições e stats ao vivo (Riot API ou PandaScore para torneios não-Riot) + patch meta
+6. Monta prompt com **raciocínio em duas etapas**: estimativa cega de probabilidade → comparação com odds
+7. Claude declara probabilidade antes de ver odds, depois verifica se há edge real (gate de 3pp)
+8. **Fair odds calculadas como `1/probabilidade`** (sem juice) — a comparação com as odds de mercado captura o edge líquido; tip emitida se EV ≥ 2%
 9. Tip registrada no banco + enviada por DM a todos os inscritos no esporte (¼ Kelly)
+10. **Uma tip por partida**: flag `tipSent` em memória (hidratada do banco ao boot via `loadExistingTips`) impede re-envio após restart
 
 #### Pré-filtro MMA — Score de Vantagem
 
@@ -227,7 +227,11 @@ Tips emitidas para partidas `upcoming` são baseadas exclusivamente em **forma h
 
 > _Análise pré-draft: baseada em forma e histórico (sem acesso às comps)_
 
-O tracking esports exibe os resultados separados por fase (**ao vivo vs pré-jogo**) para que você avalie empiricamente se as tips pré-draft têm ROI positivo ao longo do tempo.
+O tracking esports exibe os resultados separados por fase (**ao vivo vs pré-jogo**) para que a performance das tips pré-draft possa ser avaliada empiricamente ao longo do tempo. Se o ROI pré-jogo for consistentemente negativo, o gate pode ser apertado ou essa fase desativada.
+
+#### Uma Tip por Partida — Anti-duplicação
+
+Cada partida recebe no máximo uma tip, independente de reinicios do processo. Ao arrancar, `loadExistingTips()` consulta `/unsettled-tips` para todos os desportos e pré-popula os mapas em memória (`analyzedMatches`, `analyzedFights`, `analyzedTennisMatches`) com `tipSent: true` para todas as tips abertas. Isso garante que um redeploy no Railway nunca gere duplicados.
 
 ### Proteções Anti-Viés nos Prompts
 
@@ -264,7 +268,7 @@ O bot combina duas fontes para máxima cobertura:
 **Riot / LoL Esports API** — ligas oficiais transmitidas pela Riot:
 Worlds, MSI, LCS, LCK, LEC, LPL, CBLOL, LLA, PCS, LCO, VCS, LJL, EMEA Masters, LFL, NLC, LTA Norte/Sul, First Stand, e ligas regionais.
 
-**PandaScore** — torneios não transmitidos pela Riot (ex: qualificatórias EWC, ligas regionais independentes). IDs PandaScore são prefixados com `ps_` internamente. Composições e stats desses jogos vêm do endpoint `/ps-compositions`.
+**PandaScore** — torneios não transmitidos pela Riot (ex: qualificatórias EWC, ligas regionais independentes). IDs PandaScore são prefixados com `ps_` internamente. Composições e stats desses jogos vêm do endpoint `/ps-compositions`. O PandaScore é também a fonte de **odds de mercado para esports** (endpoints `/odds/matches/upcoming` e `/odds/matches/running`), substituindo o oddspapi.io que tinha limites de taxa muito restritivos no tier gratuito.
 
 Para adicionar ligas extras além da whitelist interna, use `LOL_EXTRA_LEAGUES` no `.env`.
 
@@ -408,9 +412,8 @@ Campo `sport TEXT` presente em todas as tabelas para separação por esporte. Pa
 | The Odds API | MMA + Tênis | Odds ao vivo e resultados finalizados |
 | LoL Esports API (`esports-api.lolesports.com`) | LoL | Calendário, séries, placar |
 | LoL Live Stats Feed (`feed.lolesports.com`) | LoL | Stats ao vivo com delay ~90s |
-| PandaScore API | LoL | Torneios não-Riot (ex: EWC Qualifier, ligas regionais) |
+| PandaScore API | LoL + Dota 2 | Torneios não-Riot, partidas ao vivo, odds de mercado (Pinnacle e outros) |
 | OpenDota API | Dota 2 | Partidas ao vivo, resultados, stats |
-| OddsAPI (`oddspapi.io`) | Esports | Odds Pinnacle para LoL e Dota 2 |
 | Sackmann CSV (`github.com/JeffSackmann`) | Tênis | Histórico ATP/WTA/Challenger 2022–2024 |
 | Anthropic Claude (`claude-sonnet-4-6`) | Todos | Análise de matchup via proxy `/claude` |
 
