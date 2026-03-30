@@ -216,17 +216,30 @@ async function fetchTennisOdds() {
   }
 }
 
+const ESPORTS_BACKOFF_TTL = 60 * 60 * 1000; // 1h backoff after 429
+let esportsBackoffUntil = 0;
+
 async function fetchEsportsOdds() {
   if (!ODDS_API_KEY) { log('WARN', 'ODDS', 'ODDS_API_KEY não configurada — esports odds desativadas'); return; }
   if (esportsOddsFetching) { log('DEBUG', 'ODDS', 'Esports fetch já em curso, ignorando'); return; } // prevent concurrent fetches (race condition → 429)
   const now = Date.now();
+  if (now < esportsBackoffUntil) {
+    const mins = Math.ceil((esportsBackoffUntil - now) / 60000);
+    log('DEBUG', 'ODDS', `Esports em backoff por 429 — aguardando ${mins}min`);
+    return;
+  }
   if (now - lastEsportsOddsUpdate < ESPORTS_ODDS_TTL) return; // own TTL independent of shared lastOddsUpdate
   esportsOddsFetching = true;
   lastEsportsOddsUpdate = now;
   try {
-    // LoL (sportId=18), Dota (sportId=16)
+    // LoL (sportId=18), Dota (sportId=16) — sequential with delay to respect rate limits
     for (const sportId of [18, 16]) {
       const r = await httpGet(`https://api.oddspapi.io/v4/tournaments?sportId=${sportId}&apiKey=${ODDS_API_KEY}`);
+      if (r.status === 429) {
+        esportsBackoffUntil = Date.now() + ESPORTS_BACKOFF_TTL;
+        log('WARN', 'ODDS', `Esports 429 (sportId=${sportId}) — backoff 1h`);
+        break; // stop loop entirely, don't hammer API
+      }
       if (r.status !== 200) {
         log('WARN', 'ODDS', `Esports tournaments status ${r.status} (sportId=${sportId})`);
         continue;
@@ -260,7 +273,14 @@ async function fetchEsportsOdds() {
 
       const tIds = active.map(t => t.tournamentId).join(',');
       const bk = 'pinnacle';
+      // Small delay between sportId calls to stay under rate limit
+      await new Promise(r => setTimeout(r, 2000));
       const oddsR = await httpGet(`https://api.oddspapi.io/v4/odds-by-tournaments?bookmaker=${bk}&tournamentIds=${tIds}&apiKey=${ODDS_API_KEY}`);
+      if (oddsR.status === 429) {
+        esportsBackoffUntil = Date.now() + ESPORTS_BACKOFF_TTL;
+        log('WARN', 'ODDS', `Esports 429 em odds-by-tournaments — backoff 1h`);
+        break;
+      }
       if (oddsR.status !== 200) {
         log('WARN', 'ODDS', `Esports odds-by-tournaments status ${oddsR.status}`);
         continue;
