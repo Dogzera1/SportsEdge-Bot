@@ -271,25 +271,62 @@ async function fetchEsportsOdds() {
       log('DEBUG', 'ODDS', `Torneios: LoL=${cachedTournamentIds.lol.length} Dota=${cachedTournamentIds.dota.length}`);
     }
 
-    // ── Passo 2: buscar odds combinando todos os tournament IDs numa só chamada ──
+    // ── Passo 2: buscar odds pré-jogo + ao vivo em paralelo ──
     const allIds = [...(cachedTournamentIds.lol || []), ...(cachedTournamentIds.dota || [])];
     if (!allIds.length) { log('WARN', 'ODDS', 'OddsPapi: sem tournament IDs em cache'); return; }
     if (!oddspapiAllowed('ODDS')) return;
 
     await new Promise(r => setTimeout(r, 1500)); // respeitar rate limit
-    const oddsR = await httpGet(
-      `https://api.oddspapi.io/v4/odds-by-tournaments?bookmaker=pinnacle&tournamentIds=${allIds.join(',')}&apiKey=${ODDS_API_KEY}`
-    );
-    if (oddsR.status === 429) {
+
+    // Buscar odds upcoming e live em paralelo (1 req para upcoming + 1 para live)
+    // /v4/odds-by-tournaments cobre upcoming; /v4/live-odds cobre partidas ao vivo
+    const [oddsR, liveR] = await Promise.all([
+      httpGet(`https://api.oddspapi.io/v4/odds-by-tournaments?bookmaker=pinnacle&tournamentIds=${allIds.join(',')}&apiKey=${ODDS_API_KEY}`),
+      oddspapiAllowed('ODDS')
+        ? httpGet(`https://api.oddspapi.io/v4/live-odds?bookmaker=pinnacle&sportIds=18,16&apiKey=${ODDS_API_KEY}`)
+        : Promise.resolve({ status: 0, body: '[]' })
+    ]);
+
+    if (oddsR.status === 429 || liveR.status === 429) {
       esportsBackoffUntil = Date.now() + ESPORTS_BACKOFF_TTL;
-      log('WARN', 'ODDS', `OddsPapi 429 (odds-by-tournaments) — backoff 2h | body: ${String(oddsR.body || '').slice(0, 120)}`);
-      return; // NÃO definir lastEsportsOddsUpdate
+      const body429 = oddsR.status === 429 ? oddsR.body : liveR.body;
+      log('WARN', 'ODDS', `OddsPapi 429 — backoff 2h | body: ${String(body429 || '').slice(0, 120)}`);
+      return;
     }
     if (oddsR.status !== 200) { log('WARN', 'ODDS', `OddsPapi odds-by-tournaments ${oddsR.status}`); return; }
 
-    const fixtures = safeParse(oddsR.body, []);
+    const upcoming = safeParse(oddsR.body, []);
+    const live = liveR.status === 200 ? safeParse(liveR.body, []) : [];
+    const fixtures = [...upcoming, ...live];
+    log('DEBUG', 'ODDS', `OddsPapi: ${upcoming.length} upcoming + ${live.length} live fixtures`);
     if (!fixtures.length) { log('WARN', 'ODDS', 'OddsPapi: 0 fixtures retornados'); return; }
     if (fixtures[0]) log('DEBUG', 'ODDS', `Fixture fields: ${Object.keys(fixtures[0]).join(', ')}`);
+
+    // Log market names once for debugging (first fixture only)
+    let marketNamesLogged = false;
+
+    // Helper: extract home/away prices from a single market object
+    function extractPrices(market) {
+      let h = 0, a = 0;
+      for (const oc of Object.values(market.outcomes || {})) {
+        const p = oc.players?.['0'];
+        if (!p) continue;
+        const price = parseFloat(p.price || 0);
+        if (price < 1.01) continue;
+        if (p.bookmakerOutcomeId === 'home') h = price;
+        if (p.bookmakerOutcomeId === 'away') a = price;
+      }
+      return h > 1.01 && a > 1.01 ? { h, a } : null;
+    }
+
+    // Score a market name: prefer series/match winner, penalise map-specific markets
+    function marketScore(name) {
+      const n = (name || '').toLowerCase();
+      if (/\bmap\s*\d/.test(n) || /\bround\b/.test(n)) return -1; // map X / round → skip
+      if (/winner|match result|moneyline|series|outright/i.test(n) && !/map/i.test(n)) return 3;
+      if (/handicap|spread|total|over|under/i.test(n)) return 0;
+      return 1; // neutral
+    }
 
     let cached = 0;
     for (const fix of fixtures) {
@@ -301,17 +338,25 @@ async function fetchEsportsOdds() {
       if (!p1Name || !p2Name) continue;
 
       const markets = bkOdds.markets || {};
+      const marketEntries = Object.values(markets);
+
+      // Log market names once so we can verify which markets are available
+      if (!marketNamesLogged && marketEntries.length) {
+        const names = marketEntries.map(m => m.name || m.marketName || m.id || '?').join(', ');
+        log('DEBUG', 'ODDS', `Mercados disponíveis (Pinnacle): ${names}`);
+        marketNamesLogged = true;
+      }
+
+      // Sort markets by preference: series/match winner first, map markets excluded
+      const sorted = marketEntries
+        .map(m => ({ m, score: marketScore(m.name || m.marketName || '') }))
+        .filter(({ score }) => score >= 0) // drop map/round markets
+        .sort((a, b) => b.score - a.score);
+
       let t1Odd = 0, t2Odd = 0;
-      for (const market of Object.values(markets)) {
-        for (const oc of Object.values(market.outcomes || {})) {
-          const p = oc.players?.['0'];
-          if (!p) continue;
-          const price = parseFloat(p.price || 0);
-          if (price < 1.01) continue;
-          if (p.bookmakerOutcomeId === 'home') t1Odd = price;
-          if (p.bookmakerOutcomeId === 'away') t2Odd = price;
-        }
-        if (t1Odd > 1.01 && t2Odd > 1.01) break;
+      for (const { m } of sorted) {
+        const prices = extractPrices(m);
+        if (prices) { t1Odd = prices.h; t2Odd = prices.a; break; }
       }
       if (t1Odd < 1.01 || t2Odd < 1.01) continue;
 
