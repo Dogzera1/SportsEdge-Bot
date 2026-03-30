@@ -48,6 +48,11 @@ const oddsCache = {};
 let lastOddsUpdate = 0;
 const ODDS_TTL = 4 * 60 * 60 * 1000; // 4h — conserves The Odds API monthly quota (500 req free tier)
 
+// Esports odds: separate TTL + lock to prevent concurrent fetches (→ 429 on oddspapi.io)
+let lastEsportsOddsUpdate = 0;
+let esportsOddsFetching = false;
+const ESPORTS_ODDS_TTL = 15 * 60 * 1000; // 15 min
+
 
 // ── LoL Esports ──
 const LOL_BASE = 'https://esports-api.lolesports.com/persisted/gw';
@@ -209,6 +214,11 @@ async function fetchTennisOdds() {
 
 async function fetchEsportsOdds() {
   if (!ODDS_API_KEY) return;
+  if (esportsOddsFetching) return; // prevent concurrent fetches (race condition → 429)
+  const now = Date.now();
+  if (now - lastEsportsOddsUpdate < ESPORTS_ODDS_TTL) return; // own TTL independent of shared lastOddsUpdate
+  esportsOddsFetching = true;
+  lastEsportsOddsUpdate = now;
   try {
     // LoL (sportId=18), Dota (sportId=16)
     for (const sportId of [18, 16]) {
@@ -306,6 +316,8 @@ async function fetchEsportsOdds() {
     log('INFO', 'ODDS', `Esports: ${cnt} fixtures com odds`);
   } catch(e) {
     log('ERROR', 'ODDS', `Esports: ${e.message}`);
+  } finally {
+    esportsOddsFetching = false; // release lock so next call can proceed
   }
 }
 
