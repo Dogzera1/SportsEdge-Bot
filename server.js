@@ -319,12 +319,14 @@ async function fetchEsportsOdds() {
       return h > 1.01 && a > 1.01 ? { h, a } : null;
     }
 
-    // Score a market name: prefer series/match winner, penalise map-specific markets
+    // Score a market name: prefer current map winner, skip series/match winner and handicaps
+    // Esports live analysis is always about the CURRENT MAP being played
     function marketScore(name) {
       const n = (name || '').toLowerCase();
-      if (/\bmap\s*\d/.test(n) || /\bround\b/.test(n)) return -1; // map X / round → skip
-      if (/winner|match result|moneyline|series|outright/i.test(n) && !/map/i.test(n)) return 3;
-      if (/handicap|spread|total|over|under/i.test(n)) return 0;
+      if (/\bmap\s*\d/.test(n) && /winner|result/i.test(n)) return 3; // Map X Winner → highest priority
+      if (/\bmap\b/.test(n) && !/handicap|spread|total|over|under/i.test(n)) return 2; // generic map market
+      if (/handicap|spread|total|over|under/i.test(n)) return 0; // handicap/total → neutral
+      if (/match result|series|outright|moneyline/i.test(n) && !/map/i.test(n)) return -1; // series winner → skip
       return 1; // neutral
     }
 
