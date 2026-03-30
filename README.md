@@ -45,9 +45,10 @@ Um único processo Node.js executa todos os bots em paralelo, cada um em seu pr�
 - Node.js 18+
 - Bots Telegram criados via [@BotFather](https://t.me/BotFather) — um por esporte
 - Chave Claude API (Anthropic)
-- The Odds API key (MMA + Tênis)
-- LoL Esports API key (Esports — Riot)
-- PandaScore token (Esports — torneios não-Riot + odds de mercado para LoL/Dota 2)
+- The Odds API key — MMA + Tênis ([the-odds-api.com](https://the-odds-api.com), 500 req/mês free)
+- OddsPapi key — odds esports LoL + Dota 2/Pinnacle ([oddspapi.io](https://oddspapi.io), 250 req/mês free)
+- LoL Esports API key (Riot)
+- PandaScore token — torneios não-Riot, schedules e stats
 
 ---
 
@@ -61,9 +62,10 @@ TELEGRAM_TOKEN_TENNIS=seu_token_tennis      # deixe em branco para desativar
 
 # ── APIs ──
 CLAUDE_API_KEY=sk-ant-api03-...            # Anthropic Claude (claude-sonnet-4-6)
-THE_ODDS_API_KEY=sua_chave_the_odds        # MMA + Tênis
+THE_ODDS_API_KEY=sua_chave_the_odds        # MMA + Tênis (the-odds-api.com, 500 req/mês free)
 LOL_API_KEY=sua_chave_lol                  # LoL Esports (Riot)
-PANDASCORE_TOKEN=seu_token                 # PandaScore — torneios não-Riot + odds esports
+ODDS_API_KEY=sua_chave_oddspapi            # Esports odds — LoL + Dota 2 (oddspapi.io, 250 req/mês free)
+PANDASCORE_TOKEN=seu_token                 # PandaScore — torneios não-Riot (schedules + stats)
 
 # ── Servidor ──
 SERVER_PORT=3000
@@ -268,7 +270,9 @@ O bot combina duas fontes para máxima cobertura:
 **Riot / LoL Esports API** — ligas oficiais transmitidas pela Riot:
 Worlds, MSI, LCS, LCK, LEC, LPL, CBLOL, LLA, PCS, LCO, VCS, LJL, EMEA Masters, LFL, NLC, LTA Norte/Sul, First Stand, e ligas regionais.
 
-**PandaScore** — torneios não transmitidos pela Riot (ex: qualificatórias EWC, ligas regionais independentes). IDs PandaScore são prefixados com `ps_` internamente. Composições e stats desses jogos vêm do endpoint `/ps-compositions`. O PandaScore é também a fonte de **odds de mercado para esports** (endpoints `/odds/matches/upcoming` e `/odds/matches/running`), substituindo o oddspapi.io que tinha limites de taxa muito restritivos no tier gratuito.
+**PandaScore** — torneios não transmitidos pela Riot (ex: qualificatórias EWC, ligas regionais independentes). IDs PandaScore são prefixados com `ps_` internamente. Composições e stats desses jogos vêm do endpoint `/ps-compositions`.
+
+**OddsPapi** — fonte de odds de mercado para esports. Fornece Pinnacle + 350 bookmakers para LoL (sportId=18) e Dota 2 (sportId=16). O sistema usa apenas Pinnacle (sharp book) como referência de EV. Tournament IDs são cacheados 24h; odds atualizadas a cada 6h numa única chamada combinada.
 
 Para adicionar ligas extras além da whitelist interna, use `LOL_EXTRA_LEAGUES` no `.env`.
 
@@ -305,16 +309,20 @@ Para adicionar ligas extras além da whitelist interna, use `LOL_EXTRA_LEAGUES` 
 
 ---
 
-## The Odds API — Gestão de Quota
+## Gestão de Quotas de Odds
 
-O plano gratuito tem **500 requisições/mês**. O sistema gerencia o consumo automaticamente:
+Dois provedores gratuitos, cada um com responsabilidade própria:
 
-- **TTL MMA**: 4h por refresh (≈ 180 req/mês)
-- **TTL Tênis**: 12h por refresh, máx. 8 torneios por ciclo (≈ 180 req/mês)
-- **Hard cap**: 450 req/mês (50 de buffer). Ao atingir, usa cache existente e loga aviso
-- Contador em memória (`oddsApiAllowed()`) — reinicia com restart do processo
+| Provedor | Uso | Free tier | TTL | Consumo estimado |
+|---|---|---|---|---|
+| OddsPapi | Esports (LoL + Dota 2) | 250 req/mês | 6h odds + 24h torneios | ~120–150 req/mês |
+| The Odds API | MMA + Tênis | 500 req/mês | 4h MMA / 12h Tênis | ~360 req/mês |
 
-> **Nota:** O contador de requisições é em memória. Reiniciar o bot zera o contador do mês atual. Isso é inofensivo na prática — o cache de dados ainda funciona e as requisições reais tendem a ser bem abaixo do limite.
+**OddsPapi** busca todos os tournaments ativos em cache de 24h (2 req/ciclo) e atualiza odds a cada 6h combinando LoL+Dota numa única chamada (1 req/ciclo) — total ≈ 4–6 req/dia × 30 dias = ~120–150 req/mês. Soft cap em 200 (50 de buffer), após o qual a cache existente é usada.
+
+**The Odds API** cobre MMA (4h TTL, ~180 req/mês) e Tênis exclusivamente (12h TTL, máx. 8 torneios/ciclo, ~180 req/mês). Hard cap em 450 (50 de buffer).
+
+Ambos os contadores são em memória — reiniciar o bot zera o contador do mês, inofensivo na prática porque a cache de dados persiste e as requisições reais ficam abaixo dos limites.
 
 ---
 
@@ -412,7 +420,8 @@ Campo `sport TEXT` presente em todas as tabelas para separação por esporte. Pa
 | The Odds API | MMA + Tênis | Odds ao vivo e resultados finalizados |
 | LoL Esports API (`esports-api.lolesports.com`) | LoL | Calendário, séries, placar |
 | LoL Live Stats Feed (`feed.lolesports.com`) | LoL | Stats ao vivo com delay ~90s |
-| PandaScore API | LoL + Dota 2 | Torneios não-Riot, partidas ao vivo, odds de mercado (Pinnacle e outros) |
+| PandaScore API | LoL + Dota 2 | Torneios não-Riot (ex: EWC Qualifier, ligas regionais), schedules e stats |
+| OddsPapi (`oddspapi.io`) | Esports | Odds Pinnacle para LoL e Dota 2 (sportId 18/16) |
 | OpenDota API | Dota 2 | Partidas ao vivo, resultados, stats |
 | Sackmann CSV (`github.com/JeffSackmann`) | Tênis | Histórico ATP/WTA/Challenger 2022–2024 |
 | Anthropic Claude (`claude-sonnet-4-6`) | Todos | Análise de matchup via proxy `/claude` |

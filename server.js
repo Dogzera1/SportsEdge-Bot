@@ -5,7 +5,7 @@ const path = require('path');
 const url = require('url');
 const initDatabase = require('./lib/database');
 const { SPORTS, getSportById } = require('./lib/sports');
-const { log, sendJson, safeParse, norm, httpGet, httpsPost, oddsApiAllowed } = require('./lib/utils');
+const { log, sendJson, safeParse, norm, httpGet, httpsPost, oddsApiAllowed, oddspapiAllowed } = require('./lib/utils');
 
 // Railway sets $PORT automatically; start.js bridges it to SERVER_PORT
 const PORT = parseInt(process.env.PORT || process.env.SERVER_PORT) || 3000;
@@ -48,10 +48,14 @@ const oddsCache = {};
 let lastOddsUpdate = 0;
 const ODDS_TTL = 4 * 60 * 60 * 1000; // 4h — conserves The Odds API monthly quota (500 req free tier)
 
-// Esports odds: separate TTL + lock to prevent concurrent fetches (→ 429 on oddspapi.io)
+// Esports odds: OddsPapi (free 250 req/mês). TTL 6h + tournament cache 24h ≈ 180 req/mês
 let lastEsportsOddsUpdate = 0;
 let esportsOddsFetching = false;
-const ESPORTS_ODDS_TTL = 15 * 60 * 1000; // 15 min
+const ESPORTS_ODDS_TTL = 6 * 60 * 60 * 1000; // 6h — ~2 fetches/dia = 4 req/dia = ~120/mês
+
+// Tournament ID cache: refresh once per 24h (saves 2 req/dia)
+let cachedTournamentIds = null; // { lol: [...], dota: [...], ts: epoch }
+const TOURNAMENT_CACHE_TTL = 24 * 60 * 60 * 1000; // 24h
 
 
 // ── LoL Esports ──
@@ -132,10 +136,12 @@ async function fetchOdds(sport) {
   try {
     let url;
     if (sport === 'esports') {
-      return await fetchEsportsOdds(); // unreachable now, kept for safety
+      return await fetchEsportsOdds(); // unreachable (bypassed above), kept for safety
     } else if (sport === 'tennis') {
+      // Tennis: usa The Odds API exclusivamente (quota 500/mês)
       return await fetchTennisOdds();
     } else if (sportConfig.sportKey && THE_ODDS_KEY) {
+      // MMA e outros: The Odds API (OddsPapi é esports-only e não cobre MMA)
       if (!oddsApiAllowed()) return;
       url = `https://api.the-odds-api.com/v4/sports/${sportConfig.sportKey}/odds/?apiKey=${THE_ODDS_KEY}&regions=eu,us&markets=h2h&oddsFormat=decimal`;
     } else {
@@ -216,13 +222,113 @@ async function fetchTennisOdds() {
   }
 }
 
-// fetchEsportsOdds — sem fonte de odds gratuita disponível para esports
-// PandaScore não fornece odds no tier gratuito; oddspapi.io tem rate limits muito restritivos.
-// A função existe para manter a interface, mas não faz chamadas externas.
-// Se no futuro uma fonte for adicionada, implementar aqui.
+// OddsPapi 429 backoff state
+let esportsBackoffUntil = 0;
+const ESPORTS_BACKOFF_TTL = 2 * 60 * 60 * 1000; // 2h backoff on 429
+
 async function fetchEsportsOdds() {
-  // Sem operação — odds esports não disponíveis via API gratuita
-  // O bot analisa partidas sem odds de mercado (Claude estima fair odds)
+  if (!ODDS_API_KEY) return;
+  if (esportsOddsFetching) return;
+  const now = Date.now();
+  if (now < esportsBackoffUntil) return; // em backoff por 429
+  if (now - lastEsportsOddsUpdate < ESPORTS_ODDS_TTL) return;
+  if (!oddspapiAllowed('ODDS')) return; // quota mensal
+
+  esportsOddsFetching = true;
+  lastEsportsOddsUpdate = now;
+  try {
+    // ── Passo 1: obter tournament IDs (cache 24h para economizar requisições) ──
+    const needsTournamentRefresh = !cachedTournamentIds ||
+      (now - cachedTournamentIds.ts) > TOURNAMENT_CACHE_TTL;
+
+    if (needsTournamentRefresh) {
+      const tIds = { lol: [], dota: [], ts: now };
+      for (const { sportId, key } of [{ sportId: 18, key: 'lol' }, { sportId: 16, key: 'dota' }]) {
+        if (!oddspapiAllowed('ODDS')) break; // quota check por chamada
+        const r = await httpGet(`https://api.oddspapi.io/v4/tournaments?sportId=${sportId}&apiKey=${ODDS_API_KEY}`);
+        if (r.status === 429) {
+          esportsBackoffUntil = Date.now() + ESPORTS_BACKOFF_TTL;
+          log('WARN', 'ODDS', `OddsPapi 429 (tournaments sportId=${sportId}) — backoff 2h`);
+          return; // sai sem atualizar timestamp para tentar novamente após backoff
+        }
+        if (r.status !== 200) { log('WARN', 'ODDS', `OddsPapi tournaments ${r.status} (sportId=${sportId})`); continue; }
+        const tours = safeParse(r.body, []);
+        if (!Array.isArray(tours) || !tours.length) continue;
+
+        // Filtrar torneios com fixtures activos (multi-convention)
+        const active = tours.filter(t =>
+          t.liveFixtures > 0 || t.upcomingFixtures > 0 ||
+          t.live_fixtures > 0 || t.upcoming_fixtures > 0 ||
+          t.liveCount > 0 || t.upcomingCount > 0 ||
+          t.activeFixtures > 0 || t.fixtures > 0
+        );
+        tIds[key] = (active.length ? active : tours).slice(0, 8).map(t => t.tournamentId).filter(Boolean);
+        await new Promise(r => setTimeout(r, 1500)); // 1.5s entre chamadas
+      }
+      cachedTournamentIds = tIds;
+      log('DEBUG', 'ODDS', `Torneios: LoL=${cachedTournamentIds.lol.length} Dota=${cachedTournamentIds.dota.length}`);
+    }
+
+    // ── Passo 2: buscar odds combinando todos os tournament IDs numa só chamada ──
+    const allIds = [...(cachedTournamentIds.lol || []), ...(cachedTournamentIds.dota || [])];
+    if (!allIds.length) { log('WARN', 'ODDS', 'OddsPapi: sem tournament IDs em cache'); return; }
+    if (!oddspapiAllowed('ODDS')) return;
+
+    await new Promise(r => setTimeout(r, 1500)); // respeitar rate limit
+    const oddsR = await httpGet(
+      `https://api.oddspapi.io/v4/odds-by-tournaments?bookmaker=pinnacle&tournamentIds=${allIds.join(',')}&apiKey=${ODDS_API_KEY}`
+    );
+    if (oddsR.status === 429) {
+      esportsBackoffUntil = Date.now() + ESPORTS_BACKOFF_TTL;
+      log('WARN', 'ODDS', 'OddsPapi 429 (odds-by-tournaments) — backoff 2h');
+      return;
+    }
+    if (oddsR.status !== 200) { log('WARN', 'ODDS', `OddsPapi odds-by-tournaments ${oddsR.status}`); return; }
+
+    const fixtures = safeParse(oddsR.body, []);
+    if (!fixtures.length) { log('WARN', 'ODDS', 'OddsPapi: 0 fixtures retornados'); return; }
+    if (fixtures[0]) log('DEBUG', 'ODDS', `Fixture fields: ${Object.keys(fixtures[0]).join(', ')}`);
+
+    let cached = 0;
+    for (const fix of fixtures) {
+      const bkOdds = fix.bookmakerOdds?.['pinnacle'];
+      if (!bkOdds?.bookmakerIsActive) continue;
+
+      const p1Name = fix.participant1Name || fix.participant1?.name || fix.homeTeam?.name || String(fix.participant1Id || '');
+      const p2Name = fix.participant2Name || fix.participant2?.name || fix.awayTeam?.name || String(fix.participant2Id || '');
+      if (!p1Name || !p2Name) continue;
+
+      const markets = bkOdds.markets || {};
+      let t1Odd = 0, t2Odd = 0;
+      for (const market of Object.values(markets)) {
+        for (const oc of Object.values(market.outcomes || {})) {
+          const p = oc.players?.['0'];
+          if (!p) continue;
+          const price = parseFloat(p.price || 0);
+          if (price < 1.01) continue;
+          if (p.bookmakerOutcomeId === 'home') t1Odd = price;
+          if (p.bookmakerOutcomeId === 'away') t2Odd = price;
+        }
+        if (t1Odd > 1.01 && t2Odd > 1.01) break;
+      }
+      if (t1Odd < 1.01 || t2Odd < 1.01) continue;
+
+      const entry = { t1: t1Odd.toFixed(2), t2: t2Odd.toFixed(2), bookmaker: 'Pinnacle', t1Name: p1Name, t2Name: p2Name };
+      const nameKey = norm(p1Name) + '_' + norm(p2Name);
+      oddsCache[`esports_${nameKey}`] = entry;
+      if (fix.fixtureId) oddsCache[`esports_fix_${fix.fixtureId}`] = entry;
+      cached++;
+
+      try {
+        stmts.insertOddsHistory.run('esports', nameKey, p1Name, p2Name, t1Odd, t2Odd, 'Pinnacle');
+      } catch(_) {}
+    }
+    log('INFO', 'ODDS', `Esports: ${cached} fixtures com odds (OddsPapi/Pinnacle)`);
+  } catch(e) {
+    log('ERROR', 'ODDS', `Esports odds: ${e.message}`);
+  } finally {
+    esportsOddsFetching = false;
+  }
 }
 
 function findOdds(sport, t1, t2) {
