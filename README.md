@@ -206,9 +206,9 @@ Partidas tier 1 via OpenDota API — gold diff, Roshan/Aegis, barracks, itens-ch
 
 ### Odds
 
-**OddsPapi** — fonte única de odds para esports. Fornece Pinnacle + 350 bookmakers para LoL (sportId=18) e Dota 2 (sportId=16). O sistema usa apenas Pinnacle (sharp book) como referência de EV.
+**The Odds API** — fonte única de odds para esports. Fornece Pinnacle e outros bookmakers principais para LoL (`leagueoflegends_lol`) e Dota 2 (`dota2_dota2`). O sistema tenta usar Pinnacle (sharp book) como referência de EV sempre que possível, fazendo fallback para outros bookmakers se necessário.
 
-Tournament IDs cacheados 24h; odds atualizadas a cada 6h numa única chamada combinada. Soft cap em 200 req/mês (50 de buffer).
+A cota é flexível de acordo com o plano pago adotado, e consultas são enviadas para `api.the-odds-api.com`. Como a API foi atualizada para um plano pago, as limitações rígidas de rate-limit gratuito (como as do OddsPapi antigo) foram flexibilizadas.
 
 Para adicionar ligas extras além da whitelist interna, use `LOL_EXTRA_LEAGUES` no `.env`.
 
