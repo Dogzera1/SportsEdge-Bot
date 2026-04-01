@@ -3,7 +3,7 @@ const https = require('https');
 const http = require('http');
 const initDatabase = require('./lib/database');
 const { SPORTS, getSportById, getSportByToken, getTokenToSportMap } = require('./lib/sports');
-const { log, calcKelly, fuzzyName, fmtDate, fmtDateTime, httpGet, httpsPost, safeParse } = require('./lib/utils');
+const { log, calcKelly, norm, fuzzyName, fmtDate, fmtDateTime, fmtDuration, httpGet, httpsPost, safeParse } = require('./lib/utils');
 
 const SERVER = 'localhost';
 const PORT = parseInt(process.env.SERVER_PORT) || 3000;
@@ -25,8 +25,6 @@ const subscribedUsers = new Map(); // userId → Set<sport>
 
 // Auto-analysis state
 const analyzedMatches = new Map();
-const AUTO_ANALYZE_INTERVAL = 6 * 60 * 60 * 1000;
-let lastAutoAnalyze = 0;
 
 // Settlement
 const SETTLEMENT_INTERVAL = 30 * 60 * 1000;
@@ -37,9 +35,7 @@ const lineAlerted = new Map();
 const LINE_CHECK_INTERVAL = 30 * 60 * 1000;
 let lastLineCheck = 0;
 
-// Late replacement
-const REPLACEMENT_INTERVAL = 2 * 60 * 60 * 1000;
-let lastReplacementCheck = 0;
+
 
 // Live notifications (esports)
 const notifiedMatches = new Map();
@@ -49,22 +45,13 @@ const RE_ANALYZE_INTERVAL = 10 * 60 * 1000; // 10 min between re-analyses of sam
 const UPCOMING_ANALYZE_INTERVAL = 20 * 60 * 1000; // 20m para Line Shopping contínuo
 const UPCOMING_WINDOW_HOURS = 24; // analyze upcoming matches within next 24h
 
-// MMA event-day notifications
-const notifiedMMAEvents = new Map();
-let lastMMADayCheck = 0;
-const MMA_DAY_CHECK_INTERVAL = 60 * 60 * 1000; // 1 hour
 
-// Tennis match-start notifications
-const notifiedTennisStarts = new Map();
-let lastTennisStartCheck = 0;
-const TENNIS_START_CHECK_INTERVAL = 5 * 60 * 1000; // 5 minutes
 
 // Patch meta alert
 let lastPatchAlert = 0;
 const PATCH_ALERT_INTERVAL = 24 * 60 * 60 * 1000;
 
-// MMA phase tracking — separate from esports analyzedMatches
-const analyzedFights = new Map(); // fightId → { ts, phase: 'early'|'final' }
+
 
 // ── Telegram Request ──
 function tgRequest(token, method, params) {
@@ -664,11 +651,7 @@ function normalizeEsportsMatch(m) {
   };
 }
 
-function fmtDuration(secs) {
-  if (!secs || secs <= 0) return '';
-  const m = Math.floor(secs / 60), s = secs % 60;
-  return `${m}:${String(s).padStart(2, '0')}`;
-}
+
 
 function fmtMatchTime(iso) {
   if (!iso) return '';
@@ -2464,12 +2447,12 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
 (async () => {
   await loadSubscribedUsers();
 
-  // Garantir que admins estão inscritos em MMA no banco
+  // Garantir que admins estão inscritos em esports no banco
   for (const adminId of ADMIN_IDS) {
     const id = parseInt(adminId);
     if (!id) continue;
     const existing = stmts.getUser.get(id);
-    const prefs = JSON.stringify(['mma']);
+    const prefs = JSON.stringify(['esports']);
     if (!existing) {
       stmts.upsertUser.run(id, 'admin', 1, prefs);
       log('INFO', 'BOOT', `Admin ${id} inserido no banco com subscribed=1`);
@@ -2477,10 +2460,9 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
       stmts.upsertUser.run(id, existing.username || 'admin', 1, prefs);
       log('INFO', 'BOOT', `Admin ${id} reativado (subscribed=1)`);
     }
-    // Always ensure admin is in subscribedUsers map for MMA
     if (!subscribedUsers.has(id)) subscribedUsers.set(id, new Set());
-    subscribedUsers.get(id).add('mma');
-    log('INFO', 'BOOT', `Admin ${id} inscrito em: mma`);
+    subscribedUsers.get(id).add('esports');
+    log('INFO', 'BOOT', `Admin ${id} inscrito em: esports`);
   }
 
   await loadExistingTips();
@@ -2507,13 +2489,10 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   setInterval(() => runAutoAnalysis().catch(e => log('ERROR', 'AUTO', e.message)), 6 * 60 * 1000);
   setInterval(() => settleCompletedTips().catch(e => log('ERROR', 'SETTLE', e.message)), SETTLEMENT_INTERVAL);
   setInterval(() => checkLineMovement().catch(e => log('ERROR', 'LINE', e.message)), LINE_CHECK_INTERVAL);
-  setInterval(() => checkLateReplacements().catch(e => log('ERROR', 'REPLACE', e.message)), REPLACEMENT_INTERVAL);
   if (SPORTS.esports?.enabled) {
     setInterval(() => checkLiveNotifications().catch(e => log('ERROR', 'NOTIFY', e.message)), LIVE_CHECK_INTERVAL);
     setInterval(() => checkCLV().catch(e => log('ERROR', 'CLV', e.message)), 5 * 60 * 1000);
   }
-  setInterval(() => checkMMAEventDay().catch(e => log('ERROR', 'MMA-DAY', e.message)), MMA_DAY_CHECK_INTERVAL);
-  if (SPORTS.tennis?.enabled) setInterval(() => checkTennisMatchStart().catch(e => log('ERROR', 'TENNIS-START', e.message)), TENNIS_START_CHECK_INTERVAL);
   
   log('INFO', 'BOOT', `Bots ativos: ${Object.keys(bots).join(', ')}`);
   log('INFO', 'BOOT', 'Pronto! Mande /start em cada bot no Telegram');

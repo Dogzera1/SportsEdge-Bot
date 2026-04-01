@@ -28,20 +28,7 @@ try {
 }
 const { db, stmts } = initDatabase(DB_PATH);
 
-// ── Scrapers (opcionais) ──
-let SCRAPERS = {};
-try {
-  SCRAPERS.mma = require('./scrapers/mma');
-  log('INFO', 'SCRAPER', 'MMA scraper carregado');
-} catch(e) {
-  log('WARN', 'SCRAPER', 'MMA scraper não disponível — scraping desativado');
-}
-try {
-  SCRAPERS.tennis = require('./scrapers/tennis');
-  log('INFO', 'SCRAPER', 'Tennis scraper carregado');
-} catch(e) {
-  log('WARN', 'SCRAPER', 'Tennis scraper não disponível: ' + e.message);
-}
+// Apenas Esports suportado — sem scrapers externos
 
 // ── Odds Cache ──
 const oddsCache = {};
@@ -57,10 +44,7 @@ const ESPORTS_ODDS_TTL = 20 * 60 * 1000; // 20m — ~72 fetches/dia para Line Sh
 let cachedTournamentIds = null; // { lol: [...], dota: [...], ts: epoch }
 const TOURNAMENT_CACHE_TTL = 24 * 60 * 60 * 1000; // 24h
 
-// MMA OddsPapi tracking
-let mmaSportId = null; // discovered at runtime via /v4/sports
-let lastMMAOddsUpdate = 0;
-const MMA_ODDS_TTL = 4 * 60 * 60 * 1000; // 4h
+
 
 let lastAnalysisAt = null; // ISO timestamp of last successful auto-analysis cycle
 
@@ -146,73 +130,8 @@ const DOTA_T1_KEYWORDS = ['esl', 'dreamleague', 'the international', 'pgl', 'bet
 
 // ── Odds APIs ──
 async function fetchOdds(sport) {
-  // Esports manages its own TTL (15 min) and concurrency lock inside fetchEsportsOdds.
-  // Bypassing the shared 4h gate here so the inner TTL is actually respected.
   if (sport === 'esports') return await fetchEsportsOdds();
-
-  if (Date.now() - lastOddsUpdate < ODDS_TTL) return;
-  lastOddsUpdate = Date.now();
-
-  const sportConfig = getSportById(sport);
-  if (!sportConfig?.sportKey && sport !== 'esports') return;
-
-  try {
-    let url;
-    if (sport === 'esports') {
-      return await fetchEsportsOdds(); // unreachable (bypassed above), kept for safety
-    } else if (sport === 'tennis') {
-      // Tennis: usa The Odds API exclusivamente (quota 500/mês)
-      return await fetchTennisOdds();
-    } else if (sport === 'mma') {
-      // MMA: try OddsPapi first, fall back to The Odds API
-      await fetchMMAOddsOddspapi();
-      // Check if we got odds from OddsPapi; if so, skip The Odds API
-      const cacheKey = Object.keys(oddsCache).find(k => k.startsWith('mma_'));
-      if (cacheKey) return; // OddsPapi populated cache
-      // OddsPapi didn't work or returned 0 results; fall through to The Odds API
-    }
-
-    if (sportConfig.sportKey && THE_ODDS_KEY) {
-      if (!oddsApiAllowed()) return;
-      url = `https://api.the-odds-api.com/v4/sports/${sportConfig.sportKey}/odds/?apiKey=${THE_ODDS_KEY}&regions=eu,us&markets=h2h&oddsFormat=decimal`;
-    } else {
-      return;
-    }
-
-    const r = await httpGet(url);
-    if (r.status !== 200) return;
-
-    const data = safeParse(r.body, []);
-    if (!Array.isArray(data)) return;
-
-    for (const event of data) {
-      if (!event.bookmakers?.length) continue;
-      const bk = event.bookmakers.find(b => b.key === 'pinnacle') || event.bookmakers[0];
-      const market = bk?.markets?.find(m => m.key === 'h2h');
-      if (!market?.outcomes?.length) continue;
-
-      const o1 = market.outcomes[0], o2 = market.outcomes[1];
-      const key = norm(o1.name) + '_' + norm(o2.name);
-
-      oddsCache[`${sport}_${key}`] = {
-        t1: parseFloat(o1.price).toFixed(2),
-        t2: parseFloat(o2.price).toFixed(2),
-        t1Name: o1.name,
-        t2Name: o2.name,
-        bookmaker: bk.title || bk.key
-      };
-
-      try {
-        stmts.insertOddsHistory.run(
-          sport, key, o1.name, o2.name,
-          parseFloat(o1.price), parseFloat(o2.price), bk.title || bk.key
-        );
-      } catch(_) {}
-    }
-    log('INFO', 'ODDS', `${sport}: ${Object.keys(oddsCache).filter(k => k.startsWith(sport + '_')).length} odds cached`);
-  } catch(e) {
-    log('ERROR', 'ODDS', `${sport}: ${e.message}`);
-  }
+  // Apenas Esports é suportado
 }
 
 // ── Tennis Odds (via tennis scraper) ──
@@ -1352,7 +1271,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (p === '/health') {
-    const sport = 'mma';
+    const sport = 'esports';
     const dbOk = (() => {
       try {
         stmts.getDBStatus.get(sport, sport, sport, sport, sport, sport);
@@ -1361,18 +1280,18 @@ const server = http.createServer(async (req, res) => {
         return false;
       }
     })();
-    const pendingRow = db.prepare("SELECT COUNT(*) as c FROM tips WHERE sport='mma' AND result IS NULL").get();
-    const month = new Date().toISOString().slice(0, 7);
-    const usageRow = stmts.getApiUsage.get('mma', month);
-    const stale = !lastAnalysisAt || (Date.now() - new Date(lastAnalysisAt).getTime() > 8 * 60 * 60 * 1000);
-    const status = dbOk && !stale ? 'ok' : 'degraded';
+    const pendingRow = db.prepare("SELECT COUNT(*) as c FROM tips WHERE sport='esports' AND result IS NULL").get();
+    const esportsOddsAge = lastEsportsOddsUpdate > 0 ? Math.round((Date.now() - lastEsportsOddsUpdate) / 60000) : null;
+    const stale = !lastAnalysisAt || (Date.now() - new Date(lastAnalysisAt).getTime() > 2 * 60 * 60 * 1000);
+    const status = dbOk ? (stale ? 'degraded' : 'ok') : 'error';
     sendJson(res, {
       status,
-      sport: 'mma',
+      sport: 'esports',
       db: dbOk ? 'connected' : 'error',
       lastAnalysis: lastAnalysisAt,
       pendingTips: pendingRow?.c || 0,
-      oddsApiUsage: { used: usageRow?.count || 0, limit: 230 }
+      oddsLastUpdate: esportsOddsAge !== null ? `${esportsOddsAge}min ago` : 'never',
+      oddsCacheSize: Object.keys(oddsCache).filter(k => k.startsWith('esports_')).length
     });
     return;
   }
@@ -1855,7 +1774,7 @@ const server = http.createServer(async (req, res) => {
 
   if (p === '/db-status') {
     const sport = parsed.query.sport || 'esports';
-    const counts = stmts.getDBStatus.get(sport, sport, sport, sport, sport, sport, sport);
+    const counts = stmts.getDBStatus.get(sport, sport, sport, sport, sport, sport);
     sendJson(res, counts);
     return;
   }
