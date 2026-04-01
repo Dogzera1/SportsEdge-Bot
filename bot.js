@@ -151,9 +151,22 @@ function kb(buttons) {
   return { reply_markup: { keyboard: buttons, resize_keyboard: true } };
 }
 
-// ── Sport-specific Menus ──
+// ── Sport-specific Menus (Inline Keyboard — callback_data) ──
 function getMenu(sport) {
-  return kb([['🔔 Notificações', '📊 Tracking'], ['📅 Próximas', '❓ Ajuda']]);
+  return {
+    reply_markup: {
+      inline_keyboard: [
+        [
+          { text: '🔔 Notificações', callback_data: `menu_notif_${sport}` },
+          { text: '📊 Tracking', callback_data: `menu_tracking_${sport}` }
+        ],
+        [
+          { text: '📅 Próximas', callback_data: `menu_proximas_${sport}` },
+          { text: '❓ Ajuda', callback_data: `menu_ajuda_${sport}` }
+        ]
+      ]
+    }
+  };
 }
 
 // ── Hydrate tip maps from DB on startup (prevents re-sending after restart) ──
@@ -2500,15 +2513,82 @@ async function poll(token, sport) {
         }
         
         if (update.callback_query) {
-          const chatId = update.callback_query.message.chat.id;
-          const data = update.callback_query.data;
-          await tgRequest(token, 'answerCallbackQuery', {
-            callback_query_id: update.callback_query.id
-          });
+          const cq = update.callback_query;
+          const chatId = cq.message.chat.id;
+          const data = cq.data;
+          // Always ack the callback to remove the spinner
+          await tgRequest(token, 'answerCallbackQuery', { callback_query_id: cq.id }).catch(() => {});
           
           if (data.startsWith('notif_')) {
+            // notif_{sport}_{on|off}
             const [, s, action] = data.split('_');
             await handleNotificacoes(token, chatId, s, action === 'on' ? 'on' : 'off');
+          } else if (data.startsWith('menu_')) {
+            // menu_{action}_{sport}
+            const parts = data.split('_'); // ['menu', action, sport]
+            const action = parts[1];
+            const s = parts[2] || sport;
+            
+            if (action === 'notif') {
+              await handleNotificacoes(token, chatId, s);
+            } else if (action === 'tracking') {
+              try {
+                const [roi, history] = await Promise.all([
+                  serverGet('/roi', s),
+                  serverGet('/tips-history?limit=10&filter=settled', s).catch(() => [])
+                ]);
+                const o = roi.overall || {};
+                const wins = o.wins || 0, losses = o.losses || 0, total = o.total || 0;
+                const pending = total - wins - losses;
+                const wr = total > 0 ? Math.round((wins / total) * 100) : 0;
+                const roiVal = parseFloat(o.roi || 0);
+                const roiSign = roiVal > 0 ? '+' : '';
+                const roiEmoji = roiVal > 0 ? '📈' : roiVal < 0 ? '📉' : '➡️';
+                let txt = `📊 *TRACKING DE TIPS — ${config.name}*\n`;
+                txt += `━━━━━━━━━━━━━━━━\n\n`;
+                if (total === 0) {
+                  txt += `_Nenhuma tip registrada ainda._\n`;
+                  txt += `As tips automáticas são gravadas assim que enviadas.`;
+                } else {
+                  txt += `🎯 *Acertos:* ${wins}/${total - pending} (${pending > 0 ? `+${pending} pend.` : 'todas resolvidas'})\n`;
+                  txt += `✅ Ganhas: *${wins}* | ❌ Perdidas: *${losses}*\n`;
+                  txt += `📋 Win Rate: *${wr}%*\n`;
+                  txt += `${roiEmoji} ROI: *${roiSign}${roiVal}%*\n`;
+                  txt += `💵 Profit total: *${roiVal >= 0 ? '+' : ''}${o.totalProfit || 0}u*\n`;
+                  txt += `📦 Volume: *${o.totalStaked || 0}u* apostados\n`;
+                  if (roi.calibration?.length) {
+                    txt += `\n🎯 *Calibração:*\n`;
+                    const confEmoji = { ALTA: '🟢', MÉDIA: '🟡', BAIXA: '🔴' };
+                    roi.calibration.forEach(c => {
+                      txt += `${confEmoji[c.confidence]||'⚪'} ${c.confidence}: ${c.wins}/${c.total} (${c.win_rate}%)\n`;
+                    });
+                  }
+                  if (Array.isArray(history) && history.length > 0) {
+                    txt += `\n📋 *Últimas tips:*\n`;
+                    history.slice(0, 5).forEach(t => {
+                      const res = t.result === 'win' ? '✅' : t.result === 'loss' ? '❌' : '⏳';
+                      txt += `${res} *${t.tip_participant||'?'}* @ ${t.odds} _(${(t.sent_at||'').slice(0,10)})_\n`;
+                    });
+                  }
+                }
+                txt += `\n_Use /tracking para atualizar_`;
+                await send(token, chatId, txt);
+              } catch(e) { await send(token, chatId, '❌ Erro ao buscar tracking: ' + e.message); }
+            } else if (action === 'proximas') {
+              await handleProximas(token, chatId, s);
+            } else if (action === 'ajuda') {
+              await send(token, chatId,
+                `📖 *${config.name} Bot*\n\n` +
+                `🤖 *Como funciona:*\n` +
+                `O bot analisa partidas automaticamente e envia tips quando encontra valor (+EV). Você não precisa fazer nada — só ativar as notificações.\n\n` +
+                `📊 *Comandos:*\n` +
+                `*/tracking* — acertos, ROI, histórico completo\n` +
+                `*/meustats* — resumo rápido de performance\n\n` +
+                `🔔 *Notificações:* ative pelo botão abaixo para receber as tips.\n\n` +
+                `⚠️ _Aposte com responsabilidade._`,
+                getMenu(s)
+              );
+            }
           }
         }
       }
