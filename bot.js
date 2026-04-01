@@ -2274,30 +2274,78 @@ async function handleNotificacoes(token, chatId, sport, action) {
 
 async function handleProximas(token, chatId, sport) {
   try {
-    const data = await serverGet('/upcoming-fights?days=3', sport).catch(() => []);
-    if (!Array.isArray(data) || !data.length) {
-      await send(token, chatId, '❌ Nenhuma partida próxima com odds detectada para as próximas 72h.\n_Fique de olho, atualizamos os escaneamentos hora a hora!_');
+    await send(token, chatId, '⏳ _Buscando partidas..._');
+
+    // Busca LoL e Dota em paralelo — esses endpoints retornam live + upcoming
+    const [lolMatches, dotaMatches] = await Promise.all([
+      serverGet('/lol-matches').catch(() => []),
+      serverGet('/dota-matches').catch(() => [])
+    ]);
+
+    const all = [
+      ...(Array.isArray(lolMatches) ? lolMatches : []),
+      ...(Array.isArray(dotaMatches) ? dotaMatches : [])
+    ];
+
+    if (!all.length) {
+      await send(token, chatId,
+        '❌ Nenhuma partida encontrada no momento.\n' +
+        '_A API da Riot só retorna partidas da semana atual. Tente novamente mais tarde._'
+      );
       return;
     }
-    
-    let txt = `📅 *PRÓXIMAS PARTIDAS (${data.length})*\n\n`;
-    data.slice(0, 10).forEach(m => {
-      const gIcon = (m.game === 'lol') ? '🎮 LoL' : (m.game === 'dota') ? '🌋 Dota' : '🎮';
-      txt += `${gIcon} | ${m.team1} vs ${m.team2}\n`;
-      txt += `🕐 ${new Date(m.date).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}\n`;
-      
-      if (m.odds_t1 && m.odds_t2) {
-        txt += `💰 ${m.team1}: ${m.odds_t1} | ${m.team2}: ${m.odds_t2}\n`;
-      } else {
-        txt += `_Odds ainda não publicadas_\n`;
-      }
+
+    // Separar live e upcoming
+    const live = all.filter(m => m.status === 'live' || m.status === 'draft');
+    const upcoming = all.filter(m => m.status === 'upcoming');
+
+    let txt = `📅 *PARTIDAS ESPORTS*\n━━━━━━━━━━━━━━━━\n\n`;
+
+    if (live.length) {
+      txt += `🔴 *AO VIVO / EM DRAFT (${live.length})*\n`;
+      live.slice(0, 5).forEach(m => {
+        const gameIcon = m.game === 'lol' ? '🎮' : '🌋';
+        const league = m.league ? `[${m.league}]` : '';
+        txt += `${gameIcon} ${league} *${m.team1}* vs *${m.team2}*`;
+        if (m.score1 !== undefined || m.score2 !== undefined) {
+          txt += ` (${m.score1 ?? 0}-${m.score2 ?? 0})`;
+        }
+        if (m.format) txt += ` _${m.format}_`;
+        txt += '\n';
+        if (m.odds) txt += `  💰 ${m.team1}: \`${m.odds.t1}\` | ${m.team2}: \`${m.odds.t2}\`\n`;
+      });
       txt += '\n';
-    });
-    
-    if (data.length > 10) txt += `_E mais ${data.length - 10} partidas._`;
-    await send(token, chatId, txt);
+    }
+
+    if (upcoming.length) {
+      txt += `📅 *PRÓXIMAS (${upcoming.length})*\n`;
+      upcoming.slice(0, 10).forEach(m => {
+        const gameIcon = m.game === 'lol' ? '🎮' : '🌋';
+        const league = m.league ? `[${m.league}]` : '';
+        txt += `${gameIcon} ${league} *${m.team1}* vs *${m.team2}*`;
+        if (m.format) txt += ` _${m.format}_`;
+        txt += '\n';
+        if (m.time) {
+          try {
+            const dt = new Date(m.time).toLocaleString('pt-BR', {
+              timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit',
+              hour: '2-digit', minute: '2-digit'
+            });
+            txt += `  🕐 ${dt}\n`;
+          } catch(_) {}
+        }
+        if (m.odds) txt += `  💰 ${m.team1}: \`${m.odds.t1}\` | ${m.team2}: \`${m.odds.t2}\`\n`;
+        else txt += `  _Sem odds ainda_\n`;
+      });
+    }
+
+    if (!live.length && !upcoming.length) {
+      txt += '_Nenhuma partida disponível no momento._';
+    }
+
+    await send(token, chatId, txt, getMenu(sport));
   } catch (e) {
-    await send(token, chatId, `❌ Erro ao buscar próximas: ${e.message}`);
+    await send(token, chatId, `❌ Erro ao buscar partidas: ${e.message}`);
   }
 }
 
