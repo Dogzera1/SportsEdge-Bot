@@ -46,7 +46,7 @@ const notifiedMatches = new Map();
 let lastLiveCheck = 0;
 const LIVE_CHECK_INTERVAL = 60 * 1000; // 1 minute
 const RE_ANALYZE_INTERVAL = 10 * 60 * 1000; // 10 min between re-analyses of same live match
-const UPCOMING_ANALYZE_INTERVAL = 2 * 60 * 60 * 1000; // 2h between analyses of same upcoming match
+const UPCOMING_ANALYZE_INTERVAL = 20 * 60 * 1000; // 20m para Line Shopping contínuo
 const UPCOMING_WINDOW_HOURS = 24; // analyze upcoming matches within next 24h
 
 // MMA event-day notifications
@@ -1392,25 +1392,22 @@ ${gamesContext || '\n[Sem dados ao vivo — análise pré-jogo]\n'}
 ${enrichSection}
 ═══════════════════════════════════════
 ${highFluxWarning ? '\n' + highFluxWarning + '\n' : ''}${lineMovementWarning ? '\n' + lineMovementWarning + '\n' : ''}
-RACIOCÍNIO EM DUAS ETAPAS OBRIGATÓRIO:
+ETAPA 1 — LEITURA DO DRAFT (COMPOSIÇÕES E META):
+Baseado nas composições listadas e no patch meta fornecido:
+→ Qual equipe possui a melhor composição para o Early Game? E para o Lategame (Scaling)?
+→ Existe alguma sinergia ou resposta brutal (counter-pick) no Top ou Mid que desequilibra o jogo?
+→ Estime de forma seca: P(${t1})=__% | P(${t2})=__%
+→ Principal justificativa: [1 frase focada na composição]
 
-ETAPA 1 — ESTIMATIVA CEGA (antes de comparar com odds):
-Baseado SOMENTE nos dados de estado do jogo, composições, forma e H2H:
-→ Estime: P(${t1})=__% | P(${t2})=__%
-→ Principal fator que justifica essa estimativa: [1 frase]
-→ Principal fator de incerteza: [1 frase]
-${highFlux ? '→ Aplicar desconto de alto fluxo: SIM — confiança rebaixada para BAIXA automaticamente' : ''}
-
-ETAPA 2 — VERIFICAÇÃO DE EDGE:
+ETAPA 2 — VERIFICAÇÃO DE EDGE MATEMÁTICO:
 ${hasRealOdds
-  ? `Odds implícitas do mercado: ${t1}=${(1/parseFloat(o.t1)*100).toFixed(1)}% | ${t2}=${(1/parseFloat(o.t2)*100).toFixed(1)}%
-→ Se diferença entre sua estimativa e odds implícitas < 3pp: escreva "SEM EDGE" e não emita TIP_ML.
-→ Se diferença ≥ 3pp a seu favor: calcule EV = (prob_real × odd) - 1. Só emita tip se EV >= +2%.`
-  : `Sem odds de mercado disponíveis.
-→ Estime FAIR_ODDS (sem juice) = 1/prob. Exemplo: P1=65% → odd=1.538
-→ AVISO DE PRECISÃO: sem dados de roster atual, patch, bootcamp ou draft, sua estimativa pode divergir 15-20pp do mercado real. Seja conservador.
-→ Só emita TIP_ML se vantagem for clara (>65%) E confiança for ALTA E tiver múltiplos fatores convergindo.
-→ Se vantagem entre 58-65%: emita FAIR_ODDS como referência, mas NÃO emita TIP_ML.`}
+  ? `Odds implícitas do mercado da Pinnacle: ${t1}=${(1/parseFloat(o.t1)*100).toFixed(1)}% | ${t2}=${(1/parseFloat(o.t2)*100).toFixed(1)}%
+→ Se a sua estimativa baseada no Draft for < 3pp em relação à Pinnacle: escreva "SEM EDGE" e não emita TIP_ML.
+→ Se a composição favorecer assustadoramente uma equipe e a margem for ≥ 3pp: calcule EV = (prob_real × odd) - 1. Só emita tip se EV >= +2%.`
+  : `Sem odds de mercado disponíveis (Pinnacle indisponível).
+→ Estime P(${t1}) e P(${t2}) baseado puramente na força deste Draft.
+→ Estime FAIR_ODDS = 1/prob. (Ex: 65% = 1.54).
+→ Só emita TIP_ML se a vantagem da composição for incontestavelmente esmagadora (>65%). Caso contrário, não emita.`}
 
 ANÁLISE DE VIRADA:
 ${game === 'lol' ? `• Composição late-game/scaling no time perdedor → virada possível
@@ -2507,19 +2504,36 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   }
   
   // Background tasks
-  // Run auto-analysis frequently (MMA-only now, 6min interval for stability)
   setInterval(() => runAutoAnalysis().catch(e => log('ERROR', 'AUTO', e.message)), 6 * 60 * 1000);
   setInterval(() => settleCompletedTips().catch(e => log('ERROR', 'SETTLE', e.message)), SETTLEMENT_INTERVAL);
   setInterval(() => checkLineMovement().catch(e => log('ERROR', 'LINE', e.message)), LINE_CHECK_INTERVAL);
   setInterval(() => checkLateReplacements().catch(e => log('ERROR', 'REPLACE', e.message)), REPLACEMENT_INTERVAL);
-  if (SPORTS.esports?.enabled) setInterval(() => checkLiveNotifications().catch(e => log('ERROR', 'NOTIFY', e.message)), LIVE_CHECK_INTERVAL);
+  if (SPORTS.esports?.enabled) {
+    setInterval(() => checkLiveNotifications().catch(e => log('ERROR', 'NOTIFY', e.message)), LIVE_CHECK_INTERVAL);
+    setInterval(() => checkCLV().catch(e => log('ERROR', 'CLV', e.message)), 5 * 60 * 1000);
+  }
   setInterval(() => checkMMAEventDay().catch(e => log('ERROR', 'MMA-DAY', e.message)), MMA_DAY_CHECK_INTERVAL);
   if (SPORTS.tennis?.enabled) setInterval(() => checkTennisMatchStart().catch(e => log('ERROR', 'TENNIS-START', e.message)), TENNIS_START_CHECK_INTERVAL);
-  if (SPORTS.tennis?.enabled) setInterval(() => checkTennisWithdrawals().catch(e => log('ERROR', 'TENNIS-WITHDRAW', e.message)), WITHDRAW_CHECK_INTERVAL);
-  if (SPORTS.tennis?.enabled) setInterval(() => runAutoAnalysisTennis().catch(e => log('ERROR', 'AUTO-TENNIS', e.message)), 30 * 60 * 1000);
   
   log('INFO', 'BOOT', `Bots ativos: ${Object.keys(bots).join(', ')}`);
   log('INFO', 'BOOT', 'Pronto! Mande /start em cada bot no Telegram');
 })();
+
+// Função para registrar o Closing Line Value (CLV) antes do jogo
+async function checkCLV() {
+  if (subscribedUsers.size === 0) return;
+  try {
+    const unsettled = await serverGet('/unsettled-tips', 'esports');
+    if (!Array.isArray(unsettled)) return;
+    for (const tip of unsettled) {
+      if (tip.clv_odds) continue; // já registrado
+      const o = await serverGet(`/odds?team1=${encodeURIComponent(tip.participant1)}&team2=${encodeURIComponent(tip.participant2)}`).catch(() => null);
+      if (o && o.t1 > 1) {
+        // Assume que se tiver odds reais perto da hora, salvamos como CLV se estiver prestes a começar
+        await serverPost('/update-clv', { matchId: tip.match_id, clvOdds: tip.tip_participant === tip.participant1 ? o.t1 : o.t2 }).catch(() => {});
+      }
+    }
+  } catch(e) {}
+}
 
 module.exports = { bots, subscribedUsers };

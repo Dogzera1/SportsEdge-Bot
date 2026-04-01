@@ -51,7 +51,7 @@ const ODDS_TTL = 4 * 60 * 60 * 1000; // 4h — conserves The Odds API monthly qu
 // Esports odds: OddsPapi (free 250 req/mês). TTL 6h + tournament cache 24h ≈ 180 req/mês
 let lastEsportsOddsUpdate = 0;
 let esportsOddsFetching = false;
-const ESPORTS_ODDS_TTL = 6 * 60 * 60 * 1000; // 6h — ~2 fetches/dia = 4 req/dia = ~120/mês
+const ESPORTS_ODDS_TTL = 20 * 60 * 1000; // 20m — ~72 fetches/dia para Line Shopping
 
 // Tournament ID cache: refresh once per 24h (saves 2 req/dia)
 let cachedTournamentIds = null; // { lol: [...], dota: [...], ts: epoch }
@@ -1736,6 +1736,31 @@ const server = http.createServer(async (req, res) => {
           isLive: t.isLive ? 1 : 0,
           botToken: t.botToken || ''
         });
+        
+        // Registrar a odd de abertura no banco
+        try {
+          stmts.updateTipOpenOdds.run(parseFloat(t.odds) || 0, t.matchId || t.fightId || '', sport);
+        } catch(_) {}
+        
+        sendJson(res, { ok: true });
+      } catch(e) {
+        sendJson(res, { error: e.message }, 500);
+      }
+    });
+    return;
+  }
+
+  if (p === '/update-clv' && req.method === 'POST') {
+    let body = '';
+    req.on('data', d => body += d);
+    req.on('end', () => {
+      try {
+        const { matchId, clvOdds, sport } = safeParse(body, {});
+        if (!matchId || !clvOdds) {
+          sendJson(res, { error: 'Missing matchId or clvOdds' }, 400); 
+          return;
+        }
+        stmts.updateTipCLV.run(parseFloat(clvOdds), matchId, sport || 'esports');
         sendJson(res, { ok: true });
       } catch(e) {
         sendJson(res, { error: e.message }, 500);
