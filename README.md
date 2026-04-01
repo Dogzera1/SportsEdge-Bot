@@ -1,10 +1,10 @@
-# SportsEdge Bot — Esports Edition
+# 🎮 SportsEdge Unified Bot (Esports)
 
-Bot de Telegram para análise de apostas com inteligência artificial, especializado em **Esports (LoL e Dota 2)**. Opera em **modo totalmente automático**: analisa partidas em ciclos regulares, identifica valor (+EV) e envia tips diretamente por DM aos inscritos, sem nenhuma interação manual necessária.
+*Bot autônomo de Telegram para automação de análise de apostas esportivas baseada em Valor Esperado (EV) e Kelly Criterion usando a IA Claude.*
 
----
+> **✅ Sistema Verificado (Abril 2026):** O sistema agora opera *exclusivamente* para Esports (LoL e Dota 2) utilizando a infraestrutura da **The Odds API** (plano pago, sem gargalos de rate-limit legados da antiga OddsPapi). Os botões de menu e handlers de próximas partidas estão estáveis e apontando nativamente para as APIs da Riot e OpenDota. Incluído um novíssimo **Motor de Machine Learning Local** operando por regressão logística heurística em JavaScript, economizando requisições LLM dispendiosas por agir como pre-filter contra partidas matematicamente esgotadas.
 
-## Visão Geral da Arquitetura
+## 🏗 Arquitetura
 
 ```
 ┌──────────────────────────────────────────────────┐

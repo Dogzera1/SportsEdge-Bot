@@ -4,6 +4,7 @@ const http = require('http');
 const initDatabase = require('./lib/database');
 const { SPORTS, getSportById, getSportByToken, getTokenToSportMap } = require('./lib/sports');
 const { log, calcKelly, norm, fuzzyName, fmtDate, fmtDateTime, fmtDuration, httpGet, httpsPost, safeParse } = require('./lib/utils');
+const { esportsPreFilter } = require('./lib/ml');
 
 const SERVER = 'localhost';
 const PORT = parseInt(process.env.SERVER_PORT) || 3000;
@@ -717,13 +718,12 @@ async function checkLiveNotifications() {
       serverGet('/dota-matches').catch(() => [])
     ]);
 
-    const lolLive = Array.isArray(lolList) ? lolList.filter(m => m.status === 'live' || m.status === 'draft') : [];
+    const lolLive = Array.isArray(lolList) ? lolList.filter(m => m.status === 'live') : [];
     const dotaLive = Array.isArray(dotaList) ? dotaList.filter(m => m.status === 'live') : [];
     const allLive = [...lolLive, ...dotaLive];
 
     for (const match of allLive) {
-      const isDraft = match.status === 'draft';
-      const matchKey = `${match.game}_${match.id}${isDraft ? '_draft' : ''}`;
+      const matchKey = `${match.game}_${match.id}`;
       if (!notifiedMatches.has(matchKey)) {
         notifiedMatches.set(matchKey, Date.now());
         for (const [userId, prefs] of subscribedUsers) {
@@ -731,20 +731,12 @@ async function checkLiveNotifications() {
           try {
             const o = match.odds || { t1: '?', t2: '?', bookmaker: '' };
             const gameIcon = match.game === 'lol' ? '⚽' : '🛡️';
-            let txt;
-            if (isDraft) {
-              txt = `${gameIcon} 🟡 *EM PREPARAÇÃO — DRAFT!*\n\n` +
-                `*${match.team1}* vs *${match.team2}*\n` +
-                `📋 ${match.league}\n` +
-                `💰 ${match.team1}: ${o.t1} | ${match.team2}: ${o.t2}\n\n` +
-                `_O draft está acontecendo agora. A partida começa em breve._`;
-            } else {
-              txt = `${gameIcon} 🔴 *PARTIDA AO VIVO!*\n\n` +
-                `*${match.team1}* ${match.score1}-${match.score2} *${match.team2}*\n` +
-                `📋 ${match.league}\n` +
-                `💰 ${match.team1}: ${o.t1} | ${match.team2}: ${o.t2}\n\n` +
-                `_Use o botão Análise IA para recomendação_`;
-            }
+            const txt = `${gameIcon} 🔴 *PARTIDA AO VIVO!*\n\n` +
+              `*${match.team1}* ${match.score1}-${match.score2} *${match.team2}*\n` +
+              `📋 ${match.league}\n` +
+              `💰 ${match.team1}: ${o.t1} | ${match.team2}: ${o.t2}\n\n` +
+              `_Use o botão Análise IA para recomendação_`;
+            
             await sendDM(token, userId, txt);
           } catch(e) {
             if (e.message?.includes('403')) subscribedUsers.delete(userId);
@@ -1058,6 +1050,13 @@ async function autoAnalyzeMatch(token, match) {
     ]);
     const hasLiveStats = gamesContext.includes('AO VIVO');
     const enrichSection = buildEnrichmentSection(match, enrich);
+
+    // Pré-filtro ML Local: se o modelo quantitativo não detectar chance de +EV matemático, pulamos o Claude (economia de tokens).
+    if (!esportsPreFilter(match, o, enrich, hasLiveStats, gamesContext)) {
+      log('INFO', 'AUTO', `Pré-filtro ML: matemática sem borda detectada para ${match.team1} vs ${match.team2}. Ignorando IA subjetiva.`);
+      return null;
+    }
+
     const prompt = buildEsportsPrompt(match, game, gamesContext, o, enrichSection);
 
     const resp = await serverPost('/claude', {
