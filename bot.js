@@ -723,19 +723,22 @@ async function checkLiveNotifications() {
     const allLive = [...lolLive, ...dotaLive];
 
     for (const match of allLive) {
+      // Ignora jogos sem odds na The Odds API (reduz ruído desnecessário pro usuário)
+      if (!match.odds?.t1 || parseFloat(match.odds.t1) <= 1.0) continue;
+
       const matchKey = `${match.game}_${match.id}`;
       if (!notifiedMatches.has(matchKey)) {
         notifiedMatches.set(matchKey, Date.now());
         for (const [userId, prefs] of subscribedUsers) {
           if (!prefs.has('esports')) continue;
           try {
-            const o = match.odds || { t1: '?', t2: '?', bookmaker: '' };
+            const o = match.odds;
             const gameIcon = match.game === 'lol' ? '⚽' : '🛡️';
-            const txt = `${gameIcon} 🔴 *PARTIDA AO VIVO!*\n\n` +
+            const txt = `${gameIcon} 🔴 *PARTIDA AO VIVO (COM MERCADO ABERTO)!*\n\n` +
               `*${match.team1}* ${match.score1}-${match.score2} *${match.team2}*\n` +
               `📋 ${match.league}\n` +
               `💰 ${match.team1}: ${o.t1} | ${match.team2}: ${o.t2}\n\n` +
-              `_Use o botão Análise IA para recomendação_`;
+              `_O bot efetuará a análise IA (se houver +EV) em breve, ou você pode requisitá-la agora._`;
             
             await sendDM(token, userId, txt);
           } catch(e) {
