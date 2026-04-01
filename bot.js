@@ -2608,6 +2608,11 @@ async function poll(token, sport) {
 
 // ── Start ──
 log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
+log('INFO', 'BOOT', `ENV: ESPORTS_ENABLED=${process.env.ESPORTS_ENABLED || '(não definida)'}`);
+log('INFO', 'BOOT', `ENV: TELEGRAM_TOKEN_ESPORTS=${process.env.TELEGRAM_TOKEN_ESPORTS ? '✅ definida' : '❌ AUSENTE'}`);
+log('INFO', 'BOOT', `ENV: CLAUDE_API_KEY=${process.env.CLAUDE_API_KEY ? '✅ definida' : '❌ AUSENTE'}`);
+log('INFO', 'BOOT', `ENV: THE_ODDS_API_KEY=${process.env.THE_ODDS_API_KEY ? '✅ definida' : '❌ AUSENTE'}`);
+log('INFO', 'BOOT', `Sports carregados: ${JSON.stringify(Object.entries(SPORTS).map(([k,v]) => ({id: k, enabled: v.enabled, hasToken: !!v.token})))}`);
 
 (async () => {
   await loadSubscribedUsers();
