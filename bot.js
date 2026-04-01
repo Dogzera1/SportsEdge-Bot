@@ -43,7 +43,7 @@ const notifiedMatches = new Map();
 let lastLiveCheck = 0;
 const LIVE_CHECK_INTERVAL = 60 * 1000; // 1 minute
 const RE_ANALYZE_INTERVAL = 10 * 60 * 1000; // 10 min between re-analyses of same live match
-const UPCOMING_ANALYZE_INTERVAL = 20 * 60 * 1000; // 20m para Line Shopping contínuo
+const UPCOMING_ANALYZE_INTERVAL = 30 * 60 * 1000; // 30m para acomodar a quota da OddsPapi (1xBet)
 const UPCOMING_WINDOW_HOURS = 24; // analyze upcoming matches within next 24h
 
 

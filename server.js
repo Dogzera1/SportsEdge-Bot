@@ -10,10 +10,9 @@ const { log, sendJson, safeParse, norm, httpGet, httpsPost, oddsApiAllowed } = r
 // Railway sets $PORT automatically; start.js bridges it to SERVER_PORT
 const PORT = parseInt(process.env.PORT || process.env.SERVER_PORT) || 3000;
 const CLAUDE_KEY = process.env.CLAUDE_API_KEY;
-const THE_ODDS_KEY = process.env.THE_ODDS_API_KEY;
+const ODDSPAPI_KEY = process.env.ODDS_API_KEY;  // Token da OddsPapi que já estava no seu .env
 const LOL_KEY = process.env.LOL_API_KEY || '';
 const PANDASCORE_TOKEN = process.env.PANDASCORE_TOKEN || '';
-const ODDS_API_KEY = process.env.ODDS_API_KEY || '';
 
 // DB_PATH allows pointing to a Railway volume (e.g. /data/sportsedge.db)
 const fs = require('fs');
@@ -123,67 +122,61 @@ let esportsBackoffUntil = 0;
 const ESPORTS_BACKOFF_TTL = 2 * 60 * 60 * 1000; // 2h backoff on 429
 
 async function fetchEsportsOdds() {
-  if (!THE_ODDS_KEY) return;
+  if (!ODDSPAPI_KEY) return;
   if (esportsOddsFetching) return;
   const now = Date.now();
-  if (now < esportsBackoffUntil) return;
-  if (now - lastEsportsOddsUpdate < ESPORTS_ODDS_TTL) return;
+  
+  // Limites do novo Cache Engine para Oddspapi (1xBet)
+  // Pré-jogo varre apenas a cada 30 min por padrão (poupa quota de 5.000 mensais)
+  if (now - lastEsportsOddsUpdate < 30 * 60 * 1000) return;
 
   esportsOddsFetching = true;
   try {
-    const sports = ['leagueoflegends_lol', 'dota2_dota2'];
     let cached = 0;
     
-    for (const sport of sports) {
-      const url = `https://api.the-odds-api.com/v4/sports/${sport}/odds/?apiKey=${THE_ODDS_KEY}&regions=us,eu,uk&markets=h2h`;
-      const r = await httpGet(url);
-      
-      if (r.status === 429) {
-        esportsBackoffUntil = Date.now() + ESPORTS_BACKOFF_TTL;
-        log('WARN', 'ODDS', `The Odds API 429 (Rate Limit)`);
-        break;
-      }
-      if (r.status !== 200) {
-        continue;
-      }
-
+    // Rota da OddsPapi -> Bookmaker 1xbet (ID default genérico é 1, mas puxar geral sem filtro é Bulk e filtra no JSON)
+    const url = `https://api.oddspapi.io/v1/fixtures?api_key=${ODDSPAPI_KEY}&sport=esports`;
+    const r = await httpGet(url);
+    
+    if (r.status === 200) {
       const events = safeParse(r.body, []);
       for (const ev of events) {
-        if (!ev.home_team || !ev.away_team) continue;
-        const bms = ev.bookmakers || [];
-        const bk = bms.find(b => b.key === 'pinnacle') || bms[0];
+        if (!ev.homeName || !ev.awayName || !ev.odds) continue;
+        
+        // Pega 1xBet ou a bookie predominante no payload da oddspapi
+        const bk = ev.odds.find(b => b.bookmakerName?.toLowerCase().includes('1xbet')) || ev.odds[0];
         if (!bk) continue;
         
-        const market = bk.markets?.find(m => m.key === 'h2h');
+        const market = bk.markets?.find(m => m.marketName === 'Match Winner' || m.marketId === '1');
         if (!market || !market.outcomes || market.outcomes.length < 2) continue;
 
-        const p1Name = ev.home_team;
-        const p2Name = ev.away_team;
+        const p1Name = ev.homeName;
+        const p2Name = ev.awayName;
         
-        const o1 = market.outcomes.find(o => o.name === p1Name) || market.outcomes[0];
-        const o2 = market.outcomes.find(o => o.name === p2Name) || market.outcomes[1];
+        const o1 = market.outcomes[0];
+        const o2 = market.outcomes[1];
         
-        if (!o1 || !o2 || !o1.price || !o2.price) continue;
+        if (!o1 || !o2 || !o1.odds || !o2.odds) continue;
         
-        const t1Odd = parseFloat(o1.price);
-        const t2Odd = parseFloat(o2.price);
+        const t1Odd = parseFloat(o1.odds);
+        const t2Odd = parseFloat(o2.odds);
         if (t1Odd < 1.01 || t2Odd < 1.01) continue;
 
-        const entry = { t1: t1Odd.toFixed(2), t2: t2Odd.toFixed(2), bookmaker: bk.title, t1Name: p1Name, t2Name: p2Name };
+        const entry = { t1: t1Odd.toFixed(2), t2: t2Odd.toFixed(2), bookmaker: bk.bookmakerName || '1xBet', t1Name: p1Name, t2Name: p2Name };
         const nameKey = norm(p1Name) + '_' + norm(p2Name);
         oddsCache[`esports_${nameKey}`] = entry;
         cached++;
 
         try {
-          stmts.insertOddsHistory.run('esports', nameKey, p1Name, p2Name, t1Odd, t2Odd, bk.title);
+          stmts.insertOddsHistory.run('esports', nameKey, p1Name, p2Name, t1Odd, t2Odd, entry.bookmaker);
         } catch(_) {}
       }
     }
     
-    log('INFO', 'ODDS', `Esports: ${cached} fixtures com odds (The Odds API)`);
+    log('INFO', 'ODDS', `OddsPapi (1xBet): ${cached} partidas armazenadas em cache. Próximo Sync em 30 min.`);
     lastEsportsOddsUpdate = Date.now();
   } catch(e) {
-    log('ERROR', 'ODDS', `Esports odds: ${e.message}`);
+    log('ERROR', 'ODDS', `OddsPapi Fetch: ${e.message}`);
   } finally {
     esportsOddsFetching = false;
   }
