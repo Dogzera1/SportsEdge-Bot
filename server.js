@@ -1812,7 +1812,7 @@ async function fetchEsportsOddsV1() {
   }
 }
 
-const httpGet = (url, headers = {}) => {
+function httpGet(url, headers = {}) {
   return new Promise((resolve, reject) => {
     const isHttps = url.startsWith('https');
     const lib = isHttps ? https : http;
@@ -1836,6 +1836,6 @@ const httpGet = (url, headers = {}) => {
       stream.on('end', () => resolve({ status: res.statusCode, body, headers: res.headers }));
     }).on('error', reject);
   });
-};
+}
 
 module.exports = { server, db, stmts, fetchOdds, findOdds, oddsCache, lastEsportsOddsUpdate };

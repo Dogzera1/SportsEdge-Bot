@@ -95,9 +95,9 @@ function serverGet(path, sport) {
       res.on('data', c => d += c);
       res.on('end', () => {
         try { resolve(JSON.parse(d)); }
-        catch(e) { reject(e); }
+        catch(e) { reject(new Error(`JSON Parse Error: ${e.message} | Body: ${d.slice(0,50)}`)); }
       });
-    }).on('error', reject);
+    }).on('error', e => reject(new Error(`HTTP Error on ${SERVER}:${PORT}${path}: ${e.message}`)));
   });
 }
 
