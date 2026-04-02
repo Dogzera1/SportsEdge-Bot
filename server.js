@@ -42,7 +42,11 @@ const ODDS_TTL = 4 * 60 * 60 * 1000; // 4h — conserves The Odds API monthly qu
 let lastEsportsOddsUpdate = 0;
 let lastApiResponse = ''; // Para diagnóstico
 let esportsOddsFetching = false;
-const ESPORTS_ODDS_TTL = 20 * 60 * 1000; // 20m — ~72 fetches/dia para Line Shopping
+// TTL por ciclo (1 req por ciclo com round-robin de 6 lotes).
+// Plano free OddsPapi: 250 req/mês ≈ 8/dia → ciclo mínimo = 3h
+// Com 6 lotes e 3h por ciclo: todos os torneios cobertos a cada ~18h
+// Configurável via ESPORTS_ODDS_TTL_H (horas) no Railway
+const ESPORTS_ODDS_TTL = (parseInt(process.env.ESPORTS_ODDS_TTL_H || '') || 3) * 60 * 60 * 1000;
 
 // Tournament ID cache: refresh once per 24h (saves 2 req/dia)
 const TOURNAMENT_CACHE_TTL = 24 * 60 * 60 * 1000; // 24h
@@ -93,29 +97,44 @@ async function fetchOdds(sport) {
 let esportsBackoffUntil = 0;
 const ESPORTS_BACKOFF_TTL = 2 * 60 * 60 * 1000;
 
+// Round-robin: rastreia qual lote buscar no próximo ciclo
+let esportsBatchCursor = 0;
+
 // Cache de tournament IDs (24h)
 let cachedEsportsTids = null;
 let cachedEsportsTidsTs = 0;
 
-// Torneios de LoL com fixtures ativas (verificado na OddsPapi)
+// Torneios ordenados por prioridade:
+// Lote 1 → T1 (LCS/LEC/LCK)
+// Lote 2 → EU secundárias (Prime League, HLL, Road of Legends)
+// Lote 3 → mais EU (LIT, Finnish, EMEA Masters)
+// Lote 4 → CBLOL, NACL, LPL
+// Lote 5 → LCK CL, LCP, outros
+// Lote 6 → EWC e regionais restantes
 const LOL_ACTIVE_TIDS = [
+  // Lote 1 — T1
   2450,  // LCS
   2452,  // LEC
   2454,  // LCK
+  // Lote 2 — EU secundárias prioritárias
+  33814, // Prime League Pro Division (Alemanha)
+  45623, // Hellenic Legends League (Grécia)
+  45985, // Road of Legends (Portugal)
+  // Lote 3 — mais EU
+  50586, // LIT / LES (Itália / Espanha)
+  50242, // Finnish Pro League (Finlândia)
   26590, // EMEA Masters
-  26698, // CBLOL
-  33814, // Prime League Pro Division
-  36997, // LCK CL
+  // Lote 4 — América/Ásia
+  26698, // CBLOL (Brasil)
   39009, // NACL
-  39985, // LPL
-  45589, // LCP
-  45623, // GLL
-  45985, // Road of Legends
+  39985, // LPL (China)
+  // Lote 5 — secundárias Ásia/Pacífico
+  36997, // LCK CL
+  45589, // LCP (APAC)
   46117, // LRN
+  // Lote 6 — regionais restantes
   46119, // LRS
   47864, // Esports World Cup
-  50242, // Finnish Pro League Winter
-  50586, // LES
 ];
 
 // Lista completa de todos os torneios de LoL conhecidos (fallback abrangente)
@@ -202,50 +221,41 @@ async function fetchEsportsOdds() {
   try {
     const tids = await getEsportsTournamentIds();
 
-    // A API limita o número de IDs por requisição — fazemos em lotes
-    // Usa ODDSPAPI_BATCH_SIZE do env; padrão conservador = 3
+    // Round-robin: divide em lotes e busca APENAS UM lote por ciclo TTL.
+    // Isso evita o 429 do OddsPapi (plano free ≈ 250 req/mês).
+    // O cursor avança a cada ciclo; todos os torneios são cobertos em N ciclos.
     const BATCH_SIZE = parseInt(process.env.ODDSPAPI_BATCH_SIZE || '3');
     const batches = [];
     for (let i = 0; i < tids.length; i += BATCH_SIZE) {
       batches.push(tids.slice(i, i + BATCH_SIZE));
     }
-    log('INFO', 'ODDS', `Buscando odds: ${tids.length} torneios em ${batches.length} lotes de ${BATCH_SIZE}`);
 
-    const allFixtures = [];
-    let lastStatus = 0;
+    const batchIndex = esportsBatchCursor % batches.length;
+    esportsBatchCursor++;
+    const batch = batches[batchIndex];
 
-    for (let bi = 0; bi < batches.length; bi++) {
-      const batch = batches[bi];
-      const url = `https://api.oddspapi.io/v4/odds-by-tournaments?bookmaker=1xbet&tournamentIds=${batch.join(',')}&oddsFormat=decimal&apiKey=${ODDSPAPI_KEY}`;
-      const r = await httpGet(url).catch(e => ({ status: 500, body: e.message }));
-      lastStatus = r.status;
+    log('INFO', 'ODDS', `Buscando odds: lote ${batchIndex+1}/${batches.length} tids=[${batch.join(',')}] (round-robin)`);
 
-      log('DEBUG', 'ODDS', `Lote ${bi+1}/${batches.length} tids=[${batch.join(',')}] status=${r.status} body=${(r.body||'').slice(0,80)}`);
-      lastApiResponse = `Lote ${bi+1}: HTTP ${r.status} | ${(r.body || '').slice(0, 150)}`;
+    const url = `https://api.oddspapi.io/v4/odds-by-tournaments?bookmaker=1xbet&tournamentIds=${batch.join(',')}&oddsFormat=decimal&apiKey=${ODDSPAPI_KEY}`;
+    const r = await httpGet(url).catch(e => ({ status: 500, body: e.message }));
 
-      if (r.status === 429) {
-        esportsBackoffUntil = now + ESPORTS_BACKOFF_TTL;
-        log('WARN', 'ODDS', '429 — backoff 2h ativado');
-        break;
-      }
-      if (r.status !== 200) {
-        log('WARN', 'ODDS', `Lote ${bi+1}: HTTP ${r.status} — pulando`);
-        continue;
-      }
+    log('DEBUG', 'ODDS', `Lote ${batchIndex+1}: status=${r.status} body=${(r.body||'').slice(0,100)}`);
+    lastApiResponse = `Lote ${batchIndex+1}/${batches.length}: HTTP ${r.status} | ${(r.body || '').slice(0, 150)}`;
 
-      const raw = safeParse(r.body, null);
-      if (raw) {
-        const batchFixtures = normalizeFixtures(raw);
-        allFixtures.push(...batchFixtures);
-      }
-
-      // Pausa entre lotes para respeitar rate limit (exceto no último)
-      if (bi < batches.length - 1) {
-        await new Promise(res => setTimeout(res, 400));
-      }
+    if (r.status === 429) {
+      esportsBackoffUntil = now + ESPORTS_BACKOFF_TTL;
+      log('WARN', 'ODDS', '429 — backoff 2h ativado');
+      return;
+    }
+    if (r.status !== 200) {
+      log('WARN', 'ODDS', `HTTP ${r.status} — sem atualização de odds`);
+      return;
     }
 
-    log('INFO', 'ODDS', `Fixtures recebidos: ${allFixtures.length} em ${batches.length} lotes`);
+    const raw = safeParse(r.body, null);
+    const allFixtures = raw ? normalizeFixtures(raw) : [];
+
+    log('INFO', 'ODDS', `Fixtures recebidos: ${allFixtures.length} no lote ${batchIndex+1}`);
 
     let cachedCount = 0;
     for (const f of allFixtures) {
@@ -379,12 +389,50 @@ const LOL_ALIASES = {
   'ninerosters': ['ninerosters', 'nip'],
   'weibo': ['wbg', 'weiboesports'],
   'topesports': ['tes'],
+  'invictusgaming': ['ig'],
+  'anyoneslegend': ['al', 'anyone'],
   // CBLOL
   'paingaming': ['png', 'pain'],
   'fluxo': ['flx'],
   'kabum': ['kbm'],
   'loud': ['lod'],
   'isurus': ['isr'],
+  // Prime League (Alemanha)
+  'berlininternationalgaming': ['big', 'berlin'],
+  'g2nord': ['g2n'],
+  'ewieeinfachesports': ['ewe', 'ewieeinfach'],
+  'vfbstuttgart': ['vfb', 'stuttgart'],
+  'vfbesports': ['vfb', 'stuttgart'],
+  'eintrachtfrankfurt': ['sge', 'frankfurt', 'eintracht'],
+  'eintrachtspandau': ['spandau', 'efs'],
+  'kauflandhangryknights': ['hk', 'hangryknights'],
+  'unicornsoflovesexyedition': ['uol', 'unicorns', 'unicornsoflove'],
+  'rossmanncentaurs': ['centaurs', 'rossmann'],
+  'teamorangegaming': ['tog', 'orange'],
+  // Hellenic Legends League (Grécia)
+  'goalesports': ['goal'],
+  'theparadox': ['paradox'],
+  // LoL Italian Tournament
+  'gmblersesports': ['gmblers', 'gmb'],
+  'aeternaesports': ['aeterna'],
+  'colossalgaming': ['colossal', 'clg'],
+  'zenaesports': ['zena'],
+  'ekoesports': ['eko'],
+  'stonehengeesports': ['stonehenge', 'shg'],
+  'hmble': ['humble'],
+  // Road of Legends (Portugal)
+  'senshiesports': ['senshi'],
+  'senshiesportsclub': ['senshi'],
+  'fritesesportsclub': ['frites'],
+  'mythesports': ['myth'],
+  'onceuponateam': ['ouat'],
+  // NACL
+  'doradogaming': ['dorado'],
+  'nrgesports': ['nrg'],
+  'citadelgaming': ['citadel'],
+  // LCP
+  'groundzerogaming': ['gzg', 'gz'],
+  'detonationfocusme': ['dfm'],
 };
 
 function findOdds(sport, t1, t2) {
@@ -979,14 +1027,26 @@ const server = http.createServer(async (req, res) => {
     const backoffSec = esportsBackoffUntil > Date.now()
       ? Math.round((esportsBackoffUntil - Date.now()) / 1000)
       : 0;
+    const BATCH_SIZE_DBG = parseInt(process.env.ODDSPAPI_BATCH_SIZE || '3');
+    const tidsForDbg = cachedEsportsTids || LOL_ACTIVE_TIDS;
+    const totalBatches = Math.ceil(tidsForDbg.length / BATCH_SIZE_DBG);
+    const nextBatchIdx = esportsBatchCursor % totalBatches;
+    const ttlHours = (parseInt(process.env.ESPORTS_ODDS_TTL_H || '') || 3);
     sendJson(res, {
       count: cacheEntries.length,
       lastSync: lastEsportsOddsUpdate ? new Date(lastEsportsOddsUpdate).toISOString() : 'nunca',
       lastSyncAgoSec: esportsAge,
       backoffRemainingSeconds: backoffSec,
-      tournamentIdsCache: cachedEsportsTids?.length || 0,
+      tournamentIdsCache: tidsForDbg.length,
+      ttlHours,
+      roundRobin: {
+        cursor: esportsBatchCursor,
+        nextBatch: nextBatchIdx + 1,
+        totalBatches,
+        nextTids: tidsForDbg.slice(nextBatchIdx * BATCH_SIZE_DBG, (nextBatchIdx + 1) * BATCH_SIZE_DBG),
+        cycleCompletesIn: `${((totalBatches - (esportsBatchCursor % totalBatches)) * ttlHours)}h`,
+      },
       lastApiResponse: lastApiResponse.slice(0, 300),
-      // Mostra todos os slugs para diagnóstico de matching
       slugs: cacheEntries.map(([k, v]) => ({
         slug: v.combinedSlug || norm(v.t1Name || '') + norm(v.t2Name || ''),
         t1: v.t1,
