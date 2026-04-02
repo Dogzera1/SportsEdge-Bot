@@ -21,7 +21,7 @@ const PANDASCORE_TOKEN = process.env.PANDASCORE_TOKEN || '';
 
 // DB_PATH allows pointing to a Railway volume (e.g. /data/sportsedge.db)
 const fs = require('fs');
-let DB_PATH = process.env.DB_PATH || 'sportsedge.db';
+let DB_PATH = (process.env.DB_PATH || 'sportsedge.db').trim().replace(/^=+/, '');
 // Ensure the directory exists — fall back to local path if creation fails (no volume mounted)
 try {
   const dbDir = path.dirname(path.resolve(DB_PATH));
@@ -220,20 +220,40 @@ async function fetchEsportsOdds() {
   esportsOddsFetching = true;
   lastApiResponse = 'Iniciando busca...';
   try {
-    const tids = await getEsportsTournamentIds();
+    let tids = await getEsportsTournamentIds();
+    log('DEBUG', 'ODDS', `getEsportsTournamentIds() retornou ${Array.isArray(tids) ? tids.length : typeof tids} IDs`);
+
+    // Safety: garante array válido de IDs inteiros
+    if (!Array.isArray(tids) || tids.length === 0) {
+      log('WARN', 'ODDS', 'Lista de torneios inválida/vazia — usando LOL_ACTIVE_TIDS como fallback direto');
+      tids = LOL_ACTIVE_TIDS;
+      cachedEsportsTids = LOL_ACTIVE_TIDS;
+    }
 
     // Round-robin: divide em lotes e busca APENAS UM lote por ciclo TTL.
     // Isso evita o 429 do OddsPapi (plano free ≈ 250 req/mês).
     // O cursor avança a cada ciclo; todos os torneios são cobertos em N ciclos.
-    const BATCH_SIZE = parseInt(process.env.ODDSPAPI_BATCH_SIZE || '3');
+    const BATCH_SIZE = Math.max(1, parseInt(process.env.ODDSPAPI_BATCH_SIZE || '3') || 3);
     const batches = [];
     for (let i = 0; i < tids.length; i += BATCH_SIZE) {
       batches.push(tids.slice(i, i + BATCH_SIZE));
     }
 
+    // Safety: se batches vazio ou batch inválido, usa fallback
+    if (!batches.length) {
+      log('WARN', 'ODDS', 'batches vazio após split — usando LOL_ACTIVE_TIDS completo');
+      batches.push(LOL_ACTIVE_TIDS.slice(0, BATCH_SIZE));
+    }
+
     const batchIndex = esportsBatchCursor % batches.length;
     esportsBatchCursor++;
-    const batch = batches[batchIndex];
+    let batch = batches[batchIndex];
+
+    // Safety: batch deve ter IDs válidos
+    if (!batch || !batch.length) {
+      log('WARN', 'ODDS', `Batch[${batchIndex}] vazio — usando primeiro lote de LOL_ACTIVE_TIDS`);
+      batch = LOL_ACTIVE_TIDS.slice(0, BATCH_SIZE);
+    }
 
     log('INFO', 'ODDS', `Buscando odds: lote ${batchIndex+1}/${batches.length} tids=[${batch.join(',')}] (round-robin)`);
 
