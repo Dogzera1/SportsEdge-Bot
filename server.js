@@ -1779,8 +1779,8 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, () => {
-  log('INFO', 'SERVER', `SportsEdge API em http://localhost:${PORT}`);
+server.listen(PORT, '0.0.0.0', () => {
+  log('INFO', 'SERVER', `SportsEdge API em http://0.0.0.0:${PORT}`);
   log('INFO', 'SERVER', `Esportes: LoL, Dota (API) | MMA (scraper opcional)`);
 
   // Inicialização e Loop de Cache de Odds (OddsPapi 1xBet)

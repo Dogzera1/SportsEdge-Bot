@@ -6,8 +6,8 @@ const { SPORTS, getSportById, getSportByToken, getTokenToSportMap } = require('.
 const { log, calcKelly, norm, fuzzyName, fmtDate, fmtDateTime, fmtDuration, httpGet, httpsPost, safeParse } = require('./lib/utils');
 const { esportsPreFilter } = require('./lib/ml');
 
-const SERVER = 'localhost';
-const PORT = parseInt(process.env.PORT) || 3000;
+const SERVER = '127.0.0.1';
+const PORT = parseInt(process.env.SERVER_PORT) || parseInt(process.env.PORT) || 8080;
 const ADMIN_IDS = new Set((process.env.ADMIN_USER_IDS || '').split(',').filter(Boolean));
 const CLAUDE_KEY = process.env.CLAUDE_API_KEY;
 
@@ -2659,7 +2659,7 @@ async function poll(token, sport) {
     }
     
     const backoff = consecutiveErrors > 0
-      ? Math.min(500 * Math.pow(2, consecutiveErrors), MAX_BACKOFF)
+      ? Math.min(500 * Math.pow(2, consecutiveErrors), 10000)
       : 500;
     setTimeout(loop, backoff);
   }
