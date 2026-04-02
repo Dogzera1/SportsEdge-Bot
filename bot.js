@@ -625,16 +625,26 @@ async function fetchLatestPatchMeta() {
     const patchShort = latestFull.split('.').slice(0, 2).join('.'); // "15.6"
 
     const currentMeta = process.env.LOL_PATCH_META || '';
-    if (currentMeta.includes(`Patch ${patchShort}`)) {
-      log('INFO', 'PATCH', `Patch ${patchShort} já está no contexto — sem atualização`);
+    const metaAge = getPatchMetaAgeDays();
+
+    // Se o usuário já configurou manualmente E a data é recente (< 14 dias) → não sobrescreve
+    if (currentMeta && metaAge !== null && metaAge < 14) {
+      log('INFO', 'PATCH', `Meta manual configurado (${metaAge}d) — auto-detect ignorado (ddragon: ${patchShort})`);
       return;
     }
 
+    // Se o meta já menciona a versão do ddragon → nada a fazer
+    if (currentMeta.includes(patchShort)) {
+      log('INFO', 'PATCH', `Patch ${patchShort} já no contexto — sem atualização`);
+      return;
+    }
+
+    // Só chega aqui se: meta vazio OU meta com > 14 dias sem atualização
     const prevMeta = currentMeta || '(não definido)';
     const patchNotesUrl = `https://www.leagueoflegends.com/en-us/news/game-updates/patch-${patchShort.replace('.', '-')}-notes/`;
     process.env.LOL_PATCH_META = `Patch ${patchShort} (auto-detectado — revise buffs/nerfs relevantes)`;
     process.env.PATCH_META_DATE = new Date().toISOString().slice(0, 10);
-    lastPatchAlert = 0; // reseta alerta de stale para não notificar logo após a atualização
+    lastPatchAlert = 0;
 
     log('INFO', 'PATCH', `Novo patch auto-detectado: ${patchShort} (anterior: ${prevMeta.slice(0, 40)})`);
 
