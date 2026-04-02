@@ -17,7 +17,7 @@ if (!CLAUDE_KEY && !DEEPSEEK_KEY) {
   process.exit(1);
 }
 
-const DB_PATH = process.env.DB_PATH || 'sportsedge.db';
+const DB_PATH = (process.env.DB_PATH || 'sportsedge.db').trim().replace(/^=+/, '');
 const { db, stmts } = initDatabase(DB_PATH);
 
 // ── Bot Instances ──
