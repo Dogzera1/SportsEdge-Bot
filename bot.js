@@ -234,9 +234,11 @@ async function runAutoAnalysis() {
   if (esportsConfig?.enabled) {
     try {
       const lolRaw = await serverGet('/lol-matches').catch(() => []);
-      const lolLive = Array.isArray(lolRaw) ? lolRaw.filter(m => m.status === 'live') : [];
+      // Inclui 'draft': composições já disponíveis na API Riot antes do jogo começar.
+      // Permite análise com draft real + odds pré-jogo (antes de cair para odds ao vivo).
+      const lolLive = Array.isArray(lolRaw) ? lolRaw.filter(m => m.status === 'live' || m.status === 'draft') : [];
       const allLive = lolLive;
-      log('INFO', 'AUTO', `LoL: ${lolRaw?.length||0} partidas (${allLive.length} ao vivo) | inscritos=${subscribedUsers.size}`);
+      log('INFO', 'AUTO', `LoL: ${lolRaw?.length||0} partidas (${allLive.filter(m=>m.status==='live').length} live, ${allLive.filter(m=>m.status==='draft').length} draft) | inscritos=${subscribedUsers.size}`);
 
       for (const match of allLive) {
         const matchKey = `${match.game}_${match.id}`;
@@ -266,12 +268,18 @@ async function runAutoAnalysis() {
             confidence: result.tipMatch[5]?.trim() || 'MÉDIA', isLive: result.hasLiveStats
           }, 'esports');
 
+          const isDraft = match.status === 'draft';
+          const analysisLabel = result.hasLiveStats
+            ? '📊 Baseado em dados ao vivo'
+            : isDraft
+              ? '📋 Análise de draft (composições conhecidas, jogo ainda não iniciado)'
+              : '📋 Análise pré-jogo';
           const tipMsg = `${gameIcon} 💰 *TIP ML AUTOMÁTICA*\n` +
             `*${match.team1}* ${match.score1}-${match.score2} *${match.team2}*\n\n` +
             `🎯 Aposta: *${tipTeam}* ML @ *${tipOdd}*\n` +
             `📈 EV: *${tipEV}*\n💵 Stake: *${tipStake}* _(¼ Kelly)_\n` +
             `📋 ${match.league}\n` +
-            `_${result.hasLiveStats ? '📊 Baseado em dados ao vivo' : '📋 Análise pré-jogo'}_` +
+            `_${analysisLabel}_` +
             `${oddsLabel}\n\n` +
             `⚠️ _Aposte com responsabilidade._`;
 

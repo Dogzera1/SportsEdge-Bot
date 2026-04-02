@@ -1,36 +1,49 @@
-# 🎮 SportsEdge Unified Bot (Esports)
+# LoL Betting Bot
 
-*Bot autônomo de Telegram para automação de análise de apostas esportivas baseada em Valor Esperado (EV) e Kelly Criterion usando a IA Claude.*
+Bot autônomo de Telegram para análise automática de apostas em **League of Legends**, baseado em Valor Esperado (EV) e Kelly Criterion, alimentado pela IA Claude da Anthropic.
 
-> **✅ Sistema Verificado (Abril 2026):** O sistema agora opera *exclusivamente* para Esports (LoL e Dota 2) utilizando a infraestrutura da **The Odds API** (plano pago, sem gargalos de rate-limit legados da antiga OddsPapi). Os botões de menu e handlers de próximas partidas estão estáveis e apontando nativamente para as APIs da Riot e OpenDota. Incluído um novíssimo **Motor de Machine Learning Local** operando por regressão logística heurística em JavaScript, economizando requisições LLM dispendiosas por agir como pre-filter contra partidas matematicamente esgotadas.
+> **Status (Abril 2026):** Sistema operando exclusivamente para LoL. Odds via **OddsPapi v4** (1xBet, plano free 250 req/mês) com sistema **round-robin** que busca um lote de torneios por ciclo, evitando rate-limit. Análise automática ao vivo e pré-jogo funcional. Ligas europeias secundárias (Prime League, HLL, Road of Legends, LIT) cobertas a partir do 2° ciclo (~3h após startup).
 
-## 🏗 Arquitetura
+---
+
+## Arquitetura
 
 ```
-┌──────────────────────────────────────────────────┐
-│                  bot.js (launcher)               │
-│            ┌────────────────────┐                │
-│            │   Esports Bot 🎮   │                │
-│            │   (LoL + Dota 2)   │                │
-│            └─────────┬──────────┘                │
-│              Polling loop + backoff              │
-└─────────────────────┬────────────────────────────┘
-                      │ HTTP localhost:3000
-┌─────────────────────▼────────────────────────────┐
-│           server.js (API Aggregator)             │
-│                                                  │
-│  /lol-matches  /dota-matches  /live-game         │
-│  /ps-compositions  /dota-live  /match-result     │
-│  /record-tip  /settle-tip  /claude               │
-│  /roi  /tips-history  /db-status  /users         │
-│                                                  │
-│  📦 sportsedge.db (SQLite)                       │
-│  users | events | matches | tips                 │
-│  odds_history | match_results                    │
-└──────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────┐
+│                  start.js                    │
+│       spawna server + bot com                │
+│       auto-restart em falha                  │
+└──────────┬───────────────────────────────────┘
+           │
+┌──────────▼───────────────────────────────────┐
+│           bot.js — Telegram Bot              │
+│                                              │
+│  • Polling contínuo + backoff exponencial    │
+│  • Auto-análise ao vivo (ciclo de 6 min)     │
+│  • Auto-análise pré-jogo (próximas 24h)      │
+│  • Alertas de draft e line movement          │
+│  • Settlement automático de tips             │
+└──────────┬───────────────────────────────────┘
+           │ HTTP localhost:PORT
+┌──────────▼───────────────────────────────────┐
+│         server.js — API Aggregator           │
+│                                              │
+│  Fontes de partidas:                         │
+│    Riot / LoL Esports API                    │
+│    PandaScore API                            │
+│                                              │
+│  Odds:                                       │
+│    OddsPapi v4 — 1xBet (round-robin)         │
+│                                              │
+│  Análise IA:                                 │
+│    Anthropic Claude (claude-sonnet-4-6)      │
+│    Pré-filtro ML local (lib/ml.js)           │
+│                                              │
+│  sportsedge.db (SQLite)                      │
+│  users | events | matches | tips             │
+│  odds_history | match_results                │
+└──────────────────────────────────────────────┘
 ```
-
-Um único processo Node.js executa o bot com polling contínuo e backoff exponencial.
 
 ---
 
@@ -38,42 +51,45 @@ Um único processo Node.js executa o bot com polling contínuo e backoff exponen
 
 - Node.js 18+
 - Bot Telegram criado via [@BotFather](https://t.me/BotFather)
-- Chave Claude API (Anthropic)
-- OddsPapi key — odds esports LoL + Dota 2/Pinnacle ([oddspapi.io](https://oddspapi.io), 250 req/mês free)
-- LoL Esports API key (Riot)
-- PandaScore token — torneios não-Riot, schedules e stats
+- Chave da API Anthropic Claude
+- Chave da LoL Esports API (Riot Games)
+- Token PandaScore — torneios fora da Riot (schedules + stats)
+- Chave OddsPapi — odds esports LoL via 1xBet ([oddspapi.io](https://oddspapi.io), plano free: 250 req/mês)
 
 ---
 
-## Configuração
+## Configuração (`.env`)
 
 ```env
 # ── Telegram ──
-TELEGRAM_TOKEN_ESPORTS=seu_token_esports
+TELEGRAM_TOKEN_ESPORTS=seu_token_bot
 
 # ── APIs ──
-CLAUDE_API_KEY=sk-ant-api03-...            # Anthropic Claude (claude-sonnet-4-6)
-LOL_API_KEY=sua_chave_lol                  # LoL Esports (Riot)
-ODDS_API_KEY=sua_chave_oddspapi            # Esports odds — LoL + Dota 2 (oddspapi.io, 250 req/mês free)
-PANDASCORE_TOKEN=seu_token                 # PandaScore — torneios não-Riot (schedules + stats)
+CLAUDE_API_KEY=sk-ant-api03-...          # Anthropic Claude
+LOL_API_KEY=sua_chave_lol                # LoL Esports API (Riot Games)
+ODDS_API_KEY=sua_chave_oddspapi          # OddsPapi v4 (aceita também: ODDSPAPI_KEY)
+PANDASCORE_TOKEN=seu_token               # PandaScore
 
 # ── Servidor ──
-SERVER_PORT=3000
-DB_PATH=sportsedge.db                      # Railway: use /data/sportsedge.db com volume montado
+SERVER_PORT=8080
+DB_PATH=sportsedge.db                    # Railway: use /data/sportsedge.db com volume montado
 
 # ── Admin ──
-# Obrigatório: ID numérico do Telegram (obtenha via @userinfobot)
-# O admin é inscrito automaticamente em esports a cada restart
-ADMIN_USER_IDS=123456789,987654321
+ADMIN_USER_IDS=123456789,987654321       # IDs numéricos Telegram (obtenha via @userinfobot)
+                                         # O admin é inscrito automaticamente a cada boot
 
 # ── Feature flags ──
 ESPORTS_ENABLED=true
 
-# ── LoL — ligas extras (slugs adicionais além da whitelist interna) ──
-LOL_EXTRA_LEAGUES=cd,north_regional_league  # opcional; separado por vírgula
+# ── OddsPapi — ajuste fino (opcional) ──
+ODDSPAPI_BATCH_SIZE=3                    # Torneios por requisição (padrão: 3)
+ESPORTS_ODDS_TTL_H=3                     # Horas entre ciclos round-robin (padrão: 3h)
 
-# ── Meta LoL (atualizar a cada patch — afeta qualidade da análise) ──
-LOL_PATCH_META=Patch 26.X — descrição do meta atual
+# ── LoL — ligas extras além da whitelist interna ──
+LOL_EXTRA_LEAGUES=slug1,slug2            # opcional, separado por vírgula
+
+# ── Meta LoL (atualizar a cada patch para melhorar qualidade da análise) ──
+LOL_PATCH_META=Patch 25.X — descrição do meta atual
 PATCH_META_DATE=YYYY-MM-DD
 ```
 
@@ -85,210 +101,244 @@ PATCH_META_DATE=YYYY-MM-DD
 npm install
 npm start           # inicia servidor + bot via start.js
 
-# Ou separadamente (servidor DEVE iniciar primeiro)
-npm run server      # node server.js  →  porta configurada em SERVER_PORT
-npm run bot         # node bot.js     →  polling do bot esports
+# Ou separadamente (servidor DEVE iniciar antes)
+npm run server      # node server.js
+npm run bot         # node bot.js
 ```
 
 ### Deploy no Railway
 
-1. Faça push para o repositório GitHub vinculado ao projeto Railway
-2. Configure as variáveis de ambiente no painel **Variables** do Railway
-3. Para persistência do banco entre redeploys, crie um volume e defina `DB_PATH=/data/sportsedge.db`
-4. O `start.js` gerencia os dois processos (server + bot) com auto-restart em caso de falha
-5. Configure `ADMIN_USER_IDS` com seu ID do Telegram — o admin é inscrito automaticamente em esports a cada boot
-
-> O `railway.toml` já está configurado com healthcheck TCP na porta 3000 e restart policy `on_failure`.
+1. Push para o repositório GitHub vinculado ao Railway
+2. Configure as variáveis de ambiente no painel **Variables**
+3. Para persistência do banco entre redeploys: crie um Volume e defina `DB_PATH=/data/sportsedge.db`
+4. O `start.js` gerencia os dois processos com auto-restart em falha
+5. Configure `ADMIN_USER_IDS` com seu ID do Telegram — o admin é inscrito automaticamente a cada boot
+6. O `railway.toml` já está configurado com healthcheck TCP e restart policy `on_failure`
 
 ---
 
 ## Interface do Bot
 
-O bot opera em **modo automático**. O usuário interage apenas com os botões do menu:
+O bot opera em **modo totalmente automático**. O usuário interage pelos botões do menu:
 
 | Botão / Comando | Função |
 |---|---|
-| `🔔 Notificações` | Ativa/desativa recebimento de tips automáticas por DM |
-| `📊 Tracking` | Exibe acertos, ROI, profit, calibração, split pré-jogo vs ao vivo |
-| `📅 Próximas` | Lista partidas ao vivo e próximas 48h |
-| `❓ Ajuda` | Explica como o bot funciona |
-| `/tracking` | Mesmo que o botão Tracking |
-| `/meustats` | Resumo rápido de performance (win rate, ROI) |
+| `Notificações` | Ativa/desativa recebimento de tips automáticas por DM |
+| `Tracking` | Exibe ROI, win rate, profit, calibração, split ao vivo vs pré-jogo |
+| `Próximas` | Lista partidas ao vivo e próximas com odds quando disponíveis |
+| `Ajuda` | Explica como o bot funciona |
 
 ### Comandos Admin
 
 | Comando | Função |
 |---|---|
-| `/stats` | ROI total, calibração por confiança, histórico de tips |
+| `/stats` | ROI total, calibração por confiança (ALTA/MÉDIA/BAIXA), histórico de tips |
 | `/users` | Status do banco de dados |
 | `/pending` | Tips pendentes de settlement |
 | `/settle` | Força settlement imediato |
-| `/force-analyze [id]` | Força re-análise de uma partida |
-| `/slugs` | Lista slugs LoL reconhecidos e desconhecidos (diagnóstico) |
-| `/lolraw` | Dump completo do schedule LoL por liga (diagnóstico) |
+| `/slugs` | Slugs de liga reconhecidos + desconhecidos vistos (diagnóstico) |
+| `/lolraw` | Dump do schedule Riot por liga (diagnóstico) |
 
 ---
 
-## Ciclos Automáticos — Esports (LoL + Dota 2)
+## Ciclos Automáticos
 
-- **Auto-análise ao vivo** a cada 6 min: analisa partidas `live` com dados de gold, composições, KDA e objetivos em tempo real; re-análise a cada 10 min por partida
-- **Auto-análise pré-jogo** a cada 6 min: analisa partidas `upcoming` nas **próximas 24h** — exige odds de mercado reais; se ainda não houver odds, aguarda 30 min e tenta novamente
-- **Notificação ao vivo** (a cada 1 min): avisa inscritos quando draft começa (🟡) e quando a partida vai ao vivo (🔴)
-- **Line movement** (a cada 30 min): alerta quando odds mudam ≥ 10%
-- **Patch meta stale** (a cada 24h): alerta admins se `LOL_PATCH_META` não foi atualizado há >14 dias
-- **Settlement** (a cada 30 min): via LoL Esports API e OpenDota API
+| Ciclo | Intervalo | Descrição |
+|---|---|---|
+| Auto-análise | 6 min | Analisa partidas `live` e `upcoming` nas próximas 24h |
+| Re-análise ao vivo | 10 min | Re-analisa a mesma partida ao vivo enquanto sem tip enviada |
+| Re-análise pré-jogo | 30 min | Re-tenta partidas upcoming que ainda não têm odds |
+| Notificação ao vivo | 1 min | Avisa sobre draft iniciado e partida ao vivo |
+| Line movement | 30 min | Alerta se odds mudaram >= 10% desde o último snapshot |
+| Settlement | 30 min | Resolve tips pendentes via Riot API e PandaScore |
+| Patch meta stale | 24h | Avisa admins se `LOL_PATCH_META` não foi atualizado há mais de 14 dias |
+| Fetch de odds | 3h (configurável) | Round-robin: busca 1 lote de 3 torneios por ciclo |
+
+---
+
+## Sistema de Odds — OddsPapi Round-Robin
+
+Com 250 req/mês no plano free (~8 req/dia), as odds são buscadas em ciclos de 3h. Cada ciclo cobre **um lote diferente** de torneios, ciclando pelos 6 lotes. Todos os torneios são cobertos em ~18h.
+
+### Ordem dos Lotes
+
+| Lote | Ligas cobertas | Quando busca |
+|------|----------------|--------------|
+| 1 | LCS, LEC, LCK | Startup |
+| 2 | Prime League (DE), Hellenic Legends League (GR), Road of Legends (PT) | +3h |
+| 3 | LIT/LES (IT/ES), Finnish Pro League, EMEA Masters | +6h |
+| 4 | CBLOL (BR), NACL, LPL (CN) | +9h |
+| 5 | LCK CL, LCP (APAC), LRN | +12h |
+| 6 | LRS, Esports World Cup | +15h |
+
+O cursor do round-robin é visível em `/debug-odds` no campo `roundRobin`.
+
+### Matching de Times
+
+A OddsPapi v4 não retorna nomes de times nos campos padrão — os nomes estão embutidos na URL de fixture do bookmaker (ex: `315638638-cloud9-lyon-gaming`). O sistema extrai o "combined slug" da URL, normaliza (minúsculo, sem caracteres especiais) e usa correspondência de substring. Um dicionário de aliases cobre variações de nome:
+
+```
+"BNK FEARX" → norm "bnkfearx" → alias key "fearx" → encontra "fearxhanjinbrion"
+"Gen.G Esports" → norm "gengesports" → alias key "geng" → variante "gen" → encontra "gengktrolster"
+```
 
 ---
 
 ## Sistema de Análise IA
 
-### Fluxo Automático
+### Fluxo Completo
 
-1. Ciclo detecta partida elegível (`live` ou `upcoming` ≤24h)
-2. Coleta em paralelo: stats ao vivo (se disponíveis), odds de mercado (OddsPapi/Pinnacle), forma recente, H2H, line movement
-3. **Gate de odds pré-jogo**: se não houver odds reais, a partida é marcada como `waitingOdds` e re-verificada em 30 min — o Claude **nunca** é chamado sem odds (análise sem mercado tem divergência esperada de 15–20pp, tornando-a estruturalmente pouco fiável)
-4. Para LoL: busca composições e stats ao vivo (Riot API ou PandaScore para torneios não-Riot) + patch meta atual
-5. Monta prompt com **raciocínio em duas etapas**: estimativa cega de probabilidade → comparação com odds de mercado
-6. Claude declara probabilidade antes de ver as odds, depois verifica se há edge real (gate de 3pp)
-7. **Fair odds = `1/probabilidade`** (sem juice) — tip emitida se EV ≥ 2%
-8. Tip registrada no banco + enviada por DM a todos os inscritos (¼ Kelly)
-9. **Uma tip por partida**: flag `tipSent` pré-populada de `/unsettled-tips` ao boot impede duplicados após redeploy
+```
+1. Ciclo detecta partida elegível (live ou upcoming <= 24h)
+   |
+2. Coleta em paralelo:
+   |-- Odds do cache OddsPapi (via /odds?team1=X&team2=Y)
+   |-- Contexto ao vivo: composições, gold, kills, dragões,
+   |   barões, torres (Riot API ou PandaScore)
+   |-- Forma recente dos times (últimas partidas no banco)
+   |-- Histórico H2H
+   |-- Movimentação de linha (variação de odds)
+   |
+3. Pré-filtro ML local (lib/ml.js)
+   -> Regressão logística heurística em JavaScript puro
+   -> Se sem edge matemático: pula o Claude (economiza créditos)
+   |
+4. Prompt estruturado em 2 etapas para o Claude:
+   |-- ETAPA 1: Estimativa cega de probabilidade (draft/forma)
+   |-- ETAPA 2: Comparação com odds de mercado -> cálculo de EV
+   |
+5. Claude (claude-sonnet-4-6) retorna:
+   |-- TIP_ML:[time]@[odd]|EV:[%]|STAKE:[u]|CONF:[ALTA/MÉDIA/BAIXA]
+   |-- FAIR_ODDS:[time1]=[X.XX]|[time2]=[X.XX]  (quando sem odds reais)
+   |
+6. Se TIP_ML com EV >= +2%: envia DM a todos os inscritos
+   Se só FAIR_ODDS: envia "odds de referência" sem tip formal
+   |
+7. Registra no banco SQLite + marca tipSent=true (evita duplicatas após redeploy)
+```
 
-### Prompts LoL vs Dota 2
+### Tipos de Tips
 
-| Jogo | Foco principal |
-|---|---|
-| LoL | Composições, gold ao vivo, torres, dragões, patch meta, formato Bo |
-| Dota 2 | Gold diff, Roshan/Aegis, barracks, itens-chave, tempo de jogo |
+| Tipo | Dispara quando | Dados usados | Label na mensagem |
+|------|---------------|--------------|-------------------|
+| Ao vivo | `status = live` | Composições + Gold + KDA + Objetivos (~90s delay) | `TIP ML AUTOMÁTICA` |
+| Pré-jogo | `upcoming` nas próximas 24h | Forma histórica + H2H + odds de mercado | `TIP PRÉ-JOGO ESPORTS` |
+
+Uma tip por partida — o flag `tipSent` é salvo no banco e recarregado no boot, evitando duplicatas após redeploy.
 
 ### Proteções Anti-Viés
 
-- **"Sem edge" é uma resposta válida** — instrução explícita para não forçar recomendação
-- **Gate de 3pp** — se a estimativa do Claude diferir das odds implícitas em <3pp, retorna "SEM EDGE"
-- **Line movement como sinal contrário** — instrução para ajustar probabilidade 2-3pp na direção do mercado
-- **Desconto de alto fluxo** — jogos com <15 min ou objetivo maior recente rebaixam confiança para BAIXA automaticamente
+| Proteção | Mecanismo |
+|---|---|
+| "Sem edge" é resposta válida | Instrução explícita no prompt para não forçar recomendação |
+| Gate de 3pp | Se estimativa do Claude divergir das odds implícitas em <3pp: retorna "SEM EDGE" |
+| Line movement | Instrução para ajustar probabilidade 2-3pp na direção do mercado quando linha se mover |
+| Alto fluxo | Jogos com <15 min ou objetivo maior recente (Baron, Elder) rebaixam confiança para BAIXA automaticamente |
+| Sem odds reais | Sem odds de mercado, tip só emitida com convicção >65% e múltiplos fatores favoráveis |
 
-### Tips Pré-Jogo — Nota sobre Draft
+### Nota sobre Tips Pré-Jogo
 
-Tips `upcoming` são baseadas exclusivamente em **forma histórica e H2H** — sem acesso ao draft, que só fica disponível quando a partida começa. As mensagens incluem o aviso:
+Tips `upcoming` são baseadas em forma histórica e H2H — sem acesso ao draft, disponível apenas quando a série começa. As mensagens incluem o aviso:
 
 > _Análise pré-draft: baseada em forma e histórico (sem acesso às comps)_
 
-O tracking exibe resultados separados por fase (**ao vivo vs pré-jogo**) para avaliação empírica de ROI ao longo do tempo.
+O tracking exibe resultados separados por fase (ao vivo vs pré-jogo) para avaliação empírica de ROI.
 
 ### Kelly Criterion (¼ Kelly)
 
 ```
-f* = EV / (odds − 1)
+f* = EV / (odds - 1)
 stake = clamp(f* × 0.25, 0.5u, 4u)  arredondado a 0.5u
 ```
 
 ---
 
-## Cobertura — Fontes de Partidas
+## Cobertura de Ligas
 
-### LoL
+### Partidas (Riot API + PandaScore)
 
-**Riot / LoL Esports API** — ligas oficiais:
-Worlds, MSI, LCS, LCK, LEC, LPL, CBLOL, LLA, PCS, LCO, VCS, LJL, EMEA Masters, LFL, NLC, LTA Norte/Sul, First Stand e ligas regionais.
+| Tier | Ligas |
+|------|-------|
+| T1 — Global | Worlds, MSI |
+| T1 — Regionais | LCS, LCK, LEC, LPL, CBLOL, LLA, PCS, LCO, VCS, LJL, LCP |
+| T2 — Europa | EMEA Masters, LFL, NLC, Prime League (DE), Hellenic Legends League (GR), LIT (IT), LES (ES), Road of Legends (PT), Finnish Pro League, EBL |
+| T2 — Americas | LTA Norte, LTA Sul, NACL, Circuito Desafiante |
+| T2 — Asia | LCK CL, LDL, LRN, LRS |
+| EWC | Esports World Cup e qualificatórias |
 
-**PandaScore** — torneios não transmitidos pela Riot (ex: qualificatórias EWC, ligas regionais independentes). IDs prefixados com `ps_` internamente.
+Ligas adicionais podem ser habilitadas via `LOL_EXTRA_LEAGUES` no `.env`.
 
-**Stats ao vivo:**
-- Gold total por time com trajetória
+### Stats ao Vivo (LoL)
+
+- Gold total por time com trajetória por minuto
 - Torres, dragões (com tipos), barões, inibidores, kills
-- KDA, gold e CS por jogador com nome do invocador
+- KDA, gold e função (TOP/JGL/MID/ADC/SUP) por jogador
 - ~90s de delay na API oficial da Riot
-
-### Dota 2
-
-Partidas tier 1 via OpenDota API — gold diff, Roshan/Aegis, barracks, itens-chave, estado ao vivo.
-
-### Odds
-
-**The Odds API** — fonte única de odds para esports. Fornece Pinnacle e outros bookmakers principais para LoL (`leagueoflegends_lol`) e Dota 2 (`dota2_dota2`). O sistema tenta usar Pinnacle (sharp book) como referência de EV sempre que possível, fazendo fallback para outros bookmakers se necessário.
-
-A cota é flexível de acordo com o plano pago adotado, e consultas são enviadas para `api.the-odds-api.com`. Como a API foi atualizada para um plano pago, as limitações rígidas de rate-limit gratuito (como as do OddsPapi antigo) foram flexibilizadas.
-
-Para adicionar ligas extras além da whitelist interna, use `LOL_EXTRA_LEAGUES` no `.env`.
+- PandaScore como fonte alternativa para torneios não transmitidos pela Riot
 
 ---
 
 ## Settlement Automático
 
-| Jogo | Fonte de resultado | Frequência |
-|---|---|---|
-| LoL | LoL Esports API (`/getSchedule`) | 30 min |
-| Dota 2 | OpenDota API (`/api/matches/{id}`) | 30 min |
+| Fonte | Frequência |
+|-------|-----------|
+| LoL Esports API (`/getSchedule`) | 30 min |
+| PandaScore | 30 min |
 
 ---
 
-## Alertas Automáticos
+## Rotas do Servidor
 
-| Alerta | Intervalo | Destinatários |
-|---|---|---|
-| Partida LoL ao vivo / draft iniciado | 1 min | Inscritos esports |
-| Line movement ≥ 10% | 30 min | Inscritos esports |
-| Patch meta desatualizado (>14d) | 24h | Admins |
+### Partidas e Odds
+
+| Rota | Descrição |
+|------|-----------|
+| `GET /lol-matches` | Combina Riot API + PandaScore; inclui odds quando disponíveis no cache |
+| `GET /odds?team1=X&team2=Y` | Busca odds do cache para um par de times |
+| `GET /live-gameids?matchId=X` | IDs dos games em andamento numa série Riot |
+| `GET /live-game?gameId=X` | Stats ao vivo: gold, torres, dragões, kills, players |
+| `GET /ps-compositions?matchId=ps_X` | Composições e stats via PandaScore (prefix `ps_`) |
+| `GET /match-result?matchId=X&game=X` | Resultado final de uma partida |
+
+### Tips e Banco
+
+| Rota | Descrição |
+|------|-----------|
+| `POST /record-tip` | Registrar tip no banco |
+| `POST /settle-tip` | Liquidar tip por vencedor |
+| `GET /unsettled-tips` | Tips aguardando resultado |
+| `GET /tips-history` | Histórico de tips com filtros |
+| `GET /roi` | ROI total, calibração por confiança, split ao vivo/pré-jogo |
+| `GET /team-form?team=X&game=X` | Forma recente do time |
+| `GET /h2h?team1=X&team2=Y&game=X` | Histórico H2H |
+| `GET /odds-movement` | Variação de odds nas últimas 24h |
+| `GET /db-status` | Contagem de registros por tabela |
+| `GET /users` | Listar usuários |
+| `POST /save-user` | Criar/atualizar usuário |
+| `POST /claude` | Proxy para Anthropic API |
+
+### Diagnóstico
+
+| Rota | O que retorna |
+|------|--------------|
+| `GET /debug-odds` | Cache completo de odds: slugs, TTL, backoff restante, estado do round-robin (`cursor`, `nextBatch`, `totalBatches`, `nextTids`, `cycleCompletesIn`) |
+| `GET /debug-teams` | Todos os times do schedule (Riot + PandaScore) com `team1norm`, `team2norm`, `hasOdds` e `league` — permite identificar mismatches de nome |
+| `GET /debug-match-odds?team1=X&team2=Y` | Testa matching de odds para um par específico, mostrando variantes e aliases verificados |
+| `GET /lol-slugs` | Slugs de liga reconhecidos na whitelist + slugs desconhecidos vistos no schedule |
+| `GET /lol-raw` | Dump bruto do schedule Riot por liga |
 
 ---
 
 ## Banco de Dados (`sportsedge.db`)
 
 | Tabela | Conteúdo |
-|---|---|
+|--------|---------|
 | `users` | user_id, username, subscribed, sport_prefs (JSON array) |
-| `events` | eventos/torneios com `sport = 'esports'` |
-| `matches` | confrontos com resultado pós-jogo |
-| `tips` | tips registradas: odds, EV, stake, confidence, resultado |
-| `odds_history` | snapshots de odds (14 dias) para detecção de line movement |
-| `match_results` | histórico de resultados para forma/H2H |
-
----
-
-## Rotas do Servidor
-
-### Gerais
-
-| Rota | Método | Descrição |
-|---|---|---|
-| `/record-tip` | POST | Registrar tip no banco |
-| `/settle-tip?sport=esports` | POST | Liquidar tip por vencedor |
-| `/unsettled-tips?sport=esports` | GET | Tips aguardando resultado |
-| `/roi?sport=esports` | GET | ROI total, calibração e split pré-jogo/ao vivo |
-| `/tips-history?sport=esports` | GET | Histórico de tips |
-| `/db-status?sport=esports` | GET | Contagem por tabela |
-| `/save-user` | POST | Criar/atualizar usuário |
-| `/users?subscribed=1` | GET | Listar usuários |
-| `/claude` | POST | Proxy para Anthropic API (`claude-sonnet-4-6`) |
-
-### Esports
-
-| Rota | Descrição |
-|---|---|
-| `/lol-matches` | Partidas LoL — combina Riot API + PandaScore (ao vivo, draft, próximas) |
-| `/dota-matches` | Partidas Dota 2 tier 1 |
-| `/live-gameids?matchId=X` | IDs de games em andamento numa série Riot |
-| `/live-game?gameId=X` | Stats ao vivo de um game LoL (gold, torres, players) |
-| `/ps-compositions?matchId=ps_X` | Composições e stats de partida PandaScore (`ps_` prefix) |
-| `/dota-live?matchId=X` | Estado ao vivo Dota (gold diff, kills, heroes) |
-| `/dota-match-detail?matchId=X` | Detalhes avançados Dota (Roshan, barracks, itens) |
-| `/match-result?matchId=X&game=X` | Resultado final de uma partida |
-| `/lol-slugs` | Slugs LoL na whitelist + desconhecidos vistos (diagnóstico) |
-| `/lol-raw` | Dump completo do schedule Riot por liga (diagnóstico) |
-
----
-
-## Fontes de Dados
-
-| Fonte | Uso |
-|---|---|
-| LoL Esports API (`esports-api.lolesports.com`) | Calendário, séries, placar LoL |
-| LoL Live Stats Feed (`feed.lolesports.com`) | Stats ao vivo com delay ~90s |
-| PandaScore API | Torneios não-Riot (ex: EWC Qualifier, ligas regionais), schedules e stats |
-| OddsPapi (`oddspapi.io`) | Odds Pinnacle para LoL (sportId=18) e Dota 2 (sportId=16) |
-| OpenDota API | Partidas ao vivo, resultados e stats Dota 2 |
-| Anthropic Claude (`claude-sonnet-4-6`) | Análise de matchup via proxy `/claude` |
+| `events` | Torneios/eventos com sport = 'esports' |
+| `matches` | Confrontos com resultado pós-jogo |
+| `tips` | Tips: odds, EV, stake, confidence, resultado, isLive |
+| `odds_history` | Snapshots de odds (14 dias) para detecção de line movement |
+| `match_results` | Histórico de resultados para forma recente e H2H |
 
 ---
 
@@ -296,25 +346,40 @@ Para adicionar ligas extras além da whitelist interna, use `LOL_EXTRA_LEAGUES` 
 
 ```
 lol betting/
-├── server.js           # Servidor HTTP (porta configurada via PORT/SERVER_PORT)
-├── bot.js              # Bot esports (polling, modo automático)
-├── start.js            # Launcher Railway: spawna server.js + bot.js com auto-restart
-├── railway.toml        # Configuração Railway (healthcheck TCP, restart policy)
+├── server.js           # Servidor HTTP: odds, partidas, banco, endpoints
+├── bot.js              # Bot Telegram: polling, análise automática, tips
+├── start.js            # Launcher: spawna server + bot com auto-restart
+├── railway.toml        # Deploy Railway (healthcheck TCP, restart on_failure)
 ├── package.json
-├── .env                # Credenciais (não commitar)
+├── .env                # Credenciais (nunca commitar)
 ├── sportsedge.db       # SQLite (criado automaticamente; path via DB_PATH)
 └── lib/
     ├── database.js     # Schema SQLite, prepared statements e índices
-    ├── sports.js       # Registry de esportes (tokens, flags)
-    └── utils.js        # log, calcKelly, norm, fmtDate, fuzzyName, httpGet
+    ├── ml.js           # Pré-filtro ML local (regressão logística heurística)
+    ├── sports.js       # Registry de esportes (tokens, feature flags)
+    └── utils.js        # log, calcKelly, norm, fmtDate, httpGet, safeParse
 ```
+
+---
+
+## Fontes de Dados
+
+| Fonte | Uso |
+|-------|-----|
+| `esports-api.lolesports.com` | Calendário oficial LoL, séries, placar |
+| `feed.lolesports.com` | Stats ao vivo LoL (~90s de delay) |
+| `esports.lolesports.com/persisted2` | Composições e detalhes do draft |
+| PandaScore API | Torneios não-Riot: schedules, compositions, stats |
+| OddsPapi v4 (`api.oddspapi.io/v4`) | Odds 1xBet para LoL (sportId=18), round-robin por lote |
+| Anthropic Claude (`claude-sonnet-4-6`) | Análise de matchup via proxy `/claude` |
 
 ---
 
 ## Segurança
 
-- Credenciais exclusivamente via `.env` — nunca hardcoded
-- `.env` e `*.db` devem estar no `.gitignore`
+- Todas as credenciais via `.env` — nunca hardcoded
+- `.env` e `*.db` no `.gitignore`
 - Comandos admin protegidos por whitelist `ADMIN_USER_IDS`
 - Usuários que bloqueiam o bot removidos automaticamente (erro 403)
 - Claude API key transmitida via header `x-claude-key`, nunca no body
+- OddsPapi key aceita múltiplas variáveis: `ODDS_API_KEY`, `ODDSPAPI_KEY`, `ODDS_PAPI_KEY`, `ESPORTS_ODDS_KEY`
