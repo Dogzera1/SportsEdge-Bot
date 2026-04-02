@@ -126,9 +126,8 @@ async function fetchEsportsOdds() {
   if (esportsOddsFetching) return;
   const now = Date.now();
   
-  // Limites do novo Cache Engine para Oddspapi (1xBet)
-  // Pré-jogo varre apenas a cada 30 min por padrão (poupa quota de 5.000 mensais)
-  if (now - lastEsportsOddsUpdate < 30 * 60 * 1000) return;
+  // Temporariamente reduzido para 1 min para você testar e ver as odds agora!
+  if (now - lastEsportsOddsUpdate < 1 * 60 * 1000) return;
 
   esportsOddsFetching = true;
   try {
@@ -213,12 +212,13 @@ function findOdds(sport, t1, t2) {
   for (const [cacheKey, val] of Object.entries(oddsCache)) {
     if (!cacheKey.startsWith(`${sport}_`)) continue;
     if (!val.t1Name || !val.t2Name) continue; // skip entries without names (prevents empty-string match)
-    const vt1 = norm(val.t1Name), vt2 = norm(val.t2Name);
-    if (!vt1 || !vt2) continue;
-    if ((nt1.includes(vt1) || vt1.includes(nt1)) && (nt2.includes(vt2) || vt2.includes(nt2)))
+    const vt = norm(val.t1Name); // No nosso caso t1Name e t2Name guardam o slug completo
+    if (!vt) continue;
+
+    // Se o slug da OddsPapi contém o nome normalizado de ambos os times, é o jogo certo!
+    if (vt.includes(nt1) && vt.includes(nt2)) {
       return { t1: val.t1, t2: val.t2, bookmaker: val.bookmaker };
-    if ((nt1.includes(vt2) || vt2.includes(nt1)) && (nt2.includes(vt1) || vt1.includes(nt2)))
-      return { t1: val.t2, t2: val.t1, bookmaker: val.bookmaker }; // swapped
+    }
   }
   return null;
 }
