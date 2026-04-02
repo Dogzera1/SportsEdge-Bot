@@ -1795,4 +1795,4 @@ async function fetchEsportsOddsV1() {
   }
 }
 
-module.exports = { server, db, stmts, fetchOdds, findOdds };
+module.exports = { server, db, stmts, fetchOdds, findOdds, oddsCache, lastEsportsOddsUpdate };
