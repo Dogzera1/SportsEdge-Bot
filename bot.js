@@ -241,18 +241,28 @@ async function runAutoAnalysis() {
       // Inclui 'draft': composições já disponíveis na API Riot antes do jogo começar.
       // Permite análise com draft real + odds pré-jogo (antes de cair para odds ao vivo).
       const lolLive = Array.isArray(lolRaw) ? lolRaw.filter(m => m.status === 'live' || m.status === 'draft') : [];
-      const allLive = lolLive;
-      log('INFO', 'AUTO', `LoL: ${lolRaw?.length||0} partidas (${allLive.filter(m=>m.status==='live').length} live, ${allLive.filter(m=>m.status==='draft').length} draft) | inscritos=${subscribedUsers.size}`);
+
+      // Deduplicar Riot+PandaScore: se Riot já cobre o mesmo confronto, descarta a cópia PandaScore
+      const riotLive = new Set(lolLive.filter(m => !String(m.id).startsWith('ps_')).map(m => `${norm(m.team1)}_${norm(m.team2)}`));
+      const allLive = lolLive.filter(m => {
+        if (!String(m.id).startsWith('ps_')) return true;
+        const key1 = `${norm(m.team1)}_${norm(m.team2)}`;
+        const key2 = `${norm(m.team2)}_${norm(m.team1)}`;
+        return !riotLive.has(key1) && !riotLive.has(key2);
+      });
+      log('INFO', 'AUTO', `LoL: ${lolRaw?.length||0} partidas (${allLive.filter(m=>m.status==='live').length} live, ${allLive.filter(m=>m.status==='draft').length} draft, ${lolLive.length-allLive.length} dupl. removidas) | inscritos=${subscribedUsers.size}`);
 
       for (const match of allLive) {
         const matchKey = `${match.game}_${match.id}`;
         const prev = analyzedMatches.get(matchKey);
         if (prev?.tipSent) continue; // uma tip por partida — não repetir
-        if (prev && (now - prev.ts < RE_ANALYZE_INTERVAL)) continue;
+        // Matches sem edge recente aguardam 2× mais antes de chamar a IA novamente
+        const liveCooldown = prev?.noEdge ? RE_ANALYZE_INTERVAL * 2 : RE_ANALYZE_INTERVAL;
+        if (prev && (now - prev.ts < liveCooldown)) continue;
 
         log('INFO', 'AUTO', `Esports: ${match.team1} vs ${match.team2} (${match.league})`);
         const result = await autoAnalyzeMatch(esportsConfig.token, match);
-        analyzedMatches.set(matchKey, { ts: now, tipSent: prev?.tipSent || false });
+        analyzedMatches.set(matchKey, { ts: now, tipSent: prev?.tipSent || false, noEdge: !result?.tipMatch && !result?.fairOdds });
 
         if (!result) continue;
         const hasRealOdds = !!(result.o?.t1 && parseFloat(result.o.t1) > 1);
@@ -294,11 +304,11 @@ async function runAutoAnalysis() {
           }
           analyzedMatches.set(matchKey, { ts: now, tipSent: true });
           log('INFO', 'AUTO-TIP', `Esports: ${tipTeam} @ ${tipOdd} (odds ${hasRealOdds ? 'reais' : 'estimadas'})`);
-        } else if (result.fairOdds && !prev?.tipSent) {
+        } else if (result.fairOdds && !prev?.tipSent && hasRealOdds) {
+          // Só envia odds de referência quando há mercado real — estimativas sem odds são ruído
           const fo = result.fairOdds;
           const fo1 = parseFloat(fo[2]).toFixed(2), fo2 = parseFloat(fo[4]).toFixed(2);
-          const gameIcon = '🎮';
-          const fairMsg = `${gameIcon} 💡 *ODDS DE REFERÊNCIA*\n` +
+          const fairMsg = `🎮 💡 *ODDS DE REFERÊNCIA*\n` +
             `*${match.team1}* vs *${match.team2}*\n_${match.league}_\n\n` +
             `• *${fo[1].trim()}:* *${fo1}*\n• *${fo[3].trim()}:* *${fo2}*\n\n` +
             `💡 _Odds ACIMA desses valores = +EV_\n⚠️ _Aposte com responsabilidade._`;
@@ -307,18 +317,26 @@ async function runAutoAnalysis() {
             try { await sendDM(esportsConfig.token, userId, fairMsg); }
             catch(e) { if (e.message?.includes('403')) subscribedUsers.delete(userId); }
           }
-          analyzedMatches.set(matchKey, { ts: now, tipSent: true });
+          analyzedMatches.set(matchKey, { ts: now, tipSent: true, noEdge: false });
         }
         await new Promise(r => setTimeout(r, 2000));
       }
 
       // ── LoL UPCOMING: Analyze matches in next 24h ──
       const windowEnd = now + UPCOMING_WINDOW_HOURS * 60 * 60 * 1000;
-      const allUpcoming = Array.isArray(lolRaw) ? lolRaw.filter(m => {
+      const upcomingRaw = Array.isArray(lolRaw) ? lolRaw.filter(m => {
         if (m.status !== 'upcoming') return false;
         const t = m.time ? new Date(m.time).getTime() : 0;
         return t > now && t <= windowEnd;
       }) : [];
+      // Deduplicar: prioriza Riot sobre PandaScore para o mesmo confronto
+      const riotUpcoming = new Set(upcomingRaw.filter(m => !String(m.id).startsWith('ps_')).map(m => `${norm(m.team1)}_${norm(m.team2)}`));
+      const allUpcoming = upcomingRaw.filter(m => {
+        if (!String(m.id).startsWith('ps_')) return true;
+        const key1 = `${norm(m.team1)}_${norm(m.team2)}`;
+        const key2 = `${norm(m.team2)}_${norm(m.team1)}`;
+        return !riotUpcoming.has(key1) && !riotUpcoming.has(key2);
+      });
 
       if (allUpcoming.length > 0) {
         log('INFO', 'AUTO', `LoL próximas ${UPCOMING_WINDOW_HOURS}h: ${allUpcoming.length} partidas`);
@@ -339,8 +357,9 @@ async function runAutoAnalysis() {
           const timeToMatch = matchStart > 0 ? matchStart - now : Infinity;
           const isImminentMatch = timeToMatch > 0 && timeToMatch < 2 * 60 * 60 * 1000;
 
-          // Item 3: partida iminente (<2h) bypassa o cooldown de 30min para garantir odds frescas
-          if (!isImminentMatch && prev && (now - prev.ts < UPCOMING_ANALYZE_INTERVAL)) continue;
+          // Partida iminente (<2h) bypassa cooldown; matches sem edge aguardam 2× o intervalo
+          const upcomingCooldown = prev?.noEdge ? UPCOMING_ANALYZE_INTERVAL * 2 : UPCOMING_ANALYZE_INTERVAL;
+          if (!isImminentMatch && prev && (now - prev.ts < upcomingCooldown)) continue;
 
           // Item 3: força re-fetch de odds se a partida começa em < 2h
           const oddsPath = isImminentMatch
@@ -357,7 +376,7 @@ async function runAutoAnalysis() {
           log('INFO', 'AUTO', `Esports upcoming: ${match.team1} vs ${match.team2} (${match.league}) às ${matchTime}${hasRealOdds ? ' — odds disponíveis' : ' — odds estimadas'}${isImminentMatch ? ' [IMINENTE <2h]' : ''}`);
 
           const result = await autoAnalyzeMatch(esportsConfig.token, match);
-          analyzedMatches.set(matchKey, { ts: now, tipSent: false });
+          analyzedMatches.set(matchKey, { ts: now, tipSent: false, noEdge: !result?.tipMatch && !result?.fairOdds });
 
           if (!result) { await new Promise(r => setTimeout(r, 2000)); continue; }
 
@@ -392,11 +411,11 @@ async function runAutoAnalysis() {
             }
             analyzedMatches.set(matchKey, { ts: now, tipSent: true });
             log('INFO', 'AUTO-TIP', `Esports upcoming: ${tipTeam} @ ${tipOdd}`);
-          } else if (result.fairOdds && !prev?.tipSent) {
+          } else if (result.fairOdds && !prev?.tipSent && hasRealOdds) {
+            // Só envia odds de referência quando há mercado real
             const fo = result.fairOdds;
             const fo1 = parseFloat(fo[2]).toFixed(2), fo2 = parseFloat(fo[4]).toFixed(2);
-            const gameIcon = '🎮';
-            const fairMsg = `${gameIcon} 💡 *ODDS PRÉ-JOGO*\n` +
+            const fairMsg = `🎮 💡 *ODDS PRÉ-JOGO*\n` +
               `*${match.team1}* vs *${match.team2}*\n_${match.league}_\n` +
               (match.time ? `🕐 Início: *${matchTime}* (BRT)\n` : '') +
               `\n• *${fo[1].trim()}:* *${fo1}*\n• *${fo[3].trim()}:* *${fo2}*\n\n` +
@@ -406,7 +425,7 @@ async function runAutoAnalysis() {
               try { await sendDM(esportsConfig.token, userId, fairMsg); }
               catch(e) { if (e.message?.includes('403')) subscribedUsers.delete(userId); }
             }
-            analyzedMatches.set(matchKey, { ts: now, tipSent: true });
+            analyzedMatches.set(matchKey, { ts: now, tipSent: true, noEdge: false });
           }
           await new Promise(r => setTimeout(r, 3000));
         }
@@ -829,7 +848,7 @@ async function autoAnalyzeMatch(token, match) {
 
     const resp = await serverPost('/claude', {
       model: 'deepseek-chat',
-      max_tokens: 1800,
+      max_tokens: 600,
       messages: [{ role: 'user', content: prompt }]
     }, null, { 'x-claude-key': CLAUDE_KEY });
 
@@ -895,63 +914,28 @@ function buildEsportsPrompt(match, game, gamesContext, o, enrichSection) {
     ? `[Se EV >= +${evThreshold}% E confiança não foi rebaixada para BAIXA por alto fluxo: TIP_ML:[time]@[odd]|EV:[%]|STAKE:[u]|CONF:[ALTA/MÉDIA/BAIXA]]`
     : `[Se confiança ALTA ou MÉDIA e sem rebaixamento por alto fluxo: TIP_ML:[time]@[fair_odd]|EV:estimado|STAKE:[u]|CONF:[ALTA/MÉDIA]]`;
 
-  return `Você é um analista de apostas de League of Legends. Seu trabalho é identificar edge REAL — não fabricar recomendações.
+  const deJuiced = hasRealOdds
+    ? `1xBet de-juiced: ${t1}=${(1/parseFloat(o.t1)/(1/parseFloat(o.t1)+1/parseFloat(o.t2))*100).toFixed(1)}% | ${t2}=${(1/parseFloat(o.t2)/(1/parseFloat(o.t1)+1/parseFloat(o.t2))*100).toFixed(1)}% (1xBet não é sharp — oportunidades existem)`
+    : `Sem odds — estime FAIR_ODDS=1/prob`;
 
-REGRA FUNDAMENTAL: "Sem edge identificado" é uma resposta válida e frequentemente a correta. A maioria das partidas não tem EV real. Resist the urge to always find a bet.
+  return `Analista de apostas LoL. Identifique edge REAL. "Sem edge" é resposta válida.
 
-═══════════════════════════════════════
-SÉRIE: ${t1} vs ${t2}
-Liga: ${match.league || match.event_name || 'Esports'} | Formato: ${match.format || 'Bo1/Bo3'}
-Placar da série: ${t1} ${serieScore} ${t2}
-Status: ${match.status}
-${oddsSection}
-═══════════════════════════════════════
-${gamesContext || '\n[Sem dados ao vivo — análise pré-jogo]\n'}
-═══════════════════════════════════════
-${enrichSection}
-═══════════════════════════════════════
-${highFluxWarning ? '\n' + highFluxWarning + '\n' : ''}${lineMovementWarning ? '\n' + lineMovementWarning + '\n' : ''}
-ETAPA 1 — LEITURA DO DRAFT (COMPOSIÇÕES E META):
-Baseado nas composições listadas e no patch meta fornecido:
-→ Qual equipe possui a melhor composição para o Early Game? E para o Lategame (Scaling)?
-→ Existe alguma sinergia ou resposta brutal (counter-pick) no Top ou Mid que desequilibra o jogo?
-→ Estime de forma seca: P(${t1})=__% | P(${t2})=__%
-→ Principal justificativa: [1 frase focada na composição]
-
-ETAPA 2 — VERIFICAÇÃO DE EDGE MATEMÁTICO:
-${hasRealOdds
-  ? `Referência 1xBet (de-juiced, margem da casa removida): ${t1}=${(1/parseFloat(o.t1)/(1/parseFloat(o.t1)+1/parseFloat(o.t2))*100).toFixed(1)}% | ${t2}=${(1/parseFloat(o.t2)/(1/parseFloat(o.t1)+1/parseFloat(o.t2))*100).toFixed(1)}%
-IMPORTANTE: 1xBet NÃO é sharp (margem ~7%). As linhas são menos eficientes que Pinnacle → oportunidades reais existem.
-→ Compare sua estimativa com as probabilidades de-juiced acima (não as odds brutas).
-→ Se a diferença for < ${pinnacleMargin}pp: escreva "SEM EDGE" e não emita TIP_ML.
-→ Se a diferença for ≥ ${pinnacleMargin}pp: EV = (prob_sua × odd_1xBet) - 1. Só emita tip se EV >= +${evThreshold}%.`
-  : `Sem odds de mercado disponíveis.
-→ Estime P(${t1}) e P(${t2}) baseado puramente na força deste Draft.
-→ Estime FAIR_ODDS = 1/prob. (Ex: 60% = 1.67).
-→ Só emita TIP_ML se a vantagem for clara (>${noOddsConviction}%). Caso contrário, não emita.`}
-
-ANÁLISE DE VIRADA:
-• Composição late-game/scaling no time perdedor → virada possível
-• Gold diff < 3k com torres intactas → jogo aberto
-• Soul point ou Baron buff → fator decisivo
-• Carries com KDA+ e item core completo → ameaça real
-• Antes dos 20min = cedo demais; 25-35min = janela crítica
-
-NÃO invente dados históricos. Se não tiver dado, diga explicitamente.
-
-FORMATO DE RESPOSTA:
-📊 ${t1} vs ${t2}
-Estado: [situação atual em 1-2 frases]
-Potencial de virada: [ALTO/MÉDIO/BAIXO + motivo]
-
-ETAPA 1 — P(${t1})=__% | P(${t2})=__% | Fator principal: [X] | Incerteza: [Y]
-ETAPA 2 — ${hasRealOdds ? `EV(${t1})=[X%] | EV(${t2})=[X%] | Edge: [SIM/NÃO]` : `Fair odds: ${t1}=[X.XX] | ${t2}=[X.XX] | Vantagem clara: [SIM/NÃO]`}
-Confiança: [ALTA/MÉDIA/BAIXA] | Motivo do nível: [1 frase]
-
-FAIR_ODDS:${t1}=[1/prob_sem_juice]|${t2}=[1/prob_sem_juice]
-${tipInstruction}
-${!hasRealOdds ? `\n⚠️ Lembre: sua estimativa sem dados de mercado pode divergir muito do preço real. Só emita TIP_ML com convicção (>${noOddsConviction}% + múltiplos fatores).` : ''}
-Máximo 450 palavras.`;
+PARTIDA: ${t1} vs ${t2} | ${match.league || 'Esports'} | ${match.format || 'Bo1/Bo3'} | ${match.status}
+Placar: ${serieScore} | ${oddsSection}
+${gamesContext ? `\nDADOS AO VIVO:\n${gamesContext}` : ''}
+FORMA/H2H:${enrichSection}
+${highFluxWarning ? `\n${highFluxWarning}` : ''}${lineMovementWarning ? `\n${lineMovementWarning}` : ''}
+ANÁLISE:
+1. Draft/Meta: qual time tem melhor composição? Early/Late? Counter-pick decisivo?
+   → P(${t1})=__% | P(${t2})=__% | Justificativa: [1 frase]
+2. Edge: ${hasRealOdds
+    ? `${deJuiced}\n   Se diff < ${pinnacleMargin}pp → SEM EDGE. Se diff ≥ ${pinnacleMargin}pp → EV=(prob×odd)-1. Tip só se EV ≥ +${evThreshold}%.`
+    : `${deJuiced}\n   Tip só se vantagem clara (>${noOddsConviction}%).`}
+${hasRealOdds ? '' : '   Virada possível se: gold diff <3k, scaling comp no perdedor, soul point ou baron pendente.'}
+RESPOSTA (máx 200 palavras):
+P(${t1})=__% | P(${t2})=__% | ${hasRealOdds ? `EV(${t1})=[X%] | EV(${t2})=[X%]` : `Fair: ${t1}=[X.XX] | ${t2}=[X.XX]`} | Conf:[ALTA/MÉDIA/BAIXA]
+FAIR_ODDS:${t1}=[X.XX]|${t2}=[X.XX]
+${tipInstruction}`;
 }
 
 // ── Admin ──
