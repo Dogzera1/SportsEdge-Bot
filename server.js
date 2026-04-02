@@ -51,15 +51,28 @@ let lastAnalysisAt = null; // ISO timestamp of last successful auto-analysis cyc
 // ── LoL Esports ──
 const LOL_BASE = 'https://esports-api.lolesports.com/persisted/gw';
 const LOL_LEAGUES = new Set([
+  // Ligas Tier 1
   'worlds', 'msi', 'lcs', 'lck', 'lec', 'lpl', 'cblol-brazil', 'lla', 'pcs',
-  'lco', 'vcs', 'ljl-japan', 'emea_masters', 'lfl', 'nlc', 'lta_n', 'lta_s',
-  'turkiye-sampiyonluk-ligi', 'first_stand', 'americas_cup', 'lcp', 'nacl',
-  'lck_challengers_league', 'primeleague', 'liga_portuguesa', 'lit', 'les',
-  'hitpoint_masters', 'esports_balkan_league', 'hellenic_legends_league', 'lta_cross',
-  // Road to EWC — slugs possíveis (Riot pode usar qualquer um destes)
+  'lco', 'vcs', 'ljl-japan', 'lcp',
+  // Ligas Tier 2 / Regionais
+  'emea_masters', 'emea-masters', 'lfl', 'nlc', 'lta_n', 'lta_s', 'lta',
+  'turkiye-sampiyonluk-ligi', 'tcl', 'first_stand', 'americas_cup', 'nacl',
+  'lck_challengers_league', 'lck-challengers-league', 'lck-cl',
+  'primeleague', 'prime-league-pro-division', 'prime-league',
+  'liga_portuguesa', 'lplol', 'lit', 'les', 'lrn', 'lrs',
+  'hitpoint_masters', 'hitpoint-masters', 'hitpoint-winter',
+  'esports_balkan_league', 'esport-balkan-league', 'ebl',
+  'hellenic_legends_league', 'lta_cross',
+  // Ligas adicionais da lista OddsPapi
+  'gll', 'road-of-legends', 'ultraliga', 'elite-series', 'njcs', 'kjl',
+  'arabian-league', 'lvp-superliga', 'ldl', 'cblol-academy',
+  'circuito-desafiante', 'lcl', 'gll-pro-am', 'lfl-division-2',
+  'finnish-pro-league-winter', 'finnish-pro-league',
+  'asia-masters', 'asia-invitational',
+  // EWC / Esports World Cup
   'road_to_ewc', 'road_to_ewc_lpl', 'road_to_ewc_lck', 'road_to_ewc_lec',
   'road_to_ewc_lcs', 'road_to_ewc_cblol', 'road_to_ewc_lcp',
-  'ewc', 'ewc_lpl', 'esports_world_cup', 'esports_world_cup_lpl',
+  'ewc', 'ewc_lpl', 'esports_world_cup', 'esports_world_cup_lpl', 'esports-world-cup',
   // Slugs extras configuráveis via .env (ex: LOL_EXTRA_LEAGUES=slug1,slug2)
   ...(process.env.LOL_EXTRA_LEAGUES || '').split(',').map(s => s.trim()).filter(Boolean),
 ]);
@@ -70,90 +83,231 @@ const unknownLolSlugs = new Set();
 // ── Odds APIs ──
 async function fetchOdds(sport) {
   if (sport === 'esports') return await fetchEsportsOdds();
-  // Apenas Esports é suportado
 }
 
-// The Odds API 429 backoff state
+// Backoff em caso de 429
 let esportsBackoffUntil = 0;
-const ESPORTS_BACKOFF_TTL = 2 * 60 * 60 * 1000; // 2h backoff on 429
+const ESPORTS_BACKOFF_TTL = 2 * 60 * 60 * 1000;
+
+// Cache de tournament IDs (24h)
+let cachedEsportsTids = null;
+let cachedEsportsTidsTs = 0;
+
+// Torneios de LoL com fixtures ativas (verificado na OddsPapi)
+const LOL_ACTIVE_TIDS = [
+  2450,  // LCS
+  2452,  // LEC
+  2454,  // LCK
+  26590, // EMEA Masters
+  26698, // CBLOL
+  33814, // Prime League Pro Division
+  36997, // LCK CL
+  39009, // NACL
+  39985, // LPL
+  45589, // LCP
+  45623, // GLL
+  45985, // Road of Legends
+  46117, // LRN
+  46119, // LRS
+  47864, // Esports World Cup
+  50242, // Finnish Pro League Winter
+  50586, // LES
+];
+
+// Lista completa de todos os torneios de LoL conhecidos (fallback abrangente)
+const LOL_ALL_TIDS = [
+  2450, 2452, 2454, 2527, 2549,
+  15488, 15490, 20918, 21962, 25019,
+  26590, 26698, 26706, 26708, 27372, 28520, 29023, 31835,
+  33678, 33680, 33814, 34012, 34018, 34020, 34460, 34466, 34676, 34678,
+  36889, 36997, 39009, 39985, 39997, 40019,
+  42873, 42997, 43193, 44181, 44639, 44641, 44643, 44645, 44647, 44659, 44673, 44903,
+  45081, 45337, 45397, 45589, 45617, 45619, 45621, 45623, 45855, 45985,
+  46117, 46119, 46121, 46331, 47864, 48993,
+  50242, 50586, 50756, 50952, 50972,
+];
+
+// Busca tournament IDs dinamicamente via API; fallback para lista hardcoded
+async function getEsportsTournamentIds() {
+  const now = Date.now();
+  if (cachedEsportsTids && (now - cachedEsportsTidsTs) < TOURNAMENT_CACHE_TTL) {
+    return cachedEsportsTids;
+  }
+
+  // sportId=18 é o valor real do LoL na OddsPapi (confirmado pela resposta da API)
+  const sid = parseInt(process.env.ODDSPAPI_ESPORTS_SPORT_ID || '18');
+  try {
+    const url = `https://api.oddspapi.io/v4/tournaments?sportId=${sid}&apiKey=${ODDSPAPI_KEY}`;
+    const r = await httpGet(url).catch(() => null);
+    if (r && r.status === 200) {
+      const data = safeParse(r.body, null);
+      const list = data ? (Array.isArray(data) ? data : (Array.isArray(data.data) ? data.data : [])) : [];
+      const ids = list
+        .filter(t => (t.futureFixtures || 0) + (t.upcomingFixtures || 0) + (t.liveFixtures || 0) > 0)
+        .map(t => t.tournamentId || t.id).filter(Boolean);
+      if (ids.length) {
+        log('INFO', 'ODDS', `Torneios ativos via sportId=${sid}: ${ids.length}`);
+        cachedEsportsTids = ids;
+        cachedEsportsTidsTs = now;
+        return cachedEsportsTids;
+      }
+    }
+  } catch(_) {}
+
+  // Fallback: usa lista de torneios ativos verificada
+  log('INFO', 'ODDS', `Usando lista hardcoded: ${LOL_ACTIVE_TIDS.length} torneios ativos`);
+  cachedEsportsTids = LOL_ACTIVE_TIDS;
+  cachedEsportsTidsTs = now;
+  return LOL_ACTIVE_TIDS;
+}
+
+// Extrai price de um outcome seguindo estrutura: outcome.price OU outcome.players[key].price
+function extractPrice(outcome) {
+  if (!outcome) return null;
+  const p = parseFloat(outcome.price);
+  if (!isNaN(p) && p > 1) return p;
+  const players = outcome.players || {};
+  for (const playerData of Object.values(players)) {
+    const pp = parseFloat(playerData?.price);
+    if (!isNaN(pp) && pp > 1) return pp;
+  }
+  return null;
+}
+
+// Normaliza a resposta da OddsPapi em array plano de fixtures
+// Cobre: array plano, { data: [...] }, e agrupado por torneio { tournamentId, fixtures: [...] }
+function normalizeFixtures(raw) {
+  if (!raw) return [];
+  let list = Array.isArray(raw) ? raw : (Array.isArray(raw.data) ? raw.data : []);
+  // Se cada item tem .fixtures = agrupado por torneio
+  if (list.length > 0 && list[0]?.fixtures) {
+    return list.flatMap(t => t.fixtures || []);
+  }
+  return list;
+}
 
 async function fetchEsportsOdds() {
-  if (!ODDSPAPI_KEY) return;
+  if (!ODDSPAPI_KEY) { log('WARN', 'ODDS', 'ODDS_API_KEY não configurada — odds indisponíveis'); return; }
   if (esportsOddsFetching) return;
   const now = Date.now();
-  
-  if (now - lastEsportsOddsUpdate < 10 * 60 * 1000) return;
+  if (now - lastEsportsOddsUpdate < ESPORTS_ODDS_TTL) return;
+  if (now < esportsBackoffUntil) { log('INFO', 'ODDS', 'Em backoff — aguardando'); return; }
 
   esportsOddsFetching = true;
-  lastApiResponse = 'Conectando ao v4...';
+  lastApiResponse = 'Iniciando busca...';
   try {
-    let cachedCount = 0;
-    // Baseado nos IDs que você me mandou e no Guia
-    const tids = [2450, 2452, 2454, 26590, 26698, 33814, 36997, 39009, 39985, 45589, 45623, 45985, 46117, 46119, 46121, 47864, 50242, 50586];
+    const tids = await getEsportsTournamentIds();
     const tidString = tids.join(',');
-    
-    // Padrão do Guia (Página 3): apiKey (CamelCase), host api.oddspapi.io, v4
-    const url = `https://api.oddspapi.io/v4/odds-by-tournaments?bookmaker=1xbet&tournamentIds=${tidString}&apiKey=${ODDSPAPI_KEY}`;
-    
+
+    // Guia p.3: apiKey como query param, bookmaker, tournamentIds, oddsFormat=decimal
+    const url = `https://api.oddspapi.io/v4/odds-by-tournaments?bookmaker=1xbet&tournamentIds=${tidString}&oddsFormat=decimal&apiKey=${ODDSPAPI_KEY}`;
+
     const r = await httpGet(url).catch(e => ({ status: 500, body: e.message }));
-    
-    log('DEBUG', 'ODDS', `v4 Result - Status: ${r.status} | Body Snippet: ${(r.body||'').slice(0, 100)}`);
-    lastApiResponse = `v4 Status: ${r.status} | Body: ${(r.body||'').slice(0, 150)}`;
+    lastApiResponse = `HTTP ${r.status} | ${(r.body || '').slice(0, 200)}`;
+    log('DEBUG', 'ODDS', `v4 status=${r.status} tids=${tids.length} body=${(r.body||'').slice(0, 120)}`);
 
-    if (r.status === 200) {
-      const raw = safeParse(r.body, {});
-      const tournamentList = Array.isArray(raw) ? raw : (raw.data || []);
-      
-      for (const t of tournamentList) {
-        if (!t.fixtures) continue;
-        for (const f of t.fixtures) {
-          if (!f.bookmakerOdds || !f.bookmakerOdds['1xbet']) continue;
-          
-          const bkData = f.bookmakerOdds['1xbet'];
-          const p1Name = f.participant1Name || f.homeName || '';
-          const p2Name = f.participant2Name || f.awayName || '';
-          if (!p1Name || !p2Name) continue;
+    if (r.status === 429) {
+      esportsBackoffUntil = now + ESPORTS_BACKOFF_TTL;
+      log('WARN', 'ODDS', '429 — backoff 2h ativado');
+      return;
+    }
+    if (r.status !== 200) {
+      log('WARN', 'ODDS', `HTTP ${r.status} — sem atualização de odds`);
+      return;
+    }
 
-          // Normalização Seguindo o Guia (Páginas 4 e 6)
-          // Percorre markets -> outcomes -> players
-          const markets = bkData.markets || {};
-          let oddsFound = { t1: null, t2: null };
+    const raw = safeParse(r.body, null);
+    if (!raw) { log('WARN', 'ODDS', 'Resposta inválida (não JSON)'); return; }
 
-          for (const [mid, mData] of Object.entries(markets)) {
-            // Market ID 1, 183 ou 101 (Match Winner)
-            if (mid === '1' || mid === '183' || mid === '101' || mData.bookmakerMarketId === '1') {
-              const outcomes = mData.outcomes || {};
-              const outcomesArr = Object.values(outcomes);
-              
-              if (outcomesArr.length >= 2) {
-                try {
-                  // Extrai preços seguindo o aninhamento do guia
-                  const price1 = outcomesArr[0].players?.['0']?.price || outcomesArr[0].price;
-                  const price2 = outcomesArr[1].players?.['0']?.price || outcomesArr[1].price;
-                  if (price1 && price2) {
-                    oddsFound.t1 = parseFloat(price1).toFixed(2);
-                    oddsFound.t2 = parseFloat(price2).toFixed(2);
-                    break; // Pegamos o primeiro mercado ML disponível
-                  }
-                } catch(e) {}
-              }
+    const fixtures = normalizeFixtures(raw);
+    log('INFO', 'ODDS', `Fixtures recebidos: ${fixtures.length} | tids enviados: ${tids.length}`);
+
+    let cachedCount = 0;
+    for (const f of fixtures) {
+      if (!f.bookmakerOdds) continue;
+
+      // Prefere 1xbet; aceita qualquer bookmaker presente
+      const bkData = f.bookmakerOdds['1xbet'] || f.bookmakerOdds['1xBet']
+        || Object.values(f.bookmakerOdds)[0];
+      if (!bkData || !bkData.bookmakerIsActive) continue;
+
+      // ── Extração de nomes ──
+      // A API não retorna participant1Name/2Name — os nomes estão na URL do fixturePath.
+      // Formato: https://1xbet.com/.../315638638-cloud9-lyon-gaming
+      // Removendo o {bookmakerFixtureId}- do último segmento, obtemos "cloud9-lyon-gaming"
+      let p1Name = f.participant1Name || f.homeName || '';
+      let p2Name = f.participant2Name || f.awayName || '';
+      let combinedSlug = '';
+
+      if (!p1Name || !p2Name) {
+        const fixturePath = bkData.fixturePath || '';
+        if (fixturePath) {
+          const lastSeg = fixturePath.split('/').pop() || '';
+          const bkFid = bkData.bookmakerFixtureId || '';
+          const teamsSlug = bkFid
+            ? lastSeg.replace(new RegExp(`^${bkFid}-`), '')
+            : lastSeg.replace(/^\d+-/, '');
+          if (teamsSlug) {
+            combinedSlug = teamsSlug; // ex: "cloud9-lyon-gaming"
+            // Tenta inferir nomes individuais dividindo o slug ao meio
+            const parts = teamsSlug.split('-');
+            if (parts.length >= 2) {
+              // Para times de 1 palavra: "sentinels-disguised" → partes iguais
+              // Para times de 2+ palavras: heurística por tamanho
+              const mid = Math.ceil(parts.length / 2);
+              p1Name = parts.slice(0, mid).join('-');
+              p2Name = parts.slice(mid).join('-');
             }
-          }
-
-          if (oddsFound.t1 && oddsFound.t2) {
-            const entry = { ...oddsFound, bookmaker: '1xBet', t1Name: p1Name, t2Name: p2Name };
-            const nameKey = f.fixtureId || `${norm(p1Name)}_${norm(p2Name)}`;
-            oddsCache[`esports_${nameKey}`] = entry;
-            cachedCount++;
           }
         }
       }
+
+      if (!combinedSlug && p1Name && p2Name) {
+        combinedSlug = `${p1Name}-${p2Name}`;
+      }
+
+      if (!combinedSlug && !p1Name) continue; // sem nomes, impossível fazer match
+
+      // ── Extração de odds ──
+      // Estrutura real da OddsPapi: cada time tem seu próprio mercado separado.
+      // Market 183 → time1 (participant1) | Market 185 → time2 (participant2)
+      // Cada mercado tem 1 outcome com 1 player contendo o preço.
+      const markets = bkData.markets || {};
+      const marketEntries = Object.entries(markets);
+
+      // Coleta todos os mercados com exatamente 1 outcome ativo com preço válido
+      const validMarkets = marketEntries
+        .map(([mid, mData]) => {
+          const outcomes = Object.values(mData.outcomes || {});
+          if (outcomes.length !== 1) return null;
+          const price = extractPrice(outcomes[0]);
+          if (!price) return null;
+          return { marketId: parseInt(mid) || 0, price };
+        })
+        .filter(Boolean)
+        .sort((a, b) => a.marketId - b.marketId); // menor ID = time1, maior ID = time2
+
+      if (validMarkets.length < 2) continue;
+
+      const price1 = validMarkets[0].price;
+      const price2 = validMarkets[1].price;
+
+      const key = `esports_${f.fixtureId || norm(combinedSlug)}`;
+      oddsCache[key] = {
+        t1: price1.toFixed(2),
+        t2: price2.toFixed(2),
+        bookmaker: '1xBet',
+        t1Name: p1Name || combinedSlug,
+        t2Name: p2Name || '',
+        combinedSlug: norm(combinedSlug),
+      };
+      cachedCount++;
     }
-    
-    log('INFO', 'ODDS', `v4 PDF Pattern Sync: ${cachedCount} partidas em cache.`);
-    lastEsportsOddsUpdate = Date.now();
+
+    log('INFO', 'ODDS', `Sync concluído: ${cachedCount}/${fixtures.length} fixtures com odds`);
+    lastEsportsOddsUpdate = now;
   } catch(e) {
-    log('ERROR', 'ODDS', `PDF Sync Error: ${e.message}`);
+    log('ERROR', 'ODDS', `fetchEsportsOdds: ${e.message}`);
   } finally {
     esportsOddsFetching = false;
   }
@@ -161,41 +315,89 @@ async function fetchEsportsOdds() {
 
 // ── Suporte a Apelidos/Abreviações de Times ──
 const LOL_ALIASES = {
+  // LCK
   'nongshimredforce': ['ns', 'nongshim', 'nsredforce'],
   'hanwhalifeesports': ['hle', 'hanwha', 'hanwhalife'],
   'dpluskia': ['dk', 'dplus', 'dwg', 'damwon'],
-  'ktrolster': ['kt'],
-  'geng': ['gen', 'gengolden'],
+  'ktrolster': ['kt', 'ktrolster'],
+  'geng': ['gen', 'gengolden', 'gengaming'],
+  't1': ['skt', 'skt1'],
+  // LCS
+  'cloud9': ['c9'],
+  'teamliquid': ['tl', 'liquid'],
+  'flyquest': ['fly', 'fq'],
+  '100thieves': ['100t'],
+  'digitalsports': ['dig', 'disguised', 'dsg'],
+  'sentinels': ['sen'],
+  'lyongaming': ['lg', 'lyon'],
+  // LEC
+  'giantsgaming': ['gnt', 'giants'],
+  'teamvitality': ['vit', 'vitality'],
+  'fnatic': ['fnc'],
+  'rogue': ['rog'],
+  'koi': ['koi'],
+  'madlions': ['mad'],
+  'bds': ['bdsgaming', 'bdsesport'],
+  'g2esports': ['g2'],
+  // LPL
+  'jdggaming': ['jdg'],
+  'bilibiliblaze': ['blg', 'bilibili'],
+  'ninerosters': ['ninerosters', 'nip'],
+  'weibo': ['wbg', 'weiboesports'],
+  'topesports': ['tes'],
+  // CBLOL
+  'paingaming': ['png', 'pain'],
+  'fluxo': ['flx'],
+  'kabum': ['kbm'],
+  'loud': ['lod'],
+  'isurus': ['isr'],
 };
 
 function findOdds(sport, t1, t2) {
   const nt1 = norm(t1), nt2 = norm(t2);
-  
-  // Função auxiliar para verificar match com apelidos
-  const isMatch = (orig, targetSlug) => {
-    if (!orig || !targetSlug) return false;
-    if (targetSlug.includes(orig)) return true;
-    // Procura nos aliases
+  if (!nt1 || !nt2) return null;
+
+  // Expande um nome normalizado com seus aliases conhecidos
+  const expandWithAliases = (n) => {
+    const variants = new Set([n]);
     for (const [key, aliases] of Object.entries(LOL_ALIASES)) {
-      if (orig.includes(key) || key.includes(orig)) {
-        if (aliases.some(a => targetSlug.includes(a))) return true;
+      if (n.includes(key) || key.includes(n)) {
+        aliases.forEach(a => variants.add(a));
+        variants.add(key);
       }
     }
-    return false;
+    return variants;
   };
+
+  const variants1 = expandWithAliases(nt1);
+  const variants2 = expandWithAliases(nt2);
+
+  // Verifica se alguma variante do nome está contida no slug alvo
+  const anyMatch = (variants, targetSlug) =>
+    [...variants].some(v => v.length >= 2 && targetSlug.includes(v));
 
   for (const [cacheKey, val] of Object.entries(oddsCache)) {
     if (!cacheKey.startsWith(`${sport}_`)) continue;
+
+    // ── Modo 1: combinedSlug (formato OddsPapi — sem nomes separados) ──
+    if (val.combinedSlug) {
+      const cs = val.combinedSlug;
+      if (anyMatch(variants1, cs) && anyMatch(variants2, cs)) {
+        return { t1: val.t1, t2: val.t2, bookmaker: val.bookmaker };
+      }
+      continue;
+    }
+
+    // ── Modo 2: nomes individuais (formato legado) ──
     if (!val.t1Name || !val.t2Name) continue;
     const vt1 = norm(val.t1Name);
     const vt2 = norm(val.t2Name);
 
-    // Ordem normal: query-t1 bate com cache-t1 E query-t2 bate com cache-t2
-    if (isMatch(nt1, vt1) && isMatch(nt2, vt2)) {
+    if (anyMatch(variants1, vt1) && anyMatch(variants2, vt2)) {
       return { t1: val.t1, t2: val.t2, bookmaker: val.bookmaker };
     }
-    // Ordem invertida: times podem estar trocados no cache vs. query
-    if (isMatch(nt1, vt2) && isMatch(nt2, vt1)) {
+    // Ordem invertida
+    if (anyMatch(variants1, vt2) && anyMatch(variants2, vt1)) {
       return { t1: val.t2, t2: val.t1, bookmaker: val.bookmaker };
     }
   }
@@ -725,6 +927,38 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (p === '/odds') {
+    const t1 = parsed.query.team1 || parsed.query.p1 || '';
+    const t2 = parsed.query.team2 || parsed.query.p2 || '';
+    if (!t1 || !t2) { sendJson(res, { error: 'team1 e team2 obrigatórios' }, 400); return; }
+    await fetchOdds('esports');
+    const o = findOdds('esports', t1, t2);
+    sendJson(res, o || { error: 'odds não encontradas' });
+    return;
+  }
+
+  if (p === '/debug-odds') {
+    const cacheEntries = Object.entries(oddsCache).filter(([k]) => k.startsWith('esports_'));
+    const sample = cacheEntries.slice(0, 10).map(([k, v]) => ({
+      key: k,
+      t1Name: v.t1Name,
+      t2Name: v.t2Name,
+      t1: v.t1,
+      t2: v.t2,
+      bookmaker: v.bookmaker
+    }));
+    const esportsAge = lastEsportsOddsUpdate > 0 ? Math.round((Date.now() - lastEsportsOddsUpdate) / 1000) : null;
+    sendJson(res, {
+      count: cacheEntries.length,
+      lastSync: lastEsportsOddsUpdate ? new Date(lastEsportsOddsUpdate).toISOString() : 'nunca',
+      lastSyncAgoSec: esportsAge,
+      tournamentIdsCache: cachedEsportsTids?.length || 0,
+      lastApiResponse: lastApiResponse.slice(0, 300),
+      sample
+    });
+    return;
+  }
+
   if (p === '/health') {
     const sport = 'esports';
     const dbOk = (() => {
@@ -778,6 +1012,228 @@ const server = http.createServer(async (req, res) => {
     } catch(e) {
       sendJson(res, { matchId, game, resolved: false, error: e.message });
     }
+    return;
+  }
+
+  // ── Usuários ──
+  if (p === '/users') {
+    const subscribed = parsed.query.subscribed;
+    const users = subscribed ? stmts.getSubscribedUsers.all() : db.prepare('SELECT * FROM users').all();
+    sendJson(res, users);
+    return;
+  }
+
+  if (p === '/save-user' && req.method === 'POST') {
+    let body = ''; req.on('data', d => body += d);
+    req.on('end', () => {
+      try {
+        const { userId, username, subscribed, sportPrefs } = safeParse(body, {});
+        if (!userId) { sendJson(res, { error: 'Missing userId' }, 400); return; }
+        stmts.upsertUser.run(userId, username || '', subscribed ? 1 : 0, JSON.stringify(sportPrefs || []));
+        sendJson(res, { ok: true });
+      } catch(e) { sendJson(res, { error: e.message }, 500); }
+    });
+    return;
+  }
+
+  // ── Tips ──
+  if (p === '/unsettled-tips') {
+    const sport = parsed.query.sport || 'esports';
+    const days = parsed.query.days || '30';
+    const tips = stmts.getUnsettledTips.all(sport, `-${days} days`);
+    sendJson(res, tips.map(t => ({
+      ...t,
+      match_id: t.match_id,
+      participant1: t.participant1,
+      participant2: t.participant2,
+      tip_participant: t.tip_participant,
+    })));
+    return;
+  }
+
+  if (p === '/record-tip' && req.method === 'POST') {
+    let body = ''; req.on('data', d => body += d);
+    req.on('end', async () => {
+      try {
+        const sport = parsed.query.sport || 'esports';
+        const t = safeParse(body, {});
+        if (!t.matchId) { sendJson(res, { error: 'Missing matchId' }, 400); return; }
+        const isLive = t.isLive ? 1 : 0;
+        stmts.insertTip.run({
+          sport, matchId: String(t.matchId), eventName: t.eventName || '',
+          p1: t.p1 || t.team1 || t.fighter1 || '', p2: t.p2 || t.team2 || t.fighter2 || '',
+          tipParticipant: t.tipParticipant || t.tipTeam || '', odds: parseFloat(t.odds) || 0,
+          ev: parseFloat(t.ev) || 0, stake: String(t.stake || ''), confidence: t.confidence || 'MÉDIA',
+          isLive, botToken: t.botToken || ''
+        });
+        // Grava odds de abertura para CLV tracking
+        if (t.odds) {
+          stmts.updateTipOpenOdds.run(parseFloat(t.odds), String(t.matchId), sport);
+        }
+        stmts.incrementApiUsage.run(sport, new Date().toISOString().slice(0,7));
+        sendJson(res, { ok: true });
+      } catch(e) { sendJson(res, { error: e.message }, 500); }
+    });
+    return;
+  }
+
+  if (p === '/tips-history') {
+    const sport = parsed.query.sport || 'esports';
+    const limit = parseInt(parsed.query.limit) || 20;
+    const filter = parsed.query.filter;
+    let query = 'SELECT * FROM tips WHERE sport = ?';
+    if (filter === 'settled') query += " AND result IS NOT NULL";
+    query += ` ORDER BY sent_at DESC LIMIT ${limit}`;
+    sendJson(res, db.prepare(query).all(sport));
+    return;
+  }
+
+  if (p === '/settle' && req.method === 'POST') {
+    let body = ''; req.on('data', d => body += d);
+    req.on('end', () => {
+      try {
+        const { matchId, winner } = safeParse(body, {});
+        const sport = parsed.query.sport || 'esports';
+        if (!matchId || !winner) { sendJson(res, { error: 'Missing matchId/winner' }, 400); return; }
+        const tips = db.prepare("SELECT * FROM tips WHERE match_id = ? AND sport = ? AND result IS NULL").all(matchId, sport);
+        let settled = 0;
+        for (const tip of tips) {
+          const result = norm(tip.tip_participant).includes(norm(winner)) ? 'win' : 'loss';
+          stmts.settleTip.run(result, matchId, sport);
+          settled++;
+        }
+        sendJson(res, { ok: true, settled });
+      } catch(e) { sendJson(res, { error: e.message }, 500); }
+    });
+    return;
+  }
+
+  // ── ROI e Estatísticas ──
+  if (p === '/roi') {
+    const sport = parsed.query.sport || 'esports';
+    const row = stmts.getROI.get(sport);
+    const calibration = stmts.getCalibration.all(sport);
+
+    const tips = db.prepare("SELECT odds, stake, result, ev, is_live FROM tips WHERE sport = ? AND result IS NOT NULL").all(sport);
+    let totalStaked = 0, totalProfit = 0;
+    const liveTips = { wins: 0, losses: 0, total: 0, profit: 0, staked: 0 };
+    const preTips  = { wins: 0, losses: 0, total: 0, profit: 0, staked: 0 };
+
+    for (const t of tips) {
+      const stake = parseFloat(t.stake) || 1;
+      const odds  = parseFloat(t.odds)  || 1;
+      const profit = t.result === 'win' ? stake * (odds - 1) : -stake;
+      totalStaked  += stake;
+      totalProfit  += profit;
+      const bucket = t.is_live ? liveTips : preTips;
+      bucket.total++;
+      bucket.staked += stake;
+      bucket.profit += profit;
+      if (t.result === 'win') bucket.wins++; else bucket.losses++;
+    }
+
+    const roi = totalStaked > 0 ? ((totalProfit / totalStaked) * 100).toFixed(2) : '0.00';
+    const calcBucketROI = b => b.staked > 0 ? ((b.profit / b.staked) * 100).toFixed(2) : '0.00';
+
+    sendJson(res, {
+      overall: {
+        total: row?.total || 0, wins: row?.wins || 0, losses: row?.losses || 0,
+        roi, totalProfit: totalProfit.toFixed(2), totalStaked: totalStaked.toFixed(2),
+        avg_ev: row?.avg_ev || 0, avg_odds: row?.avg_odds || 0
+      },
+      calibration: calibration.map(c => ({ ...c, win_rate: c.win_rate?.toFixed(1) || '0.0' })),
+      byPhase: {
+        live:    { ...liveTips, roi: calcBucketROI(liveTips) },
+        preGame: { ...preTips,  roi: calcBucketROI(preTips)  }
+      }
+    });
+    return;
+  }
+
+  // ── Form e H2H ──
+  if (p === '/team-form' || p === '/form') {
+    const team = parsed.query.team || parsed.query.name || '';
+    const game = parsed.query.game || 'lol';
+    if (!team) { sendJson(res, { error: 'team param required' }, 400); return; }
+    const rows = stmts.getTeamForm.all(team, team, game);
+    if (!rows.length) { sendJson(res, { wins: 0, losses: 0, winRate: 0, streak: '—' }); return; }
+    let wins = 0, losses = 0, streak = '', streakCount = 0;
+    for (const r of rows) {
+      const won = norm(r.winner) === norm(team);
+      if (wins + losses === 0) { streak = won ? 'W' : 'L'; streakCount = 1; }
+      else if ((streak[0] === 'W') === won) streakCount++;
+      else break;
+      if (won) wins++; else losses++;
+    }
+    sendJson(res, { wins, losses, winRate: rows.length > 0 ? Math.round(wins / rows.length * 100) : 0, streak: `${streakCount}${streak}` });
+    return;
+  }
+
+  if (p === '/h2h') {
+    const t1 = parsed.query.team1 || '', t2 = parsed.query.team2 || '';
+    const game = parsed.query.game || 'lol';
+    if (!t1 || !t2) { sendJson(res, { totalMatches: 0, t1Wins: 0, t2Wins: 0 }); return; }
+    const rows = stmts.getH2H.all(t1, t2, t2, t1, game);
+    let t1w = 0, t2w = 0;
+    for (const r of rows) {
+      if (norm(r.winner) === norm(t1)) t1w++; else t2w++;
+    }
+    sendJson(res, { totalMatches: rows.length, t1Wins: t1w, t2Wins: t2w });
+    return;
+  }
+
+  if (p === '/odds-movement') {
+    const t1 = parsed.query.team1 || '', t2 = parsed.query.team2 || '';
+    const sport = parsed.query.sport || 'esports';
+    const matchKey = `${norm(t1)}_${norm(t2)}`;
+    const history = stmts.getOddsMovement.all(sport, matchKey);
+    sendJson(res, { match: `${t1} vs ${t2}`, history: history.map(h => ({
+      odds_t1: h.odds_p1, odds_t2: h.odds_p2, bookmaker: h.bookmaker, recorded_at: h.recorded_at
+    })) });
+    return;
+  }
+
+  // ── DB Status ──
+  if (p === '/db-status') {
+    const sport = parsed.query.sport || 'esports';
+    try {
+      const s = stmts.getDBStatus.get(sport, sport, sport, sport, sport, sport);
+      sendJson(res, s || {});
+    } catch(e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
+  // ── Claude Proxy ──
+  if (p === '/claude' && req.method === 'POST') {
+    const key = req.headers['x-claude-key'] || CLAUDE_KEY;
+    if (!key) { sendJson(res, { error: 'Claude API key ausente' }, 401); return; }
+    let body = ''; req.on('data', d => body += d);
+    req.on('end', async () => {
+      try {
+        const payload = safeParse(body, null);
+        if (!payload) { sendJson(res, { error: 'Invalid JSON' }, 400); return; }
+        const r = await httpsPost('https://api.anthropic.com/v1/messages', payload, {
+          'x-api-key': key, 'anthropic-version': '2023-06-01', 'content-type': 'application/json'
+        });
+        const result = safeParse(r.body, { error: 'Claude sem resposta' });
+        res.writeHead(r.status, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+        res.end(r.body);
+      } catch(e) { sendJson(res, { error: e.message }, 500); }
+    });
+    return;
+  }
+
+  // ── CLV e Abertura ──
+  if (p === '/update-clv' && req.method === 'POST') {
+    let body = ''; req.on('data', d => body += d);
+    req.on('end', () => {
+      try {
+        const sport = parsed.query.sport || 'esports';
+        const { matchId, clvOdds } = safeParse(body, {});
+        if (matchId && clvOdds) stmts.updateTipCLV.run(parseFloat(clvOdds), matchId, sport);
+        sendJson(res, { ok: true });
+      } catch(e) { sendJson(res, { error: e.message }, 500); }
+    });
     return;
   }
 
