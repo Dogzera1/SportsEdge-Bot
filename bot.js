@@ -435,26 +435,34 @@ async function settleCompletedTips() {
 
   for (const sport of Object.keys(SPORTS)) {
     if (!SPORTS[sport].enabled) continue;
-    
+
     try {
       const unsettled = await serverGet('/unsettled-tips?days=14', sport);
       if (!Array.isArray(unsettled) || !unsettled.length) continue;
-      
-      const pastMatches = await serverGet('/pending-past', sport);
-      const matchResults = new Map(pastMatches.map(m => [m.match_id, m]));
-      
+
+      let settled = 0;
       for (const tip of unsettled) {
-        const match = matchResults.get(tip.match_id);
-        if (!match?.winner) continue;
-        
-        const won = norm(match.winner).includes(norm(tip.tip_participant));
-        await serverPost('/settle-tip', {
-          matchId: tip.match_id,
-          winner: match.winner
-        }, sport);
-        
-        log('INFO', 'SETTLE', `${sport}: ${tip.participant1} vs ${tip.participant2} → ${won ? 'WIN' : 'LOSS'}`);
+        if (!tip.match_id) continue;
+        try {
+          const isPanda = String(tip.match_id).startsWith('ps_');
+          const endpoint = isPanda
+            ? `/ps-result?matchId=${encodeURIComponent(tip.match_id)}`
+            : `/match-result?matchId=${encodeURIComponent(tip.match_id)}&game=lol`;
+
+          const result = await serverGet(endpoint).catch(() => null);
+          if (!result?.resolved || !result?.winner) continue;
+
+          await serverPost('/settle', { matchId: tip.match_id, winner: result.winner }, sport);
+
+          const won = norm(result.winner).includes(norm(tip.tip_participant));
+          log('INFO', 'SETTLE', `${sport}: ${tip.participant1} vs ${tip.participant2} → ${won ? 'WIN ✅' : 'LOSS ❌'} (${result.winner})`);
+          settled++;
+        } catch(e) {
+          log('WARN', 'SETTLE', `Tip ${tip.match_id}: ${e.message}`);
+        }
       }
+
+      if (settled > 0) log('INFO', 'SETTLE', `${sport}: ${settled} tips liquidadas`);
     } catch(e) {
       log('WARN', 'SETTLE', `${sport}: ${e.message}`);
     }
@@ -820,14 +828,14 @@ async function autoAnalyzeMatch(token, match) {
     const prompt = buildEsportsPrompt(match, game, gamesContext, o, enrichSection);
 
     const resp = await serverPost('/claude', {
-      model: 'claude-sonnet-4-6',
+      model: 'deepseek-chat',
       max_tokens: 1800,
       messages: [{ role: 'user', content: prompt }]
     }, null, { 'x-claude-key': CLAUDE_KEY });
 
     const text = resp.content?.map(b => b.text || '').join('');
     if (!text) {
-      log('WARN', 'AUTO', `Claude sem resposta para ${match.team1} vs ${match.team2}`);
+      log('WARN', 'AUTO', `IA sem resposta para ${match.team1} vs ${match.team2} (provider: ${resp.provider || 'claude'})`);
       return null;
     }
 

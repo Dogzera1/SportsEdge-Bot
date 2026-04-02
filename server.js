@@ -10,6 +10,7 @@ const { log, sendJson, safeParse, norm, httpGet, httpsPost, oddsApiAllowed } = r
 // Railway sets $PORT automatically; start.js bridges it to SERVER_PORT
 const PORT = parseInt(process.env.PORT || process.env.SERVER_PORT) || 3000;
 const CLAUDE_KEY = process.env.CLAUDE_API_KEY;
+const DEEPSEEK_KEY = process.env.DEEPSEEK_API_KEY || '';
 // Aceita múltiplos nomes de variável para a chave OddsPapi
 const ODDSPAPI_KEY = process.env.ODDS_API_KEY
   || process.env.ODDSPAPI_KEY
@@ -1184,6 +1185,30 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // ── Resultado PandaScore (settlement de tips ps_*) ──
+  if (p === '/ps-result') {
+    const rawId = parsed.query.matchId || '';
+    const psId = rawId.replace('ps_', '');
+    if (!psId) { sendJson(res, { resolved: false, error: 'matchId obrigatório' }, 400); return; }
+    if (!PANDASCORE_TOKEN) { sendJson(res, { resolved: false, error: 'PANDASCORE_TOKEN não configurado' }); return; }
+    try {
+      const r = await httpGet(`https://api.pandascore.co/lol/matches/${psId}`, { 'Authorization': `Bearer ${PANDASCORE_TOKEN}` });
+      const m = safeParse(r.body, {});
+      const winner = m.winner?.name || null;
+      if (winner) {
+        const t1 = m.opponents?.[0]?.opponent?.name || '';
+        const t2 = m.opponents?.[1]?.opponent?.name || '';
+        stmts.upsertMatchResult.run(rawId, 'lol', t1, t2, winner, '', m.league?.name || '');
+        sendJson(res, { matchId: rawId, winner, resolved: true });
+      } else {
+        sendJson(res, { matchId: rawId, resolved: false });
+      }
+    } catch(e) {
+      sendJson(res, { matchId: rawId, resolved: false, error: e.message });
+    }
+    return;
+  }
+
   // ── Usuários ──
   if (p === '/users') {
     const subscribed = parsed.query.subscribed;
@@ -1372,21 +1397,46 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // ── Claude Proxy ──
+  // ── AI Proxy (DeepSeek ou Claude) ──
   if (p === '/claude' && req.method === 'POST') {
-    const key = req.headers['x-claude-key'] || CLAUDE_KEY;
-    if (!key) { sendJson(res, { error: 'Claude API key ausente' }, 401); return; }
     let body = ''; req.on('data', d => body += d);
     req.on('end', async () => {
       try {
         const payload = safeParse(body, null);
         if (!payload) { sendJson(res, { error: 'Invalid JSON' }, 400); return; }
-        const r = await httpsPost('https://api.anthropic.com/v1/messages', payload, {
-          'x-api-key': key, 'anthropic-version': '2023-06-01', 'content-type': 'application/json'
-        });
-        const result = safeParse(r.body, { error: 'Claude sem resposta' });
-        res.writeHead(r.status, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-        res.end(r.body);
+
+        const useDeepSeek = !!(DEEPSEEK_KEY && (payload.model?.startsWith('deepseek') || !CLAUDE_KEY));
+
+        if (useDeepSeek) {
+          // ── DeepSeek (OpenAI-compatible) ──
+          const dsPayload = {
+            model: payload.model?.startsWith('deepseek') ? payload.model : 'deepseek-chat',
+            max_tokens: payload.max_tokens || 1800,
+            messages: payload.messages
+          };
+          const r = await httpsPost('https://api.deepseek.com/chat/completions', dsPayload, {
+            'Authorization': `Bearer ${DEEPSEEK_KEY}`,
+            'content-type': 'application/json'
+          });
+          const ds = safeParse(r.body, {});
+          const text = ds.choices?.[0]?.message?.content || '';
+          if (!text && ds.error) {
+            log('WARN', 'AI', `DeepSeek erro: ${ds.error?.message || JSON.stringify(ds.error)}`);
+            sendJson(res, { error: ds.error?.message || 'DeepSeek sem resposta' }, r.status || 500);
+            return;
+          }
+          // Normaliza para o formato Claude (content[].text) para compatibilidade com bot.js
+          sendJson(res, { content: [{ type: 'text', text }], model: dsPayload.model, provider: 'deepseek' });
+        } else {
+          // ── Claude (Anthropic) ──
+          const key = req.headers['x-claude-key'] || CLAUDE_KEY;
+          if (!key) { sendJson(res, { error: 'Nenhuma AI key configurada (DEEPSEEK_API_KEY ou CLAUDE_API_KEY)' }, 401); return; }
+          const r = await httpsPost('https://api.anthropic.com/v1/messages', payload, {
+            'x-api-key': key, 'anthropic-version': '2023-06-01', 'content-type': 'application/json'
+          });
+          res.writeHead(r.status, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+          res.end(r.body);
+        }
       } catch(e) { sendJson(res, { error: e.message }, 500); }
     });
     return;
