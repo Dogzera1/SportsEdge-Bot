@@ -2460,6 +2460,19 @@ async function poll(token, sport) {
               `⚠️ _Aposte com responsabilidade._`,
               getMenu(sport)
             );
+          } else if (text === '/debug_odds') {
+            try {
+              const { fetchOdds, oddsCache, lastEsportsOddsUpdate } = require('./server');
+              await fetchOdds('esports');
+              const count = Object.keys(oddsCache).length;
+              const lastSync = new Date(lastEsportsOddsUpdate).toLocaleTimeString();
+              await send(token, chatId, `🔍 *Diagnóstico OddsPapi*\n\n` +
+                `• Cache: ${count} partidas\n` +
+                `• Último Sync: ${lastSync}\n` +
+                `• Status API: Verifique os Logs da Railway para detalhes técnicos.`);
+            } catch(e) {
+              await send(token, chatId, `❌ Erro no Debug: ${e.message}`);
+            }
           } else if (text === '📅 Próximas') {
             await handleProximas(token, chatId, sport);
           } else if (text.startsWith('/notificacoes') || text.startsWith('/notificações')) {
