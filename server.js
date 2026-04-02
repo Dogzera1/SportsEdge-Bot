@@ -126,72 +126,68 @@ async function fetchEsportsOdds() {
   if (esportsOddsFetching) return;
   const now = Date.now();
   
-  // Temporariamente reduzido para 1 min para você testar e ver as odds agora!
-  if (now - lastEsportsOddsUpdate < 1 * 60 * 1000) return;
+  // Cache de 15 min para v4 (Quota amigável)
+  if (now - lastEsportsOddsUpdate < 15 * 60 * 1000) return;
 
   esportsOddsFetching = true;
   try {
     let cached = 0;
     
-    // Rota da OddsPapi -> Filtramos por esports
-    const url = `https://api.oddspapi.io/v1/fixtures?api_key=${ODDSPAPI_KEY}&sport=esports`;
-    const r = await httpGet(url);
+    // IDs dos maiores torneios de LoL/Dota (fornecidos pelo usuário) para v4
+    // LCS, LEC, LCK, CBLOL, LPL, etc.
+    const tidList = '2450,2452,2454,26698,39985,45589,47864,50586,2527,2549';
+    const url = `https://api.oddspapi.io/v4/odds-by-tournaments?apiKey=${ODDSPAPI_KEY}&sportId=18&tournamentIds=${tidList}&bookmakers=1xbet`;
     
+    const r = await httpGet(url);
     if (r.status === 200) {
       const raw = safeParse(r.body, {});
-      const events = Array.isArray(raw) ? raw : (raw.data || raw.fixtures || raw.events || []);
+      const tournamentList = Array.isArray(raw) ? raw : (raw.data || []);
       
-      log('INFO', 'ODDS', `OddsPapi retornou ${events.length} fixtures totais.`);
-      
-      for (const ev of events) {
-        if (!ev.bookmakerOdds || !ev.bookmakerOdds['1xbet']) continue;
-        
-        const bk = ev.bookmakerOdds['1xbet'];
-        if (!bk.markets) continue;
+      for (const t of tournamentList) {
+        const fixtures = t.fixtures || [];
+        for (const f of fixtures) {
+          if (!f.bookmakerOdds || !f.bookmakerOdds['1xbet']) continue;
+          
+          const bk = f.bookmakerOdds['1xbet'];
+          const p1Name = f.participant1Name || f.homeName || '';
+          const p2Name = f.participant2Name || f.awayName || '';
+          if (!p1Name || !p2Name) continue;
 
-        // Na OddsPapi, o mercado "Vencedor da Partida" (Moneyline) costuma ter bookmakerMarketId = "1"
-        // Os objetos com as odds vêm separados mas contêm esse ID
-        const matchWinnerOutcomes = Object.values(bk.markets).filter(m => m.bookmakerMarketId === '1');
-        if (matchWinnerOutcomes.length < 2) continue;
+          // Na v4, os mercados de Match Winner costumam ser 183 ou 101
+          const markets = bk.markets || {};
+          const matchMarket = markets['183'] || markets['101'] || Object.values(markets).find(m => m.bookmakerMarketId === '1');
+          if (!matchMarket || !matchMarket.outcomes) continue;
 
-        // Extrai o preço (odd) das duas partições
-        let prices = [];
-        for (const out of matchWinnerOutcomes) {
-          try {
-            const outKey = Object.keys(out.outcomes)[0];
-            const price = parseFloat(out.outcomes[outKey].players['0'].price);
-            if (!isNaN(price)) prices.push(price);
-          } catch(e) {}
+          const outcomes = Object.values(matchMarket.outcomes);
+          if (outcomes.length < 2) continue;
+
+          let prices = [];
+          for (const out of outcomes) {
+            try {
+              const price = parseFloat(out.players['0'].price);
+              if (!isNaN(price)) prices.push(price);
+            } catch(e) {}
+          }
+          
+          if (prices.length < 2) continue;
+          
+          const t1Odd = prices[0];
+          const t2Odd = prices[1];
+          if (t1Odd < 1.01 || t2Odd < 1.01) continue;
+
+          const entry = { t1: t1Odd.toFixed(2), t2: t2Odd.toFixed(2), bookmaker: '1xBet', t1Name: p1Name, t2Name: p2Name };
+          const nameKey = f.fixtureId || `${norm(p1Name)}_${norm(p2Name)}`;
+          
+          oddsCache[`esports_${nameKey}`] = entry;
+          cached++;
         }
-        
-        if (prices.length < 2) continue;
-        
-        const t1Odd = prices[0];
-        const t2Odd = prices[1];
-        if (t1Odd < 1.01 || t2Odd < 1.01) continue;
-
-        // Como a Oddspapi não devolveu nomes nativos nesse endpoint, fazemos dump da URL (ex: "drx-dn-soopers")
-        const urlSlug = (bk.fixturePath || '').split('/').pop().replace(/^\d+-/, '').replace(/-/g, ' ');
-        if (!urlSlug) continue;
-
-        // O fuzzy match no bot verifica se 'vt1.includes(nt1)'. Se vt1=urlSlug, ele conterá ambos os nomes perfeitamente!
-        const p1Name = urlSlug; 
-        const p2Name = urlSlug;
-
-        const entry = { t1: t1Odd.toFixed(2), t2: t2Odd.toFixed(2), bookmaker: '1xBet', t1Name: p1Name, t2Name: p2Name };
-        const nameKey = ev.fixtureId || String(ev.participant1Id);
-        
-        // Salvamos com a chave do fixtureId no cache, mas o fuzzyFallback vai resgatar pesquisando o t1Name (slug)
-        oddsCache[`esports_${nameKey}`] = entry;
-        cached++;
-        log('DEBUG', 'ODDS', `Mapped: ${p1Name} -> ${t1Odd} | ${t2Odd}`);
       }
     }
     
-    log('INFO', 'ODDS', `OddsPapi (1xBet): ${cached} partidas armazenadas em cache. Próximo Sync em 30 min.`);
+    log('INFO', 'ODDS', `OddsPapi v4: ${cached} partidas (LCK/LCS/CBLOL) em cache.`);
     lastEsportsOddsUpdate = Date.now();
   } catch(e) {
-    log('ERROR', 'ODDS', `OddsPapi Fetch: ${e.message}`);
+    log('ERROR', 'ODDS', `OddsPapi v4 Error: ${e.message}`);
   } finally {
     esportsOddsFetching = false;
   }
