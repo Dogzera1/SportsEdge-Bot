@@ -68,7 +68,7 @@ const LOL_LEAGUES = new Set([
   'esports_balkan_league', 'esport-balkan-league', 'ebl',
   'hellenic_legends_league', 'lta_cross',
   // Ligas adicionais da lista OddsPapi
-  'gll', 'road-of-legends', 'ultraliga', 'elite-series', 'njcs', 'kjl',
+  'gll', 'road-of-legends', 'road_of_legends', 'roadoflegends', 'ultraliga', 'elite-series', 'njcs', 'kjl',
   'arabian-league', 'lvp-superliga', 'ldl', 'cblol-academy',
   'circuito-desafiante', 'lcl', 'gll-pro-am', 'lfl-division-2',
   'finnish-pro-league-winter', 'finnish-pro-league',
@@ -201,33 +201,54 @@ async function fetchEsportsOdds() {
   lastApiResponse = 'Iniciando busca...';
   try {
     const tids = await getEsportsTournamentIds();
-    const tidString = tids.join(',');
 
-    // Guia p.3: apiKey como query param, bookmaker, tournamentIds, oddsFormat=decimal
-    const url = `https://api.oddspapi.io/v4/odds-by-tournaments?bookmaker=1xbet&tournamentIds=${tidString}&oddsFormat=decimal&apiKey=${ODDSPAPI_KEY}`;
-
-    const r = await httpGet(url).catch(e => ({ status: 500, body: e.message }));
-    lastApiResponse = `HTTP ${r.status} | ${(r.body || '').slice(0, 200)}`;
-    log('DEBUG', 'ODDS', `v4 status=${r.status} tids=${tids.length} body=${(r.body||'').slice(0, 120)}`);
-
-    if (r.status === 429) {
-      esportsBackoffUntil = now + ESPORTS_BACKOFF_TTL;
-      log('WARN', 'ODDS', '429 — backoff 2h ativado');
-      return;
+    // A API limita o número de IDs por requisição — fazemos em lotes
+    // Usa ODDSPAPI_BATCH_SIZE do env; padrão conservador = 3
+    const BATCH_SIZE = parseInt(process.env.ODDSPAPI_BATCH_SIZE || '3');
+    const batches = [];
+    for (let i = 0; i < tids.length; i += BATCH_SIZE) {
+      batches.push(tids.slice(i, i + BATCH_SIZE));
     }
-    if (r.status !== 200) {
-      log('WARN', 'ODDS', `HTTP ${r.status} — sem atualização de odds`);
-      return;
+    log('INFO', 'ODDS', `Buscando odds: ${tids.length} torneios em ${batches.length} lotes de ${BATCH_SIZE}`);
+
+    const allFixtures = [];
+    let lastStatus = 0;
+
+    for (let bi = 0; bi < batches.length; bi++) {
+      const batch = batches[bi];
+      const url = `https://api.oddspapi.io/v4/odds-by-tournaments?bookmaker=1xbet&tournamentIds=${batch.join(',')}&oddsFormat=decimal&apiKey=${ODDSPAPI_KEY}`;
+      const r = await httpGet(url).catch(e => ({ status: 500, body: e.message }));
+      lastStatus = r.status;
+
+      log('DEBUG', 'ODDS', `Lote ${bi+1}/${batches.length} tids=[${batch.join(',')}] status=${r.status} body=${(r.body||'').slice(0,80)}`);
+      lastApiResponse = `Lote ${bi+1}: HTTP ${r.status} | ${(r.body || '').slice(0, 150)}`;
+
+      if (r.status === 429) {
+        esportsBackoffUntil = now + ESPORTS_BACKOFF_TTL;
+        log('WARN', 'ODDS', '429 — backoff 2h ativado');
+        break;
+      }
+      if (r.status !== 200) {
+        log('WARN', 'ODDS', `Lote ${bi+1}: HTTP ${r.status} — pulando`);
+        continue;
+      }
+
+      const raw = safeParse(r.body, null);
+      if (raw) {
+        const batchFixtures = normalizeFixtures(raw);
+        allFixtures.push(...batchFixtures);
+      }
+
+      // Pausa entre lotes para respeitar rate limit (exceto no último)
+      if (bi < batches.length - 1) {
+        await new Promise(res => setTimeout(res, 400));
+      }
     }
 
-    const raw = safeParse(r.body, null);
-    if (!raw) { log('WARN', 'ODDS', 'Resposta inválida (não JSON)'); return; }
-
-    const fixtures = normalizeFixtures(raw);
-    log('INFO', 'ODDS', `Fixtures recebidos: ${fixtures.length} | tids enviados: ${tids.length}`);
+    log('INFO', 'ODDS', `Fixtures recebidos: ${allFixtures.length} em ${batches.length} lotes`);
 
     let cachedCount = 0;
-    for (const f of fixtures) {
+    for (const f of allFixtures) {
       if (!f.bookmakerOdds) continue;
 
       // Prefere 1xbet; aceita qualquer bookmaker presente
@@ -308,7 +329,7 @@ async function fetchEsportsOdds() {
       cachedCount++;
     }
 
-    log('INFO', 'ODDS', `Sync concluído: ${cachedCount}/${fixtures.length} fixtures com odds`);
+    log('INFO', 'ODDS', `Sync concluído: ${cachedCount}/${allFixtures.length} fixtures com odds`);
     lastEsportsOddsUpdate = now;
   } catch(e) {
     log('ERROR', 'ODDS', `fetchEsportsOdds: ${e.message}`);
