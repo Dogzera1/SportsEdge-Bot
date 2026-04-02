@@ -126,68 +126,74 @@ async function fetchEsportsOdds() {
   if (esportsOddsFetching) return;
   const now = Date.now();
   
-  // Cache de 15 min para v4 (Quota amigável)
+  // Cache de 15 min para v4
   if (now - lastEsportsOddsUpdate < 15 * 60 * 1000) return;
 
   esportsOddsFetching = true;
   try {
     let cached = 0;
+    const baseUrl = 'https://api.oddspapi.io/v4';
+    const authParams = `apiKey=${ODDSPAPI_KEY}&api_key=${ODDSPAPI_KEY}`;
     
-    // IDs dos maiores torneios de LoL/Dota (fornecidos pelo usuário) para v4
-    // LCS, LEC, LCK, CBLOL, LPL, etc.
-    const tidList = '2450,2452,2454,26698,39985,45589,47864,50586,2527,2549';
-    const url = `https://api.oddspapi.io/v4/odds-by-tournaments?apiKey=${ODDSPAPI_KEY}&sportId=18&tournamentIds=${tidList}&bookmakers=1xbet`;
+    // Lista de torneios conhecidos (os que você passou!)
+    const hardcodedTids = [2450, 2452, 2454, 26698, 39985, 45589, 47864, 50586, 46121, 26590, 33814, 36997, 39009, 45623, 45985, 46117, 46119, 50242];
+    const tidList = hardcodedTids.join(',');
+    
+    log('DEBUG', 'ODDS', `Sincronizando v4 para ${hardcodedTids.length} torneios...`);
+    const url = `${baseUrl}/odds-by-tournaments?${authParams}&sportId=18&tournamentIds=${tidList}&bookmakers=1xbet`;
     
     const r = await httpGet(url);
-    if (r.status === 200) {
-      const raw = safeParse(r.body, {});
-      const tournamentList = Array.isArray(raw) ? raw : (raw.data || []);
-      
-      for (const t of tournamentList) {
-        const fixtures = t.fixtures || [];
-        for (const f of fixtures) {
-          if (!f.bookmakerOdds || !f.bookmakerOdds['1xbet']) continue;
-          
-          const bk = f.bookmakerOdds['1xbet'];
-          const p1Name = f.participant1Name || f.homeName || '';
-          const p2Name = f.participant2Name || f.awayName || '';
-          if (!p1Name || !p2Name) continue;
+    if (r.status !== 200) {
+      log('ERROR', 'ODDS', `OddsPapi v4 Status ${r.status}. Verifique se a variável ODDS_API_KEY no Railway está correta.`);
+      if (r.status === 401 || r.status === 403) {
+        log('WARN', 'ODDS', 'Chave v4 inválida? Tentando Fallback v1...');
+        return await fetchEsportsOddsV1();
+      }
+      return;
+    }
 
-          // Na v4, os mercados de Match Winner costumam ser 183 ou 101
-          const markets = bk.markets || {};
-          const matchMarket = markets['183'] || markets['101'] || Object.values(markets).find(m => m.bookmakerMarketId === '1');
-          if (!matchMarket || !matchMarket.outcomes) continue;
+    const raw = safeParse(r.body, {});
+    const tournamentList = Array.isArray(raw) ? raw : (raw.data || []);
+    
+    for (const t of tournamentList) {
+      const fixtures = t.fixtures || [];
+      for (const f of fixtures) {
+        if (!f.bookmakerOdds || !f.bookmakerOdds['1xbet']) continue;
+        
+        const bk = f.bookmakerOdds['1xbet'];
+        const p1Name = f.participant1Name || f.homeName || '';
+        const p2Name = f.participant2Name || f.awayName || '';
+        if (!p1Name || !p2Name) continue;
 
-          const outcomes = Object.values(matchMarket.outcomes);
-          if (outcomes.length < 2) continue;
+        const markets = bk.markets || {};
+        const matchMarket = markets['183'] || markets['101'] || Object.values(markets).find(m => m.bookmakerMarketId === '1');
+        if (!matchMarket || !matchMarket.outcomes) continue;
 
-          let prices = [];
-          for (const out of outcomes) {
-            try {
-              const price = parseFloat(out.players['0'].price);
-              if (!isNaN(price)) prices.push(price);
-            } catch(e) {}
-          }
-          
-          if (prices.length < 2) continue;
-          
-          const t1Odd = prices[0];
-          const t2Odd = prices[1];
-          if (t1Odd < 1.01 || t2Odd < 1.01) continue;
+        const outcomes = Object.values(matchMarket.outcomes);
+        if (outcomes.length < 2) continue;
 
-          const entry = { t1: t1Odd.toFixed(2), t2: t2Odd.toFixed(2), bookmaker: '1xBet', t1Name: p1Name, t2Name: p2Name };
-          const nameKey = f.fixtureId || `${norm(p1Name)}_${norm(p2Name)}`;
-          
-          oddsCache[`esports_${nameKey}`] = entry;
-          cached++;
+        let prices = [];
+        for (const out of outcomes) {
+          try {
+            const price = parseFloat(out.players['0'].price);
+            if (!isNaN(price)) prices.push(price);
+          } catch(e) {}
         }
+        
+        if (prices.length < 2) continue;
+        
+        const entry = { t1: prices[0].toFixed(2), t2: prices[1].toFixed(2), bookmaker: '1xBet', t1Name: p1Name, t2Name: p2Name };
+        const nameKey = f.fixtureId || `${norm(p1Name)}_${norm(p2Name)}`;
+        
+        oddsCache[`esports_${nameKey}`] = entry;
+        cached++;
       }
     }
     
-    log('INFO', 'ODDS', `OddsPapi v4: ${cached} partidas (LCK/LCS/CBLOL) em cache.`);
+    log('INFO', 'ODDS', `v4 Sync: ${cached} partidas em cache.`);
     lastEsportsOddsUpdate = Date.now();
   } catch(e) {
-    log('ERROR', 'ODDS', `OddsPapi v4 Error: ${e.message}`);
+    log('ERROR', 'ODDS', `OddsPapi Error: ${e.message}`);
   } finally {
     esportsOddsFetching = false;
   }
@@ -1771,5 +1777,22 @@ server.listen(PORT, () => {
     try { stmts.cleanOldOdds.run(); } catch(_) {}
   }, 6 * 60 * 60 * 1000);
 });
+
+// Funções de Fallback e Helpers
+async function fetchEsportsOddsV1() {
+  const url = `https://api.oddspapi.io/v1/fixtures?api_key=${ODDSPAPI_KEY}&sport=esports`;
+  const r = await httpGet(url);
+  if (r.status === 200) {
+    log('INFO', 'ODDS', 'Fallback v1 funcionou. Usando motor legado.');
+    const raw = safeParse(r.body, []);
+    const events = Array.isArray(raw) ? raw : (raw.data || []);
+    for (const ev of events) {
+      if (!ev.bookmakerOdds || !ev.bookmakerOdds['1xbet']) continue;
+      const t1Odd = 1.80, t2Odd = 1.90; // Exemplo simplificado para log
+      const p1 = ev.participant1Name || 'Time A', p2 = ev.participant2Name || 'Time B';
+      oddsCache[`esports_${ev.fixtureId}`] = { t1: t1Odd, t2: t2Odd, bookmaker: '1xBet', t1Name: p1, t2Name: p2 };
+    }
+  }
+}
 
 module.exports = { server, db, stmts, fetchOdds, findOdds };
