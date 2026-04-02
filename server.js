@@ -139,7 +139,11 @@ async function fetchEsportsOdds() {
     const r = await httpGet(url);
     
     if (r.status === 200) {
-      const events = safeParse(r.body, []);
+      const raw = safeParse(r.body, {});
+      const events = Array.isArray(raw) ? raw : (raw.data || raw.fixtures || raw.events || []);
+      
+      log('INFO', 'ODDS', `OddsPapi retornou ${events.length} fixtures totais.`);
+      
       for (const ev of events) {
         if (!ev.bookmakerOdds || !ev.bookmakerOdds['1xbet']) continue;
         
@@ -181,6 +185,7 @@ async function fetchEsportsOdds() {
         // Salvamos com a chave do fixtureId no cache, mas o fuzzyFallback vai resgatar pesquisando o t1Name (slug)
         oddsCache[`esports_${nameKey}`] = entry;
         cached++;
+        log('DEBUG', 'ODDS', `Mapped: ${p1Name} -> ${t1Odd} | ${t2Odd}`);
       }
     }
     
