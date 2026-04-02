@@ -10,9 +10,10 @@ const SERVER = '127.0.0.1';
 const PORT = parseInt(process.env.SERVER_PORT) || parseInt(process.env.PORT) || 8080;
 const ADMIN_IDS = new Set((process.env.ADMIN_USER_IDS || '').split(',').filter(Boolean));
 const CLAUDE_KEY = process.env.CLAUDE_API_KEY;
+const DEEPSEEK_KEY = process.env.DEEPSEEK_API_KEY;
 
-if (!CLAUDE_KEY) {
-  console.error('❌ Configure CLAUDE_API_KEY no .env');
+if (!CLAUDE_KEY && !DEEPSEEK_KEY) {
+  console.error('❌ Configure CLAUDE_API_KEY ou DEEPSEEK_API_KEY no .env');
   process.exit(1);
 }
 
