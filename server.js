@@ -1287,7 +1287,14 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // ── Shared Endpoints ──
+  // ── Debug Endpoint ──
+  if (p === '/debug-odds') {
+    const count = Object.keys(oddsCache).length;
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({ count, lastSync: lastEsportsOddsUpdate, status: count > 0 ? 'OK' : 'Empty Cache / Auth Error' }));
+  }
+
+  // ── API Routes (Tips, ROI, etc.) ──
   if (p === '/odds') {
     const sport = parsed.query.sport || 'esports';
     await fetchOdds(sport);

@@ -2462,14 +2462,12 @@ async function poll(token, sport) {
             );
           } else if (text === '/debug_odds') {
             try {
-              const { fetchOdds, oddsCache, lastEsportsOddsUpdate } = require('./server');
-              await fetchOdds('esports');
-              const count = Object.keys(oddsCache).length;
-              const lastSync = new Date(lastEsportsOddsUpdate).toLocaleTimeString();
+              const debug = await serverGet('/debug-odds', sport);
+              const lastSync = new Date(debug.lastSync).toLocaleTimeString();
               await send(token, chatId, `🔍 *Diagnóstico OddsPapi*\n\n` +
-                `• Cache: ${count} partidas\n` +
+                `• Cache: ${debug.count} partidas\n` +
                 `• Último Sync: ${lastSync}\n` +
-                `• Status API: Verifique os Logs da Railway para detalhes técnicos.`);
+                `• Status API: ${debug.status || 'OK'}`);
             } catch(e) {
               await send(token, chatId, `❌ Erro no Debug: ${e.message}`);
             }
