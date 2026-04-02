@@ -3,7 +3,7 @@ const https = require('https');
 const http = require('http');
 const initDatabase = require('./lib/database');
 const { SPORTS, getSportById, getSportByToken, getTokenToSportMap } = require('./lib/sports');
-const { log, calcKelly, norm, fuzzyName, fmtDate, fmtDateTime, fmtDuration, httpGet, httpsPost, safeParse } = require('./lib/utils');
+const { log, calcKelly, norm, fmtDate, fmtDateTime, fmtDuration, safeParse } = require('./lib/utils');
 const { esportsPreFilter } = require('./lib/ml');
 
 const SERVER = '127.0.0.1';
@@ -180,27 +180,11 @@ async function loadExistingTips() {
         if (!tip.match_id) continue;
         const id = tip.match_id;
         // Mark all possible key formats for this match ID
-        for (const prefix of ['lol_', 'dota_', 'upcoming_lol_', 'upcoming_dota_']) {
+        for (const prefix of ['lol_', 'upcoming_lol_']) {
           analyzedMatches.set(`${prefix}${id}`, { ts: Date.now(), tipSent: true });
         }
       }
-      if (esportsTips.length) log('INFO', 'BOOT', `Esports: ${esportsTips.length} tips existentes carregadas (não serão repetidas)`);
-    }
-    // MMA
-    const mmaTips = await serverGet('/unsettled-tips', 'mma').catch(() => []);
-    if (Array.isArray(mmaTips)) {
-      for (const tip of mmaTips) {
-        if (tip.match_id) analyzedFights.set(tip.match_id, { ts: Date.now(), phase: 'final', tipSent: true });
-      }
-      if (mmaTips.length) log('INFO', 'BOOT', `MMA: ${mmaTips.length} tips existentes carregadas`);
-    }
-    // Tennis
-    const tennisTips = await serverGet('/unsettled-tips', 'tennis').catch(() => []);
-    if (Array.isArray(tennisTips)) {
-      for (const tip of tennisTips) {
-        if (tip.match_id) analyzedTennisMatches.set(`tennis_${tip.match_id}`, { ts: Date.now(), tipSent: true });
-      }
-      if (tennisTips.length) log('INFO', 'BOOT', `Tênis: ${tennisTips.length} tips existentes carregadas`);
+      if (esportsTips.length) log('INFO', 'BOOT', `LoL: ${esportsTips.length} tips existentes carregadas (não serão repetidas)`);
     }
   } catch(e) {
     log('WARN', 'BOOT', `Erro ao carregar tips existentes: ${e.message}`);
@@ -242,22 +226,17 @@ async function loadSubscribedUsers() {
   }
 }
 
-// ── Auto Analysis (esports: live every 3min; MMA: upcoming 6h with phases) ──
+// ── Auto Analysis: LoL live + upcoming ──
 async function runAutoAnalysis() {
   const now = Date.now();
 
-  // ── ESPORTS: Analyze LIVE matches every RE_ANALYZE_INTERVAL ──
   const esportsConfig = SPORTS['esports'];
   if (esportsConfig?.enabled) {
     try {
-      const [lolRaw, dotaRaw] = await Promise.all([
-        serverGet('/lol-matches').catch(() => []),
-        serverGet('/dota-matches').catch(() => [])
-      ]);
+      const lolRaw = await serverGet('/lol-matches').catch(() => []);
       const lolLive = Array.isArray(lolRaw) ? lolRaw.filter(m => m.status === 'live') : [];
-      const dotaLive = Array.isArray(dotaRaw) ? dotaRaw.filter(m => m.status === 'live') : [];
-      const allLive = [...lolLive, ...dotaLive];
-      log('INFO', 'AUTO', `Esports: ${lolRaw?.length||0} LoL, ${dotaRaw?.length||0} Dota (${allLive.length} ao vivo) | inscritos=${subscribedUsers.size}`);
+      const allLive = lolLive;
+      log('INFO', 'AUTO', `LoL: ${lolRaw?.length||0} partidas (${allLive.length} ao vivo) | inscritos=${subscribedUsers.size}`);
 
       for (const match of allLive) {
         const matchKey = `${match.game}_${match.id}`;
@@ -277,7 +256,7 @@ async function runAutoAnalysis() {
           const tipOdd = result.tipMatch[2].trim();
           const tipEV = result.tipMatch[3].trim();
           const tipStake = calcKelly(tipEV, tipOdd);
-          const gameIcon = match.game === 'lol' ? '⚽' : '🛡️';
+          const gameIcon = '🎮';
           const oddsLabel = hasRealOdds ? '' : '\n⚠️ _Odds estimadas (sem mercado disponível)_';
 
           await serverPost('/record-tip', {
@@ -306,7 +285,7 @@ async function runAutoAnalysis() {
         } else if (result.fairOdds && !prev?.tipSent) {
           const fo = result.fairOdds;
           const fo1 = parseFloat(fo[2]).toFixed(2), fo2 = parseFloat(fo[4]).toFixed(2);
-          const gameIcon = match.game === 'lol' ? '⚽' : '🛡️';
+          const gameIcon = '🎮';
           const fairMsg = `${gameIcon} 💡 *ODDS DE REFERÊNCIA*\n` +
             `*${match.team1}* vs *${match.team2}*\n_${match.league}_\n\n` +
             `• *${fo[1].trim()}:* *${fo1}*\n• *${fo[3].trim()}:* *${fo2}*\n\n` +
@@ -321,22 +300,16 @@ async function runAutoAnalysis() {
         await new Promise(r => setTimeout(r, 2000));
       }
 
-      // ── ESPORTS UPCOMING: Analyze matches in next 24h (every 2h per match) ──
+      // ── LoL UPCOMING: Analyze matches in next 24h ──
       const windowEnd = now + UPCOMING_WINDOW_HOURS * 60 * 60 * 1000;
-      const lolUpcoming = Array.isArray(lolRaw) ? lolRaw.filter(m => {
+      const allUpcoming = Array.isArray(lolRaw) ? lolRaw.filter(m => {
         if (m.status !== 'upcoming') return false;
         const t = m.time ? new Date(m.time).getTime() : 0;
         return t > now && t <= windowEnd;
       }) : [];
-      const dotaUpcoming = Array.isArray(dotaRaw) ? dotaRaw.filter(m => {
-        if (m.status !== 'upcoming') return false;
-        const t = m.time ? new Date(m.time).getTime() : 0;
-        return t > now && t <= windowEnd;
-      }) : [];
-      const allUpcoming = [...lolUpcoming, ...dotaUpcoming];
 
       if (allUpcoming.length > 0) {
-        log('INFO', 'AUTO', `Esports próximas ${UPCOMING_WINDOW_HOURS}h: ${allUpcoming.length} partidas (${lolUpcoming.length} LoL, ${dotaUpcoming.length} Dota)`);
+        log('INFO', 'AUTO', `LoL próximas ${UPCOMING_WINDOW_HOURS}h: ${allUpcoming.length} partidas`);
         for (const match of allUpcoming) {
           const matchKey = `upcoming_${match.game}_${match.id}`;
           const prev = analyzedMatches.get(matchKey);
@@ -360,7 +333,7 @@ async function runAutoAnalysis() {
             const tipOdd = result.tipMatch[2].trim();
             const tipEV = result.tipMatch[3].trim();
             const tipStake = calcKelly(tipEV, tipOdd);
-            const gameIcon = match.game === 'lol' ? '⚽' : '🛡️';
+            const gameIcon = '🎮';
 
             await serverPost('/record-tip', {
               matchId: String(match.id), eventName: match.league,
@@ -387,7 +360,7 @@ async function runAutoAnalysis() {
           } else if (result.fairOdds && !prev?.tipSent) {
             const fo = result.fairOdds;
             const fo1 = parseFloat(fo[2]).toFixed(2), fo2 = parseFloat(fo[4]).toFixed(2);
-            const gameIcon = match.game === 'lol' ? '⚽' : '🛡️';
+            const gameIcon = '🎮';
             const fairMsg = `${gameIcon} 💡 *ODDS PRÉ-JOGO*\n` +
               `*${match.team1}* vs *${match.team2}*\n_${match.league}_\n` +
               (match.time ? `🕐 Início: *${matchTime}* (BRT)\n` : '') +
@@ -417,135 +390,7 @@ async function runAutoAnalysis() {
     }
   }
 
-  // ── MMA: Analyze upcoming fights every 6h with phase tracking ──
-  const mmaConfig = SPORTS['mma'];
-  if (mmaConfig?.enabled && now - lastAutoAnalyze >= AUTO_ANALYZE_INTERVAL) {
-    lastAutoAnalyze = now;
-    try {
-      const fights = await serverGet('/upcoming-fights?days=2', 'mma');
-      if (!Array.isArray(fights) || !fights.length) {
-        log('INFO', 'AUTO-MMA', 'Nenhuma luta nos próximos 2 dias');
-        return;
-      }
-      log('INFO', 'AUTO-MMA', `${fights.length} lutas nos próximos 2 dias`);
 
-      for (const fight of fights) {
-        const key = fight.id;
-        const eventMs = new Date((fight.event_date || '') + 'T00:00:00').getTime();
-        const hoursToEvent = (eventMs - now) / 3600000;
-        if (isNaN(hoursToEvent) || hoursToEvent > 120 || hoursToEvent < -2) continue;
-
-        const entry = analyzedFights.get(key);
-        if (entry) {
-          if (entry.tipSent) continue; // uma tip por luta — não repetir mesmo após pesagem
-          // Re-análise pós-pesagem: analisou cedo (>24h) e agora estamos dentro de 24h
-          if (entry.phase === 'early' && hoursToEvent <= 24) {
-            log('INFO', 'AUTO-MMA', `Re-análise pós-pesagem: ${fight.participant1_name} vs ${fight.participant2_name}`);
-            analyzedFights.delete(key);
-          } else {
-            continue;
-          }
-        }
-
-        // early = >24h (até 5 dias antes), final = ≤24h (pós-pesagem)
-        const phase = hoursToEvent > 24 ? 'early' : 'final';
-        const daysAway = (hoursToEvent / 24).toFixed(1);
-        log('INFO', 'AUTO-MMA', `Analisando ${fight.participant1_name} vs ${fight.participant2_name} [${phase}] — ${daysAway}d p/ evento`);
-
-        const [p1Stats, p2Stats, odds, form1, form2, h2h] = await Promise.all([
-          fight.participant1_url
-            ? serverGet(`/athlete?url=${encodeURIComponent(fight.participant1_url)}`, 'mma').catch(() => null)
-            : serverGet(`/athlete?name=${encodeURIComponent(fight.participant1_name)}`, 'mma').catch(() => null),
-          fight.participant2_url
-            ? serverGet(`/athlete?url=${encodeURIComponent(fight.participant2_url)}`, 'mma').catch(() => null)
-            : serverGet(`/athlete?name=${encodeURIComponent(fight.participant2_name)}`, 'mma').catch(() => null),
-          serverGet(`/odds?p1=${encodeURIComponent(fight.participant1_name)}&p2=${encodeURIComponent(fight.participant2_name)}`, 'mma').catch(() => null),
-          serverGet(`/form?name=${encodeURIComponent(fight.participant1_name)}`, 'mma').catch(() => null),
-          serverGet(`/form?name=${encodeURIComponent(fight.participant2_name)}`, 'mma').catch(() => null),
-          serverGet(`/h2h?p1=${encodeURIComponent(fight.participant1_name)}&p2=${encodeURIComponent(fight.participant2_name)}`, 'mma').catch(() => null),
-        ]);
-
-        const effectiveOdds = odds?.t1 ? odds : fight.odds?.t1 ? fight.odds : null;
-
-        // Pre-filter: skip if quantitative model agrees with market (no edge detected)
-        if (!mmaPreFilter(p1Stats, p2Stats, form1, form2, effectiveOdds)) {
-          log('INFO', 'AUTO-MMA', `Pré-filtro: modelo alinhado com odds — pulando ${fight.participant1_name} vs ${fight.participant2_name}`);
-          analyzedFights.set(key, { ts: now, phase });
-          continue;
-        }
-
-        const prompt = buildMMAPrompt(fight, p1Stats, p2Stats, effectiveOdds, form1, form2, h2h, null);
-
-        const resp = await serverPost('/claude', {
-          model: 'claude-sonnet-4-6', max_tokens: 1800,
-          messages: [{ role: 'user', content: prompt }]
-        }, null, { 'x-claude-key': CLAUDE_KEY });
-
-        const text = resp.content?.map(b => b.text || '').join('');
-        if (!text) { analyzedFights.set(key, { ts: now, phase }); continue; }
-
-        const tipResult = text.match(/TIP_ML:\s*([^@]+?)\s*@\s*([^|\]]+?)\s*\|EV:\s*([^|]+?)\s*\|STAKE:\s*([^|\]]+?)(?:\s*\|CONF:\s*(\w+))?(?:\]|$)/);
-        const fairOddsMatch = text.match(/FAIR_ODDS:([^=]+)=([^|]+)\|([^=]+)=([^\s\n\]]+)/);
-        analyzedFights.set(key, { ts: now, phase, tipSent: false });
-
-        const hasRealOdds = !!(effectiveOdds?.t1 && parseFloat(effectiveOdds.t1) > 1);
-
-        if (tipResult) {
-          const tipFighter = tipResult[1].trim(), tipOdd = tipResult[2].trim(), tipEV = tipResult[3].trim();
-          const tipStake = calcKelly(tipEV, tipOdd);
-          const oddsLabel = hasRealOdds ? '' : '\n⚠️ _Odds estimadas (sem mercado disponível)_';
-
-          await serverPost('/record-tip', {
-            matchId: String(fight.id), eventName: fight.event_name || '',
-            p1: fight.participant1_name, p2: fight.participant2_name,
-            tipParticipant: tipFighter, odds: tipOdd, ev: tipEV, stake: tipStake,
-            confidence: tipResult[5]?.trim() || 'MÉDIA'
-          }, 'mma');
-
-          const phaseLabel = phase === 'early' ? `📋 Análise antecipada (${daysAway}d p/ evento)` : '📋 Análise pós-pesagem';
-          const tipMsg = `🥊 💰 *TIP AUTOMÁTICA MMA*\n` +
-            `*${fight.participant1_name}* vs *${fight.participant2_name}*\n` +
-            `⚖️ ${fight.category || '—'} | ${fight.event_name || ''}\n` +
-            `📅 ${fmtDate(fight.event_date)}\n\n` +
-            `🎯 Aposte: *${tipFighter}* ML @ *${tipOdd}*\n` +
-            `📈 EV: *${tipEV}*\n💵 Stake: *${tipStake}* _(¼ Kelly)_\n` +
-            `_${phaseLabel}_` +
-            `${oddsLabel}\n\n` +
-            `⚠️ _Aposte com responsabilidade._`;
-
-          for (const [userId, prefs] of subscribedUsers) {
-            if (!prefs.has('mma')) continue;
-            try { await sendDM(mmaConfig.token, userId, tipMsg); }
-            catch(e) { if (e.message?.includes('403')) subscribedUsers.delete(userId); }
-          }
-          analyzedFights.set(key, { ts: now, phase, tipSent: true });
-          log('INFO', 'AUTO-TIP-MMA', `${tipFighter} @ ${tipOdd} (odds ${hasRealOdds ? 'reais' : 'estimadas'})`);
-        } else if (fairOddsMatch && !hasRealOdds) {
-          const fo1 = parseFloat(fairOddsMatch[2]).toFixed(2), fo2 = parseFloat(fairOddsMatch[4]).toFixed(2);
-          const msg = `🥊 💡 *ODDS DE REFERÊNCIA MMA*\n` +
-            `*${fight.participant1_name}* vs *${fight.participant2_name}*\n` +
-            `_${fight.event_name || ''} — ${fmtDate(fight.event_date)}_\n\n` +
-            `• *${fairOddsMatch[1].trim()}:* ${fo1}\n• *${fairOddsMatch[3].trim()}:* ${fo2}\n\n` +
-            `💡 _Odds ACIMA = +EV_\n⚠️ _Aposte com responsabilidade._`;
-          for (const [userId, prefs] of subscribedUsers) {
-            if (!prefs.has('mma')) continue;
-            try { await sendDM(mmaConfig.token, userId, msg); }
-            catch(e) { if (e.message?.includes('403')) subscribedUsers.delete(userId); }
-          }
-        }
-        await new Promise(r => setTimeout(r, 3000));
-      }
-
-      // Clean old MMA analyses (> 3 days)
-      const cutoff3d = now - 3 * 24 * 60 * 60 * 1000;
-      for (const [k, v] of analyzedFights) { if (v.ts < cutoff3d) analyzedFights.delete(k); }
-
-      // Record successful analysis cycle
-      await serverPost('/record-analysis', {}).catch(() => {});
-    } catch(e) {
-      log('ERROR', 'AUTO-MMA', e.message);
-    }
-  }
 }
 
 // ── Settlement ──
@@ -553,11 +398,6 @@ async function settleCompletedTips() {
   if (Date.now() - lastSettlementCheck < SETTLEMENT_INTERVAL) return;
   lastSettlementCheck = Date.now();
 
-  // Tennis: trigger result scraping first
-  if (SPORTS['tennis']?.enabled) {
-    serverPost('/tennis-settle', {}).catch(() => {});
-  }
-  
   for (const sport of Object.keys(SPORTS)) {
     if (!SPORTS[sport].enabled) continue;
     
@@ -713,14 +553,8 @@ async function checkLiveNotifications() {
   const token = esportsConfig.token;
 
   try {
-    const [lolList, dotaList] = await Promise.all([
-      serverGet('/lol-matches').catch(() => []),
-      serverGet('/dota-matches').catch(() => [])
-    ]);
-
-    const lolLive = Array.isArray(lolList) ? lolList.filter(m => m.status === 'live') : [];
-    const dotaLive = Array.isArray(dotaList) ? dotaList.filter(m => m.status === 'live') : [];
-    const allLive = [...lolLive, ...dotaLive];
+    const lolList = await serverGet('/lol-matches').catch(() => []);
+    const allLive = Array.isArray(lolList) ? lolList.filter(m => m.status === 'live') : [];
 
     for (const match of allLive) {
       // Ignora jogos sem odds na The Odds API (reduz ruído desnecessário pro usuário)
@@ -733,7 +567,7 @@ async function checkLiveNotifications() {
           if (!prefs.has('esports')) continue;
           try {
             const o = match.odds;
-            const gameIcon = match.game === 'lol' ? '⚽' : '🛡️';
+            const gameIcon = '🎮';
             const txt = `${gameIcon} 🔴 *PARTIDA AO VIVO (COM MERCADO ABERTO)!*\n\n` +
               `*${match.team1}* ${match.score1}-${match.score2} *${match.team2}*\n` +
               `📋 ${match.league}\n` +
@@ -757,127 +591,6 @@ async function checkLiveNotifications() {
   }
 }
 
-// ── MMA Event-Day Notifications ──
-async function checkMMAEventDay() {
-  if (Date.now() - lastMMADayCheck < MMA_DAY_CHECK_INTERVAL) return;
-  if (subscribedUsers.size === 0) return;
-  lastMMADayCheck = Date.now();
-
-  const mmaConfig = SPORTS['mma'];
-  if (!mmaConfig?.enabled || !mmaConfig.token) return;
-
-  try {
-    // Fights today or tomorrow (UFC events typically start late at night in BRT)
-    const fights = db.prepare(`
-      SELECT m.*, e.name as ev_name, e.date as ev_date, e.location as ev_location
-      FROM matches m
-      JOIN events e ON m.event_id = e.id
-      WHERE m.sport = 'mma' AND m.winner IS NULL
-        AND e.date >= date('now') AND e.date <= date('now', '+1 day')
-      ORDER BY e.date ASC, m.is_main DESC
-    `).all();
-
-    if (!fights.length) return;
-
-    // Group by event
-    const byEvent = new Map();
-    for (const f of fights) {
-      if (!byEvent.has(f.event_id)) byEvent.set(f.event_id, { name: f.ev_name, date: f.ev_date, location: f.ev_location, fights: [] });
-      byEvent.get(f.event_id).fights.push(f);
-    }
-
-    for (const [eventId, ev] of byEvent) {
-      if (notifiedMMAEvents.has(eventId)) continue;
-      notifiedMMAEvents.set(eventId, Date.now());
-
-      const isToday = ev.date === new Date().toISOString().slice(0, 10);
-      const dayLabel = isToday ? 'HOJE' : 'AMANHÃ';
-
-      const mainEvent = ev.fights.find(f => f.is_main) || ev.fights[0];
-      const cardLines = ev.fights.slice(0, 5).map(f =>
-        `• ${f.participant1_name} vs ${f.participant2_name}${f.is_title ? ' 🏆' : ''}${f.is_main ? ' _(Main Event)_' : ''}`
-      ).join('\n');
-
-      const txt =
-        `🥊 *UFC ${dayLabel}!*\n\n` +
-        `*${ev.name}*\n` +
-        (ev.location ? `📍 ${ev.location}\n` : '') +
-        `📅 ${fmtDate(ev.date)}\n\n` +
-        `*Card principal:*\n${cardLines}\n\n` +
-        `_A análise IA será enviada automaticamente._`;
-
-      for (const [userId, prefs] of subscribedUsers) {
-        if (!prefs.has('mma')) continue;
-        await sendDM(mmaConfig.token, userId, txt).catch(e => {
-          if (e.message?.includes('403')) subscribedUsers.delete(userId);
-        });
-      }
-
-      log('INFO', 'MMA-DAY', `Notificação enviada: ${ev.name}`);
-    }
-
-    // Clean up old entries
-    const cutoff = Date.now() - 2 * 24 * 60 * 60 * 1000;
-    for (const [k, ts] of notifiedMMAEvents) {
-      if (ts < cutoff) notifiedMMAEvents.delete(k);
-    }
-  } catch(e) {
-    log('WARN', 'MMA-DAY', e.message);
-  }
-}
-
-// ── Tennis Match-Start Notifications ──
-async function checkTennisMatchStart() {
-  if (Date.now() - lastTennisStartCheck < TENNIS_START_CHECK_INTERVAL) return;
-  if (subscribedUsers.size === 0) return;
-  lastTennisStartCheck = Date.now();
-
-  const tennisConfig = SPORTS['tennis'];
-  if (!tennisConfig?.enabled || !tennisConfig.token) return;
-
-  try {
-    // Matches starting in the next 30 minutes
-    const matches = db.prepare(`
-      SELECT * FROM matches
-      WHERE sport = 'tennis' AND winner IS NULL
-        AND match_time >= datetime('now')
-        AND match_time <= datetime('now', '+35 minutes')
-    `).all();
-
-    for (const m of matches) {
-      if (notifiedTennisStarts.has(m.id)) continue;
-      notifiedTennisStarts.set(m.id, Date.now());
-
-      const surface = m.category || 'hard';
-      const surfIcon = surface === 'clay' ? '🟤' : surface === 'grass' ? '🟢' : '🔵';
-      const timeStr = m.match_time ? new Date(m.match_time).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Sao_Paulo' }) : '';
-
-      const txt =
-        `🎾 *PARTIDA COMEÇA EM ~30 MIN!*\n\n` +
-        `*${m.participant1_name}* vs *${m.participant2_name}*\n` +
-        `${surfIcon} ${surface.charAt(0).toUpperCase() + surface.slice(1)} · ${m.event_name || ''}\n` +
-        (timeStr ? `⏰ ${timeStr} (horário de Brasília)\n` : '') +
-        `\n_A análise será enviada automaticamente se houver valor._`;
-
-      for (const [userId, prefs] of subscribedUsers) {
-        if (!prefs.has('tennis')) continue;
-        await sendDM(tennisConfig.token, userId, txt).catch(e => {
-          if (e.message?.includes('403')) subscribedUsers.delete(userId);
-        });
-      }
-
-      log('INFO', 'TENNIS-START', `Notificação: ${m.participant1_name} vs ${m.participant2_name}`);
-    }
-
-    // Clean up entries older than 3 hours
-    const cutoff = Date.now() - 3 * 60 * 60 * 1000;
-    for (const [k, ts] of notifiedTennisStarts) {
-      if (ts < cutoff) notifiedTennisStarts.delete(k);
-    }
-  } catch(e) {
-    log('WARN', 'TENNIS-START', e.message);
-  }
-}
 
 // Collect live game stats for esports analysis
 async function collectGameContext(game, matchId) {
@@ -947,37 +660,13 @@ async function collectGameContext(game, matchId) {
         }
       }
     }
-  } else if (game === 'dota') {
-    try {
-      const stats = await serverGet(`/dota-live?matchId=${matchId}`);
-      if (stats.radiantTeam?.players?.length) {
-        const g = (v) => v >= 1000 ? (v/1000).toFixed(1)+'k' : String(v||0);
-        const goldDiff = stats.goldDiff !== undefined ? stats.goldDiff : 0;
-        const stateTag = stats.gameState === 'finished' ? 'FINALIZADO 📊'
-          : stats.isRealtime ? 'AO VIVO ⚡ (live feed)' : 'AO VIVO 📊';
-        const goldLeader = goldDiff > 0 ? `${stats.radiantTeam.name} +${g(Math.abs(goldDiff))}`
-          : goldDiff < 0 ? `${stats.direTeam.name} +${g(Math.abs(goldDiff))}` : 'Empatado';
-        gamesContext += `\n[DOTA 2 — ${stateTag}]\nDuração: ${fmtDuration(stats.duration)}\n`;
-        gamesContext += `Kills: ${stats.radiantTeam.name} ${stats.radiantTeam.kills||0} - ${stats.direTeam.kills||0} ${stats.direTeam.name}\n`;
-        if (goldDiff !== 0) gamesContext += `Gold Diff: ${goldLeader}\n`;
-        gamesContext += '\n';
-        const fmtP = (p) => {
-          const heroStr = (p.hero||'?').padEnd(15);
-          const nameStr = (p.name||'?').slice(0,12).padEnd(12);
-          if (stats.fullStats) return `  ${heroStr} ${nameStr} K:${p.kills||0}/${p.deaths||0}/${p.assists||0} G:${g(p.gold||0)} CS:${p.cs||0} GPM:${p.gpm||0}`;
-          return `  ${heroStr} ${nameStr}`;
-        };
-        gamesContext += `${stats.radiantTeam.name}:\n${stats.radiantTeam.players.map(fmtP).join('\n')}\n\n`;
-        gamesContext += `${stats.direTeam.name}:\n${stats.direTeam.players.map(fmtP).join('\n')}\n`;
-      }
-    } catch(e) { log('WARN', 'DOTA-LIVE', e.message); }
   }
   return gamesContext;
 }
 
 async function fetchEnrichment(match) {
   const game = match.game;
-  const data = { form1: null, form2: null, h2h: null, oddsMovement: null, dotaDetail: null };
+  const data = { form1: null, form2: null, h2h: null, oddsMovement: null };
   try {
     const [f1, f2, h, om] = await Promise.all([
       serverGet(`/team-form?team=${encodeURIComponent(match.team1 || match.participant1_name)}&game=${game}`).catch(() => null),
@@ -987,9 +676,6 @@ async function fetchEnrichment(match) {
     ]);
     data.form1 = f1; data.form2 = f2; data.h2h = h; data.oddsMovement = om;
   } catch(_) {}
-  if (game === 'dota' && match.status === 'live') {
-    try { data.dotaDetail = await serverGet(`/dota-match-detail?matchId=${match.id}`); } catch(_) {}
-  }
   return data;
 }
 
@@ -1014,20 +700,6 @@ function buildEnrichmentSection(match, enrich) {
     const p1Key = 'odds_t1', p2Key = 'odds_t2';
     const dir1 = parseFloat(last[p1Key]) < parseFloat(first[p1Key]) ? 'caindo (sharp money?)' : 'subindo';
     txt += `\nLINE MOVEMENT:\nAbertura: ${t1}=${first[p1Key]} | ${t2}=${first[p2Key]}\nAtual: ${t1}=${last[p1Key]} | ${t2}=${last[p2Key]}\n${t1}: odds ${dir1}\n`;
-  }
-  const dd = enrich.dotaDetail;
-  if (dd && !dd.error) {
-    txt += '\nDOTA AVANÇADO:\n';
-    if (dd.roshanKills > 0) txt += `Roshan kills: ${dd.roshanKills} | Aegis: ${dd.aegisHolder || 'Ninguém'}\n`;
-    if (dd.barracksDestroyed?.radiant > 0 || dd.barracksDestroyed?.dire > 0)
-      txt += `Barracks destruídas: Radiant=${dd.barracksDestroyed.radiant}/6 | Dire=${dd.barracksDestroyed.dire}/6\n`;
-    if (dd.coreItemTimings?.length > 0) {
-      txt += 'Itens-chave:\n';
-      dd.coreItemTimings.forEach(p => {
-        const items = Object.entries(p.items).map(([k,v]) => `${k}@${v}`).join(', ');
-        txt += `  ${p.name} (${p.hero}, ${p.side}): ${items}\n`;
-      });
-    }
   }
   if (match.game === 'lol') {
     const patchMeta = process.env.LOL_PATCH_META || '⚠️ Patch meta não configurado';
@@ -1085,259 +757,7 @@ async function autoAnalyzeMatch(token, match) {
   }
 }
 
-async function checkLateReplacements() {
-  if (Date.now() - lastReplacementCheck < REPLACEMENT_INTERVAL) return;
-  lastReplacementCheck = Date.now();
-
-  const mmaConfig = SPORTS['mma'];
-  if (!mmaConfig?.enabled) return;
-
-  try {
-    const events = await serverGet('/events', 'mma').catch(() => null);
-    if (!Array.isArray(events) || !events.length) return;
-
-    const now = Date.now();
-    const upcoming = events.filter(e => {
-      if (!e.date) return false;
-      const ms = new Date(e.date + 'T00:00:00').getTime();
-      return ms >= now && ms <= now + 14 * 86400000;
-    });
-
-    for (const event of upcoming) {
-      const currentFights = await serverGet(`/matches?eventId=${event.id}`, 'mma').catch(() => null);
-      if (!Array.isArray(currentFights) || !currentFights.length) continue;
-
-      const snapshot = await serverGet(`/card-snapshot?eventId=${event.id}`).catch(() => []);
-      const snapMap = {};
-      if (Array.isArray(snapshot)) snapshot.forEach(s => { snapMap[s.match_id] = s; });
-
-      // Save current snapshot
-      await serverPost('/save-card-snapshot', {
-        eventId: event.id,
-        fights: currentFights.map(f => ({ id: f.id, participant1_name: f.participant1_name, participant2_name: f.participant2_name }))
-      }).catch(() => {});
-
-      if (!Object.keys(snapMap).length) continue;
-
-      for (const fight of currentFights) {
-        const snap = snapMap[fight.id];
-        if (!snap) continue;
-
-        const f1Changed = !fuzzyName(snap.participant1_name, fight.participant1_name);
-        const f2Changed = !fuzzyName(snap.participant2_name, fight.participant2_name);
-        if (!f1Changed && !f2Changed) continue;
-
-        const oldFighter = f1Changed ? snap.participant1_name : snap.participant2_name;
-        const newFighter = f1Changed ? fight.participant1_name : fight.participant2_name;
-
-        log('WARN', 'REPLACE', `${event.name}: ${oldFighter} → ${newFighter}`);
-
-        const alert = `⚠️ *LATE REPLACEMENT DETECTADO*\n\n` +
-          `🥊 ${event.name}\n` +
-          `❌ ~~${oldFighter}~~ → ✅ *${newFighter}*\n` +
-          `Luta: *${fight.participant1_name}* vs *${fight.participant2_name}*\n\n` +
-          `📊 _Substituto tem desvantagem de camp — reavalie odds_\n` +
-          `💡 _A linha vai mover. Verifique a análise atualizada._`;
-
-        for (const [userId, prefs] of subscribedUsers) {
-          if (!prefs.has('mma')) continue;
-          sendDM(mmaConfig.token, userId, alert).catch(() => {});
-        }
-        for (const adminId of ADMIN_IDS) {
-          sendDM(mmaConfig.token, adminId, alert).catch(() => {});
-        }
-        analyzedFights.delete(fight.id);
-      }
-    }
-  } catch(e) {
-    log('ERROR', 'REPLACE', e.message);
-  }
-}
-
-async function handleNotificacoes(token, chatId, sport, action) {
-  const config = SPORTS[sport];
-  const userPrefs = subscribedUsers.get(chatId) || new Set();
-  
-  if (action === 'on') {
-    userPrefs.add(sport);
-    subscribedUsers.set(chatId, userPrefs);
-    
-    await serverPost('/save-user', {
-      userId: chatId,
-      subscribed: true,
-      sportPrefs: [...userPrefs]
-    });
-    
-    await send(token, chatId,
-      `✅ Notificações ${config.name} ativadas!\n\n` +
-      `Você receberá:\n` +
-      `• ${config.icon} Tips automáticas com +EV\n` +
-      `• 📊 Alertas de line movement > 10%\n` +
-      `• ⚠️ Late replacements (MMA)\n\n` +
-      `Use /notificacoes off para desativar`,
-      {
-        reply_markup: {
-          inline_keyboard: [[{ text: '🔕 Desativar', callback_data: `notif_${sport}_off` }]]
-        }
-      }
-    );
-  } else if (action === 'off') {
-    userPrefs.delete(sport);
-    subscribedUsers.set(chatId, userPrefs);
-    
-    await serverPost('/save-user', {
-      userId: chatId,
-      subscribed: userPrefs.size > 0,
-      sportPrefs: [...userPrefs]
-    });
-    
-    await send(token, chatId,
-      `🔕 Notificações ${config.name} desativadas.`,
-      {
-        reply_markup: {
-          inline_keyboard: [[{ text: '🔔 Ativar', callback_data: `notif_${sport}_on` }]]
-        }
-      }
-    );
-  } else {
-    const isActive = userPrefs.has(sport);
-    await send(token, chatId,
-      `🔔 *Notificações ${config.name}*\n\n` +
-      `Status: ${isActive ? '✅ Ativado' : '❌ Desativado'}\n\n` +
-      `Comandos:\n` +
-      `/notificacoes on — Ativar\n` +
-      `/notificacoes off — Desativar`
-    );
-  }
-}
-
-// ── Próximas Partidas Handler ──
-async function handleProximas(token, chatId, sport) {
-  await send(token, chatId, '⏳ Buscando próximas partidas...');
-  try {
-    if (sport === 'esports') {
-      const [lolRaw, dotaRaw] = await Promise.all([
-        serverGet('/lol-matches').catch(() => []),
-        serverGet('/dota-matches').catch(() => [])
-      ]);
-      const now = Date.now();
-      const window48h = now + 48 * 60 * 60 * 1000;
-
-      const lolAll = Array.isArray(lolRaw) ? lolRaw : [];
-      const dotaAll = Array.isArray(dotaRaw) ? dotaRaw : [];
-
-      const live = [...lolAll, ...dotaAll].filter(m => m.status === 'live');
-      const upcoming = [...lolAll, ...dotaAll].filter(m => {
-        if (m.status !== 'upcoming') return false;
-        const t = m.time ? new Date(m.time).getTime() : 0;
-        return t > now && t <= window48h;
-      }).sort((a, b) => (a.time || '').localeCompare(b.time || ''));
-
-      let txt = `🎮 *ESPORTS — PARTIDAS*\n━━━━━━━━━━━━━━━━\n\n`;
-
-      if (live.length) {
-        txt += `🔴 *AO VIVO (${live.length})*\n`;
-        for (const m of live) {
-          const icon = m.game === 'lol' ? '⚽' : '🛡️';
-          txt += `${icon} *${m.team1}* ${m.score1||0}-${m.score2||0} *${m.team2}*\n`;
-          txt += `   _${m.league || 'Esports'}_\n`;
-        }
-        txt += '\n';
-      }
-
-      if (upcoming.length) {
-        txt += `📅 *PRÓXIMAS 48H (${upcoming.length})*\n`;
-        for (const m of upcoming) {
-          const icon = m.game === 'lol' ? '⚽' : '🛡️';
-          const timeBRT = m.time
-            ? new Date(m.time).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo', weekday: 'short', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
-            : '—';
-          txt += `${icon} *${m.team1}* vs *${m.team2}*\n`;
-          txt += `   🕐 ${timeBRT} | _${m.league || 'Esports'}_\n`;
-        }
-      }
-
-      if (!live.length && !upcoming.length) {
-        txt += `_Nenhuma partida ao vivo ou prevista para as próximas 48h._`;
-      }
-
-      await send(token, chatId, txt);
-
-    } else if (sport === 'mma') {
-      const fights = await serverGet('/upcoming-fights?days=5', 'mma').catch(() => []);
-      if (!Array.isArray(fights) || !fights.length) {
-        await send(token, chatId, '🥊 Nenhuma luta prevista nos próximos 5 dias.');
-        return;
-      }
-
-      // Group by event
-      const byEvent = new Map();
-      for (const f of fights) {
-        const key = f.event_id || f.event_name || 'ev';
-        if (!byEvent.has(key)) byEvent.set(key, { name: f.event_name || '—', date: f.event_date, fights: [] });
-        byEvent.get(key).fights.push(f);
-      }
-
-      let txt = `🥊 *MMA — PRÓXIMAS LUTAS (5 DIAS)*\n━━━━━━━━━━━━━━━━\n`;
-      for (const [, ev] of byEvent) {
-        txt += `\n📅 *${ev.name}* — ${fmtDate(ev.date)}\n`;
-        for (const f of ev.fights) {
-          const odds1 = f.odds?.t1 ? ` _(${f.odds.t1})_` : '';
-          const odds2 = f.odds?.t2 ? ` _(${f.odds.t2})_` : '';
-          const main = f.is_main ? ' 🏆' : f.is_title ? ' 🎖️' : '';
-          txt += `⚖️ *${f.participant1_name}*${odds1} vs *${f.participant2_name}*${odds2}${main}\n`;
-          if (f.category) txt += `   _${f.category}_\n`;
-        }
-      }
-
-      await send(token, chatId, txt);
-
-    } else if (sport === 'tennis') {
-      const events = await serverGet('/tennis-tournaments').catch(() => []);
-      if (!Array.isArray(events) || !events.length) {
-        await send(token, chatId, '🎾 Nenhum torneio com partidas disponíveis.');
-        return;
-      }
-
-      const now = Date.now();
-      const window48h = new Date(now + 48 * 60 * 60 * 1000).toISOString();
-      const surfIcon = { clay: '🟠', grass: '🟢', hard: '🔵' };
-      const tierOrder = { 'Grand Slam': 0, 'Masters 1000': 1, 'WTA 1000': 1, 'ATP 500': 2, 'WTA 500': 2, 'ATP 250': 3, 'WTA': 3, 'Challenger': 4, 'ITF': 5 };
-      const sorted = [...events].sort((a, b) => (tierOrder[a.tier] ?? 99) - (tierOrder[b.tier] ?? 99));
-
-      let txt = `🎾 *TÊNIS — PRÓXIMAS PARTIDAS (48H)*\n━━━━━━━━━━━━━━━━\n`;
-      let found = 0;
-
-      for (const ev of sorted.slice(0, 6)) {
-        const matches = await serverGet(`/tennis-matches?tournamentId=${encodeURIComponent(ev.id)}`).catch(() => []);
-        if (!Array.isArray(matches)) continue;
-
-        const due = matches
-          .filter(m => m.match_time && m.match_time <= window48h)
-          .sort((a, b) => (a.match_time || '').localeCompare(b.match_time || ''));
-        if (!due.length) continue;
-
-        const surf = surfIcon[ev.surface] || '🎾';
-        txt += `\n${surf} *${ev.name}*${ev.tier ? ` _(${ev.tier})_` : ''}\n`;
-        for (const m of due.slice(0, 4)) {
-          const timeBRT = m.match_time
-            ? new Date(m.match_time).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo', weekday: 'short', hour: '2-digit', minute: '2-digit' })
-            : '—';
-          const o1 = m.odds?.t1 ? ` _(${m.odds.t1})_` : '';
-          const o2 = m.odds?.t2 ? ` _(${m.odds.t2})_` : '';
-          txt += `🕐 ${timeBRT} | *${m.participant1_name}*${o1} vs *${m.participant2_name}*${o2}\n`;
-          found++;
-        }
-      }
-
-      if (!found) txt += `\n_Nenhuma partida prevista para as próximas 48h._`;
-      await send(token, chatId, txt);
-    }
-  } catch(e) {
-    log('ERROR', 'PROXIMAS', e.message);
-    await send(token, chatId, '❌ Erro ao buscar partidas: ' + e.message);
-  }
-}
+// ── Próximas Partidas Handler (OLD — mantido apenas para referência interna) ──
 
 // ── Esports Prompt Builder ──
 function buildEsportsPrompt(match, game, gamesContext, o, enrichSection) {
@@ -1374,7 +794,7 @@ function buildEsportsPrompt(match, game, gamesContext, o, enrichSection) {
     ? `[Se EV >= +2% E confiança não foi rebaixada para BAIXA por alto fluxo: TIP_ML:[time]@[odd]|EV:[%]|STAKE:[u]|CONF:[ALTA/MÉDIA/BAIXA]]`
     : `[Se confiança ALTA ou MÉDIA e sem rebaixamento por alto fluxo: TIP_ML:[time]@[fair_odd]|EV:estimado|STAKE:[u]|CONF:[ALTA/MÉDIA]]`;
 
-  return `Você é um analista de apostas de ${game === 'lol' ? 'League of Legends' : 'Dota 2'}. Seu trabalho é identificar edge REAL — não fabricar recomendações.
+  return `Você é um analista de apostas de League of Legends. Seu trabalho é identificar edge REAL — não fabricar recomendações.
 
 REGRA FUNDAMENTAL: "Sem edge identificado" é uma resposta válida e frequentemente a correta. A maioria das partidas não tem EV real. Resist the urge to always find a bet.
 
@@ -1408,13 +828,11 @@ ${hasRealOdds
 → Só emita TIP_ML se a vantagem da composição for incontestavelmente esmagadora (>65%). Caso contrário, não emita.`}
 
 ANÁLISE DE VIRADA:
-${game === 'lol' ? `• Composição late-game/scaling no time perdedor → virada possível
+• Composição late-game/scaling no time perdedor → virada possível
 • Gold diff < 3k com torres intactas → jogo aberto
 • Soul point ou Baron buff → fator decisivo
 • Carries com KDA+ e item core completo → ameaça real
-• Antes dos 20min = cedo demais; 25-35min = janela crítica` : `• Roshan/Aegis ativo → equação muda completamente
-• Barracks destruídas → mega creeps, jogo quase encerrado
-• BKB nos carries não prontos → janela de virada aberta`}
+• Antes dos 20min = cedo demais; 25-35min = janela crítica
 
 NÃO invente dados históricos. Se não tiver dado, diga explicitamente.
 
@@ -1433,576 +851,6 @@ ${!hasRealOdds ? `\n⚠️ Lembre: sua estimativa sem dados de mercado pode dive
 Máximo 450 palavras.`;
 }
 
-// ── Pre-Filter: MMA Quantitative Edge Score ──
-// Returns true = analyze with Claude | false = skip (model agrees with market)
-function mmaPreFilter(p1Stats, p2Stats, form1, form2, odds) {
-  if (!odds?.t1 || parseFloat(odds.t1) <= 1) return true; // no odds → always analyze
-
-  const o1 = parseFloat(odds.t1), o2 = parseFloat(odds.t2 || '2.00');
-  if (isNaN(o1) || isNaN(o2) || o1 <= 1 || o2 <= 1) return true;
-
-  // De-juiced implied probabilities
-  const raw1 = 1 / o1, raw2 = 1 / o2;
-  const impliedP1 = raw1 / (raw1 + raw2);
-
-  const safeNum = (v) => { const n = parseFloat(v); return isNaN(n) ? null : n; };
-
-  let scorePoints = 0, factorCount = 0;
-
-  // Striking accuracy differential (% points, weight 0.45)
-  const sa1 = safeNum(p1Stats?.str_acc), sa2 = safeNum(p2Stats?.str_acc);
-  if (sa1 !== null && sa2 !== null) { scorePoints += (sa1 - sa2) * 0.45; factorCount++; }
-
-  // Striking defense differential (weight 0.35)
-  const sd1 = safeNum(p1Stats?.str_def), sd2 = safeNum(p2Stats?.str_def);
-  if (sd1 !== null && sd2 !== null) { scorePoints += (sd1 - sd2) * 0.35; factorCount++; }
-
-  // Takedown defense differential (weight 0.25)
-  const td1 = safeNum(p1Stats?.td_def), td2 = safeNum(p2Stats?.td_def);
-  if (td1 !== null && td2 !== null) { scorePoints += (td1 - td2) * 0.25; factorCount++; }
-
-  // Recent form win rate differential (weight 0.20)
-  const wr1 = safeNum(form1?.winRate), wr2 = safeNum(form2?.winRate);
-  if (wr1 !== null && wr2 !== null) { scorePoints += (wr1 - wr2) * 0.20; factorCount++; }
-
-  if (factorCount < 2) return true; // not enough data → always analyze
-
-  // Logistic conversion: scorePoints ~ [-30, +30] → modelP1 ~ [0.35, 0.65]
-  const modelP1 = 1 / (1 + Math.exp(-scorePoints / 20));
-  const edgePP = Math.abs(modelP1 - impliedP1) * 100;
-
-  // Analyze only if model disagrees with market by ≥5pp
-  return edgePP >= 5;
-}
-
-// ── Pre-Filter: Tennis Surface-Adjusted Model ──
-// Returns true = analyze | false = skip
-function tennisPreFilter(p1Stats, p2Stats, form1, form2, odds, surface) {
-  if (!odds?.t1 || parseFloat(odds.t1) <= 1) return true; // no odds → always analyze
-
-  const o1 = parseFloat(odds.t1), o2 = parseFloat(odds.t2 || '2.00');
-  if (isNaN(o1) || isNaN(o2) || o1 <= 1 || o2 <= 1) return true;
-
-  // De-juiced implied probability
-  const raw1 = 1 / o1, raw2 = 1 / o2;
-  const impliedP1 = raw1 / (raw1 + raw2);
-
-  // Ranking-based baseline (lower rank number = better player = higher prob)
-  const r1 = parseInt(p1Stats?.ranking), r2 = parseInt(p2Stats?.ranking);
-  if (isNaN(r1) || isNaN(r2) || r1 <= 0 || r2 <= 0) return true;
-
-  const logR1 = Math.log(r1), logR2 = Math.log(r2);
-  let modelP1 = logR2 / (logR1 + logR2); // baseline from ranking
-
-  // Surface form adjustment: blend 60% ranking baseline + 40% surface win rate
-  if (form1?.recentMatches?.length && form2?.recentMatches?.length) {
-    const surf1 = form1.recentMatches.filter(m => m.surface === surface);
-    const surf2 = form2.recentMatches.filter(m => m.surface === surface);
-    if (surf1.length >= 3 && surf2.length >= 3) {
-      const sw1 = surf1.filter(m => m.result === 'W').length / surf1.length;
-      const sw2 = surf2.filter(m => m.result === 'W').length / surf2.length;
-      const surfSum = sw1 + sw2;
-      if (surfSum > 0) {
-        const surfP1 = sw1 / surfSum;
-        modelP1 = modelP1 * 0.60 + surfP1 * 0.40;
-      }
-    }
-  }
-
-  const edgePP = Math.abs(modelP1 - impliedP1) * 100;
-
-  // Analyze only if model disagrees with market by ≥6pp
-  return edgePP >= 6;
-}
-
-// ── MMA Prompt Builder ──
-function buildMMAPrompt(match, p1Stats, p2Stats, odds, form1, form2, h2h, oddsMovement) {
-  const hasOdds = !!(odds?.t1 && parseFloat(odds.t1) > 1);
-  const context = match.is_title ? '🏆 DISPUTA DE CINTURÃO' : match.is_main ? 'Main Event' : 'Card';
-  const f1 = match.participant1_name;
-  const f2 = match.participant2_name;
-
-  let oddsSection = '';
-  if (hasOdds) {
-    const p1 = (1 / parseFloat(odds.t1) * 100).toFixed(1);
-    const p2 = (1 / parseFloat(odds.t2) * 100).toFixed(1);
-    oddsSection = `Odds: ${f1}=${odds.t1} (imp. ${p1}%) | ${f2}=${odds.t2} (imp. ${p2}%)\nBookmaker: ${odds.bookmaker || 'N/A'}`;
-  } else {
-    oddsSection = `Odds: Não disponíveis\n⚠️ SEM ODDS REAIS — estime FAIR_ODDS = 1/prob (sem juice)`;
-  }
-
-  let lineMovement = '';
-  if (oddsMovement?.history?.length >= 2) {
-    const first = oddsMovement.history[0], last = oddsMovement.history[oddsMovement.history.length - 1];
-    const dir = parseFloat(last.odds_p1) < parseFloat(first.odds_p1) ? 'caindo (sharp money?)' : 'subindo';
-    lineMovement = `\nLINE MOVEMENT:\nAbertura: ${f1}=${first.odds_p1} | ${f2}=${first.odds_p2}\nAtual: ${f1}=${last.odds_p1} | ${f2}=${last.odds_p2}\n${f1}: linha ${dir}`;
-  }
-
-  let h2hStr = '';
-  if (h2h?.totalMatches > 0) {
-    h2hStr = `\nH2H: ${f1} ${h2h.t1Wins}-${h2h.t2Wins} ${f2} (${h2h.totalMatches} luta${h2h.totalMatches > 1 ? 's' : ''})`;
-  }
-
-  const lineMovementWarning = oddsMovement?.history?.length >= 2
-    ? `⚠️ LINE MOVEMENT DETECTADO: o mercado se moveu. Isso significa que apostadores informados (sharpies) ajustaram. Trate como sinal contrário — ajuste sua estimativa de probabilidade 2-3pp na direção do movimento. Só ignore se tiver dados concretos que justifiquem a divergência (ex: informação de camp não precificada).`
-    : '';
-
-  const lateReplacementWarning = match.is_replacement
-    ? `🚨 LATE REPLACEMENT: esse lutador entrou sem camp completo. Isso é uma desvantagem estrutural real. Confiança máxima: MÉDIA.`
-    : '';
-
-  const highVarianceWarning = `⚠️ VARIÂNCIA MMA: MMA é o esporte de maior variância individual. Um soco muda tudo. Mesmo vantagem técnica clara → máximo 65-70% de probabilidade para o favorito. Confiança ALTA só se vantagem for esmagadora em múltiplas dimensões (striking + grappling + forma + físico).`;
-
-  const tipInstruction = hasOdds
-    ? `[Se EV >= +2% E confiança não foi rebaixada: TIP_ML:[lutador]@[odd]|EV:[%]|STAKE:[u]|CONF:[ALTA/MÉDIA/BAIXA]]`
-    : `[Se confiança ALTA ou MÉDIA: TIP_ML:[lutador]@[fair_odd]|EV:estimado|STAKE:[u]|CONF:[ALTA/MÉDIA]]`;
-
-  return `Você é analista de apostas de MMA. Seu trabalho é identificar edge REAL — não fabricar recomendações.
-
-REGRA FUNDAMENTAL: "Sem edge identificado" é frequentemente a resposta correta. MMA tem a maior variância de qualquer esporte. Seja conservador.
-
-${highVarianceWarning}
-${lateReplacementWarning ? '\n' + lateReplacementWarning : ''}${lineMovementWarning ? '\n' + lineMovementWarning : ''}
-
-═══════════════════════════════════════
-LUTA: ${f1} vs ${f2}
-Categoria: ${match.category || '—'} | ${context}
-Evento: ${match.event_name || '—'} — ${fmtDate(match.event_date)}
-${oddsSection}${lineMovement}${h2hStr}
-═══════════════════════════════════════
-
-LUTADOR 1:
-${formatAthleteBlock(f1, p1Stats, form1)}
-
-LUTADOR 2:
-${formatAthleteBlock(f2, p2Stats, form2)}
-
-═══════════════════════════════════════
-
-RACIOCÍNIO EM DUAS ETAPAS OBRIGATÓRIO:
-
-ETAPA 1 — ESTIMATIVA CEGA (analise o matchup técnico ANTES de comparar com odds):
-→ Analise: Striking (SLpM, Acc, Def), Grappling (TD Avg vs TD Def), Estilo implícito, Forma, H2H
-→ Estime: P(${f1})=__% | P(${f2})=__%  [soma = 100%]
-→ Principal vantagem técnica: [1 frase específica com dado]
-→ Principal fator de incerteza: [1 frase — MMA SEMPRE tem incerteza real]
-→ Baseline de mercado implícito: ${hasOdds ? `odds sugerem ${f1}=${(1/parseFloat(odds.t1)*100).toFixed(0)}% | ${f2}=${(1/parseFloat(odds.t2)*100).toFixed(0)}%` : 'sem odds disponíveis'}
-   → Se sua estimativa divergir do mercado em >10pp, justifique explicitamente.
-
-ETAPA 2 — VERIFICAÇÃO DE EDGE:
-${hasOdds
-  ? `Odds implícitas: ${f1}=${(1/parseFloat(odds.t1)*100).toFixed(1)}% | ${f2}=${(1/parseFloat(odds.t2)*100).toFixed(1)}%
-→ Se diferença < 3pp: escreva "SEM EDGE" — não emita TIP_ML.
-→ Se diferença ≥ 3pp a seu favor: EV = (prob_real × odd) - 1. Tip só se EV >= +2%.`
-  : `Sem odds de mercado disponíveis.
-→ Estime FAIR_ODDS (sem juice) = 1/prob. Exemplo: P1=65% → odd=1.538
-→ AVISO: sem odds reais, sua estimativa pode divergir significativamente do mercado. Seja conservador.
-→ Só emita TIP_ML se vantagem for clara (>63%) E confiança ALTA E múltiplos fatores convergindo.`}
-
-NÃO invente estatísticas. Se faltar dado, declare explicitamente "dado não disponível".
-
-FORMATO:
-🥊 ${f1} vs ${f2} | ${match.category || '—'} | ${context}
-
-MATCHUP: Striking=[X tem vantagem porque dado], Grappling=[Y tem vantagem porque dado], Físico=[reach/stance]
-FORMA: [análise objetiva de ambos — sem dramatização]
-
-ETAPA 1 — P(${f1})=__% | P(${f2})=__% | Vantagem principal: [dado específico] | Incerteza: [fator]
-ETAPA 2 — ${hasOdds ? `EV(${f1})=[X%] | EV(${f2})=[X%] | Edge: [SIM/NÃO]` : `Fair: ${f1}=[X.XX] | ${f2}=[X.XX] | Vantagem clara: [SIM/NÃO]`}
-Confiança: [ALTA/MÉDIA/BAIXA] | Justificativa: [por que esse nível — cite a incerteza real]
-
-FAIR_ODDS:${f1}=[odd]|${f2}=[odd]
-${tipInstruction}
-
-Máximo 450 palavras.`;
-}
-
-// ── Tennis Prompt Builder ──
-function buildTennisPrompt(match, p1Stats, p2Stats, odds, surfForm1, surfForm2, h2h, oddsMovement) {
-  const p1 = match.participant1_name;
-  const p2 = match.participant2_name;
-  const surface = match.category || 'hard';
-  const tournament = match.event_name || match.league || 'Torneio';
-  const hasOdds = !!(odds?.t1 && parseFloat(odds.t1) > 1);
-
-  const surfLabel = surface === 'clay' ? 'Terra batida (clay)' : surface === 'grass' ? 'Grama (grass)' : 'Quadra dura (hard)';
-
-  let oddsSection = '';
-  if (hasOdds) {
-    const prob1 = (1 / parseFloat(odds.t1) * 100).toFixed(1);
-    const prob2 = (1 / parseFloat(odds.t2) * 100).toFixed(1);
-    oddsSection = `Odds: ${p1}=${odds.t1} (imp. ${prob1}%) | ${p2}=${odds.t2} (imp. ${prob2}%)\nBookmaker: ${odds.bookmaker || 'N/A'}`;
-  } else {
-    oddsSection = `Odds: Não disponíveis\n⚠️ SEM ODDS REAIS — estime FAIR_ODDS = 1/prob (sem juice)`;
-  }
-
-  let lineMovement = '';
-  if (oddsMovement?.history?.length >= 2) {
-    const first = oddsMovement.history[0], last = oddsMovement.history[oddsMovement.history.length - 1];
-    const dir = parseFloat(last.odds_p1) < parseFloat(first.odds_p1) ? 'caindo (sharp money?)' : 'subindo';
-    lineMovement = `\nLINE MOVEMENT:\nAbertura: ${p1}=${first.odds_p1} | ${p2}=${first.odds_p2}\nAtual: ${p1}=${last.odds_p1} | ${p2}=${last.odds_p2}\n${p1}: linha ${dir}`;
-  }
-
-  let h2hStr = '';
-  if (h2h?.totalMatches > 0) {
-    h2hStr = `\nH2H: ${p1} ${h2h.t1Wins}-${h2h.t2Wins} ${p2} (${h2h.totalMatches} confronto${h2h.totalMatches > 1 ? 's' : ''})`;
-    if (h2h.matches?.length) {
-      h2hStr += '\n' + h2h.matches.slice(0, 3).map(m => `  ${m.winner} venceu (${(m.event_date||'').slice(0,10)})`).join('\n');
-    }
-  }
-
-  const fmtPlayerBlock = (name, stats, form) => {
-    let block = `${name}`;
-    if (stats?.ranking) block += ` | Ranking: #${stats.ranking}`;
-    if (stats?.rankingPeak) block += ` | Peak: #${stats.rankingPeak}`;
-    if (stats?.nationality) block += ` | ${stats.nationality}`;
-    if (stats?.hand) block += ` | Mão: ${stats.hand}`;
-
-    if (form?.total > 0) {
-      block += `\nForma geral: ${form.wins}W-${form.losses}L (${form.winRate}%)`;
-    }
-    if (form?.recentMatches?.length) {
-      const surf = form.recentMatches.filter(m => m.surface === surface);
-      if (surf.length) {
-        const sw = surf.filter(m => m.result === 'W').length;
-        block += `\nForma em ${surface}: ${sw}W-${surf.length - sw}L (${surf.length} partidas)`;
-        block += '\nÚltimas em ' + surface + ':\n' + surf.slice(0, 4).map(m =>
-          `  ${m.result} vs ${m.opponent}${m.score ? ' ' + m.score : ''}`
-        ).join('\n');
-      }
-      block += '\nÚltimas 5 (geral):\n' + form.recentMatches.slice(0, 5).map(m =>
-        `  ${m.result} vs ${m.opponent}${m.surface ? ' [' + m.surface + ']' : ''}${m.score ? ' ' + m.score : ''}`
-      ).join('\n');
-    } else {
-      block += '\n_Forma local: sem dados — use conhecimento geral_';
-    }
-    return block;
-  };
-
-  // Baseline probability from ranking differential (simple Elo-like estimate)
-  let rankingBaseline = '';
-  if (p1Stats?.ranking && p2Stats?.ranking) {
-    const r1 = parseInt(p1Stats.ranking), r2 = parseInt(p2Stats.ranking);
-    if (!isNaN(r1) && !isNaN(r2)) {
-      // Simple log-based estimate: P1 = ln(r2) / (ln(r1) + ln(r2)) — higher rank = lower number = higher prob
-      const logR1 = Math.log(r1), logR2 = Math.log(r2);
-      const baseProb1 = (logR2 / (logR1 + logR2) * 100).toFixed(0);
-      const baseProb2 = (100 - parseInt(baseProb1));
-      rankingBaseline = `Baseline por ranking: ${p1}≈${baseProb1}% | ${p2}≈${baseProb2}% — use como ponto de partida, ajuste pela superfície e forma.`;
-    }
-  }
-
-  const lineMovementWarning = oddsMovement?.history?.length >= 2
-    ? `⚠️ LINE MOVEMENT: mercado se moveu. Trate como sinal contrário — ajuste sua estimativa 2-3pp na direção do movimento. Só ignore com dados concretos.`
-    : '';
-
-  const tipInstruction = hasOdds
-    ? `[Se EV >= +2% e confiança ALTA, MÉDIA ou BAIXA: TIP_ML:[jogador]@[odd]|EV:[%]|STAKE:[u]|CONF:[ALTA/MÉDIA/BAIXA]]`
-    : `[Se confiança ALTA ou MÉDIA: TIP_ML:[jogador]@[fair_odd]|EV:estimado|STAKE:[u]|CONF:[ALTA/MÉDIA]]`;
-
-  return `Você é analista de apostas de tênis especializado em mercados ineficientes (Challenger/ITF). Seu trabalho é encontrar edge REAL.
-
-REGRA FUNDAMENTAL: "Sem edge identificado" é frequentemente a resposta correta. Tênis tem alta variância individual — partidas únicas são imprevisíveis. Seja conservador.
-${lineMovementWarning ? '\n' + lineMovementWarning : ''}
-${rankingBaseline ? rankingBaseline + '\n' : ''}
-═══════════════════════════════════════
-PARTIDA: ${p1} vs ${p2}
-Torneio: ${tournament}
-Superfície: ${surfLabel}
-${oddsSection}${lineMovement}${h2hStr}
-═══════════════════════════════════════
-
-JOGADOR 1:
-${fmtPlayerBlock(p1, p1Stats, surfForm1)}
-
-JOGADOR 2:
-${fmtPlayerBlock(p2, p2Stats, surfForm2)}
-
-═══════════════════════════════════════
-
-RACIOCÍNIO EM DUAS ETAPAS OBRIGATÓRIO:
-
-ETAPA 1 — ESTIMATIVA CEGA (analise performance ANTES de comparar com odds):
-Fatores por ordem de importância:
-  1. SUPERFÍCIE: forma histórica específica na superfície atual
-  2. FORMA RECENTE (últimas 4-6 semanas superam ranking)
-  3. H2H NA MESMA SUPERFÍCIE (>H2H geral)
-  4. RANKING como desempate — em ATP/WTA mais decisivo; em Challenger menos
-  5. Métricas se disponíveis: % 1º serviço, break points convertidos/salvos
-→ Estime: P(${p1})=__% | P(${p2})=__%  [soma = 100%]
-→ Baseline de ranking sugeria: ${rankingBaseline || 'rankings não disponíveis'}
-→ Divergência do baseline: [explique se sua estimativa se afasta >8pp do baseline]
-→ Principal fator de incerteza: [1 frase honesta]
-
-ETAPA 2 — VERIFICAÇÃO DE EDGE:
-${hasOdds
-  ? `Odds implícitas: ${p1}=${(1/parseFloat(odds.t1)*100).toFixed(1)}% | ${p2}=${(1/parseFloat(odds.t2)*100).toFixed(1)}%
-→ Se diferença < 3pp: escreva "SEM EDGE" — não emita TIP_ML.
-→ Se diferença ≥ 3pp: EV = (prob_real × odd) - 1. Tip só se EV >= +2%.`
-  : `Sem odds de mercado disponíveis.
-→ Estime FAIR_ODDS (sem juice) = 1/prob. Exemplo: P1=65% → odd=1.538
-→ AVISO: sem odds reais, sua estimativa pode divergir do mercado real. Seja conservador.
-→ Só emita TIP_ML se vantagem for clara (>62%) E confiança ALTA.`}
-
-NÃO invente dados. Se estatística não estiver disponível, declare "dado não disponível".
-
-CONTEXTO DE SUPERFÍCIE:
-• Clay: baseliners, rallies longos, 1º serviço menos dominante
-• Hard: equilibrado, serve + devolução direto
-• Grass: serve-and-volley, aces, rallies curtos — favorece servidores
-• Em Challenger/ITF: forma recente supera ranking quase sempre
-
-FORMATO:
-🎾 ${p1} vs ${p2} | ${tournament} | ${surfLabel}
-
-SUPERFÍCIE: [como cada jogador performa + dado concreto]
-MATCHUP: [serviço, devolução, H2H na superfície]
-FORMA: [objetiva, ambos, últimas semanas]
-
-ETAPA 1 — P(${p1})=__% | P(${p2})=__% | Fator decisivo: [X] | Incerteza: [Y]
-ETAPA 2 — ${hasOdds ? `EV(${p1})=[X%] | EV(${p2})=[X%] | Edge: [SIM/NÃO]` : `Fair: ${p1}=[X.XX] | ${p2}=[X.XX] | Vantagem clara: [SIM/NÃO]`}
-Confiança: [ALTA/MÉDIA/BAIXA] | Justificativa: [por que esse nível]
-
-FAIR_ODDS:${p1}=[odd]|${p2}=[odd]
-${tipInstruction}
-
-Máximo 450 palavras.`;
-}
-
-// ── Generic Prompt Dispatcher ──
-function buildPrompt(sport, match, p1Stats, p2Stats, odds, form1, form2, h2h, oddsMovement) {
-  if (sport === 'mma') {
-    return buildMMAPrompt(match, p1Stats, p2Stats, odds, form1, form2, h2h, oddsMovement);
-  }
-  if (sport === 'tennis') {
-    return buildTennisPrompt(match, p1Stats, p2Stats, odds, form1, form2, h2h, oddsMovement);
-  }
-  // Esports: use buildEsportsPrompt with basic enrichSection
-  const enrichSection = `\nFORMA:\n${form1 ? `${match.participant1_name}: ${form1.wins}W-${form1.losses}L (${form1.winRate}%)` : ''}\n${form2 ? `${match.participant2_name}: ${form2.wins}W-${form2.losses}L (${form2.winRate}%)` : ''}`;
-  const fakeOdds = odds?.t1 ? odds : null;
-  return buildEsportsPrompt({ ...match, team1: match.participant1_name, team2: match.participant2_name }, match.game || 'esports', '', fakeOdds, enrichSection);
-}
-
-function formatAthleteBlock(name, stats, form) {
-  if (!stats || stats.error) return `${name}\n_Estatísticas não disponíveis_`;
-  
-  let block = `${name}`;
-  if (stats.wins !== undefined) block += ` (${stats.wins}-${stats.losses}-${stats.draws || 0})`;
-  
-  if (stats.height) block += ` | Altura: ${stats.height}`;
-  if (stats.reach) block += ` | Reach: ${stats.reach}`;
-  
-  if (stats.slpm !== undefined) {
-    block += `\nStriking: SLpM ${stats.slpm} | Acc ${stats.str_acc}% | Def ${stats.str_def}%`;
-  }
-  if (stats.td_avg !== undefined) {
-    block += `\nGrappling: TD ${stats.td_avg} | Acc ${stats.td_acc}% | Def ${stats.td_def}%`;
-  }
-  
-  if (form?.recentMatches?.length) {
-    block += '\nÚltimas 5:\n' + form.recentMatches.slice(0, 5).map(f =>
-      `${f.result} vs ${f.opponent}${f.method ? ` (${f.method})` : ''}`
-    ).join('\n');
-    if (form.streak) block += `\nStreak: ${form.streak}`;
-  }
-  
-  return block;
-}
-
-// ── Tennis Withdrawal Detection ──
-let lastWithdrawCheck = 0;
-const WITHDRAW_CHECK_INTERVAL = 2 * 60 * 60 * 1000; // 2 hours
-
-async function checkTennisWithdrawals() {
-  if (Date.now() - lastWithdrawCheck < WITHDRAW_CHECK_INTERVAL) return;
-  lastWithdrawCheck = Date.now();
-
-  const tennisConfig = SPORTS['tennis'];
-  if (!tennisConfig?.enabled || !tennisConfig.token) return;
-
-  try {
-    const events = await serverGet('/tennis-tournaments').catch(() => []);
-    if (!Array.isArray(events) || !events.length) return;
-
-    for (const ev of events.slice(0, 5)) {
-      const [current, snapshot] = await Promise.all([
-        serverGet(`/tennis-matches?tournamentId=${encodeURIComponent(ev.id)}`).catch(() => []),
-        serverGet(`/tennis-snapshot?tournamentId=${encodeURIComponent(ev.id)}`).catch(() => [])
-      ]);
-
-      if (!Array.isArray(current) || !Array.isArray(snapshot) || !snapshot.length) continue;
-
-      const snapMap = {};
-      snapshot.forEach(s => { snapMap[s.match_id] = s; });
-
-      for (const match of current) {
-        const snap = snapMap[match.id];
-        if (!snap) continue;
-
-        const p1Changed = !fuzzyName(snap.participant1_name, match.participant1_name);
-        const p2Changed = !fuzzyName(snap.participant2_name, match.participant2_name);
-        if (!p1Changed && !p2Changed) continue;
-
-        const old = p1Changed ? snap.participant1_name : snap.participant2_name;
-        const newp = p1Changed ? match.participant1_name : match.participant2_name;
-
-        log('WARN', 'TENNIS-WITHDRAW', `${ev.name}: ${old} → ${newp}`);
-
-        const surfIcon = { clay: '🟠', grass: '🟢', hard: '🔵' };
-        const surf = match.category || 'hard';
-        const alert = `⚠️ *WITHDRAWAL / SUBSTITUIÇÃO DETECTADA*\n\n` +
-          `🎾 ${ev.name}\n` +
-          `${surfIcon[surf] || ''} Superfície: ${surf}\n\n` +
-          `❌ ~~${old}~~ → ✅ *${newp}*\n` +
-          `Partida: *${match.participant1_name}* vs *${match.participant2_name}*\n\n` +
-          `📊 _Lucky loser/substituto pode ter desvantagem de preparação_\n` +
-          `💡 _Verifique a análise atualizada antes de apostar_`;
-
-        for (const [userId, prefs] of subscribedUsers) {
-          if (!prefs.has('tennis')) continue;
-          sendDM(tennisConfig.token, userId, alert).catch(() => {});
-        }
-        for (const adminId of ADMIN_IDS) {
-          sendDM(tennisConfig.token, adminId, alert).catch(() => {});
-        }
-      }
-    }
-  } catch(e) {
-    log('ERROR', 'TENNIS-WITHDRAW', e.message);
-  }
-}
-
-// ── Tennis Auto-Analysis ──
-let lastTennisAutoAnalyze = 0;
-const TENNIS_AUTO_INTERVAL = 4 * 60 * 60 * 1000; // 4 hours (volume control)
-const analyzedTennisMatches = new Map();
-
-async function runAutoAnalysisTennis() {
-  if (Date.now() - lastTennisAutoAnalyze < TENNIS_AUTO_INTERVAL) return;
-  lastTennisAutoAnalyze = Date.now();
-
-  const tennisConfig = SPORTS['tennis'];
-  if (!tennisConfig?.enabled || !tennisConfig.token) return;
-
-  try {
-    const events = await serverGet('/tennis-tournaments').catch(() => []);
-    log('INFO', 'AUTO-TENNIS', `${events?.length || 0} torneios encontrados`);
-    if (!Array.isArray(events) || !events.length) return;
-
-    // Priorizar por tier: Grand Slam > Masters/WTA 1000 > ATP/WTA 500 > ATP 250 > Challenger > ITF
-    const tierOrder = { 'Grand Slam': 0, 'Masters 1000': 1, 'WTA 1000': 1, 'ATP 500': 2, 'WTA 500': 2, 'ATP 250': 3, 'WTA': 3, 'Challenger': 4, 'ITF': 5 };
-    const sortedEvents = [...events].sort((a, b) => (tierOrder[a.tier] ?? 99) - (tierOrder[b.tier] ?? 99));
-
-    let analyzed = 0;
-    const MAX_ANALYSES = 8; // increased to cover more upcoming matches
-
-    for (const ev of sortedEvents.slice(0, 8)) {
-      if (analyzed >= MAX_ANALYSES) break;
-      const matches = await serverGet(`/tennis-matches?tournamentId=${encodeURIComponent(ev.id)}`).catch(() => []);
-      if (!Array.isArray(matches)) continue;
-
-      // Analyze matches in next 48h (with odds), sorted by soonest first
-      const window48h = new Date(Date.now() + 48 * 3600000).toISOString();
-      const due = matches
-        .filter(m => m.match_time && m.match_time <= window48h)
-        .sort((a, b) => (a.match_time || '').localeCompare(b.match_time || ''));
-
-      if (due.length > 0) {
-        log('INFO', 'AUTO-TENNIS', `${ev.name}: ${due.length} partidas nas próximas 48h`);
-      }
-
-      for (const match of due.slice(0, 3)) { // max 3 per tournament
-        if (analyzed >= MAX_ANALYSES) break;
-        const key = `tennis_${match.id}`;
-        const prev = analyzedTennisMatches.get(key);
-        if (prev?.tipSent) continue; // uma tip por partida — não repetir
-        if (prev?.ts && Date.now() - prev.ts < TENNIS_AUTO_INTERVAL) continue;
-
-        const p1enc = encodeURIComponent(match.participant1_name);
-        const p2enc = encodeURIComponent(match.participant2_name);
-        const surface = match.category || '';
-
-        const [p1Stats, p2Stats, odds, form1, form2, h2h, oddsMovement] = await Promise.all([
-          serverGet(`/tennis-player?name=${p1enc}`).catch(() => null),
-          serverGet(`/tennis-player?name=${p2enc}`).catch(() => null),
-          serverGet(`/odds?p1=${p1enc}&p2=${p2enc}&sport=tennis`).catch(() => null),
-          serverGet(`/tennis-surface-form?player=${p1enc}${surface ? '&surface=' + encodeURIComponent(surface) : ''}`).catch(() => null),
-          serverGet(`/tennis-surface-form?player=${p2enc}${surface ? '&surface=' + encodeURIComponent(surface) : ''}`).catch(() => null),
-          serverGet(`/h2h?p1=${p1enc}&p2=${p2enc}&sport=tennis`).catch(() => null),
-          serverGet(`/odds-movement?p1=${p1enc}&p2=${p2enc}&sport=tennis`).catch(() => null)
-        ]);
-
-        // Pre-filter: skip if surface-adjusted model agrees with market within 6pp
-        if (!tennisPreFilter(p1Stats, p2Stats, form1, form2, odds, surface)) {
-          log('INFO', 'AUTO-TENNIS', `Pré-filtro: modelo alinhado com odds — pulando ${match.participant1_name} vs ${match.participant2_name}`);
-          analyzedTennisMatches.set(key, { ts: Date.now(), tipSent: false });
-          continue;
-        }
-
-        analyzedTennisMatches.set(key, { ts: Date.now(), tipSent: false });
-        analyzed++;
-
-        const matchTimeBRT = match.match_time
-          ? new Date(match.match_time).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo', weekday: 'short', hour: '2-digit', minute: '2-digit' })
-          : null;
-        log('INFO', 'AUTO-TENNIS', `Analisando ${match.participant1_name} vs ${match.participant2_name} — ${matchTimeBRT || 'horário não definido'}`);
-
-        const prompt = buildTennisPrompt(match, p1Stats, p2Stats, odds, form1, form2, h2h, oddsMovement);
-
-        const resp = await serverPost('/claude', {
-          model: 'claude-sonnet-4-6',
-          max_tokens: 1600,
-          messages: [{ role: 'user', content: prompt }]
-        }, null, { 'x-claude-key': CLAUDE_KEY });
-
-        const text = resp.content?.map(b => b.text || '').join('');
-        if (!text) continue;
-
-        const tipResult = text.match(/TIP_ML:\s*([^@]+?)\s*@\s*([^|\]]+?)\s*\|EV:\s*([^|]+?)\s*\|STAKE:\s*([^|\]]+?)(?:\s*\|CONF:\s*(\w+))?(?:\]|$)/);
-        const hasRealOdds = !!(odds?.t1 && parseFloat(odds.t1) > 1);
-
-        if (tipResult) {
-          const tipPlayer = tipResult[1].trim();
-          const tipOdd = tipResult[2].trim();
-          const tipEV = tipResult[3].trim();
-          const tipStake = calcKelly(tipEV, tipOdd);
-          const surfIcon = { clay: '🟠', grass: '🟢', hard: '🔵' };
-          const oddsLabel = hasRealOdds ? '' : '\n⚠️ _Odds estimadas (sem mercado disponível)_';
-
-          await serverPost('/record-tip', {
-            matchId: String(match.id), eventName: match.event_name || ev.name,
-            p1: match.participant1_name, p2: match.participant2_name,
-            tipParticipant: tipPlayer, odds: tipOdd, ev: tipEV, stake: tipStake,
-            confidence: tipResult[5]?.trim() || 'MÉDIA', sport: 'tennis'
-          }, 'tennis');
-
-          const tipMsg = `🎾 💰 *TIP AUTOMÁTICA TÊNIS*\n` +
-            `${surfIcon[match.category] || ''} *${match.participant1_name}* vs *${match.participant2_name}*\n` +
-            `📋 ${match.event_name || ev.name} | 🏟️ ${match.category || 'hard'}\n` +
-            (matchTimeBRT ? `🕐 *${matchTimeBRT}* (BRT)\n` : '') +
-            `\n🎯 Aposte: *${tipPlayer}* ML @ *${tipOdd}*\n` +
-            `📈 EV: *${tipEV}* | 💵 Stake: *${tipStake}* _(¼ Kelly)_` +
-            `${oddsLabel}\n\n⚠️ _Aposte com responsabilidade._`;
-
-          for (const [userId, prefs] of subscribedUsers) {
-            if (!prefs.has('tennis')) continue;
-            try { await sendDM(tennisConfig.token, userId, tipMsg); }
-            catch(e) { if (e.message?.includes('403')) subscribedUsers.delete(userId); }
-          }
-          analyzedTennisMatches.set(key, { ts: Date.now(), tipSent: true });
-          log('INFO', 'AUTO-TIP-TENNIS', `${tipPlayer} @ ${tipOdd} (odds ${hasRealOdds ? 'reais' : 'estimadas'})`);
-        }
-
-        await new Promise(r => setTimeout(r, 3000));
-        if (analyzed >= MAX_ANALYSES) break;
-      }
-      if (analyzed >= MAX_ANALYSES) break;
-    }
-  } catch(e) {
-    log('ERROR', 'AUTO-TENNIS', e.message);
-  }
-}
-
 // ── Admin ──
 async function handleAdmin(token, chatId, command) {
   if (!ADMIN_IDS.has(String(chatId))) {
@@ -2012,7 +860,7 @@ async function handleAdmin(token, chatId, command) {
   
   const parts = command.trim().split(/\s+/);
   const cmd = parts[0];
-  const sport = parts[1] || 'mma';
+  const sport = parts[1] || 'esports';
   
   if (cmd === '/stats' || cmd === '/roi') {
     try {
@@ -2085,36 +933,6 @@ async function handleAdmin(token, chatId, command) {
       });
       await send(token, chatId, txt);
     } catch(e) { await send(token, chatId, `❌ ${e.message}`); }
-  } else if (cmd === '/rescrape') {
-    if (sport !== 'mma') { await send(token, chatId, '❌ Apenas para MMA.'); return; }
-    const name = parts.slice(1).join(' ');
-    if (!name) { await send(token, chatId, '❌ Use: /rescrape <nome do lutador>'); return; }
-    await send(token, chatId, `⏳ Rebuscando *${name}*...`);
-    try {
-      const stats = await serverGet(`/athlete?name=${encodeURIComponent(name)}`, 'mma');
-      if (stats?.error) { await send(token, chatId, `❌ ${stats.error}`); return; }
-      await send(token, chatId, `✅ *${stats.name}* atualizado:\nCartel: ${stats.wins}-${stats.losses}-${stats.draws || 0}\nSLpM: ${stats.slpm || stats.str_acc} | TD Avg: ${stats.td_avg}`);
-    } catch(e) { await send(token, chatId, `❌ ${e.message}`); }
-  } else if (cmd === '/force-analyze') {
-    if (sport !== 'mma') { await send(token, chatId, '❌ Apenas para MMA.'); return; }
-    const fightId = parts[1];
-    if (!fightId) {
-      try {
-        const fights = await serverGet('/upcoming-fights?days=7', 'mma');
-        if (!Array.isArray(fights) || !fights.length) { await send(token, chatId, '❌ Nenhuma luta próxima.'); return; }
-        let txt = '⚡ *Force Analyze — Lutas disponíveis:*\n\n';
-        fights.slice(0, 8).forEach(f => {
-          const analyzed = analyzedFights.has(f.id) ? ' _(analisada)_' : '';
-          txt += `ID: \`${f.id.slice(0, 20)}\`\n${f.participant1_name} vs ${f.participant2_name}${analyzed}\n\n`;
-        });
-        txt += '_Use: /force-analyze <fightId>_';
-        await send(token, chatId, txt);
-      } catch(e) { await send(token, chatId, `❌ ${e.message}`); }
-      return;
-    }
-    analyzedFights.delete(fightId);
-    lastAutoAnalyze = 0;
-    await send(token, chatId, `✅ Cache de \`${fightId.slice(0, 20)}\` limpo.`);
   } else if (cmd === '/slugs') {
     // Mostra ligas LoL cobertas e slugs desconhecidos vistos no schedule
     try {
@@ -2154,7 +972,7 @@ async function handleAdmin(token, chatId, command) {
     try {
       const h = await serverGet('/health').catch(e => ({ error: e.message }));
       const icon = h.status === 'ok' ? '✅' : '⚠️';
-      let msg = `${icon} *Health — MMA Bot*\n\n`;
+      let msg = `${icon} *Health — LoL Bot*\n\n`;
       msg += `Status: \`${h.status || 'erro'}\`\n`;
       msg += `DB: \`${h.db || 'desconhecido'}\`\n`;
       msg += `Última análise: ${h.lastAnalysis ? new Date(h.lastAnalysis).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' }) : 'nunca'}\n`;
@@ -2168,35 +986,22 @@ async function handleAdmin(token, chatId, command) {
     if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
     try {
       const month = new Date().toISOString().slice(0, 7);
-      const [events, dbStatus] = await Promise.all([
-        serverGet('/mma-events').catch(() => []),
-        serverGet('/db-status?sport=mma').catch(() => null)
+      const [lolMatches, dbStatus, unsettled] = await Promise.all([
+        serverGet('/lol-matches').catch(() => []),
+        serverGet('/db-status?sport=esports').catch(() => null),
+        serverGet('/unsettled-tips', 'esports').catch(() => [])
       ]);
-
-      const nextEvent = Array.isArray(events) ? events.find(e => e.date >= new Date().toISOString().slice(0, 10)) : null;
-      let fights48h = [];
-      if (nextEvent) {
-        const all = await serverGet(`/upcoming-fights?days=2`, 'mma').catch(() => []);
-        fights48h = Array.isArray(all) ? all : [];
-      }
-
-      const oddsUsageRow = stmts.getApiUsage.get('mma', month);
+      const oddsUsageRow = stmts.getApiUsage.get('esports', month);
       const oddsUsed = oddsUsageRow?.count || 0;
-
-      const unsettled = await serverGet('/unsettled-tips', 'mma').catch(() => []);
-
-      const lastA = lastAutoAnalyze > 0 ? new Date(lastAutoAnalyze).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' }) : 'nunca';
-
-      let msg = `🔍 *DEBUG — MMA Bot*\n\n`;
-      msg += `📅 *Próximo evento:* ${nextEvent ? `${nextEvent.name} (${nextEvent.date})` : 'nenhum detectado'}\n`;
-      msg += `🥊 *Lutas próx. 48h:* ${fights48h.length} com odds\n`;
-      msg += `⏱ *Última análise:* ${lastA}\n`;
+      const live = Array.isArray(lolMatches) ? lolMatches.filter(m => m.status === 'live').length : 0;
+      const upcoming = Array.isArray(lolMatches) ? lolMatches.filter(m => m.status === 'upcoming').length : 0;
+      let msg = `🔍 *DEBUG — LoL Bot*\n\n`;
+      msg += `🔴 *Ao vivo:* ${live} | 📅 *Próximas:* ${upcoming}\n`;
       msg += `📊 *Tips pendentes:* ${Array.isArray(unsettled) ? unsettled.length : '?'}\n`;
       msg += `🔑 *OddsPapi mês:* ${oddsUsed}/230 req\n`;
       if (dbStatus) {
-        msg += `💾 *DB:* ${dbStatus.athletes} lutadores | ${dbStatus.tips} tips | ${dbStatus.events} eventos\n`;
+        msg += `💾 *DB:* ${dbStatus.tips || 0} tips | ${dbStatus.matches || 0} matches\n`;
       }
-
       await send(token, chatId, msg);
     } catch(e) {
       await send(token, chatId, `❌ Erro no debug: ${e.message}`);
@@ -2205,15 +1010,13 @@ async function handleAdmin(token, chatId, command) {
     await send(token, chatId,
       `📋 *Comandos Admin*\n\n` +
       `/health — status do bot e DB\n` +
-      `/debug — próximo evento, lutas 48h, uso de API\n` +
-      `/stats [sport] — ROI e calibração\n` +
+      `/debug — partidas, tips pendentes, uso de API\n` +
+      `/stats esports — ROI e calibração\n` +
       `/users — status do bot\n` +
       `/pending — tips pendentes\n` +
       `/settle — force settlement\n` +
-      `/slugs — slugs ignorados recentes\n` +
-      `/lolraw — dump bruto da API LoL (diagnóstico)\n` +
-      `${sport === 'mma' ? '/rescrape <nome> — rebuscar stats de lutador\n/force-analyze [fightId] — forçar re-análise\n' : ''}` +
-      `\n_IDs aparecem no /pending e /force-analyze_`
+      `/slugs — ligas LoL cobertas e slugs ignorados\n` +
+      `/lolraw — dump bruto da API LoL (diagnóstico)\n`
     );
   }
 }
@@ -2278,16 +1081,8 @@ async function handleProximas(token, chatId, sport) {
   try {
     await send(token, chatId, '⏳ _Buscando partidas..._');
 
-    // Busca LoL e Dota em paralelo — esses endpoints retornam live + upcoming
-    const [lolMatches, dotaMatches] = await Promise.all([
-      serverGet('/lol-matches').catch(() => []),
-      serverGet('/dota-matches').catch(() => [])
-    ]);
-
-    const all = [
-      ...(Array.isArray(lolMatches) ? lolMatches : []),
-      ...(Array.isArray(dotaMatches) ? dotaMatches : [])
-    ];
+    const lolMatches = await serverGet('/lol-matches').catch(() => []);
+    const all = Array.isArray(lolMatches) ? lolMatches : [];
 
     if (!all.length) {
       await send(token, chatId,
@@ -2301,14 +1096,13 @@ async function handleProximas(token, chatId, sport) {
     const live = all.filter(m => m.status === 'live' || m.status === 'draft');
     const upcoming = all.filter(m => m.status === 'upcoming');
 
-    let txt = `📅 *PARTIDAS ESPORTS*\n━━━━━━━━━━━━━━━━\n\n`;
+    let txt = `🎮 *PARTIDAS LoL*\n━━━━━━━━━━━━━━━━\n\n`;
 
     if (live.length) {
       txt += `🔴 *AO VIVO / EM DRAFT (${live.length})*\n`;
       live.slice(0, 5).forEach(m => {
-        const gameIcon = m.game === 'lol' ? '🎮' : '🌋';
         const league = m.league ? `[${m.league}]` : '';
-        txt += `${gameIcon} ${league} *${m.team1}* vs *${m.team2}*`;
+        txt += `🎮 ${league} *${m.team1}* vs *${m.team2}*`;
         if (m.score1 !== undefined || m.score2 !== undefined) {
           txt += ` (${m.score1 ?? 0}-${m.score2 ?? 0})`;
         }
@@ -2322,9 +1116,8 @@ async function handleProximas(token, chatId, sport) {
     if (upcoming.length) {
       txt += `📅 *PRÓXIMAS (${upcoming.length})*\n`;
       upcoming.slice(0, 10).forEach(m => {
-        const gameIcon = m.game === 'lol' ? '🎮' : '🌋';
         const league = m.league ? `[${m.league}]` : '';
-        txt += `${gameIcon} ${league} *${m.team1}* vs *${m.team2}*`;
+        txt += `🎮 ${league} *${m.team1}* vs *${m.team2}*`;
         if (m.format) txt += ` _${m.format}_`;
         txt += '\n';
         if (m.time) {
@@ -2567,8 +1360,8 @@ async function poll(token, sport) {
             } catch(e) { await send(token, chatId, '❌ Erro ao buscar tracking: ' + e.message); }
           } else if (text.startsWith('/stats') || text.startsWith('/roi') || text.startsWith('/users') ||
                      text.startsWith('/settle') || text.startsWith('/pending') ||
-                     text.startsWith('/rescrape') || text.startsWith('/force-analyze') ||
-                     text.startsWith('/slugs') || text.startsWith('/lolraw')) {
+                     text.startsWith('/slugs') || text.startsWith('/lolraw') ||
+                     text.startsWith('/health') || text.startsWith('/debug')) {
             await handleAdmin(token, chatId, text);
           }
         }
