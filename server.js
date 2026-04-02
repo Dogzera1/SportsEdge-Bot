@@ -36,6 +36,7 @@ const ODDS_TTL = 4 * 60 * 60 * 1000; // 4h — conserves The Odds API monthly qu
 
 // Esports odds: OddsPapi (free 250 req/mês). TTL 6h + tournament cache 24h ≈ 180 req/mês
 let lastEsportsOddsUpdate = 0;
+let lastApiResponse = ''; // Para diagnóstico
 let esportsOddsFetching = false;
 const ESPORTS_ODDS_TTL = 20 * 60 * 1000; // 20m — ~72 fetches/dia para Line Shopping
 
@@ -126,71 +127,70 @@ async function fetchEsportsOdds() {
   if (esportsOddsFetching) return;
   const now = Date.now();
   
-  // Cache de 15 min para v4
-  if (now - lastEsportsOddsUpdate < 15 * 60 * 1000) return;
+  if (now - lastEsportsOddsUpdate < 10 * 60 * 1000) return;
 
   esportsOddsFetching = true;
+  lastApiResponse = 'Iniciando...';
   try {
     let cached = 0;
-    const baseUrl = 'https://api.oddspapi.io/v4';
-    const authParams = `apiKey=${ODDSPAPI_KEY}&api_key=${ODDSPAPI_KEY}`;
+    const tidList = '2450,2452,2454,26698,39985,45589,47864,50586,46121,26590,33814,36997,39009,45623,45855,45985,46117,46119,50242,50586,50756';
     
-    // Lista de torneios conhecidos (os que você passou!)
-    const hardcodedTids = [2450, 2452, 2454, 26698, 39985, 45589, 47864, 50586, 46121, 26590, 33814, 36997, 39009, 45623, 45985, 46117, 46119, 50242];
-    const tidList = hardcodedTids.join(',');
+    // Tenta V4 primeiro (CamelCase apiKey)
+    let url = `https://api.oddspapi.io/v4/odds-by-tournaments?apiKey=${ODDSPAPI_KEY}&sportId=18&tournamentIds=${tidList}&bookmakers=1xbet`;
+    let r = await httpGet(url).catch(e => ({ status: 500, body: e.message }));
     
-    log('DEBUG', 'ODDS', `Sincronizando v4 para ${hardcodedTids.length} torneios...`);
-    const url = `${baseUrl}/odds-by-tournaments?${authParams}&sportId=18&tournamentIds=${tidList}&bookmakers=1xbet`;
+    lastApiResponse = `V4 Status: ${r.status} | Body: ${(r.body||'').slice(0, 100)}`;
     
-    const r = await httpGet(url);
-    if (r.status !== 200) {
-      log('ERROR', 'ODDS', `OddsPapi v4 Status ${r.status}. Verifique se a variável ODDS_API_KEY no Railway está correta.`);
-      if (r.status === 401 || r.status === 403) {
-        log('WARN', 'ODDS', 'Chave v4 inválida? Tentando Fallback v1...');
-        return await fetchEsportsOddsV1();
-      }
-      return;
+    // Fallback para V1 se V4 falhar ou vir vazio
+    if (r.status !== 200 || !r.body || r.body.length < 50) {
+       url = `https://api.oddspapi.io/v1/fixtures?api_key=${ODDSPAPI_KEY}&sportId=18`;
+       r = await httpGet(url).catch(e => ({ status: 500, body: e.message }));
+       lastApiResponse = `V1 Status: ${r.status} | Body: ${(r.body||'').slice(0, 100)}`;
     }
 
-    const raw = safeParse(r.body, {});
-    const tournamentList = Array.isArray(raw) ? raw : (raw.data || []);
-    
-    for (const t of tournamentList) {
-      const fixtures = t.fixtures || [];
-      for (const f of fixtures) {
-        if (!f.bookmakerOdds || !f.bookmakerOdds['1xbet']) continue;
-        
-        const bk = f.bookmakerOdds['1xbet'];
-        const p1Name = f.participant1Name || f.homeName || '';
-        const p2Name = f.participant2Name || f.awayName || '';
-        if (!p1Name || !p2Name) continue;
+    if (r.status === 200) {
+      const raw = safeParse(r.body, {});
+      const list = Array.isArray(raw) ? raw : (raw.data || raw.fixtures || []);
+      
+      for (const item of list) {
+        // V4 (Tournaments) ou V1 (Fixtures)
+        const fixtures = item.fixtures || (item.fixtureId ? [item] : []);
+        for (const f of fixtures) {
+          if (!f.bookmakerOdds || !f.bookmakerOdds['1xbet']) continue;
+          const bk = f.bookmakerOdds['1xbet'];
+          
+          // Extrai nomes (V4 participant1Name ou V1 Regex da URL)
+          let p1 = f.participant1Name || f.homeName || '';
+          let p2 = f.participant2Name || f.awayName || '';
+          
+          if (!p1 && bk.fixturePath) {
+            const slug = bk.fixturePath.split('/').pop().replace(/^\d+-/, '').replace(/-/g, ' ');
+            p1 = slug; p2 = slug; // Modo Fuzzy Matcher
+          }
+          if (!p1) continue;
 
-        const markets = bk.markets || {};
-        const matchMarket = markets['183'] || markets['101'] || Object.values(markets).find(m => m.bookmakerMarketId === '1');
-        if (!matchMarket || !matchMarket.outcomes) continue;
+          // Extrai Odds v1/v4 (Moneyline Market ID 1 ou 183/101)
+          const markets = bk.markets || {};
+          const market = markets['183'] || markets['101'] || markets['1'] || Object.values(markets).find(m => m.bookmakerMarketId === '1');
+          if (!market) continue;
 
-        const outcomes = Object.values(matchMarket.outcomes);
-        if (outcomes.length < 2) continue;
-
-        let prices = [];
-        for (const out of outcomes) {
+          const outcomes = Object.values(market.outcomes || {});
+          if (outcomes.length < 2) continue;
+          
           try {
-            const price = parseFloat(out.players['0'].price);
-            if (!isNaN(price)) prices.push(price);
+            const o1 = outcomes[0].players?.['0']?.price || outcomes[0].price;
+            const o2 = outcomes[1].players?.['0']?.price || outcomes[1].price;
+            if (o1 && o2) {
+              const entry = { t1: parseFloat(o1).toFixed(2), t2: parseFloat(o2).toFixed(2), bookmaker: '1xBet', t1Name: p1, t2Name: p2 };
+              oddsCache[`esports_${f.fixtureId || f.id}`] = entry;
+              cached++;
+            }
           } catch(e) {}
         }
-        
-        if (prices.length < 2) continue;
-        
-        const entry = { t1: prices[0].toFixed(2), t2: prices[1].toFixed(2), bookmaker: '1xBet', t1Name: p1Name, t2Name: p2Name };
-        const nameKey = f.fixtureId || `${norm(p1Name)}_${norm(p2Name)}`;
-        
-        oddsCache[`esports_${nameKey}`] = entry;
-        cached++;
       }
     }
     
-    log('INFO', 'ODDS', `v4 Sync: ${cached} partidas em cache.`);
+    log('INFO', 'ODDS', `Sincronizado: ${cached} partidas (Híbrido)`);
     lastEsportsOddsUpdate = Date.now();
   } catch(e) {
     log('ERROR', 'ODDS', `OddsPapi Error: ${e.message}`);
@@ -1291,7 +1291,12 @@ const server = http.createServer(async (req, res) => {
   if (p === '/debug-odds') {
     const count = Object.keys(oddsCache).length;
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify({ count, lastSync: lastEsportsOddsUpdate, status: count > 0 ? 'OK' : 'Empty Cache / Auth Error' }));
+    return res.end(JSON.stringify({ 
+      count, 
+      lastSync: lastEsportsOddsUpdate, 
+      status: count > 0 ? 'OK' : 'Error',
+      raw: lastApiResponse || 'Nenhuma requisição feita ainda.'
+    }));
   }
 
   // ── API Routes (Tips, ROI, etc.) ──
