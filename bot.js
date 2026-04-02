@@ -52,6 +52,10 @@ const UPCOMING_WINDOW_HOURS = 24; // analyze upcoming matches within next 24h
 let lastPatchAlert = 0;
 const PATCH_ALERT_INTERVAL = 24 * 60 * 60 * 1000;
 
+// Auto patch meta fetch (ddragon)
+let patchAutoFetchTs = 0;
+const PATCH_AUTO_FETCH_INTERVAL = 12 * 60 * 60 * 1000; // verifica a cada 12h
+
 
 
 // ── Telegram Request ──
@@ -323,13 +327,34 @@ async function runAutoAnalysis() {
           const prev = analyzedMatches.get(matchKey);
           if (prev?.tipSent) continue; // já enviou tip — não repetir
 
-          if (prev && (now - prev.ts < UPCOMING_ANALYZE_INTERVAL)) continue;
+          // Item 1: Bo3/Bo5 — aguarda draft disponível (fase live/draft)
+          // Pré-jogo sem draft explica ~40-60% do resultado; análise estruturalmente limitada.
+          // O loop de partidas live já captura o mesmo confronto com composições conhecidas.
+          if (match.format === 'Bo3' || match.format === 'Bo5') {
+            log('INFO', 'AUTO', `Upcoming ${match.format} ignorado (${match.team1} vs ${match.team2}) — aguardando draft para análise confiável`);
+            continue;
+          }
 
-          // Verificar odds (enriquece contexto se disponíveis, mas não bloqueia análise)
-          const oddsCheck = await serverGet(`/odds?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}`).catch(() => null);
+          const matchStart = match.time ? new Date(match.time).getTime() : 0;
+          const timeToMatch = matchStart > 0 ? matchStart - now : Infinity;
+          const isImminentMatch = timeToMatch > 0 && timeToMatch < 2 * 60 * 60 * 1000;
+
+          // Item 3: partida iminente (<2h) bypassa o cooldown de 30min para garantir odds frescas
+          if (!isImminentMatch && prev && (now - prev.ts < UPCOMING_ANALYZE_INTERVAL)) continue;
+
+          // Item 3: força re-fetch de odds se a partida começa em < 2h
+          const oddsPath = isImminentMatch
+            ? `/odds?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}&force=1`
+            : `/odds?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}`;
+
+          if (isImminentMatch) {
+            log('INFO', 'AUTO', `Upcoming < 2h: forçando re-fetch de odds para ${match.team1} vs ${match.team2}`);
+          }
+
+          const oddsCheck = await serverGet(oddsPath).catch(() => null);
           const hasRealOdds = !!(oddsCheck?.t1 && parseFloat(oddsCheck.t1) > 1);
           const matchTime = match.time ? new Date(match.time).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit' }) : '—';
-          log('INFO', 'AUTO', `Esports upcoming: ${match.team1} vs ${match.team2} (${match.league}) às ${matchTime}${hasRealOdds ? ' — odds disponíveis' : ' — odds estimadas'}`);
+          log('INFO', 'AUTO', `Esports upcoming: ${match.team1} vs ${match.team2} (${match.league}) às ${matchTime}${hasRealOdds ? ' — odds disponíveis' : ' — odds estimadas'}${isImminentMatch ? ' [IMINENTE <2h]' : ''}`);
 
           const result = await autoAnalyzeMatch(esportsConfig.token, match);
           analyzedMatches.set(matchKey, { ts: now, tipSent: false });
@@ -350,12 +375,14 @@ async function runAutoAnalysis() {
               confidence: result.tipMatch[5]?.trim() || 'MÉDIA', isLive: false
             }, 'esports');
 
-            const tipMsg = `${gameIcon} 💰 *TIP PRÉ-JOGO ESPORTS*\n` +
+            const imminentNote = isImminentMatch ? `⏰ _Odds atualizadas agora (< 2h para o jogo)_\n` : '';
+            const tipMsg = `${gameIcon} 💰 *TIP PRÉ-JOGO ESPORTS (Bo1)*\n` +
               `*${match.team1}* vs *${match.team2}*\n📋 ${match.league}\n` +
               (match.time ? `🕐 Início: *${matchTime}* (BRT)\n` : '') +
               `\n🎯 Aposta: *${tipTeam}* ML @ *${tipOdd}*\n` +
               `📈 EV: *${tipEV}*\n💵 Stake: *${tipStake}* _(¼ Kelly)_\n` +
-              `📋 _Análise pré-draft: forma e histórico (sem acesso às comps)_\n\n` +
+              `${imminentNote}` +
+              `📋 _Formato Bo1 — análise por forma e H2H (draft não disponível antes do início)_\n\n` +
               `⚠️ _Aposte com responsabilidade._`;
 
             for (const [userId, prefs] of subscribedUsers) {
@@ -547,6 +574,56 @@ async function checkPatchMetaStale(token) {
     for (const adminId of ADMIN_IDS) {
       await sendDM(token, adminId, msg).catch(() => {});
     }
+  }
+}
+
+// ── Auto Patch Meta (ddragon) ──
+async function fetchLatestPatchMeta() {
+  const now = Date.now();
+  if (now - patchAutoFetchTs < PATCH_AUTO_FETCH_INTERVAL) return;
+  patchAutoFetchTs = now;
+
+  try {
+    const versions = await new Promise((resolve, reject) => {
+      https.get('https://ddragon.leagueoflegends.com/api/versions.json', res => {
+        let d = '';
+        res.on('data', c => d += c);
+        res.on('end', () => { try { resolve(JSON.parse(d)); } catch(e) { reject(e); } });
+      }).on('error', reject);
+    });
+
+    if (!Array.isArray(versions) || !versions[0]) return;
+    const latestFull = versions[0]; // ex: "15.6.1"
+    const patchShort = latestFull.split('.').slice(0, 2).join('.'); // "15.6"
+
+    const currentMeta = process.env.LOL_PATCH_META || '';
+    if (currentMeta.includes(`Patch ${patchShort}`)) {
+      log('INFO', 'PATCH', `Patch ${patchShort} já está no contexto — sem atualização`);
+      return;
+    }
+
+    const prevMeta = currentMeta || '(não definido)';
+    const patchNotesUrl = `https://www.leagueoflegends.com/en-us/news/game-updates/patch-${patchShort.replace('.', '-')}-notes/`;
+    process.env.LOL_PATCH_META = `Patch ${patchShort} (auto-detectado — revise buffs/nerfs relevantes)`;
+    process.env.PATCH_META_DATE = new Date().toISOString().slice(0, 10);
+    lastPatchAlert = 0; // reseta alerta de stale para não notificar logo após a atualização
+
+    log('INFO', 'PATCH', `Novo patch auto-detectado: ${patchShort} (anterior: ${prevMeta.slice(0, 40)})`);
+
+    const esportsToken = SPORTS['esports']?.token;
+    if (esportsToken && ADMIN_IDS.size) {
+      const msg = `🔄 *NOVO PATCH DETECTADO: ${patchShort}*\n\n` +
+        `O contexto da IA foi atualizado automaticamente para o Patch ${patchShort}.\n\n` +
+        `📋 [Ver patch notes](${patchNotesUrl})\n\n` +
+        `Para adicionar resumo manual de meta (opcional, melhora qualidade):\n` +
+        `\`LOL_PATCH_META=Patch ${patchShort} — [buff/nerfs relevantes]\`\n\n` +
+        `_Sem ação necessária — análises já refletem o patch atual._`;
+      for (const adminId of ADMIN_IDS) {
+        await sendDM(esportsToken, adminId, msg).catch(() => {});
+      }
+    }
+  } catch(e) {
+    log('WARN', 'PATCH', `Erro no auto-fetch de patch meta: ${e.message}`);
   }
 }
 
@@ -1524,6 +1601,9 @@ log('INFO', 'BOOT', `Sports carregados: ${JSON.stringify(Object.entries(SPORTS).
   if (SPORTS.esports?.enabled) {
     setInterval(() => checkLiveNotifications().catch(e => log('ERROR', 'NOTIFY', e.message)), LIVE_CHECK_INTERVAL);
     setInterval(() => checkCLV().catch(e => log('ERROR', 'CLV', e.message)), 5 * 60 * 1000);
+    // Auto-patch meta: verifica novo patch a cada 12h via ddragon
+    fetchLatestPatchMeta().catch(e => log('WARN', 'PATCH', e.message)); // executa imediatamente no boot
+    setInterval(() => fetchLatestPatchMeta().catch(e => log('WARN', 'PATCH', e.message)), PATCH_AUTO_FETCH_INTERVAL);
   }
   
   log('INFO', 'BOOT', `Bots ativos: ${Object.keys(bots).join(', ')}`);

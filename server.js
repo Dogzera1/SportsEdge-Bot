@@ -1015,6 +1015,11 @@ const server = http.createServer(async (req, res) => {
     const t1 = parsed.query.team1 || parsed.query.p1 || '';
     const t2 = parsed.query.team2 || parsed.query.p2 || '';
     if (!t1 || !t2) { sendJson(res, { error: 'team1 e team2 obrigatórios' }, 400); return; }
+    // force=1: bypassa TTL do cache (usado para partidas iminentes < 2h)
+    if (parsed.query.force === '1') {
+      lastEsportsOddsUpdate = 0;
+      log('INFO', 'ODDS', `Force refresh solicitado para ${t1} vs ${t2} (partida iminente)`);
+    }
     await fetchOdds('esports');
     const o = findOdds('esports', t1, t2);
     sendJson(res, o || { error: 'odds não encontradas' });
