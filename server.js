@@ -197,26 +197,37 @@ async function fetchEsportsOdds() {
   }
 }
 
+// ── Suporte a Apelidos/Abreviações de Times ──
+const LOL_ALIASES = {
+  'nongshimredforce': ['ns', 'nongshim', 'nsredforce'],
+  'hanwhalifeesports': ['hle', 'hanwha', 'hanwhalife'],
+  'dpluskia': ['dk', 'dplus', 'dwg', 'damwon'],
+  'ktrolster': ['kt'],
+  'geng': ['gen', 'gengolden'],
+};
+
 function findOdds(sport, t1, t2) {
-  const key = norm(t1) + '_' + norm(t2);
-  const cached = oddsCache[`${sport}_${key}`];
-  if (cached) return { t1: cached.t1, t2: cached.t2, bookmaker: cached.bookmaker };
-
-  // Reverse key (t2_t1 order)
-  const revKey = norm(t2) + '_' + norm(t1);
-  const revCached = oddsCache[`${sport}_${revKey}`];
-  if (revCached) return { t1: revCached.t2, t2: revCached.t1, bookmaker: revCached.bookmaker };
-
-  // Fuzzy fallback — only for entries that have real team names stored
   const nt1 = norm(t1), nt2 = norm(t2);
+  
   for (const [cacheKey, val] of Object.entries(oddsCache)) {
     if (!cacheKey.startsWith(`${sport}_`)) continue;
-    if (!val.t1Name || !val.t2Name) continue; // skip entries without names (prevents empty-string match)
-    const vt = norm(val.t1Name); // No nosso caso t1Name e t2Name guardam o slug completo
-    if (!vt) continue;
+    if (!val.t1Name) continue;
+    const vt = norm(val.t1Name); 
 
-    // Se o slug da OddsPapi contém o nome normalizado de ambos os times, é o jogo certo!
-    if (vt.includes(nt1) && vt.includes(nt2)) {
+    // Função auxiliar para verificar match com apelidos
+    const isMatch = (orig, targetSlug) => {
+      if (targetSlug.includes(orig)) return true;
+      // Procura nos aliases
+      for (const [key, aliases] of Object.entries(LOL_ALIASES)) {
+        if (orig.includes(key) || key.includes(orig)) {
+          if (aliases.some(a => targetSlug.includes(a))) return true;
+        }
+      }
+      return false;
+    };
+
+    // Tenta match normal ou por apelido
+    if (isMatch(nt1, vt) && isMatch(nt2, vt)) {
       return { t1: val.t1, t2: val.t2, bookmaker: val.bookmaker };
     }
   }
