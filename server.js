@@ -130,70 +130,75 @@ async function fetchEsportsOdds() {
   if (now - lastEsportsOddsUpdate < 10 * 60 * 1000) return;
 
   esportsOddsFetching = true;
-  lastApiResponse = 'Iniciando...';
+  lastApiResponse = 'Conectando ao v4...';
   try {
-    let cached = 0;
-    const tidList = '2450,2452,2454,26698,39985,45589,47864,50586,46121,26590,33814,36997,39009,45623,45855,45985,46117,46119,50242,50586,50756';
+    let cachedCount = 0;
+    // Baseado nos IDs que você me mandou e no Guia
+    const tids = [2450, 2452, 2454, 26590, 26698, 33814, 36997, 39009, 39985, 45589, 45623, 45985, 46117, 46119, 46121, 47864, 50242, 50586];
+    const tidString = tids.join(',');
     
-    // Tenta V4 primeiro (CamelCase apiKey)
-    let url = `https://api.oddspapi.io/v4/odds-by-tournaments?apiKey=${ODDSPAPI_KEY}&sportId=18&tournamentIds=${tidList}&bookmakers=1xbet`;
-    let r = await httpGet(url).catch(e => ({ status: 500, body: e.message }));
+    // Padrão do Guia (Página 3): apiKey (CamelCase), host api.oddspapi.io, v4
+    const url = `https://api.oddspapi.io/v4/odds-by-tournaments?bookmaker=1xbet&tournamentIds=${tidString}&apiKey=${ODDSPAPI_KEY}`;
     
-    lastApiResponse = `V4 Status: ${r.status} | Body: ${(r.body||'').slice(0, 100)}`;
+    log('DEBUG', 'ODDS', `Requesting: ${url.split('apiKey=')[0]}apiKey=***`);
+    const r = await httpGet(url).catch(e => ({ status: 500, body: e.message }));
     
-    // Fallback para V1 se V4 falhar ou vir vazio
-    if (r.status !== 200 || !r.body || r.body.length < 50) {
-       url = `https://api.oddspapi.io/v1/fixtures?api_key=${ODDSPAPI_KEY}&sportId=18`;
-       r = await httpGet(url).catch(e => ({ status: 500, body: e.message }));
-       lastApiResponse = `V1 Status: ${r.status} | Body: ${(r.body||'').slice(0, 100)}`;
-    }
+    lastApiResponse = `v4 Response Code: ${r.status} | Snippet: ${(r.body||'').slice(0, 150)}`;
 
     if (r.status === 200) {
       const raw = safeParse(r.body, {});
-      const list = Array.isArray(raw) ? raw : (raw.data || raw.fixtures || []);
+      const tournamentList = Array.isArray(raw) ? raw : (raw.data || []);
       
-      for (const item of list) {
-        // V4 (Tournaments) ou V1 (Fixtures)
-        const fixtures = item.fixtures || (item.fixtureId ? [item] : []);
-        for (const f of fixtures) {
+      for (const t of tournamentList) {
+        if (!t.fixtures) continue;
+        for (const f of t.fixtures) {
           if (!f.bookmakerOdds || !f.bookmakerOdds['1xbet']) continue;
-          const bk = f.bookmakerOdds['1xbet'];
           
-          // Extrai nomes (V4 participant1Name ou V1 Regex da URL)
-          let p1 = f.participant1Name || f.homeName || '';
-          let p2 = f.participant2Name || f.awayName || '';
-          
-          if (!p1 && bk.fixturePath) {
-            const slug = bk.fixturePath.split('/').pop().replace(/^\d+-/, '').replace(/-/g, ' ');
-            p1 = slug; p2 = slug; // Modo Fuzzy Matcher
-          }
-          if (!p1) continue;
+          const bkData = f.bookmakerOdds['1xbet'];
+          const p1Name = f.participant1Name || f.homeName || '';
+          const p2Name = f.participant2Name || f.awayName || '';
+          if (!p1Name || !p2Name) continue;
 
-          // Extrai Odds v1/v4 (Moneyline Market ID 1 ou 183/101)
-          const markets = bk.markets || {};
-          const market = markets['183'] || markets['101'] || markets['1'] || Object.values(markets).find(m => m.bookmakerMarketId === '1');
-          if (!market) continue;
+          // Normalização Seguindo o Guia (Páginas 4 e 6)
+          // Percorre markets -> outcomes -> players
+          const markets = bkData.markets || {};
+          let oddsFound = { t1: null, t2: null };
 
-          const outcomes = Object.values(market.outcomes || {});
-          if (outcomes.length < 2) continue;
-          
-          try {
-            const o1 = outcomes[0].players?.['0']?.price || outcomes[0].price;
-            const o2 = outcomes[1].players?.['0']?.price || outcomes[1].price;
-            if (o1 && o2) {
-              const entry = { t1: parseFloat(o1).toFixed(2), t2: parseFloat(o2).toFixed(2), bookmaker: '1xBet', t1Name: p1, t2Name: p2 };
-              oddsCache[`esports_${f.fixtureId || f.id}`] = entry;
-              cached++;
+          for (const [mid, mData] of Object.entries(markets)) {
+            // Market ID 1, 183 ou 101 (Match Winner)
+            if (mid === '1' || mid === '183' || mid === '101' || mData.bookmakerMarketId === '1') {
+              const outcomes = mData.outcomes || {};
+              const outcomesArr = Object.values(outcomes);
+              
+              if (outcomesArr.length >= 2) {
+                try {
+                  // Extrai preços seguindo o aninhamento do guia
+                  const price1 = outcomesArr[0].players?.['0']?.price || outcomesArr[0].price;
+                  const price2 = outcomesArr[1].players?.['0']?.price || outcomesArr[1].price;
+                  if (price1 && price2) {
+                    oddsFound.t1 = parseFloat(price1).toFixed(2);
+                    oddsFound.t2 = parseFloat(price2).toFixed(2);
+                    break; // Pegamos o primeiro mercado ML disponível
+                  }
+                } catch(e) {}
+              }
             }
-          } catch(e) {}
+          }
+
+          if (oddsFound.t1 && oddsFound.t2) {
+            const entry = { ...oddsFound, bookmaker: '1xBet', t1Name: p1Name, t2Name: p2Name };
+            const nameKey = f.fixtureId || `${norm(p1Name)}_${norm(p2Name)}`;
+            oddsCache[`esports_${nameKey}`] = entry;
+            cachedCount++;
+          }
         }
       }
     }
     
-    log('INFO', 'ODDS', `Sincronizado: ${cached} partidas (Híbrido)`);
+    log('INFO', 'ODDS', `v4 PDF Pattern Sync: ${cachedCount} partidas em cache.`);
     lastEsportsOddsUpdate = Date.now();
   } catch(e) {
-    log('ERROR', 'ODDS', `OddsPapi Error: ${e.message}`);
+    log('ERROR', 'ODDS', `PDF Sync Error: ${e.message}`);
   } finally {
     esportsOddsFetching = false;
   }
