@@ -642,8 +642,18 @@ async function getPandaScoreLolMatches() {
       httpGet('https://api.pandascore.co/lol/matches/upcoming?per_page=30&sort=begin_at', headers).catch(() => ({ body: '[]' }))
     ]);
 
-    const running = safeParse(runningRaw.body, []);
-    const upcoming = safeParse(upcomingRaw.body, []);
+    function psMatchList(body, fallbackLabel) {
+      const p = safeParse(body, []);
+      if (Array.isArray(p)) return p;
+      if (p && Array.isArray(p.data)) return p.data;
+      if (p && Array.isArray(p.results)) return p.results;
+      if (p && typeof p === 'object') {
+        log('WARN', 'PANDASCORE', `${fallbackLabel}: resposta não é lista (tipo ${typeof p}), ignorando`);
+      }
+      return [];
+    }
+    const running = psMatchList(runningRaw.body, 'running');
+    const upcoming = psMatchList(upcomingRaw.body, 'upcoming');
 
     function mapPS(m, status) {
       const t1 = m.opponents?.[0]?.opponent, t2 = m.opponents?.[1]?.opponent;

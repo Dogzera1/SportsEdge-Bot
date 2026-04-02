@@ -13,6 +13,8 @@ const PORT = parseInt(process.env.SERVER_PORT) || parseInt(process.env.PORT) || 
 const ADMIN_IDS = new Set((process.env.ADMIN_USER_IDS || '').split(',').filter(Boolean));
 const CLAUDE_KEY = process.env.CLAUDE_API_KEY;
 const DEEPSEEK_KEY = process.env.DEEPSEEK_API_KEY;
+/** Header para /claude: Node rejeita undefined; com só DeepSeek, CLAUDE_KEY fica vazio. */
+const AI_PROXY_KEY = CLAUDE_KEY || DEEPSEEK_KEY;
 
 if (!CLAUDE_KEY && !DEEPSEEK_KEY) {
   console.error('❌ Configure CLAUDE_API_KEY ou DEEPSEEK_API_KEY no .env');
@@ -895,7 +897,8 @@ async function autoAnalyzeMatch(token, match) {
     const enrichSection = buildEnrichmentSection(match, enrich);
 
     // Pré-filtro ML Local: se o modelo quantitativo não detectar chance de +EV matemático, pulamos o Claude (economia de tokens).
-    if (!esportsPreFilter(match, o, enrich, hasLiveStats, gamesContext)) {
+    const mlPrefilterOn = (process.env.LOL_ML_PREFILTER ?? 'true') !== 'false';
+    if (mlPrefilterOn && !esportsPreFilter(match, o, enrich, hasLiveStats, gamesContext)) {
       log('INFO', 'AUTO', `Pré-filtro ML: matemática sem borda detectada para ${match.team1} vs ${match.team2}. Ignorando IA subjetiva.`);
       return null;
     }
@@ -906,7 +909,7 @@ async function autoAnalyzeMatch(token, match) {
       model: 'deepseek-chat',
       max_tokens: 600,
       messages: [{ role: 'user', content: prompt }]
-    }, null, { 'x-claude-key': CLAUDE_KEY });
+    }, null, { 'x-claude-key': AI_PROXY_KEY });
 
     const text = resp.content?.map(b => b.text || '').join('');
     if (!text) {
