@@ -140,10 +140,10 @@ async function fetchEsportsOdds() {
     // Padrão do Guia (Página 3): apiKey (CamelCase), host api.oddspapi.io, v4
     const url = `https://api.oddspapi.io/v4/odds-by-tournaments?bookmaker=1xbet&tournamentIds=${tidString}&apiKey=${ODDSPAPI_KEY}`;
     
-    log('DEBUG', 'ODDS', `Requesting: ${url.split('apiKey=')[0]}apiKey=***`);
     const r = await httpGet(url).catch(e => ({ status: 500, body: e.message }));
     
-    lastApiResponse = `v4 Response Code: ${r.status} | Snippet: ${(r.body||'').slice(0, 150)}`;
+    log('DEBUG', 'ODDS', `v4 Result - Status: ${r.status} | Body Snippet: ${(r.body||'').slice(0, 100)}`);
+    lastApiResponse = `v4 Status: ${r.status} | Body: ${(r.body||'').slice(0, 150)}`;
 
     if (r.status === 200) {
       const raw = safeParse(r.body, {});
@@ -1811,5 +1811,31 @@ async function fetchEsportsOddsV1() {
     }
   }
 }
+
+const httpGet = (url, headers = {}) => {
+  return new Promise((resolve, reject) => {
+    const isHttps = url.startsWith('https');
+    const lib = isHttps ? https : http;
+    const options = { 
+      headers: { 
+        'Accept-Encoding': 'gzip, deflate',
+        ...headers 
+      } 
+    };
+    lib.get(url, options, (res) => {
+      const zlib = require('zlib');
+      let stream = res;
+      if (res.headers['content-encoding'] === 'gzip') {
+        stream = res.pipe(zlib.createGunzip());
+      } else if (res.headers['content-encoding'] === 'deflate') {
+        stream = res.pipe(zlib.createInflate());
+      }
+      
+      let body = '';
+      stream.on('data', (chunk) => body += chunk);
+      stream.on('end', () => resolve({ status: res.statusCode, body, headers: res.headers }));
+    }).on('error', reject);
+  });
+};
 
 module.exports = { server, db, stmts, fetchOdds, findOdds, oddsCache, lastEsportsOddsUpdate };
