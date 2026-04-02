@@ -7,7 +7,7 @@ const { log, calcKelly, norm, fuzzyName, fmtDate, fmtDateTime, fmtDuration, http
 const { esportsPreFilter } = require('./lib/ml');
 
 const SERVER = 'localhost';
-const PORT = parseInt(process.env.SERVER_PORT) || 3000;
+const PORT = parseInt(process.env.PORT) || 3000;
 const ADMIN_IDS = new Set((process.env.ADMIN_USER_IDS || '').split(',').filter(Boolean));
 const CLAUDE_KEY = process.env.CLAUDE_API_KEY;
 
