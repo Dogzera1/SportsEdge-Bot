@@ -1,6 +1,8 @@
 require('dotenv').config({ override: true });
 const https = require('https');
 const http = require('http');
+const fs = require('fs');
+const path = require('path');
 const initDatabase = require('./lib/database');
 const { SPORTS, getSportById, getSportByToken, getTokenToSportMap } = require('./lib/sports');
 const { log, calcKelly, norm, fmtDate, fmtDateTime, fmtDuration, safeParse } = require('./lib/utils');
@@ -19,6 +21,38 @@ if (!CLAUDE_KEY && !DEEPSEEK_KEY) {
 
 const DB_PATH = (process.env.DB_PATH || 'sportsedge.db').trim().replace(/^=+/, '');
 const { db, stmts } = initDatabase(DB_PATH);
+
+// ── Patch Meta Persistência ──
+// Salva no mesmo diretório do DB para sobreviver restarts no volume Railway
+const PATCH_META_FILE = (() => {
+  try {
+    const dbDir = path.dirname(path.isAbsolute(DB_PATH) ? DB_PATH : path.resolve(DB_PATH));
+    return path.join(dbDir, 'patch_meta.json');
+  } catch(_) { return path.resolve('patch_meta.json'); }
+})();
+
+function loadPatchMetaFromFile() {
+  try {
+    if (!fs.existsSync(PATCH_META_FILE)) return;
+    const data = safeParse(fs.readFileSync(PATCH_META_FILE, 'utf8'), null);
+    if (!data) return;
+    // Só restaura se o env ainda não tem valor configurado manualmente
+    if (!process.env.LOL_PATCH_META && data.meta) {
+      process.env.LOL_PATCH_META = data.meta;
+      process.env.PATCH_META_DATE = data.date || '';
+      log('INFO', 'PATCH', `Meta restaurado do arquivo: ${data.meta.slice(0, 60)}`);
+    }
+  } catch(_) {}
+}
+
+function savePatchMetaToFile(meta, date) {
+  try {
+    fs.writeFileSync(PATCH_META_FILE, JSON.stringify({ meta, date }), 'utf8');
+  } catch(_) {}
+}
+
+// Carrega meta persistido imediatamente
+loadPatchMetaFromFile();
 
 // ── Bot Instances ──
 const bots = {};
@@ -493,53 +527,61 @@ async function settleCompletedTips() {
 async function checkLineMovement() {
   if (Date.now() - lastLineCheck < LINE_CHECK_INTERVAL) return;
   lastLineCheck = Date.now();
-  
-  for (const [sport, config] of Object.entries(SPORTS)) {
-    if (!config.enabled || subscribedUsers.size === 0) continue;
-    
-    try {
-      const matches = await serverGet('/matches?days=7', sport);
-      if (!Array.isArray(matches)) continue;
-      
-      for (const match of matches) {
-        if (!match.odds?.t1 || !match.odds?.t2) continue;
-        
-        const key = `${sport}_${match.participant1_name}_${match.participant2_name}`;
-        const cur = { t1: parseFloat(match.odds.t1), t2: parseFloat(match.odds.t2) };
-        const prev = lineAlerted.get(key);
-        
-        if (!prev) {
-          lineAlerted.set(key, cur);
-          continue;
-        }
-        
-        const d1 = Math.abs((cur.t1 - prev.t1) / prev.t1);
-        const d2 = Math.abs((cur.t2 - prev.t2) / prev.t2);
-        if (d1 < 0.10 && d2 < 0.10) {
-          lineAlerted.set(key, cur);
-          continue;
-        }
-        
+
+  const esportsConfig = SPORTS['esports'];
+  if (!esportsConfig?.enabled || subscribedUsers.size === 0) return;
+
+  try {
+    // Usa /lol-matches que inclui odds no cache (campo .odds.t1/.odds.t2)
+    const raw = await serverGet('/lol-matches');
+    if (!Array.isArray(raw)) return;
+
+    const now = Date.now();
+    const windowEnd = now + 48 * 60 * 60 * 1000;
+
+    for (const match of raw) {
+      if (!match.odds?.t1 || !match.odds?.t2) continue;
+      // Só monitora partidas nas próximas 48h
+      const t = match.time ? new Date(match.time).getTime() : 0;
+      if (t > 0 && t > windowEnd) continue;
+
+      const t1 = match.team1 || match.participant1_name || '';
+      const t2 = match.team2 || match.participant2_name || '';
+      const key = `esports_${t1}_${t2}`;
+      const cur = { t1: parseFloat(match.odds.t1), t2: parseFloat(match.odds.t2) };
+      const prev = lineAlerted.get(key);
+
+      if (!prev) {
         lineAlerted.set(key, cur);
-        
-        const arrow = (c, p) => c < p ? '📉' : '📈';
-        const msg = `📊 *MOVIMENTO DE LINHA*\n\n` +
-          `${config.icon} *${match.participant1_name}* vs *${match.participant2_name}*\n\n` +
-          `${arrow(cur.t1, prev.t1)} ${match.participant1_name}: ${prev.t1} → ${cur.t1}\n` +
-          `${arrow(cur.t2, prev.t2)} ${match.participant2_name}: ${prev.t2} → ${cur.t2}\n\n` +
-          `💡 _Movimentos bruscos = sharp money ou lesão_`;
-        
-        for (const [userId, prefs] of subscribedUsers) {
-          if (!prefs.has(sport)) continue;
-          try { await sendDM(config.token, userId, msg); }
-          catch(e) { if (e.message?.includes('403')) subscribedUsers.delete(userId); }
-        }
-        
-        log('INFO', 'LINE', `${sport}: Δ${(d1*100).toFixed(1)}%`);
+        continue;
       }
-    } catch(e) {
-      log('ERROR', 'LINE', `${sport}: ${e.message}`);
+
+      const d1 = Math.abs((cur.t1 - prev.t1) / prev.t1);
+      const d2 = Math.abs((cur.t2 - prev.t2) / prev.t2);
+      if (d1 < 0.10 && d2 < 0.10) {
+        lineAlerted.set(key, cur);
+        continue;
+      }
+
+      lineAlerted.set(key, cur);
+
+      const arrow = (c, p) => c < p ? '📉' : '📈';
+      const msg = `📊 *MOVIMENTO DE LINHA*\n\n` +
+        `🎮 *${t1}* vs *${t2}*\n_${match.league || 'LoL'}_\n\n` +
+        `${arrow(cur.t1, prev.t1)} ${t1}: ${prev.t1.toFixed(2)} → ${cur.t1.toFixed(2)}\n` +
+        `${arrow(cur.t2, prev.t2)} ${t2}: ${prev.t2.toFixed(2)} → ${cur.t2.toFixed(2)}\n\n` +
+        `💡 _Movimentos bruscos = sharp money ou lesão_`;
+
+      for (const [userId, prefs] of subscribedUsers) {
+        if (!prefs.has('esports')) continue;
+        try { await sendDM(esportsConfig.token, userId, msg); }
+        catch(e) { if (e.message?.includes('403')) subscribedUsers.delete(userId); }
+      }
+
+      log('INFO', 'LINE', `esports: ${t1} vs ${t2} Δ${(Math.max(d1,d2)*100).toFixed(1)}%`);
     }
+  } catch(e) {
+    log('ERROR', 'LINE', e.message);
   }
 }
 
@@ -642,8 +684,11 @@ async function fetchLatestPatchMeta() {
     // Só chega aqui se: meta vazio OU meta com > 14 dias sem atualização
     const prevMeta = currentMeta || '(não definido)';
     const patchNotesUrl = `https://www.leagueoflegends.com/en-us/news/game-updates/patch-${patchShort.replace('.', '-')}-notes/`;
-    process.env.LOL_PATCH_META = `Patch ${patchShort} (auto-detectado — revise buffs/nerfs relevantes)`;
-    process.env.PATCH_META_DATE = new Date().toISOString().slice(0, 10);
+    const newMeta = `Patch ${patchShort} (auto-detectado — revise buffs/nerfs relevantes)`;
+    const newDate = new Date().toISOString().slice(0, 10);
+    process.env.LOL_PATCH_META = newMeta;
+    process.env.PATCH_META_DATE = newDate;
+    savePatchMetaToFile(newMeta, newDate); // persiste no volume Railway
     lastPatchAlert = 0;
 
     log('INFO', 'PATCH', `Novo patch auto-detectado: ${patchShort} (anterior: ${prevMeta.slice(0, 40)})`);
@@ -918,9 +963,9 @@ function buildEsportsPrompt(match, game, gamesContext, o, enrichSection) {
     ? `🚨 ATENÇÃO — ESTADO DE ALTO FLUXO: ${isEarlyGame ? `Jogo com apenas ${gameMinute}min (muito cedo para análise confiável).` : ''} ${hasRecentObjective ? 'Objetivo maior recente detectado — estado do jogo pode ter mudado completamente.' : ''} Com delay de ~90s, o que você está vendo já pode ser história. Confiança máxima neste contexto: BAIXA.`
     : '';
 
-  const evThreshold = parseFloat(process.env.LOL_EV_THRESHOLD ?? '1.5');
-  const pinnacleMargin = parseFloat(process.env.LOL_PINNACLE_MARGIN ?? '2.5');
-  const noOddsConviction = parseInt(process.env.LOL_NO_ODDS_CONVICTION ?? '60');
+  const evThreshold = parseFloat(process.env.LOL_EV_THRESHOLD ?? '2');
+  const pinnacleMargin = parseFloat(process.env.LOL_PINNACLE_MARGIN ?? '5');
+  const noOddsConviction = parseInt(process.env.LOL_NO_ODDS_CONVICTION ?? '65');
   const tipInstruction = hasRealOdds
     ? `[Se EV >= +${evThreshold}% E confiança não foi rebaixada para BAIXA por alto fluxo: TIP_ML:[time]@[odd]|EV:[%]|STAKE:[u]|CONF:[ALTA/MÉDIA/BAIXA]]`
     : `[Se confiança ALTA ou MÉDIA e sem rebaixamento por alto fluxo: TIP_ML:[time]@[fair_odd]|EV:estimado|STAKE:[u]|CONF:[ALTA/MÉDIA]]`;
@@ -1562,8 +1607,10 @@ async function poll(token, sport) {
 log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
 log('INFO', 'BOOT', `ENV: ESPORTS_ENABLED=${process.env.ESPORTS_ENABLED || '(não definida)'}`);
 log('INFO', 'BOOT', `ENV: TELEGRAM_TOKEN_ESPORTS=${process.env.TELEGRAM_TOKEN_ESPORTS ? '✅ definida' : '❌ AUSENTE'}`);
-log('INFO', 'BOOT', `ENV: CLAUDE_API_KEY=${process.env.CLAUDE_API_KEY ? '✅ definida' : '❌ AUSENTE'}`);
-log('INFO', 'BOOT', `ENV: THE_ODDS_API_KEY=${process.env.THE_ODDS_API_KEY ? '✅ definida' : '❌ AUSENTE'}`);
+log('INFO', 'BOOT', `ENV: DEEPSEEK_API_KEY=${process.env.DEEPSEEK_API_KEY ? '✅ definida' : '❌ AUSENTE'}`);
+log('INFO', 'BOOT', `ENV: CLAUDE_API_KEY=${process.env.CLAUDE_API_KEY ? '✅ definida' : '❌ AUSENTE (fallback)'}`);
+const oddsKeyPresent = !!(process.env.ODDS_API_KEY || process.env.ODDSPAPI_KEY || process.env.ODDS_PAPI_KEY || process.env.ESPORTS_ODDS_KEY);
+log('INFO', 'BOOT', `ENV: ODDS_API_KEY=${oddsKeyPresent ? '✅ definida' : '❌ AUSENTE — odds indisponíveis'}`);
 log('INFO', 'BOOT', `Sports carregados: ${JSON.stringify(Object.entries(SPORTS).map(([k,v]) => ({id: k, enabled: v.enabled, hasToken: !!v.token})))}`);
 
 (async () => {
@@ -1624,17 +1671,38 @@ log('INFO', 'BOOT', `Sports carregados: ${JSON.stringify(Object.entries(SPORTS).
 })();
 
 // Função para registrar o Closing Line Value (CLV) antes do jogo
+// CLV só é válido se registrado próximo ao fechamento da linha (< 1h antes do início)
 async function checkCLV() {
   if (subscribedUsers.size === 0) return;
   try {
     const unsettled = await serverGet('/unsettled-tips', 'esports');
     if (!Array.isArray(unsettled)) return;
+    const now = Date.now();
+    // Busca partidas para cruzar horário de início
+    const lolMatches = await serverGet('/lol-matches').catch(() => []);
+    const matchTimeMap = {};
+    if (Array.isArray(lolMatches)) {
+      for (const m of lolMatches) {
+        if (m.time) {
+          const k1 = norm(m.team1 || '') + '_' + norm(m.team2 || '');
+          const k2 = norm(m.team2 || '') + '_' + norm(m.team1 || '');
+          matchTimeMap[k1] = new Date(m.time).getTime();
+          matchTimeMap[k2] = new Date(m.time).getTime();
+        }
+      }
+    }
     for (const tip of unsettled) {
       if (tip.clv_odds) continue; // já registrado
+      // Verifica se partida começa em < 1h (janela ideal para CLV)
+      const tipKey = norm(tip.participant1 || '') + '_' + norm(tip.participant2 || '');
+      const matchStart = matchTimeMap[tipKey] || 0;
+      const timeToMatch = matchStart > 0 ? matchStart - now : null;
+      if (timeToMatch === null || timeToMatch > 60 * 60 * 1000 || timeToMatch < -5 * 60 * 1000) continue;
       const o = await serverGet(`/odds?team1=${encodeURIComponent(tip.participant1)}&team2=${encodeURIComponent(tip.participant2)}`).catch(() => null);
-      if (o && o.t1 > 1) {
-        // Assume que se tiver odds reais perto da hora, salvamos como CLV se estiver prestes a começar
-        await serverPost('/update-clv', { matchId: tip.match_id, clvOdds: tip.tip_participant === tip.participant1 ? o.t1 : o.t2 }).catch(() => {});
+      if (o && parseFloat(o.t1) > 1) {
+        const clvOdds = norm(tip.tip_participant) === norm(tip.participant1) ? o.t1 : o.t2;
+        await serverPost('/update-clv', { matchId: tip.match_id, clvOdds }, 'esports').catch(() => {});
+        log('INFO', 'CLV', `Registrado CLV ${clvOdds} para ${tip.participant1} vs ${tip.participant2}`);
       }
     }
   } catch(e) {}
