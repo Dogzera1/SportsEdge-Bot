@@ -134,42 +134,53 @@ async function fetchEsportsOdds() {
   try {
     let cached = 0;
     
-    // Rota da OddsPapi -> Bookmaker 1xbet (ID default genérico é 1, mas puxar geral sem filtro é Bulk e filtra no JSON)
+    // Rota da OddsPapi -> Filtramos por esports
     const url = `https://api.oddspapi.io/v1/fixtures?api_key=${ODDSPAPI_KEY}&sport=esports`;
     const r = await httpGet(url);
     
     if (r.status === 200) {
       const events = safeParse(r.body, []);
       for (const ev of events) {
-        if (!ev.homeName || !ev.awayName || !ev.odds) continue;
+        if (!ev.bookmakerOdds || !ev.bookmakerOdds['1xbet']) continue;
         
-        // Pega 1xBet ou a bookie predominante no payload da oddspapi
-        const bk = ev.odds.find(b => b.bookmakerName?.toLowerCase().includes('1xbet')) || ev.odds[0];
-        if (!bk) continue;
-        
-        const market = bk.markets?.find(m => m.marketName === 'Match Winner' || m.marketId === '1');
-        if (!market || !market.outcomes || market.outcomes.length < 2) continue;
+        const bk = ev.bookmakerOdds['1xbet'];
+        if (!bk.markets) continue;
 
-        const p1Name = ev.homeName;
-        const p2Name = ev.awayName;
+        // Na OddsPapi, o mercado "Vencedor da Partida" (Moneyline) costuma ter bookmakerMarketId = "1"
+        // Os objetos com as odds vêm separados mas contêm esse ID
+        const matchWinnerOutcomes = Object.values(bk.markets).filter(m => m.bookmakerMarketId === '1');
+        if (matchWinnerOutcomes.length < 2) continue;
+
+        // Extrai o preço (odd) das duas partições
+        let prices = [];
+        for (const out of matchWinnerOutcomes) {
+          try {
+            const outKey = Object.keys(out.outcomes)[0];
+            const price = parseFloat(out.outcomes[outKey].players['0'].price);
+            if (!isNaN(price)) prices.push(price);
+          } catch(e) {}
+        }
         
-        const o1 = market.outcomes[0];
-        const o2 = market.outcomes[1];
+        if (prices.length < 2) continue;
         
-        if (!o1 || !o2 || !o1.odds || !o2.odds) continue;
-        
-        const t1Odd = parseFloat(o1.odds);
-        const t2Odd = parseFloat(o2.odds);
+        const t1Odd = prices[0];
+        const t2Odd = prices[1];
         if (t1Odd < 1.01 || t2Odd < 1.01) continue;
 
-        const entry = { t1: t1Odd.toFixed(2), t2: t2Odd.toFixed(2), bookmaker: bk.bookmakerName || '1xBet', t1Name: p1Name, t2Name: p2Name };
-        const nameKey = norm(p1Name) + '_' + norm(p2Name);
+        // Como a Oddspapi não devolveu nomes nativos nesse endpoint, fazemos dump da URL (ex: "drx-dn-soopers")
+        const urlSlug = (bk.fixturePath || '').split('/').pop().replace(/^\d+-/, '').replace(/-/g, ' ');
+        if (!urlSlug) continue;
+
+        // O fuzzy match no bot verifica se 'vt1.includes(nt1)'. Se vt1=urlSlug, ele conterá ambos os nomes perfeitamente!
+        const p1Name = urlSlug; 
+        const p2Name = urlSlug;
+
+        const entry = { t1: t1Odd.toFixed(2), t2: t2Odd.toFixed(2), bookmaker: '1xBet', t1Name: p1Name, t2Name: p2Name };
+        const nameKey = ev.fixtureId || String(ev.participant1Id);
+        
+        // Salvamos com a chave do fixtureId no cache, mas o fuzzyFallback vai resgatar pesquisando o t1Name (slug)
         oddsCache[`esports_${nameKey}`] = entry;
         cached++;
-
-        try {
-          stmts.insertOddsHistory.run('esports', nameKey, p1Name, p2Name, t1Odd, t2Odd, entry.bookmaker);
-        } catch(_) {}
       }
     }
     
