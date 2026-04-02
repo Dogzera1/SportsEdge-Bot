@@ -987,6 +987,37 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // Lista todos os times retornados pela API Riot + PandaScore com status de odds
+  if (p === '/debug-teams') {
+    try {
+      const [riotMatches, psMatches] = await Promise.all([
+        getLoLMatches().catch(() => []),
+        getPandaScoreLolMatches().catch(() => [])
+      ]);
+      const allMatches = [...riotMatches, ...psMatches];
+      const cacheCount = Object.keys(oddsCache).filter(k => k.startsWith('esports_')).length;
+      const teamMap = allMatches.map(m => ({
+        source: riotMatches.includes(m) ? 'riot' : 'pandascore',
+        league: m.league,
+        team1: m.team1,
+        team2: m.team2,
+        team1norm: norm(m.team1),
+        team2norm: norm(m.team2),
+        hasOdds: !!m.odds,
+        odds: m.odds ? { t1: m.odds.t1, t2: m.odds.t2 } : null
+      }));
+      sendJson(res, {
+        total: allMatches.length,
+        withOdds: teamMap.filter(m => m.hasOdds).length,
+        cacheSize: cacheCount,
+        matches: teamMap
+      });
+    } catch(e) {
+      sendJson(res, { error: e.message }, 500);
+    }
+    return;
+  }
+
   // Diagnóstico de matching: testa se um par de times encontra odds no cache
   if (p === '/debug-match-odds') {
     const t1 = parsed.query.team1 || '';
