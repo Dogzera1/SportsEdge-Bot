@@ -10,7 +10,11 @@ const { log, sendJson, safeParse, norm, httpGet, httpsPost, oddsApiAllowed } = r
 // Railway sets $PORT automatically; start.js bridges it to SERVER_PORT
 const PORT = parseInt(process.env.PORT || process.env.SERVER_PORT) || 3000;
 const CLAUDE_KEY = process.env.CLAUDE_API_KEY;
-const ODDSPAPI_KEY = process.env.ODDS_API_KEY;  // Token da OddsPapi que já estava no seu .env
+// Aceita múltiplos nomes de variável para a chave OddsPapi
+const ODDSPAPI_KEY = process.env.ODDS_API_KEY
+  || process.env.ODDSPAPI_KEY
+  || process.env.ODDS_PAPI_KEY
+  || process.env.ESPORTS_ODDS_KEY;
 const LOL_KEY = process.env.LOL_API_KEY || '';
 const PANDASCORE_TOKEN = process.env.PANDASCORE_TOKEN || '';
 
