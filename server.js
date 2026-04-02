@@ -210,6 +210,108 @@ function normalizeFixtures(raw) {
   return list;
 }
 
+/** Incorpora fixtures OddsPapi ao oddsCache (merge — não apaga chaves antigas). */
+function ingestEsportsFixtures(allFixtures) {
+  let cachedCount = 0;
+  for (const f of allFixtures) {
+    if (!f.bookmakerOdds) continue;
+
+    const bkData = f.bookmakerOdds['1xbet'] || f.bookmakerOdds['1xBet']
+      || Object.values(f.bookmakerOdds)[0];
+    if (!bkData || !bkData.bookmakerIsActive) continue;
+
+    let p1Name = f.participant1Name || f.homeName || '';
+    let p2Name = f.participant2Name || f.awayName || '';
+    let combinedSlug = '';
+
+    if (!p1Name || !p2Name) {
+      const fixturePath = bkData.fixturePath || '';
+      if (fixturePath) {
+        const lastSeg = fixturePath.split('/').pop() || '';
+        const bkFid = bkData.bookmakerFixtureId || '';
+        const teamsSlug = bkFid
+          ? lastSeg.replace(new RegExp(`^${bkFid}-`), '')
+          : lastSeg.replace(/^\d+-/, '');
+        if (teamsSlug) {
+          combinedSlug = teamsSlug;
+          const parts = teamsSlug.split('-');
+          if (parts.length >= 2) {
+            const mid = Math.ceil(parts.length / 2);
+            p1Name = parts.slice(0, mid).join('-');
+            p2Name = parts.slice(mid).join('-');
+          }
+        }
+      }
+    }
+
+    if (!combinedSlug && p1Name && p2Name) {
+      combinedSlug = `${p1Name}-${p2Name}`;
+    }
+
+    if (!combinedSlug && !p1Name) continue;
+
+    const markets = bkData.markets || {};
+    const marketEntries = Object.entries(markets);
+
+    const validMarkets = marketEntries
+      .map(([mid, mData]) => {
+        const outcomes = Object.values(mData.outcomes || {});
+        if (outcomes.length !== 1) return null;
+        const price = extractPrice(outcomes[0]);
+        if (!price) return null;
+        return { marketId: parseInt(mid) || 0, price };
+      })
+      .filter(Boolean)
+      .sort((a, b) => a.marketId - b.marketId);
+
+    if (validMarkets.length < 2) continue;
+
+    const price1 = validMarkets[0].price;
+    const price2 = validMarkets[1].price;
+
+    const key = `esports_${f.fixtureId || norm(combinedSlug)}`;
+    oddsCache[key] = {
+      t1: price1.toFixed(2),
+      t2: price2.toFixed(2),
+      bookmaker: '1xBet',
+      t1Name: p1Name || combinedSlug,
+      t2Name: p2Name || '',
+      combinedSlug: norm(combinedSlug),
+    };
+    cachedCount++;
+  }
+  return cachedCount;
+}
+
+async function fetchEsportsOddsOneBatch(batch, batchIndex0, totalBatches) {
+  log('INFO', 'ODDS', `Buscando odds: lote ${batchIndex0 + 1}/${totalBatches} tids=[${batch.join(',')}] (round-robin)`);
+
+  const url = `https://api.oddspapi.io/v4/odds-by-tournaments?bookmaker=1xbet&tournamentIds=${batch.join(',')}&oddsFormat=decimal&apiKey=${ODDSPAPI_KEY}`;
+  const r = await httpGet(url).catch(e => ({ status: 500, body: e.message }));
+
+  log('DEBUG', 'ODDS', `Lote ${batchIndex0 + 1}: status=${r.status} body=${(r.body || '').slice(0, 100)}`);
+  lastApiResponse = `Lote ${batchIndex0 + 1}/${totalBatches}: HTTP ${r.status} | ${(r.body || '').slice(0, 150)}`;
+
+  const now = Date.now();
+  if (r.status === 429) {
+    esportsBackoffUntil = now + ESPORTS_BACKOFF_TTL;
+    log('WARN', 'ODDS', '429 — backoff 2h ativado');
+    return { ok: false, status: 429 };
+  }
+  if (r.status !== 200) {
+    log('WARN', 'ODDS', `HTTP ${r.status} — sem atualização de odds`);
+    return { ok: false, status: r.status };
+  }
+
+  const raw = safeParse(r.body, null);
+  const allFixtures = raw ? normalizeFixtures(raw) : [];
+  log('INFO', 'ODDS', `Fixtures recebidos: ${allFixtures.length} no lote ${batchIndex0 + 1}`);
+
+  const cachedCount = ingestEsportsFixtures(allFixtures);
+  log('INFO', 'ODDS', `Sync concluído: ${cachedCount}/${allFixtures.length} fixtures com odds`);
+  return { ok: true, status: 200 };
+}
+
 async function fetchEsportsOdds() {
   if (!ODDSPAPI_KEY) { log('WARN', 'ODDS', 'ODDS_API_KEY não configurada — odds indisponíveis'); return; }
   if (esportsOddsFetching) return;
@@ -223,23 +325,18 @@ async function fetchEsportsOdds() {
     let tids = await getEsportsTournamentIds();
     log('DEBUG', 'ODDS', `getEsportsTournamentIds() retornou ${Array.isArray(tids) ? tids.length : typeof tids} IDs`);
 
-    // Safety: garante array válido de IDs inteiros
     if (!Array.isArray(tids) || tids.length === 0) {
       log('WARN', 'ODDS', 'Lista de torneios inválida/vazia — usando LOL_ACTIVE_TIDS como fallback direto');
       tids = LOL_ACTIVE_TIDS;
       cachedEsportsTids = LOL_ACTIVE_TIDS;
     }
 
-    // Round-robin: divide em lotes e busca APENAS UM lote por ciclo TTL.
-    // Isso evita o 429 do OddsPapi (plano free ≈ 250 req/mês).
-    // O cursor avança a cada ciclo; todos os torneios são cobertos em N ciclos.
     const BATCH_SIZE = Math.max(1, parseInt(process.env.ODDSPAPI_BATCH_SIZE || '3') || 3);
     const batches = [];
     for (let i = 0; i < tids.length; i += BATCH_SIZE) {
       batches.push(tids.slice(i, i + BATCH_SIZE));
     }
 
-    // Safety: se batches vazio ou batch inválido, usa fallback
     if (!batches.length) {
       log('WARN', 'ODDS', 'batches vazio após split — usando LOL_ACTIVE_TIDS completo');
       batches.push(LOL_ACTIVE_TIDS.slice(0, BATCH_SIZE));
@@ -249,123 +346,64 @@ async function fetchEsportsOdds() {
     esportsBatchCursor++;
     let batch = batches[batchIndex];
 
-    // Safety: batch deve ter IDs válidos
     if (!batch || !batch.length) {
       log('WARN', 'ODDS', `Batch[${batchIndex}] vazio — usando primeiro lote de LOL_ACTIVE_TIDS`);
       batch = LOL_ACTIVE_TIDS.slice(0, BATCH_SIZE);
     }
 
-    log('INFO', 'ODDS', `Buscando odds: lote ${batchIndex+1}/${batches.length} tids=[${batch.join(',')}] (round-robin)`);
-
-    const url = `https://api.oddspapi.io/v4/odds-by-tournaments?bookmaker=1xbet&tournamentIds=${batch.join(',')}&oddsFormat=decimal&apiKey=${ODDSPAPI_KEY}`;
-    const r = await httpGet(url).catch(e => ({ status: 500, body: e.message }));
-
-    log('DEBUG', 'ODDS', `Lote ${batchIndex+1}: status=${r.status} body=${(r.body||'').slice(0,100)}`);
-    lastApiResponse = `Lote ${batchIndex+1}/${batches.length}: HTTP ${r.status} | ${(r.body || '').slice(0, 150)}`;
-
-    if (r.status === 429) {
-      esportsBackoffUntil = now + ESPORTS_BACKOFF_TTL;
-      log('WARN', 'ODDS', '429 — backoff 2h ativado');
-      return;
-    }
-    if (r.status !== 200) {
-      log('WARN', 'ODDS', `HTTP ${r.status} — sem atualização de odds`);
-      return;
-    }
-
-    const raw = safeParse(r.body, null);
-    const allFixtures = raw ? normalizeFixtures(raw) : [];
-
-    log('INFO', 'ODDS', `Fixtures recebidos: ${allFixtures.length} no lote ${batchIndex+1}`);
-
-    let cachedCount = 0;
-    for (const f of allFixtures) {
-      if (!f.bookmakerOdds) continue;
-
-      // Prefere 1xbet; aceita qualquer bookmaker presente
-      const bkData = f.bookmakerOdds['1xbet'] || f.bookmakerOdds['1xBet']
-        || Object.values(f.bookmakerOdds)[0];
-      if (!bkData || !bkData.bookmakerIsActive) continue;
-
-      // ── Extração de nomes ──
-      // A API não retorna participant1Name/2Name — os nomes estão na URL do fixturePath.
-      // Formato: https://1xbet.com/.../315638638-cloud9-lyon-gaming
-      // Removendo o {bookmakerFixtureId}- do último segmento, obtemos "cloud9-lyon-gaming"
-      let p1Name = f.participant1Name || f.homeName || '';
-      let p2Name = f.participant2Name || f.awayName || '';
-      let combinedSlug = '';
-
-      if (!p1Name || !p2Name) {
-        const fixturePath = bkData.fixturePath || '';
-        if (fixturePath) {
-          const lastSeg = fixturePath.split('/').pop() || '';
-          const bkFid = bkData.bookmakerFixtureId || '';
-          const teamsSlug = bkFid
-            ? lastSeg.replace(new RegExp(`^${bkFid}-`), '')
-            : lastSeg.replace(/^\d+-/, '');
-          if (teamsSlug) {
-            combinedSlug = teamsSlug; // ex: "cloud9-lyon-gaming"
-            // Tenta inferir nomes individuais dividindo o slug ao meio
-            const parts = teamsSlug.split('-');
-            if (parts.length >= 2) {
-              // Para times de 1 palavra: "sentinels-disguised" → partes iguais
-              // Para times de 2+ palavras: heurística por tamanho
-              const mid = Math.ceil(parts.length / 2);
-              p1Name = parts.slice(0, mid).join('-');
-              p2Name = parts.slice(mid).join('-');
-            }
-          }
-        }
-      }
-
-      if (!combinedSlug && p1Name && p2Name) {
-        combinedSlug = `${p1Name}-${p2Name}`;
-      }
-
-      if (!combinedSlug && !p1Name) continue; // sem nomes, impossível fazer match
-
-      // ── Extração de odds ──
-      // Estrutura real da OddsPapi: cada time tem seu próprio mercado separado.
-      // Market 183 → time1 (participant1) | Market 185 → time2 (participant2)
-      // Cada mercado tem 1 outcome com 1 player contendo o preço.
-      const markets = bkData.markets || {};
-      const marketEntries = Object.entries(markets);
-
-      // Coleta todos os mercados com exatamente 1 outcome ativo com preço válido
-      const validMarkets = marketEntries
-        .map(([mid, mData]) => {
-          const outcomes = Object.values(mData.outcomes || {});
-          if (outcomes.length !== 1) return null;
-          const price = extractPrice(outcomes[0]);
-          if (!price) return null;
-          return { marketId: parseInt(mid) || 0, price };
-        })
-        .filter(Boolean)
-        .sort((a, b) => a.marketId - b.marketId); // menor ID = time1, maior ID = time2
-
-      if (validMarkets.length < 2) continue;
-
-      const price1 = validMarkets[0].price;
-      const price2 = validMarkets[1].price;
-
-      const key = `esports_${f.fixtureId || norm(combinedSlug)}`;
-      oddsCache[key] = {
-        t1: price1.toFixed(2),
-        t2: price2.toFixed(2),
-        bookmaker: '1xBet',
-        t1Name: p1Name || combinedSlug,
-        t2Name: p2Name || '',
-        combinedSlug: norm(combinedSlug),
-      };
-      cachedCount++;
-    }
-
-    log('INFO', 'ODDS', `Sync concluído: ${cachedCount}/${allFixtures.length} fixtures com odds`);
-    lastEsportsOddsUpdate = now;
+    const { ok } = await fetchEsportsOddsOneBatch(batch, batchIndex, batches.length);
+    if (ok) lastEsportsOddsUpdate = now;
   } catch(e) {
     log('ERROR', 'ODDS', `fetchEsportsOdds: ${e.message}`);
   } finally {
     esportsOddsFetching = false;
+  }
+}
+
+/** Após deploy só existia 1 lote no cache → poucos match (ex: 3/25). Opcional no Railway. */
+let esportsOddsBootstrapRunning = false;
+async function bootstrapEsportsOddsExtraBatches() {
+  if (process.env.ODDSPAPI_BOOTSTRAP !== 'true' || !ODDSPAPI_KEY) return;
+  if (esportsOddsBootstrapRunning || esportsOddsFetching) return;
+  if (Date.now() < esportsBackoffUntil) {
+    log('WARN', 'ODDS', 'Bootstrap odds ignorado (backoff ativo)');
+    return;
+  }
+
+  esportsOddsBootstrapRunning = true;
+  try {
+    let tids = await getEsportsTournamentIds();
+    if (!Array.isArray(tids) || tids.length === 0) tids = LOL_ACTIVE_TIDS;
+
+    const BATCH_SIZE = Math.max(1, parseInt(process.env.ODDSPAPI_BATCH_SIZE || '3') || 3);
+    const batches = [];
+    for (let i = 0; i < tids.length; i += BATCH_SIZE) batches.push(tids.slice(i, i + BATCH_SIZE));
+    if (batches.length <= 1) {
+      log('INFO', 'ODDS', 'Bootstrap: apenas 1 lote de torneios — nada extra a buscar');
+      return;
+    }
+
+    log('INFO', 'ODDS', `ODDSPAPI_BOOTSTRAP=true: buscando mais ${batches.length - 1} lote(s) para preencher cache após deploy`);
+
+    const gapMs = Math.max(1000, parseInt(process.env.ODDSPAPI_BOOTSTRAP_MS || '2500', 10) || 2500);
+    for (let i = 1; i < batches.length; i++) {
+      if (Date.now() < esportsBackoffUntil) {
+        log('WARN', 'ODDS', 'Bootstrap interrompido (backoff)');
+        break;
+      }
+      await new Promise(r => setTimeout(r, gapMs));
+      const { ok } = await fetchEsportsOddsOneBatch(batches[i], i, batches.length);
+      if (!ok) break;
+    }
+
+    esportsBatchCursor = batches.length;
+    lastEsportsOddsUpdate = Date.now();
+    const n = Object.keys(oddsCache).filter(k => k.startsWith('esports_')).length;
+    log('INFO', 'ODDS', `Bootstrap concluído — ~${n} entradas no cache esports`);
+  } catch(e) {
+    log('ERROR', 'ODDS', `bootstrapEsportsOdds: ${e.message}`);
+  } finally {
+    esportsOddsBootstrapRunning = false;
   }
 }
 
@@ -1498,7 +1536,10 @@ server.listen(PORT, '0.0.0.0', () => {
   log('INFO', 'SERVER', `Esportes: LoL (Riot API + PandaScore)`);
 
   // Inicialização e Loop de Cache de Odds (OddsPapi 1xBet)
-  fetchEsportsOdds(); // Busca imediata ao ligar
+  (async () => {
+    await fetchEsportsOdds();
+    await bootstrapEsportsOddsExtraBatches();
+  })().catch(e => log('ERROR', 'ODDS', e.message));
   setInterval(() => {
     fetchEsportsOdds();
   }, 15 * 60 * 1000); // Mantém o cache quente a cada 15 min

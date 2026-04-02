@@ -8,7 +8,11 @@ const { spawn } = require('child_process');
 const PORT = process.env.PORT || process.env.SERVER_PORT || '3000';
 process.env.SERVER_PORT = PORT; // ensure both child processes see the same port
 
-const DB_PATH = process.env.DB_PATH || 'sportsedge.db';
+// Alinha com server.js: Railway às vezes cola "=/path" ou tabs no env
+const DB_PATH = (process.env.DB_PATH || 'sportsedge.db')
+  .trim()
+  .replace(/^[\s=]+/, '')
+  .trim() || 'sportsedge.db';
 process.env.DB_PATH = DB_PATH;
 
 console.log(`[LAUNCHER] PORT=${PORT} | DB=${DB_PATH}`);
