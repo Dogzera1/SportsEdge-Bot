@@ -328,10 +328,10 @@ async function runAutoAnalysis() {
           if (prev?.tipSent) continue; // já enviou tip — não repetir
 
           // Item 1: Bo3/Bo5 — aguarda draft disponível (fase live/draft)
-          // Pré-jogo sem draft explica ~40-60% do resultado; análise estruturalmente limitada.
-          // O loop de partidas live já captura o mesmo confronto com composições conhecidas.
-          if (match.format === 'Bo3' || match.format === 'Bo5') {
-            log('INFO', 'AUTO', `Upcoming ${match.format} ignorado (${match.team1} vs ${match.team2}) — aguardando draft para análise confiável`);
+          // Controlável via LOL_PREGAME_BLOCK_BO3=false para testes / fase de calibração.
+          const blockBo3 = (process.env.LOL_PREGAME_BLOCK_BO3 ?? 'true') !== 'false';
+          if (blockBo3 && (match.format === 'Bo3' || match.format === 'Bo5')) {
+            log('INFO', 'AUTO', `Upcoming ${match.format} ignorado (${match.team1} vs ${match.team2}) — aguardando draft (LOL_PREGAME_BLOCK_BO3=true)`);
             continue;
           }
 
@@ -853,9 +853,14 @@ function buildEsportsPrompt(match, game, gamesContext, o, enrichSection) {
 
   let oddsSection = '';
   if (hasRealOdds) {
-    const prob1 = (1 / parseFloat(o.t1) * 100).toFixed(1);
-    const prob2 = (1 / parseFloat(o.t2) * 100).toFixed(1);
-    oddsSection = `Odds ML: ${t1}=${o.t1} | ${t2}=${o.t2}${o.bookmaker ? ' (' + o.bookmaker + ')' : ''}\nOdds implícitas: ${t1}=${prob1}% | ${t2}=${prob2}%`;
+    const raw1 = 1 / parseFloat(o.t1);
+    const raw2 = 1 / parseFloat(o.t2);
+    const overround = raw1 + raw2; // tipicamente 1.06-1.08 na 1xBet
+    const fairP1 = (raw1 / overround * 100).toFixed(1); // de-juiced
+    const fairP2 = (raw2 / overround * 100).toFixed(1); // de-juiced
+    const marginPct = ((overround - 1) * 100).toFixed(1);
+    const bookName = o.bookmaker || '1xBet';
+    oddsSection = `Odds ML (${bookName}): ${t1}=${o.t1} | ${t2}=${o.t2}\nMargem da casa: ${marginPct}% | Probabilidades de-juiced: ${t1}=${fairP1}% | ${t2}=${fairP2}%`;
   } else {
     oddsSection = `Odds ML: Não disponíveis — você irá estimar FAIR_ODDS`;
   }
@@ -875,8 +880,11 @@ function buildEsportsPrompt(match, game, gamesContext, o, enrichSection) {
     ? `🚨 ATENÇÃO — ESTADO DE ALTO FLUXO: ${isEarlyGame ? `Jogo com apenas ${gameMinute}min (muito cedo para análise confiável).` : ''} ${hasRecentObjective ? 'Objetivo maior recente detectado — estado do jogo pode ter mudado completamente.' : ''} Com delay de ~90s, o que você está vendo já pode ser história. Confiança máxima neste contexto: BAIXA.`
     : '';
 
+  const evThreshold = parseFloat(process.env.LOL_EV_THRESHOLD ?? '1.5');
+  const pinnacleMargin = parseFloat(process.env.LOL_PINNACLE_MARGIN ?? '2.5');
+  const noOddsConviction = parseInt(process.env.LOL_NO_ODDS_CONVICTION ?? '60');
   const tipInstruction = hasRealOdds
-    ? `[Se EV >= +2% E confiança não foi rebaixada para BAIXA por alto fluxo: TIP_ML:[time]@[odd]|EV:[%]|STAKE:[u]|CONF:[ALTA/MÉDIA/BAIXA]]`
+    ? `[Se EV >= +${evThreshold}% E confiança não foi rebaixada para BAIXA por alto fluxo: TIP_ML:[time]@[odd]|EV:[%]|STAKE:[u]|CONF:[ALTA/MÉDIA/BAIXA]]`
     : `[Se confiança ALTA ou MÉDIA e sem rebaixamento por alto fluxo: TIP_ML:[time]@[fair_odd]|EV:estimado|STAKE:[u]|CONF:[ALTA/MÉDIA]]`;
 
   return `Você é um analista de apostas de League of Legends. Seu trabalho é identificar edge REAL — não fabricar recomendações.
@@ -904,13 +912,15 @@ Baseado nas composições listadas e no patch meta fornecido:
 
 ETAPA 2 — VERIFICAÇÃO DE EDGE MATEMÁTICO:
 ${hasRealOdds
-  ? `Odds implícitas do mercado da Pinnacle: ${t1}=${(1/parseFloat(o.t1)*100).toFixed(1)}% | ${t2}=${(1/parseFloat(o.t2)*100).toFixed(1)}%
-→ Se a sua estimativa baseada no Draft for < 3pp em relação à Pinnacle: escreva "SEM EDGE" e não emita TIP_ML.
-→ Se a composição favorecer assustadoramente uma equipe e a margem for ≥ 3pp: calcule EV = (prob_real × odd) - 1. Só emita tip se EV >= +2%.`
-  : `Sem odds de mercado disponíveis (Pinnacle indisponível).
+  ? `Referência 1xBet (de-juiced, margem da casa removida): ${t1}=${(1/parseFloat(o.t1)/(1/parseFloat(o.t1)+1/parseFloat(o.t2))*100).toFixed(1)}% | ${t2}=${(1/parseFloat(o.t2)/(1/parseFloat(o.t1)+1/parseFloat(o.t2))*100).toFixed(1)}%
+IMPORTANTE: 1xBet NÃO é sharp (margem ~7%). As linhas são menos eficientes que Pinnacle → oportunidades reais existem.
+→ Compare sua estimativa com as probabilidades de-juiced acima (não as odds brutas).
+→ Se a diferença for < ${pinnacleMargin}pp: escreva "SEM EDGE" e não emita TIP_ML.
+→ Se a diferença for ≥ ${pinnacleMargin}pp: EV = (prob_sua × odd_1xBet) - 1. Só emita tip se EV >= +${evThreshold}%.`
+  : `Sem odds de mercado disponíveis.
 → Estime P(${t1}) e P(${t2}) baseado puramente na força deste Draft.
-→ Estime FAIR_ODDS = 1/prob. (Ex: 65% = 1.54).
-→ Só emita TIP_ML se a vantagem da composição for incontestavelmente esmagadora (>65%). Caso contrário, não emita.`}
+→ Estime FAIR_ODDS = 1/prob. (Ex: 60% = 1.67).
+→ Só emita TIP_ML se a vantagem for clara (>${noOddsConviction}%). Caso contrário, não emita.`}
 
 ANÁLISE DE VIRADA:
 • Composição late-game/scaling no time perdedor → virada possível
@@ -932,7 +942,7 @@ Confiança: [ALTA/MÉDIA/BAIXA] | Motivo do nível: [1 frase]
 
 FAIR_ODDS:${t1}=[1/prob_sem_juice]|${t2}=[1/prob_sem_juice]
 ${tipInstruction}
-${!hasRealOdds ? `\n⚠️ Lembre: sua estimativa sem dados de mercado pode divergir muito do preço real. Só emita TIP_ML com alta convicção (>65% + múltiplos fatores).` : ''}
+${!hasRealOdds ? `\n⚠️ Lembre: sua estimativa sem dados de mercado pode divergir muito do preço real. Só emita TIP_ML com convicção (>${noOddsConviction}% + múltiplos fatores).` : ''}
 Máximo 450 palavras.`;
 }
 
