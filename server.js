@@ -539,12 +539,14 @@ async function getLoLMatches() {
       .slice(0, 25);
 
     await fetchOdds('esports');
+    let oddsFound = 0;
     result.forEach(m => {
       const o = findOdds('esports', m.team1, m.team2);
-      if (o) m.odds = o;
+      if (o) { m.odds = o; oddsFound++; }
     });
 
-    log('INFO', 'LOL', `${result.length} partidas (${live.length} live, ${upcoming.filter(m=>m.status==='draft').length} draft)`);
+    const noOdds = result.filter(m => !m.odds).map(m => `${norm(m.team1)}v${norm(m.team2)}`);
+    log('INFO', 'LOL', `${result.length} partidas (${live.length} live, ${upcoming.filter(m=>m.status==='draft').length} draft) | odds: ${oddsFound}/${result.length}${noOdds.length ? ` | sem match: ${noOdds.slice(0,3).join(', ')}` : ''}`);
     return result;
   } catch(e) {
     log('ERROR', 'LOL', e.message);
@@ -964,22 +966,59 @@ const server = http.createServer(async (req, res) => {
 
   if (p === '/debug-odds') {
     const cacheEntries = Object.entries(oddsCache).filter(([k]) => k.startsWith('esports_'));
-    const sample = cacheEntries.slice(0, 10).map(([k, v]) => ({
-      key: k,
-      t1Name: v.t1Name,
-      t2Name: v.t2Name,
-      t1: v.t1,
-      t2: v.t2,
-      bookmaker: v.bookmaker
-    }));
     const esportsAge = lastEsportsOddsUpdate > 0 ? Math.round((Date.now() - lastEsportsOddsUpdate) / 1000) : null;
+    const backoffSec = esportsBackoffUntil > Date.now()
+      ? Math.round((esportsBackoffUntil - Date.now()) / 1000)
+      : 0;
     sendJson(res, {
       count: cacheEntries.length,
       lastSync: lastEsportsOddsUpdate ? new Date(lastEsportsOddsUpdate).toISOString() : 'nunca',
       lastSyncAgoSec: esportsAge,
+      backoffRemainingSeconds: backoffSec,
       tournamentIdsCache: cachedEsportsTids?.length || 0,
       lastApiResponse: lastApiResponse.slice(0, 300),
-      sample
+      // Mostra todos os slugs para diagnóstico de matching
+      slugs: cacheEntries.map(([k, v]) => ({
+        slug: v.combinedSlug || norm(v.t1Name || '') + norm(v.t2Name || ''),
+        t1: v.t1,
+        t2: v.t2
+      }))
+    });
+    return;
+  }
+
+  // Diagnóstico de matching: testa se um par de times encontra odds no cache
+  if (p === '/debug-match-odds') {
+    const t1 = parsed.query.team1 || '';
+    const t2 = parsed.query.team2 || '';
+    const nt1 = norm(t1), nt2 = norm(t2);
+    const expandWithAliases = n => {
+      const variants = new Set([n]);
+      for (const [key, aliases] of Object.entries(LOL_ALIASES)) {
+        if (n.includes(key) || key.includes(n)) { aliases.forEach(a => variants.add(a)); variants.add(key); }
+      }
+      return [...variants];
+    };
+    const v1 = expandWithAliases(nt1), v2 = expandWithAliases(nt2);
+    const anyMatch = (variants, slug) => variants.some(v => v.length >= 2 && slug.includes(v));
+    const cacheEntries = Object.entries(oddsCache).filter(([k]) => k.startsWith('esports_'));
+    const checks = cacheEntries.map(([k, val]) => {
+      const cs = val.combinedSlug || '';
+      return {
+        slug: cs,
+        t1InSlug: v1.filter(v => v.length >= 2 && cs.includes(v)),
+        t2InSlug: v2.filter(v => v.length >= 2 && cs.includes(v)),
+        matched: anyMatch(v1, cs) && anyMatch(v2, cs)
+      };
+    });
+    const result = findOdds('esports', t1, t2);
+    sendJson(res, {
+      query: { team1: t1, team2: t2 },
+      normalized: { nt1, nt2 },
+      variants1: v1, variants2: v2,
+      found: result,
+      cacheSize: cacheEntries.length,
+      checks
     });
     return;
   }
