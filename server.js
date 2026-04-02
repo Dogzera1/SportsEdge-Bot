@@ -1753,7 +1753,13 @@ server.listen(PORT, () => {
   log('INFO', 'SERVER', `SportsEdge API em http://localhost:${PORT}`);
   log('INFO', 'SERVER', `Esportes: LoL, Dota (API) | MMA (scraper opcional)`);
 
-  // Cleanup
+  // Inicialização e Loop de Cache de Odds (OddsPapi 1xBet)
+  fetchEsportsOdds(); // Busca imediata ao ligar
+  setInterval(() => {
+    fetchEsportsOdds();
+  }, 15 * 60 * 1000); // Mantém o cache quente a cada 15 min
+
+  // Cleanup de DB
   setInterval(() => {
     try { stmts.cleanOldOdds.run(); } catch(_) {}
   }, 6 * 60 * 60 * 1000);
