@@ -1008,8 +1008,14 @@ async function autoAnalyzeMatch(token, match) {
       const tipEV    = parseFloat(String(filteredTipResult[3]).replace('%','').replace('+',''));
       let   tipConf  = (filteredTipResult[5] || 'MÉDIA').trim().toUpperCase();
 
+      // Gate 0: Sem odds reais → rejeitar sempre (odds estimadas não garantem valor)
+      if (!hasRealOdds) {
+        log('INFO', 'AUTO', `Gate odds reais: ${match.team1} vs ${match.team2} → odds estimadas → rejeitado`);
+        filteredTipResult = null;
+      }
+
       // Gate 1: Confiança BAIXA → rejeitar sempre
-      if (tipConf === 'BAIXA') {
+      if (filteredTipResult && tipConf === 'BAIXA') {
         log('INFO', 'AUTO', `Gate confiança: ${match.team1} vs ${match.team2} → BAIXA confiança → rejeitado`);
         filteredTipResult = null;
       }

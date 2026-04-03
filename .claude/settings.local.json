@@ -7,7 +7,11 @@
       "Bash(node --check bot.js)",
       "Bash(node --check server.js)",
       "Bash(node --check lib/database.js)",
-      "Bash(node --check lib/ml.js)"
+      "Bash(node --check lib/ml.js)",
+      "Bash(curl -s http://localhost:8080/sync-pro-stats)",
+      "Bash(curl -s http://127.0.0.1:8080/sync-pro-stats)",
+      "Bash(curl -s http://localhost:3000/sync-pro-stats)",
+      "Bash(curl -s http://127.0.0.1:3000/sync-pro-stats)"
     ]
   }
 }
