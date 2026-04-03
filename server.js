@@ -461,6 +461,7 @@ const LOL_ALIASES = {
   'nongshimredforce': ['ns', 'nongshim', 'nsredforce'],
   'hanwhalifeesports': ['hle', 'hanwha', 'hanwhalife'],
   'dpluskia': ['dk', 'dplus', 'dwg', 'damwon'],
+  'kiwoomdrx': ['drx'],
   'ktrolster': ['kt'],
   'geng': ['gen', 'gengolden', 'gengaming'],
   't1': ['skt', 'skt1'],
@@ -498,6 +499,9 @@ const LOL_ALIASES = {
   'topesports': ['tes'],
   'invictusgaming': ['ig'],
   'anyoneslegend': ['al', 'anyone'],
+  // LPL — Riot API usa prefixo de cidade, OddsPapi não
+  'xianteamwe': ['teamwe', 'we'],
+  'shenzhenninjasinpyjamas': ['ninjasinpyjamas', 'nip', 'ninjas'],
   // CBLOL
   'paingaming': ['png', 'pain'],
   'fluxo': ['flx'],
@@ -846,8 +850,12 @@ const server = http.createServer(async (req, res) => {
     ]);
 
     // Mescla deduplicando por nomes de times (PandaScore não sobrescreve Riot)
+    // Partidas live/draft: usa SOMENTE Riot API (evita duplicata de análise ao vivo)
+    const riotHasLive = riotMatches.some(m => m.status === 'live' || m.status === 'draft');
     const combined = [...riotMatches];
     for (const pm of psMatches) {
+      // Descarta live/draft da PandaScore se a Riot já tem ao vivo
+      if (riotHasLive && (pm.status === 'live' || pm.status === 'draft')) continue;
       const n1 = norm(pm.team1), n2 = norm(pm.team2);
       const alreadyExists = combined.some(r =>
         (norm(r.team1).includes(n1) || n1.includes(norm(r.team1))) &&
