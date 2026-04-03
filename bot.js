@@ -421,7 +421,7 @@ async function runAutoAnalysis() {
           log('INFO', 'AUTO', `Esports upcoming: ${match.team1} vs ${match.team2} (${match.league}) às ${matchTime}${hasRealOdds ? ' — odds disponíveis' : ' — odds estimadas'}${isImminentMatch ? ' [IMINENTE <2h]' : ''}`);
 
           const result = await autoAnalyzeMatch(esportsConfig.token, match);
-          analyzedMatches.set(matchKey, { ts: now, tipSent: false, noEdge: !result?.tipMatch && !result?.fairOdds });
+          analyzedMatches.set(matchKey, { ts: now, tipSent: false, noEdge: !result?.tipMatch });
 
           if (!result) { await new Promise(r => setTimeout(r, 2000)); continue; }
 
@@ -462,21 +462,6 @@ async function runAutoAnalysis() {
             }
             analyzedMatches.set(matchKey, { ts: now, tipSent: true });
             log('INFO', 'AUTO-TIP', `Esports upcoming: ${tipTeam} @ ${tipOdd}`);
-          } else if (result.fairOdds && !prev?.tipSent && hasRealOdds) {
-            // Só envia odds de referência quando há mercado real
-            const fo = result.fairOdds;
-            const fo1 = parseFloat(fo[2]).toFixed(2), fo2 = parseFloat(fo[4]).toFixed(2);
-            const fairMsg = `🎮 💡 *ODDS PRÉ-JOGO*\n` +
-              `*${match.team1}* vs *${match.team2}*\n_${match.league}_\n` +
-              (match.time ? `🕐 Início: *${matchTime}* (BRT)\n` : '') +
-              `\n• *${fo[1].trim()}:* *${fo1}*\n• *${fo[3].trim()}:* *${fo2}*\n\n` +
-              `💡 _Odds ACIMA desses valores = +EV_\n⚠️ _Aposte com responsabilidade._`;
-            for (const [userId, prefs] of subscribedUsers) {
-              if (!prefs.has('esports')) continue;
-              try { await sendDM(esportsConfig.token, userId, fairMsg); }
-              catch(e) { if (e.message?.includes('403')) subscribedUsers.delete(userId); }
-            }
-            analyzedMatches.set(matchKey, { ts: now, tipSent: true, noEdge: false });
           }
           await new Promise(r => setTimeout(r, 3000));
         }
@@ -779,6 +764,7 @@ async function checkLiveNotifications() {
 // Collect live game stats for esports analysis
 async function collectGameContext(game, matchId) {
   let gamesContext = '';
+  let compScore = null; // pp advantage for t1 (blue) based on pro champion WRs
   if (game === 'lol') {
     const isPandaScore = String(matchId).startsWith('ps_');
 
@@ -807,6 +793,52 @@ async function collectGameContext(game, matchId) {
           gamesContext += `${gd.blueTeam.name}:\n${fmtComp(gd.blueTeam)}\n`;
           gamesContext += `${gd.redTeam.name}:\n${fmtComp(gd.redTeam)}\n`;
           gamesContext += `_Fonte: PandaScore_\n`;
+
+          // Buscar WR de campeões + jogadores em pro play
+          try {
+            const allPlayers = [...(gd.blueTeam?.players||[]), ...(gd.redTeam?.players||[])];
+            const champNames   = allPlayers.map(p => p.champion).filter(c => c && c !== '?').join(',');
+            const roleNames    = allPlayers.map(p => p.role || 'unknown').join(',');
+            const playerNames  = allPlayers.map(p => p.name || '').join(',');
+            const playerChamps = allPlayers.map(p => p.champion || '').join(',');
+
+            const [wrData, pcData] = await Promise.all([
+              champNames ? serverGet(`/champ-winrates?champs=${encodeURIComponent(champNames)}&roles=${encodeURIComponent(roleNames)}`).catch(() => ({})) : Promise.resolve({}),
+              playerNames ? serverGet(`/player-champ-stats?players=${encodeURIComponent(playerNames)}&champs=${encodeURIComponent(playerChamps)}`).catch(() => ({})) : Promise.resolve({})
+            ]);
+
+            // Comp score por champ WR
+            if (wrData && Object.keys(wrData).length >= 4) {
+              let blueWR = 0, blueN = 0, redWR = 0, redN = 0;
+              for (const pl of (gd.blueTeam?.players||[])) {
+                const s = wrData[pl.champion];
+                if (s) { blueWR += s.winRate; blueN++; }
+              }
+              for (const pl of (gd.redTeam?.players||[])) {
+                const s = wrData[pl.champion];
+                if (s) { redWR += s.winRate; redN++; }
+              }
+              if (blueN > 0 && redN > 0) {
+                const blueAvg = blueWR / blueN;
+                const redAvg  = redWR  / redN;
+                compScore = blueAvg - redAvg;
+                gamesContext += `META PRO (champ WR): ${gd.blueTeam.name} ${blueAvg.toFixed(1)}% vs ${gd.redTeam.name} ${redAvg.toFixed(1)}% (diff: ${compScore > 0 ? '+' : ''}${compScore.toFixed(1)}pp)\n`;
+              }
+            }
+
+            // Player+champ WR
+            if (pcData && Object.keys(pcData).length > 0) {
+              const lines = [];
+              for (const pl of allPlayers) {
+                const key = `${pl.name}/${pl.champion}`;
+                const stat = pcData[key];
+                if (stat) lines.push(`${pl.name}(${pl.champion}): ${stat.winRate}% em ${stat.total} games`);
+              }
+              if (lines.length > 0) {
+                gamesContext += `PLAYER CHAMP WR: ${lines.join(' | ')}\n`;
+              }
+            }
+          } catch(_) {}
         }
       } catch(e) { log('WARN', 'PS-CONTEXT', e.message); }
     } else {
@@ -839,13 +871,55 @@ async function collectGameContext(game, matchId) {
               }).join('\n');
               gamesContext += `${gd.blueTeam.name}:\n${fmtComp(gd.blueTeam)}\n`;
               gamesContext += `${gd.redTeam.name}:\n${fmtComp(gd.redTeam)}\n`;
+
+              // WR de campeões + jogadores pro play (Riot source)
+              if (compScore === null) {
+                try {
+                  const allPlayers = [...(gd.blueTeam?.players||[]), ...(gd.redTeam?.players||[])];
+                  const champNames   = allPlayers.map(p => p.champion).filter(c => c && c !== '?').join(',');
+                  const roleNames    = allPlayers.map(p => p.role || 'unknown').join(',');
+                  const playerNames  = allPlayers.map(p => p.name || '').join(',');
+                  const playerChamps = allPlayers.map(p => p.champion || '').join(',');
+
+                  const [wrData, pcData] = await Promise.all([
+                    champNames ? serverGet(`/champ-winrates?champs=${encodeURIComponent(champNames)}&roles=${encodeURIComponent(roleNames)}`).catch(() => ({})) : Promise.resolve({}),
+                    playerNames ? serverGet(`/player-champ-stats?players=${encodeURIComponent(playerNames)}&champs=${encodeURIComponent(playerChamps)}`).catch(() => ({})) : Promise.resolve({})
+                  ]);
+
+                  if (wrData && Object.keys(wrData).length >= 4) {
+                    let blueWR = 0, blueN = 0, redWR = 0, redN = 0;
+                    for (const pl of (gd.blueTeam?.players||[])) {
+                      const s = wrData[pl.champion];
+                      if (s) { blueWR += s.winRate; blueN++; }
+                    }
+                    for (const pl of (gd.redTeam?.players||[])) {
+                      const s = wrData[pl.champion];
+                      if (s) { redWR += s.winRate; redN++; }
+                    }
+                    if (blueN > 0 && redN > 0) {
+                      const blueAvg = blueWR / blueN;
+                      const redAvg  = redWR  / redN;
+                      compScore = blueAvg - redAvg;
+                      gamesContext += `META PRO (champ WR): ${gd.blueTeam.name} ${blueAvg.toFixed(1)}% vs ${gd.redTeam.name} ${redAvg.toFixed(1)}% (diff: ${compScore > 0 ? '+' : ''}${compScore.toFixed(1)}pp)\n`;
+                    }
+                  }
+                  if (pcData && Object.keys(pcData).length > 0) {
+                    const lines = [];
+                    for (const pl of allPlayers) {
+                      const stat = pcData[`${pl.name}/${pl.champion}`];
+                      if (stat) lines.push(`${pl.name}(${pl.champion}): ${stat.winRate}% em ${stat.total} games`);
+                    }
+                    if (lines.length > 0) gamesContext += `PLAYER CHAMP WR: ${lines.join(' | ')}\n`;
+                  }
+                } catch(_) {}
+              }
             }
           } catch(_) {}
         }
       }
     }
   }
-  return gamesContext;
+  return { text: gamesContext, compScore };
 }
 
 async function fetchEnrichment(match) {
@@ -902,18 +976,20 @@ async function autoAnalyzeMatch(token, match) {
   const game = match.game;
   const matchId = String(match.id);
   try {
-    const [o, gamesContext, enrich] = await Promise.all([
+    const [o, gameCtx, enrich] = await Promise.all([
       serverGet(`/odds?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}`).catch(() => null),
       collectGameContext(game, matchId),
       fetchEnrichment(match)
     ]);
+    const gamesContext = gameCtx.text;
+    const compScore   = gameCtx.compScore;
     const hasLiveStats = gamesContext.includes('AO VIVO');
     const enrichSection = buildEnrichmentSection(match, enrich);
 
     // ── Layer 1: Pré-filtro ML ──
     // Retorna { pass, direction, score, t1Edge, t2Edge }
     const mlPrefilterOn = (process.env.LOL_ML_PREFILTER ?? 'true') !== 'false';
-    const mlResult = esportsPreFilter(match, o, enrich, hasLiveStats, gamesContext);
+    const mlResult = esportsPreFilter(match, o, enrich, hasLiveStats, gamesContext, compScore);
     if (mlPrefilterOn && !mlResult.pass) {
       log('INFO', 'AUTO', `Pré-filtro ML: edge insuficiente (${mlResult.score.toFixed(1)}pp) para ${match.team1} vs ${match.team2}. Pulando IA.`);
       return null;
@@ -1008,6 +1084,7 @@ function buildEsportsPrompt(match, game, gamesContext, o, enrichSection) {
   const t2 = match.team2 || match.participant2_name;
   const serieScore = `${match.score1 || 0}-${match.score2 || 0}`;
 
+  const isUpcoming = match.status === 'upcoming';
   let oddsSection = '';
   if (hasRealOdds) {
     const raw1 = 1 / parseFloat(o.t1);
@@ -1019,7 +1096,7 @@ function buildEsportsPrompt(match, game, gamesContext, o, enrichSection) {
     const bookName = o.bookmaker || '1xBet';
     oddsSection = `Odds ML (${bookName}): ${t1}=${o.t1} | ${t2}=${o.t2}\nMargem da casa: ${marginPct}% | Probabilidades de-juiced: ${t1}=${fairP1}% | ${t2}=${fairP2}%`;
   } else {
-    oddsSection = `Odds ML: Não disponíveis — você irá estimar FAIR_ODDS`;
+    oddsSection = `Odds ML: Não disponíveis`;
   }
 
   // Detect high-flux game state from gamesContext
@@ -1053,12 +1130,20 @@ function buildEsportsPrompt(match, game, gamesContext, o, enrichSection) {
     bookMarginNote = `AVISO: 1xBet tem margem de ${marginReal}% neste jogo. O de-juice REMOVE esta margem, mas NÃO corrige o viés da bookie. Para lucro real você precisa que sua probabilidade VERDADEIRA supere o de-juice por pelo menos ${minEdgePp}pp.`;
     deJuiced = `De-juice 1xBet: ${t1}=${dj1}% | ${t2}=${dj2}%\n   Para ter edge: sua P estimada deve superar de-juice em ≥${minEdgePp}pp E EV=(prob×odd-1) ≥ +${evThreshold}%.\n   Se a diferença for < ${minEdgePp}pp → SEM EDGE real (1xBet não é mercado sharp).`;
   } else {
-    deJuiced = `Sem odds — estime FAIR_ODDS=1/prob. Tip só se vantagem clara (>${noOddsConviction}%) com pelo menos 2 sinais independentes confirmando.`;
+    deJuiced = isUpcoming
+      ? `Sem odds disponíveis. Tip só se vantagem clara (>${noOddsConviction}%) com pelo menos 2 sinais independentes confirmando.`
+      : `Sem odds — estime FAIR_ODDS=1/prob. Tip só se vantagem clara (>${noOddsConviction}%) com pelo menos 2 sinais independentes confirmando.`;
   }
 
   const tipInstruction = hasRealOdds
     ? `[SOMENTE se EV ≥ +${evThreshold}% E confiança ALTA ou MÉDIA (NUNCA BAIXA) E pelo menos 2 sinais independentes confirmam: TIP_ML:[time]@[odd]|EV:[%]|STAKE:[u]|CONF:[ALTA/MÉDIA]]`
-    : `[SOMENTE se confiança ALTA ou MÉDIA E vantagem >${noOddsConviction}% por múltiplos sinais: TIP_ML:[time]@[fair_odd]|EV:estimado|STAKE:[u]|CONF:[ALTA/MÉDIA]]`;
+    : isUpcoming
+      ? `[NÃO gere tip sem odds reais disponíveis para partidas pré-jogo]`
+      : `[SOMENTE se confiança ALTA ou MÉDIA E vantagem >${noOddsConviction}% por múltiplos sinais: TIP_ML:[time]@[fair_odd]|EV:estimado|STAKE:[u]|CONF:[ALTA/MÉDIA]]`;
+
+  const fairOddsLine = (!isUpcoming)
+    ? `FAIR_ODDS:${t1}=[X.XX]|${t2}=[X.XX]\n`
+    : '';
 
   return `Você é um analista de apostas LoL especializado. Sua função é encontrar edge REAL. "Sem edge" é sempre uma resposta válida e preferível a forçar uma tip ruim.
 
@@ -1088,9 +1173,8 @@ ANÁLISE (responda cada ponto):
    Mínimo 2 sinais para considerar tip.
 ${hasRealOdds ? '' : '   Virada possível se: gold diff <3k, scaling comp no perdedor, soul point ou baron pendente.\n'}
 RESPOSTA (máximo 200 palavras):
-P(${t1})=__% | P(${t2})=__% | ${hasRealOdds ? `EV(${t1})=[X%] | EV(${t2})=[X%]` : `Fair: ${t1}=[X.XX] | ${t2}=[X.XX]`} | Conf:[ALTA/MÉDIA/BAIXA] | Sinais:[N/5]
-FAIR_ODDS:${t1}=[X.XX]|${t2}=[X.XX]
-${tipInstruction}`;
+P(${t1})=__% | P(${t2})=__% | ${hasRealOdds ? `EV(${t1})=[X%] | EV(${t2})=[X%]` : isUpcoming ? `Conf:[ALTA/MÉDIA/BAIXA] | Sinais:[N/5]` : `Fair: ${t1}=[X.XX] | ${t2}=[X.XX]`} | Conf:[ALTA/MÉDIA/BAIXA] | Sinais:[N/5]
+${fairOddsLine}${tipInstruction}`;
 }
 
 // ── Admin ──

@@ -1488,6 +1488,59 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // ── Champion WR pro play ──
+  if (p === '/champ-winrates') {
+    const champList = (parsed.query.champs || '').split(',').map(s => s.trim()).filter(Boolean);
+    const roleList  = (parsed.query.roles  || '').split(',').map(s => s.trim()).filter(Boolean);
+    const result = {};
+    for (let i = 0; i < champList.length; i++) {
+      const champ = champList[i];
+      const role  = roleList[i] || 'unknown';
+      let stat = stmts.getChampStat.get(champ, role);
+      if (!stat) stat = stmts.getChampStatAnyRole.get(champ); // fallback: any role
+      if (stat && stat.total >= 5) {
+        result[champ] = { role: stat.role, winRate: Math.round(stat.wins / stat.total * 100), total: stat.total };
+      }
+    }
+    sendJson(res, result);
+    return;
+  }
+
+  // ── Player+champ WR pro play ──
+  if (p === '/player-champ-stats') {
+    const players = (parsed.query.players || '').split(',').map(s => s.trim()).filter(Boolean);
+    const champs  = (parsed.query.champs  || '').split(',').map(s => s.trim()).filter(Boolean);
+    const result = {};
+    for (let i = 0; i < players.length; i++) {
+      const player = players[i];
+      const champ  = champs[i];
+      if (!player) continue;
+      if (champ) {
+        const stat = stmts.getPlayerChampStat.get(player, champ);
+        if (stat && stat.total >= 3) {
+          result[`${player}/${champ}`] = { winRate: Math.round(stat.wins / stat.total * 100), total: stat.total };
+        }
+      } else {
+        // Retorna top champs do jogador
+        const rows = stmts.getPlayerChampStats.all(player);
+        result[player] = rows.filter(r => r.total >= 3).map(r => ({
+          champion: r.champion,
+          winRate: Math.round(r.wins / r.total * 100),
+          total: r.total
+        }));
+      }
+    }
+    sendJson(res, result);
+    return;
+  }
+
+  // ── Sync pro stats (PandaScore → pro_champ_stats + match_results) ──
+  if (p === '/sync-pro-stats') {
+    if (!PANDASCORE_TOKEN) { sendJson(res, { ok: false, error: 'PANDASCORE_TOKEN não configurado' }); return; }
+    syncProStats().then(r => sendJson(res, r)).catch(e => sendJson(res, { ok: false, error: e.message }));
+    return;
+  }
+
   // ── Form e H2H ──
   if (p === '/team-form' || p === '/form') {
     const team = parsed.query.team || parsed.query.name || '';
@@ -1607,6 +1660,93 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
+// ── Sync de stats pro via PandaScore ──
+async function syncProStats() {
+  if (!PANDASCORE_TOKEN) return { ok: false, error: 'sem token' };
+  const headers = { 'Authorization': `Bearer ${PANDASCORE_TOKEN}` };
+  const cutoff = new Date(Date.now() - 45 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+
+  // Busca 50 partidas finalizadas recentes
+  const listR = await httpGet(`https://api.pandascore.co/lol/matches?filter[status]=finished&sort=-begin_at&per_page=50&range[begin_at]=${cutoff},`, headers);
+  if (listR.status !== 200) return { ok: false, error: `PS list status ${listR.status}` };
+  const matches = safeParse(listR.body, []);
+  if (!Array.isArray(matches)) return { ok: false, error: 'resposta inesperada da PS' };
+
+  let matchCount = 0, champEntries = 0, playerEntries = 0, skipped = 0;
+  const champAgg = {}; // { "Champion_role": { wins, total } }
+  const playerAgg = {}; // { "player_Champion": { wins, total } }
+
+  const currentPatch = (process.env.LOL_PATCH_META || '').match(/\d+\.\d+/)?.[0] || 'current';
+
+  for (const m of matches) {
+    const psId = `ps_${m.id}`;
+    if (stmts.isMatchSynced.get(psId)) { skipped++; continue; }
+
+    const t1 = m.opponents?.[0]?.opponent;
+    const t2 = m.opponents?.[1]?.opponent;
+    const winnerName = m.winner?.name || null;
+    if (!t1 || !t2) { stmts.markMatchSynced.run(psId, 'lol'); continue; }
+
+    // Popula match_results (form dos times)
+    if (winnerName) {
+      stmts.upsertMatchResult.run(psId, 'lol', t1.name, t2.name, winnerName, '', m.league?.name || '');
+      matchCount++;
+    }
+
+    // Busca detalhes do jogo para picks de campeões
+    try {
+      const detR = await httpGet(`https://api.pandascore.co/lol/matches/${m.id}`, headers);
+      if (detR.status === 200) {
+        const det = safeParse(detR.body, {});
+        const games = Array.isArray(det.games) ? det.games : [];
+        for (const g of games) {
+          if (!g.winner || !Array.isArray(g.players) || g.players.length === 0) continue;
+          const winnerId = g.winner.id;
+          for (const pl of g.players) {
+            const champ  = pl.champion?.name;
+            const role   = pl.role;
+            const player = pl.player?.name || pl.name;
+            if (!champ || !role) continue;
+            const won = pl.team_id === winnerId;
+
+            // Champ stats (pool de campeões pro play)
+            const cKey = `${champ}_${role}`;
+            if (!champAgg[cKey]) champAgg[cKey] = { champion: champ, role, wins: 0, total: 0 };
+            champAgg[cKey].total++;
+            if (won) champAgg[cKey].wins++;
+
+            // Player+champ stats
+            if (player) {
+              const pKey = `${player}_${champ}`;
+              if (!playerAgg[pKey]) playerAgg[pKey] = { player, champion: champ, wins: 0, total: 0 };
+              playerAgg[pKey].total++;
+              if (won) playerAgg[pKey].wins++;
+            }
+          }
+        }
+      }
+    } catch(_) {}
+
+    stmts.markMatchSynced.run(psId, 'lol');
+    await new Promise(r => setTimeout(r, 150)); // rate-limit gentil
+  }
+
+  // Upsert champ stats
+  for (const s of Object.values(champAgg)) {
+    stmts.addChampStat.run(s.champion, s.role, s.wins, s.total, currentPatch);
+    champEntries++;
+  }
+  // Upsert player+champ stats
+  for (const s of Object.values(playerAgg)) {
+    stmts.addPlayerChampStat.run(s.player, s.champion, s.wins, s.total, currentPatch);
+    playerEntries++;
+  }
+
+  try { stmts.cleanOldSynced.run(); } catch(_) {}
+  log('INFO', 'SYNC', `Pro stats: ${matchCount} resultados, ${champEntries} champs, ${playerEntries} player+champ (${skipped} já sincronizados)`);
+  return { ok: true, matchCount, champEntries, playerEntries, skipped };
+}
+
 server.listen(PORT, '0.0.0.0', () => {
   log('INFO', 'SERVER', `SportsEdge API em http://0.0.0.0:${PORT}`);
   log('INFO', 'SERVER', `Esportes: LoL (Riot API + PandaScore)`);
@@ -1619,6 +1759,12 @@ server.listen(PORT, '0.0.0.0', () => {
   setInterval(() => {
     fetchEsportsOdds();
   }, 15 * 60 * 1000); // Mantém o cache quente a cada 15 min
+
+  // Sync inicial de stats pro + job recorrente a cada 12h
+  if (PANDASCORE_TOKEN) {
+    setTimeout(() => syncProStats().catch(e => log('ERROR', 'SYNC', e.message)), 5000);
+    setInterval(() => syncProStats().catch(e => log('ERROR', 'SYNC', e.message)), 12 * 60 * 60 * 1000);
+  }
 
   // Cleanup de DB
   setInterval(() => {

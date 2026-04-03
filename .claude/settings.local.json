@@ -3,7 +3,11 @@
     "allow": [
       "Bash(node -e ':*)",
       "Bash(npm ci:*)",
-      "Bash(python -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\(d.get\\('lockfileVersion'\\)\\); print\\(list\\(d.get\\('packages',{}\\).keys\\(\\)\\)[:5]\\)\")"
+      "Bash(python -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\(d.get\\('lockfileVersion'\\)\\); print\\(list\\(d.get\\('packages',{}\\).keys\\(\\)\\)[:5]\\)\")",
+      "Bash(node --check bot.js)",
+      "Bash(node --check server.js)",
+      "Bash(node --check lib/database.js)",
+      "Bash(node --check lib/ml.js)"
     ]
   }
 }
