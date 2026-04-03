@@ -493,7 +493,9 @@ const LOL_ALIASES = {
   'g2esports': ['g2'],
   // LPL
   'jdggaming': ['jdg'],
+  'beijingjdgesports': ['jdg', 'jdggaming'],
   'bilibiliblaze': ['blg', 'bilibili'],
+  'bilibligaming': ['blg', 'bilibili', 'bilibiliblaze'],
   'ninerosters': ['ninerosters', 'nip'],
   'weibo': ['wbg', 'weiboesports'],
   'topesports': ['tes'],
@@ -504,6 +506,7 @@ const LOL_ALIASES = {
   'shenzhenninjasinpyjamas': ['ninjasinpyjamas', 'nip', 'ninjas'],
   // CBLOL
   'paingaming': ['png', 'pain'],
+  'redcanidskalunga': ['redcanids', 'red'],
   'fluxo': ['flx'],
   'kabum': ['kbm'],
   'loud': ['lod'],
