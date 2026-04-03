@@ -547,6 +547,7 @@ const LOL_ALIASES = {
   'nrgesports': ['nrg'],
   'citadelgaming': ['citadel'],
   // LCP
+  'relovedeepcrossgaming': ['deepcrossgaming', 'deepcross'],
   'groundzerogaming': ['gzg', 'gz'],
   'detonationfocusme': ['dfm'],
 };
