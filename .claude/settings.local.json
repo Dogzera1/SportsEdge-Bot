@@ -11,7 +11,10 @@
       "Bash(curl -s http://localhost:8080/sync-pro-stats)",
       "Bash(curl -s http://127.0.0.1:8080/sync-pro-stats)",
       "Bash(curl -s http://localhost:3000/sync-pro-stats)",
-      "Bash(curl -s http://127.0.0.1:3000/sync-pro-stats)"
+      "Bash(curl -s http://127.0.0.1:3000/sync-pro-stats)",
+      "WebSearch",
+      "WebFetch(domain:oddspapi.io)",
+      "WebFetch(domain:docs.oddspapi.io)"
     ]
   }
 }

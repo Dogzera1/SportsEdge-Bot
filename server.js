@@ -280,6 +280,8 @@ function ingestEsportsFixtures(allFixtures) {
       t1Name: p1Name || combinedSlug,
       t2Name: p2Name || '',
       combinedSlug: norm(combinedSlug),
+      fixtureId: f.fixtureId || null,
+      tournamentId: f.tournamentId || null,
     };
     cachedCount++;
   }
@@ -410,6 +412,45 @@ async function bootstrapEsportsOddsExtraBatches() {
     log('ERROR', 'ODDS', `bootstrapEsportsOdds: ${e.message}`);
   } finally {
     esportsOddsBootstrapRunning = false;
+  }
+}
+
+// ── Mapeamento slug de liga → tournament ID (para force-fetch em partidas ao vivo) ──
+const SLUG_TO_TID = {
+  'lcs': 2450,
+  'lec': 2452,
+  'lck': 2454,
+  'primeleague': 33814, 'prime-league': 33814, 'prime-league-pro-division': 33814,
+  'hellenic_legends_league': 45623,
+  'road-of-legends': 45985, 'road_of_legends': 45985, 'roadoflegends': 45985,
+  'lit': 50586, 'les': 50586,
+  'finnish-pro-league': 50242, 'finnish-pro-league-winter': 50242,
+  'emea_masters': 26590, 'emea-masters': 26590,
+  'cblol-brazil': 26698,
+  'nacl': 39009,
+  'lpl': 39985, 'ldl': 39985,
+  'lck_challengers_league': 36997, 'lck-challengers-league': 36997, 'lck-cl': 36997,
+  'lcp': 45589,
+  'lrn': 46117,
+  'lrs': 46119,
+  'ewc': 47864, 'esports_world_cup': 47864, 'esports-world-cup': 47864,
+  'gll': 45855, 'ultraliga': 45617, 'njcs': 45619, 'kjl': 45621,
+  'circuito-desafiante': 26708, 'cblol-academy': 26708,
+};
+
+/** Force-fetch de odds para torneios específicos (ignora round-robin TTL). Usado para live matches. */
+async function fetchEsportsOddsForTids(tids) {
+  if (!ODDSPAPI_KEY || !tids || !tids.length) return;
+  if (Date.now() < esportsBackoffUntil) { log('INFO', 'ODDS', 'Force-fetch ignorado (backoff ativo)'); return; }
+  const BATCH_SIZE = Math.max(1, parseInt(process.env.ODDSPAPI_BATCH_SIZE || '3') || 3);
+  const batches = [];
+  for (let i = 0; i < tids.length; i += BATCH_SIZE) batches.push(tids.slice(i, i + BATCH_SIZE));
+  log('INFO', 'ODDS', `Force-fetch live: ${tids.length} torneio(s) em ${batches.length} lote(s)`);
+  for (let i = 0; i < batches.length; i++) {
+    if (Date.now() < esportsBackoffUntil) break;
+    const { ok } = await fetchEsportsOddsOneBatch(batches[i], i, batches.length);
+    if (!ok) break;
+    if (i < batches.length - 1) await new Promise(r => setTimeout(r, 500));
   }
 }
 
@@ -570,6 +611,7 @@ function mapLoLEvent(e, status) {
     id: e.match?.id || Date.now().toString(),
     game: 'lol',
     league: e.league?.name || 'LoL Esports',
+    leagueSlug: slug,
     team1: n1 || 'TBD',
     team2: n2 || 'TBD',
     score1: t1?.result?.gameWins ?? 0,
@@ -666,6 +708,31 @@ async function getLoLMatches() {
       const o = findOdds('esports', m.team1, m.team2);
       if (o) { m.odds = o; oddsFound++; }
     });
+
+    // Force-fetch odds para partidas ao vivo / draft sem odds (ignora round-robin TTL)
+    const liveNoOdds = result.filter(m => (m.status === 'live' || m.status === 'draft') && !m.odds);
+    if (liveNoOdds.length > 0) {
+      const tidsToFetch = new Set();
+      for (const m of liveNoOdds) {
+        // Tenta pelo slug da liga
+        const tid = SLUG_TO_TID[m.leagueSlug];
+        if (tid) tidsToFetch.add(tid);
+        // Tenta pelo tournamentId já no cache (para partidas conhecidas)
+        for (const v of Object.values(oddsCache)) {
+          if (v.tournamentId && v.combinedSlug && (
+            v.combinedSlug.includes(norm(m.team1)) || v.combinedSlug.includes(norm(m.team2))
+          )) tidsToFetch.add(v.tournamentId);
+        }
+      }
+      if (tidsToFetch.size > 0) {
+        await fetchEsportsOddsForTids([...tidsToFetch]);
+        liveNoOdds.forEach(m => {
+          if (m.odds) return;
+          const o = findOdds('esports', m.team1, m.team2);
+          if (o) { m.odds = o; oddsFound++; }
+        });
+      }
+    }
 
     const noOdds = result.filter(m => !m.odds).map(m => `${norm(m.team1)}v${norm(m.team2)}`);
     log('INFO', 'LOL', `${result.length} partidas (${live.length} live, ${upcoming.filter(m=>m.status==='draft').length} draft) | odds: ${oddsFound}/${result.length}${noOdds.length ? ` | sem match: ${noOdds.slice(0,3).join(', ')}` : ''}`);
