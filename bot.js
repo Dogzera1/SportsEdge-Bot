@@ -299,7 +299,7 @@ async function runAutoAnalysis() {
 
         log('INFO', 'AUTO', `Esports: ${match.team1} vs ${match.team2} (${match.league})`);
         const result = await autoAnalyzeMatch(esportsConfig.token, match);
-        analyzedMatches.set(matchKey, { ts: now, tipSent: prev?.tipSent || false, noEdge: !result?.tipMatch && !result?.fairOdds });
+        analyzedMatches.set(matchKey, { ts: now, tipSent: prev?.tipSent || false, noEdge: !result?.tipMatch });
 
         if (!result) continue;
         const hasRealOdds = !!(result.o?.t1 && parseFloat(result.o.t1) > 1);
@@ -349,20 +349,6 @@ async function runAutoAnalysis() {
           }
           analyzedMatches.set(matchKey, { ts: now, tipSent: true });
           log('INFO', 'AUTO-TIP', `Esports: ${tipTeam} @ ${tipOdd} (odds ${hasRealOdds ? 'reais' : 'estimadas'})`);
-        } else if (result.fairOdds && !prev?.tipSent && hasRealOdds) {
-          // Só envia odds de referência quando há mercado real — estimativas sem odds são ruído
-          const fo = result.fairOdds;
-          const fo1 = parseFloat(fo[2]).toFixed(2), fo2 = parseFloat(fo[4]).toFixed(2);
-          const fairMsg = `🎮 💡 *ODDS DE REFERÊNCIA*\n` +
-            `*${match.team1}* vs *${match.team2}*\n_${match.league}_\n\n` +
-            `• *${fo[1].trim()}:* *${fo1}*\n• *${fo[3].trim()}:* *${fo2}*\n\n` +
-            `💡 _Odds ACIMA desses valores = +EV_\n⚠️ _Aposte com responsabilidade._`;
-          for (const [userId, prefs] of subscribedUsers) {
-            if (!prefs.has('esports')) continue;
-            try { await sendDM(esportsConfig.token, userId, fairMsg); }
-            catch(e) { if (e.message?.includes('403')) subscribedUsers.delete(userId); }
-          }
-          analyzedMatches.set(matchKey, { ts: now, tipSent: true, noEdge: false });
         }
         await new Promise(r => setTimeout(r, 2000));
       }
@@ -1010,23 +996,25 @@ async function autoAnalyzeMatch(token, match) {
     }
 
     const tipResult = text.match(/TIP_ML:\s*([^@]+?)\s*@\s*([^|\]]+?)\s*\|EV:\s*([^|]+?)\s*\|STAKE:\s*([^|\]]+?)(?:\s*\|CONF:\s*(\w+))?(?:\]|$)/);
-    const fairOddsMatch = text.match(/FAIR_ODDS:([^=]+)=([^|]+)\|([^=]+)=([^\s\n\]]+)/);
     const hasRealOdds = !!(o?.t1 && parseFloat(o.t1) > 1);
 
     // ── Layer 3: Gates pós-IA ──
     // Só aplicamos os gates se há uma tip sugerida pela IA
-    let filteredTipResult = tipResult;
-    if (tipResult) {
-      const tipTeam  = tipResult[1].trim();
-      const tipOdd   = parseFloat(tipResult[2]);
-      const tipEV    = parseFloat(String(tipResult[3]).replace('%','').replace('+',''));
-      const tipConf  = (tipResult[5] || 'MÉDIA').trim().toUpperCase();
+    // Cópia mutável para permitir rebaixamento de confiança sem rejeição
+    let filteredTipResult = tipResult ? Array.from(tipResult) : null;
+    if (filteredTipResult) {
+      const tipTeam  = filteredTipResult[1].trim();
+      const tipOdd   = parseFloat(filteredTipResult[2]);
+      const tipEV    = parseFloat(String(filteredTipResult[3]).replace('%','').replace('+',''));
+      let   tipConf  = (filteredTipResult[5] || 'MÉDIA').trim().toUpperCase();
 
       // Gate 1: Confiança BAIXA → rejeitar sempre
       if (tipConf === 'BAIXA') {
         log('INFO', 'AUTO', `Gate confiança: ${match.team1} vs ${match.team2} → BAIXA confiança → rejeitado`);
         filteredTipResult = null;
       }
+      // Mantém tipConf sincronizado com o array mutável
+      const getConf = () => (filteredTipResult?.[5] || 'MÉDIA').trim().toUpperCase();
 
       // Gate 2: Odds fora da zona de valor (1.50 – 3.00)
       // Abaixo de 1.50: margem da casa come todo o EV; acima de 3.00: alta variância sem Pinnacle como referência
@@ -1040,15 +1028,22 @@ async function autoAnalyzeMatch(token, match) {
       }
 
       // Gate 3: Consenso de direção ML × IA
-      // Se o ML tem direção clara e discorda da IA → sinal conflitante → rejeitar
+      // Divergência = incerteza, não erro. Rebaixa para MÉDIA em vez de rejeitar.
+      // Raciocínio: a IA vê os mesmos dados + pode identificar padrões não-lineares.
       if (filteredTipResult && mlResult.direction && hasRealOdds && mlResult.score > 5) {
         const t1 = (match.team1 || '').toLowerCase();
         const tipTeamNorm = tipTeam.toLowerCase();
         const aiDirectionIsT1 = tipTeamNorm.includes(t1) || t1.includes(tipTeamNorm);
         const mlDirectionIsT1 = mlResult.direction === 't1';
         if (aiDirectionIsT1 !== mlDirectionIsT1) {
-          log('INFO', 'AUTO', `Gate consenso: ${match.team1} vs ${match.team2} → ML(${mlResult.direction}) ≠ IA(${tipTeam}) → sinais conflitantes → rejeitado`);
-          filteredTipResult = null;
+          const confAtual = getConf();
+          if (confAtual === 'ALTA') {
+            filteredTipResult[5] = 'MÉDIA';
+            log('INFO', 'AUTO', `Gate consenso: ${match.team1} vs ${match.team2} → ML(${mlResult.direction}) ≠ IA(${tipTeam}) → rebaixado ALTA→MÉDIA (incerteza)`);
+          } else {
+            // Já era MÉDIA com divergência ML — mantém mas anota incerteza no log
+            log('INFO', 'AUTO', `Gate consenso: ${match.team1} vs ${match.team2} → ML(${mlResult.direction}) ≠ IA(${tipTeam}) → incerteza ML×IA (conf MÉDIA mantida)`);
+          }
         }
       }
 
@@ -1068,7 +1063,7 @@ async function autoAnalyzeMatch(token, match) {
     }
 
     log('INFO', 'AUTO', `${match.team1} vs ${match.team2} | odds=${o?.t1||'N/A'} hasRealOdds=${hasRealOdds} tipMatch=${!!filteredTipResult} mlEdge=${mlResult.score.toFixed(1)}pp`);
-    return { text, tipMatch: filteredTipResult, fairOdds: fairOddsMatch, hasLiveStats, match, o, mlScore: mlResult.score };
+    return { text, tipMatch: filteredTipResult, hasLiveStats, match, o, mlScore: mlResult.score };
   } catch(e) {
     log('ERROR', 'AUTO', `Error for ${match.team1} vs ${match.team2}: ${e.message}`);
     return null;
@@ -1084,7 +1079,6 @@ function buildEsportsPrompt(match, game, gamesContext, o, enrichSection) {
   const t2 = match.team2 || match.participant2_name;
   const serieScore = `${match.score1 || 0}-${match.score2 || 0}`;
 
-  const isUpcoming = match.status === 'upcoming';
   let oddsSection = '';
   if (hasRealOdds) {
     const raw1 = 1 / parseFloat(o.t1);
@@ -1130,20 +1124,12 @@ function buildEsportsPrompt(match, game, gamesContext, o, enrichSection) {
     bookMarginNote = `AVISO: 1xBet tem margem de ${marginReal}% neste jogo. O de-juice REMOVE esta margem, mas NÃO corrige o viés da bookie. Para lucro real você precisa que sua probabilidade VERDADEIRA supere o de-juice por pelo menos ${minEdgePp}pp.`;
     deJuiced = `De-juice 1xBet: ${t1}=${dj1}% | ${t2}=${dj2}%\n   Para ter edge: sua P estimada deve superar de-juice em ≥${minEdgePp}pp E EV=(prob×odd-1) ≥ +${evThreshold}%.\n   Se a diferença for < ${minEdgePp}pp → SEM EDGE real (1xBet não é mercado sharp).`;
   } else {
-    deJuiced = isUpcoming
-      ? `Sem odds disponíveis. Tip só se vantagem clara (>${noOddsConviction}%) com pelo menos 2 sinais independentes confirmando.`
-      : `Sem odds — estime FAIR_ODDS=1/prob. Tip só se vantagem clara (>${noOddsConviction}%) com pelo menos 2 sinais independentes confirmando.`;
+    deJuiced = `Sem odds disponíveis. Tip só se vantagem clara (>${noOddsConviction}%) com pelo menos 2 sinais independentes confirmando.`;
   }
 
   const tipInstruction = hasRealOdds
     ? `[SOMENTE se EV ≥ +${evThreshold}% E confiança ALTA ou MÉDIA (NUNCA BAIXA) E pelo menos 2 sinais independentes confirmam: TIP_ML:[time]@[odd]|EV:[%]|STAKE:[u]|CONF:[ALTA/MÉDIA]]`
-    : isUpcoming
-      ? `[NÃO gere tip sem odds reais disponíveis para partidas pré-jogo]`
-      : `[SOMENTE se confiança ALTA ou MÉDIA E vantagem >${noOddsConviction}% por múltiplos sinais: TIP_ML:[time]@[fair_odd]|EV:estimado|STAKE:[u]|CONF:[ALTA/MÉDIA]]`;
-
-  const fairOddsLine = (!isUpcoming)
-    ? `FAIR_ODDS:${t1}=[X.XX]|${t2}=[X.XX]\n`
-    : '';
+    : `[NÃO gere tip sem odds reais disponíveis]`;
 
   return `Você é um analista de apostas LoL especializado. Sua função é encontrar edge REAL. "Sem edge" é sempre uma resposta válida e preferível a forçar uma tip ruim.
 
@@ -1173,8 +1159,8 @@ ANÁLISE (responda cada ponto):
    Mínimo 2 sinais para considerar tip.
 ${hasRealOdds ? '' : '   Virada possível se: gold diff <3k, scaling comp no perdedor, soul point ou baron pendente.\n'}
 RESPOSTA (máximo 200 palavras):
-P(${t1})=__% | P(${t2})=__% | ${hasRealOdds ? `EV(${t1})=[X%] | EV(${t2})=[X%]` : isUpcoming ? `Conf:[ALTA/MÉDIA/BAIXA] | Sinais:[N/5]` : `Fair: ${t1}=[X.XX] | ${t2}=[X.XX]`} | Conf:[ALTA/MÉDIA/BAIXA] | Sinais:[N/5]
-${fairOddsLine}${tipInstruction}`;
+P(${t1})=__% | P(${t2})=__% | ${hasRealOdds ? `EV(${t1})=[X%] | EV(${t2})=[X%]` : `Conf:[ALTA/MÉDIA/BAIXA]`} | Sinais:[N/5]
+${tipInstruction}`;
 }
 
 // ── Admin ──
@@ -1217,6 +1203,25 @@ async function handleAdmin(token, chatId, command) {
       txt += `${roiVal >= 0 ? '📈' : '📉'} ROI: *${roiVal >= 0 ? '+' : ''}${roiVal}%*\n`;
       txt += `💵 Profit: *${parseFloat(o.totalProfit || 0) >= 0 ? '+' : ''}${o.totalProfit || 0}u*\n`;
       txt += `📦 Volume: *${o.totalStaked || 0}u* | EV médio: *${o.avg_ev || 0}%*\n`;
+      // CLV — única métrica que indica edge real independente de variance
+      if (roi.clv) {
+        const clv = roi.clv;
+        const clvSign = clv.avg >= 0 ? '+' : '';
+        const clvEmoji = clv.avg > 1.5 ? '🟢' : clv.avg > 0 ? '🟡' : '🔴';
+        txt += `\n${clvEmoji} *CLV médio: ${clvSign}${clv.avg}%* _(${clv.count} tips)_\n`;
+        txt += `📐 CLV positivo: *${clv.positiveRate}%* das tips\n`;
+        if (clv.byPhase?.live?.count) {
+          const lv = clv.byPhase.live;
+          txt += `  ↳ Ao vivo: ${lv.avg >= 0 ? '+' : ''}${lv.avg}% (${lv.count} tips)\n`;
+        }
+        if (clv.byPhase?.preGame?.count) {
+          const pg = clv.byPhase.preGame;
+          txt += `  ↳ Pré-jogo: ${pg.avg >= 0 ? '+' : ''}${pg.avg}% (${pg.count} tips)\n`;
+        }
+        if (clv.avg < 0) txt += `  ⚠️ _CLV negativo: modelo pode não ter edge real_\n`;
+      } else {
+        txt += `\n📐 *CLV:* _aguardando tips com closing line registrada_\n`;
+      }
       if (roi.calibration?.length) {
         txt += '\n🎯 *Calibração por confiança:*\n';
         const confEmoji = { ALTA: '🟢', MÉDIA: '🟡', BAIXA: '🔴' };

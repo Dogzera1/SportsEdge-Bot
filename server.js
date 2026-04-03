@@ -52,6 +52,9 @@ const ESPORTS_ODDS_TTL = (parseInt(process.env.ESPORTS_ODDS_TTL_H || '') || 3) *
 // Tournament ID cache: refresh once per 24h (saves 2 req/dia)
 const TOURNAMENT_CACHE_TTL = 24 * 60 * 60 * 1000; // 24h
 
+// Per-batch timestamp: quando cada lote foi buscado pela última vez
+const batchLastFetchedTs = {}; // { batchIndex: timestamp }
+
 
 
 let lastAnalysisAt = null; // ISO timestamp of last successful auto-analysis cycle
@@ -352,7 +355,10 @@ async function fetchEsportsOdds() {
     }
 
     const { ok } = await fetchEsportsOddsOneBatch(batch, batchIndex, batches.length);
-    if (ok) lastEsportsOddsUpdate = now;
+    if (ok) {
+      lastEsportsOddsUpdate = now;
+      batchLastFetchedTs[batchIndex] = now;
+    }
   } catch(e) {
     log('ERROR', 'ODDS', `fetchEsportsOdds: ${e.message}`);
   } finally {
@@ -1410,10 +1416,15 @@ const server = http.createServer(async (req, res) => {
     const row = stmts.getROI.get(sport);
     const calibration = stmts.getCalibration.all(sport);
 
-    const tips = db.prepare("SELECT odds, stake, result, ev, is_live FROM tips WHERE sport = ? AND result IS NOT NULL").all(sport);
+    const tips = db.prepare("SELECT odds, stake, result, ev, is_live, clv_odds, open_odds FROM tips WHERE sport = ? AND result IS NOT NULL").all(sport);
     let totalStaked = 0, totalProfit = 0;
     const liveTips = { wins: 0, losses: 0, total: 0, profit: 0, staked: 0 };
     const preTips  = { wins: 0, losses: 0, total: 0, profit: 0, staked: 0 };
+
+    // CLV: calculado apenas em tips com clv_odds registrado
+    let clvSum = 0, clvCount = 0, clvPositive = 0;
+    const clvLive = { sum: 0, count: 0, positive: 0 };
+    const clvPre  = { sum: 0, count: 0, positive: 0 };
 
     for (const t of tips) {
       const stake = parseFloat(t.stake) || 1;
@@ -1426,10 +1437,26 @@ const server = http.createServer(async (req, res) => {
       bucket.staked += stake;
       bucket.profit += profit;
       if (t.result === 'win') bucket.wins++; else bucket.losses++;
+
+      // CLV = (tipOdds / closingOdds - 1) × 100 → positivo = compramos melhor que o mercado fechou
+      const clvOdds = parseFloat(t.clv_odds);
+      if (clvOdds > 1) {
+        const clv = (odds / clvOdds - 1) * 100;
+        clvSum += clv;
+        clvCount++;
+        if (clv > 0) clvPositive++;
+        const cb = t.is_live ? clvLive : clvPre;
+        cb.sum += clv; cb.count++; if (clv > 0) cb.positive++;
+      }
     }
 
     const roi = totalStaked > 0 ? ((totalProfit / totalStaked) * 100).toFixed(2) : '0.00';
     const calcBucketROI = b => b.staked > 0 ? ((b.profit / b.staked) * 100).toFixed(2) : '0.00';
+    const calcCLV = c => c.count > 0 ? {
+      avg: parseFloat((c.sum / c.count).toFixed(2)),
+      positiveRate: Math.round(c.positive / c.count * 100),
+      count: c.count
+    } : null;
 
     // Dados da banca em reais
     const bk = stmts.getBankroll.get();
@@ -1453,6 +1480,12 @@ const server = http.createServer(async (req, res) => {
         live:    { ...liveTips, roi: calcBucketROI(liveTips) },
         preGame: { ...preTips,  roi: calcBucketROI(preTips)  }
       },
+      clv: clvCount > 0 ? {
+        avg: parseFloat((clvSum / clvCount).toFixed(2)),
+        positiveRate: Math.round(clvPositive / clvCount * 100),
+        count: clvCount,
+        byPhase: { live: calcCLV(clvLive), preGame: calcCLV(clvPre) }
+      } : null,
       banca: bancaInfo
     });
     return;
@@ -1660,6 +1693,56 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
+// ── Re-fetch proativo de odds stale para partidas próximas (lotes tardios) ──
+// Problema: lotes 4-6 podem ficar 15-18h sem refresh no round-robin de 3h.
+// Solução: a cada 1h verifica se há odds > 6h no cache E partidas nas próximas 8h.
+// Se sim, força um ciclo imediato sem gastar chamada extra além do round-robin normal.
+let staleOddsCheckTs = 0;
+async function checkStaleOddsForUpcoming() {
+  if (!ODDSPAPI_KEY) return;
+  if (esportsOddsFetching) return;
+  const now = Date.now();
+  if (now - staleOddsCheckTs < 60 * 60 * 1000) return; // no máximo 1x/h
+  if (now < esportsBackoffUntil) return;
+  staleOddsCheckTs = now;
+
+  const SIX_HOURS = 6 * 60 * 60 * 1000;
+  const EIGHT_HOURS = 8 * 60 * 60 * 1000;
+
+  // Verifica se alguma entrada do cache de odds está > 6h
+  let hasStale = false;
+  for (const [key, entry] of Object.entries(oddsCache)) {
+    if (!key.startsWith('esports_')) continue;
+    if (entry.ts && (now - entry.ts) > SIX_HOURS) { hasStale = true; break; }
+  }
+  if (!hasStale) return;
+
+  // Verifica se há partidas nas próximas 8h — só vale re-fetch se há jogo iminente
+  let hasUpcoming = false;
+  try {
+    const r = await httpGet(`http://127.0.0.1:${PORT}/lol-matches`).catch(() => null);
+    if (r && r.status === 200) {
+      const matches = safeParse(r.body, []);
+      if (Array.isArray(matches)) {
+        hasUpcoming = matches.some(m => {
+          const t = m.time ? new Date(m.time).getTime() : 0;
+          return t > now && t - now < EIGHT_HOURS;
+        });
+      }
+    }
+  } catch(_) {}
+
+  if (!hasUpcoming) return;
+
+  log('INFO', 'ODDS', 'Odds > 6h detectadas com partidas nas próximas 8h — forçando re-fetch adicional');
+  const saved = lastEsportsOddsUpdate;
+  lastEsportsOddsUpdate = 0; // bypass TTL para este ciclo
+  await fetchEsportsOdds().catch(e => {
+    log('ERROR', 'ODDS', `Stale re-fetch falhou: ${e.message}`);
+    lastEsportsOddsUpdate = saved; // restaura se falhou
+  });
+}
+
 // ── Sync de stats pro via PandaScore ──
 async function syncProStats() {
   if (!PANDASCORE_TOKEN) return { ok: false, error: 'sem token' };
@@ -1759,6 +1842,9 @@ server.listen(PORT, '0.0.0.0', () => {
   setInterval(() => {
     fetchEsportsOdds();
   }, 15 * 60 * 1000); // Mantém o cache quente a cada 15 min
+
+  // Stale odds check: 1x/h, força re-fetch se odds > 6h com partidas próximas
+  setInterval(() => checkStaleOddsForUpcoming().catch(() => {}), 60 * 60 * 1000);
 
   // Sync inicial de stats pro + job recorrente a cada 12h
   if (PANDASCORE_TOKEN) {
