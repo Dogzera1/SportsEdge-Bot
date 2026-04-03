@@ -283,6 +283,7 @@ function ingestEsportsFixtures(allFixtures) {
       fixtureId: f.fixtureId || null,
       tournamentId: f.tournamentId || null,
     };
+    log('DEBUG', 'ODDS', `Ingest: slug="${norm(combinedSlug)}" t1="${p1Name}" t2="${p2Name}" fid=${f.fixtureId||'?'}`);
     cachedCount++;
   }
   return cachedCount;
@@ -533,6 +534,8 @@ const LOL_ALIASES = {
   'mythesports': ['myth'],
   'onceuponateam': ['ouat'],
   // NACL
+  'ccgesports': ['ccg', 'ccgesport'],
+  'supernova': ['snv', 'supernovaesports', 'supernovagg'],
   'doradogaming': ['dorado'],
   'nrgesports': ['nrg'],
   'citadelgaming': ['citadel'],
