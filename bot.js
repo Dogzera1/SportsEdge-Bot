@@ -1142,8 +1142,8 @@ ${highFluxWarning ? `\n${highFluxWarning}` : ''}${lineMovementWarning ? `\n${lin
 
 REGRAS OBRIGATÓRIAS (não negociáveis):
 • BAIXA confiança = NUNCA tip, mesmo com EV positivo
-• EV positivo sozinho NÃO é suficiente — precisa de sinais múltiplos confirmando
-• Se apenas 1 sinal aponta para o time (ex: só forma, sem H2H ou draft) → sem tip
+• EV positivo sozinho NÃO é suficiente — precisa de ao menos 1 sinal confirmando
+• Dados ausentes (forma, H2H) = use o que está disponível; ausência de dado não é motivo para bloquear análise
 • Se há dúvida real → sem tip. O custo de não apostar é zero; o custo de apostar errado é real.
 
 ANÁLISE (responda cada ponto):
@@ -1156,7 +1156,7 @@ ANÁLISE (responda cada ponto):
    [ ] Draft/composição claramente superior
    [ ] Dados ao vivo confirmam (gold diff, objetivos)
    [ ] Odds com movimento favorável (sharp money)
-   Mínimo 2 sinais para considerar tip.
+   Mínimo 1 sinal forte OU 2 sinais fracos para considerar tip. Se dados estiverem ausentes, analise os que existem.
 ${hasRealOdds ? '' : '   Virada possível se: gold diff <3k, scaling comp no perdedor, soul point ou baron pendente.\n'}
 RESPOSTA (máximo 200 palavras):
 P(${t1})=__% | P(${t2})=__% | ${hasRealOdds ? `EV(${t1})=[X%] | EV(${t2})=[X%]` : `Conf:[ALTA/MÉDIA/BAIXA]`} | Sinais:[N/5]
