@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const initDatabase = require('./lib/database');
 const { SPORTS, getSportById, getSportByToken, getTokenToSportMap } = require('./lib/sports');
-const { log, calcKelly, norm, fmtDate, fmtDateTime, fmtDuration, safeParse } = require('./lib/utils');
+const { log, calcKelly, calcKellyFraction, norm, fmtDate, fmtDateTime, fmtDuration, safeParse } = require('./lib/utils');
 const { esportsPreFilter } = require('./lib/ml');
 
 const SERVER = '127.0.0.1';
@@ -308,18 +308,25 @@ async function runAutoAnalysis() {
           const tipTeam = result.tipMatch[1].trim();
           const tipOdd = result.tipMatch[2].trim();
           const tipEV = result.tipMatch[3].trim();
-          const tipStake = calcKelly(tipEV, tipOdd);
+          const tipConf = (result.tipMatch[5] || 'MÉDIA').trim().toUpperCase();
+          // Kelly adaptado por confiança:
+          // ALTA → ¼ Kelly (padrão), MÉDIA → ⅙ Kelly (mais conservador sem Pinnacle como referência)
+          const kellyFraction = tipConf === 'ALTA' ? 0.25 : 1/6;
+          const tipStake = calcKellyFraction(tipEV, tipOdd, kellyFraction);
           const gameIcon = '🎮';
           const oddsLabel = hasRealOdds ? '' : '\n⚠️ _Odds estimadas (sem mercado disponível)_';
+          const mlEdgeLabel = result.mlScore > 0 ? ` | ML: ${result.mlScore.toFixed(1)}pp` : '';
 
           await serverPost('/record-tip', {
             matchId: String(match.id), eventName: match.league,
             p1: match.team1, p2: match.team2, tipParticipant: tipTeam,
             odds: tipOdd, ev: tipEV, stake: tipStake,
-            confidence: result.tipMatch[5]?.trim() || 'MÉDIA', isLive: result.hasLiveStats
+            confidence: tipConf, isLive: result.hasLiveStats
           }, 'esports');
 
           const isDraft = match.status === 'draft';
+          const kellyLabel = tipConf === 'ALTA' ? '¼ Kelly' : '⅙ Kelly';
+          const confEmoji = { ALTA: '🟢', MÉDIA: '🟡' }[tipConf] || '🟡';
           const analysisLabel = result.hasLiveStats
             ? '📊 Baseado em dados ao vivo'
             : isDraft
@@ -328,7 +335,8 @@ async function runAutoAnalysis() {
           const tipMsg = `${gameIcon} 💰 *TIP ML AUTOMÁTICA*\n` +
             `*${match.team1}* ${match.score1}-${match.score2} *${match.team2}*\n\n` +
             `🎯 Aposta: *${tipTeam}* ML @ *${tipOdd}*\n` +
-            `📈 EV: *${tipEV}*\n💵 Stake: *${tipStake}* _(¼ Kelly)_\n` +
+            `📈 EV: *${tipEV}*\n💵 Stake: *${tipStake}* _(${kellyLabel})_\n` +
+            `${confEmoji} Confiança: *${tipConf}*${mlEdgeLabel}\n` +
             `📋 ${match.league}\n` +
             `_${analysisLabel}_` +
             `${oddsLabel}\n\n` +
@@ -421,14 +429,19 @@ async function runAutoAnalysis() {
             const tipTeam = result.tipMatch[1].trim();
             const tipOdd = result.tipMatch[2].trim();
             const tipEV = result.tipMatch[3].trim();
-            const tipStake = calcKelly(tipEV, tipOdd);
+            const tipConf = (result.tipMatch[5] || 'MÉDIA').trim().toUpperCase();
+            const kellyFraction = tipConf === 'ALTA' ? 0.25 : 1/6;
+            const tipStake = calcKellyFraction(tipEV, tipOdd, kellyFraction);
             const gameIcon = '🎮';
+            const confEmoji = { ALTA: '🟢', MÉDIA: '🟡' }[tipConf] || '🟡';
+            const kellyLabel = tipConf === 'ALTA' ? '¼ Kelly' : '⅙ Kelly';
+            const mlEdgeLabel = result.mlScore > 0 ? ` | ML: ${result.mlScore.toFixed(1)}pp` : '';
 
             await serverPost('/record-tip', {
               matchId: String(match.id), eventName: match.league,
               p1: match.team1, p2: match.team2, tipParticipant: tipTeam,
               odds: tipOdd, ev: tipEV, stake: tipStake,
-              confidence: result.tipMatch[5]?.trim() || 'MÉDIA', isLive: false
+              confidence: tipConf, isLive: false
             }, 'esports');
 
             const imminentNote = isImminentMatch ? `⏰ _Odds atualizadas agora (< 2h para o jogo)_\n` : '';
@@ -436,7 +449,8 @@ async function runAutoAnalysis() {
               `*${match.team1}* vs *${match.team2}*\n📋 ${match.league}\n` +
               (match.time ? `🕐 Início: *${matchTime}* (BRT)\n` : '') +
               `\n🎯 Aposta: *${tipTeam}* ML @ *${tipOdd}*\n` +
-              `📈 EV: *${tipEV}*\n💵 Stake: *${tipStake}* _(¼ Kelly)_\n` +
+              `📈 EV: *${tipEV}*\n💵 Stake: *${tipStake}* _(${kellyLabel})_\n` +
+              `${confEmoji} Confiança: *${tipConf}*${mlEdgeLabel}\n` +
               `${imminentNote}` +
               `📋 _Formato Bo1 — análise por forma e H2H (draft não disponível antes do início)_\n\n` +
               `⚠️ _Aposte com responsabilidade._`;
@@ -896,10 +910,12 @@ async function autoAnalyzeMatch(token, match) {
     const hasLiveStats = gamesContext.includes('AO VIVO');
     const enrichSection = buildEnrichmentSection(match, enrich);
 
-    // Pré-filtro ML Local: se o modelo quantitativo não detectar chance de +EV matemático, pulamos o Claude (economia de tokens).
+    // ── Layer 1: Pré-filtro ML ──
+    // Retorna { pass, direction, score, t1Edge, t2Edge }
     const mlPrefilterOn = (process.env.LOL_ML_PREFILTER ?? 'true') !== 'false';
-    if (mlPrefilterOn && !esportsPreFilter(match, o, enrich, hasLiveStats, gamesContext)) {
-      log('INFO', 'AUTO', `Pré-filtro ML: matemática sem borda detectada para ${match.team1} vs ${match.team2}. Ignorando IA subjetiva.`);
+    const mlResult = esportsPreFilter(match, o, enrich, hasLiveStats, gamesContext);
+    if (mlPrefilterOn && !mlResult.pass) {
+      log('INFO', 'AUTO', `Pré-filtro ML: edge insuficiente (${mlResult.score.toFixed(1)}pp) para ${match.team1} vs ${match.team2}. Pulando IA.`);
       return null;
     }
 
@@ -920,8 +936,63 @@ async function autoAnalyzeMatch(token, match) {
     const tipResult = text.match(/TIP_ML:\s*([^@]+?)\s*@\s*([^|\]]+?)\s*\|EV:\s*([^|]+?)\s*\|STAKE:\s*([^|\]]+?)(?:\s*\|CONF:\s*(\w+))?(?:\]|$)/);
     const fairOddsMatch = text.match(/FAIR_ODDS:([^=]+)=([^|]+)\|([^=]+)=([^\s\n\]]+)/);
     const hasRealOdds = !!(o?.t1 && parseFloat(o.t1) > 1);
-    log('INFO', 'AUTO', `${match.team1} vs ${match.team2} | odds=${o?.t1||'N/A'} hasRealOdds=${hasRealOdds} tipMatch=${!!tipResult}`);
-    return { text, tipMatch: tipResult, fairOdds: fairOddsMatch, hasLiveStats, match, o };
+
+    // ── Layer 3: Gates pós-IA ──
+    // Só aplicamos os gates se há uma tip sugerida pela IA
+    let filteredTipResult = tipResult;
+    if (tipResult) {
+      const tipTeam  = tipResult[1].trim();
+      const tipOdd   = parseFloat(tipResult[2]);
+      const tipEV    = parseFloat(String(tipResult[3]).replace('%','').replace('+',''));
+      const tipConf  = (tipResult[5] || 'MÉDIA').trim().toUpperCase();
+
+      // Gate 1: Confiança BAIXA → rejeitar sempre
+      if (tipConf === 'BAIXA') {
+        log('INFO', 'AUTO', `Gate confiança: ${match.team1} vs ${match.team2} → BAIXA confiança → rejeitado`);
+        filteredTipResult = null;
+      }
+
+      // Gate 2: Odds fora da zona de valor (1.50 – 3.00)
+      // Abaixo de 1.50: margem da casa come todo o EV; acima de 3.00: alta variância sem Pinnacle como referência
+      if (filteredTipResult && hasRealOdds) {
+        const MIN_ODDS = parseFloat(process.env.LOL_MIN_ODDS ?? '1.50');
+        const MAX_ODDS = parseFloat(process.env.LOL_MAX_ODDS ?? '3.00');
+        if (tipOdd < MIN_ODDS || tipOdd > MAX_ODDS) {
+          log('INFO', 'AUTO', `Gate odds: ${match.team1} vs ${match.team2} → odd ${tipOdd} fora do range [${MIN_ODDS}, ${MAX_ODDS}] → rejeitado`);
+          filteredTipResult = null;
+        }
+      }
+
+      // Gate 3: Consenso de direção ML × IA
+      // Se o ML tem direção clara e discorda da IA → sinal conflitante → rejeitar
+      if (filteredTipResult && mlResult.direction && hasRealOdds && mlResult.score > 5) {
+        const t1 = (match.team1 || '').toLowerCase();
+        const tipTeamNorm = tipTeam.toLowerCase();
+        const aiDirectionIsT1 = tipTeamNorm.includes(t1) || t1.includes(tipTeamNorm);
+        const mlDirectionIsT1 = mlResult.direction === 't1';
+        if (aiDirectionIsT1 !== mlDirectionIsT1) {
+          log('INFO', 'AUTO', `Gate consenso: ${match.team1} vs ${match.team2} → ML(${mlResult.direction}) ≠ IA(${tipTeam}) → sinais conflitantes → rejeitado`);
+          filteredTipResult = null;
+        }
+      }
+
+      // Gate 4: EV mínimo real (re-verificação)
+      // Threshold configurável, default 5% (antes era 2% — insuficiente contra margem 1xBet ~7%)
+      if (filteredTipResult && hasRealOdds) {
+        const evMin = parseFloat(process.env.LOL_EV_THRESHOLD ?? '5');
+        if (!isNaN(tipEV) && tipEV < evMin) {
+          log('INFO', 'AUTO', `Gate EV: ${match.team1} vs ${match.team2} → EV ${tipEV}% < mínimo ${evMin}% → rejeitado`);
+          filteredTipResult = null;
+        }
+      }
+
+      if (filteredTipResult) {
+        log('INFO', 'AUTO', `Tip aprovada por todos os gates: ${tipTeam} @ ${tipOdd} | EV ${tipEV}% | Conf:${tipConf} | ML-edge:${mlResult.score.toFixed(1)}pp`);
+      }
+    }
+
+    log('INFO', 'AUTO', `${match.team1} vs ${match.team2} | odds=${o?.t1||'N/A'} hasRealOdds=${hasRealOdds} tipMatch=${!!filteredTipResult} mlEdge=${mlResult.score.toFixed(1)}pp`);
+    return { text, tipMatch: filteredTipResult, fairOdds: fairOddsMatch, hasLiveStats, match, o, mlScore: mlResult.score };
   } catch(e) {
     log('ERROR', 'AUTO', `Error for ${match.team1} vs ${match.team2}: ${e.message}`);
     return null;
@@ -966,33 +1037,58 @@ function buildEsportsPrompt(match, game, gamesContext, o, enrichSection) {
     ? `🚨 ATENÇÃO — ESTADO DE ALTO FLUXO: ${isEarlyGame ? `Jogo com apenas ${gameMinute}min (muito cedo para análise confiável).` : ''} ${hasRecentObjective ? 'Objetivo maior recente detectado — estado do jogo pode ter mudado completamente.' : ''} Com delay de ~90s, o que você está vendo já pode ser história. Confiança máxima neste contexto: BAIXA.`
     : '';
 
-  const evThreshold = parseFloat(process.env.LOL_EV_THRESHOLD ?? '2');
-  const pinnacleMargin = parseFloat(process.env.LOL_PINNACLE_MARGIN ?? '5');
-  const noOddsConviction = parseInt(process.env.LOL_NO_ODDS_CONVICTION ?? '65');
+  const evThreshold = parseFloat(process.env.LOL_EV_THRESHOLD ?? '5');
+  const minEdgePp   = parseFloat(process.env.LOL_PINNACLE_MARGIN ?? '8');
+  const noOddsConviction = parseInt(process.env.LOL_NO_ODDS_CONVICTION ?? '70');
+
+  // Calcula margem real da 1xBet para incluir no prompt
+  let bookMarginNote = '';
+  let deJuiced = '';
+  if (hasRealOdds) {
+    const r1 = 1 / parseFloat(o.t1), r2 = 1 / parseFloat(o.t2);
+    const or = r1 + r2;
+    const marginReal = ((or - 1) * 100).toFixed(1);
+    const dj1 = (r1 / or * 100).toFixed(1);
+    const dj2 = (r2 / or * 100).toFixed(1);
+    bookMarginNote = `AVISO: 1xBet tem margem de ${marginReal}% neste jogo. O de-juice REMOVE esta margem, mas NÃO corrige o viés da bookie. Para lucro real você precisa que sua probabilidade VERDADEIRA supere o de-juice por pelo menos ${minEdgePp}pp.`;
+    deJuiced = `De-juice 1xBet: ${t1}=${dj1}% | ${t2}=${dj2}%\n   Para ter edge: sua P estimada deve superar de-juice em ≥${minEdgePp}pp E EV=(prob×odd-1) ≥ +${evThreshold}%.\n   Se a diferença for < ${minEdgePp}pp → SEM EDGE real (1xBet não é mercado sharp).`;
+  } else {
+    deJuiced = `Sem odds — estime FAIR_ODDS=1/prob. Tip só se vantagem clara (>${noOddsConviction}%) com pelo menos 2 sinais independentes confirmando.`;
+  }
+
   const tipInstruction = hasRealOdds
-    ? `[Se EV >= +${evThreshold}% E confiança não foi rebaixada para BAIXA por alto fluxo: TIP_ML:[time]@[odd]|EV:[%]|STAKE:[u]|CONF:[ALTA/MÉDIA/BAIXA]]`
-    : `[Se confiança ALTA ou MÉDIA e sem rebaixamento por alto fluxo: TIP_ML:[time]@[fair_odd]|EV:estimado|STAKE:[u]|CONF:[ALTA/MÉDIA]]`;
+    ? `[SOMENTE se EV ≥ +${evThreshold}% E confiança ALTA ou MÉDIA (NUNCA BAIXA) E pelo menos 2 sinais independentes confirmam: TIP_ML:[time]@[odd]|EV:[%]|STAKE:[u]|CONF:[ALTA/MÉDIA]]`
+    : `[SOMENTE se confiança ALTA ou MÉDIA E vantagem >${noOddsConviction}% por múltiplos sinais: TIP_ML:[time]@[fair_odd]|EV:estimado|STAKE:[u]|CONF:[ALTA/MÉDIA]]`;
 
-  const deJuiced = hasRealOdds
-    ? `1xBet de-juiced: ${t1}=${(1/parseFloat(o.t1)/(1/parseFloat(o.t1)+1/parseFloat(o.t2))*100).toFixed(1)}% | ${t2}=${(1/parseFloat(o.t2)/(1/parseFloat(o.t1)+1/parseFloat(o.t2))*100).toFixed(1)}% (1xBet não é sharp — oportunidades existem)`
-    : `Sem odds — estime FAIR_ODDS=1/prob`;
-
-  return `Analista de apostas LoL. Identifique edge REAL. "Sem edge" é resposta válida.
+  return `Você é um analista de apostas LoL especializado. Sua função é encontrar edge REAL. "Sem edge" é sempre uma resposta válida e preferível a forçar uma tip ruim.
 
 PARTIDA: ${t1} vs ${t2} | ${match.league || 'Esports'} | ${match.format || 'Bo1/Bo3'} | ${match.status}
 Placar: ${serieScore} | ${oddsSection}
+${bookMarginNote ? `\n⚠️ ${bookMarginNote}` : ''}
 ${gamesContext ? `\nDADOS AO VIVO:\n${gamesContext}` : ''}
 FORMA/H2H:${enrichSection}
 ${highFluxWarning ? `\n${highFluxWarning}` : ''}${lineMovementWarning ? `\n${lineMovementWarning}` : ''}
-ANÁLISE:
-1. Draft/Meta: qual time tem melhor composição? Early/Late? Counter-pick decisivo?
-   → P(${t1})=__% | P(${t2})=__% | Justificativa: [1 frase]
-2. Edge: ${hasRealOdds
-    ? `${deJuiced}\n   Se diff < ${pinnacleMargin}pp → SEM EDGE. Se diff ≥ ${pinnacleMargin}pp → EV=(prob×odd)-1. Tip só se EV ≥ +${evThreshold}%.`
-    : `${deJuiced}\n   Tip só se vantagem clara (>${noOddsConviction}%).`}
-${hasRealOdds ? '' : '   Virada possível se: gold diff <3k, scaling comp no perdedor, soul point ou baron pendente.'}
-RESPOSTA (máx 200 palavras):
-P(${t1})=__% | P(${t2})=__% | ${hasRealOdds ? `EV(${t1})=[X%] | EV(${t2})=[X%]` : `Fair: ${t1}=[X.XX] | ${t2}=[X.XX]`} | Conf:[ALTA/MÉDIA/BAIXA]
+
+REGRAS OBRIGATÓRIAS (não negociáveis):
+• BAIXA confiança = NUNCA tip, mesmo com EV positivo
+• EV positivo sozinho NÃO é suficiente — precisa de sinais múltiplos confirmando
+• Se apenas 1 sinal aponta para o time (ex: só forma, sem H2H ou draft) → sem tip
+• Se há dúvida real → sem tip. O custo de não apostar é zero; o custo de apostar errado é real.
+
+ANÁLISE (responda cada ponto):
+1. Draft/Composição: qual time tem melhor comp? Early/late game? Counter-pick decisivo?
+   → P(${t1})=__% | P(${t2})=__% | Justificativa: [1 frase objetiva]
+2. Edge quantitativo: ${deJuiced}
+3. Sinais independentes que confirmam (marque os que se aplicam):
+   [ ] Forma recente clara (≥60% winrate, diferença >15pp)
+   [ ] H2H favorável (≥60% de vitórias no confronto direto)
+   [ ] Draft/composição claramente superior
+   [ ] Dados ao vivo confirmam (gold diff, objetivos)
+   [ ] Odds com movimento favorável (sharp money)
+   Mínimo 2 sinais para considerar tip.
+${hasRealOdds ? '' : '   Virada possível se: gold diff <3k, scaling comp no perdedor, soul point ou baron pendente.\n'}
+RESPOSTA (máximo 200 palavras):
+P(${t1})=__% | P(${t2})=__% | ${hasRealOdds ? `EV(${t1})=[X%] | EV(${t2})=[X%]` : `Fair: ${t1}=[X.XX] | ${t2}=[X.XX]`} | Conf:[ALTA/MÉDIA/BAIXA] | Sinais:[N/5]
 FAIR_ODDS:${t1}=[X.XX]|${t2}=[X.XX]
 ${tipInstruction}`;
 }
@@ -1015,11 +1111,21 @@ async function handleAdmin(token, chatId, command) {
         serverGet('/tips-history?limit=10&filter=settled', sport).catch(() => [])
       ]);
       const o = roi.overall || {};
+      const bk = roi.banca || {};
       const wins = o.wins || 0, losses = o.losses || 0, total = o.total || 0;
       const pending = total - wins - losses;
       const wr = total > 0 ? Math.round((wins / total) * 100) : 0;
       const roiVal = parseFloat(o.roi || 0);
       let txt = `📊 *ESTATÍSTICAS ${sport.toUpperCase()}*\n\n`;
+      // Banca
+      if (bk.currentBanca !== undefined) {
+        const profitR = bk.profitReais || 0;
+        const growthPct = bk.growthPct || 0;
+        txt += `💰 *Banca: R$${bk.currentBanca.toFixed(2)}*`;
+        txt += ` (inicial: R$${(bk.initialBanca || 100).toFixed(2)})\n`;
+        txt += `${profitR >= 0 ? '📈' : '📉'} Resultado: *${profitR >= 0 ? '+' : ''}R$${profitR.toFixed(2)}* (${growthPct >= 0 ? '+' : ''}${growthPct}%)\n`;
+        txt += `🎲 Valor da unidade: *R$${(bk.unitValue || 1).toFixed(2)}*\n\n`;
+      }
       txt += `Total de tips: *${total}*\n`;
       txt += `✅ Ganhas: *${wins}* | ❌ Perdidas: *${losses}*`;
       if (pending > 0) txt += ` | ⏳ Pendentes: *${pending}*`;
@@ -1039,7 +1145,8 @@ async function handleAdmin(token, chatId, command) {
         history.slice(0, 8).forEach(t => {
           const res = t.result === 'win' ? '✅' : '❌';
           const date = (t.sent_at || '').slice(0, 10);
-          txt += `${res} ${t.tip_participant || '?'} @ ${t.odds} _(${date})_\n`;
+          const pr = t.profit_reais != null ? ` (${t.profit_reais >= 0 ? '+' : ''}R$${parseFloat(t.profit_reais).toFixed(2)})` : '';
+          txt += `${res} ${t.tip_participant || '?'} @ ${t.odds}${pr} _(${date})_\n`;
         });
       }
       await send(token, chatId, txt);
@@ -1419,9 +1526,15 @@ async function poll(token, sport) {
             try {
               const roi = await serverGet('/roi', sport);
               const o = roi.overall || {};
+              const bk = roi.banca || {};
               const wins = o.wins || 0, total = o.total || 0;
               const wr = total > 0 ? Math.round((wins / total) * 100) : 0;
               let txt = `📊 *${config.name} — Performance*\n\n`;
+              if (bk.currentBanca !== undefined) {
+                const profitR = bk.profitReais || 0;
+                txt += `💰 *Banca: R$${bk.currentBanca.toFixed(2)}* (${profitR >= 0 ? '+' : ''}R$${profitR.toFixed(2)})\n`;
+                txt += `🎲 1u = R$${(bk.unitValue || 1).toFixed(2)}\n\n`;
+              }
               txt += `Tips registradas: *${total}*\n`;
               txt += `✅ Ganhas: *${wins}* | ❌ Perdidas: *${o.losses || 0}*\n`;
               txt += `🎯 Win Rate: *${wr}%*\n`;
@@ -1436,6 +1549,7 @@ async function poll(token, sport) {
                 serverGet('/tips-history?limit=10&filter=settled', sport).catch(() => [])
               ]);
               const o = roi.overall || {};
+              const bk = roi.banca || {};
               const wins = o.wins || 0, losses = o.losses || 0, total = o.total || 0;
               const pending = total - wins - losses;
               const wr = total > 0 ? Math.round((wins / total) * 100) : 0;
@@ -1445,6 +1559,16 @@ async function poll(token, sport) {
 
               let txt = `📊 *TRACKING DE TIPS — ${config.name}*\n`;
               txt += `━━━━━━━━━━━━━━━━\n\n`;
+
+              // Bloco de banca
+              if (bk.currentBanca !== undefined) {
+                const profitR = bk.profitReais || 0;
+                const growthPct = bk.growthPct || 0;
+                txt += `💰 *BANCA*\n`;
+                txt += `Inicial: R$${(bk.initialBanca || 100).toFixed(2)} → Atual: *R$${bk.currentBanca.toFixed(2)}*\n`;
+                txt += `${profitR >= 0 ? '📈' : '📉'} ${profitR >= 0 ? '+' : ''}R$${profitR.toFixed(2)} (${growthPct >= 0 ? '+' : ''}${growthPct}%)\n`;
+                txt += `🎲 1 unidade = *R$${(bk.unitValue || 1).toFixed(2)}*\n\n`;
+              }
 
               if (total === 0) {
                 txt += `_Nenhuma tip registrada ainda._\n`;
@@ -1496,7 +1620,8 @@ async function poll(token, sport) {
                     const res = t.result === 'win' ? '✅' : t.result === 'loss' ? '❌' : '⏳';
                     const name = t.tip_participant || '?';
                     const date = (t.sent_at || '').slice(0, 10);
-                    txt += `${res} *${name}* @ ${t.odds} _(${date})_\n`;
+                    const pr = t.profit_reais != null ? ` (${t.profit_reais >= 0 ? '+' : ''}R$${parseFloat(t.profit_reais).toFixed(2)})` : '';
+                    txt += `${res} *${name}* @ ${t.odds}${pr} _(${date})_\n`;
                   });
                 }
               }
@@ -1538,6 +1663,7 @@ async function poll(token, sport) {
                   serverGet('/tips-history?limit=10&filter=settled', s).catch(() => [])
                 ]);
                 const o = roi.overall || {};
+                const bk = roi.banca || {};
                 const wins = o.wins || 0, losses = o.losses || 0, total = o.total || 0;
                 const pending = total - wins - losses;
                 const wr = total > 0 ? Math.round((wins / total) * 100) : 0;
@@ -1546,6 +1672,11 @@ async function poll(token, sport) {
                 const roiEmoji = roiVal > 0 ? '📈' : roiVal < 0 ? '📉' : '➡️';
                 let txt = `📊 *TRACKING DE TIPS — ${config.name}*\n`;
                 txt += `━━━━━━━━━━━━━━━━\n\n`;
+                if (bk.currentBanca !== undefined) {
+                  const profitR = bk.profitReais || 0;
+                  txt += `💰 *Banca: R$${bk.currentBanca.toFixed(2)}* (${profitR >= 0 ? '+' : ''}R$${profitR.toFixed(2)})\n`;
+                  txt += `🎲 1u = R$${(bk.unitValue || 1).toFixed(2)}\n\n`;
+                }
                 if (total === 0) {
                   txt += `_Nenhuma tip registrada ainda._\n`;
                   txt += `As tips automáticas são gravadas assim que enviadas.`;
@@ -1567,7 +1698,8 @@ async function poll(token, sport) {
                     txt += `\n📋 *Últimas tips:*\n`;
                     history.slice(0, 5).forEach(t => {
                       const res = t.result === 'win' ? '✅' : t.result === 'loss' ? '❌' : '⏳';
-                      txt += `${res} *${t.tip_participant||'?'}* @ ${t.odds} _(${(t.sent_at||'').slice(0,10)})_\n`;
+                      const pr = t.profit_reais != null ? ` (${t.profit_reais >= 0 ? '+' : ''}R$${parseFloat(t.profit_reais).toFixed(2)})` : '';
+                      txt += `${res} *${t.tip_participant||'?'}* @ ${t.odds}${pr} _(${(t.sent_at||'').slice(0,10)})_\n`;
                     });
                   }
                 }

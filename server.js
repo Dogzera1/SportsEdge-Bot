@@ -1321,13 +1321,23 @@ const server = http.createServer(async (req, res) => {
         const t = safeParse(body, {});
         if (!t.matchId) { sendJson(res, { error: 'Missing matchId' }, 400); return; }
         const isLive = t.isLive ? 1 : 0;
-        stmts.insertTip.run({
+        const result = stmts.insertTip.run({
           sport, matchId: String(t.matchId), eventName: t.eventName || '',
           p1: t.p1 || t.team1 || t.fighter1 || '', p2: t.p2 || t.team2 || t.fighter2 || '',
           tipParticipant: t.tipParticipant || t.tipTeam || '', odds: parseFloat(t.odds) || 0,
           ev: parseFloat(t.ev) || 0, stake: String(t.stake || ''), confidence: t.confidence || 'MÉDIA',
           isLive, botToken: t.botToken || ''
         });
+        // Calcula stake em reais com base na banca atual (1u = 1% da banca atual)
+        try {
+          const bk = stmts.getBankroll.get();
+          if (bk && result.lastInsertRowid) {
+            const unitValue = bk.current_banca / 100;
+            const stakeUnits = parseFloat(String(t.stake || '1').replace('u','')) || 1;
+            const stakeReais = parseFloat((stakeUnits * unitValue).toFixed(2));
+            stmts.updateTipFinanceiro.run(stakeReais, null, result.lastInsertRowid);
+          }
+        } catch(_) {}
         // Grava odds de abertura para CLV tracking
         if (t.odds) {
           stmts.updateTipOpenOdds.run(parseFloat(t.odds), String(t.matchId), sport);
@@ -1359,12 +1369,36 @@ const server = http.createServer(async (req, res) => {
         if (!matchId || !winner) { sendJson(res, { error: 'Missing matchId/winner' }, 400); return; }
         const tips = db.prepare("SELECT * FROM tips WHERE match_id = ? AND sport = ? AND result IS NULL").all(matchId, sport);
         let settled = 0;
+        let bancaDelta = 0;
         for (const tip of tips) {
           const result = norm(tip.tip_participant).includes(norm(winner)) ? 'win' : 'loss';
           stmts.settleTip.run(result, matchId, sport);
+          // Atualiza profit_reais e acumula delta da banca
+          const stakeR = tip.stake_reais || (() => {
+            const bk = stmts.getBankroll.get();
+            const uv = bk ? bk.current_banca / 100 : 1;
+            const su = parseFloat(String(tip.stake || '1').replace('u','')) || 1;
+            return parseFloat((su * uv).toFixed(2));
+          })();
+          const odds = parseFloat(tip.odds) || 1;
+          const profitR = result === 'win'
+            ? parseFloat((stakeR * (odds - 1)).toFixed(2))
+            : parseFloat((-stakeR).toFixed(2));
+          db.prepare("UPDATE tips SET stake_reais = ?, profit_reais = ? WHERE id = ?")
+            .run(stakeR, profitR, tip.id);
+          bancaDelta += profitR;
           settled++;
         }
-        sendJson(res, { ok: true, settled });
+        // Atualiza banca total
+        if (bancaDelta !== 0) {
+          const bk = stmts.getBankroll.get();
+          if (bk) {
+            const nova = parseFloat((bk.current_banca + bancaDelta).toFixed(2));
+            stmts.updateBankroll.run(nova);
+            log('INFO', 'BANCA', `Settlement: delta R$${bancaDelta >= 0 ? '+' : ''}${bancaDelta.toFixed(2)} → banca agora R$${nova}`);
+          }
+        }
+        sendJson(res, { ok: true, settled, bancaDelta: parseFloat(bancaDelta.toFixed(2)) });
       } catch(e) { sendJson(res, { error: e.message }, 500); }
     });
     return;
@@ -1397,6 +1431,17 @@ const server = http.createServer(async (req, res) => {
     const roi = totalStaked > 0 ? ((totalProfit / totalStaked) * 100).toFixed(2) : '0.00';
     const calcBucketROI = b => b.staked > 0 ? ((b.profit / b.staked) * 100).toFixed(2) : '0.00';
 
+    // Dados da banca em reais
+    const bk = stmts.getBankroll.get();
+    const bancaInfo = bk ? {
+      initialBanca: bk.initial_banca,
+      currentBanca: bk.current_banca,
+      unitValue: parseFloat((bk.current_banca / 100).toFixed(4)),
+      profitReais: parseFloat((bk.current_banca - bk.initial_banca).toFixed(2)),
+      growthPct: parseFloat(((bk.current_banca - bk.initial_banca) / bk.initial_banca * 100).toFixed(2)),
+      updatedAt: bk.updated_at
+    } : null;
+
     sendJson(res, {
       overall: {
         total: row?.total || 0, wins: row?.wins || 0, losses: row?.losses || 0,
@@ -1407,7 +1452,38 @@ const server = http.createServer(async (req, res) => {
       byPhase: {
         live:    { ...liveTips, roi: calcBucketROI(liveTips) },
         preGame: { ...preTips,  roi: calcBucketROI(preTips)  }
-      }
+      },
+      banca: bancaInfo
+    });
+    return;
+  }
+
+  // ── Bankroll endpoints ──
+  if (p === '/bankroll') {
+    const bk = stmts.getBankroll.get();
+    if (!bk) { sendJson(res, { error: 'Bankroll não inicializado' }, 500); return; }
+    sendJson(res, {
+      initialBanca: bk.initial_banca,
+      currentBanca: bk.current_banca,
+      unitValue: parseFloat((bk.current_banca / 100).toFixed(4)),
+      profitReais: parseFloat((bk.current_banca - bk.initial_banca).toFixed(2)),
+      growthPct: parseFloat(((bk.current_banca - bk.initial_banca) / bk.initial_banca * 100).toFixed(2)),
+      updatedAt: bk.updated_at
+    });
+    return;
+  }
+
+  if (p === '/set-bankroll' && req.method === 'POST') {
+    let body = ''; req.on('data', d => body += d);
+    req.on('end', () => {
+      try {
+        const { valor } = safeParse(body, {});
+        const v = parseFloat(valor);
+        if (!v || v <= 0) { sendJson(res, { error: 'valor inválido' }, 400); return; }
+        stmts.resetBankroll.run(v, v);
+        log('INFO', 'BANCA', `Banca redefinida para R$${v.toFixed(2)}`);
+        sendJson(res, { ok: true, currentBanca: v, unitValue: parseFloat((v / 100).toFixed(4)) });
+      } catch(e) { sendJson(res, { error: e.message }, 500); }
     });
     return;
   }
