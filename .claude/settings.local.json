@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node -e ':*)",
+      "Bash(npm ci:*)",
+      "Bash(python -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\(d.get\\('lockfileVersion'\\)\\); print\\(list\\(d.get\\('packages',{}\\).keys\\(\\)\\)[:5]\\)\")"
+    ]
+  }
+}
