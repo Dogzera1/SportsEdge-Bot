@@ -1174,7 +1174,7 @@ function buildEsportsPrompt(match, game, gamesContext, o, enrichSection) {
     ? `[SOMENTE se EV ≥ +${evThreshold}% E confiança ALTA ou MÉDIA (NUNCA BAIXA) E pelo menos 2 sinais independentes confirmam: TIP_ML:[time]@[odd]|EV:[%]|STAKE:[u]|CONF:[ALTA/MÉDIA]]`
     : `[NÃO gere tip sem odds reais disponíveis]`;
 
-  return `Você é um analista de apostas LoL especializado. Sua função é encontrar edge REAL. "Sem edge" é sempre uma resposta válida e preferível a forçar uma tip ruim.
+  const text = `Você é um analista de apostas LoL especializado. Sua função é encontrar edge REAL. "Sem edge" é sempre uma resposta válida e preferível a forçar uma tip ruim.
 
 PARTIDA: ${t1} vs ${t2} | ${match.league || 'Esports'} | ${match.format || 'Bo1/Bo3'} | ${match.status}
 Placar: ${serieScore} | ${oddsSection}
@@ -1204,7 +1204,7 @@ ${hasRealOdds ? '' : '   Virada possível se: gold diff <3k, scaling comp no per
 RESPOSTA (máximo 200 palavras):
 P(${t1})=__% | P(${t2})=__% | ${hasRealOdds ? `EV(${t1})=[X%] | EV(${t2})=[X%]` : `Conf:[ALTA/MÉDIA/BAIXA]`} | Sinais:[N/6]
 ${tipInstruction}`;
-  // Retorna { text, evThreshold } para o gate 4 usar o threshold adaptativo
+
   return { text, evThreshold, sigCount };
 }
 
