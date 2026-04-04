@@ -495,7 +495,7 @@ const LOL_ALIASES = {
   'jdggaming': ['jdg'],
   'beijingjdgesports': ['jdg', 'jdggaming'],
   'bilibiliblaze': ['blg', 'bilibili'],
-  'bilibligaming': ['blg', 'bilibili', 'bilibiliblaze'],
+  'bilibiligaming': ['blg', 'bilibili', 'bilibiliblaze'],
   'ninerosters': ['ninerosters', 'nip'],
   'weibo': ['wbg', 'weiboesports'],
   'topesports': ['tes'],
@@ -560,7 +560,7 @@ function findOdds(sport, t1, t2) {
   const expandWithAliases = (n) => {
     const variants = new Set([n]);
     for (const [key, aliases] of Object.entries(LOL_ALIASES)) {
-      if (n.includes(key) || key.includes(n)) {
+      if (n.includes(key) || key.includes(n) || aliases.includes(n)) {
         aliases.forEach(a => variants.add(a));
         variants.add(key);
       }
