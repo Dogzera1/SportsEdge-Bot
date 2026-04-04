@@ -648,13 +648,29 @@ async function getLoLMatches() {
       const glr = await httpGet(LOL_BASE + '/getLive?hl=en-US', { 'x-api-key': LOL_KEY });
       const gld = safeParse(glr.body, {});
       const getLiveEvts = gld?.data?.schedule?.events || [];
+      // Log bruto de TODOS os eventos do getLive para diagnóstico
+      log('DEBUG', 'LOL', `getLive raw: ${getLiveEvts.length} eventos | ${getLiveEvts.map(e => `[${e.type}|${e.state}|${e.league?.slug}]`).join(' ')}`);
       getLiveEvts.filter(e => e.type === 'match' && e.match)
         .map(e => mapLoLEvent(e, 'live')).filter(Boolean)
         .forEach(m => { if (!live.find(l => l.id === m.id)) live.push(m); });
       getLiveEvts.filter(e => e.type === 'show' && e.state === 'inProgress')
         .forEach(e => { if (e.league?.name) liveLeagues.add(e.league.name); });
-      if (getLiveEvts.length) log('DEBUG', 'LOL', `getLive: ${live.length} live, liveLeagues=[${[...liveLeagues].join(',')}]`);
     } catch(e) { log('WARN', 'LOL', 'getLive err: ' + e.message); }
+
+    // ── 1b. Também busca getLive com hl=zh-CN (LPL às vezes só aparece com locale chinês) ──
+    try {
+      const glrCN = await httpGet(LOL_BASE + '/getLive?hl=zh-CN', { 'x-api-key': LOL_KEY });
+      const gldCN = safeParse(glrCN.body, {});
+      const getLiveCN = gldCN?.data?.schedule?.events || [];
+      if (getLiveCN.length) {
+        log('DEBUG', 'LOL', `getLive zh-CN raw: ${getLiveCN.length} eventos | ${getLiveCN.map(e => `[${e.type}|${e.state}|${e.league?.slug}]`).join(' ')}`);
+        getLiveCN.filter(e => e.type === 'match' && e.match)
+          .map(e => mapLoLEvent(e, 'live')).filter(Boolean)
+          .forEach(m => { if (!live.find(l => l.id === m.id)) live.push(m); });
+        getLiveCN.filter(e => e.type === 'show' && e.state === 'inProgress')
+          .forEach(e => { if (e.league?.name) liveLeagues.add(e.league.name); });
+      }
+    } catch(e) { log('WARN', 'LOL', 'getLive zh-CN err: ' + e.message); }
 
     // ── 2. getSchedule — schedule completo ──
     try {
@@ -663,6 +679,11 @@ async function getLoLMatches() {
       mainEvs = sd?.data?.schedule?.events || [];
       newerToken = sd?.data?.schedule?.pages?.newer;
     } catch(e) { log('WARN', 'LOL', 'Schedule err: ' + e.message); }
+
+    // Log dos eventos LPL no schedule para diagnóstico
+    const lplEvs = mainEvs.filter(e => e.league?.slug === 'lpl');
+    if (lplEvs.length) log('DEBUG', 'LOL', `LPL no schedule: ${lplEvs.map(e => `[${e.type}|${e.state}|${e.match?.teams?.map(t=>t.code||t.name).join('v')||''}]`).join(' ')}`);
+    else log('DEBUG', 'LOL', 'LPL no schedule: nenhum evento encontrado');
 
     // Adiciona liveLeagues do schedule (shows em progresso)
     mainEvs.filter(e => e.type === 'show' && e.state === 'inProgress' && LOL_LEAGUES.has(e.league?.slug))
