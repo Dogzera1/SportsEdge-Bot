@@ -998,6 +998,21 @@ async function autoAnalyzeMatch(token, match) {
     const tipResult = text.match(/TIP_ML:\s*([^@]+?)\s*@\s*([^|\]]+?)\s*\|EV:\s*([^|]+?)\s*\|STAKE:\s*([^|\]]+?)(?:\s*\|CONF:\s*(\w+))?(?:\]|$)/);
     const hasRealOdds = !!(o?.t1 && parseFloat(o.t1) > 1);
 
+    // Extrai resumo da análise da IA para logar mesmo quando não há tip
+    const extractAnalysisSummary = (t) => {
+      const parts = [];
+      // P(time)=X% — linha de resumo do prompt
+      const pMatch = t.match(/P\(([^)]+)\)\s*=\s*(\d+)%.*?P\(([^)]+)\)\s*=\s*(\d+)%/);
+      if (pMatch) parts.push(`P(${pMatch[1]})=${pMatch[2]}% P(${pMatch[3]})=${pMatch[4]}%`);
+      // EV(time)=[X%]
+      const evMatches = [...t.matchAll(/EV\(([^)]+)\)\s*=\s*\[?([+-]?\d+\.?\d*)%?\]?/g)];
+      if (evMatches.length) parts.push(evMatches.map(m => `EV(${m[1]})=${m[2]}%`).join(' '));
+      // Sinais N/5
+      const sinaisMatch = t.match(/Sinais:\s*(\d+\/\d+|\d+\s*\/\s*\d+)/i);
+      if (sinaisMatch) parts.push(`Sinais:${sinaisMatch[1].replace(/\s/g,'')}`);
+      return parts.length ? parts.join(' | ') : null;
+    };
+
     // ── Layer 3: Gates pós-IA ──
     // Só aplicamos os gates se há uma tip sugerida pela IA
     // Cópia mutável para permitir rebaixamento de confiança sem rejeição
@@ -1068,7 +1083,18 @@ async function autoAnalyzeMatch(token, match) {
       }
     }
 
-    log('INFO', 'AUTO', `${match.team1} vs ${match.team2} | odds=${o?.t1||'N/A'} hasRealOdds=${hasRealOdds} tipMatch=${!!filteredTipResult} mlEdge=${mlResult.score.toFixed(1)}pp`);
+    if (!filteredTipResult) {
+      const summary = extractAnalysisSummary(text);
+      if (!tipResult) {
+        // IA não gerou TIP_ML — sem edge detectado
+        log('INFO', 'AUTO', `Sem tip: ${match.team1} vs ${match.team2} → IA sem edge${summary ? ` | ${summary}` : ''} | mlEdge=${mlResult.score.toFixed(1)}pp`);
+      } else {
+        // TIP_ML gerada mas bloqueada pelos gates (já logado individualmente acima)
+        log('INFO', 'AUTO', `Tip bloqueada: ${match.team1} vs ${match.team2}${summary ? ` | ${summary}` : ''} | mlEdge=${mlResult.score.toFixed(1)}pp`);
+      }
+    } else {
+      log('INFO', 'AUTO', `${match.team1} vs ${match.team2} | odds=${o?.t1||'N/A'} hasRealOdds=${hasRealOdds} tipMatch=true mlEdge=${mlResult.score.toFixed(1)}pp`);
+    }
     return { text, tipMatch: filteredTipResult, hasLiveStats, match, o, mlScore: mlResult.score };
   } catch(e) {
     log('ERROR', 'AUTO', `Error for ${match.team1} vs ${match.team2}: ${e.message}`);
