@@ -1502,6 +1502,9 @@ const server = http.createServer(async (req, res) => {
     const filter = parsed.query.filter;
     let query = 'SELECT * FROM tips WHERE sport = ?';
     if (filter === 'settled') query += " AND result IS NOT NULL";
+    else if (filter === 'pending') query += " AND result IS NULL";
+    else if (filter === 'win') query += " AND result = 'win'";
+    else if (filter === 'loss') query += " AND result = 'loss'";
     query += ` ORDER BY sent_at DESC LIMIT ${limit}`;
     sendJson(res, db.prepare(query).all(sport));
     return;

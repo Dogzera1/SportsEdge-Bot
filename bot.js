@@ -205,6 +205,26 @@ function getMenu(sport) {
         [
           { text: '📅 Próximas', callback_data: `menu_proximas_${sport}` },
           { text: '❓ Ajuda', callback_data: `menu_ajuda_${sport}` }
+        ],
+        [
+          { text: '💰 Minhas Tips', callback_data: `tips_menu_${sport}` }
+        ]
+      ]
+    }
+  };
+}
+
+function getTipsMenu(sport) {
+  return {
+    reply_markup: {
+      inline_keyboard: [
+        [
+          { text: '⏳ Em andamento', callback_data: `tips_pending_${sport}` },
+          { text: '✅ Vencidas', callback_data: `tips_won_${sport}` },
+          { text: '❌ Perdidas', callback_data: `tips_lost_${sport}` }
+        ],
+        [
+          { text: '← Menu principal', callback_data: `tips_back_${sport}` }
         ]
       ]
     }
@@ -1799,10 +1819,10 @@ async function poll(token, sport) {
               }
 
               txt += `\n_Use /tracking para atualizar_`;
-              await send(token, chatId, txt);
+              await send(token, chatId, txt, getTipsMenu(sport));
             } catch(e) { await send(token, chatId, '❌ Erro ao buscar tracking: ' + e.message); }
           } else if (text.startsWith('/stats') || text.startsWith('/roi') || text.startsWith('/users') ||
-                     text.startsWith('/settle') || text.startsWith('/pending') ||
+                     text.startsWith('/settle') || text.startsWith('/pending') || text.startsWith('/resync') ||
                      text.startsWith('/slugs') || text.startsWith('/lolraw') ||
                      text.startsWith('/health') || text.startsWith('/debug')) {
             await handleAdmin(token, chatId, text);
@@ -1820,6 +1840,42 @@ async function poll(token, sport) {
             // notif_{sport}_{on|off}
             const [, s, action] = data.split('_');
             await handleNotificacoes(token, chatId, s, action === 'on' ? 'on' : 'off');
+          } else if (data.startsWith('tips_')) {
+            // tips_{action}_{sport}  — menu | pending | won | lost
+            const parts = data.split('_');
+            const action = parts[1];
+            const s = parts[2] || sport;
+
+            if (action === 'back') {
+              await send(token, chatId, '🏠 *Menu principal*', getMenu(s));
+            } else if (action === 'menu') {
+              await send(token, chatId, '💰 *Minhas Tips* — escolha uma categoria:', getTipsMenu(s));
+            } else if (action === 'pending' || action === 'won' || action === 'lost') {
+              try {
+                const filterMap = { pending: 'pending', won: 'win', lost: 'loss' };
+                const labelMap  = { pending: '⏳ Em andamento', won: '✅ Vencidas', lost: '❌ Perdidas' };
+                const tips = await serverGet(`/tips-history?limit=20&filter=${filterMap[action]}`, s).catch(() => []);
+                if (!Array.isArray(tips) || tips.length === 0) {
+                  await send(token, chatId, `${labelMap[action]}: _Nenhuma tip encontrada._`, getTipsMenu(s));
+                  return;
+                }
+                let txt = `${labelMap[action]} _(${tips.length})_\n━━━━━━━━━━━━━━━━\n\n`;
+                for (const t of tips.slice(0, 15)) {
+                  const confEmoji = { ALTA: '🟢', MÉDIA: '🟡', BAIXA: '🔴' }[t.confidence] || '⚪';
+                  const resEmoji  = t.result === 'win' ? '✅' : t.result === 'loss' ? '❌' : '⏳';
+                  const date = (t.sent_at || '').slice(0, 10);
+                  const profitStr = t.profit_reais != null
+                    ? ` | ${t.profit_reais >= 0 ? '+' : ''}R$${parseFloat(t.profit_reais).toFixed(2)}`
+                    : '';
+                  const liveTag = t.is_live ? ' 🔴' : '';
+                  txt += `${resEmoji} *${t.tip_participant || '?'}* @ ${t.odds}${liveTag}\n`;
+                  txt += `   ${confEmoji} ${t.confidence || '?'} | ${t.stake || '?'} | EV: ${t.ev || '?'}%${profitStr}\n`;
+                  txt += `   _${t.event_name || '?'} — ${date}_\n\n`;
+                }
+                if (tips.length > 15) txt += `_...e mais ${tips.length - 15} tips_\n`;
+                await send(token, chatId, txt, getTipsMenu(s));
+              } catch(e) { await send(token, chatId, '❌ Erro ao buscar tips: ' + e.message, getTipsMenu(s)); }
+            }
           } else if (data.startsWith('menu_')) {
             // menu_{action}_{sport}
             const parts = data.split('_'); // ['menu', action, sport]
