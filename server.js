@@ -642,6 +642,21 @@ async function getLoLMatches() {
     let live = [], upcoming = [];
     let mainEvs = [], newerToken = null;
 
+    // ── 1. getLive primeiro — fonte mais confiável para matches ao vivo (especialmente LPL) ──
+    const liveLeagues = new Set();
+    try {
+      const glr = await httpGet(LOL_BASE + '/getLive?hl=en-US', { 'x-api-key': LOL_KEY });
+      const gld = safeParse(glr.body, {});
+      const getLiveEvts = gld?.data?.schedule?.events || [];
+      getLiveEvts.filter(e => e.type === 'match' && e.match)
+        .map(e => mapLoLEvent(e, 'live')).filter(Boolean)
+        .forEach(m => { if (!live.find(l => l.id === m.id)) live.push(m); });
+      getLiveEvts.filter(e => e.type === 'show' && e.state === 'inProgress')
+        .forEach(e => { if (e.league?.name) liveLeagues.add(e.league.name); });
+      if (getLiveEvts.length) log('DEBUG', 'LOL', `getLive: ${live.length} live, liveLeagues=[${[...liveLeagues].join(',')}]`);
+    } catch(e) { log('WARN', 'LOL', 'getLive err: ' + e.message); }
+
+    // ── 2. getSchedule — schedule completo ──
     try {
       const sr = await httpGet(LOL_BASE + '/getSchedule?hl=en-US', { 'x-api-key': LOL_KEY });
       const sd = safeParse(sr.body, {});
@@ -649,22 +664,27 @@ async function getLoLMatches() {
       newerToken = sd?.data?.schedule?.pages?.newer;
     } catch(e) { log('WARN', 'LOL', 'Schedule err: ' + e.message); }
 
-    // Detectar ligas com transmissão ao vivo
-    const liveLeagues = new Set();
+    // Adiciona liveLeagues do schedule (shows em progresso)
     mainEvs.filter(e => e.type === 'show' && e.state === 'inProgress' && LOL_LEAGUES.has(e.league?.slug))
       .forEach(e => { if (e.league?.name) liveLeagues.add(e.league.name); });
 
-    // Matches explicitamente inProgress
-    live = mainEvs.filter(e => e.type === 'match' && e.match && e.state === 'inProgress')
-      .map(e => mapLoLEvent(e, 'live')).filter(Boolean);
+    // Matches explicitamente inProgress no schedule
+    mainEvs.filter(e => e.type === 'match' && e.match && e.state === 'inProgress')
+      .map(e => mapLoLEvent(e, 'live')).filter(Boolean)
+      .forEach(m => { if (!live.find(l => l.id === m.id)) live.push(m); });
 
     // Matches com score parcial em ligas com transmissão ao vivo = LIVE
+    const now = Date.now();
     const liveFromShows = mainEvs.filter(e => {
       if (e.type !== 'match' || !e.match || e.state !== 'unstarted') return false;
       if (!liveLeagues.has(e.league?.name)) return false;
       const t1 = e.match.teams?.[0], t2 = e.match.teams?.[1];
       const w1 = t1?.result?.gameWins || 0, w2 = t2?.result?.gameWins || 0;
-      if (w1 === 0 && w2 === 0) return false;
+      // Detecta live: tem score OU startTime já passou (jogo começou mas score ainda 0-0)
+      const startedAgo = e.startTime ? (now - new Date(e.startTime).getTime()) / 60000 : -1;
+      const hasScore = w1 > 0 || w2 > 0;
+      const timeStarted = startedAgo > 2 && startedAgo < 300; // entre 2min e 5h atrás
+      if (!hasScore && !timeStarted) return false;
       const boCount = e.match.strategy?.count || 3;
       const winsNeeded = Math.ceil(boCount / 2);
       return !(w1 >= winsNeeded || w2 >= winsNeeded);
@@ -675,6 +695,8 @@ async function getLoLMatches() {
     const upcomingInShow = mainEvs.filter(e => {
       if (e.type !== 'match' || !e.match || e.state !== 'unstarted') return false;
       if (!liveLeagues.has(e.league?.name)) return false;
+      const startedAgo = e.startTime ? (now - new Date(e.startTime).getTime()) / 60000 : -1;
+      if (startedAgo > 2) return false; // já deveria ter começado — não é draft
       const t1 = e.match.teams?.[0], t2 = e.match.teams?.[1];
       return (t1?.result?.gameWins || 0) === 0 && (t2?.result?.gameWins || 0) === 0;
     }).map(e => mapLoLEvent(e, 'draft')).filter(Boolean);
@@ -683,17 +705,6 @@ async function getLoLMatches() {
       e.type === 'match' && e.match && e.state === 'unstarted' && !liveLeagues.has(e.league?.name)
     ).map(e => mapLoLEvent(e, 'upcoming')).filter(Boolean);
     upcoming = [...upcomingInShow, ...upcoming];
-
-    try {
-      const glr = await httpGet(LOL_BASE + '/getLive?hl=en-US', { 'x-api-key': LOL_KEY });
-      const gld = safeParse(glr.body, {});
-      const getLiveEvts = gld?.data?.schedule?.events || [];
-      getLiveEvts.filter(e => e.type === 'match' && e.match)
-        .map(e => mapLoLEvent(e, 'live')).filter(Boolean)
-        .forEach(m => { if (!live.find(l => l.id === m.id)) live.push(m); });
-      getLiveEvts.filter(e => e.type === 'show' && e.state === 'inProgress')
-        .forEach(e => { if (e.league?.name) liveLeagues.add(e.league.name); });
-    } catch(e) { log('WARN', 'LOL', 'getLive err: ' + e.message); }
 
     if (!upcoming.length && newerToken) {
       try {
