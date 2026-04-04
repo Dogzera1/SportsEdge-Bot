@@ -1185,6 +1185,9 @@ function buildEsportsPrompt(match, game, gamesContext, o, enrichSection) {
   // 6 sinais → 2% | 5 → 3% | 4 → 4% | 3 → 5% | 2 → 6% | ≤1 → 7%
   const evThreshold = Math.max(2, Math.min(7, evBase + (3 - sigCount)));
 
+  const evThresholdMedia = Math.max(1, evThreshold - 1.5);
+  const evThresholdBaixa = Math.max(0.5, evThreshold - 3);
+
   let bookMarginNote = '';
   let deJuiced = '';
   if (hasRealOdds) {
@@ -1194,19 +1197,16 @@ function buildEsportsPrompt(match, game, gamesContext, o, enrichSection) {
     const dj1 = (r1 / or * 100).toFixed(1);
     const dj2 = (r2 / or * 100).toFixed(1);
     bookMarginNote = `AVISO: 1xBet tem margem de ${marginReal}% neste jogo. O de-juice REMOVE esta margem, mas NÃO corrige o viés da bookie. Para lucro real você precisa que sua probabilidade VERDADEIRA supere o de-juice por pelo menos ${minEdgePp}pp.`;
-    deJuiced = `De-juice 1xBet: ${t1}=${dj1}% | ${t2}=${dj2}%\n   Para ter edge: sua P estimada deve superar de-juice em ≥${minEdgePp}pp E EV=(prob×odd-1) ≥ +${evThreshold}%.\n   Se a diferença for < ${minEdgePp}pp → SEM EDGE real (1xBet não é mercado sharp).`;
+    deJuiced = `De-juice 1xBet: ${t1}=${dj1}% | ${t2}=${dj2}%\n   ALTA/MÉDIA: P estimada deve superar de-juice em ≥${minEdgePp}pp E EV ≥ +${evThreshold}%.\n   BAIXA: EV ≥ +${evThresholdBaixa}% é suficiente — stake mínima cobre o risco extra.\n   Se EV negativo nos dois lados → SEM EDGE.`;
   } else {
     deJuiced = `Sem odds disponíveis. Tip só se vantagem clara (>${noOddsConviction}%) com pelo menos 2 sinais independentes confirmando.`;
   }
-
-  const evThresholdMedia = Math.max(1, evThreshold - 1.5);
-  const evThresholdBaixa = Math.max(0.5, evThreshold - 3);
   const tipInstruction = hasRealOdds
-    ? `[Gere tip conforme o edge disponível — 3 níveis possíveis:
-• ALTA (EV ≥ +${evThreshold}% E ≥2 sinais fortes): TIP_ML:[time]@[odd]|EV:[%]|STAKE:[u]|CONF:ALTA
-• MÉDIA (EV ≥ +${evThresholdMedia}% E ≥1 sinal confirmando): TIP_ML:[time]@[odd]|EV:[%]|STAKE:[u]|CONF:MÉDIA
-• BAIXA (EV ≥ +${evThresholdBaixa}% com algum edge identificável): TIP_ML:[time]@[odd]|EV:[%]|STAKE:[u]|CONF:BAIXA
-Se não há edge real → não gere TIP_ML]`
+    ? `[DECISÃO OBRIGATÓRIA — avalie em ordem:
+1. Se EV(qualquer lado) ≥ +${evThreshold}% E ≥2 sinais checklist → TIP_ML:[time]@[odd]|EV:[%]|STAKE:[u]|CONF:ALTA
+2. Se EV(qualquer lado) ≥ +${evThresholdMedia}% E ≥1 sinal checklist → TIP_ML:[time]@[odd]|EV:[%]|STAKE:[u]|CONF:MÉDIA
+3. Se EV(qualquer lado) ≥ +${evThresholdBaixa}% (independente de sinais) → TIP_ML:[time]@[odd]|EV:[%]|STAKE:[u]|CONF:BAIXA
+4. Se EV negativo nos dois lados → não gere TIP_ML]`
     : `[NÃO gere tip sem odds reais disponíveis]`;
 
   const text = `Você é um analista de apostas LoL especializado. Sua função é encontrar edge REAL. "Sem edge" é sempre uma resposta válida e preferível a forçar uma tip ruim.
@@ -1219,23 +1219,22 @@ FORMA/H2H:${enrichSection}
 ${highFluxWarning ? `\n${highFluxWarning}` : ''}${lineMovementWarning ? `\n${lineMovementWarning}` : ''}
 
 REGRAS OBRIGATÓRIAS (não negociáveis):
-• 3 níveis de tip: ALTA (edge claro, ≥2 sinais), MÉDIA (edge provável, ≥1 sinal), BAIXA (edge especulativo, stake mínima)
-• EV positivo sozinho NÃO é suficiente para ALTA/MÉDIA — precisa de ao menos 1 sinal confirmando
-• BAIXA confiança: permitida quando há algum edge identificável, mas incerteza alta (stake máx 1.5u)
-• Dados ausentes (forma, H2H) = use o que está disponível; ausência de dado não bloqueia análise
-• Se não há edge identificável → sem tip. O custo de não apostar é zero; o custo de apostar errado é real.
+• ALTA (EV ≥ +${evThreshold}%): exige ≥2 sinais independentes do checklist confirmando
+• MÉDIA (EV ≥ +${evThresholdMedia}%): exige ≥1 sinal do checklist confirmando
+• BAIXA (EV ≥ +${evThresholdBaixa}%): NÃO exige sinal do checklist — EV positivo acima do threshold É SUFICIENTE para gerar BAIXA. Se um lado tem EV ≥ +${evThresholdBaixa}% → gere tip BAIXA.
+• Se EV negativo nos dois lados → sem tip.
+• Dados ausentes = use o que está disponível; ausência não bloqueia análise.
 
 ANÁLISE (responda cada ponto):
 1. Draft/Composição: qual time tem melhor comp? Early/late game? Counter-pick decisivo?
    → P(${t1})=__% | P(${t2})=__% | Justificativa: [1 frase objetiva]
 2. Edge quantitativo: ${deJuiced}
-3. Sinais independentes que confirmam (marque os que se aplicam):
+3. Sinais do checklist (para ALTA/MÉDIA — opcional para BAIXA):
    [ ] Forma recente clara (≥60% winrate, diferença >15pp)
    [ ] H2H favorável (≥60% de vitórias no confronto direto)
    [ ] Draft/composição claramente superior
    [ ] Dados ao vivo confirmam (gold diff, objetivos)
    [ ] Odds com movimento favorável (sharp money)
-   Mínimo 1 sinal forte OU 2 sinais fracos para considerar tip. Se dados estiverem ausentes, analise os que existem.
 ${hasRealOdds ? '' : '   Virada possível se: gold diff <3k, scaling comp no perdedor, soul point ou baron pendente.\n'}
 RESPOSTA (máximo 200 palavras):
 P(${t1})=__% | P(${t2})=__% | ${hasRealOdds ? `EV(${t1})=[X%] | EV(${t2})=[X%]` : `Conf:[ALTA/MÉDIA/BAIXA]`} | Sinais:[N/6] | Confiança:[ALTA/MÉDIA/BAIXA]
