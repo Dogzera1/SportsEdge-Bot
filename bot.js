@@ -297,7 +297,6 @@ async function runAutoAnalysis() {
         const liveCooldown = prev?.noEdge ? RE_ANALYZE_INTERVAL * 2 : RE_ANALYZE_INTERVAL;
         if (prev && (now - prev.ts < liveCooldown)) continue;
 
-        log('INFO', 'AUTO', `Esports: ${match.team1} vs ${match.team2} (${match.league})`);
         const result = await autoAnalyzeMatch(esportsConfig.token, match);
         analyzedMatches.set(matchKey, { ts: now, tipSent: prev?.tipSent || false, noEdge: !result?.tipMatch });
 
@@ -981,7 +980,8 @@ async function autoAnalyzeMatch(token, match) {
       return null;
     }
 
-    const prompt = buildEsportsPrompt(match, game, gamesContext, o, enrichSection);
+    const { text: prompt, evThreshold: adaptiveEV, sigCount } = buildEsportsPrompt(match, game, gamesContext, o, enrichSection);
+    log('INFO', 'AUTO', `Analisando: ${match.team1} vs ${match.team2} | sinais=${sigCount}/6 | evThreshold=${adaptiveEV}% | mlEdge=${mlResult.score.toFixed(1)}pp`);
 
     const resp = await serverPost('/claude', {
       model: 'deepseek-chat',
@@ -1068,12 +1068,10 @@ async function autoAnalyzeMatch(token, match) {
         }
       }
 
-      // Gate 4: EV mínimo real (re-verificação)
-      // Threshold configurável, default 5% (antes era 2% — insuficiente contra margem 1xBet ~7%)
+      // Gate 4: EV mínimo adaptativo (threshold reduz conforme sinais disponíveis)
       if (filteredTipResult && hasRealOdds) {
-        const evMin = parseFloat(process.env.LOL_EV_THRESHOLD ?? '5');
-        if (!isNaN(tipEV) && tipEV < evMin) {
-          log('INFO', 'AUTO', `Gate EV: ${match.team1} vs ${match.team2} → EV ${tipEV}% < mínimo ${evMin}% → rejeitado`);
+        if (!isNaN(tipEV) && tipEV < adaptiveEV) {
+          log('INFO', 'AUTO', `Gate EV: ${match.team1} vs ${match.team2} → EV ${tipEV}% < threshold adaptativo ${adaptiveEV}% (${sigCount}/6 sinais) → rejeitado`);
           filteredTipResult = null;
         }
       }
@@ -1115,9 +1113,9 @@ function buildEsportsPrompt(match, game, gamesContext, o, enrichSection) {
   if (hasRealOdds) {
     const raw1 = 1 / parseFloat(o.t1);
     const raw2 = 1 / parseFloat(o.t2);
-    const overround = raw1 + raw2; // tipicamente 1.06-1.08 na 1xBet
-    const fairP1 = (raw1 / overround * 100).toFixed(1); // de-juiced
-    const fairP2 = (raw2 / overround * 100).toFixed(1); // de-juiced
+    const overround = raw1 + raw2;
+    const fairP1 = (raw1 / overround * 100).toFixed(1);
+    const fairP2 = (raw2 / overround * 100).toFixed(1);
     const marginPct = ((overround - 1) * 100).toFixed(1);
     const bookName = o.bookmaker || '1xBet';
     oddsSection = `Odds ML (${bookName}): ${t1}=${o.t1} | ${t2}=${o.t2}\nMargem da casa: ${marginPct}% | Probabilidades de-juiced: ${t1}=${fairP1}% | ${t2}=${fairP2}%`;
@@ -1140,11 +1138,24 @@ function buildEsportsPrompt(match, game, gamesContext, o, enrichSection) {
     ? `🚨 ATENÇÃO — ESTADO DE ALTO FLUXO: ${isEarlyGame ? `Jogo com apenas ${gameMinute}min (muito cedo para análise confiável).` : ''} ${hasRecentObjective ? 'Objetivo maior recente detectado — estado do jogo pode ter mudado completamente.' : ''} Com delay de ~90s, o que você está vendo já pode ser história. Confiança máxima neste contexto: BAIXA.`
     : '';
 
-  const evThreshold = parseFloat(process.env.LOL_EV_THRESHOLD ?? '5');
+  const evBase      = parseFloat(process.env.LOL_EV_THRESHOLD ?? '5');
   const minEdgePp   = parseFloat(process.env.LOL_PINNACLE_MARGIN ?? '8');
   const noOddsConviction = parseInt(process.env.LOL_NO_ODDS_CONVICTION ?? '70');
 
-  // Calcula margem real da 1xBet para incluir no prompt
+  // ── Threshold adaptativo por quantidade de sinais disponíveis ──
+  // Mais sinais = maior confiança na estimativa = threshold menor
+  // Conta sinais pré-IA disponíveis no enrichment passado via match/enrichSection
+  const sigCount = [
+    hasRealOdds,                                          // odds disponíveis
+    enrichSection.includes('FORMA RECENTE'),              // forma t1
+    enrichSection.includes('W-') && enrichSection.split('W-').length > 2, // forma t2
+    enrichSection.includes('H2H:'),                      // histórico direto
+    enrichSection.includes('LINE MOVEMENT'),              // movimento de linha
+    gamesContext.includes('AO VIVO'),                    // dados ao vivo
+  ].filter(Boolean).length;
+  // 6 sinais → 2% | 5 → 3% | 4 → 4% | 3 → 5% | 2 → 6% | ≤1 → 7%
+  const evThreshold = Math.max(2, Math.min(7, evBase + (3 - sigCount)));
+
   let bookMarginNote = '';
   let deJuiced = '';
   if (hasRealOdds) {
@@ -1191,8 +1202,10 @@ ANÁLISE (responda cada ponto):
    Mínimo 1 sinal forte OU 2 sinais fracos para considerar tip. Se dados estiverem ausentes, analise os que existem.
 ${hasRealOdds ? '' : '   Virada possível se: gold diff <3k, scaling comp no perdedor, soul point ou baron pendente.\n'}
 RESPOSTA (máximo 200 palavras):
-P(${t1})=__% | P(${t2})=__% | ${hasRealOdds ? `EV(${t1})=[X%] | EV(${t2})=[X%]` : `Conf:[ALTA/MÉDIA/BAIXA]`} | Sinais:[N/5]
+P(${t1})=__% | P(${t2})=__% | ${hasRealOdds ? `EV(${t1})=[X%] | EV(${t2})=[X%]` : `Conf:[ALTA/MÉDIA/BAIXA]`} | Sinais:[N/6]
 ${tipInstruction}`;
+  // Retorna { text, evThreshold } para o gate 4 usar o threshold adaptativo
+  return { text, evThreshold, sigCount };
 }
 
 // ── Admin ──
@@ -1341,6 +1354,14 @@ async function handleAdmin(token, chatId, command) {
       }
       await send(token, chatId, txt);
     } catch(e) { await send(token, chatId, `❌ ${e.message}`); }
+  } else if (cmd === '/reset-tips') {
+    if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
+    try {
+      const r = await serverPost('/reset-tips', {}, sport);
+      analyzedMatches.clear();
+      await send(token, chatId, `✅ *Tips resetadas*\n${r.deleted} registros removidos.\nBanca restaurada ao valor inicial.\nMemória de análises limpa.`);
+    } catch(e) { await send(token, chatId, `❌ ${e.message}`); }
+
   } else if (cmd === '/health') {
     if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
     try {

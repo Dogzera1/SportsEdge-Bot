@@ -254,9 +254,7 @@ function ingestEsportsFixtures(allFixtures) {
     if (!combinedSlug && !p1Name) continue;
 
     const markets = bkData.markets || {};
-    const marketEntries = Object.entries(markets);
-
-    const validMarkets = marketEntries
+    const validMarkets = Object.entries(markets)
       .map(([mid, mData]) => {
         const outcomes = Object.values(mData.outcomes || {});
         if (outcomes.length !== 1) return null;
@@ -1439,6 +1437,16 @@ const server = http.createServer(async (req, res) => {
         sendJson(res, { ok: true });
       } catch(e) { sendJson(res, { error: e.message }, 500); }
     });
+    return;
+  }
+
+  if (p === '/reset-tips' && req.method === 'POST') {
+    const sport = parsed.query.sport || 'esports';
+    const count = db.prepare("SELECT COUNT(*) as c FROM tips WHERE sport = ?").get(sport).c;
+    db.prepare("DELETE FROM tips WHERE sport = ?").run(sport);
+    db.prepare("UPDATE bankroll SET current_banca = initial_banca, updated_at = datetime('now')").run();
+    log('INFO', 'ADMIN', `Tips resetadas: ${count} registros removidos (sport=${sport})`);
+    sendJson(res, { ok: true, deleted: count });
     return;
   }
 
