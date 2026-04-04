@@ -309,8 +309,8 @@ async function runAutoAnalysis() {
           const tipEV = result.tipMatch[3].trim();
           const tipConf = (result.tipMatch[5] || 'MÉDIA').trim().toUpperCase();
           // Kelly adaptado por confiança:
-          // ALTA → ¼ Kelly (padrão), MÉDIA → ⅙ Kelly (mais conservador sem Pinnacle como referência)
-          const kellyFraction = tipConf === 'ALTA' ? 0.25 : 1/6;
+          // ALTA → ¼ Kelly (max 4u) | MÉDIA → ⅙ Kelly (max 3u) | BAIXA → 1/10 Kelly (max 1.5u)
+          const kellyFraction = tipConf === 'ALTA' ? 0.25 : tipConf === 'MÉDIA' ? 1/6 : 0.1;
           const tipStake = calcKellyFraction(tipEV, tipOdd, kellyFraction);
           const gameIcon = '🎮';
           const oddsLabel = hasRealOdds ? '' : '\n⚠️ _Odds estimadas (sem mercado disponível)_';
@@ -324,8 +324,9 @@ async function runAutoAnalysis() {
           }, 'esports');
 
           const isDraft = match.status === 'draft';
-          const kellyLabel = tipConf === 'ALTA' ? '¼ Kelly' : '⅙ Kelly';
-          const confEmoji = { ALTA: '🟢', MÉDIA: '🟡' }[tipConf] || '🟡';
+          const kellyLabel = tipConf === 'ALTA' ? '¼ Kelly' : tipConf === 'MÉDIA' ? '⅙ Kelly' : '1/10 Kelly';
+          const confEmoji = { ALTA: '🟢', MÉDIA: '🟡', BAIXA: '🔴' }[tipConf] || '🟡';
+          const baixaNote = tipConf === 'BAIXA' ? '\n⚠️ _Tip exploratória — stake reduzida (baixa confiança)_' : '';
           const analysisLabel = result.hasLiveStats
             ? '📊 Baseado em dados ao vivo'
             : isDraft
@@ -335,7 +336,8 @@ async function runAutoAnalysis() {
             `*${match.team1}* ${match.score1}-${match.score2} *${match.team2}*\n\n` +
             `🎯 Aposta: *${tipTeam}* ML @ *${tipOdd}*\n` +
             `📈 EV: *${tipEV}*\n💵 Stake: *${tipStake}* _(${kellyLabel})_\n` +
-            `${confEmoji} Confiança: *${tipConf}*${mlEdgeLabel}\n` +
+            `${confEmoji} Confiança: *${tipConf}*${mlEdgeLabel}` +
+            `${baixaNote}\n` +
             `📋 ${match.league}\n` +
             `_${analysisLabel}_` +
             `${oddsLabel}\n\n` +
@@ -415,12 +417,14 @@ async function runAutoAnalysis() {
             const tipOdd = result.tipMatch[2].trim();
             const tipEV = result.tipMatch[3].trim();
             const tipConf = (result.tipMatch[5] || 'MÉDIA').trim().toUpperCase();
-            const kellyFraction = tipConf === 'ALTA' ? 0.25 : 1/6;
+            // ALTA → ¼ Kelly (max 4u) | MÉDIA → ⅙ Kelly (max 3u) | BAIXA → 1/10 Kelly (max 1.5u)
+            const kellyFraction = tipConf === 'ALTA' ? 0.25 : tipConf === 'MÉDIA' ? 1/6 : 0.1;
             const tipStake = calcKellyFraction(tipEV, tipOdd, kellyFraction);
             const gameIcon = '🎮';
-            const confEmoji = { ALTA: '🟢', MÉDIA: '🟡' }[tipConf] || '🟡';
-            const kellyLabel = tipConf === 'ALTA' ? '¼ Kelly' : '⅙ Kelly';
+            const confEmoji = { ALTA: '🟢', MÉDIA: '🟡', BAIXA: '🔴' }[tipConf] || '🟡';
+            const kellyLabel = tipConf === 'ALTA' ? '¼ Kelly' : tipConf === 'MÉDIA' ? '⅙ Kelly' : '1/10 Kelly';
             const mlEdgeLabel = result.mlScore > 0 ? ` | ML: ${result.mlScore.toFixed(1)}pp` : '';
+            const baixaNote = tipConf === 'BAIXA' ? `⚠️ _Tip exploratória — stake reduzida (baixa confiança)_\n` : '';
 
             await serverPost('/record-tip', {
               matchId: String(match.id), eventName: match.league,
@@ -436,6 +440,7 @@ async function runAutoAnalysis() {
               `\n🎯 Aposta: *${tipTeam}* ML @ *${tipOdd}*\n` +
               `📈 EV: *${tipEV}*\n💵 Stake: *${tipStake}* _(${kellyLabel})_\n` +
               `${confEmoji} Confiança: *${tipConf}*${mlEdgeLabel}\n` +
+              `${baixaNote}` +
               `${imminentNote}` +
               `📋 _Formato Bo1 — análise por forma e H2H (draft não disponível antes do início)_\n\n` +
               `⚠️ _Aposte com responsabilidade._`;
@@ -1029,12 +1034,8 @@ async function autoAnalyzeMatch(token, match) {
         filteredTipResult = null;
       }
 
-      // Gate 1: Confiança BAIXA → rejeitar sempre
-      if (filteredTipResult && tipConf === 'BAIXA') {
-        log('INFO', 'AUTO', `Gate confiança: ${match.team1} vs ${match.team2} → BAIXA confiança → rejeitado`);
-        filteredTipResult = null;
-      }
-      // Mantém tipConf sincronizado com o array mutável
+      // Gate 1: Confiança — BAIXA permitida com stake mínima (exploratória)
+      // Não rejeita mais — o Gate 4 aplica threshold de EV ajustado por confiança
       const getConf = () => (filteredTipResult?.[5] || 'MÉDIA').trim().toUpperCase();
 
       // Gate 2: Odds fora da zona de valor (1.50 – 3.00)
@@ -1061,23 +1062,31 @@ async function autoAnalyzeMatch(token, match) {
           if (confAtual === 'ALTA') {
             filteredTipResult[5] = 'MÉDIA';
             log('INFO', 'AUTO', `Gate consenso: ${match.team1} vs ${match.team2} → ML(${mlResult.direction}) ≠ IA(${tipTeam}) → rebaixado ALTA→MÉDIA (incerteza)`);
+          } else if (confAtual === 'MÉDIA') {
+            filteredTipResult[5] = 'BAIXA';
+            log('INFO', 'AUTO', `Gate consenso: ${match.team1} vs ${match.team2} → ML(${mlResult.direction}) ≠ IA(${tipTeam}) → rebaixado MÉDIA→BAIXA (divergência ML×IA)`);
           } else {
-            // Já era MÉDIA com divergência ML — mantém mas anota incerteza no log
-            log('INFO', 'AUTO', `Gate consenso: ${match.team1} vs ${match.team2} → ML(${mlResult.direction}) ≠ IA(${tipTeam}) → incerteza ML×IA (conf MÉDIA mantida)`);
+            log('INFO', 'AUTO', `Gate consenso: ${match.team1} vs ${match.team2} → ML(${mlResult.direction}) ≠ IA(${tipTeam}) → incerteza ML×IA (conf BAIXA mantida)`);
           }
         }
       }
 
-      // Gate 4: EV mínimo adaptativo (threshold reduz conforme sinais disponíveis)
+      // Gate 4: EV mínimo adaptativo por nível de confiança
+      // ALTA: adaptiveEV (padrão) | MÉDIA: adaptiveEV-1.5% | BAIXA: adaptiveEV-3% (exploratória)
       if (filteredTipResult && hasRealOdds) {
-        if (!isNaN(tipEV) && tipEV < adaptiveEV) {
-          log('INFO', 'AUTO', `Gate EV: ${match.team1} vs ${match.team2} → EV ${tipEV}% < threshold adaptativo ${adaptiveEV}% (${sigCount}/6 sinais) → rejeitado`);
+        const confNow = getConf();
+        const evOffset = confNow === 'ALTA' ? 0 : confNow === 'MÉDIA' ? -1.5 : -3;
+        const confThreshold = Math.max(confNow === 'BAIXA' ? 0.5 : 1, adaptiveEV + evOffset);
+        if (!isNaN(tipEV) && tipEV < confThreshold) {
+          log('INFO', 'AUTO', `Gate EV: ${match.team1} vs ${match.team2} → EV ${tipEV}% < threshold ${confThreshold.toFixed(1)}% [${confNow}] (${sigCount}/6 sinais) → rejeitado`);
           filteredTipResult = null;
         }
       }
 
       if (filteredTipResult) {
-        log('INFO', 'AUTO', `Tip aprovada por todos os gates: ${tipTeam} @ ${tipOdd} | EV ${tipEV}% | Conf:${tipConf} | ML-edge:${mlResult.score.toFixed(1)}pp`);
+        const confFinal = getConf();
+        const tierLabel = confFinal === 'ALTA' ? '🟢 ALTA' : confFinal === 'MÉDIA' ? '🟡 MÉDIA' : '🔴 BAIXA (exploratória)';
+        log('INFO', 'AUTO', `Tip aprovada: ${tipTeam} @ ${tipOdd} | EV ${tipEV}% | Conf:${tierLabel} | ML-edge:${mlResult.score.toFixed(1)}pp`);
       }
     }
 
@@ -1138,8 +1147,8 @@ function buildEsportsPrompt(match, game, gamesContext, o, enrichSection) {
     ? `🚨 ATENÇÃO — ESTADO DE ALTO FLUXO: ${isEarlyGame ? `Jogo com apenas ${gameMinute}min (muito cedo para análise confiável).` : ''} ${hasRecentObjective ? 'Objetivo maior recente detectado — estado do jogo pode ter mudado completamente.' : ''} Com delay de ~90s, o que você está vendo já pode ser história. Confiança máxima neste contexto: BAIXA.`
     : '';
 
-  const evBase      = parseFloat(process.env.LOL_EV_THRESHOLD ?? '5');
-  const minEdgePp   = parseFloat(process.env.LOL_PINNACLE_MARGIN ?? '8');
+  const evBase      = parseFloat(process.env.LOL_EV_THRESHOLD ?? '5') || 5;
+  const minEdgePp   = parseFloat(process.env.LOL_PINNACLE_MARGIN ?? '8') || 8;
   const noOddsConviction = parseInt(process.env.LOL_NO_ODDS_CONVICTION ?? '70');
 
   // ── Threshold adaptativo por quantidade de sinais disponíveis ──
@@ -1170,8 +1179,14 @@ function buildEsportsPrompt(match, game, gamesContext, o, enrichSection) {
     deJuiced = `Sem odds disponíveis. Tip só se vantagem clara (>${noOddsConviction}%) com pelo menos 2 sinais independentes confirmando.`;
   }
 
+  const evThresholdMedia = Math.max(1, evThreshold - 1.5);
+  const evThresholdBaixa = Math.max(0.5, evThreshold - 3);
   const tipInstruction = hasRealOdds
-    ? `[SOMENTE se EV ≥ +${evThreshold}% E confiança ALTA ou MÉDIA (NUNCA BAIXA) E pelo menos 2 sinais independentes confirmam: TIP_ML:[time]@[odd]|EV:[%]|STAKE:[u]|CONF:[ALTA/MÉDIA]]`
+    ? `[Gere tip conforme o edge disponível — 3 níveis possíveis:
+• ALTA (EV ≥ +${evThreshold}% E ≥2 sinais fortes): TIP_ML:[time]@[odd]|EV:[%]|STAKE:[u]|CONF:ALTA
+• MÉDIA (EV ≥ +${evThresholdMedia}% E ≥1 sinal confirmando): TIP_ML:[time]@[odd]|EV:[%]|STAKE:[u]|CONF:MÉDIA
+• BAIXA (EV ≥ +${evThresholdBaixa}% com algum edge identificável): TIP_ML:[time]@[odd]|EV:[%]|STAKE:[u]|CONF:BAIXA
+Se não há edge real → não gere TIP_ML]`
     : `[NÃO gere tip sem odds reais disponíveis]`;
 
   const text = `Você é um analista de apostas LoL especializado. Sua função é encontrar edge REAL. "Sem edge" é sempre uma resposta válida e preferível a forçar uma tip ruim.
@@ -1184,10 +1199,11 @@ FORMA/H2H:${enrichSection}
 ${highFluxWarning ? `\n${highFluxWarning}` : ''}${lineMovementWarning ? `\n${lineMovementWarning}` : ''}
 
 REGRAS OBRIGATÓRIAS (não negociáveis):
-• BAIXA confiança = NUNCA tip, mesmo com EV positivo
-• EV positivo sozinho NÃO é suficiente — precisa de ao menos 1 sinal confirmando
-• Dados ausentes (forma, H2H) = use o que está disponível; ausência de dado não é motivo para bloquear análise
-• Se há dúvida real → sem tip. O custo de não apostar é zero; o custo de apostar errado é real.
+• 3 níveis de tip: ALTA (edge claro, ≥2 sinais), MÉDIA (edge provável, ≥1 sinal), BAIXA (edge especulativo, stake mínima)
+• EV positivo sozinho NÃO é suficiente para ALTA/MÉDIA — precisa de ao menos 1 sinal confirmando
+• BAIXA confiança: permitida quando há algum edge identificável, mas incerteza alta (stake máx 1.5u)
+• Dados ausentes (forma, H2H) = use o que está disponível; ausência de dado não bloqueia análise
+• Se não há edge identificável → sem tip. O custo de não apostar é zero; o custo de apostar errado é real.
 
 ANÁLISE (responda cada ponto):
 1. Draft/Composição: qual time tem melhor comp? Early/late game? Counter-pick decisivo?
@@ -1202,7 +1218,7 @@ ANÁLISE (responda cada ponto):
    Mínimo 1 sinal forte OU 2 sinais fracos para considerar tip. Se dados estiverem ausentes, analise os que existem.
 ${hasRealOdds ? '' : '   Virada possível se: gold diff <3k, scaling comp no perdedor, soul point ou baron pendente.\n'}
 RESPOSTA (máximo 200 palavras):
-P(${t1})=__% | P(${t2})=__% | ${hasRealOdds ? `EV(${t1})=[X%] | EV(${t2})=[X%]` : `Conf:[ALTA/MÉDIA/BAIXA]`} | Sinais:[N/6]
+P(${t1})=__% | P(${t2})=__% | ${hasRealOdds ? `EV(${t1})=[X%] | EV(${t2})=[X%]` : `Conf:[ALTA/MÉDIA/BAIXA]`} | Sinais:[N/6] | Confiança:[ALTA/MÉDIA/BAIXA]
 ${tipInstruction}`;
 
   return { text, evThreshold, sigCount };
