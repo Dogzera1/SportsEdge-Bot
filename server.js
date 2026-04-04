@@ -640,7 +640,7 @@ async function getLoLMatches() {
     let mainEvs = [], newerToken = null;
 
     try {
-      const sr = await httpGet(LOL_BASE + '/getSchedule?hl=pt-BR', { 'x-api-key': LOL_KEY });
+      const sr = await httpGet(LOL_BASE + '/getSchedule?hl=en-US', { 'x-api-key': LOL_KEY });
       const sd = safeParse(sr.body, {});
       mainEvs = sd?.data?.schedule?.events || [];
       newerToken = sd?.data?.schedule?.pages?.newer;
@@ -682,7 +682,7 @@ async function getLoLMatches() {
     upcoming = [...upcomingInShow, ...upcoming];
 
     try {
-      const glr = await httpGet(LOL_BASE + '/getLive?hl=pt-BR', { 'x-api-key': LOL_KEY });
+      const glr = await httpGet(LOL_BASE + '/getLive?hl=en-US', { 'x-api-key': LOL_KEY });
       const gld = safeParse(glr.body, {});
       const getLiveEvts = gld?.data?.schedule?.events || [];
       getLiveEvts.filter(e => e.type === 'match' && e.match)
@@ -694,7 +694,7 @@ async function getLoLMatches() {
 
     if (!upcoming.length && newerToken) {
       try {
-        const nr = await httpGet(LOL_BASE + '/getSchedule?hl=pt-BR&pageToken=' + encodeURIComponent(newerToken), { 'x-api-key': LOL_KEY });
+        const nr = await httpGet(LOL_BASE + '/getSchedule?hl=en-US&pageToken=' + encodeURIComponent(newerToken), { 'x-api-key': LOL_KEY });
         const nd = safeParse(nr.body, {});
         upcoming = (nd?.data?.schedule?.events || [])
           .filter(e => e.type === 'match' && e.match && e.state !== 'completed')
@@ -896,14 +896,14 @@ const server = http.createServer(async (req, res) => {
   if (p === '/lol-raw') {
     // Debug: retorna todos os eventos brutos do schedule (sem filtro de liga)
     try {
-      const sr = await httpGet(LOL_BASE + '/getSchedule?hl=pt-BR', { 'x-api-key': LOL_KEY });
+      const sr = await httpGet(LOL_BASE + '/getSchedule?hl=en-US', { 'x-api-key': LOL_KEY });
       const sd = safeParse(sr.body, {});
       const evs = sd?.data?.schedule?.events || [];
 
       // Busca getLive também
       let liveEvs = [];
       try {
-        const glr = await httpGet(LOL_BASE + '/getLive?hl=pt-BR', { 'x-api-key': LOL_KEY });
+        const glr = await httpGet(LOL_BASE + '/getLive?hl=en-US', { 'x-api-key': LOL_KEY });
         liveEvs = safeParse(glr.body, {})?.data?.schedule?.events || [];
       } catch(_) {}
 
@@ -935,7 +935,7 @@ const server = http.createServer(async (req, res) => {
       const matchId = parsed.query.matchId;
       const games = [];
       if (matchId) {
-        const dr = await httpGet(`${LOL_BASE}/getEventDetails?hl=pt-BR&id=${matchId}`, { 'x-api-key': LOL_KEY });
+        const dr = await httpGet(`${LOL_BASE}/getEventDetails?hl=en-US&id=${matchId}`, { 'x-api-key': LOL_KEY });
         const dd = safeParse(dr.body, {});
         const match = dd?.data?.event?.match;
         if (match?.games) {
@@ -1321,7 +1321,7 @@ const server = http.createServer(async (req, res) => {
     const matchId = parsed.query.matchId || '';
     const game = parsed.query.game || 'lol';
     try {
-      const sr = await httpGet(LOL_BASE + '/getSchedule?hl=pt-BR', { 'x-api-key': LOL_KEY });
+      const sr = await httpGet(LOL_BASE + '/getSchedule?hl=en-US', { 'x-api-key': LOL_KEY });
       const sd = safeParse(sr.body, {});
       const events = sd?.data?.schedule?.events || [];
       const ev = events.find(e => e.match?.id === matchId && e.state === 'completed');
