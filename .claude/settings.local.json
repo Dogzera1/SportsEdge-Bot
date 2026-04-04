@@ -14,7 +14,8 @@
       "Bash(curl -s http://127.0.0.1:3000/sync-pro-stats)",
       "WebSearch",
       "WebFetch(domain:oddspapi.io)",
-      "WebFetch(domain:docs.oddspapi.io)"
+      "WebFetch(domain:docs.oddspapi.io)",
+      "Bash(node -e \"const Database = require\\('better-sqlite3'\\); const db = new Database\\('sportsedge.db'\\); const count = db.prepare\\(\\\\\"SELECT COUNT\\(*\\) as n FROM tips WHERE confidence = 'BAIXA'\\\\\"\\).get\\(\\); console.log\\('Tips BAIXA:', count.n\\);\")"
     ]
   }
 }
