@@ -328,9 +328,8 @@ async function runAutoAnalysis() {
           const tipOdd = result.tipMatch[2].trim();
           const tipEV = result.tipMatch[3].trim();
           const tipConf = (result.tipMatch[5] || 'MÉDIA').trim().toUpperCase();
-          // Kelly adaptado por confiança:
-          // ALTA → ¼ Kelly (max 4u) | MÉDIA → ⅙ Kelly (max 3u) | BAIXA → 1/10 Kelly (max 1.5u)
-          const kellyFraction = tipConf === 'ALTA' ? 0.25 : tipConf === 'MÉDIA' ? 1/6 : 0.1;
+          // Kelly adaptado por confiança: ALTA → ¼ Kelly (max 4u) | MÉDIA → ⅙ Kelly (max 3u)
+          const kellyFraction = tipConf === 'ALTA' ? 0.25 : 1/6;
           const tipStake = calcKellyFraction(tipEV, tipOdd, kellyFraction);
           const gameIcon = '🎮';
           const oddsLabel = hasRealOdds ? '' : '\n⚠️ _Odds estimadas (sem mercado disponível)_';
@@ -344,9 +343,8 @@ async function runAutoAnalysis() {
           }, 'esports');
 
           const isDraft = match.status === 'draft';
-          const kellyLabel = tipConf === 'ALTA' ? '¼ Kelly' : tipConf === 'MÉDIA' ? '⅙ Kelly' : '1/10 Kelly';
-          const confEmoji = { ALTA: '🟢', MÉDIA: '🟡', BAIXA: '🔴' }[tipConf] || '🟡';
-          const baixaNote = tipConf === 'BAIXA' ? '\n⚠️ _Tip exploratória — stake reduzida (baixa confiança)_' : '';
+          const kellyLabel = tipConf === 'ALTA' ? '¼ Kelly' : '⅙ Kelly';
+          const confEmoji = { ALTA: '🟢', MÉDIA: '🟡' }[tipConf] || '🟡';
           const analysisLabel = result.hasLiveStats
             ? '📊 Baseado em dados ao vivo'
             : isDraft
@@ -356,8 +354,7 @@ async function runAutoAnalysis() {
             `*${match.team1}* ${match.score1}-${match.score2} *${match.team2}*\n\n` +
             `🎯 Aposta: *${tipTeam}* ML @ *${tipOdd}*\n` +
             `📈 EV: *${tipEV}*\n💵 Stake: *${tipStake}* _(${kellyLabel})_\n` +
-            `${confEmoji} Confiança: *${tipConf}*${mlEdgeLabel}` +
-            `${baixaNote}\n` +
+            `${confEmoji} Confiança: *${tipConf}*${mlEdgeLabel}\n` +
             `📋 ${match.league}\n` +
             `_${analysisLabel}_` +
             `${oddsLabel}\n\n` +
@@ -437,14 +434,13 @@ async function runAutoAnalysis() {
             const tipOdd = result.tipMatch[2].trim();
             const tipEV = result.tipMatch[3].trim();
             const tipConf = (result.tipMatch[5] || 'MÉDIA').trim().toUpperCase();
-            // ALTA → ¼ Kelly (max 4u) | MÉDIA → ⅙ Kelly (max 3u) | BAIXA → 1/10 Kelly (max 1.5u)
-            const kellyFraction = tipConf === 'ALTA' ? 0.25 : tipConf === 'MÉDIA' ? 1/6 : 0.1;
+            // ALTA → ¼ Kelly (max 4u) | MÉDIA → ⅙ Kelly (max 3u)
+            const kellyFraction = tipConf === 'ALTA' ? 0.25 : 1/6;
             const tipStake = calcKellyFraction(tipEV, tipOdd, kellyFraction);
             const gameIcon = '🎮';
-            const confEmoji = { ALTA: '🟢', MÉDIA: '🟡', BAIXA: '🔴' }[tipConf] || '🟡';
-            const kellyLabel = tipConf === 'ALTA' ? '¼ Kelly' : tipConf === 'MÉDIA' ? '⅙ Kelly' : '1/10 Kelly';
+            const confEmoji = { ALTA: '🟢', MÉDIA: '🟡' }[tipConf] || '🟡';
+            const kellyLabel = tipConf === 'ALTA' ? '¼ Kelly' : '⅙ Kelly';
             const mlEdgeLabel = result.mlScore > 0 ? ` | ML: ${result.mlScore.toFixed(1)}pp` : '';
-            const baixaNote = tipConf === 'BAIXA' ? `⚠️ _Tip exploratória — stake reduzida (baixa confiança)_\n` : '';
 
             await serverPost('/record-tip', {
               matchId: String(match.id), eventName: match.league,
@@ -460,7 +456,6 @@ async function runAutoAnalysis() {
               `\n🎯 Aposta: *${tipTeam}* ML @ *${tipOdd}*\n` +
               `📈 EV: *${tipEV}*\n💵 Stake: *${tipStake}* _(${kellyLabel})_\n` +
               `${confEmoji} Confiança: *${tipConf}*${mlEdgeLabel}\n` +
-              `${baixaNote}` +
               `${imminentNote}` +
               `📋 _Formato Bo1 — análise por forma e H2H (draft não disponível antes do início)_\n\n` +
               `⚠️ _Aposte com responsabilidade._`;
@@ -1054,8 +1049,11 @@ async function autoAnalyzeMatch(token, match) {
         filteredTipResult = null;
       }
 
-      // Gate 1: Confiança — BAIXA permitida com stake mínima (exploratória)
-      // Não rejeita mais — o Gate 4 aplica threshold de EV ajustado por confiança
+      // Gate 1: Rejeitar tips de confiança BAIXA
+      if (filteredTipResult && tipConf === 'BAIXA') {
+        log('INFO', 'AUTO', `Gate confiança: ${match.team1} vs ${match.team2} → conf BAIXA → rejeitado`);
+        filteredTipResult = null;
+      }
       const getConf = () => (filteredTipResult?.[5] || 'MÉDIA').trim().toUpperCase();
 
       // Gate 2: Odds fora da zona de valor (1.50 – 3.00)
@@ -1091,12 +1089,18 @@ async function autoAnalyzeMatch(token, match) {
         }
       }
 
+      // Gate 3.5: Rejeitar se rebaixado para BAIXA pelo gate de consenso
+      if (filteredTipResult && getConf() === 'BAIXA') {
+        log('INFO', 'AUTO', `Gate confiança: ${match.team1} vs ${match.team2} → rebaixado para BAIXA → rejeitado`);
+        filteredTipResult = null;
+      }
+
       // Gate 4: EV mínimo adaptativo por nível de confiança
-      // ALTA: adaptiveEV (padrão) | MÉDIA: adaptiveEV-1.5% | BAIXA: adaptiveEV-3% (exploratória)
+      // ALTA: adaptiveEV (padrão) | MÉDIA: adaptiveEV-1.5%
       if (filteredTipResult && hasRealOdds) {
         const confNow = getConf();
-        const evOffset = confNow === 'ALTA' ? 0 : confNow === 'MÉDIA' ? -1.5 : -3;
-        const confThreshold = Math.max(confNow === 'BAIXA' ? 0.5 : 1, adaptiveEV + evOffset);
+        const evOffset = confNow === 'ALTA' ? 0 : -1.5;
+        const confThreshold = Math.max(1, adaptiveEV + evOffset);
         if (!isNaN(tipEV) && tipEV < confThreshold) {
           log('INFO', 'AUTO', `Gate EV: ${match.team1} vs ${match.team2} → EV ${tipEV}% < threshold ${confThreshold.toFixed(1)}% [${confNow}] (${sigCount}/6 sinais) → rejeitado`);
           filteredTipResult = null;
@@ -1105,7 +1109,7 @@ async function autoAnalyzeMatch(token, match) {
 
       if (filteredTipResult) {
         const confFinal = getConf();
-        const tierLabel = confFinal === 'ALTA' ? '🟢 ALTA' : confFinal === 'MÉDIA' ? '🟡 MÉDIA' : '🔴 BAIXA (exploratória)';
+        const tierLabel = confFinal === 'ALTA' ? '🟢 ALTA' : '🟡 MÉDIA';
         log('INFO', 'AUTO', `Tip aprovada: ${tipTeam} @ ${tipOdd} | EV ${tipEV}% | Conf:${tierLabel} | ML-edge:${mlResult.score.toFixed(1)}pp`);
       }
     }
@@ -1186,7 +1190,6 @@ function buildEsportsPrompt(match, game, gamesContext, o, enrichSection) {
   const evThreshold = Math.max(2, Math.min(7, evBase + (3 - sigCount)));
 
   const evThresholdMedia = Math.max(1, evThreshold - 1.5);
-  const evThresholdBaixa = Math.max(0.5, evThreshold - 3);
 
   let bookMarginNote = '';
   let deJuiced = '';
@@ -1197,7 +1200,7 @@ function buildEsportsPrompt(match, game, gamesContext, o, enrichSection) {
     const dj1 = (r1 / or * 100).toFixed(1);
     const dj2 = (r2 / or * 100).toFixed(1);
     bookMarginNote = `AVISO: 1xBet tem margem de ${marginReal}% neste jogo. O de-juice REMOVE esta margem, mas NÃO corrige o viés da bookie. Para lucro real você precisa que sua probabilidade VERDADEIRA supere o de-juice por pelo menos ${minEdgePp}pp.`;
-    deJuiced = `De-juice 1xBet: ${t1}=${dj1}% | ${t2}=${dj2}%\n   ALTA/MÉDIA: P estimada deve superar de-juice em ≥${minEdgePp}pp E EV ≥ +${evThreshold}%.\n   BAIXA: EV ≥ +${evThresholdBaixa}% é suficiente — stake mínima cobre o risco extra.\n   Se EV negativo nos dois lados → SEM EDGE.`;
+    deJuiced = `De-juice 1xBet: ${t1}=${dj1}% | ${t2}=${dj2}%\n   P estimada deve superar de-juice em ≥${minEdgePp}pp E EV ≥ +${evThreshold}%.\n   Se EV negativo nos dois lados → SEM EDGE.`;
   } else {
     deJuiced = `Sem odds disponíveis. Tip só se vantagem clara (>${noOddsConviction}%) com pelo menos 2 sinais independentes confirmando.`;
   }
@@ -1205,8 +1208,7 @@ function buildEsportsPrompt(match, game, gamesContext, o, enrichSection) {
     ? `[DECISÃO OBRIGATÓRIA — avalie em ordem:
 1. Se EV(qualquer lado) ≥ +${evThreshold}% E ≥2 sinais checklist → TIP_ML:[time]@[odd]|EV:[%]|STAKE:[u]|CONF:ALTA
 2. Se EV(qualquer lado) ≥ +${evThresholdMedia}% E ≥1 sinal checklist → TIP_ML:[time]@[odd]|EV:[%]|STAKE:[u]|CONF:MÉDIA
-3. Se EV(qualquer lado) ≥ +${evThresholdBaixa}% (independente de sinais) → TIP_ML:[time]@[odd]|EV:[%]|STAKE:[u]|CONF:BAIXA
-4. Se EV negativo nos dois lados → não gere TIP_ML]`
+3. Se EV negativo nos dois lados → não gere TIP_ML]`
     : `[NÃO gere tip sem odds reais disponíveis]`;
 
   const text = `Você é um analista de apostas LoL especializado. Sua função é encontrar edge REAL. "Sem edge" é sempre uma resposta válida e preferível a forçar uma tip ruim.
@@ -1221,7 +1223,6 @@ ${highFluxWarning ? `\n${highFluxWarning}` : ''}${lineMovementWarning ? `\n${lin
 REGRAS OBRIGATÓRIAS (não negociáveis):
 • ALTA (EV ≥ +${evThreshold}%): exige ≥2 sinais independentes do checklist confirmando
 • MÉDIA (EV ≥ +${evThresholdMedia}%): exige ≥1 sinal do checklist confirmando
-• BAIXA (EV ≥ +${evThresholdBaixa}%): NÃO exige sinal do checklist — EV positivo acima do threshold É SUFICIENTE para gerar BAIXA. Se um lado tem EV ≥ +${evThresholdBaixa}% → gere tip BAIXA.
 • Se EV negativo nos dois lados → sem tip.
 • Dados ausentes = use o que está disponível; ausência não bloqueia análise.
 
@@ -1229,7 +1230,7 @@ ANÁLISE (responda cada ponto):
 1. Draft/Composição: qual time tem melhor comp? Early/late game? Counter-pick decisivo?
    → P(${t1})=__% | P(${t2})=__% | Justificativa: [1 frase objetiva]
 2. Edge quantitativo: ${deJuiced}
-3. Sinais do checklist (para ALTA/MÉDIA — opcional para BAIXA):
+3. Sinais do checklist:
    [ ] Forma recente clara (≥60% winrate, diferença >15pp)
    [ ] H2H favorável (≥60% de vitórias no confronto direto)
    [ ] Draft/composição claramente superior
