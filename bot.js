@@ -1319,6 +1319,20 @@ async function handleAdmin(token, chatId, command) {
     } catch(e) {
       await send(token, chatId, `❌ ${e.message}`);
     }
+  } else if (cmd === '/resync') {
+    await send(token, chatId, '⏳ Iniciando re-sync de stats (forma/H2H dos últimos 45 dias)...');
+    try {
+      const r = await serverPost('/resync-stats', { force: true }, sport);
+      await send(token, chatId,
+        `✅ *Re-sync concluído*\n` +
+        `📊 Partidas: *${r.matchCount}*\n` +
+        `🎮 Champs: *${r.champEntries}*\n` +
+        `👤 Player+champ: *${r.playerEntries}*\n` +
+        `⏭️ Pulados: *${r.skipped}*\n\n` +
+        `_Form e H2H agora disponíveis para análise._`
+      );
+    } catch(e) { await send(token, chatId, `❌ ${e.message}`); }
+
   } else if (cmd === '/settle') {
     lastSettlementCheck = 0;
     await settleCompletedTips();

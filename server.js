@@ -1472,6 +1472,20 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (p === '/resync-stats' && req.method === 'POST') {
+    let body = ''; req.on('data', d => body += d);
+    req.on('end', async () => {
+      try {
+        const payload = safeParse(body, {});
+        const force = payload.force === true;
+        log('INFO', 'ADMIN', `Re-sync de stats solicitado (force=${force})`);
+        const result = await syncProStats({ forceResync: force });
+        sendJson(res, result);
+      } catch(e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    });
+    return;
+  }
+
   if (p === '/reset-tips' && req.method === 'POST') {
     const sport = parsed.query.sport || 'esports';
     const count = db.prepare("SELECT COUNT(*) as c FROM tips WHERE sport = ?").get(sport).c;
@@ -1871,16 +1885,28 @@ async function checkStaleOddsForUpcoming() {
 }
 
 // ── Sync de stats pro via PandaScore ──
-async function syncProStats() {
+async function syncProStats({ forceResync = false } = {}) {
   if (!PANDASCORE_TOKEN) return { ok: false, error: 'sem token' };
   const headers = { 'Authorization': `Bearer ${PANDASCORE_TOKEN}` };
   const cutoff = new Date(Date.now() - 45 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  const cutoffEnd = new Date().toISOString().slice(0, 10);
 
-  // Busca 50 partidas finalizadas recentes
-  const listR = await httpGet(`https://api.pandascore.co/lol/matches?filter[status]=finished&sort=-begin_at&per_page=50&range[begin_at]=${cutoff},`, headers);
-  if (listR.status !== 200) return { ok: false, error: `PS list status ${listR.status}` };
-  const matches = safeParse(listR.body, []);
-  if (!Array.isArray(matches)) return { ok: false, error: 'resposta inesperada da PS' };
+  // Busca até 4 páginas (400 partidas) para cobrir todos os times relevantes
+  const MAX_PAGES = 4;
+  const PER_PAGE = 100;
+  const allMatches = [];
+  for (let page = 1; page <= MAX_PAGES; page++) {
+    const url = `https://api.pandascore.co/lol/matches?filter[status]=finished&sort=-begin_at&per_page=${PER_PAGE}&page=${page}&range[begin_at]=${cutoff},${cutoffEnd}`;
+    const listR = await httpGet(url, headers).catch(() => null);
+    if (!listR || listR.status !== 200) break;
+    const batch = safeParse(listR.body, []);
+    if (!Array.isArray(batch) || batch.length === 0) break;
+    allMatches.push(...batch);
+    if (batch.length < PER_PAGE) break; // última página
+    await new Promise(r => setTimeout(r, 300));
+  }
+  const matches = allMatches;
+  log('INFO', 'SYNC', `PandaScore: ${matches.length} partidas finalizadas coletadas (últimos 45 dias)`);
 
   let matchCount = 0, champEntries = 0, playerEntries = 0, skipped = 0;
   const champAgg = {}; // { "Champion_role": { wins, total } }
@@ -1890,7 +1916,7 @@ async function syncProStats() {
 
   for (const m of matches) {
     const psId = `ps_${m.id}`;
-    if (stmts.isMatchSynced.get(psId)) { skipped++; continue; }
+    if (!forceResync && stmts.isMatchSynced.get(psId)) { skipped++; continue; }
 
     const t1 = m.opponents?.[0]?.opponent;
     const t2 = m.opponents?.[1]?.opponent;
