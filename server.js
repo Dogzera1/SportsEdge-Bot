@@ -511,6 +511,11 @@ const LOL_ALIASES = {
   'kabum': ['kbm'],
   'loud': ['lod'],
   'isurus': ['isr'],
+  'vivokeydstars': ['keydstars', 'keyd', 'vivo'],
+  'keydstars': ['keyd', 'vivo', 'vivokeydstars'],
+  // LLA / LTA
+  'losleviatanesports': ['leviatan', 'losleviatan', 'los'],
+  'leviatanesports': ['leviatan', 'losleviatan'],
   // Prime League (Alemanha)
   'berlininternationalgaming': ['big', 'berlin'],
   'g2nord': ['g2n'],
