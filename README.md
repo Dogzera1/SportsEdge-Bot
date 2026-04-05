@@ -2,7 +2,7 @@
 
 Bot autônomo de Telegram para análise automática de apostas em **League of Legends**, baseado em Valor Esperado (EV) e Kelly Criterion, alimentado por IA (DeepSeek ou Claude).
 
-> **Status (Abril 2026):** Sistema operando exclusivamente para LoL. Odds via **OddsPapi v4** (1xBet, plano free 250 req/mês) com sistema **round-robin** que busca um lote de torneios por ciclo. ML usa composição + WR de campeões em pro play + WR de jogadores com campeões específicos. Fair odds removidas de upcoming — tips pré-jogo só com odds reais disponíveis.
+> **Status (Abril 2026):** Sistema operando exclusivamente para LoL. Odds via **OddsPapi v4** (1xBet, plano free 250 req/mês) com sistema **round-robin** que busca um lote de torneios por ciclo. ML usa composição + WR de campeões em pro play + WR de jogadores com campeões específicos. Fair odds removidas de upcoming — tips pré-jogo só com odds reais disponíveis. Sistema de três níveis de confiança ativo: **ALTA**, **MÉDIA** e **BAIXA**.
 
 ---
 
@@ -172,7 +172,7 @@ O bot opera em **modo totalmente automático**. O usuário interage pelos botõe
 | Notificação ao vivo | 1 min | Avisa sobre draft iniciado e partida ao vivo |
 | Line movement | 30 min | Alerta se odds mudaram >= 10% desde o último snapshot |
 | Settlement | 30 min | Resolve tips pendentes via Riot API e PandaScore |
-| Sync pro stats | 12h (+ boot) | Busca últimas 50 partidas pro via PandaScore → popula WR de campeões e jogadores |
+| Sync pro stats | 12h (+ boot) | Busca até 400 partidas pro (últimos 45 dias) via PandaScore → popula WR de campeões, jogadores, forma e H2H |
 | Patch meta auto-fetch | 14 dias | Busca versão atual no ddragon e atualiza `LOL_PATCH_META` automaticamente |
 | Patch meta stale alert | 24h | Avisa admins se patch meta não foi atualizado há mais de 14 dias |
 | Fetch de odds | 3h (configurável) | Round-robin: busca 1 lote de 3 torneios por ciclo |
@@ -195,7 +195,7 @@ O comp score considera o WR médio dos campeões escolhidos em pro play (não so
 
 ### Sync de Dados Pro (PandaScore)
 
-No boot e a cada 12h, o sistema busca as últimas 50 partidas finalizadas via PandaScore e extrai:
+No boot e a cada 12h, o sistema busca até **400 partidas finalizadas** dos últimos 45 dias via PandaScore e extrai:
 - **`match_results`** — resultados para forma recente e H2H (filtrado a 45 dias)
 - **`pro_champ_stats`** — WR de cada campeão por role em pro play
 - **`pro_player_champ_stats`** — WR de cada jogador com campeões específicos
@@ -273,16 +273,39 @@ O bot usa **DeepSeek** (`deepseek-chat`) como provedor padrão por ser significa
    |-- FAIR_ODDS:[time1]=[X.XX]|[time2]=[X.XX]  (apenas partidas ao vivo/draft)
    |
 7. Gates pós-IA:
-   |-- Gate 1: rejeita confiança BAIXA
+   |-- Gate 0: rejeita se não há odds reais disponíveis
    |-- Gate 2: rejeita odds fora de [1.50, 3.00]
-   |-- Gate 3: rejeita se ML e IA apontam direções opostas (score ML > 5pp)
-   |-- Gate 4: rejeita EV < 5%
+   |-- Gate 3 (consenso ML×IA): ML diverge da IA com score > 5pp → rebaixa ALTA→MÉDIA→BAIXA
+   |-- Gate 4 (EV adaptativo): rejeita se EV < threshold por confiança (ver tabela abaixo)
    |
 8. Se TIP_ML aprovada em todos os gates: envia DM a todos os inscritos
    |
 9. Registra no banco SQLite + marca tipSent=true (evita duplicatas após redeploy)
    Partidas sem edge têm cooldown dobrado no próximo ciclo
 ```
+
+### Níveis de Confiança e Thresholds de EV
+
+O sistema opera com **três níveis de confiança**. O threshold de EV mínimo é **adaptativo** — quanto mais sinais disponíveis, menor o threshold exigido (mais dados = mais confiança na estimativa).
+
+| Confiança | Sinais exigidos | EV mínimo (6 sinais → ≤1 sinal) | Kelly | Stake máx | Emoji |
+|-----------|----------------|----------------------------------|-------|-----------|-------|
+| 🟢 ALTA   | ≥ 2 sinais     | 2% → 7%                          | ¼ Kelly | 4u | 🟢 |
+| 🟡 MÉDIA  | ≥ 1 sinal      | 1% → 5.5%                        | ⅙ Kelly | 3u | 🟡 |
+| 🔵 BAIXA  | Nenhum         | 0.5% → 4%                        | 1/10 Kelly | 1.5u | 🔵 |
+
+**Threshold adaptativo por quantidade de sinais** (`LOL_EV_THRESHOLD=5` padrão):
+
+| Sinais disponíveis | ALTA | MÉDIA | BAIXA |
+|--------------------|------|-------|-------|
+| 6 sinais | 2% | 1% | 0.5% |
+| 5 sinais | 3% | 1.5% | 0.5% |
+| 4 sinais | 4% | 2.5% | 1% |
+| 3 sinais | 5% | 3.5% | 2% |
+| 2 sinais | 6% | 4.5% | 3% |
+| ≤1 sinal | 7% | 5.5% | 4% |
+
+Tips BAIXA sempre exibem aviso: _"Tip de confiança BAIXA — stake reduzido. Aposte com cautela."_
 
 ### Tipos de Tips
 
@@ -300,20 +323,25 @@ Uma tip por partida — o flag `tipSent` é salvo no banco e recarregado no boot
 | Proteção | Mecanismo |
 |---|---|
 | "Sem edge" é resposta válida | Instrução explícita no prompt para não forçar recomendação |
-| Gate de confiança | Confiança BAIXA → rejeição automática |
-| Gate de odds | Odds < 1.50 ou > 3.00 → rejeição (zona de baixo valor real) |
-| Gate de consenso ML×IA | ML diverge da IA com score > 5pp → rejeição |
-| Gate de EV | EV < 5% → rejeição |
+| Gate 0: sem odds reais | Odds estimadas → rejeição automática |
+| Gate 2: odds fora da zona | Odds < 1.50 ou > 3.00 → rejeição (zona de baixo valor real) |
+| Gate 3: consenso ML×IA | ML diverge da IA com score > 5pp → rebaixa confiança (ALTA→MÉDIA→BAIXA) |
+| Gate 4: EV mínimo adaptativo | EV abaixo do threshold por nível de confiança e quantidade de sinais → rejeição |
 | Comparação contra 1xBet | De-juice da margem 1xBet (padrão 8%) para obter probabilidade justa real |
 | Line movement | Instrução para ajustar probabilidade 2-3pp na direção do mercado quando linha se mover |
-| Alto fluxo | Jogos com <15 min ou objetivo maior recente (Baron, Elder) rebaixam confiança para BAIXA |
+| Alto fluxo | Jogos com <15 min ou objetivo maior recente (Baron, Elder) → confiança máxima BAIXA |
 | Form/H2H limitados a 45 dias | Resultados antigos (outro meta/patch) não contam para cálculo de edge |
 
-### Kelly Criterion (¼ Kelly)
+### Kelly Criterion
 
 ```
 f* = EV / (odds - 1)
-stake = clamp(f* × 0.25, 0.5u, 4u)  arredondado a 0.5u
+
+ALTA:  stake = clamp(f* × 0.25,  0.5u, 4u)   ¼ Kelly
+MÉDIA: stake = clamp(f* × 0.167, 0.5u, 3u)   ⅙ Kelly
+BAIXA: stake = clamp(f* × 0.10,  0.5u, 1.5u) 1/10 Kelly
+
+Arredondado a 0.5u
 ```
 
 ---
@@ -434,6 +462,7 @@ lol betting/
 ├── server.js           # Servidor HTTP: odds, partidas, banco, endpoints, proxy IA, sync pro stats
 ├── bot.js              # Bot Telegram: polling, análise automática, tips, patch meta
 ├── start.js            # Launcher: spawna server + bot com auto-restart
+├── sync-form.js        # Script avulso: sync histórico de partidas (forma/H2H) sem o servidor rodando
 ├── railway.toml        # Deploy Railway (healthcheck TCP, restart on_failure)
 ├── package.json
 ├── .env                # Credenciais (nunca commitar)
@@ -442,7 +471,16 @@ lol betting/
     ├── database.js     # Schema SQLite, statements, path resolution (absoluto/relativo)
     ├── ml.js           # Pré-filtro ML local (forma, H2H, comp/meta score, live)
     ├── sports.js       # Registry de esportes (tokens, feature flags)
-    └── utils.js        # log, calcKelly, norm, fmtDate, httpGet, safeParse
+    └── utils.js        # log, calcKelly, calcKellyFraction, norm, fmtDate, httpGet, safeParse
+```
+
+### Sync manual de histórico
+
+Para popular a tabela `match_results` com os últimos 45 dias sem precisar do servidor rodando:
+
+```bash
+node sync-form.js           # sync incremental (pula já sincronizados)
+node sync-form.js --force   # re-sincroniza tudo
 ```
 
 ---

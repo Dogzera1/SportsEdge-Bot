@@ -435,13 +435,20 @@ async function runAutoAnalysis() {
             const tipOdd = result.tipMatch[2].trim();
             const tipEV = result.tipMatch[3].trim();
             const tipConf = (result.tipMatch[5] || 'MÉDIA').trim().toUpperCase();
-            // ALTA → ¼ Kelly (max 4u) | MÉDIA → ⅙ Kelly (max 3u) | BAIXA → 1/10 Kelly (max 1.5u)
-            const kellyFraction = tipConf === 'ALTA' ? 0.25 : tipConf === 'BAIXA' ? 0.10 : 1/6;
+
+            // Pré-jogo: confiança BAIXA não tem valor suficiente sem dados ao vivo
+            if (tipConf === 'BAIXA') {
+              log('INFO', 'AUTO', `Upcoming ${match.team1} vs ${match.team2} → conf BAIXA → rejeitado (pré-jogo)`);
+              analyzedMatches.set(matchKey, { ts: now, tipSent: false, noEdge: true });
+              await new Promise(r => setTimeout(r, 3000)); continue;
+            }
+
+            // ALTA → ¼ Kelly (max 4u) | MÉDIA → ⅙ Kelly (max 3u)
+            const kellyFraction = tipConf === 'ALTA' ? 0.25 : 1/6;
             const tipStake = calcKellyFraction(tipEV, tipOdd, kellyFraction);
             const gameIcon = '🎮';
-            const confEmoji = { ALTA: '🟢', MÉDIA: '🟡', BAIXA: '🔵' }[tipConf] || '🟡';
-            const kellyLabel = tipConf === 'ALTA' ? '¼ Kelly' : tipConf === 'BAIXA' ? '1/10 Kelly' : '⅙ Kelly';
-            const baixaNote = tipConf === 'BAIXA' ? '\n⚠️ _Tip de confiança BAIXA — stake reduzido. Aposte com cautela._' : '';
+            const confEmoji = { ALTA: '🟢', MÉDIA: '🟡' }[tipConf] || '🟡';
+            const kellyLabel = tipConf === 'ALTA' ? '¼ Kelly' : '⅙ Kelly';
             const mlEdgeLabel = result.mlScore > 0 ? ` | ML: ${result.mlScore.toFixed(1)}pp` : '';
 
             await serverPost('/record-tip', {
@@ -458,7 +465,7 @@ async function runAutoAnalysis() {
               `\n🎯 Aposta: *${tipTeam}* ML @ *${tipOdd}*\n` +
               `📈 EV: *${tipEV}*\n💵 Stake: *${tipStake}* _(${kellyLabel})_\n` +
               `${confEmoji} Confiança: *${tipConf}*${mlEdgeLabel}\n` +
-              `${imminentNote}${baixaNote}` +
+              `${imminentNote}` +
               `📋 _Formato Bo1 — análise por forma e H2H (draft não disponível antes do início)_\n\n` +
               `⚠️ _Aposte com responsabilidade._`;
 

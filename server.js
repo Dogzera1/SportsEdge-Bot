@@ -32,6 +32,12 @@ try {
 }
 const { db, stmts } = initDatabase(DB_PATH);
 
+// Limpeza de integridade: remove tips com odds inválidas (> 4.0) gravadas por versões anteriores
+try {
+  const cleaned = db.prepare("DELETE FROM tips WHERE CAST(odds AS REAL) > 4.0").run();
+  if (cleaned.changes > 0) log('INFO', 'BOOT', `Limpeza: ${cleaned.changes} tip(s) com odds > 4.0 removidas`);
+} catch(e) { log('WARN', 'BOOT', `Limpeza odds: ${e.message}`); }
+
 // Apenas Esports suportado — sem scrapers externos
 
 // ── Odds Cache ──
