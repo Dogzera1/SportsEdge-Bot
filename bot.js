@@ -369,6 +369,56 @@ async function runAutoAnalysis() {
           }
           analyzedMatches.set(matchKey, { ts: now, tipSent: true });
           log('INFO', 'AUTO-TIP', `Esports: ${tipTeam} @ ${tipOdd} (odds ${hasRealOdds ? 'reais' : 'estimadas'})`);
+
+          // ── Handicap tip (se houver edge) ──
+          try {
+            const hOdds = await serverGet(`/handicap-odds?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}`).catch(() => null);
+            if (hOdds?.markets?.length) {
+              const { calcHandicapScore } = require('./lib/ml');
+              const enrich = result.enrich || {};
+              const hScore = calcHandicapScore(match, enrich, result.o);
+
+              for (const mkt of hOdds.markets.slice(0, 2)) {
+                const mktName = mkt.name || '';
+                const hOdd1 = parseFloat(mkt.t1Odds);
+                const hOdd2 = parseFloat(mkt.t2Odds);
+                if (!hOdd1 || !hOdd2 || hOdd1 <= 1.0 || hOdd2 <= 1.0) continue;
+
+                const isT1Fav = hScore.cleanSweepP1 >= hScore.cleanSweepP2;
+                const modelP  = isT1Fav ? hScore.cleanSweepP1 : hScore.cleanSweepP2;
+                const hOdd    = isT1Fav ? hOdd1 : hOdd2;
+                const favTeam = isT1Fav ? match.team1 : match.team2;
+                const hEV     = (modelP * hOdd - 1) * 100;
+
+                if (hEV < 5.0) continue;
+                if (hOdd < 1.30 || hOdd > 4.00) continue;
+
+                const hStake = Math.max(0.5, Math.min(2.0, (hEV / 100) * 10)).toFixed(1);
+                const hMsg = `🎮 ♟️ *TIP HANDICAP*\n` +
+                  `*${match.team1}* vs *${match.team2}*\n📋 ${match.league}\n\n` +
+                  `🎯 Aposta: *${favTeam}* ${mktName}\n` +
+                  `📈 EV estimado: *+${hEV.toFixed(1)}%*\n` +
+                  `💵 Stake: *${hStake}u*\n` +
+                  `🔵 Confiança: BAIXA\n\n` +
+                  `⚠️ _Mercado de handicap — menor liquidez. Aposte com cautela._`;
+
+                await serverPost('/record-tip', {
+                  matchId: String(match.id) + '_H', eventName: match.league,
+                  p1: match.team1, p2: match.team2, tipParticipant: favTeam,
+                  odds: String(hOdd), ev: String(hEV.toFixed(1)), stake: String(hStake),
+                  confidence: 'BAIXA', isLive: true, market_type: 'HANDICAP'
+                }, 'esports');
+
+                for (const [userId, prefs] of subscribedUsers) {
+                  if (!prefs.has('esports')) continue;
+                  try { await sendDM(esportsConfig.token, userId, hMsg); } catch(_) {}
+                }
+                break;
+              }
+            }
+          } catch(hErr) {
+            log('WARN', 'AUTO', `Handicap check falhou: ${hErr.message}`);
+          }
         }
         await new Promise(r => setTimeout(r, 2000));
       }
@@ -1700,9 +1750,10 @@ async function poll(token, sport) {
           } else if (text === '📊 Tracking') {
             // mesmo handler do /tracking
             try {
-              const [roi, history] = await Promise.all([
+              const [roi, history, marketRows] = await Promise.all([
                 serverGet('/roi', sport),
-                serverGet('/tips-history?limit=10&filter=settled', sport).catch(() => [])
+                serverGet('/tips-history?limit=10&filter=settled', sport).catch(() => []),
+                serverGet('/roi-by-market', sport).catch(() => [])
               ]);
               const o = roi.overall || {};
               const wins = o.wins || 0, losses = o.losses || 0, total = o.total || 0;
@@ -1730,6 +1781,13 @@ async function poll(token, sport) {
                   roi.calibration.forEach(c => {
                     txt += `${confEmoji[c.confidence]||'⚪'} ${c.confidence}: ${c.wins}/${c.total} (${c.win_rate}%)\n`;
                   });
+                }
+                if (Array.isArray(marketRows) && marketRows.length > 1) {
+                  txt += `\n📊 *Por mercado:*\n`;
+                  for (const row of marketRows) {
+                    const mktEmoji = row.market_type === 'HANDICAP' ? '♟️' : row.market_type === 'METHOD' ? '🥊' : '🎯';
+                    txt += `${mktEmoji} ${row.market_type}: ${row.wins}/${row.total} | ROI: ${row.roi > 0 ? '+' : ''}${row.roi}%\n`;
+                  }
                 }
                 if (Array.isArray(history) && history.length > 0) {
                   txt += `\n📋 *Últimas tips:*\n`;
@@ -1794,9 +1852,10 @@ async function poll(token, sport) {
             } catch(e) { await send(token, chatId, '❌ Erro ao buscar stats.'); }
           } else if (text === '/tracking' || text.startsWith('/tracking ')) {
             try {
-              const [roi, history] = await Promise.all([
+              const [roi, history, marketRows] = await Promise.all([
                 serverGet('/roi', sport),
-                serverGet('/tips-history?limit=10&filter=settled', sport).catch(() => [])
+                serverGet('/tips-history?limit=10&filter=settled', sport).catch(() => []),
+                serverGet('/roi-by-market', sport).catch(() => [])
               ]);
               const o = roi.overall || {};
               const bk = roi.banca || {};
@@ -1860,6 +1919,15 @@ async function poll(token, sport) {
                     txt += `⚡ Ao Vivo: ${lv.wins}/${lv.total} (${lvWR}%) | ROI ${lvRoi >= 0 ? '+' : ''}${lvRoi}%\n`;
                   } else {
                     txt += `⚡ Ao Vivo: sem tips registradas\n`;
+                  }
+                }
+
+                // Breakdown por mercado
+                if (Array.isArray(marketRows) && marketRows.length > 1) {
+                  txt += `\n📊 *Por mercado:*\n`;
+                  for (const row of marketRows) {
+                    const mktEmoji = row.market_type === 'HANDICAP' ? '♟️' : row.market_type === 'METHOD' ? '🥊' : '🎯';
+                    txt += `${mktEmoji} ${row.market_type}: ${row.wins}/${row.total} | ROI: ${row.roi > 0 ? '+' : ''}${row.roi}%\n`;
                   }
                 }
 
@@ -1944,9 +2012,10 @@ async function poll(token, sport) {
               await handleNotificacoes(token, chatId, s);
             } else if (action === 'tracking') {
               try {
-                const [roi, history] = await Promise.all([
+                const [roi, history, marketRows] = await Promise.all([
                   serverGet('/roi', s),
-                  serverGet('/tips-history?limit=10&filter=settled', s).catch(() => [])
+                  serverGet('/tips-history?limit=10&filter=settled', s).catch(() => []),
+                  serverGet('/roi-by-market', s).catch(() => [])
                 ]);
                 const o = roi.overall || {};
                 const bk = roi.banca || {};
@@ -1979,6 +2048,13 @@ async function poll(token, sport) {
                     roi.calibration.forEach(c => {
                       txt += `${confEmoji[c.confidence]||'⚪'} ${c.confidence}: ${c.wins}/${c.total} (${c.win_rate}%)\n`;
                     });
+                  }
+                  if (Array.isArray(marketRows) && marketRows.length > 1) {
+                    txt += `\n📊 *Por mercado:*\n`;
+                    for (const row of marketRows) {
+                      const mktEmoji = row.market_type === 'HANDICAP' ? '♟️' : row.market_type === 'METHOD' ? '🥊' : '🎯';
+                      txt += `${mktEmoji} ${row.market_type}: ${row.wins}/${row.total} | ROI: ${row.roi > 0 ? '+' : ''}${row.roi}%\n`;
+                    }
                   }
                   if (Array.isArray(history) && history.length > 0) {
                     txt += `\n📋 *Últimas tips:*\n`;
@@ -2023,6 +2099,130 @@ async function poll(token, sport) {
     setTimeout(loop, backoff);
   }
   
+  loop();
+}
+
+// ── MMA Auto-analysis loop ──
+async function pollMma() {
+  const mmaConfig = SPORTS['mma'];
+  if (!mmaConfig?.enabled || !mmaConfig?.token) return;
+  const token = mmaConfig.token;
+
+  const analyzedMma = new Map();
+  const MMA_INTERVAL = 6 * 60 * 60 * 1000; // Re-analisa a cada 6h
+
+  async function loop() {
+    try {
+      const fights = await serverGet('/mma-matches').catch(() => []);
+      if (!Array.isArray(fights) || !fights.length) {
+        setTimeout(loop, 30 * 60 * 1000); return;
+      }
+
+      log('INFO', 'AUTO-MMA', `${fights.length} lutas MMA com odds`);
+
+      const now = Date.now();
+      for (const fight of fights) {
+        const key = `mma_${fight.id}`;
+        const prev = analyzedMma.get(key);
+        if (prev?.tipSent) continue;
+        if (prev && (now - prev.ts < MMA_INTERVAL)) continue;
+
+        const o = fight.odds;
+        if (!o?.t1 || !o?.t2) continue;
+
+        const fightTime = fight.time ? new Date(fight.time).toLocaleString('pt-BR', {
+          timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit',
+          hour: '2-digit', minute: '2-digit'
+        }) : '—';
+
+        const r1 = 1 / parseFloat(o.t1), r2 = 1 / parseFloat(o.t2);
+        const or = r1 + r2;
+        const fairP1 = (r1 / or * 100).toFixed(1);
+        const fairP2 = (r2 / or * 100).toFixed(1);
+        const marginPct = ((or - 1) * 100).toFixed(1);
+
+        const prompt = `Você é um analista especializado em MMA/UFC. Analise esta luta e identifique edge real se existir.
+
+LUTA: ${fight.team1} vs ${fight.team2} | ${fight.league}
+Data: ${fightTime} (BRT)
+
+ODDS (${o.bookmaker || 'EU'}):
+${fight.team1}: ${o.t1} | ${fight.team2}: ${o.t2}
+De-juice: ${fight.team1}=${fairP1}% | ${fight.team2}=${fairP2}% | Margem: ${marginPct}%
+
+INSTRUÇÃO: Analise com base no seu conhecimento dos lutadores (estilo, finalizações, form recente, ranking, histórico).
+Se encontrar edge real (EV ≥ +5%): TIP_ML:[lutador]@[odd]|EV:[%]|STAKE:[u]|CONF:[ALTA/MÉDIA/BAIXA]
+Se não houver edge: responda apenas "SEM_EDGE"
+
+RESPOSTA (máximo 150 palavras):`;
+
+        log('INFO', 'AUTO-MMA', `Analisando: ${fight.team1} vs ${fight.team2}`);
+        analyzedMma.set(key, { ts: now, tipSent: false });
+
+        let resp;
+        try {
+          resp = await serverPost('/claude', {
+            model: 'deepseek-chat',
+            max_tokens: 300,
+            messages: [{ role: 'user', content: prompt }]
+          }, null, { 'x-claude-key': AI_PROXY_KEY });
+        } catch(e) {
+          log('WARN', 'AUTO-MMA', `Claude error: ${e.message}`);
+          await new Promise(r => setTimeout(r, 3000)); continue;
+        }
+
+        const text = resp?.content?.map(b => b.text || '').join('') || '';
+        const tipMatch = text.match(/TIP_ML:([^@]+)@([\d.]+)\|EV:([+-]?[\d.]+)%\|STAKE:([\d.]+u?)\|CONF:(ALTA|MÉDIA|BAIXA)/i);
+
+        if (!tipMatch) {
+          log('INFO', 'AUTO-MMA', `Sem tip: ${fight.team1} vs ${fight.team2}`);
+          await new Promise(r => setTimeout(r, 3000)); continue;
+        }
+
+        const tipTeam  = tipMatch[1].trim();
+        const tipOdd   = parseFloat(tipMatch[2]);
+        const tipEV    = parseFloat(tipMatch[3]);
+        const tipStake = tipMatch[4].replace('u','');
+        const tipConf  = tipMatch[5].toUpperCase();
+
+        if (tipOdd < 1.50 || tipOdd > 4.00) {
+          log('INFO', 'AUTO-MMA', `Gate odds: ${tipOdd} fora do range`);
+          await new Promise(r => setTimeout(r, 3000)); continue;
+        }
+        if (tipEV < 5.0) {
+          log('INFO', 'AUTO-MMA', `Gate EV: ${tipEV}% < 5%`);
+          await new Promise(r => setTimeout(r, 3000)); continue;
+        }
+
+        const confEmoji = { ALTA: '🟢', MÉDIA: '🟡', BAIXA: '🔵' }[tipConf] || '🟡';
+        const tipMsg = `🥊 💰 *TIP MMA*\n` +
+          `*${fight.team1}* vs *${fight.team2}*\n📋 ${fight.league}\n` +
+          `🕐 ${fightTime} (BRT)\n\n` +
+          `🎯 Aposta: *${tipTeam}* @ *${tipOdd}*\n` +
+          `📈 EV: *+${tipEV}%*\n💵 Stake: *${tipStake}u*\n` +
+          `${confEmoji} Confiança: *${tipConf}*\n\n` +
+          `⚠️ _Aposte com responsabilidade._`;
+
+        await serverPost('/record-tip', {
+          matchId: String(fight.id), eventName: fight.league,
+          p1: fight.team1, p2: fight.team2, tipParticipant: tipTeam,
+          odds: String(tipOdd), ev: String(tipEV), stake: String(tipStake),
+          confidence: tipConf, isLive: false, market_type: 'ML'
+        }, 'mma');
+
+        for (const [userId, prefs] of subscribedUsers) {
+          if (!prefs.has('mma')) continue;
+          try { await sendDM(token, userId, tipMsg); } catch(_) {}
+        }
+        analyzedMma.set(key, { ts: now, tipSent: true });
+        log('INFO', 'AUTO-MMA', `Tip enviada: ${tipTeam} @ ${tipOdd}`);
+        await new Promise(r => setTimeout(r, 5000));
+      }
+    } catch(e) {
+      log('ERROR', 'AUTO-MMA', e.message);
+    }
+    setTimeout(loop, 30 * 60 * 1000);
+  }
   loop();
 }
 
@@ -2076,7 +2276,10 @@ log('INFO', 'BOOT', `Sports carregados: ${JSON.stringify(Object.entries(SPORTS).
       log('ERROR', 'BOOT', `${sport}: Token inválido`);
     }
   }
-  
+
+  // MMA polling (independente do loop de sports genérico)
+  pollMma();
+
   // Background tasks
   setTimeout(() => runAutoAnalysis().catch(e => log('ERROR', 'AUTO', e.message)), 15 * 1000); // 1ª análise 15s após boot
   setInterval(() => runAutoAnalysis().catch(e => log('ERROR', 'AUTO', e.message)), 6 * 60 * 1000);

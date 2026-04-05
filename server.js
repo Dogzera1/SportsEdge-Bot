@@ -18,6 +18,8 @@ const ODDSPAPI_KEY = process.env.ODDS_API_KEY
   || process.env.ESPORTS_ODDS_KEY;
 const LOL_KEY = process.env.LOL_API_KEY || '';
 const PANDASCORE_TOKEN = process.env.PANDASCORE_TOKEN || '';
+// The Odds API — usado para MMA (20k req/mês)
+const THE_ODDS_API_KEY = process.env.THE_ODDS_API_KEY || '';
 
 // DB_PATH allows pointing to a Railway volume (e.g. /data/sportsedge.db)
 const fs = require('fs');
@@ -1330,6 +1332,83 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (p === '/handicap-odds') {
+    const t1 = parsed.query.team1 || '';
+    const t2 = parsed.query.team2 || '';
+    if (!t1 || !t2) { sendJson(res, { error: 'team1 e team2 obrigatórios' }, 400); return; }
+    try {
+      const nt1 = norm(t1), nt2 = norm(t2);
+      const entry = Object.values(oddsCache).find(v => {
+        const cs = v.combinedSlug || '';
+        return cs.includes(nt1) && cs.includes(nt2);
+      });
+      if (!entry || !entry.fixtureId) { sendJson(res, { error: 'not_found' }); return; }
+      const { fixtureId } = entry;
+      const url = `https://api.oddspapi.io/v4/odds-by-fixtures?bookmaker=1xbet&fixtureId=${fixtureId}&oddsFormat=decimal&apiKey=${ODDSPAPI_KEY}`;
+      const r = await httpGet(url).catch(() => null);
+      if (!r || r.status !== 200) { sendJson(res, { error: 'not_found' }); return; }
+      const data = safeParse(r.body, null);
+      const allMarkets = Array.isArray(data) ? data : (Array.isArray(data?.data) ? data.data : []);
+      const handicapMarkets = allMarkets.filter(m => {
+        const name = (m.marketName || m.marketId || '').toString().toLowerCase();
+        return name.includes('handicap') || name.includes('map');
+      });
+      const markets = handicapMarkets.map(m => {
+        const outcomes = Array.isArray(m.outcomes) ? m.outcomes : [];
+        return {
+          name: m.marketName || m.marketId || '',
+          t1Odds: outcomes[0] ? extractPrice(outcomes[0]) : null,
+          t2Odds: outcomes[1] ? extractPrice(outcomes[1]) : null
+        };
+      });
+      sendJson(res, { fixtureId, markets });
+    } catch(e) {
+      sendJson(res, { error: e.message }, 500);
+    }
+    return;
+  }
+
+  if (p === '/mma-odds') {
+    if (!THE_ODDS_API_KEY) { sendJson(res, { hasData: false, error: 'no_key' }); return; }
+    const fighter1 = parsed.query.fighter1 || '';
+    const fighter2 = parsed.query.fighter2 || '';
+    const sport = parsed.query.sport || 'mma_mixed_martial_arts';
+    try {
+      const url = `https://api.the-odds-api.com/v4/sports/${sport}/odds/?apiKey=${THE_ODDS_API_KEY}&regions=eu&markets=h2h&oddsFormat=decimal`;
+      const r = await httpGet(url).catch(() => null);
+      if (!r || r.status !== 200) { sendJson(res, { hasData: false }); return; }
+      const events = safeParse(r.body, []);
+      const nf1 = norm(fighter1), nf2 = norm(fighter2);
+      let found = null;
+      for (const ev of events) {
+        const nh = norm(ev.home_team || ''), na = norm(ev.away_team || '');
+        if ((nh.includes(nf1) || nf1.includes(nh)) && (na.includes(nf2) || nf2.includes(na))) {
+          found = { home: ev.home_team, away: ev.away_team, bookmakers: ev.bookmakers };
+          break;
+        }
+        if ((nh.includes(nf2) || nf2.includes(nh)) && (na.includes(nf1) || nf1.includes(na))) {
+          found = { home: ev.away_team, away: ev.home_team, bookmakers: ev.bookmakers, swapped: true };
+          break;
+        }
+      }
+      if (!found) { sendJson(res, { hasData: false }); return; }
+      const bk = (found.bookmakers || [])[0];
+      const h2h = bk?.markets?.find(m => m.key === 'h2h');
+      const outcomes = h2h?.outcomes || [];
+      const homeOut = outcomes.find(o => norm(o.name) === norm(found.home));
+      const awayOut = outcomes.find(o => norm(o.name) === norm(found.away));
+      sendJson(res, {
+        t1: homeOut?.price ?? null,
+        t2: awayOut?.price ?? null,
+        bookmaker: bk?.title || '',
+        hasData: true
+      });
+    } catch(e) {
+      sendJson(res, { hasData: false, error: e.message });
+    }
+    return;
+  }
+
   if (p === '/health') {
     const sport = 'esports';
     const dbOk = (() => {
@@ -1459,7 +1538,7 @@ const server = http.createServer(async (req, res) => {
           p1: t.p1 || t.team1 || t.fighter1 || '', p2: t.p2 || t.team2 || t.fighter2 || '',
           tipParticipant: t.tipParticipant || t.tipTeam || '', odds: parseFloat(t.odds) || 0,
           ev: parseFloat(t.ev) || 0, stake: String(t.stake || ''), confidence: t.confidence || 'MÉDIA',
-          isLive, botToken: t.botToken || ''
+          isLive, botToken: t.botToken || '', market_type: t.market_type || 'ML'
         });
         // Calcula stake em reais com base na banca atual (1u = 1% da banca atual)
         try {
@@ -1837,6 +1916,52 @@ const server = http.createServer(async (req, res) => {
         sendJson(res, { ok: true });
       } catch(e) { sendJson(res, { error: e.message }, 500); }
     });
+    return;
+  }
+
+  if (p === '/mma-matches') {
+    if (!THE_ODDS_API_KEY) { sendJson(res, []); return; }
+    try {
+      const mmaUrl = `https://api.the-odds-api.com/v4/sports/mma_mixed_martial_arts/odds/?apiKey=${THE_ODDS_API_KEY}&regions=eu&markets=h2h&oddsFormat=decimal`;
+      const r = await httpGet(mmaUrl).catch(() => ({ status: 500, body: '[]' }));
+      if (r.status !== 200) { sendJson(res, []); return; }
+      const raw = safeParse(r.body, []);
+      const now = Date.now();
+      const fights = raw
+        .filter(e => new Date(e.commence_time).getTime() > now)
+        .map(e => {
+          const bm = e.bookmakers?.[0];
+          const market = bm?.markets?.find(m => m.key === 'h2h');
+          const out = market?.outcomes || [];
+          const o1 = out.find(o => o.name === e.home_team);
+          const o2 = out.find(o => o.name === e.away_team);
+          return {
+            id: e.id,
+            game: 'mma',
+            status: 'upcoming',
+            team1: e.home_team,
+            team2: e.away_team,
+            league: e.sport_title || 'MMA',
+            time: e.commence_time,
+            odds: (o1 && o2) ? { t1: String(o1.price), t2: String(o2.price), bookmaker: bm.title } : null
+          };
+        })
+        .filter(f => f.odds);
+      sendJson(res, fights);
+    } catch(e) {
+      sendJson(res, []);
+    }
+    return;
+  }
+
+  if (p === '/roi-by-market') {
+    const sport = parsed.query.sport || 'esports';
+    try {
+      const rows = stmts.getRoiByMarket.all(sport);
+      sendJson(res, rows);
+    } catch(e) {
+      sendJson(res, []);
+    }
     return;
   }
 
