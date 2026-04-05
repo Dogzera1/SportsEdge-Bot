@@ -464,7 +464,9 @@ const LOL_ALIASES = {
   'geng': ['gen', 'gengolden', 'gengaming'],
   't1': ['skt', 'skt1'],
   'hanwhajinbrion': ['brion', 'bro', 'hanjinbrion', 'jinbrion'],
+  'brochallengers': ['bro', 'brion', 'hanwhajinbrion'],
   'dnsoopers': ['dns', 'soopers'],
+  'dnschallengers': ['dns', 'dnsoopers'],
   'fearx': ['fearxesports', 'fx'],
   // LCS
   'cloud9': ['c9'],
@@ -472,7 +474,9 @@ const LOL_ALIASES = {
   'flyquest': ['fly', 'fq'],
   '100thieves': ['100t'],
   'digitalsports': ['dig', 'disguised', 'dsg'],
+  'dignitas': ['dig', 'digs', 'team dignitas'],
   'disguised': ['dsg', 'dig'],
+  'shopifyrebellion': ['sr', 'shopify', 'rebellion'],
   'sentinels': ['sen'],
   'lyongaming': ['lg', 'lyon'],
   // LEC
