@@ -207,7 +207,8 @@ function getMenu(sport) {
           { text: '❓ Ajuda', callback_data: `menu_ajuda_${sport}` }
         ],
         [
-          { text: '💰 Minhas Tips', callback_data: `tips_menu_${sport}` }
+          { text: '💰 Minhas Tips', callback_data: `tips_menu_${sport}` },
+          { text: '⚖️ Fair Odds', callback_data: `menu_fairodds_${sport}` }
         ]
       ]
     }
@@ -436,19 +437,19 @@ async function runAutoAnalysis() {
             const tipEV = result.tipMatch[3].trim();
             const tipConf = (result.tipMatch[5] || 'MÉDIA').trim().toUpperCase();
 
-            // Pré-jogo: confiança BAIXA não tem valor suficiente sem dados ao vivo
-            if (tipConf === 'BAIXA') {
-              log('INFO', 'AUTO', `Upcoming ${match.team1} vs ${match.team2} → conf BAIXA → rejeitado (pré-jogo)`);
+            // Pré-jogo: confiança BAIXA bloqueada salvo se mlEdge forte (≥10pp) compensar ausência de dados ao vivo
+            if (tipConf === 'BAIXA' && result.mlScore < 8) {
+              log('INFO', 'AUTO', `Upcoming ${match.team1} vs ${match.team2} → conf BAIXA sem ML-edge (${result.mlScore.toFixed(1)}pp) → rejeitado (pré-jogo)`);
               analyzedMatches.set(matchKey, { ts: now, tipSent: false, noEdge: true });
               await new Promise(r => setTimeout(r, 3000)); continue;
             }
 
-            // ALTA → ¼ Kelly (max 4u) | MÉDIA → ⅙ Kelly (max 3u)
-            const kellyFraction = tipConf === 'ALTA' ? 0.25 : 1/6;
+            // ALTA → ¼ Kelly (max 4u) | MÉDIA → ⅙ Kelly (max 3u) | BAIXA → 1/10 Kelly (max 1.5u)
+            const kellyFraction = tipConf === 'ALTA' ? 0.25 : tipConf === 'BAIXA' ? 0.10 : 1/6;
             const tipStake = calcKellyFraction(tipEV, tipOdd, kellyFraction);
             const gameIcon = '🎮';
-            const confEmoji = { ALTA: '🟢', MÉDIA: '🟡' }[tipConf] || '🟡';
-            const kellyLabel = tipConf === 'ALTA' ? '¼ Kelly' : '⅙ Kelly';
+            const confEmoji = { ALTA: '🟢', MÉDIA: '🟡', BAIXA: '🔵' }[tipConf] || '🟡';
+            const kellyLabel = tipConf === 'ALTA' ? '¼ Kelly' : tipConf === 'BAIXA' ? '1/10 Kelly' : '⅙ Kelly';
             const mlEdgeLabel = result.mlScore > 0 ? ` | ML: ${result.mlScore.toFixed(1)}pp` : '';
 
             await serverPost('/record-tip', {
@@ -459,13 +460,14 @@ async function runAutoAnalysis() {
             }, 'esports');
 
             const imminentNote = isImminentMatch ? `⏰ _Odds atualizadas agora (< 2h para o jogo)_\n` : '';
+            const baixaNote = tipConf === 'BAIXA' ? `⚠️ _Confiança BAIXA (ML-edge ${result.mlScore.toFixed(1)}pp) — stake reduzido. Aposte com cautela._\n` : '';
             const tipMsg = `${gameIcon} 💰 *TIP PRÉ-JOGO ESPORTS (Bo1)*\n` +
               `*${match.team1}* vs *${match.team2}*\n📋 ${match.league}\n` +
               (match.time ? `🕐 Início: *${matchTime}* (BRT)\n` : '') +
               `\n🎯 Aposta: *${tipTeam}* ML @ *${tipOdd}*\n` +
               `📈 EV: *${tipEV}*\n💵 Stake: *${tipStake}* _(${kellyLabel})_\n` +
               `${confEmoji} Confiança: *${tipConf}*${mlEdgeLabel}\n` +
-              `${imminentNote}` +
+              `${imminentNote}${baixaNote}` +
               `📋 _Formato Bo1 — análise por forma e H2H (draft não disponível antes do início)_\n\n` +
               `⚠️ _Aposte com responsabilidade._`;
 
@@ -1064,7 +1066,7 @@ async function autoAnalyzeMatch(token, match) {
       // Abaixo de 1.50: margem da casa come todo o EV; acima de 3.00: alta variância sem Pinnacle como referência
       if (filteredTipResult && hasRealOdds) {
         const MIN_ODDS = parseFloat(process.env.LOL_MIN_ODDS ?? '1.50');
-        const MAX_ODDS = parseFloat(process.env.LOL_MAX_ODDS ?? '3.00');
+        const MAX_ODDS = parseFloat(process.env.LOL_MAX_ODDS ?? '3.50');
         if (tipOdd < MIN_ODDS || tipOdd > MAX_ODDS) {
           log('INFO', 'AUTO', `Gate odds: ${match.team1} vs ${match.team2} → odd ${tipOdd} fora do range [${MIN_ODDS}, ${MAX_ODDS}] → rejeitado`);
           filteredTipResult = null;
@@ -1074,7 +1076,7 @@ async function autoAnalyzeMatch(token, match) {
       // Gate 3: Consenso de direção ML × IA
       // Divergência = incerteza, não erro. Rebaixa para MÉDIA em vez de rejeitar.
       // Raciocínio: a IA vê os mesmos dados + pode identificar padrões não-lineares.
-      if (filteredTipResult && mlResult.direction && hasRealOdds && mlResult.score > 5) {
+      if (filteredTipResult && mlResult.direction && hasRealOdds && mlResult.score > 8) {
         const t1 = (match.team1 || '').toLowerCase();
         const tipTeamNorm = tipTeam.toLowerCase();
         const aiDirectionIsT1 = tipTeamNorm.includes(t1) || t1.includes(tipTeamNorm);
@@ -1184,8 +1186,8 @@ function buildEsportsPrompt(match, game, gamesContext, o, enrichSection) {
     enrichSection.includes('LINE MOVEMENT'),              // movimento de linha
     gamesContext.includes('AO VIVO'),                    // dados ao vivo
   ].filter(Boolean).length;
-  // 6 sinais → 2% | 5 → 3% | 4 → 4% | 3 → 5% | 2 → 6% | ≤1 → 7%
-  const evThreshold = Math.max(2, Math.min(7, evBase + (3 - sigCount)));
+  // 6 sinais → 2% | 5 → 3% | 4 → 4% | 3 → 5% | 2 → 6% | ≤1 → 6%
+  const evThreshold = Math.max(2, Math.min(6, evBase + (3 - sigCount)));
 
   const evThresholdMedia = Math.max(1, evThreshold - 1.5);
   const evThresholdBaixa = Math.max(0.5, evThreshold - 3);
@@ -1590,6 +1592,59 @@ async function handleProximas(token, chatId, sport) {
   }
 }
 
+async function handleFairOdds(token, chatId, sport) {
+  try {
+    await send(token, chatId, '⏳ _Calculando fair odds..._');
+
+    const lolMatches = await serverGet('/lol-matches').catch(() => []);
+    const all = Array.isArray(lolMatches) ? lolMatches : [];
+
+    const live = all.filter(m => (m.status === 'live' || m.status === 'draft') && m.odds?.t1 && m.odds?.t2);
+
+    if (!live.length) {
+      await send(token, chatId,
+        '❌ *Nenhuma partida ao vivo com odds disponíveis.*\n\n_Odds reais são necessárias para calcular fair odds._',
+        getMenu(sport)
+      );
+      return;
+    }
+
+    let txt = `⚖️ *FAIR ODDS — AO VIVO*\n━━━━━━━━━━━━━━━━\n`;
+    txt += `_Odds justas = bookie sem margem (de-juiced)_\n\n`;
+
+    for (const m of live.slice(0, 8)) {
+      const o1 = parseFloat(m.odds.t1);
+      const o2 = parseFloat(m.odds.t2);
+      if (!o1 || !o2 || o1 <= 1 || o2 <= 1) continue;
+
+      const p1 = 1 / o1;
+      const p2 = 1 / o2;
+      const totalVig = p1 + p2;
+      const margin = ((totalVig - 1) * 100).toFixed(1);
+
+      // De-juiced probabilities
+      const fairP1 = p1 / totalVig;
+      const fairP2 = p2 / totalVig;
+      const fairO1 = (1 / fairP1).toFixed(2);
+      const fairO2 = (1 / fairP2).toFixed(2);
+
+      const league = m.league ? `[${m.league}] ` : '';
+      const score = (m.score1 !== undefined && m.score2 !== undefined) ? ` (${m.score1}-${m.score2})` : '';
+      const isDraft = m.status === 'draft' ? ' 📋' : ' 🔴';
+
+      txt += `${isDraft} ${league}*${m.team1}* vs *${m.team2}*${score}\n`;
+      txt += `  🏷️ 1xBet: \`${o1}\` / \`${o2}\` _(margem: ${margin}%)_\n`;
+      txt += `  ⚖️ Fair: \`${fairO1}\` / \`${fairO2}\`\n`;
+      txt += `  📊 P: *${(fairP1 * 100).toFixed(1)}%* / *${(fairP2 * 100).toFixed(1)}%*\n\n`;
+    }
+
+    txt += `_Atualizado: ${new Date().toLocaleTimeString('pt-BR', { timeZone: 'America/Sao_Paulo' })}_`;
+    await send(token, chatId, txt, getMenu(sport));
+  } catch (e) {
+    await send(token, chatId, `❌ Erro ao calcular fair odds: ${e.message}`);
+  }
+}
+
 // ── Polling per Bot ──
 async function poll(token, sport) {
   const config = SPORTS[sport];
@@ -1712,6 +1767,8 @@ async function poll(token, sport) {
             }
           } else if (text === '📅 Próximas') {
             await handleProximas(token, chatId, sport);
+          } else if (text === '⚖️ Fair Odds') {
+            await handleFairOdds(token, chatId, sport);
           } else if (text.startsWith('/notificacoes') || text.startsWith('/notificações')) {
             const action = text.split(' ')[1];
             await handleNotificacoes(token, chatId, sport, action);
@@ -1937,6 +1994,8 @@ async function poll(token, sport) {
               } catch(e) { await send(token, chatId, '❌ Erro ao buscar tracking: ' + e.message); }
             } else if (action === 'proximas') {
               await handleProximas(token, chatId, s);
+            } else if (action === 'fairodds') {
+              await handleFairOdds(token, chatId, s);
             } else if (action === 'ajuda') {
               await send(token, chatId,
                 `📖 *${config.name} Bot*\n\n` +
