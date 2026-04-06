@@ -1896,9 +1896,9 @@ async function handleFairOdds(token, chatId, sport) {
     const matches = await serverGet(endpoint).catch(() => []);
     const all = Array.isArray(matches) ? matches : [];
 
-    const withOdds = (sport === 'mma' || sport === 'tennis' || sport === 'football')
+    const withOdds = sport === 'football' || sport === 'mma' || sport === 'tennis'
       ? all.filter(m => m.odds)
-      : all.filter(m => (m.status === 'live' || m.status === 'draft') && m.odds?.t1 && m.odds?.t2);
+      : all.filter(m => m.odds?.t1 && m.odds?.t2); // LoL: todas com odds (live, draft e upcoming)
 
     if (!withOdds.length) {
       const noOddsMsg = sport === 'mma'
@@ -1937,8 +1937,9 @@ async function handleFairOdds(token, chatId, sport) {
 
         if (HAS_FB_API) {
           try {
-            const { getTeamForm, getH2H, findFixtureWithTeams } = require('./lib/football-api');
-            const fixtureInfo = await findFixtureWithTeams(m.team1, m.team2, m.time).catch(() => null);
+            const { getTeamForm, getH2H, getUpcomingFixturesCached, findInBatch } = require('./lib/football-api');
+            const allFb = await getUpcomingFixturesCached().catch(() => []);
+            const fixtureInfo = findInBatch(allFb, m.team1, m.team2);
             if (fixtureInfo) {
               const { homeId, awayId, leagueId, season } = fixtureInfo;
               const [hForm, aForm, h2h] = await Promise.all([
@@ -1989,13 +1990,21 @@ async function handleFairOdds(token, chatId, sport) {
       // LoL: usa DB local. MMA/Tennis: ESPN. Roda em paralelo para LoL, serial para outros.
       const enrichments = sport === 'lol'
         ? await Promise.all(slice.map(m => fetchEnrichment(m).catch(() => ({ form1: null, form2: null, h2h: null, oddsMovement: null }))))
-        : slice.map(m => {
+        : await Promise.all(slice.map(async m => {
             if (sport === 'mma') {
               const espn = findEspnFight(espnFightsForFair, m.team1, m.team2);
-              if (!espn) return { form1: null, form2: null, h2h: null, oddsMovement: null };
-              const rec1 = normName(espn.name1).includes(normName(m.team1)) ? espn.record1 : espn.record2;
-              const rec2 = normName(espn.name1).includes(normName(m.team1)) ? espn.record2 : espn.record1;
-              return mmaRecordToEnrich(rec1, rec2);
+              let rec1 = espn ? (normName(espn.name1).includes(normName(m.team1)) ? espn.record1 : espn.record2) : '';
+              let rec2 = espn ? (normName(espn.name1).includes(normName(m.team1)) ? espn.record2 : espn.record1) : '';
+              if (!espn) {
+                const [r1, r2] = await Promise.all([
+                  fetchEspnFighterRecord(m.team1).catch(() => null),
+                  fetchEspnFighterRecord(m.team2).catch(() => null)
+                ]);
+                if (r1) rec1 = r1;
+                if (r2) rec2 = r2;
+              }
+              if (rec1 || rec2) return mmaRecordToEnrich(rec1, rec2);
+              return { form1: null, form2: null, h2h: null, oddsMovement: null };
             } else if (sport === 'tennis') {
               const tour = (m.sport_key || '').includes('_wta_') ? 'WTA' : 'ATP';
               const rankList = tour === 'WTA' ? espnRankingsForFair.wta : espnRankingsForFair.atp;
@@ -2004,7 +2013,7 @@ async function handleFairOdds(token, chatId, sport) {
               return rankingToEnrich(rank1, rank2) || { form1: null, form2: null, h2h: null, oddsMovement: null };
             }
             return { form1: null, form2: null, h2h: null, oddsMovement: null };
-          });
+          }));
 
       for (let i = 0; i < slice.length; i++) {
         const m = slice[i];
@@ -2644,6 +2653,47 @@ function normName(s) {
   return (s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]/g, '');
 }
 
+// Cache de records individuais de lutadores buscados via ESPN athlete search
+const espnFighterCache = new Map(); // normName → { record, ts }
+const ESPN_FIGHTER_TTL = 6 * 60 * 60 * 1000; // 6h
+
+// Busca record de um lutador individualmente na ESPN quando não está no scoreboard
+// Endpoint: /apis/site/v2/sports/mma/ufc/athletes?limit=5&search={name}
+async function fetchEspnFighterRecord(name) {
+  const key = normName(name);
+  const cached = espnFighterCache.get(key);
+  if (cached && Date.now() - cached.ts < ESPN_FIGHTER_TTL) return cached.record;
+
+  try {
+    const query = encodeURIComponent(name.trim());
+    const r = await espnGet(`/apis/site/v2/sports/mma/ufc/athletes?limit=5&search=${query}`)
+      .catch(() => ({ status: 500, body: '{}' }));
+    if (r.status !== 200) { espnFighterCache.set(key, { record: null, ts: Date.now() }); return null; }
+
+    const json = safeParse(r.body, {});
+    const athletes = json.athletes || json.items || [];
+    if (!athletes.length) { espnFighterCache.set(key, { record: null, ts: Date.now() }); return null; }
+
+    // Pega o atleta mais próximo pelo nome
+    const n = normName(name);
+    const match = athletes.find(a => {
+      const an = normName(a.displayName || a.fullName || '');
+      return an === n || an.includes(n) || n.includes(an);
+    }) || athletes[0];
+
+    // Record pode vir de diferentes campos dependendo da versão da ESPN
+    const recordSummary = match.record?.displayValue
+      || match.record?.summary
+      || (match.wins !== undefined ? `${match.wins}-${match.losses}-${match.draws || 0}` : null);
+
+    espnFighterCache.set(key, { record: recordSummary, ts: Date.now() });
+    return recordSummary;
+  } catch(_) {
+    espnFighterCache.set(key, { record: null, ts: Date.now() });
+    return null;
+  }
+}
+
 function findEspnFight(espnFights, team1, team2) {
   const n1 = normName(team1), n2 = normName(team2);
   return espnFights.find(f => {
@@ -2725,16 +2775,30 @@ async function pollMma() {
         const fairP2 = (r2 / or * 100).toFixed(1);
         const marginPct = ((or - 1) * 100).toFixed(1);
 
-        // Enriquecer com dados ESPN se disponível
+        // Enriquecer com dados ESPN — scoreboard primeiro, athlete search como fallback
         const espn = findEspnFight(espnFights, fight.team1, fight.team2);
-        const rec1 = espn ? (normName(espn.name1).includes(normName(fight.team1)) ? espn.record1 : espn.record2) : '';
-        const rec2 = espn ? (normName(espn.name1).includes(normName(fight.team1)) ? espn.record2 : espn.record1) : '';
+        let rec1 = espn ? (normName(espn.name1).includes(normName(fight.team1)) ? espn.record1 : espn.record2) : '';
+        let rec2 = espn ? (normName(espn.name1).includes(normName(fight.team1)) ? espn.record2 : espn.record1) : '';
         const weightClass = espn?.weightClass || '';
         const rounds = espn?.rounds || 3;
         const isTitleFight = rounds === 5;
 
+        // Fallback: busca record individual se scoreboard não tem os lutadores
+        if (!espn) {
+          const [r1, r2] = await Promise.all([
+            fetchEspnFighterRecord(fight.team1).catch(() => null),
+            fetchEspnFighterRecord(fight.team2).catch(() => null)
+          ]);
+          if (r1) rec1 = r1;
+          if (r2) rec2 = r2;
+          if (r1 || r2) {
+            log('INFO', 'AUTO-MMA', `ESPN athlete search: ${fight.team1}=${rec1||'?'} | ${fight.team2}=${rec2||'?'}`);
+          }
+        }
+
         // ── Pré-filtro ML com dados ESPN (record → win rate) ──
-        const mmaEnrich = espn ? mmaRecordToEnrich(rec1, rec2) : { form1: null, form2: null, h2h: null, oddsMovement: null };
+        const hasEspnRecord = !!(rec1 || rec2);
+        const mmaEnrich = hasEspnRecord ? mmaRecordToEnrich(rec1, rec2) : { form1: null, form2: null, h2h: null, oddsMovement: null };
         const mlResultMma = esportsPreFilter(fight, o, mmaEnrich, false, '', null);
         if (!mlResultMma.pass) {
           log('INFO', 'AUTO-MMA', `Pré-filtro ML: edge insuficiente (${mlResultMma.score.toFixed(1)}pp) para ${fight.team1} vs ${fight.team2}. Pulando IA.`);
@@ -2776,7 +2840,8 @@ DECISÃO FINAL:
 
 Máximo 220 palavras. Seja direto e fundamentado.`;
 
-        log('INFO', 'AUTO-MMA', `Analisando: ${fight.team1} vs ${fight.team2}${espn ? ` (ESPN: ${weightClass}, ${rounds}R)` : ' (sem dados ESPN)'}`);
+        const espnTag = espn ? ` (ESPN card: ${weightClass}, ${rounds}R)` : hasEspnRecord ? ` (ESPN athlete: ${rec1||'?'} | ${rec2||'?'})` : ' (sem dados ESPN)';
+        log('INFO', 'AUTO-MMA', `Analisando: ${fight.team1} vs ${fight.team2}${espnTag}`);
         analyzedMma.set(key, { ts: now, tipSent: false });
 
         let resp;
@@ -3065,7 +3130,7 @@ async function pollFootball() {
   const token = fbConfig.token;
 
   const { calcFootballScore } = require('./lib/football-ml');
-  const { getTeamForm, getH2H, getStandings, getDaysSinceLastMatch, findFixtureWithTeams, LEAGUE_MAP } = require('./lib/football-api');
+  const { getTeamForm, getH2H, getStandings, getDaysSinceLastMatch, getUpcomingFixturesCached, findInBatch, LEAGUE_MAP } = require('./lib/football-api');
 
   const FOOTBALL_INTERVAL = 6 * 60 * 60 * 1000;
   const EV_THRESHOLD   = parseFloat(process.env.FOOTBALL_EV_THRESHOLD  || '5.0');
@@ -3098,6 +3163,13 @@ async function pollFootball() {
         setTimeout(loop, 30 * 60 * 1000); return;
       }
       log('INFO', 'AUTO-FOOTBALL', `${matches.length} partidas futebol com odds${HAS_FB_API ? ' + API-Football ativo' : ' (sem API-Football)'}`);
+
+      // Pre-fetch TODAS as fixtures em batch (1-2 chamadas à API por loop, não N×ligas)
+      let allFixturesBatch = [];
+      if (HAS_FB_API) {
+        allFixturesBatch = await getUpcomingFixturesCached().catch(() => []);
+        log('INFO', 'AUTO-FOOTBALL', `Fixtures pré-carregadas: ${allFixturesBatch.length} jogos no cache`);
+      }
 
       const now = Date.now();
       for (const match of matches) {
@@ -3143,9 +3215,11 @@ async function pollFootball() {
         let homeFatigue = 7, awayFatigue = 7;
 
         if (HAS_FB_API) {
-          try {
-            fixtureInfo = await findFixtureWithTeams(match.team1, match.team2, match.time).catch(() => null);
-          } catch(_) {}
+          // Busca no batch pré-carregado (sem chamada extra à API)
+          fixtureInfo = findInBatch(allFixturesBatch, match.team1, match.team2);
+          if (!fixtureInfo) {
+            log('INFO', 'AUTO-FOOTBALL', `Fixture não encontrada no batch: ${match.team1} vs ${match.team2}`);
+          }
 
           if (fixtureInfo) {
             const { homeId, awayId, leagueId, season } = fixtureInfo;

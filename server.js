@@ -1859,7 +1859,17 @@ const server = http.createServer(async (req, res) => {
     const team = parsed.query.team || parsed.query.name || '';
     const game = parsed.query.game || 'lol';
     if (!team) { sendJson(res, { error: 'team param required' }, 400); return; }
-    const rows = stmts.getTeamForm.all(team, team, game);
+
+    // Tentativa 1: match exato
+    let rows = stmts.getTeamForm.all(team, team, game);
+
+    // Tentativa 2: match parcial (LIKE) — captura divergências de nome como
+    // "Hanwha Life" vs "Hanwha Life Esports" ou "T1" vs "T1 Academy"
+    if (!rows.length) {
+      const fuzzy = `%${team}%`;
+      rows = stmts.getTeamFormFuzzy.all(fuzzy, fuzzy, game);
+    }
+
     if (!rows.length) { sendJson(res, { wins: 0, losses: 0, winRate: 0, streak: '—' }); return; }
     let wins = 0, losses = 0, streak = '', streakCount = 0;
     for (const r of rows) {
@@ -1877,7 +1887,15 @@ const server = http.createServer(async (req, res) => {
     const t1 = parsed.query.team1 || '', t2 = parsed.query.team2 || '';
     const game = parsed.query.game || 'lol';
     if (!t1 || !t2) { sendJson(res, { totalMatches: 0, t1Wins: 0, t2Wins: 0 }); return; }
-    const rows = stmts.getH2H.all(t1, t2, t2, t1, game);
+
+    // Tentativa 1: match exato
+    let rows = stmts.getH2H.all(t1, t2, t2, t1, game);
+
+    // Tentativa 2: match parcial
+    if (!rows.length) {
+      rows = stmts.getH2HFuzzy.all(`%${t1}%`, `%${t2}%`, `%${t2}%`, `%${t1}%`, game);
+    }
+
     let t1w = 0, t2w = 0;
     for (const r of rows) {
       if (norm(r.winner) === norm(t1)) t1w++; else t2w++;
