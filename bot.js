@@ -1125,7 +1125,7 @@ async function autoAnalyzeMatch(token, match) {
       return null;
     }
 
-    const { text: prompt, evThreshold: adaptiveEV, sigCount } = buildEsportsPrompt(match, game, gamesContext, o, enrichSection);
+    const { text: prompt, evThreshold: adaptiveEV, sigCount } = buildEsportsPrompt(match, game, gamesContext, o, enrichSection, mlResult);
     log('INFO', 'AUTO', `Analisando: ${match.team1} vs ${match.team2} | sinais=${sigCount}/6 | evThreshold=${adaptiveEV}% | mlEdge=${mlResult.score.toFixed(1)}pp`);
 
     const resp = await serverPost('/claude', {
@@ -1262,22 +1262,32 @@ async function autoAnalyzeMatch(token, match) {
 // ── Próximas Partidas Handler (OLD — mantido apenas para referência interna) ──
 
 // ── Esports Prompt Builder ──
-function buildEsportsPrompt(match, game, gamesContext, o, enrichSection) {
+function buildEsportsPrompt(match, game, gamesContext, o, enrichSection, mlResult = null) {
   const hasRealOdds = !!(o && o.t1 && parseFloat(o.t1) > 1);
   const t1 = match.team1 || match.participant1_name;
   const t2 = match.team2 || match.participant2_name;
   const serieScore = `${match.score1 || 0}-${match.score2 || 0}`;
+
+  // Probabilidades do modelo (forma + H2H + mercado como prior bayesiano)
+  // Se mlResult não disponível ou sem dados (factorCount=0), cai no de-juice simples
+  const hasModelData = mlResult && (mlResult.factorCount > 0);
+  const modelP1pct = hasModelData ? (mlResult.modelP1 * 100).toFixed(1) : null;
+  const modelP2pct = hasModelData ? (mlResult.modelP2 * 100).toFixed(1) : null;
 
   let oddsSection = '';
   if (hasRealOdds) {
     const raw1 = 1 / parseFloat(o.t1);
     const raw2 = 1 / parseFloat(o.t2);
     const overround = raw1 + raw2;
-    const fairP1 = (raw1 / overround * 100).toFixed(1);
-    const fairP2 = (raw2 / overround * 100).toFixed(1);
+    const djP1 = (raw1 / overround * 100).toFixed(1);
+    const djP2 = (raw2 / overround * 100).toFixed(1);
     const marginPct = ((overround - 1) * 100).toFixed(1);
     const bookName = o.bookmaker || '1xBet';
-    oddsSection = `Odds ML (${bookName}): ${t1}=${o.t1} | ${t2}=${o.t2}\nMargem da casa: ${marginPct}% | Probabilidades de-juiced: ${t1}=${fairP1}% | ${t2}=${fairP2}%`;
+    if (hasModelData) {
+      oddsSection = `Odds ML (${bookName}): ${t1}=${o.t1} | ${t2}=${o.t2}\nMargem da casa: ${marginPct}% | P de-juiced (só margem): ${t1}=${djP1}% | ${t2}=${djP2}%\nP modelo do sistema (forma+H2H): ${t1}=${modelP1pct}% | ${t2}=${modelP2pct}%`;
+    } else {
+      oddsSection = `Odds ML (${bookName}): ${t1}=${o.t1} | ${t2}=${o.t2}\nMargem da casa: ${marginPct}% | P de-juiced: ${t1}=${djP1}% | ${t2}=${djP2}% (sem dados de forma/H2H — apenas remoção de margem)`;
+    }
   } else {
     oddsSection = `Odds ML: Não disponíveis`;
   }
@@ -1326,8 +1336,16 @@ function buildEsportsPrompt(match, game, gamesContext, o, enrichSection) {
     const marginReal = ((or - 1) * 100).toFixed(1);
     const dj1 = (r1 / or * 100).toFixed(1);
     const dj2 = (r2 / or * 100).toFixed(1);
-    bookMarginNote = `AVISO: 1xBet tem margem de ${marginReal}% neste jogo. O de-juice REMOVE esta margem, mas NÃO corrige o viés da bookie. Para lucro real você precisa que sua probabilidade VERDADEIRA supere o de-juice por pelo menos ${minEdgePp}pp.`;
-    deJuiced = `De-juice 1xBet: ${t1}=${dj1}% | ${t2}=${dj2}%\n   P estimada deve superar de-juice em ≥${minEdgePp}pp E EV ≥ +${evThreshold}%.\n   Se EV negativo nos dois lados → SEM EDGE.`;
+    if (hasModelData) {
+      // Referência principal = probabilidade do modelo (forma + H2H)
+      // EV calculado contra a odd de mercado, mas a "fair" de referência é o modelo
+      bookMarginNote = `AVISO: 1xBet tem margem de ${marginReal}%. O MODELO DO SISTEMA estima ${t1}=${modelP1pct}% | ${t2}=${modelP2pct}% (incorpora forma recente + H2H + odds como prior bayesiano). Esta é a referência de fair odd — NÃO o de-juice simples. EV = (sua_prob/100 × odd) − 1.`;
+      deJuiced = `Referência do modelo: ${t1}=${modelP1pct}% | ${t2}=${modelP2pct}% [De-juice bookie: ${t1}=${dj1}% | ${t2}=${dj2}%]\n   Sua P estimada deve superar a P do modelo em ≥${minEdgePp}pp E EV ≥ +${evThreshold}%.\n   Se EV negativo nos dois lados → SEM EDGE.`;
+    } else {
+      // Sem dados de enriquecimento — cai no de-juice simples
+      bookMarginNote = `AVISO: 1xBet tem margem de ${marginReal}% neste jogo. O de-juice REMOVE esta margem, mas NÃO corrige o viés da bookie. Para lucro real você precisa que sua probabilidade VERDADEIRA supere o de-juice por pelo menos ${minEdgePp}pp.`;
+      deJuiced = `De-juice 1xBet: ${t1}=${dj1}% | ${t2}=${dj2}% (sem dados de forma/H2H disponíveis)\n   P estimada deve superar de-juice em ≥${minEdgePp}pp E EV ≥ +${evThreshold}%.\n   Se EV negativo nos dois lados → SEM EDGE.`;
+    }
   } else {
     deJuiced = `Sem odds disponíveis. Tip só se vantagem clara (>${noOddsConviction}%) com pelo menos 2 sinais independentes confirmando.`;
   }
@@ -1357,7 +1375,7 @@ REGRAS OBRIGATÓRIAS (não negociáveis):
 
 ANÁLISE (responda cada ponto):
 1. Draft/Composição: qual time tem melhor comp? Early/late game? Counter-pick decisivo?
-   → P(${t1})=__% | P(${t2})=__% | Justificativa: [1 frase objetiva]
+   → P(${t1})=__% | P(${t2})=__% | Justificativa: [1 frase objetiva]${hasModelData ? `\n   [Base do modelo: ${t1}=${modelP1pct}% | ${t2}=${modelP2pct}% — para ter edge, sua P deve divergir claramente deste baseline]` : ''}
 2. Edge quantitativo: ${deJuiced}
 3. Sinais do checklist:
    [ ] Forma recente clara (≥60% winrate, diferença >15pp)
@@ -1830,7 +1848,7 @@ async function handleProximas(token, chatId, sport) {
 
 async function handleFairOdds(token, chatId, sport) {
   try {
-    await send(token, chatId, '⏳ _Calculando fair odds..._');
+    await send(token, chatId, '⏳ _Calculando fair odds do modelo..._');
 
     const endpoint = sport === 'mma' ? '/mma-matches' : sport === 'tennis' ? '/tennis-matches' : sport === 'football' ? '/football-matches' : '/lol-matches';
     const matches = await serverGet(endpoint).catch(() => []);
@@ -1854,67 +1872,121 @@ async function handleFairOdds(token, chatId, sport) {
 
     const title = sport === 'mma' ? '⚖️ *FAIR ODDS — MMA*' : sport === 'tennis' ? '⚖️ *FAIR ODDS — TÊNIS*' : sport === 'football' ? '⚖️ *FAIR ODDS — FUTEBOL*' : '⚖️ *FAIR ODDS — AO VIVO*';
     let txt = `${title}\n━━━━━━━━━━━━━━━━\n`;
-    txt += `_Odds justas = bookie sem margem (de-juiced)_\n\n`;
+    txt += `_Fair odd = estimativa do modelo (forma + H2H + mercado como prior)_\n\n`;
 
-    for (const m of withOdds.slice(0, 10)) {
-      if (sport === 'football') {
-        const oH = parseFloat(m.odds?.h);
-        const oD = parseFloat(m.odds?.d);
-        const oA = parseFloat(m.odds?.a);
+    const slice = withOdds.slice(0, 10);
+
+    if (sport === 'football') {
+      const { calcFootballScore } = require('./lib/football-ml');
+      const HAS_FB_API = !!(process.env.API_SPORTS_KEY || process.env.APIFOOTBALL_KEY);
+
+      for (const m of slice) {
+        const oH = parseFloat(m.odds?.h), oD = parseFloat(m.odds?.d), oA = parseFloat(m.odds?.a);
         if (!oH || !oD || !oA || oH <= 1 || oD <= 1 || oA <= 1) continue;
+
         const rawH = 1/oH, rawD = 1/oD, rawA = 1/oA;
         const totalVig = rawH + rawD + rawA;
         const margin = ((totalVig - 1) * 100).toFixed(1);
-        const fairH = (rawH / totalVig), fairD = (rawD / totalVig), fairA = (rawA / totalVig);
+        const mktH = (rawH/totalVig*100).toFixed(1);
+        const mktA = (rawA/totalVig*100).toFixed(1);
+
+        let homeFormData = null, awayFormData = null, h2hData = { results: [] };
+        let enrichTag = ' _(sem API-Football — home adv. aplicado)_';
+
+        if (HAS_FB_API) {
+          try {
+            const { getTeamForm, getH2H, findFixtureWithTeams } = require('./lib/football-api');
+            const fixtureInfo = await findFixtureWithTeams(m.team1, m.team2, m.time).catch(() => null);
+            if (fixtureInfo) {
+              const { homeId, awayId, leagueId, season } = fixtureInfo;
+              const [hForm, aForm, h2h] = await Promise.all([
+                getTeamForm(homeId, leagueId, season, 10).catch(() => null),
+                getTeamForm(awayId, leagueId, season, 10).catch(() => null),
+                getH2H(homeId, awayId).catch(() => ({ results: [] }))
+              ]);
+              homeFormData = hForm; awayFormData = aForm; h2hData = h2h || { results: [] };
+              if (homeFormData || awayFormData || h2hData.results?.length > 0) enrichTag = '';
+            }
+          } catch(_) {}
+        }
+
+        const mlScore = calcFootballScore(
+          { form: homeFormData?.form || null, homeForm: homeFormData?.homeForm || null, goalsFor: homeFormData?.goalsFor ?? null, goalsAgainst: homeFormData?.goalsAgainst ?? null, position: null, fatigue: 7 },
+          { form: awayFormData?.form || null, awayForm: awayFormData?.awayForm || null, goalsFor: awayFormData?.goalsFor ?? null, goalsAgainst: awayFormData?.goalsAgainst ?? null, position: null, fatigue: 7 },
+          h2hData,
+          { h: oH, d: oD, a: oA, ou25: m.odds?.ou25 ? { over: parseFloat(m.odds.ou25.over), under: parseFloat(m.odds.ou25.under) } : null },
+          {}
+        );
+        if (!mlScore || mlScore.reason === 'sem_odds_validas') continue;
+
+        const mH = mlScore.modelH, mD = mlScore.modelD, mA = mlScore.modelA;
+        const edgeH = (mH - parseFloat(mktH)).toFixed(1);
+        const edgeA = (mA - parseFloat(mktA)).toFixed(1);
+
         const league = m.league ? `[${m.league}] ` : '';
         let dtStr = '';
         if (m.time) {
-          try {
-            dtStr = ` _(${new Date(m.time).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })})_`;
-          } catch(_) {}
+          try { dtStr = ` _(${new Date(m.time).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })})_`; } catch(_) {}
         }
         txt += `⚽ ${league}*${m.team1}* vs *${m.team2}*${dtStr}\n`;
         txt += `  🏷️ Bookie: \`${oH}\`/\`${oD}\`/\`${oA}\` _(margem: ${margin}%)_\n`;
-        txt += `  ⚖️ Fair: \`${(1/fairH).toFixed(2)}\`/\`${(1/fairD).toFixed(2)}\`/\`${(1/fairA).toFixed(2)}\`\n`;
-        txt += `  📊 P: *${(fairH*100).toFixed(1)}%* / *${(fairD*100).toFixed(1)}%* / *${(fairA*100).toFixed(1)}%*\n\n`;
-        continue;
+        txt += `  🤖 Modelo${enrichTag}: \`${(100/mH).toFixed(2)}\`/\`${(100/mD).toFixed(2)}\`/\`${(100/mA).toFixed(2)}\`\n`;
+        txt += `  📊 P: *${mH}%* / *${mD}%* / *${mA}%* | Edge Casa: ${parseFloat(edgeH)>=0?'+':''}${edgeH}pp | Fora: ${parseFloat(edgeA)>=0?'+':''}${edgeA}pp\n\n`;
       }
 
-      const o1 = parseFloat(m.odds.t1);
-      const o2 = parseFloat(m.odds.t2);
-      if (!o1 || !o2 || o1 <= 1 || o2 <= 1) continue;
+    } else {
+      // LoL, MMA, Tennis — busca enrichment em paralelo e roda o modelo
+      const enrichments = await Promise.all(
+        slice.map(m => fetchEnrichment(m).catch(() => ({ form1: null, form2: null, h2h: null, oddsMovement: null })))
+      );
 
-      const p1 = 1 / o1;
-      const p2 = 1 / o2;
-      const totalVig = p1 + p2;
-      const margin = ((totalVig - 1) * 100).toFixed(1);
+      for (let i = 0; i < slice.length; i++) {
+        const m = slice[i];
+        const enrich = enrichments[i];
 
-      const fairP1 = p1 / totalVig;
-      const fairP2 = p2 / totalVig;
-      const fairO1 = (1 / fairP1).toFixed(2);
-      const fairO2 = (1 / fairP2).toFixed(2);
+        const o1 = parseFloat(m.odds.t1);
+        const o2 = parseFloat(m.odds.t2);
+        if (!o1 || !o2 || o1 <= 1 || o2 <= 1) continue;
 
-      const league = m.league ? `[${m.league}] ` : '';
-      const icon = sport === 'mma' ? '🥊' : (m.status === 'draft' ? '📋' : '🔴');
+        const raw1 = 1/o1, raw2 = 1/o2;
+        const totalVig = raw1 + raw2;
+        const margin = ((totalVig - 1) * 100).toFixed(1);
 
-      if (sport === 'mma' && m.time) {
-        try {
-          const dt = new Date(m.time).toLocaleString('pt-BR', {
-            timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit',
-            hour: '2-digit', minute: '2-digit'
-          });
-          txt += `${icon} ${league}*${m.team1}* vs *${m.team2}* _(${dt})_\n`;
-        } catch(_) {
-          txt += `${icon} ${league}*${m.team1}* vs *${m.team2}*\n`;
+        const mlResult = esportsPreFilter(m, m.odds, enrich, false, '', null);
+        const { modelP1, modelP2, factorCount } = mlResult;
+
+        const fairO1 = (1 / modelP1).toFixed(2);
+        const fairO2 = (1 / modelP2).toFixed(2);
+
+        const hasEnrichData = factorCount > 0;
+        const enrichTag = hasEnrichData ? `` : ` _(sem dados — apenas de-juice)_`;
+
+        const edgePp1 = mlResult.t1Edge.toFixed(1);
+        const edgePp2 = mlResult.t2Edge.toFixed(1);
+
+        const league = m.league ? `[${m.league}] ` : '';
+        const icon = sport === 'mma' ? '🥊' : sport === 'tennis' ? '🎾' : (m.status === 'draft' ? '📋' : '🔴');
+
+        if ((sport === 'mma' || sport === 'tennis') && m.time) {
+          try {
+            const dt = new Date(m.time).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+            txt += `${icon} ${league}*${m.team1}* vs *${m.team2}* _(${dt})_\n`;
+          } catch(_) {
+            txt += `${icon} ${league}*${m.team1}* vs *${m.team2}*\n`;
+          }
+        } else {
+          const score = (m.score1 !== undefined && m.score2 !== undefined) ? ` (${m.score1}-${m.score2})` : '';
+          txt += `${icon} ${league}*${m.team1}* vs *${m.team2}*${score}\n`;
         }
-      } else {
-        const score = (m.score1 !== undefined && m.score2 !== undefined) ? ` (${m.score1}-${m.score2})` : '';
-        txt += ` ${icon} ${league}*${m.team1}* vs *${m.team2}*${score}\n`;
-      }
 
-      txt += `  🏷️ Bookie: \`${o1}\` / \`${o2}\` _(margem: ${margin}%)_\n`;
-      txt += `  ⚖️ Fair: \`${fairO1}\` / \`${fairO2}\`\n`;
-      txt += `  📊 P: *${(fairP1 * 100).toFixed(1)}%* / *${(fairP2 * 100).toFixed(1)}%*\n\n`;
+        txt += `  🏷️ Bookie: \`${o1}\` / \`${o2}\` _(margem: ${margin}%)_\n`;
+        txt += `  🤖 Modelo${enrichTag}: \`${fairO1}\` / \`${fairO2}\`\n`;
+        txt += `  📊 P: *${(modelP1*100).toFixed(1)}%* / *${(modelP2*100).toFixed(1)}%*`;
+        if (hasEnrichData) {
+          txt += ` | Edge: ${parseFloat(edgePp1)>=0?'+':''}${edgePp1}pp / ${parseFloat(edgePp2)>=0?'+':''}${edgePp2}pp`;
+        }
+        txt += `\n\n`;
+      }
     }
 
     txt += `_Atualizado: ${new Date().toLocaleTimeString('pt-BR', { timeZone: 'America/Sao_Paulo' })}_`;
