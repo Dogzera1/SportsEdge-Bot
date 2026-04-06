@@ -1995,7 +1995,6 @@ async function handleFairOdds(token, chatId, sport) {
 
     if (sport === 'football') {
       const { calcFootballScore } = require('./lib/football-ml');
-      const HAS_FB_API = !!(process.env.API_SPORTS_KEY || process.env.APIFOOTBALL_KEY);
 
       for (const m of slice) {
         const oH = parseFloat(m.odds?.h), oD = parseFloat(m.odds?.d), oA = parseFloat(m.odds?.a);
@@ -2007,26 +2006,8 @@ async function handleFairOdds(token, chatId, sport) {
         const mktH = (rawH/totalVig*100).toFixed(1);
         const mktA = (rawA/totalVig*100).toFixed(1);
 
-        let homeFormData = null, awayFormData = null, h2hData = { results: [] };
-        let enrichTag = ' _(sem API-Football — home adv. aplicado)_';
-
-        if (HAS_FB_API) {
-          try {
-            const { getTeamForm, getH2H, getUpcomingFixturesCached, findInBatch } = require('./lib/football-api');
-            const allFb = await getUpcomingFixturesCached().catch(() => []);
-            const fixtureInfo = findInBatch(allFb, m.team1, m.team2);
-            if (fixtureInfo) {
-              const { homeId, awayId, leagueId, season } = fixtureInfo;
-              const [hForm, aForm, h2h] = await Promise.all([
-                getTeamForm(homeId, leagueId, season, 10).catch(() => null),
-                getTeamForm(awayId, leagueId, season, 10).catch(() => null),
-                getH2H(homeId, awayId).catch(() => ({ results: [] }))
-              ]);
-              homeFormData = hForm; awayFormData = aForm; h2hData = h2h || { results: [] };
-              if (homeFormData || awayFormData || h2hData.results?.length > 0) enrichTag = '';
-            }
-          } catch(_) {}
-        }
+        const homeFormData = null, awayFormData = null, h2hData = { results: [] };
+        const enrichTag = ' _(home adv. aplicado)_';
 
         const mlScore = calcFootballScore(
           { form: homeFormData?.form || null, homeForm: homeFormData?.homeForm || null, goalsFor: homeFormData?.goalsFor ?? null, goalsAgainst: homeFormData?.goalsAgainst ?? null, position: null, fatigue: 7 },
@@ -3246,25 +3227,10 @@ async function pollFootball() {
   const token = fbConfig.token;
 
   const { calcFootballScore } = require('./lib/football-ml');
-  const { getTeamForm, getH2H, getStandings, getDaysSinceLastMatch, getUpcomingFixturesCached, findInBatch, LEAGUE_MAP } = require('./lib/football-api');
 
   const FOOTBALL_INTERVAL = 6 * 60 * 60 * 1000;
   const EV_THRESHOLD   = parseFloat(process.env.FOOTBALL_EV_THRESHOLD  || '5.0');
   const DRAW_MIN_ODDS  = parseFloat(process.env.FOOTBALL_DRAW_MIN_ODDS  || '2.80');
-  const HAS_FB_API     = !!(process.env.API_SPORTS_KEY || process.env.APIFOOTBALL_KEY);
-
-  // Cache de standings por liga: evita repetir chamada para cada partida do mesmo loop
-  const standingsCache = new Map(); // key: `${leagueId}_${season}` → { data, ts }
-  const STANDINGS_TTL  = 12 * 60 * 60 * 1000; // 12h
-
-  async function getStandingsCached(leagueId, season) {
-    const key = `${leagueId}_${season}`;
-    const cached = standingsCache.get(key);
-    if (cached && Date.now() - cached.ts < STANDINGS_TTL) return cached.data;
-    const data = await getStandings(leagueId, season).catch(() => ({}));
-    standingsCache.set(key, { data, ts: Date.now() });
-    return data;
-  }
 
   // Formata array de resultados ['W','D','L',...] → string "WDLWW"
   function fmtForm(arr) {
@@ -3278,14 +3244,7 @@ async function pollFootball() {
       if (!Array.isArray(matches) || !matches.length) {
         setTimeout(loop, 30 * 60 * 1000); return;
       }
-      log('INFO', 'AUTO-FOOTBALL', `${matches.length} partidas futebol com odds${HAS_FB_API ? ' + API-Football ativo' : ' (sem API-Football)'}`);
-
-      // Pre-fetch TODAS as fixtures em batch (1-2 chamadas à API por loop, não N×ligas)
-      let allFixturesBatch = [];
-      if (HAS_FB_API) {
-        allFixturesBatch = await getUpcomingFixturesCached().catch(() => []);
-        log('INFO', 'AUTO-FOOTBALL', `Fixtures pré-carregadas: ${allFixturesBatch.length} jogos no cache`);
-      }
+      log('INFO', 'AUTO-FOOTBALL', `${matches.length} partidas futebol com odds (modo odds-only)`);
 
       const now = Date.now();
       for (const match of matches) {
@@ -3323,41 +3282,12 @@ async function pollFootball() {
           await new Promise(r => setTimeout(r, 500)); continue;
         }
 
-        // ── Buscar dados API-Football se disponível ──
-        let fixtureInfo = null;
-        let homeFormData = null, awayFormData = null;
-        let h2hData = { results: [] };
-        let standingsData = {};
-        let homeFatigue = 7, awayFatigue = 7;
-
-        if (HAS_FB_API) {
-          // Busca no batch pré-carregado (sem chamada extra à API)
-          fixtureInfo = findInBatch(allFixturesBatch, match.team1, match.team2);
-
-          if (fixtureInfo) {
-            const { homeId, awayId, leagueId, season } = fixtureInfo;
-            // Busca em paralelo para economizar tempo (3 chamadas simultâneas)
-            const [hForm, aForm, h2h, standings, hFatigue, aFatigue] = await Promise.all([
-              getTeamForm(homeId, leagueId, season, 10).catch(() => null),
-              getTeamForm(awayId, leagueId, season, 10).catch(() => null),
-              getH2H(homeId, awayId).catch(() => ({ results: [] })),
-              getStandingsCached(leagueId, season),
-              getDaysSinceLastMatch(homeId).catch(() => 7),
-              getDaysSinceLastMatch(awayId).catch(() => 7)
-            ]);
-            homeFormData = hForm;
-            awayFormData = aForm;
-            h2hData      = h2h || { results: [] };
-            standingsData = standings || {};
-            homeFatigue  = hFatigue;
-            awayFatigue  = aFatigue;
-            log('INFO', 'AUTO-FOOTBALL', `Dados API-Football ok: ${match.team1} (form ${fmtForm(hForm?.form)}) vs ${match.team2} (form ${fmtForm(aForm?.form)})`);
-          } else if (allFixturesBatch.length === 0) {
-            // Batch vazio (quota esgotada ou season sem fixtures) — já logado no início do loop
-          } else {
-            log('INFO', 'AUTO-FOOTBALL', `Sem fixture no batch: ${match.team1} vs ${match.team2}`);
-          }
-        }
+        // Modo odds-only: sem enriquecimento externo
+        const fixtureInfo = null;
+        const homeFormData = null, awayFormData = null;
+        const h2hData = { results: [] };
+        const standingsData = {};
+        const homeFatigue = 7, awayFatigue = 7;
 
         // ── ML com dados reais (ou nulls se API indisponível) ──
         const homeStandings = fixtureInfo ? standingsData[fixtureInfo.homeId] : null;

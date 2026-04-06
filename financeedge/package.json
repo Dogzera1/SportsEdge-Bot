@@ -1,0 +1,21 @@
+{
+  "name": "financeedge",
+  "version": "1.0.0",
+  "description": "Crypto trading bot — paper trading + signal alerts via Telegram",
+  "main": "server.js",
+  "scripts": {
+    "start": "node start.js",
+    "server": "node server.js",
+    "bot": "node bot.js",
+    "dev": "node start.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.0.0",
+    "ccxt": "^4.3.0",
+    "dotenv": "^16.0.0",
+    "node-telegram-bot-api": "^0.66.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
