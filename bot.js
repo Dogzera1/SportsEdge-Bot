@@ -65,6 +65,7 @@ const subscribedUsers = new Map(); // userId → Set<sport>
 const analyzedMatches = new Map();
 const analyzedMma = new Map();
 const analyzedTennis = new Map();
+const analyzedFootball = new Map();
 
 // Settlement
 const SETTLEMENT_INTERVAL = 30 * 60 * 1000;
@@ -237,10 +238,11 @@ function getTipsMenu(sport) {
 // ── Hydrate tip maps from DB on startup (prevents re-sending after restart) ──
 async function loadExistingTips() {
   try {
-    const [esportsTips, mmaTips, tennisTips] = await Promise.all([
+    const [esportsTips, mmaTips, tennisTips, footballTips] = await Promise.all([
       serverGet('/unsettled-tips', 'esports').catch(() => []),
       serverGet('/unsettled-tips?days=30', 'mma').catch(() => []),
-      serverGet('/unsettled-tips?days=14', 'tennis').catch(() => [])
+      serverGet('/unsettled-tips?days=14', 'tennis').catch(() => []),
+      serverGet('/unsettled-tips?days=30', 'football').catch(() => [])
     ]);
     if (Array.isArray(esportsTips)) {
       for (const tip of esportsTips) {
@@ -264,6 +266,13 @@ async function loadExistingTips() {
         analyzedTennis.set(`tennis_${tip.match_id}`, { ts: Date.now(), tipSent: true });
       }
       if (tennisTips.length) log('INFO', 'BOOT', `Tênis: ${tennisTips.length} tips existentes carregadas`);
+    }
+    if (Array.isArray(footballTips)) {
+      for (const tip of footballTips) {
+        if (!tip.match_id) continue;
+        analyzedFootball.set(`football_${tip.match_id}`, { ts: Date.now(), tipSent: true });
+      }
+      if (footballTips.length) log('INFO', 'BOOT', `Futebol: ${footballTips.length} tips existentes carregadas`);
     }
   } catch(e) {
     log('WARN', 'BOOT', `Erro ao carregar tips existentes: ${e.message}`);
@@ -582,17 +591,46 @@ async function settleCompletedTips() {
       for (const tip of unsettled) {
         if (!tip.match_id) continue;
         try {
-          const isPanda = String(tip.match_id).startsWith('ps_');
-          const endpoint = isPanda
-            ? `/ps-result?matchId=${encodeURIComponent(tip.match_id)}`
-            : `/match-result?matchId=${encodeURIComponent(tip.match_id)}&game=lol`;
+          let endpoint;
+          if (sport === 'football') {
+            // IDs de futebol são The Odds API event IDs; usamos API-Football via fixtureId guardado no match_id
+            // Só tenta se o match_id parecer numérico (fixture ID da API-Football)
+            // ou prefixado com "fb_"
+            const fbId = String(tip.match_id).replace(/^fb_/, '');
+            if (!/^\d+$/.test(fbId)) continue; // não é fixture ID numérico, pula
+            endpoint = `/football-result?fixtureId=${encodeURIComponent(fbId)}`;
+          } else {
+            const isPanda = String(tip.match_id).startsWith('ps_');
+            endpoint = isPanda
+              ? `/ps-result?matchId=${encodeURIComponent(tip.match_id)}`
+              : `/match-result?matchId=${encodeURIComponent(tip.match_id)}&game=lol`;
+          }
 
           const result = await serverGet(endpoint).catch(() => null);
           if (!result?.resolved || !result?.winner) continue;
 
+          // Para futebol, o "winner" pode ser "Draw" — tip em Draw vence se winner === 'Draw'
+          let won;
+          if (sport === 'football') {
+            const mkt = tip.market_type || '';
+            if (mkt === '1X2_D') {
+              won = result.winner === 'Draw';
+            } else if (mkt === 'OVER_2.5' || mkt === 'UNDER_2.5') {
+              // Settlement de Over/Under: usa score para calcular total de gols
+              const [g1, g2] = (result.score || '0-0').split('-').map(Number);
+              const total = (g1 || 0) + (g2 || 0);
+              won = mkt === 'OVER_2.5' ? total > 2.5 : total < 2.5;
+              // Registra winner fictício para compatibilidade com /settle
+              result.winner = won ? tip.tip_participant : '__loss__';
+            } else {
+              won = norm(result.winner).includes(norm(tip.tip_participant));
+            }
+          } else {
+            won = norm(result.winner).includes(norm(tip.tip_participant));
+          }
+
           await serverPost('/settle', { matchId: tip.match_id, winner: result.winner }, sport);
 
-          const won = norm(result.winner).includes(norm(tip.tip_participant));
           log('INFO', 'SETTLE', `${sport}: ${tip.participant1} vs ${tip.participant2} → ${won ? 'WIN ✅' : 'LOSS ❌'} (${result.winner})`);
           settled++;
         } catch(e) {
@@ -1667,6 +1705,45 @@ async function handleProximas(token, chatId, sport) {
       return;
     }
 
+    if (sport === 'football') {
+      const matches = await serverGet('/football-matches').catch(() => []);
+      const all = Array.isArray(matches) ? matches : [];
+
+      if (!all.length) {
+        await send(token, chatId,
+          '❌ Nenhuma partida de futebol encontrada.\n_Tente novamente mais tarde._',
+          getMenu(sport)
+        );
+        return;
+      }
+
+      let txt = `⚽ *PRÓXIMAS PARTIDAS FUTEBOL*\n━━━━━━━━━━━━━━━━\n\n`;
+      let lastLeague = '';
+      all.slice(0, 15).forEach(m => {
+        if (m.league !== lastLeague) {
+          txt += `\n📋 *${m.league}*\n`;
+          lastLeague = m.league;
+        }
+        txt += `⚽ *${m.team1}* vs *${m.team2}*\n`;
+        if (m.time) {
+          try {
+            const dt = new Date(m.time).toLocaleString('pt-BR', {
+              timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit',
+              hour: '2-digit', minute: '2-digit'
+            });
+            txt += `  🕐 ${dt}\n`;
+          } catch(_) {}
+        }
+        if (m.odds) {
+          txt += `  💰 Casa: \`${m.odds.h}\` | Empate: \`${m.odds.d}\` | Fora: \`${m.odds.a}\`\n`;
+          if (m.odds.ou25) txt += `  📊 O2.5: \`${m.odds.ou25.over}\` | U2.5: \`${m.odds.ou25.under}\`\n`;
+        }
+      });
+
+      await send(token, chatId, txt, getMenu(sport));
+      return;
+    }
+
     const lolMatches = await serverGet('/lol-matches').catch(() => []);
     const all = Array.isArray(lolMatches) ? lolMatches : [];
 
@@ -1734,12 +1811,12 @@ async function handleFairOdds(token, chatId, sport) {
   try {
     await send(token, chatId, '⏳ _Calculando fair odds..._');
 
-    const endpoint = sport === 'mma' ? '/mma-matches' : sport === 'tennis' ? '/tennis-matches' : '/lol-matches';
+    const endpoint = sport === 'mma' ? '/mma-matches' : sport === 'tennis' ? '/tennis-matches' : sport === 'football' ? '/football-matches' : '/lol-matches';
     const matches = await serverGet(endpoint).catch(() => []);
     const all = Array.isArray(matches) ? matches : [];
 
-    const withOdds = (sport === 'mma' || sport === 'tennis')
-      ? all.filter(m => m.odds?.t1 && m.odds?.t2)
+    const withOdds = (sport === 'mma' || sport === 'tennis' || sport === 'football')
+      ? all.filter(m => m.odds)
       : all.filter(m => (m.status === 'live' || m.status === 'draft') && m.odds?.t1 && m.odds?.t2);
 
     if (!withOdds.length) {
@@ -1747,16 +1824,41 @@ async function handleFairOdds(token, chatId, sport) {
         ? '❌ *Nenhuma luta MMA com odds disponíveis.*\n\n_Tente novamente mais tarde._'
         : sport === 'tennis'
         ? '❌ *Nenhuma partida de tênis com odds disponíveis.*\n\n_Tente novamente mais tarde._'
+        : sport === 'football'
+        ? '❌ *Nenhuma partida de futebol com odds disponíveis.*\n\n_Tente novamente mais tarde._'
         : '❌ *Nenhuma partida ao vivo com odds disponíveis.*\n\n_Odds reais são necessárias para calcular fair odds._';
       await send(token, chatId, noOddsMsg, getMenu(sport));
       return;
     }
 
-    const title = sport === 'mma' ? '⚖️ *FAIR ODDS — MMA*' : sport === 'tennis' ? '⚖️ *FAIR ODDS — TÊNIS*' : '⚖️ *FAIR ODDS — AO VIVO*';
+    const title = sport === 'mma' ? '⚖️ *FAIR ODDS — MMA*' : sport === 'tennis' ? '⚖️ *FAIR ODDS — TÊNIS*' : sport === 'football' ? '⚖️ *FAIR ODDS — FUTEBOL*' : '⚖️ *FAIR ODDS — AO VIVO*';
     let txt = `${title}\n━━━━━━━━━━━━━━━━\n`;
     txt += `_Odds justas = bookie sem margem (de-juiced)_\n\n`;
 
     for (const m of withOdds.slice(0, 10)) {
+      if (sport === 'football') {
+        const oH = parseFloat(m.odds?.h);
+        const oD = parseFloat(m.odds?.d);
+        const oA = parseFloat(m.odds?.a);
+        if (!oH || !oD || !oA || oH <= 1 || oD <= 1 || oA <= 1) continue;
+        const rawH = 1/oH, rawD = 1/oD, rawA = 1/oA;
+        const totalVig = rawH + rawD + rawA;
+        const margin = ((totalVig - 1) * 100).toFixed(1);
+        const fairH = (rawH / totalVig), fairD = (rawD / totalVig), fairA = (rawA / totalVig);
+        const league = m.league ? `[${m.league}] ` : '';
+        let dtStr = '';
+        if (m.time) {
+          try {
+            dtStr = ` _(${new Date(m.time).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })})_`;
+          } catch(_) {}
+        }
+        txt += `⚽ ${league}*${m.team1}* vs *${m.team2}*${dtStr}\n`;
+        txt += `  🏷️ Bookie: \`${oH}\`/\`${oD}\`/\`${oA}\` _(margem: ${margin}%)_\n`;
+        txt += `  ⚖️ Fair: \`${(1/fairH).toFixed(2)}\`/\`${(1/fairD).toFixed(2)}\`/\`${(1/fairA).toFixed(2)}\`\n`;
+        txt += `  📊 P: *${(fairH*100).toFixed(1)}%* / *${(fairD*100).toFixed(1)}%* / *${(fairA*100).toFixed(1)}%*\n\n`;
+        continue;
+      }
+
       const o1 = parseFloat(m.odds.t1);
       const o2 = parseFloat(m.odds.t2);
       if (!o1 || !o2 || o1 <= 1 || o2 <= 1) continue;
@@ -2757,6 +2859,205 @@ Máximo 200 palavras. Mostre seu raciocínio brevemente antes da decisão.`;
   loop();
 }
 
+// ── Football Auto-analysis loop ──
+async function pollFootball() {
+  const fbConfig = SPORTS['football'];
+  if (!fbConfig?.enabled || !fbConfig?.token) return;
+  const token = fbConfig.token;
+
+  const { calcFootballScore } = require('./lib/football-ml');
+  const { getTeamForm, getH2H, getStandings, getDaysSinceLastMatch, findFixtureId, LEAGUE_MAP } = require('./lib/football-api');
+
+  const FOOTBALL_INTERVAL = 6 * 60 * 60 * 1000; // Re-analisa a cada 6h
+  const EV_THRESHOLD = parseFloat(process.env.FOOTBALL_EV_THRESHOLD || '5.0');
+  const DRAW_MIN_ODDS = parseFloat(process.env.FOOTBALL_DRAW_MIN_ODDS || '2.80');
+
+  async function loop() {
+    try {
+      const matches = await serverGet('/football-matches').catch(() => []);
+      if (!Array.isArray(matches) || !matches.length) {
+        setTimeout(loop, 30 * 60 * 1000); return;
+      }
+      log('INFO', 'AUTO-FOOTBALL', `${matches.length} partidas futebol com odds`);
+
+      const now = Date.now();
+      for (const match of matches) {
+        const key = `football_${match.id}`;
+        const prev = analyzedFootball.get(key);
+        if (prev?.tipSent) continue;
+        if (prev && (now - prev.ts < FOOTBALL_INTERVAL)) continue;
+
+        const o = match.odds;
+        if (!o?.h || !o?.d || !o?.a) continue;
+
+        const oH = parseFloat(o.h), oD = parseFloat(o.d), oA = parseFloat(o.a);
+        if (!oH || !oD || !oA || oH <= 1 || oD <= 1 || oA <= 1) continue;
+
+        // Odds gate: skip se draw odds abaixo do mínimo (mercados sem valor no draw)
+        // Gate de odds muito extremas (evita tips em missmatches óbvios)
+        if (Math.min(oH, oA) > 5.0) continue;
+
+        // De-juice
+        const rawH = 1/oH, rawD = 1/oD, rawA = 1/oA;
+        const overround = rawH + rawD + rawA;
+        const mktH = (rawH/overround*100).toFixed(1);
+        const mktD = (rawD/overround*100).toFixed(1);
+        const mktA = (rawA/overround*100).toFixed(1);
+        const marginPct = ((overround - 1) * 100).toFixed(1);
+
+        const matchTime = match.time ? new Date(match.time).toLocaleString('pt-BR', {
+          timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit',
+          hour: '2-digit', minute: '2-digit'
+        }) : '—';
+
+        // Buscar dados API-Football (form, H2H, standings)
+        // Precisamos dos IDs dos times — API-Football não retorna por nome, usamos busca lazy
+        // Para não gastar quota desnecessariamente, tentamos com o ML pre-filter primeiro usando só odds
+        // Se passar, aí buscamos dados extras
+        const mlQuick = calcFootballScore(
+          { form: null, homeForm: null, goalsFor: null, goalsAgainst: null },
+          { form: null, awayForm: null, goalsFor: null, goalsAgainst: null },
+          { results: [] },
+          { h: oH, d: oD, a: oA, ou25: o.ou25 ? { over: parseFloat(o.ou25.over), under: parseFloat(o.ou25.under) } : null }
+        );
+
+        // Se nem com só odds há candidato EV ≥ threshold, pular
+        if (!mlQuick.candidates?.length) {
+          log('INFO', 'AUTO-FOOTBALL', `Sem candidatos: ${match.team1} vs ${match.team2}`);
+          await new Promise(r => setTimeout(r, 1000)); continue;
+        }
+
+        // Montar contexto para IA
+        const ou25Line = o.ou25 ? `Over 2.5: ${o.ou25.over} | Under 2.5: ${o.ou25.under} (linha: ${o.ou25.point || 2.5})` : 'Não disponível';
+
+        const prompt = `Você é um analista especializado em futebol de ligas secundárias (Série B/C Brasil, ligações sul-americanas, League One/Two, 3. Liga). Analise com rigor — prefira SEM_EDGE a inventar edge.
+
+PARTIDA: ${match.team1} (casa) vs ${match.team2} (fora)
+Liga: ${match.league}
+Data/Hora: ${matchTime} (BRT)
+
+ODDS REAIS (${o.bookmaker || 'EU'}):
+Casa (${match.team1}): ${oH} → prob. mercado de-juiced: ${mktH}%
+Empate: ${oD} → prob. mercado de-juiced: ${mktD}%
+Fora (${match.team2}): ${oA} → prob. mercado de-juiced: ${mktA}%
+Margem bookie: ${marginPct}%
+
+TOTAIS:
+${ou25Line}
+
+INSTRUÇÕES:
+1. Use seu conhecimento sobre essas equipes nessa liga e temporada. Se não conhecer bem os times, máximo confiança 5 → SEM_EDGE.
+2. Estime probabilidades reais (home%, draw%, away%) somando 100%.
+3. Compare com as probabilidades de-juiced do mercado.
+4. Calcule EV explicitamente: EV = (sua_prob/100 * odd) - 1, em percentagem.
+   - EV casa: (home_prob/100 * ${oH}) - 1
+   - EV empate: (draw_prob/100 * ${oD}) - 1
+   - EV fora: (away_prob/100 * ${oA}) - 1
+5. Para Over/Under 2.5, estime se o jogo tende a ser de alta ou baixa pontuação.
+6. Confiança (1-10): baseada em quanto você sabe sobre os times e a liga.
+   - Desconhece o time? máximo confiança 5 → SEM_EDGE.
+   - Empate com odds < ${DRAW_MIN_ODDS}? Provavelmente sem valor.
+
+DECISÃO (escolha apenas a MELHOR opção):
+- Edge real (EV ≥ +${EV_THRESHOLD}%) E confiança ≥ 7 → uma linha:
+  TIP_FB:[mercado]:[seleção]@[odd]|EV:[%]|STAKE:[1-3]u|CONF:[ALTA/MÉDIA/BAIXA]
+  Mercados: 1X2_H (casa), 1X2_D (empate), 1X2_A (fora), OVER_2.5, UNDER_2.5
+  Exemplo: TIP_FB:1X2_H:${match.team1}@${oH}|EV:7.5|STAKE:2u|CONF:MÉDIA
+- Caso contrário: SEM_EDGE
+
+Máximo 250 palavras. Mostre raciocínio brevemente.`;
+
+        log('INFO', 'AUTO-FOOTBALL', `Analisando: ${match.team1} vs ${match.team2} | ${match.league}`);
+        analyzedFootball.set(key, { ts: now, tipSent: false });
+
+        let resp;
+        try {
+          resp = await serverPost('/claude', {
+            model: 'deepseek-chat',
+            max_tokens: 500,
+            messages: [{ role: 'user', content: prompt }]
+          }, null, { 'x-claude-key': AI_PROXY_KEY });
+        } catch(e) {
+          log('WARN', 'AUTO-FOOTBALL', `AI error: ${e.message}`);
+          await new Promise(r => setTimeout(r, 3000)); continue;
+        }
+
+        const text = resp?.content?.map(b => b.text || '').join('') || '';
+        // TIP_FB:1X2_H:Team Name@1.85|EV:7.5|STAKE:2u|CONF:MÉDIA
+        const tipMatch = text.match(/TIP_FB:([\w_.]+):([^@]+)@([\d.]+)\|EV:([+-]?[\d.]+)\|STAKE:([\d.]+)u?\|CONF:(ALTA|MÉDIA|BAIXA)/i);
+
+        if (!tipMatch) {
+          log('INFO', 'AUTO-FOOTBALL', `Sem tip: ${match.team1} vs ${match.team2}`);
+          await new Promise(r => setTimeout(r, 3000)); continue;
+        }
+
+        const tipMarket   = tipMatch[1].toUpperCase();
+        const tipTeam     = tipMatch[2].trim();
+        const tipOdd      = parseFloat(tipMatch[3]);
+        const tipEV       = parseFloat(tipMatch[4]);
+        const tipStake    = tipMatch[5];
+        const tipConf     = tipMatch[6].toUpperCase();
+
+        // Validações pós-análise
+        if (tipOdd < 1.30 || tipOdd > 6.00) {
+          log('INFO', 'AUTO-FOOTBALL', `Gate odds: ${tipOdd} fora do range 1.30-6.00`);
+          await new Promise(r => setTimeout(r, 2000)); continue;
+        }
+        if (tipEV < EV_THRESHOLD) {
+          log('INFO', 'AUTO-FOOTBALL', `Gate EV: ${tipEV}% < ${EV_THRESHOLD}%`);
+          await new Promise(r => setTimeout(r, 2000)); continue;
+        }
+        if (tipMarket === '1X2_D' && tipOdd < DRAW_MIN_ODDS) {
+          log('INFO', 'AUTO-FOOTBALL', `Gate draw odds: ${tipOdd} < ${DRAW_MIN_ODDS}`);
+          await new Promise(r => setTimeout(r, 2000)); continue;
+        }
+
+        const confEmoji = { ALTA: '🟢', MÉDIA: '🟡', BAIXA: '🔴' }[tipConf] || '🟡';
+        const marketLabel = {
+          '1X2_H': `⚽ Casa — *${match.team1}*`,
+          '1X2_D': `🤝 Empate`,
+          '1X2_A': `✈️ Fora — *${match.team2}*`,
+          'OVER_2.5': `📈 Over 2.5 gols`,
+          'UNDER_2.5': `📉 Under 2.5 gols`
+        }[tipMarket] || tipMarket;
+
+        const tipMsg = `⚽ 💰 *TIP FUTEBOL*\n` +
+          `*${match.team1}* vs *${match.team2}*\n` +
+          `📋 ${match.league}\n` +
+          `🕐 ${matchTime} (BRT)\n\n` +
+          `🎯 Aposta: ${marketLabel} @ *${tipOdd}*\n` +
+          `📈 EV: *+${tipEV}%* | Prob. mercado: ${tipMarket === '1X2_H' ? mktH : tipMarket === '1X2_D' ? mktD : tipMarket === '1X2_A' ? mktA : '—'}%\n` +
+          `💵 Stake: *${tipStake}u*\n` +
+          `${confEmoji} Confiança: *${tipConf}*\n\n` +
+          `⚠️ _Aposte com responsabilidade._`;
+
+        // Tenta obter o fixture ID da API-Football para permitir settlement automático
+        const fixtureId = await findFixtureId(match.team1, match.team2, match.time).catch(() => null);
+        const recordMatchId = fixtureId ? `fb_${fixtureId}` : String(match.id);
+
+        await serverPost('/record-tip', {
+          matchId: recordMatchId, eventName: match.league,
+          p1: match.team1, p2: match.team2, tipParticipant: tipTeam,
+          odds: String(tipOdd), ev: String(tipEV), stake: String(tipStake),
+          confidence: tipConf, isLive: false, market_type: tipMarket
+        }, 'football');
+
+        for (const [userId, prefs] of subscribedUsers) {
+          if (!prefs.has('football')) continue;
+          try { await sendDM(token, userId, tipMsg); } catch(_) {}
+        }
+        analyzedFootball.set(key, { ts: now, tipSent: true });
+        log('INFO', 'AUTO-FOOTBALL', `Tip enviada: ${tipTeam} @ ${tipOdd} | ${tipMarket} | EV:${tipEV}% | ${tipConf}`);
+        await new Promise(r => setTimeout(r, 5000));
+      }
+    } catch(e) {
+      log('ERROR', 'AUTO-FOOTBALL', e.message);
+    }
+    setTimeout(loop, 30 * 60 * 1000); // verifica a cada 30min
+  }
+  loop();
+}
+
 // ── Start ──
 log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
 log('INFO', 'BOOT', `ENV: ESPORTS_ENABLED=${process.env.ESPORTS_ENABLED || '(não definida)'}`);
@@ -2811,6 +3112,9 @@ log('INFO', 'BOOT', `Sports carregados: ${JSON.stringify(Object.entries(SPORTS).
 
   // MMA polling (independente do loop de sports genérico)
   pollMma();
+
+  // Football polling
+  pollFootball();
 
   // Tennis polling
   pollTennis();

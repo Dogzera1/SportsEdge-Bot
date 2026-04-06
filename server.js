@@ -1489,6 +1489,50 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // ── Resultado Futebol (settlement via API-Football) ──
+  if (p === '/football-result') {
+    const fixtureId = parsed.query.fixtureId || '';
+    if (!fixtureId) { sendJson(res, { resolved: false, error: 'fixtureId obrigatório' }, 400); return; }
+    try {
+      const FOOTBALL_API_KEY = process.env.API_SPORTS_KEY || process.env.APIFOOTBALL_KEY || '';
+      if (!FOOTBALL_API_KEY) { sendJson(res, { resolved: false, error: 'API_SPORTS_KEY não configurada' }); return; }
+
+      const r = await httpGet(`https://v3.football.api-sports.io/fixtures?id=${fixtureId}`, {
+        'x-rapidapi-key': FOOTBALL_API_KEY,
+        'x-rapidapi-host': 'v3.football.api-sports.io'
+      });
+      const data = safeParse(r.body, {});
+      const fixture = data?.response?.[0];
+      if (!fixture) { sendJson(res, { resolved: false }); return; }
+
+      const statusShort = fixture.fixture?.status?.short;
+      const FINISHED_STATUSES = ['FT', 'AET', 'PEN'];
+      if (!FINISHED_STATUSES.includes(statusShort)) {
+        sendJson(res, { resolved: false, status: statusShort }); return;
+      }
+
+      const homeGoals = fixture.goals?.home;
+      const awayGoals = fixture.goals?.away;
+      const homeName  = fixture.teams?.home?.name || '';
+      const awayName  = fixture.teams?.away?.name || '';
+
+      let winner;
+      if (homeGoals > awayGoals)       winner = homeName;
+      else if (awayGoals > homeGoals)  winner = awayName;
+      else                             winner = 'Draw';
+
+      const score = `${homeGoals}-${awayGoals}`;
+      stmts.upsertMatchResult.run(
+        String(fixtureId), 'football', homeName, awayName, winner, score,
+        fixture.league?.name || ''
+      );
+      sendJson(res, { fixtureId, winner, score, homeName, awayName, resolved: true });
+    } catch(e) {
+      sendJson(res, { resolved: false, error: e.message });
+    }
+    return;
+  }
+
   // ── Usuários ──
   if (p === '/users') {
     const subscribed = parsed.query.subscribed;
@@ -2005,6 +2049,70 @@ const server = http.createServer(async (req, res) => {
             league: e.sport_title || 'Tennis',
             time: e.commence_time,
             odds: { t1: String(o1.price), t2: String(o2.price), bookmaker: bm.title }
+          });
+        }
+      }
+      matches.sort((a, b) => new Date(a.time) - new Date(b.time));
+      sendJson(res, matches);
+    } catch(e) {
+      sendJson(res, []);
+    }
+    return;
+  }
+
+  if (p === '/football-matches') {
+    if (!THE_ODDS_API_KEY) { sendJson(res, []); return; }
+    try {
+      const now = Date.now();
+      const weekAhead = now + 7 * 24 * 60 * 60 * 1000;
+      const configured = (process.env.FOOTBALL_LEAGUES || 'soccer_brazil_serie_b,soccer_brazil_serie_c')
+        .split(',').map(s => s.trim()).filter(Boolean);
+
+      const results = await Promise.allSettled(
+        configured.map(k =>
+          httpGet(`https://api.the-odds-api.com/v4/sports/${k}/odds/?apiKey=${THE_ODDS_API_KEY}&regions=eu&markets=h2h,totals&oddsFormat=decimal`)
+            .catch(() => ({ status: 500, body: '[]' }))
+        )
+      );
+
+      const matches = [];
+      for (let i = 0; i < results.length; i++) {
+        const r2 = results[i];
+        if (r2.status !== 'fulfilled' || r2.value.status !== 200) continue;
+        const raw = safeParse(r2.value.body, []);
+        for (const e of raw) {
+          const t = new Date(e.commence_time).getTime();
+          if (t <= now || t > weekAhead) continue;
+          const bm = e.bookmakers?.[0];
+          if (!bm) continue;
+          const h2hMarket = bm.markets?.find(m => m.key === 'h2h');
+          const totalsMarket = bm.markets?.find(m => m.key === 'totals');
+          const out = h2hMarket?.outcomes || [];
+          const oH = out.find(o => o.name === e.home_team);
+          const oD = out.find(o => o.name === 'Draw');
+          const oA = out.find(o => o.name === e.away_team);
+          if (!oH || !oD || !oA) continue;
+          const over = totalsMarket?.outcomes?.find(o => o.name === 'Over');
+          const under = totalsMarket?.outcomes?.find(o => o.name === 'Under');
+          const odds = {
+            h: String(oH.price),
+            d: String(oD.price),
+            a: String(oA.price),
+            bookmaker: bm.title
+          };
+          if (over && under) {
+            odds.ou25 = { over: String(over.price), under: String(under.price), point: over.point };
+          }
+          matches.push({
+            id: e.id,
+            game: 'football',
+            sport_key: configured[i],
+            status: 'upcoming',
+            team1: e.home_team,
+            team2: e.away_team,
+            league: e.sport_title || 'Football',
+            time: e.commence_time,
+            odds
           });
         }
       }
