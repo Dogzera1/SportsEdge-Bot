@@ -2153,6 +2153,74 @@ async function poll(token, sport) {
   loop();
 }
 
+// ── ESPN MMA data fetcher (sem chave de API) ──
+let espnMmaCache = { data: [], ts: 0 };
+const ESPN_MMA_TTL = 60 * 60 * 1000; // 1h
+
+async function fetchEspnMmaFights() {
+  if (Date.now() - espnMmaCache.ts < ESPN_MMA_TTL && espnMmaCache.data.length) return espnMmaCache.data;
+  try {
+    const r = await new Promise((resolve, reject) => {
+      const req = https.request({
+        hostname: 'site.api.espn.com',
+        path: '/apis/site/v2/sports/mma/ufc/scoreboard',
+        method: 'GET',
+        headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json' }
+      }, res => {
+        let d = '';
+        res.on('data', c => d += c);
+        res.on('end', () => resolve({ status: res.statusCode, body: d }));
+      });
+      req.on('error', reject);
+      req.setTimeout(10000, () => req.destroy(new Error('ESPN timeout')));
+      req.end();
+    });
+
+    if (r.status !== 200) return espnMmaCache.data;
+    const json = safeParse(r.body, {});
+    const fights = [];
+    for (const event of (json.events || [])) {
+      for (const comp of (event.competitions || [])) {
+        const comps = comp.competitors || [];
+        if (comps.length < 2) continue;
+        const f1 = comps.find(c => c.order === 1) || comps[0];
+        const f2 = comps.find(c => c.order === 2) || comps[1];
+        const rec = c => (c.records || []).find(r => r.name === 'overall')?.summary || '';
+        fights.push({
+          name1: f1.athlete?.fullName || '',
+          name2: f2.athlete?.fullName || '',
+          record1: rec(f1),
+          record2: rec(f2),
+          weightClass: comp.type?.abbreviation || '',
+          rounds: comp.format?.regulation?.periods || 3,
+          eventName: event.name || '',
+          date: comp.date || ''
+        });
+      }
+    }
+    espnMmaCache = { data: fights, ts: Date.now() };
+    log('INFO', 'ESPN-MMA', `${fights.length} lutas carregadas da ESPN`);
+    return fights;
+  } catch(e) {
+    log('WARN', 'ESPN-MMA', `Falha ao buscar dados ESPN: ${e.message}`);
+    return espnMmaCache.data;
+  }
+}
+
+function normName(s) {
+  return (s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]/g, '');
+}
+
+function findEspnFight(espnFights, team1, team2) {
+  const n1 = normName(team1), n2 = normName(team2);
+  return espnFights.find(f => {
+    const e1 = normName(f.name1), e2 = normName(f.name2);
+    const fwd = (e1.includes(n1) || n1.includes(e1)) && (e2.includes(n2) || n2.includes(e2));
+    const rev = (e1.includes(n2) || n2.includes(e1)) && (e2.includes(n1) || n1.includes(e2));
+    return fwd || rev;
+  }) || null;
+}
+
 // ── MMA Auto-analysis loop ──
 async function pollMma() {
   const mmaConfig = SPORTS['mma'];
@@ -2164,12 +2232,16 @@ async function pollMma() {
 
   async function loop() {
     try {
-      const fights = await serverGet('/mma-matches').catch(() => []);
+      const [fights, espnFights] = await Promise.all([
+        serverGet('/mma-matches').catch(() => []),
+        fetchEspnMmaFights().catch(() => [])
+      ]);
+
       if (!Array.isArray(fights) || !fights.length) {
         setTimeout(loop, 30 * 60 * 1000); return;
       }
 
-      log('INFO', 'AUTO-MMA', `${fights.length} lutas MMA com odds`);
+      log('INFO', 'AUTO-MMA', `${fights.length} lutas MMA com odds | ESPN: ${espnFights.length} lutas`);
 
       const now = Date.now();
       for (const fight of fights) {
@@ -2186,35 +2258,55 @@ async function pollMma() {
           hour: '2-digit', minute: '2-digit'
         }) : '—';
 
+        // Dados calculados das odds
         const r1 = 1 / parseFloat(o.t1), r2 = 1 / parseFloat(o.t2);
         const or = r1 + r2;
         const fairP1 = (r1 / or * 100).toFixed(1);
         const fairP2 = (r2 / or * 100).toFixed(1);
         const marginPct = ((or - 1) * 100).toFixed(1);
 
+        // Enriquecer com dados ESPN se disponível
+        const espn = findEspnFight(espnFights, fight.team1, fight.team2);
+        const rec1 = espn ? (normName(espn.name1).includes(normName(fight.team1)) ? espn.record1 : espn.record2) : '';
+        const rec2 = espn ? (normName(espn.name1).includes(normName(fight.team1)) ? espn.record2 : espn.record1) : '';
+        const weightClass = espn?.weightClass || '';
+        const rounds = espn?.rounds || 3;
+        const isTitleFight = rounds === 5;
+
+        const espnSection = espn
+          ? `\nREGISTRO: ${fight.team1}=${rec1 || '?'} | ${fight.team2}=${rec2 || '?'}\nCategoria: ${weightClass || fight.league} | ${rounds} rounds${isTitleFight ? ' (TITLE FIGHT)' : ''}`
+          : '';
+
         const prompt = `Você é um analista especializado em MMA/UFC. Analise esta luta e identifique edge real se existir.
 
-LUTA: ${fight.team1} vs ${fight.team2} | ${fight.league}
-Data: ${fightTime} (BRT)
+LUTA: ${fight.team1} vs ${fight.team2}
+Evento: ${fight.league} | Data: ${fightTime} (BRT)${espnSection}
 
 ODDS (${o.bookmaker || 'EU'}):
-${fight.team1}: ${o.t1} | ${fight.team2}: ${o.t2}
-De-juice: ${fight.team1}=${fairP1}% | ${fight.team2}=${fairP2}% | Margem: ${marginPct}%
+${fight.team1}: ${o.t1} (prob. implícita: ${fairP1}%)
+${fight.team2}: ${o.t2} (prob. implícita: ${fairP2}%)
+Margem bookie: ${marginPct}%
 
-INSTRUÇÃO: Analise com base no seu conhecimento dos lutadores (estilo, finalizações, form recente, ranking, histórico).
-Se encontrar edge real (EV ≥ +5%): TIP_ML:[lutador]@[odd]|EV:[%]|STAKE:[u]|CONF:[ALTA/MÉDIA/BAIXA]
-Se não houver edge: responda apenas "SEM_EDGE"
+ANÁLISE REQUERIDA — seja específico:
+1. Vantagem técnica: quem domina grappling, striking e wrestling?
+2. Form recente: últimas 3 lutas de cada — tendência de melhora ou queda?
+3. Matchup estilístico: por que esse estilo X bate estilo Y nessa luta?
+4. Confiança na análise (1-10): você tem dados suficientes sobre ambos?
 
-RESPOSTA (máximo 150 palavras):`;
+DECISÃO FINAL:
+- Se EV ≥ +5% E confiança ≥ 7: TIP_ML:[lutador]@[odd]|EV:[%]|STAKE:[1-3]u|CONF:[ALTA/MÉDIA/BAIXA]
+- Se edge inexistente ou confiança < 7: SEM_EDGE
 
-        log('INFO', 'AUTO-MMA', `Analisando: ${fight.team1} vs ${fight.team2}`);
+Máximo 220 palavras. Seja direto e fundamentado.`;
+
+        log('INFO', 'AUTO-MMA', `Analisando: ${fight.team1} vs ${fight.team2}${espn ? ` (ESPN: ${weightClass}, ${rounds}R)` : ' (sem dados ESPN)'}`);
         analyzedMma.set(key, { ts: now, tipSent: false });
 
         let resp;
         try {
           resp = await serverPost('/claude', {
             model: 'deepseek-chat',
-            max_tokens: 300,
+            max_tokens: 450,
             messages: [{ role: 'user', content: prompt }]
           }, null, { 'x-claude-key': AI_PROXY_KEY });
         } catch(e) {
@@ -2223,7 +2315,7 @@ RESPOSTA (máximo 150 palavras):`;
         }
 
         const text = resp?.content?.map(b => b.text || '').join('') || '';
-        const tipMatch = text.match(/TIP_ML:([^@]+)@([\d.]+)\|EV:([+-]?[\d.]+)%\|STAKE:([\d.]+u?)\|CONF:(ALTA|MÉDIA|BAIXA)/i);
+        const tipMatch = text.match(/TIP_ML:([^@]+)@([\d.]+)\|EV:([+-]?[\d.]+)%\|STAKE:([\d.]+)u?\|CONF:(ALTA|MÉDIA|BAIXA)/i);
 
         if (!tipMatch) {
           log('INFO', 'AUTO-MMA', `Sem tip: ${fight.team1} vs ${fight.team2}`);
@@ -2233,11 +2325,11 @@ RESPOSTA (máximo 150 palavras):`;
         const tipTeam  = tipMatch[1].trim();
         const tipOdd   = parseFloat(tipMatch[2]);
         const tipEV    = parseFloat(tipMatch[3]);
-        const tipStake = tipMatch[4].replace('u','');
+        const tipStake = tipMatch[4];
         const tipConf  = tipMatch[5].toUpperCase();
 
-        if (tipOdd < 1.50 || tipOdd > 4.00) {
-          log('INFO', 'AUTO-MMA', `Gate odds: ${tipOdd} fora do range`);
+        if (tipOdd < 1.40 || tipOdd > 5.00) {
+          log('INFO', 'AUTO-MMA', `Gate odds: ${tipOdd} fora do range 1.40-5.00`);
           await new Promise(r => setTimeout(r, 3000)); continue;
         }
         if (tipEV < 5.0) {
@@ -2245,12 +2337,16 @@ RESPOSTA (máximo 150 palavras):`;
           await new Promise(r => setTimeout(r, 3000)); continue;
         }
 
-        const confEmoji = { ALTA: '🟢', MÉDIA: '🟡', BAIXA: '🔵' }[tipConf] || '🟡';
+        const confEmoji = { ALTA: '🟢', MÉDIA: '🟡', BAIXA: '🔴' }[tipConf] || '🟡';
+        const recLine = espn ? `\n📊 Registros: ${fight.team1} ${rec1||'?'} | ${fight.team2} ${rec2||'?'}` : '';
+        const catLine = espn ? `\n🏷️ ${weightClass || fight.league}${isTitleFight ? ' — TITLE FIGHT' : ''}` : '';
+
         const tipMsg = `🥊 💰 *TIP MMA*\n` +
           `*${fight.team1}* vs *${fight.team2}*\n📋 ${fight.league}\n` +
-          `🕐 ${fightTime} (BRT)\n\n` +
+          `🕐 ${fightTime} (BRT)${recLine}${catLine}\n\n` +
           `🎯 Aposta: *${tipTeam}* @ *${tipOdd}*\n` +
-          `📈 EV: *+${tipEV}%*\n💵 Stake: *${tipStake}u*\n` +
+          `📈 EV: *+${tipEV}%* | De-juice: ${tipTeam === fight.team1 ? fairP1 : fairP2}%\n` +
+          `💵 Stake: *${tipStake}u*\n` +
           `${confEmoji} Confiança: *${tipConf}*\n\n` +
           `⚠️ _Aposte com responsabilidade._`;
 
@@ -2266,7 +2362,7 @@ RESPOSTA (máximo 150 palavras):`;
           try { await sendDM(token, userId, tipMsg); } catch(_) {}
         }
         analyzedMma.set(key, { ts: now, tipSent: true });
-        log('INFO', 'AUTO-MMA', `Tip enviada: ${tipTeam} @ ${tipOdd}`);
+        log('INFO', 'AUTO-MMA', `Tip enviada: ${tipTeam} @ ${tipOdd} | EV:${tipEV}% | ${tipConf}`);
         await new Promise(r => setTimeout(r, 5000));
       }
     } catch(e) {

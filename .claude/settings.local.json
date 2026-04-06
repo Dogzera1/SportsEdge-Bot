@@ -17,7 +17,12 @@
       "WebFetch(domain:docs.oddspapi.io)",
       "Bash(node -e \"const Database = require\\('better-sqlite3'\\); const db = new Database\\('sportsedge.db'\\); const count = db.prepare\\(\\\\\"SELECT COUNT\\(*\\) as n FROM tips WHERE confidence = 'BAIXA'\\\\\"\\).get\\(\\); console.log\\('Tips BAIXA:', count.n\\);\")",
       "Bash(ls *.db)",
-      "Bash(dir *.db)"
+      "Bash(dir *.db)",
+      "Bash(curl -s \"https://site.api.espn.com/apis/site/v2/sports/mma/ufc/scoreboard\")",
+      "Bash(node -e \"const d=require\\('fs'\\).readFileSync\\('/dev/stdin','utf8'\\); const j=JSON.parse\\(d\\); console.log\\(JSON.stringify\\(j?.events?.slice\\(0,2\\), null, 2\\)\\)\")",
+      "Bash(curl -s --max-time 10 \"https://site.api.espn.com/apis/site/v2/sports/mma/ufc/scoreboard\")",
+      "Bash(curl -sv --max-time 10 \"https://site.api.espn.com/apis/site/v2/sports/mma/ufc/scoreboard\")",
+      "Bash(curl -sk --max-time 10 \"https://site.api.espn.com/apis/site/v2/sports/mma/ufc/scoreboard\")"
     ]
   }
 }
