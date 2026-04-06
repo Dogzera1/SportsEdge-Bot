@@ -1626,6 +1626,19 @@ async function handleAdmin(token, chatId, command) {
       }
       await send(token, chatId, txt);
     } catch(e) { await send(token, chatId, `❌ ${e.message}`); }
+  } else if (cmd === '/reanalise') {
+    if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
+    const cleared = {};
+    if (sport === 'esports' || sport === 'all') { analyzedMatches.clear(); cleared.esports = true; }
+    if (sport === 'mma'     || sport === 'all') { analyzedMma.clear();     cleared.mma = true; }
+    if (sport === 'tennis'  || sport === 'all') { analyzedTennis.clear();  cleared.tennis = true; }
+    if (sport === 'football'|| sport === 'all') { analyzedFootball.clear(); cleared.football = true; }
+    const clearedList = Object.keys(cleared).join(', ') || sport;
+    await send(token, chatId,
+      `🔄 *Reanálise ativada*\n\nMemória de análises limpa para: *${clearedList}*\n` +
+      `As tips em andamento serão reavaliadas no próximo ciclo de análise automática.`
+    );
+
   } else if (cmd === '/reset-tips') {
     if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
     try {

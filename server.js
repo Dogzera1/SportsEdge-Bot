@@ -1589,7 +1589,7 @@ const server = http.createServer(async (req, res) => {
         });
         // Calcula stake em reais com base na banca atual (1u = 1% da banca atual)
         try {
-          const bk = stmts.getBankroll.get();
+          const bk = stmts.getBankroll.get(sport);
           if (bk && result.lastInsertRowid) {
             const unitValue = bk.current_banca / 100;
             const stakeUnits = parseFloat(String(t.stake || '1').replace('u','')) || 1;
@@ -1626,7 +1626,7 @@ const server = http.createServer(async (req, res) => {
     const sport = parsed.query.sport || 'esports';
     const count = db.prepare("SELECT COUNT(*) as c FROM tips WHERE sport = ?").get(sport).c;
     db.prepare("DELETE FROM tips WHERE sport = ?").run(sport);
-    db.prepare("UPDATE bankroll SET current_banca = initial_banca, updated_at = datetime('now')").run();
+    db.prepare("UPDATE bankroll SET current_banca = initial_banca, updated_at = datetime('now') WHERE sport = ?").run(sport);
     log('INFO', 'ADMIN', `Tips resetadas: ${count} registros removidos (sport=${sport})`);
     sendJson(res, { ok: true, deleted: count });
     return;
@@ -1661,7 +1661,7 @@ const server = http.createServer(async (req, res) => {
           stmts.settleTip.run(result, matchId, sport);
           // Atualiza profit_reais e acumula delta da banca
           const stakeR = tip.stake_reais || (() => {
-            const bk = stmts.getBankroll.get();
+            const bk = stmts.getBankroll.get(sport);
             const uv = bk ? bk.current_banca / 100 : 1;
             const su = parseFloat(String(tip.stake || '1').replace('u','')) || 1;
             return parseFloat((su * uv).toFixed(2));
@@ -1677,11 +1677,11 @@ const server = http.createServer(async (req, res) => {
         }
         // Atualiza banca total
         if (bancaDelta !== 0) {
-          const bk = stmts.getBankroll.get();
+          const bk = stmts.getBankroll.get(sport);
           if (bk) {
             const nova = parseFloat((bk.current_banca + bancaDelta).toFixed(2));
-            stmts.updateBankroll.run(nova);
-            log('INFO', 'BANCA', `Settlement: delta R$${bancaDelta >= 0 ? '+' : ''}${bancaDelta.toFixed(2)} → banca agora R$${nova}`);
+            stmts.updateBankroll.run(nova, sport);
+            log('INFO', 'BANCA', `Settlement [${sport}]: delta R$${bancaDelta >= 0 ? '+' : ''}${bancaDelta.toFixed(2)} → banca agora R$${nova}`);
           }
         }
         sendJson(res, { ok: true, settled, bancaDelta: parseFloat(bancaDelta.toFixed(2)) });
@@ -1753,7 +1753,7 @@ const server = http.createServer(async (req, res) => {
     } : null;
 
     // Dados da banca em reais
-    const bk = stmts.getBankroll.get();
+    const bk = stmts.getBankroll.get(sport);
     const bancaInfo = bk ? {
       initialBanca: bk.initial_banca,
       currentBanca: bk.current_banca,
@@ -1793,7 +1793,8 @@ const server = http.createServer(async (req, res) => {
 
   // ── Bankroll endpoints ──
   if (p === '/bankroll') {
-    const bk = stmts.getBankroll.get();
+    const sport = parsed.query.sport || 'esports';
+    const bk = stmts.getBankroll.get(sport);
     if (!bk) { sendJson(res, { error: 'Bankroll não inicializado' }, 500); return; }
     sendJson(res, {
       initialBanca: bk.initial_banca,
@@ -1810,11 +1811,12 @@ const server = http.createServer(async (req, res) => {
     let body = ''; req.on('data', d => body += d);
     req.on('end', () => {
       try {
-        const { valor } = safeParse(body, {});
+        const { valor, sport: sportParam } = safeParse(body, {});
+        const sport = (sportParam || parsed.query.sport || 'esports');
         const v = parseFloat(valor);
         if (!v || v <= 0) { sendJson(res, { error: 'valor inválido' }, 400); return; }
-        stmts.resetBankroll.run(v, v);
-        log('INFO', 'BANCA', `Banca redefinida para R$${v.toFixed(2)}`);
+        stmts.resetBankroll.run(v, v, sport);
+        log('INFO', 'BANCA', `Banca [${sport}] redefinida para R$${v.toFixed(2)}`);
         sendJson(res, { ok: true, currentBanca: v, unitValue: parseFloat((v / 100).toFixed(4)) });
       } catch(e) { sendJson(res, { error: e.message }, 500); }
     });
