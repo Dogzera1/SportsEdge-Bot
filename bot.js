@@ -1846,6 +1846,48 @@ async function handleProximas(token, chatId, sport) {
   }
 }
 
+// ── Helpers ESPN → formato enrich do modelo ML ──
+
+// Converte record "W-L-D" do ESPN em objeto enrich compatível com esportsPreFilter
+function mmaRecordToEnrich(record1, record2) {
+  function parse(rec) {
+    const parts = (rec || '0-0').split('-').map(n => parseInt(n) || 0);
+    const wins = parts[0] || 0, losses = parts[1] || 0, draws = parts[2] || 0;
+    const total = wins + losses + draws;
+    return { wins, losses, winRate: total > 0 ? Math.round(wins / total * 100) : 50 };
+  }
+  return {
+    form1: parse(record1),
+    form2: parse(record2),
+    h2h: { t1Wins: 0, t2Wins: 0, totalMatches: 0 },
+    oddsMovement: null
+  };
+}
+
+// Converte rankings ATP/WTA em enrich compatível com esportsPreFilter
+// Usa modelo Elo-like (log-ranking): rank #1 vs #100 → ~73% favorito
+function rankingToEnrich(rankStr1, rankStr2) {
+  function parseRank(str) {
+    if (!str) return null;
+    const m = (str || '').match(/^#(\d+)/);
+    return m ? parseInt(m[1]) : null;
+  }
+  const r1 = parseRank(rankStr1), r2 = parseRank(rankStr2);
+  if (r1 === null && r2 === null) return null;
+
+  const base1 = r1 || 500, base2 = r2 || 500;
+  // P(1 ganha) = 1 / (1 + sqrt(rank1/rank2)) — favorece rank menor (melhor jogador)
+  const wr1 = Math.round(100 / (1 + Math.sqrt(base1 / base2)));
+  const wr2 = 100 - wr1;
+  // wins/losses sintéticos — apenas para o esportsPreFilter usar o winRate
+  return {
+    form1: { wins: wr1, losses: wr2, winRate: wr1 },
+    form2: { wins: wr2, losses: wr1, winRate: wr2 },
+    h2h: { t1Wins: 0, t2Wins: 0, totalMatches: 0 },
+    oddsMovement: null
+  };
+}
+
 async function handleFairOdds(token, chatId, sport) {
   try {
     await send(token, chatId, '⏳ _Calculando fair odds do modelo..._');
@@ -1935,10 +1977,34 @@ async function handleFairOdds(token, chatId, sport) {
       }
 
     } else {
-      // LoL, MMA, Tennis — busca enrichment em paralelo e roda o modelo
-      const enrichments = await Promise.all(
-        slice.map(m => fetchEnrichment(m).catch(() => ({ form1: null, form2: null, h2h: null, oddsMovement: null })))
-      );
+      // LoL, MMA, Tennis — obtém enrich de cada esporte
+      let espnFightsForFair = [];
+      let espnRankingsForFair = { atp: [], wta: [] };
+      if (sport === 'mma') {
+        espnFightsForFair = await fetchEspnMmaFights().catch(() => []);
+      } else if (sport === 'tennis') {
+        espnRankingsForFair = await fetchEspnTennisRankings().catch(() => ({ atp: [], wta: [] }));
+      }
+
+      // LoL: usa DB local. MMA/Tennis: ESPN. Roda em paralelo para LoL, serial para outros.
+      const enrichments = sport === 'lol'
+        ? await Promise.all(slice.map(m => fetchEnrichment(m).catch(() => ({ form1: null, form2: null, h2h: null, oddsMovement: null }))))
+        : slice.map(m => {
+            if (sport === 'mma') {
+              const espn = findEspnFight(espnFightsForFair, m.team1, m.team2);
+              if (!espn) return { form1: null, form2: null, h2h: null, oddsMovement: null };
+              const rec1 = normName(espn.name1).includes(normName(m.team1)) ? espn.record1 : espn.record2;
+              const rec2 = normName(espn.name1).includes(normName(m.team1)) ? espn.record2 : espn.record1;
+              return mmaRecordToEnrich(rec1, rec2);
+            } else if (sport === 'tennis') {
+              const tour = (m.sport_key || '').includes('_wta_') ? 'WTA' : 'ATP';
+              const rankList = tour === 'WTA' ? espnRankingsForFair.wta : espnRankingsForFair.atp;
+              const rank1 = getTennisPlayerRank(rankList, m.team1);
+              const rank2 = getTennisPlayerRank(rankList, m.team2);
+              return rankingToEnrich(rank1, rank2) || { form1: null, form2: null, h2h: null, oddsMovement: null };
+            }
+            return { form1: null, form2: null, h2h: null, oddsMovement: null };
+          });
 
       for (let i = 0; i < slice.length; i++) {
         const m = slice[i];
@@ -1959,7 +2025,8 @@ async function handleFairOdds(token, chatId, sport) {
         const fairO2 = (1 / modelP2).toFixed(2);
 
         const hasEnrichData = factorCount > 0;
-        const enrichTag = hasEnrichData ? `` : ` _(sem dados — apenas de-juice)_`;
+        const enrichSource = sport === 'mma' ? 'ESPN record' : sport === 'tennis' ? 'ESPN ranking' : 'forma+H2H';
+        const enrichTag = hasEnrichData ? ` _(${enrichSource})_` : ` _(sem dados — apenas de-juice)_`;
 
         const edgePp1 = mlResult.t1Edge.toFixed(1);
         const edgePp2 = mlResult.t2Edge.toFixed(1);
@@ -2666,9 +2733,25 @@ async function pollMma() {
         const rounds = espn?.rounds || 3;
         const isTitleFight = rounds === 5;
 
+        // ── Pré-filtro ML com dados ESPN (record → win rate) ──
+        const mmaEnrich = espn ? mmaRecordToEnrich(rec1, rec2) : { form1: null, form2: null, h2h: null, oddsMovement: null };
+        const mlResultMma = esportsPreFilter(fight, o, mmaEnrich, false, '', null);
+        if (!mlResultMma.pass) {
+          log('INFO', 'AUTO-MMA', `Pré-filtro ML: edge insuficiente (${mlResultMma.score.toFixed(1)}pp) para ${fight.team1} vs ${fight.team2}. Pulando IA.`);
+          await new Promise(r => setTimeout(r, 500)); continue;
+        }
+
+        const hasModelDataMma = mlResultMma.factorCount > 0;
+        const modelP1Mma = hasModelDataMma ? (mlResultMma.modelP1 * 100).toFixed(1) : null;
+        const modelP2Mma = hasModelDataMma ? (mlResultMma.modelP2 * 100).toFixed(1) : null;
+
         const espnSection = espn
           ? `\nREGISTRO: ${fight.team1}=${rec1 || '?'} | ${fight.team2}=${rec2 || '?'}\nCategoria: ${weightClass || fight.league} | ${rounds} rounds${isTitleFight ? ' (TITLE FIGHT)' : ''}`
           : '';
+
+        const fairOddsRef = hasModelDataMma
+          ? `P modelo (record ESPN): ${fight.team1}=${modelP1Mma}% | ${fight.team2}=${modelP2Mma}%\nP de-juiced bookie: ${fight.team1}=${fairP1}% | ${fight.team2}=${fairP2}%`
+          : `P de-juiced bookie: ${fight.team1}=${fairP1}% | ${fight.team2}=${fairP2}% (sem record ESPN disponível)`;
 
         const prompt = `Você é um analista especializado em MMA/UFC. Analise esta luta e identifique edge real se existir.
 
@@ -2676,9 +2759,10 @@ LUTA: ${fight.team1} vs ${fight.team2}
 Evento: ${fight.league} | Data: ${fightTime} (BRT)${espnSection}
 
 ODDS (${o.bookmaker || 'EU'}):
-${fight.team1}: ${o.t1} (prob. implícita: ${fairP1}%)
-${fight.team2}: ${o.t2} (prob. implícita: ${fairP2}%)
+${fight.team1}: ${o.t1} | ${fight.team2}: ${o.t2}
 Margem bookie: ${marginPct}%
+${fairOddsRef}
+${hasModelDataMma ? `AVISO: o modelo base usa o record histórico como prior. Sua estimativa deve superar a P do modelo em ≥8pp para ter edge real.` : ''}
 
 ANÁLISE REQUERIDA — seja específico:
 1. Vantagem técnica: quem domina grappling, striking e wrestling?
@@ -2842,6 +2926,18 @@ async function pollTennis() {
         const form1 = espnEvent ? getTennisRecentForm(espnEvent.recentResults, match.team1) : null;
         const form2 = espnEvent ? getTennisRecentForm(espnEvent.recentResults, match.team2) : null;
 
+        // ── Pré-filtro ML com ranking ESPN como prior ──
+        const tennisEnrich = rankingToEnrich(rank1, rank2);
+        const mlResultTennis = esportsPreFilter(match, o, tennisEnrich || { form1: null, form2: null, h2h: null, oddsMovement: null }, false, '', null);
+        if (!mlResultTennis.pass) {
+          log('INFO', 'AUTO-TENNIS', `Pré-filtro ML: edge insuficiente (${mlResultTennis.score.toFixed(1)}pp) para ${match.team1} vs ${match.team2}. Pulando IA.`);
+          await new Promise(r => setTimeout(r, 500)); continue;
+        }
+
+        const hasModelDataTennis = mlResultTennis.factorCount > 0;
+        const modelP1Tennis = hasModelDataTennis ? (mlResultTennis.modelP1 * 100).toFixed(1) : null;
+        const modelP2Tennis = hasModelDataTennis ? (mlResultTennis.modelP2 * 100).toFixed(1) : null;
+
         // Montar seção de dados reais
         const dataSection = [
           rank1 ? `Ranking ${match.team1}: ${rank1}` : null,
@@ -2853,6 +2949,10 @@ async function pollTennis() {
 
         const hasRealData = !!(rank1 || rank2 || form1 || form2);
 
+        const fairOddsLineTennis = hasModelDataTennis
+          ? `P modelo (ranking ESPN): ${match.team1}=${modelP1Tennis}% | ${match.team2}=${modelP2Tennis}%\nP de-juiced bookie: ${match.team1}=${fairP1}% | ${match.team2}=${fairP2}%`
+          : `P de-juiced bookie: ${match.team1}=${fairP1}% | ${match.team2}=${fairP2}% (sem ranking ESPN disponível)`;
+
         const prompt = `Você é um analista especializado em tênis profissional. Analise com rigor — prefira SEM_EDGE a inventar edge inexistente.
 
 PARTIDA: ${match.team1} vs ${match.team2}
@@ -2860,17 +2960,17 @@ Torneio: ${match.league} | ${eventType}
 Superfície: ${surfacePT} | Data: ${matchTime} (BRT)
 
 ODDS REAIS (${o.bookmaker || 'EU'}):
-${match.team1}: ${o.t1} → prob. implícita ${fairP1}% → de-juiced ${fairP1}%
-${match.team2}: ${o.t2} → prob. implícita ${fairP2}% → de-juiced ${fairP2}%
+${match.team1}: ${o.t1} | ${match.team2}: ${o.t2}
 Margem bookie: ${marginPct}%
+${fairOddsLineTennis}
 ${isFav1 ? match.team1 : match.team2} é o favorito do mercado.
 
 ${dataSection ? `DADOS REAIS (ESPN):\n${dataSection}\n` : 'AVISO: sem dados ESPN disponíveis — use apenas conhecimento de treino confiável.\n'}
 INSTRUÇÕES:
 1. Estime a probabilidade REAL de vitória de cada jogador com base em: ranking, superfície, H2H, form recente, estilo.
-2. Compare sua estimativa com a prob. de-juiced do mercado:
-   - Se sua estimativa para ${match.team1} > ${fairP1}%: edge em ${match.team1} (EV = (sua_prob/100 * ${o.t1}) - 1)
-   - Se sua estimativa para ${match.team2} > ${fairP2}%: edge em ${match.team2} (EV = (sua_prob/100 * ${o.t2}) - 1)
+2. Compare sua estimativa com a ${hasModelDataTennis ? `P do modelo (${match.team1}=${modelP1Tennis}% | ${match.team2}=${modelP2Tennis}%)` : 'prob. de-juiced do mercado'}:
+   - Se sua estimativa para ${match.team1} > ${hasModelDataTennis ? modelP1Tennis : fairP1}%: edge em ${match.team1} (EV = (sua_prob/100 * ${o.t1}) - 1)
+   - Se sua estimativa para ${match.team2} > ${hasModelDataTennis ? modelP2Tennis : fairP2}%: edge em ${match.team2} (EV = (sua_prob/100 * ${o.t2}) - 1)
 3. Confiança (1-10): baseada em quão bem você conhece esses jogadores E nessa superfície.
    - Se não tiver certeza sobre ranking atual ou form real: máximo confiança 6 → SEM_EDGE.
 
