@@ -315,7 +315,14 @@ async function loadSubscribedUsers() {
 }
 
 // ── Auto Analysis: LoL live + upcoming ──
+let autoAnalysisRunning = false;
 async function runAutoAnalysis() {
+  if (autoAnalysisRunning) {
+    log('INFO', 'AUTO', 'Análise anterior ainda em curso — pulando ciclo');
+    return;
+  }
+  autoAnalysisRunning = true;
+  try {
   const now = Date.now();
 
   const esportsConfig = SPORTS['esports'];
@@ -572,7 +579,9 @@ async function runAutoAnalysis() {
     }
   }
 
-
+  } finally {
+    autoAnalysisRunning = false;
+  }
 }
 
 // ── Settlement ──
@@ -2550,6 +2559,12 @@ async function pollMma() {
         // Descartar lutas já passadas (dado stale da API)
         if (fightTs && fightTs < now) {
           log('INFO', 'AUTO-MMA', `Ignorando luta passada: ${fight.team1} vs ${fight.team2}`);
+          continue;
+        }
+        // Descartar lutas sem data ou com data > 60 dias — provavelmente históricas/inválidas no feed
+        const MAX_FUTURE_MS = 60 * 24 * 60 * 60 * 1000;
+        if (!fightTs || fightTs > now + MAX_FUTURE_MS) {
+          log('INFO', 'AUTO-MMA', `Ignorando luta sem data válida: ${fight.team1} vs ${fight.team2}`);
           continue;
         }
         const isThisWeek = fightTs > 0 && fightTs <= endOfWeek;
