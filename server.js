@@ -1752,16 +1752,46 @@ const server = http.createServer(async (req, res) => {
       count: c.count
     } : null;
 
-    // Dados da banca em reais
+    // Dados da banca em reais — calcula current_banca a partir dos profits reais acumulados
     const bk = stmts.getBankroll.get(sport);
-    const bancaInfo = bk ? {
-      initialBanca: bk.initial_banca,
-      currentBanca: bk.current_banca,
-      unitValue: parseFloat((bk.current_banca / 100).toFixed(4)),
-      profitReais: parseFloat((bk.current_banca - bk.initial_banca).toFixed(2)),
-      growthPct: parseFloat(((bk.current_banca - bk.initial_banca) / bk.initial_banca * 100).toFixed(2)),
-      updatedAt: bk.updated_at
-    } : null;
+    let bancaInfo = null;
+    if (bk) {
+      // Backfill: tips arquivadas sem profit_reais calculado (coluna adicionada depois do settlement)
+      const orphans = db.prepare(
+        "SELECT id, result, odds, stake, stake_reais FROM tips WHERE sport = ? AND result IS NOT NULL AND profit_reais IS NULL"
+      ).all(sport);
+      if (orphans.length > 0) {
+        const unitValue = bk.initial_banca / 100;
+        const backfill = db.prepare("UPDATE tips SET stake_reais = ?, profit_reais = ? WHERE id = ?");
+        for (const t of orphans) {
+          const stakeR = t.stake_reais || parseFloat(((parseFloat(String(t.stake || '1').replace('u','')) || 1) * unitValue).toFixed(2));
+          const odds = parseFloat(t.odds) || 1;
+          const profitR = t.result === 'win'
+            ? parseFloat((stakeR * (odds - 1)).toFixed(2))
+            : parseFloat((-stakeR).toFixed(2));
+          backfill.run(stakeR, profitR, t.id);
+        }
+        log('INFO', 'BANCA', `[${sport}] Backfill: ${orphans.length} tips sem profit_reais recalculadas`);
+      }
+
+      const profitRow = db.prepare(
+        "SELECT COALESCE(SUM(profit_reais), 0) as total_profit FROM tips WHERE sport = ? AND result IS NOT NULL AND profit_reais IS NOT NULL"
+      ).get(sport);
+      const accumulatedProfit = parseFloat((profitRow?.total_profit || 0).toFixed(2));
+      const currentBanca = parseFloat((bk.initial_banca + accumulatedProfit).toFixed(2));
+      // Sincroniza o registro caso esteja desatualizado
+      if (Math.abs(currentBanca - bk.current_banca) > 0.01) {
+        stmts.updateBankroll.run(currentBanca, sport);
+      }
+      bancaInfo = {
+        initialBanca: bk.initial_banca,
+        currentBanca: currentBanca,
+        unitValue: parseFloat((currentBanca / 100).toFixed(4)),
+        profitReais: accumulatedProfit,
+        growthPct: parseFloat((accumulatedProfit / bk.initial_banca * 100).toFixed(2)),
+        updatedAt: bk.updated_at
+      };
+    }
 
     sendJson(res, {
       overall: {
@@ -1796,12 +1826,17 @@ const server = http.createServer(async (req, res) => {
     const sport = parsed.query.sport || 'esports';
     const bk = stmts.getBankroll.get(sport);
     if (!bk) { sendJson(res, { error: 'Bankroll não inicializado' }, 500); return; }
+    const profitRow = db.prepare(
+      "SELECT COALESCE(SUM(profit_reais), 0) as total_profit FROM tips WHERE sport = ? AND result IS NOT NULL AND profit_reais IS NOT NULL"
+    ).get(sport);
+    const accumulatedProfit = parseFloat((profitRow?.total_profit || 0).toFixed(2));
+    const currentBanca = parseFloat((bk.initial_banca + accumulatedProfit).toFixed(2));
     sendJson(res, {
       initialBanca: bk.initial_banca,
-      currentBanca: bk.current_banca,
-      unitValue: parseFloat((bk.current_banca / 100).toFixed(4)),
-      profitReais: parseFloat((bk.current_banca - bk.initial_banca).toFixed(2)),
-      growthPct: parseFloat(((bk.current_banca - bk.initial_banca) / bk.initial_banca * 100).toFixed(2)),
+      currentBanca: currentBanca,
+      unitValue: parseFloat((currentBanca / 100).toFixed(4)),
+      profitReais: accumulatedProfit,
+      growthPct: parseFloat((accumulatedProfit / bk.initial_banca * 100).toFixed(2)),
       updatedAt: bk.updated_at
     });
     return;
