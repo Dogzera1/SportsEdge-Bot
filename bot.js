@@ -1579,6 +1579,41 @@ async function handleProximas(token, chatId, sport) {
   try {
     await send(token, chatId, '⏳ _Buscando partidas..._');
 
+    if (sport === 'mma') {
+      const fights = await serverGet('/mma-matches').catch(() => []);
+      const all = Array.isArray(fights) ? fights : [];
+
+      if (!all.length) {
+        await send(token, chatId,
+          '❌ Nenhuma luta MMA encontrada no momento.\n' +
+          '_Tente novamente mais tarde._',
+          getMenu(sport)
+        );
+        return;
+      }
+
+      let txt = `🥊 *PRÓXIMAS LUTAS MMA*\n━━━━━━━━━━━━━━━━\n\n`;
+      txt += `📅 *PRÓXIMAS (${all.length})*\n`;
+      all.slice(0, 12).forEach(m => {
+        const league = m.league ? `[${m.league}]` : '';
+        txt += `🥊 ${league} *${m.team1}* vs *${m.team2}*\n`;
+        if (m.time) {
+          try {
+            const dt = new Date(m.time).toLocaleString('pt-BR', {
+              timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit',
+              hour: '2-digit', minute: '2-digit'
+            });
+            txt += `  🕐 ${dt}\n`;
+          } catch(_) {}
+        }
+        if (m.odds) txt += `  💰 ${m.team1}: \`${m.odds.t1}\` | ${m.team2}: \`${m.odds.t2}\`\n`;
+        else txt += `  _Sem odds ainda_\n`;
+      });
+
+      await send(token, chatId, txt, getMenu(sport));
+      return;
+    }
+
     const lolMatches = await serverGet('/lol-matches').catch(() => []);
     const all = Array.isArray(lolMatches) ? lolMatches : [];
 
@@ -1646,23 +1681,27 @@ async function handleFairOdds(token, chatId, sport) {
   try {
     await send(token, chatId, '⏳ _Calculando fair odds..._');
 
-    const lolMatches = await serverGet('/lol-matches').catch(() => []);
-    const all = Array.isArray(lolMatches) ? lolMatches : [];
+    const endpoint = sport === 'mma' ? '/mma-matches' : '/lol-matches';
+    const matches = await serverGet(endpoint).catch(() => []);
+    const all = Array.isArray(matches) ? matches : [];
 
-    const live = all.filter(m => (m.status === 'live' || m.status === 'draft') && m.odds?.t1 && m.odds?.t2);
+    const withOdds = sport === 'mma'
+      ? all.filter(m => m.odds?.t1 && m.odds?.t2)
+      : all.filter(m => (m.status === 'live' || m.status === 'draft') && m.odds?.t1 && m.odds?.t2);
 
-    if (!live.length) {
-      await send(token, chatId,
-        '❌ *Nenhuma partida ao vivo com odds disponíveis.*\n\n_Odds reais são necessárias para calcular fair odds._',
-        getMenu(sport)
-      );
+    if (!withOdds.length) {
+      const noOddsMsg = sport === 'mma'
+        ? '❌ *Nenhuma luta MMA com odds disponíveis.*\n\n_Tente novamente mais tarde._'
+        : '❌ *Nenhuma partida ao vivo com odds disponíveis.*\n\n_Odds reais são necessárias para calcular fair odds._';
+      await send(token, chatId, noOddsMsg, getMenu(sport));
       return;
     }
 
-    let txt = `⚖️ *FAIR ODDS — AO VIVO*\n━━━━━━━━━━━━━━━━\n`;
+    const title = sport === 'mma' ? '⚖️ *FAIR ODDS — MMA*' : '⚖️ *FAIR ODDS — AO VIVO*';
+    let txt = `${title}\n━━━━━━━━━━━━━━━━\n`;
     txt += `_Odds justas = bookie sem margem (de-juiced)_\n\n`;
 
-    for (const m of live.slice(0, 8)) {
+    for (const m of withOdds.slice(0, 10)) {
       const o1 = parseFloat(m.odds.t1);
       const o2 = parseFloat(m.odds.t2);
       if (!o1 || !o2 || o1 <= 1 || o2 <= 1) continue;
@@ -1672,18 +1711,30 @@ async function handleFairOdds(token, chatId, sport) {
       const totalVig = p1 + p2;
       const margin = ((totalVig - 1) * 100).toFixed(1);
 
-      // De-juiced probabilities
       const fairP1 = p1 / totalVig;
       const fairP2 = p2 / totalVig;
       const fairO1 = (1 / fairP1).toFixed(2);
       const fairO2 = (1 / fairP2).toFixed(2);
 
       const league = m.league ? `[${m.league}] ` : '';
-      const score = (m.score1 !== undefined && m.score2 !== undefined) ? ` (${m.score1}-${m.score2})` : '';
-      const isDraft = m.status === 'draft' ? ' 📋' : ' 🔴';
+      const icon = sport === 'mma' ? '🥊' : (m.status === 'draft' ? '📋' : '🔴');
 
-      txt += `${isDraft} ${league}*${m.team1}* vs *${m.team2}*${score}\n`;
-      txt += `  🏷️ 1xBet: \`${o1}\` / \`${o2}\` _(margem: ${margin}%)_\n`;
+      if (sport === 'mma' && m.time) {
+        try {
+          const dt = new Date(m.time).toLocaleString('pt-BR', {
+            timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit',
+            hour: '2-digit', minute: '2-digit'
+          });
+          txt += `${icon} ${league}*${m.team1}* vs *${m.team2}* _(${dt})_\n`;
+        } catch(_) {
+          txt += `${icon} ${league}*${m.team1}* vs *${m.team2}*\n`;
+        }
+      } else {
+        const score = (m.score1 !== undefined && m.score2 !== undefined) ? ` (${m.score1}-${m.score2})` : '';
+        txt += ` ${icon} ${league}*${m.team1}* vs *${m.team2}*${score}\n`;
+      }
+
+      txt += `  🏷️ Bookie: \`${o1}\` / \`${o2}\` _(margem: ${margin}%)_\n`;
       txt += `  ⚖️ Fair: \`${fairO1}\` / \`${fairO2}\`\n`;
       txt += `  📊 P: *${(fairP1 * 100).toFixed(1)}%* / *${(fairP2 * 100).toFixed(1)}%*\n\n`;
     }
@@ -2239,12 +2290,13 @@ log('INFO', 'BOOT', `Sports carregados: ${JSON.stringify(Object.entries(SPORTS).
 (async () => {
   await loadSubscribedUsers();
 
-  // Garantir que admins estão inscritos em esports no banco
+  // Garantir que admins estão inscritos em todos os sports ativos
+  const allEnabledSports = Object.entries(SPORTS).filter(([,v]) => v.enabled).map(([k]) => k);
   for (const adminId of ADMIN_IDS) {
     const id = parseInt(adminId);
     if (!id) continue;
     const existing = stmts.getUser.get(id);
-    const prefs = JSON.stringify(['esports']);
+    const prefs = JSON.stringify(allEnabledSports);
     if (!existing) {
       stmts.upsertUser.run(id, 'admin', 1, prefs);
       log('INFO', 'BOOT', `Admin ${id} inserido no banco com subscribed=1`);
@@ -2253,8 +2305,8 @@ log('INFO', 'BOOT', `Sports carregados: ${JSON.stringify(Object.entries(SPORTS).
       log('INFO', 'BOOT', `Admin ${id} reativado (subscribed=1)`);
     }
     if (!subscribedUsers.has(id)) subscribedUsers.set(id, new Set());
-    subscribedUsers.get(id).add('esports');
-    log('INFO', 'BOOT', `Admin ${id} inscrito em: esports`);
+    for (const s of allEnabledSports) subscribedUsers.get(id).add(s);
+    log('INFO', 'BOOT', `Admin ${id} inscrito em: ${allEnabledSports.join(', ')}`);
   }
 
   await loadExistingTips();
