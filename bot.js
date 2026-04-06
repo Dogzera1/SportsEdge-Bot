@@ -2628,12 +2628,13 @@ async function fetchEspnMmaFights() {
         const f1 = comps.find(c => c.order === 1) || comps[0];
         const f2 = comps.find(c => c.order === 2) || comps[1];
         const rec = c => (c.records || []).find(r => r.name === 'overall')?.summary || '';
+        const athleteName = a => a?.fullName || a?.displayName || a?.shortName || '';
         fights.push({
-          name1: f1.athlete?.fullName || '',
-          name2: f2.athlete?.fullName || '',
+          name1: athleteName(f1.athlete) || f1.displayName || f1.name || '',
+          name2: athleteName(f2.athlete) || f2.displayName || f2.name || '',
           record1: rec(f1),
           record2: rec(f2),
-          weightClass: comp.type?.abbreviation || '',
+          weightClass: comp.type?.abbreviation || comp.type?.text || '',
           rounds: comp.format?.regulation?.periods || 3,
           eventName: event.name || '',
           date: comp.date || ''
@@ -2657,40 +2658,61 @@ function normName(s) {
 const espnFighterCache = new Map(); // normName → { record, ts }
 const ESPN_FIGHTER_TTL = 6 * 60 * 60 * 1000; // 6h
 
-// Busca record de um lutador individualmente na ESPN quando não está no scoreboard
-// Endpoint: /apis/site/v2/sports/mma/ufc/athletes?limit=5&search={name}
+// Busca record de um lutador individualmente na ESPN quando não está no scoreboard.
+// Passo 1: search para obter o ID do atleta
+// Passo 2: GET /athletes/{id} para obter o record completo
 async function fetchEspnFighterRecord(name) {
   const key = normName(name);
   const cached = espnFighterCache.get(key);
   if (cached && Date.now() - cached.ts < ESPN_FIGHTER_TTL) return cached.record;
 
+  const cache = rec => { espnFighterCache.set(key, { record: rec, ts: Date.now() }); return rec; };
+
   try {
+    // Passo 1 — search
     const query = encodeURIComponent(name.trim());
     const r = await espnGet(`/apis/site/v2/sports/mma/ufc/athletes?limit=5&search=${query}`)
       .catch(() => ({ status: 500, body: '{}' }));
-    if (r.status !== 200) { espnFighterCache.set(key, { record: null, ts: Date.now() }); return null; }
+    if (r.status !== 200) return cache(null);
 
     const json = safeParse(r.body, {});
-    const athletes = json.athletes || json.items || [];
-    if (!athletes.length) { espnFighterCache.set(key, { record: null, ts: Date.now() }); return null; }
+    // A ESPN usa diferentes envelopes dependendo da versão do endpoint
+    const athletes = json.athletes || json.items || json.results || [];
+    if (!athletes.length) return cache(null);
 
-    // Pega o atleta mais próximo pelo nome
+    // Escolhe atleta com melhor correspondência de nome
     const n = normName(name);
-    const match = athletes.find(a => {
-      const an = normName(a.displayName || a.fullName || '');
+    const hit = athletes.find(a => {
+      const an = normName(a.displayName || a.fullName || a.name || '');
       return an === n || an.includes(n) || n.includes(an);
     }) || athletes[0];
 
-    // Record pode vir de diferentes campos dependendo da versão da ESPN
-    const recordSummary = match.record?.displayValue
-      || match.record?.summary
-      || (match.wins !== undefined ? `${match.wins}-${match.losses}-${match.draws || 0}` : null);
+    // Tenta extrair record diretamente do objeto de search
+    const inline = hit.record?.displayValue
+      || hit.record?.summary
+      || hit.recordSummary
+      || (hit.wins !== undefined ? `${hit.wins}-${hit.losses}-${hit.draws ?? 0}` : null);
+    if (inline) return cache(inline);
 
-    espnFighterCache.set(key, { record: recordSummary, ts: Date.now() });
-    return recordSummary;
+    // Passo 2 — busca perfil individual pelo ID para obter o record
+    const athleteId = hit.id || hit.uid?.replace(/[^0-9]/g, '');
+    if (!athleteId) return cache(null);
+
+    const r2 = await espnGet(`/apis/site/v2/sports/mma/ufc/athletes/${athleteId}`)
+      .catch(() => ({ status: 500, body: '{}' }));
+    if (r2.status !== 200) return cache(null);
+
+    const j2 = safeParse(r2.body, {});
+    // Perfil pode ter athlete.record ou diretamente record
+    const athlete = j2.athlete || j2;
+    const rec = athlete.record?.displayValue
+      || athlete.record?.summary
+      || athlete.recordSummary
+      || (athlete.wins !== undefined ? `${athlete.wins}-${athlete.losses}-${athlete.draws ?? 0}` : null);
+
+    return cache(rec);
   } catch(_) {
-    espnFighterCache.set(key, { record: null, ts: Date.now() });
-    return null;
+    return cache(null);
   }
 }
 
@@ -3217,9 +3239,6 @@ async function pollFootball() {
         if (HAS_FB_API) {
           // Busca no batch pré-carregado (sem chamada extra à API)
           fixtureInfo = findInBatch(allFixturesBatch, match.team1, match.team2);
-          if (!fixtureInfo) {
-            log('INFO', 'AUTO-FOOTBALL', `Fixture não encontrada no batch: ${match.team1} vs ${match.team2}`);
-          }
 
           if (fixtureInfo) {
             const { homeId, awayId, leagueId, season } = fixtureInfo;
@@ -3239,8 +3258,10 @@ async function pollFootball() {
             homeFatigue  = hFatigue;
             awayFatigue  = aFatigue;
             log('INFO', 'AUTO-FOOTBALL', `Dados API-Football ok: ${match.team1} (form ${fmtForm(hForm?.form)}) vs ${match.team2} (form ${fmtForm(aForm?.form)})`);
+          } else if (allFixturesBatch.length === 0) {
+            // Batch vazio (quota esgotada ou season sem fixtures) — já logado no início do loop
           } else {
-            log('INFO', 'AUTO-FOOTBALL', `Fixture não encontrada na API-Football: ${match.team1} vs ${match.team2}`);
+            log('INFO', 'AUTO-FOOTBALL', `Sem fixture no batch: ${match.team1} vs ${match.team2}`);
           }
         }
 
