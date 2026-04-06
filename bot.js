@@ -380,14 +380,28 @@ async function runAutoAnalysis() {
           const isDraft = match.status === 'draft';
           const kellyLabel = tipConf === 'ALTA' ? '¼ Kelly' : tipConf === 'BAIXA' ? '1/10 Kelly' : '⅙ Kelly';
           const confEmoji = { ALTA: '🟢', MÉDIA: '🟡', BAIXA: '🔵' }[tipConf] || '🟡';
+
+          // Identifica se é tip ao vivo num mapa específico ou análise de série/draft
+          const liveMapa = result.liveGameNumber;
+          const mapaLabel = liveMapa ? `🗺️ *Mapa ${liveMapa} ao vivo*` : null;
+          // Linha de contexto da série: "T1 1-0 Gen.G" + formato se disponível
+          const serieScore = `*${match.team1}* ${match.score1}-${match.score2} *${match.team2}*`;
+          const formatLabel = match.format ? ` _(${match.format})_` : '';
+
           const analysisLabel = result.hasLiveStats
-            ? '📊 Baseado em dados ao vivo'
+            ? `📊 Baseado em dados ao vivo — Mapa ${liveMapa || '?'}`
             : isDraft
               ? '📋 Análise de draft (composições conhecidas, jogo ainda não iniciado)'
               : '📋 Análise pré-jogo';
-          const tipMsg = `${gameIcon} 💰 *TIP ML AUTOMÁTICA*\n` +
-            `*${match.team1}* ${match.score1}-${match.score2} *${match.team2}*\n\n` +
-            `🎯 Aposta: *${tipTeam}* ML @ *${tipOdd}*\n` +
+
+          const tipHeader = liveMapa
+            ? `${gameIcon} 💰 *TIP ML AUTOMÁTICA — MAPA ${liveMapa}*`
+            : `${gameIcon} 💰 *TIP ML AUTOMÁTICA*`;
+
+          const tipMsg = `${tipHeader}\n` +
+            `${serieScore}${formatLabel}\n` +
+            (mapaLabel ? `${mapaLabel}\n` : '') +
+            `\n🎯 Aposta: *${tipTeam}* ML @ *${tipOdd}*\n` +
             `📈 EV: *${tipEV}*\n💵 Stake: *${tipStake}* _(${kellyLabel})_\n` +
             `${confEmoji} Confiança: *${tipConf}*${mlEdgeLabel}\n` +
             `📋 ${match.league}\n` +
@@ -952,6 +966,7 @@ async function checkLiveNotifications() {
 async function collectGameContext(game, matchId) {
   let gamesContext = '';
   let compScore = null; // pp advantage for t1 (blue) based on pro champion WRs
+  let liveGameNumber = null; // número do mapa atualmente ao vivo (Game 1, 2, 3...)
   if (game === 'lol') {
     const isPandaScore = String(matchId).startsWith('ps_');
 
@@ -964,6 +979,7 @@ async function collectGameContext(game, matchId) {
           const g = (v) => v >= 1000 ? (v/1000).toFixed(1)+'k' : String(v||0);
           const gameLabel = gd.gameNumber ? `GAME ${gd.gameNumber}` : 'GAME';
           const statusLabel = gd.gameStatus === 'running' ? 'AO VIVO' : gd.gameStatus || 'INFO';
+          if (gd.gameStatus === 'running' && gd.gameNumber) liveGameNumber = gd.gameNumber;
           gamesContext += `\n[${gameLabel} — ${statusLabel} | Série: ${gd.seriesScore||'0-0'}]\n`;
           if (gd.hasLiveStats) {
             const blue = gd.blueTeam, red = gd.redTeam;
@@ -1044,6 +1060,7 @@ async function collectGameContext(game, matchId) {
                 const delayInfo = gd.dataDelay ? ` (dados de ~${gd.dataDelay}s atrás)` : '';
                 const blueDragons = blue.dragonTypes?.length ? blue.dragonTypes.join(', ') : (blue.dragons||0);
                 const redDragons = red.dragonTypes?.length ? red.dragonTypes.join(', ') : (red.dragons||0);
+                if (gid.gameNumber) liveGameNumber = gid.gameNumber;
                 gamesContext += `\n[GAME ${gid.gameNumber} — AO VIVO${delayInfo}]\nGold: ${blue.name} ${g(blue.totalGold)} vs ${red.name} ${g(red.totalGold)} (diff: ${goldDiff>0?'+':''}${g(goldDiff)})\nTorres: ${blue.towerKills||0}x${red.towerKills||0} | Dragões: ${blueDragons} vs ${redDragons}\nKills: ${blue.totalKills||0}x${red.totalKills||0} | Barões: ${blue.barons||0}x${red.barons||0} | Inibidores: ${blue.inhibitors||0}x${red.inhibitors||0}\n`;
                 if (gd.goldTrajectory?.length > 0) {
                   gamesContext += 'Gold Trajectory: ' + gd.goldTrajectory.map(gt => `${gt.minute}min:${gt.diff>0?'+':''}${g(gt.diff)}`).join(' → ') + '\n';
@@ -1106,7 +1123,7 @@ async function collectGameContext(game, matchId) {
       }
     }
   }
-  return { text: gamesContext, compScore };
+  return { text: gamesContext, compScore, liveGameNumber };
 }
 
 async function fetchEnrichment(match) {
@@ -1168,9 +1185,10 @@ async function autoAnalyzeMatch(token, match) {
       collectGameContext(game, matchId),
       fetchEnrichment(match)
     ]);
-    const gamesContext = gameCtx.text;
-    const compScore   = gameCtx.compScore;
-    const hasLiveStats = gamesContext.includes('AO VIVO');
+    const gamesContext   = gameCtx.text;
+    const compScore      = gameCtx.compScore;
+    const liveGameNumber = gameCtx.liveGameNumber; // nº do mapa atual (null se não ao vivo)
+    const hasLiveStats   = gamesContext.includes('AO VIVO');
     const enrichSection = buildEnrichmentSection(match, enrich);
 
     // ── Layer 1: Pré-filtro ML ──
@@ -1309,7 +1327,7 @@ async function autoAnalyzeMatch(token, match) {
     } else {
       log('INFO', 'AUTO', `${match.team1} vs ${match.team2} | odds=${o?.t1||'N/A'} hasRealOdds=${hasRealOdds} tipMatch=true mlEdge=${mlResult.score.toFixed(1)}pp`);
     }
-    return { text, tipMatch: filteredTipResult, hasLiveStats, match, o, mlScore: mlResult.score };
+    return { text, tipMatch: filteredTipResult, hasLiveStats, liveGameNumber, match, o, mlScore: mlResult.score };
   } catch(e) {
     log('ERROR', 'AUTO', `Error for ${match.team1} vs ${match.team2}: ${e.message}`);
     return null;
