@@ -63,6 +63,8 @@ const subscribedUsers = new Map(); // userId → Set<sport>
 
 // Auto-analysis state
 const analyzedMatches = new Map();
+const analyzedMma = new Map();
+const analyzedTennis = new Map();
 
 // Settlement
 const SETTLEMENT_INTERVAL = 30 * 60 * 1000;
@@ -235,18 +237,33 @@ function getTipsMenu(sport) {
 // ── Hydrate tip maps from DB on startup (prevents re-sending after restart) ──
 async function loadExistingTips() {
   try {
-    // Esports
-    const esportsTips = await serverGet('/unsettled-tips', 'esports').catch(() => []);
+    const [esportsTips, mmaTips, tennisTips] = await Promise.all([
+      serverGet('/unsettled-tips', 'esports').catch(() => []),
+      serverGet('/unsettled-tips?days=30', 'mma').catch(() => []),
+      serverGet('/unsettled-tips?days=14', 'tennis').catch(() => [])
+    ]);
     if (Array.isArray(esportsTips)) {
       for (const tip of esportsTips) {
         if (!tip.match_id) continue;
-        const id = tip.match_id;
-        // Mark all possible key formats for this match ID
         for (const prefix of ['lol_', 'upcoming_lol_']) {
-          analyzedMatches.set(`${prefix}${id}`, { ts: Date.now(), tipSent: true });
+          analyzedMatches.set(`${prefix}${tip.match_id}`, { ts: Date.now(), tipSent: true });
         }
       }
-      if (esportsTips.length) log('INFO', 'BOOT', `LoL: ${esportsTips.length} tips existentes carregadas (não serão repetidas)`);
+      if (esportsTips.length) log('INFO', 'BOOT', `LoL: ${esportsTips.length} tips existentes carregadas`);
+    }
+    if (Array.isArray(mmaTips)) {
+      for (const tip of mmaTips) {
+        if (!tip.match_id) continue;
+        analyzedMma.set(`mma_${tip.match_id}`, { ts: Date.now(), tipSent: true });
+      }
+      if (mmaTips.length) log('INFO', 'BOOT', `MMA: ${mmaTips.length} tips existentes carregadas`);
+    }
+    if (Array.isArray(tennisTips)) {
+      for (const tip of tennisTips) {
+        if (!tip.match_id) continue;
+        analyzedTennis.set(`tennis_${tip.match_id}`, { ts: Date.now(), tipSent: true });
+      }
+      if (tennisTips.length) log('INFO', 'BOOT', `Tênis: ${tennisTips.length} tips existentes carregadas`);
     }
   } catch(e) {
     log('WARN', 'BOOT', `Erro ao carregar tips existentes: ${e.message}`);
@@ -2191,6 +2208,122 @@ async function poll(token, sport) {
   loop();
 }
 
+// ── ESPN Tennis data (rankings + torneio atual) ──
+let espnTennisCache = { atp: [], wta: [], ts: 0 };
+const ESPN_TENNIS_TTL = 3 * 60 * 60 * 1000; // 3h
+
+async function espnGet(path) {
+  const r = await new Promise((resolve, reject) => {
+    const req = https.request({
+      hostname: 'site.api.espn.com',
+      path,
+      method: 'GET',
+      headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json' }
+    }, res => {
+      let d = '';
+      res.on('data', c => d += c);
+      res.on('end', () => resolve({ status: res.statusCode, body: d }));
+    });
+    req.on('error', reject);
+    req.setTimeout(10000, () => req.destroy(new Error('ESPN timeout')));
+    req.end();
+  });
+  return r;
+}
+
+async function fetchEspnTennisRankings() {
+  if (Date.now() - espnTennisCache.ts < ESPN_TENNIS_TTL) return espnTennisCache;
+  try {
+    const [atpR, wtaR] = await Promise.all([
+      espnGet('/apis/site/v2/sports/tennis/atp/rankings').catch(() => ({ status: 500, body: '{}' })),
+      espnGet('/apis/site/v2/sports/tennis/wta/rankings').catch(() => ({ status: 500, body: '{}' }))
+    ]);
+    const parseRanks = body => {
+      const j = safeParse(body, {});
+      return (j.rankings?.[0]?.ranks || []).map(r => ({
+        rank: r.current,
+        points: r.points,
+        name: r.athlete?.displayName || '',
+        id: r.athlete?.id || ''
+      }));
+    };
+    espnTennisCache = {
+      atp: parseRanks(atpR.body),
+      wta: parseRanks(wtaR.body),
+      ts: Date.now()
+    };
+    log('INFO', 'ESPN-TENNIS', `Rankings: ATP ${espnTennisCache.atp.length} | WTA ${espnTennisCache.wta.length}`);
+  } catch(e) {
+    log('WARN', 'ESPN-TENNIS', `Falha rankings: ${e.message}`);
+  }
+  return espnTennisCache;
+}
+
+async function fetchEspnTennisEvent(tour) {
+  // Busca partidas agendadas e resultados recentes do torneio atual
+  try {
+    const league = tour === 'WTA' ? 'wta' : 'atp';
+    const r = await espnGet(`/apis/site/v2/sports/tennis/${league}/scoreboard`).catch(() => ({ status: 500, body: '{}' }));
+    if (r.status !== 200) return null;
+    const j = safeParse(r.body, {});
+    const ev = j.events?.[0];
+    if (!ev) return null;
+
+    const recentResults = []; // últimos resultados do torneio
+    const scheduledMatches = []; // próximas do torneio
+
+    for (const grp of (ev.groupings || [])) {
+      for (const comp of (grp.competitions || [])) {
+        const state = comp.status?.type?.state;
+        const note = comp.notes?.[0]?.text || '';
+        const c1 = comp.competitors?.[0]?.athlete?.displayName || '';
+        const c2 = comp.competitors?.[1]?.athlete?.displayName || '';
+        if (state === 'post' && note) {
+          recentResults.push(note);
+        } else if (state === 'pre' || state === 'in') {
+          scheduledMatches.push({ p1: c1, p2: c2, court: comp.venue?.court, date: comp.date });
+        }
+      }
+    }
+    return {
+      eventName: ev.name,
+      surface: ev.name?.toLowerCase().includes('monte') || ev.name?.toLowerCase().includes('clay') ? 'saibro'
+        : ev.name?.toLowerCase().includes('wimbledon') || ev.name?.toLowerCase().includes('halle') || ev.name?.toLowerCase().includes('queen') ? 'grama'
+        : 'dura',
+      recentResults: recentResults.slice(-20), // últimos 20 resultados
+      scheduledMatches
+    };
+  } catch(e) {
+    return null;
+  }
+}
+
+function getTennisPlayerRank(rankings, name) {
+  const n = normName(name);
+  const found = rankings.find(r => {
+    const rn = normName(r.name);
+    return rn === n || rn.includes(n) || n.includes(rn);
+  });
+  return found ? `#${found.rank} (${found.points}pts)` : null;
+}
+
+function getTennisRecentForm(recentResults, name) {
+  // Extrai W/L do jogador nos resultados recentes do torneio
+  const n = normName(name);
+  const results = [];
+  for (const note of recentResults) {
+    const lower = normName(note);
+    if (!lower.includes(n.slice(0, 5))) continue;
+    const won = lower.indexOf(n.slice(0, 5)) < lower.indexOf(' bt ') + 4 &&
+                lower.includes(' bt ');
+    // Extrai placar
+    const scoreMatch = note.match(/(\d-\d(?: \d-\d)*(?:\(\d+\))?(?:,? \d-\d(?:\(\d+\))?)*)$/);
+    const score = scoreMatch ? scoreMatch[0] : '';
+    results.push(won ? `W ${score}` : `L ${score}`);
+  }
+  return results.length ? results.slice(-5).join(', ') : null;
+}
+
 // ── ESPN MMA data fetcher (sem chave de API) ──
 let espnMmaCache = { data: [], ts: 0 };
 const ESPN_MMA_TTL = 60 * 60 * 1000; // 1h
@@ -2265,7 +2398,6 @@ async function pollMma() {
   if (!mmaConfig?.enabled || !mmaConfig?.token) return;
   const token = mmaConfig.token;
 
-  const analyzedMma = new Map();
   const MMA_INTERVAL = 6 * 60 * 60 * 1000; // Re-analisa a cada 6h
 
   async function loop() {
@@ -2444,7 +2576,6 @@ async function pollTennis() {
   if (!tennisConfig?.enabled || !tennisConfig?.token) return;
   const token = tennisConfig.token;
 
-  const analyzedTennis = new Map();
   const TENNIS_INTERVAL = 4 * 60 * 60 * 1000; // Re-analisa a cada 4h
 
   async function loop() {
@@ -2455,6 +2586,11 @@ async function pollTennis() {
       }
 
       log('INFO', 'AUTO-TENNIS', `${matches.length} partidas tênis com odds`);
+
+      // Buscar rankings ESPN e dados do torneio atual em paralelo
+      const rankings = await fetchEspnTennisRankings().catch(() => ({ atp: [], wta: [] }));
+      const atpEvent = await fetchEspnTennisEvent('ATP').catch(() => null);
+      const wtaEvent = await fetchEspnTennisEvent('WTA').catch(() => null);
 
       const now = Date.now();
       for (const match of matches) {
@@ -2476,38 +2612,75 @@ async function pollTennis() {
         const fairP1 = (r1 / totalVig * 100).toFixed(1);
         const fairP2 = (r2 / totalVig * 100).toFixed(1);
         const marginPct = ((totalVig - 1) * 100).toFixed(1);
+        const o1f = parseFloat(o.t1), o2f = parseFloat(o.t2);
+        const isFav1 = o1f < o2f;
 
-        // Detectar Grand Slam ou Masters pelo sport_key
         const key2 = match.sport_key || '';
         const isGrandSlam = ['aus_open', 'french_open', 'wimbledon', 'us_open'].some(k => key2.includes(k));
-        const isMasters = ['indian_wells', 'miami', 'madrid', 'italian', 'canadian', 'cincinnati', 'shanghai', 'paris'].some(k => key2.includes(k));
-        const tour = key2.includes('_atp_') ? 'ATP' : key2.includes('_wta_') ? 'WTA' : 'Tennis';
-        const surface = key2.includes('french') ? 'saibro' : key2.includes('wimbledon') ? 'grama' : key2.includes('aus_open') ? 'dura' : key2.includes('us_open') ? 'dura' : 'dura';
-        const eventType = isGrandSlam ? 'Grand Slam (best-of-5 ATP / best-of-3 WTA)' : isMasters ? `Masters 1000/Premier (${tour})` : `Torneio ${tour}`;
+        const isMasters = ['indian_wells', 'miami', 'madrid', 'italian', 'canadian', 'cincinnati', 'shanghai', 'paris', 'monte'].some(k => key2.includes(k));
+        const tour = key2.includes('_wta_') ? 'WTA' : 'ATP';
+        const espnEvent = tour === 'WTA' ? wtaEvent : atpEvent;
 
-        const prompt = `Você é um analista especializado em tênis profissional (${tour}). Analise esta partida e identifique edge real se existir.
+        // Superfície: ESPN event tem priority, senão inferir pelo torneio
+        const surface = espnEvent?.surface
+          || (key2.includes('french') || key2.includes('monte') || key2.includes('madrid') || key2.includes('italian') ? 'saibro'
+          : key2.includes('wimbledon') || key2.includes('halle') || key2.includes('queens') ? 'grama'
+          : 'dura');
+        const surfacePT = { saibro: 'Saibro (Clay)', grama: 'Grama', dura: 'Quadra dura' }[surface] || surface;
+
+        const eventType = isGrandSlam ? `Grand Slam — best-of-5 (ATP) / best-of-3 (WTA)`
+          : isMasters ? `Masters 1000 / WTA 1000`
+          : `Torneio ${tour}`;
+
+        // Rankings reais ESPN
+        const rankList = tour === 'WTA' ? rankings.wta : rankings.atp;
+        const rank1 = getTennisPlayerRank(rankList, match.team1);
+        const rank2 = getTennisPlayerRank(rankList, match.team2);
+
+        // Form recente no torneio atual via ESPN
+        const form1 = espnEvent ? getTennisRecentForm(espnEvent.recentResults, match.team1) : null;
+        const form2 = espnEvent ? getTennisRecentForm(espnEvent.recentResults, match.team2) : null;
+
+        // Montar seção de dados reais
+        const dataSection = [
+          rank1 ? `Ranking ${match.team1}: ${rank1}` : null,
+          rank2 ? `Ranking ${match.team2}: ${rank2}` : null,
+          form1 ? `Form ${match.team1} (torneio atual): ${form1}` : null,
+          form2 ? `Form ${match.team2} (torneio atual): ${form2}` : null,
+          espnEvent ? `Torneio em andamento: ${espnEvent.eventName}` : null
+        ].filter(Boolean).join('\n');
+
+        const hasRealData = !!(rank1 || rank2 || form1 || form2);
+
+        const prompt = `Você é um analista especializado em tênis profissional. Analise com rigor — prefira SEM_EDGE a inventar edge inexistente.
 
 PARTIDA: ${match.team1} vs ${match.team2}
 Torneio: ${match.league} | ${eventType}
-Superfície: ${surface} | Data: ${matchTime} (BRT)
+Superfície: ${surfacePT} | Data: ${matchTime} (BRT)
 
-ODDS (${o.bookmaker || 'EU'}):
-${match.team1}: ${o.t1} (prob. implícita: ${fairP1}%)
-${match.team2}: ${o.t2} (prob. implícita: ${fairP2}%)
+ODDS REAIS (${o.bookmaker || 'EU'}):
+${match.team1}: ${o.t1} → prob. implícita ${fairP1}% → de-juiced ${fairP1}%
+${match.team2}: ${o.t2} → prob. implícita ${fairP2}% → de-juiced ${fairP2}%
 Margem bookie: ${marginPct}%
+${isFav1 ? match.team1 : match.team2} é o favorito do mercado.
 
-ANÁLISE REQUERIDA — seja específico:
-1. Ranking atual e form recente (últimos 5 jogos de cada)
-2. Desempenho nessa superfície (${surface}) — historicamente quem performa melhor?
-3. H2H (histórico de confrontos diretos) — tendência?
-4. Estilo de jogo: quem tem vantagem tática nesse matchup?
-5. Confiança na análise (1-10): você tem dados suficientes sobre ambos?
+${dataSection ? `DADOS REAIS (ESPN):\n${dataSection}\n` : 'AVISO: sem dados ESPN disponíveis — use apenas conhecimento de treino confiável.\n'}
+INSTRUÇÕES:
+1. Estime a probabilidade REAL de vitória de cada jogador com base em: ranking, superfície, H2H, form recente, estilo.
+2. Compare sua estimativa com a prob. de-juiced do mercado:
+   - Se sua estimativa para ${match.team1} > ${fairP1}%: edge em ${match.team1} (EV = (sua_prob/100 * ${o.t1}) - 1)
+   - Se sua estimativa para ${match.team2} > ${fairP2}%: edge em ${match.team2} (EV = (sua_prob/100 * ${o.t2}) - 1)
+3. Confiança (1-10): baseada em quão bem você conhece esses jogadores E nessa superfície.
+   - Se não tiver certeza sobre ranking atual ou form real: máximo confiança 6 → SEM_EDGE.
 
-DECISÃO FINAL:
-- Se EV ≥ +4% E confiança ≥ 7: TIP_ML:[jogador]@[odd]|EV:[%]|STAKE:[1-3]u|CONF:[ALTA/MÉDIA/BAIXA]
-- Se edge inexistente ou confiança < 7: SEM_EDGE
+DECISÃO:
+- Edge real (EV ≥ +4%) E confiança ≥ 7: TIP_ML:[jogador]@[odd]|EV:[%]|STAKE:[1-3]u|CONF:[ALTA/MÉDIA/BAIXA]
+- Caso contrário: SEM_EDGE
 
-Máximo 220 palavras. Seja direto e fundamentado.`;
+Máximo 200 palavras. Mostre seu raciocínio brevemente antes da decisão.`;
+
+        log('INFO', 'AUTO-TENNIS', `Analisando: ${match.team1} vs ${match.team2} | ${surfacePT}${hasRealData ? ' [ESPN+]' : ''}`);
+        analyzedTennis.set(key, { ts: now, tipSent: false });
 
         log('INFO', 'AUTO-TENNIS', `Analisando: ${match.team1} vs ${match.team2} | ${match.league}`);
         analyzedTennis.set(key, { ts: now, tipSent: false });

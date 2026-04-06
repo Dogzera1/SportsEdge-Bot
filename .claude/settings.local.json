@@ -29,7 +29,11 @@
       "Bash(node -e \" const d=require\\('fs'\\).readFileSync\\('/dev/stdin','utf8'\\); try { const j=JSON.parse\\(d\\); const tennis=j.filter\\(s=>s.key&&s.key.toLowerCase\\(\\).includes\\('tennis'\\)\\); console.log\\('TENNIS:', JSON.stringify\\(tennis.map\\(s=>\\({key:s.key,title:s.title,active:s.active}\\)\\),null,2\\)\\); console.log\\('Total sports:', j.length\\); } catch\\(e\\) { console.log\\('RAW:', d.slice\\(0,300\\)\\); } \")",
       "Bash(curl -sk --max-time 10 \"https://api.the-odds-api.com/v4/sports/\")",
       "WebFetch(domain:api.the-odds-api.com)",
-      "WebFetch(domain:the-odds-api.com)"
+      "WebFetch(domain:the-odds-api.com)",
+      "Bash(curl -sk --max-time 10 \"https://site.api.espn.com/apis/site/v2/sports/tennis/atp/scoreboard\")",
+      "Bash(curl -sk --max-time 10 \"https://site.api.espn.com/apis/site/v2/sports/tennis/atp/scoreboard\" -o C:/tmp/espn_tennis.json)",
+      "Bash(node:*)",
+      "Bash(curl -sk --max-time 10 \"https://site.api.espn.com/apis/site/v2/sports/tennis/atp/rankings\" -o C:/tmp/espn_tennis_rank.json)"
     ]
   }
 }

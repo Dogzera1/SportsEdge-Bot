@@ -1532,6 +1532,9 @@ const server = http.createServer(async (req, res) => {
         const sport = parsed.query.sport || 'esports';
         const t = safeParse(body, {});
         if (!t.matchId) { sendJson(res, { error: 'Missing matchId' }, 400); return; }
+        // Evitar tip duplicada para o mesmo match_id + sport
+        const existing = stmts.tipExistsByMatch.get(String(t.matchId), sport);
+        if (existing) { sendJson(res, { ok: true, skipped: true, reason: 'duplicate' }); return; }
         const isLive = t.isLive ? 1 : 0;
         const result = stmts.insertTip.run({
           sport, matchId: String(t.matchId), eventName: t.eventName || '',
