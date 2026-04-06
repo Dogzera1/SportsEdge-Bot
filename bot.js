@@ -597,6 +597,63 @@ async function settleCompletedTips() {
       if (!Array.isArray(unsettled) || !unsettled.length) continue;
 
       let settled = 0;
+
+      if (sport === 'mma') {
+        const espnFights = await fetchEspnMmaFights().catch(() => []);
+        for (const tip of unsettled) {
+          if (!tip.match_id) continue;
+          try {
+            const espn = espnFights.find(f => {
+              const n1 = normName(tip.participant1), n2 = normName(tip.participant2);
+              const e1 = normName(f.name1), e2 = normName(f.name2);
+              const fwd = (e1.includes(n1) || n1.includes(e1)) && (e2.includes(n2) || n2.includes(e2));
+              const rev = (e1.includes(n2) || n2.includes(e1)) && (e2.includes(n1) || n1.includes(e2));
+              return fwd || rev;
+            });
+            if (!espn || espn.statusState !== 'post' || !espn.winner) continue;
+            await serverPost('/settle', { matchId: tip.match_id, winner: espn.winner }, 'mma');
+            log('INFO', 'SETTLE', `mma: ${tip.participant1} vs ${tip.participant2} → ${espn.winner}`);
+            settled++;
+          } catch(e) {
+            log('WARN', 'SETTLE', `mma tip ${tip.match_id}: ${e.message}`);
+          }
+        }
+        if (settled > 0) log('INFO', 'SETTLE', `mma: ${settled} tips liquidadas`);
+        continue;
+      }
+
+      if (sport === 'tennis') {
+        const [atpEvent, wtaEvent] = await Promise.all([
+          fetchEspnTennisEvent('ATP').catch(() => null),
+          fetchEspnTennisEvent('WTA').catch(() => null)
+        ]);
+        const allResults = [
+          ...(atpEvent?.recentResults || []),
+          ...(wtaEvent?.recentResults || [])
+        ];
+        for (const tip of unsettled) {
+          if (!tip.match_id) continue;
+          try {
+            const res = allResults.find(r => {
+              if (!r.winner) return false;
+              const n1 = normName(tip.participant1), n2 = normName(tip.participant2);
+              const rp1 = normName(r.p1), rp2 = normName(r.p2);
+              const fwd = (rp1.includes(n1) || n1.includes(rp1)) && (rp2.includes(n2) || n2.includes(rp2));
+              const rev = (rp1.includes(n2) || n2.includes(rp1)) && (rp2.includes(n1) || n1.includes(rp2));
+              return fwd || rev;
+            });
+            if (!res) continue;
+            await serverPost('/settle', { matchId: tip.match_id, winner: res.winner }, 'tennis');
+            log('INFO', 'SETTLE', `tennis: ${tip.participant1} vs ${tip.participant2} → ${res.winner}`);
+            settled++;
+          } catch(e) {
+            log('WARN', 'SETTLE', `tennis tip ${tip.match_id}: ${e.message}`);
+          }
+        }
+        if (settled > 0) log('INFO', 'SETTLE', `tennis: ${settled} tips liquidadas`);
+        continue;
+      }
+
       for (const tip of unsettled) {
         if (!tip.match_id) continue;
         try {
@@ -2546,11 +2603,15 @@ async function fetchEspnTennisEvent(tour) {
     for (const grp of (ev.groupings || [])) {
       for (const comp of (grp.competitions || [])) {
         const state = comp.status?.type?.state;
-        const note = comp.notes?.[0]?.text || '';
         const c1 = comp.competitors?.[0]?.athlete?.displayName || '';
         const c2 = comp.competitors?.[1]?.athlete?.displayName || '';
-        if (state === 'post' && note) {
-          recentResults.push(note);
+        if (state === 'post') {
+          const winnerComp = comp.competitors?.find(c => c.winner === true);
+          const winner = winnerComp?.athlete?.displayName || '';
+          const score = comp.status?.displayClock
+            || comp.competitors?.map(c => c.score).join('-')
+            || '';
+          recentResults.push({ p1: c1, p2: c2, winner, score, date: comp.date || '' });
         } else if (state === 'pre' || state === 'in') {
           scheduledMatches.push({ p1: c1, p2: c2, court: comp.venue?.court, date: comp.date });
         }
@@ -2582,22 +2643,31 @@ function getTennisRecentForm(recentResults, name) {
   // Extrai W/L do jogador nos resultados recentes do torneio
   const n = normName(name);
   const results = [];
-  for (const note of recentResults) {
-    const lower = normName(note);
-    if (!lower.includes(n.slice(0, 5))) continue;
-    const won = lower.indexOf(n.slice(0, 5)) < lower.indexOf(' bt ') + 4 &&
-                lower.includes(' bt ');
-    // Extrai placar
-    const scoreMatch = note.match(/(\d-\d(?: \d-\d)*(?:\(\d+\))?(?:,? \d-\d(?:\(\d+\))?)*)$/);
-    const score = scoreMatch ? scoreMatch[0] : '';
-    results.push(won ? `W ${score}` : `L ${score}`);
+  for (const r of recentResults) {
+    // Suporta objetos estruturados { p1, p2, winner, score } e strings legadas
+    if (r && typeof r === 'object') {
+      const rp1 = normName(r.p1), rp2 = normName(r.p2);
+      const nShort = n.slice(0, 5);
+      if (!rp1.includes(nShort) && !rp2.includes(nShort)) continue;
+      const won = normName(r.winner).includes(nShort);
+      results.push(won ? `W ${r.score || ''}`.trim() : `L ${r.score || ''}`.trim());
+    } else {
+      const note = String(r);
+      const lower = normName(note);
+      if (!lower.includes(n.slice(0, 5))) continue;
+      const won = lower.indexOf(n.slice(0, 5)) < lower.indexOf(' bt ') + 4 &&
+                  lower.includes(' bt ');
+      const scoreMatch = note.match(/(\d-\d(?: \d-\d)*(?:\(\d+\))?(?:,? \d-\d(?:\(\d+\))?)*)$/);
+      const score = scoreMatch ? scoreMatch[0] : '';
+      results.push(won ? `W ${score}` : `L ${score}`);
+    }
   }
   return results.length ? results.slice(-5).join(', ') : null;
 }
 
 // ── ESPN MMA data fetcher (sem chave de API) ──
 let espnMmaCache = { data: [], ts: 0 };
-const ESPN_MMA_TTL = 60 * 60 * 1000; // 1h
+const ESPN_MMA_TTL = 15 * 60 * 1000; // 15min para capturar lutas recém-concluídas
 
 async function fetchEspnMmaFights() {
   if (Date.now() - espnMmaCache.ts < ESPN_MMA_TTL && espnMmaCache.data.length) return espnMmaCache.data;
@@ -2629,6 +2699,10 @@ async function fetchEspnMmaFights() {
         const f2 = comps.find(c => c.order === 2) || comps[1];
         const rec = c => (c.records || []).find(r => r.name === 'overall')?.summary || '';
         const athleteName = a => a?.fullName || a?.displayName || a?.shortName || '';
+        const winnerComp = comps.find(c => c.winner === true);
+        const winnerName = winnerComp
+          ? (athleteName(winnerComp.athlete) || winnerComp.displayName || winnerComp.name || '')
+          : '';
         fights.push({
           name1: athleteName(f1.athlete) || f1.displayName || f1.name || '',
           name2: athleteName(f2.athlete) || f2.displayName || f2.name || '',
@@ -2637,7 +2711,9 @@ async function fetchEspnMmaFights() {
           weightClass: comp.type?.abbreviation || comp.type?.text || '',
           rounds: comp.format?.regulation?.periods || 3,
           eventName: event.name || '',
-          date: comp.date || ''
+          date: comp.date || '',
+          statusState: comp.status?.type?.state || 'pre',
+          winner: winnerName
         });
       }
     }
