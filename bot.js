@@ -1614,6 +1614,42 @@ async function handleProximas(token, chatId, sport) {
       return;
     }
 
+    if (sport === 'tennis') {
+      const matches = await serverGet('/tennis-matches').catch(() => []);
+      const all = Array.isArray(matches) ? matches : [];
+
+      if (!all.length) {
+        await send(token, chatId,
+          '❌ Nenhuma partida de tênis encontrada.\n_Tente novamente mais tarde._',
+          getMenu(sport)
+        );
+        return;
+      }
+
+      let txt = `🎾 *PRÓXIMAS PARTIDAS TÊNIS*\n━━━━━━━━━━━━━━━━\n\n`;
+      let lastLeague = '';
+      all.slice(0, 15).forEach(m => {
+        if (m.league !== lastLeague) {
+          txt += `\n📋 *${m.league}*\n`;
+          lastLeague = m.league;
+        }
+        txt += `🎾 *${m.team1}* vs *${m.team2}*\n`;
+        if (m.time) {
+          try {
+            const dt = new Date(m.time).toLocaleString('pt-BR', {
+              timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit',
+              hour: '2-digit', minute: '2-digit'
+            });
+            txt += `  🕐 ${dt}\n`;
+          } catch(_) {}
+        }
+        if (m.odds) txt += `  💰 ${m.team1}: \`${m.odds.t1}\` | ${m.team2}: \`${m.odds.t2}\`\n`;
+      });
+
+      await send(token, chatId, txt, getMenu(sport));
+      return;
+    }
+
     const lolMatches = await serverGet('/lol-matches').catch(() => []);
     const all = Array.isArray(lolMatches) ? lolMatches : [];
 
@@ -1681,23 +1717,25 @@ async function handleFairOdds(token, chatId, sport) {
   try {
     await send(token, chatId, '⏳ _Calculando fair odds..._');
 
-    const endpoint = sport === 'mma' ? '/mma-matches' : '/lol-matches';
+    const endpoint = sport === 'mma' ? '/mma-matches' : sport === 'tennis' ? '/tennis-matches' : '/lol-matches';
     const matches = await serverGet(endpoint).catch(() => []);
     const all = Array.isArray(matches) ? matches : [];
 
-    const withOdds = sport === 'mma'
+    const withOdds = (sport === 'mma' || sport === 'tennis')
       ? all.filter(m => m.odds?.t1 && m.odds?.t2)
       : all.filter(m => (m.status === 'live' || m.status === 'draft') && m.odds?.t1 && m.odds?.t2);
 
     if (!withOdds.length) {
       const noOddsMsg = sport === 'mma'
         ? '❌ *Nenhuma luta MMA com odds disponíveis.*\n\n_Tente novamente mais tarde._'
+        : sport === 'tennis'
+        ? '❌ *Nenhuma partida de tênis com odds disponíveis.*\n\n_Tente novamente mais tarde._'
         : '❌ *Nenhuma partida ao vivo com odds disponíveis.*\n\n_Odds reais são necessárias para calcular fair odds._';
       await send(token, chatId, noOddsMsg, getMenu(sport));
       return;
     }
 
-    const title = sport === 'mma' ? '⚖️ *FAIR ODDS — MMA*' : '⚖️ *FAIR ODDS — AO VIVO*';
+    const title = sport === 'mma' ? '⚖️ *FAIR ODDS — MMA*' : sport === 'tennis' ? '⚖️ *FAIR ODDS — TÊNIS*' : '⚖️ *FAIR ODDS — AO VIVO*';
     let txt = `${title}\n━━━━━━━━━━━━━━━━\n`;
     txt += `_Odds justas = bookie sem margem (de-juiced)_\n\n`;
 
@@ -2244,6 +2282,15 @@ async function pollMma() {
       log('INFO', 'AUTO-MMA', `${fights.length} lutas MMA com odds | ESPN: ${espnFights.length} lutas`);
 
       const now = Date.now();
+      const endOfWeek = (() => {
+        const d = new Date();
+        // Domingo da semana atual às 23:59
+        const sunday = new Date(d);
+        sunday.setDate(d.getDate() + (7 - d.getDay()) % 7 || 7);
+        sunday.setHours(23, 59, 59, 999);
+        return sunday.getTime();
+      })();
+
       for (const fight of fights) {
         const key = `mma_${fight.id}`;
         const prev = analyzedMma.get(key);
@@ -2252,6 +2299,19 @@ async function pollMma() {
 
         const o = fight.odds;
         if (!o?.t1 || !o?.t2) continue;
+
+        const fightTs = fight.time ? new Date(fight.time).getTime() : 0;
+        // Descartar lutas já passadas (dado stale da API)
+        if (fightTs && fightTs < now) {
+          log('INFO', 'AUTO-MMA', `Ignorando luta passada: ${fight.team1} vs ${fight.team2}`);
+          continue;
+        }
+        const isThisWeek = fightTs > 0 && fightTs <= endOfWeek;
+        // Lutas fora da semana: só analisa, não bloqueia ainda — gate de CONF depois
+        if (!isThisWeek) {
+          // Marca para análise restrita (só ALTA passa)
+          fight._futureWeek = true;
+        }
 
         const fightTime = fight.time ? new Date(fight.time).toLocaleString('pt-BR', {
           timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit',
@@ -2328,6 +2388,11 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
         const tipStake = tipMatch[4];
         const tipConf  = tipMatch[5].toUpperCase();
 
+        // Lutas fora da semana: só ALTA passa
+        if (fight._futureWeek && tipConf !== 'ALTA') {
+          log('INFO', 'AUTO-MMA', `Gate semana: ${fight.team1} vs ${fight.team2} é luta futura — descartado (CONF=${tipConf}, exige ALTA)`);
+          await new Promise(r => setTimeout(r, 3000)); continue;
+        }
         if (tipOdd < 1.40 || tipOdd > 5.00) {
           log('INFO', 'AUTO-MMA', `Gate odds: ${tipOdd} fora do range 1.40-5.00`);
           await new Promise(r => setTimeout(r, 3000)); continue;
@@ -2369,6 +2434,152 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
       log('ERROR', 'AUTO-MMA', e.message);
     }
     setTimeout(loop, 30 * 60 * 1000);
+  }
+  loop();
+}
+
+// ── Tennis Auto-analysis loop ──
+async function pollTennis() {
+  const tennisConfig = SPORTS['tennis'];
+  if (!tennisConfig?.enabled || !tennisConfig?.token) return;
+  const token = tennisConfig.token;
+
+  const analyzedTennis = new Map();
+  const TENNIS_INTERVAL = 4 * 60 * 60 * 1000; // Re-analisa a cada 4h
+
+  async function loop() {
+    try {
+      const matches = await serverGet('/tennis-matches').catch(() => []);
+      if (!Array.isArray(matches) || !matches.length) {
+        setTimeout(loop, 30 * 60 * 1000); return;
+      }
+
+      log('INFO', 'AUTO-TENNIS', `${matches.length} partidas tênis com odds`);
+
+      const now = Date.now();
+      for (const match of matches) {
+        const key = `tennis_${match.id}`;
+        const prev = analyzedTennis.get(key);
+        if (prev?.tipSent) continue;
+        if (prev && (now - prev.ts < TENNIS_INTERVAL)) continue;
+
+        const o = match.odds;
+        if (!o?.t1 || !o?.t2) continue;
+
+        const matchTime = match.time ? new Date(match.time).toLocaleString('pt-BR', {
+          timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit',
+          hour: '2-digit', minute: '2-digit'
+        }) : '—';
+
+        const r1 = 1 / parseFloat(o.t1), r2 = 1 / parseFloat(o.t2);
+        const totalVig = r1 + r2;
+        const fairP1 = (r1 / totalVig * 100).toFixed(1);
+        const fairP2 = (r2 / totalVig * 100).toFixed(1);
+        const marginPct = ((totalVig - 1) * 100).toFixed(1);
+
+        // Detectar Grand Slam ou Masters pelo sport_key
+        const key2 = match.sport_key || '';
+        const isGrandSlam = ['aus_open', 'french_open', 'wimbledon', 'us_open'].some(k => key2.includes(k));
+        const isMasters = ['indian_wells', 'miami', 'madrid', 'italian', 'canadian', 'cincinnati', 'shanghai', 'paris'].some(k => key2.includes(k));
+        const tour = key2.includes('_atp_') ? 'ATP' : key2.includes('_wta_') ? 'WTA' : 'Tennis';
+        const surface = key2.includes('french') ? 'saibro' : key2.includes('wimbledon') ? 'grama' : key2.includes('aus_open') ? 'dura' : key2.includes('us_open') ? 'dura' : 'dura';
+        const eventType = isGrandSlam ? 'Grand Slam (best-of-5 ATP / best-of-3 WTA)' : isMasters ? `Masters 1000/Premier (${tour})` : `Torneio ${tour}`;
+
+        const prompt = `Você é um analista especializado em tênis profissional (${tour}). Analise esta partida e identifique edge real se existir.
+
+PARTIDA: ${match.team1} vs ${match.team2}
+Torneio: ${match.league} | ${eventType}
+Superfície: ${surface} | Data: ${matchTime} (BRT)
+
+ODDS (${o.bookmaker || 'EU'}):
+${match.team1}: ${o.t1} (prob. implícita: ${fairP1}%)
+${match.team2}: ${o.t2} (prob. implícita: ${fairP2}%)
+Margem bookie: ${marginPct}%
+
+ANÁLISE REQUERIDA — seja específico:
+1. Ranking atual e form recente (últimos 5 jogos de cada)
+2. Desempenho nessa superfície (${surface}) — historicamente quem performa melhor?
+3. H2H (histórico de confrontos diretos) — tendência?
+4. Estilo de jogo: quem tem vantagem tática nesse matchup?
+5. Confiança na análise (1-10): você tem dados suficientes sobre ambos?
+
+DECISÃO FINAL:
+- Se EV ≥ +4% E confiança ≥ 7: TIP_ML:[jogador]@[odd]|EV:[%]|STAKE:[1-3]u|CONF:[ALTA/MÉDIA/BAIXA]
+- Se edge inexistente ou confiança < 7: SEM_EDGE
+
+Máximo 220 palavras. Seja direto e fundamentado.`;
+
+        log('INFO', 'AUTO-TENNIS', `Analisando: ${match.team1} vs ${match.team2} | ${match.league}`);
+        analyzedTennis.set(key, { ts: now, tipSent: false });
+
+        let resp;
+        try {
+          resp = await serverPost('/claude', {
+            model: 'deepseek-chat',
+            max_tokens: 450,
+            messages: [{ role: 'user', content: prompt }]
+          }, null, { 'x-claude-key': AI_PROXY_KEY });
+        } catch(e) {
+          log('WARN', 'AUTO-TENNIS', `AI error: ${e.message}`);
+          await new Promise(r => setTimeout(r, 3000)); continue;
+        }
+
+        const text = resp?.content?.map(b => b.text || '').join('') || '';
+        const tipMatch2 = text.match(/TIP_ML:([^@]+)@([\d.]+)\|EV:([+-]?[\d.]+)%\|STAKE:([\d.]+)u?\|CONF:(ALTA|MÉDIA|BAIXA)/i);
+
+        if (!tipMatch2) {
+          log('INFO', 'AUTO-TENNIS', `Sem tip: ${match.team1} vs ${match.team2}`);
+          await new Promise(r => setTimeout(r, 3000)); continue;
+        }
+
+        const tipPlayer = tipMatch2[1].trim();
+        const tipOdd    = parseFloat(tipMatch2[2]);
+        const tipEV     = parseFloat(tipMatch2[3]);
+        const tipStake  = tipMatch2[4];
+        const tipConf   = tipMatch2[5].toUpperCase();
+
+        if (tipOdd < 1.30 || tipOdd > 5.00) {
+          log('INFO', 'AUTO-TENNIS', `Gate odds: ${tipOdd} fora do range 1.30-5.00`);
+          await new Promise(r => setTimeout(r, 3000)); continue;
+        }
+        if (tipEV < 4.0) {
+          log('INFO', 'AUTO-TENNIS', `Gate EV: ${tipEV}% < 4%`);
+          await new Promise(r => setTimeout(r, 3000)); continue;
+        }
+
+        const confEmoji = { ALTA: '🟢', MÉDIA: '🟡', BAIXA: '🔴' }[tipConf] || '🟡';
+        const surfaceEmoji = { saibro: '🟤', grama: '💚', dura: '🔵' }[surface] || '🎾';
+        const grandSlamBadge = isGrandSlam ? ' 🏆' : isMasters ? ' ⭐' : '';
+
+        const tipMsg = `🎾 💰 *TIP TÊNIS*\n` +
+          `*${match.team1}* vs *${match.team2}*\n` +
+          `📋 ${match.league}${grandSlamBadge}\n` +
+          `${surfaceEmoji} ${surface.charAt(0).toUpperCase() + surface.slice(1)} | 🕐 ${matchTime} (BRT)\n\n` +
+          `🎯 Aposta: *${tipPlayer}* @ *${tipOdd}*\n` +
+          `📈 EV: *+${tipEV}%* | De-juice: ${tipPlayer === match.team1 ? fairP1 : fairP2}%\n` +
+          `💵 Stake: *${tipStake}u*\n` +
+          `${confEmoji} Confiança: *${tipConf}*\n\n` +
+          `⚠️ _Aposte com responsabilidade._`;
+
+        await serverPost('/record-tip', {
+          matchId: String(match.id), eventName: match.league,
+          p1: match.team1, p2: match.team2, tipParticipant: tipPlayer,
+          odds: String(tipOdd), ev: String(tipEV), stake: String(tipStake),
+          confidence: tipConf, isLive: false, market_type: 'ML'
+        }, 'tennis');
+
+        for (const [userId, prefs] of subscribedUsers) {
+          if (!prefs.has('tennis')) continue;
+          try { await sendDM(token, userId, tipMsg); } catch(_) {}
+        }
+        analyzedTennis.set(key, { ts: now, tipSent: true });
+        log('INFO', 'AUTO-TENNIS', `Tip enviada: ${tipPlayer} @ ${tipOdd} | EV:${tipEV}% | ${tipConf}`);
+        await new Promise(r => setTimeout(r, 5000));
+      }
+    } catch(e) {
+      log('ERROR', 'AUTO-TENNIS', e.message);
+    }
+    setTimeout(loop, 20 * 60 * 1000); // verifica a cada 20min
   }
   loop();
 }
@@ -2427,6 +2638,9 @@ log('INFO', 'BOOT', `Sports carregados: ${JSON.stringify(Object.entries(SPORTS).
 
   // MMA polling (independente do loop de sports genérico)
   pollMma();
+
+  // Tennis polling
+  pollTennis();
 
   // Background tasks
   setTimeout(() => runAutoAnalysis().catch(e => log('ERROR', 'AUTO', e.message)), 15 * 1000); // 1ª análise 15s após boot

@@ -1954,6 +1954,70 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (p === '/tennis-matches') {
+    if (!THE_ODDS_API_KEY) { sendJson(res, []); return; }
+    try {
+      // Busca odds de todos os torneios ATP/WTA ativos em paralelo
+      const tennisKeys = [
+        'tennis_atp_french_open', 'tennis_wta_french_open',
+        'tennis_atp_wimbledon', 'tennis_wta_wimbledon',
+        'tennis_atp_us_open', 'tennis_wta_us_open',
+        'tennis_atp_aus_open_singles', 'tennis_wta_aus_open_singles',
+        'tennis_atp_indian_wells', 'tennis_wta_indian_wells',
+        'tennis_atp_miami_open', 'tennis_wta_miami_open',
+        'tennis_atp_madrid_open', 'tennis_wta_madrid_open',
+        'tennis_atp_italian_open', 'tennis_wta_italian_open',
+        'tennis_atp_canadian_open', 'tennis_wta_canadian_open',
+        'tennis_atp_cincinnati_open', 'tennis_wta_cincinnati_open',
+        'tennis_atp_shanghai_masters', 'tennis_atp_paris_masters',
+        'tennis_atp_dubai', 'tennis_wta_dubai'
+      ];
+      const now = Date.now();
+      const weekAhead = now + 7 * 24 * 60 * 60 * 1000;
+
+      const results = await Promise.allSettled(
+        tennisKeys.map(k =>
+          httpGet(`https://api.the-odds-api.com/v4/sports/${k}/odds/?apiKey=${THE_ODDS_API_KEY}&regions=eu&markets=h2h&oddsFormat=decimal`)
+            .catch(() => ({ status: 500, body: '[]' }))
+        )
+      );
+
+      const matches = [];
+      for (let i = 0; i < tennisKeys.length; i++) {
+        const res2 = results[i];
+        if (res2.status !== 'fulfilled' || res2.value.status !== 200) continue;
+        const raw = safeParse(res2.value.body, []);
+        for (const e of raw) {
+          const t = new Date(e.commence_time).getTime();
+          if (t <= now || t > weekAhead) continue;
+          const bm = e.bookmakers?.[0];
+          const market = bm?.markets?.find(m => m.key === 'h2h');
+          const out = market?.outcomes || [];
+          const o1 = out.find(o => o.name === e.home_team);
+          const o2 = out.find(o => o.name === e.away_team);
+          if (!o1 || !o2) continue;
+          matches.push({
+            id: e.id,
+            game: 'tennis',
+            sport_key: tennisKeys[i],
+            status: 'upcoming',
+            team1: e.home_team,
+            team2: e.away_team,
+            league: e.sport_title || 'Tennis',
+            time: e.commence_time,
+            odds: { t1: String(o1.price), t2: String(o2.price), bookmaker: bm.title }
+          });
+        }
+      }
+      // Ordenar por data
+      matches.sort((a, b) => new Date(a.time) - new Date(b.time));
+      sendJson(res, matches);
+    } catch(e) {
+      sendJson(res, []);
+    }
+    return;
+  }
+
   if (p === '/roi-by-market') {
     const sport = parsed.query.sport || 'esports';
     try {
