@@ -1167,14 +1167,26 @@ async function autoAnalyzeMatch(token, match) {
 
       const getConf = () => (filteredTipResult?.[5] || 'MÉDIA').trim().toUpperCase();
 
-      // Gate 2: Odds fora da zona de valor (1.50 – 3.00)
-      // Abaixo de 1.50: margem da casa come todo o EV; acima de 3.00: alta variância sem Pinnacle como referência
+      // Gate 2: Odds fora da zona de valor
+      // Abaixo de 1.50: margem da casa come todo o EV.
+      // Acima de 4.00: alta variância; underdog legítimo em ligas tier-2 pode ter valor,
+      //   mas exige EV mínimo maior para compensar a incerteza sem Pinnacle como referência.
       if (filteredTipResult && hasRealOdds) {
-        const MIN_ODDS = parseFloat(process.env.LOL_MIN_ODDS ?? '1.50');
-        const MAX_ODDS = parseFloat(process.env.LOL_MAX_ODDS ?? '3.50');
+        const MIN_ODDS  = parseFloat(process.env.LOL_MIN_ODDS  ?? '1.50');
+        const MAX_ODDS  = parseFloat(process.env.LOL_MAX_ODDS  ?? '4.00');
+        const HIGH_ODDS = parseFloat(process.env.LOL_HIGH_ODDS ?? '3.00'); // acima disso → EV extra
+        const HIGH_ODDS_EV_BONUS = parseFloat(process.env.LOL_HIGH_ODDS_EV_BONUS ?? '3.0'); // +3pp
+
         if (tipOdd < MIN_ODDS || tipOdd > MAX_ODDS) {
           log('INFO', 'AUTO', `Gate odds: ${match.team1} vs ${match.team2} → odd ${tipOdd} fora do range [${MIN_ODDS}, ${MAX_ODDS}] → rejeitado`);
           filteredTipResult = null;
+        } else if (tipOdd > HIGH_ODDS && !isNaN(tipEV)) {
+          // Odds altas passam mas exigem EV maior — aplicado antes do Gate 4 via adaptiveEV bump
+          const required = adaptiveEV + HIGH_ODDS_EV_BONUS;
+          if (tipEV < required) {
+            log('INFO', 'AUTO', `Gate odds altas: ${match.team1} vs ${match.team2} → odd ${tipOdd} > ${HIGH_ODDS} mas EV ${tipEV}% < ${required.toFixed(1)}% → rejeitado`);
+            filteredTipResult = null;
+          }
         }
       }
 
@@ -2866,11 +2878,31 @@ async function pollFootball() {
   const token = fbConfig.token;
 
   const { calcFootballScore } = require('./lib/football-ml');
-  const { getTeamForm, getH2H, getStandings, getDaysSinceLastMatch, findFixtureId, LEAGUE_MAP } = require('./lib/football-api');
+  const { getTeamForm, getH2H, getStandings, getDaysSinceLastMatch, findFixtureWithTeams, LEAGUE_MAP } = require('./lib/football-api');
 
-  const FOOTBALL_INTERVAL = 6 * 60 * 60 * 1000; // Re-analisa a cada 6h
-  const EV_THRESHOLD = parseFloat(process.env.FOOTBALL_EV_THRESHOLD || '5.0');
-  const DRAW_MIN_ODDS = parseFloat(process.env.FOOTBALL_DRAW_MIN_ODDS || '2.80');
+  const FOOTBALL_INTERVAL = 6 * 60 * 60 * 1000;
+  const EV_THRESHOLD   = parseFloat(process.env.FOOTBALL_EV_THRESHOLD  || '5.0');
+  const DRAW_MIN_ODDS  = parseFloat(process.env.FOOTBALL_DRAW_MIN_ODDS  || '2.80');
+  const HAS_FB_API     = !!(process.env.API_SPORTS_KEY || process.env.APIFOOTBALL_KEY);
+
+  // Cache de standings por liga: evita repetir chamada para cada partida do mesmo loop
+  const standingsCache = new Map(); // key: `${leagueId}_${season}` → { data, ts }
+  const STANDINGS_TTL  = 12 * 60 * 60 * 1000; // 12h
+
+  async function getStandingsCached(leagueId, season) {
+    const key = `${leagueId}_${season}`;
+    const cached = standingsCache.get(key);
+    if (cached && Date.now() - cached.ts < STANDINGS_TTL) return cached.data;
+    const data = await getStandings(leagueId, season).catch(() => ({}));
+    standingsCache.set(key, { data, ts: Date.now() });
+    return data;
+  }
+
+  // Formata array de resultados ['W','D','L',...] → string "WDLWW"
+  function fmtForm(arr) {
+    if (!Array.isArray(arr) || !arr.length) return 'N/D';
+    return arr.slice(0, 5).join('');
+  }
 
   async function loop() {
     try {
@@ -2878,7 +2910,7 @@ async function pollFootball() {
       if (!Array.isArray(matches) || !matches.length) {
         setTimeout(loop, 30 * 60 * 1000); return;
       }
-      log('INFO', 'AUTO-FOOTBALL', `${matches.length} partidas futebol com odds`);
+      log('INFO', 'AUTO-FOOTBALL', `${matches.length} partidas futebol com odds${HAS_FB_API ? ' + API-Football ativo' : ' (sem API-Football)'}`);
 
       const now = Date.now();
       for (const match of matches) {
@@ -2892,12 +2924,8 @@ async function pollFootball() {
 
         const oH = parseFloat(o.h), oD = parseFloat(o.d), oA = parseFloat(o.a);
         if (!oH || !oD || !oA || oH <= 1 || oD <= 1 || oA <= 1) continue;
-
-        // Odds gate: skip se draw odds abaixo do mínimo (mercados sem valor no draw)
-        // Gate de odds muito extremas (evita tips em missmatches óbvios)
         if (Math.min(oH, oA) > 5.0) continue;
 
-        // De-juice
         const rawH = 1/oH, rawD = 1/oD, rawA = 1/oA;
         const overround = rawH + rawD + rawA;
         const mktH = (rawH/overround*100).toFixed(1);
@@ -2910,64 +2938,150 @@ async function pollFootball() {
           hour: '2-digit', minute: '2-digit'
         }) : '—';
 
-        // Buscar dados API-Football (form, H2H, standings)
-        // Precisamos dos IDs dos times — API-Football não retorna por nome, usamos busca lazy
-        // Para não gastar quota desnecessariamente, tentamos com o ML pre-filter primeiro usando só odds
-        // Se passar, aí buscamos dados extras
-        const mlQuick = calcFootballScore(
-          { form: null, homeForm: null, goalsFor: null, goalsAgainst: null },
-          { form: null, awayForm: null, goalsFor: null, goalsAgainst: null },
-          { results: [] },
-          { h: oH, d: oD, a: oA, ou25: o.ou25 ? { over: parseFloat(o.ou25.over), under: parseFloat(o.ou25.under) } : null }
+        const oddsInput = { h: oH, d: oD, a: oA, ou25: o.ou25 ? { over: parseFloat(o.ou25.over), under: parseFloat(o.ou25.under) } : null };
+
+        // ── Pré-filtro rápido com só odds (sem chamadas externas) ──
+        // Descarta partidas onde nenhum mercado tem EV > 0 mesmo ignorando margem
+        const rawEvH = (0.5 * oH) - 1; // estimativa trivial
+        if (rawEvH < -0.30 && (0.5 * oD - 1) < -0.30 && (0.5 * oA - 1) < -0.30) {
+          // odds tão desfavoráveis que não vale nem buscar dados
+          await new Promise(r => setTimeout(r, 500)); continue;
+        }
+
+        // ── Buscar dados API-Football se disponível ──
+        let fixtureInfo = null;
+        let homeFormData = null, awayFormData = null;
+        let h2hData = { results: [] };
+        let standingsData = {};
+        let homeFatigue = 7, awayFatigue = 7;
+
+        if (HAS_FB_API) {
+          try {
+            fixtureInfo = await findFixtureWithTeams(match.team1, match.team2, match.time).catch(() => null);
+          } catch(_) {}
+
+          if (fixtureInfo) {
+            const { homeId, awayId, leagueId, season } = fixtureInfo;
+            // Busca em paralelo para economizar tempo (3 chamadas simultâneas)
+            const [hForm, aForm, h2h, standings, hFatigue, aFatigue] = await Promise.all([
+              getTeamForm(homeId, leagueId, season, 10).catch(() => null),
+              getTeamForm(awayId, leagueId, season, 10).catch(() => null),
+              getH2H(homeId, awayId).catch(() => ({ results: [] })),
+              getStandingsCached(leagueId, season),
+              getDaysSinceLastMatch(homeId).catch(() => 7),
+              getDaysSinceLastMatch(awayId).catch(() => 7)
+            ]);
+            homeFormData = hForm;
+            awayFormData = aForm;
+            h2hData      = h2h || { results: [] };
+            standingsData = standings || {};
+            homeFatigue  = hFatigue;
+            awayFatigue  = aFatigue;
+            log('INFO', 'AUTO-FOOTBALL', `Dados API-Football ok: ${match.team1} (form ${fmtForm(hForm?.form)}) vs ${match.team2} (form ${fmtForm(aForm?.form)})`);
+          } else {
+            log('INFO', 'AUTO-FOOTBALL', `Fixture não encontrada na API-Football: ${match.team1} vs ${match.team2}`);
+          }
+        }
+
+        // ── ML com dados reais (ou nulls se API indisponível) ──
+        const homeStandings = fixtureInfo ? standingsData[fixtureInfo.homeId] : null;
+        const awayStandings = fixtureInfo ? standingsData[fixtureInfo.awayId] : null;
+
+        const mlScore = calcFootballScore(
+          {
+            form:         homeFormData?.form         || null,
+            homeForm:     homeFormData?.homeForm      || null,
+            goalsFor:     homeFormData?.goalsFor      ?? null,
+            goalsAgainst: homeFormData?.goalsAgainst  ?? null,
+            position:     homeStandings?.position     ?? null,
+            fatigue:      homeFatigue
+          },
+          {
+            form:         awayFormData?.form         || null,
+            awayForm:     awayFormData?.awayForm      || null,
+            goalsFor:     awayFormData?.goalsFor      ?? null,
+            goalsAgainst: awayFormData?.goalsAgainst  ?? null,
+            position:     awayStandings?.position     ?? null,
+            fatigue:      awayFatigue
+          },
+          h2hData,
+          oddsInput,
+          { leagueId: fixtureInfo?.leagueId ?? null }
         );
 
-        // Se nem com só odds há candidato EV ≥ threshold, pular
-        if (!mlQuick.candidates?.length) {
-          log('INFO', 'AUTO-FOOTBALL', `Sem candidatos: ${match.team1} vs ${match.team2}`);
+        // Se temos dados reais e o ML diz sem edge → pular (economiza chamada de IA)
+        if (fixtureInfo && !mlScore.pass) {
+          log('INFO', 'AUTO-FOOTBALL', `ML sem edge: ${match.team1} vs ${match.team2} | best EV: ${mlScore.bestEv}%`);
+          analyzedFootball.set(key, { ts: now, tipSent: false });
           await new Promise(r => setTimeout(r, 1000)); continue;
         }
 
-        // Montar contexto para IA
-        const ou25Line = o.ou25 ? `Over 2.5: ${o.ou25.over} | Under 2.5: ${o.ou25.under} (linha: ${o.ou25.point || 2.5})` : 'Não disponível';
+        // ── Montar contexto para IA ──
+        const ou25Line = o.ou25
+          ? `Over 2.5: ${o.ou25.over} | Under 2.5: ${o.ou25.under}`
+          : 'Não disponível';
 
-        const prompt = `Você é um analista especializado em futebol de ligas secundárias (Série B/C Brasil, ligações sul-americanas, League One/Two, 3. Liga). Analise com rigor — prefira SEM_EDGE a inventar edge.
+        // Bloco de contexto quantitativo (só inclui se temos dados reais)
+        let contextBlock = '';
+        if (fixtureInfo && homeFormData && awayFormData) {
+          const hPos  = homeStandings ? `${homeStandings.position}º (${homeStandings.points}pts, ${homeStandings.played}J)` : 'N/D';
+          const aPos  = awayStandings ? `${awayStandings.position}º (${awayStandings.points}pts, ${awayStandings.played}J)` : 'N/D';
+          const h2hSummary = h2hData.results.length
+            ? h2hData.results.slice(0, 5).map(r => `${r.home} ${r.homeGoals}-${r.awayGoals} ${r.away} (${r.date?.slice(0,10) || '?'})`).join('\n  ')
+            : 'Sem H2H recente';
+          contextBlock = `
+DADOS QUANTITATIVOS (API-Football):
+${match.team1} (casa):
+  Forma últimos 5: ${fmtForm(homeFormData.form)} | Em casa: ${fmtForm(homeFormData.homeForm)}
+  Gols/jogo: ${homeFormData.goalsFor?.toFixed(2) ?? 'N/D'} marcados | ${homeFormData.goalsAgainst?.toFixed(2) ?? 'N/D'} sofridos
+  Tabela: ${hPos} | Descanso: ${homeFatigue} dias
+
+${match.team2} (fora):
+  Forma últimos 5: ${fmtForm(awayFormData.form)} | Fora: ${fmtForm(awayFormData.awayForm)}
+  Gols/jogo: ${awayFormData.goalsFor?.toFixed(2) ?? 'N/D'} marcados | ${awayFormData.goalsAgainst?.toFixed(2) ?? 'N/D'} sofridos
+  Tabela: ${aPos} | Descanso: ${awayFatigue} dias
+
+H2H (últimos ${Math.min(h2hData.results.length, 5)} jogos):
+  ${h2hSummary}
+
+MODELO QUANTITATIVO (pré-análise):
+  Prob. modelo: Casa ${mlScore.modelH}% | Empate ${mlScore.modelD}% | Fora ${mlScore.modelA}%
+  Prob. mercado: Casa ${mlScore.mktH}% | Empate ${mlScore.mktD}% | Fora ${mlScore.mktA}%
+  Home advantage desta liga: ${mlScore.homeAdv}pp
+  Over 2.5 (Poisson): ${mlScore.over25Prob ?? 'N/D'}% | λ casa: ${mlScore.lambdaHome ?? 'N/D'} | λ fora: ${mlScore.lambdaAway ?? 'N/D'}
+  Melhor edge quantitativo: ${mlScore.direction} @ ${mlScore.bestOdd} (EV ${mlScore.bestEv}%)
+`;
+        }
+
+        const prompt = `Você é um analista especializado em futebol de ligas secundárias (Série B/C Brasil, Sul-America, League One/Two, 3. Liga). Analise com rigor — prefira SEM_EDGE a inventar edge.
 
 PARTIDA: ${match.team1} (casa) vs ${match.team2} (fora)
 Liga: ${match.league}
 Data/Hora: ${matchTime} (BRT)
 
 ODDS REAIS (${o.bookmaker || 'EU'}):
-Casa (${match.team1}): ${oH} → prob. mercado de-juiced: ${mktH}%
-Empate: ${oD} → prob. mercado de-juiced: ${mktD}%
-Fora (${match.team2}): ${oA} → prob. mercado de-juiced: ${mktA}%
+Casa: ${oH} → de-juiced: ${mktH}% | Empate: ${oD} → ${mktD}% | Fora: ${oA} → ${mktA}%
 Margem bookie: ${marginPct}%
-
-TOTAIS:
-${ou25Line}
-
+Totais: ${ou25Line}
+${contextBlock}
 INSTRUÇÕES:
-1. Use seu conhecimento sobre essas equipes nessa liga e temporada. Se não conhecer bem os times, máximo confiança 5 → SEM_EDGE.
+1. ${fixtureInfo ? 'Use os dados quantitativos acima como base. Complemente com seu conhecimento contextual (lesões, motivação, histórico recente não capturado).' : 'Use seu conhecimento sobre os times nessa liga. Se não conhecer bem, confiança máxima 5 → SEM_EDGE.'}
 2. Estime probabilidades reais (home%, draw%, away%) somando 100%.
-3. Compare com as probabilidades de-juiced do mercado.
-4. Calcule EV explicitamente: EV = (sua_prob/100 * odd) - 1, em percentagem.
-   - EV casa: (home_prob/100 * ${oH}) - 1
-   - EV empate: (draw_prob/100 * ${oD}) - 1
-   - EV fora: (away_prob/100 * ${oA}) - 1
-5. Para Over/Under 2.5, estime se o jogo tende a ser de alta ou baixa pontuação.
-6. Confiança (1-10): baseada em quanto você sabe sobre os times e a liga.
-   - Desconhece o time? máximo confiança 5 → SEM_EDGE.
-   - Empate com odds < ${DRAW_MIN_ODDS}? Provavelmente sem valor.
+3. Calcule EV: EV = (prob/100 × odd) − 1 × 100
+   Casa: (X/100 × ${oH} − 1) × 100 | Empate: (X/100 × ${oD} − 1) × 100 | Fora: (X/100 × ${oA} − 1) × 100
+4. Para Over/Under 2.5, use médias de gols${fixtureInfo ? ' (já calculadas acima)' : ''} + contexto tático.
+5. Confiança (1-10): ${fixtureInfo ? 'reflita incerteza residual após dados quantitativos.' : 'baseada em quanto conhece os times.'}
+   - Empate com odds < ${DRAW_MIN_ODDS}? Raramente tem valor.
 
-DECISÃO (escolha apenas a MELHOR opção):
-- Edge real (EV ≥ +${EV_THRESHOLD}%) E confiança ≥ 7 → uma linha:
+DECISÃO (melhor opção apenas):
+- Edge (EV ≥ +${EV_THRESHOLD}%) E confiança ≥ 7:
   TIP_FB:[mercado]:[seleção]@[odd]|EV:[%]|STAKE:[1-3]u|CONF:[ALTA/MÉDIA/BAIXA]
-  Mercados: 1X2_H (casa), 1X2_D (empate), 1X2_A (fora), OVER_2.5, UNDER_2.5
-  Exemplo: TIP_FB:1X2_H:${match.team1}@${oH}|EV:7.5|STAKE:2u|CONF:MÉDIA
+  Mercados: 1X2_H, 1X2_D, 1X2_A, OVER_2.5, UNDER_2.5
 - Caso contrário: SEM_EDGE
 
-Máximo 250 palavras. Mostre raciocínio brevemente.`;
+Máximo 200 palavras.`;
 
-        log('INFO', 'AUTO-FOOTBALL', `Analisando: ${match.team1} vs ${match.team2} | ${match.league}`);
+        log('INFO', 'AUTO-FOOTBALL', `Analisando: ${match.team1} vs ${match.team2} | ${match.league}${fixtureInfo ? ' [com dados]' : ' [sem dados]'}`);
         analyzedFootball.set(key, { ts: now, tipSent: false });
 
         let resp;
@@ -2983,7 +3097,6 @@ Máximo 250 palavras. Mostre raciocínio brevemente.`;
         }
 
         const text = resp?.content?.map(b => b.text || '').join('') || '';
-        // TIP_FB:1X2_H:Team Name@1.85|EV:7.5|STAKE:2u|CONF:MÉDIA
         const tipMatch = text.match(/TIP_FB:([\w_.]+):([^@]+)@([\d.]+)\|EV:([+-]?[\d.]+)\|STAKE:([\d.]+)u?\|CONF:(ALTA|MÉDIA|BAIXA)/i);
 
         if (!tipMatch) {
@@ -2991,14 +3104,13 @@ Máximo 250 palavras. Mostre raciocínio brevemente.`;
           await new Promise(r => setTimeout(r, 3000)); continue;
         }
 
-        const tipMarket   = tipMatch[1].toUpperCase();
-        const tipTeam     = tipMatch[2].trim();
-        const tipOdd      = parseFloat(tipMatch[3]);
-        const tipEV       = parseFloat(tipMatch[4]);
-        const tipStake    = tipMatch[5];
-        const tipConf     = tipMatch[6].toUpperCase();
+        const tipMarket = tipMatch[1].toUpperCase();
+        const tipTeam   = tipMatch[2].trim();
+        const tipOdd    = parseFloat(tipMatch[3]);
+        const tipEV     = parseFloat(tipMatch[4]);
+        const tipStake  = tipMatch[5];
+        const tipConf   = tipMatch[6].toUpperCase();
 
-        // Validações pós-análise
         if (tipOdd < 1.30 || tipOdd > 6.00) {
           log('INFO', 'AUTO-FOOTBALL', `Gate odds: ${tipOdd} fora do range 1.30-6.00`);
           await new Promise(r => setTimeout(r, 2000)); continue;
@@ -3014,26 +3126,28 @@ Máximo 250 palavras. Mostre raciocínio brevemente.`;
 
         const confEmoji = { ALTA: '🟢', MÉDIA: '🟡', BAIXA: '🔴' }[tipConf] || '🟡';
         const marketLabel = {
-          '1X2_H': `⚽ Casa — *${match.team1}*`,
-          '1X2_D': `🤝 Empate`,
-          '1X2_A': `✈️ Fora — *${match.team2}*`,
+          '1X2_H':    `⚽ Casa — *${match.team1}*`,
+          '1X2_D':    `🤝 Empate`,
+          '1X2_A':    `✈️ Fora — *${match.team2}*`,
           'OVER_2.5': `📈 Over 2.5 gols`,
-          'UNDER_2.5': `📉 Under 2.5 gols`
+          'UNDER_2.5':`📉 Under 2.5 gols`
         }[tipMarket] || tipMarket;
+
+        const probMkt = tipMarket === '1X2_H' ? mktH : tipMarket === '1X2_D' ? mktD : tipMarket === '1X2_A' ? mktA : '—';
+        const probMdl = tipMarket === '1X2_H' ? mlScore.modelH : tipMarket === '1X2_D' ? mlScore.modelD : tipMarket === '1X2_A' ? mlScore.modelA : null;
 
         const tipMsg = `⚽ 💰 *TIP FUTEBOL*\n` +
           `*${match.team1}* vs *${match.team2}*\n` +
           `📋 ${match.league}\n` +
           `🕐 ${matchTime} (BRT)\n\n` +
           `🎯 Aposta: ${marketLabel} @ *${tipOdd}*\n` +
-          `📈 EV: *+${tipEV}%* | Prob. mercado: ${tipMarket === '1X2_H' ? mktH : tipMarket === '1X2_D' ? mktD : tipMarket === '1X2_A' ? mktA : '—'}%\n` +
+          `📈 EV: *+${tipEV}%* | Mercado: ${probMkt}%${probMdl ? ` | Modelo: ${probMdl}%` : ''}\n` +
           `💵 Stake: *${tipStake}u*\n` +
-          `${confEmoji} Confiança: *${tipConf}*\n\n` +
-          `⚠️ _Aposte com responsabilidade._`;
+          `${confEmoji} Confiança: *${tipConf}*\n` +
+          (fixtureInfo && homeFormData ? `📊 Forma: ${fmtForm(homeFormData.form)} vs ${fmtForm(awayFormData?.form)}\n` : '') +
+          `\n⚠️ _Aposte com responsabilidade._`;
 
-        // Tenta obter o fixture ID da API-Football para permitir settlement automático
-        const fixtureId = await findFixtureId(match.team1, match.team2, match.time).catch(() => null);
-        const recordMatchId = fixtureId ? `fb_${fixtureId}` : String(match.id);
+        const recordMatchId = fixtureInfo ? `fb_${fixtureInfo.fixtureId}` : String(match.id);
 
         await serverPost('/record-tip', {
           matchId: recordMatchId, eventName: match.league,
@@ -3053,7 +3167,7 @@ Máximo 250 palavras. Mostre raciocínio brevemente.`;
     } catch(e) {
       log('ERROR', 'AUTO-FOOTBALL', e.message);
     }
-    setTimeout(loop, 30 * 60 * 1000); // verifica a cada 30min
+    setTimeout(loop, 30 * 60 * 1000);
   }
   loop();
 }

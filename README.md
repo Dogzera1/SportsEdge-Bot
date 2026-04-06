@@ -1,8 +1,8 @@
-# LoL Betting Bot
+# SportsEdge Bot
 
-Bot autônomo de Telegram para análise automática de apostas em **League of Legends**, baseado em Valor Esperado (EV) e Kelly Criterion, alimentado por IA (DeepSeek ou Claude).
+Bot autônomo de Telegram para análise automática de apostas esportivas, baseado em Valor Esperado (EV) e Kelly Criterion, alimentado por IA (DeepSeek ou Claude).
 
-> **Status (Abril 2026):** Sistema operando exclusivamente para LoL. Odds via **OddsPapi v4** (1xBet, plano free 250 req/mês) com sistema **round-robin** que busca um lote de torneios por ciclo. ML usa composição + WR de campeões em pro play + WR de jogadores com campeões específicos. Fair odds removidas de upcoming — tips pré-jogo só com odds reais disponíveis. Sistema de três níveis de confiança ativo: **ALTA**, **MÉDIA** e **BAIXA**.
+> **Status (Abril 2026):** Sistema multi-esporte — **LoL Esports**, **MMA**, **Tênis** e **Futebol** operacionais. Cada esporte roda em bot Telegram independente (token separado). Odds via **OddsPapi v4** (esports) e **The Odds API** (futebol/MMA/tênis). Futebol usa **API-Football** para dados de forma, H2H e standings, com pré-filtro ML antes de chamar a IA. Settlement automático em todos os esportes.
 
 ---
 
@@ -18,29 +18,44 @@ Bot autônomo de Telegram para análise automática de apostas em **League of Le
 ┌──────────▼───────────────────────────────────┐
 │           bot.js — Telegram Bot              │
 │                                              │
-│  • Polling contínuo + backoff exponencial    │
+│  Esports (LoL):                              │
 │  • Auto-análise ao vivo (ciclo de 6 min)     │
 │  • Auto-análise pré-jogo (upcoming <=24h)    │
 │  • Alertas de draft e line movement          │
-│  • Settlement automático de tips             │
 │  • Patch meta auto-fetch (ddragon, 14d)      │
+│                                              │
+│  MMA / Tênis:                                │
+│  • Loop independente a cada 20 min           │
+│  • ML pré-filtro + análise DeepSeek          │
+│                                              │
+│  Futebol:                                    │
+│  • Loop independente a cada 30 min           │
+│  • Dados reais: forma, H2H, standings        │
+│    via API-Football (lib/football-api.js)    │
+│  • ML com dados reais (lib/football-ml.js)   │
+│  • Settlement via fixture ID API-Football    │
+│                                              │
+│  Todos os esportes:                          │
+│  • Settlement automático a cada 30 min       │
+│  • Bots Telegram independentes por esporte   │
 └──────────┬───────────────────────────────────┘
            │ HTTP localhost:PORT
 ┌──────────▼───────────────────────────────────┐
 │         server.js — API Aggregator           │
 │                                              │
 │  Fontes de partidas:                         │
-│    Riot / LoL Esports API                    │
-│    PandaScore API                            │
+│    Riot / LoL Esports API + PandaScore       │
+│    The Odds API (MMA / Tênis / Futebol)      │
 │                                              │
 │  Odds:                                       │
-│    OddsPapi v4 — 1xBet (round-robin)         │
-│    Re-fetch forçado se partida em < 2h       │
+│    OddsPapi v4 — 1xBet (esports round-robin) │
+│    The Odds API — EU (MMA/Tênis/Futebol)     │
 │                                              │
 │  Análise IA:                                 │
 │    DeepSeek (deepseek-chat) — padrão         │
 │    Anthropic Claude — fallback               │
 │    Pré-filtro ML local (lib/ml.js)           │
+│    Pré-filtro ML futebol (lib/football-ml.js)│
 │                                              │
 │  sportsedge.db (SQLite via volume Railway)   │
 │  users | events | matches | tips             │
@@ -55,28 +70,38 @@ Bot autônomo de Telegram para análise automática de apostas em **League of Le
 ## Pré-requisitos
 
 - Node.js 18+
-- Bot Telegram criado via [@BotFather](https://t.me/BotFather)
+- Bot Telegram criado via [@BotFather](https://t.me/BotFather) — um por esporte ativo
 - Chave **DeepSeek API** (recomendado) ou **Anthropic Claude API**
-- Chave da LoL Esports API (Riot Games)
-- Token PandaScore — torneios fora da Riot (schedules + stats + sync de resultados pro)
-- Chave OddsPapi — odds esports LoL via 1xBet ([oddspapi.io](https://oddspapi.io), plano free: 250 req/mês)
+- Chave da LoL Esports API (Riot Games) — esports
+- Token PandaScore — torneios fora da Riot (schedules + stats + sync de resultados pro) — esports
+- Chave OddsPapi — odds esports LoL via 1xBet ([oddspapi.io](https://oddspapi.io), plano free: 250 req/mês) — esports
+- Chave **The Odds API** — odds para futebol, MMA e tênis
+- Chave **API-Football** (`api-sports.io`) — dados de forma, H2H e standings para futebol (free tier: 100 req/dia)
 
 ---
 
 ## Configuração (`.env`)
 
 ```env
-# ── Telegram ──
+# ── Telegram — um token por esporte ──
 TELEGRAM_TOKEN_ESPORTS=seu_token_bot
+TELEGRAM_TOKEN_MMA=seu_token_mma        # opcional
+TELEGRAM_TOKEN_TENNIS=seu_token_tennis  # opcional
+TELEGRAM_TOKEN_FOOTBALL=seu_token_fb    # opcional
 
 # ── APIs de IA (pelo menos uma obrigatória) ──
 DEEPSEEK_API_KEY=sk-...                 # DeepSeek (recomendado — mais barato)
 CLAUDE_API_KEY=sk-ant-api03-...         # Anthropic Claude (fallback)
 
-# ── APIs de dados ──
+# ── APIs de dados — esports ──
 LOL_API_KEY=sua_chave_lol               # LoL Esports API (Riot Games)
 ODDS_API_KEY=sua_chave_oddspapi         # OddsPapi v4 (aceita: ODDSPAPI_KEY, ODDS_PAPI_KEY, ESPORTS_ODDS_KEY)
 PANDASCORE_TOKEN=seu_token              # PandaScore (obrigatório para sync de stats pro)
+
+# ── APIs de dados — futebol/MMA/tênis ──
+THE_ODDS_API_KEY=sua_chave              # The Odds API (odds para futebol, MMA, tênis)
+API_SPORTS_KEY=sua_chave               # API-Football / api-sports.io (forma, H2H, standings, settlement)
+                                        # Alias aceito: APIFOOTBALL_KEY
 
 # ── Servidor ──
 SERVER_PORT=8080
@@ -89,6 +114,28 @@ ADMIN_USER_IDS=123456789,987654321      # IDs numéricos Telegram (obtenha via @
 
 # ── Feature flags ──
 ESPORTS_ENABLED=true
+MMA_ENABLED=true                        # false por padrão se token ausente
+TENNIS_ENABLED=true
+FOOTBALL_ENABLED=true
+
+# ── Futebol — configuração ──
+FOOTBALL_LEAGUES=soccer_brazil_serie_b,soccer_brazil_serie_c  # ligas a monitorar (The Odds API keys)
+FOOTBALL_EV_THRESHOLD=5.0              # EV mínimo % para emitir tip (padrão: 5.0)
+FOOTBALL_DRAW_MIN_ODDS=2.80            # Odds mínimas para tip de empate (padrão: 2.80)
+
+# Ligas disponíveis para FOOTBALL_LEAGUES:
+#   soccer_brazil_campeonato     — Brasileirão Série A
+#   soccer_brazil_serie_b        — Série B
+#   soccer_brazil_serie_c        — Série C
+#   soccer_argentina_primera     — Primera División
+#   soccer_spain_segunda_division
+#   soccer_germany_3liga
+#   soccer_england_league1
+#   soccer_england_league2
+#   soccer_usa_mls
+#   soccer_chile_primera_division
+#   soccer_colombia_primera_a
+#   soccer_uruguay_primera_division
 
 # ── OddsPapi — ajuste fino (opcional) ──
 ODDSPAPI_BATCH_SIZE=3                   # Torneios por requisição (padrão: 3)
@@ -105,7 +152,7 @@ PATCH_META_DATE=YYYY-MM-DD
 LOL_PREGAME_BLOCK_BO3=true             # true = só analisa Bo3/Bo5 após Game 1 (draft conhecido)
                                         # false = analisa upcoming sem restrição de draft
 
-# ── Thresholds de tip (opcional — valores padrão se omitidos) ──
+# ── Thresholds de tip LoL (opcional — valores padrão se omitidos) ──
 LOL_EV_THRESHOLD=5                      # EV mínimo % para emitir tip (padrão: 5)
 LOL_PINNACLE_MARGIN=8                   # Margem 1xBet esperada % para de-juice (padrão: 8)
 LOL_NO_ODDS_CONVICTION=70              # Confiança mínima % para tip sem odds de mercado (padrão: 70)
@@ -378,12 +425,21 @@ Quando o mesmo confronto aparece em ambas as fontes, o sistema prioriza os dados
 
 ## Settlement Automático
 
-| Fonte | Frequência |
-|-------|-----------|
-| LoL Esports API (`/getSchedule`) | 30 min |
-| PandaScore (`/ps-result`) | 30 min |
+| Esporte | Fonte | Endpoint | Frequência |
+|---------|-------|----------|-----------|
+| LoL (Riot) | LoL Esports API | `/match-result` | 30 min |
+| LoL (PandaScore) | PandaScore | `/ps-result` (prefixo `ps_`) | 30 min |
+| Futebol | API-Football | `/football-result` (prefixo `fb_`) | 30 min |
+| MMA / Tênis | Sem settlement automático ainda | — | — |
 
-O settlement itera pelas tips não resolvidas, consulta o resultado via endpoint correspondente (Riot para `matchId` numérico, PandaScore para IDs com prefixo `ps_`) e marca WIN/LOSS no banco.
+O settlement itera pelas tips não resolvidas e detecta o endpoint correto pelo prefixo do `matchId`:
+- Sem prefixo → Riot API (`/match-result`)
+- `ps_` → PandaScore (`/ps-result`)
+- `fb_` → API-Football (`/football-result`) — resolve apenas se status `FT`, `AET` ou `PEN`
+
+**Futebol — mercados especiais:**
+- `1X2_D` (empate): vence se `winner = "Draw"`
+- `OVER_2.5` / `UNDER_2.5`: calculado pelo placar final (gols totais > ou < 2.5)
 
 ---
 
@@ -394,12 +450,16 @@ O settlement itera pelas tips não resolvidas, consulta o resultado via endpoint
 | Rota | Descrição |
 |------|-----------|
 | `GET /lol-matches` | Combina Riot API + PandaScore; inclui odds quando disponíveis no cache |
+| `GET /mma-matches` | Lutas MMA próximas com odds (The Odds API) |
+| `GET /tennis-matches` | Partidas de tênis próximas com odds (The Odds API) |
+| `GET /football-matches` | Partidas de futebol próximas 7 dias com odds H2H + Over/Under (The Odds API) |
 | `GET /odds?team1=X&team2=Y[&force=1]` | Busca odds do cache; `force=1` ignora TTL e força re-fetch |
 | `GET /live-gameids?matchId=X` | IDs dos games em andamento numa série Riot |
 | `GET /live-game?gameId=X` | Stats ao vivo: gold, torres, dragões, kills, players |
 | `GET /ps-compositions?matchId=ps_X` | Composições e stats via PandaScore (prefix `ps_`) |
 | `GET /match-result?matchId=X&game=X` | Resultado final de uma partida (Riot) |
 | `GET /ps-result?matchId=X` | Resultado final de uma partida (PandaScore) |
+| `GET /football-result?fixtureId=X` | Resultado final de uma partida de futebol (API-Football) |
 
 ### Tips e Banco
 
@@ -469,7 +529,9 @@ lol betting/
 ├── sportsedge.db       # SQLite (criado automaticamente; path via DB_PATH)
 └── lib/
     ├── database.js     # Schema SQLite, statements, path resolution (absoluto/relativo)
-    ├── ml.js           # Pré-filtro ML local (forma, H2H, comp/meta score, live)
+    ├── ml.js           # Pré-filtro ML esports (forma, H2H, comp/meta score, live)
+    ├── football-api.js # Wrapper API-Football: forma, H2H, standings, fixture lookup, settlement
+    ├── football-ml.js  # Pré-filtro ML futebol: 1X2 + Over/Under via Poisson simplificado
     ├── sports.js       # Registry de esportes (tokens, feature flags)
     └── utils.js        # log, calcKelly, calcKellyFraction, norm, fmtDate, httpGet, safeParse
 ```
@@ -485,6 +547,83 @@ node sync-form.js --force   # re-sincroniza tudo
 
 ---
 
+## Bot de Futebol
+
+### Fluxo de Análise
+
+```
+1. /football-matches (The Odds API) — partidas próximas 7 dias com odds H2H + Over/Under
+   |
+2. Gate básico: odds válidas (1 < H,D,A ≤ 5), nenhuma odd > 5.0 nas extremas
+   |
+3. Se API_SPORTS_KEY disponível → busca dados API-Football:
+   |-- findFixtureWithTeams() → fixture ID + team IDs (1 chamada, cache de memória 30min)
+   |-- getTeamForm() × 2 → forma últimos 10 jogos, home/away split, gols médios
+   |-- getH2H() → últimos 10 confrontos diretos
+   |-- getStandingsCached() → posição, pontos, jogos (cache 12h por liga)
+   |-- getDaysSinceLastMatch() × 2 → proxy de cansaço
+   |   (todas as chamadas em Promise.all — uma rodada em paralelo)
+   |
+4. calcFootballScore() com dados reais:
+   |-- Modelo Poisson simplificado → P(Over 2.5)
+   |-- Pesos: forma (35%), forma casa/fora (30%), H2H (20%), posição (10%), cansaço (5%)
+   |-- EV calculado para cada mercado (1X2_H, 1X2_D, 1X2_A, OVER_2.5, UNDER_2.5)
+   |-- Se pass = false (EV < threshold) → pula IA (economiza tokens)
+   |
+5. Prompt para DeepSeek com contexto completo:
+   |-- Odds reais + de-juiced
+   |-- Forma (5 jogos: "WDLWW"), médias de gols, posição na tabela
+   |-- H2H resumido (últimos 5 confrontos)
+   |-- Saída do modelo quantitativo (probs modelo vs mercado, best EV)
+   |
+6. Gates pós-IA: odds [1.30, 6.00], EV ≥ threshold, draw odds ≥ DRAW_MIN_ODDS
+   |
+7. Tip enviada com forma exibida na mensagem
+   |
+8. matchId gravado como fb_<fixtureId> → permite settlement automático via API-Football
+```
+
+### Quota API-Football (free: 100 req/dia)
+
+Por partida analisada com dados completos: ~4 chamadas (fixture + 2×form + H2H + standings já em cache).
+Com standings em cache 12h e memCache 30min para outras chamadas, o custo real é ~3 chamadas/partida nova.
+20 partidas/dia em 2 ligas ≈ 60–70 req/dia — dentro do free tier.
+
+### ML Futebol (`lib/football-ml.js`)
+
+| Fator | Peso | Fonte |
+|-------|------|-------|
+| Forma geral (últimos 5) | 20% | `getTeamForm` |
+| Forma em casa / fora | 15% cada | `getTeamForm` |
+| H2H (últimos 5) | 20% | `getH2H` |
+| Posição na tabela | 10% | `getStandings` |
+| Cansaço (dias descanso) | 5% | `getDaysSinceLastMatch` |
+| Over 2.5 (Poisson) | independente | médias de gols |
+
+Home advantage fixo de +5pp aplicado ao modelo.
+Deslocamento máximo em relação ao mercado: ±15pp.
+
+### Ligas Suportadas
+
+Configuradas via `FOOTBALL_LEAGUES` (separadas por vírgula):
+
+| Chave The Odds API | Liga | ID API-Football |
+|--------------------|------|----------------|
+| `soccer_brazil_campeonato` | Brasileirão Série A | 71 |
+| `soccer_brazil_serie_b` | Série B | 72 |
+| `soccer_brazil_serie_c` | Série C | 73 |
+| `soccer_argentina_primera` | Primera División | 11 |
+| `soccer_england_league1` | League One | 41 |
+| `soccer_england_league2` | League Two | 42 |
+| `soccer_germany_3liga` | 3. Liga | 80 |
+| `soccer_spain_segunda_division` | Segunda División | 141 |
+| `soccer_usa_mls` | MLS | 253 |
+| `soccer_chile_primera_division` | Primera División | 265 |
+| `soccer_colombia_primera_a` | Liga BetPlay | 239 |
+| `soccer_uruguay_primera_division` | Primera División | 268 |
+
+---
+
 ## Fontes de Dados
 
 | Fonte | Uso |
@@ -494,6 +633,8 @@ node sync-form.js --force   # re-sincroniza tudo
 | `esports.lolesports.com/persisted2` | Composições e detalhes do draft |
 | PandaScore API | Torneios não-Riot: schedules, compositions, stats, resultados, sync de champ/player WR |
 | OddsPapi v4 (`api.oddspapi.io/v4`) | Odds 1xBet para LoL (sportId=18), round-robin por lote |
+| The Odds API (`api.the-odds-api.com/v4`) | Odds H2H + Over/Under para futebol, MMA e tênis (regiões EU) |
+| API-Football (`v3.football.api-sports.io`) | Forma, H2H, standings e resultados de futebol (free: 100 req/dia) |
 | DeepSeek API (`api.deepseek.com`) | Análise de matchup — padrão (mais barato) |
 | Anthropic Claude (`api.anthropic.com`) | Análise de matchup — fallback |
 | ddragon (`ddragon.leagueoflegends.com`) | Versão atual do patch para atualização automática do meta |
