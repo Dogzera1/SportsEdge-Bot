@@ -1706,6 +1706,9 @@ const server = http.createServer(async (req, res) => {
     const clvLive = { sum: 0, count: 0, positive: 0 };
     const clvPre  = { sum: 0, count: 0, positive: 0 };
 
+    // Calibração probabilística: Brier Score e Log Loss
+    let brierSum = 0, logLossSum = 0, calibCount = 0;
+
     for (const t of tips) {
       const stake = parseFloat(t.stake) || 1;
       const odds  = parseFloat(t.odds)  || 1;
@@ -1727,6 +1730,17 @@ const server = http.createServer(async (req, res) => {
         if (clv > 0) clvPositive++;
         const cb = t.is_live ? clvLive : clvPre;
         cb.sum += clv; cb.count++; if (clv > 0) cb.positive++;
+      }
+
+      // Brier Score e Log Loss: p derivado do EV e odds
+      const ev = parseFloat(t.ev) || 0;
+      if (odds > 1 && t.result) {
+        let p = ev > 0 ? (ev / 100 + 1) / odds : 1 / odds;
+        p = Math.max(0.01, Math.min(0.99, p));
+        const o = t.result === 'win' ? 1 : 0;
+        brierSum += (p - o) ** 2;
+        logLossSum += -(o * Math.log(p) + (1 - o) * Math.log(1 - p));
+        calibCount++;
       }
     }
 
@@ -1765,6 +1779,12 @@ const server = http.createServer(async (req, res) => {
         positiveRate: Math.round(clvPositive / clvCount * 100),
         count: clvCount,
         byPhase: { live: calcCLV(clvLive), preGame: calcCLV(clvPre) }
+      } : null,
+      calibration_metrics: calibCount >= 3 ? {
+        brierScore: parseFloat((brierSum / calibCount).toFixed(4)),
+        logLoss: parseFloat((logLossSum / calibCount).toFixed(4)),
+        sampleSize: calibCount,
+        interpretation: brierSum / calibCount < 0.20 ? 'boa' : brierSum / calibCount < 0.25 ? 'acima_da_media' : 'ruim'
       } : null,
       banca: bancaInfo
     });
