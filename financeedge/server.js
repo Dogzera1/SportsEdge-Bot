@@ -13,6 +13,62 @@ const { paperOpen, paperClose, calcUnrealizedPnL } = require('./lib/executor');
 const PORT = parseInt(process.env.PORT || process.env.SERVER_PORT) || 3001;
 const MODE = (process.env.MODE || 'paper').toLowerCase(); // 'paper' ou 'real'
 const AI_KEY = process.env.DEEPSEEK_API_KEY || process.env.CLAUDE_API_KEY || '';
+const ADMIN_KEY = (process.env.ADMIN_KEY || '').trim();
+
+function getClientIp(req) {
+  const xf = (req.headers['x-forwarded-for'] || '').toString();
+  const ip = xf.split(',')[0]?.trim();
+  return ip || req.socket?.remoteAddress || 'unknown';
+}
+
+function isAdminRequest(req) {
+  if (!ADMIN_KEY) return false;
+  const xk = (req.headers['x-admin-key'] || '').toString().trim();
+  if (xk && xk === ADMIN_KEY) return true;
+  const auth = (req.headers['authorization'] || '').toString().trim();
+  if (auth.toLowerCase().startsWith('bearer ')) {
+    const token = auth.slice(7).trim();
+    if (token && token === ADMIN_KEY) return true;
+  }
+  return false;
+}
+
+function requireAdmin(req, res) {
+  if (!ADMIN_KEY) { sendJson(res, { ok: false, error: 'admin_key_not_configured' }, 503); return false; }
+  if (!isAdminRequest(req)) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return false; }
+  return true;
+}
+
+const _rl = new Map();
+function rateLimit(req, res, limitPerMin, bucket) {
+  const ip = getClientIp(req);
+  const key = `${bucket}|${ip}`;
+  const now = Date.now();
+  const winMs = 60 * 1000;
+  const cur = _rl.get(key);
+  if (!cur || now >= cur.resetAt) { _rl.set(key, { count: 1, resetAt: now + winMs }); return true; }
+  if (cur.count >= limitPerMin) {
+    const retryAfterSec = Math.max(1, Math.ceil((cur.resetAt - now) / 1000));
+    res.setHeader('Retry-After', String(retryAfterSec));
+    sendJson(res, { ok: false, error: 'rate_limited', bucket, limitPerMin, retryAfterSec }, 429);
+    return false;
+  }
+  cur.count++;
+  return true;
+}
+
+const ADMIN_ROUTES_ANY = new Set(['/users']);
+const ADMIN_ROUTES_POST = new Set([
+  '/open-trade',
+  '/close-trade',
+  '/set-bankroll',
+  '/circuit-breaker',
+  '/save-user',
+  '/record-analysis',
+  '/ai',
+  '/reset-trades',
+]);
+const EXPENSIVE_ROUTES = new Set(['/ai']);
 
 let DB_PATH = (process.env.DB_PATH || 'financeedge.db').trim().replace(/^=+/, '');
 try {
@@ -51,11 +107,20 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(204, {
         'Access-Control-Allow-Origin': '*',
         'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type, x-api-key'
+        'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-admin-key, x-api-key'
       });
       res.end();
       return;
     }
+
+    const bucket = EXPENSIVE_ROUTES.has(p) ? `expensive:${p}` : `general:${p}`;
+    const limit = EXPENSIVE_ROUTES.has(p) ? 10 : 60;
+    if (!rateLimit(req, res, limit, bucket)) return;
+
+    const needsAdmin =
+      ADMIN_ROUTES_ANY.has(p) ||
+      (req.method === 'POST' && ADMIN_ROUTES_POST.has(p));
+    if (needsAdmin && !requireAdmin(req, res)) return;
 
     // ── Health ──
     if (p === '/health') {

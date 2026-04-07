@@ -9,6 +9,7 @@ const initDatabase = require('./lib/database');
 
 const SERVER_URL = process.env.SERVER_URL || `http://127.0.0.1:${process.env.SERVER_PORT || 3001}`;
 const MODE = (process.env.MODE || 'paper').toLowerCase();
+const ADMIN_KEY = (process.env.ADMIN_KEY || '').trim();
 const CYCLE_MIN = parseInt(process.env.CYCLE_MIN || '60'); // ciclo a cada N minutos
 const SYMBOLS = (process.env.SYMBOLS || 'BTC/USDT,ETH/USDT').split(',').map(s => s.trim());
 const TIMEFRAME = process.env.TIMEFRAME || '1h';
@@ -455,7 +456,8 @@ async function runAnalysisCycle() {
 
   // Registra análise no server
   try {
-    await httpGet(`${SERVER_URL}/record-analysis`, {}).catch(() => {});
+    const headers = ADMIN_KEY ? { 'x-admin-key': ADMIN_KEY } : {};
+    await httpGet(`${SERVER_URL}/record-analysis`, headers).catch(() => {});
   } catch (_) {}
 }
 

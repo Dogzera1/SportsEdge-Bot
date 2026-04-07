@@ -87,6 +87,11 @@ const RE_ANALYZE_INTERVAL = 10 * 60 * 1000; // 10 min between re-analyses of sam
 const UPCOMING_ANALYZE_INTERVAL = 30 * 60 * 1000; // 30m para acomodar a quota da OddsPapi (1xBet)
 const UPCOMING_WINDOW_HOURS = 24; // analyze upcoming matches within next 24h
 
+// Deduplicação de updates de tip (anti-spam)
+const tipUpdateNotifyCache = new Map(); // key -> ts
+const TIP_UPDATE_DEDUP_MS =
+  (parseInt(process.env.TIP_UPDATE_DEDUP_MIN || '30', 10) || 30) * 60 * 1000;
+
 
 
 // Patch meta alert
@@ -126,6 +131,23 @@ function tgRequest(token, method, params) {
 }
 
 // ── Server Helpers ──
+const ADMIN_KEY = (process.env.ADMIN_KEY || '').trim();
+const ADMIN_POST_PATHS = new Set([
+  '/record-analysis',
+  '/save-user',
+  '/record-tip',
+  '/log-tip-factors',
+  '/resync-stats',
+  '/reset-tips',
+  '/settle',
+  '/set-bankroll',
+  '/update-clv',
+  '/update-open-tip',
+  '/claude',
+  '/ps-result',
+  '/football-result',
+]);
+
 function serverGet(path, sport) {
   return new Promise((resolve, reject) => {
     const sep = path.includes('?') ? '&' : '?';
@@ -150,6 +172,9 @@ function serverPost(path, body, sport, extraHeaders) {
   return new Promise((resolve, reject) => {
     const s = JSON.stringify(body);
     const sportParam = sport ? `?sport=${sport}` : '';
+    const adminHeaders = (ADMIN_KEY && ADMIN_POST_PATHS.has(path))
+      ? { 'x-admin-key': ADMIN_KEY }
+      : null;
     const req = http.request({
       hostname: SERVER,
       port: PORT,
@@ -158,6 +183,7 @@ function serverPost(path, body, sport, extraHeaders) {
       headers: {
         'Content-Type': 'application/json',
         'Content-Length': Buffer.byteLength(s),
+        ...(adminHeaders || {}),
         ...extraHeaders
       }
     }, res => {
@@ -317,13 +343,61 @@ async function loadSubscribedUsers() {
 
 // ── Auto Analysis: LoL live + upcoming ──
 let autoAnalysisRunning = false;
-async function runAutoAnalysis() {
-  if (autoAnalysisRunning) {
-    log('INFO', 'AUTO', 'Análise anterior ainda em curso — pulando ciclo');
-    return;
+const AUTO_ANALYSIS_MUTEX_STALE_MS =
+  (parseInt(process.env.AUTO_ANALYSIS_MUTEX_STALE_MIN || '15', 10) || 15) * 60 * 1000;
+const autoAnalysisMutex = { locked: false, since: 0 };
+
+function canonicalMatchId(sport, rawId, opts = {}) {
+  const id = String(rawId || '').trim();
+  if (!id) return id;
+  if (sport === 'esports') {
+    // Mantém PandaScore (ps_*) e outros IDs já prefixados.
+    if (id.startsWith('ps_')) return id;
+    if (id.startsWith('lol_')) return id;
+    // Riot LoL: normaliza para lol_<eventId>
+    return `lol_${id}`;
   }
+  if (sport === 'football') {
+    if (id.startsWith('fb_')) return id;
+    // Fallback: se for fixture numérico, prefixa
+    if (/^\d+$/.test(id)) return `fb_${id}`;
+    return id;
+  }
+  if (sport === 'mma') {
+    if (id.startsWith('mma_')) return id;
+    return `mma_${id}`;
+  }
+  if (sport === 'tennis') {
+    if (id.startsWith('tennis_')) return id;
+    return `tennis_${id}`;
+  }
+  return id;
+}
+
+async function withAutoAnalysisMutex(fn) {
+  const now = Date.now();
+  if (autoAnalysisMutex.locked) {
+    if (now - autoAnalysisMutex.since > AUTO_ANALYSIS_MUTEX_STALE_MS) {
+      log('WARN', 'AUTO', `Mutex stale (${Math.round((now - autoAnalysisMutex.since)/60000)}min) — liberando lock`);
+      autoAnalysisMutex.locked = false;
+    } else {
+      log('INFO', 'AUTO', 'Análise anterior ainda em curso — pulando ciclo');
+      return;
+    }
+  }
+  autoAnalysisMutex.locked = true;
+  autoAnalysisMutex.since = now;
   autoAnalysisRunning = true;
   try {
+    return await fn();
+  } finally {
+    autoAnalysisRunning = false;
+    autoAnalysisMutex.locked = false;
+  }
+}
+
+async function runAutoAnalysis() {
+  return withAutoAnalysisMutex(async () => {
   const now = Date.now();
 
   const esportsConfig = SPORTS['esports'];
@@ -382,7 +456,7 @@ async function runAutoAnalysis() {
           const modelPPick = modelPForKelly;
 
           const rec = await serverPost('/record-tip', {
-            matchId: String(match.id), eventName: match.league,
+            matchId: canonicalMatchId('esports', match.id), eventName: match.league,
             p1: match.team1, p2: match.team2, tipParticipant: tipTeam,
             odds: tipOdd, ev: tipEV, stake: tipStake,
             confidence: tipConf, isLive: result.hasLiveStats,
@@ -476,7 +550,7 @@ async function runAutoAnalysis() {
                   `⚠️ _Mercado de handicap — menor liquidez. Aposte com cautela._`;
 
                 await serverPost('/record-tip', {
-                  matchId: String(match.id) + '_H', eventName: match.league,
+                  matchId: canonicalMatchId('esports', String(match.id) + '_H'), eventName: match.league,
                   p1: match.team1, p2: match.team2, tipParticipant: favTeam,
                   odds: String(hOdd), ev: String(hEV.toFixed(1)), stake: String(hStake),
                   confidence: 'BAIXA', isLive: true, market_type: 'HANDICAP'
@@ -600,7 +674,7 @@ async function runAutoAnalysis() {
             const mlEdgeLabel = result.mlScore > 0 ? ` | ML: ${result.mlScore.toFixed(1)}pp` : '';
 
             await serverPost('/record-tip', {
-              matchId: String(match.id), eventName: match.league,
+              matchId: canonicalMatchId('esports', match.id), eventName: match.league,
               p1: match.team1, p2: match.team2, tipParticipant: tipTeam,
               odds: tipOdd, ev: tipEV, stake: tipStake,
               confidence: tipConf, isLive: false
@@ -643,9 +717,7 @@ async function runAutoAnalysis() {
     }
   }
 
-  } finally {
-    autoAnalysisRunning = false;
-  }
+  });
 }
 
 // ── Settlement ──
@@ -3878,12 +3950,28 @@ async function refreshOpenTips() {
         const p = Math.max(0.01, Math.min(0.99, (1 + oldEv / 100) / oldOdds));
         const newEv = ((p * currentOdds) - 1) * 100;
 
+        // Dedup: evita spam para mesma tip em janela (cache + DB last_notified_at)
+        const key = `${sport}|${String(tip.match_id || '')}|${norm(pick)}|${String(tip.market_type || 'ML')}`;
+        const cachedTs = tipUpdateNotifyCache.get(key) || 0;
+        const dbTs = tip.last_notified_at ? new Date(String(tip.last_notified_at)).getTime() : 0;
+        const lastTs = Math.max(cachedTs, isFinite(dbTs) ? dbTs : 0);
+        const shouldNotify = !lastTs || (now - lastTs) >= TIP_UPDATE_DEDUP_MS;
+
         await serverPost('/update-open-tip', {
           matchId: tip.match_id,
           currentOdds: currentOdds,
           currentEV: parseFloat(newEv.toFixed(2)),
-          currentConfidence: tip.confidence || null
+          currentConfidence: tip.confidence || null,
+          markNotified: shouldNotify ? 1 : 0
         }, sport).catch(() => null);
+
+        if (!shouldNotify) continue;
+
+        tipUpdateNotifyCache.set(key, now);
+        // limpa chaves antigas
+        for (const [k, ts] of tipUpdateNotifyCache) {
+          if (ts < now - (TIP_UPDATE_DEDUP_MS * 2)) tipUpdateNotifyCache.delete(k);
+        }
 
         // Notifica inscritos do esporte
         const msg =

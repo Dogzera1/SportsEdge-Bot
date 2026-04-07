@@ -39,6 +39,21 @@
     /* Tips table */
     .table-card { background: #1a1d2e; border-radius: 10px; padding: 1.2rem; border: 1px solid #2d2f45; margin-bottom: 1.5rem; overflow-x: auto; }
     .table-card h3 { font-size: 0.9rem; color: #a78bfa; margin-bottom: 1rem; text-transform: uppercase; letter-spacing: 0.05em; }
+    .tips-controls { display: grid; grid-template-columns: 1.6fr 1fr 1fr 1fr 1fr 1fr; gap: 0.6rem; margin-bottom: 0.9rem; }
+    @media (max-width: 900px) { .tips-controls { grid-template-columns: 1fr 1fr; } }
+    .tips-controls input, .tips-controls select {
+      width: 100%;
+      background: #13151f;
+      border: 1px solid #2d2f45;
+      color: #e0e0e0;
+      border-radius: 8px;
+      padding: 0.55rem 0.7rem;
+      font-size: 0.82rem;
+      outline: none;
+    }
+    .tips-controls input::placeholder { color: #6b7280; }
+    .tips-controls input:focus, .tips-controls select:focus { border-color: #7c3aed; }
+    .tips-controls .mini { color: #6b7280; font-size: 0.72rem; margin-top: -0.2rem; }
     table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
     th { text-align: left; padding: 0.6rem 0.8rem; border-bottom: 1px solid #2d2f45; color: #6b7280; font-weight: 600; text-transform: uppercase; font-size: 0.7rem; }
     td { padding: 0.6rem 0.8rem; border-bottom: 1px solid #1f2937; }
@@ -97,6 +112,41 @@
   <!-- Tips Table -->
   <div class="table-card">
     <h3>&#128203; &Uacute;ltimas Tips</h3>
+    <div class="tips-controls">
+      <div>
+        <input id="tipsQ" type="text" placeholder="Buscar: time / atleta / evento" autocomplete="off" />
+        <div class="mini">Busca em participantes + evento</div>
+      </div>
+      <select id="tipsStatus" title="Status">
+        <option value="">Status: todos</option>
+        <option value="open">Status: open</option>
+        <option value="settled">Status: settled</option>
+      </select>
+      <select id="tipsLive" title="Live">
+        <option value="">Live: todos</option>
+        <option value="1">Live: sim</option>
+        <option value="0">Live: não</option>
+      </select>
+      <select id="tipsConf" title="Confidence">
+        <option value="">Confidence: todas</option>
+        <option value="ALTA">Confidence: alta</option>
+        <option value="MÉDIA">Confidence: média</option>
+        <option value="BAIXA">Confidence: baixa</option>
+      </select>
+      <select id="tipsSort" title="Ordenação">
+        <option value="date_desc">Ordenar: data ↓</option>
+        <option value="date_asc">Ordenar: data ↑</option>
+        <option value="ev_desc">Ordenar: EV ↓</option>
+        <option value="ev_asc">Ordenar: EV ↑</option>
+        <option value="odds_desc">Ordenar: odds ↓</option>
+        <option value="odds_asc">Ordenar: odds ↑</option>
+      </select>
+      <select id="tipsLimit" title="Limite">
+        <option value="20">20 itens</option>
+        <option value="50">50 itens</option>
+        <option value="100">100 itens</option>
+      </select>
+    </div>
     <div id="tipsTable"><div class="loading">Carregando...</div></div>
   </div>
 </div>
@@ -113,6 +163,7 @@ const BASE = (function() {
 let currentSport = 'esports';
 let calibChart = null;
 let weightsChart = null;
+let tipsTimer = null;
 
 async function apiFetch(path) {
   try {
@@ -134,17 +185,67 @@ function selectSport(sport, el) {
 
 async function loadAll() {
   document.getElementById('lastUpdated').textContent = 'Atualizando...';
-  const [roi, calibration, weights, tips] = await Promise.all([
+  const [roi, calibration, weights] = await Promise.all([
     apiFetch('/roi?sport=' + currentSport),
     apiFetch('/calibration?sport=' + currentSport),
-    apiFetch('/ml-weights'),
-    apiFetch('/tips-history?sport=' + currentSport + '&limit=20')
+    apiFetch('/ml-weights')
   ]);
   renderCards(roi);
   renderCalibration(calibration);
   renderWeights(weights);
-  renderTips(tips);
+  loadTips();
   document.getElementById('lastUpdated').textContent = 'Atualizado: ' + new Date().toLocaleTimeString('pt-BR');
+}
+
+function readTipsControls() {
+  const q = (document.getElementById('tipsQ')?.value || '').trim();
+  const status = document.getElementById('tipsStatus')?.value || '';
+  const live = document.getElementById('tipsLive')?.value || '';
+  const confidence = document.getElementById('tipsConf')?.value || '';
+  const sortRaw = document.getElementById('tipsSort')?.value || 'date_desc';
+  const limit = document.getElementById('tipsLimit')?.value || '20';
+
+  const [sortKey, sortDir] = sortRaw.split('_');
+  const sort = sortKey === 'ev' ? 'ev' : sortKey === 'odds' ? 'odds' : 'date';
+  const dir = sortDir === 'asc' ? 'asc' : 'desc';
+
+  return { q, status, live, confidence, sort, dir, limit };
+}
+
+function buildTipsQuery() {
+  const s = readTipsControls();
+  const qp = new URLSearchParams();
+  qp.set('sport', currentSport);
+  qp.set('limit', s.limit);
+  if (s.q) qp.set('q', s.q);
+  if (s.status) qp.set('status', s.status);
+  if (s.live) qp.set('live', s.live);
+  if (s.confidence) qp.set('confidence', s.confidence);
+  qp.set('sort', s.sort);
+  qp.set('dir', s.dir);
+  return '/tips-history?' + qp.toString();
+}
+
+async function loadTips() {
+  const path = buildTipsQuery();
+  document.getElementById('tipsTable').innerHTML = '<div class="loading">Carregando...</div>';
+  const tips = await apiFetch(path);
+  renderTips(tips);
+}
+
+function debounceLoadTips() {
+  if (tipsTimer) clearTimeout(tipsTimer);
+  tipsTimer = setTimeout(loadTips, 220);
+}
+
+function bindTipsControls() {
+  const q = document.getElementById('tipsQ');
+  const ids = ['tipsStatus', 'tipsLive', 'tipsConf', 'tipsSort', 'tipsLimit'];
+  if (q) q.addEventListener('input', debounceLoadTips);
+  ids.forEach(function(id) {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener('change', loadTips);
+  });
 }
 
 function renderCards(roi) {
@@ -356,6 +457,7 @@ function renderTips(tips) {
 
 // Auto-refresh every 5 minutes
 setInterval(loadAll, 5 * 60 * 1000);
+bindTipsControls();
 loadAll();
 </script>
 

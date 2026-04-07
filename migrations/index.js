@@ -107,6 +107,12 @@ const migrations = [
       addColumnIfMissing(db, 'tips', 'tip_reason', 'tip_reason TEXT');
     },
   },
+  {
+    id: '009_tips_last_notified_at_col',
+    up(db) {
+      addColumnIfMissing(db, 'tips', 'last_notified_at', 'last_notified_at TEXT');
+    },
+  },
 ];
 
 function applyMigrations(db) {

@@ -5,7 +5,7 @@ const path = require('path');
 const url = require('url');
 const initDatabase = require('./lib/database');
 const { SPORTS, getSportById } = require('./lib/sports');
-const { log, sendJson, safeParse, norm, httpGet, aiPost, oddsApiAllowed } = require('./lib/utils');
+const { log, sendJson, safeParse, norm, httpGet, cachedHttpGet, aiPost, oddsApiAllowed, getMetricsLite } = require('./lib/utils');
 
 // Railway sets $PORT automatically; start.js bridges it to SERVER_PORT
 const PORT = parseInt(process.env.PORT || process.env.SERVER_PORT) || 3000;
@@ -176,7 +176,9 @@ function badRequest(res, msg) {
 
 async function theOddsGet(theOddsUrl) {
   return await theOddsQueue.enqueue(`theodds:${theOddsUrl}`, async () => {
-    return await httpGet(theOddsUrl).catch(() => ({ status: 500, body: '[]' }));
+    const ttlMsRaw = parseInt(process.env.HTTP_CACHE_THEODDS_TTL_MS || '', 10);
+    const ttlMs = Number.isFinite(ttlMsRaw) ? ttlMsRaw : 0;
+    return await cachedHttpGet(theOddsUrl, { provider: 'theodds', ttlMs }).catch(() => ({ status: 500, body: '[]' }));
   });
 }
 
@@ -238,7 +240,9 @@ async function getEsportsTournamentIds() {
   try {
     const url = `https://api.oddspapi.io/v4/tournaments?sportId=${sid}&apiKey=${ODDSPAPI_KEY}`;
     const r = await oddsPapiQueue.enqueue(`oddspapi:tournaments:${sid}`, async () => {
-      return await httpGet(url).catch(() => null);
+      const ttlMsRaw = parseInt(process.env.HTTP_CACHE_ODDSPAPI_TOURNAMENTS_TTL_MS || '', 10);
+      const ttlMs = Number.isFinite(ttlMsRaw) ? ttlMsRaw : TOURNAMENT_CACHE_TTL;
+      return await cachedHttpGet(url, { provider: 'oddspapi', ttlMs }).catch(() => null);
     });
     if (r && r.status === 200) {
       const data = safeParse(r.body, null);
@@ -366,7 +370,9 @@ async function fetchEsportsOddsOneBatch(batch, batchIndex0, totalBatches) {
 
   const url = `https://api.oddspapi.io/v4/odds-by-tournaments?bookmaker=1xbet&tournamentIds=${batch.join(',')}&oddsFormat=decimal&apiKey=${ODDSPAPI_KEY}`;
   const r = await oddsPapiQueue.enqueue(`oddspapi:odds:${batch.join(',')}`, async () => {
-    return await httpGet(url).catch(e => ({ status: 500, body: e.message }));
+    const ttlMsRaw = parseInt(process.env.HTTP_CACHE_ODDSPAPI_ODDS_TTL_MS || '', 10);
+    const ttlMs = Number.isFinite(ttlMsRaw) ? ttlMsRaw : 0;
+    return await cachedHttpGet(url, { provider: 'oddspapi', ttlMs }).catch(e => ({ status: 500, body: e.message }));
   });
 
   log('DEBUG', 'ODDS', `Lote ${batchIndex0 + 1}: status=${r.status} body=${(r.body || '').slice(0, 100)}`);
@@ -942,6 +948,97 @@ async function getPandaScoreLolMatches() {
   }
 }
 
+// ── Admin Auth + Rate Limit (in-memory) ──
+const ADMIN_KEY = (process.env.ADMIN_KEY || '').trim();
+
+function getClientIp(req) {
+  const xf = (req.headers['x-forwarded-for'] || '').toString();
+  const ip = xf.split(',')[0]?.trim();
+  return ip || req.socket?.remoteAddress || 'unknown';
+}
+
+function isAdminRequest(req) {
+  if (!ADMIN_KEY) return false;
+  const xk = (req.headers['x-admin-key'] || '').toString().trim();
+  if (xk && xk === ADMIN_KEY) return true;
+  const auth = (req.headers['authorization'] || '').toString().trim();
+  if (auth.toLowerCase().startsWith('bearer ')) {
+    const token = auth.slice(7).trim();
+    if (token && token === ADMIN_KEY) return true;
+  }
+  return false;
+}
+
+function requireAdmin(req, res) {
+  if (!ADMIN_KEY) {
+    sendJson(res, { ok: false, error: 'admin_key_not_configured' }, 503);
+    return false;
+  }
+  if (!isAdminRequest(req)) {
+    sendJson(res, { ok: false, error: 'unauthorized' }, 401);
+    return false;
+  }
+  return true;
+}
+
+const _rl = new Map(); // key -> { count, resetAt }
+function rateLimit(req, res, limitPerMin, bucket) {
+  const ip = getClientIp(req);
+  const key = `${bucket}|${ip}`;
+  const now = Date.now();
+  const winMs = 60 * 1000;
+  const cur = _rl.get(key);
+  if (!cur || now >= cur.resetAt) {
+    _rl.set(key, { count: 1, resetAt: now + winMs });
+    return true;
+  }
+  if (cur.count >= limitPerMin) {
+    const retryAfterSec = Math.max(1, Math.ceil((cur.resetAt - now) / 1000));
+    res.setHeader('Retry-After', String(retryAfterSec));
+    sendJson(res, {
+      ok: false,
+      error: 'rate_limited',
+      bucket,
+      limitPerMin,
+      retryAfterSec
+    }, 429);
+    return false;
+  }
+  cur.count++;
+  return true;
+}
+
+const ADMIN_ROUTES_ANY = new Set([
+  '/lol-raw',
+  '/debug-odds',
+  '/debug-teams',
+  '/debug-match-odds',
+  '/sync-pro-stats',
+]);
+
+const ADMIN_ROUTES_POST = new Set([
+  '/record-analysis',
+  '/save-user',
+  '/record-tip',
+  '/log-tip-factors',
+  '/resync-stats',
+  '/reset-tips',
+  '/settle',
+  '/set-bankroll',
+  '/update-clv',
+  '/update-open-tip',
+  '/claude',
+  '/ps-result',
+  '/football-result',
+]);
+
+const EXPENSIVE_ROUTES = new Set([
+  '/claude',
+  '/odds',
+  '/handicap-odds',
+  '/mma-odds',
+]);
+
 // ── HTTP Server ──
 const server = http.createServer(async (req, res) => {
   const parsed = url.parse(req.url, true);
@@ -954,11 +1051,23 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(204, {
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type, x-claude-key, x-sport'
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-admin-key, x-claude-key, x-sport'
     });
     res.end();
     return;
   }
+
+  // Rate limit (antes de rotas pesadas)
+  const bucket = EXPENSIVE_ROUTES.has(p) ? `expensive:${p}` : `general:${p}`;
+  const limit = EXPENSIVE_ROUTES.has(p) ? 10 : 60;
+  if (!rateLimit(req, res, limit, bucket)) return;
+
+  // Admin guard
+  const needsAdmin =
+    ADMIN_ROUTES_ANY.has(p) ||
+    (req.method === 'POST' && ADMIN_ROUTES_POST.has(p)) ||
+    (p === '/odds' && parsed.query.force === '1');
+  if (needsAdmin && !requireAdmin(req, res)) return;
 
   // ── Esports Endpoints (sem scrapers) ──
   if (p === '/lol-matches') {
@@ -1047,7 +1156,8 @@ const server = http.createServer(async (req, res) => {
 
   if (p === '/live-gameids') {
     try {
-      const matchId = parsed.query.matchId;
+      const raw = parsed.query.matchId;
+      const matchId = raw ? String(raw).replace(/^lol_/, '') : '';
       const games = [];
       if (matchId) {
         const dr = await httpGet(`${LOL_BASE}/getEventDetails?hl=en-US&id=${matchId}`, { 'x-api-key': LOL_KEY });
@@ -1419,7 +1529,9 @@ const server = http.createServer(async (req, res) => {
       if (!entry || !entry.fixtureId) { sendJson(res, { error: 'not_found' }); return; }
       const { fixtureId } = entry;
       const url = `https://api.oddspapi.io/v4/odds-by-fixtures?bookmaker=1xbet&fixtureId=${fixtureId}&oddsFormat=decimal&apiKey=${ODDSPAPI_KEY}`;
-      const r = await httpGet(url).catch(() => null);
+      const ttlMsRaw = parseInt(process.env.HTTP_CACHE_ODDSPAPI_FIXTURE_TTL_MS || '', 10);
+      const ttlMs = Number.isFinite(ttlMsRaw) ? ttlMsRaw : 0;
+      const r = await cachedHttpGet(url, { provider: 'oddspapi', ttlMs }).catch(() => null);
       if (!r || r.status !== 200) { sendJson(res, { error: 'not_found' }); return; }
       const data = safeParse(r.body, null);
       const allMarkets = Array.isArray(data) ? data : (Array.isArray(data?.data) ? data.data : []);
@@ -1504,8 +1616,14 @@ const server = http.createServer(async (req, res) => {
       lastAnalysis: lastAnalysisAt,
       pendingTips: pendingRow?.c || 0,
       oddsLastUpdate: esportsOddsAge !== null ? `${esportsOddsAge}min ago` : 'never',
-      oddsCacheSize: Object.keys(oddsCache).filter(k => k.startsWith('esports_')).length
+      oddsCacheSize: Object.keys(oddsCache).filter(k => k.startsWith('esports_')).length,
+      metricsLite: getMetricsLite()
     });
+    return;
+  }
+
+  if (p === '/metrics-lite') {
+    sendJson(res, getMetricsLite());
     return;
   }
 
@@ -1516,7 +1634,8 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (p === '/match-result') {
-    const matchId = parsed.query.matchId || '';
+    const raw = parsed.query.matchId || '';
+    const matchId = String(raw).replace(/^lol_/, '');
     const game = parsed.query.game || 'lol';
     try {
       const sr = await httpGet(LOL_BASE + '/getSchedule?hl=en-US', { 'x-api-key': LOL_KEY });
@@ -1527,14 +1646,15 @@ const server = http.createServer(async (req, res) => {
         const t1 = ev.match.teams?.[0], t2 = ev.match.teams?.[1];
         const winner = t1?.result?.outcome === 'win' ? t1.name : t2?.result?.outcome === 'win' ? t2.name : null;
         if (winner) {
-          stmts.upsertMatchResult.run(matchId, 'lol', t1?.name||'', t2?.name||'', winner, `${t1?.result?.gameWins||0}-${t2?.result?.gameWins||0}`, ev.league?.name||'');
-          sendJson(res, { matchId, game, winner, resolved: true });
+          // Persist com o mesmo ID recebido (mantém compatibilidade com tips já gravadas)
+          stmts.upsertMatchResult.run(String(raw || matchId), 'lol', t1?.name||'', t2?.name||'', winner, `${t1?.result?.gameWins||0}-${t2?.result?.gameWins||0}`, ev.league?.name||'');
+          sendJson(res, { matchId: String(raw || matchId), game, winner, resolved: true });
           return;
         }
       }
-      sendJson(res, { matchId, game, resolved: false });
+      sendJson(res, { matchId: String(raw || matchId), game, resolved: false });
     } catch(e) {
-      sendJson(res, { matchId, game, resolved: false, error: e.message });
+      sendJson(res, { matchId: String(raw || matchId), game, resolved: false, error: e.message });
     }
     return;
   }
@@ -1671,6 +1791,15 @@ const server = http.createServer(async (req, res) => {
         if (!tipParticipant) { badRequest(res, 'tipParticipant obrigatório'); return; }
         if (oddsN == null || oddsN <= 1) { badRequest(res, 'odds inválidas'); return; }
         if (evN == null) { badRequest(res, 'ev inválido'); return; }
+        // Guardrail: evita odds absurdas por bug de matching/mercado
+        if (sport === 'esports') {
+          const minOdds = parseFiniteNumber(process.env.LOL_MIN_ODDS) ?? 1.10;
+          const maxOdds = parseFiniteNumber(process.env.LOL_MAX_ODDS) ?? 4.00;
+          if (oddsN < minOdds || oddsN > maxOdds) {
+            badRequest(res, `odds fora faixa esports (${minOdds}–${maxOdds})`);
+            return;
+          }
+        }
         // Evitar tip duplicada para o mesmo match_id + sport
         const existing = stmts.tipExistsByMatch.get(String(matchId), sport);
         if (existing) { sendJson(res, { ok: true, skipped: true, reason: 'duplicate' }); return; }
@@ -1766,20 +1895,66 @@ const server = http.createServer(async (req, res) => {
 
   if (p === '/tips-history') {
     const sport = parsed.query.sport || 'esports';
-    const limit = parseInt(parsed.query.limit) || 20;
-    const filter = parsed.query.filter;
+    const limitRaw = parseInt(parsed.query.limit);
+    const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(200, limitRaw)) : 20;
+
+    // status: open/settled (alias para pending/settled)
+    const status = String(parsed.query.status || '').toLowerCase();
+    const filter = String(parsed.query.filter || '').toLowerCase();
+
+    // live: 0/1/true/false
+    const liveRaw = parsed.query.live;
+    const live = (liveRaw === '1' || liveRaw === 1 || liveRaw === true || liveRaw === 'true')
+      ? 1
+      : (liveRaw === '0' || liveRaw === 0 || liveRaw === false || liveRaw === 'false')
+        ? 0
+        : null;
+
+    // confidence: ALTA/MÉDIA/BAIXA
+    const confRaw = String(parsed.query.confidence || '').toUpperCase().trim();
+    const confidence = (confRaw === 'ALTA' || confRaw === 'MÉDIA' || confRaw === 'MEDIA' || confRaw === 'BAIXA')
+      ? (confRaw === 'MEDIA' ? 'MÉDIA' : confRaw)
+      : '';
+
+    // busca simples: time/atleta/evento
+    const q = String(parsed.query.q || '').trim().slice(0, 80);
+
+    // sort: ev/odds/date (default date desc)
+    const sort = String(parsed.query.sort || '').toLowerCase();
+    const dir = String(parsed.query.dir || '').toLowerCase() === 'asc' ? 'ASC' : 'DESC';
+    const sortCol = sort === 'ev'
+      ? 't.ev'
+      : sort === 'odds'
+        ? 't.odds'
+        : 't.sent_at';
+
     let query = `
       SELECT t.*, m.match_time as match_time, m.event_date as match_date
       FROM tips t
       LEFT JOIN matches m ON t.match_id = m.id AND t.sport = m.sport
       WHERE t.sport = ?
     `;
-    if (filter === 'settled') query += " AND t.result IS NOT NULL";
+    const params = [sport];
+
+    if (status === 'settled') query += " AND t.result IS NOT NULL";
+    else if (status === 'open') query += " AND t.result IS NULL";
+    else if (filter === 'settled') query += " AND t.result IS NOT NULL";
     else if (filter === 'pending') query += " AND t.result IS NULL";
     else if (filter === 'win') query += " AND t.result = 'win'";
     else if (filter === 'loss') query += " AND t.result = 'loss'";
-    query += ` ORDER BY t.sent_at DESC LIMIT ${limit}`;
-    sendJson(res, db.prepare(query).all(sport));
+
+    if (live !== null) { query += " AND t.is_live = ?"; params.push(live); }
+    if (confidence) { query += " AND UPPER(t.confidence) = ?"; params.push(confidence); }
+    if (q) {
+      query += " AND (t.event_name LIKE ? OR t.participant1 LIKE ? OR t.participant2 LIKE ? OR t.tip_participant LIKE ?)";
+      const like = `%${q}%`;
+      params.push(like, like, like, like);
+    }
+
+    query += ` ORDER BY ${sortCol} ${dir}, t.id ${dir} LIMIT ?`;
+    params.push(limit);
+
+    sendJson(res, db.prepare(query).all(params));
     return;
   }
 
@@ -2283,7 +2458,7 @@ const server = http.createServer(async (req, res) => {
     req.on('end', () => {
       try {
         const sport = parsed.query.sport || 'esports';
-        const { matchId, currentOdds, currentEV, currentConfidence } = safeParse(body, {});
+        const { matchId, currentOdds, currentEV, currentConfidence, markNotified } = safeParse(body, {});
         const mid = clampStr(matchId, 128);
         if (!mid) { badRequest(res, 'matchId obrigatório'); return; }
         const o = parseFiniteNumber(currentOdds);
@@ -2291,7 +2466,8 @@ const server = http.createServer(async (req, res) => {
         const conf = clampStr(currentConfidence, 24) || null;
         if (o == null || o <= 1) { badRequest(res, 'currentOdds inválido'); return; }
         if (ev == null) { badRequest(res, 'currentEV inválido'); return; }
-        stmts.updateTipCurrent.run(o, ev, conf, String(mid), sport);
+        if (markNotified) stmts.updateTipCurrentAndNotified.run(o, ev, conf, String(mid), sport);
+        else stmts.updateTipCurrent.run(o, ev, conf, String(mid), sport);
         sendJson(res, { ok: true });
       } catch(e) { sendJson(res, { error: e.message }, 500); }
     });
