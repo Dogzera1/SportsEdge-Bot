@@ -7,6 +7,7 @@ const initDatabase = require('./lib/database');
 const { SPORTS, getSportById, getSportByToken, getTokenToSportMap } = require('./lib/sports');
 const { log, calcKelly, calcKellyFraction, norm, fmtDate, fmtDateTime, fmtDuration, safeParse } = require('./lib/utils');
 const { esportsPreFilter } = require('./lib/ml');
+const { fetchMatchNews } = require('./lib/news');
 
 const SERVER = '127.0.0.1';
 const PORT = parseInt(process.env.SERVER_PORT) || parseInt(process.env.PORT) || 8080;
@@ -1200,7 +1201,8 @@ async function autoAnalyzeMatch(token, match) {
       return null;
     }
 
-    const { text: prompt, evThreshold: adaptiveEV, sigCount } = buildEsportsPrompt(match, game, gamesContext, o, enrichSection, mlResult);
+    const newsSectionEsports = await fetchMatchNews('esports', match.team1, match.team2).catch(() => '');
+    const { text: prompt, evThreshold: adaptiveEV, sigCount } = buildEsportsPrompt(match, game, gamesContext, o, enrichSection, mlResult, newsSectionEsports);
     log('INFO', 'AUTO', `Analisando: ${match.team1} vs ${match.team2} | sinais=${sigCount}/6 | evThreshold=${adaptiveEV}% | mlEdge=${mlResult.score.toFixed(1)}pp`);
 
     const resp = await serverPost('/claude', {
@@ -1337,7 +1339,7 @@ async function autoAnalyzeMatch(token, match) {
 // ── Próximas Partidas Handler (OLD — mantido apenas para referência interna) ──
 
 // ── Esports Prompt Builder ──
-function buildEsportsPrompt(match, game, gamesContext, o, enrichSection, mlResult = null) {
+function buildEsportsPrompt(match, game, gamesContext, o, enrichSection, mlResult = null, newsSection = '') {
   const hasRealOdds = !!(o && o.t1 && parseFloat(o.t1) > 1);
   const t1 = match.team1 || match.participant1_name;
   const t2 = match.team2 || match.participant2_name;
@@ -1437,7 +1439,7 @@ Placar: ${serieScore} | ${oddsSection}
 ${bookMarginNote ? `\n⚠️ ${bookMarginNote}` : ''}
 ${gamesContext ? `\nDADOS AO VIVO:\n${gamesContext}` : ''}
 FORMA/H2H:${enrichSection}
-${highFluxWarning ? `\n${highFluxWarning}` : ''}${lineMovementWarning ? `\n${lineMovementWarning}` : ''}
+${highFluxWarning ? `\n${highFluxWarning}` : ''}${lineMovementWarning ? `\n${lineMovementWarning}` : ''}${newsSection ? `\n${newsSection}` : ''}
 
 REGRAS OBRIGATÓRIAS (não negociáveis):
 • ALTA (EV ≥ +${evThreshold}%): exige ≥2 sinais independentes do checklist confirmando
@@ -2927,6 +2929,8 @@ async function pollMma() {
           ? `${fairLabelMma}: ${fight.team1}=${modelP1Mma}% | ${fight.team2}=${modelP2Mma}%\nP de-juiced bookie: ${fight.team1}=${fairP1}% | ${fight.team2}=${fairP2}%`
           : `${fairLabelMma}: ${fight.team1}=${modelP1Mma}% | ${fight.team2}=${modelP2Mma}% (use como mínimo — sem dados históricos para ajustar o prior)`;
 
+        const newsSectionMma = await fetchMatchNews('mma', fight.team1, fight.team2).catch(() => '');
+
         const prompt = `Você é um analista especializado em MMA/UFC. Analise esta luta e identifique edge real se existir.
 
 LUTA: ${fight.team1} vs ${fight.team2}
@@ -2937,6 +2941,7 @@ ${fight.team1}: ${o.t1} | ${fight.team2}: ${o.t2}
 Margem bookie: ${marginPct}%
 ${fairOddsRef}
 AVISO: ${hasModelDataMma ? `modelo base usa record histórico como prior — sua estimativa deve superar a P do modelo em ≥8pp para ter edge real.` : `fair odds calculadas via de-juice (sem record ESPN) — use apenas como referência mínima; para edge real, sua estimativa deve superar ≥8pp.`}
+${newsSectionMma ? `\n${newsSectionMma}\n` : ''}
 
 ANÁLISE REQUERIDA — seja específico:
 1. Vantagem técnica: quem domina grappling, striking e wrestling?
@@ -3130,6 +3135,8 @@ async function pollTennis() {
           ? `${fairLabelTennis}: ${match.team1}=${modelP1Tennis}% | ${match.team2}=${modelP2Tennis}%\nP de-juiced bookie: ${match.team1}=${fairP1}% | ${match.team2}=${fairP2}%`
           : `${fairLabelTennis}: ${match.team1}=${modelP1Tennis}% | ${match.team2}=${modelP2Tennis}% (use como mínimo — sem ranking para ajustar o prior)`;
 
+        const newsSectionTennis = await fetchMatchNews('tennis', match.team1, match.team2).catch(() => '');
+
         const prompt = `Você é um analista especializado em tênis profissional. Analise com rigor — prefira SEM_EDGE a inventar edge inexistente.
 
 PARTIDA: ${match.team1} vs ${match.team2}
@@ -3142,7 +3149,7 @@ Margem bookie: ${marginPct}%
 ${fairOddsLineTennis}
 ${isFav1 ? match.team1 : match.team2} é o favorito do mercado.
 
-${dataSection ? `DADOS REAIS (ESPN):\n${dataSection}\n` : 'AVISO: sem dados ESPN disponíveis — use apenas conhecimento de treino confiável.\n'}
+${dataSection ? `DADOS REAIS (ESPN):\n${dataSection}\n` : 'AVISO: sem dados ESPN disponíveis — use apenas conhecimento de treino confiável.\n'}${newsSectionTennis ? `${newsSectionTennis}\n` : ''}
 INSTRUÇÕES:
 1. Estime a probabilidade REAL de vitória de cada jogador com base em: ranking, superfície, H2H, form recente, estilo.
 2. Compare sua estimativa com a ${fairLabelTennis} (${match.team1}=${modelP1Tennis}% | ${match.team2}=${modelP2Tennis}%):
@@ -3374,6 +3381,8 @@ MODELO QUANTITATIVO (pré-análise):
 `;
         }
 
+        const newsSection = await fetchMatchNews('football', match.team1, match.team2).catch(() => '');
+
         const prompt = `Você é um analista especializado em futebol de ligas secundárias (Série B/C Brasil, Sul-America, League One/Two, 3. Liga). Analise com rigor — prefira SEM_EDGE a inventar edge.
 
 PARTIDA: ${match.team1} (casa) vs ${match.team2} (fora)
@@ -3384,14 +3393,14 @@ ODDS REAIS (${o.bookmaker || 'EU'}):
 Casa: ${oH} → de-juiced: ${mktH}% | Empate: ${oD} → ${mktD}% | Fora: ${oA} → ${mktA}%
 Margem bookie: ${marginPct}%
 ${fixtureInfo && contextBlock ? '' : `Fair odds (de-juice, sem dados quantitativos): Casa=${mktH}% | Empate=${mktD}% | Fora=${mktA}% — use como referência mínima; sua estimativa deve superar ≥8pp para ter edge real.\n`}Totais: ${ou25Line}
-${contextBlock}
+${contextBlock}${newsSection ? `\n${newsSection}\n` : ''}
 INSTRUÇÕES:
-1. ${fixtureInfo ? 'Use os dados quantitativos acima como base. Complemente com seu conhecimento contextual (lesões, motivação, histórico recente não capturado).' : 'Use seu conhecimento sobre os times nessa liga. Se não conhecer bem, confiança máxima 5 → SEM_EDGE.'}
+1. ${fixtureInfo ? 'Use os dados quantitativos acima como base. Complemente com seu conhecimento contextual (lesões, motivação, histórico recente não capturado).' : 'Use seu conhecimento sobre os times nessa liga. Se não conhecer os times, seja conservador na estimativa de probabilidade e na confiança.'}
 2. Estime probabilidades reais (home%, draw%, away%) somando 100%.
 3. Calcule EV: EV = (prob/100 × odd) − 1 × 100
    Casa: (X/100 × ${oH} − 1) × 100 | Empate: (X/100 × ${oD} − 1) × 100 | Fora: (X/100 × ${oA} − 1) × 100
 4. Para Over/Under 2.5, use médias de gols${fixtureInfo ? ' (já calculadas acima)' : ''} + contexto tático.
-5. Confiança (1-10): ${fixtureInfo ? 'reflita incerteza residual após dados quantitativos.' : 'baseada em quanto conhece os times.'}
+5. Confiança (1-10): ${fixtureInfo ? 'reflita incerteza residual após dados quantitativos.' : 'reflita quanto você conhece os times e o quão claro é o edge. Confiança 7+ só se o edge for real e você tiver base para estimar.'}
    - Empate com odds < ${DRAW_MIN_ODDS}? Raramente tem valor.
 
 DECISÃO (melhor opção apenas):

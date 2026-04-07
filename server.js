@@ -86,7 +86,9 @@ const LOL_LEAGUES = new Set([
   // Ligas adicionais da lista OddsPapi
   'gll', 'road-of-legends', 'road_of_legends', 'roadoflegends', 'ultraliga', 'elite-series', 'njcs', 'kjl',
   'arabian-league', 'lvp-superliga', 'ldl', 'cblol-academy',
-  'circuito-desafiante', 'lcl', 'gll-pro-am', 'lfl-division-2',
+  'circuito-desafiante', 'cd', 'lcl', 'gll-pro-am', 'lfl-division-2',
+  // Slugs alternativos usados pela Riot API (já cobertos via PandaScore, suprime WARN)
+  'south_regional_league', 'rift_legends',
   'finnish-pro-league-winter', 'finnish-pro-league',
   'asia-masters', 'asia-invitational',
   // EWC / Esports World Cup
