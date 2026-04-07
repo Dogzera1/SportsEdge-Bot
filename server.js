@@ -1582,12 +1582,20 @@ const server = http.createServer(async (req, res) => {
         const existing = stmts.tipExistsByMatch.get(String(t.matchId), sport);
         if (existing) { sendJson(res, { ok: true, skipped: true, reason: 'duplicate' }); return; }
         const isLive = t.isLive ? 1 : 0;
+        const modelP1 = t.modelP1 != null ? parseFloat(t.modelP1) : null;
+        const modelP2 = t.modelP2 != null ? parseFloat(t.modelP2) : null;
+        const modelPPick = t.modelPPick != null ? parseFloat(t.modelPPick) : null;
+        const modelLabel = (t.modelLabel || '').toString().trim() || null;
         const result = stmts.insertTip.run({
           sport, matchId: String(t.matchId), eventName: t.eventName || '',
           p1: t.p1 || t.team1 || t.fighter1 || '', p2: t.p2 || t.team2 || t.fighter2 || '',
           tipParticipant: t.tipParticipant || t.tipTeam || '', odds: parseFloat(t.odds) || 0,
           ev: parseFloat(t.ev) || 0, stake: String(t.stake || ''), confidence: t.confidence || 'MÉDIA',
-          isLive, botToken: t.botToken || '', market_type: t.market_type || 'ML'
+          isLive, botToken: t.botToken || '', market_type: t.market_type || 'ML',
+          model_p1: isFinite(modelP1) ? modelP1 : null,
+          model_p2: isFinite(modelP2) ? modelP2 : null,
+          model_p_pick: isFinite(modelPPick) ? modelPPick : null,
+          model_label: modelLabel
         });
         // Calcula stake em reais com base na banca atual (1u = 1% da banca atual)
         try {
@@ -1861,7 +1869,7 @@ const server = http.createServer(async (req, res) => {
     const sport = parsed.query.sport || 'esports';
     try {
       const tips = db.prepare(
-        `SELECT odds, ev, confidence, result, is_live FROM tips WHERE sport = ? AND result IN ('win','loss')`
+        `SELECT odds, ev, confidence, result, is_live, model_p_pick FROM tips WHERE sport = ? AND result IN ('win','loss')`
       ).all(sport);
 
       const NUM_BUCKETS = 10;
@@ -1879,8 +1887,12 @@ const server = http.createServer(async (req, res) => {
         const odds = parseFloat(t.odds) || 0;
         if (odds <= 1) continue;
         const ev = parseFloat(String(t.ev || '0').replace('%','').replace('+','')) / 100;
-        // p derived from EV and odds (best approximation without modelP stored)
-        const p = Math.max(0.01, Math.min(0.99, (ev + 1) / odds));
+        // Preferir p do modelo salvo (mais preciso). Fallback: derivar de EV+odds.
+        const pStored = parseFloat(t.model_p_pick);
+        const pRaw = (isFinite(pStored) && pStored > 0 && pStored < 1)
+          ? pStored
+          : ((ev + 1) / odds);
+        const p = Math.max(0.01, Math.min(0.99, pRaw));
         const isWin = t.result === 'win' ? 1 : 0;
 
         const idx = Math.min(NUM_BUCKETS - 1, Math.floor(p * NUM_BUCKETS));

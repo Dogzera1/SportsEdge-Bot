@@ -3339,11 +3339,18 @@ Máximo 200 palavras. Mostre seu raciocínio brevemente antes da decisão.`;
           `${confEmoji} Confiança: *${tipConf}*\n\n` +
           `⚠️ _Aposte com responsabilidade._`;
 
+        const pickIsT1 = norm(tipPlayer) === norm(match.team1);
+        const modelPPick = pickIsT1 ? mlResultTennis.modelP1 : mlResultTennis.modelP2;
+
         await serverPost('/record-tip', {
           matchId: String(match.id), eventName: match.league,
           p1: match.team1, p2: match.team2, tipParticipant: tipPlayer,
           odds: String(tipOdd), ev: String(tipEV), stake: String(tipStake),
-          confidence: tipConf, isLive: isLiveTennis, market_type: 'ML'
+          confidence: tipConf, isLive: isLiveTennis, market_type: 'ML',
+          modelP1: mlResultTennis.modelP1,
+          modelP2: mlResultTennis.modelP2,
+          modelPPick: modelPPick,
+          modelLabel: fairLabelTennis
         }, 'tennis');
 
         for (const [userId, prefs] of subscribedUsers) {
