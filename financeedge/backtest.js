@@ -253,8 +253,8 @@ async function runBacktest(dataFile) {
   console.log(`🎯 Filtros: Confiança ≥ ${MIN_CONFIDENCE}, EV ≥ ${MIN_EV}%`);
 
   const historicalData = loadHistoricalData(dataFile);
-  if (historicalData.length < 200) {
-    console.error('❌ Dados insuficientes para backtesting (mínimo 200 candles)');
+  if (historicalData.length < 100) {
+    console.error('❌ Dados insuficientes para backtesting (mínimo 100 candles)');
     process.exit(1);
   }
 
@@ -263,7 +263,7 @@ async function runBacktest(dataFile) {
   const confLevel = confidencePriority[MIN_CONFIDENCE] || 2;
 
   // Janela deslizante de análise
-  const lookback = 200; // candles para análise técnica
+  const lookback = Math.min(100, historicalData.length - 10); // candles para análise técnica
   const step = 1; // avança 1 candle por vez
 
   for (let i = lookback; i < historicalData.length - 1; i += step) {

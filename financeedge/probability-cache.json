@@ -1,0 +1,14 @@
+{
+  "BTC/USDT": {
+    "{\"rsiZone\":\"overbought\",\"macdSignal\":\"bearish\",\"bbPosition\":\"upper_band\",\"regime\":\"unknown\",\"volumeSignal\":\"normal\"}": {
+      "wins": 0,
+      "losses": 1.95,
+      "probability": 0
+    },
+    "{\"rsiZone\":\"overbought\",\"macdSignal\":\"neutral\",\"bbPosition\":\"upper_band\",\"regime\":\"unknown\",\"volumeSignal\":\"normal\"}": {
+      "wins": 0,
+      "losses": 15.921863485084177,
+      "probability": 0
+    }
+  }
+}
