@@ -534,9 +534,9 @@ async function runAutoAnalysis() {
             const tipEV = result.tipMatch[3].trim();
             const tipConf = (result.tipMatch[5] || 'MÉDIA').trim().toUpperCase();
 
-            // Pré-jogo: confiança BAIXA bloqueada salvo se mlEdge forte (≥10pp) compensar ausência de dados ao vivo
+            // Pré-jogo: confiança BAIXA bloqueada salvo se mlEdge forte (≥8pp) compensar ausência de dados ao vivo
             if (tipConf === 'BAIXA' && result.mlScore < 8) {
-              log('INFO', 'AUTO', `Upcoming ${match.team1} vs ${match.team2} → conf BAIXA sem ML-edge (${result.mlScore.toFixed(1)}pp) → rejeitado (pré-jogo)`);
+              log('INFO', 'AUTO', `Upcoming ${match.team1} vs ${match.team2} → conf BAIXA ML-edge insuficiente (${result.mlScore.toFixed(1)}pp < 8.0pp mín.) → rejeitado (pré-jogo)`);
               analyzedMatches.set(matchKey, { ts: now, tipSent: false, noEdge: true });
               await new Promise(r => setTimeout(r, 3000)); continue;
             }
@@ -1344,10 +1344,11 @@ function buildEsportsPrompt(match, game, gamesContext, o, enrichSection, mlResul
   const serieScore = `${match.score1 || 0}-${match.score2 || 0}`;
 
   // Probabilidades do modelo (forma + H2H + mercado como prior bayesiano)
-  // Se mlResult não disponível ou sem dados (factorCount=0), cai no de-juice simples
+  // Quando factorCount=0 (sem dados), modelP1=impliedP1 (de-juice puro) — fair odds sempre calculadas
   const hasModelData = mlResult && (mlResult.factorCount > 0);
-  const modelP1pct = hasModelData ? (mlResult.modelP1 * 100).toFixed(1) : null;
-  const modelP2pct = hasModelData ? (mlResult.modelP2 * 100).toFixed(1) : null;
+  const modelP1pct = mlResult ? (mlResult.modelP1 * 100).toFixed(1) : null;
+  const modelP2pct = mlResult ? (mlResult.modelP2 * 100).toFixed(1) : null;
+  const fairOddsLabel = hasModelData ? 'P modelo (forma+H2H+mercado)' : 'Fair odds (de-juice, sem dados de forma/H2H)';
 
   let oddsSection = '';
   if (hasRealOdds) {
@@ -1358,11 +1359,8 @@ function buildEsportsPrompt(match, game, gamesContext, o, enrichSection, mlResul
     const djP2 = (raw2 / overround * 100).toFixed(1);
     const marginPct = ((overround - 1) * 100).toFixed(1);
     const bookName = o.bookmaker || '1xBet';
-    if (hasModelData) {
-      oddsSection = `Odds ML (${bookName}): ${t1}=${o.t1} | ${t2}=${o.t2}\nMargem da casa: ${marginPct}% | P de-juiced (só margem): ${t1}=${djP1}% | ${t2}=${djP2}%\nP modelo do sistema (forma+H2H): ${t1}=${modelP1pct}% | ${t2}=${modelP2pct}%`;
-    } else {
-      oddsSection = `Odds ML (${bookName}): ${t1}=${o.t1} | ${t2}=${o.t2}\nMargem da casa: ${marginPct}% | P de-juiced: ${t1}=${djP1}% | ${t2}=${djP2}% (sem dados de forma/H2H — apenas remoção de margem)`;
-    }
+    const modelNote = hasModelData ? 'forma+H2H incorporados' : 'de-juice apenas, sem dados adicionais';
+    oddsSection = `Odds ML (${bookName}): ${t1}=${o.t1} | ${t2}=${o.t2}\nMargem da casa: ${marginPct}% | P de-juiced (só margem): ${t1}=${djP1}% | ${t2}=${djP2}%\n${fairOddsLabel} (${modelNote}): ${t1}=${modelP1pct}% | ${t2}=${modelP2pct}%`;
   } else {
     oddsSection = `Odds ML: Não disponíveis`;
   }
@@ -1415,11 +1413,11 @@ function buildEsportsPrompt(match, game, gamesContext, o, enrichSection, mlResul
       // Referência principal = probabilidade do modelo (forma + H2H)
       // EV calculado contra a odd de mercado, mas a "fair" de referência é o modelo
       bookMarginNote = `AVISO: 1xBet tem margem de ${marginReal}%. O MODELO DO SISTEMA estima ${t1}=${modelP1pct}% | ${t2}=${modelP2pct}% (incorpora forma recente + H2H + odds como prior bayesiano). Esta é a referência de fair odd — NÃO o de-juice simples. EV = (sua_prob/100 × odd) − 1.`;
-      deJuiced = `Referência do modelo: ${t1}=${modelP1pct}% | ${t2}=${modelP2pct}% [De-juice bookie: ${t1}=${dj1}% | ${t2}=${dj2}%]\n   Sua P estimada deve superar a P do modelo em ≥${minEdgePp}pp E EV ≥ +${evThreshold}%.\n   Se EV negativo nos dois lados → SEM EDGE.`;
+      deJuiced = `${fairOddsLabel}: ${t1}=${modelP1pct}% | ${t2}=${modelP2pct}% [De-juice bookie: ${t1}=${dj1}% | ${t2}=${dj2}%]\n   Sua P estimada deve superar a P do modelo em ≥${minEdgePp}pp E EV ≥ +${evThreshold}%.\n   Se EV negativo nos dois lados → SEM EDGE.`;
     } else {
-      // Sem dados de enriquecimento — cai no de-juice simples
-      bookMarginNote = `AVISO: 1xBet tem margem de ${marginReal}% neste jogo. O de-juice REMOVE esta margem, mas NÃO corrige o viés da bookie. Para lucro real você precisa que sua probabilidade VERDADEIRA supere o de-juice por pelo menos ${minEdgePp}pp.`;
-      deJuiced = `De-juice 1xBet: ${t1}=${dj1}% | ${t2}=${dj2}% (sem dados de forma/H2H disponíveis)\n   P estimada deve superar de-juice em ≥${minEdgePp}pp E EV ≥ +${evThreshold}%.\n   Se EV negativo nos dois lados → SEM EDGE.`;
+      // Sem dados de forma/H2H — fair odds calculadas via de-juice (mínimo sempre disponível)
+      bookMarginNote = `AVISO: 1xBet tem margem de ${marginReal}%. Fair odds (de-juice): ${t1}=${modelP1pct}% | ${t2}=${modelP2pct}%. Use como referência mínima — para lucro real sua probabilidade deve superar isso em ≥${minEdgePp}pp. Sem dados de forma/H2H para ajustar o prior.`;
+      deJuiced = `${fairOddsLabel}: ${t1}=${modelP1pct}% | ${t2}=${modelP2pct}% (calculado via de-juice, sem dados adicionais)\n   P estimada deve superar fair odds em ≥${minEdgePp}pp E EV ≥ +${evThreshold}%.\n   Se EV negativo nos dois lados → SEM EDGE.`;
     }
   } else {
     deJuiced = `Sem odds disponíveis. Tip só se vantagem clara (>${noOddsConviction}%) com pelo menos 2 sinais independentes confirmando.`;
@@ -1450,7 +1448,7 @@ REGRAS OBRIGATÓRIAS (não negociáveis):
 
 ANÁLISE (responda cada ponto):
 1. Draft/Composição: qual time tem melhor comp? Early/late game? Counter-pick decisivo?
-   → P(${t1})=__% | P(${t2})=__% | Justificativa: [1 frase objetiva]${hasModelData ? `\n   [Base do modelo: ${t1}=${modelP1pct}% | ${t2}=${modelP2pct}% — para ter edge, sua P deve divergir claramente deste baseline]` : ''}
+   → P(${t1})=__% | P(${t2})=__% | Justificativa: [1 frase objetiva]${modelP1pct ? `\n   [${fairOddsLabel}: ${t1}=${modelP1pct}% | ${t2}=${modelP2pct}% — para ter edge, sua P deve divergir claramente deste baseline]` : ''}
 2. Edge quantitativo: ${deJuiced}
 3. Sinais do checklist:
    [ ] Forma recente clara (≥60% winrate, diferença >15pp)
@@ -2916,16 +2914,18 @@ async function pollMma() {
         }
 
         const hasModelDataMma = mlResultMma.factorCount > 0;
-        const modelP1Mma = hasModelDataMma ? (mlResultMma.modelP1 * 100).toFixed(1) : null;
-        const modelP2Mma = hasModelDataMma ? (mlResultMma.modelP2 * 100).toFixed(1) : null;
+        // Fair odds sempre disponíveis: quando sem ESPN, modelP1=impliedP1 (de-juice puro)
+        const modelP1Mma = (mlResultMma.modelP1 * 100).toFixed(1);
+        const modelP2Mma = (mlResultMma.modelP2 * 100).toFixed(1);
+        const fairLabelMma = hasModelDataMma ? 'P modelo (record ESPN)' : 'Fair odds (de-juice, sem record ESPN)';
 
         const espnSection = espn
           ? `\nREGISTRO: ${fight.team1}=${rec1 || '?'} | ${fight.team2}=${rec2 || '?'}\nCategoria: ${weightClass || fight.league} | ${rounds} rounds${isTitleFight ? ' (TITLE FIGHT)' : ''}`
           : '';
 
         const fairOddsRef = hasModelDataMma
-          ? `P modelo (record ESPN): ${fight.team1}=${modelP1Mma}% | ${fight.team2}=${modelP2Mma}%\nP de-juiced bookie: ${fight.team1}=${fairP1}% | ${fight.team2}=${fairP2}%`
-          : `P de-juiced bookie: ${fight.team1}=${fairP1}% | ${fight.team2}=${fairP2}% (sem record ESPN disponível)`;
+          ? `${fairLabelMma}: ${fight.team1}=${modelP1Mma}% | ${fight.team2}=${modelP2Mma}%\nP de-juiced bookie: ${fight.team1}=${fairP1}% | ${fight.team2}=${fairP2}%`
+          : `${fairLabelMma}: ${fight.team1}=${modelP1Mma}% | ${fight.team2}=${modelP2Mma}% (use como mínimo — sem dados históricos para ajustar o prior)`;
 
         const prompt = `Você é um analista especializado em MMA/UFC. Analise esta luta e identifique edge real se existir.
 
@@ -2936,7 +2936,7 @@ ODDS (${o.bookmaker || 'EU'}):
 ${fight.team1}: ${o.t1} | ${fight.team2}: ${o.t2}
 Margem bookie: ${marginPct}%
 ${fairOddsRef}
-${hasModelDataMma ? `AVISO: o modelo base usa o record histórico como prior. Sua estimativa deve superar a P do modelo em ≥8pp para ter edge real.` : ''}
+AVISO: ${hasModelDataMma ? `modelo base usa record histórico como prior — sua estimativa deve superar a P do modelo em ≥8pp para ter edge real.` : `fair odds calculadas via de-juice (sem record ESPN) — use apenas como referência mínima; para edge real, sua estimativa deve superar ≥8pp.`}
 
 ANÁLISE REQUERIDA — seja específico:
 1. Vantagem técnica: quem domina grappling, striking e wrestling?
@@ -3110,8 +3110,10 @@ async function pollTennis() {
         }
 
         const hasModelDataTennis = mlResultTennis.factorCount > 0;
-        const modelP1Tennis = hasModelDataTennis ? (mlResultTennis.modelP1 * 100).toFixed(1) : null;
-        const modelP2Tennis = hasModelDataTennis ? (mlResultTennis.modelP2 * 100).toFixed(1) : null;
+        // Fair odds sempre disponíveis: quando sem ranking, modelP1=impliedP1 (de-juice puro)
+        const modelP1Tennis = (mlResultTennis.modelP1 * 100).toFixed(1);
+        const modelP2Tennis = (mlResultTennis.modelP2 * 100).toFixed(1);
+        const fairLabelTennis = hasModelDataTennis ? 'P modelo (ranking ESPN)' : 'Fair odds (de-juice, sem ranking ESPN)';
 
         // Montar seção de dados reais
         const dataSection = [
@@ -3125,8 +3127,8 @@ async function pollTennis() {
         const hasRealData = !!(rank1 || rank2 || form1 || form2);
 
         const fairOddsLineTennis = hasModelDataTennis
-          ? `P modelo (ranking ESPN): ${match.team1}=${modelP1Tennis}% | ${match.team2}=${modelP2Tennis}%\nP de-juiced bookie: ${match.team1}=${fairP1}% | ${match.team2}=${fairP2}%`
-          : `P de-juiced bookie: ${match.team1}=${fairP1}% | ${match.team2}=${fairP2}% (sem ranking ESPN disponível)`;
+          ? `${fairLabelTennis}: ${match.team1}=${modelP1Tennis}% | ${match.team2}=${modelP2Tennis}%\nP de-juiced bookie: ${match.team1}=${fairP1}% | ${match.team2}=${fairP2}%`
+          : `${fairLabelTennis}: ${match.team1}=${modelP1Tennis}% | ${match.team2}=${modelP2Tennis}% (use como mínimo — sem ranking para ajustar o prior)`;
 
         const prompt = `Você é um analista especializado em tênis profissional. Analise com rigor — prefira SEM_EDGE a inventar edge inexistente.
 
@@ -3143,9 +3145,9 @@ ${isFav1 ? match.team1 : match.team2} é o favorito do mercado.
 ${dataSection ? `DADOS REAIS (ESPN):\n${dataSection}\n` : 'AVISO: sem dados ESPN disponíveis — use apenas conhecimento de treino confiável.\n'}
 INSTRUÇÕES:
 1. Estime a probabilidade REAL de vitória de cada jogador com base em: ranking, superfície, H2H, form recente, estilo.
-2. Compare sua estimativa com a ${hasModelDataTennis ? `P do modelo (${match.team1}=${modelP1Tennis}% | ${match.team2}=${modelP2Tennis}%)` : 'prob. de-juiced do mercado'}:
-   - Se sua estimativa para ${match.team1} > ${hasModelDataTennis ? modelP1Tennis : fairP1}%: edge em ${match.team1} (EV = (sua_prob/100 * ${o.t1}) - 1)
-   - Se sua estimativa para ${match.team2} > ${hasModelDataTennis ? modelP2Tennis : fairP2}%: edge em ${match.team2} (EV = (sua_prob/100 * ${o.t2}) - 1)
+2. Compare sua estimativa com a ${fairLabelTennis} (${match.team1}=${modelP1Tennis}% | ${match.team2}=${modelP2Tennis}%):
+   - Se sua estimativa para ${match.team1} > ${modelP1Tennis}%: edge em ${match.team1} (EV = (sua_prob/100 * ${o.t1}) - 1)
+   - Se sua estimativa para ${match.team2} > ${modelP2Tennis}%: edge em ${match.team2} (EV = (sua_prob/100 * ${o.t2}) - 1)
 3. Confiança (1-10): baseada em quão bem você conhece esses jogadores E nessa superfície.
    - Se não tiver certeza sobre ranking atual ou form real: máximo confiança 6 → SEM_EDGE.
 
@@ -3381,7 +3383,7 @@ Data/Hora: ${matchTime} (BRT)
 ODDS REAIS (${o.bookmaker || 'EU'}):
 Casa: ${oH} → de-juiced: ${mktH}% | Empate: ${oD} → ${mktD}% | Fora: ${oA} → ${mktA}%
 Margem bookie: ${marginPct}%
-Totais: ${ou25Line}
+${fixtureInfo && contextBlock ? '' : `Fair odds (de-juice, sem dados quantitativos): Casa=${mktH}% | Empate=${mktD}% | Fora=${mktA}% — use como referência mínima; sua estimativa deve superar ≥8pp para ter edge real.\n`}Totais: ${ou25Line}
 ${contextBlock}
 INSTRUÇÕES:
 1. ${fixtureInfo ? 'Use os dados quantitativos acima como base. Complemente com seu conhecimento contextual (lesões, motivação, histórico recente não capturado).' : 'Use seu conhecimento sobre os times nessa liga. Se não conhecer bem, confiança máxima 5 → SEM_EDGE.'}
