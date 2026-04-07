@@ -2321,27 +2321,33 @@ async function syncProStats({ forceResync = false } = {}) {
         const det = safeParse(detR.body, {});
         const games = Array.isArray(det.games) ? det.games : [];
         for (const g of games) {
-          if (!g.winner || !Array.isArray(g.players) || g.players.length === 0) continue;
+          if (!g.winner) continue;
           const winnerId = g.winner.id;
-          for (const pl of g.players) {
-            const champ  = pl.champion?.name;
-            const role   = pl.role;
-            const player = pl.player?.name || pl.name;
-            if (!champ || !role) continue;
-            const won = pl.team_id === winnerId;
+          // PandaScore aninha players dentro de g.teams[].players (não g.players direto)
+          const teams = Array.isArray(g.teams) ? g.teams : [];
+          for (const teamObj of teams) {
+            const teamId = teamObj.team?.id;
+            const won = teamId === winnerId;
+            const players = Array.isArray(teamObj.players) ? teamObj.players : [];
+            for (const pl of players) {
+              const champ  = pl.champion?.name;
+              const role   = pl.role;
+              const player = pl.player?.name || pl.name;
+              if (!champ || !role) continue;
 
-            // Champ stats (pool de campeões pro play)
-            const cKey = `${champ}_${role}`;
-            if (!champAgg[cKey]) champAgg[cKey] = { champion: champ, role, wins: 0, total: 0 };
-            champAgg[cKey].total++;
-            if (won) champAgg[cKey].wins++;
+              // Champ stats (pool de campeões pro play)
+              const cKey = `${champ}_${role}`;
+              if (!champAgg[cKey]) champAgg[cKey] = { champion: champ, role, wins: 0, total: 0 };
+              champAgg[cKey].total++;
+              if (won) champAgg[cKey].wins++;
 
-            // Player+champ stats
-            if (player) {
-              const pKey = `${player}_${champ}`;
-              if (!playerAgg[pKey]) playerAgg[pKey] = { player, champion: champ, wins: 0, total: 0 };
-              playerAgg[pKey].total++;
-              if (won) playerAgg[pKey].wins++;
+              // Player+champ stats
+              if (player) {
+                const pKey = `${player}_${champ}`;
+                if (!playerAgg[pKey]) playerAgg[pKey] = { player, champion: champ, wins: 0, total: 0 };
+                playerAgg[pKey].total++;
+                if (won) playerAgg[pKey].wins++;
+              }
             }
           }
         }

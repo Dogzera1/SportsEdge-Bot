@@ -479,12 +479,31 @@ async function runAutoAnalysis() {
         return t > now && t <= windowEnd;
       }) : [];
       // Deduplicar: prioriza Riot sobre PandaScore para o mesmo confronto
+      // Fase 1: dedup por nome normalizado (cobre maioria dos casos)
       const riotUpcoming = new Set(upcomingRaw.filter(m => !String(m.id).startsWith('ps_')).map(m => `${norm(m.team1)}_${norm(m.team2)}`));
-      const allUpcoming = upcomingRaw.filter(m => {
+      let allUpcoming = upcomingRaw.filter(m => {
         if (!String(m.id).startsWith('ps_')) return true;
         const key1 = `${norm(m.team1)}_${norm(m.team2)}`;
         const key2 = `${norm(m.team2)}_${norm(m.team1)}`;
         return !riotUpcoming.has(key1) && !riotUpcoming.has(key2);
+      });
+      // Fase 2: dedup por horário+adversário (cobre abreviações como "Gamespace M.C." vs "Gamespace Mediterranean College")
+      // Se dois matches têm o mesmo horário (±5min) e um time em comum (parcial), mantém só o primeiro (Riot)
+      const seenByTimeOpponent = new Map(); // "time_opponent" → true
+      allUpcoming = allUpcoming.filter(m => {
+        const t = m.time ? Math.round(new Date(m.time).getTime() / 300000) : 0; // bucket 5min
+        const n1 = norm(m.team1), n2 = norm(m.team2);
+        // Verifica se já há um match com mesmo horário e algum time que seja prefixo do atual ou vice-versa
+        for (const [k] of seenByTimeOpponent) {
+          const [kt, kn1, kn2] = k.split('|');
+          if (kt !== String(t)) continue;
+          if ((n1.startsWith(kn1.slice(0,8)) || kn1.startsWith(n1.slice(0,8))) &&
+              (n2.startsWith(kn2.slice(0,8)) || kn2.startsWith(n2.slice(0,8)))) return false;
+          if ((n1.startsWith(kn2.slice(0,8)) || kn2.startsWith(n1.slice(0,8))) &&
+              (n2.startsWith(kn1.slice(0,8)) || kn1.startsWith(n2.slice(0,8)))) return false;
+        }
+        seenByTimeOpponent.set(`${t}|${n1}|${n2}`, true);
+        return true;
       });
 
       if (allUpcoming.length > 0) {
@@ -1432,7 +1451,7 @@ function buildEsportsPrompt(match, game, gamesContext, o, enrichSection, mlResul
 4. Se EV negativo nos dois lados → não gere TIP_ML]`
     : `[NÃO gere tip sem odds reais disponíveis]`;
 
-  const text = `Você é um analista de apostas LoL especializado. Sua função é encontrar edge REAL. "Sem edge" é sempre uma resposta válida e preferível a forçar uma tip ruim.
+  const text = `Você é um analista de apostas LoL especializado. Siga o processo de decisão abaixo com rigor — omita TIP_ML SOMENTE se todos os EVs forem negativos ou se você não tiver base para estimar probabilidades.
 
 PARTIDA: ${t1} vs ${t2} | ${match.league || 'Esports'} | ${match.format || 'Bo1/Bo3'} | ${match.status}
 Placar: ${serieScore} | ${oddsSection}
