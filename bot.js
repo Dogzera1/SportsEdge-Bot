@@ -376,12 +376,29 @@ async function runAutoAnalysis() {
           const mlEdgeLabel = result.mlScore > 0 ? ` | ML: ${result.mlScore.toFixed(1)}pp` : '';
           const baixaNote = tipConf === 'BAIXA' ? '\n⚠️ _Tip de confiança BAIXA — stake reduzido. Aposte com cautela._' : '';
 
-          await serverPost('/record-tip', {
+          const modelLabel = (result.factorActive && result.factorActive.length)
+            ? 'P modelo (forma/H2H/comp)'
+            : 'Fair odds (de-juice)';
+          const modelPPick = modelPForKelly;
+
+          const rec = await serverPost('/record-tip', {
             matchId: String(match.id), eventName: match.league,
             p1: match.team1, p2: match.team2, tipParticipant: tipTeam,
             odds: tipOdd, ev: tipEV, stake: tipStake,
-            confidence: tipConf, isLive: result.hasLiveStats
+            confidence: tipConf, isLive: result.hasLiveStats,
+            modelP1: result.modelP1,
+            modelP2: result.modelP2,
+            modelPPick: modelPPick,
+            modelLabel: modelLabel
           }, 'esports');
+
+          if (rec?.tipId && result.factorActive?.length && result.mlDirection) {
+            await serverPost('/log-tip-factors', {
+              tipId: rec.tipId,
+              factors: result.factorActive,
+              predictedDir: result.mlDirection
+            }, 'esports').catch(() => {});
+          }
 
           const isDraft = match.status === 'draft';
           const kellyLabel = tipConf === 'ALTA' ? '¼ Kelly' : tipConf === 'BAIXA' ? '1/10 Kelly' : '⅙ Kelly';
@@ -1358,7 +1375,19 @@ async function autoAnalyzeMatch(token, match) {
     } else {
       log('INFO', 'AUTO', `${match.team1} vs ${match.team2} | odds=${o?.t1||'N/A'} hasRealOdds=${hasRealOdds} tipMatch=true mlEdge=${mlResult.score.toFixed(1)}pp`);
     }
-    return { text, tipMatch: filteredTipResult, hasLiveStats, liveGameNumber, match, o, mlScore: mlResult.score, modelP1: mlResult.modelP1, modelP2: mlResult.modelP2 };
+    return {
+      text,
+      tipMatch: filteredTipResult,
+      hasLiveStats,
+      liveGameNumber,
+      match,
+      o,
+      mlScore: mlResult.score,
+      modelP1: mlResult.modelP1,
+      modelP2: mlResult.modelP2,
+      mlDirection: mlResult.direction || null,
+      factorActive: mlResult.factorActive || []
+    };
   } catch(e) {
     log('ERROR', 'AUTO', `Error for ${match.team1} vs ${match.team2}: ${e.message}`);
     return null;
@@ -3130,12 +3159,27 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
           `${confEmoji} Confiança: *${tipConf}*\n\n` +
           `⚠️ _Aposte com responsabilidade._`;
 
-        await serverPost('/record-tip', {
+        const pickIsT1Mma = norm(tipTeam) === norm(fight.team1);
+        const modelPPickMma = pickIsT1Mma ? mlResultMma.modelP1 : mlResultMma.modelP2;
+
+        const rec = await serverPost('/record-tip', {
           matchId: String(fight.id), eventName: fight.league,
           p1: fight.team1, p2: fight.team2, tipParticipant: tipTeam,
           odds: String(tipOdd), ev: String(tipEV), stake: String(tipStake),
-          confidence: tipConf, isLive: false, market_type: 'ML'
+          confidence: tipConf, isLive: false, market_type: 'ML',
+          modelP1: mlResultMma.modelP1,
+          modelP2: mlResultMma.modelP2,
+          modelPPick: modelPPickMma,
+          modelLabel: fairLabelMma
         }, 'mma');
+
+        if (rec?.tipId && mlResultMma.factorActive?.length && mlResultMma.direction) {
+          await serverPost('/log-tip-factors', {
+            tipId: rec.tipId,
+            factors: mlResultMma.factorActive,
+            predictedDir: mlResultMma.direction
+          }, 'mma').catch(() => {});
+        }
 
         for (const [userId, prefs] of subscribedUsers) {
           if (!prefs.has('mma')) continue;
@@ -3342,7 +3386,7 @@ Máximo 200 palavras. Mostre seu raciocínio brevemente antes da decisão.`;
         const pickIsT1 = norm(tipPlayer) === norm(match.team1);
         const modelPPick = pickIsT1 ? mlResultTennis.modelP1 : mlResultTennis.modelP2;
 
-        await serverPost('/record-tip', {
+        const rec = await serverPost('/record-tip', {
           matchId: String(match.id), eventName: match.league,
           p1: match.team1, p2: match.team2, tipParticipant: tipPlayer,
           odds: String(tipOdd), ev: String(tipEV), stake: String(tipStake),
@@ -3352,6 +3396,14 @@ Máximo 200 palavras. Mostre seu raciocínio brevemente antes da decisão.`;
           modelPPick: modelPPick,
           modelLabel: fairLabelTennis
         }, 'tennis');
+
+        if (rec?.tipId && mlResultTennis.factorActive?.length && mlResultTennis.direction) {
+          await serverPost('/log-tip-factors', {
+            tipId: rec.tipId,
+            factors: mlResultTennis.factorActive,
+            predictedDir: mlResultTennis.direction
+          }, 'tennis').catch(() => {});
+        }
 
         for (const [userId, prefs] of subscribedUsers) {
           if (!prefs.has('tennis')) continue;

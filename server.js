@@ -1612,7 +1612,29 @@ const server = http.createServer(async (req, res) => {
           stmts.updateTipOpenOdds.run(parseFloat(t.odds), String(t.matchId), sport);
         }
         stmts.incrementApiUsage.run(sport, new Date().toISOString().slice(0,7));
-        sendJson(res, { ok: true });
+        sendJson(res, { ok: true, tipId: result?.lastInsertRowid || null });
+      } catch(e) { sendJson(res, { error: e.message }, 500); }
+    });
+    return;
+  }
+
+  if (p === '/log-tip-factors' && req.method === 'POST') {
+    let body = ''; req.on('data', d => body += d);
+    req.on('end', () => {
+      try {
+        const { tipId, factors, predictedDir } = safeParse(body, {});
+        const id = parseInt(tipId);
+        const dir = (predictedDir || '').toString().trim();
+        if (!id) { sendJson(res, { error: 'Missing tipId' }, 400); return; }
+        if (!Array.isArray(factors) || !factors.length) { sendJson(res, { ok: true, inserted: 0 }); return; }
+        if (dir !== 't1' && dir !== 't2') { sendJson(res, { error: 'Invalid predictedDir' }, 400); return; }
+        let inserted = 0;
+        for (const f of factors) {
+          const factor = (f || '').toString().trim();
+          if (!factor) continue;
+          try { stmts.logTipFactor.run(id, factor, dir, null); inserted++; } catch(_) {}
+        }
+        sendJson(res, { ok: true, inserted });
       } catch(e) { sendJson(res, { error: e.message }, 500); }
     });
     return;
@@ -1711,7 +1733,7 @@ const server = http.createServer(async (req, res) => {
     const row = stmts.getROI.get(sport);
     const calibration = stmts.getCalibration.all(sport);
 
-    const tips = db.prepare("SELECT odds, stake, result, ev, is_live, clv_odds, open_odds FROM tips WHERE sport = ? AND result IS NOT NULL").all(sport);
+    const tips = db.prepare("SELECT odds, stake, result, ev, is_live, clv_odds, open_odds, model_p_pick FROM tips WHERE sport = ? AND result IS NOT NULL").all(sport);
     let totalStaked = 0, totalProfit = 0;
     const liveTips = { wins: 0, losses: 0, total: 0, profit: 0, staked: 0 };
     const preTips  = { wins: 0, losses: 0, total: 0, profit: 0, staked: 0 };
@@ -1752,7 +1774,10 @@ const server = http.createServer(async (req, res) => {
       // Fórmula: p = (1 + EV/100) / odds, onde EV em decimal = ev/100
       const ev = parseFloat(t.ev) || 0;
       if (odds > 1 && t.result) {
-        let p = ev > 0 ? (1 + ev / 100) / odds : 1 / odds;
+        const pStored = parseFloat(t.model_p_pick);
+        let p = (isFinite(pStored) && pStored > 0 && pStored < 1)
+          ? pStored
+          : (ev > 0 ? (1 + ev / 100) / odds : 1 / odds);
         p = Math.max(0.01, Math.min(0.99, p));
         const o = t.result === 'win' ? 1 : 0;
         brierSum += (p - o) ** 2;
