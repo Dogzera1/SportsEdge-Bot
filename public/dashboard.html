@@ -197,6 +197,9 @@ async function loadAll() {
   document.getElementById('lastUpdated').textContent = 'Atualizado: ' + new Date().toLocaleTimeString('pt-BR');
 }
 
+// Auto-refresh (calibração/ROI “ao vivo”)
+setInterval(loadAll, 60 * 1000);
+
 function readTipsControls() {
   const q = (document.getElementById('tipsQ')?.value || '').trim();
   const status = document.getElementById('tipsStatus')?.value || '';
@@ -282,6 +285,11 @@ function renderCards(roi) {
     ? ('<div class="conf-item"><strong>BANCA</strong> R$ ' + (banca.currentBanca || 0).toFixed(2) + ' | ' + ((banca.growthPct || 0) >= 0 ? '<span class="positive">+' : '<span class="negative">') + (banca.growthPct || 0).toFixed(2) + '%</span></div>')
     : '<div class="conf-item" style="color:#6b7280">Banca: sem dados</div>';
 
+  const calibM = roi.calibration_metrics || null;
+  const calibHTML = calibM
+    ? ('<div class="conf-item"><strong>BRIER</strong> ' + (calibM.brierScore || 0).toFixed(4) + ' | <strong>LOGLOSS</strong> ' + (calibM.logLoss || 0).toFixed(4) + ' | n=' + (calibM.sampleSize || 0) + '</div>')
+    : '<div class="conf-item" style="color:#6b7280">Brier: sem dados</div>';
+
   document.getElementById('cards').innerHTML =
     '<div class="card">' +
       '<div class="label">Total Tips</div>' +
@@ -305,7 +313,7 @@ function renderCards(roi) {
     '</div>' +
     '<div class="card" style="grid-column: span 2">' +
       '<div class="label">Split / CLV / Banca</div>' +
-      '<div class="conf-breakdown">' + (phaseHTML || '<span style="color:#6b7280">Sem dados</span>') + clvHTML + bancaHTML + '</div>' +
+      '<div class="conf-breakdown">' + (phaseHTML || '<span style="color:#6b7280">Sem dados</span>') + clvHTML + bancaHTML + calibHTML + '</div>' +
     '</div>';
 }
 

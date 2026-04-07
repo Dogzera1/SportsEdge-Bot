@@ -2241,6 +2241,53 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // ── Global Risk Snapshot (cross-sport) ──
+  if (p === '/risk-snapshot') {
+    try {
+      const sports = ['esports', 'mma', 'tennis', 'football'];
+      const bySport = {};
+      let totalBanca = 0;
+      let totalPendingReais = 0;
+
+      for (const s of sports) {
+        const bk = stmts.getBankroll.get(s);
+        // Reusa lógica de /bankroll para currentBanca
+        let currentBanca = bk?.current_banca;
+        if (bk) {
+          const profitRow = db.prepare(
+            "SELECT COALESCE(SUM(profit_reais), 0) as total_profit FROM tips WHERE sport = ? AND result IS NOT NULL AND profit_reais IS NOT NULL"
+          ).get(s);
+          const accumulatedProfit = parseFloat((profitRow?.total_profit || 0).toFixed(2));
+          currentBanca = parseFloat((bk.initial_banca + accumulatedProfit).toFixed(2));
+        }
+        currentBanca = parseFloat(currentBanca) || 0;
+
+        const pending = db.prepare(
+          "SELECT COALESCE(SUM(stake_reais), 0) as pending_reais, COUNT(*) as n FROM tips WHERE sport = ? AND result IS NULL"
+        ).get(s);
+        const pendingReais = parseFloat((pending?.pending_reais || 0).toFixed(2));
+
+        bySport[s] = {
+          currentBanca,
+          pendingReais,
+          pendingCount: pending?.n || 0,
+          unitValue: parseFloat((currentBanca / 100).toFixed(4))
+        };
+        totalBanca += currentBanca;
+        totalPendingReais += pendingReais;
+      }
+
+      sendJson(res, {
+        totalBanca: parseFloat(totalBanca.toFixed(2)),
+        totalPendingReais: parseFloat(totalPendingReais.toFixed(2)),
+        bySport
+      });
+    } catch (e) {
+      sendJson(res, { error: e.message }, 500);
+    }
+    return;
+  }
+
   if (p === '/set-bankroll' && req.method === 'POST') {
     let body = ''; req.on('data', d => body += d);
     req.on('end', () => {

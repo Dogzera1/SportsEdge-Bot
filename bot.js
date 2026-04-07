@@ -6,6 +6,7 @@ const path = require('path');
 const initDatabase = require('./lib/database');
 const { SPORTS, getSportById, getSportByToken, getTokenToSportMap } = require('./lib/sports');
 const { log, calcKelly, calcKellyFraction, calcKellyWithP, norm, fmtDate, fmtDateTime, fmtDuration, safeParse } = require('./lib/utils');
+const { adjustStakeUnits } = require('./lib/risk-manager');
 const { esportsPreFilter } = require('./lib/ml');
 const { fetchMatchNews } = require('./lib/news');
 
@@ -198,6 +199,25 @@ function serverPost(path, body, sport, extraHeaders) {
     req.write(s);
     req.end();
   });
+}
+
+// ── Global Risk Manager snapshot cache ──
+let _riskSnapCache = null;
+let _riskSnapTs = 0;
+async function getRiskSnapshotCached() {
+  const now = Date.now();
+  if (_riskSnapCache && (now - _riskSnapTs) < 30 * 1000) return _riskSnapCache;
+  const snap = await serverGet('/risk-snapshot').catch(() => null);
+  if (snap) { _riskSnapCache = snap; _riskSnapTs = now; }
+  return snap;
+}
+
+async function applyGlobalRisk(sport, desiredUnits) {
+  const snap = await getRiskSnapshotCached();
+  if (!snap) return { ok: true, units: desiredUnits, reason: 'no_snapshot' };
+  const maxGlobalRiskPct = parseFloat(process.env.GLOBAL_RISK_PCT || '0.10');
+  const maxSportRiskPct = parseFloat(process.env.SPORT_RISK_PCT || '0.20');
+  return adjustStakeUnits(sport, desiredUnits, snap, { maxGlobalRiskPct, maxSportRiskPct, minUnits: 0.5 });
 }
 
 // ── Send Helpers ──
@@ -445,6 +465,11 @@ async function runAutoAnalysis() {
           const tipStake = modelPForKelly
             ? calcKellyWithP(modelPForKelly, tipOdd, kellyFraction)
             : calcKellyFraction(tipEV, tipOdd, kellyFraction);
+          // Global Risk Manager (cross-sport)
+          const desiredUnits = parseFloat(String(tipStake).replace('u', '')) || 0;
+          const riskAdj = await applyGlobalRisk('esports', desiredUnits);
+          if (!riskAdj.ok) { log('INFO', 'RISK', `esports: bloqueada (${riskAdj.reason})`); continue; }
+          const tipStakeAdj = `${riskAdj.units.toFixed(1).replace(/\.0$/, '')}u`;
           const gameIcon = '🎮';
           const oddsLabel = hasRealOdds ? '' : '\n⚠️ _Odds estimadas (sem mercado disponível)_';
           const mlEdgeLabel = result.mlScore > 0 ? ` | ML: ${result.mlScore.toFixed(1)}pp` : '';
@@ -458,7 +483,7 @@ async function runAutoAnalysis() {
           const rec = await serverPost('/record-tip', {
             matchId: canonicalMatchId('esports', match.id), eventName: match.league,
             p1: match.team1, p2: match.team2, tipParticipant: tipTeam,
-            odds: tipOdd, ev: tipEV, stake: tipStake,
+            odds: tipOdd, ev: tipEV, stake: tipStakeAdj,
             confidence: tipConf, isLive: result.hasLiveStats,
             modelP1: result.modelP1,
             modelP2: result.modelP2,
@@ -3267,10 +3292,15 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
         const pickIsT1Mma = norm(tipTeam) === norm(fight.team1);
         const modelPPickMma = pickIsT1Mma ? mlResultMma.modelP1 : mlResultMma.modelP2;
 
+        const desiredUnitsMma = parseFloat(String(tipStake)) || 0;
+        const riskAdjMma = await applyGlobalRisk('mma', desiredUnitsMma);
+        if (!riskAdjMma.ok) { log('INFO', 'RISK', `mma: bloqueada (${riskAdjMma.reason})`); await new Promise(r => setTimeout(r, 3000)); continue; }
+        const tipStakeAdjMma = String(riskAdjMma.units.toFixed(1).replace(/\.0$/, ''));
+
         const rec = await serverPost('/record-tip', {
           matchId: String(fight.id), eventName: fight.league,
           p1: fight.team1, p2: fight.team2, tipParticipant: tipTeam,
-          odds: String(tipOdd), ev: String(tipEV), stake: String(tipStake),
+          odds: String(tipOdd), ev: String(tipEV), stake: tipStakeAdjMma,
           confidence: tipConf, isLive: false, market_type: 'ML',
           modelP1: mlResultMma.modelP1,
           modelP2: mlResultMma.modelP2,
@@ -3494,10 +3524,15 @@ Máximo 200 palavras. Mostre seu raciocínio brevemente antes da decisão.`;
         const pickIsT1 = norm(tipPlayer) === norm(match.team1);
         const modelPPick = pickIsT1 ? mlResultTennis.modelP1 : mlResultTennis.modelP2;
 
+        const desiredUnitsTennis = parseFloat(String(tipStake)) || 0;
+        const riskAdjTennis = await applyGlobalRisk('tennis', desiredUnitsTennis);
+        if (!riskAdjTennis.ok) { log('INFO', 'RISK', `tennis: bloqueada (${riskAdjTennis.reason})`); await new Promise(r => setTimeout(r, 3000)); continue; }
+        const tipStakeAdjTennis = String(riskAdjTennis.units.toFixed(1).replace(/\.0$/, ''));
+
         const rec = await serverPost('/record-tip', {
           matchId: String(match.id), eventName: match.league,
           p1: match.team1, p2: match.team2, tipParticipant: tipPlayer,
-          odds: String(tipOdd), ev: String(tipEV), stake: String(tipStake),
+          odds: String(tipOdd), ev: String(tipEV), stake: tipStakeAdjTennis,
           confidence: tipConf, isLive: isLiveTennis, market_type: 'ML',
           modelP1: mlResultTennis.modelP1,
           modelP2: mlResultTennis.modelP2,
@@ -3767,10 +3802,15 @@ Máximo 200 palavras.`;
 
         const recordMatchId = fixtureInfo ? `fb_${fixtureInfo.fixtureId}` : String(match.id);
 
+        const desiredUnitsFb = parseFloat(String(tipStake)) || 0;
+        const riskAdjFb = await applyGlobalRisk('football', desiredUnitsFb);
+        if (!riskAdjFb.ok) { log('INFO', 'RISK', `football: bloqueada (${riskAdjFb.reason})`); await new Promise(r => setTimeout(r, 2000)); continue; }
+        const tipStakeAdjFb = String(riskAdjFb.units.toFixed(1).replace(/\.0$/, ''));
+
         await serverPost('/record-tip', {
           matchId: recordMatchId, eventName: match.league,
           p1: match.team1, p2: match.team2, tipParticipant: tipTeam,
-          odds: String(tipOdd), ev: String(tipEV), stake: String(tipStake),
+          odds: String(tipOdd), ev: String(tipEV), stake: tipStakeAdjFb,
           confidence: tipConf, isLive: false, market_type: tipMarket
         }, 'football');
 
