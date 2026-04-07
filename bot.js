@@ -1621,6 +1621,13 @@ async function handleAdmin(token, chatId, command) {
       });
       await send(token, chatId, txt);
     } catch(e) { await send(token, chatId, `❌ ${e.message}`); }
+  } else if (cmd === '/refresh-open') {
+    if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
+    try {
+      await send(token, chatId, '🔄 Reanalisando tips pendentes (odds/EV)...');
+      await refreshOpenTips();
+      await send(token, chatId, '✅ Updates enviados. Dashboard refletirá `current_odds/current_ev`.');
+    } catch(e) { await send(token, chatId, `❌ ${e.message}`); }
   } else if (cmd === '/slugs') {
     // Mostra ligas LoL cobertas e slugs desconhecidos vistos no schedule
     try {
@@ -3682,6 +3689,7 @@ log('INFO', 'BOOT', `Sports carregados: ${JSON.stringify(Object.entries(SPORTS).
   if (SPORTS.esports?.enabled) {
     setInterval(() => checkLiveNotifications().catch(e => log('ERROR', 'NOTIFY', e.message)), LIVE_CHECK_INTERVAL);
     setInterval(() => checkCLV().catch(e => log('ERROR', 'CLV', e.message)), 5 * 60 * 1000);
+    setInterval(() => refreshOpenTips().catch(() => {}), 10 * 60 * 1000);
     // Auto-patch meta: verifica novo patch a cada 12h via ddragon
     fetchLatestPatchMeta().catch(e => log('WARN', 'PATCH', e.message)); // executa imediatamente no boot
     setInterval(() => fetchLatestPatchMeta().catch(e => log('WARN', 'PATCH', e.message)), PATCH_AUTO_FETCH_INTERVAL);
@@ -3727,6 +3735,75 @@ async function checkCLV() {
       }
     }
   } catch(e) {}
+}
+
+// Reanalisa tips pendentes: atualiza odds/EV no DB e envia update no Telegram.
+// Não chama IA: mantém p implícita da tip original e recalcula EV com odds atuais.
+async function refreshOpenTips() {
+  try {
+    const enabledSports = Object.entries(SPORTS)
+      .filter(([_, s]) => s && s.enabled && s.token)
+      .map(([id]) => id);
+
+    for (const sport of enabledSports) {
+      const unsettled = await serverGet('/unsettled-tips?days=30', sport).catch(() => []);
+      if (!Array.isArray(unsettled) || unsettled.length === 0) continue;
+
+      const minMovePct = parseFloat(process.env.TIP_UPDATE_MIN_MOVE_PCT || '3'); // 3%
+      const now = Date.now();
+
+      for (const tip of unsettled) {
+        const p1 = tip.participant1 || '';
+        const p2 = tip.participant2 || '';
+        const pick = tip.tip_participant || '';
+        const oldOdds = parseFloat(tip.odds) || 0;
+        const oldEv = parseFloat(tip.ev) || 0;
+        if (!p1 || !p2 || !pick || oldOdds <= 1) continue;
+
+        let currentOdds = null;
+        if (sport === 'esports') {
+          const o = await serverGet(`/odds?team1=${encodeURIComponent(p1)}&team2=${encodeURIComponent(p2)}`).catch(() => null);
+          if (o && parseFloat(o.t1) > 1) {
+            currentOdds = norm(pick) === norm(p1) ? parseFloat(o.t1) : parseFloat(o.t2);
+          }
+        } else {
+          // fallback: sem odds atuais padronizadas por esporte aqui
+          continue;
+        }
+
+        if (!currentOdds || !isFinite(currentOdds) || currentOdds <= 1) continue;
+
+        const movePct = Math.abs((currentOdds - oldOdds) / oldOdds) * 100;
+        if (movePct < minMovePct) continue;
+
+        // p implícita do EV original: p = (1 + EV/100) / odds
+        const p = Math.max(0.01, Math.min(0.99, (1 + oldEv / 100) / oldOdds));
+        const newEv = ((p * currentOdds) - 1) * 100;
+
+        await serverPost('/update-open-tip', {
+          matchId: tip.match_id,
+          currentOdds: currentOdds,
+          currentEV: parseFloat(newEv.toFixed(2)),
+          currentConfidence: tip.confidence || null
+        }, sport).catch(() => null);
+
+        // Notifica inscritos do esporte
+        const msg =
+          `🔄 *Atualização Tip (em andamento)*\n\n` +
+          `🎮 *${p1} vs ${p2}*\n` +
+          `✅ Pick: *${pick}*\n` +
+          `📈 Odds: *${oldOdds.toFixed(2)}* → *${currentOdds.toFixed(2)}* (${movePct >= 0 ? '+' : ''}${movePct.toFixed(1)}%)\n` +
+          `🧮 EV (recalc): *${newEv >= 0 ? '+' : ''}${newEv.toFixed(2)}%*\n` +
+          `🕒 ${new Date(now).toLocaleString('pt-BR')}`;
+
+        for (const [userId, prefs] of subscribedUsers.entries()) {
+          if (prefs && prefs.has && prefs.has(sport)) {
+            await sendDM(SPORTS[sport].token, userId, msg).catch(() => {});
+          }
+        }
+      }
+    }
+  } catch(_) {}
 }
 
 module.exports = { bots, subscribedUsers };

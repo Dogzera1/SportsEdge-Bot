@@ -320,7 +320,7 @@ function renderTips(tips) {
         ? '<span class="badge badge-baixa">BAIXA</span>'
         : '<span class="badge badge-media">M\u00C9DIA</span>';
 
-    const evRaw = t.ev ? String(t.ev) : '';
+    const evRaw = (t.current_ev != null ? String(t.current_ev) : (t.ev ? String(t.ev) : ''));
     const ev = evRaw
       ? (evRaw.startsWith('+') || evRaw.startsWith('-') ? evRaw : '+' + evRaw)
       : '\u2013';
@@ -336,8 +336,8 @@ function renderTips(tips) {
       '<td style="color:#6b7280;font-size:0.7rem">' + date + '</td>' +
       '<td title="' + match + '" style="max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + match + '</td>' +
       '<td><strong>' + (t.tip_participant || '?') + '</strong></td>' +
-      '<td>' + parseFloat(t.odds || 0).toFixed(2) + '</td>' +
-      '<td style="color:' + evColor + '">' + ev + '%</td>' +
+      '<td>' + parseFloat((t.current_odds || t.odds) || 0).toFixed(2) + '</td>' +
+      '<td style="color:' + evColor + '">' + (t.current_ev != null ? (String(t.current_ev).startsWith('+') || String(t.current_ev).startsWith('-') ? t.current_ev : ('+' + t.current_ev)) : ev) + '%</td>' +
       '<td>' + (t.stake || '\u2013') + '</td>' +
       '<td>' + confBadge + '</td>' +
       '<td>' + resultBadge + '</td>' +

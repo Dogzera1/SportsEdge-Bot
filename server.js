@@ -2137,6 +2137,25 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (p === '/update-open-tip' && req.method === 'POST') {
+    let body = ''; req.on('data', d => body += d);
+    req.on('end', () => {
+      try {
+        const sport = parsed.query.sport || 'esports';
+        const { matchId, currentOdds, currentEV, currentConfidence } = safeParse(body, {});
+        if (!matchId) { sendJson(res, { error: 'Missing matchId' }, 400); return; }
+        const o = parseFloat(currentOdds);
+        const ev = parseFloat(currentEV);
+        const conf = (currentConfidence || '').toString().trim() || null;
+        if (!isFinite(o) || o <= 1) { sendJson(res, { error: 'Invalid currentOdds' }, 400); return; }
+        if (!isFinite(ev)) { sendJson(res, { error: 'Invalid currentEV' }, 400); return; }
+        stmts.updateTipCurrent.run(o, ev, conf, String(matchId), sport);
+        sendJson(res, { ok: true });
+      } catch(e) { sendJson(res, { error: e.message }, 500); }
+    });
+    return;
+  }
+
   if (p === '/mma-matches') {
     if (!THE_ODDS_API_KEY) { sendJson(res, []); return; }
     try {
