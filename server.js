@@ -5,7 +5,7 @@ const path = require('path');
 const url = require('url');
 const initDatabase = require('./lib/database');
 const { SPORTS, getSportById } = require('./lib/sports');
-const { log, sendJson, safeParse, norm, httpGet, httpsPost, oddsApiAllowed } = require('./lib/utils');
+const { log, sendJson, safeParse, norm, httpGet, aiPost, oddsApiAllowed } = require('./lib/utils');
 
 // Railway sets $PORT automatically; start.js bridges it to SERVER_PORT
 const PORT = parseInt(process.env.PORT || process.env.SERVER_PORT) || 3000;
@@ -118,6 +118,68 @@ let esportsBatchCursor = 0;
 let cachedEsportsTids = null;
 let cachedEsportsTidsTs = 0;
 
+// ── Fila async (anti-429 / anti-spam) ──
+function createAsyncQueue(concurrency = 1) {
+  let running = 0;
+  const q = [];
+  const inFlightByKey = new Map();
+
+  function pump() {
+    while (running < concurrency && q.length) {
+      const item = q.shift();
+      if (!item) break;
+      running++;
+      Promise.resolve()
+        .then(item.fn)
+        .then(item.resolve, item.reject)
+        .finally(() => {
+          running--;
+          inFlightByKey.delete(item.key);
+          pump();
+        });
+    }
+  }
+
+  function enqueue(key, fn) {
+    if (key && inFlightByKey.has(key)) return inFlightByKey.get(key);
+    const p = new Promise((resolve, reject) => {
+      q.push({ key, fn, resolve, reject });
+      pump();
+    });
+    if (key) inFlightByKey.set(key, p);
+    return p;
+  }
+
+  return { enqueue };
+}
+
+// OddsPapi (LoL esports) é agressivo em 429 → serializa requests
+const oddsPapiQueue = createAsyncQueue(1);
+
+// The Odds API (tennis/football/mma) — serializa + dedupe por URL
+const theOddsQueue = createAsyncQueue(1);
+
+function clampStr(v, maxLen) {
+  const s = (v == null ? '' : String(v)).trim();
+  if (!s) return '';
+  return s.length > maxLen ? s.slice(0, maxLen) : s;
+}
+
+function parseFiniteNumber(v) {
+  const n = typeof v === 'number' ? v : parseFloat(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+function badRequest(res, msg) {
+  sendJson(res, { error: String(msg || 'invalid_payload') }, 400);
+}
+
+async function theOddsGet(theOddsUrl) {
+  return await theOddsQueue.enqueue(`theodds:${theOddsUrl}`, async () => {
+    return await httpGet(theOddsUrl).catch(() => ({ status: 500, body: '[]' }));
+  });
+}
+
 // Torneios ordenados por prioridade:
 // Lote 1 → T1 (LCS/LEC/LCK)
 // Lote 2 → EU secundárias (Prime League, HLL, Road of Legends)
@@ -175,7 +237,9 @@ async function getEsportsTournamentIds() {
   const sid = parseInt(process.env.ODDSPAPI_ESPORTS_SPORT_ID || '18');
   try {
     const url = `https://api.oddspapi.io/v4/tournaments?sportId=${sid}&apiKey=${ODDSPAPI_KEY}`;
-    const r = await httpGet(url).catch(() => null);
+    const r = await oddsPapiQueue.enqueue(`oddspapi:tournaments:${sid}`, async () => {
+      return await httpGet(url).catch(() => null);
+    });
     if (r && r.status === 200) {
       const data = safeParse(r.body, null);
       const list = data ? (Array.isArray(data) ? data : (Array.isArray(data.data) ? data.data : [])) : [];
@@ -301,7 +365,9 @@ async function fetchEsportsOddsOneBatch(batch, batchIndex0, totalBatches) {
   log('INFO', 'ODDS', `Buscando odds: lote ${batchIndex0 + 1}/${totalBatches} tids=[${batch.join(',')}] (round-robin)`);
 
   const url = `https://api.oddspapi.io/v4/odds-by-tournaments?bookmaker=1xbet&tournamentIds=${batch.join(',')}&oddsFormat=decimal&apiKey=${ODDSPAPI_KEY}`;
-  const r = await httpGet(url).catch(e => ({ status: 500, body: e.message }));
+  const r = await oddsPapiQueue.enqueue(`oddspapi:odds:${batch.join(',')}`, async () => {
+    return await httpGet(url).catch(e => ({ status: 500, body: e.message }));
+  });
 
   log('DEBUG', 'ODDS', `Lote ${batchIndex0 + 1}: status=${r.status} body=${(r.body || '').slice(0, 100)}`);
   lastApiResponse = `Lote ${batchIndex0 + 1}/${totalBatches}: HTTP ${r.status} | ${(r.body || '').slice(0, 150)}`;
@@ -1223,6 +1289,12 @@ const server = http.createServer(async (req, res) => {
     if (!t1 || !t2) { sendJson(res, { error: 'team1 e team2 obrigatórios' }, 400); return; }
     // force=1: bypassa TTL do cache (usado para partidas iminentes < 2h)
     if (parsed.query.force === '1') {
+      // Evita spam/429: se já está buscando odds, não reseta TTL de novo
+      if (esportsOddsFetching) {
+        const oNow = findOdds('esports', t1, t2);
+        sendJson(res, oNow || { error: 'odds não encontradas (fetch em andamento)' });
+        return;
+      }
       lastEsportsOddsUpdate = 0;
       log('INFO', 'ODDS', `Force refresh solicitado para ${t1} vs ${t2} (partida iminente)`);
     }
@@ -1377,7 +1449,7 @@ const server = http.createServer(async (req, res) => {
     const sport = parsed.query.sport || 'mma_mixed_martial_arts';
     try {
       const url = `https://api.the-odds-api.com/v4/sports/${sport}/odds/?apiKey=${THE_ODDS_API_KEY}&regions=eu&markets=h2h&oddsFormat=decimal`;
-      const r = await httpGet(url).catch(() => null);
+      const r = await theOddsGet(url);
       if (!r || r.status !== 200) { sendJson(res, { hasData: false }); return; }
       const events = safeParse(r.body, []);
       const nf1 = norm(fighter1), nf2 = norm(fighter2);
@@ -1548,10 +1620,20 @@ const server = http.createServer(async (req, res) => {
     req.on('end', () => {
       try {
         const { userId, username, subscribed, sportPrefs } = safeParse(body, {});
-        if (!userId) { sendJson(res, { error: 'Missing userId' }, 400); return; }
-        stmts.upsertUser.run(userId, username || '', subscribed ? 1 : 0, JSON.stringify(sportPrefs || []));
+        const uid = clampStr(userId, 80);
+        if (!uid) { badRequest(res, 'userId obrigatório'); return; }
+        const uname = clampStr(username, 80);
+        const prefs = Array.isArray(sportPrefs) ? sportPrefs.slice(0, 50) : [];
+        stmts.upsertUser.run(uid, uname, subscribed ? 1 : 0, JSON.stringify(prefs));
         sendJson(res, { ok: true });
-      } catch(e) { sendJson(res, { error: e.message }, 500); }
+      } catch(e) {
+        sendJson(res, {
+          error: e.message,
+          code: e.code,
+          provider: e.provider,
+          retryAfterMs: e.retryAfterMs
+        }, e.status || 500);
+      }
     });
     return;
   }
@@ -1577,25 +1659,40 @@ const server = http.createServer(async (req, res) => {
       try {
         const sport = parsed.query.sport || 'esports';
         const t = safeParse(body, {});
-        if (!t.matchId) { sendJson(res, { error: 'Missing matchId' }, 400); return; }
+        const matchId = clampStr(t.matchId, 128);
+        if (!matchId) { badRequest(res, 'matchId obrigatório'); return; }
+        const eventName = clampStr(t.eventName, 220);
+        const p1 = clampStr(t.p1 || t.team1 || t.fighter1, 120);
+        const p2 = clampStr(t.p2 || t.team2 || t.fighter2, 120);
+        const tipParticipant = clampStr(t.tipParticipant || t.tipTeam, 120);
+        const oddsN = parseFiniteNumber(t.odds);
+        const evN = parseFiniteNumber(t.ev);
+        if (!p1 || !p2) { badRequest(res, 'p1/p2 obrigatórios'); return; }
+        if (!tipParticipant) { badRequest(res, 'tipParticipant obrigatório'); return; }
+        if (oddsN == null || oddsN <= 1) { badRequest(res, 'odds inválidas'); return; }
+        if (evN == null) { badRequest(res, 'ev inválido'); return; }
         // Evitar tip duplicada para o mesmo match_id + sport
-        const existing = stmts.tipExistsByMatch.get(String(t.matchId), sport);
+        const existing = stmts.tipExistsByMatch.get(String(matchId), sport);
         if (existing) { sendJson(res, { ok: true, skipped: true, reason: 'duplicate' }); return; }
         const isLive = t.isLive ? 1 : 0;
-        const modelP1 = t.modelP1 != null ? parseFloat(t.modelP1) : null;
-        const modelP2 = t.modelP2 != null ? parseFloat(t.modelP2) : null;
-        const modelPPick = t.modelPPick != null ? parseFloat(t.modelPPick) : null;
-        const modelLabel = (t.modelLabel || '').toString().trim() || null;
-        const tipReason = (t.tipReason || '').toString().trim() || null;
+        const modelP1 = t.modelP1 != null ? parseFiniteNumber(t.modelP1) : null;
+        const modelP2 = t.modelP2 != null ? parseFiniteNumber(t.modelP2) : null;
+        const modelPPick = t.modelPPick != null ? parseFiniteNumber(t.modelPPick) : null;
+        const modelLabel = clampStr(t.modelLabel, 60) || null;
+        const tipReason = clampStr(t.tipReason, 600) || null;
+        const stakeStr = clampStr(t.stake, 20);
+        const confidenceStr = clampStr(t.confidence || 'MÉDIA', 20) || 'MÉDIA';
+        const botTokenStr = clampStr(t.botToken, 180);
+        const marketTypeStr = clampStr(t.market_type || 'ML', 20) || 'ML';
         const result = stmts.insertTip.run({
-          sport, matchId: String(t.matchId), eventName: t.eventName || '',
-          p1: t.p1 || t.team1 || t.fighter1 || '', p2: t.p2 || t.team2 || t.fighter2 || '',
-          tipParticipant: t.tipParticipant || t.tipTeam || '', odds: parseFloat(t.odds) || 0,
-          ev: parseFloat(t.ev) || 0, stake: String(t.stake || ''), confidence: t.confidence || 'MÉDIA',
-          isLive, botToken: t.botToken || '', market_type: t.market_type || 'ML',
-          model_p1: isFinite(modelP1) ? modelP1 : null,
-          model_p2: isFinite(modelP2) ? modelP2 : null,
-          model_p_pick: isFinite(modelPPick) ? modelPPick : null,
+          sport, matchId: String(matchId), eventName,
+          p1, p2,
+          tipParticipant, odds: oddsN,
+          ev: evN, stake: stakeStr, confidence: confidenceStr,
+          isLive, botToken: botTokenStr, market_type: marketTypeStr,
+          model_p1: modelP1,
+          model_p2: modelP2,
+          model_p_pick: modelPPick,
           model_label: modelLabel,
           tip_reason: tipReason
         });
@@ -1610,8 +1707,8 @@ const server = http.createServer(async (req, res) => {
           }
         } catch(_) {}
         // Grava odds de abertura para CLV tracking
-        if (t.odds) {
-          stmts.updateTipOpenOdds.run(parseFloat(t.odds), String(t.matchId), sport);
+        if (oddsN != null) {
+          stmts.updateTipOpenOdds.run(oddsN, String(matchId), sport);
         }
         stmts.incrementApiUsage.run(sport, new Date().toISOString().slice(0,7));
         sendJson(res, { ok: true, tipId: result?.lastInsertRowid || null });
@@ -1625,14 +1722,15 @@ const server = http.createServer(async (req, res) => {
     req.on('end', () => {
       try {
         const { tipId, factors, predictedDir } = safeParse(body, {});
-        const id = parseInt(tipId);
-        const dir = (predictedDir || '').toString().trim();
-        if (!id) { sendJson(res, { error: 'Missing tipId' }, 400); return; }
+        const id = parseInt(tipId, 10);
+        const dir = clampStr(predictedDir, 10);
+        if (!Number.isFinite(id) || id <= 0) { badRequest(res, 'tipId inválido'); return; }
         if (!Array.isArray(factors) || !factors.length) { sendJson(res, { ok: true, inserted: 0 }); return; }
-        if (dir !== 't1' && dir !== 't2') { sendJson(res, { error: 'Invalid predictedDir' }, 400); return; }
+        if (dir !== 't1' && dir !== 't2') { badRequest(res, 'predictedDir inválido'); return; }
+        if (factors.length > 80) { badRequest(res, 'factors grande demais'); return; }
         let inserted = 0;
         for (const f of factors) {
-          const factor = (f || '').toString().trim();
+          const factor = clampStr(f, 240);
           if (!factor) continue;
           try { stmts.logTipFactor.run(id, factor, dir, null); inserted++; } catch(_) {}
         }
@@ -2134,7 +2232,7 @@ const server = http.createServer(async (req, res) => {
             max_tokens: payload.max_tokens || 1800,
             messages: payload.messages
           };
-          const r = await httpsPost('https://api.deepseek.com/chat/completions', dsPayload, {
+          const r = await aiPost('deepseek', 'https://api.deepseek.com/chat/completions', dsPayload, {
             'Authorization': `Bearer ${DEEPSEEK_KEY}`,
             'content-type': 'application/json'
           });
@@ -2151,7 +2249,7 @@ const server = http.createServer(async (req, res) => {
           // ── Claude (Anthropic) ──
           const key = req.headers['x-claude-key'] || CLAUDE_KEY;
           if (!key) { sendJson(res, { error: 'Nenhuma AI key configurada (DEEPSEEK_API_KEY ou CLAUDE_API_KEY)' }, 401); return; }
-          const r = await httpsPost('https://api.anthropic.com/v1/messages', payload, {
+          const r = await aiPost('claude', 'https://api.anthropic.com/v1/messages', payload, {
             'x-api-key': key, 'anthropic-version': '2023-06-01', 'content-type': 'application/json'
           });
           res.writeHead(r.status, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
@@ -2169,7 +2267,11 @@ const server = http.createServer(async (req, res) => {
       try {
         const sport = parsed.query.sport || 'esports';
         const { matchId, clvOdds } = safeParse(body, {});
-        if (matchId && clvOdds) stmts.updateTipCLV.run(parseFloat(clvOdds), matchId, sport);
+        const mid = clampStr(matchId, 128);
+        const clv = parseFiniteNumber(clvOdds);
+        if (!mid) { badRequest(res, 'matchId obrigatório'); return; }
+        if (clv == null || clv <= 1) { badRequest(res, 'clvOdds inválido'); return; }
+        stmts.updateTipCLV.run(clv, mid, sport);
         sendJson(res, { ok: true });
       } catch(e) { sendJson(res, { error: e.message }, 500); }
     });
@@ -2182,13 +2284,14 @@ const server = http.createServer(async (req, res) => {
       try {
         const sport = parsed.query.sport || 'esports';
         const { matchId, currentOdds, currentEV, currentConfidence } = safeParse(body, {});
-        if (!matchId) { sendJson(res, { error: 'Missing matchId' }, 400); return; }
-        const o = parseFloat(currentOdds);
-        const ev = parseFloat(currentEV);
-        const conf = (currentConfidence || '').toString().trim() || null;
-        if (!isFinite(o) || o <= 1) { sendJson(res, { error: 'Invalid currentOdds' }, 400); return; }
-        if (!isFinite(ev)) { sendJson(res, { error: 'Invalid currentEV' }, 400); return; }
-        stmts.updateTipCurrent.run(o, ev, conf, String(matchId), sport);
+        const mid = clampStr(matchId, 128);
+        if (!mid) { badRequest(res, 'matchId obrigatório'); return; }
+        const o = parseFiniteNumber(currentOdds);
+        const ev = parseFiniteNumber(currentEV);
+        const conf = clampStr(currentConfidence, 24) || null;
+        if (o == null || o <= 1) { badRequest(res, 'currentOdds inválido'); return; }
+        if (ev == null) { badRequest(res, 'currentEV inválido'); return; }
+        stmts.updateTipCurrent.run(o, ev, conf, String(mid), sport);
         sendJson(res, { ok: true });
       } catch(e) { sendJson(res, { error: e.message }, 500); }
     });
@@ -2199,7 +2302,7 @@ const server = http.createServer(async (req, res) => {
     if (!THE_ODDS_API_KEY) { sendJson(res, []); return; }
     try {
       const mmaUrl = `https://api.the-odds-api.com/v4/sports/mma_mixed_martial_arts/odds/?apiKey=${THE_ODDS_API_KEY}&regions=eu&markets=h2h&oddsFormat=decimal`;
-      const r = await httpGet(mmaUrl).catch(() => ({ status: 500, body: '[]' }));
+      const r = await theOddsGet(mmaUrl);
       if (r.status !== 200) { sendJson(res, []); return; }
       const raw = safeParse(r.body, []);
       const now = Date.now();
@@ -2238,8 +2341,8 @@ const server = http.createServer(async (req, res) => {
       const LIVE_WINDOW_MS = parseInt(process.env.TENNIS_LIVE_WINDOW_H || '6', 10) * 60 * 60 * 1000; // default 6h
 
       // 1) Busca todos os sports ativos na API e filtra os de tênis
-      const sportsR = await httpGet(`https://api.the-odds-api.com/v4/sports/?apiKey=${THE_ODDS_API_KEY}`)
-        .catch(() => ({ status: 500, body: '[]' }));
+      if (!oddsApiAllowed('ODDS')) { sendJson(res, []); return; }
+      const sportsR = await theOddsGet(`https://api.the-odds-api.com/v4/sports/?apiKey=${THE_ODDS_API_KEY}`);
       const allSports = safeParse(sportsR.body, []);
       const tennisKeys = allSports
         .filter(s => s.key && s.key.startsWith('tennis_') && s.active !== false)
@@ -2248,18 +2351,20 @@ const server = http.createServer(async (req, res) => {
       if (!tennisKeys.length) { sendJson(res, []); return; }
 
       // 2) Busca odds em paralelo (limita a 10 torneios para não estourar quota)
-      const results = await Promise.allSettled(
-        tennisKeys.slice(0, 10).map(k =>
-          httpGet(`https://api.the-odds-api.com/v4/sports/${k}/odds/?apiKey=${THE_ODDS_API_KEY}&regions=eu&markets=h2h&oddsFormat=decimal`)
-            .catch(() => ({ status: 500, body: '[]' }))
-        )
-      );
-
+      // Cada torneio = 1 request
+      const maxKeys = Math.min(10, tennisKeys.length);
+      const allowedKeys = [];
+      for (const k of tennisKeys.slice(0, maxKeys)) {
+        if (!oddsApiAllowed('ODDS')) break;
+        allowedKeys.push(k);
+      }
       const matches = [];
-      for (let i = 0; i < results.length; i++) {
-        const r2 = results[i];
-        if (r2.status !== 'fulfilled' || r2.value.status !== 200) continue;
-        const raw = safeParse(r2.value.body, []);
+      for (const k of allowedKeys) {
+        if (!oddsApiAllowed('ODDS')) break;
+        const urlOdds = `https://api.the-odds-api.com/v4/sports/${k}/odds/?apiKey=${THE_ODDS_API_KEY}&regions=eu&markets=h2h&oddsFormat=decimal`;
+        const r2 = await theOddsGet(urlOdds);
+        if (!r2 || r2.status !== 200) continue;
+        const raw = safeParse(r2.body, []);
         for (const e of raw) {
           const t = new Date(e.commence_time).getTime();
           // upcoming: agora → 7d
@@ -2275,7 +2380,7 @@ const server = http.createServer(async (req, res) => {
           matches.push({
             id: e.id,
             game: 'tennis',
-            sport_key: tennisKeys[i],
+            sport_key: k,
             status: (t <= now ? 'live' : 'upcoming'),
             team1: e.home_team,
             team2: e.away_team,
@@ -2305,18 +2410,13 @@ const server = http.createServer(async (req, res) => {
       const configured = (process.env.FOOTBALL_LEAGUES || 'soccer_brazil_serie_b,soccer_brazil_serie_c')
         .split(',').map(s => s.trim()).filter(Boolean);
 
-      const results = await Promise.allSettled(
-        configured.map(k =>
-          httpGet(`https://api.the-odds-api.com/v4/sports/${k}/odds/?apiKey=${THE_ODDS_API_KEY}&regions=eu&markets=h2h,totals&oddsFormat=decimal`)
-            .catch(() => ({ status: 500, body: '[]' }))
-        )
-      );
-
       const matches = [];
-      for (let i = 0; i < results.length; i++) {
-        const r2 = results[i];
-        if (r2.status !== 'fulfilled' || r2.value.status !== 200) continue;
-        const raw = safeParse(r2.value.body, []);
+      for (const k of configured) {
+        if (!oddsApiAllowed('ODDS')) break;
+        const urlOdds = `https://api.the-odds-api.com/v4/sports/${k}/odds/?apiKey=${THE_ODDS_API_KEY}&regions=eu&markets=h2h,totals&oddsFormat=decimal`;
+        const r2 = await theOddsGet(urlOdds);
+        if (!r2 || r2.status !== 200) continue;
+        const raw = safeParse(r2.body, []);
         for (const e of raw) {
           const t = new Date(e.commence_time).getTime();
           if (t <= now || t > weekAhead) continue;
@@ -2343,7 +2443,7 @@ const server = http.createServer(async (req, res) => {
           matches.push({
             id: e.id,
             game: 'football',
-            sport_key: configured[i],
+            sport_key: k,
             status: 'upcoming',
             team1: e.home_team,
             team2: e.away_team,
