@@ -111,6 +111,10 @@ async function fetchOdds(sport) {
 let esportsBackoffUntil = 0;
 const ESPORTS_BACKOFF_TTL = 2 * 60 * 60 * 1000;
 
+// Cooldown por match para force refresh (anti-429)
+const lastForceRefreshByPair = new Map(); // key -> ts
+const FORCE_REFRESH_COOLDOWN_MS = (parseInt(process.env.ODDSPAPI_FORCE_COOLDOWN_S || '300', 10) || 300) * 1000; // 5min default
+
 // Round-robin: rastreia qual lote buscar no próximo ciclo
 let esportsBatchCursor = 0;
 
@@ -1398,12 +1402,29 @@ const server = http.createServer(async (req, res) => {
     if (!t1 || !t2) { sendJson(res, { error: 'team1 e team2 obrigatórios' }, 400); return; }
     // force=1: bypassa TTL do cache (usado para partidas iminentes < 2h)
     if (parsed.query.force === '1') {
+      // Se backoff ativo, nunca force (só aumenta spam e não atualiza mesmo)
+      if (Date.now() < esportsBackoffUntil) {
+        const oNow = findOdds('esports', t1, t2);
+        sendJson(res, oNow || { error: 'odds indisponíveis (backoff ativo)' });
+        return;
+      }
       // Evita spam/429: se já está buscando odds, não reseta TTL de novo
       if (esportsOddsFetching) {
         const oNow = findOdds('esports', t1, t2);
         sendJson(res, oNow || { error: 'odds não encontradas (fetch em andamento)' });
         return;
       }
+
+      // Cooldown por par de times (mesmo que o bot chame em loop)
+      const pairKey = `${norm(t1)}v${norm(t2)}`;
+      const lastTs = lastForceRefreshByPair.get(pairKey) || 0;
+      if (lastTs && (Date.now() - lastTs) < FORCE_REFRESH_COOLDOWN_MS) {
+        const oNow = findOdds('esports', t1, t2);
+        sendJson(res, oNow || { error: 'odds não encontradas' });
+        return;
+      }
+      lastForceRefreshByPair.set(pairKey, Date.now());
+
       lastEsportsOddsUpdate = 0;
       log('INFO', 'ODDS', `Force refresh solicitado para ${t1} vs ${t2} (partida iminente)`);
     }

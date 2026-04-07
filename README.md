@@ -128,6 +128,11 @@ DB_PATH=/data/sportsedge.db            # Railway: volume montado em /data
 # ── Admin ──
 ADMIN_USER_IDS=123456789,987654321      # IDs numéricos Telegram (obtenha via @userinfobot)
                                         # Admin é inscrito automaticamente a cada boot
+ADMIN_KEY=sua_chave_admin               # Opcional (recomendado): protege rotas admin do `server.js` (header `x-admin-key`)
+
+# ── Risk Manager global (cross-sport) ──
+GLOBAL_RISK_PCT=0.10                    # Exposição máxima global (tips pendentes) vs banca total (padrão 10%)
+SPORT_RISK_PCT=0.20                     # Exposição máxima por esporte vs banca do esporte (padrão 20%)
 
 # ── Feature flags ──
 ESPORTS_ENABLED=true
@@ -160,6 +165,7 @@ ESPORTS_ODDS_TTL_H=3                    # Horas entre ciclos round-robin (padrã
 ODDSPAPI_BOOTSTRAP=true                 # Após deploy: busca vários lotes seguidos p/ encher cache (cuidado: +requisições)
 ODDSPAPI_BOOTSTRAP_MS=2500              # Intervalo mínimo entre lotes no bootstrap (ms, padrão 2500)
 ODDSPAPI_ESPORTS_SPORT_ID=18            # sportId LoL na OddsPapi (padrão 18)
+ODDSPAPI_FORCE_COOLDOWN_S=300           # Cooldown do `force=1` por par de times (s) — reduz risco de 429
 
 # ── LoL — ligas extras além da whitelist interna ──
 LOL_EXTRA_LEAGUES=slug1,slug2           # opcional, separado por vírgula
@@ -261,6 +267,7 @@ O bot opera em **modo totalmente automático**. O usuário interage pelos botõe
 | `/users` | Status do banco de dados |
 | `/pending` | Tips pendentes de settlement |
 | `/settle` | Força settlement imediato |
+| `/refresh-open` | Reanalisa tips pendentes e atualiza `current_odds/current_ev` (notificação enviada 1x por tip) |
 | `/slugs` | Slugs de liga reconhecidos + desconhecidos vistos (diagnóstico) |
 | `/lolraw` | Dump do schedule Riot por liga (diagnóstico) |
 
@@ -300,7 +307,7 @@ Cada esporte exibe fair odds calculadas pelo **próprio modelo de análise do si
 | Re-análise sem edge | 2× cooldown | Partidas sem edge têm cooldown dobrado para economizar tokens |
 | Notificação ao vivo | 1 min | Avisa sobre draft iniciado e partida ao vivo |
 | Line movement | 30 min | Alerta se odds mudaram >= 10% desde o último snapshot |
-| Settlement | 30 min | Resolve tips pendentes via Riot API e PandaScore |
+| Settlement | 30 min | Resolve tips pendentes (LoL via Riot/PandaScore, Futebol via API-Football, MMA/Tênis via ESPN) |
 | Sync pro stats | 12h (+ boot) | Busca até 400 partidas pro (últimos 45 dias) via PandaScore → popula WR de campeões, jogadores, forma e H2H |
 | Patch meta auto-fetch | 14 dias | Busca versão atual no ddragon e atualiza `LOL_PATCH_META` automaticamente |
 | Patch meta stale alert | 24h | Avisa admins se patch meta não foi atualizado há mais de 14 dias |
@@ -310,6 +317,7 @@ Cada esporte exibe fair odds calculadas pelo **próprio modelo de análise do si
 | Cache ESPN MMA | 1h | Scoreboard de lutas da carta atual do UFC |
 | Cache ESPN atletas | 6h | Records individuais buscados via athlete search |
 | Cache ESPN tênis | 3h | Rankings ATP/WTA (150 por tour) |
+| Reanálise tips em andamento | 10 min | Atualiza `current_odds/current_ev` no DB e no dashboard (notifica Telegram 1x por tip) |
 
 ---
 
@@ -319,10 +327,12 @@ O pré-filtro ML (`lib/ml.js`) calcula um edge score baseado em até 4 fatores. 
 
 | Fator | Fonte | Peso | Justificativa | Disponível quando |
 |-------|-------|------|---------------|-------------------|
-| Forma recente (win rate diferencial) | `match_results` (últimos 45 dias) | 0.25 | Forma recente é preditor moderado, mas sujeito a variação | Após sync pro stats |
-| H2H (histórico direto) | `match_results` (últimos 45 dias) | 0.30 | H2H é forte preditor em esports, especialmente em matchups específicos | Após sync pro stats |
-| Comp/meta score (WR médio dos campeões em pro play) | `pro_champ_stats` | 0.35 | Composição é fator mais importante no LoL competitivo | Draft disponível + sync feito |
+| Forma recente (win rate diferencial) | `match_results` (últimos 45 dias) | dinâmico (padrão 0.25) | Forma recente é preditor moderado, mas sujeito a variação | Após sync pro stats |
+| H2H (histórico direto) | `match_results` (últimos 45 dias) | dinâmico (padrão 0.30) | H2H é forte preditor em esports, especialmente em matchups específicos | Após sync pro stats |
+| Comp/meta score (WR médio dos campeões em pro play) | `pro_champ_stats` | dinâmico (padrão 0.35) | Composição é fator mais importante no LoL competitivo | Draft disponível + sync feito |
 | Live stats | Riot/PandaScore ao vivo | extra `factorCount` | Dados ao vivo atualizam probabilidade em tempo real | Partida ao vivo |
+
+Os pesos dinâmicos ficam em `ml_factor_weights` e são recalculados semanalmente (com base na acurácia recente por fator, **janela 45 dias**). Veja `GET /ml-weights` no dashboard.
 
 **Threshold mínimo:** Quando compScore está disponível, edge mínimo de 3pp é exigido. Justificativa: composições conhecidas reduzem incerteza, permitindo threshold mais baixo para edge significativo.
 
@@ -628,6 +638,7 @@ O settlement itera pelas tips não resolvidas e detecta o endpoint correto pelo 
 | `GET /unsettled-tips` | Tips aguardando resultado |
 | `GET /tips-history` | Histórico de tips com filtros |
 | `GET /roi` | ROI total, calibração por confiança, split ao vivo/pré-jogo |
+| `GET /risk-snapshot` | Snapshot global de risco (banca + exposição pendente por esporte) — usado pelo Global Risk Manager |
 | `GET /team-form?team=X&game=X` | Forma recente do time (exato → fuzzy LIKE, últimos 45 dias via SQL) |
 | `GET /h2h?team1=X&team2=Y&game=X` | Histórico H2H (exato → fuzzy LIKE, últimos 45 dias via SQL) |
 | `GET /odds-movement` | Variação de odds nas últimas 24h |
@@ -648,6 +659,8 @@ O settlement itera pelas tips não resolvidas e detecta o endpoint correto pelo 
 
 | Rota | O que retorna |
 |------|--------------|
+| `GET /health` | Saúde do serviço + métricas-lite (inclui contadores de 429 e cache HTTP) |
+| `GET /metrics-lite` | Métricas-lite (cache HTTP, 429 por provedor) |
 | `GET /debug-odds` | Cache completo de odds: slugs, TTL, backoff restante, estado do round-robin (`cursor`, `nextBatch`, `totalBatches`, `nextTids`, `cycleCompletesIn`) |
 | `GET /debug-teams` | Todos os times do schedule (Riot + PandaScore) com `team1norm`, `team2norm`, `hasOdds` e `league` — permite identificar mismatches de nome |
 | `GET /debug-match-odds?team1=X&team2=Y` | Testa matching de odds para um par específico, mostrando variantes e aliases verificados |
