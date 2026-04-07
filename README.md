@@ -230,7 +230,7 @@ npm run bot         # node bot.js
 | `[ODDS] Bootstrap concluído — ~N entradas` | Cache esports aquecido após sequência de lotes. |
 | `[LOL] … odds: A/B \| sem match: slugs` | **A** partidas com par no cache OddsPapi; slugs listados = nomes que não casaram (ver aliases `/debug-match-odds`). |
 | `[SYNC] pro_champ_stats vazio mas … synced` | Inconsistência DB → **resync completo** PandaScore (detalhe na secção sync). |
-| `[SYNC] Pro stats: … 0 champs, 0 player` | Partidas ingeridas sem picks suficientes no payload → comp/meta do ML fraco até próximo sync. |
+| `[SYNC] Pro stats: … 0 champs, 0 player` | PandaScore não retornou picks detalhados (ou faltou `include` no request). Sem isso, comp/meta do ML fica fraco até o próximo sync bem-sucedido. |
 | `[AUTO] Analisando: X vs Y \| sinais=N/6 \| evThreshold=X% \| mlEdge=Y.Ypp` | Pré-jogo/live LoL: sinais ML disponíveis, threshold adaptativo de EV e edge do modelo vs mercado. |
 | `[AUTO] Sem tip: X vs Y → IA sem edge \| P(X)=N% P(Y)=M% \| EV(X)=+N% \| Sinais:N/6 \| mlEdge=Y.Ypp` | IA ou gates não aprovaram tip; inclui probabilidades estimadas, EV e edge ML. |
 | `[AUTO] Gate odds … [min, max]` | Odd sugerida fora de `LOL_MIN_ODDS` / `LOL_MAX_ODDS` (padrão 1.50–4.00; em produção pode aparecer como `[1.4, 8]` se você configurou esses envs). |
@@ -661,6 +661,7 @@ O settlement itera pelas tips não resolvidas e detecta o endpoint correto pelo 
 |------|--------------|
 | `GET /health` | Saúde do serviço + métricas-lite (inclui contadores de 429 e cache HTTP) |
 | `GET /metrics-lite` | Métricas-lite (cache HTTP, 429 por provedor) |
+| `GET /lol-role-impact` | Impacto médio por role (gol.gg) — via `scripts/sync-golgg-role-impact.js` |
 | `GET /debug-odds` | Cache completo de odds: slugs, TTL, backoff restante, estado do round-robin (`cursor`, `nextBatch`, `totalBatches`, `nextTids`, `cycleCompletesIn`) |
 | `GET /debug-teams` | Todos os times do schedule (Riot + PandaScore) com `team1norm`, `team2norm`, `hasOdds` e `league` — permite identificar mismatches de nome |
 | `GET /debug-match-odds?team1=X&team2=Y` | Testa matching de odds para um par específico, mostrando variantes e aliases verificados |

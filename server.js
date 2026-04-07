@@ -2457,6 +2457,17 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // ── LoL role impact (gol.gg via PandaTobi repo) ──
+  if (p === '/lol-role-impact') {
+    try {
+      const rows = db.prepare('SELECT * FROM golgg_role_impact ORDER BY role').all();
+      sendJson(res, { ok: true, roles: rows });
+    } catch (e) {
+      sendJson(res, { ok: false, error: e.message }, 500);
+    }
+    return;
+  }
+
   // ── AI Proxy (DeepSeek ou Claude) ──
   if (p === '/claude' && req.method === 'POST') {
     let body = ''; req.on('data', d => body += d);
@@ -2802,6 +2813,22 @@ async function syncProStats({ forceResync = false } = {}) {
 
   const currentPatch = (process.env.LOL_PATCH_META || '').match(/\d+\.\d+/)?.[0] || 'current';
 
+  const champNameOf = (pl) => {
+    const c = pl?.champion;
+    if (!c) return null;
+    if (typeof c === 'string') return c;
+    return c.name || c.slug || c.id || null;
+  };
+  const roleOf = (pl) => {
+    const r = pl?.role || pl?.position || pl?.lane || pl?.player_role || pl?.playerRole;
+    if (!r) return null;
+    return String(r).toLowerCase();
+  };
+  const playerNameOf = (pl) => {
+    const p = pl?.player;
+    return p?.name || p?.slug || pl?.name || pl?.nickname || null;
+  };
+
   for (const m of matches) {
     const psId = `ps_${m.id}`;
     if (!forceResync && stmts.isMatchSynced.get(psId)) { skipped++; continue; }
@@ -2819,7 +2846,9 @@ async function syncProStats({ forceResync = false } = {}) {
 
     // Busca detalhes do jogo para picks de campeões
     try {
-      const detR = await httpGet(`https://api.pandascore.co/lol/matches/${m.id}`, headers);
+      // PandaScore: precisa de include para popular players/champions em alguns planos/versões
+      const include = 'games.teams.players.player,games.teams.players.champion,games.winner';
+      const detR = await httpGet(`https://api.pandascore.co/lol/matches/${m.id}?include=${encodeURIComponent(include)}`, headers);
       if (detR.status === 200) {
         const det = safeParse(detR.body, {});
         const games = Array.isArray(det.games) ? det.games : [];
@@ -2831,11 +2860,12 @@ async function syncProStats({ forceResync = false } = {}) {
           for (const teamObj of teams) {
             const teamId = teamObj.team?.id;
             const won = teamId === winnerId;
-            const players = Array.isArray(teamObj.players) ? teamObj.players : [];
+            const players = Array.isArray(teamObj.players) ? teamObj.players : (Array.isArray(teamObj?.players?.data) ? teamObj.players.data : []);
             for (const pl of players) {
-              const champ  = pl.champion?.name;
-              const role   = pl.role;
-              const player = pl.player?.name || pl.name;
+              const champ = champNameOf(pl);
+              const roleRaw = roleOf(pl);
+              const player = playerNameOf(pl);
+              const role = roleRaw ? roleRaw.replace(/[^a-z0-9]/g, '') : null;
               if (!champ || !role) continue;
 
               // Champ stats (pool de campeões pro play)

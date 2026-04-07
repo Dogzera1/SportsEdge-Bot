@@ -122,6 +122,24 @@ const migrations = [
       db.prepare('INSERT OR IGNORE INTO ml_factor_weights (factor, weight, wins, total) VALUES (?,?,0,0)').run('comp', 0.35);
     },
   },
+  {
+    id: '011_golgg_role_impact',
+    up(db) {
+      if (tableExists(db, 'golgg_role_impact')) return;
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS golgg_role_impact (
+          role TEXT PRIMARY KEY,
+          sample_games REAL NOT NULL DEFAULT 0,
+          winrate REAL,
+          gpm REAL,
+          dmg_pct REAL,
+          kda REAL,
+          source TEXT DEFAULT 'gol.gg',
+          updated_at TEXT DEFAULT (datetime('now'))
+        );
+      `);
+    },
+  },
 ];
 
 function applyMigrations(db) {
