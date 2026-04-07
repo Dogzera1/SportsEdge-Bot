@@ -113,6 +113,15 @@ const migrations = [
       addColumnIfMissing(db, 'tips', 'last_notified_at', 'last_notified_at TEXT');
     },
   },
+  {
+    id: '010_seed_ml_factor_weights',
+    up(db) {
+      if (!tableExists(db, 'ml_factor_weights')) return;
+      db.prepare('INSERT OR IGNORE INTO ml_factor_weights (factor, weight, wins, total) VALUES (?,?,0,0)').run('forma', 0.25);
+      db.prepare('INSERT OR IGNORE INTO ml_factor_weights (factor, weight, wins, total) VALUES (?,?,0,0)').run('h2h', 0.30);
+      db.prepare('INSERT OR IGNORE INTO ml_factor_weights (factor, weight, wins, total) VALUES (?,?,0,0)').run('comp', 0.35);
+    },
+  },
 ];
 
 function applyMigrations(db) {
