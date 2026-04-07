@@ -2386,7 +2386,19 @@ server.listen(PORT, '0.0.0.0', () => {
 
   // Sync inicial de stats pro + job recorrente a cada 12h
   if (PANDASCORE_TOKEN) {
-    setTimeout(() => syncProStats().catch(e => log('ERROR', 'SYNC', e.message)), 5000);
+    setTimeout(async () => {
+      try {
+        // Auto-detect: se pro_champ_stats está vazio mas synced_matches já tem entradas,
+        // o DB foi recriado sem repopular os stats — força resync completo
+        const champCount = db.prepare('SELECT COUNT(*) as cnt FROM pro_champ_stats').get();
+        const syncedCount = db.prepare('SELECT COUNT(*) as cnt FROM synced_matches').get();
+        const forceResync = (champCount?.cnt ?? 0) === 0 && (syncedCount?.cnt ?? 0) > 0;
+        if (forceResync) {
+          log('WARN', 'SYNC', `pro_champ_stats vazio mas ${syncedCount.cnt} matches já marcados como synced — forçando resync completo`);
+        }
+        await syncProStats({ forceResync });
+      } catch(e) { log('ERROR', 'SYNC', e.message); }
+    }, 5000);
     setInterval(() => syncProStats().catch(e => log('ERROR', 'SYNC', e.message)), 12 * 60 * 60 * 1000);
   }
 
