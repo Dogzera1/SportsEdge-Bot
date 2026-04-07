@@ -9,5 +9,4 @@ restartPolicyMaxRetries = 5
 [[deploy.healthchecks]]
 type = "http"
 path = "/health"
-port = 3000
 initialDelaySeconds = 15

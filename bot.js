@@ -3950,12 +3950,12 @@ async function refreshOpenTips() {
         const p = Math.max(0.01, Math.min(0.99, (1 + oldEv / 100) / oldOdds));
         const newEv = ((p * currentOdds) - 1) * 100;
 
-        // Dedup: evita spam para mesma tip em janela (cache + DB last_notified_at)
+        // Dedup: notificação deve ser mostrada apenas 1 vez por tip
         const key = `${sport}|${String(tip.match_id || '')}|${norm(pick)}|${String(tip.market_type || 'ML')}`;
         const cachedTs = tipUpdateNotifyCache.get(key) || 0;
         const dbTs = tip.last_notified_at ? new Date(String(tip.last_notified_at)).getTime() : 0;
-        const lastTs = Math.max(cachedTs, isFinite(dbTs) ? dbTs : 0);
-        const shouldNotify = !lastTs || (now - lastTs) >= TIP_UPDATE_DEDUP_MS;
+        const everNotified = !!cachedTs || (!!dbTs && isFinite(dbTs));
+        const shouldNotify = !everNotified;
 
         await serverPost('/update-open-tip', {
           matchId: tip.match_id,
@@ -3968,10 +3968,7 @@ async function refreshOpenTips() {
         if (!shouldNotify) continue;
 
         tipUpdateNotifyCache.set(key, now);
-        // limpa chaves antigas
-        for (const [k, ts] of tipUpdateNotifyCache) {
-          if (ts < now - (TIP_UPDATE_DEDUP_MS * 2)) tipUpdateNotifyCache.delete(k);
-        }
+        // NÃO limpar: 1x por tip (evita repetir)
 
         // Notifica inscritos do esporte
         const msg =
