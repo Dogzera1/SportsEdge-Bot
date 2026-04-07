@@ -1845,6 +1845,70 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (p === '/dashboard' || p === '/') {
+    const htmlPath = path.join(__dirname, 'public', 'dashboard.html');
+    try {
+      const html = fs.readFileSync(htmlPath, 'utf8');
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(html);
+    } catch(_) {
+      res.writeHead(404); res.end('Dashboard not found');
+    }
+    return;
+  }
+
+  if (p === '/calibration') {
+    const sport = parsed.query.sport || 'esports';
+    try {
+      const tips = db.prepare(
+        `SELECT odds, ev, confidence, result, is_live FROM tips WHERE sport = ? AND result IN ('win','loss')`
+      ).all(sport);
+
+      const NUM_BUCKETS = 10;
+      const buckets = Array.from({ length: NUM_BUCKETS }, (_, i) => ({
+        bucket: `${i*10}-${i*10+10}%`,
+        predicted: i * 10 + 5,
+        wins: 0,
+        total: 0,
+        actual: 0
+      }));
+
+      let brierSum = 0, logLossSum = 0, n = 0;
+
+      for (const t of tips) {
+        const odds = parseFloat(t.odds) || 0;
+        if (odds <= 1) continue;
+        const ev = parseFloat(String(t.ev || '0').replace('%','').replace('+','')) / 100;
+        // p derived from EV and odds (best approximation without modelP stored)
+        const p = Math.max(0.01, Math.min(0.99, (ev + 1) / odds));
+        const isWin = t.result === 'win' ? 1 : 0;
+
+        const idx = Math.min(NUM_BUCKETS - 1, Math.floor(p * NUM_BUCKETS));
+        buckets[idx].total++;
+        buckets[idx].wins += isWin;
+
+        // Brier score: (p - outcome)^2
+        brierSum += Math.pow(p - isWin, 2);
+        // Log loss: -(outcome * log(p) + (1-outcome) * log(1-p))
+        logLossSum += -(isWin * Math.log(p) + (1 - isWin) * Math.log(1 - p));
+        n++;
+      }
+
+      for (const b of buckets) {
+        b.actual = b.total > 0 ? parseFloat((b.wins / b.total * 100).toFixed(1)) : null;
+      }
+
+      sendJson(res, {
+        sport,
+        buckets: buckets.filter(b => b.total > 0),
+        brierScore: n > 0 ? brierSum / n : null,
+        logLoss: n > 0 ? logLossSum / n : null,
+        total: n
+      });
+    } catch(e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
   // ── Bankroll endpoints ──
   if (p === '/bankroll') {
     const sport = parsed.query.sport || 'esports';
@@ -2002,6 +2066,14 @@ const server = http.createServer(async (req, res) => {
     try {
       const s = stmts.getDBStatus.get(sport, sport, sport, sport, sport, sport);
       sendJson(res, s || {});
+    } catch(e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
+  if (p === '/ml-weights') {
+    try {
+      const rows = stmts.getAllFactorWeights.all();
+      sendJson(res, { weights: rows.length ? rows : 'usando padrão', defaults: { forma: 0.25, h2h: 0.30, comp: 0.35 } });
     } catch(e) { sendJson(res, { error: e.message }, 500); }
     return;
   }
@@ -2434,6 +2506,15 @@ server.listen(PORT, '0.0.0.0', () => {
   setInterval(() => {
     try { stmts.cleanOldOdds.run(); } catch(_) {}
   }, 6 * 60 * 60 * 1000);
+
+  // Weekly ML weight recalculation
+  const { recalcWeights, settleFactorLogs } = require('./lib/ml-weights');
+  setInterval(() => {
+    settleFactorLogs(stmts, log);
+    recalcWeights(stmts, log);
+  }, 7 * 24 * 60 * 60 * 1000); // weekly
+  // Also run on boot after 5 min
+  setTimeout(() => { settleFactorLogs(stmts, log); recalcWeights(stmts, log); }, 5 * 60 * 1000);
 });
 
 // Funções de Fallback e Helpers

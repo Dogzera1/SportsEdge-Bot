@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const initDatabase = require('./lib/database');
 const { SPORTS, getSportById, getSportByToken, getTokenToSportMap } = require('./lib/sports');
-const { log, calcKelly, calcKellyFraction, norm, fmtDate, fmtDateTime, fmtDuration, safeParse } = require('./lib/utils');
+const { log, calcKelly, calcKellyFraction, calcKellyWithP, norm, fmtDate, fmtDateTime, fmtDuration, safeParse } = require('./lib/utils');
 const { esportsPreFilter } = require('./lib/ml');
 const { fetchMatchNews } = require('./lib/news');
 
@@ -242,7 +242,7 @@ async function loadExistingTips() {
     const [esportsTips, mmaTips, tennisTips, footballTips] = await Promise.all([
       serverGet('/unsettled-tips', 'esports').catch(() => []),
       serverGet('/unsettled-tips?days=30', 'mma').catch(() => []),
-      serverGet('/unsettled-tips?days=14', 'tennis').catch(() => []),
+      serverGet('/unsettled-tips?days=30', 'tennis').catch(() => []),
       serverGet('/unsettled-tips?days=30', 'football').catch(() => [])
     ]);
     if (Array.isArray(esportsTips)) {
@@ -365,7 +365,12 @@ async function runAutoAnalysis() {
           const tipConf = (result.tipMatch[5] || 'MÉDIA').trim().toUpperCase();
           // Kelly adaptado por confiança: ALTA → ¼ Kelly (max 4u) | MÉDIA → ⅙ Kelly (max 3u) | BAIXA → 1/10 Kelly (max 1.5u)
           const kellyFraction = tipConf === 'ALTA' ? 0.25 : tipConf === 'BAIXA' ? 0.10 : 1/6;
-          const tipStake = calcKellyFraction(tipEV, tipOdd, kellyFraction);
+          // Usa p do modelo ML quando disponível (evita circularidade p←EV←IA)
+          const isT1bet = norm(tipTeam).includes(norm(match.team1)) || norm(match.team1).includes(norm(tipTeam));
+          const modelPForKelly = (result.modelP1 > 0) ? (isT1bet ? result.modelP1 : result.modelP2) : null;
+          const tipStake = modelPForKelly
+            ? calcKellyWithP(modelPForKelly, tipOdd, kellyFraction)
+            : calcKellyFraction(tipEV, tipOdd, kellyFraction);
           const gameIcon = '🎮';
           const oddsLabel = hasRealOdds ? '' : '\n⚠️ _Odds estimadas (sem mercado disponível)_';
           const mlEdgeLabel = result.mlScore > 0 ? ` | ML: ${result.mlScore.toFixed(1)}pp` : '';
@@ -563,7 +568,12 @@ async function runAutoAnalysis() {
 
             // ALTA → ¼ Kelly (max 4u) | MÉDIA → ⅙ Kelly (max 3u) | BAIXA → 1/10 Kelly (max 1.5u)
             const kellyFraction = tipConf === 'ALTA' ? 0.25 : tipConf === 'BAIXA' ? 0.10 : 1/6;
-            const tipStake = calcKellyFraction(tipEV, tipOdd, kellyFraction);
+            // Usa p do modelo ML quando disponível (evita circularidade p←EV←IA)
+            const isT1bet = norm(tipTeam).includes(norm(match.team1)) || norm(match.team1).includes(norm(tipTeam));
+            const modelPForKelly = (result.modelP1 > 0) ? (isT1bet ? result.modelP1 : result.modelP2) : null;
+            const tipStake = modelPForKelly
+              ? calcKellyWithP(modelPForKelly, tipOdd, kellyFraction)
+              : calcKellyFraction(tipEV, tipOdd, kellyFraction);
             const gameIcon = '🎮';
             const confEmoji = { ALTA: '🟢', MÉDIA: '🟡', BAIXA: '🔵' }[tipConf] || '🟡';
             const kellyLabel = tipConf === 'ALTA' ? '¼ Kelly' : tipConf === 'BAIXA' ? '1/10 Kelly' : '⅙ Kelly';
@@ -627,7 +637,7 @@ async function settleCompletedTips() {
     if (!SPORTS[sport].enabled) continue;
 
     try {
-      const unsettled = await serverGet('/unsettled-tips?days=14', sport);
+      const unsettled = await serverGet('/unsettled-tips?days=30', sport);
       if (!Array.isArray(unsettled) || !unsettled.length) continue;
 
       let settled = 0;
@@ -1348,7 +1358,7 @@ async function autoAnalyzeMatch(token, match) {
     } else {
       log('INFO', 'AUTO', `${match.team1} vs ${match.team2} | odds=${o?.t1||'N/A'} hasRealOdds=${hasRealOdds} tipMatch=true mlEdge=${mlResult.score.toFixed(1)}pp`);
     }
-    return { text, tipMatch: filteredTipResult, hasLiveStats, liveGameNumber, match, o, mlScore: mlResult.score };
+    return { text, tipMatch: filteredTipResult, hasLiveStats, liveGameNumber, match, o, mlScore: mlResult.score, modelP1: mlResult.modelP1, modelP2: mlResult.modelP2 };
   } catch(e) {
     log('ERROR', 'AUTO', `Error for ${match.team1} vs ${match.team2}: ${e.message}`);
     return null;

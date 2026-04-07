@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SportsEdge Dashboard</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <style>
+    /* dark theme, card grid, responsive */
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Segoe UI', sans-serif; background: #0f1117; color: #e0e0e0; min-height: 100vh; }
+    header { background: #1a1d2e; padding: 1rem 2rem; border-bottom: 2px solid #7c3aed; display: flex; align-items: center; gap: 1rem; }
+    header h1 { font-size: 1.4rem; color: #a78bfa; }
+    header span { font-size: 0.8rem; color: #6b7280; }
+
+    .sport-tabs { display: flex; gap: 0.5rem; padding: 1rem 2rem; background: #13151f; flex-wrap: wrap; }
+    .sport-tab { padding: 0.5rem 1.2rem; border-radius: 6px; border: 1px solid #374151; background: #1f2937; color: #9ca3af; cursor: pointer; font-size: 0.85rem; transition: all 0.2s; }
+    .sport-tab.active { background: #7c3aed; border-color: #7c3aed; color: #fff; }
+
+    .main { padding: 1.5rem 2rem; max-width: 1400px; }
+
+    /* Metric cards */
+    .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 1rem; margin-bottom: 1.5rem; }
+    .card { background: #1a1d2e; border-radius: 10px; padding: 1.2rem; border: 1px solid #2d2f45; }
+    .card .label { font-size: 0.75rem; color: #6b7280; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.4rem; }
+    .card .value { font-size: 1.8rem; font-weight: 700; }
+    .card .sub { font-size: 0.75rem; color: #6b7280; margin-top: 0.2rem; }
+    .positive { color: #34d399; }
+    .negative { color: #f87171; }
+    .neutral { color: #60a5fa; }
+
+    /* Charts grid */
+    .charts { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; margin-bottom: 1.5rem; }
+    @media (max-width: 900px) { .charts { grid-template-columns: 1fr; } }
+    .chart-card { background: #1a1d2e; border-radius: 10px; padding: 1.2rem; border: 1px solid #2d2f45; }
+    .chart-card h3 { font-size: 0.9rem; color: #a78bfa; margin-bottom: 1rem; text-transform: uppercase; letter-spacing: 0.05em; }
+    .chart-card canvas { max-height: 240px; }
+
+    /* Tips table */
+    .table-card { background: #1a1d2e; border-radius: 10px; padding: 1.2rem; border: 1px solid #2d2f45; margin-bottom: 1.5rem; overflow-x: auto; }
+    .table-card h3 { font-size: 0.9rem; color: #a78bfa; margin-bottom: 1rem; text-transform: uppercase; letter-spacing: 0.05em; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+    th { text-align: left; padding: 0.6rem 0.8rem; border-bottom: 1px solid #2d2f45; color: #6b7280; font-weight: 600; text-transform: uppercase; font-size: 0.7rem; }
+    td { padding: 0.6rem 0.8rem; border-bottom: 1px solid #1f2937; }
+    tr:last-child td { border-bottom: none; }
+    .badge { display: inline-block; padding: 0.2rem 0.5rem; border-radius: 4px; font-size: 0.7rem; font-weight: 600; }
+    .badge-win { background: #065f46; color: #34d399; }
+    .badge-loss { background: #7f1d1d; color: #f87171; }
+    .badge-pending { background: #1e3a5f; color: #60a5fa; }
+    .badge-alta { background: #14532d; color: #86efac; }
+    .badge-media { background: #713f12; color: #fde68a; }
+    .badge-baixa { background: #1e3a5f; color: #93c5fd; }
+
+    .conf-breakdown { display: flex; gap: 1rem; flex-wrap: wrap; margin-top: 0.5rem; }
+    .conf-item { font-size: 0.78rem; padding: 0.3rem 0.7rem; border-radius: 5px; background: #13151f; }
+
+    .loading { text-align: center; color: #6b7280; padding: 3rem; }
+    .error { color: #f87171; font-size: 0.8rem; }
+
+    .refresh-btn { margin-left: auto; padding: 0.4rem 1rem; background: #4c1d95; border: none; border-radius: 6px; color: #e0e0e0; cursor: pointer; font-size: 0.8rem; }
+    .refresh-btn:hover { background: #7c3aed; }
+    .last-updated { font-size: 0.75rem; color: #4b5563; }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>&#9889; SportsEdge Dashboard</h1>
+  <span id="lastUpdated" class="last-updated">&ndash;</span>
+  <button class="refresh-btn" onclick="loadAll()">&#8635; Atualizar</button>
+</header>
+
+<div class="sport-tabs">
+  <button class="sport-tab active" onclick="selectSport('esports', this)">&#127918; Esports</button>
+  <button class="sport-tab" onclick="selectSport('mma', this)">&#129354; MMA</button>
+  <button class="sport-tab" onclick="selectSport('tennis', this)">&#127934; T&ecirc;nis</button>
+  <button class="sport-tab" onclick="selectSport('football', this)">&#9917; Futebol</button>
+</div>
+
+<div class="main">
+  <!-- Metric Cards -->
+  <div class="cards" id="cards"><div class="loading">Carregando...</div></div>
+
+  <!-- Charts -->
+  <div class="charts">
+    <div class="chart-card">
+      <h3>&#128202; Calibra&ccedil;&atilde;o &mdash; Previsto vs. Real</h3>
+      <canvas id="calibrationChart"></canvas>
+      <p id="calibrationNote" style="font-size:0.72rem;color:#6b7280;margin-top:0.5rem"></p>
+    </div>
+    <div class="chart-card" id="mlWeightsCard">
+      <h3>&#9881;&#65039; Pesos ML Din&acirc;micos</h3>
+      <canvas id="weightsChart"></canvas>
+    </div>
+  </div>
+
+  <!-- Tips Table -->
+  <div class="table-card">
+    <h3>&#128203; &Uacute;ltimas Tips</h3>
+    <div id="tipsTable"><div class="loading">Carregando...</div></div>
+  </div>
+</div>
+
+<script>
+const BASE = (function() {
+  const origin = window.location.origin;
+  if (origin.includes('localhost') || origin.includes('127.0.0.1')) {
+    return 'http://127.0.0.1:' + (window.location.port || '8080');
+  }
+  return origin;
+})();
+
+let currentSport = 'esports';
+let calibChart = null;
+let weightsChart = null;
+
+async function apiFetch(path) {
+  try {
+    const r = await fetch(BASE + path);
+    if (!r.ok) throw new Error(r.status);
+    return await r.json();
+  } catch(e) {
+    console.warn('Fetch failed:', path, e.message);
+    return null;
+  }
+}
+
+function selectSport(sport, el) {
+  currentSport = sport;
+  document.querySelectorAll('.sport-tab').forEach(t => t.classList.remove('active'));
+  el.classList.add('active');
+  loadAll();
+}
+
+async function loadAll() {
+  document.getElementById('lastUpdated').textContent = 'Atualizando...';
+  const [roi, calibration, weights, tips] = await Promise.all([
+    apiFetch('/roi?sport=' + currentSport),
+    apiFetch('/calibration?sport=' + currentSport),
+    apiFetch('/ml-weights'),
+    apiFetch('/tips-history?sport=' + currentSport + '&limit=20')
+  ]);
+  renderCards(roi);
+  renderCalibration(calibration);
+  renderWeights(weights);
+  renderTips(tips);
+  document.getElementById('lastUpdated').textContent = 'Atualizado: ' + new Date().toLocaleTimeString('pt-BR');
+}
+
+function renderCards(roi) {
+  if (!roi) {
+    document.getElementById('cards').innerHTML = '<div class="error">Erro ao carregar ROI</div>';
+    return;
+  }
+  const overall = roi.overall || {};
+  const roiPct = parseFloat(overall.roi || 0);
+  const profit = parseFloat(overall.totalProfit || 0);
+  const staked = parseFloat(overall.totalStaked || 0);
+  const totalSettled = parseInt(overall.total || 0, 10);
+  const wins = parseInt(overall.wins || 0, 10);
+  const losses = parseInt(overall.losses || 0, 10);
+  const wr = (wins + losses) > 0 ? (wins / (wins + losses) * 100) : 0;
+  const profitClass = profit >= 0 ? 'positive' : 'negative';
+  const roiClass = roiPct >= 0 ? 'positive' : 'negative';
+
+  const byPhase = roi.byPhase || {};
+  const live = byPhase.live || null;
+  const pre = byPhase.preGame || null;
+  const phaseHTML = [
+    live ? ('<div class="conf-item"><strong>LIVE</strong> ' + (live.total || 0) + 't | ROI <span class="' + (parseFloat(live.roi || 0) >= 0 ? 'positive' : 'negative') + '">' + ((parseFloat(live.roi || 0) >= 0 ? '+' : '') + (parseFloat(live.roi || 0)).toFixed(1)) + '%</span></div>') : '',
+    pre ? ('<div class="conf-item"><strong>PR\u00C9</strong> ' + (pre.total || 0) + 't | ROI <span class="' + (parseFloat(pre.roi || 0) >= 0 ? 'positive' : 'negative') + '">' + ((parseFloat(pre.roi || 0) >= 0 ? '+' : '') + (parseFloat(pre.roi || 0)).toFixed(1)) + '%</span></div>') : ''
+  ].join('');
+
+  const clv = roi.clv || null;
+  const clvHTML = clv
+    ? ('<div class="conf-item"><strong>CLV</strong> ' + (clv.avg >= 0 ? '<span class="positive">+' : '<span class="negative">') + (clv.avg || 0).toFixed(2) + '%</span> | +' + (clv.positiveRate || 0) + '% | n=' + (clv.count || 0) + '</div>')
+    : '<div class="conf-item" style="color:#6b7280">CLV: sem dados</div>';
+
+  const banca = roi.banca || null;
+  const bancaHTML = banca
+    ? ('<div class="conf-item"><strong>BANCA</strong> R$ ' + (banca.currentBanca || 0).toFixed(2) + ' | ' + ((banca.growthPct || 0) >= 0 ? '<span class="positive">+' : '<span class="negative">') + (banca.growthPct || 0).toFixed(2) + '%</span></div>')
+    : '<div class="conf-item" style="color:#6b7280">Banca: sem dados</div>';
+
+  document.getElementById('cards').innerHTML =
+    '<div class="card">' +
+      '<div class="label">Total Tips</div>' +
+      '<div class="value neutral">' + (totalSettled || 0) + '</div>' +
+      '<div class="sub">' + wins + 'W / ' + losses + 'L</div>' +
+    '</div>' +
+    '<div class="card">' +
+      '<div class="label">Win Rate</div>' +
+      '<div class="value ' + (wr >= 50 ? 'positive' : 'negative') + '">' + wr.toFixed(1) + '%</div>' +
+      '<div class="sub">settled</div>' +
+    '</div>' +
+    '<div class="card">' +
+      '<div class="label">ROI</div>' +
+      '<div class="value ' + roiClass + '">' + (roiPct >= 0 ? '+' : '') + roiPct.toFixed(2) + '%</div>' +
+      '<div class="sub">sobre ' + (staked || 0).toFixed(1) + 'u apostados</div>' +
+    '</div>' +
+    '<div class="card">' +
+      '<div class="label">Lucro / Preju\u00EDzo</div>' +
+      '<div class="value ' + profitClass + '">' + (profit >= 0 ? '+' : '') + profit.toFixed(2) + 'u</div>' +
+      '<div class="sub">Kelly fracionado</div>' +
+    '</div>' +
+    '<div class="card" style="grid-column: span 2">' +
+      '<div class="label">Split / CLV / Banca</div>' +
+      '<div class="conf-breakdown">' + (phaseHTML || '<span style="color:#6b7280">Sem dados</span>') + clvHTML + bancaHTML + '</div>' +
+    '</div>';
+}
+
+function renderCalibration(data) {
+  const ctx = document.getElementById('calibrationChart').getContext('2d');
+  if (calibChart) { calibChart.destroy(); calibChart = null; }
+
+  if (!data || !data.buckets || !data.buckets.length) {
+    document.getElementById('calibrationNote').textContent = 'Sem dados de calibra\u00E7\u00E3o suficientes.';
+    return;
+  }
+
+  const buckets = data.buckets.filter(function(b) { return b.total > 0; });
+  if (!buckets.length) {
+    document.getElementById('calibrationNote').textContent = 'Sem tips settled suficientes.';
+    return;
+  }
+
+  const labels = buckets.map(function(b) { return b.bucket; });
+  const predicted = buckets.map(function(b) { return b.predicted; });
+  const actual = buckets.map(function(b) { return b.actual; });
+
+  calibChart = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: labels,
+      datasets: [
+        { label: 'Previsto (%)', data: predicted, backgroundColor: '#4c1d95cc', borderColor: '#7c3aed', borderWidth: 1 },
+        { label: 'Real (%)', data: actual, backgroundColor: '#065f46cc', borderColor: '#34d399', borderWidth: 1 }
+      ]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: true,
+      plugins: { legend: { labels: { color: '#9ca3af', font: { size: 11 } } } },
+      scales: {
+        x: { ticks: { color: '#6b7280', font: { size: 10 } }, grid: { color: '#1f2937' } },
+        y: { ticks: { color: '#6b7280', font: { size: 10 } }, grid: { color: '#1f2937' }, min: 0, max: 100 }
+      }
+    }
+  });
+
+  if (data.brierScore != null) {
+    document.getElementById('calibrationNote').textContent =
+      'Brier Score: ' + data.brierScore.toFixed(4) +
+      ' | Log Loss: ' + (data.logLoss || 0).toFixed(4) +
+      ' | N=' + (data.total || 0);
+  }
+}
+
+function renderWeights(data) {
+  const ctx = document.getElementById('weightsChart').getContext('2d');
+  if (weightsChart) { weightsChart.destroy(); weightsChart = null; }
+
+  if (!data || !data.weights || data.weights === 'usando padr\u00E3o') {
+    data = { weights: [
+      { factor: 'comp', weight: 0.35, wins: 0, total: 0 },
+      { factor: 'h2h', weight: 0.30, wins: 0, total: 0 },
+      { factor: 'forma', weight: 0.25, wins: 0, total: 0 }
+    ]};
+  }
+
+  const rows = Array.isArray(data.weights) ? data.weights : [];
+  const labels = rows.map(function(r) {
+    return r.factor.toUpperCase() + (r.total >= 10
+      ? ' (' + (r.wins / r.total * 100).toFixed(0) + '% acc, n=' + r.total + ')'
+      : ' (padr\u00E3o)');
+  });
+  const values = rows.map(function(r) { return (r.weight * 100).toFixed(1); });
+  const colors = ['#7c3aed', '#2563eb', '#059669'];
+
+  weightsChart = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: labels,
+      datasets: [{
+        label: 'Peso (%)',
+        data: values,
+        backgroundColor: colors.slice(0, rows.length),
+        borderRadius: 4
+      }]
+    },
+    options: {
+      indexAxis: 'y',
+      responsive: true,
+      maintainAspectRatio: true,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { ticks: { color: '#6b7280', font: { size: 10 } }, grid: { color: '#1f2937' }, max: 60 },
+        y: { ticks: { color: '#9ca3af', font: { size: 11 } }, grid: { display: false } }
+      }
+    }
+  });
+}
+
+function renderTips(tips) {
+  if (!tips || !Array.isArray(tips) || !tips.length) {
+    document.getElementById('tipsTable').innerHTML = '<div class="loading">Nenhuma tip encontrada.</div>';
+    return;
+  }
+
+  const rows = tips.slice(0, 20).map(function(t) {
+    const resultBadge = t.result === 'win'
+      ? '<span class="badge badge-win">WIN</span>'
+      : t.result === 'loss'
+        ? '<span class="badge badge-loss">LOSS</span>'
+        : '<span class="badge badge-pending">PENDING</span>';
+
+    const conf = (t.confidence || 'M\u00C9DIA').toUpperCase();
+    const confBadge = conf === 'ALTA'
+      ? '<span class="badge badge-alta">ALTA</span>'
+      : conf === 'BAIXA'
+        ? '<span class="badge badge-baixa">BAIXA</span>'
+        : '<span class="badge badge-media">M\u00C9DIA</span>';
+
+    const evRaw = t.ev ? String(t.ev) : '';
+    const ev = evRaw
+      ? (evRaw.startsWith('+') || evRaw.startsWith('-') ? evRaw : '+' + evRaw)
+      : '\u2013';
+    const evColor = ev.startsWith('+') ? '#34d399' : '#f87171';
+
+    const date = t.sent_at
+      ? new Date(t.sent_at).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
+      : '\u2013';
+
+    const match = (t.participant1 || '?') + ' vs ' + (t.participant2 || '?');
+
+    return '<tr>' +
+      '<td style="color:#6b7280;font-size:0.7rem">' + date + '</td>' +
+      '<td title="' + match + '" style="max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + match + '</td>' +
+      '<td><strong>' + (t.tip_participant || '?') + '</strong></td>' +
+      '<td>' + parseFloat(t.odds || 0).toFixed(2) + '</td>' +
+      '<td style="color:' + evColor + '">' + ev + '%</td>' +
+      '<td>' + (t.stake || '\u2013') + '</td>' +
+      '<td>' + confBadge + '</td>' +
+      '<td>' + resultBadge + '</td>' +
+    '</tr>';
+  }).join('');
+
+  document.getElementById('tipsTable').innerHTML =
+    '<table>' +
+      '<thead><tr>' +
+        '<th>Data</th><th>Partida</th><th>Tip</th><th>Odd</th><th>EV</th><th>Stake</th><th>Conf</th><th>Resultado</th>' +
+      '</tr></thead>' +
+      '<tbody>' + rows + '</tbody>' +
+    '</table>';
+}
+
+// Auto-refresh every 5 minutes
+setInterval(loadAll, 5 * 60 * 1000);
+loadAll();
+</script>
+
+</body>
+</html>
