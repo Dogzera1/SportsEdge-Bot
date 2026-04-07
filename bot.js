@@ -2459,9 +2459,22 @@ async function poll(token, sport) {
                     ? ` | ${t.profit_reais >= 0 ? '+' : ''}R$${parseFloat(t.profit_reais).toFixed(2)}`
                     : '';
                   const liveTag = t.is_live ? ' 🔴' : '';
-                  txt += `${resEmoji} *${t.tip_participant || '?'}* @ ${t.odds}${liveTag}\n`;
+
+                  // Show opponent (participant2) if available
+                  const opponent = t.participant2 ? ` vs ${t.participant2}` : '';
+
+                  // Show match time if available (from matches table)
+                  let matchTimeInfo = '';
+                  if (t.match_time) {
+                    const matchTime = t.match_time.slice(0, 16).replace('T', ' ');
+                    matchTimeInfo = ` — ${matchTime}`;
+                  } else if (t.match_date) {
+                    matchTimeInfo = ` — ${t.match_date.slice(0, 10)}`;
+                  }
+
+                  txt += `${resEmoji} *${t.tip_participant || '?'}*${opponent} @ ${t.odds}${liveTag}\n`;
                   txt += `   ${confEmoji} ${t.confidence || '?'} | ${t.stake || '?'} | EV: ${t.ev || '?'}%${profitStr}\n`;
-                  txt += `   _${t.event_name || '?'} — ${date}_\n\n`;
+                  txt += `   _${t.event_name || '?'} — ${date}${matchTimeInfo}_\n\n`;
                 }
                 if (tips.length > 15) txt += `_...e mais ${tips.length - 15} tips_\n`;
                 await send(token, chatId, txt, getTipsMenu(s));
@@ -2761,9 +2774,64 @@ function normName(s) {
   return (s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]/g, '');
 }
 
-// Cache de records individuais de lutadores buscados via ESPN athlete search
+// Cache de records individuais de lutadores buscados via ESPN/Wikipedia
 const espnFighterCache = new Map(); // normName → { record, ts }
 const ESPN_FIGHTER_TTL = 6 * 60 * 60 * 1000; // 6h
+
+/**
+ * Busca record de um lutador via Wikipedia REST API.
+ * Cobre lutadores de todas as promoções que tenham página na Wikipedia.
+ * Gratuito, sem API key, estável.
+ */
+async function fetchWikipediaFighterRecord(name) {
+  const cacheKey = `wiki_${normName(name)}`;
+  const cached = espnFighterCache.get(cacheKey);
+  if (cached && Date.now() - cached.ts < ESPN_FIGHTER_TTL) return cached.record;
+  const cache = rec => { espnFighterCache.set(cacheKey, { record: rec, ts: Date.now() }); return rec; };
+
+  try {
+    // Tenta nome exato, depois tenta com underscore
+    const title = name.trim().replace(/\s+/g, '_');
+    const r = await new Promise((resolve, reject) => {
+      const req = https.request({
+        hostname: 'en.wikipedia.org',
+        path: `/api/rest_v1/page/summary/${encodeURIComponent(title)}`,
+        method: 'GET',
+        headers: { 'User-Agent': 'SportsEdgeBot/1.0', 'Accept': 'application/json' }
+      }, res => {
+        let d = ''; res.on('data', c => d += c);
+        res.on('end', () => resolve({ status: res.statusCode, body: d }));
+      });
+      req.on('error', reject);
+      req.setTimeout(8000, () => req.destroy(new Error('Wiki timeout')));
+      req.end();
+    })
+      .catch(() => null);
+    if (!r || r.status !== 200) return cache(null);
+
+    const j = safeParse(r.body, {});
+    // Só queremos páginas de lutadores (categoria MMA/boxing)
+    const desc = (j.description || '').toLowerCase();
+    const isFighter = desc.includes('martial') || desc.includes('fighter') || desc.includes('boxer')
+      || desc.includes('wrestler') || desc.includes('kickbox');
+    if (!isFighter) return cache(null);
+
+    const text = j.extract || '';
+    // Captura padrões como "14-0", "22–4–0", "22–4"
+    // Busca a PRIMEIRA ocorrência que pareça um record de luta (not "born 14-3-1997")
+    const matches = [...text.matchAll(/\b(\d{1,3})\s*[–\-]\s*(\d{1,2})(?:\s*[–\-]\s*(\d{1,2}))?\b/g)];
+    for (const m of matches) {
+      const w = parseInt(m[1]), l = parseInt(m[2]), d = m[3] ? parseInt(m[3]) : 0;
+      // Sanity: record plausível de MMA (max ~50 lutas)
+      if (w + l + d > 0 && w + l + d <= 60 && w <= 50) {
+        return cache(`${w}-${l}-${d}`);
+      }
+    }
+    return cache(null);
+  } catch(_) {
+    return cache(null);
+  }
+}
 
 // Busca record de um lutador individualmente na ESPN quando não está no scoreboard.
 // Passo 1: search para obter o ID do atleta
@@ -2776,23 +2844,28 @@ async function fetchEspnFighterRecord(name) {
   const cache = rec => { espnFighterCache.set(key, { record: rec, ts: Date.now() }); return rec; };
 
   try {
-    // Passo 1 — search
-    const query = encodeURIComponent(name.trim());
-    const r = await espnGet(`/apis/site/v2/sports/mma/ufc/athletes?limit=5&search=${query}`)
-      .catch(() => ({ status: 500, body: '{}' }));
-    if (r.status !== 200) return cache(null);
+    // Passo 1 — search (tenta nome completo, depois só sobrenome como fallback)
+    const trySearch = async (query) => {
+      const r = await espnGet(`/apis/site/v2/sports/mma/ufc/athletes?limit=5&search=${encodeURIComponent(query)}`)
+        .catch(() => ({ status: 500, body: '{}' }));
+      if (r.status !== 200) return null;
+      const json = safeParse(r.body, {});
+      const athletes = json.athletes || json.items || json.results || [];
+      if (!athletes.length) return null;
+      const n = normName(query);
+      return athletes.find(a => {
+        const an = normName(a.displayName || a.fullName || a.name || '');
+        return an === n || an.includes(n) || n.includes(an);
+      }) || null;
+    };
 
-    const json = safeParse(r.body, {});
-    // A ESPN usa diferentes envelopes dependendo da versão do endpoint
-    const athletes = json.athletes || json.items || json.results || [];
-    if (!athletes.length) return cache(null);
-
-    // Escolhe atleta com melhor correspondência de nome
-    const n = normName(name);
-    const hit = athletes.find(a => {
-      const an = normName(a.displayName || a.fullName || a.name || '');
-      return an === n || an.includes(n) || n.includes(an);
-    }) || athletes[0];
+    let hit = await trySearch(name.trim());
+    // Fallback: tenta só o sobrenome
+    if (!hit) {
+      const lastName = name.trim().split(/\s+/).pop();
+      if (lastName && lastName !== name.trim()) hit = await trySearch(lastName);
+    }
+    if (!hit) return cache(null);
 
     // Tenta extrair record diretamente do objeto de search
     const inline = hit.record?.displayValue
@@ -2912,16 +2985,25 @@ async function pollMma() {
         const rounds = espn?.rounds || 3;
         const isTitleFight = rounds === 5;
 
-        // Fallback: busca record individual se scoreboard não tem os lutadores
+        // Fallback: busca record individual (ESPN → Wikipedia)
         if (!espn) {
-          const [r1, r2] = await Promise.all([
+          const [e1, e2] = await Promise.all([
             fetchEspnFighterRecord(fight.team1).catch(() => null),
             fetchEspnFighterRecord(fight.team2).catch(() => null)
           ]);
-          if (r1) rec1 = r1;
-          if (r2) rec2 = r2;
-          if (r1 || r2) {
-            log('INFO', 'AUTO-MMA', `ESPN athlete search: ${fight.team1}=${rec1||'?'} | ${fight.team2}=${rec2||'?'}`);
+          if (e1) rec1 = e1;
+          if (e2) rec2 = e2;
+          // Segunda camada: Wikipedia para quem ESPN não encontrou
+          const [w1, w2] = await Promise.all([
+            !rec1 ? fetchWikipediaFighterRecord(fight.team1).catch(() => null) : Promise.resolve(null),
+            !rec2 ? fetchWikipediaFighterRecord(fight.team2).catch(() => null) : Promise.resolve(null)
+          ]);
+          if (w1) { rec1 = w1; }
+          if (w2) { rec2 = w2; }
+          const source1 = e1 ? 'ESPN' : w1 ? 'Wiki' : '—';
+          const source2 = e2 ? 'ESPN' : w2 ? 'Wiki' : '—';
+          if (rec1 || rec2) {
+            log('INFO', 'AUTO-MMA', `Records: ${fight.team1}=${rec1||'?'}(${source1}) | ${fight.team2}=${rec2||'?'}(${source2})`);
           }
         }
 

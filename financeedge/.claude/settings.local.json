@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(dir:*)",
+      "Bash(node backtest.js btc_1h_sample.csv)",
+      "Bash(node -e \"console.log\\(''Node funcionando''\\)\")",
+      "Bash(node -e \"require\\(''./lib/financial-ml''\\); console.log\\(''financial-ml carregado''\\)\")",
+      "Bash(node -e \"const { generateSignal } = require\\(''./lib/financial-ml''\\); console.log\\(''generateSignal:'', typeof generateSignal\\)\")"
+    ]
+  }
+}

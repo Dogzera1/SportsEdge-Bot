@@ -3,6 +3,8 @@
 Bot autônomo de Telegram para análise automática de apostas esportivas, baseado em Valor Esperado (EV) e Kelly Criterion, alimentado por IA (DeepSeek ou Claude).
 
 > **Status (Abril 2026):** Sistema multi-esporte — **LoL Esports**, **MMA**, **Tênis** e **Futebol** operacionais. Cada esporte roda em bot Telegram independente (token separado). Odds via **OddsPapi v4** (esports) e **The Odds API** (futebol/MMA/tênis). Futebol usa **API-Football** para dados de forma, H2H e standings. MMA e Tênis usam **ESPN API** (gratuita) para records de lutadores e rankings ATP/WTA. Todos os esportes passam por pré-filtro ML antes de chamar a IA. Settlement automático em todos os esportes.
+>
+> **Produção (Railway):** No boot, `start.js` imprime `[LAUNCHER] PORT=… | DB=…` e sobe **dois** processos (`server.js` depois `bot.js`). Logs típicos: sync OddsPapi em lotes, `Force-fetch live` para torneios ao vivo, partidas LoL com `odds: X/Y` e lista `sem match` quando o slug OddsPapi não casa com o par Riot/PandaScore. Resposta **HTTP 429** da OddsPapi ativa **backoff de 2 horas** (nenhum fetch/re-fetch até expirar — ver `/debug-odds`). Sem `CLAUDE_API_KEY`, o sistema usa só **DeepSeek** (fallback Claude desligado).
 
 ---
 
@@ -155,6 +157,9 @@ FOOTBALL_DRAW_MIN_ODDS=2.80            # Odds mínimas para tip de empate (padr�
 # ── OddsPapi — ajuste fino (opcional) ──
 ODDSPAPI_BATCH_SIZE=3                   # Torneios por requisição (padrão: 3)
 ESPORTS_ODDS_TTL_H=3                    # Horas entre ciclos round-robin (padrão: 3h)
+ODDSPAPI_BOOTSTRAP=true                 # Após deploy: busca vários lotes seguidos p/ encher cache (cuidado: +requisições)
+ODDSPAPI_BOOTSTRAP_MS=2500              # Intervalo mínimo entre lotes no bootstrap (ms, padrão 2500)
+ODDSPAPI_ESPORTS_SPORT_ID=18            # sportId LoL na OddsPapi (padrão 18)
 
 # ── LoL — ligas extras além da whitelist interna ──
 LOL_EXTRA_LEAGUES=slug1,slug2           # opcional, separado por vírgula
@@ -169,8 +174,11 @@ LOL_PREGAME_BLOCK_BO3=true             # true = só analisa Bo3/Bo5 após Game 1
 
 # ── Thresholds de tip LoL (opcional — valores padrão se omitidos) ──
 LOL_EV_THRESHOLD=5                      # EV mínimo % para emitir tip (padrão: 5)
-LOL_PINNACLE_MARGIN=8                   # Margem 1xBet esperada % para de-juice (padrão: 8)
+LOL_PINNACLE_MARGIN=8                   # Mínimo de edge em pontos percentuais (pp) necessário para considerar uma aposta (padrão: 8)
 LOL_NO_ODDS_CONVICTION=70              # Confiança mínima % para tip sem odds de mercado (padrão: 70)
+LOL_MIN_ODDS=1.50                       # Gate pós-IA: odd mínima (padrão 1.50)
+LOL_MAX_ODDS=4.00                       # Gate pós-IA: odd máxima (padrão 4.00)
+LOL_HIGH_ODDS=3.00                      # Acima disso exige EV extra (LOL_HIGH_ODDS_EV_BONUS, padrão +3pp)
 ```
 
 ---
@@ -191,11 +199,37 @@ npm run bot         # node bot.js
 1. Push para o repositório GitHub vinculado ao Railway
 2. Configure as variáveis de ambiente no painel **Variables**
 3. Para persistência do banco entre redeploys: crie um Volume e defina `DB_PATH=/data/sportsedge.db`
-4. O `start.js` gerencia os dois processos com auto-restart em falha
+4. O `start.js` gerencia os dois processos com auto-restart em falha; primeira linha útil nos logs: `[LAUNCHER] PORT=… | DB=…`
 5. Configure `ADMIN_USER_IDS` com seu ID do Telegram — o admin é inscrito automaticamente a cada boot
 6. O `railway.toml` já está configurado com healthcheck TCP e restart policy `on_failure`
+7. **OddsPapi:** `ODDSPAPI_BOOTSTRAP=true` acelera o cache no primeiro minuto após deploy, mas soma muitas chamadas — combinado com `Force-fetch live` e re-fetch &lt;2h pode aproximar o **rate limit** do plano; em 429 o servidor entra em **backoff 2h** (odds ficam stale ou ausentes para pares sem match).
 
 > **Nota DB_PATH no Railway:** se a variável aparecer com artefatos (`=/data/...` ou tab no prefixo), o sistema sanitiza automaticamente antes de abrir o banco.
+
+#### Decodificação rápida dos logs (produção)
+
+| Log | Significado |
+|-----|-------------|
+| `[BOOT] ENV: CLAUDE_API_KEY=❌ AUSENTE` | Só **DeepSeek** entra no `/claude`; Claude desligado até configurar a chave. |
+| `[BOOT] … tips existentes carregadas` | Histórico de tips por esporte reidratado do SQLite. |
+| `[BOOT] Sports carregados: […]` | Esportes habilitados e se cada um tem token Telegram. |
+| `[PATCH] Meta manual configurado` | `LOL_PATCH_META` / data fixos no `.env`; auto-detect ddragon **não** sobrescreve. |
+| `[ODDS] Buscando odds: lote N/M` | Ciclo OddsPapi (round-robin); no deploy, bootstrap pode enfileirar vários lotes. |
+| `[ODDS] Bootstrap concluído — ~N entradas` | Cache esports aquecido após sequência de lotes. |
+| `[LOL] … odds: A/B \| sem match: slugs` | **A** partidas com par no cache OddsPapi; slugs listados = nomes que não casaram (ver aliases `/debug-match-odds`). |
+| `[SYNC] pro_champ_stats vazio mas … synced` | Inconsistência DB → **resync completo** PandaScore (detalhe na secção sync). |
+| `[SYNC] Pro stats: … 0 champs, 0 player` | Partidas ingeridas sem picks suficientes no payload → comp/meta do ML fraco até próximo sync. |
+| `[AUTO] Analisando … sinais=N/6` | Pré-jogo/live LoL; quantidade de sinais ML disponíveis. |
+| `[AUTO] Sem tip … IA sem edge` | IA ou gates não aprovaram tip (EV, consenso, etc.). |
+| `[AUTO] Gate odds … [min, max]` | Odd sugerida fora de `LOL_MIN_ODDS` / `LOL_MAX_ODDS` (padrão 1.50–4.00). |
+| `[AUTO] Tip bloqueada` | Tip chegou a ser considerada mas falhou gate (ex.: odd/EV); resumo com P/EV no log. |
+| `[AUTO-MMA] Gate odds … 1.40–5.00` | Odd da tip MMA fora da faixa fixa no código. |
+| `[AUTO-MMA] Gate semana … luta futura` | Confiança não-alta em luta distante → descartada. |
+| `[AUTO-MMA] Ignorando luta sem data válida` | Evento na lista sem data parseável. |
+| `[AUTO-FOOTBALL] … [sem dados]` | Fixture/API-Football não deu forma/H2H/standings (odds-only ou não encontrado). |
+| `[AUTO-TENNIS] … [ESPN+]` | Indicador de superfície/torneio vindo do contexto ESPN. |
+| `429 — backoff 2h ativado` | OddsPapi rate limit → 2h sem fetch (ver secção **Rate limit**). |
+| Dois blocos `[LOL] getLive` no mesmo segundo | Várias chamadas HTTP ao servidor em paralelo (ex.: fair odds + auto) podem disparar **dois** force-fetch OddsPapi — aumenta risco de **429**. |
 
 ---
 
@@ -275,12 +309,14 @@ Cada esporte exibe fair odds calculadas pelo **próprio modelo de análise do si
 
 O pré-filtro ML (`lib/ml.js`) calcula um edge score baseado em até 4 fatores. Qualquer fator disponível incrementa o `factorCount` — se nenhum dado estiver disponível, a partida passa diretamente para a IA.
 
-| Fator | Fonte | Peso | Disponível quando |
-|-------|-------|------|-------------------|
-| Forma recente (win rate diferencial) | `match_results` (últimos 45 dias) | 0.25 | Após sync pro stats |
-| H2H (histórico direto) | `match_results` (últimos 45 dias) | 0.30 | Após sync pro stats |
-| Comp/meta score (WR médio dos campeões em pro play) | `pro_champ_stats` | 0.35 | Draft disponível + sync feito |
-| Live stats | Riot/PandaScore ao vivo | extra `factorCount` | Partida ao vivo |
+| Fator | Fonte | Peso | Justificativa | Disponível quando |
+|-------|-------|------|---------------|-------------------|
+| Forma recente (win rate diferencial) | `match_results` (últimos 30 dias) | 0.25 | Forma recente é preditor moderado, mas sujeito a variação | Após sync pro stats |
+| H2H (histórico direto) | `match_results` (últimos 30 dias) | 0.30 | H2H é forte preditor em esports, especialmente em matchups específicos | Após sync pro stats |
+| Comp/meta score (WR médio dos campeões em pro play) | `pro_champ_stats` | 0.35 | Composição é fator mais importante no LoL competitivo | Draft disponível + sync feito |
+| Live stats | Riot/PandaScore ao vivo | extra `factorCount` | Dados ao vivo atualizam probabilidade em tempo real | Partida ao vivo |
+
+**Threshold mínimo:** Quando compScore está disponível, edge mínimo de 3pp é exigido. Justificativa: composições conhecidas reduzem incerteza, permitindo threshold mais baixo para edge significativo.
 
 O comp score considera o WR médio dos campeões escolhidos em pro play (não solo queue). Positivo = blue/t1 favorecido. Mínimo de 4 entradas em `/champ-winrates` para ativar.
 
@@ -339,6 +375,10 @@ No boot e a cada 12h, o sistema busca até **400 partidas finalizadas** dos últ
 
 Partidas já sincronizadas são rastreadas em `synced_matches` para evitar double-counting.
 
+**Recuperação de inconsistência:** se `pro_champ_stats` estiver vazio mas existirem muitas linhas em `synced_matches`, o sync loga aviso e **força resync completo** das partidas PandaScore (evita estado “marcado como sync” sem dados de campeão/jogador).
+
+**Nota:** após coletar centenas de partidas, é possível ver no log `Pro stats: … resultados, 0 champs, 0 player+champ` se o payload não trouxer picks detalhados — nesse caso forma/H2H ainda podem existir via `match_results`, mas o fator **comp/meta** do ML fica sem dados até o próximo sync bem-sucedido.
+
 ### Busca Fuzzy de Form/H2H (LoL)
 
 O endpoint `/team-form` tenta duas estratégias em sequência:
@@ -369,6 +409,10 @@ O cursor do round-robin é visível em `/debug-odds` no campo `roundRobin`.
 ### Re-fetch Urgente (< 2h)
 
 Se uma partida está programada para começar em menos de 2 horas e as odds no cache têm mais de 2 horas, o sistema força um re-fetch imediato antes de passar as odds para análise, garantindo dados frescos no momento crítico.
+
+### Rate limit (HTTP 429)
+
+Se a OddsPapi retornar **429**, o servidor define backoff de **2 horas** (`ESPORTS_BACKOFF_TTL` em `server.js`), loga `429 — backoff 2h ativado` e passa a logar `Em backoff — aguardando` / `Force-fetch ignorado (backoff ativo)` em chamadas subsequentes. Nesse período não há atualização de cache esports; use `GET /debug-odds` para ver `backoffRemainingSeconds`. Evite disparar muitas requisições no boot (bootstrap + dois processos competindo) se o plano for limitado.
 
 ### Matching de Times
 
@@ -473,15 +517,16 @@ Uma tip por partida — o flag `tipSent` é salvo no banco e recarregado no boot
 | Gate 2: odds fora da zona | Odds < 1.50 ou > 3.00 → rejeição (zona de baixo valor real) |
 | Gate 3: consenso ML×IA | ML diverge da IA com score > 8pp → rebaixa confiança (ALTA→MÉDIA→BAIXA) |
 | Gate 4: EV mínimo adaptativo | EV abaixo do threshold por nível de confiança e quantidade de sinais → rejeição |
-| Comparação contra modelo ML | P estimada deve superar o modelo (forma+H2H) em ≥8pp — não só o de-juice |
+| Comparação contra modelo ML | P estimada deve superar o modelo (forma+H2H) em ≥LOL_PINNACLE_MARGIN pp — não só o de-juice |
 | Line movement | Instrução para ajustar probabilidade 2-3pp na direção do mercado quando linha se mover |
 | Alto fluxo | Jogos com <15 min ou objetivo maior recente (Baron, Elder) → confiança máxima BAIXA |
-| Form/H2H limitados a 45 dias | Resultados antigos (outro meta/patch) não contam para cálculo de edge |
+| Form/H2H limitados a 30 dias | Resultados antigos (outro meta/patch) não contam para cálculo de edge |
 
 ### Kelly Criterion
 
 ```
-f* = EV / (odds - 1)
+f* = (p × (odds - 1) - (1 - p)) / (odds - 1)
+onde p = (EV + 1) / odds
 
 ALTA:  stake = clamp(f* × 0.25,  0.5u, 4u)   ¼ Kelly
 MÉDIA: stake = clamp(f* × 0.167, 0.5u, 3u)   ⅙ Kelly
@@ -735,6 +780,40 @@ Configuradas via `FOOTBALL_LEAGUES` (separadas por vírgula):
 | DeepSeek API (`api.deepseek.com`) | Análise de matchup — padrão (mais barato) | Pago por token |
 | Anthropic Claude (`api.anthropic.com`) | Análise de matchup — fallback | Pago por token |
 | ddragon (`ddragon.leagueoflegends.com`) | Versão atual do patch para atualização automática do meta | Gratuito |
+
+---
+
+## Troubleshooting e Erros Comuns
+
+### Problemas de Banco de Dados
+- **`syntax error` ao criar tabelas**: Verifique se o SQLite está funcionando. O sistema cria automaticamente tabelas faltantes no boot.
+- **`no such table`**: Execute manualmente `DROP TABLE nome_tabela` e reinicie para recriação automática.
+- **Perda de conexão com DB**: Railway pode reatribuir `DATABASE_URL`. O sistema fallback para `sportsedge.db` local.
+
+### Problemas de Odds
+- **`sem match` nos logs**: Nomes de times não casam entre Riot/PandaScore e OddsPapi. Use `/debug-match-odds` para investigar.
+- **HTTP 429 da OddsPapi**: Backoff de 2 horas ativado automaticamente. Verifique `/debug-odds` para tempo restante.
+- **Odds desatualizadas**: Round-robin pode levar vários ciclos para cobrir todos os torneios. Verifique `cursor` em `/debug-odds`.
+
+### Problemas de IA
+- **`Failed to parse AI response`**: A IA não seguiu o formato esperado. Verifique o prompt e contexto enviado.
+- **Timeout da API**: DeepSeek/Claude pode demorar. Timeout configurado para 45 segundos.
+- **EV calculado incorretamente**: Verifique fórmula Kelly corrigida: `f* = (p × (odds - 1) - (1 - p)) / (odds - 1)` onde `p = (EV + 1) / odds`.
+
+### Problemas de Settlement
+- **Tips não settled**: Verifique se a API de resultados está funcionando (ESPN para MMA/Tênis, API-Football para futebol).
+- **Winner não detectado**: Nomes podem não casar exatamente. O sistema usa fuzzy matching.
+- **Banca não atualizada**: Verifique `bankroll` table e `updateTipFinanceiro`.
+
+### Problemas de Performance
+- **Alta memória**: SQLite em WAL mode, conexões persistentes. Reinicie se necessário.
+- **Ciclos lentos**: Verifique número de partidas sendo analisadas. Limites configuráveis por esporte.
+- **Logs excessivos**: Ajuste `LOG_LEVEL` no `.env`.
+
+### Calibração e Métricas
+- **Brier Score/Log Loss incorretos**: Verifique cálculo de probabilidade: `p = (1 + ev/100) / odds` onde `ev` é porcentagem.
+- **CLV negativo**: Modelo pode não ter edge real ou variance alta.
+- **Win rate abaixo do esperado**: Verifique thresholds de EV e gates de confiança.
 
 ---
 

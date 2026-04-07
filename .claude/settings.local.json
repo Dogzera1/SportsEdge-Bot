@@ -33,7 +33,13 @@
       "Bash(curl -sk --max-time 10 \"https://site.api.espn.com/apis/site/v2/sports/tennis/atp/scoreboard\")",
       "Bash(curl -sk --max-time 10 \"https://site.api.espn.com/apis/site/v2/sports/tennis/atp/scoreboard\" -o C:/tmp/espn_tennis.json)",
       "Bash(node:*)",
-      "Bash(curl -sk --max-time 10 \"https://site.api.espn.com/apis/site/v2/sports/tennis/atp/rankings\" -o C:/tmp/espn_tennis_rank.json)"
+      "Bash(curl -sk --max-time 10 \"https://site.api.espn.com/apis/site/v2/sports/tennis/atp/rankings\" -o C:/tmp/espn_tennis_rank.json)",
+      "Bash(find \"C:\\\\Users\\\\vict_\\\\Desktop\\\\lol betting\" -name \"*.js\" -type f -exec grep -l \"calcKelly\\\\|calcKellyFraction\" {})",
+      "Bash(find 'C:\\\\Users\\\\vict_\\\\Desktop\\\\lol betting' -name *.js -type f -exec grep -l \"calcKelly\\\\|calcKellyFraction\" {})",
+      "Bash(2)",
+      "Bash(node -e \":*)",
+      "Bash(curl -s \"http://localhost:3000/roi?sport=tennis\")",
+      "Bash(cd:*)"
     ]
   }
 }

@@ -1638,12 +1638,17 @@ const server = http.createServer(async (req, res) => {
     const sport = parsed.query.sport || 'esports';
     const limit = parseInt(parsed.query.limit) || 20;
     const filter = parsed.query.filter;
-    let query = 'SELECT * FROM tips WHERE sport = ?';
-    if (filter === 'settled') query += " AND result IS NOT NULL";
-    else if (filter === 'pending') query += " AND result IS NULL";
-    else if (filter === 'win') query += " AND result = 'win'";
-    else if (filter === 'loss') query += " AND result = 'loss'";
-    query += ` ORDER BY sent_at DESC LIMIT ${limit}`;
+    let query = `
+      SELECT t.*, m.match_time as match_time, m.event_date as match_date
+      FROM tips t
+      LEFT JOIN matches m ON t.match_id = m.id AND t.sport = m.sport
+      WHERE t.sport = ?
+    `;
+    if (filter === 'settled') query += " AND t.result IS NOT NULL";
+    else if (filter === 'pending') query += " AND t.result IS NULL";
+    else if (filter === 'win') query += " AND t.result = 'win'";
+    else if (filter === 'loss') query += " AND t.result = 'loss'";
+    query += ` ORDER BY t.sent_at DESC LIMIT ${limit}`;
     sendJson(res, db.prepare(query).all(sport));
     return;
   }
@@ -1735,9 +1740,11 @@ const server = http.createServer(async (req, res) => {
       }
 
       // Brier Score e Log Loss: p derivado do EV e odds
+      // EV armazenado como porcentagem (ex: 5.2 para 5.2%)
+      // Fórmula: p = (1 + EV/100) / odds, onde EV em decimal = ev/100
       const ev = parseFloat(t.ev) || 0;
       if (odds > 1 && t.result) {
-        let p = ev > 0 ? (ev / 100 + 1) / odds : 1 / odds;
+        let p = ev > 0 ? (1 + ev / 100) / odds : 1 / odds;
         p = Math.max(0.01, Math.min(0.99, p));
         const o = t.result === 'win' ? 1 : 0;
         brierSum += (p - o) ** 2;
@@ -1757,6 +1764,7 @@ const server = http.createServer(async (req, res) => {
     // Dados da banca em reais — calcula current_banca a partir dos profits reais acumulados
     const bk = stmts.getBankroll.get(sport);
     let bancaInfo = null;
+
     if (bk) {
       // Backfill: tips arquivadas sem profit_reais calculado (coluna adicionada depois do settlement)
       const orphans = db.prepare(
@@ -1793,6 +1801,20 @@ const server = http.createServer(async (req, res) => {
         growthPct: parseFloat((accumulatedProfit / bk.initial_banca * 100).toFixed(2)),
         updatedAt: bk.updated_at
       };
+    } else {
+      // Se não existe registro no bankroll, cria um com valores padrão
+      db.prepare('INSERT OR IGNORE INTO bankroll (sport, initial_banca, current_banca) VALUES (?, 100.0, 100.0)').run(sport);
+      const newBk = stmts.getBankroll.get(sport);
+      if (newBk) {
+        bancaInfo = {
+          initialBanca: newBk.initial_banca,
+          currentBanca: newBk.current_banca,
+          unitValue: parseFloat((newBk.current_banca / 100).toFixed(4)),
+          profitReais: 0,
+          growthPct: 0,
+          updatedAt: newBk.updated_at
+        };
+      }
     }
 
     sendJson(res, {

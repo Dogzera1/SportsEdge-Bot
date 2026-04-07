@@ -24,15 +24,17 @@ const CONFIG = {
 
 /**
  * Kelly Completo com fração de segurança.
- * f* = EV / (odds - 1)   onde EV = probabilidade_esperada - 1/odds
+ * f* = (p × (odds - 1) - (1 - p)) / (odds - 1)   onde p = (EV + 1) / odds
  * Retorna stake como % da banca.
  */
 function calcKelly(evPct, odds, fraction = CONFIG.kellyFraction) {
   const ev = evPct / 100;
   if (!ev || ev <= 0 || !odds || odds <= 1) return 0;
   const b = odds - 1;
-  // Kelly completo: f* = (p*b - q) / b = EV / b
-  const kellyFull = ev / b;
+  // p = (EV + 1) / odds
+  const p = (ev + 1) / odds;
+  // Kelly completo: f* = (p*b - q) / b onde q = 1-p
+  const kellyFull = (p * b - (1 - p)) / b;
   const kellyFrac = kellyFull * fraction;
   const clamped = Math.max(CONFIG.minStakePct, Math.min(CONFIG.maxStakePct, kellyFrac));
   return parseFloat(clamped.toFixed(4));
