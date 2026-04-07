@@ -3185,6 +3185,8 @@ async function pollTennis() {
         const o = match.odds;
         if (!o?.t1 || !o?.t2) continue;
 
+        const isLiveTennis = match.status === 'live';
+
         const matchTime = match.time ? new Date(match.time).toLocaleString('pt-BR', {
           timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit',
           hour: '2-digit', minute: '2-digit'
@@ -3259,7 +3261,7 @@ async function pollTennis() {
 
 PARTIDA: ${match.team1} vs ${match.team2}
 Torneio: ${match.league} | ${eventType}
-Superfície: ${surfacePT} | Data: ${matchTime} (BRT)
+Status: ${isLiveTennis ? 'AO VIVO' : 'PRÉ-JOGO'} | Superfície: ${surfacePT} | Data: ${matchTime} (BRT)
 
 ODDS REAIS (${o.bookmaker || 'EU'}):
 ${match.team1}: ${o.t1} | ${match.team2}: ${o.t2}
@@ -3327,7 +3329,7 @@ Máximo 200 palavras. Mostre seu raciocínio brevemente antes da decisão.`;
         const surfaceEmoji = { saibro: '🟤', grama: '💚', dura: '🔵' }[surface] || '🎾';
         const grandSlamBadge = isGrandSlam ? ' 🏆' : isMasters ? ' ⭐' : '';
 
-        const tipMsg = `🎾 💰 *TIP TÊNIS*\n` +
+        const tipMsg = `🎾 💰 *TIP TÊNIS${isLiveTennis ? ' (AO VIVO)' : ''}*\n` +
           `*${match.team1}* vs *${match.team2}*\n` +
           `📋 ${match.league}${grandSlamBadge}\n` +
           `${surfaceEmoji} ${surface.charAt(0).toUpperCase() + surface.slice(1)} | 🕐 ${matchTime} (BRT)\n\n` +
@@ -3341,7 +3343,7 @@ Máximo 200 palavras. Mostre seu raciocínio brevemente antes da decisão.`;
           matchId: String(match.id), eventName: match.league,
           p1: match.team1, p2: match.team2, tipParticipant: tipPlayer,
           odds: String(tipOdd), ev: String(tipEV), stake: String(tipStake),
-          confidence: tipConf, isLive: false, market_type: 'ML'
+          confidence: tipConf, isLive: isLiveTennis, market_type: 'ML'
         }, 'tennis');
 
         for (const [userId, prefs] of subscribedUsers) {

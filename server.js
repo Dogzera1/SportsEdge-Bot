@@ -2196,6 +2196,7 @@ const server = http.createServer(async (req, res) => {
     try {
       const now = Date.now();
       const weekAhead = now + 7 * 24 * 60 * 60 * 1000;
+      const LIVE_WINDOW_MS = parseInt(process.env.TENNIS_LIVE_WINDOW_H || '6', 10) * 60 * 60 * 1000; // default 6h
 
       // 1) Busca todos os sports ativos na API e filtra os de tênis
       const sportsR = await httpGet(`https://api.the-odds-api.com/v4/sports/?apiKey=${THE_ODDS_API_KEY}`)
@@ -2222,7 +2223,10 @@ const server = http.createServer(async (req, res) => {
         const raw = safeParse(r2.value.body, []);
         for (const e of raw) {
           const t = new Date(e.commence_time).getTime();
-          if (t <= now || t > weekAhead) continue;
+          // upcoming: agora → 7d
+          // live: começou há <= LIVE_WINDOW_MS (The Odds API pode manter o evento por um tempo)
+          if (t > weekAhead) continue;
+          if (t <= now && (now - t) > LIVE_WINDOW_MS) continue;
           const bm = e.bookmakers?.[0];
           const market = bm?.markets?.find(m => m.key === 'h2h');
           const out = market?.outcomes || [];
@@ -2233,7 +2237,7 @@ const server = http.createServer(async (req, res) => {
             id: e.id,
             game: 'tennis',
             sport_key: tennisKeys[i],
-            status: 'upcoming',
+            status: (t <= now ? 'live' : 'upcoming'),
             team1: e.home_team,
             team2: e.away_team,
             league: e.sport_title || 'Tennis',
@@ -2242,7 +2246,11 @@ const server = http.createServer(async (req, res) => {
           });
         }
       }
-      matches.sort((a, b) => new Date(a.time) - new Date(b.time));
+      matches.sort((a, b) => {
+        if (a.status === 'live' && b.status !== 'live') return -1;
+        if (b.status === 'live' && a.status !== 'live') return 1;
+        return new Date(a.time) - new Date(b.time);
+      });
       sendJson(res, matches);
     } catch(e) {
       sendJson(res, []);
