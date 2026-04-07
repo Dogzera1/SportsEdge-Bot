@@ -331,8 +331,9 @@ function renderTips(tips) {
       : '\u2013';
 
     const match = (t.participant1 || '?') + ' vs ' + (t.participant2 || '?');
+    const why = t.tip_reason ? String(t.tip_reason).replace(/"/g, '\\"') : '';
 
-    return '<tr>' +
+    return '<tr title="' + (why ? ('Por quê: ' + why) : '') + '">' +
       '<td style="color:#6b7280;font-size:0.7rem">' + date + '</td>' +
       '<td title="' + match + '" style="max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + match + '</td>' +
       '<td><strong>' + (t.tip_participant || '?') + '</strong></td>' +

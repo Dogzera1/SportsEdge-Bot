@@ -389,7 +389,8 @@ async function runAutoAnalysis() {
             modelP1: result.modelP1,
             modelP2: result.modelP2,
             modelPPick: modelPPick,
-            modelLabel: modelLabel
+            modelLabel: modelLabel,
+            tipReason: result.tipReason || null
           }, 'esports');
 
           if (rec?.tipId && result.factorActive?.length && result.mlDirection) {
@@ -421,10 +422,12 @@ async function runAutoAnalysis() {
             ? `${gameIcon} 💰 *TIP ML AUTOMÁTICA — MAPA ${liveMapa}*`
             : `${gameIcon} 💰 *TIP ML AUTOMÁTICA*`;
 
+          const whyLine = result.tipReason ? `\n🧠 Por quê: _${result.tipReason}_\n` : '\n';
           const tipMsg = `${tipHeader}\n` +
             `${serieScore}${formatLabel}\n` +
             (mapaLabel ? `${mapaLabel}\n` : '') +
-            `\n🎯 Aposta: *${tipTeam}* ML @ *${tipOdd}*\n` +
+            whyLine +
+            `🎯 Aposta: *${tipTeam}* ML @ *${tipOdd}*\n` +
             `📈 EV: *${tipEV}*\n💵 Stake: *${tipStake}* _(${kellyLabel})_\n` +
             `${confEmoji} Confiança: *${tipConf}*${mlEdgeLabel}\n` +
             `📋 ${match.league}\n` +
@@ -1266,6 +1269,16 @@ async function autoAnalyzeMatch(token, match) {
     const tipResult = text.match(/TIP_ML:\s*([^@]+?)\s*@\s*([^|\]]+?)\s*\|EV:\s*([^|]+?)\s*\|STAKE:\s*([^|\]]+?)(?:\s*\|CONF:\s*(\w+))?(?:\]|$)/);
     const hasRealOdds = !!(o?.t1 && parseFloat(o.t1) > 1);
 
+    const extractTipReason = (t) => {
+      if (!t) return null;
+      const before = t.split('TIP_ML:')[0] || '';
+      const line = before.split('\n').map(s => s.trim()).filter(Boolean)[0] || '';
+      const clean = line.replace(/^[-*•\s]+/, '').trim();
+      if (!clean) return null;
+      return clean.slice(0, 160);
+    };
+    const tipReason = extractTipReason(text);
+
     // Extrai resumo da análise da IA para logar mesmo quando não há tip
     const extractAnalysisSummary = (t) => {
       const parts = [];
@@ -1386,7 +1399,8 @@ async function autoAnalyzeMatch(token, match) {
       modelP1: mlResult.modelP1,
       modelP2: mlResult.modelP2,
       mlDirection: mlResult.direction || null,
-      factorActive: mlResult.factorActive || []
+      factorActive: mlResult.factorActive || [],
+      tipReason
     };
   } catch(e) {
     log('ERROR', 'AUTO', `Error for ${match.team1} vs ${match.team2}: ${e.message}`);
@@ -3119,6 +3133,14 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
         }
 
         const text = resp?.content?.map(b => b.text || '').join('') || '';
+        const extractReasonTennis = (t) => {
+          if (!t) return null;
+          const before = t.split('TIP_ML:')[0] || '';
+          const line = before.split('\n').map(s => s.trim()).filter(Boolean)[0] || '';
+          const clean = line.replace(/^[-*•\s]+/, '').trim();
+          return clean ? clean.slice(0, 160) : null;
+        };
+        const tipReasonTennis = extractReasonTennis(text);
         const tipMatch = text.match(/TIP_ML:([^@]+)@([\d.]+)\|EV:([+-]?[\d.]+)%\|STAKE:([\d.]+)u?\|CONF:(ALTA|MÉDIA|BAIXA)/i);
 
         if (!tipMatch) {
@@ -3150,9 +3172,20 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
         const recLine = espn ? `\n📊 Registros: ${fight.team1} ${rec1||'?'} | ${fight.team2} ${rec2||'?'}` : '';
         const catLine = espn ? `\n🏷️ ${weightClass || fight.league}${isTitleFight ? ' — TITLE FIGHT' : ''}` : '';
 
+        const extractReasonMma = (t) => {
+          if (!t) return null;
+          const before = t.split('TIP_ML:')[0] || '';
+          const line = before.split('\n').map(s => s.trim()).filter(Boolean)[0] || '';
+          const clean = line.replace(/^[-*•\s]+/, '').trim();
+          return clean ? clean.slice(0, 160) : null;
+        };
+        const tipReasonMma = extractReasonMma(text);
+        const whyLineMma = tipReasonMma ? `\n🧠 Por quê: _${tipReasonMma}_\n` : '\n';
+
         const tipMsg = `🥊 💰 *TIP MMA*\n` +
           `*${fight.team1}* vs *${fight.team2}*\n📋 ${fight.league}\n` +
           `🕐 ${fightTime} (BRT)${recLine}${catLine}\n\n` +
+          whyLineMma +
           `🎯 Aposta: *${tipTeam}* @ *${tipOdd}*\n` +
           `📈 EV: *+${tipEV}%* | De-juice: ${tipTeam === fight.team1 ? fairP1 : fairP2}%\n` +
           `💵 Stake: *${tipStake}u*\n` +
@@ -3170,7 +3203,8 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
           modelP1: mlResultMma.modelP1,
           modelP2: mlResultMma.modelP2,
           modelPPick: modelPPickMma,
-          modelLabel: fairLabelMma
+          modelLabel: fairLabelMma,
+          tipReason: tipReasonMma
         }, 'mma');
 
         if (rec?.tipId && mlResultMma.factorActive?.length && mlResultMma.direction) {
@@ -3373,10 +3407,12 @@ Máximo 200 palavras. Mostre seu raciocínio brevemente antes da decisão.`;
         const surfaceEmoji = { saibro: '🟤', grama: '💚', dura: '🔵' }[surface] || '🎾';
         const grandSlamBadge = isGrandSlam ? ' 🏆' : isMasters ? ' ⭐' : '';
 
+        const whyLineTennis = tipReasonTennis ? `\n🧠 Por quê: _${tipReasonTennis}_\n` : '\n';
         const tipMsg = `🎾 💰 *TIP TÊNIS${isLiveTennis ? ' (AO VIVO)' : ''}*\n` +
           `*${match.team1}* vs *${match.team2}*\n` +
           `📋 ${match.league}${grandSlamBadge}\n` +
           `${surfaceEmoji} ${surface.charAt(0).toUpperCase() + surface.slice(1)} | 🕐 ${matchTime} (BRT)\n\n` +
+          whyLineTennis +
           `🎯 Aposta: *${tipPlayer}* @ *${tipOdd}*\n` +
           `📈 EV: *+${tipEV}%* | De-juice: ${tipPlayer === match.team1 ? fairP1 : fairP2}%\n` +
           `💵 Stake: *${tipStake}u*\n` +
@@ -3394,7 +3430,8 @@ Máximo 200 palavras. Mostre seu raciocínio brevemente antes da decisão.`;
           modelP1: mlResultTennis.modelP1,
           modelP2: mlResultTennis.modelP2,
           modelPPick: modelPPick,
-          modelLabel: fairLabelTennis
+          modelLabel: fairLabelTennis,
+          tipReason: tipReasonTennis
         }, 'tennis');
 
         if (rec?.tipId && mlResultTennis.factorActive?.length && mlResultTennis.direction) {

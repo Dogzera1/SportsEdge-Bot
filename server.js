@@ -1586,6 +1586,7 @@ const server = http.createServer(async (req, res) => {
         const modelP2 = t.modelP2 != null ? parseFloat(t.modelP2) : null;
         const modelPPick = t.modelPPick != null ? parseFloat(t.modelPPick) : null;
         const modelLabel = (t.modelLabel || '').toString().trim() || null;
+        const tipReason = (t.tipReason || '').toString().trim() || null;
         const result = stmts.insertTip.run({
           sport, matchId: String(t.matchId), eventName: t.eventName || '',
           p1: t.p1 || t.team1 || t.fighter1 || '', p2: t.p2 || t.team2 || t.fighter2 || '',
@@ -1595,7 +1596,8 @@ const server = http.createServer(async (req, res) => {
           model_p1: isFinite(modelP1) ? modelP1 : null,
           model_p2: isFinite(modelP2) ? modelP2 : null,
           model_p_pick: isFinite(modelPPick) ? modelPPick : null,
-          model_label: modelLabel
+          model_label: modelLabel,
+          tip_reason: tipReason
         });
         // Calcula stake em reais com base na banca atual (1u = 1% da banca atual)
         try {
