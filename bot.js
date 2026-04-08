@@ -188,7 +188,14 @@ function serverPost(path, body, sport, extraHeaders) {
       let d = '';
       res.on('data', c => d += c);
       res.on('end', () => {
-        try { resolve(JSON.parse(d)); }
+        try {
+          const parsed = JSON.parse(d);
+          if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+            parsed.__status = res.statusCode;
+            parsed.__path = path;
+          }
+          resolve(parsed);
+        }
         catch(e) { reject(e); }
       });
     });
@@ -1406,9 +1413,20 @@ async function autoAnalyzeMatch(token, match) {
       const evPct = (pickP && pickOdd) ? ((pickP * pickOdd - 1) * 100) : 0;
       if (pickOdd >= 1.01 && evPct >= 5 && mlResult.score >= 5) {
         const stake = calcKellyWithP(pickP, pickOdd, 0.15); // ~1/6 Kelly
-        log('WARN', 'AUTO', `IA sem resposta; fallback modelo: ${pickTeam} EV=${evPct.toFixed(1)}% edge=${mlResult.score.toFixed(1)}pp`);
+        const errShort = resp?.error ? String(resp.error).slice(0, 140) : '';
+        const st = resp?.__status ? String(resp.__status) : '';
+        log('WARN', 'AUTO', `IA sem resposta; fallback modelo: ${pickTeam} EV=${evPct.toFixed(1)}% edge=${mlResult.score.toFixed(1)}pp${st ? ` | status=${st}` : ''}${errShort ? ` | err=${errShort}` : ''}`);
         return {
           ok: true,
+          // Compatível com runAutoAnalysis(): precisa tipMatch estilo regex
+          tipMatch: [
+            `TIP_ML: ${pickTeam} @ ${pickOdd} |EV: +${evPct.toFixed(1)}% |STAKE: ${String(stake || '1u')} |CONF: MÉDIA`,
+            String(pickTeam),
+            String(pickOdd),
+            `+${evPct.toFixed(1)}%`,
+            String(stake || '1u'),
+            'MÉDIA'
+          ],
           tipTeam: pickTeam,
           tipOdd: pickOdd,
           tipEV: parseFloat(evPct.toFixed(1)),
@@ -1417,7 +1435,9 @@ async function autoAnalyzeMatch(token, match) {
           tipReason: 'Value detectado pelo modelo (fallback sem IA)'
         };
       }
-      log('WARN', 'AUTO', `IA sem resposta para ${match.team1} vs ${match.team2} (provider: ${resp.provider || 'deepseek'})`);
+      const errShort = resp?.error ? String(resp.error).slice(0, 220) : '';
+      const st = resp?.__status ? String(resp.__status) : '';
+      log('WARN', 'AUTO', `IA sem resposta para ${match.team1} vs ${match.team2} (provider: ${resp.provider || 'deepseek'})${st ? ` | status=${st}` : ''}${errShort ? ` | err=${errShort}` : ''}`);
       return null;
     }
 
