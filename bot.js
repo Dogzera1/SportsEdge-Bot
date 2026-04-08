@@ -505,7 +505,7 @@ async function runAutoAnalysis() {
           const modelPPick = modelPForKelly;
 
           // Ao vivo: registrar por mapa para não sobrescrever série inteira
-          const liveMapa = result.liveGameNumber;
+          const liveMapa = result.hasLiveStats ? result.liveGameNumber : null;
           const mapTag = (result.hasLiveStats && liveMapa) ? `_MAP${liveMapa}` : '';
           const rec = await serverPost('/record-tip', {
             matchId: canonicalMatchId('esports', String(match.id) + mapTag), eventName: match.league,
@@ -543,7 +543,7 @@ async function runAutoAnalysis() {
               ? '📋 Análise de draft (composições conhecidas, jogo ainda não iniciado)'
               : '📋 Análise pré-jogo';
 
-          const tipHeader = liveMapa
+          const tipHeader = (result.hasLiveStats && liveMapa)
             ? `${gameIcon} 💰 *TIP ML AUTOMÁTICA — MAPA ${liveMapa}*`
             : `${gameIcon} 💰 *TIP ML AUTOMÁTICA*`;
 
@@ -4419,6 +4419,7 @@ async function refreshOpenTips() {
       const now = Date.now();
 
       for (const tip of unsettled) {
+        if (tip.is_live) continue; // não atualizar tip que já foi gerada ao vivo
         const p1 = tip.participant1 || '';
         const p2 = tip.participant2 || '';
         const pick = tip.tip_participant || '';
