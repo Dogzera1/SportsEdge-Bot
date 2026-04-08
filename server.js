@@ -73,6 +73,127 @@ function updateEloMatch(homeTeam, awayTeam, winner) {
   return { homeTeam, awayTeam, before: { rH, rA }, after: { newH, newA }, K, homeAdvElo };
 }
 
+// ── Import dataset CSV (football matches 2024/2025) ──
+function parseCsvRows(text) {
+  const rows = [];
+  let i = 0;
+  let field = '';
+  let row = [];
+  let inQuotes = false;
+  while (i < text.length) {
+    const ch = text[i];
+    if (inQuotes) {
+      if (ch === '"') {
+        const next = text[i + 1];
+        if (next === '"') { field += '"'; i += 2; continue; }
+        inQuotes = false;
+        i++;
+        continue;
+      }
+      field += ch;
+      i++;
+      continue;
+    }
+    if (ch === '"') { inQuotes = true; i++; continue; }
+    if (ch === ',') { row.push(field); field = ''; i++; continue; }
+    if (ch === '\r') { i++; continue; }
+    if (ch === '\n') {
+      row.push(field);
+      rows.push(row);
+      row = [];
+      field = '';
+      i++;
+      continue;
+    }
+    field += ch;
+    i++;
+  }
+  if (field.length || row.length) {
+    row.push(field);
+    rows.push(row);
+  }
+  return rows;
+}
+
+function idxOf(headers, name) {
+  const n = String(name || '').toLowerCase().trim();
+  return headers.findIndex(h => String(h || '').toLowerCase().trim() === n);
+}
+
+async function importFootballMatchesCsvOnce() {
+  const enabled = (process.env.FOOTBALL_DATASET_IMPORT ?? 'true') !== 'false';
+  if (!enabled) return;
+  const urlCsv = process.env.FOOTBALL_MATCHES_CSV_URL
+    || 'https://raw.githubusercontent.com/tarekmasryo/Football-Matches-Results-2024-25-Dataset/main/data/football_matches_2024_2025.csv';
+  const key = `football_matches_csv:${urlCsv}`;
+  const exists = stmts.getDatasetImport.get(key);
+  if (exists) return;
+
+  try {
+    const r = await cachedHttpGet(urlCsv, { provider: 'football_dataset', ttlMs: 24 * 60 * 60 * 1000 }).catch(() => null);
+    if (!r || r.status !== 200) { log('WARN', 'IMPORT', `CSV football: HTTP ${r?.status || 'fail'}`); return; }
+    const rows = parseCsvRows(String(r.body || ''));
+    if (!rows.length || rows.length < 2) { log('WARN', 'IMPORT', 'CSV football: vazio'); return; }
+
+    const headers = rows[0];
+    const c = {
+      competition_name: idxOf(headers, 'competition_name'),
+      match_id: idxOf(headers, 'match_id'),
+      utc_date: idxOf(headers, 'utc_date'),
+      home_team_name: idxOf(headers, 'home_team_name'),
+      away_team_name: idxOf(headers, 'away_team_name'),
+      ft_home: idxOf(headers, 'ft_home'),
+      ft_away: idxOf(headers, 'ft_away'),
+      ht_home: idxOf(headers, 'ht_home'),
+      ht_away: idxOf(headers, 'ht_away'),
+      outcome: idxOf(headers, 'outcome'),
+    };
+    if (c.match_id < 0 || c.utc_date < 0 || c.home_team_name < 0 || c.away_team_name < 0) {
+      log('WARN', 'IMPORT', `CSV football: colunas ausentes (headers=${headers.slice(0, 30).join(',')})`);
+      return;
+    }
+
+    let imported = 0;
+    const tx = db.transaction(() => {
+      for (let i = 1; i < rows.length; i++) {
+        const row = rows[i];
+        const mid = row[c.match_id];
+        const date = row[c.utc_date];
+        const home = row[c.home_team_name];
+        const away = row[c.away_team_name];
+        if (!mid || !date || !home || !away) continue;
+
+        const ftH = c.ft_home >= 0 ? parseInt(row[c.ft_home], 10) : null;
+        const ftA = c.ft_away >= 0 ? parseInt(row[c.ft_away], 10) : null;
+        const score = (Number.isFinite(ftH) && Number.isFinite(ftA)) ? `${ftH}-${ftA}` : '';
+
+        let winner = 'Draw';
+        if (Number.isFinite(ftH) && Number.isFinite(ftA)) {
+          if (ftH > ftA) winner = home;
+          else if (ftA > ftH) winner = away;
+        } else if (c.outcome >= 0) {
+          const out = String(row[c.outcome] || '').toUpperCase();
+          if (out === 'H') winner = home;
+          else if (out === 'A') winner = away;
+          else winner = 'Draw';
+        }
+
+        const league = (c.competition_name >= 0 ? String(row[c.competition_name] || '').trim() : '') || 'Dataset';
+        const matchId = `fd_${String(mid).trim()}`;
+        const resolvedAt = String(date).replace('T', ' ').slice(0, 19); // "YYYY-MM-DD HH:MM:SS"
+        stmts.upsertMatchResultWithDate.run(matchId, 'football', String(home), String(away), String(winner), score, league, resolvedAt);
+        imported++;
+      }
+    });
+    tx();
+
+    stmts.upsertDatasetImport.run(key, 'tarekmasryo/Football-Matches-Results-2024-25-Dataset', imported);
+    log('INFO', 'IMPORT', `CSV football importado: ${imported} jogos (key=${key})`);
+  } catch (e) {
+    log('WARN', 'IMPORT', `CSV football import falhou: ${e.message}`);
+  }
+}
+
 // ── Import opcional: dados gol.gg (CSV) ──
 // Usa CSV gerado por scrapers externos (ex: PandaTobi/League-of-Legends-ESports-Data)
 // Objetivo: seed/merge em pro_champ_stats quando sync PandaScore estiver vazio
@@ -3322,6 +3443,9 @@ async function syncProStats({ forceResync = false } = {}) {
 server.listen(PORT, '0.0.0.0', () => {
   log('INFO', 'SERVER', `SportsEdge API em http://0.0.0.0:${PORT}`);
   log('INFO', 'SERVER', `Esportes: LoL (Riot API + PandaScore)`);
+
+  // Import automático de dataset futebol (CSV 2024/2025) para alimentar match_results (form/H2H)
+  importFootballMatchesCsvOnce().catch(() => {});
 
   // Inicialização e Loop de Cache de Odds (OddsPapi 1xBet)
   (async () => {

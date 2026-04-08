@@ -3750,6 +3750,45 @@ async function pollFootball() {
           } catch(_) {}
         }
 
+        // Fallback final: usar base interna (match_results) para forma/H2H quando APIs falharem
+        if (!fixtureInfo) {
+          try {
+            const [f1, f2, h2hDb] = await Promise.all([
+              serverGet(`/team-form?team=${encodeURIComponent(match.team1)}&game=football`).catch(() => null),
+              serverGet(`/team-form?team=${encodeURIComponent(match.team2)}&game=football`).catch(() => null),
+              serverGet(`/h2h?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}&game=football`).catch(() => null),
+            ]);
+            // Adaptar formato para calcFootballScore
+            const toFormArr = (obj) => {
+              const arr = Array.isArray(obj?.recent) ? obj.recent : null;
+              return arr && arr.length ? arr : null;
+            };
+            const toAvgGoals = (obj, key) => (obj && typeof obj[key] === 'number') ? obj[key] : null;
+
+            homeFormData = f1 ? {
+              form: toFormArr(f1),
+              homeForm: null,
+              awayForm: null,
+              goalsFor: toAvgGoals(f1, 'goalsFor'),
+              goalsAgainst: toAvgGoals(f1, 'goalsAgainst'),
+              games: f1?.totalGames || null
+            } : homeFormData;
+
+            awayFormData = f2 ? {
+              form: toFormArr(f2),
+              homeForm: null,
+              awayForm: null,
+              goalsFor: toAvgGoals(f2, 'goalsFor'),
+              goalsAgainst: toAvgGoals(f2, 'goalsAgainst'),
+              games: f2?.totalGames || null
+            } : awayFormData;
+
+            h2hData = (h2hDb && Array.isArray(h2hDb.results))
+              ? { results: h2hDb.results.slice(0, 10) }
+              : h2hData;
+          } catch(_) {}
+        }
+
         // ── ML com dados reais (ou nulls se API indisponível) ──
         const homeStandings = fixtureInfo ? standingsData[fixtureInfo.homeId] : null;
         const awayStandings = fixtureInfo ? standingsData[fixtureInfo.awayId] : null;
