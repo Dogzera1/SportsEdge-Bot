@@ -4190,12 +4190,13 @@ log('INFO', 'BOOT', `Sports carregados: ${JSON.stringify(Object.entries(SPORTS).
   setInterval(() => checkLineMovement().catch(e => log('ERROR', 'LINE', e.message)), LINE_CHECK_INTERVAL);
   if (SPORTS.esports?.enabled) {
     setInterval(() => checkLiveNotifications().catch(e => log('ERROR', 'NOTIFY', e.message)), LIVE_CHECK_INTERVAL);
-    setInterval(() => checkCLV().catch(e => log('ERROR', 'CLV', e.message)), 5 * 60 * 1000);
-    setInterval(() => refreshOpenTips().catch(() => {}), 10 * 60 * 1000);
     // Auto-patch meta: verifica novo patch a cada 12h via ddragon
     fetchLatestPatchMeta().catch(e => log('WARN', 'PATCH', e.message)); // executa imediatamente no boot
     setInterval(() => fetchLatestPatchMeta().catch(e => log('WARN', 'PATCH', e.message)), PATCH_AUTO_FETCH_INTERVAL);
   }
+  // CLV / updates: útil em todos esportes com odds padronizadas
+  setInterval(() => checkCLV().catch(e => log('ERROR', 'CLV', e.message)), 5 * 60 * 1000);
+  setInterval(() => refreshOpenTips().catch(() => {}), 10 * 60 * 1000);
   
   log('INFO', 'BOOT', `Bots ativos: ${Object.keys(bots).join(', ')}`);
   log('INFO', 'BOOT', 'Pronto! Mande /start em cada bot no Telegram');
@@ -4206,34 +4207,121 @@ log('INFO', 'BOOT', `Sports carregados: ${JSON.stringify(Object.entries(SPORTS).
 async function checkCLV() {
   if (subscribedUsers.size === 0) return;
   try {
-    const unsettled = await serverGet('/unsettled-tips', 'esports');
-    if (!Array.isArray(unsettled)) return;
     const now = Date.now();
-    // Busca partidas para cruzar horário de início
-    const lolMatches = await serverGet('/lol-matches').catch(() => []);
-    const matchTimeMap = {};
-    if (Array.isArray(lolMatches)) {
-      for (const m of lolMatches) {
-        if (m.time) {
-          const k1 = norm(m.team1 || '') + '_' + norm(m.team2 || '');
-          const k2 = norm(m.team2 || '') + '_' + norm(m.team1 || '');
-          matchTimeMap[k1] = new Date(m.time).getTime();
-          matchTimeMap[k2] = new Date(m.time).getTime();
+
+    const sportsToTrack = Object.entries(SPORTS)
+      .filter(([id, s]) => s && s.enabled && s.token && (id === 'esports' || id === 'football' || id === 'tennis'))
+      .map(([id]) => id);
+    if (!sportsToTrack.length) return;
+
+    for (const sport of sportsToTrack) {
+      const unsettled = await serverGet('/unsettled-tips', sport).catch(() => []);
+      if (!Array.isArray(unsettled) || unsettled.length === 0) continue;
+
+      // Mapa de horário de início por confronto
+      const matchTimeMap = {};
+      if (sport === 'esports') {
+        const lolMatches = await serverGet('/lol-matches').catch(() => []);
+        if (Array.isArray(lolMatches)) {
+          for (const m of lolMatches) {
+            if (m.time) {
+              const k1 = norm(m.team1 || '') + '_' + norm(m.team2 || '');
+              const k2 = norm(m.team2 || '') + '_' + norm(m.team1 || '');
+              matchTimeMap[k1] = new Date(m.time).getTime();
+              matchTimeMap[k2] = new Date(m.time).getTime();
+            }
+          }
+        }
+      } else if (sport === 'football') {
+        const matches = await serverGet('/football-matches').catch(() => []);
+        if (Array.isArray(matches)) {
+          for (const m of matches) {
+            if (m.time) {
+              const k1 = norm(m.team1 || '') + '_' + norm(m.team2 || '');
+              const k2 = norm(m.team2 || '') + '_' + norm(m.team1 || '');
+              const ts = new Date(m.time).getTime();
+              matchTimeMap[k1] = ts;
+              matchTimeMap[k2] = ts;
+            }
+          }
+        }
+      } else if (sport === 'tennis') {
+        const matches = await serverGet('/tennis-matches').catch(() => []);
+        if (Array.isArray(matches)) {
+          for (const m of matches) {
+            if (m.time) {
+              const k1 = norm(m.team1 || '') + '_' + norm(m.team2 || '');
+              const k2 = norm(m.team2 || '') + '_' + norm(m.team1 || '');
+              const ts = new Date(m.time).getTime();
+              matchTimeMap[k1] = ts;
+              matchTimeMap[k2] = ts;
+            }
+          }
         }
       }
-    }
-    for (const tip of unsettled) {
-      if (tip.clv_odds) continue; // já registrado
-      // Verifica se partida começa em < 1h (janela ideal para CLV)
-      const tipKey = norm(tip.participant1 || '') + '_' + norm(tip.participant2 || '');
-      const matchStart = matchTimeMap[tipKey] || 0;
-      const timeToMatch = matchStart > 0 ? matchStart - now : null;
-      if (timeToMatch === null || timeToMatch > 60 * 60 * 1000 || timeToMatch < -5 * 60 * 1000) continue;
-      const o = await serverGet(`/odds?team1=${encodeURIComponent(tip.participant1)}&team2=${encodeURIComponent(tip.participant2)}`).catch(() => null);
-      if (o && parseFloat(o.t1) > 1) {
-        const clvOdds = norm(tip.tip_participant) === norm(tip.participant1) ? o.t1 : o.t2;
-        await serverPost('/update-clv', { matchId: tip.match_id, clvOdds }, 'esports').catch(() => {});
-        log('INFO', 'CLV', `Registrado CLV ${clvOdds} para ${tip.participant1} vs ${tip.participant2}`);
+
+      // Para football, evita chamar /football-matches para cada tip (reusa lista)
+      const footballMatches = (sport === 'football')
+        ? await serverGet('/football-matches').catch(() => [])
+        : null;
+      // Para tennis, evita chamar /tennis-matches para cada tip (reusa lista)
+      const tennisMatches = (sport === 'tennis')
+        ? await serverGet('/tennis-matches').catch(() => [])
+        : null;
+
+      for (const tip of unsettled) {
+        if (tip.clv_odds) continue; // já registrado
+
+        // Verifica se partida começa em < 1h (janela ideal para CLV)
+        const tipKey = norm(tip.participant1 || '') + '_' + norm(tip.participant2 || '');
+        const matchStart = matchTimeMap[tipKey] || 0;
+        const timeToMatch = matchStart > 0 ? matchStart - now : null;
+        if (timeToMatch === null || timeToMatch > 60 * 60 * 1000 || timeToMatch < -5 * 60 * 1000) continue;
+
+        let clvOdds = null;
+        if (sport === 'esports') {
+          const o = await serverGet(`/odds?team1=${encodeURIComponent(tip.participant1)}&team2=${encodeURIComponent(tip.participant2)}`).catch(() => null);
+          if (o && parseFloat(o.t1) > 1) {
+            clvOdds = (norm(tip.tip_participant) === norm(tip.participant1)) ? o.t1 : o.t2;
+          }
+        } else if (sport === 'football') {
+          const list = Array.isArray(footballMatches) ? footballMatches : [];
+          const p1 = norm(tip.participant1 || '');
+          const p2 = norm(tip.participant2 || '');
+          const pick = String(tip.tip_participant || '');
+          const pickN = norm(pick);
+          const m = list.find(x => {
+            const a1 = norm(x.team1 || '');
+            const a2 = norm(x.team2 || '');
+            return (a1 === p1 && a2 === p2) || (a1 === p2 && a2 === p1);
+          });
+          if (m?.odds) {
+            if (pickN === norm(m.team1)) clvOdds = m.odds.h;
+            else if (pickN === norm(m.team2)) clvOdds = m.odds.a;
+            else if (pickN === 'draw' || pickN === norm('empate')) clvOdds = m.odds.d;
+          }
+        } else if (sport === 'tennis') {
+          const list = Array.isArray(tennisMatches) ? tennisMatches : [];
+          const p1 = norm(tip.participant1 || '');
+          const p2 = norm(tip.participant2 || '');
+          const pick = String(tip.tip_participant || '');
+          const pickN = norm(pick);
+          const m = list.find(x => {
+            const a1 = norm(x.team1 || '');
+            const a2 = norm(x.team2 || '');
+            return (a1 === p1 && a2 === p2) || (a1 === p2 && a2 === p1);
+          });
+          if (m?.odds) {
+            if (pickN === norm(m.team1)) clvOdds = m.odds.t1;
+            else if (pickN === norm(m.team2)) clvOdds = m.odds.t2;
+          }
+        }
+
+        const clvN = parseFloat(clvOdds);
+        if (clvN && clvN > 1) {
+          await serverPost('/update-clv', { matchId: tip.match_id, clvOdds: clvN }, sport).catch(() => {});
+          log('INFO', 'CLV', `Registrado CLV ${clvN} (${sport}) para ${tip.participant1} vs ${tip.participant2}`);
+        }
       }
     }
   } catch(e) {}
@@ -4267,6 +4355,37 @@ async function refreshOpenTips() {
           const o = await serverGet(`/odds?team1=${encodeURIComponent(p1)}&team2=${encodeURIComponent(p2)}`).catch(() => null);
           if (o && parseFloat(o.t1) > 1) {
             currentOdds = norm(pick) === norm(p1) ? parseFloat(o.t1) : parseFloat(o.t2);
+          }
+        } else if (sport === 'football') {
+          const matches = await serverGet('/football-matches').catch(() => []);
+          if (Array.isArray(matches) && matches.length) {
+            const n1 = norm(p1), n2 = norm(p2);
+            const m = matches.find(x => {
+              const a1 = norm(x.team1 || '');
+              const a2 = norm(x.team2 || '');
+              return (a1 === n1 && a2 === n2) || (a1 === n2 && a2 === n1);
+            });
+            if (m?.odds) {
+              const pickN = norm(pick);
+              if (pickN === norm(m.team1)) currentOdds = parseFloat(m.odds.h);
+              else if (pickN === norm(m.team2)) currentOdds = parseFloat(m.odds.a);
+              else if (pickN === 'draw' || pickN === norm('empate')) currentOdds = parseFloat(m.odds.d);
+            }
+          }
+        } else if (sport === 'tennis') {
+          const matches = await serverGet('/tennis-matches').catch(() => []);
+          if (Array.isArray(matches) && matches.length) {
+            const n1 = norm(p1), n2 = norm(p2);
+            const m = matches.find(x => {
+              const a1 = norm(x.team1 || '');
+              const a2 = norm(x.team2 || '');
+              return (a1 === n1 && a2 === n2) || (a1 === n2 && a2 === n1);
+            });
+            if (m?.odds) {
+              const pickN = norm(pick);
+              if (pickN === norm(m.team1)) currentOdds = parseFloat(m.odds.t1);
+              else if (pickN === norm(m.team2)) currentOdds = parseFloat(m.odds.t2);
+            }
           }
         } else {
           // fallback: sem odds atuais padronizadas por esporte aqui
