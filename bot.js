@@ -4237,6 +4237,21 @@ log('INFO', 'BOOT', `Sports carregados: ${JSON.stringify(Object.entries(SPORTS).
 
   await loadExistingTips();
   
+  // Suprime notificações de partidas já ao vivo no boot (restart).
+  // Marca como "já notificada" para não enviar de novo quando o bot reinicia.
+  try {
+    const lolList = await serverGet('/lol-matches').catch(() => []);
+    const allLive = Array.isArray(lolList) ? lolList.filter(m => m.status === 'live') : [];
+    for (const match of allLive.slice(0, 30)) {
+      const liveIds = await serverGet(`/live-gameids?matchId=${encodeURIComponent(String(match.id))}`).catch(() => []);
+      const currentMap = Array.isArray(liveIds) ? (liveIds.find(x => x.hasLiveData)?.gameNumber || liveIds[0]?.gameNumber) : null;
+      if (!currentMap) continue;
+      const matchKey = `${match.game}_${match.id}_MAP${currentMap}`;
+      if (!notifiedMatches.has(matchKey)) notifiedMatches.set(matchKey, Date.now());
+    }
+    if (allLive.length) log('INFO', 'BOOT', `Live notify suprimido no boot: ${allLive.length} partida(s) ao vivo`);
+  } catch(_) {}
+
   // Start polling for each enabled sport
   for (const [sport, config] of Object.entries(SPORTS)) {
     if (!config.enabled || !config.token) {
