@@ -1401,6 +1401,13 @@ async function autoAnalyzeMatch(token, match) {
       return null;
     }
 
+    const hasRealOdds = !!(oddsToUse?.t1 && parseFloat(oddsToUse.t1) > 1);
+    // Sem odds reais: não chamar IA (não dá para gerar TIP_ML/EV)
+    if (!hasRealOdds) {
+      // Ao vivo: esperar mercado abrir; pré-jogo: esperar odds aparecer
+      return null;
+    }
+
     const newsSectionEsports = await fetchMatchNews('esports', match.team1, match.team2).catch(() => '');
     const { text: prompt, evThreshold: adaptiveEV, sigCount } = buildEsportsPrompt(match, game, gamesContext, oddsToUse, enrichSection, mlResult, newsSectionEsports);
     log('INFO', 'AUTO', `Analisando: ${match.team1} vs ${match.team2} | sinais=${sigCount}/6 | evThreshold=${adaptiveEV}% | mlEdge=${mlResult.score.toFixed(1)}pp`);
@@ -1506,8 +1513,6 @@ async function autoAnalyzeMatch(token, match) {
       const snippet = text.slice(0, 200).replace(/\n/g, ' ');
       log('DEBUG', 'IA-PARSE', `Sem TIP_ML na resposta para ${match.team1} vs ${match.team2}: "${snippet}"`);
     }
-    const hasRealOdds = !!(oddsToUse?.t1 && parseFloat(oddsToUse.t1) > 1);
-
     const extractTipReason = (t) => {
       if (!t) return null;
       const before = t.split('TIP_ML:')[0] || '';
