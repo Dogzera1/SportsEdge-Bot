@@ -3693,8 +3693,21 @@ async function pollTennis() {
         const form1 = espnEvent ? getTennisRecentForm(espnEvent.recentResults, match.team1) : null;
         const form2 = espnEvent ? getTennisRecentForm(espnEvent.recentResults, match.team2) : null;
 
-        // ── Pré-filtro ML com ranking ESPN como prior ──
-        const tennisEnrich = rankingToEnrich(rank1, rank2);
+        // ── Pré-filtro ML com Dados do ML (Form/H2H DB + Ranking ESPN) ──
+        const [dbForm1, dbForm2, dbH2h] = await Promise.all([
+          serverGet(`/team-form?team=${encodeURIComponent(match.team1)}&game=tennis&days=730&limit=20`).catch(() => null),
+          serverGet(`/team-form?team=${encodeURIComponent(match.team2)}&game=tennis&days=730&limit=20`).catch(() => null),
+          serverGet(`/h2h?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}&game=tennis&days=1095&limit=15`).catch(() => null),
+        ]);
+
+        const rankEnrich = rankingToEnrich(rank1, rank2);
+        const tennisEnrich = {
+          form1: (dbForm1 && (dbForm1.wins + dbForm1.losses) >= 3) ? dbForm1 : (rankEnrich?.form1 || null),
+          form2: (dbForm2 && (dbForm2.wins + dbForm2.losses) >= 3) ? dbForm2 : (rankEnrich?.form2 || null),
+          h2h: dbH2h || { t1Wins: 0, t2Wins: 0, totalMatches: 0 },
+          oddsMovement: null
+        };
+
         const mlResultTennis = esportsPreFilter(match, o, tennisEnrich || { form1: null, form2: null, h2h: null, oddsMovement: null }, false, '', null);
         if (!mlResultTennis.pass) {
           log('INFO', 'AUTO-TENNIS', `Pré-filtro ML: edge insuficiente (${mlResultTennis.score.toFixed(1)}pp) para ${match.team1} vs ${match.team2}. Pulando IA.`);
@@ -3705,7 +3718,7 @@ async function pollTennis() {
         // Fair odds sempre disponíveis: quando sem ranking, modelP1=impliedP1 (de-juice puro)
         const modelP1Tennis = (mlResultTennis.modelP1 * 100).toFixed(1);
         const modelP2Tennis = (mlResultTennis.modelP2 * 100).toFixed(1);
-        const fairLabelTennis = hasModelDataTennis ? 'P modelo (ranking ESPN)' : 'Fair odds (de-juice, sem ranking ESPN)';
+        const fairLabelTennis = hasModelDataTennis ? 'P modelo (ML H2H/Ranking)' : 'Fair odds (de-juice, sem ranking/ML)';
 
         // Montar seção de dados reais
         const dataSection = [

@@ -3125,16 +3125,18 @@ const server = http.createServer(async (req, res) => {
   if (p === '/team-form' || p === '/form') {
     const team = parsed.query.team || parsed.query.name || '';
     const game = parsed.query.game || 'lol';
+    const days = parseInt(parsed.query.days) || 45;
+    const limit = parseInt(parsed.query.limit) || 10;
     if (!team) { sendJson(res, { error: 'team param required' }, 400); return; }
 
     // Tentativa 1: match exato
-    let rows = stmts.getTeamForm.all(team, team, game);
+    let rows = stmts.getTeamFormCustom.all(team, team, game, days, limit);
 
     // Tentativa 2: match parcial (LIKE) — captura divergências de nome como
     // "Hanwha Life" vs "Hanwha Life Esports" ou "T1" vs "T1 Academy"
     if (!rows.length) {
       const fuzzy = `%${team}%`;
-      rows = stmts.getTeamFormFuzzy.all(fuzzy, fuzzy, game);
+      rows = stmts.getTeamFormFuzzyCustom.all(fuzzy, fuzzy, game, days, limit);
     }
 
     if (!rows.length) { sendJson(res, { wins: 0, losses: 0, winRate: 0, streak: '—' }); return; }
@@ -3153,14 +3155,16 @@ const server = http.createServer(async (req, res) => {
   if (p === '/h2h') {
     const t1 = parsed.query.team1 || '', t2 = parsed.query.team2 || '';
     const game = parsed.query.game || 'lol';
+    const days = parseInt(parsed.query.days) || 45;
+    const limit = parseInt(parsed.query.limit) || 10;
     if (!t1 || !t2) { sendJson(res, { totalMatches: 0, t1Wins: 0, t2Wins: 0 }); return; }
 
     // Tentativa 1: match exato
-    let rows = stmts.getH2H.all(t1, t2, t2, t1, game);
+    let rows = stmts.getH2HCustom.all(t1, t2, t2, t1, game, days, limit);
 
     // Tentativa 2: match parcial
     if (!rows.length) {
-      rows = stmts.getH2HFuzzy.all(`%${t1}%`, `%${t2}%`, `%${t2}%`, `%${t1}%`, game);
+      rows = stmts.getH2HFuzzyCustom.all(`%${t1}%`, `%${t2}%`, `%${t2}%`, `%${t1}%`, game, days, limit);
     }
 
     let t1w = 0, t2w = 0;
