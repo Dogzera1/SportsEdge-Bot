@@ -2084,6 +2084,44 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // Marca tip como VOID (odds errada / cancelada) para sair de "em andamento"
+  if (p === '/void-tip') {
+    const sport = parsed.query.sport || 'esports';
+    const idStr = parsed.query.id || '';
+    const matchId = parsed.query.matchId || parsed.query.match_id || '';
+    if (!idStr && !matchId) { sendJson(res, { error: 'id ou matchId obrigatório' }, 400); return; }
+    try {
+      let changes = 0;
+      if (idStr) {
+        const id = parseInt(idStr, 10);
+        if (!Number.isFinite(id)) { sendJson(res, { error: 'id inválido' }, 400); return; }
+        const tip = stmts.getTipById.get(id, sport);
+        const r = stmts.voidTipById.run(id, sport);
+        changes = r?.changes || 0;
+        if (changes > 0 && tip?.participant1 && tip?.participant2) {
+          const p1n = norm(tip.participant1);
+          const p2n = norm(tip.participant2);
+          const mtype = (tip.market_type || 'ML').toString().slice(0, 20);
+          stmts.addVoidedTip.run(sport, tip.match_id || null, p1n, p2n, mtype, 'odds_wrong');
+        }
+      } else {
+        const tip = stmts.getTipByMatchId.get(String(matchId), sport);
+        const r = stmts.voidTipByMatch.run(String(matchId), sport);
+        changes = r?.changes || 0;
+        if (changes > 0 && tip?.participant1 && tip?.participant2) {
+          const p1n = norm(tip.participant1);
+          const p2n = norm(tip.participant2);
+          const mtype = (tip.market_type || 'ML').toString().slice(0, 20);
+          stmts.addVoidedTip.run(sport, String(matchId), p1n, p2n, mtype, 'odds_wrong');
+        }
+      }
+      sendJson(res, { ok: true, changes });
+    } catch(e) {
+      sendJson(res, { error: e.message }, 500);
+    }
+    return;
+  }
+
   if (p === '/record-tip' && req.method === 'POST') {
     let body = ''; req.on('data', d => body += d);
     req.on('end', async () => {
@@ -2114,6 +2152,15 @@ const server = http.createServer(async (req, res) => {
         // Evitar tip duplicada para o mesmo match_id + sport
         const existing = stmts.tipExistsByMatch.get(String(matchId), sport);
         if (existing) { sendJson(res, { ok: true, skipped: true, reason: 'duplicate' }); return; }
+
+        // Blacklist: se já foi VOID por odds errada, não gravar de novo
+        const isVoided = stmts.isVoidedMatch.get(sport, String(matchId));
+        if (isVoided) { sendJson(res, { ok: true, skipped: true, reason: 'voided_odds_wrong_match' }); return; }
+        const p1n = norm(p1), p2n = norm(p2);
+        const marketTypeStr = clampStr(t.market_type || 'ML', 20) || 'ML';
+        const daysBack = process.env.VOID_TIP_PAIR_DAYS || '90 days';
+        const isVoidedPair = stmts.isVoidedPairRecent.get(sport, marketTypeStr, p1n, p2n, p2n, p1n, `-${daysBack}`);
+        if (isVoidedPair) { sendJson(res, { ok: true, skipped: true, reason: 'voided_odds_wrong_pair_recent' }); return; }
         const isLive = t.isLive ? 1 : 0;
         const modelP1 = t.modelP1 != null ? parseFiniteNumber(t.modelP1) : null;
         const modelP2 = t.modelP2 != null ? parseFiniteNumber(t.modelP2) : null;
@@ -2123,7 +2170,7 @@ const server = http.createServer(async (req, res) => {
         const stakeStr = clampStr(t.stake, 20);
         const confidenceStr = clampStr(t.confidence || 'MÉDIA', 20) || 'MÉDIA';
         const botTokenStr = clampStr(t.botToken, 180);
-        const marketTypeStr = clampStr(t.market_type || 'ML', 20) || 'ML';
+        // marketTypeStr já definido acima
         const result = stmts.insertTip.run({
           sport, matchId: String(matchId), eventName,
           p1, p2,
