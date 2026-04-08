@@ -66,6 +66,8 @@ const analyzedMma = new Map();
 const analyzedTennis = new Map();
 const analyzedFootball = new Map();
 
+function _sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
 // Settlement
 const SETTLEMENT_INTERVAL = 30 * 60 * 1000;
 let lastSettlementCheck = 0;
@@ -89,6 +91,23 @@ const UPCOMING_WINDOW_HOURS = 24; // analyze upcoming matches within next 24h
 const tipUpdateNotifyCache = new Map(); // key -> ts
 const TIP_UPDATE_DEDUP_MS =
   (parseInt(process.env.TIP_UPDATE_DEDUP_MIN || '30', 10) || 30) * 60 * 1000;
+
+// Throttle de "force refresh" odds (evita 5 chamadas simultâneas)
+let _forceOddsChain = Promise.resolve();
+const FORCE_ODDS_GAP_MS = Math.max(500, parseInt(process.env.FORCE_ODDS_GAP_MS || '2500', 10) || 2500);
+function forceOddsRefreshQueued(team1, team2) {
+  const t1 = String(team1 || '');
+  const t2 = String(team2 || '');
+  const path = `/odds?team1=${encodeURIComponent(t1)}&team2=${encodeURIComponent(t2)}&force=1`;
+  const p = _forceOddsChain.then(async () => {
+    const r = await serverGet(path).catch(() => null);
+    await _sleep(FORCE_ODDS_GAP_MS);
+    return r;
+  });
+  // Mantém cadeia viva mesmo se job falhar
+  _forceOddsChain = p.catch(() => {}).then(() => {});
+  return p;
+}
 
 
 
@@ -695,15 +714,13 @@ async function runAutoAnalysis() {
           if (!isImminentMatch && prev && (now - prev.ts < upcomingCooldown)) continue;
 
           // Item 3: força re-fetch de odds se a partida começa em < 2h
-          const oddsPath = isImminentMatch
-            ? `/odds?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}&force=1`
-            : `/odds?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}`;
-
           if (isImminentMatch) {
             log('INFO', 'AUTO', `Upcoming < 2h: forçando re-fetch de odds para ${match.team1} vs ${match.team2}`);
           }
 
-          const oddsCheck = await serverGet(oddsPath).catch(() => null);
+          const oddsCheck = isImminentMatch
+            ? await forceOddsRefreshQueued(match.team1, match.team2)
+            : await serverGet(`/odds?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}`).catch(() => null);
           const hasRealOdds = !!(oddsCheck?.t1 && parseFloat(oddsCheck.t1) > 1);
           const matchTime = match.time ? new Date(match.time).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit' }) : '—';
           log('INFO', 'AUTO', `Esports upcoming: ${match.team1} vs ${match.team2} (${match.league}) às ${matchTime}${hasRealOdds ? ' — odds disponíveis' : ' — odds estimadas'}${isImminentMatch ? ' [IMINENTE <2h]' : ''}`);
