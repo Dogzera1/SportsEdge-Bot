@@ -1660,9 +1660,11 @@ const server = http.createServer(async (req, res) => {
     // Backoff: Riot (getLive+getSchedule)
     // Último backoff: PandaScore
     let riotMatches = await getLoLMatchesArush();
-    if (!riotMatches.length) riotMatches = await getLoLMatches();
+    let lolSource = 'arush_schedule';
+    if (!riotMatches.length) { riotMatches = await getLoLMatches(); lolSource = 'riot_live+schedule'; }
     const needPsBackoff = riotMatches.length < 10;
     const psMatches = needPsBackoff ? await getPandaScoreLolMatches() : [];
+    log('INFO', 'LOL', `/lol-matches fonte=${lolSource} riot=${riotMatches.length} ps=${psMatches.length} psBackoff=${needPsBackoff ? 1 : 0}`);
 
     // Mescla deduplicando por nomes de times (PandaScore não sobrescreve Riot)
     const combined = [...riotMatches];
