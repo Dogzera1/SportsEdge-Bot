@@ -6,6 +6,7 @@ const url = require('url');
 const initDatabase = require('./lib/database');
 const { SPORTS, getSportById } = require('./lib/sports');
 const { log, sendJson, safeParse, norm, httpGet, cachedHttpGet, aiPost, oddsApiAllowed, getMetricsLite } = require('./lib/utils');
+const { radarGetInfo, radarGetByPath } = require('./lib/radar-sport');
 
 // Railway sets $PORT automatically; start.js bridges it to SERVER_PORT
 const PORT = parseInt(process.env.PORT || process.env.SERVER_PORT) || 3000;
@@ -3418,6 +3419,36 @@ const server = http.createServer(async (req, res) => {
       sendJson(res, rows);
     } catch(e) {
       sendJson(res, []);
+    }
+    return;
+  }
+
+  // ── Radar Sport API (scraping) — endpoint de teste/controlado ──
+  // Exemplo:
+  // /radar?type=info&book=betfair&region=Europe:Berlin&method=stats_season_meta&value=76415
+  // /radar?type=path&book=betfair&path=en/America:Montevideo/gismo/config_tree_mini/41/0/16
+  if (p === '/radar') {
+    try {
+      const type = String(parsed.query.type || 'info');
+      const book = String(parsed.query.book || 'betfair');
+      const ttlMs = Math.max(30 * 1000, parseInt(String(parsed.query.ttlMs || ''), 10) || (5 * 60 * 1000));
+      const minDelayMs = Math.max(200, parseInt(String(parsed.query.minDelayMs || ''), 10) || 900);
+
+      if (type === 'path') {
+        const pathQ = String(parsed.query.path || '');
+        const data = await radarGetByPath({ book, path: pathQ, ttlMs, minDelayMs });
+        sendJson(res, { ok: true, type, book, data });
+        return;
+      }
+
+      const region = String(parsed.query.region || 'Europe:Berlin');
+      const method = String(parsed.query.method || '');
+      const valueRaw = parsed.query.value;
+      const value = (valueRaw != null && String(valueRaw).match(/^\d+$/)) ? parseInt(String(valueRaw), 10) : String(valueRaw || '');
+      const data = await radarGetInfo({ book, region, method, value, ttlMs, minDelayMs });
+      sendJson(res, { ok: true, type: 'info', book, region, method, value, data });
+    } catch (e) {
+      sendJson(res, { ok: false, error: e.message }, 500);
     }
     return;
   }
