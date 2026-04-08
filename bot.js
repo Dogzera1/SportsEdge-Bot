@@ -4503,6 +4503,7 @@ async function refreshOpenTips() {
 
       // Nunca atualizar odds de partidas em andamento, mesmo se tip.is_live estiver falso.
       let esportsLivePairs = null; // Set("t1|t2")
+      let esportsStartedByMatchId = null; // Map<baseId,bool>
       if (sport === 'esports') {
         try {
           const lolList = await serverGet('/lol-matches').catch(() => []);
@@ -4516,10 +4517,12 @@ async function refreshOpenTips() {
         } catch(_) {
           esportsLivePairs = null;
         }
+        esportsStartedByMatchId = new Map();
       }
 
       for (const tip of unsettled) {
         if (tip.is_live) continue; // não atualizar tip que já foi gerada ao vivo
+        if (sport === 'esports' && String(tip.match_id || '').includes('_MAP')) continue; // tip por mapa = jogo em andamento
         const p1 = tip.participant1 || '';
         const p2 = tip.participant2 || '';
         const pick = tip.tip_participant || '';
@@ -4532,6 +4535,23 @@ async function refreshOpenTips() {
           const a = norm(p1), b = norm(p2);
           const k = a < b ? `${a}|${b}` : `${b}|${a}`;
           if (esportsLivePairs.has(k)) continue;
+        }
+
+        // Bloqueio por match_id: se Riot já reporta games ativos para esse matchId, não atualizar.
+        if (sport === 'esports' && esportsStartedByMatchId) {
+          const rawMatchId = String(tip.match_id || '');
+          const baseId = rawMatchId.replace(/^lol_/, '').replace(/_MAP\d+$/i, '');
+          if (baseId && /^\d+$/.test(baseId)) {
+            if (!esportsStartedByMatchId.has(baseId)) {
+              try {
+                const liveIds = await serverGet(`/live-gameids?matchId=${encodeURIComponent(baseId)}`).catch(() => []);
+                esportsStartedByMatchId.set(baseId, Array.isArray(liveIds) && liveIds.length > 0);
+              } catch(_) {
+                esportsStartedByMatchId.set(baseId, false);
+              }
+            }
+            if (esportsStartedByMatchId.get(baseId)) continue;
+          }
         }
 
         let currentOdds = null;
