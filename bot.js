@@ -1135,7 +1135,8 @@ async function checkLiveNotifications() {
       const mapOdds = await serverGet(`/odds?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}&map=${encodeURIComponent(String(currentMap))}&force=1`).catch(() => null);
       if (!mapOdds?.t1 || parseFloat(mapOdds.t1) <= 1.0) continue;
 
-      const matchKey = `${match.game}_${match.id}_MAP${currentMap}`;
+      // Dedup por SÉRIE (não por mapa) para não duplicar notificações em cada mapa
+      const matchKey = `${match.game}_${match.id}`;
       if (!notifiedMatches.has(matchKey)) {
         notifiedMatches.set(matchKey, Date.now());
         for (const [userId, prefs] of subscribedUsers) {
@@ -4294,7 +4295,7 @@ log('INFO', 'BOOT', `Sports carregados: ${JSON.stringify(Object.entries(SPORTS).
       const liveIds = await serverGet(`/live-gameids?matchId=${encodeURIComponent(String(match.id))}`).catch(() => []);
       const currentMap = Array.isArray(liveIds) ? (liveIds.find(x => x.hasLiveData)?.gameNumber || null) : null;
       if (!currentMap) continue;
-      const matchKey = `${match.game}_${match.id}_MAP${currentMap}`;
+      const matchKey = `${match.game}_${match.id}`;
       if (!notifiedMatches.has(matchKey)) notifiedMatches.set(matchKey, Date.now());
     }
     if (allLive.length) log('INFO', 'BOOT', `Live notify suprimido no boot: ${allLive.length} partida(s) ao vivo`);
