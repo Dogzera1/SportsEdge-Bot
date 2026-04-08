@@ -3622,6 +3622,7 @@ async function pollFootball() {
   const token = fbConfig.token;
 
   const { calcFootballScore } = require('./lib/football-ml');
+  const footballApi = require('./lib/football-api');
 
   const FOOTBALL_INTERVAL = 6 * 60 * 60 * 1000;
   const EV_THRESHOLD   = parseFloat(process.env.FOOTBALL_EV_THRESHOLD  || '5.0');
@@ -3639,7 +3640,23 @@ async function pollFootball() {
       if (!Array.isArray(matches) || !matches.length) {
         setTimeout(loop, 30 * 60 * 1000); return;
       }
-      log('INFO', 'AUTO-FOOTBALL', `${matches.length} partidas futebol com odds (modo odds-only)`);
+      const hasFootballApi = !!(process.env.API_SPORTS_KEY || process.env.APIFOOTBALL_KEY);
+      log('INFO', 'AUTO-FOOTBALL', `${matches.length} partidas futebol com odds (${hasFootballApi ? 'com enrichment API-Football' : 'modo odds-only'})`);
+
+      // Batch cache para mapear times→fixtureId sem 1 chamada por partida
+      const fixturesBatch = hasFootballApi
+        ? await footballApi.getUpcomingFixturesCached().catch(() => [])
+        : [];
+
+      // Cache de standings por liga+season
+      const standingsCache = new Map(); // key `${leagueId}_${season}` -> map
+      const getStandingsCached = async (leagueId, season) => {
+        const k = `${leagueId}_${season}`;
+        if (standingsCache.has(k)) return standingsCache.get(k);
+        const m = await footballApi.getStandings(leagueId, season).catch(() => ({}));
+        standingsCache.set(k, m || {});
+        return m || {};
+      };
 
       const now = Date.now();
       for (const match of matches) {
@@ -3677,12 +3694,37 @@ async function pollFootball() {
           await new Promise(r => setTimeout(r, 500)); continue;
         }
 
-        // Modo odds-only: sem enriquecimento externo
-        const fixtureInfo = null;
-        const homeFormData = null, awayFormData = null;
-        const h2hData = { results: [] };
-        const standingsData = {};
-        const homeFatigue = 7, awayFatigue = 7;
+        // Enrichment via API-Football (se chave configurada)
+        let fixtureInfo = null;
+        let homeFormData = null, awayFormData = null;
+        let h2hData = { results: [] };
+        let standingsData = {};
+        let homeFatigue = 7, awayFatigue = 7;
+
+        if (hasFootballApi) {
+          fixtureInfo =
+            footballApi.findInBatch(fixturesBatch, match.team1, match.team2)
+            || await footballApi.findFixtureWithTeams(match.team1, match.team2, match.time).catch(() => null);
+
+          if (fixtureInfo?.fixtureId) {
+            const season = fixtureInfo.season || new Date(match.time || Date.now()).getFullYear();
+            standingsData = await getStandingsCached(fixtureInfo.leagueId, season);
+
+            const [hf, af, hh, fatH, fatA] = await Promise.all([
+              footballApi.getTeamForm(fixtureInfo.homeId, fixtureInfo.leagueId, season, 10).catch(() => null),
+              footballApi.getTeamForm(fixtureInfo.awayId, fixtureInfo.leagueId, season, 10).catch(() => null),
+              footballApi.getH2H(fixtureInfo.homeId, fixtureInfo.awayId).catch(() => ({ results: [] })),
+              footballApi.getDaysSinceLastMatch(fixtureInfo.homeId).catch(() => 7),
+              footballApi.getDaysSinceLastMatch(fixtureInfo.awayId).catch(() => 7),
+            ]);
+
+            homeFormData = hf;
+            awayFormData = af;
+            h2hData = hh || { results: [] };
+            homeFatigue = fatH ?? 7;
+            awayFatigue = fatA ?? 7;
+          }
+        }
 
         // ── ML com dados reais (ou nulls se API indisponível) ──
         const homeStandings = fixtureInfo ? standingsData[fixtureInfo.homeId] : null;
