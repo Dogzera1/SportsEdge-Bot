@@ -2026,8 +2026,11 @@ const server = http.createServer(async (req, res) => {
         return;
       }
 
-      // Evita spam/429: se já está buscando odds, não reseta TTL de novo
-      if (esportsOddsFetching) {
+      // Evita spam/429: se já está buscando odds (ou bootstrap ativo), não reseta TTL de novo
+      if (esportsOddsFetching || esportsOddsBootstrapRunning) {
+        if (esportsOddsBootstrapRunning) {
+          log('INFO', 'ODDS', `Force-fetch suprimido (bootstrap em andamento) — servindo cache para ${t1} vs ${t2}`);
+        }
         await serveFromCache('odds não encontradas (fetch em andamento)');
         return;
       }

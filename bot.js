@@ -1384,6 +1384,15 @@ async function autoAnalyzeMatch(token, match) {
     const FALLBACK_MIN_ODDS = parseFloat(process.env.LOL_MIN_ODDS ?? '1.50');
     const FALLBACK_MAX_ODDS = parseFloat(process.env.LOL_MAX_ODDS ?? '4.00');
     if (!global.__deepseekBackoffUntil) global.__deepseekBackoffUntil = 0;
+    if (!global.__deepseekLastCallTs) global.__deepseekLastCallTs = 0;
+    // Cooldown mínimo entre chamadas (evita 429 por múltiplos live matches simultâneos)
+    // O backoff pós-429 só é setado após a resposta chegar — este cooldown é preventivo
+    const DS_COOLDOWN_MS = Math.max(3000, parseInt(process.env.DEEPSEEK_CALL_COOLDOWN_MS || '8000', 10) || 8000);
+    const sinceLastCall = Date.now() - global.__deepseekLastCallTs;
+    if (sinceLastCall < DS_COOLDOWN_MS && global.__deepseekLastCallTs > 0) {
+      log('INFO', 'AUTO', `DeepSeek cooldown (${Math.round((DS_COOLDOWN_MS - sinceLastCall)/1000)}s restantes) — pulando ${match.team1} vs ${match.team2}`);
+      return null;
+    }
     if (Date.now() < global.__deepseekBackoffUntil) {
       const direction = mlResult.direction;
       const pickTeam = direction === 't2' ? match.team2 : match.team1;
@@ -1438,6 +1447,7 @@ async function autoAnalyzeMatch(token, match) {
       log('DEBUG', 'IA-PROMPT', `${match.team1} vs ${match.team2}: ${prompt.slice(0, 400)}...`);
     }
 
+    global.__deepseekLastCallTs = Date.now(); // marca antes de chamar — cooldown preventivo
     const resp = await serverPost('/claude', {
       model: 'deepseek-chat',
       max_tokens: 600,
@@ -1446,6 +1456,7 @@ async function autoAnalyzeMatch(token, match) {
     if (resp?.__status === 429 || String(resp?.error || '').toLowerCase().includes('rate')) {
       const ttl = Math.max(60 * 1000, parseInt(process.env.DEEPSEEK_BACKOFF_MS || '180000', 10) || 180000);
       global.__deepseekBackoffUntil = Date.now() + ttl;
+      log('WARN', 'AUTO', `DeepSeek 429: backoff ${Math.round(ttl/60000)}min ativado`);
     }
 
     const text = resp.content?.map(b => b.text || '').join('');
