@@ -464,6 +464,10 @@ const ESPORTS_BACKOFF_TTL = 2 * 60 * 60 * 1000;
 const lastForceRefreshByPair = new Map(); // key -> ts
 const FORCE_REFRESH_COOLDOWN_MS = (parseInt(process.env.ODDSPAPI_FORCE_COOLDOWN_S || '300', 10) || 300) * 1000; // 5min default
 
+// Timestamp do último bootstrap completo — force-refresh é bloqueado por BOOTSTRAP_GRACE_MS após o bootstrap
+let lastBootstrapCompletedTs = 0;
+const BOOTSTRAP_GRACE_MS = Math.max(30000, parseInt(process.env.ODDSPAPI_BOOTSTRAP_GRACE_MS || '60000', 10) || 60000); // 60s default
+
 // Round-robin: rastreia qual lote buscar no próximo ciclo
 let esportsBatchCursor = 0;
 
@@ -839,7 +843,8 @@ async function bootstrapEsportsOddsExtraBatches() {
 
     log('INFO', 'ODDS', `ODDSPAPI_BOOTSTRAP=true: buscando mais ${batches.length - 1} lote(s) para preencher cache após deploy`);
 
-    const gapMs = Math.max(1000, parseInt(process.env.ODDSPAPI_BOOTSTRAP_MS || '2500', 10) || 2500);
+    // Gap padrão aumentado para 5s (era 2.5s) para reduzir risco de 429
+    const gapMs = Math.max(2000, parseInt(process.env.ODDSPAPI_BOOTSTRAP_MS || '5000', 10) || 5000);
     for (let i = 1; i < batches.length; i++) {
       if (Date.now() < esportsBackoffUntil) {
         log('WARN', 'ODDS', 'Bootstrap interrompido (backoff)');
@@ -852,8 +857,10 @@ async function bootstrapEsportsOddsExtraBatches() {
 
     esportsBatchCursor = batches.length;
     lastEsportsOddsUpdate = Date.now();
+    // Marca conclusão do bootstrap — bloqueia force-refresh por BOOTSTRAP_GRACE_MS (evita 429 imediato)
+    lastBootstrapCompletedTs = Date.now();
     const n = Object.keys(oddsCache).filter(k => k.startsWith('esports_')).length;
-    log('INFO', 'ODDS', `Bootstrap concluído — ~${n} entradas no cache esports`);
+    log('INFO', 'ODDS', `Bootstrap concluído — ~${n} entradas no cache esports (grace period: ${Math.round(BOOTSTRAP_GRACE_MS/1000)}s)`);
   } catch(e) {
     log('ERROR', 'ODDS', `bootstrapEsportsOdds: ${e.message}`);
   } finally {
@@ -1985,40 +1992,43 @@ const server = http.createServer(async (req, res) => {
     const mapNumber = parsed.query.map ? parseInt(parsed.query.map, 10) : null;
     // force=1: bypassa TTL do cache (usado para partidas iminentes < 2h)
     if (parsed.query.force === '1') {
+      const serveFromCache = (reason) => {
+        let oNow = null;
+        if (mapNumber && mapNumber > 0) {
+          return getMapMlOddsFromFixture(t1, t2, mapNumber).then(mo => {
+            if (!mo) {
+              const base = findOdds('esports', t1, t2);
+              if (base?.t1 && base?.t2) mo = { ...base, mapRequested: mapNumber, mapMarket: false };
+            } else { mo.mapRequested = mapNumber; mo.mapMarket = true; }
+            sendJson(res, mo || { error: reason });
+          });
+        } else {
+          oNow = findOdds('esports', t1, t2);
+          sendJson(res, oNow || { error: reason });
+          return Promise.resolve();
+        }
+      };
+
       // Se backoff ativo, nunca force (só aumenta spam e não atualiza mesmo)
       if (Date.now() < esportsBackoffUntil) {
-        let oNow = null;
-        if (mapNumber && mapNumber > 0) {
-          oNow = await getMapMlOddsFromFixture(t1, t2, mapNumber);
-          if (!oNow) {
-            const base = findOdds('esports', t1, t2);
-            if (base?.t1 && base?.t2) oNow = { ...base, mapRequested: mapNumber, mapMarket: false };
-          } else {
-            oNow.mapRequested = mapNumber;
-            oNow.mapMarket = true;
-          }
-        } else {
-          oNow = findOdds('esports', t1, t2);
-        }
-        sendJson(res, oNow || { error: 'odds indisponíveis (backoff ativo)' });
+        await serveFromCache('odds indisponíveis (backoff ativo)');
         return;
       }
+
+      // Grace period pós-bootstrap: aguarda N segundos antes de permitir force-refresh
+      // (evita 429 imediato logo após bootstrap que já consumiu vários requests)
+      const graceRemaining = lastBootstrapCompletedTs > 0
+        ? (lastBootstrapCompletedTs + BOOTSTRAP_GRACE_MS) - Date.now()
+        : 0;
+      if (graceRemaining > 0) {
+        log('INFO', 'ODDS', `Force-fetch suprimido (grace ${Math.round(graceRemaining/1000)}s pós-bootstrap) — servindo cache para ${t1} vs ${t2}`);
+        await serveFromCache('odds não encontradas');
+        return;
+      }
+
       // Evita spam/429: se já está buscando odds, não reseta TTL de novo
       if (esportsOddsFetching) {
-        let oNow = null;
-        if (mapNumber && mapNumber > 0) {
-          oNow = await getMapMlOddsFromFixture(t1, t2, mapNumber);
-          if (!oNow) {
-            const base = findOdds('esports', t1, t2);
-            if (base?.t1 && base?.t2) oNow = { ...base, mapRequested: mapNumber, mapMarket: false };
-          } else {
-            oNow.mapRequested = mapNumber;
-            oNow.mapMarket = true;
-          }
-        } else {
-          oNow = findOdds('esports', t1, t2);
-        }
-        sendJson(res, oNow || { error: 'odds não encontradas (fetch em andamento)' });
+        await serveFromCache('odds não encontradas (fetch em andamento)');
         return;
       }
 
@@ -2026,8 +2036,7 @@ const server = http.createServer(async (req, res) => {
       const pairKey = `${norm(t1)}v${norm(t2)}`;
       const lastTs = lastForceRefreshByPair.get(pairKey) || 0;
       if (lastTs && (Date.now() - lastTs) < FORCE_REFRESH_COOLDOWN_MS) {
-        const oNow = findOdds('esports', t1, t2);
-        sendJson(res, oNow || { error: 'odds não encontradas' });
+        await serveFromCache('odds não encontradas');
         return;
       }
       lastForceRefreshByPair.set(pairKey, Date.now());
@@ -3551,6 +3560,18 @@ async function syncProStats({ forceResync = false } = {}) {
   const matches = allMatches;
   log('INFO', 'SYNC', `PandaScore: ${matches.length} partidas finalizadas coletadas (últimos 45 dias)`);
 
+  // Em forceResync: limpa tabelas para evitar acúmulo de dados stale e garantir re-fetch real
+  if (forceResync && matches.length > 0) {
+    try {
+      db.prepare('DELETE FROM pro_champ_stats').run();
+      db.prepare('DELETE FROM pro_player_champ_stats').run();
+      db.prepare("DELETE FROM synced_matches WHERE game = 'lol'").run();
+      log('INFO', 'SYNC', 'forceResync: pro_champ_stats, pro_player_champ_stats e synced_matches(lol) limpos para re-população');
+    } catch(e) {
+      log('WARN', 'SYNC', `forceResync cleanup falhou: ${e.message}`);
+    }
+  }
+
   let matchCount = 0, champEntries = 0, playerEntries = 0, skipped = 0;
   const champAgg = {}; // { "Champion_role": { wins, total } }
   const playerAgg = {}; // { "player_Champion": { wins, total } }
@@ -3595,30 +3616,67 @@ async function syncProStats({ forceResync = false } = {}) {
       const detR = await httpGet(`https://api.pandascore.co/lol/matches/${m.id}?include=${encodeURIComponent(include)}`, headers);
       if (detR.status === 200) {
         const det = safeParse(detR.body, {});
-        const games = Array.isArray(det.games) ? det.games : [];
+        // m.games pode já estar populado na resposta lista ou precisar do detalhe
+        const games = Array.isArray(det.games) ? det.games
+          : (Array.isArray(m.games) ? m.games : []);
         for (const g of games) {
-          if (!g.winner) continue;
-          const winnerId = g.winner.id;
-          // PandaScore aninha players dentro de g.teams[].players (não g.players direto)
+          // winner pode ser objeto {id, type} ou null
+          const winnerId = g.winner?.id ?? g.winner_id ?? null;
+          if (!winnerId) continue;
+
+          // Estratégia 1: g.teams[].players (estrutura mais comum no plano pago)
           const teams = Array.isArray(g.teams) ? g.teams : [];
+          let parsedPlayers = 0;
           for (const teamObj of teams) {
-            const teamId = teamObj.team?.id;
-            const won = teamId === winnerId;
-            const players = Array.isArray(teamObj.players) ? teamObj.players : (Array.isArray(teamObj?.players?.data) ? teamObj.players.data : []);
+            const teamId = teamObj.team?.id ?? teamObj.id;
+            const won = teamId !== undefined && teamId === winnerId;
+            // players pode ser array direto ou {data: []}
+            const players = Array.isArray(teamObj.players)
+              ? teamObj.players
+              : (Array.isArray(teamObj?.players?.data) ? teamObj.players.data : []);
             for (const pl of players) {
               const champ = champNameOf(pl);
               const roleRaw = roleOf(pl);
               const player = playerNameOf(pl);
               const role = roleRaw ? roleRaw.replace(/[^a-z0-9]/g, '') : null;
               if (!champ || !role) continue;
+              parsedPlayers++;
 
-              // Champ stats (pool de campeões pro play)
               const cKey = `${champ}_${role}`;
               if (!champAgg[cKey]) champAgg[cKey] = { champion: champ, role, wins: 0, total: 0 };
               champAgg[cKey].total++;
               if (won) champAgg[cKey].wins++;
 
-              // Player+champ stats
+              if (player) {
+                const pKey = `${player}_${champ}`;
+                if (!playerAgg[pKey]) playerAgg[pKey] = { player, champion: champ, wins: 0, total: 0 };
+                playerAgg[pKey].total++;
+                if (won) playerAgg[pKey].wins++;
+              }
+            }
+          }
+
+          // Estratégia 2: fallback para g.players quando teams está vazio
+          // (Plano free PandaScore retorna g.players em vez de g.teams.players)
+          if (parsedPlayers === 0) {
+            const flatPlayers = Array.isArray(g.players)
+              ? g.players
+              : (Array.isArray(g?.players?.data) ? g.players.data : []);
+            for (const pl of flatPlayers) {
+              const champ = champNameOf(pl);
+              const roleRaw = roleOf(pl);
+              const player = playerNameOf(pl);
+              const role = roleRaw ? roleRaw.replace(/[^a-z0-9]/g, '') : null;
+              // winner_team_id ou team_id para determinar vitória no flat array
+              const plTeamId = pl?.team?.id ?? pl?.team_id ?? null;
+              const won = plTeamId !== null && plTeamId === winnerId;
+              if (!champ || !role) continue;
+
+              const cKey = `${champ}_${role}`;
+              if (!champAgg[cKey]) champAgg[cKey] = { champion: champ, role, wins: 0, total: 0 };
+              champAgg[cKey].total++;
+              if (won) champAgg[cKey].wins++;
+
               if (player) {
                 const pKey = `${player}_${champ}`;
                 if (!playerAgg[pKey]) playerAgg[pKey] = { player, champion: champ, wins: 0, total: 0 };
@@ -3632,7 +3690,7 @@ async function syncProStats({ forceResync = false } = {}) {
     } catch(_) {}
 
     stmts.markMatchSynced.run(psId, 'lol');
-    await new Promise(r => setTimeout(r, 150)); // rate-limit gentil
+    await new Promise(r => setTimeout(r, 200)); // rate-limit gentil (aumentado de 150ms)
   }
 
   // Upsert champ stats
