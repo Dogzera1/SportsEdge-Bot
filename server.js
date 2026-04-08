@@ -40,6 +40,39 @@ try {
   if (cleaned.changes > 0) log('INFO', 'BOOT', `Limpeza: ${cleaned.changes} tip(s) com odds > 4.0 removidas`);
 } catch(e) { log('WARN', 'BOOT', `Limpeza odds: ${e.message}`); }
 
+// ── Football Elo helper (1X2) ──
+function getElo(team) {
+  const row = stmts.getFootballElo.get(team);
+  return row?.rating ? parseFloat(row.rating) : 1500;
+}
+function getEloGames(team) {
+  const row = stmts.getFootballElo.get(team);
+  return row?.games ? parseInt(row.games, 10) : 0;
+}
+function expectedScore(rA, rB) {
+  return 1 / (1 + Math.pow(10, (rB - rA) / 400));
+}
+function updateEloMatch(homeTeam, awayTeam, winner) {
+  const K = parseFloat(process.env.FOOTBALL_ELO_K || '20') || 20;
+  const homeAdvElo = parseFloat(process.env.FOOTBALL_ELO_HOME_ADV || '50') || 50; // ~6–8pp
+  const rH = getElo(homeTeam);
+  const rA = getElo(awayTeam);
+  const eH = expectedScore(rH + homeAdvElo, rA);
+  const eA = 1 - eH;
+
+  const sH = (winner === homeTeam) ? 1 : (winner === 'Draw' ? 0.5 : 0);
+  const sA = 1 - sH;
+
+  const newH = rH + K * (sH - eH);
+  const newA = rA + K * (sA - eA);
+
+  const gH = getEloGames(homeTeam) + 1;
+  const gA = getEloGames(awayTeam) + 1;
+  stmts.upsertFootballElo.run(homeTeam, newH, gH);
+  stmts.upsertFootballElo.run(awayTeam, newA, gA);
+  return { homeTeam, awayTeam, before: { rH, rA }, after: { newH, newA }, K, homeAdvElo };
+}
+
 // ── Import opcional: dados gol.gg (CSV) ──
 // Usa CSV gerado por scrapers externos (ex: PandaTobi/League-of-Legends-ESports-Data)
 // Objetivo: seed/merge em pro_champ_stats quando sync PandaScore estiver vazio
@@ -2031,9 +2064,28 @@ const server = http.createServer(async (req, res) => {
         String(fixtureId), 'football', homeName, awayName, winner, score,
         fixture.league?.name || ''
       );
+      // Atualiza Elo 1X2
+      try { updateEloMatch(homeName, awayName, winner); } catch(_) {}
       sendJson(res, { fixtureId, winner, score, homeName, awayName, resolved: true });
     } catch(e) {
       sendJson(res, { resolved: false, error: e.message });
+    }
+    return;
+  }
+
+  // ── Football Elo snapshot ──
+  if (p === '/football-elo') {
+    const home = parsed.query.home || '';
+    const away = parsed.query.away || '';
+    if (!home || !away) { sendJson(res, { error: 'home/away obrigatórios' }, 400); return; }
+    try {
+      const homeRating = getElo(home);
+      const awayRating = getElo(away);
+      const homeGames = getEloGames(home);
+      const awayGames = getEloGames(away);
+      sendJson(res, { home, away, homeRating, awayRating, homeGames, awayGames });
+    } catch(e) {
+      sendJson(res, { error: e.message }, 500);
     }
     return;
   }

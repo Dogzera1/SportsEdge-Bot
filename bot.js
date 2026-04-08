@@ -3730,6 +3730,15 @@ async function pollFootball() {
         const homeStandings = fixtureInfo ? standingsData[fixtureInfo.homeId] : null;
         const awayStandings = fixtureInfo ? standingsData[fixtureInfo.awayId] : null;
 
+        // Elo local (aprende só com resultados já liquidados no DB)
+        let elo = null;
+        if (fixtureInfo) {
+          try {
+            const e = await serverGet(`/football-elo?home=${encodeURIComponent(match.team1)}&away=${encodeURIComponent(match.team2)}`).catch(() => null);
+            if (e?.homeRating && e?.awayRating) elo = e;
+          } catch(_) {}
+        }
+
         const mlScore = calcFootballScore(
           {
             form:         homeFormData?.form         || null,
@@ -3737,7 +3746,8 @@ async function pollFootball() {
             goalsFor:     homeFormData?.goalsFor      ?? null,
             goalsAgainst: homeFormData?.goalsAgainst  ?? null,
             position:     homeStandings?.position     ?? null,
-            fatigue:      homeFatigue
+            fatigue:      homeFatigue,
+            elo:          elo?.homeRating ?? null
           },
           {
             form:         awayFormData?.form         || null,
@@ -3745,7 +3755,8 @@ async function pollFootball() {
             goalsFor:     awayFormData?.goalsFor      ?? null,
             goalsAgainst: awayFormData?.goalsAgainst  ?? null,
             position:     awayStandings?.position     ?? null,
-            fatigue:      awayFatigue
+            fatigue:      awayFatigue,
+            elo:          elo?.awayRating ?? null
           },
           h2hData,
           oddsInput,
