@@ -137,8 +137,8 @@ async function importFootballMatchesCsvOnce() {
 
     const headers = rows[0];
     const c = {
+      // formato "tarekmasryo" antigo (planejado)
       competition_name: idxOf(headers, 'competition_name'),
-      match_id: idxOf(headers, 'match_id'),
       utc_date: idxOf(headers, 'utc_date'),
       home_team_name: idxOf(headers, 'home_team_name'),
       away_team_name: idxOf(headers, 'away_team_name'),
@@ -147,8 +147,24 @@ async function importFootballMatchesCsvOnce() {
       ht_home: idxOf(headers, 'ht_home'),
       ht_away: idxOf(headers, 'ht_away'),
       outcome: idxOf(headers, 'outcome'),
+
+      // formato atual (log): competition_name, date_utc, home_team, away_team, fulltime_home, fulltime_away, halftime_home, halftime_away, match_outcome
+      date_utc: idxOf(headers, 'date_utc'),
+      home_team: idxOf(headers, 'home_team'),
+      away_team: idxOf(headers, 'away_team'),
+      fulltime_home: idxOf(headers, 'fulltime_home'),
+      fulltime_away: idxOf(headers, 'fulltime_away'),
+      halftime_home: idxOf(headers, 'halftime_home'),
+      halftime_away: idxOf(headers, 'halftime_away'),
+      match_outcome: idxOf(headers, 'match_outcome'),
+
+      match_id: idxOf(headers, 'match_id'),
     };
-    if (c.match_id < 0 || c.utc_date < 0 || c.home_team_name < 0 || c.away_team_name < 0) {
+
+    const dateIdx = c.utc_date >= 0 ? c.utc_date : c.date_utc;
+    const homeIdx = c.home_team_name >= 0 ? c.home_team_name : c.home_team;
+    const awayIdx = c.away_team_name >= 0 ? c.away_team_name : c.away_team;
+    if (c.match_id < 0 || dateIdx < 0 || homeIdx < 0 || awayIdx < 0) {
       log('WARN', 'IMPORT', `CSV football: colunas ausentes (headers=${headers.slice(0, 30).join(',')})`);
       return;
     }
@@ -158,21 +174,24 @@ async function importFootballMatchesCsvOnce() {
       for (let i = 1; i < rows.length; i++) {
         const row = rows[i];
         const mid = row[c.match_id];
-        const date = row[c.utc_date];
-        const home = row[c.home_team_name];
-        const away = row[c.away_team_name];
+        const date = row[dateIdx];
+        const home = row[homeIdx];
+        const away = row[awayIdx];
         if (!mid || !date || !home || !away) continue;
 
-        const ftH = c.ft_home >= 0 ? parseInt(row[c.ft_home], 10) : null;
-        const ftA = c.ft_away >= 0 ? parseInt(row[c.ft_away], 10) : null;
+        const ftHIdx = c.ft_home >= 0 ? c.ft_home : c.fulltime_home;
+        const ftAIdx = c.ft_away >= 0 ? c.ft_away : c.fulltime_away;
+        const ftH = ftHIdx >= 0 ? parseInt(row[ftHIdx], 10) : null;
+        const ftA = ftAIdx >= 0 ? parseInt(row[ftAIdx], 10) : null;
         const score = (Number.isFinite(ftH) && Number.isFinite(ftA)) ? `${ftH}-${ftA}` : '';
 
         let winner = 'Draw';
         if (Number.isFinite(ftH) && Number.isFinite(ftA)) {
           if (ftH > ftA) winner = home;
           else if (ftA > ftH) winner = away;
-        } else if (c.outcome >= 0) {
-          const out = String(row[c.outcome] || '').toUpperCase();
+        } else {
+          const outIdx = c.outcome >= 0 ? c.outcome : c.match_outcome;
+          const out = outIdx >= 0 ? String(row[outIdx] || '').toUpperCase() : '';
           if (out === 'H') winner = home;
           else if (out === 'A') winner = away;
           else winner = 'Draw';
