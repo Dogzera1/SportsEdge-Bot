@@ -2644,28 +2644,34 @@ const server = http.createServer(async (req, res) => {
         const { matchId, winner } = safeParse(body, {});
         const sport = parsed.query.sport || 'esports';
         if (!matchId || !winner) { sendJson(res, { error: 'Missing matchId/winner' }, 400); return; }
-        const tips = db.prepare("SELECT * FROM tips WHERE match_id = ? AND sport = ? AND result IS NULL").all(matchId, sport);
-        let settled = 0;
-        let bancaDelta = 0;
-        for (const tip of tips) {
-          const result = norm(tip.tip_participant).includes(norm(winner)) ? 'win' : 'loss';
-          stmts.settleTip.run(result, matchId, sport);
-          // Atualiza profit_reais e acumula delta da banca
-          const stakeR = tip.stake_reais || (() => {
-            const bk = stmts.getBankroll.get(sport);
-            const uv = bk ? bk.current_banca / 100 : 1;
-            const su = parseFloat(String(tip.stake || '1').replace('u','')) || 1;
-            return parseFloat((su * uv).toFixed(2));
-          })();
-          const odds = parseFloat(tip.odds) || 1;
-          const profitR = result === 'win'
-            ? parseFloat((stakeR * (odds - 1)).toFixed(2))
-            : parseFloat((-stakeR).toFixed(2));
-          db.prepare("UPDATE tips SET stake_reais = ?, profit_reais = ? WHERE id = ?")
-            .run(stakeR, profitR, tip.id);
-          bancaDelta += profitR;
-          settled++;
-        }
+        // Usa transaction para garantir atomicidade: SELECT + UPDATE acontecem juntos,
+        // evitando que dois ciclos de settlement processem o mesmo tip simultaneamente.
+        const settleResult = db.transaction(() => {
+          const tips = db.prepare("SELECT * FROM tips WHERE match_id = ? AND sport = ? AND result IS NULL").all(matchId, sport);
+          let settled = 0;
+          let bancaDelta = 0;
+          for (const tip of tips) {
+            const result = norm(tip.tip_participant).includes(norm(winner)) ? 'win' : 'loss';
+            stmts.settleTip.run(result, matchId, sport);
+            // Atualiza profit_reais e acumula delta da banca
+            const stakeR = tip.stake_reais || (() => {
+              const bk = stmts.getBankroll.get(sport);
+              const uv = bk ? bk.current_banca / 100 : 1;
+              const su = parseFloat(String(tip.stake || '1').replace('u','')) || 1;
+              return parseFloat((su * uv).toFixed(2));
+            })();
+            const odds = parseFloat(tip.odds) || 1;
+            const profitR = result === 'win'
+              ? parseFloat((stakeR * (odds - 1)).toFixed(2))
+              : parseFloat((-stakeR).toFixed(2));
+            db.prepare("UPDATE tips SET stake_reais = ?, profit_reais = ? WHERE id = ?")
+              .run(stakeR, profitR, tip.id);
+            bancaDelta += profitR;
+            settled++;
+          }
+          return { settled, bancaDelta };
+        })();
+        let { settled, bancaDelta } = settleResult;
         // Atualiza banca total
         if (bancaDelta !== 0) {
           const bk = stmts.getBankroll.get(sport);

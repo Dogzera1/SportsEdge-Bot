@@ -43,13 +43,13 @@ function loadPatchMetaFromFile() {
       process.env.PATCH_META_DATE = data.date || '';
       log('INFO', 'PATCH', `Meta restaurado do arquivo: ${data.meta.slice(0, 60)}`);
     }
-  } catch(_) {}
+  } catch(e) { log('WARN', 'PATCH', `Erro ao carregar patch meta: ${e.message}`); }
 }
 
 function savePatchMetaToFile(meta, date) {
   try {
     fs.writeFileSync(PATCH_META_FILE, JSON.stringify({ meta, date }), 'utf8');
-  } catch(_) {}
+  } catch(e) { log('WARN', 'PATCH', `Erro ao salvar patch meta: ${e.message}`); }
 }
 
 // Carrega meta persistido imediatamente
@@ -95,6 +95,9 @@ const TIP_UPDATE_DEDUP_MS =
 // Patch meta alert
 let lastPatchAlert = 0;
 const PATCH_ALERT_INTERVAL = 24 * 60 * 60 * 1000;
+
+// ── Constantes de confiança ──
+const CONF = { ALTA: 'ALTA', MEDIA: 'MÉDIA', BAIXA: 'BAIXA' };
 
 // Auto patch meta fetch (ddragon)
 let patchAutoFetchTs = 0;
@@ -406,15 +409,19 @@ function canonicalMatchId(sport, rawId, opts = {}) {
 
 async function withAutoAnalysisMutex(fn) {
   const now = Date.now();
+  // Verifica se há lock ativo
   if (autoAnalysisMutex.locked) {
-    if (now - autoAnalysisMutex.since > AUTO_ANALYSIS_MUTEX_STALE_MS) {
-      log('WARN', 'AUTO', `Mutex stale (${Math.round((now - autoAnalysisMutex.since)/60000)}min) — liberando lock`);
+    const age = now - autoAnalysisMutex.since;
+    if (age > AUTO_ANALYSIS_MUTEX_STALE_MS) {
+      // Lock stale: provavelmente ficou preso por crash/exception — libera
+      log('WARN', 'AUTO', `Mutex stale (${Math.round(age / 60000)}min) — liberando lock forçado`);
       autoAnalysisMutex.locked = false;
     } else {
-      log('INFO', 'AUTO', 'Análise anterior ainda em curso — pulando ciclo');
+      log('INFO', 'AUTO', `Análise anterior ainda em curso (${Math.round(age / 1000)}s) — pulando ciclo`);
       return;
     }
   }
+  // Adquire lock atomicamente (JS é single-threaded, então isso é seguro dentro do mesmo processo)
   autoAnalysisMutex.locked = true;
   autoAnalysisMutex.since = now;
   autoAnalysisRunning = true;
@@ -423,6 +430,7 @@ async function withAutoAnalysisMutex(fn) {
   } finally {
     autoAnalysisRunning = false;
     autoAnalysisMutex.locked = false;
+    autoAnalysisMutex.since = 0;
   }
 }
 
@@ -472,9 +480,9 @@ async function runAutoAnalysis() {
           const tipTeam = result.tipMatch[1].trim();
           const tipOdd = result.tipMatch[2].trim();
           const tipEV = result.tipMatch[3].trim();
-          const tipConf = (result.tipMatch[5] || 'MÉDIA').trim().toUpperCase();
+          const tipConf = (result.tipMatch[5] || CONF.MEDIA).trim().toUpperCase();
           // Kelly adaptado por confiança: ALTA → ¼ Kelly (max 4u) | MÉDIA → ⅙ Kelly (max 3u) | BAIXA → 1/10 Kelly (max 1.5u)
-          const kellyFraction = tipConf === 'ALTA' ? 0.25 : tipConf === 'BAIXA' ? 0.10 : 1/6;
+          const kellyFraction = tipConf === CONF.ALTA ? 0.25 : tipConf === CONF.BAIXA ? 0.10 : 1/6;
           // Usa p do modelo ML quando disponível (evita circularidade p←EV←IA)
           const isT1bet = norm(tipTeam).includes(norm(match.team1)) || norm(match.team1).includes(norm(tipTeam));
           const modelPForKelly = (result.modelP1 > 0) ? (isT1bet ? result.modelP1 : result.modelP2) : null;
@@ -520,8 +528,8 @@ async function runAutoAnalysis() {
           }
 
           const isDraft = match.status === 'draft';
-          const kellyLabel = tipConf === 'ALTA' ? '¼ Kelly' : tipConf === 'BAIXA' ? '1/10 Kelly' : '⅙ Kelly';
-          const confEmoji = { ALTA: '🟢', MÉDIA: '🟡', BAIXA: '🔵' }[tipConf] || '🟡';
+          const kellyLabel = tipConf === CONF.ALTA ? '¼ Kelly' : tipConf === CONF.BAIXA ? '1/10 Kelly' : '⅙ Kelly';
+          const confEmoji = { [CONF.ALTA]: '🟢', [CONF.MEDIA]: '🟡', [CONF.BAIXA]: '🔵' }[tipConf] || '🟡';
 
           // Identifica se é tip ao vivo num mapa específico
           const mapaLabel = liveMapa ? `🗺️ *Mapa ${liveMapa} ao vivo*` : null;
@@ -696,17 +704,17 @@ async function runAutoAnalysis() {
             const tipTeam = result.tipMatch[1].trim();
             const tipOdd = result.tipMatch[2].trim();
             const tipEV = result.tipMatch[3].trim();
-            const tipConf = (result.tipMatch[5] || 'MÉDIA').trim().toUpperCase();
+            const tipConf = (result.tipMatch[5] || CONF.MEDIA).trim().toUpperCase();
 
             // Pré-jogo: confiança BAIXA bloqueada salvo se mlEdge forte (≥8pp) compensar ausência de dados ao vivo
-            if (tipConf === 'BAIXA' && result.mlScore < 8) {
+            if (tipConf === CONF.BAIXA && result.mlScore < 8) {
               log('INFO', 'AUTO', `Upcoming ${match.team1} vs ${match.team2} → conf BAIXA ML-edge insuficiente (${result.mlScore.toFixed(1)}pp < 8.0pp mín.) → rejeitado (pré-jogo)`);
               analyzedMatches.set(matchKey, { ts: now, tipSent: false, noEdge: true });
               await new Promise(r => setTimeout(r, 3000)); continue;
             }
 
             // ALTA → ¼ Kelly (max 4u) | MÉDIA → ⅙ Kelly (max 3u) | BAIXA → 1/10 Kelly (max 1.5u)
-            const kellyFraction = tipConf === 'ALTA' ? 0.25 : tipConf === 'BAIXA' ? 0.10 : 1/6;
+            const kellyFraction = tipConf === CONF.ALTA ? 0.25 : tipConf === CONF.BAIXA ? 0.10 : 1/6;
             // Usa p do modelo ML quando disponível (evita circularidade p←EV←IA)
             const isT1bet = norm(tipTeam).includes(norm(match.team1)) || norm(match.team1).includes(norm(tipTeam));
             const modelPForKelly = (result.modelP1 > 0) ? (isT1bet ? result.modelP1 : result.modelP2) : null;
@@ -714,8 +722,8 @@ async function runAutoAnalysis() {
               ? calcKellyWithP(modelPForKelly, tipOdd, kellyFraction)
               : calcKellyFraction(tipEV, tipOdd, kellyFraction);
             const gameIcon = '🎮';
-            const confEmoji = { ALTA: '🟢', MÉDIA: '🟡', BAIXA: '🔵' }[tipConf] || '🟡';
-            const kellyLabel = tipConf === 'ALTA' ? '¼ Kelly' : tipConf === 'BAIXA' ? '1/10 Kelly' : '⅙ Kelly';
+            const confEmoji = { [CONF.ALTA]: '🟢', [CONF.MEDIA]: '🟡', [CONF.BAIXA]: '🔵' }[tipConf] || '🟡';
+            const kellyLabel = tipConf === CONF.ALTA ? '¼ Kelly' : tipConf === CONF.BAIXA ? '1/10 Kelly' : '⅙ Kelly';
             const mlEdgeLabel = result.mlScore > 0 ? ` | ML: ${result.mlScore.toFixed(1)}pp` : '';
 
             await serverPost('/record-tip', {
@@ -1224,7 +1232,7 @@ async function collectGameContext(game, matchId) {
                 gamesContext += `PLAYER CHAMP WR: ${lines.join(' | ')}\n`;
               }
             }
-          } catch(_) {}
+          } catch(e) { log('WARN', 'PS-CONTEXT', `Champ/player WR fetch falhou: ${e.message}`); }
         }
       } catch(e) { log('WARN', 'PS-CONTEXT', e.message); }
     } else {
@@ -1301,10 +1309,10 @@ async function collectGameContext(game, matchId) {
                     }
                     if (lines.length > 0) gamesContext += `PLAYER CHAMP WR: ${lines.join(' | ')}\n`;
                   }
-                } catch(_) {}
+                } catch(e) { log('WARN', 'RIOT-CONTEXT', `Champ/player WR fetch falhou: ${e.message}`); }
               }
             }
-          } catch(_) {}
+          } catch(e) { log('WARN', 'RIOT-CONTEXT', `Erro ao processar game ${gid?.gameId}: ${e.message}`); }
         }
       }
     }
@@ -1323,7 +1331,7 @@ async function fetchEnrichment(match) {
       serverGet(`/odds-movement?team1=${encodeURIComponent(match.team1 || match.participant1_name)}&team2=${encodeURIComponent(match.team2 || match.participant2_name)}`).catch(() => null),
     ]);
     data.form1 = f1; data.form2 = f2; data.h2h = h; data.oddsMovement = om;
-  } catch(_) {}
+  } catch(e) { log('WARN', 'ENRICH', `Erro ao buscar enrichment para ${match?.team1} vs ${match?.team2}: ${e.message}`); }
   return data;
 }
 
@@ -1429,6 +1437,10 @@ async function autoAnalyzeMatch(token, match) {
       return null;
     }
 
+    if (process.env.LOG_IA_PROMPT === 'true') {
+      log('DEBUG', 'IA-PROMPT', `${match.team1} vs ${match.team2}: ${prompt.slice(0, 400)}...`);
+    }
+
     const resp = await serverPost('/claude', {
       model: 'deepseek-chat',
       max_tokens: 600,
@@ -1440,6 +1452,9 @@ async function autoAnalyzeMatch(token, match) {
     }
 
     const text = resp.content?.map(b => b.text || '').join('');
+    if (process.env.LOG_IA_PROMPT === 'true' && text) {
+      log('DEBUG', 'IA-RESP', `${match.team1} vs ${match.team2}: ${text.slice(0, 400)}...`);
+    }
     if (!text) {
       // Fallback sem IA: envia tip baseada no modelo quando há edge claro
       const direction = mlResult.direction;
@@ -1478,6 +1493,11 @@ async function autoAnalyzeMatch(token, match) {
     }
 
     const tipResult = text.match(/TIP_ML:\s*([^@]+?)\s*@\s*([^|\]]+?)\s*\|EV:\s*([^|]+?)\s*\|STAKE:\s*([^|\]]+?)(?:\s*\|CONF:\s*(\w+))?(?:\]|$)/);
+    // Log quando a IA gerou resposta mas o padrão TIP_ML não foi encontrado (ajuda a detectar mudança de formato)
+    if (!tipResult && text && text.length > 20 && !text.toLowerCase().includes('sem edge') && !text.toLowerCase().includes('sem tip')) {
+      const snippet = text.slice(0, 200).replace(/\n/g, ' ');
+      log('DEBUG', 'IA-PARSE', `Sem TIP_ML na resposta para ${match.team1} vs ${match.team2}: "${snippet}"`);
+    }
     const hasRealOdds = !!(oddsToUse?.t1 && parseFloat(oddsToUse.t1) > 1);
 
     const extractTipReason = (t) => {
@@ -1513,10 +1533,22 @@ async function autoAnalyzeMatch(token, match) {
       const tipTeam  = filteredTipResult[1].trim();
       const tipOdd   = parseFloat(filteredTipResult[2]);
       const tipEV    = parseFloat(String(filteredTipResult[3]).replace('%','').replace('+',''));
-      let   tipConf  = (filteredTipResult[5] || 'MÉDIA').trim().toUpperCase();
+      let   tipConf  = (filteredTipResult[5] || CONF.MEDIA).trim().toUpperCase();
+
+      // Validação numérica: rejeitar tip se odd ou EV não são números válidos
+      if (!Number.isFinite(tipOdd) || tipOdd <= 1.0) {
+        log('WARN', 'AUTO', `Tip com odd inválida rejeitada: "${filteredTipResult[2]}" (${match.team1} vs ${match.team2})`);
+        filteredTipResult = null;
+      } else if (!Number.isFinite(tipEV)) {
+        log('WARN', 'AUTO', `Tip com EV inválido rejeitada: "${filteredTipResult[3]}" (${match.team1} vs ${match.team2})`);
+        filteredTipResult = null;
+      } else if (!tipTeam) {
+        log('WARN', 'AUTO', `Tip sem time rejeitada (${match.team1} vs ${match.team2})`);
+        filteredTipResult = null;
+      }
 
       // Gate 0: Sem odds reais → rejeitar sempre (odds estimadas não garantem valor)
-      if (!hasRealOdds) {
+      if (filteredTipResult && !hasRealOdds) {
         log('INFO', 'AUTO', `Gate odds reais: ${match.team1} vs ${match.team2} → odds estimadas → rejeitado`);
         filteredTipResult = null;
       }
@@ -1556,11 +1588,11 @@ async function autoAnalyzeMatch(token, match) {
         const mlDirectionIsT1 = mlResult.direction === 't1';
         if (aiDirectionIsT1 !== mlDirectionIsT1) {
           const confAtual = getConf();
-          if (confAtual === 'ALTA') {
-            filteredTipResult[5] = 'MÉDIA';
+          if (confAtual === CONF.ALTA) {
+            filteredTipResult[5] = CONF.MEDIA;
             log('INFO', 'AUTO', `Gate consenso: ${match.team1} vs ${match.team2} → ML(${mlResult.direction}) ≠ IA(${tipTeam}) → rebaixado ALTA→MÉDIA (incerteza)`);
-          } else if (confAtual === 'MÉDIA') {
-            filteredTipResult[5] = 'BAIXA';
+          } else if (confAtual === CONF.MEDIA) {
+            filteredTipResult[5] = CONF.BAIXA;
             log('INFO', 'AUTO', `Gate consenso: ${match.team1} vs ${match.team2} → ML(${mlResult.direction}) ≠ IA(${tipTeam}) → rebaixado MÉDIA→BAIXA (divergência ML×IA)`);
           } else {
             log('INFO', 'AUTO', `Gate consenso: ${match.team1} vs ${match.team2} → ML(${mlResult.direction}) ≠ IA(${tipTeam}) → incerteza ML×IA (conf BAIXA mantida)`);
@@ -1572,7 +1604,7 @@ async function autoAnalyzeMatch(token, match) {
       // ALTA: adaptiveEV (padrão) | MÉDIA: adaptiveEV-1.5% | BAIXA: adaptiveEV-3%
       if (filteredTipResult && hasRealOdds) {
         const confNow = getConf();
-        const evOffset = confNow === 'ALTA' ? 0 : confNow === 'MÉDIA' ? -1.5 : -3;
+        const evOffset = confNow === CONF.ALTA ? 0 : confNow === CONF.MEDIA ? -1.5 : -3;
         const confThreshold = Math.max(0.5, adaptiveEV + evOffset);
         if (!isNaN(tipEV) && tipEV < confThreshold) {
           log('INFO', 'AUTO', `Gate EV: ${match.team1} vs ${match.team2} → EV ${tipEV}% < threshold ${confThreshold.toFixed(1)}% [${confNow}] (${sigCount}/6 sinais) → rejeitado`);
@@ -1582,7 +1614,7 @@ async function autoAnalyzeMatch(token, match) {
 
       if (filteredTipResult) {
         const confFinal = getConf();
-        const tierLabel = confFinal === 'ALTA' ? '🟢 ALTA' : confFinal === 'MÉDIA' ? '🟡 MÉDIA' : '🔵 BAIXA';
+        const tierLabel = confFinal === CONF.ALTA ? '🟢 ALTA' : confFinal === CONF.MEDIA ? '🟡 MÉDIA' : '🔵 BAIXA';
         log('INFO', 'AUTO', `Tip aprovada: ${tipTeam} @ ${tipOdd} | EV ${tipEV}% | Conf:${tierLabel} | ML-edge:${mlResult.score.toFixed(1)}pp`);
       }
     }
