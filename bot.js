@@ -296,9 +296,13 @@ async function loadExistingTips() {
     if (Array.isArray(esportsTips)) {
       for (const tip of esportsTips) {
         if (!tip.match_id) continue;
-        for (const prefix of ['lol_', 'upcoming_lol_']) {
-          analyzedMatches.set(`${prefix}${tip.match_id}`, { ts: Date.now(), tipSent: true });
-        }
+        const mid = String(tip.match_id);
+        const rawId = mid.startsWith('lol_') ? mid.slice(4) : mid; // match.id do endpoint (/lol-matches)
+        // Keys usados no bot:
+        // - live/draft: `${match.game}_${match.id}` → "lol_<id>" / "lol_ps_<id>"
+        // - upcoming:   `upcoming_${match.game}_${match.id}` → "upcoming_lol_<id>"
+        analyzedMatches.set(`lol_${rawId}`, { ts: Date.now(), tipSent: true });
+        analyzedMatches.set(`upcoming_lol_${rawId}`, { ts: Date.now(), tipSent: true });
       }
       if (esportsTips.length) log('INFO', 'BOOT', `LoL: ${esportsTips.length} tips existentes carregadas`);
     }
