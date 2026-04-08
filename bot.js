@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const initDatabase = require('./lib/database');
 const { SPORTS, getSportById, getSportByToken, getTokenToSportMap } = require('./lib/sports');
-const { log, calcKelly, calcKellyFraction, calcKellyWithP, norm, fmtDate, fmtDateTime, fmtDuration, safeParse } = require('./lib/utils');
+const { log, calcKelly, calcKellyFraction, calcKellyWithP, norm, fmtDate, fmtDateTime, fmtDuration, safeParse, cachedHttpGet } = require('./lib/utils');
 const { adjustStakeUnits } = require('./lib/risk-manager');
 const { esportsPreFilter } = require('./lib/ml');
 const { fetchMatchNews } = require('./lib/news');
@@ -13,13 +13,10 @@ const { fetchMatchNews } = require('./lib/news');
 const SERVER = '127.0.0.1';
 const PORT = parseInt(process.env.SERVER_PORT) || parseInt(process.env.PORT) || 8080;
 const ADMIN_IDS = new Set((process.env.ADMIN_USER_IDS || '').split(',').filter(Boolean));
-const CLAUDE_KEY = process.env.CLAUDE_API_KEY;
 const DEEPSEEK_KEY = process.env.DEEPSEEK_API_KEY;
-/** Header para /claude: Node rejeita undefined; com só DeepSeek, CLAUDE_KEY fica vazio. */
-const AI_PROXY_KEY = CLAUDE_KEY || DEEPSEEK_KEY;
 
-if (!CLAUDE_KEY && !DEEPSEEK_KEY) {
-  console.error('❌ Configure CLAUDE_API_KEY ou DEEPSEEK_API_KEY no .env');
+if (!DEEPSEEK_KEY) {
+  console.error('❌ Configure DEEPSEEK_API_KEY no .env');
   process.exit(1);
 }
 
@@ -1397,11 +1394,11 @@ async function autoAnalyzeMatch(token, match) {
       model: 'deepseek-chat',
       max_tokens: 600,
       messages: [{ role: 'user', content: prompt }]
-    }, null, { 'x-claude-key': AI_PROXY_KEY });
+    });
 
     const text = resp.content?.map(b => b.text || '').join('');
     if (!text) {
-      log('WARN', 'AUTO', `IA sem resposta para ${match.team1} vs ${match.team2} (provider: ${resp.provider || 'claude'})`);
+      log('WARN', 'AUTO', `IA sem resposta para ${match.team1} vs ${match.team2} (provider: ${resp.provider || 'deepseek'})`);
       return null;
     }
 
@@ -2297,6 +2294,27 @@ async function handleFairOdds(token, chatId, sport) {
                 ]);
                 if (r1) rec1 = r1;
                 if (r2) rec2 = r2;
+
+                const [w1, w2] = await Promise.all([
+                  !rec1 ? fetchWikipediaFighterRecord(m.team1).catch(() => null) : Promise.resolve(null),
+                  !rec2 ? fetchWikipediaFighterRecord(m.team2).catch(() => null) : Promise.resolve(null)
+                ]);
+                if (w1) rec1 = w1;
+                if (w2) rec2 = w2;
+
+                const [s1, s2] = await Promise.all([
+                  !rec1 ? fetchSherdogFighterRecord(m.team1).catch(() => null) : Promise.resolve(null),
+                  !rec2 ? fetchSherdogFighterRecord(m.team2).catch(() => null) : Promise.resolve(null)
+                ]);
+                if (s1) rec1 = s1;
+                if (s2) rec2 = s2;
+
+                const [t1, t2] = await Promise.all([
+                  !rec1 ? fetchTapologyFighterRecord(m.team1).catch(() => null) : Promise.resolve(null),
+                  !rec2 ? fetchTapologyFighterRecord(m.team2).catch(() => null) : Promise.resolve(null)
+                ]);
+                if (t1) rec1 = t1;
+                if (t2) rec2 = t2;
               }
               if (rec1 || rec2) return mmaRecordToEnrich(rec1, rec2);
               return { form1: null, form2: null, h2h: null, oddsMovement: null };
@@ -3006,6 +3024,86 @@ async function fetchWikipediaFighterRecord(name) {
   }
 }
 
+function _normalizeWld(rec) {
+  const s = String(rec || '').trim();
+  if (!s) return null;
+  const m = s.match(/\b(\d{1,3})\s*[-–]\s*(\d{1,2})(?:\s*[-–]\s*(\d{1,2}))?\b/);
+  if (!m) return null;
+  const w = parseInt(m[1], 10) || 0;
+  const l = parseInt(m[2], 10) || 0;
+  const d = m[3] != null ? (parseInt(m[3], 10) || 0) : 0;
+  if (w + l + d <= 0) return null;
+  if (w + l + d > 120) return null;
+  return `${w}-${l}-${d}`;
+}
+
+async function fetchSherdogFighterRecord(name) {
+  const cacheKey = `sh_${normName(name)}`;
+  const cached = espnFighterCache.get(cacheKey);
+  if (cached && Date.now() - cached.ts < ESPN_FIGHTER_TTL) return cached.record;
+  const cache = rec => { espnFighterCache.set(cacheKey, { record: rec, ts: Date.now() }); return rec; };
+
+  try {
+    const searchUrl = `https://www.sherdog.com/stats/fightfinder?SearchTxt=${encodeURIComponent(name.trim())}`;
+    const r1 = await cachedHttpGet(searchUrl, { ttlMs: ESPN_FIGHTER_TTL, provider: 'sherdog' }).catch(() => null);
+    if (!r1 || r1.status !== 200 || !r1.body) return cache(null);
+
+    const body1 = String(r1.body || '');
+    const m = body1.match(/href="(\/fighter\/[^"]+)"/i);
+    if (!m) return cache(null);
+    const fighterPath = m[1];
+
+    const profileUrl = `https://www.sherdog.com${fighterPath}`;
+    const r2 = await cachedHttpGet(profileUrl, { ttlMs: ESPN_FIGHTER_TTL, provider: 'sherdog' }).catch(() => null);
+    if (!r2 || r2.status !== 200 || !r2.body) return cache(null);
+
+    const body2 = String(r2.body || '');
+    const recRaw = body2.match(/class="record"\s*>\s*([\d]{1,3}\s*[-–]\s*[\d]{1,2}(?:\s*[-–]\s*[\d]{1,2})?)\s*</i)?.[1];
+    return cache(_normalizeWld(recRaw));
+  } catch (_) {
+    return cache(null);
+  }
+}
+
+async function fetchTapologyFighterRecord(name) {
+  const cacheKey = `tp_${normName(name)}`;
+  const cached = espnFighterCache.get(cacheKey);
+  if (cached && Date.now() - cached.ts < ESPN_FIGHTER_TTL) return cached.record;
+  const cache = rec => { espnFighterCache.set(cacheKey, { record: rec, ts: Date.now() }); return rec; };
+
+  try {
+    const searchUrl = `https://www.tapology.com/search?term=${encodeURIComponent(name.trim())}`;
+    const r1 = await cachedHttpGet(searchUrl, {
+      ttlMs: ESPN_FIGHTER_TTL,
+      provider: 'tapology',
+      headers: { 'Accept': 'text/html', 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
+    }).catch(() => null);
+    if (!r1 || r1.status !== 200 || !r1.body) return cache(null);
+
+    const body1 = String(r1.body || '');
+    const m = body1.match(/href="(\/fightcenter\/fighters\/[^"]+)"/i);
+    if (!m) return cache(null);
+    const fighterPath = m[1];
+
+    const profileUrl = `https://www.tapology.com${fighterPath}`;
+    const r2 = await cachedHttpGet(profileUrl, {
+      ttlMs: ESPN_FIGHTER_TTL,
+      provider: 'tapology',
+      headers: { 'Accept': 'text/html', 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
+    }).catch(() => null);
+    if (!r2 || r2.status !== 200 || !r2.body) return cache(null);
+
+    const body2 = String(r2.body || '');
+    const idx = body2.search(/Pro\s*Record|Record/i);
+    const window = idx >= 0 ? body2.slice(Math.max(0, idx - 500), idx + 1500) : body2.slice(0, 2500);
+    const recRaw = window.match(/\b(\d{1,3})-(\d{1,2})-(\d{1,2})\b/)?.[0]
+      || window.match(/\b(\d{1,3})-(\d{1,2})\b/)?.[0];
+    return cache(_normalizeWld(recRaw));
+  } catch (_) {
+    return cache(null);
+  }
+}
+
 // Busca record de um lutador individualmente na ESPN quando não está no scoreboard.
 // Passo 1: search para obter o ID do atleta
 // Passo 2: GET /athletes/{id} para obter o record completo
@@ -3158,7 +3256,7 @@ async function pollMma() {
         const rounds = espn?.rounds || 3;
         const isTitleFight = rounds === 5;
 
-        // Fallback: busca record individual (ESPN → Wikipedia)
+        // Fallback: busca record individual (ESPN → Wikipedia → Sherdog → Tapology)
         if (!espn) {
           const [e1, e2] = await Promise.all([
             fetchEspnFighterRecord(fight.team1).catch(() => null),
@@ -3166,15 +3264,30 @@ async function pollMma() {
           ]);
           if (e1) rec1 = e1;
           if (e2) rec2 = e2;
-          // Segunda camada: Wikipedia para quem ESPN não encontrou
+
           const [w1, w2] = await Promise.all([
             !rec1 ? fetchWikipediaFighterRecord(fight.team1).catch(() => null) : Promise.resolve(null),
             !rec2 ? fetchWikipediaFighterRecord(fight.team2).catch(() => null) : Promise.resolve(null)
           ]);
-          if (w1) { rec1 = w1; }
-          if (w2) { rec2 = w2; }
-          const source1 = e1 ? 'ESPN' : w1 ? 'Wiki' : '—';
-          const source2 = e2 ? 'ESPN' : w2 ? 'Wiki' : '—';
+          if (w1) rec1 = w1;
+          if (w2) rec2 = w2;
+
+          const [s1, s2] = await Promise.all([
+            !rec1 ? fetchSherdogFighterRecord(fight.team1).catch(() => null) : Promise.resolve(null),
+            !rec2 ? fetchSherdogFighterRecord(fight.team2).catch(() => null) : Promise.resolve(null)
+          ]);
+          if (s1) rec1 = s1;
+          if (s2) rec2 = s2;
+
+          const [t1, t2] = await Promise.all([
+            !rec1 ? fetchTapologyFighterRecord(fight.team1).catch(() => null) : Promise.resolve(null),
+            !rec2 ? fetchTapologyFighterRecord(fight.team2).catch(() => null) : Promise.resolve(null)
+          ]);
+          if (t1) rec1 = t1;
+          if (t2) rec2 = t2;
+
+          const source1 = e1 ? 'ESPN' : w1 ? 'Wiki' : s1 ? 'Sherdog' : t1 ? 'Tapology' : '—';
+          const source2 = e2 ? 'ESPN' : w2 ? 'Wiki' : s2 ? 'Sherdog' : t2 ? 'Tapology' : '—';
           if (rec1 || rec2) {
             log('INFO', 'AUTO-MMA', `Records: ${fight.team1}=${rec1||'?'}(${source1}) | ${fight.team2}=${rec2||'?'}(${source2})`);
           }
@@ -3239,9 +3352,9 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
             model: 'deepseek-chat',
             max_tokens: 450,
             messages: [{ role: 'user', content: prompt }]
-          }, null, { 'x-claude-key': AI_PROXY_KEY });
+          });
         } catch(e) {
-          log('WARN', 'AUTO-MMA', `Claude error: ${e.message}`);
+          log('WARN', 'AUTO-MMA', `AI error: ${e.message}`);
           await new Promise(r => setTimeout(r, 3000)); continue;
         }
 
@@ -3492,7 +3605,7 @@ Máximo 200 palavras. Mostre seu raciocínio brevemente antes da decisão.`;
             model: 'deepseek-chat',
             max_tokens: 450,
             messages: [{ role: 'user', content: prompt }]
-          }, null, { 'x-claude-key': AI_PROXY_KEY });
+          });
         } catch(e) {
           log('WARN', 'AUTO-TENNIS', `AI error: ${e.message}`);
           await new Promise(r => setTimeout(r, 3000)); continue;
@@ -3617,10 +3730,11 @@ async function pollFootball() {
       }
       const hasFootballApi = !!(process.env.API_SPORTS_KEY || process.env.APIFOOTBALL_KEY);
       const hasFootballDataOrg = !!(process.env.FOOTBALL_DATA_TOKEN || process.env.FOOTBALL_DATA_KEY);
+      const apiFootballSuspended = !!(hasFootballApi && typeof footballApi.isSuspended === 'function' && footballApi.isSuspended());
       log('INFO', 'AUTO-FOOTBALL', `${matches.length} partidas futebol com odds (${hasFootballApi ? 'API-Football' : hasFootballDataOrg ? 'football-data.org' : 'odds-only'})`);
 
       // Batch cache para mapear times→fixtureId sem 1 chamada por partida
-      const fixturesBatch = hasFootballApi
+      const fixturesBatch = (hasFootballApi && !apiFootballSuspended)
         ? await footballApi.getUpcomingFixturesCached().catch(() => [])
         : [];
 
@@ -3677,7 +3791,7 @@ async function pollFootball() {
         let standingsData = {};
         let homeFatigue = 7, awayFatigue = 7;
 
-        if (hasFootballApi) {
+        if (hasFootballApi && !apiFootballSuspended) {
           fixtureInfo =
             footballApi.findInBatch(fixturesBatch, match.team1, match.team2)
             || await footballApi.findFixtureWithTeams(match.team1, match.team2, match.time).catch(() => null);
@@ -3883,7 +3997,7 @@ Máximo 200 palavras.`;
             model: 'deepseek-chat',
             max_tokens: 500,
             messages: [{ role: 'user', content: prompt }]
-          }, null, { 'x-claude-key': AI_PROXY_KEY });
+          });
         } catch(e) {
           log('WARN', 'AUTO-FOOTBALL', `AI error: ${e.message}`);
           await new Promise(r => setTimeout(r, 3000)); continue;
@@ -3975,7 +4089,6 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
 log('INFO', 'BOOT', `ENV: ESPORTS_ENABLED=${process.env.ESPORTS_ENABLED || '(não definida)'}`);
 log('INFO', 'BOOT', `ENV: TELEGRAM_TOKEN_ESPORTS=${process.env.TELEGRAM_TOKEN_ESPORTS ? '✅ definida' : '❌ AUSENTE'}`);
 log('INFO', 'BOOT', `ENV: DEEPSEEK_API_KEY=${process.env.DEEPSEEK_API_KEY ? '✅ definida' : '❌ AUSENTE'}`);
-log('INFO', 'BOOT', `ENV: CLAUDE_API_KEY=${process.env.CLAUDE_API_KEY ? '✅ definida' : '❌ AUSENTE (fallback)'}`);
 const oddsKeyPresent = !!(process.env.ODDS_API_KEY || process.env.ODDSPAPI_KEY || process.env.ODDS_PAPI_KEY || process.env.ESPORTS_ODDS_KEY);
 log('INFO', 'BOOT', `ENV: ODDS_API_KEY=${oddsKeyPresent ? '✅ definida' : '❌ AUSENTE — odds indisponíveis'}`);
 log('INFO', 'BOOT', `Sports carregados: ${JSON.stringify(Object.entries(SPORTS).map(([k,v]) => ({id: k, enabled: v.enabled, hasToken: !!v.token})))}`);

@@ -9,7 +9,6 @@ const { log, sendJson, safeParse, norm, httpGet, cachedHttpGet, aiPost, oddsApiA
 
 // Railway sets $PORT automatically; start.js bridges it to SERVER_PORT
 const PORT = parseInt(process.env.PORT || process.env.SERVER_PORT) || 3000;
-const CLAUDE_KEY = process.env.CLAUDE_API_KEY;
 const DEEPSEEK_KEY = process.env.DEEPSEEK_API_KEY || '';
 // Aceita múltiplos nomes de variável para a chave OddsPapi
 const ODDSPAPI_KEY = process.env.ODDS_API_KEY
@@ -1363,11 +1362,35 @@ async function getPandaScoreLolMatches() {
     function psMatchList(body, fallbackLabel) {
       const p = safeParse(body, []);
       if (Array.isArray(p)) return p;
-      if (p && Array.isArray(p.data)) return p.data;
-      if (p && Array.isArray(p.results)) return p.results;
+
       if (p && typeof p === 'object') {
-        log('WARN', 'PANDASCORE', `${fallbackLabel}: resposta não é lista (tipo ${typeof p}), ignorando`);
+        const keys = Object.keys(p);
+
+        const direct =
+          (Array.isArray(p.data) && p.data) ||
+          (Array.isArray(p.results) && p.results) ||
+          (Array.isArray(p.matches) && p.matches);
+        if (direct) {
+          log('INFO', 'PANDASCORE', `${fallbackLabel}: formato objeto detectado; chaves=${keys.join(',')}`);
+          return direct;
+        }
+
+        // Alguns wrappers retornam { data: { matches: [...] } } ou { data: { results: [...] } }
+        const dataObj = p.data && typeof p.data === 'object' ? p.data : null;
+        const nested =
+          (Array.isArray(dataObj?.matches) && dataObj.matches) ||
+          (Array.isArray(dataObj?.results) && dataObj.results) ||
+          (Array.isArray(dataObj?.data) && dataObj.data);
+        if (nested) {
+          const dataKeys = dataObj ? Object.keys(dataObj) : [];
+          log('INFO', 'PANDASCORE', `${fallbackLabel}: formato data.* detectado; chaves=${keys.join(',')} | data=${dataKeys.join(',')}`);
+          return nested;
+        }
+
+        log('WARN', 'PANDASCORE', `${fallbackLabel}: resposta não é lista; tipo=${typeof p}; chaves=${keys.join(',')}`);
+        return [];
       }
+
       return [];
     }
     const running = psMatchList(runningRaw.body, 'running');
@@ -1525,7 +1548,7 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(204, {
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-admin-key, x-claude-key, x-sport'
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-admin-key, x-sport'
     });
     res.end();
     return;
@@ -3069,7 +3092,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // ── AI Proxy (DeepSeek ou Claude) ──
+  // ── AI Proxy (DeepSeek apenas) ──
   if (p === '/claude' && req.method === 'POST') {
     let body = ''; req.on('data', d => body += d);
     req.on('end', async () => {
@@ -3077,38 +3100,27 @@ const server = http.createServer(async (req, res) => {
         const payload = safeParse(body, null);
         if (!payload) { sendJson(res, { error: 'Invalid JSON' }, 400); return; }
 
-        const useDeepSeek = !!(DEEPSEEK_KEY && (payload.model?.startsWith('deepseek') || !CLAUDE_KEY));
+        if (!DEEPSEEK_KEY) { sendJson(res, { error: 'DEEPSEEK_API_KEY ausente' }, 401); return; }
 
-        if (useDeepSeek) {
-          // ── DeepSeek (OpenAI-compatible) ──
-          const dsPayload = {
-            model: payload.model?.startsWith('deepseek') ? payload.model : 'deepseek-chat',
-            max_tokens: payload.max_tokens || 1800,
-            messages: payload.messages
-          };
-          const r = await aiPost('deepseek', 'https://api.deepseek.com/chat/completions', dsPayload, {
-            'Authorization': `Bearer ${DEEPSEEK_KEY}`,
-            'content-type': 'application/json'
-          });
-          const ds = safeParse(r.body, {});
-          const text = ds.choices?.[0]?.message?.content || '';
-          if (!text && ds.error) {
-            log('WARN', 'AI', `DeepSeek erro: ${ds.error?.message || JSON.stringify(ds.error)}`);
-            sendJson(res, { error: ds.error?.message || 'DeepSeek sem resposta' }, r.status || 500);
-            return;
-          }
-          // Normaliza para o formato Claude (content[].text) para compatibilidade com bot.js
-          sendJson(res, { content: [{ type: 'text', text }], model: dsPayload.model, provider: 'deepseek' });
-        } else {
-          // ── Claude (Anthropic) ──
-          const key = req.headers['x-claude-key'] || CLAUDE_KEY;
-          if (!key) { sendJson(res, { error: 'Nenhuma AI key configurada (DEEPSEEK_API_KEY ou CLAUDE_API_KEY)' }, 401); return; }
-          const r = await aiPost('claude', 'https://api.anthropic.com/v1/messages', payload, {
-            'x-api-key': key, 'anthropic-version': '2023-06-01', 'content-type': 'application/json'
-          });
-          res.writeHead(r.status, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-          res.end(r.body);
+        // ── DeepSeek (OpenAI-compatible) ──
+        const dsPayload = {
+          model: payload.model?.startsWith('deepseek') ? payload.model : 'deepseek-chat',
+          max_tokens: payload.max_tokens || 1800,
+          messages: payload.messages
+        };
+        const r = await aiPost('deepseek', 'https://api.deepseek.com/chat/completions', dsPayload, {
+          'Authorization': `Bearer ${DEEPSEEK_KEY}`,
+          'content-type': 'application/json'
+        });
+        const ds = safeParse(r.body, {});
+        const text = ds.choices?.[0]?.message?.content || '';
+        if (!text && ds.error) {
+          log('WARN', 'AI', `DeepSeek erro: ${ds.error?.message || JSON.stringify(ds.error)}`);
+          sendJson(res, { error: ds.error?.message || 'DeepSeek sem resposta' }, r.status || 500);
+          return;
         }
+        // Normaliza para o formato Claude (content[].text) para compatibilidade com bot.js
+        sendJson(res, { content: [{ type: 'text', text }], model: dsPayload.model, provider: 'deepseek' });
       } catch(e) { sendJson(res, { error: e.message }, 500); }
     });
     return;
