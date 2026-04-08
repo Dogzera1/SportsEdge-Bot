@@ -223,8 +223,16 @@ async function applyGlobalRisk(sport, desiredUnits) {
   const snap = await getRiskSnapshotCached();
   if (!snap) return { ok: true, units: desiredUnits, reason: 'no_snapshot' };
   const s = String(sport || '').toUpperCase();
-  const maxGlobalRiskPct = parseFloat(process.env[`GLOBAL_RISK_PCT_${s}`] || process.env.GLOBAL_RISK_PCT || '0.10');
-  const maxSportRiskPct = parseFloat(process.env[`SPORT_RISK_PCT_${s}`] || process.env.SPORT_RISK_PCT || '0.20');
+  const globalDefault =
+    s === 'TENNIS' ? '0.15' :
+    s === 'MMA' ? '0.12' :
+    '0.10';
+  const sportDefault =
+    s === 'TENNIS' ? '0.35' :
+    s === 'MMA' ? '0.25' :
+    '0.20';
+  const maxGlobalRiskPct = parseFloat(process.env[`GLOBAL_RISK_PCT_${s}`] || process.env.GLOBAL_RISK_PCT || globalDefault);
+  const maxSportRiskPct = parseFloat(process.env[`SPORT_RISK_PCT_${s}`] || process.env.SPORT_RISK_PCT || sportDefault);
   return adjustStakeUnits(sport, desiredUnits, snap, { maxGlobalRiskPct, maxSportRiskPct, minUnits: 0.5 });
 }
 
