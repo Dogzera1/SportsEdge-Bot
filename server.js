@@ -3140,6 +3140,9 @@ const server = http.createServer(async (req, res) => {
           'Authorization': `Bearer ${DEEPSEEK_KEY}`,
           'content-type': 'application/json'
         });
+        if (!r || r.status !== 200) {
+          log('WARN', 'AI', `DeepSeek HTTP ${r?.status || 'fail'} body=${String(r?.body || '').slice(0, 900)}`);
+        }
         const ds = safeParse(r.body, {});
         const text = ds.choices?.[0]?.message?.content || '';
         if (!text) {
@@ -3150,7 +3153,10 @@ const server = http.createServer(async (req, res) => {
         }
         // Normaliza para o formato Claude (content[].text) para compatibilidade com bot.js
         sendJson(res, { content: [{ type: 'text', text }], model: dsPayload.model, provider: 'deepseek' });
-      } catch(e) { sendJson(res, { error: e.message }, 500); }
+      } catch(e) {
+        log('WARN', 'AI', `DeepSeek exception: ${e.code || '-'} ${e.message || String(e)}`);
+        sendJson(res, { error: e.message }, e.status || 500);
+      }
     });
     return;
   }
