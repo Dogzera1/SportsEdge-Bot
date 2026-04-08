@@ -2548,10 +2548,11 @@ const server = http.createServer(async (req, res) => {
         ? 't.odds'
         : 't.sent_at';
 
+    // desempenho: dashboard não usa match_time/match_date
+    // se precisar no futuro, criar query separada com includeMatch=1
     let query = `
-      SELECT t.*, m.match_time as match_time, m.event_date as match_date
+      SELECT t.*
       FROM tips t
-      LEFT JOIN matches m ON t.match_id = m.id AND t.sport = m.sport
       WHERE t.sport = ?
     `;
     const params = [sport];

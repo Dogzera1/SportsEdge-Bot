@@ -140,6 +140,18 @@ const migrations = [
       `);
     },
   },
+  {
+    id: '012_tips_indexes',
+    up(db) {
+      if (!tableExists(db, 'tips')) return;
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_tips_sport_sent_at ON tips(sport, sent_at);
+        CREATE INDEX IF NOT EXISTS idx_tips_sport_result_sent_at ON tips(sport, result, sent_at);
+        CREATE INDEX IF NOT EXISTS idx_tips_sport_live_sent_at ON tips(sport, is_live, sent_at);
+        CREATE INDEX IF NOT EXISTS idx_tips_sport_conf_sent_at ON tips(sport, confidence, sent_at);
+      `);
+    },
+  },
 ];
 
 function applyMigrations(db) {

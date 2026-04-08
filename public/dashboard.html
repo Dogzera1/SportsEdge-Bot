@@ -185,6 +185,8 @@ function selectSport(sport, el) {
 
 async function loadAll() {
   document.getElementById('lastUpdated').textContent = 'Atualizando...';
+  // tips não devem depender de ROI/calibração (podem ser lentos)
+  const tipsP = loadTips();
   const [roi, calibration, weights] = await Promise.all([
     apiFetch('/roi?sport=' + currentSport),
     apiFetch('/calibration?sport=' + currentSport),
@@ -193,7 +195,7 @@ async function loadAll() {
   renderCards(roi);
   renderCalibration(calibration);
   renderWeights(weights);
-  loadTips();
+  await tipsP;
   document.getElementById('lastUpdated').textContent = 'Atualizado: ' + new Date().toLocaleTimeString('pt-BR');
 }
 
@@ -463,8 +465,6 @@ function renderTips(tips) {
     '</table>';
 }
 
-// Auto-refresh every 5 minutes
-setInterval(loadAll, 5 * 60 * 1000);
 bindTipsControls();
 loadAll();
 </script>
