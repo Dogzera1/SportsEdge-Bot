@@ -40,6 +40,111 @@ try {
   if (cleaned.changes > 0) log('INFO', 'BOOT', `Limpeza: ${cleaned.changes} tip(s) com odds > 4.0 removidas`);
 } catch(e) { log('WARN', 'BOOT', `Limpeza odds: ${e.message}`); }
 
+// ── Import opcional: dados gol.gg (CSV) ──
+// Usa CSV gerado por scrapers externos (ex: PandaTobi/League-of-Legends-ESports-Data)
+// Objetivo: seed/merge em pro_champ_stats quando sync PandaScore estiver vazio
+function parseCsvLoose(text) {
+  const rows = [];
+  let i = 0;
+  let field = '';
+  let row = [];
+  let inQuotes = false;
+  while (i < text.length) {
+    const ch = text[i];
+    if (inQuotes) {
+      if (ch === '"') {
+        const next = text[i + 1];
+        if (next === '"') { field += '"'; i += 2; continue; }
+        inQuotes = false;
+        i++;
+        continue;
+      }
+      field += ch;
+      i++;
+      continue;
+    }
+    if (ch === '"') { inQuotes = true; i++; continue; }
+    if (ch === ',') { row.push(field); field = ''; i++; continue; }
+    if (ch === '\r') { i++; continue; }
+    if (ch === '\n') {
+      row.push(field);
+      rows.push(row);
+      row = [];
+      field = '';
+      i++;
+      continue;
+    }
+    field += ch;
+    i++;
+  }
+  if (field.length || row.length) {
+    row.push(field);
+    rows.push(row);
+  }
+  return rows;
+}
+
+function normHeader(h) {
+  return String(h || '').trim().toLowerCase().replace(/\s+/g, '_');
+}
+
+function importGolGgCsvToProChampStats(csvPath) {
+  try {
+    if (!csvPath) return { ok: false, reason: 'no_path' };
+    const abs = path.isAbsolute(csvPath) ? csvPath : path.resolve(csvPath);
+    if (!fs.existsSync(abs)) return { ok: false, reason: 'not_found', path: abs };
+
+    const mode = (process.env.GOLGG_IMPORT_MODE || 'seed').toLowerCase(); // seed|merge
+    const champCount = db.prepare('SELECT COUNT(*) as cnt FROM pro_champ_stats').get();
+    if (mode === 'seed' && (champCount?.cnt || 0) > 0) return { ok: false, reason: 'already_has_data', cnt: champCount.cnt };
+
+    const raw = fs.readFileSync(abs, 'utf8');
+    const rows = parseCsvLoose(raw);
+    if (!rows.length) return { ok: false, reason: 'empty_csv' };
+
+    const headers = rows[0].map(normHeader);
+    const idx = (name) => headers.indexOf(name);
+    const colChampion = idx('champion') >= 0 ? idx('champion') : idx('champ') >= 0 ? idx('champ') : idx('champion_name');
+    const colRole = idx('role') >= 0 ? idx('role') : idx('position') >= 0 ? idx('position') : idx('lane');
+    const colWins = idx('wins') >= 0 ? idx('wins') : idx('win') >= 0 ? idx('win') : -1;
+    const colTotal = idx('total') >= 0 ? idx('total') : idx('games') >= 0 ? idx('games') : idx('matches');
+    const colPatch = idx('patch');
+
+    if (colChampion < 0 || colRole < 0 || colWins < 0 || colTotal < 0) {
+      return { ok: false, reason: 'missing_columns', headers: headers.slice(0, 50) };
+    }
+
+    let imported = 0;
+    const patchVal = process.env.LOL_PATCH || (process.env.LOL_PATCH_META || '').slice(0, 16) || null;
+    const tx = db.transaction(() => {
+      for (let r = 1; r < rows.length; r++) {
+        const row = rows[r];
+        const champion = String(row[colChampion] || '').trim();
+        const roleRaw = String(row[colRole] || '').trim().toLowerCase();
+        const wins = parseInt(String(row[colWins] || '0').trim(), 10);
+        const total = parseInt(String(row[colTotal] || '0').trim(), 10);
+        if (!champion || !roleRaw || !Number.isFinite(wins) || !Number.isFinite(total) || total <= 0) continue;
+        const role = roleRaw.replace('bot', 'bottom').replace('adc', 'bottom').replace('sup', 'support');
+        const patch = (colPatch >= 0 ? String(row[colPatch] || '').trim() : '') || patchVal || null;
+        stmts.addChampStat.run(champion, role, wins, total, patch);
+        imported++;
+      }
+    });
+    tx();
+
+    log('INFO', 'BOOT', `gol.gg CSV import: ${imported} linha(s) para pro_champ_stats (${abs})`);
+    return { ok: true, imported, path: abs };
+  } catch(e) {
+    log('WARN', 'BOOT', `gol.gg CSV import falhou: ${e.message}`);
+    return { ok: false, reason: e.message };
+  }
+}
+
+try {
+  const csvPath = process.env.GOLGG_CSV_PATH || process.env.GOLGG_PATH || '';
+  if (csvPath) importGolGgCsvToProChampStats(csvPath);
+} catch(_) {}
+
 // Apenas Esports suportado — sem scrapers externos
 
 // ── Odds Cache ──
