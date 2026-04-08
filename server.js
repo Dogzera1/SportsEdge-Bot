@@ -674,6 +674,18 @@ function findOdds(sport, t1, t2) {
     // ── Modo 1: combinedSlug (formato OddsPapi — sem nomes separados) ──
     if (val.combinedSlug) {
       const cs = val.combinedSlug;
+      // Se tivermos t1Name/t2Name, tenta preservar ordem correta (evita odds invertida)
+      if (val.t1Name && val.t2Name) {
+        const vt1 = norm(val.t1Name);
+        const vt2 = norm(val.t2Name);
+        if (anyMatch(variants1, vt1) && anyMatch(variants2, vt2)) {
+          return { t1: val.t1, t2: val.t2, bookmaker: val.bookmaker };
+        }
+        if (anyMatch(variants1, vt2) && anyMatch(variants2, vt1)) {
+          return { t1: val.t2, t2: val.t1, bookmaker: val.bookmaker };
+        }
+      }
+      // Fallback: match sem garantia de ordem
       if (anyMatch(variants1, cs) && anyMatch(variants2, cs)) {
         return { t1: val.t1, t2: val.t2, bookmaker: val.bookmaker };
       }
