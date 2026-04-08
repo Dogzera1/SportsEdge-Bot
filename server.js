@@ -2883,54 +2883,102 @@ const server = http.createServer(async (req, res) => {
   if (p === '/calibration') {
     const sport = parsed.query.sport || 'esports';
     try {
+      const limitRaw = parseInt(parsed.query.limit);
+      const limit = Number.isFinite(limitRaw)
+        ? Math.max(20, Math.min(3000, limitRaw))
+        : (parseInt(process.env.CALIBRATION_LIMIT || '800', 10) || 800);
+
+      const minBinRaw = parseInt(parsed.query.minBin);
+      const minBin = Number.isFinite(minBinRaw)
+        ? Math.max(5, Math.min(200, minBinRaw))
+        : (parseInt(process.env.CALIBRATION_MIN_BIN || '12', 10) || 12);
+
+      const phase = String(parsed.query.phase || 'all'); // all | live | pre
+
       const tips = db.prepare(
-        `SELECT odds, ev, confidence, result, is_live, model_p_pick FROM tips WHERE sport = ? AND result IN ('win','loss')`
-      ).all(sport);
+        `SELECT odds, ev, result, is_live, model_p_pick, sent_at, settled_at
+         FROM tips
+         WHERE sport = ? AND result IN ('win','loss')
+         ORDER BY COALESCE(settled_at, sent_at) DESC
+         LIMIT ?`
+      ).all(sport, limit);
 
-      const NUM_BUCKETS = 10;
-      const buckets = Array.from({ length: NUM_BUCKETS }, (_, i) => ({
-        bucket: `${i*10}-${i*10+10}%`,
-        predicted: i * 10 + 5,
-        wins: 0,
-        total: 0,
-        actual: 0
-      }));
-
-      let brierSum = 0, logLossSum = 0, n = 0;
-
-      for (const t of tips) {
+      function tipToP(t) {
         const odds = parseFloat(t.odds) || 0;
-        if (odds <= 1) continue;
+        if (odds <= 1) return null;
         const ev = parseFloat(String(t.ev || '0').replace('%','').replace('+','')) / 100;
-        // Preferir p do modelo salvo (mais preciso). Fallback: derivar de EV+odds.
         const pStored = parseFloat(t.model_p_pick);
         const pRaw = (isFinite(pStored) && pStored > 0 && pStored < 1)
           ? pStored
           : ((ev + 1) / odds);
         const p = Math.max(0.01, Math.min(0.99, pRaw));
-        const isWin = t.result === 'win' ? 1 : 0;
-
-        const idx = Math.min(NUM_BUCKETS - 1, Math.floor(p * NUM_BUCKETS));
-        buckets[idx].total++;
-        buckets[idx].wins += isWin;
-
-        // Brier score: (p - outcome)^2
-        brierSum += Math.pow(p - isWin, 2);
-        // Log loss: -(outcome * log(p) + (1-outcome) * log(1-p))
-        logLossSum += -(isWin * Math.log(p) + (1 - isWin) * Math.log(1 - p));
-        n++;
+        const o = t.result === 'win' ? 1 : 0;
+        return { p, o, is_live: !!t.is_live };
       }
 
-      for (const b of buckets) {
-        b.actual = b.total > 0 ? parseFloat((b.wins / b.total * 100).toFixed(1)) : null;
+      function buildAdaptiveBuckets(rows) {
+        const pts = [];
+        let brierSum = 0, logLossSum = 0, n = 0;
+        for (const t of rows) {
+          const x = tipToP(t);
+          if (!x) continue;
+          pts.push(x);
+          brierSum += (x.p - x.o) ** 2;
+          logLossSum += -(x.o * Math.log(x.p) + (1 - x.o) * Math.log(1 - x.p));
+          n++;
+        }
+        if (!pts.length) return { buckets: [], brierScore: null, logLoss: null, total: 0, binSize: 0 };
+        pts.sort((a, b) => a.p - b.p);
+
+        const binSize = Math.max(minBin, Math.ceil(pts.length / 8)); // alvo ~6–10 bins
+        const buckets = [];
+        for (let i = 0; i < pts.length; i += binSize) {
+          const slice = pts.slice(i, i + binSize);
+          if (!slice.length) continue;
+          const pAvg = slice.reduce((s, x) => s + x.p, 0) / slice.length;
+          const winRate = slice.reduce((s, x) => s + x.o, 0) / slice.length;
+          const lo = slice[0].p;
+          const hi = slice[slice.length - 1].p;
+          buckets.push({
+            bucket: `${Math.round(lo * 100)}-${Math.round(hi * 100)}%`,
+            predicted: parseFloat((pAvg * 100).toFixed(1)),
+            wins: slice.reduce((s, x) => s + x.o, 0),
+            total: slice.length,
+            actual: parseFloat((winRate * 100).toFixed(1))
+          });
+        }
+        return {
+          buckets,
+          brierScore: n > 0 ? (brierSum / n) : null,
+          logLoss: n > 0 ? (logLossSum / n) : null,
+          total: n,
+          binSize
+        };
       }
+
+      const all = buildAdaptiveBuckets(tips);
+      const live = buildAdaptiveBuckets(tips.filter(t => !!t.is_live));
+      const pre  = buildAdaptiveBuckets(tips.filter(t => !t.is_live));
+
+      const out =
+        phase === 'live' ? live :
+        phase === 'pre' ? pre :
+        all;
 
       sendJson(res, {
         sport,
-        buckets: buckets.filter(b => b.total > 0),
-        brierScore: n > 0 ? brierSum / n : null,
-        logLoss: n > 0 ? logLossSum / n : null,
-        total: n
+        phase,
+        limit,
+        minBin,
+        binSize: out.binSize,
+        buckets: out.buckets,
+        brierScore: out.brierScore,
+        logLoss: out.logLoss,
+        total: out.total,
+        byPhase: {
+          live: { buckets: live.buckets, brierScore: live.brierScore, logLoss: live.logLoss, total: live.total, binSize: live.binSize },
+          preGame: { buckets: pre.buckets, brierScore: pre.brierScore, logLoss: pre.logLoss, total: pre.total, binSize: pre.binSize },
+        }
       });
     } catch(e) { sendJson(res, { error: e.message }, 500); }
     return;

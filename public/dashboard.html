@@ -189,7 +189,7 @@ async function loadAll() {
   const tipsP = loadTips();
   const [roi, calibration, weights] = await Promise.all([
     apiFetch('/roi?sport=' + currentSport),
-    apiFetch('/calibration?sport=' + currentSport),
+    apiFetch('/calibration?sport=' + currentSport + '&phase=all'),
     apiFetch('/ml-weights')
   ]);
   renderCards(roi);
