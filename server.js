@@ -2952,7 +2952,29 @@ const server = http.createServer(async (req, res) => {
     try {
       const now = Date.now();
       const weekAhead = now + 7 * 24 * 60 * 60 * 1000;
-      const configured = (process.env.FOOTBALL_LEAGUES || 'soccer_brazil_serie_b,soccer_brazil_serie_c')
+      // Ligas "mercado não tão forte" (tier-2) por padrão.
+      // Override total via FOOTBALL_LEAGUES no Railway.
+      const defaultLeagues = [
+        'soccer_brazil_serie_b',
+        'soccer_brazil_serie_c',
+        // Inglaterra
+        'soccer_england_league1',
+        'soccer_england_league2',
+        // Alemanha / França / Itália / Espanha / Portugal (2ª/3ª divisões)
+        'soccer_germany_3_liga',
+        'soccer_france_ligue_2',
+        'soccer_italy_serie_b',
+        'soccer_spain_segunda_division',
+        'soccer_portugal_segunda_liga',
+        // Países com mercados menores
+        'soccer_netherlands_eerste_divisie',
+        'soccer_belgium_first_division_b',
+        'soccer_turkey_1_lig',
+        'soccer_sweden_superettan',
+        'soccer_norway_obos_ligaen',
+      ].join(',');
+
+      const configured = (process.env.FOOTBALL_LEAGUES || defaultLeagues)
         .split(',').map(s => s.trim()).filter(Boolean);
 
       const matches = [];
