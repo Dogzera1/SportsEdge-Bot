@@ -1406,6 +1406,8 @@ async function autoAnalyzeMatch(token, match) {
     log('INFO', 'AUTO', `Analisando: ${match.team1} vs ${match.team2} | sinais=${sigCount}/6 | evThreshold=${adaptiveEV}% | mlEdge=${mlResult.score.toFixed(1)}pp`);
 
     // Backoff IA: evita spam quando DeepSeek responde 429 (rate_limited)
+    const FALLBACK_MIN_ODDS = parseFloat(process.env.LOL_MIN_ODDS ?? '1.50');
+    const FALLBACK_MAX_ODDS = parseFloat(process.env.LOL_MAX_ODDS ?? '4.00');
     if (!global.__deepseekBackoffUntil) global.__deepseekBackoffUntil = 0;
     if (Date.now() < global.__deepseekBackoffUntil) {
       const direction = mlResult.direction;
@@ -1413,9 +1415,9 @@ async function autoAnalyzeMatch(token, match) {
       const pickOdd = direction === 't2' ? parseFloat(oddsToUse?.t2) : parseFloat(oddsToUse?.t1);
       const pickP = direction === 't2' ? mlResult.modelP2 : mlResult.modelP1;
       const evPct = (pickP && pickOdd) ? ((pickP * pickOdd - 1) * 100) : 0;
-      if (pickOdd >= 1.01 && evPct >= 5 && mlResult.score >= 5) {
+      if (pickOdd >= FALLBACK_MIN_ODDS && pickOdd <= FALLBACK_MAX_ODDS && evPct >= 5 && mlResult.score >= 5) {
         const stake = calcKellyWithP(pickP, pickOdd, 0.15);
-        log('WARN', 'AUTO', `IA em backoff; fallback modelo: ${pickTeam} EV=${evPct.toFixed(1)}% edge=${mlResult.score.toFixed(1)}pp`);
+        log('WARN', 'AUTO', `IA em backoff; fallback modelo: ${pickTeam} @ ${pickOdd} EV=${evPct.toFixed(1)}% edge=${mlResult.score.toFixed(1)}pp`);
         return {
           ok: true,
           tipMatch: [
@@ -1424,15 +1426,18 @@ async function autoAnalyzeMatch(token, match) {
             String(pickOdd),
             `+${evPct.toFixed(1)}%`,
             String(stake || '1u'),
-            'MÉDIA'
+            CONF.MEDIA
           ],
           tipTeam: pickTeam,
           tipOdd: pickOdd,
           tipEV: parseFloat(evPct.toFixed(1)),
           tipStake: String(stake || '1u'),
-          tipConf: 'MÉDIA',
+          tipConf: CONF.MEDIA,
           tipReason: 'Value detectado pelo modelo (fallback em backoff IA)'
         };
+      }
+      if (Number.isFinite(pickOdd)) {
+        log('INFO', 'AUTO', `Fallback backoff rejeitado: ${pickTeam} @ ${pickOdd} — fora do range [${FALLBACK_MIN_ODDS}, ${FALLBACK_MAX_ODDS}] ou EV/edge insuficiente`);
       }
       return null;
     }
@@ -1462,11 +1467,11 @@ async function autoAnalyzeMatch(token, match) {
       const pickOdd = direction === 't2' ? parseFloat(oddsToUse?.t2) : parseFloat(oddsToUse?.t1);
       const pickP = direction === 't2' ? mlResult.modelP2 : mlResult.modelP1;
       const evPct = (pickP && pickOdd) ? ((pickP * pickOdd - 1) * 100) : 0;
-      if (pickOdd >= 1.01 && evPct >= 5 && mlResult.score >= 5) {
+      if (pickOdd >= FALLBACK_MIN_ODDS && pickOdd <= FALLBACK_MAX_ODDS && evPct >= 5 && mlResult.score >= 5) {
         const stake = calcKellyWithP(pickP, pickOdd, 0.15); // ~1/6 Kelly
         const errShort = resp?.error ? String(resp.error).slice(0, 140) : '';
         const st = resp?.__status ? String(resp.__status) : '';
-        log('WARN', 'AUTO', `IA sem resposta; fallback modelo: ${pickTeam} EV=${evPct.toFixed(1)}% edge=${mlResult.score.toFixed(1)}pp${st ? ` | status=${st}` : ''}${errShort ? ` | err=${errShort}` : ''}`);
+        log('WARN', 'AUTO', `IA sem resposta; fallback modelo: ${pickTeam} @ ${pickOdd} EV=${evPct.toFixed(1)}% edge=${mlResult.score.toFixed(1)}pp${st ? ` | status=${st}` : ''}${errShort ? ` | err=${errShort}` : ''}`);
         return {
           ok: true,
           // Compatível com runAutoAnalysis(): precisa tipMatch estilo regex
@@ -1476,15 +1481,18 @@ async function autoAnalyzeMatch(token, match) {
             String(pickOdd),
             `+${evPct.toFixed(1)}%`,
             String(stake || '1u'),
-            'MÉDIA'
+            CONF.MEDIA
           ],
           tipTeam: pickTeam,
           tipOdd: pickOdd,
           tipEV: parseFloat(evPct.toFixed(1)),
           tipStake: String(stake || '1u'),
-          tipConf: 'MÉDIA',
+          tipConf: CONF.MEDIA,
           tipReason: 'Value detectado pelo modelo (fallback sem IA)'
         };
+      }
+      if (Number.isFinite(pickOdd)) {
+        log('INFO', 'AUTO', `Fallback sem IA rejeitado: ${pickTeam} @ ${pickOdd} — fora do range [${FALLBACK_MIN_ODDS}, ${FALLBACK_MAX_ODDS}] ou EV/edge insuficiente`);
       }
       const errShort = resp?.error ? String(resp.error).slice(0, 220) : '';
       const st = resp?.__status ? String(resp.__status) : '';
