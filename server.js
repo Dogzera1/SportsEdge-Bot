@@ -539,6 +539,69 @@ async function fetchEsportsOddsForTids(tids) {
   }
 }
 
+// ── Map odds (LoL por mapa) via OddsPapi fixture markets ──
+async function getMapMlOddsFromFixture(t1, t2, mapNumber) {
+  const nt1 = norm(t1), nt2 = norm(t2);
+  if (!nt1 || !nt2) return null;
+  const entry = Object.values(oddsCache).find(v => {
+    const cs = v.combinedSlug || '';
+    return cs.includes(nt1) && cs.includes(nt2) && v.fixtureId;
+  });
+  if (!entry?.fixtureId || !ODDSPAPI_KEY) return null;
+
+  const fixtureId = entry.fixtureId;
+  const url = `https://api.oddspapi.io/v4/odds-by-fixtures?bookmaker=1xbet&fixtureId=${fixtureId}&oddsFormat=decimal&apiKey=${ODDSPAPI_KEY}`;
+  const ttlMsRaw = parseInt(process.env.HTTP_CACHE_ODDSPAPI_FIXTURE_TTL_MS || '', 10);
+  const ttlMs = Number.isFinite(ttlMsRaw) ? ttlMsRaw : 0;
+  const r = await cachedHttpGet(url, { provider: 'oddspapi', ttlMs }).catch(() => null);
+  if (!r || r.status !== 200) return null;
+
+  const data = safeParse(r.body, null);
+  const allMarkets = Array.isArray(data) ? data : (Array.isArray(data?.data) ? data.data : []);
+  if (!allMarkets.length) return null;
+
+  const n = parseInt(mapNumber, 10);
+  if (!Number.isFinite(n) || n <= 0) return null;
+
+  // Filtra mercados relacionados a "map" e tenta achar o do mapa atual
+  const mapMarkets = allMarkets.filter(m => {
+    const name = (m.marketName || m.marketId || '').toString().toLowerCase();
+    if (!name.includes('map')) return false;
+    // match "map 1", "map1", etc
+    return name.includes(`map ${n}`) || name.includes(`map${n}`) || name.includes(`#${n}`);
+  });
+
+  // Se não achou explícito, tenta qualquer mercado "map" (fallback)
+  const candidates = mapMarkets.length ? mapMarkets : allMarkets.filter(m => ((m.marketName || '').toString().toLowerCase().includes('map')));
+  if (!candidates.length) return null;
+
+  // Heurística: preferir "winner" / "moneyline"
+  const scored = candidates.map(m => {
+    const name = (m.marketName || m.marketId || '').toString().toLowerCase();
+    const outcomes = Array.isArray(m.outcomes) ? m.outcomes : [];
+    const has2 = outcomes.length >= 2;
+    const score =
+      (name.includes('winner') ? 5 : 0) +
+      (name.includes('moneyline') || name.includes('ml') ? 3 : 0) +
+      (has2 ? 1 : 0);
+    return { m, name, outcomes, score };
+  }).sort((a, b) => b.score - a.score);
+
+  for (const cand of scored) {
+    const outcomes = cand.outcomes;
+    if (!outcomes || outcomes.length < 2) continue;
+    // Tenta mapear outcomes pelo nome do time (quando disponível)
+    const o1 = outcomes.find(o => norm(o.name || '') === nt1 || norm(o.name || '').includes(nt1) || nt1.includes(norm(o.name || '')));
+    const o2 = outcomes.find(o => norm(o.name || '') === nt2 || norm(o.name || '').includes(nt2) || nt2.includes(norm(o.name || '')));
+    const p1 = extractPrice(o1 || outcomes[0]);
+    const p2 = extractPrice(o2 || outcomes[1]);
+    if (!p1 || !p2) continue;
+    return { t1: String(p1), t2: String(p2), bookmaker: '1xBet', fixtureId, market: cand.name };
+  }
+
+  return null;
+}
+
 // ── Suporte a Apelidos/Abreviações de Times ──
 const LOL_ALIASES = {
   // LCK
@@ -1425,17 +1488,22 @@ const server = http.createServer(async (req, res) => {
     const t1 = parsed.query.team1 || parsed.query.p1 || '';
     const t2 = parsed.query.team2 || parsed.query.p2 || '';
     if (!t1 || !t2) { sendJson(res, { error: 'team1 e team2 obrigatórios' }, 400); return; }
+    const mapNumber = parsed.query.map ? parseInt(parsed.query.map, 10) : null;
     // force=1: bypassa TTL do cache (usado para partidas iminentes < 2h)
     if (parsed.query.force === '1') {
       // Se backoff ativo, nunca force (só aumenta spam e não atualiza mesmo)
       if (Date.now() < esportsBackoffUntil) {
-        const oNow = findOdds('esports', t1, t2);
+        const oNow = (mapNumber && mapNumber > 0)
+          ? await getMapMlOddsFromFixture(t1, t2, mapNumber)
+          : findOdds('esports', t1, t2);
         sendJson(res, oNow || { error: 'odds indisponíveis (backoff ativo)' });
         return;
       }
       // Evita spam/429: se já está buscando odds, não reseta TTL de novo
       if (esportsOddsFetching) {
-        const oNow = findOdds('esports', t1, t2);
+        const oNow = (mapNumber && mapNumber > 0)
+          ? await getMapMlOddsFromFixture(t1, t2, mapNumber)
+          : findOdds('esports', t1, t2);
         sendJson(res, oNow || { error: 'odds não encontradas (fetch em andamento)' });
         return;
       }
@@ -1454,7 +1522,9 @@ const server = http.createServer(async (req, res) => {
       log('INFO', 'ODDS', `Force refresh solicitado para ${t1} vs ${t2} (partida iminente)`);
     }
     await fetchOdds('esports');
-    const o = findOdds('esports', t1, t2);
+    const o = (mapNumber && mapNumber > 0)
+      ? await getMapMlOddsFromFixture(t1, t2, mapNumber)
+      : findOdds('esports', t1, t2);
     sendJson(res, o || { error: 'odds não encontradas' });
     return;
   }

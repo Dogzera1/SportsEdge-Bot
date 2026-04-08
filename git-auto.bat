@@ -14,12 +14,20 @@ git add -A
 if errorlevel 1 goto :err
 
 set "MSG="
-set /p MSG=Mensagem commit: 
-if "%MSG%"=="" set "MSG=update"
+set "MSGFILE=%TEMP%\git_commit_msg_%RANDOM%.txt"
+
+rem Lê mensagem via PowerShell e remove caracteres de controle (ex: Ctrl+A vira ^A)
+for /f "usebackq delims=" %%M in (`powershell -NoProfile -Command "$m = Read-Host 'Mensagem commit'; $m = ($m -replace '[\x00-\x1F]','').Trim(); if(-not $m){$m='update'}; $m"`) do (
+  set "MSG=%%M"
+)
+
+rem Escreve em arquivo (evita problemas com aspas/símbolos)
+powershell -NoProfile -Command "$m = '%MSG%'; $m | Out-File -FilePath '%MSGFILE%' -Encoding utf8"
 
 echo.
 echo === git commit ===
-git commit -m "%MSG%"
+git commit -F "%MSGFILE%"
+del "%MSGFILE%" >nul 2>&1
 if errorlevel 1 (
   echo.
   echo Commit falhou ou nada para commitar.

@@ -445,7 +445,13 @@ async function runAutoAnalysis() {
       log('INFO', 'AUTO', `LoL: ${lolRaw?.length||0} partidas (${allLive.filter(m=>m.status==='live').length} live, ${allLive.filter(m=>m.status==='draft').length} draft, ${lolLive.length-allLive.length} dupl. removidas) | inscritos=${subscribedUsers.size}`);
 
       for (const match of allLive) {
-        const matchKey = `${match.game}_${match.id}`;
+        // Ao vivo: dedup por mapa atual (uma tip por mapa, não por série inteira)
+        const liveIds = (match.status === 'live')
+          ? await serverGet(`/live-gameids?matchId=${encodeURIComponent(String(match.id))}`).catch(() => [])
+          : [];
+        const currentMap = Array.isArray(liveIds) ? (liveIds.find(x => x.hasLiveData)?.gameNumber || liveIds[0]?.gameNumber) : null;
+        const mapSuffix = (match.status === 'live' && currentMap) ? `_MAP${currentMap}` : '';
+        const matchKey = `${match.game}_${match.id}${mapSuffix}`;
         const prev = analyzedMatches.get(matchKey);
         if (prev?.tipSent) continue; // uma tip por partida — não repetir
         // Matches sem edge recente aguardam 2× mais antes de chamar a IA novamente
@@ -486,8 +492,11 @@ async function runAutoAnalysis() {
             : 'Fair odds (de-juice)';
           const modelPPick = modelPForKelly;
 
+          // Ao vivo: registrar por mapa para não sobrescrever série inteira
+          const liveMapa = result.liveGameNumber;
+          const mapTag = (result.hasLiveStats && liveMapa) ? `_MAP${liveMapa}` : '';
           const rec = await serverPost('/record-tip', {
-            matchId: canonicalMatchId('esports', match.id), eventName: match.league,
+            matchId: canonicalMatchId('esports', String(match.id) + mapTag), eventName: match.league,
             p1: match.team1, p2: match.team2, tipParticipant: tipTeam,
             odds: tipOdd, ev: tipEV, stake: tipStakeAdj,
             confidence: tipConf, isLive: result.hasLiveStats,
@@ -510,8 +519,7 @@ async function runAutoAnalysis() {
           const kellyLabel = tipConf === 'ALTA' ? '¼ Kelly' : tipConf === 'BAIXA' ? '1/10 Kelly' : '⅙ Kelly';
           const confEmoji = { ALTA: '🟢', MÉDIA: '🟡', BAIXA: '🔵' }[tipConf] || '🟡';
 
-          // Identifica se é tip ao vivo num mapa específico ou análise de série/draft
-          const liveMapa = result.liveGameNumber;
+          // Identifica se é tip ao vivo num mapa específico
           const mapaLabel = liveMapa ? `🗺️ *Mapa ${liveMapa} ao vivo*` : null;
           // Linha de contexto da série: "T1 1-0 Gen.G" + formato se disponível
           const serieScore = `*${match.team1}* ${match.score1}-${match.score2} *${match.team2}*`;
@@ -548,8 +556,10 @@ async function runAutoAnalysis() {
           analyzedMatches.set(matchKey, { ts: now, tipSent: true });
           log('INFO', 'AUTO-TIP', `Esports: ${tipTeam} @ ${tipOdd} (odds ${hasRealOdds ? 'reais' : 'estimadas'})`);
 
-          // ── Handicap tip (se houver edge) ──
+          // Ao vivo: apenas ML do mapa (não enviar outros mercados após live)
+          // ── Handicap tip (desativado em live) ──
           try {
+            if (result.hasLiveStats) throw new Error('skip_live_markets');
             const hOdds = await serverGet(`/handicap-odds?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}`).catch(() => null);
             if (hOdds?.markets?.length) {
               const { calcHandicapScore } = require('./lib/ml');
@@ -595,7 +605,7 @@ async function runAutoAnalysis() {
               }
             }
           } catch(hErr) {
-            log('WARN', 'AUTO', `Handicap check falhou: ${hErr.message}`);
+            if (hErr.message !== 'skip_live_markets') log('WARN', 'AUTO', `Handicap check falhou: ${hErr.message}`);
           }
         }
         await new Promise(r => setTimeout(r, 2000));
@@ -1344,17 +1354,24 @@ async function autoAnalyzeMatch(token, match) {
     const hasLiveStats   = gamesContext.includes('AO VIVO');
     const enrichSection = buildEnrichmentSection(match, enrich);
 
+    // Ao vivo: usar odds do mapa atual (se mercado disponível)
+    let oddsToUse = o;
+    if (hasLiveStats && liveGameNumber) {
+      const mo = await serverGet(`/odds?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}&map=${encodeURIComponent(String(liveGameNumber))}&force=1`).catch(() => null);
+      if (mo?.t1 && mo?.t2) oddsToUse = mo;
+    }
+
     // ── Layer 1: Pré-filtro ML ──
     // Retorna { pass, direction, score, t1Edge, t2Edge }
     const mlPrefilterOn = (process.env.LOL_ML_PREFILTER ?? 'true') !== 'false';
-    const mlResult = esportsPreFilter(match, o, enrich, hasLiveStats, gamesContext, compScore);
+    const mlResult = esportsPreFilter(match, oddsToUse, enrich, hasLiveStats, gamesContext, compScore);
     if (mlPrefilterOn && !mlResult.pass) {
       log('INFO', 'AUTO', `Pré-filtro ML: edge insuficiente (${mlResult.score.toFixed(1)}pp) para ${match.team1} vs ${match.team2}. Pulando IA.`);
       return null;
     }
 
     const newsSectionEsports = await fetchMatchNews('esports', match.team1, match.team2).catch(() => '');
-    const { text: prompt, evThreshold: adaptiveEV, sigCount } = buildEsportsPrompt(match, game, gamesContext, o, enrichSection, mlResult, newsSectionEsports);
+    const { text: prompt, evThreshold: adaptiveEV, sigCount } = buildEsportsPrompt(match, game, gamesContext, oddsToUse, enrichSection, mlResult, newsSectionEsports);
     log('INFO', 'AUTO', `Analisando: ${match.team1} vs ${match.team2} | sinais=${sigCount}/6 | evThreshold=${adaptiveEV}% | mlEdge=${mlResult.score.toFixed(1)}pp`);
 
     const resp = await serverPost('/claude', {
@@ -1370,7 +1387,7 @@ async function autoAnalyzeMatch(token, match) {
     }
 
     const tipResult = text.match(/TIP_ML:\s*([^@]+?)\s*@\s*([^|\]]+?)\s*\|EV:\s*([^|]+?)\s*\|STAKE:\s*([^|\]]+?)(?:\s*\|CONF:\s*(\w+))?(?:\]|$)/);
-    const hasRealOdds = !!(o?.t1 && parseFloat(o.t1) > 1);
+    const hasRealOdds = !!(oddsToUse?.t1 && parseFloat(oddsToUse.t1) > 1);
 
     const extractTipReason = (t) => {
       if (!t) return null;
@@ -1497,7 +1514,7 @@ async function autoAnalyzeMatch(token, match) {
       hasLiveStats,
       liveGameNumber,
       match,
-      o,
+      o: oddsToUse,
       mlScore: mlResult.score,
       modelP1: mlResult.modelP1,
       modelP2: mlResult.modelP2,
