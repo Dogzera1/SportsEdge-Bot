@@ -2354,47 +2354,8 @@ const server = http.createServer(async (req, res) => {
 
   // ── Resultado Futebol (settlement via API-Football) ──
   if (p === '/football-result') {
-    const fixtureId = parsed.query.fixtureId || '';
-    if (!fixtureId) { sendJson(res, { resolved: false, error: 'fixtureId obrigatório' }, 400); return; }
-    try {
-      const FOOTBALL_API_KEY = process.env.API_SPORTS_KEY || process.env.APIFOOTBALL_KEY || '';
-      if (!FOOTBALL_API_KEY) { sendJson(res, { resolved: false, error: 'API_SPORTS_KEY não configurada' }); return; }
-
-      const r = await httpGet(`https://v3.football.api-sports.io/fixtures?id=${fixtureId}`, {
-        'x-rapidapi-key': FOOTBALL_API_KEY,
-        'x-rapidapi-host': 'v3.football.api-sports.io'
-      });
-      const data = safeParse(r.body, {});
-      const fixture = data?.response?.[0];
-      if (!fixture) { sendJson(res, { resolved: false }); return; }
-
-      const statusShort = fixture.fixture?.status?.short;
-      const FINISHED_STATUSES = ['FT', 'AET', 'PEN'];
-      if (!FINISHED_STATUSES.includes(statusShort)) {
-        sendJson(res, { resolved: false, status: statusShort }); return;
-      }
-
-      const homeGoals = fixture.goals?.home;
-      const awayGoals = fixture.goals?.away;
-      const homeName  = fixture.teams?.home?.name || '';
-      const awayName  = fixture.teams?.away?.name || '';
-
-      let winner;
-      if (homeGoals > awayGoals)       winner = homeName;
-      else if (awayGoals > homeGoals)  winner = awayName;
-      else                             winner = 'Draw';
-
-      const score = `${homeGoals}-${awayGoals}`;
-      stmts.upsertMatchResult.run(
-        String(fixtureId), 'football', homeName, awayName, winner, score,
-        fixture.league?.name || ''
-      );
-      // Atualiza Elo 1X2
-      try { updateEloMatch(homeName, awayName, winner); } catch(_) {}
-      sendJson(res, { fixtureId, winner, score, homeName, awayName, resolved: true });
-    } catch(e) {
-      sendJson(res, { resolved: false, error: e.message });
-    }
+    // API-Football removida
+    sendJson(res, { resolved: false, disabled: true, error: 'football-result desativado (API-Football removida)' }, 410);
     return;
   }
 

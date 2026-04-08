@@ -878,12 +878,8 @@ async function settleCompletedTips() {
         try {
           let endpoint;
           if (sport === 'football') {
-            // IDs de futebol são The Odds API event IDs; usamos API-Football via fixtureId guardado no match_id
-            // Só tenta se o match_id parecer numérico (fixture ID da API-Football)
-            // ou prefixado com "fb_"
-            const fbId = String(tip.match_id).replace(/^fb_/, '');
-            if (!/^\d+$/.test(fbId)) continue; // não é fixture ID numérico, pula
-            endpoint = `/football-result?fixtureId=${encodeURIComponent(fbId)}`;
+            // Settlement futebol via API-Football removido
+            continue;
           } else {
             const isPanda = String(tip.match_id).startsWith('ps_');
             endpoint = isPanda
@@ -3918,7 +3914,6 @@ async function pollFootball() {
   const token = fbConfig.token;
 
   const { calcFootballScore } = require('./lib/football-ml');
-  const footballApi = require('./lib/football-api');
   const footballData = require('./lib/football-data');
 
   const FOOTBALL_INTERVAL = 6 * 60 * 60 * 1000;
@@ -3937,25 +3932,8 @@ async function pollFootball() {
       if (!Array.isArray(matches) || !matches.length) {
         setTimeout(loop, 30 * 60 * 1000); return;
       }
-      const hasFootballApi = !!(process.env.API_SPORTS_KEY || process.env.APIFOOTBALL_KEY);
       const hasFootballDataOrg = !!(process.env.FOOTBALL_DATA_TOKEN || process.env.FOOTBALL_DATA_KEY);
-      const apiFootballSuspended = !!(hasFootballApi && typeof footballApi.isSuspended === 'function' && footballApi.isSuspended());
-      log('INFO', 'AUTO-FOOTBALL', `${matches.length} partidas futebol com odds (${hasFootballApi ? 'API-Football' : hasFootballDataOrg ? 'football-data.org' : 'odds-only'})`);
-
-      // Batch cache para mapear times→fixtureId sem 1 chamada por partida
-      const fixturesBatch = (hasFootballApi && !apiFootballSuspended)
-        ? await footballApi.getUpcomingFixturesCached().catch(() => [])
-        : [];
-
-      // Cache de standings por liga+season
-      const standingsCache = new Map(); // key `${leagueId}_${season}` -> map
-      const getStandingsCached = async (leagueId, season) => {
-        const k = `${leagueId}_${season}`;
-        if (standingsCache.has(k)) return standingsCache.get(k);
-        const m = await footballApi.getStandings(leagueId, season).catch(() => ({}));
-        standingsCache.set(k, m || {});
-        return m || {};
-      };
+      log('INFO', 'AUTO-FOOTBALL', `${matches.length} partidas futebol com odds (${hasFootballDataOrg ? 'football-data.org' : 'odds-only'})`);
 
       const now = Date.now();
       for (const match of matches) {
@@ -3993,37 +3971,13 @@ async function pollFootball() {
           await new Promise(r => setTimeout(r, 500)); continue;
         }
 
-        // Enrichment via API-Football (se chave configurada)
+        // Enrichment via football-data.org (se token disponível)
         let fixtureInfo = null;
         let homeFormData = null, awayFormData = null;
         let h2hData = { results: [] };
         let standingsData = {};
         let homeFatigue = 7, awayFatigue = 7;
 
-        if (hasFootballApi && !apiFootballSuspended) {
-          fixtureInfo =
-            footballApi.findInBatch(fixturesBatch, match.team1, match.team2)
-            || await footballApi.findFixtureWithTeams(match.team1, match.team2, match.time).catch(() => null);
-
-          if (fixtureInfo?.fixtureId) {
-            const season = fixtureInfo.season || new Date(match.time || Date.now()).getFullYear();
-            standingsData = await getStandingsCached(fixtureInfo.leagueId, season);
-
-            const [hf, af, hh, fatH, fatA] = await Promise.all([
-              footballApi.getTeamForm(fixtureInfo.homeId, fixtureInfo.leagueId, season, 10).catch(() => null),
-              footballApi.getTeamForm(fixtureInfo.awayId, fixtureInfo.leagueId, season, 10).catch(() => null),
-              footballApi.getH2H(fixtureInfo.homeId, fixtureInfo.awayId).catch(() => ({ results: [] })),
-              footballApi.getDaysSinceLastMatch(fixtureInfo.homeId).catch(() => 7),
-              footballApi.getDaysSinceLastMatch(fixtureInfo.awayId).catch(() => 7),
-            ]);
-
-            homeFormData = hf;
-            awayFormData = af;
-            h2hData = hh || { results: [] };
-            homeFatigue = fatH ?? 7;
-            awayFatigue = fatA ?? 7;
-          }
-        }
         // Fallback: football-data.org (temporadas atuais, dependendo do plano/competição)
         if (!fixtureInfo && (process.env.FOOTBALL_DATA_TOKEN || process.env.FOOTBALL_DATA_KEY)) {
           try {
@@ -4144,7 +4098,7 @@ async function pollFootball() {
             ? h2hData.results.slice(0, 5).map(r => `${r.home} ${r.homeGoals}-${r.awayGoals} ${r.away} (${r.date?.slice(0,10) || '?'})`).join('\n  ')
             : 'Sem H2H recente';
           contextBlock = `
-DADOS QUANTITATIVOS (API-Football):
+DADOS QUANTITATIVOS (football-data.org / DB):
 ${match.team1} (casa):
   Forma últimos 5: ${fmtForm(homeFormData.form)} | Em casa: ${fmtForm(homeFormData.homeForm)}
   Gols/jogo: ${homeFormData.goalsFor?.toFixed(2) ?? 'N/D'} marcados | ${homeFormData.goalsAgainst?.toFixed(2) ?? 'N/D'} sofridos
@@ -4263,7 +4217,8 @@ Máximo 200 palavras.`;
           (fixtureInfo && homeFormData ? `📊 Forma: ${fmtForm(homeFormData.form)} vs ${fmtForm(awayFormData?.form)}\n` : '') +
           `\n⚠️ _Aposte com responsabilidade._`;
 
-        const recordMatchId = fixtureInfo ? `fb_${fixtureInfo.fixtureId}` : String(match.id);
+        // API-Football removida: manter match_id como eventId do provedor de odds
+        const recordMatchId = String(match.id);
 
         const desiredUnitsFb = parseFloat(String(tipStake)) || 0;
         const riskAdjFb = await applyGlobalRisk('football', desiredUnitsFb);
