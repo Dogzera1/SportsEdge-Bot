@@ -2787,51 +2787,21 @@ async function poll(token, sport) {
   loop();
 }
 
-// ── ESPN Tennis data (rankings + torneio atual) ──
+// ── ESPN Tennis data (via lib/tennis-data) ──
+const tennisData = require('./lib/tennis-data');
+
 let espnTennisCache = { atp: [], wta: [], ts: 0 };
 const ESPN_TENNIS_TTL = 3 * 60 * 60 * 1000; // 3h
-
-async function espnGet(path) {
-  const r = await new Promise((resolve, reject) => {
-    const req = https.request({
-      hostname: 'site.api.espn.com',
-      path,
-      method: 'GET',
-      headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json' }
-    }, res => {
-      let d = '';
-      res.on('data', c => d += c);
-      res.on('end', () => resolve({ status: res.statusCode, body: d }));
-    });
-    req.on('error', reject);
-    req.setTimeout(10000, () => req.destroy(new Error('ESPN timeout')));
-    req.end();
-  });
-  return r;
-}
 
 async function fetchEspnTennisRankings() {
   if (Date.now() - espnTennisCache.ts < ESPN_TENNIS_TTL) return espnTennisCache;
   try {
-    const [atpR, wtaR] = await Promise.all([
-      espnGet('/apis/site/v2/sports/tennis/atp/rankings').catch(() => ({ status: 500, body: '{}' })),
-      espnGet('/apis/site/v2/sports/tennis/wta/rankings').catch(() => ({ status: 500, body: '{}' }))
+    const [atp, wta] = await Promise.all([
+      tennisData.getRankings('atp', 250).catch(() => []),
+      tennisData.getRankings('wta', 250).catch(() => [])
     ]);
-    const parseRanks = body => {
-      const j = safeParse(body, {});
-      return (j.rankings?.[0]?.ranks || []).map(r => ({
-        rank: r.current,
-        points: r.points,
-        name: r.athlete?.displayName || '',
-        id: r.athlete?.id || ''
-      }));
-    };
-    espnTennisCache = {
-      atp: parseRanks(atpR.body),
-      wta: parseRanks(wtaR.body),
-      ts: Date.now()
-    };
-    log('INFO', 'ESPN-TENNIS', `Rankings: ATP ${espnTennisCache.atp.length} | WTA ${espnTennisCache.wta.length}`);
+    espnTennisCache = { atp, wta, ts: Date.now() };
+    log('INFO', 'ESPN-TENNIS', `Rankings: ATP ${atp.length} | WTA ${wta.length}`);
   } catch(e) {
     log('WARN', 'ESPN-TENNIS', `Falha rankings: ${e.message}`);
   }
@@ -2839,18 +2809,14 @@ async function fetchEspnTennisRankings() {
 }
 
 async function fetchEspnTennisEvent(tour) {
-  // Busca partidas agendadas e resultados recentes do torneio atual
   try {
-    const league = tour === 'WTA' ? 'wta' : 'atp';
-    const r = await espnGet(`/apis/site/v2/sports/tennis/${league}/scoreboard`).catch(() => ({ status: 500, body: '{}' }));
-    if (r.status !== 200) return null;
-    const j = safeParse(r.body, {});
-    const ev = j.events?.[0];
+    const slug = tour === 'WTA' ? 'wta' : 'atp';
+    const j = await tennisData.getScoreboard(slug).catch(() => null);
+    const ev = j?.events?.[0];
     if (!ev) return null;
 
-    const recentResults = []; // últimos resultados do torneio
-    const scheduledMatches = []; // próximas do torneio
-
+    const recentResults = [];
+    const scheduledMatches = [];
     for (const grp of (ev.groupings || [])) {
       for (const comp of (grp.competitions || [])) {
         const state = comp.status?.type?.state;
@@ -2873,10 +2839,10 @@ async function fetchEspnTennisEvent(tour) {
       surface: ev.name?.toLowerCase().includes('monte') || ev.name?.toLowerCase().includes('clay') ? 'saibro'
         : ev.name?.toLowerCase().includes('wimbledon') || ev.name?.toLowerCase().includes('halle') || ev.name?.toLowerCase().includes('queen') ? 'grama'
         : 'dura',
-      recentResults: recentResults.slice(-20), // últimos 20 resultados
+      recentResults: recentResults.slice(-20),
       scheduledMatches
     };
-  } catch(e) {
+  } catch(_) {
     return null;
   }
 }

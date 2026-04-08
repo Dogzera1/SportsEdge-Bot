@@ -194,6 +194,76 @@ async function importFootballMatchesCsvOnce() {
   }
 }
 
+async function importTennisMatchesCsvOnce() {
+  const enabled = (process.env.TENNIS_DATASET_IMPORT ?? 'true') !== 'false';
+  if (!enabled) return;
+  const year = parseInt(process.env.TENNIS_DATASET_YEAR || '2024', 10) || 2024;
+  const urlCsv = process.env.TENNIS_MATCHES_CSV_URL
+    || `https://raw.githubusercontent.com/JeffSackmann/tennis_atp/master/atp_matches_${year}.csv`;
+  const key = `tennis_matches_csv:${urlCsv}`;
+  const exists = stmts.getDatasetImport.get(key);
+  if (exists) return;
+
+  try {
+    const r = await cachedHttpGet(urlCsv, { provider: 'tennis_dataset', ttlMs: 24 * 60 * 60 * 1000 }).catch(() => null);
+    if (!r || r.status !== 200) { log('WARN', 'IMPORT', `CSV tennis: HTTP ${r?.status || 'fail'}`); return; }
+    const rows = parseCsvRows(String(r.body || ''));
+    if (!rows.length || rows.length < 2) { log('WARN', 'IMPORT', 'CSV tennis: vazio'); return; }
+
+    const headers = rows[0];
+    const c = {
+      tourney_id: idxOf(headers, 'tourney_id'),
+      tourney_name: idxOf(headers, 'tourney_name'),
+      surface: idxOf(headers, 'surface'),
+      tourney_level: idxOf(headers, 'tourney_level'),
+      tourney_date: idxOf(headers, 'tourney_date'),
+      match_num: idxOf(headers, 'match_num'),
+      winner_name: idxOf(headers, 'winner_name'),
+      loser_name: idxOf(headers, 'loser_name'),
+      score: idxOf(headers, 'score'),
+    };
+    if (c.winner_name < 0 || c.loser_name < 0 || c.tourney_date < 0) {
+      log('WARN', 'IMPORT', `CSV tennis: colunas ausentes (headers=${headers.slice(0, 30).join(',')})`);
+      return;
+    }
+
+    let imported = 0;
+    const tx = db.transaction(() => {
+      for (let i = 1; i < rows.length; i++) {
+        const row = rows[i];
+        const w = row[c.winner_name];
+        const l = row[c.loser_name];
+        const d = row[c.tourney_date];
+        if (!w || !l || !d) continue;
+        const score = (c.score >= 0 ? String(row[c.score] || '').trim() : '');
+        const tourneyName = (c.tourney_name >= 0 ? String(row[c.tourney_name] || '').trim() : '') || 'ATP';
+        const surface = (c.surface >= 0 ? String(row[c.surface] || '').trim() : '') || '';
+        const level = (c.tourney_level >= 0 ? String(row[c.tourney_level] || '').trim() : '') || '';
+        const league = `ATP ${tourneyName}${surface ? ` (${surface})` : ''}${level ? ` [${level}]` : ''}`;
+
+        const tid = (c.tourney_id >= 0 ? String(row[c.tourney_id] || '').trim() : '');
+        const mnum = (c.match_num >= 0 ? String(row[c.match_num] || '').trim() : '');
+        const matchIdRaw = [tid || `Y${year}`, d, mnum || String(i)].filter(Boolean).join('_');
+        const matchId = `ta_${matchIdRaw}`.slice(0, 128);
+
+        // tourney_date = YYYYMMDD
+        const resolvedAt = (String(d).length === 8)
+          ? `${String(d).slice(0,4)}-${String(d).slice(4,6)}-${String(d).slice(6,8)} 00:00:00`
+          : `${String(d).slice(0,10)} 00:00:00`;
+
+        stmts.upsertMatchResultWithDate.run(matchId, 'tennis', String(w), String(l), String(w), score, league, resolvedAt);
+        imported++;
+      }
+    });
+    tx();
+
+    stmts.upsertDatasetImport.run(key, 'JeffSackmann/tennis_atp', imported);
+    log('INFO', 'IMPORT', `CSV tennis importado: ${imported} jogos (key=${key})`);
+  } catch (e) {
+    log('WARN', 'IMPORT', `CSV tennis import falhou: ${e.message}`);
+  }
+}
+
 // ── Import opcional: dados gol.gg (CSV) ──
 // Usa CSV gerado por scrapers externos (ex: PandaTobi/League-of-Legends-ESports-Data)
 // Objetivo: seed/merge em pro_champ_stats quando sync PandaScore estiver vazio
@@ -3446,6 +3516,8 @@ server.listen(PORT, '0.0.0.0', () => {
 
   // Import automático de dataset futebol (CSV 2024/2025) para alimentar match_results (form/H2H)
   importFootballMatchesCsvOnce().catch(() => {});
+  // Import automático de dataset tênis (ATP) para alimentar match_results (form/H2H)
+  importTennisMatchesCsvOnce().catch(() => {});
 
   // Inicialização e Loop de Cache de Odds (OddsPapi 1xBet)
   (async () => {
