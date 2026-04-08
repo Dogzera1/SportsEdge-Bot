@@ -285,11 +285,13 @@ function getTipsMenu(sport) {
 // ── Hydrate tip maps from DB on startup (prevents re-sending after restart) ──
 async function loadExistingTips() {
   try {
+    // Importante: usar histórico (inclui settled) para evitar reenvio após restart.
+    // Se usar apenas unsettled, tips já liquidadas voltam a ser analisadas/enviadas em jogos que reaparecem nas APIs.
     const [esportsTips, mmaTips, tennisTips, footballTips] = await Promise.all([
-      serverGet('/unsettled-tips', 'esports').catch(() => []),
-      serverGet('/unsettled-tips?days=30', 'mma').catch(() => []),
-      serverGet('/unsettled-tips?days=30', 'tennis').catch(() => []),
-      serverGet('/unsettled-tips?days=30', 'football').catch(() => [])
+      serverGet('/tips-history?limit=400', 'esports').catch(() => []),
+      serverGet('/tips-history?limit=400', 'mma').catch(() => []),
+      serverGet('/tips-history?limit=400', 'tennis').catch(() => []),
+      serverGet('/tips-history?limit=400', 'football').catch(() => [])
     ]);
     if (Array.isArray(esportsTips)) {
       for (const tip of esportsTips) {
