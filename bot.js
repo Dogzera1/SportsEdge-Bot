@@ -1397,11 +1397,47 @@ async function autoAnalyzeMatch(token, match) {
     const { text: prompt, evThreshold: adaptiveEV, sigCount } = buildEsportsPrompt(match, game, gamesContext, oddsToUse, enrichSection, mlResult, newsSectionEsports);
     log('INFO', 'AUTO', `Analisando: ${match.team1} vs ${match.team2} | sinais=${sigCount}/6 | evThreshold=${adaptiveEV}% | mlEdge=${mlResult.score.toFixed(1)}pp`);
 
+    // Backoff IA: evita spam quando DeepSeek responde 429 (rate_limited)
+    if (!global.__deepseekBackoffUntil) global.__deepseekBackoffUntil = 0;
+    if (Date.now() < global.__deepseekBackoffUntil) {
+      const direction = mlResult.direction;
+      const pickTeam = direction === 't2' ? match.team2 : match.team1;
+      const pickOdd = direction === 't2' ? parseFloat(oddsToUse?.t2) : parseFloat(oddsToUse?.t1);
+      const pickP = direction === 't2' ? mlResult.modelP2 : mlResult.modelP1;
+      const evPct = (pickP && pickOdd) ? ((pickP * pickOdd - 1) * 100) : 0;
+      if (pickOdd >= 1.01 && evPct >= 5 && mlResult.score >= 5) {
+        const stake = calcKellyWithP(pickP, pickOdd, 0.15);
+        log('WARN', 'AUTO', `IA em backoff; fallback modelo: ${pickTeam} EV=${evPct.toFixed(1)}% edge=${mlResult.score.toFixed(1)}pp`);
+        return {
+          ok: true,
+          tipMatch: [
+            `TIP_ML: ${pickTeam} @ ${pickOdd} |EV: +${evPct.toFixed(1)}% |STAKE: ${String(stake || '1u')} |CONF: MÉDIA`,
+            String(pickTeam),
+            String(pickOdd),
+            `+${evPct.toFixed(1)}%`,
+            String(stake || '1u'),
+            'MÉDIA'
+          ],
+          tipTeam: pickTeam,
+          tipOdd: pickOdd,
+          tipEV: parseFloat(evPct.toFixed(1)),
+          tipStake: String(stake || '1u'),
+          tipConf: 'MÉDIA',
+          tipReason: 'Value detectado pelo modelo (fallback em backoff IA)'
+        };
+      }
+      return null;
+    }
+
     const resp = await serverPost('/claude', {
       model: 'deepseek-chat',
       max_tokens: 600,
       messages: [{ role: 'user', content: prompt }]
     });
+    if (resp?.__status === 429 || String(resp?.error || '').toLowerCase().includes('rate')) {
+      const ttl = Math.max(60 * 1000, parseInt(process.env.DEEPSEEK_BACKOFF_MS || '180000', 10) || 180000);
+      global.__deepseekBackoffUntil = Date.now() + ttl;
+    }
 
     const text = resp.content?.map(b => b.text || '').join('');
     if (!text) {

@@ -1383,16 +1383,23 @@ async function getPandaScoreLolMatches() {
   try {
     const headers = { 'Authorization': `Bearer ${PANDASCORE_TOKEN}` };
     const [runningRaw, upcomingRaw] = await Promise.all([
-      httpGet('https://api.pandascore.co/lol/matches/running?per_page=20', headers).catch(() => ({ body: '[]' })),
-      httpGet('https://api.pandascore.co/lol/matches/upcoming?per_page=30&sort=begin_at', headers).catch(() => ({ body: '[]' }))
+      httpGet('https://api.pandascore.co/lol/matches/running?per_page=20', headers).catch(() => ({ status: 0, body: '[]' })),
+      httpGet('https://api.pandascore.co/lol/matches/upcoming?per_page=30&sort=begin_at', headers).catch(() => ({ status: 0, body: '[]' }))
     ]);
 
-    function psMatchList(body, fallbackLabel) {
+    function psMatchList(raw, fallbackLabel) {
+      const status = raw?.status;
+      const body = raw?.body;
       const p = safeParse(body, []);
       if (Array.isArray(p)) return p;
 
       if (p && typeof p === 'object') {
         const keys = Object.keys(p);
+        const errMsg = (p?.error && (p.error.message || p.error)) || p?.message || '';
+        if (keys.includes('error') || errMsg) {
+          log('WARN', 'PANDASCORE', `${fallbackLabel}: erro status=${status || '-'} msg=${String(errMsg || '').slice(0, 180) || '-'} body=${String(body || '').slice(0, 220)}`);
+          return [];
+        }
 
         const direct =
           (Array.isArray(p.data) && p.data) ||
@@ -1421,8 +1428,8 @@ async function getPandaScoreLolMatches() {
 
       return [];
     }
-    const running = psMatchList(runningRaw.body, 'running');
-    const upcoming = psMatchList(upcomingRaw.body, 'upcoming');
+    const running = psMatchList(runningRaw, 'running');
+    const upcoming = psMatchList(upcomingRaw, 'upcoming');
 
     function mapPS(m, status) {
       const t1 = m.opponents?.[0]?.opponent, t2 = m.opponents?.[1]?.opponent;
