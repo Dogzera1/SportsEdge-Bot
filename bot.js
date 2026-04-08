@@ -1090,22 +1090,27 @@ async function checkLiveNotifications() {
     const allLive = Array.isArray(lolList) ? lolList.filter(m => m.status === 'live') : [];
 
     for (const match of allLive) {
-      // Ignora jogos sem odds na The Odds API (reduz ruído desnecessário pro usuário)
-      if (!match.odds?.t1 || parseFloat(match.odds.t1) <= 1.0) continue;
+      // Ao vivo: notificar apenas se tivermos odds reais do MAPA atual (mercado aberto)
+      const liveIds = await serverGet(`/live-gameids?matchId=${encodeURIComponent(String(match.id))}`).catch(() => []);
+      const currentMap = Array.isArray(liveIds) ? (liveIds.find(x => x.hasLiveData)?.gameNumber || liveIds[0]?.gameNumber) : null;
+      if (!currentMap) continue;
+      const mapOdds = await serverGet(`/odds?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}&map=${encodeURIComponent(String(currentMap))}&force=1`).catch(() => null);
+      if (!mapOdds?.t1 || parseFloat(mapOdds.t1) <= 1.0) continue;
 
-      const matchKey = `${match.game}_${match.id}`;
+      const matchKey = `${match.game}_${match.id}_MAP${currentMap}`;
       if (!notifiedMatches.has(matchKey)) {
         notifiedMatches.set(matchKey, Date.now());
         for (const [userId, prefs] of subscribedUsers) {
           if (!prefs.has('esports')) continue;
           try {
-            const o = match.odds;
+            const o = mapOdds;
             const gameIcon = '🎮';
-            const txt = `${gameIcon} 🔴 *PARTIDA AO VIVO (COM MERCADO ABERTO)!*\n\n` +
+            const txt = `${gameIcon} 🔴 *PARTIDA AO VIVO (COM MERCADO ABERTO)!*\n` +
+              `🗺️ *Mapa ${currentMap} (ML do mapa)*\n\n` +
               `*${match.team1}* ${match.score1}-${match.score2} *${match.team2}*\n` +
               `📋 ${match.league}\n` +
               `💰 ${match.team1}: ${o.t1} | ${match.team2}: ${o.t2}\n\n` +
-              `_O bot efetuará a análise IA (se houver +EV) em breve, ou você pode requisitá-la agora._`;
+              `_A partir de agora: apenas ML do mapa atual. Odds acima são do mapa._`;
             
             await sendDM(token, userId, txt);
           } catch(e) {
