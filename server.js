@@ -3180,6 +3180,7 @@ const server = http.createServer(async (req, res) => {
       }
     }
     sendJson(res, { wins, draws, losses, winRate: Math.round((wins / rows.length) * 100), streak: `${streakCount}${streak}`, recent });
+    return;
   }
 
   if (p === '/h2h') {
