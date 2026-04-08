@@ -1181,6 +1181,7 @@ async function collectGameContext(game, matchId) {
   let gamesContext = '';
   let compScore = null; // pp advantage for t1 (blue) based on pro champion WRs
   let liveGameNumber = null; // número do mapa atualmente ao vivo (Game 1, 2, 3...)
+  let hasLiveStats = false;
   if (game === 'lol') {
     const isPandaScore = String(matchId).startsWith('ps_');
 
@@ -1193,7 +1194,8 @@ async function collectGameContext(game, matchId) {
           const g = (v) => v >= 1000 ? (v/1000).toFixed(1)+'k' : String(v||0);
           const gameLabel = gd.gameNumber ? `GAME ${gd.gameNumber}` : 'GAME';
           const statusLabel = gd.gameStatus === 'running' ? 'AO VIVO' : gd.gameStatus || 'INFO';
-          if (gd.gameStatus === 'running' && gd.gameNumber) liveGameNumber = gd.gameNumber;
+          const liveNow = gd.gameStatus === 'running' && gd.hasLiveStats && gd.gameNumber;
+          if (liveNow) { liveGameNumber = gd.gameNumber; hasLiveStats = true; }
           gamesContext += `\n[${gameLabel} — ${statusLabel} | Série: ${gd.seriesScore||'0-0'}]\n`;
           if (gd.hasLiveStats) {
             const blue = gd.blueTeam, red = gd.redTeam;
@@ -1271,13 +1273,15 @@ async function collectGameContext(game, matchId) {
             if (gd.blueTeam?.players?.length) {
               const roles = { top:'TOP', jungle:'JGL', mid:'MID', bottom:'ADC', support:'SUP' };
               const g = (v) => v >= 1000 ? (v/1000).toFixed(1)+'k' : String(v||0);
-              if (gd.hasLiveStats) {
+              const liveNow = !!(gid.hasLiveData && gd.hasLiveStats && (gd.gameState === 'in_game' || gd.gameState === 'paused'));
+              if (liveNow) {
                 const blue = gd.blueTeam, red = gd.redTeam;
                 const goldDiff = blue.totalGold - red.totalGold;
                 const delayInfo = gd.dataDelay ? ` (dados de ~${gd.dataDelay}s atrás)` : '';
                 const blueDragons = blue.dragonTypes?.length ? blue.dragonTypes.join(', ') : (blue.dragons||0);
                 const redDragons = red.dragonTypes?.length ? red.dragonTypes.join(', ') : (red.dragons||0);
                 if (gid.gameNumber) liveGameNumber = gid.gameNumber;
+                hasLiveStats = true;
                 gamesContext += `\n[GAME ${gid.gameNumber} — AO VIVO${delayInfo}]\nGold: ${blue.name} ${g(blue.totalGold)} vs ${red.name} ${g(red.totalGold)} (diff: ${goldDiff>0?'+':''}${g(goldDiff)})\nTorres: ${blue.towerKills||0}x${red.towerKills||0} | Dragões: ${blueDragons} vs ${redDragons}\nKills: ${blue.totalKills||0}x${red.totalKills||0} | Barões: ${blue.barons||0}x${red.barons||0} | Inibidores: ${blue.inhibitors||0}x${red.inhibitors||0}\n`;
                 if (gd.goldTrajectory?.length > 0) {
                   gamesContext += 'Gold Trajectory: ' + gd.goldTrajectory.map(gt => `${gt.minute}min:${gt.diff>0?'+':''}${g(gt.diff)}`).join(' → ') + '\n';
@@ -1343,7 +1347,7 @@ async function collectGameContext(game, matchId) {
       }
     }
   }
-  return { text: gamesContext, compScore, liveGameNumber };
+  return { text: gamesContext, compScore, liveGameNumber, hasLiveStats };
 }
 
 async function fetchEnrichment(match) {
@@ -1408,7 +1412,7 @@ async function autoAnalyzeMatch(token, match) {
     const gamesContext   = gameCtx.text;
     const compScore      = gameCtx.compScore;
     const liveGameNumber = gameCtx.liveGameNumber; // nº do mapa atual (null se não ao vivo)
-    const hasLiveStats   = gamesContext.includes('AO VIVO');
+    const hasLiveStats   = !!gameCtx.hasLiveStats;
     const enrichSection = buildEnrichmentSection(match, enrich);
 
     // Ao vivo: só usar odds do mapa atual se mapa ao vivo confirmado
