@@ -3114,9 +3114,10 @@ const server = http.createServer(async (req, res) => {
         });
         const ds = safeParse(r.body, {});
         const text = ds.choices?.[0]?.message?.content || '';
-        if (!text && ds.error) {
-          log('WARN', 'AI', `DeepSeek erro: ${ds.error?.message || JSON.stringify(ds.error)}`);
-          sendJson(res, { error: ds.error?.message || 'DeepSeek sem resposta' }, r.status || 500);
+        if (!text) {
+          const errMsg = ds.error?.message || ds.error?.code || '';
+          log('WARN', 'AI', `DeepSeek vazio: status=${r?.status} err=${errMsg || '-'} body=${String(r?.body || '').slice(0, 900)}`);
+          sendJson(res, { error: errMsg || 'DeepSeek sem resposta' }, r.status || 502);
           return;
         }
         // Normaliza para o formato Claude (content[].text) para compatibilidade com bot.js
