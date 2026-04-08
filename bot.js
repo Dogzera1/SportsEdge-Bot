@@ -489,7 +489,7 @@ async function runAutoAnalysis() {
         const liveIds = (match.status === 'live')
           ? await serverGet(`/live-gameids?matchId=${encodeURIComponent(String(match.id))}`).catch(() => [])
           : [];
-        const currentMap = Array.isArray(liveIds) ? (liveIds.find(x => x.hasLiveData)?.gameNumber || liveIds[0]?.gameNumber) : null;
+        const currentMap = Array.isArray(liveIds) ? (liveIds.find(x => x.hasLiveData)?.gameNumber || null) : null;
         const mapSuffix = (match.status === 'live' && currentMap) ? `_MAP${currentMap}` : '';
         const matchKey = `${match.game}_${match.id}${mapSuffix}`;
         const prev = analyzedMatches.get(matchKey);
@@ -1134,7 +1134,7 @@ async function checkLiveNotifications() {
     for (const match of allLive) {
       // Ao vivo: notificar apenas se tivermos odds reais do MAPA atual (mercado aberto)
       const liveIds = await serverGet(`/live-gameids?matchId=${encodeURIComponent(String(match.id))}`).catch(() => []);
-      const currentMap = Array.isArray(liveIds) ? (liveIds.find(x => x.hasLiveData)?.gameNumber || liveIds[0]?.gameNumber) : null;
+      const currentMap = Array.isArray(liveIds) ? (liveIds.find(x => x.hasLiveData)?.gameNumber || null) : null;
       if (!currentMap) continue;
       const mapOdds = await serverGet(`/odds?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}&map=${encodeURIComponent(String(currentMap))}&force=1`).catch(() => null);
       if (!mapOdds?.t1 || parseFloat(mapOdds.t1) <= 1.0) continue;
@@ -1415,7 +1415,7 @@ async function autoAnalyzeMatch(token, match) {
     const hasLiveStats   = gamesContext.includes('AO VIVO');
     const enrichSection = buildEnrichmentSection(match, enrich);
 
-    // Ao vivo: usar odds do mapa atual (se mercado disponível)
+    // Ao vivo: só usar odds do mapa atual se mapa ao vivo confirmado
     let oddsToUse = o;
     if (hasLiveStats && liveGameNumber) {
       const mo = await serverGet(`/odds?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}&map=${encodeURIComponent(String(liveGameNumber))}&force=1`).catch(() => null);
@@ -4333,7 +4333,7 @@ log('INFO', 'BOOT', `Sports carregados: ${JSON.stringify(Object.entries(SPORTS).
     const allLive = Array.isArray(lolList) ? lolList.filter(m => m.status === 'live') : [];
     for (const match of allLive.slice(0, 30)) {
       const liveIds = await serverGet(`/live-gameids?matchId=${encodeURIComponent(String(match.id))}`).catch(() => []);
-      const currentMap = Array.isArray(liveIds) ? (liveIds.find(x => x.hasLiveData)?.gameNumber || liveIds[0]?.gameNumber) : null;
+      const currentMap = Array.isArray(liveIds) ? (liveIds.find(x => x.hasLiveData)?.gameNumber || null) : null;
       if (!currentMap) continue;
       const matchKey = `${match.game}_${match.id}_MAP${currentMap}`;
       if (!notifiedMatches.has(matchKey)) notifiedMatches.set(matchKey, Date.now());
