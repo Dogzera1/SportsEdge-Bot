@@ -464,6 +464,24 @@ const ESPORTS_BACKOFF_TTL = 2 * 60 * 60 * 1000;
 const lastForceRefreshByPair = new Map(); // key -> ts
 const FORCE_REFRESH_COOLDOWN_MS = (parseInt(process.env.ODDSPAPI_FORCE_COOLDOWN_S || '300', 10) || 300) * 1000; // 5min default
 
+// Throttle global de force-refresh (evita rajadas em diferentes pares)
+let _forceFetchChain = Promise.resolve();
+let _forceFetchLastTs = 0;
+const FORCE_FETCH_GAP_MS = Math.max(500, parseInt(process.env.FORCE_FETCH_GAP_MS || '2500', 10) || 2500);
+function _sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+async function enqueueForceFetchEsports() {
+  const p = _forceFetchChain.then(async () => {
+    const now = Date.now();
+    const wait = Math.max(0, FORCE_FETCH_GAP_MS - (now - _forceFetchLastTs));
+    if (wait > 0) await _sleep(wait);
+    _forceFetchLastTs = Date.now();
+    lastEsportsOddsUpdate = 0;
+    await fetchOdds('esports');
+  });
+  _forceFetchChain = p.catch(() => {}).then(() => {});
+  return p;
+}
+
 // Timestamp do último bootstrap completo — force-refresh é bloqueado por BOOTSTRAP_GRACE_MS após o bootstrap
 let lastBootstrapCompletedTs = 0;
 const BOOTSTRAP_GRACE_MS = Math.max(30000, parseInt(process.env.ODDSPAPI_BOOTSTRAP_GRACE_MS || '60000', 10) || 60000); // 60s default
@@ -2043,9 +2061,13 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       lastForceRefreshByPair.set(pairKey, Date.now());
-
-      lastEsportsOddsUpdate = 0;
       log('INFO', 'ODDS', `Force refresh solicitado para ${t1} vs ${t2} (partida iminente)`);
+      await enqueueForceFetchEsports().catch(() => {});
+      const oNowAfter = findOdds('esports', t1, t2);
+      if (oNowAfter && (!mapNumber || mapNumber <= 0)) {
+        sendJson(res, oNowAfter);
+        return;
+      }
     }
     await fetchOdds('esports');
     let o = null;
