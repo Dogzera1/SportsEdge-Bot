@@ -685,6 +685,23 @@ function findOdds(sport, t1, t2) {
           return { t1: val.t2, t2: val.t1, bookmaker: val.bookmaker };
         }
       }
+      // Se slug carrega ordem (concat), usa a posição do primeiro match para decidir swap
+      const firstIdx = (variants, target) => {
+        let best = Infinity;
+        for (const v of variants) {
+          if (!v || v.length < 2) continue;
+          const idx = target.indexOf(v);
+          if (idx >= 0 && idx < best) best = idx;
+        }
+        return best;
+      };
+      const i1 = firstIdx(variants1, cs);
+      const i2 = firstIdx(variants2, cs);
+      if (i1 !== Infinity && i2 !== Infinity && i1 !== i2) {
+        // cs: "...<teamA>...<teamB>..." ⇒ t1=teamA, t2=teamB
+        if (i1 < i2) return { t1: val.t1, t2: val.t2, bookmaker: val.bookmaker };
+        return { t1: val.t2, t2: val.t1, bookmaker: val.bookmaker };
+      }
       // Fallback: match sem garantia de ordem
       if (anyMatch(variants1, cs) && anyMatch(variants2, cs)) {
         return { t1: val.t1, t2: val.t2, bookmaker: val.bookmaker };
