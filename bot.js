@@ -3499,6 +3499,14 @@ Máximo 200 palavras. Mostre seu raciocínio brevemente antes da decisão.`;
         }
 
         const text = resp?.content?.map(b => b.text || '').join('') || '';
+        const extractReasonTennis = (t) => {
+          if (!t) return null;
+          const before = t.split('TIP_ML:')[0] || '';
+          const line = before.split('\n').map(s => s.trim()).filter(Boolean)[0] || '';
+          const clean = line.replace(/^[-*•\s]+/, '').trim();
+          return clean ? clean.slice(0, 160) : null;
+        };
+        const tipReasonTennis = extractReasonTennis(text);
         const tipMatch2 = text.match(/TIP_ML:([^@]+)@([\d.]+)\|EV:([+-]?[\d.]+)%\|STAKE:([\d.]+)u?\|CONF:(ALTA|MÉDIA|BAIXA)/i);
 
         if (!tipMatch2) {
