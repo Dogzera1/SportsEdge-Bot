@@ -3161,17 +3161,25 @@ const server = http.createServer(async (req, res) => {
       rows = stmts.getTeamFormFuzzyCustom.all(fuzzy, fuzzy, game, days, limit);
     }
 
-    if (!rows.length) { sendJson(res, { wins: 0, losses: 0, winRate: 0, streak: '—' }); return; }
-    let wins = 0, losses = 0, streak = '', streakCount = 0;
+    if (!rows.length) { sendJson(res, { wins: 0, draws: 0, losses: 0, winRate: 0, streak: '—', recent: [] }); return; }
+    let wins = 0, losses = 0, draws = 0, streak = '', streakCount = 0;
+    const recent = [];
+    let streakActive = true;
     for (const r of rows) {
-      const won = norm(r.winner) === norm(team);
-      if (wins + losses === 0) { streak = won ? 'W' : 'L'; streakCount = 1; }
-      else if ((streak[0] === 'W') === won) streakCount++;
-      else break;
-      if (won) wins++; else losses++;
+      const isDraw = r.winner && norm(r.winner) === 'draw';
+      const won = !isDraw && norm(r.winner) === norm(team);
+      const resChar = won ? 'W' : (isDraw ? 'D' : 'L');
+      recent.push(resChar);
+
+      if (won) wins++; else if (isDraw) draws++; else losses++;
+      
+      if (streakActive) {
+        if (streak === '') { streak = resChar; streakCount = 1; }
+        else if (streak === resChar) streakCount++;
+        else streakActive = false;
+      }
     }
-    sendJson(res, { wins, losses, winRate: rows.length > 0 ? Math.round(wins / rows.length * 100) : 0, streak: `${streakCount}${streak}` });
-    return;
+    sendJson(res, { wins, draws, losses, winRate: Math.round((wins / rows.length) * 100), streak: `${streakCount}${streak}`, recent });
   }
 
   if (p === '/h2h') {
@@ -3190,10 +3198,20 @@ const server = http.createServer(async (req, res) => {
     }
 
     let t1w = 0, t2w = 0;
-    for (const r of rows) {
-      if (norm(r.winner) === norm(t1)) t1w++; else t2w++;
-    }
-    sendJson(res, { totalMatches: rows.length, t1Wins: t1w, t2Wins: t2w });
+    const results = rows.map(r => {
+      const isDraw = r.winner && norm(r.winner) === 'draw';
+      if (norm(r.winner) === norm(t1)) t1w++;
+      else if (!isDraw) t2w++;
+
+      let hG = 0, aG = 0;
+      if (r.final_score && r.final_score.includes('-')) {
+        const parts = r.final_score.split('-');
+        hG = parseInt(parts[0]) || 0;
+        aG = parseInt(parts[1]) || 0;
+      }
+      return { home: r.team1, away: r.team2, homeGoals: hG, awayGoals: aG, date: r.resolved_at };
+    });
+    sendJson(res, { totalMatches: rows.length, t1Wins: t1w, t2Wins: t2w, results });
     return;
   }
 

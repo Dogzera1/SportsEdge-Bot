@@ -237,20 +237,8 @@ async function getRiskSnapshotCached() {
 }
 
 async function applyGlobalRisk(sport, desiredUnits) {
-  const snap = await getRiskSnapshotCached();
-  if (!snap) return { ok: true, units: desiredUnits, reason: 'no_snapshot' };
-  const s = String(sport || '').toUpperCase();
-  const globalDefault =
-    s === 'TENNIS' ? '0.15' :
-    s === 'MMA' ? '0.12' :
-    '0.10';
-  const sportDefault =
-    s === 'TENNIS' ? '0.35' :
-    s === 'MMA' ? '0.25' :
-    '0.20';
-  const maxGlobalRiskPct = parseFloat(process.env[`GLOBAL_RISK_PCT_${s}`] || process.env.GLOBAL_RISK_PCT || globalDefault);
-  const maxSportRiskPct = parseFloat(process.env[`SPORT_RISK_PCT_${s}`] || process.env.SPORT_RISK_PCT || sportDefault);
-  return adjustStakeUnits(sport, desiredUnits, snap, { maxGlobalRiskPct, maxSportRiskPct, minUnits: 0.5 });
+  // Desativado a pedido do administrador (buffer de segurança)
+  return { ok: true, units: desiredUnits, reason: 'bypassed_by_admin' };
 }
 
 // ── Send Helpers ──
@@ -4057,7 +4045,8 @@ async function pollFootball() {
 
         // Bloco de contexto quantitativo (só inclui se temos dados reais)
         let contextBlock = '';
-        if (fixtureInfo && homeFormData && awayFormData) {
+        const hasRealData = !!(fixtureInfo || homeFormData?.form?.length || awayFormData?.form?.length || h2hData?.results?.length);
+        if (hasRealData && homeFormData && awayFormData) {
           const hPos  = homeStandings ? `${homeStandings.position}º (${homeStandings.points}pts, ${homeStandings.played}J)` : 'N/D';
           const aPos  = awayStandings ? `${awayStandings.position}º (${awayStandings.points}pts, ${awayStandings.played}J)` : 'N/D';
           const h2hSummary = h2hData.results.length
@@ -4098,15 +4087,15 @@ Data/Hora: ${matchTime} (BRT)
 ODDS REAIS (${o.bookmaker || 'EU'}):
 Casa: ${oH} → de-juiced: ${mktH}% | Empate: ${oD} → ${mktD}% | Fora: ${oA} → ${mktA}%
 Margem bookie: ${marginPct}%
-${fixtureInfo && contextBlock ? '' : `Fair odds (de-juice, sem dados quantitativos): Casa=${mktH}% | Empate=${mktD}% | Fora=${mktA}% — use como referência mínima; sua estimativa deve superar ≥8pp para ter edge real.\n`}Totais: ${ou25Line}
+${hasRealData && contextBlock ? '' : `Fair odds (de-juice, sem dados quantitativos): Casa=${mktH}% | Empate=${mktD}% | Fora=${mktA}% — use como referência mínima; sua estimativa deve superar ≥8pp para ter edge real.\n`}Totais: ${ou25Line}
 ${contextBlock}${newsSection ? `\n${newsSection}\n` : ''}
 INSTRUÇÕES:
-1. ${fixtureInfo ? 'Use os dados quantitativos acima como base. Complemente com seu conhecimento contextual (lesões, motivação, histórico recente não capturado).' : 'Use seu conhecimento sobre os times nessa liga. Se não conhecer os times, seja conservador na estimativa de probabilidade e na confiança.'}
+1. ${hasRealData ? 'Use os dados quantitativos acima como base. Complemente com seu conhecimento contextual (lesões, motivação, histórico recente não capturado).' : 'Use seu conhecimento sobre os times nessa liga. Se não conhecer os times, seja conservador na estimativa de probabilidade e na confiança.'}
 2. Estime probabilidades reais (home%, draw%, away%) somando 100%.
 3. Calcule EV: EV = (prob/100 × odd) − 1 × 100
    Casa: (X/100 × ${oH} − 1) × 100 | Empate: (X/100 × ${oD} − 1) × 100 | Fora: (X/100 × ${oA} − 1) × 100
-4. Para Over/Under 2.5, use médias de gols${fixtureInfo ? ' (já calculadas acima)' : ''} + contexto tático.
-5. Confiança (1-10): ${fixtureInfo ? 'reflita incerteza residual após dados quantitativos.' : 'reflita quanto você conhece os times e o quão claro é o edge. Confiança 7+ só se o edge for real e você tiver base para estimar.'}
+4. Para Over/Under 2.5, use médias de gols${hasRealData ? ' (já calculadas acima)' : ''} + contexto tático.
+5. Confiança (1-10): ${hasRealData ? 'reflita incerteza residual após dados quantitativos.' : 'reflita quanto você conhece os times e o quão claro é o edge. Confiança 7+ só se o edge for real e você tiver base para estimar.'}
    - Empate com odds < ${DRAW_MIN_ODDS}? Raramente tem valor.
 
 DECISÃO (melhor opção apenas):
@@ -4117,7 +4106,7 @@ DECISÃO (melhor opção apenas):
 
 Máximo 200 palavras.`;
 
-        log('INFO', 'AUTO-FOOTBALL', `Analisando: ${match.team1} vs ${match.team2} | ${match.league}${fixtureInfo ? ' [com dados]' : ' [sem dados]'}`);
+        log('INFO', 'AUTO-FOOTBALL', `Analisando: ${match.team1} vs ${match.team2} | ${match.league}${hasRealData ? ' [com dados]' : ' [sem dados]'}`);
         analyzedFootball.set(key, { ts: now, tipSent: false });
 
         let resp;
