@@ -1186,22 +1186,25 @@ async function collectGameContext(game, matchId) {
               playerNames ? serverGet(`/player-champ-stats?players=${encodeURIComponent(playerNames)}&champs=${encodeURIComponent(playerChamps)}`).catch(() => ({})) : Promise.resolve({})
             ]);
 
-            // Comp score por champ WR
+            // Comp score por champ WR (pro play DB: PandaScore sync + opcional gol.gg CSV seed)
             if (wrData && Object.keys(wrData).length >= 4) {
               let blueWR = 0, blueN = 0, redWR = 0, redN = 0;
+              let blueTot = 0, redTot = 0;
               for (const pl of (gd.blueTeam?.players||[])) {
                 const s = wrData[pl.champion];
-                if (s) { blueWR += s.winRate; blueN++; }
+                if (s) { blueWR += s.winRate; blueTot += (s.total || 0); blueN++; }
               }
               for (const pl of (gd.redTeam?.players||[])) {
                 const s = wrData[pl.champion];
-                if (s) { redWR += s.winRate; redN++; }
+                if (s) { redWR += s.winRate; redTot += (s.total || 0); redN++; }
               }
               if (blueN > 0 && redN > 0) {
                 const blueAvg = blueWR / blueN;
                 const redAvg  = redWR  / redN;
                 compScore = blueAvg - redAvg;
-                gamesContext += `META PRO (champ WR): ${gd.blueTeam.name} ${blueAvg.toFixed(1)}% vs ${gd.redTeam.name} ${redAvg.toFixed(1)}% (diff: ${compScore > 0 ? '+' : ''}${compScore.toFixed(1)}pp)\n`;
+                const blueAvgN = Math.round(blueTot / blueN);
+                const redAvgN  = Math.round(redTot  / redN);
+                gamesContext += `META PRO (champ WR): ${gd.blueTeam.name} ${blueAvg.toFixed(1)}% (n~${blueAvgN}) vs ${gd.redTeam.name} ${redAvg.toFixed(1)}% (n~${redAvgN}) (diff: ${compScore > 0 ? '+' : ''}${compScore.toFixed(1)}pp)\n`;
               }
             }
 
@@ -1268,19 +1271,22 @@ async function collectGameContext(game, matchId) {
 
                   if (wrData && Object.keys(wrData).length >= 4) {
                     let blueWR = 0, blueN = 0, redWR = 0, redN = 0;
+                    let blueTot = 0, redTot = 0;
                     for (const pl of (gd.blueTeam?.players||[])) {
                       const s = wrData[pl.champion];
-                      if (s) { blueWR += s.winRate; blueN++; }
+                      if (s) { blueWR += s.winRate; blueTot += (s.total || 0); blueN++; }
                     }
                     for (const pl of (gd.redTeam?.players||[])) {
                       const s = wrData[pl.champion];
-                      if (s) { redWR += s.winRate; redN++; }
+                      if (s) { redWR += s.winRate; redTot += (s.total || 0); redN++; }
                     }
                     if (blueN > 0 && redN > 0) {
                       const blueAvg = blueWR / blueN;
                       const redAvg  = redWR  / redN;
                       compScore = blueAvg - redAvg;
-                      gamesContext += `META PRO (champ WR): ${gd.blueTeam.name} ${blueAvg.toFixed(1)}% vs ${gd.redTeam.name} ${redAvg.toFixed(1)}% (diff: ${compScore > 0 ? '+' : ''}${compScore.toFixed(1)}pp)\n`;
+                      const blueAvgN = Math.round(blueTot / blueN);
+                      const redAvgN  = Math.round(redTot  / redN);
+                      gamesContext += `META PRO (champ WR): ${gd.blueTeam.name} ${blueAvg.toFixed(1)}% (n~${blueAvgN}) vs ${gd.redTeam.name} ${redAvg.toFixed(1)}% (n~${redAvgN}) (diff: ${compScore > 0 ? '+' : ''}${compScore.toFixed(1)}pp)\n`;
                     }
                   }
                   if (pcData && Object.keys(pcData).length > 0) {
@@ -1643,6 +1649,14 @@ PARTIDA: ${t1} vs ${t2} | ${match.league || 'Esports'} | ${match.format || 'Bo1/
 Placar: ${serieScore} | ${oddsSection}
 ${bookMarginNote ? `\n⚠️ ${bookMarginNote}` : ''}
 ${gamesContext ? `\nDADOS AO VIVO:\n${gamesContext}` : ''}
+${gamesContext && /META PRO \(champ WR\):|PLAYER CHAMP WR:/i.test(gamesContext)
+  ? `\nDADOS PRO (gol.gg/PandaScore via DB) — COMO USAR:
+• Se (n~) < 10: sinal fraco (não force tip).
+• Se (n~) 10–29: sinal médio.
+• Se (n~) ≥ 30: sinal forte.
+• Use META PRO/PLAYER CHAMP WR como ajuste fino de draft, não como substituto de odds/EV.
+`
+  : ''}
 FORMA/H2H:${enrichSection}
 ${highFluxWarning ? `\n${highFluxWarning}` : ''}${lineMovementWarning ? `\n${lineMovementWarning}` : ''}${newsSection ? `\n${newsSection}` : ''}
 
