@@ -16,7 +16,8 @@ const ODDSPAPI_KEY = process.env.ODDS_API_KEY
   || process.env.ODDSPAPI_KEY
   || process.env.ODDS_PAPI_KEY
   || process.env.ESPORTS_ODDS_KEY;
-const LOL_KEY = process.env.LOL_API_KEY || '';
+const LOL_KEY = process.env.LOL_API_KEY || process.env.NEXT_PUBLIC_LOL_API || '';
+const LOL_HEADERS = LOL_KEY ? { 'x-api-key': LOL_KEY } : {};
 const PANDASCORE_TOKEN = process.env.PANDASCORE_TOKEN || '';
 // The Odds API — usado para MMA (20k req/mês)
 const THE_ODDS_API_KEY = process.env.THE_ODDS_API_KEY || '';
@@ -1226,6 +1227,42 @@ function mapLoLEvent(e, status) {
   };
 }
 
+async function getLoLMatchesArush() {
+  // Fonte "lolesports-live": apenas getSchedule (sem getLive) + filtro por ligas
+  try {
+    const sr = await httpGet(LOL_BASE + '/getSchedule?hl=en-US', LOL_HEADERS);
+    const sd = safeParse(sr.body, {});
+    const evs = sd?.data?.schedule?.events || [];
+    if (!Array.isArray(evs) || evs.length === 0) return [];
+
+    const live = evs
+      .filter(e => e.type === 'match' && e.match && e.state === 'inProgress')
+      .map(e => mapLoLEvent(e, 'live')).filter(Boolean);
+
+    const upcoming = evs
+      .filter(e => e.type === 'match' && e.match && e.state === 'unstarted')
+      .map(e => mapLoLEvent(e, 'upcoming')).filter(Boolean);
+
+    const combined = [...live, ...upcoming]
+      .filter((m, i, a) => m && !(m.team1 === 'TBD' && m.team2 === 'TBD') && a.findIndex(x => x.id === m.id) === i)
+      .sort((a, b) => {
+        if (a.status === 'live' && b.status !== 'live') return -1;
+        if (b.status === 'live' && a.status !== 'live') return 1;
+        return new Date(a.time) - new Date(b.time);
+      })
+      .slice(0, 25);
+
+    await fetchOdds('esports');
+    combined.forEach(m => {
+      const o = findOdds('esports', m.team1, m.team2);
+      if (o) m.odds = o;
+    });
+    return combined;
+  } catch(_) {
+    return [];
+  }
+}
+
 async function getLoLMatches() {
   try {
     let live = [], upcoming = [];
@@ -1234,7 +1271,7 @@ async function getLoLMatches() {
     // ── 1. getLive primeiro — fonte mais confiável para matches ao vivo (especialmente LPL) ──
     const liveLeagues = new Set();
     try {
-      const glr = await httpGet(LOL_BASE + '/getLive?hl=en-US', { 'x-api-key': LOL_KEY });
+      const glr = await httpGet(LOL_BASE + '/getLive?hl=en-US', LOL_HEADERS);
       const gld = safeParse(glr.body, {});
       const getLiveEvts = gld?.data?.schedule?.events || [];
       // Log bruto de TODOS os eventos do getLive para diagnóstico
@@ -1248,7 +1285,7 @@ async function getLoLMatches() {
 
     // ── 1b. Também busca getLive com hl=zh-CN (LPL às vezes só aparece com locale chinês) ──
     try {
-      const glrCN = await httpGet(LOL_BASE + '/getLive?hl=zh-CN', { 'x-api-key': LOL_KEY });
+      const glrCN = await httpGet(LOL_BASE + '/getLive?hl=zh-CN', LOL_HEADERS);
       const gldCN = safeParse(glrCN.body, {});
       const getLiveCN = gldCN?.data?.schedule?.events || [];
       if (getLiveCN.length) {
@@ -1263,7 +1300,7 @@ async function getLoLMatches() {
 
     // ── 2. getSchedule — schedule completo ──
     try {
-      const sr = await httpGet(LOL_BASE + '/getSchedule?hl=en-US', { 'x-api-key': LOL_KEY });
+      const sr = await httpGet(LOL_BASE + '/getSchedule?hl=en-US', LOL_HEADERS);
       const sd = safeParse(sr.body, {});
       mainEvs = sd?.data?.schedule?.events || [];
       newerToken = sd?.data?.schedule?.pages?.newer;
@@ -1318,7 +1355,7 @@ async function getLoLMatches() {
 
     if (!upcoming.length && newerToken) {
       try {
-        const nr = await httpGet(LOL_BASE + '/getSchedule?hl=en-US&pageToken=' + encodeURIComponent(newerToken), { 'x-api-key': LOL_KEY });
+        const nr = await httpGet(LOL_BASE + '/getSchedule?hl=en-US&pageToken=' + encodeURIComponent(newerToken), LOL_HEADERS);
         const nd = safeParse(nr.body, {});
         upcoming = (nd?.data?.schedule?.events || [])
           .filter(e => e.type === 'match' && e.match && e.state !== 'completed')
@@ -1379,8 +1416,11 @@ async function getLoLMatches() {
 }
 
 // ── PandaScore LoL (cobre torneios fora do lolesports.com, ex: EWC Qualifier China) ──
+let _pandaBackoffUntil = 0;
+let _pandaLast429LogTs = 0;
 async function getPandaScoreLolMatches() {
   if (!PANDASCORE_TOKEN || PANDASCORE_TOKEN === 'your-pandascore-token') return [];
+  if (Date.now() < _pandaBackoffUntil) return [];
   try {
     const headers = { 'Authorization': `Bearer ${PANDASCORE_TOKEN}` };
     const [runningRaw, upcomingRaw] = await Promise.all([
@@ -1398,7 +1438,19 @@ async function getPandaScoreLolMatches() {
         const keys = Object.keys(p);
         const errMsg = (p?.error && (p.error.message || p.error)) || p?.message || '';
         if (keys.includes('error') || errMsg) {
-          log('WARN', 'PANDASCORE', `${fallbackLabel}: erro status=${status || '-'} msg=${String(errMsg || '').slice(0, 180) || '-'} body=${String(body || '').slice(0, 220)}`);
+          const msg = String(errMsg || '');
+          const is429 = status === 429 || msg.toLowerCase().includes('too many') || String(body || '').toLowerCase().includes('too many requests');
+          if (is429) {
+            const ttl = Math.max(60 * 1000, parseInt(process.env.PANDASCORE_BACKOFF_MS || '900000', 10) || 900000); // default 15min
+            _pandaBackoffUntil = Date.now() + ttl;
+            const now = Date.now();
+            if (now - _pandaLast429LogTs > 60 * 1000) {
+              _pandaLast429LogTs = now;
+              log('WARN', 'PANDASCORE', `${fallbackLabel}: 429 — backoff ${Math.round(ttl/60000)}min | msg=${msg.slice(0, 120) || '-'} body=${String(body || '').slice(0, 180)}`);
+            }
+          } else {
+            log('WARN', 'PANDASCORE', `${fallbackLabel}: erro status=${status || '-'} msg=${msg.slice(0, 180) || '-'} body=${String(body || '').slice(0, 220)}`);
+          }
           return [];
         }
 
@@ -1604,11 +1656,13 @@ const server = http.createServer(async (req, res) => {
 
   // ── Esports Endpoints (sem scrapers) ──
   if (p === '/lol-matches') {
-    // Busca em paralelo: API Riot (lolesports) + PandaScore (cobre LPL China e outros)
-    const [riotMatches, psMatches] = await Promise.all([
-      getLoLMatches(),
-      getPandaScoreLolMatches()
-    ]);
+    // Primário: getSchedule "lolesports-live" (leve)
+    // Backoff: Riot (getLive+getSchedule)
+    // Último backoff: PandaScore
+    let riotMatches = await getLoLMatchesArush();
+    if (!riotMatches.length) riotMatches = await getLoLMatches();
+    const needPsBackoff = riotMatches.length < 10;
+    const psMatches = needPsBackoff ? await getPandaScoreLolMatches() : [];
 
     // Mescla deduplicando por nomes de times (PandaScore não sobrescreve Riot)
     const combined = [...riotMatches];
@@ -1649,14 +1703,14 @@ const server = http.createServer(async (req, res) => {
   if (p === '/lol-raw') {
     // Debug: retorna todos os eventos brutos do schedule (sem filtro de liga)
     try {
-      const sr = await httpGet(LOL_BASE + '/getSchedule?hl=en-US', { 'x-api-key': LOL_KEY });
+      const sr = await httpGet(LOL_BASE + '/getSchedule?hl=en-US', LOL_HEADERS);
       const sd = safeParse(sr.body, {});
       const evs = sd?.data?.schedule?.events || [];
 
       // Busca getLive também
       let liveEvs = [];
       try {
-        const glr = await httpGet(LOL_BASE + '/getLive?hl=en-US', { 'x-api-key': LOL_KEY });
+        const glr = await httpGet(LOL_BASE + '/getLive?hl=en-US', LOL_HEADERS);
         liveEvs = safeParse(glr.body, {})?.data?.schedule?.events || [];
       } catch(_) {}
 
@@ -1689,7 +1743,7 @@ const server = http.createServer(async (req, res) => {
       const matchId = raw ? String(raw).replace(/^lol_/, '') : '';
       const games = [];
       if (matchId) {
-        const dr = await httpGet(`${LOL_BASE}/getEventDetails?hl=en-US&id=${matchId}`, { 'x-api-key': LOL_KEY });
+        const dr = await httpGet(`${LOL_BASE}/getEventDetails?hl=en-US&id=${matchId}`, LOL_HEADERS);
         const dd = safeParse(dr.body, {});
         const match = dd?.data?.event?.match;
         if (match?.games) {
@@ -1796,7 +1850,7 @@ const server = http.createServer(async (req, res) => {
       const base = `https://feed.lolesports.com/livestats/v1/window/${gameId}`;
 
       // 1) Buscar metadata do jogo (times, campeões, etc)
-      let wr = await httpGet(base, { 'x-api-key': LOL_KEY });
+      let wr = await httpGet(base, LOL_HEADERS);
       if (wr.status === 403) wr = await httpGet(base, {});
       if (wr.status !== 200) {
         sendJson(res, { error: 'Game not found: ' + wr.status, hasLiveStats: false }, 404);
@@ -2251,7 +2305,7 @@ const server = http.createServer(async (req, res) => {
     const matchId = String(raw).replace(/^lol_/, '');
     const game = parsed.query.game || 'lol';
     try {
-      const sr = await httpGet(LOL_BASE + '/getSchedule?hl=en-US', { 'x-api-key': LOL_KEY });
+      const sr = await httpGet(LOL_BASE + '/getSchedule?hl=en-US', LOL_HEADERS);
       const sd = safeParse(sr.body, {});
       const events = sd?.data?.schedule?.events || [];
       const ev = events.find(e => e.match?.id === matchId && e.state === 'completed');

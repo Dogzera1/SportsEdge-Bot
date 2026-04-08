@@ -567,6 +567,10 @@ async function runAutoAnalysis() {
           }
           analyzedMatches.set(matchKey, { ts: now, tipSent: true });
           log('INFO', 'AUTO-TIP', `Esports: ${tipTeam} @ ${tipOdd} (odds ${hasRealOdds ? 'reais' : 'estimadas'})`);
+          // Log curto + variáveis consideradas (para auditoria)
+          if (result.debugVars) {
+            log('INFO', 'TIP-VARS', `${tipTeam} @ ${tipOdd} | ${result.tipReason || '-'} | ${match.team1} vs ${match.team2}`, result.debugVars);
+          }
 
           // Ao vivo: apenas ML do mapa (não enviar outros mercados após live)
           // ── Handicap tip (desativado em live) ──
@@ -1440,7 +1444,24 @@ async function autoAnalyzeMatch(token, match) {
           tipEV: parseFloat(evPct.toFixed(1)),
           tipStake: String(stake || '1u'),
           tipConf: CONF.MEDIA,
-          tipReason: 'Value detectado pelo modelo (fallback em backoff IA)'
+          tipReason: 'Value detectado pelo modelo (fallback em backoff IA)',
+          debugVars: {
+            source: 'fallback_backoff',
+            game,
+            status: match.status,
+            league: match.league,
+            t1: match.team1,
+            t2: match.team2,
+            hasLiveStats,
+            liveGameNumber,
+            odds: { t1: oddsToUse?.t1, t2: oddsToUse?.t2, bookmaker: oddsToUse?.bookmaker, market: oddsToUse?.market, mapMarket: oddsToUse?.mapMarket },
+            modelP1: mlResult.modelP1,
+            modelP2: mlResult.modelP2,
+            pick: { team: pickTeam, odd: pickOdd, p: pickP, evPct: parseFloat(evPct.toFixed(1)), stake: String(stake || '1u'), conf: CONF.MEDIA },
+            ml: { pass: mlResult.pass, direction: mlResult.direction, edgePp: parseFloat(mlResult.score.toFixed(1)), factors: mlResult.factorActive || [], factorCount: mlResult.factorCount || 0 },
+            signals: { sigCount, evThreshold: adaptiveEV },
+            compScore
+          }
         };
       }
       if (Number.isFinite(pickOdd)) {
@@ -1495,7 +1516,24 @@ async function autoAnalyzeMatch(token, match) {
           tipEV: parseFloat(evPct.toFixed(1)),
           tipStake: String(stake || '1u'),
           tipConf: CONF.MEDIA,
-          tipReason: 'Value detectado pelo modelo (fallback sem IA)'
+          tipReason: 'Value detectado pelo modelo (fallback sem IA)',
+          debugVars: {
+            source: 'fallback_no_ai',
+            game,
+            status: match.status,
+            league: match.league,
+            t1: match.team1,
+            t2: match.team2,
+            hasLiveStats,
+            liveGameNumber,
+            odds: { t1: oddsToUse?.t1, t2: oddsToUse?.t2, bookmaker: oddsToUse?.bookmaker, market: oddsToUse?.market, mapMarket: oddsToUse?.mapMarket },
+            modelP1: mlResult.modelP1,
+            modelP2: mlResult.modelP2,
+            pick: { team: pickTeam, odd: pickOdd, p: pickP, evPct: parseFloat(evPct.toFixed(1)), stake: String(stake || '1u'), conf: CONF.MEDIA },
+            ml: { pass: mlResult.pass, direction: mlResult.direction, edgePp: parseFloat(mlResult.score.toFixed(1)), factors: mlResult.factorActive || [], factorCount: mlResult.factorCount || 0 },
+            signals: { sigCount, evThreshold: adaptiveEV },
+            compScore
+          }
         };
       }
       if (Number.isFinite(pickOdd)) {
@@ -1656,7 +1694,32 @@ async function autoAnalyzeMatch(token, match) {
       modelP2: mlResult.modelP2,
       mlDirection: mlResult.direction || null,
       factorActive: mlResult.factorActive || [],
-      tipReason
+      tipReason,
+      debugVars: filteredTipResult ? (() => {
+        const tipTeam = String(filteredTipResult[1] || '').trim();
+        const tipOdd = parseFloat(filteredTipResult[2]);
+        const tipEV = parseFloat(String(filteredTipResult[3]).replace('%','').replace('+',''));
+        const tipStake = String(filteredTipResult[4] || '').trim();
+        const tipConf = String(filteredTipResult[5] || CONF.MEDIA).trim().toUpperCase();
+        return {
+          source: 'ai',
+          game,
+          status: match.status,
+          league: match.league,
+          t1: match.team1,
+          t2: match.team2,
+          hasLiveStats,
+          liveGameNumber,
+          odds: { t1: oddsToUse?.t1, t2: oddsToUse?.t2, bookmaker: oddsToUse?.bookmaker, market: oddsToUse?.market, mapMarket: oddsToUse?.mapMarket },
+          modelP1: mlResult.modelP1,
+          modelP2: mlResult.modelP2,
+          pick: { team: tipTeam, odd: tipOdd, evPct: Number.isFinite(tipEV) ? tipEV : null, stake: tipStake, conf: tipConf },
+          ml: { pass: mlResult.pass, direction: mlResult.direction, edgePp: parseFloat(mlResult.score.toFixed(1)), factors: mlResult.factorActive || [], factorCount: mlResult.factorCount || 0 },
+          signals: { sigCount, evThreshold: adaptiveEV },
+          compScore,
+          tipReason
+        };
+      })() : null
     };
   } catch(e) {
     log('ERROR', 'AUTO', `Error for ${match.team1} vs ${match.team2}: ${e.message}`);
@@ -4438,6 +4501,23 @@ async function refreshOpenTips() {
       const minMovePct = parseFloat(process.env.TIP_UPDATE_MIN_MOVE_PCT || '3'); // 3%
       const now = Date.now();
 
+      // Nunca atualizar odds de partidas em andamento, mesmo se tip.is_live estiver falso.
+      let esportsLivePairs = null; // Set("t1|t2")
+      if (sport === 'esports') {
+        try {
+          const lolList = await serverGet('/lol-matches').catch(() => []);
+          const live = Array.isArray(lolList) ? lolList.filter(m => m.status === 'live' || m.status === 'draft') : [];
+          esportsLivePairs = new Set(
+            live.map(m => {
+              const a = norm(m.team1 || ''), b = norm(m.team2 || '');
+              return a < b ? `${a}|${b}` : `${b}|${a}`;
+            }).filter(Boolean)
+          );
+        } catch(_) {
+          esportsLivePairs = null;
+        }
+      }
+
       for (const tip of unsettled) {
         if (tip.is_live) continue; // não atualizar tip que já foi gerada ao vivo
         const p1 = tip.participant1 || '';
@@ -4446,6 +4526,13 @@ async function refreshOpenTips() {
         const oldOdds = parseFloat(tip.odds) || 0;
         const oldEv = parseFloat(tip.ev) || 0;
         if (!p1 || !p2 || !pick || oldOdds <= 1) continue;
+
+        // Bloqueio extra: partida atualmente live/draft
+        if (sport === 'esports' && esportsLivePairs) {
+          const a = norm(p1), b = norm(p2);
+          const k = a < b ? `${a}|${b}` : `${b}|${a}`;
+          if (esportsLivePairs.has(k)) continue;
+        }
 
         let currentOdds = null;
         if (sport === 'esports') {
@@ -4462,6 +4549,7 @@ async function refreshOpenTips() {
               const a2 = norm(x.team2 || '');
               return (a1 === n1 && a2 === n2) || (a1 === n2 && a2 === n1);
             });
+            if (m && (m.status === 'live' || m.status === 'draft')) continue;
             if (m?.odds) {
               const pickN = norm(pick);
               if (pickN === norm(m.team1)) currentOdds = parseFloat(m.odds.h);
@@ -4478,6 +4566,7 @@ async function refreshOpenTips() {
               const a2 = norm(x.team2 || '');
               return (a1 === n1 && a2 === n2) || (a1 === n2 && a2 === n1);
             });
+            if (m && (m.status === 'live' || m.status === 'draft')) continue;
             if (m?.odds) {
               const pickN = norm(pick);
               if (pickN === norm(m.team1)) currentOdds = parseFloat(m.odds.t1);
