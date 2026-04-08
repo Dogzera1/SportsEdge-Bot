@@ -3623,6 +3623,7 @@ async function pollFootball() {
 
   const { calcFootballScore } = require('./lib/football-ml');
   const footballApi = require('./lib/football-api');
+  const footballData = require('./lib/football-data');
 
   const FOOTBALL_INTERVAL = 6 * 60 * 60 * 1000;
   const EV_THRESHOLD   = parseFloat(process.env.FOOTBALL_EV_THRESHOLD  || '5.0');
@@ -3641,7 +3642,8 @@ async function pollFootball() {
         setTimeout(loop, 30 * 60 * 1000); return;
       }
       const hasFootballApi = !!(process.env.API_SPORTS_KEY || process.env.APIFOOTBALL_KEY);
-      log('INFO', 'AUTO-FOOTBALL', `${matches.length} partidas futebol com odds (${hasFootballApi ? 'com enrichment API-Football' : 'modo odds-only'})`);
+      const hasFootballDataOrg = !!(process.env.FOOTBALL_DATA_TOKEN || process.env.FOOTBALL_DATA_KEY);
+      log('INFO', 'AUTO-FOOTBALL', `${matches.length} partidas futebol com odds (${hasFootballApi ? 'API-Football' : hasFootballDataOrg ? 'football-data.org' : 'odds-only'})`);
 
       // Batch cache para mapear times→fixtureId sem 1 chamada por partida
       const fixturesBatch = hasFootballApi
@@ -3724,6 +3726,28 @@ async function pollFootball() {
             homeFatigue = fatH ?? 7;
             awayFatigue = fatA ?? 7;
           }
+        }
+        // Fallback: football-data.org (temporadas atuais, dependendo do plano/competição)
+        if (!fixtureInfo && (process.env.FOOTBALL_DATA_TOKEN || process.env.FOOTBALL_DATA_KEY)) {
+          try {
+            const compCode = footballData.getCompetitionCode(match.sport_key);
+            if (compCode) {
+              const fx = await footballData.findScheduledMatchByTeams(compCode, match.team1, match.team2, match.time).catch(() => null);
+              if (fx?.matchId && fx.homeId && fx.awayId) {
+                fixtureInfo = { fixtureId: fx.matchId, homeId: fx.homeId, awayId: fx.awayId, leagueId: fx.competitionId, season: fx.seasonStartYear };
+                standingsData = await footballData.getStandings(compCode).catch(() => ({})) || {};
+                const [hf, af, hh] = await Promise.all([
+                  footballData.getTeamRecentForm(fx.homeId, { competitionId: fx.competitionId, limit: 10 }).catch(() => null),
+                  footballData.getTeamRecentForm(fx.awayId, { competitionId: fx.competitionId, limit: 10 }).catch(() => null),
+                  footballData.getHeadToHead(fx.matchId, { limit: 10 }).catch(() => ({ results: [] })),
+                ]);
+                homeFormData = hf;
+                awayFormData = af;
+                h2hData = hh || { results: [] };
+                homeFatigue = 7; awayFatigue = 7;
+              }
+            }
+          } catch(_) {}
         }
 
         // ── ML com dados reais (ou nulls se API indisponível) ──
