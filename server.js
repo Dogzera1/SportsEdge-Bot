@@ -3708,13 +3708,17 @@ async function syncProStats({ forceResync = false } = {}) {
   }
 
   try { stmts.cleanOldSynced.run(); } catch(_) {}
+  // Registra timestamp da tentativa (mesmo com 0 champs) para evitar loop de resync a cada restart
+  try {
+    stmts.upsertDatasetImport.run('pro_champ_sync_attempt', 'syncProStats', champEntries);
+  } catch(_) {}
   log('INFO', 'SYNC', `Pro stats: ${matchCount} resultados, ${champEntries} champs, ${playerEntries} player+champ (${skipped} já sincronizados)`);
   return { ok: true, matchCount, champEntries, playerEntries, skipped };
 }
 
 server.listen(PORT, '0.0.0.0', () => {
   log('INFO', 'SERVER', `SportsEdge API em http://0.0.0.0:${PORT}`);
-  log('INFO', 'SERVER', `Esportes: LoL (Riot API + PandaScore)`);
+  log('INFO', 'SERVER', `Esportes: LoL (Riot API + LoLEsports)`);
 
   // Import automático de dataset futebol (CSV 2024/2025) para alimentar match_results (form/H2H)
   importFootballMatchesCsvOnce().catch(() => {});
@@ -3739,11 +3743,22 @@ server.listen(PORT, '0.0.0.0', () => {
       try {
         // Auto-detect: se pro_champ_stats está vazio mas synced_matches já tem entradas,
         // o DB foi recriado sem repopular os stats — força resync completo
+        // MAS: só se o último resync foi há mais de 6h (evita loop a cada restart)
         const champCount = db.prepare('SELECT COUNT(*) as cnt FROM pro_champ_stats').get();
         const syncedCount = db.prepare('SELECT COUNT(*) as cnt FROM synced_matches').get();
-        const forceResync = (champCount?.cnt ?? 0) === 0 && (syncedCount?.cnt ?? 0) > 0;
+        const lastAttempt = stmts.getDatasetImport.get('pro_champ_sync_attempt');
+        const lastAttemptAge = lastAttempt
+          ? (Date.now() - new Date(lastAttempt.imported_at).getTime())
+          : Infinity;
+        const PRO_SYNC_COOLDOWN_MS = Math.max(60 * 60 * 1000, parseInt(process.env.PRO_SYNC_COOLDOWN_H || '6', 10) * 60 * 60 * 1000);
+        const forceResync = (champCount?.cnt ?? 0) === 0
+          && (syncedCount?.cnt ?? 0) > 0
+          && lastAttemptAge > PRO_SYNC_COOLDOWN_MS;
         if (forceResync) {
           log('WARN', 'SYNC', `pro_champ_stats vazio mas ${syncedCount.cnt} matches já marcados como synced — forçando resync completo`);
+        } else if ((champCount?.cnt ?? 0) === 0 && lastAttemptAge <= PRO_SYNC_COOLDOWN_MS) {
+          const agoMin = Math.round(lastAttemptAge / 60000);
+          log('INFO', 'SYNC', `pro_champ_stats vazio mas último resync há ${agoMin}min — cooldown ativo (próximo em ${Math.round((PRO_SYNC_COOLDOWN_MS - lastAttemptAge)/3600000)}h)`);
         }
         await syncProStats({ forceResync });
       } catch(e) { log('ERROR', 'SYNC', e.message); }

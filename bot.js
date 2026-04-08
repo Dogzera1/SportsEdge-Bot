@@ -1387,7 +1387,7 @@ async function autoAnalyzeMatch(token, match) {
     if (!global.__deepseekLastCallTs) global.__deepseekLastCallTs = 0;
     // Cooldown mínimo entre chamadas (evita 429 por múltiplos live matches simultâneos)
     // O backoff pós-429 só é setado após a resposta chegar — este cooldown é preventivo
-    const DS_COOLDOWN_MS = Math.max(3000, parseInt(process.env.DEEPSEEK_CALL_COOLDOWN_MS || '8000', 10) || 8000);
+    const DS_COOLDOWN_MS = Math.max(3000, parseInt(process.env.DEEPSEEK_CALL_COOLDOWN_MS || '20000', 10) || 20000);
     const sinceLastCall = Date.now() - global.__deepseekLastCallTs;
     if (sinceLastCall < DS_COOLDOWN_MS && global.__deepseekLastCallTs > 0) {
       log('INFO', 'AUTO', `DeepSeek cooldown (${Math.round((DS_COOLDOWN_MS - sinceLastCall)/1000)}s restantes) — pulando ${match.team1} vs ${match.team2}`);
