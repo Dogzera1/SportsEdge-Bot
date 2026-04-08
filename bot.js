@@ -118,9 +118,7 @@ const PATCH_ALERT_INTERVAL = 24 * 60 * 60 * 1000;
 // ── Constantes de confiança ──
 const CONF = { ALTA: 'ALTA', MEDIA: 'MÉDIA', BAIXA: 'BAIXA' };
 
-// Auto patch meta fetch (ddragon)
-let patchAutoFetchTs = 0;
-const PATCH_AUTO_FETCH_INTERVAL = 12 * 60 * 60 * 1000; // verifica a cada 12h
+
 
 
 
@@ -1050,68 +1048,7 @@ async function checkPatchMetaStale(token) {
   }
 }
 
-// ── Auto Patch Meta (ddragon) ──
-async function fetchLatestPatchMeta() {
-  const now = Date.now();
-  if (now - patchAutoFetchTs < PATCH_AUTO_FETCH_INTERVAL) return;
-  patchAutoFetchTs = now;
-
-  try {
-    const versions = await new Promise((resolve, reject) => {
-      https.get('https://ddragon.leagueoflegends.com/api/versions.json', res => {
-        let d = '';
-        res.on('data', c => d += c);
-        res.on('end', () => { try { resolve(JSON.parse(d)); } catch(e) { reject(e); } });
-      }).on('error', reject);
-    });
-
-    if (!Array.isArray(versions) || !versions[0]) return;
-    const latestFull = versions[0]; // ex: "15.6.1"
-    const patchShort = latestFull.split('.').slice(0, 2).join('.'); // "15.6"
-
-    const currentMeta = process.env.LOL_PATCH_META || '';
-    const metaAge = getPatchMetaAgeDays();
-
-    // Se o usuário já configurou manualmente E a data é recente (< 14 dias) → não sobrescreve
-    if (currentMeta && metaAge !== null && metaAge < 14) {
-      log('INFO', 'PATCH', `Meta manual configurado (${metaAge}d) — auto-detect ignorado (ddragon: ${patchShort})`);
-      return;
-    }
-
-    // Se o meta já menciona a versão do ddragon → nada a fazer
-    if (currentMeta.includes(patchShort)) {
-      log('INFO', 'PATCH', `Patch ${patchShort} já no contexto — sem atualização`);
-      return;
-    }
-
-    // Só chega aqui se: meta vazio OU meta com > 14 dias sem atualização
-    const prevMeta = currentMeta || '(não definido)';
-    const patchNotesUrl = `https://www.leagueoflegends.com/en-us/news/game-updates/patch-${patchShort.replace('.', '-')}-notes/`;
-    const newMeta = `Patch ${patchShort} (auto-detectado — revise buffs/nerfs relevantes)`;
-    const newDate = new Date().toISOString().slice(0, 10);
-    process.env.LOL_PATCH_META = newMeta;
-    process.env.PATCH_META_DATE = newDate;
-    savePatchMetaToFile(newMeta, newDate); // persiste no volume Railway
-    lastPatchAlert = 0;
-
-    log('INFO', 'PATCH', `Novo patch auto-detectado: ${patchShort} (anterior: ${prevMeta.slice(0, 40)})`);
-
-    const esportsToken = SPORTS['esports']?.token;
-    if (esportsToken && ADMIN_IDS.size) {
-      const msg = `🔄 *NOVO PATCH DETECTADO: ${patchShort}*\n\n` +
-        `O contexto da IA foi atualizado automaticamente para o Patch ${patchShort}.\n\n` +
-        `📋 [Ver patch notes](${patchNotesUrl})\n\n` +
-        `Para adicionar resumo manual de meta (opcional, melhora qualidade):\n` +
-        `\`LOL_PATCH_META=Patch ${patchShort} — [buff/nerfs relevantes]\`\n\n` +
-        `_Sem ação necessária — análises já refletem o patch atual._`;
-      for (const adminId of ADMIN_IDS) {
-        await sendDM(esportsToken, adminId, msg).catch(() => {});
-      }
-    }
-  } catch(e) {
-    log('WARN', 'PATCH', `Erro no auto-fetch de patch meta: ${e.message}`);
-  }
-}
+// ── Patch Meta: lido do env (LOL_PATCH_META no Railway) — sem auto-detect ──
 
 // Live match notifications for esports
 async function checkLiveNotifications() {
@@ -4335,9 +4272,6 @@ log('INFO', 'BOOT', `Sports carregados: ${JSON.stringify(Object.entries(SPORTS).
   setInterval(() => checkLineMovement().catch(e => log('ERROR', 'LINE', e.message)), LINE_CHECK_INTERVAL);
   if (SPORTS.esports?.enabled) {
     setInterval(() => checkLiveNotifications().catch(e => log('ERROR', 'NOTIFY', e.message)), LIVE_CHECK_INTERVAL);
-    // Auto-patch meta: verifica novo patch a cada 12h via ddragon
-    fetchLatestPatchMeta().catch(e => log('WARN', 'PATCH', e.message)); // executa imediatamente no boot
-    setInterval(() => fetchLatestPatchMeta().catch(e => log('WARN', 'PATCH', e.message)), PATCH_AUTO_FETCH_INTERVAL);
   }
   // CLV / updates: útil em todos esportes com odds padronizadas
   setInterval(() => checkCLV().catch(e => log('ERROR', 'CLV', e.message)), 5 * 60 * 1000);
