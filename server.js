@@ -543,9 +543,23 @@ async function fetchEsportsOddsForTids(tids) {
 async function getMapMlOddsFromFixture(t1, t2, mapNumber) {
   const nt1 = norm(t1), nt2 = norm(t2);
   if (!nt1 || !nt2) return null;
+
+  // Matching mais robusto (usa aliases e aceita ordem invertida)
+  const expandWithAliases = n => {
+    const variants = new Set([n]);
+    for (const [key, aliases] of Object.entries(LOL_ALIASES)) {
+      if (n.includes(key) || key.includes(n)) { aliases.forEach(a => variants.add(a)); variants.add(key); }
+    }
+    return [...variants];
+  };
+  const variants1 = expandWithAliases(nt1);
+  const variants2 = expandWithAliases(nt2);
+  const anyMatch = (variants, slug) => variants.some(v => v && v.length >= 2 && slug.includes(v));
+
   const entry = Object.values(oddsCache).find(v => {
+    if (!v?.fixtureId) return false;
     const cs = v.combinedSlug || '';
-    return cs.includes(nt1) && cs.includes(nt2) && v.fixtureId;
+    return (anyMatch(variants1, cs) && anyMatch(variants2, cs));
   });
   if (!entry?.fixtureId || !ODDSPAPI_KEY) return null;
 
@@ -563,16 +577,27 @@ async function getMapMlOddsFromFixture(t1, t2, mapNumber) {
   const n = parseInt(mapNumber, 10);
   if (!Number.isFinite(n) || n <= 0) return null;
 
-  // Filtra mercados relacionados a "map" e tenta achar o do mapa atual
+  // Filtra mercados relacionados a map/game e tenta achar o do mapa atual
   const mapMarkets = allMarkets.filter(m => {
     const name = (m.marketName || m.marketId || '').toString().toLowerCase();
-    if (!name.includes('map')) return false;
-    // match "map 1", "map1", etc
-    return name.includes(`map ${n}`) || name.includes(`map${n}`) || name.includes(`#${n}`);
+    const isMap = name.includes('map') || name.includes('game');
+    if (!isMap) return false;
+    // match "map 1", "game 1", "map1", "game1", "#1", "1st map"
+    return (
+      name.includes(`map ${n}`) || name.includes(`map${n}`) ||
+      name.includes(`game ${n}`) || name.includes(`game${n}`) ||
+      name.includes(`#${n}`) ||
+      name.includes(`${n}st map`) || name.includes(`${n}nd map`) || name.includes(`${n}rd map`) || name.includes(`${n}th map`)
+    );
   });
 
-  // Se não achou explícito, tenta qualquer mercado "map" (fallback)
-  const candidates = mapMarkets.length ? mapMarkets : allMarkets.filter(m => ((m.marketName || '').toString().toLowerCase().includes('map')));
+  // Se não achou explícito, tenta qualquer mercado "map/game" (fallback)
+  const candidates = mapMarkets.length
+    ? mapMarkets
+    : allMarkets.filter(m => {
+        const name = (m.marketName || m.marketId || '').toString().toLowerCase();
+        return name.includes('map') || name.includes('game');
+      });
   if (!candidates.length) return null;
 
   // Heurística: preferir "winner" / "moneyline"
@@ -591,8 +616,14 @@ async function getMapMlOddsFromFixture(t1, t2, mapNumber) {
     const outcomes = cand.outcomes;
     if (!outcomes || outcomes.length < 2) continue;
     // Tenta mapear outcomes pelo nome do time (quando disponível)
-    const o1 = outcomes.find(o => norm(o.name || '') === nt1 || norm(o.name || '').includes(nt1) || nt1.includes(norm(o.name || '')));
-    const o2 = outcomes.find(o => norm(o.name || '') === nt2 || norm(o.name || '').includes(nt2) || nt2.includes(norm(o.name || '')));
+    const o1 = outcomes.find(o => {
+      const on = norm(o.name || '');
+      return variants1.some(v => v && v.length >= 2 && (on === v || on.includes(v) || v.includes(on)));
+    });
+    const o2 = outcomes.find(o => {
+      const on = norm(o.name || '');
+      return variants2.some(v => v && v.length >= 2 && (on === v || on.includes(v) || v.includes(on)));
+    });
     const p1 = extractPrice(o1 || outcomes[0]);
     const p2 = extractPrice(o2 || outcomes[1]);
     if (!p1 || !p2) continue;
