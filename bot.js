@@ -1105,12 +1105,20 @@ async function checkLiveNotifications() {
           try {
             const o = mapOdds;
             const gameIcon = '🎮';
+            const isMapMarket = (o.mapMarket === true);
+            const marketLabel = isMapMarket ? 'ML do mapa' : 'ML da série';
+            const mapNote = !isMapMarket
+              ? `⚠️ *Mercado ML do mapa indisponível* — exibindo ML da série\n`
+              : '';
             const txt = `${gameIcon} 🔴 *PARTIDA AO VIVO (COM MERCADO ABERTO)!*\n` +
-              `🗺️ *Mapa ${currentMap} (ML do mapa)*\n\n` +
+              `🗺️ *Mapa ${currentMap} (${marketLabel})*\n\n` +
               `*${match.team1}* ${match.score1}-${match.score2} *${match.team2}*\n` +
               `📋 ${match.league}\n` +
+              mapNote +
               `💰 ${match.team1}: ${o.t1} | ${match.team2}: ${o.t2}\n\n` +
-              `_A partir de agora: apenas ML do mapa atual. Odds acima são do mapa._`;
+              (isMapMarket
+                ? `_A partir de agora: apenas ML do mapa atual. Odds acima são do mapa._`
+                : `_A partir de agora: apenas ML do mapa atual. Quando mercado do mapa abrir, odds serão do mapa._`);
             
             await sendDM(token, userId, txt);
           } catch(e) {

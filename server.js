@@ -1524,17 +1524,37 @@ const server = http.createServer(async (req, res) => {
     if (parsed.query.force === '1') {
       // Se backoff ativo, nunca force (só aumenta spam e não atualiza mesmo)
       if (Date.now() < esportsBackoffUntil) {
-        const oNow = (mapNumber && mapNumber > 0)
-          ? await getMapMlOddsFromFixture(t1, t2, mapNumber)
-          : findOdds('esports', t1, t2);
+        let oNow = null;
+        if (mapNumber && mapNumber > 0) {
+          oNow = await getMapMlOddsFromFixture(t1, t2, mapNumber);
+          if (!oNow) {
+            const base = findOdds('esports', t1, t2);
+            if (base?.t1 && base?.t2) oNow = { ...base, mapRequested: mapNumber, mapMarket: false };
+          } else {
+            oNow.mapRequested = mapNumber;
+            oNow.mapMarket = true;
+          }
+        } else {
+          oNow = findOdds('esports', t1, t2);
+        }
         sendJson(res, oNow || { error: 'odds indisponíveis (backoff ativo)' });
         return;
       }
       // Evita spam/429: se já está buscando odds, não reseta TTL de novo
       if (esportsOddsFetching) {
-        const oNow = (mapNumber && mapNumber > 0)
-          ? await getMapMlOddsFromFixture(t1, t2, mapNumber)
-          : findOdds('esports', t1, t2);
+        let oNow = null;
+        if (mapNumber && mapNumber > 0) {
+          oNow = await getMapMlOddsFromFixture(t1, t2, mapNumber);
+          if (!oNow) {
+            const base = findOdds('esports', t1, t2);
+            if (base?.t1 && base?.t2) oNow = { ...base, mapRequested: mapNumber, mapMarket: false };
+          } else {
+            oNow.mapRequested = mapNumber;
+            oNow.mapMarket = true;
+          }
+        } else {
+          oNow = findOdds('esports', t1, t2);
+        }
         sendJson(res, oNow || { error: 'odds não encontradas (fetch em andamento)' });
         return;
       }
@@ -1553,9 +1573,21 @@ const server = http.createServer(async (req, res) => {
       log('INFO', 'ODDS', `Force refresh solicitado para ${t1} vs ${t2} (partida iminente)`);
     }
     await fetchOdds('esports');
-    const o = (mapNumber && mapNumber > 0)
-      ? await getMapMlOddsFromFixture(t1, t2, mapNumber)
-      : findOdds('esports', t1, t2);
+    let o = null;
+    if (mapNumber && mapNumber > 0) {
+      o = await getMapMlOddsFromFixture(t1, t2, mapNumber);
+      if (!o) {
+        const base = findOdds('esports', t1, t2);
+        if (base?.t1 && base?.t2) {
+          o = { ...base, mapRequested: mapNumber, mapMarket: false };
+        }
+      } else {
+        o.mapRequested = mapNumber;
+        o.mapMarket = true;
+      }
+    } else {
+      o = findOdds('esports', t1, t2);
+    }
     sendJson(res, o || { error: 'odds não encontradas' });
     return;
   }
@@ -1659,6 +1691,34 @@ const server = http.createServer(async (req, res) => {
       cacheSize: cacheEntries.length,
       checks
     });
+    return;
+  }
+
+  // Diagnóstico de odds por mapa (mercados de fixture)
+  if (p === '/debug-map-odds') {
+    const t1 = parsed.query.team1 || '';
+    const t2 = parsed.query.team2 || '';
+    const mapNumber = parsed.query.map ? parseInt(parsed.query.map, 10) : 1;
+    try {
+      const nt1 = norm(t1), nt2 = norm(t2);
+      const entry = Object.values(oddsCache).find(v => {
+        if (!v?.fixtureId) return false;
+        const cs = v.combinedSlug || '';
+        return cs.includes(nt1) && cs.includes(nt2);
+      });
+      if (!entry?.fixtureId) { sendJson(res, { error: 'fixture_not_found' }); return; }
+      const fixtureId = entry.fixtureId;
+      const url = `https://api.oddspapi.io/v4/odds-by-fixtures?bookmaker=1xbet&fixtureId=${fixtureId}&oddsFormat=decimal&apiKey=${ODDSPAPI_KEY}`;
+      const r = await cachedHttpGet(url, { provider: 'oddspapi', ttlMs: 0 }).catch(() => null);
+      if (!r || r.status !== 200) { sendJson(res, { error: 'http_' + (r?.status || 'fail') }); return; }
+      const data = safeParse(r.body, null);
+      const allMarkets = Array.isArray(data) ? data : (Array.isArray(data?.data) ? data.data : []);
+      const names = allMarkets.map(m => (m.marketName || m.marketId || '').toString());
+      const mapOdds = await getMapMlOddsFromFixture(t1, t2, mapNumber);
+      sendJson(res, { fixtureId, map: mapNumber, mapOdds, markets: names.slice(0, 80) });
+    } catch(e) {
+      sendJson(res, { error: e.message }, 500);
+    }
     return;
   }
 
