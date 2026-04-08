@@ -3205,13 +3205,26 @@ const server = http.createServer(async (req, res) => {
 
       if (!tennisKeys.length) { sendJson(res, []); return; }
 
-      // 2) Busca odds em paralelo (limita a 10 torneios para não estourar quota)
+      // 2) Busca odds em paralelo (limita chaves para não estourar quota)
       // Cada torneio = 1 request
-      const maxKeys = Math.min(10, tennisKeys.length);
+      const maxKeysCfg = parseInt(process.env.TENNIS_MAX_KEYS || '10', 10);
+      const maxKeys = Math.min(Math.max(2, maxKeysCfg || 10), tennisKeys.length);
+
+      // Balancear ATP/WTA: evita só ATP quando a lista vem ordenada por popularidade
+      const isWtaKey = k => /(^|_)wta(_|$)/i.test(String(k));
+      const wtaKeys = tennisKeys.filter(isWtaKey);
+      const atpKeys = tennisKeys.filter(k => !isWtaKey(k));
       const allowedKeys = [];
-      for (const k of tennisKeys.slice(0, maxKeys)) {
+      for (let i = 0; allowedKeys.length < maxKeys && (i < atpKeys.length || i < wtaKeys.length); i++) {
+        if (i < atpKeys.length) allowedKeys.push(atpKeys[i]);
+        if (allowedKeys.length >= maxKeys) break;
+        if (i < wtaKeys.length) allowedKeys.push(wtaKeys[i]);
+      }
+
+      log('INFO', 'TENNIS', `Sports keys: total=${tennisKeys.length} atp=${atpKeys.length} wta=${wtaKeys.length} usando=${allowedKeys.length}`);
+
+      for (const k of allowedKeys) {
         if (!oddsApiAllowed('ODDS')) break;
-        allowedKeys.push(k);
       }
       const matches = [];
       for (const k of allowedKeys) {
