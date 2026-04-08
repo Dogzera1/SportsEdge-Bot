@@ -1398,6 +1398,25 @@ async function autoAnalyzeMatch(token, match) {
 
     const text = resp.content?.map(b => b.text || '').join('');
     if (!text) {
+      // Fallback sem IA: envia tip baseada no modelo quando há edge claro
+      const direction = mlResult.direction;
+      const pickTeam = direction === 't2' ? match.team2 : match.team1;
+      const pickOdd = direction === 't2' ? parseFloat(oddsToUse?.t2) : parseFloat(oddsToUse?.t1);
+      const pickP = direction === 't2' ? mlResult.modelP2 : mlResult.modelP1;
+      const evPct = (pickP && pickOdd) ? ((pickP * pickOdd - 1) * 100) : 0;
+      if (pickOdd >= 1.01 && evPct >= 5 && mlResult.score >= 5) {
+        const stake = calcKellyWithP(pickP, pickOdd, 0.15); // ~1/6 Kelly
+        log('WARN', 'AUTO', `IA sem resposta; fallback modelo: ${pickTeam} EV=${evPct.toFixed(1)}% edge=${mlResult.score.toFixed(1)}pp`);
+        return {
+          ok: true,
+          tipTeam: pickTeam,
+          tipOdd: pickOdd,
+          tipEV: parseFloat(evPct.toFixed(1)),
+          tipStake: String(stake || '1u'),
+          tipConf: 'MÉDIA',
+          tipReason: 'Value detectado pelo modelo (fallback sem IA)'
+        };
+      }
       log('WARN', 'AUTO', `IA sem resposta para ${match.team1} vs ${match.team2} (provider: ${resp.provider || 'deepseek'})`);
       return null;
     }

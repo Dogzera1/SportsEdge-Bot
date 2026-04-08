@@ -735,6 +735,18 @@ async function fetchEsportsOddsOneBatch(batch, batchIndex0, totalBatches) {
     log('WARN', 'ODDS', '429 — backoff 2h ativado');
     return { ok: false, status: 429 };
   }
+  // FIXT / no fixtures: evitar re-chamar em loop (force-fetch live)
+  if (r.status === 404) {
+    const bodyS = String(r.body || '');
+    const isNoFixtures = bodyS.includes('FIXT') || bodyS.toLowerCase().includes('no fixtures found');
+    if (isNoFixtures) {
+      for (const tid of batch) esportsTidNoFixturesUntil.set(tid, now + ESPORTS_NO_FIXTURES_TTL);
+      log('WARN', 'ODDS', `HTTP 404 (no fixtures) — backoff ${Math.round(ESPORTS_NO_FIXTURES_TTL/60000)}min tids=[${batch.join(',')}]`);
+    } else {
+      log('WARN', 'ODDS', `HTTP 404 — sem atualização de odds`);
+    }
+    return { ok: false, status: 404 };
+  }
   if (r.status !== 200) {
     log('WARN', 'ODDS', `HTTP ${r.status} — sem atualização de odds`);
     return { ok: false, status: r.status };
@@ -847,6 +859,16 @@ async function bootstrapEsportsOddsExtraBatches() {
   }
 }
 
+// ── Backoff por tournamentId sem fixtures (OddsPapi 404 FIXT) ──
+const esportsTidNoFixturesUntil = new Map(); // tid -> ts
+const ESPORTS_NO_FIXTURES_TTL = Math.max(10 * 60 * 1000, parseInt(process.env.ODDSPAPI_NO_FIXTURES_TTL_MS || '7200000', 10) || 7200000); // default 2h
+function _isNoFixturesBlocked(tid) {
+  const until = esportsTidNoFixturesUntil.get(tid);
+  if (!until) return false;
+  if (Date.now() >= until) { esportsTidNoFixturesUntil.delete(tid); return false; }
+  return true;
+}
+
 // ── Mapeamento slug de liga → tournament ID (para force-fetch em partidas ao vivo) ──
 const SLUG_TO_TID = {
   'lcs': 2450,
@@ -874,10 +896,16 @@ const SLUG_TO_TID = {
 async function fetchEsportsOddsForTids(tids) {
   if (!ODDSPAPI_KEY || !tids || !tids.length) return;
   if (Date.now() < esportsBackoffUntil) { log('INFO', 'ODDS', 'Force-fetch ignorado (backoff ativo)'); return; }
+  // Filtra tournamentIds que retornaram 404 sem fixtures recentemente
+  const filtered = tids.filter(tid => !_isNoFixturesBlocked(tid));
+  if (!filtered.length) {
+    log('INFO', 'ODDS', `Force-fetch ignorado (no-fixtures backoff em ${tids.length} tid(s))`);
+    return;
+  }
   const BATCH_SIZE = Math.max(1, parseInt(process.env.ODDSPAPI_BATCH_SIZE || '3') || 3);
   const batches = [];
-  for (let i = 0; i < tids.length; i += BATCH_SIZE) batches.push(tids.slice(i, i + BATCH_SIZE));
-  log('INFO', 'ODDS', `Force-fetch live: ${tids.length} torneio(s) em ${batches.length} lote(s)`);
+  for (let i = 0; i < filtered.length; i += BATCH_SIZE) batches.push(filtered.slice(i, i + BATCH_SIZE));
+  log('INFO', 'ODDS', `Force-fetch live: ${filtered.length} torneio(s) em ${batches.length} lote(s)`);
   for (let i = 0; i < batches.length; i++) {
     if (Date.now() < esportsBackoffUntil) break;
     const { ok } = await fetchEsportsOddsOneBatch(batches[i], i, batches.length);
