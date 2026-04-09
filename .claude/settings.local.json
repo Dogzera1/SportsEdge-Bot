@@ -41,7 +41,8 @@
       "Bash(curl -s \"http://localhost:3000/roi?sport=tennis\")",
       "Bash(cd:*)",
       "Bash(grep -rl \"isLive\\\\|Esports upcoming\\\\|autoHandler\\\\|AUTO\\\\|auto_handler\" 'C:/Users/vict_/Desktop/lol betting' --include=*.js)",
-      "Bash(grep -rl \"lol-matches\\\\|lol_matches\\\\|live.*odds\\\\|odds.*live\" 'C:/Users/vict_/Desktop/lol betting' --include=*.js)"
+      "Bash(grep -rl \"lol-matches\\\\|lol_matches\\\\|live.*odds\\\\|odds.*live\" 'C:/Users/vict_/Desktop/lol betting' --include=*.js)",
+      "Bash(dir:*)"
     ]
   }
 }

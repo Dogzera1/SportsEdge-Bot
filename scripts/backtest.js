@@ -274,6 +274,80 @@ async function main() {
     console.log(`  ${bucket}: ${b.total} tips | WR ${wr}% | P&L ${b.profit >= 0 ? '+' : ''}${b.profit.toFixed(2)}u`);
   }
 
+  // ── Análise por factorCount (novo: distingue tips com vs sem dados ML) ──
+  console.log('\n── ROI POR FACTORCOUNT (dados ML disponíveis) ──');
+  const byFactorCount = {};
+  for (const tip of tips) {
+    if (tip.sport !== 'esports') continue;
+    // model_p_pick > 0 indica que factorCount >= 1
+    const hasModelP = tip.model_p_pick && parseFloat(tip.model_p_pick) > 0;
+    const bucket = hasModelP ? 'com_dados_ml' : 'sem_dados_ml';
+    if (!byFactorCount[bucket]) byFactorCount[bucket] = newBucket();
+    byFactorCount[bucket].total++;
+    const s = parseFloat(tip.stake) || 1;
+    const o = parseFloat(tip.odds)  || 1;
+    const p = tip.result === 'win';
+    byFactorCount[bucket].staked += s;
+    byFactorCount[bucket].profit += p ? s * (o - 1) : -s;
+    if (p) byFactorCount[bucket].wins++;
+  }
+  for (const [b, d] of Object.entries(byFactorCount)) {
+    const r = d.staked > 0 ? (d.profit / d.staked * 100) : 0;
+    const w = d.total > 0 ? (d.wins / d.total * 100) : 0;
+    const icon = r > 0 ? '✅' : '❌';
+    console.log(`  ${icon} ${b}: ${d.total} tips | WR ${w.toFixed(1)}% | ROI ${r >= 0 ? '+' : ''}${r.toFixed(2)}%`);
+  }
+
+  // ── CLV analysis ──
+  const clvTips = tips.filter(t => t.clv_odds && parseFloat(t.clv_odds) > 1);
+  if (clvTips.length > 0) {
+    console.log('\n── CLV (Closing Line Value) ──');
+    const clvValues = clvTips.map(t => {
+      const tipOdds = parseFloat(t.odds) || 1;
+      const clvOdds = parseFloat(t.clv_odds) || 1;
+      return ((tipOdds / clvOdds) - 1) * 100; // CLV positivo = bet antes do closing foi melhor
+    });
+    const avgCLV = clvValues.reduce((a, b) => a + b, 0) / clvValues.length;
+    const posRate = clvValues.filter(v => v > 0).length / clvValues.length * 100;
+    console.log(`  Tips com CLV: ${clvTips.length} | CLV médio: ${avgCLV >= 0 ? '+' : ''}${avgCLV.toFixed(2)}%`);
+    console.log(`  CLV positivo: ${posRate.toFixed(1)}% das tips`);
+    if (avgCLV > 1.5) console.log('  ✅ CLV positivo consistente — modelo tem edge real');
+    else if (avgCLV > 0) console.log('  🟡 CLV marginalmente positivo — monitorar');
+    else console.log('  ❌ CLV negativo — apostas pioram após o bet (sem edge ou timing ruim)');
+  }
+
+  // ── Recomendações automáticas ──
+  console.log('\n── RECOMENDAÇÕES ──');
+  const esportsTips = tips.filter(t => t.sport === 'esports' && t.result);
+  if (esportsTips.length >= 20) {
+    const roiEsports = esportsTips.reduce((acc, t) => {
+      const s = parseFloat(t.stake) || 1, o = parseFloat(t.odds) || 1;
+      return acc + (t.result === 'win' ? s * (o - 1) : -s);
+    }, 0) / esportsTips.reduce((acc, t) => acc + (parseFloat(t.stake) || 1), 0) * 100;
+
+    if (roiEsports < -10) {
+      console.log('  → ROI < -10%: considere LOL_KELLY_CAL=0.7 e aumentar LOL_MIN_EDGE_NO_COMP para 6.0');
+    } else if (roiEsports < 0) {
+      console.log('  → ROI negativo: considere LOL_KELLY_CAL=0.8 e revisar thresholds de EV');
+    } else if (roiEsports > 10) {
+      console.log('  → ROI > +10%: sistema com edge. Pode testar LOL_KELLY_CAL=1.1 para aumentar stakes');
+    } else {
+      console.log('  → ROI marginalmente positivo: manter configuração atual, aumentar sample size');
+    }
+
+    const altaTips = esportsTips.filter(t => (t.confidence || '').toUpperCase() === 'ALTA');
+    const altaROI = altaTips.length > 5 ? altaTips.reduce((acc, t) => {
+      const s = parseFloat(t.stake) || 1, o = parseFloat(t.odds) || 1;
+      return acc + (t.result === 'win' ? s * (o - 1) : -s);
+    }, 0) / altaTips.reduce((acc, t) => acc + (parseFloat(t.stake) || 1), 0) * 100 : null;
+
+    if (altaROI !== null && altaROI < -5) {
+      console.log('  → ALTA confiança com ROI negativo: elevar LOL_EV_THRESHOLD para 8');
+    }
+  } else {
+    console.log(`  → Sample size insuficiente (${esportsTips.length} esports tips). Mínimo 20 para recomendações.`);
+  }
+
   console.log('\n=== Fim do Backtest ===\n');
   db.close();
 }

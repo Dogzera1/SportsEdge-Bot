@@ -236,9 +236,41 @@ async function getRiskSnapshotCached() {
   return snap;
 }
 
-async function applyGlobalRisk(sport, desiredUnits) {
-  // Desativado a pedido do administrador (buffer de segurança)
-  return { ok: true, units: desiredUnits, reason: 'bypassed_by_admin' };
+// Multiplicadores de stake por liga (tier-2/3 = mais variância, menor Kelly)
+// Configurável via LOL_LEAGUE_RISK_MULTIPLIERS no .env (JSON)
+const _leagueRiskMultipliers = (() => {
+  try {
+    const custom = process.env.LOL_LEAGUE_RISK_MULTIPLIERS;
+    if (custom) return JSON.parse(custom);
+  } catch(_) {}
+  return {
+    // T1 — sem redução
+    lck: 1.0, lcs: 1.0, lec: 1.0, lpl: 1.0, worlds: 1.0, msi: 1.0,
+    cblol: 0.9, 'cblol-brazil': 0.9, lla: 0.9, pcs: 0.9, lco: 0.9, vcs: 0.9,
+    // T2 — redução de 25-40%
+    'prime-league': 0.7, primeleague: 0.7, 'emea-masters': 0.75, 'lck-cl': 0.75,
+    lfl: 0.7, nlc: 0.7, 'ultraliga': 0.7, lit: 0.65, les: 0.65, lrn: 0.65, lrs: 0.65,
+    'road-of-legends': 0.65, nacl: 0.7, ldl: 0.75,
+    // T3 — redução de 50%
+    default: 0.6,
+  };
+})();
+
+function getLeagueRiskMultiplier(leagueSlug) {
+  if (!leagueSlug) return _leagueRiskMultipliers.default ?? 0.6;
+  const slug = String(leagueSlug).toLowerCase().replace(/[^a-z0-9-]/g, '');
+  return _leagueRiskMultipliers[slug] ?? _leagueRiskMultipliers.default ?? 0.6;
+}
+
+async function applyGlobalRisk(sport, desiredUnits, leagueSlug) {
+  if (!desiredUnits || desiredUnits <= 0) return { ok: false, units: 0, reason: 'stake_zero' };
+  // Ajuste por liga (tier-2/3 = stake reduzido proporcionalmente)
+  const leagueMult = (sport === 'esports' && leagueSlug) ? getLeagueRiskMultiplier(leagueSlug) : 1.0;
+  const adjusted = Math.max(0.5, Math.round(desiredUnits * leagueMult * 2) / 2);
+  if (leagueMult < 1.0 && adjusted !== desiredUnits) {
+    log('INFO', 'RISK', `Liga ${leagueSlug}: mult=${leagueMult} ${desiredUnits}u→${adjusted}u`);
+  }
+  return { ok: true, units: adjusted, reason: leagueMult < 1.0 ? `league_tier_reduction` : 'ok' };
 }
 
 // ── Send Helpers ──
@@ -503,9 +535,11 @@ async function runAutoAnalysis() {
           const tipStake = modelPForKelly
             ? calcKellyWithP(modelPForKelly, tipOdd, kellyFraction)
             : calcKellyFraction(tipEV, tipOdd, kellyFraction);
+          // Kelly negativo → não apostar
+          if (tipStake === '0u') { log('INFO', 'AUTO', `Kelly negativo para ${tipTeam} @ ${tipOdd} — tip abortada`); continue; }
           // Global Risk Manager (cross-sport)
           const desiredUnits = parseFloat(String(tipStake).replace('u', '')) || 0;
-          const riskAdj = await applyGlobalRisk('esports', desiredUnits);
+          const riskAdj = await applyGlobalRisk('esports', desiredUnits, match.leagueSlug || match.league);
           if (!riskAdj.ok) { log('INFO', 'RISK', `esports: bloqueada (${riskAdj.reason})`); continue; }
           const tipStakeAdj = `${riskAdj.units.toFixed(1).replace(/\.0$/, '')}u`;
           const gameIcon = '🎮';
@@ -748,6 +782,10 @@ async function runAutoAnalysis() {
             const tipStake = modelPForKelly
               ? calcKellyWithP(modelPForKelly, tipOdd, kellyFraction)
               : calcKellyFraction(tipEV, tipOdd, kellyFraction);
+            if (tipStake === '0u') {
+              log('INFO', 'AUTO', `Kelly negativo upcoming ${tipTeam} @ ${tipOdd} — tip abortada`);
+              await new Promise(r => setTimeout(r, 3000)); continue;
+            }
             const gameIcon = '🎮';
             const confEmoji = { [CONF.ALTA]: '🟢', [CONF.MEDIA]: '🟡', [CONF.BAIXA]: '🔵' }[tipConf] || '🟡';
             const kellyLabel = tipConf === CONF.ALTA ? '¼ Kelly' : tipConf === CONF.BAIXA ? '1/10 Kelly' : '⅙ Kelly';
@@ -1577,6 +1615,27 @@ async function autoAnalyzeMatch(token, match) {
         filteredTipResult = null;
       }
 
+      // Gate 0.5: Validação cruzada EV da IA vs modelo (quando modelP disponível)
+      // Previne tip quando IA reporta EV muito acima do que o modelo calcula
+      // Ex: modelo calcula EV=+2%, IA reporta EV=+12% — divergência de 10pp → suspeito
+      if (filteredTipResult && mlResult.modelP1 > 0 && mlResult.factorCount >= 1) {
+        const isT1Tip = filteredTipResult[1] && (norm(filteredTipResult[1]).includes(norm(match.team1)) || norm(match.team1).includes(norm(filteredTipResult[1].trim())));
+        const modelP  = isT1Tip ? mlResult.modelP1 : mlResult.modelP2;
+        const modelEV = (modelP * tipOdd - 1) * 100;
+        const evDivergence = tipEV - modelEV;
+        // Se IA reporta EV >10pp acima do modelo, rebaixa confiança
+        if (evDivergence > 10) {
+          const confAtual = (filteredTipResult[5] || CONF.MEDIA).trim().toUpperCase();
+          if (confAtual === CONF.ALTA) {
+            filteredTipResult[5] = CONF.MEDIA;
+            log('INFO', 'AUTO', `Gate EV-modelo: ${match.team1} vs ${match.team2} → IA EV=${tipEV.toFixed(1)}% vs modeloEV=${modelEV.toFixed(1)}% (Δ${evDivergence.toFixed(1)}pp) → ALTA→MÉDIA`);
+          } else if (confAtual === CONF.MEDIA && evDivergence > 15) {
+            filteredTipResult[5] = CONF.BAIXA;
+            log('INFO', 'AUTO', `Gate EV-modelo: ${match.team1} vs ${match.team2} → IA EV diverge ${evDivergence.toFixed(1)}pp → MÉDIA→BAIXA`);
+          }
+        }
+      }
+
       // Gate 0: Sem odds reais → rejeitar sempre (odds estimadas não garantem valor)
       if (filteredTipResult && !hasRealOdds) {
         log('INFO', 'AUTO', `Gate odds reais: ${match.team1} vs ${match.team2} → odds estimadas → rejeitado`);
@@ -1609,24 +1668,51 @@ async function autoAnalyzeMatch(token, match) {
       }
 
       // Gate 3: Consenso de direção ML × IA
-      // Divergência = incerteza, não erro. Rebaixa para MÉDIA em vez de rejeitar.
-      // Raciocínio: a IA vê os mesmos dados + pode identificar padrões não-lineares.
-      if (filteredTipResult && mlResult.direction && hasRealOdds && mlResult.score > 8) {
+      // Com dados suficientes (factorCount>=2, score>=3pp), divergência ML×IA é sinal forte.
+      // Score >8pp: rejeita BAIXA, rebaixa ALTA/MÉDIA
+      // Score 3-8pp: rebaixa um nível
+      if (filteredTipResult && mlResult.direction && hasRealOdds && mlResult.factorCount >= 2 && mlResult.score >= 3) {
         const t1 = (match.team1 || '').toLowerCase();
         const tipTeamNorm = tipTeam.toLowerCase();
         const aiDirectionIsT1 = tipTeamNorm.includes(t1) || t1.includes(tipTeamNorm);
         const mlDirectionIsT1 = mlResult.direction === 't1';
         if (aiDirectionIsT1 !== mlDirectionIsT1) {
           const confAtual = getConf();
-          if (confAtual === CONF.ALTA) {
-            filteredTipResult[5] = CONF.MEDIA;
-            log('INFO', 'AUTO', `Gate consenso: ${match.team1} vs ${match.team2} → ML(${mlResult.direction}) ≠ IA(${tipTeam}) → rebaixado ALTA→MÉDIA (incerteza)`);
-          } else if (confAtual === CONF.MEDIA) {
-            filteredTipResult[5] = CONF.BAIXA;
-            log('INFO', 'AUTO', `Gate consenso: ${match.team1} vs ${match.team2} → ML(${mlResult.direction}) ≠ IA(${tipTeam}) → rebaixado MÉDIA→BAIXA (divergência ML×IA)`);
+          if (mlResult.score > 8) {
+            // ML fortemente em outra direção: BAIXA → rejeita, MÉDIA/ALTA → rebaixa
+            if (confAtual === CONF.BAIXA) {
+              log('INFO', 'AUTO', `Gate consenso forte: ${match.team1} vs ${match.team2} → ML(${mlResult.direction}) ≠ IA edge=${mlResult.score.toFixed(1)}pp → BAIXA rejeitada`);
+              filteredTipResult = null;
+            } else if (confAtual === CONF.ALTA) {
+              filteredTipResult[5] = CONF.MEDIA;
+              log('INFO', 'AUTO', `Gate consenso forte: ${match.team1} vs ${match.team2} → ML(${mlResult.direction}) ≠ IA → ALTA→MÉDIA`);
+            } else {
+              filteredTipResult[5] = CONF.BAIXA;
+              log('INFO', 'AUTO', `Gate consenso forte: ${match.team1} vs ${match.team2} → ML(${mlResult.direction}) ≠ IA → MÉDIA→BAIXA`);
+            }
           } else {
-            log('INFO', 'AUTO', `Gate consenso: ${match.team1} vs ${match.team2} → ML(${mlResult.direction}) ≠ IA(${tipTeam}) → incerteza ML×IA (conf BAIXA mantida)`);
+            // ML moderadamente divergente: rebaixa um nível
+            if (confAtual === CONF.ALTA) {
+              filteredTipResult[5] = CONF.MEDIA;
+              log('INFO', 'AUTO', `Gate consenso: ${match.team1} vs ${match.team2} → ML(${mlResult.direction}) ≠ IA edge=${mlResult.score.toFixed(1)}pp → ALTA→MÉDIA`);
+            } else if (confAtual === CONF.MEDIA) {
+              filteredTipResult[5] = CONF.BAIXA;
+              log('INFO', 'AUTO', `Gate consenso: ${match.team1} vs ${match.team2} → ML(${mlResult.direction}) ≠ IA → MÉDIA→BAIXA`);
+            }
           }
+        }
+      }
+
+      // Gate 3.5: sem dados ML (factorCount=0), bloqueia BAIXA e exige EV maior para MÉDIA
+      // Razão: sem forma/H2H/comp, o EV reportado pela IA é circular (deriva do de-juice que já está no prompt)
+      if (filteredTipResult && mlResult.factorCount === 0) {
+        const confNow = getConf();
+        if (confNow === CONF.BAIXA) {
+          log('INFO', 'AUTO', `Gate sem-dados: ${match.team1} vs ${match.team2} → factorCount=0, conf BAIXA bloqueada (sem dados objetivos)`);
+          filteredTipResult = null;
+        } else if (confNow === CONF.MEDIA && tipEV < 8) {
+          log('INFO', 'AUTO', `Gate sem-dados: ${match.team1} vs ${match.team2} → factorCount=0, conf MÉDIA exige EV≥8% (atual ${tipEV}%) → rejeitado`);
+          filteredTipResult = null;
         }
       }
 
@@ -1635,7 +1721,8 @@ async function autoAnalyzeMatch(token, match) {
       if (filteredTipResult && hasRealOdds) {
         const confNow = getConf();
         const evOffset = confNow === CONF.ALTA ? 0 : confNow === CONF.MEDIA ? -1.5 : -3;
-        const confThreshold = Math.max(0.5, adaptiveEV + evOffset);
+        // Mínimo absoluto de 3% — abaixo disso a margem da 1xBet já come o EV
+        const confThreshold = Math.max(3.0, adaptiveEV + evOffset);
         if (!isNaN(tipEV) && tipEV < confThreshold) {
           log('INFO', 'AUTO', `Gate EV: ${match.team1} vs ${match.team2} → EV ${tipEV}% < threshold ${confThreshold.toFixed(1)}% [${confNow}] (${sigCount}/6 sinais) → rejeitado`);
           filteredTipResult = null;
@@ -4309,6 +4396,21 @@ log('INFO', 'BOOT', `Sports carregados: ${JSON.stringify(Object.entries(SPORTS).
   // CLV / updates: útil em todos esportes com odds padronizadas
   setInterval(() => checkCLV().catch(e => log('ERROR', 'CLV', e.message)), 5 * 60 * 1000);
   setInterval(() => refreshOpenTips().catch(() => {}), 10 * 60 * 1000);
+
+  // Live odds polling: força atualização de odds para partidas ao vivo a cada 2 min
+  // Captura oportunidades quando casas demoram a ajustar linha mid-game
+  if (SPORTS.esports?.enabled) {
+    setInterval(async () => {
+      try {
+        const lolRaw = await serverGet('/lol-matches').catch(() => []);
+        const live = Array.isArray(lolRaw) ? lolRaw.filter(m => m.status === 'live') : [];
+        for (const m of live) {
+          await serverGet(`/odds?team1=${encodeURIComponent(m.team1)}&team2=${encodeURIComponent(m.team2)}&force=1`).catch(() => null);
+        }
+        if (live.length > 0) log('DEBUG', 'LIVE-ODDS', `Refresh odds live: ${live.length} partida(s)`);
+      } catch(e) { /* silencioso */ }
+    }, 2 * 60 * 1000); // a cada 2 min
+  }
   
   log('INFO', 'BOOT', `Bots ativos: ${Object.keys(bots).join(', ')}`);
   log('INFO', 'BOOT', 'Pronto! Mande /start em cada bot no Telegram');
@@ -4384,11 +4486,12 @@ async function checkCLV() {
       for (const tip of unsettled) {
         if (tip.clv_odds) continue; // já registrado
 
-        // Verifica se partida começa em < 1h (janela ideal para CLV)
+        // Janela CLV: < 3h antes do início (odds já refletem mercado maduro)
+        // Antes era 1h — muito restritivo, muitas tips ficavam sem CLV
         const tipKey = norm(tip.participant1 || '') + '_' + norm(tip.participant2 || '');
         const matchStart = matchTimeMap[tipKey] || 0;
         const timeToMatch = matchStart > 0 ? matchStart - now : null;
-        if (timeToMatch === null || timeToMatch > 60 * 60 * 1000 || timeToMatch < -5 * 60 * 1000) continue;
+        if (timeToMatch === null || timeToMatch > 3 * 60 * 60 * 1000 || timeToMatch < -5 * 60 * 1000) continue;
 
         let clvOdds = null;
         if (sport === 'esports') {
