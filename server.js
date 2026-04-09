@@ -1038,6 +1038,16 @@ async function getMapMlOddsFromFixture(t1, t2, mapNumber) {
   const n = parseInt(mapNumber, 10);
   if (!Number.isFinite(n) || n <= 0) return null;
 
+  // OddsPapi LoL marketIds (blog):
+  // 171 = Match Winner (série)
+  // 173/175/177 = Map 1/2/3 Winner
+  const mapMarketId = 173 + ((n - 1) * 2);
+  const byMarketId = markets.find(m => {
+    const mid = (m?.marketId != null) ? parseInt(m.marketId, 10) : NaN;
+    const key = (m?._key != null) ? parseInt(m._key, 10) : NaN;
+    return (Number.isFinite(mid) && mid === mapMarketId) || (Number.isFinite(key) && key === mapMarketId);
+  });
+
   const mkName = (m) => (m?.bookmakerMarketId || m?.marketId || m?._key || '').toString().toLowerCase();
   const isMapMarketFor = (name, mapN) => {
     if (!name) return false;
@@ -1049,7 +1059,7 @@ async function getMapMlOddsFromFixture(t1, t2, mapNumber) {
     );
   };
 
-  const candidatesExact = markets.filter(m => isMapMarketFor(mkName(m), n));
+  const candidatesExact = byMarketId ? [byMarketId] : markets.filter(m => isMapMarketFor(mkName(m), n));
   const candidatesAnyMap = markets.filter(m => {
     const name = mkName(m);
     return name.includes('map') || name.includes('game');
