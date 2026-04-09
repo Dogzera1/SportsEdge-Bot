@@ -35,10 +35,14 @@ try {
 }
 const { db, stmts } = initDatabase(DB_PATH);
 
-// Limpeza de integridade: remove tips com odds inválidas (> 4.0) gravadas por versões anteriores
+// Limpeza única de integridade: só executa se nunca rodou (evita deletar tips legítimas no futuro)
 try {
-  const cleaned = db.prepare("DELETE FROM tips WHERE CAST(odds AS REAL) > 4.0").run();
-  if (cleaned.changes > 0) log('INFO', 'BOOT', `Limpeza: ${cleaned.changes} tip(s) com odds > 4.0 removidas`);
+  const alreadyCleaned = db.prepare("SELECT 1 FROM settings WHERE key='odds_cleanup_v1' LIMIT 1").get();
+  if (!alreadyCleaned) {
+    const cleaned = db.prepare("DELETE FROM tips WHERE CAST(odds AS REAL) > 4.0").run();
+    db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('odds_cleanup_v1', datetime('now'))").run();
+    if (cleaned.changes > 0) log('INFO', 'BOOT', `Limpeza única: ${cleaned.changes} tip(s) com odds > 4.0 removidas`);
+  }
 } catch(e) { log('WARN', 'BOOT', `Limpeza odds: ${e.message}`); }
 
 // ── Football Elo helper (1X2) ──
@@ -1594,9 +1598,11 @@ function isAdminRequest(req) {
 }
 
 function requireAdmin(req, res) {
-  // Se ADMIN_KEY não configurada, não bloquear rotas internas.
-  // (Sem isso, bot não consegue settlear tips em produção/local.)
-  if (!ADMIN_KEY) return true;
+  if (!ADMIN_KEY) {
+    // AVISO: sem ADMIN_KEY, rotas admin estão abertas. Configure ADMIN_KEY em produção.
+    log('WARN', 'SEC', 'ADMIN_KEY não configurada — acesso admin sem autenticação');
+    return true;
+  }
   if (!isAdminRequest(req)) {
     sendJson(res, { ok: false, error: 'unauthorized' }, 401);
     return false;
@@ -3894,22 +3900,7 @@ server.listen(PORT, '0.0.0.0', () => {
   setTimeout(() => { settleFactorLogs(stmts, log); recalcWeights(stmts, log); }, 5 * 60 * 1000);
 });
 
-// Funções de Fallback e Helpers
-async function fetchEsportsOddsV1() {
-  const url = `https://api.oddspapi.io/v1/fixtures?api_key=${ODDSPAPI_KEY}&sport=esports`;
-  const r = await httpGet(url);
-  if (r.status === 200) {
-    log('INFO', 'ODDS', 'Fallback v1 funcionou. Usando motor legado.');
-    const raw = safeParse(r.body, []);
-    const events = Array.isArray(raw) ? raw : (raw.data || []);
-    for (const ev of events) {
-      if (!ev.bookmakerOdds || !ev.bookmakerOdds['1xbet']) continue;
-      const t1Odd = 1.80, t2Odd = 1.90; // Exemplo simplificado para log
-      const p1 = ev.participant1Name || 'Time A', p2 = ev.participant2Name || 'Time B';
-      oddsCache[`esports_${ev.fixtureId}`] = { t1: t1Odd, t2: t2Odd, bookmaker: '1xBet', t1Name: p1, t2Name: p2 };
-    }
-  }
-}
+// fetchEsportsOddsV1 removida — código legado com odds falsas hardcoded (1.80/1.90)
 
 
 module.exports = { server, db, stmts, fetchOdds, findOdds, oddsCache, lastEsportsOddsUpdate };

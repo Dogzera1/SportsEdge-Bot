@@ -533,6 +533,12 @@ async function runAutoAnalysis() {
             tipReason: result.tipReason || null
           }, 'esports');
 
+          // Aborta se DB recusou (erro ou duplicata já registrada)
+          if (!rec?.tipId && !rec?.skipped) {
+            log('WARN', 'AUTO', `record-tip falhou para ${tipTeam} @ ${tipOdd} (${match.team1} vs ${match.team2}) — tip abortada`);
+            continue;
+          }
+
           if (rec?.tipId && result.factorActive?.length && result.mlDirection) {
             await serverPost('/log-tip-factors', {
               tipId: rec.tipId,
@@ -577,7 +583,12 @@ async function runAutoAnalysis() {
           for (const [userId, prefs] of subscribedUsers) {
             if (!prefs.has('esports')) continue;
             try { await sendDM(esportsConfig.token, userId, tipMsg); }
-            catch(e) { if (e.message?.includes('403')) subscribedUsers.delete(userId); }
+            catch(e) {
+              if (e.message?.includes('403')) {
+                subscribedUsers.delete(userId);
+                serverPost('/save-user', { userId: String(userId), subscribed: false }, 'esports').catch(() => {});
+              }
+            }
           }
           analyzedMatches.set(matchKey, { ts: now, tipSent: true });
           log('INFO', 'AUTO-TIP', `Esports: ${tipTeam} @ ${tipOdd} (odds ${hasRealOdds ? 'reais' : 'estimadas'})`);
@@ -742,12 +753,17 @@ async function runAutoAnalysis() {
             const kellyLabel = tipConf === CONF.ALTA ? '¼ Kelly' : tipConf === CONF.BAIXA ? '1/10 Kelly' : '⅙ Kelly';
             const mlEdgeLabel = result.mlScore > 0 ? ` | ML: ${result.mlScore.toFixed(1)}pp` : '';
 
-            await serverPost('/record-tip', {
+            const recUp = await serverPost('/record-tip', {
               matchId: canonicalMatchId('esports', match.id), eventName: match.league,
               p1: match.team1, p2: match.team2, tipParticipant: tipTeam,
               odds: tipOdd, ev: tipEV, stake: tipStake,
               confidence: tipConf, isLive: false
             }, 'esports');
+
+            if (!recUp?.tipId && !recUp?.skipped) {
+              log('WARN', 'AUTO', `record-tip upcoming falhou para ${tipTeam} @ ${tipOdd} — tip abortada`);
+              await new Promise(r => setTimeout(r, 3000)); continue;
+            }
 
             const imminentNote = isImminentMatch ? `⏰ _Odds atualizadas agora (< 2h para o jogo)_\n` : '';
             const baixaNote = tipConf === 'BAIXA' ? `⚠️ _Confiança BAIXA (ML-edge ${result.mlScore.toFixed(1)}pp) — stake reduzido. Aposte com cautela._\n` : '';
@@ -3516,14 +3532,14 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
         }
 
         const text = resp?.content?.map(b => b.text || '').join('') || '';
-        const extractReasonTennis = (t) => {
+        const extractTipReasonMma = (t) => {
           if (!t) return null;
           const before = t.split('TIP_ML:')[0] || '';
           const line = before.split('\n').map(s => s.trim()).filter(Boolean)[0] || '';
           const clean = line.replace(/^[-*•\s]+/, '').trim();
           return clean ? clean.slice(0, 160) : null;
         };
-        const tipReasonTennis = extractReasonTennis(text);
+        const tipReasonTennis = extractTipReasonMma(text);
         const tipMatch = text.match(/TIP_ML:([^@]+)@([\d.]+)\|EV:([+-]?[\d.]+)%\|STAKE:([\d.]+)u?\|CONF:(ALTA|MÉDIA|BAIXA)/i);
 
         if (!tipMatch) {
@@ -3555,14 +3571,7 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
         const recLine = espn ? `\n📊 Registros: ${fight.team1} ${rec1||'?'} | ${fight.team2} ${rec2||'?'}` : '';
         const catLine = espn ? `\n🏷️ ${weightClass || fight.league}${isTitleFight ? ' — TITLE FIGHT' : ''}` : '';
 
-        const extractReasonMma = (t) => {
-          if (!t) return null;
-          const before = t.split('TIP_ML:')[0] || '';
-          const line = before.split('\n').map(s => s.trim()).filter(Boolean)[0] || '';
-          const clean = line.replace(/^[-*•\s]+/, '').trim();
-          return clean ? clean.slice(0, 160) : null;
-        };
-        const tipReasonMma = extractReasonMma(text);
+        const tipReasonMma = extractTipReasonMma(text);
         const whyLineMma = tipReasonMma ? `\n🧠 Por quê: _${tipReasonMma}_\n` : '\n';
 
         const tipMsg = `🥊 💰 *TIP MMA*\n` +

@@ -20,6 +20,7 @@ process.env.DB_PATH = DB_PATH;
 
 console.log(`[LAUNCHER] PORT=${PORT} | DB=${DB_PATH}`);
 
+const _crashCount = {};
 function spawnChild(name, file) {
   const child = spawn('node', [file], {
     stdio: 'inherit',
@@ -27,8 +28,11 @@ function spawnChild(name, file) {
   });
 
   child.on('exit', (code, signal) => {
-    console.error(`[LAUNCHER] ${name} exited (code=${code} signal=${signal}) — restarting in 3s`);
-    setTimeout(() => spawnChild(name, file), 3000);
+    _crashCount[name] = (_crashCount[name] || 0) + 1;
+    // Backoff exponencial: 3s, 6s, 12s, 24s, max 60s
+    const delay = Math.min(3000 * Math.pow(2, Math.min(_crashCount[name] - 1, 4)), 60000);
+    console.error(`[LAUNCHER] ${name} exited (code=${code} signal=${signal}) — restart #${_crashCount[name]} em ${delay/1000}s`);
+    setTimeout(() => spawnChild(name, file), delay);
   });
 
   child.on('error', (err) => {
