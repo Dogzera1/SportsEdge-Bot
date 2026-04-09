@@ -1018,12 +1018,26 @@ async function getMapMlOddsFromFixture(t1, t2, mapNumber) {
   let r = null;
   let fixtureJson = null;
   for (const fid of uniqCandidates) {
-    const url = `https://api.oddspapi.io/v4/odds?fixtureId=${fid}&oddsFormat=decimal&verbosity=5&apiKey=${ODDSPAPI_KEY}`;
-    r = await cachedHttpGet(url, { provider: 'oddspapi', ttlMs }).catch(() => null);
-    if (r && r.status === 200) {
-      fixtureJson = safeParse(r.body, null);
-      if (fixtureJson) { r.__fixtureIdUsed = fid; break; }
+    // OddsPapi LoL marketIds:
+    // 171 (série), 173/175/177/179/181 (map1..5)
+    const n = parseInt(mapNumber, 10);
+    const mapMarketId = 171 + (2 * n);
+    const urls = [
+      // Preferência: bookmaker alvo + mercado alvo
+      `https://api.oddspapi.io/v4/odds?fixtureId=${fid}&bookmakers=1xbet&marketId=${mapMarketId}&oddsFormat=decimal&verbosity=5&apiKey=${ODDSPAPI_KEY}`,
+      // Fallback: sem bookmaker filter (alguns planos/contas ignoram/limitam)
+      `https://api.oddspapi.io/v4/odds?fixtureId=${fid}&marketId=${mapMarketId}&oddsFormat=decimal&verbosity=5&apiKey=${ODDSPAPI_KEY}`,
+      // Último fallback: sem filtro (usa seleção local por marketId)
+      `https://api.oddspapi.io/v4/odds?fixtureId=${fid}&oddsFormat=decimal&verbosity=5&apiKey=${ODDSPAPI_KEY}`,
+    ];
+    for (const url of urls) {
+      r = await cachedHttpGet(url, { provider: 'oddspapi', ttlMs }).catch(() => null);
+      if (r && r.status === 200) {
+        fixtureJson = safeParse(r.body, null);
+        if (fixtureJson) { r.__fixtureIdUsed = fid; break; }
+      }
     }
+    if (fixtureJson) break;
   }
   if (!fixtureJson) return null;
 
@@ -1040,7 +1054,7 @@ async function getMapMlOddsFromFixture(t1, t2, mapNumber) {
 
   // OddsPapi LoL marketIds (blog):
   // 171 = Match Winner (série)
-  // 173/175/177 = Map 1/2/3 Winner
+  // 173/175/177/179/181 = Map 1..5 Winner
   const mapMarketId = 173 + ((n - 1) * 2);
   const byMarketId = markets.find(m => {
     const mid = (m?.marketId != null) ? parseInt(m.marketId, 10) : NaN;
