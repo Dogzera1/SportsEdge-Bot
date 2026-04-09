@@ -468,7 +468,7 @@ async function fetchOdds(sport) {
 // ── SX.Bet (orderbook) odds ──
 // Base URL docs: https://docs.sx.bet/api-reference/get-best-odds
 const SXBET_BASE_URL = process.env.SXBET_BASE_URL || 'https://api.sx.bet';
-const SXBET_ENABLED = process.env.SXBET_ENABLED === '1';
+const SXBET_ENABLED = /^(1|true|yes)$/i.test(String(process.env.SXBET_ENABLED || ''));
 let _sxSportsCache = null; // { ts, data }
 let _sxMetadataCache = null; // { ts, data }
 
@@ -2578,6 +2578,7 @@ const server = http.createServer(async (req, res) => {
       if (!o || o.mapEstimated || o.mapMarket === false) {
         const sxMap = await sxGetMatchWinnerOdds(t1, t2, { liveOnly: (parsed.query.live === '1'), mapNumber }).catch(() => null);
         if (sxMap?.t1 && sxMap?.t2) {
+          log('INFO', 'ODDS', `SX.Bet usado (map${mapNumber}${parsed.query.live==='1'?' live':''}): ${t1}=${sxMap.t1} | ${t2}=${sxMap.t2}`);
           sendJson(res, { ...sxMap, mapRequested: mapNumber, mapMarket: true });
           return;
         }
@@ -2598,7 +2599,10 @@ const server = http.createServer(async (req, res) => {
       o = findOdds('esports', t1, t2);
       if (!o) {
         const sxLive = await sxGetMatchWinnerOdds(t1, t2, { liveOnly: (parsed.query.live === '1') }).catch(() => null);
-        if (sxLive?.t1 && sxLive?.t2) o = sxLive;
+        if (sxLive?.t1 && sxLive?.t2) {
+          log('INFO', 'ODDS', `SX.Bet usado (${parsed.query.live==='1'?'live':'pregame'}): ${t1}=${sxLive.t1} | ${t2}=${sxLive.t2}`);
+          o = sxLive;
+        }
       }
     }
     sendJson(res, o || { error: 'odds não encontradas' });
@@ -4426,6 +4430,7 @@ async function syncProStats({ forceResync = false } = {}) {
 server.listen(PORT, '0.0.0.0', () => {
   log('INFO', 'SERVER', `SportsEdge API em http://0.0.0.0:${PORT}`);
   log('INFO', 'SERVER', `Esportes: LoL (Riot API + LoLEsports)`);
+  if (SXBET_ENABLED) log('INFO', 'ODDS', `SX.Bet ativo: base=${SXBET_BASE_URL}`);
 
   // Import automático de dataset futebol (CSV 2024/2025) para alimentar match_results (form/H2H)
   importFootballMatchesCsvOnce().catch(() => {});
