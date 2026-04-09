@@ -1198,14 +1198,28 @@ async function collectGameContext(game, matchId) {
   let compScore = null; // pp advantage for t1 (blue) based on pro champion WRs
   let liveGameNumber = null; // número do mapa atualmente ao vivo (Game 1, 2, 3...)
   let hasLiveStats = false;
+  let draftComplete = false; // composições completas (10 champs definidos)
   if (game === 'lol') {
     const isPandaScore = String(matchId).startsWith('ps_');
+    const isChampValid = (c) => {
+      const s = String(c || '').trim();
+      if (!s) return false;
+      const low = s.toLowerCase();
+      return low !== '?' && low !== '???' && low !== 'unknown' && low !== 'null' && low !== 'undefined';
+    };
+    const isDraftCompleteTeam = (team) => {
+      const pls = team?.players || [];
+      if (pls.length !== 5) return false;
+      return pls.every(p => isChampValid(p?.champion));
+    };
 
     if (isPandaScore) {
       // Fonte PandaScore — composições via /ps-compositions
       try {
         const gd = await serverGet(`/ps-compositions?matchId=${encodeURIComponent(matchId)}`);
         if (gd.hasCompositions && (gd.blueTeam?.players?.length || gd.redTeam?.players?.length)) {
+          const thisDraftComplete = isDraftCompleteTeam(gd.blueTeam) && isDraftCompleteTeam(gd.redTeam);
+          if (thisDraftComplete) draftComplete = true;
           const roles = { top:'TOP', jungle:'JGL', mid:'MID', bottom:'ADC', support:'SUP', '?':'?' };
           const g = (v) => v >= 1000 ? (v/1000).toFixed(1)+'k' : String(v||0);
           const gameLabel = gd.gameNumber ? `GAME ${gd.gameNumber}` : 'GAME';
@@ -1227,7 +1241,7 @@ async function collectGameContext(game, matchId) {
           }).join('\n');
           gamesContext += `${gd.blueTeam.name}:\n${fmtComp(gd.blueTeam)}\n`;
           gamesContext += `${gd.redTeam.name}:\n${fmtComp(gd.redTeam)}\n`;
-          gamesContext += `_Fonte: PandaScore_\n`;
+          gamesContext += `_Fonte: PandaScore_${thisDraftComplete ? '' : ' | ⚠️ draft incompleto'}_\n`;
 
           // Buscar WR de campeões + jogadores em pro play
           try {
@@ -1287,6 +1301,8 @@ async function collectGameContext(game, matchId) {
           try {
             const gd = await serverGet(`/live-game?gameId=${gid.gameId}`);
             if (gd.blueTeam?.players?.length) {
+              const thisDraftComplete = isDraftCompleteTeam(gd.blueTeam) && isDraftCompleteTeam(gd.redTeam);
+              if (thisDraftComplete) draftComplete = true;
               const roles = { top:'TOP', jungle:'JGL', mid:'MID', bottom:'ADC', support:'SUP' };
               const g = (v) => v >= 1000 ? (v/1000).toFixed(1)+'k' : String(v||0);
               const liveNow = !!(gid.hasLiveData && gd.hasLiveStats && (gd.gameState === 'in_game' || gd.gameState === 'paused'));
@@ -1312,6 +1328,9 @@ async function collectGameContext(game, matchId) {
               }).join('\n');
               gamesContext += `${gd.blueTeam.name}:\n${fmtComp(gd.blueTeam)}\n`;
               gamesContext += `${gd.redTeam.name}:\n${fmtComp(gd.redTeam)}\n`;
+              if (!thisDraftComplete && !liveNow) {
+                gamesContext += `_Fonte: Riot | ⚠️ draft incompleto_\n`;
+              }
 
               // WR de campeões + jogadores pro play (Riot source)
               if (compScore === null) {
@@ -1363,7 +1382,7 @@ async function collectGameContext(game, matchId) {
       }
     }
   }
-  return { text: gamesContext, compScore, liveGameNumber, hasLiveStats };
+  return { text: gamesContext, compScore, liveGameNumber, hasLiveStats, draftComplete };
 }
 
 async function fetchEnrichment(match) {
@@ -1429,7 +1448,14 @@ async function autoAnalyzeMatch(token, match) {
     const compScore      = gameCtx.compScore;
     const liveGameNumber = gameCtx.liveGameNumber; // nº do mapa atual (null se não ao vivo)
     const hasLiveStats   = !!gameCtx.hasLiveStats;
+    const draftComplete  = !!gameCtx.draftComplete;
     const enrichSection = buildEnrichmentSection(match, enrich);
+
+    // Draft: só analisar quando draft completo (evita tip com base em comp parcial)
+    if (match.status === 'draft' && !hasLiveStats && !draftComplete) {
+      log('INFO', 'AUTO', `Draft incompleto: pulando ${match.team1} vs ${match.team2} (aguardando comp completa)`);
+      return null;
+    }
 
     // Ao vivo: só usar odds do mapa atual se mapa ao vivo confirmado
     let oddsToUse = o;
