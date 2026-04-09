@@ -500,9 +500,11 @@ async function runAutoAnalysis() {
   return withAutoAnalysisMutex(async () => {
   const now = Date.now();
 
+  // usado depois em sharedCaches (CLV/refreshOpenTips)
+  let lolRaw = [];
+
   const esportsConfig = SPORTS['esports'];
   if (esportsConfig?.enabled) {
-    let lolRaw = [];
     try {
       lolRaw = await serverGet('/lol-matches').catch(() => []);
       // Inclui 'draft': composições já disponíveis na API Riot antes do jogo começar.
