@@ -3,6 +3,8 @@ const http = require('http');
 const https = require('https');
 const path = require('path');
 const url = require('url');
+const dns = require('dns');
+dns.setDefaultResultOrder('ipv4first');
 const initDatabase = require('./lib/database');
 const { SPORTS, getSportById } = require('./lib/sports');
 const { log, sendJson, safeParse, norm, httpGet, cachedHttpGet, aiPost, oddsApiAllowed, getMetricsLite } = require('./lib/utils');
@@ -556,7 +558,7 @@ function badRequest(res, msg) {
 async function theOddsGet(theOddsUrl) {
   return await theOddsQueue.enqueue(`theodds:${theOddsUrl}`, async () => {
     const ttlMsRaw = parseInt(process.env.HTTP_CACHE_THEODDS_TTL_MS || '', 10);
-    const ttlMs = Number.isFinite(ttlMsRaw) ? ttlMsRaw : 0;
+    const ttlMs = Number.isFinite(ttlMsRaw) ? ttlMsRaw : 15 * 60 * 1000; // cache de 15 minutos por default!
     return await cachedHttpGet(theOddsUrl, { provider: 'theodds', ttlMs }).catch(() => ({ status: 500, body: '[]' }));
   });
 }

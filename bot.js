@@ -1,4 +1,6 @@
 require('dotenv').config({ override: true });
+const dns = require('dns');
+dns.setDefaultResultOrder('ipv4first');
 const https = require('https');
 const http = require('http');
 const fs = require('fs');
@@ -4658,8 +4660,8 @@ async function refreshOpenTips() {
             currentOdds = norm(pick) === norm(p1) ? parseFloat(o.t1) : parseFloat(o.t2);
           }
         } else if (sport === 'football') {
-          const matches = await serverGet('/football-matches').catch(() => []);
-          if (Array.isArray(matches) && matches.length) {
+          const matches = Array.isArray(footballMatches) ? footballMatches : [];
+          if (matches.length) {
             const n1 = norm(p1), n2 = norm(p2);
             const m = matches.find(x => {
               const a1 = norm(x.team1 || '');
@@ -4675,8 +4677,8 @@ async function refreshOpenTips() {
             }
           }
         } else if (sport === 'tennis') {
-          const matches = await serverGet('/tennis-matches').catch(() => []);
-          if (Array.isArray(matches) && matches.length) {
+          const matches = Array.isArray(tennisMatches) ? tennisMatches : [];
+          if (matches.length) {
             const n1 = norm(p1), n2 = norm(p2);
             const m = matches.find(x => {
               const a1 = norm(x.team1 || '');
