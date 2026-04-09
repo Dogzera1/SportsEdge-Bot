@@ -399,6 +399,9 @@ try {
 
 // ── Odds Cache ──
 const oddsCache = {};
+// Cache específico: ML por mapa (quando disponível via OddsPapi marketId 173+)
+// key: `map_${fixtureId}_${mapNumber}` -> { t1, t2, bookmaker, fixtureId, marketId, mapNumber, ts }
+const mapOddsCache = new Map();
 let lastOddsUpdate = 0;
 const ODDS_TTL = 4 * 60 * 60 * 1000; // 4h — conserves The Odds API monthly quota (500 req free tier)
 
@@ -460,6 +463,64 @@ const unknownLolSlugs = new Set();
 // ── Odds APIs ──
 async function fetchOdds(sport) {
   if (sport === 'esports') return await fetchEsportsOdds();
+}
+
+async function fetchMapOddsByFixtureId(fixtureId, mapNumber) {
+  if (!ODDSPAPI_KEY) return null;
+  const fid = String(fixtureId || '');
+  const n = parseInt(mapNumber, 10);
+  if (!fid || !Number.isFinite(n) || n <= 0) return null;
+
+  // marketId: 173/175/177/179/181
+  const marketId = 173 + ((n - 1) * 2);
+  const cacheKey = `map_${fid}_${n}`;
+  const cached = mapOddsCache.get(cacheKey);
+  const ttlMs = Math.max(2000, parseInt(process.env.ODDSPAPI_MAP_ODDS_TTL_MS || '8000', 10) || 8000);
+  if (cached && (Date.now() - cached.ts) < ttlMs) return cached;
+
+  const urls = [
+    `https://api.oddspapi.io/v4/odds?fixtureId=${encodeURIComponent(fid)}&bookmakers=1xbet&marketId=${marketId}&oddsFormat=decimal&verbosity=5&apiKey=${ODDSPAPI_KEY}`,
+    `https://api.oddspapi.io/v4/odds?fixtureId=${encodeURIComponent(fid)}&marketId=${marketId}&oddsFormat=decimal&verbosity=5&apiKey=${ODDSPAPI_KEY}`,
+  ];
+  let fixtureJson = null;
+  for (const url of urls) {
+    const r = await cachedHttpGet(url, { provider: 'oddspapi', ttlMs: 0 }).catch(() => null);
+    if (r && r.status === 200) {
+      fixtureJson = safeParse(r.body, null);
+      if (fixtureJson) break;
+    }
+  }
+  if (!fixtureJson) return null;
+
+  const bkOdds = fixtureJson.bookmakerOdds || fixtureJson.bookmakersOdds || {};
+  const bk = bkOdds['1xbet'] || bkOdds['1xBet'] || bkOdds['1XBET'] || null;
+  const marketsObj = bk?.markets || {};
+  const m = marketsObj[String(marketId)] || marketsObj[marketId] || null;
+  if (!m) return null;
+
+  const outcomesObj = m?.outcomes || {};
+  const outcomes = Object.values(outcomesObj || {});
+  if (!outcomes || outcomes.length < 2) return null;
+  const pickPrice = (o) => {
+    const players = o?.players || o?.playerOdds || {};
+    const first = players['0'] || players[0] || Object.values(players || {})[0] || null;
+    return extractPrice(first || o);
+  };
+  const p1 = pickPrice(outcomes[0]);
+  const p2 = pickPrice(outcomes[1]);
+  if (!p1 || !p2) return null;
+
+  const out = {
+    t1: String(p1),
+    t2: String(p2),
+    bookmaker: '1xBet',
+    fixtureId: fid,
+    marketId,
+    mapNumber: n,
+    ts: Date.now(),
+  };
+  mapOddsCache.set(cacheKey, out);
+  return out;
 }
 
 // Backoff em caso de 429
@@ -1005,6 +1066,10 @@ async function getMapMlOddsFromFixture(t1, t2, mapNumber) {
   if (!entry?.fixtureId || !ODDSPAPI_KEY) return null;
 
   const fixtureId = String(entry.fixtureId);
+  // Primeiro tenta cache/polling direto por fixtureId + mapNumber
+  const direct = await fetchMapOddsByFixtureId(fixtureId, mapNumber).catch(() => null);
+  if (direct?.t1 && direct?.t2) return { ...direct, mapMarket: true };
+
   const fixtureCandidates = [fixtureId];
   if (fixtureId.startsWith('id') && fixtureId.length > 4) fixtureCandidates.push(fixtureId.slice(2));
   if (!fixtureId.startsWith('id') && fixtureId.length > 4) fixtureCandidates.push('id' + fixtureId);
@@ -4198,6 +4263,27 @@ server.listen(PORT, '0.0.0.0', () => {
   setInterval(() => {
     fetchEsportsOdds();
   }, 15 * 60 * 1000); // Mantém o cache quente a cada 15 min
+
+  // Live odds (polling por fixtureId + marketId mapa).
+  // Ativa só com ODDSPAPI_LIVE_POLL=1 para não estourar quota.
+  if (process.env.ODDSPAPI_LIVE_POLL === '1') {
+    const pollMs = Math.max(1500, parseInt(process.env.ODDSPAPI_LIVE_POLL_MS || '6000', 10) || 6000);
+    setInterval(async () => {
+      try {
+        // percorre fixtures recentes no oddsCache; tenta manter maps 1..5 aquecidos
+        const fids = [...new Set(Object.values(oddsCache).map(v => v?.fixtureId).filter(Boolean).map(String))];
+        const maxFixtures = Math.max(1, parseInt(process.env.ODDSPAPI_LIVE_MAX_FIXTURES || '6', 10) || 6);
+        const maxMaps = Math.max(1, parseInt(process.env.ODDSPAPI_LIVE_MAX_MAPS || '3', 10) || 3);
+        const slice = fids.slice(0, maxFixtures);
+        for (const fid of slice) {
+          for (let m = 1; m <= maxMaps; m++) {
+            await fetchMapOddsByFixtureId(fid, m).catch(() => null);
+          }
+        }
+      } catch(_) {}
+    }, pollMs);
+    log('INFO', 'ODDS', `Live polling ativo: ${pollMs}ms`);
+  }
 
   // Stale odds check: 1x/h, força re-fetch se odds > 6h com partidas próximas
   setInterval(() => checkStaleOddsForUpcoming().catch(() => {}), 60 * 60 * 1000);
