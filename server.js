@@ -1270,19 +1270,47 @@ function mapLoLEvent(e, status) {
 }
 
 async function getLoLMatchesArush() {
-  // Fonte "lolesports-live": apenas getSchedule (sem getLive) + filtro por ligas
+  // Fonte "lolesports-live": getSchedule + getLive (en-US e zh-CN para cobrir LPL)
   try {
-    const sr = await httpGet(LOL_BASE + '/getSchedule?hl=en-US', LOL_HEADERS);
-    const sd = safeParse(sr.body, {});
-    const evs = sd?.data?.schedule?.events || [];
+    // Busca schedule e getLive em paralelo
+    const [srResult, glrResult, glrCNResult] = await Promise.allSettled([
+      httpGet(LOL_BASE + '/getSchedule?hl=en-US', LOL_HEADERS),
+      httpGet(LOL_BASE + '/getLive?hl=en-US', LOL_HEADERS),
+      httpGet(LOL_BASE + '/getLive?hl=zh-CN', LOL_HEADERS),
+    ]);
+
+    const evs = srResult.status === 'fulfilled'
+      ? (safeParse(srResult.value?.body, {})?.data?.schedule?.events || [])
+      : [];
     if (!Array.isArray(evs) || evs.length === 0) return [];
 
-    const live = evs
-      .filter(e => e.type === 'match' && e.match && e.state === 'inProgress')
-      .map(e => mapLoLEvent(e, 'live')).filter(Boolean);
+    // Live do schedule (state=inProgress)
+    const liveMap = new Map();
+    evs.filter(e => e.type === 'match' && e.match && e.state === 'inProgress')
+      .map(e => mapLoLEvent(e, 'live')).filter(Boolean)
+      .forEach(m => liveMap.set(String(m.id), m));
+
+    // Merge getLive en-US — captura partidas live não refletidas no schedule ainda
+    if (glrResult.status === 'fulfilled') {
+      const glEvts = safeParse(glrResult.value?.body, {})?.data?.schedule?.events || [];
+      glEvts.filter(e => e.type === 'match' && e.match)
+        .map(e => mapLoLEvent(e, 'live')).filter(Boolean)
+        .forEach(m => { if (!liveMap.has(String(m.id))) liveMap.set(String(m.id), m); });
+    }
+
+    // Merge getLive zh-CN — LPL frequentemente só aparece aqui
+    if (glrCNResult.status === 'fulfilled') {
+      const glCNEvts = safeParse(glrCNResult.value?.body, {})?.data?.schedule?.events || [];
+      glCNEvts.filter(e => e.type === 'match' && e.match)
+        .map(e => mapLoLEvent(e, 'live')).filter(Boolean)
+        .forEach(m => { if (!liveMap.has(String(m.id))) liveMap.set(String(m.id), m); });
+    }
+
+    const live = [...liveMap.values()];
+    const liveIds = new Set(live.map(m => String(m.id)));
 
     const upcoming = evs
-      .filter(e => e.type === 'match' && e.match && e.state === 'unstarted')
+      .filter(e => e.type === 'match' && e.match && e.state === 'unstarted' && !liveIds.has(String(e.match?.id)))
       .map(e => mapLoLEvent(e, 'upcoming')).filter(Boolean);
 
     const combined = [...live, ...upcoming]
