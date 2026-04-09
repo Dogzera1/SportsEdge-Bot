@@ -1965,10 +1965,14 @@ function buildEsportsPrompt(match, game, gamesContext, o, enrichSection, mlResul
     ? `\n🚨 CRÍTICO: Partida em andamento (LIVE - Bo3/Bo5). As ODDS ML referem-se ao VENCEDOR DA SÉRIE COMPLETA (Match Winner), NÃO ao vencedor do mapa atual!\nSua estimativa P() deve refletir a chance de ganhar a SÉRIE (placar atual + draft). Se a chance da equipe virar/vencer a série inteira não gerar EV positivo, NÃO envie tip.`
     : '';
 
+  const oddsTitle = (o && o.mapRequested)
+    ? (o.mapMarket ? `Odds ML (Vencedor do MAPA ${o.mapRequested})` : `Odds ML (Vencedor do MAPA ${o.mapRequested} — estimada/sem mercado)`)
+    : `Odds ML (Match Winner da SÉRIE)`;
+
   const text = `Você é um analista de apostas LoL especializado. Siga o processo de decisão abaixo com rigor — omita TIP_ML SOMENTE se todos os EVs forem negativos ou se você não tiver base para estimar probabilidades.
 
 PARTIDA: ${t1} vs ${t2} | ${match.league || 'Esports'} | ${match.format || 'Bo1/Bo3'} | ${match.status}
-Placar da Série: ${serieScore} | ${oddsSection.replace('Odds ML', 'Odds ML (Match Winner da SÉRIE)')}${seriesWarning}
+Placar da Série: ${serieScore} | ${oddsSection.replace('Odds ML', oddsTitle)}${seriesWarning}
 ${bookMarginNote ? `\n⚠️ ${bookMarginNote}` : ''}
 ${gamesContext ? `\nDADOS AO VIVO (Mapa Atual):\n${gamesContext}` : ''}
 ${gamesContext && /META PRO \(champ WR\):|PLAYER CHAMP WR:/i.test(gamesContext)

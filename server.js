@@ -465,6 +465,171 @@ async function fetchOdds(sport) {
   if (sport === 'esports') return await fetchEsportsOdds();
 }
 
+// ── SX.Bet (orderbook) odds ──
+// Base URL docs: https://docs.sx.bet/api-reference/get-best-odds
+const SXBET_BASE_URL = process.env.SXBET_BASE_URL || 'https://api.sx.bet';
+const SXBET_ENABLED = process.env.SXBET_ENABLED === '1';
+let _sxSportsCache = null; // { ts, data }
+let _sxMetadataCache = null; // { ts, data }
+
+async function sxGetJson(path, { ttlMs = 15000 } = {}) {
+  const url = `${SXBET_BASE_URL}${path}`;
+  const r = await cachedHttpGet(url, { provider: 'sxbet', ttlMs }).catch(() => null);
+  if (!r || r.status !== 200) return null;
+  return safeParse(r.body, null);
+}
+
+async function sxGetSports() {
+  const ttl = Math.max(30000, parseInt(process.env.SXBET_SPORTS_TTL_MS || '300000', 10) || 300000);
+  if (_sxSportsCache && (Date.now() - _sxSportsCache.ts) < ttl) return _sxSportsCache.data;
+  const j = await sxGetJson('/sports', { ttlMs: ttl }).catch(() => null);
+  const data = j?.data || null;
+  if (Array.isArray(data)) _sxSportsCache = { ts: Date.now(), data };
+  return Array.isArray(data) ? data : null;
+}
+
+async function sxGetMetadata() {
+  const ttl = Math.max(30000, parseInt(process.env.SXBET_METADATA_TTL_MS || '300000', 10) || 300000);
+  if (_sxMetadataCache && (Date.now() - _sxMetadataCache.ts) < ttl) return _sxMetadataCache.data;
+  const j = await sxGetJson('/metadata', { ttlMs: ttl }).catch(() => null);
+  const data = j?.data || null;
+  if (data) _sxMetadataCache = { ts: Date.now(), data };
+  return data || null;
+}
+
+function sxPercentageOddsToDecimal(percentageOddsRaw) {
+  // Docs: percentageOdds is implied probability * 1e20
+  // https://docs.sx.bet/developers/odds-and-tokens.md
+  try {
+    const n = typeof percentageOddsRaw === 'string' ? BigInt(percentageOddsRaw) : BigInt(percentageOddsRaw);
+    const PREC = 10n ** 20n;
+    if (n <= 0n || n >= PREC) return null;
+    const p = Number(n) / Number(PREC);
+    if (!Number.isFinite(p) || p <= 0 || p >= 1) return null;
+    const dec = 1 / p;
+    if (!Number.isFinite(dec) || dec < 1.0001 || dec > 1000) return null;
+    return dec;
+  } catch(_) {
+    return null;
+  }
+}
+
+async function sxFindLoLSportId() {
+  const sports = await sxGetSports().catch(() => null);
+  if (!sports) return null;
+  const pick = sports.find(s => {
+    const lbl = String(s?.label || '').toLowerCase();
+    return lbl.includes('league of legends') || lbl === 'lol' || lbl.includes('loL'.toLowerCase());
+  }) || sports.find(s => {
+    const lbl = String(s?.label || '').toLowerCase();
+    return lbl.includes('esports') || lbl.includes('e sports') || lbl.replace(/\s+/g, '').includes('esports');
+  });
+  const sid = pick?.sportId;
+  return (sid != null) ? parseInt(sid, 10) : null;
+}
+
+function sxNameLike(a, b) {
+  const na = norm(String(a || ''));
+  const nb = norm(String(b || ''));
+  if (!na || !nb) return false;
+  return na === nb || na.includes(nb) || nb.includes(na);
+}
+
+async function sxFindMarketForMatch(t1, t2, { liveOnly = false, mapNumber = null } = {}) {
+  const sportId = await sxFindLoLSportId().catch(() => null);
+  if (!sportId) return null;
+
+  const pageSize = Math.min(50, Math.max(5, parseInt(process.env.SXBET_MARKETS_PAGE_SIZE || '50', 10) || 50));
+  const maxPages = Math.min(6, Math.max(1, parseInt(process.env.SXBET_MARKETS_MAX_PAGES || '3', 10) || 3));
+  let nextKey = null;
+
+  for (let i = 0; i < maxPages; i++) {
+    const qs = [
+      `sportIds=${encodeURIComponent(String(sportId))}`,
+      `pageSize=${encodeURIComponent(String(pageSize))}`,
+      liveOnly ? `liveOnly=true` : ``,
+      nextKey ? `paginationKey=${encodeURIComponent(String(nextKey))}` : ``,
+    ].filter(Boolean).join('&');
+    const j = await sxGetJson(`/markets/active?${qs}`, { ttlMs: 2500 }).catch(() => null);
+    const markets = j?.data?.markets || [];
+    if (!Array.isArray(markets) || markets.length === 0) break;
+
+    const wantedMap = mapNumber != null ? parseInt(mapNumber, 10) : null;
+    const isMapWanted = (m) => {
+      if (!wantedMap || wantedMap <= 0) return false;
+      const o1 = String(m?.outcomeOneName || '');
+      const o2 = String(m?.outcomeTwoName || '');
+      const meta = JSON.stringify(m?.marketMeta || {});
+      const needle = `map ${wantedMap}`;
+      return `${o1} ${o2} ${meta}`.toLowerCase().includes(needle);
+    };
+
+    const candidates = markets.filter(m => {
+      // LoL só (evita outros esports)
+      const leagueLabel = String(m?.leagueLabel || m?.group1 || '').toLowerCase();
+      if (leagueLabel && !(leagueLabel.includes('lol') || leagueLabel.includes('league of legends'))) return false;
+      const a = m?.teamOneName || m?.outcomeOneName || '';
+      const b = m?.teamTwoName || m?.outcomeTwoName || '';
+      const okTeams = (sxNameLike(a, t1) && sxNameLike(b, t2)) || (sxNameLike(a, t2) && sxNameLike(b, t1));
+      if (!okTeams) return false;
+      if (wantedMap) return isMapWanted(m);
+      // Prefer "12" (no draw) style markets
+      const mt = parseInt(m?.type, 10);
+      return [52, 226].includes(mt) || true;
+    });
+
+    if (candidates.length) {
+      // prefer liveEnabled when liveOnly is true
+      const picked = [...candidates].sort((x, y) => {
+        const xl = x?.liveEnabled ? 1 : 0;
+        const yl = y?.liveEnabled ? 1 : 0;
+        return (yl - xl);
+      })[0];
+      return picked || null;
+    }
+    nextKey = j?.data?.nextKey || null;
+    if (!nextKey) break;
+  }
+  return null;
+}
+
+async function sxGetBestOddsForMarket(marketHash) {
+  const md = await sxGetMetadata().catch(() => null);
+  const baseToken = md?.addresses?.['4162']?.USDC || md?.addresses?.['4162']?.usdc || null;
+  if (!baseToken) return null;
+  const path = `/orders/odds/best?marketHashes=${encodeURIComponent(String(marketHash))}&baseToken=${encodeURIComponent(String(baseToken))}`;
+  const j = await sxGetJson(path, { ttlMs: 1500 }).catch(() => null);
+  const best = j?.data?.bestOdds?.[0];
+  if (!best) return null;
+  return best;
+}
+
+async function sxGetMatchWinnerOdds(t1, t2, { liveOnly = false, mapNumber = null } = {}) {
+  if (!SXBET_ENABLED) return null;
+  const m = await sxFindMarketForMatch(t1, t2, { liveOnly, mapNumber }).catch(() => null);
+  if (!m?.marketHash) return null;
+  const best = await sxGetBestOddsForMarket(m.marketHash).catch(() => null);
+  if (!best) return null;
+  const o1 = sxPercentageOddsToDecimal(best?.outcomeOne?.percentageOdds);
+  const o2 = sxPercentageOddsToDecimal(best?.outcomeTwo?.percentageOdds);
+  if (!o1 || !o2) return null;
+
+  // Map outcome->team por matching de nome
+  const aName = String(m?.outcomeOneName || m?.teamOneName || '');
+  const bName = String(m?.outcomeTwoName || m?.teamTwoName || '');
+  const isA1 = sxNameLike(aName, t1) && sxNameLike(bName, t2);
+  const isA2 = sxNameLike(aName, t2) && sxNameLike(bName, t1);
+  const t1Odd = isA1 ? o1 : isA2 ? o2 : o1;
+  const t2Odd = isA1 ? o2 : isA2 ? o1 : o2;
+
+  return {
+    t1: t1Odd.toFixed(2),
+    t2: t2Odd.toFixed(2),
+    bookmaker: 'SX.Bet',
+    sx: { marketHash: String(m.marketHash), liveOnly: !!liveOnly, mapNumber: mapNumber ? parseInt(mapNumber, 10) : null },
+  };
+}
+
 async function fetchMapOddsByFixtureId(fixtureId, mapNumber) {
   if (!ODDSPAPI_KEY) return null;
   const fid = String(fixtureId || '');
@@ -2410,6 +2575,12 @@ const server = http.createServer(async (req, res) => {
     if (mapNumber && mapNumber > 0) {
       o = await getMapMlOddsFromFixture(t1, t2, mapNumber);
       if (!o) {
+        // SX.Bet: tentativa map odds (heurística) — se existir mercado "Map N"
+        const sxMap = await sxGetMatchWinnerOdds(t1, t2, { liveOnly: (parsed.query.live === '1'), mapNumber }).catch(() => null);
+        if (sxMap?.t1 && sxMap?.t2) {
+          sendJson(res, { ...sxMap, mapRequested: mapNumber, mapMarket: true });
+          return;
+        }
         const base = findOdds('esports', t1, t2);
         if (base?.t1 && base?.t2) {
           const est = estimateMapMlFromSeriesOdds(base, { score1, score2, maxWins: _parseFormatMaxWins(format) });
@@ -2423,6 +2594,10 @@ const server = http.createServer(async (req, res) => {
       }
     } else {
       o = findOdds('esports', t1, t2);
+      if (!o) {
+        const sxLive = await sxGetMatchWinnerOdds(t1, t2, { liveOnly: (parsed.query.live === '1') }).catch(() => null);
+        if (sxLive?.t1 && sxLive?.t2) o = sxLive;
+      }
     }
     sendJson(res, o || { error: 'odds não encontradas' });
     return;
