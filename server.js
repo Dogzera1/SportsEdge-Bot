@@ -580,7 +580,7 @@ const LOL_ACTIVE_TIDS = [
   // Lote 4 — América/Ásia
   26698, // CBLOL (Brasil)
   39009, // NACL
-  39985, // LPL (China)
+  46121, // LPL (China) 2026 — confirmado ativo (ex-39985 era temporada antiga, retornava 0 fixtures LPL)
   // Lote 5 — secundárias Ásia/Pacífico
   36997, // LCK CL
   45589, // LCP (APAC)
@@ -588,6 +588,8 @@ const LOL_ACTIVE_TIDS = [
   // Lote 6 — regionais restantes
   46119, // LRS
   47864, // Esports World Cup
+  39997, // LPL 2026 alternativo (candidato — cobre WeiboGaming/NIP se em split diferente)
+  40019, // LPL 2026 alternativo (candidato — idem)
 ];
 
 // Lista completa de todos os torneios de LoL conhecidos (fallback abrangente)
@@ -909,7 +911,7 @@ const SLUG_TO_TID = {
   'emea_masters': 26590, 'emea-masters': 26590,
   'cblol-brazil': 26698,
   'nacl': 39009,
-  'lpl': 39985, 'ldl': 39985,
+  'lpl': 46121, 'ldl': 39985,
   'lck_challengers_league': 36997, 'lck-challengers-league': 36997, 'lck-cl': 36997,
   'lcp': 45589,
   'lrn': 46117,
@@ -1076,18 +1078,29 @@ const LOL_ALIASES = {
   'bds': ['bdsgaming', 'bdsesport'],
   'g2esports': ['g2'],
   // LPL
-  'jdggaming': ['jdg'],
-  'beijingjdgesports': ['jdg', 'jdggaming'],
+  'jdggaming': ['jdg', 'jd'],
+  'beijingjdgesports': ['jdg', 'jdggaming', 'jd'],
   'bilibiliblaze': ['blg', 'bilibili'],
   'bilibiligaming': ['blg', 'bilibili', 'bilibiliblaze'],
-  'ninerosters': ['ninerosters', 'nip'],
-  'weibo': ['wbg', 'weiboesports'],
+  'ninerosters': ['ninerosters'],
+  'weibo': ['wbg', 'weiboesports', 'weibogaming'],
+  'wbgesports': ['wbg', 'weibo', 'weibogaming'],
+  'weibogaming': ['wbg', 'weiboesports', 'weibo'],
   'topesports': ['tes'],
   'invictusgaming': ['ig'],
   'anyoneslegend': ['al', 'anyone'],
+  'longzhutigers': ['lgt', 'longzhu'],
+  'funplusphoenix': ['fpx'],
+  'edwardgaming': ['edg'],
+  'royalnevergiveuprng': ['rng'],
+  'royalnevergiveuphighschool': ['rng'],
+  'lgdesports': ['lgd'],
+  'omgesports': ['omg'],
+  'vici': ['vg', 'vicigaming'],
   // LPL — Riot API usa prefixo de cidade, OddsPapi não
   'xianteamwe': ['teamwe', 'we'],
-  'shenzhenninjasinpyjamas': ['ninjasinpyjamas', 'nip', 'ninjas'],
+  'shenzhenninjasinpyjamas': ['ninjasinpyjamas', 'nip', 'ninjas', 'nipesports'],
+  'ninjasinpyjamas': ['nip', 'shenzhenninjasinpyjamas', 'ninjas'],
   // CBLOL
   'paingaming': ['png', 'pain'],
   'redcanidskalunga': ['redcanids', 'red'],
