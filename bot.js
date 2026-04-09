@@ -843,18 +843,38 @@ async function runAutoAnalysis() {
         }
       }
 
-      // Clean old esports analyses (> 26h — keep upcoming entries until match starts + 2h)
-      const cutoff3h = now - 3 * 60 * 60 * 1000;
-      const cutoff26h = now - 26 * 60 * 60 * 1000;
-      for (const [k, v] of analyzedMatches) {
-        const isUpcoming = k.startsWith('upcoming_');
-        if (isUpcoming && v.ts < cutoff26h) analyzedMatches.delete(k);
-        else if (!isUpcoming && v.ts < cutoff3h) analyzedMatches.delete(k);
-      }
     } catch(e) {
       log('ERROR', 'AUTO-ESPORTS', e.message);
     }
   }
+
+  // Caches compartilhados para CLV e Updates
+  const sharedCaches = { esports: lolRaw || [] };
+
+  // MMA: Executa análise sequencial após Esports
+  if (SPORTS['mma']?.enabled) {
+    await new Promise(r => setTimeout(r, 5000));
+    await pollMma(true).catch(e => log('ERROR', 'AUTO', `MMA unified: ${e.message}`));
+  }
+
+  // Football: Executa análise sequencial
+  if (SPORTS['football']?.enabled) {
+    await new Promise(r => setTimeout(r, 5000));
+    const fbList = await pollFootball(true).catch(e => { log('ERROR', 'AUTO', `Football unified: ${e.message}`); return []; });
+    sharedCaches.football = fbList;
+  }
+
+  // Tennis: Executa análise sequencial
+  if (SPORTS['tennis']?.enabled) {
+    await new Promise(r => setTimeout(r, 5000));
+    const tnList = await pollTennis(true).catch(e => { log('ERROR', 'AUTO', `Tennis unified: ${e.message}`); return []; });
+    sharedCaches.tennis = tnList;
+  }
+
+  // Tarefas de fundo agora usam os dados baixados acima (mais rápido e seguro)
+  await new Promise(r => setTimeout(r, 2000));
+  await checkCLV(sharedCaches).catch(e => log('ERROR', 'AUTO', `CLV internal: ${e.message}`));
+  await refreshOpenTips(sharedCaches).catch(e => log('ERROR', 'AUTO', `Refresh internal: ${e.message}`));
 
   });
 }
@@ -3457,7 +3477,7 @@ function findEspnFight(espnFights, team1, team2) {
 }
 
 // ── MMA Auto-analysis loop ──
-async function pollMma() {
+async function pollMma(runOnce = false) {
   const mmaConfig = SPORTS['mma'];
   if (!mmaConfig?.enabled || !mmaConfig?.token) return;
   const token = mmaConfig.token;
@@ -3466,13 +3486,14 @@ async function pollMma() {
 
   async function loop() {
     try {
+      log('INFO', 'AUTO-MMA', 'Iniciando verificação de lutas MMA...');
       const [fights, espnFights] = await Promise.all([
         serverGet('/mma-matches').catch(() => []),
         fetchEspnMmaFights().catch(() => [])
       ]);
 
       if (!Array.isArray(fights) || !fights.length) {
-        setTimeout(loop, 30 * 60 * 1000); return;
+        if (!runOnce) setTimeout(loop, 30 * 60 * 1000); return;
       }
 
       log('INFO', 'AUTO-MMA', `${fights.length} lutas MMA com odds | ESPN: ${espnFights.length} lutas`);
@@ -3619,7 +3640,7 @@ ANÁLISE REQUERIDA — seja específico:
 1. Vantagem técnica: quem domina grappling, striking e wrestling?
 2. Form recente: últimas 3 lutas de cada — tendência de melhora ou queda?
 3. Matchup estilístico: por que esse estilo X bate estilo Y nessa luta?
-4. Confiança na análise (1-10): você tem dados suficientes sobre ambos?
+4. Confiança (1-10): você tem dados suficientes sobre ambos?
 
 DECISÃO FINAL:
 - Se EV ≥ +5% E confiança ≥ 7: TIP_ML:[lutador]@[odd]|EV:[%]|STAKE:[1-3]u|CONF:[ALTA/MÉDIA/BAIXA]
@@ -3735,13 +3756,15 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
     } catch(e) {
       log('ERROR', 'AUTO-MMA', e.message);
     }
-    setTimeout(loop, 30 * 60 * 1000);
+    if (!runOnce) setTimeout(loop, 30 * 60 * 1000);
+    return []; // fallback
   }
-  loop();
+  const result = await loop();
+  return runOnce ? (result || []) : undefined;
 }
 
 // ── Tennis Auto-analysis loop ──
-async function pollTennis() {
+async function pollTennis(runOnce = false) {
   const tennisConfig = SPORTS['tennis'];
   if (!tennisConfig?.enabled || !tennisConfig?.token) return;
   const token = tennisConfig.token;
@@ -3750,9 +3773,11 @@ async function pollTennis() {
 
   async function loop() {
     try {
+      log('INFO', 'AUTO-TENNIS', 'Iniciando verificação de partidas de Tênis...');
       const matches = await serverGet('/tennis-matches').catch(() => []);
       if (!Array.isArray(matches) || !matches.length) {
-        setTimeout(loop, 30 * 60 * 1000); return;
+        if (!runOnce) setTimeout(loop, 30 * 60 * 1000);
+        return [];
       }
 
       log('INFO', 'AUTO-TENNIS', `${matches.length} partidas tênis com odds`);
@@ -4006,13 +4031,15 @@ Máximo 200 palavras. Mostre seu raciocínio brevemente antes da decisão.`;
     } catch(e) {
       log('ERROR', 'AUTO-TENNIS', e.message);
     }
-    setTimeout(loop, 10 * 60 * 1000); // verifica a cada 10min
+    if (!runOnce) setTimeout(loop, 30 * 60 * 1000); // verifica a cada 30min
+    return typeof matches !== 'undefined' ? matches : [];
   }
-  loop();
+  const result = await loop();
+  return runOnce ? (result || []) : undefined;
 }
 
 // ── Football Auto-analysis loop ──
-async function pollFootball() {
+async function pollFootball(runOnce = false) {
   const fbConfig = SPORTS['football'];
   if (!fbConfig?.enabled || !fbConfig?.token) return;
   const token = fbConfig.token;
@@ -4032,9 +4059,11 @@ async function pollFootball() {
 
   async function loop() {
     try {
+      log('INFO', 'AUTO-FOOTBALL', 'Iniciando verificação de partidas de Futebol...');
       const matches = await serverGet('/football-matches').catch(() => []);
       if (!Array.isArray(matches) || !matches.length) {
-        setTimeout(loop, 30 * 60 * 1000); return;
+        if (!runOnce) setTimeout(loop, 60 * 60 * 1000);
+        return [];
       }
       const hasFootballDataOrg = !!(process.env.FOOTBALL_DATA_TOKEN || process.env.FOOTBALL_DATA_KEY);
       log('INFO', 'AUTO-FOOTBALL', `${matches.length} partidas futebol com odds (${hasFootballDataOrg ? 'football-data.org' : 'odds-only'})`);
@@ -4348,12 +4377,12 @@ Máximo 200 palavras.`;
     } catch(e) {
       log('ERROR', 'AUTO-FOOTBALL', e.message);
     }
-    setTimeout(loop, 30 * 60 * 1000);
+    if (!runOnce) setTimeout(loop, 60 * 60 * 1000); // a cada 1h
+    return typeof matches !== 'undefined' ? matches : [];
   }
-  loop();
+  const result = await loop();
+  return runOnce ? (result || []) : undefined;
 }
-
-// ── Start ──
 log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
 log('INFO', 'BOOT', `ENV: ESPORTS_ENABLED=${process.env.ESPORTS_ENABLED || '(não definida)'}`);
 log('INFO', 'BOOT', `ENV: TELEGRAM_TOKEN_ESPORTS=${process.env.TELEGRAM_TOKEN_ESPORTS ? '✅ definida' : '❌ AUSENTE'}`);
@@ -4419,16 +4448,7 @@ log('INFO', 'BOOT', `Sports carregados: ${JSON.stringify(Object.entries(SPORTS).
     }
   }
 
-  // MMA polling (independente do loop de sports genérico)
-  pollMma();
-
-  // Football polling
-  pollFootball();
-
-  // Tennis polling
-  pollTennis();
-
-  // Background tasks
+  // Background tasks - Agora tudo é unificado via runAutoAnalysis
   setTimeout(() => runAutoAnalysis().catch(e => log('ERROR', 'AUTO', e.message)), 15 * 1000); // 1ª análise 15s após boot
   setInterval(() => runAutoAnalysis().catch(e => log('ERROR', 'AUTO', e.message)), 6 * 60 * 1000);
   setInterval(() => settleCompletedTips().catch(e => log('ERROR', 'SETTLE', e.message)), SETTLEMENT_INTERVAL);
@@ -4436,9 +4456,8 @@ log('INFO', 'BOOT', `Sports carregados: ${JSON.stringify(Object.entries(SPORTS).
   if (SPORTS.esports?.enabled) {
     setInterval(() => checkLiveNotifications().catch(e => log('ERROR', 'NOTIFY', e.message)), LIVE_CHECK_INTERVAL);
   }
-  // CLV / updates: útil em todos esportes com odds padronizadas
-  setInterval(() => checkCLV().catch(e => log('ERROR', 'CLV', e.message)), 5 * 60 * 1000);
-  setInterval(() => refreshOpenTips().catch(() => {}), 10 * 60 * 1000);
+  // CLV e Refresh de Tips agora são chamados internamente pelo runAutoAnalysis
+
 
   // Live odds polling: força atualização de odds para partidas ao vivo a cada 2 min
   // Captura oportunidades quando casas demoram a ajustar linha mid-game
@@ -4461,7 +4480,7 @@ log('INFO', 'BOOT', `Sports carregados: ${JSON.stringify(Object.entries(SPORTS).
 
 // Função para registrar o Closing Line Value (CLV) antes do jogo
 // CLV só é válido se registrado próximo ao fechamento da linha (< 1h antes do início)
-async function checkCLV() {
+async function checkCLV(caches = {}) {
   if (subscribedUsers.size === 0) return;
   try {
     const now = Date.now();
@@ -4478,7 +4497,7 @@ async function checkCLV() {
       // Mapa de horário de início por confronto
       const matchTimeMap = {};
       if (sport === 'esports') {
-        const lolMatches = await serverGet('/lol-matches').catch(() => []);
+        const lolMatches = caches.esports || await serverGet('/lol-matches').catch(() => []);
         if (Array.isArray(lolMatches)) {
           for (const m of lolMatches) {
             if (m.time) {
@@ -4490,7 +4509,7 @@ async function checkCLV() {
           }
         }
       } else if (sport === 'football') {
-        const matches = await serverGet('/football-matches').catch(() => []);
+        const matches = caches.football || await serverGet('/football-matches').catch(() => []);
         if (Array.isArray(matches)) {
           for (const m of matches) {
             if (m.time) {
@@ -4503,7 +4522,7 @@ async function checkCLV() {
           }
         }
       } else if (sport === 'tennis') {
-        const matches = await serverGet('/tennis-matches').catch(() => []);
+        const matches = caches.tennis || await serverGet('/tennis-matches').catch(() => []);
         if (Array.isArray(matches)) {
           for (const m of matches) {
             if (m.time) {
@@ -4517,15 +4536,9 @@ async function checkCLV() {
         }
       }
 
-      // Para football, evita chamar /football-matches para cada tip (reusa lista)
-      const footballMatches = (sport === 'football')
-        ? await serverGet('/football-matches').catch(() => [])
-        : null;
-      // Para tennis, evita chamar /tennis-matches para cada tip (reusa lista)
-      const tennisMatches = (sport === 'tennis')
-        ? await serverGet('/tennis-matches').catch(() => [])
-        : null;
-
+      // Reuso de carregamento para evitar N chamadas /matches
+      const currentSportMatches = caches[sport] || await serverGet(`/${sport}-matches`).catch(() => []);
+      
       for (const tip of unsettled) {
         if (tip.clv_odds) continue; // já registrado
 
@@ -4587,7 +4600,7 @@ async function checkCLV() {
 
 // Reanalisa tips pendentes: atualiza odds/EV no DB e envia update no Telegram.
 // Não chama IA: mantém p implícita da tip original e recalcula EV com odds atuais.
-async function refreshOpenTips() {
+async function refreshOpenTips(caches = {}) {
   try {
     const enabledSports = Object.entries(SPORTS)
       .filter(([_, s]) => s && s.enabled && s.token)
@@ -4660,7 +4673,7 @@ async function refreshOpenTips() {
             currentOdds = norm(pick) === norm(p1) ? parseFloat(o.t1) : parseFloat(o.t2);
           }
         } else if (sport === 'football') {
-          const matches = Array.isArray(footballMatches) ? footballMatches : [];
+          const matches = caches.football || await serverGet('/football-matches').catch(() => []);
           if (matches.length) {
             const n1 = norm(p1), n2 = norm(p2);
             const m = matches.find(x => {
@@ -4677,7 +4690,7 @@ async function refreshOpenTips() {
             }
           }
         } else if (sport === 'tennis') {
-          const matches = Array.isArray(tennisMatches) ? tennisMatches : [];
+          const matches = caches.tennis || await serverGet('/tennis-matches').catch(() => []);
           if (matches.length) {
             const n1 = norm(p1), n2 = norm(p2);
             const m = matches.find(x => {
