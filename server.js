@@ -2589,15 +2589,6 @@ const server = http.createServer(async (req, res) => {
     let o = null;
     if (mapNumber && mapNumber > 0) {
       o = await getMapMlOddsFromFixture(t1, t2, mapNumber);
-      // Se OddsPapi não tiver mercado de mapa (ou só estimativa), tenta SX.Bet antes de devolver.
-      if (!o || o.mapEstimated || o.mapMarket === false) {
-        const sxMap = await sxGetMatchWinnerOdds(t1, t2, { liveOnly: (parsed.query.live === '1'), mapNumber }).catch(() => null);
-        if (sxMap?.t1 && sxMap?.t2) {
-          log('INFO', 'ODDS', `SX.Bet usado (map${mapNumber}${parsed.query.live==='1'?' live':''}): ${t1}=${sxMap.t1} | ${t2}=${sxMap.t2}`);
-          sendJson(res, { ...sxMap, mapRequested: mapNumber, mapMarket: true });
-          return;
-        }
-      }
       if (!o) {
         const base = findOdds('esports', t1, t2);
         if (base?.t1 && base?.t2) {
@@ -2612,13 +2603,6 @@ const server = http.createServer(async (req, res) => {
       }
     } else {
       o = findOdds('esports', t1, t2);
-      if (!o) {
-        const sxLive = await sxGetMatchWinnerOdds(t1, t2, { liveOnly: (parsed.query.live === '1') }).catch(() => null);
-        if (sxLive?.t1 && sxLive?.t2) {
-          log('INFO', 'ODDS', `SX.Bet usado (${parsed.query.live==='1'?'live':'pregame'}): ${t1}=${sxLive.t1} | ${t2}=${sxLive.t2}`);
-          o = sxLive;
-        }
-      }
     }
     sendJson(res, o || { error: 'odds não encontradas' });
     return;
