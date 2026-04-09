@@ -2574,13 +2574,15 @@ const server = http.createServer(async (req, res) => {
     let o = null;
     if (mapNumber && mapNumber > 0) {
       o = await getMapMlOddsFromFixture(t1, t2, mapNumber);
-      if (!o) {
-        // SX.Bet: tentativa map odds (heurística) — se existir mercado "Map N"
+      // Se OddsPapi não tiver mercado de mapa (ou só estimativa), tenta SX.Bet antes de devolver.
+      if (!o || o.mapEstimated || o.mapMarket === false) {
         const sxMap = await sxGetMatchWinnerOdds(t1, t2, { liveOnly: (parsed.query.live === '1'), mapNumber }).catch(() => null);
         if (sxMap?.t1 && sxMap?.t2) {
           sendJson(res, { ...sxMap, mapRequested: mapNumber, mapMarket: true });
           return;
         }
+      }
+      if (!o) {
         const base = findOdds('esports', t1, t2);
         if (base?.t1 && base?.t2) {
           const est = estimateMapMlFromSeriesOdds(base, { score1, score2, maxWins: _parseFormatMaxWins(format) });
