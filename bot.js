@@ -1787,7 +1787,7 @@ function buildEsportsPrompt(match, game, gamesContext, o, enrichSection, mlResul
     : `[NÃO gere tip sem odds reais disponíveis]`;
 
   const isTargetSeries = match.format && typeof match.format === 'string' && match.format.toLowerCase() !== 'bo1';
-  const seriesWarning = (isLive && isTargetSeries) 
+  const seriesWarning = (match.status === 'live' && isTargetSeries)
     ? `\n🚨 CRÍTICO: Partida em andamento (LIVE - Bo3/Bo5). As ODDS ML referem-se ao VENCEDOR DA SÉRIE COMPLETA (Match Winner), NÃO ao vencedor do mapa atual!\nSua estimativa P() deve refletir a chance de ganhar a SÉRIE (placar atual + draft). Se a chance da equipe virar/vencer a série inteira não gerar EV positivo, NÃO envie tip.`
     : '';
 
