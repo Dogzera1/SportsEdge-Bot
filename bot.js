@@ -3360,6 +3360,12 @@ async function pollMma() {
       })();
 
       for (const fight of fights) {
+        // ── UFC-ONLY: pula qualquer luta fora do UFC ──
+        if (!findEspnFight(espnFights, fight.team1, fight.team2)) {
+          log('DEBUG', 'AUTO-MMA', `Pulando não-UFC: ${fight.team1} vs ${fight.team2}`);
+          continue;
+        }
+
         const key = `mma_${fight.id}`;
         const prev = analyzedMma.get(key);
         if (prev?.tipSent) continue;
