@@ -1147,7 +1147,10 @@ async function checkLiveNotifications() {
       const liveIds = await serverGet(`/live-gameids?matchId=${encodeURIComponent(String(match.id))}`).catch(() => []);
       const currentMap = Array.isArray(liveIds) ? (liveIds.find(x => x.hasLiveData)?.gameNumber || null) : null;
       if (!currentMap) continue;
-      const mapOdds = await serverGet(`/odds?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}&map=${encodeURIComponent(String(currentMap))}&force=1`).catch(() => null);
+      const fmt = match.format ? `&format=${encodeURIComponent(String(match.format))}` : '';
+      const s1 = Number.isFinite(match.score1) ? `&score1=${encodeURIComponent(String(match.score1))}` : '';
+      const s2 = Number.isFinite(match.score2) ? `&score2=${encodeURIComponent(String(match.score2))}` : '';
+      const mapOdds = await serverGet(`/odds?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}&map=${encodeURIComponent(String(currentMap))}${fmt}${s1}${s2}&force=1`).catch(() => null);
       if (!mapOdds?.t1 || parseFloat(mapOdds.t1) <= 1.0) continue;
 
       // Dedup por SÉRIE (não por mapa) para não duplicar notificações em cada mapa
@@ -1460,7 +1463,10 @@ async function autoAnalyzeMatch(token, match) {
     // Ao vivo: só usar odds do mapa atual se mapa ao vivo confirmado
     let oddsToUse = o;
     if (hasLiveStats && liveGameNumber) {
-      const mo = await serverGet(`/odds?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}&map=${encodeURIComponent(String(liveGameNumber))}&force=1`).catch(() => null);
+      const fmt = match.format ? `&format=${encodeURIComponent(String(match.format))}` : '';
+      const s1 = Number.isFinite(match.score1) ? `&score1=${encodeURIComponent(String(match.score1))}` : '';
+      const s2 = Number.isFinite(match.score2) ? `&score2=${encodeURIComponent(String(match.score2))}` : '';
+      const mo = await serverGet(`/odds?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}&map=${encodeURIComponent(String(liveGameNumber))}${fmt}${s1}${s2}&force=1`).catch(() => null);
       if (mo?.t1 && mo?.t2) oddsToUse = mo;
     }
 

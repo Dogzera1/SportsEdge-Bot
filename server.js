@@ -1108,6 +1108,69 @@ async function getMapMlOddsFromFixture(t1, t2, mapNumber) {
   return null;
 }
 
+function _parseFormatMaxWins(formatStr) {
+  const f = String(formatStr || '').toLowerCase();
+  const m = f.match(/bo\s*(\d+)/i) || f.match(/bestof\s*(\d+)/i) || f.match(/bo(\d+)/i);
+  const n = m ? parseInt(m[1], 10) : NaN;
+  if (Number.isFinite(n) && n >= 1) return Math.ceil(n / 2);
+  // default conservador
+  return 2; // Bo3
+}
+
+function _seriesWinProbDP(p, aWins, bWins, maxWins) {
+  const memo = new Map();
+  const key = (a, b) => `${a}|${b}`;
+  const go = (a, b) => {
+    if (a >= maxWins) return 1;
+    if (b >= maxWins) return 0;
+    const k = key(a, b);
+    if (memo.has(k)) return memo.get(k);
+    const v = p * go(a + 1, b) + (1 - p) * go(a, b + 1);
+    memo.set(k, v);
+    return v;
+  };
+  return go(aWins, bWins);
+}
+
+function _invertToMapP(targetSeriesP, aWins, bWins, maxWins) {
+  const t = Math.max(0.0001, Math.min(0.9999, targetSeriesP));
+  let lo = 0.0001, hi = 0.9999;
+  for (let i = 0; i < 60; i++) {
+    const mid = (lo + hi) / 2;
+    const ps = _seriesWinProbDP(mid, aWins, bWins, maxWins);
+    if (ps < t) lo = mid;
+    else hi = mid;
+  }
+  return (lo + hi) / 2;
+}
+
+function estimateMapMlFromSeriesOdds(baseOdds, opts) {
+  const o1 = parseFloat(baseOdds?.t1);
+  const o2 = parseFloat(baseOdds?.t2);
+  if (!o1 || !o2 || o1 <= 1 || o2 <= 1) return null;
+
+  const aWins = Math.max(0, parseInt(opts?.score1 ?? 0, 10) || 0);
+  const bWins = Math.max(0, parseInt(opts?.score2 ?? 0, 10) || 0);
+  const maxWins = Math.max(1, parseInt(opts?.maxWins ?? 2, 10) || 2);
+
+  // Converte odds série -> prob série (de-juice simples)
+  const p1i = 1 / o1;
+  const p2i = 1 / o2;
+  const over = p1i + p2i;
+  const pSeriesT1 = over > 0 ? (p1i / over) : 0.5;
+
+  const pMapT1 = _invertToMapP(pSeriesT1, aWins, bWins, maxWins);
+  const pMapT2 = 1 - pMapT1;
+  return {
+    t1: String((1 / pMapT1).toFixed(2)),
+    t2: String((1 / pMapT2).toFixed(2)),
+    bookmaker: baseOdds?.bookmaker || '1xBet',
+    mapMarket: false,
+    mapEstimated: true,
+    mapP: { t1: pMapT1, t2: pMapT2 },
+  };
+}
+
 // ── Suporte a Apelidos/Abreviações de Times ──
 const LOL_ALIASES = {
   // LCK
@@ -2182,6 +2245,9 @@ const server = http.createServer(async (req, res) => {
     const t2 = parsed.query.team2 || parsed.query.p2 || '';
     if (!t1 || !t2) { sendJson(res, { error: 'team1 e team2 obrigatórios' }, 400); return; }
     const mapNumber = parsed.query.map ? parseInt(parsed.query.map, 10) : null;
+    const score1 = parsed.query.score1 != null ? parseInt(parsed.query.score1, 10) : null;
+    const score2 = parsed.query.score2 != null ? parseInt(parsed.query.score2, 10) : null;
+    const format = parsed.query.format ? String(parsed.query.format) : '';
     // force=1: bypassa TTL do cache (usado para partidas iminentes < 2h)
     if (parsed.query.force === '1') {
       const serveFromCache = (reason) => {
@@ -2190,7 +2256,14 @@ const server = http.createServer(async (req, res) => {
           return getMapMlOddsFromFixture(t1, t2, mapNumber).then(mo => {
             if (!mo) {
               const base = findOdds('esports', t1, t2);
-              if (base?.t1 && base?.t2) mo = { ...base, mapRequested: mapNumber, mapMarket: false };
+              const est = base?.t1 && base?.t2
+                ? estimateMapMlFromSeriesOdds(base, { score1, score2, maxWins: _parseFormatMaxWins(format) })
+                : null;
+              if (est?.t1 && est?.t2) {
+                mo = { ...est, mapRequested: mapNumber };
+              } else if (base?.t1 && base?.t2) {
+                mo = { ...base, mapRequested: mapNumber, mapMarket: false };
+              }
             } else { mo.mapRequested = mapNumber; mo.mapMarket = true; }
             sendJson(res, mo || { error: reason });
           });
@@ -2250,7 +2323,10 @@ const server = http.createServer(async (req, res) => {
       if (!o) {
         const base = findOdds('esports', t1, t2);
         if (base?.t1 && base?.t2) {
-          o = { ...base, mapRequested: mapNumber, mapMarket: false };
+          const est = estimateMapMlFromSeriesOdds(base, { score1, score2, maxWins: _parseFormatMaxWins(format) });
+          o = est?.t1 && est?.t2
+            ? { ...est, mapRequested: mapNumber }
+            : { ...base, mapRequested: mapNumber, mapMarket: false };
         }
       } else {
         o.mapRequested = mapNumber;
