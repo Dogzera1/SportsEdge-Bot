@@ -7,7 +7,8 @@ const dns = require('dns');
 dns.setDefaultResultOrder('ipv4first');
 const initDatabase = require('./lib/database');
 const { SPORTS, getSportById } = require('./lib/sports');
-const { log, sendJson, safeParse, norm, httpGet, cachedHttpGet, aiPost, oddsApiAllowed, getMetricsLite } = require('./lib/utils');
+const { log, sendJson, safeParse, norm, httpGet, cachedHttpGet, aiPost, oddsApiAllowed, getMetricsLite, calcKellyWithP } = require('./lib/utils');
+const { esportsPreFilter } = require('./lib/ml');
 const { radarGetInfo, radarGetByPath } = require('./lib/radar-sport');
 
 // Railway sets $PORT automatically; start.js bridges it to SERVER_PORT
@@ -2126,6 +2127,61 @@ const EXPENSIVE_ROUTES = new Set([
   '/mma-odds',
 ]);
 
+/** Forma + H2H + histórico de odds gravado (mesma lógica que /team-form, /h2h, /odds-movement). */
+function lolEnrichmentFromDb(t1, t2, game = 'lol') {
+  const days = 45;
+  const limit = 10;
+  const formFor = (team) => {
+    if (!team) return { wins: 0, draws: 0, losses: 0, winRate: 0, streak: '—', recent: [] };
+    let rows = stmts.getTeamFormCustom.all(team, team, game, days, limit);
+    if (!rows.length) {
+      const fuzzy = `%${team}%`;
+      rows = stmts.getTeamFormFuzzyCustom.all(fuzzy, fuzzy, game, days, limit);
+    }
+    if (!rows.length) return { wins: 0, draws: 0, losses: 0, winRate: 0, streak: '—', recent: [] };
+    let wins = 0, losses = 0, draws = 0, streak = '', streakCount = 0;
+    const recent = [];
+    let streakActive = true;
+    for (const r of rows) {
+      const isDraw = r.winner && norm(r.winner) === 'draw';
+      const won = !isDraw && norm(r.winner) === norm(team);
+      const resChar = won ? 'W' : (isDraw ? 'D' : 'L');
+      recent.push(resChar);
+      if (won) wins++; else if (isDraw) draws++; else losses++;
+      if (streakActive) {
+        if (streak === '') { streak = resChar; streakCount = 1; }
+        else if (streak === resChar) streakCount++;
+        else streakActive = false;
+      }
+    }
+    return { wins, draws, losses, winRate: Math.round((wins / rows.length) * 100), streak: `${streakCount}${streak}`, recent };
+  };
+  const form1 = formFor(t1);
+  const form2 = formFor(t2);
+  let rows = stmts.getH2HCustom.all(t1, t2, t2, t1, game, days, limit);
+  if (!rows.length) {
+    rows = stmts.getH2HFuzzyCustom.all(`%${t1}%`, `%${t2}%`, `%${t2}%`, `%${t1}%`, game, days, limit);
+  }
+  let t1w = 0, t2w = 0;
+  for (const r of rows) {
+    const isDraw = r.winner && norm(r.winner) === 'draw';
+    if (norm(r.winner) === norm(t1)) t1w++;
+    else if (!isDraw) t2w++;
+  }
+  const h2h = { totalMatches: rows.length, t1Wins: t1w, t2Wins: t2w };
+  const matchKey = `${norm(t1)}_${norm(t2)}`;
+  const history = stmts.getOddsMovement.all('esports', matchKey);
+  const oddsMovement = {
+    history: history.map(h => ({
+      odds_t1: h.odds_p1,
+      odds_t2: h.odds_p2,
+      bookmaker: h.bookmaker,
+      recorded_at: h.recorded_at
+    }))
+  };
+  return { form1, form2, h2h, oddsMovement };
+}
+
 // ── HTTP Server ──
 const server = http.createServer(async (req, res) => {
   const parsed = url.parse(req.url, true);
@@ -3757,6 +3813,113 @@ const server = http.createServer(async (req, res) => {
   if (p === '/sync-pro-stats') {
     if (!PANDASCORE_TOKEN) { sendJson(res, { ok: false, error: 'PANDASCORE_TOKEN não configurado' }); return; }
     syncProStats().then(r => sendJson(res, r)).catch(e => sendJson(res, { ok: false, error: e.message }));
+    return;
+  }
+
+  // ── LoL Match Winner: EV com odds manuais (sem API de odds) ──
+  if (p === '/lol/ev-manual') {
+    const serveHtml = () => {
+      const q = parsed.query || {};
+      const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+      const t1 = esc(q.team1 || '');
+      const t2 = esc(q.team2 || '');
+      const o1 = esc(q.odd1 || q.o1 || '');
+      const o2 = esc(q.odd2 || q.o2 || '');
+      const fmt = esc(q.format || '');
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      res.end(`<!DOCTYPE html><html lang="pt-BR"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>LoL ML — odds manuais</title>
+<style>body{font-family:system-ui,sans-serif;max-width:520px;margin:2rem auto;padding:0 1rem}label{display:block;margin:.6rem 0 .15rem}input{width:100%;padding:.45rem;box-sizing:border-box}button{margin-top:1rem;padding:.55rem 1rem}</style></head><body>
+<h1>Match Winner (odds manuais)</h1>
+<p>Odds decimais; dados de forma/H2H vêm do DB local.</p>
+<form method="get" action="/lol/ev-manual">
+<input type="hidden" name="view" value="json"/>
+<label>Time 1</label><input name="team1" value="${t1}" required/>
+<label>Time 2</label><input name="team2" value="${t2}" required/>
+<label>Odd time 1</label><input name="odd1" type="number" step="0.01" min="1.01" value="${o1}" required/>
+<label>Odd time 2</label><input name="odd2" type="number" step="0.01" min="1.01" value="${o2}" required/>
+<label>Formato (opcional)</label><input name="format" placeholder="Bo1 / Bo3 / Bo5" value="${fmt}"/>
+<button type="submit">Calcular JSON</button>
+</form>
+<p><small>Resposta: JSON com EV e Kelly. Ou use GET/POST API com os mesmos parâmetros.</small></p>
+</body></html>`);
+    };
+
+    const runManualEv = (payload) => {
+      try {
+        const team1 = String(payload.team1 || payload.t1 || '').trim();
+        const team2 = String(payload.team2 || payload.t2 || '').trim();
+        const oRaw1 = payload.odd1 ?? payload.o1 ?? payload.odds1;
+        const oRaw2 = payload.odd2 ?? payload.o2 ?? payload.odds2;
+        const o1 = parseFloat(String(oRaw1 ?? '').replace(',', '.'));
+        const o2 = parseFloat(String(oRaw2 ?? '').replace(',', '.'));
+        const game = String(payload.game || 'lol').trim() || 'lol';
+        const formatRaw = payload.format != null ? String(payload.format).trim() : '';
+        if (!team1 || !team2) { sendJson(res, { error: 'team1 e team2 obrigatórios' }, 400); return; }
+        if (!Number.isFinite(o1) || !Number.isFinite(o2) || o1 <= 1.0 || o2 <= 1.0) {
+          sendJson(res, { error: 'odd1 e odd2 devem ser decimais > 1' }, 400); return;
+        }
+        const enrich = lolEnrichmentFromDb(team1, team2, game);
+        const match = { team1, team2, game, format: formatRaw || null };
+        const odds = { t1: String(o1), t2: String(o2) };
+        const mlResult = esportsPreFilter(match, odds, enrich, false, '', null, stmts);
+        const ev1 = (mlResult.modelP1 * o1 - 1) * 100;
+        const ev2 = (mlResult.modelP2 * o2 - 1) * 100;
+        const kFrac = parseFloat(payload.kellyFrac);
+        const kellyFrac = Number.isFinite(kFrac) && kFrac > 0 && kFrac <= 1 ? kFrac : (1 / 6);
+        const stake1 = calcKellyWithP(mlResult.modelP1, o1, kellyFrac);
+        const stake2 = calcKellyWithP(mlResult.modelP2, o2, kellyFrac);
+        let suggestion = null;
+        if (ev1 >= ev2 && ev1 > 0) suggestion = { side: 't1', team: team1, odd: o1, evPercent: Math.round(ev1 * 10) / 10, stake: stake1 };
+        else if (ev2 > ev1 && ev2 > 0) suggestion = { side: 't2', team: team2, odd: o2, evPercent: Math.round(ev2 * 10) / 10, stake: stake2 };
+
+        sendJson(res, {
+          match,
+          oddsDecimal: { t1: o1, t2: o2 },
+          enrichSummary: {
+            form1: enrich.form1,
+            form2: enrich.form2,
+            h2h: enrich.h2h,
+            oddsMovementPoints: enrich.oddsMovement?.history?.length || 0
+          },
+          mlPrefilter: {
+            pass: mlResult.pass,
+            direction: mlResult.direction,
+            score: mlResult.score,
+            t1Edge: mlResult.t1Edge,
+            t2Edge: mlResult.t2Edge,
+            modelP1: mlResult.modelP1,
+            modelP2: mlResult.modelP2,
+            impliedP1: mlResult.impliedP1,
+            impliedP2: mlResult.impliedP2,
+            factorCount: mlResult.factorCount,
+            factorActive: mlResult.factorActive || []
+          },
+          evPercent: { t1: Math.round(ev1 * 10) / 10, t2: Math.round(ev2 * 10) / 10 },
+          kellyStakeUnits: { t1: stake1, t2: stake2, kellyFrac: kellyFrac },
+          suggestion
+        });
+      } catch (e) {
+        sendJson(res, { error: e.message }, 500);
+      }
+    };
+
+    if (req.method === 'GET') {
+      const q = parsed.query || {};
+      const bare = !q.team1 && !q.odd1 && !q.o1 && q.view !== 'json';
+      if (bare) { serveHtml(); return; }
+      runManualEv(q);
+      return;
+    }
+    if (req.method === 'POST') {
+      let body = '';
+      req.on('data', d => { body += d; });
+      req.on('end', () => {
+        const json = safeParse(body, {});
+        runManualEv({ ...parsed.query, ...json });
+      });
+      return;
+    }
+    sendJson(res, { error: 'Method not allowed' }, 405);
     return;
   }
 
