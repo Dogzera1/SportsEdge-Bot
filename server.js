@@ -1728,29 +1728,58 @@ const server = http.createServer(async (req, res) => {
 
   // ── Esports Endpoints (sem scrapers) ──
   if (p === '/lol-matches') {
-    // Primário: getSchedule "lolesports-live" (leve)
-    // Backoff: Riot (getLive+getSchedule)
-    // Último backoff: PandaScore
+    // Primário: getSchedule + getLive (arush); PandaScore sempre para live status (LPL)
     let riotMatches = await getLoLMatchesArush();
     let lolSource = 'arush_schedule';
     if (!riotMatches.length) { riotMatches = await getLoLMatches(); lolSource = 'riot_live+schedule'; }
-    const needPsBackoff = riotMatches.length < 10;
-    const psMatches = needPsBackoff ? await getPandaScoreLolMatches() : [];
-    log('INFO', 'LOL', `/lol-matches fonte=${lolSource} riot=${riotMatches.length} ps=${psMatches.length} psBackoff=${needPsBackoff ? 1 : 0}`);
 
-    // Mescla deduplicando por nomes de times (PandaScore não sobrescreve Riot)
+    // PandaScore: SEMPRE busca para live status (não só como backoff de count)
+    // Razão: Lolesports API falha em refletir LPL live — PS /running é a fonte correta
+    const psMatches = await getPandaScoreLolMatches();
+    const psBackoff = riotMatches.length < 10;
+    log('INFO', 'LOL', `/lol-matches fonte=${lolSource} riot=${riotMatches.length} ps=${psMatches.length} psBackoff=${psBackoff ? 1 : 0}`);
+
+    // Mescla: PandaScore não sobrescreve Riot, mas pode promover upcoming→live
     const combined = [...riotMatches];
     for (const pm of psMatches) {
       const n1 = norm(pm.team1), n2 = norm(pm.team2);
-      const alreadyExists = combined.some(r =>
+      const riotIdx = combined.findIndex(r =>
         (norm(r.team1).includes(n1) || n1.includes(norm(r.team1))) &&
         (norm(r.team2).includes(n2) || n2.includes(norm(r.team2)))
       );
-      if (!alreadyExists) {
+      if (riotIdx !== -1) {
+        // PS diz que está live mas Riot mostra upcoming → promove status
+        if (pm.status === 'live' && combined[riotIdx].status !== 'live') {
+          combined[riotIdx].status = 'live';
+          // Atualiza placar se PS tem dados mais recentes
+          if (pm.score1 > 0 || pm.score2 > 0) {
+            combined[riotIdx].score1 = pm.score1;
+            combined[riotIdx].score2 = pm.score2;
+          }
+        }
+      } else {
+        // Partida não existe no Riot (só no PandaScore)
         const o = findOdds('esports', pm.team1, pm.team2);
         if (o) pm.odds = o;
         combined.push(pm);
       }
+    }
+
+    // Promoção por tempo: LPL/ligas asiáticas que a Riot API não atualiza para inProgress
+    // Se startTime passou há mais de 2min e menos de 5h, e partida não está completa → live
+    const nowMs = Date.now();
+    const LIVE_LEAGUES_TIME_PROMOTE = new Set(['lpl', 'ldl', 'lck', 'lck_challengers_league', 'lck-cl', 'lck-challengers-league']);
+    for (const m of combined) {
+      if (m.status === 'live') continue;
+      const startTs = m.time ? new Date(m.time).getTime() : 0;
+      if (!startTs) continue;
+      const elapsedMin = (nowMs - startTs) / 60000;
+      if (elapsedMin < 2 || elapsedMin > 300) continue; // entre 2min e 5h
+      if (m.winner) continue; // já terminou
+      // Só promove ligas problemáticas (LPL é a principal)
+      const slug = m.leagueSlug || '';
+      if (!LIVE_LEAGUES_TIME_PROMOTE.has(slug)) continue;
+      m.status = 'live';
     }
 
     // Reordena: live primeiro, depois por horário
