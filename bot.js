@@ -2444,8 +2444,8 @@ function mmaRecordToEnrich(record1, record2) {
 }
 
 // Converte rankings ATP/WTA em enrich compatível com esportsPreFilter
-// Usa modelo Elo-like (log-ranking): rank #1 vs #100 → ~73% favorito
-function rankingToEnrich(rankStr1, rankStr2) {
+// Usa modelo logístico calibrado para o tênis (chance real, suavizada): log(r2/r1)
+function rankingToEnrich(rankStr1, rankStr2, surface = 'dura') {
   function parseRank(str) {
     if (!str) return null;
     const m = (str || '').match(/^#(\d+)/);
@@ -2454,11 +2454,20 @@ function rankingToEnrich(rankStr1, rankStr2) {
   const r1 = parseRank(rankStr1), r2 = parseRank(rankStr2);
   if (r1 === null && r2 === null) return null;
 
-  const base1 = r1 || 500, base2 = r2 || 500;
-  // P(1 ganha) = 1 / (1 + sqrt(rank1/rank2)) — favorece rank menor (melhor jogador)
-  const wr1 = Math.round(100 / (1 + Math.sqrt(base1 / base2)));
+  const base1 = r1 || 800, base2 = r2 || 800; // Penaliza mais a falta de rank no tênis
+  
+  // Tênis usa modelo logístico: diff = log2(base2/base1). Cap em ±3.5 (~70% favorito max limit para prevenir overconfidence extrema)
+  const diff = Math.max(-3.5, Math.min(3.5, Math.log2(base2 / base1)));
+  
+  // Ajuste por superfície: reduz o peso do ranking puro no saibro e grama onde especialistas brilham mais
+  const multiplier = surface === 'saibro' ? 0.75 : surface === 'grama' ? 0.85 : 1.0;
+  
+  // P1 base score (0.5 = 50%) => scale: diff 1 = +4%, cap 70%
+  const p1 = 0.5 + (diff * multiplier * 0.055);
+  const wr1 = Math.max(10, Math.min(90, Math.round(p1 * 100)));
   const wr2 = 100 - wr1;
-  // wins/losses sintéticos — apenas para o esportsPreFilter usar o winRate
+  
+  // wins/losses sintéticos — para calibração do balanceamento H2H
   return {
     form1: { wins: wr1, losses: wr2, winRate: wr1 },
     form2: { wins: wr2, losses: wr1, winRate: wr2 },
@@ -3735,7 +3744,7 @@ async function pollTennis() {
   if (!tennisConfig?.enabled || !tennisConfig?.token) return;
   const token = tennisConfig.token;
 
-  const TENNIS_INTERVAL = 4 * 60 * 60 * 1000; // Re-analisa a cada 4h
+  const TENNIS_INTERVAL = 2 * 60 * 60 * 1000; // Re-analisa a cada 2h
 
   async function loop() {
     try {
@@ -3806,10 +3815,10 @@ async function pollTennis() {
         const [dbForm1, dbForm2, dbH2h] = await Promise.all([
           serverGet(`/team-form?team=${encodeURIComponent(match.team1)}&game=tennis&days=730&limit=20`).catch(() => null),
           serverGet(`/team-form?team=${encodeURIComponent(match.team2)}&game=tennis&days=730&limit=20`).catch(() => null),
-          serverGet(`/h2h?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}&game=tennis&days=1095&limit=15`).catch(() => null),
+          serverGet(`/h2h?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}&game=tennis&days=730&limit=15`).catch(() => null),
         ]);
 
-        const rankEnrich = rankingToEnrich(rank1, rank2);
+        const rankEnrich = rankingToEnrich(rank1, rank2, surface);
         const tennisEnrich = {
           form1: (dbForm1 && (dbForm1.wins + dbForm1.losses) >= 3) ? dbForm1 : (rankEnrich?.form1 || null),
           form2: (dbForm2 && (dbForm2.wins + dbForm2.losses) >= 3) ? dbForm2 : (rankEnrich?.form2 || null),
@@ -3817,7 +3826,18 @@ async function pollTennis() {
           oddsMovement: null
         };
 
-        const mlResultTennis = esportsPreFilter(match, o, tennisEnrich || { form1: null, form2: null, h2h: null, oddsMovement: null }, false, '', null);
+        // Usa override ML env para tênis com base 2.5pp (margin bookies tênis é menor, ~4-6%)
+        const envScoreBase = process.env.TENNIS_MIN_EDGE ? parseFloat(process.env.TENNIS_MIN_EDGE) : 2.5; 
+        
+        let mlResultTennis = esportsPreFilter(match, o, tennisEnrich || { form1: null, form2: null, h2h: null, oddsMovement: null }, false, '', null);
+        
+        // Substituindo a verificação de edge baseada em LoL (que exige 4pp sem comp) para o padrão do tênis (2.5pp)
+        if (mlResultTennis.factorCount >= 1 && mlResultTennis.score < envScoreBase) {
+           mlResultTennis.pass = false; 
+        } else {
+           mlResultTennis.pass = true;
+        }
+
         if (!mlResultTennis.pass) {
           log('INFO', 'AUTO-TENNIS', `Pré-filtro ML: edge insuficiente (${mlResultTennis.score.toFixed(1)}pp) para ${match.team1} vs ${match.team2}. Pulando IA.`);
           await new Promise(r => setTimeout(r, 500)); continue;
@@ -3830,7 +3850,7 @@ async function pollTennis() {
         const fairLabelTennis = hasModelDataTennis ? 'P modelo (ML H2H/Ranking)' : 'Fair odds (de-juice, sem ranking/ML)';
 
         // Montar seção de dados reais
-        const dataSection = [
+        let dataSection = [
           rank1 ? `Ranking ${match.team1}: ${rank1}` : null,
           rank2 ? `Ranking ${match.team2}: ${rank2}` : null,
           form1 ? `Form ${match.team1} (torneio atual): ${form1}` : null,
@@ -3838,7 +3858,17 @@ async function pollTennis() {
           espnEvent ? `Torneio em andamento: ${espnEvent.eventName}` : null
         ].filter(Boolean).join('\n');
 
-        const hasRealData = !!(rank1 || rank2 || form1 || form2);
+        if (dbH2h && (dbH2h.t1Wins + dbH2h.t2Wins > 0)) {
+           dataSection += `\nHistórico Direto (H2H): ${match.team1} ${dbH2h.t1Wins} x ${dbH2h.t2Wins} ${match.team2}`;
+        }
+        if (dbForm1 && dbForm1.totalGames > 0) {
+           dataSection += `\nForma geral (${match.team1}): ${dbForm1.wins}W-${dbForm1.losses}L (${dbForm1.winRate}%)`;
+        }
+        if (dbForm2 && dbForm2.totalGames > 0) {
+           dataSection += `\nForma geral (${match.team2}): ${dbForm2.wins}W-${dbForm2.losses}L (${dbForm2.winRate}%)`;
+        }
+
+        const hasRealData = !!(rank1 || rank2 || form1 || form2 || dbH2h);
 
         const fairOddsLineTennis = hasModelDataTennis
           ? `${fairLabelTennis}: ${match.team1}=${modelP1Tennis}% | ${match.team2}=${modelP2Tennis}%\nP de-juiced bookie: ${match.team1}=${fairP1}% | ${match.team2}=${fairP2}%`
@@ -3858,14 +3888,14 @@ Margem bookie: ${marginPct}%
 ${fairOddsLineTennis}
 ${isFav1 ? match.team1 : match.team2} é o favorito do mercado.
 
-${dataSection ? `DADOS REAIS (ESPN):\n${dataSection}\n` : 'AVISO: sem dados ESPN disponíveis — use apenas conhecimento de treino confiável.\n'}${newsSectionTennis ? `${newsSectionTennis}\n` : ''}
+${dataSection ? `DADOS REAIS (ESPN/DB):\n${dataSection}\n` : 'AVISO: sem dados ESPN/DB disponíveis — use apenas conhecimento de treino confiável.\n'}${newsSectionTennis ? `${newsSectionTennis}\n` : ''}
 INSTRUÇÕES:
-1. Estime a probabilidade REAL de vitória de cada jogador com base em: ranking, superfície, H2H, form recente, estilo.
+1. Estime a probabilidade REAL de vitória de cada jogador com base em: ranking, superfície, H2H, form recente, estilo de jogo. Use H2H para match-ups desfavoráveis.
 2. Compare sua estimativa com a ${fairLabelTennis} (${match.team1}=${modelP1Tennis}% | ${match.team2}=${modelP2Tennis}%):
    - Se sua estimativa para ${match.team1} > ${modelP1Tennis}%: edge em ${match.team1} (EV = (sua_prob/100 * ${o.t1}) - 1)
    - Se sua estimativa para ${match.team2} > ${modelP2Tennis}%: edge em ${match.team2} (EV = (sua_prob/100 * ${o.t2}) - 1)
-3. Confiança (1-10): baseada em quão bem você conhece esses jogadores E nessa superfície.
-   - Se não tiver certeza sobre ranking atual ou form real: máximo confiança 6 → SEM_EDGE.
+3. Confiança (1-10): baseada em quão bem você conhece esses jogadores E nessa superfície específica.
+   - Se não tiver certeza sobre o contexto atual (ex: lesões reportadas vs forma real): máximo confiança 6 → SEM_EDGE.
 
 DECISÃO:
 - Edge real (EV ≥ +4%) E confiança ≥ 7: TIP_ML:[jogador]@[odd]|EV:[%]|STAKE:[1-3]u|CONF:[ALTA/MÉDIA/BAIXA]
@@ -3873,10 +3903,7 @@ DECISÃO:
 
 Máximo 200 palavras. Mostre seu raciocínio brevemente antes da decisão.`;
 
-        log('INFO', 'AUTO-TENNIS', `Analisando: ${match.team1} vs ${match.team2} | ${surfacePT}${hasRealData ? ' [ESPN+]' : ''}`);
-        analyzedTennis.set(key, { ts: now, tipSent: false });
-
-        log('INFO', 'AUTO-TENNIS', `Analisando: ${match.team1} vs ${match.team2} | ${match.league}`);
+        log('INFO', 'AUTO-TENNIS', `Analisando: ${match.team1} vs ${match.team2} | ${match.league} | ${surfacePT}${hasRealData ? ' [ESPN/DB+]' : ''}`);
         analyzedTennis.set(key, { ts: now, tipSent: false });
 
         let resp;
@@ -3913,8 +3940,8 @@ Máximo 200 palavras. Mostre seu raciocínio brevemente antes da decisão.`;
         const tipStake  = tipMatch2[4];
         const tipConf   = tipMatch2[5].toUpperCase();
 
-        if (tipOdd < 1.30 || tipOdd > 5.00) {
-          log('INFO', 'AUTO-TENNIS', `Gate odds: ${tipOdd} fora do range 1.30-5.00`);
+        if (tipOdd < 1.15 || tipOdd > 5.00) {
+          log('INFO', 'AUTO-TENNIS', `Gate odds: ${tipOdd} fora do range 1.15-5.00`);
           await new Promise(r => setTimeout(r, 3000)); continue;
         }
         if (tipEV < 4.0) {
@@ -3977,7 +4004,7 @@ Máximo 200 palavras. Mostre seu raciocínio brevemente antes da decisão.`;
     } catch(e) {
       log('ERROR', 'AUTO-TENNIS', e.message);
     }
-    setTimeout(loop, 20 * 60 * 1000); // verifica a cada 20min
+    setTimeout(loop, 10 * 60 * 1000); // verifica a cada 10min
   }
   loop();
 }
