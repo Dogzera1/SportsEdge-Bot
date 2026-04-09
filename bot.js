@@ -502,8 +502,9 @@ async function runAutoAnalysis() {
 
   const esportsConfig = SPORTS['esports'];
   if (esportsConfig?.enabled) {
+    let lolRaw = [];
     try {
-      const lolRaw = await serverGet('/lol-matches').catch(() => []);
+      lolRaw = await serverGet('/lol-matches').catch(() => []);
       // Inclui 'draft': composições já disponíveis na API Riot antes do jogo começar.
       // Permite análise com draft real + odds pré-jogo (antes de cair para odds ao vivo).
       const lolLive = Array.isArray(lolRaw) ? lolRaw.filter(m => m.status === 'live' || m.status === 'draft') : [];

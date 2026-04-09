@@ -1018,7 +1018,7 @@ async function getMapMlOddsFromFixture(t1, t2, mapNumber) {
   let r = null;
   let fixtureJson = null;
   for (const fid of uniqCandidates) {
-    const url = `https://api.oddspapi.io/v4/odds?fixtureId=${fid}&bookmakers=1xbet&oddsFormat=decimal&verbosity=3&apiKey=${ODDSPAPI_KEY}`;
+    const url = `https://api.oddspapi.io/v4/odds?fixtureId=${fid}&oddsFormat=decimal&verbosity=5&apiKey=${ODDSPAPI_KEY}`;
     r = await cachedHttpGet(url, { provider: 'oddspapi', ttlMs }).catch(() => null);
     if (r && r.status === 200) {
       fixtureJson = safeParse(r.body, null);
@@ -2527,7 +2527,7 @@ const server = http.createServer(async (req, res) => {
       let r = null;
       let fixtureJson = null;
       for (const fid of uniqCandidates) {
-        const url = `https://api.oddspapi.io/v4/odds?fixtureId=${fid}&bookmakers=1xbet&oddsFormat=decimal&verbosity=3&apiKey=${ODDSPAPI_KEY}`;
+        const url = `https://api.oddspapi.io/v4/odds?fixtureId=${fid}&oddsFormat=decimal&verbosity=5&apiKey=${ODDSPAPI_KEY}`;
         r = await cachedHttpGet(url, { provider: 'oddspapi', ttlMs: 0 }).catch(() => null);
         if (r && r.status === 200) {
           fixtureJson = safeParse(r.body, null);
@@ -2573,7 +2573,7 @@ const server = http.createServer(async (req, res) => {
       let r = null;
       let fixtureJson = null;
       for (const fid of uniqCandidates) {
-        const url = `https://api.oddspapi.io/v4/odds?fixtureId=${fid}&bookmakers=1xbet&oddsFormat=decimal&verbosity=3&apiKey=${ODDSPAPI_KEY}`;
+        const url = `https://api.oddspapi.io/v4/odds?fixtureId=${fid}&oddsFormat=decimal&verbosity=5&apiKey=${ODDSPAPI_KEY}`;
         r = await cachedHttpGet(url, { provider: 'oddspapi', ttlMs }).catch(() => null);
         if (r && r.status === 200) {
           fixtureJson = safeParse(r.body, null);
