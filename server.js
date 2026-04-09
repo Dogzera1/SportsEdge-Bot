@@ -1488,9 +1488,13 @@ async function getLoLMatches() {
 // ── PandaScore LoL (cobre torneios fora do lolesports.com, ex: EWC Qualifier China) ──
 let _pandaBackoffUntil = 0;
 let _pandaLast429LogTs = 0;
+let _pandaCache = { data: [], ts: 0 };
+const PANDA_CACHE_TTL = parseInt(process.env.PANDA_CACHE_TTL_MS || '60000', 10); // 60s default
 async function getPandaScoreLolMatches() {
   if (!PANDASCORE_TOKEN || PANDASCORE_TOKEN === 'your-pandascore-token') return [];
   if (Date.now() < _pandaBackoffUntil) return [];
+  // Cache TTL: evita chamar PandaScore em cada /lol-matches (chamado ~1/min pelo bot)
+  if (_pandaCache.data.length && (Date.now() - _pandaCache.ts) < PANDA_CACHE_TTL) return _pandaCache.data;
   try {
     const headers = { 'Authorization': `Bearer ${PANDASCORE_TOKEN}` };
     const [runningRaw, upcomingRaw] = await Promise.all([
@@ -1597,10 +1601,11 @@ async function getPandaScoreLolMatches() {
     if (psMatches.length) {
       log('INFO', 'PANDASCORE', `${psMatches.length} partidas LoL (${live.length} live)`);
     }
+    _pandaCache = { data: psMatches, ts: Date.now() };
     return psMatches;
   } catch(e) {
     log('WARN', 'PANDASCORE', 'Erro: ' + e.message);
-    return [];
+    return _pandaCache.data; // retorna cache antigo em caso de erro
   }
 }
 
@@ -1625,10 +1630,13 @@ function isAdminRequest(req) {
   return false;
 }
 
+let _adminKeyWarnLogged = false;
 function requireAdmin(req, res) {
   if (!ADMIN_KEY) {
-    // AVISO: sem ADMIN_KEY, rotas admin estão abertas. Configure ADMIN_KEY em produção.
-    log('WARN', 'SEC', 'ADMIN_KEY não configurada — acesso admin sem autenticação');
+    if (!_adminKeyWarnLogged) {
+      _adminKeyWarnLogged = true;
+      log('WARN', 'SEC', 'ADMIN_KEY não configurada — rotas admin abertas sem autenticação. Configure ADMIN_KEY em produção.');
+    }
     return true;
   }
   if (!isAdminRequest(req)) {
