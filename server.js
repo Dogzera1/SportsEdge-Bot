@@ -529,10 +529,24 @@ async function sxFindLoLSportId() {
 }
 
 function sxNameLike(a, b) {
-  const na = norm(String(a || ''));
-  const nb = norm(String(b || ''));
+  const clean = (s) => {
+    let n = norm(String(s || ''));
+    // remove sufixos comuns
+    for (const suf of ['gaming', 'esports', 'team', 'club', 'academy', 'gg', 'esport']) {
+      if (n.endsWith(suf) && n.length > suf.length + 3) n = n.slice(0, -suf.length);
+    }
+    return n;
+  };
+  const na = clean(a);
+  const nb = clean(b);
   if (!na || !nb) return false;
-  return na === nb || na.includes(nb) || nb.includes(na);
+  if (na === nb) return true;
+  if (na.includes(nb) || nb.includes(na)) return true;
+  // prefix match (evita nomes compostos)
+  if (na.length >= 6 && nb.length >= 6) {
+    if (na.startsWith(nb.slice(0, 6)) || nb.startsWith(na.slice(0, 6))) return true;
+  }
+  return false;
 }
 
 async function sxFindMarketForMatch(t1, t2, { liveOnly = false, mapNumber = null } = {}) {
@@ -564,10 +578,9 @@ async function sxFindMarketForMatch(t1, t2, { liveOnly = false, mapNumber = null
       return `${o1} ${o2} ${meta}`.toLowerCase().includes(needle);
     };
 
-    const candidates = markets.filter(m => {
-      // LoL só (evita outros esports)
+    const pickCandidates = (requireLolLabel) => markets.filter(m => {
       const leagueLabel = String(m?.leagueLabel || m?.group1 || '').toLowerCase();
-      if (leagueLabel && !(leagueLabel.includes('lol') || leagueLabel.includes('league of legends'))) return false;
+      if (requireLolLabel && leagueLabel && !(leagueLabel.includes('lol') || leagueLabel.includes('league of legends'))) return false;
       const a = m?.teamOneName || m?.outcomeOneName || '';
       const b = m?.teamTwoName || m?.outcomeTwoName || '';
       const okTeams = (sxNameLike(a, t1) && sxNameLike(b, t2)) || (sxNameLike(a, t2) && sxNameLike(b, t1));
@@ -577,6 +590,8 @@ async function sxFindMarketForMatch(t1, t2, { liveOnly = false, mapNumber = null
       const mt = parseInt(m?.type, 10);
       return [52, 226].includes(mt) || true;
     });
+    let candidates = pickCandidates(true);
+    if (!candidates.length) candidates = pickCandidates(false); // fallback: label não padronizado
 
     if (candidates.length) {
       // prefer liveEnabled when liveOnly is true
