@@ -130,6 +130,7 @@ function tgRequest(token, method, params) {
       hostname: 'api.telegram.org',
       path: `/bot${token}/${method}`,
       method: 'POST',
+      family: 4, // força IPv4 — Railway tem problemas de conectividade IPv6 com Telegram
       headers: {
         'Content-Type': 'application/json',
         'Content-Length': Buffer.byteLength(body)
@@ -143,10 +144,23 @@ function tgRequest(token, method, params) {
       });
     });
     req.on('error', reject);
+    // Timeout de 20s — evita que lentidão do Telegram bloqueie o loop
+    req.setTimeout(20000, () => req.destroy(Object.assign(new Error('TelegramTimeout'), { code: 'ETIMEDOUT' })));
     req.write(body);
     req.end();
   });
 }
+
+// Handler global para promises não tratadas — evita crash do processo
+process.on('unhandledRejection', (reason) => {
+  const msg = reason instanceof Error ? reason.message : String(reason);
+  // Erros de rede do Telegram são esperados em instabilidades — não crashar
+  if (msg.includes('ETIMEDOUT') || msg.includes('ENETUNREACH') || msg.includes('ECONNREFUSED') || msg.includes('TelegramTimeout')) {
+    log('WARN', 'NET', `Telegram connection error (ignored): ${msg}`);
+  } else {
+    log('ERROR', 'UNCAUGHT', `unhandledRejection: ${msg}`);
+  }
+});
 
 // ── Server Helpers ──
 const ADMIN_KEY = (process.env.ADMIN_KEY || '').trim();
