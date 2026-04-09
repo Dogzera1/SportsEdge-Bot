@@ -962,9 +962,40 @@ async function getMapMlOddsFromFixture(t1, t2, mapNumber) {
     }
     return [...variants];
   };
-  const variants1 = expandWithAliases(nt1);
-  const variants2 = expandWithAliases(nt2);
-  const anyMatch = (variants, slug) => variants.some(v => v && v.length >= 2 && slug.includes(v));
+  const stripSuffixes = (n) => {
+    let s = String(n || '');
+    const suffixes = ['gaming', 'esports', 'team', 'academy', 'club', 'gg', 'esport']; // heurístico
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const suf of suffixes) {
+        if (s.endsWith(suf) && s.length > suf.length + 3) {
+          s = s.slice(0, -suf.length);
+          changed = true;
+        }
+      }
+    }
+    return s;
+  };
+  const expandLoose = (n) => {
+    const base = String(n || '');
+    const stripped = stripSuffixes(base);
+    const variants = new Set([base, stripped]);
+    const bases = [base, stripped].filter(Boolean);
+    for (const b of bases) {
+      if (b.length >= 8) variants.add(b.slice(0, 8));
+      if (b.length >= 10) variants.add(b.slice(0, 10));
+    }
+    for (const [key, aliases] of Object.entries(LOL_ALIASES)) {
+      for (const b of bases) {
+        if (b.includes(key) || key.includes(b)) { aliases.forEach(a => variants.add(a)); variants.add(key); }
+      }
+    }
+    return [...variants].filter(v => v && v.length >= 3);
+  };
+  const variants1 = expandLoose(nt1);
+  const variants2 = expandLoose(nt2);
+  const anyMatch = (variants, slug) => variants.some(v => v && (slug.includes(v) || v.includes(slug)));
 
   const entry = Object.values(oddsCache).find(v => {
     if (!v?.fixtureId) return false;
@@ -973,71 +1004,105 @@ async function getMapMlOddsFromFixture(t1, t2, mapNumber) {
   });
   if (!entry?.fixtureId || !ODDSPAPI_KEY) return null;
 
-  const fixtureId = entry.fixtureId;
-  const url = `https://api.oddspapi.io/v4/odds-by-fixtures?bookmaker=1xbet&fixtureId=${fixtureId}&oddsFormat=decimal&apiKey=${ODDSPAPI_KEY}`;
+  const fixtureId = String(entry.fixtureId);
+  const fixtureCandidates = [fixtureId];
+  if (fixtureId.startsWith('id') && fixtureId.length > 4) fixtureCandidates.push(fixtureId.slice(2));
+  if (!fixtureId.startsWith('id') && fixtureId.length > 4) fixtureCandidates.push('id' + fixtureId);
+  const uniqCandidates = [...new Set(fixtureCandidates)];
+
   const ttlMsRaw = parseInt(process.env.HTTP_CACHE_ODDSPAPI_FIXTURE_TTL_MS || '', 10);
   const ttlMs = Number.isFinite(ttlMsRaw) ? ttlMsRaw : 0;
-  const r = await cachedHttpGet(url, { provider: 'oddspapi', ttlMs }).catch(() => null);
-  if (!r || r.status !== 200) return null;
 
-  const data = safeParse(r.body, null);
-  const allMarkets = Array.isArray(data) ? data : (Array.isArray(data?.data) ? data.data : []);
-  if (!allMarkets.length) return null;
+  // OddsPapi v4: odds por fixture via GET /v4/odds?fixtureId=...
+  // (endpoint antigo /odds-by-fixtures pode retornar 404 dependendo do plano/versão)
+  let r = null;
+  let fixtureJson = null;
+  for (const fid of uniqCandidates) {
+    const url = `https://api.oddspapi.io/v4/odds?fixtureId=${fid}&bookmakers=1xbet&oddsFormat=decimal&verbosity=3&apiKey=${ODDSPAPI_KEY}`;
+    r = await cachedHttpGet(url, { provider: 'oddspapi', ttlMs }).catch(() => null);
+    if (r && r.status === 200) {
+      fixtureJson = safeParse(r.body, null);
+      if (fixtureJson) { r.__fixtureIdUsed = fid; break; }
+    }
+  }
+  if (!fixtureJson) return null;
+
+  const bkOdds = fixtureJson.bookmakerOdds || fixtureJson.bookmakersOdds || {};
+  const bk = bkOdds['1xbet'] || bkOdds['1xBet'] || bkOdds['1XBET'] || null;
+  const marketsObj = bk?.markets || {};
+  // Alguns bookmakers retornam markets como objeto { "<marketKey>": { ... } } sem bookmakerMarketId.
+  // Preserva a chave para debug e matching heurístico.
+  const markets = Object.entries(marketsObj || {}).map(([k, v]) => ({ ...(v || {}), _key: String(k) }));
+  if (!markets.length) return null;
 
   const n = parseInt(mapNumber, 10);
   if (!Number.isFinite(n) || n <= 0) return null;
 
-  // Filtra mercados relacionados a map/game e tenta achar o do mapa atual
-  const mapMarkets = allMarkets.filter(m => {
-    const name = (m.marketName || m.marketId || '').toString().toLowerCase();
-    const isMap = name.includes('map') || name.includes('game');
-    if (!isMap) return false;
-    // match "map 1", "game 1", "map1", "game1", "#1", "1st map"
+  const mkName = (m) => (m?.bookmakerMarketId || m?.marketId || m?._key || '').toString().toLowerCase();
+  const isMapMarketFor = (name, mapN) => {
+    if (!name) return false;
+    if (!(name.includes('map') || name.includes('game'))) return false;
     return (
-      name.includes(`map ${n}`) || name.includes(`map${n}`) ||
-      name.includes(`game ${n}`) || name.includes(`game${n}`) ||
-      name.includes(`#${n}`) ||
-      name.includes(`${n}st map`) || name.includes(`${n}nd map`) || name.includes(`${n}rd map`) || name.includes(`${n}th map`)
+      name.includes(`map${mapN}`) || name.includes(`map ${mapN}`) || name.includes(`map/${mapN}`) || name.includes(`map-${mapN}`) ||
+      name.includes(`game${mapN}`) || name.includes(`game ${mapN}`) || name.includes(`game/${mapN}`) || name.includes(`game-${mapN}`) ||
+      name.includes(`#${mapN}`)
     );
-  });
+  };
 
-  // Se não achou explícito, tenta qualquer mercado "map/game" (fallback)
-  const candidates = mapMarkets.length
-    ? mapMarkets
-    : allMarkets.filter(m => {
-        const name = (m.marketName || m.marketId || '').toString().toLowerCase();
-        return name.includes('map') || name.includes('game');
-      });
+  const candidatesExact = markets.filter(m => isMapMarketFor(mkName(m), n));
+  const candidatesAnyMap = markets.filter(m => {
+    const name = mkName(m);
+    return name.includes('map') || name.includes('game');
+  });
+  const candidates = candidatesExact.length ? candidatesExact : candidatesAnyMap;
   if (!candidates.length) return null;
 
-  // Heurística: preferir "winner" / "moneyline"
-  const scored = candidates.map(m => {
-    const name = (m.marketName || m.marketId || '').toString().toLowerCase();
-    const outcomes = Array.isArray(m.outcomes) ? m.outcomes : [];
+  const scoreMarket = (m) => {
+    const name = mkName(m);
+    const outcomesObj = m?.outcomes || {};
+    const outcomes = Object.values(outcomesObj || {});
     const has2 = outcomes.length >= 2;
-    const score =
+    return (
       (name.includes('winner') ? 5 : 0) +
       (name.includes('moneyline') || name.includes('ml') ? 3 : 0) +
-      (has2 ? 1 : 0);
-    return { m, name, outcomes, score };
-  }).sort((a, b) => b.score - a.score);
+      (has2 ? 1 : 0)
+    );
+  };
+  const scored = [...candidates].map(m => ({ m, name: mkName(m), score: scoreMarket(m) }))
+    .sort((a, b) => b.score - a.score);
+
+  const extractHomeAway = (market) => {
+    const outcomesObj = market?.outcomes || {};
+    const outcomes = Object.values(outcomesObj || {});
+    const pickPrice = (o) => {
+      const players = o?.players || o?.playerOdds || {};
+      const first = players['0'] || players[0] || Object.values(players || {})[0] || null;
+      return extractPrice(first || o);
+    };
+    const pickKey = (o) => {
+      const players = o?.players || o?.playerOdds || {};
+      const first = players['0'] || players[0] || Object.values(players || {})[0] || null;
+      return (first?.bookmakerOutcomeId || o?.bookmakerOutcomeId || '').toString().toLowerCase();
+    };
+    let home = null, away = null;
+    for (const o of outcomes) {
+      const k = pickKey(o);
+      const p = pickPrice(o);
+      if (!p) continue;
+      if (!home && (k.includes('home') || k === '1')) home = p;
+      else if (!away && (k.includes('away') || k === '2')) away = p;
+    }
+    if ((!home || !away) && outcomes.length >= 2) {
+      home = home || pickPrice(outcomes[0]);
+      away = away || pickPrice(outcomes[1]);
+    }
+    return { home, away };
+  };
 
   for (const cand of scored) {
-    const outcomes = cand.outcomes;
-    if (!outcomes || outcomes.length < 2) continue;
-    // Tenta mapear outcomes pelo nome do time (quando disponível)
-    const o1 = outcomes.find(o => {
-      const on = norm(o.name || '');
-      return variants1.some(v => v && v.length >= 2 && (on === v || on.includes(v) || v.includes(on)));
-    });
-    const o2 = outcomes.find(o => {
-      const on = norm(o.name || '');
-      return variants2.some(v => v && v.length >= 2 && (on === v || on.includes(v) || v.includes(on)));
-    });
-    const p1 = extractPrice(o1 || outcomes[0]);
-    const p2 = extractPrice(o2 || outcomes[1]);
-    if (!p1 || !p2) continue;
-    return { t1: String(p1), t2: String(p2), bookmaker: '1xBet', fixtureId, market: cand.name };
+    const { home, away } = extractHomeAway(cand.m);
+    if (!home || !away) continue;
+    return { t1: String(home), t2: String(away), bookmaker: '1xBet', fixtureId: (r.__fixtureIdUsed || fixtureId), market: cand.name };
   }
 
   return null;
@@ -1167,6 +1232,29 @@ function findOdds(sport, t1, t2) {
   // Expande um nome normalizado com seus aliases conhecidos
   const expandWithAliases = (n) => {
     const variants = new Set([n]);
+    // Heurística: remove sufixos comuns (ex: "teamorangegaming" → "teamorange")
+    const stripSuffixes = (raw) => {
+      let s = String(raw || '');
+      const suffixes = ['gaming', 'esports', 'team', 'academy', 'club', 'gg', 'esport'];
+      let changed = true;
+      while (changed) {
+        changed = false;
+        for (const suf of suffixes) {
+          if (s.endsWith(suf) && s.length > suf.length + 3) {
+            s = s.slice(0, -suf.length);
+            changed = true;
+          }
+        }
+      }
+      return s;
+    };
+    const stripped = stripSuffixes(n);
+    if (stripped && stripped !== n) variants.add(stripped);
+    // Prefixos curtos para cobrir abreviações sem tabela (ex: "teamorange" vs "teamorangegaming")
+    for (const v of [n, stripped]) {
+      if (v && v.length >= 8) variants.add(v.slice(0, 8));
+      if (v && v.length >= 10) variants.add(v.slice(0, 10));
+    }
     for (const [key, aliases] of Object.entries(LOL_ALIASES)) {
       if (n.includes(key) || key.includes(n) || aliases.includes(n)) {
         aliases.forEach(a => variants.add(a));
@@ -2248,6 +2336,27 @@ const server = http.createServer(async (req, res) => {
     const nt1 = norm(t1), nt2 = norm(t2);
     const expandWithAliases = n => {
       const variants = new Set([n]);
+      const stripSuffixes = (raw) => {
+        let s = String(raw || '');
+        const suffixes = ['gaming', 'esports', 'team', 'academy', 'club', 'gg', 'esport'];
+        let changed = true;
+        while (changed) {
+          changed = false;
+          for (const suf of suffixes) {
+            if (s.endsWith(suf) && s.length > suf.length + 3) {
+              s = s.slice(0, -suf.length);
+              changed = true;
+            }
+          }
+        }
+        return s;
+      };
+      const stripped = stripSuffixes(n);
+      if (stripped && stripped !== n) variants.add(stripped);
+      for (const v of [n, stripped]) {
+        if (v && v.length >= 8) variants.add(v.slice(0, 8));
+        if (v && v.length >= 10) variants.add(v.slice(0, 10));
+      }
       for (const [key, aliases] of Object.entries(LOL_ALIASES)) {
         if (n.includes(key) || key.includes(n)) { aliases.forEach(a => variants.add(a)); variants.add(key); }
       }
@@ -2284,19 +2393,68 @@ const server = http.createServer(async (req, res) => {
     const mapNumber = parsed.query.map ? parseInt(parsed.query.map, 10) : 1;
     try {
       const nt1 = norm(t1), nt2 = norm(t2);
+      const stripSuffixes = (n) => {
+        let s = String(n || '');
+        const suffixes = ['gaming', 'esports', 'team', 'academy', 'club', 'gg', 'esport'];
+        let changed = true;
+        while (changed) {
+          changed = false;
+          for (const suf of suffixes) {
+            if (s.endsWith(suf) && s.length > suf.length + 3) {
+              s = s.slice(0, -suf.length);
+              changed = true;
+            }
+          }
+        }
+        return s;
+      };
+      const expandLoose = (n) => {
+        const base = String(n || '');
+        const stripped = stripSuffixes(base);
+        const variants = new Set([base, stripped]);
+        const bases = [base, stripped].filter(Boolean);
+        for (const b of bases) {
+          if (b.length >= 8) variants.add(b.slice(0, 8));
+          if (b.length >= 10) variants.add(b.slice(0, 10));
+        }
+        for (const [key, aliases] of Object.entries(LOL_ALIASES)) {
+          for (const b of bases) {
+            if (b.includes(key) || key.includes(b)) { aliases.forEach(a => variants.add(a)); variants.add(key); }
+          }
+        }
+        return [...variants].filter(v => v && v.length >= 3);
+      };
+      const v1 = expandLoose(nt1), v2 = expandLoose(nt2);
+      const anyMatch = (variants, slug) => variants.some(v => v && (slug.includes(v) || v.includes(slug)));
       const entry = Object.values(oddsCache).find(v => {
         if (!v?.fixtureId) return false;
         const cs = v.combinedSlug || '';
-        return cs.includes(nt1) && cs.includes(nt2);
+        return anyMatch(v1, cs) && anyMatch(v2, cs);
       });
       if (!entry?.fixtureId) { sendJson(res, { error: 'fixture_not_found' }); return; }
-      const fixtureId = entry.fixtureId;
-      const url = `https://api.oddspapi.io/v4/odds-by-fixtures?bookmaker=1xbet&fixtureId=${fixtureId}&oddsFormat=decimal&apiKey=${ODDSPAPI_KEY}`;
-      const r = await cachedHttpGet(url, { provider: 'oddspapi', ttlMs: 0 }).catch(() => null);
-      if (!r || r.status !== 200) { sendJson(res, { error: 'http_' + (r?.status || 'fail') }); return; }
-      const data = safeParse(r.body, null);
-      const allMarkets = Array.isArray(data) ? data : (Array.isArray(data?.data) ? data.data : []);
-      const names = allMarkets.map(m => (m.marketName || m.marketId || '').toString());
+      const fixtureId = String(entry.fixtureId);
+      const fixtureCandidates = [fixtureId];
+      if (fixtureId.startsWith('id') && fixtureId.length > 4) fixtureCandidates.push(fixtureId.slice(2));
+      if (!fixtureId.startsWith('id') && fixtureId.length > 4) fixtureCandidates.push('id' + fixtureId);
+      const uniqCandidates = [...new Set(fixtureCandidates)];
+
+      let r = null;
+      let fixtureJson = null;
+      for (const fid of uniqCandidates) {
+        const url = `https://api.oddspapi.io/v4/odds?fixtureId=${fid}&bookmakers=1xbet&oddsFormat=decimal&verbosity=3&apiKey=${ODDSPAPI_KEY}`;
+        r = await cachedHttpGet(url, { provider: 'oddspapi', ttlMs: 0 }).catch(() => null);
+        if (r && r.status === 200) {
+          fixtureJson = safeParse(r.body, null);
+          if (fixtureJson) break;
+        }
+      }
+      if (!fixtureJson) { sendJson(res, { error: 'http_' + (r?.status || 'fail') }); return; }
+
+      const bkOdds = fixtureJson.bookmakerOdds || fixtureJson.bookmakersOdds || {};
+      const bk = bkOdds['1xbet'] || bkOdds['1xBet'] || bkOdds['1XBET'] || null;
+      const marketsObj = bk?.markets || {};
+      const entries = Object.entries(marketsObj || {});
+      const names = entries.map(([k, m]) => String((m?.bookmakerMarketId || m?.marketId || k || '')).toString());
       const mapOdds = await getMapMlOddsFromFixture(t1, t2, mapNumber);
       sendJson(res, { fixtureId, map: mapNumber, mapOdds, markets: names.slice(0, 80) });
     } catch(e) {
@@ -2317,26 +2475,54 @@ const server = http.createServer(async (req, res) => {
       });
       if (!entry || !entry.fixtureId) { sendJson(res, { error: 'not_found' }); return; }
       const { fixtureId } = entry;
-      const url = `https://api.oddspapi.io/v4/odds-by-fixtures?bookmaker=1xbet&fixtureId=${fixtureId}&oddsFormat=decimal&apiKey=${ODDSPAPI_KEY}`;
       const ttlMsRaw = parseInt(process.env.HTTP_CACHE_ODDSPAPI_FIXTURE_TTL_MS || '', 10);
       const ttlMs = Number.isFinite(ttlMsRaw) ? ttlMsRaw : 0;
-      const r = await cachedHttpGet(url, { provider: 'oddspapi', ttlMs }).catch(() => null);
-      if (!r || r.status !== 200) { sendJson(res, { error: 'not_found' }); return; }
-      const data = safeParse(r.body, null);
-      const allMarkets = Array.isArray(data) ? data : (Array.isArray(data?.data) ? data.data : []);
-      const handicapMarkets = allMarkets.filter(m => {
-        const name = (m.marketName || m.marketId || '').toString().toLowerCase();
+
+      const fixtureIdStr = String(fixtureId);
+      const fixtureCandidates = [fixtureIdStr];
+      if (fixtureIdStr.startsWith('id') && fixtureIdStr.length > 4) fixtureCandidates.push(fixtureIdStr.slice(2));
+      if (!fixtureIdStr.startsWith('id') && fixtureIdStr.length > 4) fixtureCandidates.push('id' + fixtureIdStr);
+      const uniqCandidates = [...new Set(fixtureCandidates)];
+
+      let r = null;
+      let fixtureJson = null;
+      for (const fid of uniqCandidates) {
+        const url = `https://api.oddspapi.io/v4/odds?fixtureId=${fid}&bookmakers=1xbet&oddsFormat=decimal&verbosity=3&apiKey=${ODDSPAPI_KEY}`;
+        r = await cachedHttpGet(url, { provider: 'oddspapi', ttlMs }).catch(() => null);
+        if (r && r.status === 200) {
+          fixtureJson = safeParse(r.body, null);
+          if (fixtureJson) break;
+        }
+      }
+      if (!fixtureJson) { sendJson(res, { error: 'not_found' }); return; }
+
+      const bkOdds = fixtureJson.bookmakerOdds || fixtureJson.bookmakersOdds || {};
+      const bk = bkOdds['1xbet'] || bkOdds['1xBet'] || bkOdds['1XBET'] || null;
+      const marketsObj = bk?.markets || {};
+      const marketsRaw = Object.entries(marketsObj || {}).map(([k, v]) => ({ ...(v || {}), _key: String(k) }));
+
+      const mkName = (m) => (m?.bookmakerMarketId || m?.marketId || m?._key || '').toString().toLowerCase();
+      const pickPrice = (o) => {
+        const players = o?.players || o?.playerOdds || {};
+        const first = players['0'] || players[0] || Object.values(players || {})[0] || null;
+        return extractPrice(first || o);
+      };
+
+      const handicapMarkets = marketsRaw.filter(m => {
+        const name = mkName(m);
         return name.includes('handicap') || name.includes('map');
       });
-      const markets = handicapMarkets.map(m => {
-        const outcomes = Array.isArray(m.outcomes) ? m.outcomes : [];
+
+      const markets = handicapMarkets.slice(0, 12).map(m => {
+        const outcomesObj = m?.outcomes || {};
+        const outcomes = Object.values(outcomesObj || {});
         return {
-          name: m.marketName || m.marketId || '',
-          t1Odds: outcomes[0] ? extractPrice(outcomes[0]) : null,
-          t2Odds: outcomes[1] ? extractPrice(outcomes[1]) : null
+          name: m?.bookmakerMarketId || m?.marketId || '',
+          t1Odds: outcomes[0] ? pickPrice(outcomes[0]) : null,
+          t2Odds: outcomes[1] ? pickPrice(outcomes[1]) : null
         };
       });
-      sendJson(res, { fixtureId, markets });
+      sendJson(res, { fixtureId: fixtureIdStr, markets });
     } catch(e) {
       sendJson(res, { error: e.message }, 500);
     }
