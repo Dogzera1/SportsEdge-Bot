@@ -989,6 +989,10 @@ async function settleCompletedTips() {
       }
 
       if (sport === 'tennis') {
+        // Prefer The Odds API scores (cobre até 3 dias atrás)
+        const scores = await serverGet('/tennis-scores?daysFrom=3', 'tennis').catch(() => []);
+        const scoresById = new Map((Array.isArray(scores) ? scores : []).map(s => [String(s.id), s]));
+
         const [atpEvent, wtaEvent] = await Promise.all([
           fetchEspnTennisEvent('ATP').catch(() => null),
           fetchEspnTennisEvent('WTA').catch(() => null)
@@ -1000,6 +1004,24 @@ async function settleCompletedTips() {
         for (const tip of unsettled) {
           if (!tip.match_id) continue;
           try {
+            // 1) Match por id (The Odds)
+            const mid = stripTheOddsMatchId(tip.match_id);
+            const s = mid ? scoresById.get(String(mid)) : null;
+            if (s?.completed && Array.isArray(s.scores) && s.scores.length >= 2) {
+              const a = s.scores[0], b = s.scores[1];
+              const sa = parseFloat(a?.score), sb = parseFloat(b?.score);
+              const winner = (Number.isFinite(sa) && Number.isFinite(sb) && sa !== sb)
+                ? (sa > sb ? a.name : b.name)
+                : null;
+              if (winner) {
+                await serverPost('/settle', { matchId: tip.match_id, winner }, 'tennis');
+                log('INFO', 'SETTLE', `tennis: ${tip.participant1} vs ${tip.participant2} → ${winner}`);
+                settled++;
+                continue;
+              }
+            }
+
+            // 2) Fallback ESPN (ranking/evento atual)
             const res = allResults.find(r => {
               if (!r.winner) return false;
               const n1 = normName(tip.participant1), n2 = normName(tip.participant2);

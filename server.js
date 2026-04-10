@@ -4688,6 +4688,63 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (p === '/tennis-scores') {
+    if (!THE_ODDS_API_KEY) { sendJson(res, []); return; }
+    try {
+      const daysFrom = Math.min(3, Math.max(1, parseInt(u.searchParams.get('daysFrom') || '3', 10) || 3));
+
+      // 1) Busca todos os sports ativos na API e filtra os de tênis
+      if (!oddsApiAllowed('ODDS')) { sendJson(res, []); return; }
+      const sportsR = await theOddsGet(`https://api.the-odds-api.com/v4/sports/?apiKey=${THE_ODDS_API_KEY}`);
+      const allSports = safeParse(sportsR.body, []);
+      const tennisKeys = allSports
+        .filter(s => s.key && s.key.startsWith('tennis_') && s.active !== false)
+        .map(s => s.key);
+
+      if (!tennisKeys.length) { sendJson(res, []); return; }
+
+      // 2) Limita chaves para não estourar quota
+      const maxKeysCfg = parseInt(process.env.TENNIS_MAX_KEYS || '10', 10);
+      const maxKeys = Math.min(Math.max(2, maxKeysCfg || 10), tennisKeys.length);
+      const isWtaKey = k => /(^|_)wta(_|$)/i.test(String(k));
+      const wtaKeys = tennisKeys.filter(isWtaKey);
+      const atpKeys = tennisKeys.filter(k => !isWtaKey(k));
+      const allowedKeys = [];
+      for (let i = 0; allowedKeys.length < maxKeys && (i < atpKeys.length || i < wtaKeys.length); i++) {
+        if (i < atpKeys.length) allowedKeys.push(atpKeys[i]);
+        if (allowedKeys.length >= maxKeys) break;
+        if (i < wtaKeys.length) allowedKeys.push(wtaKeys[i]);
+      }
+
+      const results = [];
+      for (const k of allowedKeys) {
+        if (!oddsApiAllowed('ODDS')) break;
+        const urlScores = `https://api.the-odds-api.com/v4/sports/${k}/scores/?apiKey=${THE_ODDS_API_KEY}&daysFrom=${daysFrom}&dateFormat=iso`;
+        const r2 = await theOddsGet(urlScores);
+        if (!r2 || r2.status !== 200) continue;
+        const raw = safeParse(r2.body, []);
+        for (const e of raw) {
+          results.push({
+            id: e.id,
+            sport_key: e.sport_key,
+            sport_title: e.sport_title,
+            commence_time: e.commence_time,
+            completed: !!e.completed,
+            home_team: e.home_team,
+            away_team: e.away_team,
+            scores: Array.isArray(e.scores) ? e.scores : null,
+            last_update: e.last_update
+          });
+        }
+      }
+
+      sendJson(res, results);
+    } catch(e) {
+      sendJson(res, []);
+    }
+    return;
+  }
+
   if (p === '/football-matches') {
     if (!THE_ODDS_API_KEY) { sendJson(res, []); return; }
     try {
