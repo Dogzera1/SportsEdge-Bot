@@ -3938,6 +3938,54 @@ const server = http.createServer(async (req, res) => {
           WHERE t IS NOT NULL AND TRIM(t) != ''
           ORDER BY t COLLATE NOCASE
         `).all(league, league);
+
+        // Fallback: se DB tiver poucos times, completa com jogos atuais (Riot/PandaScore)
+        if ((rows || []).length < 20) {
+          const want = league.toLowerCase();
+          const seen = new Set((rows || []).map(r => String(r.t || '').trim()).filter(Boolean));
+          const addTeam = (t) => {
+            const s = String(t || '').trim();
+            if (!s) return;
+            seen.add(s);
+          };
+          const addMatch = (m) => {
+            if (!m) return;
+            const lg = String(m.league || '').toLowerCase();
+            if (!lg) return;
+            if (lg === want || lg.includes(want)) {
+              addTeam(m.team1);
+              addTeam(m.team2);
+            }
+          };
+
+          // Riot schedule + PandaScore (cacheado)
+          try {
+            const [riotA, riotB, ps] = await Promise.all([
+              getLoLMatchesArush().catch(() => []),
+              getLoLMatches().catch(() => []),
+              getPandaScoreLolMatches().catch(() => []),
+            ]);
+            [...riotA, ...riotB, ...ps].forEach(addMatch);
+          } catch (_) {}
+
+          // Riot schedule bruto (pega times mesmo sem /lol-matches exibir)
+          try {
+            const sr = await httpGet(LOL_BASE + '/getSchedule?hl=en-US', LOL_HEADERS);
+            const sd = safeParse(sr.body, {});
+            const evs = sd?.data?.schedule?.events || [];
+            for (const e of evs) {
+              const lName = String(e.league?.name || '').toLowerCase();
+              const lSlug = String(e.league?.slug || '').toLowerCase();
+              if (!(lName === want || lSlug === want || lName.includes(want) || lSlug.includes(want))) continue;
+              const t1 = e.match?.teams?.[0];
+              const t2 = e.match?.teams?.[1];
+              addTeam(t1?.name || t1?.code || '');
+              addTeam(t2?.name || t2?.code || '');
+            }
+          } catch (_) {}
+
+          rows = [...seen].sort((a, b) => a.localeCompare(b)).map(t => ({ t }));
+        }
       } else {
         rows = db.prepare(`
           SELECT team AS t, COUNT(*) AS c FROM (
