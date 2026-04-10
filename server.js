@@ -3007,7 +3007,9 @@ const server = http.createServer(async (req, res) => {
     if (gameParam === 'dota2' || gameParam === 'dota') {
       if (!SXBET_ENABLED) { sendJson(res, { error: 'SX.Bet não habilitado' }); return; }
       const dotaSportId = await sxFindDotaSportId().catch(() => null);
-      const o = await sxGetMatchWinnerOdds(t1, t2, { sportId: dotaSportId, _debug: false }).catch(() => null);
+      const liveOnly = parsed.query.live === '1';
+      const o = await sxGetMatchWinnerOdds(t1, t2, { sportId: dotaSportId, liveOnly, _debug: false }).catch(() => null);
+      if (o && liveOnly) log('INFO', 'ODDS', `SX.Bet Dota 2 ao vivo: ${t1} vs ${t2}`);
       sendJson(res, o || { error: 'odds Dota 2 não encontradas (SX.Bet)' });
       return;
     }
@@ -3105,8 +3107,8 @@ const server = http.createServer(async (req, res) => {
     // Fallback SX.Bet quando OddsPapi não tem odds (backoff ou partida não listada)
     if (!o && SXBET_ENABLED) {
       const liveOnly = !!(mapNumber && mapNumber > 0);
-      o = await sxGetMatchWinnerOdds(t1, t2, { liveOnly: false, mapNumber: liveOnly ? mapNumber : null }).catch(() => null);
-      if (o) log('INFO', 'ODDS', `SX.Bet fallback usado para ${t1} vs ${t2}`);
+      o = await sxGetMatchWinnerOdds(t1, t2, { liveOnly, mapNumber: liveOnly ? mapNumber : null }).catch(() => null);
+      if (o) log('INFO', 'ODDS', `SX.Bet fallback usado para ${t1} vs ${t2}${liveOnly ? ` (ao vivo mapa ${mapNumber})` : ''}`);
     }
     sendJson(res, o || { error: 'odds não encontradas' });
     return;

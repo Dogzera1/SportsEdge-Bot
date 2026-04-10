@@ -613,9 +613,8 @@ async function runAutoAnalysis() {
   if (esportsConfig?.enabled) {
     try {
       lolRaw = await serverGet('/lol-matches').catch(() => []);
-      // Inclui 'draft': composições já disponíveis na API Riot antes do jogo começar.
-      // Permite análise com draft real + odds pré-jogo (antes de cair para odds ao vivo).
-      const lolLive = Array.isArray(lolRaw) ? lolRaw.filter(m => m.status === 'draft') : []; // tips ao vivo desabilitadas
+      // Inclui 'draft' (comp disponível antes do jogo) e 'live' (odds ao vivo via SX.Bet).
+      const lolLive = Array.isArray(lolRaw) ? lolRaw.filter(m => m.status === 'draft' || m.status === 'live') : [];
 
       // Deduplicar Riot+PandaScore: se Riot já cobre o mesmo confronto, descarta a cópia PandaScore
       const riotLive = new Set(lolLive.filter(m => !String(m.id).startsWith('ps_')).map(m => `${norm(m.team1)}_${norm(m.team2)}`));
@@ -3695,6 +3694,7 @@ async function pollDota() {
   if (!esportsConfig?.enabled || !esportsConfig?.token) return;
   const token = esportsConfig.token;
   const DOTA_INTERVAL = 4 * 60 * 60 * 1000;
+  const DOTA_LIVE_COOLDOWN = 10 * 60 * 1000; // re-analisa ao vivo a cada 10min
 
   try {
     log('INFO', 'AUTO-DOTA', 'Iniciando verificação de partidas Dota 2...');
@@ -3705,28 +3705,40 @@ async function pollDota() {
     }
 
     const now = Date.now();
-    log('INFO', 'AUTO-DOTA', `${matches.length} partidas (${matches.filter(m => m.status === 'live').length} live)`);
+    const liveCount = matches.filter(m => m.status === 'live').length;
+    log('INFO', 'AUTO-DOTA', `${matches.length} partidas (${liveCount} live, ${matches.length - liveCount} upcoming)`);
 
     for (const match of matches) {
-      const key = `dota2_${match.id}`;
+      const isLive = match.status === 'live';
+
+      // ── Dedup / cooldown ──
+      // Ao vivo: chave inclui placar para re-analisar em cada jogo da série (igual LoL _MAPn)
+      const serieKey = isLive ? `_${match.score1||0}x${match.score2||0}` : '';
+      const key = `dota2_${match.id}${serieKey}`;
       const prev = analyzedDota.get(key);
       if (prev?.tipSent) continue;
-      if (prev && (now - prev.ts < DOTA_INTERVAL)) continue;
+      const cooldown = isLive ? DOTA_LIVE_COOLDOWN : DOTA_INTERVAL;
+      if (prev && (now - prev.ts < cooldown)) continue;
 
-      const matchTs = match.time ? new Date(match.time).getTime() : 0;
-      if (matchTs && matchTs < now) continue;
-      if (!matchTs || matchTs > now + 7 * 24 * 60 * 60 * 1000) continue;
+      // ── Filtro de data (só upcoming; ao vivo passa sempre) ──
+      if (!isLive) {
+        const matchTs = match.time ? new Date(match.time).getTime() : 0;
+        if (!matchTs || matchTs < now || matchTs > now + 7 * 24 * 60 * 60 * 1000) continue;
+      }
 
-      let o = match.odds;
+      // ── Odds: ao vivo pede liveOnly=true via SX.Bet ──
+      let o = (!isLive && match.odds?.t1) ? match.odds : null;
       if (!o?.t1 || !o?.t2) {
-        o = await serverGet(`/odds?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}&game=dota2`).catch(() => null);
+        const liveFlag = isLive ? '&live=1' : '';
+        o = await serverGet(`/odds?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}&game=dota2${liveFlag}`).catch(() => null);
       }
       if (!o?.t1 || !o?.t2) {
-        log('DEBUG', 'AUTO-DOTA', `Sem odds: ${match.team1} vs ${match.team2}`);
+        log('DEBUG', 'AUTO-DOTA', `Sem odds ${isLive ? 'ao vivo' : ''}: ${match.team1} vs ${match.team2}`);
         analyzedDota.set(key, { ts: now, tipSent: false, noEdge: true });
         continue;
       }
 
+      // ── Forma + H2H ──
       const [form1, form2, h2h] = await Promise.all([
         serverGet(`/team-form?team=${encodeURIComponent(match.team1)}&game=dota2`).catch(() => null),
         serverGet(`/team-form?team=${encodeURIComponent(match.team2)}&game=dota2`).catch(() => null),
@@ -3739,13 +3751,16 @@ async function pollDota() {
         h2h: h2h?.totalMatches > 0 ? { t1Wins: h2h.t1Wins, t2Wins: h2h.t2Wins, total: h2h.totalMatches } : null,
         oddsMovement: null
       };
-      const mlResult = esportsPreFilter(match, o, enrich, false, '', null);
+
+      // ── Pré-filtro ML ──
+      const mlResult = esportsPreFilter(match, o, enrich, isLive, '', null);
       if (!mlResult.pass) {
         log('INFO', 'AUTO-DOTA', `Pré-filtro: edge insuficiente (${mlResult.score.toFixed(1)}pp) para ${match.team1} vs ${match.team2}`);
         analyzedDota.set(key, { ts: now, tipSent: false, noEdge: true });
         continue;
       }
 
+      // ── Dados para o prompt ──
       const r1 = 1 / parseFloat(o.t1), r2 = 1 / parseFloat(o.t2);
       const overround = r1 + r2;
       const djP1 = (r1 / overround * 100).toFixed(1);
@@ -3756,8 +3771,8 @@ async function pollDota() {
       const hasModelData = mlResult.factorCount > 0;
 
       const formSection = [
-        form1 ? `${match.team1}: ${form1.wins}V-${form1.losses}D (${form1.winRate}%) | Série: ${form1.streak} | ${(form1.recent||[]).join('')}` : `${match.team1}: sem dados`,
-        form2 ? `${match.team2}: ${form2.wins}V-${form2.losses}D (${form2.winRate}%) | Série: ${form2.streak} | ${(form2.recent||[]).join('')}` : `${match.team2}: sem dados`,
+        form1 ? `${match.team1}: ${form1.wins}V-${form1.losses}D (${form1.winRate}%) | Streak: ${form1.streak} | ${(form1.recent||[]).join('')}` : `${match.team1}: sem dados`,
+        form2 ? `${match.team2}: ${form2.wins}V-${form2.losses}D (${form2.winRate}%) | Streak: ${form2.streak} | ${(form2.recent||[]).join('')}` : `${match.team2}: sem dados`,
       ].join('\n');
       const h2hSection = h2h?.totalMatches > 0
         ? `H2H (${h2h.totalMatches} jogos): ${match.team1} ${h2h.t1Wins}V x ${h2h.t2Wins}V ${match.team2}`
@@ -3772,11 +3787,14 @@ async function pollDota() {
       const minOdds = parseFloat(process.env.DOTA_MIN_ODDS || '1.30');
       const maxOdds = parseFloat(process.env.DOTA_MAX_ODDS || '5.00');
 
+      const liveSection = isLive
+        ? `\nESTADO DA SÉRIE (AO VIVO): ${match.team1} ${match.score1||0} x ${match.score2||0} ${match.team2} | Formato: ${match.format || 'Bo?'}\n⚠️ Partida ao vivo — odds refletem o estado atual da série. Só tip se edge for claro e odds forem favoráveis.`
+        : '';
+
       const prompt = `Você é um analista especializado em Dota 2 esports. Analise esta partida e identifique edge real se existir.
 
 PARTIDA: ${match.team1} vs ${match.team2}
-Liga: ${match.league} | Formato: ${match.format || 'Bo?'} | Data: ${matchTime} (BRT)
-Placar série: ${match.score1 || 0}-${match.score2 || 0}
+Liga: ${match.league} | Formato: ${match.format || 'Bo?'} | Data: ${matchTime} (BRT)${liveSection}
 
 ODDS (${o.bookmaker || 'SX.Bet'}):
 ${match.team1}: ${o.t1} | ${match.team2}: ${o.t2}
@@ -3788,13 +3806,13 @@ ${formSection}
 ${h2hSection}
 
 ANÁLISE (seja específico — Dota 2):
-1. Forma e momentum: série atual, consistência.
-2. Estilo: teamfight/Roshan vs split push/farm — qual favorece cada time no meta atual.
-3. Meta do patch: quais estilos/heróis dominam e qual time se adapta melhor.
-4. Vantagem individual: carries, midlaners, suportes chave.
-5. H2H e contexto da série (se aplicável).
+1. Forma e momentum: série atual, consistência, nível de oposição.
+2. Estilo: teamfight/Roshan vs split push/farm — qual favorece cada time.
+3. Meta do patch: estilos/heróis dominantes e adaptação de cada time.
+4. Vantagem individual: carry (pos 1), mid (pos 2), offlaner, suportes.
+5. Contexto da série ao vivo (se aplicável): placar, pressão psicológica, fadiga.
 
-REGRAS: Odds ${minOdds}–${maxOdds} | EV ≥ ${evThreshold}% (sua estimativa de P vs odd de-juiced)
+REGRAS: Odds ${minOdds}–${maxOdds} | EV ≥ ${evThreshold}%${isLive ? ' | Ao vivo: só ALTA ou MÉDIA com edge claro' : ''}
 
 DECISÃO FINAL (escolha UMA):
 TIP_ML:[time]@[odd]|EV:[%]|STAKE:[1-3]u|CONF:[ALTA/MÉDIA/BAIXA]
@@ -3802,7 +3820,7 @@ ou SEM_EDGE
 
 Máximo 200 palavras.`;
 
-      log('INFO', 'AUTO-DOTA', `Analisando: ${match.team1} vs ${match.team2} (${match.league}) | mlEdge=${mlResult.score.toFixed(1)}pp`);
+      log('INFO', 'AUTO-DOTA', `Analisando${isLive ? ' [AO VIVO]' : ''}: ${match.team1} vs ${match.team2} (${match.league}) | mlEdge=${mlResult.score.toFixed(1)}pp`);
       analyzedDota.set(key, { ts: now, tipSent: false, noEdge: false });
 
       let iaResp = '';
@@ -3830,6 +3848,13 @@ Máximo 200 palavras.`;
       const tipEV = tipMatch[3].trim();
       const tipConf = (tipMatch[5] || 'MÉDIA').trim().toUpperCase().replace('MEDIA', 'MÉDIA');
 
+      // Ao vivo: bloqueia confiança BAIXA (muito risco com delay de odds)
+      if (isLive && tipConf === 'BAIXA') {
+        log('INFO', 'AUTO-DOTA', `Ao vivo: conf BAIXA rejeitada para ${match.team1} vs ${match.team2}`);
+        analyzedDota.set(key, { ts: now, tipSent: false, noEdge: true });
+        await _sleep(2000); continue;
+      }
+
       const oddVal = parseFloat(tipOdd);
       if (oddVal < minOdds || oddVal > maxOdds) {
         log('INFO', 'AUTO-DOTA', `Odd fora do range (${oddVal}): pulando`);
@@ -3856,7 +3881,8 @@ Máximo 200 palavras.`;
       const tipStakeAdj = `${riskAdj.units.toFixed(1).replace(/\.0$/, '')}u`;
 
       const matchId = `dota2_${match.id}`;
-      const msg = `🎮 *DOTA 2 — ${match.league}*\n${match.team1} vs ${match.team2} | ${match.format || ''}\n📅 ${matchTime} BRT\n\n✅ *TIP: ${tipTeam} @ ${tipOdd}*\n💰 Stake: ${tipStakeAdj} | EV: ${tipEV} | Conf: ${tipConf}\n🏦 ${o.bookmaker || 'SX.Bet'}`;
+      const liveTag = isLive ? ' 🔴 AO VIVO' : '';
+      const msg = `🎮 *DOTA 2 — ${match.league}*${liveTag}\n${match.team1} vs ${match.team2} | ${match.format || ''}\n📅 ${matchTime} BRT\n\n✅ *TIP: ${tipTeam} @ ${tipOdd}*\n💰 Stake: ${tipStakeAdj} | EV: ${tipEV} | Conf: ${tipConf}\n🏦 ${o.bookmaker || 'SX.Bet'}`;
 
       try {
         await serverPost('/record-tip', {
@@ -3877,7 +3903,7 @@ Máximo 200 palavras.`;
           if (!sports.has('esports')) continue;
           await sendTelegramMessage(token, uid, msg, { parse_mode: 'Markdown' }).catch(() => {});
         }
-        log('INFO', 'AUTO-DOTA', `TIP: ${tipTeam} @ ${tipOdd} (${tipStakeAdj})`);
+        log('INFO', 'AUTO-DOTA', `TIP${isLive ? ' [LIVE]' : ''}: ${tipTeam} @ ${tipOdd} (${tipStakeAdj})`);
         analyzedDota.set(key, { ts: now, tipSent: true, noEdge: false });
       } catch(e) {
         log('WARN', 'AUTO-DOTA', `Erro ao gravar tip: ${e.message}`);
