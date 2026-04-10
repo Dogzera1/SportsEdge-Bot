@@ -8,6 +8,7 @@ dns.setDefaultResultOrder('ipv4first');
 const initDatabase = require('./lib/database');
 const { SPORTS, getSportById } = require('./lib/sports');
 const { log, sendJson, safeParse, norm, httpGet, cachedHttpGet, aiPost, oddsApiAllowed, getMetricsLite, calcKellyWithP } = require('./lib/utils');
+const { tennisSinglePlayerNameMatch, tennisPairMatchesPlayers } = require('./lib/tennis-match');
 const { esportsPreFilter } = require('./lib/ml');
 const { radarGetInfo, radarGetByPath } = require('./lib/radar-sport');
 
@@ -579,25 +580,6 @@ function sxNameLike(a, b) {
   return false;
 }
 
-function tennisSinglePlayerNameMatch(displayA, displayB) {
-  if (sxNameLike(displayA, displayB)) return true;
-  const na = norm(displayA);
-  const nb = norm(displayB);
-  if (!na || !nb) return false;
-  if (na === nb) return true;
-  if (na.length >= 5 && nb.length >= 5 && (na.includes(nb) || nb.includes(na))) return true;
-  const tokensA = String(displayA || '').trim().split(/\s+/).filter(Boolean);
-  const tokensB = String(displayB || '').trim().split(/\s+/).filter(Boolean);
-  const la = tokensA.length ? norm(tokensA[tokensA.length - 1]) : '';
-  const lb = tokensB.length ? norm(tokensB[tokensB.length - 1]) : '';
-  return la.length >= 4 && lb.length >= 4 && la === lb;
-}
-
-function tennisPairMatchesPlayers(p1, p2, t1, t2) {
-  return (tennisSinglePlayerNameMatch(p1, t1) && tennisSinglePlayerNameMatch(p2, t2))
-    || (tennisSinglePlayerNameMatch(p1, t2) && tennisSinglePlayerNameMatch(p2, t1));
-}
-
 let _tennisSettleRowsCache = { ts: 0, lookback: -1, rows: null };
 function getTennisSettleRowsCached(lookbackDays) {
   const now = Date.now();
@@ -636,14 +618,15 @@ function utcDayAnchorMs(tipMs) {
   return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
 }
 
-function shouldSkipTennisEspnWindowSync(anchorMs) {
+function shouldSkipTennisEspnWindowSync(anchorKey) {
   const ttl = Math.min(300000, Math.max(20000, parseInt(process.env.TENNIS_ESPN_WINDOW_SYNC_MIN_MS || '90000', 10) || 90000));
-  const t = _tennisEspnWindowSyncAt.get(anchorMs);
+  const k = String(anchorKey);
+  const t = _tennisEspnWindowSyncAt.get(k);
   return t != null && (Date.now() - t) < ttl;
 }
 
-function markTennisEspnWindowSync(anchorMs) {
-  _tennisEspnWindowSyncAt.set(anchorMs, Date.now());
+function markTennisEspnWindowSync(anchorKey) {
+  _tennisEspnWindowSyncAt.set(String(anchorKey), Date.now());
 }
 
 /** Grava jogos com status post de um payload scoreboard ESPN (ATP/WTA). */
@@ -685,18 +668,19 @@ function upsertTennisPostCompetitionsFromEspnJson(j, slug) {
   return n;
 }
 
-/** Busca scoreboard ESPN ATP+WTA em janela ao redor de sent_at (endpoint /schedule da ESPN retorna 404). */
+/** Busca scoreboard ESPN ATP+WTA em janela ao redor de sent_at (assimétrica: jogos costumam ser antes ou pouco depois da tip). */
 async function syncTennisEspnCompletedAroundSentAt(sentAtRaw) {
   const sentRaw = String(sentAtRaw || '').trim();
-  const tipMs = sentRaw
+  let tipMs = sentRaw
     ? Date.parse(sentRaw.includes('T') ? sentRaw : sentRaw.replace(' ', 'T'))
     : NaN;
-  if (!Number.isFinite(tipMs)) return 0;
-  const anchor = utcDayAnchorMs(tipMs);
-  if (shouldSkipTennisEspnWindowSync(anchor)) return 0;
-  const winDays = Math.min(21, Math.max(3, parseInt(process.env.TENNIS_ESPN_DATE_WINDOW_DAYS || '10', 10) || 10));
-  const start = new Date(tipMs - winDays * 86400000);
-  const end = new Date(tipMs + winDays * 86400000);
+  if (!Number.isFinite(tipMs)) tipMs = Date.now();
+  const anchorKey = `day:${utcDayAnchorMs(tipMs)}`;
+  if (shouldSkipTennisEspnWindowSync(anchorKey)) return 0;
+  const beforeD = Math.min(50, Math.max(7, parseInt(process.env.TENNIS_ESPN_DATE_WINDOW_BEFORE_DAYS || '21', 10) || 21));
+  const afterD = Math.min(50, Math.max(7, parseInt(process.env.TENNIS_ESPN_DATE_WINDOW_AFTER_DAYS || '21', 10) || 21));
+  const start = new Date(tipMs - beforeD * 86400000);
+  const end = new Date(tipMs + afterD * 86400000);
   const dates = `${espnDateYmdUtc(start)}-${espnDateYmdUtc(end)}`;
   const tennisData = require('./lib/tennis-data');
   let n = 0;
@@ -704,7 +688,27 @@ async function syncTennisEspnCompletedAroundSentAt(sentAtRaw) {
     const j = await tennisData.getScoreboard(slug, { dates }).catch(() => null);
     n += upsertTennisPostCompetitionsFromEspnJson(j, slug);
   }
-  markTennisEspnWindowSync(anchor);
+  markTennisEspnWindowSync(anchorKey);
+  invalidateTennisSettleRowsCache();
+  return n;
+}
+
+/** Fallback: últimos N dias até amanhã (throttle próprio) — cobre tips com sent_at ruim ou buracos na janela. */
+async function syncTennisEspnCompletedRecentSpan(spanDays) {
+  const span = Math.min(90, Math.max(14, parseInt(String(spanDays), 10) || 45));
+  const anchorKey = `recent:${span}`;
+  if (shouldSkipTennisEspnWindowSync(anchorKey)) return 0;
+  const now = Date.now();
+  const start = new Date(now - span * 86400000);
+  const end = new Date(now + 2 * 86400000);
+  const dates = `${espnDateYmdUtc(start)}-${espnDateYmdUtc(end)}`;
+  const tennisData = require('./lib/tennis-data');
+  let n = 0;
+  for (const slug of ['atp', 'wta']) {
+    const j = await tennisData.getScoreboard(slug, { dates }).catch(() => null);
+    n += upsertTennisPostCompetitionsFromEspnJson(j, slug);
+  }
+  markTennisEspnWindowSync(anchorKey);
   invalidateTennisSettleRowsCache();
   return n;
 }
@@ -4962,6 +4966,36 @@ const server = http.createServer(async (req, res) => {
       best = null;
       bestDist = Infinity;
       for (const r of rows2) {
+        if (!tennisPairMatchesPlayers(p1, p2, r.team1, r.team2)) continue;
+        const resMs = Date.parse(String(r.resolved_at || '').replace(' ', 'T'));
+        if (Number.isFinite(tipMs) && Number.isFinite(resMs)) {
+          const dist = Math.abs(resMs - tipMs);
+          if (dist < bestDist) {
+            bestDist = dist;
+            best = r;
+          }
+        } else if (Number.isFinite(resMs)) {
+          if (!best || resMs > Date.parse(String(best.resolved_at || '').replace(' ', 'T'))) best = r;
+        }
+      }
+      if (best?.winner) {
+        sendJson(res, {
+          resolved: true,
+          winner: best.winner,
+          match_id: best.match_id,
+          league: best.league,
+          final_score: best.final_score,
+          resolved_at: best.resolved_at
+        });
+        return;
+      }
+
+      const spanCfg = Math.min(90, Math.max(21, parseInt(process.env.TENNIS_ESPN_RECENT_FALLBACK_DAYS || '50', 10) || 50));
+      await syncTennisEspnCompletedRecentSpan(spanCfg);
+      const rows3 = getTennisSettleRowsCached(lookbackDays);
+      best = null;
+      bestDist = Infinity;
+      for (const r of rows3) {
         if (!tennisPairMatchesPlayers(p1, p2, r.team1, r.team2)) continue;
         const resMs = Date.parse(String(r.resolved_at || '').replace(' ', 'T'));
         if (Number.isFinite(tipMs) && Number.isFinite(resMs)) {

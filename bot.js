@@ -11,6 +11,7 @@ const { log, calcKelly, calcKellyFraction, calcKellyWithP, norm, fmtDate, fmtDat
 const { adjustStakeUnits } = require('./lib/risk-manager');
 const { esportsPreFilter } = require('./lib/ml');
 const { fetchMatchNews } = require('./lib/news');
+const { tennisPairMatchesPlayers } = require('./lib/tennis-match');
 
 const SERVER = '127.0.0.1';
 const PORT = parseInt(process.env.SERVER_PORT) || parseInt(process.env.PORT) || 8080;
@@ -959,7 +960,10 @@ async function settleCompletedTips() {
     if (!SPORTS[sport].enabled) continue;
 
     try {
-      const unsettled = await serverGet('/unsettled-tips?days=30', sport);
+      const unsettledDays = sport === 'tennis'
+        ? Math.min(365, Math.max(30, parseInt(process.env.TENNIS_UNSETTLED_DAYS || '120', 10) || 120))
+        : 30;
+      const unsettled = await serverGet(`/unsettled-tips?days=${unsettledDays}`, sport);
       if (!Array.isArray(unsettled) || !unsettled.length) continue;
 
       let settled = 0;
@@ -1037,11 +1041,7 @@ async function settleCompletedTips() {
             // 3) ESPN (evento atual)
             const res = allResults.find(r => {
               if (!r.winner) return false;
-              const n1 = normName(tip.participant1), n2 = normName(tip.participant2);
-              const rp1 = normName(r.p1), rp2 = normName(r.p2);
-              const fwd = (rp1.includes(n1) || n1.includes(rp1)) && (rp2.includes(n2) || n2.includes(rp2));
-              const rev = (rp1.includes(n2) || n2.includes(rp1)) && (rp2.includes(n1) || n1.includes(rp2));
-              return fwd || rev;
+              return tennisPairMatchesPlayers(tip.participant1, tip.participant2, r.p1, r.p2);
             });
             if (!res) continue;
             await serverPost('/settle', { matchId: tip.match_id, winner: res.winner }, 'tennis');
