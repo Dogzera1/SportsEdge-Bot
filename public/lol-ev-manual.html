@@ -226,6 +226,17 @@
     <p class="hint">Se <code>DEEPSEEK_API_KEY</code> não estiver configurado, fica vazio.</p>
   </div>
 
+  <div class="card">
+    <h2>Print Bet365 (LoL)</h2>
+    <p class="hint">Opcional. Envie print e IA preenche times/odds e gera análise.</p>
+    <input id="img365" type="file" accept="image/*"/>
+    <div class="grid2">
+      <button type="button" class="primary" id="btn-365" style="margin-top:0.6rem;">Extrair + Analisar</button>
+      <button type="button" class="primary" id="btn-365-fill" style="margin-top:0.6rem;background:#1f2937;border:1px solid var(--border);">Aplicar valores extraídos</button>
+    </div>
+    <div id="res-365" class="hint" style="white-space:pre-wrap;margin-top:0.6rem;">—</div>
+  </div>
+
   <button type="button" class="primary" id="btn-calc">Calcular EV</button>
   <div id="load-msg" class="hint" style="display:none;margin-top:0.75rem;">Carregando listas do servidor…</div>
   <div id="err-box" class="err" style="display:none;"></div>
@@ -685,6 +696,72 @@
     if (x == null || isNaN(x)) return '—';
     return (Math.round(x * 10) / 10);
   }
+
+  var _last365 = null;
+  function fileToDataUrl(file) {
+    return new Promise(function (resolve, reject) {
+      if (!file) return resolve('');
+      const rd = new FileReader();
+      rd.onload = function () { resolve(String(rd.result || '')); };
+      rd.onerror = function () { reject(new Error('Falha ao ler imagem')); };
+      rd.readAsDataURL(file);
+    });
+  }
+
+  function applyExtracted365(x) {
+    if (!x) return;
+    if (x.team1) document.getElementById('team1').value = x.team1;
+    if (x.team2) document.getElementById('team2').value = x.team2;
+    if (x.odd1) document.getElementById('odd1').value = x.odd1;
+    if (x.odd2) document.getElementById('odd2').value = x.odd2;
+    if (x.league) leagueEl.value = x.league;
+    if (x.format) document.getElementById('format').value = x.format;
+  }
+
+  (function bind365() {
+    const btn365 = document.getElementById('btn-365');
+    const btnFill = document.getElementById('btn-365-fill');
+    const inp = document.getElementById('img365');
+    const out = document.getElementById('res-365');
+    if (!btn365 || !inp || !out) return;
+
+    if (btnFill) {
+      btnFill.addEventListener('click', function () {
+        if (_last365 && _last365.extracted) applyExtracted365(_last365.extracted);
+      });
+    }
+
+    btn365.addEventListener('click', function () {
+      showErr('');
+      out.textContent = 'Processando…';
+      const f = inp.files && inp.files[0];
+      if (!f) { out.textContent = 'Selecione print.'; return; }
+      if (f.size > 6 * 1024 * 1024) { out.textContent = 'Imagem muito grande (>6MB).'; return; }
+
+      btn365.disabled = true;
+      fileToDataUrl(f)
+        .then(function (dataUrl) {
+          return fetch('/lol/ev-manual-365', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ imageDataUrl: dataUrl })
+          });
+        })
+        .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, status: r.status, j: j }; }); })
+        .then(function (x) {
+          if (!x.ok) { out.textContent = (x.j && x.j.error) ? x.j.error : ('HTTP ' + x.status); return; }
+          _last365 = x.j;
+          if (x.j.extracted) applyExtracted365(x.j.extracted);
+          out.textContent = (x.j.ai && x.j.ai.text) ? x.j.ai.text : JSON.stringify(x.j.extracted || {}, null, 2);
+        })
+        .catch(function (e) {
+          out.textContent = e.message || String(e);
+        })
+        .finally(function () {
+          btn365.disabled = false;
+        });
+    });
+  })();
 
   btn.addEventListener('click', function () {
     showErr('');

@@ -4282,6 +4282,67 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // ── LoL EV manual: extrair print Bet365 e analisar ──
+  if (p === '/lol/ev-manual-365' && req.method === 'POST') {
+    let body = ''; req.on('data', d => { body += d; });
+    req.on('end', async () => {
+      try {
+        if (!DEEPSEEK_KEY) { sendJson(res, { ok: false, error: 'DEEPSEEK_API_KEY ausente' }, 401); return; }
+        const json = safeParse(body, null);
+        const dataUrl = String(json?.imageDataUrl || '').trim();
+        if (!dataUrl.startsWith('data:image/')) { sendJson(res, { ok: false, error: 'imageDataUrl inválido' }, 400); return; }
+        if (dataUrl.length > 8_000_000) { sendJson(res, { ok: false, error: 'imagem muito grande' }, 413); return; }
+
+        const prompt =
+          'Extraia dados de uma captura da Bet365 (LoL) e retorne JSON puro.\n' +
+          'Campos:\n' +
+          '{ team1, team2, odd1, odd2, league, format }\n' +
+          '- odd1/odd2 como número decimal (ex 1.85)\n' +
+          '- league/format podem ser null\n' +
+          'Se não achar algum campo, use null.\n' +
+          'Depois do JSON, escreva análise curta em pt-BR.\n' +
+          'Formato resposta:\n' +
+          'JSON em uma linha.\n' +
+          '---\n' +
+          'Texto análise.\n';
+
+        const dsPayload = {
+          model: 'deepseek-vision',
+          max_tokens: 700,
+          messages: [
+            {
+              role: 'user',
+              content: [
+                { type: 'text', text: prompt },
+                { type: 'image_url', image_url: { url: dataUrl } }
+              ]
+            }
+          ]
+        };
+
+        const r = await aiPost('deepseek', 'https://api.deepseek.com/chat/completions', dsPayload, {
+          'Authorization': `Bearer ${DEEPSEEK_KEY}`
+        }, { timeoutMs: 30000, retry: { maxAttempts: 3 } });
+
+        const j = safeParse(r && r.body, null);
+        const content = String(j?.choices?.[0]?.message?.content || '').trim();
+        const parts = content.split('\n---\n');
+        const jsonLine = (parts[0] || '').trim();
+        const analysisText = (parts.slice(1).join('\n---\n') || '').trim();
+        const extracted = safeParse(jsonLine, null) || null;
+
+        sendJson(res, {
+          ok: true,
+          extracted,
+          ai: { ok: true, provider: 'deepseek', model: dsPayload.model, text: analysisText || content }
+        });
+      } catch (e) {
+        sendJson(res, { ok: false, error: e.message }, 500);
+      }
+    });
+    return;
+  }
+
   // ── Form e H2H ──
   if (p === '/team-form' || p === '/form') {
     const team = parsed.query.team || parsed.query.name || '';
