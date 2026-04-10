@@ -480,6 +480,59 @@ function canonicalMatchId(sport, rawId, opts = {}) {
   return id;
 }
 
+/** Remove prefixo interno para comparar com id do The Odds API */
+function stripTheOddsMatchId(raw) {
+  let s = String(raw || '').trim();
+  if (s.startsWith('tennis_')) s = s.slice(7);
+  else if (s.startsWith('mma_')) s = s.slice(4);
+  return s;
+}
+
+/** Nomes de tenistas/lutadores: abreviação vs nome completo */
+function fuzzyPlayerNameMatch(displayA, displayB) {
+  const na = norm(displayA), nb = norm(displayB);
+  if (!na || !nb) return false;
+  if (na === nb) return true;
+  if (na.length >= 5 && nb.length >= 5 && (na.includes(nb) || nb.includes(na))) return true;
+  const tokensA = String(displayA || '').trim().split(/\s+/).filter(Boolean);
+  const tokensB = String(displayB || '').trim().split(/\s+/).filter(Boolean);
+  const la = tokensA.length ? norm(tokensA[tokensA.length - 1]) : '';
+  const lb = tokensB.length ? norm(tokensB[tokensB.length - 1]) : '';
+  return la.length >= 4 && lb.length >= 4 && la === lb;
+}
+
+/** Alinha tip pendente com evento atual da API (id ou nomes) */
+function findTheOddsH2hMatch(list, tip) {
+  if (!Array.isArray(list) || !list.length) return null;
+  const mid = stripTheOddsMatchId(tip.match_id);
+  const p1 = tip.participant1 || '';
+  const p2 = tip.participant2 || '';
+  let m = list.find(x => x && mid && String(x.id) === mid);
+  if (m) return m;
+  const n1 = norm(p1), n2 = norm(p2);
+  m = list.find(x => {
+    const a1 = norm(x.team1 || ''), a2 = norm(x.team2 || '');
+    return (a1 === n1 && a2 === n2) || (a1 === n2 && a2 === n1);
+  });
+  if (m) return m;
+  return list.find(x =>
+    (fuzzyPlayerNameMatch(p1, x.team1) && fuzzyPlayerNameMatch(p2, x.team2)) ||
+    (fuzzyPlayerNameMatch(p1, x.team2) && fuzzyPlayerNameMatch(p2, x.team1))
+  ) || null;
+}
+
+function h2hDecimalOddsForPick(m, pick) {
+  if (!m?.odds) return null;
+  const t1 = m.odds.t1 != null ? m.odds.t1 : m.odds.h;
+  const t2 = m.odds.t2 != null ? m.odds.t2 : m.odds.a;
+  const o1 = parseFloat(t1);
+  const o2 = parseFloat(t2);
+  const pickN = norm(pick);
+  if (pickN === norm(m.team1) || fuzzyPlayerNameMatch(pick, m.team1)) return o1;
+  if (pickN === norm(m.team2) || fuzzyPlayerNameMatch(pick, m.team2)) return o2;
+  return null;
+}
+
 async function withAutoAnalysisMutex(fn) {
   const now = Date.now();
   // Verifica se há lock ativo
@@ -3550,7 +3603,9 @@ async function pollMma(runOnce = false) {
         if (!runOnce) setTimeout(loop, 30 * 60 * 1000); return;
       }
 
-      log('INFO', 'AUTO-MMA', `${fights.length} lutas MMA com odds | ESPN: ${espnFights.length} lutas`);
+      const mmaCount = fights.filter(f => f.game === 'mma').length;
+      const boxCount = fights.filter(f => f.game === 'boxing').length;
+      log('INFO', 'AUTO-MMA', `${fights.length} lutas com odds (MMA: ${mmaCount} | Boxe: ${boxCount}) | ESPN: ${espnFights.length} lutas`);
 
       const now = Date.now();
       const endOfWeek = (() => {
@@ -3563,8 +3618,9 @@ async function pollMma(runOnce = false) {
       })();
 
       for (const fight of fights) {
-        // ── UFC-ONLY: pula qualquer luta fora do UFC ──
-        if (!findEspnFight(espnFights, fight.team1, fight.team2)) {
+        const isBoxing = fight.game === 'boxing';
+        // ── UFC-ONLY para MMA; boxe não precisa de confirmação ESPN ──
+        if (!isBoxing && !findEspnFight(espnFights, fight.team1, fight.team2)) {
           log('DEBUG', 'AUTO-MMA', `Pulando não-UFC: ${fight.team1} vs ${fight.team2}`);
           continue;
         }
@@ -3616,8 +3672,14 @@ async function pollMma(runOnce = false) {
         const rounds = espn?.rounds || 3;
         const isTitleFight = rounds === 5;
 
+        // Boxe: não tenta records/ESPN/Wiki/Sherdog (ruído). Usa de-juice apenas.
+        if (isBoxing) {
+          rec1 = '';
+          rec2 = '';
+        }
+
         // Fallback: busca record individual (ESPN → Wikipedia → Sherdog → Tapology)
-        if (!espn) {
+        if (!isBoxing && !espn) {
           const [e1, e2] = await Promise.all([
             fetchEspnFighterRecord(fight.team1).catch(() => null),
             fetchEspnFighterRecord(fight.team2).catch(() => null)
@@ -3655,7 +3717,7 @@ async function pollMma(runOnce = false) {
 
         // ── Pré-filtro ML com dados ESPN (record → win rate) ──
         const hasEspnRecord = !!(rec1 || rec2);
-        const mmaEnrich = hasEspnRecord ? mmaRecordToEnrich(rec1, rec2) : { form1: null, form2: null, h2h: null, oddsMovement: null };
+        const mmaEnrich = (!isBoxing && hasEspnRecord) ? mmaRecordToEnrich(rec1, rec2) : { form1: null, form2: null, h2h: null, oddsMovement: null };
         const mlResultMma = esportsPreFilter(fight, o, mmaEnrich, false, '', null);
         if (!mlResultMma.pass) {
           log('INFO', 'AUTO-MMA', `Pré-filtro ML: edge insuficiente (${mlResultMma.score.toFixed(1)}pp) para ${fight.team1} vs ${fight.team2}. Pulando IA.`);
@@ -3678,7 +3740,29 @@ async function pollMma(runOnce = false) {
 
         const newsSectionMma = await fetchMatchNews('mma', fight.team1, fight.team2).catch(() => '');
 
-        const prompt = `Você é um analista especializado em MMA/UFC. Analise esta luta e identifique edge real se existir.
+        const prompt = isBoxing
+          ? `Você é um analista especializado em BOXE. Analise esta luta e identifique edge real se existir.
+
+LUTA: ${fight.team1} vs ${fight.team2}
+Evento: ${fight.league} | Data: ${fightTime} (BRT)
+
+ODDS (${o.bookmaker || 'EU'}):
+${fight.team1}: ${o.t1} | ${fight.team2}: ${o.t2}
+Margem bookie: ${marginPct}%
+Fair odds (de-juice): ${fight.team1}=${fairP1}% | ${fight.team2}=${fairP2}%
+
+ANÁLISE REQUERIDA — seja específico:
+1. Striking: volume, potência, defesa, timing.
+2. Tendência: últimos resultados e nível de oposição (se tiver).
+3. Risco: variância por decisão vs KO/TKO.
+4. Confiança (1-10): dados suficientes?
+
+DECISÃO FINAL:
+- Se EV ≥ +5% E confiança ≥ 7: TIP_ML:[lutador]@[odd]|EV:[%]|STAKE:[1-3]u|CONF:[ALTA/MÉDIA/BAIXA]
+- Se edge inexistente ou confiança < 7: SEM_EDGE
+
+Máximo 200 palavras.`
+          : `Você é um analista especializado em MMA/UFC. Analise esta luta e identifique edge real se existir.
 
 LUTA: ${fight.team1} vs ${fight.team2}
 Evento: ${fight.league} | Data: ${fightTime} (BRT)${espnSection}
@@ -3761,7 +3845,7 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
         const tipReasonMma = extractTipReasonMma(text);
         const whyLineMma = tipReasonMma ? `\n🧠 Por quê: _${tipReasonMma}_\n` : '\n';
 
-        const tipMsg = `🥊 💰 *TIP MMA*\n` +
+        const tipMsg = `${isBoxing ? '🥊 💰 *TIP BOXE*' : '🥊 💰 *TIP MMA*'}\n` +
           `*${fight.team1}* vs *${fight.team2}*\n📋 ${fight.league}\n` +
           `🕐 ${fightTime} (BRT)${recLine}${catLine}\n\n` +
           whyLineMma +
@@ -4627,18 +4711,10 @@ async function checkCLV(caches = {}) {
           }
         } else if (sport === 'tennis') {
           const list = Array.isArray(tennisMatches) ? tennisMatches : [];
-          const p1 = norm(tip.participant1 || '');
-          const p2 = norm(tip.participant2 || '');
-          const pick = String(tip.tip_participant || '');
-          const pickN = norm(pick);
-          const m = list.find(x => {
-            const a1 = norm(x.team1 || '');
-            const a2 = norm(x.team2 || '');
-            return (a1 === p1 && a2 === p2) || (a1 === p2 && a2 === p1);
-          });
+          const m = findTheOddsH2hMatch(list, tip);
           if (m?.odds) {
-            if (pickN === norm(m.team1)) clvOdds = m.odds.t1;
-            else if (pickN === norm(m.team2)) clvOdds = m.odds.t2;
+            const o = h2hDecimalOddsForPick(m, tip.tip_participant);
+            if (o && o > 1) clvOdds = String(o);
           }
         }
 
@@ -4687,7 +4763,8 @@ async function refreshOpenTips(caches = {}) {
       }
 
       for (const tip of unsettled) {
-        if (tip.is_live) continue; // não atualizar tip que já foi gerada ao vivo
+        // Esports ao vivo: congela linha; MMA/tênis/futebol podem atualizar odds no dashboard
+        if (tip.is_live && sport === 'esports') continue;
         if (sport === 'esports' && String(tip.match_id || '').includes('_MAP')) continue; // tip por mapa = jogo em andamento
         const p1 = tip.participant1 || '';
         const p2 = tip.participant2 || '';
@@ -4726,6 +4803,12 @@ async function refreshOpenTips(caches = {}) {
           if (o && parseFloat(o.t1) > 1) {
             currentOdds = norm(pick) === norm(p1) ? parseFloat(o.t1) : parseFloat(o.t2);
           }
+        } else if (sport === 'mma') {
+          const fights = caches.mma || await serverGet('/mma-matches').catch(() => []);
+          if (Array.isArray(fights) && fights.length) {
+            const m = findTheOddsH2hMatch(fights, tip);
+            if (m?.odds) currentOdds = h2hDecimalOddsForPick(m, pick);
+          }
         } else if (sport === 'football') {
           const matches = caches.football || await serverGet('/football-matches').catch(() => []);
           if (matches.length) {
@@ -4746,18 +4829,8 @@ async function refreshOpenTips(caches = {}) {
         } else if (sport === 'tennis') {
           const matches = caches.tennis || await serverGet('/tennis-matches').catch(() => []);
           if (matches.length) {
-            const n1 = norm(p1), n2 = norm(p2);
-            const m = matches.find(x => {
-              const a1 = norm(x.team1 || '');
-              const a2 = norm(x.team2 || '');
-              return (a1 === n1 && a2 === n2) || (a1 === n2 && a2 === n1);
-            });
-            if (m && (m.status === 'live' || m.status === 'draft')) continue;
-            if (m?.odds) {
-              const pickN = norm(pick);
-              if (pickN === norm(m.team1)) currentOdds = parseFloat(m.odds.t1);
-              else if (pickN === norm(m.team2)) currentOdds = parseFloat(m.odds.t2);
-            }
+            const m = findTheOddsH2hMatch(matches, tip);
+            if (m?.odds) currentOdds = h2hDecimalOddsForPick(m, pick);
           }
         } else {
           // fallback: sem odds atuais padronizadas por esporte aqui
@@ -4796,7 +4869,7 @@ async function refreshOpenTips(caches = {}) {
         // Notifica inscritos do esporte
         const msg =
           `🔄 *Atualização Tip (em andamento)*\n\n` +
-          `🎮 *${p1} vs ${p2}*\n` +
+          `${sport === 'mma' ? '🥊' : '🎮'} *${p1} vs ${p2}*\n` +
           `✅ Pick: *${pick}*\n` +
           `📈 Odds: *${oldOdds.toFixed(2)}* → *${currentOdds.toFixed(2)}* (${movePct >= 0 ? '+' : ''}${movePct.toFixed(1)}%)\n` +
           `🧮 EV (recalc): *${newEv >= 0 ? '+' : ''}${newEv.toFixed(2)}%*\n` +

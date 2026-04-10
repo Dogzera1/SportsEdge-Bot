@@ -4568,12 +4568,8 @@ const server = http.createServer(async (req, res) => {
   if (p === '/mma-matches') {
     if (!THE_ODDS_API_KEY) { sendJson(res, []); return; }
     try {
-      const mmaUrl = `https://api.the-odds-api.com/v4/sports/mma_mixed_martial_arts/odds/?apiKey=${THE_ODDS_API_KEY}&regions=eu&markets=h2h&oddsFormat=decimal`;
-      const r = await theOddsGet(mmaUrl);
-      if (r.status !== 200) { sendJson(res, []); return; }
-      const raw = safeParse(r.body, []);
       const now = Date.now();
-      const fights = raw
+      const parseFights = (raw, gameTag) => raw
         .filter(e => new Date(e.commence_time).getTime() > now)
         .map(e => {
           const bm = e.bookmakers?.[0];
@@ -4583,16 +4579,26 @@ const server = http.createServer(async (req, res) => {
           const o2 = out.find(o => o.name === e.away_team);
           return {
             id: e.id,
-            game: 'mma',
+            game: gameTag,
             status: 'upcoming',
             team1: e.home_team,
             team2: e.away_team,
-            league: e.sport_title || 'MMA',
+            league: e.sport_title || (gameTag === 'boxing' ? 'Boxing' : 'MMA'),
             time: e.commence_time,
             odds: (o1 && o2) ? { t1: String(o1.price), t2: String(o2.price), bookmaker: bm.title } : null
           };
         })
         .filter(f => f.odds);
+
+      const [rMma, rBox] = await Promise.all([
+        theOddsGet(`https://api.the-odds-api.com/v4/sports/mma_mixed_martial_arts/odds/?apiKey=${THE_ODDS_API_KEY}&regions=eu&markets=h2h&oddsFormat=decimal`),
+        theOddsGet(`https://api.the-odds-api.com/v4/sports/boxing_boxing/odds/?apiKey=${THE_ODDS_API_KEY}&regions=eu&markets=h2h&oddsFormat=decimal`)
+      ]);
+
+      const mmaFights = rMma.status === 200 ? parseFights(safeParse(rMma.body, []), 'mma') : [];
+      const boxFights = rBox.status === 200 ? parseFights(safeParse(rBox.body, []), 'boxing') : [];
+
+      const fights = [...mmaFights, ...boxFights].sort((a, b) => new Date(a.time) - new Date(b.time));
       sendJson(res, fights);
     } catch(e) {
       sendJson(res, []);
