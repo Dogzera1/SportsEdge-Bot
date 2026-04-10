@@ -15,6 +15,8 @@
 
     .sport-tabs { display: flex; gap: 0.5rem; padding: 1rem 2rem; background: #13151f; flex-wrap: wrap; }
     .sport-tab { padding: 0.5rem 1.2rem; border-radius: 6px; border: 1px solid #374151; background: #1f2937; color: #9ca3af; cursor: pointer; font-size: 0.85rem; transition: all 0.2s; }
+    a.sport-tab { text-decoration: none; color: #9ca3af; display: inline-block; }
+    a.sport-tab:hover { color: #e0e0e0; border-color: #6b7280; }
     .sport-tab.active { background: #7c3aed; border-color: #7c3aed; color: #fff; }
 
     .main { padding: 1.5rem 2rem; max-width: 1400px; }
@@ -87,6 +89,7 @@
 
 <div class="sport-tabs">
   <button class="sport-tab active" onclick="selectSport('esports', this)">&#127918; Esports</button>
+  <a class="sport-tab" href="/lol/ev-manual" title="Match Winner — odds manuais (LoL)">&#128200; LoL EV manual</a>
   <button class="sport-tab" onclick="selectSport('mma', this)">&#129354; MMA</button>
   <button class="sport-tab" onclick="selectSport('tennis', this)">&#127934; T&ecirc;nis</button>
   <button class="sport-tab" onclick="selectSport('football', this)">&#9917; Futebol</button>

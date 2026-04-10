@@ -2185,7 +2185,9 @@ function lolEnrichmentFromDb(t1, t2, game = 'lol') {
 // ── HTTP Server ──
 const server = http.createServer(async (req, res) => {
   const parsed = url.parse(req.url, true);
-  const p = parsed.pathname;
+  let p = parsed.pathname || '/';
+  p = p.replace(/\/{2,}/g, '/');
+  if (p.length > 1) p = p.replace(/\/+$/, '');
   // Global safety net — prevents hanging requests on unhandled async errors
   res.on('error', (e) => log('ERROR', 'RES', e.message));
   try {
