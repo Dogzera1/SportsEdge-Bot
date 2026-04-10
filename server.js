@@ -307,7 +307,7 @@ async function importTennisMatchesCsvOnce() {
   if (rawYears) {
     years = [...new Set(rawYears.split(',').map(s => parseInt(s.trim(), 10)).filter(n => Number.isFinite(n) && n >= 1990 && n <= y0 + 1))];
   } else {
-    years = [y0 - 1, y0];
+    years = [y0 - 1, y0, y0 + 1];
   }
   for (const year of years) {
     await importTennisSackmannCsvForYear(year, 'atp');
@@ -574,8 +574,23 @@ function sxNameLike(a, b) {
   return false;
 }
 
+function tennisSinglePlayerNameMatch(displayA, displayB) {
+  if (sxNameLike(displayA, displayB)) return true;
+  const na = norm(displayA);
+  const nb = norm(displayB);
+  if (!na || !nb) return false;
+  if (na === nb) return true;
+  if (na.length >= 5 && nb.length >= 5 && (na.includes(nb) || nb.includes(na))) return true;
+  const tokensA = String(displayA || '').trim().split(/\s+/).filter(Boolean);
+  const tokensB = String(displayB || '').trim().split(/\s+/).filter(Boolean);
+  const la = tokensA.length ? norm(tokensA[tokensA.length - 1]) : '';
+  const lb = tokensB.length ? norm(tokensB[tokensB.length - 1]) : '';
+  return la.length >= 4 && lb.length >= 4 && la === lb;
+}
+
 function tennisPairMatchesPlayers(p1, p2, t1, t2) {
-  return (sxNameLike(p1, t1) && sxNameLike(p2, t2)) || (sxNameLike(p1, t2) && sxNameLike(p2, t1));
+  return (tennisSinglePlayerNameMatch(p1, t1) && tennisSinglePlayerNameMatch(p2, t2))
+    || (tennisSinglePlayerNameMatch(p1, t2) && tennisSinglePlayerNameMatch(p2, t1));
 }
 
 let _tennisSettleRowsCache = { ts: 0, lookback: -1, rows: null };
@@ -591,7 +606,7 @@ function getTennisSettleRowsCached(lookbackDays) {
     WHERE game = 'tennis'
     AND datetime(resolved_at) >= datetime('now', '-' || ? || ' days')
     ORDER BY resolved_at DESC
-    LIMIT 1500
+    LIMIT 4000
   `).all(String(lookbackDays));
   _tennisSettleRowsCache = { ts: now, lookback: lookbackDays, rows };
   return rows;
@@ -4743,7 +4758,7 @@ const server = http.createServer(async (req, res) => {
     const p2 = parsed.query.p2 || '';
     const sentAt = parsed.query.sentAt || '';
     if (!p1 || !p2) { sendJson(res, { resolved: false, error: 'p1/p2 obrigatórios' }, 400); return; }
-    const lookbackDays = Math.min(120, Math.max(14, parseInt(process.env.TENNIS_SETTLE_LOOKBACK_DAYS || '45', 10) || 45));
+    const lookbackDays = Math.min(800, Math.max(14, parseInt(process.env.TENNIS_SETTLE_LOOKBACK_DAYS || '600', 10) || 600));
     try {
       const rows = getTennisSettleRowsCached(lookbackDays);
 

@@ -3269,34 +3269,38 @@ async function fetchEspnTennisEvent(tour) {
   try {
     const slug = tour === 'WTA' ? 'wta' : 'atp';
     const j = await tennisData.getScoreboard(slug).catch(() => null);
-    const ev = j?.events?.[0];
-    if (!ev) return null;
+    const events = Array.isArray(j?.events) ? j.events : [];
+    if (!events.length) return null;
 
     const recentResults = [];
     const scheduledMatches = [];
-    for (const grp of (ev.groupings || [])) {
-      for (const comp of (grp.competitions || [])) {
-        const state = comp.status?.type?.state;
-        const c1 = comp.competitors?.[0]?.athlete?.displayName || '';
-        const c2 = comp.competitors?.[1]?.athlete?.displayName || '';
-        if (state === 'post') {
-          const winnerComp = comp.competitors?.find(c => c.winner === true);
-          const winner = winnerComp?.athlete?.displayName || '';
-          const score = comp.status?.displayClock
-            || comp.competitors?.map(c => c.score).join('-')
-            || '';
-          recentResults.push({ p1: c1, p2: c2, winner, score, date: comp.date || '' });
-        } else if (state === 'pre' || state === 'in') {
-          scheduledMatches.push({ p1: c1, p2: c2, court: comp.venue?.court, date: comp.date });
+    for (const ev of events) {
+      for (const grp of (ev.groupings || [])) {
+        for (const comp of (grp.competitions || [])) {
+          const state = comp.status?.type?.state;
+          const c1 = comp.competitors?.[0]?.athlete?.displayName || '';
+          const c2 = comp.competitors?.[1]?.athlete?.displayName || '';
+          if (state === 'post') {
+            const winnerComp = comp.competitors?.find(c => c.winner === true);
+            const winner = winnerComp?.athlete?.displayName || '';
+            const score = comp.status?.displayClock
+              || comp.competitors?.map(c => c.score).join('-')
+              || '';
+            recentResults.push({ p1: c1, p2: c2, winner, score, date: comp.date || '', eventName: ev.name || '' });
+          } else if (state === 'pre' || state === 'in') {
+            scheduledMatches.push({ p1: c1, p2: c2, court: comp.venue?.court, date: comp.date });
+          }
         }
       }
     }
+    const ev0 = events[0];
+    const name0 = String(ev0?.name || '');
     return {
-      eventName: ev.name,
-      surface: ev.name?.toLowerCase().includes('monte') || ev.name?.toLowerCase().includes('clay') ? 'saibro'
-        : ev.name?.toLowerCase().includes('wimbledon') || ev.name?.toLowerCase().includes('halle') || ev.name?.toLowerCase().includes('queen') ? 'grama'
+      eventName: events.map(e => e.name).filter(Boolean).join(' | ') || name0,
+      surface: name0.toLowerCase().includes('monte') || name0.toLowerCase().includes('clay') ? 'saibro'
+        : name0.toLowerCase().includes('wimbledon') || name0.toLowerCase().includes('halle') || name0.toLowerCase().includes('queen') ? 'grama'
         : 'dura',
-      recentResults: recentResults.slice(-20),
+      recentResults: recentResults.slice(-80),
       scheduledMatches
     };
   } catch(_) {

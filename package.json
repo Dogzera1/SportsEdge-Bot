@@ -8,7 +8,8 @@
     "server": "node server.js",
     "bot": "node bot.js",
     "dev": "nodemon server.js & nodemon bot.js",
-    "backtest": "node scripts/backtest.js"
+    "backtest": "node scripts/backtest.js",
+    "audit-mma": "node scripts/audit-mma-tips.js"
   },
   "dependencies": {
     "better-sqlite3": "^11.0.0",
