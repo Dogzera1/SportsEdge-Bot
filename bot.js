@@ -300,12 +300,14 @@ function getLeagueRiskMultiplier(leagueSlug) {
   return _leagueRiskMultipliers[slug] ?? _leagueRiskMultipliers.default ?? 0.6;
 }
 
-// Ligas principais bloqueadas — tips apenas em ligas secundárias (tier-2/3)
+// Ligas bloqueadas — controlado por LOL_BLOCK_MAIN_LEAGUES (default: false = sem bloqueio)
+const _LOL_BLOCK_MAIN = /^(1|true|yes)$/i.test(String(process.env.LOL_BLOCK_MAIN_LEAGUES || 'false'));
 const LOL_MAIN_LEAGUES = new Set([
   'lck', 'lcs', 'lec', 'lpl', 'worlds', 'msi',
   'cblol', 'cblolbrazil', 'lla', 'pcs', 'lco', 'vcs',
 ]);
 function isMainLeague(leagueSlug) {
+  if (!_LOL_BLOCK_MAIN) return false;
   if (!leagueSlug) return false;
   const slug = String(leagueSlug).toLowerCase().replace(/[^a-z0-9-]/g, '');
   return LOL_MAIN_LEAGUES.has(slug);

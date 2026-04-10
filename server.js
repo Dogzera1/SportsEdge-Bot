@@ -2998,6 +2998,12 @@ const server = http.createServer(async (req, res) => {
     } else {
       o = findOdds('esports', t1, t2);
     }
+    // Fallback SX.Bet quando OddsPapi não tem odds (backoff ou partida não listada)
+    if (!o && SXBET_ENABLED) {
+      const liveOnly = !!(mapNumber && mapNumber > 0);
+      o = await sxGetMatchWinnerOdds(t1, t2, { liveOnly: false, mapNumber: liveOnly ? mapNumber : null }).catch(() => null);
+      if (o) log('INFO', 'ODDS', `SX.Bet fallback usado para ${t1} vs ${t2}`);
+    }
     sendJson(res, o || { error: 'odds não encontradas' });
     return;
   }
