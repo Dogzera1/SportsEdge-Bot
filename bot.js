@@ -3696,8 +3696,9 @@ async function pollMma(runOnce = false) {
       log('INFO', 'AUTO-MMA', `${fights.length} lutas com odds (MMA: ${mmaCount} | Boxe: ${boxCount}) | ESPN: ${espnFights.length} lutas`);
 
       const now = Date.now();
-      const boxingMinDays = Math.max(1, Math.min(45, parseInt(process.env.BOXING_MIN_DAYS_BEFORE_FIGHT || '10', 10) || 10));
-      const boxingMinMs = boxingMinDays * 24 * 60 * 60 * 1000;
+      // BOXING_MAX_DAYS_BEFORE_FIGHT: só tip se a luta for em no máximo N dias (default 10)
+      const boxingMaxDays = Math.max(1, Math.min(60, parseInt(process.env.BOXING_MAX_DAYS_BEFORE_FIGHT || process.env.BOXING_MIN_DAYS_BEFORE_FIGHT || '10', 10) || 10));
+      const boxingMaxMs = boxingMaxDays * 24 * 60 * 60 * 1000;
       let boxingSkippedLead = 0;
       const endOfWeek = (() => {
         const d = new Date();
@@ -3736,10 +3737,10 @@ async function pollMma(runOnce = false) {
           log('INFO', 'AUTO-MMA', `Ignorando luta sem data válida: ${fight.team1} vs ${fight.team2}`);
           continue;
         }
-        // Boxe: só tip se faltar no mínimo N dias para a luta (linha de corte antecipada)
-        if (isBoxing && fightTs - now < boxingMinMs) {
+        // Boxe: só tip se a luta for em no máximo N dias (evita tips prematuras)
+        if (isBoxing && fightTs - now > boxingMaxMs) {
           boxingSkippedLead++;
-          log('DEBUG', 'AUTO-MMA', `Boxe: <${boxingMinDays}d até a luta — sem tip: ${fight.team1} vs ${fight.team2}`);
+          log('DEBUG', 'AUTO-MMA', `Boxe: >${boxingMaxDays}d até a luta — sem tip: ${fight.team1} vs ${fight.team2}`);
           continue;
         }
         const isThisWeek = fightTs > 0 && fightTs <= endOfWeek;
