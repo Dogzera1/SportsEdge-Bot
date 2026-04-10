@@ -1081,8 +1081,7 @@ async function settleCompletedTips() {
         try {
           let endpoint;
           if (sport === 'football') {
-            // Settlement futebol via API-Football removido
-            continue;
+            endpoint = `/football-result?matchId=${encodeURIComponent(tip.match_id)}&team1=${encodeURIComponent(tip.participant1 || '')}&team2=${encodeURIComponent(tip.participant2 || '')}&sentAt=${encodeURIComponent(tip.sent_at || '')}`;
           } else {
             const isPanda = String(tip.match_id).startsWith('ps_');
             endpoint = isPanda
@@ -1113,7 +1112,12 @@ async function settleCompletedTips() {
             won = norm(result.winner).includes(norm(tip.tip_participant));
           }
 
-          await serverPost('/settle', { matchId: tip.match_id, winner: result.winner }, sport);
+          const settleBody = { matchId: tip.match_id, winner: result.winner };
+          if (sport === 'football') {
+            settleBody.home = tip.participant1 || '';
+            settleBody.away = tip.participant2 || '';
+          }
+          await serverPost('/settle', settleBody, sport);
 
           log('INFO', 'SETTLE', `${sport}: ${tip.participant1} vs ${tip.participant2} → ${won ? 'WIN ✅' : 'LOSS ❌'} (${result.winner})`);
           settled++;
@@ -4594,12 +4598,35 @@ Máximo 200 palavras.`;
   return runOnce ? (result || []) : undefined;
 }
 log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
-log('INFO', 'BOOT', `ENV: ESPORTS_ENABLED=${process.env.ESPORTS_ENABLED || '(não definida)'}`);
-log('INFO', 'BOOT', `ENV: TELEGRAM_TOKEN_ESPORTS=${process.env.TELEGRAM_TOKEN_ESPORTS ? '✅ definida' : '❌ AUSENTE'}`);
-log('INFO', 'BOOT', `ENV: DEEPSEEK_API_KEY=${process.env.DEEPSEEK_API_KEY ? '✅ definida' : '❌ AUSENTE'}`);
-const oddsKeyPresent = !!(process.env.ODDS_API_KEY || process.env.ODDSPAPI_KEY || process.env.ODDS_PAPI_KEY || process.env.ESPORTS_ODDS_KEY);
-log('INFO', 'BOOT', `ENV: ODDS_API_KEY=${oddsKeyPresent ? '✅ definida' : '❌ AUSENTE — odds indisponíveis'}`);
-log('INFO', 'BOOT', `Sports carregados: ${JSON.stringify(Object.entries(SPORTS).map(([k,v]) => ({id: k, enabled: v.enabled, hasToken: !!v.token})))}`);
+
+// ── Validação de variáveis de ambiente ──
+(function validateEnv() {
+  const oddsKeyPresent = !!(process.env.ODDS_API_KEY || process.env.ODDSPAPI_KEY || process.env.ODDS_PAPI_KEY || process.env.ESPORTS_ODDS_KEY);
+  // Chaves globais obrigatórias para operação mínima
+  const globalRequired = [
+    ['DEEPSEEK_API_KEY', !!process.env.DEEPSEEK_API_KEY, 'IA desativada — nenhuma tip será gerada'],
+    ['ODDS_API_KEY',     oddsKeyPresent,                  'odds esports indisponíveis'],
+  ];
+  for (const [key, present, reason] of globalRequired) {
+    if (!present) log('WARN', 'ENV', `${key} ausente — ${reason}`);
+  }
+  // Por esporte: avisa se habilitado sem token
+  for (const [sport, cfg] of Object.entries(SPORTS)) {
+    if (!cfg.enabled) continue;
+    if (!cfg.token) log('WARN', 'ENV', `${sport}: ENABLED=true mas token Telegram ausente — sport ignorado`);
+  }
+  // Variáveis opcionais úteis
+  const optionals = [
+    ['ADMIN_KEY',          process.env.ADMIN_KEY,          'rotas admin abertas sem autenticação'],
+    ['PANDASCORE_TOKEN',   process.env.PANDASCORE_TOKEN,   'dados PandaScore indisponíveis (LoL)'],
+    ['THE_ODDS_API_KEY',   process.env.THE_ODDS_API_KEY,   'odds tênis/MMA via TheOdds indisponíveis'],
+    ['API_SPORTS_KEY',     process.env.API_SPORTS_KEY || process.env.APISPORTS_KEY, 'dados futebol via API-Sports indisponíveis'],
+  ];
+  for (const [key, present, reason] of optionals) {
+    if (!present) log('WARN', 'ENV', `${key} ausente — ${reason}`);
+  }
+  log('INFO', 'ENV', `Sports: ${JSON.stringify(Object.entries(SPORTS).map(([k,v]) => ({id: k, enabled: v.enabled, hasToken: !!v.token})))}`);
+})();
 
 (async () => {
   await loadSubscribedUsers();

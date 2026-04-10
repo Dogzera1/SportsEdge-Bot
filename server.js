@@ -3367,10 +3367,55 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // ── Resultado Futebol (settlement via API-Football) ──
+  // ── Resultado Futebol (settlement via match_results DB + CSV dataset) ──
   if (p === '/football-result') {
-    // API-Football removida
-    sendJson(res, { resolved: false, disabled: true, error: 'football-result desativado (API-Football removida)' }, 410);
+    const matchId = (parsed.query.matchId || '').trim();
+    const team1   = (parsed.query.team1   || '').trim();
+    const team2   = (parsed.query.team2   || '').trim();
+    const sentAt  = (parsed.query.sentAt  || '').trim();
+
+    if (!team1 || !team2) {
+      sendJson(res, { resolved: false, error: 'team1 e team2 obrigatórios' }, 400);
+      return;
+    }
+    try {
+      // 1) Tentativa por match_id exato (caso o ID já esteja indexado na DB)
+      let row = matchId
+        ? db.prepare("SELECT * FROM match_results WHERE match_id = ? AND game = 'football' LIMIT 1").get(matchId)
+        : null;
+
+      // 2) Fuzzy por nome dos times + janela de ±4 dias em torno de sentAt
+      if (!row?.winner) {
+        const t1Like = `%${team1}%`;
+        const t2Like = `%${team2}%`;
+        const stmt = sentAt
+          ? db.prepare(`
+              SELECT * FROM match_results
+              WHERE game = 'football'
+                AND ((lower(team1) LIKE lower(?) AND lower(team2) LIKE lower(?))
+                  OR (lower(team1) LIKE lower(?) AND lower(team2) LIKE lower(?)))
+                AND resolved_at BETWEEN datetime(?, '-4 days') AND datetime(?, '+6 days')
+              ORDER BY resolved_at DESC LIMIT 1`)
+          : db.prepare(`
+              SELECT * FROM match_results
+              WHERE game = 'football'
+                AND ((lower(team1) LIKE lower(?) AND lower(team2) LIKE lower(?))
+                  OR (lower(team1) LIKE lower(?) AND lower(team2) LIKE lower(?)))
+              ORDER BY resolved_at DESC LIMIT 1`);
+
+        row = sentAt
+          ? stmt.get(t1Like, t2Like, t2Like, t1Like, sentAt, sentAt)
+          : stmt.get(t1Like, t2Like, t2Like, t1Like);
+      }
+
+      if (row?.winner) {
+        sendJson(res, { resolved: true, winner: row.winner, score: row.final_score || '' });
+      } else {
+        sendJson(res, { resolved: false });
+      }
+    } catch(e) {
+      sendJson(res, { resolved: false, error: e.message });
+    }
     return;
   }
 
@@ -3674,7 +3719,7 @@ const server = http.createServer(async (req, res) => {
     let body = ''; req.on('data', d => body += d);
     req.on('end', () => {
       try {
-        const { matchId, winner } = safeParse(body, {});
+        const { matchId, winner, home, away } = safeParse(body, {});
         const sport = parsed.query.sport || 'esports';
         if (!matchId || !winner) { sendJson(res, { error: 'Missing matchId/winner' }, 400); return; }
         // Usa transaction para garantir atomicidade: SELECT + UPDATE acontecem juntos,
@@ -3717,6 +3762,19 @@ const server = http.createServer(async (req, res) => {
             const nova = parseFloat((bk.current_banca + bancaDelta).toFixed(2));
             stmts.updateBankroll.run(nova, sport);
             log('INFO', 'BANCA', `Settlement [${sport}]: delta R$${bancaDelta >= 0 ? '+' : ''}${bancaDelta.toFixed(2)} → banca agora R$${nova}`);
+          }
+        }
+        // Atualiza Elo após settlement de futebol (só para mercados 1X2, não Over/Under)
+        if (sport === 'football' && settled > 0 && winner && winner !== '__loss__') {
+          const homeTeam = home || '';
+          const awayTeam = away || '';
+          const nw = norm(winner);
+          const isTeamOrDraw = winner === 'Draw'
+            || (homeTeam && nw && (nw.includes(norm(homeTeam)) || norm(homeTeam).includes(nw)))
+            || (awayTeam && nw && (nw.includes(norm(awayTeam)) || norm(awayTeam).includes(nw)));
+          if (homeTeam && awayTeam && isTeamOrDraw) {
+            try { updateEloMatch(homeTeam, awayTeam, winner); }
+            catch(e) { log('WARN', 'ELO', `Elo update falhou: ${e.message}`); }
           }
         }
         sendJson(res, { ok: true, settled, bancaDelta: parseFloat(bancaDelta.toFixed(2)) });
@@ -5432,6 +5490,20 @@ async function syncProStats({ forceResync = false } = {}) {
   log('INFO', 'SYNC', `Pro stats: ${matchCount} resultados, ${champEntries} champs, ${playerEntries} player+champ (${skipped} já sincronizados)`);
   return { ok: true, matchCount, champEntries, playerEntries, skipped };
 }
+
+// ── Validação de variáveis de ambiente (server) ──
+(function validateServerEnv() {
+  const checks = [
+    ['DEEPSEEK_API_KEY', DEEPSEEK_KEY,       'chamadas à IA desativadas — /claude retornará erro'],
+    ['ODDS_API_KEY',     ODDSPAPI_KEY,        'odds esports (OddsPapi) indisponíveis'],
+    ['ADMIN_KEY',        process.env.ADMIN_KEY, 'rotas admin abertas sem autenticação'],
+    ['PANDASCORE_TOKEN', PANDASCORE_TOKEN,    'dados PandaScore indisponíveis'],
+    ['THE_ODDS_API_KEY', THE_ODDS_API_KEY,    'odds tênis/MMA via TheOdds indisponíveis'],
+  ];
+  for (const [key, val, reason] of checks) {
+    if (!val) log('WARN', 'ENV', `${key} ausente — ${reason}`);
+  }
+})();
 
 server.listen(PORT, '0.0.0.0', () => {
   log('INFO', 'SERVER', `SportsEdge API em http://0.0.0.0:${PORT}`);
