@@ -181,6 +181,7 @@ O server em **`/settle`** compara vencedor com `tip_participant` (tênis usa mat
 | `GRID_API_KEY` | **Server**: acesso [GRID Central Data](https://api-op.grid.gg/central-data/graphql) + Series State; endpoint **`GET /grid-enrich?team1=&team2=&game=lol`**. Open Access pode **não** incluir LoL — depende do plano. |
 | `LOL_GRID_ENRICH` | **Bot**: `false` desliga chamada a `/grid-enrich` (default ligado se API responder). |
 | `GRID_DAYS_BACK`, `GRID_MAX_STATE_CALLS`, `GRID_ENRICH_CACHE_MS`, … | Ver `lib/grid.js` — janela temporal, paginação `allSeries`, limite de `seriesState`, cache por confronto. |
+| `GRID_FORBIDDEN_COOLDOWN_MS` | Após erro **Requester forbidden** (plano sem `allSeries` LoL): pausa chamadas GRID (default **6 h**), um único `WARN` no log. |
 | `TENNIS_MIN_EDGE` | Limiar do pré-filtro ML (tênis). |
 | `TENNIS_UNSETTLED_DAYS` | Janela de tips pendentes para liquidação tênis. |
 | `FOOTBALL_EV_THRESHOLD`, `FOOTBALL_DRAW_MIN_ODDS` | Gates futebol. |
@@ -200,6 +201,16 @@ O server em **`/settle`** compara vencedor com `tip_participant` (tênis usa mat
   - `normalizeNameOrder()` converte "Last, First" → "First Last" antes de comparação substring.  
   - Pipeline: nome exacto → substring → ordem normalizada → sobrenome isolado → último token.
 - **Elo futebol:** `lib/database.js` (`updateEloMatch`); disparo automático no `/settle` após liquidação de mercados 1X2.
+
+---
+
+## 12. GRID na prática + backtest / treino
+
+**GRID:** Mensagem `Requester forbidden to make query` = a **chave é aceita**, mas o **contrato/plano não inclui** a query `allSeries` (ou LoL no Central Data). O boot pode mostrar “GRID_API_KEY configurada” mesmo assim. Soluções: upgrade com a GRID, ou **`LOL_GRID_ENRICH=false`** no bot para não chamar `/grid-enrich`; o pré-modelo continua com PandaScore/DB/odds.
+
+**Backtest no repo:** `node scripts/backtest.js` (usa `DB_PATH`, tips **settled**, re-simula `esportsPreFilter` com `match_results` **sem look-ahead**). Serve para calibrar gates e pesos.
+
+**Treino / modelo próprio:** o fluxo em produção é heurístico (`lib/ml.js`) + IA. Para ensemble tipo [lol-betting-pipeline](https://github.com/chdoyle1/lol-betting-pipeline): exportar features (GRID file-download ou PandaScore/Riot já no projeto), treinar fora (Python/sklearn), servir probabilidades via microserviço ou fundir no `esportsPreFilter` — não está automatizado neste repo.
 
 ---
 
