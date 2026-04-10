@@ -837,15 +837,25 @@ async function sxGetBestOddsForMarket(marketHash) {
   return best;
 }
 
-async function sxGetMatchWinnerOdds(t1, t2, { liveOnly = false, mapNumber = null } = {}) {
+async function sxGetMatchWinnerOdds(t1, t2, { liveOnly = false, mapNumber = null, _debug = false } = {}) {
   if (!SXBET_ENABLED) return null;
   const m = await sxFindMarketForMatch(t1, t2, { liveOnly, mapNumber }).catch(() => null);
-  if (!m?.marketHash) return null;
+  if (!m?.marketHash) {
+    if (_debug) log('DEBUG', 'SXBET', `Mercado não encontrado para ${t1} vs ${t2} (liveOnly=${liveOnly})`);
+    return null;
+  }
+  if (_debug) log('DEBUG', 'SXBET', `Mercado encontrado: ${m.marketHash} (${m.outcomeOneName} vs ${m.outcomeTwoName})`);
   const best = await sxGetBestOddsForMarket(m.marketHash).catch(() => null);
-  if (!best) return null;
+  if (!best) {
+    if (_debug) log('DEBUG', 'SXBET', `Sem melhores odds para marketHash=${m.marketHash}`);
+    return null;
+  }
   const o1 = sxPercentageOddsToDecimal(best?.outcomeOne?.percentageOdds);
   const o2 = sxPercentageOddsToDecimal(best?.outcomeTwo?.percentageOdds);
-  if (!o1 || !o2) return null;
+  if (!o1 || !o2) {
+    if (_debug) log('DEBUG', 'SXBET', `Conversão de odds falhou: outcomeOne=${best?.outcomeOne?.percentageOdds} outcomeTwo=${best?.outcomeTwo?.percentageOdds}`);
+    return null;
+  }
 
   // Map outcome->team por matching de nome
   const aName = String(m?.outcomeOneName || m?.teamOneName || '');
@@ -3005,6 +3015,32 @@ const server = http.createServer(async (req, res) => {
       if (o) log('INFO', 'ODDS', `SX.Bet fallback usado para ${t1} vs ${t2}`);
     }
     sendJson(res, o || { error: 'odds não encontradas' });
+    return;
+  }
+
+  if (p === '/sx-status') {
+    const t1q = q.get('t1') || '';
+    const t2q = q.get('t2') || '';
+    const result = { enabled: SXBET_ENABLED, base: SXBET_BASE_URL };
+    if (!SXBET_ENABLED) { sendJson(res, result); return; }
+    const sports = await sxGetSports().catch(() => null);
+    result.sports_ok = Array.isArray(sports);
+    result.sports_count = Array.isArray(sports) ? sports.length : 0;
+    result.sports_sample = Array.isArray(sports) ? sports.slice(0, 5).map(s => ({ id: s.sportId, label: s.label })) : null;
+    const sportId = await sxFindLoLSportId().catch(() => null);
+    result.lol_sport_id = sportId;
+    const md = await sxGetMetadata().catch(() => null);
+    result.metadata_ok = !!md;
+    result.sx_network_chain = md?.addresses ? Object.keys(md.addresses) : null;
+    const usdc4162 = md?.addresses?.['4162']?.USDC || md?.addresses?.['4162']?.usdc || null;
+    result.usdc_token = usdc4162 ? usdc4162.slice(0, 10) + '...' : null;
+    if (t1q && t2q) {
+      const odds = await sxGetMatchWinnerOdds(t1q, t2q, { _debug: true }).catch(() => null);
+      result.test_t1 = t1q;
+      result.test_t2 = t2q;
+      result.test_odds = odds;
+    }
+    sendJson(res, result);
     return;
   }
 
