@@ -236,7 +236,11 @@ async function importTennisSackmannCsvForYear(year, tour) {
   try {
     const r = await cachedHttpGet(urlCsv, { provider: 'tennis_dataset', ttlMs: 24 * 60 * 60 * 1000 }).catch(() => null);
     if (!r || r.status !== 200) {
-      log('WARN', 'IMPORT', `CSV tennis ${tour} ${year}: HTTP ${r?.status || 'fail'}`);
+      if (r?.status === 404) {
+        log('INFO', 'IMPORT', `CSV tennis ${tour} ${year}: ainda não disponível no GitHub (404) — use ESPN sync`);
+      } else {
+        log('WARN', 'IMPORT', `CSV tennis ${tour} ${year}: HTTP ${r?.status || 'fail'}`);
+      }
       return;
     }
     const rows = parseCsvRows(String(r.body || ''));
@@ -307,7 +311,8 @@ async function importTennisMatchesCsvOnce() {
   if (rawYears) {
     years = [...new Set(rawYears.split(',').map(s => parseInt(s.trim(), 10)).filter(n => Number.isFinite(n) && n >= 1990 && n <= y0 + 1))];
   } else {
-    years = [y0 - 1, y0, y0 + 1];
+    // Sackmann publica ~ano anterior; 2025/2026 costumam 404 até existir no GitHub
+    years = [y0 - 2, y0 - 1, y0].filter(y => y >= 1990);
   }
   for (const year of years) {
     await importTennisSackmannCsvForYear(year, 'atp');
@@ -610,6 +615,68 @@ function getTennisSettleRowsCached(lookbackDays) {
   `).all(String(lookbackDays));
   _tennisSettleRowsCache = { ts: now, lookback: lookbackDays, rows };
   return rows;
+}
+
+function invalidateTennisSettleRowsCache() {
+  _tennisSettleRowsCache = { ts: 0, lookback: -1, rows: null };
+}
+
+let _tennisEspnMatchSyncLastMs = 0;
+
+/** Grava jogos com status post do scoreboard ESPN ATP/WTA em match_results (não depende do CSV Sackmann). */
+async function syncTennisEspnCompletedToMatchResults() {
+  const tennisData = require('./lib/tennis-data');
+  let n = 0;
+  for (const slug of ['atp', 'wta']) {
+    const j = await tennisData.getScoreboard(slug).catch(() => null);
+    for (const ev of (j?.events || [])) {
+      const evName = String(ev?.name || '').trim() || slug.toUpperCase();
+      for (const grp of (ev.groupings || [])) {
+        for (const comp of (grp.competitions || [])) {
+          if (String(comp?.status?.type?.state || '') !== 'post') continue;
+          const comps = comp.competitors || [];
+          if (comps.length < 2) continue;
+          const winnerComp = comps.find(c => c.winner === true);
+          if (!winnerComp) continue;
+          const ath = c => String(c?.athlete?.displayName || c?.displayName || c?.name || '').trim();
+          const t1 = ath(comps[0]);
+          const t2 = ath(comps[1]);
+          const winner = ath(winnerComp);
+          if (!t1 || !t2 || !winner) continue;
+          const compId = comp.id != null ? String(comp.id) : `${comp.date || ''}_${norm(t1)}_${norm(t2)}`;
+          const matchId = `espn_${slug}_${compId}`.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 128);
+          const score = String(comp.status?.displayClock || comp.status?.type?.shortDetail || '').trim();
+          const league = `${String(slug).toUpperCase()} ${evName}`.slice(0, 220);
+          const dateIso = String(comp.date || '').trim();
+          let resolvedAt = null;
+          if (dateIso.includes('T')) {
+            resolvedAt = dateIso.replace('T', ' ').replace(/\.\d{3}Z?$/, '').slice(0, 19);
+          } else if (dateIso.length >= 10) {
+            resolvedAt = `${dateIso.slice(0, 10)} 12:00:00`;
+          }
+          if (!resolvedAt) continue;
+          try {
+            stmts.upsertMatchResultWithDate.run(matchId, 'tennis', t1, t2, winner, score, league, resolvedAt);
+            n++;
+          } catch (_) { /* ignore row */ }
+        }
+      }
+    }
+  }
+  invalidateTennisSettleRowsCache();
+  return n;
+}
+
+async function maybeSyncTennisEspnMatchResults(force = false) {
+  const minMs = Math.max(45_000, parseInt(process.env.TENNIS_ESPN_SYNC_MIN_MS || '90000', 10) || 90000);
+  const now = Date.now();
+  if (!force && (now - _tennisEspnMatchSyncLastMs) < minMs) {
+    return { ok: true, throttled: true, upserted: 0 };
+  }
+  _tennisEspnMatchSyncLastMs = now;
+  const upserted = await syncTennisEspnCompletedToMatchResults();
+  if (upserted > 0) log('INFO', 'TENNIS-ESPN', `match_results: +${upserted} (ESPN scoreboard)`);
+  return { ok: true, upserted };
 }
 
 async function sxFindMarketForMatch(t1, t2, { liveOnly = false, mapNumber = null } = {}) {
@@ -4753,6 +4820,19 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (p === '/sync-tennis-espn-results') {
+    (async () => {
+      try {
+        const force = String(parsed.query.force || '') === '1';
+        const out = await maybeSyncTennisEspnMatchResults(force);
+        sendJson(res, out);
+      } catch (e) {
+        sendJson(res, { ok: false, error: e.message }, 500);
+      }
+    })();
+    return;
+  }
+
   if (p === '/tennis-db-result') {
     const p1 = parsed.query.p1 || '';
     const p2 = parsed.query.p2 || '';
@@ -5223,6 +5303,7 @@ server.listen(PORT, '0.0.0.0', () => {
   importFootballMatchesCsvOnce().catch(() => {});
   // Import automático de dataset tênis (ATP) para alimentar match_results (form/H2H)
   importTennisMatchesCsvOnce().catch(() => {});
+  maybeSyncTennisEspnMatchResults(true).catch(() => {});
 
   // Inicialização e Loop de Cache de Odds (OddsPapi 1xBet)
   (async () => {

@@ -989,7 +989,9 @@ async function settleCompletedTips() {
       }
 
       if (sport === 'tennis') {
-        // The Odds API não publica scores para tênis — settlement principal via DB (JeffSackmann CSV).
+        // ESPN scoreboard → match_results (CSV Sackmann 2025+ costuma 404 no GitHub).
+        await serverGet('/sync-tennis-espn-results?force=1', 'tennis').catch(() => {});
+        // The Odds API não publica scores para tênis — settlement via DB + ESPN.
         const scores = await serverGet('/tennis-scores?daysFrom=3', 'tennis').catch(() => []);
         const scoresById = new Map((Array.isArray(scores) ? scores : []).map(s => [String(s.id), s]));
 
