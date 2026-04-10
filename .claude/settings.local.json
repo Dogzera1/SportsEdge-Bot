@@ -42,7 +42,9 @@
       "Bash(cd:*)",
       "Bash(grep -rl \"isLive\\\\|Esports upcoming\\\\|autoHandler\\\\|AUTO\\\\|auto_handler\" 'C:/Users/vict_/Desktop/lol betting' --include=*.js)",
       "Bash(grep -rl \"lol-matches\\\\|lol_matches\\\\|live.*odds\\\\|odds.*live\" 'C:/Users/vict_/Desktop/lol betting' --include=*.js)",
-      "Bash(dir:*)"
+      "Bash(dir:*)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)"
     ]
   }
 }

@@ -152,6 +152,47 @@ const migrations = [
       `);
     },
   },
+  {
+    // Tabela de estatísticas de jogo por partida (kill_diff_10, gold_diff_10, etc.)
+    // Populada por scripts/fetch-match-stats.js (Riot API) ou manualmente.
+    // Usada pelo modelo ML como features adicionais quando disponível.
+    id: '013_match_stats',
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS match_stats (
+          match_id    TEXT NOT NULL,
+          game        TEXT NOT NULL DEFAULT 'lol',
+          -- Kill differential at 10 minutes (t1 perspective: positive = t1 ahead)
+          kill_diff_10  REAL,
+          -- Gold differential at 10 minutes (em centenas para normalização)
+          gold_diff_10  REAL,
+          -- First objective (t1=1, t2=0, null=desconhecido)
+          first_blood   INTEGER,
+          first_tower   INTEGER,
+          first_dragon  INTEGER,
+          first_baron   INTEGER,
+          -- Duração da partida em minutos
+          game_duration REAL,
+          -- Total de abates na partida
+          total_kills   INTEGER,
+          -- Fonte dos dados
+          source        TEXT DEFAULT 'riot_api',
+          fetched_at    TEXT DEFAULT (datetime('now')),
+          PRIMARY KEY (match_id, game)
+        );
+        CREATE INDEX IF NOT EXISTS idx_match_stats_game ON match_stats(game);
+      `);
+    },
+  },
+  {
+    // Seed de novos fatores ML: streak e kd10
+    id: '014_seed_ml_streak_kd10',
+    up(db) {
+      if (!tableExists(db, 'ml_factor_weights')) return;
+      db.prepare('INSERT OR IGNORE INTO ml_factor_weights (factor, weight, wins, total) VALUES (?,?,0,0)').run('streak', 0.05);
+      db.prepare('INSERT OR IGNORE INTO ml_factor_weights (factor, weight, wins, total) VALUES (?,?,0,0)').run('kd10', 0.10);
+    },
+  },
 ];
 
 function applyMigrations(db) {
