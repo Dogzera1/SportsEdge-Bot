@@ -893,7 +893,9 @@ async function fetchMapOddsByFixtureId(fixtureId, mapNumber) {
 
 // Backoff em caso de 429
 let esportsBackoffUntil = 0;
-const ESPORTS_BACKOFF_TTL = 2 * 60 * 60 * 1000;
+let _oddsBackoffLogTs = 0;
+const _raw429Backoff = parseInt(process.env.ODDSPAPI_429_BACKOFF_MS || '', 10);
+const ESPORTS_BACKOFF_TTL = Math.max(5 * 60 * 1000, Number.isFinite(_raw429Backoff) && _raw429Backoff > 0 ? _raw429Backoff : 2 * 60 * 60 * 1000);
 
 // Cooldown por match para force refresh (anti-429)
 const lastForceRefreshByPair = new Map(); // key -> ts
@@ -1267,7 +1269,13 @@ async function fetchEsportsOdds() {
   if (esportsOddsFetching) return;
   const now = Date.now();
   if (now - lastEsportsOddsUpdate < ESPORTS_ODDS_TTL) return;
-  if (now < esportsBackoffUntil) { log('INFO', 'ODDS', 'Em backoff — aguardando'); return; }
+  if (now < esportsBackoffUntil) {
+    if (now - _oddsBackoffLogTs > 10 * 60 * 1000) {
+      _oddsBackoffLogTs = now;
+      log('INFO', 'ODDS', 'Em backoff — aguardando');
+    }
+    return;
+  }
 
   esportsOddsFetching = true;
   lastApiResponse = 'Iniciando busca...';
@@ -5437,8 +5445,13 @@ server.listen(PORT, '0.0.0.0', () => {
   maybeSyncTennisEspnMatchResults(true).catch(() => {});
 
   // Inicialização e Loop de Cache de Odds (OddsPapi 1xBet)
+  // Atraso opcional no boot evita rajada paralela com sync tênis/CSV no Railway.
   (async () => {
+    const startDelay = Math.max(0, parseInt(process.env.ODDSPAPI_START_DELAY_MS || '4000', 10) || 4000);
+    if (startDelay) await new Promise(r => setTimeout(r, startDelay));
     await fetchEsportsOdds();
+    const bootGap = Math.max(0, parseInt(process.env.ODDSPAPI_BOOTSTRAP_GAP_AFTER_FIRST_MS || '6000', 10) || 6000);
+    if (bootGap) await new Promise(r => setTimeout(r, bootGap));
     await bootstrapEsportsOddsExtraBatches();
   })().catch(e => log('ERROR', 'ODDS', e.message));
   setInterval(() => {

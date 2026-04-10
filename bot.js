@@ -126,7 +126,7 @@ const CONF = { ALTA: 'ALTA', MEDIA: 'MÉDIA', BAIXA: 'BAIXA' };
 
 
 // ── Telegram Request ──
-function tgRequest(token, method, params) {
+function tgRequestOnce(token, method, params, timeoutMs) {
   return new Promise((resolve, reject) => {
     const body = JSON.stringify(params || {});
     const req = https.request({
@@ -147,11 +147,32 @@ function tgRequest(token, method, params) {
       });
     });
     req.on('error', reject);
-    // Timeout de 20s — evita que lentidão do Telegram bloqueie o loop
-    req.setTimeout(20000, () => req.destroy(Object.assign(new Error('TelegramTimeout'), { code: 'ETIMEDOUT' })));
+    req.setTimeout(timeoutMs, () => req.destroy(Object.assign(new Error('TelegramTimeout'), { code: 'ETIMEDOUT' })));
     req.write(body);
     req.end();
   });
+}
+
+function tgRequest(token, method, params) {
+  const timeoutMs = Math.max(15000, Math.min(120000, parseInt(process.env.TELEGRAM_HTTP_TIMEOUT_MS || '50000', 10) || 50000));
+  const maxAttempts = Math.max(1, Math.min(4, parseInt(process.env.TELEGRAM_HTTP_ATTEMPTS || '2', 10) || 2));
+  return (async () => {
+    let lastErr;
+    for (let a = 1; a <= maxAttempts; a++) {
+      try {
+        return await tgRequestOnce(token, method, params, timeoutMs);
+      } catch (e) {
+        lastErr = e;
+        const msg = String(e && e.message || '');
+        if (a < maxAttempts && (msg.includes('TelegramTimeout') || msg.includes('ETIMEDOUT'))) {
+          await new Promise(r => setTimeout(r, 1500 * a));
+          continue;
+        }
+        throw e;
+      }
+    }
+    throw lastErr;
+  })();
 }
 
 // Handler global para promises não tratadas — evita crash do processo
@@ -3647,6 +3668,9 @@ async function pollMma(runOnce = false) {
       log('INFO', 'AUTO-MMA', `${fights.length} lutas com odds (MMA: ${mmaCount} | Boxe: ${boxCount}) | ESPN: ${espnFights.length} lutas`);
 
       const now = Date.now();
+      const boxingMinDays = Math.max(1, Math.min(45, parseInt(process.env.BOXING_MIN_DAYS_BEFORE_FIGHT || '10', 10) || 10));
+      const boxingMinMs = boxingMinDays * 24 * 60 * 60 * 1000;
+      let boxingSkippedLead = 0;
       const endOfWeek = (() => {
         const d = new Date();
         // Domingo da semana atual às 23:59
@@ -3685,13 +3709,10 @@ async function pollMma(runOnce = false) {
           continue;
         }
         // Boxe: só tip se faltar no mínimo N dias para a luta (linha de corte antecipada)
-        if (isBoxing) {
-          const boxingMinDays = Math.max(1, Math.min(45, parseInt(process.env.BOXING_MIN_DAYS_BEFORE_FIGHT || '10', 10) || 10));
-          const minMs = boxingMinDays * 24 * 60 * 60 * 1000;
-          if (fightTs - now < minMs) {
-            log('INFO', 'AUTO-MMA', `Boxe: <${boxingMinDays}d até a luta — sem tip: ${fight.team1} vs ${fight.team2}`);
-            continue;
-          }
+        if (isBoxing && fightTs - now < boxingMinMs) {
+          boxingSkippedLead++;
+          log('DEBUG', 'AUTO-MMA', `Boxe: <${boxingMinDays}d até a luta — sem tip: ${fight.team1} vs ${fight.team2}`);
+          continue;
         }
         const isThisWeek = fightTs > 0 && fightTs <= endOfWeek;
         // Lutas fora da semana: só analisa, não bloqueia ainda — gate de CONF depois
@@ -3938,6 +3959,9 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
         analyzedMma.set(key, { ts: now, tipSent: true });
         log('INFO', 'AUTO-MMA', `Tip enviada: ${tipTeam} @ ${tipOdd} | EV:${tipEV}% | ${tipConf}`);
         await new Promise(r => setTimeout(r, 5000));
+      }
+      if (boxingSkippedLead > 0) {
+        log('INFO', 'AUTO-MMA', `Boxe: ${boxingSkippedLead} luta(s) ignoradas (menos de ${boxingMinDays}d até o combate)`);
       }
     } catch(e) {
       log('ERROR', 'AUTO-MMA', e.message);
