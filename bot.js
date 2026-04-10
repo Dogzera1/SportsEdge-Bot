@@ -278,6 +278,17 @@ function getLeagueRiskMultiplier(leagueSlug) {
   return _leagueRiskMultipliers[slug] ?? _leagueRiskMultipliers.default ?? 0.6;
 }
 
+// Ligas principais bloqueadas — tips apenas em ligas secundárias (tier-2/3)
+const LOL_MAIN_LEAGUES = new Set([
+  'lck', 'lcs', 'lec', 'lpl', 'worlds', 'msi',
+  'cblol', 'cblolbrazil', 'lla', 'pcs', 'lco', 'vcs',
+]);
+function isMainLeague(leagueSlug) {
+  if (!leagueSlug) return false;
+  const slug = String(leagueSlug).toLowerCase().replace(/[^a-z0-9-]/g, '');
+  return LOL_MAIN_LEAGUES.has(slug);
+}
+
 async function applyGlobalRisk(sport, desiredUnits, leagueSlug) {
   if (!desiredUnits || desiredUnits <= 0) return { ok: false, units: 0, reason: 'stake_zero' };
   // Ajuste por liga (tier-2/3 = stake reduzido proporcionalmente)
@@ -529,6 +540,8 @@ async function runAutoAnalysis() {
         const currentMap = Array.isArray(liveIds) ? (liveIds.find(x => x.hasLiveData)?.gameNumber || null) : null;
         const mapSuffix = (match.status === 'live' && currentMap) ? `_MAP${currentMap}` : '';
         const matchKey = `${match.game}_${match.id}${mapSuffix}`;
+        // Bloqueia ligas principais — tips apenas em ligas secundárias
+        if (isMainLeague(match.leagueSlug || match.league)) { log('INFO', 'AUTO', `Liga principal ignorada (draft): ${match.league} (${match.team1} vs ${match.team2})`); continue; }
         const prev = analyzedMatches.get(matchKey);
         if (prev?.tipSent) continue; // uma tip por partida — não repetir
         // Matches sem edge recente aguardam 2× mais antes de chamar a IA novamente
@@ -744,6 +757,8 @@ async function runAutoAnalysis() {
         log('INFO', 'AUTO', `LoL próximas ${UPCOMING_WINDOW_HOURS}h: ${allUpcoming.length} partidas`);
         for (const match of allUpcoming) {
           const matchKey = `upcoming_${match.game}_${match.id}`;
+          // Bloqueia ligas principais — tips apenas em ligas secundárias
+          if (isMainLeague(match.leagueSlug || match.league)) { log('INFO', 'AUTO', `Liga principal ignorada (upcoming): ${match.league} (${match.team1} vs ${match.team2})`); continue; }
           const prev = analyzedMatches.get(matchKey);
           if (prev?.tipSent) continue; // já enviou tip — não repetir
 
