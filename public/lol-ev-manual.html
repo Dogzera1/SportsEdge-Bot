@@ -739,12 +739,26 @@
       if (f.size > 6 * 1024 * 1024) { out.textContent = 'Imagem muito grande (>6MB).'; return; }
 
       btn365.disabled = true;
-      fileToDataUrl(f)
-        .then(function (dataUrl) {
+      // OCR no navegador (sem enviar imagem pra DeepSeek)
+      Promise.resolve()
+        .then(function () {
+          if (!window.Tesseract || !window.Tesseract.recognize) throw new Error('OCR indisponível (Tesseract não carregou)');
+          out.textContent = 'OCR…';
+          return window.Tesseract.recognize(f, 'eng', {
+            logger: function (m) {
+              if (m && m.status && m.progress != null) {
+                out.textContent = 'OCR: ' + m.status + ' ' + Math.round(m.progress * 100) + '%';
+              }
+            }
+          });
+        })
+        .then(function (r) {
+          const txt = (r && r.data && r.data.text) ? String(r.data.text) : '';
+          out.textContent = 'Enviando…';
           return fetch('/lol/ev-manual-365', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ imageDataUrl: dataUrl })
+            body: JSON.stringify({ ocrText: txt })
           });
         })
         .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, status: r.status, j: j }; }); })
@@ -752,7 +766,9 @@
           if (!x.ok) { out.textContent = (x.j && x.j.error) ? x.j.error : ('HTTP ' + x.status); return; }
           _last365 = x.j;
           if (x.j.extracted) applyExtracted365(x.j.extracted);
-          out.textContent = (x.j.ai && x.j.ai.text) ? x.j.ai.text : JSON.stringify(x.j.extracted || {}, null, 2);
+          if (x.j.ai && x.j.ai.text) out.textContent = x.j.ai.text;
+          else if (x.j.extracted) out.textContent = JSON.stringify(x.j.extracted || {}, null, 2);
+          else out.textContent = (x.j.debug && x.j.debug.contentPreview) ? ('Sem extração.\n' + x.j.debug.contentPreview) : 'Sem extração.';
         })
         .catch(function (e) {
           out.textContent = e.message || String(e);
@@ -831,5 +847,6 @@
   });
 })();
 </script>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 </body>
 </html>
