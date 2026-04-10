@@ -1562,15 +1562,23 @@ async function collectGameContext(game, matchId) {
 
 async function fetchEnrichment(match) {
   const game = match.game;
-  const data = { form1: null, form2: null, h2h: null, oddsMovement: null };
+  const data = { form1: null, form2: null, h2h: null, oddsMovement: null, grid: null };
+  const useGrid = game === 'lol' && (process.env.LOL_GRID_ENRICH ?? 'true') !== 'false';
   try {
-    const [f1, f2, h, om] = await Promise.all([
-      serverGet(`/team-form?team=${encodeURIComponent(match.team1 || match.participant1_name)}&game=${game}`).catch(() => null),
-      serverGet(`/team-form?team=${encodeURIComponent(match.team2 || match.participant2_name)}&game=${game}`).catch(() => null),
-      serverGet(`/h2h?team1=${encodeURIComponent(match.team1 || match.participant1_name)}&team2=${encodeURIComponent(match.team2 || match.participant2_name)}&game=${game}`).catch(() => null),
-      serverGet(`/odds-movement?team1=${encodeURIComponent(match.team1 || match.participant1_name)}&team2=${encodeURIComponent(match.team2 || match.participant2_name)}`).catch(() => null),
-    ]);
-    data.form1 = f1; data.form2 = f2; data.h2h = h; data.oddsMovement = om;
+    const t1 = match.team1 || match.participant1_name;
+    const t2 = match.team2 || match.participant2_name;
+    const parts = [
+      serverGet(`/team-form?team=${encodeURIComponent(t1)}&game=${game}`).catch(() => null),
+      serverGet(`/team-form?team=${encodeURIComponent(t2)}&game=${game}`).catch(() => null),
+      serverGet(`/h2h?team1=${encodeURIComponent(t1)}&team2=${encodeURIComponent(t2)}&game=${game}`).catch(() => null),
+      serverGet(`/odds-movement?team1=${encodeURIComponent(t1)}&team2=${encodeURIComponent(t2)}`).catch(() => null),
+    ];
+    if (useGrid) {
+      parts.push(serverGet(`/grid-enrich?team1=${encodeURIComponent(t1)}&team2=${encodeURIComponent(t2)}&game=lol`).catch(() => null));
+    }
+    const out = await Promise.all(parts);
+    data.form1 = out[0]; data.form2 = out[1]; data.h2h = out[2]; data.oddsMovement = out[3];
+    if (useGrid) data.grid = out[4];
   } catch(e) { log('WARN', 'ENRICH', `Erro ao buscar enrichment para ${match?.team1} vs ${match?.team2}: ${e.message}`); }
   return data;
 }
@@ -1606,6 +1614,19 @@ function buildEnrichmentSection(match, enrich) {
   if (match.format) {
     if (match.format === 'Bo1') txt += '\nCONTEXTO: Bo1 — alta variância, upset mais provável.\n';
     else if (match.format === 'Bo5') txt += '\nCONTEXTO: Bo5 — formato decisivo, favorece time mais consistente.\n';
+  }
+  const gr = enrich.grid;
+  if (gr?.ok && (gr.h2h || gr.form1 || gr.form2)) {
+    txt += '\nGRID (séries oficiais — janela configurável no server):\n';
+    if (gr.form1 && (gr.form1.wins + gr.form1.losses) > 0) {
+      txt += `${t1}: ${gr.form1.wins}W-${gr.form1.losses}L (${gr.form1.winRate}%) [GRID]\n`;
+    }
+    if (gr.form2 && (gr.form2.wins + gr.form2.losses) > 0) {
+      txt += `${t2}: ${gr.form2.wins}W-${gr.form2.losses}L (${gr.form2.winRate}%) [GRID]\n`;
+    }
+    if (gr.h2h && (gr.h2h.t1Wins + gr.h2h.t2Wins) > 0) {
+      txt += `H2H GRID: ${t1} ${gr.h2h.t1Wins}-${gr.h2h.t2Wins} ${t2} (${gr.h2h.totalMatches} séries com resultado)\n`;
+    }
   }
   return txt;
 }
@@ -2101,6 +2122,7 @@ function buildEsportsPrompt(match, game, gamesContext, o, enrichSection, mlResul
     enrichSection.includes('H2H:'),                      // histórico direto
     enrichSection.includes('LINE MOVEMENT'),              // movimento de linha
     gamesContext.includes('AO VIVO'),                    // dados ao vivo
+    enrichSection.includes('GRID ('),                     // GRID forma/H2H oficiais
   ].filter(Boolean).length;
   // 6 sinais → 2% | 5 → 3% | 4 → 4% | 3 → 5% | 2 → 6% | ≤1 → 6%
   const evThreshold = Math.max(2, Math.min(6, evBase + (3 - sigCount)));

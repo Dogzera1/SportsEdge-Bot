@@ -64,7 +64,7 @@ Fonte de partidas: **`GET /lol-matches`** (Riot + PandaScore mesclados no server
 
 (Resumo; implementação longa no `bot.js`.)
 
-- Monta contexto: odds (`/odds` ou estimadas), forma/H2H (`/team-form`, `/h2h`), composições (**`/ps-compositions`**, **`/live-gameids`**, stats ao vivo).
+- Monta contexto: odds (`/odds` ou estimadas), forma/H2H (`/team-form`, `/h2h`), **`/grid-enrich`** (LoL, opcional — `GRID_API_KEY` no server), composições (**`/ps-compositions`**, **`/live-gameids`**, stats ao vivo).
 - **Pré-modelo:** `esportsPreFilter()` (`lib/ml.js`) → score em “pp”, `modelP1`/`modelP2`, fatores ativos.
 - Chama **`POST /claude`** no server (modelo configurável, ex. DeepSeek) com prompt que exige formato **`TIP_ML:...`** ou **`SEM_EDGE`**.
 - **Prompt LoL (`buildEsportsPrompt`):** bloco `LOL_PROMPT_RESEARCH_HINTS` — teses de edge da literatura quant (ritmo early/jungle, objetivos vs. só ouro, série Bo3/Bo5), alinhadas a ideias de projetos como [lol-betting-pipeline](https://github.com/chdoyle1/lol-betting-pipeline); **sem** Python/GRID no runtime. Checklist ampliado (8 itens) + contador separado **Conf pré-modelo** (0–6) dos sinais de enrichment.
@@ -178,6 +178,9 @@ O server em **`/settle`** compara vencedor com `tip_participant` (tênis usa mat
 | `BOXING_MAX_DAYS_BEFORE_FIGHT` | Boxe: só analisa se faltam **≤ N dias** para a luta (default 10). |
 | `MMA_MAX_IA_CALLS_PER_CYCLE` | MMA/boxe: máx. chamadas IA por ciclo do `pollMma` (default **18**; `0` = sem limite). |
 | `ADMIN_KEY` | Só no **server**: um aviso `[SEC]` no boot se ausente (bot não duplica). |
+| `GRID_API_KEY` | **Server**: acesso [GRID Central Data](https://api-op.grid.gg/central-data/graphql) + Series State; endpoint **`GET /grid-enrich?team1=&team2=&game=lol`**. Open Access pode **não** incluir LoL — depende do plano. |
+| `LOL_GRID_ENRICH` | **Bot**: `false` desliga chamada a `/grid-enrich` (default ligado se API responder). |
+| `GRID_DAYS_BACK`, `GRID_MAX_STATE_CALLS`, `GRID_ENRICH_CACHE_MS`, … | Ver `lib/grid.js` — janela temporal, paginação `allSeries`, limite de `seriesState`, cache por confronto. |
 | `TENNIS_MIN_EDGE` | Limiar do pré-filtro ML (tênis). |
 | `TENNIS_UNSETTLED_DAYS` | Janela de tips pendentes para liquidação tênis. |
 | `FOOTBALL_EV_THRESHOLD`, `FOOTBALL_DRAW_MIN_ODDS` | Gates futebol. |

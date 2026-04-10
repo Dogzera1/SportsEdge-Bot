@@ -10,6 +10,7 @@ const { SPORTS, getSportById } = require('./lib/sports');
 const { log, sendJson, safeParse, norm, httpGet, cachedHttpGet, aiPost, oddsApiAllowed, getMetricsLite, calcKellyWithP } = require('./lib/utils');
 const { tennisSinglePlayerNameMatch, tennisPairMatchesPlayers } = require('./lib/tennis-match');
 const { esportsPreFilter } = require('./lib/ml');
+const { fetchGridEnrichForMatch } = require('./lib/grid');
 const { radarGetInfo, radarGetByPath } = require('./lib/radar-sport');
 
 // Railway sets $PORT automatically; start.js bridges it to SERVER_PORT
@@ -25,6 +26,7 @@ const LOL_HEADERS = LOL_KEY ? { 'x-api-key': LOL_KEY } : {};
 const PANDASCORE_TOKEN = process.env.PANDASCORE_TOKEN || '';
 // The Odds API — usado para MMA (20k req/mês)
 const THE_ODDS_API_KEY = process.env.THE_ODDS_API_KEY || '';
+const GRID_API_KEY = (process.env.GRID_API_KEY || '').trim();
 
 // DB_PATH allows pointing to a Railway volume (e.g. /data/sportsedge.db)
 const fs = require('fs');
@@ -4968,6 +4970,32 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // ── GRID (LoL) — forma + H2H oficiais quando há chave e plano com LoL ──
+  if (p === '/grid-enrich') {
+    const t1 = parsed.query.team1 || '';
+    const t2 = parsed.query.team2 || '';
+    const game = (parsed.query.game || 'lol').toLowerCase();
+    if (game !== 'lol') {
+      sendJson(res, { ok: false, skipped: true, reason: 'only lol' });
+      return;
+    }
+    if (!t1 || !t2) {
+      sendJson(res, { error: 'team1 and team2 required' }, 400);
+      return;
+    }
+    if (!GRID_API_KEY) {
+      sendJson(res, { ok: false, disabled: true, reason: 'GRID_API_KEY ausente' });
+      return;
+    }
+    fetchGridEnrichForMatch(GRID_API_KEY, t1, t2)
+      .then((out) => sendJson(res, out))
+      .catch((e) => {
+        log('WARN', 'GRID', `/grid-enrich: ${e.message}`);
+        sendJson(res, { ok: false, error: e.message }, 500);
+      });
+    return;
+  }
+
   // ── DB Status ──
   if (p === '/db-status') {
     const sport = parsed.query.sport || 'esports';
@@ -5681,6 +5709,7 @@ server.listen(PORT, '0.0.0.0', () => {
   log('INFO', 'SERVER', `SportsEdge API em http://0.0.0.0:${PORT}`);
   log('INFO', 'SERVER', `Esportes: LoL (Riot API + LoLEsports)`);
   if (SXBET_ENABLED) log('INFO', 'ODDS', `SX.Bet ativo: base=${SXBET_BASE_URL}`);
+  if (GRID_API_KEY) log('INFO', 'GRID', 'GRID_API_KEY configurada — /grid-enrich ativo (LoL)');
 
   // Import automático de dataset futebol (CSV 2024/2025) para alimentar match_results (form/H2H)
   importFootballMatchesCsvOnce().catch(() => {});
