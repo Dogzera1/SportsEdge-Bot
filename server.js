@@ -2102,6 +2102,7 @@ const ADMIN_ROUTES_ANY = new Set([
   '/debug-teams',
   '/debug-match-odds',
   '/sync-pro-stats',
+  '/sync-golgg-role-impact',
 ]);
 
 const ADMIN_ROUTES_POST = new Set([
@@ -3892,10 +3893,30 @@ const server = http.createServer(async (req, res) => {
       const champRows = db.prepare(`
         SELECT DISTINCT champion FROM pro_champ_stats ORDER BY champion COLLATE NOCASE
       `).all();
+      let champions = champRows.map(r => r.champion).filter(Boolean);
+
+      // Fallback: se DB está vazio, usa lista oficial (Data Dragon)
+      if (!champions.length) {
+        const ttl7d = 7 * 24 * 60 * 60 * 1000;
+        const vR = await cachedHttpGet('https://ddragon.leagueoflegends.com/api/versions.json', { provider: 'ddragon', ttlMs: ttl7d }).catch(() => null);
+        const vers = safeParse(vR && vR.body, null);
+        const v = Array.isArray(vers) && vers.length ? String(vers[0]) : '';
+        if (v) {
+          const cjR = await cachedHttpGet(`https://ddragon.leagueoflegends.com/cdn/${encodeURIComponent(v)}/data/en_US/champion.json`, { provider: 'ddragon', ttlMs: ttl7d }).catch(() => null);
+          const cj = safeParse(cjR && cjR.body, null);
+          const data = cj && cj.data ? cj.data : null;
+          if (data && typeof data === 'object') {
+            champions = Object.keys(data)
+              .map(k => data[k] && data[k].name ? String(data[k].name) : '')
+              .filter(Boolean)
+              .sort((a, b) => String(a).localeCompare(String(b)));
+          }
+        }
+      }
       sendJson(res, {
         ok: true,
         leagues: leagueRows.map(r => r.name),
-        champions: champRows.map(r => r.champion)
+        champions
       });
     } catch (e) {
       sendJson(res, { ok: false, error: e.message }, 500);
@@ -3942,6 +3963,87 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // ── Sync gol.gg Role Impact (PandaTobi repo CSV) ──
+  if (p === '/sync-golgg-role-impact') {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const CSV_URL = 'https://raw.githubusercontent.com/PandaTobi/League-of-Legends-ESports-Data/master/Role%20Impact/league_pro_play_data.csv';
+      const r = await cachedHttpGet(CSV_URL, { provider: 'golgg', ttlMs: 0 }).catch(() => null);
+      if (!r || r.status !== 200) { sendJson(res, { ok: false, error: `HTTP ${r?.status || 'fail'}` }, 502); return; }
+      const body = String(r.body || '');
+      const rows = body.split('\n').map(l => l.trim()).filter(Boolean);
+
+      const percentToFloat = (p) => {
+        const s = String(p || '').trim();
+        if (!s) return null;
+        const n = parseFloat(s.replace('%', ''));
+        return Number.isFinite(n) ? (n / 100) : null;
+      };
+      const num = (v) => {
+        const n = parseFloat(String(v || '').trim());
+        return Number.isFinite(n) ? n : null;
+      };
+
+      const roleGames = {};
+      const agg = { winrate: {}, gpm: {}, dmg: {}, kda: {} };
+      const add = (role, games, stat, bucket) => {
+        if (!bucket[role]) bucket[role] = 0;
+        bucket[role] += games * stat;
+      };
+
+      for (const line of rows) {
+        const parts = line.split(',');
+        if (parts.length < 11) continue;
+        const role = String(parts[1] || '').trim().toUpperCase();
+        const games = num(parts[2]);
+        const winr = percentToFloat(parts[3]);
+        const kda = num(parts[4]);
+        const gpm = num(parts[9]);
+        const dmg = num(parts[10]);
+        if (!role || !games || !gpm) continue;
+
+        roleGames[role] = (roleGames[role] || 0) + games;
+        if (winr != null) add(role, games, winr, agg.winrate);
+        if (gpm != null) add(role, games, gpm, agg.gpm);
+        if (dmg != null) add(role, games, dmg, agg.dmg);
+        if (kda != null) add(role, games, kda, agg.kda);
+      }
+
+      const upsert = db.prepare(`
+        INSERT INTO golgg_role_impact (role, sample_games, winrate, gpm, dmg_pct, kda, source, updated_at)
+        VALUES (@role, @sample_games, @winrate, @gpm, @dmg_pct, @kda, 'gol.gg', datetime('now'))
+        ON CONFLICT(role) DO UPDATE SET
+          sample_games=excluded.sample_games,
+          winrate=excluded.winrate,
+          gpm=excluded.gpm,
+          dmg_pct=excluded.dmg_pct,
+          kda=excluded.kda,
+          source=excluded.source,
+          updated_at=excluded.updated_at
+      `);
+
+      let written = 0;
+      for (const [role, games] of Object.entries(roleGames)) {
+        const g = games || 0;
+        if (g <= 0) continue;
+        upsert.run({
+          role,
+          sample_games: g,
+          winrate: agg.winrate[role] != null ? (agg.winrate[role] / g) : null,
+          gpm: agg.gpm[role] != null ? (agg.gpm[role] / g) : null,
+          dmg_pct: agg.dmg[role] != null ? (agg.dmg[role] / g) : null,
+          kda: agg.kda[role] != null ? (agg.kda[role] / g) : null,
+        });
+        written++;
+      }
+
+      sendJson(res, { ok: true, written, source: 'gol.gg', csv: CSV_URL });
+    } catch (e) {
+      sendJson(res, { ok: false, error: e.message }, 500);
+    }
+    return;
+  }
+
   // ── LoL Match Winner: EV com odds manuais (sem API de odds) ──
   if (p === '/lol/ev-manual') {
     const serveEvManualPage = () => {
@@ -3963,7 +4065,40 @@ const server = http.createServer(async (req, res) => {
       return { t1: side('t1'), t2: side('t2') };
     };
 
-    const runManualEv = (payload) => {
+    const objectivesFromPayload = (payload) => {
+      const o = payload.objectives && typeof payload.objectives === 'object' ? payload.objectives : {};
+      const readSide = (k) => {
+        const s = o[k] && typeof o[k] === 'object' ? o[k] : {};
+        const f = (x) => {
+          const n = parseFloat(String(x ?? '').replace(',', '.'));
+          return Number.isFinite(n) ? n : null;
+        };
+        return {
+          gold: f(s.gold),
+          towers: f(s.towers),
+          drakes: f(s.drakes),
+          barons: f(s.barons),
+        };
+      };
+      const t1 = readSide('t1');
+      const t2 = readSide('t2');
+      const gdRaw = (() => {
+        const n = parseFloat(String(o.goldDiff ?? '').replace(',', '.'));
+        return Number.isFinite(n) ? n : null;
+      })();
+      const goldDiff = (gdRaw != null)
+        ? gdRaw
+        : (t1.gold != null && t2.gold != null) ? (t1.gold - t2.gold) : null;
+      const any =
+        goldDiff != null ||
+        t1.gold != null || t2.gold != null ||
+        t1.towers != null || t2.towers != null ||
+        t1.drakes != null || t2.drakes != null ||
+        t1.barons != null || t2.barons != null;
+      return any ? { t1, t2, goldDiff } : null;
+    };
+
+    const runManualEv = async (payload) => {
       try {
         const team1 = String(payload.team1 || payload.t1 || '').trim();
         const team2 = String(payload.team2 || payload.t2 || '').trim();
@@ -3979,9 +4114,14 @@ const server = http.createServer(async (req, res) => {
           sendJson(res, { error: 'odd1 e odd2 devem ser decimais > 1' }, 400); return;
         }
         const { t1: t1Champs, t2: t2Champs } = draftSidesFromPayload(payload);
+        const objectives = objectivesFromPayload(payload);
         const draftAnalysis = lolCompScoreFromDraft(stmts, t1Champs, t2Champs);
         const compScore = draftAnalysis.compScore;
         const enrich = lolEnrichmentFromDb(team1, team2, game);
+        const roleImpact = (() => {
+          try { return db.prepare('SELECT role, sample_games, winrate, gpm, dmg_pct, kda FROM golgg_role_impact ORDER BY role').all(); }
+          catch(_) { return []; }
+        })();
         const match = { team1, team2, game, format: formatRaw || null, league: leagueRaw || null };
         const odds = { t1: String(o1), t2: String(o2) };
         const mlResult = esportsPreFilter(match, odds, enrich, false, '', compScore, stmts);
@@ -3995,6 +4135,50 @@ const server = http.createServer(async (req, res) => {
         if (ev1 >= ev2 && ev1 > 0) suggestion = { side: 't1', team: team1, odd: o1, evPercent: Math.round(ev1 * 10) / 10, stake: stake1 };
         else if (ev2 > ev1 && ev2 > 0) suggestion = { side: 't2', team: team2, odd: o2, evPercent: Math.round(ev2 * 10) / 10, stake: stake2 };
 
+        // IA (DeepSeek): análise curta do cálculo
+        const wantAi = String(payload.ai || '').toLowerCase();
+        const useAi = (wantAi === '1' || wantAi === 'true' || wantAi === 'yes' || wantAi === 'on');
+        let ai = null;
+        if (useAi && DEEPSEEK_KEY) {
+          const prompt =
+            'Você é analista de apostas em LoL.\n' +
+            'Explique em pt-BR, direto, sem enrolação.\n' +
+            'Use bullets curtos.\n\n' +
+            `Partida: ${team1} vs ${team2}\n` +
+            `Odds: ${o1} / ${o2}\n` +
+            `Prob modelo: ${(mlResult.modelP1 * 100).toFixed(1)}% / ${(mlResult.modelP2 * 100).toFixed(1)}%\n` +
+            `EV: ${ev1.toFixed(1)}% / ${ev2.toFixed(1)}%\n` +
+            `Sugestão: ${suggestion ? `${suggestion.team} @ ${suggestion.odd} (EV ${suggestion.evPercent}%, Kelly ${suggestion.stake})` : 'nenhuma'}\n` +
+            `Forma t1/t2: ${enrich?.form1?.winRate ?? '—'}% / ${enrich?.form2?.winRate ?? '—'}%\n` +
+            `H2H jogos: ${enrich?.h2h?.totalMatches ?? 0}\n` +
+            `Draft compScore(pp): ${compScore != null && Number.isFinite(compScore) ? compScore.toFixed(2) : '—'}\n\n` +
+            `Role impact (gol.gg via PandaTobi): ${Array.isArray(roleImpact) && roleImpact.length ? roleImpact.map(r => `${r.role} WR ${(r.winrate != null ? Math.round(r.winrate*1000)/10 : '—')}%`).join(' | ') : '—'}\n\n` +
+            `Objetivos ao vivo: ${objectives ? `goldDiff=${objectives.goldDiff ?? '—'} towers=${objectives.t1.towers ?? '—'}-${objectives.t2.towers ?? '—'} drakes=${objectives.t1.drakes ?? '—'}-${objectives.t2.drakes ?? '—'} barons=${objectives.t1.barons ?? '—'}-${objectives.t2.barons ?? '—'}` : '—'}\n\n` +
+            'Inclua:\n' +
+            '- Por que lado tem edge\n' +
+            '- Riscos/alertas\n' +
+            '- O que observar ao vivo\n';
+
+          try {
+            const dsPayload = {
+              model: 'deepseek-chat',
+              max_tokens: 350,
+              messages: [
+                { role: 'system', content: 'Responda em pt-BR. Seja conciso.' },
+                { role: 'user', content: prompt }
+              ]
+            };
+            const r = await aiPost('deepseek', 'https://api.deepseek.com/chat/completions', dsPayload, {
+              'Authorization': `Bearer ${DEEPSEEK_KEY}`
+            }, { timeoutMs: 20000, retry: { maxAttempts: 3 } });
+            const j = safeParse(r && r.body, null);
+            const text = j?.choices?.[0]?.message?.content || '';
+            ai = { ok: true, provider: 'deepseek', model: dsPayload.model, text: String(text || '').trim() };
+          } catch (e) {
+            ai = { ok: false, provider: 'deepseek', error: e.message || String(e) };
+          }
+        }
+
         sendJson(res, {
           match,
           oddsDecimal: { t1: o1, t2: o2 },
@@ -4005,6 +4189,8 @@ const server = http.createServer(async (req, res) => {
             h2h: enrich.h2h,
             oddsMovementPoints: enrich.oddsMovement?.history?.length || 0
           },
+          roleImpact,
+          objectives,
           mlPrefilter: {
             pass: mlResult.pass,
             direction: mlResult.direction,
@@ -4020,7 +4206,8 @@ const server = http.createServer(async (req, res) => {
           },
           evPercent: { t1: Math.round(ev1 * 10) / 10, t2: Math.round(ev2 * 10) / 10 },
           kellyStakeUnits: { t1: stake1, t2: stake2, kellyFrac: kellyFrac },
-          suggestion
+          suggestion,
+          ai
         });
       } catch (e) {
         sendJson(res, { error: e.message }, 500);
