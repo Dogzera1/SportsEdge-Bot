@@ -4290,6 +4290,7 @@ const server = http.createServer(async (req, res) => {
         if (!DEEPSEEK_KEY) { sendJson(res, { ok: false, error: 'DEEPSEEK_API_KEY ausente' }, 401); return; }
         const json = safeParse(body, null);
         const ocrText = String(json?.ocrText || '').trim();
+        const ocrTextClean = String(json?.ocrTextClean || '').trim();
         if (!ocrText) {
           sendJson(res, {
             ok: false,
@@ -4300,6 +4301,9 @@ const server = http.createServer(async (req, res) => {
 
         const prompt =
           'Extraia dados de um texto OCR de uma captura da Bet365 (LoL) e retorne JSON puro.\n' +
+          'Ignore completamente: KDA, kills, deaths, assists, stats do jogo, timers, nomes de campeões.\n' +
+          'Foque só em: time1, time2, odd1, odd2, league, format.\n' +
+          'Odds: números decimais típicos 1.01–20.00 (pode vir com vírgula).\n' +
           'Campos:\n' +
           '{ team1, team2, odd1, odd2, league, format }\n' +
           '- odd1/odd2 como número decimal (ex 1.85)\n' +
@@ -4310,7 +4314,9 @@ const server = http.createServer(async (req, res) => {
           'JSON em uma linha.\n' +
           '---\n' +
           'Texto análise.\n\n' +
-          'Texto OCR:\n' +
+          'Texto OCR (limpo):\n' +
+          (ocrTextClean || ocrText).slice(0, 12000) +
+          '\n\nTexto OCR (bruto):\n' +
           ocrText.slice(0, 12000);
 
         const dsPayload = {

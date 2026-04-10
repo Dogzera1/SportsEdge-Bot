@@ -234,6 +234,12 @@
       <button type="button" class="primary" id="btn-365" style="margin-top:0.6rem;">Extrair + Analisar</button>
       <button type="button" class="primary" id="btn-365-fill" style="margin-top:0.6rem;background:#1f2937;border:1px solid var(--border);">Aplicar valores extraídos</button>
     </div>
+    <label for="ocr365" style="margin-top:0.6rem;">OCR (editável)</label>
+    <textarea id="ocr365" rows="6" style="width:100%;border-radius:8px;border:1px solid var(--border);background:#13151f;color:var(--text);padding:0.55rem;"></textarea>
+    <div class="grid2">
+      <button type="button" class="primary" id="btn-365-analyze" style="margin-top:0.6rem;background:#111827;border:1px solid var(--border);">Analisar OCR</button>
+      <button type="button" class="primary" id="btn-365-clear" style="margin-top:0.6rem;background:#111827;border:1px solid var(--border);">Limpar OCR</button>
+    </div>
     <div id="res-365" class="hint" style="white-space:pre-wrap;margin-top:0.6rem;">—</div>
   </div>
 
@@ -718,16 +724,77 @@
     if (x.format) document.getElementById('format').value = x.format;
   }
 
+  function cleanOcrText(raw) {
+    const s = String(raw || '').replace(/\r/g, '\n');
+    const lines = s.split('\n').map(l => l.trim()).filter(Boolean);
+    const out = [];
+    for (let i = 0; i < lines.length; i++) {
+      const l = lines[i];
+      // remove lixo comum de logs/progresso
+      if (/^ocr:/i.test(l)) continue;
+      if (/progress/i.test(l) && /%/.test(l)) continue;
+      if (/^\W+$/.test(l)) continue;
+      if (l.length <= 1) continue;
+      // mantém linhas com sinal útil (número / times / mercado)
+      const hasDigit = /\d/.test(l);
+      const hasLetter = /[a-zA-Z]/.test(l);
+      if (!hasDigit && !hasLetter) continue;
+      // corta linhas enormes (geralmente lixo)
+      out.push(l.slice(0, 180));
+    }
+    // dedupe simples
+    const seen = new Set();
+    return out.filter(l => (seen.has(l) ? false : (seen.add(l), true))).join('\n');
+  }
+
   (function bind365() {
     const btn365 = document.getElementById('btn-365');
     const btnFill = document.getElementById('btn-365-fill');
     const inp = document.getElementById('img365');
     const out = document.getElementById('res-365');
+    const ocrBox = document.getElementById('ocr365');
+    const btnAnalyze = document.getElementById('btn-365-analyze');
+    const btnClear = document.getElementById('btn-365-clear');
     if (!btn365 || !inp || !out) return;
+
+    function analyzeOcrText(ocrText) {
+      const raw = String(ocrText || '');
+      const cleaned = cleanOcrText(raw);
+      out.textContent = 'Enviando…';
+      return fetch('/lol/ev-manual-365', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ocrText: raw, ocrTextClean: cleaned })
+      })
+        .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, status: r.status, j: j }; }); })
+        .then(function (x) {
+          if (!x.ok) { out.textContent = (x.j && x.j.error) ? x.j.error : ('HTTP ' + x.status); return; }
+          _last365 = x.j;
+          if (x.j.extracted) applyExtracted365(x.j.extracted);
+          if (x.j.ai && x.j.ai.text) out.textContent = x.j.ai.text;
+          else if (x.j.extracted) out.textContent = JSON.stringify(x.j.extracted || {}, null, 2);
+          else out.textContent = (x.j.debug && x.j.debug.contentPreview) ? ('Sem extração.\n' + x.j.debug.contentPreview) : 'Sem extração.';
+        });
+    }
 
     if (btnFill) {
       btnFill.addEventListener('click', function () {
         if (_last365 && _last365.extracted) applyExtracted365(_last365.extracted);
+      });
+    }
+    if (btnClear && ocrBox) {
+      btnClear.addEventListener('click', function () {
+        ocrBox.value = '';
+        out.textContent = '—';
+      });
+    }
+    if (btnAnalyze && ocrBox) {
+      btnAnalyze.addEventListener('click', function () {
+        showErr('');
+        const txt = ocrBox.value || '';
+        if (!txt.trim()) { out.textContent = 'Cole OCR.'; return; }
+        btnAnalyze.disabled = true;
+        analyzeOcrText(txt).catch(function (e) { out.textContent = e.message || String(e); }).finally(function () { btnAnalyze.disabled = false; });
       });
     }
 
@@ -744,7 +811,7 @@
         .then(function () {
           if (!window.Tesseract || !window.Tesseract.recognize) throw new Error('OCR indisponível (Tesseract não carregou)');
           out.textContent = 'OCR…';
-          return window.Tesseract.recognize(f, 'eng', {
+          return window.Tesseract.recognize(f, 'eng+por', {
             logger: function (m) {
               if (m && m.status && m.progress != null) {
                 out.textContent = 'OCR: ' + m.status + ' ' + Math.round(m.progress * 100) + '%';
@@ -754,21 +821,8 @@
         })
         .then(function (r) {
           const txt = (r && r.data && r.data.text) ? String(r.data.text) : '';
-          out.textContent = 'Enviando…';
-          return fetch('/lol/ev-manual-365', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ ocrText: txt })
-          });
-        })
-        .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, status: r.status, j: j }; }); })
-        .then(function (x) {
-          if (!x.ok) { out.textContent = (x.j && x.j.error) ? x.j.error : ('HTTP ' + x.status); return; }
-          _last365 = x.j;
-          if (x.j.extracted) applyExtracted365(x.j.extracted);
-          if (x.j.ai && x.j.ai.text) out.textContent = x.j.ai.text;
-          else if (x.j.extracted) out.textContent = JSON.stringify(x.j.extracted || {}, null, 2);
-          else out.textContent = (x.j.debug && x.j.debug.contentPreview) ? ('Sem extração.\n' + x.j.debug.contentPreview) : 'Sem extração.';
+          if (ocrBox) ocrBox.value = txt;
+          return analyzeOcrText(txt);
         })
         .catch(function (e) {
           out.textContent = e.message || String(e);
