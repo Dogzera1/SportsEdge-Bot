@@ -934,6 +934,46 @@ async function theOddsGet(theOddsUrl) {
   });
 }
 
+function isWtaTennisOddsKey(k) {
+  return /(^|_)wta(_|$)/i.test(String(k));
+}
+
+/** Chaves tennis_* (ATP + WTA). Com all=true a API devolve torneios fora de temporada — WTA deixa de sumir. */
+async function fetchTheOddsTennisSportKeys() {
+  if (!THE_ODDS_API_KEY) return [];
+  const useAll = (process.env.TENNIS_ODDS_SPORTS_ALL ?? 'true') !== 'false';
+  const q = useAll ? `apiKey=${THE_ODDS_API_KEY}&all=true` : `apiKey=${THE_ODDS_API_KEY}`;
+  const sportsR = await theOddsGet(`https://api.the-odds-api.com/v4/sports/?${q}`);
+  const allSports = safeParse(sportsR.body, []);
+  const tennisSports = allSports.filter(s => s && typeof s.key === 'string' && s.key.startsWith('tennis_'));
+  tennisSports.sort((a, b) => {
+    const ai = a.active === false ? 1 : 0;
+    const bi = b.active === false ? 1 : 0;
+    if (ai !== bi) return ai - bi;
+    return String(a.key).localeCompare(String(b.key));
+  });
+  return tennisSports.map(s => s.key);
+}
+
+/** Prioriza WTA (mínimo configurável) e completa com ATP em round-robin. */
+function pickBalancedTennisKeys(tennisKeys, maxKeys) {
+  const wtaKeys = tennisKeys.filter(isWtaTennisOddsKey);
+  const atpKeys = tennisKeys.filter(k => !isWtaTennisOddsKey(k));
+  const cap = Math.min(Math.max(2, maxKeys || 10), tennisKeys.length);
+  const minWtaCfg = parseInt(process.env.TENNIS_MIN_WTA_KEYS || '5', 10);
+  const minWta = Math.min(Math.max(0, Number.isFinite(minWtaCfg) ? minWtaCfg : 5), wtaKeys.length, cap);
+  const allowedKeys = [];
+  let wi = 0;
+  let ai = 0;
+  for (; wi < minWta; wi++) allowedKeys.push(wtaKeys[wi]);
+  while (allowedKeys.length < cap && (ai < atpKeys.length || wi < wtaKeys.length)) {
+    if (ai < atpKeys.length) allowedKeys.push(atpKeys[ai++]);
+    if (allowedKeys.length >= cap) break;
+    if (wi < wtaKeys.length) allowedKeys.push(wtaKeys[wi++]);
+  }
+  return { allowedKeys, wtaKeys, atpKeys };
+}
+
 // Torneios ordenados por prioridade:
 // Lote 1 → T1 (LCS/LEC/LCK)
 // Lote 2 → EU secundárias (Prime League, HLL, Road of Legends)
@@ -4745,33 +4785,19 @@ const server = http.createServer(async (req, res) => {
       const weekAhead = now + 7 * 24 * 60 * 60 * 1000;
       const LIVE_WINDOW_MS = parseInt(process.env.TENNIS_LIVE_WINDOW_H || '6', 10) * 60 * 60 * 1000; // default 6h
 
-      // 1) Busca todos os sports ativos na API e filtra os de tênis
+      // 1) Lista tennis_* com all=true para incluir WTA (muitas chaves vêm active=false fora do pico)
       if (!oddsApiAllowed('ODDS')) { sendJson(res, []); return; }
-      const sportsR = await theOddsGet(`https://api.the-odds-api.com/v4/sports/?apiKey=${THE_ODDS_API_KEY}`);
-      const allSports = safeParse(sportsR.body, []);
-      const tennisKeys = allSports
-        .filter(s => s.key && s.key.startsWith('tennis_') && s.active !== false)
-        .map(s => s.key);
+      const tennisKeys = await fetchTheOddsTennisSportKeys();
 
       if (!tennisKeys.length) { sendJson(res, []); return; }
 
-      // 2) Busca odds em paralelo (limita chaves para não estourar quota)
-      // Cada torneio = 1 request
-      const maxKeysCfg = parseInt(process.env.TENNIS_MAX_KEYS || '10', 10);
-      const maxKeys = Math.min(Math.max(2, maxKeysCfg || 10), tennisKeys.length);
+      // 2) Busca odds (cada torneio = 1 request). Cota mínima WTA via TENNIS_MIN_WTA_KEYS
+      const maxKeysCfg = parseInt(process.env.TENNIS_MAX_KEYS || '16', 10);
+      const maxKeys = Math.min(Math.max(2, maxKeysCfg || 16), tennisKeys.length);
 
-      // Balancear ATP/WTA: evita só ATP quando a lista vem ordenada por popularidade
-      const isWtaKey = k => /(^|_)wta(_|$)/i.test(String(k));
-      const wtaKeys = tennisKeys.filter(isWtaKey);
-      const atpKeys = tennisKeys.filter(k => !isWtaKey(k));
-      const allowedKeys = [];
-      for (let i = 0; allowedKeys.length < maxKeys && (i < atpKeys.length || i < wtaKeys.length); i++) {
-        if (i < atpKeys.length) allowedKeys.push(atpKeys[i]);
-        if (allowedKeys.length >= maxKeys) break;
-        if (i < wtaKeys.length) allowedKeys.push(wtaKeys[i]);
-      }
+      const { allowedKeys, wtaKeys, atpKeys } = pickBalancedTennisKeys(tennisKeys, maxKeys);
 
-      log('INFO', 'TENNIS', `Sports keys: total=${tennisKeys.length} atp=${atpKeys.length} wta=${wtaKeys.length} usando=${allowedKeys.length}`);
+      log('INFO', 'TENNIS', `Sports keys: total=${tennisKeys.length} atp=${atpKeys.length} wta=${wtaKeys.length} usando=${allowedKeys.length} (minWTA=${process.env.TENNIS_MIN_WTA_KEYS || '5'})`);
 
       for (const k of allowedKeys) {
         if (!oddsApiAllowed('ODDS')) break;
@@ -4886,28 +4912,14 @@ const server = http.createServer(async (req, res) => {
     try {
       const daysFrom = Math.min(3, Math.max(1, parseInt(u.searchParams.get('daysFrom') || '3', 10) || 3));
 
-      // 1) Busca todos os sports ativos na API e filtra os de tênis
       if (!oddsApiAllowed('ODDS')) { sendJson(res, []); return; }
-      const sportsR = await theOddsGet(`https://api.the-odds-api.com/v4/sports/?apiKey=${THE_ODDS_API_KEY}`);
-      const allSports = safeParse(sportsR.body, []);
-      const tennisKeys = allSports
-        .filter(s => s.key && s.key.startsWith('tennis_') && s.active !== false)
-        .map(s => s.key);
+      const tennisKeys = await fetchTheOddsTennisSportKeys();
 
       if (!tennisKeys.length) { sendJson(res, []); return; }
 
-      // 2) Limita chaves para não estourar quota
-      const maxKeysCfg = parseInt(process.env.TENNIS_MAX_KEYS || '10', 10);
-      const maxKeys = Math.min(Math.max(2, maxKeysCfg || 10), tennisKeys.length);
-      const isWtaKey = k => /(^|_)wta(_|$)/i.test(String(k));
-      const wtaKeys = tennisKeys.filter(isWtaKey);
-      const atpKeys = tennisKeys.filter(k => !isWtaKey(k));
-      const allowedKeys = [];
-      for (let i = 0; allowedKeys.length < maxKeys && (i < atpKeys.length || i < wtaKeys.length); i++) {
-        if (i < atpKeys.length) allowedKeys.push(atpKeys[i]);
-        if (allowedKeys.length >= maxKeys) break;
-        if (i < wtaKeys.length) allowedKeys.push(wtaKeys[i]);
-      }
+      const maxKeysCfg = parseInt(process.env.TENNIS_MAX_KEYS || '16', 10);
+      const maxKeys = Math.min(Math.max(2, maxKeysCfg || 16), tennisKeys.length);
+      const { allowedKeys } = pickBalancedTennisKeys(tennisKeys, maxKeys);
 
       const results = [];
       for (const k of allowedKeys) {
