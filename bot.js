@@ -2036,6 +2036,14 @@ async function autoAnalyzeMatch(token, match) {
 // ── Próximas Partidas Handler (OLD — mantido apenas para referência interna) ──
 
 // ── Esports Prompt Builder ──
+// Teses de edge da literatura quant LoL (ex.: pipelines GRID + ensemble). Sem dados GRID aqui — IA só aplica se draft/DADOS AO VIVO suportarem.
+const LOL_PROMPT_RESEARCH_HINTS = `TESES A CONSIDERAR (use só se draft ou "DADOS AO VIVO" derem base concreta; não invente números nem cite fontes):
+• Ritmo early: path de jungle e prioridade de rio/córrego costumam definir quem impõe o primeiro arco do jogo.
+• Objetivos majores: ouro líquido nem sempre reflete controle real de Baron/Elder — visão, ondas e quem força o play importam para fechar mapa ou virar série.
+• Bo3/Bo5: mapa atual + draft da série e side — não reduza P() da série só ao snapshot de um mapa sem encadear o contexto da série.
+
+`;
+
 function buildEsportsPrompt(match, game, gamesContext, o, enrichSection, mlResult = null, newsSection = '') {
   const hasRealOdds = !!(o && o.t1 && parseFloat(o.t1) > 1);
   const t1 = match.team1 || match.participant1_name;
@@ -2140,6 +2148,7 @@ function buildEsportsPrompt(match, game, gamesContext, o, enrichSection, mlResul
 
   const text = `Você é um analista de apostas LoL especializado. Siga o processo de decisão abaixo com rigor — omita TIP_ML SOMENTE se todos os EVs forem negativos ou se você não tiver base para estimar probabilidades.
 
+${LOL_PROMPT_RESEARCH_HINTS}
 PARTIDA: ${t1} vs ${t2} | ${match.league || 'Esports'} | ${match.format || 'Bo1/Bo3'} | ${match.status}
 Placar da Série: ${serieScore} | ${oddsSection.replace('Odds ML', oddsTitle)}${seriesWarning}
 ${bookMarginNote ? `\n⚠️ ${bookMarginNote}` : ''}
@@ -2171,10 +2180,12 @@ ANÁLISE (responda cada ponto):
    [ ] H2H favorável (≥60% de vitórias no confronto direto)
    [ ] Draft/composição claramente superior
    [ ] Dados ao vivo confirmam (gold diff, objetivos)
+   [ ] Leitura de objetivos (Baron/Elder/dragões) coerente com mapa/visão, não só ouro bruto
+   [ ] Ritmo early (jungle/rio) alinhado com quem está na frente, se houver dados ao vivo
    [ ] Odds com movimento favorável (sharp money)
 ${hasRealOdds ? '' : '   Virada possível se: gold diff <3k, scaling comp no perdedor, soul point ou baron pendente.\n'}
 RESPOSTA (máximo 200 palavras):
-P(${t1})=__% | P(${t2})=__% | ${hasRealOdds ? `EV(${t1})=[X%] | EV(${t2})=[X%]` : `Conf:[ALTA/MÉDIA/BAIXA]`} | Sinais:[N/6] | Confiança:[ALTA/MÉDIA/BAIXA]
+P(${t1})=__% | P(${t2})=__% | ${hasRealOdds ? `EV(${t1})=[X%] | EV(${t2})=[X%]` : `Conf:[ALTA/MÉDIA/BAIXA]`} | Sinais checklist:[N/8] | Conf pré-modelo:[${sigCount}/6] | Confiança:[ALTA/MÉDIA/BAIXA]
 ${tipInstruction}`;
 
   return { text, evThreshold, sigCount };

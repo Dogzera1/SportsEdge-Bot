@@ -18,7 +18,7 @@ Cada **sport** (`esports`, `mma`, `tennis`, `football`) pode ter token Telegram 
 
 ## 2. Arranque do bot (`bot.js`)
 
-0. **`validateEnv()`** (IIFE no topo): verifica variáveis obrigatórias e opcionais; emite `WARN` no log se ausentes, sem lançar excepção. Cobre `DEEPSEEK_API_KEY`, `ODDS_API_KEY`, tokens Telegram por sport, `ADMIN_KEY`, `PANDASCORE_TOKEN`, `THE_ODDS_API_KEY`, `API_SPORTS_KEY`.
+0. **`validateEnv()`** (IIFE no topo): verifica variáveis obrigatórias e opcionais; emite `WARN` no log se ausentes, sem lançar excepção. Cobre `DEEPSEEK_API_KEY`, `ODDS_API_KEY`, tokens Telegram por sport, `PANDASCORE_TOKEN`, `THE_ODDS_API_KEY`, `API_SPORTS_KEY`. (`ADMIN_KEY` só no **server**, um aviso `[SEC]` no boot da API.)
 1. Carrega **`SPORTS`** (`lib/sports.js`) conforme `.env` (enabled + token).
 2. **`loadSubscribedUsers()`** → `GET /users?subscribed=1`; admins em **`ADMIN_USER_IDS`** são auto-inscritos nos sports ativos.
 3. **`loadExistingTips()`** → histórico para maps `analyzedMatches` / `analyzedMma` / `analyzedTennis` / `analyzedFootball` (evita re-tip imediata).
@@ -67,6 +67,7 @@ Fonte de partidas: **`GET /lol-matches`** (Riot + PandaScore mesclados no server
 - Monta contexto: odds (`/odds` ou estimadas), forma/H2H (`/team-form`, `/h2h`), composições (**`/ps-compositions`**, **`/live-gameids`**, stats ao vivo).
 - **Pré-modelo:** `esportsPreFilter()` (`lib/ml.js`) → score em “pp”, `modelP1`/`modelP2`, fatores ativos.
 - Chama **`POST /claude`** no server (modelo configurável, ex. DeepSeek) com prompt que exige formato **`TIP_ML:...`** ou **`SEM_EDGE`**.
+- **Prompt LoL (`buildEsportsPrompt`):** bloco `LOL_PROMPT_RESEARCH_HINTS` — teses de edge da literatura quant (ritmo early/jungle, objetivos vs. só ouro, série Bo3/Bo5), alinhadas a ideias de projetos como [lol-betting-pipeline](https://github.com/chdoyle1/lol-betting-pipeline); **sem** Python/GRID no runtime. Checklist ampliado (8 itens) + contador separado **Conf pré-modelo** (0–6) dos sinais de enrichment.
 - Se houver tip parseada: **Kelly** (`calcKellyWithP` / `calcKellyFraction`) por confiança (ALTA ¼, MÉDIA ⅙, BAIXA 1/10) → **`applyGlobalRisk('esports', ...)`** → **`POST /record-tip`** → DM inscritos → opcional **`/log-tip-factors`**.
 - Opcional: segunda tip **HANDICAP** (mercado via `/handicap-odds`) se não for live no mapa — stake limitado, confiança BAIXA.
 
@@ -189,7 +190,7 @@ O server em **`/settle`** compara vencedor com `tip_participant` (tênis usa mat
 ## 11. Onde mudar o comportamento
 
 - **Intervalos globais de análise / settlement:** topo de `bot.js` (`RE_ANALYZE_INTERVAL`, `SETTLEMENT_INTERVAL`, etc.).
-- **Prompts e parsing de tip:** funções `autoAnalyzeMatch`, blocos `pollMma` / `pollTennis` / `pollFootball`.
+- **Prompts e parsing de tip:** funções `autoAnalyzeMatch`, `buildEsportsPrompt` (`LOL_PROMPT_RESEARCH_HINTS`), blocos `pollMma` / `pollTennis` / `pollFootball`.
 - **Endpoints e caches de odds:** `server.js` (OddsPapi, 429/backoff, `/lol-matches`).
 - **Matching de nomes (tênis):** `lib/tennis-match.js` + `/tennis-db-result` / `/settle` no server.  
   - `extractSurname()` trata formatos "Last, First", "J.Sinner" e "J. Sinner".  
