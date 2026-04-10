@@ -2182,6 +2182,76 @@ function lolEnrichmentFromDb(t1, t2, game = 'lol') {
   return { form1, form2, h2h, oddsMovement };
 }
 
+/** WR médio pro play por lado + linha por rota (espelha lógica do bot / champ-winrates). */
+function lolCompScoreFromDraft(stmts, t1Champs, t2Champs) {
+  const roleAliases = [
+    ['top'],
+    ['jungle', 'jg', 'jgl'],
+    ['mid', 'middle'],
+    ['bottom', 'adc', 'bot'],
+    ['support', 'sup']
+  ];
+  const label = ['TOP', 'JGL', 'MID', 'ADC', 'SUP'];
+  const pickStat = (champ, aliases) => {
+    const c = String(champ || '').trim();
+    if (!c) return null;
+    for (const r of aliases) {
+      const stat = stmts.getChampStat.get(c, r);
+      if (stat && stat.total >= 5) return { stat, matchedRole: r };
+    }
+    const fall = stmts.getChampStatAnyRole.get(c);
+    if (fall && fall.total >= 5) return { stat: fall, matchedRole: fall.role, fallback: true };
+    return null;
+  };
+  const rolesDetail = [];
+  let blueWR = 0, blueN = 0, redWR = 0, redN = 0, blueTot = 0, redTot = 0;
+  for (let i = 0; i < 5; i++) {
+    const c1 = t1Champs[i];
+    const c2 = t2Champs[i];
+    const aliases = roleAliases[i];
+    const p1 = pickStat(c1, aliases);
+    const p2 = pickStat(c2, aliases);
+    rolesDetail.push({
+      role: label[i],
+      t1Champion: c1 || null,
+      t2Champion: c2 || null,
+      t1WinRate: p1 ? Math.round((p1.stat.wins / p1.stat.total) * 1000) / 10 : null,
+      t1Total: p1 ? p1.stat.total : null,
+      t1MatchedRole: p1 ? p1.matchedRole : null,
+      t1Fallback: !!p1?.fallback,
+      t2WinRate: p2 ? Math.round((p2.stat.wins / p2.stat.total) * 1000) / 10 : null,
+      t2Total: p2 ? p2.stat.total : null,
+      t2MatchedRole: p2 ? p2.matchedRole : null,
+      t2Fallback: !!p2?.fallback
+    });
+    if (p1) {
+      blueWR += (p1.stat.wins / p1.stat.total) * 100;
+      blueTot += p1.stat.total;
+      blueN++;
+    }
+    if (p2) {
+      redWR += (p2.stat.wins / p2.stat.total) * 100;
+      redTot += p2.stat.total;
+      redN++;
+    }
+  }
+  if (blueN > 0 && redN > 0) {
+    const blueAvg = blueWR / blueN;
+    const redAvg = redWR / redN;
+    return {
+      compScore: blueAvg - redAvg,
+      t1Avg: Math.round(blueAvg * 10) / 10,
+      t2Avg: Math.round(redAvg * 10) / 10,
+      t1N: blueN,
+      t2N: redN,
+      t1Sample: Math.round(blueTot / blueN),
+      t2Sample: Math.round(redTot / redN),
+      rolesDetail
+    };
+  }
+  return { compScore: null, t1N: blueN, t2N: redN, rolesDetail };
+}
+
 // ── HTTP Server ──
 const server = http.createServer(async (req, res) => {
   const parsed = url.parse(req.url, true);
@@ -3811,6 +3881,60 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // ── LoL EV manual: ligas e campeões (DB) ──
+  if (p === '/lol/ev-manual-meta') {
+    try {
+      const leagueRows = db.prepare(`
+        SELECT league AS name, COUNT(*) AS n FROM match_results
+        WHERE game = 'lol' AND league IS NOT NULL AND TRIM(league) != ''
+        GROUP BY league ORDER BY n DESC LIMIT 300
+      `).all();
+      const champRows = db.prepare(`
+        SELECT DISTINCT champion FROM pro_champ_stats ORDER BY champion COLLATE NOCASE
+      `).all();
+      sendJson(res, {
+        ok: true,
+        leagues: leagueRows.map(r => r.name),
+        champions: champRows.map(r => r.champion)
+      });
+    } catch (e) {
+      sendJson(res, { ok: false, error: e.message }, 500);
+    }
+    return;
+  }
+
+  if (p === '/lol/ev-manual-teams') {
+    try {
+      const league = String(parsed.query.league || '').trim();
+      let rows;
+      if (league) {
+        rows = db.prepare(`
+          SELECT DISTINCT t FROM (
+            SELECT team1 AS t FROM match_results WHERE game = 'lol' AND league = ?
+            UNION
+            SELECT team2 AS t FROM match_results WHERE game = 'lol' AND league = ?
+          )
+          WHERE t IS NOT NULL AND TRIM(t) != ''
+          ORDER BY t COLLATE NOCASE
+        `).all(league, league);
+      } else {
+        rows = db.prepare(`
+          SELECT team AS t, COUNT(*) AS c FROM (
+            SELECT team1 AS team FROM match_results WHERE game = 'lol'
+            UNION ALL
+            SELECT team2 FROM match_results WHERE game = 'lol'
+          ) AS u
+          WHERE team IS NOT NULL AND TRIM(team) != ''
+          GROUP BY team ORDER BY c DESC LIMIT 600
+        `).all();
+      }
+      sendJson(res, { ok: true, teams: rows.map(r => r.t) });
+    } catch (e) {
+      sendJson(res, { ok: false, error: e.message }, 500);
+    }
+    return;
+  }
+
   // ── Sync pro stats (PandaScore → pro_champ_stats + match_results) ──
   if (p === '/sync-pro-stats') {
     if (!PANDASCORE_TOKEN) { sendJson(res, { ok: false, error: 'PANDASCORE_TOKEN não configurado' }); return; }
@@ -3820,30 +3944,23 @@ const server = http.createServer(async (req, res) => {
 
   // ── LoL Match Winner: EV com odds manuais (sem API de odds) ──
   if (p === '/lol/ev-manual') {
-    const serveHtml = () => {
-      const q = parsed.query || {};
-      const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-      const t1 = esc(q.team1 || '');
-      const t2 = esc(q.team2 || '');
-      const o1 = esc(q.odd1 || q.o1 || '');
-      const o2 = esc(q.odd2 || q.o2 || '');
-      const fmt = esc(q.format || '');
-      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-      res.end(`<!DOCTYPE html><html lang="pt-BR"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>LoL ML — odds manuais</title>
-<style>body{font-family:system-ui,sans-serif;max-width:520px;margin:2rem auto;padding:0 1rem}label{display:block;margin:.6rem 0 .15rem}input{width:100%;padding:.45rem;box-sizing:border-box}button{margin-top:1rem;padding:.55rem 1rem}</style></head><body>
-<h1>Match Winner (odds manuais)</h1>
-<p>Odds decimais; dados de forma/H2H vêm do DB local.</p>
-<form method="get" action="/lol/ev-manual">
-<input type="hidden" name="view" value="json"/>
-<label>Time 1</label><input name="team1" value="${t1}" required/>
-<label>Time 2</label><input name="team2" value="${t2}" required/>
-<label>Odd time 1</label><input name="odd1" type="number" step="0.01" min="1.01" value="${o1}" required/>
-<label>Odd time 2</label><input name="odd2" type="number" step="0.01" min="1.01" value="${o2}" required/>
-<label>Formato (opcional)</label><input name="format" placeholder="Bo1 / Bo3 / Bo5" value="${fmt}"/>
-<button type="submit">Calcular JSON</button>
-</form>
-<p><small>Resposta: JSON com EV e Kelly. Ou use GET/POST API com os mesmos parâmetros.</small></p>
-</body></html>`);
+    const serveEvManualPage = () => {
+      const htmlPath = path.join(__dirname, 'public', 'lol-ev-manual.html');
+      try {
+        const html = fs.readFileSync(htmlPath, 'utf8');
+        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+        res.end(html);
+      } catch (e) {
+        res.writeHead(500, { 'content-type': 'text/plain; charset=utf-8' });
+        res.end('Arquivo public/lol-ev-manual.html ausente ou ilegível.');
+      }
+    };
+
+    const ROLE_KEYS = ['TOP', 'JGL', 'MID', 'ADC', 'SUP'];
+    const draftSidesFromPayload = (payload) => {
+      const d = payload.draft && typeof payload.draft === 'object' ? payload.draft : {};
+      const side = (key) => ROLE_KEYS.map((r) => String(d[key]?.[r] ?? '').trim());
+      return { t1: side('t1'), t2: side('t2') };
     };
 
     const runManualEv = (payload) => {
@@ -3856,14 +3973,18 @@ const server = http.createServer(async (req, res) => {
         const o2 = parseFloat(String(oRaw2 ?? '').replace(',', '.'));
         const game = String(payload.game || 'lol').trim() || 'lol';
         const formatRaw = payload.format != null ? String(payload.format).trim() : '';
+        const leagueRaw = payload.league != null ? String(payload.league).trim() : '';
         if (!team1 || !team2) { sendJson(res, { error: 'team1 e team2 obrigatórios' }, 400); return; }
         if (!Number.isFinite(o1) || !Number.isFinite(o2) || o1 <= 1.0 || o2 <= 1.0) {
           sendJson(res, { error: 'odd1 e odd2 devem ser decimais > 1' }, 400); return;
         }
+        const { t1: t1Champs, t2: t2Champs } = draftSidesFromPayload(payload);
+        const draftAnalysis = lolCompScoreFromDraft(stmts, t1Champs, t2Champs);
+        const compScore = draftAnalysis.compScore;
         const enrich = lolEnrichmentFromDb(team1, team2, game);
-        const match = { team1, team2, game, format: formatRaw || null };
+        const match = { team1, team2, game, format: formatRaw || null, league: leagueRaw || null };
         const odds = { t1: String(o1), t2: String(o2) };
-        const mlResult = esportsPreFilter(match, odds, enrich, false, '', null, stmts);
+        const mlResult = esportsPreFilter(match, odds, enrich, false, '', compScore, stmts);
         const ev1 = (mlResult.modelP1 * o1 - 1) * 100;
         const ev2 = (mlResult.modelP2 * o2 - 1) * 100;
         const kFrac = parseFloat(payload.kellyFrac);
@@ -3877,6 +3998,7 @@ const server = http.createServer(async (req, res) => {
         sendJson(res, {
           match,
           oddsDecimal: { t1: o1, t2: o2 },
+          draftAnalysis,
           enrichSummary: {
             form1: enrich.form1,
             form2: enrich.form2,
@@ -3908,7 +4030,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET') {
       const q = parsed.query || {};
       const bare = !q.team1 && !q.odd1 && !q.o1 && q.view !== 'json';
-      if (bare) { serveHtml(); return; }
+      if (bare) { serveEvManualPage(); return; }
       runManualEv(q);
       return;
     }

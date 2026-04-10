@@ -1,0 +1,453 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>LoL — EV manual</title>
+  <style>
+    :root {
+      --bg: #0f1117;
+      --card: #1a1d2e;
+      --border: #2d2f45;
+      --text: #e5e7eb;
+      --muted: #6b7280;
+      --accent: #7c3aed;
+      --accent-dim: #a78bfa;
+      --good: #34d399;
+      --bad: #f87171;
+    }
+    * { box-sizing: border-box; }
+    body {
+      font-family: system-ui, -apple-system, Segoe UI, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      margin: 0;
+      min-height: 100vh;
+      line-height: 1.45;
+    }
+    header {
+      background: #13151f;
+      border-bottom: 2px solid var(--accent);
+      padding: 1rem 1.5rem;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 0.75rem;
+    }
+    header h1 { font-size: 1.15rem; color: var(--accent-dim); margin: 0; }
+    header a { color: var(--muted); font-size: 0.85rem; }
+    .wrap { max-width: 960px; margin: 0 auto; padding: 1.25rem 1rem 2.5rem; }
+    .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+    @media (max-width: 720px) { .grid2 { grid-template-columns: 1fr; } }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1rem 1.1rem;
+      margin-bottom: 1rem;
+    }
+    .card h2 {
+      font-size: 0.78rem;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--accent-dim);
+      margin: 0 0 0.75rem;
+    }
+    label { display: block; font-size: 0.75rem; color: var(--muted); margin: 0.45rem 0 0.2rem; }
+    input, select {
+      width: 100%;
+      padding: 0.5rem 0.55rem;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: #13151f;
+      color: var(--text);
+      font-size: 0.9rem;
+    }
+    input:focus, select:focus { outline: none; border-color: var(--accent); }
+    .row-roles { display: grid; grid-template-columns: 90px 1fr 1fr; gap: 0.4rem 0.6rem; align-items: center; font-size: 0.82rem; }
+    .row-roles .rh { color: var(--muted); font-size: 0.72rem; text-transform: uppercase; }
+    @media (max-width: 640px) {
+      .row-roles { grid-template-columns: 72px 1fr; }
+      .row-roles .side-h { display: none; }
+    }
+    button.primary {
+      margin-top: 0.5rem;
+      padding: 0.65rem 1.25rem;
+      border: none;
+      border-radius: 8px;
+      background: var(--accent);
+      color: #fff;
+      font-weight: 600;
+      cursor: pointer;
+      font-size: 0.95rem;
+    }
+    button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
+    button.primary:hover:not(:disabled) { filter: brightness(1.08); }
+    #result { display: none; }
+    #result.visible { display: block; }
+    .pill { display: inline-block; padding: 0.2rem 0.55rem; border-radius: 6px; font-size: 0.75rem; font-weight: 600; }
+    .pill.ok { background: #14532d; color: var(--good); }
+    .pill.no { background: #450a0a; color: var(--bad); }
+    .ev-big { font-size: 1.6rem; font-weight: 800; }
+    .ev-pos { color: var(--good); }
+    .ev-neg { color: var(--bad); }
+    table.result-t { width: 100%; border-collapse: collapse; font-size: 0.8rem; margin-top: 0.5rem; }
+    table.result-t th, table.result-t td { padding: 0.45rem 0.35rem; border-bottom: 1px solid var(--border); text-align: left; }
+    table.result-t th { color: var(--muted); font-weight: 600; text-transform: uppercase; font-size: 0.65rem; }
+    .err { background: #450a0a; color: #fecaca; padding: 0.75rem 1rem; border-radius: 8px; margin-top: 1rem; font-size: 0.88rem; }
+    .hint { font-size: 0.78rem; color: var(--muted); margin-top: 0.35rem; }
+    .suggest-box { border-left: 3px solid var(--accent); padding-left: 0.75rem; margin-top: 0.75rem; }
+  </style>
+</head>
+<body>
+<header>
+  <h1>Match Winner — odds manuais (LoL)</h1>
+  <a href="/dashboard">← Dashboard</a>
+</header>
+<div class="wrap">
+  <div class="card">
+    <h2>Partida</h2>
+    <div class="grid2">
+      <div>
+        <label for="league">Liga (filtra lista de times)</label>
+        <select id="league">
+          <option value="">Todas (top times no DB)</option>
+        </select>
+        <p class="hint">Vem de <code>match_results</code> — só ajuda a escolher nomes; forma/H2H usam os times digitados.</p>
+      </div>
+      <div>
+        <label for="format">Formato</label>
+        <input id="format" type="text" placeholder="Bo1, Bo3, Bo5…" autocomplete="off"/>
+      </div>
+    </div>
+    <div class="grid2">
+      <div>
+        <label for="team1">Time 1 (lado azul / t1)</label>
+        <input id="team1" list="teams-dl" required autocomplete="off"/>
+      </div>
+      <div>
+        <label for="team2">Time 2 (lado vermelho / t2)</label>
+        <input id="team2" list="teams-dl" required autocomplete="off"/>
+      </div>
+    </div>
+    <datalist id="teams-dl"></datalist>
+    <div class="grid2">
+      <div>
+        <label for="odd1">Odd decimal time 1</label>
+        <input id="odd1" type="number" step="0.01" min="1.01" required/>
+      </div>
+      <div>
+        <label for="odd2">Odd decimal time 2</label>
+        <input id="odd2" type="number" step="0.01" min="1.01" required/>
+      </div>
+    </div>
+    <label for="kellyFrac">Fração Kelly (opcional, padrão 1/6)</label>
+    <input id="kellyFrac" type="number" step="0.05" min="0.05" max="1" placeholder="0.166…"/>
+  </div>
+
+  <div class="card">
+    <h2>Draft — campeões por rota</h2>
+    <p class="hint">Opcional. Se ambos os lados tiverem dados em <code>pro_champ_stats</code>, entra o fator “comp” no ML (como no bot).</p>
+    <datalist id="champs-dl"></datalist>
+    <div class="row-roles" style="margin-bottom:0.35rem;font-weight:600;">
+      <span></span>
+      <span class="side-h">Time 1</span>
+      <span class="side-h">Time 2</span>
+    </div>
+    <div id="role-rows"></div>
+  </div>
+
+  <button type="button" class="primary" id="btn-calc">Calcular EV</button>
+  <div id="load-msg" class="hint" style="display:none;margin-top:0.75rem;">Carregando listas do servidor…</div>
+  <div id="err-box" class="err" style="display:none;"></div>
+
+  <div id="result">
+    <div class="card">
+      <h2>Resumo</h2>
+      <p id="res-match"></p>
+      <p id="res-odds"></p>
+      <div id="res-suggest" class="suggest-box"></div>
+    </div>
+    <div class="grid2">
+      <div class="card">
+        <h2>Valor esperado (%)</h2>
+        <p id="res-ev1" class="ev-big"></p>
+        <p id="res-ev2" class="ev-big"></p>
+      </div>
+      <div class="card">
+        <h2>Kelly (unidades)</h2>
+        <p id="res-k1"></p>
+        <p id="res-k2"></p>
+        <p class="hint" id="res-kfrac"></p>
+      </div>
+    </div>
+    <div class="card">
+      <h2>Modelo (pré-filtro)</h2>
+      <p id="res-ml-pills"></p>
+      <table class="result-t" id="res-ml-table"></table>
+    </div>
+    <div class="card">
+      <h2>Forma &amp; H2H</h2>
+      <p id="res-enrich"></p>
+    </div>
+    <div class="card">
+      <h2>Draft vs pro stats</h2>
+      <p id="res-draft-summary"></p>
+      <table class="result-t" id="res-draft-table"></table>
+      <p class="hint" id="res-draft-foot"></p>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  const ROLES = [
+    { key: 'TOP', label: 'Topo' },
+    { key: 'JGL', label: 'Selva' },
+    { key: 'MID', label: 'Meio' },
+    { key: 'ADC', label: 'Atirador' },
+    { key: 'SUP', label: 'Suporte' }
+  ];
+
+  const leagueEl = document.getElementById('league');
+  const teamsDl = document.getElementById('teams-dl');
+  const champsDl = document.getElementById('champs-dl');
+  const roleRows = document.getElementById('role-rows');
+  const btn = document.getElementById('btn-calc');
+  const loadMsg = document.getElementById('load-msg');
+  const errBox = document.getElementById('err-box');
+  const result = document.getElementById('result');
+
+  function showErr(msg) {
+    errBox.style.display = msg ? 'block' : 'none';
+    errBox.textContent = msg || '';
+  }
+
+  ROLES.forEach(function (r) {
+    const row = document.createElement('div');
+    row.className = 'row-roles';
+    row.innerHTML =
+      '<span class="rh">' + r.label + '</span>' +
+      '<input type="text" class="c1" data-role="' + r.key + '" list="champs-dl" placeholder="—" autocomplete="off"/>' +
+      '<input type="text" class="c2" data-role="' + r.key + '" list="champs-dl" placeholder="—" autocomplete="off"/>';
+    roleRows.appendChild(row);
+  });
+
+  function fillDatalist(dl, items) {
+    dl.innerHTML = '';
+    items.forEach(function (t) {
+      const o = document.createElement('option');
+      o.value = t;
+      dl.appendChild(o);
+    });
+  }
+
+  async function loadTeams() {
+    const lg = leagueEl.value.trim();
+    const q = lg ? ('?league=' + encodeURIComponent(lg)) : '';
+    const r = await fetch('/lol/ev-manual-teams' + q);
+    const j = await r.json();
+    if (!j.ok) throw new Error(j.error || 'Falha ao carregar times');
+    fillDatalist(teamsDl, j.teams || []);
+  }
+
+  loadMsg.style.display = 'block';
+  fetch('/lol/ev-manual-meta')
+    .then(function (r) { return r.json(); })
+    .then(function (j) {
+      if (!j.ok) throw new Error(j.error || 'meta');
+      (j.leagues || []).forEach(function (name) {
+        const o = document.createElement('option');
+        o.value = name;
+        o.textContent = name;
+        leagueEl.appendChild(o);
+      });
+      fillDatalist(champsDl, j.champions || []);
+      return loadTeams();
+    })
+    .catch(function (e) {
+      showErr('Não foi possível carregar ligas/campeões: ' + (e.message || e));
+    })
+    .finally(function () {
+      loadMsg.style.display = 'none';
+    });
+
+  leagueEl.addEventListener('change', function () {
+    loadTeams().catch(function (e) {
+      showErr(e.message || String(e));
+    });
+  });
+
+  function collectDraft() {
+    const t1 = {};
+    const t2 = {};
+    roleRows.querySelectorAll('.c1').forEach(function (inp) {
+      t1[inp.getAttribute('data-role')] = inp.value.trim();
+    });
+    roleRows.querySelectorAll('.c2').forEach(function (inp) {
+      t2[inp.getAttribute('data-role')] = inp.value.trim();
+    });
+    return { t1: t1, t2: t2 };
+  }
+
+  function pctClass(v) {
+    if (v == null || isNaN(v)) return '';
+    return v >= 0 ? 'ev-pos' : 'ev-neg';
+  }
+
+  function render(data) {
+    result.classList.add('visible');
+    const m = data.match || {};
+    document.getElementById('res-match').textContent =
+      (m.team1 || '—') + ' vs ' + (m.team2 || '—') +
+      (m.league ? ' · Liga: ' + m.league : '') +
+      (m.format ? ' · ' + m.format : '');
+
+    const od = data.oddsDecimal || {};
+    document.getElementById('res-odds').textContent =
+      'Odds: ' + (od.t1 != null ? od.t1 : '—') + ' / ' + (od.t2 != null ? od.t2 : '—');
+
+    const sug = data.suggestion;
+    const sg = document.getElementById('res-suggest');
+    if (sug && sug.team) {
+      sg.innerHTML = '<strong>Sugestão:</strong> ' + sug.team + ' @ ' + sug.odd +
+        ' · EV ~' + sug.evPercent + '% · Kelly ' + sug.stake;
+    } else {
+      sg.innerHTML = '<strong>Sugestão:</strong> nenhum lado com EV positivo claro.';
+    }
+
+    const ev = data.evPercent || {};
+    const e1 = document.getElementById('res-ev1');
+    const e2 = document.getElementById('res-ev2');
+    e1.textContent = 'Time 1: ' + (ev.t1 != null ? ev.t1 : '—') + '%';
+    e1.className = 'ev-big ' + pctClass(ev.t1);
+    e2.textContent = 'Time 2: ' + (ev.t2 != null ? ev.t2 : '—') + '%';
+    e2.className = 'ev-big ' + pctClass(ev.t2);
+
+    const k = data.kellyStakeUnits || {};
+    document.getElementById('res-k1').textContent = 'Time 1: ' + (k.t1 || '—');
+    document.getElementById('res-k2').textContent = 'Time 2: ' + (k.t2 || '—');
+    document.getElementById('res-kfrac').textContent = 'Fração usada: ' + (k.kellyFrac != null ? k.kellyFrac : '—');
+
+    const ml = data.mlPrefilter || {};
+    const passEl = document.getElementById('res-ml-pills');
+    passEl.innerHTML = '<span class="pill ' + (ml.pass ? 'ok' : 'no') + '">' + (ml.pass ? 'Pass' : 'Não pass') + '</span>' +
+      ' · direção: ' + (ml.direction || '—') + ' · score: ' + (ml.score != null ? ml.score : '—');
+    const factors = (ml.factorActive || []).join(', ') || '—';
+    let mlHtml = '<thead><tr><th>Métrica</th><th>Valor</th></tr></thead><tbody>';
+    mlHtml += '<tr><td>Fatores ativos</td><td>' + factors + '</td></tr>';
+    mlHtml += '<tr><td>P modelo t1 / t2</td><td>' + fmtP(ml.modelP1) + ' / ' + fmtP(ml.modelP2) + '</td></tr>';
+    mlHtml += '<tr><td>P implícita t1 / t2</td><td>' + fmtP(ml.impliedP1) + ' / ' + fmtP(ml.impliedP2) + '</td></tr>';
+    mlHtml += '<tr><td>Edge t1 / t2 (%)</td><td>' + n2(ml.t1Edge) + ' / ' + n2(ml.t2Edge) + '</td></tr>';
+    mlHtml += '<tr><td>factorCount</td><td>' + (ml.factorCount != null ? ml.factorCount : '—') + '</td></tr>';
+    mlHtml += '</tbody>';
+    document.getElementById('res-ml-table').innerHTML = mlHtml;
+
+    const en = data.enrichSummary || {};
+    const f1 = en.form1 || {};
+    const f2 = en.form2 || {};
+    const h2h = en.h2h || {};
+    document.getElementById('res-enrich').innerHTML =
+      '<strong>' + (m.team1 || 'T1') + '</strong> forma: ' + (f1.winRate != null ? f1.winRate : '—') + '% WR' +
+      (f1.recent && f1.recent.length ? ' · últimos: ' + f1.recent.join('') : '') + '<br/>' +
+      '<strong>' + (m.team2 || 'T2') + '</strong> forma: ' + (f2.winRate != null ? f2.winRate : '—') + '% WR' +
+      (f2.recent && f2.recent.length ? ' · últimos: ' + f2.recent.join('') : '') + '<br/>' +
+      'H2H: ' + (h2h.totalMatches != null ? h2h.totalMatches : 0) + ' jogos · ' +
+      (m.team1 || 'T1') + ' ' + (h2h.t1Wins != null ? h2h.t1Wins : 0) + ' × ' +
+      (h2h.t2Wins != null ? h2h.t2Wins : 0) + ' ' + (m.team2 || 'T2') +
+      '<br/>Movimento de odds (pontos no DB): ' + (en.oddsMovementPoints != null ? en.oddsMovementPoints : 0);
+
+    const da = data.draftAnalysis || {};
+    const ds = document.getElementById('res-draft-summary');
+    if (da.compScore != null && !isNaN(da.compScore)) {
+      ds.textContent = 'Comp score (média WR pro — t1 vs t2): ' + (da.compScore > 0 ? '+' : '') + da.compScore.toFixed(2) + ' pp · ' +
+        'médias ' + (da.t1Avg != null ? da.t1Avg : '—') + '% vs ' + (da.t2Avg != null ? da.t2Avg : '—') +
+        '% (amostra ~' + (da.t1Sample != null ? da.t1Sample : '?') + ' / ~' + (da.t2Sample != null ? da.t2Sample : '?') + ' jogos por pick)';
+    } else {
+      ds.textContent = 'Comp score: indisponível (preenche os 5 campeões nos dois times com dados em pro_champ_stats, ou DB vazio).';
+    }
+
+    let dh = '<thead><tr><th>Rota</th><th>T1 champ</th><th>WR%</th><th>n</th><th>T2 champ</th><th>WR%</th><th>n</th></tr></thead><tbody>';
+    (da.rolesDetail || []).forEach(function (row) {
+      dh += '<tr><td>' + row.role + '</td>' +
+        '<td>' + (row.t1Champion || '—') + (row.t1Fallback ? ' *' : '') + '</td>' +
+        '<td>' + (row.t1WinRate != null ? row.t1WinRate : '—') + '</td>' +
+        '<td>' + (row.t1Total != null ? row.t1Total : '—') + '</td>' +
+        '<td>' + (row.t2Champion || '—') + (row.t2Fallback ? ' *' : '') + '</td>' +
+        '<td>' + (row.t2WinRate != null ? row.t2WinRate : '—') + '</td>' +
+        '<td>' + (row.t2Total != null ? row.t2Total : '—') + '</td></tr>';
+    });
+    dh += '</tbody>';
+    document.getElementById('res-draft-table').innerHTML = dh;
+    const foot = document.getElementById('res-draft-foot');
+    const hasFb = (da.rolesDetail || []).some(function (row) {
+      return row.t1Fallback || row.t2Fallback;
+    });
+    foot.textContent = hasFb ? '* WR em outra role (fallback) quando não há linha exata no DB.' : '';
+  }
+
+  function fmtP(x) {
+    if (x == null || isNaN(x)) return '—';
+    return (Math.round(x * 1000) / 10) + '%';
+  }
+  function n2(x) {
+    if (x == null || isNaN(x)) return '—';
+    return (Math.round(x * 10) / 10);
+  }
+
+  btn.addEventListener('click', function () {
+    showErr('');
+    const team1 = document.getElementById('team1').value.trim();
+    const team2 = document.getElementById('team2').value.trim();
+    const odd1 = parseFloat(String(document.getElementById('odd1').value).replace(',', '.'));
+    const odd2 = parseFloat(String(document.getElementById('odd2').value).replace(',', '.'));
+    const format = document.getElementById('format').value.trim();
+    const league = leagueEl.value.trim();
+    const kfRaw = document.getElementById('kellyFrac').value.trim();
+    const kellyFrac = kfRaw === '' ? undefined : parseFloat(kfRaw.replace(',', '.'));
+
+    if (!team1 || !team2) {
+      showErr('Informe os dois times.');
+      return;
+    }
+    if (!isFinite(odd1) || !isFinite(odd2) || odd1 <= 1 || odd2 <= 1) {
+      showErr('Odds decimais devem ser maiores que 1.');
+      return;
+    }
+
+    const body = {
+      team1: team1,
+      team2: team2,
+      odd1: odd1,
+      odd2: odd2,
+      format: format || undefined,
+      league: league || undefined,
+      draft: collectDraft()
+    };
+    if (kellyFrac != null && isFinite(kellyFrac)) body.kellyFrac = kellyFrac;
+
+    btn.disabled = true;
+    fetch('/lol/ev-manual', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    })
+      .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, status: r.status, j: j }; }); })
+      .then(function (x) {
+        if (!x.ok) {
+          showErr(x.j.error || ('HTTP ' + x.status));
+          return;
+        }
+        render(x.j);
+      })
+      .catch(function (e) {
+        showErr(e.message || String(e));
+      })
+      .finally(function () {
+        btn.disabled = false;
+      });
+  });
+})();
+</script>
+</body>
+</html>
