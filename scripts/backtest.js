@@ -316,6 +316,134 @@ async function main() {
     else console.log('  ❌ CLV negativo — apostas pioram após o bet (sem edge ou timing ruim)');
   }
 
+  // ── Breakdown temporal mensal ──
+  const byMonth = {};
+  for (const tip of tips) {
+    if (!tip.sent_at) continue;
+    const month = tip.sent_at.slice(0, 7); // YYYY-MM
+    if (!byMonth[month]) byMonth[month] = newBucket();
+    const s = parseFloat(tip.stake) || 1;
+    const o = parseFloat(tip.odds)  || 1;
+    const isWin = tip.result === 'win';
+    byMonth[month].total++;
+    byMonth[month].staked += s;
+    byMonth[month].profit += isWin ? s * (o - 1) : -s;
+    if (isWin) byMonth[month].wins++;
+  }
+  const monthKeys = Object.keys(byMonth).sort();
+  if (monthKeys.length > 1) {
+    console.log('\n── ROI MENSAL ──');
+    console.log('  Mês     | Tips | WR     | ROI       | P&L');
+    console.log('  --------|------|--------|-----------|--------');
+    let cumulProfit = 0;
+    for (const m of monthKeys) {
+      const b = byMonth[m];
+      const r = b.staked > 0 ? (b.profit / b.staked * 100) : 0;
+      const w = b.total > 0 ? (b.wins / b.total * 100) : 0;
+      cumulProfit += b.profit;
+      const roi = r >= 0 ? `+${r.toFixed(1)}%` : `${r.toFixed(1)}%`;
+      const pnl = b.profit >= 0 ? `+${b.profit.toFixed(2)}u` : `${b.profit.toFixed(2)}u`;
+      const icon = r >= 5 ? '✅' : r >= 0 ? '🟡' : '❌';
+      console.log(`  ${m} | ${String(b.total).padStart(4)} | ${w.toFixed(1).padStart(5)}% | ${roi.padStart(9)} | ${pnl} ${icon}`);
+    }
+    const cumulRoi = metrics.totalStaked > 0 ? (metrics.totalProfit / metrics.totalStaked * 100) : 0;
+    const cumulWr  = metrics.total > 0 ? (metrics.wins / metrics.total * 100) : 0;
+    console.log(`  ${'Cumul.'.padEnd(8)}| ${String(metrics.total).padStart(4)} | ${cumulWr.toFixed(1).padStart(5)}% | ${(cumulRoi >= 0 ? '+' : '') + cumulRoi.toFixed(1) + '%'} | ${cumulProfit >= 0 ? '+' : ''}${cumulProfit.toFixed(2)}u`);
+  }
+
+  // ── Walk-forward LoL: simulação no histórico de match_results ──
+  const lolMatches = db.prepare(
+    "SELECT * FROM match_results WHERE game='lol' ORDER BY resolved_at ASC"
+  ).all();
+
+  if (lolMatches.length >= 50) {
+    console.log('\n── WALK-FORWARD LoL (simulação em match_results, sem look-ahead) ──');
+
+    const wForm = db.prepare("SELECT weight FROM ml_factor_weights WHERE factor='forma'").get()?.weight || 0.25;
+    const wH2h  = db.prepare("SELECT weight FROM ml_factor_weights WHERE factor='h2h'").get()?.weight  || 0.30;
+    const splitIdx = Math.floor(lolMatches.length * 0.7);
+
+    let wfCorrect = 0, wfTotal = 0, wfPassed = 0;
+    const wfByLeague = {};
+
+    const sigmoid = x => 1 / (1 + Math.exp(-x));
+
+    for (let i = splitIdx; i < lolMatches.length; i++) {
+      const m = lolMatches[i];
+      const t1 = m.team1.toLowerCase(), t2 = m.team2.toLowerCase();
+      const cutoff = m.resolved_at;
+
+      const d45 = new Date(cutoff); d45.setDate(d45.getDate() - 45);
+      const formCutoff = d45.toISOString().slice(0, 19).replace('T', ' ');
+
+      const form1 = lolMatches.slice(0, i).filter(mm =>
+        (mm.team1.toLowerCase() === t1 || mm.team2.toLowerCase() === t1) &&
+        mm.resolved_at >= formCutoff && mm.resolved_at < cutoff
+      );
+      const form2 = lolMatches.slice(0, i).filter(mm =>
+        (mm.team1.toLowerCase() === t2 || mm.team2.toLowerCase() === t2) &&
+        mm.resolved_at >= formCutoff && mm.resolved_at < cutoff
+      );
+
+      if (form1.length < 2 || form2.length < 2) continue;
+
+      const wr1 = form1.filter(mm => mm.winner?.toLowerCase() === t1).length / form1.length * 100;
+      const wr2 = form2.filter(mm => mm.winner?.toLowerCase() === t2).length / form2.length * 100;
+
+      const d90 = new Date(cutoff); d90.setDate(d90.getDate() - 90);
+      const h2hCutoff = d90.toISOString().slice(0, 19).replace('T', ' ');
+
+      const h2h = lolMatches.slice(0, i).filter(mm => {
+        const mt1 = mm.team1.toLowerCase(), mt2 = mm.team2.toLowerCase();
+        return ((mt1 === t1 && mt2 === t2) || (mt1 === t2 && mt2 === t1)) &&
+               mm.resolved_at >= h2hCutoff && mm.resolved_at < cutoff;
+      });
+      const h2hT1 = h2h.filter(mm => mm.winner?.toLowerCase() === t1).length;
+      const h2hTot = h2h.length;
+      const fH2h = h2hTot > 0 ? ((h2hT1 / h2hTot) - 0.5) * 100 : 0;
+
+      const scorePoints = (wr1 - wr2) * wForm + fH2h * wH2h;
+      const p1 = sigmoid(scorePoints * 0.05);
+
+      const predWinner = p1 >= 0.5 ? t1 : t2;
+      const actual = m.winner?.toLowerCase();
+      if (!actual) continue;
+
+      const isCorrect = predWinner === actual;
+      wfTotal++;
+      if (isCorrect) wfCorrect++;
+      // conta como "passou" quando edge > 3pp (simulando filtro do bot)
+      const edge = Math.abs(p1 - 0.5) * 100;
+      if (edge >= 3) wfPassed++;
+
+      const league = m.league || 'other';
+      if (!wfByLeague[league]) wfByLeague[league] = { correct: 0, total: 0 };
+      wfByLeague[league].total++;
+      if (isCorrect) wfByLeague[league].correct++;
+    }
+
+    const wfAcc = wfTotal ? (wfCorrect / wfTotal * 100).toFixed(1) : 0;
+    const passPct = wfTotal ? (wfPassed / wfTotal * 100).toFixed(1) : 0;
+    console.log(`  Pesos: forma=${wForm} h2h=${wH2h}`);
+    console.log(`  Conjunto de teste: ${wfTotal} partidas (${splitIdx}-${lolMatches.length})`);
+    console.log(`  Acurácia geral: ${wfCorrect}/${wfTotal} (${wfAcc}%)`);
+    console.log(`  Com edge ≥3pp (tips simuladas): ${wfPassed} (${passPct}%)`);
+
+    const topLeagues = Object.entries(wfByLeague)
+      .filter(([, v]) => v.total >= 5)
+      .sort((a, b) => b[1].total - a[1].total)
+      .slice(0, 10);
+
+    if (topLeagues.length) {
+      console.log('\n  Por liga:');
+      for (const [league, v] of topLeagues) {
+        const acc = (v.correct / v.total * 100).toFixed(1);
+        const bar = '█'.repeat(Math.round(v.correct / v.total * 10));
+        console.log(`    ${league.padEnd(35)} ${v.correct}/${v.total} (${acc}%)  ${bar}`);
+      }
+    }
+  }
+
   // ── Recomendações automáticas ──
   console.log('\n── RECOMENDAÇÕES ──');
   const esportsTips = tips.filter(t => t.sport === 'esports' && t.result);
@@ -346,6 +474,9 @@ async function main() {
     }
   } else {
     console.log(`  → Sample size insuficiente (${esportsTips.length} esports tips). Mínimo 20 para recomendações.`);
+    if (lolMatches.length >= 50) {
+      console.log(`  → Rode: node scripts/train.js --sport lol  para treinar pesos com ${lolMatches.length} partidas do histórico.`);
+    }
   }
 
   console.log('\n=== Fim do Backtest ===\n');

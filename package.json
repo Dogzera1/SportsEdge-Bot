@@ -9,6 +9,8 @@
     "bot": "node bot.js",
     "dev": "nodemon server.js & nodemon bot.js",
     "backtest": "node scripts/backtest.js",
+    "train": "node scripts/train.js",
+    "predict": "node scripts/predict.js",
     "audit-mma": "node scripts/audit-mma-tips.js"
   },
   "dependencies": {
