@@ -964,6 +964,12 @@ async function runAutoAnalysis() {
   // Caches compartilhados para CLV e Updates
   const sharedCaches = { esports: lolRaw || [] };
 
+  // Dota 2: Executa análise sequencial após LoL
+  if (SPORTS['esports']?.enabled) {
+    await new Promise(r => setTimeout(r, 5000));
+    await pollDota().catch(e => log('ERROR', 'AUTO', `Dota2 unified: ${e.message}`));
+  }
+
   // MMA: Executa análise sequencial após Esports
   if (SPORTS['mma']?.enabled) {
     await new Promise(r => setTimeout(r, 5000));
@@ -1114,10 +1120,15 @@ async function settleCompletedTips() {
           if (sport === 'football') {
             endpoint = `/football-result?matchId=${encodeURIComponent(tip.match_id)}&team1=${encodeURIComponent(tip.participant1 || '')}&team2=${encodeURIComponent(tip.participant2 || '')}&sentAt=${encodeURIComponent(tip.sent_at || '')}`;
           } else {
-            const isPanda = String(tip.match_id).startsWith('ps_');
-            endpoint = isPanda
-              ? `/ps-result?matchId=${encodeURIComponent(tip.match_id)}`
-              : `/match-result?matchId=${encodeURIComponent(tip.match_id)}&game=lol`;
+            const mid = String(tip.match_id);
+            if (mid.startsWith('dota2_')) {
+              endpoint = `/dota-result?matchId=${encodeURIComponent(mid)}`;
+            } else {
+              const isPanda = mid.startsWith('ps_');
+              endpoint = isPanda
+                ? `/ps-result?matchId=${encodeURIComponent(mid)}`
+                : `/match-result?matchId=${encodeURIComponent(mid)}&game=lol`;
+            }
           }
 
           const result = await serverGet(endpoint).catch(() => null);
@@ -2340,7 +2351,7 @@ async function handleAdmin(token, chatId, command) {
   } else if (cmd === '/reanalise') {
     if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
     const cleared = {};
-    if (sport === 'esports' || sport === 'all') { analyzedMatches.clear(); cleared.esports = true; }
+    if (sport === 'esports' || sport === 'all') { analyzedMatches.clear(); analyzedDota.clear(); cleared.esports = true; }
     if (sport === 'mma'     || sport === 'all') { analyzedMma.clear();     cleared.mma = true; }
     if (sport === 'tennis'  || sport === 'all') { analyzedTennis.clear();  cleared.tennis = true; }
     if (sport === 'football'|| sport === 'all') { analyzedFootball.clear(); cleared.football = true; }
@@ -3676,6 +3687,206 @@ function findEspnFight(espnFights, team1, team2) {
     const rev = (e1.includes(n2) || n2.includes(e1)) && (e2.includes(n1) || n1.includes(e2));
     return fwd || rev;
   }) || null;
+}
+
+// ── Dota 2 Auto-analysis ──
+async function pollDota() {
+  const esportsConfig = SPORTS['esports'];
+  if (!esportsConfig?.enabled || !esportsConfig?.token) return;
+  const token = esportsConfig.token;
+  const DOTA_INTERVAL = 4 * 60 * 60 * 1000;
+
+  try {
+    log('INFO', 'AUTO-DOTA', 'Iniciando verificação de partidas Dota 2...');
+    const matches = await serverGet('/dota-matches').catch(() => []);
+    if (!Array.isArray(matches) || !matches.length) {
+      log('INFO', 'AUTO-DOTA', 'Sem partidas Dota 2 disponíveis');
+      return;
+    }
+
+    const now = Date.now();
+    log('INFO', 'AUTO-DOTA', `${matches.length} partidas (${matches.filter(m => m.status === 'live').length} live)`);
+
+    for (const match of matches) {
+      const key = `dota2_${match.id}`;
+      const prev = analyzedDota.get(key);
+      if (prev?.tipSent) continue;
+      if (prev && (now - prev.ts < DOTA_INTERVAL)) continue;
+
+      const matchTs = match.time ? new Date(match.time).getTime() : 0;
+      if (matchTs && matchTs < now) continue;
+      if (!matchTs || matchTs > now + 7 * 24 * 60 * 60 * 1000) continue;
+
+      let o = match.odds;
+      if (!o?.t1 || !o?.t2) {
+        o = await serverGet(`/odds?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}&game=dota2`).catch(() => null);
+      }
+      if (!o?.t1 || !o?.t2) {
+        log('DEBUG', 'AUTO-DOTA', `Sem odds: ${match.team1} vs ${match.team2}`);
+        analyzedDota.set(key, { ts: now, tipSent: false, noEdge: true });
+        continue;
+      }
+
+      const [form1, form2, h2h] = await Promise.all([
+        serverGet(`/team-form?team=${encodeURIComponent(match.team1)}&game=dota2`).catch(() => null),
+        serverGet(`/team-form?team=${encodeURIComponent(match.team2)}&game=dota2`).catch(() => null),
+        serverGet(`/h2h?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}&game=dota2`).catch(() => null)
+      ]);
+
+      const enrich = {
+        form1: form1?.winRate != null ? { winRate: form1.winRate / 100, recent: form1.recent || [] } : null,
+        form2: form2?.winRate != null ? { winRate: form2.winRate / 100, recent: form2.recent || [] } : null,
+        h2h: h2h?.totalMatches > 0 ? { t1Wins: h2h.t1Wins, t2Wins: h2h.t2Wins, total: h2h.totalMatches } : null,
+        oddsMovement: null
+      };
+      const mlResult = esportsPreFilter(match, o, enrich, false, '', null);
+      if (!mlResult.pass) {
+        log('INFO', 'AUTO-DOTA', `Pré-filtro: edge insuficiente (${mlResult.score.toFixed(1)}pp) para ${match.team1} vs ${match.team2}`);
+        analyzedDota.set(key, { ts: now, tipSent: false, noEdge: true });
+        continue;
+      }
+
+      const r1 = 1 / parseFloat(o.t1), r2 = 1 / parseFloat(o.t2);
+      const overround = r1 + r2;
+      const djP1 = (r1 / overround * 100).toFixed(1);
+      const djP2 = (r2 / overround * 100).toFixed(1);
+      const marginPct = ((overround - 1) * 100).toFixed(1);
+      const modelP1 = (mlResult.modelP1 * 100).toFixed(1);
+      const modelP2 = (mlResult.modelP2 * 100).toFixed(1);
+      const hasModelData = mlResult.factorCount > 0;
+
+      const formSection = [
+        form1 ? `${match.team1}: ${form1.wins}V-${form1.losses}D (${form1.winRate}%) | Série: ${form1.streak} | ${(form1.recent||[]).join('')}` : `${match.team1}: sem dados`,
+        form2 ? `${match.team2}: ${form2.wins}V-${form2.losses}D (${form2.winRate}%) | Série: ${form2.streak} | ${(form2.recent||[]).join('')}` : `${match.team2}: sem dados`,
+      ].join('\n');
+      const h2hSection = h2h?.totalMatches > 0
+        ? `H2H (${h2h.totalMatches} jogos): ${match.team1} ${h2h.t1Wins}V x ${h2h.t2Wins}V ${match.team2}`
+        : 'H2H: sem histórico';
+
+      const matchTime = match.time ? new Date(match.time).toLocaleString('pt-BR', {
+        timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'
+      }) : '—';
+
+      const fairLabel = hasModelData ? 'P modelo (forma+H2H)' : 'Fair odds (de-juice)';
+      const evThreshold = hasModelData ? 5 : 6;
+      const minOdds = parseFloat(process.env.DOTA_MIN_ODDS || '1.30');
+      const maxOdds = parseFloat(process.env.DOTA_MAX_ODDS || '5.00');
+
+      const prompt = `Você é um analista especializado em Dota 2 esports. Analise esta partida e identifique edge real se existir.
+
+PARTIDA: ${match.team1} vs ${match.team2}
+Liga: ${match.league} | Formato: ${match.format || 'Bo?'} | Data: ${matchTime} (BRT)
+Placar série: ${match.score1 || 0}-${match.score2 || 0}
+
+ODDS (${o.bookmaker || 'SX.Bet'}):
+${match.team1}: ${o.t1} | ${match.team2}: ${o.t2}
+Margem: ${marginPct}% | P de-juiced: ${match.team1}=${djP1}% | ${match.team2}=${djP2}%
+${fairLabel}: ${match.team1}=${modelP1}% | ${match.team2}=${modelP2}%
+
+FORMA RECENTE (DB interno, últimos 45 dias):
+${formSection}
+${h2hSection}
+
+ANÁLISE (seja específico — Dota 2):
+1. Forma e momentum: série atual, consistência.
+2. Estilo: teamfight/Roshan vs split push/farm — qual favorece cada time no meta atual.
+3. Meta do patch: quais estilos/heróis dominam e qual time se adapta melhor.
+4. Vantagem individual: carries, midlaners, suportes chave.
+5. H2H e contexto da série (se aplicável).
+
+REGRAS: Odds ${minOdds}–${maxOdds} | EV ≥ ${evThreshold}% (sua estimativa de P vs odd de-juiced)
+
+DECISÃO FINAL (escolha UMA):
+TIP_ML:[time]@[odd]|EV:[%]|STAKE:[1-3]u|CONF:[ALTA/MÉDIA/BAIXA]
+ou SEM_EDGE
+
+Máximo 200 palavras.`;
+
+      log('INFO', 'AUTO-DOTA', `Analisando: ${match.team1} vs ${match.team2} (${match.league}) | mlEdge=${mlResult.score.toFixed(1)}pp`);
+      analyzedDota.set(key, { ts: now, tipSent: false, noEdge: false });
+
+      let iaResp = '';
+      try {
+        const iaRaw = await serverPost('/claude', { prompt, max_tokens: 400 }).catch(() => null);
+        iaResp = iaRaw?.result || iaRaw?.text || '';
+      } catch(e) {
+        log('WARN', 'AUTO-DOTA', `IA erro: ${e.message}`);
+        continue;
+      }
+
+      const tipMatch = typeof iaResp === 'string'
+        ? iaResp.match(/TIP_ML:([^@]+)@([0-9.]+)\|EV:([0-9.+%-]+)\|STAKE:([0-9.]+u?)\|CONF:(ALTA|M[ÉE]DIA|BAIXA)/i)
+        : null;
+
+      if (!tipMatch) {
+        log('INFO', 'AUTO-DOTA', `Sem tip: ${match.team1} vs ${match.team2}`);
+        analyzedDota.set(key, { ts: now, tipSent: false, noEdge: true });
+        await _sleep(2000);
+        continue;
+      }
+
+      const tipTeam = tipMatch[1].trim();
+      const tipOdd = tipMatch[2].trim();
+      const tipEV = tipMatch[3].trim();
+      const tipConf = (tipMatch[5] || 'MÉDIA').trim().toUpperCase().replace('MEDIA', 'MÉDIA');
+
+      const oddVal = parseFloat(tipOdd);
+      if (oddVal < minOdds || oddVal > maxOdds) {
+        log('INFO', 'AUTO-DOTA', `Odd fora do range (${oddVal}): pulando`);
+        analyzedDota.set(key, { ts: now, tipSent: false, noEdge: true });
+        await _sleep(2000); continue;
+      }
+      const evVal = parseFloat(String(tipEV).replace('%', '').replace('+', ''));
+      if (evVal < evThreshold) {
+        log('INFO', 'AUTO-DOTA', `EV insuficiente (${evVal}% < ${evThreshold}%): pulando`);
+        analyzedDota.set(key, { ts: now, tipSent: false, noEdge: true });
+        await _sleep(2000); continue;
+      }
+
+      const isT1bet = norm(tipTeam).includes(norm(match.team1)) || norm(match.team1).includes(norm(tipTeam));
+      const kellyFraction = tipConf === 'ALTA' ? 0.25 : tipConf === 'BAIXA' ? 0.10 : 1/6;
+      const modelPForKelly = mlResult.modelP1 > 0 ? (isT1bet ? mlResult.modelP1 : mlResult.modelP2) : null;
+      const tipStake = modelPForKelly
+        ? calcKellyWithP(modelPForKelly, tipOdd, kellyFraction)
+        : calcKellyFraction(tipEV, tipOdd, kellyFraction);
+      if (tipStake === '0u') { log('INFO', 'AUTO-DOTA', `Kelly negativo: ${tipTeam} @ ${tipOdd}`); await _sleep(2000); continue; }
+
+      const riskAdj = await applyGlobalRisk('esports', parseFloat(String(tipStake).replace('u', '')) || 0, match.league);
+      if (!riskAdj.ok) { log('INFO', 'RISK', `dota2: bloqueada (${riskAdj.reason})`); continue; }
+      const tipStakeAdj = `${riskAdj.units.toFixed(1).replace(/\.0$/, '')}u`;
+
+      const matchId = `dota2_${match.id}`;
+      const msg = `🎮 *DOTA 2 — ${match.league}*\n${match.team1} vs ${match.team2} | ${match.format || ''}\n📅 ${matchTime} BRT\n\n✅ *TIP: ${tipTeam} @ ${tipOdd}*\n💰 Stake: ${tipStakeAdj} | EV: ${tipEV} | Conf: ${tipConf}\n🏦 ${o.bookmaker || 'SX.Bet'}`;
+
+      try {
+        await serverPost('/record-tip', {
+          matchId,
+          sport: 'esports',
+          participant1: match.team1,
+          participant2: match.team2,
+          tipParticipant: tipTeam,
+          tipOdds: tipOdd,
+          tipEV,
+          stake: tipStakeAdj,
+          confidence: tipConf,
+          league: match.league,
+          format: match.format || '',
+          game: 'dota2'
+        }, 'esports');
+        for (const [uid, sports] of subscribedUsers) {
+          if (!sports.has('esports')) continue;
+          await sendTelegramMessage(token, uid, msg, { parse_mode: 'Markdown' }).catch(() => {});
+        }
+        log('INFO', 'AUTO-DOTA', `TIP: ${tipTeam} @ ${tipOdd} (${tipStakeAdj})`);
+        analyzedDota.set(key, { ts: now, tipSent: true, noEdge: false });
+      } catch(e) {
+        log('WARN', 'AUTO-DOTA', `Erro ao gravar tip: ${e.message}`);
+      }
+      await _sleep(3000);
+    }
+  } catch(e) {
+    log('ERROR', 'AUTO-DOTA', e.message);
+  }
 }
 
 // ── MMA Auto-analysis loop ──
