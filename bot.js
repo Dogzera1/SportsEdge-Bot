@@ -3684,6 +3684,15 @@ async function pollMma(runOnce = false) {
           log('INFO', 'AUTO-MMA', `Ignorando luta sem data válida: ${fight.team1} vs ${fight.team2}`);
           continue;
         }
+        // Boxe: só tip se faltar no mínimo N dias para a luta (linha de corte antecipada)
+        if (isBoxing) {
+          const boxingMinDays = Math.max(1, Math.min(45, parseInt(process.env.BOXING_MIN_DAYS_BEFORE_FIGHT || '10', 10) || 10));
+          const minMs = boxingMinDays * 24 * 60 * 60 * 1000;
+          if (fightTs - now < minMs) {
+            log('INFO', 'AUTO-MMA', `Boxe: <${boxingMinDays}d até a luta — sem tip: ${fight.team1} vs ${fight.team2}`);
+            continue;
+          }
+        }
         const isThisWeek = fightTs > 0 && fightTs <= endOfWeek;
         // Lutas fora da semana: só analisa, não bloqueia ainda — gate de CONF depois
         if (!isThisWeek) {
