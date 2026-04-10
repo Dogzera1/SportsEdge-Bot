@@ -73,9 +73,12 @@ Bot autônomo de Telegram para análise automática de apostas esportivas, basea
 │    Anthropic Claude — fallback               │
 │    Pré-filtro ML local (lib/ml.js)           │
 │    Pré-filtro ML futebol (lib/football-ml.js)│
+│    Contexto de notícias (lib/news.js)        │
+│    Risk Manager cross-sport (lib/risk-mgr)   │
 │                                              │
 │  Dados gratuitos externos:                   │
 │    ESPN API — MMA records + rankings tênis   │
+│    Google News RSS — lesões/suspensões       │
 │                                              │
 │  sportsedge.db (SQLite via volume Railway)   │
 │  users | events | matches | tips             │
@@ -97,6 +100,7 @@ Bot autônomo de Telegram para análise automática de apostas esportivas, basea
 - Chave OddsPapi — odds esports LoL via 1xBet ([oddspapi.io](https://oddspapi.io), plano free: 250 req/mês) — esports
 - Chave **The Odds API** — odds para futebol, MMA e tênis
 - Chave **API-Football** (`api-sports.io`) — dados de forma, H2H e standings para futebol (free tier: 100 req/dia)
+- Chave **football-data.org** (`FOOTBALL_DATA_TOKEN`) — enriquecimento alternativo para futebol (opcional; free tier disponível)
 - **ESPN API** — gratuita, sem chave; usada automaticamente para MMA e Tênis
 
 ---
@@ -123,6 +127,7 @@ PANDASCORE_TOKEN=seu_token              # PandaScore (obrigatório para sync de 
 THE_ODDS_API_KEY=sua_chave              # The Odds API (odds para futebol, MMA, tênis)
 API_SPORTS_KEY=sua_chave               # API-Football / api-sports.io (forma, H2H, standings, settlement)
                                         # Alias aceito: APIFOOTBALL_KEY
+FOOTBALL_DATA_TOKEN=sua_chave          # football-data.org v4 (enriquecimento alternativo — opcional)
 # Nota: ESPN API é gratuita e sem chave — MMA e Tênis usam automaticamente
 
 # ── Servidor ──
@@ -531,14 +536,22 @@ lol betting/
 ├── start.js            # Launcher: spawna server + bot com auto-restart (backoff exponencial)
 ├── sync-form.js        # Script avulso: sync histórico de partidas (forma/H2H) sem o servidor rodando
 ├── railway.toml        # Deploy Railway (healthcheck TCP, restart on_failure)
+├── nixpacks.toml       # Build config Nixpacks (Railway)
 ├── package.json
 ├── .env                # Credenciais (nunca commitar)
 ├── sportsedge.db       # SQLite (criado automaticamente; path via DB_PATH)
+├── migrations/         # Scripts de migração SQLite
+├── public/             # Dashboard HTML + calculadora EV manual (lol-ev-manual.html)
 └── lib/
     ├── database.js     # Schema SQLite, statements (exato + fuzzy LIKE), índices de performance
     ├── ml.js           # Pré-filtro ML esports (forma, H2H, comp score) — retorna modelP1/P2
-    ├── football-api.js # Wrapper API-Football: forma, H2H, standings, batch fixture cache
+    ├── ml-weights.js   # Pesos dinâmicos do ML — recalculados semanalmente por acurácia por fator
+    ├── risk-manager.js # Risk Manager global: ajusta stake por exposição cross-sport (GLOBAL_RISK_PCT/SPORT_RISK_PCT)
+    ├── news.js         # Google News RSS — contexto de lesões/suspensões/escalações no prompt (sem API key)
+    ├── football-data.js# Wrapper football-data.org v4: enriquecimento alternativo para futebol
     ├── football-ml.js  # Pré-filtro ML futebol: 1X2 + Over/Under via Poisson simplificado
+    ├── tennis-data.js  # Dados ESPN de tênis: rankings ATP/WTA, scoreboard de torneios
+    ├── radar-sport.js  # Wrapper Radar Sport API com cache em memória + throttle
     ├── sports.js       # Registry de esportes (tokens, feature flags)
     └── utils.js        # log, calcKelly, calcKellyFraction, norm, fmtDate, httpGet, safeParse
 ```

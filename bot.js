@@ -509,7 +509,7 @@ async function runAutoAnalysis() {
       lolRaw = await serverGet('/lol-matches').catch(() => []);
       // Inclui 'draft': composições já disponíveis na API Riot antes do jogo começar.
       // Permite análise com draft real + odds pré-jogo (antes de cair para odds ao vivo).
-      const lolLive = Array.isArray(lolRaw) ? lolRaw.filter(m => m.status === 'live' || m.status === 'draft') : [];
+      const lolLive = Array.isArray(lolRaw) ? lolRaw.filter(m => m.status === 'draft') : []; // tips ao vivo desabilitadas
 
       // Deduplicar Riot+PandaScore: se Riot já cobre o mesmo confronto, descarta a cópia PandaScore
       const riotLive = new Set(lolLive.filter(m => !String(m.id).startsWith('ps_')).map(m => `${norm(m.team1)}_${norm(m.team2)}`));
