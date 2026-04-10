@@ -502,6 +502,17 @@ function canonicalMatchId(sport, rawId, opts = {}) {
   return id;
 }
 
+/** ESPN `post` usa data de início; exige fim estimado ≥ sent_at para não pegar H2H antigo. */
+function tennisEspnRecentResultEligibleForTip(r, tipMs) {
+  if (!Number.isFinite(tipMs)) return true;
+  const d = r?.date;
+  if (!d) return true;
+  const startMs = Date.parse(String(d).includes('T') ? String(d) : String(d).replace(' ', 'T'));
+  if (!Number.isFinite(startMs)) return true;
+  const h = Math.max(1, Math.min(14, parseInt(process.env.TENNIS_ESPN_POST_BUFFER_H || '8', 10) || 8));
+  return startMs + h * 3600000 >= tipMs;
+}
+
 /** Remove prefixo interno para comparar com id do The Odds API */
 function stripTheOddsMatchId(raw) {
   let s = String(raw || '').trim();
@@ -1045,23 +1056,34 @@ async function settleCompletedTips() {
             // 2) The Odds (se no futuro houver scores)
             const mid = stripTheOddsMatchId(tip.match_id);
             const s = mid ? scoresById.get(String(mid)) : null;
+            const tipMsTn = tip.sent_at
+              ? Date.parse(String(tip.sent_at).includes('T') ? String(tip.sent_at) : String(tip.sent_at).replace(' ', 'T'))
+              : NaN;
             if (s?.completed && Array.isArray(s.scores) && s.scores.length >= 2) {
-              const a = s.scores[0], b = s.scores[1];
-              const sa = parseFloat(a?.score), sb = parseFloat(b?.score);
-              const winner = (Number.isFinite(sa) && Number.isFinite(sb) && sa !== sb)
-                ? (sa > sb ? a.name : b.name)
-                : null;
-              if (winner) {
-                await serverPost('/settle', { matchId: tip.match_id, winner }, 'tennis');
-                log('INFO', 'SETTLE', `tennis: ${tip.participant1} vs ${tip.participant2} → ${winner}`);
-                settled++;
-                continue;
+              let oddsOldEvent = false;
+              if (Number.isFinite(tipMsTn) && s.commence_time) {
+                const cMs = Date.parse(String(s.commence_time));
+                if (Number.isFinite(cMs) && cMs + 12 * 3600000 < tipMsTn) oddsOldEvent = true;
+              }
+              if (!oddsOldEvent) {
+                const a = s.scores[0], b = s.scores[1];
+                const sa = parseFloat(a?.score), sb = parseFloat(b?.score);
+                const winner = (Number.isFinite(sa) && Number.isFinite(sb) && sa !== sb)
+                  ? (sa > sb ? a.name : b.name)
+                  : null;
+                if (winner) {
+                  await serverPost('/settle', { matchId: tip.match_id, winner }, 'tennis');
+                  log('INFO', 'SETTLE', `tennis: ${tip.participant1} vs ${tip.participant2} → ${winner}`);
+                  settled++;
+                  continue;
+                }
               }
             }
 
             // 3) ESPN (evento atual)
             const res = allResults.find(r => {
               if (!r.winner) return false;
+              if (!tennisEspnRecentResultEligibleForTip(r, tipMsTn)) return false;
               return tennisPairMatchesPlayers(tip.participant1, tip.participant2, r.p1, r.p2);
             });
             if (!res) continue;

@@ -18,6 +18,7 @@ Cada **sport** (`esports`, `mma`, `tennis`, `football`) pode ter token Telegram 
 
 ## 2. Arranque do bot (`bot.js`)
 
+0. **`validateEnv()`** (IIFE no topo): verifica variáveis obrigatórias e opcionais; emite `WARN` no log se ausentes, sem lançar excepção. Cobre `DEEPSEEK_API_KEY`, `ODDS_API_KEY`, tokens Telegram por sport, `ADMIN_KEY`, `PANDASCORE_TOKEN`, `THE_ODDS_API_KEY`, `API_SPORTS_KEY`.
 1. Carrega **`SPORTS`** (`lib/sports.js`) conforme `.env` (enabled + token).
 2. **`loadSubscribedUsers()`** → `GET /users?subscribed=1`; admins em **`ADMIN_USER_IDS`** são auto-inscritos nos sports ativos.
 3. **`loadExistingTips()`** → histórico para maps `analyzedMatches` / `analyzedMma` / `analyzedTennis` / `analyzedFootball` (evita re-tip imediata).
@@ -28,6 +29,8 @@ Cada **sport** (`esports`, `mma`, `tennis`, `football`) pode ter token Telegram 
 8. **A cada 30 minutos**: `checkLineMovement()` (só esports).
 9. **A cada 1 minuto** (se esports ativo): `checkLiveNotifications()`.
 10. **A cada 2 minutos** (esports): refresh forçado de odds para partidas **live** LoL.
+
+> **`server.js`** também executa `validateServerEnv()` antes do `server.listen()` (mesmas variáveis críticas do lado API).
 
 ---
 
@@ -146,7 +149,10 @@ Roda a cada **`SETTLEMENT_INTERVAL`** = **30 min** (fixo no código).
    - `/tennis-scores` (Odds API, se útil)  
    - `fetchEspnTennisEvent` (resultados recentes)  
    - Ordem: **`/tennis-db-result`** (DB + sync ESPN por janela de datas) → scores → fallback ESPN par a par.
-4. **`football`:** ramo de settlement por API externa removido → tips ficam pendentes até outro mecanismo (se existir).
+4. **`football`:** **`GET /football-result?matchId=…&team1=…&team2=…&sentAt=…`**  
+   - Server consulta `match_results` (CSV 2024/25 importado no boot) primeiro por `match_id` exacto; se não encontrar, faz LIKE por nome dos times numa janela de ±4 dias em torno de `sentAt`.  
+   - Após **`/settle`** o server actualiza o Elo dos times (`updateEloMatch`) — só para mercados 1X2 (não O/U); vencedor validado contra nome dos times ou "Draw".  
+   - Body do settle inclui `home` e `away` para o Elo update.
 5. **`esports`:** **`/match-result`** (Riot) ou **`/ps-result`** (PandaScore) → **`/settle`**.
 
 O server em **`/settle`** compara vencedor com `tip_participant` (tênis usa matching de nomes **`tennisSinglePlayerNameMatch`**).
@@ -183,7 +189,11 @@ O server em **`/settle`** compara vencedor com `tip_participant` (tênis usa mat
 - **Intervalos globais de análise / settlement:** topo de `bot.js` (`RE_ANALYZE_INTERVAL`, `SETTLEMENT_INTERVAL`, etc.).
 - **Prompts e parsing de tip:** funções `autoAnalyzeMatch`, blocos `pollMma` / `pollTennis` / `pollFootball`.
 - **Endpoints e caches de odds:** `server.js` (OddsPapi, 429/backoff, `/lol-matches`).
-- **Matching de nomes (tênis):** `lib/tennis-match.js` + `/tennis-db-result` / `/settle` no server.
+- **Matching de nomes (tênis):** `lib/tennis-match.js` + `/tennis-db-result` / `/settle` no server.  
+  - `extractSurname()` trata formatos "Last, First", "J.Sinner" e "J. Sinner".  
+  - `normalizeNameOrder()` converte "Last, First" → "First Last" antes de comparação substring.  
+  - Pipeline: nome exacto → substring → ordem normalizada → sobrenome isolado → último token.
+- **Elo futebol:** `lib/database.js` (`updateEloMatch`); disparo automático no `/settle` após liquidação de mercados 1X2.
 
 ---
 

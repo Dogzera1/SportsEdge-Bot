@@ -603,6 +603,36 @@ function invalidateTennisSettleRowsCache() {
   _tennisSettleRowsCache = { ts: 0, lookback: -1, rows: null };
 }
 
+/** Evita liquidação com H2H antigo: só linhas com jogo terminado depois da tip (slack opcional p/ relógio). */
+function tennisResolvedAtEligibleForSentTip(resolvedAtStr, tipMs) {
+  const resMs = Date.parse(String(resolvedAtStr || '').replace(' ', 'T'));
+  if (!Number.isFinite(resMs)) return false;
+  if (!Number.isFinite(tipMs)) return true;
+  const slackMs = Math.max(0, parseInt(process.env.TENNIS_SETTLE_BEFORE_TIP_SLACK_MS || '0', 10) || 0);
+  return resMs >= tipMs - slackMs;
+}
+
+function pickBestTennisSettleRow(rows, p1, p2, tipMs) {
+  let best = null;
+  let bestDist = Infinity;
+  for (const r of rows) {
+    if (!tennisPairMatchesPlayers(p1, p2, r.team1, r.team2)) continue;
+    if (!tennisResolvedAtEligibleForSentTip(r.resolved_at, tipMs)) continue;
+    const resMs = Date.parse(String(r.resolved_at || '').replace(' ', 'T'));
+    if (Number.isFinite(tipMs) && Number.isFinite(resMs)) {
+      const dist = Math.abs(resMs - tipMs);
+      if (dist < bestDist) {
+        bestDist = dist;
+        best = r;
+      }
+    } else if (Number.isFinite(resMs)) {
+      const bestMs = best ? Date.parse(String(best.resolved_at || '').replace(' ', 'T')) : -Infinity;
+      if (!best || resMs > bestMs) best = r;
+    }
+  }
+  return best;
+}
+
 let _tennisEspnMatchSyncLastMs = 0;
 const _tennisEspnWindowSyncAt = new Map();
 
@@ -4999,21 +5029,7 @@ const server = http.createServer(async (req, res) => {
         ? Date.parse(sentRaw.includes('T') ? sentRaw : sentRaw.replace(' ', 'T'))
         : NaN;
 
-      let best = null;
-      let bestDist = Infinity;
-      for (const r of rows) {
-        if (!tennisPairMatchesPlayers(p1, p2, r.team1, r.team2)) continue;
-        const resMs = Date.parse(String(r.resolved_at || '').replace(' ', 'T'));
-        if (Number.isFinite(tipMs) && Number.isFinite(resMs)) {
-          const dist = Math.abs(resMs - tipMs);
-          if (dist < bestDist) {
-            bestDist = dist;
-            best = r;
-          }
-        } else if (Number.isFinite(resMs)) {
-          if (!best || resMs > Date.parse(String(best.resolved_at || '').replace(' ', 'T'))) best = r;
-        }
-      }
+      let best = pickBestTennisSettleRow(rows, p1, p2, tipMs);
 
       if (best?.winner) {
         sendJson(res, {
@@ -5029,21 +5045,7 @@ const server = http.createServer(async (req, res) => {
 
       await syncTennisEspnCompletedAroundSentAt(sentAt);
       const rows2 = getTennisSettleRowsCached(lookbackDays);
-      best = null;
-      bestDist = Infinity;
-      for (const r of rows2) {
-        if (!tennisPairMatchesPlayers(p1, p2, r.team1, r.team2)) continue;
-        const resMs = Date.parse(String(r.resolved_at || '').replace(' ', 'T'));
-        if (Number.isFinite(tipMs) && Number.isFinite(resMs)) {
-          const dist = Math.abs(resMs - tipMs);
-          if (dist < bestDist) {
-            bestDist = dist;
-            best = r;
-          }
-        } else if (Number.isFinite(resMs)) {
-          if (!best || resMs > Date.parse(String(best.resolved_at || '').replace(' ', 'T'))) best = r;
-        }
-      }
+      best = pickBestTennisSettleRow(rows2, p1, p2, tipMs);
       if (best?.winner) {
         sendJson(res, {
           resolved: true,
@@ -5059,21 +5061,7 @@ const server = http.createServer(async (req, res) => {
       const spanCfg = Math.min(90, Math.max(21, parseInt(process.env.TENNIS_ESPN_RECENT_FALLBACK_DAYS || '50', 10) || 50));
       await syncTennisEspnCompletedRecentSpan(spanCfg);
       const rows3 = getTennisSettleRowsCached(lookbackDays);
-      best = null;
-      bestDist = Infinity;
-      for (const r of rows3) {
-        if (!tennisPairMatchesPlayers(p1, p2, r.team1, r.team2)) continue;
-        const resMs = Date.parse(String(r.resolved_at || '').replace(' ', 'T'));
-        if (Number.isFinite(tipMs) && Number.isFinite(resMs)) {
-          const dist = Math.abs(resMs - tipMs);
-          if (dist < bestDist) {
-            bestDist = dist;
-            best = r;
-          }
-        } else if (Number.isFinite(resMs)) {
-          if (!best || resMs > Date.parse(String(best.resolved_at || '').replace(' ', 'T'))) best = r;
-        }
-      }
+      best = pickBestTennisSettleRow(rows3, p1, p2, tipMs);
       if (best?.winner) {
         sendJson(res, {
           resolved: true,
