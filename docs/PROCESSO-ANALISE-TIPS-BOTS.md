@@ -93,7 +93,7 @@ Paralelo: **`fetchEspnMmaFights()`** (scoreboard UFC na ESPN).
 | Deve existir na ESPN (UFC) | Sim — senão *Pulando não-UFC* | Não exige ESPN |
 | Luta no passado | Ignora | Ignora |
 | Data inválida ou > 60 dias | Ignora | Ignora |
-| **Prazo mínimo antes do combate** | — | Só analisa se faltam **≥ N dias** (default **10**, `BOXING_MIN_DAYS_BEFORE_FIGHT`) |
+| **Janela até o combate** | — | Só analisa boxe se a luta for em **≤ N dias** (default **10**, `BOXING_MAX_DAYS_BEFORE_FIGHT`; além disso pula) |
 | Intervalo entre re-análises | **6 h** (`MMA_INTERVAL`) | Idem |
 
 ### 5.2 Dados e modelo
@@ -174,7 +174,9 @@ O server em **`/settle`** compara vencedor com `tip_participant` (tênis usa mat
 
 | Variável | Efeito |
 |----------|--------|
-| `BOXING_MIN_DAYS_BEFORE_FIGHT` | Boxe: só tip se faltam ≥ N dias (default 10). |
+| `BOXING_MAX_DAYS_BEFORE_FIGHT` | Boxe: só analisa se faltam **≤ N dias** para a luta (default 10). |
+| `MMA_MAX_IA_CALLS_PER_CYCLE` | MMA/boxe: máx. chamadas IA por ciclo do `pollMma` (default **18**; `0` = sem limite). |
+| `ADMIN_KEY` | Só no **server**: um aviso `[SEC]` no boot se ausente (bot não duplica). |
 | `TENNIS_MIN_EDGE` | Limiar do pré-filtro ML (tênis). |
 | `TENNIS_UNSETTLED_DAYS` | Janela de tips pendentes para liquidação tênis. |
 | `FOOTBALL_EV_THRESHOLD`, `FOOTBALL_DRAW_MIN_ODDS` | Gates futebol. |

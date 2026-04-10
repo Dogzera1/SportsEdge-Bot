@@ -68,6 +68,7 @@ const analyzedMatches = new Map();
 const analyzedMma = new Map();
 const analyzedTennis = new Map();
 const analyzedFootball = new Map();
+const analyzedDota = new Map();
 
 function _sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
@@ -391,8 +392,9 @@ async function loadExistingTips() {
   try {
     // Importante: usar histórico (inclui settled) para evitar reenvio após restart.
     // Se usar apenas unsettled, tips já liquidadas voltam a ser analisadas/enviadas em jogos que reaparecem nas APIs.
-    const [esportsTips, mmaTips, tennisTips, footballTips] = await Promise.all([
+    const [esportsTips, dotaTips, mmaTips, tennisTips, footballTips] = await Promise.all([
       serverGet('/tips-history?limit=400', 'esports').catch(() => []),
+      serverGet('/tips-history?limit=400&game=dota2', 'esports').catch(() => []),
       serverGet('/tips-history?limit=400', 'mma').catch(() => []),
       serverGet('/tips-history?limit=400', 'tennis').catch(() => []),
       serverGet('/tips-history?limit=400', 'football').catch(() => [])
@@ -401,14 +403,19 @@ async function loadExistingTips() {
       for (const tip of esportsTips) {
         if (!tip.match_id) continue;
         const mid = String(tip.match_id);
-        const rawId = mid.startsWith('lol_') ? mid.slice(4) : mid; // match.id do endpoint (/lol-matches)
-        // Keys usados no bot:
-        // - live/draft: `${match.game}_${match.id}` → "lol_<id>" / "lol_ps_<id>"
-        // - upcoming:   `upcoming_${match.game}_${match.id}` → "upcoming_lol_<id>"
+        if (mid.startsWith('dota2_')) continue; // tratado em dotaTips
+        const rawId = mid.startsWith('lol_') ? mid.slice(4) : mid;
         analyzedMatches.set(`lol_${rawId}`, { ts: Date.now(), tipSent: true });
         analyzedMatches.set(`upcoming_lol_${rawId}`, { ts: Date.now(), tipSent: true });
       }
       if (esportsTips.length) log('INFO', 'BOOT', `LoL: ${esportsTips.length} tips existentes carregadas`);
+    }
+    if (Array.isArray(dotaTips)) {
+      for (const tip of dotaTips) {
+        if (!tip.match_id) continue;
+        analyzedDota.set(`dota2_${tip.match_id}`, { ts: Date.now(), tipSent: true });
+      }
+      if (dotaTips.length) log('INFO', 'BOOT', `Dota 2: ${dotaTips.length} tips existentes carregadas`);
     }
     if (Array.isArray(mmaTips)) {
       for (const tip of mmaTips) {
@@ -3696,10 +3703,12 @@ async function pollMma(runOnce = false) {
       log('INFO', 'AUTO-MMA', `${fights.length} lutas com odds (MMA: ${mmaCount} | Boxe: ${boxCount}) | ESPN: ${espnFights.length} lutas`);
 
       const now = Date.now();
-      // BOXING_MAX_DAYS_BEFORE_FIGHT: só tip se a luta for em no máximo N dias (default 10)
-      const boxingMaxDays = Math.max(1, Math.min(60, parseInt(process.env.BOXING_MAX_DAYS_BEFORE_FIGHT || process.env.BOXING_MIN_DAYS_BEFORE_FIGHT || '10', 10) || 10));
+      // BOXING_MAX_DAYS_BEFORE_FIGHT: boxe só se a luta em ≤ N dias (default 10); além disso pula
+      const boxingMaxDays = Math.max(1, Math.min(60, parseInt(process.env.BOXING_MAX_DAYS_BEFORE_FIGHT || '10', 10) || 10));
       const boxingMaxMs = boxingMaxDays * 24 * 60 * 60 * 1000;
       let boxingSkippedLead = 0;
+      let mmaIaCallsThisCycle = 0;
+      const mmaIaCap = Math.max(0, parseInt(process.env.MMA_MAX_IA_CALLS_PER_CYCLE || '18', 10) || 18);
       const endOfWeek = (() => {
         const d = new Date();
         // Domingo da semana atual às 23:59
@@ -3737,7 +3746,7 @@ async function pollMma(runOnce = false) {
           log('INFO', 'AUTO-MMA', `Ignorando luta sem data válida: ${fight.team1} vs ${fight.team2}`);
           continue;
         }
-        // Boxe: só tip se a luta for em no máximo N dias (evita tips prematuras)
+        // Boxe: só dentro da janela de N dias (pula se ainda falta > N dias)
         if (isBoxing && fightTs - now > boxingMaxMs) {
           boxingSkippedLead++;
           log('DEBUG', 'AUTO-MMA', `Boxe: >${boxingMaxDays}d até a luta — sem tip: ${fight.team1} vs ${fight.team2}`);
@@ -3884,6 +3893,12 @@ DECISÃO FINAL:
 
 Máximo 220 palavras. Seja direto e fundamentado.`;
 
+        if (mmaIaCap > 0 && mmaIaCallsThisCycle >= mmaIaCap) {
+          log('INFO', 'AUTO-MMA', `Ciclo: limite ${mmaIaCap} IA(s) — resto no próximo (~30min). Ajuste MMA_MAX_IA_CALLS_PER_CYCLE.`);
+          break;
+        }
+        mmaIaCallsThisCycle++;
+
         const espnTag = espn ? ` (ESPN card: ${weightClass}, ${rounds}R)` : hasEspnRecord ? ` (ESPN athlete: ${rec1||'?'} | ${rec2||'?'})` : ' (sem dados ESPN)';
         log('INFO', 'AUTO-MMA', `Analisando: ${fight.team1} vs ${fight.team2}${espnTag}`);
         analyzedMma.set(key, { ts: now, tipSent: false });
@@ -3990,7 +4005,7 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
         await new Promise(r => setTimeout(r, 5000));
       }
       if (boxingSkippedLead > 0) {
-        log('INFO', 'AUTO-MMA', `Boxe: ${boxingSkippedLead} luta(s) ignoradas (menos de ${boxingMinDays}d até o combate)`);
+        log('INFO', 'AUTO-MMA', `Boxe: ${boxingSkippedLead} luta(s) ignoradas (>${boxingMaxDays}d até o combate)`);
       }
     } catch(e) {
       log('ERROR', 'AUTO-MMA', e.message);
@@ -4642,7 +4657,6 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   }
   // Variáveis opcionais úteis
   const optionals = [
-    ['ADMIN_KEY',          process.env.ADMIN_KEY,          'rotas admin abertas sem autenticação'],
     ['PANDASCORE_TOKEN',   process.env.PANDASCORE_TOKEN,   'dados PandaScore indisponíveis (LoL)'],
     ['THE_ODDS_API_KEY',   process.env.THE_ODDS_API_KEY,   'odds tênis/MMA via TheOdds indisponíveis'],
     ['API_SPORTS_KEY',     process.env.API_SPORTS_KEY || process.env.APISPORTS_KEY, 'dados futebol via API-Sports indisponíveis'],

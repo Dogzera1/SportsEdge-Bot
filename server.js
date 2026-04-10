@@ -559,6 +559,20 @@ async function sxFindLoLSportId() {
   return (sid != null) ? parseInt(sid, 10) : null;
 }
 
+let _sxDotaSportIdCache = null;
+async function sxFindDotaSportId() {
+  if (_sxDotaSportIdCache != null) return _sxDotaSportIdCache;
+  const sports = await sxGetSports().catch(() => null);
+  if (!sports) return null;
+  const pick = sports.find(s => {
+    const lbl = String(s?.label || '').toLowerCase();
+    return lbl.includes('dota 2') || lbl.includes('dota2') || lbl === 'dota';
+  });
+  const sid = pick?.sportId;
+  _sxDotaSportIdCache = (sid != null) ? parseInt(sid, 10) : null;
+  return _sxDotaSportIdCache;
+}
+
 function sxNameLike(a, b) {
   const clean = (s) => {
     let n = norm(String(s || ''));
@@ -767,8 +781,8 @@ async function maybeSyncTennisEspnMatchResults(force = false) {
   return { ok: true, upserted };
 }
 
-async function sxFindMarketForMatch(t1, t2, { liveOnly = false, mapNumber = null } = {}) {
-  const sportId = await sxFindLoLSportId().catch(() => null);
+async function sxFindMarketForMatch(t1, t2, { liveOnly = false, mapNumber = null, sportId: overrideSportId = null } = {}) {
+  const sportId = overrideSportId ?? await sxFindLoLSportId().catch(() => null);
   if (!sportId) return null;
 
   const pageSize = Math.min(50, Math.max(5, parseInt(process.env.SXBET_MARKETS_PAGE_SIZE || '50', 10) || 50));
@@ -837,9 +851,9 @@ async function sxGetBestOddsForMarket(marketHash) {
   return best;
 }
 
-async function sxGetMatchWinnerOdds(t1, t2, { liveOnly = false, mapNumber = null, _debug = false } = {}) {
+async function sxGetMatchWinnerOdds(t1, t2, { liveOnly = false, mapNumber = null, _debug = false, sportId = null } = {}) {
   if (!SXBET_ENABLED) return null;
-  const m = await sxFindMarketForMatch(t1, t2, { liveOnly, mapNumber }).catch(() => null);
+  const m = await sxFindMarketForMatch(t1, t2, { liveOnly, mapNumber, sportId }).catch(() => null);
   if (!m?.marketHash) {
     if (_debug) log('DEBUG', 'SXBET', `Mercado não encontrado para ${t1} vs ${t2} (liveOnly=${liveOnly})`);
     return null;
@@ -2307,8 +2321,83 @@ async function getPandaScoreLolMatches() {
   }
 }
 
+// ── PandaScore Dota 2 ──
+let _pandaDotaCache = { data: [], ts: 0 };
+const PANDA_DOTA_CACHE_TTL = parseInt(process.env.PANDA_DOTA_CACHE_TTL_MS || '90000', 10);
+
+async function getPandaScoreDotaMatches() {
+  if (!PANDASCORE_TOKEN || PANDASCORE_TOKEN === 'your-pandascore-token') return [];
+  if (Date.now() < _pandaBackoffUntil) return [];
+  if (_pandaDotaCache.data.length && (Date.now() - _pandaDotaCache.ts) < PANDA_DOTA_CACHE_TTL) return _pandaDotaCache.data;
+  try {
+    const headers = { 'Authorization': `Bearer ${PANDASCORE_TOKEN}` };
+    const [runningRaw, upcomingRaw] = await Promise.all([
+      httpGet('https://api.pandascore.co/dota2/matches/running?per_page=20', headers).catch(() => ({ status: 0, body: '[]' })),
+      httpGet('https://api.pandascore.co/dota2/matches/upcoming?per_page=30&sort=begin_at', headers).catch(() => ({ status: 0, body: '[]' }))
+    ]);
+    const parsePsArr = (raw) => {
+      const p = safeParse(raw?.body, []);
+      return Array.isArray(p) ? p : [];
+    };
+    const running = parsePsArr(runningRaw);
+    const upcoming = parsePsArr(upcomingRaw);
+
+    const mapDota = (m, status) => {
+      const t1 = m.opponents?.[0]?.opponent, t2 = m.opponents?.[1]?.opponent;
+      const n1 = t1?.name || 'TBD', n2 = t2?.name || 'TBD';
+      if (n1 === 'TBD' && n2 === 'TBD') return null;
+      const leagueName = m.league?.name || m.serie?.full_name || 'Dota 2';
+      const format = m.number_of_games > 1 ? `Bo${m.number_of_games}` : 'Bo1';
+      let s1 = 0, s2 = 0;
+      if (Array.isArray(m.games)) {
+        for (const g of m.games) {
+          if (!g.winner) continue;
+          if (g.winner.id === t1?.id) s1++;
+          else if (g.winner.id === t2?.id) s2++;
+        }
+      }
+      return {
+        id: `dota2_ps_${m.id}`,
+        game: 'dota2',
+        league: leagueName,
+        leagueSlug: m.league?.slug || '',
+        team1: n1, team2: n2,
+        score1: s1, score2: s2,
+        status,
+        time: m.begin_at || '',
+        format,
+        winner: m.winner?.name || null,
+        _psId: String(m.id),
+        _source: 'pandascore'
+      };
+    };
+
+    const live = running.map(m => mapDota(m, 'live')).filter(Boolean);
+    const next = upcoming
+      .filter(m => {
+        const t = new Date(m.begin_at).getTime();
+        return !isNaN(t) && t < Date.now() + 7 * 24 * 3600 * 1000;
+      })
+      .map(m => mapDota(m, 'upcoming')).filter(Boolean);
+
+    const result = [...live, ...next];
+    if (result.length) log('INFO', 'DOTA2', `PandaScore: ${result.length} partidas (${live.length} live)`);
+    _pandaDotaCache = { data: result, ts: Date.now() };
+    return result;
+  } catch(e) {
+    log('WARN', 'DOTA2', 'getPandaScoreDotaMatches: ' + e.message);
+    return _pandaDotaCache.data;
+  }
+}
+
 // ── Admin Auth + Rate Limit (in-memory) ──
 const ADMIN_KEY = (process.env.ADMIN_KEY || '').trim();
+let _adminKeyWarnLogged = false;
+function warnAdminKeyMissingOnce() {
+  if (ADMIN_KEY || _adminKeyWarnLogged) return;
+  _adminKeyWarnLogged = true;
+  log('WARN', 'SEC', 'ADMIN_KEY não configurada — rotas admin abertas sem autenticação. Configure ADMIN_KEY em produção.');
+}
 
 function getClientIp(req) {
   const xf = (req.headers['x-forwarded-for'] || '').toString();
@@ -2328,13 +2417,9 @@ function isAdminRequest(req) {
   return false;
 }
 
-let _adminKeyWarnLogged = false;
 function requireAdmin(req, res) {
   if (!ADMIN_KEY) {
-    if (!_adminKeyWarnLogged) {
-      _adminKeyWarnLogged = true;
-      log('WARN', 'SEC', 'ADMIN_KEY não configurada — rotas admin abertas sem autenticação. Configure ADMIN_KEY em produção.');
-    }
+    warnAdminKeyMissingOnce();
     return true;
   }
   if (!isAdminRequest(req)) {
@@ -2917,6 +3002,15 @@ const server = http.createServer(async (req, res) => {
     const t1 = parsed.query.team1 || parsed.query.p1 || '';
     const t2 = parsed.query.team2 || parsed.query.p2 || '';
     if (!t1 || !t2) { sendJson(res, { error: 'team1 e team2 obrigatórios' }, 400); return; }
+    const gameParam = (parsed.query.game || '').toLowerCase();
+    // Dota 2: odds via SX.Bet diretamente (OddsPapi não cobre Dota)
+    if (gameParam === 'dota2' || gameParam === 'dota') {
+      if (!SXBET_ENABLED) { sendJson(res, { error: 'SX.Bet não habilitado' }); return; }
+      const dotaSportId = await sxFindDotaSportId().catch(() => null);
+      const o = await sxGetMatchWinnerOdds(t1, t2, { sportId: dotaSportId, _debug: false }).catch(() => null);
+      sendJson(res, o || { error: 'odds Dota 2 não encontradas (SX.Bet)' });
+      return;
+    }
     const mapNumber = parsed.query.map ? parseInt(parsed.query.map, 10) : null;
     const score1 = parsed.query.score1 != null ? parseInt(parsed.query.score1, 10) : null;
     const score2 = parsed.query.score2 != null ? parseInt(parsed.query.score2, 10) : null;
@@ -3076,6 +3170,28 @@ const server = http.createServer(async (req, res) => {
         t2: v.t2
       }))
     });
+    return;
+  }
+
+  if (p === '/dota-matches') {
+    try {
+      const matches = await getPandaScoreDotaMatches();
+      // Enrich with SX.Bet odds
+      if (SXBET_ENABLED) {
+        const dotaSportId = await sxFindDotaSportId().catch(() => null);
+        if (dotaSportId) {
+          for (const m of matches) {
+            if (m.status === 'upcoming' || m.status === 'live') {
+              const o = await sxGetMatchWinnerOdds(m.team1, m.team2, { sportId: dotaSportId }).catch(() => null);
+              if (o) m.odds = o;
+            }
+          }
+        }
+      }
+      sendJson(res, matches);
+    } catch(e) {
+      sendJson(res, []);
+    }
     return;
   }
 
@@ -3429,6 +3545,30 @@ const server = http.createServer(async (req, res) => {
         const t1 = m.opponents?.[0]?.opponent?.name || '';
         const t2 = m.opponents?.[1]?.opponent?.name || '';
         stmts.upsertMatchResult.run(rawId, 'lol', t1, t2, winner, '', m.league?.name || '');
+        sendJson(res, { matchId: rawId, winner, resolved: true });
+      } else {
+        sendJson(res, { matchId: rawId, resolved: false });
+      }
+    } catch(e) {
+      sendJson(res, { matchId: rawId, resolved: false, error: e.message });
+    }
+    return;
+  }
+
+  // ── Resultado PandaScore Dota 2 (settlement de tips dota2_ps_*) ──
+  if (p === '/dota-result') {
+    const rawId = parsed.query.matchId || '';
+    const psId = rawId.replace(/^dota2_ps_/, '').replace(/^ps_/, '');
+    if (!psId) { sendJson(res, { resolved: false, error: 'matchId obrigatório' }, 400); return; }
+    if (!PANDASCORE_TOKEN) { sendJson(res, { resolved: false, error: 'PANDASCORE_TOKEN não configurado' }); return; }
+    try {
+      const r = await httpGet(`https://api.pandascore.co/dota2/matches/${psId}`, { 'Authorization': `Bearer ${PANDASCORE_TOKEN}` });
+      const m = safeParse(r.body, {});
+      const winner = m.winner?.name || null;
+      if (winner) {
+        const t1 = m.opponents?.[0]?.opponent?.name || '';
+        const t2 = m.opponents?.[1]?.opponent?.name || '';
+        stmts.upsertMatchResult.run(rawId, 'dota2', t1, t2, winner, '', m.league?.name || '');
         sendJson(res, { matchId: rawId, winner, resolved: true });
       } else {
         sendJson(res, { matchId: rawId, resolved: false });
@@ -5526,13 +5666,13 @@ async function syncProStats({ forceResync = false } = {}) {
   const checks = [
     ['DEEPSEEK_API_KEY', DEEPSEEK_KEY,       'chamadas à IA desativadas — /claude retornará erro'],
     ['ODDS_API_KEY',     ODDSPAPI_KEY,        'odds esports (OddsPapi) indisponíveis'],
-    ['ADMIN_KEY',        process.env.ADMIN_KEY, 'rotas admin abertas sem autenticação'],
     ['PANDASCORE_TOKEN', PANDASCORE_TOKEN,    'dados PandaScore indisponíveis'],
     ['THE_ODDS_API_KEY', THE_ODDS_API_KEY,    'odds tênis/MMA via TheOdds indisponíveis'],
   ];
   for (const [key, val, reason] of checks) {
     if (!val) log('WARN', 'ENV', `${key} ausente — ${reason}`);
   }
+  warnAdminKeyMissingOnce();
 })();
 
 server.listen(PORT, '0.0.0.0', () => {
