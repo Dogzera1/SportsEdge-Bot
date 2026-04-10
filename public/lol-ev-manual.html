@@ -97,6 +97,23 @@
     .err { background: #450a0a; color: #fecaca; padding: 0.75rem 1rem; border-radius: 8px; margin-top: 1rem; font-size: 0.88rem; }
     .hint { font-size: 0.78rem; color: var(--muted); margin-top: 0.35rem; }
     .suggest-box { border-left: 3px solid var(--accent); padding-left: 0.75rem; margin-top: 0.75rem; }
+    .combo-wrap { position: relative; }
+    .combo-dd {
+      position: absolute; z-index: 50; left: 0; right: 0; top: 100%;
+      margin-top: 3px; max-height: 260px; overflow-y: auto;
+      background: #13151f; border: 1px solid var(--border); border-radius: 8px;
+      box-shadow: 0 10px 28px rgba(0,0,0,0.5);
+    }
+    .combo-dd[hidden] { display: none !important; }
+    .combo-opt {
+      display: block; width: 100%; text-align: left;
+      padding: 0.5rem 0.7rem; border: none; background: transparent;
+      color: var(--text); font-size: 0.88rem; cursor: pointer;
+      border-bottom: 1px solid #252838;
+    }
+    .combo-opt:last-child { border-bottom: none; }
+    .combo-opt:hover, .combo-opt.combo-hi { background: #2d2654; color: #fff; }
+    .combo-empty { padding: 0.55rem 0.7rem; font-size: 0.8rem; color: var(--muted); }
   </style>
 </head>
 <body>
@@ -117,7 +134,11 @@
       </div>
       <div>
         <label for="format">Formato</label>
-        <input id="format" type="text" placeholder="Bo1, Bo3, Bo5…" autocomplete="off"/>
+        <div class="combo-wrap">
+          <input id="format" type="text" placeholder="Digite ou escolha (ex. Bo3)" autocomplete="off" spellcheck="false"/>
+          <div class="combo-dd" hidden role="listbox"></div>
+        </div>
+        <p class="hint">Lista fixa LoL; você ainda pode colar texto livre.</p>
       </div>
     </div>
     <div class="grid2">
@@ -147,8 +168,7 @@
 
   <div class="card">
     <h2>Draft — campeões por rota</h2>
-    <p class="hint">Opcional. Se ambos os lados tiverem dados em <code>pro_champ_stats</code>, entra o fator “comp” no ML (como no bot).</p>
-    <datalist id="champs-dl"></datalist>
+    <p class="hint">Opcional. Digite o nome do campeão e escolha na lista. Dados em <code>pro_champ_stats</code>.</p>
     <div class="row-roles" style="margin-bottom:0.35rem;font-weight:600;">
       <span></span>
       <span class="side-h">Time 1</span>
@@ -209,10 +229,17 @@
     { key: 'SUP', label: 'Suporte' }
   ];
 
+  const FORMAT_OPTIONS = [
+    'Bo1', 'Bo2', 'Bo3', 'Bo5', 'Bo7',
+    'MD1', 'MD3', 'MD5',
+    'Melhor de 1', 'Melhor de 3', 'Melhor de 5', 'Melhor de 7',
+    'Best of 1', 'Best of 3', 'Best of 5', 'Best of 7'
+  ];
+
   const leagueEl = document.getElementById('league');
   const teamsDl = document.getElementById('teams-dl');
-  const champsDl = document.getElementById('champs-dl');
   const roleRows = document.getElementById('role-rows');
+  var championsList = [];
   const btn = document.getElementById('btn-calc');
   const loadMsg = document.getElementById('load-msg');
   const errBox = document.getElementById('err-box');
@@ -228,10 +255,153 @@
     row.className = 'row-roles';
     row.innerHTML =
       '<span class="rh">' + r.label + '</span>' +
-      '<input type="text" class="c1" data-role="' + r.key + '" list="champs-dl" placeholder="—" autocomplete="off"/>' +
-      '<input type="text" class="c2" data-role="' + r.key + '" list="champs-dl" placeholder="—" autocomplete="off"/>';
+      '<div class="combo-wrap"><input type="text" class="c1 combo-champ" data-role="' + r.key + '" placeholder="Digite…" autocomplete="off" spellcheck="false"/><div class="combo-dd" hidden role="listbox"></div></div>' +
+      '<div class="combo-wrap"><input type="text" class="c2 combo-champ" data-role="' + r.key + '" placeholder="Digite…" autocomplete="off" spellcheck="false"/><div class="combo-dd" hidden role="listbox"></div></div>';
     roleRows.appendChild(row);
   });
+
+  function normQ(s) {
+    return String(s || '').toLowerCase().trim();
+  }
+
+  (function bindComboCloseOnce() {
+    if (window.__evManualComboClose) return;
+    window.__evManualComboClose = true;
+    document.addEventListener('click', function (e) {
+      document.querySelectorAll('.combo-dd').forEach(function (dd) {
+        var w = dd.closest('.combo-wrap');
+        if (w && !w.contains(e.target)) dd.hidden = true;
+      });
+    });
+  })();
+
+  /** Combobox: filtra ao digitar; ↑↓ Enter Esc */
+  function attachTypeahead(input, getItems, opt) {
+    opt = opt || {};
+    var maxN = opt.maxN != null ? opt.maxN : 40;
+    var minChars = opt.minChars != null ? opt.minChars : 0;
+    var wrap = input.closest('.combo-wrap');
+    if (!wrap) return;
+    var dd = wrap.querySelector('.combo-dd');
+    if (!dd) return;
+    var items = [];
+    var hi = -1;
+
+    function allItems() {
+      var a = typeof getItems === 'function' ? getItems() : getItems;
+      return Array.isArray(a) ? a : [];
+    }
+
+    function buildList() {
+      var q = normQ(input.value);
+      var all = allItems();
+      if (minChars > 0 && q.length < minChars) {
+        items = [];
+        return;
+      }
+      if (!q) {
+        items = all.slice(0, maxN);
+        return;
+      }
+      var starts = [];
+      var rest = [];
+      for (var i = 0; i < all.length; i++) {
+        var t = String(all[i]);
+        var n = normQ(t);
+        if (n.indexOf(q) === 0) starts.push(t);
+        else if (n.indexOf(q) !== -1) rest.push(t);
+      }
+      starts.sort(function (a, b) { return normQ(a).localeCompare(normQ(b)); });
+      rest.sort(function (a, b) { return normQ(a).localeCompare(normQ(b)); });
+      items = starts.concat(rest).slice(0, maxN);
+    }
+
+    function highlight() {
+      var opts = dd.querySelectorAll('.combo-opt');
+      for (var i = 0; i < opts.length; i++) {
+        opts[i].classList.toggle('combo-hi', i === hi);
+      }
+      if (hi >= 0 && opts[hi]) opts[hi].scrollIntoView({ block: 'nearest' });
+    }
+
+    function render() {
+      dd.innerHTML = '';
+      hi = -1;
+      if (minChars > 0 && normQ(input.value).length < minChars) {
+        var need = document.createElement('div');
+        need.className = 'combo-empty';
+        need.textContent = 'Digite para buscar campeão…';
+        dd.appendChild(need);
+        dd.hidden = false;
+        return;
+      }
+      if (!items.length) {
+        var qlen = normQ(input.value).length;
+        if (qlen >= minChars && (minChars > 0 || qlen > 0)) {
+          var nx = document.createElement('div');
+          nx.className = 'combo-empty';
+          nx.textContent = 'Nenhum resultado.';
+          dd.appendChild(nx);
+          dd.hidden = false;
+        } else {
+          dd.hidden = true;
+        }
+        return;
+      }
+      dd.hidden = false;
+      items.forEach(function (t) {
+        var b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'combo-opt';
+        b.setAttribute('role', 'option');
+        b.textContent = t;
+        b.addEventListener('mousedown', function (e) {
+          e.preventDefault();
+          input.value = t;
+          dd.hidden = true;
+        });
+        dd.appendChild(b);
+      });
+    }
+
+    function open() {
+      buildList();
+      render();
+      highlight();
+    }
+
+    input.addEventListener('focus', function () { open(); });
+    input.addEventListener('input', function () { open(); });
+    input.addEventListener('keydown', function (e) {
+      var opts = dd.querySelectorAll('.combo-opt');
+      if (e.key === 'Escape') {
+        dd.hidden = true;
+        hi = -1;
+        e.preventDefault();
+        return;
+      }
+      if (dd.hidden || !opts.length) {
+        if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+          open();
+          e.preventDefault();
+        }
+        return;
+      }
+      if (e.key === 'ArrowDown') {
+        hi = Math.min(hi + 1, opts.length - 1);
+        if (hi < 0) hi = 0;
+        e.preventDefault();
+        highlight();
+      } else if (e.key === 'ArrowUp') {
+        hi = Math.max(hi - 1, 0);
+        e.preventDefault();
+        highlight();
+      } else if (e.key === 'Enter' && hi >= 0) {
+        opts[hi].dispatchEvent(new MouseEvent('mousedown'));
+        e.preventDefault();
+      }
+    });
+  }
 
   function fillDatalist(dl, items) {
     dl.innerHTML = '';
@@ -262,7 +432,10 @@
         o.textContent = name;
         leagueEl.appendChild(o);
       });
-      fillDatalist(champsDl, j.champions || []);
+      championsList = j.champions || [];
+      roleRows.querySelectorAll('.combo-champ').forEach(function (inp) {
+        attachTypeahead(inp, function () { return championsList; }, { maxN: 60, minChars: 1 });
+      });
       return loadTeams();
     })
     .catch(function (e) {
@@ -271,6 +444,8 @@
     .finally(function () {
       loadMsg.style.display = 'none';
     });
+
+  attachTypeahead(document.getElementById('format'), FORMAT_OPTIONS, { maxN: 30, minChars: 0 });
 
   leagueEl.addEventListener('change', function () {
     loadTeams().catch(function (e) {
