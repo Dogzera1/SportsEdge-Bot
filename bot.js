@@ -989,7 +989,7 @@ async function settleCompletedTips() {
       }
 
       if (sport === 'tennis') {
-        // Prefer The Odds API scores (cobre até 3 dias atrás)
+        // The Odds API não publica scores para tênis — settlement principal via DB (JeffSackmann CSV).
         const scores = await serverGet('/tennis-scores?daysFrom=3', 'tennis').catch(() => []);
         const scoresById = new Map((Array.isArray(scores) ? scores : []).map(s => [String(s.id), s]));
 
@@ -1004,7 +1004,18 @@ async function settleCompletedTips() {
         for (const tip of unsettled) {
           if (!tip.match_id) continue;
           try {
-            // 1) Match por id (The Odds)
+            const dbRes = await serverGet(
+              `/tennis-db-result?p1=${encodeURIComponent(tip.participant1 || '')}&p2=${encodeURIComponent(tip.participant2 || '')}&sentAt=${encodeURIComponent(tip.sent_at || '')}`,
+              'tennis'
+            ).catch(() => null);
+            if (dbRes?.resolved && dbRes.winner) {
+              await serverPost('/settle', { matchId: tip.match_id, winner: dbRes.winner }, 'tennis');
+              log('INFO', 'SETTLE', `tennis: ${tip.participant1} vs ${tip.participant2} → ${dbRes.winner} (DB)`);
+              settled++;
+              continue;
+            }
+
+            // 2) The Odds (se no futuro houver scores)
             const mid = stripTheOddsMatchId(tip.match_id);
             const s = mid ? scoresById.get(String(mid)) : null;
             if (s?.completed && Array.isArray(s.scores) && s.scores.length >= 2) {
@@ -1021,7 +1032,7 @@ async function settleCompletedTips() {
               }
             }
 
-            // 2) Fallback ESPN (ranking/evento atual)
+            // 3) ESPN (evento atual)
             const res = allResults.find(r => {
               if (!r.winner) return false;
               const n1 = normName(tip.participant1), n2 = normName(tip.participant2);

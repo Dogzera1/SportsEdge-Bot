@@ -221,21 +221,26 @@ async function importFootballMatchesCsvOnce() {
   }
 }
 
-async function importTennisMatchesCsvOnce() {
-  const enabled = (process.env.TENNIS_DATASET_IMPORT ?? 'true') !== 'false';
-  if (!enabled) return;
-  const year = parseInt(process.env.TENNIS_DATASET_YEAR || '2024', 10) || 2024;
-  const urlCsv = process.env.TENNIS_MATCHES_CSV_URL
-    || `https://raw.githubusercontent.com/JeffSackmann/tennis_atp/master/atp_matches_${year}.csv`;
-  const key = `tennis_matches_csv:${urlCsv}`;
-  const exists = stmts.getDatasetImport.get(key);
-  if (exists) return;
+async function importTennisSackmannCsvForYear(year, tour) {
+  const isWta = tour === 'wta';
+  let urlCsv = isWta
+    ? `https://raw.githubusercontent.com/JeffSackmann/tennis_wta/master/wta_matches_${year}.csv`
+    : `https://raw.githubusercontent.com/JeffSackmann/tennis_atp/master/atp_matches_${year}.csv`;
+  if (!isWta && process.env.TENNIS_MATCHES_CSV_URL) {
+    const yOverride = parseInt(process.env.TENNIS_DATASET_YEAR || String(year), 10);
+    if (year === yOverride) urlCsv = process.env.TENNIS_MATCHES_CSV_URL;
+  }
+  const key = `tennis_csv:${tour}:${year}:${urlCsv}`;
+  if (stmts.getDatasetImport.get(key)) return;
 
   try {
     const r = await cachedHttpGet(urlCsv, { provider: 'tennis_dataset', ttlMs: 24 * 60 * 60 * 1000 }).catch(() => null);
-    if (!r || r.status !== 200) { log('WARN', 'IMPORT', `CSV tennis: HTTP ${r?.status || 'fail'}`); return; }
+    if (!r || r.status !== 200) {
+      log('WARN', 'IMPORT', `CSV tennis ${tour} ${year}: HTTP ${r?.status || 'fail'}`);
+      return;
+    }
     const rows = parseCsvRows(String(r.body || ''));
-    if (!rows.length || rows.length < 2) { log('WARN', 'IMPORT', 'CSV tennis: vazio'); return; }
+    if (!rows.length || rows.length < 2) { log('WARN', 'IMPORT', `CSV tennis ${tour} ${year}: vazio`); return; }
 
     const headers = rows[0];
     const c = {
@@ -250,10 +255,12 @@ async function importTennisMatchesCsvOnce() {
       score: idxOf(headers, 'score'),
     };
     if (c.winner_name < 0 || c.loser_name < 0 || c.tourney_date < 0) {
-      log('WARN', 'IMPORT', `CSV tennis: colunas ausentes (headers=${headers.slice(0, 30).join(',')})`);
+      log('WARN', 'IMPORT', `CSV tennis ${tour} ${year}: colunas ausentes (headers=${headers.slice(0, 30).join(',')})`);
       return;
     }
 
+    const tourLabel = isWta ? 'WTA' : 'ATP';
+    const idPrefix = isWta ? 'tw_' : 'ta_';
     let imported = 0;
     const tx = db.transaction(() => {
       for (let i = 1; i < rows.length; i++) {
@@ -263,20 +270,19 @@ async function importTennisMatchesCsvOnce() {
         const d = row[c.tourney_date];
         if (!w || !l || !d) continue;
         const score = (c.score >= 0 ? String(row[c.score] || '').trim() : '');
-        const tourneyName = (c.tourney_name >= 0 ? String(row[c.tourney_name] || '').trim() : '') || 'ATP';
+        const tourneyName = (c.tourney_name >= 0 ? String(row[c.tourney_name] || '').trim() : '') || tourLabel;
         const surface = (c.surface >= 0 ? String(row[c.surface] || '').trim() : '') || '';
         const level = (c.tourney_level >= 0 ? String(row[c.tourney_level] || '').trim() : '') || '';
-        const league = `ATP ${tourneyName}${surface ? ` (${surface})` : ''}${level ? ` [${level}]` : ''}`;
+        const league = `${tourLabel} ${tourneyName}${surface ? ` (${surface})` : ''}${level ? ` [${level}]` : ''}`;
 
         const tid = (c.tourney_id >= 0 ? String(row[c.tourney_id] || '').trim() : '');
         const mnum = (c.match_num >= 0 ? String(row[c.match_num] || '').trim() : '');
         const matchIdRaw = [tid || `Y${year}`, d, mnum || String(i)].filter(Boolean).join('_');
-        const matchId = `ta_${matchIdRaw}`.slice(0, 128);
+        const matchId = `${idPrefix}${matchIdRaw}`.slice(0, 128);
 
-        // tourney_date = YYYYMMDD
         const resolvedAt = (String(d).length === 8)
-          ? `${String(d).slice(0,4)}-${String(d).slice(4,6)}-${String(d).slice(6,8)} 00:00:00`
-          : `${String(d).slice(0,10)} 00:00:00`;
+          ? `${String(d).slice(0, 4)}-${String(d).slice(4, 6)}-${String(d).slice(6, 8)} 00:00:00`
+          : `${String(d).slice(0, 10)} 00:00:00`;
 
         stmts.upsertMatchResultWithDate.run(matchId, 'tennis', String(w), String(l), String(w), score, league, resolvedAt);
         imported++;
@@ -284,10 +290,28 @@ async function importTennisMatchesCsvOnce() {
     });
     tx();
 
-    stmts.upsertDatasetImport.run(key, 'JeffSackmann/tennis_atp', imported);
-    log('INFO', 'IMPORT', `CSV tennis importado: ${imported} jogos (key=${key})`);
+    stmts.upsertDatasetImport.run(key, `JeffSackmann/tennis_${tour}`, imported);
+    log('INFO', 'IMPORT', `CSV tennis ${tour} ${year}: ${imported} jogos`);
   } catch (e) {
-    log('WARN', 'IMPORT', `CSV tennis import falhou: ${e.message}`);
+    log('WARN', 'IMPORT', `CSV tennis ${tour} ${year} falhou: ${e.message}`);
+  }
+}
+
+async function importTennisMatchesCsvOnce() {
+  const enabled = (process.env.TENNIS_DATASET_IMPORT ?? 'true') !== 'false';
+  if (!enabled) return;
+  const importWta = (process.env.TENNIS_IMPORT_WTA ?? 'true') !== 'false';
+  const y0 = new Date().getFullYear();
+  let years;
+  const rawYears = (process.env.TENNIS_DATASET_YEARS || '').trim();
+  if (rawYears) {
+    years = [...new Set(rawYears.split(',').map(s => parseInt(s.trim(), 10)).filter(n => Number.isFinite(n) && n >= 1990 && n <= y0 + 1))];
+  } else {
+    years = [y0 - 1, y0];
+  }
+  for (const year of years) {
+    await importTennisSackmannCsvForYear(year, 'atp');
+    if (importWta) await importTennisSackmannCsvForYear(year, 'wta');
   }
 }
 
@@ -548,6 +572,29 @@ function sxNameLike(a, b) {
     if (na.startsWith(nb.slice(0, 6)) || nb.startsWith(na.slice(0, 6))) return true;
   }
   return false;
+}
+
+function tennisPairMatchesPlayers(p1, p2, t1, t2) {
+  return (sxNameLike(p1, t1) && sxNameLike(p2, t2)) || (sxNameLike(p1, t2) && sxNameLike(p2, t1));
+}
+
+let _tennisSettleRowsCache = { ts: 0, lookback: -1, rows: null };
+function getTennisSettleRowsCached(lookbackDays) {
+  const now = Date.now();
+  const ttl = Math.min(120000, Math.max(15000, parseInt(process.env.TENNIS_SETTLE_CACHE_MS || '60000', 10) || 60000));
+  if (_tennisSettleRowsCache.rows && _tennisSettleRowsCache.lookback === lookbackDays && (now - _tennisSettleRowsCache.ts) < ttl) {
+    return _tennisSettleRowsCache.rows;
+  }
+  const rows = db.prepare(`
+    SELECT match_id, team1, team2, winner, final_score, league, resolved_at
+    FROM match_results
+    WHERE game = 'tennis'
+    AND datetime(resolved_at) >= datetime('now', '-' || ? || ' days')
+    ORDER BY resolved_at DESC
+    LIMIT 1500
+  `).all(String(lookbackDays));
+  _tennisSettleRowsCache = { ts: now, lookback: lookbackDays, rows };
+  return rows;
 }
 
 async function sxFindMarketForMatch(t1, t2, { liveOnly = false, mapNumber = null } = {}) {
@@ -3449,7 +3496,10 @@ const server = http.createServer(async (req, res) => {
           let settled = 0;
           let bancaDelta = 0;
           for (const tip of tips) {
-            const result = norm(tip.tip_participant).includes(norm(winner)) ? 'win' : 'loss';
+            const nt = norm(tip.tip_participant);
+            const nw = norm(winner);
+            const nameMatched = nt && nw && (nt === nw || nt.includes(nw) || nw.includes(nt));
+            const result = nameMatched ? 'win' : 'loss';
             stmts.settleTip.run(result, matchId, sport);
             // Atualiza profit_reais e acumula delta da banca
             const stakeR = tip.stake_reais || (() => {
@@ -4684,6 +4734,54 @@ const server = http.createServer(async (req, res) => {
       sendJson(res, matches);
     } catch(e) {
       sendJson(res, []);
+    }
+    return;
+  }
+
+  if (p === '/tennis-db-result') {
+    const p1 = parsed.query.p1 || '';
+    const p2 = parsed.query.p2 || '';
+    const sentAt = parsed.query.sentAt || '';
+    if (!p1 || !p2) { sendJson(res, { resolved: false, error: 'p1/p2 obrigatórios' }, 400); return; }
+    const lookbackDays = Math.min(120, Math.max(14, parseInt(process.env.TENNIS_SETTLE_LOOKBACK_DAYS || '45', 10) || 45));
+    try {
+      const rows = getTennisSettleRowsCached(lookbackDays);
+
+      const sentRaw = String(sentAt || '').trim();
+      const tipMs = sentRaw
+        ? Date.parse(sentRaw.includes('T') ? sentRaw : sentRaw.replace(' ', 'T'))
+        : NaN;
+
+      let best = null;
+      let bestDist = Infinity;
+      for (const r of rows) {
+        if (!tennisPairMatchesPlayers(p1, p2, r.team1, r.team2)) continue;
+        const resMs = Date.parse(String(r.resolved_at || '').replace(' ', 'T'));
+        if (Number.isFinite(tipMs) && Number.isFinite(resMs)) {
+          const dist = Math.abs(resMs - tipMs);
+          if (dist < bestDist) {
+            bestDist = dist;
+            best = r;
+          }
+        } else if (Number.isFinite(resMs)) {
+          if (!best || resMs > Date.parse(String(best.resolved_at || '').replace(' ', 'T'))) best = r;
+        }
+      }
+
+      if (best?.winner) {
+        sendJson(res, {
+          resolved: true,
+          winner: best.winner,
+          match_id: best.match_id,
+          league: best.league,
+          final_score: best.final_score,
+          resolved_at: best.resolved_at
+        });
+        return;
+      }
+      sendJson(res, { resolved: false });
+    } catch (e) {
+      sendJson(res, { resolved: false, error: e.message }, 500);
     }
     return;
   }
