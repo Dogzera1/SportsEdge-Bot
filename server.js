@@ -622,6 +622,92 @@ function invalidateTennisSettleRowsCache() {
 }
 
 let _tennisEspnMatchSyncLastMs = 0;
+const _tennisEspnWindowSyncAt = new Map();
+
+function espnDateYmdUtc(d) {
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(d.getUTCDate()).padStart(2, '0');
+  return `${y}${m}${day}`;
+}
+
+function utcDayAnchorMs(tipMs) {
+  const d = new Date(tipMs);
+  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+}
+
+function shouldSkipTennisEspnWindowSync(anchorMs) {
+  const ttl = Math.min(300000, Math.max(20000, parseInt(process.env.TENNIS_ESPN_WINDOW_SYNC_MIN_MS || '90000', 10) || 90000));
+  const t = _tennisEspnWindowSyncAt.get(anchorMs);
+  return t != null && (Date.now() - t) < ttl;
+}
+
+function markTennisEspnWindowSync(anchorMs) {
+  _tennisEspnWindowSyncAt.set(anchorMs, Date.now());
+}
+
+/** Grava jogos com status post de um payload scoreboard ESPN (ATP/WTA). */
+function upsertTennisPostCompetitionsFromEspnJson(j, slug) {
+  let n = 0;
+  for (const ev of (j?.events || [])) {
+    const evName = String(ev?.name || '').trim() || slug.toUpperCase();
+    for (const grp of (ev.groupings || [])) {
+      for (const comp of (grp.competitions || [])) {
+        if (String(comp?.status?.type?.state || '') !== 'post') continue;
+        const comps = comp.competitors || [];
+        if (comps.length < 2) continue;
+        const winnerComp = comps.find(c => c.winner === true);
+        if (!winnerComp) continue;
+        const ath = c => String(c?.athlete?.displayName || c?.displayName || c?.name || '').trim();
+        const t1 = ath(comps[0]);
+        const t2 = ath(comps[1]);
+        const winner = ath(winnerComp);
+        if (!t1 || !t2 || !winner) continue;
+        const compId = comp.id != null ? String(comp.id) : `${comp.date || ''}_${norm(t1)}_${norm(t2)}`;
+        const matchId = `espn_${slug}_${compId}`.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 128);
+        const score = String(comp.status?.displayClock || comp.status?.type?.shortDetail || '').trim();
+        const league = `${String(slug).toUpperCase()} ${evName}`.slice(0, 220);
+        const dateIso = String(comp.date || '').trim();
+        let resolvedAt = null;
+        if (dateIso.includes('T')) {
+          resolvedAt = dateIso.replace('T', ' ').replace(/\.\d{3}Z?$/, '').slice(0, 19);
+        } else if (dateIso.length >= 10) {
+          resolvedAt = `${dateIso.slice(0, 10)} 12:00:00`;
+        }
+        if (!resolvedAt) continue;
+        try {
+          stmts.upsertMatchResultWithDate.run(matchId, 'tennis', t1, t2, winner, score, league, resolvedAt);
+          n++;
+        } catch (_) { /* ignore row */ }
+      }
+    }
+  }
+  return n;
+}
+
+/** Busca scoreboard ESPN ATP+WTA em janela ao redor de sent_at (endpoint /schedule da ESPN retorna 404). */
+async function syncTennisEspnCompletedAroundSentAt(sentAtRaw) {
+  const sentRaw = String(sentAtRaw || '').trim();
+  const tipMs = sentRaw
+    ? Date.parse(sentRaw.includes('T') ? sentRaw : sentRaw.replace(' ', 'T'))
+    : NaN;
+  if (!Number.isFinite(tipMs)) return 0;
+  const anchor = utcDayAnchorMs(tipMs);
+  if (shouldSkipTennisEspnWindowSync(anchor)) return 0;
+  const winDays = Math.min(21, Math.max(3, parseInt(process.env.TENNIS_ESPN_DATE_WINDOW_DAYS || '10', 10) || 10));
+  const start = new Date(tipMs - winDays * 86400000);
+  const end = new Date(tipMs + winDays * 86400000);
+  const dates = `${espnDateYmdUtc(start)}-${espnDateYmdUtc(end)}`;
+  const tennisData = require('./lib/tennis-data');
+  let n = 0;
+  for (const slug of ['atp', 'wta']) {
+    const j = await tennisData.getScoreboard(slug, { dates }).catch(() => null);
+    n += upsertTennisPostCompetitionsFromEspnJson(j, slug);
+  }
+  markTennisEspnWindowSync(anchor);
+  invalidateTennisSettleRowsCache();
+  return n;
+}
 
 /** Grava jogos com status post do scoreboard ESPN ATP/WTA em match_results (não depende do CSV Sackmann). */
 async function syncTennisEspnCompletedToMatchResults() {
@@ -629,41 +715,9 @@ async function syncTennisEspnCompletedToMatchResults() {
   let n = 0;
   for (const slug of ['atp', 'wta']) {
     const j = await tennisData.getScoreboard(slug).catch(() => null);
-    for (const ev of (j?.events || [])) {
-      const evName = String(ev?.name || '').trim() || slug.toUpperCase();
-      for (const grp of (ev.groupings || [])) {
-        for (const comp of (grp.competitions || [])) {
-          if (String(comp?.status?.type?.state || '') !== 'post') continue;
-          const comps = comp.competitors || [];
-          if (comps.length < 2) continue;
-          const winnerComp = comps.find(c => c.winner === true);
-          if (!winnerComp) continue;
-          const ath = c => String(c?.athlete?.displayName || c?.displayName || c?.name || '').trim();
-          const t1 = ath(comps[0]);
-          const t2 = ath(comps[1]);
-          const winner = ath(winnerComp);
-          if (!t1 || !t2 || !winner) continue;
-          const compId = comp.id != null ? String(comp.id) : `${comp.date || ''}_${norm(t1)}_${norm(t2)}`;
-          const matchId = `espn_${slug}_${compId}`.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 128);
-          const score = String(comp.status?.displayClock || comp.status?.type?.shortDetail || '').trim();
-          const league = `${String(slug).toUpperCase()} ${evName}`.slice(0, 220);
-          const dateIso = String(comp.date || '').trim();
-          let resolvedAt = null;
-          if (dateIso.includes('T')) {
-            resolvedAt = dateIso.replace('T', ' ').replace(/\.\d{3}Z?$/, '').slice(0, 19);
-          } else if (dateIso.length >= 10) {
-            resolvedAt = `${dateIso.slice(0, 10)} 12:00:00`;
-          }
-          if (!resolvedAt) continue;
-          try {
-            stmts.upsertMatchResultWithDate.run(matchId, 'tennis', t1, t2, winner, score, league, resolvedAt);
-            n++;
-          } catch (_) { /* ignore row */ }
-        }
-      }
-    }
+    n += upsertTennisPostCompetitionsFromEspnJson(j, slug);
   }
-  invalidateTennisSettleRowsCache();
+  if (n > 0) invalidateTennisSettleRowsCache();
   return n;
 }
 
@@ -3620,7 +3674,9 @@ const server = http.createServer(async (req, res) => {
           for (const tip of tips) {
             const nt = norm(tip.tip_participant);
             const nw = norm(winner);
-            const nameMatched = nt && nw && (nt === nw || nt.includes(nw) || nw.includes(nt));
+            const nameMatched = sport === 'tennis'
+              ? tennisSinglePlayerNameMatch(tip.tip_participant, winner)
+              : (nt && nw && (nt === nw || nt.includes(nw) || nw.includes(nt)));
             const result = nameMatched ? 'win' : 'loss';
             stmts.settleTip.run(result, matchId, sport);
             // Atualiza profit_reais e acumula delta da banca
@@ -4889,6 +4945,35 @@ const server = http.createServer(async (req, res) => {
         }
       }
 
+      if (best?.winner) {
+        sendJson(res, {
+          resolved: true,
+          winner: best.winner,
+          match_id: best.match_id,
+          league: best.league,
+          final_score: best.final_score,
+          resolved_at: best.resolved_at
+        });
+        return;
+      }
+
+      await syncTennisEspnCompletedAroundSentAt(sentAt);
+      const rows2 = getTennisSettleRowsCached(lookbackDays);
+      best = null;
+      bestDist = Infinity;
+      for (const r of rows2) {
+        if (!tennisPairMatchesPlayers(p1, p2, r.team1, r.team2)) continue;
+        const resMs = Date.parse(String(r.resolved_at || '').replace(' ', 'T'));
+        if (Number.isFinite(tipMs) && Number.isFinite(resMs)) {
+          const dist = Math.abs(resMs - tipMs);
+          if (dist < bestDist) {
+            bestDist = dist;
+            best = r;
+          }
+        } else if (Number.isFinite(resMs)) {
+          if (!best || resMs > Date.parse(String(best.resolved_at || '').replace(' ', 'T'))) best = r;
+        }
+      }
       if (best?.winner) {
         sendJson(res, {
           resolved: true,
