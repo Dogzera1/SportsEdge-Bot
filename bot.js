@@ -4061,11 +4061,6 @@ async function pollMma(runOnce = false) {
 
       for (const fight of fights) {
         const isBoxing = fight.game === 'boxing';
-        // ── UFC-ONLY para MMA; boxe não precisa de confirmação ESPN ──
-        if (!isBoxing && !findEspnFight(espnFights, fight.team1, fight.team2)) {
-          log('DEBUG', 'AUTO-MMA', `Pulando não-UFC: ${fight.team1} vs ${fight.team2}`);
-          continue;
-        }
 
         const key = `mma_${fight.id}`;
         const prev = analyzedMma.get(key);
