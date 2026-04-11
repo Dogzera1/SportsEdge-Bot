@@ -77,6 +77,23 @@
     .refresh-btn { margin-left: auto; padding: 0.4rem 1rem; background: #4c1d95; border: none; border-radius: 6px; color: #e0e0e0; cursor: pointer; font-size: 0.8rem; }
     .refresh-btn:hover { background: #7c3aed; }
     .last-updated { font-size: 0.75rem; color: #4b5563; }
+
+    /* ML Tab */
+    #mlSection { display: none; }
+    .ml-stat-card { background: #1a1d2e; border-radius: 10px; padding: 1.2rem; border: 1px solid #2d2f45; }
+    .ml-stat-card .label { font-size: 0.75rem; color: #6b7280; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.4rem; }
+    .ml-stat-card .value { font-size: 1.8rem; font-weight: 700; }
+    .ml-stat-card .sub { font-size: 0.75rem; color: #6b7280; margin-top: 0.2rem; }
+
+    .prob-bar-wrap { display: flex; align-items: center; gap: 0.5rem; font-size: 0.78rem; }
+    .prob-bar { height: 6px; border-radius: 3px; background: #374151; flex: 1; overflow: hidden; }
+    .prob-bar-fill { height: 100%; border-radius: 3px; transition: width 0.3s; }
+
+    .acc-bar { display: inline-block; height: 8px; border-radius: 4px; vertical-align: middle; }
+    .factor-row { display: flex; align-items: center; gap: 0.6rem; margin: 0.4rem 0; font-size: 0.82rem; }
+    .factor-label { width: 70px; color: #9ca3af; font-size: 0.75rem; text-transform: uppercase; }
+    .factor-weight { width: 38px; color: #a78bfa; font-weight: 700; text-align: right; }
+    .factor-acc { font-size: 0.72rem; color: #6b7280; margin-left: 0.3rem; }
   </style>
 </head>
 <body>
@@ -93,6 +110,7 @@
   <button class="sport-tab" onclick="selectSport('mma', this)">&#129354; MMA</button>
   <button class="sport-tab" onclick="selectSport('tennis', this)">&#127934; T&ecirc;nis</button>
   <button class="sport-tab" onclick="selectSport('football', this)">&#9917; Futebol</button>
+  <button class="sport-tab" onclick="selectML(this)">&#129302; ML / Treino</button>
 </div>
 
 <div class="main">
@@ -100,7 +118,7 @@
   <div class="cards" id="cards"><div class="loading">Carregando...</div></div>
 
   <!-- Charts -->
-  <div class="charts">
+  <div class="charts" id="sportCharts">
     <div class="chart-card">
       <h3>&#128202; Calibra&ccedil;&atilde;o &mdash; Previsto vs. Real</h3>
       <canvas id="calibrationChart"></canvas>
@@ -113,7 +131,7 @@
   </div>
 
   <!-- Tips Table -->
-  <div class="table-card">
+  <div class="table-card" id="sportTipsCard">
     <h3>&#128203; &Uacute;ltimas Tips</h3>
     <div class="tips-controls">
       <div>
@@ -152,6 +170,40 @@
     </div>
     <div id="tipsTable"><div class="loading">Carregando...</div></div>
   </div>
+
+  <!-- ── ML / Treino Tab ── -->
+  <div id="mlSection">
+    <!-- Cards -->
+    <div class="cards" id="mlCards" style="margin-bottom:1.5rem">
+      <div class="loading">Carregando...</div>
+    </div>
+
+    <!-- Charts -->
+    <div class="charts" style="margin-bottom:1.5rem">
+      <div class="chart-card">
+        <h3>&#9881;&#65039; Pesos ML por Fator</h3>
+        <canvas id="mlWeightsFullChart" style="max-height:220px"></canvas>
+        <div id="mlWeightsNote" style="font-size:0.72rem;color:#6b7280;margin-top:0.5rem"></div>
+      </div>
+      <div class="chart-card">
+        <h3>&#128200; Acur&aacute;cia Walk-Forward por M&ecirc;s</h3>
+        <canvas id="mlMonthlyChart" style="max-height:220px"></canvas>
+        <div id="mlMonthlyNote" style="font-size:0.72rem;color:#6b7280;margin-top:0.5rem"></div>
+      </div>
+    </div>
+
+    <!-- Upcoming Predictions -->
+    <div class="table-card" style="margin-bottom:1.5rem">
+      <h3>&#128302; Pr&oacute;ximas Partidas &mdash; Predi&ccedil;&otilde;es do Modelo (LoL)</h3>
+      <div id="mlPredictions"><div class="loading">Carregando...</div></div>
+    </div>
+
+    <!-- Monthly Accuracy Table -->
+    <div class="table-card">
+      <h3>&#128202; Acur&aacute;cia Mensal Walk-Forward (LoL)</h3>
+      <div id="mlMonthlyTable"><div class="loading">Carregando...</div></div>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -164,8 +216,11 @@ const BASE = (function() {
 })();
 
 let currentSport = 'esports';
+let isMLView = false;
 let calibChart = null;
 let weightsChart = null;
+let mlWeightsFullChart = null;
+let mlMonthlyChart = null;
 let tipsTimer = null;
 
 async function apiFetch(path) {
@@ -180,15 +235,31 @@ async function apiFetch(path) {
 }
 
 function selectSport(sport, el) {
+  isMLView = false;
   currentSport = sport;
   document.querySelectorAll('.sport-tab').forEach(t => t.classList.remove('active'));
   el.classList.add('active');
+  document.getElementById('cards').style.display = '';
+  document.getElementById('sportCharts').style.display = '';
+  document.getElementById('sportTipsCard').style.display = '';
+  document.getElementById('mlSection').style.display = 'none';
   loadAll();
 }
 
+function selectML(el) {
+  isMLView = true;
+  document.querySelectorAll('.sport-tab').forEach(t => t.classList.remove('active'));
+  el.classList.add('active');
+  document.getElementById('cards').style.display = 'none';
+  document.getElementById('sportCharts').style.display = 'none';
+  document.getElementById('sportTipsCard').style.display = 'none';
+  document.getElementById('mlSection').style.display = 'block';
+  loadML();
+}
+
 async function loadAll() {
+  if (isMLView) { loadML(); return; }
   document.getElementById('lastUpdated').textContent = 'Atualizando...';
-  // tips não devem depender de ROI/calibração (podem ser lentos)
   const tipsP = loadTips();
   const [roi, calibration, weights] = await Promise.all([
     apiFetch('/roi?sport=' + currentSport),
@@ -200,6 +271,224 @@ async function loadAll() {
   renderWeights(weights);
   await tipsP;
   document.getElementById('lastUpdated').textContent = 'Atualizado: ' + new Date().toLocaleTimeString('pt-BR');
+}
+
+async function loadML() {
+  document.getElementById('lastUpdated').textContent = 'Atualizando ML...';
+  const data = await apiFetch('/ml-dashboard');
+  if (!data) {
+    document.getElementById('mlCards').innerHTML = '<div class="error">Erro ao carregar dados ML.</div>';
+    return;
+  }
+  renderMLCards(data);
+  renderMLWeightsFull(data.weights || []);
+  renderMLMonthlyChart(data.monthlyAccuracy || []);
+  renderMLPredictions(data.predictions || []);
+  renderMLMonthlyTable(data.monthlyAccuracy || []);
+  document.getElementById('lastUpdated').textContent = 'Atualizado: ' + new Date().toLocaleTimeString('pt-BR');
+}
+
+function renderMLCards(data) {
+  const acc = data.overallAccuracy;
+  const n   = data.overallN || 0;
+  const accClass = acc == null ? 'neutral' : acc >= 55 ? 'positive' : acc >= 50 ? 'neutral' : 'negative';
+  const lastDate = data.lastMatch ? new Date(data.lastMatch).toLocaleDateString('pt-BR') : '—';
+
+  const weights = Array.isArray(data.weights) ? data.weights : [];
+  const bestFactor = data.factorAccuracy && data.factorAccuracy.length
+    ? data.factorAccuracy.slice().sort((a,b) => (b.acc||0)-(a.acc||0))[0]
+    : null;
+
+  document.getElementById('mlCards').innerHTML =
+    '<div class="card">' +
+      '<div class="label">Partidas LoL (DB)</div>' +
+      '<div class="value neutral">' + (data.totalMatches || 0) + '</div>' +
+      '<div class="sub">última: ' + lastDate + '</div>' +
+    '</div>' +
+    '<div class="card">' +
+      '<div class="label">Acurácia Walk-Forward</div>' +
+      '<div class="value ' + accClass + '">' + (acc != null ? acc + '%' : '—') + '</div>' +
+      '<div class="sub">n=' + n + ' (últimos 30%)</div>' +
+    '</div>' +
+    '<div class="card">' +
+      '<div class="label">Fatores no Modelo</div>' +
+      '<div class="value neutral">' + weights.length + '</div>' +
+      '<div class="sub">' + weights.map(function(w){ return w.factor; }).join(', ') + '</div>' +
+    '</div>' +
+    '<div class="card">' +
+      '<div class="label">Melhor Fator (45d)</div>' +
+      '<div class="value ' + (bestFactor ? (bestFactor.acc >= 55 ? 'positive' : 'neutral') : 'neutral') + '">' +
+        (bestFactor ? (bestFactor.factor.toUpperCase() + ' ' + bestFactor.acc + '%') : '—') +
+      '</div>' +
+      '<div class="sub">' + (bestFactor ? ('n=' + bestFactor.total + ' tips') : 'sem dados tip_factor_log') + '</div>' +
+    '</div>';
+}
+
+function renderMLWeightsFull(weights) {
+  const ctx = document.getElementById('mlWeightsFullChart').getContext('2d');
+  if (mlWeightsFullChart) { mlWeightsFullChart.destroy(); mlWeightsFullChart = null; }
+  if (!weights.length) {
+    document.getElementById('mlWeightsNote').textContent = 'Sem pesos no DB — usando padrão.';
+    return;
+  }
+  const colors = { forma: '#7c3aed', h2h: '#2563eb', comp: '#059669', streak: '#d97706', kd10: '#dc2626' };
+  const labels = weights.map(function(r) { return r.factor.toUpperCase(); });
+  const values = weights.map(function(r) { return parseFloat((r.weight * 100).toFixed(1)); });
+  const bgs    = weights.map(function(r) { return colors[r.factor] || '#6b7280'; });
+
+  const totalSamples = weights.reduce(function(s,r){ return s+(r.total||0); }, 0);
+  document.getElementById('mlWeightsNote').textContent =
+    totalSamples > 0
+      ? 'Baseado em ' + totalSamples + ' tips com factor log'
+      : 'Pesos do último treino (node scripts/train.js)';
+
+  mlWeightsFullChart = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: labels,
+      datasets: [{
+        label: 'Peso (%)',
+        data: values,
+        backgroundColor: bgs,
+        borderRadius: 5
+      }]
+    },
+    options: {
+      indexAxis: 'y',
+      responsive: true,
+      maintainAspectRatio: true,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { ticks: { color:'#6b7280', font:{size:10} }, grid:{color:'#1f2937'}, max: 60 },
+        y: { ticks: { color:'#9ca3af', font:{size:12} }, grid:{display:false} }
+      }
+    }
+  });
+}
+
+function renderMLMonthlyChart(monthly) {
+  const ctx = document.getElementById('mlMonthlyChart').getContext('2d');
+  if (mlMonthlyChart) { mlMonthlyChart.destroy(); mlMonthlyChart = null; }
+  if (!monthly.length) {
+    document.getElementById('mlMonthlyNote').textContent = 'Sem dados suficientes para o gráfico.';
+    return;
+  }
+  const labels = monthly.map(function(m){ return m.month; });
+  const accs   = monthly.map(function(m){ return m.accuracy; });
+  const avg    = accs.length ? parseFloat((accs.reduce(function(a,b){return a+b;},0)/accs.length).toFixed(1)) : 0;
+  document.getElementById('mlMonthlyNote').textContent = 'Média: ' + avg + '% | Linha ref. = 50%';
+
+  mlMonthlyChart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels: labels,
+      datasets: [
+        {
+          label: 'Acurácia (%)',
+          data: accs,
+          borderColor: '#7c3aed',
+          backgroundColor: '#7c3aed33',
+          tension: 0.3,
+          fill: true,
+          pointBackgroundColor: accs.map(function(a){ return a>=55?'#34d399':a>=50?'#fbbf24':'#f87171'; }),
+          pointRadius: 5
+        },
+        {
+          label: 'Baseline 50%',
+          data: labels.map(function(){ return 50; }),
+          borderColor: '#374151',
+          borderDash: [5,5],
+          borderWidth: 1,
+          pointRadius: 0,
+          fill: false
+        }
+      ]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: true,
+      plugins: { legend: { labels: { color:'#9ca3af', font:{size:10} } } },
+      scales: {
+        x: { ticks:{ color:'#6b7280', font:{size:10} }, grid:{color:'#1f2937'} },
+        y: { ticks:{ color:'#6b7280', font:{size:10} }, grid:{color:'#1f2937'}, min:30, max:80,
+             title:{ display:true, text:'%', color:'#6b7280', font:{size:10} } }
+      }
+    }
+  });
+}
+
+function renderMLPredictions(predictions) {
+  const el = document.getElementById('mlPredictions');
+  if (!predictions.length) {
+    el.innerHTML = '<div class="loading" style="color:#6b7280">Sem partidas LoL upcoming no DB no momento.</div>';
+    return;
+  }
+  const rows = predictions.map(function(p) {
+    const favCol   = p.p1 >= p.p2 ? '#a78bfa' : '#60a5fa';
+    const pickCol  = p.p1 >= p.p2 ? '#a78bfa' : '#60a5fa';
+    const barFill1 = p.p1 + '%';
+    const barFill2 = p.p2 + '%';
+    const dateStr  = p.match_time ? new Date(p.match_time).toLocaleString('pt-BR',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}) : '—';
+    return '<tr>' +
+      '<td style="color:#6b7280;font-size:0.7rem;white-space:nowrap">' + dateStr + '</td>' +
+      '<td style="color:#6b7280;font-size:0.72rem">' + (p.league||'?') + '</td>' +
+      '<td style="font-size:0.82rem">' +
+        '<div style="font-weight:600;margin-bottom:2px">' + p.t1 + ' vs ' + p.t2 + '</div>' +
+        '<div class="prob-bar-wrap">' +
+          '<span style="width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#e0e0e0">' + p.t1 + '</span>' +
+          '<div class="prob-bar"><div class="prob-bar-fill" style="width:' + barFill1 + ';background:#7c3aed"></div></div>' +
+          '<span style="color:#a78bfa;font-weight:700;width:36px;text-align:right">' + p.p1 + '%</span>' +
+        '</div>' +
+        '<div class="prob-bar-wrap" style="margin-top:2px">' +
+          '<span style="width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#e0e0e0">' + p.t2 + '</span>' +
+          '<div class="prob-bar"><div class="prob-bar-fill" style="width:' + barFill2 + ';background:#2563eb"></div></div>' +
+          '<span style="color:#60a5fa;font-weight:700;width:36px;text-align:right">' + p.p2 + '%</span>' +
+        '</div>' +
+      '</td>' +
+      '<td style="color:' + pickCol + ';font-weight:700">' + p.pick + '</td>' +
+      '<td style="font-size:0.72rem;color:#6b7280">' +
+        p.t1 + ' ' + p.wr1 + '% (' + p.f1n + 'g)<br>' +
+        p.t2 + ' ' + p.wr2 + '% (' + p.f2n + 'g)' +
+      '</td>' +
+      '<td style="font-size:0.72rem;color:#6b7280">' + (p.h2hn ? p.h2hn + 'g' : '—') + '</td>' +
+    '</tr>';
+  }).join('');
+
+  el.innerHTML = '<table>' +
+    '<thead><tr>' +
+      '<th>Hora</th><th>Liga</th><th>Partida / Probabilidade</th><th>Pick</th><th>Forma 45d</th><th>H2H 90d</th>' +
+    '</tr></thead>' +
+    '<tbody>' + rows + '</tbody>' +
+  '</table>';
+}
+
+function renderMLMonthlyTable(monthly) {
+  const el = document.getElementById('mlMonthlyTable');
+  if (!monthly.length) {
+    el.innerHTML = '<div class="loading" style="color:#6b7280">Sem dados de walk-forward.</div>';
+    return;
+  }
+  const rows = monthly.slice().reverse().map(function(m) {
+    const icon = m.accuracy >= 57 ? '&#9989;' : m.accuracy >= 50 ? '&#128993;' : '&#10060;';
+    const barW = Math.round(m.accuracy);
+    const barCol = m.accuracy >= 57 ? '#34d399' : m.accuracy >= 50 ? '#fbbf24' : '#f87171';
+    return '<tr>' +
+      '<td style="color:#9ca3af">' + m.month + '</td>' +
+      '<td>' + icon + '</td>' +
+      '<td>' + m.correct + '/' + m.total + '</td>' +
+      '<td style="color:' + barCol + ';font-weight:700">' + m.accuracy + '%</td>' +
+      '<td style="width:120px">' +
+        '<div class="prob-bar" style="width:' + barW + '%;background:' + barCol + ';height:8px;border-radius:4px;min-width:4px"></div>' +
+      '</td>' +
+    '</tr>';
+  }).join('');
+
+  el.innerHTML = '<table>' +
+    '<thead><tr>' +
+      '<th>M&ecirc;s</th><th></th><th>Correto/Total</th><th>Acur&aacute;cia</th><th>Barra</th>' +
+    '</tr></thead>' +
+    '<tbody>' + rows + '</tbody>' +
+  '</table>';
 }
 
 // Auto-refresh (calibração/ROI “ao vivo”)

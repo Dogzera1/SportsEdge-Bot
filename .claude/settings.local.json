@@ -44,7 +44,9 @@
       "Bash(grep -rl \"lol-matches\\\\|lol_matches\\\\|live.*odds\\\\|odds.*live\" 'C:/Users/vict_/Desktop/lol betting' --include=*.js)",
       "Bash(dir:*)",
       "WebFetch(domain:github.com)",
-      "WebFetch(domain:raw.githubusercontent.com)"
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(grep -v \"//.*ODDSPAPI\")",
+      "Bash(grep -n \"SXBET\\\\|sxbet\\\\|SX_BET\\\\|sx_bet\" bot.js lib/*.js)"
     ]
   }
 }

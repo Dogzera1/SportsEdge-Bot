@@ -5014,6 +5014,130 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // ── ML Dashboard — weights, walk-forward accuracy, upcoming predictions ──
+  if (p === '/ml-dashboard') {
+    try {
+      const _sig = x => 1 / (1 + Math.exp(-x));
+
+      // Weights from DB
+      const weightRows = stmts.getAllFactorWeights.all();
+      const wMap = {};
+      for (const w of weightRows) wMap[w.factor] = w;
+      const w_forma = wMap.forma?.weight ?? 0.25;
+      const w_h2h   = wMap.h2h?.weight   ?? 0.30;
+
+      // Factor accuracy from tip_factor_log (last 45d)
+      let factorAcc = [];
+      try {
+        factorAcc = stmts.getFactorAccuracyLast45d.all().map(r => ({
+          factor: r.factor, wins: r.wins, total: r.total,
+          acc: r.total > 0 ? parseFloat((r.wins / r.total * 100).toFixed(1)) : null
+        }));
+      } catch (_) {}
+
+      // Match count + last result date
+      const countRow = db.prepare("SELECT COUNT(*) as n, MAX(resolved_at) as last FROM match_results WHERE game='lol'").get();
+      const totalMatches = countRow?.n ?? 0;
+      const lastMatch    = countRow?.last ?? null;
+
+      // Monthly walk-forward (last 30% of dataset, no look-ahead)
+      const allLol = db.prepare(
+        "SELECT team1, team2, winner, resolved_at FROM match_results WHERE game='lol' ORDER BY resolved_at ASC"
+      ).all();
+
+      const monthly = {};
+      let overallCorrect = 0, overallTotal = 0;
+      const startIdx = Math.max(50, Math.floor(allLol.length * 0.7));
+
+      for (let i = startIdx; i < allLol.length; i++) {
+        const m  = allLol[i];
+        const t1 = m.team1.toLowerCase(), t2 = m.team2.toLowerCase();
+        const cut = m.resolved_at;
+        const d   = new Date(cut);
+
+        const fCut = new Date(d); fCut.setDate(fCut.getDate() - 45);
+        const hCut = new Date(d); hCut.setDate(hCut.getDate() - 90);
+        const fStr = fCut.toISOString().slice(0, 19).replace('T', ' ');
+        const hStr = hCut.toISOString().slice(0, 19).replace('T', ' ');
+
+        const prior = allLol.slice(0, i);
+        const f1 = prior.filter(mm => (mm.team1.toLowerCase()===t1||mm.team2.toLowerCase()===t1) && mm.resolved_at>=fStr && mm.resolved_at<cut);
+        const f2 = prior.filter(mm => (mm.team1.toLowerCase()===t2||mm.team2.toLowerCase()===t2) && mm.resolved_at>=fStr && mm.resolved_at<cut);
+        if (f1.length < 2 || f2.length < 2) continue;
+
+        const wr1 = f1.filter(mm=>mm.winner?.toLowerCase()===t1).length / f1.length * 100;
+        const wr2 = f2.filter(mm=>mm.winner?.toLowerCase()===t2).length / f2.length * 100;
+        const h2h = prior.filter(mm => {
+          const mt1=mm.team1.toLowerCase(), mt2=mm.team2.toLowerCase();
+          return ((mt1===t1&&mt2===t2)||(mt1===t2&&mt2===t1)) && mm.resolved_at>=hStr && mm.resolved_at<cut;
+        });
+        const h2hT1  = h2h.filter(mm=>mm.winner?.toLowerCase()===t1).length;
+        const f_h2h  = h2h.length ? ((h2hT1/h2h.length)-0.5)*100 : 0;
+        const p1     = _sig(((wr1-wr2)*w_forma + f_h2h*w_h2h) * 0.05);
+        const actual = m.winner?.toLowerCase();
+        if (!actual) continue;
+
+        const month = cut.slice(0, 7);
+        if (!monthly[month]) monthly[month] = { correct:0, total:0 };
+        monthly[month].total++;
+        overallTotal++;
+        if ((p1>=0.5?t1:t2) === actual) { monthly[month].correct++; overallCorrect++; }
+      }
+
+      const monthlyArr = Object.entries(monthly)
+        .sort(([a],[b]) => a<b?-1:1)
+        .map(([month, v]) => ({
+          month, correct: v.correct, total: v.total,
+          accuracy: v.total > 0 ? parseFloat((v.correct/v.total*100).toFixed(1)) : 0
+        }));
+
+      // Upcoming predictions
+      const predictions = [];
+      try {
+        const upcoming = db.prepare(`
+          SELECT participant1_name as t1, participant2_name as t2, event_name as league, match_time
+          FROM matches WHERE sport='esports' AND winner IS NULL
+            AND (match_time IS NULL OR match_time >= datetime('now','-2 hours'))
+          ORDER BY match_time ASC LIMIT 10
+        `).all();
+
+        for (const m of upcoming) {
+          if (!m.t1 || !m.t2) continue;
+          const t1 = m.t1.toLowerCase(), t2 = m.t2.toLowerCase();
+          const f1 = db.prepare(`SELECT winner FROM match_results WHERE (lower(team1)=lower(?) OR lower(team2)=lower(?)) AND game='lol' AND resolved_at>=datetime('now','-45 days') ORDER BY resolved_at DESC LIMIT 10`).all(m.t1, m.t1);
+          const f2 = db.prepare(`SELECT winner FROM match_results WHERE (lower(team1)=lower(?) OR lower(team2)=lower(?)) AND game='lol' AND resolved_at>=datetime('now','-45 days') ORDER BY resolved_at DESC LIMIT 10`).all(m.t2, m.t2);
+          const wr1 = f1.length ? f1.filter(r=>r.winner?.toLowerCase()===t1).length/f1.length*100 : 50;
+          const wr2 = f2.length ? f2.filter(r=>r.winner?.toLowerCase()===t2).length/f2.length*100 : 50;
+          const h2h = db.prepare(`SELECT winner FROM match_results WHERE ((lower(team1)=lower(?) AND lower(team2)=lower(?)) OR (lower(team1)=lower(?) AND lower(team2)=lower(?))) AND game='lol' AND resolved_at>=datetime('now','-90 days') LIMIT 10`).all(m.t1,m.t2,m.t2,m.t1);
+          const h2hT1 = h2h.filter(r=>r.winner?.toLowerCase()===t1).length;
+          const f_h2h = h2h.length ? ((h2hT1/h2h.length)-0.5)*100 : 0;
+          const p1    = _sig(((wr1-wr2)*w_forma + f_h2h*w_h2h) * 0.05);
+          predictions.push({
+            t1: m.t1, t2: m.t2, league: m.league, match_time: m.match_time,
+            p1: parseFloat((p1*100).toFixed(1)),
+            p2: parseFloat(((1-p1)*100).toFixed(1)),
+            pick: p1>=0.5 ? m.t1 : m.t2,
+            wr1: parseFloat(wr1.toFixed(1)), wr2: parseFloat(wr2.toFixed(1)),
+            f1n: f1.length, f2n: f2.length, h2hn: h2h.length
+          });
+        }
+      } catch (_) {}
+
+      sendJson(res, {
+        weights: weightRows,
+        factorAccuracy: factorAcc,
+        totalMatches, lastMatch,
+        overallAccuracy: overallTotal > 0 ? parseFloat((overallCorrect/overallTotal*100).toFixed(1)) : null,
+        overallN: overallTotal,
+        monthlyAccuracy: monthlyArr,
+        predictions
+      });
+    } catch (e) {
+      sendJson(res, { error: e.message }, 500);
+    }
+    return;
+  }
+
   // ── LoL role impact (gol.gg via PandaTobi repo) ──
   if (p === '/lol-role-impact') {
     try {
