@@ -710,10 +710,13 @@ function renderTips(tips) {
   }
 
   const rows = tips.slice(0, 20).map(function(t) {
+    const reopenBtn = (t.result === 'win' || t.result === 'loss')
+      ? '<button onclick="reopenTip(' + t.id + ',\'' + (t.sport||currentSport) + '\')" title="Reabrir tip (anular liquidação incorreta)" style="margin-left:6px;padding:1px 5px;font-size:0.65rem;background:#1f2937;border:1px solid #4b5563;border-radius:3px;color:#9ca3af;cursor:pointer">↩</button>'
+      : '';
     const resultBadge = t.result === 'win'
-      ? '<span class="badge badge-win">WIN</span>'
+      ? '<span class="badge badge-win">WIN</span>' + reopenBtn
       : t.result === 'loss'
-        ? '<span class="badge badge-loss">LOSS</span>'
+        ? '<span class="badge badge-loss">LOSS</span>' + reopenBtn
         : '<span class="badge badge-pending">PENDING</span>';
 
     const conf = (t.confidence || 'M\u00C9DIA').toUpperCase();
@@ -755,6 +758,21 @@ function renderTips(tips) {
       '</tr></thead>' +
       '<tbody>' + rows + '</tbody>' +
     '</table>';
+}
+
+async function reopenTip(id, sport) {
+  if (!confirm('Reabrir esta tip para re-liquidação futura?')) return;
+  try {
+    const r = await fetch(BASE + '/reopen-tip?id=' + id + '&sport=' + encodeURIComponent(sport), { method: 'POST' });
+    const j = await r.json();
+    if (j.ok && j.changes > 0) {
+      loadTips();
+    } else {
+      alert('Não foi possível reabrir: ' + (j.error || 'sem mudanças'));
+    }
+  } catch(e) {
+    alert('Erro: ' + e.message);
+  }
 }
 
 bindTipsControls();

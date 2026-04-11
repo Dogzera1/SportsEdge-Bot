@@ -3698,6 +3698,35 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // Reabre uma tip já liquidada (volta result → NULL) para re-liquidação futura
+  if (p === '/reopen-tip' && req.method === 'POST') {
+    let body = ''; req.on('data', d => body += d);
+    req.on('end', () => {
+      try {
+        const payload = safeParse(body, {});
+        const sport   = payload.sport || parsed.query.sport || 'esports';
+        const idStr   = String(payload.id || parsed.query.id || '').trim();
+        const matchId = String(payload.matchId || parsed.query.matchId || '').trim();
+        if (!idStr && !matchId) { sendJson(res, { error: 'id ou matchId obrigatório' }, 400); return; }
+
+        let changes = 0;
+        if (idStr) {
+          const id = parseInt(idStr, 10);
+          if (!Number.isFinite(id)) { sendJson(res, { error: 'id inválido' }, 400); return; }
+          const r = db.prepare(`UPDATE tips SET result = NULL, settled_at = NULL, profit_reais = NULL WHERE id = ? AND sport = ?`).run(id, sport);
+          changes = r.changes;
+        } else {
+          const r = db.prepare(`UPDATE tips SET result = NULL, settled_at = NULL, profit_reais = NULL WHERE match_id = ? AND sport = ? ORDER BY sent_at DESC LIMIT 1`).run(matchId, sport);
+          changes = r.changes;
+        }
+        sendJson(res, { ok: true, changes });
+      } catch (e) {
+        sendJson(res, { error: e.message }, 500);
+      }
+    });
+    return;
+  }
+
   // Marca tip como VOID (odds errada / cancelada) para sair de "em andamento"
   if (p === '/void-tip') {
     const sport = parsed.query.sport || 'esports';

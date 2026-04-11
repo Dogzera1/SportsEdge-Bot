@@ -511,14 +511,18 @@ function canonicalMatchId(sport, rawId, opts = {}) {
   return id;
 }
 
-/** ESPN `post` usa data de início; exige fim estimado ≥ sent_at para não pegar H2H antigo. */
+/** ESPN `post` usa data de início; exige fim estimado ≥ sent_at para não pegar H2H antigo.
+ *  Buffer padrão: 3h (cobre jogos longos do mesmo dia sem pegar rodadas anteriores do torneio).
+ *  Resultados sem data são rejeitados para evitar falsos positivos. */
 function tennisEspnRecentResultEligibleForTip(r, tipMs) {
   if (!Number.isFinite(tipMs)) return true;
   const d = r?.date;
-  if (!d) return true;
+  if (!d) return false; // sem data → não confiável, rejeita
   const startMs = Date.parse(String(d).includes('T') ? String(d) : String(d).replace(' ', 'T'));
-  if (!Number.isFinite(startMs)) return true;
-  const h = Math.max(1, Math.min(14, parseInt(process.env.TENNIS_ESPN_POST_BUFFER_H || '8', 10) || 8));
+  if (!Number.isFinite(startMs)) return false; // data inválida → rejeita
+  // Buffer: jogo deve ter COMEÇADO no máximo `h` horas antes do tip.
+  // 3h cobre partidas longas do mesmo dia; evita pegar rodadas de dias anteriores.
+  const h = Math.max(0, Math.min(6, parseInt(process.env.TENNIS_ESPN_POST_BUFFER_H || '3', 10) || 3));
   return startMs + h * 3600000 >= tipMs;
 }
 
