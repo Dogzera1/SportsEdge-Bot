@@ -4339,6 +4339,11 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
           tipReason: tipReasonMma
         }, 'mma');
 
+        if (!rec?.tipId && !rec?.skipped) {
+          log('WARN', 'AUTO-MMA', `record-tip falhou para ${tipTeam} @ ${tipOdd} (${fight.team1} vs ${fight.team2}) — tip abortada`);
+          await new Promise(r => setTimeout(r, 3000)); continue;
+        }
+
         if (rec?.tipId && mlResultMma.factorActive?.length && mlResultMma.direction) {
           await serverPost('/log-tip-factors', {
             tipId: rec.tipId,
@@ -4616,6 +4621,11 @@ Máximo 200 palavras. Mostre seu raciocínio brevemente antes da decisão.`;
           modelLabel: fairLabelTennis,
           tipReason: tipReasonTennis
         }, 'tennis');
+
+        if (!rec?.tipId && !rec?.skipped) {
+          log('WARN', 'AUTO-TENNIS', `record-tip falhou para ${tipPlayer} @ ${tipOdd} (${match.team1} vs ${match.team2}) — tip abortada`);
+          await new Promise(r => setTimeout(r, 3000)); continue;
+        }
 
         if (rec?.tipId && mlResultTennis.factorActive?.length && mlResultTennis.direction) {
           await serverPost('/log-tip-factors', {
@@ -4978,12 +4988,17 @@ Máximo 200 palavras.`;
         if (!riskAdjFb.ok) { log('INFO', 'RISK', `football: bloqueada (${riskAdjFb.reason})`); await new Promise(r => setTimeout(r, 2000)); continue; }
         const tipStakeAdjFb = String(riskAdjFb.units.toFixed(1).replace(/\.0$/, ''));
 
-        await serverPost('/record-tip', {
+        const recFb = await serverPost('/record-tip', {
           matchId: recordMatchId, eventName: match.league,
           p1: match.team1, p2: match.team2, tipParticipant: tipTeam,
           odds: String(tipOdd), ev: String(tipEV), stake: tipStakeAdjFb,
           confidence: tipConf, isLive: false, market_type: tipMarket
         }, 'football');
+
+        if (!recFb?.tipId && !recFb?.skipped) {
+          log('WARN', 'AUTO-FOOTBALL', `record-tip falhou para ${tipTeam} @ ${tipOdd} (${match.team1} vs ${match.team2}) — tip abortada`);
+          await new Promise(r => setTimeout(r, 2000)); continue;
+        }
 
         for (const [userId, prefs] of subscribedUsers) {
           if (!prefs.has('football')) continue;
