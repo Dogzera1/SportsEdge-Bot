@@ -2481,6 +2481,7 @@ const ADMIN_ROUTES_POST = new Set([
   '/resync-stats',
   '/reset-tips',
   '/settle',
+  '/settle-manual',
   '/set-bankroll',
   '/update-clv',
   '/update-open-tip',
@@ -3726,6 +3727,53 @@ const server = http.createServer(async (req, res) => {
           changes = r.changes;
         }
         sendJson(res, { ok: true, changes });
+      } catch (e) {
+        sendJson(res, { error: e.message }, 500);
+      }
+    });
+    return;
+  }
+
+  // Liquidação manual de tip por ID (Win ou Loss)
+  if (p === '/settle-manual' && req.method === 'POST') {
+    let body = ''; req.on('data', d => body += d);
+    req.on('end', () => {
+      try {
+        const payload = safeParse(body, {});
+        const sport  = payload.sport || parsed.query.sport || 'esports';
+        const idStr  = String(payload.id || parsed.query.id || '').trim();
+        const result = String(payload.result || parsed.query.result || '').toLowerCase();
+        if (!idStr) { sendJson(res, { error: 'id obrigatório' }, 400); return; }
+        if (result !== 'win' && result !== 'loss') { sendJson(res, { error: 'result deve ser win ou loss' }, 400); return; }
+        const id = parseInt(idStr, 10);
+        if (!Number.isFinite(id)) { sendJson(res, { error: 'id inválido' }, 400); return; }
+
+        const settled = db.transaction(() => {
+          const tip = stmts.getTipById.get(id, sport);
+          if (!tip) return { ok: false, error: 'tip não encontrada' };
+          if (tip.result !== null) return { ok: false, error: 'tip já liquidada — use ↩ para reabrir primeiro' };
+
+          db.prepare(`UPDATE tips SET result = ?, settled_at = datetime('now') WHERE id = ? AND sport = ?`).run(result, id, sport);
+
+          const bk = stmts.getBankroll.get(sport);
+          const uv = bk ? bk.current_banca / 100 : 1;
+          const su = parseFloat(String(tip.stake || '1').replace('u', '')) || 1;
+          const stakeR = tip.stake_reais || parseFloat((su * uv).toFixed(2));
+          const odds = parseFloat(tip.odds) || 1;
+          const profitR = result === 'win'
+            ? parseFloat((stakeR * (odds - 1)).toFixed(2))
+            : parseFloat((-stakeR).toFixed(2));
+          db.prepare(`UPDATE tips SET stake_reais = ?, profit_reais = ? WHERE id = ?`).run(stakeR, profitR, id);
+
+          if (bk && profitR !== 0) {
+            const nova = parseFloat((bk.current_banca + profitR).toFixed(2));
+            db.prepare(`UPDATE bankroll SET current_banca = ? WHERE sport = ?`).run(nova, sport);
+          }
+          return { ok: true, result, profitR };
+        })();
+
+        if (!settled.ok) { sendJson(res, { error: settled.error }, 400); return; }
+        sendJson(res, settled);
       } catch (e) {
         sendJson(res, { error: e.message }, 500);
       }

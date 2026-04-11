@@ -710,14 +710,19 @@ function renderTips(tips) {
   }
 
   const rows = tips.slice(0, 20).map(function(t) {
+    const sport = t.sport || currentSport;
     const reopenBtn = (t.result === 'win' || t.result === 'loss')
-      ? '<button onclick="reopenTip(' + t.id + ',\'' + (t.sport||currentSport) + '\')" title="Reabrir tip (anular liquidação incorreta)" style="margin-left:6px;padding:1px 5px;font-size:0.65rem;background:#1f2937;border:1px solid #4b5563;border-radius:3px;color:#9ca3af;cursor:pointer">↩</button>'
+      ? '<button onclick="reopenTip(' + t.id + ',\'' + sport + '\')" title="Reabrir tip (anular liquidação incorreta)" style="margin-left:6px;padding:1px 5px;font-size:0.65rem;background:#1f2937;border:1px solid #4b5563;border-radius:3px;color:#9ca3af;cursor:pointer">↩</button>'
+      : '';
+    const manualBtns = (!t.result)
+      ? '<button onclick="settleTipManual(' + t.id + ',\'win\',\'' + sport + '\')" title="Marcar como WIN" style="margin-left:4px;padding:1px 6px;font-size:0.65rem;background:#065f46;border:1px solid #34d399;border-radius:3px;color:#34d399;cursor:pointer">W</button>' +
+        '<button onclick="settleTipManual(' + t.id + ',\'loss\',\'' + sport + '\')" title="Marcar como LOSS" style="margin-left:3px;padding:1px 6px;font-size:0.65rem;background:#7f1d1d;border:1px solid #f87171;border-radius:3px;color:#f87171;cursor:pointer">L</button>'
       : '';
     const resultBadge = t.result === 'win'
       ? '<span class="badge badge-win">WIN</span>' + reopenBtn
       : t.result === 'loss'
         ? '<span class="badge badge-loss">LOSS</span>' + reopenBtn
-        : '<span class="badge badge-pending">PENDING</span>';
+        : '<span class="badge badge-pending">PENDING</span>' + manualBtns;
 
     const conf = (t.confidence || 'M\u00C9DIA').toUpperCase();
     const confBadge = conf === 'ALTA'
@@ -769,6 +774,27 @@ async function reopenTip(id, sport) {
       loadTips();
     } else {
       alert('Não foi possível reabrir: ' + (j.error || 'sem mudanças'));
+    }
+  } catch(e) {
+    alert('Erro: ' + e.message);
+  }
+}
+
+async function settleTipManual(id, result, sport) {
+  const label = result === 'win' ? 'WIN' : 'LOSS';
+  if (!confirm('Marcar tip #' + id + ' como ' + label + '?')) return;
+  try {
+    const r = await fetch(BASE + '/settle-manual', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, result, sport })
+    });
+    const j = await r.json();
+    if (j.ok) {
+      loadTips();
+      loadAll();
+    } else {
+      alert('Erro: ' + (j.error || 'falha desconhecida'));
     }
   } catch(e) {
     alert('Erro: ' + e.message);
