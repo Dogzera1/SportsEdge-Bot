@@ -51,14 +51,23 @@ function mmaRecordToEnrich(record1, record2) {
   };
 }
 
+function fighterNamesMatch(espnSideName, oddsSideName) {
+  const e = normName(espnSideName), o = normName(oddsSideName);
+  if (!e || !o) return false;
+  if (e === o) return true;
+  if (e.includes(o) || o.includes(e)) return true;
+  const tokens = s => String(s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().split(/\s+/).filter(Boolean);
+  const te = tokens(espnSideName), to = tokens(oddsSideName);
+  if (!te.length || !to.length) return false;
+  const le = te[te.length - 1], lo = to[to.length - 1];
+  if (le && lo && le === lo && (te[0]?.[0] || '') === (to[0]?.[0] || '')) return true;
+  return false;
+}
+
 function findEspnFight(espnFights, team1, team2) {
-  const n1 = normName(team1);
-  const n2 = normName(team2);
   return espnFights.find(f => {
-    const e1 = normName(f.name1);
-    const e2 = normName(f.name2);
-    const fwd = (e1.includes(n1) || n1.includes(e1)) && (e2.includes(n2) || n2.includes(e2));
-    const rev = (e1.includes(n2) || n2.includes(e1)) && (e2.includes(n1) || n1.includes(e2));
+    const fwd = fighterNamesMatch(f.name1, team1) && fighterNamesMatch(f.name2, team2);
+    const rev = fighterNamesMatch(f.name1, team2) && fighterNamesMatch(f.name2, team1);
     return fwd || rev;
   }) || null;
 }

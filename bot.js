@@ -1023,13 +1023,7 @@ async function settleCompletedTips() {
         for (const tip of unsettled) {
           if (!tip.match_id) continue;
           try {
-            const espn = espnFights.find(f => {
-              const n1 = normName(tip.participant1), n2 = normName(tip.participant2);
-              const e1 = normName(f.name1), e2 = normName(f.name2);
-              const fwd = (e1.includes(n1) || n1.includes(e1)) && (e2.includes(n2) || n2.includes(e2));
-              const rev = (e1.includes(n2) || n2.includes(e1)) && (e2.includes(n1) || n1.includes(e2));
-              return fwd || rev;
-            });
+            const espn = findEspnFight(espnFights, tip.participant1, tip.participant2);
             if (!espn || espn.statusState !== 'post' || !espn.winner) continue;
             await serverPost('/settle', { matchId: tip.match_id, winner: espn.winner }, 'mma');
             log('INFO', 'SETTLE', `mma: ${tip.participant1} vs ${tip.participant2} → ${espn.winner}`);
@@ -3452,56 +3446,98 @@ function getTennisRecentForm(recentResults, name) {
 let espnMmaCache = { data: [], ts: 0 };
 const ESPN_MMA_TTL = 15 * 60 * 1000; // 15min para capturar lutas recém-concluídas
 
+function _espnMmaYmd(d) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}${m}${day}`;
+}
+
+function _espnMmaSlugPair(f) {
+  const slug = s => String(s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]/g, '');
+  const a = slug(f.name1);
+  const b = slug(f.name2);
+  return a && b ? (a < b ? `${a}|${b}` : `${b}|${a}`) : '';
+}
+
+function parseEspnMmaScoreboardJson(json) {
+  const fights = [];
+  for (const event of (json.events || [])) {
+    for (const comp of (event.competitions || [])) {
+      const comps = comp.competitors || [];
+      if (comps.length < 2) continue;
+      const f1 = comps.find(c => c.order === 1) || comps[0];
+      const f2 = comps.find(c => c.order === 2) || comps[1];
+      const rec = c => (c.records || []).find(r => r.name === 'overall')?.summary || '';
+      const athleteName = a => a?.fullName || a?.displayName || a?.shortName || '';
+      const winnerComp = comps.find(c => c.winner === true);
+      const winnerName = winnerComp
+        ? (athleteName(winnerComp.athlete) || winnerComp.displayName || winnerComp.name || '')
+        : '';
+      fights.push({
+        name1: athleteName(f1.athlete) || f1.displayName || f1.name || '',
+        name2: athleteName(f2.athlete) || f2.displayName || f2.name || '',
+        record1: rec(f1),
+        record2: rec(f2),
+        weightClass: comp.type?.abbreviation || comp.type?.text || '',
+        rounds: comp.format?.regulation?.periods || 3,
+        eventName: event.name || '',
+        date: comp.date || '',
+        statusState: comp.status?.type?.state || 'pre',
+        winner: winnerName
+      });
+    }
+  }
+  return fights;
+}
+
+function _httpsEspnScoreboardGet(path) {
+  return new Promise((resolve, reject) => {
+    const req = https.request({
+      hostname: 'site.api.espn.com',
+      path,
+      method: 'GET',
+      headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json' }
+    }, res => {
+      let d = '';
+      res.on('data', c => d += c);
+      res.on('end', () => resolve({ status: res.statusCode, body: d }));
+    });
+    req.on('error', reject);
+    req.setTimeout(12000, () => req.destroy(new Error('ESPN timeout')));
+    req.end();
+  });
+}
+
 async function fetchEspnMmaFights() {
   if (Date.now() - espnMmaCache.ts < ESPN_MMA_TTL && espnMmaCache.data.length) return espnMmaCache.data;
   try {
-    const r = await new Promise((resolve, reject) => {
-      const req = https.request({
-        hostname: 'site.api.espn.com',
-        path: '/apis/site/v2/sports/mma/ufc/scoreboard',
-        method: 'GET',
-        headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json' }
-      }, res => {
-        let d = '';
-        res.on('data', c => d += c);
-        res.on('end', () => resolve({ status: res.statusCode, body: d }));
-      });
-      req.on('error', reject);
-      req.setTimeout(10000, () => req.destroy(new Error('ESPN timeout')));
-      req.end();
-    });
+    const weeks = Math.max(1, Math.min(18, parseInt(process.env.MMA_ESPN_SCOREBOARD_WEEKS || '12', 10) || 12));
+    const paths = ['/apis/site/v2/sports/mma/ufc/scoreboard'];
+    const base = new Date();
+    base.setHours(0, 0, 0, 0);
+    for (let w = 0; w < weeks; w++) {
+      const a = new Date(base);
+      a.setDate(a.getDate() + w * 7);
+      const b = new Date(a);
+      b.setDate(b.getDate() + 6);
+      paths.push(`/apis/site/v2/sports/mma/ufc/scoreboard?dates=${_espnMmaYmd(a)}-${_espnMmaYmd(b)}`);
+    }
 
-    if (r.status !== 200) return espnMmaCache.data;
-    const json = safeParse(r.body, {});
-    const fights = [];
-    for (const event of (json.events || [])) {
-      for (const comp of (event.competitions || [])) {
-        const comps = comp.competitors || [];
-        if (comps.length < 2) continue;
-        const f1 = comps.find(c => c.order === 1) || comps[0];
-        const f2 = comps.find(c => c.order === 2) || comps[1];
-        const rec = c => (c.records || []).find(r => r.name === 'overall')?.summary || '';
-        const athleteName = a => a?.fullName || a?.displayName || a?.shortName || '';
-        const winnerComp = comps.find(c => c.winner === true);
-        const winnerName = winnerComp
-          ? (athleteName(winnerComp.athlete) || winnerComp.displayName || winnerComp.name || '')
-          : '';
-        fights.push({
-          name1: athleteName(f1.athlete) || f1.displayName || f1.name || '',
-          name2: athleteName(f2.athlete) || f2.displayName || f2.name || '',
-          record1: rec(f1),
-          record2: rec(f2),
-          weightClass: comp.type?.abbreviation || comp.type?.text || '',
-          rounds: comp.format?.regulation?.periods || 3,
-          eventName: event.name || '',
-          date: comp.date || '',
-          statusState: comp.status?.type?.state || 'pre',
-          winner: winnerName
-        });
+    const results = await Promise.all(paths.map(p => _httpsEspnScoreboardGet(p).catch(() => ({ status: 0, body: '{}' }))));
+    const merged = new Map();
+    for (const r of results) {
+      if (r.status !== 200) continue;
+      const json = safeParse(r.body, {});
+      for (const f of parseEspnMmaScoreboardJson(json)) {
+        const key = _espnMmaSlugPair(f);
+        if (key && !merged.has(key)) merged.set(key, f);
       }
     }
+
+    const fights = [...merged.values()];
     espnMmaCache = { data: fights, ts: Date.now() };
-    log('INFO', 'ESPN-MMA', `${fights.length} lutas carregadas da ESPN`);
+    log('INFO', 'ESPN-MMA', `${fights.length} lutas carregadas da ESPN (${paths.length} janelas)`);
     return fights;
   } catch(e) {
     log('WARN', 'ESPN-MMA', `Falha ao buscar dados ESPN: ${e.message}`);
@@ -3652,6 +3688,25 @@ async function fetchTapologyFighterRecord(name) {
   }
 }
 
+/** GET site.api.espn.com (path completo incluindo query). */
+function espnGet(path) {
+  return new Promise((resolve, reject) => {
+    const req = https.request({
+      hostname: 'site.api.espn.com',
+      path,
+      method: 'GET',
+      headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json' }
+    }, res => {
+      let d = '';
+      res.on('data', c => d += c);
+      res.on('end', () => resolve({ status: res.statusCode, body: d }));
+    });
+    req.on('error', reject);
+    req.setTimeout(12000, () => req.destroy(new Error('ESPN timeout')));
+    req.end();
+  });
+}
+
 // Busca record de um lutador individualmente na ESPN quando não está no scoreboard.
 // Passo 1: search para obter o ID do atleta
 // Passo 2: GET /athletes/{id} para obter o record completo
@@ -3715,12 +3770,24 @@ async function fetchEspnFighterRecord(name) {
   }
 }
 
+/** ESPN vs feed de odds: nomes completos vs apelidos (ex.: Paulo Henrique Costa vs Paulo Costa). */
+function fighterNamesMatch(espnSideName, oddsSideName) {
+  const e = normName(espnSideName), o = normName(oddsSideName);
+  if (!e || !o) return false;
+  if (e === o) return true;
+  if (e.includes(o) || o.includes(e)) return true;
+  const tokens = s => String(s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().split(/\s+/).filter(Boolean);
+  const te = tokens(espnSideName), to = tokens(oddsSideName);
+  if (!te.length || !to.length) return false;
+  const le = te[te.length - 1], lo = to[to.length - 1];
+  if (le && lo && le === lo && (te[0]?.[0] || '') === (to[0]?.[0] || '')) return true;
+  return false;
+}
+
 function findEspnFight(espnFights, team1, team2) {
-  const n1 = normName(team1), n2 = normName(team2);
   return espnFights.find(f => {
-    const e1 = normName(f.name1), e2 = normName(f.name2);
-    const fwd = (e1.includes(n1) || n1.includes(e1)) && (e2.includes(n2) || n2.includes(e2));
-    const rev = (e1.includes(n2) || n2.includes(e1)) && (e2.includes(n1) || n1.includes(e2));
+    const fwd = fighterNamesMatch(f.name1, team1) && fighterNamesMatch(f.name2, team2);
+    const rev = fighterNamesMatch(f.name1, team2) && fighterNamesMatch(f.name2, team1);
     return fwd || rev;
   }) || null;
 }
