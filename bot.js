@@ -4636,6 +4636,7 @@ async function pollFootball(runOnce = false) {
 
   const { calcFootballScore } = require('./lib/football-ml');
   const footballData = require('./lib/football-data');
+  const sofascoreFootball = require('./lib/sofascore-football');
 
   const FOOTBALL_INTERVAL = 6 * 60 * 60 * 1000;
   const EV_THRESHOLD   = parseFloat(process.env.FOOTBALL_EV_THRESHOLD  || '5.0');
@@ -4656,7 +4657,9 @@ async function pollFootball(runOnce = false) {
         return [];
       }
       const hasFootballDataOrg = !!(process.env.FOOTBALL_DATA_TOKEN || process.env.FOOTBALL_DATA_KEY);
-      log('INFO', 'AUTO-FOOTBALL', `${matches.length} partidas futebol com odds (${hasFootballDataOrg ? 'football-data.org' : 'odds-only'})`);
+      const hasSofaProxy = !!(process.env.SOFASCORE_PROXY_BASE || '').trim();
+      const src = [hasFootballDataOrg && 'football-data.org', hasSofaProxy && 'Sofascore-proxy'].filter(Boolean).join('+') || 'odds-only';
+      log('INFO', 'AUTO-FOOTBALL', `${matches.length} partidas futebol com odds (${src})`);
 
       const now = Date.now();
       for (const match of matches) {
@@ -4724,6 +4727,19 @@ async function pollFootball(runOnce = false) {
           } catch(_) {}
         }
 
+        // Sofascore (via proxy TLS — ver SOFASCORE_PROXY_BASE) preenche forma/H2H quando football-data/DB vazios
+        if (!fixtureInfo) {
+          try {
+            const ss = await sofascoreFootball.enrichMatch(match.team1, match.team2, match.time).catch(() => null);
+            if (ss) {
+              if (!homeFormData?.form?.length && ss.homeFormData?.form?.length) homeFormData = ss.homeFormData;
+              if (!awayFormData?.form?.length && ss.awayFormData?.form?.length) awayFormData = ss.awayFormData;
+              if (!h2hData?.results?.length && ss.h2hData?.results?.length) h2hData = ss.h2hData;
+              if (ss.eventId) log('DEBUG', 'AUTO-FOOTBALL', `Sofascore event ${ss.eventId}: ${match.team1} vs ${match.team2}`);
+            }
+          } catch (_) {}
+        }
+
         // Fallback final: usar base interna (match_results) para forma/H2H quando APIs falharem
         if (!fixtureInfo) {
           try {
@@ -4769,12 +4785,10 @@ async function pollFootball(runOnce = false) {
 
         // Elo local (aprende só com resultados já liquidados no DB)
         let elo = null;
-        if (fixtureInfo) {
-          try {
-            const e = await serverGet(`/football-elo?home=${encodeURIComponent(match.team1)}&away=${encodeURIComponent(match.team2)}`).catch(() => null);
-            if (e?.homeRating && e?.awayRating) elo = e;
-          } catch(_) {}
-        }
+        try {
+          const e = await serverGet(`/football-elo?home=${encodeURIComponent(match.team1)}&away=${encodeURIComponent(match.team2)}`).catch(() => null);
+          if (e?.homeRating && e?.awayRating) elo = e;
+        } catch (_) {}
 
         const mlScore = calcFootballScore(
           {
@@ -4822,7 +4836,7 @@ async function pollFootball(runOnce = false) {
             ? h2hData.results.slice(0, 5).map(r => `${r.home} ${r.homeGoals}-${r.awayGoals} ${r.away} (${r.date?.slice(0,10) || '?'})`).join('\n  ')
             : 'Sem H2H recente';
           contextBlock = `
-DADOS QUANTITATIVOS (football-data.org / DB):
+DADOS QUANTITATIVOS (football-data.org / Sofascore / DB):
 ${match.team1} (casa):
   Forma últimos 5: ${fmtForm(homeFormData.form)} | Em casa: ${fmtForm(homeFormData.homeForm)}
   Gols/jogo: ${homeFormData.goalsFor?.toFixed(2) ?? 'N/D'} marcados | ${homeFormData.goalsAgainst?.toFixed(2) ?? 'N/D'} sofridos
