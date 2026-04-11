@@ -3512,17 +3512,32 @@ function _httpsEspnScoreboardGet(path) {
 async function fetchEspnMmaFights() {
   if (Date.now() - espnMmaCache.ts < ESPN_MMA_TTL && espnMmaCache.data.length) return espnMmaCache.data;
   try {
-    const weeks = Math.max(1, Math.min(18, parseInt(process.env.MMA_ESPN_SCOREBOARD_WEEKS || '12', 10) || 12));
-    const paths = ['/apis/site/v2/sports/mma/ufc/scoreboard'];
+    const futureWeeks = Math.max(1, Math.min(18, parseInt(process.env.MMA_ESPN_SCOREBOARD_WEEKS || '12', 10) || 12));
+    const pastWeeks   = Math.max(1, Math.min(12, parseInt(process.env.MMA_ESPN_PAST_WEEKS || '6',  10) || 6));
     const base = new Date();
     base.setHours(0, 0, 0, 0);
-    for (let w = 0; w < weeks; w++) {
-      const a = new Date(base);
-      a.setDate(a.getDate() + w * 7);
-      const b = new Date(a);
-      b.setDate(b.getDate() + 6);
-      paths.push(`/apis/site/v2/sports/mma/ufc/scoreboard?dates=${_espnMmaYmd(a)}-${_espnMmaYmd(b)}`);
-    }
+
+    const addWindows = (prefix, start, count, dir) => {
+      const out = [];
+      for (let w = 0; w < count; w++) {
+        const a = new Date(start);
+        a.setDate(a.getDate() + dir * w * 7);
+        const b = new Date(a);
+        b.setDate(b.getDate() + dir * 6);
+        const [from, to] = dir >= 0 ? [a, b] : [b, a];
+        out.push(`${prefix}?dates=${_espnMmaYmd(from)}-${_espnMmaYmd(to)}`);
+      }
+      return out;
+    };
+
+    const paths = [
+      '/apis/site/v2/sports/mma/ufc/scoreboard',
+      '/apis/site/v2/sports/boxing/scoreboard',
+      ...addWindows('/apis/site/v2/sports/mma/ufc/scoreboard',     base, futureWeeks,  1),
+      ...addWindows('/apis/site/v2/sports/boxing/scoreboard',      base, futureWeeks,  1),
+      ...addWindows('/apis/site/v2/sports/mma/ufc/scoreboard',     base, pastWeeks,   -1),
+      ...addWindows('/apis/site/v2/sports/boxing/scoreboard',      base, pastWeeks,   -1),
+    ];
 
     const results = await Promise.all(paths.map(p => _httpsEspnScoreboardGet(p).catch(() => ({ status: 0, body: '{}' }))));
     const merged = new Map();
@@ -3537,7 +3552,7 @@ async function fetchEspnMmaFights() {
 
     const fights = [...merged.values()];
     espnMmaCache = { data: fights, ts: Date.now() };
-    log('INFO', 'ESPN-MMA', `${fights.length} lutas carregadas da ESPN (${paths.length} janelas)`);
+    log('INFO', 'ESPN-MMA', `${fights.length} lutas carregadas da ESPN (${paths.length} janelas: ${futureWeeks}f+${pastWeeks}p semanas, UFC+Boxe)`);
     return fights;
   } catch(e) {
     log('WARN', 'ESPN-MMA', `Falha ao buscar dados ESPN: ${e.message}`);
