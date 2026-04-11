@@ -4205,9 +4205,13 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
+    const totalAllRow = db.prepare("SELECT COUNT(*) as c FROM tips WHERE sport = ?").get(sport);
+    const pendingRow  = db.prepare("SELECT COUNT(*) as c FROM tips WHERE sport = ? AND result IS NULL").get(sport);
+
     sendJson(res, {
       overall: {
         total: row?.total || 0, wins: row?.wins || 0, losses: row?.losses || 0,
+        totalAll: totalAllRow?.c || 0, pending: pendingRow?.c || 0,
         roi, totalProfit: totalProfit.toFixed(2), totalStaked: totalStaked.toFixed(2),
         avg_ev: row?.avg_ev || 0, avg_odds: row?.avg_odds || 0
       },

@@ -554,8 +554,10 @@ function renderCards(roi) {
   const roiPct = parseFloat(overall.roi || 0);
   const profit = parseFloat(overall.totalProfit || 0);
   const staked = parseFloat(overall.totalStaked || 0);
+  const totalAll     = parseInt(overall.totalAll || overall.total || 0, 10);
   const totalSettled = parseInt(overall.total || 0, 10);
-  const wins = parseInt(overall.wins || 0, 10);
+  const pending      = parseInt(overall.pending || 0, 10);
+  const wins   = parseInt(overall.wins   || 0, 10);
   const losses = parseInt(overall.losses || 0, 10);
   const wr = (wins + losses) > 0 ? (wins / (wins + losses) * 100) : 0;
   const profitClass = profit >= 0 ? 'positive' : 'negative';
@@ -587,13 +589,13 @@ function renderCards(roi) {
   document.getElementById('cards').innerHTML =
     '<div class="card">' +
       '<div class="label">Total Tips</div>' +
-      '<div class="value neutral">' + (totalSettled || 0) + '</div>' +
-      '<div class="sub">' + wins + 'W / ' + losses + 'L</div>' +
+      '<div class="value neutral">' + totalAll + '</div>' +
+      '<div class="sub">' + wins + 'W / ' + losses + 'L' + (pending > 0 ? ' / ' + pending + ' pend' : '') + '</div>' +
     '</div>' +
     '<div class="card">' +
       '<div class="label">Win Rate</div>' +
-      '<div class="value ' + (wr >= 50 ? 'positive' : 'negative') + '">' + wr.toFixed(1) + '%</div>' +
-      '<div class="sub">settled</div>' +
+      '<div class="value ' + (wr >= 50 ? 'positive' : 'negative') + '">' + (totalSettled > 0 ? wr.toFixed(1) + '%' : '—') + '</div>' +
+      '<div class="sub">' + totalSettled + ' liquidadas</div>' +
     '</div>' +
     '<div class="card">' +
       '<div class="label">ROI</div>' +
