@@ -7,7 +7,9 @@ const dns = require('dns');
 dns.setDefaultResultOrder('ipv4first');
 const initDatabase = require('./lib/database');
 const { SPORTS, getSportById } = require('./lib/sports');
-const { log, sendJson, safeParse, norm, httpGet, cachedHttpGet, aiPost, oddsApiAllowed, getMetricsLite, calcKellyWithP } = require('./lib/utils');
+const { log, sendJson, safeParse, norm, httpGet, cachedHttpGet, aiPost, oddsApiAllowed, oddsApiPeek, getMetricsLite, calcKellyWithP } = require('./lib/utils');
+const footballData  = require('./lib/football-data');
+const apiFootball   = require('./lib/api-football');
 const { tennisSinglePlayerNameMatch, tennisPairMatchesPlayers } = require('./lib/tennis-match');
 const { esportsPreFilter } = require('./lib/ml');
 const { fetchGridEnrichForMatch } = require('./lib/grid');
@@ -946,6 +948,10 @@ async function fetchMapOddsByFixtureId(fixtureId, mapNumber) {
   mapOddsCache.set(cacheKey, out);
   return out;
 }
+
+// Cache de último resultado bem-sucedido de /football-matches (sobrevive ao esgotamento de quota)
+let _footballMatchesCache = null; // { matches: Array, ts: number }
+const FOOTBALL_MATCHES_CACHE_TTL = 8 * 60 * 60 * 1000; // 8h
 
 // Backoff em caso de 429
 let esportsBackoffUntil = 0;
@@ -5489,25 +5495,20 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (p === '/football-matches') {
-    if (!THE_ODDS_API_KEY) { sendJson(res, []); return; }
     try {
       const now = Date.now();
       const weekAhead = now + 7 * 24 * 60 * 60 * 1000;
-      // Ligas "mercado não tão forte" (tier-2) por padrão.
-      // Override total via FOOTBALL_LEAGUES no Railway.
+
       const defaultLeagues = [
         'soccer_brazil_serie_b',
         'soccer_brazil_serie_c',
-        // Inglaterra
         'soccer_england_league1',
         'soccer_england_league2',
-        // Alemanha / França / Itália / Espanha / Portugal (2ª/3ª divisões)
         'soccer_germany_3_liga',
         'soccer_france_ligue_2',
         'soccer_italy_serie_b',
         'soccer_spain_segunda_division',
         'soccer_portugal_segunda_liga',
-        // Países com mercados menores
         'soccer_netherlands_eerste_divisie',
         'soccer_belgium_first_division_b',
         'soccer_turkey_1_lig',
@@ -5518,53 +5519,102 @@ const server = http.createServer(async (req, res) => {
       const configured = (process.env.FOOTBALL_LEAGUES || defaultLeagues)
         .split(',').map(s => s.trim()).filter(Boolean);
 
-      const matches = [];
-      for (const k of configured) {
-        if (!oddsApiAllowed('ODDS')) break;
-        const urlOdds = `https://api.the-odds-api.com/v4/sports/${k}/odds/?apiKey=${THE_ODDS_API_KEY}&regions=eu&markets=h2h,totals&oddsFormat=decimal`;
-        const r2 = await theOddsGet(urlOdds);
-        if (!r2 || r2.status !== 200) continue;
-        const raw = safeParse(r2.body, []);
-        for (const e of raw) {
-          const t = new Date(e.commence_time).getTime();
-          if (t <= now || t > weekAhead) continue;
-          const bm = e.bookmakers?.[0];
-          if (!bm) continue;
-          const h2hMarket = bm.markets?.find(m => m.key === 'h2h');
-          const totalsMarket = bm.markets?.find(m => m.key === 'totals');
-          const out = h2hMarket?.outcomes || [];
-          const oH = out.find(o => o.name === e.home_team);
-          const oD = out.find(o => o.name === 'Draw');
-          const oA = out.find(o => o.name === e.away_team);
-          if (!oH || !oD || !oA) continue;
-          const over = totalsMarket?.outcomes?.find(o => o.name === 'Over');
-          const under = totalsMarket?.outcomes?.find(o => o.name === 'Under');
-          const odds = {
-            h: String(oH.price),
-            d: String(oD.price),
-            a: String(oA.price),
-            bookmaker: bm.title
-          };
-          if (over && under) {
-            odds.ou25 = { over: String(over.price), under: String(under.price), point: over.point };
+      let matches = [];
+      let oddsSource = 'none';
+
+      // ── Fonte 1: TheOddsAPI (odds reais) ──
+      if (THE_ODDS_API_KEY && oddsApiPeek()) {
+        for (const k of configured) {
+          if (!oddsApiAllowed('ODDS')) break;
+          const urlOdds = `https://api.the-odds-api.com/v4/sports/${k}/odds/?apiKey=${THE_ODDS_API_KEY}&regions=eu&markets=h2h,totals&oddsFormat=decimal`;
+          const r2 = await theOddsGet(urlOdds);
+          if (!r2 || r2.status !== 200) continue;
+          const raw = safeParse(r2.body, []);
+          for (const e of raw) {
+            const t = new Date(e.commence_time).getTime();
+            if (t <= now || t > weekAhead) continue;
+            const bm = e.bookmakers?.[0];
+            if (!bm) continue;
+            const h2hMarket = bm.markets?.find(m => m.key === 'h2h');
+            const totalsMarket = bm.markets?.find(m => m.key === 'totals');
+            const out = h2hMarket?.outcomes || [];
+            const oH = out.find(o => o.name === e.home_team);
+            const oD = out.find(o => o.name === 'Draw');
+            const oA = out.find(o => o.name === e.away_team);
+            if (!oH || !oD || !oA) continue;
+            const over = totalsMarket?.outcomes?.find(o => o.name === 'Over');
+            const under = totalsMarket?.outcomes?.find(o => o.name === 'Under');
+            const odds = { h: String(oH.price), d: String(oD.price), a: String(oA.price), bookmaker: bm.title };
+            if (over && under) odds.ou25 = { over: String(over.price), under: String(under.price), point: over.point };
+            matches.push({
+              id: e.id, game: 'football', sport_key: k, status: 'upcoming',
+              team1: e.home_team, team2: e.away_team,
+              league: e.sport_title || 'Football', time: e.commence_time, odds
+            });
           }
-          matches.push({
-            id: e.id,
-            game: 'football',
-            sport_key: k,
-            status: 'upcoming',
-            team1: e.home_team,
-            team2: e.away_team,
-            league: e.sport_title || 'Football',
-            time: e.commence_time,
-            odds
-          });
+        }
+        if (matches.length) {
+          oddsSource = 'theodds';
+          _footballMatchesCache = { matches: matches.slice(), ts: now };
         }
       }
+
+      // ── Fonte 2: cache da última resposta com odds (quando quota esgotada) ──
+      if (!matches.length && _footballMatchesCache && now - _footballMatchesCache.ts < FOOTBALL_MATCHES_CACHE_TTL) {
+        matches = _footballMatchesCache.matches.filter(m => new Date(m.time).getTime() > now);
+        oddsSource = 'cache';
+        log('INFO', 'AUTO-FOOTBALL', `Usando cache de partidas com odds (${matches.length} partidas, idade=${Math.round((now - _footballMatchesCache.ts) / 60000)}min)`);
+      }
+
+      // ── Fonte 3: fixtures sem odds (quando cache também vazio) ──
+      // football-data.org cobre ligas mapeadas, api-football cobre o resto
+      if (!matches.length) {
+        const fixtureMatches = [];
+        const hasFdToken = !!(process.env.FOOTBALL_DATA_TOKEN || process.env.FOOTBALL_DATA_KEY);
+
+        for (const k of configured) {
+          // football-data.org
+          if (hasFdToken) {
+            const compCode = footballData.getCompetitionCode(k);
+            if (compCode) {
+              const fx = await footballData.getUpcomingFixtures(compCode, { sportKey: k, daysAhead: 7 }).catch(() => []);
+              fixtureMatches.push(...fx);
+              continue; // liga já coberta
+            }
+          }
+          // api-football como fallback de cobertura
+          const leagueId = apiFootball.getLeagueId(k);
+          if (leagueId && apiFootball.apiFootballAllowed()) {
+            const fx = await apiFootball.getUpcomingFixtures(leagueId, { sportKey: k, daysAhead: 7 }).catch(() => []);
+            fixtureMatches.push(...fx);
+          }
+        }
+
+        // Deduplicação por time1+time2+dia
+        const seen = new Set();
+        for (const m of fixtureMatches) {
+          if (!m.team1 || !m.team2 || !m.time) continue;
+          const t = new Date(m.time).getTime();
+          if (t <= now || t > weekAhead) continue;
+          const key = `${m.team1}|${m.team2}|${String(m.time).slice(0, 10)}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          matches.push(m);
+        }
+
+        if (matches.length) {
+          oddsSource = 'fixtures';
+          log('INFO', 'AUTO-FOOTBALL', `Fixtures sem odds: ${matches.length} partida(s) de football-data.org/api-football`);
+        }
+      }
+
       matches.sort((a, b) => new Date(a.time) - new Date(b.time));
+      log('INFO', 'AUTO-FOOTBALL', `/football-matches: ${matches.length} partidas (fonte=${oddsSource})`);
       sendJson(res, matches);
     } catch(e) {
-      sendJson(res, []);
+      // Em caso de erro total, serve cache se disponível
+      const fallback = _footballMatchesCache?.matches?.filter(m => new Date(m.time).getTime() > Date.now()) || [];
+      sendJson(res, fallback);
     }
     return;
   }
