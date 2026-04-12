@@ -703,6 +703,12 @@ async function runAutoAnalysis() {
             continue;
           }
 
+          if (rec?.skipped) {
+            analyzedMatches.set(matchKey, { ts: now, tipSent: true });
+            log('INFO', 'AUTO', `Tip duplicada (já registrada), Telegram ignorado: ${match.team1} vs ${match.team2}`);
+            continue;
+          }
+
           if (rec?.tipId && result.factorActive?.length && result.mlDirection) {
             await serverPost('/log-tip-factors', {
               tipId: rec.tipId,
@@ -4346,6 +4352,12 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
           await new Promise(r => setTimeout(r, 3000)); continue;
         }
 
+        if (rec?.skipped) {
+          analyzedMma.set(key, { ts: now, tipSent: true });
+          log('INFO', 'AUTO-MMA', `Tip duplicada (já registrada), Telegram ignorado: ${fight.team1} vs ${fight.team2}`);
+          continue;
+        }
+
         if (rec?.tipId && mlResultMma.factorActive?.length && mlResultMma.direction) {
           await serverPost('/log-tip-factors', {
             tipId: rec.tipId,
@@ -4627,6 +4639,12 @@ Máximo 200 palavras. Mostre seu raciocínio brevemente antes da decisão.`;
         if (!rec?.tipId && !rec?.skipped) {
           log('WARN', 'AUTO-TENNIS', `record-tip falhou para ${tipPlayer} @ ${tipOdd} (${match.team1} vs ${match.team2}) — tip abortada`);
           await new Promise(r => setTimeout(r, 3000)); continue;
+        }
+
+        if (rec?.skipped) {
+          analyzedTennis.set(key, { ts: now, tipSent: true });
+          log('INFO', 'AUTO-TENNIS', `Tip duplicada (já registrada), Telegram ignorado: ${match.team1} vs ${match.team2}`);
+          continue;
         }
 
         if (rec?.tipId && mlResultTennis.factorActive?.length && mlResultTennis.direction) {
@@ -5000,6 +5018,12 @@ Máximo 200 palavras.`;
         if (!recFb?.tipId && !recFb?.skipped) {
           log('WARN', 'AUTO-FOOTBALL', `record-tip falhou para ${tipTeam} @ ${tipOdd} (${match.team1} vs ${match.team2}) — tip abortada`);
           await new Promise(r => setTimeout(r, 2000)); continue;
+        }
+
+        if (recFb?.skipped) {
+          analyzedFootball.set(key, { ts: now, tipSent: true });
+          log('INFO', 'AUTO-FOOTBALL', `Tip duplicada (já registrada), Telegram ignorado: ${match.team1} vs ${match.team2}`);
+          continue;
         }
 
         for (const [userId, prefs] of subscribedUsers) {
