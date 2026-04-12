@@ -86,6 +86,11 @@ function updateEloMatch(homeTeam, awayTeam, winner) {
   return { homeTeam, awayTeam, before: { rH, rA }, after: { newH, newA }, K, homeAdvElo };
 }
 
+/** Escopo SQL: uma linha por partida (MAX(id)); evita duplicatas de match_id no dashboard/ROI */
+function sqlTipsDedupeIdIn(alias, sportParam = '?') {
+  return `${alias}.id IN (SELECT MAX(tdx.id) FROM tips tdx WHERE tdx.sport = ${sportParam} GROUP BY COALESCE(NULLIF(TRIM(tdx.match_id), ''), 'id:' || CAST(tdx.id AS TEXT)))`;
+}
+
 // ── Import dataset CSV (football matches 2024/2025) ──
 function parseCsvRows(text) {
   const rows = [];
@@ -4031,8 +4036,9 @@ const server = http.createServer(async (req, res) => {
       SELECT t.*
       FROM tips t
       WHERE t.sport = ?
+      AND ${sqlTipsDedupeIdIn('t', '?')}
     `;
-    const params = [sport];
+    const params = [sport, sport];
 
     if (status === 'settled') query += " AND t.result IN ('win', 'loss')";
     else if (status === 'open') query += " AND t.result IS NULL";
@@ -4131,10 +4137,32 @@ const server = http.createServer(async (req, res) => {
   // ── ROI e Estatísticas ──
   if (p === '/roi') {
     const sport = parsed.query.sport || 'esports';
-    const row = stmts.getROI.get(sport);
-    const calibration = stmts.getCalibration.all(sport);
+    const dedupe = sqlTipsDedupeIdIn('t', '?');
+    const row = db.prepare(`
+      SELECT COUNT(*) as total,
+        SUM(CASE WHEN t.result='win' THEN 1 ELSE 0 END) as wins,
+        SUM(CASE WHEN t.result='loss' THEN 1 ELSE 0 END) as losses,
+        ROUND(AVG(t.ev), 2) as avg_ev,
+        ROUND(AVG(t.odds), 2) as avg_odds
+      FROM tips t
+      WHERE t.sport = ? AND ${dedupe}
+      AND t.result IS NOT NULL AND t.result != 'void'
+    `).get(sport, sport);
+    const calibration = db.prepare(`
+      SELECT t.confidence, COUNT(*) as total,
+        SUM(CASE WHEN t.result='win' THEN 1 ELSE 0 END) as wins,
+        ROUND(100.0 * SUM(CASE WHEN t.result='win' THEN 1 ELSE 0 END) / COUNT(*), 1) as win_rate
+      FROM tips t
+      WHERE t.sport = ? AND ${dedupe}
+      AND t.result IS NOT NULL AND t.result != 'void' GROUP BY t.confidence
+    `).all(sport, sport);
 
-    const tips = db.prepare("SELECT odds, stake, result, ev, is_live, clv_odds, open_odds, model_p_pick FROM tips WHERE sport = ? AND result IS NOT NULL AND result != 'void'").all(sport);
+    const tips = db.prepare(`
+      SELECT t.odds, t.stake, t.result, t.ev, t.is_live, t.clv_odds, t.open_odds, t.model_p_pick
+      FROM tips t
+      WHERE t.sport = ? AND ${dedupe}
+      AND t.result IS NOT NULL AND t.result != 'void'
+    `).all(sport, sport);
     let totalStaked = 0, totalProfit = 0;
     const liveTips = { wins: 0, losses: 0, total: 0, profit: 0, staked: 0 };
     const preTips  = { wins: 0, losses: 0, total: 0, profit: 0, staked: 0 };
@@ -4202,8 +4230,10 @@ const server = http.createServer(async (req, res) => {
     if (bk) {
       // Backfill: tips arquivadas sem profit_reais calculado (coluna adicionada depois do settlement)
       const orphans = db.prepare(
-        "SELECT id, result, odds, stake, stake_reais FROM tips WHERE sport = ? AND result IS NOT NULL AND result != 'void' AND profit_reais IS NULL"
-      ).all(sport);
+        `SELECT t.id, t.result, t.odds, t.stake, t.stake_reais FROM tips t
+         WHERE t.sport = ? AND ${sqlTipsDedupeIdIn('t', '?')}
+         AND t.result IS NOT NULL AND t.result != 'void' AND t.profit_reais IS NULL`
+      ).all(sport, sport);
       if (orphans.length > 0) {
         const unitValue = bk.initial_banca / 100;
         const backfill = db.prepare("UPDATE tips SET stake_reais = ?, profit_reais = ? WHERE id = ?");
@@ -4219,8 +4249,10 @@ const server = http.createServer(async (req, res) => {
       }
 
       const profitRow = db.prepare(
-        "SELECT COALESCE(SUM(profit_reais), 0) as total_profit FROM tips WHERE sport = ? AND result IS NOT NULL AND result != 'void' AND profit_reais IS NOT NULL"
-      ).get(sport);
+        `SELECT COALESCE(SUM(t.profit_reais), 0) as total_profit FROM tips t
+         WHERE t.sport = ? AND ${sqlTipsDedupeIdIn('t', '?')}
+         AND t.result IS NOT NULL AND t.result != 'void' AND t.profit_reais IS NOT NULL`
+      ).get(sport, sport);
       const accumulatedProfit = parseFloat((profitRow?.total_profit || 0).toFixed(2));
       const currentBanca = parseFloat((bk.initial_banca + accumulatedProfit).toFixed(2));
       // Sincroniza o registro caso esteja desatualizado
@@ -4251,8 +4283,12 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
-    const totalAllRow = db.prepare("SELECT COUNT(*) as c FROM tips WHERE sport = ? AND COALESCE(result,'') != 'void'").get(sport);
-    const pendingRow  = db.prepare("SELECT COUNT(*) as c FROM tips WHERE sport = ? AND result IS NULL").get(sport);
+    const totalAllRow = db.prepare(
+      `SELECT COUNT(*) as c FROM tips t WHERE t.sport = ? AND ${sqlTipsDedupeIdIn('t', '?')} AND COALESCE(t.result,'') != 'void'`
+    ).get(sport, sport);
+    const pendingRow  = db.prepare(
+      `SELECT COUNT(*) as c FROM tips t WHERE t.sport = ? AND ${sqlTipsDedupeIdIn('t', '?')} AND t.result IS NULL`
+    ).get(sport, sport);
 
     sendJson(res, {
       overall: {
@@ -4315,12 +4351,13 @@ const server = http.createServer(async (req, res) => {
       const phase = String(parsed.query.phase || 'all'); // all | live | pre
 
       const tips = db.prepare(
-        `SELECT odds, ev, result, is_live, model_p_pick, sent_at, settled_at
-         FROM tips
-         WHERE sport = ? AND result IN ('win','loss')
-         ORDER BY COALESCE(settled_at, sent_at) DESC
+        `SELECT t.odds, t.ev, t.result, t.is_live, t.model_p_pick, t.sent_at, t.settled_at
+         FROM tips t
+         WHERE t.sport = ? AND ${sqlTipsDedupeIdIn('t', '?')}
+         AND t.result IN ('win','loss')
+         ORDER BY COALESCE(t.settled_at, t.sent_at) DESC
          LIMIT ?`
-      ).all(sport, limit);
+      ).all(sport, sport, limit);
 
       function tipToP(t) {
         const odds = parseFloat(t.odds) || 0;
