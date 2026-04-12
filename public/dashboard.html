@@ -555,10 +555,10 @@ function renderCards(roi) {
   const profit = parseFloat(overall.totalProfit || 0);
   const staked = parseFloat(overall.totalStaked || 0);
   const totalAll     = parseInt(overall.totalAll || overall.total || 0, 10);
-  const totalSettled = parseInt(overall.total || 0, 10);
   const pending      = parseInt(overall.pending || 0, 10);
   const wins   = parseInt(overall.wins   || 0, 10);
   const losses = parseInt(overall.losses || 0, 10);
+  const totalSettled = wins + losses; // exclude void tips
   const wr = (wins + losses) > 0 ? (wins / (wins + losses) * 100) : 0;
   const profitClass = profit >= 0 ? 'positive' : 'negative';
   const roiClass = roiPct >= 0 ? 'positive' : 'negative';

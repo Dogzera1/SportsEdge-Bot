@@ -4205,7 +4205,7 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
-    const totalAllRow = db.prepare("SELECT COUNT(*) as c FROM tips WHERE sport = ?").get(sport);
+    const totalAllRow = db.prepare("SELECT COUNT(*) as c FROM tips WHERE sport = ? AND COALESCE(result,'') != 'void'").get(sport);
     const pendingRow  = db.prepare("SELECT COUNT(*) as c FROM tips WHERE sport = ? AND result IS NULL").get(sport);
 
     sendJson(res, {
