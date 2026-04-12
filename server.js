@@ -5378,9 +5378,6 @@ const server = http.createServer(async (req, res) => {
 
       log('INFO', 'TENNIS', `Sports keys: total=${tennisKeys.length} atp=${atpKeys.length} wta=${wtaKeys.length} usando=${allowedKeys.length} (minWTA=${process.env.TENNIS_MIN_WTA_KEYS || '5'})`);
 
-      for (const k of allowedKeys) {
-        if (!oddsApiAllowed('ODDS')) break;
-      }
       const matches = [];
       for (const k of allowedKeys) {
         if (!oddsApiAllowed('ODDS')) break;
