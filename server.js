@@ -4034,12 +4034,16 @@ const server = http.createServer(async (req, res) => {
     `;
     const params = [sport];
 
-    if (status === 'settled') query += " AND t.result IS NOT NULL";
+    if (status === 'settled') query += " AND t.result IN ('win', 'loss')";
     else if (status === 'open') query += " AND t.result IS NULL";
-    else if (filter === 'settled') query += " AND t.result IS NOT NULL";
+    else if (status === 'win') query += " AND t.result = 'win'";
+    else if (status === 'loss') query += " AND t.result = 'loss'";
+    else if (status === 'void') query += " AND t.result = 'void'";
+    else if (filter === 'settled') query += " AND t.result IN ('win', 'loss')";
     else if (filter === 'pending') query += " AND t.result IS NULL";
     else if (filter === 'win') query += " AND t.result = 'win'";
     else if (filter === 'loss') query += " AND t.result = 'loss'";
+    else query += " AND COALESCE(t.result, '') != 'void'";
 
     if (live !== null) { query += " AND t.is_live = ?"; params.push(live); }
     if (confidence) { query += " AND UPPER(t.confidence) = ?"; params.push(confidence); }
