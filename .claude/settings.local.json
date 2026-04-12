@@ -48,7 +48,8 @@
       "Bash(grep -v \"//.*ODDSPAPI\")",
       "Bash(grep -n \"SXBET\\\\|sxbet\\\\|SX_BET\\\\|sx_bet\" bot.js lib/*.js)",
       "Bash(gh repo:*)",
-      "Bash(curl -s https://raw.githubusercontent.com/cwendt94/espn-api/master/README.md)"
+      "Bash(curl -s https://raw.githubusercontent.com/cwendt94/espn-api/master/README.md)",
+      "Bash(ls *.js)"
     ]
   }
 }

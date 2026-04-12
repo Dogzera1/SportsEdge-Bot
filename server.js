@@ -4241,7 +4241,11 @@ const server = http.createServer(async (req, res) => {
     const htmlPath = path.join(__dirname, 'public', 'dashboard.html');
     try {
       const html = fs.readFileSync(htmlPath, 'utf8');
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.writeHead(200, {
+        'Content-Type': 'text/html; charset=utf-8',
+        'Cache-Control': 'no-store, no-cache, must-revalidate',
+        'Pragma': 'no-cache'
+      });
       res.end(html);
     } catch(_) {
       res.writeHead(404); res.end('Dashboard not found');
