@@ -3820,6 +3820,26 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // Retorna quantas tips pendentes existem por faixa de idade
+  if (p === '/pending-age-info') {
+    const sport = parsed.query.sport || 'esports';
+    try {
+      const thresholds = [3, 7, 14, 21, 30, 45, 60, 90];
+      const buckets = thresholds.map(d => {
+        const row = db.prepare(
+          `SELECT COUNT(*) as c FROM tips WHERE sport = ? AND result IS NULL AND sent_at < datetime('now', ?)`
+        ).get(sport, `-${d} days`);
+        return { days: d, count: row?.c || 0 };
+      }).filter(b => b.count > 0);
+      // Sugestão: limiar onde a maioria das lutas já aconteceu (~10 dias)
+      const suggestDays = 10;
+      sendJson(res, { buckets, suggestDays });
+    } catch(e) {
+      sendJson(res, { buckets: [], suggestDays: 14 });
+    }
+    return;
+  }
+
   // Anula em lote todas as tips pendentes mais antigas que N dias (padrão: 60)
   if (p === '/void-old-pending' && req.method === 'POST') {
     let body = ''; req.on('data', d => body += d);

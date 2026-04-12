@@ -807,10 +807,19 @@ async function settleTipManual(id, result, sport) {
 }
 
 async function voidOldPending() {
-  const days = parseInt(prompt('Anular tips pendentes mais antigas que quantos dias?', '60'), 10);
-  if (!days || isNaN(days) || days < 1) return;
-  if (!confirm('Anular TODAS as tips pendentes de ' + currentSport.toUpperCase() + ' com mais de ' + days + ' dias? Esta ação não pode ser desfeita.')) return;
   try {
+    // Busca contagem por faixa antes de mostrar o prompt
+    const info = await fetch(BASE + '/pending-age-info?sport=' + currentSport).then(r => r.json()).catch(() => null);
+    let hint = '';
+    if (info && Array.isArray(info.buckets) && info.buckets.length) {
+      hint = '\n\nPendentes por idade:\n' + info.buckets.map(b => '  • >' + b.days + 'd: ' + b.count + ' tips').join('\n');
+      hint += '\n\n(lute já aconteceu se sent_at > ~10 dias atrás)';
+    }
+    const days = parseInt(prompt('Anular tips pendentes mais antigas que quantos dias?' + hint, info?.suggestDays || '14'), 10);
+    if (!days || isNaN(days) || days < 1) return;
+    const preview = info?.buckets?.find(b => b.days <= days);
+    const estCount = info?.buckets?.filter(b => b.days <= days).reduce((s, b) => Math.max(s, b.count), 0);
+    if (!confirm('Anular TODAS as tips pendentes de ' + currentSport.toUpperCase() + ' com mais de ' + days + ' dias?\n' + (estCount ? '~' + estCount + ' tips serão anuladas.' : '') + '\nEsta ação não pode ser desfeita.')) return;
     const r = await fetch(BASE + '/void-old-pending', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
