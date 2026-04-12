@@ -132,7 +132,10 @@
 
   <!-- Tips Table -->
   <div class="table-card" id="sportTipsCard">
-    <h3>&#128203; &Uacute;ltimas Tips</h3>
+    <h3 style="display:flex;align-items:center;justify-content:space-between">
+      <span>&#128203; &Uacute;ltimas Tips</span>
+      <button onclick="voidOldPending()" title="Anular em lote todas as tips pendentes antigas" style="font-size:0.7rem;padding:3px 8px;background:#1f2937;border:1px solid #4b5563;border-radius:4px;color:#f87171;cursor:pointer">&#128465; Anular pendentes antigas</button>
+    </h3>
     <div class="tips-controls">
       <div>
         <input id="tipsQ" type="text" placeholder="Buscar: time / atleta / evento" autocomplete="off" />
@@ -797,6 +800,28 @@ async function settleTipManual(id, result, sport) {
       loadAll();
     } else {
       alert('Erro: ' + (j.error || 'falha desconhecida'));
+    }
+  } catch(e) {
+    alert('Erro: ' + e.message);
+  }
+}
+
+async function voidOldPending() {
+  const days = parseInt(prompt('Anular tips pendentes mais antigas que quantos dias?', '60'), 10);
+  if (!days || isNaN(days) || days < 1) return;
+  if (!confirm('Anular TODAS as tips pendentes de ' + currentSport.toUpperCase() + ' com mais de ' + days + ' dias? Esta ação não pode ser desfeita.')) return;
+  try {
+    const r = await fetch(BASE + '/void-old-pending', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sport: currentSport, days })
+    });
+    const j = await r.json();
+    if (j.ok) {
+      alert('Anuladas: ' + j.voided + ' tips.');
+      loadTips(); loadAll();
+    } else {
+      alert('Erro: ' + (j.error || 'falha'));
     }
   } catch(e) {
     alert('Erro: ' + e.message);

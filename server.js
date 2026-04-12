@@ -2482,6 +2482,7 @@ const ADMIN_ROUTES_POST = new Set([
   '/reset-tips',
   '/settle',
   '/settle-manual',
+  '/void-old-pending',
   '/set-bankroll',
   '/update-clv',
   '/update-open-tip',
@@ -3816,6 +3817,27 @@ const server = http.createServer(async (req, res) => {
     } catch(e) {
       sendJson(res, { error: e.message }, 500);
     }
+    return;
+  }
+
+  // Anula em lote todas as tips pendentes mais antigas que N dias (padrão: 60)
+  if (p === '/void-old-pending' && req.method === 'POST') {
+    let body = ''; req.on('data', d => body += d);
+    req.on('end', () => {
+      try {
+        const payload = safeParse(body, {});
+        const sport = payload.sport || parsed.query.sport || 'esports';
+        const days = Math.max(1, Math.min(730, parseInt(payload.days || parsed.query.days || '60', 10) || 60));
+        const r = db.prepare(
+          `UPDATE tips SET result = 'void', settled_at = datetime('now'), profit_reais = 0
+           WHERE sport = ? AND result IS NULL AND sent_at < datetime('now', ?)`
+        ).run(sport, `-${days} days`);
+        log('INFO', 'ADMIN', `void-old-pending: sport=${sport} days=${days} → ${r.changes} tips anuladas`);
+        sendJson(res, { ok: true, voided: r.changes, sport, days });
+      } catch(e) {
+        sendJson(res, { error: e.message }, 500);
+      }
+    });
     return;
   }
 

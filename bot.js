@@ -1012,7 +1012,9 @@ async function settleCompletedTips() {
     try {
       const unsettledDays = sport === 'tennis'
         ? Math.min(365, Math.max(30, parseInt(process.env.TENNIS_UNSETTLED_DAYS || '120', 10) || 120))
-        : 30;
+        : sport === 'mma'
+          ? Math.min(365, Math.max(30, parseInt(process.env.MMA_UNSETTLED_DAYS || '90', 10) || 90))
+          : 30;
       const unsettled = await serverGet(`/unsettled-tips?days=${unsettledDays}`, sport);
       if (!Array.isArray(unsettled) || !unsettled.length) continue;
 
@@ -3513,7 +3515,7 @@ async function fetchEspnMmaFights() {
   if (Date.now() - espnMmaCache.ts < ESPN_MMA_TTL && espnMmaCache.data.length) return espnMmaCache.data;
   try {
     const futureWeeks = Math.max(1, Math.min(18, parseInt(process.env.MMA_ESPN_SCOREBOARD_WEEKS || '12', 10) || 12));
-    const pastWeeks   = Math.max(1, Math.min(12, parseInt(process.env.MMA_ESPN_PAST_WEEKS || '6',  10) || 6));
+    const pastWeeks   = Math.max(1, Math.min(26, parseInt(process.env.MMA_ESPN_PAST_WEEKS || '13', 10) || 13));
     const base = new Date();
     base.setHours(0, 0, 0, 0);
 
