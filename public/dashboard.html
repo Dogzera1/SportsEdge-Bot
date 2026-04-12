@@ -727,7 +727,9 @@ function renderTips(tips) {
       ? '<span class="badge badge-win">WIN</span>' + reopenBtn
       : t.result === 'loss'
         ? '<span class="badge badge-loss">LOSS</span>' + reopenBtn
-        : '<span class="badge badge-pending">PENDING</span>' + manualBtns;
+        : t.result === 'void'
+          ? '<span class="badge" style="background:#1f2937;color:#6b7280">VOID</span>'
+          : '<span class="badge badge-pending">PENDING</span>' + manualBtns;
 
     const conf = (t.confidence || 'M\u00C9DIA').toUpperCase();
     const confBadge = conf === 'ALTA'
