@@ -3032,6 +3032,15 @@ const server = http.createServer(async (req, res) => {
     const score1 = parsed.query.score1 != null ? parseInt(parsed.query.score1, 10) : null;
     const score2 = parsed.query.score2 != null ? parseInt(parsed.query.score2, 10) : null;
     const format = parsed.query.format ? String(parsed.query.format) : '';
+    // LoL: odds via SX.Bet diretamente (sem The Odds API)
+    if (gameParam === 'lol') {
+      if (!SXBET_ENABLED) { sendJson(res, { error: 'SX.Bet não habilitado' }); return; }
+      const liveOnly = !!(mapNumber && mapNumber > 0);
+      const o = await sxGetMatchWinnerOdds(t1, t2, { liveOnly, mapNumber: liveOnly ? mapNumber : null }).catch(() => null);
+      if (o) log('INFO', 'ODDS', `SX.Bet LoL: ${t1} vs ${t2}${liveOnly ? ` (ao vivo mapa ${mapNumber})` : ''}`);
+      sendJson(res, o || { error: 'odds LoL não encontradas (SX.Bet)' });
+      return;
+    }
     // force=1: bypassa TTL do cache (usado para partidas iminentes < 2h)
     if (parsed.query.force === '1') {
       const serveFromCache = (reason) => {

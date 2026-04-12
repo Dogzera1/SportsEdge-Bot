@@ -99,10 +99,11 @@ const TIP_UPDATE_DEDUP_MS =
 // Throttle de "force refresh" odds (evita 5 chamadas simultâneas)
 let _forceOddsChain = Promise.resolve();
 const FORCE_ODDS_GAP_MS = Math.max(500, parseInt(process.env.FORCE_ODDS_GAP_MS || '2500', 10) || 2500);
-function forceOddsRefreshQueued(team1, team2) {
+function forceOddsRefreshQueued(team1, team2, game = '') {
   const t1 = String(team1 || '');
   const t2 = String(team2 || '');
-  const path = `/odds?team1=${encodeURIComponent(t1)}&team2=${encodeURIComponent(t2)}&force=1`;
+  const gameQ = game ? `&game=${encodeURIComponent(game)}` : '';
+  const path = `/odds?team1=${encodeURIComponent(t1)}&team2=${encodeURIComponent(t2)}&force=1${gameQ}`;
   const p = _forceOddsChain.then(async () => {
     const r = await serverGet(path).catch(() => null);
     await _sleep(FORCE_ODDS_GAP_MS);
@@ -888,8 +889,8 @@ async function runAutoAnalysis() {
           }
 
           const oddsCheck = isImminentMatch
-            ? await forceOddsRefreshQueued(match.team1, match.team2)
-            : await serverGet(`/odds?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}`).catch(() => null);
+            ? await forceOddsRefreshQueued(match.team1, match.team2, 'lol')
+            : await serverGet(`/odds?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}&game=lol`).catch(() => null);
           const hasRealOdds = !!(oddsCheck?.t1 && parseFloat(oddsCheck.t1) > 1);
           const matchTime = match.time ? new Date(match.time).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit' }) : '—';
           log('INFO', 'AUTO', `Esports upcoming: ${match.team1} vs ${match.team2} (${match.league}) às ${matchTime}${hasRealOdds ? ' — odds disponíveis' : ' — odds estimadas'}${isImminentMatch ? ' [IMINENTE <2h]' : ''}`);
@@ -1328,7 +1329,7 @@ async function checkLiveNotifications() {
       const fmt = match.format ? `&format=${encodeURIComponent(String(match.format))}` : '';
       const s1 = Number.isFinite(match.score1) ? `&score1=${encodeURIComponent(String(match.score1))}` : '';
       const s2 = Number.isFinite(match.score2) ? `&score2=${encodeURIComponent(String(match.score2))}` : '';
-      const mapOdds = await serverGet(`/odds?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}&map=${encodeURIComponent(String(currentMap))}${fmt}${s1}${s2}&force=1`).catch(() => null);
+      const mapOdds = await serverGet(`/odds?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}&map=${encodeURIComponent(String(currentMap))}${fmt}${s1}${s2}&force=1&game=lol`).catch(() => null);
       if (!mapOdds?.t1 || parseFloat(mapOdds.t1) <= 1.0) continue;
 
       // Dedup por SÉRIE (não por mapa) para não duplicar notificações em cada mapa
@@ -1642,7 +1643,7 @@ async function autoAnalyzeMatch(token, match) {
   const matchId = String(match.id);
   try {
     const [o, gameCtx, enrich] = await Promise.all([
-      serverGet(`/odds?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}`).catch(() => null),
+      serverGet(`/odds?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}&game=${encodeURIComponent(game)}`).catch(() => null),
       collectGameContext(game, matchId),
       fetchEnrichment(match)
     ]);
@@ -1665,7 +1666,7 @@ async function autoAnalyzeMatch(token, match) {
       const fmt = match.format ? `&format=${encodeURIComponent(String(match.format))}` : '';
       const s1 = Number.isFinite(match.score1) ? `&score1=${encodeURIComponent(String(match.score1))}` : '';
       const s2 = Number.isFinite(match.score2) ? `&score2=${encodeURIComponent(String(match.score2))}` : '';
-      const mo = await serverGet(`/odds?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}&map=${encodeURIComponent(String(liveGameNumber))}${fmt}${s1}${s2}&force=1`).catch(() => null);
+      const mo = await serverGet(`/odds?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}&map=${encodeURIComponent(String(liveGameNumber))}${fmt}${s1}${s2}&force=1&game=${encodeURIComponent(game)}`).catch(() => null);
       if (mo?.t1 && mo?.t2) oddsToUse = mo;
     }
 
@@ -5149,7 +5150,7 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
         const lolRaw = await serverGet('/lol-matches').catch(() => []);
         const live = Array.isArray(lolRaw) ? lolRaw.filter(m => m.status === 'live') : [];
         for (const m of live) {
-          await serverGet(`/odds?team1=${encodeURIComponent(m.team1)}&team2=${encodeURIComponent(m.team2)}&force=1`).catch(() => null);
+          await serverGet(`/odds?team1=${encodeURIComponent(m.team1)}&team2=${encodeURIComponent(m.team2)}&force=1&game=lol`).catch(() => null);
         }
         if (live.length > 0) log('DEBUG', 'LIVE-ODDS', `Refresh odds live: ${live.length} partida(s)`);
       } catch(e) { /* silencioso */ }
@@ -5233,7 +5234,7 @@ async function checkCLV(caches = {}) {
 
         let clvOdds = null;
         if (sport === 'esports') {
-          const o = await serverGet(`/odds?team1=${encodeURIComponent(tip.participant1)}&team2=${encodeURIComponent(tip.participant2)}`).catch(() => null);
+          const o = await serverGet(`/odds?team1=${encodeURIComponent(tip.participant1)}&team2=${encodeURIComponent(tip.participant2)}&game=lol`).catch(() => null);
           if (o && parseFloat(o.t1) > 1) {
             clvOdds = (norm(tip.tip_participant) === norm(tip.participant1)) ? o.t1 : o.t2;
           }
@@ -5343,7 +5344,7 @@ async function refreshOpenTips(caches = {}) {
 
         let currentOdds = null;
         if (sport === 'esports') {
-          const o = await serverGet(`/odds?team1=${encodeURIComponent(p1)}&team2=${encodeURIComponent(p2)}`).catch(() => null);
+          const o = await serverGet(`/odds?team1=${encodeURIComponent(p1)}&team2=${encodeURIComponent(p2)}&game=lol`).catch(() => null);
           if (o && parseFloat(o.t1) > 1) {
             currentOdds = norm(pick) === norm(p1) ? parseFloat(o.t1) : parseFloat(o.t2);
           }
