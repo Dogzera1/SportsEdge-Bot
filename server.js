@@ -4130,7 +4130,7 @@ const server = http.createServer(async (req, res) => {
     const row = stmts.getROI.get(sport);
     const calibration = stmts.getCalibration.all(sport);
 
-    const tips = db.prepare("SELECT odds, stake, result, ev, is_live, clv_odds, open_odds, model_p_pick FROM tips WHERE sport = ? AND result IS NOT NULL").all(sport);
+    const tips = db.prepare("SELECT odds, stake, result, ev, is_live, clv_odds, open_odds, model_p_pick FROM tips WHERE sport = ? AND result IS NOT NULL AND result != 'void'").all(sport);
     let totalStaked = 0, totalProfit = 0;
     const liveTips = { wins: 0, losses: 0, total: 0, profit: 0, staked: 0 };
     const preTips  = { wins: 0, losses: 0, total: 0, profit: 0, staked: 0 };
@@ -4198,7 +4198,7 @@ const server = http.createServer(async (req, res) => {
     if (bk) {
       // Backfill: tips arquivadas sem profit_reais calculado (coluna adicionada depois do settlement)
       const orphans = db.prepare(
-        "SELECT id, result, odds, stake, stake_reais FROM tips WHERE sport = ? AND result IS NOT NULL AND profit_reais IS NULL"
+        "SELECT id, result, odds, stake, stake_reais FROM tips WHERE sport = ? AND result IS NOT NULL AND result != 'void' AND profit_reais IS NULL"
       ).all(sport);
       if (orphans.length > 0) {
         const unitValue = bk.initial_banca / 100;
@@ -4215,7 +4215,7 @@ const server = http.createServer(async (req, res) => {
       }
 
       const profitRow = db.prepare(
-        "SELECT COALESCE(SUM(profit_reais), 0) as total_profit FROM tips WHERE sport = ? AND result IS NOT NULL AND profit_reais IS NOT NULL"
+        "SELECT COALESCE(SUM(profit_reais), 0) as total_profit FROM tips WHERE sport = ? AND result IS NOT NULL AND result != 'void' AND profit_reais IS NOT NULL"
       ).get(sport);
       const accumulatedProfit = parseFloat((profitRow?.total_profit || 0).toFixed(2));
       const currentBanca = parseFloat((bk.initial_banca + accumulatedProfit).toFixed(2));
@@ -4405,7 +4405,7 @@ const server = http.createServer(async (req, res) => {
     const bk = stmts.getBankroll.get(sport);
     if (!bk) { sendJson(res, { error: 'Bankroll não inicializado' }, 500); return; }
     const profitRow = db.prepare(
-      "SELECT COALESCE(SUM(profit_reais), 0) as total_profit FROM tips WHERE sport = ? AND result IS NOT NULL AND profit_reais IS NOT NULL"
+      "SELECT COALESCE(SUM(profit_reais), 0) as total_profit FROM tips WHERE sport = ? AND result IS NOT NULL AND result != 'void' AND profit_reais IS NOT NULL"
     ).get(sport);
     const accumulatedProfit = parseFloat((profitRow?.total_profit || 0).toFixed(2));
     const currentBanca = parseFloat((bk.initial_banca + accumulatedProfit).toFixed(2));
