@@ -717,8 +717,15 @@ function renderTips(tips) {
     return;
   }
 
-  const rows = tips.slice(0, 20).map(function(t) {
+  const rows = tips.map(function(t) {
     const sport = t.sport || currentSport;
+    const settled = t.result === 'win' || t.result === 'loss' || t.result === 'void';
+    const showOdds = settled
+      ? t.odds
+      : (t.current_odds != null && t.current_odds !== '' ? t.current_odds : t.odds);
+    const showEvRaw = settled
+      ? t.ev
+      : (t.current_ev != null && t.current_ev !== '' ? t.current_ev : t.ev);
     const reopenBtn = (t.result === 'win' || t.result === 'loss')
       ? '<button onclick="reopenTip(' + t.id + ',\'' + sport + '\')" title="Reabrir tip (anular liquidação incorreta)" style="margin-left:6px;padding:1px 5px;font-size:0.65rem;background:#1f2937;border:1px solid #4b5563;border-radius:3px;color:#9ca3af;cursor:pointer">↩</button>'
       : '';
@@ -741,11 +748,11 @@ function renderTips(tips) {
         ? '<span class="badge badge-baixa">BAIXA</span>'
         : '<span class="badge badge-media">M\u00C9DIA</span>';
 
-    const evRaw = (t.current_ev != null ? String(t.current_ev) : (t.ev ? String(t.ev) : ''));
+    const evRaw = (showEvRaw != null && showEvRaw !== '' ? String(showEvRaw) : '');
     const ev = evRaw
       ? (evRaw.startsWith('+') || evRaw.startsWith('-') ? evRaw : '+' + evRaw)
       : '\u2013';
-    const evColor = ev.startsWith('+') ? '#34d399' : '#f87171';
+    const evColor = ev === '\u2013' ? '#6b7280' : (ev.startsWith('+') ? '#34d399' : '#f87171');
 
     const date = t.sent_at
       ? new Date(t.sent_at).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
@@ -758,8 +765,8 @@ function renderTips(tips) {
       '<td style="color:#6b7280;font-size:0.7rem">' + date + '</td>' +
       '<td title="' + match + '" style="max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + match + '</td>' +
       '<td><strong>' + (t.tip_participant || '?') + '</strong></td>' +
-      '<td>' + parseFloat((t.current_odds || t.odds) || 0).toFixed(2) + '</td>' +
-      '<td style="color:' + evColor + '">' + (t.current_ev != null ? (String(t.current_ev).startsWith('+') || String(t.current_ev).startsWith('-') ? t.current_ev : ('+' + t.current_ev)) : ev) + '%</td>' +
+      '<td>' + parseFloat(showOdds || 0).toFixed(2) + '</td>' +
+      '<td style="color:' + evColor + '">' + (ev === '\u2013' ? ev : ev + '%') + '</td>' +
       '<td>' + (t.stake || '\u2013') + '</td>' +
       '<td>' + confBadge + '</td>' +
       '<td>' + resultBadge + '</td>' +
