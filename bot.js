@@ -4452,6 +4452,8 @@ async function pollTennis(runOnce = false) {
   const token = tennisConfig.token;
 
   const TENNIS_INTERVAL = 2 * 60 * 60 * 1000; // Re-analisa a cada 2h
+  const TENNIS_GATE_MIN_ODDS = parseFloat(process.env.TENNIS_MIN_ODDS ?? '1.40');
+  const TENNIS_GATE_MAX_ODDS = parseFloat(process.env.TENNIS_MAX_ODDS ?? '5.00');
 
   async function loop() {
     try {
@@ -4684,8 +4686,8 @@ Máximo 200 palavras. Mostre seu raciocínio brevemente antes da decisão.`;
         const tipStake  = tipMatch2[4];
         const tipConf   = tipMatch2[5].toUpperCase();
 
-        if (tipOdd < 1.15 || tipOdd > 5.00) {
-          log('INFO', 'AUTO-TENNIS', `Gate odds: ${tipOdd} fora do range 1.15-5.00`);
+        if (tipOdd < TENNIS_GATE_MIN_ODDS || tipOdd > TENNIS_GATE_MAX_ODDS) {
+          log('INFO', 'AUTO-TENNIS', `Gate odds: ${tipOdd} fora do range ${TENNIS_GATE_MIN_ODDS}-${TENNIS_GATE_MAX_ODDS}`);
           await new Promise(r => setTimeout(r, 3000)); continue;
         }
         if (tipEV < 4.0) {

@@ -119,7 +119,7 @@ Fonte: **`GET /tennis-matches`** (The Odds API, chaves ATP/WTA balanceadas no se
 - Enriquecimento: rankings ESPN ATP/WTA, evento/scoreboard, **`/team-form`**, **`/h2h`** com `game=tennis`, `rankingToEnrich` / DB.
 - **`TENNIS_MIN_EDGE`** (default ~2.5 pp): ajuste do pré-filtro vs LoL.
 - **`esportsPreFilter`** → IA (mesmo padrão `TIP_ML` com regras de tênis no prompt).
-- Gates: odds **1.15–5.00**, **EV ≥ 4%**.
+- Gates: odds **`TENNIS_MIN_ODDS`–`TENNIS_MAX_ODDS`** (default **1.40–5.00**), **EV ≥ 4%**.
 - **`POST /record-tip`**, `sport=tennis`, `matchId` canônico `tennis_<id_odds>`.
 - Re-execução: intervalo **2 h** por confronto; sem partidas → retry em **30 min**.
 
@@ -183,6 +183,7 @@ O server em **`/settle`** compara vencedor com `tip_participant` (tênis usa mat
 | `GRID_DAYS_BACK`, `GRID_MAX_STATE_CALLS`, `GRID_ENRICH_CACHE_MS`, … | Ver `lib/grid.js` — janela temporal, paginação `allSeries`, limite de `seriesState`, cache por confronto. |
 | `GRID_FORBIDDEN_COOLDOWN_MS` | Após erro **Requester forbidden** (plano sem `allSeries` LoL): pausa chamadas GRID (default **6 h**), um único `WARN` no log. |
 | `TENNIS_MIN_EDGE` | Limiar do pré-filtro ML (tênis). |
+| `TENNIS_MIN_ODDS`, `TENNIS_MAX_ODDS` | Gate pós-IA tênis (default 1.40 / 5.00). |
 | `TENNIS_UNSETTLED_DAYS` | Janela de tips pendentes para liquidação tênis. |
 | `FOOTBALL_EV_THRESHOLD`, `FOOTBALL_DRAW_MIN_ODDS` | Gates futebol. |
 | `LOL_PREGAME_BLOCK_BO3` | Bloquear upcoming Bo3/Bo5 até draft. |
