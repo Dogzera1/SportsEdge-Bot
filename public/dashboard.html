@@ -560,6 +560,7 @@ function renderCards(roi) {
   const roiPct = parseFloat(overall.roi || 0);
   const profit = parseFloat(overall.totalProfit || 0);
   const staked = parseFloat(overall.totalStaked || 0);
+  const avgOdds = parseFloat(overall.avg_odds || overall.avg_odds === 0 ? overall.avg_odds : 0);
   const totalAll     = parseInt(overall.totalAll || overall.total || 0, 10);
   const pending      = parseInt(overall.pending || 0, 10);
   const wins   = parseInt(overall.wins   || 0, 10);
@@ -612,6 +613,11 @@ function renderCards(roi) {
       '<div class="label">Lucro / Preju\u00EDzo</div>' +
       '<div class="value ' + profitClass + '">' + (profit >= 0 ? '+' : '') + profit.toFixed(2) + 'u</div>' +
       '<div class="sub">Kelly fracionado</div>' +
+    '</div>' +
+    '<div class="card">' +
+      '<div class="label">Odd m\u00E9dia apostada</div>' +
+      '<div class="value neutral">' + (totalSettled > 0 ? (avgOdds || 0).toFixed(2) : '\u2014') + '</div>' +
+      '<div class="sub">' + totalSettled + ' liquidadas</div>' +
     '</div>' +
     '<div class="card" style="grid-column: span 2">' +
       '<div class="label">Split / CLV / Banca</div>' +

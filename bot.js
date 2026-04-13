@@ -1374,9 +1374,11 @@ async function checkLiveNotifications() {
       const maxN = Math.min(10, Math.max(1, Number.isFinite(maxCfg) ? maxCfg : 4));
       const dotaList = await serverGet('/dota-matches').catch(() => []);
       const dotaLive = Array.isArray(dotaList) ? dotaList.filter(m => m.status === 'live') : [];
+      let liveWithOdds = 0;
       for (const match of dotaLive.slice(0, maxN)) {
         const o = await serverGet(`/odds?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}&game=dota2&live=1`).catch(() => null);
         if (!o?.t1 || !o?.t2 || parseFloat(o.t1) <= 1.0) continue;
+        liveWithOdds++;
         const matchKey = `dota2_${match.id}`;
         if (notifiedMatches.has(matchKey)) continue;
         notifiedMatches.set(matchKey, now);
@@ -1393,6 +1395,9 @@ async function checkLiveNotifications() {
             if (e.message?.includes('403')) subscribedUsers.delete(userId);
           }
         }
+      }
+      if (dotaLive.length && liveWithOdds === 0) {
+        log('INFO', 'NOTIFY', `Dota 2 ao vivo: ${dotaLive.length} | odds ao vivo: 0 (sem aviso)`);
       }
     }
 
