@@ -865,6 +865,8 @@ async function runAutoAnalysis() {
 
       if (allUpcoming.length > 0) {
         log('INFO', 'AUTO', `LoL próximas ${UPCOMING_WINDOW_HOURS}h: ${allUpcoming.length} partidas`);
+        let blockedBo3Count = 0;
+        const blockBo3 = (process.env.LOL_PREGAME_BLOCK_BO3 ?? 'true') !== 'false';
         for (const match of allUpcoming) {
           const matchKey = `upcoming_${match.game}_${match.id}`;
           // Bloqueia ligas principais — tips apenas em ligas secundárias
@@ -874,9 +876,8 @@ async function runAutoAnalysis() {
 
           // Item 1: Bo3/Bo5 — aguarda draft disponível (fase live/draft)
           // Controlável via LOL_PREGAME_BLOCK_BO3=false para testes / fase de calibração.
-          const blockBo3 = (process.env.LOL_PREGAME_BLOCK_BO3 ?? 'true') !== 'false';
           if (blockBo3 && (match.format === 'Bo3' || match.format === 'Bo5')) {
-            log('INFO', 'AUTO', `Upcoming ${match.format} ignorado (${match.team1} vs ${match.team2}) — aguardando draft (LOL_PREGAME_BLOCK_BO3=true)`);
+            blockedBo3Count++;
             continue;
           }
 
@@ -971,6 +972,9 @@ async function runAutoAnalysis() {
             log('INFO', 'AUTO-TIP', `Esports upcoming: ${tipTeam} @ ${tipOdd}`);
           }
           await new Promise(r => setTimeout(r, 3000));
+        }
+        if (blockedBo3Count > 0) {
+          log('DEBUG', 'AUTO', `${blockedBo3Count} partida(s) Bo3/Bo5 ignoradas (aguardando draft, LOL_PREGAME_BLOCK_BO3=true)`);
         }
       }
 
@@ -4126,6 +4130,7 @@ async function pollMma(runOnce = false) {
       const boxingMaxDays = Math.max(1, Math.min(60, parseInt(process.env.BOXING_MAX_DAYS_BEFORE_FIGHT || '10', 10) || 10));
       const boxingMaxMs = boxingMaxDays * 24 * 60 * 60 * 1000;
       let boxingSkippedLead = 0;
+      let noDateSkipped = 0;
       let mmaIaCallsThisCycle = 0;
       const mmaIaCap = Math.max(0, parseInt(process.env.MMA_MAX_IA_CALLS_PER_CYCLE || '18', 10) || 18);
       const endOfWeek = (() => {
@@ -4157,13 +4162,12 @@ async function pollMma(runOnce = false) {
         // Descartar lutas sem data ou com data > 60 dias — provavelmente históricas/inválidas no feed
         const MAX_FUTURE_MS = 60 * 24 * 60 * 60 * 1000;
         if (!fightTs || fightTs > now + MAX_FUTURE_MS) {
-          log('INFO', 'AUTO-MMA', `Ignorando luta sem data válida: ${fight.team1} vs ${fight.team2}`);
+          noDateSkipped++;
           continue;
         }
         // Boxe: só dentro da janela de N dias (pula se ainda falta > N dias)
         if (isBoxing && fightTs - now > boxingMaxMs) {
           boxingSkippedLead++;
-          log('DEBUG', 'AUTO-MMA', `Boxe: >${boxingMaxDays}d até a luta — sem tip: ${fight.team1} vs ${fight.team2}`);
           continue;
         }
         const isThisWeek = fightTs > 0 && fightTs <= endOfWeek;
@@ -4431,6 +4435,9 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
         analyzedMma.set(key, { ts: now, tipSent: true });
         log('INFO', 'AUTO-MMA', `Tip enviada: ${tipTeam} @ ${tipOdd} | EV:${tipEV}% | ${tipConf}`);
         await new Promise(r => setTimeout(r, 5000));
+      }
+      if (noDateSkipped > 0) {
+        log('DEBUG', 'AUTO-MMA', `${noDateSkipped} luta(s) ignoradas (sem data válida ou >60d)`);
       }
       if (boxingSkippedLead > 0) {
         log('INFO', 'AUTO-MMA', `Boxe: ${boxingSkippedLead} luta(s) ignoradas (>${boxingMaxDays}d até o combate)`);
