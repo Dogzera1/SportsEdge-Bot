@@ -87,6 +87,8 @@ let lastLineCheck = 0;
 const notifiedMatches = new Map();
 let lastLiveCheck = 0;
 const LIVE_CHECK_INTERVAL = 60 * 1000; // 1 minute
+let lastDotaLiveCheck = 0;
+const DOTA_LIVE_CHECK_INTERVAL = 5 * 60 * 1000; // 5 min (evita spam de requests)
 const RE_ANALYZE_INTERVAL = 10 * 60 * 1000; // 10 min between re-analyses of same live match
 const UPCOMING_ANALYZE_INTERVAL = 30 * 60 * 1000; // 30m para acomodar a quota da OddsPapi (1xBet)
 const UPCOMING_WINDOW_HOURS = 24; // analyze upcoming matches within next 24h
@@ -1318,6 +1320,7 @@ async function checkLiveNotifications() {
   const token = esportsConfig.token;
 
   try {
+    const now = Date.now();
     const lolList = await serverGet('/lol-matches').catch(() => []);
     const allLive = Array.isArray(lolList) ? lolList.filter(m => m.status === 'live') : [];
 
@@ -1335,7 +1338,7 @@ async function checkLiveNotifications() {
       // Dedup por SÉRIE (não por mapa) para não duplicar notificações em cada mapa
       const matchKey = `${match.game}_${match.id}`;
       if (!notifiedMatches.has(matchKey)) {
-        notifiedMatches.set(matchKey, Date.now());
+        notifiedMatches.set(matchKey, now);
         for (const [userId, prefs] of subscribedUsers) {
           if (!prefs.has('esports')) continue;
           try {
@@ -1356,6 +1359,35 @@ async function checkLiveNotifications() {
                 ? `_A partir de agora: apenas ML do mapa atual. Odds acima são do mapa._`
                 : `_A partir de agora: apenas ML do mapa atual. Quando mercado do mapa abrir, odds serão do mapa._`);
             
+            await sendDM(token, userId, txt);
+          } catch(e) {
+            if (e.message?.includes('403')) subscribedUsers.delete(userId);
+          }
+        }
+      }
+    }
+
+    // Dota 2: notificar quando odds ao vivo estiverem acessíveis
+    if (now - lastDotaLiveCheck >= DOTA_LIVE_CHECK_INTERVAL) {
+      lastDotaLiveCheck = now;
+      const maxCfg = parseInt(process.env.DOTA_LIVE_NOTIFY_MAX || '4', 10);
+      const maxN = Math.min(10, Math.max(1, Number.isFinite(maxCfg) ? maxCfg : 4));
+      const dotaList = await serverGet('/dota-matches').catch(() => []);
+      const dotaLive = Array.isArray(dotaList) ? dotaList.filter(m => m.status === 'live') : [];
+      for (const match of dotaLive.slice(0, maxN)) {
+        const o = await serverGet(`/odds?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}&game=dota2&live=1`).catch(() => null);
+        if (!o?.t1 || !o?.t2 || parseFloat(o.t1) <= 1.0) continue;
+        const matchKey = `dota2_${match.id}`;
+        if (notifiedMatches.has(matchKey)) continue;
+        notifiedMatches.set(matchKey, now);
+        for (const [userId, prefs] of subscribedUsers) {
+          if (!prefs.has('esports')) continue;
+          try {
+            const txt = `🕹️ 🔴 *DOTA 2 AO VIVO (ODDS AO VIVO DISPONÍVEIS)!*\n\n` +
+              `*${match.team1}* ${match.score1||0}-${match.score2||0} *${match.team2}*\n` +
+              `📋 ${match.league || 'Dota 2'} | ${match.format || 'Bo?'}\n` +
+              `💰 ${match.team1}: ${o.t1} | ${match.team2}: ${o.t2}\n` +
+              `_Fonte: ${o.bookmaker || 'odds'}_`;
             await sendDM(token, userId, txt);
           } catch(e) {
             if (e.message?.includes('403')) subscribedUsers.delete(userId);
@@ -5165,6 +5197,16 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
       if (!notifiedMatches.has(matchKey)) notifiedMatches.set(matchKey, Date.now());
     }
     if (allLive.length) log('INFO', 'BOOT', `Live notify suprimido no boot: ${allLive.length} partida(s) ao vivo`);
+  } catch(_) {}
+
+  // Suprime notificações Dota ao vivo no boot
+  try {
+    const dotaList = await serverGet('/dota-matches').catch(() => []);
+    const live = Array.isArray(dotaList) ? dotaList.filter(m => m.status === 'live') : [];
+    for (const match of live.slice(0, 30)) {
+      const k = `dota2_${match.id}`;
+      if (!notifiedMatches.has(k)) notifiedMatches.set(k, Date.now());
+    }
   } catch(_) {}
 
   // Start polling for each enabled sport
