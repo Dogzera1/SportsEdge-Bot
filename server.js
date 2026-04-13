@@ -29,6 +29,8 @@ const LOL_HEADERS = LOL_KEY ? { 'x-api-key': LOL_KEY } : {};
 const PANDASCORE_TOKEN = process.env.PANDASCORE_TOKEN || '';
 // The Odds API — usado para MMA (20k req/mês)
 const THE_ODDS_API_KEY = process.env.THE_ODDS_API_KEY || '';
+// Odds-API.io (odds-api.io) — alternativa (esports/tennis/etc)
+const ODDS_API_IO_KEY = process.env.ODDS_API_IO_KEY || process.env.ODDSAPIIO_KEY || '';
 const GRID_API_KEY = (process.env.GRID_API_KEY || '').trim();
 
 // DB_PATH allows pointing to a Railway volume (e.g. /data/sportsedge.db)
@@ -1043,6 +1045,9 @@ const oddsPapiQueue = createAsyncQueue(1);
 // The Odds API (tennis/football/mma) — serializa + dedupe por URL
 const theOddsQueue = createAsyncQueue(1);
 
+// Odds-API.io — serializa + dedupe por URL
+const oddsApiIoQueue = createAsyncQueue(1);
+
 function clampStr(v, maxLen) {
   const s = (v == null ? '' : String(v)).trim();
   if (!s) return '';
@@ -1064,6 +1069,50 @@ async function theOddsGet(theOddsUrl) {
     const ttlMs = Number.isFinite(ttlMsRaw) ? ttlMsRaw : 15 * 60 * 1000; // cache de 15 minutos por default!
     return await cachedHttpGet(theOddsUrl, { provider: 'theodds', ttlMs }).catch(() => ({ status: 500, body: '[]' }));
   });
+}
+
+async function oddsApiIoGet(oddsApiIoUrl, ttlMsDefault) {
+  return await oddsApiIoQueue.enqueue(`oddsapiio:${oddsApiIoUrl}`, async () => {
+    const ttlMsRaw = parseInt(process.env.HTTP_CACHE_ODDSAPIO_TTL_MS || '', 10);
+    const ttlMs = Number.isFinite(ttlMsRaw)
+      ? ttlMsRaw
+      : (Number.isFinite(ttlMsDefault) ? ttlMsDefault : 10 * 60 * 1000);
+    return await cachedHttpGet(oddsApiIoUrl, { provider: 'oddsapiio', ttlMs }).catch(() => ({ status: 500, body: '[]' }));
+  });
+}
+
+// Cache local de /events (Odds-API.io) — reduzir requisições mensais (plano free)
+let _oddsApiIoEventsCache = new Map(); // sportSlug -> { events, ts }
+const ODDSAPIO_EVENTS_TTL = 10 * 60 * 1000;
+
+async function fetchOddsApiIoEvents(sportSlug) {
+  const slug = String(sportSlug || '').trim().toLowerCase();
+  if (!slug || !ODDS_API_IO_KEY) return [];
+  const now = Date.now();
+  const cached = _oddsApiIoEventsCache.get(slug);
+  if (cached && (now - cached.ts) < ODDSAPIO_EVENTS_TTL) return cached.events || [];
+  const r = await oddsApiIoGet(
+    `https://api.odds-api.io/v3/events?apiKey=${encodeURIComponent(ODDS_API_IO_KEY)}&sport=${encodeURIComponent(slug)}`,
+    ODDSAPIO_EVENTS_TTL
+  );
+  const list = r && r.status === 200 ? safeParse(r.body, []) : [];
+  const events = Array.isArray(list) ? list : (Array.isArray(list?.data) ? list.data : []);
+  _oddsApiIoEventsCache.set(slug, { events, ts: now });
+  return events;
+}
+
+async function fetchOddsApiIoEventOdds(eventId, bookmakersCsv) {
+  if (!ODDS_API_IO_KEY) return null;
+  const eid = String(eventId || '').trim();
+  if (!eid) return null;
+  const bks = String(bookmakersCsv || '').trim() || (process.env.ODDSAPIO_BOOKMAKERS || 'Pinnacle');
+  const r = await oddsApiIoGet(
+    `https://api.odds-api.io/v3/odds?apiKey=${encodeURIComponent(ODDS_API_IO_KEY)}&eventId=${encodeURIComponent(eid)}&bookmakers=${encodeURIComponent(bks)}`,
+    2 * 60 * 1000
+  );
+  if (!r || r.status !== 200) return null;
+  const obj = safeParse(r.body, null);
+  return obj && typeof obj === 'object' ? obj : null;
 }
 
 function isWtaTennisOddsKey(k) {
@@ -2339,6 +2388,142 @@ async function getPandaScoreLolMatches() {
   }
 }
 
+// ── The Odds API — Dota 2 ──
+let _dotaOddsCache = { data: [], ts: 0 };
+const DOTA_ODDS_CACHE_TTL = parseInt(process.env.DOTA_ODDS_CACHE_TTL_MS || String(15 * 60 * 1000), 10);
+
+async function getTheOddsDotaMatches() {
+  if (!THE_ODDS_API_KEY) return [];
+  if (_dotaOddsCache.data.length && (Date.now() - _dotaOddsCache.ts) < DOTA_ODDS_CACHE_TTL) {
+    return _dotaOddsCache.data;
+  }
+
+  // Descobrir chaves Dota 2 disponíveis (inclui inativos para não perder torneios)
+  const sportsR = await theOddsGet(`https://api.the-odds-api.com/v4/sports/?apiKey=${THE_ODDS_API_KEY}&all=true`);
+  const allSports = safeParse(sportsR.body, []);
+  const dotaKeys = allSports
+    .filter(s => s && typeof s.key === 'string' && s.key.toLowerCase().includes('dota'))
+    .map(s => s.key);
+
+  if (!dotaKeys.length) {
+    log('INFO', 'DOTA2', 'The Odds API: nenhuma chave Dota 2 encontrada');
+    return [];
+  }
+
+  log('INFO', 'DOTA2', `The Odds API: chaves encontradas: ${dotaKeys.join(', ')}`);
+
+  const now = Date.now();
+  const matches = [];
+
+  for (const key of dotaKeys) {
+    if (!oddsApiAllowed('ODDS')) break;
+    const url = `https://api.the-odds-api.com/v4/sports/${key}/odds/?apiKey=${THE_ODDS_API_KEY}&regions=eu&markets=h2h&oddsFormat=decimal`;
+    const r = await theOddsGet(url);
+    if (r.status !== 200) continue;
+    const events = safeParse(r.body, []);
+    for (const e of events) {
+      const commenceTs = new Date(e.commence_time).getTime();
+      if (commenceTs < now) continue; // skip partidas passadas
+      const bm = e.bookmakers?.[0];
+      const market = bm?.markets?.find(m => m.key === 'h2h');
+      const out = market?.outcomes || [];
+      const o1 = out.find(o => o.name === e.home_team);
+      const o2 = out.find(o => o.name === e.away_team);
+      if (!o1 || !o2) continue;
+      matches.push({
+        id: `dota2_odds_${e.id}`,
+        game: 'dota2',
+        status: 'upcoming',
+        team1: e.home_team,
+        team2: e.away_team,
+        league: e.sport_title || 'Dota 2',
+        time: e.commence_time,
+        sport_key: key,
+        odds: { t1: String(o1.price), t2: String(o2.price), bookmaker: bm.title },
+        score1: 0, score2: 0,
+        format: 'Bo?',
+        _source: 'theodds',
+        _oddsId: e.id,
+      });
+    }
+  }
+
+  matches.sort((a, b) => new Date(a.time) - new Date(b.time));
+  if (matches.length) {
+    log('INFO', 'DOTA2', `The Odds API: ${matches.length} partidas Dota 2 com odds`);
+    _dotaOddsCache = { data: matches, ts: Date.now() };
+  }
+  return matches;
+}
+
+// ── Odds-API.io — Dota 2 (esports) ──
+let _dotaOddsApiIoCache = { data: [], ts: 0 };
+
+async function getOddsApiIoDotaMatches() {
+  if (!ODDS_API_IO_KEY) return [];
+  if (_dotaOddsApiIoCache.data.length && (Date.now() - _dotaOddsApiIoCache.ts) < DOTA_ODDS_CACHE_TTL) {
+    return _dotaOddsApiIoCache.data;
+  }
+
+  const now = Date.now();
+  const weekAhead = now + 7 * 24 * 60 * 60 * 1000;
+  const LIVE_WINDOW_MS = parseInt(process.env.DOTA_LIVE_WINDOW_H || '6', 10) * 60 * 60 * 1000;
+  const maxEventsCfg = parseInt(process.env.DOTA_MAX_EVENTS || '12', 10);
+  const maxEvents = Math.min(30, Math.max(4, Number.isFinite(maxEventsCfg) ? maxEventsCfg : 12));
+  const leagueRe = new RegExp(process.env.DOTA_LEAGUE_REGEX || 'dota', 'i');
+
+  const events = await fetchOddsApiIoEvents('esports');
+  const filtered = (events || [])
+    .map(e => {
+      const t = new Date(e.date || e.commence_time || e.start_time || e.time || '').getTime();
+      const leagueName = (e.league?.name || e.league || '').toString();
+      return { e, t, leagueName };
+    })
+    .filter(x => leagueRe.test(x.leagueName))
+    .filter(x => Number.isFinite(x.t) && x.t <= weekAhead && (x.t > now || (x.t <= now && (now - x.t) <= LIVE_WINDOW_MS)))
+    .sort((a, b) => a.t - b.t)
+    .slice(0, maxEvents);
+
+  const matches = [];
+  for (const { e, t, leagueName } of filtered) {
+    const oddsObj = await fetchOddsApiIoEventOdds(
+      e.id,
+      process.env.ODDSAPIO_DOTA_BOOKMAKERS || process.env.ODDSAPIO_BOOKMAKERS || 'Pinnacle'
+    );
+    const bmName = oddsObj?.bookmakers ? Object.keys(oddsObj.bookmakers)[0] : null;
+    const mk = bmName ? (oddsObj.bookmakers?.[bmName] || []) : [];
+    const ml = mk.find(m => String(m?.name || '').toLowerCase() === 'ml' || String(m?.name || '').toLowerCase() === 'h2h') || mk[0];
+    const firstOdds = Array.isArray(ml?.odds) ? ml.odds[0] : null;
+    const o1 = firstOdds?.home;
+    const o2 = firstOdds?.away;
+    const team1 = e.home || e.home_team || e.team1 || '';
+    const team2 = e.away || e.away_team || e.team2 || '';
+    if (!team1 || !team2) continue;
+    if (!o1 || !o2) continue;
+    matches.push({
+      id: `dota2_oddsapiio_${e.id}`,
+      game: 'dota2',
+      status: (t <= now ? 'live' : 'upcoming'),
+      team1,
+      team2,
+      league: leagueName || 'Dota 2',
+      time: e.date || e.commence_time || e.time,
+      odds: { t1: String(o1), t2: String(o2), bookmaker: bmName || 'Odds-API.io' },
+      score1: 0, score2: 0,
+      format: 'Bo?',
+      _source: 'oddsapiio',
+      _oddsId: e.id,
+    });
+  }
+
+  matches.sort((a, b) => new Date(a.time) - new Date(b.time));
+  if (matches.length) {
+    log('INFO', 'DOTA2', `Odds-API.io: ${matches.length} partidas Dota 2 com odds`);
+    _dotaOddsApiIoCache = { data: matches, ts: Date.now() };
+  }
+  return matches;
+}
+
 // ── PandaScore Dota 2 ──
 let _pandaDotaCache = { data: [], ts: 0 };
 const PANDA_DOTA_CACHE_TTL = parseInt(process.env.PANDA_DOTA_CACHE_TTL_MS || '90000', 10);
@@ -3023,14 +3208,30 @@ const server = http.createServer(async (req, res) => {
     const t2 = parsed.query.team2 || parsed.query.p2 || '';
     if (!t1 || !t2) { sendJson(res, { error: 'team1 e team2 obrigatórios' }, 400); return; }
     const gameParam = (parsed.query.game || '').toLowerCase();
-    // Dota 2: odds via SX.Bet diretamente (OddsPapi não cobre Dota)
+    // Dota 2: tenta SX.Bet (live) ou The Odds API (upcoming)
     if (gameParam === 'dota2' || gameParam === 'dota') {
-      if (!SXBET_ENABLED) { sendJson(res, { error: 'SX.Bet não habilitado' }); return; }
-      const dotaSportId = await sxFindDotaSportId().catch(() => null);
       const liveOnly = parsed.query.live === '1';
-      const o = await sxGetMatchWinnerOdds(t1, t2, { sportId: dotaSportId, liveOnly, _debug: false }).catch(() => null);
-      if (o && liveOnly) log('INFO', 'ODDS', `SX.Bet Dota 2 ao vivo: ${t1} vs ${t2}`);
-      sendJson(res, o || { error: 'odds Dota 2 não encontradas (SX.Bet)' });
+      // SX.Bet para ao vivo
+      if (SXBET_ENABLED) {
+        const dotaSportId = await sxFindDotaSportId().catch(() => null);
+        const o = await sxGetMatchWinnerOdds(t1, t2, { sportId: dotaSportId, liveOnly, _debug: false }).catch(() => null);
+        if (o) {
+          if (liveOnly) log('INFO', 'ODDS', `SX.Bet Dota 2 ao vivo: ${t1} vs ${t2}`);
+          sendJson(res, o);
+          return;
+        }
+      }
+      // Fallback: The Odds API cache (já buscado pelo /dota-matches)
+      if (THE_ODDS_API_KEY && !liveOnly) {
+        const normTeam = s => String(s||'').toLowerCase().replace(/[^a-z0-9]/g,'');
+        const n1 = normTeam(t1), n2 = normTeam(t2);
+        const cached = _dotaOddsCache.data.find(m => {
+          const mn1 = normTeam(m.team1), mn2 = normTeam(m.team2);
+          return (mn1.includes(n1) || n1.includes(mn1)) && (mn2.includes(n2) || n2.includes(mn2));
+        });
+        if (cached?.odds) { sendJson(res, cached.odds); return; }
+      }
+      sendJson(res, { error: 'odds Dota 2 não encontradas' });
       return;
     }
     const mapNumber = parsed.query.map ? parseInt(parsed.query.map, 10) : null;
@@ -3206,20 +3407,63 @@ const server = http.createServer(async (req, res) => {
 
   if (p === '/dota-matches') {
     try {
-      const matches = await getPandaScoreDotaMatches();
-      // Enrich with SX.Bet odds
-      if (SXBET_ENABLED) {
+      // ── Fonte primária: Odds (The Odds API ou Odds-API.io) ──
+      const oddsMatches = ODDS_API_IO_KEY
+        ? await getOddsApiIoDotaMatches().catch(() => [])
+        : (THE_ODDS_API_KEY ? await getTheOddsDotaMatches().catch(() => []) : []);
+
+      // ── Fonte secundária: PandaScore (partidas live + formato Bo3/Bo5) ──
+      const psMatches = await getPandaScoreDotaMatches().catch(() => []);
+
+      // Normaliza nome para matching entre fontes
+      const normTeam = s => String(s||'').toLowerCase().replace(/[^a-z0-9]/g,'');
+
+      // Enriquece The Odds API matches com formato e placar ao vivo do PandaScore
+      for (const om of oddsMatches) {
+        const n1 = normTeam(om.team1), n2 = normTeam(om.team2);
+        const ps = psMatches.find(p => {
+          const pn1 = normTeam(p.team1), pn2 = normTeam(p.team2);
+          return (pn1.includes(n1) || n1.includes(pn1)) && (pn2.includes(n2) || n2.includes(pn2));
+        });
+        if (ps) {
+          om.format = ps.format || om.format;
+          om.leagueSlug = ps.leagueSlug || '';
+          om._psId = ps._psId || null;
+        }
+      }
+
+      // Inclui partidas ao vivo do PandaScore (sem odds The Odds API — live não disponível)
+      const liveFromPs = psMatches.filter(p => {
+        if (p.status !== 'live') return false;
+        const pn1 = normTeam(p.team1), pn2 = normTeam(p.team2);
+        return !oddsMatches.some(om => {
+          const n1 = normTeam(om.team1), n2 = normTeam(om.team2);
+          return (pn1.includes(n1) || n1.includes(pn1)) && (pn2.includes(n2) || n2.includes(pn2));
+        });
+      });
+
+      // Para partidas ao vivo do PS sem odds The Odds, tenta SX.Bet como fallback
+      if (SXBET_ENABLED && liveFromPs.length) {
         const dotaSportId = await sxFindDotaSportId().catch(() => null);
         if (dotaSportId) {
-          for (const m of matches) {
-            if (m.status === 'upcoming' || m.status === 'live') {
-              const o = await sxGetMatchWinnerOdds(m.team1, m.team2, { sportId: dotaSportId }).catch(() => null);
-              if (o) m.odds = o;
-            }
+          for (const m of liveFromPs) {
+            const o = await sxGetMatchWinnerOdds(m.team1, m.team2, { sportId: dotaSportId, liveOnly: true }).catch(() => null);
+            if (o) m.odds = o;
           }
         }
       }
-      sendJson(res, matches);
+
+      const combined = [...liveFromPs, ...oddsMatches];
+      combined.sort((a, b) => {
+        const sa = a.status === 'live' ? 0 : 1;
+        const sb = b.status === 'live' ? 0 : 1;
+        if (sa !== sb) return sa - sb;
+        return new Date(a.time) - new Date(b.time);
+      });
+
+      const oddsSrc = ODDS_API_IO_KEY ? 'Odds-API.io' : 'TheOdds';
+      log('INFO', 'DOTA2', `/dota-matches: ${combined.length} total (${liveFromPs.length} live PS, ${oddsMatches.length} odds ${oddsSrc})`);
+      sendJson(res, combined);
     } catch(e) {
       sendJson(res, []);
     }
@@ -5476,7 +5720,8 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (p === '/tennis-matches') {
-    if (!THE_ODDS_API_KEY) { sendJson(res, []); return; }
+    // Preferência: The Odds API (já integrado). Se ausente, tenta Odds-API.io.
+    if (!THE_ODDS_API_KEY && !ODDS_API_IO_KEY) { sendJson(res, []); return; }
     try {
       const now = Date.now();
 
@@ -5488,6 +5733,57 @@ const server = http.createServer(async (req, res) => {
           return t > now || (t <= now && (now - t) <= LIVE_WINDOW_MS);
         });
         sendJson(res, cached);
+        return;
+      }
+
+      // Fallback via Odds-API.io (1 request /events + N /odds; manter N baixo)
+      if (!THE_ODDS_API_KEY && ODDS_API_IO_KEY) {
+        const LIVE_WINDOW_MS = parseInt(process.env.TENNIS_LIVE_WINDOW_H || '6', 10) * 60 * 60 * 1000;
+        const weekAhead = now + 7 * 24 * 60 * 60 * 1000;
+        const maxEventsCfg = parseInt(process.env.ODDSAPIO_TENNIS_MAX_EVENTS || '14', 10);
+        const maxEvents = Math.min(30, Math.max(4, Number.isFinite(maxEventsCfg) ? maxEventsCfg : 14));
+
+        const events = await fetchOddsApiIoEvents('tennis');
+        const filtered = (events || [])
+          .map(e => {
+            const t = new Date(e.date || e.commence_time || e.start_time || e.time || '').getTime();
+            return { e, t };
+          })
+          .filter(x => Number.isFinite(x.t) && x.t <= weekAhead && (x.t > now || (x.t <= now && (now - x.t) <= LIVE_WINDOW_MS)))
+          .sort((a, b) => a.t - b.t)
+          .slice(0, maxEvents);
+
+        const matches = [];
+        for (const { e, t } of filtered) {
+          const oddsObj = await fetchOddsApiIoEventOdds(
+            e.id,
+            process.env.ODDSAPIO_TENNIS_BOOKMAKERS || process.env.ODDSAPIO_BOOKMAKERS || 'Pinnacle'
+          );
+          const bmName = oddsObj?.bookmakers ? Object.keys(oddsObj.bookmakers)[0] : null;
+          const mk = bmName ? (oddsObj.bookmakers?.[bmName] || []) : [];
+          const ml = mk.find(m => String(m?.name || '').toLowerCase() === 'ml' || String(m?.name || '').toLowerCase() === 'h2h') || mk[0];
+          const firstOdds = Array.isArray(ml?.odds) ? ml.odds[0] : null;
+          const o1 = firstOdds?.home;
+          const o2 = firstOdds?.away;
+          if (!o1 || !o2) continue;
+          matches.push({
+            id: e.id,
+            game: 'tennis',
+            status: (t <= now ? 'live' : 'upcoming'),
+            team1: e.home || e.home_team || e.team1 || '',
+            team2: e.away || e.away_team || e.team2 || '',
+            league: e.league?.name || e.league || 'Tennis',
+            time: e.date || e.commence_time || e.time,
+            odds: { t1: String(o1), t2: String(o2), bookmaker: bmName || 'Odds-API.io' }
+          });
+        }
+        matches.sort((a, b) => {
+          if (a.status === 'live' && b.status !== 'live') return -1;
+          if (b.status === 'live' && a.status !== 'live') return 1;
+          return new Date(a.time) - new Date(b.time);
+        });
+        if (matches.length) _tennisMatchesCache = { matches: matches.slice(), ts: now };
+        sendJson(res, matches);
         return;
       }
 
