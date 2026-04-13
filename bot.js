@@ -4470,6 +4470,16 @@ async function pollTennis(runOnce = false) {
           serverGet(`/h2h?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}&game=tennis&days=730&limit=15`).catch(() => null),
         ]);
 
+        // ── Elo ML model (surface-adjusted, from Sackmann data) ──
+        // r1/r2/totalVig already computed above
+        const imp1Elo = r1 / totalVig;
+        const imp2Elo = r2 / totalVig;
+
+        const eloResult = await serverGet(
+          `/tennis-elo?p1=${encodeURIComponent(match.team1)}&p2=${encodeURIComponent(match.team2)}&surface=${surface}&imp1=${imp1Elo.toFixed(4)}&imp2=${imp2Elo.toFixed(4)}`
+        ).catch(() => null);
+
+        // Fallback: use ranking-based enrich when Elo unavailable
         const rankEnrich = rankingToEnrich(rank1, rank2, surface);
         const tennisEnrich = {
           form1: (dbForm1 && (dbForm1.wins + dbForm1.losses) >= 3) ? dbForm1 : (rankEnrich?.form1 || null),
@@ -4479,15 +4489,29 @@ async function pollTennis(runOnce = false) {
         };
 
         // Usa override ML env para tênis com base 2.5pp (margin bookies tênis é menor, ~4-6%)
-        const envScoreBase = process.env.TENNIS_MIN_EDGE ? parseFloat(process.env.TENNIS_MIN_EDGE) : 2.5; 
-        
-        let mlResultTennis = esportsPreFilter(match, o, tennisEnrich || { form1: null, form2: null, h2h: null, oddsMovement: null }, false, '', null);
-        
-        // Substituindo a verificação de edge baseada em LoL (que exige 4pp sem comp) para o padrão do tênis (2.5pp)
-        if (mlResultTennis.factorCount >= 1 && mlResultTennis.score < envScoreBase) {
-           mlResultTennis.pass = false; 
+        const envScoreBase = process.env.TENNIS_MIN_EDGE ? parseFloat(process.env.TENNIS_MIN_EDGE) : 2.5;
+
+        let mlResultTennis;
+        if (eloResult && (eloResult.found1 || eloResult.found2)) {
+          // Use Elo model result directly
+          mlResultTennis = {
+            pass: eloResult.score >= envScoreBase,
+            modelP1: eloResult.modelP1,
+            modelP2: eloResult.modelP2,
+            score: eloResult.score,
+            factorCount: eloResult.factorCount,
+            direction: eloResult.direction,
+            _eloResult: eloResult,
+          };
         } else {
-           mlResultTennis.pass = true;
+          // Fallback to ranking-based esportsPreFilter
+          mlResultTennis = esportsPreFilter(match, o, tennisEnrich || { form1: null, form2: null, h2h: null, oddsMovement: null }, false, '', null);
+          // Substituindo a verificação de edge baseada em LoL para o padrão do tênis (2.5pp)
+          if (mlResultTennis.factorCount >= 1 && mlResultTennis.score < envScoreBase) {
+            mlResultTennis.pass = false;
+          } else {
+            mlResultTennis.pass = true;
+          }
         }
 
         if (!mlResultTennis.pass) {
@@ -4496,10 +4520,13 @@ async function pollTennis(runOnce = false) {
         }
 
         const hasModelDataTennis = mlResultTennis.factorCount > 0;
+        const usingEloModel = !!(eloResult && (eloResult.found1 || eloResult.found2));
         // Fair odds sempre disponíveis: quando sem ranking, modelP1=impliedP1 (de-juice puro)
         const modelP1Tennis = (mlResultTennis.modelP1 * 100).toFixed(1);
         const modelP2Tennis = (mlResultTennis.modelP2 * 100).toFixed(1);
-        const fairLabelTennis = hasModelDataTennis ? 'P modelo (ML H2H/Ranking)' : 'Fair odds (de-juice, sem ranking/ML)';
+        const fairLabelTennis = usingEloModel
+          ? 'P modelo (Elo superfície)'
+          : (hasModelDataTennis ? 'P modelo (ML H2H/Ranking)' : 'Fair odds (de-juice, sem ranking/ML)');
 
         // Montar seção de dados reais
         let dataSection = [
@@ -4509,6 +4536,14 @@ async function pollTennis(runOnce = false) {
           form2 ? `Form ${match.team2} (torneio atual): ${form2}` : null,
           espnEvent ? `Torneio em andamento: ${espnEvent.eventName}` : null
         ].filter(Boolean).join('\n');
+
+        if (usingEloModel) {
+          const er = eloResult;
+          if (er.found1) dataSection += `\nElo ${match.team1}: ${er.elo1} (${er.eloMatches1} partidas, ${er.surfMatches1} em ${surfacePT})`;
+          if (er.found2) dataSection += `\nElo ${match.team2}: ${er.elo2} (${er.eloMatches2} partidas, ${er.surfMatches2} em ${surfacePT})`;
+          if (!er.found1) dataSection += `\nElo ${match.team1}: não encontrado no histórico`;
+          if (!er.found2) dataSection += `\nElo ${match.team2}: não encontrado no histórico`;
+        }
 
         if (dbH2h && (dbH2h.t1Wins + dbH2h.t2Wins > 0)) {
            dataSection += `\nHistórico Direto (H2H): ${match.team1} ${dbH2h.t1Wins} x ${dbH2h.t2Wins} ${match.team2}`;
@@ -4520,7 +4555,7 @@ async function pollTennis(runOnce = false) {
            dataSection += `\nForma geral (${match.team2}): ${dbForm2.wins}W-${dbForm2.losses}L (${dbForm2.winRate}%)`;
         }
 
-        const hasRealData = !!(rank1 || rank2 || form1 || form2 || dbH2h);
+        const hasRealData = !!(rank1 || rank2 || form1 || form2 || dbH2h || usingEloModel);
 
         const fairOddsLineTennis = hasModelDataTennis
           ? `${fairLabelTennis}: ${match.team1}=${modelP1Tennis}% | ${match.team2}=${modelP2Tennis}%\nP de-juiced bookie: ${match.team1}=${fairP1}% | ${match.team2}=${fairP2}%`
@@ -4555,7 +4590,7 @@ DECISÃO:
 
 Máximo 200 palavras. Mostre seu raciocínio brevemente antes da decisão.`;
 
-        log('INFO', 'AUTO-TENNIS', `Analisando: ${match.team1} vs ${match.team2} | ${match.league} | ${surfacePT}${hasRealData ? ' [ESPN/DB+]' : ''}`);
+        log('INFO', 'AUTO-TENNIS', `Analisando: ${match.team1} vs ${match.team2} | ${match.league} | ${surfacePT}${usingEloModel ? ' [Elo]' : (hasRealData ? ' [ESPN/DB+]' : '')}`);
         analyzedTennis.set(key, { ts: now, tipSent: false });
 
         let resp;
@@ -4683,6 +4718,7 @@ async function pollFootball(runOnce = false) {
   const { calcFootballScore } = require('./lib/football-ml');
   const footballData = require('./lib/football-data');
   const sofascoreFootball = require('./lib/sofascore-football');
+  const apiFootball = require('./lib/api-football');
 
   const FOOTBALL_INTERVAL = 6 * 60 * 60 * 1000;
   const EV_THRESHOLD   = parseFloat(process.env.FOOTBALL_EV_THRESHOLD  || '5.0');
@@ -4704,7 +4740,8 @@ async function pollFootball(runOnce = false) {
       }
       const hasFootballDataOrg = !!(process.env.FOOTBALL_DATA_TOKEN || process.env.FOOTBALL_DATA_KEY);
       const hasSofaProxy = !!(process.env.SOFASCORE_PROXY_BASE || '').trim();
-      const src = [hasFootballDataOrg && 'football-data.org', hasSofaProxy && 'Sofascore-proxy'].filter(Boolean).join('+') || 'odds-only';
+      const hasApiFootball = !!(process.env.API_FOOTBALL_KEY || process.env.API_SPORTS_KEY || process.env.APISPORTS_KEY);
+      const src = [hasFootballDataOrg && 'football-data.org', hasSofaProxy && 'Sofascore-proxy', hasApiFootball && 'api-football'].filter(Boolean).join('+') || 'odds-only';
       log('INFO', 'AUTO-FOOTBALL', `${matches.length} partidas futebol com odds (${src})`);
 
       const now = Date.now();
@@ -4782,6 +4819,23 @@ async function pollFootball(runOnce = false) {
               if (!awayFormData?.form?.length && ss.awayFormData?.form?.length) awayFormData = ss.awayFormData;
               if (!h2hData?.results?.length && ss.h2hData?.results?.length) h2hData = ss.h2hData;
               if (ss.eventId) log('DEBUG', 'AUTO-FOOTBALL', `Sofascore event ${ss.eventId}: ${match.team1} vs ${match.team2}`);
+            }
+          } catch (_) {}
+        }
+
+        // api-football (api-sports.io): cobre ~900 ligas incluindo Superettan, Série B, La Liga 2 etc.
+        // Só chama quando football-data.org e Sofascore não preencheram os dados
+        if (!fixtureInfo && (!homeFormData?.form?.length || !awayFormData?.form?.length)) {
+          try {
+            const af = await apiFootball.enrichMatch(match.team1, match.team2, match.sport_key, match.time).catch(() => null);
+            if (af) {
+              if (!homeFormData?.form?.length && af.homeFormData?.form?.length) homeFormData = af.homeFormData;
+              else if (!homeFormData && af.homeFormData) homeFormData = af.homeFormData;
+              if (!awayFormData?.form?.length && af.awayFormData?.form?.length) awayFormData = af.awayFormData;
+              else if (!awayFormData && af.awayFormData) awayFormData = af.awayFormData;
+              if (!h2hData?.results?.length && af.h2hData?.results?.length) h2hData = af.h2hData;
+              if (af.fixtureId) fixtureInfo = { fixtureId: af.fixtureId, homeId: null, awayId: null, leagueId: apiFootball.getLeagueId(match.sport_key), season: new Date().getFullYear() };
+              if (af.homeFormData || af.awayFormData) log('DEBUG', 'AUTO-FOOTBALL', `api-football enrich OK: ${match.team1} vs ${match.team2}`);
             }
           } catch (_) {}
         }

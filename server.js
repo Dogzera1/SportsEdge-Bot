@@ -12,6 +12,7 @@ const footballData  = require('./lib/football-data');
 const apiFootball   = require('./lib/api-football');
 const { tennisSinglePlayerNameMatch, tennisPairMatchesPlayers } = require('./lib/tennis-match');
 const { esportsPreFilter } = require('./lib/ml');
+const tennisML = require('./lib/tennis-ml');
 const { fetchGridEnrichForMatch } = require('./lib/grid');
 const { radarGetInfo, radarGetByPath } = require('./lib/radar-sport');
 
@@ -957,6 +958,10 @@ async function fetchMapOddsByFixtureId(fixtureId, mapNumber) {
 // Cache de último resultado bem-sucedido de /football-matches (sobrevive ao esgotamento de quota)
 let _footballMatchesCache = null; // { matches: Array, ts: number }
 const FOOTBALL_MATCHES_CACHE_TTL = 8 * 60 * 60 * 1000; // 8h
+
+// Cache de /tennis-matches — evita 17 chamadas à API por cada pressão de botão
+let _tennisMatchesCache = null; // { matches: Array, ts: number }
+const TENNIS_MATCHES_CACHE_TTL = 10 * 60 * 1000; // 10 min (auto-tennis roda a cada ~6 min)
 
 // Backoff em caso de 429
 let esportsBackoffUntil = 0;
@@ -3657,6 +3662,23 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // ── Tennis Elo snapshot ──
+  if (p === '/tennis-elo') {
+    const p1   = parsed.query.p1 || '';
+    const p2   = parsed.query.p2 || '';
+    const surf = parsed.query.surface || 'dura';
+    const imp1 = parseFloat(parsed.query.imp1 || '') || 0.5;
+    const imp2 = parseFloat(parsed.query.imp2 || '') || 0.5;
+    if (!p1 || !p2) { sendJson(res, { error: 'p1/p2 obrigatórios' }, 400); return; }
+    try {
+      const result = tennisML.getTennisElo(db, p1, p2, surf, imp1, imp2);
+      sendJson(res, { p1, p2, surface: surf, ...result });
+    } catch(e) {
+      sendJson(res, { error: e.message }, 500);
+    }
+    return;
+  }
+
   // ── Football Elo snapshot ──
   if (p === '/football-elo') {
     const home = parsed.query.home || '';
@@ -5457,11 +5479,28 @@ const server = http.createServer(async (req, res) => {
     if (!THE_ODDS_API_KEY) { sendJson(res, []); return; }
     try {
       const now = Date.now();
+
+      // Serve do cache se ainda válido (evita 17 chamadas à API por cada pressão de botão)
+      if (_tennisMatchesCache && now - _tennisMatchesCache.ts < TENNIS_MATCHES_CACHE_TTL) {
+        const cached = _tennisMatchesCache.matches.filter(m => {
+          const t = new Date(m.time).getTime();
+          const LIVE_WINDOW_MS = parseInt(process.env.TENNIS_LIVE_WINDOW_H || '6', 10) * 60 * 60 * 1000;
+          return t > now || (t <= now && (now - t) <= LIVE_WINDOW_MS);
+        });
+        sendJson(res, cached);
+        return;
+      }
+
       const weekAhead = now + 7 * 24 * 60 * 60 * 1000;
       const LIVE_WINDOW_MS = parseInt(process.env.TENNIS_LIVE_WINDOW_H || '6', 10) * 60 * 60 * 1000; // default 6h
 
       // 1) Lista tennis_* com all=true para incluir WTA (muitas chaves vêm active=false fora do pico)
-      if (!oddsApiAllowed('ODDS')) { sendJson(res, []); return; }
+      if (!oddsApiAllowed('ODDS')) {
+        // Quota esgotada: retorna cache expirado se disponível
+        const fallback = _tennisMatchesCache?.matches?.filter(m => new Date(m.time).getTime() > now) || [];
+        sendJson(res, fallback);
+        return;
+      }
       const tennisKeys = await fetchTheOddsTennisSportKeys();
 
       if (!tennisKeys.length) { sendJson(res, []); return; }
@@ -5511,9 +5550,12 @@ const server = http.createServer(async (req, res) => {
         if (b.status === 'live' && a.status !== 'live') return 1;
         return new Date(a.time) - new Date(b.time);
       });
+      // Salva no cache para reutilização por pressões de botão
+      if (matches.length) _tennisMatchesCache = { matches: matches.slice(), ts: now };
       sendJson(res, matches);
     } catch(e) {
-      sendJson(res, []);
+      const fallback = _tennisMatchesCache?.matches?.filter(m => new Date(m.time).getTime() > Date.now()) || [];
+      sendJson(res, fallback);
     }
     return;
   }
