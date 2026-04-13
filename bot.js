@@ -741,11 +741,14 @@ async function runAutoAnalysis() {
             : `${gameIcon} 💰 *TIP ML AUTOMÁTICA*`;
 
           const whyLine = result.tipReason ? `\n🧠 Por quê: _${result.tipReason}_\n` : '\n';
+          const minTakeOdds = calcMinTakeOdds(tipOdd);
+          const minTakeLine = minTakeOdds ? `📉 Odd mínima: *${minTakeOdds}*\n` : '';
           const tipMsg = `${tipHeader}\n` +
             `${serieScore}${formatLabel}\n` +
             (mapaLabel ? `${mapaLabel}\n` : '') +
             whyLine +
             `🎯 Aposta: *${tipTeam}* ML @ *${tipOdd}*\n` +
+            minTakeLine +
             `📈 EV: *${tipEV}*\n💵 Stake: *${tipStake}* _(${kellyLabel})_\n` +
             `${confEmoji} Confiança: *${tipConf}*${mlEdgeLabel}\n` +
             `📋 ${match.league}\n` +
@@ -946,10 +949,13 @@ async function runAutoAnalysis() {
 
             const imminentNote = isImminentMatch ? `⏰ _Odds atualizadas agora (< 2h para o jogo)_\n` : '';
             const baixaNote = tipConf === 'BAIXA' ? `⚠️ _Confiança BAIXA (ML-edge ${result.mlScore.toFixed(1)}pp) — stake reduzido. Aposte com cautela._\n` : '';
+            const minTakeOdds = calcMinTakeOdds(tipOdd);
+            const minTakeLine = minTakeOdds ? `📉 Odd mínima: *${minTakeOdds}*\n` : '';
             const tipMsg = `${gameIcon} 💰 *TIP PRÉ-JOGO ESPORTS (Bo1)*\n` +
               `*${match.team1}* vs *${match.team2}*\n📋 ${match.league}\n` +
               (match.time ? `🕐 Início: *${matchTime}* (BRT)\n` : '') +
               `\n🎯 Aposta: *${tipTeam}* ML @ *${tipOdd}*\n` +
+              minTakeLine +
               `📈 EV: *${tipEV}*\n💵 Stake: *${tipStake}* _(${kellyLabel})_\n` +
               `${confEmoji} Confiança: *${tipConf}*${mlEdgeLabel}\n` +
               `${imminentNote}${baixaNote}` +
@@ -1279,6 +1285,15 @@ function fmtMatchTime(iso) {
     if (isNaN(d.getTime())) return '';
     return d.toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit', timeZone: 'America/Sao_Paulo' });
   } catch(_) { return ''; }
+}
+
+function calcMinTakeOdds(tipOdd) {
+  const o = parseFloat(tipOdd);
+  if (!Number.isFinite(o) || o <= 1) return null;
+  const pctRaw = parseFloat(process.env.ODDS_MIN_TAKE_PCT || '0.97'); // 3% pior por default
+  const pct = Number.isFinite(pctRaw) ? Math.min(1, Math.max(0.5, pctRaw)) : 0.97;
+  const min = Math.max(1.01, o * pct);
+  return min.toFixed(2);
 }
 
 // ── Helper Functions ──
@@ -4047,7 +4062,9 @@ Máximo 200 palavras.`;
 
       const matchId = `dota2_${match.id}`;
       const liveTag = isLive ? ' 🔴 AO VIVO' : '';
-      const msg = `🎮 *DOTA 2 — ${match.league}*${liveTag}\n${match.team1} vs ${match.team2} | ${match.format || ''}\n📅 ${matchTime} BRT\n\n✅ *TIP: ${tipTeam} @ ${tipOdd}*\n💰 Stake: ${tipStakeAdj} | EV: ${tipEV} | Conf: ${tipConf}\n🏦 ${o.bookmaker || 'SX.Bet'}`;
+      const minTakeOdds = calcMinTakeOdds(tipOdd);
+      const minTakeLine = minTakeOdds ? `\n📉 Odd mínima: *${minTakeOdds}*` : '';
+      const msg = `🎮 *DOTA 2 — ${match.league}*${liveTag}\n${match.team1} vs ${match.team2} | ${match.format || ''}\n📅 ${matchTime} BRT\n\n✅ *TIP: ${tipTeam} @ ${tipOdd}*${minTakeLine}\n💰 Stake: ${tipStakeAdj} | EV: ${tipEV} | Conf: ${tipConf}\n🏦 ${o.bookmaker || 'SX.Bet'}`;
 
       try {
         await serverPost('/record-tip', {
@@ -4354,12 +4371,15 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
 
         const tipReasonMma = extractTipReasonMma(text);
         const whyLineMma = tipReasonMma ? `\n🧠 Por quê: _${tipReasonMma}_\n` : '\n';
+        const minTakeOdds = calcMinTakeOdds(tipOdd);
+        const minTakeLine = minTakeOdds ? `📉 Odd mínima: *${minTakeOdds}*\n` : '';
 
         const tipMsg = `${isBoxing ? '🥊 💰 *TIP BOXE*' : '🥊 💰 *TIP MMA*'}\n` +
           `*${fight.team1}* vs *${fight.team2}*\n📋 ${fight.league}\n` +
           `🕐 ${fightTime} (BRT)${recLine}${catLine}\n\n` +
           whyLineMma +
           `🎯 Aposta: *${tipTeam}* @ *${tipOdd}*\n` +
+          minTakeLine +
           `📈 EV: *+${tipEV}%* | De-juice: ${tipTeam === fight.team1 ? fairP1 : fairP2}%\n` +
           `💵 Stake: *${tipStake}u*\n` +
           `${confEmoji} Confiança: *${tipConf}*\n\n` +
@@ -4678,12 +4698,15 @@ Máximo 200 palavras. Mostre seu raciocínio brevemente antes da decisão.`;
         const grandSlamBadge = isGrandSlam ? ' 🏆' : isMasters ? ' ⭐' : '';
 
         const whyLineTennis = tipReasonTennis ? `\n🧠 Por quê: _${tipReasonTennis}_\n` : '\n';
+        const minTakeOdds = calcMinTakeOdds(tipOdd);
+        const minTakeLine = minTakeOdds ? `📉 Odd mínima: *${minTakeOdds}*\n` : '';
         const tipMsg = `🎾 💰 *TIP TÊNIS${isLiveTennis ? ' (AO VIVO)' : ''}*\n` +
           `*${match.team1}* vs *${match.team2}*\n` +
           `📋 ${match.league}${grandSlamBadge}\n` +
           `${surfaceEmoji} ${surface.charAt(0).toUpperCase() + surface.slice(1)} | 🕐 ${matchTime} (BRT)\n\n` +
           whyLineTennis +
           `🎯 Aposta: *${tipPlayer}* @ *${tipOdd}*\n` +
+          minTakeLine +
           `📈 EV: *+${tipEV}%* | De-juice: ${tipPlayer === match.team1 ? fairP1 : fairP2}%\n` +
           `💵 Stake: *${tipStake}u*\n` +
           `${confEmoji} Confiança: *${tipConf}*\n\n` +
@@ -5080,12 +5103,15 @@ Máximo 200 palavras.`;
 
         const probMkt = tipMarket === '1X2_H' ? mktH : tipMarket === '1X2_D' ? mktD : tipMarket === '1X2_A' ? mktA : '—';
         const probMdl = tipMarket === '1X2_H' ? mlScore.modelH : tipMarket === '1X2_D' ? mlScore.modelD : tipMarket === '1X2_A' ? mlScore.modelA : null;
+        const minTakeOdds = calcMinTakeOdds(tipOdd);
+        const minTakeLine = minTakeOdds ? `📉 Odd mínima: *${minTakeOdds}*\n` : '';
 
         const tipMsg = `⚽ 💰 *TIP FUTEBOL*\n` +
           `*${match.team1}* vs *${match.team2}*\n` +
           `📋 ${match.league}\n` +
           `🕐 ${matchTime} (BRT)\n\n` +
           `🎯 Aposta: ${marketLabel} @ *${tipOdd}*\n` +
+          minTakeLine +
           `📈 EV: *+${tipEV}%* | Mercado: ${probMkt}%${probMdl ? ` | Modelo: ${probMdl}%` : ''}\n` +
           `💵 Stake: *${tipStake}u*\n` +
           `${confEmoji} Confiança: *${tipConf}*\n` +
