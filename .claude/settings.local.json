@@ -55,7 +55,18 @@
       "WebFetch(domain:docs.balldontlie.io)",
       "WebFetch(domain:dota.balldontlie.io)",
       "WebFetch(domain:odds-api.io)",
-      "WebFetch(domain:docs.odds-api.io)"
+      "WebFetch(domain:docs.odds-api.io)",
+      "Bash(grep -i \"dashboard\\\\|DASHBOARD_URL\\\\|NEXT_PUBLIC\\\\|API_BASE\" .env .env.local)",
+      "Bash(ls dashboard/.env*)",
+      "Bash(ls frontend/.env*)",
+      "Bash(curl -s \"http://127.0.0.1:3000/unsettled-tips?sport=mma&days=120\")",
+      "Bash(curl -s \"http://127.0.0.1:3000/health\")",
+      "Bash(curl -s \"http://localhost:3000/health\")",
+      "Bash(netstat -ano)",
+      "Bash(tasklist)",
+      "WebFetch(domain:sportsedge-bot-production.up.railway.app)",
+      "Bash(curl -sv \"https://sportsedge-bot-production.up.railway.app/void-tip?id=193&sport=mma\")",
+      "Bash(curl:*)"
     ]
   }
 }
