@@ -4242,7 +4242,7 @@ async function pollMma(runOnce = false) {
 
         // ── Pré-filtro ML com dados ESPN (record → win rate) ──
         const hasEspnRecord = !!(rec1 || rec2);
-        const mmaEnrich = (!isBoxing && hasEspnRecord) ? mmaRecordToEnrich(rec1, rec2) : { form1: null, form2: null, h2h: null, oddsMovement: null };
+        const mmaEnrich = hasEspnRecord ? mmaRecordToEnrich(rec1, rec2) : { form1: null, form2: null, h2h: null, oddsMovement: null };
         const mlResultMma = esportsPreFilter(fight, o, mmaEnrich, false, '', null);
         if (!mlResultMma.pass) {
           log('INFO', 'AUTO-MMA', `Pré-filtro ML: edge insuficiente (${mlResultMma.score.toFixed(1)}pp) para ${fight.team1} vs ${fight.team2}. Pulando IA.`);
@@ -4266,27 +4266,28 @@ async function pollMma(runOnce = false) {
         const newsSectionMma = await fetchMatchNews('mma', fight.team1, fight.team2).catch(() => '');
 
         const prompt = isBoxing
-          ? `Você é um analista especializado em BOXE. Analise esta luta e identifique edge real se existir.
+          ? `Você é um analista especializado em BOXE. Seja conservador — prefira SEM_EDGE a apostar em margem duvidosa.
 
 LUTA: ${fight.team1} vs ${fight.team2}
-Evento: ${fight.league} | Data: ${fightTime} (BRT)
+Evento: ${fight.league} | Data: ${fightTime} (BRT)${espnSection}
 
 ODDS (${o.bookmaker || 'EU'}):
 ${fight.team1}: ${o.t1} | ${fight.team2}: ${o.t2}
 Margem bookie: ${marginPct}%
-Fair odds (de-juice): ${fight.team1}=${fairP1}% | ${fight.team2}=${fairP2}%
-
+${fairOddsRef}
+${newsSectionMma ? `\n${newsSectionMma}\n` : ''}
 ANÁLISE REQUERIDA — seja específico:
-1. Striking: volume, potência, defesa, timing.
-2. Tendência: últimos resultados e nível de oposição (se tiver).
-3. Risco: variância por decisão vs KO/TKO.
-4. Confiança (1-10): dados suficientes?
+1. Striking: volume, potência, defesa, timing, alcance.
+2. Record e nível de oposição: quem enfrentou adversários de nível mais alto?
+3. Matchup estilístico: brawler vs técnico, volume vs potência, etc.
+4. Risco: variância por decisão vs KO/TKO — lutas com alta chance de KO são mais imprevisíveis.
+5. Confiança (1-10): dados suficientes sobre AMBOS os lutadores?
 
 DECISÃO FINAL:
 - Se EV ≥ +5% E confiança ≥ 7: TIP_ML:[lutador]@[odd]|EV:[%]|STAKE:[1-3]u|CONF:[ALTA/MÉDIA/BAIXA]
 - Se edge inexistente ou confiança < 7: SEM_EDGE
 
-Máximo 200 palavras.`
+Máximo 220 palavras. Seja direto e fundamentado.`
           : `Você é um analista especializado em MMA/UFC. Analise esta luta e identifique edge real se existir.
 
 LUTA: ${fight.team1} vs ${fight.team2}
@@ -4368,6 +4369,11 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
           log('INFO', 'AUTO-MMA', `Gate EV: ${tipEV}% < 5%`);
           await new Promise(r => setTimeout(r, 3000)); continue;
         }
+        // Confiança BAIXA: bloqueia — MMA tem variância alta, BAIXA não compensa
+        if (tipConf === 'BAIXA') {
+          log('INFO', 'AUTO-MMA', `Gate conf BAIXA rejeitado: ${fight.team1} vs ${fight.team2}`);
+          await new Promise(r => setTimeout(r, 3000)); continue;
+        }
 
         const confEmoji = { ALTA: '🟢', MÉDIA: '🟡', BAIXA: '🔴' }[tipConf] || '🟡';
         const recLine = espn ? `\n📊 Registros: ${fight.team1} ${rec1||'?'} | ${fight.team2} ${rec2||'?'}` : '';
@@ -4378,6 +4384,7 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
         const minTakeOdds = calcMinTakeOdds(tipOdd);
         const minTakeLine = minTakeOdds ? `📉 Odd mínima: *${minTakeOdds}*\n` : '';
 
+        const kellyLabelMma = tipConf === 'ALTA' ? '¼ Kelly' : '⅙ Kelly';
         const tipMsg = `${isBoxing ? '🥊 💰 *TIP BOXE*' : '🥊 💰 *TIP MMA*'}\n` +
           `*${fight.team1}* vs *${fight.team2}*\n📋 ${fight.league}\n` +
           `🕐 ${fightTime} (BRT)${recLine}${catLine}\n\n` +
@@ -4385,14 +4392,23 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
           `🎯 Aposta: *${tipTeam}* @ *${tipOdd}*\n` +
           minTakeLine +
           `📈 EV: *+${tipEV}%* | De-juice: ${tipTeam === fight.team1 ? fairP1 : fairP2}%\n` +
-          `💵 Stake: *${tipStake}u*\n` +
+          `💵 Stake: *${tipStakeAdjMma}u* _(${kellyLabelMma})_\n` +
           `${confEmoji} Confiança: *${tipConf}*\n\n` +
           `⚠️ _Aposte com responsabilidade._`;
 
         const pickIsT1Mma = norm(tipTeam) === norm(fight.team1);
         const modelPPickMma = pickIsT1Mma ? mlResultMma.modelP1 : mlResultMma.modelP2;
 
-        const desiredUnitsMma = parseFloat(String(tipStake)) || 0;
+        // Kelly fracionado: ALTA → ¼ Kelly (max 4u) | MÉDIA → ⅙ Kelly (max 3u)
+        const kellyFractionMma = tipConf === 'ALTA' ? 0.25 : 1/6;
+        const kellyStakeMma = modelPPickMma > 0
+          ? calcKellyWithP(modelPPickMma, tipOdd, kellyFractionMma)
+          : calcKellyFraction(tipEV, tipOdd, kellyFractionMma);
+        if (kellyStakeMma === '0u') {
+          log('INFO', 'AUTO-MMA', `Kelly negativo ${tipTeam} @ ${tipOdd} — tip abortada`);
+          await new Promise(r => setTimeout(r, 3000)); continue;
+        }
+        const desiredUnitsMma = parseFloat(kellyStakeMma) || 0;
         const riskAdjMma = await applyGlobalRisk('mma', desiredUnitsMma);
         if (!riskAdjMma.ok) { log('INFO', 'RISK', `mma: bloqueada (${riskAdjMma.reason})`); await new Promise(r => setTimeout(r, 3000)); continue; }
         const tipStakeAdjMma = String(riskAdjMma.units.toFixed(1).replace(/\.0$/, ''));
@@ -5360,6 +5376,20 @@ async function checkCLV(caches = {}) {
             }
           }
         }
+      } else if (sport === 'mma') {
+        const matches = caches.mma || await serverGet('/mma-matches').catch(() => []);
+        caches.mma = matches;
+        if (Array.isArray(matches)) {
+          for (const m of matches) {
+            if (m.time) {
+              const k1 = norm(m.team1 || '') + '_' + norm(m.team2 || '');
+              const k2 = norm(m.team2 || '') + '_' + norm(m.team1 || '');
+              const ts = new Date(m.time).getTime();
+              matchTimeMap[k1] = ts;
+              matchTimeMap[k2] = ts;
+            }
+          }
+        }
       }
 
       // Reuso de carregamento para evitar N chamadas /matches
@@ -5403,6 +5433,15 @@ async function checkCLV(caches = {}) {
           if (m?.odds) {
             const o = h2hDecimalOddsForPick(m, tip.tip_participant);
             if (o && o > 1) clvOdds = String(o);
+          }
+        } else if (sport === 'mma') {
+          const list = caches.mma || await serverGet('/mma-matches').catch(() => []);
+          if (Array.isArray(list) && list.length) {
+            const m = findTheOddsH2hMatch(list, tip);
+            if (m?.odds) {
+              const o = h2hDecimalOddsForPick(m, tip.tip_participant);
+              if (o && o > 1) clvOdds = String(o);
+            }
           }
         }
 
