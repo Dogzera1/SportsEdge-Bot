@@ -2477,9 +2477,13 @@ async function getOddsApiIoDotaMatches() {
     .map(e => {
       const t = new Date(e.date || e.commence_time || e.start_time || e.time || '').getTime();
       const leagueName = (e.league?.name || e.league || '').toString();
-      return { e, t, leagueName };
+      const sportName = (e.sport?.name || e.sport || '').toString();
+      const sportSlug = (e.sport?.slug || '').toString();
+      const hay = `${leagueName} ${sportName} ${sportSlug}`.trim();
+      return { e, t, leagueName, hay };
     })
-    .filter(x => leagueRe.test(x.leagueName))
+    // Alguns eventos vêm sem league; usa sport.* como fallback
+    .filter(x => leagueRe.test(x.hay || x.leagueName || ''))
     .filter(x => Number.isFinite(x.t) && x.t <= weekAhead && (x.t > now || (x.t <= now && (now - x.t) <= LIVE_WINDOW_MS)))
     .sort((a, b) => a.t - b.t)
     .slice(0, maxEvents);
