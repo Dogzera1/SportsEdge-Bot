@@ -919,6 +919,14 @@ async function runAutoAnalysis() {
               await new Promise(r => setTimeout(r, 3000)); continue;
             }
 
+            // EV sanity: bloqueia EV absurdamente alto (erro de cálculo da IA)
+            const tipEVnum = parseFloat(String(tipEV).replace('%', '').replace('+', ''));
+            if (!isNaN(tipEVnum) && tipEVnum > 50) {
+              log('WARN', 'AUTO', `Gate EV sanity upcoming: ${match.team1} vs ${match.team2} → EV ${tipEVnum}% > 50% (provável erro de cálculo da IA) → rejeitado`);
+              analyzedMatches.set(matchKey, { ts: now, tipSent: false, noEdge: true });
+              await new Promise(r => setTimeout(r, 3000)); continue;
+            }
+
             // ALTA → ¼ Kelly (max 4u) | MÉDIA → ⅙ Kelly (max 3u) | BAIXA → 1/10 Kelly (max 1.5u)
             const kellyFraction = tipConf === CONF.ALTA ? 0.25 : tipConf === CONF.BAIXA ? 0.10 : 1/6;
             // Usa p do modelo ML quando disponível (evita circularidade p←EV←IA)
@@ -2051,6 +2059,12 @@ async function autoAnalyzeMatch(token, match) {
           log('INFO', 'AUTO', `Gate EV: ${match.team1} vs ${match.team2} → EV ${tipEV}% < threshold ${confThreshold.toFixed(1)}% [${confNow}] (${sigCount}/6 sinais) → rejeitado`);
           filteredTipResult = null;
         }
+      }
+
+      // Gate 4b: EV sanity — bloqueia EV absurdamente alto (erro de cálculo da IA)
+      if (filteredTipResult && !isNaN(tipEV) && tipEV > 50) {
+        log('WARN', 'AUTO', `Gate EV sanity: ${match.team1} vs ${match.team2} → EV ${tipEV}% > 50% (provável erro de cálculo da IA) → rejeitado`);
+        filteredTipResult = null;
       }
 
       if (filteredTipResult) {
@@ -4048,6 +4062,12 @@ Máximo 200 palavras.`;
       const evVal = parseFloat(String(tipEV).replace('%', '').replace('+', ''));
       if (evVal < evThreshold) {
         log('INFO', 'AUTO-DOTA', `EV insuficiente (${evVal}% < ${evThreshold}%): pulando`);
+        analyzedDota.set(key, { ts: now, tipSent: false, noEdge: true });
+        await _sleep(2000); continue;
+      }
+      // EV sanity: bloqueia EV absurdamente alto (erro de cálculo da IA)
+      if (evVal > 50) {
+        log('WARN', 'AUTO-DOTA', `Gate EV sanity: EV ${evVal}% > 50% — provável erro de cálculo da IA → rejeitado`);
         analyzedDota.set(key, { ts: now, tipSent: false, noEdge: true });
         await _sleep(2000); continue;
       }
