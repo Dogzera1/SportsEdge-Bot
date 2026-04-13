@@ -4554,12 +4554,12 @@ async function pollTennis(runOnce = false) {
           oddsMovement: null
         };
 
-        // Usa override ML env para tênis com base 2.5pp (margin bookies tênis é menor, ~4-6%)
-        const envScoreBase = process.env.TENNIS_MIN_EDGE ? parseFloat(process.env.TENNIS_MIN_EDGE) : 2.5;
+        // Usa override ML env para tênis com base 4.0pp — exige edge mais robusto para reduzir false positives
+        const envScoreBase = process.env.TENNIS_MIN_EDGE ? parseFloat(process.env.TENNIS_MIN_EDGE) : 4.0;
 
         let mlResultTennis;
-        if (eloResult && (eloResult.found1 || eloResult.found2)) {
-          // Use Elo model result directly
+        if (eloResult && eloResult.found1 && eloResult.found2) {
+          // Use Elo model result directly — requires both players in DB
           mlResultTennis = {
             pass: eloResult.score >= envScoreBase,
             modelP1: eloResult.modelP1,
@@ -4586,7 +4586,7 @@ async function pollTennis(runOnce = false) {
         }
 
         const hasModelDataTennis = mlResultTennis.factorCount > 0;
-        const usingEloModel = !!(eloResult && (eloResult.found1 || eloResult.found2));
+        const usingEloModel = !!(eloResult && eloResult.found1 && eloResult.found2);
         // Fair odds sempre disponíveis: quando sem ranking, modelP1=impliedP1 (de-juice puro)
         const modelP1Tennis = (mlResultTennis.modelP1 * 100).toFixed(1);
         const modelP2Tennis = (mlResultTennis.modelP2 * 100).toFixed(1);
@@ -4629,7 +4629,7 @@ async function pollTennis(runOnce = false) {
 
         const newsSectionTennis = await fetchMatchNews('tennis', match.team1, match.team2).catch(() => '');
 
-        const prompt = `Você é um analista especializado em tênis profissional. Analise com rigor — prefira SEM_EDGE a inventar edge inexistente.
+        const prompt = `Você é um analista especializado em tênis profissional. Seja MUITO conservador — prefira SEM_EDGE a apostar em margem duvidosa. Só dê tip quando o edge for claro e robusto.
 
 PARTIDA: ${match.team1} vs ${match.team2}
 Torneio: ${match.league} | ${eventType}
@@ -4643,18 +4643,20 @@ ${isFav1 ? match.team1 : match.team2} é o favorito do mercado.
 
 ${dataSection ? `DADOS REAIS (ESPN/DB):\n${dataSection}\n` : 'AVISO: sem dados ESPN/DB disponíveis — use apenas conhecimento de treino confiável.\n'}${newsSectionTennis ? `${newsSectionTennis}\n` : ''}
 INSTRUÇÕES:
-1. Estime a probabilidade REAL de vitória de cada jogador com base em: ranking, superfície, H2H, form recente, estilo de jogo. Use H2H para match-ups desfavoráveis.
-2. Compare sua estimativa com a ${fairLabelTennis} (${match.team1}=${modelP1Tennis}% | ${match.team2}=${modelP2Tennis}%):
-   - Se sua estimativa para ${match.team1} > ${modelP1Tennis}%: edge em ${match.team1} (EV = (sua_prob/100 * ${o.t1}) - 1)
-   - Se sua estimativa para ${match.team2} > ${modelP2Tennis}%: edge em ${match.team2} (EV = (sua_prob/100 * ${o.t2}) - 1)
-3. Confiança (1-10): baseada em quão bem você conhece esses jogadores E nessa superfície específica.
-   - Se não tiver certeza sobre o contexto atual (ex: lesões reportadas vs forma real): máximo confiança 6 → SEM_EDGE.
+1. Analise: ranking, superfície (peso ALTO — clay specialists, grass specialists), H2H direto, forma recente (últimos 5 jogos), estilo de jogo vs superfície.
+2. O modelo Elo calculou: ${match.team1}=${modelP1Tennis}% | ${match.team2}=${modelP2Tennis}% (${fairLabelTennis}).
+   - Use o modelo como ÂNCORA. Só desvie se tiver motivo CONCRETO (H2H dominante, lesão confirmada, forma terrível recente, especialista em superfície).
+   - Sem motivo concreto para desviar → SEM_EDGE.
+3. Se identificar edge: calcule EV = (sua_prob/100 * odd) - 1. Exija EV ≥ +5%.
+4. Confiança (1-10): baseada em quão bem conhece os jogadores E na superfície.
+   - Dados insuficientes ou dúvida sobre contexto atual → máximo 6 → SEM_EDGE.
+   - Apenas ALTA (≥8) ou MÉDIA (7): exige edge claro. BAIXA (≤6): apenas se edge > +8%.
 
 DECISÃO:
-- Edge real (EV ≥ +4%) E confiança ≥ 7: TIP_ML:[jogador]@[odd]|EV:[%]|STAKE:[1-3]u|CONF:[ALTA/MÉDIA/BAIXA]
+- Edge claro (EV ≥ +5%) E confiança ≥ 7: TIP_ML:[jogador]@[odd]|EV:[%]|STAKE:[1-3]u|CONF:[ALTA/MÉDIA/BAIXA]
 - Caso contrário: SEM_EDGE
 
-Máximo 200 palavras. Mostre seu raciocínio brevemente antes da decisão.`;
+Máximo 200 palavras. Raciocínio breve antes da decisão.`;
 
         log('INFO', 'AUTO-TENNIS', `Analisando: ${match.team1} vs ${match.team2} | ${match.league} | ${surfacePT}${usingEloModel ? ' [Elo]' : (hasRealData ? ' [ESPN/DB+]' : '')}`);
         analyzedTennis.set(key, { ts: now, tipSent: false });
@@ -4697,8 +4699,13 @@ Máximo 200 palavras. Mostre seu raciocínio brevemente antes da decisão.`;
           log('INFO', 'AUTO-TENNIS', `Gate odds: ${tipOdd} fora do range ${TENNIS_GATE_MIN_ODDS}-${TENNIS_GATE_MAX_ODDS}`);
           await new Promise(r => setTimeout(r, 3000)); continue;
         }
-        if (tipEV < 4.0) {
-          log('INFO', 'AUTO-TENNIS', `Gate EV: ${tipEV}% < 4%`);
+        if (tipEV < 5.0) {
+          log('INFO', 'AUTO-TENNIS', `Gate EV: ${tipEV}% < 5%`);
+          await new Promise(r => setTimeout(r, 3000)); continue;
+        }
+        // Confiança BAIXA: requer edge ML forte (≥6pp) para compensar incerteza
+        if (tipConf === 'BAIXA' && mlResultTennis.score < 6.0) {
+          log('INFO', 'AUTO-TENNIS', `Gate conf BAIXA: ML-edge ${mlResultTennis.score.toFixed(1)}pp < 6.0pp — rejeitado: ${match.team1} vs ${match.team2}`);
           await new Promise(r => setTimeout(r, 3000)); continue;
         }
 
