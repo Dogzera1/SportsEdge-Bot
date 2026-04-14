@@ -1661,7 +1661,7 @@ async function collectGameContext(game, matchId) {
         for (const gid of ids) {
           try {
             const gd = await serverGet(`/live-game?gameId=${gid.gameId}`);
-            log('INFO', 'LIVE-STATS', `LoL Riot game ${gid.gameId}: state=${gd.gameState||'?'} hasLiveStats=${!!gd.hasLiveStats} gold=${gd.blueTeam?.totalGold||0}/${gd.redTeam?.totalGold||0}`);
+            log('INFO', 'LIVE-STATS', `LoL Riot game ${gid.gameId}: state=${gd.gameState||'?'} hasLiveStats=${!!gd.hasLiveStats} hasDraft=${!!gd.hasDraft}${gd.statsDisabled ? ' STATS_DISABLED':''} gold=${gd.blueTeam?.totalGold||0}/${gd.redTeam?.totalGold||0}`);
             if (gd.blueTeam?.players?.length) {
               const thisDraftComplete = isDraftCompleteTeam(gd.blueTeam) && isDraftCompleteTeam(gd.redTeam);
               if (thisDraftComplete) draftComplete = true;

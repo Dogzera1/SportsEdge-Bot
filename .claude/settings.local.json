@@ -87,7 +87,8 @@
       "WebFetch(domain:hub.maisesports.com.br)",
       "Bash(grep -oE '\"x-api-key\":\"[^\"]{10,60}\"' /tmp/mais.js)",
       "Bash(grep -oE 'x-api-key[^,}]{0,80}' /tmp/mais.js)",
-      "Bash(grep -oE '\\\\$h=\"[^\"]{10,60}\"' /tmp/mais.js)"
+      "Bash(grep -oE '\\\\$h=\"[^\"]{10,60}\"' /tmp/mais.js)",
+      "Bash(python3:*)"
     ]
   }
 }

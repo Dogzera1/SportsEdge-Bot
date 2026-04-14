@@ -3225,6 +3225,50 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // ── Diagnóstico: varredura completa de livestats de um gameId específico ──
+  if (p === '/debug-livestats') {
+    const gameId = parsed.query.gameId;
+    if (!gameId) { sendJson(res, { error: 'Missing gameId. Uso: /debug-livestats?gameId=X' }, 400); return; }
+    try {
+      const base = `https://feed.lolesports.com/livestats/v1/window/${gameId}`;
+      const baseNoHdr = await httpGet(base, {});
+      const baseWithKey = await httpGet(base, LOL_HEADERS);
+      const scanDelays = [30, 45, 60, 90, 120, 150, 180, 240, 300, 420, 600, 900, 1200, 1800, 2400, 3600];
+      const scan = [];
+      let firstGold = null;
+      for (const secAgo of scanDelays) {
+        const ts = new Date(Math.floor((Date.now() - secAgo * 1000) / 10000) * 10000).toISOString();
+        const r = await httpGet(`${base}?startingTime=${encodeURIComponent(ts)}`, LOL_HEADERS);
+        const d = r.status === 200 ? safeParse(r.body, {}) : null;
+        const framesCount = d?.frames?.length || 0;
+        const anyGold = !!(d?.frames?.some(f => f.blueTeam?.totalGold > 0));
+        const maxBlue = Math.max(0, ...(d?.frames?.map(f => f.blueTeam?.totalGold || 0) || [0]));
+        const maxRed  = Math.max(0, ...(d?.frames?.map(f => f.redTeam?.totalGold  || 0) || [0]));
+        const hasMeta = !!d?.gameMetadata;
+        scan.push({ secAgo, ts, status: r.status, framesCount, anyGold, maxBlue, maxRed, hasMeta });
+        if (anyGold && !firstGold) firstGold = { secAgo, maxBlue, maxRed, framesCount };
+      }
+      // Tenta /details também (player data)
+      const detailsBase = `https://feed.lolesports.com/livestats/v1/details/${gameId}`;
+      const detTs = new Date(Math.floor((Date.now() - 90000) / 10000) * 10000).toISOString();
+      const detR = await httpGet(`${detailsBase}?startingTime=${encodeURIComponent(detTs)}`, LOL_HEADERS);
+      const detD = detR.status === 200 ? safeParse(detR.body, {}) : null;
+      sendJson(res, {
+        gameId,
+        apiKey: LOL_KEY ? `${LOL_KEY.slice(0, 8)}…${LOL_KEY.slice(-4)}` : 'none',
+        baseNoHdr: baseNoHdr.status,
+        baseWithKey: baseWithKey.status,
+        firstGold,
+        detailsStatus: detR.status,
+        detailsFramesCount: detD?.frames?.length || 0,
+        scan
+      });
+    } catch(e) {
+      sendJson(res, { error: e.message }, 500);
+    }
+    return;
+  }
+
   // ── OpenDota: live stats de Dota 2 (github.com/odota/core) ──
   if (p === '/opendota-live') {
     const t1 = String(parsed.query.team1 || '').trim();
@@ -3399,24 +3443,31 @@ const server = http.createServer(async (req, res) => {
       let frames = [];
       let usedTs = null;
       let scanStatuses = [];
+      let statsDisabled = false;
       for (const secAgo of scanDelays) {
         const ts = new Date(Math.floor((Date.now() - secAgo * 1000) / 10000) * 10000).toISOString();
         const r = await httpGet(`${base}?startingTime=${encodeURIComponent(ts)}`, LOL_HEADERS);
         scanStatuses.push(`${secAgo}s=${r.status}`);
+        if (r.status === 404 && /Stats are disabled/i.test(String(r.body || ''))) {
+          statsDisabled = true;
+          break; // Não adianta tentar outros timestamps — Riot desabilitou o feed
+        }
         if (r.status !== 200) continue;
         const d = safeParse(r.body, {});
         if (d.frames?.length && d.frames.some(f => f.blueTeam?.totalGold > 0)) {
           frames = d.frames;
           usedTs = secAgo;
-          // Se base estava 204, pega metadata do primeiro frame com sucesso
           if (!raw.gameMetadata && d.gameMetadata) raw.gameMetadata = d.gameMetadata;
           break;
         }
         if (!frames.length && d.frames?.length) frames = d.frames;
         if (!raw.gameMetadata && d.gameMetadata) raw.gameMetadata = d.gameMetadata;
       }
-      if (usedTs === null) {
-        log('WARN', 'LIVE-GAME', `window/${gameId}: varredura não achou frames com gold (frames=${frames.length}, scan: ${scanStatuses.join(',')})`);
+      const hasDraft = !!(raw.gameMetadata?.blueTeamMetadata?.participantMetadata?.length);
+      if (statsDisabled) {
+        log('INFO', 'LIVE-GAME', `window/${gameId}: Stats DISABLED pela Riot — draft=${hasDraft ? 'ok' : 'no'}`);
+      } else if (usedTs === null) {
+        log('WARN', 'LIVE-GAME', `window/${gameId}: varredura sem gold (frames=${frames.length}, draft=${hasDraft ? 'ok' : 'no'}, scan: ${scanStatuses.join(',')})`);
       } else {
         log('INFO', 'LIVE-GAME', `window/${gameId}: gold encontrado a ${usedTs}s atrás (${frames.length} frames)`);
       }
@@ -3482,6 +3533,8 @@ const server = http.createServer(async (req, res) => {
         gameId,
         gameState,
         hasLiveStats,
+        hasDraft,
+        statsDisabled,
         framesTotal: frames.length,
         dataDelay: frameAge,
         goldTrajectory,
