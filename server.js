@@ -3360,10 +3360,13 @@ const server = http.createServer(async (req, res) => {
     const t2 = parsed.query.team2 || parsed.query.p2 || '';
     if (!t1 || !t2) { sendJson(res, { error: 'team1 e team2 obrigatórios' }, 400); return; }
     const gameParam = (parsed.query.game || '').toLowerCase();
-    // Dota 2: tenta SX.Bet (live) ou The Odds API (upcoming)
+    // Dota 2: SX.Bet → Pinnacle (map OR série via period) → The Odds API
+    // Pinnacle tem period=N para mapa N em Dota 2 (mesmo padrão LoL).
     if (gameParam === 'dota2' || gameParam === 'dota') {
       const liveOnly = parsed.query.live === '1';
-      // SX.Bet para ao vivo
+      const dotaMapNumber = parsed.query.map ? parseInt(parsed.query.map, 10) : null;
+
+      // 1. SX.Bet para ao vivo
       if (SXBET_ENABLED) {
         const dotaSportId = await sxFindDotaSportId().catch(() => null);
         const o = await sxGetMatchWinnerOdds(t1, t2, { sportId: dotaSportId, liveOnly, _debug: false }).catch(() => null);
@@ -3380,30 +3383,52 @@ const server = http.createServer(async (req, res) => {
         return (mn1.includes(n1) || n1.includes(mn1)) && (mn2.includes(n2) || n2.includes(mn2));
       };
 
-      // Fallback 1: Pinnacle (se ativado)
-      if (process.env.PINNACLE_DOTA === 'true' && !liveOnly) {
+      // 2. Pinnacle (se ativado): mapa específico ou série
+      if (process.env.PINNACLE_DOTA === 'true') {
         const pinMatches = await getPinnacleDotaMatches().catch(() => []);
         const pinHit = pinMatches.find(m => matchesTeams(m.team1, m.team2));
-        if (pinHit?.odds) { sendJson(res, pinHit.odds); return; }
+        if (pinHit) {
+          const swap = !normTeam(pinHit.team1).includes(n1) && !n1.includes(normTeam(pinHit.team1));
+          const pinMatchupId = String(pinHit.id || '').replace(/^pin_/, '');
+          if (dotaMapNumber && dotaMapNumber > 0 && pinMatchupId) {
+            const mapMl = await pinnacle.getMatchupMoneylineByPeriod(pinMatchupId, dotaMapNumber).catch(() => null);
+            if (mapMl?.oddsHome && mapMl?.oddsAway) {
+              const [th, ta] = swap ? [mapMl.oddsAway, mapMl.oddsHome] : [mapMl.oddsHome, mapMl.oddsAway];
+              log('INFO', 'ODDS', `Pinnacle Dota MAPA ${dotaMapNumber}: ${t1} vs ${t2}`);
+              sendJson(res, {
+                t1: String(th), t2: String(ta), bookmaker: 'Pinnacle',
+                mapMarket: true, mapRequested: dotaMapNumber, fallback: 'pinnacle-map'
+              });
+              return;
+            }
+          }
+          // série (sem map solicitado ou map indisponível)
+          if (!dotaMapNumber && pinHit.odds) {
+            sendJson(res, { ...pinHit.odds, seriesOnly: true, fallback: 'pinnacle-series' });
+            return;
+          }
+        }
       }
 
-      // Fallback 2: The Odds API cache (já buscado pelo /dota-matches)
-      if (THE_ODDS_API_KEY && !liveOnly) {
+      // 3. The Odds API cache (apenas série)
+      if (THE_ODDS_API_KEY && !liveOnly && !dotaMapNumber) {
         const cached = _dotaOddsCache.data.find(m => matchesTeams(m.team1, m.team2));
         if (cached?.odds) { sendJson(res, cached.odds); return; }
       }
-      sendJson(res, { error: 'odds Dota 2 não encontradas' });
+      sendJson(res, { error: `odds Dota 2 não encontradas${dotaMapNumber ? ` (mapa ${dotaMapNumber})` : ''}` });
       return;
     }
     const mapNumber = parsed.query.map ? parseInt(parsed.query.map, 10) : null;
     const score1 = parsed.query.score1 != null ? parseInt(parsed.query.score1, 10) : null;
     const score2 = parsed.query.score2 != null ? parseInt(parsed.query.score2, 10) : null;
     const format = parsed.query.format ? String(parsed.query.format) : '';
-    // LoL: odds via SX.Bet (primário para live por-mapa) → fallback Pinnacle (SÓ ODDS DE SÉRIE)
-    // CRÍTICO: Pinnacle NÃO tem mercado por mapa individual — só Match Winner da SÉRIE
-    // (confirmado via /0.1/matchups/{id}/related: units=Regular/Kills/Maps-handicap, sem mapa 1/2/3).
-    // Por isso, quando a request pede mapNumber, NÃO caímos pra Pinnacle — retornamos erro
-    // explícito pra evitar que o bot trate odds de série como se fossem do mapa.
+    // LoL: odds via SX.Bet (primário por-mapa) → Pinnacle (map OU série, conforme período disponível)
+    // DESCOBERTA: Pinnacle TEM odds por mapa via field `period` no /markets/related/straight
+    //   period=0 → série, period=N → mapa N (status 'open' quando ainda em aposta).
+    // Cascata:
+    //   1. SX.Bet (per-map + per-series, preferido quando funciona)
+    //   2. Pinnacle period=mapNumber (odds do mapa específico)
+    //   3. Pinnacle period=0 (série) — apenas quando request NÃO pediu mapa
     if (gameParam === 'lol') {
       const liveOnly = !!(mapNumber && mapNumber > 0);
 
@@ -3417,21 +3442,65 @@ const server = http.createServer(async (req, res) => {
         }
       }
 
-      // 2. Pinnacle fallback APENAS para odds de SÉRIE (sem mapNumber)
-      //    Se request pediu mapa específico e SX.Bet não tem, retorna erro —
-      //    bot cai no fluxo de "mercado de mapa indisponível" em vez de confundir série com mapa.
-      if (!mapNumber) {
-        const pinMatch = findOdds('esports', t1, t2);
-        if (pinMatch?.t1 && pinMatch?.t2) {
-          log('INFO', 'ODDS', `Pinnacle LoL fallback (série): ${t1} vs ${t2}`);
-          sendJson(res, { ...pinMatch, mapMarket: false, seriesOnly: true, fallback: 'pinnacle' });
+      // 2. Pinnacle: busca matchup pelo time via oddsCache (populado por fetchLoLOddsFromPinnacle)
+      //    Procuramos qualquer entry esports_pin_* que tenha os nomes t1/t2 — o fixtureId carrega o matchupId
+      const pinEntry = (() => {
+        const nt1 = norm(t1), nt2 = norm(t2);
+        for (const [k, v] of Object.entries(oddsCache)) {
+          if (!k.startsWith('esports_pin_')) continue;
+          const vt1 = norm(v?.t1Name || ''), vt2 = norm(v?.t2Name || '');
+          if ((vt1.includes(nt1) || nt1.includes(vt1)) && (vt2.includes(nt2) || nt2.includes(vt2))) return v;
+          if ((vt1.includes(nt2) || nt2.includes(vt1)) && (vt2.includes(nt1) || nt1.includes(vt2))) return { ...v, _swap: true };
+        }
+        return null;
+      })();
+
+      if (pinEntry && pinEntry.fixtureId) {
+        const pinMatchupId = String(pinEntry.fixtureId).replace(/^pin_/, '');
+        // 2a. Mapa específico solicitado → busca period=mapNumber
+        if (mapNumber && mapNumber > 0) {
+          const mapMl = await pinnacle.getMatchupMoneylineByPeriod(pinMatchupId, mapNumber).catch(() => null);
+          if (mapMl?.oddsHome && mapMl?.oddsAway) {
+            const [th, ta] = pinEntry._swap ? [mapMl.oddsAway, mapMl.oddsHome] : [mapMl.oddsHome, mapMl.oddsAway];
+            log('INFO', 'ODDS', `Pinnacle LoL MAPA ${mapNumber}: ${t1} vs ${t2} → ${th}/${ta}`);
+            sendJson(res, {
+              t1: String(th), t2: String(ta),
+              bookmaker: 'Pinnacle',
+              mapMarket: true,
+              mapRequested: mapNumber,
+              fallback: 'pinnacle-map'
+            });
+            return;
+          }
+          log('DEBUG', 'ODDS', `Pinnacle LoL mapa ${mapNumber} não disponível (settled ou sem mercado)`);
+        }
+        // 2b. Sem mapa OU mapa solicitado mas não disponível → tenta série (period=0)
+        if (!mapNumber) {
+          const seriesMl = await pinnacle.getMatchupMoneylineByPeriod(pinMatchupId, 0).catch(() => null);
+          if (seriesMl?.oddsHome && seriesMl?.oddsAway) {
+            const [th, ta] = pinEntry._swap ? [seriesMl.oddsAway, seriesMl.oddsHome] : [seriesMl.oddsHome, seriesMl.oddsAway];
+            log('INFO', 'ODDS', `Pinnacle LoL série: ${t1} vs ${t2} → ${th}/${ta}`);
+            sendJson(res, {
+              t1: String(th), t2: String(ta),
+              bookmaker: 'Pinnacle',
+              mapMarket: false,
+              seriesOnly: true,
+              fallback: 'pinnacle-series'
+            });
+            return;
+          }
+          // Fallback final: usa as odds cacheadas (já sabemos que existem)
+          log('INFO', 'ODDS', `Pinnacle LoL cache (série): ${t1} vs ${t2}`);
+          sendJson(res, {
+            t1: pinEntry._swap ? pinEntry.t2 : pinEntry.t1,
+            t2: pinEntry._swap ? pinEntry.t1 : pinEntry.t2,
+            bookmaker: 'Pinnacle', mapMarket: false, seriesOnly: true, fallback: 'pinnacle-cache'
+          });
           return;
         }
-      } else {
-        log('DEBUG', 'ODDS', `Pinnacle skip (request pediu mapa ${mapNumber}, Pinnacle só tem série): ${t1} vs ${t2}`);
       }
 
-      sendJson(res, { error: `odds LoL não encontradas${mapNumber ? ` (mapa ${mapNumber} — SX.Bet sem mercado)` : ' (SX.Bet + Pinnacle)'}` });
+      sendJson(res, { error: `odds LoL não encontradas${mapNumber ? ` (mapa ${mapNumber})` : ''}` });
       return;
     }
     // force=1: bypassa TTL do cache (usado para partidas iminentes < 2h)

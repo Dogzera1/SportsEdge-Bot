@@ -423,19 +423,24 @@ No boot e a cada 12h, o sistema busca até **400 partidas finalizadas** dos últ
 
 ## Sistema de Odds
 
-### LoL / Dota 2 ao vivo — SX.Bet + Pinnacle
+### LoL / Dota 2 ao vivo — SX.Bet + Pinnacle (com odds PER-MAP)
 
-Cascata de fontes para odds ao vivo:
+**Pinnacle expõe odds por mapa individual** via field `period` no endpoint `/0.1/matchups/{id}/markets/related/straight`:
+- `period: 0` → Match Winner da **série**
+- `period: 1..5` → Match Winner do **mapa N**
+- Mapas já finalizados desaparecem do response (status `settled`)
 
-1. **SX.Bet** (primário, per-map) — API descentralizada, ativar `SXBET_ENABLED=true`
-2. **Pinnacle** (fallback, série) — guest API, cai quando SX.Bet não tem mercado aberto
-3. **Série via SX.Bet** quando Riot API não fornece `currentMap` (entre mapas ou partida PandaScore `ps_`)
+Cascata no endpoint `/odds?game=lol&map=N`:
 
-O endpoint `/odds?game=lol&map=N` tenta SX.Bet primeiro; se falhar, busca no `oddsCache` populado por `fetchLoLOddsFromPinnacle()` (que traz live + upcoming no mesmo endpoint `listSportMatchups`). Entradas com `isLive=true` são priorizadas via sort em `findOdds()`.
+1. **SX.Bet** (primário) — `sxGetMatchWinnerOdds` per-map quando `map=N`
+2. **Pinnacle per-map** (fallback novo) — `getMatchupMoneylineByPeriod(matchupId, N)` retorna odds do mapa exato
+3. **Pinnacle série** (fallback final) — apenas quando request **não** pediu mapa (`map` ausente). Nunca retorna série quando `map=N` foi solicitado — evita o bug de confundir odds de série com odds de mapa.
 
-**Refresh Pinnacle live**: quando há matches LIVE cacheados, um segundo `setInterval` de `PINNACLE_LOL_LIVE_REFRESH_MIN` (default 2min) atualiza só aqueles, capturando mudanças de odds em tempo real sem sobrecarregar a API.
+**Bug histórico corrigido**: antes, quando SX.Bet falhava com `map=N`, o código caía na Pinnacle série e retornava essas odds como se fossem do mapa. Isso fazia o bot analisar o draft do mapa atual e tipar em odds completamente diferentes. Caso real: Forsaken vs BOMBA tinha série @1.24/3.52 mas mapa 3 @2.00/1.69 — inversão total do favorito.
 
-**Dota 2 live**: mesma cascata — SX.Bet → Pinnacle → The Odds API cache.
+**Refresh Pinnacle live**: segundo `setInterval` de `PINNACLE_LOL_LIVE_REFRESH_MIN` (default 2min) roda quando há matches live cacheados.
+
+**Dota 2**: mesma cascata — SX.Bet → Pinnacle per-map (`period=N`) → Pinnacle série → The Odds API.
 
 ### LoL pré-match — Pinnacle Guest API
 
