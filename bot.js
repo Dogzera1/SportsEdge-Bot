@@ -4967,27 +4967,30 @@ async function pollFootball(runOnce = false) {
             };
             const toAvgGoals = (obj, key) => (obj && typeof obj[key] === 'number') ? obj[key] : null;
 
-            homeFormData = f1 ? {
-              form: toFormArr(f1),
-              homeForm: null,
-              awayForm: null,
-              goalsFor: toAvgGoals(f1, 'goalsFor'),
-              goalsAgainst: toAvgGoals(f1, 'goalsAgainst'),
-              games: f1?.totalGames || null
-            } : homeFormData;
-
-            awayFormData = f2 ? {
-              form: toFormArr(f2),
-              homeForm: null,
-              awayForm: null,
-              goalsFor: toAvgGoals(f2, 'goalsFor'),
-              goalsAgainst: toAvgGoals(f2, 'goalsAgainst'),
-              games: f2?.totalGames || null
-            } : awayFormData;
-
-            h2hData = (h2hDb && Array.isArray(h2hDb.results))
-              ? { results: h2hDb.results.slice(0, 10) }
-              : h2hData;
+            // Só sobrescreve forma se DB tiver dados e Sofascore/api-football ainda não preencheram
+            if (f1 && toFormArr(f1) && !homeFormData?.form?.length) {
+              homeFormData = {
+                form: toFormArr(f1),
+                homeForm: null,
+                awayForm: null,
+                goalsFor: toAvgGoals(f1, 'goalsFor'),
+                goalsAgainst: toAvgGoals(f1, 'goalsAgainst'),
+                games: f1?.totalGames || null
+              };
+            }
+            if (f2 && toFormArr(f2) && !awayFormData?.form?.length) {
+              awayFormData = {
+                form: toFormArr(f2),
+                homeForm: null,
+                awayForm: null,
+                goalsFor: toAvgGoals(f2, 'goalsFor'),
+                goalsAgainst: toAvgGoals(f2, 'goalsAgainst'),
+                games: f2?.totalGames || null
+              };
+            }
+            if (h2hDb && Array.isArray(h2hDb.results) && h2hDb.results.length && !h2hData?.results?.length) {
+              h2hData = { results: h2hDb.results.slice(0, 10) };
+            }
           } catch(_) {}
         }
 
