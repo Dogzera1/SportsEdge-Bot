@@ -23,6 +23,26 @@ if (!DEEPSEEK_KEY) {
   process.exit(1);
 }
 
+// Valida consistência aritmética entre EV reportado pela IA e EV calculado a partir de P + odd.
+// IA frequentemente emite P e EV contraditórios (ex: P=95% @ 1.2 mas EV=+8.6% quando o correto seria +14%).
+// Retorna {valid, reason, reportedEv, computedEv, p}. Tolerância padrão = 3pp.
+function _validateTipEvP(text, pickOdd, reportedEvPct, tolerancePp = 3) {
+  const pMatch = String(text || '').match(/\|P:\s*([0-9.]+)\s*%?/i);
+  if (!pMatch) return { valid: true, reason: 'no_p_field' };
+  const p = parseFloat(pMatch[1]);
+  const odd = parseFloat(pickOdd);
+  const evR = parseFloat(String(reportedEvPct).replace(/[+%\s]/g, ''));
+  if (!Number.isFinite(p) || !Number.isFinite(odd) || !Number.isFinite(evR) || odd <= 1 || p <= 0 || p > 100) {
+    return { valid: true, reason: 'invalid_numbers' };
+  }
+  const evC = (p / 100 * odd - 1) * 100;
+  const diff = Math.abs(evC - evR);
+  if (diff > tolerancePp) {
+    return { valid: false, reason: `EV inconsistente: reportado=${evR.toFixed(1)}% vs calculado=${evC.toFixed(1)}% (P=${p}% @ ${odd}) diff=${diff.toFixed(1)}pp`, reportedEv: evR, computedEv: evC, p, odd };
+  }
+  return { valid: true, reportedEv: evR, computedEv: evC, p, odd };
+}
+
 const DB_PATH = (process.env.DB_PATH || 'sportsedge.db').trim().replace(/^=+/, '');
 const { db, stmts } = initDatabase(DB_PATH);
 
@@ -2001,11 +2021,18 @@ async function autoAnalyzeMatch(token, match) {
       return null;
     }
 
-    const tipResult = text.match(/TIP_ML:\s*([^@]+?)\s*@\s*([^|\]]+?)\s*\|EV:\s*([^|]+?)\s*\|STAKE:\s*([^|\]]+?)(?:\s*\|CONF:\s*(\w+))?(?:\]|$)/);
+    let tipResult = text.match(/TIP_ML:\s*([^@]+?)\s*@\s*([^|\]]+?)\s*\|EV:\s*([^|]+?)\s*(?:\|P:\s*[^|]+?\s*)?\|STAKE:\s*([^|\]]+?)(?:\s*\|CONF:\s*(\w+))?(?:\]|$)/);
     // Log quando a IA gerou resposta mas o padrão TIP_ML não foi encontrado (ajuda a detectar mudança de formato)
     if (!tipResult && text && text.length > 20 && !text.toLowerCase().includes('sem edge') && !text.toLowerCase().includes('sem tip') && !/\bsem_?tip\b/i.test(text)) {
       const snippet = text.slice(0, 200).replace(/\n/g, ' ');
       log('DEBUG', 'IA-PARSE', `Sem TIP_ML na resposta para ${match.team1} vs ${match.team2}: "${snippet}"`);
+    }
+    if (tipResult) {
+      const _v = _validateTipEvP(text, tipResult[2], tipResult[3]);
+      if (!_v.valid) {
+        log('WARN', 'AUTO', `Tip rejeitada (${match.team1} vs ${match.team2}): ${_v.reason}`);
+        tipResult = null;
+      }
     }
     const extractTipReason = (t) => {
       if (!t) return null;
@@ -4291,9 +4318,17 @@ Máximo 200 palavras.`;
         continue;
       }
 
-      const tipMatch = typeof iaResp === 'string'
-        ? iaResp.match(/TIP_ML:([^@]+)@([0-9.]+)\|EV:([0-9.+%-]+)\|STAKE:([0-9.]+u?)\|CONF:(ALTA|M[ÉE]DIA|BAIXA)/i)
+      let tipMatch = typeof iaResp === 'string'
+        ? iaResp.match(/TIP_ML:([^@]+)@([0-9.]+)\|EV:([0-9.+%-]+)(?:\|P:[^|]+)?\|STAKE:([0-9.]+u?)\|CONF:(ALTA|M[ÉE]DIA|BAIXA)/i)
         : null;
+
+      if (tipMatch) {
+        const _v = _validateTipEvP(iaResp, tipMatch[2], tipMatch[3]);
+        if (!_v.valid) {
+          log('WARN', 'AUTO-DOTA', `Tip rejeitada (${match.team1} vs ${match.team2}): ${_v.reason}`);
+          tipMatch = null;
+        }
+      }
 
       if (!tipMatch) {
         log('INFO', 'AUTO-DOTA', `Sem tip: ${match.team1} vs ${match.team2}`);
@@ -4641,7 +4676,15 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
           return clean ? clean.slice(0, 160) : null;
         };
         const tipReasonTennis = extractTipReasonMma(text);
-        const tipMatch = text.match(/TIP_ML:([^@]+)@([\d.]+)\|EV:([+-]?[\d.]+)%\|STAKE:([\d.]+)u?\|CONF:(ALTA|MÉDIA|BAIXA)/i);
+        let tipMatch = text.match(/TIP_ML:([^@]+)@([\d.]+)\|EV:([+-]?[\d.]+)%(?:\|P:[^|]+)?\|STAKE:([\d.]+)u?\|CONF:(ALTA|MÉDIA|BAIXA)/i);
+
+        if (tipMatch) {
+          const _v = _validateTipEvP(text, tipMatch[2], tipMatch[3]);
+          if (!_v.valid) {
+            log('WARN', 'AUTO-MMA', `Tip rejeitada (${fight.team1} vs ${fight.team2}): ${_v.reason}`);
+            tipMatch = null;
+          }
+        }
 
         if (!tipMatch) {
           log('INFO', 'AUTO-MMA', `Sem tip: ${fight.team1} vs ${fight.team2}`);
@@ -5019,7 +5062,15 @@ Máximo 200 palavras. Raciocínio breve antes da decisão.`;
           return clean ? clean.slice(0, 160) : null;
         };
         const tipReasonTennis = extractReasonTennis(text);
-        const tipMatch2 = text.match(/TIP_ML:([^@]+)@([\d.]+)\|EV:([+-]?[\d.]+)%\|STAKE:([\d.]+)u?\|CONF:(ALTA|MÉDIA|BAIXA)/i);
+        let tipMatch2 = text.match(/TIP_ML:([^@]+)@([\d.]+)\|EV:([+-]?[\d.]+)%(?:\|P:[^|]+)?\|STAKE:([\d.]+)u?\|CONF:(ALTA|MÉDIA|BAIXA)/i);
+
+        if (tipMatch2) {
+          const _v = _validateTipEvP(text, tipMatch2[2], tipMatch2[3]);
+          if (!_v.valid) {
+            log('WARN', 'AUTO-TENNIS', `Tip rejeitada (${match.team1} vs ${match.team2}): ${_v.reason}`);
+            tipMatch2 = null;
+          }
+        }
 
         if (!tipMatch2) {
           log('INFO', 'AUTO-TENNIS', `Sem tip: ${match.team1} vs ${match.team2}`);
