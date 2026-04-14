@@ -2508,6 +2508,46 @@ async function getTheOddsDotaMatches() {
   return matches;
 }
 
+// ── Pinnacle — Dota 2 (esports) ──
+// sportId=12 (E-Sports) filtrado por league.name contendo "Dota 2"
+// Descarta matchups de kills e handicap (só queremos match winner série)
+let _dotaPinnacleCache = { data: [], ts: 0 };
+const DOTA_PINNACLE_TTL = 3 * 60 * 1000; // 3min (mesmo padrão snooker)
+
+async function getPinnacleDotaMatches() {
+  if (process.env.PINNACLE_DOTA !== 'true') return [];
+  if (_dotaPinnacleCache.data.length && (Date.now() - _dotaPinnacleCache.ts) < DOTA_PINNACLE_TTL) {
+    return _dotaPinnacleCache.data;
+  }
+  try {
+    const rows = await pinnacle.fetchSportMatchOdds(12, (m) => {
+      const name = String(m?.league?.name || '').toLowerCase();
+      if (!name.includes('dota 2')) return false;
+      const p1 = String(m?.participants?.[0]?.name || '');
+      const p2 = String(m?.participants?.[1]?.name || '');
+      // Descarta: (Kills) mercado de total kills + handicap de map ("X 0, Y 2 vs X 1, Y 2")
+      if (/\(kills\)/i.test(p1) || /\(kills\)/i.test(p2)) return false;
+      if (/\d+,\s*\w+\s+\d+/.test(p1) || /\d+,\s*\w+\s+\d+/.test(p2)) return false;
+      return true;
+    });
+    const matches = rows.map(r => ({
+      id: `pin_${r.id}`,
+      team1: r.team1,
+      team2: r.team2,
+      league: r.league,
+      status: r.status === 'live' ? 'live' : 'upcoming',
+      time: r.startTime,
+      odds: { t1: String(r.oddsT1), t2: String(r.oddsT2), bookmaker: 'Pinnacle' }
+    }));
+    _dotaPinnacleCache = { data: matches, ts: Date.now() };
+    log('INFO', 'ODDS', `Pinnacle Dota 2: ${matches.length} partidas cacheadas`);
+    return matches;
+  } catch (e) {
+    log('ERROR', 'ODDS', `Pinnacle Dota 2: ${e.message}`);
+    return [];
+  }
+}
+
 // ── Odds-API.io — Dota 2 (esports) ──
 let _dotaOddsApiIoCache = { data: [], ts: 0 };
 
@@ -3277,14 +3317,23 @@ const server = http.createServer(async (req, res) => {
           return;
         }
       }
-      // Fallback: The Odds API cache (já buscado pelo /dota-matches)
+      const normTeam = s => String(s||'').toLowerCase().replace(/[^a-z0-9]/g,'');
+      const n1 = normTeam(t1), n2 = normTeam(t2);
+      const matchesTeams = (mt1, mt2) => {
+        const mn1 = normTeam(mt1), mn2 = normTeam(mt2);
+        return (mn1.includes(n1) || n1.includes(mn1)) && (mn2.includes(n2) || n2.includes(mn2));
+      };
+
+      // Fallback 1: Pinnacle (se ativado)
+      if (process.env.PINNACLE_DOTA === 'true' && !liveOnly) {
+        const pinMatches = await getPinnacleDotaMatches().catch(() => []);
+        const pinHit = pinMatches.find(m => matchesTeams(m.team1, m.team2));
+        if (pinHit?.odds) { sendJson(res, pinHit.odds); return; }
+      }
+
+      // Fallback 2: The Odds API cache (já buscado pelo /dota-matches)
       if (THE_ODDS_API_KEY && !liveOnly) {
-        const normTeam = s => String(s||'').toLowerCase().replace(/[^a-z0-9]/g,'');
-        const n1 = normTeam(t1), n2 = normTeam(t2);
-        const cached = _dotaOddsCache.data.find(m => {
-          const mn1 = normTeam(m.team1), mn2 = normTeam(m.team2);
-          return (mn1.includes(n1) || n1.includes(mn1)) && (mn2.includes(n2) || n2.includes(mn2));
-        });
+        const cached = _dotaOddsCache.data.find(m => matchesTeams(m.team1, m.team2));
         if (cached?.odds) { sendJson(res, cached.odds); return; }
       }
       sendJson(res, { error: 'odds Dota 2 não encontradas' });
@@ -3464,10 +3513,16 @@ const server = http.createServer(async (req, res) => {
 
   if (p === '/dota-matches') {
     try {
-      // ── Fonte primária: Odds (The Odds API ou Odds-API.io) ──
-      const oddsMatches = ODDS_API_IO_KEY
-        ? await getOddsApiIoDotaMatches().catch(() => [])
-        : (THE_ODDS_API_KEY ? await getTheOddsDotaMatches().catch(() => []) : []);
+      // ── Fonte primária: Pinnacle (se ativado) → Odds-API.io → The Odds API ──
+      let oddsMatches = [];
+      if (process.env.PINNACLE_DOTA === 'true') {
+        oddsMatches = await getPinnacleDotaMatches().catch(() => []);
+      }
+      if (!oddsMatches.length) {
+        oddsMatches = ODDS_API_IO_KEY
+          ? await getOddsApiIoDotaMatches().catch(() => [])
+          : (THE_ODDS_API_KEY ? await getTheOddsDotaMatches().catch(() => []) : []);
+      }
 
       // ── Fonte secundária: PandaScore (partidas live + formato Bo3/Bo5) ──
       const psMatches = await getPandaScoreDotaMatches().catch(() => []);

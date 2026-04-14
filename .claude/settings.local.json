@@ -75,7 +75,9 @@
       "Bash(python -c \"import json,sys; d=json.load\\(sys.stdin\\); evts=d.get\\('events',[]\\)[:5]; [print\\(e['id'], e['tournament']['name'], '|', e['homeTeam']['name'], 'vs', e['awayTeam']['name'], '|', e['status']['type']\\) for e in evts]\")",
       "Bash(python -c \"import json,sys; d=json.load\\(sys.stdin\\); [print\\(s['id'], s.get\\('name'\\)\\) for s in d[:40]]\")",
       "Bash(python -c \"import json,sys; d=json.load\\(sys.stdin\\); evs=d.get\\('events',[]\\); print\\(f'total={len\\(evs\\)}'\\); [print\\(e['id'], '|', e.get\\('tournament',{}\\).get\\('uniqueTournament',{}\\).get\\('slug','NO_SLUG'\\), '|', e.get\\('tournament',{}\\).get\\('uniqueTournament',{}\\).get\\('name','NO_NAME'\\), '|', e['homeTeam']['name'], 'vs', e['awayTeam']['name'], '|', e.get\\('status',{}\\).get\\('type','?'\\)\\) for e in evs[:15]]\")",
-      "Bash(python -c \"import json,sys; d=json.load\\(sys.stdin\\); [print\\(s['id'], s.get\\('name', '?'\\), '| hasOfferings=', s.get\\('hasOfferings', '?'\\), '| matchupCount=', s.get\\('matchupCount', 0\\)\\) for s in d]\")"
+      "Bash(python -c \"import json,sys; d=json.load\\(sys.stdin\\); [print\\(s['id'], s.get\\('name', '?'\\), '| hasOfferings=', s.get\\('hasOfferings', '?'\\), '| matchupCount=', s.get\\('matchupCount', 0\\)\\) for s in d]\")",
+      "Bash(python -c \"import json,sys; d=json.load\\(sys.stdin\\); dota=[l for l in d if 'dota' in l.get\\('name',''\\).lower\\(\\)]; print\\('Dota leagues hoje:', len\\(dota\\)\\); [print\\(f\\\\\"  {l.get\\('matchupCount','?'\\):>3} | {l.get\\('name','?'\\)} [{l.get\\('group','?'\\)}]\\\\\"\\) for l in sorted\\(dota, key=lambda x: -x.get\\('matchupCount',0\\)\\)]\")",
+      "Bash(python -c ':*)"
     ]
   }
 }
