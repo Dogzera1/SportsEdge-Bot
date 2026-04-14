@@ -4192,8 +4192,12 @@ Máximo 200 palavras.`;
 
       let iaResp = '';
       try {
-        const iaRaw = await serverPost('/claude', { prompt, max_tokens: 400 }).catch(() => null);
-        iaResp = iaRaw?.result || iaRaw?.text || '';
+        const iaRaw = await serverPost('/claude', {
+          messages: [{ role: 'user', content: prompt }],
+          max_tokens: 400
+        }).catch(() => null);
+        // /claude retorna formato Claude-compatível: { content: [{ type:'text', text }] }
+        iaResp = iaRaw?.content?.[0]?.text || iaRaw?.result || iaRaw?.text || '';
       } catch(e) {
         log('WARN', 'AUTO-DOTA', `IA erro: ${e.message}`);
         continue;
