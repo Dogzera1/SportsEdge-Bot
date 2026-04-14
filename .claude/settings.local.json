@@ -83,7 +83,8 @@
       "Bash(python3 tmp_check_balance.py)",
       "Bash(rm tmp_check_balance.py)",
       "Bash(gh api:*)",
-      "WebFetch(domain:andydanger.github.io)"
+      "WebFetch(domain:andydanger.github.io)",
+      "WebFetch(domain:hub.maisesports.com.br)"
     ]
   }
 }
