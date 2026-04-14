@@ -3380,11 +3380,12 @@ const server = http.createServer(async (req, res) => {
     const backoffSec = esportsBackoffUntil > Date.now()
       ? Math.round((esportsBackoffUntil - Date.now()) / 1000)
       : 0;
-    const BATCH_SIZE_DBG = parseInt(process.env.ODDSPAPI_BATCH_SIZE || '3');
-    const tidsForDbg = cachedEsportsTids || LOL_ACTIVE_TIDS;
-    const totalBatches = Math.ceil(tidsForDbg.length / BATCH_SIZE_DBG);
-    const nextBatchIdx = esportsBatchCursor % totalBatches;
+    const BATCH_SIZE_DBG = Math.max(1, parseInt(process.env.ODDSPAPI_BATCH_SIZE || '3') || 3);
+    const tidsForDbg = Array.isArray(cachedEsportsTids) ? cachedEsportsTids : LOL_ACTIVE_TIDS;
+    const totalBatches = tidsForDbg.length > 0 ? Math.ceil(tidsForDbg.length / BATCH_SIZE_DBG) : 0;
+    const nextBatchIdx = totalBatches > 0 ? esportsBatchCursor % totalBatches : 0;
     const ttlHours = (parseInt(process.env.ESPORTS_ODDS_TTL_H || '') || 3);
+    const batchesLeft = totalBatches > 0 ? totalBatches - (esportsBatchCursor % totalBatches) : 0;
     sendJson(res, {
       count: cacheEntries.length,
       lastSync: lastEsportsOddsUpdate ? new Date(lastEsportsOddsUpdate).toISOString() : 'nunca',
@@ -3394,10 +3395,10 @@ const server = http.createServer(async (req, res) => {
       ttlHours,
       roundRobin: {
         cursor: esportsBatchCursor,
-        nextBatch: nextBatchIdx + 1,
-        totalBatches,
+        nextBatch: totalBatches > 0 ? nextBatchIdx + 1 : null,
+        totalBatches: totalBatches || null,
         nextTids: tidsForDbg.slice(nextBatchIdx * BATCH_SIZE_DBG, (nextBatchIdx + 1) * BATCH_SIZE_DBG),
-        cycleCompletesIn: `${((totalBatches - (esportsBatchCursor % totalBatches)) * ttlHours)}h`,
+        cycleCompletesIn: totalBatches > 0 ? `${batchesLeft * ttlHours}h` : 'sem dados',
       },
       lastApiResponse: lastApiResponse.slice(0, 300),
       slugs: cacheEntries.map(([k, v]) => ({
