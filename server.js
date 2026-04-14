@@ -14,6 +14,7 @@ const { tennisSinglePlayerNameMatch, tennisPairMatchesPlayers } = require('./lib
 const { nameMatches } = require('./lib/name-match');
 const sofascoreDarts = require('./lib/sofascore-darts');
 const pinnacleSnooker = require('./lib/pinnacle-snooker');
+const pinnacle = require('./lib/pinnacle');
 // lib/betfair.js mantido no repo mas não usado aqui (Betfair bloqueia IPs brasileiros).
 const { esportsPreFilter } = require('./lib/ml');
 const tennisML = require('./lib/tennis-ml');
@@ -1388,6 +1389,52 @@ async function fetchEsportsOddsOneBatch(batch, batchIndex0, totalBatches) {
   const cachedCount = ingestEsportsFixtures(allFixtures);
   log('INFO', 'ODDS', `Sync concluído: ${cachedCount}/${allFixtures.length} fixtures com odds`);
   return { ok: true, status: 200 };
+}
+
+// ── Fetch de odds LoL via Pinnacle guest API (substitui OddsPapi travada) ──
+// Pinnacle sportId=12 (E-Sports), filtra por "League of Legends" no league.name.
+// Ignora mercados "(Kills)" (total kills) — só queremos match winner.
+let lastPinnacleLoLUpdate = 0;
+
+async function fetchLoLOddsFromPinnacle() {
+  if (process.env.PINNACLE_LOL !== 'true') return;
+  try {
+    const rows = await pinnacle.fetchSportMatchOdds(12, (m) => {
+      const name = String(m?.league?.name || '').toLowerCase();
+      if (!name.includes('league of legends')) return false;
+      // Ignora matchups de "(Kills)" — só match winner da série
+      const p1 = String(m?.participants?.[0]?.name || '');
+      const p2 = String(m?.participants?.[1]?.name || '');
+      if (/\(kills\)/i.test(p1) || /\(kills\)/i.test(p2)) return false;
+      return true;
+    });
+
+    let cached = 0;
+    for (const r of rows) {
+      if (!r.team1 || !r.team2 || !r.oddsT1 || !r.oddsT2) continue;
+      const slug = norm(r.team1 + r.team2);
+      const key = `esports_pin_${r.id}`;
+      oddsCache[key] = {
+        t1: r.oddsT1.toFixed(2),
+        t2: r.oddsT2.toFixed(2),
+        bookmaker: 'Pinnacle',
+        t1Name: r.team1,
+        t2Name: r.team2,
+        combinedSlug: slug,
+        fixtureId: `pin_${r.id}`,
+        tournamentId: r.leagueId || null,
+        league: r.league,
+        startTime: r.startTime,
+        source: 'pinnacle',
+      };
+      cached++;
+    }
+    lastPinnacleLoLUpdate = Date.now();
+    lastEsportsOddsUpdate = Date.now(); // também atualiza o timestamp geral para /health
+    log('INFO', 'ODDS', `Pinnacle LoL: ${cached} partidas cacheadas (${rows.length} matchups LoL ativos)`);
+  } catch (e) {
+    log('ERROR', 'ODDS', `Pinnacle LoL: ${e.message}`);
+  }
 }
 
 async function fetchEsportsOdds() {
@@ -6594,11 +6641,22 @@ server.listen(PORT, '0.0.0.0', () => {
     const bootGap = Math.max(0, parseInt(process.env.ODDSPAPI_BOOTSTRAP_GAP_AFTER_FIRST_MS || '6000', 10) || 6000);
     if (bootGap) await new Promise(r => setTimeout(r, bootGap));
     await bootstrapEsportsOddsExtraBatches();
+    // Após OddsPapi (que pode falhar/backoff), puxa Pinnacle LoL como fonte independente
+    await fetchLoLOddsFromPinnacle();
   })().catch(e => log('ERROR', 'ODDS', e.message));
   const refreshMin = Math.max(15, parseInt(process.env.ODDSPAPI_REFRESH_MIN || '60', 10) || 60);
   setInterval(() => {
     fetchEsportsOdds();
   }, refreshMin * 60 * 1000); // Default 60 min (OddsPapi free tier: 250 req total)
+
+  // Pinnacle LoL refresh — independente do OddsPapi (sem quota, só rate limit soft)
+  if (process.env.PINNACLE_LOL === 'true') {
+    const pinRefreshMin = Math.max(5, parseInt(process.env.PINNACLE_LOL_REFRESH_MIN || '10', 10) || 10);
+    setInterval(() => {
+      fetchLoLOddsFromPinnacle();
+    }, pinRefreshMin * 60 * 1000);
+    log('INFO', 'ODDS', `Pinnacle LoL refresh a cada ${pinRefreshMin}min`);
+  }
 
   // Live odds (polling por fixtureId + marketId mapa).
   // Ativa só com ODDSPAPI_LIVE_POLL=1 para não estourar quota.

@@ -5425,6 +5425,7 @@ Máximo 200 palavras.`;
     try {
       const { dartsPreFilter } = require('./lib/darts-ml');
       const sofaDarts = require('./lib/sofascore-darts');
+      const now = Date.now();
       log('INFO', 'AUTO-DARTS', `Iniciando verificação de darts${dartsConfig.shadowMode ? ' [SHADOW]' : ''}...`);
       const matches = await serverGet('/darts-matches').catch(() => []);
       if (!Array.isArray(matches) || !matches.length) {
@@ -5531,6 +5532,7 @@ Máximo 200 palavras.`;
   if (snookerConfig?.enabled) {
     try {
       const { snookerPreFilter } = require('./lib/snooker-ml');
+      const now = Date.now();
       log('INFO', 'AUTO-SNOOKER', `Iniciando verificação de snooker${snookerConfig.shadowMode ? ' [SHADOW]' : ''}...`);
       const matches = await serverGet('/snooker-matches').catch(() => []);
       if (!Array.isArray(matches) || !matches.length) {

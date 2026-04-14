@@ -175,6 +175,12 @@ DARTS_TOURNAMENT_WHITELIST=pdc,premier-league-darts,world-matchplay,world-grand-
 # PINNACLE_API_KEY=...                   # opcional: override da X-API-Key pública
 #                                        # (a chave atual está hardcoded em lib/pinnacle-snooker.js)
 
+# ── LoL Pre-match — Pinnacle (substitui OddsPapi travada) ──
+# Pinnacle cobre LCK, LCS, LFL, CBLOL, LPL, EMEA Masters, NACL, Rift Legends, etc.
+# Sem quota mensal — só rate limit soft (cache 3min interno).
+PINNACLE_LOL=true                       # ativa fetcher Pinnacle para LoL pre-match
+PINNACLE_LOL_REFRESH_MIN=10             # intervalo entre refreshes (default 10min, mínimo 5)
+
 # ── Futebol — configuração ──
 FOOTBALL_LEAGUES=soccer_brazil_serie_b,soccer_brazil_serie_c  # ligas a monitorar (The Odds API keys)
 FOOTBALL_EV_THRESHOLD=5.0              # EV mínimo % para emitir tip (padrão: 5.0)
@@ -421,6 +427,20 @@ Odds de LoL e Dota 2 ao vivo (Match Winner, por mapa ou série) vêm do **SX.Bet
 
 - LoL live: se o Riot API fornece `currentMap` (state `inProgress`), busca odds **do mapa atual**; caso contrário (partida PandaScore ou entre mapas), faz **fallback para odds de série**.
 - Dota 2 live: odds sempre de série.
+
+### LoL pré-match — Pinnacle Guest API
+
+Pinnacle (sportId=12 E-Sports) é a fonte primária recomendada para odds pré-match de LoL desde que OddsPapi free tier (250 req) provou ser inviável. Ativar com `PINNACLE_LOL=true`.
+
+**Cobertura confirmada (Abr/2026):** LCK, LCS, LFL, CBLOL, LPL, EMEA Masters, NACL, TCL, LCP, Prime League, Rift Legends, ROL, LES — ~33 match-winners ativos por dia.
+
+**Lacunas:** ligas tier-3/4 fora do circuito principal (Hellenic Legends, Road of Legends pequenas, etc.) podem não estar.
+
+**Implementação** (`lib/pinnacle.js` + `fetchLoLOddsFromPinnacle` em `server.js`):
+- Filtro: `league.name` contém "League of Legends" + descarta participantes com `(Kills)` no nome (mercado kills, não match winner)
+- Cache key: `esports_pin_<matchupId>` no mesmo `oddsCache` que OddsPapi → `findOdds` encontra automaticamente
+- Refresh: `PINNACLE_LOL_REFRESH_MIN` (default 10 min)
+- American odds → decimal via `americanToDecimal()`
 
 ### Esports pré-jogo — OddsPapi Round-Robin
 
