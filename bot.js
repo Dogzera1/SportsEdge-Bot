@@ -2003,7 +2003,7 @@ async function autoAnalyzeMatch(token, match) {
 
     const tipResult = text.match(/TIP_ML:\s*([^@]+?)\s*@\s*([^|\]]+?)\s*\|EV:\s*([^|]+?)\s*\|STAKE:\s*([^|\]]+?)(?:\s*\|CONF:\s*(\w+))?(?:\]|$)/);
     // Log quando a IA gerou resposta mas o padrão TIP_ML não foi encontrado (ajuda a detectar mudança de formato)
-    if (!tipResult && text && text.length > 20 && !text.toLowerCase().includes('sem edge') && !text.toLowerCase().includes('sem tip')) {
+    if (!tipResult && text && text.length > 20 && !text.toLowerCase().includes('sem edge') && !text.toLowerCase().includes('sem tip') && !/\bsem_?tip\b/i.test(text)) {
       const snippet = text.slice(0, 200).replace(/\n/g, ' ');
       log('DEBUG', 'IA-PARSE', `Sem TIP_ML na resposta para ${match.team1} vs ${match.team2}: "${snippet}"`);
     }
@@ -2363,14 +2363,13 @@ function buildEsportsPrompt(match, game, gamesContext, o, enrichSection, mlResul
     deJuiced = `Sem odds disponíveis. Tip só se vantagem clara (>${noOddsConviction}%) com pelo menos 2 sinais independentes confirmando.`;
   }
   const tipInstruction = hasRealOdds
-    ? `[DECISÃO OBRIGATÓRIA — avalie em ordem:
-Formato OBRIGATÓRIO inclui P (probabilidade que VOCÊ atribui ao pick, 0-100%):
-1. Se EV(qualquer lado) ≥ +${evThreshold}% E ≥2 sinais checklist → TIP_ML:[time]@[odd]|EV:[%]|P:[%]|STAKE:[u]|CONF:ALTA
-2. Se EV(qualquer lado) ≥ +${evThresholdMedia}% E ≥1 sinal checklist → TIP_ML:[time]@[odd]|EV:[%]|P:[%]|STAKE:[u]|CONF:MÉDIA
-3. Se EV(qualquer lado) ≥ +${evThresholdBaixa}% (sem sinal obrigatório) → TIP_ML:[time]@[odd]|EV:[%]|P:[%]|STAKE:[u]|CONF:BAIXA
-P deve ser consistente: EV = (P/100 × odd − 1) × 100.
-4. Se EV negativo nos dois lados → não gere TIP_ML]`
-    : `[NÃO gere tip sem odds reais disponíveis]`;
+    ? `REGRAS DE CONF (aplicar na LINHA 1):
+• ALTA: EV ≥ +${evThreshold}% E ≥2 sinais checklist
+• MÉDIA: EV ≥ +${evThresholdMedia}% E ≥1 sinal checklist
+• BAIXA: EV ≥ +${evThresholdBaixa}% (sem sinal obrigatório)
+• Se EV negativo nos dois lados → escreva literalmente SEM_TIP na linha 1
+P = sua probabilidade (0-100). Consistência: EV = (P/100 × odd − 1) × 100`
+    : `Sem odds reais disponíveis — escreva SEM_TIP na linha 1.`;
 
   const isTargetSeries = match.format && typeof match.format === 'string' && match.format.toLowerCase() !== 'bo1';
   const seriesWarning = (match.status === 'live' && isTargetSeries)
@@ -2381,7 +2380,7 @@ P deve ser consistente: EV = (P/100 × odd − 1) × 100.
     ? (o.mapMarket ? `Odds ML (Vencedor do MAPA ${o.mapRequested})` : `Odds ML (Vencedor do MAPA ${o.mapRequested} — estimada/sem mercado)`)
     : `Odds ML (Match Winner da SÉRIE)`;
 
-  const text = `Você é um analista de apostas LoL especializado. Siga o processo de decisão abaixo com rigor — omita TIP_ML SOMENTE se todos os EVs forem negativos ou se você não tiver base para estimar probabilidades.
+  const text = `Você é um analista de apostas LoL especializado. FORMATO CRÍTICO: sua resposta DEVE começar na linha 1 com "TIP_ML:..." (ou "SEM_TIP"). Nenhum texto antes. A análise vem DEPOIS.
 
 ${LOL_PROMPT_RESEARCH_HINTS}
 PARTIDA: ${t1} vs ${t2} | ${match.league || 'Esports'} | ${match.format || 'Bo1/Bo3'} | ${match.status}
@@ -2419,9 +2418,13 @@ ANÁLISE (responda cada ponto):
    [ ] Ritmo early (jungle/rio) alinhado com quem está na frente, se houver dados ao vivo
    [ ] Odds com movimento favorável (sharp money)
 ${hasRealOdds ? '' : '   Virada possível se: gold diff <3k, scaling comp no perdedor, soul point ou baron pendente.\n'}
-RESPOSTA (máximo 200 palavras):
-P(${t1})=__% | P(${t2})=__% | ${hasRealOdds ? `EV(${t1})=[X%] | EV(${t2})=[X%]` : `Conf:[ALTA/MÉDIA/BAIXA]`} | Sinais checklist:[N/8] | Conf pré-modelo:[${sigCount}/6] | Confiança:[ALTA/MÉDIA/BAIXA]
-${tipInstruction}`;
+${tipInstruction}
+
+RESPOSTA OBRIGATÓRIA — siga exatamente esta ordem:
+LINHA 1 (primeira linha, SEM texto antes): TIP_ML:[time]@[odd]|EV:[X%]|P:[X%]|STAKE:[1-3]u|CONF:[ALTA/MÉDIA/BAIXA]
+        (ou apenas "SEM_TIP" se EV negativo nos dois lados)
+LINHA 2+ (máx 150 palavras): P(${t1})=__% | P(${t2})=__% | ${hasRealOdds ? `EV(${t1})=[X%] | EV(${t2})=[X%]` : `Conf:[ALTA/MÉDIA/BAIXA]`} | Sinais:[N/8] | ConfPré:[${sigCount}/6]
++ justificativa curta (draft, forma, H2H, movimento de linha).`;
 
   return { text, evThreshold, sigCount };
 }
