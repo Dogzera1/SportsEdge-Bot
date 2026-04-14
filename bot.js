@@ -4790,7 +4790,22 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
         if (!riskAdjMma.ok) { log('INFO', 'RISK', `mma: bloqueada (${riskAdjMma.reason})`); await new Promise(r => setTimeout(r, 3000)); continue; }
         const tipStakeAdjMma = String(riskAdjMma.units.toFixed(1).replace(/\.0$/, ''));
 
-        const tipMsg = `${isBoxing ? '🥊 💰 *TIP BOXE*' : '🥊 💰 *TIP MMA*'}\n` +
+        const orgLabel = (() => {
+          if (isBoxing) return '🥊 💰 *TIP BOXE*';
+          const lg = String(fight.league || '').toLowerCase();
+          if (/\bufc\b/.test(lg)) return '🥋 💰 *TIP UFC*';
+          if (/\bpfl\b/.test(lg)) return '🥋 💰 *TIP PFL*';
+          if (/oktagon/.test(lg)) return '🥋 💰 *TIP OKTAGON*';
+          if (/bellator/.test(lg)) return '🥋 💰 *TIP BELLATOR*';
+          if (/\bone\b|one championship|one fc/.test(lg)) return '🥋 💰 *TIP ONE*';
+          if (/\bksw\b/.test(lg)) return '🥋 💰 *TIP KSW*';
+          if (/\brizin\b/.test(lg)) return '🥋 💰 *TIP RIZIN*';
+          if (/\bcage warriors|\bcw\b/.test(lg)) return '🥋 💰 *TIP CAGE WARRIORS*';
+          if (/\blfa\b|legacy fighting/.test(lg)) return '🥋 💰 *TIP LFA*';
+          if (/\bbkfc\b|bare knuckle/.test(lg)) return '🥋 💰 *TIP BKFC*';
+          return '🥋 💰 *TIP MMA*';
+        })();
+        const tipMsg = `${orgLabel}\n` +
           `*${fight.team1}* vs *${fight.team2}*\n📋 ${fight.league}\n` +
           `🕐 ${fightTime} (BRT)${recLine}${catLine}\n\n` +
           whyLineMma +
