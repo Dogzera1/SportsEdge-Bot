@@ -115,6 +115,7 @@ TELEGRAM_TOKEN_ESPORTS=seu_token_bot
 TELEGRAM_TOKEN_MMA=seu_token_mma        # opcional
 TELEGRAM_TOKEN_TENNIS=seu_token_tennis  # opcional
 TELEGRAM_TOKEN_FOOTBALL=seu_token_fb    # opcional
+TELEGRAM_TOKEN_DARTS=seu_token_darts    # opcional (shadow mode por default)
 
 # ── APIs de IA (pelo menos uma obrigatória) ──
 DEEPSEEK_API_KEY=sk-...                 # DeepSeek (recomendado — mais barato)
@@ -152,6 +153,18 @@ ESPORTS_ENABLED=true
 MMA_ENABLED=true                        # false por padrão se token ausente
 TENNIS_ENABLED=true
 FOOTBALL_ENABLED=true
+DARTS_ENABLED=true                      # requer TELEGRAM_TOKEN_DARTS + SOFASCORE_PROXY_BASE
+
+# ── Shadow mode (modo auditoria — tip gerada mas NÃO envia DM) ──
+# Default: darts inicia em shadow. Todos os outros em produção.
+DARTS_SHADOW=true                       # default; desligue após 30 tips com CLV+
+# ESPORTS_SHADOW=false                  # (outros esportes também podem rodar em shadow)
+
+# ── Darts — Sofascore ──
+# Fonte única (odds + 3-dart avg + 180s + checkouts) via Sofascore
+SOFASCORE_PROXY_BASE=https://xxx.ngrok-free.app/api/v1/sofascore  # Public-Sofascore-API no projeto
+# SOFASCORE_DIRECT=true                 # alternativa: chamar api.sofascore.com direto
+DARTS_TOURNAMENT_WHITELIST=pdc,premier-league-darts,world-matchplay,world-grand-prix,uk-open,players-championship,european-tour,grand-slam,world-series-finals
 
 # ── Futebol — configuração ──
 FOOTBALL_LEAGUES=soccer_brazil_serie_b,soccer_brazil_serie_c  # ligas a monitorar (The Odds API keys)
@@ -326,6 +339,7 @@ Cada esporte exibe fair odds calculadas pelo **próprio modelo de análise do si
 | MMA | ESPN scoreboard (carta atual UFC) + ESPN athlete search + Sofascore fallback | Win rate do record histórico |
 | Tênis | Sackmann (Elo superfície) + ESPN rankings ATP/WTA + Sofascore fallback | Modelo Elo-log por superfície |
 | Futebol | API-Football (forma, H2H, standings) + Sofascore home/away split | `calcFootballScore` com Poisson + home boost |
+| Darts | Sofascore (3-dart avg + win rate últimos 10 jogos) | `dartsPreFilter` — 3-dart avg diff é o sinal primário |
 
 ---
 
@@ -683,6 +697,46 @@ lol betting/
 ### Settlement
 - **Tips não settled**: Verifique se a API de resultados está funcionando (ESPN para MMA/Tênis, API-Football para futebol).
 - **Winner não detectado**: Nomes podem não casar. O sistema usa fuzzy matching.
+
+---
+
+## Darts (shadow mode)
+
+Novo esporte adicionado em modo **shadow** (tip é gerada e registrada no DB, mas **não envia DM**). Objetivo: auditar CLV e win rate dos primeiros 30 tips antes de promover para produção.
+
+### Arquitetura
+
+- **Fonte única**: Sofascore (via proxy `Public-Sofascore-API` no projeto).
+- **`lib/sofascore-darts.js`**: listagem de eventos PDC, odds H2H, stats do match (`Average3Darts`, `Thrown180`, `CheckoutsOver100`, etc.) e rolling average dos últimos N jogos por jogador.
+- **`lib/darts-ml.js`**: pré-filtro com **3-dart avg differential como sinal primário** (equivalente ao xG em futebol) + win rate recente como sinal secundário.
+- **Sem IA**: modelo puramente estatístico (3DA é forte o suficiente; economia de tokens).
+- **Kelly conservador**: 1/8 Kelly + gates de edge ≥4pp (com 2 fatores) ou 5pp (com 1 fator).
+- **Whitelist PDC** via `DARTS_TOURNAMENT_WHITELIST` (default cobre PDC World, Premier League, Matchplay, Grand Prix, UK Open, Players Championship, European Tour, Grand Slam, World Series Finals).
+
+### Shadow Mode
+
+| Flag env | Efeito |
+|---|---|
+| `DARTS_SHADOW=true` (default) | Tips registradas com `is_shadow=1` no DB; sem DM |
+| `DARTS_SHADOW=false` | Tips enviam DM normalmente (após graduação) |
+| `<SPORT>_SHADOW=true` | Qualquer outro esporte também pode rodar em shadow |
+
+### Comando admin `/shadow [sport]`
+
+Relatório de auditoria via Telegram:
+```
+🕶️ SHADOW TIPS — DARTS
+Total: 17
+✅ W: 9 | ❌ L: 6 | ⚪ Void: 0 | ⏳ Pend: 2
+Win rate: 60.0%
+CLV médio: +2.15% (n=13)
+```
+
+**Critério de graduação sugerido**: ≥30 tips, CLV médio positivo, win rate calibrado com confiança predita. Ao graduar: setar `DARTS_SHADOW=false` e restart.
+
+### Endpoint `/shadow-tips?sport=X&limit=100`
+
+Retorna JSON com summary + últimas N tips para análise externa (Excel, Python notebook).
 
 ---
 

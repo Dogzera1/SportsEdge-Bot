@@ -12,6 +12,7 @@ const footballData  = require('./lib/football-data');
 const apiFootball   = require('./lib/api-football');
 const { tennisSinglePlayerNameMatch, tennisPairMatchesPlayers } = require('./lib/tennis-match');
 const { nameMatches } = require('./lib/name-match');
+const sofascoreDarts = require('./lib/sofascore-darts');
 const { esportsPreFilter } = require('./lib/ml');
 const tennisML = require('./lib/tennis-ml');
 const { fetchGridEnrichForMatch } = require('./lib/grid');
@@ -4013,6 +4014,49 @@ const server = http.createServer(async (req, res) => {
   }
 
   // ── Tips ──
+  // Shadow tips: tips registradas mas que NÃO foram enviadas (modo auditoria)
+  // Retorna resumo CLV / win rate para avaliação manual antes de promover o esporte
+  if (p === '/shadow-tips') {
+    const sport = parsed.query.sport || 'darts';
+    const limit = Math.min(500, Math.max(10, parseInt(parsed.query.limit || '100', 10) || 100));
+    try {
+      const rows = db.prepare(
+        `SELECT id, match_id, event_name, participant1, participant2, tip_participant,
+                odds, open_odds, clv_odds, current_odds, ev, stake, confidence,
+                model_p_pick, result, sent_at, settled_at, is_live
+         FROM tips
+         WHERE sport = ? AND is_shadow = 1
+         ORDER BY sent_at DESC
+         LIMIT ?`
+      ).all(sport, limit);
+
+      let wins = 0, losses = 0, voids = 0, pending = 0;
+      let clvSum = 0, clvN = 0;
+      for (const r of rows) {
+        if (r.result === 'win') wins++;
+        else if (r.result === 'loss') losses++;
+        else if (r.result === 'void') voids++;
+        else pending++;
+        // CLV: odds no momento do tip vs odds de fechamento
+        if (r.clv_odds && r.open_odds && r.clv_odds > 0 && r.open_odds > 0) {
+          clvSum += (r.open_odds / r.clv_odds - 1) * 100;
+          clvN++;
+        }
+      }
+      const settled = wins + losses;
+      const winRate = settled > 0 ? +(wins / settled * 100).toFixed(1) : null;
+      const avgClvPct = clvN > 0 ? +(clvSum / clvN).toFixed(2) : null;
+      sendJson(res, {
+        sport,
+        summary: { total: rows.length, wins, losses, voids, pending, winRate, avgClvPct, clvSamples: clvN },
+        tips: rows
+      });
+    } catch (e) {
+      sendJson(res, { error: e.message }, 500);
+    }
+    return;
+  }
+
   if (p === '/unsettled-tips') {
     const sport = parsed.query.sport || 'esports';
     const days = parsed.query.days || '30';
@@ -4231,6 +4275,7 @@ const server = http.createServer(async (req, res) => {
         const confidenceStr = clampStr(t.confidence || 'MÉDIA', 20) || 'MÉDIA';
         const botTokenStr = clampStr(t.botToken, 180);
         // marketTypeStr já definido acima
+        const isShadow = t.isShadow ? 1 : 0;
         const result = stmts.insertTip.run({
           sport, matchId: String(matchId), eventName,
           p1, p2,
@@ -4241,7 +4286,8 @@ const server = http.createServer(async (req, res) => {
           model_p2: modelP2,
           model_p_pick: modelPPick,
           model_label: modelLabel,
-          tip_reason: tipReason
+          tip_reason: tipReason,
+          isShadow
         });
         // Calcula stake em reais com base na banca atual (1u = 1% da banca atual)
         try {
@@ -6023,6 +6069,42 @@ const server = http.createServer(async (req, res) => {
 
       sendJson(res, results);
     } catch(e) {
+      sendJson(res, []);
+    }
+    return;
+  }
+
+  // ── Darts: lista de eventos via Sofascore (fonte única para odds + stats) ──
+  if (p === '/darts-matches') {
+    try {
+      const events = await sofascoreDarts.listLiveAndUpcoming().catch(() => []);
+      const matches = [];
+      for (const ev of events) {
+        const odds = await sofascoreDarts.getOdds(ev.id).catch(() => null);
+        if (!odds?.t1 || !odds?.t2) continue;
+        const status = ev?.status?.type === 'inprogress' ? 'live' : 'upcoming';
+        matches.push({
+          id: `darts_${ev.id}`,
+          sofaEventId: ev.id,
+          game: 'darts',
+          status,
+          team1: ev?.homeTeam?.name || '',
+          team2: ev?.awayTeam?.name || '',
+          playerId1: ev?.homeTeam?.id,
+          playerId2: ev?.awayTeam?.id,
+          league: ev?.tournament?.uniqueTournament?.name || ev?.tournament?.name || 'Darts',
+          time: ev?.startTimestamp ? new Date(ev.startTimestamp * 1000).toISOString() : null,
+          odds
+        });
+      }
+      matches.sort((a, b) => {
+        if (a.status === 'live' && b.status !== 'live') return -1;
+        if (b.status === 'live' && a.status !== 'live') return 1;
+        return new Date(a.time || 0).getTime() - new Date(b.time || 0).getTime();
+      });
+      sendJson(res, matches);
+    } catch (e) {
+      log('ERROR', 'DARTS', e.message);
       sendJson(res, []);
     }
     return;

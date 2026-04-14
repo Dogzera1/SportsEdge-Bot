@@ -69,6 +69,7 @@ const analyzedMma = new Map();
 const analyzedTennis = new Map();
 const analyzedFootball = new Map();
 const analyzedDota = new Map();
+const analyzedDarts = new Map();
 
 function _sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
@@ -2528,11 +2529,40 @@ async function handleAdmin(token, chatId, command) {
     if (sport === 'mma'     || sport === 'all') { analyzedMma.clear();     cleared.mma = true; }
     if (sport === 'tennis'  || sport === 'all') { analyzedTennis.clear();  cleared.tennis = true; }
     if (sport === 'football'|| sport === 'all') { analyzedFootball.clear(); cleared.football = true; }
+    if (sport === 'darts'   || sport === 'all') { analyzedDarts.clear();   cleared.darts = true; }
     const clearedList = Object.keys(cleared).join(', ') || sport;
     await send(token, chatId,
       `🔄 *Reanálise ativada*\n\nMemória de análises limpa para: *${clearedList}*\n` +
       `As tips em andamento serão reavaliadas no próximo ciclo de análise automática.`
     );
+
+  } else if (cmd === '/shadow') {
+    if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
+    // Argumento opcional: /shadow darts | /shadow snooker → default 'darts'
+    const parts = String(text || '').trim().split(/\s+/);
+    const sportArg = parts[1]?.toLowerCase() || 'darts';
+    try {
+      const data = await serverGet(`/shadow-tips?sport=${encodeURIComponent(sportArg)}&limit=100`);
+      if (data?.error) { await send(token, chatId, `❌ ${data.error}`); return; }
+      const s = data.summary || {};
+      let txt = `🕶️ *SHADOW TIPS — ${sportArg.toUpperCase()}*\n\n`;
+      txt += `Total: *${s.total || 0}*\n`;
+      txt += `✅ W: ${s.wins || 0} | ❌ L: ${s.losses || 0} | ⚪ Void: ${s.voids || 0} | ⏳ Pend: ${s.pending || 0}\n`;
+      if (s.winRate != null) txt += `Win rate: *${s.winRate}%*\n`;
+      if (s.avgClvPct != null) txt += `CLV médio: *${s.avgClvPct > 0 ? '+' : ''}${s.avgClvPct}%* (n=${s.clvSamples})\n`;
+      txt += `\n_Critério de graduação sugerido: ≥30 tips, CLV médio positivo, WR calibrado._\n`;
+      txt += `_Desligar shadow: env ${sportArg.toUpperCase()}_SHADOW=false + restart._`;
+      // Últimas 5 tips pra visão rápida
+      const recent = (data.tips || []).slice(0, 5);
+      if (recent.length) {
+        txt += `\n\n*Últimas 5:*\n`;
+        recent.forEach(r => {
+          const emoji = r.result === 'win' ? '✅' : r.result === 'loss' ? '❌' : r.result === 'void' ? '⚪' : '⏳';
+          txt += `${emoji} ${r.tip_participant} @ ${r.odds} | EV:${r.ev}% | ${String(r.sent_at || '').slice(0, 10)}\n`;
+        });
+      }
+      await send(token, chatId, txt);
+    } catch(e) { await send(token, chatId, `❌ ${e.message}`); }
 
   } else if (cmd === '/reset-tips') {
     if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
@@ -3321,7 +3351,8 @@ async function poll(token, sport) {
           } else if (text.startsWith('/stats') || text.startsWith('/roi') || text.startsWith('/users') ||
                      text.startsWith('/settle') || text.startsWith('/pending') || text.startsWith('/resync') ||
                      text.startsWith('/slugs') || text.startsWith('/lolraw') ||
-                     text.startsWith('/health') || text.startsWith('/debug')) {
+                     text.startsWith('/health') || text.startsWith('/debug') ||
+                     text.startsWith('/shadow')) {
             await handleAdmin(token, chatId, text);
           }
         }
@@ -5313,6 +5344,117 @@ Máximo 200 palavras.`;
     return typeof matches !== 'undefined' ? matches : [];
   }
   const result = await loop();
+
+  // ── Darts (shadow mode por default) ────────────────────────────────────
+  // Modelo puramente estatístico: 3-dart avg diff + recent form.
+  // NÃO chama IA (economia + o sinal estatístico é o principal em darts).
+  // Tip registrada com is_shadow=1 → não envia DM enquanto em shadow.
+  const dartsConfig = SPORTS['darts'];
+  if (dartsConfig?.enabled) {
+    try {
+      const { dartsPreFilter } = require('./lib/darts-ml');
+      const sofaDarts = require('./lib/sofascore-darts');
+      log('INFO', 'AUTO-DARTS', `Iniciando verificação de darts${dartsConfig.shadowMode ? ' [SHADOW]' : ''}...`);
+      const matches = await serverGet('/darts-matches').catch(() => []);
+      if (!Array.isArray(matches) || !matches.length) {
+        log('INFO', 'AUTO-DARTS', '0 partidas darts com odds');
+      } else {
+        log('INFO', 'AUTO-DARTS', `${matches.length} partidas darts com odds`);
+        for (const match of matches) {
+          const key = `darts_${match.id}`;
+          const prev = analyzedDarts.get(key);
+          if (prev?.tipSent) continue;
+          if (prev && (now - prev.ts < 60 * 60 * 1000)) continue; // re-check a cada 1h
+
+          // Enriquecimento: 3-dart avg recente (últimos 10 jogos) de cada jogador
+          const [recentP1, recentP2] = await Promise.all([
+            match.playerId1 ? sofaDarts.getPlayerRecentAvg(match.playerId1, 10).catch(() => null) : null,
+            match.playerId2 ? sofaDarts.getPlayerRecentAvg(match.playerId2, 10).catch(() => null) : null,
+          ]);
+
+          const enrich = {
+            avgP1: recentP1?.avgLast || null,
+            avgP2: recentP2?.avgLast || null,
+            winRateP1: recentP1?.winRate || null,
+            winRateP2: recentP2?.winRate || null,
+          };
+
+          const ml = dartsPreFilter(match, enrich);
+          if (!ml.pass) {
+            analyzedDarts.set(key, { ts: now, tipSent: false });
+            log('INFO', 'AUTO-DARTS', `Sem edge: ${match.team1} vs ${match.team2} | edge=${ml.score}pp factors=${ml.factorCount}`);
+            continue;
+          }
+
+          // Direção, odd e stake Kelly
+          const pickTeam = ml.direction === 't1' ? match.team1 : match.team2;
+          const pickOdd = ml.direction === 't1' ? parseFloat(match.odds.t1) : parseFloat(match.odds.t2);
+          const pickP   = ml.direction === 't1' ? ml.modelP1 : ml.modelP2;
+          const evPct   = ((pickP * pickOdd - 1) * 100);
+          if (evPct < 3) {
+            analyzedDarts.set(key, { ts: now, tipSent: false });
+            log('INFO', 'AUTO-DARTS', `EV baixo (${evPct.toFixed(1)}%): ${match.team1} vs ${match.team2}`);
+            continue;
+          }
+
+          // Kelly fracionado conservador (sem IA → 1/8 Kelly)
+          const stake = calcKellyWithP(pickP, pickOdd, 1/8);
+          if (stake === '0u') { analyzedDarts.set(key, { ts: now, tipSent: false }); continue; }
+          const desiredU = parseFloat(stake) || 0;
+          const riskAdj = await applyGlobalRisk('darts', desiredU);
+          if (!riskAdj.ok) { log('INFO', 'RISK', `darts: bloqueada (${riskAdj.reason})`); continue; }
+          const stakeAdj = String(riskAdj.units.toFixed(1).replace(/\.0$/, ''));
+
+          const tipReason = `3-dart avg: ${match.team1}=${enrich.avgP1 ?? 'n/a'} vs ${match.team2}=${enrich.avgP2 ?? 'n/a'} | WR: ${enrich.winRateP1 ?? 'n/a'}% vs ${enrich.winRateP2 ?? 'n/a'}%`;
+
+          // Registra tip com flag shadow
+          const rec = await serverPost('/record-tip', {
+            matchId: String(match.id), eventName: match.league,
+            p1: match.team1, p2: match.team2, tipParticipant: pickTeam,
+            odds: String(pickOdd), ev: evPct.toFixed(1), stake: stakeAdj,
+            confidence: ml.factorCount >= 2 ? 'MÉDIA' : 'BAIXA',
+            isLive: match.status === 'live' ? 1 : 0,
+            market_type: 'ML',
+            modelP1: ml.modelP1, modelP2: ml.modelP2, modelPPick: pickP,
+            modelLabel: 'darts-ml (3DA + WR)',
+            tipReason,
+            isShadow: dartsConfig.shadowMode ? 1 : 0
+          }, 'darts');
+
+          if (!rec?.tipId && !rec?.skipped) {
+            log('WARN', 'AUTO-DARTS', `record-tip falhou: ${pickTeam} @ ${pickOdd}`);
+            continue;
+          }
+          analyzedDarts.set(key, { ts: now, tipSent: true });
+          if (rec?.skipped) continue;
+
+          // Shadow mode: NÃO envia DM — apenas loga
+          if (dartsConfig.shadowMode) {
+            log('INFO', 'AUTO-DARTS', `[SHADOW] Tip registrada: ${pickTeam} @ ${pickOdd} | EV:${evPct.toFixed(1)}% | ${stakeAdj}u | edge=${ml.score}pp`);
+            continue;
+          }
+
+          const tipMsg = `🎯 💰 *TIP DARTS*\n` +
+            `*${match.team1}* vs *${match.team2}*\n📋 ${match.league}\n\n` +
+            `🎯 Aposta: *${pickTeam}* @ *${pickOdd}*\n` +
+            `📈 EV: *+${evPct.toFixed(1)}%*\n` +
+            `💵 Stake: *${stakeAdj}u* _(1/8 Kelly)_\n` +
+            `🧠 Por quê: _${tipReason}_\n\n` +
+            `⚠️ _Aposte com responsabilidade._`;
+
+          for (const [userId, prefs] of subscribedUsers) {
+            if (!prefs.has('darts')) continue;
+            try { await sendDM(dartsConfig.token, userId, tipMsg); } catch(_) {}
+          }
+          log('INFO', 'AUTO-DARTS', `Tip enviada: ${pickTeam} @ ${pickOdd} | EV:${evPct.toFixed(1)}%`);
+          await new Promise(r => setTimeout(r, 3000));
+        }
+      }
+    } catch(e) {
+      log('ERROR', 'AUTO-DARTS', e.message);
+    }
+  }
+
   return runOnce ? (result || []) : undefined;
 }
 log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');

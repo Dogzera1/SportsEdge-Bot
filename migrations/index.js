@@ -193,6 +193,22 @@ const migrations = [
       db.prepare('INSERT OR IGNORE INTO ml_factor_weights (factor, weight, wins, total) VALUES (?,?,0,0)').run('kd10', 0.10);
     },
   },
+  {
+    // Shadow mode: tip é analisada e registrada no DB mas NÃO é enviada DM.
+    // Usado para auditar CLV antes de promover um esporte novo (darts, snooker) para produção.
+    id: '015_tips_shadow_col',
+    up(db) {
+      addColumnIfMissing(db, 'tips', 'is_shadow', 'is_shadow INTEGER DEFAULT 0');
+    },
+  },
+  {
+    // Bankroll inicial para darts (novo esporte)
+    id: '016_seed_bankroll_darts',
+    up(db) {
+      if (!tableExists(db, 'bankroll')) return;
+      db.prepare('INSERT OR IGNORE INTO bankroll (sport, initial_banca, current_banca) VALUES (?, 100.0, 100.0)').run('darts');
+    },
+  },
 ];
 
 function applyMigrations(db) {

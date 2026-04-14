@@ -67,7 +67,12 @@
       "WebFetch(domain:sportsedge-bot-production.up.railway.app)",
       "Bash(curl -sv \"https://sportsedge-bot-production.up.railway.app/void-tip?id=193&sport=mma\")",
       "Bash(curl:*)",
-      "Bash(grep -iE \"FOOTBALL-DATA|API-FOOTBALL|SOFASCORE|FOOTBALL_DATA|apiFootball|\\\\\\\\[FD\\\\\\\\]|\\\\\\\\[AF\\\\\\\\]|\\\\\\\\[SOFA\" \"C:/Users/vict_/Downloads/logs.1776121947125.log\")"
+      "Bash(grep -iE \"FOOTBALL-DATA|API-FOOTBALL|SOFASCORE|FOOTBALL_DATA|apiFootball|\\\\\\\\[FD\\\\\\\\]|\\\\\\\\[AF\\\\\\\\]|\\\\\\\\[SOFA\" \"C:/Users/vict_/Downloads/logs.1776121947125.log\")",
+      "WebFetch(domain:api.snooker.org)",
+      "Read(//tmp/**)",
+      "Bash(python -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\('IDs:', [e['id'] for e in d.get\\('events',[]\\)[:5]]\\)\")",
+      "Bash(python -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\('events:', len\\(d.get\\('events',[]\\)\\)\\); [print\\(e['id'], e['tournament']['name'], '|', e['homeTeam']['name'], 'vs', e['awayTeam']['name']\\) for e in d.get\\('events',[]\\)[:10]]\")",
+      "Bash(python -c \"import json,sys; d=json.load\\(sys.stdin\\); evts=d.get\\('events',[]\\)[:5]; [print\\(e['id'], e['tournament']['name'], '|', e['homeTeam']['name'], 'vs', e['awayTeam']['name'], '|', e['status']['type']\\) for e in evts]\")"
     ]
   }
 }
