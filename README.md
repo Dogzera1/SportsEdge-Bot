@@ -471,6 +471,21 @@ O bot usa **DeepSeek** (`deepseek-chat`) como provedor padrão. Se `DEEPSEEK_API
    Usuários que bloquearam o bot (403) são removidos e persistidos no DB
 ```
 
+### Unidade de stake (`u`) — base do Kelly
+
+**Definição explícita**: `1u = 1% da banca do esporte específico` (não cross-sport).
+
+- Cada esporte tem sua própria banca na tabela `bankroll` (`esports`, `mma`, `tennis`, `football`), com `initial_banca` e `current_banca` próprias.
+- Kelly (`_applyKelly` em `lib/utils.js`) retorna stake em % da banca → multiplica por 100 para converter em `u`.
+- Os caps `4u / 3u / 1.5u` correspondem a `4% / 3% / 1.5%` da banca do esporte — são o **teto hardcoded do Kelly** (não "u fixo"). Abaixo do cap, o stake escala dinamicamente com edge.
+- Valor em reais do settlement: `stake_reais = stake_units × (current_banca_do_sport / 100)`.
+
+**Caps de exposição (independentes do Kelly individual)** em `lib/risk-manager.js`:
+- `GLOBAL_RISK_PCT=0.10` — soma de tips pendentes **cross-sport** não pode exceder 10% da banca total.
+- `SPORT_RISK_PCT=0.20` — soma de tips pendentes de um esporte não pode exceder 20% da banca desse esporte.
+
+Kelly calcula a stake individual, risk-manager reduz ou rejeita se os caps de exposição já estariam violados.
+
 ### Política de Kelly/Stake (ML vs IA)
 
 O stake é calculado com **Kelly fracionado** (fração por nível de confiança). A probabilidade `P` usada no Kelly segue esta política explícita:
@@ -526,18 +541,26 @@ O sistema analisa **apenas lutas do UFC**. A cada ciclo:
 
 ### Matching de nomes no settlement (`lib/name-match.js`)
 
-Settlement unifica o matching de nomes numa função auditável (`nameMatches`) com 4 estratégias em ordem:
+Settlement unifica o matching de nomes numa função auditável (`nameMatches`) com 5 estratégias em ordem:
 
 | Método | Quando | Score |
 |---|---|---|
 | `exact` | strings normalizadas iguais | 1.0 |
 | `alias` | `LOL_ALIASES` mapeia A↔B (ex: `FNC ↔ Fnatic`) | 0.95 |
-| `substring` | `A.includes(B)` **e** ambos com ≥ 4 caracteres (evita `IG ↔ BIG`, `T1 ↔ T10`) | comprimento relativo |
+| `substring` | `A.includes(B)` + ambos ≥ 4 chars + `score ≥ 0.5` | `shorter/longer` |
+| `substring_weak` | casaria por substring mas score < 0.5 → **NÃO é match** (registrado como WARN para auditoria) | `shorter/longer` |
 | `none` | nenhum dos acima | 0 |
+
+**Threshold de score mínimo (0.5 default)** evita falsos positivos silenciosos:
+- `"Real"` (4) em `"UnrealTournament"` (16) → score 0.25 → `substring_weak` (rejeitado)
+- `"Bayern"` em `"BayernLeverkusen"` → score 0.375 → `substring_weak` (rejeitado — são times diferentes)
+- `"Liquid"` em `"Team Liquid"` → score 0.55 → `substring` (match legítimo)
+
+Configurável via `opts.minSubstrScore` para casos específicos.
 
 **Tênis** usa matcher dedicado (`lib/tennis-match.js`) com suporte a `"Last, First"` e inicial abreviada (`"J. Last"`).
 
-Cada settlement emite log: `[SETTLE] esports matchId=X tip="Fnatic" vs winner="FNC" → win [method=alias score=0.95]` — permite auditar qualquer resolução posterior.
+Cada settlement emite log: `[SETTLE] esports matchId=X tip="Fnatic" vs winner="FNC" → win [method=alias score=0.95]`. Casos `substring_weak` são logados como **WARN** destacando potenciais disputas.
 
 ---
 

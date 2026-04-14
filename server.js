@@ -4409,7 +4409,9 @@ const server = http.createServer(async (req, res) => {
               matchScore = r.score;
             }
             const result = nameMatched ? 'win' : 'loss';
-            log('INFO', 'SETTLE', `${sport} matchId=${matchId} tip="${tip.tip_participant}" vs winner="${winner}" → ${result} [method=${matchMethod} score=${matchScore}]`);
+            // substring_weak = haveria match se o threshold fosse menor — destaca como WARN para auditoria
+            const logLevel = matchMethod === 'substring_weak' ? 'WARN' : 'INFO';
+            log(logLevel, 'SETTLE', `${sport} matchId=${matchId} tip="${tip.tip_participant}" vs winner="${winner}" → ${result} [method=${matchMethod} score=${matchScore}]`);
             stmts.settleTip.run(result, matchId, sport);
             // Atualiza profit_reais e acumula delta da banca
             const stakeR = tip.stake_reais || (() => {
