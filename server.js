@@ -6418,9 +6418,10 @@ server.listen(PORT, '0.0.0.0', () => {
     if (bootGap) await new Promise(r => setTimeout(r, bootGap));
     await bootstrapEsportsOddsExtraBatches();
   })().catch(e => log('ERROR', 'ODDS', e.message));
+  const refreshMin = Math.max(15, parseInt(process.env.ODDSPAPI_REFRESH_MIN || '60', 10) || 60);
   setInterval(() => {
     fetchEsportsOdds();
-  }, 15 * 60 * 1000); // Mantém o cache quente a cada 15 min
+  }, refreshMin * 60 * 1000); // Default 60 min (OddsPapi free tier: 250 req total)
 
   // Live odds (polling por fixtureId + marketId mapa).
   // Ativa só com ODDSPAPI_LIVE_POLL=1 para não estourar quota.

@@ -662,7 +662,12 @@ async function runAutoAnalysis() {
           const tipConf = (result.tipMatch[5] || CONF.MEDIA).trim().toUpperCase();
           // Kelly adaptado por confiança: ALTA → ¼ Kelly (max 4u) | MÉDIA → ⅙ Kelly (max 3u) | BAIXA → 1/10 Kelly (max 1.5u)
           const kellyFraction = tipConf === CONF.ALTA ? 0.25 : tipConf === CONF.BAIXA ? 0.10 : 1/6;
-          // Usa p do modelo ML quando disponível (evita circularidade p←EV←IA)
+          // Política de P para Kelly (evita circularidade p←EV←IA):
+          //   • factorCount>0 (ML tem dados): usa modelP do ML — mais calibrado historicamente.
+          //   • factorCount=0 (sem dados ML): fallback para calcKellyFraction usando EV da IA.
+          //     Gate 3.5 já bloqueia BAIXA e exige EV>=8% para MÉDIA neste caso.
+          //   • Divergência ML×IA: apenas rebaixa CONFIANÇA (Gate 0.5, Gate 0.6, Gate 3) —
+          //     stake nunca é blendado com P da IA (evita inflacionar em hallucinations).
           const isT1bet = norm(tipTeam).includes(norm(match.team1)) || norm(match.team1).includes(norm(tipTeam));
           const modelPForKelly = (result.modelP1 > 0) ? (isT1bet ? result.modelP1 : result.modelP2) : null;
           const tipStake = modelPForKelly
@@ -1958,6 +1963,13 @@ async function autoAnalyzeMatch(token, match) {
       // Gate 0.5: Validação cruzada EV da IA vs modelo (quando modelP disponível)
       // Previne tip quando IA reporta EV muito acima do que o modelo calcula
       // Ex: modelo calcula EV=+2%, IA reporta EV=+12% — divergência de 10pp → suspeito
+      //
+      // IMPORTANTE — política de Kelly/stake:
+      //   • O stake NUNCA usa a P implícita da IA; sempre usa modelP do ML (ou calcKellyFraction
+      //     quando factorCount=0). Isso evita que a IA infle o stake ao exagerar edge.
+      //   • Este gate serve para rebaixar CONFIANÇA quando IA e modelo divergem — não mexe no stake.
+      //   • Assimetria intencional: IA > modelo → penaliza (IA otimista demais); IA < modelo → OK
+      //     (IA sendo cautelosa pode refletir sinal qualitativo que o ML não captura).
       if (filteredTipResult && mlResult.modelP1 > 0 && mlResult.factorCount >= 1) {
         const isT1Tip = filteredTipResult[1] && (norm(filteredTipResult[1]).includes(norm(match.team1)) || norm(match.team1).includes(norm(filteredTipResult[1].trim())));
         const modelP  = isT1Tip ? mlResult.modelP1 : mlResult.modelP2;
@@ -1972,6 +1984,23 @@ async function autoAnalyzeMatch(token, match) {
           } else if (confAtual === CONF.MEDIA && evDivergence > 15) {
             filteredTipResult[5] = CONF.BAIXA;
             log('INFO', 'AUTO', `Gate EV-modelo: ${match.team1} vs ${match.team2} → IA EV diverge ${evDivergence.toFixed(1)}pp → MÉDIA→BAIXA`);
+          }
+        }
+
+        // Gate 0.6: Divergência simétrica de MAGNITUDE de P (direção concordante mas P distante)
+        // Backs out a P implícita da IA: P_ai = (1 + EV/100) / odd
+        // Se |P_ml − P_ai| > 0.10, há ruído grande entre os dois estimadores — rebaixa um nível
+        // (mesmo que a direção bata). Stake permanece com modelP do ML.
+        const pAiImplied = (1 + tipEV / 100) / tipOdd;
+        const pDivergence = Math.abs(modelP - pAiImplied);
+        if (pDivergence > 0.10) {
+          const confAtual = (filteredTipResult[5] || CONF.MEDIA).trim().toUpperCase();
+          if (confAtual === CONF.ALTA) {
+            filteredTipResult[5] = CONF.MEDIA;
+            log('INFO', 'AUTO', `Gate P-magnitude: ${match.team1} vs ${match.team2} → |P_ml(${(modelP*100).toFixed(1)}%) − P_ai(${(pAiImplied*100).toFixed(1)}%)| = ${(pDivergence*100).toFixed(1)}pp > 10pp → ALTA→MÉDIA`);
+          } else if (confAtual === CONF.MEDIA && pDivergence > 0.15) {
+            filteredTipResult[5] = CONF.BAIXA;
+            log('INFO', 'AUTO', `Gate P-magnitude: ${match.team1} vs ${match.team2} → |ΔP| = ${(pDivergence*100).toFixed(1)}pp > 15pp → MÉDIA→BAIXA`);
           }
         }
       }
