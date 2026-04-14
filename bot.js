@@ -1576,6 +1576,7 @@ async function collectGameContext(game, matchId) {
       // Fonte PandaScore — composições via /ps-compositions
       try {
         const gd = await serverGet(`/ps-compositions?matchId=${encodeURIComponent(matchId)}`);
+        log('INFO', 'LIVE-STATS', `LoL PandaScore ${matchId}: hasComps=${!!gd.hasCompositions} hasLiveStats=${!!gd.hasLiveStats} game=${gd.gameNumber||'?'} status=${gd.gameStatus||'?'}`);
         if (gd.hasCompositions && (gd.blueTeam?.players?.length || gd.redTeam?.players?.length)) {
           const thisDraftComplete = isDraftCompleteTeam(gd.blueTeam) && isDraftCompleteTeam(gd.redTeam);
           if (thisDraftComplete) draftComplete = true;
@@ -1655,10 +1656,12 @@ async function collectGameContext(game, matchId) {
     } else {
       // Fonte Riot (lolesports.com) — live-gameids + live-game
       const ids = await serverGet(`/live-gameids?matchId=${matchId}`).catch(() => []);
+      log('INFO', 'LIVE-STATS', `LoL Riot ${matchId}: ${Array.isArray(ids) ? ids.length : 0} gameId(s)`);
       if (Array.isArray(ids)) {
         for (const gid of ids) {
           try {
             const gd = await serverGet(`/live-game?gameId=${gid.gameId}`);
+            log('INFO', 'LIVE-STATS', `LoL Riot game ${gid.gameId}: state=${gd.gameState||'?'} hasLiveStats=${!!gd.hasLiveStats} gold=${gd.blueTeam?.totalGold||0}/${gd.redTeam?.totalGold||0}`);
             if (gd.blueTeam?.players?.length) {
               const thisDraftComplete = isDraftCompleteTeam(gd.blueTeam) && isDraftCompleteTeam(gd.redTeam);
               if (thisDraftComplete) draftComplete = true;
@@ -4233,8 +4236,31 @@ async function pollDota() {
         oddsMovement: null
       };
 
+      // ── Live stats (PandaScore Dota) ──
+      let dotaLiveContext = '';
+      let dotaHasLiveStats = false;
+      if (isLive && String(match.id).startsWith('ps_')) {
+        try {
+          const ld = await serverGet(`/ps-dota-live?matchId=${encodeURIComponent(match.id)}`);
+          log('INFO', 'LIVE-STATS', `Dota ${match.id}: hasLiveStats=${!!ld.hasLiveStats} game=${ld.gameNumber||'?'} status=${ld.gameStatus||'?'}`);
+          if (ld.hasLiveStats) {
+            dotaHasLiveStats = true;
+            const g = (v) => v >= 1000 ? (v/1000).toFixed(1)+'k' : String(v||0);
+            const blue = ld.blueTeam, red = ld.redTeam;
+            const goldDiff = (blue.totalGold||0) - (red.totalGold||0);
+            dotaLiveContext += `\n[GAME ${ld.gameNumber} — AO VIVO | Série: ${ld.seriesScore||'0-0'}]\n`;
+            dotaLiveContext += `Gold: ${blue.name} ${g(blue.totalGold)} vs ${red.name} ${g(red.totalGold)} (diff: ${goldDiff>0?'+':''}${g(goldDiff)})\n`;
+            dotaLiveContext += `Kills: ${blue.totalKills||0}x${red.totalKills||0}\n`;
+            const fmtTeam = (team) => (team.players||[]).map(p =>
+              `  ${(p.hero||'?').padEnd(14)} ${(p.name||'?').slice(0,12).padEnd(12)} ${p.kills}/${p.deaths}/${p.assists} lvl${p.level} ${g(p.gold)}g`
+            ).join('\n');
+            dotaLiveContext += `${blue.name}:\n${fmtTeam(blue)}\n${red.name}:\n${fmtTeam(red)}\n`;
+          }
+        } catch(e) { log('WARN', 'AUTO-DOTA', `Live stats fetch falhou: ${e.message}`); }
+      }
+
       // ── Pré-filtro ML ──
-      const mlResult = esportsPreFilter(match, o, enrich, isLive, '', null);
+      const mlResult = esportsPreFilter(match, o, enrich, isLive, dotaLiveContext, null);
       if (!mlResult.pass) {
         log('INFO', 'AUTO-DOTA', `Pré-filtro: edge insuficiente (${mlResult.score.toFixed(1)}pp) para ${match.team1} vs ${match.team2}`);
         analyzedDota.set(key, { ts: now, tipSent: false, noEdge: true });
@@ -4269,7 +4295,7 @@ async function pollDota() {
       const maxOdds = parseFloat(process.env.DOTA_MAX_ODDS || '5.00');
 
       const liveSection = isLive
-        ? `\nESTADO DA SÉRIE (AO VIVO): ${match.team1} ${match.score1||0} x ${match.score2||0} ${match.team2} | Formato: ${match.format || 'Bo?'}\n⚠️ Partida ao vivo — odds refletem o estado atual da série. Só tip se edge for claro e odds forem favoráveis.`
+        ? `\nESTADO DA SÉRIE (AO VIVO): ${match.team1} ${match.score1||0} x ${match.score2||0} ${match.team2} | Formato: ${match.format || 'Bo?'}\n⚠️ Partida ao vivo — odds refletem o estado atual da série. Só tip se edge for claro e odds forem favoráveis.${dotaHasLiveStats ? '\n\nSTATS AO VIVO (PandaScore):' + dotaLiveContext : ''}`
         : '';
 
       const prompt = `Você é um analista especializado em Dota 2 esports. Analise esta partida e identifique edge real se existir.

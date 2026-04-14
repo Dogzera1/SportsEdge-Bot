@@ -3222,6 +3222,77 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // ── PandaScore: live stats de Dota 2 ──
+  if (p === '/ps-dota-live') {
+    const rawId = parsed.query.matchId || '';
+    const psId = rawId.replace(/^ps_/, '');
+    if (!psId || !PANDASCORE_TOKEN || PANDASCORE_TOKEN === 'your-pandascore-token') {
+      sendJson(res, { hasLiveStats: false, error: 'Token PandaScore não configurado' });
+      return;
+    }
+    try {
+      const headers = { 'Authorization': `Bearer ${PANDASCORE_TOKEN}` };
+      const r = await httpGet(`https://api.pandascore.co/dota2/matches/${psId}`, headers);
+      if (r.status !== 200) {
+        sendJson(res, { hasLiveStats: false, error: `PS status ${r.status}` });
+        return;
+      }
+      const m = safeParse(r.body, {});
+      const ops = m.opponents || [];
+      const t1 = ops[0]?.opponent, t2 = ops[1]?.opponent;
+      const games = Array.isArray(m.games) ? m.games : [];
+      const activeGame = games.find(g => g.status === 'running') || games[games.length - 1];
+      if (!activeGame) { sendJson(res, { hasLiveStats: false, error: 'Nenhum game disponível' }); return; }
+
+      let s1 = 0, s2 = 0;
+      for (const g of games) {
+        if (!g.winner) continue;
+        if (g.winner.id === t1?.id) s1++;
+        else if (g.winner.id === t2?.id) s2++;
+      }
+
+      const players = Array.isArray(activeGame.players) ? activeGame.players : [];
+      const buildTeam = (teamObj, side) => {
+        const teamId = teamObj?.id;
+        const tp = players
+          .filter(pl => pl.team_id === teamId || pl.side === side)
+          .map(pl => ({
+            name: pl.player?.name || pl.name || '?',
+            hero: pl.hero?.name || '?',
+            kills: pl.kills || 0,
+            deaths: pl.deaths || 0,
+            assists: pl.assists || 0,
+            gold: pl.total_gold || pl.gold || 0,
+            lastHits: pl.last_hits || 0,
+            level: pl.level || 0,
+          }));
+        return { name: teamObj?.name || side, players: tp };
+      };
+      const blueTeam = buildTeam(t1, 'radiant');
+      const redTeam  = buildTeam(t2, 'dire');
+      const hasLiveStats = activeGame.status === 'running' && players.some(pl => (pl.total_gold || pl.gold || 0) > 0);
+      const totalGoldBlue = blueTeam.players.reduce((s, pl) => s + pl.gold, 0);
+      const totalGoldRed  = redTeam.players.reduce((s, pl) => s + pl.gold, 0);
+      const totalKillsBlue = blueTeam.players.reduce((s, pl) => s + pl.kills, 0);
+      const totalKillsRed  = redTeam.players.reduce((s, pl) => s + pl.kills, 0);
+
+      sendJson(res, {
+        matchId: rawId,
+        hasLiveStats,
+        gameNumber: activeGame.position || 1,
+        seriesScore: `${s1}-${s2}`,
+        gameStatus: activeGame.status || 'unknown',
+        blueTeam: { ...blueTeam, totalGold: totalGoldBlue, totalKills: totalKillsBlue },
+        redTeam:  { ...redTeam,  totalGold: totalGoldRed,  totalKills: totalKillsRed },
+        _source: 'pandascore'
+      });
+    } catch(e) {
+      log('ERROR', 'PS-DOTA', e.message);
+      sendJson(res, { hasLiveStats: false, error: e.message });
+    }
+    return;
+  }
+
   if (p === '/live-game') {
     const gameId = parsed.query.gameId;
     if (!gameId) { sendJson(res, { error: 'Missing gameId' }, 400); return; }
@@ -5422,77 +5493,9 @@ const server = http.createServer(async (req, res) => {
   if (p === '/sync-golgg-role-impact') {
     if (!requireAdmin(req, res)) return;
     try {
-      const CSV_URL = 'https://raw.githubusercontent.com/PandaTobi/League-of-Legends-ESports-Data/master/Role%20Impact/league_pro_play_data.csv';
-      const r = await cachedHttpGet(CSV_URL, { provider: 'golgg', ttlMs: 0 }).catch(() => null);
-      if (!r || r.status !== 200) { sendJson(res, { ok: false, error: `HTTP ${r?.status || 'fail'}` }, 502); return; }
-      const body = String(r.body || '');
-      const rows = body.split('\n').map(l => l.trim()).filter(Boolean);
-
-      const percentToFloat = (p) => {
-        const s = String(p || '').trim();
-        if (!s) return null;
-        const n = parseFloat(s.replace('%', ''));
-        return Number.isFinite(n) ? (n / 100) : null;
-      };
-      const num = (v) => {
-        const n = parseFloat(String(v || '').trim());
-        return Number.isFinite(n) ? n : null;
-      };
-
-      const roleGames = {};
-      const agg = { winrate: {}, gpm: {}, dmg: {}, kda: {} };
-      const add = (role, games, stat, bucket) => {
-        if (!bucket[role]) bucket[role] = 0;
-        bucket[role] += games * stat;
-      };
-
-      for (const line of rows) {
-        const parts = line.split(',');
-        if (parts.length < 11) continue;
-        const role = String(parts[1] || '').trim().toUpperCase();
-        const games = num(parts[2]);
-        const winr = percentToFloat(parts[3]);
-        const kda = num(parts[4]);
-        const gpm = num(parts[9]);
-        const dmg = num(parts[10]);
-        if (!role || !games || !gpm) continue;
-
-        roleGames[role] = (roleGames[role] || 0) + games;
-        if (winr != null) add(role, games, winr, agg.winrate);
-        if (gpm != null) add(role, games, gpm, agg.gpm);
-        if (dmg != null) add(role, games, dmg, agg.dmg);
-        if (kda != null) add(role, games, kda, agg.kda);
-      }
-
-      const upsert = db.prepare(`
-        INSERT INTO golgg_role_impact (role, sample_games, winrate, gpm, dmg_pct, kda, source, updated_at)
-        VALUES (@role, @sample_games, @winrate, @gpm, @dmg_pct, @kda, 'gol.gg', datetime('now'))
-        ON CONFLICT(role) DO UPDATE SET
-          sample_games=excluded.sample_games,
-          winrate=excluded.winrate,
-          gpm=excluded.gpm,
-          dmg_pct=excluded.dmg_pct,
-          kda=excluded.kda,
-          source=excluded.source,
-          updated_at=excluded.updated_at
-      `);
-
-      let written = 0;
-      for (const [role, games] of Object.entries(roleGames)) {
-        const g = games || 0;
-        if (g <= 0) continue;
-        upsert.run({
-          role,
-          sample_games: g,
-          winrate: agg.winrate[role] != null ? (agg.winrate[role] / g) : null,
-          gpm: agg.gpm[role] != null ? (agg.gpm[role] / g) : null,
-          dmg_pct: agg.dmg[role] != null ? (agg.dmg[role] / g) : null,
-          kda: agg.kda[role] != null ? (agg.kda[role] / g) : null,
-        });
-        written++;
-      }
-
-      sendJson(res, { ok: true, written, source: 'gol.gg', csv: CSV_URL });
+      const out = await syncGolggRoleImpact();
+      if (!out.ok) { sendJson(res, out, 502); return; }
+      sendJson(res, out);
     } catch (e) {
       sendJson(res, { ok: false, error: e.message }, 500);
     }
@@ -6922,6 +6925,79 @@ async function syncProStats({ forceResync = false } = {}) {
 }
 
 // ── Validação de variáveis de ambiente (server) ──
+async function syncGolggRoleImpact() {
+  const CSV_URL = 'https://raw.githubusercontent.com/PandaTobi/League-of-Legends-ESports-Data/master/Role%20Impact/league_pro_play_data.csv';
+  const r = await cachedHttpGet(CSV_URL, { provider: 'golgg', ttlMs: 0 }).catch(() => null);
+  if (!r || r.status !== 200) return { ok: false, error: `HTTP ${r?.status || 'fail'}` };
+  const body = String(r.body || '');
+  const rows = body.split('\n').map(l => l.trim()).filter(Boolean);
+
+  const percentToFloat = (p) => {
+    const s = String(p || '').trim();
+    if (!s) return null;
+    const n = parseFloat(s.replace('%', ''));
+    return Number.isFinite(n) ? (n / 100) : null;
+  };
+  const num = (v) => {
+    const n = parseFloat(String(v || '').trim());
+    return Number.isFinite(n) ? n : null;
+  };
+
+  const roleGames = {};
+  const agg = { winrate: {}, gpm: {}, dmg: {}, kda: {} };
+  const add = (role, games, stat, bucket) => {
+    if (!bucket[role]) bucket[role] = 0;
+    bucket[role] += games * stat;
+  };
+
+  for (const line of rows) {
+    const parts = line.split(',');
+    if (parts.length < 11) continue;
+    const role = String(parts[1] || '').trim().toUpperCase();
+    const games = num(parts[2]);
+    const winr = percentToFloat(parts[3]);
+    const kda = num(parts[4]);
+    const gpm = num(parts[9]);
+    const dmg = num(parts[10]);
+    if (!role || !games || !gpm) continue;
+
+    roleGames[role] = (roleGames[role] || 0) + games;
+    if (winr != null) add(role, games, winr, agg.winrate);
+    if (gpm != null) add(role, games, gpm, agg.gpm);
+    if (dmg != null) add(role, games, dmg, agg.dmg);
+    if (kda != null) add(role, games, kda, agg.kda);
+  }
+
+  const upsert = db.prepare(`
+    INSERT INTO golgg_role_impact (role, sample_games, winrate, gpm, dmg_pct, kda, source, updated_at)
+    VALUES (@role, @sample_games, @winrate, @gpm, @dmg_pct, @kda, 'gol.gg', datetime('now'))
+    ON CONFLICT(role) DO UPDATE SET
+      sample_games=excluded.sample_games,
+      winrate=excluded.winrate,
+      gpm=excluded.gpm,
+      dmg_pct=excluded.dmg_pct,
+      kda=excluded.kda,
+      source=excluded.source,
+      updated_at=excluded.updated_at
+  `);
+
+  let written = 0;
+  for (const [role, games] of Object.entries(roleGames)) {
+    const g = games || 0;
+    if (g <= 0) continue;
+    upsert.run({
+      role,
+      sample_games: g,
+      winrate: agg.winrate[role] != null ? (agg.winrate[role] / g) : null,
+      gpm: agg.gpm[role] != null ? (agg.gpm[role] / g) : null,
+      dmg_pct: agg.dmg[role] != null ? (agg.dmg[role] / g) : null,
+      kda: agg.kda[role] != null ? (agg.kda[role] / g) : null,
+    });
+    written++;
+  }
+  return { ok: true, written, source: 'gol.gg', csv: CSV_URL };
+}
+
 (function validateServerEnv() {
   const checks = [
     ['DEEPSEEK_API_KEY', DEEPSEEK_KEY,       'chamadas à IA desativadas — /claude retornará erro'],
@@ -7032,6 +7108,22 @@ server.listen(PORT, '0.0.0.0', () => {
     }, 5000);
     setInterval(() => syncProStats().catch(e => log('ERROR', 'SYNC', e.message)), 12 * 60 * 60 * 1000);
   }
+
+  // gol.gg Role Impact: sync no boot (30s) + diário
+  setTimeout(() => {
+    syncGolggRoleImpact()
+      .then(r => r.ok
+        ? log('INFO', 'GOLGG', `Role impact sync: ${r.written} linha(s)`)
+        : log('WARN', 'GOLGG', `Sync falhou: ${r.error}`))
+      .catch(e => log('ERROR', 'GOLGG', e.message));
+  }, 30 * 1000);
+  setInterval(() => {
+    syncGolggRoleImpact()
+      .then(r => r.ok
+        ? log('INFO', 'GOLGG', `Role impact sync diário: ${r.written} linha(s)`)
+        : log('WARN', 'GOLGG', `Sync diário falhou: ${r.error}`))
+      .catch(e => log('ERROR', 'GOLGG', e.message));
+  }, 24 * 60 * 60 * 1000);
 
   // Cleanup de DB
   setInterval(() => {
