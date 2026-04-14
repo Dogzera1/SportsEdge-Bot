@@ -1424,9 +1424,18 @@ async function checkLiveNotifications() {
     const allLive = Array.isArray(lolList) ? lolList.filter(m => m.status === 'live') : [];
 
     for (const match of allLive) {
-      // Ao vivo: tentar odds do mapa atual; fallback para odds de série se mapa não disponível
+      // Ao vivo: determinar mapa atual via Riot OU via placar da série (PS-only)
       const liveIds = await serverGet(`/live-gameids?matchId=${encodeURIComponent(String(match.id))}`).catch(() => []);
-      const currentMap = Array.isArray(liveIds) ? (liveIds.find(x => x.hasLiveData)?.gameNumber || null) : null;
+      let currentMap = Array.isArray(liveIds) ? (liveIds.find(x => x.hasLiveData)?.gameNumber || null) : null;
+      // Fallback: mapa = games já decididos + 1 (Bo3/Bo5 com placar 1-0 → mapa 2)
+      if (!currentMap && Number.isFinite(match.score1) && Number.isFinite(match.score2)) {
+        const inferred = (match.score1 || 0) + (match.score2 || 0) + 1;
+        if (inferred >= 1 && inferred <= 5) {
+          currentMap = inferred;
+          log('DEBUG', 'NOTIFY', `Mapa inferido pelo placar ${match.score1}-${match.score2} → mapa ${currentMap}: ${match.team1} vs ${match.team2}`);
+        }
+      }
+
       const fmt = match.format ? `&format=${encodeURIComponent(String(match.format))}` : '';
       const s1 = Number.isFinite(match.score1) ? `&score1=${encodeURIComponent(String(match.score1))}` : '';
       const s2 = Number.isFinite(match.score2) ? `&score2=${encodeURIComponent(String(match.score2))}` : '';
@@ -1435,7 +1444,7 @@ async function checkLiveNotifications() {
       if (currentMap) {
         mapOdds = await serverGet(`/odds?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}&map=${encodeURIComponent(String(currentMap))}${fmt}${s1}${s2}&force=1&game=lol`).catch(() => null);
       }
-      // Fallback: odds de série (quando mapa ainda não disponível ou partida PS sem live-gameids)
+      // Fallback: odds de série (quando mapa ainda não disponível — Pinnacle per-map retornou vazio)
       if (!mapOdds?.t1 || parseFloat(mapOdds.t1) <= 1.0) {
         mapOdds = await serverGet(`/odds?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}&game=lol`).catch(() => null);
       }
@@ -1804,13 +1813,27 @@ async function autoAnalyzeMatch(token, match) {
       return null;
     }
 
-    // Ao vivo: só usar odds do mapa atual se mapa ao vivo confirmado
+    // Ao vivo: usar odds do MAPA atual. Se Riot live-game não forneceu liveGameNumber
+    // (partida PandaScore-only), inferir pelo placar: mapa atual = score1 + score2 + 1.
+    // Isso evita o bug de análise com odds de série em partida live.
     let oddsToUse = o;
-    if (hasLiveStats && liveGameNumber) {
+    let effectiveMapNumber = null;
+    if (match.status === 'live') {
+      if (hasLiveStats && liveGameNumber) {
+        effectiveMapNumber = liveGameNumber;
+      } else if (Number.isFinite(match.score1) && Number.isFinite(match.score2)) {
+        const inferred = (match.score1 || 0) + (match.score2 || 0) + 1;
+        if (inferred >= 1 && inferred <= 5) {
+          effectiveMapNumber = inferred;
+          log('DEBUG', 'AUTO', `Mapa inferido pelo placar ${match.score1}-${match.score2} → mapa ${inferred}: ${match.team1} vs ${match.team2}`);
+        }
+      }
+    }
+    if (effectiveMapNumber) {
       const fmt = match.format ? `&format=${encodeURIComponent(String(match.format))}` : '';
       const s1 = Number.isFinite(match.score1) ? `&score1=${encodeURIComponent(String(match.score1))}` : '';
       const s2 = Number.isFinite(match.score2) ? `&score2=${encodeURIComponent(String(match.score2))}` : '';
-      const mo = await serverGet(`/odds?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}&map=${encodeURIComponent(String(liveGameNumber))}${fmt}${s1}${s2}&force=1&game=${encodeURIComponent(game)}`).catch(() => null);
+      const mo = await serverGet(`/odds?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}&map=${encodeURIComponent(String(effectiveMapNumber))}${fmt}${s1}${s2}&force=1&game=${encodeURIComponent(game)}`).catch(() => null);
       if (mo?.t1 && mo?.t2) oddsToUse = mo;
     }
 
@@ -4135,14 +4158,24 @@ async function pollDota() {
         if (!matchTs || matchTs < now || matchTs > now + 7 * 24 * 60 * 60 * 1000) continue;
       }
 
-      // ── Odds: ao vivo pede liveOnly=true via SX.Bet ──
+      // ── Odds: ao vivo, infere mapa pelo placar e pede odds do MAPA específico via Pinnacle
+      //   (Pinnacle period=N) ou SX.Bet. Pré-jogo usa odds da série.
       let o = (!isLive && match.odds?.t1) ? match.odds : null;
-      if (!o?.t1 || !o?.t2) {
-        const liveFlag = isLive ? '&live=1' : '';
-        o = await serverGet(`/odds?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}&game=dota2${liveFlag}`).catch(() => null);
+      let dotaMapNum = null;
+      if (isLive && Number.isFinite(match.score1) && Number.isFinite(match.score2)) {
+        const inferred = (match.score1 || 0) + (match.score2 || 0) + 1;
+        if (inferred >= 1 && inferred <= 5) {
+          dotaMapNum = inferred;
+          log('DEBUG', 'AUTO-DOTA', `Mapa inferido pelo placar ${match.score1}-${match.score2} → mapa ${inferred}: ${match.team1} vs ${match.team2}`);
+        }
       }
       if (!o?.t1 || !o?.t2) {
-        log('DEBUG', 'AUTO-DOTA', `Sem odds ${isLive ? 'ao vivo' : ''}: ${match.team1} vs ${match.team2}`);
+        const liveFlag = isLive ? '&live=1' : '';
+        const mapFlag = dotaMapNum ? `&map=${dotaMapNum}` : '';
+        o = await serverGet(`/odds?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}&game=dota2${liveFlag}${mapFlag}`).catch(() => null);
+      }
+      if (!o?.t1 || !o?.t2) {
+        log('DEBUG', 'AUTO-DOTA', `Sem odds ${isLive ? 'ao vivo' : ''}${dotaMapNum ? ` (mapa ${dotaMapNum})` : ''}: ${match.team1} vs ${match.team2}`);
         analyzedDota.set(key, { ts: now, tipSent: false, noEdge: true });
         continue;
       }
