@@ -2925,6 +2925,48 @@ async function handleProximas(token, chatId, sport) {
       txt += '_Nenhuma partida disponível no momento._';
     }
 
+    // Dota 2 — bot esports também cobre Dota 2 (mesma infra)
+    try {
+      const dotaMatches = await serverGet('/dota-matches').catch(() => []);
+      const dotaAll = Array.isArray(dotaMatches) ? dotaMatches : [];
+      if (dotaAll.length) {
+        const dotaLive = dotaAll.filter(m => m.status === 'live');
+        const dotaUp   = dotaAll.filter(m => m.status !== 'live');
+        txt += `\n\n🕹️ *PARTIDAS DOTA 2*\n━━━━━━━━━━━━━━━━\n`;
+        if (dotaLive.length) {
+          txt += `\n🔴 *AO VIVO (${dotaLive.length})*\n`;
+          dotaLive.slice(0, 5).forEach(m => {
+            const league = m.league ? `[${m.league}]` : '';
+            txt += `🕹️ ${league} *${m.team1}* vs *${m.team2}*`;
+            if (m.score1 !== undefined || m.score2 !== undefined) txt += ` (${m.score1 ?? 0}-${m.score2 ?? 0})`;
+            if (m.format) txt += ` _${m.format}_`;
+            txt += '\n';
+            if (m.odds?.t1 && m.odds?.t2) txt += `  💰 ${m.team1}: \`${m.odds.t1}\` | ${m.team2}: \`${m.odds.t2}\`\n`;
+          });
+        }
+        if (dotaUp.length) {
+          txt += `\n📅 *PRÓXIMAS (${dotaUp.length})*\n`;
+          dotaUp.slice(0, 8).forEach(m => {
+            const league = m.league ? `[${m.league}]` : '';
+            txt += `🕹️ ${league} *${m.team1}* vs *${m.team2}*`;
+            if (m.format) txt += ` _${m.format}_`;
+            txt += '\n';
+            if (m.time) {
+              try {
+                const dt = new Date(m.time).toLocaleString('pt-BR', {
+                  timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit',
+                  hour: '2-digit', minute: '2-digit'
+                });
+                txt += `  🕐 ${dt}\n`;
+              } catch(_) {}
+            }
+            if (m.odds?.t1 && m.odds?.t2) txt += `  💰 ${m.team1}: \`${m.odds.t1}\` | ${m.team2}: \`${m.odds.t2}\`\n`;
+            else txt += `  _Sem odds ainda_\n`;
+          });
+        }
+      }
+    } catch(_) {}
+
     await send(token, chatId, txt, getMenu(sport));
   } catch (e) {
     await send(token, chatId, `❌ Erro ao buscar partidas: ${e.message}`);
