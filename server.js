@@ -4151,6 +4151,98 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // ── Resultado Darts (settlement via Sofascore event status) ──
+  if (p === '/darts-result') {
+    const rawId = parsed.query.matchId || '';
+    const sofaId = String(rawId).replace(/^darts_/, '');
+    if (!sofaId) { sendJson(res, { resolved: false, error: 'matchId obrigatório' }, 400); return; }
+    try {
+      const r = await sofascoreDarts.getEventResult(sofaId);
+      if (!r) { sendJson(res, { matchId: rawId, resolved: false, error: 'event não encontrado' }); return; }
+      if (r.resolved && r.winner) {
+        stmts.upsertMatchResult.run(rawId, 'darts', '', '', r.winner, r.score || '', '');
+      }
+      sendJson(res, { matchId: rawId, resolved: r.resolved, winner: r.winner, status: r.status, score: r.score });
+    } catch (e) {
+      sendJson(res, { matchId: rawId, resolved: false, error: e.message });
+    }
+    return;
+  }
+
+  // ── Resultado Snooker (settlement via Sofascore — matching por nomes + data) ──
+  // match_id é `snooker_<pinMatchupId>` (Pinnacle). Sofascore tem ID próprio,
+  // então buscamos via scheduled-events de snooker últimos 7 dias e casamos nomes.
+  if (p === '/snooker-result') {
+    const rawId = parsed.query.matchId || '';
+    const t1 = parsed.query.team1 || '';
+    const t2 = parsed.query.team2 || '';
+    const sentAt = parsed.query.sentAt || '';
+    if (!rawId || (!t1 && !t2)) { sendJson(res, { resolved: false, error: 'matchId + team1/team2 obrigatórios' }, 400); return; }
+
+    // Normaliza pra comparação
+    const normN = s => String(s||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]/g,'');
+    const nt1 = normN(t1), nt2 = normN(t2);
+
+    // Janela de datas: últimos 7 dias (desde sent_at se disponível, senão desde 7d atrás)
+    const startMs = sentAt ? Date.parse(sentAt.includes('T') ? sentAt : sentAt.replace(' ', 'T')) : (Date.now() - 7 * 86400000);
+    const dayStrs = [];
+    for (let d = 0; d <= 7; d++) {
+      const ts = new Date(startMs + d * 86400000);
+      dayStrs.push(ts.toISOString().slice(0, 10));
+    }
+
+    try {
+      for (const dateStr of dayStrs) {
+        const path = `/sport/snooker/scheduled-events/${dateStr}`;
+        const proxyUrl = (process.env.SOFASCORE_PROXY_BASE || '').trim().replace(/\/+$/, '');
+        const urls = [];
+        if (proxyUrl) urls.push(`${proxyUrl}/schedule/snooker/${dateStr}/`);
+        urls.push(`https://api.sofascore.com/api/v1${path}`);
+        let found = null;
+        for (const u of urls) {
+          const r = await cachedHttpGet(u, {
+            provider: 'sofascore', ttlMs: 30 * 60 * 1000,
+            headers: {
+              'User-Agent': 'Mozilla/5.0',
+              'Accept': 'application/json',
+              'Referer': 'https://www.sofascore.com/',
+              'Origin': 'https://www.sofascore.com'
+            },
+            cacheKey: `sofa-snooker-sched:${dateStr}:${u}`
+          }).catch(() => null);
+          if (!r || r.status !== 200) continue;
+          const j = safeParse(r.body, null);
+          const events = j?.events || [];
+          for (const ev of events) {
+            if (ev?.status?.type !== 'finished') continue;
+            const h = normN(ev?.homeTeam?.name);
+            const a = normN(ev?.awayTeam?.name);
+            const match =
+              (h.includes(nt1) || nt1.includes(h)) && (a.includes(nt2) || nt2.includes(a)) ||
+              (h.includes(nt2) || nt2.includes(h)) && (a.includes(nt1) || nt1.includes(a));
+            if (match) { found = ev; break; }
+          }
+          if (found) break;
+        }
+        if (!found) continue;
+        const wc = found.winnerCode;
+        const winner = wc === 1 ? (found.homeTeam?.name || null)
+                     : wc === 2 ? (found.awayTeam?.name || null)
+                     : null;
+        if (!winner) continue;
+        const s1 = found.homeScore?.current ?? 0;
+        const s2 = found.awayScore?.current ?? 0;
+        stmts.upsertMatchResult.run(rawId, 'snooker', found.homeTeam?.name || t1, found.awayTeam?.name || t2, winner, `${s1}-${s2}`, '');
+        sendJson(res, { matchId: rawId, resolved: true, winner, score: `${s1}-${s2}` });
+        return;
+      }
+      sendJson(res, { matchId: rawId, resolved: false });
+    } catch (e) {
+      sendJson(res, { matchId: rawId, resolved: false, error: e.message });
+    }
+    return;
+  }
+
   // ── Resultado Futebol (settlement via match_results DB + CSV dataset) ──
   if (p === '/football-result') {
     const matchId = (parsed.query.matchId || '').trim();

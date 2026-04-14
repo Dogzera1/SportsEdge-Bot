@@ -2,9 +2,131 @@
 
 Bot autônomo de Telegram para análise automática de apostas esportivas, baseado em Valor Esperado (EV) e Kelly Criterion, alimentado por IA (DeepSeek ou Claude).
 
-> **Status (Abril 2026 — Patch 26.5):** Sistema multi-esporte — **LoL Esports**, **Dota 2**, **MMA (UFC only)**, **Tênis** e **Futebol** operacionais. Cada esporte roda em bot Telegram independente (token separado). Odds via **SX.Bet** (LoL/Dota 2 live + pré-jogo), **OddsPapi v4** (esports upcoming) e **The Odds API** (futebol/MMA/tênis). Futebol usa **API-Football** para dados de forma, H2H e standings. MMA e Tênis usam **ESPN API** (gratuita) para records de lutadores e rankings ATP/WTA, com **fallback Sofascore** (via proxy `Public-Sofascore-API`) quando ESPN/Sherdog/Tapology não retornam dados. Tênis usa modelo **Elo por superfície** com dados Sackmann. Todos os esportes passam por pré-filtro ML antes de chamar a IA. Settlement automático em todos os esportes.
+> **Status (Abril 2026):** Sistema multi-esporte com **6 esportes ativos**:
 >
-> **Produção (Railway):** No boot, `start.js` imprime `[LAUNCHER] PORT=… | DB=…` e sobe **dois** processos (`server.js` depois `bot.js`). Logs típicos: sync OddsPapi em lotes, `Force-fetch live` para torneios ao vivo, partidas LoL com `odds: X/Y` e lista `sem match` quando o slug OddsPapi não casa com o par Riot/PandaScore. Resposta **HTTP 429** da OddsPapi ativa **backoff de 2 horas** (nenhum fetch/re-fetch até expirar — ver `/debug-odds`). OddsPapi free tier = **250 requests totais** — default refresh é **60 min** (configurável via `ODDSPAPI_REFRESH_MIN`). Sem `CLAUDE_API_KEY`, o sistema usa só **DeepSeek** (fallback Claude desligado).
+> | Esporte | Bot | Fonte odds primária | Fonte odds fallback | Fonte stats | Modelo ML |
+> |---|---|---|---|---|---|
+> | **LoL Esports** | `@Lolbetting_bot` | SX.Bet (per-map) | Pinnacle (per-map via `period=N`) | Riot API + PandaScore + gol.gg | forma+H2H+comp |
+> | **Dota 2** | (mesmo bot LoL) | SX.Bet | Pinnacle (per-map) | PandaScore | forma+H2H |
+> | **MMA/Boxe** | `@Ufcbettor_bot` | The Odds API | — | ESPN + Sofascore fallback | record histórico |
+> | **Tênis** | `@Tennisbet1_bot` | The Odds API | Pinnacle (suplementar) | Sackmann (Elo superfície) + ESPN | Elo-log por superfície |
+> | **Futebol** | `@Betfut1_bot` | The Odds API | — | API-Football + Sofascore | Poisson + home boost |
+> | **Darts** 🆕 | `@Dartsbet_bot` | Sofascore | — | Sofascore (3-dart avg) | 3DA + WR com sample-weight |
+> | **Snooker** 🆕 | `@Snookerbet_bot` | Pinnacle | — | CueTracker (scraping HTML) | ranking-log + WR |
+>
+> **Descoberta chave (Abril 2026)**: Pinnacle Guest API expõe odds por mapa individual via campo `period` no endpoint `/markets/related/straight`. `period=0` é série, `period=N` é mapa N. Isso permite odds precisas per-map em LoL/Dota mesmo quando SX.Bet não tem mercado. Bot infere `currentMap` via placar da série (`score1+score2+1`) quando Riot API não fornece live game ID.
+>
+> **Produção (Railway):** `start.js` sobe dois processos (`server.js` + `bot.js`). OddsPapi desligado (free tier 250 req esgotava em horas); substituído por Pinnacle para LoL/Dota.
+
+---
+
+## Quick Start — Env Vars essenciais
+
+```env
+# ── Telegram (um token por esporte, do @BotFather) ──
+TELEGRAM_TOKEN_ESPORTS=<token>         # cobre LoL + Dota 2
+TELEGRAM_TOKEN_MMA=<token>             # cobre MMA + Boxe
+TELEGRAM_TOKEN_TENNIS=<token>
+TELEGRAM_TOKEN_FOOTBALL=<token>
+TELEGRAM_TOKEN_DARTS=<token>
+TELEGRAM_TOKEN_SNOOKER=<token>
+
+# ── IA (obrigatório) ──
+DEEPSEEK_API_KEY=sk-...
+
+# ── Odds — Pinnacle (guest, sem auth, funciona do BR) ──
+PINNACLE_LOL=true                      # LoL pre-match + live (per-map via period)
+PINNACLE_DOTA=true                     # Dota 2 pre-match + live (per-map)
+PINNACLE_TENNIS=true                   # suplementa The Odds API
+
+# ── Odds — SX.Bet (opcional, melhor para LoL/Dota live per-map) ──
+SXBET_ENABLED=true
+
+# ── Odds — The Odds API (MMA/Tênis/Futebol) ──
+THE_ODDS_API_KEY=<key>
+
+# ── Stats — APIs externas ──
+LOL_API_KEY=<key>                      # Riot
+PANDASCORE_TOKEN=<token>               # PandaScore (LoL/Dota stats)
+API_SPORTS_KEY=<key>                   # API-Football (soccer)
+SOFASCORE_PROXY_BASE=<url>             # Public-Sofascore-API (darts + enrichment)
+
+# ── Admin + Risk ──
+ADMIN_USER_IDS=<id1,id2>               # seu ID do Telegram
+ADMIN_KEY=<chave_aleatoria>
+GLOBAL_RISK_PCT=0.10
+SPORT_RISK_PCT=0.20
+
+# ── Esportes enabled flags ──
+ESPORTS_ENABLED=true
+MMA_ENABLED=true
+TENNIS_ENABLED=true
+FOOTBALL_ENABLED=true
+DARTS_ENABLED=true
+SNOOKER_ENABLED=true
+```
+
+**Variáveis opcionais** (com defaults): ver seção "Configuração (`.env`)" abaixo.
+
+---
+
+## O que mudou (Abril 2026 — changelog)
+
+### 🎯 Novos esportes
+
+- **Darts** (`lib/sofascore-darts.js`, `lib/darts-ml.js`): 3-dart average + WR via Sofascore. Modelo com **sample-weighted ML** — jogadores com <10 jogos têm sinal atenuado.
+- **Snooker** (`lib/pinnacle-snooker.js`, `lib/cuetracker.js`, `lib/snooker-ml.js`): odds via Pinnacle, enrichment via **scraper CueTracker** (HTML, cache 6h). Win rate da temporada atual usado como fator principal.
+
+### 🔍 Pinnacle map-winner
+
+Descoberta: field `period` em `/0.1/matchups/{id}/markets/related/straight` expõe odds por mapa individual. `lib/pinnacle.js::getMatchupMoneylineByPeriod(id, N)` retorna moneyline do mapa N. Endpoint `/odds?game=lol&map=N` agora:
+
+1. Tenta SX.Bet (per-map nativo)
+2. Fallback Pinnacle period=N (mapa específico)
+3. Fallback Pinnacle period=0 (série — **só se map não foi solicitado**)
+4. Nunca retorna odds de série como se fossem de mapa (bug anterior corrigido)
+
+Inferência de `currentMap` pelo placar (`score1 + score2 + 1`) para partidas PandaScore-only onde Riot API não fornece `live-gameids`.
+
+### 💰 Substituição OddsPapi → Pinnacle para LoL/Dota
+
+OddsPapi free tier (250 req totais) esgotava rapidamente → 429 backoff de 2h. Pinnacle Guest API:
+- Sem quota
+- Odds sharper (book mais afiada do mundo)
+- Cobre LCK, LCS, LFL, CBLOL, LPL, EMEA Masters, NACL, Rift Legends + Dota 2 DreamLeague, European Pro League, etc.
+- Filtra markets "Kills" e "Maps handicap" (só match winner)
+- Refresh adaptativo: 10min default, 2min quando há matches live
+
+### 🐛 Bug fixes críticos
+
+| Bug | Causa | Fix |
+|---|---|---|
+| `AUTO-MMA Cannot access 'tipStakeAdjMma' before initialization` | TDZ — `tipMsg` usava var declarada 26 linhas depois | Reordenado bloco Kelly/risk antes do `tipMsg` |
+| Bot MMA recebia alertas OddsPapi | `checkCriticalAlerts` pegava primeiro token disponível | Roteamento por `_alertSportFor(alertId)` → esports bot |
+| Darts/snooker não rodavam (`now is not defined`) | Var `now` não declarada no bloco | `const now = Date.now()` adicionado |
+| DeepSeek `missing field messages` (Dota) | Body `{ prompt, max_tokens }` sem `messages` | Ajustado para `{ messages: [{role,content}], max_tokens }` |
+| Handler darts respondia como esports | `handleAdmin` default `sport='esports'` | `handleAdmin(token, chatId, text, callerSport)` recebe sport do bot |
+| Settlement fuzzy match false-positive | `includes` aceitava "IG" em "BIG", "T1" em "T10" | `lib/name-match.js` com threshold score ≥ 0.5 + aliases |
+| Snooker sempre edge=0 | Sem enrichment, `factorCount=1`, shift=0 | CueTracker scraping (`lib/cuetracker.js`) fornece WR |
+| Análise live usando odds de série | Só pegava odds de mapa se Riot tinha `liveGameNumber` | Infere mapa pelo placar quando Riot vazio |
+| Endpoints darts/snooker sumiram | Proxy Sofascore não tinha rotas de live/odds/stats | Adicionadas 3 views Django novas |
+
+### 📊 Calibração ML revisada
+
+Todos os pré-filtros (`darts-ml`, `snooker-ml`) agora retornam `sampleConfidence` e aplicam peso por sample size:
+- Jogador com 0 jogos → confiança 0 → fator efetivamente ignorado
+- Jogador com <10 jogos → sinais atenuados + penalty +1pp no gate
+- Previne falso positivo tipo `Jun Jiang (0 jogos) vs Stan Moody (37 jogos) → EV inflado`
+
+### ⚙️ Economia de tokens pré-jogo
+
+| Esporte | Cooldown pré-jogo antigo | Novo |
+|---|---|---|
+| LoL upcoming | 30 min | 2h (`LOL_UPCOMING_INTERVAL_MIN`) |
+| Tennis pré-jogo | 2h | 6h (`TENNIS_PREGAME_INTERVAL_H`) |
+| MMA | 6h | 12h (`MMA_INTERVAL_H`) |
+
+Live cooldown inalterado (10min LoL, 10min Dota) — mercado muda rápido.
 
 ---
 
@@ -42,10 +164,20 @@ Bot autônomo de Telegram para análise automática de apostas esportivas, basea
 │  Futebol:                                    │
 │  • Loop independente a cada 6h               │
 │  • Fixtures pré-carregadas em batch (1 call) │
-│  • Dados reais: forma, H2H, standings        │
-│    via API-Football (lib/football-api.js)    │
+│  • API-Football (forma, H2H, standings)      │
 │  • ML com dados reais (lib/football-ml.js)   │
-│  • Settlement via fixture ID API-Football    │
+│                                              │
+│  Darts 🆕:                                   │
+│  • Loop independente a cada 15 min           │
+│  • Sofascore (3-dart avg + WR + stats)       │
+│  • ML sample-weighted (lib/darts-ml.js)      │
+│  • Whitelist PDC (World/Premier League/etc.) │
+│                                              │
+│  Snooker 🆕:                                 │
+│  • Loop independente a cada 15 min           │
+│  • Pinnacle (odds) + CueTracker (WR scrape)  │
+│  • ML ranking-log + sample-weight            │
+│  • Cobre World/UK/Masters/Tour Championship  │
 │                                              │
 │  Todos os esportes:                          │
 │  • Fair Odds calculadas pelo modelo ML       │
@@ -57,34 +189,39 @@ Bot autônomo de Telegram para análise automática de apostas esportivas, basea
 │         server.js — API Aggregator           │
 │                                              │
 │  Fontes de partidas:                         │
-│    Riot / LoL Esports API + PandaScore       │
-│    The Odds API (MMA / Tênis / Futebol)      │
+│    Riot + PandaScore (LoL/Dota)              │
+│    The Odds API (MMA/Tênis/Futebol)          │
+│    Sofascore (Darts via proxy curl_cffi)     │
+│    Pinnacle Guest API (Snooker + LoL/Dota)   │
 │                                              │
 │  Live LPL:                                   │
 │    3 camadas: getLive zh-CN + PS running +   │
 │    promoção por tempo (startTime past > 2min)│
 │                                              │
-│  Odds:                                       │
-│    OddsPapi v4 — 1xBet (esports round-robin) │
-│    The Odds API — EU (MMA/Tênis/Futebol)     │
+│  Odds cascata (LoL/Dota per-map):            │
+│    1. SX.Bet (mapa via marketId)             │
+│    2. Pinnacle period=N (mapa via API)       │
+│    3. Pinnacle period=0 (série, sem mapa)    │
+│    Inferência mapa: score1+score2+1          │
 │                                              │
 │  Análise IA:                                 │
-│    DeepSeek (deepseek-chat) — padrão         │
-│    Anthropic Claude — fallback               │
-│    Pré-filtro ML local (lib/ml.js)           │
-│    Pré-filtro ML futebol (lib/football-ml.js)│
-│    Contexto de notícias (lib/news.js)        │
-│    Risk Manager cross-sport (lib/risk-mgr)   │
+│    DeepSeek (padrão) + Claude (fallback)     │
+│    Pré-filtro ML por esporte com sample-wt   │
+│    Contexto de notícias (Google News RSS)    │
+│    Risk Manager cross-sport (GLOBAL/SPORT%)  │
 │                                              │
-│  Dados gratuitos externos:                   │
-│    ESPN API — MMA records + rankings tênis   │
-│    Google News RSS — lesões/suspensões       │
+│  Enrichment:                                 │
+│    ESPN (MMA records, tênis rankings)        │
+│    Sofascore proxy (fallback universal)      │
+│    CueTracker (snooker WR — HTML scraping)   │
+│    Sackmann (Elo tênis por superfície)       │
+│    API-Football (futebol)                    │
 │                                              │
 │  sportsedge.db (SQLite via volume Railway)   │
 │  users | events | matches | tips             │
 │  odds_history | match_results | api_usage    │
 │  pro_champ_stats | pro_player_champ_stats    │
-│  synced_matches | settings                   │
+│  synced_matches | settings | bankroll        │
 └──────────────────────────────────────────────┘
 ```
 
@@ -97,7 +234,7 @@ Bot autônomo de Telegram para análise automática de apostas esportivas, basea
 - Chave **DeepSeek API** (recomendado) ou **Anthropic Claude API**
 - Chave da LoL Esports API (Riot Games) — esports
 - Token PandaScore — torneios fora da Riot (schedules + stats + sync de resultados pro + live LPL) — esports
-- Chave OddsPapi — odds esports LoL via 1xBet ([oddspapi.io](https://oddspapi.io), plano free: **250 requests totais**) — esports
+- ~~Chave OddsPapi~~ **(descontinuado Abr/2026)** — free tier de 250 req esgotava em horas. Substituído por Pinnacle Guest API (LoL pré-match + live). OddsPapi permanece suportado via `ODDS_API_KEY` mas é opcional
 - **SX.Bet** — odds LoL/Dota 2 ao vivo (API pública, sem chave); ativar via `SXBET_ENABLED=true`
 - Chave **The Odds API** — odds para futebol, MMA e tênis
 - Chave **API-Football** (`api-sports.io`) — dados de forma, H2H e standings para futebol (free tier: 100 req/dia)
@@ -116,7 +253,7 @@ TELEGRAM_TOKEN_MMA=seu_token_mma        # opcional
 TELEGRAM_TOKEN_TENNIS=seu_token_tennis  # opcional
 TELEGRAM_TOKEN_FOOTBALL=seu_token_fb    # opcional
 TELEGRAM_TOKEN_DARTS=seu_token_darts    # opcional (shadow mode por default)
-TELEGRAM_TOKEN_SNOOKER=seu_token_snk    # opcional (requer Betfair Exchange)
+TELEGRAM_TOKEN_SNOOKER=seu_token_snk    # opcional (odds via Pinnacle, enrichment via CueTracker)
 
 # ── APIs de IA (pelo menos uma obrigatória) ──
 DEEPSEEK_API_KEY=sk-...                 # DeepSeek (recomendado — mais barato)
@@ -155,7 +292,7 @@ MMA_ENABLED=true                        # false por padrão se token ausente
 TENNIS_ENABLED=true
 FOOTBALL_ENABLED=true
 DARTS_ENABLED=true                      # requer TELEGRAM_TOKEN_DARTS + SOFASCORE_PROXY_BASE
-SNOOKER_ENABLED=true                    # requer TELEGRAM_TOKEN_SNOOKER + Betfair (BF_APP_KEY etc.)
+SNOOKER_ENABLED=true                    # requer TELEGRAM_TOKEN_SNOOKER (odds Pinnacle, zero config extra)
 
 # ── Shadow mode (modo auditoria — tip gerada mas NÃO envia DM) ──
 # Darts + Snooker: ambos GRADUADOS (default não-shadow).
@@ -277,7 +414,7 @@ Execute `npm test` antes de qualquer deploy que toque parser da IA, Kelly ou set
 5. Configure `ADMIN_USER_IDS` com seu ID do Telegram — o admin é inscrito automaticamente a cada boot
 6. Configure `ADMIN_KEY` para proteger rotas admin; sem ele, um `WARN [SEC]` é emitido uma vez no boot
 7. O `railway.toml` já está configurado com healthcheck TCP e restart policy `on_failure`
-8. **OddsPapi:** `ODDSPAPI_BOOTSTRAP=true` acelera o cache no primeiro minuto após deploy, mas soma muitas chamadas — em 429 o servidor entra em **backoff 2h**
+8. **OddsPapi (descontinuado padrão Abr/2026):** substituído por Pinnacle. Se ainda usar, `ODDSPAPI_BOOTSTRAP=true` acelera cache mas em 429 gera backoff 2h
 
 > **Nota DB_PATH no Railway:** se a variável aparecer com artefatos (`=/data/...`), o sistema sanitiza automaticamente antes de abrir o banco.
 
@@ -456,31 +593,18 @@ Pinnacle (sportId=12 E-Sports) é a fonte primária recomendada para odds pré-m
 - Refresh: `PINNACLE_LOL_REFRESH_MIN` (default 10 min)
 - American odds → decimal via `americanToDecimal()`
 
-### Esports pré-jogo — OddsPapi Round-Robin
+### Esports pré-jogo — Pinnacle (OddsPapi descontinuado)
 
-Com **250 requests totais** no plano free, as odds são buscadas em ciclos round-robin. Default: 1 lote a cada **60 minutos** (configurável via `ODDSPAPI_REFRESH_MIN`).
+**Default Abr/2026 em diante**: Pinnacle Guest API é a fonte primária para LoL pré-match. OddsPapi foi descontinuado porque o free tier (250 req) esgotava em horas.
 
-### Ordem dos Lotes
-
-| Lote | Ligas cobertas |
-|------|----------------|
-| 1 | LCS, LEC, LCK |
-| 2 | Prime League (DE), Hellenic Legends League (GR), Road of Legends (PT) |
-| 3 | LIT/LES (IT/ES), Finnish Pro League, EMEA Masters |
-| 4 | CBLOL (BR), NACL, LPL 2026 (CN) |
-| 5 | LCK CL, LCP (APAC), LRN |
-| 6 | LRS, Esports World Cup |
-| 7 | LPL 2026 alternativo (39997, 40019) |
-
-> **LPL:** TID ativo confirmado: `46121`. Candidatos alternos: `39997`, `40019` (diferentes splits/stages). O sistema usa a lista dinâmica retornada pela OddsPapi API — se o TID da LPL atual não constar, as odds ficam sem match para aquele confronto.
+Se quiser **reativar OddsPapi** (não recomendado):
+- `ODDS_API_KEY=<key>` + `ODDSPAPI_REFRESH_MIN=60`
+- Funciona em paralelo com Pinnacle (cache compartilhado `esports_*`)
+- Em 429, server entra em `backoff 2h`; ver `backoffRemainingSeconds` em `/debug-odds`
 
 ### Re-fetch Urgente (< 2h)
 
-Se uma partida está programada para começar em menos de 2 horas e as odds no cache têm mais de 2 horas, o sistema força um re-fetch imediato.
-
-### Rate limit (HTTP 429)
-
-Se a OddsPapi retornar **429**, o servidor define backoff de **2 horas**, loga `429 — backoff 2h ativado` e para todos os fetches até expirar. Use `GET /debug-odds` para ver `backoffRemainingSeconds`.
+Se uma partida está programada para começar em menos de 2 horas e as odds no cache têm mais de 2 horas, o sistema força um re-fetch imediato (aplicável tanto a Pinnacle quanto OddsPapi quando ativos).
 
 ---
 
@@ -562,8 +686,16 @@ P_ai_implied = (1 + EV_ia / 100) / odd
 
 **Gates de consenso (LoL, `autoAnalyzeMatch`):**
 - **Gate 0.5 — EV-modelo (assimétrico)**: se `EV_ia − EV_modelo > 10pp`, IA está otimista demais → rebaixa conf. Assimétrico por design: IA pessimista pode ter razão (sinal qualitativo que ML não captura).
-- **Gate 0.6 — P-magnitude (simétrico)**: se `|P_ml − P_ai_implied| > 10pp` → rebaixa conf (ALTA→MÉDIA, >15pp MÉDIA→BAIXA). Captura o caso em que direção concorda mas magnitude de P diverge muito.
+- **Gate 0.6 — P-magnitude (simétrico)**: se `|P_ml − P_ai| > 10pp` → rebaixa conf (ALTA→MÉDIA, >15pp MÉDIA→BAIXA). **P_ai** preferencialmente lido do campo `|P:XX%|` retornado explicitamente pela IA no formato TIP_ML. Fallback: derivação `(1 + EV/100) / odd`.
 - **Gate 3 — direção**: se `ml.direction ≠ ia.direction` com `factorCount≥2` e `score≥3pp` → rebaixa; score>8pp rejeita BAIXA.
+
+### Formato TIP_ML (Abr/2026+)
+
+```
+TIP_ML:[time]@[odd]|EV:[%]|P:[%]|STAKE:[Nu]|CONF:[ALTA/MÉDIA/BAIXA]
+```
+
+Campo `P` é a probabilidade 0–100% que a IA **explicitamente** atribui ao pick. Consistência: `EV = (P/100 × odd − 1) × 100`. Parser é tolerante — se IA omitir `P`, o sistema deriva do EV+odd. O campo é usado no Gate 0.6 (divergência ML×IA) e no Brier Score do `/roi`.
 
 ### Níveis de Confiança e Thresholds de EV
 
@@ -589,13 +721,20 @@ O sistema analisa **apenas lutas do UFC**. A cada ciclo:
 
 ## Settlement Automático
 
-| Esporte | Fonte | Frequência |
-|---------|-------|-----------|
-| LoL (Riot) | LoL Esports API | 30 min |
-| LoL (PandaScore) | PandaScore (prefixo `ps_`) | 30 min |
-| Futebol | API-Football (prefixo `fb_`) | 30 min |
-| MMA | ESPN UFC scoreboard | 30 min |
-| Tênis | ESPN ATP/WTA scoreboard | 30 min |
+| Esporte | Fonte de resultado | Endpoint | Frequência |
+|---------|---|---|-----------|
+| LoL (Riot) | LoL Esports API | `/match-result?matchId=X&game=lol` | 30 min |
+| LoL (PandaScore) | PandaScore (prefixo `ps_`) | `/ps-result?matchId=X` | 30 min |
+| Dota 2 | PandaScore | `/dota-result?matchId=X` | 30 min |
+| Futebol | API-Football + DB | `/football-result?matchId=X&team1&team2&sentAt` | 30 min |
+| MMA | ESPN UFC scoreboard | direto via `fetchEspnMmaFights` | 30 min |
+| Tênis | ESPN ATP/WTA + DB | `/tennis-db-result` + ESPN scoreboard | 30 min |
+| **Darts** 🆕 | Sofascore event status | `/darts-result?matchId=X` | 30 min |
+| **Snooker** 🆕 | Sofascore scheduled-events (match por nome+data) | `/snooker-result?matchId=X&team1&team2&sentAt` | 30 min |
+
+**Darts**: `match_id = darts_<sofaEventId>` — extrai o sofaId e consulta `/event/{id}` via `sofascoreDarts.getEventResult`. Lê `status.type === 'finished'` + `winnerCode` (1=home, 2=away).
+
+**Snooker**: `match_id = snooker_<pinnacleMatchupId>` — como Pinnacle não expõe resultado após settlement, busca em Sofascore `scheduled-events/<date>` (janela 7 dias desde `sentAt`) e casa por nome do jogador.
 
 ### Matching de nomes no settlement (`lib/name-match.js`)
 
@@ -721,7 +860,7 @@ lol betting/
 
 ### Odds
 - **`sem match` nos logs**: Nomes de times não casam entre Riot/PandaScore e OddsPapi. Use `/debug-match-odds` para investigar.
-- **HTTP 429 da OddsPapi (`Request limit exceeded — 250 requests`)**: Backoff de 2 horas ativado automaticamente. Verifique `/debug-odds` para tempo restante. Se recorrente: aumente `ODDSPAPI_REFRESH_MIN` (ex: `120` ou `180`) e desative `ODDSPAPI_BOOTSTRAP` e `ODDSPAPI_LIVE_POLL`.
+- **HTTP 429 da OddsPapi**: só relevante se ainda usar OddsPapi. Abr/2026+ padrão é Pinnacle que não tem quota. Se 429 aparecer: `ODDS_API_KEY` vazia (desativa) ou `ODDSPAPI_REFRESH_MIN=180+`.
 - **`/debug-odds` mostra `count: 0, lastSync: nunca`**: OddsPapi nunca conseguiu sincronizar — chave ausente/inválida ou backoff ativo. Veja `lastApiResponse` para detalhes.
 - **LPL sem odds**: OddsPapi pode não ter cobertura para esse confronto específico. Verifique se o TID 46121 está na lista dinâmica via `/debug-odds`.
 - **Sem notificação de partida LoL ao vivo com odds**: confira `SXBET_ENABLED=true`. Odds de LoL live vêm exclusivamente do SX.Bet, independente do OddsPapi. O sistema já faz fallback para odds de série quando Riot API não retorna `currentMap` (entre mapas ou partidas PandaScore `ps_`).
@@ -794,12 +933,12 @@ A primeira tentativa foi usar Betfair Exchange API (delayed key gratuita), mas *
 
 ### Setup
 
-Zero setup — a `X-API-Key` pública é hardcoded em `lib/pinnacle-snooker.js`. Se Pinnacle rotacionar essa chave, use `PINNACLE_API_KEY` no env para override.
+Zero setup extra — a `X-API-Key` pública é hardcoded em `lib/pinnacle.js` (reutilizada em snooker). Se Pinnacle rotacionar, use `PINNACLE_API_KEY` no env para override.
 
 ```env
 SNOOKER_ENABLED=true
 TELEGRAM_TOKEN_SNOOKER=<token>
-SNOOKER_SHADOW=true  (default)
+# SNOOKER_SHADOW=true   # default é false (graduado com CueTracker enrichment)
 ```
 
 ### Limitações
@@ -815,10 +954,6 @@ SNOOKER_SHADOW=true  (default)
 - Para cada matchup: `GET /0.1/matchups/{id}/markets/related/straight` → moneyline + totals
 - Extrai `prices.home` / `prices.away` (American), converte para decimal
 - Cobertura: todos os majors (World, UK, Masters, Tour Championship, German Masters, etc.)
-
-### Código legado
-
-`lib/betfair.js` ficou no repo como referência para deploys fora do BR — se um dia o bot rodar em servidor US/EU, pode ser reativado trocando o import em `server.js`.
 
 ### Modelo ML
 

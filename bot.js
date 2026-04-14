@@ -1155,6 +1155,10 @@ async function settleCompletedTips() {
           let endpoint;
           if (sport === 'football') {
             endpoint = `/football-result?matchId=${encodeURIComponent(tip.match_id)}&team1=${encodeURIComponent(tip.participant1 || '')}&team2=${encodeURIComponent(tip.participant2 || '')}&sentAt=${encodeURIComponent(tip.sent_at || '')}`;
+          } else if (sport === 'darts') {
+            endpoint = `/darts-result?matchId=${encodeURIComponent(tip.match_id)}`;
+          } else if (sport === 'snooker') {
+            endpoint = `/snooker-result?matchId=${encodeURIComponent(tip.match_id)}&team1=${encodeURIComponent(tip.participant1 || '')}&team2=${encodeURIComponent(tip.participant2 || '')}&sentAt=${encodeURIComponent(tip.sent_at || '')}`;
           } else {
             const mid = String(tip.match_id);
             if (mid.startsWith('dota2_')) {
@@ -2078,10 +2082,13 @@ async function autoAnalyzeMatch(token, match) {
         }
 
         // Gate 0.6: Divergência simétrica de MAGNITUDE de P (direção concordante mas P distante)
-        // Backs out a P implícita da IA: P_ai = (1 + EV/100) / odd
+        // Preferimos P REPORTADO explicitamente pela IA (novo campo `|P:XX%|` no formato TIP_ML).
+        // Fallback: derivação `P_ai = (1 + EV/100) / odd` se IA não forneceu P.
         // Se |P_ml − P_ai| > 0.10, há ruído grande entre os dois estimadores — rebaixa um nível
         // (mesmo que a direção bata). Stake permanece com modelP do ML.
-        const pAiImplied = (1 + tipEV / 100) / tipOdd;
+        const reportedPMatch = String(text || '').match(/\|P:\s*([0-9.]+)\s*%?/i);
+        const reportedP = reportedPMatch ? Math.max(0.01, Math.min(0.99, parseFloat(reportedPMatch[1]) / 100)) : null;
+        const pAiImplied = reportedP != null ? reportedP : (1 + tipEV / 100) / tipOdd;
         const pDivergence = Math.abs(modelP - pAiImplied);
         if (pDivergence > 0.10) {
           const confAtual = (filteredTipResult[5] || CONF.MEDIA).trim().toUpperCase();
@@ -2357,9 +2364,11 @@ function buildEsportsPrompt(match, game, gamesContext, o, enrichSection, mlResul
   }
   const tipInstruction = hasRealOdds
     ? `[DECISÃO OBRIGATÓRIA — avalie em ordem:
-1. Se EV(qualquer lado) ≥ +${evThreshold}% E ≥2 sinais checklist → TIP_ML:[time]@[odd]|EV:[%]|STAKE:[u]|CONF:ALTA
-2. Se EV(qualquer lado) ≥ +${evThresholdMedia}% E ≥1 sinal checklist → TIP_ML:[time]@[odd]|EV:[%]|STAKE:[u]|CONF:MÉDIA
-3. Se EV(qualquer lado) ≥ +${evThresholdBaixa}% (sem sinal obrigatório) → TIP_ML:[time]@[odd]|EV:[%]|STAKE:[u]|CONF:BAIXA
+Formato OBRIGATÓRIO inclui P (probabilidade que VOCÊ atribui ao pick, 0-100%):
+1. Se EV(qualquer lado) ≥ +${evThreshold}% E ≥2 sinais checklist → TIP_ML:[time]@[odd]|EV:[%]|P:[%]|STAKE:[u]|CONF:ALTA
+2. Se EV(qualquer lado) ≥ +${evThresholdMedia}% E ≥1 sinal checklist → TIP_ML:[time]@[odd]|EV:[%]|P:[%]|STAKE:[u]|CONF:MÉDIA
+3. Se EV(qualquer lado) ≥ +${evThresholdBaixa}% (sem sinal obrigatório) → TIP_ML:[time]@[odd]|EV:[%]|P:[%]|STAKE:[u]|CONF:BAIXA
+P deve ser consistente: EV = (P/100 × odd − 1) × 100.
 4. Se EV negativo nos dois lados → não gere TIP_ML]`
     : `[NÃO gere tip sem odds reais disponíveis]`;
 
@@ -4257,7 +4266,8 @@ ANÁLISE (seja específico — Dota 2):
 REGRAS: Odds ${minOdds}–${maxOdds} | EV ≥ ${evThreshold}%${isLive ? ' | Ao vivo: só ALTA ou MÉDIA com edge claro' : ''}
 
 DECISÃO FINAL (escolha UMA):
-TIP_ML:[time]@[odd]|EV:[%]|STAKE:[1-3]u|CONF:[ALTA/MÉDIA/BAIXA]
+TIP_ML:[time]@[odd]|EV:[%]|P:[%]|STAKE:[1-3]u|CONF:[ALTA/MÉDIA/BAIXA]
+(P = probabilidade 0-100 que você atribui ao pick; EV = (P/100 × odd − 1) × 100)
 ou SEM_EDGE
 
 Máximo 200 palavras.`;
@@ -4569,7 +4579,7 @@ ANÁLISE REQUERIDA — seja específico:
 5. Confiança (1-10): dados suficientes sobre AMBOS os lutadores?
 
 DECISÃO FINAL:
-- Se EV ≥ +5% E confiança ≥ 7: TIP_ML:[lutador]@[odd]|EV:[%]|STAKE:[1-3]u|CONF:[ALTA/MÉDIA/BAIXA]
+- Se EV ≥ +5% E confiança ≥ 7: TIP_ML:[lutador]@[odd]|EV:[%]|P:[%]|STAKE:[1-3]u|CONF:[ALTA/MÉDIA/BAIXA] (P = sua prob 0-100; EV = (P/100×odd−1)×100)
 - Se edge inexistente ou confiança < 7: SEM_EDGE
 
 Máximo 220 palavras. Seja direto e fundamentado.`
@@ -4592,7 +4602,7 @@ ANÁLISE REQUERIDA — seja específico:
 4. Confiança (1-10): você tem dados suficientes sobre ambos?
 
 DECISÃO FINAL:
-- Se EV ≥ +5% E confiança ≥ 7: TIP_ML:[lutador]@[odd]|EV:[%]|STAKE:[1-3]u|CONF:[ALTA/MÉDIA/BAIXA]
+- Se EV ≥ +5% E confiança ≥ 7: TIP_ML:[lutador]@[odd]|EV:[%]|P:[%]|STAKE:[1-3]u|CONF:[ALTA/MÉDIA/BAIXA] (P = sua prob 0-100; EV = (P/100×odd−1)×100)
 - Se edge inexistente ou confiança < 7: SEM_EDGE
 
 Máximo 220 palavras. Seja direto e fundamentado.`;
@@ -4977,7 +4987,7 @@ INSTRUÇÕES:
    - Apenas ALTA (≥8) ou MÉDIA (7): exige edge claro. BAIXA (≤6): apenas se edge > +8%.
 
 DECISÃO:
-- Edge claro (EV ≥ +5%) E confiança ≥ 7: TIP_ML:[jogador]@[odd]|EV:[%]|STAKE:[1-3]u|CONF:[ALTA/MÉDIA/BAIXA]
+- Edge claro (EV ≥ +5%) E confiança ≥ 7: TIP_ML:[jogador]@[odd]|EV:[%]|P:[%]|STAKE:[1-3]u|CONF:[ALTA/MÉDIA/BAIXA] (P = sua prob 0-100; EV = (P/100×odd−1)×100)
 - Caso contrário: SEM_EDGE
 
 Máximo 200 palavras. Raciocínio breve antes da decisão.`;
@@ -5386,7 +5396,7 @@ INSTRUÇÕES:
 
 DECISÃO (melhor opção apenas):
 - Edge (EV ≥ +${EV_THRESHOLD}%) E confiança ≥ 7:
-  TIP_FB:[mercado]:[seleção]@[odd]|EV:[%]|STAKE:[1-3]u|CONF:[ALTA/MÉDIA/BAIXA]
+  TIP_FB:[mercado]:[seleção]@[odd]|EV:[%]|P:[%]|STAKE:[1-3]u|CONF:[ALTA/MÉDIA/BAIXA] (P = sua prob 0-100; EV = (P/100×odd−1)×100)
   Mercados: 1X2_H, 1X2_D, 1X2_A, OVER_2.5, UNDER_2.5
 - Caso contrário: SEM_EDGE
 
@@ -5870,7 +5880,7 @@ async function checkCLV(caches = {}) {
     const now = Date.now();
 
     const sportsToTrack = Object.entries(SPORTS)
-      .filter(([id, s]) => s && s.enabled && s.token && (id === 'esports' || id === 'football' || id === 'tennis'))
+      .filter(([id, s]) => s && s.enabled && s.token && (id === 'esports' || id === 'football' || id === 'tennis' || id === 'mma' || id === 'darts' || id === 'snooker'))
       .map(([id]) => id);
     if (!sportsToTrack.length) return;
 
@@ -5921,6 +5931,20 @@ async function checkCLV(caches = {}) {
       } else if (sport === 'mma') {
         const matches = caches.mma || await serverGet('/mma-matches').catch(() => []);
         caches.mma = matches;
+        if (Array.isArray(matches)) {
+          for (const m of matches) {
+            if (m.time) {
+              const k1 = norm(m.team1 || '') + '_' + norm(m.team2 || '');
+              const k2 = norm(m.team2 || '') + '_' + norm(m.team1 || '');
+              const ts = new Date(m.time).getTime();
+              matchTimeMap[k1] = ts;
+              matchTimeMap[k2] = ts;
+            }
+          }
+        }
+      } else if (sport === 'darts' || sport === 'snooker') {
+        const matches = caches[sport] || await serverGet(`/${sport}-matches`).catch(() => []);
+        caches[sport] = matches;
         if (Array.isArray(matches)) {
           for (const m of matches) {
             if (m.time) {
@@ -5984,6 +6008,20 @@ async function checkCLV(caches = {}) {
               const o = h2hDecimalOddsForPick(m, tip.tip_participant);
               if (o && o > 1) clvOdds = String(o);
             }
+          }
+        } else if (sport === 'darts' || sport === 'snooker') {
+          // Darts/Snooker: compara odds atuais (Sofascore/Pinnacle) com as odds de abertura da tip
+          const list = caches[sport] || [];
+          const p1n = norm(tip.participant1 || '');
+          const p2n = norm(tip.participant2 || '');
+          const m = list.find(x => {
+            const a1 = norm(x.team1 || ''), a2 = norm(x.team2 || '');
+            return (a1 === p1n && a2 === p2n) || (a1 === p2n && a2 === p1n);
+          });
+          if (m?.odds?.t1 && m?.odds?.t2) {
+            const pickN = norm(tip.tip_participant || '');
+            const a1 = norm(m.team1 || '');
+            clvOdds = pickN === a1 ? m.odds.t1 : m.odds.t2;
           }
         }
 
