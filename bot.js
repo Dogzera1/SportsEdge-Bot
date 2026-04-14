@@ -5560,13 +5560,22 @@ async function runAutoSnooker() {
           if (prev?.tipSent) continue;
           if (prev && (now - prev.ts < 60 * 60 * 1000)) continue;
 
-          // Enrichment: ranking + form recente via snooker.org se configurado.
-          // Por ora só usa implied odds (factorCount=0 → bloqueado pelo ML).
-          // TODO: integrar snooker.org quando chave X-Requested-By for aprovada.
+          // Enrichment via CueTracker (scraping HTML) — win rate da temporada atual.
+          // Sem ranking oficial (snooker.org precisa email approval), mas win rate já
+          // dá ao modelo o segundo fator necessário para gerar edge.
+          const cuetracker = require('./lib/cuetracker');
+          const [stats1, stats2] = await Promise.all([
+            cuetracker.getPlayerStats(match.team1).catch(() => null),
+            cuetracker.getPlayerStats(match.team2).catch(() => null),
+          ]);
           const enrich = {
             rankP1: null, rankP2: null,
-            winRateP1: null, winRateP2: null
+            winRateP1: stats1?.winRate ?? null,
+            winRateP2: stats2?.winRate ?? null
           };
+          if (stats1 || stats2) {
+            log('DEBUG', 'AUTO-SNOOKER', `CueTracker: ${match.team1}=${stats1?.winRate ?? 'n/a'}% (${stats1?.totalMatches ?? 0} jogos) | ${match.team2}=${stats2?.winRate ?? 'n/a'}% (${stats2?.totalMatches ?? 0} jogos)`);
+          }
 
           const ml = snookerPreFilter(match, enrich);
           if (!ml.pass) {

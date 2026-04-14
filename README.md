@@ -158,10 +158,11 @@ DARTS_ENABLED=true                      # requer TELEGRAM_TOKEN_DARTS + SOFASCOR
 SNOOKER_ENABLED=true                    # requer TELEGRAM_TOKEN_SNOOKER + Betfair (BF_APP_KEY etc.)
 
 # ── Shadow mode (modo auditoria — tip gerada mas NÃO envia DM) ──
-# Default: darts/snooker iniciam em shadow. Outros em produção.
-DARTS_SHADOW=true                       # default; desligue após 30 tips com CLV+
-SNOOKER_SHADOW=true                     # default; desligue após 30 tips com CLV+
-# ESPORTS_SHADOW=false                  # (outros esportes também podem rodar em shadow)
+# Darts + Snooker: ambos GRADUADOS (default não-shadow).
+# Darts: 3-dart avg + WR via Sofascore (proxy Public-Sofascore-API).
+# Snooker: WR temporada via scraper CueTracker (lib/cuetracker.js) + implied Pinnacle.
+# DARTS_SHADOW=true                     # voltar darts pra shadow
+# SNOOKER_SHADOW=true                   # voltar snooker pra shadow
 
 # ── Darts — Sofascore ──
 # Fonte única (odds + 3-dart avg + 180s + checkouts) via Sofascore
@@ -808,11 +809,18 @@ SNOOKER_SHADOW=true  (default)
 
 ### Modelo ML
 
-`lib/snooker-ml.js` com 2 sinais:
-- **Log-diff de ranking** (peso principal) — ranking oficial é o sinal mais limpo sem scraping
-- Win rate recente (via snooker.org — pendente de integração; por ora factorCount=0 → gate segura)
+`lib/snooker-ml.js` com 2 sinais possíveis:
+- **Log-diff de ranking** (placeholder — snooker.org pendente de aprovação do header `X-Requested-By`)
+- **Win rate da temporada atual** (ATIVO) — via scraper `lib/cuetracker.js` de `cuetracker.net/players/<slug>`
 
-Com só implied odds como sinal (sem rank enrichment), o pré-filtro **bloqueia todas as tips** até integrar snooker.org. Isso é intencional durante shadow — melhor 0 tips erradas que 30 tips com sinal fraco.
+### Enrichment CueTracker (`lib/cuetracker.js`)
+
+CueTracker não tem API oficial — scraping HTML puro do padrão `Won:</span> N (XX.XX%)`.
+
+- **Cache 6h** (stats mudam lentamente — temporadas snooker são longas)
+- **Slug**: nome convertido para lowercase com hífens (ex: `Judd Trump` → `judd-trump`)
+- **Validação**: testado com Trump, Selby, Bingham, Vafaei, Zhou Yuelong, Jackson Page — todos retornaram stats corretas
+- **Risco**: CueTracker pode mudar HTML. Se quebrar, ajustar o regex em `_fetchHtml` + fallback para shadow automático.
 
 ### Whitelist
 
