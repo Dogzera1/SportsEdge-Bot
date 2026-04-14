@@ -49,7 +49,7 @@ THE_ODDS_API_KEY=<key>
 LOL_API_KEY=<key>                      # Riot
 PANDASCORE_TOKEN=<token>               # PandaScore (LoL/Dota stats)
 API_SPORTS_KEY=<key>                   # API-Football (soccer)
-SOFASCORE_PROXY_BASE=<url>             # Public-Sofascore-API (darts + enrichment)
+SOFASCORE_PROXY_BASE=<url>             # Public-Sofascore-API deploy Railway — ver RAILWAY_DEPLOY.md
 
 # ── Admin + Risk ──
 ADMIN_USER_IDS=<id1,id2>               # seu ID do Telegram
@@ -303,7 +303,9 @@ SNOOKER_ENABLED=true                    # requer TELEGRAM_TOKEN_SNOOKER (odds Pi
 
 # ── Darts — Sofascore ──
 # Fonte única (odds + 3-dart avg + 180s + checkouts) via Sofascore
-SOFASCORE_PROXY_BASE=https://xxx.ngrok-free.app/api/v1/sofascore  # Public-Sofascore-API no projeto
+SOFASCORE_PROXY_BASE=https://sofascore-proxy-production.up.railway.app/api/v1/sofascore
+#   ↑ Proxy deploy no próprio Railway como service separado (ver Public-Sofascore-API/sofascore_service/RAILWAY_DEPLOY.md)
+#   Substitui o ngrok antigo — URL permanente, sem expirar.
 # SOFASCORE_DIRECT=true                 # alternativa: chamar api.sofascore.com direto
 DARTS_TOURNAMENT_WHITELIST=pdc,premier-league-darts,world-matchplay,world-grand-prix,uk-open,players-championship,european-tour,grand-slam,world-series-finals
 
