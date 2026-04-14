@@ -4581,12 +4581,30 @@ async function pollTennis(runOnce = false) {
           `/tennis-elo?p1=${encodeURIComponent(match.team1)}&p2=${encodeURIComponent(match.team2)}&surface=${surface}&imp1=${imp1Elo.toFixed(4)}&imp2=${imp2Elo.toFixed(4)}`
         ).catch(() => null);
 
-        // Fallback: use ranking-based enrich when Elo unavailable
+        // Sofascore enrichment (cobertura superior a ESPN em challengers/WTA 250/ITF)
+        let sofaEnrich = null;
+        try {
+          const sofascoreTennis = require('./lib/sofascore-tennis');
+          sofaEnrich = await sofascoreTennis.enrichMatch(match.team1, match.team2, match.time).catch(() => null);
+          if (sofaEnrich) log('DEBUG', 'AUTO-TENNIS', `Sofascore event ${sofaEnrich.eventId}: ${match.team1} vs ${match.team2}`);
+        } catch (_) {}
+
+        // Fallback em cascata: DB → Sofascore → ranking
         const rankEnrich = rankingToEnrich(rank1, rank2, surface);
+        const pickForm = (db, sofa, rank) => {
+          if (db && (db.wins + db.losses) >= 3) return db;
+          if (sofa && (sofa.wins + sofa.losses) >= 3) return sofa;
+          return rank || null;
+        };
+        const pickH2h = (db, sofa) => {
+          if (db && db.totalMatches > 0) return db;
+          if (sofa && sofa.totalMatches > 0) return sofa;
+          return { t1Wins: 0, t2Wins: 0, totalMatches: 0 };
+        };
         const tennisEnrich = {
-          form1: (dbForm1 && (dbForm1.wins + dbForm1.losses) >= 3) ? dbForm1 : (rankEnrich?.form1 || null),
-          form2: (dbForm2 && (dbForm2.wins + dbForm2.losses) >= 3) ? dbForm2 : (rankEnrich?.form2 || null),
-          h2h: dbH2h || { t1Wins: 0, t2Wins: 0, totalMatches: 0 },
+          form1: pickForm(dbForm1, sofaEnrich?.form1, rankEnrich?.form1),
+          form2: pickForm(dbForm2, sofaEnrich?.form2, rankEnrich?.form2),
+          h2h: pickH2h(dbH2h, sofaEnrich?.h2h),
           oddsMovement: null
         };
 
