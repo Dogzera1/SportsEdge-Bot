@@ -5505,6 +5505,9 @@ async function runAutoDarts() {
             avgP2: recentP2?.avgLast || null,
             winRateP1: recentP1?.winRate || null,
             winRateP2: recentP2?.winRate || null,
+            gamesP1: recentP1?.games || 0,
+            gamesP2: recentP2?.games || 0,
+            // checkoutP1/P2: TODO — extrair de getPlayerRecentAvg (já disponível no stats)
           };
 
           const ml = dartsPreFilter(match, enrich);
@@ -5613,7 +5616,11 @@ async function runAutoSnooker() {
           const enrich = {
             rankP1: null, rankP2: null,
             winRateP1: stats1?.winRate ?? null,
-            winRateP2: stats2?.winRate ?? null
+            winRateP2: stats2?.winRate ?? null,
+            gamesP1: stats1?.totalMatches ?? 0,
+            gamesP2: stats2?.totalMatches ?? 0,
+            centuriesP1: stats1?.centuries ?? null,
+            centuriesP2: stats2?.centuries ?? null,
           };
           if (stats1 || stats2) {
             log('DEBUG', 'AUTO-SNOOKER', `CueTracker: ${match.team1}=${stats1?.winRate ?? 'n/a'}% (${stats1?.totalMatches ?? 0} jogos) | ${match.team2}=${stats2?.winRate ?? 'n/a'}% (${stats2?.totalMatches ?? 0} jogos)`);
