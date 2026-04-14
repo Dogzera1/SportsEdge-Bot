@@ -1352,14 +1352,21 @@ async function checkLiveNotifications() {
     const allLive = Array.isArray(lolList) ? lolList.filter(m => m.status === 'live') : [];
 
     for (const match of allLive) {
-      // Ao vivo: notificar apenas se tivermos odds reais do MAPA atual (mercado aberto)
+      // Ao vivo: tentar odds do mapa atual; fallback para odds de série se mapa não disponível
       const liveIds = await serverGet(`/live-gameids?matchId=${encodeURIComponent(String(match.id))}`).catch(() => []);
       const currentMap = Array.isArray(liveIds) ? (liveIds.find(x => x.hasLiveData)?.gameNumber || null) : null;
-      if (!currentMap) continue;
       const fmt = match.format ? `&format=${encodeURIComponent(String(match.format))}` : '';
       const s1 = Number.isFinite(match.score1) ? `&score1=${encodeURIComponent(String(match.score1))}` : '';
       const s2 = Number.isFinite(match.score2) ? `&score2=${encodeURIComponent(String(match.score2))}` : '';
-      const mapOdds = await serverGet(`/odds?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}&map=${encodeURIComponent(String(currentMap))}${fmt}${s1}${s2}&force=1&game=lol`).catch(() => null);
+
+      let mapOdds = null;
+      if (currentMap) {
+        mapOdds = await serverGet(`/odds?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}&map=${encodeURIComponent(String(currentMap))}${fmt}${s1}${s2}&force=1&game=lol`).catch(() => null);
+      }
+      // Fallback: odds de série (quando mapa ainda não disponível ou partida PS sem live-gameids)
+      if (!mapOdds?.t1 || parseFloat(mapOdds.t1) <= 1.0) {
+        mapOdds = await serverGet(`/odds?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}&game=lol`).catch(() => null);
+      }
       if (!mapOdds?.t1 || parseFloat(mapOdds.t1) <= 1.0) continue;
 
       // Dedup por SÉRIE (não por mapa) para não duplicar notificações em cada mapa
@@ -1373,19 +1380,20 @@ async function checkLiveNotifications() {
             const gameIcon = '🎮';
             const isMapMarket = (o.mapMarket === true);
             const marketLabel = isMapMarket ? 'ML do mapa' : 'ML da série';
+            const mapHeader = currentMap ? `🗺️ *Mapa ${currentMap} (${marketLabel})*\n\n` : '';
             const mapNote = !isMapMarket
               ? `⚠️ *Mercado ML do mapa indisponível* — exibindo ML da série\n`
               : '';
             const txt = `${gameIcon} 🔴 *PARTIDA AO VIVO (COM MERCADO ABERTO)!*\n` +
-              `🗺️ *Mapa ${currentMap} (${marketLabel})*\n\n` +
+              mapHeader +
               `*${match.team1}* ${match.score1}-${match.score2} *${match.team2}*\n` +
               `📋 ${match.league}\n` +
               mapNote +
               `💰 ${match.team1}: ${o.t1} | ${match.team2}: ${o.t2}\n\n` +
               (isMapMarket
                 ? `_A partir de agora: apenas ML do mapa atual. Odds acima são do mapa._`
-                : `_A partir de agora: apenas ML do mapa atual. Quando mercado do mapa abrir, odds serão do mapa._`);
-            
+                : `_Odds de série disponíveis. Quando mercado do mapa abrir, odds serão do mapa._`);
+
             await sendDM(token, userId, txt);
           } catch(e) {
             if (e.message?.includes('403')) subscribedUsers.delete(userId);
