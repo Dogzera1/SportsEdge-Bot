@@ -3381,35 +3381,41 @@ const server = http.createServer(async (req, res) => {
     try {
       const base = `https://feed.lolesports.com/livestats/v1/window/${gameId}`;
 
-      // 1) Buscar metadata do jogo (times, campeões, etc)
+      // 1) Buscar metadata do jogo (times, campeões, etc) — não aborta se 204,
+      //    pois algumas ligas só respondem com startingTime específico.
       let wr = await httpGet(base, LOL_HEADERS);
       if (wr.status === 403) wr = await httpGet(base, {});
+      const raw = wr.status === 200 ? safeParse(wr.body, {}) : {};
       if (wr.status !== 200) {
-        log('WARN', 'LIVE-GAME', `window/${gameId} status=${wr.status}`);
-        sendJson(res, { error: 'Game not found: ' + wr.status, hasLiveStats: false }, 404);
-        return;
+        log('INFO', 'LIVE-GAME', `window/${gameId}: base status=${wr.status} — tentando varredura mesmo assim`);
       }
-      const raw = safeParse(wr.body, {});
 
-      // 2) Varredura de timestamps: 45s, 90s, 150s, 3min, 5min, 10min atrás.
-      //    Riot livestats tem delay mínimo ~45s e frames em múltiplos de 10s.
+      // 2) Varredura ampla: 45s→30min. Ligas tier-2 costumam ter delay maior
+      //    e/ou janelas arquivadas acessíveis por startingTime histórico.
+      const scanDelays = [45, 60, 90, 120, 150, 180, 240, 300, 420, 600, 900, 1200, 1800];
       let frames = [];
       let usedTs = null;
-      for (const secAgo of [45, 90, 150, 180, 300, 600]) {
+      let scanStatuses = [];
+      for (const secAgo of scanDelays) {
         const ts = new Date(Math.floor((Date.now() - secAgo * 1000) / 10000) * 10000).toISOString();
         const r = await httpGet(`${base}?startingTime=${encodeURIComponent(ts)}`, {});
+        scanStatuses.push(`${secAgo}s=${r.status}`);
         if (r.status !== 200) continue;
         const d = safeParse(r.body, {});
         if (d.frames?.length && d.frames.some(f => f.blueTeam?.totalGold > 0)) {
           frames = d.frames;
           usedTs = secAgo;
+          // Se base estava 204, pega metadata do primeiro frame com sucesso
+          if (!raw.gameMetadata && d.gameMetadata) raw.gameMetadata = d.gameMetadata;
           break;
         }
-        // Guarda frames vazios como último recurso se nenhum tiver gold
         if (!frames.length && d.frames?.length) frames = d.frames;
+        if (!raw.gameMetadata && d.gameMetadata) raw.gameMetadata = d.gameMetadata;
       }
       if (usedTs === null) {
-        log('WARN', 'LIVE-GAME', `window/${gameId}: varredura não achou frames com gold (frames=${frames.length})`);
+        log('WARN', 'LIVE-GAME', `window/${gameId}: varredura não achou frames com gold (frames=${frames.length}, scan: ${scanStatuses.join(',')})`);
+      } else {
+        log('INFO', 'LIVE-GAME', `window/${gameId}: gold encontrado a ${usedTs}s atrás (${frames.length} frames)`);
       }
 
       // 4) Último recurso: usar frames iniciais
