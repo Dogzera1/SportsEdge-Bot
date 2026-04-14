@@ -5604,7 +5604,7 @@ Máximo 200 palavras.`;
             `📈 EV: *+${evPct.toFixed(1)}%*\n` +
             `💵 Stake: *${stakeAdj}u*\n` +
             `🧠 ${tipReason}\n\n` +
-            `⚠️ _Odds Betfair (delayed ~1s)._`;
+            `⚠️ _Odds Pinnacle._`;
 
           for (const [userId, prefs] of subscribedUsers) {
             if (!prefs.has('snooker')) continue;

@@ -169,12 +169,11 @@ SOFASCORE_PROXY_BASE=https://xxx.ngrok-free.app/api/v1/sofascore  # Public-Sofas
 # SOFASCORE_DIRECT=true                 # alternativa: chamar api.sofascore.com direto
 DARTS_TOURNAMENT_WHITELIST=pdc,premier-league-darts,world-matchplay,world-grand-prix,uk-open,players-championship,european-tour,grand-slam,world-series-finals
 
-# ── Snooker — Betfair Exchange (delayed key gratuita) ──
-# Setup manual (uma vez): developer.betfair.com → criar delayed App Key
-# Requer conta Betfair com depósito mín. £10 + 2FA ativo
-BF_APP_KEY=sua_delayed_app_key          # applicationKey com delayData:true
-BF_USER=seu_username_betfair
-BF_PASS=sua_senha_betfair
+# ── Snooker — Pinnacle guest API ──
+# Usa endpoint público guest.api.arcadia.pinnacle.com (funciona do BR, sem auth).
+# Betfair foi removido porque bloqueia IPs brasileiros.
+# PINNACLE_API_KEY=...                   # opcional: override da X-API-Key pública
+#                                        # (a chave atual está hardcoded em lib/pinnacle-snooker.js)
 
 # ── Futebol — configuração ──
 FOOTBALL_LEAGUES=soccer_brazil_serie_b,soccer_brazil_serie_c  # ligas a monitorar (The Odds API keys)
@@ -350,7 +349,7 @@ Cada esporte exibe fair odds calculadas pelo **próprio modelo de análise do si
 | Tênis | Sackmann (Elo superfície) + ESPN rankings ATP/WTA + Sofascore fallback | Modelo Elo-log por superfície |
 | Futebol | API-Football (forma, H2H, standings) + Sofascore home/away split | `calcFootballScore` com Poisson + home boost |
 | Darts | Sofascore (3-dart avg + win rate últimos 10 jogos) | `dartsPreFilter` — 3-dart avg diff é o sinal primário |
-| Snooker | Betfair Exchange (odds) + ranking fallback | `snookerPreFilter` — log-diff de ranking ± win rate recente |
+| Snooker | Pinnacle guest API (odds) + ranking fallback | `snookerPreFilter` — log-diff de ranking ± win rate recente |
 
 ---
 
@@ -751,30 +750,41 @@ Retorna JSON com summary + últimas N tips para análise externa (Excel, Python 
 
 ---
 
-## Snooker (Betfair Exchange)
+## Snooker (Pinnacle guest API)
 
-Novo esporte em shadow mode, alimentado pela **Betfair Exchange API** (delayed key gratuita).
+Novo esporte em shadow mode, alimentado pela **Pinnacle Guest API** — endpoint público usado pelo próprio frontend pinnacle.com, sem auth real.
 
-### Setup manual (uma vez)
+### Por que Pinnacle (e não Betfair)
 
-1. Conta Betfair com depósito mínimo £10 + 2FA ativo
-2. `developer.betfair.com` → **Get Started** → criar **delayed App Key** (grátis; versão `delayData:true`)
-3. Guardar `BF_APP_KEY`, `BF_USER`, `BF_PASS` no Railway
-4. `SNOOKER_ENABLED=true` + `TELEGRAM_TOKEN_SNOOKER=<token>`
+A primeira tentativa foi usar Betfair Exchange API (delayed key gratuita), mas **Betfair bloqueia IPs brasileiros** (Region: BR → Restricted). Pinnacle aceita acesso de BR e tem endpoint guest público.
 
-### Limitações do delayed tier (free)
+### Setup
 
-- Dados com ~1-3s de delay (ok para pré-jogo, marginal para in-play de alta velocidade)
-- Sem quota mensal — pode rodar 24/7
+Zero setup — a `X-API-Key` pública é hardcoded em `lib/pinnacle-snooker.js`. Se Pinnacle rotacionar essa chave, use `PINNACLE_API_KEY` no env para override.
+
+```env
+SNOOKER_ENABLED=true
+TELEGRAM_TOKEN_SNOOKER=<token>
+SNOOKER_SHADOW=true  (default)
+```
+
+### Limitações
+
+- Sem auth oficial — a key é pública mas pode ser rotacionada sem aviso (risco médio)
 - Rate limit soft: cache de 3 min no endpoint `/snooker-matches`
-- **Apenas leitura** — não permite apostar via API (só consumimos odds aqui)
+- Schema pode mudar (mudou uma vez em 2023) — se quebrar, ajustar parser em `lib/pinnacle-snooker.js`
+- Odds em formato **American odds** (+305, -499) → convertidas para decimal via `americanToDecimal()`
 
-### Fluxo (`lib/betfair.js`)
+### Fluxo (`lib/pinnacle-snooker.js`)
 
-- Login interactive (`/api/login`) → sessionToken 12h
-- KeepAlive automático a cada 20 min
-- `listEvents(eventTypeId=6422)` → `listMarketCatalogue(MATCH_ODDS)` → `listMarketBook(EX_BEST_OFFERS)`
-- **Odds = best back price** (maior odd que alguém está oferecendo no mercado)
+- `GET /0.1/sports/28/matchups?brandId=0` → lista de matchups ativos (sportId 28 = snooker)
+- Para cada matchup: `GET /0.1/matchups/{id}/markets/related/straight` → moneyline + totals
+- Extrai `prices.home` / `prices.away` (American), converte para decimal
+- Cobertura: todos os majors (World, UK, Masters, Tour Championship, German Masters, etc.)
+
+### Código legado
+
+`lib/betfair.js` ficou no repo como referência para deploys fora do BR — se um dia o bot rodar em servidor US/EU, pode ser reativado trocando o import em `server.js`.
 
 ### Modelo ML
 

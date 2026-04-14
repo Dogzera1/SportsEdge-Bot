@@ -13,7 +13,8 @@ const apiFootball   = require('./lib/api-football');
 const { tennisSinglePlayerNameMatch, tennisPairMatchesPlayers } = require('./lib/tennis-match');
 const { nameMatches } = require('./lib/name-match');
 const sofascoreDarts = require('./lib/sofascore-darts');
-const betfair = require('./lib/betfair');
+const pinnacleSnooker = require('./lib/pinnacle-snooker');
+// lib/betfair.js mantido no repo mas não usado aqui (Betfair bloqueia IPs brasileiros).
 const { esportsPreFilter } = require('./lib/ml');
 const tennisML = require('./lib/tennis-ml');
 const { fetchGridEnrichForMatch } = require('./lib/grid');
@@ -6078,11 +6079,15 @@ const server = http.createServer(async (req, res) => {
   // ── Darts: lista de eventos via Sofascore (fonte única para odds + stats) ──
   if (p === '/darts-matches') {
     try {
-      const events = await sofascoreDarts.listLiveAndUpcoming().catch(() => []);
+      const events = await sofascoreDarts.listLiveAndUpcoming().catch(e => {
+        log('WARN', 'DARTS', `listLiveAndUpcoming falhou: ${e.message}`);
+        return [];
+      });
       const matches = [];
+      let noOdds = 0;
       for (const ev of events) {
         const odds = await sofascoreDarts.getOdds(ev.id).catch(() => null);
-        if (!odds?.t1 || !odds?.t2) continue;
+        if (!odds?.t1 || !odds?.t2) { noOdds++; continue; }
         const status = ev?.status?.type === 'inprogress' ? 'live' : 'upcoming';
         matches.push({
           id: `darts_${ev.id}`,
@@ -6103,6 +6108,7 @@ const server = http.createServer(async (req, res) => {
         if (b.status === 'live' && a.status !== 'live') return 1;
         return new Date(a.time || 0).getTime() - new Date(b.time || 0).getTime();
       });
+      log('INFO', 'DARTS', `/darts-matches: ${matches.length} partidas com odds (descartados sem odds: ${noOdds})`);
       sendJson(res, matches);
     } catch (e) {
       log('ERROR', 'DARTS', e.message);
@@ -6111,51 +6117,40 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // ── Snooker: lista de eventos + odds via Betfair Exchange (delayed key) ──
+  // ── Snooker: odds via Pinnacle guest API (funciona do BR) ──
   if (p === '/snooker-matches') {
-    if (!betfair.isConfigured()) { sendJson(res, []); return; }
     try {
-      const daysAhead = parseInt(parsed.query.days || '14', 10) || 14;
-      // Cache curto para economizar requests (Betfair tem soft rate limit)
       if (!global.__snookerCache) global.__snookerCache = { ts: 0, data: [] };
-      const TTL = 3 * 60 * 1000; // 3 min
+      const TTL = 3 * 60 * 1000; // 3 min (Pinnacle tem rate limit soft)
       if (Date.now() - global.__snookerCache.ts < TTL && global.__snookerCache.data.length) {
         sendJson(res, global.__snookerCache.data);
         return;
       }
-      const odds = await betfair.fetchSnookerMatchOdds(daysAhead);
-      const matches = [];
-      for (const ev of odds) {
-        const [r1, r2] = ev.runners;
-        if (!r1 || !r2) continue;
-        const t1Odds = r1.backPrice; // best back price = equivalente ao odds de casa
-        const t2Odds = r2.backPrice;
-        if (!t1Odds || !t2Odds || t1Odds <= 1 || t2Odds <= 1) continue;
-        const isLive = ev.startTime && new Date(ev.startTime).getTime() <= Date.now();
-        matches.push({
-          id: `snooker_${ev.marketId}`,
-          marketId: ev.marketId,
-          eventId: ev.eventId,
+      const rows = await pinnacleSnooker.fetchSnookerMatchOdds();
+      const now = Date.now();
+      const matches = rows.map(r => {
+        const t = r.startTime ? new Date(r.startTime).getTime() : 0;
+        const isLive = r.status === 'live' || (t > 0 && t <= now);
+        return {
+          id: `snooker_${r.id}`,
+          pinMatchupId: r.id,
           game: 'snooker',
           status: isLive ? 'live' : 'upcoming',
-          team1: r1.name, team2: r2.name,
-          selectionId1: r1.selectionId,
-          selectionId2: r2.selectionId,
-          league: ev.competition || 'Snooker',
-          time: ev.startTime,
-          odds: {
-            t1: String(t1Odds), t2: String(t2Odds),
-            t1Lay: r1.layPrice, t2Lay: r2.layPrice,
-            bookmaker: 'Betfair'
-          }
-        });
-      }
+          team1: r.team1,
+          team2: r.team2,
+          league: r.league,
+          leagueGroup: r.group,
+          time: r.startTime,
+          odds: { t1: String(r.oddsT1), t2: String(r.oddsT2), bookmaker: 'Pinnacle' }
+        };
+      });
       matches.sort((a, b) => {
         if (a.status === 'live' && b.status !== 'live') return -1;
         if (b.status === 'live' && a.status !== 'live') return 1;
         return new Date(a.time || 0).getTime() - new Date(b.time || 0).getTime();
       });
       global.__snookerCache = { ts: Date.now(), data: matches };
+      log('INFO', 'SNOOKER', `/snooker-matches: ${matches.length} partidas (Pinnacle)`);
       sendJson(res, matches);
     } catch (e) {
       log('ERROR', 'SNOOKER', e.message);

@@ -72,7 +72,9 @@
       "Read(//tmp/**)",
       "Bash(python -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\('IDs:', [e['id'] for e in d.get\\('events',[]\\)[:5]]\\)\")",
       "Bash(python -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\('events:', len\\(d.get\\('events',[]\\)\\)\\); [print\\(e['id'], e['tournament']['name'], '|', e['homeTeam']['name'], 'vs', e['awayTeam']['name']\\) for e in d.get\\('events',[]\\)[:10]]\")",
-      "Bash(python -c \"import json,sys; d=json.load\\(sys.stdin\\); evts=d.get\\('events',[]\\)[:5]; [print\\(e['id'], e['tournament']['name'], '|', e['homeTeam']['name'], 'vs', e['awayTeam']['name'], '|', e['status']['type']\\) for e in evts]\")"
+      "Bash(python -c \"import json,sys; d=json.load\\(sys.stdin\\); evts=d.get\\('events',[]\\)[:5]; [print\\(e['id'], e['tournament']['name'], '|', e['homeTeam']['name'], 'vs', e['awayTeam']['name'], '|', e['status']['type']\\) for e in evts]\")",
+      "Bash(python -c \"import json,sys; d=json.load\\(sys.stdin\\); [print\\(s['id'], s.get\\('name'\\)\\) for s in d[:40]]\")",
+      "Bash(python -c \"import json,sys; d=json.load\\(sys.stdin\\); evs=d.get\\('events',[]\\); print\\(f'total={len\\(evs\\)}'\\); [print\\(e['id'], '|', e.get\\('tournament',{}\\).get\\('uniqueTournament',{}\\).get\\('slug','NO_SLUG'\\), '|', e.get\\('tournament',{}\\).get\\('uniqueTournament',{}\\).get\\('name','NO_NAME'\\), '|', e['homeTeam']['name'], 'vs', e['awayTeam']['name'], '|', e.get\\('status',{}\\).get\\('type','?'\\)\\) for e in evs[:15]]\")"
     ]
   }
 }
