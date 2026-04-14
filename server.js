@@ -3222,6 +3222,88 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // ── OpenDota: live stats de Dota 2 (github.com/odota/core) ──
+  if (p === '/opendota-live') {
+    const t1 = String(parsed.query.team1 || '').trim();
+    const t2 = String(parsed.query.team2 || '').trim();
+    if (!t1 || !t2) { sendJson(res, { hasLiveStats: false, error: 'team1/team2 obrigatórios' }); return; }
+    try {
+      const apiKeyQs = process.env.OPENDOTA_API_KEY ? `?api_key=${encodeURIComponent(process.env.OPENDOTA_API_KEY)}` : '';
+      const [liveR, heroesR] = await Promise.all([
+        httpGet(`https://api.opendota.com/api/live${apiKeyQs}`, {}),
+        (global.__odHeroesCache && (Date.now() - global.__odHeroesCache.ts) < 24*60*60*1000)
+          ? Promise.resolve({ status: 200, body: JSON.stringify(global.__odHeroesCache.data) })
+          : httpGet(`https://api.opendota.com/api/heroes${apiKeyQs}`, {}),
+      ]);
+      if (liveR.status !== 200) { sendJson(res, { hasLiveStats: false, error: `OpenDota status ${liveR.status}` }); return; }
+      const heroes = safeParse(heroesR.body, []) || [];
+      if (Array.isArray(heroes) && heroes.length) global.__odHeroesCache = { ts: Date.now(), data: heroes };
+      const heroById = {};
+      for (const h of (Array.isArray(heroes) ? heroes : [])) heroById[h.id] = h.localized_name || h.name;
+
+      const live = safeParse(liveR.body, []) || [];
+      if (!Array.isArray(live) || !live.length) { sendJson(res, { hasLiveStats: false, error: 'sem partidas ao vivo' }); return; }
+
+      const normName = (s) => String(s||'').toLowerCase().replace(/[^a-z0-9]/g,'');
+      const n1 = normName(t1), n2 = normName(t2);
+      const nameMatches = (a, b) => {
+        if (!a || !b) return false;
+        return a.includes(b) || b.includes(a);
+      };
+
+      let hit = null, swap = false;
+      for (const m of live) {
+        const rn = normName(m.team_name_radiant || m.radiant_team?.team_name || m.radiant_team?.name);
+        const dn = normName(m.team_name_dire    || m.dire_team?.team_name    || m.dire_team?.name);
+        if (nameMatches(rn, n1) && nameMatches(dn, n2)) { hit = m; swap = false; break; }
+        if (nameMatches(rn, n2) && nameMatches(dn, n1)) { hit = m; swap = true;  break; }
+      }
+      if (!hit) { sendJson(res, { hasLiveStats: false, error: 'match não encontrado no OpenDota live' }); return; }
+
+      const players = Array.isArray(hit.players) ? hit.players : [];
+      const buildSide = (teamFlag) => {
+        const ps = players.filter(p => (teamFlag === 'radiant' ? p.team === 0 : p.team === 1))
+          .map(p => ({
+            name: p.name || p.personaname || '?',
+            hero: heroById[p.hero_id] || (p.hero_id ? `hero${p.hero_id}` : '?'),
+            kills: p.kills || 0,
+            deaths: p.deaths || 0,
+            assists: p.assists || 0,
+            gold: p.net_worth || p.gold || 0,
+            level: p.level || 0,
+            lastHits: p.last_hits || 0,
+          }));
+        return {
+          name: teamFlag === 'radiant'
+            ? (hit.team_name_radiant || hit.radiant_team?.team_name || 'Radiant')
+            : (hit.team_name_dire    || hit.dire_team?.team_name    || 'Dire'),
+          players: ps,
+          totalGold: ps.reduce((s, p) => s + (p.gold || 0), 0),
+          totalKills: teamFlag === 'radiant' ? (hit.radiant_score || 0) : (hit.dire_score || 0),
+        };
+      };
+      const radiant = buildSide('radiant');
+      const dire = buildSide('dire');
+      const blue = swap ? dire : radiant;
+      const red  = swap ? radiant : dire;
+      const hasLiveStats = (blue.totalGold + red.totalGold) > 0;
+
+      sendJson(res, {
+        hasLiveStats,
+        matchId: hit.match_id,
+        gameTime: hit.game_time || 0,
+        radiantLead: (swap ? -1 : 1) * (hit.radiant_lead || 0),
+        blueTeam: blue,
+        redTeam:  red,
+        _source: 'opendota'
+      });
+    } catch(e) {
+      log('ERROR', 'OPENDOTA', e.message);
+      sendJson(res, { hasLiveStats: false, error: e.message });
+    }
+    return;
+  }
+
   // ── PandaScore: live stats de Dota 2 ──
   if (p === '/ps-dota-live') {
     const rawId = parsed.query.matchId || '';
