@@ -29,8 +29,11 @@ const ODDSPAPI_KEY = process.env.ODDS_API_KEY
   || process.env.ODDSPAPI_KEY
   || process.env.ODDS_PAPI_KEY
   || process.env.ESPORTS_ODDS_KEY;
-const LOL_KEY = process.env.LOL_API_KEY || process.env.NEXT_PUBLIC_LOL_API || '';
-const LOL_HEADERS = LOL_KEY ? { 'x-api-key': LOL_KEY } : {};
+// Chave pública do lolesports (mesma hardcoded por andy/aureom/maisesports).
+// Vaza em qualquer inspect do frontend — Riot a trata como chave read-only pública.
+const LOL_PUBLIC_KEY = '0TvQnueqKa5mxJntVWt0w4LpLfEkrV1Ta8rQBb9Z';
+const LOL_KEY = process.env.LOL_API_KEY || process.env.NEXT_PUBLIC_LOL_API || LOL_PUBLIC_KEY;
+const LOL_HEADERS = { 'x-api-key': LOL_KEY };
 const PANDASCORE_TOKEN = process.env.PANDASCORE_TOKEN || '';
 // The Odds API — usado para MMA (20k req/mês)
 const THE_ODDS_API_KEY = process.env.THE_ODDS_API_KEY || '';
@@ -3398,7 +3401,7 @@ const server = http.createServer(async (req, res) => {
       let scanStatuses = [];
       for (const secAgo of scanDelays) {
         const ts = new Date(Math.floor((Date.now() - secAgo * 1000) / 10000) * 10000).toISOString();
-        const r = await httpGet(`${base}?startingTime=${encodeURIComponent(ts)}`, {});
+        const r = await httpGet(`${base}?startingTime=${encodeURIComponent(ts)}`, LOL_HEADERS);
         scanStatuses.push(`${secAgo}s=${r.status}`);
         if (r.status !== 200) continue;
         const d = safeParse(r.body, {});
