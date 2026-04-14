@@ -179,8 +179,9 @@ DARTS_TOURNAMENT_WHITELIST=pdc,premier-league-darts,world-matchplay,world-grand-
 # ── LoL Pre-match — Pinnacle (substitui OddsPapi travada) ──
 # Pinnacle cobre LCK, LCS, LFL, CBLOL, LPL, EMEA Masters, NACL, Rift Legends, etc.
 # Sem quota mensal — só rate limit soft (cache 3min interno).
-PINNACLE_LOL=true                       # ativa fetcher Pinnacle para LoL pre-match
-PINNACLE_LOL_REFRESH_MIN=10             # intervalo entre refreshes (default 10min, mínimo 5)
+PINNACLE_LOL=true                       # ativa fetcher Pinnacle para LoL (pre-match + live)
+PINNACLE_LOL_REFRESH_MIN=10             # refresh completo (pre + live), default 10min, mínimo 5
+PINNACLE_LOL_LIVE_REFRESH_MIN=2         # refresh rápido quando há matches LIVE cacheados (default 2min)
 
 # ── Futebol — configuração ──
 FOOTBALL_LEAGUES=soccer_brazil_serie_b,soccer_brazil_serie_c  # ligas a monitorar (The Odds API keys)
@@ -422,12 +423,19 @@ No boot e a cada 12h, o sistema busca até **400 partidas finalizadas** dos últ
 
 ## Sistema de Odds
 
-### LoL / Dota 2 ao vivo — SX.Bet
+### LoL / Dota 2 ao vivo — SX.Bet + Pinnacle
 
-Odds de LoL e Dota 2 ao vivo (Match Winner, por mapa ou série) vêm do **SX.Bet** (API pública descentralizada, sem chave de API). Ativar via `SXBET_ENABLED=true`. Independente do OddsPapi — não consome quota.
+Cascata de fontes para odds ao vivo:
 
-- LoL live: se o Riot API fornece `currentMap` (state `inProgress`), busca odds **do mapa atual**; caso contrário (partida PandaScore ou entre mapas), faz **fallback para odds de série**.
-- Dota 2 live: odds sempre de série.
+1. **SX.Bet** (primário, per-map) — API descentralizada, ativar `SXBET_ENABLED=true`
+2. **Pinnacle** (fallback, série) — guest API, cai quando SX.Bet não tem mercado aberto
+3. **Série via SX.Bet** quando Riot API não fornece `currentMap` (entre mapas ou partida PandaScore `ps_`)
+
+O endpoint `/odds?game=lol&map=N` tenta SX.Bet primeiro; se falhar, busca no `oddsCache` populado por `fetchLoLOddsFromPinnacle()` (que traz live + upcoming no mesmo endpoint `listSportMatchups`). Entradas com `isLive=true` são priorizadas via sort em `findOdds()`.
+
+**Refresh Pinnacle live**: quando há matches LIVE cacheados, um segundo `setInterval` de `PINNACLE_LOL_LIVE_REFRESH_MIN` (default 2min) atualiza só aqueles, capturando mudanças de odds em tempo real sem sobrecarregar a API.
+
+**Dota 2 live**: mesma cascata — SX.Bet → Pinnacle → The Odds API cache.
 
 ### LoL pré-match — Pinnacle Guest API
 

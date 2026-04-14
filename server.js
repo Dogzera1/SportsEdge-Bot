@@ -1409,10 +1409,12 @@ async function fetchLoLOddsFromPinnacle() {
       return true;
     });
 
-    let cached = 0;
+    let cached = 0, liveCount = 0;
     for (const r of rows) {
       if (!r.team1 || !r.team2 || !r.oddsT1 || !r.oddsT2) continue;
       const slug = norm(r.team1 + r.team2);
+      const isLive = r.status === 'live';
+      if (isLive) liveCount++;
       const key = `esports_pin_${r.id}`;
       oddsCache[key] = {
         t1: r.oddsT1.toFixed(2),
@@ -1425,13 +1427,14 @@ async function fetchLoLOddsFromPinnacle() {
         tournamentId: r.leagueId || null,
         league: r.league,
         startTime: r.startTime,
+        isLive,           // flag explícito para roteamento live vs upcoming
         source: 'pinnacle',
       };
       cached++;
     }
     lastPinnacleLoLUpdate = Date.now();
     lastEsportsOddsUpdate = Date.now(); // também atualiza o timestamp geral para /health
-    log('INFO', 'ODDS', `Pinnacle LoL: ${cached} partidas cacheadas (${rows.length} matchups LoL ativos)`);
+    log('INFO', 'ODDS', `Pinnacle LoL: ${cached} partidas cacheadas (${liveCount} live, ${cached - liveCount} upcoming)`);
   } catch (e) {
     log('ERROR', 'ODDS', `Pinnacle LoL: ${e.message}`);
   }
@@ -2021,8 +2024,15 @@ function findOdds(sport, t1, t2) {
   const anyMatch = (variants, targetSlug) =>
     [...variants].some(v => v.length >= 2 && targetSlug.includes(v));
 
-  for (const [cacheKey, val] of Object.entries(oddsCache)) {
-    if (!cacheKey.startsWith(`${sport}_`)) continue;
+  // Ordena entries: live primeiro (para priorizar odds live quando houver), depois upcoming
+  const entries = Object.entries(oddsCache)
+    .filter(([k]) => k.startsWith(`${sport}_`))
+    .sort(([, a], [, b]) => {
+      const al = a?.isLive ? 1 : 0;
+      const bl = b?.isLive ? 1 : 0;
+      return bl - al; // true antes de false
+    });
+  for (const [cacheKey, val] of entries) {
 
     // ── Modo 1: combinedSlug (formato OddsPapi — sem nomes separados) ──
     if (val.combinedSlug) {
@@ -3389,13 +3399,31 @@ const server = http.createServer(async (req, res) => {
     const score1 = parsed.query.score1 != null ? parseInt(parsed.query.score1, 10) : null;
     const score2 = parsed.query.score2 != null ? parseInt(parsed.query.score2, 10) : null;
     const format = parsed.query.format ? String(parsed.query.format) : '';
-    // LoL: odds via SX.Bet diretamente (sem The Odds API)
+    // LoL: odds via SX.Bet (primário para live por-mapa) → fallback Pinnacle (live/upcoming de série)
     if (gameParam === 'lol') {
-      if (!SXBET_ENABLED) { sendJson(res, { error: 'SX.Bet não habilitado' }); return; }
       const liveOnly = !!(mapNumber && mapNumber > 0);
-      const o = await sxGetMatchWinnerOdds(t1, t2, { liveOnly, mapNumber: liveOnly ? mapNumber : null }).catch(() => null);
-      if (o) log('INFO', 'ODDS', `SX.Bet LoL: ${t1} vs ${t2}${liveOnly ? ` (ao vivo mapa ${mapNumber})` : ''}`);
-      sendJson(res, o || { error: 'odds LoL não encontradas (SX.Bet)' });
+
+      // 1. SX.Bet (per-map odds ao vivo, melhor para live com mapNumber)
+      if (SXBET_ENABLED) {
+        const o = await sxGetMatchWinnerOdds(t1, t2, { liveOnly, mapNumber: liveOnly ? mapNumber : null }).catch(() => null);
+        if (o) {
+          log('INFO', 'ODDS', `SX.Bet LoL: ${t1} vs ${t2}${liveOnly ? ` (ao vivo mapa ${mapNumber})` : ''}`);
+          sendJson(res, o);
+          return;
+        }
+      }
+
+      // 2. Fallback Pinnacle (via oddsCache populado por fetchLoLOddsFromPinnacle)
+      //    Funciona tanto pra pré-jogo quanto live (Pinnacle traz ambos no mesmo endpoint).
+      //    Quando liveOnly=true, prioriza entradas com isLive=true.
+      const pinMatch = findOdds('esports', t1, t2);
+      if (pinMatch?.t1 && pinMatch?.t2) {
+        log('INFO', 'ODDS', `Pinnacle LoL fallback: ${t1} vs ${t2}${liveOnly ? ' (ao vivo, série)' : ''}`);
+        sendJson(res, { ...pinMatch, mapMarket: false, fallback: 'pinnacle' });
+        return;
+      }
+
+      sendJson(res, { error: 'odds LoL não encontradas (SX.Bet + Pinnacle)' });
       return;
     }
     // force=1: bypassa TTL do cache (usado para partidas iminentes < 2h)
@@ -6768,12 +6796,19 @@ server.listen(PORT, '0.0.0.0', () => {
   }, refreshMin * 60 * 1000); // Default 60 min (OddsPapi free tier: 250 req total)
 
   // Pinnacle LoL refresh — independente do OddsPapi (sem quota, só rate limit soft)
+  // Dois intervalos: refresh completo (pre-match, default 10min) + refresh rápido de live (default 2min)
   if (process.env.PINNACLE_LOL === 'true') {
     const pinRefreshMin = Math.max(5, parseInt(process.env.PINNACLE_LOL_REFRESH_MIN || '10', 10) || 10);
+    const pinLiveMin = Math.max(1, parseInt(process.env.PINNACLE_LOL_LIVE_REFRESH_MIN || '2', 10) || 2);
     setInterval(() => {
       fetchLoLOddsFromPinnacle();
     }, pinRefreshMin * 60 * 1000);
-    log('INFO', 'ODDS', `Pinnacle LoL refresh a cada ${pinRefreshMin}min`);
+    // Refresh rápido apenas quando há matches live cacheados (odds live mudam rápido)
+    setInterval(() => {
+      const hasLive = Object.values(oddsCache).some(v => v?.source === 'pinnacle' && v?.isLive);
+      if (hasLive) fetchLoLOddsFromPinnacle();
+    }, pinLiveMin * 60 * 1000);
+    log('INFO', 'ODDS', `Pinnacle LoL: refresh full=${pinRefreshMin}min, live=${pinLiveMin}min (quando há live)`);
   }
 
   // Live odds (polling por fixtureId + marketId mapa).
