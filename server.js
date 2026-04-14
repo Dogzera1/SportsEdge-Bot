@@ -3303,33 +3303,31 @@ const server = http.createServer(async (req, res) => {
       let wr = await httpGet(base, LOL_HEADERS);
       if (wr.status === 403) wr = await httpGet(base, {});
       if (wr.status !== 200) {
+        log('WARN', 'LIVE-GAME', `window/${gameId} status=${wr.status}`);
         sendJson(res, { error: 'Game not found: ' + wr.status, hasLiveStats: false }, 404);
         return;
       }
       const raw = safeParse(wr.body, {});
 
-      // 2) Buscar dados mais recentes — ~90s atrás (timestamps divisíveis por 10s)
+      // 2) Varredura de timestamps: 45s, 90s, 150s, 3min, 5min, 10min atrás.
+      //    Riot livestats tem delay mínimo ~45s e frames em múltiplos de 10s.
       let frames = [];
-      const recentTs = new Date(Math.floor((Date.now() - 90000) / 10000) * 10000).toISOString();
-      const wr2 = await httpGet(`${base}?startingTime=${encodeURIComponent(recentTs)}`, {});
-      if (wr2.status === 200) {
-        const raw2 = safeParse(wr2.body, {});
-        frames = raw2.frames || [];
-      }
-
-      // 3) Se não achou dados recentes, tenta 3min e 5min atrás
-      if (!frames.length || !frames.some(f => f.blueTeam?.totalGold > 0)) {
-        for (const secAgo of [180, 300]) {
-          const ts = new Date(Math.floor((Date.now() - secAgo * 1000) / 10000) * 10000).toISOString();
-          const r3 = await httpGet(`${base}?startingTime=${encodeURIComponent(ts)}`, {});
-          if (r3.status === 200) {
-            const d3 = safeParse(r3.body, {});
-            if (d3.frames?.length && d3.frames.some(f => f.blueTeam?.totalGold > 0)) {
-              frames = d3.frames;
-              break;
-            }
-          }
+      let usedTs = null;
+      for (const secAgo of [45, 90, 150, 180, 300, 600]) {
+        const ts = new Date(Math.floor((Date.now() - secAgo * 1000) / 10000) * 10000).toISOString();
+        const r = await httpGet(`${base}?startingTime=${encodeURIComponent(ts)}`, {});
+        if (r.status !== 200) continue;
+        const d = safeParse(r.body, {});
+        if (d.frames?.length && d.frames.some(f => f.blueTeam?.totalGold > 0)) {
+          frames = d.frames;
+          usedTs = secAgo;
+          break;
         }
+        // Guarda frames vazios como último recurso se nenhum tiver gold
+        if (!frames.length && d.frames?.length) frames = d.frames;
+      }
+      if (usedTs === null) {
+        log('WARN', 'LIVE-GAME', `window/${gameId}: varredura não achou frames com gold (frames=${frames.length})`);
       }
 
       // 4) Último recurso: usar frames iniciais
@@ -3473,9 +3471,13 @@ const server = http.createServer(async (req, res) => {
               return;
             }
           }
-          // série (sem map solicitado ou map indisponível)
-          if (!dotaMapNumber && pinHit.odds) {
-            sendJson(res, { ...pinHit.odds, seriesOnly: true, fallback: 'pinnacle-series' });
+          // série — sem map solicitado OU map solicitado mas indisponível (fallback)
+          if (pinHit.odds) {
+            const payload = dotaMapNumber
+              ? { ...pinHit.odds, seriesOnly: true, mapRequested: dotaMapNumber, fallback: 'pinnacle-series-fallback' }
+              : { ...pinHit.odds, seriesOnly: true, fallback: 'pinnacle-series' };
+            if (dotaMapNumber) log('INFO', 'ODDS', `Pinnacle Dota série (fallback de mapa ${dotaMapNumber}): ${t1} vs ${t2}`);
+            sendJson(res, payload);
             return;
           }
         }
