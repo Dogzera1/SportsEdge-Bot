@@ -4260,9 +4260,25 @@ async function pollMma(runOnce = false) {
           }
         }
 
-        // ── Pré-filtro ML com dados ESPN (record → win rate) ──
+        // ── Pré-filtro ML com dados ESPN (record → win rate) + Sofascore fallback ──
         const hasEspnRecord = !!(rec1 || rec2);
-        const mmaEnrich = hasEspnRecord ? mmaRecordToEnrich(rec1, rec2) : { form1: null, form2: null, h2h: null, oddsMovement: null };
+        let mmaEnrich = hasEspnRecord ? mmaRecordToEnrich(rec1, rec2) : { form1: null, form2: null, h2h: null, oddsMovement: null };
+        // Sofascore: preenche forma quando ESPN/Wiki/Sherdog/Tapology não deram record
+        if (!hasEspnRecord) {
+          try {
+            const sofascoreMma = require('./lib/sofascore-mma');
+            const sofa = await sofascoreMma.enrichMatch(fight.team1, fight.team2, fight.time).catch(() => null);
+            if (sofa && (sofa.form1 || sofa.form2)) {
+              mmaEnrich = {
+                form1: sofa.form1 || mmaEnrich.form1,
+                form2: sofa.form2 || mmaEnrich.form2,
+                h2h: mmaEnrich.h2h || { t1Wins: 0, t2Wins: 0, totalMatches: 0 },
+                oddsMovement: null
+              };
+              log('DEBUG', 'AUTO-MMA', `Sofascore event ${sofa.eventId}: ${fight.team1} vs ${fight.team2}`);
+            }
+          } catch (_) {}
+        }
         const mlResultMma = esportsPreFilter(fight, o, mmaEnrich, false, '', null);
         if (!mlResultMma.pass) {
           log('INFO', 'AUTO-MMA', `Pré-filtro ML: edge insuficiente (${mlResultMma.score.toFixed(1)}pp) para ${fight.team1} vs ${fight.team2}. Pulando IA.`);
