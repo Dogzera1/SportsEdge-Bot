@@ -1437,8 +1437,17 @@ async function fetchLoLOddsFromPinnacle() {
   }
 }
 
+let _oddspapiMissingLogged = false;
 async function fetchEsportsOdds() {
-  if (!ODDSPAPI_KEY) { log('WARN', 'ODDS', 'ODDS_API_KEY não configurada — odds indisponíveis'); return; }
+  if (!ODDSPAPI_KEY) {
+    // Quando Pinnacle LoL está ativo, OddsPapi é opcional — loga uma única vez no boot.
+    if (!_oddspapiMissingLogged) {
+      const viaPinnacle = process.env.PINNACLE_LOL === 'true';
+      log('WARN', 'ODDS', `ODDS_API_KEY ausente — ${viaPinnacle ? 'OddsPapi desabilitado (Pinnacle LoL ativo)' : 'odds esports indisponíveis'}`);
+      _oddspapiMissingLogged = true;
+    }
+    return;
+  }
   if (esportsOddsFetching) return;
   const now = Date.now();
   if (now - lastEsportsOddsUpdate < ESPORTS_ODDS_TTL) return;
