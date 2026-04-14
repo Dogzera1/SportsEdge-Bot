@@ -221,7 +221,22 @@ npm start           # inicia servidor + bot via start.js
 # Ou separadamente (servidor DEVE iniciar antes)
 npm run server      # node server.js
 npm run bot         # node bot.js
+
+# Testes unitários (sem dependência de framework)
+npm test            # executa tests/run.js — Kelly, parser de TIP_ML, name-match
 ```
+
+### Testes (`tests/`)
+
+Suíte mínima sem framework externo (Node runner puro):
+
+| Arquivo | Cobertura |
+|---|---|
+| `tests/test-kelly.js` | `calcKellyWithP`, `calcKellyFraction` — casos negativos, frações, edge cases |
+| `tests/test-tip-parser.js` | Regex `TIP_ML:...\|EV:...\|STAKE:...\|CONF:...` de LoL e MMA |
+| `tests/test-name-match.js` | Matching de settlement: exact, alias, substring com guard, short-alias traps |
+
+Execute `npm test` antes de qualquer deploy que toque parser da IA, Kelly ou settlement.
 
 ### Deploy no Railway
 
@@ -509,6 +524,21 @@ O sistema analisa **apenas lutas do UFC**. A cada ciclo:
 | MMA | ESPN UFC scoreboard | 30 min |
 | Tênis | ESPN ATP/WTA scoreboard | 30 min |
 
+### Matching de nomes no settlement (`lib/name-match.js`)
+
+Settlement unifica o matching de nomes numa função auditável (`nameMatches`) com 4 estratégias em ordem:
+
+| Método | Quando | Score |
+|---|---|---|
+| `exact` | strings normalizadas iguais | 1.0 |
+| `alias` | `LOL_ALIASES` mapeia A↔B (ex: `FNC ↔ Fnatic`) | 0.95 |
+| `substring` | `A.includes(B)` **e** ambos com ≥ 4 caracteres (evita `IG ↔ BIG`, `T1 ↔ T10`) | comprimento relativo |
+| `none` | nenhum dos acima | 0 |
+
+**Tênis** usa matcher dedicado (`lib/tennis-match.js`) com suporte a `"Last, First"` e inicial abreviada (`"J. Last"`).
+
+Cada settlement emite log: `[SETTLE] esports matchId=X tip="Fnatic" vs winner="FNC" → win [method=alias score=0.95]` — permite auditar qualquer resolução posterior.
+
 ---
 
 ## Rotas do Servidor
@@ -630,6 +660,70 @@ lol betting/
 ### Settlement
 - **Tips não settled**: Verifique se a API de resultados está funcionando (ESPN para MMA/Tênis, API-Football para futebol).
 - **Winner não detectado**: Nomes podem não casar. O sistema usa fuzzy matching.
+
+---
+
+## Monitoramento e Alertas
+
+### `/health` — status agregado do sistema
+
+Retorna JSON com status por fonte de dados (não apenas esports):
+
+```json
+{
+  "status": "ok|degraded|error",
+  "db": "connected",
+  "lastAnalysis": "...",
+  "pendingTips": { "esports": 3, "mma": 1, "tennis": 0 },
+  "sources": {
+    "oddspapi": { "keyConfigured": true, "lastSyncMinAgo": 12, "cacheSize": 18, "backoffActive": false },
+    "theOddsApi": { "keyConfigured": true, "quota": { "used": 410, "cap": 450, "pct": 91.1 } },
+    "sxbet": { "enabled": true },
+    "apiFootball": { "keyConfigured": true }
+  },
+  "alerts": [...],
+  "metricsLite": {...}
+}
+```
+
+### `/alerts` — alertas críticos ativos
+
+Endpoint dedicado para monitoramento externo. Retorna apenas o array de alertas ativos no momento:
+
+| ID do alerta | Severidade | Dispara quando |
+|---|---|---|
+| `db_error` | critical | SQLite falhou |
+| `oddspapi_key_missing` | critical | `ODDS_API_KEY`/`ODDSPAPI_KEY` ausente |
+| `oddspapi_never_synced` | critical | OddsPapi nunca sincronizou (>30 min pós-boot) |
+| `oddspapi_backoff_long` | warning | backoff 429 ativo há >1h |
+| `theodds_quota_high` | warning / critical | The Odds API ≥80% / ≥95% da quota |
+| `analysis_stale` | warning | nenhuma análise há >2h |
+
+### Notificações Telegram para admin
+
+O bot faz **polling do `/alerts` a cada 10 min** (`checkCriticalAlerts` em `bot.js`) e envia DM para todos os `ADMIN_USER_IDS` quando um alerta novo aparece. Throttle: 1h por `alert.id` (se persistir, re-notifica a cada hora, não a cada ciclo).
+
+Exemplo da mensagem recebida:
+```
+🚨 ALERTA SISTEMA (critical)
+
+`oddspapi_never_synced`
+OddsPapi nunca sincronizou desde o boot (>30min) — verifique chave/quota
+```
+
+**Observação de escopo**: não integramos Sentry/Prometheus — overkill para um único deploy Railway. O modelo de polling do `/alerts` via bot é suficiente e mantém dependências zero.
+
+---
+
+## Concorrência SQLite
+
+Tanto `server.js` quanto `bot.js` abrem o mesmo arquivo via `lib/database.js`. Concorrência é segura porque:
+
+- `journal_mode = WAL` — leitores concorrentes não bloqueiam escritores
+- `busy_timeout = 5000` — queries esperam até 5s antes de disparar `SQLITE_BUSY`
+- Transações críticas (settlement, record-tip) são wrapped em `db.transaction()` — atômicas
+
+Em cargas muito maiores (>100 req/s de escrita), considerar migrar para PostgreSQL — Railway oferece free tier. Hoje o volume de escritas é baixo (tips individuais + settlements a cada 30 min) e WAL + busy_timeout cobrem o caso com folga.
 
 ---
 

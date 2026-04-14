@@ -1321,6 +1321,33 @@ function getPatchMetaAgeDays() {
   return isNaN(days) ? null : days;
 }
 
+// ── Alertas críticos: polling do /alerts do server → DM admins (throttled por alert id) ──
+const _criticalAlertCooldown = new Map(); // alertId → lastNotifiedTs
+const CRITICAL_ALERT_COOLDOWN_MS = 60 * 60 * 1000; // 1h entre re-notificações do mesmo alert
+
+async function checkCriticalAlerts() {
+  if (!ADMIN_IDS.size) return;
+  const resp = await serverGet('/alerts').catch(() => null);
+  if (!resp || !Array.isArray(resp.alerts) || !resp.alerts.length) return;
+  // Usa token de qualquer sport ativo para mandar DM ao admin
+  const token = Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
+  if (!token) return;
+  const now = Date.now();
+  for (const alert of resp.alerts) {
+    const last = _criticalAlertCooldown.get(alert.id) || 0;
+    if (now - last < CRITICAL_ALERT_COOLDOWN_MS) continue;
+    _criticalAlertCooldown.set(alert.id, now);
+    const icon = alert.severity === 'critical' ? '🚨' : '⚠️';
+    const msg = `${icon} *ALERTA SISTEMA* (${alert.severity})\n\n` +
+      `\`${alert.id}\`\n${alert.msg}\n\n` +
+      `_Próxima notificação deste alerta: em ${Math.round(CRITICAL_ALERT_COOLDOWN_MS/60000)}min (se persistir)._`;
+    for (const adminId of ADMIN_IDS) {
+      await sendDM(token, adminId, msg).catch(() => {});
+    }
+    log('WARN', 'ALERT', `[${alert.severity}] ${alert.id}: ${alert.msg}`);
+  }
+}
+
 async function checkPatchMetaStale(token) {
   if (!ADMIN_IDS.size) return;
   if (Date.now() - lastPatchAlert < PATCH_ALERT_INTERVAL) return;
@@ -5390,6 +5417,9 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   setInterval(() => runAutoAnalysis().catch(e => log('ERROR', 'AUTO', e.message)), 6 * 60 * 1000);
   setInterval(() => settleCompletedTips().catch(e => log('ERROR', 'SETTLE', e.message)), SETTLEMENT_INTERVAL);
   setInterval(() => checkLineMovement().catch(e => log('ERROR', 'LINE', e.message)), LINE_CHECK_INTERVAL);
+  // Alertas críticos: polling /alerts a cada 10 min → DM admins (throttled 1h por alert id)
+  setInterval(() => checkCriticalAlerts().catch(e => log('ERROR', 'ALERT', e.message)), 10 * 60 * 1000);
+  setTimeout(() => checkCriticalAlerts().catch(() => {}), 30 * 1000); // primeiro check 30s pós-boot
   if (SPORTS.esports?.enabled) {
     setInterval(() => checkLiveNotifications().catch(e => log('ERROR', 'NOTIFY', e.message)), LIVE_CHECK_INTERVAL);
   }

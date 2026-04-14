@@ -11,7 +11,8 @@
     "backtest": "node scripts/backtest.js",
     "train": "node scripts/train.js",
     "predict": "node scripts/predict.js",
-    "audit-mma": "node scripts/audit-mma-tips.js"
+    "audit-mma": "node scripts/audit-mma-tips.js",
+    "test": "node tests/run.js"
   },
   "dependencies": {
     "better-sqlite3": "^11.0.0",

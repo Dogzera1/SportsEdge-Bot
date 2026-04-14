@@ -7,10 +7,11 @@ const dns = require('dns');
 dns.setDefaultResultOrder('ipv4first');
 const initDatabase = require('./lib/database');
 const { SPORTS, getSportById } = require('./lib/sports');
-const { log, sendJson, safeParse, norm, httpGet, cachedHttpGet, aiPost, oddsApiAllowed, oddsApiPeek, getMetricsLite, calcKellyWithP } = require('./lib/utils');
+const { log, sendJson, safeParse, norm, httpGet, cachedHttpGet, aiPost, oddsApiAllowed, oddsApiPeek, oddsApiQuotaStatus, getMetricsLite, calcKellyWithP } = require('./lib/utils');
 const footballData  = require('./lib/football-data');
 const apiFootball   = require('./lib/api-football');
 const { tennisSinglePlayerNameMatch, tennisPairMatchesPlayers } = require('./lib/tennis-match');
+const { nameMatches } = require('./lib/name-match');
 const { esportsPreFilter } = require('./lib/ml');
 const tennisML = require('./lib/tennis-ml');
 const { fetchGridEnrichForMatch } = require('./lib/grid');
@@ -967,6 +968,7 @@ const TENNIS_MATCHES_CACHE_TTL = 10 * 60 * 1000; // 10 min (auto-tennis roda a c
 
 // Backoff em caso de 429
 let esportsBackoffUntil = 0;
+const _serverStartTs = Date.now();
 let _oddsBackoffLogTs = 0;
 const _raw429Backoff = parseInt(process.env.ODDSPAPI_429_BACKOFF_MS || '', 10);
 const ESPORTS_BACKOFF_TTL = Math.max(5 * 60 * 1000, Number.isFinite(_raw429Backoff) && _raw429Backoff > 0 ? _raw429Backoff : 2 * 60 * 60 * 1000);
@@ -3747,28 +3749,62 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  if (p === '/health') {
-    const sport = 'esports';
+  if (p === '/health' || p === '/alerts') {
     const dbOk = (() => {
-      try {
-        stmts.getDBStatus.get(sport, sport, sport, sport, sport, sport);
-        return true;
-      } catch(_) {
-        return false;
-      }
+      try { db.prepare('SELECT 1').get(); return true; } catch(_) { return false; }
     })();
-    const pendingRow = db.prepare("SELECT COUNT(*) as c FROM tips WHERE sport='esports' AND result IS NULL").get();
-    const esportsOddsAge = lastEsportsOddsUpdate > 0 ? Math.round((Date.now() - lastEsportsOddsUpdate) / 60000) : null;
+    const pendingBySport = (() => {
+      try {
+        const rows = db.prepare("SELECT sport, COUNT(*) as c FROM tips WHERE result IS NULL GROUP BY sport").all();
+        return Object.fromEntries(rows.map(r => [r.sport, r.c]));
+      } catch(_) { return {}; }
+    })();
+    const esportsOddsAgeMin = lastEsportsOddsUpdate > 0 ? Math.round((Date.now() - lastEsportsOddsUpdate) / 60000) : null;
+    const oddspapiBackoffSec = esportsBackoffUntil > Date.now() ? Math.round((esportsBackoffUntil - Date.now()) / 1000) : 0;
+    const theOddsQuota = oddsApiQuotaStatus();
     const stale = !lastAnalysisAt || (Date.now() - new Date(lastAnalysisAt).getTime() > 2 * 60 * 60 * 1000);
-    const status = dbOk ? (stale ? 'degraded' : 'ok') : 'error';
+
+    // ── Alertas críticos (consumidos pelo bot via polling) ──
+    const alerts = [];
+    if (!dbOk) alerts.push({ id: 'db_error', severity: 'critical', msg: 'SQLite connection falhou' });
+    if (!ODDSPAPI_KEY) alerts.push({ id: 'oddspapi_key_missing', severity: 'critical', msg: 'ODDS_API_KEY/ODDSPAPI_KEY ausente — odds esports indisponíveis' });
+    if (THE_ODDS_API_KEY && theOddsQuota.pct >= 80) {
+      alerts.push({ id: 'theodds_quota_high', severity: theOddsQuota.pct >= 95 ? 'critical' : 'warning', msg: `The Odds API quota em ${theOddsQuota.pct}% (${theOddsQuota.used}/${theOddsQuota.cap})` });
+    }
+    if (oddspapiBackoffSec > 3600) {
+      alerts.push({ id: 'oddspapi_backoff_long', severity: 'warning', msg: `OddsPapi 429 backoff ativo há ${Math.round(oddspapiBackoffSec/60)} min` });
+    }
+    if (ODDSPAPI_KEY && lastEsportsOddsUpdate === 0 && Date.now() - _serverStartTs > 30 * 60 * 1000) {
+      alerts.push({ id: 'oddspapi_never_synced', severity: 'critical', msg: 'OddsPapi nunca sincronizou desde o boot (>30min) — verifique chave/quota' });
+    }
+    if (stale && lastAnalysisAt) {
+      alerts.push({ id: 'analysis_stale', severity: 'warning', msg: `Nenhuma análise há >2h (última: ${lastAnalysisAt})` });
+    }
+
+    if (p === '/alerts') { sendJson(res, { alerts, ts: new Date().toISOString() }); return; }
+
+    const status = !dbOk ? 'error' : (alerts.some(a => a.severity === 'critical') ? 'degraded' : (stale ? 'degraded' : 'ok'));
     sendJson(res, {
       status,
-      sport: 'esports',
       db: dbOk ? 'connected' : 'error',
       lastAnalysis: lastAnalysisAt,
-      pendingTips: pendingRow?.c || 0,
-      oddsLastUpdate: esportsOddsAge !== null ? `${esportsOddsAge}min ago` : 'never',
-      oddsCacheSize: Object.keys(oddsCache).filter(k => k.startsWith('esports_')).length,
+      pendingTips: pendingBySport,
+      sources: {
+        oddspapi: {
+          keyConfigured: !!ODDSPAPI_KEY,
+          lastSyncMinAgo: esportsOddsAgeMin,
+          cacheSize: Object.keys(oddsCache).filter(k => k.startsWith('esports_')).length,
+          backoffActive: oddspapiBackoffSec > 0,
+          backoffRemainingSec: oddspapiBackoffSec,
+        },
+        theOddsApi: {
+          keyConfigured: !!THE_ODDS_API_KEY,
+          quota: theOddsQuota,
+        },
+        sxbet: { enabled: SXBET_ENABLED },
+        apiFootball: { keyConfigured: !!(process.env.API_FOOTBALL_KEY || process.env.API_SPORTS_KEY || process.env.APISPORTS_KEY) },
+      },
+      alerts,
       metricsLite: getMetricsLite()
     });
     return;
@@ -4360,12 +4396,20 @@ const server = http.createServer(async (req, res) => {
           let settled = 0;
           let bancaDelta = 0;
           for (const tip of tips) {
-            const nt = norm(tip.tip_participant);
-            const nw = norm(winner);
-            const nameMatched = sport === 'tennis'
-              ? tennisSinglePlayerNameMatch(tip.tip_participant, winner)
-              : (nt && nw && (nt === nw || nt.includes(nw) || nw.includes(nt)));
+            let nameMatched, matchMethod, matchScore;
+            if (sport === 'tennis') {
+              nameMatched = tennisSinglePlayerNameMatch(tip.tip_participant, winner);
+              matchMethod = nameMatched ? 'tennis' : 'none';
+              matchScore = nameMatched ? 1.0 : 0;
+            } else {
+              const aliases = sport === 'esports' ? LOL_ALIASES : null;
+              const r = nameMatches(tip.tip_participant, winner, { aliases });
+              nameMatched = r.match;
+              matchMethod = r.method;
+              matchScore = r.score;
+            }
             const result = nameMatched ? 'win' : 'loss';
+            log('INFO', 'SETTLE', `${sport} matchId=${matchId} tip="${tip.tip_participant}" vs winner="${winner}" → ${result} [method=${matchMethod} score=${matchScore}]`);
             stmts.settleTip.run(result, matchId, sport);
             // Atualiza profit_reais e acumula delta da banca
             const stakeR = tip.stake_reais || (() => {
