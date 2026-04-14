@@ -92,7 +92,10 @@ const LIVE_CHECK_INTERVAL = 60 * 1000; // 1 minute
 let lastDotaLiveCheck = 0;
 const DOTA_LIVE_CHECK_INTERVAL = 5 * 60 * 1000; // 5 min (evita spam de requests)
 const RE_ANALYZE_INTERVAL = 10 * 60 * 1000; // 10 min between re-analyses of same live match
-const UPCOMING_ANALYZE_INTERVAL = 30 * 60 * 1000; // 30m para acomodar a quota da OddsPapi (1xBet)
+// Pré-jogo: intervalo maior para economizar tokens IA (odds pré-jogo mudam pouco).
+// Default 2h (antes 30min). Configurável via LOL_UPCOMING_INTERVAL_MIN.
+// Live continua usando RE_ANALYZE_INTERVAL (10min) — mercado muda rápido.
+const UPCOMING_ANALYZE_INTERVAL = Math.max(10, parseInt(process.env.LOL_UPCOMING_INTERVAL_MIN || '120', 10) || 120) * 60 * 1000;
 const UPCOMING_WINDOW_HOURS = 24; // analyze upcoming matches within next 24h
 
 // Deduplicação de updates de tip (anti-spam)
@@ -4293,7 +4296,8 @@ async function pollMma(runOnce = false) {
   if (!mmaConfig?.enabled || !mmaConfig?.token) return;
   const token = mmaConfig.token;
 
-  const MMA_INTERVAL = 6 * 60 * 60 * 1000; // Re-analisa a cada 6h
+  // Re-analisa a cada MMA_INTERVAL_H (default 12h — MMA odds são muito estáveis)
+  const MMA_INTERVAL = Math.max(1, parseInt(process.env.MMA_INTERVAL_H || '12', 10) || 12) * 60 * 60 * 1000;
 
   async function loop() {
     try {
@@ -4677,7 +4681,9 @@ async function pollTennis(runOnce = false) {
   if (!tennisConfig?.enabled || !tennisConfig?.token) return;
   const token = tennisConfig.token;
 
-  const TENNIS_INTERVAL = 2 * 60 * 60 * 1000; // Re-analisa a cada 2h
+  // Live tênis mantém cooldown curto; pré-jogo usa TENNIS_PREGAME_INTERVAL_H (default 6h)
+  const TENNIS_INTERVAL = 2 * 60 * 60 * 1000; // live: 2h
+  const TENNIS_PREGAME_INTERVAL = Math.max(1, parseInt(process.env.TENNIS_PREGAME_INTERVAL_H || '6', 10) || 6) * 60 * 60 * 1000;
   const TENNIS_GATE_MIN_ODDS = parseFloat(process.env.TENNIS_MIN_ODDS ?? '1.40');
   const TENNIS_GATE_MAX_ODDS = parseFloat(process.env.TENNIS_MAX_ODDS ?? '5.00');
 
@@ -4702,7 +4708,9 @@ async function pollTennis(runOnce = false) {
         const key = `tennis_${match.id}`;
         const prev = analyzedTennis.get(key);
         if (prev?.tipSent) continue;
-        if (prev && (now - prev.ts < TENNIS_INTERVAL)) continue;
+        // Live: 2h | Pré-jogo: 6h (configurável via TENNIS_PREGAME_INTERVAL_H) — economia de tokens
+        const cooldown = match.status === 'live' ? TENNIS_INTERVAL : TENNIS_PREGAME_INTERVAL;
+        if (prev && (now - prev.ts < cooldown)) continue;
 
         const o = match.odds;
         if (!o?.t1 || !o?.t2) continue;
@@ -5415,14 +5423,16 @@ Máximo 200 palavras.`;
     return typeof matches !== 'undefined' ? matches : [];
   }
   const result = await loop();
+  return runOnce ? (result || []) : undefined;
+}
 
-  // ── Darts (shadow mode por default) ────────────────────────────────────
-  // Modelo puramente estatístico: 3-dart avg diff + recent form.
-  // NÃO chama IA (economia + o sinal estatístico é o principal em darts).
-  // Tip registrada com is_shadow=1 → não envia DM enquanto em shadow.
+// ── Darts loop (INDEPENDENTE de pollFootball) ──────────────────────────
+// Motivo: dentro de pollFootball, Football serializa ~25min bloqueando
+// darts/snooker. Loops separados garantem que rodem em intervalo próprio.
+async function runAutoDarts() {
   const dartsConfig = SPORTS['darts'];
-  if (dartsConfig?.enabled) {
-    try {
+  if (!dartsConfig?.enabled) return;
+  try {
       const { dartsPreFilter } = require('./lib/darts-ml');
       const sofaDarts = require('./lib/sofascore-darts');
       const now = Date.now();
@@ -5522,15 +5532,16 @@ Máximo 200 palavras.`;
           await new Promise(r => setTimeout(r, 3000));
         }
       }
-    } catch(e) {
-      log('ERROR', 'AUTO-DARTS', e.message);
-    }
+  } catch(e) {
+    log('ERROR', 'AUTO-DARTS', e.message);
   }
+}
 
-  // ── Snooker (shadow mode por default, via Betfair) ─────────────────────
+// ── Snooker loop (INDEPENDENTE do mutex runAutoAnalysis) ───────────────
+async function runAutoSnooker() {
   const snookerConfig = SPORTS['snooker'];
-  if (snookerConfig?.enabled) {
-    try {
+  if (!snookerConfig?.enabled) return;
+  try {
       const { snookerPreFilter } = require('./lib/snooker-ml');
       const now = Date.now();
       log('INFO', 'AUTO-SNOOKER', `Iniciando verificação de snooker${snookerConfig.shadowMode ? ' [SHADOW]' : ''}...`);
@@ -5616,12 +5627,9 @@ Máximo 200 palavras.`;
           await new Promise(r => setTimeout(r, 3000));
         }
       }
-    } catch(e) {
-      log('ERROR', 'AUTO-SNOOKER', e.message);
-    }
+  } catch(e) {
+    log('ERROR', 'AUTO-SNOOKER', e.message);
   }
-
-  return runOnce ? (result || []) : undefined;
 }
 log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
 
@@ -5723,6 +5731,12 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   // Background tasks - Agora tudo é unificado via runAutoAnalysis
   setTimeout(() => runAutoAnalysis().catch(e => log('ERROR', 'AUTO', e.message)), 15 * 1000); // 1ª análise 15s após boot
   setInterval(() => runAutoAnalysis().catch(e => log('ERROR', 'AUTO', e.message)), 6 * 60 * 1000);
+  // Darts e Snooker: loops independentes (fora do mutex runAutoAnalysis) para não ser
+  // bloqueados pelo Football que serializa ~25min por ciclo.
+  setTimeout(() => runAutoDarts().catch(e => log('ERROR', 'AUTO-DARTS', e.message)), 45 * 1000);
+  setInterval(() => runAutoDarts().catch(e => log('ERROR', 'AUTO-DARTS', e.message)), 15 * 60 * 1000);
+  setTimeout(() => runAutoSnooker().catch(e => log('ERROR', 'AUTO-SNOOKER', e.message)), 60 * 1000);
+  setInterval(() => runAutoSnooker().catch(e => log('ERROR', 'AUTO-SNOOKER', e.message)), 15 * 60 * 1000);
   setInterval(() => settleCompletedTips().catch(e => log('ERROR', 'SETTLE', e.message)), SETTLEMENT_INTERVAL);
   setInterval(() => checkLineMovement().catch(e => log('ERROR', 'LINE', e.message)), LINE_CHECK_INTERVAL);
   // Alertas críticos: polling /alerts a cada 10 min → DM admins (throttled 1h por alert id)

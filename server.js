@@ -2508,6 +2508,43 @@ async function getTheOddsDotaMatches() {
   return matches;
 }
 
+// ── Pinnacle — Tennis (sportId=33) ──
+// Suplementa The Odds API: cobre ATP/WTA/Challenger/ITF extensivamente.
+let _tennisPinnacleCache = { data: [], ts: 0 };
+const TENNIS_PINNACLE_TTL = 5 * 60 * 1000; // 5min
+
+async function getPinnacleTennisMatches() {
+  if (process.env.PINNACLE_TENNIS !== 'true') return [];
+  if (_tennisPinnacleCache.data.length && (Date.now() - _tennisPinnacleCache.ts) < TENNIS_PINNACLE_TTL) {
+    return _tennisPinnacleCache.data;
+  }
+  try {
+    const rows = await pinnacle.fetchSportMatchOdds(33, (m) => {
+      // Descarta mercados de kills/sets ("X 6-0" etc.) — só match winner
+      const p1 = String(m?.participants?.[0]?.name || '');
+      const p2 = String(m?.participants?.[1]?.name || '');
+      if (/\(sets\)|\(games\)|\d+-\d+/i.test(p1 + p2)) return false;
+      return true;
+    });
+    const matches = rows.map(r => ({
+      id: `tennis_pin_${r.id}`,
+      team1: r.team1,
+      team2: r.team2,
+      league: r.league,
+      sport_key: (r.league || '').toLowerCase().includes('wta') ? 'tennis_wta' : 'tennis_atp',
+      status: r.status === 'live' ? 'live' : 'upcoming',
+      time: r.startTime,
+      odds: { t1: String(r.oddsT1), t2: String(r.oddsT2), bookmaker: 'Pinnacle' }
+    }));
+    _tennisPinnacleCache = { data: matches, ts: Date.now() };
+    log('INFO', 'ODDS', `Pinnacle Tennis: ${matches.length} partidas cacheadas`);
+    return matches;
+  } catch (e) {
+    log('ERROR', 'ODDS', `Pinnacle Tennis: ${e.message}`);
+    return [];
+  }
+}
+
 // ── Pinnacle — Dota 2 (esports) ──
 // sportId=12 (E-Sports) filtrado por league.name contendo "Dota 2"
 // Descarta matchups de kills e handicap (só queremos match winner série)
@@ -5921,10 +5958,17 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (p === '/tennis-matches') {
-    // Preferência: The Odds API (já integrado). Se ausente, tenta Odds-API.io.
-    if (!THE_ODDS_API_KEY && !ODDS_API_IO_KEY) { sendJson(res, []); return; }
+    // Preferência: Pinnacle (se ativado) → The Odds API → Odds-API.io
+    const hasPinnacle = process.env.PINNACLE_TENNIS === 'true';
+    if (!hasPinnacle && !THE_ODDS_API_KEY && !ODDS_API_IO_KEY) { sendJson(res, []); return; }
     try {
       const now = Date.now();
+
+      // Pinnacle first: merge com cache existente (suplementa, não substitui)
+      let pinMatches = [];
+      if (hasPinnacle) {
+        pinMatches = await getPinnacleTennisMatches().catch(() => []);
+      }
 
       // Serve do cache se ainda válido (evita 17 chamadas à API por cada pressão de botão)
       if (_tennisMatchesCache && now - _tennisMatchesCache.ts < TENNIS_MATCHES_CACHE_TTL) {
@@ -5933,7 +5977,17 @@ const server = http.createServer(async (req, res) => {
           const LIVE_WINDOW_MS = parseInt(process.env.TENNIS_LIVE_WINDOW_H || '6', 10) * 60 * 60 * 1000;
           return t > now || (t <= now && (now - t) <= LIVE_WINDOW_MS);
         });
-        sendJson(res, cached);
+        // Merge Pinnacle matches que não casam com cached (por nome normalizado)
+        const normKey = m => `${(m.team1||'').toLowerCase().replace(/[^a-z0-9]/g,'')}_${(m.team2||'').toLowerCase().replace(/[^a-z0-9]/g,'')}`;
+        const cachedKeys = new Set(cached.map(normKey));
+        const extraPin = pinMatches.filter(m => !cachedKeys.has(normKey(m)) && !cachedKeys.has(normKey({team1:m.team2,team2:m.team1})));
+        sendJson(res, [...cached, ...extraPin]);
+        return;
+      }
+
+      // Se só Pinnacle está ativo (sem The Odds API / Odds-API.io), usa direto
+      if (hasPinnacle && !THE_ODDS_API_KEY && !ODDS_API_IO_KEY) {
+        sendJson(res, pinMatches);
         return;
       }
 
