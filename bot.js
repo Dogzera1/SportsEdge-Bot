@@ -4421,16 +4421,6 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
         const minTakeLine = minTakeOdds ? `📉 Odd mínima: *${minTakeOdds}*\n` : '';
 
         const kellyLabelMma = tipConf === 'ALTA' ? '¼ Kelly' : '⅙ Kelly';
-        const tipMsg = `${isBoxing ? '🥊 💰 *TIP BOXE*' : '🥊 💰 *TIP MMA*'}\n` +
-          `*${fight.team1}* vs *${fight.team2}*\n📋 ${fight.league}\n` +
-          `🕐 ${fightTime} (BRT)${recLine}${catLine}\n\n` +
-          whyLineMma +
-          `🎯 Aposta: *${tipTeam}* @ *${tipOdd}*\n` +
-          minTakeLine +
-          `📈 EV: *+${tipEV}%* | De-juice: ${tipTeam === fight.team1 ? fairP1 : fairP2}%\n` +
-          `💵 Stake: *${tipStakeAdjMma}u* _(${kellyLabelMma})_\n` +
-          `${confEmoji} Confiança: *${tipConf}*\n\n` +
-          `⚠️ _Aposte com responsabilidade._`;
 
         const pickIsT1Mma = norm(tipTeam) === norm(fight.team1);
         const modelPPickMma = pickIsT1Mma ? mlResultMma.modelP1 : mlResultMma.modelP2;
@@ -4448,6 +4438,17 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
         const riskAdjMma = await applyGlobalRisk('mma', desiredUnitsMma);
         if (!riskAdjMma.ok) { log('INFO', 'RISK', `mma: bloqueada (${riskAdjMma.reason})`); await new Promise(r => setTimeout(r, 3000)); continue; }
         const tipStakeAdjMma = String(riskAdjMma.units.toFixed(1).replace(/\.0$/, ''));
+
+        const tipMsg = `${isBoxing ? '🥊 💰 *TIP BOXE*' : '🥊 💰 *TIP MMA*'}\n` +
+          `*${fight.team1}* vs *${fight.team2}*\n📋 ${fight.league}\n` +
+          `🕐 ${fightTime} (BRT)${recLine}${catLine}\n\n` +
+          whyLineMma +
+          `🎯 Aposta: *${tipTeam}* @ *${tipOdd}*\n` +
+          minTakeLine +
+          `📈 EV: *+${tipEV}%* | De-juice: ${tipTeam === fight.team1 ? fairP1 : fairP2}%\n` +
+          `💵 Stake: *${tipStakeAdjMma}u* _(${kellyLabelMma})_\n` +
+          `${confEmoji} Confiança: *${tipConf}*\n\n` +
+          `⚠️ _Aposte com responsabilidade._`;
 
         const rec = await serverPost('/record-tip', {
           matchId: String(fight.id), eventName: fight.league,
