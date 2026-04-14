@@ -209,6 +209,14 @@ const migrations = [
       db.prepare('INSERT OR IGNORE INTO bankroll (sport, initial_banca, current_banca) VALUES (?, 100.0, 100.0)').run('darts');
     },
   },
+  {
+    // Bankroll inicial para snooker (novo esporte, Betfair)
+    id: '017_seed_bankroll_snooker',
+    up(db) {
+      if (!tableExists(db, 'bankroll')) return;
+      db.prepare('INSERT OR IGNORE INTO bankroll (sport, initial_banca, current_banca) VALUES (?, 100.0, 100.0)').run('snooker');
+    },
+  },
 ];
 
 function applyMigrations(db) {

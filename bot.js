@@ -70,6 +70,7 @@ const analyzedTennis = new Map();
 const analyzedFootball = new Map();
 const analyzedDota = new Map();
 const analyzedDarts = new Map();
+const analyzedSnooker = new Map();
 
 function _sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
@@ -1326,26 +1327,61 @@ function getPatchMetaAgeDays() {
 const _criticalAlertCooldown = new Map(); // alertId → lastNotifiedTs
 const CRITICAL_ALERT_COOLDOWN_MS = 60 * 60 * 1000; // 1h entre re-notificações do mesmo alert
 
+// Mapeia alert.id → sport bot que deve enviar o aviso (ou 'system' para enviar no primeiro ativo).
+// Evita que, por ex., MMA receba alertas de OddsPapi (que só afeta esports).
+function _alertSportFor(alertId) {
+  if (!alertId) return 'system';
+  if (alertId.startsWith('oddspapi_')) return 'esports';       // OddsPapi cobre só LoL
+  if (alertId.startsWith('theodds_'))  return 'system';        // The Odds API afeta mma/tennis/football
+  if (alertId === 'db_error')          return 'system';
+  if (alertId === 'analysis_stale')    return 'esports';       // lastAnalysisAt é do esports
+  return 'system';
+}
+
+function _pickTokenForAlert(alertId) {
+  const preferred = _alertSportFor(alertId);
+  if (preferred !== 'system') {
+    const cfg = SPORTS[preferred];
+    if (cfg?.enabled && cfg?.token) return { token: cfg.token, sport: preferred };
+  }
+  // Fallback: primeiro esporte não-shadow (para que o admin veja o alerta no bot que usa)
+  const firstActive = Object.values(SPORTS).find(s => s?.enabled && s?.token && !s?.shadowMode);
+  if (firstActive) return { token: firstActive.token, sport: firstActive.id };
+  // Último recurso: qualquer bot ativo
+  const any = Object.values(SPORTS).find(s => s?.enabled && s?.token);
+  return any ? { token: any.token, sport: any.id } : null;
+}
+
 async function checkCriticalAlerts() {
   if (!ADMIN_IDS.size) return;
   const resp = await serverGet('/alerts').catch(() => null);
   if (!resp || !Array.isArray(resp.alerts) || !resp.alerts.length) return;
-  // Usa token de qualquer sport ativo para mandar DM ao admin
-  const token = Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
-  if (!token) return;
   const now = Date.now();
   for (const alert of resp.alerts) {
     const last = _criticalAlertCooldown.get(alert.id) || 0;
     if (now - last < CRITICAL_ALERT_COOLDOWN_MS) continue;
+
+    // Rotear alerta para o bot do esporte afetado (ou fallback)
+    const routed = _pickTokenForAlert(alert.id);
+    if (!routed) continue;
+
+    // Se o alerta é específico de um esporte e esse esporte não está ativo, pula
+    const preferredSport = _alertSportFor(alert.id);
+    if (preferredSport !== 'system' && !SPORTS[preferredSport]?.enabled) {
+      log('INFO', 'ALERT', `Alerta ${alert.id} suprimido (${preferredSport} desligado)`);
+      _criticalAlertCooldown.set(alert.id, now);
+      continue;
+    }
+
     _criticalAlertCooldown.set(alert.id, now);
     const icon = alert.severity === 'critical' ? '🚨' : '⚠️';
     const msg = `${icon} *ALERTA SISTEMA* (${alert.severity})\n\n` +
       `\`${alert.id}\`\n${alert.msg}\n\n` +
-      `_Próxima notificação deste alerta: em ${Math.round(CRITICAL_ALERT_COOLDOWN_MS/60000)}min (se persistir)._`;
+      `_Enviado via bot [${routed.sport}] — próxima em ${Math.round(CRITICAL_ALERT_COOLDOWN_MS/60000)}min se persistir._`;
     for (const adminId of ADMIN_IDS) {
-      await sendDM(token, adminId, msg).catch(() => {});
+      await sendDM(routed.token, adminId, msg).catch(() => {});
     }
-    log('WARN', 'ALERT', `[${alert.severity}] ${alert.id}: ${alert.msg}`);
+    log('WARN', 'ALERT', `[${alert.severity}] ${alert.id} → bot [${routed.sport}]: ${alert.msg}`);
   }
 }
 
@@ -2356,15 +2392,16 @@ ${tipInstruction}`;
 }
 
 // ── Admin ──
-async function handleAdmin(token, chatId, command) {
+async function handleAdmin(token, chatId, command, callerSport = 'esports') {
   if (!ADMIN_IDS.has(String(chatId))) {
     await send(token, chatId, '❌ Comando restrito a administradores.');
     return;
   }
-  
+
   const parts = command.trim().split(/\s+/);
   const cmd = parts[0];
-  const sport = parts[1] || 'esports';
+  // Argumento explícito do comando (ex: /stats darts) tem prioridade sobre o bot que recebeu
+  const sport = parts[1] || callerSport;
   
   if (cmd === '/stats' || cmd === '/roi') {
     try {
@@ -2530,6 +2567,7 @@ async function handleAdmin(token, chatId, command) {
     if (sport === 'tennis'  || sport === 'all') { analyzedTennis.clear();  cleared.tennis = true; }
     if (sport === 'football'|| sport === 'all') { analyzedFootball.clear(); cleared.football = true; }
     if (sport === 'darts'   || sport === 'all') { analyzedDarts.clear();   cleared.darts = true; }
+    if (sport === 'snooker' || sport === 'all') { analyzedSnooker.clear(); cleared.snooker = true; }
     const clearedList = Object.keys(cleared).join(', ') || sport;
     await send(token, chatId,
       `🔄 *Reanálise ativada*\n\nMemória de análises limpa para: *${clearedList}*\n` +
@@ -2796,6 +2834,37 @@ async function handleProximas(token, chatId, sport) {
       return;
     }
 
+    if (sport === 'darts' || sport === 'snooker') {
+      const endpoint = sport === 'darts' ? '/darts-matches' : '/snooker-matches';
+      const emoji = sport === 'darts' ? '🎯' : '🎱';
+      const title = sport === 'darts' ? 'PRÓXIMAS DARTS' : 'PRÓXIMAS SNOOKER';
+      const matches = await serverGet(endpoint).catch(() => []);
+      const all = Array.isArray(matches) ? matches : [];
+      if (!all.length) {
+        await send(token, chatId,
+          `❌ Nenhuma partida de ${sport} encontrada.\n_Tente novamente mais tarde._`,
+          getMenu(sport));
+        return;
+      }
+      let txt = `${emoji} *${title}*\n━━━━━━━━━━━━━━━━\n\n`;
+      all.slice(0, 12).forEach(m => {
+        const liveTag = m.status === 'live' ? ' 🔴' : '';
+        txt += `${emoji} [${m.league}]${liveTag} *${m.team1}* vs *${m.team2}*\n`;
+        if (m.time) {
+          try {
+            const dt = new Date(m.time).toLocaleString('pt-BR', {
+              timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit',
+              hour: '2-digit', minute: '2-digit'
+            });
+            txt += `  🕐 ${dt}\n`;
+          } catch(_) {}
+        }
+        if (m.odds) txt += `  💰 ${m.team1}: \`${m.odds.t1}\` | ${m.team2}: \`${m.odds.t2}\`\n`;
+      });
+      await send(token, chatId, txt, getMenu(sport));
+      return;
+    }
+
     const lolMatches = await serverGet('/lol-matches').catch(() => []);
     const all = Array.isArray(lolMatches) ? lolMatches : [];
 
@@ -2914,27 +2983,28 @@ async function handleFairOdds(token, chatId, sport) {
   try {
     await send(token, chatId, '⏳ _Calculando fair odds do modelo..._');
 
-    const endpoint = sport === 'mma' ? '/mma-matches' : sport === 'tennis' ? '/tennis-matches' : sport === 'football' ? '/football-matches' : '/lol-matches';
+    const endpoint = sport === 'mma' ? '/mma-matches'
+      : sport === 'tennis' ? '/tennis-matches'
+      : sport === 'football' ? '/football-matches'
+      : sport === 'darts' ? '/darts-matches'
+      : sport === 'snooker' ? '/snooker-matches'
+      : '/lol-matches';
     const matches = await serverGet(endpoint).catch(() => []);
     const all = Array.isArray(matches) ? matches : [];
 
-    const withOdds = sport === 'football' || sport === 'mma' || sport === 'tennis'
+    const withOdds = sport === 'football' || sport === 'mma' || sport === 'tennis' || sport === 'darts' || sport === 'snooker'
       ? all.filter(m => m.odds)
       : all.filter(m => m.odds?.t1 && m.odds?.t2); // LoL: todas com odds (live, draft e upcoming)
 
     if (!withOdds.length) {
-      const noOddsMsg = sport === 'mma'
-        ? '❌ *Nenhuma luta MMA com odds disponíveis.*\n\n_Tente novamente mais tarde._'
-        : sport === 'tennis'
-        ? '❌ *Nenhuma partida de tênis com odds disponíveis.*\n\n_Tente novamente mais tarde._'
-        : sport === 'football'
-        ? '❌ *Nenhuma partida de futebol com odds disponíveis.*\n\n_Tente novamente mais tarde._'
-        : '❌ *Nenhuma partida ao vivo com odds disponíveis.*\n\n_Odds reais são necessárias para calcular fair odds._';
-      await send(token, chatId, noOddsMsg, getMenu(sport));
+      await send(token, chatId,
+        `❌ *Nenhuma partida de ${sport} com odds disponíveis.*\n\n_Tente novamente mais tarde._`,
+        getMenu(sport));
       return;
     }
 
-    const title = sport === 'mma' ? '⚖️ *FAIR ODDS — MMA*' : sport === 'tennis' ? '⚖️ *FAIR ODDS — TÊNIS*' : sport === 'football' ? '⚖️ *FAIR ODDS — FUTEBOL*' : '⚖️ *FAIR ODDS — AO VIVO*';
+    const titleMap = { mma: 'MMA', tennis: 'TÊNIS', football: 'FUTEBOL', darts: 'DARTS', snooker: 'SNOOKER' };
+    const title = `⚖️ *FAIR ODDS — ${titleMap[sport] || 'AO VIVO'}*`;
     let txt = `${title}\n━━━━━━━━━━━━━━━━\n`;
     txt += `_Fair odd = estimativa do modelo (forma + H2H + mercado como prior)_\n\n`;
 
@@ -3353,7 +3423,8 @@ async function poll(token, sport) {
                      text.startsWith('/slugs') || text.startsWith('/lolraw') ||
                      text.startsWith('/health') || text.startsWith('/debug') ||
                      text.startsWith('/shadow')) {
-            await handleAdmin(token, chatId, text);
+            // Passa `sport` da poll (qual bot recebeu) para evitar default 'esports'
+            await handleAdmin(token, chatId, text, sport);
           }
         }
         
@@ -5452,6 +5523,99 @@ Máximo 200 palavras.`;
       }
     } catch(e) {
       log('ERROR', 'AUTO-DARTS', e.message);
+    }
+  }
+
+  // ── Snooker (shadow mode por default, via Betfair) ─────────────────────
+  const snookerConfig = SPORTS['snooker'];
+  if (snookerConfig?.enabled) {
+    try {
+      const { snookerPreFilter } = require('./lib/snooker-ml');
+      log('INFO', 'AUTO-SNOOKER', `Iniciando verificação de snooker${snookerConfig.shadowMode ? ' [SHADOW]' : ''}...`);
+      const matches = await serverGet('/snooker-matches').catch(() => []);
+      if (!Array.isArray(matches) || !matches.length) {
+        log('INFO', 'AUTO-SNOOKER', '0 partidas snooker com odds Betfair');
+      } else {
+        log('INFO', 'AUTO-SNOOKER', `${matches.length} partidas snooker com odds`);
+        for (const match of matches) {
+          const key = `snooker_${match.id}`;
+          const prev = analyzedSnooker.get(key);
+          if (prev?.tipSent) continue;
+          if (prev && (now - prev.ts < 60 * 60 * 1000)) continue;
+
+          // Enrichment: ranking + form recente via snooker.org se configurado.
+          // Por ora só usa implied odds (factorCount=0 → bloqueado pelo ML).
+          // TODO: integrar snooker.org quando chave X-Requested-By for aprovada.
+          const enrich = {
+            rankP1: null, rankP2: null,
+            winRateP1: null, winRateP2: null
+          };
+
+          const ml = snookerPreFilter(match, enrich);
+          if (!ml.pass) {
+            analyzedSnooker.set(key, { ts: now, tipSent: false });
+            log('INFO', 'AUTO-SNOOKER', `Sem edge: ${match.team1} vs ${match.team2} | edge=${ml.score}pp factors=${ml.factorCount}`);
+            continue;
+          }
+
+          const pickTeam = ml.direction === 't1' ? match.team1 : match.team2;
+          const pickOdd = ml.direction === 't1' ? parseFloat(match.odds.t1) : parseFloat(match.odds.t2);
+          const pickP   = ml.direction === 't1' ? ml.modelP1 : ml.modelP2;
+          const evPct   = ((pickP * pickOdd - 1) * 100);
+          if (evPct < 3) { analyzedSnooker.set(key, { ts: now, tipSent: false }); continue; }
+
+          const stake = calcKellyWithP(pickP, pickOdd, 1/8);
+          if (stake === '0u') { analyzedSnooker.set(key, { ts: now, tipSent: false }); continue; }
+          const desiredU = parseFloat(stake) || 0;
+          const riskAdj = await applyGlobalRisk('snooker', desiredU);
+          if (!riskAdj.ok) { log('INFO', 'RISK', `snooker: bloqueada (${riskAdj.reason})`); continue; }
+          const stakeAdj = String(riskAdj.units.toFixed(1).replace(/\.0$/, ''));
+
+          const tipReason = `Rank: ${match.team1}=${enrich.rankP1 ?? 'n/a'} vs ${match.team2}=${enrich.rankP2 ?? 'n/a'} | edge=${ml.score}pp`;
+
+          const rec = await serverPost('/record-tip', {
+            matchId: String(match.id), eventName: match.league,
+            p1: match.team1, p2: match.team2, tipParticipant: pickTeam,
+            odds: String(pickOdd), ev: evPct.toFixed(1), stake: stakeAdj,
+            confidence: ml.factorCount >= 2 ? 'MÉDIA' : 'BAIXA',
+            isLive: match.status === 'live' ? 1 : 0,
+            market_type: 'ML',
+            modelP1: ml.modelP1, modelP2: ml.modelP2, modelPPick: pickP,
+            modelLabel: 'snooker-ml (rank + WR)',
+            tipReason,
+            isShadow: snookerConfig.shadowMode ? 1 : 0
+          }, 'snooker');
+
+          if (!rec?.tipId && !rec?.skipped) {
+            log('WARN', 'AUTO-SNOOKER', `record-tip falhou: ${pickTeam} @ ${pickOdd}`);
+            continue;
+          }
+          analyzedSnooker.set(key, { ts: now, tipSent: true });
+          if (rec?.skipped) continue;
+
+          if (snookerConfig.shadowMode) {
+            log('INFO', 'AUTO-SNOOKER', `[SHADOW] Tip: ${pickTeam} @ ${pickOdd} | EV:${evPct.toFixed(1)}% | ${stakeAdj}u | edge=${ml.score}pp`);
+            continue;
+          }
+
+          const tipMsg = `🎱 💰 *TIP SNOOKER*\n` +
+            `*${match.team1}* vs *${match.team2}*\n📋 ${match.league}\n\n` +
+            `🎯 Aposta: *${pickTeam}* @ *${pickOdd}*\n` +
+            `📈 EV: *+${evPct.toFixed(1)}%*\n` +
+            `💵 Stake: *${stakeAdj}u*\n` +
+            `🧠 ${tipReason}\n\n` +
+            `⚠️ _Odds Betfair (delayed ~1s)._`;
+
+          for (const [userId, prefs] of subscribedUsers) {
+            if (!prefs.has('snooker')) continue;
+            try { await sendDM(snookerConfig.token, userId, tipMsg); } catch(_) {}
+          }
+          log('INFO', 'AUTO-SNOOKER', `Tip enviada: ${pickTeam} @ ${pickOdd} | EV:${evPct.toFixed(1)}%`);
+          await new Promise(r => setTimeout(r, 3000));
+        }
+      }
+    } catch(e) {
+      log('ERROR', 'AUTO-SNOOKER', e.message);
     }
   }
 

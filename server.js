@@ -13,6 +13,7 @@ const apiFootball   = require('./lib/api-football');
 const { tennisSinglePlayerNameMatch, tennisPairMatchesPlayers } = require('./lib/tennis-match');
 const { nameMatches } = require('./lib/name-match');
 const sofascoreDarts = require('./lib/sofascore-darts');
+const betfair = require('./lib/betfair');
 const { esportsPreFilter } = require('./lib/ml');
 const tennisML = require('./lib/tennis-ml');
 const { fetchGridEnrichForMatch } = require('./lib/grid');
@@ -6105,6 +6106,59 @@ const server = http.createServer(async (req, res) => {
       sendJson(res, matches);
     } catch (e) {
       log('ERROR', 'DARTS', e.message);
+      sendJson(res, []);
+    }
+    return;
+  }
+
+  // ── Snooker: lista de eventos + odds via Betfair Exchange (delayed key) ──
+  if (p === '/snooker-matches') {
+    if (!betfair.isConfigured()) { sendJson(res, []); return; }
+    try {
+      const daysAhead = parseInt(parsed.query.days || '14', 10) || 14;
+      // Cache curto para economizar requests (Betfair tem soft rate limit)
+      if (!global.__snookerCache) global.__snookerCache = { ts: 0, data: [] };
+      const TTL = 3 * 60 * 1000; // 3 min
+      if (Date.now() - global.__snookerCache.ts < TTL && global.__snookerCache.data.length) {
+        sendJson(res, global.__snookerCache.data);
+        return;
+      }
+      const odds = await betfair.fetchSnookerMatchOdds(daysAhead);
+      const matches = [];
+      for (const ev of odds) {
+        const [r1, r2] = ev.runners;
+        if (!r1 || !r2) continue;
+        const t1Odds = r1.backPrice; // best back price = equivalente ao odds de casa
+        const t2Odds = r2.backPrice;
+        if (!t1Odds || !t2Odds || t1Odds <= 1 || t2Odds <= 1) continue;
+        const isLive = ev.startTime && new Date(ev.startTime).getTime() <= Date.now();
+        matches.push({
+          id: `snooker_${ev.marketId}`,
+          marketId: ev.marketId,
+          eventId: ev.eventId,
+          game: 'snooker',
+          status: isLive ? 'live' : 'upcoming',
+          team1: r1.name, team2: r2.name,
+          selectionId1: r1.selectionId,
+          selectionId2: r2.selectionId,
+          league: ev.competition || 'Snooker',
+          time: ev.startTime,
+          odds: {
+            t1: String(t1Odds), t2: String(t2Odds),
+            t1Lay: r1.layPrice, t2Lay: r2.layPrice,
+            bookmaker: 'Betfair'
+          }
+        });
+      }
+      matches.sort((a, b) => {
+        if (a.status === 'live' && b.status !== 'live') return -1;
+        if (b.status === 'live' && a.status !== 'live') return 1;
+        return new Date(a.time || 0).getTime() - new Date(b.time || 0).getTime();
+      });
+      global.__snookerCache = { ts: Date.now(), data: matches };
+      sendJson(res, matches);
+    } catch (e) {
+      log('ERROR', 'SNOOKER', e.message);
       sendJson(res, []);
     }
     return;

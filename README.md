@@ -116,6 +116,7 @@ TELEGRAM_TOKEN_MMA=seu_token_mma        # opcional
 TELEGRAM_TOKEN_TENNIS=seu_token_tennis  # opcional
 TELEGRAM_TOKEN_FOOTBALL=seu_token_fb    # opcional
 TELEGRAM_TOKEN_DARTS=seu_token_darts    # opcional (shadow mode por default)
+TELEGRAM_TOKEN_SNOOKER=seu_token_snk    # opcional (requer Betfair Exchange)
 
 # ── APIs de IA (pelo menos uma obrigatória) ──
 DEEPSEEK_API_KEY=sk-...                 # DeepSeek (recomendado — mais barato)
@@ -154,10 +155,12 @@ MMA_ENABLED=true                        # false por padrão se token ausente
 TENNIS_ENABLED=true
 FOOTBALL_ENABLED=true
 DARTS_ENABLED=true                      # requer TELEGRAM_TOKEN_DARTS + SOFASCORE_PROXY_BASE
+SNOOKER_ENABLED=true                    # requer TELEGRAM_TOKEN_SNOOKER + Betfair (BF_APP_KEY etc.)
 
 # ── Shadow mode (modo auditoria — tip gerada mas NÃO envia DM) ──
-# Default: darts inicia em shadow. Todos os outros em produção.
+# Default: darts/snooker iniciam em shadow. Outros em produção.
 DARTS_SHADOW=true                       # default; desligue após 30 tips com CLV+
+SNOOKER_SHADOW=true                     # default; desligue após 30 tips com CLV+
 # ESPORTS_SHADOW=false                  # (outros esportes também podem rodar em shadow)
 
 # ── Darts — Sofascore ──
@@ -165,6 +168,13 @@ DARTS_SHADOW=true                       # default; desligue após 30 tips com CL
 SOFASCORE_PROXY_BASE=https://xxx.ngrok-free.app/api/v1/sofascore  # Public-Sofascore-API no projeto
 # SOFASCORE_DIRECT=true                 # alternativa: chamar api.sofascore.com direto
 DARTS_TOURNAMENT_WHITELIST=pdc,premier-league-darts,world-matchplay,world-grand-prix,uk-open,players-championship,european-tour,grand-slam,world-series-finals
+
+# ── Snooker — Betfair Exchange (delayed key gratuita) ──
+# Setup manual (uma vez): developer.betfair.com → criar delayed App Key
+# Requer conta Betfair com depósito mín. £10 + 2FA ativo
+BF_APP_KEY=sua_delayed_app_key          # applicationKey com delayData:true
+BF_USER=seu_username_betfair
+BF_PASS=sua_senha_betfair
 
 # ── Futebol — configuração ──
 FOOTBALL_LEAGUES=soccer_brazil_serie_b,soccer_brazil_serie_c  # ligas a monitorar (The Odds API keys)
@@ -340,6 +350,7 @@ Cada esporte exibe fair odds calculadas pelo **próprio modelo de análise do si
 | Tênis | Sackmann (Elo superfície) + ESPN rankings ATP/WTA + Sofascore fallback | Modelo Elo-log por superfície |
 | Futebol | API-Football (forma, H2H, standings) + Sofascore home/away split | `calcFootballScore` com Poisson + home boost |
 | Darts | Sofascore (3-dart avg + win rate últimos 10 jogos) | `dartsPreFilter` — 3-dart avg diff é o sinal primário |
+| Snooker | Betfair Exchange (odds) + ranking fallback | `snookerPreFilter` — log-diff de ranking ± win rate recente |
 
 ---
 
@@ -737,6 +748,45 @@ CLV médio: +2.15% (n=13)
 ### Endpoint `/shadow-tips?sport=X&limit=100`
 
 Retorna JSON com summary + últimas N tips para análise externa (Excel, Python notebook).
+
+---
+
+## Snooker (Betfair Exchange)
+
+Novo esporte em shadow mode, alimentado pela **Betfair Exchange API** (delayed key gratuita).
+
+### Setup manual (uma vez)
+
+1. Conta Betfair com depósito mínimo £10 + 2FA ativo
+2. `developer.betfair.com` → **Get Started** → criar **delayed App Key** (grátis; versão `delayData:true`)
+3. Guardar `BF_APP_KEY`, `BF_USER`, `BF_PASS` no Railway
+4. `SNOOKER_ENABLED=true` + `TELEGRAM_TOKEN_SNOOKER=<token>`
+
+### Limitações do delayed tier (free)
+
+- Dados com ~1-3s de delay (ok para pré-jogo, marginal para in-play de alta velocidade)
+- Sem quota mensal — pode rodar 24/7
+- Rate limit soft: cache de 3 min no endpoint `/snooker-matches`
+- **Apenas leitura** — não permite apostar via API (só consumimos odds aqui)
+
+### Fluxo (`lib/betfair.js`)
+
+- Login interactive (`/api/login`) → sessionToken 12h
+- KeepAlive automático a cada 20 min
+- `listEvents(eventTypeId=6422)` → `listMarketCatalogue(MATCH_ODDS)` → `listMarketBook(EX_BEST_OFFERS)`
+- **Odds = best back price** (maior odd que alguém está oferecendo no mercado)
+
+### Modelo ML
+
+`lib/snooker-ml.js` com 2 sinais:
+- **Log-diff de ranking** (peso principal) — ranking oficial é o sinal mais limpo sem scraping
+- Win rate recente (via snooker.org — pendente de integração; por ora factorCount=0 → gate segura)
+
+Com só implied odds como sinal (sem rank enrichment), o pré-filtro **bloqueia todas as tips** até integrar snooker.org. Isso é intencional durante shadow — melhor 0 tips erradas que 30 tips com sinal fraco.
+
+### Whitelist
+
+Por default sem whitelist explícita; Betfair já foca em majors (World Championship, UK, Masters, Tour Championship, German Masters, Shanghai, etc.). Filtro adicional por competição pode ser adicionado se necessário.
 
 ---
 
