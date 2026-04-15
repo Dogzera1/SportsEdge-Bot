@@ -3294,7 +3294,9 @@ const server = http.createServer(async (req, res) => {
       const normName = (s) => String(s||'').toLowerCase().replace(/[^a-z0-9]/g,'');
       const n1 = normName(t1), n2 = normName(t2);
       const nameMatches = (a, b) => {
-        if (!a || !b) return false;
+        // Ambos lados precisam ter ≥3 chars para evitar false-positive
+        // (string vazia sempre está "contida", casaria partida errada)
+        if (!a || !b || a.length < 3 || b.length < 3) return false;
         return a.includes(b) || b.includes(a);
       };
 
