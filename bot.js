@@ -4866,8 +4866,10 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
           `${confEmoji} Confiança: *${tipConf}*\n\n` +
           `⚠️ _Aposte com responsabilidade._`;
 
+        // eventName: prioriza org + eventName (ex: "UFC — UFC 305") sobre o "MMA" genérico do TheOddsAPI
+        const recEventName = leagueLine || fight.league;
         const rec = await serverPost('/record-tip', {
-          matchId: String(fight.id), eventName: fight.league,
+          matchId: String(fight.id), eventName: recEventName,
           p1: fight.team1, p2: fight.team2, tipParticipant: tipTeam,
           odds: String(tipOdd), ev: String(tipEV), stake: tipStakeAdjMma,
           confidence: tipConf, isLive: false, market_type: 'ML',
