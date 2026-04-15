@@ -6139,11 +6139,27 @@ async function pollCs(runOnce = false) {
 
         const hltvData = await hltv.enrichMatch(match.team1, match.team2, match.time).catch(() => null);
 
+        // Live-only: resolve HLTV match_id e lê scorebot (round, score, bomba, HP/money)
+        let scoreboard = null;
+        let hltvMatchId = null;
+        if (match.status === 'live') {
+          const found = await hltv.getHltvMatchId(match.team1, match.team2, match.time).catch(() => null);
+          if (found?.matchId) {
+            hltvMatchId = found.matchId;
+            const raw = await hltv.getScoreboard(found.matchId, 10).catch(() => null);
+            scoreboard = hltv.summarizeScoreboard(raw);
+            if (scoreboard) {
+              log('INFO', 'AUTO-CS', `Scorebot ${match.team1} vs ${match.team2}: ${scoreboard.mapName} ${scoreboard.scoreT}-${scoreboard.scoreCT} (round ${scoreboard.round})`);
+            }
+          }
+        }
+
         const enrich = {
           form1: hltvData?.form1 || null,
           form2: hltvData?.form2 || null,
           h2h: hltvData?.h2h || { t1Wins: 0, t2Wins: 0, totalMatches: 0 },
           oddsMovement: null,
+          liveContext: scoreboard,
         };
 
         const { esportsPreFilter } = require('./lib/ml');
@@ -6188,9 +6204,12 @@ async function pollCs(runOnce = false) {
 
         const conf = useElo && elo.eloMatches1 >= 20 && elo.eloMatches2 >= 20 ? 'ALTA'
                    : factorCount >= 2 ? 'MÉDIA' : 'BAIXA';
-        const tipReason = useElo
+        const liveCtx = scoreboard
+          ? ` | LIVE ${scoreboard.mapName} T:${scoreboard.scoreT} CT:${scoreboard.scoreCT} r${scoreboard.round}${scoreboard.bombPlanted ? ' 💣' : ''}`
+          : '';
+        const tipReason = (useElo
           ? `Elo: ${match.team1}=${elo.elo1} (${elo.eloMatches1}j) vs ${match.team2}=${elo.elo2} (${elo.eloMatches2}j)`
-          : `HLTV form/H2H: factors=${factorCount}, edge=${mlScore.toFixed(1)}pp`;
+          : `HLTV form/H2H: factors=${factorCount}, edge=${mlScore.toFixed(1)}pp`) + liveCtx;
 
         const rec = await serverPost('/record-tip', {
           matchId: String(match.id), eventName: match.league,
