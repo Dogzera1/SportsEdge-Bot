@@ -4906,6 +4906,63 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // Reanalisa tips pendentes de tênis com os novos gates (2026-04-15) e anula as reprovadas.
+  // Aceita ?apply=1 para executar; sem apply faz dry-run.
+  // Critérios (sincronizados com bot.js auto-tennis):
+  //   - Duplas (participant com "/") → reject (Elo só singles)
+  //   - EV < 7% → reject (novo gate base)
+  //   - EV 7-10% + conf BAIXA → reject (exige MÉDIA+)
+  //   - EV ≥ 30% sem conf ALTA → reject (small-sample)
+  if (p === '/void-bad-tennis' && req.method === 'POST') {
+    try {
+      const apply = parsed.query.apply === '1' || parsed.query.apply === 'true';
+      const rows = db.prepare(
+        "SELECT id, participant1, participant2, tip_participant, odds, ev, confidence, event_name, sent_at FROM tips WHERE sport='tennis' AND result IS NULL ORDER BY sent_at DESC"
+      ).all();
+      const evaluate = (t) => {
+        const ev = parseFloat(t.ev);
+        const conf = String(t.confidence || '').toUpperCase();
+        const p1 = String(t.participant1 || '');
+        const p2 = String(t.participant2 || '');
+        const isDoubles = p1.includes('/') || p2.includes('/');
+        const reasons = [];
+        if (isDoubles) reasons.push('dupla');
+        if (ev < 7.0) reasons.push(`EV ${ev.toFixed(1)}% < 7%`);
+        if (ev >= 7.0 && ev < 10.0 && conf === 'BAIXA') reasons.push(`EV ${ev.toFixed(1)}% + conf BAIXA`);
+        if (ev >= 30.0 && conf !== 'ALTA') reasons.push(`EV ${ev.toFixed(1)}% absurdo (small-sample)`);
+        return { keep: reasons.length === 0, reasons };
+      };
+      const decided = rows.map(r => ({ ...r, _eval: evaluate(r) }));
+      const toVoid = decided.filter(r => !r._eval.keep);
+      let voided = 0;
+      if (apply && toVoid.length) {
+        const upd = db.prepare("UPDATE tips SET result='void', settled_at=datetime('now'), profit_reais=0 WHERE id=?");
+        const tx = db.transaction(ids => { for (const id of ids) upd.run(id); });
+        tx(toVoid.map(r => r.id));
+        voided = toVoid.length;
+        log('INFO', 'ADMIN', `void-bad-tennis: ${voided} tips anuladas`);
+      }
+      sendJson(res, {
+        ok: true,
+        dryRun: !apply,
+        total: rows.length,
+        wouldVoid: toVoid.length,
+        voided,
+        items: decided.map(r => ({
+          id: r.id,
+          matchup: `${r.participant1} vs ${r.participant2}`,
+          pick: r.tip_participant,
+          odds: r.odds, ev: r.ev, conf: r.confidence,
+          keep: r._eval.keep,
+          reasons: r._eval.reasons
+        }))
+      });
+    } catch(e) {
+      sendJson(res, { error: e.message }, 500);
+    }
+    return;
+  }
+
   // Anula em lote todas as tips pendentes mais antigas que N dias (padrão: 60)
   if (p === '/void-old-pending' && req.method === 'POST') {
     let body = ''; req.on('data', d => body += d);
