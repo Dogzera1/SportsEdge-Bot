@@ -6931,6 +6931,28 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // Debug: retorna o que TheOddsAPI lista como sport keys TT
+  if (p === '/debug-ttennis-sources') {
+    try {
+      const out = { theOddsApiKey: !!THE_ODDS_API_KEY, pinnacle: 0, theOddsSports: null };
+      const pinRows = await getPinnacleTableTennisMatches();
+      out.pinnacle = pinRows.length;
+      if (THE_ODDS_API_KEY) {
+        const sportsR = await theOddsGet(`https://api.the-odds-api.com/v4/sports/?apiKey=${THE_ODDS_API_KEY}&all=false`);
+        out.theOddsStatus = sportsR.status;
+        out.theOddsBody = String(sportsR.body || '').slice(0, 500);
+        if (sportsR.status === 200) {
+          const sports = safeParse(sportsR.body, []);
+          out.theOddsSports = (Array.isArray(sports) ? sports : [])
+            .filter(s => /table.?tennis/i.test(s.title || '') || /table.?tennis|tt_/i.test(s.key || ''))
+            .map(s => ({ key: s.key, title: s.title, active: s.active }));
+        }
+      }
+      sendJson(res, out);
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
   // ── Snooker: odds via Pinnacle guest API (funciona do BR) ──
   if (p === '/tabletennis-matches') {
     try {
