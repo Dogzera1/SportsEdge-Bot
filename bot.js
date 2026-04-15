@@ -671,8 +671,13 @@ async function runAutoAnalysis() {
         if (isMainLeague(match.leagueSlug || match.league)) { log('INFO', 'AUTO', `Liga principal ignorada (draft): ${match.league} (${match.team1} vs ${match.team2})`); continue; }
         const prev = analyzedMatches.get(matchKey);
         if (prev?.tipSent) continue; // uma tip por partida — não repetir
-        // Matches sem edge recente aguardam 2× mais antes de chamar a IA novamente
-        const liveCooldown = prev?.noEdge ? RE_ANALYZE_INTERVAL * 2 : RE_ANALYZE_INTERVAL;
+        // Live matches: cooldown menor pra capturar janela em que Riot popula o feed.
+        // Em draft/outros: 2× pra matches sem edge prévio.
+        // Antes: noEdge sempre dobrava → perdíamos janelas em live quando stats aparecia tarde.
+        const isLiveMatch = match.status === 'live' || match.status === 'inprogress';
+        const liveCooldown = isLiveMatch
+          ? RE_ANALYZE_INTERVAL                                        // live: 10 min fixo
+          : (prev?.noEdge ? RE_ANALYZE_INTERVAL * 2 : RE_ANALYZE_INTERVAL); // draft/upcoming: 10/20 min
         if (prev && (now - prev.ts < liveCooldown)) continue;
 
         const result = await autoAnalyzeMatch(esportsConfig.token, match);
