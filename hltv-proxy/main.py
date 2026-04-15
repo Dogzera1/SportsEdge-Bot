@@ -63,12 +63,26 @@ def _cache_put(key: str, status: int, body: str, ctype: str):
         _cache.popitem(last=False)
 
 
+IMPERSONATE_CHAIN = ["chrome136", "chrome131", "chrome124", "safari18_0", "chrome120"]
+
 def _fetch_hltv(path: str, qs: str = "") -> tuple[int, str, str]:
-    """Fetch síncrono via curl_cffi. Retorna (status, body, content-type)."""
+    """Fetch síncrono via curl_cffi. Retorna (status, body, content-type).
+    Tenta múltiplos fingerprints — se um começa a ser bloqueado pela CF, rota pra outro."""
     url = f"{UPSTREAM}{path}" + (f"?{qs}" if qs else "")
-    r = cf_requests.get(url, impersonate="chrome124", timeout=TIMEOUT, headers=HEADERS)
-    ctype = r.headers.get("content-type", "text/html; charset=utf-8")
-    return r.status_code, r.text, ctype
+    last_status = 0
+    last_body = ""
+    last_ctype = "text/html"
+    for impersonate in IMPERSONATE_CHAIN:
+        try:
+            r = cf_requests.get(url, impersonate=impersonate, timeout=TIMEOUT, headers=HEADERS)
+        except Exception:
+            continue
+        last_status = r.status_code
+        last_body = r.text
+        last_ctype = r.headers.get("content-type", "text/html; charset=utf-8")
+        if r.status_code == 200 and last_body and "Just a moment" not in last_body:
+            return last_status, last_body, last_ctype
+    return last_status, last_body, last_ctype
 
 
 @app.get("/healthz", response_class=PlainTextResponse)
