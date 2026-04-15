@@ -3021,6 +3021,40 @@ async function handleProximas(token, chatId, sport) {
       return;
     }
 
+    if (sport === 'cs') {
+      const matches = await serverGet('/cs-matches').catch(() => []);
+      const all = Array.isArray(matches) ? matches : [];
+      if (!all.length) {
+        await send(token, chatId,
+          '❌ Nenhuma partida de CS2 encontrada.\n_Tente novamente mais tarde._',
+          getMenu(sport));
+        return;
+      }
+      let txt = `🔫 *PRÓXIMAS PARTIDAS CS2*\n━━━━━━━━━━━━━━━━\n\n`;
+      let lastLeague = '';
+      all.slice(0, 15).forEach(m => {
+        if (m.league !== lastLeague) {
+          txt += `\n📋 *${m.league}*\n`;
+          lastLeague = m.league;
+        }
+        const liveTag = m.status === 'live' ? ' 🔴' : '';
+        const fmt = m.format ? ` (${m.format})` : '';
+        txt += `🔫${liveTag} *${m.team1}* vs *${m.team2}*${fmt}\n`;
+        if (m.time) {
+          try {
+            const dt = new Date(m.time).toLocaleString('pt-BR', {
+              timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit',
+              hour: '2-digit', minute: '2-digit'
+            });
+            txt += `  🕐 ${dt}\n`;
+          } catch(_) {}
+        }
+        if (m.odds) txt += `  💰 ${m.team1}: \`${m.odds.t1}\` | ${m.team2}: \`${m.odds.t2}\`\n`;
+      });
+      await send(token, chatId, txt, getMenu(sport));
+      return;
+    }
+
     if (sport === 'darts' || sport === 'snooker') {
       const endpoint = sport === 'darts' ? '/darts-matches' : '/snooker-matches';
       const emoji = sport === 'darts' ? '🎯' : '🎱';

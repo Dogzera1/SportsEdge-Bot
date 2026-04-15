@@ -6158,7 +6158,7 @@ const server = http.createServer(async (req, res) => {
   // ── Global Risk Snapshot (cross-sport) ──
   if (p === '/risk-snapshot') {
     try {
-      const sports = ['esports', 'mma', 'tennis', 'football'];
+      const sports = ['esports', 'mma', 'tennis', 'tabletennis', 'cs', 'darts', 'snooker', 'football'];
       const bySport = {};
       let totalBanca = 0;
       let totalPendingReais = 0;
