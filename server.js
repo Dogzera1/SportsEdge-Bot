@@ -3335,10 +3335,32 @@ const server = http.createServer(async (req, res) => {
       const dire = buildSide('dire');
       const blue = swap ? dire : radiant;
       const red  = swap ? radiant : dire;
-      const hasLiveStats = (blue.totalGold + red.totalGold) > 0;
+      // BUG FIX 2026-04-15: OpenDota /api/live não retorna mais per-player net_worth/gold.
+      // Antes usávamos totalGold (soma) que ficava sempre 0 → hasLiveStats sempre false.
+      // Agora consideramos live se game_time > 0 (partida realmente rolando) OU kills agregados.
+      const hasPlayerStats = (blue.totalGold + red.totalGold) > 0;
+      const hasAggregateStats = (hit.game_time || 0) > 0 || (hit.radiant_score || 0) + (hit.dire_score || 0) > 0;
+      const hasLiveStats = hasPlayerStats || hasAggregateStats;
+      // Estimativa de gold a partir de radiant_lead + score quando per-player ausente.
+      if (!hasPlayerStats && hasAggregateStats) {
+        const lead = Math.abs(hit.radiant_lead || 0);
+        // Net worth aproximado: ~25k/team aos 30min (benchmark pro). Escalável por game_time.
+        const baseNetworth = Math.round(Math.max(2500, (hit.game_time || 0) / 60 * 800));
+        const rLead = hit.radiant_lead || 0;
+        const radNet = baseNetworth + (rLead > 0 ? Math.round(lead / 2) : -Math.round(lead / 2));
+        const dirNet = baseNetworth - (rLead > 0 ? Math.round(lead / 2) : -Math.round(lead / 2));
+        radiant.totalGold = Math.max(0, radNet);
+        dire.totalGold = Math.max(0, dirNet);
+        (swap ? [red, blue] : [blue, red]).forEach((t, i) => {
+          t.totalGold = i === 0 ? radiant.totalGold : dire.totalGold;
+          t._estimated = true;
+        });
+      }
 
       sendJson(res, {
         hasLiveStats,
+        hasPlayerStats,
+        hasAggregateStats,
         matchId: hit.match_id,
         gameTime: hit.game_time || 0,
         radiantLead: (swap ? -1 : 1) * (hit.radiant_lead || 0),
