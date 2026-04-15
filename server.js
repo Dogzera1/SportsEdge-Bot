@@ -7417,9 +7417,22 @@ const server = http.createServer(async (req, res) => {
         sendJson(res, global.__ttennisCache.data);
         return;
       }
-      // 1) Pinnacle (frequentemente sem matches TT — Pinnacle cobre pouco)
+      // 1) Pinnacle (frequentemente sem matches TT — matchupCount=0 observado)
       let rows = await getPinnacleTableTennisMatches();
-      // 2) Fallback Sofascore — lista matches sem odds (ao menos o botão Próximas funciona)
+      // 2) 1xBet via hltv-proxy (curl_cffi bypass) — ~770 matches TT/dia com odds reais
+      if (!rows.length) {
+        try {
+          const onexbet = require('./lib/sportsbook-1xbet');
+          const oneXRows = await onexbet.getTableTennisMatches().catch(() => []);
+          if (oneXRows.length) {
+            rows = oneXRows;
+            log('INFO', 'ODDS', `1xBet Table Tennis: ${rows.length} partidas`);
+          }
+        } catch (e) {
+          log('WARN', 'ODDS', `1xBet TT fallback: ${e.message}`);
+        }
+      }
+      // 3) Fallback Sofascore — lista matches sem odds (ao menos o botão Próximas funciona)
       // Sofascore cobre Setka Cup/WTT/TT Elite Series/etc (13k+ matches/dia).
       if (!rows.length) {
         try {

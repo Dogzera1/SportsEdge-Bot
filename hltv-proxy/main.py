@@ -28,6 +28,7 @@ import socketio
 app = FastAPI(title="HLTV Proxy")
 
 UPSTREAM = "https://www.hltv.org"
+UPSTREAM_1XBET = "https://1xbet.com"
 CACHE_TTL = int(os.environ.get("CACHE_TTL_SECONDS", "300"))  # 5min — CF-friendly
 CACHE_MAX = int(os.environ.get("CACHE_MAX_ENTRIES", "500"))
 TIMEOUT = int(os.environ.get("UPSTREAM_TIMEOUT_SECONDS", "20"))
@@ -86,20 +87,21 @@ def _ordered_chain() -> list[str]:
         return [_last_good_impersonate] + [x for x in IMPERSONATE_CHAIN if x != _last_good_impersonate]
     return list(IMPERSONATE_CHAIN)
 
-def _fetch_hltv(path: str, qs: str = "") -> tuple[int, str, str]:
-    """Fetch síncrono via curl_cffi com sessões persistentes (mantém cf_clearance).
-    Rota entre fingerprints se CF bloqueia, com backoff progressivo."""
+def _fetch_url(url: str, extra_headers: dict | None = None) -> tuple[int, str, str]:
+    """Fetch genérico via curl_cffi com sessões persistentes + rotate fingerprints."""
     global _last_good_impersonate
-    url = f"{UPSTREAM}{path}" + (f"?{qs}" if qs else "")
     last_status = 0
     last_body = ""
     last_ctype = "text/html"
     for idx, impersonate in enumerate(_ordered_chain()):
         if idx > 0:
-            time.sleep(RETRY_BACKOFF_BASE * idx)  # 0.6s, 1.2s, 1.8s…
+            time.sleep(RETRY_BACKOFF_BASE * idx)
         try:
             sess = _get_session(impersonate)
-            r = sess.get(url, impersonate=impersonate, timeout=TIMEOUT, headers=HEADERS)
+            hdrs = dict(HEADERS)
+            if extra_headers:
+                hdrs.update(extra_headers)
+            r = sess.get(url, impersonate=impersonate, timeout=TIMEOUT, headers=hdrs)
         except Exception:
             continue
         last_status = r.status_code
@@ -109,6 +111,11 @@ def _fetch_hltv(path: str, qs: str = "") -> tuple[int, str, str]:
             _last_good_impersonate = impersonate
             return last_status, last_body, last_ctype
     return last_status, last_body, last_ctype
+
+
+def _fetch_hltv(path: str, qs: str = "") -> tuple[int, str, str]:
+    url = f"{UPSTREAM}{path}" + (f"?{qs}" if qs else "")
+    return _fetch_url(url)
 
 
 @app.get("/healthz", response_class=PlainTextResponse)
@@ -352,12 +359,94 @@ async def api_scorebot(match_id: int, snapshot: int = 10):
 
 
 # ──────────────────────────────────────────────────────
+# /bookies/1xbet/table-tennis — odds TT 1x2 via 1xBet guest
+# ──────────────────────────────────────────────────────
+@app.get("/bookies/1xbet/table-tennis")
+def bookie_1xbet_tt(live: int = 0, count: int = 200):
+    """
+    Scrape odds TT do 1xBet. Se live=1, usa LiveFeed; senão LineFeed (pre-match).
+    sports=10 é Table Tennis (confirmado via GetSportsZip).
+    """
+    cache_key = f"__1xbet_tt_{live}_{count}__"
+    cached = _cache_get(cache_key)
+    if cached:
+        status, body, _ = cached
+        if status == 200:
+            import json
+            return JSONResponse(content=json.loads(body), headers={"X-Proxy-Cache": "HIT"})
+
+    feed = "LiveFeed" if live else "LineFeed"
+    url = (
+        f"{UPSTREAM_1XBET}/service-api/{feed}/Get1x2_VZip"
+        f"?sports=10&count={count}&lng=en&mode=4&country=76&partner=51"
+        f"&getEmpty=true&noFilterBlockEvent=true"
+    )
+    try:
+        status, body, _ = _fetch_url(url, extra_headers={
+            "Referer": f"{UPSTREAM_1XBET}/en/line/table-tennis",
+            "Accept": "application/json",
+        })
+    except Exception as e:
+        raise HTTPException(502, f"upstream error: {e}")
+
+    if status != 200:
+        raise HTTPException(status or 502, f"1xbet returned {status}")
+
+    import json
+    try:
+        raw = json.loads(body) if body else {}
+    except Exception:
+        raise HTTPException(502, "1xbet returned non-json")
+
+    if not raw.get("Success"):
+        raise HTTPException(502, f"1xbet not success: {raw.get('Error')}")
+
+    events = raw.get("Value") or []
+    out = []
+    for ev in events:
+        # 1xBet schema (campos principais):
+        #   I = match id, L = league name, O1/O2 = team names,
+        #   S = start timestamp (unix), E = odds array
+        # Cada item em E tem T (tipo: 1=home, 3=away, 2=draw), C (coeficiente)
+        odds1 = odds2 = None
+        for o in (ev.get("E") or []):
+            if o.get("T") == 1 and odds1 is None:
+                odds1 = o.get("C")
+            elif o.get("T") == 3 and odds2 is None:
+                odds2 = o.get("C")
+        if not odds1 or not odds2:
+            continue
+        start_iso = None
+        try:
+            if ev.get("S"):
+                from datetime import datetime, timezone
+                start_iso = datetime.fromtimestamp(ev["S"], tz=timezone.utc).isoformat()
+        except Exception:
+            pass
+        out.append({
+            "matchId": ev.get("I"),
+            "team1": ev.get("O1"),
+            "team2": ev.get("O2"),
+            "league": ev.get("L"),
+            "startTime": start_iso,
+            "startUnix": ev.get("S"),
+            "odds": {"t1": float(odds1), "t2": float(odds2)},
+            "live": bool(live),
+        })
+
+    payload = {"matches": out, "count": len(out), "rawCount": len(events)}
+    import json as _json
+    _cache_put(cache_key, 200, _json.dumps(payload), "application/json")
+    return JSONResponse(payload, headers={"X-Proxy-Cache": "MISS"})
+
+
+# ──────────────────────────────────────────────────────
 # Pass-through — QUALQUER outro path
 # ──────────────────────────────────────────────────────
 @app.get("/{path:path}")
 def proxy(path: str, request: Request):
-    if path.startswith("api/"):
-        raise HTTPException(404, "unknown api route")
+    if path.startswith(("api/", "bookies/")):
+        raise HTTPException(404, "unknown route")
     qs = request.url.query
     full = f"/{path}" + (f"?{qs}" if qs else "")
     cached = _cache_get(full)
