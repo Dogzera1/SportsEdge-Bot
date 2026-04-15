@@ -2573,7 +2573,9 @@ let _ttennisPinnacleCache = { data: [], ts: 0 };
 const TTENNIS_PINNACLE_TTL = 3 * 60 * 1000; // 3min
 
 async function getPinnacleTableTennisMatches() {
-  if (process.env.PINNACLE_TABLETENNIS !== 'true') return [];
+  // Pinnacle guest API funciona sem auth (mesmo padrão snooker/tennis).
+  // Para desabilitar explicitamente: PINNACLE_TABLETENNIS=false
+  if (process.env.PINNACLE_TABLETENNIS === 'false') return [];
   if (_ttennisPinnacleCache.data.length && (Date.now() - _ttennisPinnacleCache.ts) < TTENNIS_PINNACLE_TTL) {
     return _ttennisPinnacleCache.data;
   }
