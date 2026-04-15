@@ -6940,9 +6940,48 @@ const server = http.createServer(async (req, res) => {
         sendJson(res, global.__ttennisCache.data);
         return;
       }
-      const rows = await getPinnacleTableTennisMatches();
+      // 1) Pinnacle (frequentemente sem matches TT — Pinnacle cobre pouco)
+      let rows = await getPinnacleTableTennisMatches();
+      // 2) Fallback TheOddsAPI: cobre Setka Cup, WTT, Czech TT League extensivamente
+      if (!rows.length && THE_ODDS_API_KEY) {
+        try {
+          const ttKeys = ['table_tennis_tt_elite_series', 'table_tennis_setka_cup', 'table_tennis_wtt', 'table_tennis'];
+          const fromOdds = [];
+          for (const sk of ttKeys) {
+            const r = await theOddsGet(`https://api.the-odds-api.com/v4/sports/${sk}/odds/?apiKey=${THE_ODDS_API_KEY}&regions=eu&markets=h2h&oddsFormat=decimal`);
+            if (r.status !== 200) continue;
+            const data = safeParse(r.body, []);
+            if (!Array.isArray(data) || !data.length) continue;
+            for (const e of data) {
+              if (new Date(e.commence_time).getTime() < Date.now() - 2 * 60 * 60 * 1000) continue;
+              const bm = e.bookmakers?.[0];
+              const market = bm?.markets?.find(m => m.key === 'h2h');
+              const outs = market?.outcomes || [];
+              const o1 = outs.find(o => o.name === e.home_team);
+              const o2 = outs.find(o => o.name === e.away_team);
+              if (!o1 || !o2) continue;
+              fromOdds.push({
+                id: `ttennis_odds_${e.id}`,
+                game: 'tabletennis',
+                status: 'upcoming',
+                team1: e.home_team,
+                team2: e.away_team,
+                league: e.sport_title || 'Table Tennis',
+                time: e.commence_time,
+                odds: { t1: String(o1.price), t2: String(o2.price), bookmaker: bm.title },
+              });
+            }
+          }
+          if (fromOdds.length) {
+            log('INFO', 'ODDS', `TheOddsAPI TT: ${fromOdds.length} partidas`);
+            rows = fromOdds;
+          }
+        } catch (e) { log('WARN', 'TTENNIS', `TheOddsAPI fallback: ${e.message}`); }
+      }
       const now = Date.now();
       const matches = rows.map(r => {
+        // Se já veio com id/game (TheOddsAPI), não remapeia
+        if (r.game === 'tabletennis') return r;
         const t = r.time ? new Date(r.time).getTime() : 0;
         const isLive = r.status === 'live' || (t > 0 && t <= now);
         return {
