@@ -4640,10 +4640,10 @@ async function pollMma(runOnce = false) {
         // ── Pré-filtro ML com dados ESPN (record → win rate) + Sofascore fallback ──
         const hasEspnRecord = !!(rec1 || rec2);
         let mmaEnrich = hasEspnRecord ? mmaRecordToEnrich(rec1, rec2) : { form1: null, form2: null, h2h: null, oddsMovement: null };
+        const sofascoreMma = require('./lib/sofascore-mma');
         // Sofascore: preenche forma quando ESPN/Wiki/Sherdog/Tapology não deram record
         if (!hasEspnRecord) {
           try {
-            const sofascoreMma = require('./lib/sofascore-mma');
             const sofa = await sofascoreMma.enrichMatch(fight.team1, fight.team2, fight.time).catch(() => null);
             if (sofa && (sofa.form1 || sofa.form2)) {
               mmaEnrich = {
@@ -4653,7 +4653,17 @@ async function pollMma(runOnce = false) {
                 oddsMovement: null
               };
               log('DEBUG', 'AUTO-MMA', `Sofascore event ${sofa.eventId}: ${fight.team1} vs ${fight.team2}`);
+              if (sofa.org) fight._org = sofa.org;
+              if (sofa.eventName) fight._eventName = sofa.eventName;
             }
+          } catch (_) {}
+        }
+        // Sempre resolve org/eventName via Sofascore (TheOddsAPI só dá "MMA"/"Boxing" genérico)
+        if (!fight._org && !isBoxing) {
+          try {
+            const orgInfo = await sofascoreMma.lookupOrg(fight.team1, fight.team2, fight.time).catch(() => null);
+            if (orgInfo?.org) fight._org = orgInfo.org;
+            if (orgInfo?.eventName) fight._eventName = orgInfo.eventName;
           } catch (_) {}
         }
         const mlResultMma = esportsPreFilter(fight, o, mmaEnrich, false, '', null);
@@ -4826,21 +4836,27 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
 
         const orgLabel = (() => {
           if (isBoxing) return '🥊 💰 *TIP BOXE*';
-          const lg = String(fight.league || '').toLowerCase();
-          if (/\bufc\b/.test(lg)) return '🥋 💰 *TIP UFC*';
-          if (/\bpfl\b/.test(lg)) return '🥋 💰 *TIP PFL*';
-          if (/oktagon/.test(lg)) return '🥋 💰 *TIP OKTAGON*';
-          if (/bellator/.test(lg)) return '🥋 💰 *TIP BELLATOR*';
-          if (/\bone\b|one championship|one fc/.test(lg)) return '🥋 💰 *TIP ONE*';
-          if (/\bksw\b/.test(lg)) return '🥋 💰 *TIP KSW*';
-          if (/\brizin\b/.test(lg)) return '🥋 💰 *TIP RIZIN*';
-          if (/\bcage warriors|\bcw\b/.test(lg)) return '🥋 💰 *TIP CAGE WARRIORS*';
-          if (/\blfa\b|legacy fighting/.test(lg)) return '🥋 💰 *TIP LFA*';
-          if (/\bbkfc\b|bare knuckle/.test(lg)) return '🥋 💰 *TIP BKFC*';
+          // fight._org vem do Sofascore uniqueTournament.name (UFC/PFL/Bellator/etc).
+          // Prioriza sobre fight.league que TheOddsAPI retorna como "MMA" genérico.
+          const src = [fight._org, fight.league].filter(Boolean).join(' ').toLowerCase();
+          if (/\bufc\b/.test(src)) return '🥋 💰 *TIP UFC*';
+          if (/\bpfl\b/.test(src)) return '🥋 💰 *TIP PFL*';
+          if (/oktagon/.test(src)) return '🥋 💰 *TIP OKTAGON*';
+          if (/bellator/.test(src)) return '🥋 💰 *TIP BELLATOR*';
+          if (/\bone\b|one championship|one fc/.test(src)) return '🥋 💰 *TIP ONE*';
+          if (/\bksw\b/.test(src)) return '🥋 💰 *TIP KSW*';
+          if (/\brizin\b/.test(src)) return '🥋 💰 *TIP RIZIN*';
+          if (/\bcage warriors|\bcw\b/.test(src)) return '🥋 💰 *TIP CAGE WARRIORS*';
+          if (/\blfa\b|legacy fighting/.test(src)) return '🥋 💰 *TIP LFA*';
+          if (/\bbkfc\b|bare knuckle/.test(src)) return '🥋 💰 *TIP BKFC*';
+          if (fight._org) return `🥋 💰 *TIP ${String(fight._org).toUpperCase()}*`;
           return '🥋 💰 *TIP MMA*';
         })();
+        const leagueLine = fight._eventName
+          ? `${fight._org ? fight._org + ' — ' : ''}${fight._eventName}`
+          : fight.league;
         const tipMsg = `${orgLabel}\n` +
-          `*${fight.team1}* vs *${fight.team2}*\n📋 ${fight.league}\n` +
+          `*${fight.team1}* vs *${fight.team2}*\n📋 ${leagueLine}\n` +
           `🕐 ${fightTime} (BRT)${recLine}${catLine}\n\n` +
           whyLineMma +
           `🎯 Aposta: *${tipTeam}* @ *${tipOdd}*\n` +
