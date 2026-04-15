@@ -96,7 +96,11 @@
       "Bash(grep -oE \"Matches Played[^<]*<[^>]*>[\\\\s\\\\S]{0,500}\" h2h.html)",
       "Bash(wc -l scripts/backtest.js scripts/train.js scripts/calibrate.js)",
       "Bash(head -50 scripts/backtest.js)",
-      "Bash(grep -n \"ml_factor_weights\\\\|factor_weights\" scripts/*.js lib/*.js)"
+      "Bash(grep -n \"ml_factor_weights\\\\|factor_weights\" scripts/*.js lib/*.js)",
+      "Bash(grep -oE '\"/api/[^\"]{10,150}\"' betano_tt.html)",
+      "Bash(grep -oE '<script id=\"__NEXT_DATA__\"[^>]*>[^<]{0,500}' bt2.json)",
+      "Bash(grep -oE '\"/api/[^\"]{10,120}\"' betano_live.html)",
+      "Bash(grep -oE '\"/[a-zA-Z0-9-]+\\\\?[a-zA-Z][^\"]{0,100}\"' bt_tt.html)"
     ]
   }
 }

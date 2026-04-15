@@ -3639,7 +3639,9 @@ const server = http.createServer(async (req, res) => {
       }
       const hasDraft = !!(raw.gameMetadata?.blueTeamMetadata?.participantMetadata?.length);
       if (statsDisabled) {
-        log('INFO', 'LIVE-GAME', `window/${gameId}: Stats DISABLED pela Riot — draft=${hasDraft ? 'ok' : 'no'}`);
+        // Riot desabilita feed público em muitas ligas tier-2 — limitação externa, sem ação possível.
+        // Rebaixado pra DEBUG para não poluir log.
+        log('DEBUG', 'LIVE-GAME', `window/${gameId}: Stats DISABLED pela Riot — draft=${hasDraft ? 'ok' : 'no'}`);
       } else if (usedTs === null) {
         // 204 em todas as janelas é esperado em ligas tier-2 sem feed público da Riot.
         // Log em DEBUG para não poluir — stats simplesmente não existem.
