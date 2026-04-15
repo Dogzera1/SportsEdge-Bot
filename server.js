@@ -3454,9 +3454,9 @@ const server = http.createServer(async (req, res) => {
           if (rt.status === 200) {
             const rtd = safeParse(rt.body, {});
             const rtTeams = Array.isArray(rtd?.teams) ? rtd.teams : [];
-            // team_number: 0=radiant, 1=dire
-            const rtRad = rtTeams.find(t => t.team_number === 0);
-            const rtDir = rtTeams.find(t => t.team_number === 1);
+            // Steam RT usa team_number: 2=radiant, 3=dire (não 0/1 como eu assumi).
+            const rtRad = rtTeams.find(t => t.team_number === 2);
+            const rtDir = rtTeams.find(t => t.team_number === 3);
             const mkPlayers = (rtTeam, ourSideTeamFlag) => {
               if (!rtTeam?.players?.length) return null;
               return rtTeam.players.map(p => ({
