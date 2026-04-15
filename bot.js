@@ -94,6 +94,27 @@ const analyzedSnooker = new Map();
 const analyzedTT = new Map();
 const analyzedCs = new Map();
 
+// ── Gate global de prioridade LIVE ──────────────────────────────────────
+// Cada esporte registra 'esporte' em _livePhase enquanto processa live matches.
+// Antes do primeiro upcoming, chama _waitOthersLiveDone(self) — bloqueia até
+// nenhum outro esporte ter live pendente. Garante que TODO live do sistema
+// é analisado antes de qualquer upcoming de qualquer esporte.
+const _livePhase = new Set();
+async function _waitOthersLiveDone(self, timeoutMs = 3 * 60 * 1000) {
+  const start = Date.now();
+  while (true) {
+    const others = [..._livePhase].filter(s => s !== self);
+    if (others.length === 0) return;
+    if (Date.now() - start > timeoutMs) {
+      log('WARN', 'AUTO', `live-gate timeout (${self}), prosseguindo. others=${others.join(',')}`);
+      return;
+    }
+    await new Promise(r => setTimeout(r, 500));
+  }
+}
+function _livePhaseEnter(sport) { _livePhase.add(sport); }
+function _livePhaseExit(sport)  { _livePhase.delete(sport); }
+
 function _sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 // Settlement
@@ -660,6 +681,9 @@ async function runAutoAnalysis() {
       });
       log('INFO', 'AUTO', `LoL: ${lolRaw?.length||0} partidas (${allLive.filter(m=>m.status==='live').length} live, ${allLive.filter(m=>m.status==='draft').length} draft, ${lolLive.length-allLive.length} dupl. removidas) | inscritos=${subscribedUsers.size}`);
 
+      const _hasLiveLol = allLive.length > 0;
+      if (_hasLiveLol) _livePhaseEnter('lol');
+
       for (const match of allLive) {
         // Ao vivo: dedup por mapa atual (uma tip por mapa, não por série inteira)
         const liveIds = (match.status === 'live')
@@ -924,6 +948,10 @@ async function runAutoAnalysis() {
         return true;
       });
 
+      // Sai da live phase (se estava dentro) e espera outros esportes terminarem live
+      if (_hasLiveLol) _livePhaseExit('lol');
+      await _waitOthersLiveDone('lol');
+
       if (allUpcoming.length > 0) {
         log('INFO', 'AUTO', `LoL próximas ${UPCOMING_WINDOW_HOURS}h: ${allUpcoming.length} partidas`);
         let blockedBo3Count = 0;
@@ -1057,6 +1085,7 @@ async function runAutoAnalysis() {
 
     } catch(e) {
       log('ERROR', 'AUTO-ESPORTS', e.message);
+      _livePhaseExit('lol');
     }
   }
 
@@ -4331,7 +4360,17 @@ async function pollDota() {
       return new Date(a.time || 0) - new Date(b.time || 0);
     });
 
+    const _hasLive = matches.some(m => m.status === 'live');
+    if (_hasLive) _livePhaseEnter('dota');
+    let _drained = false;
+
     for (const match of matches) {
+      // Gate global: antes do primeiro upcoming, espera outros esportes terminarem live
+      if (match.status !== 'live' && !_drained) {
+        if (_hasLive) _livePhaseExit('dota');
+        await _waitOthersLiveDone('dota');
+        _drained = true;
+      }
       const isLive = match.status === 'live';
 
       // ── Dedup / cooldown ──
@@ -4622,8 +4661,10 @@ Máximo 200 palavras.`;
       }
       await _sleep(3000);
     }
+    if (!_drained && _hasLive) _livePhaseExit('dota');
   } catch(e) {
     log('ERROR', 'AUTO-DOTA', e.message);
+    _livePhaseExit('dota');
   }
 }
 
@@ -4670,16 +4711,27 @@ async function pollMma(runOnce = false) {
       })();
 
       // Prioridade: lutas live/imminent (próximas 3h) primeiro
+      const imminentMs = 3 * 60 * 60 * 1000;
+      const isPriorityFight = (f) => {
+        if (f.status === 'live') return true;
+        const t = new Date(f.time || 0).getTime();
+        return t > 0 && (t - now) < imminentMs;
+      };
       fights.sort((a, b) => {
-        const ta = new Date(a.time || 0).getTime();
-        const tb = new Date(b.time || 0).getTime();
-        const imminent = 3 * 60 * 60 * 1000;
-        const la = (a.status === 'live' || (ta > 0 && ta - now < imminent)) ? 0 : 1;
-        const lb = (b.status === 'live' || (tb > 0 && tb - now < imminent)) ? 0 : 1;
+        const la = isPriorityFight(a) ? 0 : 1;
+        const lb = isPriorityFight(b) ? 0 : 1;
         if (la !== lb) return la - lb;
-        return ta - tb;
+        return new Date(a.time || 0) - new Date(b.time || 0);
       });
+      const _hasLiveMma = fights.some(isPriorityFight);
+      if (_hasLiveMma) _livePhaseEnter('mma');
+      let _drainedMma = false;
       for (const fight of fights) {
+        if (!isPriorityFight(fight) && !_drainedMma) {
+          if (_hasLiveMma) _livePhaseExit('mma');
+          await _waitOthersLiveDone('mma');
+          _drainedMma = true;
+        }
         const isBoxing = fight.game === 'boxing';
 
         const key = `mma_${fight.id}`;
@@ -5092,8 +5144,10 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
       if (boxingSkippedLead > 0) {
         log('INFO', 'AUTO-MMA', `Boxe: ${boxingSkippedLead} luta(s) ignoradas (>${boxingMaxDays}d até o combate)`);
       }
+      if (!_drainedMma && _hasLiveMma) _livePhaseExit('mma');
     } catch(e) {
       log('ERROR', 'AUTO-MMA', e.message);
+      _livePhaseExit('mma');
     }
     if (!runOnce) setTimeout(loop, 30 * 60 * 1000);
     return []; // fallback
@@ -5138,7 +5192,15 @@ async function pollTennis(runOnce = false) {
         if (la !== lb) return la - lb;
         return new Date(a.time || 0) - new Date(b.time || 0);
       });
+      const _hasLiveT = matches.some(m => m.status === 'live');
+      if (_hasLiveT) _livePhaseEnter('tennis');
+      let _drainedT = false;
       for (const match of matches) {
+        if (match.status !== 'live' && !_drainedT) {
+          if (_hasLiveT) _livePhaseExit('tennis');
+          await _waitOthersLiveDone('tennis');
+          _drainedT = true;
+        }
         const key = `tennis_${match.id}`;
         const prev = analyzedTennis.get(key);
         if (prev?.tipSent) continue;
@@ -5505,8 +5567,10 @@ Máximo 200 palavras. Raciocínio breve antes da decisão.`;
         log('INFO', 'AUTO-TENNIS', `Tip enviada: ${tipPlayer} @ ${tipOdd} | EV:${tipEV}% | ${tipConf}`);
         await new Promise(r => setTimeout(r, 5000));
       }
+      if (!_drainedT && _hasLiveT) _livePhaseExit('tennis');
     } catch(e) {
       log('ERROR', 'AUTO-TENNIS', e.message);
+      _livePhaseExit('tennis');
     }
     if (!runOnce) setTimeout(loop, 30 * 60 * 1000); // verifica a cada 30min
     return typeof matches !== 'undefined' ? matches : [];
@@ -5558,7 +5622,15 @@ async function pollFootball(runOnce = false) {
         if (la !== lb) return la - lb;
         return new Date(a.time || 0) - new Date(b.time || 0);
       });
+      const _hasLiveFb = matches.some(m => m.status === 'live');
+      if (_hasLiveFb) _livePhaseEnter('football');
+      let _drainedFb = false;
       for (const match of matches) {
+        if (match.status !== 'live' && !_drainedFb) {
+          if (_hasLiveFb) _livePhaseExit('football');
+          await _waitOthersLiveDone('football');
+          _drainedFb = true;
+        }
         const key = `football_${match.id}`;
         const prev = analyzedFootball.get(key);
         if (prev?.tipSent) continue;
@@ -5908,8 +5980,10 @@ Máximo 200 palavras.`;
         log('INFO', 'AUTO-FOOTBALL', `Tip enviada: ${tipTeam} @ ${tipOdd} | ${tipMarket} | EV:${tipEV}% | ${tipConf}`);
         await new Promise(r => setTimeout(r, 5000));
       }
+      if (!_drainedFb && _hasLiveFb) _livePhaseExit('football');
     } catch(e) {
       log('ERROR', 'AUTO-FOOTBALL', e.message);
+      _livePhaseExit('football');
     }
     if (!runOnce) setTimeout(loop, 60 * 60 * 1000); // a cada 1h
     return typeof matches !== 'undefined' ? matches : [];
@@ -5964,8 +6038,16 @@ async function pollTableTennis(runOnce = false) {
         if (!runOnce) setTimeout(loop, TT_INTERVAL);
         return [];
       }
+      const _hasLiveTT = relevant.some(m => m.status === 'live');
+      if (_hasLiveTT) _livePhaseEnter('tabletennis');
+      let _drainedTT = false;
 
       for (const match of relevant) {
+        if (match.status !== 'live' && !_drainedTT) {
+          if (_hasLiveTT) _livePhaseExit('tabletennis');
+          await _waitOthersLiveDone('tabletennis');
+          _drainedTT = true;
+        }
         const key = `tt_${match.id}`;
         const prev = analyzedTT.get(key);
         if (prev?.tipSent) continue;
@@ -6093,8 +6175,10 @@ async function pollTableTennis(runOnce = false) {
         log('INFO', 'AUTO-TT', `Tip enviada: ${pickTeam} @ ${pickOdd} | EV:${evPct.toFixed(1)}% | ${conf}`);
         await new Promise(r => setTimeout(r, 3000));
       }
+      if (!_drainedTT && _hasLiveTT) _livePhaseExit('tabletennis');
     } catch (e) {
       log('ERROR', 'AUTO-TT', e.message);
+      _livePhaseExit('tabletennis');
     }
     if (!runOnce) setTimeout(loop, TT_INTERVAL);
     return [];
@@ -6145,8 +6229,16 @@ async function pollCs(runOnce = false) {
         if (!runOnce) setTimeout(loop, CS_INTERVAL);
         return [];
       }
+      const _hasLiveCs = relevant.some(m => m.status === 'live');
+      if (_hasLiveCs) _livePhaseEnter('cs');
+      let _drainedCs = false;
 
       for (const match of relevant) {
+        if (match.status !== 'live' && !_drainedCs) {
+          if (_hasLiveCs) _livePhaseExit('cs');
+          await _waitOthersLiveDone('cs');
+          _drainedCs = true;
+        }
         const key = `cs_${match.id}`;
         const prev = analyzedCs.get(key);
         if (prev?.tipSent) continue;
@@ -6288,8 +6380,10 @@ async function pollCs(runOnce = false) {
         log('INFO', 'AUTO-CS', `Tip enviada: ${pickTeam} @ ${pickOdd} | EV:${evPct.toFixed(1)}% | ${conf}`);
         await new Promise(r => setTimeout(r, 3000));
       }
+      if (!_drainedCs && _hasLiveCs) _livePhaseExit('cs');
     } catch (e) {
       log('ERROR', 'AUTO-CS', e.message);
+      _livePhaseExit('cs');
     }
     if (!runOnce) setTimeout(loop, CS_INTERVAL);
     return [];
