@@ -700,6 +700,21 @@ async function runAutoAnalysis() {
           const tipOdd = result.tipMatch[2].trim();
           const tipEV = result.tipMatch[3].trim();
           const tipConf = (result.tipMatch[5] || CONF.MEDIA).trim().toUpperCase();
+          // Gate BAIXA endurecido (2026-04-15): histórico mostra BAIXA perdendo muito em LoL.
+          // Exige ML-edge ≥10pp E EV ≥ 8% pra compensar baixa confiança da IA.
+          if (tipConf === CONF.BAIXA) {
+            const tipEVnum = parseFloat(String(tipEV).replace(/[%+]/g, ''));
+            if (result.mlScore < 10) {
+              log('INFO', 'AUTO', `LIVE BAIXA rejeitada: ${match.team1} vs ${match.team2} | ML-edge ${result.mlScore.toFixed(1)}pp < 10pp`);
+              analyzedMatches.set(matchKey, { ts: now, tipSent: false, noEdge: true });
+              continue;
+            }
+            if (!isNaN(tipEVnum) && tipEVnum < 8) {
+              log('INFO', 'AUTO', `LIVE BAIXA rejeitada: ${match.team1} vs ${match.team2} | EV ${tipEVnum}% < 8%`);
+              analyzedMatches.set(matchKey, { ts: now, tipSent: false, noEdge: true });
+              continue;
+            }
+          }
           // Kelly adaptado por confiança: ALTA → ¼ Kelly (max 4u) | MÉDIA → ⅙ Kelly (max 3u) | BAIXA → 1/10 Kelly (max 1.5u)
           const kellyFraction = tipConf === CONF.ALTA ? 0.25 : tipConf === CONF.BAIXA ? 0.10 : 1/6;
           // Política de P para Kelly (evita circularidade p←EV←IA):
@@ -957,11 +972,19 @@ async function runAutoAnalysis() {
             const tipEV = result.tipMatch[3].trim();
             const tipConf = (result.tipMatch[5] || CONF.MEDIA).trim().toUpperCase();
 
-            // Pré-jogo: confiança BAIXA bloqueada salvo se mlEdge forte (≥8pp) compensar ausência de dados ao vivo
-            if (tipConf === CONF.BAIXA && result.mlScore < 8) {
-              log('INFO', 'AUTO', `Upcoming ${match.team1} vs ${match.team2} → conf BAIXA ML-edge insuficiente (${result.mlScore.toFixed(1)}pp < 8.0pp mín.) → rejeitado (pré-jogo)`);
-              analyzedMatches.set(matchKey, { ts: now, tipSent: false, noEdge: true });
-              await new Promise(r => setTimeout(r, 3000)); continue;
+            // Pré-jogo BAIXA endurecido (2026-04-15): exige mlEdge ≥10pp E EV ≥ 10%
+            if (tipConf === CONF.BAIXA) {
+              const tipEVnumUp = parseFloat(String(tipEV).replace(/[%+]/g, ''));
+              if (result.mlScore < 10) {
+                log('INFO', 'AUTO', `Upcoming BAIXA rejeitada: ${match.team1} vs ${match.team2} → ML-edge ${result.mlScore.toFixed(1)}pp < 10pp`);
+                analyzedMatches.set(matchKey, { ts: now, tipSent: false, noEdge: true });
+                await new Promise(r => setTimeout(r, 3000)); continue;
+              }
+              if (!isNaN(tipEVnumUp) && tipEVnumUp < 10) {
+                log('INFO', 'AUTO', `Upcoming BAIXA rejeitada: ${match.team1} vs ${match.team2} → EV ${tipEVnumUp}% < 10%`);
+                analyzedMatches.set(matchKey, { ts: now, tipSent: false, noEdge: true });
+                await new Promise(r => setTimeout(r, 3000)); continue;
+              }
             }
 
             // EV sanity: bloqueia EV absurdamente alto (erro de cálculo da IA)
@@ -4437,9 +4460,16 @@ ANÁLISE (seja específico — Dota 2):
 
 REGRAS: Odds ${minOdds}–${maxOdds} | EV ≥ ${evThreshold}%${isLive ? ' | Ao vivo: só ALTA ou MÉDIA com edge claro' : ''}
 
+CÁLCULO DE EV — OBRIGATÓRIO VALIDAR ANTES DE REPORTAR:
+  Fórmula: EV% = (P/100 × odd − 1) × 100
+  Exemplo: P=55%, odd=2.00 → EV = (0.55 × 2.00 − 1) × 100 = +10%
+  Exemplo: P=60%, odd=1.70 → EV = (0.60 × 1.70 − 1) × 100 = +2%
+Se EV reportado ≠ cálculo da fórmula, sua tip será REJEITADA automaticamente.
+⚠️ EV > 40% é quase sempre erro — revise seu cálculo se chegar nisso.
+
 DECISÃO FINAL (escolha UMA):
 TIP_ML:[time]@[odd]|EV:[%]|P:[%]|STAKE:[1-3]u|CONF:[ALTA/MÉDIA/BAIXA]
-(P = probabilidade 0-100 que você atribui ao pick; EV = (P/100 × odd − 1) × 100)
+(P inteiro 0-100; EV deve bater EXATAMENTE com fórmula acima, margem ±1pp)
 ou SEM_EDGE
 
 Máximo 200 palavras.`;
@@ -4531,7 +4561,7 @@ Máximo 200 palavras.`;
       try {
         await serverPost('/record-tip', {
           matchId,
-          sport: 'esports',
+          sport: 'dota2',
           participant1: match.team1,
           participant2: match.team2,
           tipParticipant: tipTeam,

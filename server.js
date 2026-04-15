@@ -4942,6 +4942,80 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // Seed histórico de Dota 2 via OpenDota /api/proMatches.
+  // Alimenta match_results (game='dota2') pra form/H2H endpoints.
+  // POST /seed-dota?days=60&apply=1
+  if (p === '/seed-dota' && req.method === 'POST') {
+    try {
+      const days = Math.max(1, Math.min(180, parseInt(parsed.query.days || '60', 10) || 60));
+      const dryRun = parsed.query.apply !== '1' && parsed.query.apply !== 'true';
+      const cutoffMs = Date.now() - days * 24 * 60 * 60 * 1000;
+      const cutoffSec = Math.floor(cutoffMs / 1000);
+
+      const matches = [];
+      let lastMatchId = null;
+      // Paginated scan — 100 proMatches por página. Para quando chega no cutoff.
+      for (let i = 0; i < 30; i++) {
+        const url = lastMatchId
+          ? `https://api.opendota.com/api/proMatches?less_than_match_id=${lastMatchId}`
+          : `https://api.opendota.com/api/proMatches`;
+        const r = await httpGet(url, { 'User-Agent': 'Mozilla/5.0' }).catch(() => null);
+        if (!r || r.status !== 200) break;
+        const page = safeParse(r.body, []);
+        if (!Array.isArray(page) || !page.length) break;
+        let stop = false;
+        for (const m of page) {
+          if (!m.match_id || !m.radiant_name || !m.dire_name || m.radiant_win == null) continue;
+          if ((m.start_time || 0) < cutoffSec) { stop = true; break; }
+          matches.push(m);
+        }
+        lastMatchId = page[page.length - 1].match_id;
+        if (stop) break;
+        await new Promise(r => setTimeout(r, 300)); // rate limit soft
+      }
+
+      const upsert = db.prepare(`
+        INSERT OR IGNORE INTO match_results (match_id, game, team1, team2, winner, final_score, league, resolved_at)
+        VALUES (?, 'dota2', ?, ?, ?, ?, ?, ?)
+      `);
+      const existing = db.prepare(`SELECT COUNT(*) c FROM match_results WHERE game='dota2'`).get()?.c || 0;
+
+      let inserted = 0;
+      if (!dryRun) {
+        const tx = db.transaction((rows) => {
+          for (const m of rows) {
+            const mid = `dota2_pro_${m.match_id}`;
+            const winner = m.radiant_win ? m.radiant_name : m.dire_name;
+            const score = `${m.radiant_score || 0}-${m.dire_score || 0}`;
+            const resolvedAt = new Date((m.start_time + (m.duration || 0)) * 1000).toISOString().replace('T', ' ').slice(0, 19);
+            const r = upsert.run(mid, m.radiant_name, m.dire_name, winner, score, m.league_name || 'Dota 2', resolvedAt);
+            if (r.changes) inserted++;
+          }
+        });
+        tx(matches);
+      }
+
+      sendJson(res, {
+        ok: true,
+        dryRun,
+        daysScraped: days,
+        matchesFound: matches.length,
+        inserted,
+        existingBefore: existing,
+        sampleMatch: matches[0] ? {
+          match_id: matches[0].match_id,
+          teams: `${matches[0].radiant_name} vs ${matches[0].dire_name}`,
+          winner: matches[0].radiant_win ? matches[0].radiant_name : matches[0].dire_name,
+          league: matches[0].league_name,
+        } : null,
+      });
+      if (!dryRun) log('INFO', 'ADMIN', `seed-dota: ${inserted} novos matches em ${days}d (existing antes: ${existing})`);
+    } catch (e) {
+      sendJson(res, { error: e.message }, 500);
+    }
+    return;
+  }
+
   // Seed histórico de Table Tennis (bootstrap do Elo).
   // POST /seed-tabletennis?days=60  → varre Sofascore, insere matches finished em match_results.
   if (p === '/seed-tabletennis' && req.method === 'POST') {
