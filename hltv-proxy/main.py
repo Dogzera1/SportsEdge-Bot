@@ -150,6 +150,39 @@ def api_matches():
         seen = set()
         matches = [x for x in matches if not (x["matchId"] in seen or seen.add(x["matchId"]))]
 
+    # Enriquece teams vazios extraindo do slug do URL: /matches/<id>/<t1>-vs-<t2>-<event>
+    for m in matches:
+        if m.get("teams") and len(m["teams"]) >= 2:
+            continue
+        slug_m = re.match(r"^/matches/\d+/(.+)$", m["url"].replace(UPSTREAM, ""))
+        if not slug_m:
+            continue
+        slug = slug_m.group(1)
+        # Divide no "-vs-"
+        if "-vs-" not in slug:
+            continue
+        t1_raw, rest = slug.split("-vs-", 1)
+        # Heurística: o event tem palavras em comum com m.event se já temos
+        # Senão, simplificação: pega até onde aparece o tournament-like palavras chave
+        # Mais robusto: normaliza team1 e caça team2 até os "delimitadores" (numbers, year)
+        # Abordagem prática: split de rest por "-" e tenta várias fronteiras
+        t2_raw = rest
+        if m.get("event"):
+            # Remove event do final
+            ev_slug = re.sub(r"\s+", "-", m["event"].lower().strip())
+            if ev_slug and ev_slug in rest.lower():
+                idx = rest.lower().rfind(ev_slug)
+                if idx > 0 and rest[idx - 1] == "-":
+                    t2_raw = rest[: idx - 1]
+        else:
+            # Remove sufixos comuns: -iem-X, -esl-X, -major-X, -yyyy etc
+            t2_raw = re.sub(r"-(iem|esl|blast|pgl|major|dreamhack|epicenter|relog|flashpoint|cct|elisa|gamers-club|eagle|eliga|master|masters|championship|series|open|invitational|finals|playoff|playoffs|cup|league|season|tour|qualifier|qualifiers|group|stage|bo1|bo3|bo5)[-a-z0-9]*$", "", rest, flags=re.I)
+            # Remove ano final
+            t2_raw = re.sub(r"-20\d{2}$", "", t2_raw)
+        def _humanize(s):
+            return re.sub(r"[-_]+", " ", s).strip().title()
+        m["teams"] = [_humanize(t1_raw), _humanize(t2_raw)]
+
     import json
     payload = json.dumps({"matches": matches, "count": len(matches)})
     _cache_put(cache_key, 200, payload, "application/json")
@@ -295,7 +328,12 @@ def proxy(path: str, request: Request):
         status, body, ctype = _fetch_hltv(f"/{path}", qs)
     except Exception as e:
         raise HTTPException(502, f"upstream error: {e}")
-    if status == 200 and body:
+    is_cf_challenge = (status == 200 and len(body) < 8000 and
+                       ("Just a moment" in body or "challenge-error-text" in body or "cf-browser-verification" in body))
+    if status == 200 and body and not is_cf_challenge:
         _cache_put(full, status, body, ctype)
+    if is_cf_challenge:
+        return Response(content='{"error":"cloudflare_challenge","advice":"try again"}',
+                        status_code=503, media_type="application/json")
     return Response(content=body, status_code=status, media_type=ctype,
                     headers={"X-Proxy-Cache": "MISS"})
