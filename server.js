@@ -3386,14 +3386,25 @@ const server = http.createServer(async (req, res) => {
         return a.includes(b) || b.includes(a);
       };
 
-      let hit = null, swap = false;
+      // Bo3/Bo5 geram múltiplos matches simultâneos no OpenDota (games da série).
+      // Pegar o MAIS RECENTE (maior game_time) pra bater com o game que está rolando agora.
+      const candidates = [];
       for (const m of live) {
         const rn = normName(m.team_name_radiant || m.radiant_team?.team_name || m.radiant_team?.name);
         const dn = normName(m.team_name_dire    || m.dire_team?.team_name    || m.dire_team?.name);
-        if (nameMatches(rn, n1) && nameMatches(dn, n2)) { hit = m; swap = false; break; }
-        if (nameMatches(rn, n2) && nameMatches(dn, n1)) { hit = m; swap = true;  break; }
+        if (nameMatches(rn, n1) && nameMatches(dn, n2)) candidates.push({ m, swap: false });
+        else if (nameMatches(rn, n2) && nameMatches(dn, n1)) candidates.push({ m, swap: true });
       }
-      if (!hit) { sendJson(res, { hasLiveStats: false, error: 'match não encontrado no OpenDota live' }); return; }
+      if (!candidates.length) { sendJson(res, { hasLiveStats: false, error: 'match não encontrado no OpenDota live' }); return; }
+      // Prefere match com game_time válido e maior timestamp (mais recente iniciado)
+      candidates.sort((a, b) => {
+        const ga = a.m.game_time || 0, gb = b.m.game_time || 0;
+        if (ga > 0 && gb <= 0) return -1;
+        if (gb > 0 && ga <= 0) return 1;
+        return (b.m.activate_time || 0) - (a.m.activate_time || 0);
+      });
+      const hit = candidates[0].m;
+      const swap = candidates[0].swap;
 
       const players = Array.isArray(hit.players) ? hit.players : [];
       const buildSide = (teamFlag) => {
