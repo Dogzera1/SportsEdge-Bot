@@ -6942,10 +6942,19 @@ const server = http.createServer(async (req, res) => {
       }
       // 1) Pinnacle (frequentemente sem matches TT — Pinnacle cobre pouco)
       let rows = await getPinnacleTableTennisMatches();
-      // 2) Fallback TheOddsAPI: cobre Setka Cup, WTT, Czech TT League extensivamente
+      // 2) Fallback TheOddsAPI: descobre sport keys TT dinamicamente via /v4/sports
       if (!rows.length && THE_ODDS_API_KEY) {
         try {
-          const ttKeys = ['table_tennis_tt_elite_series', 'table_tennis_setka_cup', 'table_tennis_wtt', 'table_tennis'];
+          let ttKeys = [];
+          const sportsR = await theOddsGet(`https://api.the-odds-api.com/v4/sports/?apiKey=${THE_ODDS_API_KEY}&all=false`);
+          if (sportsR.status === 200) {
+            const sports = safeParse(sportsR.body, []);
+            ttKeys = (Array.isArray(sports) ? sports : [])
+              .filter(s => /table.?tennis/i.test(s.title || '') || /table.?tennis|tt_/i.test(s.key || ''))
+              .map(s => s.key);
+            if (ttKeys.length) log('INFO', 'TTENNIS', `TheOddsAPI sport keys TT: ${ttKeys.join(',')}`);
+          }
+          if (!ttKeys.length) log('WARN', 'TTENNIS', 'TheOddsAPI: nenhum sport key TT ativo');
           const fromOdds = [];
           for (const sk of ttKeys) {
             const r = await theOddsGet(`https://api.the-odds-api.com/v4/sports/${sk}/odds/?apiKey=${THE_ODDS_API_KEY}&regions=eu&markets=h2h&oddsFormat=decimal`);
