@@ -100,7 +100,9 @@
       "Bash(grep -oE '\"/api/[^\"]{10,150}\"' betano_tt.html)",
       "Bash(grep -oE '<script id=\"__NEXT_DATA__\"[^>]*>[^<]{0,500}' bt2.json)",
       "Bash(grep -oE '\"/api/[^\"]{10,120}\"' betano_live.html)",
-      "Bash(grep -oE '\"/[a-zA-Z0-9-]+\\\\?[a-zA-Z][^\"]{0,100}\"' bt_tt.html)"
+      "Bash(grep -oE '\"/[a-zA-Z0-9-]+\\\\?[a-zA-Z][^\"]{0,100}\"' bt_tt.html)",
+      "Bash(awk -F: '$2 > 1874 && $2 < 2400 {print}')",
+      "Bash(awk 'NR>=1874 && NR<2400 && /return/{print NR\": \"$0}' bot.js)"
     ]
   }
 }
