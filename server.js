@@ -5089,6 +5089,60 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // Reanalisa tips Darts pendentes contra os gates atuais.
+  //   - EV ≤ 0% → void (edge fechou)
+  //   - EV < 3% → void (gate base)
+  //   - EV ≥ 30% sem conf ALTA → void (sanity)
+  //   - odds fora 1.20-6.00 → void
+  if (p === '/void-bad-darts' && req.method === 'POST') {
+    try {
+      const apply = parsed.query.apply === '1' || parsed.query.apply === 'true';
+      const rows = db.prepare(
+        `SELECT id, participant1, participant2, tip_participant, odds, ev, current_ev,
+                confidence, event_name, sent_at
+         FROM tips
+         WHERE sport='darts' AND result IS NULL
+         ORDER BY sent_at DESC`
+      ).all();
+      const MIN_EV = 3.0, MIN_ODDS = 1.20, MAX_ODDS = 6.00, SANITY_MAX_EV = 30.0;
+      const evaluate = (t) => {
+        const reasons = [];
+        const effectiveEv = Number.isFinite(parseFloat(t.current_ev)) ? parseFloat(t.current_ev) : parseFloat(t.ev);
+        const odds = parseFloat(t.odds);
+        const conf = String(t.confidence || '').toUpperCase();
+        if (!Number.isFinite(effectiveEv) || effectiveEv <= 0) reasons.push(`EV atual ${effectiveEv.toFixed(1)}% ≤ 0 (edge fechou)`);
+        else if (effectiveEv < MIN_EV) reasons.push(`EV atual ${effectiveEv.toFixed(1)}% < ${MIN_EV}%`);
+        if (effectiveEv >= SANITY_MAX_EV && conf !== 'ALTA') reasons.push(`EV ${effectiveEv.toFixed(1)}% ≥ ${SANITY_MAX_EV}% sem conf ALTA`);
+        if (!Number.isFinite(odds) || odds < MIN_ODDS || odds > MAX_ODDS) reasons.push(`odds ${odds} fora de ${MIN_ODDS}-${MAX_ODDS}`);
+        return { keep: reasons.length === 0, reasons, effectiveEv };
+      };
+      const decided = rows.map(r => ({ ...r, _eval: evaluate(r) }));
+      const toVoid = decided.filter(r => !r._eval.keep);
+      let voided = 0;
+      if (apply && toVoid.length) {
+        const upd = db.prepare("UPDATE tips SET result='void', settled_at=datetime('now'), profit_reais=0 WHERE id=?");
+        const tx = db.transaction(ids => { for (const id of ids) upd.run(id); });
+        tx(toVoid.map(r => r.id));
+        voided = toVoid.length;
+        log('INFO', 'ADMIN', `void-bad-darts: ${voided} tips anuladas`);
+      }
+      sendJson(res, {
+        ok: true, dryRun: !apply,
+        total: rows.length, wouldVoid: toVoid.length, voided,
+        items: decided.map(r => ({
+          id: r.id,
+          matchup: `${r.participant1} vs ${r.participant2}`,
+          pick: r.tip_participant, odds: r.odds,
+          originalEv: r.ev, currentEv: r.current_ev ?? null,
+          effectiveEv: +r._eval.effectiveEv.toFixed(2),
+          conf: r.confidence,
+          keep: r._eval.keep, reasons: r._eval.reasons,
+        })),
+      });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
   // Reanalisa tips MMA pendentes contra os gates atuais (2026-04-15).
   // Usa current_ev quando disponível (mercado move → edge pode desaparecer).
   //   - current_ev ≤ 0% → void (edge desapareceu)
