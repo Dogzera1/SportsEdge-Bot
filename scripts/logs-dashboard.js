@@ -54,11 +54,14 @@ function classify(line) {
   if (/\bdarts?\b/i.test(l)) bot = 'darts';
 
   let kind = null;
-  if (/\bTIP\b|\bAUTO-(LOL|DOTA|TENIS|MMA|DARTS|SNOOKER|TT)\b|envia(da|ndo)/i.test(l)) kind = 'tip';
+  if (/\bTIP\b|\bAUTO-(LOL|DOTA|TENIS|MMA|DARTS|SNOOKER|TT|CS)\b|envia(da|ndo)/i.test(l)) kind = 'tip';
   if (/livestats|live.?stats|streamlist|window\//i.test(lc)) kind = 'stats';
   if (/calibrat/i.test(lc)) kind = 'calibration';
 
-  return { level, bot, kind };
+  // Live match signal — prioridade visual no dashboard
+  const isLive = /\bLIVE\b|\bao vivo\b|hasLiveStats=true|state=in_game|isLive:?\s*1|Scorebot|"live":\s*true|\blive PS\b/i.test(l);
+
+  return { level, bot, kind, isLive };
 }
 
 function pushLine(raw) {
@@ -154,7 +157,8 @@ function statusForSport(cfg) {
   const last = all[all.length - 1];
 
   // métricas comuns
-  const cycles = window.filter(e => /AUTO-(LOL|DOTA|MMA|TENIS|TT|SNOOKER|DARTS)|Iniciando verifica|\/lol-matches|\/dota-matches|\/tennis-matches|\/mma-matches|\/snooker-matches|\/darts-matches|\/tabletennis-matches/i.test(e.text)).length;
+  const cycles = window.filter(e => /AUTO-(LOL|DOTA|MMA|TENIS|TT|SNOOKER|DARTS|CS)|Iniciando verifica|\/lol-matches|\/dota-matches|\/tennis-matches|\/mma-matches|\/snooker-matches|\/darts-matches|\/tabletennis-matches|\/cs-matches/i.test(e.text)).length;
+  const liveActivity = window.filter(e => e.isLive).length;
   const errors = window.filter(e => e.level === 'error' || /\[stderr\]|ECONN|ETIMEDOUT|ENOTFOUND|fail(ed)?|exception/i.test(e.text)).length;
   const warns  = window.filter(e => e.level === 'warn').length;
   const tipsSent = window.filter(e => /tip\s+enviad|TIP-\d|Tip enviada/i.test(e.text)).length;
@@ -270,6 +274,7 @@ function statusForSport(cfg) {
     if (level === 'ok') level = 'warn';
   }
 
+  m.liveActivity = liveActivity;
   return {
     bot: cfg.bot,
     label: cfg.label,
@@ -279,6 +284,8 @@ function statusForSport(cfg) {
     summary: summary || 'Sem dados',
     issues,
     metrics: m,
+    hasLive: liveActivity > 0,
+    liveCount: liveActivity,
     lastActivity: last?.t || null,
     lastActivityAgo: last ? fmtAgo(now - last.t) : '—',
   };
@@ -289,30 +296,46 @@ function extractTips(limit = 60) {
   const denied = [];
   for (const e of buffer) {
     const t = e.text;
+    const isLive = !!e.isLive;
     if (/Tip enviada/i.test(t)) {
-      sent.push({ t: e.t, bot: e.bot, text: t.replace(/^.*?Tip enviada:?\s*/i, '').trim() });
+      sent.push({ t: e.t, bot: e.bot, isLive, text: t.replace(/^.*?Tip enviada:?\s*/i, '').trim() });
     } else if (/\bSem tip:/i.test(t)) {
-      denied.push({ t: e.t, bot: e.bot, reason: 'sem-edge', text: t.replace(/^.*?Sem tip:\s*/i, '').trim() });
+      denied.push({ t: e.t, bot: e.bot, isLive, reason: 'sem-edge', text: t.replace(/^.*?Sem tip:\s*/i, '').trim() });
     } else if (/Tip bloqueada/i.test(t)) {
-      denied.push({ t: e.t, bot: e.bot, reason: 'gate', text: t.replace(/^.*?Tip bloqueada:?\s*/i, '').trim() });
+      denied.push({ t: e.t, bot: e.bot, isLive, reason: 'gate', text: t.replace(/^.*?Tip bloqueada:?\s*/i, '').trim() });
     } else if (/Gate sem-dados/i.test(t)) {
-      denied.push({ t: e.t, bot: e.bot, reason: 'sem-dados', text: t.replace(/^.*?Gate sem-dados:\s*/i, '').trim() });
+      denied.push({ t: e.t, bot: e.bot, isLive, reason: 'sem-dados', text: t.replace(/^.*?Gate sem-dados:\s*/i, '').trim() });
     } else if (/\[RISK\].*?bloqueada/i.test(t) || /RISK.*?: bloqueada/i.test(t)) {
-      denied.push({ t: e.t, bot: e.bot, reason: 'risk', text: t.replace(/^.*?bloqueada\s*/i, 'bloqueada ').trim() });
+      denied.push({ t: e.t, bot: e.bot, isLive, reason: 'risk', text: t.replace(/^.*?bloqueada\s*/i, 'bloqueada ').trim() });
     } else if (/\[AUTO\].*?BAIXA.*?(rejeit|bloque)/i.test(t)) {
-      denied.push({ t: e.t, bot: e.bot, reason: 'baixa-gate', text: t.replace(/^.*?\[AUTO\]\s*/i, '').trim() });
+      denied.push({ t: e.t, bot: e.bot, isLive, reason: 'baixa-gate', text: t.replace(/^.*?\[AUTO\]\s*/i, '').trim() });
     }
   }
+  // Prioriza live em cima, depois por tempo desc
+  const sortLivePriority = (a, b) => {
+    if (a.isLive !== b.isLive) return a.isLive ? -1 : 1;
+    return b.t - a.t;
+  };
   return {
-    sent: sent.slice(-limit).reverse(),
-    denied: denied.slice(-limit).reverse(),
-    countsTotal: { sent: sent.length, denied: denied.length },
+    sent: sent.slice(-limit).sort(sortLivePriority),
+    denied: denied.slice(-limit).sort(sortLivePriority),
+    countsTotal: {
+      sent: sent.length,
+      sentLive: sent.filter(x => x.isLive).length,
+      denied: denied.length,
+      deniedLive: denied.filter(x => x.isLive).length,
+    },
   };
 }
 
 function computeStatus() {
   const now = Date.now();
-  const sports = SPORTS.map(statusForSport);
+  const sports = SPORTS.map(statusForSport).sort((a, b) => {
+    // live primeiro, depois error/warn, depois ok
+    if (a.hasLive !== b.hasLive) return a.hasLive ? -1 : 1;
+    const rank = { error: 0, warn: 1, ok: 2 };
+    return (rank[a.status] ?? 3) - (rank[b.status] ?? 3);
+  });
   const overall = sports.some(s => s.status === 'error') ? 'error'
                 : sports.some(s => s.status === 'warn')  ? 'warn'
                 : 'ok';

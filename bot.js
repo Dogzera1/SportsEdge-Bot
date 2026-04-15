@@ -1063,45 +1063,32 @@ async function runAutoAnalysis() {
   // Caches compartilhados para CLV e Updates
   const sharedCaches = { esports: lolRaw || [] };
 
-  // Dota 2: Executa análise sequencial após LoL
+  // ── Execução PARALELA dos esportes (antes era série → MMA bloqueava ~15min o resto)
+  // Cada poll já tem error handling interno; Promise.allSettled garante isolamento total.
+  const parallel = [];
   if (SPORTS['esports']?.enabled) {
-    await new Promise(r => setTimeout(r, 5000));
-    await pollDota().catch(e => log('ERROR', 'AUTO', `Dota2 unified: ${e.message}`));
+    parallel.push(pollDota().catch(e => log('ERROR', 'AUTO', `Dota2 unified: ${e.message}`)));
   }
-
-  // MMA: Executa análise sequencial após Esports
   if (SPORTS['mma']?.enabled) {
-    await new Promise(r => setTimeout(r, 5000));
-    await pollMma(true).catch(e => log('ERROR', 'AUTO', `MMA unified: ${e.message}`));
+    parallel.push(pollMma(true).catch(e => log('ERROR', 'AUTO', `MMA unified: ${e.message}`)));
   }
-
-  // Football: Executa análise sequencial
   if (SPORTS['football']?.enabled) {
-    await new Promise(r => setTimeout(r, 5000));
-    const fbList = await pollFootball(true).catch(e => { log('ERROR', 'AUTO', `Football unified: ${e.message}`); return []; });
-    sharedCaches.football = fbList;
+    parallel.push(pollFootball(true).then(v => { sharedCaches.football = v; })
+      .catch(e => log('ERROR', 'AUTO', `Football unified: ${e.message}`)));
   }
-
-  // Tennis: Executa análise sequencial
   if (SPORTS['tennis']?.enabled) {
-    await new Promise(r => setTimeout(r, 5000));
-    const tnList = await pollTennis(true).catch(e => { log('ERROR', 'AUTO', `Tennis unified: ${e.message}`); return []; });
-    sharedCaches.tennis = tnList;
+    parallel.push(pollTennis(true).then(v => { sharedCaches.tennis = v; })
+      .catch(e => log('ERROR', 'AUTO', `Tennis unified: ${e.message}`)));
   }
-
-  // Table Tennis: análise sequencial (shadow-first)
   if (SPORTS['tabletennis']?.enabled) {
-    await new Promise(r => setTimeout(r, 5000));
-    const ttList = await pollTableTennis(true).catch(e => { log('ERROR', 'AUTO', `TableTennis unified: ${e.message}`); return []; });
-    sharedCaches.tabletennis = ttList;
+    parallel.push(pollTableTennis(true).then(v => { sharedCaches.tabletennis = v; })
+      .catch(e => log('ERROR', 'AUTO', `TableTennis unified: ${e.message}`)));
   }
-
-  // CS2: análise sequencial (shadow-first)
   if (SPORTS['cs']?.enabled) {
-    await new Promise(r => setTimeout(r, 5000));
-    const csList = await pollCs(true).catch(e => { log('ERROR', 'AUTO', `CS2 unified: ${e.message}`); return []; });
-    sharedCaches.cs = csList;
+    parallel.push(pollCs(true).then(v => { sharedCaches.cs = v; })
+      .catch(e => log('ERROR', 'AUTO', `CS2 unified: ${e.message}`)));
   }
+  await Promise.allSettled(parallel);
 
   // Tarefas de fundo agora usam os dados baixados acima (mais rápido e seguro)
   await new Promise(r => setTimeout(r, 2000));
@@ -4336,6 +4323,14 @@ async function pollDota() {
     const liveCount = matches.filter(m => m.status === 'live').length;
     log('INFO', 'AUTO-DOTA', `${matches.length} partidas (${liveCount} live, ${matches.length - liveCount} upcoming)`);
 
+    // Prioridade: live primeiro, depois upcoming por horário asc
+    matches.sort((a, b) => {
+      const la = a.status === 'live' ? 0 : 1;
+      const lb = b.status === 'live' ? 0 : 1;
+      if (la !== lb) return la - lb;
+      return new Date(a.time || 0) - new Date(b.time || 0);
+    });
+
     for (const match of matches) {
       const isLive = match.status === 'live';
 
@@ -4674,6 +4669,16 @@ async function pollMma(runOnce = false) {
         return sunday.getTime();
       })();
 
+      // Prioridade: lutas live/imminent (próximas 3h) primeiro
+      fights.sort((a, b) => {
+        const ta = new Date(a.time || 0).getTime();
+        const tb = new Date(b.time || 0).getTime();
+        const imminent = 3 * 60 * 60 * 1000;
+        const la = (a.status === 'live' || (ta > 0 && ta - now < imminent)) ? 0 : 1;
+        const lb = (b.status === 'live' || (tb > 0 && tb - now < imminent)) ? 0 : 1;
+        if (la !== lb) return la - lb;
+        return ta - tb;
+      });
       for (const fight of fights) {
         const isBoxing = fight.game === 'boxing';
 
@@ -5126,6 +5131,13 @@ async function pollTennis(runOnce = false) {
       const wtaEvent = await fetchEspnTennisEvent('WTA').catch(() => null);
 
       const now = Date.now();
+      // Prioridade: live primeiro
+      matches.sort((a, b) => {
+        const la = a.status === 'live' ? 0 : 1;
+        const lb = b.status === 'live' ? 0 : 1;
+        if (la !== lb) return la - lb;
+        return new Date(a.time || 0) - new Date(b.time || 0);
+      });
       for (const match of matches) {
         const key = `tennis_${match.id}`;
         const prev = analyzedTennis.get(key);
@@ -5539,6 +5551,13 @@ async function pollFootball(runOnce = false) {
       log('INFO', 'AUTO-FOOTBALL', `${matches.length} partidas futebol com odds (${src})`);
 
       const now = Date.now();
+      // Prioridade: live primeiro
+      matches.sort((a, b) => {
+        const la = a.status === 'live' ? 0 : 1;
+        const lb = b.status === 'live' ? 0 : 1;
+        if (la !== lb) return la - lb;
+        return new Date(a.time || 0) - new Date(b.time || 0);
+      });
       for (const match of matches) {
         const key = `football_${match.id}`;
         const prev = analyzedFootball.get(key);
@@ -5933,6 +5952,13 @@ async function pollTableTennis(runOnce = false) {
         const t = new Date(m.time || 0).getTime();
         return t > 0 && (t - now) < windowMs && (t - now) > -60 * 60 * 1000; // até 1h no passado (live)
       });
+      // Prioridade: live primeiro
+      relevant.sort((a, b) => {
+        const la = a.status === 'live' ? 0 : 1;
+        const lb = b.status === 'live' ? 0 : 1;
+        if (la !== lb) return la - lb;
+        return new Date(a.time || 0) - new Date(b.time || 0);
+      });
       if (!relevant.length) {
         log('INFO', 'AUTO-TT', '0 matches em janela de 6h');
         if (!runOnce) setTimeout(loop, TT_INTERVAL);
@@ -6106,6 +6132,13 @@ async function pollCs(runOnce = false) {
       const relevant = matches.filter(m => {
         const t = new Date(m.time || 0).getTime();
         return t > 0 && (t - now) < windowMs && (t - now) > -3 * 60 * 60 * 1000;
+      });
+      // Prioridade: live primeiro
+      relevant.sort((a, b) => {
+        const la = a.status === 'live' ? 0 : 1;
+        const lb = b.status === 'live' ? 0 : 1;
+        if (la !== lb) return la - lb;
+        return new Date(a.time || 0) - new Date(b.time || 0);
       });
       if (!relevant.length) {
         log('INFO', 'AUTO-CS', '0 matches em janela de 6h');

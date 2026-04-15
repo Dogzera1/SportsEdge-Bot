@@ -81,6 +81,14 @@
   .tip-filters { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 8px; }
   .tip-filters .pill { background: var(--panel2); border: 1px solid var(--border); padding: 2px 8px; border-radius: 999px; font-size: 11px; cursor: pointer; user-select: none; color: var(--text); }
   .tip-filters .pill.active { background: var(--accent); color: #051119; border-color: var(--accent); font-weight: 600; }
+  .tip-filters .pill.live { background: rgba(248,113,113,.15); border-color: rgba(248,113,113,.4); color: #ff9a9a; }
+  .tip-filters .pill.live.active { background: var(--err); border-color: var(--err); color: #1a0000; }
+
+  .live-badge { display: inline-flex; align-items: center; gap: 4px; margin-left: 6px; padding: 1px 7px; border-radius: 4px; background: rgba(248,113,113,.18); color: var(--err); font-size: 10px; font-weight: 700; letter-spacing: .5px; }
+  .live-badge::before { content: ''; width: 6px; height: 6px; background: var(--err); border-radius: 50%; animation: blink 1.2s infinite; }
+  .tip-row.live { background: rgba(248,113,113,.05); border-left: 2px solid var(--err); padding-left: 4px; }
+  .card.has-live { box-shadow: 0 0 0 1px rgba(248,113,113,.3), 0 4px 18px rgba(248,113,113,.08); }
+  .card.has-live .title::after { content: '⚡LIVE'; margin-left: auto; padding: 2px 8px; border-radius: 999px; font-size: 10px; font-weight: 700; letter-spacing: .5px; background: var(--err); color: #1a0000; animation: blink 1.2s infinite; }
 </style>
 </head>
 <body>
@@ -98,6 +106,7 @@
 <div class="tips-section">
   <h2>📡 Tips em tempo real</h2>
   <div class="tip-filters" id="tipFilters">
+    <span class="pill live" data-live="1">⚡ só LIVE</span>
     <span class="pill active" data-bot="all">todos</span>
     <span class="pill" data-bot="lol">lol</span>
     <span class="pill" data-bot="dota">dota</span>
@@ -159,8 +168,9 @@
       ? `<ul class="issues">${s.issues.map(i => `<li>${escapeHtml(i)}</li>`).join('')}</ul>`
       : '';
     const metrics = metricsLine(s.metrics);
+    const liveCls = s.hasLive ? ' has-live' : '';
     return `
-      <div class="card ${k}">
+      <div class="card ${k}${liveCls}">
         <div class="title">
           <span class="emoji">${s.emoji}</span>
           <span>${s.label}</span>
@@ -204,24 +214,33 @@
   }, true);
 
   let tipFilter = 'all';
+  let liveOnly = false;
   document.querySelectorAll('#tipFilters .pill').forEach(p => p.addEventListener('click', () => {
-    document.querySelectorAll('#tipFilters .pill').forEach(x => x.classList.remove('active'));
-    p.classList.add('active');
-    tipFilter = p.dataset.bot;
+    if (p.dataset.live) {
+      liveOnly = !liveOnly;
+      p.classList.toggle('active', liveOnly);
+    } else {
+      document.querySelectorAll('#tipFilters .pill[data-bot]').forEach(x => x.classList.remove('active'));
+      p.classList.add('active');
+      tipFilter = p.dataset.bot;
+    }
     refreshTips();
   }));
 
   let lastTipsData = null;
   function renderTipsList(items, container, denied) {
-    const filt = tipFilter === 'all' ? items : items.filter(i => i.bot === tipFilter);
+    let filt = tipFilter === 'all' ? items : items.filter(i => i.bot === tipFilter);
+    if (liveOnly) filt = filt.filter(i => i.isLive);
     if (!filt.length) {
-      container.innerHTML = `<div class="tips-empty">${tipFilter === 'all' ? 'nenhuma no buffer' : 'nenhuma deste bot'}</div>`;
+      const msg = liveOnly ? 'sem live no momento' : (tipFilter === 'all' ? 'nenhuma no buffer' : 'nenhuma deste bot');
+      container.innerHTML = `<div class="tips-empty">${msg}</div>`;
       return;
     }
     container.innerHTML = filt.map(i => {
       const reasonTag = denied && i.reason ? `<span class="reason">${i.reason}</span>` : '';
-      const cls = denied ? `tip-row r-${i.reason || ''}` : 'tip-row';
-      return `<div class="${cls}"><span class="tt">${fmtTime(i.t)}</span><span class="bb">${i.bot}</span><span>${reasonTag}${escapeHtml(i.text)}</span></div>`;
+      const liveTag = i.isLive ? `<span class="live-badge">LIVE</span>` : '';
+      const cls = (denied ? `tip-row r-${i.reason || ''}` : 'tip-row') + (i.isLive ? ' live' : '');
+      return `<div class="${cls}"><span class="tt">${fmtTime(i.t)}</span><span class="bb">${i.bot}</span><span>${reasonTag}${liveTag}${escapeHtml(i.text)}</span></div>`;
     }).join('');
   }
 
@@ -230,8 +249,9 @@
       lastTipsData = await fetch('/tips?limit=80').then(r => r.json()).catch(() => null);
     }
     if (!lastTipsData) return;
-    document.getElementById('cntSent').textContent = lastTipsData.countsTotal.sent;
-    document.getElementById('cntDenied').textContent = lastTipsData.countsTotal.denied;
+    const c = lastTipsData.countsTotal;
+    document.getElementById('cntSent').textContent = c.sentLive ? `${c.sent} (${c.sentLive} live)` : c.sent;
+    document.getElementById('cntDenied').textContent = c.deniedLive ? `${c.denied} (${c.deniedLive} live)` : c.denied;
     renderTipsList(lastTipsData.sent, document.getElementById('listSent'), false);
     renderTipsList(lastTipsData.denied, document.getElementById('listDenied'), true);
   }
