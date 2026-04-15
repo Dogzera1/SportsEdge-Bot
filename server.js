@@ -2530,6 +2530,74 @@ async function getTheOddsDotaMatches() {
   return matches;
 }
 
+// ── The Odds API — Table Tennis ──
+let _ttOddsCache = { data: [], ts: 0 };
+const TT_ODDS_CACHE_TTL = parseInt(process.env.TT_ODDS_CACHE_TTL_MS || String(5 * 60 * 1000), 10);
+let _ttOddsKeysCache = { keys: [], ts: 0 };
+
+async function getTheOddsTableTennisMatches() {
+  if (!THE_ODDS_API_KEY) return [];
+  if (_ttOddsCache.data.length && (Date.now() - _ttOddsCache.ts) < TT_ODDS_CACHE_TTL) {
+    return _ttOddsCache.data;
+  }
+
+  // Cache das keys por 1h (mudam raramente)
+  let ttKeys = _ttOddsKeysCache.keys;
+  if (!ttKeys.length || (Date.now() - _ttOddsKeysCache.ts) > 60 * 60 * 1000) {
+    const sportsR = await theOddsGet(`https://api.the-odds-api.com/v4/sports/?apiKey=${THE_ODDS_API_KEY}&all=true`).catch(() => ({ body: '[]' }));
+    const all = safeParse(sportsR.body, []);
+    ttKeys = (all || [])
+      .filter(s => s && typeof s.key === 'string'
+        && (/tabletennis|table.?tennis|ping.?pong/i.test(s.key)
+            || /table.?tennis|ping.?pong/i.test(s.title || '')
+            || /table.?tennis/i.test(s.group || '')))
+      .map(s => s.key);
+    _ttOddsKeysCache = { keys: ttKeys, ts: Date.now() };
+    if (ttKeys.length) log('INFO', 'ODDS', `The Odds API TT keys: ${ttKeys.join(', ')}`);
+    else log('INFO', 'ODDS', 'The Odds API: nenhuma key de Table Tennis retornada');
+  }
+  if (!ttKeys.length) return [];
+
+  const now = Date.now();
+  const matches = [];
+  for (const key of ttKeys) {
+    if (!oddsApiAllowed('ODDS')) break;
+    const url = `https://api.the-odds-api.com/v4/sports/${key}/odds/?apiKey=${THE_ODDS_API_KEY}&regions=eu&markets=h2h&oddsFormat=decimal`;
+    const r = await theOddsGet(url).catch(() => null);
+    if (!r || r.status !== 200) continue;
+    const events = safeParse(r.body, []);
+    for (const e of events) {
+      const commenceTs = new Date(e.commence_time).getTime();
+      // Aceita live (até 3h no passado) + upcoming
+      if (commenceTs < now - 3 * 60 * 60 * 1000) continue;
+      const bm = e.bookmakers?.[0];
+      const market = bm?.markets?.find(m => m.key === 'h2h');
+      const outcomes = market?.outcomes || [];
+      const o1 = outcomes.find(o => o.name === e.home_team);
+      const o2 = outcomes.find(o => o.name === e.away_team);
+      if (!o1 || !o2) continue;
+      matches.push({
+        id: `ttennis_odds_${e.id}`,
+        team1: e.home_team,
+        team2: e.away_team,
+        league: e.sport_title || 'Table Tennis',
+        sport_key: key,
+        status: commenceTs <= now ? 'live' : 'upcoming',
+        time: e.commence_time,
+        odds: { t1: String(o1.price), t2: String(o2.price), bookmaker: bm.title },
+        _source: 'theodds',
+      });
+    }
+  }
+
+  matches.sort((a, b) => new Date(a.time) - new Date(b.time));
+  if (matches.length) {
+    log('INFO', 'ODDS', `The Odds API Table Tennis: ${matches.length} partidas`);
+    _ttOddsCache = { data: matches, ts: Date.now() };
+  }
+  return matches;
+}
+
 // ── Pinnacle — Tennis (sportId=33) ──
 // Suplementa The Odds API: cobre ATP/WTA/Challenger/ITF extensivamente.
 let _tennisPinnacleCache = { data: [], ts: 0 };
@@ -7409,6 +7477,21 @@ const server = http.createServer(async (req, res) => {
   }
 
   // ── Snooker: odds via Pinnacle guest API (funciona do BR) ──
+  if (p === '/debug-tt-theodds') {
+    try {
+      if (!THE_ODDS_API_KEY) { sendJson(res, { error: 'no_key' }); return; }
+      const sportsR = await theOddsGet(`https://api.the-odds-api.com/v4/sports/?apiKey=${THE_ODDS_API_KEY}&all=true`);
+      const all = safeParse(sportsR.body, []);
+      const tt = (all || []).filter(s => /table.?tennis|tabletennis|ping.?pong/i.test(
+        (s.key||'') + ' ' + (s.title||'') + ' ' + (s.group||'')
+      ));
+      sendJson(res, { totalSports: all.length, ttSports: tt });
+    } catch (e) {
+      sendJson(res, { error: e.message });
+    }
+    return;
+  }
+
   if (p === '/tabletennis-matches') {
     try {
       if (!global.__ttennisCache) global.__ttennisCache = { ts: 0, data: [] };
@@ -7419,7 +7502,11 @@ const server = http.createServer(async (req, res) => {
       }
       // 1) Pinnacle (frequentemente sem matches TT — matchupCount=0 observado)
       let rows = await getPinnacleTableTennisMatches();
-      // 2) 1xBet via hltv-proxy (curl_cffi bypass) — ~770 matches TT/dia com odds reais
+      // 2) The Odds API (plano pago do user) — deve cobrir Setka Cup/WTT/TT Elite
+      if (!rows.length) {
+        rows = await getTheOddsTableTennisMatches().catch(() => []);
+      }
+      // 3) 1xBet via hltv-proxy (experimental, 1xBet bloqueia IP Railway em geral)
       if (!rows.length) {
         try {
           const onexbet = require('./lib/sportsbook-1xbet');
@@ -7432,7 +7519,7 @@ const server = http.createServer(async (req, res) => {
           log('WARN', 'ODDS', `1xBet TT fallback: ${e.message}`);
         }
       }
-      // 3) Fallback Sofascore — lista matches sem odds (ao menos o botão Próximas funciona)
+      // 4) Fallback Sofascore — lista matches sem odds (ao menos o botão Próximas funciona)
       // Sofascore cobre Setka Cup/WTT/TT Elite Series/etc (13k+ matches/dia).
       if (!rows.length) {
         try {
