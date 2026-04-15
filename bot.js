@@ -1552,7 +1552,7 @@ async function checkLiveNotifications() {
 
 
 // Collect live game stats for esports analysis
-async function collectGameContext(game, matchId) {
+async function collectGameContext(game, matchId, team1, team2) {
   let gamesContext = '';
   let compScore = null; // pp advantage for t1 (blue) based on pro champion WRs
   let liveGameNumber = null; // número do mapa atualmente ao vivo (Game 1, 2, 3...)
@@ -1573,7 +1573,8 @@ async function collectGameContext(game, matchId) {
     };
 
     if (isPandaScore) {
-      // Fonte PandaScore — composições via /ps-compositions
+      // Fonte PandaScore — composições via /ps-compositions.
+      // Para LPL/matches ps_*: se PS falhar, tenta fallback Riot via team names (descoberto 2026-04-15).
       try {
         const gd = await serverGet(`/ps-compositions?matchId=${encodeURIComponent(matchId)}`);
         log('INFO', 'LIVE-STATS', `LoL PandaScore ${matchId}: hasComps=${!!gd.hasCompositions} hasLiveStats=${!!gd.hasLiveStats} game=${gd.gameNumber||'?'} status=${gd.gameStatus||'?'}`);
@@ -1653,6 +1654,29 @@ async function collectGameContext(game, matchId) {
           } catch(e) { log('WARN', 'PS-CONTEXT', `Champ/player WR fetch falhou: ${e.message}`); }
         }
       } catch(e) { log('WARN', 'PS-CONTEXT', e.message); }
+      // Fallback Riot por team names quando PS não deu live stats (caso típico LPL no plano atual).
+      // /live-gameids com team1/team2 procura no getSchedule (zh-CN + en-US) e resolve o Riot matchId.
+      if (!hasLiveStats && team1 && team2) {
+        try {
+          const ids = await serverGet(`/live-gameids?team1=${encodeURIComponent(team1)}&team2=${encodeURIComponent(team2)}`).catch(() => []);
+          log('INFO', 'LIVE-STATS', `LoL Riot fallback (PS→teams): ${team1} vs ${team2} → ${Array.isArray(ids) ? ids.length : 0} gameId(s)`);
+          for (const gid of (Array.isArray(ids) ? ids : [])) {
+            const gd = await serverGet(`/live-game?gameId=${gid.gameId}`);
+            log('INFO', 'LIVE-STATS', `LoL Riot game ${gid.gameId}: state=${gd.gameState||'?'} hasLiveStats=${!!gd.hasLiveStats} gold=${gd.blueTeam?.totalGold||0}/${gd.redTeam?.totalGold||0}`);
+            if (gd.hasLiveStats && (gd.gameState === 'in_game' || gd.gameState === 'paused')) {
+              hasLiveStats = true;
+              if (gid.gameNumber) liveGameNumber = gid.gameNumber;
+              const gfn = (v) => v >= 1000 ? (v/1000).toFixed(1)+'k' : String(v||0);
+              const blue = gd.blueTeam, red = gd.redTeam;
+              const goldDiff = (blue.totalGold||0) - (red.totalGold||0);
+              const blueDragons = blue.dragonTypes?.length ? blue.dragonTypes.join(', ') : (blue.dragons||0);
+              const redDragons  = red.dragonTypes?.length  ? red.dragonTypes.join(', ')  : (red.dragons||0);
+              gamesContext += `\n[GAME ${gid.gameNumber || '?'} — AO VIVO | Riot fallback]\nGold: ${blue.name} ${gfn(blue.totalGold)} vs ${red.name} ${gfn(red.totalGold)} (diff: ${goldDiff>0?'+':''}${gfn(goldDiff)})\nTorres: ${blue.towerKills||0}x${red.towerKills||0} | Dragões: ${blueDragons} vs ${redDragons}\nKills: ${blue.totalKills||0}x${red.totalKills||0} | Barões: ${blue.barons||0}x${red.barons||0}\n`;
+              break;
+            }
+          }
+        } catch(e) { log('WARN', 'RIOT-FALLBACK', `${team1} vs ${team2}: ${e.message}`); }
+      }
     } else {
       // Fonte Riot (lolesports.com) — live-gameids + live-game
       const ids = await serverGet(`/live-gameids?matchId=${matchId}`).catch(() => []);
@@ -1667,7 +1691,9 @@ async function collectGameContext(game, matchId) {
               if (thisDraftComplete) draftComplete = true;
               const roles = { top:'TOP', jungle:'JGL', mid:'MID', bottom:'ADC', support:'SUP' };
               const g = (v) => v >= 1000 ? (v/1000).toFixed(1)+'k' : String(v||0);
-              const liveNow = !!(gid.hasLiveData && gd.hasLiveStats && (gd.gameState === 'in_game' || gd.gameState === 'paused'));
+              // LPL bug fix 2026-04-15: Riot schedule marca LPL games como "unstarted" mesmo
+              // quando está in_game. Não depender de gid.hasLiveData — usar só o que veio do feed real.
+              const liveNow = !!(gd.hasLiveStats && (gd.gameState === 'in_game' || gd.gameState === 'paused'));
               if (liveNow) {
                 const blue = gd.blueTeam, red = gd.redTeam;
                 const goldDiff = blue.totalGold - red.totalGold;
@@ -1824,7 +1850,7 @@ async function autoAnalyzeMatch(token, match) {
   try {
     const [o, gameCtx, enrich] = await Promise.all([
       serverGet(`/odds?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}&game=${encodeURIComponent(game)}`).catch(() => null),
-      collectGameContext(game, matchId),
+      collectGameContext(game, matchId, match.team1, match.team2),
       fetchEnrichment(match)
     ]);
     const gamesContext   = gameCtx.text;
@@ -4245,19 +4271,27 @@ async function pollDota() {
           `  ${(p.hero||'?').padEnd(14)} ${(p.name||'?').slice(0,12).padEnd(12)} ${p.kills}/${p.deaths}/${p.assists} lvl${p.level} ${g(p.gold)}g`
         ).join('\n');
 
-        // 1) OpenDota (github.com/odota/core) — funciona para qualquer liga com lobby público
+        // 1) OpenDota — /api/live retorna aggregate stats (score + radiant_lead) mas não per-player gold/KDA
         try {
           const ld = await serverGet(`/opendota-live?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}`);
-          log('INFO', 'LIVE-STATS', `Dota OpenDota ${match.team1} vs ${match.team2}: hasLiveStats=${!!ld.hasLiveStats}${ld.error?` err=${ld.error}`:''}`);
+          log('INFO', 'LIVE-STATS', `Dota OpenDota ${match.team1} vs ${match.team2}: hasLiveStats=${!!ld.hasLiveStats} playerStats=${!!ld.hasPlayerStats} agg=${!!ld.hasAggregateStats}${ld.error?` err=${ld.error}`:''}`);
           if (ld.hasLiveStats) {
             dotaHasLiveStats = true;
             const blue = ld.blueTeam, red = ld.redTeam;
             const goldDiff = (blue.totalGold||0) - (red.totalGold||0);
             const gt = ld.gameTime ? Math.round(ld.gameTime/60) : 0;
-            dotaLiveContext += `\n[AO VIVO — ${gt}min | OpenDota]\n`;
+            const sourceNote = ld.hasPlayerStats ? 'OpenDota' : 'OpenDota agg (gold estimado)';
+            dotaLiveContext += `\n[AO VIVO — ${gt}min | ${sourceNote}]\n`;
             dotaLiveContext += `Gold: ${blue.name} ${g(blue.totalGold)} vs ${red.name} ${g(red.totalGold)} (diff: ${goldDiff>0?'+':''}${g(goldDiff)})\n`;
             dotaLiveContext += `Kills: ${blue.totalKills||0}x${red.totalKills||0}\n`;
-            dotaLiveContext += `${blue.name}:\n${fmtTeam(blue)}\n${red.name}:\n${fmtTeam(red)}\n`;
+            if (ld.hasPlayerStats) {
+              dotaLiveContext += `${blue.name}:\n${fmtTeam(blue)}\n${red.name}:\n${fmtTeam(red)}\n`;
+            } else {
+              // Sem per-player stats: mostra só heróis
+              const heroLine = (team) => (team.players||[]).map(p => p.hero || '?').filter(h => h !== '?').join(', ');
+              if (heroLine(blue)) dotaLiveContext += `${blue.name} heroes: ${heroLine(blue)}\n`;
+              if (heroLine(red))  dotaLiveContext += `${red.name} heroes: ${heroLine(red)}\n`;
+            }
           }
         } catch(e) { log('WARN', 'AUTO-DOTA', `OpenDota fetch falhou: ${e.message}`); }
 
@@ -4315,7 +4349,7 @@ async function pollDota() {
       const maxOdds = parseFloat(process.env.DOTA_MAX_ODDS || '5.00');
 
       const liveSection = isLive
-        ? `\nESTADO DA SÉRIE (AO VIVO): ${match.team1} ${match.score1||0} x ${match.score2||0} ${match.team2} | Formato: ${match.format || 'Bo?'}\n⚠️ Partida ao vivo — odds refletem o estado atual da série. Só tip se edge for claro e odds forem favoráveis.${dotaHasLiveStats ? '\n\nSTATS AO VIVO (PandaScore):' + dotaLiveContext : ''}`
+        ? `\nESTADO DA SÉRIE (AO VIVO): ${match.team1} ${match.score1||0} x ${match.score2||0} ${match.team2} | Formato: ${match.format || 'Bo?'}\n⚠️ Partida ao vivo — odds refletem o estado atual da série. Só tip se edge for claro e odds forem favoráveis.${dotaHasLiveStats ? '\n\nSTATS AO VIVO:' + dotaLiveContext : ''}`
         : '';
 
       const prompt = `Você é um analista especializado em Dota 2 esports. Analise esta partida e identifique edge real se existir.

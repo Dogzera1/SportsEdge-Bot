@@ -3122,17 +3122,64 @@ const server = http.createServer(async (req, res) => {
   if (p === '/live-gameids') {
     try {
       const raw = parsed.query.matchId;
-      const matchId = raw ? String(raw).replace(/^lol_/, '') : '';
+      const matchId = raw ? String(raw).replace(/^lol_/, '').replace(/^ps_/, '') : '';
+      const qt1 = String(parsed.query.team1 || '').trim();
+      const qt2 = String(parsed.query.team2 || '').trim();
       const games = [];
-      if (matchId) {
+      const normT = s => String(s||'').toLowerCase().replace(/[^a-z0-9]/g, '');
+      const teamsMatch = (a, b, qa, qb) => {
+        const na = normT(a), nb = normT(b), nqa = normT(qa), nqb = normT(qb);
+        if (!nqa || !nqb) return false;
+        const has = (x, y) => x && y && (x.includes(y) || y.includes(x));
+        return (has(na, nqa) && has(nb, nqb)) || (has(na, nqb) && has(nb, nqa));
+      };
+      // Path 1: matchId direto (Riot format) — busca getEventDetails
+      let addedFromMatchId = false;
+      if (matchId && /^\d+$/.test(matchId)) {
         const dr = await httpGet(`${LOL_BASE}/getEventDetails?hl=en-US&id=${matchId}`, LOL_HEADERS);
         const dd = safeParse(dr.body, {});
         const match = dd?.data?.event?.match;
         if (match?.games) {
           const t1 = match.teams?.[0]?.name, t2 = match.teams?.[1]?.name;
           for (const g of match.games) {
-            if (!g.id || g.state === 'completed') continue;
-            games.push({ gameId: g.id, matchId, team1: t1, team2: t2, gameNumber: g.number, hasLiveData: g.state === 'inProgress' });
+            // NÃO filtrar por g.state — LPL/PS-only aparecem como "unstarted" mesmo quando live.
+            // Também não filtrar "completed" agressivamente — livestats ainda funciona pós-match.
+            if (!g.id) continue;
+            games.push({ gameId: g.id, matchId, team1: t1, team2: t2, gameNumber: g.number, hasLiveData: g.state === 'inProgress' || g.state === 'unstarted' });
+          }
+          addedFromMatchId = games.length > 0;
+        }
+      }
+      // Path 2: fallback por team names — varre getSchedule zh-CN + en-US procurando match
+      if (!addedFromMatchId && qt1 && qt2) {
+        const schedules = await Promise.all([
+          httpGet(`${LOL_BASE}/getSchedule?hl=zh-CN`, LOL_HEADERS).catch(() => ({ body: '{}' })),
+          httpGet(`${LOL_BASE}/getSchedule?hl=en-US`, LOL_HEADERS).catch(() => ({ body: '{}' })),
+        ]);
+        const events = [];
+        for (const s of schedules) {
+          const d = safeParse(s.body, {});
+          const evs = d?.data?.schedule?.events || [];
+          for (const e of evs) {
+            if (e.type === 'match' && e.match) events.push(e);
+          }
+        }
+        // Ordena por startTime desc (mais recente primeiro — mais provável de estar ao vivo)
+        events.sort((a, b) => new Date(b.startTime || 0) - new Date(a.startTime || 0));
+        const hit = events.find(e => {
+          const teams = e.match?.teams || [];
+          return teamsMatch(teams[0]?.name, teams[1]?.name, qt1, qt2);
+        });
+        if (hit?.match?.id) {
+          const dr = await httpGet(`${LOL_BASE}/getEventDetails?hl=en-US&id=${hit.match.id}`, LOL_HEADERS);
+          const dd = safeParse(dr.body, {});
+          const m = dd?.data?.event?.match;
+          if (m?.games) {
+            const t1 = m.teams?.[0]?.name, t2 = m.teams?.[1]?.name;
+            for (const g of m.games) {
+              if (!g.id) continue;
+              games.push({ gameId: g.id, matchId: hit.match.id, team1: t1, team2: t2, gameNumber: g.number, hasLiveData: g.state === 'inProgress' || g.state === 'unstarted', _resolvedByTeams: true });
+            }
           }
         }
       }
