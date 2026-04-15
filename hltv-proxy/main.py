@@ -376,21 +376,33 @@ def bookie_1xbet_tt(live: int = 0, count: int = 200):
             return JSONResponse(content=json.loads(body), headers={"X-Proxy-Cache": "HIT"})
 
     feed = "LiveFeed" if live else "LineFeed"
-    url = (
-        f"{UPSTREAM_1XBET}/service-api/{feed}/Get1x2_VZip"
-        f"?sports=10&count={count}&lng=en&mode=4&country=76&partner=51"
-        f"&getEmpty=true&noFilterBlockEvent=true"
-    )
-    try:
-        status, body, _ = _fetch_url(url, extra_headers={
-            "Referer": f"{UPSTREAM_1XBET}/en/line/table-tennis",
-            "Accept": "application/json",
-        })
-    except Exception as e:
-        raise HTTPException(502, f"upstream error: {e}")
+    # Tenta múltiplas variações — 1xBet é sensível a combinação de params/headers
+    variants = [
+        # Sem headers extras, params mínimos
+        (f"{UPSTREAM_1XBET}/service-api/{feed}/Get1x2_VZip?sports=10&count={count}&lng=en&mode=4&country=76&partner=51", None),
+        # Com tf (time frame) grande
+        (f"{UPSTREAM_1XBET}/service-api/{feed}/Get1x2_VZip?sports=10&count={count}&lng=en&mode=4&country=76&partner=51&tf=2200000&tz=0", None),
+        # Via mirror 1xlite
+        (f"https://1xlite-sport.com/service-api/{feed}/Get1x2_VZip?sports=10&count={count}&lng=en&mode=4&country=76&partner=51", None),
+        # Com referer do site BR
+        (f"{UPSTREAM_1XBET}/service-api/{feed}/Get1x2_VZip?sports=10&count={count}&lng=pt&mode=4&country=32&partner=51",
+         {"Referer": f"{UPSTREAM_1XBET}/pt/line/table-tennis"}),
+    ]
+    status = 0
+    body = ""
+    last_err = None
+    for url, extra in variants:
+        try:
+            status, body, _ = _fetch_url(url, extra_headers=extra)
+        except Exception as e:
+            last_err = str(e)
+            continue
+        if status == 200 and body and '"Value"' in body:
+            break
+        last_err = f"status={status} len={len(body) if body else 0}"
 
-    if status != 200:
-        raise HTTPException(status or 502, f"1xbet returned {status}")
+    if status != 200 or not body:
+        raise HTTPException(502, f"1xbet failed all variants (last: {last_err})")
 
     import json
     try:
