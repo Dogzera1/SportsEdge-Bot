@@ -2567,6 +2567,43 @@ async function getPinnacleTennisMatches() {
   }
 }
 
+// ── Pinnacle — Table Tennis (sportId=32) ──
+// Cobre WTT, Setka Cup, TT Elite Series, Czech TT League. Alto volume (~200/dia).
+let _ttennisPinnacleCache = { data: [], ts: 0 };
+const TTENNIS_PINNACLE_TTL = 3 * 60 * 1000; // 3min
+
+async function getPinnacleTableTennisMatches() {
+  if (process.env.PINNACLE_TABLETENNIS !== 'true') return [];
+  if (_ttennisPinnacleCache.data.length && (Date.now() - _ttennisPinnacleCache.ts) < TTENNIS_PINNACLE_TTL) {
+    return _ttennisPinnacleCache.data;
+  }
+  try {
+    const rows = await pinnacle.fetchSportMatchOdds(32, (m) => {
+      const p1 = String(m?.participants?.[0]?.name || '');
+      const p2 = String(m?.participants?.[1]?.name || '');
+      // Filtra mercados de sets/games (só moneyline)
+      if (/\(sets\)|\(games\)|\d+-\d+/i.test(p1 + p2)) return false;
+      return true;
+    });
+    const matches = rows.map(r => ({
+      id: `ttennis_pin_${r.id}`,
+      team1: r.team1,
+      team2: r.team2,
+      league: r.league,
+      sport_key: 'table_tennis',
+      status: r.status === 'live' ? 'live' : 'upcoming',
+      time: r.startTime,
+      odds: { t1: String(r.oddsT1), t2: String(r.oddsT2), bookmaker: 'Pinnacle' }
+    }));
+    _ttennisPinnacleCache = { data: matches, ts: Date.now() };
+    log('INFO', 'ODDS', `Pinnacle Table Tennis: ${matches.length} partidas cacheadas`);
+    return matches;
+  } catch (e) {
+    log('ERROR', 'ODDS', `Pinnacle Table Tennis: ${e.message}`);
+    return [];
+  }
+}
+
 // ── Pinnacle — Dota 2 (esports) ──
 // sportId=12 (E-Sports) filtrado por league.name contendo "Dota 2"
 // Descarta matchups de kills e handicap (só queremos match winner série)
@@ -6823,6 +6860,44 @@ const server = http.createServer(async (req, res) => {
   }
 
   // ── Snooker: odds via Pinnacle guest API (funciona do BR) ──
+  if (p === '/tabletennis-matches') {
+    try {
+      if (!global.__ttennisCache) global.__ttennisCache = { ts: 0, data: [] };
+      const TTL = 3 * 60 * 1000;
+      if (Date.now() - global.__ttennisCache.ts < TTL && global.__ttennisCache.data.length) {
+        sendJson(res, global.__ttennisCache.data);
+        return;
+      }
+      const rows = await getPinnacleTableTennisMatches();
+      const now = Date.now();
+      const matches = rows.map(r => {
+        const t = r.time ? new Date(r.time).getTime() : 0;
+        const isLive = r.status === 'live' || (t > 0 && t <= now);
+        return {
+          id: r.id,
+          game: 'tabletennis',
+          status: isLive ? 'live' : 'upcoming',
+          team1: r.team1,
+          team2: r.team2,
+          league: r.league,
+          time: r.time,
+          odds: r.odds,
+        };
+      });
+      matches.sort((a, b) => {
+        if (a.status === 'live' && b.status !== 'live') return -1;
+        if (b.status === 'live' && a.status !== 'live') return 1;
+        return new Date(a.time || 0).getTime() - new Date(b.time || 0).getTime();
+      });
+      global.__ttennisCache = { ts: Date.now(), data: matches };
+      sendJson(res, matches);
+    } catch (e) {
+      log('ERROR', 'TTENNIS', e.message);
+      sendJson(res, []);
+    }
+    return;
+  }
+
   if (p === '/snooker-matches') {
     try {
       if (!global.__snookerCache) global.__snookerCache = { ts: 0, data: [] };

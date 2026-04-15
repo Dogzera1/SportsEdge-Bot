@@ -91,6 +91,7 @@ const analyzedFootball = new Map();
 const analyzedDota = new Map();
 const analyzedDarts = new Map();
 const analyzedSnooker = new Map();
+const analyzedTT = new Map();
 
 function _sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
@@ -1048,6 +1049,13 @@ async function runAutoAnalysis() {
     await new Promise(r => setTimeout(r, 5000));
     const tnList = await pollTennis(true).catch(e => { log('ERROR', 'AUTO', `Tennis unified: ${e.message}`); return []; });
     sharedCaches.tennis = tnList;
+  }
+
+  // Table Tennis: análise sequencial (shadow-first)
+  if (SPORTS['tabletennis']?.enabled) {
+    await new Promise(r => setTimeout(r, 5000));
+    const ttList = await pollTableTennis(true).catch(e => { log('ERROR', 'AUTO', `TableTennis unified: ${e.message}`); return []; });
+    sharedCaches.tabletennis = ttList;
   }
 
   // Tarefas de fundo agora usam os dados baixados acima (mais rápido e seguro)
@@ -5701,6 +5709,184 @@ Máximo 200 palavras.`;
     }
     if (!runOnce) setTimeout(loop, 60 * 60 * 1000); // a cada 1h
     return typeof matches !== 'undefined' ? matches : [];
+  }
+  const result = await loop();
+  return runOnce ? (result || []) : undefined;
+}
+
+// ── Table Tennis loop (shadow-first) ──
+// MVP conservador: Elo (empty no início, bootstrap via settlement) + Sofascore
+// enrich (form/H2H) + esportsPreFilter. Sem IA no MVP — só ML-based.
+// Shadow default: TABLETENNIS_SHADOW=false para promover.
+async function pollTableTennis(runOnce = false) {
+  const ttConfig = SPORTS['tabletennis'];
+  if (!ttConfig?.enabled || !ttConfig?.token) return [];
+  const token = ttConfig.token;
+
+  const TT_INTERVAL = 30 * 60 * 1000; // 30 min (volume alto, match curto)
+  const TT_MIN_ODDS = parseFloat(process.env.TABLETENNIS_MIN_ODDS ?? '1.40');
+  const TT_MAX_ODDS = parseFloat(process.env.TABLETENNIS_MAX_ODDS ?? '4.00');
+  const TT_MIN_EV = parseFloat(process.env.TABLETENNIS_MIN_EV ?? '5.0');
+  const { getTableTennisElo } = require('./lib/tabletennis-ml');
+  const sofaTT = require('./lib/sofascore-tabletennis');
+
+  async function loop() {
+    try {
+      log('INFO', 'AUTO-TT', `Iniciando verificação de Table Tennis${ttConfig.shadowMode ? ' [SHADOW]' : ''}...`);
+      const matches = await serverGet('/tabletennis-matches').catch(() => []);
+      if (!Array.isArray(matches) || !matches.length) {
+        log('INFO', 'AUTO-TT', '0 partidas TT com odds');
+        if (!runOnce) setTimeout(loop, TT_INTERVAL);
+        return [];
+      }
+      log('INFO', 'AUTO-TT', `${matches.length} partidas TT com odds`);
+
+      const now = Date.now();
+      // Filtra: só matches nas próximas 6h (pregame ou live) — TT tem matches curtos, não vale analisar semana inteira
+      const windowMs = 6 * 60 * 60 * 1000;
+      const relevant = matches.filter(m => {
+        const t = new Date(m.time || 0).getTime();
+        return t > 0 && (t - now) < windowMs && (t - now) > -60 * 60 * 1000; // até 1h no passado (live)
+      });
+      if (!relevant.length) {
+        log('INFO', 'AUTO-TT', '0 matches em janela de 6h');
+        if (!runOnce) setTimeout(loop, TT_INTERVAL);
+        return [];
+      }
+
+      for (const match of relevant) {
+        const key = `tt_${match.id}`;
+        const prev = analyzedTT.get(key);
+        if (prev?.tipSent) continue;
+        if (prev && (now - prev.ts < 30 * 60 * 1000)) continue; // re-check 30min
+
+        if (!match.odds?.t1 || !match.odds?.t2) continue;
+        const o1 = parseFloat(match.odds.t1);
+        const o2 = parseFloat(match.odds.t2);
+        if (!o1 || !o2 || o1 <= 1 || o2 <= 1) continue;
+
+        // Odds range gate
+        const bestOdd = Math.max(o1, o2);
+        const worstOdd = Math.min(o1, o2);
+        if (worstOdd < TT_MIN_ODDS || bestOdd > TT_MAX_ODDS + 10) {
+          analyzedTT.set(key, { ts: now, tipSent: false });
+          continue;
+        }
+
+        // Implied + Elo
+        const r1 = 1 / o1, r2 = 1 / o2;
+        const vig = r1 + r2;
+        const impliedP1 = r1 / vig;
+        const impliedP2 = r2 / vig;
+        const elo = getTableTennisElo(db, match.team1, match.team2, impliedP1, impliedP2);
+
+        // Enrich Sofascore (form + H2H)
+        const sofa = await sofaTT.enrichMatch(match.team1, match.team2, match.time).catch(() => null);
+
+        // Monta enrich pra esportsPreFilter
+        const enrich = {
+          form1: sofa?.form1 || null,
+          form2: sofa?.form2 || null,
+          h2h: sofa?.h2h || { t1Wins: 0, t2Wins: 0, totalMatches: 0 },
+          oddsMovement: null,
+        };
+
+        const { esportsPreFilter } = require('./lib/ml');
+        const mlResult = esportsPreFilter(match, match.odds, enrich, false, '', null);
+
+        // Prioridade: Elo se confiável (both players in DB, ≥5 jogos cada), senão esportsPreFilter
+        const useElo = elo.pass && elo.found1 && elo.found2 && Math.min(elo.eloMatches1, elo.eloMatches2) >= 5;
+        const modelP1 = useElo ? elo.modelP1 : mlResult.modelP1;
+        const modelP2 = useElo ? elo.modelP2 : mlResult.modelP2;
+        const direction = useElo
+          ? (elo.direction === 'p1' ? 't1' : elo.direction === 'p2' ? 't2' : null)
+          : mlResult.direction;
+        const mlScore = useElo ? elo.score : mlResult.score;
+        const factorCount = useElo ? elo.factorCount : mlResult.factorCount;
+
+        if (!direction || mlScore < 3.0) {
+          analyzedTT.set(key, { ts: now, tipSent: false });
+          log('INFO', 'AUTO-TT', `Sem edge: ${match.team1} vs ${match.team2} | edge=${mlScore.toFixed(1)}pp factors=${factorCount} ${useElo ? '[Elo]' : '[Sofa]'}`);
+          continue;
+        }
+
+        const pickTeam = direction === 't1' ? match.team1 : match.team2;
+        const pickOdd = direction === 't1' ? o1 : o2;
+        const pickP = direction === 't1' ? modelP1 : modelP2;
+        const evPct = (pickP * pickOdd - 1) * 100;
+
+        if (evPct < TT_MIN_EV) {
+          analyzedTT.set(key, { ts: now, tipSent: false });
+          log('INFO', 'AUTO-TT', `EV baixo (${evPct.toFixed(1)}%): ${match.team1} vs ${match.team2}`);
+          continue;
+        }
+        if (pickOdd < TT_MIN_ODDS || pickOdd > TT_MAX_ODDS) {
+          analyzedTT.set(key, { ts: now, tipSent: false });
+          continue;
+        }
+
+        // Kelly 1/8 conservador (sem IA → fração menor)
+        const stake = calcKellyWithP(pickP, pickOdd, 1/8);
+        if (stake === '0u') { analyzedTT.set(key, { ts: now, tipSent: false }); continue; }
+        const desiredU = parseFloat(stake) || 0;
+        const riskAdj = await applyGlobalRisk('tabletennis', desiredU);
+        if (!riskAdj.ok) { log('INFO', 'RISK', `tabletennis: bloqueada (${riskAdj.reason})`); continue; }
+        const stakeAdj = String(riskAdj.units.toFixed(1).replace(/\.0$/, ''));
+
+        const conf = useElo && elo.eloMatches1 >= 20 && elo.eloMatches2 >= 20 ? 'ALTA'
+                   : factorCount >= 2 ? 'MÉDIA' : 'BAIXA';
+        const tipReason = useElo
+          ? `Elo: ${match.team1}=${elo.elo1} (${elo.eloMatches1}j) vs ${match.team2}=${elo.elo2} (${elo.eloMatches2}j)`
+          : `Sofa form/H2H: factors=${factorCount}, edge=${mlScore.toFixed(1)}pp`;
+
+        const rec = await serverPost('/record-tip', {
+          matchId: String(match.id), eventName: match.league,
+          p1: match.team1, p2: match.team2, tipParticipant: pickTeam,
+          odds: String(pickOdd), ev: evPct.toFixed(1), stake: stakeAdj,
+          confidence: conf,
+          isLive: match.status === 'live' ? 1 : 0,
+          market_type: 'ML',
+          modelP1, modelP2, modelPPick: pickP,
+          modelLabel: useElo ? 'tabletennis-elo' : 'tabletennis-ml',
+          tipReason,
+          isShadow: ttConfig.shadowMode ? 1 : 0,
+        }, 'tabletennis');
+
+        if (!rec?.tipId && !rec?.skipped) {
+          log('WARN', 'AUTO-TT', `record-tip falhou: ${pickTeam} @ ${pickOdd}`);
+          continue;
+        }
+        analyzedTT.set(key, { ts: now, tipSent: true });
+        if (rec?.skipped) continue;
+
+        if (ttConfig.shadowMode) {
+          log('INFO', 'AUTO-TT', `[SHADOW] ${pickTeam} @ ${pickOdd} | EV:${evPct.toFixed(1)}% | ${stakeAdj}u | ${conf} | ${tipReason}`);
+          continue;
+        }
+
+        const confEmoji = { ALTA: '🟢', MÉDIA: '🟡', BAIXA: '🔴' }[conf] || '🟡';
+        const fightTime = match.time ? new Date(match.time).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—';
+        const msg = `🏓 💰 *TIP TÊNIS DE MESA*\n\n` +
+          `*${match.team1}* vs *${match.team2}*\n📋 ${match.league}\n🕐 ${fightTime} (BRT)\n\n` +
+          `🎯 Aposta: *${pickTeam}* @ *${pickOdd}*\n` +
+          `📈 EV: *+${evPct.toFixed(1)}%*\n` +
+          `💵 Stake: *${stakeAdj}u*\n` +
+          `${confEmoji} Confiança: *${conf}*\n` +
+          `_${tipReason}_\n\n` +
+          `⚠️ _Aposte com responsabilidade._`;
+
+        for (const [userId, prefs] of subscribedUsers) {
+          if (!prefs.has('tabletennis')) continue;
+          try { await sendDM(token, userId, msg); } catch (_) {}
+        }
+        log('INFO', 'AUTO-TT', `Tip enviada: ${pickTeam} @ ${pickOdd} | EV:${evPct.toFixed(1)}% | ${conf}`);
+        await new Promise(r => setTimeout(r, 3000));
+      }
+    } catch (e) {
+      log('ERROR', 'AUTO-TT', e.message);
+    }
+    if (!runOnce) setTimeout(loop, TT_INTERVAL);
+    return [];
   }
   const result = await loop();
   return runOnce ? (result || []) : undefined;
