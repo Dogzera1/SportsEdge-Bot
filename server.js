@@ -3385,8 +3385,64 @@ const server = http.createServer(async (req, res) => {
       // BUG FIX 2026-04-15: OpenDota /api/live não retorna mais per-player net_worth/gold.
       // Antes usávamos totalGold (soma) que ficava sempre 0 → hasLiveStats sempre false.
       // Agora consideramos live se game_time > 0 (partida realmente rolando) OU kills agregados.
-      const hasPlayerStats = (blue.totalGold + red.totalGold) > 0;
+      let hasPlayerStats = (blue.totalGold + red.totalGold) > 0;
       const hasAggregateStats = (hit.game_time || 0) > 0 || (hit.radiant_score || 0) + (hit.dire_score || 0) > 0;
+
+      // ── Enriquecimento Steam WebAPI (per-player gold/KDA/items) ──
+      // Requer STEAM_WEBAPI_KEY no .env. Chave é gratuita em https://steamcommunity.com/dev/apikey
+      // Endpoint docs: https://steamapi.xpaw.me/#IDOTA2MatchStats_570/GetRealtimeStats
+      let steamSource = false;
+      if (process.env.STEAM_WEBAPI_KEY && hit.server_steam_id) {
+        try {
+          const rt = await httpGet(
+            `https://api.steampowered.com/IDOTA2MatchStats_570/GetRealtimeStats/v1/?server_steam_id=${encodeURIComponent(hit.server_steam_id)}&key=${encodeURIComponent(process.env.STEAM_WEBAPI_KEY)}`,
+            {}
+          );
+          if (rt.status === 200) {
+            const rtd = safeParse(rt.body, {});
+            const rtTeams = Array.isArray(rtd?.teams) ? rtd.teams : [];
+            // team_number: 0=radiant, 1=dire
+            const rtRad = rtTeams.find(t => t.team_number === 0);
+            const rtDir = rtTeams.find(t => t.team_number === 1);
+            const mkPlayers = (rtTeam, ourSideTeamFlag) => {
+              if (!rtTeam?.players?.length) return null;
+              return rtTeam.players.map(p => ({
+                name: p.name || p.accountid || '?',
+                hero: heroById[p.heroid] || (p.heroid ? `hero${p.heroid}` : '?'),
+                kills: p.kill_count || 0,
+                deaths: p.death_count || 0,
+                assists: p.assists_count || 0,
+                gold: p.net_worth || 0,
+                level: p.level || 0,
+                lastHits: p.lh_count || 0,
+                items: Array.isArray(p.items) ? p.items.filter(i => i > 0) : [],
+              }));
+            };
+            const radPlayers = mkPlayers(rtRad);
+            const dirPlayers = mkPlayers(rtDir);
+            if (radPlayers && dirPlayers) {
+              radiant.players = radPlayers;
+              dire.players = dirPlayers;
+              radiant.totalGold = rtRad.net_worth || radPlayers.reduce((s, p) => s + (p.gold || 0), 0);
+              dire.totalGold    = rtDir.net_worth || dirPlayers.reduce((s, p) => s + (p.gold || 0), 0);
+              radiant.totalKills = rtRad.score || radiant.totalKills;
+              dire.totalKills    = rtDir.score || dire.totalKills;
+              radiant.towerKills = rtRad.building_state ? undefined : radiant.towerKills;
+              hasPlayerStats = true;
+              steamSource = true;
+              // Re-atribui blue/red após swap
+              const nb = swap ? dire : radiant;
+              const nr = swap ? radiant : dire;
+              Object.assign(blue, nb);
+              Object.assign(red, nr);
+              log('INFO', 'STEAM-RT', `Dota RT ${hit.match_id}: per-player OK (${radPlayers.length}v${dirPlayers.length})`);
+            }
+          } else {
+            log('INFO', 'STEAM-RT', `Dota RT ${hit.match_id}: status=${rt.status}`);
+          }
+        } catch (e) { log('WARN', 'STEAM-RT', `${hit.match_id}: ${e.message}`); }
+      }
+
       const hasLiveStats = hasPlayerStats || hasAggregateStats;
       // Estimativa de gold a partir de radiant_lead + score quando per-player ausente.
       if (!hasPlayerStats && hasAggregateStats) {
@@ -3413,7 +3469,7 @@ const server = http.createServer(async (req, res) => {
         radiantLead: (swap ? -1 : 1) * (hit.radiant_lead || 0),
         blueTeam: blue,
         redTeam:  red,
-        _source: 'opendota'
+        _source: steamSource ? 'opendota+steam-rt' : 'opendota'
       });
     } catch(e) {
       log('ERROR', 'OPENDOTA', e.message);
