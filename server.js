@@ -4923,6 +4923,23 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // Stats de calibração isotônica por esporte
+  if (p === '/calibration-stats') {
+    try {
+      const calib = require('./lib/calibration');
+      const sport = parsed.query.sport;
+      const sports = sport ? [sport] : ['esports', 'mma', 'tennis', 'tabletennis', 'darts', 'snooker', 'football'];
+      const result = {};
+      for (const s of sports) {
+        result[s] = calib.getCalibrationStats(db, s);
+      }
+      sendJson(res, result);
+    } catch (e) {
+      sendJson(res, { error: e.message }, 500);
+    }
+    return;
+  }
+
   // Retorna quantas tips pendentes existem por faixa de idade
   if (p === '/pending-age-info') {
     const sport = parsed.query.sport || 'esports';

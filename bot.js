@@ -4709,6 +4709,23 @@ async function pollMma(runOnce = false) {
             if (orgInfo?.eventName) fight._eventName = orgInfo.eventName;
           } catch (_) {}
         }
+
+        // UFC Stats: stats avançadas de striking/grappling/físico (só UFC/não-boxe)
+        let ufcStats1 = null, ufcStats2 = null;
+        const isUfc = String(fight._org || fight.league || '').toUpperCase().includes('UFC');
+        if (!isBoxing && isUfc) {
+          try {
+            const ufcStats = require('./lib/ufcstats');
+            [ufcStats1, ufcStats2] = await Promise.all([
+              ufcStats.getFighterByName(fight.team1).catch(() => null),
+              ufcStats.getFighterByName(fight.team2).catch(() => null),
+            ]);
+            if (ufcStats1 || ufcStats2) {
+              log('DEBUG', 'AUTO-MMA', `UFC Stats: ${fight.team1}=${ufcStats1 ? 'ok' : 'n/a'} | ${fight.team2}=${ufcStats2 ? 'ok' : 'n/a'}`);
+            }
+          } catch (_) {}
+        }
+
         const mlResultMma = esportsPreFilter(fight, o, mmaEnrich, false, '', null);
         if (!mlResultMma.pass) {
           log('INFO', 'AUTO-MMA', `Pré-filtro ML: edge insuficiente (${mlResultMma.score.toFixed(1)}pp) para ${fight.team1} vs ${fight.team2}. Pulando IA.`);
@@ -4723,6 +4740,28 @@ async function pollMma(runOnce = false) {
 
         const espnSection = espn
           ? `\nREGISTRO: ${fight.team1}=${rec1 || '?'} | ${fight.team2}=${rec2 || '?'}\nCategoria: ${weightClass || fight.league} | ${rounds} rounds${isTitleFight ? ' (TITLE FIGHT)' : ''}`
+          : '';
+
+        // Seção stats UFC (quando disponível): striking/grappling avançado
+        const fmtUfc = (name, s) => {
+          if (!s) return null;
+          const parts = [];
+          if (s.slpm != null) parts.push(`SLpM ${s.slpm}`);
+          if (s.strAcc != null) parts.push(`Acc ${Math.round(s.strAcc * 100)}%`);
+          if (s.sapm != null) parts.push(`SApM ${s.sapm}`);
+          if (s.strDef != null) parts.push(`Def ${Math.round(s.strDef * 100)}%`);
+          if (s.tdAvg != null) parts.push(`TD ${s.tdAvg}/15min`);
+          if (s.tdAcc != null) parts.push(`TDAcc ${Math.round(s.tdAcc * 100)}%`);
+          if (s.tdDef != null) parts.push(`TDDef ${Math.round(s.tdDef * 100)}%`);
+          if (s.subAvg != null) parts.push(`Sub ${s.subAvg}/15min`);
+          if (s.reach != null) parts.push(`Reach ${s.reach}"`);
+          if (s.stance) parts.push(s.stance);
+          return `${name}: ${parts.join(' | ')}`;
+        };
+        const ufcLine1 = fmtUfc(fight.team1, ufcStats1);
+        const ufcLine2 = fmtUfc(fight.team2, ufcStats2);
+        const ufcStatsSection = (ufcLine1 || ufcLine2)
+          ? `\n\nUFC STATS (striking/grappling por 15min):\n${[ufcLine1, ufcLine2].filter(Boolean).join('\n')}`
           : '';
 
         const fairOddsRef = hasModelDataMma
@@ -4757,7 +4796,7 @@ Máximo 220 palavras. Seja direto e fundamentado.`
           : `Você é um analista especializado em MMA/UFC. Analise esta luta e identifique edge real se existir.
 
 LUTA: ${fight.team1} vs ${fight.team2}
-Evento: ${fight.league} | Data: ${fightTime} (BRT)${espnSection}
+Evento: ${fight.league} | Data: ${fightTime} (BRT)${espnSection}${ufcStatsSection}
 
 ODDS (${o.bookmaker || 'EU'}):
 ${fight.team1}: ${o.t1} | ${fight.team2}: ${o.t2}
@@ -5065,10 +5104,18 @@ async function pollTennis(runOnce = false) {
 
         // Sofascore enrichment (cobertura superior a ESPN em challengers/WTA 250/ITF)
         let sofaEnrich = null;
+        let serveStats1 = null, serveStats2 = null;
         try {
           const sofascoreTennis = require('./lib/sofascore-tennis');
           sofaEnrich = await sofascoreTennis.enrichMatch(match.team1, match.team2, match.time).catch(() => null);
-          if (sofaEnrich) log('DEBUG', 'AUTO-TENNIS', `Sofascore event ${sofaEnrich.eventId}: ${match.team1} vs ${match.team2}`);
+          if (sofaEnrich) {
+            log('DEBUG', 'AUTO-TENNIS', `Sofascore event ${sofaEnrich.eventId}: ${match.team1} vs ${match.team2}`);
+            // Serve/return stats dos últimos 5 matches (apenas se event encontrado — evita requests perdidos)
+            [serveStats1, serveStats2] = await Promise.all([
+              sofaEnrich.player1Id ? sofascoreTennis.getPlayerServeStats(sofaEnrich.player1Id, 5).catch(() => null) : null,
+              sofaEnrich.player2Id ? sofascoreTennis.getPlayerServeStats(sofaEnrich.player2Id, 5).catch(() => null) : null,
+            ]);
+          }
         } catch (_) {}
 
         // Fallback em cascata: DB → Sofascore → ranking
@@ -5155,6 +5202,17 @@ async function pollTennis(runOnce = false) {
         }
         if (dbForm2 && dbForm2.totalGames > 0) {
            dataSection += `\nForma geral (${match.team2}): ${dbForm2.wins}W-${dbForm2.losses}L (${dbForm2.winRate}%)`;
+        }
+
+        // Serve/return stats (últimos 5 matches — identifica specialists de superfície com saque fraco)
+        const fmtServe = (name, s) => {
+          if (!s || s.games < 2) return null;
+          return `${name} (últ. ${s.games}): 1ºsv ${s.firstServePct ?? '?'}% | pts 1ºsv ${s.firstServePointsPct ?? '?'}% | pts 2ºsv ${s.secondServePointsPct ?? '?'}% | BP saved ${s.breakPointsSavedPct ?? '?'}% | aces ${s.acesPerMatch}/m | DFs ${s.dfsPerMatch}/m`;
+        };
+        const svLine1 = fmtServe(match.team1, serveStats1);
+        const svLine2 = fmtServe(match.team2, serveStats2);
+        if (svLine1 || svLine2) {
+          dataSection += `\n\nSERVE/RETURN STATS:\n${[svLine1, svLine2].filter(Boolean).join('\n')}`;
         }
 
         const hasRealData = !!(rank1 || rank2 || form1 || form2 || dbH2h || usingEloModel);
