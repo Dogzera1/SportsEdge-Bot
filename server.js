@@ -7485,7 +7485,13 @@ const server = http.createServer(async (req, res) => {
       const tt = (all || []).filter(s => /table.?tennis|tabletennis|ping.?pong/i.test(
         (s.key||'') + ' ' + (s.title||'') + ' ' + (s.group||'')
       ));
-      sendJson(res, { totalSports: all.length, ttSports: tt });
+      const groups = [...new Set((all||[]).map(s => s.group).filter(Boolean))].sort();
+      sendJson(res, {
+        totalSports: all.length,
+        ttSports: tt,
+        allGroups: groups,
+        allKeys: (all||[]).map(s => ({ key: s.key, title: s.title, group: s.group, active: s.active })),
+      });
     } catch (e) {
       sendJson(res, { error: e.message });
     }
