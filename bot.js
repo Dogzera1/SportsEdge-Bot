@@ -92,6 +92,7 @@ const analyzedDota = new Map();
 const analyzedDarts = new Map();
 const analyzedSnooker = new Map();
 const analyzedTT = new Map();
+const analyzedCs = new Map();
 
 function _sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
@@ -1093,6 +1094,13 @@ async function runAutoAnalysis() {
     await new Promise(r => setTimeout(r, 5000));
     const ttList = await pollTableTennis(true).catch(e => { log('ERROR', 'AUTO', `TableTennis unified: ${e.message}`); return []; });
     sharedCaches.tabletennis = ttList;
+  }
+
+  // CS2: análise sequencial (shadow-first)
+  if (SPORTS['cs']?.enabled) {
+    await new Promise(r => setTimeout(r, 5000));
+    const csList = await pollCs(true).catch(e => { log('ERROR', 'AUTO', `CS2 unified: ${e.message}`); return []; });
+    sharedCaches.cs = csList;
   }
 
   // Tarefas de fundo agora usam os dados baixados acima (mais rápido e seguro)
@@ -2713,6 +2721,7 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
     if (sport === 'darts'   || sport === 'all') { analyzedDarts.clear();   cleared.darts = true; }
     if (sport === 'snooker' || sport === 'all') { analyzedSnooker.clear(); cleared.snooker = true; }
     if (sport === 'tabletennis' || sport === 'all') { analyzedTT.clear(); cleared.tabletennis = true; }
+    if (sport === 'cs'      || sport === 'all') { analyzedCs.clear();    cleared.cs = true; }
     const clearedList = Object.keys(cleared).join(', ') || sport;
     await send(token, chatId,
       `🔄 *Reanálise ativada*\n\nMemória de análises limpa para: *${clearedList}*\n` +
@@ -6028,6 +6037,175 @@ async function pollTableTennis(runOnce = false) {
       log('ERROR', 'AUTO-TT', e.message);
     }
     if (!runOnce) setTimeout(loop, TT_INTERVAL);
+    return [];
+  }
+  const result = await loop();
+  return runOnce ? (result || []) : undefined;
+}
+
+// ── CS2 loop (shadow inicial, mesma estrutura do TT) ──────────────────
+async function pollCs(runOnce = false) {
+  const csConfig = SPORTS['cs'];
+  if (!csConfig?.enabled || !csConfig?.token) return [];
+  const token = csConfig.token;
+
+  const CS_INTERVAL = 5 * 60 * 1000; // 5 min
+  const CS_MIN_ODDS = parseFloat(process.env.CS_MIN_ODDS ?? '1.40');
+  const CS_MAX_ODDS = parseFloat(process.env.CS_MAX_ODDS ?? '4.50');
+  const CS_MIN_EV = parseFloat(process.env.CS_MIN_EV ?? '5.0');
+  const { getCsElo } = require('./lib/cs-ml');
+  const hltv = require('./lib/hltv');
+
+  async function loop() {
+    try {
+      log('INFO', 'AUTO-CS', `Iniciando verificação de CS2${csConfig.shadowMode ? ' [SHADOW]' : ''}...`);
+      const matches = await serverGet('/cs-matches').catch(() => []);
+      if (!Array.isArray(matches) || !matches.length) {
+        log('INFO', 'AUTO-CS', '0 partidas CS2 com odds');
+        if (!runOnce) setTimeout(loop, CS_INTERVAL);
+        return [];
+      }
+      log('INFO', 'AUTO-CS', `${matches.length} partidas CS2`);
+
+      const now = Date.now();
+      const windowMs = 6 * 60 * 60 * 1000;
+      const relevant = matches.filter(m => {
+        const t = new Date(m.time || 0).getTime();
+        return t > 0 && (t - now) < windowMs && (t - now) > -3 * 60 * 60 * 1000;
+      });
+      if (!relevant.length) {
+        log('INFO', 'AUTO-CS', '0 matches em janela de 6h');
+        if (!runOnce) setTimeout(loop, CS_INTERVAL);
+        return [];
+      }
+
+      for (const match of relevant) {
+        const key = `cs_${match.id}`;
+        const prev = analyzedCs.get(key);
+        if (prev?.tipSent) continue;
+        if (prev && (now - prev.ts < 30 * 60 * 1000)) continue;
+
+        if (!match.odds?.t1 || !match.odds?.t2) continue;
+        const o1 = parseFloat(match.odds.t1);
+        const o2 = parseFloat(match.odds.t2);
+        if (!o1 || !o2 || o1 <= 1 || o2 <= 1) continue;
+
+        const bestOdd = Math.max(o1, o2);
+        const worstOdd = Math.min(o1, o2);
+        if (worstOdd < CS_MIN_ODDS || bestOdd > CS_MAX_ODDS + 10) {
+          analyzedCs.set(key, { ts: now, tipSent: false });
+          continue;
+        }
+
+        const r1 = 1 / o1, r2 = 1 / o2;
+        const vig = r1 + r2;
+        const impliedP1 = r1 / vig;
+        const impliedP2 = r2 / vig;
+        const elo = getCsElo(db, match.team1, match.team2, impliedP1, impliedP2);
+
+        const hltvData = await hltv.enrichMatch(match.team1, match.team2, match.time).catch(() => null);
+
+        const enrich = {
+          form1: hltvData?.form1 || null,
+          form2: hltvData?.form2 || null,
+          h2h: hltvData?.h2h || { t1Wins: 0, t2Wins: 0, totalMatches: 0 },
+          oddsMovement: null,
+        };
+
+        const { esportsPreFilter } = require('./lib/ml');
+        const mlResult = esportsPreFilter(match, match.odds, enrich, false, '', null);
+
+        const useElo = elo.pass && elo.found1 && elo.found2 && Math.min(elo.eloMatches1, elo.eloMatches2) >= 5;
+        const modelP1 = useElo ? elo.modelP1 : mlResult.modelP1;
+        const modelP2 = useElo ? elo.modelP2 : mlResult.modelP2;
+        const direction = useElo
+          ? (elo.direction === 'p1' ? 't1' : elo.direction === 'p2' ? 't2' : null)
+          : mlResult.direction;
+        const mlScore = useElo ? elo.score : mlResult.score;
+        const factorCount = useElo ? elo.factorCount : mlResult.factorCount;
+
+        if (!direction || mlScore < 3.0) {
+          analyzedCs.set(key, { ts: now, tipSent: false });
+          log('INFO', 'AUTO-CS', `Sem edge: ${match.team1} vs ${match.team2} | edge=${mlScore.toFixed(1)}pp factors=${factorCount} ${useElo ? '[Elo]' : '[HLTV]'}`);
+          continue;
+        }
+
+        const pickTeam = direction === 't1' ? match.team1 : match.team2;
+        const pickOdd = direction === 't1' ? o1 : o2;
+        const pickP = direction === 't1' ? modelP1 : modelP2;
+        const evPct = (pickP * pickOdd - 1) * 100;
+
+        if (evPct < CS_MIN_EV) {
+          analyzedCs.set(key, { ts: now, tipSent: false });
+          log('INFO', 'AUTO-CS', `EV baixo (${evPct.toFixed(1)}%): ${match.team1} vs ${match.team2}`);
+          continue;
+        }
+        if (pickOdd < CS_MIN_ODDS || pickOdd > CS_MAX_ODDS) {
+          analyzedCs.set(key, { ts: now, tipSent: false });
+          continue;
+        }
+
+        const stake = calcKellyWithP(pickP, pickOdd, 1/8);
+        if (stake === '0u') { analyzedCs.set(key, { ts: now, tipSent: false }); continue; }
+        const desiredU = parseFloat(stake) || 0;
+        const riskAdj = await applyGlobalRisk('cs', desiredU);
+        if (!riskAdj.ok) { log('INFO', 'RISK', `cs: bloqueada (${riskAdj.reason})`); continue; }
+        const stakeAdj = String(riskAdj.units.toFixed(1).replace(/\.0$/, ''));
+
+        const conf = useElo && elo.eloMatches1 >= 20 && elo.eloMatches2 >= 20 ? 'ALTA'
+                   : factorCount >= 2 ? 'MÉDIA' : 'BAIXA';
+        const tipReason = useElo
+          ? `Elo: ${match.team1}=${elo.elo1} (${elo.eloMatches1}j) vs ${match.team2}=${elo.elo2} (${elo.eloMatches2}j)`
+          : `HLTV form/H2H: factors=${factorCount}, edge=${mlScore.toFixed(1)}pp`;
+
+        const rec = await serverPost('/record-tip', {
+          matchId: String(match.id), eventName: match.league,
+          p1: match.team1, p2: match.team2, tipParticipant: pickTeam,
+          odds: String(pickOdd), ev: evPct.toFixed(1), stake: stakeAdj,
+          confidence: conf,
+          isLive: match.status === 'live' ? 1 : 0,
+          market_type: 'ML',
+          modelP1, modelP2, modelPPick: pickP,
+          modelLabel: useElo ? 'cs-elo' : 'cs-ml',
+          tipReason,
+          isShadow: csConfig.shadowMode ? 1 : 0,
+          sport: 'cs',
+        }, 'cs');
+
+        if (!rec?.tipId && !rec?.skipped) {
+          log('WARN', 'AUTO-CS', `record-tip falhou: ${pickTeam} @ ${pickOdd}`);
+          continue;
+        }
+        analyzedCs.set(key, { ts: now, tipSent: true });
+        if (rec?.skipped) continue;
+
+        if (csConfig.shadowMode) {
+          log('INFO', 'AUTO-CS', `[SHADOW] ${pickTeam} @ ${pickOdd} | EV:${evPct.toFixed(1)}% | ${stakeAdj}u | ${conf} | ${tipReason}`);
+          continue;
+        }
+
+        const confEmoji = { ALTA: '🟢', MÉDIA: '🟡', BAIXA: '🔴' }[conf] || '🟡';
+        const matchTime = match.time ? new Date(match.time).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—';
+        const msg = `🔫 💰 *TIP CS2*\n\n` +
+          `*${match.team1}* vs *${match.team2}*\n📋 ${match.league}${match.format ? ` (${match.format})` : ''}\n🕐 ${matchTime} (BRT)\n\n` +
+          `🎯 Aposta: *${pickTeam}* @ *${pickOdd}*\n` +
+          `📈 EV: *+${evPct.toFixed(1)}%*\n` +
+          `💵 Stake: *${stakeAdj}u*\n` +
+          `${confEmoji} Confiança: *${conf}*\n` +
+          `_${tipReason}_\n\n` +
+          `⚠️ _Aposte com responsabilidade._`;
+
+        for (const [userId, prefs] of subscribedUsers) {
+          if (!prefs.has('cs')) continue;
+          try { await sendDM(token, userId, msg); } catch (_) {}
+        }
+        log('INFO', 'AUTO-CS', `Tip enviada: ${pickTeam} @ ${pickOdd} | EV:${evPct.toFixed(1)}% | ${conf}`);
+        await new Promise(r => setTimeout(r, 3000));
+      }
+    } catch (e) {
+      log('ERROR', 'AUTO-CS', e.message);
+    }
+    if (!runOnce) setTimeout(loop, CS_INTERVAL);
     return [];
   }
   const result = await loop();

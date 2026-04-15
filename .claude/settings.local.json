@@ -106,7 +106,11 @@
       "Bash(curl -sk https://sportsedge-bot-production.up.railway.app/lol-matches --max-time 15)",
       "Bash(cp /tmp/lol.json lol_now.json)",
       "Bash(awk -F: '$2 > 4300 && $2 < 4450 {print}')",
-      "Bash(awk 'NR>=4280 && NR<=4400 && /form|h2h|enrich/' bot.js)"
+      "Bash(awk 'NR>=4280 && NR<=4400 && /form|h2h|enrich/' bot.js)",
+      "Bash(railway login *)",
+      "Bash(cat \"C:\\\\\\\\Users\\\\\\\\vict_\\\\\\\\AppData\\\\\\\\Local\\\\\\\\Temp\\\\\\\\claude\\\\\\\\C--Users-vict--Desktop-lol-betting\\\\\\\\8e375339-d3c5-4558-a9f2-becbd79290e1\\\\\\\\tasks\\\\\\\\ba7ozhd66.output\")",
+      "Bash(powershell -Command 'Get-NetTCPConnection -LocalPort 7777 -ErrorAction SilentlyContinue | Select-Object OwningProcess | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }')",
+      "Bash(powershell -Command 'Get-NetTCPConnection -LocalPort 7777 -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }')"
     ]
   }
 }

@@ -1,0 +1,279 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>SportsEdge-Bot · Status</title>
+<style>
+  :root {
+    --bg: #0b0d10;
+    --panel: #12161c;
+    --panel2: #1a212a;
+    --border: #232b35;
+    --text: #d7dde5;
+    --muted: #7c8693;
+    --ok: #34d399;
+    --warn: #fbbf24;
+    --err: #f87171;
+    --accent: #4aa3ff;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text); font: 14px/1.45 -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; min-height: 100%; }
+  header { display: flex; align-items: center; gap: 14px; padding: 14px 22px; background: var(--panel); border-bottom: 1px solid var(--border); flex-wrap: wrap; position: sticky; top: 0; z-index: 10; }
+  header h1 { font-size: 18px; margin: 0; font-weight: 700; }
+  .pulse { display: inline-block; width: 10px; height: 10px; border-radius: 50%; vertical-align: middle; margin-right: 6px; }
+  .pulse.ok { background: var(--ok); box-shadow: 0 0 8px var(--ok); animation: blink 2s infinite; }
+  .pulse.warn { background: var(--warn); box-shadow: 0 0 8px var(--warn); }
+  .pulse.err { background: var(--err); box-shadow: 0 0 8px var(--err); animation: blink 1s infinite; }
+  @keyframes blink { 50% { opacity: .35; } }
+  .global { padding: 4px 12px; border-radius: 999px; font-weight: 700; font-size: 13px; }
+  .global.ok   { background: rgba(52,211,153,.15); color: var(--ok); }
+  .global.warn { background: rgba(251,191,36,.15); color: var(--warn); }
+  .global.err  { background: rgba(248,113,113,.15); color: var(--err); }
+  header .stat { color: var(--muted); font-size: 12px; }
+  header .stat b { color: var(--text); font-weight: 600; }
+  header .grow { flex: 1; }
+  header button { background: var(--panel2); border: 1px solid var(--border); color: var(--text); padding: 6px 12px; border-radius: 6px; cursor: pointer; font: inherit; font-size: 12px; }
+  header button:hover { background: var(--border); }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 14px; padding: 18px; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-left: 4px solid var(--border); border-radius: 10px; padding: 16px 18px; transition: transform .12s; }
+  .card.ok   { border-left-color: var(--ok); }
+  .card.warn { border-left-color: var(--warn); }
+  .card.err  { border-left-color: var(--err); }
+  .card .title { display: flex; align-items: center; gap: 10px; font-size: 16px; font-weight: 700; margin-bottom: 8px; }
+  .card .title .emoji { font-size: 22px; }
+  .card .badge { margin-left: auto; padding: 3px 10px; border-radius: 999px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; }
+  .badge.ok   { background: rgba(52,211,153,.18); color: var(--ok); }
+  .badge.warn { background: rgba(251,191,36,.18); color: var(--warn); }
+  .badge.err  { background: rgba(248,113,113,.18); color: var(--err); }
+  .card .summary { color: var(--text); font-size: 13px; margin-bottom: 10px; line-height: 1.5; }
+  .card .issues { list-style: none; padding: 0; margin: 0 0 10px; }
+  .card .issues li { font-size: 12.5px; padding: 6px 10px; border-radius: 6px; margin-top: 4px; background: rgba(248,113,113,.08); border-left: 2px solid var(--err); color: #fbb; }
+  .card.warn .issues li { background: rgba(251,191,36,.08); border-left-color: var(--warn); color: #ffd97a; }
+  .card .meta { font-size: 11px; color: var(--muted); display: flex; justify-content: space-between; padding-top: 8px; border-top: 1px dashed var(--border); }
+  .card .more { margin-top: 8px; }
+  .card .more summary { cursor: pointer; color: var(--muted); font-size: 11.5px; user-select: none; }
+  .card .more summary:hover { color: var(--accent); }
+  .card .more pre { background: #06080b; border: 1px solid var(--border); border-radius: 6px; padding: 8px; font-size: 11px; max-height: 240px; overflow: auto; margin: 8px 0 0; white-space: pre-wrap; word-break: break-word; color: var(--muted); font-family: ui-monospace, Menlo, Consolas, monospace; }
+  .empty { color: var(--muted); padding: 40px; text-align: center; }
+
+  .tips-section { padding: 18px 18px 0; }
+  .tips-section h2 { font-size: 14px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; margin: 0 0 10px; }
+  .tips-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  @media (max-width: 900px) { .tips-cols { grid-template-columns: 1fr; } }
+  .tips-col { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; max-height: 380px; overflow: auto; }
+  .tips-col.sent   { border-left: 4px solid var(--ok); }
+  .tips-col.denied { border-left: 4px solid var(--err); }
+  .tips-col h3 { margin: 0 0 8px; font-size: 13px; display: flex; align-items: center; gap: 8px; }
+  .tips-col h3 .count { background: var(--panel2); padding: 1px 8px; border-radius: 999px; font-size: 11px; color: var(--muted); }
+  .tips-col.sent h3   { color: var(--ok); }
+  .tips-col.denied h3 { color: var(--err); }
+  .tip-row { display: grid; grid-template-columns: 60px 70px 1fr; gap: 8px; padding: 5px 6px; border-radius: 4px; font-size: 12px; align-items: baseline; }
+  .tip-row + .tip-row { border-top: 1px solid var(--border); }
+  .tip-row .tt { color: var(--muted); font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; }
+  .tip-row .bb { color: var(--accent); font-weight: 600; font-size: 11px; text-transform: uppercase; }
+  .tip-row .reason { display: inline-block; padding: 1px 6px; border-radius: 4px; background: var(--panel2); color: var(--muted); font-size: 10px; margin-right: 6px; text-transform: uppercase; letter-spacing: .5px; }
+  .tip-row.r-risk      .reason { background: rgba(248,113,113,.15); color: var(--err); }
+  .tip-row.r-baixa-gate .reason { background: rgba(251,191,36,.15); color: var(--warn); }
+  .tip-row.r-sem-dados .reason { background: rgba(124,134,147,.2); color: var(--muted); }
+  .tips-empty { color: var(--muted); font-size: 12px; padding: 16px; text-align: center; }
+  .tip-filters { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 8px; }
+  .tip-filters .pill { background: var(--panel2); border: 1px solid var(--border); padding: 2px 8px; border-radius: 999px; font-size: 11px; cursor: pointer; user-select: none; color: var(--text); }
+  .tip-filters .pill.active { background: var(--accent); color: #051119; border-color: var(--accent); font-weight: 600; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🚀 SportsEdge-Bot</h1>
+  <span class="global" id="global"><span class="pulse"></span><span id="globalText">aguardando…</span></span>
+  <span class="stat">atualizado <b id="ts">—</b></span>
+  <span class="stat">subprocess <b id="subp">—</b></span>
+  <span class="stat">buffer <b id="buf">0</b></span>
+  <span class="grow"></span>
+  <label class="stat" style="display:flex;align-items:center;gap:6px;"><input type="checkbox" id="auto" checked />auto-refresh 5s</label>
+  <button id="refresh">↻ atualizar</button>
+  <button id="restart">⟲ restart subprocess</button>
+</header>
+<div class="tips-section">
+  <h2>📡 Tips em tempo real</h2>
+  <div class="tip-filters" id="tipFilters">
+    <span class="pill active" data-bot="all">todos</span>
+    <span class="pill" data-bot="lol">lol</span>
+    <span class="pill" data-bot="dota">dota</span>
+    <span class="pill" data-bot="cs">cs2</span>
+    <span class="pill" data-bot="tennis">tennis</span>
+    <span class="pill" data-bot="tabletennis">tt</span>
+    <span class="pill" data-bot="mma">mma</span>
+    <span class="pill" data-bot="snooker">snooker</span>
+    <span class="pill" data-bot="darts">darts</span>
+  </div>
+  <div class="tips-cols">
+    <div class="tips-col sent">
+      <h3>✅ Enviadas <span class="count" id="cntSent">0</span></h3>
+      <div id="listSent"><div class="tips-empty">aguardando…</div></div>
+    </div>
+    <div class="tips-col denied">
+      <h3>❌ Negadas <span class="count" id="cntDenied">0</span></h3>
+      <div id="listDenied"><div class="tips-empty">aguardando…</div></div>
+    </div>
+  </div>
+</div>
+<div class="grid" id="grid"><div class="empty">carregando status…</div></div>
+
+<script>
+(function(){
+  const $grid = document.getElementById('grid');
+  const $global = document.getElementById('global');
+  const $globalText = document.getElementById('globalText');
+  const $ts = document.getElementById('ts');
+  const $subp = document.getElementById('subp');
+  const $buf = document.getElementById('buf');
+  const $refresh = document.getElementById('refresh');
+  const $restart = document.getElementById('restart');
+  const $auto = document.getElementById('auto');
+
+  const STATUS_LABEL = { ok: 'TUDO OK', warn: 'ATENÇÃO', err: 'PROBLEMA' };
+
+  function statusKey(s) { return s === 'error' ? 'err' : s; }
+
+  function fmtTime(ms) {
+    const d = new Date(ms);
+    const p = n => String(n).padStart(2,'0');
+    return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+  }
+
+  function metricsLine(m) {
+    if (!m) return '';
+    const pairs = [];
+    for (const [k, v] of Object.entries(m)) {
+      if (v === 0 || v == null) continue;
+      pairs.push(`<b>${k}</b>=${v}`);
+    }
+    return pairs.join(' · ');
+  }
+
+  function renderCard(s) {
+    const k = statusKey(s.status);
+    const issues = s.issues.length
+      ? `<ul class="issues">${s.issues.map(i => `<li>${escapeHtml(i)}</li>`).join('')}</ul>`
+      : '';
+    const metrics = metricsLine(s.metrics);
+    return `
+      <div class="card ${k}">
+        <div class="title">
+          <span class="emoji">${s.emoji}</span>
+          <span>${s.label}</span>
+          <span class="badge ${k}">${STATUS_LABEL[k]}</span>
+        </div>
+        <div class="summary">${escapeHtml(s.summary)}</div>
+        ${issues}
+        ${metrics ? `<details class="more"><summary>métricas (janela ${s.windowMin}min)</summary><pre>${metrics.replace(/<\/?b>/g,'')}</pre></details>` : ''}
+        <details class="more"><summary>últimas linhas no buffer</summary><pre data-bot="${s.bot}">carregando…</pre></details>
+        <div class="meta">
+          <span>última atividade: ${escapeHtml(s.lastActivityAgo)}</span>
+          <span>janela: ${s.windowMin}min</span>
+        </div>
+      </div>`;
+  }
+
+  function escapeHtml(s) {
+    return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+
+  let historyCache = null;
+  let historyAt = 0;
+  async function fillBotLogs(pre) {
+    const bot = pre.dataset.bot;
+    if (!historyCache || Date.now() - historyAt > 4000) {
+      historyCache = await fetch('/history').then(r => r.json()).catch(() => []);
+      historyAt = Date.now();
+    }
+    const lines = historyCache.filter(e => e.bot === bot).slice(-15);
+    pre.textContent = lines.length
+      ? lines.map(e => `${fmtTime(e.t)} [${e.level}] ${e.text}`).join('\n')
+      : '(nenhuma linha do bot no buffer)';
+  }
+
+  // delega click no <details> pra carregar logs sob demanda
+  document.addEventListener('toggle', ev => {
+    const det = ev.target;
+    if (!(det instanceof HTMLDetailsElement) || !det.open) return;
+    const pre = det.querySelector('pre[data-bot]');
+    if (pre && pre.textContent.startsWith('carregando')) fillBotLogs(pre);
+  }, true);
+
+  let tipFilter = 'all';
+  document.querySelectorAll('#tipFilters .pill').forEach(p => p.addEventListener('click', () => {
+    document.querySelectorAll('#tipFilters .pill').forEach(x => x.classList.remove('active'));
+    p.classList.add('active');
+    tipFilter = p.dataset.bot;
+    refreshTips();
+  }));
+
+  let lastTipsData = null;
+  function renderTipsList(items, container, denied) {
+    const filt = tipFilter === 'all' ? items : items.filter(i => i.bot === tipFilter);
+    if (!filt.length) {
+      container.innerHTML = `<div class="tips-empty">${tipFilter === 'all' ? 'nenhuma no buffer' : 'nenhuma deste bot'}</div>`;
+      return;
+    }
+    container.innerHTML = filt.map(i => {
+      const reasonTag = denied && i.reason ? `<span class="reason">${i.reason}</span>` : '';
+      const cls = denied ? `tip-row r-${i.reason || ''}` : 'tip-row';
+      return `<div class="${cls}"><span class="tt">${fmtTime(i.t)}</span><span class="bb">${i.bot}</span><span>${reasonTag}${escapeHtml(i.text)}</span></div>`;
+    }).join('');
+  }
+
+  async function refreshTips() {
+    if (!lastTipsData) {
+      lastTipsData = await fetch('/tips?limit=80').then(r => r.json()).catch(() => null);
+    }
+    if (!lastTipsData) return;
+    document.getElementById('cntSent').textContent = lastTipsData.countsTotal.sent;
+    document.getElementById('cntDenied').textContent = lastTipsData.countsTotal.denied;
+    renderTipsList(lastTipsData.sent, document.getElementById('listSent'), false);
+    renderTipsList(lastTipsData.denied, document.getElementById('listDenied'), true);
+  }
+
+  async function refresh() {
+    try {
+      const [s, tips] = await Promise.all([
+        fetch('/status').then(r => r.json()),
+        fetch('/tips?limit=80').then(r => r.json()),
+      ]);
+      lastTipsData = tips;
+      refreshTips();
+      const k = statusKey(s.overall);
+      $global.className = `global ${k}`;
+      $global.innerHTML = `<span class="pulse ${k}"></span>${STATUS_LABEL[k]}`;
+      $ts.textContent = fmtTime(s.now);
+      $subp.textContent = s.subprocess.running ? 'on' : 'OFF';
+      $subp.style.color = s.subprocess.running ? 'var(--ok)' : 'var(--err)';
+      $buf.textContent = s.subprocess.bufferSize;
+      $grid.innerHTML = s.sports.map(renderCard).join('');
+      historyCache = null;
+    } catch (e) {
+      $global.className = 'global err';
+      $global.innerHTML = `<span class="pulse err"></span>FALHA AO CONSULTAR /status`;
+    }
+  }
+
+  $refresh.addEventListener('click', refresh);
+  $restart.addEventListener('click', async () => {
+    if (!confirm('Reiniciar subprocess railway logs?')) return;
+    await fetch('/restart');
+    setTimeout(refresh, 800);
+  });
+
+  let timer = setInterval(refresh, 5000);
+  $auto.addEventListener('change', () => {
+    clearInterval(timer);
+    if ($auto.checked) timer = setInterval(refresh, 5000);
+  });
+
+  refresh();
+})();
+</script>
+</body>
+</html>
