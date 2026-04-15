@@ -28,10 +28,11 @@ import socketio
 app = FastAPI(title="HLTV Proxy")
 
 UPSTREAM = "https://www.hltv.org"
-CACHE_TTL = int(os.environ.get("CACHE_TTL_SECONDS", "60"))
-CACHE_MAX = int(os.environ.get("CACHE_MAX_ENTRIES", "200"))
+CACHE_TTL = int(os.environ.get("CACHE_TTL_SECONDS", "300"))  # 5min — CF-friendly
+CACHE_MAX = int(os.environ.get("CACHE_MAX_ENTRIES", "500"))
 TIMEOUT = int(os.environ.get("UPSTREAM_TIMEOUT_SECONDS", "20"))
 SCOREBOT_SNAPSHOT_MAX = int(os.environ.get("SCOREBOT_SNAPSHOT_MAX_SECONDS", "20"))
+RETRY_BACKOFF_BASE = float(os.environ.get("RETRY_BACKOFF_BASE", "0.6"))  # segundos entre fingerprints
 
 _cache: "OrderedDict[str, tuple[float, int, str, str]]" = OrderedDict()
 
@@ -65,29 +66,55 @@ def _cache_put(key: str, status: int, body: str, ctype: str):
 
 IMPERSONATE_CHAIN = ["chrome136", "chrome131", "chrome124", "safari18_0", "chrome120"]
 
+# Sessões persistentes por fingerprint — mantêm cookies CF (cf_clearance etc).
+# Quando um fingerprint resolve o CF challenge, o clearance cookie vale pras próximas requests,
+# reduzindo drasticamente 403s intermitentes.
+_sessions: "dict[str, object]" = {}
+
+def _get_session(impersonate: str):
+    sess = _sessions.get(impersonate)
+    if sess is None:
+        sess = cf_requests.Session()
+        _sessions[impersonate] = sess
+    return sess
+
+# Fingerprint que conseguiu 200 mais recentemente — tentar primeiro
+_last_good_impersonate: str = ""
+
+def _ordered_chain() -> list[str]:
+    if _last_good_impersonate and _last_good_impersonate in IMPERSONATE_CHAIN:
+        return [_last_good_impersonate] + [x for x in IMPERSONATE_CHAIN if x != _last_good_impersonate]
+    return list(IMPERSONATE_CHAIN)
+
 def _fetch_hltv(path: str, qs: str = "") -> tuple[int, str, str]:
-    """Fetch síncrono via curl_cffi. Retorna (status, body, content-type).
-    Tenta múltiplos fingerprints — se um começa a ser bloqueado pela CF, rota pra outro."""
+    """Fetch síncrono via curl_cffi com sessões persistentes (mantém cf_clearance).
+    Rota entre fingerprints se CF bloqueia, com backoff progressivo."""
+    global _last_good_impersonate
     url = f"{UPSTREAM}{path}" + (f"?{qs}" if qs else "")
     last_status = 0
     last_body = ""
     last_ctype = "text/html"
-    for impersonate in IMPERSONATE_CHAIN:
+    for idx, impersonate in enumerate(_ordered_chain()):
+        if idx > 0:
+            time.sleep(RETRY_BACKOFF_BASE * idx)  # 0.6s, 1.2s, 1.8s…
         try:
-            r = cf_requests.get(url, impersonate=impersonate, timeout=TIMEOUT, headers=HEADERS)
+            sess = _get_session(impersonate)
+            r = sess.get(url, impersonate=impersonate, timeout=TIMEOUT, headers=HEADERS)
         except Exception:
             continue
         last_status = r.status_code
         last_body = r.text
         last_ctype = r.headers.get("content-type", "text/html; charset=utf-8")
         if r.status_code == 200 and last_body and "Just a moment" not in last_body:
+            _last_good_impersonate = impersonate
             return last_status, last_body, last_ctype
     return last_status, last_body, last_ctype
 
 
 @app.get("/healthz", response_class=PlainTextResponse)
 def healthz():
-    return f"ok cache={len(_cache)}"
+    return (f"ok cache={len(_cache)} sessions={len(_sessions)} "
+            f"last_good={_last_good_impersonate or '-'} ttl={CACHE_TTL}s")
 
 
 # ──────────────────────────────────────────────────────
