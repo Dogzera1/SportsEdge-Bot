@@ -2670,6 +2670,7 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
     if (sport === 'football'|| sport === 'all') { analyzedFootball.clear(); cleared.football = true; }
     if (sport === 'darts'   || sport === 'all') { analyzedDarts.clear();   cleared.darts = true; }
     if (sport === 'snooker' || sport === 'all') { analyzedSnooker.clear(); cleared.snooker = true; }
+    if (sport === 'tabletennis' || sport === 'all') { analyzedTT.clear(); cleared.tabletennis = true; }
     const clearedList = Object.keys(cleared).join(', ') || sport;
     await send(token, chatId,
       `🔄 *Reanálise ativada*\n\nMemória de análises limpa para: *${clearedList}*\n` +
@@ -2936,6 +2937,39 @@ async function handleProximas(token, chatId, sport) {
       return;
     }
 
+    if (sport === 'tabletennis') {
+      const matches = await serverGet('/tabletennis-matches').catch(() => []);
+      const all = Array.isArray(matches) ? matches : [];
+      if (!all.length) {
+        await send(token, chatId,
+          '❌ Nenhuma partida de tênis de mesa encontrada.\n_Tente novamente mais tarde._',
+          getMenu(sport));
+        return;
+      }
+      let txt = `🏓 *PRÓXIMAS PARTIDAS TÊNIS DE MESA*\n━━━━━━━━━━━━━━━━\n\n`;
+      let lastLeague = '';
+      all.slice(0, 15).forEach(m => {
+        if (m.league !== lastLeague) {
+          txt += `\n📋 *${m.league}*\n`;
+          lastLeague = m.league;
+        }
+        const liveTag = m.status === 'live' ? ' 🔴' : '';
+        txt += `🏓${liveTag} *${m.team1}* vs *${m.team2}*\n`;
+        if (m.time) {
+          try {
+            const dt = new Date(m.time).toLocaleString('pt-BR', {
+              timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit',
+              hour: '2-digit', minute: '2-digit'
+            });
+            txt += `  🕐 ${dt}\n`;
+          } catch(_) {}
+        }
+        if (m.odds) txt += `  💰 ${m.team1}: \`${m.odds.t1}\` | ${m.team2}: \`${m.odds.t2}\`\n`;
+      });
+      await send(token, chatId, txt, getMenu(sport));
+      return;
+    }
+
     if (sport === 'darts' || sport === 'snooker') {
       const endpoint = sport === 'darts' ? '/darts-matches' : '/snooker-matches';
       const emoji = sport === 'darts' ? '🎯' : '🎱';
@@ -3132,11 +3166,12 @@ async function handleFairOdds(token, chatId, sport) {
       : sport === 'football' ? '/football-matches'
       : sport === 'darts' ? '/darts-matches'
       : sport === 'snooker' ? '/snooker-matches'
+      : sport === 'tabletennis' ? '/tabletennis-matches'
       : '/lol-matches';
     const matches = await serverGet(endpoint).catch(() => []);
     const all = Array.isArray(matches) ? matches : [];
 
-    const withOdds = sport === 'football' || sport === 'mma' || sport === 'tennis' || sport === 'darts' || sport === 'snooker'
+    const withOdds = sport === 'football' || sport === 'mma' || sport === 'tennis' || sport === 'darts' || sport === 'snooker' || sport === 'tabletennis'
       ? all.filter(m => m.odds)
       : all.filter(m => m.odds?.t1 && m.odds?.t2); // LoL: todas com odds (live, draft e upcoming)
 
@@ -3147,7 +3182,7 @@ async function handleFairOdds(token, chatId, sport) {
       return;
     }
 
-    const titleMap = { mma: 'MMA', tennis: 'TÊNIS', football: 'FUTEBOL', darts: 'DARTS', snooker: 'SNOOKER' };
+    const titleMap = { mma: 'MMA', tennis: 'TÊNIS', football: 'FUTEBOL', darts: 'DARTS', snooker: 'SNOOKER', tabletennis: 'TÊNIS DE MESA' };
     const title = `⚖️ *FAIR ODDS — ${titleMap[sport] || 'AO VIVO'}*`;
     let txt = `${title}\n━━━━━━━━━━━━━━━━\n`;
     txt += `_Fair odd = estimativa do modelo (forma + H2H + mercado como prior)_\n\n`;
