@@ -93,7 +93,10 @@
       "Read(//c/Users/vict_/**)",
       "Bash(railway status *)",
       "Bash(grep -oE \"\\(Matches? played|Frames?|Won|total.?matches|Trump|Selby\\)[^<>]{0,80}\" h2h.html)",
-      "Bash(grep -oE \"Matches Played[^<]*<[^>]*>[\\\\s\\\\S]{0,500}\" h2h.html)"
+      "Bash(grep -oE \"Matches Played[^<]*<[^>]*>[\\\\s\\\\S]{0,500}\" h2h.html)",
+      "Bash(wc -l scripts/backtest.js scripts/train.js scripts/calibrate.js)",
+      "Bash(head -50 scripts/backtest.js)",
+      "Bash(grep -n \"ml_factor_weights\\\\|factor_weights\" scripts/*.js lib/*.js)"
     ]
   }
 }

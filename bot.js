@@ -6324,6 +6324,30 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   setTimeout(() => runAutoSnooker().catch(e => log('ERROR', 'AUTO-SNOOKER', e.message)), 60 * 1000);
   setInterval(() => runAutoSnooker().catch(e => log('ERROR', 'AUTO-SNOOKER', e.message)), 15 * 60 * 1000);
   setInterval(() => settleCompletedTips().catch(e => log('ERROR', 'SETTLE', e.message)), SETTLEMENT_INTERVAL);
+
+  // Auto-tune de pesos ML: recalcWeights roda 1x/semana (segunda às 06:00 UTC).
+  // Settle de factor logs roda junto com settlement pra manter dados atualizados.
+  const WEIGHTS_RECALC_INTERVAL = 6 * 60 * 60 * 1000; // check a cada 6h
+  async function runWeeklyRecalc() {
+    try {
+      const now = new Date();
+      const lastRun = global.__lastWeightsRecalc || 0;
+      const daysSince = (Date.now() - lastRun) / (24 * 60 * 60 * 1000);
+      // Só recalcula se passou ≥7 dias OU é segunda-feira e passou ≥6 dias (buffer)
+      const isMonday = now.getUTCDay() === 1 && now.getUTCHours() >= 6;
+      if (daysSince < 6) return;
+      if (daysSince < 7 && !isMonday) return;
+
+      const { recalcWeights, settleFactorLogs } = require('./lib/ml-weights');
+      settleFactorLogs(stmts, log);
+      recalcWeights(stmts, log);
+      global.__lastWeightsRecalc = Date.now();
+    } catch (e) {
+      log('ERROR', 'ML-WEIGHTS', `Recalc weekly: ${e.message}`);
+    }
+  }
+  setInterval(() => runWeeklyRecalc().catch(() => {}), WEIGHTS_RECALC_INTERVAL);
+  setTimeout(() => runWeeklyRecalc().catch(() => {}), 5 * 60 * 1000); // primeiro check 5min pós-boot
   // Notificações de line movement desativadas a pedido do usuário
   // setInterval(() => checkLineMovement().catch(e => log('ERROR', 'LINE', e.message)), LINE_CHECK_INTERVAL);
   // Alertas críticos: polling /alerts a cada 10 min → DM admins (throttled 1h por alert id)

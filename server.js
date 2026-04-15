@@ -4923,6 +4923,59 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // Seed histórico de Table Tennis (bootstrap do Elo).
+  // POST /seed-tabletennis?days=60  → varre Sofascore, insere matches finished em match_results.
+  if (p === '/seed-tabletennis' && req.method === 'POST') {
+    try {
+      const days = Math.max(1, Math.min(180, parseInt(parsed.query.days || '60', 10) || 60));
+      const dryRun = parsed.query.apply !== '1' && parsed.query.apply !== 'true';
+      const sofaTT = require('./lib/sofascore-tabletennis');
+      const matches = await sofaTT.fetchHistoricalMatches(days);
+
+      const upsert = db.prepare(`
+        INSERT OR IGNORE INTO match_results (match_id, game, team1, team2, winner, final_score, league, resolved_at)
+        VALUES (?, 'tabletennis', ?, ?, ?, ?, ?, ?)
+      `);
+      const existing = db.prepare(
+        `SELECT COUNT(*) c FROM match_results WHERE game='tabletennis'`
+      ).get()?.c || 0;
+
+      let inserted = 0;
+      if (!dryRun) {
+        const tx = db.transaction((rows) => {
+          for (const m of rows) {
+            const mid = `tt_${m.eventId || `${m.date}_${m.homeTeam}_${m.awayTeam}`.replace(/[^a-zA-Z0-9_]/g, '_')}`;
+            const resolvedAt = m.startTimestamp
+              ? new Date(m.startTimestamp * 1000).toISOString().replace('T', ' ').slice(0, 19)
+              : `${m.date} 00:00:00`;
+            const r = upsert.run(mid, m.homeTeam, m.awayTeam, m.winner, m.score || '', m.tournament || 'Table Tennis', resolvedAt);
+            if (r.changes) inserted++;
+          }
+        });
+        tx(matches);
+      }
+
+      // Invalida cache Elo pra refletir novo seed
+      if (!dryRun && inserted > 0) {
+        try { require('./lib/tabletennis-ml').invalidateEloCache(); } catch (_) {}
+      }
+
+      sendJson(res, {
+        ok: true,
+        dryRun,
+        daysScraped: days,
+        matchesFound: matches.length,
+        inserted,
+        existingBefore: existing,
+        sampleMatch: matches[0] || null,
+      });
+      if (!dryRun) log('INFO', 'ADMIN', `seed-tabletennis: ${inserted} novos matches em ${days}d (total existing antes: ${existing})`);
+    } catch (e) {
+      sendJson(res, { error: e.message }, 500);
+    }
+    return;
+  }
+
   // Stats de calibração isotônica por esporte
   if (p === '/calibration-stats') {
     try {
