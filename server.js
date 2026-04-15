@@ -6964,7 +6964,69 @@ const server = http.createServer(async (req, res) => {
       }
       // 1) Pinnacle (frequentemente sem matches TT — Pinnacle cobre pouco)
       let rows = await getPinnacleTableTennisMatches();
-      // 2) Fallback TheOddsAPI: descobre sport keys TT dinamicamente via /v4/sports
+      // 2) Fallback Sofascore — lista matches sem odds (ao menos o botão Próximas funciona)
+      // Sofascore cobre Setka Cup/WTT/TT Elite Series/etc (13k+ matches/dia).
+      if (!rows.length) {
+        try {
+          const sofaTT = require('./lib/sofascore-tabletennis');
+          const today = new Date().toISOString().slice(0, 10);
+          const tomorrow = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+          const [todaySched, tomSched] = await Promise.all([
+            sofaTT.fetchHistoricalMatches(0).catch(() => []), // hoje
+            // helper direto via scheduleUrls não exposto; reutiliza fetchHistoricalMatches que só pega finished
+            (async () => [])(),
+          ]);
+          // fetchHistoricalMatches só retorna finished. Precisa buscar upcoming separadamente via schedule.
+          // Workaround: faz request direto ao schedule e filtra por status notStarted/inProgress.
+          const { cachedHttpGet, safeParse: _safeParse } = require('./lib/utils');
+          const proxy = (process.env.SOFASCORE_PROXY_BASE || '').trim().replace(/\/+$/, '');
+          const urls = [];
+          for (const d of [today, tomorrow]) {
+            if (proxy) urls.push(`${proxy}/schedule/table-tennis/${d}/`);
+            urls.push(`https://api.sofascore.com/api/v1/sport/table-tennis/scheduled-events/${d}`);
+          }
+          const fromSofa = [];
+          const seenIds = new Set();
+          for (const url of urls) {
+            try {
+              const r = await cachedHttpGet(url, {
+                ttlMs: 5 * 60 * 1000, provider: 'sofascore',
+                headers: {
+                  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+                  Accept: 'application/json', Origin: 'https://www.sofascore.com', Referer: 'https://www.sofascore.com/',
+                  'ngrok-skip-browser-warning': 'true',
+                },
+                cacheKey: `ttennis-schedule:${url}`,
+              }).catch(() => null);
+              if (!r || r.status !== 200) continue;
+              const d = _safeParse(r.body, {});
+              for (const ev of (d.events || [])) {
+                if (seenIds.has(ev.id)) continue;
+                const st = ev?.status?.type;
+                if (st !== 'notstarted' && st !== 'inprogress' && st !== 'live') continue;
+                seenIds.add(ev.id);
+                const t = ev.startTimestamp ? new Date(ev.startTimestamp * 1000).toISOString() : null;
+                fromSofa.push({
+                  id: `ttennis_sofa_${ev.id}`,
+                  game: 'tabletennis',
+                  status: (st === 'inprogress' || st === 'live') ? 'live' : 'upcoming',
+                  team1: ev.homeTeam?.name || '?',
+                  team2: ev.awayTeam?.name || '?',
+                  league: ev.tournament?.name || 'Table Tennis',
+                  time: t,
+                  odds: null, // Sofascore não tem odds
+                });
+              }
+            } catch (_) {}
+          }
+          if (fromSofa.length) {
+            log('INFO', 'ODDS', `Sofascore TT schedule (sem odds): ${fromSofa.length} partidas`);
+            rows = fromSofa;
+          }
+        } catch (e) { log('WARN', 'TTENNIS', `Sofascore schedule: ${e.message}`); }
+      }
+
+      // 3) Fallback TheOddsAPI: descobre sport keys TT dinamicamente via /v4/sports
       if (!rows.length && THE_ODDS_API_KEY) {
         try {
           let ttKeys = [];
