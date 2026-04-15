@@ -3442,12 +3442,15 @@ const server = http.createServer(async (req, res) => {
       // Requer STEAM_WEBAPI_KEY no .env. Chave é gratuita em https://steamcommunity.com/dev/apikey
       // Endpoint docs: https://steamapi.xpaw.me/#IDOTA2MatchStats_570/GetRealtimeStats
       let steamSource = false;
-      if (process.env.STEAM_WEBAPI_KEY && hit.server_steam_id) {
+      const steamKeyPresent = !!process.env.STEAM_WEBAPI_KEY;
+      const steamSid = hit.server_steam_id || null;
+      if (steamKeyPresent && steamSid) {
         try {
           const rt = await httpGet(
-            `https://api.steampowered.com/IDOTA2MatchStats_570/GetRealtimeStats/v1/?server_steam_id=${encodeURIComponent(hit.server_steam_id)}&key=${encodeURIComponent(process.env.STEAM_WEBAPI_KEY)}`,
+            `https://api.steampowered.com/IDOTA2MatchStats_570/GetRealtimeStats/v1/?server_steam_id=${encodeURIComponent(steamSid)}&key=${encodeURIComponent(process.env.STEAM_WEBAPI_KEY)}`,
             {}
           );
+          log('INFO', 'STEAM-RT', `sid=${steamSid} → status=${rt.status} bodyLen=${(rt.body||'').length}`);
           if (rt.status === 200) {
             const rtd = safeParse(rt.body, {});
             const rtTeams = Array.isArray(rtd?.teams) ? rtd.teams : [];
@@ -3519,7 +3522,8 @@ const server = http.createServer(async (req, res) => {
         radiantLead: (swap ? -1 : 1) * (hit.radiant_lead || 0),
         blueTeam: blue,
         redTeam:  red,
-        _source: steamSource ? 'opendota+steam-rt' : 'opendota'
+        _source: steamSource ? 'opendota+steam-rt' : 'opendota',
+        _debug: { steamKeyPresent, steamSid, steamSource }
       });
     } catch(e) {
       log('ERROR', 'OPENDOTA', e.message);
