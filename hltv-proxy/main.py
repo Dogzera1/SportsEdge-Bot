@@ -376,42 +376,56 @@ def bookie_1xbet_tt(live: int = 0, count: int = 200):
             return JSONResponse(content=json.loads(body), headers={"X-Proxy-Cache": "HIT"})
 
     feed = "LiveFeed" if live else "LineFeed"
-    # Tenta múltiplas variações — 1xBet é sensível a combinação de params/headers
-    variants = [
-        # Sem headers extras, params mínimos
-        (f"{UPSTREAM_1XBET}/service-api/{feed}/Get1x2_VZip?sports=10&count={count}&lng=en&mode=4&country=76&partner=51", None),
-        # Com tf (time frame) grande
-        (f"{UPSTREAM_1XBET}/service-api/{feed}/Get1x2_VZip?sports=10&count={count}&lng=en&mode=4&country=76&partner=51&tf=2200000&tz=0", None),
-        # Via mirror 1xlite
-        (f"https://1xlite-sport.com/service-api/{feed}/Get1x2_VZip?sports=10&count={count}&lng=en&mode=4&country=76&partner=51", None),
-        # Com referer do site BR
-        (f"{UPSTREAM_1XBET}/service-api/{feed}/Get1x2_VZip?sports=10&count={count}&lng=pt&mode=4&country=32&partner=51",
-         {"Referer": f"{UPSTREAM_1XBET}/pt/line/table-tennis"}),
-    ]
-    status = 0
-    body = ""
-    last_err = None
-    for url, extra in variants:
-        try:
-            status, body, _ = _fetch_url(url, extra_headers=extra)
-        except Exception as e:
-            last_err = str(e)
-            continue
-        if status == 200 and body and '"Value"' in body:
-            break
-        last_err = f"status={status} len={len(body) if body else 0}"
-
-    if status != 200 or not body:
-        raise HTTPException(502, f"1xbet failed all variants (last: {last_err})")
-
     import json
-    try:
-        raw = json.loads(body) if body else {}
-    except Exception:
-        raise HTTPException(502, "1xbet returned non-json")
 
+    # Fluxo real do 1xBet frontend (3 passos):
+    #  1) GetChampsZip?sport=10  → lista campeonatos TT
+    #  2) GetGamesZip?sport=10&champs=<ids>  → eventos daqueles champs com odds
+    #  (Get1x2_VZip retornava vazio porque não é o endpoint certo pra TT)
+
+    champs_url = f"{UPSTREAM_1XBET}/service-api/{feed}/GetChampsZip?sport=10&lng=en&country=76&partner=51&virtualSports=true&groupChamps=true"
+    try:
+        status, body, _ = _fetch_url(champs_url)
+    except Exception as e:
+        raise HTTPException(502, f"GetChampsZip error: {e}")
+    if status != 200 or not body:
+        raise HTTPException(502, f"GetChampsZip failed status={status}")
+    try:
+        champs_raw = json.loads(body)
+    except Exception:
+        raise HTTPException(502, "GetChampsZip non-json")
+    champs = champs_raw.get("Value") or []
+    # Pega só champs com matches — cada item tem 'I' (id) e 'SC' (sub-champs) ou 'C' (count)
+    champ_ids = []
+    def _walk_champs(items):
+        for c in items:
+            if c.get("I") and (c.get("C") or c.get("G") or (c.get("SC") and len(c["SC"]) > 0)):
+                champ_ids.append(str(c["I"]))
+            if c.get("SC"):
+                _walk_champs(c["SC"])
+    _walk_champs(champs)
+    champ_ids = champ_ids[:30]  # limita pra não passar URL enorme
+
+    if not champ_ids:
+        return JSONResponse({"matches": [], "count": 0, "rawCount": 0, "note": "no champs"}, headers={"X-Proxy-Cache": "MISS"})
+
+    games_url = (
+        f"{UPSTREAM_1XBET}/service-api/{feed}/GetGamesZip"
+        f"?sports=10&champs={','.join(champ_ids)}&count={count}&lng=en&mode=4"
+        f"&country=76&partner=51&virtualSports=true&noFilterBlockEvent=true"
+    )
+    try:
+        status, body, _ = _fetch_url(games_url)
+    except Exception as e:
+        raise HTTPException(502, f"GetGamesZip error: {e}")
+    if status != 200 or not body:
+        raise HTTPException(502, f"GetGamesZip failed status={status}")
+    try:
+        raw = json.loads(body)
+    except Exception:
+        raise HTTPException(502, "GetGamesZip non-json")
     if not raw.get("Success"):
-        raise HTTPException(502, f"1xbet not success: {raw.get('Error')}")
+        raise HTTPException(502, f"GetGamesZip not success: {raw.get('Error')}")
 
     events = raw.get("Value") or []
     out = []
