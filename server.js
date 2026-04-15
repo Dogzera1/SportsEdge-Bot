@@ -7477,6 +7477,39 @@ const server = http.createServer(async (req, res) => {
   }
 
   // ── Snooker: odds via Pinnacle guest API (funciona do BR) ──
+  if (p === '/debug-cs-hltv') {
+    try {
+      const hltv = require('./lib/hltv');
+      const proxyEnv = (process.env.HLTV_PROXY_BASE || '').trim();
+      const enabled = hltv._enabled();
+      const team1 = parsed.query.team1 || 'Natus Vincere';
+      const team2 = parsed.query.team2 || 'FaZe';
+      const [tid1, tid2] = await Promise.all([
+        hltv.findTeamId(team1).catch(e => ({ err: e.message })),
+        hltv.findTeamId(team2).catch(e => ({ err: e.message })),
+      ]);
+      let enrich = null, scoreboardProbe = null;
+      if (tid1?.teamId && tid2?.teamId) {
+        enrich = await hltv.enrichMatch(team1, team2).catch(e => ({ err: e.message }));
+      }
+      const matchInfo = await hltv.getHltvMatchId(team1, team2).catch(e => ({ err: e.message }));
+      if (matchInfo?.matchId) {
+        scoreboardProbe = await hltv.getScoreboard(matchInfo.matchId, 5).catch(e => ({ err: e.message }));
+      }
+      sendJson(res, {
+        proxyEnv: proxyEnv || '(not set)',
+        enabled,
+        team1: { query: team1, found: tid1 },
+        team2: { query: team2, found: tid2 },
+        matchInfo,
+        enrichSummary: enrich ? { form1: enrich.form1, form2: enrich.form2, h2h: enrich.h2h } : null,
+        scoreboardSummary: scoreboardProbe ? (hltv.summarizeScoreboard(scoreboardProbe) || scoreboardProbe) : null,
+      });
+    } catch (e) {
+      sendJson(res, { error: e.message, stack: e.stack });
+    }
+    return;
+  }
   if (p === '/debug-tt-theodds') {
     try {
       if (!THE_ODDS_API_KEY) { sendJson(res, { error: 'no_key' }); return; }
