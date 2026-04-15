@@ -671,17 +671,26 @@ async function runAutoAnalysis() {
         if (isMainLeague(match.leagueSlug || match.league)) { log('INFO', 'AUTO', `Liga principal ignorada (draft): ${match.league} (${match.team1} vs ${match.team2})`); continue; }
         const prev = analyzedMatches.get(matchKey);
         if (prev?.tipSent) continue; // uma tip por partida — não repetir
-        // Live matches: cooldown menor pra capturar janela em que Riot popula o feed.
-        // Em draft/outros: 2× pra matches sem edge prévio.
-        // Antes: noEdge sempre dobrava → perdíamos janelas em live quando stats aparecia tarde.
+        // Live matches: cooldown agressivo pra pegar janela quando Riot popula feed.
+        //   - Sem stats antes (hasLiveStats=false): 3 min (pode aparecer a qualquer momento)
+        //   - Com stats mas sem edge: 8 min (IA já analisou com dados reais, improvável mudar rápido)
+        // Draft/upcoming: 10/20 min (comportamento anterior).
         const isLiveMatch = match.status === 'live' || match.status === 'inprogress';
+        const LIVE_FAST_RETRY = 3 * 60 * 1000;   // 3 min pra live sem stats
+        const LIVE_NORMAL_COOLDOWN = 8 * 60 * 1000; // 8 min pra live que já teve stats
         const liveCooldown = isLiveMatch
-          ? RE_ANALYZE_INTERVAL                                        // live: 10 min fixo
-          : (prev?.noEdge ? RE_ANALYZE_INTERVAL * 2 : RE_ANALYZE_INTERVAL); // draft/upcoming: 10/20 min
+          ? (prev?.hadLiveStats ? LIVE_NORMAL_COOLDOWN : LIVE_FAST_RETRY)
+          : (prev?.noEdge ? RE_ANALYZE_INTERVAL * 2 : RE_ANALYZE_INTERVAL);
         if (prev && (now - prev.ts < liveCooldown)) continue;
 
         const result = await autoAnalyzeMatch(esportsConfig.token, match);
-        analyzedMatches.set(matchKey, { ts: now, tipSent: prev?.tipSent || false, noEdge: !result?.tipMatch });
+        // Persiste se teve stats nesse ciclo pra ajustar cooldown na próxima
+        analyzedMatches.set(matchKey, {
+          ts: now,
+          tipSent: prev?.tipSent || false,
+          noEdge: !result?.tipMatch,
+          hadLiveStats: !!result?.hasLiveStats || prev?.hadLiveStats || false,
+        });
 
         if (!result) continue;
         const hasRealOdds = !!(result.o?.t1 && parseFloat(result.o.t1) > 1);
