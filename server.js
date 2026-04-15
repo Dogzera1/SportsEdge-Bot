@@ -3430,24 +3430,26 @@ const server = http.createServer(async (req, res) => {
     try {
       const base = `https://feed.lolesports.com/livestats/v1/window/${gameId}`;
 
-      // 1) Buscar metadata do jogo (times, campeões, etc) — não aborta se 204,
-      //    pois algumas ligas só respondem com startingTime específico.
-      let wr = await httpGet(base, LOL_HEADERS);
-      if (wr.status === 403) wr = await httpGet(base, {});
+      // 1) Buscar metadata do jogo (times, campeões, etc).
+      //    BUG confirmado 2026-04-15: x-api-key causa 204 em jogos inProgress (LCK/LEC/etc).
+      //    Sem key funciona. Para completed games, key funciona também — mas usar sem key é seguro.
+      let wr = await httpGet(base, {});
+      if (wr.status !== 200) wr = await httpGet(base, LOL_HEADERS); // fallback com key
       const raw = wr.status === 200 ? safeParse(wr.body, {}) : {};
       if (wr.status !== 200) {
         log('INFO', 'LIVE-GAME', `window/${gameId}: base status=${wr.status} — tentando varredura mesmo assim`);
       }
 
-      // 2) Varredura paralela. Prioriza janelas 90-300s (Riot tem ~2-3min de delay típico).
-      //    Antes era serial — 13 scans × latência = vários segundos bloqueando tip generation.
-      const scanDelays = [90, 120, 150, 180, 240, 300, 60, 420, 600, 45, 900, 1200, 1800];
+      // 2) Varredura paralela. DESCOBERTA 2026-04-15: Riot retém livestats em janela curta
+      //    (~15-100s). Timestamps mais antigos retornam 204. Prioriza janelas recentes.
+      const scanDelays = [30, 45, 60, 75, 90, 15, 120, 150, 180, 240, 300, 600, 1200];
       let frames = [];
       let usedTs = null;
       let statsDisabled = false;
       const scanResults = await Promise.all(scanDelays.map(async (secAgo) => {
         const ts = new Date(Math.floor((Date.now() - secAgo * 1000) / 10000) * 10000).toISOString();
-        const r = await httpGet(`${base}?startingTime=${encodeURIComponent(ts)}`, LOL_HEADERS).catch(() => ({ status: 0, body: '' }));
+        // Sem key: evita 204 em inProgress games
+        const r = await httpGet(`${base}?startingTime=${encodeURIComponent(ts)}`, {}).catch(() => ({ status: 0, body: '' }));
         return { secAgo, status: r.status, body: r.body };
       }));
       const scanStatuses = scanResults.map(r => `${r.secAgo}s=${r.status}`);
@@ -3475,7 +3477,9 @@ const server = http.createServer(async (req, res) => {
       if (statsDisabled) {
         log('INFO', 'LIVE-GAME', `window/${gameId}: Stats DISABLED pela Riot — draft=${hasDraft ? 'ok' : 'no'}`);
       } else if (usedTs === null) {
-        log('WARN', 'LIVE-GAME', `window/${gameId}: varredura sem gold (frames=${frames.length}, draft=${hasDraft ? 'ok' : 'no'}, scan: ${scanStatuses.join(',')})`);
+        // 204 em todas as janelas é esperado em ligas tier-2 sem feed público da Riot.
+        // Log em DEBUG para não poluir — stats simplesmente não existem.
+        log('DEBUG', 'LIVE-GAME', `window/${gameId}: varredura sem gold (frames=${frames.length}, draft=${hasDraft ? 'ok' : 'no'}, scan: ${scanStatuses.join(',')})`);
       } else {
         log('INFO', 'LIVE-GAME', `window/${gameId}: gold encontrado a ${usedTs}s atrás (${frames.length} frames)`);
       }
