@@ -66,7 +66,7 @@ def _cache_put(key: str, status: int, body: str, ctype: str):
 def _fetch_hltv(path: str, qs: str = "") -> tuple[int, str, str]:
     """Fetch síncrono via curl_cffi. Retorna (status, body, content-type)."""
     url = f"{UPSTREAM}{path}" + (f"?{qs}" if qs else "")
-    r = cf_requests.get(url, impersonate="chrome131", timeout=TIMEOUT, headers=HEADERS)
+    r = cf_requests.get(url, impersonate="chrome124", timeout=TIMEOUT, headers=HEADERS)
     ctype = r.headers.get("content-type", "text/html; charset=utf-8")
     return r.status_code, r.text, ctype
 
