@@ -5726,10 +5726,13 @@ async function runAutoDarts() {
           if (prev?.tipSent) continue;
           if (prev && (now - prev.ts < 60 * 60 * 1000)) continue; // re-check a cada 1h
 
-          // Enriquecimento: 3-dart avg recente (últimos 10 jogos) de cada jogador
-          const [recentP1, recentP2] = await Promise.all([
+          // Enriquecimento: 3-dart avg recente (últimos 10 jogos) + H2H entre os dois
+          const [recentP1, recentP2, h2h] = await Promise.all([
             match.playerId1 ? sofaDarts.getPlayerRecentAvg(match.playerId1, 10).catch(() => null) : null,
             match.playerId2 ? sofaDarts.getPlayerRecentAvg(match.playerId2, 10).catch(() => null) : null,
+            (match.playerId1 && match.playerId2)
+              ? sofaDarts.getHeadToHead(match.playerId1, match.playerId2).catch(() => null)
+              : null,
           ]);
 
           const enrich = {
@@ -5739,8 +5742,13 @@ async function runAutoDarts() {
             winRateP2: recentP2?.winRate || null,
             gamesP1: recentP1?.games || 0,
             gamesP2: recentP2?.games || 0,
+            h2hP1Wins: h2h?.p1Wins ?? null,
+            h2hP2Wins: h2h?.p2Wins ?? null,
             // checkoutP1/P2: TODO — extrair de getPlayerRecentAvg (já disponível no stats)
           };
+          if (h2h) {
+            log('DEBUG', 'AUTO-DARTS', `H2H ${match.team1} vs ${match.team2}: ${h2h.p1Wins}-${h2h.p2Wins}`);
+          }
 
           const ml = dartsPreFilter(match, enrich);
           if (!ml.pass) {
@@ -5841,9 +5849,10 @@ async function runAutoSnooker() {
           // Sem ranking oficial (snooker.org precisa email approval), mas win rate já
           // dá ao modelo o segundo fator necessário para gerar edge.
           const cuetracker = require('./lib/cuetracker');
-          const [stats1, stats2] = await Promise.all([
+          const [stats1, stats2, h2h] = await Promise.all([
             cuetracker.getPlayerStats(match.team1).catch(() => null),
             cuetracker.getPlayerStats(match.team2).catch(() => null),
+            cuetracker.getHeadToHead(match.team1, match.team2).catch(() => null),
           ]);
           const enrich = {
             rankP1: null, rankP2: null,
@@ -5853,9 +5862,11 @@ async function runAutoSnooker() {
             gamesP2: stats2?.totalMatches ?? 0,
             centuriesP1: stats1?.centuries ?? null,
             centuriesP2: stats2?.centuries ?? null,
+            h2hP1Wins: h2h?.p1Wins ?? null,
+            h2hP2Wins: h2h?.p2Wins ?? null,
           };
           if (stats1 || stats2) {
-            log('DEBUG', 'AUTO-SNOOKER', `CueTracker: ${match.team1}=${stats1?.winRate ?? 'n/a'}% (${stats1?.totalMatches ?? 0} jogos) | ${match.team2}=${stats2?.winRate ?? 'n/a'}% (${stats2?.totalMatches ?? 0} jogos)`);
+            log('DEBUG', 'AUTO-SNOOKER', `CueTracker: ${match.team1}=${stats1?.winRate ?? 'n/a'}% (${stats1?.totalMatches ?? 0} jogos) | ${match.team2}=${stats2?.winRate ?? 'n/a'}% (${stats2?.totalMatches ?? 0} jogos)${h2h ? ` | H2H ${h2h.p1Wins}-${h2h.p2Wins}` : ''}`);
           }
 
           const ml = snookerPreFilter(match, enrich);
