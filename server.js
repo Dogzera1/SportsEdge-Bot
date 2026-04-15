@@ -3437,31 +3437,37 @@ const server = http.createServer(async (req, res) => {
         log('INFO', 'LIVE-GAME', `window/${gameId}: base status=${wr.status} — tentando varredura mesmo assim`);
       }
 
-      // 2) Varredura ampla: 45s→30min. Ligas tier-2 costumam ter delay maior
-      //    e/ou janelas arquivadas acessíveis por startingTime histórico.
-      const scanDelays = [45, 60, 90, 120, 150, 180, 240, 300, 420, 600, 900, 1200, 1800];
+      // 2) Varredura paralela. Prioriza janelas 90-300s (Riot tem ~2-3min de delay típico).
+      //    Antes era serial — 13 scans × latência = vários segundos bloqueando tip generation.
+      const scanDelays = [90, 120, 150, 180, 240, 300, 60, 420, 600, 45, 900, 1200, 1800];
       let frames = [];
       let usedTs = null;
-      let scanStatuses = [];
       let statsDisabled = false;
-      for (const secAgo of scanDelays) {
+      const scanResults = await Promise.all(scanDelays.map(async (secAgo) => {
         const ts = new Date(Math.floor((Date.now() - secAgo * 1000) / 10000) * 10000).toISOString();
-        const r = await httpGet(`${base}?startingTime=${encodeURIComponent(ts)}`, LOL_HEADERS);
-        scanStatuses.push(`${secAgo}s=${r.status}`);
-        if (r.status === 404 && /Stats are disabled/i.test(String(r.body || ''))) {
-          statsDisabled = true;
-          break; // Não adianta tentar outros timestamps — Riot desabilitou o feed
+        const r = await httpGet(`${base}?startingTime=${encodeURIComponent(ts)}`, LOL_HEADERS).catch(() => ({ status: 0, body: '' }));
+        return { secAgo, status: r.status, body: r.body };
+      }));
+      const scanStatuses = scanResults.map(r => `${r.secAgo}s=${r.status}`);
+      if (scanResults.some(r => r.status === 404 && /Stats are disabled/i.test(String(r.body || '')))) {
+        statsDisabled = true;
+      }
+      if (!statsDisabled) {
+        // Prefere o resultado com mais frames de gold real; preserva ordem (90s primeiro).
+        let bestScore = -1;
+        for (const r of scanResults) {
+          if (r.status !== 200) continue;
+          const d = safeParse(r.body, {});
+          const hasGold = d.frames?.length && d.frames.some(f => f.blueTeam?.totalGold > 0);
+          const score = hasGold ? 1000 + (d.frames.length || 0) : (d.frames?.length || 0);
+          if (score > bestScore) {
+            bestScore = score;
+            frames = d.frames || [];
+            usedTs = r.secAgo;
+            if (!raw.gameMetadata && d.gameMetadata) raw.gameMetadata = d.gameMetadata;
+          }
         }
-        if (r.status !== 200) continue;
-        const d = safeParse(r.body, {});
-        if (d.frames?.length && d.frames.some(f => f.blueTeam?.totalGold > 0)) {
-          frames = d.frames;
-          usedTs = secAgo;
-          if (!raw.gameMetadata && d.gameMetadata) raw.gameMetadata = d.gameMetadata;
-          break;
-        }
-        if (!frames.length && d.frames?.length) frames = d.frames;
-        if (!raw.gameMetadata && d.gameMetadata) raw.gameMetadata = d.gameMetadata;
+        if (bestScore < 1000) usedTs = null; // sem gold real encontrado
       }
       const hasDraft = !!(raw.gameMetadata?.blueTeamMetadata?.participantMetadata?.length);
       if (statsDisabled) {

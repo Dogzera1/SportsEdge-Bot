@@ -5148,9 +5148,33 @@ Máximo 200 palavras. Raciocínio breve antes da decisão.`;
           log('INFO', 'AUTO-TENNIS', `Gate odds: ${tipOdd} fora do range ${TENNIS_GATE_MIN_ODDS}-${TENNIS_GATE_MAX_ODDS}`);
           await new Promise(r => setTimeout(r, 3000)); continue;
         }
-        if (tipEV < 5.0) {
-          log('INFO', 'AUTO-TENNIS', `Gate EV: ${tipEV}% < 5%`);
+        if (tipEV < 7.0) {
+          log('INFO', 'AUTO-TENNIS', `Gate EV: ${tipEV}% < 7%`);
           await new Promise(r => setTimeout(r, 3000)); continue;
+        }
+        // Small-sample gate: Elo com poucos jogos gera EV inflado por ruído.
+        // Se qualquer jogador tem <10 partidas no DB OU <5 na superfície, exige EV ≥ 10% e confiança ≥ MÉDIA.
+        if (usingEloModel) {
+          const er = eloResult;
+          const minAll  = Math.min(er.eloMatches1, er.eloMatches2);
+          const minSurf = Math.min(er.surfMatches1, er.surfMatches2);
+          const smallSample = minAll < 10 || minSurf < 5;
+          if (smallSample) {
+            if (tipEV < 10.0) {
+              log('INFO', 'AUTO-TENNIS', `Gate small-sample: EV ${tipEV}% < 10% (min jogos=${minAll}, superfície=${minSurf})`);
+              await new Promise(r => setTimeout(r, 3000)); continue;
+            }
+            if (tipConf === 'BAIXA') {
+              log('INFO', 'AUTO-TENNIS', `Gate small-sample: conf BAIXA rejeitada (min jogos=${minAll}, superfície=${minSurf})`);
+              await new Promise(r => setTimeout(r, 3000)); continue;
+            }
+          }
+        } else {
+          // Sem Elo (fallback ranking): ainda mais conservador
+          if (tipEV < 10.0) {
+            log('INFO', 'AUTO-TENNIS', `Gate sem-Elo: EV ${tipEV}% < 10%`);
+            await new Promise(r => setTimeout(r, 3000)); continue;
+          }
         }
         // Confiança BAIXA: requer edge ML forte (≥6pp) para compensar incerteza
         if (tipConf === 'BAIXA' && mlResultTennis.score < 6.0) {
@@ -5958,7 +5982,8 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   setTimeout(() => runAutoSnooker().catch(e => log('ERROR', 'AUTO-SNOOKER', e.message)), 60 * 1000);
   setInterval(() => runAutoSnooker().catch(e => log('ERROR', 'AUTO-SNOOKER', e.message)), 15 * 60 * 1000);
   setInterval(() => settleCompletedTips().catch(e => log('ERROR', 'SETTLE', e.message)), SETTLEMENT_INTERVAL);
-  setInterval(() => checkLineMovement().catch(e => log('ERROR', 'LINE', e.message)), LINE_CHECK_INTERVAL);
+  // Notificações de line movement desativadas a pedido do usuário
+  // setInterval(() => checkLineMovement().catch(e => log('ERROR', 'LINE', e.message)), LINE_CHECK_INTERVAL);
   // Alertas críticos: polling /alerts a cada 10 min → DM admins (throttled 1h por alert id)
   setInterval(() => checkCriticalAlerts().catch(e => log('ERROR', 'ALERT', e.message)), 10 * 60 * 1000);
   setTimeout(() => checkCriticalAlerts().catch(() => {}), 30 * 1000); // primeiro check 30s pós-boot
