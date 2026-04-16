@@ -900,11 +900,12 @@ async function runAutoAnalysis() {
           const liveMapa = result.hasLiveStats ? result.liveGameNumber : null;
           const mapTag = (result.hasLiveStats && liveMapa) ? `_MAP${liveMapa}` : '';
 
-          // Dedup serie-level: suprime 2a tip no mesmo BoN quando placar nao mudou e EV mexeu pouco.
-          // Evita spammar 2-3 tips no mesmo confronto ao avancar de mapa sem mudanca de estado.
+          // Dedup por FASE (pregame / map1 / map2 / ...): suprime re-tip na MESMA fase
+          // quando placar e EV mal mexeram. Transição entre fases (pregame→map1, map1→map2)
+          // passa livre — max 1 tip por mapa é garantido por analyzedMatches + matchId+_MAP{N}.
           const serieId = String(match.id);
           const lastSerieTip = lolSeriesLastTip.get(serieId);
-          if (lastSerieTip) {
+          if (lastSerieTip && (lastSerieTip.mapNum || null) === (liveMapa || null)) {
             const samePick = norm(lastSerieTip.pick) === norm(tipTeam);
             const sameScore = (lastSerieTip.score1 || 0) === (match.score1 || 0) && (lastSerieTip.score2 || 0) === (match.score2 || 0);
             const evDiff = Math.abs(parseFloat(tipEV) - parseFloat(lastSerieTip.ev));
@@ -912,7 +913,8 @@ async function runAutoAnalysis() {
             const DEDUP_WINDOW_MS = 15 * 60 * 1000;
             const EV_TOLERANCE = parseFloat(process.env.LOL_SERIES_EV_TOLERANCE || '2.0');
             if (samePick && sameScore && evDiff < EV_TOLERANCE && recentMs < DEDUP_WINDOW_MS) {
-              log('INFO', 'AUTO', `Dedup serie: ${match.team1} vs ${match.team2} — mesma pick/placar, EV ${lastSerieTip.ev}% → ${tipEV}% (diff ${evDiff.toFixed(1)}pp < ${EV_TOLERANCE}pp)`);
+              const phaseLabel = liveMapa ? `map${liveMapa}` : 'pregame';
+              log('INFO', 'AUTO', `Dedup [${phaseLabel}]: ${match.team1} vs ${match.team2} — mesma pick/placar, EV ${lastSerieTip.ev}% → ${tipEV}% (diff ${evDiff.toFixed(1)}pp)`);
               continue;
             }
           }
