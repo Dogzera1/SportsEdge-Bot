@@ -6767,6 +6767,106 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // ── ROI por Liga (divisão usada pelo stake multiplier) ──
+  if (p === '/league-roi') {
+    const sport = parsed.query.sport || 'esports';
+    const minRaw = parseInt(parsed.query.min, 10);
+    const minTotal = Number.isFinite(minRaw) ? Math.max(1, Math.min(100, minRaw)) : 1;
+    try {
+      const rows = db.prepare(`
+        SELECT
+          COALESCE(NULLIF(TRIM(event_name), ''), '(sem liga)') AS league,
+          COALESCE(is_live, 0) AS is_live,
+          COUNT(*) AS total,
+          SUM(CASE WHEN result='win'  THEN 1 ELSE 0 END) AS wins,
+          SUM(CASE WHEN result='loss' THEN 1 ELSE 0 END) AS losses,
+          ROUND(SUM(COALESCE(stake_reais, 0)), 2)  AS staked,
+          ROUND(SUM(COALESCE(profit_reais, 0)), 2) AS profit
+        FROM tips
+        WHERE sport = ? AND result IN ('win','loss')
+        GROUP BY league, is_live
+      `).all(sport);
+
+      // Mapa league → { all, pre, live } (mesmas faixas de multiplicador de lib/stake-adjuster.js)
+      const roiOf = (staked, profit) => staked > 0 ? +((profit / staked) * 100).toFixed(2) : 0;
+      const multOf = (roi, total) => {
+        if (total < 20) return null; // insuficiente
+        if (roi >= 15)  return 1.20;
+        if (roi >= 5)   return 1.10;
+        if (roi >= -5)  return 1.00;
+        if (roi >= -15) return 0.75;
+        if (roi >= -25) return 0.50;
+        return 0;
+      };
+
+      const byLeague = new Map();
+      for (const r of rows) {
+        const key = r.league;
+        if (!byLeague.has(key)) {
+          byLeague.set(key, {
+            league: key,
+            all:  { total: 0, wins: 0, losses: 0, staked: 0, profit: 0 },
+            pre:  { total: 0, wins: 0, losses: 0, staked: 0, profit: 0 },
+            live: { total: 0, wins: 0, losses: 0, staked: 0, profit: 0 },
+          });
+        }
+        const agg = byLeague.get(key);
+        const bucket = r.is_live ? agg.live : agg.pre;
+        bucket.total  += r.total  || 0;
+        bucket.wins   += r.wins   || 0;
+        bucket.losses += r.losses || 0;
+        bucket.staked += r.staked || 0;
+        bucket.profit += r.profit || 0;
+        agg.all.total  += r.total  || 0;
+        agg.all.wins   += r.wins   || 0;
+        agg.all.losses += r.losses || 0;
+        agg.all.staked += r.staked || 0;
+        agg.all.profit += r.profit || 0;
+      }
+
+      const finalize = (b) => ({
+        total: b.total,
+        wins: b.wins,
+        losses: b.losses,
+        staked: +b.staked.toFixed(2),
+        profit: +b.profit.toFixed(2),
+        roi: roiOf(b.staked, b.profit),
+      });
+
+      const leagues = [...byLeague.values()]
+        .filter(x => x.all.total >= minTotal)
+        .map(x => {
+          const all = finalize(x.all);
+          return {
+            league: x.league,
+            all,
+            pre:  finalize(x.pre),
+            live: finalize(x.live),
+            multiplier: multOf(all.roi, all.total), // null = amostra insuficiente
+            active: all.total >= 20,
+          };
+        })
+        .sort((a, b) => b.all.total - a.all.total);
+
+      sendJson(res, {
+        sport,
+        leagues,
+        thresholds: [
+          { from:  15, mult: 1.20 },
+          { from:   5, mult: 1.10 },
+          { from:  -5, mult: 1.00 },
+          { from: -15, mult: 0.75 },
+          { from: -25, mult: 0.50 },
+          { from: null, mult: 0 },
+        ],
+        minSample: 20,
+      });
+    } catch(e) {
+      sendJson(res, { error: e.message }, 500);
+    }
+    return;
+  }
+
   if (p === '/dashboard' || p === '/') {
     const htmlPath = path.join(__dirname, 'public', 'dashboard.html');
     try {

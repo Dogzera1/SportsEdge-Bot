@@ -134,6 +134,17 @@
     </div>
   </div>
 
+  <!-- ROI por Liga -->
+  <div class="table-card" id="leagueRoiCard">
+    <h3 style="display:flex;align-items:center;justify-content:space-between;gap:0.8rem;flex-wrap:wrap">
+      <span>&#127942; ROI por Liga &mdash; Stake Multiplier</span>
+      <span style="font-size:0.68rem;color:#6b7280;font-weight:400;text-transform:none;letter-spacing:0">
+        &#8805;20 tips p/ ativar &bull; ROI +15%&rarr;1.20x &bull; +5%&rarr;1.10x &bull; &minus;5%&rarr;0.75x &bull; &minus;25%&rarr;0x
+      </span>
+    </h3>
+    <div id="leagueRoiTable"><div class="loading">Carregando...</div></div>
+  </div>
+
   <!-- Tips Table -->
   <div class="table-card" id="sportTipsCard">
     <h3 style="display:flex;align-items:center;justify-content:space-between">
@@ -251,6 +262,7 @@ function selectSport(sport, el) {
   el.classList.add('active');
   document.getElementById('cards').style.display = '';
   document.getElementById('sportCharts').style.display = '';
+  document.getElementById('leagueRoiCard').style.display = '';
   document.getElementById('sportTipsCard').style.display = '';
   document.getElementById('mlSection').style.display = 'none';
   loadAll();
@@ -262,6 +274,7 @@ function selectML(el) {
   el.classList.add('active');
   document.getElementById('cards').style.display = 'none';
   document.getElementById('sportCharts').style.display = 'none';
+  document.getElementById('leagueRoiCard').style.display = 'none';
   document.getElementById('sportTipsCard').style.display = 'none';
   document.getElementById('mlSection').style.display = 'block';
   loadML();
@@ -271,14 +284,16 @@ async function loadAll() {
   if (isMLView) { loadML(); return; }
   document.getElementById('lastUpdated').textContent = 'Atualizando...';
   const tipsP = loadTips();
-  const [roi, calibration, weights] = await Promise.all([
+  const [roi, calibration, weights, leagueRoi] = await Promise.all([
     apiFetch('/roi?sport=' + currentSport),
     apiFetch('/calibration?sport=' + currentSport + '&phase=all'),
-    apiFetch('/ml-weights')
+    apiFetch('/ml-weights'),
+    apiFetch('/league-roi?sport=' + currentSport)
   ]);
   renderCards(roi);
   renderCalibration(calibration);
   renderWeights(weights);
+  renderLeagueRoi(leagueRoi);
   await tipsP;
   document.getElementById('lastUpdated').textContent = 'Atualizado: ' + new Date().toLocaleTimeString('pt-BR');
 }
@@ -719,6 +734,69 @@ function renderWeights(data) {
       }
     }
   });
+}
+
+function renderLeagueRoi(data) {
+  const el = document.getElementById('leagueRoiTable');
+  if (!el) return;
+  if (!data || !Array.isArray(data.leagues) || !data.leagues.length) {
+    el.innerHTML = '<div class="loading" style="color:#6b7280">Sem ligas com tips liquidadas.</div>';
+    return;
+  }
+
+  const fmtRoi = function(roi, total) {
+    if (!total) return '<span style="color:#4b5563">—</span>';
+    const cls = roi >= 0 ? 'positive' : 'negative';
+    return '<span class="' + cls + '">' + (roi >= 0 ? '+' : '') + roi.toFixed(1) + '%</span>';
+  };
+
+  const multBadge = function(L) {
+    if (!L.active) {
+      return '<span class="badge" style="background:#1f2937;color:#9ca3af">n=' + L.all.total + '/20</span>';
+    }
+    const m = L.multiplier;
+    let bg = '#1e3a5f', fg = '#93c5fd';
+    if (m === 0)       { bg = '#7f1d1d'; fg = '#f87171'; }
+    else if (m >= 1.20){ bg = '#064e3b'; fg = '#6ee7b7'; }
+    else if (m >= 1.10){ bg = '#065f46'; fg = '#34d399'; }
+    else if (m === 1.0){ bg = '#1f2937'; fg = '#9ca3af'; }
+    else if (m >= 0.75){ bg = '#713f12'; fg = '#fde68a'; }
+    else               { bg = '#7f1d1d'; fg = '#fca5a5'; }
+    const label = m === 0 ? 'BLOQUEADA' : (m.toFixed(2) + 'x');
+    return '<span class="badge" style="background:' + bg + ';color:' + fg + ';font-weight:700">' + label + '</span>';
+  };
+
+  const rows = data.leagues.map(function(L) {
+    const leagueName = (L.league || '?').replace(/</g, '&lt;');
+    const profitCls = L.all.profit >= 0 ? 'positive' : 'negative';
+    return '<tr>' +
+      '<td style="max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + leagueName + '">' + leagueName + '</td>' +
+      '<td style="text-align:center">' + multBadge(L) + '</td>' +
+      '<td style="text-align:center">' + L.all.total + '<span style="color:#4b5563;font-size:0.7rem"> (' + L.all.wins + 'W/' + L.all.losses + 'L)</span></td>' +
+      '<td style="text-align:right;font-weight:600">' + fmtRoi(L.all.roi, L.all.total) + '</td>' +
+      '<td style="text-align:right" class="' + profitCls + '">' + (L.all.profit >= 0 ? '+' : '') + L.all.profit.toFixed(2) + '</td>' +
+      '<td style="text-align:right;font-size:0.75rem">' +
+        '<div>' + L.pre.total + 't ' + fmtRoi(L.pre.roi, L.pre.total) + '</div>' +
+      '</td>' +
+      '<td style="text-align:right;font-size:0.75rem">' +
+        '<div>' + L.live.total + 't ' + fmtRoi(L.live.roi, L.live.total) + '</div>' +
+      '</td>' +
+    '</tr>';
+  }).join('');
+
+  el.innerHTML =
+    '<table>' +
+      '<thead><tr>' +
+        '<th>Liga</th>' +
+        '<th style="text-align:center">Mult.</th>' +
+        '<th style="text-align:center">Tips</th>' +
+        '<th style="text-align:right">ROI</th>' +
+        '<th style="text-align:right">Lucro (R$)</th>' +
+        '<th style="text-align:right">Pré</th>' +
+        '<th style="text-align:right">Live</th>' +
+      '</tr></thead>' +
+      '<tbody>' + rows + '</tbody>' +
+    '</table>';
 }
 
 function renderTips(tips) {
