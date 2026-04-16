@@ -1,6 +1,3 @@
-[build]
-builder = "railpacks"
-
 [deploy]
 startCommand = "node start.js"
 restartPolicyType = "on_failure"
