@@ -475,12 +475,34 @@ async function applyGlobalRisk(sport, desiredUnits, leagueSlug) {
     drawdownMult = 0.5;
   }
 
-  // Ajuste por liga (tier-2/3 = stake reduzido proporcionalmente)
+  // Ajuste por liga (tier-2/3 = stake reduzido proporcionalmente) — apenas esports/LoL
   const leagueMult = (sport === 'esports' && leagueSlug) ? getLeagueRiskMultiplier(leagueSlug) : 1.0;
-  const adjusted = Math.max(0.5, Math.round(desiredUnits * leagueMult * drawdownMult * 2) / 2);
-  const reason = drawdownMult < 1 ? 'drawdown_reduction' : leagueMult < 1 ? 'league_tier_reduction' : 'ok';
+
+  // Stake multiplier dinâmico (performance histórica): league ROI × streak × daily stop-loss
+  let perfMult = 1.0;
+  let perfReasons = [];
+  if (leagueSlug) {
+    try {
+      const sm = await serverGet(`/stake-multiplier?sport=${encodeURIComponent(sport)}&league=${encodeURIComponent(leagueSlug)}`, sport).catch(() => null);
+      if (sm && typeof sm.multiplier === 'number') {
+        perfMult = sm.multiplier;
+        perfReasons = Array.isArray(sm.reasons) ? sm.reasons : [];
+        if (sm.blocked) {
+          log('WARN', 'RISK', `${sport} (${leagueSlug}): ${sm.blocked} — BLOQUEADO | ${perfReasons.join(' | ')}`);
+          return { ok: false, units: 0, reason: sm.blocked };
+        }
+      }
+    } catch (_) {}
+  }
+
+  const adjusted = Math.max(0.5, Math.round(desiredUnits * leagueMult * drawdownMult * perfMult * 2) / 2);
+  const reason = drawdownMult < 1 ? 'drawdown_reduction'
+               : perfMult !== 1.0 ? 'perf_adjusted'
+               : leagueMult < 1 ? 'league_tier_reduction'
+               : 'ok';
   if (adjusted !== desiredUnits) {
-    log('INFO', 'RISK', `${sport}${leagueSlug ? ` (${leagueSlug})` : ''}: ${desiredUnits}u→${adjusted}u (league=${leagueMult} drawdown=${drawdownMult})`);
+    const perfStr = perfMult !== 1.0 ? ` perf=${perfMult}(${perfReasons.slice(0,2).join(';')})` : '';
+    log('INFO', 'RISK', `${sport}${leagueSlug ? ` (${leagueSlug})` : ''}: ${desiredUnits}u→${adjusted}u (league=${leagueMult} drawdown=${drawdownMult}${perfStr})`);
   }
   return { ok: true, units: adjusted, reason };
 }
@@ -4114,10 +4136,11 @@ async function poll(token, sport) {
               await handleNotificacoes(token, chatId, s);
             } else if (action === 'tracking') {
               try {
-                const [roi, history, marketRows] = await Promise.all([
+                const [roi, history, marketRows, leagueRoi] = await Promise.all([
                   serverGet('/roi', s),
                   serverGet('/tips-history?limit=10&filter=settled', s).catch(() => []),
-                  serverGet('/roi-by-market', s).catch(() => [])
+                  serverGet('/roi-by-market', s).catch(() => []),
+                  serverGet(`/league-roi?sport=${encodeURIComponent(s)}&min=5`, s).catch(() => ({ leagues: [] })),
                 ]);
                 const o = roi.overall || {};
                 const bk = roi.banca || {};
@@ -4156,6 +4179,26 @@ async function poll(token, sport) {
                     for (const row of marketRows) {
                       const mktEmoji = row.market_type === 'HANDICAP' ? '♟️' : row.market_type === 'METHOD' ? '🥊' : '🎯';
                       txt += `${mktEmoji} ${row.market_type}: ${row.wins}/${row.total} | ROI: ${row.roi > 0 ? '+' : ''}${row.roi}%\n`;
+                    }
+                  }
+                  const leagues = Array.isArray(leagueRoi?.leagues) ? leagueRoi.leagues : [];
+                  if (leagues.length > 1) {
+                    // Top 5 por profit absoluto + bottom 3 (perdedoras)
+                    const sorted = [...leagues].sort((a, b) => (b.profit || 0) - (a.profit || 0));
+                    const top = sorted.slice(0, 5);
+                    const bottom = sorted.slice(-3).reverse().filter(l => !top.includes(l));
+                    txt += `\n🏆 *Por campeonato (≥5 tips):*\n`;
+                    for (const lg of top) {
+                      const roiEm = lg.roi > 5 ? '🟢' : lg.roi < -5 ? '🔴' : '🟡';
+                      const name = String(lg.league || '').slice(0, 30);
+                      txt += `${roiEm} ${name}: ${lg.wins}-${lg.losses} | ROI: ${lg.roi > 0 ? '+' : ''}${lg.roi}%\n`;
+                    }
+                    if (bottom.length) {
+                      txt += `\n⚠️ *Perdedoras:*\n`;
+                      for (const lg of bottom) {
+                        const name = String(lg.league || '').slice(0, 30);
+                        txt += `🔴 ${name}: ${lg.wins}-${lg.losses} | ROI: ${lg.roi}%\n`;
+                      }
                     }
                   }
                   if (Array.isArray(history) && history.length > 0) {
@@ -5450,7 +5493,7 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
           await new Promise(r => setTimeout(r, 3000)); continue;
         }
         const desiredUnitsMma = parseFloat(kellyStakeMma) || 0;
-        const riskAdjMma = await applyGlobalRisk('mma', desiredUnitsMma);
+        const riskAdjMma = await applyGlobalRisk('mma', desiredUnitsMma, match.league);
         if (!riskAdjMma.ok) { log('INFO', 'RISK', `mma: bloqueada (${riskAdjMma.reason})`); await new Promise(r => setTimeout(r, 3000)); continue; }
         const tipStakeAdjMma = String(riskAdjMma.units.toFixed(1).replace(/\.0$/, ''));
 
@@ -6027,7 +6070,7 @@ Máximo 200 palavras. Raciocínio breve antes da decisão.`;
         const modelPPick = pickIsT1 ? mlResultTennis.modelP1 : mlResultTennis.modelP2;
 
         const desiredUnitsTennis = parseFloat(String(tipStake)) || 0;
-        const riskAdjTennis = await applyGlobalRisk('tennis', desiredUnitsTennis);
+        const riskAdjTennis = await applyGlobalRisk('tennis', desiredUnitsTennis, match.league);
         if (!riskAdjTennis.ok) { log('INFO', 'RISK', `tennis: bloqueada (${riskAdjTennis.reason})`); await new Promise(r => setTimeout(r, 3000)); continue; }
         const tipStakeAdjTennis = String(riskAdjTennis.units.toFixed(1).replace(/\.0$/, ''));
 
@@ -6496,7 +6539,7 @@ Máximo 200 palavras.`;
         const recordMatchId = String(match.id);
 
         const desiredUnitsFb = parseFloat(String(tipStake)) || 0;
-        const riskAdjFb = await applyGlobalRisk('football', desiredUnitsFb);
+        const riskAdjFb = await applyGlobalRisk('football', desiredUnitsFb, match.league);
         if (!riskAdjFb.ok) { log('INFO', 'RISK', `football: bloqueada (${riskAdjFb.reason})`); await new Promise(r => setTimeout(r, 2000)); continue; }
         const tipStakeAdjFb = String(riskAdjFb.units.toFixed(1).replace(/\.0$/, ''));
 
@@ -6686,7 +6729,7 @@ async function pollTableTennis(runOnce = false) {
         const stake = calcKellyWithP(pickP, pickOdd, 1/8);
         if (stake === '0u') { analyzedTT.set(key, { ts: now, tipSent: false }); continue; }
         const desiredU = parseFloat(stake) || 0;
-        const riskAdj = await applyGlobalRisk('tabletennis', desiredU);
+        const riskAdj = await applyGlobalRisk('tabletennis', desiredU, match.league);
         if (!riskAdj.ok) { log('INFO', 'RISK', `tabletennis: bloqueada (${riskAdj.reason})`); continue; }
         const stakeAdj = String(riskAdj.units.toFixed(1).replace(/\.0$/, ''));
 
@@ -6902,7 +6945,7 @@ async function pollCs(runOnce = false) {
         const stake = calcKellyWithP(pickP, pickOdd, 1/8);
         if (stake === '0u') { analyzedCs.set(key, { ts: now, tipSent: false }); continue; }
         const desiredU = parseFloat(stake) || 0;
-        const riskAdj = await applyGlobalRisk('cs', desiredU);
+        const riskAdj = await applyGlobalRisk('cs', desiredU, match.league);
         if (!riskAdj.ok) { log('INFO', 'RISK', `cs: bloqueada (${riskAdj.reason})`); continue; }
         const stakeAdj = String(riskAdj.units.toFixed(1).replace(/\.0$/, ''));
 
@@ -7114,7 +7157,7 @@ async function pollValorant(runOnce = false) {
         const stake = calcKellyWithP(pickP, pickOdd, 1/8);
         if (stake === '0u') { analyzedValorant.set(key, { ts: now, tipSent: false }); continue; }
         const desiredU = parseFloat(stake) || 0;
-        const riskAdj = await applyGlobalRisk('valorant', desiredU);
+        const riskAdj = await applyGlobalRisk('valorant', desiredU, match.league);
         if (!riskAdj.ok) { log('INFO', 'RISK', `valorant: bloqueada (${riskAdj.reason})`); continue; }
         const stakeAdj = String(riskAdj.units.toFixed(1).replace(/\.0$/, ''));
 
@@ -7290,7 +7333,7 @@ async function runAutoDarts() {
           const stake = calcKellyWithP(pickP, pickOdd, 1/8);
           if (stake === '0u') { analyzedDarts.set(key, { ts: now, tipSent: false }); continue; }
           const desiredU = parseFloat(stake) || 0;
-          const riskAdj = await applyGlobalRisk('darts', desiredU);
+          const riskAdj = await applyGlobalRisk('darts', desiredU, match.league);
           if (!riskAdj.ok) { log('INFO', 'RISK', `darts: bloqueada (${riskAdj.reason})`); continue; }
           const stakeAdj = String(riskAdj.units.toFixed(1).replace(/\.0$/, ''));
 
@@ -7421,7 +7464,7 @@ async function runAutoSnooker() {
           const stake = calcKellyWithP(pickP, pickOdd, 1/8);
           if (stake === '0u') { analyzedSnooker.set(key, { ts: now, tipSent: false }); continue; }
           const desiredU = parseFloat(stake) || 0;
-          const riskAdj = await applyGlobalRisk('snooker', desiredU);
+          const riskAdj = await applyGlobalRisk('snooker', desiredU, match.league);
           if (!riskAdj.ok) { log('INFO', 'RISK', `snooker: bloqueada (${riskAdj.reason})`); continue; }
           const stakeAdj = String(riskAdj.units.toFixed(1).replace(/\.0$/, ''));
 
