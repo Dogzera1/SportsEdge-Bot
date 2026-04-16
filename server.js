@@ -3045,6 +3045,7 @@ const ADMIN_ROUTES_POST = new Set([
   '/save-user',
   '/record-tip',
   '/log-tip-factors',
+  '/log-odds-history',
   '/resync-stats',
   '/reset-tips',
   '/settle',
@@ -5754,6 +5755,26 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (p === '/log-odds-history' && req.method === 'POST') {
+    let body = ''; req.on('data', d => body += d);
+    req.on('end', () => {
+      try {
+        const t = safeParse(body, {});
+        const sport = parsed.query.sport || t.sport || 'esports';
+        const matchKey = clampStr(t.matchKey, 128);
+        const p1 = clampStr(t.p1, 120);
+        const p2 = clampStr(t.p2, 120);
+        const o1 = parseFiniteNumber(t.oddsP1);
+        const o2 = parseFiniteNumber(t.oddsP2);
+        const bm = clampStr(t.bookmaker, 60) || '?';
+        if (!matchKey || !p1 || !p2 || !o1 || !o2) { sendJson(res, { ok: false }); return; }
+        stmts.insertOddsHistory.run(sport, matchKey, p1, p2, o1, o2, bm);
+        sendJson(res, { ok: true });
+      } catch(e) { sendJson(res, { ok: false, error: e.message }); }
+    });
+    return;
+  }
+
   if (p === '/resync-stats' && req.method === 'POST') {
     let body = ''; req.on('data', d => body += d);
     req.on('end', async () => {
@@ -5877,8 +5898,12 @@ const server = http.createServer(async (req, res) => {
               matchScore = r.score;
             }
             const result = nameMatched ? 'win' : 'loss';
-            // substring_weak = haveria match se o threshold fosse menor — destaca como WARN para auditoria
-            const logLevel = matchMethod === 'substring_weak' ? 'WARN' : 'INFO';
+            // substring_weak = match fraco — quarentena para evitar false positive/negative
+            if (matchMethod === 'substring_weak') {
+              log('WARN', 'SETTLE', `QUARANTINE ${sport} matchId=${matchId} tip="${tip.tip_participant}" vs winner="${winner}" → ${result} [method=${matchMethod} score=${matchScore}] — NÃO liquidado (requer /settle-manual)`);
+              continue;
+            }
+            const logLevel = 'INFO';
             log(logLevel, 'SETTLE', `${sport} matchId=${matchId} tip="${tip.tip_participant}" vs winner="${winner}" → ${result} [method=${matchMethod} score=${matchScore}]`);
             stmts.settleTip.run(result, matchId, sport);
             // Atualiza profit_reais e acumula delta da banca

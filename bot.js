@@ -329,6 +329,22 @@ function checkSharpLine(odds, tipParticipant, team1, team2) {
   return { ok: true, sharpOdd, betOdd };
 }
 
+// ── Odds history logging (1x por análise) ──
+const _oddsHistoryLogged = new Map(); // matchId → lastLoggedAt
+function logOddsHistory(sport, matchId, p1, p2, odds) {
+  if (!odds?.t1 || !odds?.t2) return;
+  const key = `${sport}_${matchId}`;
+  const lastLog = _oddsHistoryLogged.get(key) || 0;
+  if (Date.now() - lastLog < 5 * 60 * 1000) return; // max 1x a cada 5min por match
+  _oddsHistoryLogged.set(key, Date.now());
+  // Fire-and-forget — não bloquear a análise
+  serverPost('/log-odds-history', {
+    sport, matchKey: String(matchId), p1, p2,
+    oddsP1: parseFloat(odds.t1) || 0, oddsP2: parseFloat(odds.t2) || 0,
+    bookmaker: odds.bookmaker || '?'
+  }).catch(() => {});
+}
+
 function serverPost(path, body, sport, extraHeaders) {
   return new Promise((resolve, reject) => {
     const s = JSON.stringify(body);
@@ -418,15 +434,48 @@ function isMainLeague(leagueSlug) {
   return LOL_MAIN_LEAGUES.has(slug);
 }
 
+// Cache de drawdown por sport (atualizado a cada chamada de risk)
+const _drawdownCache = new Map(); // sport → { pct, checkedAt }
+const DRAWDOWN_CACHE_TTL = 5 * 60 * 1000; // refresh a cada 5min
+const DRAWDOWN_HARD_LIMIT = parseFloat(process.env.DRAWDOWN_HARD_LIMIT || '0.25'); // 25% = bloqueia
+const DRAWDOWN_SOFT_LIMIT = parseFloat(process.env.DRAWDOWN_SOFT_LIMIT || '0.15'); // 15% = reduz 50%
+
 async function applyGlobalRisk(sport, desiredUnits, leagueSlug) {
   if (!desiredUnits || desiredUnits <= 0) return { ok: false, units: 0, reason: 'stake_zero' };
+
+  // ── Drawdown check: reduz/bloqueia stakes quando banca está em queda ──
+  let drawdownMult = 1.0;
+  const cached = _drawdownCache.get(sport);
+  if (!cached || Date.now() - cached.checkedAt > DRAWDOWN_CACHE_TTL) {
+    try {
+      const bk = await serverGet(`/bankroll`, sport).catch(() => null);
+      if (bk?.initialBanca && bk?.currentBanca && bk.initialBanca > 0) {
+        const drawdown = (bk.initialBanca - bk.currentBanca) / bk.initialBanca;
+        _drawdownCache.set(sport, { pct: drawdown, checkedAt: Date.now() });
+        if (drawdown >= DRAWDOWN_HARD_LIMIT) {
+          log('WARN', 'RISK', `${sport}: drawdown ${(drawdown * 100).toFixed(1)}% ≥ ${DRAWDOWN_HARD_LIMIT * 100}% — BLOQUEADO`);
+          return { ok: false, units: 0, reason: `drawdown_${(drawdown * 100).toFixed(0)}pct` };
+        }
+        if (drawdown >= DRAWDOWN_SOFT_LIMIT) {
+          drawdownMult = 0.5;
+          log('INFO', 'RISK', `${sport}: drawdown ${(drawdown * 100).toFixed(1)}% ≥ ${DRAWDOWN_SOFT_LIMIT * 100}% — stakes ×0.5`);
+        }
+      }
+    } catch (_) {}
+  } else if (cached.pct >= DRAWDOWN_HARD_LIMIT) {
+    return { ok: false, units: 0, reason: `drawdown_${(cached.pct * 100).toFixed(0)}pct` };
+  } else if (cached.pct >= DRAWDOWN_SOFT_LIMIT) {
+    drawdownMult = 0.5;
+  }
+
   // Ajuste por liga (tier-2/3 = stake reduzido proporcionalmente)
   const leagueMult = (sport === 'esports' && leagueSlug) ? getLeagueRiskMultiplier(leagueSlug) : 1.0;
-  const adjusted = Math.max(0.5, Math.round(desiredUnits * leagueMult * 2) / 2);
-  if (leagueMult < 1.0 && adjusted !== desiredUnits) {
-    log('INFO', 'RISK', `Liga ${leagueSlug}: mult=${leagueMult} ${desiredUnits}u→${adjusted}u`);
+  const adjusted = Math.max(0.5, Math.round(desiredUnits * leagueMult * drawdownMult * 2) / 2);
+  const reason = drawdownMult < 1 ? 'drawdown_reduction' : leagueMult < 1 ? 'league_tier_reduction' : 'ok';
+  if (adjusted !== desiredUnits) {
+    log('INFO', 'RISK', `${sport}${leagueSlug ? ` (${leagueSlug})` : ''}: ${desiredUnits}u→${adjusted}u (league=${leagueMult} drawdown=${drawdownMult})`);
   }
-  return { ok: true, units: adjusted, reason: leagueMult < 1.0 ? `league_tier_reduction` : 'ok' };
+  return { ok: true, units: adjusted, reason };
 }
 
 // ── Send Helpers ──
@@ -896,18 +945,22 @@ async function runAutoAnalysis() {
             `${oddsLabel}${baixaNote}\n\n` +
             `⚠️ _Aposte com responsabilidade._`;
 
-          for (const [userId, prefs] of subscribedUsers) {
-            if (!prefs.has('esports')) continue;
-            try { await sendDM(esportsConfig.token, userId, tipMsg); }
-            catch(e) {
-              if (e.message?.includes('403')) {
-                subscribedUsers.delete(userId);
-                serverPost('/save-user', { userId: String(userId), subscribed: false }, 'esports').catch(() => {});
+          // Live: registra no DB mas NÃO envia DM (user não quer notificações live)
+          const isLiveTip = !!(result.hasLiveStats || match.status === 'live' || match.status === 'inprogress');
+          if (!isLiveTip) {
+            for (const [userId, prefs] of subscribedUsers) {
+              if (!prefs.has('esports')) continue;
+              try { await sendDM(esportsConfig.token, userId, tipMsg); }
+              catch(e) {
+                if (e.message?.includes('403')) {
+                  subscribedUsers.delete(userId);
+                  serverPost('/save-user', { userId: String(userId), subscribed: false }, 'esports').catch(() => {});
+                }
               }
             }
           }
           analyzedMatches.set(matchKey, { ts: now, tipSent: true });
-          log('INFO', 'AUTO-TIP', `Esports: ${tipTeam} @ ${tipOdd} (odds ${hasRealOdds ? 'reais' : 'estimadas'})`);
+          log('INFO', 'AUTO-TIP', `Esports${isLiveTip ? ' [LIVE-SILENT]' : ''}: ${tipTeam} @ ${tipOdd} (odds ${hasRealOdds ? 'reais' : 'estimadas'})`);
           // Log curto + variáveis consideradas (para auditoria)
           if (result.debugVars) {
             log('INFO', 'TIP-VARS', `${tipTeam} @ ${tipOdd} | ${result.tipReason || '-'} | ${match.team1} vs ${match.team2}`, result.debugVars);
@@ -1184,6 +1237,64 @@ async function runAutoAnalysis() {
   await refreshOpenTips(sharedCaches).catch(e => log('ERROR', 'AUTO', `Refresh internal: ${e.message}`));
 
   });
+}
+
+// ── Daily P&L Summary ──
+let _lastDailySummary = 0;
+async function sendDailySummary() {
+  // Roda 1x por dia, após 23:00 BRT (02:00 UTC)
+  const now = new Date();
+  const utcH = now.getUTCHours();
+  if (utcH < 2 || utcH > 3) return; // só entre 23:00-00:00 BRT
+  const todayKey = now.toISOString().slice(0, 10);
+  if (_lastDailySummary === todayKey) return;
+  _lastDailySummary = todayKey;
+
+  try {
+    const lines = ['📊 *Resumo Diário — SportsEdge Bot*\n'];
+    let totalProfit = 0, totalTips = 0, totalWins = 0;
+
+    for (const sportKey of Object.keys(SPORTS)) {
+      const cfg = SPORTS[sportKey];
+      if (!cfg?.enabled || !cfg?.token) continue;
+      const sport = sportKey === 'esports' ? 'esports' : sportKey;
+      try {
+        const roi = await serverGet(`/roi`, sport).catch(() => null);
+        if (!roi || !roi.total) continue;
+        const bk = roi.bankroll;
+        const dayTips = roi.total;
+        const dayWins = roi.wins || 0;
+        const dayLosses = roi.losses || 0;
+        const roiPct = roi.roi != null ? `${roi.roi >= 0 ? '+' : ''}${roi.roi}%` : '—';
+        const profitR = roi.profitReais != null ? `R$${roi.profitReais >= 0 ? '+' : ''}${roi.profitReais}` : '';
+        const bancaR = bk?.current != null ? `R$${bk.current}` : '';
+        const sportEmoji = { esports: '🎮', mma: '🥊', tennis: '🎾', football: '⚽', darts: '🎯', snooker: '🎱', tabletennis: '🏓', cs: '🔫' }[sportKey] || '📌';
+
+        lines.push(`${sportEmoji} *${sportKey.toUpperCase()}*: ${dayWins}W/${dayLosses}L (${dayTips} tips) | ROI ${roiPct} ${profitR} | Banca: ${bancaR}`);
+        totalProfit += (roi.profitReais || 0);
+        totalTips += dayTips;
+        totalWins += dayWins;
+      } catch (_) {}
+    }
+
+    if (totalTips === 0) return; // sem atividade no dia
+    lines.push(`\n💰 *Total*: ${totalTips} tips | ${totalWins}W | Profit: R$${totalProfit >= 0 ? '+' : ''}${totalProfit.toFixed(2)}`);
+
+    const msg = lines.join('\n');
+    // Envia para todos os sports tokens (usa o primeiro disponível)
+    for (const sportKey of Object.keys(SPORTS)) {
+      const cfg = SPORTS[sportKey];
+      if (!cfg?.enabled || !cfg?.token) continue;
+      for (const [uid, prefs] of subscribedUsers) {
+        if (!prefs.has(sportKey)) continue;
+        try { await sendDM(cfg.token, uid, msg); } catch(_) {}
+      }
+      break; // só precisa enviar uma vez
+    }
+    log('INFO', 'DAILY', `Resumo enviado: ${totalTips} tips, R$${totalProfit.toFixed(2)}`);
+  } catch(e) {
+    log('WARN', 'DAILY', `Erro no resumo diário: ${e.message}`);
+  }
 }
 
 // ── Odds movement alerts + Tip expiry ──
@@ -4439,14 +4550,15 @@ async function pollDota() {
   const token = esportsConfig.token;
   const DOTA_INTERVAL = 4 * 60 * 60 * 1000;
   const DOTA_LIVE_COOLDOWN = 3 * 60 * 1000; // re-analisa ao vivo a cada 3min
+  let _hasLiveDota = false;
 
   try {
     log('INFO', 'AUTO-DOTA', 'Iniciando verificação de partidas Dota 2...');
     const matches = await serverGet('/dota-matches').catch(() => []);
     if (!Array.isArray(matches) || !matches.length) {
       log('INFO', 'AUTO-DOTA', 'Sem partidas Dota 2 disponíveis');
-      return;
-    }
+      // não return — precisa chegar ao setTimeout no final
+    } else {
 
     const now = Date.now();
     const liveCount = matches.filter(m => m.status === 'live').length;
@@ -4461,6 +4573,7 @@ async function pollDota() {
     });
 
     const _hasLive = matches.some(m => m.status === 'live');
+    _hasLiveDota = _hasLive;
     if (_hasLive) _livePhaseEnter('dota');
     let _drained = false;
 
@@ -4513,6 +4626,7 @@ async function pollDota() {
         log('INFO', 'AUTO-DOTA', `Odds stale (${oddsAgeStr(o)}): ${match.team1} vs ${match.team2} — pulando`);
         continue;
       }
+      logOddsHistory('dota2', match.id, match.team1, match.team2, o);
 
       // ── Forma + H2H ──
       const [form1, form2, h2h] = await Promise.all([
@@ -4791,10 +4905,15 @@ Máximo 200 palavras.`;
       await _sleep(3000);
     }
     if (!_drained && _hasLive) _livePhaseExit('dota');
+    } // end else (has matches)
   } catch(e) {
     log('ERROR', 'AUTO-DOTA', e.message);
     _livePhaseExit('dota');
   }
+  // Dual-mode: 2min quando há live, 15min idle
+  const dotaNextMs = _hasLiveDota ? (2 * 60 * 1000) : (15 * 60 * 1000);
+  log('INFO', 'AUTO-DOTA', `Próximo ciclo em ${Math.round(dotaNextMs / 1000)}s (${_hasLiveDota ? 'LIVE' : 'idle'})`);
+  setTimeout(() => pollDota().catch(e => log('ERROR', 'AUTO-DOTA', e.message)), dotaNextMs);
 }
 
 // ── MMA Auto-analysis loop ──
@@ -5350,6 +5469,7 @@ async function pollTennis(runOnce = false) {
           log('INFO', 'AUTO-TENNIS', `Odds stale (${oddsAgeStr(o)}): ${match.team1} vs ${match.team2} — pulando`);
           continue;
         }
+        logOddsHistory('tennis', match.id, match.team1, match.team2, o);
 
         const matchTime = match.time ? new Date(match.time).toLocaleString('pt-BR', {
           timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit',
@@ -5798,7 +5918,10 @@ async function pollFootball(runOnce = false) {
   const sofascoreFootball = require('./lib/sofascore-football');
   const apiFootball = require('./lib/api-football');
 
-  const FOOTBALL_INTERVAL = 6 * 60 * 60 * 1000;
+  const FOOTBALL_PREGAME_INTERVAL = 6 * 60 * 60 * 1000;
+  const FOOTBALL_LIVE_INTERVAL = 10 * 60 * 1000; // live: re-análise a cada 10min
+  const FOOTBALL_POLL_LIVE_MS = 3 * 60 * 1000;  // polling: 3min quando há live
+  const FOOTBALL_POLL_IDLE_MS = 60 * 60 * 1000;  // polling: 1h idle
   const EV_THRESHOLD   = parseFloat(process.env.FOOTBALL_EV_THRESHOLD  || '5.0');
   const DRAW_MIN_ODDS  = parseFloat(process.env.FOOTBALL_DRAW_MIN_ODDS  || '2.80');
 
@@ -5842,7 +5965,9 @@ async function pollFootball(runOnce = false) {
         const key = `football_${match.id}`;
         const prev = analyzedFootball.get(key);
         if (prev?.tipSent) continue;
-        if (prev && (now - prev.ts < FOOTBALL_INTERVAL)) continue;
+        const isFbLiveMatch = match.status === 'live';
+        const fbCooldown = isFbLiveMatch ? FOOTBALL_LIVE_INTERVAL : FOOTBALL_PREGAME_INTERVAL;
+        if (prev && (now - prev.ts < fbCooldown)) continue;
 
         const o = match.odds;
         if (!o?.h || !o?.d || !o?.a) continue;
@@ -6206,7 +6331,12 @@ Máximo 200 palavras.`;
       log('ERROR', 'AUTO-FOOTBALL', e.message);
       _livePhaseExit('football');
     }
-    if (!runOnce) setTimeout(loop, 60 * 60 * 1000); // a cada 1h
+    if (!runOnce) {
+      const hadLiveFb = typeof _hasLiveFb !== 'undefined' && _hasLiveFb;
+      const nextMs = hadLiveFb ? FOOTBALL_POLL_LIVE_MS : FOOTBALL_POLL_IDLE_MS;
+      log('INFO', 'AUTO-FOOTBALL', `Próximo ciclo em ${Math.round(nextMs / 1000)}s (${hadLiveFb ? 'LIVE' : 'idle'})`);
+      setTimeout(loop, nextMs);
+    }
     return typeof matches !== 'undefined' ? matches : [];
   }
   const result = await loop();
@@ -7023,6 +7153,7 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   setInterval(() => {
     settleCompletedTips().catch(e => log('ERROR', 'SETTLE', e.message));
     checkPendingTipsAlerts().catch(e => log('WARN', 'ALERTS', e.message));
+    sendDailySummary().catch(e => log('WARN', 'DAILY', e.message));
   }, SETTLEMENT_INTERVAL);
 
   // Auto-tune de pesos ML: recalcWeights roda 1x/semana (segunda às 06:00 UTC).
