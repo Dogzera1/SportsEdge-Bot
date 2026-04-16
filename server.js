@@ -5814,13 +5814,14 @@ const server = http.createServer(async (req, res) => {
 
   if (p === '/seed-valorant-maps-from-vlr' && req.method === 'POST') {
     try {
+      const startPage = Math.max(1, Math.min(50, parseInt(parsed.query.startPage || '1', 10) || 1));
       const pages = Math.max(1, Math.min(10, parseInt(parsed.query.pages || '2', 10) || 2));
       const maxMatches = Math.max(5, Math.min(100, parseInt(parsed.query.max || '30', 10) || 30));
       const vlr = require('./lib/vlr');
 
       const seen = new Set();
       const allIds = [];
-      for (let pg = 1; pg <= pages; pg++) {
+      for (let pg = startPage; pg < startPage + pages; pg++) {
         const ids = await vlr.fetchResults(pg).catch(() => []);
         for (const id of ids) {
           if (!seen.has(id)) { seen.add(id); allIds.push(id); }
