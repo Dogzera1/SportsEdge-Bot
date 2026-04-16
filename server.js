@@ -4982,6 +4982,90 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // ── Resultado esports genérico (CS2 / Valorant) — settlement ──
+  // Suporta match_id em 2 formas:
+  //   <sport>_ps_<id>   → consulta direta PandaScore /<game>/matches/{id}
+  //   pin_<sport>_<id>  → match por nomes nos últimos finalizados (Pinnacle ID ≠ PS ID)
+  async function resolveEsportsResult({ sport, game, pandaPath, rawId, t1, t2, sentAt }) {
+    if (!PANDASCORE_TOKEN) return { resolved: false, error: 'PANDASCORE_TOKEN missing' };
+    const psMatch = rawId.match(new RegExp('^' + sport + '_ps_(\\d+)$'));
+    if (psMatch) {
+      const r = await httpGet(`https://api.pandascore.co/${pandaPath}/matches/${psMatch[1]}`, { 'Authorization': `Bearer ${PANDASCORE_TOKEN}` });
+      const m = safeParse(r.body, {});
+      const winner = m.winner?.name || null;
+      if (winner) {
+        const p1 = m.opponents?.[0]?.opponent?.name || t1 || '';
+        const p2 = m.opponents?.[1]?.opponent?.name || t2 || '';
+        stmts.upsertMatchResult.run(rawId, game, p1, p2, winner, '', m.league?.name || '');
+        return { resolved: true, winner };
+      }
+      return { resolved: false };
+    }
+    // Fallback por nomes — exige team1+team2
+    if (!t1 || !t2) return { resolved: false, error: 'team1/team2 obrigatórios para match_id sem ps_' };
+    const norm = s => String(s||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]/g,'');
+    const n1 = norm(t1), n2 = norm(t2);
+    const sentMs = sentAt ? Date.parse(sentAt) : NaN;
+    const sinceMs = Number.isFinite(sentMs) ? (sentMs - 12 * 3600 * 1000) : (Date.now() - 5 * 86400 * 1000);
+    const sinceIso = new Date(sinceMs).toISOString().slice(0, 19);
+    const untilIso = new Date(Date.now() + 3600 * 1000).toISOString().slice(0, 19);
+    for (let page = 1; page <= 3; page++) {
+      const url = `https://api.pandascore.co/${pandaPath}/matches/past?per_page=100&page=${page}&sort=-end_at&filter[finished]=true&range[end_at]=${encodeURIComponent(sinceIso)},${encodeURIComponent(untilIso)}`;
+      const r = await httpGet(url, { 'Authorization': `Bearer ${PANDASCORE_TOKEN}` }).catch(() => null);
+      if (!r || r.status !== 200) break;
+      const arr = safeParse(r.body, []);
+      if (!Array.isArray(arr) || !arr.length) break;
+      for (const m of arr) {
+        const a = m.opponents?.[0]?.opponent?.name || '';
+        const b = m.opponents?.[1]?.opponent?.name || '';
+        const na = norm(a), nb = norm(b);
+        if (!na || !nb) continue;
+        const matched =
+          (na.includes(n1) && nb.includes(n2)) || (na.includes(n2) && nb.includes(n1)) ||
+          (n1.includes(na) && n2.includes(nb)) || (n1.includes(nb) && n2.includes(na));
+        if (!matched) continue;
+        const winner = m.winner?.name;
+        if (winner) {
+          stmts.upsertMatchResult.run(rawId, game, a, b, winner, '', m.league?.name || '');
+          return { resolved: true, winner };
+        }
+      }
+      if (arr.length < 100) break;
+      await new Promise(r => setTimeout(r, 200));
+    }
+    return { resolved: false };
+  }
+
+  if (p === '/cs-result') {
+    const rawId = parsed.query.matchId || '';
+    const t1 = parsed.query.team1 || '';
+    const t2 = parsed.query.team2 || '';
+    const sentAt = parsed.query.sentAt || '';
+    if (!rawId) { sendJson(res, { resolved: false, error: 'matchId obrigatório' }, 400); return; }
+    try {
+      const r = await resolveEsportsResult({ sport: 'cs', game: 'cs', pandaPath: 'csgo', rawId, t1, t2, sentAt });
+      sendJson(res, { matchId: rawId, ...r });
+    } catch (e) {
+      sendJson(res, { matchId: rawId, resolved: false, error: e.message });
+    }
+    return;
+  }
+
+  if (p === '/valorant-result') {
+    const rawId = parsed.query.matchId || '';
+    const t1 = parsed.query.team1 || '';
+    const t2 = parsed.query.team2 || '';
+    const sentAt = parsed.query.sentAt || '';
+    if (!rawId) { sendJson(res, { resolved: false, error: 'matchId obrigatório' }, 400); return; }
+    try {
+      const r = await resolveEsportsResult({ sport: 'valorant', game: 'valorant', pandaPath: 'valorant', rawId, t1, t2, sentAt });
+      sendJson(res, { matchId: rawId, ...r });
+    } catch (e) {
+      sendJson(res, { matchId: rawId, resolved: false, error: e.message });
+    }
+    return;
+  }
+
   // ── Resultado Darts (settlement via Sofascore event status) ──
   if (p === '/darts-result') {
     const rawId = parsed.query.matchId || '';

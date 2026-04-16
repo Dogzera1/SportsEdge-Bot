@@ -1498,6 +1498,10 @@ async function settleCompletedTips() {
             endpoint = `/darts-result?matchId=${encodeURIComponent(tip.match_id)}`;
           } else if (sport === 'snooker') {
             endpoint = `/snooker-result?matchId=${encodeURIComponent(tip.match_id)}&team1=${encodeURIComponent(tip.participant1 || '')}&team2=${encodeURIComponent(tip.participant2 || '')}&sentAt=${encodeURIComponent(tip.sent_at || '')}`;
+          } else if (sport === 'cs') {
+            endpoint = `/cs-result?matchId=${encodeURIComponent(tip.match_id)}&team1=${encodeURIComponent(tip.participant1 || '')}&team2=${encodeURIComponent(tip.participant2 || '')}&sentAt=${encodeURIComponent(tip.sent_at || '')}`;
+          } else if (sport === 'valorant') {
+            endpoint = `/valorant-result?matchId=${encodeURIComponent(tip.match_id)}&team1=${encodeURIComponent(tip.participant1 || '')}&team2=${encodeURIComponent(tip.participant2 || '')}&sentAt=${encodeURIComponent(tip.sent_at || '')}`;
           } else {
             const mid = String(tip.match_id);
             if (mid.startsWith('dota2_')) {
