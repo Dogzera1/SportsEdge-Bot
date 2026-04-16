@@ -4476,11 +4476,17 @@ async function pollDota() {
       }
 
       // ── Pré-filtro ML ──
-      const mlResult = esportsPreFilter(match, o, enrich, isLive, dotaLiveContext, null);
+      // maxDivergence: Dota tier-2 com small-sample (3-0 vs 0-3) infla modelP; clamp a ±15pp
+      // impede a IA de derivar EV absurdo (>50%) que o sanity gate em bot.js rejeita.
+      const dotaMaxDiv = parseFloat(process.env.DOTA_ML_MAX_DIVERGENCE ?? '0.15') || 0.15;
+      const mlResult = esportsPreFilter(match, o, enrich, isLive, dotaLiveContext, null, null, { maxDivergence: dotaMaxDiv });
       if (!mlResult.pass) {
         log('INFO', 'AUTO-DOTA', `Pré-filtro: edge insuficiente (${mlResult.score.toFixed(1)}pp) para ${match.team1} vs ${match.team2}`);
         analyzedDota.set(key, { ts: now, tipSent: false, noEdge: true });
         continue;
+      }
+      if ((mlResult.rawEdge || 0) > 15) {
+        log('DEBUG', 'AUTO-DOTA', `ML edge bruto=${mlResult.rawEdge.toFixed(1)}pp (clamped→${mlResult.score.toFixed(1)}pp) | modelP1Raw=${(mlResult.modelP1Raw*100).toFixed(1)}% impliedP1=${(mlResult.impliedP1*100).toFixed(1)}% scorePts=${(mlResult.scorePoints||0).toFixed(1)} factors=[${(mlResult.factorActive||[]).join(',')}] ${match.team1} vs ${match.team2}`);
       }
 
       // ── Dados para o prompt ──
@@ -5162,11 +5168,15 @@ async function pollTennis(runOnce = false) {
   if (!tennisConfig?.enabled || !tennisConfig?.token) return;
   const token = tennisConfig.token;
 
-  // Live tênis mantém cooldown curto; pré-jogo usa TENNIS_PREGAME_INTERVAL_H (default 6h)
-  const TENNIS_INTERVAL = 2 * 60 * 60 * 1000; // live: 2h
+  // Live: cooldown curto (15min) para re-análise com score atualizado
+  // Pré-jogo: usa TENNIS_PREGAME_INTERVAL_H (default 6h)
+  const TENNIS_LIVE_INTERVAL = Math.max(1, parseInt(process.env.TENNIS_LIVE_INTERVAL_MIN || '15', 10)) * 60 * 1000; // 15min default
   const TENNIS_PREGAME_INTERVAL = Math.max(1, parseInt(process.env.TENNIS_PREGAME_INTERVAL_H || '6', 10) || 6) * 60 * 60 * 1000;
   const TENNIS_GATE_MIN_ODDS = parseFloat(process.env.TENNIS_MIN_ODDS ?? '1.40');
   const TENNIS_GATE_MAX_ODDS = parseFloat(process.env.TENNIS_MAX_ODDS ?? '5.00');
+  // Dual-mode polling: 3min quando há live, 30min quando só upcoming
+  const TENNIS_POLL_LIVE_MS = Math.max(60, parseInt(process.env.TENNIS_POLL_LIVE_SEC || '180', 10)) * 1000; // 3min
+  const TENNIS_POLL_IDLE_MS = 30 * 60 * 1000; // 30min
 
   async function loop() {
     try {
@@ -5204,8 +5214,8 @@ async function pollTennis(runOnce = false) {
         const key = `tennis_${match.id}`;
         const prev = analyzedTennis.get(key);
         if (prev?.tipSent) continue;
-        // Live: 2h | Pré-jogo: 6h (configurável via TENNIS_PREGAME_INTERVAL_H) — economia de tokens
-        const cooldown = match.status === 'live' ? TENNIS_INTERVAL : TENNIS_PREGAME_INTERVAL;
+        // Live: 15min | Pré-jogo: 6h (configurável)
+        const cooldown = match.status === 'live' ? TENNIS_LIVE_INTERVAL : TENNIS_PREGAME_INTERVAL;
         if (prev && (now - prev.ts < cooldown)) continue;
 
         const o = match.odds;
@@ -5271,6 +5281,7 @@ async function pollTennis(runOnce = false) {
         // Sofascore enrichment (cobertura superior a ESPN em challengers/WTA 250/ITF)
         let sofaEnrich = null;
         let serveStats1 = null, serveStats2 = null;
+        let liveScoreData = null;
         try {
           const sofascoreTennis = require('./lib/sofascore-tennis');
           sofaEnrich = await sofascoreTennis.enrichMatch(match.team1, match.team2, match.time).catch(() => null);
@@ -5281,6 +5292,24 @@ async function pollTennis(runOnce = false) {
               sofaEnrich.player1Id ? sofascoreTennis.getPlayerServeStats(sofaEnrich.player1Id, 5).catch(() => null) : null,
               sofaEnrich.player2Id ? sofascoreTennis.getPlayerServeStats(sofaEnrich.player2Id, 5).catch(() => null) : null,
             ]);
+            // Live score: placar em tempo real para partidas ao vivo
+            if (isLiveTennis) {
+              liveScoreData = await sofascoreTennis.getLiveScore(sofaEnrich.eventId).catch(() => null);
+              if (liveScoreData?.isLive) {
+                log('DEBUG', 'AUTO-TENNIS', `Live score ${match.team1} vs ${match.team2}: sets ${liveScoreData.setsHome}-${liveScoreData.setsAway} | set ${liveScoreData.currentSet}`);
+              } else if (liveScoreData?.isFinished) {
+                log('INFO', 'AUTO-TENNIS', `Partida já finalizada (Sofascore): ${match.team1} vs ${match.team2} — pulando`);
+                await new Promise(r => setTimeout(r, 500)); continue;
+              }
+            }
+          } else if (isLiveTennis) {
+            // Tenta buscar live score diretamente sem enrichMatch (pode ser mais rápido)
+            liveScoreData = await sofascoreTennis.getLiveMatchScore(match.team1, match.team2, match.time).catch(() => null);
+            if (liveScoreData) liveScoreData = liveScoreData.liveScore;
+            if (liveScoreData?.isFinished) {
+              log('INFO', 'AUTO-TENNIS', `Partida já finalizada (Sofascore direct): ${match.team1} vs ${match.team2} — pulando`);
+              await new Promise(r => setTimeout(r, 500)); continue;
+            }
           }
         } catch (_) {}
 
@@ -5370,6 +5399,30 @@ async function pollTennis(runOnce = false) {
            dataSection += `\nForma geral (${match.team2}): ${dbForm2.wins}W-${dbForm2.losses}L (${dbForm2.winRate}%)`;
         }
 
+        // Live score section — placar e momentum em tempo real
+        if (isLiveTennis && liveScoreData?.isLive) {
+          const ls = liveScoreData;
+          const setsLine = ls.sets.map(s => `${s.home}-${s.away}`).join(', ');
+          const gameLine = (ls.currentGameHome != null && ls.currentGameAway != null)
+            ? `Game atual: ${ls.currentGameHome}-${ls.currentGameAway}` : '';
+          const servingLine = ls.serving === 'home' ? `Sacando: ${match.team1}` : ls.serving === 'away' ? `Sacando: ${match.team2}` : '';
+          // Momentum: quem ganhou mais games no set atual
+          const curSet = ls.sets[ls.sets.length - 1];
+          let momentumLine = '';
+          if (curSet) {
+            const diff = curSet.home - curSet.away;
+            if (Math.abs(diff) >= 2) {
+              momentumLine = `Momentum: ${diff > 0 ? match.team1 : match.team2} lidera ${Math.max(curSet.home, curSet.away)}-${Math.min(curSet.home, curSet.away)} no set atual`;
+            }
+          }
+          dataSection += `\n\nPLACAR AO VIVO:`;
+          dataSection += `\nSets: ${match.team1} ${ls.setsHome} x ${ls.setsAway} ${match.team2}`;
+          if (setsLine) dataSection += `\nDetalhe sets: ${setsLine}`;
+          if (gameLine) dataSection += `\n${gameLine}`;
+          if (servingLine) dataSection += `\n${servingLine}`;
+          if (momentumLine) dataSection += `\n${momentumLine}`;
+        }
+
         // Serve/return stats (últimos 5 matches — identifica specialists de superfície com saque fraco)
         const fmtServe = (name, s) => {
           if (!s || s.games < 2) return null;
@@ -5389,6 +5442,16 @@ async function pollTennis(runOnce = false) {
 
         const newsSectionTennis = await fetchMatchNews('tennis', match.team1, match.team2).catch(() => '');
 
+        const hasLiveScore = isLiveTennis && liveScoreData?.isLive;
+        const liveInstructions = hasLiveScore ? `
+ANÁLISE IN-PLAY (PARTIDA AO VIVO):
+- O placar atual está nos DADOS acima. Use-o para avaliar momentum e probabilidade condicional.
+- Considere: quem está sacando, vantagem de break, sets já ganhos.
+- Odds ao vivo já refletem o placar — edge in-play requer análise mais profunda (fadiga, estilo vs momento do jogo, clutch ability).
+- Se um jogador perdeu o 1º set mas é favorito claro no Elo, pode haver valor se odds reagiram excessivamente.
+- Se placar é equilibrado e odds são próximas: SEM_EDGE (mercado eficiente in-play).
+` : '';
+
         const prompt = `Você é um analista especializado em tênis profissional. Seja MUITO conservador — prefira SEM_EDGE a apostar em margem duvidosa. Só dê tip quando o edge for claro e robusto.
 
 PARTIDA: ${match.team1} vs ${match.team2}
@@ -5401,7 +5464,7 @@ Margem bookie: ${marginPct}%
 ${fairOddsLineTennis}
 ${isFav1 ? match.team1 : match.team2} é o favorito do mercado.
 
-${dataSection ? `DADOS REAIS (ESPN/DB):\n${dataSection}\n` : 'AVISO: sem dados ESPN/DB disponíveis — use apenas conhecimento de treino confiável.\n'}${newsSectionTennis ? `${newsSectionTennis}\n` : ''}
+${dataSection ? `DADOS REAIS (ESPN/DB):\n${dataSection}\n` : 'AVISO: sem dados ESPN/DB disponíveis — use apenas conhecimento de treino confiável.\n'}${newsSectionTennis ? `${newsSectionTennis}\n` : ''}${liveInstructions}
 INSTRUÇÕES:
 1. Analise: ranking, superfície (peso ALTO — clay specialists, grass specialists), H2H direto, forma recente (últimos 5 jogos), estilo de jogo vs superfície.
 2. O modelo Elo calculou: ${match.team1}=${modelP1Tennis}% | ${match.team2}=${modelP2Tennis}% (${fairLabelTennis}).
@@ -5508,10 +5571,19 @@ Máximo 200 palavras. Raciocínio breve antes da decisão.`;
         const whyLineTennis = tipReasonTennis ? `\n🧠 Por quê: _${tipReasonTennis}_\n` : '\n';
         const minTakeOdds = calcMinTakeOdds(tipOdd);
         const minTakeLine = minTakeOdds ? `📉 Odd mínima: *${minTakeOdds}*\n` : '';
-        const tipMsg = `🎾 💰 *TIP TÊNIS${isLiveTennis ? ' (AO VIVO)' : ''}*\n` +
+        // Linha de placar live na mensagem do Telegram
+        let liveScoreLine = '';
+        if (hasLiveScore) {
+          const ls = liveScoreData;
+          const setsDetail = ls.sets.map(s => `${s.home}-${s.away}`).join(' · ');
+          liveScoreLine = `📊 Placar: *${ls.setsHome}-${ls.setsAway}* (${setsDetail})\n`;
+        }
+
+        const tipMsg = `🎾 💰 *TIP TÊNIS${isLiveTennis ? ' (AO VIVO 🔴)' : ''}*\n` +
           `*${match.team1}* vs *${match.team2}*\n` +
           `📋 ${match.league}${grandSlamBadge}\n` +
-          `${surfaceEmoji} ${surface.charAt(0).toUpperCase() + surface.slice(1)} | 🕐 ${matchTime} (BRT)\n\n` +
+          `${surfaceEmoji} ${surface.charAt(0).toUpperCase() + surface.slice(1)} | 🕐 ${matchTime} (BRT)\n` +
+          liveScoreLine + '\n' +
           whyLineTennis +
           `🎯 Aposta: *${tipPlayer}* @ *${tipOdd}*\n` +
           minTakeLine +
@@ -5572,7 +5644,13 @@ Máximo 200 palavras. Raciocínio breve antes da decisão.`;
       log('ERROR', 'AUTO-TENNIS', e.message);
       _livePhaseExit('tennis');
     }
-    if (!runOnce) setTimeout(loop, 30 * 60 * 1000); // verifica a cada 30min
+    // Dual-mode: ciclo rápido (3min) se havia partidas live, lento (30min) se só upcoming
+    if (!runOnce) {
+      const hadLive = typeof _hasLiveT !== 'undefined' && _hasLiveT;
+      const nextMs = hadLive ? TENNIS_POLL_LIVE_MS : TENNIS_POLL_IDLE_MS;
+      log('INFO', 'AUTO-TENNIS', `Próximo ciclo em ${Math.round(nextMs / 1000)}s (${hadLive ? 'LIVE mode' : 'idle mode'})`);
+      setTimeout(loop, nextMs);
+    }
     return typeof matches !== 'undefined' ? matches : [];
   }
   const result = await loop();

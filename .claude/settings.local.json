@@ -111,7 +111,21 @@
       "Bash(cat \"C:\\\\\\\\Users\\\\\\\\vict_\\\\\\\\AppData\\\\\\\\Local\\\\\\\\Temp\\\\\\\\claude\\\\\\\\C--Users-vict--Desktop-lol-betting\\\\\\\\8e375339-d3c5-4558-a9f2-becbd79290e1\\\\\\\\tasks\\\\\\\\ba7ozhd66.output\")",
       "Bash(powershell -Command 'Get-NetTCPConnection -LocalPort 7777 -ErrorAction SilentlyContinue | Select-Object OwningProcess | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }')",
       "Bash(powershell -Command 'Get-NetTCPConnection -LocalPort 7777 -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }')",
-      "Bash(grep -iE \"in \\\\\\(|case |\\\\\\\\?\\\\\\\\?|=== ?'\")"
+      "Bash(grep -iE \"in \\\\\\(|case |\\\\\\\\?\\\\\\\\?|=== ?'\")",
+      "Bash(ls -la \"C:/Users/vict_/AppData/Local/Temp/m\"*.json)",
+      "Bash(awk '/async function pollDota/{flag=1; line=NR} flag && /^}/{print NR; flag=0; exit}' bot.js)",
+      "Bash(awk '/async function pollTennis/{flag=1} flag && /^  const result = await loop\\\\\\(\\\\\\)/{print NR; exit}' bot.js)",
+      "Bash(awk '/async function pollTableTennis/{flag=1} flag && /^  const result = await loop/{print NR; exit}' bot.js)",
+      "Bash(awk '/async function pollCs/{flag=1} flag && /^  const result = await loop/{print NR; exit}' bot.js)",
+      "Bash(awk '/async function pollMma/{flag=1} flag && /^  const result = await loop/{print NR; exit}' bot.js)",
+      "Bash(awk '/async function pollFootball/{flag=1} flag && /^  const result = await loop/{print NR; exit}' bot.js)",
+      "WebFetch(domain:www.postman.com)",
+      "WebFetch(domain:rapidapi.com)",
+      "WebFetch(domain:sportdevs.com)",
+      "WebFetch(domain:www.sportdevs.com)",
+      "Bash(ls .env*)",
+      "Bash(echo \"CURL_FAILED: $?\")",
+      "Bash(echo \"EXIT:$?\")"
     ]
   }
 }

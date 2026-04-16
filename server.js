@@ -969,9 +969,9 @@ async function fetchMapOddsByFixtureId(fixtureId, mapNumber) {
 let _footballMatchesCache = null; // { matches: Array, ts: number }
 const FOOTBALL_MATCHES_CACHE_TTL = 8 * 60 * 60 * 1000; // 8h
 
-// Cache de /tennis-matches — evita 17 chamadas à API por cada pressão de botão
+// Cache de /tennis-matches — reduzido para suportar live polling rápido (3min)
 let _tennisMatchesCache = null; // { matches: Array, ts: number }
-const TENNIS_MATCHES_CACHE_TTL = 10 * 60 * 1000; // 10 min (auto-tennis roda a cada ~6 min)
+const TENNIS_MATCHES_CACHE_TTL = 3 * 60 * 1000; // 3 min
 
 // Backoff em caso de 429
 let esportsBackoffUntil = 0;
@@ -3443,8 +3443,23 @@ const server = http.createServer(async (req, res) => {
         else if (g.winner.id === t2?.id) s2++;
       }
 
-      // Jogadores do game ativo
-      const players = Array.isArray(activeGame.players) ? activeGame.players : [];
+      // Jogadores do game ativo — tenta match-level primeiro, fallback game-level se gold=0
+      let players = Array.isArray(activeGame.players) ? activeGame.players : [];
+
+      // Se game running mas sem gold, tenta /lol/games/{gameId} que pode ter dados mais frescos
+      if (activeGame.status === 'running' && activeGame.id && !players.some(pl => pl.total_gold > 0)) {
+        try {
+          const gr = await httpGet(`https://api.pandascore.co/lol/games/${activeGame.id}`, headers);
+          if (gr.status === 200) {
+            const gd = safeParse(gr.body, {});
+            const gPlayers = Array.isArray(gd.players) ? gd.players : [];
+            if (gPlayers.some(pl => pl.total_gold > 0)) {
+              players = gPlayers;
+              log('INFO', 'PS-COMPS', `Game-level fallback ${activeGame.id}: gold found via /lol/games/`);
+            }
+          }
+        } catch (_) {}
+      }
 
       function buildTeam(teamObj, side) {
         const teamId = teamObj?.id;
@@ -3799,7 +3814,8 @@ const server = http.createServer(async (req, res) => {
 
       // 2) Varredura paralela. DESCOBERTA 2026-04-15: Riot retém livestats em janela curta
       //    (~15-100s). Timestamps mais antigos retornam 204. Prioriza janelas recentes.
-      const scanDelays = [30, 45, 60, 75, 90, 15, 120, 150, 180, 240, 300, 600, 1200];
+      //    Adicionado 5s/10s: janela de Riot pode ser ainda mais apertada (~5-30s).
+      const scanDelays = [5, 10, 15, 20, 30, 45, 60, 75, 90, 120, 150, 180, 240, 300, 600, 1200];
       let frames = [];
       let usedTs = null;
       let statsDisabled = false;
@@ -3836,9 +3852,11 @@ const server = http.createServer(async (req, res) => {
         // Rebaixado pra DEBUG para não poluir log.
         log('DEBUG', 'LIVE-GAME', `window/${gameId}: Stats DISABLED pela Riot — draft=${hasDraft ? 'ok' : 'no'}`);
       } else if (usedTs === null) {
-        // 204 em todas as janelas é esperado em ligas tier-2 sem feed público da Riot.
-        // Log em DEBUG para não poluir — stats simplesmente não existem.
-        log('DEBUG', 'LIVE-GAME', `window/${gameId}: varredura sem gold (frames=${frames.length}, draft=${hasDraft ? 'ok' : 'no'}, scan: ${scanStatuses.join(',')})`);
+        // 204 em todas as janelas — provável liga sem feed público ou jogo ainda no draft
+        const has200 = scanResults.filter(r => r.status === 200).length;
+        const has204 = scanResults.filter(r => r.status === 204).length;
+        const logLevel = has200 > 0 ? 'INFO' : 'DEBUG';
+        log(logLevel, 'LIVE-GAME', `window/${gameId}: sem gold (200s=${has200} 204s=${has204} frames=${frames.length}, draft=${hasDraft ? 'ok' : 'no'}, melhor: ${scanStatuses.slice(0, 6).join(',')})`);
       } else {
         log('INFO', 'LIVE-GAME', `window/${gameId}: gold encontrado a ${usedTs}s atrás (${frames.length} frames)`);
       }
@@ -7264,6 +7282,8 @@ const server = http.createServer(async (req, res) => {
           const o1 = out.find(o => o.name === e.home_team);
           const o2 = out.find(o => o.name === e.away_team);
           if (!o1 || !o2) continue;
+          // Completed events são descartados — não queremos analisar partidas já finalizadas
+          if (e.completed) continue;
           matches.push({
             id: e.id,
             game: 'tennis',

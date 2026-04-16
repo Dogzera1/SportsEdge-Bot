@@ -34,6 +34,8 @@ const clients = new Set();
 let child = null;
 let childStartedAt = null;
 let lastError = null;
+let lastLineAt = Date.now();
+const STALE_THRESHOLD_MS = parseInt(process.env.STALE_THRESHOLD_MS || String(2 * 60 * 1000), 10); // 2min sem log = morto
 
 function classify(line) {
   const l = String(line || '');
@@ -75,6 +77,7 @@ function pushLine(raw) {
   };
   buffer.push(entry);
   if (buffer.length > BUFFER_MAX) buffer.splice(0, buffer.length - BUFFER_MAX);
+  lastLineAt = Date.now();
   const payload = `data: ${JSON.stringify(entry)}\n\n`;
   for (const res of clients) {
     try { res.write(payload); } catch (_) { /* ignore */ }
@@ -406,6 +409,17 @@ const server = http.createServer((req, res) => {
 
 server.listen(PORT, () => {
   console.log(`[logs-dashboard] http://localhost:${PORT}`);
-  console.log(`[logs-dashboard] buffer=${BUFFER_MAX} service=${SERVICE || '(default)'}`);
+  console.log(`[logs-dashboard] buffer=${BUFFER_MAX} service=${SERVICE || '(default)'} stale_threshold=${STALE_THRESHOLD_MS}ms`);
   startChild();
+
+  // Watchdog: detecta subprocess silent-hung (railway CLI drops stream sem exit event).
+  // Se nenhum log chega em STALE_THRESHOLD_MS, força restart.
+  setInterval(() => {
+    const since = Date.now() - lastLineAt;
+    if (since > STALE_THRESHOLD_MS && child) {
+      pushLine(`[dashboard] watchdog: sem logs há ${Math.round(since/1000)}s → restart subprocess`);
+      lastLineAt = Date.now(); // evita trigger duplo
+      startChild();
+    }
+  }, 30 * 1000);
 });
