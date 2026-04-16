@@ -10,6 +10,9 @@ const { SPORTS, getSportById, getSportByToken, getTokenToSportMap } = require('.
 const { log, calcKelly, calcKellyFraction, calcKellyWithP, norm, fmtDate, fmtDateTime, fmtDuration, safeParse, cachedHttpGet } = require('./lib/utils');
 const { adjustStakeUnits } = require('./lib/risk-manager');
 const { esportsPreFilter } = require('./lib/ml');
+const { getLolProbability } = require('./lib/lol-model');
+const { getFootballProbability } = require('./lib/football-model');
+const { getTennisProbability, detectSurface } = require('./lib/tennis-model');
 const { fetchMatchNews } = require('./lib/news');
 const { tennisPairMatchesPlayers } = require('./lib/tennis-match');
 
@@ -2182,6 +2185,38 @@ async function autoAnalyzeMatch(token, match) {
     // Retorna { pass, direction, score, t1Edge, t2Edge }
     const mlPrefilterOn = (process.env.LOL_ML_PREFILTER ?? 'true') !== 'false';
     const mlResult = esportsPreFilter(match, oddsToUse, enrich, hasLiveStats, gamesContext, compScore);
+
+    // ── Layer 1b: Modelo LoL específico (Elo + Draft + Form) ──
+    // Gera probabilidades melhores que o ML genérico. Usado para:
+    // 1. Resgatar matches que o ML genérico rejeitou mas o modelo específico vê edge
+    // 2. Melhorar a estimativa de P para Kelly sizing
+    let lolModel = null;
+    try {
+      lolModel = getLolProbability(db, match, oddsToUse, enrich, compScore);
+      if (lolModel && lolModel.confidence > 0.3) {
+        // Merge: se o modelo específico tem confiança alta, usa suas probabilidades
+        if (lolModel.modelP1 > 0 && lolModel.modelP2 > 0) {
+          mlResult.modelP1 = mlResult.modelP1 > 0
+            ? mlResult.modelP1 * 0.4 + lolModel.modelP1 * 0.6  // blend: 60% modelo específico
+            : lolModel.modelP1;
+          mlResult.modelP2 = 1 - mlResult.modelP1;
+        }
+        // Se modelo específico vê edge forte (>5pp) e ML genérico rejeitou, resgata
+        const lolEdge = Math.abs(lolModel.modelP1 - lolModel.modelP2) > 0
+          ? Math.max(
+              (lolModel.modelP1 - (1 / parseFloat(oddsToUse?.t1 || 2))) * 100,
+              (lolModel.modelP2 - (1 / parseFloat(oddsToUse?.t2 || 2))) * 100
+            ) : 0;
+        if (!mlResult.pass && lolEdge >= 5 && lolModel.confidence >= 0.5) {
+          mlResult.pass = true;
+          mlResult.score = lolEdge;
+          mlResult.direction = lolModel.modelP1 > lolModel.modelP2 ? 't1' : 't2';
+          log('INFO', 'AUTO', `Modelo LoL resgatou: ${match.team1} vs ${match.team2} | edge=${lolEdge.toFixed(1)}pp conf=${lolModel.confidence.toFixed(2)} method=${lolModel.method}`);
+        }
+        log('DEBUG', 'LOL-MODEL', `${match.team1} vs ${match.team2}: P1=${(lolModel.modelP1*100).toFixed(1)}% conf=${lolModel.confidence.toFixed(2)} factors=${lolModel.factors?.join('+')}`);
+      }
+    } catch(e) { log('DEBUG', 'LOL-MODEL', `Erro: ${e.message}`); }
+
     if (mlPrefilterOn && !mlResult.pass) {
       log('INFO', 'AUTO', `Pré-filtro ML: edge insuficiente (${mlResult.score.toFixed(1)}pp) para ${match.team1} vs ${match.team2}. Pulando IA.`);
       return null;
@@ -5597,9 +5632,52 @@ async function pollTennis(runOnce = false) {
         // Usa override ML env para tênis com base 4.0pp — exige edge mais robusto para reduzir false positives
         const envScoreBase = process.env.TENNIS_MIN_EDGE ? parseFloat(process.env.TENNIS_MIN_EDGE) : 4.0;
 
+        // ── Modelo Tennis Específico (Elo + Serve/Return + Fatigue + H2H Surface) ──
+        let tennisModelResult = null;
+        try {
+          const surfaceForModel = detectSurface(match.league || '');
+          const tennisModelEnrich = {
+            ...tennisEnrich,
+            ranking1: rank1 ? parseInt(String(rank1).replace(/[^\d]/g, ''), 10) || null : null,
+            ranking2: rank2 ? parseInt(String(rank2).replace(/[^\d]/g, ''), 10) || null : null,
+            serveStats1, serveStats2,
+          };
+          tennisModelResult = getTennisProbability(db, match, o, tennisModelEnrich, surfaceForModel || surface);
+          if (tennisModelResult && tennisModelResult.confidence > 0.3) {
+            log('DEBUG', 'TENNIS-MODEL', `${match.team1} vs ${match.team2}: P1=${(tennisModelResult.modelP1*100).toFixed(1)}% conf=${tennisModelResult.confidence.toFixed(2)} factors=${tennisModelResult.factors?.join('+')}`);
+          }
+        } catch(e) { log('DEBUG', 'TENNIS-MODEL', `Erro: ${e.message}`); }
+
         let mlResultTennis;
-        if (eloResult && eloResult.found1 && eloResult.found2) {
-          // Use Elo model result directly — requires both players in DB
+        if (tennisModelResult && tennisModelResult.confidence >= 0.4) {
+          // Modelo específico de tennis tem confiança suficiente — usar como primário
+          const edgePp = Math.max(
+            (tennisModelResult.modelP1 - (r1 / totalVig)) * 100,
+            (tennisModelResult.modelP2 - (r2 / totalVig)) * 100
+          );
+          mlResultTennis = {
+            pass: edgePp >= envScoreBase,
+            modelP1: tennisModelResult.modelP1,
+            modelP2: tennisModelResult.modelP2,
+            score: edgePp,
+            factorCount: tennisModelResult.factors?.length || 1,
+            direction: tennisModelResult.modelP1 > tennisModelResult.modelP2 ? 't1' : 't2',
+            _tennisModel: tennisModelResult,
+            _eloResult: eloResult,
+          };
+          // Se Elo antigo também está disponível, faz blend
+          if (eloResult && eloResult.found1 && eloResult.found2 && eloResult.score > 0) {
+            mlResultTennis.modelP1 = mlResultTennis.modelP1 * 0.6 + eloResult.modelP1 * 0.4;
+            mlResultTennis.modelP2 = 1 - mlResultTennis.modelP1;
+            const blendEdge = Math.max(
+              (mlResultTennis.modelP1 - (r1 / totalVig)) * 100,
+              (mlResultTennis.modelP2 - (r2 / totalVig)) * 100
+            );
+            mlResultTennis.score = blendEdge;
+            mlResultTennis.pass = blendEdge >= envScoreBase;
+          }
+        } else if (eloResult && eloResult.found1 && eloResult.found2) {
+          // Fallback: Elo antigo (sem modelo específico com confiança)
           mlResultTennis = {
             pass: eloResult.score >= envScoreBase,
             modelP1: eloResult.modelP1,
@@ -5610,9 +5688,8 @@ async function pollTennis(runOnce = false) {
             _eloResult: eloResult,
           };
         } else {
-          // Fallback to ranking-based esportsPreFilter
+          // Fallback: ranking-based esportsPreFilter
           mlResultTennis = esportsPreFilter(match, o, tennisEnrich || { form1: null, form2: null, h2h: null, oddsMovement: null }, false, '', null);
-          // Substituindo a verificação de edge baseada em LoL para o padrão do tênis (2.5pp)
           if (mlResultTennis.factorCount >= 1 && mlResultTennis.score < envScoreBase) {
             mlResultTennis.pass = false;
           } else {
@@ -6153,6 +6230,31 @@ async function pollFootball(runOnce = false) {
           oddsInput,
           { leagueId: fixtureInfo?.leagueId ?? null }
         );
+
+        // ── Modelo Football Específico (Poisson + Elo + Form) ──
+        let fbModel = null;
+        try {
+          const fbEnrich = {
+            form1: homeFormData, form2: awayFormData,
+            h2h: h2hData, standings: standingsData,
+          };
+          fbModel = getFootballProbability(db, match, o, fbEnrich);
+          if (fbModel && fbModel.confidence > 0.3) {
+            log('DEBUG', 'FB-MODEL', `${match.team1} vs ${match.team2}: pH=${(fbModel.pH*100).toFixed(1)}% pD=${(fbModel.pD*100).toFixed(1)}% pA=${(fbModel.pA*100).toFixed(1)}% conf=${fbModel.confidence.toFixed(2)} method=${fbModel.method}`);
+            // Melhorar estimativa do mlScore com probabilidades do modelo Poisson
+            if (mlScore && fbModel.pH > 0 && fbModel.pD > 0 && fbModel.pA > 0) {
+              // Blend: 60% modelo específico, 40% ML genérico (quando disponível)
+              const blend = 0.6;
+              if (mlScore.pH) mlScore.pH = mlScore.pH * (1 - blend) + fbModel.pH * blend;
+              if (mlScore.pD) mlScore.pD = mlScore.pD * (1 - blend) + fbModel.pD * blend;
+              if (mlScore.pA) mlScore.pA = mlScore.pA * (1 - blend) + fbModel.pA * blend;
+              // Normalizar
+              const total = (mlScore.pH || 0) + (mlScore.pD || 0) + (mlScore.pA || 0);
+              if (total > 0) { mlScore.pH /= total; mlScore.pD /= total; mlScore.pA /= total; }
+              mlScore._fbModel = fbModel;
+            }
+          }
+        } catch(e) { log('DEBUG', 'FB-MODEL', `Erro: ${e.message}`); }
 
         // Se temos dados reais e o ML diz sem edge → pular (economiza chamada de IA)
         if (fixtureInfo && !mlScore.pass) {
