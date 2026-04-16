@@ -4591,7 +4591,8 @@ const server = http.createServer(async (req, res) => {
   // perguntar "esse jogo tem live stats/odd Pinnacle?" a cada partida.
   if (p === '/live-snapshot') {
     try {
-      const base = `http://127.0.0.1:${PORT}`;
+      const selfPort = (req.socket && req.socket.localPort) || PORT;
+      const base = `http://127.0.0.1:${selfPort}`;
       const sources = [
         { sport: 'lol',      path: '/lol-matches' },
         { sport: 'dota',     path: '/dota-matches' },
@@ -4707,7 +4708,9 @@ const server = http.createServer(async (req, res) => {
   // Consumido pelo card "Próximos Jogos" do dashboard.
   if (p === '/upcoming-snapshot') {
     try {
-      const base = `http://127.0.0.1:${PORT}`;
+      // Usa a porta real do request pra self-fetch (evita divergência entre PORT env e porta efetiva).
+      const selfPort = (req.socket && req.socket.localPort) || PORT;
+      const base = `http://127.0.0.1:${selfPort}`;
       const sources = [
         { sport: 'lol',      path: '/lol-matches' },
         { sport: 'dota',     path: '/dota-matches' },

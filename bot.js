@@ -5544,7 +5544,7 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
           await new Promise(r => setTimeout(r, 3000)); continue;
         }
         const desiredUnitsMma = parseFloat(kellyStakeMma) || 0;
-        const riskAdjMma = await applyGlobalRisk('mma', desiredUnitsMma, match.league);
+        const riskAdjMma = await applyGlobalRisk('mma', desiredUnitsMma, fight.league);
         if (!riskAdjMma.ok) { log('INFO', 'RISK', `mma: bloqueada (${riskAdjMma.reason})`); await new Promise(r => setTimeout(r, 3000)); continue; }
         const tipStakeAdjMma = String(riskAdjMma.units.toFixed(1).replace(/\.0$/, ''));
 
