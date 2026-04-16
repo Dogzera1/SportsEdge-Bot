@@ -1,2 +1,2 @@
 [phases.setup]
-nixPkgs = ["python3", "gcc", "gnumake", "pkg-config"]
+nixPkgs = ["nodejs_22", "npm-9_x", "python3", "gcc", "gnumake", "pkg-config"]
