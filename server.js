@@ -5501,7 +5501,8 @@ const server = http.createServer(async (req, res) => {
 
   // Reanalisa tips Darts pendentes contra os gates atuais.
   //   - EV ≤ 0% → void (edge fechou)
-  //   - EV < 3% → void (gate base)
+  //   - EV < 5% → void (gate base alinhado com MMA; ajustável via DARTS_MIN_EV)
+  //   - conf BAIXA + EV < 8% → void (single-factor tips só passam com EV forte)
   //   - EV ≥ 30% sem conf ALTA → void (sanity)
   //   - odds fora 1.20-6.00 → void
   if (p === '/void-bad-darts' && req.method === 'POST') {
@@ -5514,7 +5515,9 @@ const server = http.createServer(async (req, res) => {
          WHERE sport='darts' AND result IS NULL
          ORDER BY sent_at DESC`
       ).all();
-      const MIN_EV = 3.0, MIN_ODDS = 1.20, MAX_ODDS = 6.00, SANITY_MAX_EV = 30.0;
+      const MIN_EV = parseFloat(process.env.DARTS_MIN_EV || '5');
+      const BAIXA_MIN_EV = 8.0;
+      const MIN_ODDS = 1.20, MAX_ODDS = 6.00, SANITY_MAX_EV = 30.0;
       const evaluate = (t) => {
         const reasons = [];
         const effectiveEv = Number.isFinite(parseFloat(t.current_ev)) ? parseFloat(t.current_ev) : parseFloat(t.ev);
@@ -5522,6 +5525,7 @@ const server = http.createServer(async (req, res) => {
         const conf = String(t.confidence || '').toUpperCase();
         if (!Number.isFinite(effectiveEv) || effectiveEv <= 0) reasons.push(`EV atual ${effectiveEv.toFixed(1)}% ≤ 0 (edge fechou)`);
         else if (effectiveEv < MIN_EV) reasons.push(`EV atual ${effectiveEv.toFixed(1)}% < ${MIN_EV}%`);
+        else if (conf === 'BAIXA' && effectiveEv < BAIXA_MIN_EV) reasons.push(`conf BAIXA com EV ${effectiveEv.toFixed(1)}% < ${BAIXA_MIN_EV}%`);
         if (effectiveEv >= SANITY_MAX_EV && conf !== 'ALTA') reasons.push(`EV ${effectiveEv.toFixed(1)}% ≥ ${SANITY_MAX_EV}% sem conf ALTA`);
         if (!Number.isFinite(odds) || odds < MIN_ODDS || odds > MAX_ODDS) reasons.push(`odds ${odds} fora de ${MIN_ODDS}-${MAX_ODDS}`);
         return { keep: reasons.length === 0, reasons, effectiveEv };
