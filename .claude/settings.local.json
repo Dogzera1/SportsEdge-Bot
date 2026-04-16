@@ -128,7 +128,10 @@
       "Bash(echo \"EXIT:$?\")",
       "WebFetch(domain:docs.railway.com)",
       "WebFetch(domain:station.railway.com)",
-      "WebFetch(domain:railpack.com)"
+      "WebFetch(domain:railpack.com)",
+      "Bash(wmic process *)",
+      "Bash(taskkill //PID 15068 //F)",
+      "Bash(taskkill //PID 8664 //F)"
     ]
   }
 }

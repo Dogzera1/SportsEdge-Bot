@@ -355,7 +355,7 @@ function extractLiveMatches() {
   // Regex patterns para capturar "team1 vs team2" de linhas de cada bot
   // Captura linhas como: "Analisando: T1 vs T2", "Sem edge: T1 vs T2", "Tip enviada: T1 @ ...",
   // "5 partidas (3 live ...)", "LIVE-STATS LoL Riot ...", "X vs Y | sinais=", etc.
-  const vsRe = /(?:^|[\s|:])([A-Z0-9][A-Za-z0-9 .'\-()&!]+?)\s+vs\.?\s+([A-Z0-9][A-Za-z0-9 .'\-()&!]+?)(?:\s*[\|—\-@\n]|$)/;
+  const vsRe = /(?:^|[\s|:])([A-Z0-9][A-Za-z0-9 .'\-&!]+?)\s+vs\.?\s+([A-Z0-9][A-Za-z0-9 .'\-&!]+?)(?:\s*[\|—\-@(\n]|$)/;
 
   const matches = new Map(); // key = "bot|t1|t2" → { sport, team1, team2, status, lastSeen, details }
 
