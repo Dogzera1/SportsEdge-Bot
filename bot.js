@@ -945,22 +945,18 @@ async function runAutoAnalysis() {
             `${oddsLabel}${baixaNote}\n\n` +
             `⚠️ _Aposte com responsabilidade._`;
 
-          // Live: registra no DB mas NÃO envia DM (user não quer notificações live)
-          const isLiveTip = !!(result.hasLiveStats || match.status === 'live' || match.status === 'inprogress');
-          if (!isLiveTip) {
-            for (const [userId, prefs] of subscribedUsers) {
-              if (!prefs.has('esports')) continue;
-              try { await sendDM(esportsConfig.token, userId, tipMsg); }
-              catch(e) {
-                if (e.message?.includes('403')) {
-                  subscribedUsers.delete(userId);
-                  serverPost('/save-user', { userId: String(userId), subscribed: false }, 'esports').catch(() => {});
-                }
+          for (const [userId, prefs] of subscribedUsers) {
+            if (!prefs.has('esports')) continue;
+            try { await sendDM(esportsConfig.token, userId, tipMsg); }
+            catch(e) {
+              if (e.message?.includes('403')) {
+                subscribedUsers.delete(userId);
+                serverPost('/save-user', { userId: String(userId), subscribed: false }, 'esports').catch(() => {});
               }
             }
           }
           analyzedMatches.set(matchKey, { ts: now, tipSent: true });
-          log('INFO', 'AUTO-TIP', `Esports${isLiveTip ? ' [LIVE-SILENT]' : ''}: ${tipTeam} @ ${tipOdd} (odds ${hasRealOdds ? 'reais' : 'estimadas'})`);
+          log('INFO', 'AUTO-TIP', `Esports: ${tipTeam} @ ${tipOdd} (odds ${hasRealOdds ? 'reais' : 'estimadas'})`);
           // Log curto + variáveis consideradas (para auditoria)
           if (result.debugVars) {
             log('INFO', 'TIP-VARS', `${tipTeam} @ ${tipOdd} | ${result.tipReason || '-'} | ${match.team1} vs ${match.team2}`, result.debugVars);
