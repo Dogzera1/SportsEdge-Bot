@@ -307,6 +307,28 @@ function oddsAgeStr(odds) {
   return sec < 60 ? `${sec}s` : `${Math.floor(sec / 60)}m${sec % 60}s`;
 }
 
+// ── Sharp line validation (Pinnacle como referência) ──
+// Se temos a linha sharp (Pinnacle) e a odd usada é PIOR que Pinnacle para o lado apostado,
+// não há edge real — o soft book já ajustou ou o mercado é eficiente.
+// Retorna { ok, reason, sharpOdd, betOdd } ou { ok: true } se sem sharp disponível.
+const SHARP_LINE_ENABLED = (process.env.SHARP_LINE_CHECK ?? 'true') !== 'false';
+
+function checkSharpLine(odds, tipParticipant, team1, team2) {
+  if (!SHARP_LINE_ENABLED) return { ok: true };
+  if (!odds?._sharp?.t1) return { ok: true }; // sem sharp disponível — não bloquear
+  const sharp = odds._sharp;
+  const isT1 = norm(tipParticipant).includes(norm(team1)) || norm(team1).includes(norm(tipParticipant));
+  const betOdd = isT1 ? parseFloat(odds.t1) : parseFloat(odds.t2);
+  const sharpOdd = isT1 ? parseFloat(sharp.t1) : parseFloat(sharp.t2);
+  if (!betOdd || !sharpOdd || betOdd <= 1 || sharpOdd <= 1) return { ok: true };
+  // A odd do soft book tem que ser >= Pinnacle para ter value
+  // Tolerância: 2% (soft book pode ter margem ligeiramente diferente)
+  if (betOdd < sharpOdd * 0.98) {
+    return { ok: false, reason: `soft ${betOdd.toFixed(2)} < sharp ${sharpOdd.toFixed(2)} (Pinnacle)`, sharpOdd, betOdd };
+  }
+  return { ok: true, sharpOdd, betOdd };
+}
+
 function serverPost(path, body, sport, extraHeaders) {
   return new Promise((resolve, reject) => {
     const s = JSON.stringify(body);
@@ -771,14 +793,16 @@ async function runAutoAnalysis() {
               continue;
             }
           }
+          // ── Sharp line check (Pinnacle reference) ──
+          const sharpCheck = checkSharpLine(result.o, tipTeam, match.team1, match.team2);
+          if (!sharpCheck.ok) {
+            log('INFO', 'AUTO', `Sharp line gate: ${tipTeam} — ${sharpCheck.reason} | ${match.team1} vs ${match.team2}`);
+            analyzedMatches.set(matchKey, { ts: now, tipSent: false, noEdge: true });
+            continue;
+          }
+
           // Kelly adaptado por confiança: ALTA → ¼ Kelly (max 4u) | MÉDIA → ⅙ Kelly (max 3u) | BAIXA → 1/10 Kelly (max 1.5u)
           const kellyFraction = tipConf === CONF.ALTA ? 0.25 : tipConf === CONF.BAIXA ? 0.10 : 1/6;
-          // Política de P para Kelly (evita circularidade p←EV←IA):
-          //   • factorCount>0 (ML tem dados): usa modelP do ML — mais calibrado historicamente.
-          //   • factorCount=0 (sem dados ML): fallback para calcKellyFraction usando EV da IA.
-          //     Gate 3.5 já bloqueia BAIXA e exige EV>=8% para MÉDIA neste caso.
-          //   • Divergência ML×IA: apenas rebaixa CONFIANÇA (Gate 0.5, Gate 0.6, Gate 3) —
-          //     stake nunca é blendado com P da IA (evita inflacionar em hallucinations).
           const isT1bet = norm(tipTeam).includes(norm(match.team1)) || norm(match.team1).includes(norm(tipTeam));
           const modelPForKelly = (result.modelP1 > 0) ? (isT1bet ? result.modelP1 : result.modelP2) : null;
           const tipStake = modelPForKelly
@@ -1160,6 +1184,40 @@ async function runAutoAnalysis() {
   await refreshOpenTips(sharedCaches).catch(e => log('ERROR', 'AUTO', `Refresh internal: ${e.message}`));
 
   });
+}
+
+// ── Odds movement alerts + Tip expiry ──
+const _alertedTips = new Set(); // evita alertar a mesma tip múltiplas vezes
+const TIP_EXPIRY_MS = parseInt(process.env.TIP_EXPIRY_MIN || '30', 10) * 60 * 1000; // 30min default
+const ODDS_DROP_THRESHOLD = parseFloat(process.env.ODDS_DROP_ALERT_PCT || '12') / 100; // 12% default
+
+async function checkPendingTipsAlerts() {
+  try {
+    for (const sportKey of Object.keys(SPORTS)) {
+      const cfg = SPORTS[sportKey];
+      if (!cfg?.enabled || !cfg?.token) continue;
+      const sport = sportKey === 'esports' ? 'esports' : sportKey;
+      const unsettled = await serverGet('/unsettled-tips?days=1', sport).catch(() => []);
+      if (!Array.isArray(unsettled) || !unsettled.length) continue;
+
+      for (const tip of unsettled) {
+        const alertKey = `${sport}_${tip.id}`;
+        if (_alertedTips.has(alertKey)) continue;
+
+        const sentMs = tip.sent_at ? Date.parse(String(tip.sent_at).replace(' ', 'T')) : 0;
+        if (!sentMs || !Number.isFinite(sentMs)) continue;
+        const age = Date.now() - sentMs;
+
+        // Tip expiry: log only (sem DM — user não quer notificações extras)
+        if (age > TIP_EXPIRY_MS && age < TIP_EXPIRY_MS + SETTLEMENT_INTERVAL) {
+          _alertedTips.add(alertKey);
+          log('INFO', 'EXPIRY', `${sport}: tip ${tip.id} expirada (${Math.round(age / 60000)}min) — ${tip.participant1} vs ${tip.participant2}`);
+        }
+      }
+    }
+  } catch(e) {
+    log('WARN', 'ALERTS', `checkPendingTipsAlerts: ${e.message}`);
+  }
 }
 
 // ── Settlement ──
@@ -4669,6 +4727,14 @@ Máximo 200 palavras.`;
         await _sleep(2000); continue;
       }
 
+      // ── Sharp line check (Pinnacle reference) ──
+      const sharpCheckDota = checkSharpLine(o, tipTeam, match.team1, match.team2);
+      if (!sharpCheckDota.ok) {
+        log('INFO', 'AUTO-DOTA', `Sharp line gate: ${tipTeam} — ${sharpCheckDota.reason}`);
+        analyzedDota.set(key, { ts: now, tipSent: false, noEdge: true });
+        await _sleep(2000); continue;
+      }
+
       const isT1bet = norm(tipTeam).includes(norm(match.team1)) || norm(match.team1).includes(norm(tipTeam));
       const kellyFraction = tipConf === 'ALTA' ? 0.25 : tipConf === 'BAIXA' ? 0.10 : 1/6;
       const modelPForKelly = mlResult.modelP1 > 0 ? (isT1bet ? mlResult.modelP1 : mlResult.modelP2) : null;
@@ -6353,7 +6419,9 @@ async function pollCs(runOnce = false) {
   if (!csConfig?.enabled || !csConfig?.token) return [];
   const token = csConfig.token;
 
-  const CS_INTERVAL = 5 * 60 * 1000; // 5 min
+  const CS_POLL_LIVE_MS = 2 * 60 * 1000;  // 2min quando há live
+  const CS_POLL_IDLE_MS = 5 * 60 * 1000;  // 5min idle
+  let _hadLiveCs = false;
   const CS_MIN_ODDS = parseFloat(process.env.CS_MIN_ODDS ?? '1.40');
   const CS_MAX_ODDS = parseFloat(process.env.CS_MAX_ODDS ?? '4.50');
   const CS_MIN_EV = parseFloat(process.env.CS_MIN_EV ?? '5.0');
@@ -6366,7 +6434,7 @@ async function pollCs(runOnce = false) {
       const matches = await serverGet('/cs-matches').catch(() => []);
       if (!Array.isArray(matches) || !matches.length) {
         log('INFO', 'AUTO-CS', '0 partidas CS2 com odds');
-        if (!runOnce) setTimeout(loop, CS_INTERVAL);
+        if (!runOnce) { const _n = _hadLiveCs ? CS_POLL_LIVE_MS : CS_POLL_IDLE_MS; log('INFO', 'AUTO-CS', `Próximo ciclo em ${Math.round(_n/1000)}s (${_hadLiveCs ? 'LIVE' : 'idle'})`); setTimeout(loop, _n); }
         return [];
       }
       log('INFO', 'AUTO-CS', `${matches.length} partidas CS2`);
@@ -6386,10 +6454,11 @@ async function pollCs(runOnce = false) {
       });
       if (!relevant.length) {
         log('INFO', 'AUTO-CS', '0 matches em janela de 6h');
-        if (!runOnce) setTimeout(loop, CS_INTERVAL);
+        if (!runOnce) { const _n = _hadLiveCs ? CS_POLL_LIVE_MS : CS_POLL_IDLE_MS; log('INFO', 'AUTO-CS', `Próximo ciclo em ${Math.round(_n/1000)}s (${_hadLiveCs ? 'LIVE' : 'idle'})`); setTimeout(loop, _n); }
         return [];
       }
       const _hasLiveCs = relevant.some(m => m.status === 'live');
+      _hadLiveCs = _hasLiveCs;
       if (_hasLiveCs) _livePhaseEnter('cs');
       let _drainedCs = false;
 
@@ -6951,7 +7020,10 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
       scheduleSnooker();
     }, scheduleSnooker._nextMs || 60 * 1000);
   })();
-  setInterval(() => settleCompletedTips().catch(e => log('ERROR', 'SETTLE', e.message)), SETTLEMENT_INTERVAL);
+  setInterval(() => {
+    settleCompletedTips().catch(e => log('ERROR', 'SETTLE', e.message));
+    checkPendingTipsAlerts().catch(e => log('WARN', 'ALERTS', e.message));
+  }, SETTLEMENT_INTERVAL);
 
   // Auto-tune de pesos ML: recalcWeights roda 1x/semana (segunda às 06:00 UTC).
   // Settle de factor logs roda junto com settlement pra manter dados atualizados.

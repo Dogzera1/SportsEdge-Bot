@@ -4021,13 +4021,16 @@ const server = http.createServer(async (req, res) => {
         return;
       }
 
-      // LINE SHOPPING: retorna melhor odd
+      // LINE SHOPPING: retorna melhor odd + sharp reference
       const best = candidates.reduce((a, b) => {
         const aMax = Math.max(parseFloat(a.t1) || 0, parseFloat(a.t2) || 0);
         const bMax = Math.max(parseFloat(b.t1) || 0, parseFloat(b.t2) || 0);
         return bMax > aMax ? b : a;
       });
-
+      const pinCandidate = candidates.find(c => c.bookmaker === 'Pinnacle');
+      if (pinCandidate) {
+        best._sharp = { t1: pinCandidate.t1, t2: pinCandidate.t2, bookmaker: 'Pinnacle' };
+      }
       if (candidates.length > 1) {
         best._allOdds = candidates.map(c => ({ t1: c.t1, t2: c.t2, bookmaker: c.bookmaker }));
         log('INFO', 'ODDS', `LINE SHOP Dota: ${t1} vs ${t2} → best=${best.bookmaker} (${candidates.map(c => `${c.bookmaker}:${c.t1}/${c.t2}`).join(' | ')})`);
@@ -4098,15 +4101,17 @@ const server = http.createServer(async (req, res) => {
         return;
       }
 
-      // LINE SHOPPING: para cada candidato, calcular max(t1) e max(t2) entre todas as fontes
-      // mas retornamos o candidato com melhor odd para o lado com mais edge (max do max)
+      // LINE SHOPPING: retorna melhor preço + sharp line (Pinnacle) separada
       const best = candidates.reduce((a, b) => {
         const aMax = Math.max(parseFloat(a.t1) || 0, parseFloat(a.t2) || 0);
         const bMax = Math.max(parseFloat(b.t1) || 0, parseFloat(b.t2) || 0);
         return bMax > aMax ? b : a;
       });
-
-      // Adiciona _allOdds para transparência
+      // _sharp: odds Pinnacle como referência eficiente (se disponível)
+      const pinCandidate = candidates.find(c => c.bookmaker === 'Pinnacle');
+      if (pinCandidate) {
+        best._sharp = { t1: pinCandidate.t1, t2: pinCandidate.t2, bookmaker: 'Pinnacle' };
+      }
       if (candidates.length > 1) {
         best._allOdds = candidates.map(c => ({ t1: c.t1, t2: c.t2, bookmaker: c.bookmaker }));
         log('INFO', 'ODDS', `LINE SHOP LoL: ${t1} vs ${t2} → best=${best.bookmaker} (${candidates.map(c => `${c.bookmaker}:${c.t1}/${c.t2}`).join(' | ')})`);
