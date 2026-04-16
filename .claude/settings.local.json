@@ -125,7 +125,9 @@
       "WebFetch(domain:www.sportdevs.com)",
       "Bash(ls .env*)",
       "Bash(echo \"CURL_FAILED: $?\")",
-      "Bash(echo \"EXIT:$?\")"
+      "Bash(echo \"EXIT:$?\")",
+      "WebFetch(domain:docs.railway.com)",
+      "WebFetch(domain:station.railway.com)"
     ]
   }
 }

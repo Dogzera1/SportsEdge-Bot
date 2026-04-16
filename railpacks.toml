@@ -1,2 +1,0 @@
-[apt]
-packages = ["python3", "build-essential", "pkg-config"]
