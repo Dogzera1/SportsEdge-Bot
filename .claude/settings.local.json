@@ -134,7 +134,10 @@
       "Bash(taskkill //PID 8664 //F)",
       "Bash(taskkill //PID 20696 //F)",
       "Bash(echo \"exit: $?\")",
-      "Bash(du -sh \"/c/Users/vict_/Desktop/lol betting/\"*.db)"
+      "Bash(du -sh \"/c/Users/vict_/Desktop/lol betting/\"*.db)",
+      "Bash(taskkill //PID 7996 //F)",
+      "Bash(node scripts/logs-dashboard.js)",
+      "Bash(echo \"started pid=$!\")"
     ]
   }
 }

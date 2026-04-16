@@ -46,7 +46,9 @@ function classify(line) {
   else if (/\bdebug\b/i.test(l)) level = 'debug';
 
   let bot = 'system';
+  // LoL: prefixos que o bot.js usa sem sufixo do esporte ([AUTO], [LOL-MODEL], [LIVE-STATS] LoL, etc.)
   if (/\b(lol|riot|league|lck|lcs|lec|lpl|lcp|esports)\b/i.test(l)) bot = 'lol';
+  else if (/\[LOL-MODEL\]|\[LIVE-STATS\]|\[LIVE-GAME\]|\[LIVE-ODDS\]|\[PANDASCORE\]|\[GOLGG\]|\[GRID\]|\[LOL-SLUG\]|\[AUTO\]\s+(Analisando|Esports\s+upcoming|Liga\s+principal|LoL:|Tip\s+aprovada|Sem\s+tip|Upcoming|Odds\s+stale|Pr[ée]-filtro\s+ML|Draft|DeepSeek|IA\s+(em|sem))/i.test(l)) bot = 'lol';
   if (/\bdota\b/i.test(l) || /opendota|steam.?rt|radiant|dire/i.test(l)) bot = 'dota';
   if (/\b(cs2|cs:?go|counter.?strike|hltv)\b/i.test(l) || /\bAUTO-CS\b/.test(l) || /\[CS\]/.test(l)) bot = 'cs';
   if (/\btennis|tenis\b/i.test(l) && !/table.?tennis|tabletennis|tenis.?de.?mesa/i.test(lc)) bot = 'tennis';
