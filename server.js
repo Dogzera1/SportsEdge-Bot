@@ -5812,6 +5812,73 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (p === '/seed-valorant-maps-from-vlr' && req.method === 'POST') {
+    try {
+      const pages = Math.max(1, Math.min(10, parseInt(parsed.query.pages || '2', 10) || 2));
+      const maxMatches = Math.max(5, Math.min(100, parseInt(parsed.query.max || '30', 10) || 30));
+      const vlr = require('./lib/vlr');
+
+      const seen = new Set();
+      const allIds = [];
+      for (let pg = 1; pg <= pages; pg++) {
+        const ids = await vlr.fetchResults(pg).catch(() => []);
+        for (const id of ids) {
+          if (!seen.has(id)) { seen.add(id); allIds.push(id); }
+        }
+        if (allIds.length >= maxMatches) break;
+        await new Promise(r => setTimeout(r, 1500));
+      }
+
+      const toProcess = allIds.slice(0, maxMatches);
+      const upsertMap = db.prepare(`
+        INSERT OR IGNORE INTO valorant_map_results (match_id, game_pos, team1, team2, map_name, winner, resolved_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `);
+      const ts = new Date().toISOString().replace('T', ' ').slice(0, 19);
+
+      let insertedMaps = 0;
+      let processedMatches = 0;
+      let errors = 0;
+      const samples = [];
+
+      for (const vlrId of toProcess) {
+        try {
+          const data = await vlr.fetchMatchMaps(vlrId);
+          if (data?.maps?.length) {
+            for (const mp of data.maps) {
+              if (!mp.winner) continue;
+              const r = upsertMap.run(`vlr_${vlrId}_${mp.pos}`, mp.pos, data.team1, data.team2, mp.name, mp.winner, ts);
+              if (r.changes) insertedMaps++;
+            }
+            processedMatches++;
+            if (samples.length < 3) samples.push({ vlrId, ...data });
+          }
+        } catch (e) {
+          errors++;
+          log('WARN', 'VLR', `match ${vlrId}: ${e.message}`);
+        }
+        await new Promise(r => setTimeout(r, 2000));
+      }
+
+      const totalMaps = db.prepare(`SELECT COUNT(*) c FROM valorant_map_results`).get()?.c || 0;
+
+      log('INFO', 'ADMIN', `seed-valorant-maps-from-vlr: processed=${processedMatches}, inserted=${insertedMaps}, errors=${errors}`);
+      sendJson(res, {
+        ok: true,
+        pagesScanned: pages,
+        matchIdsFound: allIds.length,
+        processedMatches,
+        insertedMaps,
+        totalMapsAfter: totalMaps,
+        errors,
+        samples,
+      });
+    } catch (e) {
+      sendJson(res, { error: e.message }, 500);
+    }
+    return;
+  }
+
   if (p === '/debug-valorant-elo') {
     try {
       const { getValorantElo } = require('./lib/valorant-ml');
