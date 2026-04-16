@@ -4586,6 +4586,7 @@ async function pollDota() {
       const serieKey = isLive ? `_${match.score1||0}x${match.score2||0}` : '';
       const key = `dota2_${match.id}${serieKey}`;
       const pairKey = `dota2_pair_${norm(match.team1)}_${norm(match.team2)}${serieKey}`;
+      const setDotaAnalyzed = (val) => { analyzedDota.set(key, val); analyzedDota.set(pairKey, val); };
       const prev = analyzedDota.get(key) || analyzedDota.get(pairKey);
       if (prev?.tipSent) continue;
       const cooldown = isLive ? DOTA_LIVE_COOLDOWN : DOTA_INTERVAL;
@@ -4615,7 +4616,7 @@ async function pollDota() {
       }
       if (!o?.t1 || !o?.t2) {
         log('DEBUG', 'AUTO-DOTA', `Sem odds ${isLive ? 'ao vivo' : ''}${dotaMapNum ? ` (mapa ${dotaMapNum})` : ''}: ${match.team1} vs ${match.team2}`);
-        analyzedDota.set(key, { ts: now, tipSent: false, noEdge: true });
+        setDotaAnalyzed({ ts: now, tipSent: false, noEdge: true });
         continue;
       }
       if (!isOddsFresh(o, isLive)) {
@@ -4696,7 +4697,7 @@ async function pollDota() {
       const mlResult = esportsPreFilter(match, o, enrich, isLive, dotaLiveContext, null, null, { maxDivergence: dotaMaxDiv });
       if (!mlResult.pass) {
         log('INFO', 'AUTO-DOTA', `Pré-filtro: edge insuficiente (${mlResult.score.toFixed(1)}pp) para ${match.team1} vs ${match.team2}`);
-        analyzedDota.set(key, { ts: now, tipSent: false, noEdge: true });
+        setDotaAnalyzed({ ts: now, tipSent: false, noEdge: true });
         continue;
       }
       if ((mlResult.rawEdge || 0) > 15) {
@@ -4772,7 +4773,7 @@ ou SEM_EDGE
 Máximo 200 palavras.`;
 
       log('INFO', 'AUTO-DOTA', `Analisando${isLive ? ' [AO VIVO]' : ''}: ${match.team1} vs ${match.team2} (${match.league}) | mlEdge=${mlResult.score.toFixed(1)}pp`);
-      analyzedDota.set(key, { ts: now, tipSent: false, noEdge: false });
+      setDotaAnalyzed({ ts: now, tipSent: false, noEdge: false });
 
       let iaResp = '';
       try {
@@ -4801,7 +4802,7 @@ Máximo 200 palavras.`;
 
       if (!tipMatch) {
         log('INFO', 'AUTO-DOTA', `Sem tip: ${match.team1} vs ${match.team2}`);
-        analyzedDota.set(key, { ts: now, tipSent: false, noEdge: true });
+        setDotaAnalyzed({ ts: now, tipSent: false, noEdge: true });
         await _sleep(2000);
         continue;
       }
@@ -4814,26 +4815,26 @@ Máximo 200 palavras.`;
       // Ao vivo: bloqueia confiança BAIXA (muito risco com delay de odds)
       if (isLive && tipConf === 'BAIXA') {
         log('INFO', 'AUTO-DOTA', `Ao vivo: conf BAIXA rejeitada para ${match.team1} vs ${match.team2}`);
-        analyzedDota.set(key, { ts: now, tipSent: false, noEdge: true });
+        setDotaAnalyzed({ ts: now, tipSent: false, noEdge: true });
         await _sleep(2000); continue;
       }
 
       const oddVal = parseFloat(tipOdd);
       if (oddVal < minOdds || oddVal > maxOdds) {
         log('INFO', 'AUTO-DOTA', `Odd fora do range (${oddVal}): pulando`);
-        analyzedDota.set(key, { ts: now, tipSent: false, noEdge: true });
+        setDotaAnalyzed({ ts: now, tipSent: false, noEdge: true });
         await _sleep(2000); continue;
       }
       const evVal = parseFloat(String(tipEV).replace('%', '').replace('+', ''));
       if (evVal < evThreshold) {
         log('INFO', 'AUTO-DOTA', `EV insuficiente (${evVal}% < ${evThreshold}%): pulando`);
-        analyzedDota.set(key, { ts: now, tipSent: false, noEdge: true });
+        setDotaAnalyzed({ ts: now, tipSent: false, noEdge: true });
         await _sleep(2000); continue;
       }
       // EV sanity: bloqueia EV absurdamente alto (erro de cálculo da IA)
       if (evVal > 50) {
         log('WARN', 'AUTO-DOTA', `Gate EV sanity: EV ${evVal}% > 50% — provável erro de cálculo da IA → rejeitado`);
-        analyzedDota.set(key, { ts: now, tipSent: false, noEdge: true });
+        setDotaAnalyzed({ ts: now, tipSent: false, noEdge: true });
         await _sleep(2000); continue;
       }
 
@@ -4841,7 +4842,7 @@ Máximo 200 palavras.`;
       const sharpCheckDota = checkSharpLine(o, tipTeam, match.team1, match.team2);
       if (!sharpCheckDota.ok) {
         log('INFO', 'AUTO-DOTA', `Sharp line gate: ${tipTeam} — ${sharpCheckDota.reason}`);
-        analyzedDota.set(key, { ts: now, tipSent: false, noEdge: true });
+        setDotaAnalyzed({ ts: now, tipSent: false, noEdge: true });
         await _sleep(2000); continue;
       }
 
@@ -4886,8 +4887,7 @@ Máximo 200 palavras.`;
         }, 'esports');
         if (rec?.skipped) {
           log('INFO', 'AUTO-DOTA', `Tip já existe (duplicate): ${tipTeam} @ ${tipOdd}`);
-          analyzedDota.set(key, { ts: now, tipSent: true, noEdge: false });
-          analyzedDota.set(pairKey, { ts: now, tipSent: true, noEdge: false });
+          setDotaAnalyzed({ ts: now, tipSent: true, noEdge: false });
           await _sleep(2000); continue;
         }
         for (const [uid, sports] of subscribedUsers) {
@@ -4895,8 +4895,7 @@ Máximo 200 palavras.`;
           await sendDM(token, uid, msg).catch(() => {});
         }
         log('INFO', 'AUTO-DOTA', `TIP${isLive ? ' [LIVE]' : ''}: ${tipTeam} @ ${tipOdd} (${tipStakeAdj})`);
-        analyzedDota.set(key, { ts: now, tipSent: true, noEdge: false });
-        analyzedDota.set(pairKey, { ts: now, tipSent: true, noEdge: false });
+        setDotaAnalyzed({ ts: now, tipSent: true, noEdge: false });
       } catch(e) {
         log('WARN', 'AUTO-DOTA', `Erro ao gravar tip: ${e.message}`);
       }
