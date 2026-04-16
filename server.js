@@ -102,6 +102,8 @@ function sqlTipsDedupeIdIn(alias, sportParam = '?') {
   return `${alias}.id IN (SELECT MAX(tdx.id) FROM tips tdx WHERE tdx.sport = ${sportParam} GROUP BY COALESCE(NULLIF(TRIM(tdx.match_id), ''), 'id:' || CAST(tdx.id AS TEXT)))`;
 }
 
+const { rollupLeague } = require('./lib/league-rollup');
+
 /**
  * Sub-game filter p/ esportes "guarda-chuva" (esports=lol/dota, mma=mma/boxing).
  * Retorna '' se não se aplica — seguro para concatenar em qualquer WHERE.
@@ -6801,7 +6803,7 @@ const server = http.createServer(async (req, res) => {
 
       const byLeague = new Map();
       for (const r of rows) {
-        const key = r.league;
+        const key = rollupLeague(sport, r.league);
         if (!byLeague.has(key)) {
           byLeague.set(key, {
             league: key,

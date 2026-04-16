@@ -138,7 +138,8 @@
       "Bash(taskkill //PID 7996 //F)",
       "Bash(node scripts/logs-dashboard.js)",
       "Bash(echo \"started pid=$!\")",
-      "Bash(ls data/*.db)"
+      "Bash(ls data/*.db)",
+      "Bash(taskkill //F //IM node.exe)"
     ]
   }
 }
