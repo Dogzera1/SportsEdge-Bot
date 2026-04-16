@@ -6959,9 +6959,15 @@ async function runAutoDarts() {
           const pickOdd = ml.direction === 't1' ? parseFloat(match.odds.t1) : parseFloat(match.odds.t2);
           const pickP   = ml.direction === 't1' ? ml.modelP1 : ml.modelP2;
           const evPct   = ((pickP * pickOdd - 1) * 100);
-          if (evPct < 3) {
+          const MIN_EV_DARTS = parseFloat(process.env.DARTS_MIN_EV || '5');
+          if (evPct < MIN_EV_DARTS) {
             analyzedDarts.set(key, { ts: now, tipSent: false });
-            log('INFO', 'AUTO-DARTS', `EV baixo (${evPct.toFixed(1)}%): ${match.team1} vs ${match.team2}`);
+            log('INFO', 'AUTO-DARTS', `EV baixo (${evPct.toFixed(1)}% < ${MIN_EV_DARTS}%): ${match.team1} vs ${match.team2}`);
+            continue;
+          }
+          if (ml.factorCount === 1 && evPct < 8) {
+            analyzedDarts.set(key, { ts: now, tipSent: false });
+            log('INFO', 'AUTO-DARTS', `BAIXA confiança (1 fator, EV ${evPct.toFixed(1)}%<8%): ${match.team1} vs ${match.team2}`);
             continue;
           }
 
