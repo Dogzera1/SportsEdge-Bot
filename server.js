@@ -6122,6 +6122,110 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // Recalcula `ev` (e `current_ev`) das tips pendentes usando o EV determinístico
+  // `(model_p_pick × odds − 1) × 100`. Motivo: o bot passou a gravar EV do modelo em vez
+  // do EV chutado pela IA — queremos alinhar tips antigas que ainda estão em aberto.
+  //   POST /admin/recompute-ev-pending?apply=1            (persiste; sem apply = dry-run)
+  //   POST /admin/recompute-ev-pending?sport=mma&apply=1  (filtra por esporte)
+  if (p === '/admin/recompute-ev-pending' && req.method === 'POST') {
+    try {
+      const apply = parsed.query.apply === '1' || parsed.query.apply === 'true';
+      const sportFilter = parsed.query.sport ? String(parsed.query.sport).trim().toLowerCase() : null;
+
+      // Gates por esporte (alinhados com bot.js) — usados pra flagear tips que
+      // ficariam abaixo do mínimo após o recálculo.
+      const MIN_EV = { mma: 5, tennis: 7, esports: 2, dota: 5, cs: 5, valorant: 5, darts: 5, snooker: 5, tabletennis: 5, football: 5 };
+
+      const params = [];
+      let where = `result IS NULL AND model_p_pick IS NOT NULL AND model_p_pick > 0 AND model_p_pick < 1 AND odds IS NOT NULL AND odds > 1`;
+      if (sportFilter) { where += ` AND LOWER(sport) = ?`; params.push(sportFilter); }
+
+      const rows = db.prepare(`
+        SELECT id, sport, participant1, participant2, tip_participant,
+               odds, ev, current_odds, current_ev, model_p_pick, confidence, event_name, sent_at
+        FROM tips
+        WHERE ${where}
+        ORDER BY sent_at DESC
+      `).all(...params);
+
+      let updated = 0;
+      const items = [];
+      const upd = db.prepare(`UPDATE tips SET ev = ?, current_ev = ? WHERE id = ?`);
+      const tx = db.transaction((opsArr) => { for (const o of opsArr) upd.run(o.newEv, o.newCurEv, o.id); });
+
+      const ops = [];
+      for (const r of rows) {
+        const odds = parseFloat(r.odds);
+        const curOdds = Number.isFinite(parseFloat(r.current_odds)) ? parseFloat(r.current_odds) : odds;
+        const p = parseFloat(r.model_p_pick);
+        if (!Number.isFinite(p) || !Number.isFinite(odds) || p <= 0 || p >= 1 || odds <= 1) continue;
+
+        const newEv = +((p * odds - 1) * 100).toFixed(1);
+        const newCurEv = Number.isFinite(curOdds) && curOdds > 1 ? +((p * curOdds - 1) * 100).toFixed(1) : newEv;
+        const oldEv = parseFloat(r.ev);
+        const diff = Number.isFinite(oldEv) ? +(newEv - oldEv).toFixed(1) : null;
+        const minGate = MIN_EV[String(r.sport).toLowerCase()] ?? 5;
+        const belowGate = newEv < minGate;
+
+        items.push({
+          id: r.id, sport: r.sport,
+          matchup: `${r.participant1} vs ${r.participant2}`,
+          pick: r.tip_participant,
+          odds, curOdds,
+          p: +(p * 100).toFixed(1),
+          oldEv: Number.isFinite(oldEv) ? oldEv : null,
+          newEv,
+          diff,
+          oldCurEv: Number.isFinite(parseFloat(r.current_ev)) ? parseFloat(r.current_ev) : null,
+          newCurEv,
+          confidence: r.confidence,
+          event: r.event_name,
+          sentAt: r.sent_at,
+          minGate,
+          belowGate,
+        });
+        ops.push({ id: r.id, newEv, newCurEv });
+      }
+
+      if (apply && ops.length) {
+        tx(ops);
+        updated = ops.length;
+        log('INFO', 'ADMIN', `recompute-ev-pending: sport=${sportFilter || 'all'} scanned=${rows.length} updated=${updated}`);
+      }
+
+      // Resumo por esporte
+      const bySport = {};
+      for (const it of items) {
+        const k = it.sport;
+        if (!bySport[k]) bySport[k] = { total: 0, belowGate: 0, avgDiff: 0, biggestDrop: 0, biggestRise: 0 };
+        const b = bySport[k];
+        b.total++;
+        if (it.belowGate) b.belowGate++;
+        if (it.diff != null) {
+          b.avgDiff += it.diff;
+          if (it.diff < b.biggestDrop) b.biggestDrop = it.diff;
+          if (it.diff > b.biggestRise) b.biggestRise = it.diff;
+        }
+      }
+      for (const k of Object.keys(bySport)) {
+        bySport[k].avgDiff = +(bySport[k].avgDiff / Math.max(1, bySport[k].total)).toFixed(1);
+      }
+
+      sendJson(res, {
+        ok: true,
+        dryRun: !apply,
+        sportFilter,
+        scanned: rows.length,
+        updated,
+        bySport,
+        items,
+      });
+    } catch (e) {
+      sendJson(res, { error: e.message, stack: e.stack }, 500);
+    }
+    return;
+  }
+
   // Reanalisa tips pendentes de tênis com os novos gates (2026-04-15) e anula as reprovadas.
   // Aceita ?apply=1 para executar; sem apply faz dry-run.
   // Critérios (sincronizados com bot.js auto-tennis):
