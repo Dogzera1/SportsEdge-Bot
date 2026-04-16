@@ -4338,7 +4338,7 @@ async function pollDota() {
   if (!esportsConfig?.enabled || !esportsConfig?.token) return;
   const token = esportsConfig.token;
   const DOTA_INTERVAL = 4 * 60 * 60 * 1000;
-  const DOTA_LIVE_COOLDOWN = 10 * 60 * 1000; // re-analisa ao vivo a cada 10min
+  const DOTA_LIVE_COOLDOWN = 8 * 60 * 1000; // re-analisa ao vivo a cada 8min
 
   try {
     log('INFO', 'AUTO-DOTA', 'Iniciando verificação de partidas Dota 2...');
@@ -5170,7 +5170,7 @@ async function pollTennis(runOnce = false) {
 
   // Live: cooldown curto (15min) para re-análise com score atualizado
   // Pré-jogo: usa TENNIS_PREGAME_INTERVAL_H (default 6h)
-  const TENNIS_LIVE_INTERVAL = Math.max(1, parseInt(process.env.TENNIS_LIVE_INTERVAL_MIN || '15', 10)) * 60 * 1000; // 15min default
+  const TENNIS_LIVE_INTERVAL = Math.max(1, parseInt(process.env.TENNIS_LIVE_INTERVAL_MIN || '10', 10)) * 60 * 1000; // 10min default
   const TENNIS_PREGAME_INTERVAL = Math.max(1, parseInt(process.env.TENNIS_PREGAME_INTERVAL_H || '6', 10) || 6) * 60 * 60 * 1000;
   const TENNIS_GATE_MIN_ODDS = parseFloat(process.env.TENNIS_MIN_ODDS ?? '1.40');
   const TENNIS_GATE_MAX_ODDS = parseFloat(process.env.TENNIS_MAX_ODDS ?? '5.00');
@@ -6317,10 +6317,12 @@ async function pollCs(runOnce = false) {
           await _waitOthersLiveDone('cs');
           _drainedCs = true;
         }
+        const isLiveCs = match.status === 'live';
         const key = `cs_${match.id}`;
         const prev = analyzedCs.get(key);
         if (prev?.tipSent) continue;
-        if (prev && (now - prev.ts < 30 * 60 * 1000)) continue;
+        const csCooldown = isLiveCs ? (10 * 60 * 1000) : (30 * 60 * 1000); // live: 10min, pregame: 30min
+        if (prev && (now - prev.ts < csCooldown)) continue;
 
         if (!match.odds?.t1 || !match.odds?.t2) continue;
         const o1 = parseFloat(match.odds.t1);
@@ -6476,6 +6478,12 @@ async function pollCs(runOnce = false) {
 async function runAutoDarts() {
   const dartsConfig = SPORTS['darts'];
   if (!dartsConfig?.enabled) return;
+  // Dual-mode: 5min quando há live, 15min idle
+  const DARTS_POLL_LIVE_MS = 3 * 60 * 1000;     // polling: 3min quando há live
+  const DARTS_POLL_IDLE_MS = 15 * 60 * 1000;    // polling: 15min idle
+  const DARTS_LIVE_COOLDOWN = 10 * 60 * 1000;   // re-análise live: 10min
+  const DARTS_PREGAME_COOLDOWN = 60 * 60 * 1000; // pregame: 1h
+  let _hadLiveDarts = false;
   try {
       const { dartsPreFilter } = require('./lib/darts-ml');
       const sofaDarts = require('./lib/sofascore-darts');
@@ -6486,11 +6494,21 @@ async function runAutoDarts() {
         log('INFO', 'AUTO-DARTS', '0 partidas darts com odds');
       } else {
         log('INFO', 'AUTO-DARTS', `${matches.length} partidas darts com odds`);
+        // Prioridade: live primeiro
+        matches.sort((a, b) => {
+          const la = a.status === 'live' ? 0 : 1;
+          const lb = b.status === 'live' ? 0 : 1;
+          if (la !== lb) return la - lb;
+          return new Date(a.time || 0) - new Date(b.time || 0);
+        });
+        _hadLiveDarts = matches.some(m => m.status === 'live');
         for (const match of matches) {
+          const isLiveDarts = match.status === 'live';
           const key = `darts_${match.id}`;
           const prev = analyzedDarts.get(key);
           if (prev?.tipSent) continue;
-          if (prev && (now - prev.ts < 60 * 60 * 1000)) continue; // re-check a cada 1h
+          const cooldown = isLiveDarts ? DARTS_LIVE_COOLDOWN : DARTS_PREGAME_COOLDOWN;
+          if (prev && (now - prev.ts < cooldown)) continue;
 
           // Enriquecimento: 3-dart avg recente (últimos 10 jogos) + H2H entre os dois
           const [recentP1, recentP2, h2h] = await Promise.all([
@@ -6571,7 +6589,7 @@ async function runAutoDarts() {
             continue;
           }
 
-          const tipMsg = `🎯 💰 *TIP DARTS*\n` +
+          const tipMsg = `🎯 💰 *TIP DARTS${isLiveDarts ? ' (AO VIVO 🔴)' : ''}*\n` +
             `*${match.team1}* vs *${match.team2}*\n📋 ${match.league}\n\n` +
             `🎯 Aposta: *${pickTeam}* @ *${pickOdd}*\n` +
             `📈 EV: *+${evPct.toFixed(1)}%*\n` +
@@ -6590,12 +6608,16 @@ async function runAutoDarts() {
   } catch(e) {
     log('ERROR', 'AUTO-DARTS', e.message);
   }
+  return _hadLiveDarts;
 }
 
 // ── Snooker loop (INDEPENDENTE do mutex runAutoAnalysis) ───────────────
 async function runAutoSnooker() {
   const snookerConfig = SPORTS['snooker'];
   if (!snookerConfig?.enabled) return;
+  const SNOOKER_LIVE_COOLDOWN = 10 * 60 * 1000;   // live: re-análise a cada 10min
+  const SNOOKER_PREGAME_COOLDOWN = 60 * 60 * 1000; // pregame: 1h
+  let _hadLiveSnooker = false;
   try {
       const { snookerPreFilter } = require('./lib/snooker-ml');
       const now = Date.now();
@@ -6605,11 +6627,21 @@ async function runAutoSnooker() {
         log('INFO', 'AUTO-SNOOKER', '0 partidas snooker com odds Betfair');
       } else {
         log('INFO', 'AUTO-SNOOKER', `${matches.length} partidas snooker com odds`);
+        // Prioridade: live primeiro
+        matches.sort((a, b) => {
+          const la = a.status === 'live' ? 0 : 1;
+          const lb = b.status === 'live' ? 0 : 1;
+          if (la !== lb) return la - lb;
+          return new Date(a.time || 0) - new Date(b.time || 0);
+        });
+        _hadLiveSnooker = matches.some(m => m.status === 'live');
         for (const match of matches) {
+          const isLiveSnooker = match.status === 'live';
           const key = `snooker_${match.id}`;
           const prev = analyzedSnooker.get(key);
           if (prev?.tipSent) continue;
-          if (prev && (now - prev.ts < 60 * 60 * 1000)) continue;
+          const cooldown = isLiveSnooker ? SNOOKER_LIVE_COOLDOWN : SNOOKER_PREGAME_COOLDOWN;
+          if (prev && (now - prev.ts < cooldown)) continue;
 
           // Enrichment via CueTracker (scraping HTML) — win rate da temporada atual.
           // Sem ranking oficial (snooker.org precisa email approval), mas win rate já
@@ -6682,7 +6714,7 @@ async function runAutoSnooker() {
             continue;
           }
 
-          const tipMsg = `🎱 💰 *TIP SNOOKER*\n` +
+          const tipMsg = `🎱 💰 *TIP SNOOKER${isLiveSnooker ? ' (AO VIVO 🔴)' : ''}*\n` +
             `*${match.team1}* vs *${match.team2}*\n📋 ${match.league}\n\n` +
             `🎯 Aposta: *${pickTeam}* @ *${pickOdd}*\n` +
             `📈 EV: *+${evPct.toFixed(1)}%*\n` +
@@ -6701,6 +6733,7 @@ async function runAutoSnooker() {
   } catch(e) {
     log('ERROR', 'AUTO-SNOOKER', e.message);
   }
+  return _hadLiveSnooker;
 }
 log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
 
@@ -6804,10 +6837,26 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   setInterval(() => runAutoAnalysis().catch(e => log('ERROR', 'AUTO', e.message)), 6 * 60 * 1000);
   // Darts e Snooker: loops independentes (fora do mutex runAutoAnalysis) para não ser
   // bloqueados pelo Football que serializa ~25min por ciclo.
-  setTimeout(() => runAutoDarts().catch(e => log('ERROR', 'AUTO-DARTS', e.message)), 45 * 1000);
-  setInterval(() => runAutoDarts().catch(e => log('ERROR', 'AUTO-DARTS', e.message)), 15 * 60 * 1000);
-  setTimeout(() => runAutoSnooker().catch(e => log('ERROR', 'AUTO-SNOOKER', e.message)), 60 * 1000);
-  setInterval(() => runAutoSnooker().catch(e => log('ERROR', 'AUTO-SNOOKER', e.message)), 15 * 60 * 1000);
+  // Darts: dual-mode scheduling (rápido se live, lento se idle)
+  (function scheduleDarts() {
+    setTimeout(async () => {
+      const hadLive = await runAutoDarts().catch(e => { log('ERROR', 'AUTO-DARTS', e.message); return false; });
+      const nextMs = hadLive ? (3 * 60 * 1000) : (15 * 60 * 1000); // 3min live, 15min idle
+      log('INFO', 'AUTO-DARTS', `Próximo ciclo em ${Math.round(nextMs / 1000)}s (${hadLive ? 'LIVE' : 'idle'})`);
+      scheduleDarts._nextMs = nextMs;
+      scheduleDarts();
+    }, scheduleDarts._nextMs || 45 * 1000);
+  })();
+  // Snooker: dual-mode scheduling (rápido se live, lento se idle)
+  (function scheduleSnooker() {
+    setTimeout(async () => {
+      const hadLive = await runAutoSnooker().catch(e => { log('ERROR', 'AUTO-SNOOKER', e.message); return false; });
+      const nextMs = hadLive ? (3 * 60 * 1000) : (15 * 60 * 1000); // 3min live, 15min idle
+      log('INFO', 'AUTO-SNOOKER', `Próximo ciclo em ${Math.round(nextMs / 1000)}s (${hadLive ? 'LIVE' : 'idle'})`);
+      scheduleSnooker._nextMs = nextMs;
+      scheduleSnooker();
+    }, scheduleSnooker._nextMs || 60 * 1000);
+  })();
   setInterval(() => settleCompletedTips().catch(e => log('ERROR', 'SETTLE', e.message)), SETTLEMENT_INTERVAL);
 
   // Auto-tune de pesos ML: recalcWeights roda 1x/semana (segunda às 06:00 UTC).
