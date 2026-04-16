@@ -4608,8 +4608,18 @@ const server = http.createServer(async (req, res) => {
       const all = await Promise.all(sources.map(fetchMatches));
       const out = {};
 
+      const nowMs = Date.now();
+      const START_TOLERANCE_MS = 90 * 1000; // aceita até 90s antes do horário marcado
       for (const { sport, items } of all) {
-        const live = items.filter(m => m && m.status === 'live');
+        // Filtro duplo: status='live' E (horário já passou OU marcador de progresso).
+        // Evita mostrar partidas que o feed marca prematuramente como live antes do kickoff.
+        const live = items.filter(m => {
+          if (!m || m.status !== 'live') return false;
+          const t = m.time ? Date.parse(m.time) : NaN;
+          const alreadyStarted = Number.isFinite(t) ? (t - nowMs) <= START_TOLERANCE_MS : true;
+          const hasProgress = (m.score1 || 0) > 0 || (m.score2 || 0) > 0;
+          return alreadyStarted || hasProgress;
+        });
         const rows = [];
         for (const m of live) {
           const odds = m.odds || null;
