@@ -139,7 +139,8 @@
       "Bash(node scripts/logs-dashboard.js)",
       "Bash(echo \"started pid=$!\")",
       "Bash(ls data/*.db)",
-      "Bash(taskkill //F //IM node.exe)"
+      "Bash(taskkill //F //IM node.exe)",
+      "Bash(python -c 'import sys,json; d=json.load\\(sys.stdin\\); tips=d.get\\('\\\\''tips'\\\\''\\) or d.get\\('\\\\''items'\\\\''\\) or d; print\\(type\\(tips\\).__name__\\); ')"
     ]
   }
 }

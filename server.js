@@ -6190,6 +6190,53 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // Backfill: reidentifica organização (UFC/PFL/Bellator/KSW/Boxing...) em tips
+  // de MMA cujo event_name caiu no genérico ("MMA", "Boxing" sem detalhes).
+  // Atualiza event_name para "{org} — {eventName}" quando resolver encontra.
+  //   POST /admin/backfill-mma-events?dryRun=1&limit=50
+  if (p === '/admin/backfill-mma-events' && req.method === 'POST') {
+    (async () => {
+      try {
+        const { resolveOrg } = require('./lib/mma-org-resolver');
+        const limit = Math.max(1, Math.min(500, parseInt(parsed.query.limit || '100', 10) || 100));
+        const dryRun = !(parsed.query.apply === '1' || parsed.query.apply === 'true');
+
+        const rows = db.prepare(`
+          SELECT id, participant1, participant2, event_name, sent_at
+          FROM tips
+          WHERE sport = 'mma'
+            AND (event_name IS NULL OR TRIM(event_name) IN ('', 'MMA', 'Boxing'))
+          ORDER BY id DESC
+          LIMIT ?
+        `).all(limit);
+
+        const results = [];
+        let updated = 0, unresolved = 0;
+        for (const r of rows) {
+          const resolved = await resolveOrg(r.participant1, r.participant2, r.sent_at).catch(() => null);
+          if (!resolved?.org) {
+            unresolved++;
+            results.push({ id: r.id, matchup: `${r.participant1} vs ${r.participant2}`, from: r.event_name, to: null });
+            continue;
+          }
+          const newEvent = resolved.eventName && resolved.eventName !== resolved.org
+            ? `${resolved.org} — ${resolved.eventName}`
+            : resolved.org;
+          results.push({ id: r.id, matchup: `${r.participant1} vs ${r.participant2}`, from: r.event_name, to: newEvent });
+          if (!dryRun) {
+            db.prepare(`UPDATE tips SET event_name = ? WHERE id = ?`).run(newEvent, r.id);
+            updated++;
+          }
+        }
+        log('INFO', 'ADMIN', `backfill-mma-events: dryRun=${dryRun} scanned=${rows.length} resolved=${rows.length - unresolved} updated=${updated}`);
+        sendJson(res, { ok: true, dryRun, scanned: rows.length, resolved: rows.length - unresolved, unresolved, updated, items: results });
+      } catch (e) {
+        sendJson(res, { error: e.message, stack: e.stack }, 500);
+      }
+    })();
+    return;
+  }
+
   // Anula em lote todas as tips pendentes mais antigas que N dias (padrão: 60)
   if (p === '/void-old-pending' && req.method === 'POST') {
     let body = ''; req.on('data', d => body += d);

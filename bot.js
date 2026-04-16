@@ -5282,10 +5282,12 @@ async function pollMma(runOnce = false) {
             }
           } catch (_) {}
         }
-        // Sempre resolve org/eventName via Sofascore (TheOddsAPI só dá "MMA"/"Boxing" genérico)
-        if (!fight._org && !isBoxing) {
+        // Sempre resolve org/eventName (TheOddsAPI só dá "MMA"/"Boxing" genérico).
+        // resolver: Sofascore → ESPN scoreboards (UFC/PFL/Bellator/boxing) como fallback.
+        if (!fight._org) {
           try {
-            const orgInfo = await sofascoreMma.lookupOrg(fight.team1, fight.team2, fight.time).catch(() => null);
+            const { resolveOrg } = require('./lib/mma-org-resolver');
+            const orgInfo = await resolveOrg(fight.team1, fight.team2, fight.time).catch(() => null);
             if (orgInfo?.org) fight._org = orgInfo.org;
             if (orgInfo?.eventName) fight._eventName = orgInfo.eventName;
           } catch (_) {}
@@ -5529,8 +5531,13 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
           `${confEmoji} Confiança: *${tipConf}*\n\n` +
           `⚠️ _Aposte com responsabilidade._`;
 
-        // eventName: prioriza org + eventName (ex: "UFC — UFC 305") sobre o "MMA" genérico do TheOddsAPI
-        const recEventName = leagueLine || fight.league;
+        // eventName: prioriza org + eventName (ex: "UFC — UFC 305") sobre o "MMA" genérico do TheOddsAPI.
+        // Se nenhum resolver achou org (leagueLine vira "MMA" puro), marca como
+        // "MMA (não identificado)" pra não contaminar o bucket rollup das orgs conhecidas.
+        const _trim = String(leagueLine || '').trim();
+        const recEventName = (!_trim || /^mma$/i.test(_trim))
+          ? (isBoxing ? 'Boxing (não identificado)' : 'MMA (não identificado)')
+          : leagueLine;
         const rec = await serverPost('/record-tip', {
           matchId: String(fight.id), eventName: recEventName,
           p1: fight.team1, p2: fight.team2, tipParticipant: tipTeam,
