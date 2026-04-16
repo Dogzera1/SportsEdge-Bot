@@ -7603,6 +7603,38 @@ const server = http.createServer(async (req, res) => {
   }
 
   // ── Snooker: odds via Pinnacle guest API (funciona do BR) ──
+  if (p === '/debug-cs-elo') {
+    try {
+      const { getCsElo, computeEloFromDB } = require('./lib/cs-ml');
+      const teamsParam = String(parsed.query.teams || '').trim();
+      const totalRows = db.prepare(`SELECT COUNT(*) c FROM match_results WHERE game='cs'`).get()?.c || 0;
+      const distinctTeams = db.prepare(`SELECT COUNT(DISTINCT team) c FROM (SELECT team1 AS team FROM match_results WHERE game='cs' UNION ALL SELECT team2 FROM match_results WHERE game='cs')`).get()?.c || 0;
+      const latest = db.prepare(`SELECT MAX(resolved_at) m FROM match_results WHERE game='cs'`).get()?.m || null;
+
+      let pairs = null;
+      if (teamsParam) {
+        const list = teamsParam.split(',').map(s => s.trim()).filter(Boolean);
+        pairs = [];
+        for (let i = 0; i < list.length; i += 2) {
+          const t1 = list[i], t2 = list[i+1];
+          if (!t2) break;
+          const r = getCsElo(db, t1, t2, 0.5, 0.5);
+          pairs.push({ t1, t2, elo1: r.elo1, elo2: r.elo2, eloMatches1: r.eloMatches1, eloMatches2: r.eloMatches2, found1: r.found1, found2: r.found2, useEloEligible: r.found1 && r.found2 && Math.min(r.eloMatches1, r.eloMatches2) >= 5 });
+        }
+      }
+
+      sendJson(res, {
+        matchResultsRows: totalRows,
+        distinctTeams,
+        latestResolvedAt: latest,
+        pairs,
+      });
+    } catch (e) {
+      sendJson(res, { error: e.message, stack: e.stack }, 500);
+    }
+    return;
+  }
+
   if (p === '/debug-cs-hltv') {
     try {
       const hltv = require('./lib/hltv');
