@@ -3962,22 +3962,12 @@ const server = http.createServer(async (req, res) => {
     const t2 = parsed.query.team2 || parsed.query.p2 || '';
     if (!t1 || !t2) { sendJson(res, { error: 'team1 e team2 obrigatórios' }, 400); return; }
     const gameParam = (parsed.query.game || '').toLowerCase();
-    // Dota 2: SX.Bet → Pinnacle (map OR série via period) → The Odds API
-    // Pinnacle tem period=N para mapa N em Dota 2 (mesmo padrão LoL).
+    // Dota 2: LINE SHOPPING — busca SX.Bet + Pinnacle + TheOddsAPI em paralelo
     if (gameParam === 'dota2' || gameParam === 'dota') {
       const liveOnly = parsed.query.live === '1';
       const dotaMapNumber = parsed.query.map ? parseInt(parsed.query.map, 10) : null;
+      const candidates = [];
 
-      // 1. SX.Bet para ao vivo
-      if (SXBET_ENABLED) {
-        const dotaSportId = await sxFindDotaSportId().catch(() => null);
-        const o = await sxGetMatchWinnerOdds(t1, t2, { sportId: dotaSportId, liveOnly, _debug: false }).catch(() => null);
-        if (o) {
-          if (liveOnly) log('INFO', 'ODDS', `SX.Bet Dota 2 ao vivo: ${t1} vs ${t2}`);
-          sendJson(res, o);
-          return;
-        }
-      }
       const normTeam = s => String(s||'').toLowerCase().replace(/[^a-z0-9]/g,'');
       const n1 = normTeam(t1), n2 = normTeam(t2);
       const matchesTeams = (mt1, mt2) => {
@@ -3985,71 +3975,76 @@ const server = http.createServer(async (req, res) => {
         return (mn1.includes(n1) || n1.includes(mn1)) && (mn2.includes(n2) || n2.includes(mn2));
       };
 
-      // 2. Pinnacle (se ativado): mapa específico ou série
-      if (process.env.PINNACLE_DOTA === 'true') {
-        const pinMatches = await getPinnacleDotaMatches().catch(() => []);
-        const pinHit = pinMatches.find(m => matchesTeams(m.team1, m.team2));
-        if (pinHit) {
-          const swap = !normTeam(pinHit.team1).includes(n1) && !n1.includes(normTeam(pinHit.team1));
-          const pinMatchupId = String(pinHit.id || '').replace(/^pin_/, '');
-          if (dotaMapNumber && dotaMapNumber > 0 && pinMatchupId) {
-            const mapMl = await pinnacle.getMatchupMoneylineByPeriod(pinMatchupId, dotaMapNumber).catch(() => null);
-            if (mapMl?.oddsHome && mapMl?.oddsAway) {
-              const [th, ta] = swap ? [mapMl.oddsAway, mapMl.oddsHome] : [mapMl.oddsHome, mapMl.oddsAway];
-              log('INFO', 'ODDS', `Pinnacle Dota MAPA ${dotaMapNumber}: ${t1} vs ${t2}`);
-              sendJson(res, {
-                t1: String(th), t2: String(ta), bookmaker: 'Pinnacle',
-                mapMarket: true, mapRequested: dotaMapNumber, fallback: 'pinnacle-map'
-              });
-              return;
-            }
-          }
-          // série — sem map solicitado OU map solicitado mas indisponível (fallback)
-          if (pinHit.odds) {
-            const payload = dotaMapNumber
-              ? { ...pinHit.odds, seriesOnly: true, mapRequested: dotaMapNumber, fallback: 'pinnacle-series-fallback' }
-              : { ...pinHit.odds, seriesOnly: true, fallback: 'pinnacle-series' };
-            if (dotaMapNumber) log('INFO', 'ODDS', `Pinnacle Dota série (fallback de mapa ${dotaMapNumber}): ${t1} vs ${t2}`);
-            sendJson(res, payload);
-            return;
-          }
-        }
-      }
+      // Busca em paralelo: SX.Bet + Pinnacle + TheOddsAPI cache
+      const [sxResult, pinResult] = await Promise.all([
+        // SX.Bet
+        SXBET_ENABLED
+          ? (async () => {
+              const dotaSportId = await sxFindDotaSportId().catch(() => null);
+              return sxGetMatchWinnerOdds(t1, t2, { sportId: dotaSportId, liveOnly, _debug: false }).catch(() => null);
+            })()
+          : null,
+        // Pinnacle
+        process.env.PINNACLE_DOTA === 'true'
+          ? (async () => {
+              const pinMatches = await getPinnacleDotaMatches().catch(() => []);
+              const pinHit = pinMatches.find(m => matchesTeams(m.team1, m.team2));
+              if (!pinHit) return null;
+              const swap = !normTeam(pinHit.team1).includes(n1) && !n1.includes(normTeam(pinHit.team1));
+              const pinMatchupId = String(pinHit.id || '').replace(/^pin_/, '');
+              if (dotaMapNumber && dotaMapNumber > 0 && pinMatchupId) {
+                const mapMl = await pinnacle.getMatchupMoneylineByPeriod(pinMatchupId, dotaMapNumber).catch(() => null);
+                if (mapMl?.oddsHome && mapMl?.oddsAway) {
+                  const [th, ta] = swap ? [mapMl.oddsAway, mapMl.oddsHome] : [mapMl.oddsHome, mapMl.oddsAway];
+                  return { t1: String(th), t2: String(ta), bookmaker: 'Pinnacle', mapMarket: true, mapRequested: dotaMapNumber };
+                }
+              }
+              if (pinHit.odds) {
+                return { ...pinHit.odds, bookmaker: 'Pinnacle', seriesOnly: true };
+              }
+              return null;
+            })()
+          : null,
+      ]);
 
-      // 3. The Odds API cache (apenas série)
+      if (sxResult?.t1) candidates.push(sxResult);
+      if (pinResult?.t1) candidates.push(pinResult);
+
+      // TheOddsAPI cache (fallback, não precisa de await)
       if (THE_ODDS_API_KEY && !liveOnly && !dotaMapNumber) {
         const cached = _dotaOddsCache.data.find(m => matchesTeams(m.team1, m.team2));
-        if (cached?.odds) { sendJson(res, cached.odds); return; }
+        if (cached?.odds?.t1) candidates.push({ ...cached.odds, bookmaker: cached.odds.bookmaker || 'TheOddsAPI' });
       }
-      sendJson(res, { error: `odds Dota 2 não encontradas${dotaMapNumber ? ` (mapa ${dotaMapNumber})` : ''}` });
+
+      if (!candidates.length) {
+        sendJson(res, { error: `odds Dota 2 não encontradas${dotaMapNumber ? ` (mapa ${dotaMapNumber})` : ''}` });
+        return;
+      }
+
+      // LINE SHOPPING: retorna melhor odd
+      const best = candidates.reduce((a, b) => {
+        const aMax = Math.max(parseFloat(a.t1) || 0, parseFloat(a.t2) || 0);
+        const bMax = Math.max(parseFloat(b.t1) || 0, parseFloat(b.t2) || 0);
+        return bMax > aMax ? b : a;
+      });
+
+      if (candidates.length > 1) {
+        best._allOdds = candidates.map(c => ({ t1: c.t1, t2: c.t2, bookmaker: c.bookmaker }));
+        log('INFO', 'ODDS', `LINE SHOP Dota: ${t1} vs ${t2} → best=${best.bookmaker} (${candidates.map(c => `${c.bookmaker}:${c.t1}/${c.t2}`).join(' | ')})`);
+      }
+      sendJson(res, best);
       return;
     }
     const mapNumber = parsed.query.map ? parseInt(parsed.query.map, 10) : null;
     const score1 = parsed.query.score1 != null ? parseInt(parsed.query.score1, 10) : null;
     const score2 = parsed.query.score2 != null ? parseInt(parsed.query.score2, 10) : null;
     const format = parsed.query.format ? String(parsed.query.format) : '';
-    // LoL: odds via SX.Bet (primário por-mapa) → Pinnacle (map OU série, conforme período disponível)
-    // DESCOBERTA: Pinnacle TEM odds por mapa via field `period` no /markets/related/straight
-    //   period=0 → série, period=N → mapa N (status 'open' quando ainda em aposta).
-    // Cascata:
-    //   1. SX.Bet (per-map + per-series, preferido quando funciona)
-    //   2. Pinnacle period=mapNumber (odds do mapa específico)
-    //   3. Pinnacle period=0 (série) — apenas quando request NÃO pediu mapa
+    // LoL: LINE SHOPPING — busca SX.Bet + Pinnacle em paralelo, retorna melhor preço
     if (gameParam === 'lol') {
       const liveOnly = !!(mapNumber && mapNumber > 0);
+      const candidates = []; // { t1, t2, bookmaker, ... }
 
-      // 1. SX.Bet (per-map odds ao vivo, melhor para live com mapNumber)
-      if (SXBET_ENABLED) {
-        const o = await sxGetMatchWinnerOdds(t1, t2, { liveOnly, mapNumber: liveOnly ? mapNumber : null }).catch(() => null);
-        if (o) {
-          log('INFO', 'ODDS', `SX.Bet LoL: ${t1} vs ${t2}${liveOnly ? ` (ao vivo mapa ${mapNumber})` : ''}`);
-          sendJson(res, o);
-          return;
-        }
-      }
-
-      // 2. Pinnacle: busca matchup pelo time via oddsCache (populado por fetchLoLOddsFromPinnacle)
-      //    Procuramos qualquer entry esports_pin_* que tenha os nomes t1/t2 — o fixtureId carrega o matchupId
+      // Busca em paralelo: SX.Bet + Pinnacle
       const pinEntry = (() => {
         const nt1 = norm(t1), nt2 = norm(t2);
         for (const [k, v] of Object.entries(oddsCache)) {
@@ -4061,52 +4056,62 @@ const server = http.createServer(async (req, res) => {
         return null;
       })();
 
-      if (pinEntry && pinEntry.fixtureId) {
-        const pinMatchupId = String(pinEntry.fixtureId).replace(/^pin_/, '');
-        // 2a. Mapa específico solicitado → busca period=mapNumber
-        if (mapNumber && mapNumber > 0) {
-          const mapMl = await pinnacle.getMatchupMoneylineByPeriod(pinMatchupId, mapNumber).catch(() => null);
-          if (mapMl?.oddsHome && mapMl?.oddsAway) {
-            const [th, ta] = pinEntry._swap ? [mapMl.oddsAway, mapMl.oddsHome] : [mapMl.oddsHome, mapMl.oddsAway];
-            log('INFO', 'ODDS', `Pinnacle LoL MAPA ${mapNumber}: ${t1} vs ${t2} → ${th}/${ta}`);
-            sendJson(res, {
-              t1: String(th), t2: String(ta),
-              bookmaker: 'Pinnacle',
-              mapMarket: true,
-              mapRequested: mapNumber,
-              fallback: 'pinnacle-map'
-            });
-            return;
+      const [sxResult, pinResult] = await Promise.all([
+        // SX.Bet
+        SXBET_ENABLED
+          ? sxGetMatchWinnerOdds(t1, t2, { liveOnly, mapNumber: liveOnly ? mapNumber : null }).catch(() => null)
+          : null,
+        // Pinnacle
+        (pinEntry?.fixtureId ? (async () => {
+          const pinMatchupId = String(pinEntry.fixtureId).replace(/^pin_/, '');
+          if (mapNumber && mapNumber > 0) {
+            const mapMl = await pinnacle.getMatchupMoneylineByPeriod(pinMatchupId, mapNumber).catch(() => null);
+            if (mapMl?.oddsHome && mapMl?.oddsAway) {
+              const [th, ta] = pinEntry._swap ? [mapMl.oddsAway, mapMl.oddsHome] : [mapMl.oddsHome, mapMl.oddsAway];
+              return { t1: String(th), t2: String(ta), bookmaker: 'Pinnacle', mapMarket: true, mapRequested: mapNumber };
+            }
           }
-          log('DEBUG', 'ODDS', `Pinnacle LoL mapa ${mapNumber} não disponível (settled ou sem mercado)`);
-        }
-        // 2b. Sem mapa OU mapa solicitado mas não disponível → tenta série (period=0)
-        if (!mapNumber) {
-          const seriesMl = await pinnacle.getMatchupMoneylineByPeriod(pinMatchupId, 0).catch(() => null);
-          if (seriesMl?.oddsHome && seriesMl?.oddsAway) {
-            const [th, ta] = pinEntry._swap ? [seriesMl.oddsAway, seriesMl.oddsHome] : [seriesMl.oddsHome, seriesMl.oddsAway];
-            log('INFO', 'ODDS', `Pinnacle LoL série: ${t1} vs ${t2} → ${th}/${ta}`);
-            sendJson(res, {
-              t1: String(th), t2: String(ta),
-              bookmaker: 'Pinnacle',
-              mapMarket: false,
-              seriesOnly: true,
-              fallback: 'pinnacle-series'
-            });
-            return;
+          if (!mapNumber) {
+            const seriesMl = await pinnacle.getMatchupMoneylineByPeriod(pinMatchupId, 0).catch(() => null);
+            if (seriesMl?.oddsHome && seriesMl?.oddsAway) {
+              const [th, ta] = pinEntry._swap ? [seriesMl.oddsAway, seriesMl.oddsHome] : [seriesMl.oddsHome, seriesMl.oddsAway];
+              return { t1: String(th), t2: String(ta), bookmaker: 'Pinnacle', seriesOnly: true };
+            }
+            // Cache fallback
+            if (pinEntry.t1 && pinEntry.t2) {
+              return {
+                t1: pinEntry._swap ? pinEntry.t2 : pinEntry.t1,
+                t2: pinEntry._swap ? pinEntry.t1 : pinEntry.t2,
+                bookmaker: 'Pinnacle', seriesOnly: true, fallback: 'pinnacle-cache'
+              };
+            }
           }
-          // Fallback final: usa as odds cacheadas (já sabemos que existem)
-          log('INFO', 'ODDS', `Pinnacle LoL cache (série): ${t1} vs ${t2}`);
-          sendJson(res, {
-            t1: pinEntry._swap ? pinEntry.t2 : pinEntry.t1,
-            t2: pinEntry._swap ? pinEntry.t1 : pinEntry.t2,
-            bookmaker: 'Pinnacle', mapMarket: false, seriesOnly: true, fallback: 'pinnacle-cache'
-          });
-          return;
-        }
+          return null;
+        })() : null),
+      ]);
+
+      if (sxResult?.t1) candidates.push(sxResult);
+      if (pinResult?.t1) candidates.push(pinResult);
+
+      if (!candidates.length) {
+        sendJson(res, { error: `odds LoL não encontradas${mapNumber ? ` (mapa ${mapNumber})` : ''}` });
+        return;
       }
 
-      sendJson(res, { error: `odds LoL não encontradas${mapNumber ? ` (mapa ${mapNumber})` : ''}` });
+      // LINE SHOPPING: para cada candidato, calcular max(t1) e max(t2) entre todas as fontes
+      // mas retornamos o candidato com melhor odd para o lado com mais edge (max do max)
+      const best = candidates.reduce((a, b) => {
+        const aMax = Math.max(parseFloat(a.t1) || 0, parseFloat(a.t2) || 0);
+        const bMax = Math.max(parseFloat(b.t1) || 0, parseFloat(b.t2) || 0);
+        return bMax > aMax ? b : a;
+      });
+
+      // Adiciona _allOdds para transparência
+      if (candidates.length > 1) {
+        best._allOdds = candidates.map(c => ({ t1: c.t1, t2: c.t2, bookmaker: c.bookmaker }));
+        log('INFO', 'ODDS', `LINE SHOP LoL: ${t1} vs ${t2} → best=${best.bookmaker} (${candidates.map(c => `${c.bookmaker}:${c.t1}/${c.t2}`).join(' | ')})`);
+      }
+      sendJson(res, best);
       return;
     }
     // force=1: bypassa TTL do cache (usado para partidas iminentes < 2h)
@@ -5848,6 +5853,7 @@ const server = http.createServer(async (req, res) => {
         if (!matchId || !winner) { sendJson(res, { error: 'Missing matchId/winner' }, 400); return; }
         // Usa transaction para garantir atomicidade: SELECT + UPDATE acontecem juntos,
         // evitando que dois ciclos de settlement processem o mesmo tip simultaneamente.
+        const tipsNeedingClv = [];
         const settleResult = db.transaction(() => {
           const tips = db.prepare("SELECT * FROM tips WHERE match_id = ? AND sport = ? AND result IS NULL").all(matchId, sport);
           let settled = 0;
@@ -5883,6 +5889,10 @@ const server = http.createServer(async (req, res) => {
               : parseFloat((-stakeR).toFixed(2));
             db.prepare("UPDATE tips SET stake_reais = ?, profit_reais = ? WHERE id = ?")
               .run(stakeR, profitR, tip.id);
+            // CLV: gravar odds de fecho se ainda não tiver (captura retroativa)
+            if (!tip.clv_odds && tip.odds) {
+              tipsNeedingClv.push({ id: tip.id, matchId: tip.match_id, sport, odds: tip.odds, p1: tip.participant1, p2: tip.participant2 });
+            }
             bancaDelta += profitR;
             settled++;
           }
@@ -5912,6 +5922,42 @@ const server = http.createServer(async (req, res) => {
           }
         }
         sendJson(res, { ok: true, settled, bancaDelta: parseFloat(bancaDelta.toFixed(2)) });
+
+        // CLV retroativo: busca odds de fecho para tips que não tinham clv_odds
+        // Executa fora da transaction, sem bloquear a resposta
+        if (tipsNeedingClv.length > 0) {
+          setImmediate(async () => {
+            for (const t of tipsNeedingClv) {
+              try {
+                // Tenta buscar odds atuais para os mesmos times (serão as closing odds ou próximas disso)
+                const game = t.sport === 'esports' ? 'lol' : (t.sport === 'dota2' ? 'dota2' : t.sport);
+                const oddsUrl = `/odds?team1=${encodeURIComponent(t.p1 || '')}&team2=${encodeURIComponent(t.p2 || '')}&game=${game}`;
+                const currentOdds = await new Promise((resolve) => {
+                  const req = http.get({ hostname: '127.0.0.1', port: PORT, path: oddsUrl, timeout: 8000 }, (res) => {
+                    let d = ''; res.on('data', c => d += c);
+                    res.on('end', () => { try { resolve(JSON.parse(d)); } catch(_) { resolve(null); } });
+                  });
+                  req.on('error', () => resolve(null));
+                  req.end();
+                }).catch(() => null);
+
+                if (currentOdds?.t1 && currentOdds?.t2) {
+                  // CLV = odds no qual apostamos / odds de fecho
+                  // Se apostamos em t1: clv_odds = currentOdds.t1
+                  // Se apostamos em t2: clv_odds = currentOdds.t2
+                  const tipNorm = norm(t.p1 || '');
+                  const isT1 = norm(t.p1 || '').length > 0; // tip_participant matching
+                  const closingOdd = parseFloat(isT1 ? currentOdds.t1 : currentOdds.t2);
+                  if (closingOdd > 1) {
+                    stmts.updateTipCLV.run(closingOdd, t.matchId, t.sport);
+                    const clvPct = ((parseFloat(t.odds) / closingOdd - 1) * 100).toFixed(1);
+                    log('INFO', 'CLV', `${t.sport} ${t.p1} vs ${t.p2}: closing=${closingOdd} tip=${t.odds} CLV=${clvPct}%`);
+                  }
+                }
+              } catch (_) {}
+            }
+          });
+        }
       } catch(e) { sendJson(res, { error: e.message }, 500); }
     });
     return;
