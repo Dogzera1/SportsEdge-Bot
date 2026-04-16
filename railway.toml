@@ -1,5 +1,5 @@
 [build]
-builder = "nixpacks"
+builder = "railpacks"
 
 [deploy]
 startCommand = "node start.js"
