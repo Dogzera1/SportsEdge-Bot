@@ -6761,9 +6761,8 @@ async function pollCs(runOnce = false) {
   const CS_MIN_ODDS = parseFloat(process.env.CS_MIN_ODDS ?? '1.40');
   const CS_MAX_ODDS = parseFloat(process.env.CS_MAX_ODDS ?? '4.50');
   const CS_MIN_EV = parseFloat(process.env.CS_MIN_EV ?? '5.0');
-  // Flip gradual do shadow: 'ALL' | 'ALTA' | 'ALTA_MEDIA' — filtra DM por confiança.
-  // Default 'ALTA' protege a saída inicial enquanto amostra real cresce.
-  const CS_LIVE_CONF = String(process.env.CS_LIVE_CONF || 'ALTA').toUpperCase();
+  // Filtra DM por confiança: 'ALL' | 'ALTA' | 'ALTA_MEDIA'. Default ALL (sem gate).
+  const CS_LIVE_CONF = String(process.env.CS_LIVE_CONF || 'ALL').toUpperCase();
   const { getCsElo } = require('./lib/cs-ml');
   const hltv = require('./lib/hltv');
 
@@ -6990,7 +6989,7 @@ async function pollValorant(runOnce = false) {
   const VAL_MIN_ODDS = parseFloat(process.env.VALORANT_MIN_ODDS ?? '1.40');
   const VAL_MAX_ODDS = parseFloat(process.env.VALORANT_MAX_ODDS ?? '4.50');
   const VAL_MIN_EV = parseFloat(process.env.VALORANT_MIN_EV ?? '5.0');
-  const VAL_LIVE_CONF = String(process.env.VALORANT_LIVE_CONF || 'ALTA').toUpperCase();
+  const VAL_LIVE_CONF = String(process.env.VALORANT_LIVE_CONF || 'ALL').toUpperCase();
   const { getValorantElo } = require('./lib/valorant-ml');
 
   async function loop() {
