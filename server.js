@@ -494,7 +494,7 @@ const LOL_LEAGUES = new Set([
   'hellenic_legends_league', 'lta_cross',
   // Ligas adicionais da lista OddsPapi
   'gll', 'road-of-legends', 'road_of_legends', 'roadoflegends', 'ultraliga', 'elite-series', 'njcs', 'kjl',
-  'arabian-league', 'lvp-superliga', 'ldl', 'cblol-academy',
+  'arabian-league', 'arabian_league', 'lvp-superliga', 'ldl', 'cblol-academy',
   'circuito-desafiante', 'cd', 'lcl', 'gll-pro-am', 'lfl-division-2',
   // Slugs alternativos usados pela Riot API (já cobertos via PandaScore, suprime WARN)
   'south_regional_league', 'rift_legends',
@@ -4696,7 +4696,11 @@ const server = http.createServer(async (req, res) => {
     // ── Alertas críticos (consumidos pelo bot via polling) ──
     const alerts = [];
     if (!dbOk) alerts.push({ id: 'db_error', severity: 'critical', msg: 'SQLite connection falhou' });
-    if (!ODDSPAPI_KEY) alerts.push({ id: 'oddspapi_key_missing', severity: 'critical', msg: 'ODDS_API_KEY/ODDSPAPI_KEY ausente — odds esports indisponíveis' });
+    // OddsPapi descontinuado — odds esports agora vêm de Pinnacle. Alerta suprimido
+    // por padrão; reative setando ODDSPAPI_ALERT_ENABLED=true se voltar a usar OddsPapi.
+    if (!ODDSPAPI_KEY && /^(1|true|yes)$/i.test(String(process.env.ODDSPAPI_ALERT_ENABLED || ''))) {
+      alerts.push({ id: 'oddspapi_key_missing', severity: 'critical', msg: 'ODDS_API_KEY/ODDSPAPI_KEY ausente — odds esports indisponíveis' });
+    }
     if (THE_ODDS_API_KEY && theOddsQuota.pct >= 80) {
       alerts.push({ id: 'theodds_quota_high', severity: theOddsQuota.pct >= 95 ? 'critical' : 'warning', msg: `The Odds API quota em ${theOddsQuota.pct}% (${theOddsQuota.used}/${theOddsQuota.cap})` });
     }
