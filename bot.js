@@ -2243,8 +2243,15 @@ async function autoAnalyzeMatch(token, match) {
     const DS_COOLDOWN_MS = Math.max(3000, parseInt(process.env.DEEPSEEK_CALL_COOLDOWN_MS || '20000', 10) || 20000);
     const sinceLastCall = Date.now() - global.__deepseekLastCallTs;
     if (sinceLastCall < DS_COOLDOWN_MS && global.__deepseekLastCallTs > 0) {
-      log('INFO', 'AUTO', `DeepSeek cooldown (${Math.round((DS_COOLDOWN_MS - sinceLastCall)/1000)}s restantes) — pulando ${match.team1} vs ${match.team2}`);
-      return null;
+      const remainMs = DS_COOLDOWN_MS - sinceLastCall;
+      const MAX_WAIT_MS = Math.max(3000, parseInt(process.env.DEEPSEEK_COOLDOWN_MAX_WAIT_MS || '25000', 10) || 25000);
+      if (remainMs <= MAX_WAIT_MS) {
+        log('INFO', 'AUTO', `DeepSeek cooldown (${Math.round(remainMs/1000)}s) — aguardando para ${match.team1} vs ${match.team2}`);
+        await _sleep(remainMs + 100);
+      } else {
+        log('INFO', 'AUTO', `DeepSeek cooldown (${Math.round(remainMs/1000)}s restantes >${Math.round(MAX_WAIT_MS/1000)}s) — pulando ${match.team1} vs ${match.team2}`);
+        return null;
+      }
     }
     if (Date.now() < global.__deepseekBackoffUntil) {
       const direction = mlResult.direction;
@@ -2373,7 +2380,7 @@ async function autoAnalyzeMatch(token, match) {
       return null;
     }
 
-    let tipResult = text.match(/TIP_ML:\s*([^@]+?)\s*@\s*([^|\]]+?)\s*\|EV:\s*([^|]+?)\s*(?:\|P:\s*[^|]+?\s*)?\|STAKE:\s*([^|\]]+?)(?:\s*\|CONF:\s*(\w+))?(?:\]|$)/);
+    let tipResult = text.match(/TIP_ML:\s*([^@]+?)\s*@\s*([^|\]]+?)\s*\|EV:\s*([^|]+?)\s*(?:\|P:\s*[^|]+?\s*)?\|STAKE:\s*([^|\]]+?)(?:\s*\|CONF:\s*([A-Za-zÀ-ÿ]+))?(?=\]|\s|$)/);
     // Log quando a IA gerou resposta mas o padrão TIP_ML não foi encontrado (ajuda a detectar mudança de formato)
     if (!tipResult && text && text.length > 20 && !text.toLowerCase().includes('sem edge') && !text.toLowerCase().includes('sem tip') && !/\bsem_?tip\b/i.test(text)) {
       const snippet = text.slice(0, 200).replace(/\n/g, ' ');
