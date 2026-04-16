@@ -1,15 +1,4 @@
 {
   "$schema": "https://schema.railpack.com",
-  "build": {
-    "aptPackages": [
-      "python3",
-      "build-essential",
-      "pkg-config"
-    ]
-  },
-  "deploy": {
-    "aptPackages": [
-      "python3"
-    ]
-  }
+  "buildAptPackages": ["python3", "build-essential", "pkg-config"]
 }

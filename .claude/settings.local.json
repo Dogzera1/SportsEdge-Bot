@@ -127,7 +127,8 @@
       "Bash(echo \"CURL_FAILED: $?\")",
       "Bash(echo \"EXIT:$?\")",
       "WebFetch(domain:docs.railway.com)",
-      "WebFetch(domain:station.railway.com)"
+      "WebFetch(domain:station.railway.com)",
+      "WebFetch(domain:railpack.com)"
     ]
   }
 }
