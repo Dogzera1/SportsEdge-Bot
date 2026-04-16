@@ -88,6 +88,9 @@ const subscribedUsers = new Map(); // userId → Set<sport>
 
 // Auto-analysis state
 const analyzedMatches = new Map();
+// Serie-level dedup LoL: evita re-tip entre mapas quando placar nao mudou e EV e semelhante.
+// key = match.id da serie | value = { pick, ev, score1, score2, ts, mapNum }
+const lolSeriesLastTip = new Map();
 const analyzedMma = new Map();
 const analyzedTennis = new Map();
 const analyzedFootball = new Map();
@@ -895,6 +898,24 @@ async function runAutoAnalysis() {
           // Ao vivo: registrar por mapa para não sobrescrever série inteira
           const liveMapa = result.hasLiveStats ? result.liveGameNumber : null;
           const mapTag = (result.hasLiveStats && liveMapa) ? `_MAP${liveMapa}` : '';
+
+          // Dedup serie-level: suprime 2a tip no mesmo BoN quando placar nao mudou e EV mexeu pouco.
+          // Evita spammar 2-3 tips no mesmo confronto ao avancar de mapa sem mudanca de estado.
+          const serieId = String(match.id);
+          const lastSerieTip = lolSeriesLastTip.get(serieId);
+          if (lastSerieTip) {
+            const samePick = norm(lastSerieTip.pick) === norm(tipTeam);
+            const sameScore = (lastSerieTip.score1 || 0) === (match.score1 || 0) && (lastSerieTip.score2 || 0) === (match.score2 || 0);
+            const evDiff = Math.abs(parseFloat(tipEV) - parseFloat(lastSerieTip.ev));
+            const recentMs = now - lastSerieTip.ts;
+            const DEDUP_WINDOW_MS = 15 * 60 * 1000;
+            const EV_TOLERANCE = parseFloat(process.env.LOL_SERIES_EV_TOLERANCE || '2.0');
+            if (samePick && sameScore && evDiff < EV_TOLERANCE && recentMs < DEDUP_WINDOW_MS) {
+              log('INFO', 'AUTO', `Dedup serie: ${match.team1} vs ${match.team2} — mesma pick/placar, EV ${lastSerieTip.ev}% → ${tipEV}% (diff ${evDiff.toFixed(1)}pp < ${EV_TOLERANCE}pp)`);
+              continue;
+            }
+          }
+
           const rec = await serverPost('/record-tip', {
             matchId: canonicalMatchId('esports', String(match.id) + mapTag), eventName: match.league,
             p1: match.team1, p2: match.team2, tipParticipant: tipTeam,
@@ -974,6 +995,12 @@ async function runAutoAnalysis() {
             }
           }
           analyzedMatches.set(matchKey, { ts: now, tipSent: true });
+          // Registra a tip na serie-level dedup map (suprime re-tip no proximo mapa sem mudanca de estado).
+          lolSeriesLastTip.set(String(match.id), {
+            pick: tipTeam, ev: tipEV,
+            score1: match.score1 || 0, score2: match.score2 || 0,
+            ts: now, mapNum: liveMapa || null,
+          });
           log('INFO', 'AUTO-TIP', `Esports: ${tipTeam} @ ${tipOdd} (odds ${hasRealOdds ? 'reais' : 'estimadas'})`);
           // Log curto + variáveis consideradas (para auditoria)
           if (result.debugVars) {

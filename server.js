@@ -2600,12 +2600,16 @@ async function getTheOddsTableTennisMatches() {
 
 // ── Pinnacle — Tennis (sportId=33) ──
 // Suplementa The Odds API: cobre ATP/WTA/Challenger/ITF extensivamente.
+// TTL adaptativo: 5min quando só upcoming; 90s quando ha partidas live (odds live movem rapido).
 let _tennisPinnacleCache = { data: [], ts: 0 };
-const TENNIS_PINNACLE_TTL = 5 * 60 * 1000; // 5min
+const TENNIS_PINNACLE_TTL_IDLE = 5 * 60 * 1000;
+const TENNIS_PINNACLE_TTL_LIVE = 90 * 1000;
 
 async function getPinnacleTennisMatches() {
   if (process.env.PINNACLE_TENNIS !== 'true') return [];
-  if (_tennisPinnacleCache.data.length && (Date.now() - _tennisPinnacleCache.ts) < TENNIS_PINNACLE_TTL) {
+  const hadLive = _tennisPinnacleCache.data.some(m => m.status === 'live');
+  const ttl = hadLive ? TENNIS_PINNACLE_TTL_LIVE : TENNIS_PINNACLE_TTL_IDLE;
+  if (_tennisPinnacleCache.data.length && (Date.now() - _tennisPinnacleCache.ts) < ttl) {
     return _tennisPinnacleCache.data;
   }
   try {
@@ -2616,6 +2620,7 @@ async function getPinnacleTennisMatches() {
       if (/\(sets\)|\(games\)|\d+-\d+/i.test(p1 + p2)) return false;
       return true;
     });
+    const _fetchedAt = Date.now();
     const matches = rows.map(r => ({
       id: `tennis_pin_${r.id}`,
       team1: r.team1,
@@ -2624,7 +2629,7 @@ async function getPinnacleTennisMatches() {
       sport_key: (r.league || '').toLowerCase().includes('wta') ? 'tennis_wta' : 'tennis_atp',
       status: r.status === 'live' ? 'live' : 'upcoming',
       time: r.startTime,
-      odds: { t1: String(r.oddsT1), t2: String(r.oddsT2), bookmaker: 'Pinnacle' }
+      odds: { t1: String(r.oddsT1), t2: String(r.oddsT2), bookmaker: 'Pinnacle', _fetchedAt }
     }));
     _tennisPinnacleCache = { data: matches, ts: Date.now() };
     log('INFO', 'ODDS', `Pinnacle Tennis: ${matches.length} partidas cacheadas`);
