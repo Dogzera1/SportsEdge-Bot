@@ -6990,7 +6990,7 @@ async function pollValorant(runOnce = false) {
   const VAL_MAX_ODDS = parseFloat(process.env.VALORANT_MAX_ODDS ?? '4.50');
   const VAL_MIN_EV = parseFloat(process.env.VALORANT_MIN_EV ?? '5.0');
   const VAL_LIVE_CONF = String(process.env.VALORANT_LIVE_CONF || 'ALL').toUpperCase();
-  const { getValorantElo } = require('./lib/valorant-ml');
+  const { getValorantModel } = require('./lib/valorant-ml');
 
   async function loop() {
     try {
@@ -7058,7 +7058,11 @@ async function pollValorant(runOnce = false) {
         const vig = r1 + r2;
         const impliedP1 = r1 / vig;
         const impliedP2 = r2 / vig;
-        const elo = getValorantElo(db, match.team1, match.team2, impliedP1, impliedP2);
+
+        const boMatch = String(match.format || '').match(/Bo(\d+)/i);
+        const bo = boMatch ? parseInt(boMatch[1], 10) : 3;
+        const ctx = { bo, score1: match.score1, score2: match.score2 };
+        const elo = getValorantModel(db, match.team1, match.team2, impliedP1, impliedP2, ctx);
 
         const useElo = elo.pass && elo.found1 && elo.found2 && Math.min(elo.eloMatches1, elo.eloMatches2) >= 5;
         if (!useElo) {
@@ -7072,6 +7076,10 @@ async function pollValorant(runOnce = false) {
         const direction = elo.direction === 'p1' ? 't1' : elo.direction === 'p2' ? 't2' : null;
         const mlScore = elo.score;
         const factorCount = elo.factorCount;
+
+        if (elo.inSeriesAdjusted) {
+          log('INFO', 'AUTO-VAL', `Série ${match.score1||0}-${match.score2||0} Bo${bo}: P mapa=${elo.mapP1.toFixed(3)} → P série=${modelP1.toFixed(3)}`);
+        }
 
         if (!direction || mlScore < 3.0) {
           analyzedValorant.set(key, { ts: now, tipSent: false });
@@ -7101,9 +7109,15 @@ async function pollValorant(runOnce = false) {
         if (!riskAdj.ok) { log('INFO', 'RISK', `valorant: bloqueada (${riskAdj.reason})`); continue; }
         const stakeAdj = String(riskAdj.units.toFixed(1).replace(/\.0$/, ''));
 
-        const conf = elo.eloMatches1 >= 20 && elo.eloMatches2 >= 20 ? 'ALTA'
+        const conf = (elo.eloMatches1 >= 20 && elo.eloMatches2 >= 20 && factorCount >= 3) ? 'ALTA'
                    : factorCount >= 2 ? 'MÉDIA' : 'BAIXA';
-        const tipReason = `Elo: ${match.team1}=${elo.elo1} (${elo.eloMatches1}j) vs ${match.team2}=${elo.elo2} (${elo.eloMatches2}j)`;
+        const formStr = (elo.form1 && elo.form2)
+          ? ` | Form: ${(elo.form1.winRate*100).toFixed(0)}% (${elo.form1.games}j) vs ${(elo.form2.winRate*100).toFixed(0)}% (${elo.form2.games}j)`
+          : '';
+        const seriesStr = elo.inSeriesAdjusted
+          ? ` | série ${match.score1||0}-${match.score2||0} Bo${bo}`
+          : '';
+        const tipReason = `Elo: ${match.team1}=${elo.elo1} (${elo.eloMatches1}j) vs ${match.team2}=${elo.elo2} (${elo.eloMatches2}j)${formStr}${seriesStr}`;
 
         const rec = await serverPost('/record-tip', {
           matchId: String(match.id), eventName: match.league,
