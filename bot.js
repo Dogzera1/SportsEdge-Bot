@@ -7061,7 +7061,7 @@ async function pollValorant(runOnce = false) {
 
         const boMatch = String(match.format || '').match(/Bo(\d+)/i);
         const bo = boMatch ? parseInt(boMatch[1], 10) : 3;
-        const ctx = { bo, score1: match.score1, score2: match.score2 };
+        const ctx = { bo, score1: match.score1, score2: match.score2, currentMap: match.currentMap || null };
         const elo = getValorantModel(db, match.team1, match.team2, impliedP1, impliedP2, ctx);
 
         const useElo = elo.pass && elo.found1 && elo.found2 && Math.min(elo.eloMatches1, elo.eloMatches2) >= 5;
@@ -7114,10 +7114,14 @@ async function pollValorant(runOnce = false) {
         const formStr = (elo.form1 && elo.form2)
           ? ` | Form: ${(elo.form1.winRate*100).toFixed(0)}% (${elo.form1.games}j) vs ${(elo.form2.winRate*100).toFixed(0)}% (${elo.form2.games}j)`
           : '';
+        const h2hStr = elo.h2h ? ` | H2H ${elo.h2h.t1Wins}-${elo.h2h.t2Wins}` : '';
+        const mapStr = (elo.mapRate1 && elo.mapRate2 && elo.currentMap)
+          ? ` | ${elo.currentMap}: ${(elo.mapRate1.winRate*100).toFixed(0)}%(${elo.mapRate1.games}j) vs ${(elo.mapRate2.winRate*100).toFixed(0)}%(${elo.mapRate2.games}j)`
+          : '';
         const seriesStr = elo.inSeriesAdjusted
           ? ` | série ${match.score1||0}-${match.score2||0} Bo${bo}`
           : '';
-        const tipReason = `Elo: ${match.team1}=${elo.elo1} (${elo.eloMatches1}j) vs ${match.team2}=${elo.elo2} (${elo.eloMatches2}j)${formStr}${seriesStr}`;
+        const tipReason = `Elo: ${match.team1}=${elo.elo1} (${elo.eloMatches1}j) vs ${match.team2}=${elo.elo2} (${elo.eloMatches2}j)${formStr}${h2hStr}${mapStr}${seriesStr}`;
 
         const rec = await serverPost('/record-tip', {
           matchId: String(match.id), eventName: match.league,

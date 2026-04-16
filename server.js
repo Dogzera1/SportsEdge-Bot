@@ -3034,8 +3034,12 @@ async function getPandaScoreValorantMatches() {
       const leagueName = m.league?.name || m.serie?.full_name || 'Valorant';
       const format = m.number_of_games > 1 ? `Bo${m.number_of_games}` : 'Bo1';
       let s1 = 0, s2 = 0;
+      let currentMap = null;
       if (Array.isArray(m.games)) {
         for (const g of m.games) {
+          if (g.status === 'running' || g.status === 'not_started' && !currentMap) {
+            if (g.status === 'running' && g.map?.name) currentMap = g.map.name;
+          }
           if (!g.winner) continue;
           if (g.winner.id === t1?.id) s1++;
           else if (g.winner.id === t2?.id) s2++;
@@ -3052,6 +3056,7 @@ async function getPandaScoreValorantMatches() {
         time: m.begin_at || '',
         format,
         winner: m.winner?.name || null,
+        currentMap,
         _psId: String(m.id),
         _source: 'pandascore'
       };
@@ -5661,6 +5666,7 @@ const server = http.createServer(async (req, res) => {
       const since = new Date(Date.now() - days * 86400 * 1000).toISOString().slice(0, 19);
 
       const matches = [];
+      const mapRows = [];
       let page = 1;
       while (page <= 50) {
         const url = `https://api.pandascore.co/valorant/matches/past?per_page=100&page=${page}&sort=-end_at&filter[finished]=true&range[end_at]=${encodeURIComponent(since)},${encodeURIComponent(new Date().toISOString().slice(0,19))}`;
@@ -5669,12 +5675,14 @@ const server = http.createServer(async (req, res) => {
         const arr = safeParse(r.body, []);
         if (!Array.isArray(arr) || arr.length === 0) break;
         for (const m of arr) {
-          const t1 = m.opponents?.[0]?.opponent?.name;
-          const t2 = m.opponents?.[1]?.opponent?.name;
+          const t1Opp = m.opponents?.[0]?.opponent;
+          const t2Opp = m.opponents?.[1]?.opponent;
+          const t1 = t1Opp?.name;
+          const t2 = t2Opp?.name;
           const winnerName = m.winner?.name;
           if (!t1 || !t2 || !winnerName) continue;
-          const score1 = m.results?.find(x => x.team_id === m.opponents?.[0]?.opponent?.id)?.score ?? null;
-          const score2 = m.results?.find(x => x.team_id === m.opponents?.[1]?.opponent?.id)?.score ?? null;
+          const score1 = m.results?.find(x => x.team_id === t1Opp?.id)?.score ?? null;
+          const score2 = m.results?.find(x => x.team_id === t2Opp?.id)?.score ?? null;
           matches.push({
             psId: m.id,
             team1: t1, team2: t2,
@@ -5683,6 +5691,25 @@ const server = http.createServer(async (req, res) => {
             league: m.league?.name || 'Valorant',
             endAt: m.end_at,
           });
+
+          // Map-level: extrai winner por game quando há map.name
+          if (Array.isArray(m.games)) {
+            for (const g of m.games) {
+              if (!g?.winner?.id || g.status !== 'finished') continue;
+              const mapName = g.map?.name || null;
+              if (!mapName) continue;
+              const winTeam = g.winner.id === t1Opp?.id ? t1 : (g.winner.id === t2Opp?.id ? t2 : null);
+              if (!winTeam) continue;
+              mapRows.push({
+                psId: m.id,
+                pos: g.position ?? 0,
+                team1: t1, team2: t2,
+                mapName,
+                winner: winTeam,
+                endAt: g.end_at || m.end_at,
+              });
+            }
+          }
         }
         if (arr.length < 100) break;
         page++;
@@ -5693,11 +5720,17 @@ const server = http.createServer(async (req, res) => {
         INSERT OR IGNORE INTO match_results (match_id, game, team1, team2, winner, final_score, league, resolved_at)
         VALUES (?, 'valorant', ?, ?, ?, ?, ?, ?)
       `);
+      const upsertMap = db.prepare(`
+        INSERT OR IGNORE INTO valorant_map_results (match_id, game_pos, team1, team2, map_name, winner, resolved_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `);
       const existing = db.prepare(`SELECT COUNT(*) c FROM match_results WHERE game='valorant'`).get()?.c || 0;
+      const existingMaps = db.prepare(`SELECT COUNT(*) c FROM valorant_map_results`).get()?.c || 0;
 
       let inserted = 0;
+      let insertedMaps = 0;
       if (!dryRun) {
-        const tx = db.transaction((rows) => {
+        const tx = db.transaction((rows, maps) => {
           for (const m of rows) {
             const mid = `valorant_ps_${m.psId}`;
             const resolvedAt = m.endAt
@@ -5706,8 +5739,16 @@ const server = http.createServer(async (req, res) => {
             const r = upsert.run(mid, m.team1, m.team2, m.winner, m.score, m.league, resolvedAt);
             if (r.changes) inserted++;
           }
+          for (const g of maps) {
+            const mid = `valorant_ps_${g.psId}`;
+            const resolvedAt = g.endAt
+              ? new Date(g.endAt).toISOString().replace('T', ' ').slice(0, 19)
+              : new Date().toISOString().replace('T', ' ').slice(0, 19);
+            const r = upsertMap.run(mid, g.pos, g.team1, g.team2, g.mapName, g.winner, resolvedAt);
+            if (r.changes) insertedMaps++;
+          }
         });
-        tx(matches);
+        tx(matches, mapRows);
         try { require('./lib/valorant-ml').invalidateEloCache(); } catch (_) {}
       }
 
@@ -5719,6 +5760,9 @@ const server = http.createServer(async (req, res) => {
         pagesScanned: page,
         inserted,
         existingBefore: existing,
+        insertedMaps,
+        existingMapsBefore: existingMaps,
+        mapsFoundFromApi: mapRows.length,
         sample: matches[0] || null,
       });
       if (!dryRun) log('INFO', 'ADMIN', `seed-valorant-history: ${inserted} novos matches em ${days}d (existing antes: ${existing})`);
