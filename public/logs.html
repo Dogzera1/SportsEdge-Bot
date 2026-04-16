@@ -89,6 +89,42 @@
   .tip-row.live { background: rgba(248,113,113,.05); border-left: 2px solid var(--err); padding-left: 4px; }
   .card.has-live { box-shadow: 0 0 0 1px rgba(248,113,113,.3), 0 4px 18px rgba(248,113,113,.08); }
   .card.has-live .title::after { content: '⚡LIVE'; margin-left: auto; padding: 2px 8px; border-radius: 999px; font-size: 10px; font-weight: 700; letter-spacing: .5px; background: var(--err); color: #1a0000; animation: blink 1.2s infinite; }
+
+  /* ── Live Matches Tab ── */
+  .live-section { padding: 18px 18px 0; }
+  .live-section h2 { font-size: 14px; font-weight: 700; color: var(--ok); text-transform: uppercase; letter-spacing: 1px; margin: 0; display: flex; align-items: center; gap: 8px; }
+  .live-table { width: 100%; border-collapse: collapse; margin-top: 10px; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+  .live-table th { background: var(--panel2); color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .5px; padding: 8px 12px; text-align: left; border-bottom: 1px solid var(--border); }
+  .live-table td { padding: 8px 12px; font-size: 13px; border-bottom: 1px solid var(--border); }
+  .live-table tr:last-child td { border-bottom: none; }
+  .live-table tr.row-live { background: rgba(248,113,113,.06); }
+  .live-table tr.row-draft { background: rgba(251,191,36,.06); }
+  .live-table .sport-tag { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .3px; }
+  .sport-tag.lol { background: rgba(74,163,255,.15); color: var(--accent); }
+  .sport-tag.dota { background: rgba(248,113,113,.15); color: #ff9a9a; }
+  .sport-tag.cs { background: rgba(251,191,36,.15); color: var(--warn); }
+  .sport-tag.tennis { background: rgba(52,211,153,.15); color: var(--ok); }
+  .sport-tag.tabletennis { background: rgba(52,211,153,.12); color: #76c9a5; }
+  .sport-tag.mma { background: rgba(255,150,100,.15); color: #ffaa80; }
+  .sport-tag.football { background: rgba(100,255,100,.12); color: #7adb7a; }
+  .sport-tag.snooker { background: rgba(160,120,255,.15); color: #c4a8ff; }
+  .sport-tag.darts { background: rgba(255,200,80,.15); color: #ffd060; }
+  .status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+  .status-dot.live { background: var(--err); box-shadow: 0 0 6px var(--err); animation: blink 1.2s infinite; }
+  .status-dot.draft { background: var(--warn); box-shadow: 0 0 6px var(--warn); }
+  .status-dot.upcoming { background: var(--muted); }
+  .activity-tag { display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 10px; text-transform: uppercase; letter-spacing: .3px; }
+  .activity-tag.tip_sent { background: rgba(52,211,153,.18); color: var(--ok); }
+  .activity-tag.deep_analysis { background: rgba(74,163,255,.15); color: var(--accent); }
+  .activity-tag.live_stats { background: rgba(248,113,113,.15); color: #ff9a9a; }
+  .activity-tag.analyzing { background: rgba(124,134,147,.15); color: var(--muted); }
+  .activity-tag.no_edge { background: rgba(124,134,147,.12); color: var(--muted); }
+  .activity-tag.stale_odds { background: rgba(251,191,36,.12); color: var(--warn); }
+  .activity-tag.blocked { background: rgba(248,113,113,.1); color: #ff8080; }
+  .live-empty { color: var(--muted); font-size: 13px; padding: 20px; text-align: center; }
+  .live-filters { display: flex; gap: 4px; flex-wrap: wrap; margin: 10px 0 0; }
+  .live-filters .lpill { background: var(--panel2); border: 1px solid var(--border); padding: 2px 8px; border-radius: 999px; font-size: 11px; cursor: pointer; user-select: none; color: var(--text); }
+  .live-filters .lpill.active { background: var(--accent); color: #051119; border-color: var(--accent); font-weight: 600; }
 </style>
 </head>
 <body>
@@ -114,6 +150,7 @@
     <span class="pill" data-bot="tennis">tennis</span>
     <span class="pill" data-bot="tabletennis">tt</span>
     <span class="pill" data-bot="mma">mma</span>
+    <span class="pill" data-bot="football">football</span>
     <span class="pill" data-bot="snooker">snooker</span>
     <span class="pill" data-bot="darts">darts</span>
   </div>
@@ -136,6 +173,28 @@
   <div id="errPanel" style="display:none;margin:8px 18px;background:var(--panel);border:1px solid var(--border);border-left:4px solid var(--err);border-radius:10px;max-height:320px;overflow:auto;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;padding:10px 14px;">
     <div class="tips-empty" id="errEmpty">sem erros no buffer</div>
     <div id="errList"></div>
+  </div>
+</div>
+<div class="live-section" id="liveSection">
+  <h2>
+    <span class="status-dot live"></span> Partidas ao Vivo
+    <span id="liveMatchCount" style="background:rgba(52,211,153,.18);padding:1px 8px;border-radius:999px;font-size:11px;color:var(--ok);">0</span>
+    <span id="liveTrackedCount" style="font-size:11px;color:var(--muted);font-weight:400;margin-left:4px;">/ 0 cobertas</span>
+  </h2>
+  <div class="live-filters" id="liveFilters">
+    <span class="lpill active" data-lf="all">todos</span>
+    <span class="lpill" data-lf="lol">lol</span>
+    <span class="lpill" data-lf="dota">dota</span>
+    <span class="lpill" data-lf="cs">cs2</span>
+    <span class="lpill" data-lf="tennis">tennis</span>
+    <span class="lpill" data-lf="football">football</span>
+    <span class="lpill" data-lf="mma">mma</span>
+    <span class="lpill" data-lf="tabletennis">tt</span>
+    <span class="lpill" data-lf="snooker">snooker</span>
+    <span class="lpill" data-lf="darts">darts</span>
+  </div>
+  <div id="liveBody">
+    <div class="live-empty">carregando partidas...</div>
   </div>
 </div>
 <div class="grid" id="grid"><div class="empty">carregando status…</div></div>
@@ -336,13 +395,73 @@
     }).join('');
   }
 
-  let timer = setInterval(() => { refresh(); if (errOpen) refreshErrors(); }, 5000);
+  // ── Live Matches Tab ──
+  const SPORT_EMOJI = { lol: '🟦', dota: '🟥', cs: '🔫', tennis: '🎾', tabletennis: '🏓', mma: '🥊', football: '⚽', snooker: '🎱', darts: '🎯' };
+  const SPORT_LABEL = { lol: 'LoL', dota: 'Dota 2', cs: 'CS2', tennis: 'Tênis', tabletennis: 'TT', mma: 'MMA', football: 'Futebol', snooker: 'Snooker', darts: 'Darts' };
+  const ACTIVITY_LABEL = { tip_sent: 'TIP ENVIADA', deep_analysis: 'ANALISANDO IA', live_stats: 'LIVE STATS', analyzing: 'MONITORANDO', no_edge: 'SEM EDGE', stale_odds: 'ODDS STALE', blocked: 'BLOQUEADA' };
+  const STATUS_LABEL_LIVE = { live: 'AO VIVO', draft: 'DRAFT', upcoming: 'PRÓXIMA', finished: 'ENCERRADA' };
+
+  let liveFilter = 'all';
+  document.querySelectorAll('#liveFilters .lpill').forEach(p => p.addEventListener('click', () => {
+    document.querySelectorAll('#liveFilters .lpill').forEach(x => x.classList.remove('active'));
+    p.classList.add('active');
+    liveFilter = p.dataset.lf;
+    renderLiveMatches(lastLiveData);
+  }));
+
+  let lastLiveData = null;
+
+  function renderLiveMatches(data) {
+    lastLiveData = data;
+    const $body = document.getElementById('liveBody');
+    const $count = document.getElementById('liveMatchCount');
+    const $tracked = document.getElementById('liveTrackedCount');
+    if (!data || !data.matches) {
+      $body.innerHTML = '<div class="live-empty">sem dados</div>';
+      return;
+    }
+    $count.textContent = data.liveCount;
+    $tracked.textContent = `/ ${data.totalTracked} cobertas`;
+
+    let items = data.matches;
+    if (liveFilter !== 'all') items = items.filter(m => m.sport === liveFilter);
+
+    if (!items.length) {
+      $body.innerHTML = `<div class="live-empty">${liveFilter === 'all' ? 'nenhuma partida detectada nos últimos ' + data.windowMin + ' min' : 'nenhuma partida de ' + (SPORT_LABEL[liveFilter] || liveFilter)}</div>`;
+      return;
+    }
+
+    let html = '<table class="live-table"><thead><tr><th>Esporte</th><th>Status</th><th>Partida</th><th>Atividade</th><th>Visto há</th></tr></thead><tbody>';
+    for (const m of items) {
+      const rowCls = m.status === 'live' ? 'row-live' : (m.status === 'draft' ? 'row-draft' : '');
+      const sportTag = `<span class="sport-tag ${m.sport}">${SPORT_EMOJI[m.sport] || ''} ${SPORT_LABEL[m.sport] || m.sport}</span>`;
+      const statusDot = `<span class="status-dot ${m.status}"></span>${STATUS_LABEL_LIVE[m.status] || m.status}`;
+      const actTag = `<span class="activity-tag ${m.activity}">${ACTIVITY_LABEL[m.activity] || m.activity}</span>`;
+      const tipBadge = m.tipSent ? ' <span style="color:var(--ok);font-size:10px;font-weight:700;">✓ TIP</span>' : '';
+      const lsBadge = m.liveStats ? ' <span style="color:#ff9a9a;font-size:10px;">📊 STATS</span>' : '';
+      const ago = fmtTime(m.lastSeen);
+      const matchText = `<b>${escapeHtml(m.team1)}</b> vs <b>${escapeHtml(m.team2)}</b>${tipBadge}${lsBadge}`;
+      html += `<tr class="${rowCls}"><td>${sportTag}</td><td style="font-size:12px;">${statusDot}</td><td>${matchText}</td><td>${actTag}</td><td style="color:var(--muted);font-size:12px;">${ago}</td></tr>`;
+    }
+    html += '</tbody></table>';
+    $body.innerHTML = html;
+  }
+
+  async function refreshLiveMatches() {
+    try {
+      const data = await fetch('/live-matches').then(r => r.json());
+      renderLiveMatches(data);
+    } catch (_) {}
+  }
+
+  let timer = setInterval(() => { refresh(); if (errOpen) refreshErrors(); refreshLiveMatches(); }, 5000);
   $auto.addEventListener('change', () => {
     clearInterval(timer);
-    if ($auto.checked) timer = setInterval(() => { refresh(); if (errOpen) refreshErrors(); }, 5000);
+    if ($auto.checked) timer = setInterval(() => { refresh(); if (errOpen) refreshErrors(); refreshLiveMatches(); }, 5000);
   });
 
   refresh();
+  refreshLiveMatches();
 })();
 </script>
 </body>

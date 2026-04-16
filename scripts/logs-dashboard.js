@@ -52,11 +52,12 @@ function classify(line) {
   if (/\btennis|tenis\b/i.test(l) && !/table.?tennis|tabletennis|tenis.?de.?mesa/i.test(lc)) bot = 'tennis';
   if (/table.?tennis|tabletennis|tenis.?de.?mesa|tt.?match/i.test(lc)) bot = 'tabletennis';
   if (/\bmma|ufc|pfl|bellator|rizin|cagewarriors\b/i.test(l)) bot = 'mma';
+  if (/\bfootball|futebol|AUTO-FOOTBALL|football-matches\b/i.test(l)) bot = 'football';
   if (/\bsnooker|cuetracker\b/i.test(l)) bot = 'snooker';
   if (/\bdarts?\b/i.test(l)) bot = 'darts';
 
   let kind = null;
-  if (/\bTIP\b|\bAUTO-(LOL|DOTA|TENIS|MMA|DARTS|SNOOKER|TT|CS)\b|envia(da|ndo)/i.test(l)) kind = 'tip';
+  if (/\bTIP\b|\bAUTO-(LOL|DOTA|TENIS|MMA|DARTS|SNOOKER|TT|CS|FOOTBALL)\b|envia(da|ndo)/i.test(l)) kind = 'tip';
   if (/livestats|live.?stats|streamlist|window\//i.test(lc)) kind = 'stats';
   if (/calibrat/i.test(lc)) kind = 'calibration';
 
@@ -137,6 +138,7 @@ const SPORTS = [
   { bot: 'tennis',      label: 'Tênis',             emoji: '🎾', windowMin: 12, cycleEverySec: 300 },
   { bot: 'tabletennis', label: 'Tênis de Mesa',     emoji: '🏓', windowMin: 15, cycleEverySec: 600 },
   { bot: 'mma',         label: 'MMA / Boxe',        emoji: '🥊', windowMin: 12, cycleEverySec: 360 },
+  { bot: 'football',    label: 'Futebol',            emoji: '⚽', windowMin: 15, cycleEverySec: 900 },
   { bot: 'snooker',     label: 'Snooker',           emoji: '🎱', windowMin: 30, cycleEverySec: 1800 },
   { bot: 'darts',       label: 'Darts',             emoji: '🎯', windowMin: 30, cycleEverySec: 1800 },
 ];
@@ -257,6 +259,16 @@ function statusForSport(cfg) {
     summary = `${cyc.length} eventos · ${m.matches} partidas com odds · ${tipsSent} tips (shadow)`;
   }
 
+  // ─── Football ───
+  else if (cfg.bot === 'football') {
+    const cyc = window.filter(e => /AUTO-FOOTBALL|\/football-matches/i.test(e.text));
+    const lastCount = window.map(e => e.text.match(/(\d+) partidas futebol com odds/)).filter(Boolean).pop();
+    m.cycles = cyc.length;
+    m.matches = lastCount ? +lastCount[1] : 0;
+    if (cyc.length === 0) { issues.push('Sem ciclos AUTO-FOOTBALL na janela'); level = 'warn'; }
+    summary = `${cyc.length} ciclos · ${m.matches} partidas · ${tipsSent} tips`;
+  }
+
   // ─── Snooker / Darts ───
   else {
     if (window.length === 0) { issues.push(`Nenhuma atividade na janela (${cfg.windowMin} min)`); level = 'warn'; }
@@ -331,6 +343,98 @@ function extractTips(limit = 60) {
   };
 }
 
+// ─────────────────────────────────────────────────────────
+// Live matches — extrai partidas ao vivo do buffer de logs
+// ─────────────────────────────────────────────────────────
+function extractLiveMatches() {
+  const now = Date.now();
+  const WINDOW = 20 * 60 * 1000; // últimos 20min de logs
+  const cutoff = now - WINDOW;
+  const recent = buffer.filter(e => e.t >= cutoff);
+
+  // Regex patterns para capturar "team1 vs team2" de linhas de cada bot
+  // Captura linhas como: "Analisando: T1 vs T2", "Sem edge: T1 vs T2", "Tip enviada: T1 @ ...",
+  // "5 partidas (3 live ...)", "LIVE-STATS LoL Riot ...", "X vs Y | sinais=", etc.
+  const vsRe = /(?:^|[\s|:])([A-Z0-9][A-Za-z0-9 .'\-()&!]+?)\s+vs\.?\s+([A-Z0-9][A-Za-z0-9 .'\-()&!]+?)(?:\s*[\|—\-@\n]|$)/;
+
+  const matches = new Map(); // key = "bot|t1|t2" → { sport, team1, team2, status, lastSeen, details }
+
+  for (const e of recent) {
+    if (e.bot === 'system') continue;
+    const text = e.text;
+
+    // Detectar se a linha menciona match live
+    const isLiveLine = e.isLive || /\bLIVE\b|ao vivo|live PS|status=live|isLive/i.test(text);
+
+    // Extrair nomes via "vs"
+    const m = text.match(vsRe);
+    if (!m) continue;
+    const t1 = m[1].trim();
+    const t2 = m[2].trim();
+    // Rejeitar falsos positivos (strings muito curtas ou numéricas)
+    if (t1.length < 2 || t2.length < 2) continue;
+    if (/^\d+$/.test(t1) || /^\d+$/.test(t2)) continue;
+
+    const key = `${e.bot}|${t1.toLowerCase()}|${t2.toLowerCase()}`;
+    const existing = matches.get(key);
+
+    // Determinar status do match a partir do texto do log
+    let status = 'upcoming';
+    if (isLiveLine) status = 'live';
+    else if (/draft|pick.?ban|champselect/i.test(text)) status = 'draft';
+    else if (/finish|termin|ended|resolved/i.test(text)) status = 'finished';
+
+    // Determinar atividade: análise, tip enviada, sem edge, odds stale, etc.
+    let activity = 'analyzing';
+    if (/Tip enviada/i.test(text)) activity = 'tip_sent';
+    else if (/Sem tip:|Sem edge|edge insuficiente|EV baixo|BAIXA rejeit/i.test(text)) activity = 'no_edge';
+    else if (/Odds stale/i.test(text)) activity = 'stale_odds';
+    else if (/LIVE-STATS|live.?stats|hasLiveStats/i.test(text)) activity = 'live_stats';
+    else if (/Analisando:|sinais=/i.test(text)) activity = 'deep_analysis';
+    else if (/Gate|bloqueada|rejeit/i.test(text)) activity = 'blocked';
+
+    if (!existing || e.t > existing.lastSeen) {
+      matches.set(key, {
+        sport: e.bot,
+        team1: existing?.team1 || t1,
+        team2: existing?.team2 || t2,
+        status: (existing?.status === 'live' && status !== 'finished') ? 'live' : status,
+        activity,
+        lastSeen: e.t,
+        firstSeen: existing?.firstSeen || e.t,
+        tipSent: existing?.tipSent || activity === 'tip_sent',
+        liveStats: existing?.liveStats || activity === 'live_stats',
+        mentions: (existing?.mentions || 0) + 1,
+      });
+    } else if (existing) {
+      // Atualizar flags mesmo se não é mais recente
+      if (activity === 'tip_sent') existing.tipSent = true;
+      if (activity === 'live_stats') existing.liveStats = true;
+      if (status === 'live') existing.status = 'live';
+      existing.mentions++;
+    }
+  }
+
+  // Converter Map → array, priorizando live
+  const result = [...matches.values()]
+    .filter(m => m.status === 'live' || m.status === 'draft' || (now - m.lastSeen < 10 * 60 * 1000))
+    .sort((a, b) => {
+      // live > draft > upcoming > finished
+      const rank = { live: 0, draft: 1, upcoming: 2, finished: 3 };
+      const ra = rank[a.status] ?? 9;
+      const rb = rank[b.status] ?? 9;
+      if (ra !== rb) return ra - rb;
+      return b.lastSeen - a.lastSeen;
+    });
+
+  return {
+    matches: result,
+    liveCount: result.filter(m => m.status === 'live').length,
+    totalTracked: result.length,
+    windowMin: Math.round(WINDOW / 60000),
+  };
+}
+
 function computeStatus() {
   const now = Date.now();
   const sports = SPORTS.map(statusForSport).sort((a, b) => {
@@ -385,6 +489,10 @@ const server = http.createServer((req, res) => {
     const limit = parseInt(url.searchParams.get('limit') || '60', 10);
     res.writeHead(200, { 'Content-Type': 'application/json' });
     return res.end(JSON.stringify(extractTips(limit)));
+  }
+  if (url.pathname === '/live-matches') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify(extractLiveMatches()));
   }
   if (url.pathname === '/restart') {
     startChild();
