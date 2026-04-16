@@ -969,9 +969,9 @@ async function fetchMapOddsByFixtureId(fixtureId, mapNumber) {
 let _footballMatchesCache = null; // { matches: Array, ts: number }
 const FOOTBALL_MATCHES_CACHE_TTL = 8 * 60 * 60 * 1000; // 8h
 
-// Cache de /tennis-matches — reduzido para suportar live polling rápido (3min)
+// Cache de /tennis-matches — curto para suportar live polling agressivo (2min)
 let _tennisMatchesCache = null; // { matches: Array, ts: number }
-const TENNIS_MATCHES_CACHE_TTL = 3 * 60 * 1000; // 3 min
+const TENNIS_MATCHES_CACHE_TTL = 90 * 1000; // 90s
 
 // Backoff em caso de 429
 let esportsBackoffUntil = 0;

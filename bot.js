@@ -701,8 +701,8 @@ async function runAutoAnalysis() {
         //   - Com stats mas sem edge: 8 min (IA já analisou com dados reais, improvável mudar rápido)
         // Draft/upcoming: 10/20 min (comportamento anterior).
         const isLiveMatch = match.status === 'live' || match.status === 'inprogress';
-        const LIVE_FAST_RETRY = 3 * 60 * 1000;   // 3 min pra live sem stats
-        const LIVE_NORMAL_COOLDOWN = 8 * 60 * 1000; // 8 min pra live que já teve stats
+        const LIVE_FAST_RETRY = 2 * 60 * 1000;   // 2 min pra live sem stats
+        const LIVE_NORMAL_COOLDOWN = 3 * 60 * 1000; // 3 min pra live que já teve stats
         const liveCooldown = isLiveMatch
           ? (prev?.hadLiveStats ? LIVE_NORMAL_COOLDOWN : LIVE_FAST_RETRY)
           : (prev?.noEdge ? RE_ANALYZE_INTERVAL * 2 : RE_ANALYZE_INTERVAL);
@@ -4338,7 +4338,7 @@ async function pollDota() {
   if (!esportsConfig?.enabled || !esportsConfig?.token) return;
   const token = esportsConfig.token;
   const DOTA_INTERVAL = 4 * 60 * 60 * 1000;
-  const DOTA_LIVE_COOLDOWN = 8 * 60 * 1000; // re-analisa ao vivo a cada 8min
+  const DOTA_LIVE_COOLDOWN = 3 * 60 * 1000; // re-analisa ao vivo a cada 3min
 
   try {
     log('INFO', 'AUTO-DOTA', 'Iniciando verificação de partidas Dota 2...');
@@ -5170,12 +5170,12 @@ async function pollTennis(runOnce = false) {
 
   // Live: cooldown curto (15min) para re-análise com score atualizado
   // Pré-jogo: usa TENNIS_PREGAME_INTERVAL_H (default 6h)
-  const TENNIS_LIVE_INTERVAL = Math.max(1, parseInt(process.env.TENNIS_LIVE_INTERVAL_MIN || '10', 10)) * 60 * 1000; // 10min default
+  const TENNIS_LIVE_INTERVAL = Math.max(1, parseInt(process.env.TENNIS_LIVE_INTERVAL_MIN || '3', 10)) * 60 * 1000; // 3min default
   const TENNIS_PREGAME_INTERVAL = Math.max(1, parseInt(process.env.TENNIS_PREGAME_INTERVAL_H || '6', 10) || 6) * 60 * 60 * 1000;
   const TENNIS_GATE_MIN_ODDS = parseFloat(process.env.TENNIS_MIN_ODDS ?? '1.40');
   const TENNIS_GATE_MAX_ODDS = parseFloat(process.env.TENNIS_MAX_ODDS ?? '5.00');
-  // Dual-mode polling: 3min quando há live, 30min quando só upcoming
-  const TENNIS_POLL_LIVE_MS = Math.max(60, parseInt(process.env.TENNIS_POLL_LIVE_SEC || '180', 10)) * 1000; // 3min
+  // Dual-mode polling: 2min quando há live, 30min quando só upcoming
+  const TENNIS_POLL_LIVE_MS = Math.max(60, parseInt(process.env.TENNIS_POLL_LIVE_SEC || '120', 10)) * 1000; // 2min
   const TENNIS_POLL_IDLE_MS = 30 * 60 * 1000; // 30min
 
   async function loop() {
@@ -6321,7 +6321,7 @@ async function pollCs(runOnce = false) {
         const key = `cs_${match.id}`;
         const prev = analyzedCs.get(key);
         if (prev?.tipSent) continue;
-        const csCooldown = isLiveCs ? (10 * 60 * 1000) : (30 * 60 * 1000); // live: 10min, pregame: 30min
+        const csCooldown = isLiveCs ? (3 * 60 * 1000) : (30 * 60 * 1000); // live: 3min, pregame: 30min
         if (prev && (now - prev.ts < csCooldown)) continue;
 
         if (!match.odds?.t1 || !match.odds?.t2) continue;
@@ -6479,9 +6479,9 @@ async function runAutoDarts() {
   const dartsConfig = SPORTS['darts'];
   if (!dartsConfig?.enabled) return;
   // Dual-mode: 5min quando há live, 15min idle
-  const DARTS_POLL_LIVE_MS = 3 * 60 * 1000;     // polling: 3min quando há live
+  const DARTS_POLL_LIVE_MS = 2 * 60 * 1000;     // polling: 2min quando há live
   const DARTS_POLL_IDLE_MS = 15 * 60 * 1000;    // polling: 15min idle
-  const DARTS_LIVE_COOLDOWN = 10 * 60 * 1000;   // re-análise live: 10min
+  const DARTS_LIVE_COOLDOWN = 3 * 60 * 1000;    // re-análise live: 3min
   const DARTS_PREGAME_COOLDOWN = 60 * 60 * 1000; // pregame: 1h
   let _hadLiveDarts = false;
   try {
@@ -6615,7 +6615,7 @@ async function runAutoDarts() {
 async function runAutoSnooker() {
   const snookerConfig = SPORTS['snooker'];
   if (!snookerConfig?.enabled) return;
-  const SNOOKER_LIVE_COOLDOWN = 10 * 60 * 1000;   // live: re-análise a cada 10min
+  const SNOOKER_LIVE_COOLDOWN = 3 * 60 * 1000;    // live: re-análise a cada 3min
   const SNOOKER_PREGAME_COOLDOWN = 60 * 60 * 1000; // pregame: 1h
   let _hadLiveSnooker = false;
   try {
@@ -6841,7 +6841,7 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   (function scheduleDarts() {
     setTimeout(async () => {
       const hadLive = await runAutoDarts().catch(e => { log('ERROR', 'AUTO-DARTS', e.message); return false; });
-      const nextMs = hadLive ? (3 * 60 * 1000) : (15 * 60 * 1000); // 3min live, 15min idle
+      const nextMs = hadLive ? (2 * 60 * 1000) : (15 * 60 * 1000); // 2min live, 15min idle
       log('INFO', 'AUTO-DARTS', `Próximo ciclo em ${Math.round(nextMs / 1000)}s (${hadLive ? 'LIVE' : 'idle'})`);
       scheduleDarts._nextMs = nextMs;
       scheduleDarts();
@@ -6851,7 +6851,7 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   (function scheduleSnooker() {
     setTimeout(async () => {
       const hadLive = await runAutoSnooker().catch(e => { log('ERROR', 'AUTO-SNOOKER', e.message); return false; });
-      const nextMs = hadLive ? (3 * 60 * 1000) : (15 * 60 * 1000); // 3min live, 15min idle
+      const nextMs = hadLive ? (2 * 60 * 1000) : (15 * 60 * 1000); // 2min live, 15min idle
       log('INFO', 'AUTO-SNOOKER', `Próximo ciclo em ${Math.round(nextMs / 1000)}s (${hadLive ? 'LIVE' : 'idle'})`);
       scheduleSnooker._nextMs = nextMs;
       scheduleSnooker();
