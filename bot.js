@@ -1701,11 +1701,9 @@ async function checkPatchMetaStale(token) {
 
 // ── Patch Meta: lido do env (LOL_PATCH_META no Railway) — sem auto-detect ──
 
-// Live match notifications for esports
+// Live match notifications for esports — DESATIVADO (user não quer notificações de partida live)
 async function checkLiveNotifications() {
-  if (Date.now() - lastLiveCheck < LIVE_CHECK_INTERVAL) return;
-  if (subscribedUsers.size === 0) return;
-  lastLiveCheck = Date.now();
+  return;
 
   const esportsConfig = SPORTS['esports'];
   if (!esportsConfig?.enabled || !esportsConfig.token) return;
