@@ -4581,10 +4581,12 @@ async function pollDota() {
       const isLive = match.status === 'live';
 
       // ── Dedup / cooldown ──
-      // Ao vivo: chave inclui placar para re-analisar em cada jogo da série (igual LoL _MAPn)
+      // Dedup primário: por matchId + score (permite re-análise por mapa em live)
+      // Dedup secundário: por nomes normalizados (impede duplicata quando matchId muda entre fontes)
       const serieKey = isLive ? `_${match.score1||0}x${match.score2||0}` : '';
       const key = `dota2_${match.id}${serieKey}`;
-      const prev = analyzedDota.get(key);
+      const pairKey = `dota2_pair_${norm(match.team1)}_${norm(match.team2)}${serieKey}`;
+      const prev = analyzedDota.get(key) || analyzedDota.get(pairKey);
       if (prev?.tipSent) continue;
       const cooldown = isLive ? DOTA_LIVE_COOLDOWN : DOTA_INTERVAL;
       if (prev && (now - prev.ts < cooldown)) continue;
@@ -4885,6 +4887,7 @@ Máximo 200 palavras.`;
         if (rec?.skipped) {
           log('INFO', 'AUTO-DOTA', `Tip já existe (duplicate): ${tipTeam} @ ${tipOdd}`);
           analyzedDota.set(key, { ts: now, tipSent: true, noEdge: false });
+          analyzedDota.set(pairKey, { ts: now, tipSent: true, noEdge: false });
           await _sleep(2000); continue;
         }
         for (const [uid, sports] of subscribedUsers) {
@@ -4893,6 +4896,7 @@ Máximo 200 palavras.`;
         }
         log('INFO', 'AUTO-DOTA', `TIP${isLive ? ' [LIVE]' : ''}: ${tipTeam} @ ${tipOdd} (${tipStakeAdj})`);
         analyzedDota.set(key, { ts: now, tipSent: true, noEdge: false });
+        analyzedDota.set(pairKey, { ts: now, tipSent: true, noEdge: false });
       } catch(e) {
         log('WARN', 'AUTO-DOTA', `Erro ao gravar tip: ${e.message}`);
       }

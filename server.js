@@ -5676,6 +5676,18 @@ const server = http.createServer(async (req, res) => {
         const existing = stmts.tipExistsByMatch.get(String(matchId), sport);
         if (existing) { sendJson(res, { ok: true, skipped: true, reason: 'duplicate' }); return; }
 
+        // Dedup secundário: mesmos times + sport nas últimas 2h (impede duplicata quando matchId muda entre fontes)
+        const p1n_ = norm(p1 || ''), p2n_ = norm(p2 || '');
+        if (p1n_ && p2n_) {
+          const recentDupe = db.prepare(
+            `SELECT 1 FROM tips WHERE sport = ? AND result IS NULL
+             AND sent_at > datetime('now', '-2 hours')
+             AND ((lower(participant1) LIKE ? AND lower(participant2) LIKE ?) OR (lower(participant1) LIKE ? AND lower(participant2) LIKE ?))
+             LIMIT 1`
+          ).get(sport, `%${p1n_}%`, `%${p2n_}%`, `%${p2n_}%`, `%${p1n_}%`);
+          if (recentDupe) { sendJson(res, { ok: true, skipped: true, reason: 'duplicate_pair' }); return; }
+        }
+
         // Blacklist: se já foi VOID por odds errada, não gravar de novo
         const isVoided = stmts.isVoidedMatch.get(sport, String(matchId));
         if (isVoided) { sendJson(res, { ok: true, skipped: true, reason: 'voided_odds_wrong_match' }); return; }
