@@ -269,11 +269,42 @@ function serverGet(path, sport) {
       let d = '';
       res.on('data', c => d += c);
       res.on('end', () => {
-        try { resolve(JSON.parse(d)); }
+        try {
+          const parsed = JSON.parse(d);
+          // Stamp _oddsFetchedAt em respostas de matches e odds para tracking de freshness
+          const now = Date.now();
+          if (Array.isArray(parsed)) {
+            for (const m of parsed) {
+              if (m?.odds && !m.odds._fetchedAt) m.odds._fetchedAt = now;
+            }
+          } else if (parsed?.t1 && parsed?.t2 && !parsed._fetchedAt) {
+            parsed._fetchedAt = now;
+          }
+          resolve(parsed);
+        }
         catch(e) { reject(new Error(`JSON Parse Error: ${e.message} | Body: ${d.slice(0,50)}`)); }
       });
     }).on('error', e => reject(new Error(`HTTP Error on ${SERVER}:${PORT}${path}: ${e.message}`)));
   });
+}
+
+// ── Odds freshness validation ──
+// Live: odds > 2min são stale (mercado muda a cada jogada)
+// Pregame: odds > 10min são stale (linhas movem mais devagar)
+const ODDS_MAX_AGE_LIVE_MS = parseInt(process.env.ODDS_MAX_AGE_LIVE_SEC || '120', 10) * 1000;   // 2min
+const ODDS_MAX_AGE_PRE_MS  = parseInt(process.env.ODDS_MAX_AGE_PRE_SEC  || '600', 10) * 1000;   // 10min
+
+function isOddsFresh(odds, isLive) {
+  if (!odds?._fetchedAt) return true; // sem timestamp = não bloquear (backward compat)
+  const age = Date.now() - odds._fetchedAt;
+  const maxAge = isLive ? ODDS_MAX_AGE_LIVE_MS : ODDS_MAX_AGE_PRE_MS;
+  return age <= maxAge;
+}
+
+function oddsAgeStr(odds) {
+  if (!odds?._fetchedAt) return '?';
+  const sec = Math.round((Date.now() - odds._fetchedAt) / 1000);
+  return sec < 60 ? `${sec}s` : `${Math.floor(sec / 60)}m${sec % 60}s`;
 }
 
 function serverPost(path, body, sport, extraHeaders) {
@@ -1045,7 +1076,11 @@ async function runAutoAnalysis() {
               matchId: canonicalMatchId('esports', match.id), eventName: match.league,
               p1: match.team1, p2: match.team2, tipParticipant: tipTeam,
               odds: tipOdd, ev: tipEV, stake: tipStake,
-              confidence: tipConf, isLive: false
+              confidence: tipConf, isLive: false,
+              modelP1: result.modelP1, modelP2: result.modelP2,
+              modelPPick: modelPForKelly,
+              modelLabel: result.modelLabel || 'esports-ml',
+              tipReason: result.tipReason || null
             }, 'esports');
 
             if (!recUp?.tipId && !recUp?.skipped) {
@@ -1962,6 +1997,13 @@ async function autoAnalyzeMatch(token, match) {
       const s2 = Number.isFinite(match.score2) ? `&score2=${encodeURIComponent(String(match.score2))}` : '';
       const mo = await serverGet(`/odds?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}&map=${encodeURIComponent(String(effectiveMapNumber))}${fmt}${s1}${s2}&force=1&game=${encodeURIComponent(game)}`).catch(() => null);
       if (mo?.t1 && mo?.t2) oddsToUse = mo;
+    }
+
+    // ── Odds freshness gate ──
+    const isLiveLoL = match.status === 'live' || match.status === 'inprogress';
+    if (oddsToUse?.t1 && !isOddsFresh(oddsToUse, isLiveLoL)) {
+      log('INFO', 'AUTO', `Odds stale (${oddsAgeStr(oddsToUse)}): ${match.team1} vs ${match.team2} — pulando`);
+      return null;
     }
 
     // ── Layer 1: Pré-filtro ML ──
@@ -4409,6 +4451,10 @@ async function pollDota() {
         analyzedDota.set(key, { ts: now, tipSent: false, noEdge: true });
         continue;
       }
+      if (!isOddsFresh(o, isLive)) {
+        log('INFO', 'AUTO-DOTA', `Odds stale (${oddsAgeStr(o)}): ${match.team1} vs ${match.team2} — pulando`);
+        continue;
+      }
 
       // ── Forma + H2H ──
       const [form1, form2, h2h] = await Promise.all([
@@ -4642,20 +4688,31 @@ Máximo 200 palavras.`;
       const msg = `🎮 *DOTA 2 — ${match.league}*${liveTag}\n${match.team1} vs ${match.team2} | ${match.format || ''}\n📅 ${matchTime} BRT\n\n✅ *TIP: ${tipTeam} @ ${tipOdd}*${minTakeLine}\n💰 Stake: ${tipStakeAdj} | EV: ${tipEV} | Conf: ${tipConf}\n🏦 ${o.bookmaker || 'SX.Bet'}`;
 
       try {
-        await serverPost('/record-tip', {
+        const rec = await serverPost('/record-tip', {
           matchId,
-          sport: 'dota2',
-          participant1: match.team1,
-          participant2: match.team2,
+          eventName: match.league,
+          p1: match.team1,
+          p2: match.team2,
           tipParticipant: tipTeam,
-          tipOdds: tipOdd,
-          tipEV,
+          odds: String(tipOdd),
+          ev: String(evVal),
           stake: tipStakeAdj,
           confidence: tipConf,
-          league: match.league,
-          format: match.format || '',
-          game: 'dota2'
+          isLive: isLive ? 1 : 0,
+          market_type: 'ML',
+          modelP1: mlResult.modelP1,
+          modelP2: mlResult.modelP2,
+          modelPPick: modelPForKelly,
+          modelLabel: `dota-ml (${mlResult.factorActive?.join('+') || 'base'})`,
+          tipReason: iaResp ? iaResp.split('TIP_ML:')[0].trim().split('\n').filter(Boolean).pop()?.slice(0, 160) || null : null,
+          isShadow: esportsConfig.shadowMode ? 1 : 0,
+          oddsFetchedAt: o._fetchedAt || null
         }, 'esports');
+        if (rec?.skipped) {
+          log('INFO', 'AUTO-DOTA', `Tip já existe (duplicate): ${tipTeam} @ ${tipOdd}`);
+          analyzedDota.set(key, { ts: now, tipSent: true, noEdge: false });
+          await _sleep(2000); continue;
+        }
         for (const [uid, sports] of subscribedUsers) {
           if (!sports.has('esports')) continue;
           await sendDM(token, uid, msg).catch(() => {});
@@ -5114,7 +5171,8 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
           modelP2: mlResultMma.modelP2,
           modelPPick: modelPPickMma,
           modelLabel: fairLabelMma,
-          tipReason: tipReasonMma
+          tipReason: tipReasonMma,
+          isShadow: mmaConfig.shadowMode ? 1 : 0
         }, 'mma');
 
         if (!rec?.tipId && !rec?.skipped) {
@@ -5222,6 +5280,10 @@ async function pollTennis(runOnce = false) {
         if (!o?.t1 || !o?.t2) continue;
 
         const isLiveTennis = match.status === 'live';
+        if (!isOddsFresh(o, isLiveTennis)) {
+          log('INFO', 'AUTO-TENNIS', `Odds stale (${oddsAgeStr(o)}): ${match.team1} vs ${match.team2} — pulando`);
+          continue;
+        }
 
         const matchTime = match.time ? new Date(match.time).toLocaleString('pt-BR', {
           timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit',
@@ -5609,7 +5671,9 @@ Máximo 200 palavras. Raciocínio breve antes da decisão.`;
           modelP2: mlResultTennis.modelP2,
           modelPPick: modelPPick,
           modelLabel: fairLabelTennis,
-          tipReason: tipReasonTennis
+          tipReason: tipReasonTennis,
+          isShadow: tennisConfig.shadowMode ? 1 : 0,
+          oddsFetchedAt: o._fetchedAt || null
         }, 'tennis');
 
         if (!rec?.tipId && !rec?.skipped) {
@@ -5716,6 +5780,11 @@ async function pollFootball(runOnce = false) {
 
         const o = match.odds;
         if (!o?.h || !o?.d || !o?.a) continue;
+        const isFbLive = match.status === 'live';
+        if (!isOddsFresh(o, isFbLive)) {
+          log('INFO', 'AUTO-FOOTBALL', `Odds stale (${oddsAgeStr(o)}): ${match.team1} vs ${match.team2} — pulando`);
+          continue;
+        }
 
         const oH = parseFloat(o.h), oD = parseFloat(o.d), oA = parseFloat(o.a);
         if (!oH || !oD || !oA || oH <= 1 || oD <= 1 || oA <= 1) continue;
@@ -6032,11 +6101,19 @@ Máximo 200 palavras.`;
         if (!riskAdjFb.ok) { log('INFO', 'RISK', `football: bloqueada (${riskAdjFb.reason})`); await new Promise(r => setTimeout(r, 2000)); continue; }
         const tipStakeAdjFb = String(riskAdjFb.units.toFixed(1).replace(/\.0$/, ''));
 
+        const fbModelP1 = mlScore?.modelH ? parseFloat(mlScore.modelH) / 100 : null;
+        const fbModelP2 = mlScore?.modelA ? parseFloat(mlScore.modelA) / 100 : null;
+        const fbModelPPick = tipMarket === '1X2_H' ? fbModelP1 : tipMarket === '1X2_A' ? fbModelP2 : (mlScore?.modelD ? parseFloat(mlScore.modelD) / 100 : null);
+        const fbTipReason = text ? text.split('TIP_FB:')[0].trim().split('\n').filter(Boolean).pop()?.slice(0, 160) || null : null;
+
         const recFb = await serverPost('/record-tip', {
           matchId: recordMatchId, eventName: match.league,
           p1: match.team1, p2: match.team2, tipParticipant: tipTeam,
           odds: String(tipOdd), ev: String(tipEV), stake: tipStakeAdjFb,
-          confidence: tipConf, isLive: false, market_type: tipMarket
+          confidence: tipConf, isLive: false, market_type: tipMarket,
+          modelP1: fbModelP1, modelP2: fbModelP2, modelPPick: fbModelPPick,
+          modelLabel: elo ? 'football-elo+poisson' : 'football-poisson',
+          tipReason: fbTipReason
         }, 'football');
 
         if (!recFb?.tipId && !recFb?.skipped) {
@@ -6132,6 +6209,11 @@ async function pollTableTennis(runOnce = false) {
         if (prev && (now - prev.ts < 30 * 60 * 1000)) continue; // re-check 30min
 
         if (!match.odds?.t1 || !match.odds?.t2) continue;
+        const isTTLive = match.status === 'live';
+        if (!isOddsFresh(match.odds, isTTLive)) {
+          log('INFO', 'AUTO-TT', `Odds stale (${oddsAgeStr(match.odds)}): ${match.team1} vs ${match.team2} — pulando`);
+          continue;
+        }
         const o1 = parseFloat(match.odds.t1);
         const o2 = parseFloat(match.odds.t2);
         if (!o1 || !o2 || o1 <= 1 || o2 <= 1) continue;
@@ -6325,6 +6407,10 @@ async function pollCs(runOnce = false) {
         if (prev && (now - prev.ts < csCooldown)) continue;
 
         if (!match.odds?.t1 || !match.odds?.t2) continue;
+        if (!isOddsFresh(match.odds, isLiveCs)) {
+          log('INFO', 'AUTO-CS', `Odds stale (${oddsAgeStr(match.odds)}): ${match.team1} vs ${match.team2} — pulando`);
+          continue;
+        }
         const o1 = parseFloat(match.odds.t1);
         const o2 = parseFloat(match.odds.t2);
         if (!o1 || !o2 || o1 <= 1 || o2 <= 1) continue;
@@ -6509,6 +6595,10 @@ async function runAutoDarts() {
           if (prev?.tipSent) continue;
           const cooldown = isLiveDarts ? DARTS_LIVE_COOLDOWN : DARTS_PREGAME_COOLDOWN;
           if (prev && (now - prev.ts < cooldown)) continue;
+          if (!isOddsFresh(match.odds, isLiveDarts)) {
+            log('INFO', 'AUTO-DARTS', `Odds stale (${oddsAgeStr(match.odds)}): ${match.team1} vs ${match.team2} — pulando`);
+            continue;
+          }
 
           // Enriquecimento: 3-dart avg recente (últimos 10 jogos) + H2H entre os dois
           const [recentP1, recentP2, h2h] = await Promise.all([
@@ -6642,6 +6732,10 @@ async function runAutoSnooker() {
           if (prev?.tipSent) continue;
           const cooldown = isLiveSnooker ? SNOOKER_LIVE_COOLDOWN : SNOOKER_PREGAME_COOLDOWN;
           if (prev && (now - prev.ts < cooldown)) continue;
+          if (!isOddsFresh(match.odds, isLiveSnooker)) {
+            log('INFO', 'AUTO-SNOOKER', `Odds stale (${oddsAgeStr(match.odds)}): ${match.team1} vs ${match.team2} — pulando`);
+            continue;
+          }
 
           // Enrichment via CueTracker (scraping HTML) — win rate da temporada atual.
           // Sem ranking oficial (snooker.org precisa email approval), mas win rate já

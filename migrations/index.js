@@ -217,6 +217,13 @@ const migrations = [
       db.prepare('INSERT OR IGNORE INTO bankroll (sport, initial_banca, current_banca) VALUES (?, 100.0, 100.0)').run('snooker');
     },
   },
+  {
+    // Timestamp de quando as odds foram fetched — mede latência e permite auditar staleness
+    id: '018_tips_odds_fetched_at',
+    up(db) {
+      addColumnIfMissing(db, 'tips', 'odds_fetched_at', 'odds_fetched_at TEXT');
+    },
+  },
 ];
 
 function applyMigrations(db) {

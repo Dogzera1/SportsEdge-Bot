@@ -5695,7 +5695,10 @@ const server = http.createServer(async (req, res) => {
           model_p_pick: modelPPick,
           model_label: modelLabel,
           tip_reason: tipReason,
-          isShadow
+          isShadow,
+          odds_fetched_at: t.oddsFetchedAt
+            ? new Date(t.oddsFetchedAt).toISOString()
+            : (t._oddsFetchedAt ? new Date(t._oddsFetchedAt).toISOString() : new Date().toISOString())
         });
         // Calcula stake em reais com base na banca atual (1u = 1% da banca atual)
         try {
