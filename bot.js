@@ -794,6 +794,12 @@ async function runAutoAnalysis() {
         return !riotLive.has(key1) && !riotLive.has(key2);
       });
       log('INFO', 'AUTO', `LoL: ${lolRaw?.length||0} partidas (${allLive.filter(m=>m.status==='live').length} live, ${allLive.filter(m=>m.status==='draft').length} draft, ${lolLive.length-allLive.length} dupl. removidas) | inscritos=${subscribedUsers.size}`);
+      // Feed do dashboard: lista cada partida live pelos nomes (dashboard só classifica live quando
+      // o nome do confronto aparece numa linha com marker "ao vivo"). Partidas puladas pelos gates
+      // nunca chegam ao log "Analisando [AO VIVO]", então emitimos aqui ANTES dos filtros.
+      for (const _m of allLive) {
+        if (_m.status === 'live') log('INFO', 'AUTO', `LoL AO VIVO: ${_m.team1} vs ${_m.team2} (${_m.league || '?'})`);
+      }
 
       const _hasLiveLol = allLive.length > 0;
       if (_hasLiveLol) _livePhaseEnter('lol');
