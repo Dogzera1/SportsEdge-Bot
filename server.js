@@ -102,6 +102,24 @@ function sqlTipsDedupeIdIn(alias, sportParam = '?') {
   return `${alias}.id IN (SELECT MAX(tdx.id) FROM tips tdx WHERE tdx.sport = ${sportParam} GROUP BY COALESCE(NULLIF(TRIM(tdx.match_id), ''), 'id:' || CAST(tdx.id AS TEXT)))`;
 }
 
+/**
+ * Sub-game filter p/ esportes "guarda-chuva" (esports=lol/dota, mma=mma/boxing).
+ * Retorna '' se não se aplica — seguro para concatenar em qualquer WHERE.
+ */
+function sqlGameFilter(alias, sport, game) {
+  if (!game) return '';
+  const g = String(game).toLowerCase();
+  if (sport === 'esports') {
+    if (g === 'dota2' || g === 'dota') return ` AND ${alias}.match_id LIKE 'dota2_%'`;
+    if (g === 'lol')                   return ` AND (${alias}.match_id IS NULL OR ${alias}.match_id NOT LIKE 'dota2_%')`;
+  }
+  if (sport === 'mma') {
+    if (g === 'boxing' || g === 'boxe') return ` AND LOWER(COALESCE(${alias}.event_name,'')) LIKE '%boxing%'`;
+    if (g === 'mma')                    return ` AND LOWER(COALESCE(${alias}.event_name,'')) NOT LIKE '%boxing%'`;
+  }
+  return '';
+}
+
 // ── Import dataset CSV (football matches 2024/2025) ──
 function parseCsvRows(text) {
   const rows = [];
@@ -6390,6 +6408,7 @@ const server = http.createServer(async (req, res) => {
 
   if (p === '/tips-history') {
     const sport = parsed.query.sport || 'esports';
+    const game  = parsed.query.game || '';
     const limitRaw = parseInt(parsed.query.limit);
     const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(200, limitRaw)) : 20;
 
@@ -6430,6 +6449,7 @@ const server = http.createServer(async (req, res) => {
       FROM tips t
       WHERE t.sport = ?
       AND ${sqlTipsDedupeIdIn('t', '?')}
+      ${sqlGameFilter('t', sport, game)}
     `;
     const params = [sport, sport];
 
@@ -6585,7 +6605,9 @@ const server = http.createServer(async (req, res) => {
   // ── ROI e Estatísticas ──
   if (p === '/roi') {
     const sport = parsed.query.sport || 'esports';
+    const game  = parsed.query.game || '';
     const dedupe = sqlTipsDedupeIdIn('t', '?');
+    const gameSql = sqlGameFilter('t', sport, game);
     const row = db.prepare(`
       SELECT COUNT(*) as total,
         SUM(CASE WHEN t.result='win' THEN 1 ELSE 0 END) as wins,
@@ -6595,6 +6617,7 @@ const server = http.createServer(async (req, res) => {
       FROM tips t
       WHERE t.sport = ? AND ${dedupe}
       AND t.result IS NOT NULL AND t.result != 'void'
+      ${gameSql}
     `).get(sport, sport);
     const calibration = db.prepare(`
       SELECT t.confidence, COUNT(*) as total,
@@ -6602,7 +6625,9 @@ const server = http.createServer(async (req, res) => {
         ROUND(100.0 * SUM(CASE WHEN t.result='win' THEN 1 ELSE 0 END) / COUNT(*), 1) as win_rate
       FROM tips t
       WHERE t.sport = ? AND ${dedupe}
-      AND t.result IS NOT NULL AND t.result != 'void' GROUP BY t.confidence
+      AND t.result IS NOT NULL AND t.result != 'void'
+      ${gameSql}
+      GROUP BY t.confidence
     `).all(sport, sport);
 
     const tips = db.prepare(`
@@ -6610,6 +6635,7 @@ const server = http.createServer(async (req, res) => {
       FROM tips t
       WHERE t.sport = ? AND ${dedupe}
       AND t.result IS NOT NULL AND t.result != 'void'
+      ${gameSql}
     `).all(sport, sport);
     let totalStaked = 0, totalProfit = 0;
     const liveTips = { wins: 0, losses: 0, total: 0, profit: 0, staked: 0 };
@@ -6732,10 +6758,10 @@ const server = http.createServer(async (req, res) => {
     }
 
     const totalAllRow = db.prepare(
-      `SELECT COUNT(*) as c FROM tips t WHERE t.sport = ? AND ${sqlTipsDedupeIdIn('t', '?')} AND COALESCE(t.result,'') != 'void'`
+      `SELECT COUNT(*) as c FROM tips t WHERE t.sport = ? AND ${sqlTipsDedupeIdIn('t', '?')} AND COALESCE(t.result,'') != 'void' ${gameSql}`
     ).get(sport, sport);
     const pendingRow  = db.prepare(
-      `SELECT COUNT(*) as c FROM tips t WHERE t.sport = ? AND ${sqlTipsDedupeIdIn('t', '?')} AND t.result IS NULL`
+      `SELECT COUNT(*) as c FROM tips t WHERE t.sport = ? AND ${sqlTipsDedupeIdIn('t', '?')} AND t.result IS NULL ${gameSql}`
     ).get(sport, sport);
 
     sendJson(res, {
@@ -6770,8 +6796,10 @@ const server = http.createServer(async (req, res) => {
   // ── ROI por Liga (divisão usada pelo stake multiplier) ──
   if (p === '/league-roi') {
     const sport = parsed.query.sport || 'esports';
+    const game  = parsed.query.game || '';
     const minRaw = parseInt(parsed.query.min, 10);
     const minTotal = Number.isFinite(minRaw) ? Math.max(1, Math.min(100, minRaw)) : 1;
+    const gameSql = sqlGameFilter('tips', sport, game);
     try {
       const rows = db.prepare(`
         SELECT
@@ -6784,6 +6812,7 @@ const server = http.createServer(async (req, res) => {
           ROUND(SUM(COALESCE(profit_reais, 0)), 2) AS profit
         FROM tips
         WHERE sport = ? AND result IN ('win','loss')
+        ${gameSql}
         GROUP BY league, is_live
       `).all(sport);
 
@@ -6885,6 +6914,7 @@ const server = http.createServer(async (req, res) => {
 
   if (p === '/calibration') {
     const sport = parsed.query.sport || 'esports';
+    const game  = parsed.query.game || '';
     try {
       const limitRaw = parseInt(parsed.query.limit);
       const limit = Number.isFinite(limitRaw)
@@ -6897,12 +6927,14 @@ const server = http.createServer(async (req, res) => {
         : (parseInt(process.env.CALIBRATION_MIN_BIN || '12', 10) || 12);
 
       const phase = String(parsed.query.phase || 'all'); // all | live | pre
+      const gameSql = sqlGameFilter('t', sport, game);
 
       const tips = db.prepare(
         `SELECT t.odds, t.ev, t.result, t.is_live, t.model_p_pick, t.sent_at, t.settled_at
          FROM tips t
          WHERE t.sport = ? AND ${sqlTipsDedupeIdIn('t', '?')}
          AND t.result IN ('win','loss')
+         ${gameSql}
          ORDER BY COALESCE(t.settled_at, t.sent_at) DESC
          LIMIT ?`
       ).all(sport, sport, limit);

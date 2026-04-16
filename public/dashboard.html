@@ -105,15 +105,18 @@
 </header>
 
 <div class="sport-tabs">
-  <button class="sport-tab active" onclick="selectSport('esports', this)">&#127918; Esports</button>
+  <button class="sport-tab active" onclick="selectSport('esports','lol', this)">&#127918; LoL</button>
+  <button class="sport-tab" onclick="selectSport('esports','dota2', this)">&#128737;&#65039; Dota 2</button>
+  <button class="sport-tab" onclick="selectSport('valorant','', this)">&#127919; Valorant</button>
+  <button class="sport-tab" onclick="selectSport('cs','', this)">&#128299; CS2</button>
+  <button class="sport-tab" onclick="selectSport('mma','mma', this)">&#129354; MMA</button>
+  <button class="sport-tab" onclick="selectSport('mma','boxing', this)">&#129307; Boxe</button>
   <a class="sport-tab" href="/lol/ev-manual" title="Match Winner — odds manuais (LoL)">&#128200; LoL EV manual</a>
-  <button class="sport-tab" onclick="selectSport('mma', this)">&#129354; MMA</button>
-  <button class="sport-tab" onclick="selectSport('tennis', this)">&#127934; T&ecirc;nis</button>
-  <button class="sport-tab" onclick="selectSport('football', this)">&#9917; Futebol</button>
-  <button class="sport-tab" onclick="selectSport('darts', this)">&#127919; Darts</button>
-  <button class="sport-tab" onclick="selectSport('snooker', this)">&#127921; Snooker</button>
-  <button class="sport-tab" onclick="selectSport('tabletennis', this)">&#127955; T&ecirc;nis de Mesa</button>
-  <button class="sport-tab" onclick="selectSport('cs', this)">&#128299; CS2</button>
+  <button class="sport-tab" onclick="selectSport('tennis','', this)">&#127934; T&ecirc;nis</button>
+  <button class="sport-tab" onclick="selectSport('football','', this)">&#9917; Futebol</button>
+  <button class="sport-tab" onclick="selectSport('darts','', this)">&#127919; Darts</button>
+  <button class="sport-tab" onclick="selectSport('snooker','', this)">&#127921; Snooker</button>
+  <button class="sport-tab" onclick="selectSport('tabletennis','', this)">&#127955; T&ecirc;nis de Mesa</button>
   <button class="sport-tab" onclick="selectML(this)">&#129302; ML / Treino</button>
 </div>
 
@@ -237,6 +240,7 @@ const BASE = (function() {
 })();
 
 let currentSport = 'esports';
+let currentGame = 'lol';
 let isMLView = false;
 let calibChart = null;
 let weightsChart = null;
@@ -255,9 +259,10 @@ async function apiFetch(path) {
   }
 }
 
-function selectSport(sport, el) {
+function selectSport(sport, game, el) {
   isMLView = false;
   currentSport = sport;
+  currentGame = game || '';
   document.querySelectorAll('.sport-tab').forEach(t => t.classList.remove('active'));
   el.classList.add('active');
   document.getElementById('cards').style.display = '';
@@ -280,15 +285,18 @@ function selectML(el) {
   loadML();
 }
 
+function gameQs() { return currentGame ? '&game=' + encodeURIComponent(currentGame) : ''; }
+
 async function loadAll() {
   if (isMLView) { loadML(); return; }
   document.getElementById('lastUpdated').textContent = 'Atualizando...';
   const tipsP = loadTips();
+  const gq = gameQs();
   const [roi, calibration, weights, leagueRoi] = await Promise.all([
-    apiFetch('/roi?sport=' + currentSport),
-    apiFetch('/calibration?sport=' + currentSport + '&phase=all'),
+    apiFetch('/roi?sport=' + currentSport + gq),
+    apiFetch('/calibration?sport=' + currentSport + '&phase=all' + gq),
     apiFetch('/ml-weights'),
-    apiFetch('/league-roi?sport=' + currentSport)
+    apiFetch('/league-roi?sport=' + currentSport + gq)
   ]);
   renderCards(roi);
   renderCalibration(calibration);
@@ -538,6 +546,7 @@ function buildTipsQuery() {
   const s = readTipsControls();
   const qp = new URLSearchParams();
   qp.set('sport', currentSport);
+  if (currentGame) qp.set('game', currentGame);
   qp.set('limit', s.limit);
   if (s.q) qp.set('q', s.q);
   if (s.status) qp.set('status', s.status);
