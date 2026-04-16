@@ -5677,12 +5677,14 @@ const server = http.createServer(async (req, res) => {
         if (existing) { sendJson(res, { ok: true, skipped: true, reason: 'duplicate' }); return; }
 
         // Dedup secundário: mesmos times + sport nas últimas 2h (impede duplicata quando matchId muda entre fontes)
+        // norm() remove espaços/acentos/pontuação, lower() do SQLite mantém espaços — usar REPLACE para match correto
         const p1n_ = norm(p1 || ''), p2n_ = norm(p2 || '');
         if (p1n_ && p2n_) {
           const recentDupe = db.prepare(
             `SELECT 1 FROM tips WHERE sport = ? AND result IS NULL
              AND sent_at > datetime('now', '-2 hours')
-             AND ((lower(participant1) LIKE ? AND lower(participant2) LIKE ?) OR (lower(participant1) LIKE ? AND lower(participant2) LIKE ?))
+             AND ((REPLACE(REPLACE(lower(participant1),' ',''),'-','') LIKE ? AND REPLACE(REPLACE(lower(participant2),' ',''),'-','') LIKE ?)
+               OR (REPLACE(REPLACE(lower(participant1),' ',''),'-','') LIKE ? AND REPLACE(REPLACE(lower(participant2),' ',''),'-','') LIKE ?))
              LIMIT 1`
           ).get(sport, `%${p1n_}%`, `%${p2n_}%`, `%${p2n_}%`, `%${p1n_}%`);
           if (recentDupe) { sendJson(res, { ok: true, skipped: true, reason: 'duplicate_pair' }); return; }

@@ -131,7 +131,8 @@
       "WebFetch(domain:railpack.com)",
       "Bash(wmic process *)",
       "Bash(taskkill //PID 15068 //F)",
-      "Bash(taskkill //PID 8664 //F)"
+      "Bash(taskkill //PID 8664 //F)",
+      "Bash(taskkill //PID 20696 //F)"
     ]
   }
 }

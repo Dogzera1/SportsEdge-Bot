@@ -566,9 +566,18 @@ async function loadExistingTips() {
     if (Array.isArray(dotaTips)) {
       for (const tip of dotaTips) {
         if (!tip.match_id) continue;
-        analyzedDota.set(`dota2_${tip.match_id}`, { ts: Date.now(), tipSent: true });
+        const mid = tip.match_id;
+        // Chave por matchId (evita prefixo duplicado dota2_dota2_)
+        const idKey = mid.startsWith('dota2_') ? mid : `dota2_${mid}`;
+        analyzedDota.set(idKey, { ts: Date.now(), tipSent: true });
+        // Chave por nomes normalizados — impede duplicata quando matchId muda entre fontes
+        const p1n = norm(tip.participant1 || '');
+        const p2n = norm(tip.participant2 || '');
+        if (p1n && p2n) {
+          analyzedDota.set(`dota2_pair_${p1n}_${p2n}`, { ts: Date.now(), tipSent: true });
+        }
       }
-      if (dotaTips.length) log('INFO', 'BOOT', `Dota 2: ${dotaTips.length} tips existentes carregadas`);
+      if (dotaTips.length) log('INFO', 'BOOT', `Dota 2: ${dotaTips.length} tips existentes carregadas (${analyzedDota.size} chaves dedup)`);
     }
     if (Array.isArray(mmaTips)) {
       for (const tip of mmaTips) {

@@ -36,6 +36,19 @@
   header button { background: var(--panel2); border: 1px solid var(--border); color: var(--text); padding: 6px 12px; border-radius: 6px; cursor: pointer; font: inherit; font-size: 12px; }
   header button:hover { background: var(--border); }
 
+  /* ── Tabs ── */
+  .tab-bar { display: flex; gap: 0; padding: 0 18px; background: var(--panel); border-bottom: 1px solid var(--border); }
+  .tab-btn { padding: 10px 20px; font-size: 13px; font-weight: 600; color: var(--muted); cursor: pointer; border: none; background: none; border-bottom: 2px solid transparent; transition: all .15s; user-select: none; }
+  .tab-btn:hover { color: var(--text); }
+  .tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
+  .tab-btn .tab-count { display: inline-block; padding: 1px 7px; border-radius: 999px; font-size: 10px; font-weight: 700; margin-left: 5px; }
+  .tab-btn .tab-count.ok { background: rgba(52,211,153,.18); color: var(--ok); }
+  .tab-btn .tab-count.err { background: rgba(248,113,113,.18); color: var(--err); }
+  .tab-btn .tab-count.live { background: rgba(248,113,113,.25); color: var(--err); animation: blink 1.2s infinite; }
+  .tab-pane { display: none; }
+  .tab-pane.active { display: block; }
+
+  /* ── Cards grid ── */
   .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 14px; padding: 18px; }
   .card { background: var(--panel); border: 1px solid var(--border); border-left: 4px solid var(--border); border-radius: 10px; padding: 16px 18px; transition: transform .12s; }
   .card.ok   { border-left-color: var(--ok); }
@@ -57,8 +70,11 @@
   .card .more summary:hover { color: var(--accent); }
   .card .more pre { background: #06080b; border: 1px solid var(--border); border-radius: 6px; padding: 8px; font-size: 11px; max-height: 240px; overflow: auto; margin: 8px 0 0; white-space: pre-wrap; word-break: break-word; color: var(--muted); font-family: ui-monospace, Menlo, Consolas, monospace; }
   .empty { color: var(--muted); padding: 40px; text-align: center; }
+  .card.has-live { box-shadow: 0 0 0 1px rgba(248,113,113,.3), 0 4px 18px rgba(248,113,113,.08); }
+  .card.has-live .title::after { content: 'LIVE'; margin-left: auto; padding: 2px 8px; border-radius: 999px; font-size: 10px; font-weight: 700; letter-spacing: .5px; background: var(--err); color: #1a0000; animation: blink 1.2s infinite; }
 
-  .tips-section { padding: 18px 18px 0; }
+  /* ── Tips ── */
+  .tips-section { padding: 18px; }
   .tips-section h2 { font-size: 14px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; margin: 0 0 10px; }
   .tips-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
   @media (max-width: 900px) { .tips-cols { grid-template-columns: 1fr; } }
@@ -83,23 +99,19 @@
   .tip-filters .pill.active { background: var(--accent); color: #051119; border-color: var(--accent); font-weight: 600; }
   .tip-filters .pill.live { background: rgba(248,113,113,.15); border-color: rgba(248,113,113,.4); color: #ff9a9a; }
   .tip-filters .pill.live.active { background: var(--err); border-color: var(--err); color: #1a0000; }
-
   .live-badge { display: inline-flex; align-items: center; gap: 4px; margin-left: 6px; padding: 1px 7px; border-radius: 4px; background: rgba(248,113,113,.18); color: var(--err); font-size: 10px; font-weight: 700; letter-spacing: .5px; }
   .live-badge::before { content: ''; width: 6px; height: 6px; background: var(--err); border-radius: 50%; animation: blink 1.2s infinite; }
   .tip-row.live { background: rgba(248,113,113,.05); border-left: 2px solid var(--err); padding-left: 4px; }
-  .card.has-live { box-shadow: 0 0 0 1px rgba(248,113,113,.3), 0 4px 18px rgba(248,113,113,.08); }
-  .card.has-live .title::after { content: '⚡LIVE'; margin-left: auto; padding: 2px 8px; border-radius: 999px; font-size: 10px; font-weight: 700; letter-spacing: .5px; background: var(--err); color: #1a0000; animation: blink 1.2s infinite; }
 
-  /* ── Live Matches Tab ── */
-  .live-section { padding: 18px 18px 0; }
-  .live-section h2 { font-size: 14px; font-weight: 700; color: var(--ok); text-transform: uppercase; letter-spacing: 1px; margin: 0; display: flex; align-items: center; gap: 8px; }
+  /* ── Live Matches ── */
+  .live-section { padding: 18px; }
   .live-table { width: 100%; border-collapse: collapse; margin-top: 10px; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
   .live-table th { background: var(--panel2); color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .5px; padding: 8px 12px; text-align: left; border-bottom: 1px solid var(--border); }
   .live-table td { padding: 8px 12px; font-size: 13px; border-bottom: 1px solid var(--border); }
   .live-table tr:last-child td { border-bottom: none; }
   .live-table tr.row-live { background: rgba(248,113,113,.06); }
   .live-table tr.row-draft { background: rgba(251,191,36,.06); }
-  .live-table .sport-tag { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .3px; }
+  .sport-tag { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .3px; }
   .sport-tag.lol { background: rgba(74,163,255,.15); color: var(--accent); }
   .sport-tag.dota { background: rgba(248,113,113,.15); color: #ff9a9a; }
   .sport-tag.cs { background: rgba(251,191,36,.15); color: var(--warn); }
@@ -122,88 +134,109 @@
   .activity-tag.stale_odds { background: rgba(251,191,36,.12); color: var(--warn); }
   .activity-tag.blocked { background: rgba(248,113,113,.1); color: #ff8080; }
   .live-empty { color: var(--muted); font-size: 13px; padding: 20px; text-align: center; }
-  .live-filters { display: flex; gap: 4px; flex-wrap: wrap; margin: 10px 0 0; }
+  .live-filters { display: flex; gap: 4px; flex-wrap: wrap; margin: 0 0 8px; }
   .live-filters .lpill { background: var(--panel2); border: 1px solid var(--border); padding: 2px 8px; border-radius: 999px; font-size: 11px; cursor: pointer; user-select: none; color: var(--text); }
   .live-filters .lpill.active { background: var(--accent); color: #051119; border-color: var(--accent); font-weight: 600; }
+
+  /* ── Errors ── */
+  .errors-section { padding: 18px; }
+  .err-log { background: var(--panel); border: 1px solid var(--border); border-left: 4px solid var(--err); border-radius: 10px; max-height: 500px; overflow: auto; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; padding: 10px 14px; }
 </style>
 </head>
 <body>
 <header>
-  <h1>🚀 SportsEdge-Bot</h1>
-  <span class="global" id="global"><span class="pulse"></span><span id="globalText">aguardando…</span></span>
-  <span class="stat">atualizado <b id="ts">—</b></span>
-  <span class="stat">subprocess <b id="subp">—</b></span>
+  <h1>SportsEdge-Bot</h1>
+  <span class="global" id="global"><span class="pulse"></span><span id="globalText">aguardando...</span></span>
+  <span class="stat">atualizado <b id="ts">-</b></span>
+  <span class="stat">subprocess <b id="subp">-</b></span>
   <span class="stat">buffer <b id="buf">0</b></span>
   <span class="grow"></span>
   <label class="stat" style="display:flex;align-items:center;gap:6px;"><input type="checkbox" id="auto" checked />auto-refresh 5s</label>
-  <button id="refresh">↻ atualizar</button>
-  <button id="restart">⟲ restart subprocess</button>
+  <button id="refresh">atualizar</button>
+  <button id="restart">restart subprocess</button>
 </header>
-<div class="tips-section">
-  <h2>📡 Tips em tempo real</h2>
-  <div class="tip-filters" id="tipFilters">
-    <span class="pill live" data-live="1">⚡ só LIVE</span>
-    <span class="pill active" data-bot="all">todos</span>
-    <span class="pill" data-bot="lol">lol</span>
-    <span class="pill" data-bot="dota">dota</span>
-    <span class="pill" data-bot="cs">cs2</span>
-    <span class="pill" data-bot="tennis">tennis</span>
-    <span class="pill" data-bot="tabletennis">tt</span>
-    <span class="pill" data-bot="mma">mma</span>
-    <span class="pill" data-bot="football">football</span>
-    <span class="pill" data-bot="snooker">snooker</span>
-    <span class="pill" data-bot="darts">darts</span>
-  </div>
-  <div class="tips-cols">
-    <div class="tips-col sent">
-      <h3>✅ Enviadas <span class="count" id="cntSent">0</span></h3>
-      <div id="listSent"><div class="tips-empty">aguardando…</div></div>
+
+<div class="tab-bar">
+  <button class="tab-btn active" data-tab="tips">Tips <span class="tab-count ok" id="tabTipCount">0</span></button>
+  <button class="tab-btn" data-tab="live">Cobertura ao Vivo <span class="tab-count live" id="tabLiveCount">0</span></button>
+  <button class="tab-btn" data-tab="errors">Erros <span class="tab-count err" id="tabErrCount">0</span></button>
+  <button class="tab-btn" data-tab="status">Status dos Bots</button>
+</div>
+
+<!-- ═══ Tab: Tips ═══ -->
+<div class="tab-pane active" id="pane-tips">
+  <div class="tips-section">
+    <div class="tip-filters" id="tipFilters">
+      <span class="pill live" data-live="1">so LIVE</span>
+      <span class="pill active" data-bot="all">todos</span>
+      <span class="pill" data-bot="lol">lol</span>
+      <span class="pill" data-bot="dota">dota</span>
+      <span class="pill" data-bot="cs">cs2</span>
+      <span class="pill" data-bot="tennis">tennis</span>
+      <span class="pill" data-bot="tabletennis">tt</span>
+      <span class="pill" data-bot="mma">mma</span>
+      <span class="pill" data-bot="football">football</span>
+      <span class="pill" data-bot="snooker">snooker</span>
+      <span class="pill" data-bot="darts">darts</span>
     </div>
-    <div class="tips-col denied">
-      <h3>❌ Negadas <span class="count" id="cntDenied">0</span></h3>
-      <div id="listDenied"><div class="tips-empty">aguardando…</div></div>
+    <div class="tips-cols">
+      <div class="tips-col sent">
+        <h3>Enviadas <span class="count" id="cntSent">0</span></h3>
+        <div id="listSent"><div class="tips-empty">aguardando...</div></div>
+      </div>
+      <div class="tips-col denied">
+        <h3>Negadas <span class="count" id="cntDenied">0</span></h3>
+        <div id="listDenied"><div class="tips-empty">aguardando...</div></div>
+      </div>
     </div>
   </div>
 </div>
-<div class="errors-section" id="errorsSection">
-  <h2 style="padding:18px 18px 0;font-size:14px;font-weight:700;color:var(--err);text-transform:uppercase;letter-spacing:1px;margin:0;display:flex;align-items:center;gap:8px;">
-    🔴 Erros Recentes <span id="errCount" style="background:rgba(248,113,113,.18);padding:1px 8px;border-radius:999px;font-size:11px;">0</span>
-    <button id="errToggle" style="margin-left:auto;background:var(--panel2);border:1px solid var(--border);color:var(--muted);padding:3px 10px;border-radius:6px;cursor:pointer;font-size:11px;">▼ mostrar</button>
-  </h2>
-  <div id="errPanel" style="display:none;margin:8px 18px;background:var(--panel);border:1px solid var(--border);border-left:4px solid var(--err);border-radius:10px;max-height:320px;overflow:auto;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;padding:10px 14px;">
-    <div class="tips-empty" id="errEmpty">sem erros no buffer</div>
-    <div id="errList"></div>
+
+<!-- ═══ Tab: Cobertura ao Vivo ═══ -->
+<div class="tab-pane" id="pane-live">
+  <div class="live-section">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;">
+      <span class="status-dot live"></span>
+      <span style="font-size:14px;font-weight:700;color:var(--ok);">
+        <span id="liveMatchCount">0</span> ao vivo
+      </span>
+      <span style="font-size:12px;color:var(--muted);">/ <span id="liveTrackedCount">0</span> cobertas (janela <span id="liveWindow">20</span>min)</span>
+    </div>
+    <div class="live-filters" id="liveFilters">
+      <span class="lpill active" data-lf="all">todos</span>
+      <span class="lpill" data-lf="lol">lol</span>
+      <span class="lpill" data-lf="dota">dota</span>
+      <span class="lpill" data-lf="cs">cs2</span>
+      <span class="lpill" data-lf="tennis">tennis</span>
+      <span class="lpill" data-lf="football">football</span>
+      <span class="lpill" data-lf="mma">mma</span>
+      <span class="lpill" data-lf="tabletennis">tt</span>
+      <span class="lpill" data-lf="snooker">snooker</span>
+      <span class="lpill" data-lf="darts">darts</span>
+    </div>
+    <div id="liveBody"><div class="live-empty">carregando partidas...</div></div>
   </div>
 </div>
-<div class="live-section" id="liveSection">
-  <h2>
-    <span class="status-dot live"></span> Partidas ao Vivo
-    <span id="liveMatchCount" style="background:rgba(52,211,153,.18);padding:1px 8px;border-radius:999px;font-size:11px;color:var(--ok);">0</span>
-    <span id="liveTrackedCount" style="font-size:11px;color:var(--muted);font-weight:400;margin-left:4px;">/ 0 cobertas</span>
-  </h2>
-  <div class="live-filters" id="liveFilters">
-    <span class="lpill active" data-lf="all">todos</span>
-    <span class="lpill" data-lf="lol">lol</span>
-    <span class="lpill" data-lf="dota">dota</span>
-    <span class="lpill" data-lf="cs">cs2</span>
-    <span class="lpill" data-lf="tennis">tennis</span>
-    <span class="lpill" data-lf="football">football</span>
-    <span class="lpill" data-lf="mma">mma</span>
-    <span class="lpill" data-lf="tabletennis">tt</span>
-    <span class="lpill" data-lf="snooker">snooker</span>
-    <span class="lpill" data-lf="darts">darts</span>
-  </div>
-  <div id="liveBody">
-    <div class="live-empty">carregando partidas...</div>
+
+<!-- ═══ Tab: Erros ═══ -->
+<div class="tab-pane" id="pane-errors">
+  <div class="errors-section">
+    <div class="err-log" id="errLog">
+      <div class="tips-empty" id="errEmpty">sem erros no buffer</div>
+      <div id="errList"></div>
+    </div>
   </div>
 </div>
-<div class="grid" id="grid"><div class="empty">carregando status…</div></div>
+
+<!-- ═══ Tab: Status dos Bots ═══ -->
+<div class="tab-pane" id="pane-status">
+  <div class="grid" id="grid"><div class="empty">carregando status...</div></div>
+</div>
 
 <script>
 (function(){
   const $grid = document.getElementById('grid');
   const $global = document.getElementById('global');
-  const $globalText = document.getElementById('globalText');
   const $ts = document.getElementById('ts');
   const $subp = document.getElementById('subp');
   const $buf = document.getElementById('buf');
@@ -211,7 +244,19 @@
   const $restart = document.getElementById('restart');
   const $auto = document.getElementById('auto');
 
-  const STATUS_LABEL = { ok: 'TUDO OK', warn: 'ATENÇÃO', err: 'PROBLEMA' };
+  const STATUS_LABEL = { ok: 'TUDO OK', warn: 'ATENCAO', err: 'PROBLEMA' };
+
+  // ── Tab switching ──
+  let activeTab = 'tips';
+  document.querySelectorAll('.tab-btn').forEach(btn => btn.addEventListener('click', () => {
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
+    btn.classList.add('active');
+    activeTab = btn.dataset.tab;
+    document.getElementById('pane-' + activeTab).classList.add('active');
+    if (activeTab === 'live') refreshLiveMatches();
+    if (activeTab === 'errors') refreshErrors();
+  }));
 
   function statusKey(s) { return s === 'error' ? 'err' : s; }
 
@@ -228,7 +273,7 @@
       if (v === 0 || v == null) continue;
       pairs.push(`<b>${k}</b>=${v}`);
     }
-    return pairs.join(' · ');
+    return pairs.join(' &middot; ');
   }
 
   function renderCard(s) {
@@ -247,10 +292,10 @@
         </div>
         <div class="summary">${escapeHtml(s.summary)}</div>
         ${issues}
-        ${metrics ? `<details class="more"><summary>métricas (janela ${s.windowMin}min)</summary><pre>${metrics.replace(/<\/?b>/g,'')}</pre></details>` : ''}
-        <details class="more"><summary>últimas linhas no buffer</summary><pre data-bot="${s.bot}">carregando…</pre></details>
+        ${metrics ? `<details class="more"><summary>metricas (janela ${s.windowMin}min)</summary><pre>${metrics.replace(/<\/?b>/g,'')}</pre></details>` : ''}
+        <details class="more"><summary>ultimas linhas no buffer</summary><pre data-bot="${s.bot}">carregando...</pre></details>
         <div class="meta">
-          <span>última atividade: ${escapeHtml(s.lastActivityAgo)}</span>
+          <span>ultima atividade: ${escapeHtml(s.lastActivityAgo)}</span>
           <span>janela: ${s.windowMin}min</span>
         </div>
       </div>`;
@@ -262,19 +307,23 @@
 
   let historyCache = null;
   let historyAt = 0;
-  async function fillBotLogs(pre) {
-    const bot = pre.dataset.bot;
+  async function getHistory() {
     if (!historyCache || Date.now() - historyAt > 4000) {
       historyCache = await fetch('/history').then(r => r.json()).catch(() => []);
       historyAt = Date.now();
     }
-    const lines = historyCache.filter(e => e.bot === bot).slice(-15);
+    return historyCache;
+  }
+
+  async function fillBotLogs(pre) {
+    const bot = pre.dataset.bot;
+    const hist = await getHistory();
+    const lines = hist.filter(e => e.bot === bot).slice(-15);
     pre.textContent = lines.length
       ? lines.map(e => `${fmtTime(e.t)} [${e.level}] ${e.text}`).join('\n')
       : '(nenhuma linha do bot no buffer)';
   }
 
-  // delega click no <details> pra carregar logs sob demanda
   document.addEventListener('toggle', ev => {
     const det = ev.target;
     if (!(det instanceof HTMLDetailsElement) || !det.open) return;
@@ -282,6 +331,7 @@
     if (pre && pre.textContent.startsWith('carregando')) fillBotLogs(pre);
   }, true);
 
+  // ── Tips ──
   let tipFilter = 'all';
   let liveOnly = false;
   document.querySelectorAll('#tipFilters .pill').forEach(p => p.addEventListener('click', () => {
@@ -321,10 +371,95 @@
     const c = lastTipsData.countsTotal;
     document.getElementById('cntSent').textContent = c.sentLive ? `${c.sent} (${c.sentLive} live)` : c.sent;
     document.getElementById('cntDenied').textContent = c.deniedLive ? `${c.denied} (${c.deniedLive} live)` : c.denied;
+    document.getElementById('tabTipCount').textContent = c.sent;
     renderTipsList(lastTipsData.sent, document.getElementById('listSent'), false);
     renderTipsList(lastTipsData.denied, document.getElementById('listDenied'), true);
   }
 
+  // ── Live Matches ──
+  const SPORT_EMOJI = { lol: '🟦', dota: '🟥', cs: '🔫', tennis: '🎾', tabletennis: '🏓', mma: '🥊', football: '⚽', snooker: '🎱', darts: '🎯' };
+  const SPORT_LABEL_MAP = { lol: 'LoL', dota: 'Dota 2', cs: 'CS2', tennis: 'Tennis', tabletennis: 'TT', mma: 'MMA', football: 'Futebol', snooker: 'Snooker', darts: 'Darts' };
+  const ACTIVITY_LABEL = { tip_sent: 'TIP ENVIADA', deep_analysis: 'ANALISANDO IA', live_stats: 'LIVE STATS', analyzing: 'MONITORANDO', no_edge: 'SEM EDGE', stale_odds: 'ODDS STALE', blocked: 'BLOQUEADA' };
+  const STATUS_LABEL_LIVE = { live: 'AO VIVO', draft: 'DRAFT', upcoming: 'PROXIMA', finished: 'ENCERRADA' };
+
+  let liveFilter = 'all';
+  document.querySelectorAll('#liveFilters .lpill').forEach(p => p.addEventListener('click', () => {
+    document.querySelectorAll('#liveFilters .lpill').forEach(x => x.classList.remove('active'));
+    p.classList.add('active');
+    liveFilter = p.dataset.lf;
+    renderLiveMatches(lastLiveData);
+  }));
+
+  let lastLiveData = null;
+
+  function renderLiveMatches(data) {
+    lastLiveData = data;
+    const $body = document.getElementById('liveBody');
+    if (!data || !data.matches) {
+      $body.innerHTML = '<div class="live-empty">sem dados</div>';
+      return;
+    }
+    document.getElementById('liveMatchCount').textContent = data.liveCount;
+    document.getElementById('liveTrackedCount').textContent = data.totalTracked;
+    document.getElementById('liveWindow').textContent = data.windowMin;
+    document.getElementById('tabLiveCount').textContent = data.liveCount;
+
+    let items = data.matches;
+    if (liveFilter !== 'all') items = items.filter(m => m.sport === liveFilter);
+
+    if (!items.length) {
+      $body.innerHTML = `<div class="live-empty">${liveFilter === 'all' ? 'nenhuma partida detectada nos ultimos ' + data.windowMin + ' min' : 'nenhuma partida de ' + (SPORT_LABEL_MAP[liveFilter] || liveFilter)}</div>`;
+      return;
+    }
+
+    let html = '<table class="live-table"><thead><tr><th>Esporte</th><th>Status</th><th>Partida</th><th>Atividade</th><th>Hora</th></tr></thead><tbody>';
+    for (const m of items) {
+      const rowCls = m.status === 'live' ? 'row-live' : (m.status === 'draft' ? 'row-draft' : '');
+      const sportTag = `<span class="sport-tag ${m.sport}">${SPORT_EMOJI[m.sport] || ''} ${SPORT_LABEL_MAP[m.sport] || m.sport}</span>`;
+      const statusDot = `<span class="status-dot ${m.status}"></span>${STATUS_LABEL_LIVE[m.status] || m.status}`;
+      const actTag = `<span class="activity-tag ${m.activity}">${ACTIVITY_LABEL[m.activity] || m.activity}</span>`;
+      const tipBadge = m.tipSent ? ' <span style="color:var(--ok);font-size:10px;font-weight:700;">TIP</span>' : '';
+      const lsBadge = m.liveStats ? ' <span style="color:#ff9a9a;font-size:10px;">STATS</span>' : '';
+      const matchText = `<b>${escapeHtml(m.team1)}</b> vs <b>${escapeHtml(m.team2)}</b>${tipBadge}${lsBadge}`;
+      html += `<tr class="${rowCls}"><td>${sportTag}</td><td style="font-size:12px;">${statusDot}</td><td>${matchText}</td><td>${actTag}</td><td style="color:var(--muted);font-size:12px;">${fmtTime(m.lastSeen)}</td></tr>`;
+    }
+    html += '</tbody></table>';
+    $body.innerHTML = html;
+  }
+
+  async function refreshLiveMatches() {
+    try {
+      const data = await fetch('/live-matches').then(r => r.json());
+      renderLiveMatches(data);
+    } catch (_) {}
+  }
+
+  // ── Errors ──
+  async function refreshErrors() {
+    const hist = await getHistory();
+    const errs = hist.filter(e =>
+      e.level === 'error' ||
+      /\[stderr\]|ECONN|ETIMEDOUT|ENOTFOUND|exception|panic|fatal/i.test(e.text)
+    ).slice(-50);
+    document.getElementById('tabErrCount').textContent = errs.length;
+    const $errList = document.getElementById('errList');
+    const $errEmpty = document.getElementById('errEmpty');
+    if (!errs.length) {
+      $errEmpty.style.display = 'block';
+      $errList.innerHTML = '';
+      return;
+    }
+    $errEmpty.style.display = 'none';
+    $errList.innerHTML = errs.map(e => {
+      const bot = e.bot && e.bot !== 'system' ? `<span style="color:var(--accent);font-weight:600;text-transform:uppercase;margin-right:6px;">${e.bot}</span>` : '';
+      return `<div style="padding:4px 0;border-bottom:1px solid var(--border);line-height:1.4;word-break:break-word;">` +
+        `<span style="color:var(--muted);margin-right:8px;">${fmtTime(e.t)}</span>` +
+        bot +
+        `<span style="color:var(--err);">${escapeHtml(e.text)}</span></div>`;
+    }).join('');
+  }
+
+  // ── Main refresh ──
   async function refresh() {
     try {
       const [s, tips] = await Promise.all([
@@ -348,120 +483,30 @@
     }
   }
 
-  $refresh.addEventListener('click', refresh);
+  $refresh.addEventListener('click', () => { refresh(); refreshLiveMatches(); refreshErrors(); });
   $restart.addEventListener('click', async () => {
     if (!confirm('Reiniciar subprocess railway logs?')) return;
     await fetch('/restart');
     setTimeout(refresh, 800);
   });
 
-  // ── Painel de erros ──
-  const $errToggle = document.getElementById('errToggle');
-  const $errPanel = document.getElementById('errPanel');
-  const $errList = document.getElementById('errList');
-  const $errEmpty = document.getElementById('errEmpty');
-  const $errCount = document.getElementById('errCount');
-  let errOpen = false;
-
-  $errToggle.addEventListener('click', () => {
-    errOpen = !errOpen;
-    $errPanel.style.display = errOpen ? 'block' : 'none';
-    $errToggle.textContent = errOpen ? '▲ esconder' : '▼ mostrar';
-    if (errOpen) refreshErrors();
-  });
-
-  async function refreshErrors() {
-    if (!historyCache || Date.now() - historyAt > 4000) {
-      historyCache = await fetch('/history').then(r => r.json()).catch(() => []);
-      historyAt = Date.now();
-    }
-    const errs = historyCache.filter(e =>
-      e.level === 'error' ||
-      /\[stderr\]|ECONN|ETIMEDOUT|ENOTFOUND|exception|panic|fatal/i.test(e.text)
-    ).slice(-50);
-    $errCount.textContent = errs.length;
-    if (!errs.length) {
-      $errEmpty.style.display = 'block';
-      $errList.innerHTML = '';
-      return;
-    }
-    $errEmpty.style.display = 'none';
-    $errList.innerHTML = errs.map(e => {
-      const bot = e.bot && e.bot !== 'system' ? `<span style="color:var(--accent);font-weight:600;text-transform:uppercase;margin-right:6px;">${e.bot}</span>` : '';
-      return `<div style="padding:4px 0;border-bottom:1px solid var(--border);line-height:1.4;word-break:break-word;">` +
-        `<span style="color:var(--muted);margin-right:8px;">${fmtTime(e.t)}</span>` +
-        bot +
-        `<span style="color:var(--err);">${escapeHtml(e.text)}</span></div>`;
-    }).join('');
-  }
-
-  // ── Live Matches Tab ──
-  const SPORT_EMOJI = { lol: '🟦', dota: '🟥', cs: '🔫', tennis: '🎾', tabletennis: '🏓', mma: '🥊', football: '⚽', snooker: '🎱', darts: '🎯' };
-  const SPORT_LABEL = { lol: 'LoL', dota: 'Dota 2', cs: 'CS2', tennis: 'Tênis', tabletennis: 'TT', mma: 'MMA', football: 'Futebol', snooker: 'Snooker', darts: 'Darts' };
-  const ACTIVITY_LABEL = { tip_sent: 'TIP ENVIADA', deep_analysis: 'ANALISANDO IA', live_stats: 'LIVE STATS', analyzing: 'MONITORANDO', no_edge: 'SEM EDGE', stale_odds: 'ODDS STALE', blocked: 'BLOQUEADA' };
-  const STATUS_LABEL_LIVE = { live: 'AO VIVO', draft: 'DRAFT', upcoming: 'PRÓXIMA', finished: 'ENCERRADA' };
-
-  let liveFilter = 'all';
-  document.querySelectorAll('#liveFilters .lpill').forEach(p => p.addEventListener('click', () => {
-    document.querySelectorAll('#liveFilters .lpill').forEach(x => x.classList.remove('active'));
-    p.classList.add('active');
-    liveFilter = p.dataset.lf;
-    renderLiveMatches(lastLiveData);
-  }));
-
-  let lastLiveData = null;
-
-  function renderLiveMatches(data) {
-    lastLiveData = data;
-    const $body = document.getElementById('liveBody');
-    const $count = document.getElementById('liveMatchCount');
-    const $tracked = document.getElementById('liveTrackedCount');
-    if (!data || !data.matches) {
-      $body.innerHTML = '<div class="live-empty">sem dados</div>';
-      return;
-    }
-    $count.textContent = data.liveCount;
-    $tracked.textContent = `/ ${data.totalTracked} cobertas`;
-
-    let items = data.matches;
-    if (liveFilter !== 'all') items = items.filter(m => m.sport === liveFilter);
-
-    if (!items.length) {
-      $body.innerHTML = `<div class="live-empty">${liveFilter === 'all' ? 'nenhuma partida detectada nos últimos ' + data.windowMin + ' min' : 'nenhuma partida de ' + (SPORT_LABEL[liveFilter] || liveFilter)}</div>`;
-      return;
-    }
-
-    let html = '<table class="live-table"><thead><tr><th>Esporte</th><th>Status</th><th>Partida</th><th>Atividade</th><th>Visto há</th></tr></thead><tbody>';
-    for (const m of items) {
-      const rowCls = m.status === 'live' ? 'row-live' : (m.status === 'draft' ? 'row-draft' : '');
-      const sportTag = `<span class="sport-tag ${m.sport}">${SPORT_EMOJI[m.sport] || ''} ${SPORT_LABEL[m.sport] || m.sport}</span>`;
-      const statusDot = `<span class="status-dot ${m.status}"></span>${STATUS_LABEL_LIVE[m.status] || m.status}`;
-      const actTag = `<span class="activity-tag ${m.activity}">${ACTIVITY_LABEL[m.activity] || m.activity}</span>`;
-      const tipBadge = m.tipSent ? ' <span style="color:var(--ok);font-size:10px;font-weight:700;">✓ TIP</span>' : '';
-      const lsBadge = m.liveStats ? ' <span style="color:#ff9a9a;font-size:10px;">📊 STATS</span>' : '';
-      const ago = fmtTime(m.lastSeen);
-      const matchText = `<b>${escapeHtml(m.team1)}</b> vs <b>${escapeHtml(m.team2)}</b>${tipBadge}${lsBadge}`;
-      html += `<tr class="${rowCls}"><td>${sportTag}</td><td style="font-size:12px;">${statusDot}</td><td>${matchText}</td><td>${actTag}</td><td style="color:var(--muted);font-size:12px;">${ago}</td></tr>`;
-    }
-    html += '</tbody></table>';
-    $body.innerHTML = html;
-  }
-
-  async function refreshLiveMatches() {
-    try {
-      const data = await fetch('/live-matches').then(r => r.json());
-      renderLiveMatches(data);
-    } catch (_) {}
-  }
-
-  let timer = setInterval(() => { refresh(); if (errOpen) refreshErrors(); refreshLiveMatches(); }, 5000);
+  let timer = setInterval(() => {
+    refresh();
+    if (activeTab === 'live') refreshLiveMatches();
+    if (activeTab === 'errors') refreshErrors();
+  }, 5000);
   $auto.addEventListener('change', () => {
     clearInterval(timer);
-    if ($auto.checked) timer = setInterval(() => { refresh(); if (errOpen) refreshErrors(); refreshLiveMatches(); }, 5000);
+    if ($auto.checked) timer = setInterval(() => {
+      refresh();
+      if (activeTab === 'live') refreshLiveMatches();
+      if (activeTab === 'errors') refreshErrors();
+    }, 5000);
   });
 
   refresh();
   refreshLiveMatches();
+  refreshErrors();
 })();
 </script>
 </body>
