@@ -6717,6 +6717,9 @@ async function pollCs(runOnce = false) {
   const CS_MIN_ODDS = parseFloat(process.env.CS_MIN_ODDS ?? '1.40');
   const CS_MAX_ODDS = parseFloat(process.env.CS_MAX_ODDS ?? '4.50');
   const CS_MIN_EV = parseFloat(process.env.CS_MIN_EV ?? '5.0');
+  // Flip gradual do shadow: 'ALL' | 'ALTA' | 'ALTA_MEDIA' — filtra DM por confiança.
+  // Default 'ALTA' protege a saída inicial enquanto amostra real cresce.
+  const CS_LIVE_CONF = String(process.env.CS_LIVE_CONF || 'ALTA').toUpperCase();
   const { getCsElo } = require('./lib/cs-ml');
   const hltv = require('./lib/hltv');
 
@@ -6886,6 +6889,18 @@ async function pollCs(runOnce = false) {
 
         if (csConfig.shadowMode) {
           log('INFO', 'AUTO-CS', `[SHADOW] ${pickTeam} @ ${pickOdd} | EV:${evPct.toFixed(1)}% | ${stakeAdj}u | ${conf} | ${tipReason}`);
+          continue;
+        }
+
+        // Gate de confiança para saída do shadow: só envia DM se conf passar CS_LIVE_CONF.
+        // 'ALTA' (default): só Elo com ≥20 jogos ambos lados.
+        // 'ALTA_MEDIA': ALTA + MÉDIA (factors≥2).
+        // 'ALL': sem filtro.
+        const confAllowed = CS_LIVE_CONF === 'ALL'
+          || (CS_LIVE_CONF === 'ALTA' && conf === 'ALTA')
+          || (CS_LIVE_CONF === 'ALTA_MEDIA' && (conf === 'ALTA' || conf === 'MÉDIA'));
+        if (!confAllowed) {
+          log('INFO', 'AUTO-CS', `[GATE ${CS_LIVE_CONF}] ${pickTeam} @ ${pickOdd} | EV:${evPct.toFixed(1)}% | ${conf} — tip gravada mas DM suprimido`);
           continue;
         }
 
