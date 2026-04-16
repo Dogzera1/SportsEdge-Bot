@@ -4730,7 +4730,10 @@ async function _pollDotaInner(runOnce = false) {
         oddsMovement: null
       };
 
-      // ── Live stats (OpenDota → PandaScore fallback) ──
+      // ── Live stats (OpenDota + PandaScore em paralelo) ──
+      // Lanca as duas fontes simultaneamente e usa a primeira que retornar hasLiveStats=true
+      // (prioridade: OpenDota quando disponivel). Antes era sequencial → timeout OpenDota
+      // bloqueava PandaScore por 10-30s.
       let dotaLiveContext = '';
       let dotaHasLiveStats = false;
       if (isLive) {
@@ -4739,45 +4742,47 @@ async function _pollDotaInner(runOnce = false) {
           `  ${(p.hero||'?').padEnd(14)} ${(p.name||'?').slice(0,12).padEnd(12)} ${p.kills}/${p.deaths}/${p.assists} lvl${p.level} ${g(p.gold)}g`
         ).join('\n');
 
-        // 1) OpenDota — /api/live retorna aggregate stats (score + radiant_lead) mas não per-player gold/KDA
-        try {
-          const ld = await serverGet(`/opendota-live?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}`);
-          log('INFO', 'LIVE-STATS', `Dota OpenDota ${match.team1} vs ${match.team2}: hasLiveStats=${!!ld.hasLiveStats} playerStats=${!!ld.hasPlayerStats} agg=${!!ld.hasAggregateStats}${ld.error?` err=${ld.error}`:''}`);
-          if (ld.hasLiveStats) {
-            dotaHasLiveStats = true;
-            const blue = ld.blueTeam, red = ld.redTeam;
-            const goldDiff = (blue.totalGold||0) - (red.totalGold||0);
-            const gt = ld.gameTime ? Math.round(ld.gameTime/60) : 0;
-            const sourceNote = ld.hasPlayerStats ? 'OpenDota' : 'OpenDota agg (gold estimado)';
-            dotaLiveContext += `\n[AO VIVO — ${gt}min | ${sourceNote}]\n`;
-            dotaLiveContext += `Gold: ${blue.name} ${g(blue.totalGold)} vs ${red.name} ${g(red.totalGold)} (diff: ${goldDiff>0?'+':''}${g(goldDiff)})\n`;
-            dotaLiveContext += `Kills: ${blue.totalKills||0}x${red.totalKills||0}\n`;
-            if (ld.hasPlayerStats) {
-              dotaLiveContext += `${blue.name}:\n${fmtTeam(blue)}\n${red.name}:\n${fmtTeam(red)}\n`;
-            } else {
-              // Sem per-player stats: mostra só heróis
-              const heroLine = (team) => (team.players||[]).map(p => p.hero || '?').filter(h => h !== '?').join(', ');
-              if (heroLine(blue)) dotaLiveContext += `${blue.name} heroes: ${heroLine(blue)}\n`;
-              if (heroLine(red))  dotaLiveContext += `${red.name} heroes: ${heroLine(red)}\n`;
-            }
-          }
-        } catch(e) { log('WARN', 'AUTO-DOTA', `OpenDota fetch falhou: ${e.message}`); }
+        const isPsMatch = String(match.id).startsWith('ps_');
+        const [odRes, psRes] = await Promise.allSettled([
+          serverGet(`/opendota-live?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}`),
+          isPsMatch
+            ? serverGet(`/ps-dota-live?matchId=${encodeURIComponent(match.id)}`)
+            : Promise.resolve(null),
+        ]);
 
-        // 2) Fallback PandaScore (se OpenDota não achou e match é ps_*)
-        if (!dotaHasLiveStats && String(match.id).startsWith('ps_')) {
-          try {
-            const ld = await serverGet(`/ps-dota-live?matchId=${encodeURIComponent(match.id)}`);
-            log('INFO', 'LIVE-STATS', `Dota PandaScore ${match.id}: hasLiveStats=${!!ld.hasLiveStats} game=${ld.gameNumber||'?'} status=${ld.gameStatus||'?'}`);
-            if (ld.hasLiveStats) {
-              dotaHasLiveStats = true;
-              const blue = ld.blueTeam, red = ld.redTeam;
-              const goldDiff = (blue.totalGold||0) - (red.totalGold||0);
-              dotaLiveContext += `\n[GAME ${ld.gameNumber} — AO VIVO | Série: ${ld.seriesScore||'0-0'} | PandaScore]\n`;
-              dotaLiveContext += `Gold: ${blue.name} ${g(blue.totalGold)} vs ${red.name} ${g(red.totalGold)} (diff: ${goldDiff>0?'+':''}${g(goldDiff)})\n`;
-              dotaLiveContext += `Kills: ${blue.totalKills||0}x${red.totalKills||0}\n`;
-              dotaLiveContext += `${blue.name}:\n${fmtTeam(blue)}\n${red.name}:\n${fmtTeam(red)}\n`;
-            }
-          } catch(e) { log('WARN', 'AUTO-DOTA', `PS live fetch falhou: ${e.message}`); }
+        const od = odRes.status === 'fulfilled' ? odRes.value : null;
+        const ps = psRes.status === 'fulfilled' ? psRes.value : null;
+        if (odRes.status === 'rejected') log('WARN', 'AUTO-DOTA', `OpenDota fetch falhou: ${odRes.reason?.message || odRes.reason}`);
+        if (isPsMatch && psRes.status === 'rejected') log('WARN', 'AUTO-DOTA', `PS live fetch falhou: ${psRes.reason?.message || psRes.reason}`);
+
+        log('INFO', 'LIVE-STATS', `Dota OpenDota ${match.team1} vs ${match.team2}: hasLiveStats=${!!od?.hasLiveStats} playerStats=${!!od?.hasPlayerStats} agg=${!!od?.hasAggregateStats}${od?.error?` err=${od.error}`:''}`);
+        if (isPsMatch) log('INFO', 'LIVE-STATS', `Dota PandaScore ${match.id}: hasLiveStats=${!!ps?.hasLiveStats} game=${ps?.gameNumber||'?'} status=${ps?.gameStatus||'?'}`);
+
+        // Preferencia: OpenDota se hasLiveStats; senao, PandaScore.
+        if (od?.hasLiveStats) {
+          dotaHasLiveStats = true;
+          const blue = od.blueTeam, red = od.redTeam;
+          const goldDiff = (blue.totalGold||0) - (red.totalGold||0);
+          const gt = od.gameTime ? Math.round(od.gameTime/60) : 0;
+          const sourceNote = od.hasPlayerStats ? 'OpenDota' : 'OpenDota agg (gold estimado)';
+          dotaLiveContext += `\n[AO VIVO — ${gt}min | ${sourceNote}]\n`;
+          dotaLiveContext += `Gold: ${blue.name} ${g(blue.totalGold)} vs ${red.name} ${g(red.totalGold)} (diff: ${goldDiff>0?'+':''}${g(goldDiff)})\n`;
+          dotaLiveContext += `Kills: ${blue.totalKills||0}x${red.totalKills||0}\n`;
+          if (od.hasPlayerStats) {
+            dotaLiveContext += `${blue.name}:\n${fmtTeam(blue)}\n${red.name}:\n${fmtTeam(red)}\n`;
+          } else {
+            const heroLine = (team) => (team.players||[]).map(p => p.hero || '?').filter(h => h !== '?').join(', ');
+            if (heroLine(blue)) dotaLiveContext += `${blue.name} heroes: ${heroLine(blue)}\n`;
+            if (heroLine(red))  dotaLiveContext += `${red.name} heroes: ${heroLine(red)}\n`;
+          }
+        } else if (ps?.hasLiveStats) {
+          dotaHasLiveStats = true;
+          const blue = ps.blueTeam, red = ps.redTeam;
+          const goldDiff = (blue.totalGold||0) - (red.totalGold||0);
+          dotaLiveContext += `\n[GAME ${ps.gameNumber} — AO VIVO | Série: ${ps.seriesScore||'0-0'} | PandaScore]\n`;
+          dotaLiveContext += `Gold: ${blue.name} ${g(blue.totalGold)} vs ${red.name} ${g(red.totalGold)} (diff: ${goldDiff>0?'+':''}${g(goldDiff)})\n`;
+          dotaLiveContext += `Kills: ${blue.totalKills||0}x${red.totalKills||0}\n`;
+          dotaLiveContext += `${blue.name}:\n${fmtTeam(blue)}\n${red.name}:\n${fmtTeam(red)}\n`;
         }
       }
 
