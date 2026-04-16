@@ -2970,6 +2970,111 @@ async function getPandaScoreCsMatches() {
   }
 }
 
+// ── Pinnacle — Valorant (sportId=12 E-Sports, league filter "valorant") ──
+let _valorantPinnacleCache = { data: [], ts: 0 };
+const VALORANT_PINNACLE_TTL = 3 * 60 * 1000;
+
+async function getPinnacleValorantMatches() {
+  if (_valorantPinnacleCache.data.length && (Date.now() - _valorantPinnacleCache.ts) < VALORANT_PINNACLE_TTL) {
+    return _valorantPinnacleCache.data;
+  }
+  try {
+    const rows = await pinnacle.fetchSportMatchOdds(12, (m) => {
+      const name = String(m?.league?.name || '').toLowerCase();
+      if (!name.includes('valorant')) return false;
+      const p1 = String(m?.participants?.[0]?.name || '');
+      const p2 = String(m?.participants?.[1]?.name || '');
+      if (/\((kills|rounds|maps|handicap)\)/i.test(p1) || /\((kills|rounds|maps|handicap)\)/i.test(p2)) return false;
+      if (/\d+,\s*\w+\s+\d+/.test(p1) || /\d+,\s*\w+\s+\d+/.test(p2)) return false;
+      return true;
+    });
+    const matches = rows.map(r => ({
+      id: `pin_valorant_${r.id}`,
+      team1: r.team1,
+      team2: r.team2,
+      league: r.league,
+      status: r.status === 'live' ? 'live' : 'upcoming',
+      time: r.startTime,
+      odds: { t1: String(r.oddsT1), t2: String(r.oddsT2), bookmaker: 'Pinnacle' }
+    }));
+    _valorantPinnacleCache = { data: matches, ts: Date.now() };
+    log('INFO', 'ODDS', `Pinnacle Valorant: ${matches.length} partidas cacheadas`);
+    return matches;
+  } catch (e) {
+    log('ERROR', 'ODDS', `Pinnacle Valorant: ${e.message}`);
+    return [];
+  }
+}
+
+// ── PandaScore Valorant ──
+let _pandaValorantCache = { data: [], ts: 0 };
+const PANDA_VALORANT_CACHE_TTL = parseInt(process.env.PANDA_VALORANT_CACHE_TTL_MS || '90000', 10);
+
+async function getPandaScoreValorantMatches() {
+  if (!PANDASCORE_TOKEN || PANDASCORE_TOKEN === 'your-pandascore-token') return [];
+  if (Date.now() < _pandaBackoffUntil) return [];
+  if (_pandaValorantCache.data.length && (Date.now() - _pandaValorantCache.ts) < PANDA_VALORANT_CACHE_TTL) return _pandaValorantCache.data;
+  try {
+    const headers = { 'Authorization': `Bearer ${PANDASCORE_TOKEN}` };
+    const [runningRaw, upcomingRaw] = await Promise.all([
+      httpGet('https://api.pandascore.co/valorant/matches/running?per_page=20', headers).catch(() => ({ status: 0, body: '[]' })),
+      httpGet('https://api.pandascore.co/valorant/matches/upcoming?per_page=30&sort=begin_at', headers).catch(() => ({ status: 0, body: '[]' }))
+    ]);
+    const parsePsArr = (raw) => {
+      const p = safeParse(raw?.body, []);
+      return Array.isArray(p) ? p : [];
+    };
+    const running = parsePsArr(runningRaw);
+    const upcoming = parsePsArr(upcomingRaw);
+
+    const mapVal = (m, status) => {
+      const t1 = m.opponents?.[0]?.opponent, t2 = m.opponents?.[1]?.opponent;
+      const n1 = t1?.name || 'TBD', n2 = t2?.name || 'TBD';
+      if (n1 === 'TBD' && n2 === 'TBD') return null;
+      const leagueName = m.league?.name || m.serie?.full_name || 'Valorant';
+      const format = m.number_of_games > 1 ? `Bo${m.number_of_games}` : 'Bo1';
+      let s1 = 0, s2 = 0;
+      if (Array.isArray(m.games)) {
+        for (const g of m.games) {
+          if (!g.winner) continue;
+          if (g.winner.id === t1?.id) s1++;
+          else if (g.winner.id === t2?.id) s2++;
+        }
+      }
+      return {
+        id: `valorant_ps_${m.id}`,
+        game: 'valorant',
+        league: leagueName,
+        leagueSlug: m.league?.slug || '',
+        team1: n1, team2: n2,
+        score1: s1, score2: s2,
+        status,
+        time: m.begin_at || '',
+        format,
+        winner: m.winner?.name || null,
+        _psId: String(m.id),
+        _source: 'pandascore'
+      };
+    };
+
+    const live = running.map(m => mapVal(m, 'live')).filter(Boolean);
+    const next = upcoming
+      .filter(m => {
+        const t = new Date(m.begin_at).getTime();
+        return !isNaN(t) && t < Date.now() + 7 * 24 * 3600 * 1000;
+      })
+      .map(m => mapVal(m, 'upcoming')).filter(Boolean);
+
+    const result = [...live, ...next];
+    if (result.length) log('INFO', 'VALORANT', `PandaScore: ${result.length} partidas (${live.length} live)`);
+    _pandaValorantCache = { data: result, ts: Date.now() };
+    return result;
+  } catch(e) {
+    log('WARN', 'VALORANT', 'getPandaScoreValorantMatches: ' + e.message);
+    return _pandaValorantCache.data;
+  }
+}
+
 // ── Admin Auth + Rate Limit (in-memory) ──
 const ADMIN_KEY = (process.env.ADMIN_KEY || '').trim();
 let _adminKeyWarnLogged = false;
@@ -4406,6 +4511,55 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (p === '/valorant-matches') {
+    try {
+      const [pinMatches, psMatches] = await Promise.all([
+        getPinnacleValorantMatches().catch(() => []),
+        getPandaScoreValorantMatches().catch(() => []),
+      ]);
+
+      const normTeam = s => String(s||'').toLowerCase().replace(/[^a-z0-9]/g,'');
+
+      for (const om of pinMatches) {
+        const n1 = normTeam(om.team1), n2 = normTeam(om.team2);
+        const ps = psMatches.find(p => {
+          const pn1 = normTeam(p.team1), pn2 = normTeam(p.team2);
+          return (pn1.includes(n1) || n1.includes(pn1)) && (pn2.includes(n2) || n2.includes(pn2));
+        });
+        if (ps) {
+          om.format = ps.format;
+          om.leagueSlug = ps.leagueSlug || '';
+          om.score1 = ps.score1; om.score2 = ps.score2;
+          om._psId = ps._psId || null;
+        }
+      }
+
+      const liveFromPs = psMatches.filter(p => {
+        if (p.status !== 'live') return false;
+        const pn1 = normTeam(p.team1), pn2 = normTeam(p.team2);
+        return !pinMatches.some(om => {
+          const n1 = normTeam(om.team1), n2 = normTeam(om.team2);
+          return (pn1.includes(n1) || n1.includes(pn1)) && (pn2.includes(n2) || n2.includes(pn2));
+        });
+      });
+
+      const combined = [...liveFromPs, ...pinMatches];
+      combined.sort((a, b) => {
+        const sa = a.status === 'live' ? 0 : 1;
+        const sb = b.status === 'live' ? 0 : 1;
+        if (sa !== sb) return sa - sb;
+        return new Date(a.time) - new Date(b.time);
+      });
+
+      log('INFO', 'VALORANT', `/valorant-matches: ${combined.length} total (${liveFromPs.length} live PS, ${pinMatches.length} odds Pinnacle)`);
+      sendJson(res, combined);
+    } catch (e) {
+      log('ERROR', 'VALORANT', `/valorant-matches: ${e.message}`);
+      sendJson(res, []);
+    }
+    return;
+  }
+
   // Lista todos os times retornados pela API Riot + PandaScore com status de odds
   if (p === '/debug-teams') {
     try {
@@ -5410,6 +5564,114 @@ const server = http.createServer(async (req, res) => {
       if (!dryRun) log('INFO', 'ADMIN', `seed-cs-history: ${inserted} novos matches em ${days}d (existing antes: ${existing})`);
     } catch (e) {
       sendJson(res, { error: e.message }, 500);
+    }
+    return;
+  }
+
+  if (p === '/seed-valorant-history' && req.method === 'POST') {
+    try {
+      if (!PANDASCORE_TOKEN) { sendJson(res, { error: 'PANDASCORE_TOKEN missing' }, 400); return; }
+      const days = Math.max(1, Math.min(180, parseInt(parsed.query.days || '90', 10) || 90));
+      const dryRun = parsed.query.apply !== '1' && parsed.query.apply !== 'true';
+      const headers = { 'Authorization': `Bearer ${PANDASCORE_TOKEN}` };
+      const since = new Date(Date.now() - days * 86400 * 1000).toISOString().slice(0, 19);
+
+      const matches = [];
+      let page = 1;
+      while (page <= 50) {
+        const url = `https://api.pandascore.co/valorant/matches/past?per_page=100&page=${page}&sort=-end_at&filter[finished]=true&range[end_at]=${encodeURIComponent(since)},${encodeURIComponent(new Date().toISOString().slice(0,19))}`;
+        const r = await httpGet(url, headers).catch(() => null);
+        if (!r || r.status !== 200) break;
+        const arr = safeParse(r.body, []);
+        if (!Array.isArray(arr) || arr.length === 0) break;
+        for (const m of arr) {
+          const t1 = m.opponents?.[0]?.opponent?.name;
+          const t2 = m.opponents?.[1]?.opponent?.name;
+          const winnerName = m.winner?.name;
+          if (!t1 || !t2 || !winnerName) continue;
+          const score1 = m.results?.find(x => x.team_id === m.opponents?.[0]?.opponent?.id)?.score ?? null;
+          const score2 = m.results?.find(x => x.team_id === m.opponents?.[1]?.opponent?.id)?.score ?? null;
+          matches.push({
+            psId: m.id,
+            team1: t1, team2: t2,
+            winner: winnerName,
+            score: (score1 != null && score2 != null) ? `${score1}-${score2}` : '',
+            league: m.league?.name || 'Valorant',
+            endAt: m.end_at,
+          });
+        }
+        if (arr.length < 100) break;
+        page++;
+        await new Promise(r => setTimeout(r, 250));
+      }
+
+      const upsert = db.prepare(`
+        INSERT OR IGNORE INTO match_results (match_id, game, team1, team2, winner, final_score, league, resolved_at)
+        VALUES (?, 'valorant', ?, ?, ?, ?, ?, ?)
+      `);
+      const existing = db.prepare(`SELECT COUNT(*) c FROM match_results WHERE game='valorant'`).get()?.c || 0;
+
+      let inserted = 0;
+      if (!dryRun) {
+        const tx = db.transaction((rows) => {
+          for (const m of rows) {
+            const mid = `valorant_ps_${m.psId}`;
+            const resolvedAt = m.endAt
+              ? new Date(m.endAt).toISOString().replace('T', ' ').slice(0, 19)
+              : new Date().toISOString().replace('T', ' ').slice(0, 19);
+            const r = upsert.run(mid, m.team1, m.team2, m.winner, m.score, m.league, resolvedAt);
+            if (r.changes) inserted++;
+          }
+        });
+        tx(matches);
+        try { require('./lib/valorant-ml').invalidateEloCache(); } catch (_) {}
+      }
+
+      sendJson(res, {
+        ok: true,
+        dryRun,
+        daysScraped: days,
+        matchesFound: matches.length,
+        pagesScanned: page,
+        inserted,
+        existingBefore: existing,
+        sample: matches[0] || null,
+      });
+      if (!dryRun) log('INFO', 'ADMIN', `seed-valorant-history: ${inserted} novos matches em ${days}d (existing antes: ${existing})`);
+    } catch (e) {
+      sendJson(res, { error: e.message }, 500);
+    }
+    return;
+  }
+
+  if (p === '/debug-valorant-elo') {
+    try {
+      const { getValorantElo } = require('./lib/valorant-ml');
+      const teamsParam = String(parsed.query.teams || '').trim();
+      const totalRows = db.prepare(`SELECT COUNT(*) c FROM match_results WHERE game='valorant'`).get()?.c || 0;
+      const distinctTeams = db.prepare(`SELECT COUNT(DISTINCT team) c FROM (SELECT team1 AS team FROM match_results WHERE game='valorant' UNION ALL SELECT team2 FROM match_results WHERE game='valorant')`).get()?.c || 0;
+      const latest = db.prepare(`SELECT MAX(resolved_at) m FROM match_results WHERE game='valorant'`).get()?.m || null;
+
+      let pairs = null;
+      if (teamsParam) {
+        const list = teamsParam.split(',').map(s => s.trim()).filter(Boolean);
+        pairs = [];
+        for (let i = 0; i < list.length; i += 2) {
+          const t1 = list[i], t2 = list[i+1];
+          if (!t2) break;
+          const r = getValorantElo(db, t1, t2, 0.5, 0.5);
+          pairs.push({ t1, t2, elo1: r.elo1, elo2: r.elo2, eloMatches1: r.eloMatches1, eloMatches2: r.eloMatches2, found1: r.found1, found2: r.found2, useEloEligible: r.found1 && r.found2 && Math.min(r.eloMatches1, r.eloMatches2) >= 5 });
+        }
+      }
+
+      sendJson(res, {
+        matchResultsRows: totalRows,
+        distinctTeams,
+        latestResolvedAt: latest,
+        pairs,
+      });
+    } catch (e) {
+      sendJson(res, { error: e.message, stack: e.stack }, 500);
     }
     return;
   }

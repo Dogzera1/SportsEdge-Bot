@@ -99,6 +99,7 @@ const analyzedDarts = new Map();
 const analyzedSnooker = new Map();
 const analyzedTT = new Map();
 const analyzedCs = new Map();
+const analyzedValorant = new Map();
 
 // ── Gate global de prioridade LIVE ──────────────────────────────────────
 // Cada esporte registra 'esporte' em _livePhase enquanto processa live matches.
@@ -1269,6 +1270,10 @@ async function runAutoAnalysis() {
   if (SPORTS['cs']?.enabled) {
     parallel.push(pollCs(true).then(v => { sharedCaches.cs = v; })
       .catch(e => log('ERROR', 'AUTO', `CS2 unified: ${e.message}`)));
+  }
+  if (SPORTS['valorant']?.enabled) {
+    parallel.push(pollValorant(true).then(v => { sharedCaches.valorant = v; })
+      .catch(e => log('ERROR', 'AUTO', `Valorant unified: ${e.message}`)));
   }
   await Promise.allSettled(parallel);
 
@@ -3028,6 +3033,7 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
     if (sport === 'snooker' || sport === 'all') { analyzedSnooker.clear(); cleared.snooker = true; }
     if (sport === 'tabletennis' || sport === 'all') { analyzedTT.clear(); cleared.tabletennis = true; }
     if (sport === 'cs'      || sport === 'all') { analyzedCs.clear();    cleared.cs = true; }
+    if (sport === 'valorant'|| sport === 'all') { analyzedValorant.clear(); cleared.valorant = true; }
     const clearedList = Object.keys(cleared).join(', ') || sport;
     await send(token, chatId,
       `🔄 *Reanálise ativada*\n\nMemória de análises limpa para: *${clearedList}*\n` +
@@ -3346,6 +3352,40 @@ async function handleProximas(token, chatId, sport) {
         const liveTag = m.status === 'live' ? ' 🔴' : '';
         const fmt = m.format ? ` (${m.format})` : '';
         txt += `🔫${liveTag} *${m.team1}* vs *${m.team2}*${fmt}\n`;
+        if (m.time) {
+          try {
+            const dt = new Date(m.time).toLocaleString('pt-BR', {
+              timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit',
+              hour: '2-digit', minute: '2-digit'
+            });
+            txt += `  🕐 ${dt}\n`;
+          } catch(_) {}
+        }
+        if (m.odds) txt += `  💰 ${m.team1}: \`${m.odds.t1}\` | ${m.team2}: \`${m.odds.t2}\`\n`;
+      });
+      await send(token, chatId, txt, getMenu(sport));
+      return;
+    }
+
+    if (sport === 'valorant') {
+      const matches = await serverGet('/valorant-matches').catch(() => []);
+      const all = Array.isArray(matches) ? matches : [];
+      if (!all.length) {
+        await send(token, chatId,
+          '❌ Nenhuma partida de Valorant encontrada.\n_Tente novamente mais tarde._',
+          getMenu(sport));
+        return;
+      }
+      let txt = `🎯 *PRÓXIMAS PARTIDAS VALORANT*\n━━━━━━━━━━━━━━━━\n\n`;
+      let lastLeague = '';
+      all.slice(0, 15).forEach(m => {
+        if (m.league !== lastLeague) {
+          txt += `\n📋 *${m.league}*\n`;
+          lastLeague = m.league;
+        }
+        const liveTag = m.status === 'live' ? ' 🔴' : '';
+        const fmt = m.format ? ` (${m.format})` : '';
+        txt += `🎯${liveTag} *${m.team1}* vs *${m.team2}*${fmt}\n`;
         if (m.time) {
           try {
             const dt = new Date(m.time).toLocaleString('pt-BR', {
@@ -6934,6 +6974,197 @@ async function pollCs(runOnce = false) {
   return runOnce ? (result || []) : undefined;
 }
 
+// ── Valorant loop (fork de pollCs — sem HLTV scorebot) ────────────────
+async function pollValorant(runOnce = false) {
+  const valConfig = SPORTS['valorant'];
+  if (!valConfig?.enabled || !valConfig?.token) return [];
+  const token = valConfig.token;
+
+  const VAL_POLL_LIVE_MS = 2 * 60 * 1000;
+  const VAL_POLL_IDLE_MS = 5 * 60 * 1000;
+  let _hadLiveVal = false;
+  const VAL_MIN_ODDS = parseFloat(process.env.VALORANT_MIN_ODDS ?? '1.40');
+  const VAL_MAX_ODDS = parseFloat(process.env.VALORANT_MAX_ODDS ?? '4.50');
+  const VAL_MIN_EV = parseFloat(process.env.VALORANT_MIN_EV ?? '5.0');
+  const VAL_LIVE_CONF = String(process.env.VALORANT_LIVE_CONF || 'ALTA').toUpperCase();
+  const { getValorantElo } = require('./lib/valorant-ml');
+
+  async function loop() {
+    try {
+      log('INFO', 'AUTO-VAL', `Iniciando verificação de Valorant${valConfig.shadowMode ? ' [SHADOW]' : ''}...`);
+      const matches = await serverGet('/valorant-matches').catch(() => []);
+      if (!Array.isArray(matches) || !matches.length) {
+        log('INFO', 'AUTO-VAL', '0 partidas Valorant com odds');
+        if (!runOnce) { const _n = _hadLiveVal ? VAL_POLL_LIVE_MS : VAL_POLL_IDLE_MS; log('INFO', 'AUTO-VAL', `Próximo ciclo em ${Math.round(_n/1000)}s (${_hadLiveVal ? 'LIVE' : 'idle'})`); setTimeout(loop, _n); }
+        return [];
+      }
+      log('INFO', 'AUTO-VAL', `${matches.length} partidas Valorant`);
+
+      const now = Date.now();
+      const windowMs = 6 * 60 * 60 * 1000;
+      const relevant = matches.filter(m => {
+        const t = new Date(m.time || 0).getTime();
+        return t > 0 && (t - now) < windowMs && (t - now) > -3 * 60 * 60 * 1000;
+      });
+      relevant.sort((a, b) => {
+        const la = a.status === 'live' ? 0 : 1;
+        const lb = b.status === 'live' ? 0 : 1;
+        if (la !== lb) return la - lb;
+        return new Date(a.time || 0) - new Date(b.time || 0);
+      });
+      if (!relevant.length) {
+        log('INFO', 'AUTO-VAL', '0 matches em janela de 6h');
+        if (!runOnce) { const _n = _hadLiveVal ? VAL_POLL_LIVE_MS : VAL_POLL_IDLE_MS; log('INFO', 'AUTO-VAL', `Próximo ciclo em ${Math.round(_n/1000)}s (${_hadLiveVal ? 'LIVE' : 'idle'})`); setTimeout(loop, _n); }
+        return [];
+      }
+      const _hasLiveVal = relevant.some(m => m.status === 'live');
+      _hadLiveVal = _hasLiveVal;
+      if (_hasLiveVal) _livePhaseEnter('valorant');
+      let _drainedVal = false;
+
+      for (const match of relevant) {
+        if (match.status !== 'live' && !_drainedVal) {
+          if (_hasLiveVal) _livePhaseExit('valorant');
+          await _waitOthersLiveDone('valorant');
+          _drainedVal = true;
+        }
+        const isLiveVal = match.status === 'live';
+        const key = `valorant_${match.id}`;
+        const prev = analyzedValorant.get(key);
+        if (prev?.tipSent) continue;
+        const valCooldown = isLiveVal ? (3 * 60 * 1000) : (30 * 60 * 1000);
+        if (prev && (now - prev.ts < valCooldown)) continue;
+
+        if (!match.odds?.t1 || !match.odds?.t2) continue;
+        if (!isOddsFresh(match.odds, isLiveVal)) {
+          log('INFO', 'AUTO-VAL', `Odds stale (${oddsAgeStr(match.odds)}): ${match.team1} vs ${match.team2} — pulando`);
+          continue;
+        }
+        const o1 = parseFloat(match.odds.t1);
+        const o2 = parseFloat(match.odds.t2);
+        if (!o1 || !o2 || o1 <= 1 || o2 <= 1) continue;
+
+        const bestOdd = Math.max(o1, o2);
+        const worstOdd = Math.min(o1, o2);
+        if (worstOdd < VAL_MIN_ODDS || bestOdd > VAL_MAX_ODDS + 10) {
+          analyzedValorant.set(key, { ts: now, tipSent: false });
+          continue;
+        }
+
+        const r1 = 1 / o1, r2 = 1 / o2;
+        const vig = r1 + r2;
+        const impliedP1 = r1 / vig;
+        const impliedP2 = r2 / vig;
+        const elo = getValorantElo(db, match.team1, match.team2, impliedP1, impliedP2);
+
+        const useElo = elo.pass && elo.found1 && elo.found2 && Math.min(elo.eloMatches1, elo.eloMatches2) >= 5;
+        if (!useElo) {
+          analyzedValorant.set(key, { ts: now, tipSent: false });
+          log('INFO', 'AUTO-VAL', `Sem Elo (${match.team1}=${elo.eloMatches1}j, ${match.team2}=${elo.eloMatches2}j): ${match.team1} vs ${match.team2}`);
+          continue;
+        }
+
+        const modelP1 = elo.modelP1;
+        const modelP2 = elo.modelP2;
+        const direction = elo.direction === 'p1' ? 't1' : elo.direction === 'p2' ? 't2' : null;
+        const mlScore = elo.score;
+        const factorCount = elo.factorCount;
+
+        if (!direction || mlScore < 3.0) {
+          analyzedValorant.set(key, { ts: now, tipSent: false });
+          log('INFO', 'AUTO-VAL', `Sem edge: ${match.team1} vs ${match.team2} | edge=${mlScore.toFixed(1)}pp`);
+          continue;
+        }
+
+        const pickTeam = direction === 't1' ? match.team1 : match.team2;
+        const pickOdd  = direction === 't1' ? o1 : o2;
+        const pickP    = direction === 't1' ? modelP1 : modelP2;
+        const evPct = (pickP * pickOdd - 1) * 100;
+
+        if (evPct < VAL_MIN_EV) {
+          analyzedValorant.set(key, { ts: now, tipSent: false });
+          log('INFO', 'AUTO-VAL', `EV baixo (${evPct.toFixed(1)}%): ${match.team1} vs ${match.team2}`);
+          continue;
+        }
+        if (pickOdd < VAL_MIN_ODDS || pickOdd > VAL_MAX_ODDS) {
+          analyzedValorant.set(key, { ts: now, tipSent: false });
+          continue;
+        }
+
+        const stake = calcKellyWithP(pickP, pickOdd, 1/8);
+        if (stake === '0u') { analyzedValorant.set(key, { ts: now, tipSent: false }); continue; }
+        const desiredU = parseFloat(stake) || 0;
+        const riskAdj = await applyGlobalRisk('valorant', desiredU);
+        if (!riskAdj.ok) { log('INFO', 'RISK', `valorant: bloqueada (${riskAdj.reason})`); continue; }
+        const stakeAdj = String(riskAdj.units.toFixed(1).replace(/\.0$/, ''));
+
+        const conf = elo.eloMatches1 >= 20 && elo.eloMatches2 >= 20 ? 'ALTA'
+                   : factorCount >= 2 ? 'MÉDIA' : 'BAIXA';
+        const tipReason = `Elo: ${match.team1}=${elo.elo1} (${elo.eloMatches1}j) vs ${match.team2}=${elo.elo2} (${elo.eloMatches2}j)`;
+
+        const rec = await serverPost('/record-tip', {
+          matchId: String(match.id), eventName: match.league,
+          p1: match.team1, p2: match.team2, tipParticipant: pickTeam,
+          odds: String(pickOdd), ev: evPct.toFixed(1), stake: stakeAdj,
+          confidence: conf,
+          isLive: match.status === 'live' ? 1 : 0,
+          market_type: 'ML',
+          modelP1, modelP2, modelPPick: pickP,
+          modelLabel: 'valorant-elo',
+          tipReason,
+          isShadow: valConfig.shadowMode ? 1 : 0,
+          sport: 'valorant',
+        }, 'valorant');
+
+        if (!rec?.tipId && !rec?.skipped) {
+          log('WARN', 'AUTO-VAL', `record-tip falhou: ${pickTeam} @ ${pickOdd}`);
+          continue;
+        }
+        analyzedValorant.set(key, { ts: now, tipSent: true });
+        if (rec?.skipped) continue;
+
+        if (valConfig.shadowMode) {
+          log('INFO', 'AUTO-VAL', `[SHADOW] ${pickTeam} @ ${pickOdd} | EV:${evPct.toFixed(1)}% | ${stakeAdj}u | ${conf} | ${tipReason}`);
+          continue;
+        }
+
+        const confAllowed = VAL_LIVE_CONF === 'ALL'
+          || (VAL_LIVE_CONF === 'ALTA' && conf === 'ALTA')
+          || (VAL_LIVE_CONF === 'ALTA_MEDIA' && (conf === 'ALTA' || conf === 'MÉDIA'));
+        if (!confAllowed) {
+          log('INFO', 'AUTO-VAL', `[GATE ${VAL_LIVE_CONF}] ${pickTeam} @ ${pickOdd} | EV:${evPct.toFixed(1)}% | ${conf} — tip gravada mas DM suprimido`);
+          continue;
+        }
+
+        const confEmoji = { ALTA: '🟢', MÉDIA: '🟡', BAIXA: '🔴' }[conf] || '🟡';
+        const matchTime = match.time ? new Date(match.time).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—';
+        const msg = `🎯 💰 *TIP VALORANT*\n\n` +
+          `*${match.team1}* vs *${match.team2}*\n📋 ${match.league}${match.format ? ` (${match.format})` : ''}\n🕐 ${matchTime} (BRT)\n\n` +
+          `🎯 Aposta: *${pickTeam}* @ *${pickOdd}*\n` +
+          `📈 EV: *+${evPct.toFixed(1)}%*\n` +
+          `💵 Stake: *${stakeAdj}u*\n` +
+          `${confEmoji} Confiança: *${conf}*\n` +
+          `_${tipReason}_\n\n` +
+          `⚠️ _Aposte com responsabilidade._`;
+
+        for (const [userId, prefs] of subscribedUsers) {
+          if (!prefs.has('valorant')) continue;
+          try { await sendDM(token, userId, msg); } catch (_) {}
+        }
+        log('INFO', 'AUTO-VAL', `Tip enviada: ${pickTeam} @ ${pickOdd} | EV:${evPct.toFixed(1)}% | ${conf}`);
+        await new Promise(r => setTimeout(r, 3000));
+      }
+      if (!_drainedVal && _hasLiveVal) _livePhaseExit('valorant');
+    } catch (e) {
+      log('ERROR', 'AUTO-VAL', e.message);
+      _livePhaseExit('valorant');
+    }
+    return [];
+  }
+  const result = await loop();
+  return runOnce ? (result || []) : undefined;
+}
+
 // ── Darts loop (INDEPENDENTE de pollFootball) ──────────────────────────
 // Motivo: dentro de pollFootball, Football serializa ~25min bloqueando
 // darts/snooker. Loops separados garantem que rodem em intervalo próprio.
@@ -7291,17 +7522,25 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   } catch(_) {}
 
   // Start polling for each enabled sport
+  const polledTokens = new Set();
   for (const [sport, config] of Object.entries(SPORTS)) {
     if (!config.enabled || !config.token) {
       log('WARN', 'BOOT', `${sport}: disabled or no token`);
       continue;
     }
-    
+
     // Verify token
     const r = await tgRequest(config.token, 'getMe', {});
     if (r.ok) {
       log('INFO', 'BOOT', `${sport}: ${r.result.first_name} (@${r.result.username})`);
-      poll(config.token, sport);
+      // Dedup: se token é compartilhado (ex: valorant reusa CS), poll só 1x.
+      // Callbacks carregam sport em callback_data, então roteamento continua correto.
+      if (!polledTokens.has(config.token)) {
+        poll(config.token, sport);
+        polledTokens.add(config.token);
+      } else {
+        log('INFO', 'BOOT', `${sport}: compartilha token — poll já iniciado por outro esporte`);
+      }
       bots[sport] = config.token;
     } else {
       log('ERROR', 'BOOT', `${sport}: Token inválido`);
