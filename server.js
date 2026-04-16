@@ -7145,7 +7145,7 @@ const server = http.createServer(async (req, res) => {
         const r = await aiPost('deepseek', 'https://api.deepseek.com/chat/completions', dsPayload, {
           'Authorization': `Bearer ${DEEPSEEK_KEY}`,
           'content-type': 'application/json'
-        });
+        }, { timeoutMs: 45000, retry: { baseDelayMs: 2000, maxDelayMs: 15000, minDelayMs: 1500 } });
         if (!r || r.status !== 200) {
           log('WARN', 'AI', `DeepSeek HTTP ${r?.status || 'fail'} body=${String(r?.body || '').slice(0, 900)}`);
         }
