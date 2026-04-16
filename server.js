@@ -5776,22 +5776,35 @@ const server = http.createServer(async (req, res) => {
     try {
       if (!PANDASCORE_TOKEN) { sendJson(res, { error: 'no token' }, 400); return; }
       const id = parsed.query.id || '';
+      const headers = { 'Authorization': `Bearer ${PANDASCORE_TOKEN}` };
       const path = id
         ? `/valorant/matches/${id}`
         : '/valorant/matches/past?per_page=1&sort=-end_at&filter[finished]=true';
-      const r = await httpGet(`https://api.pandascore.co${path}`, { 'Authorization': `Bearer ${PANDASCORE_TOKEN}` });
+      const r = await httpGet(`https://api.pandascore.co${path}`, headers);
       const body = safeParse(r.body, null);
       const sample = Array.isArray(body) ? body[0] : body;
-      // Extrai só games[] com todas as chaves presentes pra ver schema
-      const gameKeysSample = Array.isArray(sample?.games) && sample.games[0]
-        ? Object.keys(sample.games[0])
-        : [];
+      const firstGame = sample?.games?.[0] || null;
+
+      // Se houver firstGame.id, puxa endpoint detalhado
+      let gameDetail = null;
+      let gameDetailKeys = [];
+      if (firstGame?.id) {
+        const gr = await httpGet(`https://api.pandascore.co/valorant/games/${firstGame.id}`, headers).catch(() => null);
+        if (gr) {
+          const gb = safeParse(gr.body, null);
+          gameDetail = { status: gr.status, body: gb };
+          if (gb && typeof gb === 'object') gameDetailKeys = Object.keys(gb);
+        }
+      }
+
       sendJson(res, {
         status: r.status,
         matchId: sample?.id,
         numGames: sample?.games?.length || 0,
-        firstGameKeys: gameKeysSample,
-        firstGameRaw: sample?.games?.[0] || null,
+        firstGameKeys: firstGame ? Object.keys(firstGame) : [],
+        firstGameRaw: firstGame,
+        gameDetailKeys,
+        gameDetail,
       });
     } catch (e) {
       sendJson(res, { error: e.message, stack: e.stack }, 500);
