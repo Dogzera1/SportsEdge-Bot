@@ -137,7 +137,8 @@
       "Bash(du -sh \"/c/Users/vict_/Desktop/lol betting/\"*.db)",
       "Bash(taskkill //PID 7996 //F)",
       "Bash(node scripts/logs-dashboard.js)",
-      "Bash(echo \"started pid=$!\")"
+      "Bash(echo \"started pid=$!\")",
+      "Bash(ls data/*.db)"
     ]
   }
 }
