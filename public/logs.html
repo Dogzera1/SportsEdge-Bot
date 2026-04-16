@@ -128,6 +128,16 @@
     </div>
   </div>
 </div>
+<div class="errors-section" id="errorsSection">
+  <h2 style="padding:18px 18px 0;font-size:14px;font-weight:700;color:var(--err);text-transform:uppercase;letter-spacing:1px;margin:0;display:flex;align-items:center;gap:8px;">
+    🔴 Erros Recentes <span id="errCount" style="background:rgba(248,113,113,.18);padding:1px 8px;border-radius:999px;font-size:11px;">0</span>
+    <button id="errToggle" style="margin-left:auto;background:var(--panel2);border:1px solid var(--border);color:var(--muted);padding:3px 10px;border-radius:6px;cursor:pointer;font-size:11px;">▼ mostrar</button>
+  </h2>
+  <div id="errPanel" style="display:none;margin:8px 18px;background:var(--panel);border:1px solid var(--border);border-left:4px solid var(--err);border-radius:10px;max-height:320px;overflow:auto;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;padding:10px 14px;">
+    <div class="tips-empty" id="errEmpty">sem erros no buffer</div>
+    <div id="errList"></div>
+  </div>
+</div>
 <div class="grid" id="grid"><div class="empty">carregando status…</div></div>
 
 <script>
@@ -286,10 +296,50 @@
     setTimeout(refresh, 800);
   });
 
-  let timer = setInterval(refresh, 5000);
+  // ── Painel de erros ──
+  const $errToggle = document.getElementById('errToggle');
+  const $errPanel = document.getElementById('errPanel');
+  const $errList = document.getElementById('errList');
+  const $errEmpty = document.getElementById('errEmpty');
+  const $errCount = document.getElementById('errCount');
+  let errOpen = false;
+
+  $errToggle.addEventListener('click', () => {
+    errOpen = !errOpen;
+    $errPanel.style.display = errOpen ? 'block' : 'none';
+    $errToggle.textContent = errOpen ? '▲ esconder' : '▼ mostrar';
+    if (errOpen) refreshErrors();
+  });
+
+  async function refreshErrors() {
+    if (!historyCache || Date.now() - historyAt > 4000) {
+      historyCache = await fetch('/history').then(r => r.json()).catch(() => []);
+      historyAt = Date.now();
+    }
+    const errs = historyCache.filter(e =>
+      e.level === 'error' ||
+      /\[stderr\]|ECONN|ETIMEDOUT|ENOTFOUND|exception|panic|fatal/i.test(e.text)
+    ).slice(-50);
+    $errCount.textContent = errs.length;
+    if (!errs.length) {
+      $errEmpty.style.display = 'block';
+      $errList.innerHTML = '';
+      return;
+    }
+    $errEmpty.style.display = 'none';
+    $errList.innerHTML = errs.map(e => {
+      const bot = e.bot && e.bot !== 'system' ? `<span style="color:var(--accent);font-weight:600;text-transform:uppercase;margin-right:6px;">${e.bot}</span>` : '';
+      return `<div style="padding:4px 0;border-bottom:1px solid var(--border);line-height:1.4;word-break:break-word;">` +
+        `<span style="color:var(--muted);margin-right:8px;">${fmtTime(e.t)}</span>` +
+        bot +
+        `<span style="color:var(--err);">${escapeHtml(e.text)}</span></div>`;
+    }).join('');
+  }
+
+  let timer = setInterval(() => { refresh(); if (errOpen) refreshErrors(); }, 5000);
   $auto.addEventListener('change', () => {
     clearInterval(timer);
-    if ($auto.checked) timer = setInterval(refresh, 5000);
+    if ($auto.checked) timer = setInterval(() => { refresh(); if (errOpen) refreshErrors(); }, 5000);
   });
 
   refresh();

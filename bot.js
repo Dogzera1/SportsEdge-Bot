@@ -4658,7 +4658,7 @@ Máximo 200 palavras.`;
         }, 'esports');
         for (const [uid, sports] of subscribedUsers) {
           if (!sports.has('esports')) continue;
-          await sendTelegramMessage(token, uid, msg, { parse_mode: 'Markdown' }).catch(() => {});
+          await sendDM(token, uid, msg).catch(() => {});
         }
         log('INFO', 'AUTO-DOTA', `TIP${isLive ? ' [LIVE]' : ''}: ${tipTeam} @ ${tipOdd} (${tipStakeAdj})`);
         analyzedDota.set(key, { ts: now, tipSent: true, noEdge: false });
