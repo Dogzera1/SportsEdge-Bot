@@ -5772,6 +5772,33 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (p === '/debug-valorant-ps-match') {
+    try {
+      if (!PANDASCORE_TOKEN) { sendJson(res, { error: 'no token' }, 400); return; }
+      const id = parsed.query.id || '';
+      const path = id
+        ? `/valorant/matches/${id}`
+        : '/valorant/matches/past?per_page=1&sort=-end_at&filter[finished]=true';
+      const r = await httpGet(`https://api.pandascore.co${path}`, { 'Authorization': `Bearer ${PANDASCORE_TOKEN}` });
+      const body = safeParse(r.body, null);
+      const sample = Array.isArray(body) ? body[0] : body;
+      // Extrai só games[] com todas as chaves presentes pra ver schema
+      const gameKeysSample = Array.isArray(sample?.games) && sample.games[0]
+        ? Object.keys(sample.games[0])
+        : [];
+      sendJson(res, {
+        status: r.status,
+        matchId: sample?.id,
+        numGames: sample?.games?.length || 0,
+        firstGameKeys: gameKeysSample,
+        firstGameRaw: sample?.games?.[0] || null,
+      });
+    } catch (e) {
+      sendJson(res, { error: e.message, stack: e.stack }, 500);
+    }
+    return;
+  }
+
   if (p === '/debug-valorant-elo') {
     try {
       const { getValorantElo } = require('./lib/valorant-ml');
