@@ -4711,6 +4711,7 @@ const server = http.createServer(async (req, res) => {
       // Usa a porta real do request pra self-fetch (evita divergência entre PORT env e porta efetiva).
       const selfPort = (req.socket && req.socket.localPort) || PORT;
       const base = `http://127.0.0.1:${selfPort}`;
+      const _diag = { selfPort, socketPort: req.socket?.localPort, constPort: PORT, envPort: process.env.PORT, envServerPort: process.env.SERVER_PORT };
       const sources = [
         { sport: 'lol',      path: '/lol-matches' },
         { sport: 'dota',     path: '/dota-matches' },
@@ -4756,7 +4757,7 @@ const server = http.createServer(async (req, res) => {
         out[sport] = rows;
         debug[sport] = { fetched: items.length, upcomingBeforeLimit: upcoming.length, selfStatus: _status, selfErr: _err };
       }
-      sendJson(res, { generatedAt: new Date().toISOString(), horizonHours: horizonMs / 3600000, sports: out, _debug: debug });
+      sendJson(res, { generatedAt: new Date().toISOString(), horizonHours: horizonMs / 3600000, sports: out, _debug: debug, _diag });
     } catch (e) {
       sendJson(res, { error: e.message, stack: e.stack }, 500);
     }
