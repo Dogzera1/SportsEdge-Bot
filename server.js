@@ -4708,10 +4708,8 @@ const server = http.createServer(async (req, res) => {
   // Consumido pelo card "Próximos Jogos" do dashboard.
   if (p === '/upcoming-snapshot') {
     try {
-      // Usa a porta real do request pra self-fetch (evita divergência entre PORT env e porta efetiva).
       const selfPort = (req.socket && req.socket.localPort) || PORT;
       const base = `http://127.0.0.1:${selfPort}`;
-      const _diag = { selfPort, socketPort: req.socket?.localPort, constPort: PORT, envPort: process.env.PORT, envServerPort: process.env.SERVER_PORT };
       const sources = [
         { sport: 'lol',      path: '/lol-matches' },
         { sport: 'dota',     path: '/dota-matches' },
@@ -4722,15 +4720,14 @@ const server = http.createServer(async (req, res) => {
       const now = Date.now();
 
       const fetchMatches = async ({ sport, path: apiPath }) => {
-        const r = await httpGet(`${base}${apiPath}`).catch(e => ({ status: 0, body: '', err: String(e?.message || e) }));
+        const r = await httpGet(`${base}${apiPath}`).catch(() => null);
         const items = (r && r.status === 200) ? safeParse(r.body, []) : [];
-        return { sport, items: Array.isArray(items) ? items : [], _status: r?.status ?? 0, _err: r?.err || null };
+        return { sport, items: Array.isArray(items) ? items : [] };
       };
       const all = await Promise.all(sources.map(fetchMatches));
 
       const out = {};
-      const debug = {};
-      for (const { sport, items, _status, _err } of all) {
+      for (const { sport, items } of all) {
         const upcoming = items.filter(m => {
           if (!m || m.status !== 'upcoming') return false;
           const t = m.time ? Date.parse(m.time) : NaN;
@@ -4755,9 +4752,8 @@ const server = http.createServer(async (req, res) => {
           };
         });
         out[sport] = rows;
-        debug[sport] = { fetched: items.length, upcomingBeforeLimit: upcoming.length, selfStatus: _status, selfErr: _err };
       }
-      sendJson(res, { generatedAt: new Date().toISOString(), horizonHours: horizonMs / 3600000, sports: out, _debug: debug, _diag });
+      sendJson(res, { generatedAt: new Date().toISOString(), horizonHours: horizonMs / 3600000, sports: out });
     } catch (e) {
       sendJson(res, { error: e.message, stack: e.stack }, 500);
     }
