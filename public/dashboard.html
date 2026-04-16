@@ -137,6 +137,15 @@
     </div>
   </div>
 
+  <!-- Live Snapshot (lol/dota/cs/valorant) -->
+  <div class="table-card" id="liveSnapshotCard">
+    <h3 style="display:flex;align-items:center;justify-content:space-between;gap:0.8rem;flex-wrap:wrap">
+      <span>&#128308; Live Agora &mdash; Esports</span>
+      <span id="liveSnapshotMeta" style="font-size:0.68rem;color:#6b7280;font-weight:400;text-transform:none;letter-spacing:0">&mdash;</span>
+    </h3>
+    <div id="liveSnapshotBody"><div class="loading">Carregando...</div></div>
+  </div>
+
   <!-- ROI por Liga -->
   <div class="table-card" id="leagueRoiCard">
     <h3 style="display:flex;align-items:center;justify-content:space-between;gap:0.8rem;flex-wrap:wrap">
@@ -292,16 +301,18 @@ async function loadAll() {
   document.getElementById('lastUpdated').textContent = 'Atualizando...';
   const tipsP = loadTips();
   const gq = gameQs();
-  const [roi, calibration, weights, leagueRoi] = await Promise.all([
+  const [roi, calibration, weights, leagueRoi, liveSnap] = await Promise.all([
     apiFetch('/roi?sport=' + currentSport + gq),
     apiFetch('/calibration?sport=' + currentSport + '&phase=all' + gq),
     apiFetch('/ml-weights'),
-    apiFetch('/league-roi?sport=' + currentSport + gq)
+    apiFetch('/league-roi?sport=' + currentSport + gq),
+    apiFetch('/live-snapshot')
   ]);
   renderCards(roi);
   renderCalibration(calibration);
   renderWeights(weights);
   renderLeagueRoi(leagueRoi);
+  renderLiveSnapshot(liveSnap);
   await tipsP;
   document.getElementById('lastUpdated').textContent = 'Atualizado: ' + new Date().toLocaleTimeString('pt-BR');
 }
@@ -526,6 +537,8 @@ function renderMLMonthlyTable(monthly) {
 
 // Auto-refresh (calibração/ROI “ao vivo”)
 setInterval(loadAll, 60 * 1000);
+// Live snapshot tem cadência própria (30s) pra refletir odds/stats ao vivo mais rápido.
+setInterval(refreshLiveSnapshot, 30 * 1000);
 
 function readTipsControls() {
   const q = (document.getElementById('tipsQ')?.value || '').trim();
@@ -806,6 +819,113 @@ function renderLeagueRoi(data) {
       '</tr></thead>' +
       '<tbody>' + rows + '</tbody>' +
     '</table>';
+}
+
+function renderLiveSnapshot(data) {
+  var body = document.getElementById('liveSnapshotBody');
+  var meta = document.getElementById('liveSnapshotMeta');
+  if (!body) return;
+  if (!data || !data.sports) {
+    body.innerHTML = '<div class="loading" style="color:#6b7280">Sem dados.</div>';
+    if (meta) meta.textContent = '—';
+    return;
+  }
+  var sports = data.sports || {};
+  var orderedKeys = ['lol', 'dota', 'cs', 'valorant'];
+  var labels = { lol: 'LoL', dota: 'Dota 2', cs: 'CS2', valorant: 'Valorant' };
+
+  var totalLive = 0, totalPinnacle = 0, totalStats = 0;
+  Object.keys(sports).forEach(function(k) {
+    (sports[k] || []).forEach(function(row) {
+      totalLive++;
+      if (row.pinnacle) totalPinnacle++;
+      if (row.liveStats && row.liveStats.available) totalStats++;
+    });
+  });
+  if (meta) {
+    meta.textContent = totalLive + ' live • ' + totalPinnacle + ' com Pinnacle • ' + totalStats +
+      ' com live stats • atualizado ' + new Date(data.generatedAt || Date.now()).toLocaleTimeString('pt-BR');
+  }
+  if (totalLive === 0) {
+    body.innerHTML = '<div class="loading" style="color:#6b7280">Nenhuma partida live no momento.</div>';
+    return;
+  }
+
+  var esc = function(s) { return String(s == null ? '' : s).replace(/</g, '&lt;'); };
+  var fmtGold = function(v) { return v >= 1000 ? (v / 1000).toFixed(1) + 'k' : String(v || 0); };
+
+  var sections = [];
+  orderedKeys.forEach(function(sp) {
+    var rows = sports[sp] || [];
+    if (!rows.length) return;
+    var trs = rows.map(function(r) {
+      var odds = r.pinnacle
+        ? '<span class="positive" style="font-weight:600">' + esc(r.pinnacle.t1) + ' / ' + esc(r.pinnacle.t2) + '</span>'
+        : r.odds
+          ? '<span style="color:#9ca3af" title="Bookmaker: ' + esc(r.odds.bookmaker || '-') + '">' + esc(r.odds.t1) + ' / ' + esc(r.odds.t2) + '</span>'
+          : '<span style="color:#4b5563">—</span>';
+
+      var statsBadge;
+      if (r.liveStats && r.liveStats.available) {
+        statsBadge = '<span class="badge" style="background:#064e3b;color:#6ee7b7;font-weight:700">LIVE</span>';
+      } else if (r.liveStats && r.liveStats.reason === 'stats_disabled') {
+        statsBadge = '<span class="badge" style="background:#7f1d1d;color:#fca5a5">disabled</span>';
+      } else {
+        statsBadge = '<span class="badge" style="background:#1f2937;color:#9ca3af">—</span>';
+      }
+
+      var detail = '';
+      var s = r.liveStats && r.liveStats.summary;
+      if (sp === 'lol' && s && s.blue && s.red) {
+        var diff = s.goldDiff || 0;
+        var diffCls = diff >= 0 ? 'positive' : 'negative';
+        var gnum = r.liveStats.gameNumber ? ('G' + r.liveStats.gameNumber + ' ') : '';
+        detail =
+          gnum + 'gold ' + fmtGold(s.blue.gold) + ' / ' + fmtGold(s.red.gold) +
+          ' (<span class="' + diffCls + '">' + (diff >= 0 ? '+' : '') + fmtGold(diff) + '</span>) • ' +
+          'K ' + s.blue.kills + '/' + s.red.kills + ' • T ' + s.blue.towers + '/' + s.red.towers +
+          ' • D ' + s.blue.dragons + '/' + s.red.dragons +
+          (s.dataDelay ? ' • ~' + s.dataDelay + 's atrás' : '');
+      } else if (s && s.score) {
+        detail = 'placar ' + esc(s.score);
+      } else if (r.score) {
+        detail = 'placar ' + esc(r.score);
+      }
+
+      var matchLabel = esc(r.team1) + ' vs ' + esc(r.team2);
+      var leagueLabel = r.league ? esc(r.league) : '—';
+      return '<tr>' +
+        '<td style="max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + matchLabel + '">' + matchLabel + '</td>' +
+        '<td style="color:#9ca3af;font-size:0.78rem;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + leagueLabel + '">' + leagueLabel + '</td>' +
+        '<td style="text-align:center">' + odds + '</td>' +
+        '<td style="text-align:center">' + statsBadge + '</td>' +
+        '<td style="color:#d1d5db;font-size:0.78rem">' + detail + '</td>' +
+      '</tr>';
+    }).join('');
+
+    sections.push(
+      '<div style="margin-top:0.6rem">' +
+        '<div style="font-size:0.78rem;color:#9ca3af;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:0.3rem">' +
+          esc(labels[sp] || sp) + ' <span style="color:#4b5563">(' + rows.length + ')</span>' +
+        '</div>' +
+        '<table><thead><tr>' +
+          '<th>Confronto</th><th>Liga</th>' +
+          '<th style="text-align:center">Pinnacle</th>' +
+          '<th style="text-align:center">Stats</th>' +
+          '<th>Detalhe</th>' +
+        '</tr></thead><tbody>' + trs + '</tbody></table>' +
+      '</div>'
+    );
+  });
+
+  body.innerHTML = sections.join('') || '<div class="loading" style="color:#6b7280">Nenhuma partida live.</div>';
+}
+
+async function refreshLiveSnapshot() {
+  try {
+    var data = await apiFetch('/live-snapshot');
+    if (data) renderLiveSnapshot(data);
+  } catch (_) {}
 }
 
 function renderTips(tips) {

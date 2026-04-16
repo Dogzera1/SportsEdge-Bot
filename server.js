@@ -4585,6 +4585,114 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // Snapshot agregado para o dashboard: matches live de lol/dota/cs/valorant
+  // com odds Pinnacle (quando houver) e um resumo de live stats. Projetado pra
+  // ser consumido pelo dashboard via polling (~30s) — assim o user não precisa
+  // perguntar "esse jogo tem live stats/odd Pinnacle?" a cada partida.
+  if (p === '/live-snapshot') {
+    try {
+      const base = `http://127.0.0.1:${PORT}`;
+      const sources = [
+        { sport: 'lol',      path: '/lol-matches' },
+        { sport: 'dota',     path: '/dota-matches' },
+        { sport: 'cs',       path: '/cs-matches' },
+        { sport: 'valorant', path: '/valorant-matches' },
+      ];
+
+      const fetchMatches = async ({ sport, path: apiPath }) => {
+        const r = await httpGet(`${base}${apiPath}`).catch(() => null);
+        const items = (r && r.status === 200) ? safeParse(r.body, []) : [];
+        return { sport, items: Array.isArray(items) ? items : [] };
+      };
+
+      const all = await Promise.all(sources.map(fetchMatches));
+      const out = {};
+
+      for (const { sport, items } of all) {
+        const live = items.filter(m => m && m.status === 'live');
+        const rows = [];
+        for (const m of live) {
+          const odds = m.odds || null;
+          const bookmaker = odds ? String(odds.bookmaker || '').trim() : '';
+          const pinnacle = /pinnacle/i.test(bookmaker)
+            ? { t1: odds.t1, t2: odds.t2 }
+            : null;
+
+          const row = {
+            matchId: m.id,
+            league: m.league || null,
+            leagueSlug: m.leagueSlug || null,
+            team1: m.team1,
+            team2: m.team2,
+            format: m.format || null,
+            score: (m.score1 != null || m.score2 != null) ? `${m.score1 || 0}-${m.score2 || 0}` : null,
+            startTime: m.time || null,
+            odds: odds ? { bookmaker: bookmaker || null, t1: odds.t1, t2: odds.t2 } : null,
+            pinnacle,
+            liveStats: { available: false, gameState: null, gameNumber: null, reason: null, summary: null },
+          };
+
+          // Live stats detalhado só pra LoL (livestats Riot + PandaScore compositions).
+          if (sport === 'lol') {
+            try {
+              const idsR = await httpGet(`${base}/live-gameids?matchId=${encodeURIComponent(String(m.id))}`).catch(() => null);
+              const ids = (idsR && idsR.status === 200) ? safeParse(idsR.body, []) : [];
+              const current = Array.isArray(ids)
+                ? (ids.find(x => x.hasLiveData) || ids[ids.length - 1] || null)
+                : null;
+              if (current?.gameId) {
+                const gdR = await httpGet(`${base}/live-game?gameId=${current.gameId}`).catch(() => null);
+                const gd = (gdR && gdR.status === 200) ? safeParse(gdR.body, {}) : null;
+                if (gd?.statsDisabled) {
+                  row.liveStats = { available: false, gameState: gd.gameState || null, gameNumber: current.gameNumber || null, reason: 'stats_disabled', summary: null };
+                } else if (gd?.hasLiveStats) {
+                  const b = gd.blueTeam || {}, r2 = gd.redTeam || {};
+                  const bg = b.totalGold || 0, rg = r2.totalGold || 0;
+                  row.liveStats = {
+                    available: true,
+                    gameState: gd.gameState || null,
+                    gameNumber: current.gameNumber || null,
+                    reason: null,
+                    summary: {
+                      blue: { name: b.name || '', gold: bg, kills: b.totalKills || 0, towers: b.towerKills || 0, dragons: (b.dragonTypes?.length ?? b.dragons ?? 0), barons: b.barons || 0, inhibs: b.inhibitors || 0 },
+                      red:  { name: r2.name || '', gold: rg, kills: r2.totalKills || 0, towers: r2.towerKills || 0, dragons: (r2.dragonTypes?.length ?? r2.dragons ?? 0), barons: r2.barons || 0, inhibs: r2.inhibitors || 0 },
+                      goldDiff: bg - rg,
+                      dataDelay: gd.dataDelay || null,
+                    },
+                  };
+                } else if (gd) {
+                  row.liveStats = { available: false, gameState: gd.gameState || null, gameNumber: current.gameNumber || null, reason: 'no_live_data', summary: null };
+                }
+              } else {
+                row.liveStats.reason = 'no_gameids';
+              }
+            } catch (e) {
+              row.liveStats.reason = `error:${(e.message || '').slice(0, 60)}`;
+            }
+          } else {
+            // Dota/CS/Valorant — sem feed detalhado aqui; mostra score PS se presente.
+            const hasScore = m.score1 != null || m.score2 != null;
+            row.liveStats = {
+              available: hasScore,
+              gameState: hasScore ? 'in_progress' : null,
+              gameNumber: null,
+              reason: hasScore ? null : 'no_pandascore_data',
+              summary: hasScore ? { score: `${m.score1 || 0}-${m.score2 || 0}` } : null,
+            };
+          }
+          rows.push(row);
+        }
+        rows.sort((a, b) => (b.pinnacle ? 1 : 0) - (a.pinnacle ? 1 : 0));
+        out[sport] = rows;
+      }
+
+      sendJson(res, { generatedAt: new Date().toISOString(), sports: out });
+    } catch (e) {
+      sendJson(res, { error: e.message, stack: e.stack }, 500);
+    }
+    return;
+  }
+
   // Lista todos os times retornados pela API Riot + PandaScore com status de odds
   if (p === '/debug-teams') {
     try {
