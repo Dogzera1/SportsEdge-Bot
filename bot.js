@@ -2231,7 +2231,8 @@ async function autoAnalyzeMatch(token, match) {
 
     const newsSectionEsports = await fetchMatchNews('esports', match.team1, match.team2).catch(() => '');
     const { text: prompt, evThreshold: adaptiveEV, sigCount } = buildEsportsPrompt(match, game, gamesContext, oddsToUse, enrichSection, mlResult, newsSectionEsports);
-    log('INFO', 'AUTO', `Analisando: ${match.team1} vs ${match.team2} | sinais=${sigCount}/6 | evThreshold=${adaptiveEV}% | mlEdge=${mlResult.score.toFixed(1)}pp`);
+    const liveTag = (match.status === 'live' || match.status === 'inprogress') ? ' [AO VIVO]' : '';
+    log('INFO', 'AUTO', `Analisando${liveTag}: ${match.team1} vs ${match.team2} | sinais=${sigCount}/6 | evThreshold=${adaptiveEV}% | mlEdge=${mlResult.score.toFixed(1)}pp`);
 
     // Backoff IA: evita spam quando DeepSeek responde 429 (rate_limited)
     const FALLBACK_MIN_ODDS = parseFloat(process.env.LOL_MIN_ODDS ?? '1.50');
