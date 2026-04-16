@@ -41,6 +41,16 @@
     /* Tips table */
     .table-card { background: #1a1d2e; border-radius: 10px; padding: 1.2rem; border: 1px solid #2d2f45; margin-bottom: 1.5rem; overflow-x: auto; }
     .table-card h3 { font-size: 0.9rem; color: #a78bfa; margin-bottom: 1rem; text-transform: uppercase; letter-spacing: 0.05em; }
+    /* Collapsible cards */
+    .table-card.collapsible > h3 { cursor: pointer; user-select: none; margin-bottom: 0; }
+    .table-card.collapsible > h3:hover { color: #c4b5fd; }
+    .table-card.collapsible .toggle-arrow {
+      display: inline-block; margin-right: 0.55rem; color: #6b7280; font-size: 0.72rem;
+      transition: transform 0.18s ease;
+    }
+    .table-card.collapsible[data-collapsed="true"] .toggle-arrow { transform: rotate(-90deg); }
+    .table-card.collapsible:not([data-collapsed="true"]) > h3 { margin-bottom: 1rem; }
+    .table-card.collapsible[data-collapsed="true"] > *:not(h3) { display: none !important; }
     .tips-controls { display: grid; grid-template-columns: 1.6fr 1fr 1fr 1fr 1fr 1fr; gap: 0.6rem; margin-bottom: 0.9rem; }
     @media (max-width: 900px) { .tips-controls { grid-template-columns: 1fr 1fr; } }
     .tips-controls input, .tips-controls select {
@@ -138,18 +148,27 @@
   </div>
 
   <!-- Live Snapshot (lol/dota/cs/valorant) -->
-  <div class="table-card" id="liveSnapshotCard">
-    <h3 style="display:flex;align-items:center;justify-content:space-between;gap:0.8rem;flex-wrap:wrap">
-      <span>&#128308; Live Agora &mdash; Esports</span>
+  <div class="table-card collapsible" id="liveSnapshotCard" data-collapsed="false">
+    <h3 onclick="toggleCard(this)" style="display:flex;align-items:center;justify-content:space-between;gap:0.8rem;flex-wrap:wrap">
+      <span><span class="toggle-arrow">&#9662;</span>&#128308; Live Agora &mdash; Esports</span>
       <span id="liveSnapshotMeta" style="font-size:0.68rem;color:#6b7280;font-weight:400;text-transform:none;letter-spacing:0">&mdash;</span>
     </h3>
     <div id="liveSnapshotBody"><div class="loading">Carregando...</div></div>
   </div>
 
+  <!-- Próximos Jogos (upcoming) -->
+  <div class="table-card collapsible" id="upcomingCard" data-collapsed="false">
+    <h3 onclick="toggleCard(this)" style="display:flex;align-items:center;justify-content:space-between;gap:0.8rem;flex-wrap:wrap">
+      <span><span class="toggle-arrow">&#9662;</span>&#128337; Próximos Jogos &mdash; Esports</span>
+      <span id="upcomingMeta" style="font-size:0.68rem;color:#6b7280;font-weight:400;text-transform:none;letter-spacing:0">&mdash;</span>
+    </h3>
+    <div id="upcomingBody"><div class="loading">Carregando...</div></div>
+  </div>
+
   <!-- ROI por Liga -->
-  <div class="table-card" id="leagueRoiCard">
-    <h3 style="display:flex;align-items:center;justify-content:space-between;gap:0.8rem;flex-wrap:wrap">
-      <span>&#127942; ROI por Liga &mdash; Stake Multiplier</span>
+  <div class="table-card collapsible" id="leagueRoiCard" data-collapsed="true">
+    <h3 onclick="toggleCard(this)" style="display:flex;align-items:center;justify-content:space-between;gap:0.8rem;flex-wrap:wrap">
+      <span><span class="toggle-arrow">&#9662;</span>&#127942; ROI por Liga &mdash; Stake Multiplier</span>
       <span style="font-size:0.68rem;color:#6b7280;font-weight:400;text-transform:none;letter-spacing:0">
         &#8805;20 tips p/ ativar &bull; ROI +15%&rarr;1.20x &bull; +5%&rarr;1.10x &bull; &minus;5%&rarr;0.75x &bull; &minus;25%&rarr;0x
       </span>
@@ -158,10 +177,10 @@
   </div>
 
   <!-- Tips Table -->
-  <div class="table-card" id="sportTipsCard">
-    <h3 style="display:flex;align-items:center;justify-content:space-between">
-      <span>&#128203; &Uacute;ltimas Tips</span>
-      <button onclick="voidOldPending()" title="Anular em lote todas as tips pendentes antigas" style="font-size:0.7rem;padding:3px 8px;background:#1f2937;border:1px solid #4b5563;border-radius:4px;color:#f87171;cursor:pointer">&#128465; Anular pendentes antigas</button>
+  <div class="table-card collapsible" id="sportTipsCard" data-collapsed="true">
+    <h3 onclick="toggleCard(this, event)" style="display:flex;align-items:center;justify-content:space-between">
+      <span><span class="toggle-arrow">&#9662;</span>&#128203; &Uacute;ltimas Tips</span>
+      <button onclick="event.stopPropagation(); voidOldPending()" title="Anular em lote todas as tips pendentes antigas" style="font-size:0.7rem;padding:3px 8px;background:#1f2937;border:1px solid #4b5563;border-radius:4px;color:#f87171;cursor:pointer">&#128465; Anular pendentes antigas</button>
     </h3>
     <div class="tips-controls">
       <div>
@@ -240,6 +259,20 @@
 </div>
 
 <script>
+// Colapsa/expande o card clicado. Segundo argumento opcional (event) permite
+// parar propagação quando botões internos no h3 também querem handler próprio.
+function toggleCard(headerEl, ev) {
+  if (ev && typeof ev.stopPropagation === 'function') {
+    // Se o clique veio de dentro de um <button>, ignora o toggle.
+    const target = ev.target;
+    if (target && target.closest && target.closest('button')) return;
+  }
+  const card = headerEl.closest('.table-card');
+  if (!card) return;
+  const collapsed = card.getAttribute('data-collapsed') === 'true';
+  card.setAttribute('data-collapsed', collapsed ? 'false' : 'true');
+}
+
 const BASE = (function() {
   const origin = window.location.origin;
   if (origin.includes('localhost') || origin.includes('127.0.0.1')) {
@@ -301,18 +334,20 @@ async function loadAll() {
   document.getElementById('lastUpdated').textContent = 'Atualizando...';
   const tipsP = loadTips();
   const gq = gameQs();
-  const [roi, calibration, weights, leagueRoi, liveSnap] = await Promise.all([
+  const [roi, calibration, weights, leagueRoi, liveSnap, upcomingSnap] = await Promise.all([
     apiFetch('/roi?sport=' + currentSport + gq),
     apiFetch('/calibration?sport=' + currentSport + '&phase=all' + gq),
     apiFetch('/ml-weights'),
     apiFetch('/league-roi?sport=' + currentSport + gq),
-    apiFetch('/live-snapshot')
+    apiFetch('/live-snapshot'),
+    apiFetch('/upcoming-snapshot?hours=24')
   ]);
   renderCards(roi);
   renderCalibration(calibration);
   renderWeights(weights);
   renderLeagueRoi(leagueRoi);
   renderLiveSnapshot(liveSnap);
+  renderUpcoming(upcomingSnap);
   await tipsP;
   document.getElementById('lastUpdated').textContent = 'Atualizado: ' + new Date().toLocaleTimeString('pt-BR');
 }
@@ -539,6 +574,8 @@ function renderMLMonthlyTable(monthly) {
 setInterval(loadAll, 60 * 1000);
 // Live snapshot tem cadência própria (30s) pra refletir odds/stats ao vivo mais rápido.
 setInterval(refreshLiveSnapshot, 30 * 1000);
+// Upcoming: atualiza a cada 2min (contagem regressiva + odds que chegam).
+setInterval(refreshUpcoming, 2 * 60 * 1000);
 
 function readTipsControls() {
   const q = (document.getElementById('tipsQ')?.value || '').trim();
@@ -925,6 +962,94 @@ async function refreshLiveSnapshot() {
   try {
     var data = await apiFetch('/live-snapshot');
     if (data) renderLiveSnapshot(data);
+  } catch (_) {}
+}
+
+function renderUpcoming(data) {
+  var body = document.getElementById('upcomingBody');
+  var meta = document.getElementById('upcomingMeta');
+  if (!body) return;
+  if (!data || !data.sports) {
+    body.innerHTML = '<div class="loading" style="color:#6b7280">Sem dados.</div>';
+    if (meta) meta.textContent = '—';
+    return;
+  }
+  var sports = data.sports || {};
+  var orderedKeys = ['lol', 'dota', 'cs', 'valorant'];
+  var labels = { lol: 'LoL', dota: 'Dota 2', cs: 'CS2', valorant: 'Valorant' };
+
+  var total = 0, totalPinnacle = 0;
+  orderedKeys.forEach(function(k) {
+    var arr = sports[k] || [];
+    total += arr.length;
+    arr.forEach(function(r) { if (r.pinnacle) totalPinnacle++; });
+  });
+  if (meta) {
+    meta.textContent = total + ' próximos (' + (data.horizonHours || 24) + 'h) • ' + totalPinnacle +
+      ' com Pinnacle • ' + new Date(data.generatedAt || Date.now()).toLocaleTimeString('pt-BR');
+  }
+  if (total === 0) {
+    body.innerHTML = '<div class="loading" style="color:#6b7280">Sem jogos agendados na janela.</div>';
+    return;
+  }
+
+  var esc = function(s) { return String(s == null ? '' : s).replace(/</g, '&lt;'); };
+  var fmtTime = function(iso) {
+    try {
+      var d = new Date(iso);
+      if (isNaN(d.getTime())) return '—';
+      return d.toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+    } catch (_) { return '—'; }
+  };
+  var fmtCountdown = function(min) {
+    if (!Number.isFinite(min) || min < 0) return '—';
+    if (min < 60) return 'em ' + min + 'min';
+    var h = Math.floor(min / 60);
+    var m = min % 60;
+    return 'em ' + h + 'h' + (m ? m + 'm' : '');
+  };
+
+  var sections = [];
+  orderedKeys.forEach(function(sp) {
+    var rows = sports[sp] || [];
+    if (!rows.length) return;
+    var trs = rows.map(function(r) {
+      var odds = r.pinnacle
+        ? '<span class="positive" style="font-weight:600">' + esc(r.pinnacle.t1) + ' / ' + esc(r.pinnacle.t2) + '</span>'
+        : r.odds
+          ? '<span style="color:#9ca3af" title="Bookmaker: ' + esc(r.odds.bookmaker || '-') + '">' + esc(r.odds.t1) + ' / ' + esc(r.odds.t2) + '</span>'
+          : '<span style="color:#4b5563">—</span>';
+      var matchLabel = esc(r.team1) + ' vs ' + esc(r.team2);
+      var leagueLabel = r.league ? esc(r.league) : '—';
+      var fmt = r.format ? esc(r.format) : '';
+      return '<tr>' +
+        '<td style="color:#d1d5db;font-size:0.78rem;white-space:nowrap">' + fmtTime(r.startTime) + '<span style="color:#6b7280"> · ' + fmtCountdown(r.startsInMin) + '</span></td>' +
+        '<td style="max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + matchLabel + '">' + matchLabel + (fmt ? ' <span style="color:#6b7280;font-size:0.72rem">[' + fmt + ']</span>' : '') + '</td>' +
+        '<td style="color:#9ca3af;font-size:0.78rem;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + leagueLabel + '">' + leagueLabel + '</td>' +
+        '<td style="text-align:center">' + odds + '</td>' +
+      '</tr>';
+    }).join('');
+
+    sections.push(
+      '<div style="margin-top:0.6rem">' +
+        '<div style="font-size:0.78rem;color:#9ca3af;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:0.3rem">' +
+          esc(labels[sp] || sp) + ' <span style="color:#4b5563">(' + rows.length + ')</span>' +
+        '</div>' +
+        '<table><thead><tr>' +
+          '<th>Horário (BRT)</th><th>Confronto</th><th>Liga</th>' +
+          '<th style="text-align:center">Pinnacle</th>' +
+        '</tr></thead><tbody>' + trs + '</tbody></table>' +
+      '</div>'
+    );
+  });
+
+  body.innerHTML = sections.join('') || '<div class="loading" style="color:#6b7280">Sem jogos agendados.</div>';
+}
+
+async function refreshUpcoming() {
+  try {
+    var data = await apiFetch('/upcoming-snapshot?hours=24');
+    if (data) renderUpcoming(data);
   } catch (_) {}
 }
 

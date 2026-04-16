@@ -4703,6 +4703,61 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // Lista próximos jogos (upcoming) de lol/dota/cs/valorant com odds e horário.
+  // Consumido pelo card "Próximos Jogos" do dashboard.
+  if (p === '/upcoming-snapshot') {
+    try {
+      const base = `http://127.0.0.1:${PORT}`;
+      const sources = [
+        { sport: 'lol',      path: '/lol-matches' },
+        { sport: 'dota',     path: '/dota-matches' },
+        { sport: 'cs',       path: '/cs-matches' },
+        { sport: 'valorant', path: '/valorant-matches' },
+      ];
+      const horizonMs = Math.max(1, Math.min(48, parseInt(parsed.query.hours || '24', 10) || 24)) * 60 * 60 * 1000;
+      const now = Date.now();
+
+      const fetchMatches = async ({ sport, path: apiPath }) => {
+        const r = await httpGet(`${base}${apiPath}`).catch(() => null);
+        const items = (r && r.status === 200) ? safeParse(r.body, []) : [];
+        return { sport, items: Array.isArray(items) ? items : [] };
+      };
+      const all = await Promise.all(sources.map(fetchMatches));
+
+      const out = {};
+      for (const { sport, items } of all) {
+        const upcoming = items.filter(m => {
+          if (!m || m.status !== 'upcoming') return false;
+          const t = m.time ? Date.parse(m.time) : NaN;
+          if (!Number.isFinite(t)) return false;
+          return t > now && (t - now) <= horizonMs;
+        });
+        upcoming.sort((a, b) => Date.parse(a.time) - Date.parse(b.time));
+        const rows = upcoming.slice(0, 40).map(m => {
+          const odds = m.odds || null;
+          const bk = odds ? String(odds.bookmaker || '').trim() : '';
+          const pinnacle = /pinnacle/i.test(bk) ? { t1: odds.t1, t2: odds.t2 } : null;
+          return {
+            matchId: m.id,
+            league: m.league || null,
+            team1: m.team1,
+            team2: m.team2,
+            format: m.format || null,
+            startTime: m.time,
+            startsInMin: Math.round((Date.parse(m.time) - now) / 60000),
+            odds: odds ? { bookmaker: bk || null, t1: odds.t1, t2: odds.t2 } : null,
+            pinnacle,
+          };
+        });
+        out[sport] = rows;
+      }
+      sendJson(res, { generatedAt: new Date().toISOString(), horizonHours: horizonMs / 3600000, sports: out });
+    } catch (e) {
+      sendJson(res, { error: e.message, stack: e.stack }, 500);
+    }
+    return;
+  }
+
   // Lista todos os times retornados pela API Riot + PandaScore com status de odds
   if (p === '/debug-teams') {
     try {
