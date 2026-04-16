@@ -1,4 +1,0 @@
-{
-  "$schema": "https://schema.railpack.com",
-  "buildAptPackages": ["python3", "build-essential", "pkg-config"]
-}
