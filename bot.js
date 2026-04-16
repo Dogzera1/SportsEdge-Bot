@@ -1213,7 +1213,7 @@ async function runAutoAnalysis() {
   // Cada poll já tem error handling interno; Promise.allSettled garante isolamento total.
   const parallel = [];
   if (SPORTS['esports']?.enabled) {
-    parallel.push(pollDota().catch(e => log('ERROR', 'AUTO', `Dota2 unified: ${e.message}`)));
+    parallel.push(pollDota(true).catch(e => log('ERROR', 'AUTO', `Dota2 unified: ${e.message}`)));
   }
   if (SPORTS['mma']?.enabled) {
     parallel.push(pollMma(true).catch(e => log('ERROR', 'AUTO', `MMA unified: ${e.message}`)));
@@ -4547,7 +4547,13 @@ function findEspnFight(espnFights, team1, team2) {
 }
 
 // ── Dota 2 Auto-analysis ──
-async function pollDota() {
+let _pollDotaRunning = false;
+async function pollDota(runOnce = false) {
+  if (_pollDotaRunning) { log('DEBUG', 'AUTO-DOTA', 'Já em execução (mutex), pulando ciclo'); return; }
+  _pollDotaRunning = true;
+  try { await _pollDotaInner(runOnce); } finally { _pollDotaRunning = false; }
+}
+async function _pollDotaInner(runOnce = false) {
   const esportsConfig = SPORTS['esports'];
   if (!esportsConfig?.enabled || !esportsConfig?.token) return;
   const token = esportsConfig.token;
@@ -4917,9 +4923,11 @@ Máximo 200 palavras.`;
     _livePhaseExit('dota');
   }
   // Dual-mode: 2min quando há live, 15min idle
-  const dotaNextMs = _hasLiveDota ? (2 * 60 * 1000) : (15 * 60 * 1000);
-  log('INFO', 'AUTO-DOTA', `Próximo ciclo em ${Math.round(dotaNextMs / 1000)}s (${_hasLiveDota ? 'LIVE' : 'idle'})`);
-  setTimeout(() => pollDota().catch(e => log('ERROR', 'AUTO-DOTA', e.message)), dotaNextMs);
+  if (!runOnce) {
+    const dotaNextMs = _hasLiveDota ? (2 * 60 * 1000) : (15 * 60 * 1000);
+    log('INFO', 'AUTO-DOTA', `Próximo ciclo em ${Math.round(dotaNextMs / 1000)}s (${_hasLiveDota ? 'LIVE' : 'idle'})`);
+    setTimeout(() => pollDota().catch(e => log('ERROR', 'AUTO-DOTA', e.message)), dotaNextMs);
+  }
 }
 
 // ── MMA Auto-analysis loop ──
