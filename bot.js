@@ -6809,7 +6809,11 @@ async function pollCs(runOnce = false) {
           _drainedCs = true;
         }
         const isLiveCs = match.status === 'live';
-        const key = `cs_${match.id}`;
+        // Fase: pregame=0, mapN = s1+s2+1 durante live.
+        // Cada fase pode gerar 1 tip própria; pregame não bloqueia map1, map1 não bloqueia map2.
+        const csMapNum = isLiveCs ? ((Number(match.score1) || 0) + (Number(match.score2) || 0) + 1) : 0;
+        const csMapTag = csMapNum > 0 ? `_MAP${csMapNum}` : '';
+        const key = `cs_${match.id}_${csMapNum}`;
         const prev = analyzedCs.get(key);
         if (prev?.tipSent) continue;
         const csCooldown = isLiveCs ? (3 * 60 * 1000) : (30 * 60 * 1000); // live: 3min, pregame: 30min
@@ -6912,7 +6916,7 @@ async function pollCs(runOnce = false) {
           : `HLTV form/H2H: factors=${factorCount}, edge=${mlScore.toFixed(1)}pp`) + liveCtx;
 
         const rec = await serverPost('/record-tip', {
-          matchId: String(match.id), eventName: match.league,
+          matchId: String(match.id) + csMapTag, eventName: match.league,
           p1: match.team1, p2: match.team2, tipParticipant: pickTeam,
           odds: String(pickOdd), ev: evPct.toFixed(1), stake: stakeAdj,
           confidence: conf,
@@ -6951,7 +6955,8 @@ async function pollCs(runOnce = false) {
 
         const confEmoji = { ALTA: '🟢', MÉDIA: '🟡', BAIXA: '🔴' }[conf] || '🟡';
         const matchTime = match.time ? new Date(match.time).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—';
-        const msg = `🔫 💰 *TIP CS2*\n\n` +
+        const phaseLabel = csMapNum > 0 ? ` — MAPA ${csMapNum} (série ${match.score1||0}-${match.score2||0})` : '';
+        const msg = `🔫 💰 *TIP CS2${phaseLabel}*\n\n` +
           `*${match.team1}* vs *${match.team2}*\n📋 ${match.league}${match.format ? ` (${match.format})` : ''}\n🕐 ${matchTime} (BRT)\n\n` +
           `🎯 Aposta: *${pickTeam}* @ *${pickOdd}*\n` +
           `📈 EV: *+${evPct.toFixed(1)}%*\n` +
@@ -7034,7 +7039,9 @@ async function pollValorant(runOnce = false) {
           _drainedVal = true;
         }
         const isLiveVal = match.status === 'live';
-        const key = `valorant_${match.id}`;
+        const valMapNum = isLiveVal ? ((Number(match.score1) || 0) + (Number(match.score2) || 0) + 1) : 0;
+        const valMapTag = valMapNum > 0 ? `_MAP${valMapNum}` : '';
+        const key = `valorant_${match.id}_${valMapNum}`;
         const prev = analyzedValorant.get(key);
         if (prev?.tipSent) continue;
         const valCooldown = isLiveVal ? (3 * 60 * 1000) : (30 * 60 * 1000);
@@ -7126,7 +7133,7 @@ async function pollValorant(runOnce = false) {
         const tipReason = `Elo: ${match.team1}=${elo.elo1} (${elo.eloMatches1}j) vs ${match.team2}=${elo.elo2} (${elo.eloMatches2}j)${formStr}${h2hStr}${mapStr}${seriesStr}`;
 
         const rec = await serverPost('/record-tip', {
-          matchId: String(match.id), eventName: match.league,
+          matchId: String(match.id) + valMapTag, eventName: match.league,
           p1: match.team1, p2: match.team2, tipParticipant: pickTeam,
           odds: String(pickOdd), ev: evPct.toFixed(1), stake: stakeAdj,
           confidence: conf,
@@ -7161,7 +7168,8 @@ async function pollValorant(runOnce = false) {
 
         const confEmoji = { ALTA: '🟢', MÉDIA: '🟡', BAIXA: '🔴' }[conf] || '🟡';
         const matchTime = match.time ? new Date(match.time).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—';
-        const msg = `🎯 💰 *TIP VALORANT*\n\n` +
+        const phaseLabel = valMapNum > 0 ? ` — MAPA ${valMapNum} (série ${match.score1||0}-${match.score2||0})` : '';
+        const msg = `🎯 💰 *TIP VALORANT${phaseLabel}*\n\n` +
           `*${match.team1}* vs *${match.team2}*\n📋 ${match.league}${match.format ? ` (${match.format})` : ''}\n🕐 ${matchTime} (BRT)\n\n` +
           `🎯 Aposta: *${pickTeam}* @ *${pickOdd}*\n` +
           `📈 EV: *+${evPct.toFixed(1)}%*\n` +

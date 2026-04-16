@@ -4993,7 +4993,12 @@ const server = http.createServer(async (req, res) => {
   //   pin_<sport>_<id>  → match por nomes nos últimos finalizados (Pinnacle ID ≠ PS ID)
   async function resolveEsportsResult({ sport, game, pandaPath, rawId, t1, t2, sentAt }) {
     if (!PANDASCORE_TOKEN) return { resolved: false, error: 'PANDASCORE_TOKEN missing' };
-    const psMatch = rawId.match(new RegExp('^' + sport + '_ps_(\\d+)$'));
+    // Tips podem ter sufixo _MAP{N} (per-phase tip) — usa o ID da série pra resolver.
+    // Settlement per-map não é suportado (fonte PS paywall + VLR per-match); usa série winner
+    // como best-effort. Pode ser incorreto quando map winner != series winner — aceitável
+    // pq tip é de uma fase específica, e resultado final da série ainda informa calibração.
+    const baseId = rawId.replace(/_MAP\d+$/, '');
+    const psMatch = baseId.match(new RegExp('^' + sport + '_ps_(\\d+)$'));
     if (psMatch) {
       const r = await httpGet(`https://api.pandascore.co/${pandaPath}/matches/${psMatch[1]}`, { 'Authorization': `Bearer ${PANDASCORE_TOKEN}` });
       const m = safeParse(r.body, {});
@@ -5001,7 +5006,9 @@ const server = http.createServer(async (req, res) => {
       if (winner) {
         const p1 = m.opponents?.[0]?.opponent?.name || t1 || '';
         const p2 = m.opponents?.[1]?.opponent?.name || t2 || '';
-        stmts.upsertMatchResult.run(rawId, game, p1, p2, winner, '', m.league?.name || '');
+        // Use baseId (sem _MAP) pra evitar Elo inflation quando múltiplas phase-tips
+        // do mesmo match são settled — INSERT OR IGNORE dedupe series result.
+        stmts.upsertMatchResult.run(baseId, game, p1, p2, winner, '', m.league?.name || '');
         return { resolved: true, winner };
       }
       return { resolved: false };
@@ -5031,7 +5038,7 @@ const server = http.createServer(async (req, res) => {
         if (!matched) continue;
         const winner = m.winner?.name;
         if (winner) {
-          stmts.upsertMatchResult.run(rawId, game, a, b, winner, '', m.league?.name || '');
+          stmts.upsertMatchResult.run(baseId, game, a, b, winner, '', m.league?.name || '');
           return { resolved: true, winner };
         }
       }
