@@ -5963,36 +5963,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  if (p === '/league-roi') {
-    try {
-      const sport = String(parsed.query.sport || '').trim();
-      if (!sport) { sendJson(res, { error: 'sport obrigatório' }, 400); return; }
-      const minTips = Math.max(1, parseInt(parsed.query.min || '5', 10) || 5);
-      const rows = db.prepare(`
-        SELECT
-          event_name AS league,
-          COUNT(*) AS total,
-          SUM(CASE WHEN result='win'  THEN 1 ELSE 0 END) AS wins,
-          SUM(CASE WHEN result='loss' THEN 1 ELSE 0 END) AS losses,
-          ROUND(SUM(COALESCE(stake_reais, 0)), 2) AS staked,
-          ROUND(SUM(COALESCE(profit_reais, 0)), 2) AS profit
-        FROM tips
-        WHERE sport = ? AND result IN ('win', 'loss') AND event_name IS NOT NULL
-        GROUP BY event_name
-        HAVING total >= ?
-        ORDER BY profit DESC
-      `).all(sport, minTips);
-      const withRoi = rows.map(r => ({
-        ...r,
-        roi: r.staked > 0 ? +((r.profit / r.staked) * 100).toFixed(2) : 0,
-        winRate: (r.wins + r.losses) > 0 ? +((r.wins / (r.wins + r.losses)) * 100).toFixed(1) : 0,
-      }));
-      sendJson(res, { sport, leagues: withRoi });
-    } catch (e) {
-      sendJson(res, { error: e.message }, 500);
-    }
-    return;
-  }
+  // (definição única movida p/ depois do /roi — este stub só redireciona o fluxo)
 
   // Stats de calibração isotônica por esporte
   if (p === '/calibration-stats') {
