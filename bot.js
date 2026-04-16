@@ -29,6 +29,22 @@ if (!DEEPSEEK_KEY) {
 // Valida consistência aritmética entre EV reportado pela IA e EV calculado a partir de P + odd.
 // IA frequentemente emite P e EV contraditórios (ex: P=95% @ 1.2 mas EV=+8.6% quando o correto seria +14%).
 // Retorna {valid, reason, reportedEv, computedEv, p}. Tolerância padrão = 3pp.
+/**
+ * EV determinístico a partir da probabilidade do modelo (ML/Elo/enrich),
+ * em vez de confiar no EV que a IA (Claude/DeepSeek) reporta no `TIP_ML:`.
+ *
+ * Histórico: a IA às vezes chuta probabilidade P≈50% pra underdog, retornando
+ * EV = 0.5 × odds − 1, o que infla o valor em relação ao que o modelo acredita.
+ * Aqui a gente recalcula usando `modelPPick × odds − 1` quando há modelP válido.
+ * Retorna null se o modelP não estiver disponível (aí o caller pode manter o EV da IA).
+ */
+function _modelEv(modelPPick, odds) {
+  const p = typeof modelPPick === 'number' ? modelPPick : parseFloat(modelPPick);
+  const o = typeof odds === 'number' ? odds : parseFloat(odds);
+  if (!Number.isFinite(p) || !Number.isFinite(o) || p <= 0 || p >= 1 || o <= 1) return null;
+  return +((p * o - 1) * 100).toFixed(1);
+}
+
 function _validateTipEvP(text, pickOdd, reportedEvPct, tolerancePp = 3) {
   const pMatch = String(text || '').match(/\|P:\s*([0-9.]+)\s*%?/i);
   if (!pMatch) return { valid: true, reason: 'no_p_field' };
@@ -2553,6 +2569,17 @@ async function autoAnalyzeMatch(token, match) {
             log('INFO', 'AUTO', `Gate P-magnitude: ${match.team1} vs ${match.team2} → |ΔP| = ${(pDivergence*100).toFixed(1)}pp > 15pp → MÉDIA→BAIXA`);
           }
         }
+
+        // EV determinístico: substitui o EV reportado pela IA por (modelP × odds − 1).
+        // A IA continua escolhendo lado/confiança; o EV mostrado e salvo passa a ser o do modelo.
+        // Isso evita números inflados tipo IA=42.5% quando modelo calcula +21%.
+        if (filteredTipResult && Number.isFinite(modelEV)) {
+          const _detSigned = modelEV >= 0 ? `+${modelEV.toFixed(1)}%` : `${modelEV.toFixed(1)}%`;
+          if (Math.abs(modelEV - tipEV) >= 3) {
+            log('INFO', 'EV-RECALC', `esports ${match.team1} vs ${match.team2}: IA=${tipEV.toFixed(1)}% → modelo=${modelEV.toFixed(1)}% (P=${(modelP*100).toFixed(1)}% @ ${tipOdd})`);
+          }
+          filteredTipResult[3] = _detSigned;
+        }
       }
 
       // Gate 0: Sem odds reais → rejeitar sempre (odds estimadas não garantem valor)
@@ -4994,8 +5021,18 @@ Máximo 200 palavras.`;
 
       const tipTeam = tipMatch[1].trim();
       const tipOdd = tipMatch[2].trim();
-      const tipEV = tipMatch[3].trim();
+      const tipEvIa = tipMatch[3].trim(); // EV bruto da IA
       const tipConf = (tipMatch[5] || 'MÉDIA').trim().toUpperCase().replace('MEDIA', 'MÉDIA');
+
+      // Recalcula EV via modelP (ML) — evita IA inflar edge em underdogs.
+      const _pickIsT1D = norm(tipTeam).includes(norm(match.team1)) || norm(match.team1).includes(norm(tipTeam));
+      const _modelPPickD = _pickIsT1D ? mlResult.modelP1 : mlResult.modelP2;
+      const _detEvD = _modelEv(_modelPPickD, tipOdd);
+      const _iaEvNumD = parseFloat(String(tipEvIa).replace('%','').replace('+',''));
+      const tipEV = _detEvD != null ? `+${_detEvD.toFixed(1)}%` : tipEvIa;
+      if (_detEvD != null && Number.isFinite(_iaEvNumD) && Math.abs(_detEvD - _iaEvNumD) >= 3) {
+        log('INFO', 'EV-RECALC', `dota2 ${match.team1} vs ${match.team2}: IA=${_iaEvNumD}% → modelo=${_detEvD}% (P=${(_modelPPickD*100).toFixed(1)}% @ ${tipOdd})`);
+      }
 
       // Ao vivo: bloqueia confiança BAIXA (muito risco com delay de odds)
       if (isLive && tipConf === 'BAIXA') {
@@ -5448,9 +5485,21 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
 
         const tipTeam  = tipMatch[1].trim();
         const tipOdd   = parseFloat(tipMatch[2]);
-        const tipEV    = parseFloat(tipMatch[3]);
+        const tipEvIa  = parseFloat(tipMatch[3]); // EV reportado pela IA (mantido p/ log)
         const tipStake = tipMatch[4];
         const tipConf  = tipMatch[5].toUpperCase();
+
+        // Recalcula EV usando probabilidade do modelo interno (evita IA inflando EV).
+        // Se não houver modelP, cai no EV da IA.
+        const _pickIsT1Ev = norm(tipTeam) === norm(fight.team1)
+          || norm(fight.team1).includes(norm(tipTeam))
+          || norm(tipTeam).includes(norm(fight.team1));
+        const _modelPPickEv = _pickIsT1Ev ? mlResultMma.modelP1 : mlResultMma.modelP2;
+        const _detEv = _modelEv(_modelPPickEv, tipOdd);
+        const tipEV = _detEv != null ? _detEv : tipEvIa;
+        if (_detEv != null && Math.abs(_detEv - tipEvIa) >= 3) {
+          log('INFO', 'EV-RECALC', `mma ${fight.team1} vs ${fight.team2}: IA=${tipEvIa}% → modelo=${_detEv}% (P=${(_modelPPickEv*100).toFixed(1)}% @ ${tipOdd})`);
+        }
 
         // Lutas fora da semana: só ALTA passa
         if (fight._futureWeek && tipConf !== 'ALTA') {
@@ -6003,9 +6052,20 @@ Máximo 200 palavras. Raciocínio breve antes da decisão.`;
 
         const tipPlayer = tipMatch2[1].trim();
         const tipOdd    = parseFloat(tipMatch2[2]);
-        const tipEV     = parseFloat(tipMatch2[3]);
+        const tipEvIa   = parseFloat(tipMatch2[3]); // EV reportado pela IA
         const tipStake  = tipMatch2[4];
         const tipConf   = tipMatch2[5].toUpperCase();
+
+        // Recalcula EV via modelP (Elo/ML) — IA tende a inflar EV em underdogs.
+        const _pickIsT1Tn = norm(tipPlayer) === norm(match.team1)
+          || norm(match.team1).includes(norm(tipPlayer))
+          || norm(tipPlayer).includes(norm(match.team1));
+        const _modelPPickTn = _pickIsT1Tn ? mlResultTennis.modelP1 : mlResultTennis.modelP2;
+        const _detEvTn = _modelEv(_modelPPickTn, tipOdd);
+        const tipEV = _detEvTn != null ? _detEvTn : tipEvIa;
+        if (_detEvTn != null && Math.abs(_detEvTn - tipEvIa) >= 3) {
+          log('INFO', 'EV-RECALC', `tennis ${match.team1} vs ${match.team2}: IA=${tipEvIa}% → modelo=${_detEvTn}% (P=${(_modelPPickTn*100).toFixed(1)}% @ ${tipOdd})`);
+        }
 
         if (tipOdd < TENNIS_GATE_MIN_ODDS || tipOdd > TENNIS_GATE_MAX_ODDS) {
           log('INFO', 'AUTO-TENNIS', `Gate odds: ${tipOdd} fora do range ${TENNIS_GATE_MIN_ODDS}-${TENNIS_GATE_MAX_ODDS}`);
