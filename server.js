@@ -4718,14 +4718,15 @@ const server = http.createServer(async (req, res) => {
       const now = Date.now();
 
       const fetchMatches = async ({ sport, path: apiPath }) => {
-        const r = await httpGet(`${base}${apiPath}`).catch(() => null);
+        const r = await httpGet(`${base}${apiPath}`).catch(e => ({ status: 0, body: '', err: String(e?.message || e) }));
         const items = (r && r.status === 200) ? safeParse(r.body, []) : [];
-        return { sport, items: Array.isArray(items) ? items : [] };
+        return { sport, items: Array.isArray(items) ? items : [], _status: r?.status ?? 0, _err: r?.err || null };
       };
       const all = await Promise.all(sources.map(fetchMatches));
 
       const out = {};
-      for (const { sport, items } of all) {
+      const debug = {};
+      for (const { sport, items, _status, _err } of all) {
         const upcoming = items.filter(m => {
           if (!m || m.status !== 'upcoming') return false;
           const t = m.time ? Date.parse(m.time) : NaN;
@@ -4750,8 +4751,9 @@ const server = http.createServer(async (req, res) => {
           };
         });
         out[sport] = rows;
+        debug[sport] = { fetched: items.length, upcomingBeforeLimit: upcoming.length, selfStatus: _status, selfErr: _err };
       }
-      sendJson(res, { generatedAt: new Date().toISOString(), horizonHours: horizonMs / 3600000, sports: out });
+      sendJson(res, { generatedAt: new Date().toISOString(), horizonHours: horizonMs / 3600000, sports: out, _debug: debug });
     } catch (e) {
       sendJson(res, { error: e.message, stack: e.stack }, 500);
     }
@@ -7102,6 +7104,7 @@ const server = http.createServer(async (req, res) => {
         SELECT
           COALESCE(NULLIF(TRIM(event_name), ''), '(sem liga)') AS league,
           COALESCE(is_live, 0) AS is_live,
+          UPPER(COALESCE(NULLIF(TRIM(confidence), ''), 'MÉDIA')) AS conf,
           COUNT(*) AS total,
           SUM(CASE WHEN result='win'  THEN 1 ELSE 0 END) AS wins,
           SUM(CASE WHEN result='loss' THEN 1 ELSE 0 END) AS losses,
@@ -7110,10 +7113,10 @@ const server = http.createServer(async (req, res) => {
         FROM tips
         WHERE sport = ? AND result IN ('win','loss')
         ${gameSql}
-        GROUP BY league, is_live
+        GROUP BY league, is_live, conf
       `).all(sport);
 
-      // Mapa league → { all, pre, live } (mesmas faixas de multiplicador de lib/stake-adjuster.js)
+      // Mapa league → { all, pre, live, byConf } (mesmas faixas de multiplicador de lib/stake-adjuster.js)
       const roiOf = (staked, profit) => staked > 0 ? +((profit / staked) * 100).toFixed(2) : 0;
       const multOf = (roi, total) => {
         if (total < 20) return null; // insuficiente
@@ -7125,29 +7128,40 @@ const server = http.createServer(async (req, res) => {
         return 0;
       };
 
+      const emptyBucket = () => ({ total: 0, wins: 0, losses: 0, staked: 0, profit: 0 });
+      const normConf = (c) => {
+        const s = String(c || '').toUpperCase().trim();
+        if (s === 'ALTA') return 'ALTA';
+        if (s === 'BAIXA') return 'BAIXA';
+        if (s === 'MEDIA' || s === 'MÉDIA') return 'MÉDIA';
+        return 'MÉDIA';
+      };
+
       const byLeague = new Map();
       for (const r of rows) {
         const key = rollupLeague(sport, r.league);
         if (!byLeague.has(key)) {
           byLeague.set(key, {
             league: key,
-            all:  { total: 0, wins: 0, losses: 0, staked: 0, profit: 0 },
-            pre:  { total: 0, wins: 0, losses: 0, staked: 0, profit: 0 },
-            live: { total: 0, wins: 0, losses: 0, staked: 0, profit: 0 },
+            all:  emptyBucket(),
+            pre:  emptyBucket(),
+            live: emptyBucket(),
+            byConf: { ALTA: emptyBucket(), 'MÉDIA': emptyBucket(), BAIXA: emptyBucket() },
           });
         }
         const agg = byLeague.get(key);
-        const bucket = r.is_live ? agg.live : agg.pre;
-        bucket.total  += r.total  || 0;
-        bucket.wins   += r.wins   || 0;
-        bucket.losses += r.losses || 0;
-        bucket.staked += r.staked || 0;
-        bucket.profit += r.profit || 0;
-        agg.all.total  += r.total  || 0;
-        agg.all.wins   += r.wins   || 0;
-        agg.all.losses += r.losses || 0;
-        agg.all.staked += r.staked || 0;
-        agg.all.profit += r.profit || 0;
+        const phaseBucket = r.is_live ? agg.live : agg.pre;
+        const confBucket = agg.byConf[normConf(r.conf)];
+        const apply = (b) => {
+          b.total  += r.total  || 0;
+          b.wins   += r.wins   || 0;
+          b.losses += r.losses || 0;
+          b.staked += r.staked || 0;
+          b.profit += r.profit || 0;
+        };
+        apply(phaseBucket);
+        apply(confBucket);
+        apply(agg.all);
       }
 
       const finalize = (b) => ({
@@ -7168,6 +7182,11 @@ const server = http.createServer(async (req, res) => {
             all,
             pre:  finalize(x.pre),
             live: finalize(x.live),
+            byConf: {
+              ALTA:    finalize(x.byConf.ALTA),
+              'MÉDIA': finalize(x.byConf['MÉDIA']),
+              BAIXA:   finalize(x.byConf.BAIXA),
+            },
             multiplier: multOf(all.roi, all.total), // null = amostra insuficiente
             active: all.total >= 20,
           };

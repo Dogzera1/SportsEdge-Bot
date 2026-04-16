@@ -825,11 +825,18 @@ function renderLeagueRoi(data) {
     return '<span class="badge" style="background:' + bg + ';color:' + fg + ';font-weight:700">' + label + '</span>';
   };
 
+  const fmtConfCell = function(b) {
+    if (!b || !b.total) return '<span style="color:#374151">—</span>';
+    return '<div style="font-size:0.72rem">' + b.total + 't ' + fmtRoi(b.roi, b.total) + '</div>' +
+           '<div style="color:#6b7280;font-size:0.65rem">' + b.wins + 'W/' + b.losses + 'L</div>';
+  };
+
   const rows = data.leagues.map(function(L) {
     const leagueName = (L.league || '?').replace(/</g, '&lt;');
     const profitCls = L.all.profit >= 0 ? 'positive' : 'negative';
+    const bc = L.byConf || {};
     return '<tr>' +
-      '<td style="max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + leagueName + '">' + leagueName + '</td>' +
+      '<td style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + leagueName + '">' + leagueName + '</td>' +
       '<td style="text-align:center">' + multBadge(L) + '</td>' +
       '<td style="text-align:center">' + L.all.total + '<span style="color:#4b5563;font-size:0.7rem"> (' + L.all.wins + 'W/' + L.all.losses + 'L)</span></td>' +
       '<td style="text-align:right;font-weight:600">' + fmtRoi(L.all.roi, L.all.total) + '</td>' +
@@ -840,6 +847,9 @@ function renderLeagueRoi(data) {
       '<td style="text-align:right;font-size:0.75rem">' +
         '<div>' + L.live.total + 't ' + fmtRoi(L.live.roi, L.live.total) + '</div>' +
       '</td>' +
+      '<td style="text-align:right">' + fmtConfCell(bc.ALTA) + '</td>' +
+      '<td style="text-align:right">' + fmtConfCell(bc['MÉDIA']) + '</td>' +
+      '<td style="text-align:right">' + fmtConfCell(bc.BAIXA) + '</td>' +
     '</tr>';
   }).join('');
 
@@ -853,6 +863,9 @@ function renderLeagueRoi(data) {
         '<th style="text-align:right">Lucro (R$)</th>' +
         '<th style="text-align:right">Pré</th>' +
         '<th style="text-align:right">Live</th>' +
+        '<th style="text-align:right" title="Confiança ALTA"><span style="color:#86efac">ALTA</span></th>' +
+        '<th style="text-align:right" title="Confiança MÉDIA"><span style="color:#fde68a">MÉDIA</span></th>' +
+        '<th style="text-align:right" title="Confiança BAIXA"><span style="color:#93c5fd">BAIXA</span></th>' +
       '</tr></thead>' +
       '<tbody>' + rows + '</tbody>' +
     '</table>';
