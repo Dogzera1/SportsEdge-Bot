@@ -5696,13 +5696,22 @@ async function pollTennis(runOnce = false) {
         }
         const key = `tennis_${match.id}`;
         const prev = analyzedTennis.get(key);
-        if (prev?.tipSent) continue;
+        if (prev?.tipSent) {
+          log('DEBUG', 'AUTO-TENNIS', `Skip ${match.team1} vs ${match.team2} (${match.status}): tip já enviada`);
+          continue;
+        }
         // Live: 15min | Pré-jogo: 6h (configurável)
         const cooldown = match.status === 'live' ? TENNIS_LIVE_INTERVAL : TENNIS_PREGAME_INTERVAL;
-        if (prev && (now - prev.ts < cooldown)) continue;
+        if (prev && (now - prev.ts < cooldown)) {
+          log('DEBUG', 'AUTO-TENNIS', `Skip ${match.team1} vs ${match.team2} (${match.status}): cooldown ${Math.round((cooldown-(now-prev.ts))/1000)}s restante`);
+          continue;
+        }
 
         const o = match.odds;
-        if (!o?.t1 || !o?.t2) continue;
+        if (!o?.t1 || !o?.t2) {
+          log('DEBUG', 'AUTO-TENNIS', `Skip ${match.team1} vs ${match.team2} (${match.status}): odds incompletas (t1=${o?.t1||'null'} t2=${o?.t2||'null'})`);
+          continue;
+        }
 
         const isLiveTennis = match.status === 'live';
         if (!isOddsFresh(o, isLiveTennis)) {
