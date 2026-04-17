@@ -7,7 +7,8 @@ const dns = require('dns');
 dns.setDefaultResultOrder('ipv4first');
 const initDatabase = require('./lib/database');
 const { SPORTS, getSportById } = require('./lib/sports');
-const { log, sendJson, safeParse, norm, httpGet, cachedHttpGet, aiPost, oddsApiAllowed, oddsApiPeek, oddsApiQuotaStatus, getMetricsLite, calcKellyWithP } = require('./lib/utils');
+const { log, sendJson, safeParse, norm, httpGet, cachedHttpGet, aiPost, oddsApiAllowed, oddsApiPeek, oddsApiQuotaStatus, getMetricsLite, calcKellyWithP, getLogBuffer, addLogClient, removeLogClient } = require('./lib/utils');
+const dashboard = require('./lib/dashboard');
 const footballData  = require('./lib/football-data');
 const apiFootball   = require('./lib/api-football');
 const { tennisSinglePlayerNameMatch, tennisPairMatchesPlayers } = require('./lib/tennis-match');
@@ -7323,6 +7324,74 @@ const server = http.createServer(async (req, res) => {
     } catch(_) {
       res.writeHead(404); res.end('Dashboard not found');
     }
+    return;
+  }
+
+  // ── Logs dashboard (migrado de scripts/logs-dashboard.js) ──
+  // HTML servido sem admin; endpoints JSON exigem x-admin-key (enviado pelo JS da página).
+  if (p === '/logs') {
+    const htmlPath = path.join(__dirname, 'public', 'logs.html');
+    try {
+      const html = fs.readFileSync(htmlPath, 'utf8');
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(html);
+    } catch (_) { res.writeHead(404); res.end('logs.html not found'); }
+    return;
+  }
+  if (p === '/logs/status') {
+    if (!requireAdmin(req, res)) return;
+    sendJson(res, dashboard.computeStatus());
+    return;
+  }
+  if (p === '/logs/tips') {
+    if (!requireAdmin(req, res)) return;
+    const limit = parseInt(parsed.query.limit || '60', 10);
+    sendJson(res, dashboard.extractTips(limit));
+    return;
+  }
+  if (p === '/logs/live-matches') {
+    if (!requireAdmin(req, res)) return;
+    sendJson(res, dashboard.extractLiveMatches());
+    return;
+  }
+  if (p === '/logs/history') {
+    if (!requireAdmin(req, res)) return;
+    sendJson(res, dashboard.getClassifiedBuffer());
+    return;
+  }
+  if (p === '/logs/stream') {
+    if (!requireAdmin(req, res)) return;
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+      'X-Accel-Buffering': 'no',
+    });
+    res.write(':ok\n\n');
+    addLogClient(res);
+    const ka = setInterval(() => { try { res.write(':ka\n\n'); } catch(_) {} }, 15000);
+    req.on('close', () => { clearInterval(ka); removeLogClient(res); });
+    return;
+  }
+
+  if (p === '/agents/live-scout') {
+    if (!requireAdmin(req, res)) return;
+    const base = `http://127.0.0.1:${PORT}`;
+    dashboard.runLiveScout(base).then(data => sendJson(res, data))
+      .catch(e => sendJson(res, { ok: false, error: e.message }, 500));
+    return;
+  }
+  if (p === '/agents/feed-medic') {
+    if (!requireAdmin(req, res)) return;
+    const base = `http://127.0.0.1:${PORT}`;
+    dashboard.runFeedMedic(base).then(data => sendJson(res, data))
+      .catch(e => sendJson(res, { ok: false, error: e.message }, 500));
+    return;
+  }
+  if (p === '/agents/roi-analyst') {
+    if (!requireAdmin(req, res)) return;
+    try { sendJson(res, dashboard.runRoiAnalyst(db, parsed.query.days || '30')); }
+    catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
     return;
   }
 

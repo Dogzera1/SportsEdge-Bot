@@ -175,7 +175,6 @@
   <span class="grow"></span>
   <label class="stat" style="display:flex;align-items:center;gap:6px;"><input type="checkbox" id="auto" checked />auto-refresh 5s</label>
   <button id="refresh">atualizar</button>
-  <button id="restart">restart subprocess</button>
 </header>
 
 <div class="tab-bar">
@@ -304,10 +303,29 @@
   const $subp = document.getElementById('subp');
   const $buf = document.getElementById('buf');
   const $refresh = document.getElementById('refresh');
-  const $restart = document.getElementById('restart');
   const $auto = document.getElementById('auto');
 
   const STATUS_LABEL = { ok: 'TUDO OK', warn: 'ATENCAO', err: 'PROBLEMA' };
+
+  // ── Admin key (pedida uma vez por sessão; guardada em sessionStorage) ──
+  function getAdminKey() {
+    let key = sessionStorage.getItem('ADMIN_KEY') || '';
+    if (!key) {
+      key = prompt('Admin key (x-admin-key):') || '';
+      if (key) sessionStorage.setItem('ADMIN_KEY', key);
+    }
+    return key;
+  }
+  async function apiFetch(path, opts = {}) {
+    const key = getAdminKey();
+    const headers = Object.assign({}, opts.headers || {}, { 'x-admin-key': key });
+    const r = await fetch(path, Object.assign({}, opts, { headers }));
+    if (r.status === 401 || r.status === 403) {
+      sessionStorage.removeItem('ADMIN_KEY');
+      throw new Error('Admin key inválida/ausente (recarregue a página)');
+    }
+    return r;
+  }
 
   // ── Tab switching ──
   let activeTab = 'tips';
@@ -373,7 +391,7 @@
   let historyAt = 0;
   async function getHistory() {
     if (!historyCache || Date.now() - historyAt > 4000) {
-      historyCache = await fetch('/history').then(r => r.json()).catch(() => []);
+      historyCache = await apiFetch('/logs/history').then(r => r.json()).catch(() => []);
       historyAt = Date.now();
     }
     return historyCache;
@@ -429,7 +447,7 @@
 
   async function refreshTips() {
     if (!lastTipsData) {
-      lastTipsData = await fetch('/tips?limit=80').then(r => r.json()).catch(() => null);
+      lastTipsData = await apiFetch('/logs/tips?limit=80').then(r => r.json()).catch(() => null);
     }
     if (!lastTipsData) return;
     const c = lastTipsData.countsTotal;
@@ -493,7 +511,7 @@
 
   async function refreshLiveMatches() {
     try {
-      const data = await fetch('/live-matches').then(r => r.json());
+      const data = await apiFetch('/logs/live-matches').then(r => r.json());
       renderLiveMatches(data);
     } catch (_) {}
   }
@@ -527,8 +545,8 @@
   async function refresh() {
     try {
       const [s, tips] = await Promise.all([
-        fetch('/status').then(r => r.json()),
-        fetch('/tips?limit=80').then(r => r.json()),
+        apiFetch('/logs/status').then(r => r.json()),
+        apiFetch('/logs/tips?limit=80').then(r => r.json()),
       ]);
       lastTipsData = tips;
       refreshTips();
@@ -633,7 +651,7 @@
     const btn = document.querySelector(`.agent-refresh[data-agent="${name}"]`);
     if (btn) btn.classList.add('loading');
     try {
-      const r = await fetch(`/agents/${name}${params}`);
+      const r = await apiFetch(`/agents/${name}${params}`);
       const data = await r.json();
       if (name === 'live-scout') renderLiveScout(data);
       if (name === 'roi-analyst') renderRoi(data);
@@ -666,11 +684,6 @@
   document.getElementById('roiDaysSel')?.addEventListener('change', () => fetchAgent('roi-analyst', '?days=' + document.getElementById('roiDaysSel').value));
 
   $refresh.addEventListener('click', () => { refresh(); refreshLiveMatches(); refreshErrors(); if (activeTab === 'agents') refreshAgents(); });
-  $restart.addEventListener('click', async () => {
-    if (!confirm('Reiniciar subprocess railway logs?')) return;
-    await fetch('/restart');
-    setTimeout(refresh, 800);
-  });
 
   // Auto-refresh agentes em ritmo próprio (30s) só quando a aba está ativa
   let agentsTimer = null;
