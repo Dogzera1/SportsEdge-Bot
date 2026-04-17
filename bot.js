@@ -2163,6 +2163,194 @@ async function runAutoHealerCycle() {
   }
 }
 
+// ── Bankroll Guardian: alerta DD, auto-shadow temporário ──
+const _bankrollAlertedKey = new Map(); // sport → { ts }
+const BANKROLL_DM_COOLDOWN_MS = 60 * 60 * 1000; // 1h por sport
+const _bankrollAutoShadowed = new Set(); // sports temporariamente em auto-shadow por DD
+
+async function runBankrollGuardianCycle() {
+  if (!ADMIN_IDS.size) return;
+  let result = null;
+  try {
+    const ext = require('./lib/agents-extended');
+    result = await ext.runBankrollGuardian(`http://127.0.0.1:${process.env.PORT || 8080}`, db);
+  } catch (e) {
+    log('WARN', 'BANKROLL-GUARDIAN', `falhou: ${e.message}`);
+    return;
+  }
+  if (!result?.ok || !result.alerts?.length) {
+    log('DEBUG', 'BANKROLL-GUARDIAN', `Ciclo OK — ${result?.summary?.sports_evaluated || 0} sports avaliados, 0 alertas`);
+    return;
+  }
+
+  // Aplica auto-shadow / block conforme severidade
+  const newAlerts = [];
+  for (const alert of result.alerts) {
+    const last = _bankrollAlertedKey.get(alert.sport);
+    if (last && (Date.now() - last.ts) < BANKROLL_DM_COOLDOWN_MS) continue;
+    _bankrollAlertedKey.set(alert.sport, { ts: Date.now() });
+    newAlerts.push(alert);
+
+    // Auto-shadow temporário (DD>=15)
+    if (alert.action === 'AUTO_SHADOW' && SPORTS[alert.sport] && !SPORTS[alert.sport].shadowMode) {
+      SPORTS[alert.sport].shadowMode = true;
+      _bankrollAutoShadowed.add(alert.sport);
+      log('WARN', 'BANKROLL-GUARDIAN', `[FLIP→SHADOW] ${alert.sport}: DD ${alert.drawdown_pct.toFixed(1)}% — auto-shadow temporário`);
+    }
+  }
+
+  // Restore auto-shadow se DD recuperou (<10%)
+  for (const sport of _bankrollAutoShadowed) {
+    const sItem = result.sports.find(s => s.sport === sport);
+    if (sItem && sItem.drawdown_pct < 10 && SPORTS[sport]?.shadowMode) {
+      SPORTS[sport].shadowMode = false;
+      _bankrollAutoShadowed.delete(sport);
+      log('INFO', 'BANKROLL-GUARDIAN', `[RESTORE] ${sport}: DD recuperou pra ${sItem.drawdown_pct.toFixed(1)}% — DMs reativados`);
+      newAlerts.push({ sport, severity: 'info', action: 'RESTORED', message: `${sport}: DD recuperou (DD ${sItem.drawdown_pct.toFixed(1)}%) — DMs reativados` });
+    }
+  }
+
+  if (!newAlerts.length) return;
+  const tokenForAlert = Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
+  if (!tokenForAlert) return;
+
+  const sevIcon = { critical: '🚨', warning: '⚠️', info: 'ℹ️' };
+  const lines = newAlerts.map(a => `${sevIcon[a.severity] || '🔧'} *${a.sport.toUpperCase()}* | DD ${a.drawdown_pct?.toFixed(1) || '-'}% | ${a.action}\n   └─ ${a.message}`).join('\n');
+  const msg = `💰 *BANKROLL GUARDIAN*\n\n${lines}\n\n` +
+    `Banca total: R$${result.overall.total_current.toFixed(2)} (DD ${result.overall.overall_drawdown_pct.toFixed(1)}%)\n` +
+    `_Cooldown 1h por sport. Auto-restore quando DD<10%._`;
+  for (const adminId of ADMIN_IDS) await sendDM(tokenForAlert, adminId, msg).catch(() => {});
+}
+
+// ── Pre-Match Final Check ──
+const _preMatchAlerted = new Set();
+
+async function runPreMatchFinalCheckCycle() {
+  if (!ADMIN_IDS.size) return;
+  let result = null;
+  try {
+    const ext = require('./lib/agents-extended');
+    result = await ext.runPreMatchFinalCheck(`http://127.0.0.1:${process.env.PORT || 8080}`, db, { windowMin: 30 });
+  } catch (e) {
+    log('WARN', 'PRE-MATCH-CHECK', `falhou: ${e.message}`);
+    return;
+  }
+  if (!result?.ok || !result.alerts?.length) return;
+
+  const newAlerts = result.alerts.filter(a => !_preMatchAlerted.has(`${a.tip_id}_${a.alert}`));
+  for (const a of newAlerts) _preMatchAlerted.add(`${a.tip_id}_${a.alert}`);
+  if (!newAlerts.length) return;
+
+  log('WARN', 'PRE-MATCH-CHECK', `${newAlerts.length} alerta(s) novo(s) de ${result.tips_checked} tips analisadas`);
+
+  const tokenForAlert = Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
+  if (!tokenForAlert) return;
+
+  const sevIcon = { critical: '🚨', warning: '⚠️' };
+  const lines = newAlerts.slice(0, 8).map(a => `${sevIcon[a.severity] || '⚠️'} *Tip #${a.tip_id}* (${a.sport})\n   └─ ${a.detail}`).join('\n');
+  const msg = `🔍 *PRE-MATCH FINAL CHECK*\n\n${lines}\n\n_Tips a <30min do match com mudanças significativas._`;
+  for (const adminId of ADMIN_IDS) await sendDM(tokenForAlert, adminId, msg).catch(() => {});
+}
+
+// ── IA Health Monitor ──
+let _lastIaHealthAlert = 0;
+const IA_HEALTH_DM_COOLDOWN_MS = 4 * 60 * 60 * 1000; // 4h
+
+async function runIaHealthCycle() {
+  if (!ADMIN_IDS.size) return;
+  let result = null;
+  try {
+    const ext = require('./lib/agents-extended');
+    const dashboard = require('./lib/dashboard');
+    result = await ext.runIaHealthMonitor(`http://127.0.0.1:${process.env.PORT || 8080}`, dashboard.getClassifiedBuffer);
+  } catch (e) {
+    log('WARN', 'IA-HEALTH', `falhou: ${e.message}`);
+    return;
+  }
+  if (!result?.ok || !result.alerts?.length) return;
+  if (Date.now() - _lastIaHealthAlert < IA_HEALTH_DM_COOLDOWN_MS) return;
+  _lastIaHealthAlert = Date.now();
+
+  const tokenForAlert = Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
+  if (!tokenForAlert) return;
+  const sevIcon = { critical: '🚨', warning: '⚠️' };
+  const lines = result.alerts.map(a => `${sevIcon[a.severity] || '⚠️'} ${a.message}\n   └─ Sugestão: ${a.suggestion}`).join('\n');
+  const msg = `🤖 *IA HEALTH MONITOR*\n\n${lines}\n\n_Cooldown 4h. Próximo check em 1h._`;
+  for (const adminId of ADMIN_IDS) await sendDM(tokenForAlert, adminId, msg).catch(() => {});
+}
+
+// ── Model Calibration Watcher (semanal) ──
+let _lastModelCalibAlert = 0;
+
+async function runModelCalibrationCycle() {
+  if (!ADMIN_IDS.size) return;
+  let result = null;
+  try {
+    const ext = require('./lib/agents-extended');
+    result = await ext.runModelCalibrationWatcher(db);
+  } catch (e) {
+    log('WARN', 'MODEL-CALIB', `falhou: ${e.message}`);
+    return;
+  }
+  if (!result?.ok || !result.alerts?.length) {
+    log('DEBUG', 'MODEL-CALIB', `Ciclo OK — ${result?.summary?.sports_evaluated || 0} sports, 0 drift`);
+    return;
+  }
+  // Cooldown 24h pra evitar spam diário
+  if (Date.now() - _lastModelCalibAlert < 24 * 60 * 60 * 1000) return;
+  _lastModelCalibAlert = Date.now();
+
+  const tokenForAlert = Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
+  if (!tokenForAlert) return;
+  const lines = result.alerts.map(a => `🎯 *${a.sport.toUpperCase()}* — ${a.message}\n   └─ ${a.suggestions[0]}`).join('\n\n');
+  const msg = `🎯 *MODEL CALIBRATION WATCHER (semanal)*\n\n${lines}\n\n_Próximo check em 7 dias._`;
+  for (const adminId of ADMIN_IDS) await sendDM(tokenForAlert, adminId, msg).catch(() => {});
+}
+
+// ── Daily Health workflow (1x/dia 11h UTC = 8h BRT) ──
+let _lastDailyHealthRun = 0;
+
+async function runDailyHealthIfTime() {
+  const now = new Date();
+  const hour = now.getUTCHours();
+  if (hour < 11 || hour > 12) return; // janela 11-12 UTC
+  const todayKey = now.toISOString().slice(0, 10);
+  if (_lastDailyHealthRun === todayKey) return;
+  _lastDailyHealthRun = todayKey;
+
+  if (!ADMIN_IDS.size) return;
+  log('INFO', 'DAILY-HEALTH', 'Rodando workflow diário consolidado...');
+  try {
+    const orchR = await serverGet('/agents/orchestrator?workflow=daily_health').catch(() => null);
+    if (!orchR?.ok) return;
+
+    const tokenForAlert = Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
+    if (!tokenForAlert) return;
+
+    const stepsHtml = orchR.steps.map(s => `${s.ok ? '✅' : '❌'} ${s.name}${s.duration_ms ? ` (${s.duration_ms}ms)` : ''}`).join('\n');
+    const ctx = orchR.context || {};
+    const summary = [];
+    if (ctx.weekly_review?.summary) {
+      const ws = ctx.weekly_review.summary;
+      summary.push(`📊 Portfolio: 🟢${ws.verdes || 0} 🟡${ws.amarelos || 0} 🔴${ws.vermelhos || 0}`);
+    }
+    if (ctx.bankroll_guardian?.overall) {
+      const o = ctx.bankroll_guardian.overall;
+      summary.push(`💰 Banca total: R$${o.total_current.toFixed(2)} (DD ${o.overall_drawdown_pct.toFixed(1)}%, growth ${o.overall_growth_pct?.toFixed(1) || '-'}%)`);
+    }
+    if (ctx.health_sentinel?.summary) {
+      const hs = ctx.health_sentinel.summary;
+      summary.push(`🩻 Saúde: ${hs.critical} crit | ${hs.warning} warn | ${hs.healthy_checks} ok`);
+    }
+    if (ctx.cut_advisor?.summary) {
+      const ca = ctx.cut_advisor.summary;
+      summary.push(`✂️ Cuts: ${ca.ready_to_cut} prontos pra cortar (R$${ca.total_daily_loss_at_risk_reais}/dia em risco)`);
+    }
+    const msg = `🌅 *DAILY HEALTH REPORT*\n\n${summary.join('\n')}\n\n*Steps:*\n\`\`\`${stepsHtml}\`\`\`\n\n_Próximo report amanhã 8h BRT._`;
+    for (const adminId of ADMIN_IDS) await sendDM(tokenForAlert, adminId, msg).catch(() => {});
+  } catch (e) { log('WARN', 'DAILY-HEALTH', e.message); }
+}
+
 // Live Scout gap monitor: alerta admin via Telegram quando gap (no_gameids/stats_disabled/coverage_missing/etc)
 // persiste por mais que LIVE_SCOUT_ALERT_THRESHOLD_MIN. Anti-spam: cada gap key alerta uma vez por janela.
 const _liveScoutGapFirstSeen = new Map(); // gapKey -> { firstTs, lastTs, info, alerted }
@@ -8939,6 +9127,25 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   // Default ON — desativar via AUTO_HEALER_ENABLED=false
   setInterval(() => runAutoHealerCycle().catch(e => log('ERROR', 'AUTO-HEALER', e.message)), AUTO_HEALER_CHECK_INTERVAL_MS);
   setTimeout(() => runAutoHealerCycle().catch(() => {}), 4 * 60 * 1000); // primeiro check 4min pós-boot
+
+  // Bankroll Guardian: cron 1h, alerta drawdown alto + auto-shadow temporário.
+  setInterval(() => runBankrollGuardianCycle().catch(e => log('ERROR', 'BANKROLL-GUARDIAN', e.message)), 60 * 60 * 1000);
+  setTimeout(() => runBankrollGuardianCycle().catch(() => {}), 10 * 60 * 1000); // primeiro check 10min pós-boot
+
+  // Pre-Match Final Check: cron 5min, valida tips a <30min do match.
+  setInterval(() => runPreMatchFinalCheckCycle().catch(e => log('ERROR', 'PRE-MATCH-CHECK', e.message)), 5 * 60 * 1000);
+  setTimeout(() => runPreMatchFinalCheckCycle().catch(() => {}), 6 * 60 * 1000);
+
+  // IA Health Monitor: cron 1h.
+  setInterval(() => runIaHealthCycle().catch(e => log('ERROR', 'IA-HEALTH', e.message)), 60 * 60 * 1000);
+  setTimeout(() => runIaHealthCycle().catch(() => {}), 15 * 60 * 1000);
+
+  // Model Calibration Watcher: cron 1x/semana (segunda 7h UTC = 4h BRT).
+  setInterval(() => runModelCalibrationCycle().catch(e => log('ERROR', 'MODEL-CALIB', e.message)), 24 * 60 * 60 * 1000);
+  setTimeout(() => runModelCalibrationCycle().catch(() => {}), 60 * 60 * 1000); // 1h pós-boot
+
+  // Daily Health workflow: cron 1x/dia 8h BRT (11h UTC).
+  setInterval(() => runDailyHealthIfTime().catch(e => log('ERROR', 'DAILY-HEALTH', e.message)), 30 * 60 * 1000);
 
   // ── Cashout monitor ──
   // Varre tips live pendentes, recomputa P via live stats, notifica admins

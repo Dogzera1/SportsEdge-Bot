@@ -7974,6 +7974,57 @@ const server = http.createServer(async (req, res) => {
       .catch(e => sendJson(res, { ok: false, error: e.message }, 500));
     return;
   }
+  // ── Agents extended ──
+  if (p === '/agents/bankroll-guardian') {
+    if (!requireAdmin(req, res)) return;
+    const ext = require('./lib/agents-extended');
+    ext.runBankrollGuardian(`http://127.0.0.1:${PORT}`, db).then(d => sendJson(res, d))
+      .catch(e => sendJson(res, { ok: false, error: e.message }, 500));
+    return;
+  }
+  if (p === '/agents/pre-match-check') {
+    if (!requireAdmin(req, res)) return;
+    const ext = require('./lib/agents-extended');
+    const windowMin = parseInt(parsed.query.windowMin || '30', 10);
+    ext.runPreMatchFinalCheck(`http://127.0.0.1:${PORT}`, db, { windowMin }).then(d => sendJson(res, d))
+      .catch(e => sendJson(res, { ok: false, error: e.message }, 500));
+    return;
+  }
+  if (p === '/agents/model-calibration') {
+    if (!requireAdmin(req, res)) return;
+    const ext = require('./lib/agents-extended');
+    ext.runModelCalibrationWatcher(db).then(d => sendJson(res, d))
+      .catch(e => sendJson(res, { ok: false, error: e.message }, 500));
+    return;
+  }
+  if (p === '/agents/cut-advisor') {
+    if (!requireAdmin(req, res)) return;
+    const ext = require('./lib/agents-extended');
+    ext.runCutAdvisor(`http://127.0.0.1:${PORT}`).then(d => sendJson(res, d))
+      .catch(e => sendJson(res, { ok: false, error: e.message }, 500));
+    return;
+  }
+  if (p === '/agents/live-storm') {
+    if (!requireAdmin(req, res)) return;
+    const ext = require('./lib/agents-extended');
+    ext.runLiveStormManager(`http://127.0.0.1:${PORT}`).then(d => sendJson(res, d))
+      .catch(e => sendJson(res, { ok: false, error: e.message }, 500));
+    return;
+  }
+  if (p === '/agents/ia-health') {
+    if (!requireAdmin(req, res)) return;
+    const ext = require('./lib/agents-extended');
+    ext.runIaHealthMonitor(`http://127.0.0.1:${PORT}`, dashboard.getClassifiedBuffer).then(d => sendJson(res, d))
+      .catch(e => sendJson(res, { ok: false, error: e.message }, 500));
+    return;
+  }
+  if (p === '/agents/decision-tree') {
+    if (!requireAdmin(req, res)) return;
+    const ext = require('./lib/agents-extended');
+    sendJson(res, { ok: true, ...ext.getDecisionTree() });
+    return;
+  }
+
   // Orchestrator: roda workflows compostos (sentinel + healer, scout + medic, etc).
   // GET /agents/orchestrator?workflow=full_diagnostic
   // GET /agents/orchestrator (sem workflow → lista disponíveis)
@@ -7986,6 +8037,7 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     const base = `http://127.0.0.1:${PORT}`;
+    const ext = require('./lib/agents-extended');
     const ctx = {
       log: (level, tag, msg) => log(level, tag, msg),
       agents: {
@@ -7994,11 +8046,13 @@ const server = http.createServer(async (req, res) => {
         'feed-medic': () => dashboard.runFeedMedic(base),
         'roi-analyst': (args) => dashboard.runRoiAnalyst(db, args?.days),
         'weekly-review': () => dashboard.runWeeklyReview(base),
-        'auto-healer': async () => {
-          // Auto-healer precisa do ctx do bot (mutex/pollFns) — não disponível aqui server-side.
-          // Retorna info pra orchestrator saber que precisa rodar via bot scheduler.
-          return { ok: true, note: 'auto-healer roda via cron interno do bot.js (a cada 5min). Endpoint orchestrator não invoca diretamente.', applied: [] };
-        },
+        'bankroll-guardian': () => ext.runBankrollGuardian(base, db),
+        'pre-match-check': (args) => ext.runPreMatchFinalCheck(base, db, args || {}),
+        'model-calibration': () => ext.runModelCalibrationWatcher(db),
+        'cut-advisor': () => ext.runCutAdvisor(base),
+        'live-storm': () => ext.runLiveStormManager(base),
+        'ia-health': () => ext.runIaHealthMonitor(base, dashboard.getClassifiedBuffer),
+        'auto-healer': async () => ({ ok: true, note: 'auto-healer roda via cron interno do bot.js (a cada 5min). Endpoint orchestrator não invoca diretamente.', applied: [] }),
       },
     };
     orchestrator.runWorkflow(wfName, ctx).then(data => sendJson(res, data))
