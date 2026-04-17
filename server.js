@@ -8473,7 +8473,10 @@ const server = http.createServer(async (req, res) => {
       }
 
       // Serve do cache se ainda válido (evita 17 chamadas à API por cada pressão de botão)
-      if (_tennisMatchesCache && now - _tennisMatchesCache.ts < TENNIS_MATCHES_CACHE_TTL) {
+      // Guard: se Pinnacle ativo mas retornou vazio, pode ser race/falha transiente —
+      // força re-fetch (fluxo completo) pra não servir cache empobrecido.
+      const pinEmpty = hasPinnacle && pinMatches.length === 0;
+      if (!pinEmpty && _tennisMatchesCache && now - _tennisMatchesCache.ts < TENNIS_MATCHES_CACHE_TTL) {
         const cached = _tennisMatchesCache.matches.filter(m => {
           const t = new Date(m.time).getTime();
           const LIVE_WINDOW_MS = parseInt(process.env.TENNIS_LIVE_WINDOW_H || '6', 10) * 60 * 60 * 1000;
@@ -8486,6 +8489,7 @@ const server = http.createServer(async (req, res) => {
         sendJson(res, [...cached, ...extraPin]);
         return;
       }
+      if (pinEmpty) log('DEBUG', 'TENNIS', 'Pinnacle vazio — descartando cache e refetching');
 
       // Se só Pinnacle está ativo (sem The Odds API / Odds-API.io), usa direto
       if (hasPinnacle && !THE_ODDS_API_KEY && !ODDS_API_IO_KEY) {
