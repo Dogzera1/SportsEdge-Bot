@@ -8770,6 +8770,32 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
       scheduleSnooker();
     }, scheduleSnooker._nextMs || 60 * 1000);
   })();
+  // Valorant: scheduler INDEPENDENTE do mutex runAutoAnalysis (fix Abr 2026 mid).
+  // Antes: pollValorant rodava só dentro do mutex (a cada 6-15min). Em ciclos longos
+  // (MMA com IA cap), ficava 10+min sem analisar — perdíamos partidas live VCT inteiras.
+  if (SPORTS['valorant']?.enabled) {
+    (function scheduleValorant() {
+      setTimeout(async () => {
+        const matches = await pollValorant(true).catch(e => { log('ERROR', 'AUTO-VAL', `scheduler: ${e.message}`); return []; });
+        const hadLive = Array.isArray(matches) && matches.some(m => m.status === 'live');
+        const nextMs = hadLive ? (90 * 1000) : (5 * 60 * 1000); // 90s live, 5min idle
+        scheduleValorant._nextMs = nextMs;
+        scheduleValorant();
+      }, scheduleValorant._nextMs || 30 * 1000);
+    })();
+  }
+  // CS2: mesma motivação — independência do mutex pra reagir rápido em live.
+  if (SPORTS['cs']?.enabled) {
+    (function scheduleCs() {
+      setTimeout(async () => {
+        const matches = await pollCs(true).catch(e => { log('ERROR', 'AUTO-CS', `scheduler: ${e.message}`); return []; });
+        const hadLive = Array.isArray(matches) && matches.some(m => m.status === 'live');
+        const nextMs = hadLive ? (90 * 1000) : (5 * 60 * 1000);
+        scheduleCs._nextMs = nextMs;
+        scheduleCs();
+      }, scheduleCs._nextMs || 45 * 1000);
+    })();
+  }
   setInterval(() => {
     settleCompletedTips().catch(e => log('ERROR', 'SETTLE', e.message));
     checkPendingTipsAlerts().catch(e => log('WARN', 'ALERTS', e.message));
