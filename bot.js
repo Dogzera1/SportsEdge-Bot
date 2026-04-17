@@ -5915,11 +5915,11 @@ async function pollTennis(runOnce = false) {
         const tour = key2.includes('_wta_') ? 'WTA' : 'ATP';
         const espnEvent = tour === 'WTA' ? wtaEvent : atpEvent;
 
-        // Superfície: ESPN event tem priority, senão inferir pelo torneio
-        const surface = espnEvent?.surface
-          || (key2.includes('french') || key2.includes('monte') || key2.includes('madrid') || key2.includes('italian') ? 'saibro'
-          : key2.includes('wimbledon') || key2.includes('halle') || key2.includes('queens') ? 'grama'
-          : 'dura');
+        // Superfície: ESPN event tem priority, senão usa detectSurface (lista completa
+        // com Barcelona, Hamburg, Lyon, Bastad, Kitzbuhel, Gstaad, Marrakech, Rio, etc).
+        // Fix 2026-04-17: lista local era curta — Barcelona caía em 'dura' quebrando Elo.
+        const { detectSurface: _detectSurfaceTn } = require('./lib/tennis-model');
+        const surface = espnEvent?.surface || _detectSurfaceTn(match.league || '');
         const surfacePT = { saibro: 'Saibro (Clay)', grama: 'Grama', dura: 'Quadra dura' }[surface] || surface;
 
         const eventType = isGrandSlam ? `Grand Slam — best-of-5 (ATP) / best-of-3 (WTA)`
@@ -6259,6 +6259,17 @@ Máximo 200 palavras. Raciocínio breve antes da decisão.`;
         if (tipEV < 7.0) {
           log('INFO', 'AUTO-TENNIS', `Gate EV: ${tipEV}% < 7%`);
           await new Promise(r => setTimeout(r, 3000)); continue;
+        }
+        // Gate EV máximo: mercados tennis ATP/WTA são sharp.
+        // Edge > 25% quase sempre é erro de modelo (Elo desalinhado, small sample, match incorreto).
+        // Em sharp markets, edges reais raramente excedem 8-12%.
+        const TENNIS_MAX_EV = parseFloat(process.env.TENNIS_MAX_EV || '25');
+        if (tipEV > TENNIS_MAX_EV) {
+          log('WARN', 'AUTO-TENNIS', `Gate MAX_EV: ${tipEV}% > ${TENNIS_MAX_EV}% — provável erro de modelo (${tipPlayer} @ ${tipOdd} | P=${(_modelPPickTn*100).toFixed(1)}%) — rejeitada`);
+          await new Promise(r => setTimeout(r, 3000)); continue;
+        }
+        if (tipEV > 15) {
+          log('WARN', 'AUTO-TENNIS', `EV alto para sharp market: ${tipEV}% (${tipPlayer} @ ${tipOdd} | P=${(_modelPPickTn*100).toFixed(1)}%) — revisar modelo`);
         }
         // Small-sample gate: Elo com poucos jogos gera EV inflado por ruído.
         // Se qualquer jogador tem <10 partidas no DB OU <5 na superfície, exige EV ≥ 10% e confiança ≥ MÉDIA.
