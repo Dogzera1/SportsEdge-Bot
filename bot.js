@@ -9358,6 +9358,18 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   setInterval(() => runLiveStormCycle().catch(e => log('ERROR', 'LIVE-STORM', e.message)), 10 * 60 * 1000);
   setTimeout(() => runLiveStormCycle().catch(() => {}), 7 * 60 * 1000); // 7min pós-boot
 
+  // Vetor 7 — Dota snapshot collector: cron 60s captura Steam RT + Pinnacle pareados.
+  // Default ON. Desativar via DOTA_SNAPSHOT_ENABLED=false.
+  if (/^(1|true|yes)$/i.test(String(process.env.DOTA_SNAPSHOT_ENABLED ?? 'true'))) {
+    setInterval(async () => {
+      try {
+        const { collectSnapshot } = require('./lib/dota-snapshot-collector');
+        const r = await collectSnapshot(`http://127.0.0.1:${process.env.PORT || 8080}`, db);
+        if (r?.captured > 0) log('DEBUG', 'DOTA-SNAP', `Captured ${r.captured} snapshots`);
+      } catch (e) { log('WARN', 'DOTA-SNAP', e.message); }
+    }, 60 * 1000);
+  }
+
   // Daily Health workflow: cron 1x/dia 8h BRT (11h UTC).
   setInterval(() => runDailyHealthIfTime().catch(e => log('ERROR', 'DAILY-HEALTH', e.message)), 30 * 60 * 1000);
 

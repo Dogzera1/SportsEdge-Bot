@@ -232,6 +232,35 @@ const migrations = [
       addColumnIfMissing(db, 'tips', 'model_version', `model_version TEXT DEFAULT 'v1'`);
     },
   },
+  {
+    // Snapshots Dota live pra Vetor 7 — Steam RT vs Pinnacle latency analysis.
+    // Captura pareada (Steam RT state + odds Pinnacle dejuiced) a cada N segundos.
+    id: '020_dota_live_snapshots',
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS dota_live_snapshots (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          captured_at TEXT NOT NULL,
+          match_id TEXT NOT NULL,
+          team1 TEXT NOT NULL,
+          team2 TEXT NOT NULL,
+          game_time INTEGER,
+          gold_diff INTEGER,
+          kills_diff INTEGER,
+          radiant_kills INTEGER,
+          dire_kills INTEGER,
+          model_p1 REAL,
+          pinnacle_odds_t1 REAL,
+          pinnacle_odds_t2 REAL,
+          implied_p1_dejuiced REAL,
+          divergence_pp REAL,
+          source TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_dota_snap_match ON dota_live_snapshots(match_id, captured_at);
+        CREATE INDEX IF NOT EXISTS idx_dota_snap_time ON dota_live_snapshots(captured_at);
+      `);
+    },
+  },
 ];
 
 function applyMigrations(db) {

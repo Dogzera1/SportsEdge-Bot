@@ -8205,6 +8205,38 @@ const server = http.createServer(async (req, res) => {
   // Vetor 2 props smoke test: lista todos markets disponíveis em matches LoL/Dota live
   // do Pinnacle. Se só tem moneyline + totals genéricos → Vetor 2 props morre cedo.
   // Se tem first_blood/dragons/towers/etc → Fase 2 vale.
+  // Vetor 10 — Gate Optimizer (grid search retroativo dos caps de divergence)
+  if (p === '/agents/gate-optimizer') {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const { runGateOptimizer } = require('./lib/gate-optimizer');
+      const days = parseInt(parsed.query.days || '90', 10);
+      const sport = parsed.query.sport || null;
+      sendJson(res, runGateOptimizer(db, { days, sport }));
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+  // Vetor 7 — Dota live snapshot collector + latency analysis
+  if (p === '/agents/dota-snapshot-analyze') {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const { analyzeLatency } = require('./lib/dota-snapshot-collector');
+      const days = parseInt(parsed.query.days || '7', 10);
+      sendJson(res, analyzeLatency(db, { days }));
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+  if (p === '/admin/dota-snapshot-collect' && req.method === 'POST') {
+    if (!requireAdmin(req, res)) return;
+    (async () => {
+      try {
+        const { collectSnapshot } = require('./lib/dota-snapshot-collector');
+        const r = await collectSnapshot(`http://127.0.0.1:${PORT}`, db);
+        sendJson(res, r);
+      } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    })();
+    return;
+  }
   if (p === '/agents/vetor2-props-smoke') {
     if (!requireAdmin(req, res)) return;
     (async () => {

@@ -263,6 +263,15 @@
 <!-- ═══ Tab: Agentes ═══ -->
 <div class="tab-pane" id="pane-agents">
   <div class="agents-section" style="padding:18px;display:grid;grid-template-columns:1fr;gap:14px;">
+    <!-- Gate Optimizer (Vetor 10) -->
+    <div class="agent-card" id="agent-gate-optimizer">
+      <div class="agent-head">
+        <span class="agent-toggle">&#9662;</span><span class="agent-title">⚙️ Gate Optimizer (Vetor 10)</span>
+        <span class="agent-meta" id="gateOptimizerMeta">—</span>
+        <button class="agent-refresh" data-agent="gate-optimizer">↻</button>
+      </div>
+      <div class="agent-body" id="gateOptimizerBody"><div class="empty" style="padding:20px;">Grid search retroativo: testa caps 6/8/10/12/15/18/20/25/30pp por sport. Encontra cap "ótimo" via ROI. Sugere ajuste env.</div></div>
+    </div>
     <!-- Backtest Validator -->
     <div class="agent-card" id="agent-backtest-validator">
       <div class="agent-head">
@@ -936,6 +945,41 @@
     body.innerHTML = opts.html || `<pre style="font-size:11px;color:#9ca3af;white-space:pre-wrap;max-height:400px;overflow:auto">${escapeHtml(JSON.stringify(data, null, 2).slice(0, 6000))}</pre>`;
   }
 
+  function renderGateOptimizer(data) {
+    const body = document.getElementById('gateOptimizerBody');
+    const meta = document.getElementById('gateOptimizerMeta');
+    if (!body) return;
+    if (!data || !data.ok) { body.innerHTML = `<div class="empty" style="color:var(--err);">${escapeHtml(data?.error || 'sem dados')}</div>`; return; }
+    meta.textContent = `${data.total_tips} tips ${data.days}d`;
+    if (!data.sports?.length) { body.innerHTML = '<div class="empty" style="color:var(--muted);padding:12px">Sem dados — tips precisam ter model_p_pick.</div>'; return; }
+    let html = '';
+    for (const s of data.sports) {
+      const recColor = s.recommendation?.includes('🟢') ? '#6ee7b7' : s.recommendation?.includes('🟡') ? '#fde68a' : s.recommendation?.includes('⚪') ? '#9ca3af' : '#86efac';
+      html += `<div style="margin-bottom:14px;padding:10px;background:var(--panel2);border-radius:6px;border-left:3px solid ${recColor}">`;
+      html += `<div style="font-weight:700;font-size:13px;margin-bottom:6px">${escapeHtml(s.sport.toUpperCase())} <span style="color:#6b7280;font-size:11px">| n=${s.total_tips} | cap atual ${s.current_cap_pp}pp</span></div>`;
+      html += `<div style="font-size:11px;color:${recColor};margin-bottom:8px">${escapeHtml(s.recommendation || '')}</div>`;
+      // Tabela by_cap
+      const rows = s.by_cap.map(c => {
+        const isCurrent = c.cap_pp === s.current_cap_pp;
+        const isOptimal = s.optimal && c.cap_pp === s.optimal.cap_pp;
+        const bg = isCurrent ? 'rgba(96,165,250,0.10)' : isOptimal && !isCurrent ? 'rgba(34,197,94,0.10)' : '';
+        const marker = isOptimal && !isCurrent ? ' 🎯' : isCurrent ? ' ←' : '';
+        const roiStr = c.roi != null ? (c.roi >= 0 ? '+' : '') + c.roi.toFixed(1) + '%' : '—';
+        return `<tr style="background:${bg}">
+          <td style="text-align:center;font-weight:${isCurrent || isOptimal ? '700' : '400'}">${c.cap_pp}pp${marker}</td>
+          <td style="text-align:right">${c.n}</td>
+          <td style="text-align:right">${c.wins}W/${c.losses}L</td>
+          <td style="text-align:right;color:${c.roi >= 0 ? '#86efac' : '#fca5a5'}">${roiStr}</td>
+          <td style="text-align:right">${c.brier ?? '—'}</td>
+          <td style="text-align:right;color:#9ca3af">${c.blocked || 0}</td>
+        </tr>`;
+      }).join('');
+      html += `<table class="agent-table" style="font-size:10px"><thead><tr><th>Cap</th><th style="text-align:right">N</th><th style="text-align:right">W/L</th><th style="text-align:right">ROI</th><th style="text-align:right">Brier</th><th style="text-align:right">Blocked</th></tr></thead><tbody>${rows}</tbody></table>`;
+      html += `</div>`;
+    }
+    body.innerHTML = html;
+  }
+
   function renderBacktestValidator(data) {
     const body = document.getElementById('backtestValidatorBody');
     const meta = document.getElementById('backtestValidatorMeta');
@@ -1111,8 +1155,9 @@
       if (name === 'model-calibration') renderModelCalibration(data);
       if (name === 'ia-health') renderIaHealth(data);
       if (name === 'live-storm') renderLiveStorm(data);
+      if (name === 'gate-optimizer') renderGateOptimizer(data);
     } catch (e) {
-      const map = { 'live-scout': 'liveScoutBody', 'roi-analyst': 'roiAnalystBody', 'feed-medic': 'feedMedicBody', 'weekly-review': 'weeklyReviewBody', 'health-sentinel': 'healthSentinelBody', 'orchestrator': 'orchestratorBody', 'backtest-validator': 'backtestValidatorBody', 'bankroll-guardian': 'bankrollGuardianBody', 'cut-advisor': 'cutAdvisorBody', 'pre-match-check': 'preMatchCheckBody', 'news-monitor': 'newsMonitorBody', 'model-calibration': 'modelCalibrationBody', 'ia-health': 'iaHealthBody', 'live-storm': 'liveStormBody' };
+      const map = { 'live-scout': 'liveScoutBody', 'roi-analyst': 'roiAnalystBody', 'feed-medic': 'feedMedicBody', 'weekly-review': 'weeklyReviewBody', 'health-sentinel': 'healthSentinelBody', 'orchestrator': 'orchestratorBody', 'backtest-validator': 'backtestValidatorBody', 'bankroll-guardian': 'bankrollGuardianBody', 'cut-advisor': 'cutAdvisorBody', 'pre-match-check': 'preMatchCheckBody', 'news-monitor': 'newsMonitorBody', 'model-calibration': 'modelCalibrationBody', 'ia-health': 'iaHealthBody', 'live-storm': 'liveStormBody', 'gate-optimizer': 'gateOptimizerBody' };
       const el = document.getElementById(map[name]);
       if (el) el.innerHTML = `<div class="empty" style="color:var(--err);">fetch falhou: ${escapeHtml(String(e.message||e))}</div>`;
     } finally {
@@ -1121,6 +1166,7 @@
   }
 
   function refreshAgents() {
+    fetchAgent('gate-optimizer');
     fetchAgent('backtest-validator');
     fetchAgent('health-sentinel');
     fetchAgent('weekly-review');
