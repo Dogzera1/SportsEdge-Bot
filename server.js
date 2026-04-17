@@ -113,8 +113,14 @@ function sqlGameFilter(alias, sport, game) {
   if (!game) return '';
   const g = String(game).toLowerCase();
   if (sport === 'esports') {
-    if (g === 'dota2' || g === 'dota') return ` AND ${alias}.match_id LIKE 'dota2_%'`;
-    if (g === 'lol')                   return ` AND (${alias}.match_id IS NULL OR ${alias}.match_id NOT LIKE 'dota2_%')`;
+    // Dota: match_id 'dota2_%' (PandaScore) OU event_name contém 'dota' (Pinnacle 'pin_*' não tem prefixo).
+    // Bug fix 2026-04-18: tips Dota via Pinnacle (pin_*) eram contadas como LoL.
+    if (g === 'dota2' || g === 'dota') {
+      return ` AND (${alias}.match_id LIKE 'dota2_%' OR LOWER(COALESCE(${alias}.event_name,'')) LIKE '%dota%')`;
+    }
+    if (g === 'lol') {
+      return ` AND ${alias}.match_id NOT LIKE 'dota2_%' AND LOWER(COALESCE(${alias}.event_name,'')) NOT LIKE '%dota%'`;
+    }
   }
   if (sport === 'mma') {
     if (g === 'boxing' || g === 'boxe') return ` AND LOWER(COALESCE(${alias}.event_name,'')) LIKE '%boxing%'`;
