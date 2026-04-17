@@ -7414,6 +7414,114 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // Análise por liga dentro de um sport — identifica leagues bleeding vs edge real.
+  // GET /roi-by-league?sport=esports&days=60&phase=pregame
+  if (p === '/roi-by-league') {
+    const sport = (parsed.query.sport || 'esports').trim();
+    const daysRaw = parseInt(parsed.query.days);
+    const days = Number.isFinite(daysRaw) ? Math.max(7, Math.min(365, daysRaw)) : 60;
+    const phase = (parsed.query.phase || '').trim().toLowerCase();
+    const phaseFilter = phase === 'live' ? 'AND is_live = 1' : phase === 'pregame' ? 'AND is_live = 0' : '';
+    try {
+      const rows = db.prepare(`
+        SELECT event_name, odds, clv_odds, stake_reais, profit_reais, result, model_p_pick
+        FROM tips
+        WHERE sport = ?
+          AND result IN ('win','loss','push')
+          AND settled_at IS NOT NULL
+          AND settled_at >= datetime('now', ?)
+          ${phaseFilter}
+      `).all(sport, `-${days} days`);
+
+      const buckets = new Map();
+      for (const r of rows) {
+        const league = String(r.event_name || '(unknown)').trim() || '(unknown)';
+        if (!buckets.has(league)) {
+          buckets.set(league, {
+            league, n: 0, wins: 0, losses: 0, pushes: 0,
+            stakeR: 0, profitR: 0, oddsSum: 0,
+            clvSum: 0, clvCount: 0, clvPositive: 0,
+            brierSum: 0, brierCount: 0,
+          });
+        }
+        const b = buckets.get(league);
+        b.n++;
+        if (r.result === 'win') b.wins++;
+        else if (r.result === 'loss') b.losses++;
+        else if (r.result === 'push') b.pushes++;
+        b.stakeR += Number(r.stake_reais) || 0;
+        b.profitR += Number(r.profit_reais) || 0;
+        const odds = Number(r.odds), clv = Number(r.clv_odds);
+        if (odds > 1) b.oddsSum += odds;
+        if (odds > 1 && clv > 1) {
+          const clvPct = (odds / clv - 1) * 100;
+          b.clvSum += clvPct; b.clvCount++;
+          if (clvPct > 0) b.clvPositive++;
+        }
+        if ((r.result === 'win' || r.result === 'loss') && odds > 1) {
+          const pStored = Number(r.model_p_pick);
+          let p = (Number.isFinite(pStored) && pStored > 0 && pStored < 1) ? pStored : (1 / odds);
+          p = Math.max(0.01, Math.min(0.99, p));
+          const o = r.result === 'win' ? 1 : 0;
+          b.brierSum += (p - o) ** 2;
+          b.brierCount++;
+        }
+      }
+
+      const leagues = [];
+      for (const b of buckets.values()) {
+        const decided = b.wins + b.losses;
+        const hit = decided > 0 ? (b.wins / decided) * 100 : null;
+        const roi = b.stakeR > 0 ? (b.profitR / b.stakeR) * 100 : null;
+        const clvAvg = b.clvCount > 0 ? b.clvSum / b.clvCount : null;
+        const clvPos = b.clvCount > 0 ? (b.clvPositive / b.clvCount) * 100 : null;
+        const brier = b.brierCount > 0 ? b.brierSum / b.brierCount : null;
+        // Verdict: bleeding se ROI <= -20% E n >= 5
+        let verdict = 'neutral';
+        if (b.n < 3) verdict = 'insufficient';
+        else if (roi != null && roi <= -20 && b.n >= 5) verdict = 'bleeding';
+        else if (roi != null && roi >= 15 && b.n >= 5) verdict = 'edge';
+        else if (roi != null && roi < 0) verdict = 'negative';
+        leagues.push({
+          league: b.league,
+          n: b.n, wins: b.wins, losses: b.losses, pushes: b.pushes,
+          hit_rate: hit != null ? parseFloat(hit.toFixed(1)) : null,
+          roi: roi != null ? parseFloat(roi.toFixed(2)) : null,
+          profit_reais: parseFloat(b.profitR.toFixed(2)),
+          avg_odds: b.n > 0 ? parseFloat((b.oddsSum / b.n).toFixed(2)) : null,
+          clv_avg_pct: clvAvg != null ? parseFloat(clvAvg.toFixed(2)) : null,
+          clv_positive_rate: clvPos != null ? parseFloat(clvPos.toFixed(1)) : null,
+          clv_n: b.clvCount,
+          brier: brier != null ? parseFloat(brier.toFixed(3)) : null,
+          verdict,
+        });
+      }
+      leagues.sort((a, b) => (a.roi ?? 0) - (b.roi ?? 0));
+
+      // Total & candidatos a cut (bleeding)
+      const totalProfit = leagues.reduce((s, l) => s + l.profit_reais, 0);
+      const totalN = leagues.reduce((s, l) => s + l.n, 0);
+      const bleedingLeagues = leagues.filter(l => l.verdict === 'bleeding');
+      const bleedingLoss = bleedingLeagues.reduce((s, l) => s + l.profit_reais, 0);
+      const bleedingN = bleedingLeagues.reduce((s, l) => s + l.n, 0);
+
+      sendJson(res, {
+        sport, days, phase: phase || 'all',
+        generated_at: new Date().toISOString(),
+        total_tips: totalN,
+        total_profit_reais: parseFloat(totalProfit.toFixed(2)),
+        bleeding_summary: {
+          n_leagues: bleedingLeagues.length,
+          tips: bleedingN,
+          loss_reais: parseFloat(bleedingLoss.toFixed(2)),
+          would_save_if_cut: parseFloat((-bleedingLoss).toFixed(2)),
+        },
+        leagues,
+      });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
   // Vetor "auditoria live" — compara live vs pregame por sport num único JSON.
   // Decide se vale manter live (CLV ≥ 0 = edge real) ou desligar (CLV << 0 = market absorve antes).
   // GET /live-vs-pregame-audit?days=60
