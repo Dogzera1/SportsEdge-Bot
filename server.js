@@ -7415,22 +7415,27 @@ const server = http.createServer(async (req, res) => {
   }
 
   // Análise por liga dentro de um sport — identifica leagues bleeding vs edge real.
-  // GET /roi-by-league?sport=esports&days=60&phase=pregame
+  // GET /roi-by-league?sport=esports&days=60&phase=pregame&since=2026-04-17
+  // "since" filtra por sent_at >= DATE (ISO) — útil pra excluir tips pré gate-fix.
   if (p === '/roi-by-league') {
     const sport = (parsed.query.sport || 'esports').trim();
     const daysRaw = parseInt(parsed.query.days);
     const days = Number.isFinite(daysRaw) ? Math.max(7, Math.min(365, daysRaw)) : 60;
     const phase = (parsed.query.phase || '').trim().toLowerCase();
     const phaseFilter = phase === 'live' ? 'AND is_live = 1' : phase === 'pregame' ? 'AND is_live = 0' : '';
+    const sinceRaw = (parsed.query.since || '').trim();
+    const sinceValid = /^\d{4}-\d{2}-\d{2}/.test(sinceRaw);
+    const sinceFilter = sinceValid ? `AND sent_at >= '${sinceRaw}'` : '';
     try {
       const rows = db.prepare(`
-        SELECT event_name, odds, clv_odds, stake_reais, profit_reais, result, model_p_pick
+        SELECT event_name, odds, clv_odds, stake_reais, profit_reais, result, model_p_pick, sent_at
         FROM tips
         WHERE sport = ?
           AND result IN ('win','loss','push')
           AND settled_at IS NOT NULL
           AND settled_at >= datetime('now', ?)
           ${phaseFilter}
+          ${sinceFilter}
       `).all(sport, `-${days} days`);
 
       const buckets = new Map();
@@ -7507,6 +7512,7 @@ const server = http.createServer(async (req, res) => {
 
       sendJson(res, {
         sport, days, phase: phase || 'all',
+        since: sinceValid ? sinceRaw : null,
         generated_at: new Date().toISOString(),
         total_tips: totalN,
         total_profit_reais: parseFloat(totalProfit.toFixed(2)),
@@ -7524,18 +7530,22 @@ const server = http.createServer(async (req, res) => {
 
   // Vetor "auditoria live" — compara live vs pregame por sport num único JSON.
   // Decide se vale manter live (CLV ≥ 0 = edge real) ou desligar (CLV << 0 = market absorve antes).
-  // GET /live-vs-pregame-audit?days=60
+  // GET /live-vs-pregame-audit?days=60&since=2026-04-17
   if (p === '/live-vs-pregame-audit') {
     const daysRaw = parseInt(parsed.query.days);
     const days = Number.isFinite(daysRaw) ? Math.max(7, Math.min(365, daysRaw)) : 60;
+    const sinceRaw = (parsed.query.since || '').trim();
+    const sinceValid = /^\d{4}-\d{2}-\d{2}/.test(sinceRaw);
+    const sinceFilter = sinceValid ? `AND sent_at >= '${sinceRaw}'` : '';
     try {
       const rows = db.prepare(`
         SELECT sport, is_live, odds, clv_odds, stake_reais, profit_reais,
-               result, model_p_pick
+               result, model_p_pick, sent_at
         FROM tips
         WHERE result IN ('win','loss','push')
           AND settled_at IS NOT NULL
           AND settled_at >= datetime('now', ?)
+          ${sinceFilter}
       `).all(`-${days} days`);
 
       const buckets = new Map(); // "sport|phase" -> agg
@@ -7649,6 +7659,7 @@ const server = http.createServer(async (req, res) => {
 
       sendJson(res, {
         days,
+        since: sinceValid ? sinceRaw : null,
         generated_at: new Date().toISOString(),
         overall: {
           live: overallPhase('live'),
