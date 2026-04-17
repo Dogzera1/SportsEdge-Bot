@@ -1160,6 +1160,7 @@ async function runAutoAnalysis() {
             }
           }
 
+          const _pickSideLs = norm(tipTeam) === norm(match.team1) ? 't1' : 't2';
           const rec = await serverPost('/record-tip', {
             matchId: canonicalMatchId('esports', String(match.id) + mapTag), eventName: match.league,
             p1: match.team1, p2: match.team2, tipParticipant: tipTeam,
@@ -1169,7 +1170,9 @@ async function runAutoAnalysis() {
             modelP2: result.modelP2,
             modelPPick: modelPPick,
             modelLabel: modelLabel,
-            tipReason: result.tipReason || null
+            tipReason: result.tipReason || null,
+            lineShopOdds: result.o || null,
+            pickSide: _pickSideLs,
           }, 'esports');
 
           // Aborta se DB recusou (erro ou duplicata já registrada)

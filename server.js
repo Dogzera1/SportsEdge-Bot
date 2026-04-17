@@ -7021,6 +7021,19 @@ const server = http.createServer(async (req, res) => {
         if (oddsN != null) {
           stmts.updateTipOpenOdds.run(oddsN, String(matchId), sport);
         }
+        // Vetor 3 — Line shopping: se bot passou oddsObj com alternativas, persiste best book/odd + Pinnacle anchor
+        if (result?.lastInsertRowid && t.lineShopOdds && t.pickSide) {
+          try {
+            const { computeLineShop } = require('./lib/line-shopping');
+            const ls = computeLineShop(t.lineShopOdds, t.pickSide);
+            if (ls && ls.bestBook) {
+              stmts.updateTipLineShop.run(
+                ls.bestBook, ls.bestOdd, ls.pinnacleOdd, ls.deltaPct,
+                result.lastInsertRowid
+              );
+            }
+          } catch (e) { log('WARN', 'LINE-SHOP', `Fail compute: ${e.message}`); }
+        }
         stmts.incrementApiUsage.run(sport, new Date().toISOString().slice(0,7));
         sendJson(res, { ok: true, tipId: result?.lastInsertRowid || null });
       } catch(e) { sendJson(res, { error: e.message }, 500); }

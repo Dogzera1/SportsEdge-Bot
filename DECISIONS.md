@@ -14,6 +14,17 @@ Registro cronológico de decisões significativas. Toda mudança de comportament
 
 ---
 
+## 2026-04-18 — Vetor 3 fase 1: line shopping tracking (LoL PoC)
+**Motivo:** sem registrar onde estava o melhor preço, CLV-by-bookmaker é invisível. Vetor 3 desbloqueia 2 edges: (1) mostrar ao user a casa certa pra apostar; (2) medir retroativamente se bater SX.Bet ou Pinnacle deu mais ROI.
+**Antes:** /record-tip só guardava odds da casa primária (Pinnacle em LoL/Dota). Nenhum registro de alternativas.
+**Agora:**
+- `lib/line-shopping.js` — `computeLineShop(oddsObj, pickSide)` retorna `bestBook/bestOdd/pinnacleOdd/deltaPct` a partir de `_alternative` ou `_allOdds`.
+- Migration 021: `tips.best_book / best_odd / pinnacle_odd / line_shop_delta_pct`.
+- `/record-tip` aceita payload opcional `{ lineShopOdds, pickSide }`; se presente, persiste os 4 campos.
+- PoC integrado em LoL auto-loop (bot.js:1163). Outros 12 callsites ainda não integrados — vão em follow-up.
+**Reversão:** remover bloco "Vetor 3 — Line shopping" em server.js:/record-tip + migration é aditiva (colunas ficam, inócuas).
+**Status:** 🧪 experimental fase 1 — coleta de dados. DM + /roi by-book em commits futuros.
+
 ## 2026-04-18 — /opendota-live: fallback Steam GetLiveLeagueGames
 **Motivo:** Logs mostraram 7 timeouts consecutivos em `api.opendota.com/api/live` (21:46-21:47 BRT). OpenDota pode ficar degradado por minutos/horas — sem fallback, toda tip Dota fica sem live stats no intervalo.
 **Antes:** `/opendota-live` abortava se OpenDota retornasse não-200 ou timeout. Steam RT só era consultado DEPOIS de achar match no OpenDota (precisa do `server_steam_id`).

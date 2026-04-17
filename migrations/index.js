@@ -261,6 +261,17 @@ const migrations = [
       `);
     },
   },
+  {
+    // Vetor 3 — Line shopping cross-bookmaker.
+    // Colunas pra registrar qual book tinha melhor preço na hora da tip (pra tracking CLV by-book).
+    id: '021_tips_line_shop_cols',
+    up(db) {
+      addColumnIfMissing(db, 'tips', 'best_book', 'best_book TEXT');
+      addColumnIfMissing(db, 'tips', 'best_odd', 'best_odd REAL');
+      addColumnIfMissing(db, 'tips', 'pinnacle_odd', 'pinnacle_odd REAL');
+      addColumnIfMissing(db, 'tips', 'line_shop_delta_pct', 'line_shop_delta_pct REAL');
+    },
+  },
 ];
 
 function applyMigrations(db) {
