@@ -168,7 +168,8 @@
       "Bash(git -C \"C:\\\\Users\\\\vict_\\\\Desktop\\\\lol betting\" log --oneline -30 lib/vlr.js)",
       "Bash(git -C \"C:\\\\Users\\\\vict_\\\\Desktop\\\\lol betting\" log --oneline -5 -p -- lib/vlr.js)",
       "Bash(awk '/^async function pollValorant/,/^async function pollDarts|^\\\\/\\\\/ ── Darts/' bot.js)",
-      "Bash(grep -nE \"Confiança.*\\\\*\\\\\\\\\\\\$\\\\{tipConf\\\\}|MMA.*confidence.*tipConf|record-tip.*confidence.*tipConf\" bot.js)"
+      "Bash(grep -nE \"Confiança.*\\\\*\\\\\\\\\\\\$\\\\{tipConf\\\\}|MMA.*confidence.*tipConf|record-tip.*confidence.*tipConf\" bot.js)",
+      "Bash(grep -nE \"Stake.*\\\\*\\\\\\\\\\\\$\\\\{tipStake\\\\}|💵 Stake.*tipStake\" bot.js)"
     ]
   }
 }

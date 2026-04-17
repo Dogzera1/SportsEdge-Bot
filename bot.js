@@ -1059,17 +1059,23 @@ async function runAutoAnalysis() {
           const tipOdd = result.tipMatch[2].trim();
           const tipEV = result.tipMatch[3].trim();
           const tipConf = (result.tipMatch[5] || CONF.MEDIA).trim().toUpperCase();
+          // EV sanity: bloqueia EV absurdamente alto (erro de cálculo da IA) — espelha gate do upcoming.
+          const tipEVnumLive = parseFloat(String(tipEV).replace(/[%+]/g, ''));
+          if (!isNaN(tipEVnumLive) && tipEVnumLive > 50) {
+            log('WARN', 'AUTO', `Gate EV sanity LIVE: ${match.team1} vs ${match.team2} → EV ${tipEVnumLive}% > 50% (provável erro de cálculo da IA) → rejeitado`);
+            analyzedMatches.set(matchKey, { ts: now, tipSent: false, noEdge: true });
+            continue;
+          }
           // Gate BAIXA endurecido (2026-04-15): histórico mostra BAIXA perdendo muito em LoL.
           // Exige ML-edge ≥10pp E EV ≥ 8% pra compensar baixa confiança da IA.
           if (tipConf === CONF.BAIXA) {
-            const tipEVnum = parseFloat(String(tipEV).replace(/[%+]/g, ''));
             if (result.mlScore < 10) {
               log('INFO', 'AUTO', `LIVE BAIXA rejeitada: ${match.team1} vs ${match.team2} | ML-edge ${result.mlScore.toFixed(1)}pp < 10pp`);
               analyzedMatches.set(matchKey, { ts: now, tipSent: false, noEdge: true });
               continue;
             }
-            if (!isNaN(tipEVnum) && tipEVnum < 8) {
-              log('INFO', 'AUTO', `LIVE BAIXA rejeitada: ${match.team1} vs ${match.team2} | EV ${tipEVnum}% < 8%`);
+            if (!isNaN(tipEVnumLive) && tipEVnumLive < 8) {
+              log('INFO', 'AUTO', `LIVE BAIXA rejeitada: ${match.team1} vs ${match.team2} | EV ${tipEVnumLive}% < 8%`);
               analyzedMatches.set(matchKey, { ts: now, tipSent: false, noEdge: true });
               continue;
             }
@@ -1198,7 +1204,7 @@ async function runAutoAnalysis() {
             `🎯 Aposta: *${tipTeam}* ML @ *${tipOdd}*\n` +
             bookLineLol +
             minTakeLine +
-            `📈 EV: *${tipEV}*\n💵 Stake: *${tipStake}* _(${kellyLabel})_\n` +
+            `📈 EV: *${tipEV}*\n💵 Stake: *${tipStakeAdj}* _(${kellyLabel})_\n` +
             `${confEmoji} Confiança: *${tipConf}*${mlEdgeLabel}\n` +
             `📋 ${match.league}\n` +
             `_${analysisLabel}_` +
@@ -1406,6 +1412,14 @@ async function runAutoAnalysis() {
               log('INFO', 'AUTO', `Kelly negativo upcoming ${tipTeam} @ ${tipOdd} — tip abortada`);
               await new Promise(r => setTimeout(r, 3000)); continue;
             }
+            // Risk Manager cross-sport (faltava no upcoming — bug fix mid-Abr 2026)
+            const desiredUnitsUp = parseFloat(String(tipStake).replace('u', '')) || 0;
+            const riskAdjUp = await applyGlobalRisk('esports', desiredUnitsUp, match.leagueSlug || match.league);
+            if (!riskAdjUp.ok) {
+              log('INFO', 'RISK', `esports upcoming: bloqueada (${riskAdjUp.reason})`);
+              await new Promise(r => setTimeout(r, 3000)); continue;
+            }
+            const tipStakeAdj = `${riskAdjUp.units.toFixed(1).replace(/\.0$/, '')}u`;
             const gameIcon = '🎮';
             const confEmoji = { [CONF.ALTA]: '🟢', [CONF.MEDIA]: '🟡', [CONF.BAIXA]: '🔵' }[tipConf] || '🟡';
             const kellyLabel = tipConf === CONF.ALTA ? '¼ Kelly' : tipConf === CONF.BAIXA ? '1/10 Kelly' : '⅙ Kelly';
@@ -1414,7 +1428,7 @@ async function runAutoAnalysis() {
             const recUp = await serverPost('/record-tip', {
               matchId: canonicalMatchId('esports', match.id), eventName: match.league,
               p1: match.team1, p2: match.team2, tipParticipant: tipTeam,
-              odds: tipOdd, ev: tipEV, stake: tipStake,
+              odds: tipOdd, ev: tipEV, stake: tipStakeAdj,
               confidence: tipConf, isLive: false,
               modelP1: result.modelP1, modelP2: result.modelP2,
               modelPPick: modelPForKelly,
@@ -1436,7 +1450,7 @@ async function runAutoAnalysis() {
               (match.time ? `🕐 Início: *${matchTime}* (BRT)\n` : '') +
               `\n🎯 Aposta: *${tipTeam}* ML @ *${tipOdd}*\n` +
               minTakeLine +
-              `📈 EV: *${tipEV}*\n💵 Stake: *${tipStake}* _(${kellyLabel})_\n` +
+              `📈 EV: *${tipEV}*\n💵 Stake: *${tipStakeAdj}* _(${kellyLabel})_\n` +
               `${confEmoji} Confiança: *${tipConf}*${mlEdgeLabel}\n` +
               `${imminentNote}${baixaNote}` +
               `📋 _Formato Bo1 — análise por forma e H2H (draft não disponível antes do início)_\n\n` +
@@ -1547,17 +1561,21 @@ async function sendDailySummary() {
     lines.push(`\n💰 *Total*: ${totalTips} tips | ${totalWins}W | Profit: R$${totalProfit >= 0 ? '+' : ''}${totalProfit.toFixed(2)}`);
 
     const msg = lines.join('\n');
-    // Envia para todos os sports tokens (usa o primeiro disponível)
-    for (const sportKey of Object.keys(SPORTS)) {
-      const cfg = SPORTS[sportKey];
-      if (!cfg?.enabled || !cfg?.token) continue;
+    // Coleta usuários únicos (qualquer sport inscrito) e envia 1 DM/user via primeiro token disponível.
+    // Bug fix mid-Abr 2026: `break` antigo saía após primeiro sport, então users inscritos
+    // só em outros sports não recebiam o resumo.
+    const firstActive = Object.values(SPORTS).find(c => c?.enabled && c?.token);
+    if (firstActive) {
+      const uniqueUsers = new Set();
       for (const [uid, prefs] of subscribedUsers) {
-        if (!prefs.has(sportKey)) continue;
-        try { await sendDM(cfg.token, uid, msg); } catch(_) {}
+        if (prefs && prefs.size > 0) uniqueUsers.add(uid);
       }
-      break; // só precisa enviar uma vez
+      let sent = 0;
+      for (const uid of uniqueUsers) {
+        try { await sendDM(firstActive.token, uid, msg); sent++; } catch(_) {}
+      }
+      log('INFO', 'DAILY', `Resumo enviado a ${sent}/${uniqueUsers.size} users: ${totalTips} tips, R$${totalProfit.toFixed(2)}`);
     }
-    log('INFO', 'DAILY', `Resumo enviado: ${totalTips} tips, R$${totalProfit.toFixed(2)}`);
   } catch(e) {
     log('WARN', 'DAILY', `Erro no resumo diário: ${e.message}`);
   }
@@ -8179,8 +8197,16 @@ async function runAutoDarts() {
           return new Date(a.time || 0) - new Date(b.time || 0);
         });
         _hadLiveDarts = matches.some(m => m.status === 'live');
+        if (_hadLiveDarts) _livePhaseEnter('darts');
+        let _drainedDarts = false;
         for (const match of matches) {
           const isLiveDarts = match.status === 'live';
+          // Live-priority gate: ao primeiro upcoming, espera outros sports drenarem live
+          if (!isLiveDarts && !_drainedDarts) {
+            if (_hadLiveDarts) _livePhaseExit('darts');
+            await _waitOthersLiveDone('darts');
+            _drainedDarts = true;
+          }
           const key = `darts_${match.id}`;
           const prev = analyzedDarts.get(key);
           if (prev?.tipSent) continue;
@@ -8345,9 +8371,11 @@ async function runAutoDarts() {
           log('INFO', 'AUTO-DARTS', `Tip enviada: ${pickTeam} @ ${pickOdd} | EV:${evPct.toFixed(1)}%`);
           await new Promise(r => setTimeout(r, 3000));
         }
+        if (!_drainedDarts && _hadLiveDarts) _livePhaseExit('darts');
       }
   } catch(e) {
     log('ERROR', 'AUTO-DARTS', e.message);
+    _livePhaseExit('darts');
   }
   return _hadLiveDarts;
 }
@@ -8376,8 +8404,15 @@ async function runAutoSnooker() {
           return new Date(a.time || 0) - new Date(b.time || 0);
         });
         _hadLiveSnooker = matches.some(m => m.status === 'live');
+        if (_hadLiveSnooker) _livePhaseEnter('snooker');
+        let _drainedSnooker = false;
         for (const match of matches) {
           const isLiveSnooker = match.status === 'live';
+          if (!isLiveSnooker && !_drainedSnooker) {
+            if (_hadLiveSnooker) _livePhaseExit('snooker');
+            await _waitOthersLiveDone('snooker');
+            _drainedSnooker = true;
+          }
           const key = `snooker_${match.id}`;
           const prev = analyzedSnooker.get(key);
           if (prev?.tipSent) continue;
@@ -8502,9 +8537,11 @@ async function runAutoSnooker() {
           log('INFO', 'AUTO-SNOOKER', `Tip enviada: ${pickTeam} @ ${pickOdd} | EV:${evPct.toFixed(1)}%`);
           await new Promise(r => setTimeout(r, 3000));
         }
+        if (!_drainedSnooker && _hadLiveSnooker) _livePhaseExit('snooker');
       }
   } catch(e) {
     log('ERROR', 'AUTO-SNOOKER', e.message);
+    _livePhaseExit('snooker');
   }
   return _hadLiveSnooker;
 }
