@@ -7430,14 +7430,23 @@ async function runAutoDarts() {
             continue;
           }
 
-          // Enriquecimento: 3-dart avg recente (últimos 10 jogos) + H2H entre os dois
-          const [recentP1, recentP2, h2h] = await Promise.all([
+          // Enriquecimento: 3-dart avg recente (últimos 10 jogos) + H2H entre os dois + live score se aplicável
+          const [recentP1, recentP2, h2h, liveScore] = await Promise.all([
             match.playerId1 ? sofaDarts.getPlayerRecentAvg(match.playerId1, 10).catch(() => null) : null,
             match.playerId2 ? sofaDarts.getPlayerRecentAvg(match.playerId2, 10).catch(() => null) : null,
             (match.playerId1 && match.playerId2)
               ? sofaDarts.getHeadToHead(match.playerId1, match.playerId2).catch(() => null)
               : null,
+            isLiveDarts && match.sofaEventId
+              ? sofaDarts.getLiveScore(match.sofaEventId).catch(() => null)
+              : null,
           ]);
+
+          if (isLiveDarts && liveScore?.isFinished) {
+            analyzedDarts.set(key, { ts: now, tipSent: false });
+            log('INFO', 'AUTO-DARTS', `Partida finalizada (Sofascore): ${match.team1} vs ${match.team2} — pulando`);
+            continue;
+          }
 
           const enrich = {
             avgP1: recentP1?.avgLast || null,
@@ -7453,6 +7462,9 @@ async function runAutoDarts() {
           if (h2h) {
             log('DEBUG', 'AUTO-DARTS', `H2H ${match.team1} vs ${match.team2}: ${h2h.p1Wins}-${h2h.p2Wins}`);
           }
+          if (liveScore?.isLive) {
+            log('INFO', 'AUTO-DARTS', `Live ${match.team1} vs ${match.team2}: sets ${liveScore.setsHome}-${liveScore.setsAway} | leg ${liveScore.pointsHome ?? '?'}-${liveScore.pointsAway ?? '?'}`);
+          }
 
           const ml = dartsPreFilter(match, enrich);
           if (!ml.pass) {
@@ -7466,6 +7478,19 @@ async function runAutoDarts() {
           const pickOdd = ml.direction === 't1' ? parseFloat(match.odds.t1) : parseFloat(match.odds.t2);
           const pickP   = ml.direction === 't1' ? ml.modelP1 : ml.modelP2;
           const evPct   = ((pickP * pickOdd - 1) * 100);
+
+          // Guard live: não tippar quem está perdendo em sets por margem ≥ 2
+          if (liveScore?.isLive && liveScore.setsHome != null && liveScore.setsAway != null) {
+            const pickDiff = ml.direction === 't1'
+              ? (liveScore.setsHome - liveScore.setsAway)
+              : (liveScore.setsAway - liveScore.setsHome);
+            if (pickDiff <= -2) {
+              analyzedDarts.set(key, { ts: now, tipSent: false });
+              log('INFO', 'AUTO-DARTS', `Live guard: ${pickTeam} perdendo ${liveScore.setsHome}-${liveScore.setsAway} em sets — tip rejeitada`);
+              continue;
+            }
+          }
+
           const MIN_EV_DARTS = parseFloat(process.env.DARTS_MIN_EV || '5');
           if (evPct < MIN_EV_DARTS) {
             analyzedDarts.set(key, { ts: now, tipSent: false });
