@@ -258,6 +258,78 @@
 <!-- ═══ Tab: Agentes ═══ -->
 <div class="tab-pane" id="pane-agents">
   <div class="agents-section" style="padding:18px;display:grid;grid-template-columns:1fr;gap:14px;">
+    <!-- Backtest Validator -->
+    <div class="agent-card" id="agent-backtest-validator">
+      <div class="agent-head">
+        <span class="agent-title">🔬 Backtest Validator</span>
+        <span class="agent-meta" id="backtestValidatorMeta">—</span>
+        <button class="agent-refresh" data-agent="backtest-validator">↻</button>
+      </div>
+      <div class="agent-body" id="backtestValidatorBody"><div class="empty" style="padding:20px;">valida modelo aplicando gates atuais retroativamente. Brier modelo vs baseline (apostar implied dejuiced). Veredito por sport: edge real / bleed / ruído / inconclusivo.</div></div>
+    </div>
+    <!-- Bankroll Guardian -->
+    <div class="agent-card" id="agent-bankroll-guardian">
+      <div class="agent-head">
+        <span class="agent-title">💰 Bankroll Guardian</span>
+        <span class="agent-meta" id="bankrollGuardianMeta">—</span>
+        <button class="agent-refresh" data-agent="bankroll-guardian">↻</button>
+      </div>
+      <div class="agent-body" id="bankrollGuardianBody"><div class="empty" style="padding:20px;">DD por sport + overall. Auto-shadow temp em DD≥15%, alerta em DD≥10%. Cron 1h.</div></div>
+    </div>
+    <!-- Cut Advisor -->
+    <div class="agent-card" id="agent-cut-advisor">
+      <div class="agent-head">
+        <span class="agent-title">✂️ Cut Advisor</span>
+        <span class="agent-meta" id="cutAdvisorMeta">—</span>
+        <button class="agent-refresh" data-agent="cut-advisor">↻</button>
+      </div>
+      <div class="agent-body" id="cutAdvisorBody"><div class="empty" style="padding:20px;">Buckets vermelhos ranqueados por expected daily loss em R$. Sugere cut order ótimo.</div></div>
+    </div>
+    <!-- Pre-Match Final Check -->
+    <div class="agent-card" id="agent-pre-match-check">
+      <div class="agent-head">
+        <span class="agent-title">🔍 Pre-Match Final Check</span>
+        <span class="agent-meta" id="preMatchCheckMeta">—</span>
+        <button class="agent-refresh" data-agent="pre-match-check">↻</button>
+      </div>
+      <div class="agent-body" id="preMatchCheckBody"><div class="empty" style="padding:20px;">Tips a &lt;30min match: re-fetch odds, drift adverso, cancelamento. Cron 5min.</div></div>
+    </div>
+    <!-- News Monitor -->
+    <div class="agent-card" id="agent-news-monitor">
+      <div class="agent-head">
+        <span class="agent-title">📰 News Monitor</span>
+        <span class="agent-meta" id="newsMonitorMeta">—</span>
+        <button class="agent-refresh" data-agent="news-monitor">↻</button>
+      </div>
+      <div class="agent-body" id="newsMonitorBody"><div class="empty" style="padding:20px;">RSS scan (HLTV, Sherdog, Tennis.com, Google News). Critical/warning keywords cruzados com tips pendentes.</div></div>
+    </div>
+    <!-- Model Calibration Watcher -->
+    <div class="agent-card" id="agent-model-calibration">
+      <div class="agent-head">
+        <span class="agent-title">🎯 Model Calibration Watcher</span>
+        <span class="agent-meta" id="modelCalibrationMeta">—</span>
+        <button class="agent-refresh" data-agent="model-calibration">↻</button>
+      </div>
+      <div class="agent-body" id="modelCalibrationBody"><div class="empty" style="padding:20px;">Brier 30d vs baseline 90d-30d. Drift &gt;0.03 alerta com sugestões. Cron diário.</div></div>
+    </div>
+    <!-- IA Health Monitor -->
+    <div class="agent-card" id="agent-ia-health">
+      <div class="agent-head">
+        <span class="agent-title">🤖 IA Health Monitor</span>
+        <span class="agent-meta" id="iaHealthMeta">—</span>
+        <button class="agent-refresh" data-agent="ia-health">↻</button>
+      </div>
+      <div class="agent-body" id="iaHealthBody"><div class="empty" style="padding:20px;">Parse failure rate 24h, IA errors 1h, backoff status DeepSeek. Cron 1h.</div></div>
+    </div>
+    <!-- Live Storm Manager -->
+    <div class="agent-card" id="agent-live-storm">
+      <div class="agent-head">
+        <span class="agent-title">⚡ Live Storm Manager</span>
+        <span class="agent-meta" id="liveStormMeta">—</span>
+        <button class="agent-refresh" data-agent="live-storm">↻</button>
+      </div>
+      <div class="agent-body" id="liveStormBody"><div class="empty" style="padding:20px;">Detecta totalLive&gt;15 partidas. Sugere prioritização de polls.</div></div>
+    </div>
     <!-- Health Sentinel + Auto-Healer -->
     <div class="agent-card" id="agent-health-sentinel">
       <div class="agent-head">
@@ -846,6 +918,139 @@
     </div>` + stepsHtml + compareHtml + shortcircuitHtml;
   }
 
+  // ── Renderers compactos pros 8 agents extended ──
+  function _renderGenericKv(id, data, opts = {}) {
+    const body = document.getElementById(id + 'Body');
+    const meta = document.getElementById(id + 'Meta');
+    if (!body) return;
+    if (!data || data.error || !data.ok) {
+      body.innerHTML = `<div class="empty" style="color:var(--err);">${escapeHtml(data?.error || 'sem dados')}</div>`;
+      return;
+    }
+    if (meta) meta.textContent = data.at ? new Date(data.at).toLocaleTimeString() : '';
+    body.innerHTML = opts.html || `<pre style="font-size:11px;color:#9ca3af;white-space:pre-wrap;max-height:400px;overflow:auto">${escapeHtml(JSON.stringify(data, null, 2).slice(0, 6000))}</pre>`;
+  }
+
+  function renderBacktestValidator(data) {
+    const body = document.getElementById('backtestValidatorBody');
+    const meta = document.getElementById('backtestValidatorMeta');
+    if (!body) return;
+    if (!data || !data.ok) { body.innerHTML = `<div class="empty" style="color:var(--err);">${escapeHtml(data?.error || 'sem dados')}</div>`; return; }
+    meta.textContent = `${data.total_tips} tips ${data.days}d`;
+    const o = data.overall || {};
+    const v = o.verdict || {};
+    const sportsHtml = (data.sports || []).map(s => {
+      const vc = s.verdict.code;
+      const bg = vc === 'edge_real' ? 'rgba(34,197,94,0.12)' : vc === 'noise' || vc === 'bleed' ? 'rgba(239,68,68,0.12)' : vc === 'insufficient' ? 'rgba(107,114,128,0.1)' : 'rgba(251,191,36,0.10)';
+      return `<tr style="background:${bg}"><td><b>${escapeHtml(s.sport)}</b></td><td style="text-align:right">${s.n}</td><td style="text-align:right">${s.roi >= 0 ? '+' : ''}${s.roi}%</td><td style="text-align:right">${s.brier ?? '—'}</td><td style="text-align:right">${s.brier_edge != null ? (s.brier_edge >= 0 ? '+' : '') + s.brier_edge : '—'}</td><td style="text-align:right">R$${s.gates_net_reais >= 0 ? '+' : ''}${s.gates_net_reais}</td><td>${s.verdict.label}</td></tr>`;
+    }).join('');
+    body.innerHTML = `
+      <div style="padding:10px;background:#0f1729;border-radius:6px;margin-bottom:10px;font-size:12px">
+        <div style="font-weight:700;font-size:14px;margin-bottom:6px">${v.label}</div>
+        <div style="color:#9ca3af">n=${o.n} | ROI ${o.roi >= 0 ? '+' : ''}${o.roi}% | Brier ${o.brier ?? '-'} vs baseline ${o.baseline_brier ?? '-'} (edge ${o.brier_edge != null ? (o.brier_edge >= 0 ? '+' : '') + o.brier_edge : '-'})</div>
+        <div style="color:#9ca3af;margin-top:4px">Gates: ${o.gates_blocked} bloqueadas | Net R$${o.gates_net_reais >= 0 ? '+' : ''}${o.gates_net_reais}</div>
+      </div>
+      <table class="agent-table" style="font-size:11px"><thead><tr><th>Sport</th><th style="text-align:right">N</th><th style="text-align:right">ROI</th><th style="text-align:right">Brier</th><th style="text-align:right">Δ vs base</th><th style="text-align:right">Gates net</th><th>Veredito</th></tr></thead><tbody>${sportsHtml}</tbody></table>`;
+  }
+
+  function renderBankrollGuardian(data) {
+    const body = document.getElementById('bankrollGuardianBody');
+    const meta = document.getElementById('bankrollGuardianMeta');
+    if (!body) return;
+    if (!data || !data.ok) { body.innerHTML = `<div class="empty" style="color:var(--err);">${escapeHtml(data?.error || 'sem dados')}</div>`; return; }
+    const o = data.overall || {};
+    meta.innerHTML = `R$${o.total_current?.toFixed(2)} (DD ${o.overall_drawdown_pct?.toFixed(1)}%)`;
+    const sevColor = { ok: '#34d399', info: '#fde68a', warning: '#fbbf24', critical: '#fca5a5' };
+    const sportsHtml = (data.sports || []).map(s => `<tr style="border-left:3px solid ${sevColor[s.severity] || '#374151'};"><td><b>${escapeHtml(s.sport)}</b></td><td style="text-align:right">R$${s.initial_banca.toFixed(2)}</td><td style="text-align:right">R$${s.current_banca.toFixed(2)}</td><td style="text-align:right">${s.growth_pct >= 0 ? '+' : ''}${s.growth_pct.toFixed(1)}%</td><td style="text-align:right">${s.drawdown_pct.toFixed(1)}%</td><td style="color:${sevColor[s.severity]}">${s.severity}</td><td style="font-size:10px;color:#9ca3af">${s.action_recommended || ''}</td></tr>`).join('');
+    body.innerHTML = `
+      <div style="padding:10px;background:#0f1729;border-radius:6px;margin-bottom:10px;font-size:12px">
+        <b>Total:</b> R$${o.total_initial?.toFixed(2)} → <b style="color:${o.overall_growth_pct >= 0 ? '#34d399' : '#fca5a5'}">R$${o.total_current?.toFixed(2)}</b> (${o.overall_growth_pct >= 0 ? '+' : ''}${o.overall_growth_pct?.toFixed(2)}% | DD ${o.overall_drawdown_pct?.toFixed(2)}%) | Pico R$${o.total_peak?.toFixed(2)}
+      </div>
+      <table class="agent-table" style="font-size:11px"><thead><tr><th>Sport</th><th style="text-align:right">Inicial</th><th style="text-align:right">Atual</th><th style="text-align:right">Growth</th><th style="text-align:right">DD</th><th>Sev</th><th>Ação</th></tr></thead><tbody>${sportsHtml}</tbody></table>`;
+  }
+
+  function renderCutAdvisor(data) {
+    const body = document.getElementById('cutAdvisorBody');
+    const meta = document.getElementById('cutAdvisorMeta');
+    if (!body) return;
+    if (!data || !data.ok) { body.innerHTML = `<div class="empty" style="color:var(--err);">${escapeHtml(data?.error || 'sem dados')}</div>`; return; }
+    const s = data.summary || {};
+    meta.textContent = `${s.candidates || 0} candidatos | R$${s.total_daily_loss_at_risk_reais || 0}/dia em risco`;
+    const cutsHtml = (data.candidates || []).slice(0, 10).map(c => `<tr style="background:rgba(239,68,68,0.08)"><td><code>${escapeHtml(c.bucket)}</code></td><td style="text-align:right">${c.n}</td><td style="text-align:right;color:#fca5a5">${c.roi}%</td><td style="text-align:right;color:#fca5a5">R$-${c.expected_daily_loss_reais}/dia</td><td style="color:#86efac;font-size:10px">${escapeHtml(c.suggestion_env || '—')}</td></tr>`).join('');
+    const scaleHtml = (data.scale_ups || []).slice(0, 5).map(c => `<tr style="background:rgba(34,197,94,0.08)"><td><code>${escapeHtml(c.bucket)}</code></td><td style="text-align:right">${c.n}</td><td style="text-align:right;color:#6ee7b7">+${c.roi}%</td><td style="text-align:right;color:#6ee7b7">R$+${c.expected_daily_profit_reais}/dia</td></tr>`).join('');
+    body.innerHTML = `
+      ${cutsHtml ? `<div style="margin-bottom:10px"><div style="font-size:11px;color:#fca5a5;margin-bottom:4px">🛑 CUT CANDIDATES</div><table class="agent-table" style="font-size:11px"><thead><tr><th>Bucket</th><th style="text-align:right">N</th><th style="text-align:right">ROI</th><th style="text-align:right">Loss/dia</th><th>Env sugerida</th></tr></thead><tbody>${cutsHtml}</tbody></table></div>` : ''}
+      ${scaleHtml ? `<div><div style="font-size:11px;color:#6ee7b7;margin-bottom:4px">📈 SCALE UP</div><table class="agent-table" style="font-size:11px"><thead><tr><th>Bucket</th><th style="text-align:right">N</th><th style="text-align:right">ROI</th><th style="text-align:right">Profit/dia</th></tr></thead><tbody>${scaleHtml}</tbody></table></div>` : ''}
+      ${!cutsHtml && !scaleHtml ? '<div class="empty" style="color:var(--muted);padding:12px">Sem candidatos.</div>' : ''}`;
+  }
+
+  function renderPreMatchCheck(data) {
+    const body = document.getElementById('preMatchCheckBody');
+    const meta = document.getElementById('preMatchCheckMeta');
+    if (!body) return;
+    if (!data || !data.ok) { body.innerHTML = `<div class="empty" style="color:var(--err);">${escapeHtml(data?.error || 'sem dados')}</div>`; return; }
+    const s = data.summary || {};
+    meta.textContent = `${s.tips_checked || 0} tips | ${s.alerts || 0} alertas`;
+    if (!data.alerts?.length) { body.innerHTML = '<div class="empty" style="color:#86efac;padding:12px">✅ Nenhum alerta.</div>'; return; }
+    const sevIcon = { critical: '🚨', warning: '⚠️' };
+    body.innerHTML = `<table class="agent-table" style="font-size:11px"><thead><tr><th>Sev</th><th>Tip</th><th>Sport</th><th>Detalhe</th></tr></thead><tbody>${data.alerts.map(a => `<tr><td>${sevIcon[a.severity] || '⚠️'}</td><td>#${a.tip_id}</td><td>${escapeHtml(a.sport)}</td><td style="color:#9ca3af">${escapeHtml(a.detail || '')}</td></tr>`).join('')}</tbody></table>`;
+  }
+
+  function renderNewsMonitor(data) {
+    const body = document.getElementById('newsMonitorBody');
+    const meta = document.getElementById('newsMonitorMeta');
+    if (!body) return;
+    if (!data || !data.ok) { body.innerHTML = `<div class="empty" style="color:var(--err);">${escapeHtml(data?.error || 'sem dados')}</div>`; return; }
+    const s = data.summary || {};
+    meta.textContent = `${s.total_alerts || 0} alerts | ${s.tips_affected || 0} tips afetadas | ${s.sources_ok}/${s.sources_fetched} sources`;
+    if (!data.alerts?.length) { body.innerHTML = '<div class="empty" style="color:#86efac;padding:12px">✅ Sem news flagrantes.</div>'; return; }
+    const sevBg = { critical: 'rgba(239,68,68,0.12)', warning: 'rgba(251,191,36,0.10)' };
+    body.innerHTML = `<table class="agent-table" style="font-size:11px"><thead><tr><th>Sev</th><th>Sport</th><th>Source</th><th>Title</th><th>Tips afetadas</th></tr></thead><tbody>${data.alerts.slice(0, 20).map(a => `<tr style="background:${sevBg[a.severity] || ''};"><td>${a.severity === 'critical' ? '🚨' : '⚠️'}</td><td>${escapeHtml(a.sport)}</td><td style="font-size:10px;color:#6b7280">${escapeHtml(a.source)}</td><td>${a.link ? `<a href="${escapeHtml(a.link)}" target="_blank" style="color:#93c5fd">${escapeHtml(a.title)}</a>` : escapeHtml(a.title)}</td><td>${a.matched_tips_count > 0 ? `🎯 ${a.matched_tips_count}` : '—'}</td></tr>`).join('')}</tbody></table>`;
+  }
+
+  function renderModelCalibration(data) {
+    const body = document.getElementById('modelCalibrationBody');
+    const meta = document.getElementById('modelCalibrationMeta');
+    if (!body) return;
+    if (!data || !data.ok) { body.innerHTML = `<div class="empty" style="color:var(--err);">${escapeHtml(data?.error || 'sem dados')}</div>`; return; }
+    const s = data.summary || {};
+    meta.textContent = `${s.sports_evaluated || 0} sports | ${s.alerts || 0} alertas`;
+    const rows = (data.sports || []).map(sp => {
+      const cls = sp.severity === 'warning' ? 'rgba(251,191,36,0.10)' : sp.severity === 'info' ? 'rgba(96,165,250,0.10)' : '';
+      return `<tr style="background:${cls}"><td><b>${escapeHtml(sp.sport)}</b></td><td style="text-align:right">${sp.recent_brier} (n=${sp.recent_n})</td><td style="text-align:right">${sp.baseline_brier ?? '—'}</td><td style="text-align:right;color:${sp.drift > 0 ? '#fca5a5' : sp.drift < 0 ? '#86efac' : '#9ca3af'}">${sp.drift != null ? (sp.drift >= 0 ? '+' : '') + sp.drift : '—'}</td><td>${sp.severity}</td></tr>`;
+    }).join('');
+    body.innerHTML = `<table class="agent-table" style="font-size:11px"><thead><tr><th>Sport</th><th style="text-align:right">Brier 30d</th><th style="text-align:right">Brier 90d-30d</th><th style="text-align:right">Drift</th><th>Status</th></tr></thead><tbody>${rows}</tbody></table>`;
+  }
+
+  function renderIaHealth(data) {
+    const body = document.getElementById('iaHealthBody');
+    const meta = document.getElementById('iaHealthMeta');
+    if (!body) return;
+    if (!data || !data.ok) { body.innerHTML = `<div class="empty" style="color:var(--err);">${escapeHtml(data?.error || 'sem dados')}</div>`; return; }
+    const s = data.summary || {};
+    meta.innerHTML = `parse fail ${s.parse_failure_rate_24h ?? '-'}% | errors 1h: ${s.ia_errors_1h ?? '-'} | backoff: ${s.backoff_active ? '🚨 ON' : '✅ OFF'}`;
+    const alertsHtml = (data.alerts || []).map(a => `<div style="padding:8px;background:rgba(239,68,68,0.10);border-left:3px solid #ef4444;border-radius:4px;margin-bottom:6px;font-size:11px"><b>${a.severity.toUpperCase()}</b> — ${escapeHtml(a.message)}<br><span style="color:#86efac;font-size:10px">💡 ${escapeHtml(a.suggestion || '')}</span></div>`).join('');
+    body.innerHTML = `
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:10px;font-size:12px">
+        <div style="background:#0f1729;padding:8px;border-radius:4px"><div style="color:#6b7280;font-size:10px">Parse failure 24h</div><div style="font-weight:700">${s.parse_failure_rate_24h ?? '-'}%</div></div>
+        <div style="background:#0f1729;padding:8px;border-radius:4px"><div style="color:#6b7280;font-size:10px">IA errors 1h</div><div style="font-weight:700">${s.ia_errors_1h ?? '-'}</div></div>
+        <div style="background:#0f1729;padding:8px;border-radius:4px"><div style="color:#6b7280;font-size:10px">Backoff</div><div style="font-weight:700">${s.backoff_active ? '🚨 ON' : '✅ OFF'}</div></div>
+      </div>
+      ${alertsHtml || '<div class="empty" style="color:#86efac;padding:12px">✅ IA saudável.</div>'}`;
+  }
+
+  function renderLiveStorm(data) {
+    const body = document.getElementById('liveStormBody');
+    const meta = document.getElementById('liveStormMeta');
+    if (!body) return;
+    if (!data || !data.ok) { body.innerHTML = `<div class="empty" style="color:var(--err);">${escapeHtml(data?.error || 'sem dados')}</div>`; return; }
+    meta.innerHTML = `${data.live_total} live ${data.storm_active ? '⚡ STORM' : '🟢 normal'} (threshold ${data.storm_threshold})`;
+    const sportsHtml = Object.entries(data.by_sport || {}).map(([s, n]) => `<span style="background:#1f2937;padding:3px 8px;border-radius:4px;font-size:11px;margin-right:6px">${escapeHtml(s)}: ${n}</span>`).join('');
+    body.innerHTML = `
+      <div style="margin-bottom:10px;font-size:12px">${sportsHtml}</div>
+      <ul style="font-size:11px;color:#9ca3af;line-height:1.6">${(data.recommendations || []).map(r => `<li>${escapeHtml(r)}</li>`).join('')}</ul>`;
+  }
+
   async function fetchAgent(name, params = '') {
     const btn = document.querySelector(`.agent-refresh[data-agent="${name}"]`);
     if (btn) btn.classList.add('loading');
@@ -858,8 +1063,16 @@
       if (name === 'weekly-review') renderWeeklyReview(data);
       if (name === 'health-sentinel') renderHealthSentinel(data);
       if (name === 'orchestrator') renderOrchestrator(data);
+      if (name === 'backtest-validator') renderBacktestValidator(data);
+      if (name === 'bankroll-guardian') renderBankrollGuardian(data);
+      if (name === 'cut-advisor') renderCutAdvisor(data);
+      if (name === 'pre-match-check') renderPreMatchCheck(data);
+      if (name === 'news-monitor') renderNewsMonitor(data);
+      if (name === 'model-calibration') renderModelCalibration(data);
+      if (name === 'ia-health') renderIaHealth(data);
+      if (name === 'live-storm') renderLiveStorm(data);
     } catch (e) {
-      const map = { 'live-scout': 'liveScoutBody', 'roi-analyst': 'roiAnalystBody', 'feed-medic': 'feedMedicBody', 'weekly-review': 'weeklyReviewBody', 'health-sentinel': 'healthSentinelBody', 'orchestrator': 'orchestratorBody' };
+      const map = { 'live-scout': 'liveScoutBody', 'roi-analyst': 'roiAnalystBody', 'feed-medic': 'feedMedicBody', 'weekly-review': 'weeklyReviewBody', 'health-sentinel': 'healthSentinelBody', 'orchestrator': 'orchestratorBody', 'backtest-validator': 'backtestValidatorBody', 'bankroll-guardian': 'bankrollGuardianBody', 'cut-advisor': 'cutAdvisorBody', 'pre-match-check': 'preMatchCheckBody', 'news-monitor': 'newsMonitorBody', 'model-calibration': 'modelCalibrationBody', 'ia-health': 'iaHealthBody', 'live-storm': 'liveStormBody' };
       const el = document.getElementById(map[name]);
       if (el) el.innerHTML = `<div class="empty" style="color:var(--err);">fetch falhou: ${escapeHtml(String(e.message||e))}</div>`;
     } finally {
@@ -868,9 +1081,17 @@
   }
 
   function refreshAgents() {
+    fetchAgent('backtest-validator');
     fetchAgent('health-sentinel');
     fetchAgent('weekly-review');
+    fetchAgent('bankroll-guardian');
+    fetchAgent('cut-advisor');
     fetchAgent('live-scout');
+    fetchAgent('pre-match-check');
+    fetchAgent('news-monitor');
+    fetchAgent('model-calibration');
+    fetchAgent('ia-health');
+    fetchAgent('live-storm');
     const sel = document.getElementById('roiDaysSel');
     fetchAgent('roi-analyst', '?days=' + (sel?.value || '30'));
     fetchAgent('feed-medic');

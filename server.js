@@ -8119,6 +8119,14 @@ const server = http.createServer(async (req, res) => {
       .catch(e => sendJson(res, { ok: false, error: e.message }, 500));
     return;
   }
+  if (p === '/agents/backtest-validator') {
+    if (!requireAdmin(req, res)) return;
+    const ext = require('./lib/agents-extended');
+    const days = parseInt(parsed.query.days || '90', 10);
+    ext.runBacktestValidator(db, { days }).then(d => sendJson(res, d))
+      .catch(e => sendJson(res, { ok: false, error: e.message }, 500));
+    return;
+  }
 
   // Orchestrator: roda workflows compostos (sentinel + healer, scout + medic, etc).
   // GET /agents/orchestrator?workflow=full_diagnostic
@@ -8148,6 +8156,7 @@ const server = http.createServer(async (req, res) => {
         'live-storm': () => ext.runLiveStormManager(base),
         'ia-health': () => ext.runIaHealthMonitor(base, dashboard.getClassifiedBuffer),
         'news-monitor': () => ext.runNewsMonitor(base, db),
+        'backtest-validator': (args) => ext.runBacktestValidator(db, args || {}),
         'auto-healer': async () => ({ ok: true, note: 'auto-healer roda via cron interno do bot.js (a cada 5min). Endpoint orchestrator não invoca diretamente.', applied: [] }),
       },
     };

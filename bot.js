@@ -2358,6 +2358,55 @@ async function runIaHealthCycle() {
   for (const adminId of ADMIN_IDS) await sendDM(tokenForAlert, adminId, msg).catch(() => {});
 }
 
+// ── Backtest Validator (1x/dia) ──
+let _lastBacktestAlert = 0;
+const _backtestMilestonesSeen = new Set();
+async function runBacktestValidatorCycle() {
+  if (!ADMIN_IDS.size) return;
+  let result = null;
+  try {
+    const ext = require('./lib/agents-extended');
+    result = await ext.runBacktestValidator(db, { days: 90 });
+  } catch (e) {
+    log('WARN', 'BACKTEST-VALIDATOR', `falhou: ${e.message}`);
+    return;
+  }
+  if (!result?.ok) return;
+  log('INFO', 'BACKTEST-VALIDATOR', `Ciclo: ${result.total_tips} tips | overall ${result.overall.verdict.code} | ${result.summary.edge_real} edge_real | ${result.summary.bleed} bleed`);
+
+  // Marcos novos (n=30, n=100, n=300) — sempre alerta
+  const newMilestones = (result.milestones || []).filter(m => !_backtestMilestonesSeen.has(`${m.sport}|${m.milestone}`));
+  for (const m of newMilestones) _backtestMilestonesSeen.add(`${m.sport}|${m.milestone}`);
+
+  // Alerta condicional: bleed/noise ou marcos atingidos. Cooldown 24h pra DMs regulares.
+  const hasBleed = result.summary.bleed > 0;
+  const cooldownExpired = Date.now() - _lastBacktestAlert > 24 * 60 * 60 * 1000;
+  if (!newMilestones.length && !hasBleed && !cooldownExpired) return;
+
+  _lastBacktestAlert = Date.now();
+  const tokenForAlert = Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
+  if (!tokenForAlert) return;
+
+  const overall = result.overall;
+  const lines = [];
+  lines.push(`*Overall (${result.total_tips} tips, ${result.days}d):* ${overall.verdict.label}`);
+  lines.push(`  ROI ${overall.roi >= 0 ? '+' : ''}${overall.roi}% | Brier ${overall.brier ?? '-'} vs baseline ${overall.baseline_brier ?? '-'} (edge ${overall.brier_edge != null ? (overall.brier_edge >= 0 ? '+' : '') + overall.brier_edge : '-'})`);
+  lines.push(`  Gates net: R$${overall.gates_net_reais >= 0 ? '+' : ''}${overall.gates_net_reais} (${overall.gates_blocked} bloqueadas)`);
+  lines.push('');
+  lines.push('*Por sport:*');
+  for (const s of result.sports) {
+    if (s.verdict.code === 'insufficient') continue;
+    lines.push(`  ${s.verdict.label} *${s.sport}* (n=${s.n}) — ${s.verdict.detail}`);
+  }
+  if (newMilestones.length) {
+    lines.push('');
+    lines.push('*Marcos atingidos:*');
+    for (const m of newMilestones) lines.push(`  🎯 ${m.sport}: ${m.milestone}`);
+  }
+  const msg = `🔬 *BACKTEST VALIDATOR*\n\n${lines.join('\n')}\n\n_Cron 1x/dia. Cooldown DM 24h._`;
+  for (const adminId of ADMIN_IDS) await sendDM(tokenForAlert, adminId, msg).catch(() => {});
+}
+
 // ── Model Calibration Watcher (semanal) ──
 let _lastModelCalibAlert = 0;
 
@@ -9237,6 +9286,10 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   // Model Calibration Watcher: cron 1x/semana (segunda 7h UTC = 4h BRT).
   setInterval(() => runModelCalibrationCycle().catch(e => log('ERROR', 'MODEL-CALIB', e.message)), 24 * 60 * 60 * 1000);
   setTimeout(() => runModelCalibrationCycle().catch(() => {}), 60 * 60 * 1000); // 1h pós-boot
+
+  // Backtest Validator: cron 1x/dia, valida modelo via gates retroativos.
+  setInterval(() => runBacktestValidatorCycle().catch(e => log('ERROR', 'BACKTEST-VALIDATOR', e.message)), 24 * 60 * 60 * 1000);
+  setTimeout(() => runBacktestValidatorCycle().catch(() => {}), 30 * 60 * 1000); // 30min pós-boot
 
   // Daily Health workflow: cron 1x/dia 8h BRT (11h UTC).
   setInterval(() => runDailyHealthIfTime().catch(e => log('ERROR', 'DAILY-HEALTH', e.message)), 30 * 60 * 1000);
