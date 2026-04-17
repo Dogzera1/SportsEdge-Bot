@@ -7192,7 +7192,8 @@ async function pollValorant(runOnce = false) {
               const stats = await vlr.getMatchStats(found.matchId).catch(() => null);
               if (stats) vlrLive = vlr.summarizeLive(stats, match.team1, match.team2);
               if (vlrLive) {
-                log('INFO', 'AUTO-VAL', `VLR ${match.team1} vs ${match.team2}: ${vlrLive.currentMap || '?'} R${vlrLive.currentRound} | ${vlrLive.t1.name} ${vlrLive.t1.score}(CT${vlrLive.t1.ct}/A${vlrLive.t1.atk}|${vlrLive.t1.side}) vs ${vlrLive.t2.name} ${vlrLive.t2.score}(CT${vlrLive.t2.ct}/A${vlrLive.t2.atk}|${vlrLive.t2.side})`);
+                const conf = vlrLive.sideConfident ? '✓' : (vlrLive.overtime ? 'OT' : '~');
+                log('INFO', 'AUTO-VAL', `VLR[${conf}] ${match.team1} vs ${match.team2}: ${vlrLive.currentMap || '?'} R${vlrLive.currentRound} | ${vlrLive.t1.name} ${vlrLive.t1.score}(${vlrLive.t1.side}; CT${vlrLive.t1.ct}/A${vlrLive.t1.atk}) vs ${vlrLive.t2.name} ${vlrLive.t2.score}(${vlrLive.t2.side}; CT${vlrLive.t2.ct}/A${vlrLive.t2.atk})`);
               }
             }
           } catch (_) {}
@@ -7238,6 +7239,50 @@ async function pollValorant(runOnce = false) {
         if (pickOdd < VAL_MIN_ODDS || pickOdd > VAL_MAX_ODDS) {
           analyzedValorant.set(key, { ts: now, tipSent: false });
           continue;
+        }
+
+        // ── Gates específicos de LIVE (mitigam limitações do VLR) ──
+        // Preview da confidence (mesma fórmula do bloco original abaixo).
+        const _confPreview = (elo.eloMatches1 >= 20 && elo.eloMatches2 >= 20 && factorCount >= 3) ? 'ALTA'
+                           : factorCount >= 2 ? 'MÉDIA' : 'BAIXA';
+        if (isLiveVal) {
+          const VAL_LIVE_MIN_EV_NO_VLR = parseFloat(process.env.VAL_LIVE_MIN_EV_NO_VLR || '8');
+          const VAL_LIVE_MIN_EV_AMBIG  = parseFloat(process.env.VAL_LIVE_MIN_EV_AMBIG  || '6');
+          if (!vlrLive) {
+            // Sem contexto live: tip live às cegas (sem mapa/side/round). Endurece.
+            if (evPct < VAL_LIVE_MIN_EV_NO_VLR) {
+              analyzedValorant.set(key, { ts: now, tipSent: false });
+              log('INFO', 'AUTO-VAL', `Gate live-sem-VLR: EV ${evPct.toFixed(1)}% < ${VAL_LIVE_MIN_EV_NO_VLR}% (partida live sem contexto) — rejeitado`);
+              continue;
+            }
+            if (_confPreview === 'BAIXA') {
+              analyzedValorant.set(key, { ts: now, tipSent: false });
+              log('INFO', 'AUTO-VAL', `Gate live-sem-VLR: conf BAIXA rejeitada (sem contexto live)`);
+              continue;
+            }
+          } else if (!vlrLive.sideConfident) {
+            // VLR com side ambíguo (overtime ou sem round 1 parseável). EV mínimo maior.
+            if (evPct < VAL_LIVE_MIN_EV_AMBIG) {
+              analyzedValorant.set(key, { ts: now, tipSent: false });
+              log('INFO', 'AUTO-VAL', `Gate live-ambíguo (${vlrLive.overtime ? 'OT' : 'sem round1'}): EV ${evPct.toFixed(1)}% < ${VAL_LIVE_MIN_EV_AMBIG}% — rejeitado`);
+              continue;
+            }
+            if (_confPreview === 'BAIXA') {
+              analyzedValorant.set(key, { ts: now, tipSent: false });
+              log('INFO', 'AUTO-VAL', `Gate live-ambíguo: conf BAIXA rejeitada`);
+              continue;
+            }
+          }
+          // Mapa avançado (R20+ em half 2): resultado virtualmente decidido; rejeita tips novas.
+          if (vlrLive && vlrLive.currentRound >= 20 && !vlrLive.overtime) {
+            const leader = Math.max(vlrLive.t1.score, vlrLive.t2.score);
+            const trailing = Math.min(vlrLive.t1.score, vlrLive.t2.score);
+            if (leader >= 12 && (leader - trailing) >= 3) {
+              analyzedValorant.set(key, { ts: now, tipSent: false });
+              log('INFO', 'AUTO-VAL', `Gate map-closing: R${vlrLive.currentRound} ${vlrLive.t1.score}-${vlrLive.t2.score} — resultado próximo, tip rejeitada`);
+              continue;
+            }
+          }
         }
 
         const stake = calcKellyWithP(pickP, pickOdd, 1/8);
