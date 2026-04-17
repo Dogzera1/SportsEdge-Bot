@@ -789,7 +789,124 @@ sportsedge.db                   — DB local (Railway: /data/sportsedge.db)
 
 ---
 
-## 12. ESTADO ATUAL (snapshot 2026-04-17)
+## 12. CUSTOS OPERACIONAIS
+
+Sistema tem 12 dias em produção (deploy inicial Abril/2026). Tracking real via endpoint **`GET /cost-summary?month=YYYY-MM`** + card no dashboard.
+
+### Provedores pagos (com custo recorrente)
+
+| Provider | Tier | Pricing | Tracking |
+|---|---|---|---|
+| **DeepSeek** | API key | $0.14/M input + $0.28/M output (deepseek-chat sem cache) | tabela `api_usage` (auto: count + tokens registrados a cada `/claude` proxy) |
+| **The Odds API** | Free 500/mo + paid $0.005/req | budget mensal trackeado in-memory (`oddsApiQuotaStatus()`) | endpoint retorna `used/cap/pct` |
+| **Railway** | Hobby ($5/mo flat) ou Pay As You Go (~$5-10/mo pra 2 services) | Não expõe API de cost — estimativa via env `RAILWAY_MONTHLY_USD_EST` (default 7) | manual |
+
+### Provedores gratuitos
+
+- **Pinnacle Guest API** — sem auth, sem quota documentada (rate limit soft 3min cache local)
+- **PandaScore** — free tier 1000 calls/mo (não trackeamos calls atualmente)
+- **Riot LoL Esports API** — gratuita
+- **OpenDota** — gratuita (limit maior com `OPENDOTA_API_KEY`)
+- **Steam Realtime** — gratuita (precisa `STEAM_WEBAPI_KEY`)
+- **ESPN MMA/Tennis** — scraping gratuito
+- **Sofascore** — via proxy hosted no Railway (já contabilizado)
+- **HLTV / VLR.gg / Sherdog / CueTracker** — scraping gratuito (frágil, sujeito a quebras de HTML)
+
+### Custo total estimado / mês (snapshot abr/2026)
+
+Em fase inicial (12 dias, ~5 tips/dia/sport, ~250 chamadas DeepSeek/dia):
+- DeepSeek: ~$2-4/mo (~7500 calls × ~600+300 tokens)
+- The Odds API: $0 (dentro free tier)
+- Railway: $5-10/mo (estimativa)
+- **Total estimado: ~$7-15/mo (R$35-75 com USD/BRL = 5)**
+
+⚠️ Override no env:
+```
+RAILWAY_MONTHLY_USD_EST=10        # ajuste conforme billing real do Railway
+USD_BRL_RATE=5.20                 # taxa atual
+```
+
+### Quando preocupar
+
+- DeepSeek > $20/mo: high volume, considerar cache de respostas pra prompts repetidos
+- The Odds API > 80% quota: enable shadow ou aumentar TTL cache
+- Railway > $20/mo: investigar memory leak, reduzir poll intervals
+
+---
+
+## 13. KNOWN ISSUES / EM CONSTRUÇÃO
+
+### 🔧 Decisões provisórias (em janela de validação)
+
+| Item | Status | Janela | Risco se errar |
+|---|---|---|---|
+| Pre-Match Check cutoff 90min (match-missing) | ⚠️ provisório | revisar 2026-05-01 | False negative pra Bo3+ longos / tennis Slam |
+| Auto-Healer 12 fixes | 🧪 experimental | 14d (até 2026-05-01) | Fix que nunca dispara = ruído; fix mal-aplicado = damage |
+| News Monitor | 🧪 experimental | 30d (até 2026-05-15) | 70% expected false positive — vai virar spam? |
+| Auto-Shadow CLV cutoff -1% / n>=30 | 🧪 experimental | 30d | Cutoff frouxo demais pode demorar a flippar; apertado demais flippa demais |
+| Sharp divergence caps por sport | 🧪 calibração inicial | 30d | Caps frouxos = edge fictício passa; apertados = boas tips bloqueadas |
+| LoL tier 2-3 EV cap >25% | ⚠️ provisório | 30d | Pode estar bloqueando tips legítimas em tier 2-3 |
+| Bankroll Guardian thresholds 10/15/25% DD | 🧪 sem dados ainda | 60d | Sistema novo — precisa cenário real de drawdown |
+
+### 🚧 Em construção (parcial)
+
+- **Live Storm Manager** — só detecta totalLive>15 e sugere; **não age** (não muda intervals dos polls automaticamente). Implementação ativa pendente.
+- **Bankroll Guardian DD≥25% block** — alerta sai mas não bloqueia bot. Só auto-shadow temp em DD≥15%. Block real ficou TODO.
+- **Backtest expandido** — `scripts/backtest.js` existe mas não simula gates novos (`_sharpDivergenceGate`, tier-aware caps). Resultado pode super-estimar performance.
+- **PandaScore call tracking** — table `api_usage` não registra. Sem visibilidade de quanto da quota é consumida.
+- **Cache de respostas DeepSeek** — prompts idênticos (mesma partida re-analisada) re-chamam IA. Possível economia 30-50% de tokens.
+- **Live Scout alerts via DM** — funciona mas não tem snooze/ack (mesmo gap aparece a cada 60min sem fim).
+- **Tennis match_time** — tabela tips não armazena; agentes têm que estimar via sent_at + heurística.
+
+### 🔬 Hipóteses não validadas (precisam backtest)
+
+- **Modelos ML são fundamentalmente sound?** — Não validado. Sistema novo (12d). Plano original era esperar 60d coletando, mas se modelo é ruim, é desperdício.
+  - **Ação:** rodar `scripts/backtest.js` em match_results históricos (45d) e checar Brier + ROI simulado por sport antes de esperar mais 30d.
+- **Sharp divergence threshold corretos?** — Definidos por intuição, não data.
+  - **Ação:** backtest com caps diferentes (5/10/15/20pp) e comparar.
+- **IA second opinion adiciona valor?** — Não medido. Pode estar só rejeitando tips boas.
+  - **Ação:** rodar 30d comparando bucket com IA on vs off (shadow mode A/B).
+- **News Monitor captura edge real?** — Não validado.
+  - **Ação:** classificar manualmente 30 alerts: % afetou outcome de tip.
+- **Auto-Shadow critério (CLV<-1% n>=30)** — chutado.
+  - **Ação:** ver historicamente quantos sports flippariam e se CLV é proxy bom de ROI.
+
+### 🐛 Bugs conhecidos não fixados
+
+- **mutex_stale "Críticas pendentes" em DM** — fixado mas falso positivo ainda pode aparecer em janela curta. Cooldown de 30min/anomaly_id ajuda mas não elimina.
+- **Settlement_stale_<sport>** detecta tips >48h sem result, mas não distingue settlement realmente travado vs match com winner desconhecido vs name match falhou.
+- **DeepSeek tokens não registrados quando API antiga não retornava `usage`** — algumas calls dão custo $0 estimado errado.
+
+### 📚 Falta documentação
+
+- **Como adicionar sport novo** — não há runbook
+- **Como debugar tip não enviada** — checklist de gates falhados
+- **Como interpretar buckets do `/roi-matrix`** — `tier1` significa o quê em cada sport
+- **Como reverter migration de DB** — não temos script de rollback
+
+### 🔮 Backlog (priorizado)
+
+| Prio | Item | Esforço |
+|---|---|---|
+| 🔴 HIGH | `scripts/backtest.js` v2 — incluir gates novos + Brier por bucket | 4h |
+| 🔴 HIGH | Cost tracking real Railway (via webhook ou estimativa por uso) | 2h |
+| 🟡 MED | Cache de respostas DeepSeek (LRU 24h por hash do prompt) | 3h |
+| 🟡 MED | PandaScore quota tracking | 1h |
+| 🟡 MED | Bankroll Guardian DD≥25% block real | 2h |
+| 🟡 MED | Live Storm Manager: ação ativa (mudar intervals) | 4h |
+| 🟢 LOW | Snooze/ack pra Live Scout alerts | 2h |
+| 🟢 LOW | Comando admin `/banca <sport> <novo_valor>` | 1h |
+
+### 🔁 Decisões pendentes (debatidas, não decididas)
+
+- **Cortar sport sem edge após 30d?** — não definido critério final
+- **Promover sport com CLV positivo sustentado?** — não definido (aumentar Kelly fraction? expandir markets?)
+- **Adicionar mais bookmakers** (Betfair Exchange, Bet365)? — Betfair bloqueia BR
+- **Modelo ML mais sofisticado** (deep learning, gradient boosting)? — talvez overkill pra sample size atual
+
+---
+
+## 14. ESTADO ATUAL (snapshot 2026-04-17)
 
 - **9 sports ativos:** LoL, Dota, MMA, Tennis, CS, Valorant, Darts, Snooker, TT (Football disabled)
 - **Banca:** R$900 inicial → R$916 atual (+1.78%)

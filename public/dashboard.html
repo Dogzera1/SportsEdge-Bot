@@ -252,6 +252,15 @@
     </div>
   </div>
 
+  <!-- Cost Summary -->
+  <div class="table-card collapsible" id="costCard" data-collapsed="false">
+    <h3 onclick="toggleCard(this, event)" style="display:flex;align-items:center;justify-content:space-between;gap:0.8rem;flex-wrap:wrap">
+      <span><span class="toggle-arrow">&#9662;</span>&#128176; Custos Operacionais &mdash; <span id="costMeta" style="font-weight:400;font-size:0.78rem;color:#9ca3af"></span></span>
+      <span style="font-size:0.68rem;color:#6b7280;font-weight:400;text-transform:none;letter-spacing:0">mês atual</span>
+    </h3>
+    <div id="costBody"><div class="loading">Carregando...</div></div>
+  </div>
+
   <!-- Equity Curve -->
   <div class="table-card collapsible" id="equityCard" data-collapsed="false">
     <h3 onclick="toggleCard(this, event)" style="display:flex;align-items:center;justify-content:space-between;gap:0.8rem;flex-wrap:wrap">
@@ -466,6 +475,7 @@ async function loadAll() {
   loadShadow();
   loadRoiMatrix();
   loadClvDecay();
+  loadCostSummary();
   await tipsP;
   document.getElementById('lastUpdated').textContent = 'Atualizado: ' + new Date().toLocaleTimeString('pt-BR');
 }
@@ -578,6 +588,69 @@ async function loadHourly() {
   }).join('');
   el.innerHTML = `<div style="display:grid;grid-template-columns:repeat(12,1fr);gap:3px">${cells}</div>`;
   document.getElementById('hourlyMeta').textContent = `${totalN} tips | lucro R$${totalProfit.toFixed(2)} | ${data.timezone || ''}`;
+}
+
+async function loadCostSummary() {
+  const data = await apiFetch('/cost-summary');
+  const el = document.getElementById('costBody');
+  if (!el) return;
+  if (!data || data.error || !data.ok) {
+    el.innerHTML = '<div class="loading" style="color:#6b7280">' + (data?.error || 'sem dados') + '</div>';
+    return;
+  }
+  const ds = data.deepseek || {};
+  const odds = data.the_odds_api || {};
+  const rw = data.railway || {};
+  const totalUsd = data.total_usd || 0;
+  const totalBrl = data.total_brl || 0;
+  document.getElementById('costMeta').innerHTML =
+    `<b>R$${totalBrl.toFixed(2)}</b> ($${totalUsd.toFixed(2)} | rate ${data.usd_brl_rate}) — ${data.month}`;
+  const warningHtml = (data.warnings || []).length
+    ? `<div style="background:rgba(251,191,36,0.12);border-left:3px solid #fbbf24;padding:8px 12px;border-radius:4px;margin-bottom:10px;font-size:0.78rem;color:#fde68a">⚠️ ${data.warnings.join(' | ')}</div>`
+    : '';
+  el.innerHTML = warningHtml + `
+    <table style="font-size:0.82rem">
+      <thead><tr>
+        <th>Provider</th>
+        <th style="text-align:right">Uso</th>
+        <th style="text-align:right">Custo USD</th>
+        <th style="text-align:right">Custo BRL</th>
+        <th>Notas</th>
+      </tr></thead>
+      <tbody>
+        <tr>
+          <td><b>DeepSeek</b></td>
+          <td style="text-align:right">${ds.calls || 0} calls<br><span style="color:#6b7280;font-size:0.7rem">${(ds.prompt_tokens||0).toLocaleString()} in / ${(ds.completion_tokens||0).toLocaleString()} out</span></td>
+          <td style="text-align:right;font-weight:600">$${(ds.cost_usd + (ds.cost_usd_estimated_no_token_data || 0)).toFixed(4)}</td>
+          <td style="text-align:right;font-weight:600">R$${(ds.cost_brl || 0).toFixed(2)}</td>
+          <td style="font-size:0.7rem;color:#9ca3af">${ds.note || ''}</td>
+        </tr>
+        <tr>
+          <td><b>The Odds API</b></td>
+          <td style="text-align:right">${odds.used}/${odds.cap}<br><span style="color:${odds.pct>=80?'#fca5a5':'#6b7280'};font-size:0.7rem">${odds.pct}%</span></td>
+          <td style="text-align:right;font-weight:600">$${(odds.cost_usd || 0).toFixed(2)}</td>
+          <td style="text-align:right;font-weight:600">R$${(odds.cost_brl || 0).toFixed(2)}</td>
+          <td style="font-size:0.7rem;color:#9ca3af">${odds.note || ''}</td>
+        </tr>
+        <tr>
+          <td><b>Railway</b></td>
+          <td style="text-align:right;color:#6b7280">2 services</td>
+          <td style="text-align:right;font-weight:600">$${rw.estimated_usd}</td>
+          <td style="text-align:right;font-weight:600">R$${(rw.cost_brl || 0).toFixed(2)}</td>
+          <td style="font-size:0.7rem;color:#9ca3af">${rw.note || ''}</td>
+        </tr>
+        <tr style="border-top:2px solid #374151;background:#0f1729">
+          <td><b>TOTAL</b></td>
+          <td></td>
+          <td style="text-align:right;font-weight:700;color:#34d399">$${totalUsd.toFixed(2)}</td>
+          <td style="text-align:right;font-weight:700;color:#34d399">R$${totalBrl.toFixed(2)}</td>
+          <td style="font-size:0.7rem;color:#9ca3af">free APIs: Pinnacle, PandaScore, Riot, Sherdog, HLTV, VLR, ESPN</td>
+        </tr>
+      </tbody>
+    </table>
+    <div style="margin-top:8px;font-size:0.66rem;color:#6b7280">
+      Override Railway: ENV <code>RAILWAY_MONTHLY_USD_EST=10</code> | USD/BRL: ENV <code>USD_BRL_RATE=5.0</code>
+    </div>`;
 }
 
 async function loadRoiMatrix() {

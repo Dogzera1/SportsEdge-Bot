@@ -7036,6 +7036,94 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // Cost Summary: estima custos mensais de APIs externas + Railway.
+  // Baseado em: api_usage table (DeepSeek count + tokens) + oddsApiQuotaStatus + uptime.
+  // GET /cost-summary?month=2026-04 (default mês atual)
+  if (p === '/cost-summary') {
+    const monthParam = parsed.query.month || new Date().toISOString().slice(0, 7);
+    try {
+      // DeepSeek: tokens registrados via /claude proxy
+      const dsCallsRow = db.prepare(`SELECT count FROM api_usage WHERE provider = 'deepseek' AND month = ?`).get(monthParam);
+      const dsPromptRow = db.prepare(`SELECT count FROM api_usage WHERE provider = 'deepseek_prompt_tokens' AND month = ?`).get(monthParam);
+      const dsComplRow = db.prepare(`SELECT count FROM api_usage WHERE provider = 'deepseek_completion_tokens' AND month = ?`).get(monthParam);
+      const dsCalls = dsCallsRow?.count || 0;
+      const dsPromptTokens = dsPromptRow?.count || 0;
+      const dsComplTokens = dsComplRow?.count || 0;
+      // DeepSeek pricing (deepseek-chat, 2026-04): $0.14/M input, $0.28/M output (sem cache)
+      // Nota: DeepSeek tem tier de cache hit ($0.014/M) mas não temos visibilidade
+      const dsCostUSD = (dsPromptTokens / 1_000_000 * 0.14) + (dsComplTokens / 1_000_000 * 0.28);
+      // Estimativa caso tokens não estejam preenchidos (deepseek antiga não retornava usage):
+      // ~600 tokens prompt + 300 completion por call em média
+      const dsCostUSDEstimated = dsPromptTokens === 0 && dsComplTokens === 0
+        ? dsCalls * 0.0001596  // ((600 * 0.14) + (300 * 0.28)) / 1_000_000
+        : null;
+
+      // The Odds API: usa quota counter in-memory
+      const oddsStatus = require('./lib/utils').oddsApiQuotaStatus();
+      // Pricing The Odds API: free tier 500/mo, depois $0.005/req (estimativa)
+      const oddsCostUSD = Math.max(0, (oddsStatus.used - 500)) * 0.005;
+
+      // Railway: estimativa (sem API). 2 services (server+bot) com ~512MB RAM cada,
+      // sempre on. Hobby plan é $5/mo flat ou Pay As You Go ~$0.000231/min/GB-RAM
+      // Aproximação conservadora: $5-10/mo
+      const railwayEstUSD = parseFloat(process.env.RAILWAY_MONTHLY_USD_EST || '7');
+
+      // PandaScore: free tier 1000 calls/mo (não trackeamos calls)
+      // Pinnacle Guest API: gratuito
+      // Sofascore proxy: hosted no Railway (já contabilizado)
+      // Sherdog/HLTV/VLR scraping: gratuito
+
+      const totalUSD = dsCostUSD + (dsCostUSDEstimated || 0) + oddsCostUSD + railwayEstUSD;
+      const usdToBrl = parseFloat(process.env.USD_BRL_RATE || '5.0');
+
+      sendJson(res, {
+        ok: true,
+        month: monthParam,
+        usd_brl_rate: usdToBrl,
+        deepseek: {
+          calls: dsCalls,
+          prompt_tokens: dsPromptTokens,
+          completion_tokens: dsComplTokens,
+          cost_usd: parseFloat(dsCostUSD.toFixed(4)),
+          cost_usd_estimated_no_token_data: dsCostUSDEstimated != null ? parseFloat(dsCostUSDEstimated.toFixed(4)) : null,
+          cost_brl: parseFloat(((dsCostUSD + (dsCostUSDEstimated || 0)) * usdToBrl).toFixed(2)),
+          note: dsPromptTokens === 0 && dsComplTokens === 0
+            ? 'tokens não retornados pela API DeepSeek — custo estimado por call (~600 prompt+300 completion)'
+            : 'tokens reais via API usage',
+        },
+        the_odds_api: {
+          used: oddsStatus.used,
+          cap: oddsStatus.cap,
+          pct: oddsStatus.pct,
+          cost_usd: parseFloat(oddsCostUSD.toFixed(2)),
+          cost_brl: parseFloat((oddsCostUSD * usdToBrl).toFixed(2)),
+          note: oddsStatus.used <= 500 ? 'free tier' : `${oddsStatus.used - 500} calls acima de free tier × $0.005`,
+        },
+        railway: {
+          estimated_usd: railwayEstUSD,
+          cost_brl: parseFloat((railwayEstUSD * usdToBrl).toFixed(2)),
+          note: 'estimativa — Railway não expõe cost API. Override via env RAILWAY_MONTHLY_USD_EST',
+        },
+        free_apis: {
+          pinnacle: 'guest API gratuita',
+          pandascore: 'free tier 1000 calls/mo (não trackeado)',
+          sofascore_proxy: 'hosted no Railway (incluído)',
+          riot_lol: 'gratuita',
+          opendota: 'gratuita (com OPENDOTA_API_KEY tem limit maior)',
+          sherdog_hltv_vlr: 'scraping gratuito',
+          espn: 'gratuita',
+        },
+        total_usd: parseFloat(totalUSD.toFixed(2)),
+        total_brl: parseFloat((totalUSD * usdToBrl).toFixed(2)),
+        warnings: [
+          ...(oddsStatus.pct >= 80 ? [`The Odds API ${oddsStatus.pct}% da quota — risco de exceder free tier`] : []),
+          ...(dsCalls > 5000 ? [`DeepSeek ${dsCalls} calls este mês — alto volume`] : []),
+        ],
+      });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
   // ROI Matrix: agregação por (sport, phase, league_tier) — base pra decisão "cortar ou manter sport".
   // GET /roi-matrix?days=30
   if (p === '/roi-matrix') {
@@ -9028,6 +9116,20 @@ const server = http.createServer(async (req, res) => {
           sendJson(res, { error: errMsg || 'DeepSeek sem resposta' }, r.status || 502);
           return;
         }
+        // Track usage: count + tokens (prompt + completion)
+        try {
+          const month = new Date().toISOString().slice(0, 7);
+          stmts.incrApiUsage.run('deepseek', month);
+          // Tokens (DeepSeek retorna usage.prompt_tokens + completion_tokens quando disponível)
+          const ptok = ds.usage?.prompt_tokens || 0;
+          const ctok = ds.usage?.completion_tokens || 0;
+          if (ptok || ctok) {
+            stmts.incrApiUsage.run(`deepseek_tokens_in_${month}`, month);
+            // Acumula tokens via UPDATE direto (api_usage só guarda count, hack: usar provider compositekey)
+            db.prepare(`INSERT INTO api_usage (provider, month, count) VALUES (?, ?, ?) ON CONFLICT(provider, month) DO UPDATE SET count = count + excluded.count`).run('deepseek_prompt_tokens', month, ptok);
+            db.prepare(`INSERT INTO api_usage (provider, month, count) VALUES (?, ?, ?) ON CONFLICT(provider, month) DO UPDATE SET count = count + excluded.count`).run('deepseek_completion_tokens', month, ctok);
+          }
+        } catch (_) {}
         // Normaliza para o formato Claude (content[].text) para compatibilidade com bot.js
         sendJson(res, { content: [{ type: 'text', text }], model: dsPayload.model, provider: 'deepseek' });
       } catch(e) {
