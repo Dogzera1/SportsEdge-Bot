@@ -14,6 +14,36 @@ Registro cronológico de decisões significativas. Toda mudança de comportament
 
 ---
 
+## 2026-04-18 — Tennis Vetor 1 (fatigue/surface): 🔴 KILL após smoke test
+**Motivo:** Plano user "14 semanas Vetor 1" propunha features experimentais (fatigue, surface transition, weight decay) pra tennis. Fase 1A smoke test executado conforme plano; nenhuma feature passou kill switch.
+
+**Resultados smoke test (2026-04-18, n=52 tips tennis settled):**
+- `fatigue_minutes_avg_7d`: corr +0.0485 ❌
+- `matches_last_7d`: corr +0.0485 ❌
+- `matches_last_14d`: corr +0.0949 ❌ (próximo de 0.10 mas não bate)
+- `days_since_last_match`: n=0 (sem histórico)
+- `is_surface_transition`: corr +0.3780 mas n=8 (sample minúsculo)
+- `matches_since_transition`: corr +0.3181 mas n=8
+
+**Re-test após Sackmann sync (B+C do plano):** mesmo resultado. Sackmann só publica 2024; tips são 2026 — sem overlap temporal pra fatigue/recency.
+
+**Decisão consciente:** ACEITAR KILL conforme plano. Economia ~150-200h.
+
+**Achado paralelo importante:** lib/tennis-model.js JÁ tem fatigue v1 (`computeFatigueIndex`) com daysSinceLast, matchesLast7/14, fiveSetMatchesLast7, accumulationBonus, roundFatigue — aplicado +/-3pp via fatigueSubModel. Portanto Vetor 1 não traria diferencial.
+
+**Bônus do experimento:**
+- 5765 matches Sackmann 2024 sincronizados em match_results (útil pra H2H long-term + Brier baseline)
+- Endpoint `/admin/sync-sackmann` criado pra futuras sincs
+- `lib/tennis-features-v2.js` mantido pra possível reuso (surface_transition via Sackmann em Bo3+ longas temporadas)
+- Endpoint `/agents/tennis-v2-smoke` mantido pra re-testar quando dataset crescer
+
+**Reversão:** N/A (não houve mudança em modelo de negócio)
+**Status:** ✅ KILL definitivo — Vetor 1 não viável com infraestrutura atual
+
+**Próxima decisão pendente:**
+- Vetor 2 (latência em esports) — JÁ temos parcial (Steam RT Dota, VLR Valorant). Investigar aprofundamento.
+- OU aceitar premissa: modelagem pública não gera edge mensurável → focar em CLV (line shopping) e gates de proteção (já fazemos).
+
 ## 2026-04-18 — Calibração granular: 4 padrões observados (revisão 2026-05-02)
 **Motivo:** Backtest validator com calibração granular (ECE, sharpness, decomp Brier, reliability diagram) revelou padrões claros mas sample por bucket ainda pequeno (5-15 tips). Decisão de NÃO recalibrar agora — risco de overfit ao ruído. Anotado pra reavaliar quando n por bucket for ≥10 confiável.
 
