@@ -1,2 +1,2 @@
-[logs-dashboard] http://localhost:7777
-[logs-dashboard] buffer=5000 service=(default) stale_threshold=120000ms
+[logs-dashboard] http://localhost:7788
+[logs-dashboard] buffer=5000 service=dummy stale_threshold=120000ms

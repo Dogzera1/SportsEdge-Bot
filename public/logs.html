@@ -118,6 +118,28 @@
   .sport-tag.tennis { background: rgba(52,211,153,.15); color: var(--ok); }
   .sport-tag.tabletennis { background: rgba(52,211,153,.12); color: #76c9a5; }
   .sport-tag.mma { background: rgba(255,150,100,.15); color: #ffaa80; }
+
+  /* ── Agents ── */
+  .agent-card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+  .agent-head { display: flex; align-items: center; gap: 10px; padding: 10px 14px; background: var(--panel2); border-bottom: 1px solid var(--border); }
+  .agent-title { font-size: 14px; font-weight: 700; }
+  .agent-meta { color: var(--muted); font-size: 11px; margin-left: auto; font-family: ui-monospace, Menlo, Consolas, monospace; }
+  .agent-refresh { background: var(--panel); border: 1px solid var(--border); color: var(--text); padding: 4px 10px; border-radius: 6px; cursor: pointer; font: inherit; font-size: 13px; }
+  .agent-refresh:hover { background: var(--border); }
+  .agent-refresh.loading { opacity: .4; pointer-events: none; }
+  .agent-body { padding: 12px 14px; }
+  .agent-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  .agent-table th { background: var(--panel2); color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .5px; padding: 6px 8px; text-align: left; }
+  .agent-table td { padding: 6px 8px; border-top: 1px solid var(--border); font-family: ui-monospace, Menlo, Consolas, monospace; }
+  .agent-table tr.has-flag td { background: rgba(248,113,113,.06); }
+  .flag-pill { display: inline-block; background: rgba(248,113,113,.18); color: var(--err); padding: 1px 6px; border-radius: 4px; font-size: 10px; margin-right: 3px; }
+  .num-pos { color: var(--ok); }
+  .num-neg { color: var(--err); }
+  .feed-ok   { color: var(--ok);   font-weight: 700; }
+  .feed-warn { color: var(--warn); font-weight: 700; }
+  .feed-err  { color: var(--err);  font-weight: 700; }
+  .gold-bar { display: inline-block; height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; width: 80px; vertical-align: middle; margin-left: 4px; position: relative; }
+  .gold-bar .fill { height: 100%; background: var(--accent); }
   .sport-tag.football { background: rgba(100,255,100,.12); color: #7adb7a; }
   .sport-tag.snooker { background: rgba(160,120,255,.15); color: #c4a8ff; }
   .sport-tag.darts { background: rgba(255,200,80,.15); color: #ffd060; }
@@ -161,6 +183,7 @@
   <button class="tab-btn" data-tab="live">Cobertura ao Vivo <span class="tab-count live" id="tabLiveCount">0</span></button>
   <button class="tab-btn" data-tab="errors">Erros <span class="tab-count err" id="tabErrCount">0</span></button>
   <button class="tab-btn" data-tab="status">Status dos Bots</button>
+  <button class="tab-btn" data-tab="agents">Agentes <span class="tab-count" id="tabAgentsCount">–</span></button>
 </div>
 
 <!-- ═══ Tab: Tips ═══ -->
@@ -233,6 +256,46 @@
   <div class="grid" id="grid"><div class="empty">carregando status...</div></div>
 </div>
 
+<!-- ═══ Tab: Agentes ═══ -->
+<div class="tab-pane" id="pane-agents">
+  <div class="agents-section" style="padding:18px;display:grid;grid-template-columns:1fr;gap:14px;">
+    <!-- Live Scout -->
+    <div class="agent-card" id="agent-live-scout">
+      <div class="agent-head">
+        <span class="agent-title">🔭 Live Scout</span>
+        <span class="agent-meta" id="liveScoutMeta">—</span>
+        <button class="agent-refresh" data-agent="live-scout">↻</button>
+      </div>
+      <div class="agent-body" id="liveScoutBody"><div class="empty" style="padding:20px;">clique em ↻ pra rodar</div></div>
+    </div>
+    <!-- ROI Analyst -->
+    <div class="agent-card" id="agent-roi-analyst">
+      <div class="agent-head">
+        <span class="agent-title">📈 ROI Analyst</span>
+        <span class="agent-meta">
+          <select id="roiDaysSel" style="background:var(--panel2);border:1px solid var(--border);color:var(--text);padding:2px 6px;border-radius:4px;font-size:11px;">
+            <option value="7">7d</option>
+            <option value="30" selected>30d</option>
+            <option value="90">90d</option>
+            <option value="365">1a</option>
+          </select>
+        </span>
+        <button class="agent-refresh" data-agent="roi-analyst">↻</button>
+      </div>
+      <div class="agent-body" id="roiAnalystBody"><div class="empty" style="padding:20px;">clique em ↻ pra rodar</div></div>
+    </div>
+    <!-- Feed Medic -->
+    <div class="agent-card" id="agent-feed-medic">
+      <div class="agent-head">
+        <span class="agent-title">🩺 Feed Medic</span>
+        <span class="agent-meta" id="feedMedicMeta">—</span>
+        <button class="agent-refresh" data-agent="feed-medic">↻</button>
+      </div>
+      <div class="agent-body" id="feedMedicBody"><div class="empty" style="padding:20px;">clique em ↻ pra rodar</div></div>
+    </div>
+  </div>
+</div>
+
 <script>
 (function(){
   const $grid = document.getElementById('grid');
@@ -256,6 +319,7 @@
     document.getElementById('pane-' + activeTab).classList.add('active');
     if (activeTab === 'live') refreshLiveMatches();
     if (activeTab === 'errors') refreshErrors();
+    if (activeTab === 'agents') refreshAgents();
   }));
 
   function statusKey(s) { return s === 'error' ? 'err' : s; }
@@ -483,12 +547,139 @@
     }
   }
 
-  $refresh.addEventListener('click', () => { refresh(); refreshLiveMatches(); refreshErrors(); });
+  // ─────────────────────────────────────────────────────────
+  // Agents tab
+  // ─────────────────────────────────────────────────────────
+  function fmtPct(x, digits = 1) {
+    if (x == null || !isFinite(x)) return '—';
+    const s = (x * 100).toFixed(digits) + '%';
+    return `<span class="${x >= 0 ? 'num-pos' : 'num-neg'}">${x >= 0 ? '+' : ''}${s}</span>`;
+  }
+  function fmtNum(x) { return x == null ? '—' : Number(x).toFixed(2); }
+  function escapeHtml(s) { return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+  function renderLiveScout(data) {
+    const meta = document.getElementById('liveScoutMeta');
+    const body = document.getElementById('liveScoutBody');
+    const badge = document.getElementById('tabAgentsCount');
+    if (!data.ok) {
+      meta.textContent = 'erro';
+      body.innerHTML = `<div class="empty" style="color:var(--err);">${escapeHtml(data.error || 'erro')}</div>`;
+      return;
+    }
+    meta.textContent = `${data.totalLive || 0} live · ${data.latency}ms · ${new Date(data.generatedAt).toLocaleTimeString()}`;
+    badge.textContent = data.totalLive || 0;
+    badge.className = 'tab-count ' + (data.gaps?.length ? 'err' : (data.totalLive ? 'live' : 'ok'));
+
+    const parts = [];
+    for (const [sport, rows] of Object.entries(data.sports)) {
+      if (!rows.length) continue;
+      parts.push(`<div style="margin-bottom:10px;"><b style="color:var(--accent);text-transform:uppercase;font-size:11px;">${sport}</b> <span style="color:var(--muted);font-size:11px;">(${rows.length})</span></div>`);
+      parts.push('<table class="agent-table"><thead><tr><th>liga</th><th>partida</th><th>série</th><th>game</th><th>delay</th><th>blue</th><th>red</th><th>diff</th><th>flags</th></tr></thead><tbody>');
+      for (const m of rows) {
+        const s = m.summary || {};
+        const blue = s.blue ? `${s.blue.gold}g ${s.blue.kills}K ${s.blue.towers}T ${s.blue.dragons}D` : '—';
+        const red  = s.red  ? `${s.red.gold}g ${s.red.kills}K ${s.red.towers}T ${s.red.dragons}D`  : '—';
+        const diff = s.goldDiff != null ? `<span class="${s.goldDiff >= 0 ? 'num-pos' : 'num-neg'}">${s.goldDiff >= 0 ? '+' : ''}${s.goldDiff}</span>` : '—';
+        const delay = m.delay != null ? `${m.delay}s` : (m.reason ? `<span style="color:var(--warn);">${escapeHtml(m.reason)}</span>` : '—');
+        const flagHtml = (m.flags || []).map(f => `<span class="flag-pill">${escapeHtml(f)}</span>`).join('');
+        parts.push(`<tr class="${m.flags?.length ? 'has-flag' : ''}"><td>${escapeHtml(m.league || '—')}</td><td>${escapeHtml(m.teams)}</td><td>${escapeHtml(m.score || '—')}</td><td>G${m.gameNumber ?? '?'} ${escapeHtml(m.gameState || '—')}</td><td>${delay}</td><td>${escapeHtml(blue)}</td><td>${escapeHtml(red)}</td><td>${diff}</td><td>${flagHtml}</td></tr>`);
+      }
+      parts.push('</tbody></table>');
+    }
+    if (data.gaps?.length) {
+      parts.push(`<div style="margin-top:12px;padding:8px 12px;background:rgba(248,113,113,.08);border-left:2px solid var(--err);border-radius:4px;"><b style="color:var(--err);">${data.gaps.length} gap(s):</b><ul style="margin:4px 0 0;padding-left:20px;color:var(--muted);font-size:12px;">${data.gaps.map(g => `<li>${escapeHtml(g.sport)} · ${escapeHtml(g.teams)} → ${g.flags.map(f=>escapeHtml(f)).join(', ')}</li>`).join('')}</ul></div>`);
+    }
+    if (!data.totalLive) parts.push('<div class="empty">nenhuma partida live agora</div>');
+    body.innerHTML = parts.join('');
+  }
+
+  function renderRoi(data) {
+    const body = document.getElementById('roiAnalystBody');
+    if (!data.ok) {
+      body.innerHTML = `<div class="empty" style="color:var(--err);">${escapeHtml(data.error || 'erro')}</div>`;
+      return;
+    }
+    const t = data.total || {};
+    const head = `<div style="margin-bottom:10px;font-size:13px;">Janela <b>${data.days}d</b> · ${t.n} tips · ${t.settled} resolvidas · ROI <b>${t.roi != null ? fmtPct(t.roi) : '—'}</b> · hit <b>${t.hitRate != null ? (t.hitRate*100).toFixed(1)+'%' : '—'}</b> · Brier <b>${fmtNum(t.brier)}</b> · P/L <b class="${(t.totalProfit||0) >= 0 ? 'num-pos' : 'num-neg'}">R$ ${fmtNum(t.totalProfit)}</b></div>`;
+    const sportRows = (data.bySport || []).map(s => `<tr><td>${escapeHtml(s.sport)}</td><td>${s.n}</td><td>${s.settled}</td><td>${s.hitRate != null ? (s.hitRate*100).toFixed(1)+'%' : '—'}</td><td>${fmtPct(s.roi)}</td><td>${fmtNum(s.brier)}</td><td class="${(s.totalProfit||0)>=0?'num-pos':'num-neg'}">${fmtNum(s.totalProfit)}</td></tr>`).join('');
+    const bucketRows = (data.byBucket || []).map(b => `<tr><td>${escapeHtml(b.bucket)}</td><td>${b.n}</td><td>${b.settled}</td><td>${b.hitRate != null ? (b.hitRate*100).toFixed(1)+'%' : '—'}</td><td>${fmtPct(b.roi)}</td><td>${fmtNum(b.brier)}</td></tr>`).join('');
+    const leaks = (data.leaks || []).length
+      ? `<div style="margin-top:10px;padding:8px 12px;background:rgba(248,113,113,.08);border-left:2px solid var(--err);border-radius:4px;"><b style="color:var(--err);">Leaks:</b> ${data.leaks.map(l => `${escapeHtml(l.kind)}=${escapeHtml(l.key)} (ROI ${(l.roi*100).toFixed(1)}% em ${l.n})`).join(' · ')}</div>`
+      : '';
+    body.innerHTML = head
+      + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">'
+      + `<div><b style="color:var(--muted);font-size:11px;">POR SPORT</b><table class="agent-table"><thead><tr><th>sport</th><th>n</th><th>rs</th><th>hit</th><th>ROI</th><th>Brier</th><th>P/L</th></tr></thead><tbody>${sportRows || '<tr><td colspan="7" class="empty" style="text-align:center;">sem dados</td></tr>'}</tbody></table></div>`
+      + `<div><b style="color:var(--muted);font-size:11px;">POR CONFIDENCE</b><table class="agent-table"><thead><tr><th>bucket</th><th>n</th><th>rs</th><th>hit</th><th>ROI</th><th>Brier</th></tr></thead><tbody>${bucketRows}</tbody></table></div>`
+      + '</div>' + leaks;
+  }
+
+  function renderFeedMedic(data) {
+    const body = document.getElementById('feedMedicBody');
+    const meta = document.getElementById('feedMedicMeta');
+    if (!data.ok) {
+      body.innerHTML = `<div class="empty" style="color:var(--err);">${escapeHtml(data.error || 'erro')}</div>`;
+      return;
+    }
+    meta.textContent = new Date(data.at).toLocaleTimeString();
+    const feedClass = (f) => f.status === 200 ? 'feed-ok' : (f.status >= 400 && f.status < 500 ? 'feed-warn' : 'feed-err');
+    const rows = data.feeds.map(f => `<tr><td>${escapeHtml(f.label)}</td><td class="${feedClass(f)}">${f.status || '—'}</td><td>${f.latency}ms</td><td>${f.bytes ? (f.bytes/1024).toFixed(1)+'KB' : '—'}</td><td>${escapeHtml(f.error || '')}</td></tr>`).join('');
+    const ld = data.logDerived || {};
+    const ldRows = Object.entries(ld).filter(([k,v]) => v).map(([k,v]) => `<tr><td>${escapeHtml(k)}</td><td colspan="4" style="color:var(--muted);">${escapeHtml(v.text)}</td></tr>`).join('');
+    body.innerHTML = `<table class="agent-table"><thead><tr><th>fonte</th><th>HTTP</th><th>latency</th><th>bytes</th><th>erro</th></tr></thead><tbody>${rows}${ldRows}</tbody></table>`;
+  }
+
+  async function fetchAgent(name, params = '') {
+    const btn = document.querySelector(`.agent-refresh[data-agent="${name}"]`);
+    if (btn) btn.classList.add('loading');
+    try {
+      const r = await fetch(`/agents/${name}${params}`);
+      const data = await r.json();
+      if (name === 'live-scout') renderLiveScout(data);
+      if (name === 'roi-analyst') renderRoi(data);
+      if (name === 'feed-medic') renderFeedMedic(data);
+    } catch (e) {
+      const map = { 'live-scout': 'liveScoutBody', 'roi-analyst': 'roiAnalystBody', 'feed-medic': 'feedMedicBody' };
+      const el = document.getElementById(map[name]);
+      if (el) el.innerHTML = `<div class="empty" style="color:var(--err);">fetch falhou: ${escapeHtml(String(e.message||e))}</div>`;
+    } finally {
+      if (btn) btn.classList.remove('loading');
+    }
+  }
+
+  function refreshAgents() {
+    fetchAgent('live-scout');
+    const sel = document.getElementById('roiDaysSel');
+    fetchAgent('roi-analyst', '?days=' + (sel?.value || '30'));
+    fetchAgent('feed-medic');
+  }
+
+  document.querySelectorAll('.agent-refresh').forEach(btn => btn.addEventListener('click', () => {
+    const name = btn.dataset.agent;
+    if (name === 'roi-analyst') {
+      const sel = document.getElementById('roiDaysSel');
+      fetchAgent(name, '?days=' + (sel?.value || '30'));
+    } else {
+      fetchAgent(name);
+    }
+  }));
+  document.getElementById('roiDaysSel')?.addEventListener('change', () => fetchAgent('roi-analyst', '?days=' + document.getElementById('roiDaysSel').value));
+
+  $refresh.addEventListener('click', () => { refresh(); refreshLiveMatches(); refreshErrors(); if (activeTab === 'agents') refreshAgents(); });
   $restart.addEventListener('click', async () => {
     if (!confirm('Reiniciar subprocess railway logs?')) return;
     await fetch('/restart');
     setTimeout(refresh, 800);
   });
+
+  // Auto-refresh agentes em ritmo próprio (30s) só quando a aba está ativa
+  let agentsTimer = null;
+  function ensureAgentsTimer() {
+    if (agentsTimer) clearInterval(agentsTimer);
+    agentsTimer = setInterval(() => {
+      if (activeTab === 'agents' && $auto.checked) refreshAgents();
+    }, 30000);
+  }
 
   let timer = setInterval(() => {
     refresh();
@@ -502,7 +693,9 @@
       if (activeTab === 'live') refreshLiveMatches();
       if (activeTab === 'errors') refreshErrors();
     }, 5000);
+    ensureAgentsTimer();
   });
+  ensureAgentsTimer();
 
   refresh();
   refreshLiveMatches();

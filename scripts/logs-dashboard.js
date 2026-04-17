@@ -16,9 +16,51 @@
  */
 
 const http = require('http');
+const https = require('https');
 const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
+
+// Lazy sqlite (só carrega quando aba Agentes é consultada)
+let _dbInstance = null;
+function getDb() {
+  if (_dbInstance) return _dbInstance;
+  try {
+    const Database = require('better-sqlite3');
+    const dbPath = path.join(__dirname, '..', 'sportsedge.db');
+    _dbInstance = new Database(dbPath, { readonly: true, fileMustExist: true });
+  } catch (e) {
+    _dbInstance = { _err: String(e.message || e) };
+  }
+  return _dbInstance;
+}
+
+// GET simples com timeout pro agents (não reusa httpGet do server.js — o dashboard é standalone)
+function agentHttpGet(targetUrl, timeoutMs = 5000, extraHeaders = {}) {
+  return new Promise((resolve) => {
+    const start = Date.now();
+    try {
+      const u = new URL(targetUrl);
+      const mod = u.protocol === 'https:' ? https : http;
+      const req = mod.get({
+        hostname: u.hostname,
+        port: u.port || (u.protocol === 'https:' ? 443 : 80),
+        path: u.pathname + (u.search || ''),
+        headers: { 'User-Agent': 'SportsEdge-Dashboard/1.0', 'Accept': 'application/json,*/*', ...extraHeaders },
+        timeout: timeoutMs,
+      }, (res) => {
+        let body = '';
+        res.setEncoding('utf8');
+        res.on('data', (c) => { if (body.length < 2_000_000) body += c; });
+        res.on('end', () => resolve({ status: res.statusCode, body, latency: Date.now() - start }));
+      });
+      req.on('error', (e) => resolve({ status: 0, error: e.message, latency: Date.now() - start }));
+      req.on('timeout', () => { req.destroy(); resolve({ status: 0, error: 'timeout', latency: Date.now() - start }); });
+    } catch (e) {
+      resolve({ status: 0, error: e.message, latency: Date.now() - start });
+    }
+  });
+}
 
 const argv = process.argv.slice(2);
 function arg(name, def) {
@@ -457,6 +499,179 @@ function computeStatus() {
   };
 }
 
+// ─────────────────────────────────────────────────────────
+// Agents — painéis que alimentam a aba "Agentes"
+// ─────────────────────────────────────────────────────────
+const SERVER_BASE = process.env.AGENT_SERVER_BASE || 'http://localhost:3000';
+
+async function runLiveScout() {
+  const r = await agentHttpGet(`${SERVER_BASE}/live-snapshot`, 15000);
+  if (r.status !== 200) {
+    return { ok: false, error: `snapshot: HTTP ${r.status}${r.error ? ' '+r.error : ''}`, latency: r.latency };
+  }
+  let snap;
+  try { snap = JSON.parse(r.body); } catch (e) { return { ok: false, error: 'parse: ' + e.message }; }
+
+  const gaps = [];
+  const out = { generatedAt: snap.generatedAt, latency: r.latency, sports: {} };
+  for (const sport of ['lol', 'dota', 'cs', 'valorant']) {
+    const rows = snap.sports?.[sport] || [];
+    out.sports[sport] = rows.map(m => {
+      const s = m.liveStats || {};
+      const flags = [];
+      if (String(m.matchId || '').startsWith('ps_') && s.reason === 'no_gameids') flags.push('no_gameids_in_ps');
+      if (s.reason === 'stats_disabled') flags.push('stats_disabled');
+      if (s.available === false && s.gameState === 'in_progress') flags.push('live_sem_frames');
+      const delay = s.summary?.dataDelay ?? null;
+      if (sport === 'lol' && delay != null && delay > 600 && m.league && !/LPL/i.test(m.league)) flags.push(`delay_alto_${delay}s`);
+      if (flags.length) gaps.push({ sport, matchId: m.matchId, teams: `${m.team1} vs ${m.team2}`, flags });
+      return {
+        matchId: m.matchId,
+        league: m.league,
+        teams: `${m.team1} vs ${m.team2}`,
+        score: m.score,
+        format: m.format,
+        gameNumber: s.gameNumber,
+        gameState: s.gameState,
+        available: !!s.available,
+        reason: s.reason || null,
+        delay,
+        summary: s.summary || null,
+        hasPinnacle: !!m.pinnacle,
+        flags,
+      };
+    });
+  }
+  // Duplicatas por times (case-insensitive) no mesmo sport
+  for (const sport of Object.keys(out.sports)) {
+    const byPair = new Map();
+    for (const m of out.sports[sport]) {
+      const a = [m.teams.split(' vs ')[0], m.teams.split(' vs ')[1]].map(x => (x||'').toLowerCase().replace(/[^a-z0-9]/g,'')).sort().join('|');
+      if (byPair.has(a)) gaps.push({ sport, matchId: m.matchId, teams: m.teams, flags: ['duplicata_invertida'] });
+      else byPair.set(a, m.matchId);
+    }
+  }
+  out.gaps = gaps;
+  out.totalLive = Object.values(out.sports).reduce((a, arr) => a + arr.length, 0);
+  return { ok: true, ...out };
+}
+
+async function runFeedMedic() {
+  const RIOT_KEY = process.env.LOL_API_KEY || process.env.NEXT_PUBLIC_LOL_API || '0TvQnueqKa5mxJntVWt0w4LpLfEkrV1Ta8rQBb9Z';
+  const riotHeaders = { 'x-api-key': RIOT_KEY };
+  const targets = [
+    { id: 'riot_schedule', label: 'Riot getSchedule', url: 'https://esports-api.lolesports.com/persisted/gw/getSchedule?hl=en-US', headers: riotHeaders },
+    { id: 'riot_live_en', label: 'Riot getLive (en-US)', url: 'https://esports-api.lolesports.com/persisted/gw/getLive?hl=en-US', headers: riotHeaders },
+    { id: 'riot_live_zh', label: 'Riot getLive (zh-CN)', url: 'https://esports-api.lolesports.com/persisted/gw/getLive?hl=zh-CN', headers: riotHeaders },
+    { id: 'vlr',          label: 'VLR.gg /matches', url: 'https://www.vlr.gg/matches' },
+    { id: 'server_local', label: 'server.js (:3000)', url: `${SERVER_BASE}/lol-matches` },
+  ];
+  const results = await Promise.all(targets.map(async t => {
+    const r = await agentHttpGet(t.url, 8000, t.headers || {});
+    return { id: t.id, label: t.label, status: r.status, latency: r.latency, error: r.error || null, bytes: r.body?.length || 0 };
+  }));
+
+  // Log-derived sources (sem bater na fonte direta — aproveita buffer railway)
+  const recent = buffer.slice(-1000);
+  const pinnacleLine = [...recent].reverse().find(e => /Pinnacle LoL:/i.test(e.text));
+  const odssApiLine = [...recent].reverse().find(e => /Quota The Odds API/i.test(e.text));
+  const espnMmaLine = [...recent].reverse().find(e => /ESPN-MMA.*lutas carregadas/i.test(e.text));
+  const backoffLine = [...recent].reverse().find(e => /backoff .* ativado|backoff ativo/i.test(e.text));
+
+  return {
+    ok: true,
+    at: Date.now(),
+    feeds: results,
+    logDerived: {
+      pinnacle: pinnacleLine ? { text: pinnacleLine.text, at: pinnacleLine.t } : null,
+      oddsApi:  odssApiLine  ? { text: odssApiLine.text,  at: odssApiLine.t }  : null,
+      espnMma:  espnMmaLine  ? { text: espnMmaLine.text,  at: espnMmaLine.t }  : null,
+      backoff:  backoffLine  ? { text: backoffLine.text,  at: backoffLine.t }  : null,
+    },
+  };
+}
+
+function runRoiAnalyst(days) {
+  const db = getDb();
+  if (db._err) return { ok: false, error: 'db: ' + db._err };
+  const cutoff = `-${Math.max(1, Math.min(365, parseInt(days || '30', 10)))} days`;
+  const base = `
+    SELECT sport, participant1, participant2, odds, ev, stake, stake_reais, profit_reais,
+           confidence, result, is_live, settled_at, sent_at
+    FROM tips
+    WHERE settled_at IS NOT NULL
+      AND result IN ('win','loss','push')
+      AND settled_at >= datetime('now', ?)`;
+  let rows;
+  try { rows = db.prepare(base).all(cutoff); }
+  catch (e) { return { ok: false, error: 'query: ' + e.message }; }
+
+  const agg = (items) => {
+    const settled = items.filter(x => x.result !== 'push');
+    const totalStake = settled.reduce((a,x) => a + (Number(x.stake_reais ?? x.stake) || 0), 0);
+    const totalProfit = settled.reduce((a,x) => a + (Number(x.profit_reais) || 0), 0);
+    const wins = settled.filter(x => x.result === 'win').length;
+    const hitRate = settled.length ? wins / settled.length : null;
+    const roi = totalStake > 0 ? totalProfit / totalStake : null;
+    const brierEntries = settled.filter(x => Number(x.odds) > 1).map(x => {
+      const pImp = 1 / Number(x.odds);
+      const hit = x.result === 'win' ? 1 : 0;
+      return (pImp - hit) ** 2;
+    });
+    const brier = brierEntries.length ? brierEntries.reduce((a,b) => a+b, 0) / brierEntries.length : null;
+    return { n: items.length, settled: settled.length, wins, hitRate, roi, totalStake, totalProfit, brier };
+  };
+
+  const bySport = {};
+  for (const r of rows) {
+    (bySport[r.sport] = bySport[r.sport] || []).push(r);
+  }
+  const sports = Object.entries(bySport).map(([sport, arr]) => ({ sport, ...agg(arr) }))
+    .sort((a,b) => (b.n || 0) - (a.n || 0));
+
+  // Confidence buckets — o schema usa texto (BAIXA/MÉDIA/ALTA), não número.
+  // Se for número, bucket em %.
+  const isNumericConf = rows.some(r => Number.isFinite(Number(r.confidence)) && String(r.confidence).trim() !== '');
+  let byBucket;
+  if (isNumericConf) {
+    const buckets = [
+      { key: '<55%', min: 0,    max: 0.55 },
+      { key: '55-65', min: 0.55, max: 0.65 },
+      { key: '65-75', min: 0.65, max: 0.75 },
+      { key: '75%+',  min: 0.75, max: 1.01 },
+    ];
+    byBucket = buckets.map(b => {
+      const items = rows.filter(x => {
+        const c = Number(x.confidence);
+        return Number.isFinite(c) && c >= b.min && c < b.max;
+      });
+      return { bucket: b.key, ...agg(items) };
+    });
+  } else {
+    const order = ['ALTA', 'MÉDIA', 'MEDIA', 'BAIXA'];
+    const seen = new Set(rows.map(r => String(r.confidence || '').trim().toUpperCase()));
+    byBucket = order.filter(k => seen.has(k)).map(k => {
+      const items = rows.filter(x => String(x.confidence || '').trim().toUpperCase() === k);
+      return { bucket: k, ...agg(items) };
+    });
+  }
+
+  // Leaks: sports/buckets com ROI < -10% e settled >= 5
+  const leaks = [];
+  for (const s of sports) if (s.roi != null && s.roi < -0.10 && s.settled >= 5) leaks.push({ kind: 'sport', key: s.sport, roi: s.roi, n: s.settled });
+  for (const b of byBucket) if (b.roi != null && b.roi < -0.10 && b.settled >= 5) leaks.push({ kind: 'bucket', key: b.bucket, roi: b.roi, n: b.settled });
+
+  return {
+    ok: true,
+    days: parseInt(days || '30', 10),
+    windowCutoff: cutoff,
+    total: agg(rows),
+    bySport: sports,
+    byBucket,
+    leaks,
+  };
+}
+
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, `http://localhost:${PORT}`);
   if (url.pathname === '/' || url.pathname === '/logs.html') {
@@ -495,6 +710,29 @@ const server = http.createServer((req, res) => {
   if (url.pathname === '/live-matches') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     return res.end(JSON.stringify(extractLiveMatches()));
+  }
+  if (url.pathname === '/agents/live-scout') {
+    runLiveScout().then(data => {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(data));
+    }).catch(e => { res.writeHead(500); res.end(JSON.stringify({ ok:false, error:e.message })); });
+    return;
+  }
+  if (url.pathname === '/agents/feed-medic') {
+    runFeedMedic().then(data => {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(data));
+    }).catch(e => { res.writeHead(500); res.end(JSON.stringify({ ok:false, error:e.message })); });
+    return;
+  }
+  if (url.pathname === '/agents/roi-analyst') {
+    const days = url.searchParams.get('days') || '30';
+    try {
+      const data = runRoiAnalyst(days);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(data));
+    } catch (e) { res.writeHead(500); res.end(JSON.stringify({ ok:false, error:e.message })); }
+    return;
   }
   if (url.pathname === '/restart') {
     startChild();
