@@ -6761,17 +6761,21 @@ const server = http.createServer(async (req, res) => {
         const existing = stmts.tipExistsByMatch.get(String(matchId), sport);
         if (existing) { sendJson(res, { ok: true, skipped: true, reason: 'duplicate' }); return; }
 
-        // Dedup secundário: mesmos times + sport nas últimas 2h (impede duplicata quando matchId muda entre fontes)
-        // norm() remove espaços/acentos/pontuação, lower() do SQLite mantém espaços — usar REPLACE para match correto
+        // Dedup secundário: mesmos times + sport + MESMO tip_participant nas últimas 24h
+        // (impede duplicata quando matchId muda entre fontes — ex: Pinnacle re-cria event ID ao virar live,
+        // ou partida adiada gera ID novo no dia seguinte).
+        // Filtra por tip_participant pra permitir hedge legítimo em times diferentes.
         const p1n_ = norm(p1 || ''), p2n_ = norm(p2 || '');
+        const pickN_ = norm(t.tip_participant || '');
         if (p1n_ && p2n_) {
           const recentDupe = db.prepare(
             `SELECT 1 FROM tips WHERE sport = ? AND result IS NULL
-             AND sent_at > datetime('now', '-2 hours')
+             AND sent_at > datetime('now', '-24 hours')
+             AND REPLACE(REPLACE(lower(tip_participant),' ',''),'-','') = ?
              AND ((REPLACE(REPLACE(lower(participant1),' ',''),'-','') LIKE ? AND REPLACE(REPLACE(lower(participant2),' ',''),'-','') LIKE ?)
                OR (REPLACE(REPLACE(lower(participant1),' ',''),'-','') LIKE ? AND REPLACE(REPLACE(lower(participant2),' ',''),'-','') LIKE ?))
              LIMIT 1`
-          ).get(sport, `%${p1n_}%`, `%${p2n_}%`, `%${p2n_}%`, `%${p1n_}%`);
+          ).get(sport, pickN_, `%${p1n_}%`, `%${p2n_}%`, `%${p2n_}%`, `%${p1n_}%`);
           if (recentDupe) { sendJson(res, { ok: true, skipped: true, reason: 'duplicate_pair' }); return; }
         }
 

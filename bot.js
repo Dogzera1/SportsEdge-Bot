@@ -614,12 +614,13 @@ async function loadExistingTips() {
         const mid = tip.match_id;
         // Chave por matchId (evita prefixo duplicado dota2_dota2_)
         const idKey = mid.startsWith('dota2_') ? mid : `dota2_${mid}`;
-        analyzedDota.set(idKey, { ts: Date.now(), tipSent: true });
+        const tipTs = tip.sent_at ? new Date(tip.sent_at).getTime() : Date.now();
+        analyzedDota.set(idKey, { ts: tipTs, tipSent: true });
         // Chave por nomes normalizados — impede duplicata quando matchId muda entre fontes
         const p1n = norm(tip.participant1 || '');
         const p2n = norm(tip.participant2 || '');
         if (p1n && p2n) {
-          analyzedDota.set(`dota2_pair_${p1n}_${p2n}`, { ts: Date.now(), tipSent: true });
+          analyzedDota.set(`dota2_pair_${p1n}_${p2n}`, { ts: tipTs, tipSent: true });
         }
       }
       if (dotaTips.length) log('INFO', 'BOOT', `Dota 2: ${dotaTips.length} tips existentes carregadas (${analyzedDota.size} chaves dedup)`);
@@ -4793,10 +4794,22 @@ async function _pollDotaInner(runOnce = false) {
       // ── Dedup / cooldown ──
       // Dedup primário: por matchId + score (permite re-análise por mapa em live)
       // Dedup secundário: por nomes normalizados (impede duplicata quando matchId muda entre fontes)
+      // Dedup terciário: pair sem serieKey — bloqueia duplicata pre→live na mesma série (até 12h)
       const serieKey = isLive ? `_${match.score1||0}x${match.score2||0}` : '';
       const key = `dota2_${match.id}${serieKey}`;
       const pairKey = `dota2_pair_${norm(match.team1)}_${norm(match.team2)}${serieKey}`;
-      const setDotaAnalyzed = (val) => { analyzedDota.set(key, val); analyzedDota.set(pairKey, val); };
+      const pairKeyBase = `dota2_pair_${norm(match.team1)}_${norm(match.team2)}`;
+      const setDotaAnalyzed = (val) => {
+        analyzedDota.set(key, val);
+        analyzedDota.set(pairKey, val);
+        // Só marca pairKeyBase quando tipSent=true — evita bloquear análise de outros mapas
+        if (val?.tipSent) analyzedDota.set(pairKeyBase, val);
+      };
+      const prevBase = analyzedDota.get(pairKeyBase);
+      if (prevBase?.tipSent && (now - prevBase.ts) < 12 * 60 * 60 * 1000) {
+        log('DEBUG', 'AUTO-DOTA', `Skip ${match.team1} vs ${match.team2} (${match.status}): tip já enviada nessa série (${Math.round((now-prevBase.ts)/60000)}min atrás)`);
+        continue;
+      }
       const prev = analyzedDota.get(key) || analyzedDota.get(pairKey);
       if (prev?.tipSent) continue;
       const cooldown = isLive ? DOTA_LIVE_COOLDOWN : DOTA_INTERVAL;
