@@ -5466,10 +5466,13 @@ Máximo 200 palavras.`;
     log('ERROR', 'AUTO-DOTA', e.message);
     _livePhaseExit('dota');
   }
-  // Dual-mode: 2min quando há live, 15min idle
+  // Dual-mode: 60s live (com Steam RT) / 2min sem RT / 15min idle.
+  // RT delay ~15s + loop 60s + cooldown 90s + IA 5s → tip atualizada em ~90-120s no pior caso.
   if (!runOnce) {
-    const dotaNextMs = _hasLiveDota ? (2 * 60 * 1000) : (15 * 60 * 1000);
-    log('INFO', 'AUTO-DOTA', `Próximo ciclo em ${Math.round(dotaNextMs / 1000)}s (${_hasLiveDota ? 'LIVE' : 'idle'})`);
+    const _hasRT = !!process.env.STEAM_WEBAPI_KEY;
+    const livePollMs = _hasRT ? (60 * 1000) : (2 * 60 * 1000);
+    const dotaNextMs = _hasLiveDota ? livePollMs : (15 * 60 * 1000);
+    log('INFO', 'AUTO-DOTA', `Próximo ciclo em ${Math.round(dotaNextMs / 1000)}s (${_hasLiveDota ? 'LIVE' + (_hasRT ? ' [Steam RT]' : '') : 'idle'})`);
     setTimeout(() => pollDota().catch(e => log('ERROR', 'AUTO-DOTA', e.message)), dotaNextMs);
   }
 }
