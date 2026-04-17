@@ -2358,6 +2358,66 @@ async function runIaHealthCycle() {
   for (const adminId of ADMIN_IDS) await sendDM(tokenForAlert, adminId, msg).catch(() => {});
 }
 
+// ── Live Storm Manager (cron 10min) ──
+// Detecta totalLive >= LIVE_STORM_THRESHOLD (default 15) e alerta admin pra tomar ciência.
+// Anti-spam: DM apenas no flip into-storm e flip out-of-storm. Cooldown 30min entre flips.
+let _liveStormActive = false;
+let _lastLiveStormDM = 0;
+const LIVE_STORM_DM_COOLDOWN_MS = 30 * 60 * 1000;
+
+async function runLiveStormCycle() {
+  if (!ADMIN_IDS.size) return;
+  let result = null;
+  try {
+    const ext = require('./lib/agents-extended');
+    result = await ext.runLiveStormManager(`http://127.0.0.1:${process.env.PORT || 8080}`);
+  } catch (e) {
+    log('WARN', 'LIVE-STORM', `falhou: ${e.message}`);
+    return;
+  }
+  if (!result?.ok) return;
+
+  const wasActive = _liveStormActive;
+  _liveStormActive = !!result.storm_active;
+
+  // Storm INICIOU
+  if (_liveStormActive && !wasActive) {
+    log('WARN', 'LIVE-STORM', `STORM ATIVO: ${result.live_total} partidas live (threshold ${result.storm_threshold})`);
+    if (Date.now() - _lastLiveStormDM > LIVE_STORM_DM_COOLDOWN_MS) {
+      _lastLiveStormDM = Date.now();
+      const tokenForAlert = Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
+      if (tokenForAlert) {
+        const sportsLine = Object.entries(result.by_sport || {}).sort((a, b) => b[1] - a[1])
+          .map(([s, n]) => `*${s}*: ${n}`).join(' | ');
+        const recsLine = (result.recommendations || []).slice(0, 3).map(r => `• ${r}`).join('\n');
+        const msg = `⚡ *LIVE STORM ATIVO*\n\n` +
+          `Total: *${result.live_total}* partidas live (threshold ${result.storm_threshold})\n\n` +
+          `Por sport:\n${sportsLine}\n\n` +
+          `Recomendações:\n${recsLine}\n\n` +
+          `_Vou avisar quando voltar ao normal. Cooldown 30min._`;
+        for (const adminId of ADMIN_IDS) await sendDM(tokenForAlert, adminId, msg).catch(() => {});
+      }
+    }
+  }
+
+  // Storm RESOLVEU
+  if (!_liveStormActive && wasActive) {
+    log('INFO', 'LIVE-STORM', `Storm resolvido: ${result.live_total} live (abaixo do threshold)`);
+    const tokenForAlert = Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
+    if (tokenForAlert) {
+      const msg = `✅ *LIVE STORM RESOLVIDO*\n\n` +
+        `Voltou ao volume normal: *${result.live_total}* partidas live.\n` +
+        `Sistema operando em capacidade padrão.`;
+      for (const adminId of ADMIN_IDS) await sendDM(tokenForAlert, adminId, msg).catch(() => {});
+    }
+  }
+
+  // Log silencioso quando estável
+  if (_liveStormActive === wasActive) {
+    log('DEBUG', 'LIVE-STORM', `Ciclo: ${result.live_total} live | storm ${_liveStormActive ? 'ON' : 'OFF'}`);
+  }
+}
+
 // ── Backtest Validator (1x/dia) ──
 let _lastBacktestAlert = 0;
 const _backtestMilestonesSeen = new Set();
@@ -9290,6 +9350,10 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   // Backtest Validator: cron 1x/dia, valida modelo via gates retroativos.
   setInterval(() => runBacktestValidatorCycle().catch(e => log('ERROR', 'BACKTEST-VALIDATOR', e.message)), 24 * 60 * 60 * 1000);
   setTimeout(() => runBacktestValidatorCycle().catch(() => {}), 30 * 60 * 1000); // 30min pós-boot
+
+  // Live Storm Manager: cron 10min, alerta admin no flip into/out-of storm.
+  setInterval(() => runLiveStormCycle().catch(e => log('ERROR', 'LIVE-STORM', e.message)), 10 * 60 * 1000);
+  setTimeout(() => runLiveStormCycle().catch(() => {}), 7 * 60 * 1000); // 7min pós-boot
 
   // Daily Health workflow: cron 1x/dia 8h BRT (11h UTC).
   setInterval(() => runDailyHealthIfTime().catch(e => log('ERROR', 'DAILY-HEALTH', e.message)), 30 * 60 * 1000);
