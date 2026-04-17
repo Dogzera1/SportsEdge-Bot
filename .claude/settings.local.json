@@ -166,7 +166,8 @@
       "Bash(cygpath -w /tmp/tmp_live_final.json)",
       "Bash(python -c ' *)",
       "Bash(git -C \"C:\\\\Users\\\\vict_\\\\Desktop\\\\lol betting\" log --oneline -30 lib/vlr.js)",
-      "Bash(git -C \"C:\\\\Users\\\\vict_\\\\Desktop\\\\lol betting\" log --oneline -5 -p -- lib/vlr.js)"
+      "Bash(git -C \"C:\\\\Users\\\\vict_\\\\Desktop\\\\lol betting\" log --oneline -5 -p -- lib/vlr.js)",
+      "Bash(awk '/^async function pollValorant/,/^async function pollDarts|^\\\\/\\\\/ ── Darts/' bot.js)"
     ]
   }
 }
