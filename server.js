@@ -4849,14 +4849,55 @@ const server = http.createServer(async (req, res) => {
             } catch (e) {
               row.liveStats = { available: false, gameState: null, gameNumber: null, reason: `error:${(e.message || '').slice(0, 60)}`, summary: null };
             }
+          } else if (sport === 'dota') {
+            // Espelha o bot.js: OpenDota primária (+ Steam RT), PandaScore fallback só pra match ps_*.
+            let stats = null;
+            let src = null;
+            try {
+              const odR = await httpGet(`${base}/opendota-live?team1=${encodeURIComponent(m.team1)}&team2=${encodeURIComponent(m.team2)}`).catch(() => null);
+              const od = (odR && odR.status === 200) ? safeParse(odR.body, {}) : null;
+              if (od?.hasLiveStats) { stats = od; src = od._source || 'opendota'; }
+              if (!stats && String(m.id).startsWith('ps_')) {
+                const psR = await httpGet(`${base}/ps-dota-live?matchId=${encodeURIComponent(String(m.id))}`).catch(() => null);
+                const ps = (psR && psR.status === 200) ? safeParse(psR.body, {}) : null;
+                if (ps?.hasLiveStats) { stats = ps; src = 'pandascore'; }
+              }
+            } catch (_) {}
+            if (stats) {
+              const blue = stats.blueTeam || {}, red = stats.redTeam || {};
+              const goldDiff = (blue.totalGold || 0) - (red.totalGold || 0);
+              row.liveStats = {
+                available: true,
+                gameState: 'in_progress',
+                gameNumber: stats.gameNumber || null,
+                reason: null,
+                summary: {
+                  score: stats.seriesScore || ((m.score1 != null || m.score2 != null) ? `${m.score1 || 0}-${m.score2 || 0}` : null),
+                  gameTime: stats.gameTime ? Math.round(stats.gameTime / 60) : null,
+                  blue: { name: blue.name || m.team1, gold: blue.totalGold || 0, kills: blue.totalKills || 0 },
+                  red:  { name: red.name  || m.team2, gold: red.totalGold  || 0, kills: red.totalKills  || 0 },
+                  goldDiff,
+                  source: src,
+                },
+              };
+            } else {
+              const hasScore = m.score1 != null || m.score2 != null;
+              row.liveStats = {
+                available: false,
+                gameState: hasScore ? 'in_progress' : null,
+                gameNumber: null,
+                reason: 'no_live_stats',
+                summary: hasScore ? { score: `${m.score1 || 0}-${m.score2 || 0}` } : null,
+              };
+            }
           } else {
-            // Dota/CS — sem feed detalhado aqui; mostra score PS se presente.
+            // CS e outros: score do PandaScore quando disponível.
             const hasScore = m.score1 != null || m.score2 != null;
             row.liveStats = {
               available: hasScore,
               gameState: hasScore ? 'in_progress' : null,
               gameNumber: null,
-              reason: hasScore ? null : 'no_pandascore_data',
+              reason: hasScore ? null : 'no_live_data',
               summary: hasScore ? { score: `${m.score1 || 0}-${m.score2 || 0}` } : null,
             };
           }

@@ -4985,6 +4985,14 @@ async function _pollDotaInner(runOnce = false) {
         }
       }
 
+      // Gate: partida live sem nenhuma fonte de stats (OpenDota + Steam RT + PandaScore).
+      // Sem feed real, só Elo/H2H → IA vira coin-flip. Default ON (DOTA_LIVE_REQUIRE_STATS=true).
+      if (isLive && !dotaHasLiveStats && /^(1|true|yes)$/i.test(String(process.env.DOTA_LIVE_REQUIRE_STATS ?? 'true'))) {
+        log('INFO', 'AUTO-DOTA', `Sem stats live (OpenDota/Steam RT/PS) — pulando: ${match.team1} vs ${match.team2}`);
+        setDotaAnalyzed({ ts: now, tipSent: false, noEdge: true });
+        continue;
+      }
+
       // ── Pré-filtro ML ──
       // maxDivergence: Dota tier-2 com small-sample (3-0 vs 0-3) infla modelP; clamp a ±15pp
       // impede a IA de derivar EV absurdo (>50%) que o sanity gate em bot.js rejeita.
