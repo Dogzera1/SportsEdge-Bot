@@ -7035,6 +7035,157 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // Heatmap horários: ROI por hora do dia (0..23).
+  // GET /hourly-roi?sport=esports&days=30
+  if (p === '/hourly-roi') {
+    const sport = parsed.query.sport || 'esports';
+    const daysRaw = parseInt(parsed.query.days);
+    const days = Number.isFinite(daysRaw) ? Math.max(1, Math.min(365, daysRaw)) : 30;
+    try {
+      // STRFTIME('%H', settled_at) → hora UTC; convertemos pra BRT (UTC-3) shiftando -3.
+      const rows = db.prepare(`
+        SELECT CAST(STRFTIME('%H', settled_at, '-3 hours') AS INTEGER) AS hour,
+               COUNT(*) AS n,
+               SUM(CASE WHEN result='win' THEN 1 ELSE 0 END) AS wins,
+               SUM(CASE WHEN result='loss' THEN 1 ELSE 0 END) AS losses,
+               SUM(CASE WHEN result='push' THEN 1 ELSE 0 END) AS pushes,
+               SUM(COALESCE(profit_reais, 0)) AS profit_r,
+               SUM(COALESCE(stake_reais, 0)) AS stake_r
+        FROM tips
+        WHERE sport = ?
+          AND result IN ('win','loss','push')
+          AND settled_at IS NOT NULL
+          AND settled_at >= datetime('now', ?)
+        GROUP BY hour
+        ORDER BY hour ASC
+      `).all(sport, `-${days} days`);
+      const byHour = {};
+      for (const r of rows) byHour[r.hour] = r;
+      const hours = [];
+      for (let h = 0; h < 24; h++) {
+        const r = byHour[h];
+        if (!r) {
+          hours.push({ hour: h, n: 0, wins: 0, losses: 0, hitRate: null, roi: null, profit_reais: 0 });
+          continue;
+        }
+        const decided = (r.wins || 0) + (r.losses || 0);
+        const hitRate = decided > 0 ? r.wins / decided : null;
+        const roi = (r.stake_r || 0) > 0 ? (r.profit_r / r.stake_r) * 100 : null;
+        hours.push({
+          hour: h, n: r.n, wins: r.wins, losses: r.losses, pushes: r.pushes,
+          hitRate: hitRate != null ? parseFloat(hitRate.toFixed(3)) : null,
+          roi: roi != null ? parseFloat(roi.toFixed(2)) : null,
+          profit_reais: parseFloat((r.profit_r || 0).toFixed(2)),
+        });
+      }
+      sendJson(res, { sport, days, timezone: 'BRT (UTC-3)', hours });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
+  // Comparação Shadow vs Ativo: tips em modo shadow não enviam DM mas registram.
+  // GET /shadow-vs-active?sport=esports&days=30
+  if (p === '/shadow-vs-active') {
+    const sport = parsed.query.sport || 'esports';
+    const daysRaw = parseInt(parsed.query.days);
+    const days = Number.isFinite(daysRaw) ? Math.max(1, Math.min(365, daysRaw)) : 30;
+    try {
+      const rows = db.prepare(`
+        SELECT COALESCE(is_shadow, 0) AS shadow,
+               COUNT(*) AS n,
+               SUM(CASE WHEN result='win' THEN 1 ELSE 0 END) AS wins,
+               SUM(CASE WHEN result='loss' THEN 1 ELSE 0 END) AS losses,
+               SUM(CASE WHEN result='push' THEN 1 ELSE 0 END) AS pushes,
+               SUM(COALESCE(profit_reais, 0)) AS profit_r,
+               SUM(COALESCE(stake_reais, 0)) AS stake_r,
+               AVG(odds) AS avg_odds,
+               AVG(ev) AS avg_ev
+        FROM tips
+        WHERE sport = ?
+          AND result IN ('win','loss','push')
+          AND settled_at IS NOT NULL
+          AND settled_at >= datetime('now', ?)
+        GROUP BY COALESCE(is_shadow, 0)
+      `).all(sport, `-${days} days`);
+      const buckets = { active: null, shadow: null };
+      for (const r of rows) {
+        const decided = (r.wins || 0) + (r.losses || 0);
+        const hitRate = decided > 0 ? r.wins / decided : null;
+        const roi = (r.stake_r || 0) > 0 ? (r.profit_r / r.stake_r) * 100 : null;
+        const obj = {
+          n: r.n, wins: r.wins, losses: r.losses, pushes: r.pushes,
+          hitRate: hitRate != null ? parseFloat(hitRate.toFixed(3)) : null,
+          roi: roi != null ? parseFloat(roi.toFixed(2)) : null,
+          profit_reais: parseFloat((r.profit_r || 0).toFixed(2)),
+          stake_reais: parseFloat((r.stake_r || 0).toFixed(2)),
+          avg_odds: r.avg_odds ? parseFloat(r.avg_odds.toFixed(2)) : null,
+          avg_ev: r.avg_ev ? parseFloat(r.avg_ev.toFixed(2)) : null,
+        };
+        if (r.shadow) buckets.shadow = obj; else buckets.active = obj;
+      }
+      sendJson(res, { sport, days, active: buckets.active, shadow: buckets.shadow });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
+  // Equity curve diária: cumulative profit em R$ por dia (após settlement).
+  // Inclui drawdown (queda do pico), Sharpe daily ratio, max drawdown.
+  // GET /equity-curve?sport=esports&days=30
+  if (p === '/equity-curve') {
+    const sport = parsed.query.sport || 'esports';
+    const daysRaw = parseInt(parsed.query.days);
+    const days = Number.isFinite(daysRaw) ? Math.max(1, Math.min(365, daysRaw)) : 30;
+    try {
+      const rows = db.prepare(`
+        SELECT DATE(settled_at) as day,
+               SUM(COALESCE(profit_reais, 0)) as profit_r,
+               SUM(COALESCE(stake_reais, 0)) as stake_r,
+               COUNT(*) as n
+        FROM tips
+        WHERE sport = ?
+          AND result IN ('win','loss','push')
+          AND settled_at IS NOT NULL
+          AND settled_at >= datetime('now', ?)
+        GROUP BY DATE(settled_at)
+        ORDER BY day ASC
+      `).all(sport, `-${days} days`);
+      const bk = stmts.getBankroll.get(sport);
+      let cum = bk ? Number(bk.initial_banca || 0) : 0;
+      const initial = cum;
+      let peak = cum, maxDD = 0;
+      const dailyReturns = [];
+      const series = rows.map(r => {
+        const profit = Number(r.profit_r) || 0;
+        cum += profit;
+        if (cum > peak) peak = cum;
+        const dd = peak > 0 ? (peak - cum) / peak : 0;
+        if (dd > maxDD) maxDD = dd;
+        const dailyR = (Number(r.stake_r) || 0) > 0 ? profit / Number(r.stake_r) : 0;
+        dailyReturns.push(dailyR);
+        return { day: r.day, profit_reais: profit, cum_banca: parseFloat(cum.toFixed(2)), drawdown_pct: parseFloat((dd * 100).toFixed(2)), n: r.n };
+      });
+      const mean = dailyReturns.length ? dailyReturns.reduce((a,b)=>a+b,0) / dailyReturns.length : 0;
+      const variance = dailyReturns.length ? dailyReturns.reduce((a,b)=>a+(b-mean)**2,0) / dailyReturns.length : 0;
+      const std = Math.sqrt(variance);
+      const sharpe = std > 0 ? (mean / std) * Math.sqrt(252) : null; // anualizado
+      sendJson(res, {
+        sport,
+        days,
+        initial_banca: initial,
+        current_banca: parseFloat(cum.toFixed(2)),
+        peak_banca: parseFloat(peak.toFixed(2)),
+        total_profit_reais: parseFloat((cum - initial).toFixed(2)),
+        max_drawdown_pct: parseFloat((maxDD * 100).toFixed(2)),
+        sharpe_annualized: sharpe != null ? parseFloat(sharpe.toFixed(2)) : null,
+        days_settled: series.length,
+        series,
+      });
+    } catch (e) {
+      sendJson(res, { error: e.message }, 500);
+    }
+    return;
+  }
+
   if (p === '/tips-history') {
     const sport = parsed.query.sport || 'esports';
     const game  = parsed.query.game || '';
@@ -7083,7 +7234,7 @@ const server = http.createServer(async (req, res) => {
     const params = [sport, sport];
 
     if (status === 'settled') query += " AND t.result IN ('win', 'loss')";
-    else if (status === 'open') query += " AND t.result IS NULL";
+    else if (status === 'open' || status === 'pending') query += " AND t.result IS NULL";
     else if (status === 'win') query += " AND t.result = 'win'";
     else if (status === 'loss') query += " AND t.result = 'loss'";
     else if (status === 'void') query += " AND t.result = 'void'";
@@ -7237,15 +7388,18 @@ const server = http.createServer(async (req, res) => {
     const game  = parsed.query.game || '';
     const dedupe = sqlTipsDedupeIdIn('t', '?');
     const gameSql = sqlGameFilter('t', sport, game);
+    // Win rate / ROI excluem void E push (push = refund, não é WIN nem LOSS).
+    // 'pushes' contado separadamente pra UI mostrar totais corretos.
     const row = db.prepare(`
       SELECT COUNT(*) as total,
         SUM(CASE WHEN t.result='win' THEN 1 ELSE 0 END) as wins,
         SUM(CASE WHEN t.result='loss' THEN 1 ELSE 0 END) as losses,
+        SUM(CASE WHEN t.result='push' THEN 1 ELSE 0 END) as pushes,
         ROUND(AVG(t.ev), 2) as avg_ev,
         ROUND(AVG(t.odds), 2) as avg_odds
       FROM tips t
       WHERE t.sport = ? AND ${dedupe}
-      AND t.result IS NOT NULL AND t.result != 'void'
+      AND t.result IN ('win','loss')
       ${gameSql}
     `).get(sport, sport);
     const calibration = db.prepare(`
@@ -7254,7 +7408,7 @@ const server = http.createServer(async (req, res) => {
         ROUND(100.0 * SUM(CASE WHEN t.result='win' THEN 1 ELSE 0 END) / COUNT(*), 1) as win_rate
       FROM tips t
       WHERE t.sport = ? AND ${dedupe}
-      AND t.result IS NOT NULL AND t.result != 'void'
+      AND t.result IN ('win','loss')
       ${gameSql}
       GROUP BY t.confidence
     `).all(sport, sport);
@@ -7263,7 +7417,7 @@ const server = http.createServer(async (req, res) => {
       SELECT t.odds, t.stake, t.result, t.ev, t.is_live, t.clv_odds, t.open_odds, t.model_p_pick
       FROM tips t
       WHERE t.sport = ? AND ${dedupe}
-      AND t.result IS NOT NULL AND t.result != 'void'
+      AND t.result IN ('win','loss','push')
       ${gameSql}
     `).all(sport, sport);
     let totalStaked = 0, totalProfit = 0;
@@ -7281,14 +7435,16 @@ const server = http.createServer(async (req, res) => {
     for (const t of tips) {
       const stake = parseFloat(t.stake) || 1;
       const odds  = parseFloat(t.odds)  || 1;
-      const profit = t.result === 'win' ? stake * (odds - 1) : -stake;
+      // Push = refund (profit=0). Win = stake*(odds-1). Loss = -stake.
+      const profit = t.result === 'push' ? 0 : (t.result === 'win' ? stake * (odds - 1) : -stake);
       totalStaked  += stake;
       totalProfit  += profit;
       const bucket = t.is_live ? liveTips : preTips;
       bucket.total++;
       bucket.staked += stake;
       bucket.profit += profit;
-      if (t.result === 'win') bucket.wins++; else bucket.losses++;
+      if (t.result === 'win') bucket.wins++;
+      else if (t.result === 'loss') bucket.losses++;
 
       // CLV = (tipOdds / closingOdds - 1) × 100 → positivo = compramos melhor que o mercado fechou
       const clvOdds = parseFloat(t.clv_odds);
@@ -7301,11 +7457,10 @@ const server = http.createServer(async (req, res) => {
         cb.sum += clv; cb.count++; if (clv > 0) cb.positive++;
       }
 
-      // Brier Score e Log Loss: p derivado do EV e odds
-      // EV armazenado como porcentagem (ex: 5.2 para 5.2%)
-      // Fórmula: p = (1 + EV/100) / odds, onde EV em decimal = ev/100
+      // Brier Score e Log Loss: p derivado do EV e odds.
+      // Push é refund — não classifica como WIN/LOSS, então não entra no Brier (evento ambíguo).
       const ev = parseFloat(t.ev) || 0;
-      if (odds > 1 && t.result) {
+      if (odds > 1 && (t.result === 'win' || t.result === 'loss')) {
         const pStored = parseFloat(t.model_p_pick);
         let p = (isFinite(pStored) && pStored > 0 && pStored < 1)
           ? pStored

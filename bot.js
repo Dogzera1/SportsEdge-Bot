@@ -1947,6 +1947,88 @@ async function checkCriticalAlerts() {
   }
 }
 
+// Live Scout gap monitor: alerta admin via Telegram quando gap (no_gameids/stats_disabled/coverage_missing/etc)
+// persiste por mais que LIVE_SCOUT_ALERT_THRESHOLD_MIN. Anti-spam: cada gap key alerta uma vez por janela.
+const _liveScoutGapFirstSeen = new Map(); // gapKey -> { firstTs, lastTs, info, alerted }
+const LIVE_SCOUT_ALERT_THRESHOLD_MIN = parseInt(process.env.LIVE_SCOUT_ALERT_THRESHOLD_MIN || '5', 10);
+const LIVE_SCOUT_ALERT_COOLDOWN_MS = parseInt(process.env.LIVE_SCOUT_ALERT_COOLDOWN_MIN || '60', 10) * 60 * 1000;
+let _lastLiveScoutCheck = 0;
+const LIVE_SCOUT_CHECK_INTERVAL_MS = parseInt(process.env.LIVE_SCOUT_CHECK_INTERVAL_MIN || '3', 10) * 60 * 1000;
+
+async function checkLiveScoutGaps() {
+  if (!ADMIN_IDS.size) return;
+  if (!/^(1|true|yes)$/i.test(String(process.env.LIVE_SCOUT_ALERTS ?? 'true'))) return;
+  const now = Date.now();
+  if (now - _lastLiveScoutCheck < LIVE_SCOUT_CHECK_INTERVAL_MS) return;
+  _lastLiveScoutCheck = now;
+
+  let scout = null;
+  try {
+    const dashboard = require('./lib/dashboard');
+    scout = await dashboard.runLiveScout(`http://127.0.0.1:${process.env.PORT || 8080}`);
+  } catch (e) {
+    log('WARN', 'LIVE-SCOUT-ALERT', `runLiveScout falhou: ${e.message}`);
+    return;
+  }
+  if (!scout?.ok || !Array.isArray(scout.gaps)) return;
+
+  // Marca todos os gaps atuais
+  const currentKeys = new Set();
+  for (const gap of scout.gaps) {
+    const primaryFlag = (gap.flags && gap.flags[0]) || 'unknown';
+    const key = `${gap.sport}|${gap.matchId || gap.teams || ''}|${primaryFlag}`;
+    currentKeys.add(key);
+    const prev = _liveScoutGapFirstSeen.get(key);
+    if (!prev) {
+      _liveScoutGapFirstSeen.set(key, { firstTs: now, lastTs: now, info: gap, alerted: false, lastAlertTs: 0 });
+    } else {
+      prev.lastTs = now;
+      prev.info = gap; // refresh com info mais recente
+    }
+  }
+
+  // Limpa entradas que sumiram (gap resolvido)
+  for (const [key, st] of _liveScoutGapFirstSeen.entries()) {
+    if (!currentKeys.has(key)) {
+      _liveScoutGapFirstSeen.delete(key);
+    }
+  }
+
+  // Dispara alertas pra gaps persistentes
+  const grouped = []; // agrupa pra enviar única mensagem
+  for (const [key, st] of _liveScoutGapFirstSeen.entries()) {
+    const ageMin = (now - st.firstTs) / 60000;
+    if (ageMin < LIVE_SCOUT_ALERT_THRESHOLD_MIN) continue;
+    if (st.alerted && (now - st.lastAlertTs) < LIVE_SCOUT_ALERT_COOLDOWN_MS) continue;
+    st.alerted = true; st.lastAlertTs = now;
+    grouped.push({ key, ageMin, ...st.info });
+  }
+  if (!grouped.length) return;
+
+  // Pega bot token genérico (esports preferido)
+  const sportsOrder = ['esports', 'cs', 'valorant', 'tennis', 'mma', 'football'];
+  let token = null, botSport = null;
+  for (const sp of sportsOrder) {
+    if (SPORTS[sp]?.enabled && SPORTS[sp]?.token) { token = SPORTS[sp].token; botSport = sp; break; }
+  }
+  if (!token) return;
+
+  const lines = grouped.slice(0, 12).map(g => {
+    const teamsStr = g.teams || g.matchId || '?';
+    const flagsStr = (g.flags || []).slice(0, 3).join(', ');
+    const leagueStr = g.league ? ` (${g.league})` : '';
+    return `• ${g.sport.toUpperCase()} | ${teamsStr}${leagueStr}\n  └─ ${flagsStr} | há ${g.ageMin.toFixed(1)}min`;
+  }).join('\n');
+  const more = grouped.length > 12 ? `\n_(+${grouped.length - 12} outros gaps)_` : '';
+  const msg = `🔍 *LIVE SCOUT — ${grouped.length} gap(s) persistente(s)*\n\n${lines}${more}\n\n` +
+    `_Threshold ${LIVE_SCOUT_ALERT_THRESHOLD_MIN}min | cooldown ${Math.round(LIVE_SCOUT_ALERT_COOLDOWN_MS/60000)}min/gap_`;
+
+  for (const adminId of ADMIN_IDS) {
+    await sendDM(token, adminId, msg).catch(() => {});
+  }
+  log('WARN', 'LIVE-SCOUT-ALERT', `${grouped.length} gap(s) persistentes alertados via bot [${botSport}]`);
+}
+
 async function checkPatchMetaStale(token) {
   if (!ADMIN_IDS.size) return;
   if (Date.now() - lastPatchAlert < PATCH_ALERT_INTERVAL) return;
@@ -8511,6 +8593,10 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   // Alertas críticos: polling /alerts a cada 10 min → DM admins (throttled 1h por alert id)
   setInterval(() => checkCriticalAlerts().catch(e => log('ERROR', 'ALERT', e.message)), 10 * 60 * 1000);
   setTimeout(() => checkCriticalAlerts().catch(() => {}), 30 * 1000); // primeiro check 30s pós-boot
+
+  // Live Scout gaps: alerta admin quando partida live tem stats faltando >5min
+  setInterval(() => checkLiveScoutGaps().catch(e => log('ERROR', 'LIVE-SCOUT-ALERT', e.message)), LIVE_SCOUT_CHECK_INTERVAL_MS);
+  setTimeout(() => checkLiveScoutGaps().catch(() => {}), 60 * 1000); // primeiro check 60s pós-boot
 
   // ── Cashout monitor ──
   // Varre tips live pendentes, recomputa P via live stats, notifica admins

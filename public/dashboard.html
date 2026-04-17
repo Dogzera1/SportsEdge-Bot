@@ -176,6 +176,58 @@
     <div id="leagueRoiTable"><div class="loading">Carregando...</div></div>
   </div>
 
+  <!-- Heatmap Horários + Shadow vs Ativo (lado a lado) -->
+  <div style="display:grid;grid-template-columns:1.4fr 1fr;gap:1.2rem;margin-bottom:1.2rem" id="hourlyShadowGrid">
+    <div class="table-card collapsible" id="hourlyCard" data-collapsed="false">
+      <h3 onclick="toggleCard(this, event)" style="display:flex;align-items:center;justify-content:space-between;gap:0.8rem;flex-wrap:wrap">
+        <span><span class="toggle-arrow">&#9662;</span>&#128293; Heatmap por Hora (BRT) &mdash; <span id="hourlyMeta" style="font-weight:400;font-size:0.72rem;color:#9ca3af"></span></span>
+        <span style="font-size:0.68rem;color:#6b7280;font-weight:400;text-transform:none;letter-spacing:0">
+          Janela:
+          <select id="hourlyDays" onclick="event.stopPropagation()" onchange="loadHourly()" style="background:#1f2937;color:#e5e7eb;border:1px solid #374151;border-radius:4px;padding:2px 6px;font-size:0.7rem">
+            <option value="7">7 dias</option>
+            <option value="30" selected>30 dias</option>
+            <option value="90">90 dias</option>
+            <option value="365">1 ano</option>
+          </select>
+        </span>
+      </h3>
+      <div id="hourlyHeatmap"><div class="loading">Carregando...</div></div>
+    </div>
+
+    <div class="table-card collapsible" id="shadowCard" data-collapsed="false">
+      <h3 onclick="toggleCard(this, event)" style="display:flex;align-items:center;justify-content:space-between;gap:0.8rem;flex-wrap:wrap">
+        <span><span class="toggle-arrow">&#9662;</span>&#127770; Shadow vs Ativo</span>
+        <span style="font-size:0.68rem;color:#6b7280;font-weight:400;text-transform:none;letter-spacing:0">
+          <select id="shadowDays" onclick="event.stopPropagation()" onchange="loadShadow()" style="background:#1f2937;color:#e5e7eb;border:1px solid #374151;border-radius:4px;padding:2px 6px;font-size:0.7rem">
+            <option value="7">7d</option>
+            <option value="30" selected>30d</option>
+            <option value="90">90d</option>
+            <option value="365">1a</option>
+          </select>
+        </span>
+      </h3>
+      <div id="shadowBody"><div class="loading">Carregando...</div></div>
+    </div>
+  </div>
+
+  <!-- Equity Curve -->
+  <div class="table-card collapsible" id="equityCard" data-collapsed="false">
+    <h3 onclick="toggleCard(this, event)" style="display:flex;align-items:center;justify-content:space-between;gap:0.8rem;flex-wrap:wrap">
+      <span><span class="toggle-arrow">&#9662;</span>&#128200; Curva de Banca &mdash; <span id="equityKpis" style="font-weight:400;font-size:0.78rem;color:#9ca3af"></span></span>
+      <span style="font-size:0.68rem;color:#6b7280;font-weight:400;text-transform:none;letter-spacing:0">
+        Janela:
+        <select id="equityDays" onclick="event.stopPropagation()" onchange="loadEquityCurve()" style="background:#1f2937;color:#e5e7eb;border:1px solid #374151;border-radius:4px;padding:2px 6px;font-size:0.7rem">
+          <option value="7">7 dias</option>
+          <option value="30" selected>30 dias</option>
+          <option value="90">90 dias</option>
+          <option value="365">1 ano</option>
+        </select>
+      </span>
+    </h3>
+    <canvas id="equityChart" style="max-height:260px"></canvas>
+    <div id="equityMeta" style="font-size:0.72rem;color:#6b7280;margin-top:0.5rem;display:flex;gap:1.2rem;flex-wrap:wrap"></div>
+  </div>
+
   <!-- Tips Table -->
   <div class="table-card collapsible" id="sportTipsCard" data-collapsed="true">
     <h3 onclick="toggleCard(this, event)" style="display:flex;align-items:center;justify-content:space-between">
@@ -367,8 +419,172 @@ async function loadAll() {
   renderLeagueRoi(leagueRoi);
   renderLiveSnapshot(liveSnap);
   renderUpcoming(upcomingSnap);
+  loadEquityCurve();
+  loadHourly();
+  loadShadow();
   await tipsP;
   document.getElementById('lastUpdated').textContent = 'Atualizado: ' + new Date().toLocaleTimeString('pt-BR');
+}
+
+let _equityChart = null;
+async function loadEquityCurve() {
+  const days = (document.getElementById('equityDays')?.value) || '30';
+  const data = await apiFetch('/equity-curve?sport=' + currentSport + '&days=' + days);
+  if (!data || data.error) {
+    const meta = document.getElementById('equityMeta');
+    if (meta) meta.textContent = data?.error || 'sem dados';
+    return;
+  }
+  const series = Array.isArray(data.series) ? data.series : [];
+  const ctx = document.getElementById('equityChart')?.getContext?.('2d');
+  if (!ctx) return;
+  const labels = series.map(s => s.day);
+  const banca = series.map(s => s.cum_banca);
+  const drawdown = series.map(s => -Math.abs(s.drawdown_pct || 0));
+  if (_equityChart) _equityChart.destroy();
+  _equityChart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [
+        {
+          label: 'Banca (R$)',
+          data: banca,
+          borderColor: '#34d399',
+          backgroundColor: 'rgba(52,211,153,0.12)',
+          borderWidth: 2,
+          tension: 0.25,
+          fill: true,
+          yAxisID: 'y',
+        },
+        {
+          label: 'Drawdown (%)',
+          data: drawdown,
+          borderColor: '#f87171',
+          backgroundColor: 'rgba(248,113,113,0.05)',
+          borderWidth: 1.5,
+          tension: 0.2,
+          fill: false,
+          yAxisID: 'y1',
+        }
+      ]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { labels: { color: '#9ca3af', font: { size: 11 } } } },
+      scales: {
+        x: { ticks: { color: '#6b7280', font: { size: 10 } }, grid: { color: 'rgba(75,85,99,0.18)' } },
+        y: { position: 'left', ticks: { color: '#34d399', font: { size: 10 }, callback: v => 'R$' + Number(v).toFixed(0) }, grid: { color: 'rgba(75,85,99,0.18)' } },
+        y1: { position: 'right', ticks: { color: '#f87171', font: { size: 10 }, callback: v => Number(v).toFixed(1) + '%' }, grid: { drawOnChartArea: false } }
+      }
+    }
+  });
+  const initial = Number(data.initial_banca || 0);
+  const current = Number(data.current_banca || 0);
+  const profitR = Number(data.total_profit_reais || 0);
+  const growth = initial > 0 ? (profitR / initial) * 100 : 0;
+  const growthClass = profitR >= 0 ? 'positive' : 'negative';
+  document.getElementById('equityKpis').innerHTML =
+    `Banca atual <b style="color:#e5e7eb">R$${current.toFixed(2)}</b> ` +
+    `(<span class="${growthClass}">${profitR >= 0 ? '+' : ''}${profitR.toFixed(2)} | ${growth >= 0 ? '+' : ''}${growth.toFixed(2)}%</span>)`;
+  document.getElementById('equityMeta').innerHTML =
+    `<span>Pico: <b>R$${Number(data.peak_banca || 0).toFixed(2)}</b></span>` +
+    `<span>Max DD: <b style="color:#f87171">-${Number(data.max_drawdown_pct || 0).toFixed(2)}%</b></span>` +
+    `<span>Sharpe (anual): <b>${data.sharpe_annualized != null ? Number(data.sharpe_annualized).toFixed(2) : '—'}</b></span>` +
+    `<span>Dias ativos: <b>${data.days_settled || 0}</b></span>`;
+}
+
+async function loadHourly() {
+  const days = (document.getElementById('hourlyDays')?.value) || '30';
+  const data = await apiFetch('/hourly-roi?sport=' + currentSport + '&days=' + days);
+  const el = document.getElementById('hourlyHeatmap');
+  if (!el) return;
+  if (!data || data.error || !Array.isArray(data.hours)) {
+    el.innerHTML = '<div class="loading" style="color:#6b7280">' + (data?.error || 'sem dados') + '</div>';
+    return;
+  }
+  // Color scale: ROI -50% (red) → 0 (gray) → +50% (green). null/n=0 = neutro.
+  const cellColor = (h) => {
+    if (h.n === 0) return { bg: '#111827', fg: '#374151' };
+    if (h.roi == null) return { bg: '#1f2937', fg: '#6b7280' };
+    const r = Math.max(-50, Math.min(50, h.roi));
+    if (r >= 0) {
+      const t = r / 50; // 0..1
+      const g = Math.round(40 + 160 * t); // 40..200
+      return { bg: `rgba(34,${g},94,${0.15 + 0.55 * t})`, fg: t > 0.5 ? '#bbf7d0' : '#86efac' };
+    } else {
+      const t = -r / 50;
+      const rr = Math.round(40 + 160 * t);
+      return { bg: `rgba(${rr},38,38,${0.15 + 0.55 * t})`, fg: t > 0.5 ? '#fecaca' : '#fca5a5' };
+    }
+  };
+  let totalN = 0, totalProfit = 0;
+  const cells = data.hours.map(h => {
+    totalN += h.n; totalProfit += h.profit_reais || 0;
+    const { bg, fg } = cellColor(h);
+    const roiTxt = h.roi != null ? (h.roi >= 0 ? '+' : '') + h.roi.toFixed(1) + '%' : '—';
+    const tip = h.n > 0
+      ? `${String(h.hour).padStart(2,'0')}:00\nn=${h.n} | ${h.wins}W/${h.losses}L\nROI: ${roiTxt}\nLucro: R$${h.profit_reais.toFixed(2)}`
+      : `${String(h.hour).padStart(2,'0')}:00\nsem tips`;
+    return `<div title="${tip}" style="background:${bg};color:${fg};padding:6px 4px;border-radius:4px;text-align:center;font-size:0.65rem;line-height:1.2">
+      <div style="font-weight:700;color:#9ca3af;font-size:0.6rem">${String(h.hour).padStart(2,'0')}h</div>
+      <div style="font-weight:600">${roiTxt}</div>
+      <div style="opacity:0.7;font-size:0.55rem">n=${h.n}</div>
+    </div>`;
+  }).join('');
+  el.innerHTML = `<div style="display:grid;grid-template-columns:repeat(12,1fr);gap:3px">${cells}</div>`;
+  document.getElementById('hourlyMeta').textContent = `${totalN} tips | lucro R$${totalProfit.toFixed(2)} | ${data.timezone || ''}`;
+}
+
+async function loadShadow() {
+  const days = (document.getElementById('shadowDays')?.value) || '30';
+  const data = await apiFetch('/shadow-vs-active?sport=' + currentSport + '&days=' + days);
+  const el = document.getElementById('shadowBody');
+  if (!el) return;
+  if (!data || data.error) {
+    el.innerHTML = '<div class="loading" style="color:#6b7280">' + (data?.error || 'sem dados') + '</div>';
+    return;
+  }
+  const fmtBucket = (label, b, color) => {
+    if (!b) return `<div style="border-left:3px solid #374151;padding:0.6rem 0.8rem;background:#0f1729;border-radius:4px">
+      <div style="font-size:0.7rem;color:#6b7280;text-transform:uppercase;letter-spacing:1px">${label}</div>
+      <div style="font-size:0.85rem;color:#4b5563;margin-top:6px">sem tips</div>
+    </div>`;
+    const roi = b.roi != null ? b.roi : 0;
+    const roiCls = roi >= 0 ? 'positive' : 'negative';
+    const roiTxt = b.roi != null ? (roi >= 0 ? '+' : '') + roi.toFixed(2) + '%' : '—';
+    const hr = b.hitRate != null ? (b.hitRate * 100).toFixed(1) + '%' : '—';
+    return `<div style="border-left:3px solid ${color};padding:0.6rem 0.8rem;background:#0f1729;border-radius:4px">
+      <div style="font-size:0.7rem;color:#9ca3af;text-transform:uppercase;letter-spacing:1px">${label}</div>
+      <div style="display:flex;justify-content:space-between;align-items:baseline;margin-top:6px">
+        <span style="font-size:1.4rem;font-weight:700" class="${roiCls}">${roiTxt}</span>
+        <span style="font-size:0.72rem;color:#6b7280">ROI</span>
+      </div>
+      <div style="display:flex;justify-content:space-between;font-size:0.72rem;color:#9ca3af;margin-top:8px">
+        <span>${b.n} tips</span>
+        <span>${b.wins}W/${b.losses}L</span>
+        <span>HR ${hr}</span>
+      </div>
+      <div style="display:flex;justify-content:space-between;font-size:0.7rem;color:#6b7280;margin-top:4px">
+        <span>Lucro: <b style="color:${b.profit_reais>=0?'#34d399':'#f87171'}">R$${b.profit_reais.toFixed(2)}</b></span>
+        <span>Odd média: ${b.avg_odds || '—'}</span>
+      </div>
+    </div>`;
+  };
+  let delta = '';
+  if (data.active && data.shadow && data.active.roi != null && data.shadow.roi != null) {
+    const d = data.active.roi - data.shadow.roi;
+    const dCls = d >= 0 ? 'positive' : 'negative';
+    delta = `<div style="text-align:center;font-size:0.72rem;color:#6b7280;margin-top:0.6rem">
+      Δ Ativo - Shadow: <span class="${dCls}" style="font-weight:700">${d >= 0 ? '+' : ''}${d.toFixed(2)}pp</span>
+      ${Math.abs(d) > 5 ? ' &nbsp;&middot; ' + (d < 0 ? '⚠️ shadow tá ganhando do ativo' : '✓ ativo melhor') : ''}
+    </div>`;
+  }
+  el.innerHTML = `<div style="display:flex;flex-direction:column;gap:0.6rem">
+    ${fmtBucket('🟢 Ativo (DM enviada)', data.active, '#34d399')}
+    ${fmtBucket('🟡 Shadow (só registrada)', data.shadow, '#fbbf24')}
+    ${delta}
+  </div>`;
 }
 
 async function loadML() {
