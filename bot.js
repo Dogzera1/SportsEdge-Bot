@@ -7180,7 +7180,26 @@ async function pollValorant(runOnce = false) {
 
         const boMatch = String(match.format || '').match(/Bo(\d+)/i);
         const bo = boMatch ? parseInt(boMatch[1], 10) : 3;
-        const ctx = { bo, score1: match.score1, score2: match.score2, currentMap: match.currentMap || null };
+
+        // Live context via VLR.gg — PandaScore não dá mapa atual enquanto game roda,
+        // nem lado (CT/Atk) nem score de rounds. VLR preenche esses gaps via scraping.
+        let vlrLive = null;
+        if (isLiveVal) {
+          try {
+            const vlr = require('./lib/vlr');
+            const found = await vlr.findLiveMatch(match.team1, match.team2).catch(() => null);
+            if (found?.matchId) {
+              const stats = await vlr.getMatchStats(found.matchId).catch(() => null);
+              if (stats) vlrLive = vlr.summarizeLive(stats, match.team1, match.team2);
+              if (vlrLive) {
+                log('INFO', 'AUTO-VAL', `VLR ${match.team1} vs ${match.team2}: ${vlrLive.currentMap || '?'} R${vlrLive.currentRound} | ${vlrLive.t1.name} ${vlrLive.t1.score}(CT${vlrLive.t1.ct}/A${vlrLive.t1.atk}|${vlrLive.t1.side}) vs ${vlrLive.t2.name} ${vlrLive.t2.score}(CT${vlrLive.t2.ct}/A${vlrLive.t2.atk}|${vlrLive.t2.side})`);
+              }
+            }
+          } catch (_) {}
+        }
+        // Usa VLR.currentMap quando PandaScore entregou null (partida em andamento de game N)
+        const mapHint = match.currentMap || vlrLive?.currentMap || null;
+        const ctx = { bo, score1: match.score1, score2: match.score2, currentMap: mapHint };
         const elo = getValorantModel(db, match.team1, match.team2, impliedP1, impliedP2, ctx);
 
         const useElo = elo.pass && elo.found1 && elo.found2 && Math.min(elo.eloMatches1, elo.eloMatches2) >= 5;
@@ -7240,7 +7259,10 @@ async function pollValorant(runOnce = false) {
         const seriesStr = elo.inSeriesAdjusted
           ? ` | série ${match.score1||0}-${match.score2||0} Bo${bo}`
           : '';
-        const tipReason = `Elo: ${match.team1}=${elo.elo1} (${elo.eloMatches1}j) vs ${match.team2}=${elo.elo2} (${elo.eloMatches2}j)${formStr}${h2hStr}${mapStr}${seriesStr}`;
+        const liveStr = vlrLive
+          ? ` | LIVE ${vlrLive.currentMap || '?'} R${vlrLive.currentRound} ${vlrLive.t1.score}-${vlrLive.t2.score} (CT ${vlrLive.t1.ct}/${vlrLive.t2.ct} | Atk ${vlrLive.t1.atk}/${vlrLive.t2.atk})`
+          : '';
+        const tipReason = `Elo: ${match.team1}=${elo.elo1} (${elo.eloMatches1}j) vs ${match.team2}=${elo.elo2} (${elo.eloMatches2}j)${formStr}${h2hStr}${mapStr}${seriesStr}${liveStr}`;
 
         const rec = await serverPost('/record-tip', {
           matchId: String(match.id) + valMapTag, eventName: match.league,

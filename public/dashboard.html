@@ -936,6 +936,21 @@ function renderLiveSnapshot(data) {
           'K ' + s.blue.kills + '/' + s.red.kills + ' • T ' + s.blue.towers + '/' + s.red.towers +
           ' • D ' + s.blue.dragons + '/' + s.red.dragons +
           (s.dataDelay ? ' • ~' + s.dataDelay + 's atrás' : '');
+      } else if (sp === 'valorant' && s && s.currentMap && s.t1 && s.t2) {
+        var map = esc(s.currentMap);
+        var rnd = 'R' + s.round;
+        var mapScore = s.t1.score + '-' + s.t2.score;
+        var sideBadge = function(side) {
+          if (side === 'CT') return '<span style="color:#93c5fd">CT</span>';
+          if (side === 'Atk') return '<span style="color:#fca5a5">Atk</span>';
+          return '<span style="color:#6b7280">' + esc(side || '?') + '</span>';
+        };
+        detail = '<b>' + map + '</b> ' + rnd + ' ' + mapScore +
+          ' • ' + esc((s.t1.name || '').split(' ')[0]) + ' ' + sideBadge(s.t1.side) +
+          ' ' + (s.t1.ct || 0) + 'CT/' + (s.t1.atk || 0) + 'Atk' +
+          ' vs ' + esc((s.t2.name || '').split(' ')[0]) + ' ' + sideBadge(s.t2.side) +
+          ' ' + (s.t2.ct || 0) + 'CT/' + (s.t2.atk || 0) + 'Atk' +
+          ' <span style="color:#6b7280;font-size:0.72rem">[vlr]</span>';
       } else if (s && s.score) {
         detail = 'placar ' + esc(s.score);
       } else if (r.score) {

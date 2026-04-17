@@ -4680,8 +4680,42 @@ const server = http.createServer(async (req, res) => {
             } catch (e) {
               row.liveStats.reason = `error:${(e.message || '').slice(0, 60)}`;
             }
+          } else if (sport === 'valorant') {
+            // Enriquece com VLR.gg quando possível (mapa, lado, round atual).
+            const hasScore = m.score1 != null || m.score2 != null;
+            let enriched = null;
+            try {
+              const vlr = require('./lib/vlr');
+              const found = await vlr.findLiveMatch(m.team1, m.team2).catch(() => null);
+              if (found?.matchId) {
+                const stats = await vlr.getMatchStats(found.matchId).catch(() => null);
+                if (stats) enriched = vlr.summarizeLive(stats, m.team1, m.team2);
+              }
+            } catch (_) {}
+            row.liveStats = enriched
+              ? {
+                  available: true,
+                  gameState: enriched.isLive ? 'in_progress' : 'between_maps',
+                  gameNumber: null,
+                  reason: null,
+                  summary: {
+                    score: `${m.score1 || 0}-${m.score2 || 0}`,
+                    currentMap: enriched.currentMap,
+                    round: enriched.currentRound,
+                    t1: { name: enriched.t1.name, score: enriched.t1.score, ct: enriched.t1.ct, atk: enriched.t1.atk, side: enriched.t1.side },
+                    t2: { name: enriched.t2.name, score: enriched.t2.score, ct: enriched.t2.ct, atk: enriched.t2.atk, side: enriched.t2.side },
+                    source: 'vlr.gg',
+                  },
+                }
+              : {
+                  available: hasScore,
+                  gameState: hasScore ? 'in_progress' : null,
+                  gameNumber: null,
+                  reason: hasScore ? null : 'no_vlr_match',
+                  summary: hasScore ? { score: `${m.score1 || 0}-${m.score2 || 0}` } : null,
+                };
           } else {
-            // Dota/CS/Valorant — sem feed detalhado aqui; mostra score PS se presente.
+            // Dota/CS — sem feed detalhado aqui; mostra score PS se presente.
             const hasScore = m.score1 != null || m.score2 != null;
             row.liveStats = {
               available: hasScore,
@@ -4698,6 +4732,29 @@ const server = http.createServer(async (req, res) => {
       }
 
       sendJson(res, { generatedAt: new Date().toISOString(), sports: out });
+    } catch (e) {
+      sendJson(res, { error: e.message, stack: e.stack }, 500);
+    }
+    return;
+  }
+
+  // Debug: testa o scraper VLR.gg pra um par de times Valorant live.
+  //   GET /debug-vlr?team1=KRU%20Spark&team2=ShindeN
+  if (p === '/debug-vlr') {
+    try {
+      const vlr = require('./lib/vlr');
+      const team1 = String(parsed.query.team1 || '').trim();
+      const team2 = String(parsed.query.team2 || '').trim();
+      const matchIdQ = String(parsed.query.matchId || '').trim();
+      if (!matchIdQ && (!team1 || !team2)) {
+        sendJson(res, { error: 'team1+team2 ou matchId obrigatório' }, 400);
+        return;
+      }
+      const found = matchIdQ ? { matchId: matchIdQ } : await vlr.findLiveMatch(team1, team2).catch(() => null);
+      if (!found?.matchId) { sendJson(res, { found: null, reason: 'no_live_match' }); return; }
+      const stats = await vlr.getMatchStats(found.matchId).catch(() => null);
+      const summary = (team1 && team2) ? vlr.summarizeLive(stats, team1, team2) : null;
+      sendJson(res, { found, stats, summary });
     } catch (e) {
       sendJson(res, { error: e.message, stack: e.stack }, 500);
     }
