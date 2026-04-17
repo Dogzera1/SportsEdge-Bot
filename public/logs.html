@@ -258,6 +258,15 @@
 <!-- ═══ Tab: Agentes ═══ -->
 <div class="tab-pane" id="pane-agents">
   <div class="agents-section" style="padding:18px;display:grid;grid-template-columns:1fr;gap:14px;">
+    <!-- Weekly Review -->
+    <div class="agent-card" id="agent-weekly-review">
+      <div class="agent-head">
+        <span class="agent-title">🗓️ Weekly Review</span>
+        <span class="agent-meta" id="weeklyReviewMeta">—</span>
+        <button class="agent-refresh" data-agent="weekly-review">↻</button>
+      </div>
+      <div class="agent-body" id="weeklyReviewBody"><div class="empty" style="padding:20px;">clique em ↻ pra rodar — gera relatório consolidado de portfólio (verde/vermelho/cuts/scales/tendência CLV)</div></div>
+    </div>
     <!-- Live Scout -->
     <div class="agent-card" id="agent-live-scout">
       <div class="agent-head">
@@ -647,6 +656,82 @@
     body.innerHTML = `<table class="agent-table"><thead><tr><th>fonte</th><th>HTTP</th><th>latency</th><th>bytes</th><th>erro</th></tr></thead><tbody>${rows}${ldRows}</tbody></table>`;
   }
 
+  function renderWeeklyReview(data) {
+    const body = document.getElementById('weeklyReviewBody');
+    const meta = document.getElementById('weeklyReviewMeta');
+    if (!body) return;
+    if (!data || !data.ok) {
+      body.innerHTML = `<div class="empty" style="color:var(--err);">${escapeHtml(data?.error || 'sem dados')}</div>`;
+      return;
+    }
+    meta.textContent = new Date(data.at).toLocaleTimeString();
+    const s = data.summary || {};
+    const prioBg = { HIGH: 'rgba(239,68,68,0.15)', MED: 'rgba(251,191,36,0.12)', INFO: 'rgba(96,165,250,0.12)', LOW: 'rgba(107,114,128,0.1)' };
+    const prioFg = { HIGH: '#fca5a5', MED: '#fde68a', INFO: '#93c5fd', LOW: '#9ca3af' };
+    const actionIcon = { CUT: '🛑', SCALE: '📈', WATCH: '👁️', ALERT: '⚠️', EXPLORE: '🔍', NO_DATA: '⚪' };
+
+    const summaryHtml = `
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:8px;margin-bottom:12px;font-size:11px">
+        <div style="background:rgba(34,197,94,0.12);padding:8px;border-radius:6px;border-left:3px solid #34d399">
+          <div style="color:#6ee7b7;font-weight:700;font-size:18px">${s.verdes || 0}</div>
+          <div style="color:#86efac">verdes (SCALE)</div>
+        </div>
+        <div style="background:rgba(251,191,36,0.12);padding:8px;border-radius:6px;border-left:3px solid #fbbf24">
+          <div style="color:#fde68a;font-weight:700;font-size:18px">${s.amarelos || 0}</div>
+          <div style="color:#fcd34d">amarelos</div>
+        </div>
+        <div style="background:rgba(239,68,68,0.12);padding:8px;border-radius:6px;border-left:3px solid #ef4444">
+          <div style="color:#fca5a5;font-weight:700;font-size:18px">${s.vermelhos || 0}</div>
+          <div style="color:#fca5a5">vermelhos (CUT)</div>
+        </div>
+        <div style="background:rgba(107,114,128,0.1);padding:8px;border-radius:6px;border-left:3px solid #6b7280">
+          <div style="color:#9ca3af;font-weight:700;font-size:18px">${s.no_data || 0}</div>
+          <div style="color:#6b7280">sem dados</div>
+        </div>
+        <div style="background:rgba(96,165,250,0.12);padding:8px;border-radius:6px;border-left:3px solid #60a5fa">
+          <div style="color:#93c5fd;font-weight:700;font-size:18px">${s.clv_subindo || 0} ↗ / ${s.clv_caindo || 0} ↘</div>
+          <div style="color:#93c5fd">CLV trend</div>
+        </div>
+        <div style="background:rgba(168,85,247,0.12);padding:8px;border-radius:6px;border-left:3px solid #a855f7">
+          <div style="color:#d8b4fe;font-weight:700;font-size:18px">${s.auto_shadowed || 0}</div>
+          <div style="color:#d8b4fe">auto-shadow ativos</div>
+        </div>
+      </div>`;
+
+    const actionsHtml = (data.actions || []).length === 0
+      ? `<div style="color:var(--muted);padding:12px;text-align:center;font-size:12px">Nenhuma ação recomendada — portfólio em equilíbrio.</div>`
+      : `<table class="agent-table" style="font-size:11px"><thead><tr><th>Prio</th><th>Ação</th><th>Bucket/Sport</th><th>Razão</th><th>Sugestão</th></tr></thead><tbody>${
+          data.actions.map(a => `<tr style="background:${prioBg[a.priority] || ''};">
+            <td style="color:${prioFg[a.priority]};font-weight:700">${a.priority}</td>
+            <td style="font-weight:700">${actionIcon[a.action] || ''} ${escapeHtml(a.action)}</td>
+            <td style="font-family:monospace;color:#e5e7eb">${escapeHtml(a.target)}</td>
+            <td style="color:#9ca3af">${escapeHtml(a.reason)}</td>
+            <td style="color:#86efac;font-style:italic">${escapeHtml(a.suggestion || '—')}</td>
+          </tr>`).join('')
+        }</tbody></table>`;
+
+    const trendsUp = (data.trends?.clv_subindo || []).map(t =>
+      `<span style="background:rgba(34,197,94,0.15);color:#6ee7b7;padding:3px 8px;border-radius:4px;font-size:11px;margin-right:6px">${escapeHtml(t.sport)} +${t.delta}pp (${t.clv_recent}%)</span>`
+    ).join('');
+    const trendsDown = (data.trends?.clv_caindo || []).map(t =>
+      `<span style="background:rgba(239,68,68,0.15);color:#fca5a5;padding:3px 8px;border-radius:4px;font-size:11px;margin-right:6px">${escapeHtml(t.sport)} ${t.delta}pp (${t.clv_recent}%)</span>`
+    ).join('');
+    const trendsHtml = (trendsUp || trendsDown) ? `
+      <div style="margin-top:14px;padding:10px;background:var(--panel2);border-radius:6px">
+        <div style="font-size:11px;color:var(--muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:1px">CLV trend (recent 7d vs prior 7d)</div>
+        ${trendsUp ? '<div style="margin-bottom:6px"><span style="color:#6ee7b7;font-size:11px;font-weight:700">↗ subindo:</span> ' + trendsUp + '</div>' : ''}
+        ${trendsDown ? '<div><span style="color:#fca5a5;font-size:11px;font-weight:700">↘ caindo:</span> ' + trendsDown + '</div>' : ''}
+      </div>` : '';
+
+    const shadowHtml = (data.auto_shadow_active || []).length > 0 ? `
+      <div style="margin-top:12px;padding:10px;background:rgba(168,85,247,0.08);border-radius:6px;border-left:3px solid #a855f7">
+        <div style="font-size:11px;color:#d8b4fe;font-weight:700;margin-bottom:6px">🛑 SPORTS EM AUTO-SHADOW</div>
+        ${data.auto_shadow_active.map(a => `<div style="font-size:11px;color:#9ca3af;margin-bottom:4px">${escapeHtml(a.sport)} — ${new Date(a.at).toLocaleString()}</div>`).join('')}
+      </div>` : '';
+
+    body.innerHTML = summaryHtml + actionsHtml + trendsHtml + shadowHtml;
+  }
+
   async function fetchAgent(name, params = '') {
     const btn = document.querySelector(`.agent-refresh[data-agent="${name}"]`);
     if (btn) btn.classList.add('loading');
@@ -656,8 +741,9 @@
       if (name === 'live-scout') renderLiveScout(data);
       if (name === 'roi-analyst') renderRoi(data);
       if (name === 'feed-medic') renderFeedMedic(data);
+      if (name === 'weekly-review') renderWeeklyReview(data);
     } catch (e) {
-      const map = { 'live-scout': 'liveScoutBody', 'roi-analyst': 'roiAnalystBody', 'feed-medic': 'feedMedicBody' };
+      const map = { 'live-scout': 'liveScoutBody', 'roi-analyst': 'roiAnalystBody', 'feed-medic': 'feedMedicBody', 'weekly-review': 'weeklyReviewBody' };
       const el = document.getElementById(map[name]);
       if (el) el.innerHTML = `<div class="empty" style="color:var(--err);">fetch falhou: ${escapeHtml(String(e.message||e))}</div>`;
     } finally {
@@ -666,6 +752,7 @@
   }
 
   function refreshAgents() {
+    fetchAgent('weekly-review');
     fetchAgent('live-scout');
     const sel = document.getElementById('roiDaysSel');
     fetchAgent('roi-analyst', '?days=' + (sel?.value || '30'));

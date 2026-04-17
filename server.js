@@ -7960,6 +7960,13 @@ const server = http.createServer(async (req, res) => {
       .catch(e => sendJson(res, { ok: false, error: e.message }, 500));
     return;
   }
+  if (p === '/agents/weekly-review') {
+    if (!requireAdmin(req, res)) return;
+    const base = `http://127.0.0.1:${PORT}`;
+    dashboard.runWeeklyReview(base).then(data => sendJson(res, data))
+      .catch(e => sendJson(res, { ok: false, error: e.message }, 500));
+    return;
+  }
   if (p === '/agents/roi-analyst') {
     if (!requireAdmin(req, res)) return;
     try { sendJson(res, dashboard.runRoiAnalyst(db, parsed.query.days || '30')); }
