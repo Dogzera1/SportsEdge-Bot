@@ -162,7 +162,11 @@
       "Bash(node scripts/logs-dashboard.js --port 7788 --service dummy)",
       "Bash(echo \"PID $!\")",
       "Bash(awk '/AUTO-FOOTBALL/ && /TIP_ML|tipMatch|tipParticipant|tipTeam/' bot.js)",
-      "Bash(awk 'NR>=6970 && NR<=7020' bot.js)"
+      "Bash(awk 'NR>=6970 && NR<=7020' bot.js)",
+      "Bash(cygpath -w /tmp/tmp_live_final.json)",
+      "Bash(python -c ' *)",
+      "Bash(git -C \"C:\\\\Users\\\\vict_\\\\Desktop\\\\lol betting\" log --oneline -30 lib/vlr.js)",
+      "Bash(git -C \"C:\\\\Users\\\\vict_\\\\Desktop\\\\lol betting\" log --oneline -5 -p -- lib/vlr.js)"
     ]
   }
 }

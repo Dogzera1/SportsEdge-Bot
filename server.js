@@ -2661,7 +2661,9 @@ async function getTheOddsTableTennisMatches() {
 // TTL adaptativo: 5min quando só upcoming; 90s quando ha partidas live (odds live movem rapido).
 let _tennisPinnacleCache = { data: [], ts: 0 };
 const TENNIS_PINNACLE_TTL_IDLE = 5 * 60 * 1000;
-const TENNIS_PINNACLE_TTL_LIVE = 90 * 1000;
+// Em sets decisivos as odds tennis Pinnacle mexem rápido (5-15s). 60s era razoável
+// pré-fix do "odd invertida" (Faria/Safiullin: 3.04 → 1.87 em 30min). Mantém 60s.
+const TENNIS_PINNACLE_TTL_LIVE = 60 * 1000;
 
 async function getPinnacleTennisMatches() {
   if (process.env.PINNACLE_TENNIS !== 'true') return [];
@@ -2741,11 +2743,15 @@ async function getPinnacleTableTennisMatches() {
 // sportId=12 (E-Sports) filtrado por league.name contendo "Dota 2"
 // Descarta matchups de kills e handicap (só queremos match winner série)
 let _dotaPinnacleCache = { data: [], ts: 0 };
-const DOTA_PINNACLE_TTL = 3 * 60 * 1000; // 3min (mesmo padrão snooker)
+// TTL adaptativo: 45s quando há live (odds vivas mexem rápido), 3min idle.
+const DOTA_PINNACLE_TTL_LIVE = 45 * 1000;
+const DOTA_PINNACLE_TTL_IDLE = 3 * 60 * 1000;
 
 async function getPinnacleDotaMatches() {
   if (process.env.PINNACLE_DOTA !== 'true') return [];
-  if (_dotaPinnacleCache.data.length && (Date.now() - _dotaPinnacleCache.ts) < DOTA_PINNACLE_TTL) {
+  const hasLiveCached = _dotaPinnacleCache.data.some(m => m.status === 'live');
+  const ttl = hasLiveCached ? DOTA_PINNACLE_TTL_LIVE : DOTA_PINNACLE_TTL_IDLE;
+  if (_dotaPinnacleCache.data.length && (Date.now() - _dotaPinnacleCache.ts) < ttl) {
     return _dotaPinnacleCache.data;
   }
   try {

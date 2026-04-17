@@ -5022,7 +5022,12 @@ async function _pollDotaInner(runOnce = false) {
   if (!esportsConfig?.enabled || !esportsConfig?.token) return;
   const token = esportsConfig.token;
   const DOTA_INTERVAL = 4 * 60 * 60 * 1000;
-  const DOTA_LIVE_COOLDOWN = 3 * 60 * 1000; // re-analisa ao vivo a cada 3min
+  // Cooldown live adaptativo: 90s quando temos Steam RT (delay ~15s) ou stats live frescas;
+  // 3min quando só OpenDota (delay nativo 3min — não vale re-analisar antes).
+  const DOTA_LIVE_COOLDOWN_FAST = 90 * 1000;
+  const DOTA_LIVE_COOLDOWN_SLOW = 3 * 60 * 1000;
+  const _dotaHasSteamRT = !!process.env.STEAM_WEBAPI_KEY;
+  const DOTA_LIVE_COOLDOWN = _dotaHasSteamRT ? DOTA_LIVE_COOLDOWN_FAST : DOTA_LIVE_COOLDOWN_SLOW;
   let _hasLiveDota = false;
 
   try {
@@ -5158,8 +5163,24 @@ async function _pollDotaInner(runOnce = false) {
         if (odRes.status === 'rejected') log('WARN', 'AUTO-DOTA', `OpenDota fetch falhou: ${odRes.reason?.message || odRes.reason}`);
         if (isPsMatch && psRes.status === 'rejected') log('WARN', 'AUTO-DOTA', `PS live fetch falhou: ${psRes.reason?.message || psRes.reason}`);
 
-        log('INFO', 'LIVE-STATS', `Dota OpenDota ${match.team1} vs ${match.team2}: hasLiveStats=${!!od?.hasLiveStats} playerStats=${!!od?.hasPlayerStats} agg=${!!od?.hasAggregateStats}${od?.error?` err=${od.error}`:''}`);
+        // Mede staleness: Steam RT tem delay ~15s; OpenDota agg ~3min nativo.
+        // Se source = opendota-only e gameTime > 5min, dado pode estar muito velho.
+        const sourceIsRT = String(od?._source || '').includes('steam-rt');
+        const ageHint = sourceIsRT ? '~15s' : (od?.hasPlayerStats ? '~30s' : '~3min anti-cheat');
+        log('INFO', 'LIVE-STATS', `Dota OpenDota ${match.team1} vs ${match.team2}: hasLiveStats=${!!od?.hasLiveStats} playerStats=${!!od?.hasPlayerStats} agg=${!!od?.hasAggregateStats} source=${od?._source || '?'} delayEst=${ageHint}${od?.error?` err=${od.error}`:''}`);
         if (isPsMatch) log('INFO', 'LIVE-STATS', `Dota PandaScore ${match.id}: hasLiveStats=${!!ps?.hasLiveStats} game=${ps?.gameNumber||'?'} status=${ps?.gameStatus||'?'}`);
+
+        // Gate stale: se sem Steam RT E gameTime ainda no early game (<8min) E partida live há tempo,
+        // dado é provavelmente velho — bloqueia tip pra evitar agir em snapshot defasado.
+        if (od?.hasLiveStats && !sourceIsRT && od.gameTime && od.gameTime < 8 * 60) {
+          const matchTs = match.time ? new Date(match.time).getTime() : 0;
+          const matchAgeMin = matchTs ? (Date.now() - matchTs) / 60000 : 0;
+          if (matchAgeMin > 15) {
+            log('INFO', 'AUTO-DOTA', `Stats stale: gameTime=${Math.round(od.gameTime/60)}min mas partida começou há ${matchAgeMin.toFixed(0)}min — pulando ${match.team1} vs ${match.team2}`);
+            setDotaAnalyzed({ ts: now, tipSent: false, noEdge: true });
+            continue;
+          }
+        }
 
         // Preferencia: OpenDota se hasLiveStats; senao, PandaScore.
         if (od?.hasLiveStats) {
@@ -6610,6 +6631,30 @@ Máximo 200 palavras. Raciocínio breve antes da decisão.`;
         if (tipConf === 'BAIXA' && mlResultTennis.score < 6.0) {
           log('INFO', 'AUTO-TENNIS', `Gate conf BAIXA: ML-edge ${mlResultTennis.score.toFixed(1)}pp < 6.0pp — rejeitado: ${match.team1} vs ${match.team2}`);
           await new Promise(r => setTimeout(r, 3000)); continue;
+        }
+
+        // ── Re-validação de odds AO VIVO antes do DM ──
+        // Em sets decisivos as odds tennis Pinnacle podem mexer 30-50% em poucos minutos.
+        // Se odds atuais movem >12% contra a tip (favorito virou underdog ou pick virou favorito),
+        // aborta — usuário receberia tip com odd já desatualizada.
+        if (isLiveTennis) {
+          try {
+            const fresh = await serverGet(`/tennis-matches`).catch(() => null);
+            const freshM = Array.isArray(fresh) ? fresh.find(x => String(x.id) === String(match.id)) : null;
+            if (freshM?.odds?.t1 && freshM?.odds?.t2) {
+              const pickIsT1Fresh = norm(tipPlayer) === norm(match.team1);
+              const freshPickOdd = parseFloat(pickIsT1Fresh ? freshM.odds.t1 : freshM.odds.t2);
+              const tipOddNum = parseFloat(tipOdd);
+              if (Number.isFinite(freshPickOdd) && freshPickOdd > 1 && tipOddNum > 1) {
+                const driftPct = ((tipOddNum - freshPickOdd) / tipOddNum) * 100;
+                // drift positivo = mercado precificou pra pior (odd diminuiu) → edge sumiu
+                if (driftPct > 12) {
+                  log('WARN', 'AUTO-TENNIS', `Odds stale: tip @ ${tipOddNum} mas mercado agora ${freshPickOdd} (drift ${driftPct.toFixed(1)}%) — abortando ${tipPlayer}`);
+                  await new Promise(r => setTimeout(r, 3000)); continue;
+                }
+              }
+            }
+          } catch (_) {}
         }
 
         const confEmoji = { ALTA: '🟢', MÉDIA: '🟡', BAIXA: '🔴' }[tipConf] || '🟡';
