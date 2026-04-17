@@ -14,7 +14,50 @@ Registro cronológico de decisões significativas. Toda mudança de comportament
 
 ---
 
-## 2026-04-18 — Tennis: relaxar sharp divergence cap 12pp → 15pp
+## 2026-04-18 — Calibração granular: 4 padrões observados (revisão 2026-05-02)
+**Motivo:** Backtest validator com calibração granular (ECE, sharpness, decomp Brier, reliability diagram) revelou padrões claros mas sample por bucket ainda pequeno (5-15 tips). Decisão de NÃO recalibrar agora — risco de overfit ao ruído. Anotado pra reavaliar quando n por bucket for ≥10 confiável.
+
+**Snapshot 2026-04-18 (n=138 overall):**
+- Overall ECE 0.047 (calibração agregada BOA)
+- Sharpness 0.023 (modelo cauteloso, predições próximas de 50%)
+- Padrão "compressão pro meio" em esports + tennis
+- Sharpness colapsada em MMA (0.008 — modelo cego)
+
+**4 padrões a confirmar:**
+
+### Padrão A — MMA sharpness colapsada (URGENTE se confirmar)
+- Sport: mma | n=26 | ECE 0.211 | sharpness 0.008
+- Bucket 50-60% n=13: pred 58% → real 84.6% (gap +26.6pp)
+- Diagnóstico: modelo prediz quase tudo entre 50-65%. Não usa info pra discriminar magnitude. Acerta direção por sorte.
+- ROI +13.19% atual = variância
+- **Ação se confirmar (2026-05-02 com n≥40):** refactor `lib/mma-*.js` — adicionar features (KO%, DEC%, recent form weight, opponent caliber). NÃO recalibração; é problema fundamental.
+
+### Padrão B — ESPORTS overconfident 50-70%
+- Sport: esports | n=39 | ECE 0.130
+- 50-60% n=8: gap -16.5pp ⚠️
+- 60-70% n=11: gap -10.1pp ⚠️
+- 20-30% n=5: gap +11.7pp 💡 (underconfident)
+- **Ação se confirmar (n≥80, n≥10/bucket):** spreading factor 1.10-1.15 em `lib/lol-model.js`:
+  ```
+  P_corrigido = 0.5 + (P_raw − 0.5) × 1.10
+  ```
+- Reverte se piorar.
+
+### Padrão C — TENNIS mesmo padrão de ESPORTS
+- Sport: tennis | n=52 | ECE 0.126
+- 40-50% n=13: -15.6pp ⚠️
+- 50-60% n=5: -16.3pp ⚠️
+- 60-70% n=15: -5.5pp ⚠️
+- Buckets 40-70% combinados: n=33 (sample sólido)
+- **Ação se confirmar (n≥100):** spreading 1.10 em `lib/tennis-model.js`. Compatível com cap de divergência relaxado pra 15pp (decisão paralela 2026-04-18).
+
+### Padrão D — DARTS small sample mas direção
+- Sport: darts | n=11 | ECE 0.180
+- 60-70% n=3: -33.9pp (alarmante mas n=3)
+- **Ação:** aguardar n≥30 antes de qualquer mudança.
+
+**Status:** ⚠️ provisório — revisar 2026-05-02 com backtest novo
+**Reversão:** não houve mudança ativa, só observação registrada
 **Motivo:** Backtest validator (n=52, 90d) mostrou: ROI tennis +5.24% mas Brier 0.23 vs baseline 0.22 (descalibrado) E gates custaram R$4.82 bloqueando winners. Modelo acerta direção, erra magnitude — gates muito apertados rejeitavam tips legítimas onde Pinnacle estava errado.
 **Antes:** `TENNIS_MAX_DIVERGENCE_PP=12` (default hardcoded)
 **Agora:** `TENNIS_MAX_DIVERGENCE_PP=15` (default hardcoded), envar override mantido
@@ -181,6 +224,8 @@ Itens que precisam revisão em janela específica:
 | Item | Provisório até | Revisar | Motivo |
 |---|---|---|---|
 | Pre-Match cutoff 90min | 2026-05-01 | Pode falhar pra Bo3+ longos ou tennis Slam | Validar com tipos de match longos no log |
+| Calibração 4 padrões observados | 2026-05-02 | Recalibrar pode introduzir bias se sample pequeno | Re-rodar backtest, se padrões A/B/C/D persistirem com n≥10/bucket → aplicar ações registradas |
+| Tennis cap 12→15 | 2026-05-02 | Pode estar passando bleed extra | Comparar ROI tennis pré-fix vs pós-fix |
 | Auto-Healer (12 fixes) | 2026-05-15 | Tem fix que nunca dispara? Algum gera ruído? | Audit: fixes aplicados / falsos positivos / problemas reais que escaparam |
 | News Monitor | 2026-05-15 | Acerto útil >5%? Spam ratio aceitável? | Manualmente classificar 30 alerts: úteis vs ruído |
 | Auto-Shadow CLV cutoff -1% | 2026-05-15 | Cutoff certo? Recovery 0% sufficient? | Ver quantos sports flipparam, % falso positivo |
