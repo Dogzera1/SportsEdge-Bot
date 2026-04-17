@@ -3749,20 +3749,73 @@ const server = http.createServer(async (req, res) => {
     if (!t1 || !t2) { sendJson(res, { hasLiveStats: false, error: 'team1/team2 obrigatórios' }); return; }
     try {
       const apiKeyQs = process.env.OPENDOTA_API_KEY ? `?api_key=${encodeURIComponent(process.env.OPENDOTA_API_KEY)}` : '';
-      const [liveR, heroesR] = await Promise.all([
-        httpGet(`https://api.opendota.com/api/live${apiKeyQs}`, {}),
-        (global.__odHeroesCache && (Date.now() - global.__odHeroesCache.ts) < 24*60*60*1000)
-          ? Promise.resolve({ status: 200, body: JSON.stringify(global.__odHeroesCache.data) })
-          : httpGet(`https://api.opendota.com/api/heroes${apiKeyQs}`, {}),
-      ]);
-      if (liveR.status !== 200) { sendJson(res, { hasLiveStats: false, error: `OpenDota status ${liveR.status}` }); return; }
+      const steamKey = process.env.STEAM_WEBAPI_KEY;
+
+      // Heroes cache (24h). Se OpenDota cair, usamos cache; senão vazio (hero names viram "hero<id>").
+      let heroesR;
+      if (global.__odHeroesCache && (Date.now() - global.__odHeroesCache.ts) < 24*60*60*1000) {
+        heroesR = { status: 200, body: JSON.stringify(global.__odHeroesCache.data) };
+      } else {
+        heroesR = await httpGet(`https://api.opendota.com/api/heroes${apiKeyQs}`, {}).catch(() => ({ status: 0, body: '[]' }));
+      }
+
+      // Fetch OpenDota primário; se cair (timeout/non-200), fallback Steam GetLiveLeagueGames (cobre pro/league).
+      let live = [];
+      let liveSource = 'opendota';
+      try {
+        const liveR = await httpGet(`https://api.opendota.com/api/live${apiKeyQs}`, {});
+        if (liveR.status === 200) {
+          live = safeParse(liveR.body, []) || [];
+        } else {
+          throw new Error(`OpenDota status ${liveR.status}`);
+        }
+      } catch (odErr) {
+        if (!steamKey) {
+          sendJson(res, { hasLiveStats: false, error: `OpenDota fail (${odErr.message}) e sem STEAM_WEBAPI_KEY pra fallback` });
+          return;
+        }
+        log('WARN', 'OPENDOTA', `Fallback Steam GetLiveLeagueGames: ${odErr.message}`);
+        const sR = await httpGet(`https://api.steampowered.com/IDOTA2Match_570/GetLiveLeagueGames/v1/?key=${encodeURIComponent(steamKey)}`, {}).catch(e => ({ status: 0, body: '', error: e.message }));
+        if (sR.status !== 200) {
+          sendJson(res, { hasLiveStats: false, error: `OpenDota+Steam ambos falharam (steam=${sR.status})` });
+          return;
+        }
+        const sData = safeParse(sR.body, {});
+        const games = Array.isArray(sData?.result?.games) ? sData.result.games : [];
+        // Normaliza Steam → shape compatível com OpenDota /api/live
+        live = games.map(g => {
+          const sb = g.scoreboard || {};
+          const radPs = Array.isArray(sb.radiant?.players) ? sb.radiant.players : [];
+          const dirPs = Array.isArray(sb.dire?.players) ? sb.dire.players : [];
+          const mkPlayer = (p, team) => ({
+            account_id: p.account_id, hero_id: p.hero_id, team,
+            kills: p.kills, deaths: p.death, assists: p.assists,
+            net_worth: p.net_worth, gold: p.gold, level: p.level, last_hits: p.last_hits,
+          });
+          return {
+            match_id: g.match_id,
+            server_steam_id: g.server_steam_id,
+            activate_time: g.stream_delay_s ? (Date.now()/1000 - g.stream_delay_s) : (Date.now()/1000),
+            game_time: sb.duration || 0,
+            radiant_score: sb.radiant?.score || 0,
+            dire_score: sb.dire?.score || 0,
+            radiant_lead: ((sb.radiant?.score || 0) - (sb.dire?.score || 0)),
+            team_name_radiant: g.radiant_team?.team_name,
+            team_name_dire: g.dire_team?.team_name,
+            radiant_team: g.radiant_team,
+            dire_team: g.dire_team,
+            players: [...radPs.map(p => mkPlayer(p, 0)), ...dirPs.map(p => mkPlayer(p, 1))],
+          };
+        });
+        liveSource = 'steam-getliveleaguegames';
+      }
+
       const heroes = safeParse(heroesR.body, []) || [];
       if (Array.isArray(heroes) && heroes.length) global.__odHeroesCache = { ts: Date.now(), data: heroes };
       const heroById = {};
       for (const h of (Array.isArray(heroes) ? heroes : [])) heroById[h.id] = h.localized_name || h.name;
 
-      const live = safeParse(liveR.body, []) || [];
-      if (!Array.isArray(live) || !live.length) { sendJson(res, { hasLiveStats: false, error: 'sem partidas ao vivo' }); return; }
+      if (!Array.isArray(live) || !live.length) { sendJson(res, { hasLiveStats: false, error: 'sem partidas ao vivo', _source: liveSource }); return; }
 
       const normName = (s) => String(s||'').toLowerCase().replace(/[^a-z0-9]/g,'');
       const n1 = normName(t1), n2 = normName(t2);
@@ -3909,8 +3962,8 @@ const server = http.createServer(async (req, res) => {
         radiantLead: (swap ? -1 : 1) * (hit.radiant_lead || 0),
         blueTeam: blue,
         redTeam:  red,
-        _source: steamSource ? 'opendota+steam-rt' : 'opendota',
-        _debug: { steamKeyPresent, steamSid, steamSource }
+        _source: steamSource ? `${liveSource}+steam-rt` : liveSource,
+        _debug: { steamKeyPresent, steamSid, steamSource, liveSource }
       });
     } catch(e) {
       log('ERROR', 'OPENDOTA', e.message);

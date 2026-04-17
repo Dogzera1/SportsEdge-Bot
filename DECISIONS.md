@@ -14,6 +14,14 @@ Registro cronológico de decisões significativas. Toda mudança de comportament
 
 ---
 
+## 2026-04-18 — /opendota-live: fallback Steam GetLiveLeagueGames
+**Motivo:** Logs mostraram 7 timeouts consecutivos em `api.opendota.com/api/live` (21:46-21:47 BRT). OpenDota pode ficar degradado por minutos/horas — sem fallback, toda tip Dota fica sem live stats no intervalo.
+**Antes:** `/opendota-live` abortava se OpenDota retornasse não-200 ou timeout. Steam RT só era consultado DEPOIS de achar match no OpenDota (precisa do `server_steam_id`).
+**Agora:** quando OpenDota falha, usa Steam `GetLiveLeagueGames` (cobre partidas pro/league — nosso universo de betting) e normaliza shape pra compatibilidade downstream. Fluxo Steam RT continua normal após fallback.
+**Requisito:** `STEAM_WEBAPI_KEY` setada (já confirmada).
+**Reversão:** server.js:3750 — voltar pro `Promise.all([httpGet(live), httpGet(heroes)])` original.
+**Status:** ✅ aplicado — observar em produção se falso-negativo Dota cai quando OpenDota degradar.
+
 ## 2026-04-18 — Tennis cap divergência 15→20pp (Gate Optimizer data-driven)
 **Motivo:** `/agents/gate-optimizer?sport=tennis&days=90` (n=25) mostrou cap 15pp bloqueando 7 tips winners; cap 18-20pp tem Brier ótimo (0.185) e ROI positivo. Cirúrgico: relaxa só o suficiente pra não cortar winners legítimos, sem abrir porteira pra outliers.
 **Antes:** `TENNIS_MAX_DIVERGENCE_PP=15` (default hardcoded em bot.js:7188)
