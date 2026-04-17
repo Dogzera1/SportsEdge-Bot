@@ -14,6 +14,28 @@ Registro cronológico de decisões significativas. Toda mudança de comportament
 
 ---
 
+## 2026-04-18 — Postura: aceitar "modelagem pública = pouco edge"; foco em operação
+**Motivo:** Após KILL do Vetor 1 (tennis fatigue/surface), aceita premissa que mercados públicos (Pinnacle/Betfair) são suficientemente eficientes pra que features ML genéricas gerem pouco/nenhum edge mensurável em curto prazo. Foco do bot vira **operação**.
+
+**Pilares operacionais (já em produção):**
+- Sharp divergence gate (rejeita edge fictício)
+- IA second opinion (refusa quando IA discorda do modelo)
+- Tier-aware caps (CS tier 2+, MMA non-sharp)
+- Auto-shadow CLV-based (corta sport com edge negativo)
+- Bankroll Guardian DD-based (protege drawdown)
+- Pre-Match Final Check (re-valida antes do DM)
+- News Monitor (detecta roster change/cancelamento)
+- Backtest Validator com calibração granular
+
+**Decisão:** NÃO buscar edge via ML refactor. Edge real está em:
+1. **CLV** (line shopping, capturar antes da linha mover)
+2. **Gates** (proteger bankroll de edge fictício)
+3. **Calibração** (modelo bem-calibrado dura mais)
+4. **Vetor 2** (latência informacional — explorar Steam RT/VLR/HLTV mais agressivamente)
+
+**Status:** ✅ aceito — postura registrada
+**Reversão:** se Vetor 2 morrer também → reavaliar viabilidade do bot completo
+
 ## 2026-04-18 — Tennis Vetor 1 (fatigue/surface): 🔴 KILL após smoke test
 **Motivo:** Plano user "14 semanas Vetor 1" propunha features experimentais (fatigue, surface transition, weight decay) pra tennis. Fase 1A smoke test executado conforme plano; nenhuma feature passou kill switch.
 

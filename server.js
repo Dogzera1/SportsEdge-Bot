@@ -8202,6 +8202,73 @@ const server = http.createServer(async (req, res) => {
     })().catch(e => sendJson(res, { ok: false, error: e.message }, 500));
     return;
   }
+  // Vetor 2 props smoke test: lista todos markets disponíveis em matches LoL/Dota live
+  // do Pinnacle. Se só tem moneyline + totals genéricos → Vetor 2 props morre cedo.
+  // Se tem first_blood/dragons/towers/etc → Fase 2 vale.
+  if (p === '/agents/vetor2-props-smoke') {
+    if (!requireAdmin(req, res)) return;
+    (async () => {
+      try {
+        const pinnacle = require('./lib/pinnacle');
+        // sportId 12 = E-Sports
+        const all = await pinnacle.listSportMatchups(12).catch(() => []);
+        const liveLolDota = all.filter(m => {
+          if (!m.isLive) return false;
+          const ln = String(m.league?.name || '').toLowerCase();
+          return ln.includes('league of legends') || ln.includes('dota 2');
+        }).slice(0, 5);
+        if (!liveLolDota.length) {
+          sendJson(res, {
+            ok: true, verdict: { code: 'no_live', label: '⚪ Sem matches LoL/Dota live agora — re-rodar quando houver' },
+            checked_at: new Date().toISOString(),
+          });
+          return;
+        }
+        const samples = [];
+        for (const m of liveLolDota) {
+          const markets = await pinnacle.getMatchupMarkets(m.id).catch(() => []);
+          if (!Array.isArray(markets)) continue;
+          // Agrupa por type+period
+          const byType = {};
+          for (const mk of markets) {
+            const k = `${mk.type}|period=${mk.period}`;
+            if (!byType[k]) byType[k] = { type: mk.type, period: mk.period, count: 0, sample_status: mk.status };
+            byType[k].count++;
+          }
+          samples.push({
+            matchup_id: m.id,
+            league: m.league?.name,
+            teams: `${m.participants?.[0]?.name} vs ${m.participants?.[1]?.name}`,
+            isLive: m.isLive,
+            total_markets: markets.length,
+            market_types: Object.values(byType),
+          });
+        }
+        // Tipos únicos cross-samples
+        const allTypes = new Set();
+        for (const s of samples) for (const t of s.market_types) allTypes.add(t.type);
+        const interesting = [...allTypes].filter(t => !['moneyline'].includes(t));
+        let verdict;
+        if (interesting.length === 0) {
+          verdict = { code: 'kill', label: '🔴 KILL — Pinnacle só expõe moneyline em LoL/Dota live (sem props pra explorar)' };
+        } else if (interesting.some(t => /first|kill|drag|baron|tower|inhib|roshan/i.test(t))) {
+          verdict = { code: 'props_found', label: '🟢 SINAL — Pinnacle expõe props (first blood/towers/etc) — Fase 2 vale!' };
+        } else {
+          verdict = { code: 'partial', label: `🟡 PARCIAL — Pinnacle expõe outros markets (${interesting.join(', ')}) mas sem props óbvios — investigar caso a caso` };
+        }
+        sendJson(res, {
+          ok: true,
+          checked_at: new Date().toISOString(),
+          live_matches_checked: samples.length,
+          all_market_types: [...allTypes],
+          interesting_types: interesting,
+          verdict,
+          samples,
+        });
+      } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    })();
+    return;
+  }
   if (p === '/agents/tennis-v2-smoke') {
     if (!requireAdmin(req, res)) return;
     try {
