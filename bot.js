@@ -2005,7 +2005,11 @@ const AUTO_SHADOW_CHECK_INTERVAL_MS = parseInt(process.env.AUTO_SHADOW_CHECK_INT
 let _lastAutoShadowCheck = 0;
 
 async function checkAutoShadow() {
-  if (!/^(1|true|yes)$/i.test(String(process.env.AUTO_SHADOW_NEGATIVE_CLV ?? 'false'))) return;
+  const enabled = /^(1|true|yes)$/i.test(String(process.env.AUTO_SHADOW_NEGATIVE_CLV ?? 'false'));
+  if (!enabled) {
+    log('DEBUG', 'AUTO-SHADOW', 'desativado (AUTO_SHADOW_NEGATIVE_CLV != true) — pulando');
+    return;
+  }
   const now = Date.now();
   if (now - _lastAutoShadowCheck < AUTO_SHADOW_CHECK_INTERVAL_MS) return;
   _lastAutoShadowCheck = now;
@@ -2013,6 +2017,8 @@ async function checkAutoShadow() {
   const minN = parseInt(process.env.AUTO_SHADOW_MIN_N || '30', 10);
   const cutoffClvBad = parseFloat(process.env.AUTO_SHADOW_CLV_CUTOFF || '-1.0'); // CLV avg < -1%
   const recoveryClvOk = parseFloat(process.env.AUTO_SHADOW_RECOVERY_CLV || '0.0'); // pra desfazer
+
+  let evaluated = 0, flipped = 0, restored = 0, skippedLowN = 0;
 
   for (const sport of Object.keys(SPORTS)) {
     const cfg = SPORTS[sport];
@@ -2025,7 +2031,8 @@ async function checkAutoShadow() {
     catch (_) {}
     if (!clvData?.series?.length) continue;
     const totalN = clvData.series.reduce((a, b) => a + (b.n || 0), 0);
-    if (totalN < minN) continue;
+    evaluated++;
+    if (totalN < minN) { skippedLowN++; continue; }
     const weightedSum = clvData.series.reduce((a, b) => a + (b.clv_avg || 0) * (b.n || 0), 0);
     const meanClv = totalN > 0 ? weightedSum / totalN : 0;
 
@@ -2033,6 +2040,7 @@ async function checkAutoShadow() {
     if (meanClv < cutoffClvBad && !cfg.shadowMode) {
       // Flip: ativa shadow
       cfg.shadowMode = true;
+      flipped++;
       _autoShadowState.set(sport, { reason: `CLV ${meanClv.toFixed(2)}% < ${cutoffClvBad}% (n=${totalN}, 14d)`, since: now, lastCheck: now });
       log('WARN', 'AUTO-SHADOW', `[FLIP→SHADOW] ${sport}: CLV ${meanClv.toFixed(2)}% < ${cutoffClvBad}% em ${totalN} tips. DMs suspensos até CLV recuperar ≥ ${recoveryClvOk}%.`);
       // Notifica admin
@@ -2044,6 +2052,7 @@ async function checkAutoShadow() {
     } else if (wasAutoShadowed && meanClv >= recoveryClvOk && cfg.shadowMode === true && orig === false) {
       // Recovery: desfaz auto-shadow se CLV recuperou
       cfg.shadowMode = false;
+      restored++;
       _autoShadowState.delete(sport);
       log('INFO', 'AUTO-SHADOW', `[RESTORE→ATIVO] ${sport}: CLV recuperou ${meanClv.toFixed(2)}% ≥ ${recoveryClvOk}%. DMs reativados.`);
       const tokenForAlert = Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
@@ -2055,6 +2064,8 @@ async function checkAutoShadow() {
       _autoShadowState.get(sport).lastCheck = now;
     }
   }
+  // Sumário do ciclo (mesmo se nada mudou — dá visibilidade)
+  log('INFO', 'AUTO-SHADOW', `Ciclo concluído: ${evaluated} sport(s) avaliados | ${flipped} flip(s) | ${restored} restore(s) | ${skippedLowN} skip(s) por n<${minN} | cutoff CLV ${cutoffClvBad}% | recovery ${recoveryClvOk}%`);
 }
 
 // Live Scout gap monitor: alerta admin via Telegram quando gap (no_gameids/stats_disabled/coverage_missing/etc)
