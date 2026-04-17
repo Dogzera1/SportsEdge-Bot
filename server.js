@@ -2163,6 +2163,25 @@ async function getLoLMatchesArush() {
       .map(e => mapLoLEvent(e, 'live')).filter(Boolean)
       .forEach(m => liveMap.set(String(m.id), m));
 
+    // Fallback: Riot marca matches LPL como state=completed prematuramente
+    // enquanto games ainda estão em progresso. Só promove se startTime já passou
+    // (>=2min) e nenhum time atingiu winsNeeded nem tem outcome=win.
+    const _nowArush = Date.now();
+    evs.filter(e => {
+      if (e.type !== 'match' || !e.match || e.state !== 'completed') return false;
+      const t1 = e.match.teams?.[0], t2 = e.match.teams?.[1];
+      if (t1?.result?.outcome === 'win' || t2?.result?.outcome === 'win') return false;
+      const w1 = t1?.result?.gameWins || 0, w2 = t2?.result?.gameWins || 0;
+      const boCount = e.match.strategy?.count || 3;
+      const winsNeeded = Math.ceil(boCount / 2);
+      if (w1 >= winsNeeded || w2 >= winsNeeded) return false;
+      const startTs = e.startTime ? Date.parse(e.startTime) : NaN;
+      if (!Number.isFinite(startTs)) return false;
+      const elapsedMin = (_nowArush - startTs) / 60000;
+      return elapsedMin >= 2 && elapsedMin < 300;
+    }).map(e => mapLoLEvent(e, 'live')).filter(Boolean)
+      .forEach(m => { if (!liveMap.has(String(m.id))) liveMap.set(String(m.id), m); });
+
     // Merge getLive en-US — captura partidas live não refletidas no schedule ainda
     if (glrResult.status === 'fulfilled') {
       const glEvts = safeParse(glrResult.value?.body, {})?.data?.schedule?.events || [];
@@ -2261,6 +2280,24 @@ async function getLoLMatches() {
     // Matches explicitamente inProgress no schedule
     mainEvs.filter(e => e.type === 'match' && e.match && e.state === 'inProgress')
       .map(e => mapLoLEvent(e, 'live')).filter(Boolean)
+      .forEach(m => { if (!live.find(l => l.id === m.id)) live.push(m); });
+
+    // Fallback LPL: Riot marca state=completed prematuramente. Só promove se
+    // startTime já passou (>=2min) e ninguém ainda ganhou a série.
+    const _nowFbk = Date.now();
+    mainEvs.filter(e => {
+      if (e.type !== 'match' || !e.match || e.state !== 'completed') return false;
+      const t1 = e.match.teams?.[0], t2 = e.match.teams?.[1];
+      if (t1?.result?.outcome === 'win' || t2?.result?.outcome === 'win') return false;
+      const w1 = t1?.result?.gameWins || 0, w2 = t2?.result?.gameWins || 0;
+      const boCount = e.match.strategy?.count || 3;
+      const winsNeeded = Math.ceil(boCount / 2);
+      if (w1 >= winsNeeded || w2 >= winsNeeded) return false;
+      const startTs = e.startTime ? Date.parse(e.startTime) : NaN;
+      if (!Number.isFinite(startTs)) return false;
+      const elapsedMin = (_nowFbk - startTs) / 60000;
+      return elapsedMin >= 2 && elapsedMin < 300;
+    }).map(e => mapLoLEvent(e, 'live')).filter(Boolean)
       .forEach(m => { if (!live.find(l => l.id === m.id)) live.push(m); });
 
     // Matches com score parcial em ligas com transmissão ao vivo = LIVE
@@ -3375,10 +3412,14 @@ const server = http.createServer(async (req, res) => {
     const combined = [...riotMatches];
     for (const pm of psMatches) {
       const n1 = norm(pm.team1), n2 = norm(pm.team2);
-      const riotIdx = combined.findIndex(r =>
-        (norm(r.team1).includes(n1) || n1.includes(norm(r.team1))) &&
-        (norm(r.team2).includes(n2) || n2.includes(norm(r.team2)))
-      );
+      const teamsMatch = (a, b) =>
+        (a.includes(b) || b.includes(a));
+      const riotIdx = combined.findIndex(r => {
+        const r1 = norm(r.team1), r2 = norm(r.team2);
+        const direct = teamsMatch(r1, n1) && teamsMatch(r2, n2);
+        const swapped = teamsMatch(r1, n2) && teamsMatch(r2, n1);
+        return direct || swapped;
+      });
       if (riotIdx !== -1) {
         // PS diz que está live mas Riot mostra upcoming → promove status
         if (pm.status === 'live' && combined[riotIdx].status !== 'live') {

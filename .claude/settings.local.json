@@ -140,7 +140,25 @@
       "Bash(echo \"started pid=$!\")",
       "Bash(ls data/*.db)",
       "Bash(taskkill //F //IM node.exe)",
-      "Bash(python -c 'import sys,json; d=json.load\\(sys.stdin\\); tips=d.get\\('\\\\''tips'\\\\''\\) or d.get\\('\\\\''items'\\\\''\\) or d; print\\(type\\(tips\\).__name__\\); ')"
+      "Bash(python -c 'import sys,json; d=json.load\\(sys.stdin\\); tips=d.get\\('\\\\''tips'\\\\''\\) or d.get\\('\\\\''items'\\\\''\\) or d; print\\(type\\(tips\\).__name__\\); ')",
+      "Bash(awk '/^ for \\\\\\(const fight of fights\\\\\\)/,/^ }$/' bot.js)",
+      "Bash(awk '/^      for \\\\\\(const fight of fights\\\\\\)/,/^      }$/' bot.js)",
+      "Bash(echo \"---exit: $?\")",
+      "Bash(node start.js)",
+      "Bash(echo \"pid=$!\")",
+      "Bash(curl -s -m 20 \"http://127.0.0.1:3000/live-gameids?matchId=115548128962840647\")",
+      "Bash(curl -s -m 20 \"http://127.0.0.1:3000/ps-compositions?matchId=ps_1420907\")",
+      "Bash(grep -v \"//\")",
+      "Bash(awk '{print $2}')",
+      "Bash(xargs -r -I {} taskkill //F //PID {} sleep 1 tasklist)",
+      "Bash(node server.js)",
+      "Bash(echo \"Started PID: $!\")",
+      "Bash(taskkill //F //PID 20988)",
+      "Bash(echo \"started PID $!\")",
+      "Bash(taskkill //F //PID 16744)",
+      "Bash(echo \"restarted PID $!\")",
+      "Bash(taskkill //F //PID 5404)",
+      "Bash(echo \"PID $!\" sleep 18 netstat -ano)"
     ]
   }
 }
