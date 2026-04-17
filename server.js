@@ -7414,6 +7414,105 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // Taxa de produção de tips por sport — detecta starvation (gates muito apertados)
+  // ou flood (gates muito frouxos). Compara janela atual vs baseline histórico.
+  // GET /tips-produced-rate?sport=esports&days=7&baselineDays=30
+  if (p === '/tips-produced-rate') {
+    const sport = (parsed.query.sport || 'all').trim();
+    const daysRaw = parseInt(parsed.query.days);
+    const days = Number.isFinite(daysRaw) ? Math.max(1, Math.min(60, daysRaw)) : 7;
+    const baselineRaw = parseInt(parsed.query.baselineDays);
+    const baselineDays = Number.isFinite(baselineRaw) ? Math.max(7, Math.min(365, baselineRaw)) : 30;
+    try {
+      const sportFilter = sport === 'all' ? '' : 'AND sport = ?';
+      const params = [`-${days} days`];
+      if (sport !== 'all') params.push(sport);
+
+      const recent = db.prepare(`
+        SELECT sport, is_live,
+               DATE(sent_at) AS day,
+               COUNT(*) AS n
+        FROM tips
+        WHERE sent_at >= datetime('now', ?)
+          ${sportFilter}
+        GROUP BY sport, is_live, DATE(sent_at)
+        ORDER BY day ASC
+      `).all(...params);
+
+      const baselineParams = [`-${baselineDays} days`, `-${days} days`];
+      if (sport !== 'all') baselineParams.push(sport);
+      const baseline = db.prepare(`
+        SELECT sport, is_live, COUNT(*) AS n
+        FROM tips
+        WHERE sent_at >= datetime('now', ?)
+          AND sent_at <  datetime('now', ?)
+          ${sportFilter}
+        GROUP BY sport, is_live
+      `).all(...baselineParams);
+
+      // Agrupar por sport
+      const sportStats = new Map();
+      const addStat = (map, sport, key, n) => {
+        if (!map.has(sport)) map.set(sport, { live: 0, pregame: 0, byDay: new Map() });
+        map.get(sport)[key === 1 || key === true ? 'live' : 'pregame'] += n;
+      };
+      for (const r of recent) {
+        addStat(sportStats, r.sport, r.is_live, r.n);
+        const s = sportStats.get(r.sport);
+        const day = r.day;
+        if (!s.byDay.has(day)) s.byDay.set(day, { live: 0, pregame: 0 });
+        s.byDay.get(day)[r.is_live ? 'live' : 'pregame'] += r.n;
+      }
+      const baselineBySport = new Map();
+      for (const b of baseline) {
+        if (!baselineBySport.has(b.sport)) baselineBySport.set(b.sport, { live: 0, pregame: 0 });
+        baselineBySport.get(b.sport)[b.is_live ? 'live' : 'pregame'] += b.n;
+      }
+
+      const out = [];
+      for (const [sp, s] of sportStats.entries()) {
+        const totalRecent = s.live + s.pregame;
+        const dailyRate = totalRecent / days;
+        const bl = baselineBySport.get(sp) || { live: 0, pregame: 0 };
+        const baselineTotal = bl.live + bl.pregame;
+        const baselineWindowDays = baselineDays - days;
+        const baselineDailyRate = baselineWindowDays > 0 ? baselineTotal / baselineWindowDays : null;
+        const changePct = (baselineDailyRate && baselineDailyRate > 0)
+          ? ((dailyRate - baselineDailyRate) / baselineDailyRate) * 100
+          : null;
+
+        let verdict;
+        if (totalRecent === 0) verdict = { code: 'starvation', label: '🔴 STARVATION — 0 tips na janela. Bot parado ou gates matando 100%.' };
+        else if (changePct != null && changePct <= -70) verdict = { code: 'starvation', label: `🔴 STARVATION — ${changePct.toFixed(0)}% vs baseline` };
+        else if (changePct != null && changePct <= -40) verdict = { code: 'reduced', label: `🟡 REDUZIDO — ${changePct.toFixed(0)}% vs baseline (gates mais apertados?)` };
+        else if (changePct != null && changePct >= 100) verdict = { code: 'flood', label: `🟢 FLOOD — ${changePct.toFixed(0)}% vs baseline (gates frouxos?)` };
+        else verdict = { code: 'normal', label: `🟢 Normal — ${changePct != null ? (changePct >= 0 ? '+' : '') + changePct.toFixed(0) + '% vs baseline' : 'sem baseline'}` };
+
+        out.push({
+          sport: sp,
+          window_days: days,
+          total_tips: totalRecent,
+          live: s.live,
+          pregame: s.pregame,
+          daily_rate: parseFloat(dailyRate.toFixed(2)),
+          baseline_daily_rate: baselineDailyRate != null ? parseFloat(baselineDailyRate.toFixed(2)) : null,
+          change_vs_baseline_pct: changePct != null ? parseFloat(changePct.toFixed(1)) : null,
+          by_day: Array.from(s.byDay.entries()).map(([day, v]) => ({ day, live: v.live, pregame: v.pregame, total: v.live + v.pregame })),
+          verdict,
+        });
+      }
+      out.sort((a, b) => a.sport.localeCompare(b.sport));
+
+      sendJson(res, {
+        window_days: days,
+        baseline_days: baselineDays,
+        generated_at: new Date().toISOString(),
+        sports: out,
+      });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
   // Análise por liga dentro de um sport — identifica leagues bleeding vs edge real.
   // GET /roi-by-league?sport=esports&days=60&phase=pregame&since=2026-04-17
   // "since" filtra por sent_at >= DATE (ISO) — útil pra excluir tips pré gate-fix.
