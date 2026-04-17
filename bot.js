@@ -2472,6 +2472,61 @@ async function runBacktestValidatorCycle() {
   for (const adminId of ADMIN_IDS) await sendDM(tokenForAlert, adminId, msg).catch(() => {});
 }
 
+// ── Post-Fix Monitor (cron diário) ──
+// Roda /agents/post-fix-monitor com cutoff 2026-04-17 (gate-fix day) e alerta admin se houver alertas.
+let _lastPostFixAlert = 0;
+const _postFixAlertsSeen = new Set(); // `${sport}|${verdict_code}` — pra alertar só mudanças de estado
+
+async function runPostFixMonitorCycle() {
+  if (!ADMIN_IDS.size) return;
+  const cutoff = process.env.POST_FIX_CUTOFF || '2026-04-17';
+  let result = null;
+  try {
+    result = await serverGet(`/agents/post-fix-monitor?since=${cutoff}`).catch(() => null);
+  } catch (e) {
+    log('WARN', 'POST-FIX-MONITOR', `falhou: ${e.message}`);
+    return;
+  }
+  if (!result?.ok) return;
+  log('INFO', 'POST-FIX-MONITOR', `Ciclo: ${result.sports?.length || 0} sports | ${result.alerts?.length || 0} alertas`);
+
+  const alerts = result.alerts || [];
+  // Novos alertas: que não apareceram antes (estado muda de ok→alert)
+  const newAlerts = alerts.filter(a => !_postFixAlertsSeen.has(`${a.sport}|${a.severity}`));
+  for (const a of newAlerts) _postFixAlertsSeen.add(`${a.sport}|${a.severity}`);
+
+  // Cooldown 24h pra DM regular mesmo sem alertas novos
+  const cooldownExpired = Date.now() - _lastPostFixAlert > 24 * 60 * 60 * 1000;
+  const hasHighSeverity = alerts.some(a => a.severity === 'high');
+  if (!newAlerts.length && !hasHighSeverity && !cooldownExpired) return;
+
+  _lastPostFixAlert = Date.now();
+  const tokenForAlert = Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
+  if (!tokenForAlert) return;
+
+  const lines = [];
+  lines.push(`*Cutoff:* ${result.cutoff} (${result.days_since_cutoff}d de dados pós-fix)`);
+  lines.push('');
+  if (alerts.length) {
+    lines.push(`*${alerts.length} alerta(s):*`);
+    for (const a of alerts) {
+      const sev = a.severity === 'high' ? '🔴' : a.severity === 'medium' ? '🟡' : '⚪';
+      lines.push(`  ${sev} ${a.sport}: ${a.message}`);
+    }
+  } else {
+    lines.push('✅ *Nenhum alerta* — todos os sports dentro do esperado.');
+  }
+  lines.push('');
+  lines.push('*Resumo por sport:*');
+  for (const s of (result.sports || [])) {
+    if (s.settled < 5) continue;
+    const roiStr = s.roi != null ? (s.roi >= 0 ? '+' : '') + s.roi.toFixed(1) + '%' : 'n/a';
+    lines.push(`  ${s.verdict.label.split(' — ')[0]} *${s.sport}* — n=${s.settled} ROI ${roiStr}`);
+  }
+  const msg = `🩺 *POST-FIX MONITOR*\n\n${lines.join('\n')}\n\n_Cron 1x/dia. Alerta se bleed ou flood+bleed em sport com n≥10._`;
+  for (const adminId of ADMIN_IDS) await sendDM(tokenForAlert, adminId, msg).catch(() => {});
+}
+
 // ── Model Calibration Watcher (semanal) ──
 let _lastModelCalibAlert = 0;
 
@@ -9400,6 +9455,10 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   // Backtest Validator: cron 1x/dia, valida modelo via gates retroativos.
   setInterval(() => runBacktestValidatorCycle().catch(e => log('ERROR', 'BACKTEST-VALIDATOR', e.message)), 24 * 60 * 60 * 1000);
   setTimeout(() => runBacktestValidatorCycle().catch(() => {}), 30 * 60 * 1000); // 30min pós-boot
+
+  // Post-Fix Monitor: cron 1x/dia, alerta se algum sport sangra ou tem FLOOD+BLEED pós gate-fix.
+  setInterval(() => runPostFixMonitorCycle().catch(e => log('ERROR', 'POST-FIX-MONITOR', e.message)), 24 * 60 * 60 * 1000);
+  setTimeout(() => runPostFixMonitorCycle().catch(() => {}), 45 * 60 * 1000); // 45min pós-boot
 
   // Live Storm Manager: cron 10min, alerta admin no flip into/out-of storm.
   setInterval(() => runLiveStormCycle().catch(e => log('ERROR', 'LIVE-STORM', e.message)), 10 * 60 * 1000);

@@ -263,6 +263,15 @@
 <!-- ═══ Tab: Agentes ═══ -->
 <div class="tab-pane" id="pane-agents">
   <div class="agents-section" style="padding:18px;display:grid;grid-template-columns:1fr;gap:14px;">
+    <!-- Post-Fix Monitor -->
+    <div class="agent-card" id="agent-post-fix-monitor">
+      <div class="agent-head">
+        <span class="agent-toggle">&#9662;</span><span class="agent-title">🩺 Post-Fix Monitor</span>
+        <span class="agent-meta" id="postFixMonitorMeta">—</span>
+        <button class="agent-refresh" data-agent="post-fix-monitor">↻</button>
+      </div>
+      <div class="agent-body" id="postFixMonitorBody"><div class="empty" style="padding:20px;">Audita tips emitidas pós gate-fix (2026-04-17). Alerta se algum sport sangra (ROI ≤-10%) ou tem FLOOD+BLEED (volume alto + ROI negativo).</div></div>
+    </div>
     <!-- Gate Optimizer (Vetor 10) -->
     <div class="agent-card" id="agent-gate-optimizer">
       <div class="agent-head">
@@ -954,6 +963,50 @@
     body.innerHTML = opts.html || `<pre style="font-size:11px;color:#9ca3af;white-space:pre-wrap;max-height:400px;overflow:auto">${escapeHtml(JSON.stringify(data, null, 2).slice(0, 6000))}</pre>`;
   }
 
+  function renderPostFixMonitor(data) {
+    const body = document.getElementById('postFixMonitorBody');
+    const meta = document.getElementById('postFixMonitorMeta');
+    if (!body) return;
+    if (!data?.ok) { body.innerHTML = `<div class="empty" style="color:var(--err);">${escapeHtml(data?.error || 'sem dados')}</div>`; return; }
+    const alertsN = (data.alerts || []).length;
+    const alertColor = alertsN > 0 ? (data.alerts.some(a => a.severity === 'high') ? '#fca5a5' : '#fde68a') : '#6ee7b7';
+    meta.innerHTML = `<span style="color:${alertColor}">${alertsN} alert${alertsN !== 1 ? 's' : ''}</span> | cutoff ${escapeHtml(data.cutoff)} (${data.days_since_cutoff}d)`;
+    let html = '';
+    if (alertsN > 0) {
+      html += '<div style="background:rgba(239,68,68,0.08);padding:10px;border-radius:6px;border-left:3px solid var(--err);margin-bottom:12px">';
+      html += '<div style="font-weight:700;margin-bottom:6px">🚨 Alertas</div>';
+      for (const a of data.alerts) {
+        const sevColor = a.severity === 'high' ? '#fca5a5' : a.severity === 'medium' ? '#fde68a' : '#9ca3af';
+        html += `<div style="font-size:12px;color:${sevColor};margin:4px 0">[${escapeHtml(a.severity.toUpperCase())}] ${escapeHtml(a.sport)}: ${escapeHtml(a.message)}</div>`;
+      }
+      html += '</div>';
+    } else {
+      html += '<div style="background:rgba(34,197,94,0.08);padding:10px;border-radius:6px;border-left:3px solid #22c55e;margin-bottom:12px;font-size:12px;color:#6ee7b7">✅ Nenhum alerta. Todos os sports dentro do esperado pós-fix.</div>';
+    }
+    const rows = (data.sports || []).map(s => {
+      const roiC = s.roi != null && s.roi >= 0 ? '#86efac' : '#fca5a5';
+      const volC = s.volume_change_pct != null && s.volume_change_pct >= 100 ? '#fde68a' : '#9ca3af';
+      return `<tr>
+        <td><b>${escapeHtml(s.sport)}</b></td>
+        <td style="text-align:right">${s.n}</td>
+        <td style="text-align:right">${s.settled}</td>
+        <td style="text-align:right">${s.hit_rate != null ? s.hit_rate.toFixed(1) + '%' : '—'}</td>
+        <td style="text-align:right;color:${roiC}">${s.roi != null ? (s.roi >= 0 ? '+' : '') + s.roi.toFixed(2) + '%' : '—'}</td>
+        <td style="text-align:right">R$${s.profit_reais}</td>
+        <td style="text-align:right">${s.clv_avg_pct != null ? (s.clv_avg_pct >= 0 ? '+' : '') + s.clv_avg_pct.toFixed(2) + '%' : '—'}</td>
+        <td style="text-align:right;color:${volC}">${s.volume_change_pct != null ? (s.volume_change_pct >= 0 ? '+' : '') + s.volume_change_pct.toFixed(0) + '%' : '—'}</td>
+        <td style="font-size:10px">${escapeHtml(s.verdict.label)}</td>
+      </tr>`;
+    }).join('');
+    html += `<table class="agent-table" style="font-size:11px"><thead>
+      <tr><th>Sport</th><th style="text-align:right">N</th><th style="text-align:right">Settled</th>
+      <th style="text-align:right">Hit%</th><th style="text-align:right">ROI</th>
+      <th style="text-align:right">Lucro</th><th style="text-align:right">CLV</th>
+      <th style="text-align:right">ΔVol</th><th>Verdict</th></tr>
+    </thead><tbody>${rows}</tbody></table>`;
+    body.innerHTML = html;
+  }
+
   function renderRoiByBook(data) {
     const body = document.getElementById('roiByBookBody');
     const meta = document.getElementById('roiByBookMeta');
@@ -1222,8 +1275,9 @@
       if (name === 'ia-health') renderIaHealth(data);
       if (name === 'live-storm') renderLiveStorm(data);
       if (name === 'gate-optimizer') renderGateOptimizer(data);
+      if (name === 'post-fix-monitor') renderPostFixMonitor(data);
     } catch (e) {
-      const map = { 'live-scout': 'liveScoutBody', 'roi-analyst': 'roiAnalystBody', 'feed-medic': 'feedMedicBody', 'weekly-review': 'weeklyReviewBody', 'health-sentinel': 'healthSentinelBody', 'orchestrator': 'orchestratorBody', 'backtest-validator': 'backtestValidatorBody', 'bankroll-guardian': 'bankrollGuardianBody', 'cut-advisor': 'cutAdvisorBody', 'pre-match-check': 'preMatchCheckBody', 'news-monitor': 'newsMonitorBody', 'model-calibration': 'modelCalibrationBody', 'ia-health': 'iaHealthBody', 'live-storm': 'liveStormBody', 'gate-optimizer': 'gateOptimizerBody' };
+      const map = { 'live-scout': 'liveScoutBody', 'roi-analyst': 'roiAnalystBody', 'feed-medic': 'feedMedicBody', 'weekly-review': 'weeklyReviewBody', 'health-sentinel': 'healthSentinelBody', 'orchestrator': 'orchestratorBody', 'backtest-validator': 'backtestValidatorBody', 'bankroll-guardian': 'bankrollGuardianBody', 'cut-advisor': 'cutAdvisorBody', 'pre-match-check': 'preMatchCheckBody', 'news-monitor': 'newsMonitorBody', 'model-calibration': 'modelCalibrationBody', 'ia-health': 'iaHealthBody', 'live-storm': 'liveStormBody', 'gate-optimizer': 'gateOptimizerBody', 'post-fix-monitor': 'postFixMonitorBody' };
       const el = document.getElementById(map[name]);
       if (el) el.innerHTML = `<div class="empty" style="color:var(--err);">fetch falhou: ${escapeHtml(String(e.message||e))}</div>`;
     } finally {
@@ -1233,6 +1287,7 @@
 
   function refreshAgents() {
     fetchRoiByBook();
+    fetchAgent('post-fix-monitor');
     fetchAgent('gate-optimizer');
     fetchAgent('backtest-validator');
     fetchAgent('health-sentinel');

@@ -14,6 +14,17 @@ Registro cronológico de decisões significativas. Toda mudança de comportament
 
 ---
 
+## 2026-04-18 — Post-Fix Monitor (cron 24h) + checkpoint 2026-04-24
+**Motivo:** `/tips-produced-rate` mostrou FLOOD em tennis (+192%) e esports (+123%) vs baseline pós-fix (cap tennis 15→20, sharp gates, tier caps, line shopping). Gate-fix é de hoje (04-17); sample pós-fix acumula rápido. DECISIONS.md original planejava revisão 05-02, mas com FLOOD o risco de bleed silencioso é mais imediato.
+**Agora:**
+- `/agents/post-fix-monitor?since=YYYY-MM-DD` consolida produção + ROI + CLV + veredito por sport.
+- Alertas: `bleeding` (ROI ≤-20% n≥10), `warning` (ROI ≤-10%), `flood_with_bleed` (volume +100% + ROI<0), `clv_negative` (-2%+).
+- Cron `runPostFixMonitorCycle` 24h, DM admin quando alertas aparecem OU 24h cooldown expira.
+- Card dashboard `🩺 Post-Fix Monitor` em /logs.
+**Checkpoint antecipado:** 2026-04-24 (7d pós-fix, n esperado ~45 esports + ~65 tennis).
+**Reversão:** `POST_FIX_CUTOFF=YYYY-MM-DD` ajusta cutoff; remover scheduler se ficar ruidoso.
+**Status:** ✅ aplicado — primeira DM prevista 2026-04-18 em ~45min após deploy.
+
 ## 2026-04-18 — Vetor 3 fase 1: line shopping tracking (LoL PoC)
 **Motivo:** sem registrar onde estava o melhor preço, CLV-by-bookmaker é invisível. Vetor 3 desbloqueia 2 edges: (1) mostrar ao user a casa certa pra apostar; (2) medir retroativamente se bater SX.Bet ou Pinnacle deu mais ROI.
 **Antes:** /record-tip só guardava odds da casa primária (Pinnacle em LoL/Dota). Nenhum registro de alternativas.

@@ -8733,6 +8733,130 @@ const server = http.createServer(async (req, res) => {
     } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
     return;
   }
+  // Post-fix monitor — audit tips emitidas após data de corte (default 2026-04-17 = gate-fix day).
+  // Combina: produção (volume vs baseline) + ROI + CLV + verdict por sport.
+  // Alertas: bleeding (ROI ≤-10% n≥10) OR flood_with_bleed (volume +100% E ROI negativo).
+  if (p === '/agents/post-fix-monitor') {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const cutoff = (parsed.query.since || '2026-04-17').trim();
+      if (!/^\d{4}-\d{2}-\d{2}/.test(cutoff)) {
+        sendJson(res, { ok: false, error: 'since inválido (esperado YYYY-MM-DD)' }, 400);
+        return;
+      }
+      // Dias do cutoff até hoje
+      const daysSinceCutoff = Math.max(1, Math.ceil((Date.now() - new Date(cutoff).getTime()) / 86400000));
+      const baselineDays = Math.max(daysSinceCutoff, 14);
+
+      const rows = db.prepare(`
+        SELECT sport, is_live, odds, clv_odds, stake_reais, profit_reais, result, model_p_pick, sent_at
+        FROM tips
+        WHERE sent_at >= ?
+      `).all(cutoff);
+
+      const baselineStartDays = daysSinceCutoff + baselineDays;
+      const baseline = db.prepare(`
+        SELECT sport, COUNT(*) AS n
+        FROM tips
+        WHERE sent_at >= datetime('now', ?)
+          AND sent_at <  ?
+        GROUP BY sport
+      `).all(`-${baselineStartDays} days`, cutoff);
+      const baselineMap = new Map();
+      for (const b of baseline) baselineMap.set(b.sport, b.n);
+
+      const bySport = new Map();
+      for (const r of rows) {
+        if (!bySport.has(r.sport)) {
+          bySport.set(r.sport, {
+            sport: r.sport, n: 0, wins: 0, losses: 0, pushes: 0,
+            pending: 0, stakeR: 0, profitR: 0,
+            clvSum: 0, clvCount: 0, clvPositive: 0,
+          });
+        }
+        const b = bySport.get(r.sport);
+        b.n++;
+        if (r.result === 'win') b.wins++;
+        else if (r.result === 'loss') b.losses++;
+        else if (r.result === 'push') b.pushes++;
+        else b.pending++;
+        b.stakeR += Number(r.stake_reais) || 0;
+        b.profitR += Number(r.profit_reais) || 0;
+        const odds = Number(r.odds), clv = Number(r.clv_odds);
+        if (odds > 1 && clv > 1) {
+          const clvPct = (odds / clv - 1) * 100;
+          b.clvSum += clvPct; b.clvCount++;
+          if (clvPct > 0) b.clvPositive++;
+        }
+      }
+
+      const sports = [];
+      const alerts = [];
+      for (const b of bySport.values()) {
+        const settled = b.wins + b.losses + b.pushes;
+        const decided = b.wins + b.losses;
+        const hitRate = decided > 0 ? (b.wins / decided) * 100 : null;
+        const roi = b.stakeR > 0 ? (b.profitR / b.stakeR) * 100 : null;
+        const clvAvg = b.clvCount > 0 ? b.clvSum / b.clvCount : null;
+        const dailyRate = b.n / daysSinceCutoff;
+        const baselineN = baselineMap.get(b.sport) || 0;
+        const baselineDailyRate = baselineDays > 0 ? baselineN / baselineDays : null;
+        const volumeChangePct = (baselineDailyRate && baselineDailyRate > 0)
+          ? ((dailyRate - baselineDailyRate) / baselineDailyRate) * 100
+          : null;
+
+        // Verdict
+        let verdict;
+        if (settled < 5) verdict = { code: 'too_early', label: `⚪ Cedo (${settled} settled, esperando)` };
+        else if (roi != null && roi <= -20 && decided >= 10) {
+          verdict = { code: 'bleeding', label: `🔴 SANGRANDO — ROI ${roi.toFixed(1)}% em ${decided} decided — CORTAR OU APERTAR GATES` };
+          alerts.push({ sport: b.sport, severity: 'high', message: verdict.label });
+        } else if (roi != null && roi <= -10 && decided >= 10) {
+          verdict = { code: 'warning', label: `🟡 Atenção — ROI ${roi.toFixed(1)}% em ${decided} decided` };
+          alerts.push({ sport: b.sport, severity: 'medium', message: verdict.label });
+        } else if (volumeChangePct != null && volumeChangePct >= 100 && roi != null && roi < 0) {
+          verdict = { code: 'flood_with_bleed', label: `🟡 FLOOD+BLEED — volume +${volumeChangePct.toFixed(0)}% mas ROI ${roi.toFixed(1)}%` };
+          alerts.push({ sport: b.sport, severity: 'medium', message: verdict.label });
+        } else if (roi != null && roi >= 10 && decided >= 10) {
+          verdict = { code: 'edge_real', label: `🟢 Edge real — ROI +${roi.toFixed(1)}% em ${decided} decided` };
+        } else if (clvAvg != null && clvAvg <= -2 && b.clvCount >= 10) {
+          verdict = { code: 'clv_negative', label: `🟡 CLV negativo — ${clvAvg.toFixed(2)}% em ${b.clvCount} tips` };
+          alerts.push({ sport: b.sport, severity: 'low', message: verdict.label });
+        } else {
+          verdict = { code: 'neutral', label: `🟢 Neutro — ROI ${roi != null ? roi.toFixed(1) + '%' : 'n/a'}, n=${settled}` };
+        }
+
+        sports.push({
+          sport: b.sport,
+          n: b.n, settled, pending: b.pending,
+          wins: b.wins, losses: b.losses, pushes: b.pushes,
+          hit_rate: hitRate != null ? parseFloat(hitRate.toFixed(1)) : null,
+          roi: roi != null ? parseFloat(roi.toFixed(2)) : null,
+          profit_reais: parseFloat(b.profitR.toFixed(2)),
+          clv_avg_pct: clvAvg != null ? parseFloat(clvAvg.toFixed(2)) : null,
+          clv_positive_rate: b.clvCount > 0 ? parseFloat((b.clvPositive / b.clvCount * 100).toFixed(1)) : null,
+          clv_n: b.clvCount,
+          daily_rate: parseFloat(dailyRate.toFixed(2)),
+          baseline_daily_rate: baselineDailyRate != null ? parseFloat(baselineDailyRate.toFixed(2)) : null,
+          volume_change_pct: volumeChangePct != null ? parseFloat(volumeChangePct.toFixed(1)) : null,
+          verdict,
+        });
+      }
+      sports.sort((a, b) => (a.roi ?? 0) - (b.roi ?? 0));
+
+      sendJson(res, {
+        ok: true,
+        cutoff,
+        days_since_cutoff: daysSinceCutoff,
+        baseline_days: baselineDays,
+        generated_at: new Date().toISOString(),
+        alerts,
+        sports,
+      });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   // Vetor 7 — Dota live snapshot collector + latency analysis
   if (p === '/agents/dota-snapshot-analyze') {
     if (!requireAdmin(req, res)) return;
