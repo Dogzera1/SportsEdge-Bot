@@ -2068,6 +2068,101 @@ async function checkAutoShadow() {
   log('INFO', 'AUTO-SHADOW', `Ciclo concluído: ${evaluated} sport(s) avaliados | ${flipped} flip(s) | ${restored} restore(s) | ${skippedLowN} skip(s) por n<${minN} | cutoff CLV ${cutoffClvBad}% | recovery ${recoveryClvOk}%`);
 }
 
+// ── Auto-Healer scheduler ──
+// Health Sentinel (passivo) detecta anomalias → Auto-Healer (ativo) aplica fixes.
+// Resultado vira DM admin priorizado (audit trail).
+const _autoHealerLastAppliedKey = new Map(); // anomaly_id → { ts, count } pra cooldown anti-spam
+const AUTO_HEALER_CHECK_INTERVAL_MS = parseInt(process.env.AUTO_HEALER_INTERVAL_MIN || '5', 10) * 60 * 1000;
+const AUTO_HEALER_DM_COOLDOWN_MS = parseInt(process.env.AUTO_HEALER_DM_COOLDOWN_MIN || '30', 10) * 60 * 1000;
+let _lastHealerCheck = 0;
+
+async function runAutoHealerCycle() {
+  if (!/^(1|true|yes)$/i.test(String(process.env.AUTO_HEALER_ENABLED ?? 'true'))) return;
+  const now = Date.now();
+  if (now - _lastHealerCheck < AUTO_HEALER_CHECK_INTERVAL_MS) return;
+  _lastHealerCheck = now;
+
+  let sentinel = null;
+  try {
+    const dashboard = require('./lib/dashboard');
+    sentinel = await dashboard.runHealthSentinel(`http://127.0.0.1:${process.env.PORT || 8080}`, db);
+  } catch (e) {
+    log('WARN', 'AUTO-HEALER', `health-sentinel falhou: ${e.message}`);
+    return;
+  }
+  if (!sentinel?.ok || !Array.isArray(sentinel.anomalies)) return;
+  if (sentinel.anomalies.length === 0) {
+    log('DEBUG', 'AUTO-HEALER', `Ciclo OK — 0 anomalias detectadas (${sentinel.summary.healthy_checks} checks healthy)`);
+    return;
+  }
+
+  // Constrói ctx pra healer com refs internos do bot
+  const ctx = {
+    autoAnalysisMutex,
+    pollFns: {
+      lol: () => runAutoAnalysis(),
+      dota: pollDota,
+      cs: pollCs,
+      valorant: pollValorant,
+      tennis: pollTennis,
+      mma: pollMma,
+      darts: runAutoDarts,
+      snooker: runAutoSnooker,
+      tt: pollTableTennis,
+    },
+    runningFlags: { dota: typeof _pollDotaRunning !== 'undefined' ? _pollDotaRunning : false },
+    checkAutoShadow,
+    get lastAutoShadowCheck() { return _lastAutoShadowCheck; },
+    log,
+  };
+
+  let healer = null;
+  try {
+    const { runAutoHealer } = require('./lib/auto-healer');
+    healer = await runAutoHealer({ anomalies: sentinel.anomalies, ctx });
+  } catch (e) {
+    log('ERROR', 'AUTO-HEALER', `runAutoHealer erro: ${e.message}`);
+    return;
+  }
+
+  log('INFO', 'AUTO-HEALER', `Ciclo: ${sentinel.anomalies.length} anomalia(s) | ${healer.applied.length} fix(es) aplicado(s) | ${healer.skipped.length} skip(s) | ${healer.errors.length} erro(s)`);
+
+  // DM admin: agrupa fixes recentes (cooldown anti-spam por anomaly_id)
+  if (!ADMIN_IDS.size) return;
+  const newApplied = healer.applied.filter(a => {
+    const last = _autoHealerLastAppliedKey.get(a.id);
+    if (!last) { _autoHealerLastAppliedKey.set(a.id, { ts: now, count: 1 }); return true; }
+    if ((now - last.ts) > AUTO_HEALER_DM_COOLDOWN_MS) {
+      _autoHealerLastAppliedKey.set(a.id, { ts: now, count: 1 });
+      return true;
+    }
+    last.count++;
+    return false;
+  });
+  const criticalUnresolved = sentinel.anomalies.filter(a => a.severity === 'critical' && !healer.applied.find(x => x.id === a.id));
+  if (newApplied.length === 0 && criticalUnresolved.length === 0) return;
+
+  const tokenForAlert = Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
+  if (!tokenForAlert) return;
+
+  const sevIcon = { critical: '🚨', warning: '⚠️', info: 'ℹ️' };
+  const fixLines = newApplied.slice(0, 8).map(a =>
+    `${sevIcon[a.severity] || '🔧'} *${a.id}* — ${a.description}\n   └─ \`${a.action}\``
+  ).join('\n');
+  const critLines = criticalUnresolved.slice(0, 5).map(a =>
+    `🚨 *${a.id}* — ${a.detail || ''}`
+  ).join('\n');
+
+  const msg = `🤖 *AUTO-HEALER*\n\n` +
+    (newApplied.length ? `*Fixes aplicados* (${newApplied.length}):\n${fixLines}\n\n` : '') +
+    (criticalUnresolved.length ? `*Críticas pendentes* (${criticalUnresolved.length} — precisam intervenção):\n${critLines}\n\n` : '') +
+    `_Próximo ciclo em ${Math.round(AUTO_HEALER_CHECK_INTERVAL_MS / 60000)}min. Cooldown DM ${Math.round(AUTO_HEALER_DM_COOLDOWN_MS / 60000)}min/anomaly._`;
+
+  for (const adminId of ADMIN_IDS) {
+    await sendDM(tokenForAlert, adminId, msg).catch(() => {});
+  }
+}
+
 // Live Scout gap monitor: alerta admin via Telegram quando gap (no_gameids/stats_disabled/coverage_missing/etc)
 // persiste por mais que LIVE_SCOUT_ALERT_THRESHOLD_MIN. Anti-spam: cada gap key alerta uma vez por janela.
 const _liveScoutGapFirstSeen = new Map(); // gapKey -> { firstTs, lastTs, info, alerted }
@@ -8839,6 +8934,11 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   // Default OFF — ativar via AUTO_SHADOW_NEGATIVE_CLV=true
   setInterval(() => checkAutoShadow().catch(e => log('ERROR', 'AUTO-SHADOW', e.message)), AUTO_SHADOW_CHECK_INTERVAL_MS);
   setTimeout(() => checkAutoShadow().catch(() => {}), 5 * 60 * 1000); // primeiro check 5min pós-boot (DB já tá warm)
+
+  // Auto-Healer: detecta anomalias via Health Sentinel e aplica fixes operacionais.
+  // Default ON — desativar via AUTO_HEALER_ENABLED=false
+  setInterval(() => runAutoHealerCycle().catch(e => log('ERROR', 'AUTO-HEALER', e.message)), AUTO_HEALER_CHECK_INTERVAL_MS);
+  setTimeout(() => runAutoHealerCycle().catch(() => {}), 4 * 60 * 1000); // primeiro check 4min pós-boot
 
   // ── Cashout monitor ──
   // Varre tips live pendentes, recomputa P via live stats, notifica admins

@@ -258,6 +258,30 @@
 <!-- ═══ Tab: Agentes ═══ -->
 <div class="tab-pane" id="pane-agents">
   <div class="agents-section" style="padding:18px;display:grid;grid-template-columns:1fr;gap:14px;">
+    <!-- Health Sentinel + Auto-Healer -->
+    <div class="agent-card" id="agent-health-sentinel">
+      <div class="agent-head">
+        <span class="agent-title">🩻 Health Sentinel + 🔧 Auto-Healer</span>
+        <span class="agent-meta" id="healthSentinelMeta">—</span>
+        <button class="agent-refresh" data-agent="health-sentinel">↻</button>
+      </div>
+      <div class="agent-body" id="healthSentinelBody"><div class="empty" style="padding:20px;">clique em ↻ pra rodar — detecta anomalias (mutex stuck/poll silent/endpoint slow/etc). Auto-Healer corrige via cron 5min e te avisa via Telegram quando aplica fix.</div></div>
+    </div>
+    <!-- Orchestrator -->
+    <div class="agent-card" id="agent-orchestrator">
+      <div class="agent-head">
+        <span class="agent-title">🎼 Orchestrator (workflows)</span>
+        <span class="agent-meta">
+          <select id="orchWorkflow" style="background:var(--panel2);border:1px solid var(--border);color:var(--text);padding:2px 6px;border-radius:4px;font-size:11px;">
+            <option value="full_diagnostic">full_diagnostic</option>
+            <option value="coverage_investigation">coverage_investigation</option>
+            <option value="weekly_full">weekly_full</option>
+          </select>
+        </span>
+        <button class="agent-refresh" data-agent="orchestrator">↻</button>
+      </div>
+      <div class="agent-body" id="orchestratorBody"><div class="empty" style="padding:20px;">workflow chains: sentinel→healer→validate, scout→medic→report, weekly_review→roi_analyst→sentinel. Roda múltiplos agents em sequência inteligente.</div></div>
+    </div>
     <!-- Weekly Review -->
     <div class="agent-card" id="agent-weekly-review">
       <div class="agent-head">
@@ -732,6 +756,96 @@
     body.innerHTML = summaryHtml + actionsHtml + trendsHtml + shadowHtml;
   }
 
+  function renderHealthSentinel(data) {
+    const body = document.getElementById('healthSentinelBody');
+    const meta = document.getElementById('healthSentinelMeta');
+    if (!body) return;
+    if (!data || !data.ok) {
+      body.innerHTML = `<div class="empty" style="color:var(--err);">${escapeHtml(data?.error || 'sem dados')}</div>`;
+      return;
+    }
+    meta.textContent = new Date(data.at).toLocaleTimeString();
+    const s = data.summary || {};
+    const sevBg = { critical: 'rgba(239,68,68,0.18)', warning: 'rgba(251,191,36,0.15)', info: 'rgba(96,165,250,0.12)' };
+    const sevFg = { critical: '#fca5a5', warning: '#fde68a', info: '#93c5fd' };
+    const summaryHtml = `
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:8px;margin-bottom:12px;font-size:11px">
+        <div style="background:rgba(34,197,94,0.12);padding:8px;border-radius:6px;border-left:3px solid #34d399">
+          <div style="color:#6ee7b7;font-weight:700;font-size:18px">${s.healthy_checks || 0}</div>
+          <div style="color:#86efac">healthy</div>
+        </div>
+        <div style="background:rgba(251,191,36,0.15);padding:8px;border-radius:6px;border-left:3px solid #fbbf24">
+          <div style="color:#fde68a;font-weight:700;font-size:18px">${s.warning || 0}</div>
+          <div style="color:#fcd34d">warning</div>
+        </div>
+        <div style="background:rgba(239,68,68,0.18);padding:8px;border-radius:6px;border-left:3px solid #ef4444">
+          <div style="color:#fca5a5;font-weight:700;font-size:18px">${s.critical || 0}</div>
+          <div style="color:#fca5a5">critical</div>
+        </div>
+        <div style="background:rgba(96,165,250,0.12);padding:8px;border-radius:6px;border-left:3px solid #60a5fa">
+          <div style="color:#93c5fd;font-weight:700;font-size:18px">${s.actionable || 0}</div>
+          <div style="color:#93c5fd">actionable (auto-fix)</div>
+        </div>
+      </div>`;
+    const anomaliesHtml = (data.anomalies || []).length === 0
+      ? `<div style="color:var(--muted);padding:12px;text-align:center;font-size:12px">✅ Sistema saudável — 0 anomalias detectadas.</div>`
+      : `<table class="agent-table" style="font-size:11px"><thead><tr><th>Sev</th><th>ID</th><th>Detalhe</th><th>Auto-fix?</th></tr></thead><tbody>${
+          data.anomalies.map(a => `<tr style="background:${sevBg[a.severity] || ''};">
+            <td style="color:${sevFg[a.severity]};font-weight:700">${a.severity.toUpperCase()}</td>
+            <td style="font-family:monospace;color:#e5e7eb">${escapeHtml(a.id)}</td>
+            <td style="color:#9ca3af">${escapeHtml(a.detail || '')}</td>
+            <td style="color:${a.actionable ? '#6ee7b7' : '#6b7280'}">${a.actionable ? '🔧 yes' : '— manual'}</td>
+          </tr>`).join('')
+        }</tbody></table>`;
+    body.innerHTML = summaryHtml + anomaliesHtml + `
+      <div style="margin-top:10px;padding:8px;background:var(--panel2);border-radius:6px;font-size:10px;color:#6b7280">
+        Auto-Healer roda no bot.js (cron 5min, ENV: <code>AUTO_HEALER_ENABLED=true</code>). Você recebe DM quando ele aplica fix em anomaly nova.
+      </div>`;
+  }
+
+  function renderOrchestrator(data) {
+    const body = document.getElementById('orchestratorBody');
+    if (!body) return;
+    if (!data || !data.ok) {
+      body.innerHTML = `<div class="empty" style="color:var(--err);">${escapeHtml(data?.error || 'sem dados')}</div>`;
+      return;
+    }
+    if (data.workflows && !data.workflow) {
+      body.innerHTML = `<div style="padding:10px"><b>Workflows disponíveis:</b><ul style="margin-top:8px;font-size:11px;line-height:1.6">${
+        data.workflows.map(w => `<li><code>${escapeHtml(w.name)}</code> — ${escapeHtml(w.description)}<br><span style="color:#6b7280">steps: ${w.steps.map(s => escapeHtml(s)).join(' → ')}</span></li>`).join('')
+      }</ul></div>`;
+      return;
+    }
+    const stepIcon = (s) => s.ok === false ? '❌' : (s.skip_remaining ? '⏭️' : '✅');
+    const stepsHtml = `<table class="agent-table" style="font-size:11px"><thead><tr><th>#</th><th>Step</th><th>Status</th><th>Duração</th><th>Sumário</th></tr></thead><tbody>${
+      data.steps.map((s, i) => `<tr>
+        <td style="color:#6b7280">${i + 1}</td>
+        <td style="font-family:monospace">${stepIcon(s)} ${escapeHtml(s.name)}${s.agent ? ` <span style="color:#6b7280">[${escapeHtml(s.agent)}]</span>` : ''}</td>
+        <td style="color:${s.ok ? '#6ee7b7' : '#fca5a5'}">${s.ok ? 'ok' : (s.error || 'fail')}</td>
+        <td style="color:#9ca3af">${s.duration_ms != null ? s.duration_ms + 'ms' : '—'}</td>
+        <td style="color:#9ca3af;font-size:10px">${s.data_summary ? escapeHtml(JSON.stringify(s.data_summary)) : (s.actionable_count != null ? 'actionable: ' + s.actionable_count : '—')}</td>
+      </tr>`).join('')
+    }</tbody></table>`;
+    const compareHtml = data.steps.find(s => s.comparison) ? (() => {
+      const cmp = data.steps.find(s => s.comparison).comparison;
+      return `<div style="margin-top:10px;padding:10px;background:var(--panel2);border-radius:6px;font-size:11px">
+        <div style="color:#6ee7b7;margin-bottom:4px">✅ Resolvidos (${cmp.resolved.length}):</div>
+        <div style="font-family:monospace;color:#86efac">${cmp.resolved.length ? cmp.resolved.map(escapeHtml).join(', ') : '—'}</div>
+        <div style="color:#fde68a;margin-top:6px;margin-bottom:4px">⚠️ Persistentes (${cmp.persistent.length}):</div>
+        <div style="font-family:monospace;color:#fde68a">${cmp.persistent.length ? cmp.persistent.map(escapeHtml).join(', ') : '—'}</div>
+        <div style="color:#fca5a5;margin-top:6px;margin-bottom:4px">🆕 Novos (${cmp.new_anomalies.length}):</div>
+        <div style="font-family:monospace;color:#fca5a5">${cmp.new_anomalies.length ? cmp.new_anomalies.map(escapeHtml).join(', ') : '—'}</div>
+      </div>`;
+    })() : '';
+    const shortcircuitHtml = data.shortcircuit
+      ? `<div style="margin-top:10px;padding:8px;background:rgba(34,197,94,0.1);border-radius:6px;font-size:11px;color:#86efac">⚡ Short-circuit: ${escapeHtml(data.shortcircuit.reason || '')}</div>`
+      : '';
+    body.innerHTML = `<div style="display:flex;justify-content:space-between;font-size:11px;color:#9ca3af;margin-bottom:8px">
+      <span><b>${escapeHtml(data.workflow)}</b> — ${escapeHtml(data.description || '')}</span>
+      <span>${data.duration_ms}ms</span>
+    </div>` + stepsHtml + compareHtml + shortcircuitHtml;
+  }
+
   async function fetchAgent(name, params = '') {
     const btn = document.querySelector(`.agent-refresh[data-agent="${name}"]`);
     if (btn) btn.classList.add('loading');
@@ -742,8 +856,10 @@
       if (name === 'roi-analyst') renderRoi(data);
       if (name === 'feed-medic') renderFeedMedic(data);
       if (name === 'weekly-review') renderWeeklyReview(data);
+      if (name === 'health-sentinel') renderHealthSentinel(data);
+      if (name === 'orchestrator') renderOrchestrator(data);
     } catch (e) {
-      const map = { 'live-scout': 'liveScoutBody', 'roi-analyst': 'roiAnalystBody', 'feed-medic': 'feedMedicBody', 'weekly-review': 'weeklyReviewBody' };
+      const map = { 'live-scout': 'liveScoutBody', 'roi-analyst': 'roiAnalystBody', 'feed-medic': 'feedMedicBody', 'weekly-review': 'weeklyReviewBody', 'health-sentinel': 'healthSentinelBody', 'orchestrator': 'orchestratorBody' };
       const el = document.getElementById(map[name]);
       if (el) el.innerHTML = `<div class="empty" style="color:var(--err);">fetch falhou: ${escapeHtml(String(e.message||e))}</div>`;
     } finally {
@@ -752,11 +868,14 @@
   }
 
   function refreshAgents() {
+    fetchAgent('health-sentinel');
     fetchAgent('weekly-review');
     fetchAgent('live-scout');
     const sel = document.getElementById('roiDaysSel');
     fetchAgent('roi-analyst', '?days=' + (sel?.value || '30'));
     fetchAgent('feed-medic');
+    const orchSel = document.getElementById('orchWorkflow');
+    fetchAgent('orchestrator', '?workflow=' + (orchSel?.value || 'full_diagnostic'));
   }
 
   document.querySelectorAll('.agent-refresh').forEach(btn => btn.addEventListener('click', () => {

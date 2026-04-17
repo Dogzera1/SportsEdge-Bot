@@ -7967,6 +7967,44 @@ const server = http.createServer(async (req, res) => {
       .catch(e => sendJson(res, { ok: false, error: e.message }, 500));
     return;
   }
+  if (p === '/agents/health-sentinel') {
+    if (!requireAdmin(req, res)) return;
+    const base = `http://127.0.0.1:${PORT}`;
+    dashboard.runHealthSentinel(base, db).then(data => sendJson(res, data))
+      .catch(e => sendJson(res, { ok: false, error: e.message }, 500));
+    return;
+  }
+  // Orchestrator: roda workflows compostos (sentinel + healer, scout + medic, etc).
+  // GET /agents/orchestrator?workflow=full_diagnostic
+  // GET /agents/orchestrator (sem workflow → lista disponíveis)
+  if (p === '/agents/orchestrator') {
+    if (!requireAdmin(req, res)) return;
+    const orchestrator = require('./lib/agent-orchestrator');
+    const wfName = parsed.query.workflow;
+    if (!wfName) {
+      sendJson(res, { ok: true, workflows: orchestrator.listWorkflows() });
+      return;
+    }
+    const base = `http://127.0.0.1:${PORT}`;
+    const ctx = {
+      log: (level, tag, msg) => log(level, tag, msg),
+      agents: {
+        'health-sentinel': () => dashboard.runHealthSentinel(base, db),
+        'live-scout': () => dashboard.runLiveScout(base),
+        'feed-medic': () => dashboard.runFeedMedic(base),
+        'roi-analyst': (args) => dashboard.runRoiAnalyst(db, args?.days),
+        'weekly-review': () => dashboard.runWeeklyReview(base),
+        'auto-healer': async () => {
+          // Auto-healer precisa do ctx do bot (mutex/pollFns) — não disponível aqui server-side.
+          // Retorna info pra orchestrator saber que precisa rodar via bot scheduler.
+          return { ok: true, note: 'auto-healer roda via cron interno do bot.js (a cada 5min). Endpoint orchestrator não invoca diretamente.', applied: [] };
+        },
+      },
+    };
+    orchestrator.runWorkflow(wfName, ctx).then(data => sendJson(res, data))
+      .catch(e => sendJson(res, { ok: false, error: e.message }, 500));
+    return;
+  }
   if (p === '/agents/roi-analyst') {
     if (!requireAdmin(req, res)) return;
     try { sendJson(res, dashboard.runRoiAnalyst(db, parsed.query.days || '30')); }
