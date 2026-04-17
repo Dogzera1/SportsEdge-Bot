@@ -2139,7 +2139,19 @@ async function runAutoHealerCycle() {
     last.count++;
     return false;
   });
-  const criticalUnresolved = sentinel.anomalies.filter(a => a.severity === 'critical' && !healer.applied.find(x => x.id === a.id));
+  // Critical "pendente" = anomaly não tem fix aplicado E não foi self-resolved.
+  // Self-resolved: precondition retornou !ok porque situação já mudou (ex: "mutex não está locked").
+  // Esses não são problemas reais — ignora pra não spammar admin.
+  const skippedSelfResolved = new Set(
+    healer.skipped
+      .filter(s => /precondition falhou/.test(s.reason || '') && !/já rodando|não exposto/.test(s.reason || ''))
+      .map(s => s.id)
+  );
+  const criticalUnresolved = sentinel.anomalies.filter(a =>
+    a.severity === 'critical'
+    && !healer.applied.find(x => x.id === a.id)
+    && !skippedSelfResolved.has(a.id)
+  );
   if (newApplied.length === 0 && criticalUnresolved.length === 0) return;
 
   const tokenForAlert = Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
