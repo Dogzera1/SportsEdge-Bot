@@ -21,12 +21,14 @@ Registro cronológico de decisões significativas. Toda mudança de comportament
 **Reversão:** mudar valor em `bot.js:7188` ou setar env `TENNIS_MAX_DIVERGENCE_PP=12`
 **Status:** 🧪 experimental — re-rodar backtest em 14d (2026-05-02) pra validar
 
-## 2026-04-18 — Esports: shadow recomendado pendente intervenção manual
-**Motivo:** Backtest n=39 mostrou ROI -3.92% + Brier 0.264 vs baseline 0.253 = bleed real confirmado em buckets esports pregame tier1+tier2. Gates novos salvaram R$3.72 mas não são suficientes pra cobrir bleed.
-**Antes:** Esports operando normalmente
-**Agora:** Recomendado setar `ESPORTS_SHADOW=true` no Railway (ação manual). Tips continuam sendo geradas e gravadas mas sem DM, permitindo coleta de mais dados sem perda real.
-**Reversão:** desativar env após 30d se backtest mostrar Brier melhorando ou refactor de `lib/lol-model.js`.
-**Status:** 📋 pendente decisão manual user — não aplicado automaticamente
+## 2026-04-18 — Esports: NÃO cortar / shadow agora — sample contaminado
+**Motivo:** Backtest n=39 mostrou ROI esports -3.92% + Brier ruim. Análise por liga mostrou bleed concentrado em Prime League (n=6, ROI -72%) e LFL (n=3, ROI -70%). PORÉM: maioria dessas tips foi gerada quando o modelo/gates ainda estavam em construção (sample contaminado por iterações pré-fix).
+**Decisão consciente:** NÃO aplicar shadow esports global nem por liga. Cortar agora baseado em sample contaminado seria decisão prematura — gates novos têm <14d de uptime, dataset limpo ainda não acumulou.
+**Antes:** considerou-se `ESPORTS_SHADOW=true` ou helper `isLeagueShadowed` (CSV envar)
+**Agora:** mantém esports operacional. Aguarda 14-30d pra dataset gates-pos-fix acumular.
+**Próxima ação:** re-rodar `/agents/backtest-validator` em 2026-05-02. Se bleed persistir com tips post-2026-04-17, aí sim aplicar cuts cirúrgicos por liga.
+**Reversão:** N/A (não houve mudança ativa)
+**Status:** ✅ decisão consciente — não cortar prematuramente
 
 ## 2026-04-17 — Tip parser: IA fornece apenas P, sistema calcula EV
 **Motivo:** IA tinha taxa alta de erro aritmético (`EV = P × odd − 1`). Mesmo modelo P bom, EV inconsistente fazia tip ser rejeitada por gate antigo.
