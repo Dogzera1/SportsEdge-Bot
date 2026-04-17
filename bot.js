@@ -1097,6 +1097,13 @@ async function runAutoAnalysis() {
           if (!riskAdj.ok) { log('INFO', 'RISK', `esports: bloqueada (${riskAdj.reason})`); continue; }
           const tipStakeAdj = `${riskAdj.units.toFixed(1).replace(/\.0$/, '')}u`;
           const gameIcon = '🎮';
+          // Linha de bookmaker — Pinnacle prioritário; mostra alternativa (SX.Bet) se houver linha melhor.
+          const _bmSrcLol = String(result.o?.bookmaker || '').trim();
+          const _altLol = result.o?._alternative;
+          const _altLine = _altLol ? ` (alt ${_altLol.bookmaker}: ${_altLol.t1}/${_altLol.t2})` : '';
+          const bookLineLol = _bmSrcLol
+            ? `🏦 Casa: *${_bmSrcLol}*${_altLine}\n`
+            : '';
           const oddsLabel = hasRealOdds ? '' : '\n⚠️ _Odds estimadas (sem mercado disponível)_';
           const mlEdgeLabel = result.mlScore > 0 ? ` | ML: ${result.mlScore.toFixed(1)}pp` : '';
           const baixaNote = tipConf === 'BAIXA' ? '\n⚠️ _Tip de confiança BAIXA — stake reduzido. Aposte com cautela._' : '';
@@ -1189,6 +1196,7 @@ async function runAutoAnalysis() {
             (mapaLabel ? `${mapaLabel}\n` : '') +
             whyLine +
             `🎯 Aposta: *${tipTeam}* ML @ *${tipOdd}*\n` +
+            bookLineLol +
             minTakeLine +
             `📈 EV: *${tipEV}*\n💵 Stake: *${tipStake}* _(${kellyLabel})_\n` +
             `${confEmoji} Confiança: *${tipConf}*${mlEdgeLabel}\n` +
@@ -6012,8 +6020,16 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
           log('INFO', 'AUTO-MMA', `Gate odds: ${tipOdd} fora do range 1.40-5.00`);
           await new Promise(r => setTimeout(r, 3000)); continue;
         }
-        if (tipEV < 5.0) {
-          log('INFO', 'AUTO-MMA', `Gate EV: ${tipEV}% < 5%`);
+        // Detecta book sharp (Pinnacle/Betfair). MMA TheOddsAPI pode entregar BetOnline.ag,
+        // BetMGM, FanDuel etc — todos non-sharp. Sem ground truth sharp, edge é mais arriscado.
+        const _bookmakerMma = String(o?.bookmaker || '').toLowerCase();
+        const _isSharpBookMma = /pinnacle|betfair/.test(_bookmakerMma);
+        const _mmaMinEvSharp = parseFloat(process.env.MMA_MIN_EV ?? '5.0');
+        const _mmaMinEvSoft = parseFloat(process.env.MMA_MIN_EV_NONSHARP ?? '12.0');
+        const _minEvForBook = _isSharpBookMma ? _mmaMinEvSharp : _mmaMinEvSoft;
+
+        if (tipEV < _minEvForBook) {
+          log('INFO', 'AUTO-MMA', `Gate EV: ${tipEV}% < ${_minEvForBook}% (${_isSharpBookMma ? 'sharp' : 'non-sharp ' + _bookmakerMma})`);
           await new Promise(r => setTimeout(r, 3000)); continue;
         }
         // Confiança BAIXA: bloqueia — MMA tem variância alta, BAIXA não compensa
@@ -6022,7 +6038,15 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
           await new Promise(r => setTimeout(r, 3000)); continue;
         }
 
-        const confEmoji = { ALTA: '🟢', MÉDIA: '🟡', BAIXA: '🔴' }[tipConf] || '🟡';
+        // Cap conservador pra book non-sharp: rebaixa ALTA → MÉDIA (Kelly menor) e limita stake.
+        // Sem Pinnacle/Betfair como ground truth, "edge" pode ser ilusório.
+        let _confEffMma = tipConf;
+        if (!_isSharpBookMma && _confEffMma === 'ALTA') {
+          log('INFO', 'AUTO-MMA', `Conf rebaixada ALTA→MÉDIA (book non-sharp ${_bookmakerMma})`);
+          _confEffMma = 'MÉDIA';
+        }
+
+        const confEmoji = { ALTA: '🟢', MÉDIA: '🟡', BAIXA: '🔴' }[_confEffMma] || '🟡';
         const recLine = espn ? `\n📊 Registros: ${fight.team1} ${rec1||'?'} | ${fight.team2} ${rec2||'?'}` : '';
         const catLine = espn ? `\n🏷️ ${weightClass || fight.league}${isTitleFight ? ' — TITLE FIGHT' : ''}` : '';
 
@@ -6030,14 +6054,15 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
         const whyLineMma = tipReasonMma ? `\n🧠 Por quê: _${tipReasonMma}_\n` : '\n';
         const minTakeOdds = calcMinTakeOdds(tipOdd);
         const minTakeLine = minTakeOdds ? `📉 Odd mínima: *${minTakeOdds}*\n` : '';
+        const bookSourceLine = !_isSharpBookMma ? `\n⚠️ _Odds ${o.bookmaker || 'non-sharp'} — sem Pinnacle como referência. Stake/conf reduzidos._\n` : '';
 
-        const kellyLabelMma = tipConf === 'ALTA' ? '¼ Kelly' : '⅙ Kelly';
+        const kellyLabelMma = _confEffMma === 'ALTA' ? '¼ Kelly' : '⅙ Kelly';
 
         const pickIsT1Mma = norm(tipTeam) === norm(fight.team1);
         const modelPPickMma = pickIsT1Mma ? mlResultMma.modelP1 : mlResultMma.modelP2;
 
         // Kelly fracionado: ALTA → ¼ Kelly (max 4u) | MÉDIA → ⅙ Kelly (max 3u)
-        const kellyFractionMma = tipConf === 'ALTA' ? 0.25 : 1/6;
+        const kellyFractionMma = _confEffMma === 'ALTA' ? 0.25 : 1/6;
         const kellyStakeMma = modelPPickMma > 0
           ? calcKellyWithP(modelPPickMma, tipOdd, kellyFractionMma)
           : calcKellyFraction(tipEV, tipOdd, kellyFractionMma);
@@ -6045,7 +6070,13 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
           log('INFO', 'AUTO-MMA', `Kelly negativo ${tipTeam} @ ${tipOdd} — tip abortada`);
           await new Promise(r => setTimeout(r, 3000)); continue;
         }
-        const desiredUnitsMma = parseFloat(kellyStakeMma) || 0;
+        let desiredUnitsMma = parseFloat(kellyStakeMma) || 0;
+        // Cap stake pra book non-sharp: max 1u (mesma filosofia do CS tier 2+).
+        const _mmaMaxStakeNonSharp = parseFloat(process.env.MMA_MAX_STAKE_NONSHARP ?? '1.0');
+        if (!_isSharpBookMma && desiredUnitsMma > _mmaMaxStakeNonSharp) {
+          log('INFO', 'AUTO-MMA', `Stake cap ${desiredUnitsMma.toFixed(1)}u → ${_mmaMaxStakeNonSharp}u (book non-sharp ${_bookmakerMma})`);
+          desiredUnitsMma = _mmaMaxStakeNonSharp;
+        }
         const riskAdjMma = await applyGlobalRisk('mma', desiredUnitsMma, fight.league);
         if (!riskAdjMma.ok) { log('INFO', 'RISK', `mma: bloqueada (${riskAdjMma.reason})`); await new Promise(r => setTimeout(r, 3000)); continue; }
         const tipStakeAdjMma = String(riskAdjMma.units.toFixed(1).replace(/\.0$/, ''));
@@ -6079,7 +6110,7 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
           minTakeLine +
           `📈 EV: *+${tipEV}%* | De-juice: ${tipTeam === fight.team1 ? fairP1 : fairP2}%\n` +
           `💵 Stake: *${tipStakeAdjMma}u* _(${kellyLabelMma})_\n` +
-          `${confEmoji} Confiança: *${tipConf}*\n\n` +
+          `${confEmoji} Confiança: *${_confEffMma}*${bookSourceLine}\n` +
           `⚠️ _Aposte com responsabilidade._`;
 
         // eventName: prioriza org + eventName (ex: "UFC — UFC 305") sobre o "MMA" genérico do TheOddsAPI.
@@ -6093,7 +6124,7 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
           matchId: String(fight.id), eventName: recEventName,
           p1: fight.team1, p2: fight.team2, tipParticipant: tipTeam,
           odds: String(tipOdd), ev: String(tipEV), stake: tipStakeAdjMma,
-          confidence: tipConf, isLive: false, market_type: 'ML',
+          confidence: _confEffMma, isLive: false, market_type: 'ML',
           modelP1: mlResultMma.modelP1,
           modelP2: mlResultMma.modelP2,
           modelPPick: modelPPickMma,

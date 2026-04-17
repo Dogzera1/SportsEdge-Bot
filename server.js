@@ -4209,21 +4209,18 @@ const server = http.createServer(async (req, res) => {
         return;
       }
 
-      // LINE SHOPPING: retorna melhor odd + sharp reference
-      const best = candidates.reduce((a, b) => {
-        const aMax = Math.max(parseFloat(a.t1) || 0, parseFloat(a.t2) || 0);
-        const bMax = Math.max(parseFloat(b.t1) || 0, parseFloat(b.t2) || 0);
-        return bMax > aMax ? b : a;
-      });
+      // PRIORIZA PINNACLE (sharp anchor). SX.Bet/TheOddsAPI vão como alternativas.
       const pinCandidate = candidates.find(c => c.bookmaker === 'Pinnacle');
-      if (pinCandidate) {
-        best._sharp = { t1: pinCandidate.t1, t2: pinCandidate.t2, bookmaker: 'Pinnacle' };
+      const altCandidate = candidates.find(c => c.bookmaker !== 'Pinnacle');
+      const primary = pinCandidate || altCandidate;
+      if (altCandidate && pinCandidate) {
+        primary._alternative = { t1: altCandidate.t1, t2: altCandidate.t2, bookmaker: altCandidate.bookmaker };
       }
       if (candidates.length > 1) {
-        best._allOdds = candidates.map(c => ({ t1: c.t1, t2: c.t2, bookmaker: c.bookmaker }));
-        log('INFO', 'ODDS', `LINE SHOP Dota: ${t1} vs ${t2} → best=${best.bookmaker} (${candidates.map(c => `${c.bookmaker}:${c.t1}/${c.t2}`).join(' | ')})`);
+        primary._allOdds = candidates.map(c => ({ t1: c.t1, t2: c.t2, bookmaker: c.bookmaker }));
+        log('INFO', 'ODDS', `Dota ${t1} vs ${t2} → primary=${primary.bookmaker} (${candidates.map(c => `${c.bookmaker}:${c.t1}/${c.t2}`).join(' | ')})`);
       }
-      sendJson(res, best);
+      sendJson(res, primary);
       return;
     }
     const mapNumber = parsed.query.map ? parseInt(parsed.query.map, 10) : null;
@@ -4289,22 +4286,20 @@ const server = http.createServer(async (req, res) => {
         return;
       }
 
-      // LINE SHOPPING: retorna melhor preço + sharp line (Pinnacle) separada
-      const best = candidates.reduce((a, b) => {
-        const aMax = Math.max(parseFloat(a.t1) || 0, parseFloat(a.t2) || 0);
-        const bMax = Math.max(parseFloat(b.t1) || 0, parseFloat(b.t2) || 0);
-        return bMax > aMax ? b : a;
-      });
-      // _sharp: odds Pinnacle como referência eficiente (se disponível)
+      // PRIORIZA PINNACLE como base de tip (sharp anchor calibrado).
+      // Se Pinnacle disponível → primary. SX.Bet vai como `_alternative` (informa
+      // ao usuário que pode pegar linha melhor lá). User pediu Pinnacle como ground truth.
       const pinCandidate = candidates.find(c => c.bookmaker === 'Pinnacle');
-      if (pinCandidate) {
-        best._sharp = { t1: pinCandidate.t1, t2: pinCandidate.t2, bookmaker: 'Pinnacle' };
+      const sxCandidate = candidates.find(c => c.bookmaker !== 'Pinnacle');
+      const primary = pinCandidate || sxCandidate;
+      if (sxCandidate && pinCandidate) {
+        primary._alternative = { t1: sxCandidate.t1, t2: sxCandidate.t2, bookmaker: sxCandidate.bookmaker };
       }
       if (candidates.length > 1) {
-        best._allOdds = candidates.map(c => ({ t1: c.t1, t2: c.t2, bookmaker: c.bookmaker }));
-        log('INFO', 'ODDS', `LINE SHOP LoL: ${t1} vs ${t2} → best=${best.bookmaker} (${candidates.map(c => `${c.bookmaker}:${c.t1}/${c.t2}`).join(' | ')})`);
+        primary._allOdds = candidates.map(c => ({ t1: c.t1, t2: c.t2, bookmaker: c.bookmaker }));
+        log('INFO', 'ODDS', `LoL ${t1} vs ${t2} → primary=${primary.bookmaker} (${candidates.map(c => `${c.bookmaker}:${c.t1}/${c.t2}`).join(' | ')})`);
       }
-      sendJson(res, best);
+      sendJson(res, primary);
       return;
     }
     // force=1: bypassa TTL do cache (usado para partidas iminentes < 2h)
@@ -8814,10 +8809,18 @@ const server = http.createServer(async (req, res) => {
     if (!THE_ODDS_API_KEY) { sendJson(res, []); return; }
     try {
       const now = Date.now();
+      // Preferência de bookmaker: Pinnacle > Betfair > primeiro disponível.
+      // MMA Pinnacle é sharp e calibrado; pega ele quando TheOddsAPI retorna múltiplos books.
+      const SHARP_BOOK_RE = /pinnacle|betfair/i;
+      const pickBestBook = (bookmakers) => {
+        if (!Array.isArray(bookmakers) || !bookmakers.length) return null;
+        const sharp = bookmakers.find(b => SHARP_BOOK_RE.test(String(b?.title || b?.key || '')));
+        return sharp || bookmakers[0];
+      };
       const parseFights = (raw, gameTag) => raw
         .filter(e => new Date(e.commence_time).getTime() > now)
         .map(e => {
-          const bm = e.bookmakers?.[0];
+          const bm = pickBestBook(e.bookmakers);
           const market = bm?.markets?.find(m => m.key === 'h2h');
           const out = market?.outcomes || [];
           const o1 = out.find(o => o.name === e.home_team);
