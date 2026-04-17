@@ -1973,6 +1973,66 @@ async function checkCriticalAlerts() {
   }
 }
 
+// Auto-shadow: avalia CLV recente por sport; se persistentemente negativo, flipa shadowMode=true.
+// Defesa anti-bleed: para de mandar DMs em sports sem edge real (CLV é proxy de edge sustentável).
+const _autoShadowOriginal = new Map(); // sport → original shadowMode (pra restaurar se CLV recuperar)
+const _autoShadowState = new Map();    // sport → { reason, since, lastCheck }
+const AUTO_SHADOW_CHECK_INTERVAL_MS = parseInt(process.env.AUTO_SHADOW_CHECK_INTERVAL_HOURS || '6', 10) * 60 * 60 * 1000;
+let _lastAutoShadowCheck = 0;
+
+async function checkAutoShadow() {
+  if (!/^(1|true|yes)$/i.test(String(process.env.AUTO_SHADOW_NEGATIVE_CLV ?? 'false'))) return;
+  const now = Date.now();
+  if (now - _lastAutoShadowCheck < AUTO_SHADOW_CHECK_INTERVAL_MS) return;
+  _lastAutoShadowCheck = now;
+
+  const minN = parseInt(process.env.AUTO_SHADOW_MIN_N || '30', 10);
+  const cutoffClvBad = parseFloat(process.env.AUTO_SHADOW_CLV_CUTOFF || '-1.0'); // CLV avg < -1%
+  const recoveryClvOk = parseFloat(process.env.AUTO_SHADOW_RECOVERY_CLV || '0.0'); // pra desfazer
+
+  for (const sport of Object.keys(SPORTS)) {
+    const cfg = SPORTS[sport];
+    if (!cfg?.enabled || !cfg?.token) continue;
+    if (!_autoShadowOriginal.has(sport)) _autoShadowOriginal.set(sport, !!cfg.shadowMode);
+    const orig = _autoShadowOriginal.get(sport);
+
+    let clvData = null;
+    try { clvData = await serverGet(`/clv-decay?sport=${encodeURIComponent(sport)}&days=14`).catch(() => null); }
+    catch (_) {}
+    if (!clvData?.series?.length) continue;
+    const totalN = clvData.series.reduce((a, b) => a + (b.n || 0), 0);
+    if (totalN < minN) continue;
+    const weightedSum = clvData.series.reduce((a, b) => a + (b.clv_avg || 0) * (b.n || 0), 0);
+    const meanClv = totalN > 0 ? weightedSum / totalN : 0;
+
+    const wasAutoShadowed = _autoShadowState.has(sport);
+    if (meanClv < cutoffClvBad && !cfg.shadowMode) {
+      // Flip: ativa shadow
+      cfg.shadowMode = true;
+      _autoShadowState.set(sport, { reason: `CLV ${meanClv.toFixed(2)}% < ${cutoffClvBad}% (n=${totalN}, 14d)`, since: now, lastCheck: now });
+      log('WARN', 'AUTO-SHADOW', `[FLIP→SHADOW] ${sport}: CLV ${meanClv.toFixed(2)}% < ${cutoffClvBad}% em ${totalN} tips. DMs suspensos até CLV recuperar ≥ ${recoveryClvOk}%.`);
+      // Notifica admin
+      const tokenForAlert = Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
+      if (tokenForAlert) {
+        const msg = `🛑 *AUTO-SHADOW ATIVADO — ${sport.toUpperCase()}*\n\nCLV médio (14d): *${meanClv.toFixed(2)}%* em ${totalN} tips\nCutoff: ${cutoffClvBad}%\n\nTips continuam sendo geradas e gravadas no DB (com \`is_shadow=1\`), mas DMs suspensos.\n\n_Auto-restaura quando CLV ≥ ${recoveryClvOk}% (mesmo \`AUTO_SHADOW_NEGATIVE_CLV\`)._`;
+        for (const adminId of ADMIN_IDS) await sendDM(tokenForAlert, adminId, msg).catch(() => {});
+      }
+    } else if (wasAutoShadowed && meanClv >= recoveryClvOk && cfg.shadowMode === true && orig === false) {
+      // Recovery: desfaz auto-shadow se CLV recuperou
+      cfg.shadowMode = false;
+      _autoShadowState.delete(sport);
+      log('INFO', 'AUTO-SHADOW', `[RESTORE→ATIVO] ${sport}: CLV recuperou ${meanClv.toFixed(2)}% ≥ ${recoveryClvOk}%. DMs reativados.`);
+      const tokenForAlert = Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
+      if (tokenForAlert) {
+        const msg = `✅ *AUTO-SHADOW RESTAURADO — ${sport.toUpperCase()}*\n\nCLV (14d): *+${meanClv.toFixed(2)}%* em ${totalN} tips\n\nDMs reativados.`;
+        for (const adminId of ADMIN_IDS) await sendDM(tokenForAlert, adminId, msg).catch(() => {});
+      }
+    } else if (wasAutoShadowed) {
+      _autoShadowState.get(sport).lastCheck = now;
+    }
+  }
+}
+
 // Live Scout gap monitor: alerta admin via Telegram quando gap (no_gameids/stats_disabled/coverage_missing/etc)
 // persiste por mais que LIVE_SCOUT_ALERT_THRESHOLD_MIN. Anti-spam: cada gap key alerta uma vez por janela.
 const _liveScoutGapFirstSeen = new Map(); // gapKey -> { firstTs, lastTs, info, alerted }
@@ -8713,6 +8773,11 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   // Live Scout gaps: alerta admin quando partida live tem stats faltando >5min
   setInterval(() => checkLiveScoutGaps().catch(e => log('ERROR', 'LIVE-SCOUT-ALERT', e.message)), LIVE_SCOUT_CHECK_INTERVAL_MS);
   setTimeout(() => checkLiveScoutGaps().catch(() => {}), 60 * 1000); // primeiro check 60s pós-boot
+
+  // Auto-shadow: avalia CLV a cada 6h e flipa shadowMode pra sports com edge negativo persistente.
+  // Default OFF — ativar via AUTO_SHADOW_NEGATIVE_CLV=true
+  setInterval(() => checkAutoShadow().catch(e => log('ERROR', 'AUTO-SHADOW', e.message)), AUTO_SHADOW_CHECK_INTERVAL_MS);
+  setTimeout(() => checkAutoShadow().catch(() => {}), 5 * 60 * 1000); // primeiro check 5min pós-boot (DB já tá warm)
 
   // ── Cashout monitor ──
   // Varre tips live pendentes, recomputa P via live stats, notifica admins

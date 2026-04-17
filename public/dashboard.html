@@ -176,6 +176,48 @@
     <div id="leagueRoiTable"><div class="loading">Carregando...</div></div>
   </div>
 
+  <!-- ROI Matrix — base pra decisão "cortar ou manter" sport/phase/tier -->
+  <div class="table-card collapsible" id="roiMatrixCard" data-collapsed="false">
+    <h3 onclick="toggleCard(this, event)" style="display:flex;align-items:center;justify-content:space-between;gap:0.8rem;flex-wrap:wrap">
+      <span><span class="toggle-arrow">&#9662;</span>&#127919; ROI Matrix &mdash; <span style="font-weight:400;font-size:0.72rem;color:#9ca3af">cross-sport, phase, tier</span></span>
+      <span style="font-size:0.68rem;color:#6b7280;font-weight:400;text-transform:none;letter-spacing:0">
+        Janela:
+        <select id="matrixDays" onclick="event.stopPropagation()" onchange="loadRoiMatrix()" style="background:#1f2937;color:#e5e7eb;border:1px solid #374151;border-radius:4px;padding:2px 6px;font-size:0.7rem">
+          <option value="7">7 dias</option>
+          <option value="30" selected>30 dias</option>
+          <option value="90">90 dias</option>
+          <option value="365">1 ano</option>
+        </select>
+      </span>
+    </h3>
+    <div style="font-size:0.68rem;color:#6b7280;margin-bottom:0.6rem;padding:0.4rem 0.6rem;background:#0f1729;border-radius:4px">
+      🟢 Verde: ROI ≥+3% E CLV ≥+1% — <b>scale up</b> &nbsp;|&nbsp;
+      🟡 Amarelo: misto — <b>observe</b> &nbsp;|&nbsp;
+      🔴 Vermelho: ROI ≤-5% OU CLV ≤-1% — <b>shadow / cut</b> &nbsp;|&nbsp;
+      ⚪ Cinza: n&lt;10 (sem dados)
+    </div>
+    <div id="roiMatrixTable"><div class="loading">Carregando...</div></div>
+  </div>
+
+  <!-- CLV Decay — degradação de edge ao longo do tempo -->
+  <div class="table-card collapsible" id="clvDecayCard" data-collapsed="false">
+    <h3 onclick="toggleCard(this, event)" style="display:flex;align-items:center;justify-content:space-between;gap:0.8rem;flex-wrap:wrap">
+      <span><span class="toggle-arrow">&#9662;</span>&#128202; CLV Decay (sport selecionado) &mdash; <span id="clvMeta" style="font-weight:400;font-size:0.72rem;color:#9ca3af"></span></span>
+      <span style="font-size:0.68rem;color:#6b7280;font-weight:400;text-transform:none;letter-spacing:0">
+        Janela:
+        <select id="clvDays" onclick="event.stopPropagation()" onchange="loadClvDecay()" style="background:#1f2937;color:#e5e7eb;border:1px solid #374151;border-radius:4px;padding:2px 6px;font-size:0.7rem">
+          <option value="14">14 dias</option>
+          <option value="30" selected>30 dias</option>
+          <option value="90">90 dias</option>
+        </select>
+      </span>
+    </h3>
+    <canvas id="clvChart" style="max-height:200px"></canvas>
+    <div style="font-size:0.66rem;color:#6b7280;margin-top:0.4rem">
+      CLV positivo sustentado = edge real vs mercado. Negativo persistente = sport perdeu edge ou modelo está errado.
+    </div>
+  </div>
+
   <!-- Heatmap Horários + Shadow vs Ativo (lado a lado) -->
   <div style="display:grid;grid-template-columns:1.4fr 1fr;gap:1.2rem;margin-bottom:1.2rem" id="hourlyShadowGrid">
     <div class="table-card collapsible" id="hourlyCard" data-collapsed="false">
@@ -422,6 +464,8 @@ async function loadAll() {
   loadEquityCurve();
   loadHourly();
   loadShadow();
+  loadRoiMatrix();
+  loadClvDecay();
   await tipsP;
   document.getElementById('lastUpdated').textContent = 'Atualizado: ' + new Date().toLocaleTimeString('pt-BR');
 }
@@ -534,6 +578,134 @@ async function loadHourly() {
   }).join('');
   el.innerHTML = `<div style="display:grid;grid-template-columns:repeat(12,1fr);gap:3px">${cells}</div>`;
   document.getElementById('hourlyMeta').textContent = `${totalN} tips | lucro R$${totalProfit.toFixed(2)} | ${data.timezone || ''}`;
+}
+
+async function loadRoiMatrix() {
+  const days = (document.getElementById('matrixDays')?.value) || '30';
+  const data = await apiFetch('/roi-matrix?days=' + days);
+  const el = document.getElementById('roiMatrixTable');
+  if (!el) return;
+  if (!data || data.error || !Array.isArray(data.matrix)) {
+    el.innerHTML = '<div class="loading" style="color:#6b7280">' + (data?.error || 'sem dados') + '</div>';
+    return;
+  }
+  if (!data.matrix.length) {
+    el.innerHTML = '<div class="loading" style="color:#6b7280">Sem tips liquidadas no período.</div>';
+    return;
+  }
+  const healthBg = {
+    verde: '#064e3b', amarelo: '#713f12', vermelho: '#7f1d1d', no_data: '#1f2937',
+    verde_sem_clv: '#064e3b', amarelo_sem_clv: '#713f12', vermelho_sem_clv: '#7f1d1d', unknown: '#1f2937'
+  };
+  const healthFg = {
+    verde: '#6ee7b7', amarelo: '#fde68a', vermelho: '#fca5a5', no_data: '#6b7280',
+    verde_sem_clv: '#86efac', amarelo_sem_clv: '#fde68a', vermelho_sem_clv: '#fca5a5', unknown: '#6b7280'
+  };
+  const healthLabel = {
+    verde: '🟢 SCALE', amarelo: '🟡 OBSERVE', vermelho: '🔴 CUT', no_data: '⚪ —',
+    verde_sem_clv: '🟢 SCALE*', amarelo_sem_clv: '🟡 OBS*', vermelho_sem_clv: '🔴 CUT*', unknown: '⚪ —'
+  };
+  const fmtNum = (v, suffix) => v == null ? '<span style="color:#4b5563">—</span>' : (v + (suffix || ''));
+  const fmtSigned = (v, suffix) => {
+    if (v == null) return '<span style="color:#4b5563">—</span>';
+    const cls = v >= 0 ? 'positive' : 'negative';
+    return '<span class="' + cls + '">' + (v >= 0 ? '+' : '') + v + (suffix || '') + '</span>';
+  };
+  const rows = data.matrix.map(b => {
+    const hbg = healthBg[b.health] || '#1f2937';
+    const hfg = healthFg[b.health] || '#9ca3af';
+    const hlabel = healthLabel[b.health] || '⚪ —';
+    const tierColor = b.tier === 'tier1' ? '#93c5fd' : '#fde68a';
+    return '<tr>' +
+      '<td style="font-weight:600">' + b.sport.toUpperCase() + '</td>' +
+      '<td>' + (b.phase === 'live' ? '🔴 LIVE' : '⏳ pré') + '</td>' +
+      '<td><span style="color:' + tierColor + '">' + b.tier + '</span></td>' +
+      '<td style="text-align:right">' + b.n + '<span style="color:#6b7280;font-size:0.65rem"> (' + b.wins + 'W/' + b.losses + 'L)</span></td>' +
+      '<td style="text-align:right">' + (b.hitRate != null ? b.hitRate + '%' : '—') + '</td>' +
+      '<td style="text-align:right;font-weight:600">' + fmtSigned(b.roi, '%') + '</td>' +
+      '<td style="text-align:right">' + fmtSigned(b.profit_reais, '') + '</td>' +
+      '<td style="text-align:right">' + fmtSigned(b.clv_avg, '%') + '<span style="color:#6b7280;font-size:0.65rem"> (n' + b.clv_n + ')</span></td>' +
+      '<td style="text-align:right">' + (b.brier != null ? b.brier : '—') + '</td>' +
+      '<td style="text-align:right">' + fmtNum(b.avg_ev, '%') + '</td>' +
+      '<td style="text-align:center;background:' + hbg + ';color:' + hfg + ';font-weight:700;font-size:0.7rem">' + hlabel + '</td>' +
+    '</tr>';
+  }).join('');
+  el.innerHTML =
+    '<table style="font-size:0.78rem">' +
+      '<thead><tr>' +
+        '<th>Sport</th><th>Phase</th><th>Tier</th>' +
+        '<th style="text-align:right">N</th><th style="text-align:right">Hit</th>' +
+        '<th style="text-align:right">ROI</th><th style="text-align:right">Lucro R$</th>' +
+        '<th style="text-align:right">CLV</th><th style="text-align:right">Brier</th>' +
+        '<th style="text-align:right">avg EV</th><th style="text-align:center">Veredito</th>' +
+      '</tr></thead>' +
+      '<tbody>' + rows + '</tbody>' +
+    '</table>' +
+    '<div style="font-size:0.62rem;color:#6b7280;margin-top:0.4rem">* sem CLV o suficiente — decisão baseada só em ROI (menos confiável)</div>';
+}
+
+let _clvChart = null;
+async function loadClvDecay() {
+  const days = (document.getElementById('clvDays')?.value) || '30';
+  const data = await apiFetch('/clv-decay?sport=' + currentSport + '&days=' + days);
+  const ctx = document.getElementById('clvChart')?.getContext?.('2d');
+  if (!ctx) return;
+  if (!data || data.error || !Array.isArray(data.series)) {
+    document.getElementById('clvMeta').textContent = data?.error || 'sem dados';
+    if (_clvChart) { _clvChart.destroy(); _clvChart = null; }
+    return;
+  }
+  const labels = data.series.map(s => s.day);
+  const dailyClv = data.series.map(s => s.clv_avg);
+  const rolling7 = (data.rolling7 || []).map(r => r.rolling7_clv);
+  const totalN = data.series.reduce((a,b) => a + b.n, 0);
+  const meanCLV = data.series.length > 0 ? (data.series.reduce((a,s) => a + s.clv_avg * s.n, 0) / Math.max(1, totalN)) : 0;
+  if (_clvChart) _clvChart.destroy();
+  _clvChart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [
+        {
+          label: 'CLV diário (%)',
+          data: dailyClv,
+          borderColor: 'rgba(96,165,250,0.4)',
+          backgroundColor: 'rgba(96,165,250,0.08)',
+          borderWidth: 1.5,
+          tension: 0.2,
+          pointRadius: 2,
+        },
+        {
+          label: 'CLV rolling 7d (%)',
+          data: rolling7,
+          borderColor: '#34d399',
+          backgroundColor: 'rgba(52,211,153,0.1)',
+          borderWidth: 2.5,
+          tension: 0.3,
+          fill: false,
+        }
+      ]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: {
+        legend: { labels: { color: '#9ca3af', font: { size: 11 } } },
+        annotation: { annotations: {} }
+      },
+      scales: {
+        x: { ticks: { color: '#6b7280', font: { size: 10 } }, grid: { color: 'rgba(75,85,99,0.18)' } },
+        y: {
+          ticks: { color: '#9ca3af', font: { size: 10 }, callback: v => Number(v).toFixed(1) + '%' },
+          grid: { color: 'rgba(75,85,99,0.18)' },
+          suggestedMin: -3, suggestedMax: 3,
+        }
+      }
+    }
+  });
+  const cls = meanCLV >= 0 ? 'positive' : 'negative';
+  document.getElementById('clvMeta').innerHTML =
+    `${currentSport.toUpperCase()} | ${totalN} tips com CLV | médio ` +
+    `<span class="${cls}">${meanCLV >= 0 ? '+' : ''}${meanCLV.toFixed(2)}%</span>`;
 }
 
 async function loadShadow() {

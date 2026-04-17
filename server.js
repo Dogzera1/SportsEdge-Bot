@@ -7036,6 +7036,168 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // ROI Matrix: agregação por (sport, phase, league_tier) — base pra decisão "cortar ou manter sport".
+  // GET /roi-matrix?days=30
+  if (p === '/roi-matrix') {
+    const daysRaw = parseInt(parsed.query.days);
+    const days = Number.isFinite(daysRaw) ? Math.max(1, Math.min(365, daysRaw)) : 30;
+
+    // Tier classification por sport (regex em event_name).
+    const TIER1_REGEX = {
+      esports: /\b(lck|lec|lcs|lpl|msi\b|worlds|cblol|dota.*?(major|riyadh|the international|ti\d|dpc))\b/i,
+      cs:       /\b(major|iem\b|katowice|cologne|esl pro league|epl\b|blast premier|esports world cup|ewc|austin|rio|shanghai|paris)\b/i,
+      valorant: /\b(vct.*?(champions|masters|internationals)|game changers championship|valorant.*?champions)\b/i,
+      tennis:   /\b(grand slam|wimbledon|us open|roland garros|australian open|atp masters|wta 1000|atp 1000|atp finals|wta finals)\b/i,
+      mma:      /\b(ufc \d{3,}|ufc on |ufc fight night|ufc apex)\b/i,
+      football: /\b(premier league|la liga|bundesliga|serie a$|ligue 1|champions league|brasileirao|brasileirão|copa libertadores)\b/i,
+    };
+    const tierOf = (sport, eventName) => {
+      const re = TIER1_REGEX[sport];
+      if (!re) return 'unknown';
+      return re.test(String(eventName || '')) ? 'tier1' : 'tier2plus';
+    };
+
+    try {
+      const rows = db.prepare(`
+        SELECT sport, event_name, is_live, odds, ev, stake, stake_reais, profit_reais,
+               result, clv_odds, model_p_pick, confidence
+        FROM tips
+        WHERE result IN ('win','loss','push')
+          AND settled_at IS NOT NULL
+          AND settled_at >= datetime('now', ?)
+      `).all(`-${days} days`);
+
+      const buckets = new Map(); // key → agg
+      for (const r of rows) {
+        const sport = r.sport;
+        const phase = r.is_live ? 'live' : 'pregame';
+        const tier = tierOf(sport, r.event_name);
+        const key = `${sport}|${phase}|${tier}`;
+        if (!buckets.has(key)) {
+          buckets.set(key, {
+            sport, phase, tier,
+            n: 0, wins: 0, losses: 0, pushes: 0,
+            stakeR: 0, profitR: 0, evSum: 0, oddsSum: 0,
+            clvSum: 0, clvCount: 0, clvPositive: 0,
+            brierSum: 0, brierCount: 0,
+          });
+        }
+        const b = buckets.get(key);
+        b.n++;
+        if (r.result === 'win') b.wins++;
+        else if (r.result === 'loss') b.losses++;
+        else if (r.result === 'push') b.pushes++;
+        b.stakeR += Number(r.stake_reais) || 0;
+        b.profitR += Number(r.profit_reais) || 0;
+        b.evSum += Number(r.ev) || 0;
+        b.oddsSum += Number(r.odds) || 0;
+        const clv = Number(r.clv_odds);
+        const odds = Number(r.odds);
+        if (clv > 1 && odds > 1) {
+          const clvPct = (odds / clv - 1) * 100;
+          b.clvSum += clvPct; b.clvCount++;
+          if (clvPct > 0) b.clvPositive++;
+        }
+        // Brier (exclui push)
+        if ((r.result === 'win' || r.result === 'loss') && odds > 1) {
+          const pStored = Number(r.model_p_pick);
+          let pUsed = (Number.isFinite(pStored) && pStored > 0 && pStored < 1) ? pStored : (1 / odds);
+          pUsed = Math.max(0.01, Math.min(0.99, pUsed));
+          const o = r.result === 'win' ? 1 : 0;
+          b.brierSum += (pUsed - o) ** 2;
+          b.brierCount++;
+        }
+      }
+
+      const matrix = [];
+      for (const b of buckets.values()) {
+        const decided = b.wins + b.losses;
+        const hitRate = decided > 0 ? b.wins / decided : null;
+        const roi = b.stakeR > 0 ? (b.profitR / b.stakeR) * 100 : null;
+        const clvAvg = b.clvCount > 0 ? b.clvSum / b.clvCount : null;
+        const brier = b.brierCount > 0 ? b.brierSum / b.brierCount : null;
+        // Health score: combina ROI + CLV. Verde = ambos positivos. Vermelho = ROI<-5 OU CLV<-1.
+        let health = 'unknown';
+        if (b.n < 10) health = 'no_data';
+        else if (roi != null && clvAvg != null) {
+          if (roi >= 3 && clvAvg >= 1) health = 'verde';
+          else if (roi <= -5 || clvAvg <= -1) health = 'vermelho';
+          else health = 'amarelo';
+        } else if (roi != null) {
+          if (roi >= 3) health = 'verde_sem_clv';
+          else if (roi <= -5) health = 'vermelho_sem_clv';
+          else health = 'amarelo_sem_clv';
+        }
+        matrix.push({
+          sport: b.sport, phase: b.phase, tier: b.tier,
+          n: b.n, wins: b.wins, losses: b.losses, pushes: b.pushes,
+          hitRate: hitRate != null ? parseFloat((hitRate * 100).toFixed(1)) : null,
+          roi: roi != null ? parseFloat(roi.toFixed(2)) : null,
+          profit_reais: parseFloat(b.profitR.toFixed(2)),
+          stake_reais: parseFloat(b.stakeR.toFixed(2)),
+          avg_ev: b.n > 0 ? parseFloat((b.evSum / b.n).toFixed(2)) : null,
+          avg_odds: b.n > 0 ? parseFloat((b.oddsSum / b.n).toFixed(2)) : null,
+          clv_avg: clvAvg != null ? parseFloat(clvAvg.toFixed(2)) : null,
+          clv_positive_rate: b.clvCount > 0 ? parseFloat((b.clvPositive / b.clvCount * 100).toFixed(1)) : null,
+          clv_n: b.clvCount,
+          brier: brier != null ? parseFloat(brier.toFixed(3)) : null,
+          health,
+        });
+      }
+      // Ordena por (sport, phase, tier)
+      matrix.sort((a, b) => {
+        if (a.sport !== b.sport) return a.sport.localeCompare(b.sport);
+        if (a.phase !== b.phase) return a.phase.localeCompare(b.phase);
+        return a.tier.localeCompare(b.tier);
+      });
+
+      sendJson(res, { days, generated_at: new Date().toISOString(), matrix });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
+  // CLV decay tracker: CLV médio diário por sport — detecta degradação ao longo do tempo.
+  // GET /clv-decay?sport=X&days=30
+  if (p === '/clv-decay') {
+    const sport = parsed.query.sport || 'esports';
+    const daysRaw = parseInt(parsed.query.days);
+    const days = Number.isFinite(daysRaw) ? Math.max(7, Math.min(365, daysRaw)) : 30;
+    try {
+      const rows = db.prepare(`
+        SELECT DATE(settled_at) AS day,
+               AVG((odds / clv_odds - 1) * 100) AS clv_avg,
+               COUNT(*) AS n,
+               SUM(CASE WHEN (odds / clv_odds - 1) > 0 THEN 1 ELSE 0 END) AS positive
+        FROM tips
+        WHERE sport = ?
+          AND clv_odds > 1 AND odds > 1
+          AND settled_at IS NOT NULL
+          AND settled_at >= datetime('now', ?)
+        GROUP BY DATE(settled_at)
+        ORDER BY day ASC
+      `).all(sport, `-${days} days`);
+      const series = rows.map(r => ({
+        day: r.day,
+        clv_avg: parseFloat((Number(r.clv_avg) || 0).toFixed(2)),
+        n: r.n,
+        positive_rate: r.n > 0 ? parseFloat((r.positive / r.n * 100).toFixed(1)) : null,
+      }));
+      // Rolling 7d average
+      const rolling = [];
+      for (let i = 0; i < series.length; i++) {
+        const window = series.slice(Math.max(0, i - 6), i + 1);
+        const total = window.reduce((a, b) => a + b.clv_avg * b.n, 0);
+        const totalN = window.reduce((a, b) => a + b.n, 0);
+        rolling.push({
+          day: series[i].day,
+          rolling7_clv: totalN > 0 ? parseFloat((total / totalN).toFixed(2)) : null,
+        });
+      }
+      sendJson(res, { sport, days, series, rolling7: rolling });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
   // Heatmap horários: ROI por hora do dia (0..23).
   // GET /hourly-roi?sport=esports&days=30
   if (p === '/hourly-roi') {
