@@ -942,15 +942,50 @@
     const sportsHtml = (data.sports || []).map(s => {
       const vc = s.verdict.code;
       const bg = vc === 'edge_real' ? 'rgba(34,197,94,0.12)' : vc === 'noise' || vc === 'bleed' ? 'rgba(239,68,68,0.12)' : vc === 'insufficient' ? 'rgba(107,114,128,0.1)' : 'rgba(251,191,36,0.10)';
-      return `<tr style="background:${bg}"><td><b>${escapeHtml(s.sport)}</b></td><td style="text-align:right">${s.n}</td><td style="text-align:right">${s.roi >= 0 ? '+' : ''}${s.roi}%</td><td style="text-align:right">${s.brier ?? '—'}</td><td style="text-align:right">${s.brier_edge != null ? (s.brier_edge >= 0 ? '+' : '') + s.brier_edge : '—'}</td><td style="text-align:right">R$${s.gates_net_reais >= 0 ? '+' : ''}${s.gates_net_reais}</td><td>${s.verdict.label}</td></tr>`;
+      const calibBadge = s.calibration ? ` <span title="ECE ${s.calibration.ece}" style="font-size:10px;color:${s.calibration.ece < 0.05 ? '#6ee7b7' : s.calibration.ece < 0.10 ? '#fde68a' : '#fca5a5'}">[ECE ${s.calibration.ece}]</span>` : '';
+      return `<tr style="background:${bg}"><td><b>${escapeHtml(s.sport)}</b>${calibBadge}</td><td style="text-align:right">${s.n}</td><td style="text-align:right">${s.roi >= 0 ? '+' : ''}${s.roi}%</td><td style="text-align:right">${s.brier ?? '—'}</td><td style="text-align:right">${s.brier_edge != null ? (s.brier_edge >= 0 ? '+' : '') + s.brier_edge : '—'}</td><td style="text-align:right">R$${s.gates_net_reais >= 0 ? '+' : ''}${s.gates_net_reais}</td><td>${s.verdict.label}</td></tr>`;
     }).join('');
+
+    // Calibration tables (overall + per sport)
+    const renderCalibSection = (calib, label) => {
+      if (!calib) return '';
+      const bucketRows = calib.buckets.filter(b => b.n > 0).map(b => {
+        const dirColor = b.direction === 'OVERCONFIDENT' ? '#fca5a5' : b.direction === 'underconfident' ? '#93c5fd' : '#86efac';
+        const gapPct = b.gap_pp != null ? (b.gap_pp >= 0 ? '+' : '') + b.gap_pp + 'pp' : '—';
+        return `<tr><td style="font-family:monospace">${b.range}</td><td style="text-align:right">${b.n}</td><td style="text-align:right">${b.predicted_avg}%</td><td style="text-align:right">${b.actual_freq}%</td><td style="text-align:right;color:${dirColor}">${gapPct}</td><td style="font-size:10px;color:${dirColor}">${b.direction}</td></tr>`;
+      }).join('');
+      const interpHtml = (calib.interpretation || []).map(i => {
+        const color = i.includes('🔴') ? '#fca5a5' : i.includes('🟡') ? '#fde68a' : i.includes('✅') ? '#6ee7b7' : i.includes('⚠️') ? '#fbbf24' : '#9ca3af';
+        return `<div style="color:${color};font-size:11px;margin-bottom:3px">${escapeHtml(i)}</div>`;
+      }).join('');
+      const decomp = calib.decomposition;
+      return `
+        <div style="margin-top:14px;padding:10px;background:var(--panel2);border-radius:6px">
+          <div style="font-size:11px;color:var(--muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:1px">📐 Calibração granular — ${escapeHtml(label)}</div>
+          <div style="font-size:11px;color:#9ca3af;margin-bottom:8px">
+            n=${calib.n} | base rate ${calib.base_rate}% | avg pred ${calib.avg_predicted}% | sharpness ${calib.sharpness} | <b>ECE ${calib.ece}</b>
+          </div>
+          <div style="font-size:10px;color:#6b7280;margin-bottom:6px">Brier decomp: reliability ${decomp.reliability} − resolution ${decomp.resolution} + uncertainty ${decomp.uncertainty} ≈ ${decomp.brier_check}</div>
+          <table class="agent-table" style="font-size:10px"><thead><tr><th>P bucket</th><th style="text-align:right">N</th><th style="text-align:right">Pred avg</th><th style="text-align:right">Real freq</th><th style="text-align:right">Gap</th><th>Direção</th></tr></thead><tbody>${bucketRows}</tbody></table>
+          <div style="margin-top:8px">${interpHtml}</div>
+        </div>`;
+    };
+
+    const overallCalibHtml = renderCalibSection(o.calibration, 'OVERALL');
+    const sportCalibHtml = (data.sports || [])
+      .filter(s => s.calibration)
+      .map(s => renderCalibSection(s.calibration, s.sport.toUpperCase()))
+      .join('');
+
     body.innerHTML = `
       <div style="padding:10px;background:#0f1729;border-radius:6px;margin-bottom:10px;font-size:12px">
         <div style="font-weight:700;font-size:14px;margin-bottom:6px">${v.label}</div>
         <div style="color:#9ca3af">n=${o.n} | ROI ${o.roi >= 0 ? '+' : ''}${o.roi}% | Brier ${o.brier ?? '-'} vs baseline ${o.baseline_brier ?? '-'} (edge ${o.brier_edge != null ? (o.brier_edge >= 0 ? '+' : '') + o.brier_edge : '-'})</div>
         <div style="color:#9ca3af;margin-top:4px">Gates: ${o.gates_blocked} bloqueadas | Net R$${o.gates_net_reais >= 0 ? '+' : ''}${o.gates_net_reais}</div>
       </div>
-      <table class="agent-table" style="font-size:11px"><thead><tr><th>Sport</th><th style="text-align:right">N</th><th style="text-align:right">ROI</th><th style="text-align:right">Brier</th><th style="text-align:right">Δ vs base</th><th style="text-align:right">Gates net</th><th>Veredito</th></tr></thead><tbody>${sportsHtml}</tbody></table>`;
+      <table class="agent-table" style="font-size:11px"><thead><tr><th>Sport</th><th style="text-align:right">N</th><th style="text-align:right">ROI</th><th style="text-align:right">Brier</th><th style="text-align:right">Δ vs base</th><th style="text-align:right">Gates net</th><th>Veredito</th></tr></thead><tbody>${sportsHtml}</tbody></table>
+      ${overallCalibHtml}
+      ${sportCalibHtml}`;
   }
 
   function renderBankrollGuardian(data) {
