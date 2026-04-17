@@ -62,6 +62,62 @@ function _validateTipEvP(text, pickOdd, reportedEvPct, tolerancePp = 3) {
   return { valid: true, reportedEv: evR, computedEv: evC, p, odd };
 }
 
+/**
+ * Parseia resposta IA TIP_ML num layout compatível com o antigo (6 grupos).
+ * Aceita ambos formatos:
+ *   - Novo: TIP_ML:time@odd|P:X%|STAKE:Yu|CONF:...
+ *   - Antigo: TIP_ML:time@odd|EV:X%|P:Y%|STAKE:Zu|CONF:...
+ * EV ausente é recalculado via P × odd − 1 (fonte da verdade = P).
+ *
+ * @returns {Array|null} [full, team, odd, evStr, stake, conf] compatível com código legado
+ */
+function _parseTipMl(text) {
+  const raw = String(text || '').match(
+    /TIP_ML:\s*([^@]+?)\s*@\s*([^|\]]+?)\s*\|\s*(?:EV:\s*([+-]?[\d.]+)\s*%?\s*\|\s*)?P:\s*([\d.]+)\s*%?\s*\|\s*STAKE:\s*([^|\]]+?)(?:\s*\|\s*CONF:\s*([A-Za-zÀ-ÿ]+))?(?=\]|\s|$)/i
+  );
+  if (!raw) return null;
+  const team = raw[1].trim();
+  const oddStr = raw[2].trim();
+  const evTxt = raw[3] != null ? String(raw[3]).replace(/[+%\s]/g, '') : null;
+  const pTxt = raw[4];
+  const stake = raw[5];
+  const conf = raw[6];
+  const pNum = parseFloat(pTxt);
+  const odd = parseFloat(oddStr);
+  let evFinal;
+  if (evTxt != null && Number.isFinite(parseFloat(evTxt))) {
+    evFinal = String(evTxt);
+  } else if (Number.isFinite(pNum) && Number.isFinite(odd) && odd > 1) {
+    evFinal = ((pNum / 100 * odd - 1) * 100).toFixed(1); // recalcula EV de P
+  } else {
+    evFinal = '0';
+  }
+  return [raw[0], team, oddStr, evFinal, stake, conf];
+}
+
+/**
+ * Valida P reportado pela IA contra P do modelo determinístico.
+ * Source of truth = modelP. Se IA escreveu P divergente → rejeita (IA ignorou modelo).
+ * Se IA só errou EV (P bate com modelo), aceita — EV será recalculado via _modelEv downstream.
+ *
+ * @param {string} text       — resposta completa da IA
+ * @param {number} modelP     — probabilidade do modelo (0..1)
+ * @param {number} [tolPp=8]  — tolerância em pp entre P texto e P modelo
+ * @returns {{ valid: boolean, reason?: string, textP?: number, modelP?: number, diffPp?: number }}
+ */
+function _validateTipPvsModel(text, modelP, tolPp = 8) {
+  if (!Number.isFinite(modelP) || modelP <= 0 || modelP >= 1) return { valid: true, reason: 'no_model_p' };
+  const pMatch = String(text || '').match(/\|P:\s*([0-9.]+)\s*%?/i);
+  if (!pMatch) return { valid: true, reason: 'no_text_p' };
+  const textP = parseFloat(pMatch[1]) / 100;
+  if (!Number.isFinite(textP) || textP <= 0 || textP >= 1) return { valid: true, reason: 'invalid_text_p' };
+  const diffPp = Math.abs(textP - modelP) * 100;
+  if (diffPp > tolPp) {
+    return { valid: false, reason: `P divergente do modelo: IA=${(textP*100).toFixed(1)}% vs modelo=${(modelP*100).toFixed(1)}% diff=${diffPp.toFixed(1)}pp`, textP, modelP, diffPp };
+  }
+  return { valid: true, textP, modelP, diffPp };
+}
+
 const DB_PATH = (process.env.DB_PATH || 'sportsedge.db').trim().replace(/^=+/, '');
 const { db, stmts } = initDatabase(DB_PATH);
 
@@ -2467,14 +2523,21 @@ async function autoAnalyzeMatch(token, match) {
       return null;
     }
 
-    let tipResult = text.match(/TIP_ML:\s*([^@]+?)\s*@\s*([^|\]]+?)\s*\|EV:\s*([^|]+?)\s*(?:\|P:\s*[^|]+?\s*)?\|STAKE:\s*([^|\]]+?)(?:\s*\|CONF:\s*([A-Za-zÀ-ÿ]+))?(?=\]|\s|$)/);
+    // Parse via helper — aceita formato novo (|P:X|STAKE:...) e antigo (|EV:X|P:Y|STAKE:...).
+    // EV recalculado automaticamente de P×odd quando ausente. Layout [1]=team, [2]=odd, [3]=EV, [4]=stake, [5]=conf.
+    let tipResult = _parseTipMl(text);
     // Log quando a IA gerou resposta mas o padrão TIP_ML não foi encontrado (ajuda a detectar mudança de formato)
     if (!tipResult && text && text.length > 20 && !text.toLowerCase().includes('sem edge') && !text.toLowerCase().includes('sem tip') && !/\bsem_?tip\b/i.test(text)) {
       const snippet = text.slice(0, 200).replace(/\n/g, ' ');
       log('DEBUG', 'IA-PARSE', `Sem TIP_ML na resposta para ${match.team1} vs ${match.team2}: "${snippet}"`);
     }
     if (tipResult) {
-      const _v = _validateTipEvP(text, tipResult[2], tipResult[3]);
+      // Valida P-texto vs P-modelo. EV será recalculado via _modelEv downstream.
+      const _pickIsT1V = norm(tipResult[1].trim()) === norm(match.team1)
+        || norm(match.team1).includes(norm(tipResult[1].trim()))
+        || norm(tipResult[1].trim()).includes(norm(match.team1));
+      const _modelPV = _pickIsT1V ? mlResult.modelP1 : mlResult.modelP2;
+      const _v = _validateTipPvsModel(text, _modelPV);
       if (!_v.valid) {
         log('WARN', 'AUTO', `Tip rejeitada (${match.team1} vs ${match.team2}): ${_v.reason}`);
         tipResult = null;
@@ -2905,7 +2968,8 @@ ${hasRealOdds ? '' : '   Virada possível se: gold diff <3k, scaling comp no per
 ${tipInstruction}
 
 RESPOSTA OBRIGATÓRIA — siga exatamente esta ordem:
-LINHA 1 (primeira linha, SEM texto antes): TIP_ML:[time]@[odd]|EV:[X%]|P:[X%]|STAKE:[1-3]u|CONF:[ALTA/MÉDIA/BAIXA]
+LINHA 1 (primeira linha, SEM texto antes): TIP_ML:[time]@[odd]|P:[X%]|STAKE:[1-3]u|CONF:[ALTA/MÉDIA/BAIXA]
+        (Só forneça P — sua probabilidade estimada 0-100. O sistema calcula EV automaticamente como (P/100 × odd − 1) × 100.)
         (ou apenas "SEM_TIP" se EV negativo nos dois lados)
 LINHA 2+ (máx 150 palavras): P(${t1})=__% | P(${t2})=__% | ${hasRealOdds ? `EV(${t1})=[X%] | EV(${t2})=[X%]` : `Conf:[ALTA/MÉDIA/BAIXA]`} | Sinais:[N/8] | ConfPré:[${sigCount}/6]
 + justificativa curta (draft, forma, H2H, movimento de linha).`;
@@ -4997,8 +5061,8 @@ Se EV reportado ≠ cálculo da fórmula, sua tip será REJEITADA automaticament
 ⚠️ EV > 40% é quase sempre erro — revise seu cálculo se chegar nisso.
 
 DECISÃO FINAL (escolha UMA):
-TIP_ML:[time]@[odd]|EV:[%]|P:[%]|STAKE:[1-3]u|CONF:[ALTA/MÉDIA/BAIXA]
-(P inteiro 0-100; EV deve bater EXATAMENTE com fórmula acima, margem ±1pp)
+TIP_ML:[time]@[odd]|P:[%]|STAKE:[1-3]u|CONF:[ALTA/MÉDIA/BAIXA]
+(Só forneça P — sua prob estimada 0-100 inteiro. Sistema calcula EV automaticamente.)
 ou SEM_EDGE
 
 Máximo 200 palavras.`;
@@ -5019,12 +5083,14 @@ Máximo 200 palavras.`;
         continue;
       }
 
-      let tipMatch = typeof iaResp === 'string'
-        ? iaResp.match(/TIP_ML:([^@]+)@([0-9.]+)\|EV:([0-9.+%-]+)(?:\|P:[^|]+)?\|STAKE:([0-9.]+u?)\|CONF:(ALTA|M[ÉE]DIA|BAIXA)/i)
-        : null;
+      let tipMatch = typeof iaResp === 'string' ? _parseTipMl(iaResp) : null;
 
       if (tipMatch) {
-        const _v = _validateTipEvP(iaResp, tipMatch[2], tipMatch[3]);
+        const _pickIsT1V = norm(tipMatch[1].trim()) === norm(match.team1)
+          || norm(match.team1).includes(norm(tipMatch[1].trim()))
+          || norm(tipMatch[1].trim()).includes(norm(match.team1));
+        const _modelPV = _pickIsT1V ? mlResult.modelP1 : mlResult.modelP2;
+        const _v = _validateTipPvsModel(iaResp, _modelPV);
         if (!_v.valid) {
           log('WARN', 'AUTO-DOTA', `Tip rejeitada (${match.team1} vs ${match.team2}): ${_v.reason}`);
           tipMatch = null;
@@ -5582,7 +5648,7 @@ ANÁLISE REQUERIDA — seja específico:
 5. Confiança (1-10): dados suficientes sobre AMBOS os lutadores?
 
 DECISÃO FINAL:
-- Se EV ≥ +5% E confiança ≥ 7: TIP_ML:[lutador]@[odd]|EV:[%]|P:[%]|STAKE:[1-3]u|CONF:[ALTA/MÉDIA/BAIXA] (P = sua prob 0-100; EV = (P/100×odd−1)×100)
+- Se P × odd ≥ 1.05 E confiança ≥ 7: TIP_ML:[lutador]@[odd]|P:[%]|STAKE:[1-3]u|CONF:[ALTA/MÉDIA/BAIXA] (P = sua prob 0-100 inteiro; sistema calcula EV automaticamente)
 - Se edge inexistente ou confiança < 7: SEM_EDGE
 
 Máximo 220 palavras. Seja direto e fundamentado.`
@@ -5605,7 +5671,7 @@ ANÁLISE REQUERIDA — seja específico:
 4. Confiança (1-10): você tem dados suficientes sobre ambos?
 
 DECISÃO FINAL:
-- Se EV ≥ +5% E confiança ≥ 7: TIP_ML:[lutador]@[odd]|EV:[%]|P:[%]|STAKE:[1-3]u|CONF:[ALTA/MÉDIA/BAIXA] (P = sua prob 0-100; EV = (P/100×odd−1)×100)
+- Se P × odd ≥ 1.05 E confiança ≥ 7: TIP_ML:[lutador]@[odd]|P:[%]|STAKE:[1-3]u|CONF:[ALTA/MÉDIA/BAIXA] (P = sua prob 0-100 inteiro; sistema calcula EV automaticamente)
 - Se edge inexistente ou confiança < 7: SEM_EDGE
 
 Máximo 220 palavras. Seja direto e fundamentado.`;
@@ -5641,13 +5707,21 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
           return clean ? clean.slice(0, 160) : null;
         };
         const tipReasonTennis = extractTipReasonMma(text);
-        let tipMatch = text.match(/TIP_ML:([^@]+)@([\d.]+)\|EV:([+-]?[\d.]+)%(?:\|P:[^|]+)?\|STAKE:([\d.]+)u?\|CONF:(ALTA|MÉDIA|BAIXA)/i);
+        let tipMatch = _parseTipMl(text);
 
         if (tipMatch) {
-          const _v = _validateTipEvP(text, tipMatch[2], tipMatch[3]);
-          if (!_v.valid) {
-            log('WARN', 'AUTO-MMA', `Tip rejeitada (${fight.team1} vs ${fight.team2}): ${_v.reason}`);
+          // Valida P (IA) contra P (modelo determinístico). Se modelo tem P, ele é source of truth;
+          // basta o P do texto bater — erros só no EV são corrigidos via _modelEv downstream.
+          const _pickIsT1V = norm(tipMatch[1].trim()) === norm(fight.team1)
+            || norm(fight.team1).includes(norm(tipMatch[1].trim()))
+            || norm(tipMatch[1].trim()).includes(norm(fight.team1));
+          const _modelPPickV = _pickIsT1V ? mlResultMma.modelP1 : mlResultMma.modelP2;
+          const _vP = _validateTipPvsModel(text, _modelPPickV);
+          if (!_vP.valid) {
+            log('WARN', 'AUTO-MMA', `Tip rejeitada (${fight.team1} vs ${fight.team2}): ${_vP.reason}`);
             tipMatch = null;
+          } else if (_vP.diffPp != null) {
+            log('DEBUG', 'AUTO-MMA', `P consistente (Δ${_vP.diffPp.toFixed(1)}pp): IA=${(_vP.textP*100).toFixed(1)}% modelo=${(_vP.modelP*100).toFixed(1)}%`);
           }
         }
 
@@ -5662,8 +5736,8 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
         const tipStake = tipMatch[4];
         const tipConf  = tipMatch[5].toUpperCase();
 
-        // Recalcula EV usando probabilidade do modelo interno (evita IA inflando EV).
-        // Se não houver modelP, cai no EV da IA.
+        // Recalcula EV usando P do modelo determinístico (source of truth).
+        // IA às vezes erra só o cálculo do EV; validação P-vs-modelo acima garante que P é bom.
         const _pickIsT1Ev = norm(tipTeam) === norm(fight.team1)
           || norm(fight.team1).includes(norm(tipTeam))
           || norm(tipTeam).includes(norm(fight.team1));
@@ -5671,7 +5745,7 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
         const _detEv = _modelEv(_modelPPickEv, tipOdd);
         const tipEV = _detEv != null ? _detEv : tipEvIa;
         if (_detEv != null && Math.abs(_detEv - tipEvIa) >= 3) {
-          log('INFO', 'EV-RECALC', `mma ${fight.team1} vs ${fight.team2}: IA=${tipEvIa}% → modelo=${_detEv}% (P=${(_modelPPickEv*100).toFixed(1)}% @ ${tipOdd})`);
+          log('INFO', 'EV-RECALC', `mma ${fight.team1} vs ${fight.team2}: IA=${tipEvIa}% → modelo=${_detEv}% (P=${(_modelPPickEv*100).toFixed(1)}% @ ${tipOdd}) [usando modelo]`);
         }
 
         // Lutas fora da semana: só ALTA passa
@@ -6191,7 +6265,7 @@ INSTRUÇÕES:
    - Apenas ALTA (≥8) ou MÉDIA (7): exige edge claro. BAIXA (≤6): apenas se edge > +8%.
 
 DECISÃO:
-- Edge claro (EV ≥ +5%) E confiança ≥ 7: TIP_ML:[jogador]@[odd]|EV:[%]|P:[%]|STAKE:[1-3]u|CONF:[ALTA/MÉDIA/BAIXA] (P = sua prob 0-100; EV = (P/100×odd−1)×100)
+- P × odd ≥ 1.05 E confiança ≥ 7: TIP_ML:[jogador]@[odd]|P:[%]|STAKE:[1-3]u|CONF:[ALTA/MÉDIA/BAIXA] (P = sua prob 0-100 inteiro; sistema calcula EV automaticamente)
 - Caso contrário: SEM_EDGE
 
 Máximo 200 palavras. Raciocínio breve antes da decisão.`;
@@ -6220,10 +6294,14 @@ Máximo 200 palavras. Raciocínio breve antes da decisão.`;
           return clean ? clean.slice(0, 160) : null;
         };
         const tipReasonTennis = extractReasonTennis(text);
-        let tipMatch2 = text.match(/TIP_ML:([^@]+)@([\d.]+)\|EV:([+-]?[\d.]+)%(?:\|P:[^|]+)?\|STAKE:([\d.]+)u?\|CONF:(ALTA|MÉDIA|BAIXA)/i);
+        let tipMatch2 = _parseTipMl(text);
 
         if (tipMatch2) {
-          const _v = _validateTipEvP(text, tipMatch2[2], tipMatch2[3]);
+          const _pickIsT1V = norm(tipMatch2[1].trim()) === norm(match.team1)
+            || norm(match.team1).includes(norm(tipMatch2[1].trim()))
+            || norm(tipMatch2[1].trim()).includes(norm(match.team1));
+          const _modelPV = _pickIsT1V ? mlResultTennis.modelP1 : mlResultTennis.modelP2;
+          const _v = _validateTipPvsModel(text, _modelPV);
           if (!_v.valid) {
             log('WARN', 'AUTO-TENNIS', `Tip rejeitada (${match.team1} vs ${match.team2}): ${_v.reason}`);
             tipMatch2 = null;
