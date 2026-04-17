@@ -3114,7 +3114,7 @@ async function autoAnalyzeMatch(token, match) {
     // ── Layer 1: Pré-filtro ML ──
     // Retorna { pass, direction, score, t1Edge, t2Edge }
     const mlPrefilterOn = (process.env.LOL_ML_PREFILTER ?? 'true') !== 'false';
-    const mlResult = esportsPreFilter(match, oddsToUse, enrich, hasLiveStats, gamesContext, compScore);
+    const mlResult = esportsPreFilter(match, oddsToUse, enrich, hasLiveStats, gamesContext, compScore, stmts);
 
     // ── Layer 1b: Modelo LoL específico (Elo + Draft + Form) ──
     // Gera probabilidades melhores que o ML genérico. Usado para:
@@ -4652,7 +4652,7 @@ async function handleFairOdds(token, chatId, sport) {
         const totalVig = raw1 + raw2;
         const margin = ((totalVig - 1) * 100).toFixed(1);
 
-        const mlResult = esportsPreFilter(m, m.odds, enrich, false, '', null);
+        const mlResult = esportsPreFilter(m, m.odds, enrich, false, '', null, stmts);
         const { modelP1, modelP2, factorCount } = mlResult;
 
         const fairO1 = (1 / modelP1).toFixed(2);
@@ -5817,7 +5817,7 @@ async function _pollDotaInner(runOnce = false) {
       // maxDivergence: Dota tier-2 com small-sample (3-0 vs 0-3) infla modelP; clamp a ±15pp
       // impede a IA de derivar EV absurdo (>50%) que o sanity gate em bot.js rejeita.
       const dotaMaxDiv = parseFloat(process.env.DOTA_ML_MAX_DIVERGENCE ?? '0.15') || 0.15;
-      const mlResult = esportsPreFilter(match, o, enrich, isLive, dotaLiveContext, null, null, { maxDivergence: dotaMaxDiv });
+      const mlResult = esportsPreFilter(match, o, enrich, isLive, dotaLiveContext, null, stmts, { maxDivergence: dotaMaxDiv });
       if (!mlResult.pass) {
         log('INFO', 'AUTO-DOTA', `Pré-filtro: edge insuficiente (${mlResult.score.toFixed(1)}pp) para ${match.team1} vs ${match.team2}`);
         setDotaAnalyzed({ ts: now, tipSent: false, noEdge: true });
@@ -6426,7 +6426,7 @@ async function pollMma(runOnce = false) {
           } catch (_) {}
         }
 
-        const mlResultMma = esportsPreFilter(fight, o, mmaEnrich, false, '', null);
+        const mlResultMma = esportsPreFilter(fight, o, mmaEnrich, false, '', null, stmts);
         if (!mlResultMma.pass) {
           log('INFO', 'AUTO-MMA', `Pré-filtro ML: edge insuficiente (${mlResultMma.score.toFixed(1)}pp) para ${fight.team1} vs ${fight.team2}. Pulando IA.`);
           await new Promise(r => setTimeout(r, 500)); continue;
@@ -7014,7 +7014,7 @@ async function pollTennis(runOnce = false) {
           };
         } else {
           // Fallback: ranking-based esportsPreFilter
-          mlResultTennis = esportsPreFilter(match, o, tennisEnrich || { form1: null, form2: null, h2h: null, oddsMovement: null }, false, '', null);
+          mlResultTennis = esportsPreFilter(match, o, tennisEnrich || { form1: null, form2: null, h2h: null, oddsMovement: null }, false, '', null, stmts);
           if (mlResultTennis.factorCount >= 1 && mlResultTennis.score < envScoreBase) {
             mlResultTennis.pass = false;
           } else {
@@ -7963,7 +7963,7 @@ async function pollTableTennis(runOnce = false) {
         };
 
         const { esportsPreFilter } = require('./lib/ml');
-        const mlResult = esportsPreFilter(match, match.odds, enrich, false, '', null);
+        const mlResult = esportsPreFilter(match, match.odds, enrich, false, '', null, stmts);
 
         // Prioridade: Elo se confiável (both players in DB, ≥5 jogos cada), senão esportsPreFilter
         const useElo = elo.pass && elo.found1 && elo.found2 && Math.min(elo.eloMatches1, elo.eloMatches2) >= 5;
@@ -8216,7 +8216,7 @@ async function pollCs(runOnce = false) {
         };
 
         const { esportsPreFilter } = require('./lib/ml');
-        const mlResult = esportsPreFilter(match, match.odds, enrich, false, '', null);
+        const mlResult = esportsPreFilter(match, match.odds, enrich, false, '', null, stmts);
 
         const useElo = elo.pass && elo.found1 && elo.found2 && Math.min(elo.eloMatches1, elo.eloMatches2) >= 5;
         const modelP1 = useElo ? elo.modelP1 : mlResult.modelP1;
