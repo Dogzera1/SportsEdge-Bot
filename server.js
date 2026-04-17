@@ -5669,6 +5669,70 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // Avalia saúde das tips live pendentes — sinal pra cashout/hedge manual.
+  // GET /cashout-alerts?sport=esports&days=3
+  if (p === '/cashout-alerts') {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const sport = parsed.query.sport || 'esports';
+      const days  = parsed.query.days || '3';
+      const tips  = stmts.getUnsettledTips.all(sport, `-${days} days`).filter(t => t.is_live);
+      if (!tips.length) { sendJson(res, { ok: true, sport, alerts: [] }); return; }
+
+      const { checkTipHealth } = require('./lib/cashout-monitor');
+      const selfPort = (req.socket && req.socket.localPort) || PORT;
+      const base = `http://127.0.0.1:${selfPort}`;
+
+      // Pega snapshot live uma vez — fonte única pra LoL/tennis/darts
+      const snapR = await httpGet(`${base}/live-snapshot`).catch(() => null);
+      const snap = (snapR && snapR.status === 200) ? safeParse(snapR.body, { sports: {} }) : { sports: {} };
+
+      const alerts = [];
+      for (const tip of tips) {
+        const liveCtx = { sport: tip.sport };
+        const normPair = (a, b) => `${String(a||'').toLowerCase().replace(/[^a-z0-9]/g,'')}_${String(b||'').toLowerCase().replace(/[^a-z0-9]/g,'')}`;
+        const tipPair = normPair(tip.participant1, tip.participant2);
+        const findInSnap = (sportKey) => (snap.sports?.[sportKey] || []).find(m => {
+          const [a,b] = (m.teams || '').split(' vs ');
+          return normPair(a,b) === tipPair || normPair(b,a) === tipPair;
+        });
+        if (tip.sport === 'esports' || tip.sport === 'lol') {
+          const m = findInSnap('lol');
+          liveCtx.gameData = m?.summary ? { summary: m.summary } : null;
+        } else if (tip.sport === 'tennis') {
+          const m = findInSnap('tennis');
+          if (m?.summary?.sets) {
+            liveCtx.liveScore = { isLive: true, setsHome: parseInt((m.summary.score||'0-0').split('-')[0],10), setsAway: parseInt((m.summary.score||'0-0').split('-')[1],10) };
+          }
+        } else if (tip.sport === 'darts') {
+          // Darts não tá no /live-snapshot principal — busca direto
+          try {
+            const sofa = require('./lib/sofascore-darts');
+            const sid = String(tip.match_id || '').replace(/^darts_/, '');
+            const ls = await sofa.getLiveScore(sid).catch(() => null);
+            if (ls) liveCtx.liveScore = ls;
+          } catch(_) {}
+        }
+        const health = checkTipHealth(tip, liveCtx);
+        if (health.verdict === 'alert' || health.verdict === 'dying') {
+          alerts.push({
+            tipId: tip.id,
+            match: `${tip.participant1} vs ${tip.participant2}`,
+            pick: tip.tip_participant,
+            odds: tip.odds,
+            sport: tip.sport,
+            originalEv: tip.ev,
+            ...health,
+          });
+        }
+      }
+      sendJson(res, { ok: true, sport, count: alerts.length, alerts });
+    } catch (e) {
+      sendJson(res, { ok: false, error: e.message }, 500);
+    }
+    return;
+  }
+
   // Reabre uma tip já liquidada (volta result → NULL) para re-liquidação futura
   if (p === '/reopen-tip' && req.method === 'POST') {
     let body = ''; req.on('data', d => body += d);

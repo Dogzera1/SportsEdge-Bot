@@ -7854,6 +7854,79 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   // Alertas críticos: polling /alerts a cada 10 min → DM admins (throttled 1h por alert id)
   setInterval(() => checkCriticalAlerts().catch(e => log('ERROR', 'ALERT', e.message)), 10 * 60 * 1000);
   setTimeout(() => checkCriticalAlerts().catch(() => {}), 30 * 1000); // primeiro check 30s pós-boot
+
+  // ── Cashout monitor ──
+  // Varre tips live pendentes, recomputa P via live stats, notifica admins
+  // quando tip está "morrendo". Cada (tipId, verdict) notificado só 1x.
+  const _cashoutNotified = new Map(); // key: `${tipId}_${verdict}` → ts
+  async function runCashoutMonitor() {
+    const { checkTipHealth } = require('./lib/cashout-monitor');
+    const sofaDarts = require('./lib/sofascore-darts');
+    const nowMs = Date.now();
+
+    // GC: remove entries > 48h pra evitar memory growth em longos uptimes
+    for (const [k, ts] of _cashoutNotified) {
+      if (nowMs - ts > 48 * 60 * 60 * 1000) _cashoutNotified.delete(k);
+    }
+
+    const snap = await serverGet('/live-snapshot').catch(() => ({ sports: {} }));
+    const normPair = (a, b) => `${String(a||'').toLowerCase().replace(/[^a-z0-9]/g,'')}_${String(b||'').toLowerCase().replace(/[^a-z0-9]/g,'')}`;
+
+    for (const sport of ['esports', 'lol', 'tennis', 'darts']) {
+      const tips = stmts.getUnsettledTips.all(sport, '-3 days').filter(t => t.is_live);
+      if (!tips.length) continue;
+
+      for (const tip of tips) {
+        const liveCtx = { sport: tip.sport };
+        const tipPair = normPair(tip.participant1, tip.participant2);
+        const lookupSnap = (sportKey) => (snap.sports?.[sportKey] || []).find(m => {
+          const [a, b] = (m.teams || '').split(' vs ');
+          return normPair(a, b) === tipPair || normPair(b, a) === tipPair;
+        });
+
+        if (tip.sport === 'esports' || tip.sport === 'lol') {
+          const m = lookupSnap('lol');
+          liveCtx.gameData = m?.summary ? { summary: m.summary } : null;
+        } else if (tip.sport === 'tennis') {
+          const m = lookupSnap('tennis');
+          if (m?.summary?.score) {
+            const [sh, sa] = String(m.summary.score).split('-').map(x => parseInt(x, 10));
+            liveCtx.liveScore = { isLive: true, setsHome: sh, setsAway: sa };
+          }
+        } else if (tip.sport === 'darts') {
+          const sid = String(tip.match_id || '').replace(/^darts_/, '');
+          const ls = await sofaDarts.getLiveScore(sid).catch(() => null);
+          if (ls) liveCtx.liveScore = ls;
+        }
+
+        const health = checkTipHealth(tip, liveCtx);
+        if (health.verdict !== 'dying' && health.verdict !== 'alert') continue;
+
+        const notifyKey = `${tip.id}_${health.verdict}`;
+        if (_cashoutNotified.has(notifyKey)) continue;
+
+        const emoji = health.verdict === 'dying' ? '🚨' : '⚠️';
+        const label = health.verdict === 'dying' ? 'CASHOUT FORTEMENTE SUGERIDO' : 'Considerar cashout';
+        const text = `${emoji} *${label}*\n\n` +
+          `Tip #${tip.id}: *${tip.tip_participant}* @ ${tip.odds}\n` +
+          `${tip.participant1} vs ${tip.participant2}\n\n` +
+          `Prob original: ${(health.originalP * 100).toFixed(0)}%\n` +
+          `Prob atual: *${(health.currentP * 100).toFixed(0)}%* (Δ${(health.deltaP * 100).toFixed(0)}pp)\n` +
+          `EV atual: *${health.currentEv}%*\n\n` +
+          `_${health.reason}_`;
+
+        const token = tip.bot_token || SPORTS[tip.sport]?.token || SPORTS.esports?.token;
+        if (!token) continue;
+        for (const adminId of ADMIN_IDS) {
+          try { await sendDM(token, adminId, text); } catch (_) {}
+        }
+        _cashoutNotified.set(notifyKey, nowMs);
+        log('INFO', 'CASHOUT', `Alert ${health.verdict} enviado: tip #${tip.id} (${tip.tip_participant}) | P ${(health.originalP*100).toFixed(0)}→${(health.currentP*100).toFixed(0)}% EV ${health.currentEv}%`);
+      }
+    }
+  }
+  setInterval(() => runCashoutMonitor().catch(e => log('ERROR', 'CASHOUT', e.message)), 2 * 60 * 1000);
+  setTimeout(() => runCashoutMonitor().catch(() => {}), 90 * 1000); // primeiro check 90s pós-boot
   if (SPORTS.esports?.enabled) {
     setInterval(() => checkLiveNotifications().catch(e => log('ERROR', 'NOTIFY', e.message)), LIVE_CHECK_INTERVAL);
   }
