@@ -8133,6 +8133,76 @@ const server = http.createServer(async (req, res) => {
       .catch(e => sendJson(res, { ok: false, error: e.message }, 500));
     return;
   }
+  if (p === '/agents/tennis-v2-smoke') {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const v2 = require('./lib/tennis-features-v2');
+      const limit = parseInt(parsed.query.limit || '500', 10);
+      const tips = db.prepare(`
+        SELECT id, sport, match_id, event_name, participant1, participant2, tip_participant,
+               odds, ev, sent_at, settled_at, result
+        FROM tips
+        WHERE sport = 'tennis' AND result IN ('win','loss') AND sent_at IS NOT NULL
+        ORDER BY sent_at DESC LIMIT ?
+      `).all(limit);
+
+      const FEATURES = ['fatigue_minutes_avg_7d','matches_last_7d','matches_last_14d','days_since_last_match','is_surface_transition','matches_since_transition'];
+      const samples = [];
+      let withFeatures = 0;
+      for (const tip of tips) {
+        const f = v2.computeAllFeatures(db, tip.tip_participant, tip.event_name, tip.sent_at);
+        const outcome = tip.result === 'win' ? 1 : 0;
+        samples.push({ features: f, outcome });
+        if (f.matches_last_14d > 0 || f.days_since_last_match != null) withFeatures++;
+      }
+
+      const pearson = (xs, ys) => {
+        const n = xs.length;
+        if (n < 5) return null;
+        const mx = xs.reduce((a, b) => a + b, 0) / n;
+        const my = ys.reduce((a, b) => a + b, 0) / n;
+        let num = 0, dx2 = 0, dy2 = 0;
+        for (let i = 0; i < n; i++) {
+          const dx = xs[i] - mx, dy = ys[i] - my;
+          num += dx * dy; dx2 += dx * dx; dy2 += dy * dy;
+        }
+        const den = Math.sqrt(dx2 * dy2);
+        return den === 0 ? null : num / den;
+      };
+
+      const featureResults = {};
+      let anyFeatureSignal = false;
+      for (const fname of FEATURES) {
+        const xs = [], ys = [];
+        for (const s of samples) {
+          let v = s.features[fname];
+          if (v == null) continue;
+          if (typeof v === 'boolean') v = v ? 1 : 0;
+          if (!Number.isFinite(v)) continue;
+          xs.push(v); ys.push(s.outcome);
+        }
+        const corr = pearson(xs, ys);
+        const hasSignal = corr != null && Math.abs(corr) > 0.10 && xs.length >= 30;
+        if (hasSignal) anyFeatureSignal = true;
+        featureResults[fname] = { n: xs.length, corr: corr != null ? parseFloat(corr.toFixed(4)) : null, has_signal: hasSignal };
+      }
+
+      let verdict;
+      if (withFeatures < 30) verdict = { code: 'inconclusive', label: '⚪ INCONCLUSIVO — sample histórico baixo (n<30)' };
+      else if (anyFeatureSignal) verdict = { code: 'signal', label: '🟢 SINAL DETECTADO — Vetor 1 sobrevive smoke test, prosseguir Fase 1B' };
+      else verdict = { code: 'kill', label: '🔴 KILL — nenhuma feature mostra sinal mensurável (Vetor 1 morre)' };
+
+      sendJson(res, {
+        ok: true,
+        at: Date.now(),
+        tips_analyzed: tips.length,
+        tips_with_history: withFeatures,
+        features: featureResults,
+        verdict,
+      });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
 
   // Orchestrator: roda workflows compostos (sentinel + healer, scout + medic, etc).
   // GET /agents/orchestrator?workflow=full_diagnostic

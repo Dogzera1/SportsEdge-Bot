@@ -224,6 +224,14 @@ const migrations = [
       addColumnIfMissing(db, 'tips', 'odds_fetched_at', 'odds_fetched_at TEXT');
     },
   },
+  {
+    // model_version: separa tips do modelo padrão ('v1') vs experimentais ('v2', 'v2_shadow').
+    // Usado pelo plano Tennis Vetor 1 — A/B test sem misturar agregados.
+    id: '019_tips_model_version',
+    up(db) {
+      addColumnIfMissing(db, 'tips', 'model_version', `model_version TEXT DEFAULT 'v1'`);
+    },
+  },
 ];
 
 function applyMigrations(db) {
