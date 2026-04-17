@@ -7414,6 +7414,144 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // Vetor "auditoria live" — compara live vs pregame por sport num único JSON.
+  // Decide se vale manter live (CLV ≥ 0 = edge real) ou desligar (CLV << 0 = market absorve antes).
+  // GET /live-vs-pregame-audit?days=60
+  if (p === '/live-vs-pregame-audit') {
+    const daysRaw = parseInt(parsed.query.days);
+    const days = Number.isFinite(daysRaw) ? Math.max(7, Math.min(365, daysRaw)) : 60;
+    try {
+      const rows = db.prepare(`
+        SELECT sport, is_live, odds, clv_odds, stake_reais, profit_reais,
+               result, model_p_pick
+        FROM tips
+        WHERE result IN ('win','loss','push')
+          AND settled_at IS NOT NULL
+          AND settled_at >= datetime('now', ?)
+      `).all(`-${days} days`);
+
+      const buckets = new Map(); // "sport|phase" -> agg
+      for (const r of rows) {
+        const phase = r.is_live ? 'live' : 'pregame';
+        const key = `${r.sport}|${phase}`;
+        if (!buckets.has(key)) {
+          buckets.set(key, {
+            sport: r.sport, phase,
+            n: 0, wins: 0, losses: 0, pushes: 0,
+            stakeR: 0, profitR: 0,
+            clvSum: 0, clvCount: 0, clvPositive: 0,
+            brierSum: 0, brierCount: 0,
+          });
+        }
+        const b = buckets.get(key);
+        b.n++;
+        if (r.result === 'win') b.wins++;
+        else if (r.result === 'loss') b.losses++;
+        else if (r.result === 'push') b.pushes++;
+        b.stakeR += Number(r.stake_reais) || 0;
+        b.profitR += Number(r.profit_reais) || 0;
+        const odds = Number(r.odds), clv = Number(r.clv_odds);
+        if (odds > 1 && clv > 1) {
+          const clvPct = (odds / clv - 1) * 100;
+          b.clvSum += clvPct;
+          b.clvCount++;
+          if (clvPct > 0) b.clvPositive++;
+        }
+        if ((r.result === 'win' || r.result === 'loss') && odds > 1) {
+          const pStored = Number(r.model_p_pick);
+          let p = (Number.isFinite(pStored) && pStored > 0 && pStored < 1) ? pStored : (1 / odds);
+          p = Math.max(0.01, Math.min(0.99, p));
+          const o = r.result === 'win' ? 1 : 0;
+          b.brierSum += (p - o) ** 2;
+          b.brierCount++;
+        }
+      }
+
+      const bucketList = [];
+      for (const b of buckets.values()) {
+        const decided = b.wins + b.losses;
+        const hitRate = decided > 0 ? (b.wins / decided) * 100 : null;
+        const roi = b.stakeR > 0 ? (b.profitR / b.stakeR) * 100 : null;
+        const clvAvg = b.clvCount > 0 ? b.clvSum / b.clvCount : null;
+        const clvPosRate = b.clvCount > 0 ? (b.clvPositive / b.clvCount) * 100 : null;
+        const brier = b.brierCount > 0 ? b.brierSum / b.brierCount : null;
+        bucketList.push({
+          sport: b.sport, phase: b.phase,
+          n: b.n, wins: b.wins, losses: b.losses, pushes: b.pushes,
+          hit_rate: hitRate != null ? parseFloat(hitRate.toFixed(1)) : null,
+          roi: roi != null ? parseFloat(roi.toFixed(2)) : null,
+          profit_reais: parseFloat(b.profitR.toFixed(2)),
+          clv_avg_pct: clvAvg != null ? parseFloat(clvAvg.toFixed(2)) : null,
+          clv_positive_rate: clvPosRate != null ? parseFloat(clvPosRate.toFixed(1)) : null,
+          clv_n: b.clvCount,
+          brier: brier != null ? parseFloat(brier.toFixed(3)) : null,
+        });
+      }
+
+      // Agrupa por sport pra permitir comparação live vs pre
+      const bySport = new Map();
+      for (const b of bucketList) {
+        if (!bySport.has(b.sport)) bySport.set(b.sport, { sport: b.sport, live: null, pregame: null });
+        bySport.get(b.sport)[b.phase] = b;
+      }
+
+      // Veredito por sport
+      const sports = [];
+      for (const s of bySport.values()) {
+        const L = s.live, P = s.pregame;
+        let verdict;
+        if (!L || L.n < 15) {
+          verdict = { code: 'insufficient_live', label: `⚪ Sample live insuficiente (n=${L?.n || 0})` };
+        } else if (L.clv_avg_pct != null && L.clv_avg_pct <= -2) {
+          verdict = { code: 'kill_live', label: `🔴 MATAR LIVE — CLV ${L.clv_avg_pct}% (mercado absorve edge antes de você agir)` };
+        } else if (L.clv_avg_pct != null && L.clv_avg_pct < 0 && L.roi != null && L.roi < 0) {
+          verdict = { code: 'bleeding_live', label: `🔴 LIVE SANGRANDO — CLV ${L.clv_avg_pct}% + ROI ${L.roi}% — considerar desligar` };
+        } else if (L.clv_avg_pct != null && L.clv_avg_pct >= 1 && L.roi != null && L.roi > 0) {
+          verdict = { code: 'keep_live', label: `🟢 MANTER LIVE — CLV ${L.clv_avg_pct}% + ROI ${L.roi}% (edge real)` };
+        } else if (L.clv_avg_pct != null && L.clv_avg_pct >= 0) {
+          verdict = { code: 'neutral_live', label: `🟡 Live neutro — CLV ${L.clv_avg_pct}%, observar (n=${L.n})` };
+        } else {
+          verdict = { code: 'ambiguous', label: `🟡 Ambíguo — CLV ${L.clv_avg_pct ?? 'n/a'}%, ROI ${L.roi ?? 'n/a'}% (n=${L.n})` };
+        }
+        // Comparação live vs pre
+        const delta = (L?.roi != null && P?.roi != null) ? parseFloat((L.roi - P.roi).toFixed(2)) : null;
+        sports.push({ sport: s.sport, live: L, pregame: P, roi_delta_live_minus_pre: delta, verdict });
+      }
+      sports.sort((a, b) => a.sport.localeCompare(b.sport));
+
+      // Overall por phase: agregado de todos os sports
+      const overallPhase = (phase) => {
+        const bs = bucketList.filter(b => b.phase === phase);
+        if (!bs.length) return null;
+        const n = bs.reduce((s, b) => s + b.n, 0);
+        const w = bs.reduce((s, b) => s + b.wins, 0);
+        const l = bs.reduce((s, b) => s + b.losses, 0);
+        const clvRows = bs.filter(b => b.clv_avg_pct != null && b.clv_n > 0);
+        const clvWeightedSum = clvRows.reduce((s, b) => s + b.clv_avg_pct * b.clv_n, 0);
+        const clvTotalN = clvRows.reduce((s, b) => s + b.clv_n, 0);
+        const profit = bs.reduce((s, b) => s + b.profit_reais, 0);
+        return {
+          n, wins: w, losses: l,
+          hit_rate: (w + l) > 0 ? parseFloat((w / (w + l) * 100).toFixed(1)) : null,
+          clv_avg_pct: clvTotalN > 0 ? parseFloat((clvWeightedSum / clvTotalN).toFixed(2)) : null,
+          clv_n: clvTotalN,
+          profit_reais: parseFloat(profit.toFixed(2)),
+        };
+      };
+
+      sendJson(res, {
+        days,
+        generated_at: new Date().toISOString(),
+        overall: {
+          live: overallPhase('live'),
+          pregame: overallPhase('pregame'),
+        },
+        sports,
+      });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
   // CLV decay tracker: CLV médio diário por sport — detecta degradação ao longo do tempo.
   // GET /clv-decay?sport=X&days=30
   if (p === '/clv-decay') {
