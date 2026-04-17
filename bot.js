@@ -1453,6 +1453,7 @@ async function runAutoAnalysis() {
             const kellyLabel = tipConf === CONF.ALTA ? '¼ Kelly' : tipConf === CONF.BAIXA ? '1/10 Kelly' : '⅙ Kelly';
             const mlEdgeLabel = result.mlScore > 0 ? ` | ML: ${result.mlScore.toFixed(1)}pp` : '';
 
+            const _pickSideUp = norm(tipTeam) === norm(match.team1) ? 't1' : 't2';
             const recUp = await serverPost('/record-tip', {
               matchId: canonicalMatchId('esports', match.id), eventName: match.league,
               p1: match.team1, p2: match.team2, tipParticipant: tipTeam,
@@ -1461,7 +1462,9 @@ async function runAutoAnalysis() {
               modelP1: result.modelP1, modelP2: result.modelP2,
               modelPPick: modelPForKelly,
               modelLabel: result.modelLabel || 'esports-ml',
-              tipReason: result.tipReason || null
+              tipReason: result.tipReason || null,
+              lineShopOdds: result.o || null,
+              pickSide: _pickSideUp,
             }, 'esports');
 
             if (!recUp?.tipId && !recUp?.skipped) {
@@ -6030,7 +6033,9 @@ Máximo 200 palavras.`;
           modelLabel: `dota-ml (${mlResult.factorActive?.join('+') || 'base'})`,
           tipReason: iaResp ? iaResp.split('TIP_ML:')[0].trim().split('\n').filter(Boolean).pop()?.slice(0, 160) || null : null,
           isShadow: esportsConfig.shadowMode ? 1 : 0,
-          oddsFetchedAt: o._fetchedAt || null
+          oddsFetchedAt: o._fetchedAt || null,
+          lineShopOdds: o || null,
+          pickSide: isT1bet ? 't1' : 't2',
         }, 'esports');
         if (rec?.skipped) {
           log('INFO', 'AUTO-DOTA', `Tip já existe (duplicate): ${tipTeam} @ ${tipOdd}`);
@@ -6202,6 +6207,8 @@ async function analyzeDotaMapTip(match, token) {
       tipReason: pred.reason.slice(0, 160),
       isShadow: SPORTS['esports']?.shadowMode ? 1 : 0,
       oddsFetchedAt: null,
+      lineShopOdds: match.mapOdds || null,
+      pickSide: pickDir,
     }, 'esports');
     if (rec?.skipped) {
       log('INFO', 'AUTO-DOTA-MAP', `Tip mapa ${mapN} duplicada: ${pickTeam} @ ${pickOdd}`);
@@ -6711,6 +6718,7 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
         const recEventName = (!_trim || /^mma$/i.test(_trim))
           ? (isBoxing ? 'Boxing (não identificado)' : 'MMA (não identificado)')
           : leagueLine;
+        const _pickSideMma = norm(tipTeam) === norm(fight.team1) ? 't1' : 't2';
         const rec = await serverPost('/record-tip', {
           matchId: String(fight.id), eventName: recEventName,
           p1: fight.team1, p2: fight.team2, tipParticipant: tipTeam,
@@ -6721,7 +6729,9 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
           modelPPick: modelPPickMma,
           modelLabel: fairLabelMma,
           tipReason: tipReasonMma,
-          isShadow: mmaConfig.shadowMode ? 1 : 0
+          isShadow: mmaConfig.shadowMode ? 1 : 0,
+          lineShopOdds: fight.odds || null,
+          pickSide: _pickSideMma,
         }, 'mma');
 
         if (!rec?.tipId && !rec?.skipped) {
@@ -7333,7 +7343,9 @@ Máximo 200 palavras. Raciocínio breve antes da decisão.`;
           modelLabel: fairLabelTennis,
           tipReason: tipReasonTennis,
           isShadow: tennisConfig.shadowMode ? 1 : 0,
-          oddsFetchedAt: o._fetchedAt || null
+          oddsFetchedAt: o._fetchedAt || null,
+          lineShopOdds: o || null,
+          pickSide: pickIsT1 ? 't1' : 't2',
         }, 'tennis');
 
         if (!rec?.tipId && !rec?.skipped) {
@@ -7821,6 +7833,7 @@ Máximo 200 palavras.`;
         const fbModelPPick = tipMarket === '1X2_H' ? fbModelP1 : tipMarket === '1X2_A' ? fbModelP2 : (mlScore?.modelD ? parseFloat(mlScore.modelD) / 100 : null);
         const fbTipReason = text ? text.split('TIP_FB:')[0].trim().split('\n').filter(Boolean).pop()?.slice(0, 160) || null : null;
 
+        const _pickSideFb = tipMarket === '1X2_H' ? 'h' : tipMarket === '1X2_A' ? 'a' : tipMarket === '1X2_D' ? 'd' : null;
         const recFb = await serverPost('/record-tip', {
           matchId: recordMatchId, eventName: match.league,
           p1: match.team1, p2: match.team2, tipParticipant: tipTeam,
@@ -7828,7 +7841,9 @@ Máximo 200 palavras.`;
           confidence: tipConf, isLive: false, market_type: tipMarket,
           modelP1: fbModelP1, modelP2: fbModelP2, modelPPick: fbModelPPick,
           modelLabel: elo ? 'football-elo+poisson' : 'football-poisson',
-          tipReason: fbTipReason
+          tipReason: fbTipReason,
+          lineShopOdds: _pickSideFb ? (match.odds || null) : null,
+          pickSide: _pickSideFb,
         }, 'football');
 
         if (!recFb?.tipId && !recFb?.skipped) {
@@ -8050,6 +8065,8 @@ async function pollTableTennis(runOnce = false) {
           modelLabel: useElo ? 'tabletennis-elo' : 'tabletennis-ml',
           tipReason,
           isShadow: ttConfig.shadowMode ? 1 : 0,
+          lineShopOdds: match.odds || null,
+          pickSide: direction,
         }, 'tabletennis');
 
         if (!rec?.tipId && !rec?.skipped) {
@@ -8383,6 +8400,8 @@ Máximo 150 palavras.`;
           tipReason,
           isShadow: csConfig.shadowMode ? 1 : 0,
           sport: 'cs',
+          lineShopOdds: match.odds || null,
+          pickSide: direction,
         }, 'cs');
 
         if (!rec?.tipId && !rec?.skipped) {
@@ -8696,6 +8715,8 @@ async function pollValorant(runOnce = false) {
           tipReason,
           isShadow: valConfig.shadowMode ? 1 : 0,
           sport: 'valorant',
+          lineShopOdds: match.odds || null,
+          pickSide: direction,
         }, 'valorant');
 
         if (!rec?.tipId && !rec?.skipped) {
@@ -8922,7 +8943,9 @@ async function runAutoDarts() {
             modelP1: ml.modelP1, modelP2: ml.modelP2, modelPPick: pickP,
             modelLabel: 'darts-ml (3DA + WR)',
             tipReason,
-            isShadow: dartsConfig.shadowMode ? 1 : 0
+            isShadow: dartsConfig.shadowMode ? 1 : 0,
+            lineShopOdds: match.odds || null,
+            pickSide: ml.direction,
           }, 'darts');
 
           if (!rec?.tipId && !rec?.skipped) {
@@ -9090,7 +9113,9 @@ async function runAutoSnooker() {
             modelP1: ml.modelP1, modelP2: ml.modelP2, modelPPick: pickP,
             modelLabel: 'snooker-ml (rank + WR)',
             tipReason,
-            isShadow: snookerConfig.shadowMode ? 1 : 0
+            isShadow: snookerConfig.shadowMode ? 1 : 0,
+            lineShopOdds: match.odds || null,
+            pickSide: ml.direction,
           }, 'snooker');
 
           if (!rec?.tipId && !rec?.skipped) {
