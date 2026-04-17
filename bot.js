@@ -7,7 +7,7 @@ const fs = require('fs');
 const path = require('path');
 const initDatabase = require('./lib/database');
 const { SPORTS, getSportById, getSportByToken, getTokenToSportMap } = require('./lib/sports');
-const { log, calcKelly, calcKellyFraction, calcKellyWithP, norm, fmtDate, fmtDateTime, fmtDuration, safeParse, cachedHttpGet } = require('./lib/utils');
+const { log, calcKelly, calcKellyFraction, calcKellyWithP, norm, fmtDate, fmtDateTime, fmtDuration, safeParse, cachedHttpGet, markPollHeartbeat } = require('./lib/utils');
 const { adjustStakeUnits } = require('./lib/risk-manager');
 const { esportsPreFilter } = require('./lib/ml');
 const { getLolProbability } = require('./lib/lol-model');
@@ -1017,6 +1017,7 @@ async function runAutoAnalysis() {
         return !riotLive.has(key1) && !riotLive.has(key2);
       });
       log('INFO', 'AUTO', `LoL: ${lolRaw?.length||0} partidas (${allLive.filter(m=>m.status==='live').length} live, ${allLive.filter(m=>m.status==='draft').length} draft, ${lolLive.length-allLive.length} dupl. removidas) | inscritos=${subscribedUsers.size}`);
+      markPollHeartbeat('lol', { matches: lolRaw?.length || 0, hadLive: allLive.some(m => m.status === 'live') });
       // Feed do dashboard: lista cada partida live pelos nomes (dashboard só classifica live quando
       // o nome do confronto aparece numa linha com marker "ao vivo"). Partidas puladas pelos gates
       // nunca chegam ao log "Analisando [AO VIVO]", então emitimos aqui ANTES dos filtros.
@@ -5503,6 +5504,7 @@ async function _pollDotaInner(runOnce = false) {
 
   try {
     log('INFO', 'AUTO-DOTA', 'Iniciando verificação de partidas Dota 2...');
+    markPollHeartbeat('dota');
     const matches = await serverGet('/dota-matches').catch(() => []);
     if (!Array.isArray(matches) || !matches.length) {
       log('INFO', 'AUTO-DOTA', 'Sem partidas Dota 2 disponíveis');
@@ -6104,6 +6106,7 @@ async function pollMma(runOnce = false) {
   async function loop() {
     try {
       log('INFO', 'AUTO-MMA', 'Iniciando verificação de lutas MMA...');
+      markPollHeartbeat('mma');
       const [fights, espnFights] = await Promise.all([
         serverGet('/mma-matches').catch(() => []),
         fetchEspnMmaFights().catch(() => [])
@@ -6660,6 +6663,7 @@ async function pollTennis(runOnce = false) {
   async function loop() {
     try {
       log('INFO', 'AUTO-TENNIS', 'Iniciando verificação de partidas de Tênis...');
+      markPollHeartbeat('tennis');
       const matches = await serverGet('/tennis-matches').catch(() => []);
       if (!Array.isArray(matches) || !matches.length) {
         if (!runOnce) setTimeout(loop, 30 * 60 * 1000);
@@ -7276,6 +7280,7 @@ async function pollFootball(runOnce = false) {
   async function loop() {
     try {
       log('INFO', 'AUTO-FOOTBALL', 'Iniciando verificação de partidas de Futebol...');
+      markPollHeartbeat('football');
       const matches = await serverGet('/football-matches').catch(() => []);
       if (!Array.isArray(matches) || !matches.length) {
         if (!runOnce) setTimeout(loop, 60 * 60 * 1000);
@@ -7753,6 +7758,7 @@ async function pollTableTennis(runOnce = false) {
   async function loop() {
     try {
       log('INFO', 'AUTO-TT', `Iniciando verificação de Table Tennis${ttConfig.shadowMode ? ' [SHADOW]' : ''}...`);
+      markPollHeartbeat('tt');
       const matches = await serverGet('/tabletennis-matches').catch(() => []);
       if (!Array.isArray(matches) || !matches.length) {
         log('INFO', 'AUTO-TT', '0 partidas TT com odds');
@@ -7988,6 +7994,7 @@ async function pollCs(runOnce = false) {
   async function loop() {
     try {
       log('INFO', 'AUTO-CS', `Iniciando verificação de CS2${csConfig.shadowMode ? ' [SHADOW]' : ''}...`);
+      markPollHeartbeat('cs');
       const matches = await serverGet('/cs-matches').catch(() => []);
       if (!Array.isArray(matches) || !matches.length) {
         log('INFO', 'AUTO-CS', '0 partidas CS2 com odds');
@@ -8323,6 +8330,7 @@ async function pollValorant(runOnce = false) {
   async function loop() {
     try {
       log('INFO', 'AUTO-VAL', `Iniciando verificação de Valorant${valConfig.shadowMode ? ' [SHADOW]' : ''}...`);
+      markPollHeartbeat('valorant');
       const matches = await serverGet('/valorant-matches').catch(() => []);
       if (!Array.isArray(matches) || !matches.length) {
         log('INFO', 'AUTO-VAL', '0 partidas Valorant com odds');
@@ -8629,6 +8637,7 @@ async function runAutoDarts() {
       const sofaDarts = require('./lib/sofascore-darts');
       const now = Date.now();
       log('INFO', 'AUTO-DARTS', `Iniciando verificação de darts${dartsConfig.shadowMode ? ' [SHADOW]' : ''}...`);
+      markPollHeartbeat('darts');
       const matches = await serverGet('/darts-matches').catch(() => []);
       if (!Array.isArray(matches) || !matches.length) {
         log('INFO', 'AUTO-DARTS', '0 partidas darts com odds');
@@ -8836,6 +8845,7 @@ async function runAutoSnooker() {
       const { snookerPreFilter } = require('./lib/snooker-ml');
       const now = Date.now();
       log('INFO', 'AUTO-SNOOKER', `Iniciando verificação de snooker${snookerConfig.shadowMode ? ' [SHADOW]' : ''}...`);
+      markPollHeartbeat('snooker');
       const matches = await serverGet('/snooker-matches').catch(() => []);
       if (!Array.isArray(matches) || !matches.length) {
         log('INFO', 'AUTO-SNOOKER', '0 partidas snooker com odds Betfair');
