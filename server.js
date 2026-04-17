@@ -4640,6 +4640,7 @@ const server = http.createServer(async (req, res) => {
         { sport: 'dota',     path: '/dota-matches' },
         { sport: 'cs',       path: '/cs-matches' },
         { sport: 'valorant', path: '/valorant-matches' },
+        { sport: 'tennis',   path: '/tennis-matches' },
       ];
 
       const fetchMatches = async ({ sport, path: apiPath }) => {
@@ -4756,6 +4757,35 @@ const server = http.createServer(async (req, res) => {
                   reason: hasScore ? null : 'no_vlr_match',
                   summary: hasScore ? { score: `${m.score1 || 0}-${m.score2 || 0}` } : null,
                 };
+          } else if (sport === 'tennis') {
+            // Sofascore live score (sets, game atual, saque, %saque)
+            try {
+              const sofaTn = require('./lib/sofascore-tennis');
+              const wrapped = await sofaTn.getLiveMatchScore(m.team1, m.team2, m.time).catch(() => null);
+              const ls = wrapped?.liveScore || null;
+              if (ls?.isLive) {
+                row.liveStats = {
+                  available: true,
+                  gameState: 'in_progress',
+                  gameNumber: ls.currentSet || null,
+                  reason: null,
+                  summary: {
+                    score: `${ls.setsHome || 0}-${ls.setsAway || 0}`,
+                    sets: ls.sets || [],
+                    currentSet: ls.currentSet || null,
+                    gameScore: (ls.currentGameHome != null || ls.currentGameAway != null) ? `${ls.currentGameHome ?? '–'}-${ls.currentGameAway ?? '–'}` : null,
+                    serving: ls.serving || null,
+                    source: 'sofascore',
+                  },
+                };
+              } else if (ls?.isFinished) {
+                row.liveStats = { available: false, gameState: 'finished', gameNumber: null, reason: 'finished', summary: null };
+              } else {
+                row.liveStats = { available: false, gameState: null, gameNumber: null, reason: 'no_sofascore_match', summary: null };
+              }
+            } catch (e) {
+              row.liveStats = { available: false, gameState: null, gameNumber: null, reason: `error:${(e.message || '').slice(0, 60)}`, summary: null };
+            }
           } else {
             // Dota/CS — sem feed detalhado aqui; mostra score PS se presente.
             const hasScore = m.score1 != null || m.score2 != null;
