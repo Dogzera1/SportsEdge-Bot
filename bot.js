@@ -7147,10 +7147,18 @@ async function pollCs(runOnce = false) {
   const CS_MIN_ODDS = parseFloat(process.env.CS_MIN_ODDS ?? '1.40');
   const CS_MAX_ODDS = parseFloat(process.env.CS_MAX_ODDS ?? '4.50');
   const CS_MIN_EV = parseFloat(process.env.CS_MIN_EV ?? '5.0');
+  const CS_MAX_DIVERGENCE_PP = parseFloat(process.env.CS_MAX_DIVERGENCE_PP ?? '12'); // gate Elo vs Pinnacle
+  const CS_TIER2_MIN_EV = parseFloat(process.env.CS_TIER2_MIN_EV ?? '8.0');
+  const CS_TIER2_MAX_STAKE = parseFloat(process.env.CS_TIER2_MAX_STAKE ?? '1.0');
+  const CS_USE_AI = /^(1|true|yes)$/i.test(String(process.env.CS_USE_AI ?? 'true'));
   // Filtra DM por confiança: 'ALL' | 'ALTA' | 'ALTA_MEDIA'. Default ALL (sem gate).
   const CS_LIVE_CONF = String(process.env.CS_LIVE_CONF || 'ALL').toUpperCase();
   const { getCsElo } = require('./lib/cs-ml');
   const hltv = require('./lib/hltv');
+
+  // Tier-1 keywords: Major, IEM/ESL/BLAST séries premier, Cologne/Katowice/Rio/Shanghai, EPL.
+  const CS_TIER1_RE = /(major|iem\b|katowice|cologne|esl pro league|epl|blast premier|blast world|blast fall|blast spring|esports world cup|ewc|austin|rio|shanghai|paris)/i;
+  const isCsTier1 = (league) => CS_TIER1_RE.test(String(league || ''));
 
   async function loop() {
     try {
@@ -7271,11 +7279,25 @@ async function pollCs(runOnce = false) {
         const pickTeam = direction === 't1' ? match.team1 : match.team2;
         const pickOdd = direction === 't1' ? o1 : o2;
         const pickP = direction === 't1' ? modelP1 : modelP2;
+        const pickImpliedP = direction === 't1' ? impliedP1 : impliedP2;
         const evPct = (pickP * pickOdd - 1) * 100;
 
-        if (evPct < CS_MIN_EV) {
+        // Gate A: divergência modelo vs Pinnacle (sharp). >12pp = quase sempre erro do modelo.
+        const divergencePp = Math.abs(pickP - pickImpliedP) * 100;
+        const isPinnacleOdds = /pinnacle/i.test(String(match.odds?.bookmaker || ''));
+        if (isPinnacleOdds && divergencePp > CS_MAX_DIVERGENCE_PP) {
           analyzedCs.set(key, { ts: now, tipSent: false });
-          log('INFO', 'AUTO-CS', `EV baixo (${evPct.toFixed(1)}%): ${match.team1} vs ${match.team2}`);
+          log('INFO', 'AUTO-CS', `Divergência alta (modelP=${(pickP*100).toFixed(1)}% vs Pinnacle=${(pickImpliedP*100).toFixed(1)}% Δ${divergencePp.toFixed(1)}pp > ${CS_MAX_DIVERGENCE_PP}pp): ${match.team1} vs ${match.team2}`);
+          continue;
+        }
+
+        // Gate B: tier de liga. Não-Tier1 = mais conservador (EV mín ↑, stake máx ↓, conf máx MÉDIA).
+        const isTier1 = isCsTier1(match.league);
+        const minEvForTier = isTier1 ? CS_MIN_EV : CS_TIER2_MIN_EV;
+
+        if (evPct < minEvForTier) {
+          analyzedCs.set(key, { ts: now, tipSent: false });
+          log('INFO', 'AUTO-CS', `EV baixo (${evPct.toFixed(1)}% < ${minEvForTier}% ${isTier1 ? 'tier1' : 'tier2+'}): ${match.team1} vs ${match.team2}`);
           continue;
         }
         if (pickOdd < CS_MIN_ODDS || pickOdd > CS_MAX_ODDS) {
@@ -7283,21 +7305,110 @@ async function pollCs(runOnce = false) {
           continue;
         }
 
+        // Gate C: IA como segunda opinião (DeepSeek). Valida P do modelo Elo.
+        // Se IA discorda fortemente de P (Δ>10pp pra ser tolerante a noise da IA), rejeita.
+        let aiConf = null;
+        let aiReason = null;
+        if (CS_USE_AI) {
+          const tierLabel = isTier1 ? 'TIER 1 (premier)' : 'TIER 2/3 (regional/academy)';
+          const formStr = enrich.form1 && enrich.form2
+            ? `Form últimos jogos: ${match.team1} ${(enrich.form1.wins||0)}V-${(enrich.form1.losses||0)}D | ${match.team2} ${(enrich.form2.wins||0)}V-${(enrich.form2.losses||0)}D`
+            : 'Form: dados HLTV indisponíveis';
+          const h2hStr = enrich.h2h && enrich.h2h.totalMatches > 0
+            ? `H2H (${enrich.h2h.totalMatches} jogos): ${match.team1} ${enrich.h2h.t1Wins}V x ${enrich.h2h.t2Wins}V ${match.team2}`
+            : 'H2H: sem histórico';
+          const liveStr = scoreboard
+            ? `\nLIVE: ${scoreboard.mapName} T:${scoreboard.scoreT}-CT:${scoreboard.scoreCT} round ${scoreboard.round}${scoreboard.bombPlanted ? ' (bomba)' : ''}`
+            : '';
+          const prompt = `Análise CS2 — ${match.team1} vs ${match.team2} (${match.league}) ${match.status === 'live' ? '[AO VIVO]' : '[PRÉ-JOGO]'}
+Liga: ${tierLabel}
+Odds Pinnacle: ${match.team1}@${o1} | ${match.team2}@${o2}
+Implied: ${(impliedP1*100).toFixed(1)}% / ${(impliedP2*100).toFixed(1)}% (de-juiced)
+Modelo Elo: ${match.team1}=${elo.elo1||'?'} (${elo.eloMatches1||0}j) | ${match.team2}=${elo.elo2||'?'} (${elo.eloMatches2||0}j)
+Modelo P: ${(modelP1*100).toFixed(1)}% / ${(modelP2*100).toFixed(1)}%
+${formStr}
+${h2hStr}${liveStr}
+
+Pick proposta pelo modelo: ${pickTeam} @ ${pickOdd} (P=${(pickP*100).toFixed(1)}%, EV=${evPct.toFixed(1)}%)
+
+Avalie:
+1. P do modelo é razoável dado contexto (roster, tier, form, H2H)?
+2. Se for time academy/feeder ou tier 3-4, modelo pode estar inflando edge.
+3. Pinnacle é sharp em CS — se modelo diverge muito de Pinnacle (>10pp) sem razão clara, modelo está errado.
+
+DECISÃO:
+TIP_ML:[time]@[odd]|P:[%]|STAKE:[1-3]u|CONF:[ALTA/MÉDIA/BAIXA]
+(Só forneça P inteiro 0-100; sistema calcula EV. Use a MESMA pick do modelo se concordar.)
+ou SEM_EDGE (se modelo está errado / dados insuficientes / time academy não confiável)
+
+Máximo 150 palavras.`;
+
+          let iaResp = '';
+          try {
+            const iaRaw = await serverPost('/claude', { messages: [{ role: 'user', content: prompt }], max_tokens: 350 }).catch(() => null);
+            iaResp = iaRaw?.content?.[0]?.text || iaRaw?.result || iaRaw?.text || '';
+          } catch (e) {
+            log('WARN', 'AUTO-CS', `IA erro: ${e.message}`);
+          }
+
+          if (!iaResp || /SEM_EDGE/i.test(iaResp)) {
+            analyzedCs.set(key, { ts: now, tipSent: false });
+            log('INFO', 'AUTO-CS', `IA SEM_EDGE: ${pickTeam} @ ${pickOdd} (modelP=${(pickP*100).toFixed(1)}% EV=${evPct.toFixed(1)}%)`);
+            continue;
+          }
+
+          const iaTip = _parseTipMl(iaResp);
+          if (!iaTip) {
+            analyzedCs.set(key, { ts: now, tipSent: false });
+            log('INFO', 'AUTO-CS', `IA sem TIP_ML parseável: ${match.team1} vs ${match.team2}`);
+            continue;
+          }
+
+          const iaPickIsT1 = norm(iaTip[1].trim()) === norm(match.team1)
+            || norm(match.team1).includes(norm(iaTip[1].trim()))
+            || norm(iaTip[1].trim()).includes(norm(match.team1));
+          const iaPickedSamePick = (iaPickIsT1 && direction === 't1') || (!iaPickIsT1 && direction === 't2');
+          if (!iaPickedSamePick) {
+            analyzedCs.set(key, { ts: now, tipSent: false });
+            log('INFO', 'AUTO-CS', `IA discorda da pick (modelo=${pickTeam}, IA=${iaTip[1].trim()}): rejeitado`);
+            continue;
+          }
+
+          const _v = _validateTipPvsModel(iaResp, pickP, 10);
+          if (!_v.valid) {
+            analyzedCs.set(key, { ts: now, tipSent: false });
+            log('WARN', 'AUTO-CS', `Tip rejeitada (${match.team1} vs ${match.team2}): ${_v.reason}`);
+            continue;
+          }
+          aiConf = (iaTip[5] || '').toUpperCase().replace('MEDIA', 'MÉDIA');
+          aiReason = String(iaResp).split('TIP_ML:')[0].trim().slice(0, 160) || null;
+        }
+
         const stake = calcKellyWithP(pickP, pickOdd, 1/8);
         if (stake === '0u') { analyzedCs.set(key, { ts: now, tipSent: false }); continue; }
         const desiredU = parseFloat(stake) || 0;
         const riskAdj = await applyGlobalRisk('cs', desiredU, match.league);
         if (!riskAdj.ok) { log('INFO', 'RISK', `cs: bloqueada (${riskAdj.reason})`); continue; }
-        const stakeAdj = String(riskAdj.units.toFixed(1).replace(/\.0$/, ''));
+        let appliedUnits = riskAdj.units;
+        // Cap de stake em tier 2+: limita exposição em ligas de menor confiabilidade do modelo.
+        if (!isTier1 && appliedUnits > CS_TIER2_MAX_STAKE) appliedUnits = CS_TIER2_MAX_STAKE;
+        const stakeAdj = String(appliedUnits.toFixed(1).replace(/\.0$/, ''));
 
-        const conf = useElo && elo.eloMatches1 >= 20 && elo.eloMatches2 >= 20 ? 'ALTA'
-                   : factorCount >= 2 ? 'MÉDIA' : 'BAIXA';
+        let conf = useElo && elo.eloMatches1 >= 20 && elo.eloMatches2 >= 20 ? 'ALTA'
+                 : factorCount >= 2 ? 'MÉDIA' : 'BAIXA';
+        // Cap de confiança em tier 2+: nunca ALTA em liga regional/academy.
+        if (!isTier1 && conf === 'ALTA') conf = 'MÉDIA';
+        // IA pode rebaixar confiança (mas não promover).
+        if (aiConf === 'BAIXA' || (aiConf === 'MÉDIA' && conf === 'ALTA')) conf = aiConf;
         const liveCtx = scoreboard
           ? ` | LIVE ${scoreboard.mapName} T:${scoreboard.scoreT} CT:${scoreboard.scoreCT} r${scoreboard.round}${scoreboard.bombPlanted ? ' 💣' : ''}`
           : '';
+        const tierTag = isTier1 ? '' : ' [tier2+]';
+        const divTag = isPinnacleOdds ? ` | Δ${divergencePp.toFixed(1)}pp` : '';
+        const aiTag = aiReason ? ` | IA: ${aiReason.slice(0, 80)}` : '';
         const tipReason = (useElo
-          ? `Elo: ${match.team1}=${elo.elo1} (${elo.eloMatches1}j) vs ${match.team2}=${elo.elo2} (${elo.eloMatches2}j)`
-          : `HLTV form/H2H: factors=${factorCount}, edge=${mlScore.toFixed(1)}pp`) + liveCtx;
+          ? `Elo: ${match.team1}=${elo.elo1} (${elo.eloMatches1}j) vs ${match.team2}=${elo.elo2} (${elo.eloMatches2}j)${divTag}${tierTag}`
+          : `HLTV form/H2H: factors=${factorCount}, edge=${mlScore.toFixed(1)}pp${divTag}${tierTag}`) + liveCtx + aiTag;
 
         const rec = await serverPost('/record-tip', {
           matchId: String(match.id) + csMapTag, eventName: match.league,
