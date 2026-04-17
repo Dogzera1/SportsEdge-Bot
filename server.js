@@ -4518,11 +4518,70 @@ const server = http.createServer(async (req, res) => {
         return new Date(a.time) - new Date(b.time);
       });
 
+      // ── Fase 1: mapOdds para live matches com Pinnacle matchupId ──
+      // Busca odds do mapa em andamento (period = score1+score2+1) via Pinnacle.
+      // Alimenta tips por mapa (market_type='MAP{N}').
+      if (process.env.PINNACLE_DOTA === 'true') {
+        for (const m of combined) {
+          if (m.status !== 'live') continue;
+          if (!String(m.id || '').startsWith('pin_')) continue;
+          const matchupId = String(m.id).replace(/^pin_/, '');
+          const nextMap = (m.score1 || 0) + (m.score2 || 0) + 1;
+          if (nextMap < 1 || nextMap > 5) continue;
+          try {
+            const mapMl = await pinnacle.getMatchupMoneylineByPeriod(matchupId, nextMap);
+            if (mapMl?.oddsHome && mapMl?.oddsAway) {
+              m.mapOdds = {
+                period: nextMap,
+                t1: String(mapMl.oddsHome),
+                t2: String(mapMl.oddsAway),
+                bookmaker: 'Pinnacle',
+                status: mapMl.status,
+              };
+            }
+          } catch(_) {}
+        }
+      }
+
       const oddsSrc = ODDS_API_IO_KEY ? 'Odds-API.io' : 'TheOdds';
-      log('INFO', 'DOTA2', `/dota-matches: ${combined.length} total (${liveFromPs.length} live PS, ${oddsMatches.length} odds ${oddsSrc})`);
+      const withMapOdds = combined.filter(m => m.mapOdds).length;
+      log('INFO', 'DOTA2', `/dota-matches: ${combined.length} total (${liveFromPs.length} live PS, ${oddsMatches.length} odds ${oddsSrc}${withMapOdds ? `, ${withMapOdds} com mapOdds` : ''})`);
       sendJson(res, combined);
     } catch(e) {
       sendJson(res, []);
+    }
+    return;
+  }
+
+  // Resultado de um mapa específico (Fase 1 de tips por mapa).
+  // GET /dota-map-result?psId=XXXX&map=1 → { resolved, winner, map }
+  if (p === '/dota-map-result') {
+    if (!PANDASCORE_TOKEN) { sendJson(res, { error: 'no_token' }, 503); return; }
+    try {
+      const psId = String(parsed.query.psId || '').trim();
+      const mapN = parseInt(parsed.query.map || '0', 10);
+      if (!psId || !mapN || mapN < 1 || mapN > 5) {
+        sendJson(res, { error: 'psId e map (1..5) obrigatórios' }, 400);
+        return;
+      }
+      const r = await httpGet(`https://api.pandascore.co/dota2/matches/${psId}`, { 'Authorization': `Bearer ${PANDASCORE_TOKEN}` });
+      if (r.status !== 200) { sendJson(res, { resolved: false, error: `ps_http_${r.status}` }); return; }
+      const match = safeParse(r.body, {});
+      const games = Array.isArray(match?.games) ? match.games : [];
+      const game = games.find(g => g.position === mapN || g.number === mapN);
+      if (!game) { sendJson(res, { resolved: false, reason: 'map_not_found', map: mapN }); return; }
+      if (game.status !== 'finished' || !game.winner) {
+        sendJson(res, { resolved: false, reason: 'map_in_progress', map: mapN, status: game.status });
+        return;
+      }
+      const t1 = match.opponents?.[0]?.opponent;
+      const t2 = match.opponents?.[1]?.opponent;
+      let winner = null;
+      if (game.winner.id === t1?.id) winner = t1.name;
+      else if (game.winner.id === t2?.id) winner = t2.name;
+      sendJson(res, { resolved: true, winner, map: mapN, psId });
+    } catch (e) {
+      sendJson(res, { resolved: false, error: e.message }, 500);
     }
     return;
   }
@@ -5288,19 +5347,46 @@ const server = http.createServer(async (req, res) => {
   }
 
   // ── Resultado PandaScore Dota 2 (settlement de tips dota2_ps_*) ──
+  // Suporta sufixo _MAP{N} — resolve winner do mapa específico (em vez da série)
   if (p === '/dota-result') {
     const rawId = parsed.query.matchId || '';
-    const psId = rawId.replace(/^dota2_ps_/, '').replace(/^ps_/, '');
+    const mapMatch = rawId.match(/_MAP(\d+)$/);
+    const mapN = mapMatch ? parseInt(mapMatch[1], 10) : null;
+    const baseId = rawId.replace(/_MAP\d+$/, '');
+    const psId = baseId.replace(/^dota2_ps_/, '').replace(/^ps_/, '');
     if (!psId) { sendJson(res, { resolved: false, error: 'matchId obrigatório' }, 400); return; }
     if (!PANDASCORE_TOKEN) { sendJson(res, { resolved: false, error: 'PANDASCORE_TOKEN não configurado' }); return; }
     try {
       const r = await httpGet(`https://api.pandascore.co/dota2/matches/${psId}`, { 'Authorization': `Bearer ${PANDASCORE_TOKEN}` });
       const m = safeParse(r.body, {});
+      const t1 = m.opponents?.[0]?.opponent;
+      const t2 = m.opponents?.[1]?.opponent;
+
+      // Settlement per-map
+      if (mapN) {
+        const games = Array.isArray(m.games) ? m.games : [];
+        const game = games.find(g => g.position === mapN || g.number === mapN);
+        if (!game) { sendJson(res, { matchId: rawId, resolved: false, reason: 'map_not_found', map: mapN }); return; }
+        if (game.status !== 'finished' || !game.winner) {
+          sendJson(res, { matchId: rawId, resolved: false, reason: 'map_in_progress', map: mapN, status: game.status });
+          return;
+        }
+        let winner = null;
+        if (game.winner.id === t1?.id) winner = t1.name;
+        else if (game.winner.id === t2?.id) winner = t2.name;
+        if (winner) {
+          stmts.upsertMatchResult.run(rawId, 'dota2', t1?.name || '', t2?.name || '', winner, '', m.league?.name || '');
+          sendJson(res, { matchId: rawId, winner, resolved: true, map: mapN });
+        } else {
+          sendJson(res, { matchId: rawId, resolved: false, map: mapN });
+        }
+        return;
+      }
+
+      // Settlement da série (comportamento original)
       const winner = m.winner?.name || null;
       if (winner) {
-        const t1 = m.opponents?.[0]?.opponent?.name || '';
-        const t2 = m.opponents?.[1]?.opponent?.name || '';
-        stmts.upsertMatchResult.run(rawId, 'dota2', t1, t2, winner, '', m.league?.name || '');
+        stmts.upsertMatchResult.run(rawId, 'dota2', t1?.name || '', t2?.name || '', winner, '', m.league?.name || '');
         sendJson(res, { matchId: rawId, winner, resolved: true });
       } else {
         sendJson(res, { matchId: rawId, resolved: false });
@@ -6767,15 +6853,17 @@ const server = http.createServer(async (req, res) => {
         // Filtra por tip_participant pra permitir hedge legítimo em times diferentes.
         const p1n_ = norm(p1 || ''), p2n_ = norm(p2 || '');
         const pickN_ = norm(t.tip_participant || '');
+        const marketN_ = String(t.market_type || 'ML').toUpperCase();
         if (p1n_ && p2n_) {
           const recentDupe = db.prepare(
             `SELECT 1 FROM tips WHERE sport = ? AND result IS NULL
              AND sent_at > datetime('now', '-24 hours')
              AND REPLACE(REPLACE(lower(tip_participant),' ',''),'-','') = ?
+             AND upper(COALESCE(market_type, 'ML')) = ?
              AND ((REPLACE(REPLACE(lower(participant1),' ',''),'-','') LIKE ? AND REPLACE(REPLACE(lower(participant2),' ',''),'-','') LIKE ?)
                OR (REPLACE(REPLACE(lower(participant1),' ',''),'-','') LIKE ? AND REPLACE(REPLACE(lower(participant2),' ',''),'-','') LIKE ?))
              LIMIT 1`
-          ).get(sport, pickN_, `%${p1n_}%`, `%${p2n_}%`, `%${p2n_}%`, `%${p1n_}%`);
+          ).get(sport, pickN_, marketN_, `%${p1n_}%`, `%${p2n_}%`, `%${p2n_}%`, `%${p1n_}%`);
           if (recentDupe) { sendJson(res, { ok: true, skipped: true, reason: 'duplicate_pair' }); return; }
         }
 

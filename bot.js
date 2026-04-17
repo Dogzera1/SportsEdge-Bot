@@ -4805,9 +4805,12 @@ async function _pollDotaInner(runOnce = false) {
         // Só marca pairKeyBase quando tipSent=true — evita bloquear análise de outros mapas
         if (val?.tipSent) analyzedDota.set(pairKeyBase, val);
       };
+      // Bloqueia duplicata pre→live ou re-cadastro com novo event ID no começo.
+      // Permite tips em mapas diferentes do Bo3/Bo5 (score já avançou).
       const prevBase = analyzedDota.get(pairKeyBase);
-      if (prevBase?.tipSent && (now - prevBase.ts) < 12 * 60 * 60 * 1000) {
-        log('DEBUG', 'AUTO-DOTA', `Skip ${match.team1} vs ${match.team2} (${match.status}): tip já enviada nessa série (${Math.round((now-prevBase.ts)/60000)}min atrás)`);
+      const isStartOfSerie = !isLive || ((match.score1 || 0) === 0 && (match.score2 || 0) === 0);
+      if (isStartOfSerie && prevBase?.tipSent && (now - prevBase.ts) < 12 * 60 * 60 * 1000) {
+        log('DEBUG', 'AUTO-DOTA', `Skip ${match.team1} vs ${match.team2} (${match.status}): tip já enviada no início dessa série (${Math.round((now-prevBase.ts)/60000)}min atrás)`);
         continue;
       }
       const prev = analyzedDota.get(key) || analyzedDota.get(pairKey);
@@ -5140,6 +5143,16 @@ Máximo 200 palavras.`;
       await _sleep(3000);
     }
     if (!_drained && _hasLive) _livePhaseExit('dota');
+
+    // ── Fase 3: Tips por mapa (independente da tip ML-série) ──
+    // Pra cada live com mapOdds Pinnacle, roda modelo de mapa e emite tip MAP{N} se EV+edge.
+    for (const match of matches.filter(m => m.status === 'live' && m.mapOdds)) {
+      try {
+        await analyzeDotaMapTip(match, token);
+      } catch (e) {
+        log('WARN', 'AUTO-DOTA-MAP', `${match.team1} vs ${match.team2}: ${e.message}`);
+      }
+    }
     } // end else (has matches)
   } catch(e) {
     log('ERROR', 'AUTO-DOTA', e.message);
@@ -5150,6 +5163,124 @@ Máximo 200 palavras.`;
     const dotaNextMs = _hasLiveDota ? (2 * 60 * 1000) : (15 * 60 * 1000);
     log('INFO', 'AUTO-DOTA', `Próximo ciclo em ${Math.round(dotaNextMs / 1000)}s (${_hasLiveDota ? 'LIVE' : 'idle'})`);
     setTimeout(() => pollDota().catch(e => log('ERROR', 'AUTO-DOTA', e.message)), dotaNextMs);
+  }
+}
+
+// ── Análise e emissão de tip por mapa ──
+// Chamado pelo AUTO-DOTA principal pra cada match live com match.mapOdds.
+// Usa lib/dota-map-model pra calcular P(mapa atual) com live stats OpenDota/Steam RT.
+async function analyzeDotaMapTip(match, token) {
+  const { predictMapWinner } = require('./lib/dota-map-model');
+  const DOTA_MAP_MIN_EV = parseFloat(process.env.DOTA_MAP_MIN_EV || '8');
+  const DOTA_MAP_MIN_CONF = parseFloat(process.env.DOTA_MAP_MIN_CONF || '0.5');
+
+  const mapN = match.mapOdds?.period;
+  if (!mapN) return;
+  const psId = match._psId || null;
+  const mapMatchId = psId
+    ? `dota2_ps_${psId}_MAP${mapN}`
+    : `${match.id}_MAP${mapN}`;
+
+  // Dedup: se já temos tip deste mapa em memória, pula
+  const mapKey = `dota2_${mapMatchId}`;
+  const prevMap = analyzedDota.get(mapKey);
+  if (prevMap?.tipSent) return;
+  const now = Date.now();
+  if (prevMap && (now - prevMap.ts < 5 * 60 * 1000)) return; // cooldown 5min
+
+  const od = await serverGet(`/opendota-live?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}`).catch(() => null);
+  if (!od?.hasLiveStats) {
+    analyzedDota.set(mapKey, { ts: now, tipSent: false, reason: 'no_live_stats' });
+    return;
+  }
+
+  // Baseline: de-juice das odds do mapa
+  const o1 = parseFloat(match.mapOdds.t1), o2 = parseFloat(match.mapOdds.t2);
+  if (!o1 || !o2 || o1 <= 1 || o2 <= 1) return;
+  const r1 = 1 / o1, r2 = 1 / o2;
+  const vig = r1 + r2;
+  const baselineP1 = r1 / vig;
+
+  const pred = predictMapWinner({
+    liveStats: od,
+    seriesScore: { score1: match.score1 || 0, score2: match.score2 || 0, team1: match.team1, team2: match.team2 },
+    baselineP: baselineP1,
+    team1Name: match.team1,
+  });
+
+  // Avalia ambos lados e escolhe melhor EV
+  const pT1 = pred.p;
+  const pT2 = 1 - pT1;
+  const evT1 = (pT1 * o1 - 1) * 100;
+  const evT2 = (pT2 * o2 - 1) * 100;
+  const pickDir = evT1 >= evT2 ? 't1' : 't2';
+  const pickTeam = pickDir === 't1' ? match.team1 : match.team2;
+  const pickOdd  = pickDir === 't1' ? o1 : o2;
+  const pickP    = pickDir === 't1' ? pT1 : pT2;
+  const pickEv   = pickDir === 't1' ? evT1 : evT2;
+
+  log('INFO', 'AUTO-DOTA-MAP', `Map ${mapN} ${match.team1} vs ${match.team2}: pT1=${(pT1*100).toFixed(1)}% EV_t1=${evT1.toFixed(1)}% EV_t2=${evT2.toFixed(1)}% conf=${pred.confidence} | ${pred.reason}`);
+
+  if (pred.confidence < DOTA_MAP_MIN_CONF) {
+    analyzedDota.set(mapKey, { ts: now, tipSent: false, reason: 'low_confidence' });
+    return;
+  }
+  if (pickEv < DOTA_MAP_MIN_EV) {
+    analyzedDota.set(mapKey, { ts: now, tipSent: false, reason: 'low_ev' });
+    return;
+  }
+
+  // Stake Kelly fracionado conservador (1/8 — igual demais tips sem IA)
+  const stake = calcKellyWithP(pickP, pickOdd, 1/8);
+  if (stake === '0u') { analyzedDota.set(mapKey, { ts: now, tipSent: false, reason: 'zero_stake' }); return; }
+  const desiredU = parseFloat(stake) || 0;
+  const riskAdj = await applyGlobalRisk('esports', desiredU, match.league);
+  if (!riskAdj.ok) {
+    log('INFO', 'RISK', `dota map: bloqueada (${riskAdj.reason})`);
+    analyzedDota.set(mapKey, { ts: now, tipSent: false, reason: 'risk_blocked' });
+    return;
+  }
+  const stakeAdj = String(riskAdj.units.toFixed(1).replace(/\.0$/, '')) + 'u';
+
+  const tipConf = pickEv >= 15 ? 'ALTA' : pickEv >= 8 ? 'MÉDIA' : 'BAIXA';
+  const msg = `🟥 💰 *TIP DOTA2 MAPA ${mapN} (AO VIVO 🔴)*\n` +
+    `${match.team1} vs ${match.team2} — série ${match.score1||0}-${match.score2||0}\n` +
+    `Pick: *${pickTeam}* (mapa ${mapN})\n` +
+    `Odd: ${pickOdd.toFixed(2)} | EV: ${pickEv.toFixed(1)}% | Stake: ${stakeAdj}\n` +
+    `Modelo: gold/kill diff + momentum (conf ${(pred.confidence*100).toFixed(0)}%)`;
+
+  try {
+    const rec = await serverPost('/record-tip', {
+      matchId: mapMatchId,
+      eventName: match.league,
+      p1: match.team1, p2: match.team2,
+      tipParticipant: pickTeam,
+      odds: String(pickOdd),
+      ev: String(pickEv.toFixed(1)),
+      stake: stakeAdj,
+      confidence: tipConf,
+      isLive: 1,
+      market_type: `MAP${mapN}_WINNER`,
+      modelP1: pT1, modelP2: pT2,
+      modelPPick: pickP,
+      modelLabel: `dota-map-${mapN} (${pred.factors.map(f => f.name).join('+') || 'base'})`,
+      tipReason: pred.reason.slice(0, 160),
+      isShadow: SPORTS['esports']?.shadowMode ? 1 : 0,
+      oddsFetchedAt: null,
+    }, 'esports');
+    if (rec?.skipped) {
+      log('INFO', 'AUTO-DOTA-MAP', `Tip mapa ${mapN} duplicada: ${pickTeam} @ ${pickOdd}`);
+      analyzedDota.set(mapKey, { ts: now, tipSent: true });
+      return;
+    }
+    for (const [uid, sports] of subscribedUsers) {
+      if (!sports.has('esports')) continue;
+      await sendDM(token, uid, msg).catch(() => {});
+    }
+    log('INFO', 'AUTO-DOTA-MAP', `TIP MAPA ${mapN}: ${pickTeam} @ ${pickOdd} (EV ${pickEv.toFixed(1)}%, conf ${pred.confidence})`);
+    analyzedDota.set(mapKey, { ts: now, tipSent: true });
+  } catch (e) {
+    log('WARN', 'AUTO-DOTA-MAP', `record-tip falhou: ${e.message}`);
   }
 }
 
