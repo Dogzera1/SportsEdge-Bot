@@ -170,7 +170,9 @@
       "Bash(awk '/^async function pollValorant/,/^async function pollDarts|^\\\\/\\\\/ ── Darts/' bot.js)",
       "Bash(grep -nE \"Confiança.*\\\\*\\\\\\\\\\\\$\\\\{tipConf\\\\}|MMA.*confidence.*tipConf|record-tip.*confidence.*tipConf\" bot.js)",
       "Bash(grep -nE \"Stake.*\\\\*\\\\\\\\\\\\$\\\\{tipStake\\\\}|💵 Stake.*tipStake\" bot.js)",
-      "Bash(grep -nE \"log\\\\\\('INFO',\\\\s*'AUTO[-_].*Iniciando|log\\\\\\('INFO',\\\\s*'AUTO',.*\\\\`LoL: \" bot.js)"
+      "Bash(grep -nE \"log\\\\\\('INFO',\\\\s*'AUTO[-_].*Iniciando|log\\\\\\('INFO',\\\\s*'AUTO',.*\\\\`LoL: \" bot.js)",
+      "Bash(curl -s -k -m 25 -H \"x-admin-key: 54cd682231bdda16f405b54f55e147883cb3aaabe09b16ab88c73cd701e8523e\" \"https://sportsedge-bot-production.up.railway.app/agents/tennis-v2-smoke?limit=500\" -o /tmp/sm2.json)",
+      "Bash(cp /tmp/sm2.json _sm2.json)"
     ]
   }
 }
