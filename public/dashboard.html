@@ -290,6 +290,25 @@ let mlWeightsFullChart = null;
 let mlMonthlyChart = null;
 let tipsTimer = null;
 
+function getAdminKey() {
+  let key = sessionStorage.getItem('ADMIN_KEY') || '';
+  if (!key) {
+    key = prompt('Admin key (x-admin-key):') || '';
+    if (key) sessionStorage.setItem('ADMIN_KEY', key);
+  }
+  return key;
+}
+async function adminFetch(path, opts = {}) {
+  const key = getAdminKey();
+  const headers = Object.assign({}, opts.headers || {}, { 'x-admin-key': key });
+  const r = await fetch(BASE + path, Object.assign({}, opts, { headers }));
+  if (r.status === 401 || r.status === 403) {
+    sessionStorage.removeItem('ADMIN_KEY');
+    throw new Error('Admin key inválida/ausente — recarregue a página');
+  }
+  return r;
+}
+
 async function apiFetch(path) {
   try {
     const r = await fetch(BASE + path);
@@ -1155,7 +1174,7 @@ function renderTips(tips) {
 async function reopenTip(id, sport) {
   if (!confirm('Reabrir esta tip para re-liquidação futura?')) return;
   try {
-    const r = await fetch(BASE + '/reopen-tip?id=' + id + '&sport=' + encodeURIComponent(sport), { method: 'POST' });
+    const r = await adminFetch('/reopen-tip?id=' + id + '&sport=' + encodeURIComponent(sport), { method: 'POST' });
     const j = await r.json();
     if (j.ok && j.changes > 0) {
       loadTips();
@@ -1171,7 +1190,7 @@ async function settleTipManual(id, result, sport) {
   const label = result === 'win' ? 'WIN' : 'LOSS';
   if (!confirm('Marcar tip #' + id + ' como ' + label + '?')) return;
   try {
-    const r = await fetch(BASE + '/settle-manual', {
+    const r = await adminFetch('/settle-manual', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ id, result, sport })
@@ -1202,7 +1221,7 @@ async function voidOldPending() {
     const preview = info?.buckets?.find(b => b.days <= days);
     const estCount = info?.buckets?.filter(b => b.days <= days).reduce((s, b) => Math.max(s, b.count), 0);
     if (!confirm('Anular TODAS as tips pendentes de ' + currentSport.toUpperCase() + ' com mais de ' + days + ' dias?\n' + (estCount ? '~' + estCount + ' tips serão anuladas.' : '') + '\nEsta ação não pode ser desfeita.')) return;
-    const r = await fetch(BASE + '/void-old-pending', {
+    const r = await adminFetch('/void-old-pending', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ sport: currentSport, days })
