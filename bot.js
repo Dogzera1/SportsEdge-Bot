@@ -6260,16 +6260,8 @@ Máximo 200 palavras. Raciocínio breve antes da decisão.`;
           log('INFO', 'AUTO-TENNIS', `Gate EV: ${tipEV}% < 7%`);
           await new Promise(r => setTimeout(r, 3000)); continue;
         }
-        // Gate EV máximo: mercados tennis ATP/WTA são sharp.
-        // Edge > 25% quase sempre é erro de modelo (Elo desalinhado, small sample, match incorreto).
-        // Em sharp markets, edges reais raramente excedem 8-12%.
-        const TENNIS_MAX_EV = parseFloat(process.env.TENNIS_MAX_EV || '25');
-        if (tipEV > TENNIS_MAX_EV) {
-          log('WARN', 'AUTO-TENNIS', `Gate MAX_EV: ${tipEV}% > ${TENNIS_MAX_EV}% — provável erro de modelo (${tipPlayer} @ ${tipOdd} | P=${(_modelPPickTn*100).toFixed(1)}%) — rejeitada`);
-          await new Promise(r => setTimeout(r, 3000)); continue;
-        }
         if (tipEV > 15) {
-          log('WARN', 'AUTO-TENNIS', `EV alto para sharp market: ${tipEV}% (${tipPlayer} @ ${tipOdd} | P=${(_modelPPickTn*100).toFixed(1)}%) — revisar modelo`);
+          log('INFO', 'AUTO-TENNIS', `EV alto (${tipEV}%): ${tipPlayer} @ ${tipOdd} | P=${(_modelPPickTn*100).toFixed(1)}% | Elo ${_pickIsT1Tn?mlResultTennis.elo1:mlResultTennis.elo2}/${_pickIsT1Tn?mlResultTennis.elo2:mlResultTennis.elo1}`);
         }
         // Small-sample gate: Elo com poucos jogos gera EV inflado por ruído.
         // Se qualquer jogador tem <10 partidas no DB OU <5 na superfície, exige EV ≥ 10% e confiança ≥ MÉDIA.
