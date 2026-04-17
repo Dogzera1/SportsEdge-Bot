@@ -272,6 +272,15 @@
       </div>
       <div class="agent-body" id="gateOptimizerBody"><div class="empty" style="padding:20px;">Grid search retroativo: testa caps 6/8/10/12/15/18/20/25/30pp por sport. Encontra cap "ótimo" via ROI. Sugere ajuste env.</div></div>
     </div>
+    <!-- ROI by Bookmaker (Vetor 3 fase 4) -->
+    <div class="agent-card" id="agent-roi-by-book">
+      <div class="agent-head">
+        <span class="agent-toggle">&#9662;</span><span class="agent-title">🏦 ROI por Bookmaker (Vetor 3)</span>
+        <span class="agent-meta" id="roiByBookMeta">—</span>
+        <button class="agent-refresh" data-agent="roi-by-book">↻</button>
+      </div>
+      <div class="agent-body" id="roiByBookBody"><div class="empty" style="padding:20px;">Agrupa tips por best_book (casa com melhor preço). Mede ROI real por book vs avg delta % capturado. Precisa tips com best_book (pós-Vetor 3).</div></div>
+    </div>
     <!-- Backtest Validator -->
     <div class="agent-card" id="agent-backtest-validator">
       <div class="agent-head">
@@ -945,6 +954,63 @@
     body.innerHTML = opts.html || `<pre style="font-size:11px;color:#9ca3af;white-space:pre-wrap;max-height:400px;overflow:auto">${escapeHtml(JSON.stringify(data, null, 2).slice(0, 6000))}</pre>`;
   }
 
+  function renderRoiByBook(data) {
+    const body = document.getElementById('roiByBookBody');
+    const meta = document.getElementById('roiByBookMeta');
+    if (!body) return;
+    if (data?.error) { body.innerHTML = `<div class="empty" style="color:var(--err);">${escapeHtml(data.error)}</div>`; return; }
+    const list = Array.isArray(data?.byBook) ? data.byBook : [];
+    const overall = data?.overall || {};
+    meta.textContent = `${list.length} books | n=${overall.n || 0} ${data.days}d`;
+    if (!list.length) { body.innerHTML = '<div class="empty" style="padding:12px;color:var(--muted)">Sem tips settled com best_book. Aguardar Vetor 3 fase 1+2 acumular dados.</div>'; return; }
+    const roiOverall = overall.roi != null ? (overall.roi >= 0 ? '+' : '') + overall.roi.toFixed(2) + '%' : '—';
+    const deltaOverall = overall.avg_delta_pct != null ? (overall.avg_delta_pct >= 0 ? '+' : '') + overall.avg_delta_pct.toFixed(2) + '%' : '—';
+    const rows = list.map(b => {
+      const roiC = b.roi != null && b.roi >= 0 ? '#86efac' : '#fca5a5';
+      const roiStr = b.roi != null ? (b.roi >= 0 ? '+' : '') + b.roi.toFixed(2) + '%' : '—';
+      const deltaStr = b.avg_delta_pct != null ? (b.avg_delta_pct >= 0 ? '+' : '') + b.avg_delta_pct.toFixed(2) + '%' : '—';
+      const brierStr = b.brier != null ? b.brier.toFixed(3) : '—';
+      return `<tr>
+        <td><b>${escapeHtml(b.book)}</b></td>
+        <td style="text-align:right">${b.n}</td>
+        <td style="text-align:right">${b.wins}W/${b.losses}L${b.pushes ? '/' + b.pushes + 'P' : ''}</td>
+        <td style="text-align:right">${b.hit_rate != null ? b.hit_rate.toFixed(1) + '%' : '—'}</td>
+        <td style="text-align:right;color:${roiC}">${roiStr}</td>
+        <td style="text-align:right;color:#9ca3af">${deltaStr}</td>
+        <td style="text-align:right">${b.avg_odds ?? '—'}</td>
+        <td style="text-align:right">${brierStr}</td>
+      </tr>`;
+    }).join('');
+    body.innerHTML = `
+      <div style="padding:10px;background:var(--panel2);border-radius:6px;margin-bottom:10px;font-size:12px">
+        <span style="color:var(--muted)">Overall:</span>
+        <b style="margin-left:6px">ROI ${roiOverall}</b> |
+        <span style="margin-left:6px">hit ${overall.hit_rate != null ? overall.hit_rate.toFixed(1) + '%' : '—'}</span> |
+        <span style="margin-left:6px;color:var(--muted)">avg Δ vs Pinnacle ${deltaOverall}</span>
+      </div>
+      <table class="agent-table" style="font-size:11px"><thead>
+        <tr><th>Book</th><th style="text-align:right">N</th><th style="text-align:right">W/L</th>
+        <th style="text-align:right">Hit%</th><th style="text-align:right">ROI</th>
+        <th style="text-align:right">Δ vs Pin</th><th style="text-align:right">Odd avg</th>
+        <th style="text-align:right">Brier</th></tr>
+      </thead><tbody>${rows}</tbody></table>`;
+  }
+
+  async function fetchRoiByBook() {
+    const btn = document.querySelector('.agent-refresh[data-agent="roi-by-book"]');
+    if (btn) btn.classList.add('loading');
+    try {
+      const r = await apiFetch('/roi-by-book?days=60');
+      const data = await r.json();
+      renderRoiByBook(data);
+    } catch (e) {
+      const el = document.getElementById('roiByBookBody');
+      if (el) el.innerHTML = `<div class="empty" style="color:var(--err);">fetch falhou: ${escapeHtml(String(e.message||e))}</div>`;
+    } finally {
+      if (btn) btn.classList.remove('loading');
+    }
+  }
+
   function renderGateOptimizer(data) {
     const body = document.getElementById('gateOptimizerBody');
     const meta = document.getElementById('gateOptimizerMeta');
@@ -1166,6 +1232,7 @@
   }
 
   function refreshAgents() {
+    fetchRoiByBook();
     fetchAgent('gate-optimizer');
     fetchAgent('backtest-validator');
     fetchAgent('health-sentinel');
@@ -1191,6 +1258,8 @@
     if (name === 'roi-analyst') {
       const sel = document.getElementById('roiDaysSel');
       fetchAgent(name, '?days=' + (sel?.value || '30'));
+    } else if (name === 'roi-by-book') {
+      fetchRoiByBook();
     } else {
       fetchAgent(name);
     }

@@ -7319,6 +7319,101 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // Vetor 3 fase 4 — ROI agrupado por best_book (casa de aposta)
+  // Response: { days, overall: {...}, byBook: [{ book, n, roi, hitRate, avgDelta, ... }] }
+  if (p === '/roi-by-book') {
+    const daysRaw = parseInt(parsed.query.days);
+    const days = Number.isFinite(daysRaw) ? Math.max(1, Math.min(365, daysRaw)) : 60;
+    const sportFilter = (parsed.query.sport || '').trim() || null;
+
+    try {
+      const whereSport = sportFilter ? 'AND sport = ?' : '';
+      const params = [`-${days} days`];
+      if (sportFilter) params.push(sportFilter);
+
+      const rows = db.prepare(`
+        SELECT sport, odds, best_book, best_odd, pinnacle_odd, line_shop_delta_pct,
+               result, stake_reais, profit_reais, model_p_pick
+        FROM tips
+        WHERE result IN ('win','loss','push')
+          AND settled_at IS NOT NULL
+          AND settled_at >= datetime('now', ?)
+          AND best_book IS NOT NULL
+          ${whereSport}
+      `).all(...params);
+
+      const byBook = new Map();
+      let overallN = 0, overallStake = 0, overallProfit = 0, overallDeltaSum = 0, overallDeltaN = 0;
+      for (const r of rows) {
+        const book = String(r.best_book || 'unknown').trim() || 'unknown';
+        if (!byBook.has(book)) {
+          byBook.set(book, {
+            book, n: 0, wins: 0, losses: 0, pushes: 0,
+            stakeR: 0, profitR: 0, oddsSum: 0, deltaSum: 0, deltaCount: 0,
+            brierSum: 0, brierCount: 0,
+          });
+        }
+        const b = byBook.get(book);
+        b.n++;
+        overallN++;
+        if (r.result === 'win') b.wins++;
+        else if (r.result === 'loss') b.losses++;
+        else if (r.result === 'push') b.pushes++;
+        b.stakeR  += Number(r.stake_reais) || 0;
+        b.profitR += Number(r.profit_reais) || 0;
+        overallStake  += Number(r.stake_reais) || 0;
+        overallProfit += Number(r.profit_reais) || 0;
+        b.oddsSum += Number(r.odds) || 0;
+        const delta = Number(r.line_shop_delta_pct);
+        if (Number.isFinite(delta)) { b.deltaSum += delta; b.deltaCount++; overallDeltaSum += delta; overallDeltaN++; }
+        const odds = Number(r.odds);
+        if ((r.result === 'win' || r.result === 'loss') && odds > 1) {
+          const pStored = Number(r.model_p_pick);
+          let pUsed = (Number.isFinite(pStored) && pStored > 0 && pStored < 1) ? pStored : (1 / odds);
+          pUsed = Math.max(0.01, Math.min(0.99, pUsed));
+          const o = r.result === 'win' ? 1 : 0;
+          b.brierSum += (pUsed - o) ** 2;
+          b.brierCount++;
+        }
+      }
+
+      const bookList = [];
+      for (const b of byBook.values()) {
+        const decided = b.wins + b.losses;
+        const hitRate = decided > 0 ? (b.wins / decided) * 100 : null;
+        const roi = b.stakeR > 0 ? (b.profitR / b.stakeR) * 100 : null;
+        bookList.push({
+          book: b.book,
+          n: b.n, wins: b.wins, losses: b.losses, pushes: b.pushes,
+          hit_rate: hitRate != null ? parseFloat(hitRate.toFixed(1)) : null,
+          roi: roi != null ? parseFloat(roi.toFixed(2)) : null,
+          profit_reais: parseFloat(b.profitR.toFixed(2)),
+          stake_reais: parseFloat(b.stakeR.toFixed(2)),
+          avg_odds: b.n > 0 ? parseFloat((b.oddsSum / b.n).toFixed(2)) : null,
+          avg_delta_pct: b.deltaCount > 0 ? parseFloat((b.deltaSum / b.deltaCount).toFixed(2)) : null,
+          brier: b.brierCount > 0 ? parseFloat((b.brierSum / b.brierCount).toFixed(3)) : null,
+        });
+      }
+      bookList.sort((a, b) => (b.roi ?? -9999) - (a.roi ?? -9999));
+
+      const overallDecided = bookList.reduce((s, b) => s + b.wins + b.losses, 0);
+      const overallWins = bookList.reduce((s, b) => s + b.wins, 0);
+      sendJson(res, {
+        days,
+        sport: sportFilter,
+        generated_at: new Date().toISOString(),
+        overall: {
+          n: overallN,
+          hit_rate: overallDecided > 0 ? parseFloat((overallWins / overallDecided * 100).toFixed(1)) : null,
+          roi: overallStake > 0 ? parseFloat((overallProfit / overallStake * 100).toFixed(2)) : null,
+          avg_delta_pct: overallDeltaN > 0 ? parseFloat((overallDeltaSum / overallDeltaN).toFixed(2)) : null,
+        },
+        byBook: bookList,
+      });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
   // CLV decay tracker: CLV médio diário por sport — detecta degradação ao longo do tempo.
   // GET /clv-decay?sport=X&days=30
   if (p === '/clv-decay') {
