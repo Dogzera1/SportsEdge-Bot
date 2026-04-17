@@ -14,6 +14,14 @@ Registro cronológico de decisões significativas. Toda mudança de comportament
 
 ---
 
+## 2026-04-18 — Tennis cap divergência 15→20pp (Gate Optimizer data-driven)
+**Motivo:** `/agents/gate-optimizer?sport=tennis&days=90` (n=25) mostrou cap 15pp bloqueando 7 tips winners; cap 18-20pp tem Brier ótimo (0.185) e ROI positivo. Cirúrgico: relaxa só o suficiente pra não cortar winners legítimos, sem abrir porteira pra outliers.
+**Antes:** `TENNIS_MAX_DIVERGENCE_PP=15` (default hardcoded em bot.js:7188)
+**Agora:** `TENNIS_MAX_DIVERGENCE_PP=20` (default hardcoded), envar override mantido
+**Reversão:** mudar valor em `bot.js:7188` de volta pra '15' ou setar env `TENNIS_MAX_DIVERGENCE_PP=15`
+**Status:** 🧪 experimental — re-rodar Gate Optimizer em 2026-05-15 com n≥50. Se Brier degradar ou winners-bloqueados voltarem, re-apertar pra 18.
+**Deploy:** setar `TENNIS_MAX_DIVERGENCE_PP=20` no Railway (ou aguardar próximo deploy pra default novo entrar)
+
 ## 2026-04-18 — Vetor 2 props (LoL/Dota): 🟡 PARCIAL (sem props óbvios em Pinnacle)
 **Motivo:** Smoke test `/agents/vetor2-props-smoke` revelou que Pinnacle LoL/Dota live expõe apenas: moneyline, team_total, spread, total. SEM first_blood, dragons, towers, baron, roshan, inhibs.
 
@@ -296,7 +304,7 @@ Itens que precisam revisão em janela específica:
 |---|---|---|---|
 | Pre-Match cutoff 90min | 2026-05-01 | Pode falhar pra Bo3+ longos ou tennis Slam | Validar com tipos de match longos no log |
 | Calibração 4 padrões observados | 2026-05-02 | Recalibrar pode introduzir bias se sample pequeno | Re-rodar backtest, se padrões A/B/C/D persistirem com n≥10/bucket → aplicar ações registradas |
-| Tennis cap 12→15 | 2026-05-02 | Pode estar passando bleed extra | Comparar ROI tennis pré-fix vs pós-fix |
+| Tennis cap 15→20 | 2026-05-15 | Pode estar passando outliers | Re-rodar Gate Optimizer com n≥50, comparar Brier + winners-bloqueados |
 | Auto-Healer (12 fixes) | 2026-05-15 | Tem fix que nunca dispara? Algum gera ruído? | Audit: fixes aplicados / falsos positivos / problemas reais que escaparam |
 | News Monitor | 2026-05-15 | Acerto útil >5%? Spam ratio aceitável? | Manualmente classificar 30 alerts: úteis vs ruído |
 | Auto-Shadow CLV cutoff -1% | 2026-05-15 | Cutoff certo? Recovery 0% sufficient? | Ver quantos sports flipparam, % falso positivo |

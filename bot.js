@@ -7184,10 +7184,10 @@ Máximo 200 palavras. Raciocínio breve antes da decisão.`;
             // Gate divergência modelo vs Pinnacle (tennis Pinnacle é sharp em ATP/WTA).
             const _impPair = _impliedFromOdds(o);
             const _impPV = _impPair ? (_pickIsT1V ? _impPair.impliedP1 : _impPair.impliedP2) : null;
-            // Cap relaxado de 12 → 15pp baseado em backtest (n=52, 90d):
-            // gates anteriores custaram R$4.82 bloqueando winners. Brier ruim mas ROI positivo.
-            // Sugere modelo descalibrado em magnitude, não em direção. Ver DECISIONS.md.
-            const _maxDivTennis = parseFloat(process.env.TENNIS_MAX_DIVERGENCE_PP ?? '15');
+            // Cap relaxado de 15 → 20pp baseado em Gate Optimizer (n=25, 90d):
+            // cap 15pp bloqueava 7 tips winners; cap 20pp bloqueia só 5 outliers
+            // E tem Brier ótimo do grid (0.185). Cirúrgico. Ver DECISIONS.md.
+            const _maxDivTennis = parseFloat(process.env.TENNIS_MAX_DIVERGENCE_PP ?? '20');
             const _div = _sharpDivergenceGate({ oddsObj: o, modelP: _modelPV, impliedP: _impPV, maxPp: _maxDivTennis });
             if (!_div.ok) {
               log('WARN', 'AUTO-TENNIS', `Tip rejeitada (${match.team1} vs ${match.team2}): ${_div.reason}`);
