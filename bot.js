@@ -10,6 +10,7 @@ const { SPORTS, getSportById, getSportByToken, getTokenToSportMap } = require('.
 const { log, calcKelly, calcKellyFraction, calcKellyWithP, norm, fmtDate, fmtDateTime, fmtDuration, safeParse, cachedHttpGet, markPollHeartbeat } = require('./lib/utils');
 const { adjustStakeUnits } = require('./lib/risk-manager');
 const { esportsPreFilter } = require('./lib/ml');
+const { formatLineShopDM } = require('./lib/line-shopping');
 const { getLolProbability } = require('./lib/lol-model');
 const { getFootballProbability } = require('./lib/football-model');
 const { getTennisProbability, detectSurface } = require('./lib/tennis-model');
@@ -1121,13 +1122,9 @@ async function runAutoAnalysis() {
           if (!riskAdj.ok) { log('INFO', 'RISK', `esports: bloqueada (${riskAdj.reason})`); continue; }
           const tipStakeAdj = `${riskAdj.units.toFixed(1).replace(/\.0$/, '')}u`;
           const gameIcon = '🎮';
-          // Linha de bookmaker — Pinnacle prioritário; mostra alternativa (SX.Bet) se houver linha melhor.
-          const _bmSrcLol = String(result.o?.bookmaker || '').trim();
-          const _altLol = result.o?._alternative;
-          const _altLine = _altLol ? ` (alt ${_altLol.bookmaker}: ${_altLol.t1}/${_altLol.t2})` : '';
-          const bookLineLol = _bmSrcLol
-            ? `🏦 Casa: *${_bmSrcLol}*${_altLine}\n`
-            : '';
+          // Vetor 3 — linha de bookmaker com delta % vs Pinnacle (se alt ≥1.5% melhor).
+          const _pickSideDm = norm(tipTeam) === norm(match.team1) ? 't1' : 't2';
+          const bookLineLol = formatLineShopDM(result.o, _pickSideDm);
           const oddsLabel = hasRealOdds ? '' : '\n⚠️ _Odds estimadas (sem mercado disponível)_';
           const mlEdgeLabel = result.mlScore > 0 ? ` | ML: ${result.mlScore.toFixed(1)}pp` : '';
           const baixaNote = tipConf === 'BAIXA' ? '\n⚠️ _Tip de confiança BAIXA — stake reduzido. Aposte com cautela._' : '';
@@ -1476,11 +1473,13 @@ async function runAutoAnalysis() {
             const baixaNote = tipConf === 'BAIXA' ? `⚠️ _Confiança BAIXA (ML-edge ${result.mlScore.toFixed(1)}pp) — stake reduzido. Aposte com cautela._\n` : '';
             const minTakeOdds = calcMinTakeOdds(tipOdd);
             const minTakeLine = minTakeOdds ? `📉 Odd mínima: *${minTakeOdds}*\n` : '';
+            const bookLineLolUp = formatLineShopDM(result.o, _pickSideUp);
             const tipMsg = `${gameIcon} 💰 *TIP PRÉ-JOGO ESPORTS (Bo1)*\n` +
               `*${match.team1}* vs *${match.team2}*\n📋 ${match.league}\n` +
               (match.time ? `🕐 Início: *${matchTime}* (BRT)\n` : '') +
               `\n🎯 Aposta: *${tipTeam}* ML @ *${tipOdd}*\n` +
               minTakeLine +
+              bookLineLolUp +
               `📈 EV: *${tipEV}*\n💵 Stake: *${tipStakeAdj}* _(${kellyLabel})_\n` +
               `${confEmoji} Confiança: *${tipConf}*${mlEdgeLabel}\n` +
               `${imminentNote}${baixaNote}` +
@@ -6012,7 +6011,8 @@ Máximo 200 palavras.`;
       const liveTag = isLive ? ' 🔴 AO VIVO' : '';
       const minTakeOdds = calcMinTakeOdds(tipOdd);
       const minTakeLine = minTakeOdds ? `\n📉 Odd mínima: *${minTakeOdds}*` : '';
-      const msg = `🎮 *DOTA 2 — ${match.league}*${liveTag}\n${match.team1} vs ${match.team2} | ${match.format || ''}\n📅 ${matchTime} BRT\n\n✅ *TIP: ${tipTeam} @ ${tipOdd}*${minTakeLine}\n💰 Stake: ${tipStakeAdj} | EV: ${tipEV} | Conf: ${tipConf}\n🏦 ${o.bookmaker || 'SX.Bet'}`;
+      const _bookDota = formatLineShopDM(o, isT1bet ? 't1' : 't2').trim();
+      const msg = `🎮 *DOTA 2 — ${match.league}*${liveTag}\n${match.team1} vs ${match.team2} | ${match.format || ''}\n📅 ${matchTime} BRT\n\n✅ *TIP: ${tipTeam} @ ${tipOdd}*${minTakeLine}\n💰 Stake: ${tipStakeAdj} | EV: ${tipEV} | Conf: ${tipConf}\n${_bookDota || `🏦 ${o.bookmaker || 'SX.Bet'}`}`;
 
       try {
         const rec = await serverPost('/record-tip', {
@@ -6183,10 +6183,12 @@ async function analyzeDotaMapTip(match, token) {
   const stakeAdj = String(riskAdj.units.toFixed(1).replace(/\.0$/, '')) + 'u';
 
   const tipConf = pickEv >= 15 ? 'ALTA' : pickEv >= 8 ? 'MÉDIA' : 'BAIXA';
+  const _bookDotaMap = formatLineShopDM(match.mapOdds, pickDir);
   const msg = `🟥 💰 *TIP DOTA2 MAPA ${mapN} (AO VIVO 🔴)*\n` +
     `${match.team1} vs ${match.team2} — série ${match.score1||0}-${match.score2||0}\n` +
     `Pick: *${pickTeam}* (mapa ${mapN})\n` +
     `Odd: ${pickOdd.toFixed(2)} | EV: ${pickEv.toFixed(1)}% | Stake: ${stakeAdj}\n` +
+    _bookDotaMap +
     `Modelo: gold/kill diff + momentum (conf ${(pred.confidence*100).toFixed(0)}%)`;
 
   try {
@@ -6700,12 +6702,14 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
         const leagueLine = fight._eventName
           ? `${fight._org ? fight._org + ' — ' : ''}${fight._eventName}`
           : fight.league;
+        const _bookMma = formatLineShopDM(fight.odds, norm(tipTeam) === norm(fight.team1) ? 't1' : 't2');
         const tipMsg = `${orgLabel}\n` +
           `*${fight.team1}* vs *${fight.team2}*\n📋 ${leagueLine}\n` +
           `🕐 ${fightTime} (BRT)${recLine}${catLine}\n\n` +
           whyLineMma +
           `🎯 Aposta: *${tipTeam}* @ *${tipOdd}*\n` +
           minTakeLine +
+          _bookMma +
           `📈 EV: *+${tipEV}%* | De-juice: ${tipTeam === fight.team1 ? fairP1 : fairP2}%\n` +
           `💵 Stake: *${tipStakeAdjMma}u* _(${kellyLabelMma})_\n` +
           `${confEmoji} Confiança: *${_confEffMma}*${bookSourceLine}\n` +
@@ -7311,6 +7315,7 @@ Máximo 200 palavras. Raciocínio breve antes da decisão.`;
           liveScoreLine = `📊 Placar: *${ls.setsHome}-${ls.setsAway}* (${setsDetail})\n`;
         }
 
+        const _bookTennis = formatLineShopDM(o, norm(tipPlayer) === norm(match.team1) ? 't1' : 't2');
         const tipMsg = `🎾 💰 *TIP TÊNIS${isLiveTennis ? ' (AO VIVO 🔴)' : ''}*\n` +
           `*${match.team1}* vs *${match.team2}*\n` +
           `📋 ${match.league}${grandSlamBadge}\n` +
@@ -7319,6 +7324,7 @@ Máximo 200 palavras. Raciocínio breve antes da decisão.`;
           whyLineTennis +
           `🎯 Aposta: *${tipPlayer}* @ *${tipOdd}*\n` +
           minTakeLine +
+          _bookTennis +
           `📈 EV: *+${tipEV}%* | De-juice: ${tipPlayer === match.team1 ? fairP1 : fairP2}%\n` +
           `💵 Stake: *${tipStake}u*\n` +
           `${confEmoji} Confiança: *${tipConf}*\n\n` +
@@ -7808,12 +7814,15 @@ Máximo 200 palavras.`;
         const minTakeOdds = calcMinTakeOdds(tipOdd);
         const minTakeLine = minTakeOdds ? `📉 Odd mínima: *${minTakeOdds}*\n` : '';
 
+        const _pickSideFbDm = tipMarket === '1X2_H' ? 'h' : tipMarket === '1X2_A' ? 'a' : tipMarket === '1X2_D' ? 'd' : null;
+        const _bookFb = _pickSideFbDm ? formatLineShopDM(match.odds, _pickSideFbDm) : '';
         const tipMsg = `⚽ 💰 *TIP FUTEBOL*\n` +
           `*${match.team1}* vs *${match.team2}*\n` +
           `📋 ${match.league}\n` +
           `🕐 ${matchTime} (BRT)\n\n` +
           `🎯 Aposta: ${marketLabel} @ *${tipOdd}*\n` +
           minTakeLine +
+          _bookFb +
           `📈 EV: *+${tipEV}%* | Mercado: ${probMkt}%${probMdl ? ` | Modelo: ${probMdl}%` : ''}\n` +
           `💵 Stake: *${tipStake}u*\n` +
           `${confEmoji} Confiança: *${tipConf}*\n` +
@@ -8083,12 +8092,14 @@ async function pollTableTennis(runOnce = false) {
 
         const confEmoji = { ALTA: '🟢', MÉDIA: '🟡', BAIXA: '🔴' }[conf] || '🟡';
         const fightTime = match.time ? new Date(match.time).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—';
+        const _bookTT = formatLineShopDM(match.odds, direction);
         const msg = `🏓 💰 *TIP TÊNIS DE MESA*\n\n` +
           `*${match.team1}* vs *${match.team2}*\n📋 ${match.league}\n🕐 ${fightTime} (BRT)\n\n` +
           `🎯 Aposta: *${pickTeam}* @ *${pickOdd}*\n` +
           `📈 EV: *+${evPct.toFixed(1)}%*\n` +
           `💵 Stake: *${stakeAdj}u*\n` +
           `${confEmoji} Confiança: *${conf}*\n` +
+          _bookTT +
           `_${tipReason}_\n\n` +
           `⚠️ _Aposte com responsabilidade._`;
 
@@ -8431,12 +8442,14 @@ Máximo 150 palavras.`;
         const confEmoji = { ALTA: '🟢', MÉDIA: '🟡', BAIXA: '🔴' }[conf] || '🟡';
         const matchTime = match.time ? new Date(match.time).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—';
         const phaseLabel = csMapNum > 0 ? ` — MAPA ${csMapNum} (série ${match.score1||0}-${match.score2||0})` : '';
+        const _bookCs = formatLineShopDM(match.odds, direction);
         const msg = `🔫 💰 *TIP CS2${phaseLabel}*\n\n` +
           `*${match.team1}* vs *${match.team2}*\n📋 ${match.league}${match.format ? ` (${match.format})` : ''}\n🕐 ${matchTime} (BRT)\n\n` +
           `🎯 Aposta: *${pickTeam}* @ *${pickOdd}*\n` +
           `📈 EV: *+${evPct.toFixed(1)}%*\n` +
           `💵 Stake: *${stakeAdj}u*\n` +
           `${confEmoji} Confiança: *${conf}*\n` +
+          _bookCs +
           `_${tipReason}_\n\n` +
           `⚠️ _Aposte com responsabilidade._`;
 
@@ -8742,12 +8755,14 @@ async function pollValorant(runOnce = false) {
         const confEmoji = { ALTA: '🟢', MÉDIA: '🟡', BAIXA: '🔴' }[conf] || '🟡';
         const matchTime = match.time ? new Date(match.time).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—';
         const phaseLabel = valMapNum > 0 ? ` — MAPA ${valMapNum} (série ${match.score1||0}-${match.score2||0})` : '';
+        const _bookVal = formatLineShopDM(match.odds, direction);
         const msg = `🎯 💰 *TIP VALORANT${phaseLabel}*\n\n` +
           `*${match.team1}* vs *${match.team2}*\n📋 ${match.league}${match.format ? ` (${match.format})` : ''}\n🕐 ${matchTime} (BRT)\n\n` +
           `🎯 Aposta: *${pickTeam}* @ *${pickOdd}*\n` +
           `📈 EV: *+${evPct.toFixed(1)}%*\n` +
           `💵 Stake: *${stakeAdj}u*\n` +
           `${confEmoji} Confiança: *${conf}*\n` +
+          _bookVal +
           `_${tipReason}_\n\n` +
           `⚠️ _Aposte com responsabilidade._`;
 
@@ -8961,11 +8976,13 @@ async function runAutoDarts() {
             continue;
           }
 
+          const _bookDarts = formatLineShopDM(match.odds, ml.direction);
           const tipMsg = `🎯 💰 *TIP DARTS${isLiveDarts ? ' (AO VIVO 🔴)' : ''}*\n` +
             `*${match.team1}* vs *${match.team2}*\n📋 ${match.league}\n\n` +
             `🎯 Aposta: *${pickTeam}* @ *${pickOdd}*\n` +
             `📈 EV: *+${evPct.toFixed(1)}%*\n` +
             `💵 Stake: *${stakeAdj}u* _(1/8 Kelly)_\n` +
+            _bookDarts +
             `🧠 Por quê: _${tipReason}_\n\n` +
             `⚠️ _Aposte com responsabilidade._`;
 
@@ -9130,11 +9147,13 @@ async function runAutoSnooker() {
             continue;
           }
 
+          const _bookSn = formatLineShopDM(match.odds, ml.direction);
           const tipMsg = `🎱 💰 *TIP SNOOKER${isLiveSnooker ? ' (AO VIVO 🔴)' : ''}*\n` +
             `*${match.team1}* vs *${match.team2}*\n📋 ${match.league}\n\n` +
             `🎯 Aposta: *${pickTeam}* @ *${pickOdd}*\n` +
             `📈 EV: *+${evPct.toFixed(1)}%*\n` +
             `💵 Stake: *${stakeAdj}u*\n` +
+            _bookSn +
             `🧠 ${tipReason}\n\n` +
             `⚠️ _Odds Pinnacle._`;
 
