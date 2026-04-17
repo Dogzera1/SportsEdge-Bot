@@ -624,6 +624,15 @@ function isMainLeague(leagueSlug) {
   const slug = String(leagueSlug).toLowerCase().replace(/[^a-z0-9-]/g, '');
   return LOL_MAIN_LEAGUES.has(slug);
 }
+// Detecta se liga LoL é tier1 (premier). Pra ligas tier 2-3 endurecemos gates pós-bleed
+// histórico: ROI -56% em tier2plus por EV inflado em Prime League/LFL/Rift Legends/etc.
+function isLolTier1(leagueOrSlug) {
+  if (!leagueOrSlug) return false;
+  const slug = String(leagueOrSlug).toLowerCase().replace(/[^a-z0-9-]/g, '');
+  if (LOL_MAIN_LEAGUES.has(slug)) return true;
+  // Match por nome também (event_name vs leagueSlug)
+  return /\b(lck|lec|lcs|lpl|msi|worlds|cblol|cbloldbrazil|lla|pcs|lco|vcs|esports world cup)\b/i.test(String(leagueOrSlug));
+}
 
 // Cache de drawdown por sport (atualizado a cada chamada de risk)
 const _drawdownCache = new Map(); // sport → { pct, checkedAt }
@@ -1066,6 +1075,14 @@ async function runAutoAnalysis() {
             analyzedMatches.set(matchKey, { ts: now, tipSent: false, noEdge: true });
             continue;
           }
+          // Cap LoL tier 2-3: histórico ROI -56% nessas ligas (Prime League/LFL/Rift Legends/etc) por EV inflado.
+          // Em tier 2-3, EV reportado > 25% é red flag de modelo errado; rebaixa conf.
+          const _lolTier1Live = isLolTier1(match.leagueSlug || match.league);
+          if (!_lolTier1Live && !isNaN(tipEVnumLive) && tipEVnumLive > 25) {
+            log('WARN', 'AUTO', `Gate LoL tier2+ LIVE: ${match.team1} vs ${match.team2} (${match.league}) → EV ${tipEVnumLive}% > 25% em liga não-premier → rejeitado`);
+            analyzedMatches.set(matchKey, { ts: now, tipSent: false, noEdge: true });
+            continue;
+          }
           // Gate BAIXA endurecido (2026-04-15): histórico mostra BAIXA perdendo muito em LoL.
           // Exige ML-edge ≥10pp E EV ≥ 8% pra compensar baixa confiança da IA.
           if (tipConf === CONF.BAIXA) {
@@ -1396,6 +1413,13 @@ async function runAutoAnalysis() {
             const tipEVnum = parseFloat(String(tipEV).replace('%', '').replace('+', ''));
             if (!isNaN(tipEVnum) && tipEVnum > 50) {
               log('WARN', 'AUTO', `Gate EV sanity upcoming: ${match.team1} vs ${match.team2} → EV ${tipEVnum}% > 50% (provável erro de cálculo da IA) → rejeitado`);
+              analyzedMatches.set(matchKey, { ts: now, tipSent: false, noEdge: true });
+              await new Promise(r => setTimeout(r, 3000)); continue;
+            }
+            // Cap LoL tier 2-3 upcoming: bleed histórico ROI -56% por EV inflado em ligas não-premier.
+            const _lolTier1Up = isLolTier1(match.leagueSlug || match.league);
+            if (!_lolTier1Up && !isNaN(tipEVnum) && tipEVnum > 25) {
+              log('WARN', 'AUTO', `Gate LoL tier2+ upcoming: ${match.team1} vs ${match.team2} (${match.league}) → EV ${tipEVnum}% > 25% em liga não-premier → rejeitado`);
               analyzedMatches.set(matchKey, { ts: now, tipSent: false, noEdge: true });
               await new Promise(r => setTimeout(r, 3000)); continue;
             }

@@ -7050,6 +7050,9 @@ const server = http.createServer(async (req, res) => {
       tennis:   /\b(grand slam|wimbledon|us open|roland garros|australian open|atp masters|wta 1000|atp 1000|atp finals|wta finals)\b/i,
       mma:      /\b(ufc \d{3,}|ufc on |ufc fight night|ufc apex)\b/i,
       football: /\b(premier league|la liga|bundesliga|serie a$|ligue 1|champions league|brasileirao|brasileirão|copa libertadores)\b/i,
+      darts:    /\b(pdc world|premier league darts|world matchplay|world grand prix|uk open|players championship|european tour|grand slam|world series finals)\b/i,
+      snooker:  /\b(world snooker|world championship|uk championship|masters\b|tour championship|german masters|shanghai masters|world grand prix|players championship)\b/i,
+      tabletennis: /\b(wtt champions|wtt finals|wtt cup|olympics|world championships|world cup|european championships)\b/i,
     };
     const tierOf = (sport, eventName) => {
       const re = TIER1_REGEX[sport];
