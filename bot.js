@@ -2229,8 +2229,19 @@ async function runBankrollGuardianCycle() {
 
   const sevIcon = { critical: '🚨', warning: '⚠️', info: 'ℹ️' };
   const lines = newAlerts.map(a => `${sevIcon[a.severity] || '🔧'} *${a.sport.toUpperCase()}* | DD ${a.drawdown_pct?.toFixed(1) || '-'}% | ${a.action}\n   └─ ${a.message}`).join('\n');
+  const initial = result.overall.total_initial.toFixed(2);
+  const current = result.overall.total_current.toFixed(2);
+  const peak = result.overall.total_peak.toFixed(2);
+  const growth = result.overall.overall_growth_pct;
+  const growthStr = growth != null ? `${growth >= 0 ? '+' : ''}${growth.toFixed(2)}%` : '-';
+  const profitR = (result.overall.total_current - result.overall.total_initial).toFixed(2);
+  const profitStr = `${profitR >= 0 ? '+' : ''}R$${profitR}`;
   const msg = `💰 *BANKROLL GUARDIAN*\n\n${lines}\n\n` +
-    `Banca total: R$${result.overall.total_current.toFixed(2)} (DD ${result.overall.overall_drawdown_pct.toFixed(1)}%)\n` +
+    `*Banca consolidada:*\n` +
+    `• Inicial: R$${initial}\n` +
+    `• Atual:   R$${current} (${profitStr} | ${growthStr})\n` +
+    `• Pico:    R$${peak}\n` +
+    `• DD atual: ${result.overall.overall_drawdown_pct.toFixed(2)}%\n\n` +
     `_Cooldown 1h por sport. Auto-restore quando DD<10%._`;
   for (const adminId of ADMIN_IDS) await sendDM(tokenForAlert, adminId, msg).catch(() => {});
 }
@@ -2404,7 +2415,9 @@ async function runDailyHealthIfTime() {
     }
     if (ctx.bankroll_guardian?.overall) {
       const o = ctx.bankroll_guardian.overall;
-      summary.push(`💰 Banca total: R$${o.total_current.toFixed(2)} (DD ${o.overall_drawdown_pct.toFixed(1)}%, growth ${o.overall_growth_pct?.toFixed(1) || '-'}%)`);
+      const profitR = (o.total_current - o.total_initial).toFixed(2);
+      const profitStr = `${profitR >= 0 ? '+' : ''}R$${profitR}`;
+      summary.push(`💰 Banca: R$${o.total_initial.toFixed(2)} → *R$${o.total_current.toFixed(2)}* (${profitStr} | growth ${o.overall_growth_pct?.toFixed(2) || '-'}% | DD ${o.overall_drawdown_pct.toFixed(2)}%)`);
     }
     if (ctx.health_sentinel?.summary) {
       const hs = ctx.health_sentinel.summary;
