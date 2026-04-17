@@ -634,7 +634,10 @@ async function loadExistingTips() {
     if (Array.isArray(tennisTips)) {
       for (const tip of tennisTips) {
         if (!tip.match_id) continue;
-        analyzedTennis.set(`tennis_${tip.match_id}`, { ts: Date.now(), tipSent: true });
+        const k = `tennis_${tip.match_id}`;
+        const existing = analyzedTennis.get(k) || { ts: Date.now() };
+        if (tip.is_live) existing.tipSentLive = true; else existing.tipSentPre = true;
+        analyzedTennis.set(k, existing);
       }
       if (tennisTips.length) log('INFO', 'BOOT', `Tênis: ${tennisTips.length} tips existentes carregadas`);
     }
@@ -5696,14 +5699,17 @@ async function pollTennis(runOnce = false) {
         }
         const key = `tennis_${match.id}`;
         const prev = analyzedTennis.get(key);
-        if (prev?.tipSent) {
-          log('DEBUG', 'AUTO-TENNIS', `Skip ${match.team1} vs ${match.team2} (${match.status}): tip já enviada`);
+        const isLivePhase = match.status === 'live';
+        const phaseTipSent = isLivePhase ? prev?.tipSentLive : prev?.tipSentPre;
+        if (phaseTipSent) {
+          log('DEBUG', 'AUTO-TENNIS', `Skip ${match.team1} vs ${match.team2} (${match.status}): tip já enviada nesta fase`);
           continue;
         }
         // Live: 15min | Pré-jogo: 6h (configurável)
-        const cooldown = match.status === 'live' ? TENNIS_LIVE_INTERVAL : TENNIS_PREGAME_INTERVAL;
-        if (prev && (now - prev.ts < cooldown)) {
-          log('DEBUG', 'AUTO-TENNIS', `Skip ${match.team1} vs ${match.team2} (${match.status}): cooldown ${Math.round((cooldown-(now-prev.ts))/1000)}s restante`);
+        const cooldown = isLivePhase ? TENNIS_LIVE_INTERVAL : TENNIS_PREGAME_INTERVAL;
+        const phaseTs = isLivePhase ? (prev?.tsLive || 0) : (prev?.tsPre || 0);
+        if (phaseTs && (now - phaseTs < cooldown)) {
+          log('DEBUG', 'AUTO-TENNIS', `Skip ${match.team1} vs ${match.team2} (${match.status}): cooldown ${Math.round((cooldown-(now-phaseTs))/1000)}s restante`);
           continue;
         }
 
@@ -6021,7 +6027,7 @@ DECISÃO:
 Máximo 200 palavras. Raciocínio breve antes da decisão.`;
 
         log('INFO', 'AUTO-TENNIS', `Analisando: ${match.team1} vs ${match.team2} | ${match.league} | ${surfacePT}${usingEloModel ? ' [Elo]' : (hasRealData ? ' [ESPN/DB+]' : '')}`);
-        analyzedTennis.set(key, { ts: now, tipSent: false });
+        analyzedTennis.set(key, Object.assign({}, prev || {}, { ts: now, [isLivePhase ? 'tsLive' : 'tsPre']: now }));
 
         let resp;
         try {
@@ -6170,7 +6176,7 @@ Máximo 200 palavras. Raciocínio breve antes da decisão.`;
         }
 
         if (rec?.skipped) {
-          analyzedTennis.set(key, { ts: now, tipSent: true });
+          analyzedTennis.set(key, Object.assign({}, analyzedTennis.get(key) || {}, { ts: now, [isLivePhase ? 'tipSentLive' : 'tipSentPre']: true, [isLivePhase ? 'tsLive' : 'tsPre']: now }));
           log('INFO', 'AUTO-TENNIS', `Tip duplicada (já registrada), Telegram ignorado: ${match.team1} vs ${match.team2}`);
           continue;
         }
@@ -6187,8 +6193,8 @@ Máximo 200 palavras. Raciocínio breve antes da decisão.`;
           if (!prefs.has('tennis')) continue;
           try { await sendDM(token, userId, tipMsg); } catch(_) {}
         }
-        analyzedTennis.set(key, { ts: now, tipSent: true });
-        log('INFO', 'AUTO-TENNIS', `Tip enviada: ${tipPlayer} @ ${tipOdd} | EV:${tipEV}% | ${tipConf}`);
+        analyzedTennis.set(key, Object.assign({}, analyzedTennis.get(key) || {}, { ts: now, [isLivePhase ? 'tipSentLive' : 'tipSentPre']: true, [isLivePhase ? 'tsLive' : 'tsPre']: now }));
+        log('INFO', 'AUTO-TENNIS', `Tip enviada${isLivePhase ? ' (LIVE)' : ''}: ${tipPlayer} @ ${tipOdd} | EV:${tipEV}% | ${tipConf}`);
         await new Promise(r => setTimeout(r, 5000));
       }
       if (!_drainedT && _hasLiveT) _livePhaseExit('tennis');
