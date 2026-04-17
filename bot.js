@@ -2234,6 +2234,61 @@ async function runBankrollGuardianCycle() {
   for (const adminId of ADMIN_IDS) await sendDM(tokenForAlert, adminId, msg).catch(() => {});
 }
 
+// ── News Monitor ──
+const _newsAlerted = new Set(); // dedup por hash titulo+source
+const NEWS_DM_COOLDOWN_MS = 30 * 60 * 1000; // 30min cooldown global
+
+let _lastNewsDM = 0;
+async function runNewsMonitorCycle() {
+  if (!ADMIN_IDS.size) return;
+  let result = null;
+  try {
+    const ext = require('./lib/agents-extended');
+    result = await ext.runNewsMonitor(`http://127.0.0.1:${process.env.PORT || 8080}`, db);
+  } catch (e) {
+    log('WARN', 'NEWS-MONITOR', `falhou: ${e.message}`);
+    return;
+  }
+  if (!result?.ok || !result.alerts?.length) {
+    log('DEBUG', 'NEWS-MONITOR', `Ciclo OK — ${result?.summary?.sources_ok || 0}/${result?.summary?.sources_fetched || 0} sources, 0 alertas`);
+    return;
+  }
+
+  // Filtra alerts novos (não vistos)
+  const newAlerts = result.alerts.filter(a => {
+    const key = `${a.source}::${a.title.slice(0, 80)}`;
+    if (_newsAlerted.has(key)) return false;
+    _newsAlerted.add(key);
+    return true;
+  });
+  if (!newAlerts.length) return;
+
+  // Cooldown DM global pra agrupar
+  if (Date.now() - _lastNewsDM < NEWS_DM_COOLDOWN_MS) {
+    log('DEBUG', 'NEWS-MONITOR', `${newAlerts.length} alerta(s) novo(s) mas em cooldown DM`);
+    return;
+  }
+  _lastNewsDM = Date.now();
+
+  // Filtra: só alerta DM se affecta tip OU é critical sem tip
+  const dmWorthy = newAlerts.filter(a => a.matched_tips_count > 0 || a.severity === 'critical');
+  if (!dmWorthy.length) return;
+
+  const tokenForAlert = Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
+  if (!tokenForAlert) return;
+
+  const sevIcon = { critical: '🚨', warning: '⚠️' };
+  const lines = dmWorthy.slice(0, 10).map(a => {
+    const tipNote = a.matched_tips_count > 0 ? ` 🎯 *afeta ${a.matched_tips_count} tip(s)* (#${a.matched_tip_ids.slice(0, 3).join(', #')})` : '';
+    const sourceNote = ` _(${a.source})_`;
+    return `${sevIcon[a.severity]} *${a.sport.toUpperCase()}*${tipNote}\n   ${a.title}${sourceNote}`;
+  }).join('\n\n');
+  const msg = `📰 *NEWS MONITOR*\n\n${lines}\n\n_Próximo ciclo em 15min. Cooldown DM 30min._`;
+  for (const adminId of ADMIN_IDS) await sendDM(tokenForAlert, adminId, msg).catch(() => {});
+
+  log('WARN', 'NEWS-MONITOR', `${dmWorthy.length} alerta(s) enviado(s) | tips afetadas: ${result.summary.tips_affected}`);
+}
+
 // ── Pre-Match Final Check ──
 const _preMatchAlerted = new Set();
 
@@ -9147,6 +9202,10 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   // Pre-Match Final Check: cron 5min, valida tips a <30min do match.
   setInterval(() => runPreMatchFinalCheckCycle().catch(e => log('ERROR', 'PRE-MATCH-CHECK', e.message)), 5 * 60 * 1000);
   setTimeout(() => runPreMatchFinalCheckCycle().catch(() => {}), 6 * 60 * 1000);
+
+  // News Monitor: cron 15min, varre RSS feeds, alerta sobre tips pendentes afetadas.
+  setInterval(() => runNewsMonitorCycle().catch(e => log('ERROR', 'NEWS-MONITOR', e.message)), 15 * 60 * 1000);
+  setTimeout(() => runNewsMonitorCycle().catch(() => {}), 8 * 60 * 1000);
 
   // IA Health Monitor: cron 1h.
   setInterval(() => runIaHealthCycle().catch(e => log('ERROR', 'IA-HEALTH', e.message)), 60 * 60 * 1000);

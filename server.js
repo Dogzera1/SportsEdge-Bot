@@ -8024,6 +8024,13 @@ const server = http.createServer(async (req, res) => {
     sendJson(res, { ok: true, ...ext.getDecisionTree() });
     return;
   }
+  if (p === '/agents/news-monitor') {
+    if (!requireAdmin(req, res)) return;
+    const ext = require('./lib/agents-extended');
+    ext.runNewsMonitor(`http://127.0.0.1:${PORT}`, db).then(d => sendJson(res, d))
+      .catch(e => sendJson(res, { ok: false, error: e.message }, 500));
+    return;
+  }
 
   // Orchestrator: roda workflows compostos (sentinel + healer, scout + medic, etc).
   // GET /agents/orchestrator?workflow=full_diagnostic
@@ -8052,6 +8059,7 @@ const server = http.createServer(async (req, res) => {
         'cut-advisor': () => ext.runCutAdvisor(base),
         'live-storm': () => ext.runLiveStormManager(base),
         'ia-health': () => ext.runIaHealthMonitor(base, dashboard.getClassifiedBuffer),
+        'news-monitor': () => ext.runNewsMonitor(base, db),
         'auto-healer': async () => ({ ok: true, note: 'auto-healer roda via cron interno do bot.js (a cada 5min). Endpoint orchestrator não invoca diretamente.', applied: [] }),
       },
     };
