@@ -8133,6 +8133,75 @@ const server = http.createServer(async (req, res) => {
       .catch(e => sendJson(res, { ok: false, error: e.message }, 500));
     return;
   }
+  // Admin: roda sync Sackmann no servidor (popula match_results retroativo).
+  // POST /admin/sync-sackmann?years=2024,2025&tour=atp,wta
+  if (p === '/admin/sync-sackmann' && req.method === 'POST') {
+    if (!requireAdmin(req, res)) return;
+    const years = (parsed.query.years || '2024,2025,2026').split(',').map(s => s.trim()).filter(Boolean);
+    const tours = (parsed.query.tour || 'atp,wta').split(',').map(s => s.trim()).filter(Boolean);
+    const results = [];
+    let totalInserted = 0;
+
+    const insertStmt = db.prepare(`
+      INSERT OR REPLACE INTO match_results (match_id, game, team1, team2, winner, final_score, league, resolved_at)
+      VALUES (?, 'tennis', ?, ?, ?, ?, ?, ?)
+    `);
+
+    const parseSackmannDate = (s) => {
+      if (!s || s.length !== 8) return null;
+      return `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6, 8)} 00:00:00`;
+    };
+    const parseCsv = (text) => {
+      const lines = text.trim().split('\n');
+      if (lines.length < 2) return [];
+      const headers = lines[0].split(',').map(h => h.trim());
+      const rows = [];
+      for (let i = 1; i < lines.length; i++) {
+        const cols = lines[i].split(',');
+        if (cols.length < headers.length) continue;
+        const row = {};
+        for (let j = 0; j < headers.length; j++) row[headers[j]] = (cols[j] || '').trim();
+        rows.push(row);
+      }
+      return rows;
+    };
+
+    (async () => {
+      for (const tour of tours) {
+        for (const year of years) {
+          const repo = tour === 'wta' ? 'tennis_wta' : 'tennis_atp';
+          const filePrefix = tour === 'wta' ? 'wta_matches' : 'atp_matches';
+          const url = `https://raw.githubusercontent.com/JeffSackmann/${repo}/master/${filePrefix}_${year}.csv`;
+
+          const r = await httpGet(url, { 'User-Agent': 'SportsEdge-Sync/1.0' }).catch(() => null);
+          if (!r || r.status !== 200) {
+            results.push({ tour, year, status: r?.status || 'fail', inserted: 0 });
+            continue;
+          }
+          const rows = parseCsv(r.body);
+          let inserted = 0;
+          const trx = db.transaction((rs) => {
+            for (const row of rs) {
+              const matchId = `sackmann_${tour}_${row.tourney_id}_${row.match_num}`;
+              const winner = row.winner_name, loser = row.loser_name;
+              const tn = row.tourney_name, surface = row.surface, score = row.score;
+              const date = parseSackmannDate(row.tourney_date);
+              if (!winner || !loser || !tn || !date) continue;
+              const lws = surface ? `${tn} [${surface.toLowerCase()}]` : tn;
+              insertStmt.run(matchId, winner, loser, winner, score || '', lws, date);
+              inserted++;
+            }
+          });
+          trx(rows);
+          totalInserted += inserted;
+          results.push({ tour, year, status: 200, parsed: rows.length, inserted });
+        }
+      }
+      const after = db.prepare(`SELECT COUNT(*) as n FROM match_results WHERE game='tennis'`).get().n;
+      sendJson(res, { ok: true, total_inserted: totalInserted, total_tennis_after: after, results });
+    })().catch(e => sendJson(res, { ok: false, error: e.message }, 500));
+    return;
+  }
   if (p === '/agents/tennis-v2-smoke') {
     if (!requireAdmin(req, res)) return;
     try {
