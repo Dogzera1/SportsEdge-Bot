@@ -7,7 +7,7 @@ const dns = require('dns');
 dns.setDefaultResultOrder('ipv4first');
 const initDatabase = require('./lib/database');
 const { SPORTS, getSportById } = require('./lib/sports');
-const { log, sendJson, safeParse, norm, httpGet, cachedHttpGet, aiPost, oddsApiAllowed, oddsApiPeek, oddsApiQuotaStatus, getMetricsLite, calcKellyWithP, getLogBuffer, addLogClient, removeLogClient } = require('./lib/utils');
+const { log, sendJson, safeParse, norm, httpGet, cachedHttpGet, aiPost, oddsApiAllowed, oddsApiPeek, oddsApiQuotaStatus, getMetricsLite, calcKellyWithP, getLogBuffer, addLogClient, removeLogClient, ingestExternalLog } = require('./lib/utils');
 const dashboard = require('./lib/dashboard');
 const footballData  = require('./lib/football-data');
 const apiFootball   = require('./lib/api-football');
@@ -7371,6 +7371,26 @@ const server = http.createServer(async (req, res) => {
     addLogClient(res);
     const ka = setInterval(() => { try { res.write(':ka\n\n'); } catch(_) {} }, 15000);
     req.on('close', () => { clearInterval(ka); removeLogClient(res); });
+    return;
+  }
+  // Ingest de logs externos (chamado pelo start.js a partir do stdout do bot.js).
+  // Aceita loopback (127.0.0.1/::1) sem admin key — é IPC interno.
+  if (p === '/logs/ingest' && req.method === 'POST') {
+    const ra = String(req.socket?.remoteAddress || '');
+    const isLoopback = ra === '127.0.0.1' || ra === '::1' || ra === '::ffff:127.0.0.1';
+    if (!isLoopback && !requireAdmin(req, res)) return;
+    let body = '';
+    req.on('data', c => { if (body.length < 500_000) body += c; });
+    req.on('end', () => {
+      try {
+        const j = JSON.parse(body || '{}');
+        const lines = Array.isArray(j.lines) ? j.lines : (j.line ? [j.line] : []);
+        for (const ln of lines) ingestExternalLog(ln);
+        sendJson(res, { ok: true, ingested: lines.length });
+      } catch (e) {
+        sendJson(res, { ok: false, error: e.message }, 400);
+      }
+    });
     return;
   }
 

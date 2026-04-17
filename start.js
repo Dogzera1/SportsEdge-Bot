@@ -4,6 +4,39 @@
 // processes agree on which port to use for internal HTTP communication.
 
 const { spawn } = require('child_process');
+const http = require('http');
+
+// Buffer de linhas pra mandar ao /logs/ingest do server (batched)
+const _pendingLines = [];
+let _flushTimer = null;
+function scheduleIngestFlush() {
+  if (_flushTimer) return;
+  _flushTimer = setTimeout(flushIngest, 500);
+}
+function flushIngest() {
+  _flushTimer = null;
+  if (!_pendingLines.length) return;
+  const lines = _pendingLines.splice(0, _pendingLines.length);
+  const payload = JSON.stringify({ lines });
+  const req = http.request({
+    host: '127.0.0.1',
+    port: process.env.SERVER_PORT || process.env.PORT || 3000,
+    path: '/logs/ingest',
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) },
+    timeout: 4000,
+  }, (res) => { res.resume(); });
+  req.on('error', () => { /* server pode estar reiniciando; descarta */ });
+  req.on('timeout', () => req.destroy());
+  req.write(payload); req.end();
+}
+function pipeLineToServer(raw) {
+  const line = String(raw || '').replace(/\r$/, '');
+  if (!line.trim()) return;
+  _pendingLines.push(line);
+  if (_pendingLines.length >= 40) flushIngest();
+  else scheduleIngestFlush();
+}
 
 let PORT = process.env.PORT || process.env.SERVER_PORT || '3000';
 process.env.SERVER_PORT = String(PORT); // keep in sync
@@ -22,9 +55,30 @@ console.log(`[LAUNCHER] PORT=${PORT} | DB=${DB_PATH}`);
 
 const _crashCount = {};
 function spawnChild(name, file) {
+  // Captura stdout/stderr via pipe pra espelhar no Railway console E ingerir no buffer do server.
   const child = spawn('node', [file], {
-    stdio: 'inherit',
+    stdio: ['inherit', 'pipe', 'pipe'],
     env: process.env
+  });
+
+  let outBuf = '', errBuf = '';
+  child.stdout.on('data', d => {
+    outBuf += d.toString('utf8');
+    const parts = outBuf.split('\n');
+    outBuf = parts.pop() || '';
+    for (const ln of parts) {
+      process.stdout.write(ln + '\n');
+      pipeLineToServer(ln);
+    }
+  });
+  child.stderr.on('data', d => {
+    errBuf += d.toString('utf8');
+    const parts = errBuf.split('\n');
+    errBuf = parts.pop() || '';
+    for (const ln of parts) {
+      process.stderr.write(ln + '\n');
+      pipeLineToServer(ln);
+    }
   });
 
   child.on('exit', (code, signal) => {
