@@ -121,7 +121,12 @@
 
   /* ── Agents ── */
   .agent-card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
-  .agent-head { display: flex; align-items: center; gap: 10px; padding: 10px 14px; background: var(--panel2); border-bottom: 1px solid var(--border); }
+  .agent-head { display: flex; align-items: center; gap: 10px; padding: 10px 14px; background: var(--panel2); border-bottom: 1px solid var(--border); cursor: pointer; user-select: none; }
+  .agent-head:hover { background: rgba(96,165,250,0.08); }
+  .agent-toggle { display: inline-block; transition: transform .2s; color: var(--muted); font-size: 12px; width: 14px; }
+  .agent-card.collapsed .agent-toggle { transform: rotate(-90deg); }
+  .agent-card.collapsed .agent-body { display: none; }
+  .agent-card.collapsed .agent-head { border-bottom: none; }
   .agent-title { font-size: 14px; font-weight: 700; }
   .agent-meta { color: var(--muted); font-size: 11px; margin-left: auto; font-family: ui-monospace, Menlo, Consolas, monospace; }
   .agent-refresh { background: var(--panel); border: 1px solid var(--border); color: var(--text); padding: 4px 10px; border-radius: 6px; cursor: pointer; font: inherit; font-size: 13px; }
@@ -261,7 +266,7 @@
     <!-- Backtest Validator -->
     <div class="agent-card" id="agent-backtest-validator">
       <div class="agent-head">
-        <span class="agent-title">🔬 Backtest Validator</span>
+        <span class="agent-toggle">&#9662;</span><span class="agent-title">🔬 Backtest Validator</span>
         <span class="agent-meta" id="backtestValidatorMeta">—</span>
         <button class="agent-refresh" data-agent="backtest-validator">↻</button>
       </div>
@@ -270,7 +275,7 @@
     <!-- Bankroll Guardian -->
     <div class="agent-card" id="agent-bankroll-guardian">
       <div class="agent-head">
-        <span class="agent-title">💰 Bankroll Guardian</span>
+        <span class="agent-toggle">&#9662;</span><span class="agent-title">💰 Bankroll Guardian</span>
         <span class="agent-meta" id="bankrollGuardianMeta">—</span>
         <button class="agent-refresh" data-agent="bankroll-guardian">↻</button>
       </div>
@@ -279,7 +284,7 @@
     <!-- Cut Advisor -->
     <div class="agent-card" id="agent-cut-advisor">
       <div class="agent-head">
-        <span class="agent-title">✂️ Cut Advisor</span>
+        <span class="agent-toggle">&#9662;</span><span class="agent-title">✂️ Cut Advisor</span>
         <span class="agent-meta" id="cutAdvisorMeta">—</span>
         <button class="agent-refresh" data-agent="cut-advisor">↻</button>
       </div>
@@ -288,7 +293,7 @@
     <!-- Pre-Match Final Check -->
     <div class="agent-card" id="agent-pre-match-check">
       <div class="agent-head">
-        <span class="agent-title">🔍 Pre-Match Final Check</span>
+        <span class="agent-toggle">&#9662;</span><span class="agent-title">🔍 Pre-Match Final Check</span>
         <span class="agent-meta" id="preMatchCheckMeta">—</span>
         <button class="agent-refresh" data-agent="pre-match-check">↻</button>
       </div>
@@ -297,7 +302,7 @@
     <!-- News Monitor -->
     <div class="agent-card" id="agent-news-monitor">
       <div class="agent-head">
-        <span class="agent-title">📰 News Monitor</span>
+        <span class="agent-toggle">&#9662;</span><span class="agent-title">📰 News Monitor</span>
         <span class="agent-meta" id="newsMonitorMeta">—</span>
         <button class="agent-refresh" data-agent="news-monitor">↻</button>
       </div>
@@ -306,7 +311,7 @@
     <!-- Model Calibration Watcher -->
     <div class="agent-card" id="agent-model-calibration">
       <div class="agent-head">
-        <span class="agent-title">🎯 Model Calibration Watcher</span>
+        <span class="agent-toggle">&#9662;</span><span class="agent-title">🎯 Model Calibration Watcher</span>
         <span class="agent-meta" id="modelCalibrationMeta">—</span>
         <button class="agent-refresh" data-agent="model-calibration">↻</button>
       </div>
@@ -315,7 +320,7 @@
     <!-- IA Health Monitor -->
     <div class="agent-card" id="agent-ia-health">
       <div class="agent-head">
-        <span class="agent-title">🤖 IA Health Monitor</span>
+        <span class="agent-toggle">&#9662;</span><span class="agent-title">🤖 IA Health Monitor</span>
         <span class="agent-meta" id="iaHealthMeta">—</span>
         <button class="agent-refresh" data-agent="ia-health">↻</button>
       </div>
@@ -324,7 +329,7 @@
     <!-- Live Storm Manager -->
     <div class="agent-card" id="agent-live-storm">
       <div class="agent-head">
-        <span class="agent-title">⚡ Live Storm Manager</span>
+        <span class="agent-toggle">&#9662;</span><span class="agent-title">⚡ Live Storm Manager</span>
         <span class="agent-meta" id="liveStormMeta">—</span>
         <button class="agent-refresh" data-agent="live-storm">↻</button>
       </div>
@@ -333,7 +338,7 @@
     <!-- Health Sentinel + Auto-Healer -->
     <div class="agent-card" id="agent-health-sentinel">
       <div class="agent-head">
-        <span class="agent-title">🩻 Health Sentinel + 🔧 Auto-Healer</span>
+        <span class="agent-toggle">&#9662;</span><span class="agent-title">🩻 Health Sentinel + 🔧 Auto-Healer</span>
         <span class="agent-meta" id="healthSentinelMeta">—</span>
         <button class="agent-refresh" data-agent="health-sentinel">↻</button>
       </div>
@@ -342,7 +347,7 @@
     <!-- Orchestrator -->
     <div class="agent-card" id="agent-orchestrator">
       <div class="agent-head">
-        <span class="agent-title">🎼 Orchestrator (workflows)</span>
+        <span class="agent-toggle">&#9662;</span><span class="agent-title">🎼 Orchestrator (workflows)</span>
         <span class="agent-meta">
           <select id="orchWorkflow" style="background:var(--panel2);border:1px solid var(--border);color:var(--text);padding:2px 6px;border-radius:4px;font-size:11px;">
             <option value="full_diagnostic">full_diagnostic</option>
@@ -357,7 +362,7 @@
     <!-- Weekly Review -->
     <div class="agent-card" id="agent-weekly-review">
       <div class="agent-head">
-        <span class="agent-title">🗓️ Weekly Review</span>
+        <span class="agent-toggle">&#9662;</span><span class="agent-title">🗓️ Weekly Review</span>
         <span class="agent-meta" id="weeklyReviewMeta">—</span>
         <button class="agent-refresh" data-agent="weekly-review">↻</button>
       </div>
@@ -366,7 +371,7 @@
     <!-- Live Scout -->
     <div class="agent-card" id="agent-live-scout">
       <div class="agent-head">
-        <span class="agent-title">🔭 Live Scout</span>
+        <span class="agent-toggle">&#9662;</span><span class="agent-title">🔭 Live Scout</span>
         <span class="agent-meta" id="liveScoutMeta">—</span>
         <button class="agent-refresh" data-agent="live-scout">↻</button>
       </div>
@@ -375,7 +380,7 @@
     <!-- ROI Analyst -->
     <div class="agent-card" id="agent-roi-analyst">
       <div class="agent-head">
-        <span class="agent-title">📈 ROI Analyst</span>
+        <span class="agent-toggle">&#9662;</span><span class="agent-title">📈 ROI Analyst</span>
         <span class="agent-meta">
           <select id="roiDaysSel" style="background:var(--panel2);border:1px solid var(--border);color:var(--text);padding:2px 6px;border-radius:4px;font-size:11px;">
             <option value="7">7d</option>
@@ -391,7 +396,7 @@
     <!-- Feed Medic -->
     <div class="agent-card" id="agent-feed-medic">
       <div class="agent-head">
-        <span class="agent-title">🩺 Feed Medic</span>
+        <span class="agent-toggle">&#9662;</span><span class="agent-title">🩺 Feed Medic</span>
         <span class="agent-meta" id="feedMedicMeta">—</span>
         <button class="agent-refresh" data-agent="feed-medic">↻</button>
       </div>
@@ -1134,7 +1139,8 @@
     fetchAgent('orchestrator', '?workflow=' + (orchSel?.value || 'full_diagnostic'));
   }
 
-  document.querySelectorAll('.agent-refresh').forEach(btn => btn.addEventListener('click', () => {
+  document.querySelectorAll('.agent-refresh').forEach(btn => btn.addEventListener('click', (ev) => {
+    ev.stopPropagation(); // não dispara o toggle do head
     const name = btn.dataset.agent;
     if (name === 'roi-analyst') {
       const sel = document.getElementById('roiDaysSel');
@@ -1143,6 +1149,44 @@
       fetchAgent(name);
     }
   }));
+
+  // ── Toggle collapse/expand de cada agent card ──
+  // Estado persistido no localStorage. Click no head colapsa/expande.
+  // Selects (ex: orchWorkflow, roiDaysSel) também não disparam toggle.
+  const COLLAPSED_KEY = 'sportsedge_logs_collapsed_agents';
+  function loadCollapsed() {
+    try { return JSON.parse(localStorage.getItem(COLLAPSED_KEY) || '[]'); } catch (_) { return []; }
+  }
+  function saveCollapsed(list) {
+    try { localStorage.setItem(COLLAPSED_KEY, JSON.stringify(list)); } catch (_) {}
+  }
+  function applyCollapsedState() {
+    const list = loadCollapsed();
+    document.querySelectorAll('.agent-card').forEach(card => {
+      if (list.includes(card.id)) card.classList.add('collapsed');
+      else card.classList.remove('collapsed');
+    });
+  }
+  applyCollapsedState();
+  document.querySelectorAll('.agent-head').forEach(head => {
+    head.addEventListener('click', (ev) => {
+      // Ignora clicks em selects, inputs, buttons internos
+      if (ev.target.matches('select, input, button, .agent-refresh, .agent-meta select')) return;
+      const card = head.closest('.agent-card');
+      if (!card) return;
+      card.classList.toggle('collapsed');
+      const list = loadCollapsed();
+      const isCollapsed = card.classList.contains('collapsed');
+      const idx = list.indexOf(card.id);
+      if (isCollapsed && idx === -1) list.push(card.id);
+      if (!isCollapsed && idx !== -1) list.splice(idx, 1);
+      saveCollapsed(list);
+    });
+  });
+  // Selects internos (roiDaysSel, orchWorkflow) não devem propagar pro head
+  document.querySelectorAll('.agent-head select, .agent-head input').forEach(el => {
+    el.addEventListener('click', ev => ev.stopPropagation());
+  });
   document.getElementById('roiDaysSel')?.addEventListener('change', () => fetchAgent('roi-analyst', '?days=' + document.getElementById('roiDaysSel').value));
 
   $refresh.addEventListener('click', () => { refresh(); refreshLiveMatches(); refreshErrors(); if (activeTab === 'agents') refreshAgents(); });
