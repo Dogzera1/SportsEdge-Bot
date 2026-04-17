@@ -2892,12 +2892,16 @@ async function getOddsApiIoDotaMatches() {
 
 // ── PandaScore Dota 2 ──
 let _pandaDotaCache = { data: [], ts: 0 };
-const PANDA_DOTA_CACHE_TTL = parseInt(process.env.PANDA_DOTA_CACHE_TTL_MS || '90000', 10);
+// TTL dual: 30s quando há live (score pode mudar), 90s quando idle
+const PANDA_DOTA_CACHE_TTL_LIVE = parseInt(process.env.PANDA_DOTA_CACHE_TTL_LIVE_MS || '30000', 10);
+const PANDA_DOTA_CACHE_TTL_IDLE = parseInt(process.env.PANDA_DOTA_CACHE_TTL_IDLE_MS || '90000', 10);
 
 async function getPandaScoreDotaMatches() {
   if (!PANDASCORE_TOKEN || PANDASCORE_TOKEN === 'your-pandascore-token') return [];
   if (Date.now() < _pandaBackoffUntil) return [];
-  if (_pandaDotaCache.data.length && (Date.now() - _pandaDotaCache.ts) < PANDA_DOTA_CACHE_TTL) return _pandaDotaCache.data;
+  const hadLive = _pandaDotaCache.data.some(m => m.status === 'live');
+  const ttl = hadLive ? PANDA_DOTA_CACHE_TTL_LIVE : PANDA_DOTA_CACHE_TTL_IDLE;
+  if (_pandaDotaCache.data.length && (Date.now() - _pandaDotaCache.ts) < ttl) return _pandaDotaCache.data;
   try {
     const headers = { 'Authorization': `Bearer ${PANDASCORE_TOKEN}` };
     const [runningRaw, upcomingRaw] = await Promise.all([

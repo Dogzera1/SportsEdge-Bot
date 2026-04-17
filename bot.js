@@ -5188,9 +5188,35 @@ async function analyzeDotaMapTip(match, token) {
   const now = Date.now();
   if (prevMap && (now - prevMap.ts < 5 * 60 * 1000)) return; // cooldown 5min
 
+  // Staleness guard: confirma que o mapa ainda está em andamento via PandaScore games.
+  // Match.score1/score2 do endpoint /dota-matches pode vir de cache de 1-2min,
+  // tempo suficiente pra mapa acabar e mapa seguinte começar.
+  if (psId) {
+    const mapResult = await serverGet(`/dota-map-result?psId=${encodeURIComponent(psId)}&map=${mapN}`).catch(() => null);
+    if (mapResult?.resolved) {
+      log('INFO', 'AUTO-DOTA-MAP', `Skip: mapa ${mapN} já finalizado (winner=${mapResult.winner}) — score cache estava velho`);
+      analyzedDota.set(mapKey, { ts: now, tipSent: false, reason: 'map_already_finished' });
+      return;
+    }
+    if (mapResult?.reason === 'map_not_found') {
+      // Mapa N ainda não criado no PandaScore — série pode estar entre mapas
+      log('DEBUG', 'AUTO-DOTA-MAP', `Skip: mapa ${mapN} ainda não iniciado no PS`);
+      analyzedDota.set(mapKey, { ts: now, tipSent: false, reason: 'map_not_started' });
+      return;
+    }
+  }
+
   const od = await serverGet(`/opendota-live?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}`).catch(() => null);
   if (!od?.hasLiveStats) {
     analyzedDota.set(mapKey, { ts: now, tipSent: false, reason: 'no_live_stats' });
+    return;
+  }
+
+  // Game-time sanity: opendota-live sem game_time significa partida não começou ou já terminou.
+  // Evita tip em brecha entre mapas quando OpenDota ainda mostra lobby/draft.
+  if ((od.gameTime || 0) < 60) {
+    log('DEBUG', 'AUTO-DOTA-MAP', `Skip: gameTime=${od.gameTime}s muito baixo (lobby/draft)`);
+    analyzedDota.set(mapKey, { ts: now, tipSent: false, reason: 'lobby_or_draft' });
     return;
   }
 
