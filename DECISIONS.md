@@ -14,6 +14,25 @@ Registro cronológico de decisões significativas. Toda mudança de comportament
 
 ---
 
+## 2026-04-18 — Vetor 2 props (LoL/Dota): 🟡 PARCIAL (sem props óbvios em Pinnacle)
+**Motivo:** Smoke test `/agents/vetor2-props-smoke` revelou que Pinnacle LoL/Dota live expõe apenas: moneyline, team_total, spread, total. SEM first_blood, dragons, towers, baron, roshan, inhibs.
+
+**Implicações:**
+- Props "fáceis" (eventos discretos modeláveis com Steam RT) → não existem em Pinnacle. KILL.
+- Markets de magnitude (team_total, spread, total) existem — mas requerem modelo sofisticado de kills/total + validação de delay real Pinnacle vs Riot.
+
+**Estimativa de custo se aprofundar:**
+- Modelo de kills baseado em estado live: 6-10h
+- Validação de delay real: 2-3h
+- Pipeline detect+bet: 4-6h
+- **Total: 20-30h** (não 8-12h do plano original — margem de erro alta)
+
+**Decisão:** ACEITAR PARCIAL como KILL prático. Disciplina do filtro: se exige 20h+ pra descobrir se vale, sample-cost de risco muito alto.
+
+**Reabertura possível:** se latency check mostrar Pinnacle com delay >30s consistente em kills/dragons — então `total kills` (market mais simples) vira viável (4-6h).
+
+**Status:** ⏸️ pausado — não investir agora. Re-avaliar se houver evidência de delay Pinnacle.
+
 ## 2026-04-18 — Postura: aceitar "modelagem pública = pouco edge"; foco em operação
 **Motivo:** Após KILL do Vetor 1 (tennis fatigue/surface), aceita premissa que mercados públicos (Pinnacle/Betfair) são suficientemente eficientes pra que features ML genéricas gerem pouco/nenhum edge mensurável em curto prazo. Foco do bot vira **operação**.
 
