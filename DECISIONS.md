@@ -14,6 +14,20 @@ Registro cronológico de decisões significativas. Toda mudança de comportament
 
 ---
 
+## 2026-04-18 — Tennis: relaxar sharp divergence cap 12pp → 15pp
+**Motivo:** Backtest validator (n=52, 90d) mostrou: ROI tennis +5.24% mas Brier 0.23 vs baseline 0.22 (descalibrado) E gates custaram R$4.82 bloqueando winners. Modelo acerta direção, erra magnitude — gates muito apertados rejeitavam tips legítimas onde Pinnacle estava errado.
+**Antes:** `TENNIS_MAX_DIVERGENCE_PP=12` (default hardcoded)
+**Agora:** `TENNIS_MAX_DIVERGENCE_PP=15` (default hardcoded), envar override mantido
+**Reversão:** mudar valor em `bot.js:7188` ou setar env `TENNIS_MAX_DIVERGENCE_PP=12`
+**Status:** 🧪 experimental — re-rodar backtest em 14d (2026-05-02) pra validar
+
+## 2026-04-18 — Esports: shadow recomendado pendente intervenção manual
+**Motivo:** Backtest n=39 mostrou ROI -3.92% + Brier 0.264 vs baseline 0.253 = bleed real confirmado em buckets esports pregame tier1+tier2. Gates novos salvaram R$3.72 mas não são suficientes pra cobrir bleed.
+**Antes:** Esports operando normalmente
+**Agora:** Recomendado setar `ESPORTS_SHADOW=true` no Railway (ação manual). Tips continuam sendo geradas e gravadas mas sem DM, permitindo coleta de mais dados sem perda real.
+**Reversão:** desativar env após 30d se backtest mostrar Brier melhorando ou refactor de `lib/lol-model.js`.
+**Status:** 📋 pendente decisão manual user — não aplicado automaticamente
+
 ## 2026-04-17 — Tip parser: IA fornece apenas P, sistema calcula EV
 **Motivo:** IA tinha taxa alta de erro aritmético (`EV = P × odd − 1`). Mesmo modelo P bom, EV inconsistente fazia tip ser rejeitada por gate antigo.
 **Antes:** prompt pedia `TIP_ML:[time]@[odd]|EV:[%]|P:[%]|STAKE:Yu|CONF:Z`
