@@ -160,7 +160,9 @@
       "Bash(taskkill //F //PID 5404)",
       "Bash(echo \"PID $!\" sleep 18 netstat -ano)",
       "Bash(node scripts/logs-dashboard.js --port 7788 --service dummy)",
-      "Bash(echo \"PID $!\")"
+      "Bash(echo \"PID $!\")",
+      "Bash(awk '/AUTO-FOOTBALL/ && /TIP_ML|tipMatch|tipParticipant|tipTeam/' bot.js)",
+      "Bash(awk 'NR>=6970 && NR<=7020' bot.js)"
     ]
   }
 }

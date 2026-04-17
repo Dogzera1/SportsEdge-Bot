@@ -118,6 +118,118 @@ function _validateTipPvsModel(text, modelP, tolPp = 8) {
   return { valid: true, textP, modelP, diffPp };
 }
 
+/**
+ * Gate de divergência modelo vs mercado sharp (Pinnacle/Betfair).
+ * Em book sharp, edges reais são tipicamente 1-8pp. Divergência grande sem razão clara
+ * = quase sempre erro do modelo (dado faltando, sample pequeno, viés). Apostar tipsum
+ * com edge fictício leva a Kelly inflado e ruína de bankroll a longo prazo.
+ *
+ * @param {object} args
+ * @param {object} args.oddsObj   — { t1, t2, bookmaker } da partida
+ * @param {number} args.modelP    — P do modelo pra pick (0..1)
+ * @param {number} args.impliedP  — P implícita dejuiced do mercado pra pick (0..1)
+ * @param {number} args.maxPp     — limite de divergência em pp (sport-specific)
+ * @returns {{ ok: boolean, divPp: number|null, reason: string|null }}
+ */
+function _sharpDivergenceGate({ oddsObj, modelP, impliedP, maxPp }) {
+  if (!Number.isFinite(modelP) || !Number.isFinite(impliedP) || modelP <= 0 || impliedP <= 0) return { ok: true, divPp: null, reason: null };
+  const bookmaker = String(oddsObj?.bookmaker || '').toLowerCase();
+  const isSharp = /pinnacle|betfair/.test(bookmaker);
+  if (!isSharp) return { ok: true, divPp: null, reason: 'not_sharp_book' };
+  const divPp = Math.abs(modelP - impliedP) * 100;
+  if (divPp > maxPp) {
+    return { ok: false, divPp, reason: `Divergência modelP=${(modelP*100).toFixed(1)}% vs ${bookmaker} dejuiced=${(impliedP*100).toFixed(1)}% Δ${divPp.toFixed(1)}pp > ${maxPp}pp cap` };
+  }
+  return { ok: true, divPp, reason: null };
+}
+
+/**
+ * Calcula impliedP1/impliedP2 dejuiced a partir de odds {t1, t2}.
+ */
+function _impliedFromOdds(oddsObj) {
+  const o1 = parseFloat(oddsObj?.t1);
+  const o2 = parseFloat(oddsObj?.t2);
+  if (!Number.isFinite(o1) || !Number.isFinite(o2) || o1 <= 1 || o2 <= 1) return null;
+  const r1 = 1 / o1, r2 = 1 / o2;
+  const vig = r1 + r2;
+  return { impliedP1: r1 / vig, impliedP2: r2 / vig };
+}
+
+/**
+ * IA "segunda opinião" compartilhada por bots sem IA própria (Valorant/Darts/Snooker/TT).
+ * Recebe contexto pronto (modelo já calculou pick/P/EV); IA decide se concorda.
+ *
+ * @param {object} args
+ * @param {string} args.sport         — log tag ('valorant', 'darts', etc.)
+ * @param {string} args.matchLabel    — "team1 vs team2"
+ * @param {string} args.league        — nome da liga
+ * @param {string} args.pickTeam      — pick do modelo
+ * @param {number} args.pickOdd       — odd da pick
+ * @param {number} args.pickP         — probabilidade do modelo (0..1)
+ * @param {number} args.evPct         — EV em %
+ * @param {string} args.contextBlock  — bloco multiline com Elo/form/H2H/live
+ * @param {boolean}[args.isLive=false]
+ * @param {number} [args.tolPp=10]    — tolerância P-modelo vs P-IA em pp
+ * @returns {Promise<{passed: boolean, reason: string|null, conf: string|null}>}
+ */
+async function _aiSecondOpinion(args) {
+  const { sport, matchLabel, league, pickTeam, pickOdd, pickP, evPct, contextBlock, isLive = false, tolPp = 10, oddsObj = null, impliedP = null, maxDivPp = null } = args;
+  const tag = `AUTO-${String(sport).toUpperCase()}`;
+
+  // Pré-gate: divergência modelo vs Pinnacle/Betfair (sharp anchor). Bloqueia ANTES da IA pra economizar tokens.
+  if (oddsObj && Number.isFinite(impliedP) && Number.isFinite(maxDivPp)) {
+    const _div = _sharpDivergenceGate({ oddsObj, modelP: pickP, impliedP, maxPp: maxDivPp });
+    if (!_div.ok) return { passed: false, reason: _div.reason, conf: null };
+  }
+
+  const prompt = `Análise ${sport.toUpperCase()} — ${matchLabel} (${league}) ${isLive ? '[AO VIVO]' : '[PRÉ-JOGO]'}
+
+${contextBlock}
+
+Pick proposta pelo modelo: ${pickTeam} @ ${pickOdd} (P=${(pickP*100).toFixed(1)}%, EV=${evPct.toFixed(1)}%)
+
+Avalie:
+1. P do modelo é razoável dado contexto (form, H2H, ranking, dados live)?
+2. Modelo pode estar inflando edge se: amostra pequena, time/jogador pouco conhecido, surface/condição atípica.
+3. Mercados sharp (Pinnacle/Betfair) raramente erram >10pp — divergência grande sem razão clara = modelo errado.
+
+DECISÃO:
+TIP_ML:[time]@[odd]|P:[%]|STAKE:[1-3]u|CONF:[ALTA/MÉDIA/BAIXA]
+(Só forneça P inteiro 0-100; sistema calcula EV. Use a MESMA pick do modelo se concordar.)
+ou SEM_EDGE (se modelo está errado / dados insuficientes / risco alto)
+
+Máximo 150 palavras.`;
+
+  let iaResp = '';
+  try {
+    const iaRaw = await serverPost('/claude', { messages: [{ role: 'user', content: prompt }], max_tokens: 350 }).catch(() => null);
+    iaResp = iaRaw?.content?.[0]?.text || iaRaw?.result || iaRaw?.text || '';
+  } catch (e) {
+    log('WARN', tag, `IA erro: ${e.message}`);
+    return { passed: true, reason: 'ia_error', conf: null }; // fail-open: IA indisponível não bloqueia
+  }
+
+  if (!iaResp) return { passed: true, reason: 'ia_no_response', conf: null };
+  if (/SEM_EDGE/i.test(iaResp)) return { passed: false, reason: 'IA SEM_EDGE', conf: null };
+
+  const iaTip = _parseTipMl(iaResp);
+  if (!iaTip) return { passed: true, reason: 'ia_no_tipml', conf: null };
+
+  // Pick deve ser a mesma
+  const iaPick = String(iaTip[1] || '').trim();
+  const samePick = norm(iaPick) === norm(pickTeam)
+    || norm(pickTeam).includes(norm(iaPick))
+    || norm(iaPick).includes(norm(pickTeam));
+  if (!samePick) return { passed: false, reason: `IA pick diferente (modelo=${pickTeam} IA=${iaPick})`, conf: null };
+
+  // Validador P-vs-modelo
+  const _v = _validateTipPvsModel(iaResp, pickP, tolPp);
+  if (!_v.valid) return { passed: false, reason: _v.reason, conf: null };
+
+  const conf = (iaTip[5] || '').toUpperCase().replace('MEDIA', 'MÉDIA') || null;
+  return { passed: true, reason: null, conf };
+}
+
 const DB_PATH = (process.env.DB_PATH || 'sportsedge.db').trim().replace(/^=+/, '');
 const { db, stmts } = initDatabase(DB_PATH);
 
@@ -2541,6 +2653,16 @@ async function autoAnalyzeMatch(token, match) {
       if (!_v.valid) {
         log('WARN', 'AUTO', `Tip rejeitada (${match.team1} vs ${match.team2}): ${_v.reason}`);
         tipResult = null;
+      }
+      // Gate divergência modelo vs Pinnacle (sharp anchor).
+      if (tipResult) {
+        const _impPV = _pickIsT1V ? mlResult.impliedP1 : mlResult.impliedP2;
+        const _maxDivLol = parseFloat(process.env.LOL_MAX_DIVERGENCE_PP ?? '15');
+        const _div = _sharpDivergenceGate({ oddsObj: oddsToUse, modelP: _modelPV, impliedP: _impPV, maxPp: _maxDivLol });
+        if (!_div.ok) {
+          log('WARN', 'AUTO', `Tip rejeitada (${match.team1} vs ${match.team2}): ${_div.reason}`);
+          tipResult = null;
+        }
       }
     }
     const extractTipReason = (t) => {
@@ -5102,6 +5224,15 @@ Máximo 200 palavras.`;
         if (!_v.valid) {
           log('WARN', 'AUTO-DOTA', `Tip rejeitada (${match.team1} vs ${match.team2}): ${_v.reason}`);
           tipMatch = null;
+        } else {
+          // Gate divergência modelo vs Pinnacle.
+          const _impPV = _pickIsT1V ? mlResult.impliedP1 : mlResult.impliedP2;
+          const _maxDivDota = parseFloat(process.env.DOTA_MAX_DIVERGENCE_PP ?? '15');
+          const _div = _sharpDivergenceGate({ oddsObj: o, modelP: _modelPV, impliedP: _impPV, maxPp: _maxDivDota });
+          if (!_div.ok) {
+            log('WARN', 'AUTO-DOTA', `Tip rejeitada (${match.team1} vs ${match.team2}): ${_div.reason}`);
+            tipMatch = null;
+          }
         }
       }
 
@@ -5731,6 +5862,16 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
           } else if (_vP.diffPp != null) {
             log('DEBUG', 'AUTO-MMA', `P consistente (Δ${_vP.diffPp.toFixed(1)}pp): IA=${(_vP.textP*100).toFixed(1)}% modelo=${(_vP.modelP*100).toFixed(1)}%`);
           }
+          // Gate divergência modelo vs Pinnacle (MMA Pinnacle é muito sharp, threshold menor).
+          if (tipMatch) {
+            const _impPV = _pickIsT1V ? mlResultMma.impliedP1 : mlResultMma.impliedP2;
+            const _maxDivMma = parseFloat(process.env.MMA_MAX_DIVERGENCE_PP ?? '10');
+            const _div = _sharpDivergenceGate({ oddsObj: o, modelP: _modelPPickV, impliedP: _impPV, maxPp: _maxDivMma });
+            if (!_div.ok) {
+              log('WARN', 'AUTO-MMA', `Tip rejeitada (${fight.team1} vs ${fight.team2}): ${_div.reason}`);
+              tipMatch = null;
+            }
+          }
         }
 
         if (!tipMatch) {
@@ -6313,6 +6454,16 @@ Máximo 200 palavras. Raciocínio breve antes da decisão.`;
           if (!_v.valid) {
             log('WARN', 'AUTO-TENNIS', `Tip rejeitada (${match.team1} vs ${match.team2}): ${_v.reason}`);
             tipMatch2 = null;
+          } else {
+            // Gate divergência modelo vs Pinnacle (tennis Pinnacle é sharp em ATP/WTA).
+            const _impPair = _impliedFromOdds(o);
+            const _impPV = _impPair ? (_pickIsT1V ? _impPair.impliedP1 : _impPair.impliedP2) : null;
+            const _maxDivTennis = parseFloat(process.env.TENNIS_MAX_DIVERGENCE_PP ?? '12');
+            const _div = _sharpDivergenceGate({ oddsObj: o, modelP: _modelPV, impliedP: _impPV, maxPp: _maxDivTennis });
+            if (!_div.ok) {
+              log('WARN', 'AUTO-TENNIS', `Tip rejeitada (${match.team1} vs ${match.team2}): ${_div.reason}`);
+              tipMatch2 = null;
+            }
           }
         }
 
@@ -6850,6 +7001,30 @@ Máximo 200 palavras.`;
           await new Promise(r => setTimeout(r, 2000)); continue;
         }
 
+        // Gate divergência modelo vs Pinnacle (football Pinnacle = sharp).
+        {
+          let _modelPFb = null, _impPFb = null;
+          if (tipMarket === '1X2_H') { _modelPFb = mlScore.modelH ? mlScore.modelH/100 : null; _impPFb = parseFloat(mktH)/100; }
+          else if (tipMarket === '1X2_D') { _modelPFb = mlScore.modelD ? mlScore.modelD/100 : null; _impPFb = parseFloat(mktD)/100; }
+          else if (tipMarket === '1X2_A') { _modelPFb = mlScore.modelA ? mlScore.modelA/100 : null; _impPFb = parseFloat(mktA)/100; }
+          else if (/OVER|UNDER/i.test(tipMarket) && o.ou25) {
+            const oOver = parseFloat(o.ou25.over), oUnder = parseFloat(o.ou25.under);
+            if (oOver > 1 && oUnder > 1) {
+              const rO = 1/oOver, rU = 1/oUnder, vigOu = rO + rU;
+              _impPFb = /OVER/i.test(tipMarket) ? rO/vigOu : rU/vigOu;
+              _modelPFb = 1/tipOdd; // sem modelo dedicado pra OU; usa derivação simples
+            }
+          }
+          if (_modelPFb != null && _impPFb != null) {
+            const _maxDivFb = parseFloat(process.env.FOOTBALL_MAX_DIVERGENCE_PP ?? '10');
+            const _div = _sharpDivergenceGate({ oddsObj: o, modelP: _modelPFb, impliedP: _impPFb, maxPp: _maxDivFb });
+            if (!_div.ok) {
+              log('WARN', 'AUTO-FOOTBALL', `Tip rejeitada (${match.team1} vs ${match.team2}, ${tipMarket}): ${_div.reason}`);
+              await new Promise(r => setTimeout(r, 2000)); continue;
+            }
+          }
+        }
+
         const confEmoji = { ALTA: '🟢', MÉDIA: '🟡', BAIXA: '🔴' }[tipConf] || '🟡';
         const marketLabel = {
           '1X2_H':    `⚽ Casa — *${match.team1}*`,
@@ -7066,6 +7241,31 @@ async function pollTableTennis(runOnce = false) {
           continue;
         }
 
+        // ── IA segunda opinião ──
+        let _aiConfTT = null;
+        if (/^(1|true|yes)$/i.test(String(process.env.TT_USE_AI ?? 'true'))) {
+          const ctxLines = [
+            `Odds: ${match.team1}@${o1} | ${match.team2}@${o2} (implied ${(impliedP1*100).toFixed(1)}%/${(impliedP2*100).toFixed(1)}%)`,
+            `Elo: ${match.team1}=${elo.elo1||'?'} (${elo.eloMatches1||0}j) | ${match.team2}=${elo.elo2||'?'} (${elo.eloMatches2||0}j)`,
+            sofa?.form1 || sofa?.form2 ? `Form Sofascore: ${match.team1}=${sofa.form1?.wins||0}V-${sofa.form1?.losses||0}D | ${match.team2}=${sofa.form2?.wins||0}V-${sofa.form2?.losses||0}D` : 'Form: Sofascore indisponível',
+            sofa?.h2h?.totalMatches ? `H2H (${sofa.h2h.totalMatches}j): ${sofa.h2h.t1Wins}-${sofa.h2h.t2Wins}` : 'H2H: sem histórico',
+            `Modelo: P1=${(modelP1*100).toFixed(1)}% P2=${(modelP2*100).toFixed(1)}% | edge=${mlScore.toFixed(1)}pp factors=${factorCount} ${useElo ? '[Elo]' : '[Sofa]'}`,
+          ].filter(Boolean).join('\n');
+          const aiR = await _aiSecondOpinion({
+            sport: 'tt', matchLabel: `${match.team1} vs ${match.team2}`, league: match.league || '?',
+            pickTeam, pickOdd, pickP, evPct, contextBlock: ctxLines, isLive: isTTLive,
+            oddsObj: match.odds,
+            impliedP: direction === 't1' ? impliedP1 : impliedP2,
+            maxDivPp: parseFloat(process.env.TT_MAX_DIVERGENCE_PP ?? '20'),
+          });
+          if (!aiR.passed) {
+            analyzedTT.set(key, { ts: now, tipSent: false });
+            log('INFO', 'AUTO-TT', `IA bloqueou: ${aiR.reason} | ${pickTeam} @ ${pickOdd}`);
+            continue;
+          }
+          _aiConfTT = aiR.conf;
+        }
+
         // Kelly 1/8 conservador (sem IA → fração menor)
         const stake = calcKellyWithP(pickP, pickOdd, 1/8);
         if (stake === '0u') { analyzedTT.set(key, { ts: now, tipSent: false }); continue; }
@@ -7074,8 +7274,9 @@ async function pollTableTennis(runOnce = false) {
         if (!riskAdj.ok) { log('INFO', 'RISK', `tabletennis: bloqueada (${riskAdj.reason})`); continue; }
         const stakeAdj = String(riskAdj.units.toFixed(1).replace(/\.0$/, ''));
 
-        const conf = useElo && elo.eloMatches1 >= 20 && elo.eloMatches2 >= 20 ? 'ALTA'
-                   : factorCount >= 2 ? 'MÉDIA' : 'BAIXA';
+        let conf = useElo && elo.eloMatches1 >= 20 && elo.eloMatches2 >= 20 ? 'ALTA'
+                 : factorCount >= 2 ? 'MÉDIA' : 'BAIXA';
+        if (_aiConfTT === 'BAIXA' || (_aiConfTT === 'MÉDIA' && conf === 'ALTA')) conf = _aiConfTT;
         const tipReason = useElo
           ? `Elo: ${match.team1}=${elo.elo1} (${elo.eloMatches1}j) vs ${match.team2}=${elo.elo2} (${elo.eloMatches2}j)`
           : `Sofa form/H2H: factors=${factorCount}, edge=${mlScore.toFixed(1)}pp`;
@@ -7282,12 +7483,13 @@ async function pollCs(runOnce = false) {
         const pickImpliedP = direction === 't1' ? impliedP1 : impliedP2;
         const evPct = (pickP * pickOdd - 1) * 100;
 
-        // Gate A: divergência modelo vs Pinnacle (sharp). >12pp = quase sempre erro do modelo.
-        const divergencePp = Math.abs(pickP - pickImpliedP) * 100;
+        // Gate A: divergência modelo vs Pinnacle/Betfair (sharp anchor). >12pp = quase sempre erro do modelo.
+        const _divCs = _sharpDivergenceGate({ oddsObj: match.odds, modelP: pickP, impliedP: pickImpliedP, maxPp: CS_MAX_DIVERGENCE_PP });
+        const divergencePp = _divCs.divPp ?? 0;
         const isPinnacleOdds = /pinnacle/i.test(String(match.odds?.bookmaker || ''));
-        if (isPinnacleOdds && divergencePp > CS_MAX_DIVERGENCE_PP) {
+        if (!_divCs.ok) {
           analyzedCs.set(key, { ts: now, tipSent: false });
-          log('INFO', 'AUTO-CS', `Divergência alta (modelP=${(pickP*100).toFixed(1)}% vs Pinnacle=${(pickImpliedP*100).toFixed(1)}% Δ${divergencePp.toFixed(1)}pp > ${CS_MAX_DIVERGENCE_PP}pp): ${match.team1} vs ${match.team2}`);
+          log('INFO', 'AUTO-CS', `${_divCs.reason}: ${match.team1} vs ${match.team2}`);
           continue;
         }
 
@@ -7670,6 +7872,30 @@ async function pollValorant(runOnce = false) {
           }
         }
 
+        // ── IA segunda opinião ──
+        if (/^(1|true|yes)$/i.test(String(process.env.VAL_USE_AI ?? 'true'))) {
+          const ctx = [
+            `Odds: ${match.team1}@${o1} | ${match.team2}@${o2} (implied ${(impliedP1*100).toFixed(1)}%/${(impliedP2*100).toFixed(1)}%)`,
+            `Elo: ${match.team1}=${elo.elo1||'?'} (${elo.eloMatches1||0}j) | ${match.team2}=${elo.elo2||'?'} (${elo.eloMatches2||0}j)`,
+            `Modelo: P1=${(modelP1*100).toFixed(1)}% P2=${(modelP2*100).toFixed(1)}% | edge ML=${mlScore.toFixed(1)}pp factors=${factorCount}`,
+            vlrLive ? `LIVE VLR: ${vlrLive.currentMap||'?'} R${vlrLive.currentRound} | ${vlrLive.t1.name} ${vlrLive.t1.score}(${vlrLive.t1.side}) vs ${vlrLive.t2.name} ${vlrLive.t2.score}(${vlrLive.t2.side})` : (isLiveVal ? 'LIVE: sem contexto VLR' : 'Pré-jogo'),
+            match.score1 != null || match.score2 != null ? `Série: ${match.score1||0}-${match.score2||0} (Bo${bo})` : '',
+          ].filter(Boolean).join('\n');
+          const aiR = await _aiSecondOpinion({
+            sport: 'val', matchLabel: `${match.team1} vs ${match.team2}`, league: match.league || '?',
+            pickTeam, pickOdd, pickP, evPct, contextBlock: ctx, isLive: isLiveVal,
+            oddsObj: match.odds,
+            impliedP: direction === 't1' ? impliedP1 : impliedP2,
+            maxDivPp: parseFloat(process.env.VAL_MAX_DIVERGENCE_PP ?? '12'),
+          });
+          if (!aiR.passed) {
+            analyzedValorant.set(key, { ts: now, tipSent: false });
+            log('INFO', 'AUTO-VAL', `IA bloqueou: ${aiR.reason} | ${pickTeam} @ ${pickOdd}`);
+            continue;
+          }
+          var _aiConfVal = aiR.conf || null;
+        }
+
         const stake = calcKellyWithP(pickP, pickOdd, 1/8);
         if (stake === '0u') { analyzedValorant.set(key, { ts: now, tipSent: false }); continue; }
         const desiredU = parseFloat(stake) || 0;
@@ -7677,8 +7903,12 @@ async function pollValorant(runOnce = false) {
         if (!riskAdj.ok) { log('INFO', 'RISK', `valorant: bloqueada (${riskAdj.reason})`); continue; }
         const stakeAdj = String(riskAdj.units.toFixed(1).replace(/\.0$/, ''));
 
-        const conf = (elo.eloMatches1 >= 20 && elo.eloMatches2 >= 20 && factorCount >= 3) ? 'ALTA'
-                   : factorCount >= 2 ? 'MÉDIA' : 'BAIXA';
+        let conf = (elo.eloMatches1 >= 20 && elo.eloMatches2 >= 20 && factorCount >= 3) ? 'ALTA'
+                 : factorCount >= 2 ? 'MÉDIA' : 'BAIXA';
+        // IA pode rebaixar (nunca promover)
+        if (typeof _aiConfVal !== 'undefined') {
+          if (_aiConfVal === 'BAIXA' || (_aiConfVal === 'MÉDIA' && conf === 'ALTA')) conf = _aiConfVal;
+        }
         const formStr = (elo.form1 && elo.form2)
           ? ` | Form: ${(elo.form1.winRate*100).toFixed(0)}% (${elo.form1.games}j) vs ${(elo.form2.winRate*100).toFixed(0)}% (${elo.form2.games}j)`
           : '';
@@ -7873,6 +8103,33 @@ async function runAutoDarts() {
             continue;
           }
 
+          // ── IA segunda opinião ──
+          let _aiConfDarts = null;
+          if (/^(1|true|yes)$/i.test(String(process.env.DARTS_USE_AI ?? 'true'))) {
+            const ctxLines = [
+              `Odds: ${match.team1}@${match.odds.t1} | ${match.team2}@${match.odds.t2}`,
+              `3-dart avg (últimos 10j): ${match.team1}=${enrich.avgP1 ?? 'n/a'} | ${match.team2}=${enrich.avgP2 ?? 'n/a'}`,
+              `Win rate: ${match.team1}=${enrich.winRateP1 ?? 'n/a'}% (${enrich.gamesP1}j) | ${match.team2}=${enrich.winRateP2 ?? 'n/a'}% (${enrich.gamesP2}j)`,
+              enrich.h2hP1Wins != null ? `H2H: ${enrich.h2hP1Wins}-${enrich.h2hP2Wins}` : 'H2H: sem histórico',
+              `Modelo: P1=${(ml.modelP1*100).toFixed(1)}% P2=${(ml.modelP2*100).toFixed(1)}% | edge=${ml.score}pp factors=${ml.factorCount}`,
+              liveScore?.isLive ? `LIVE: sets ${liveScore.setsHome}-${liveScore.setsAway} | leg ${liveScore.pointsHome ?? '?'}-${liveScore.pointsAway ?? '?'}` : '',
+            ].filter(Boolean).join('\n');
+            const _impDarts = _impliedFromOdds(match.odds);
+            const aiR = await _aiSecondOpinion({
+              sport: 'darts', matchLabel: `${match.team1} vs ${match.team2}`, league: match.league || '?',
+              pickTeam, pickOdd, pickP, evPct, contextBlock: ctxLines, isLive: !!liveScore?.isLive,
+              oddsObj: match.odds,
+              impliedP: _impDarts ? (ml.direction === 't1' ? _impDarts.impliedP1 : _impDarts.impliedP2) : null,
+              maxDivPp: parseFloat(process.env.DARTS_MAX_DIVERGENCE_PP ?? '15'),
+            });
+            if (!aiR.passed) {
+              analyzedDarts.set(key, { ts: now, tipSent: false });
+              log('INFO', 'AUTO-DARTS', `IA bloqueou: ${aiR.reason} | ${pickTeam} @ ${pickOdd}`);
+              continue;
+            }
+            _aiConfDarts = aiR.conf;
+          }
+
           // Kelly fracionado conservador (sem IA → 1/8 Kelly)
           const stake = calcKellyWithP(pickP, pickOdd, 1/8);
           if (stake === '0u') { analyzedDarts.set(key, { ts: now, tipSent: false }); continue; }
@@ -7883,12 +8140,14 @@ async function runAutoDarts() {
 
           const tipReason = `3-dart avg: ${match.team1}=${enrich.avgP1 ?? 'n/a'} vs ${match.team2}=${enrich.avgP2 ?? 'n/a'} | WR: ${enrich.winRateP1 ?? 'n/a'}% vs ${enrich.winRateP2 ?? 'n/a'}%`;
 
+          let _confDarts = ml.factorCount >= 2 ? 'MÉDIA' : 'BAIXA';
+          if (_aiConfDarts === 'BAIXA' || (_aiConfDarts === 'MÉDIA' && _confDarts !== 'BAIXA')) _confDarts = _aiConfDarts;
           // Registra tip com flag shadow
           const rec = await serverPost('/record-tip', {
             matchId: String(match.id), eventName: match.league,
             p1: match.team1, p2: match.team2, tipParticipant: pickTeam,
             odds: String(pickOdd), ev: evPct.toFixed(1), stake: stakeAdj,
-            confidence: ml.factorCount >= 2 ? 'MÉDIA' : 'BAIXA',
+            confidence: _confDarts,
             isLive: match.status === 'live' ? 1 : 0,
             market_type: 'ML',
             modelP1: ml.modelP1, modelP2: ml.modelP2, modelPPick: pickP,
@@ -8005,6 +8264,32 @@ async function runAutoSnooker() {
           const evPct   = ((pickP * pickOdd - 1) * 100);
           if (evPct < 3) { analyzedSnooker.set(key, { ts: now, tipSent: false }); continue; }
 
+          // ── IA segunda opinião ──
+          let _aiConfSnooker = null;
+          if (/^(1|true|yes)$/i.test(String(process.env.SNOOKER_USE_AI ?? 'true'))) {
+            const ctxLines = [
+              `Odds: ${match.team1}@${match.odds.t1} | ${match.team2}@${match.odds.t2} (${match.odds.bookmaker || 'Pinnacle'})`,
+              `Win rate (temporada): ${match.team1}=${enrich.winRateP1 ?? 'n/a'}% (${enrich.gamesP1}j) | ${match.team2}=${enrich.winRateP2 ?? 'n/a'}% (${enrich.gamesP2}j)`,
+              enrich.centuriesP1 != null ? `Centuries: ${match.team1}=${enrich.centuriesP1} | ${match.team2}=${enrich.centuriesP2}` : '',
+              enrich.h2hP1Wins != null ? `H2H: ${enrich.h2hP1Wins}-${enrich.h2hP2Wins}` : 'H2H: sem histórico',
+              `Modelo: P1=${(ml.modelP1*100).toFixed(1)}% P2=${(ml.modelP2*100).toFixed(1)}% | edge=${ml.score}pp factors=${ml.factorCount}`,
+            ].filter(Boolean).join('\n');
+            const _impSnooker = _impliedFromOdds(match.odds);
+            const aiR = await _aiSecondOpinion({
+              sport: 'snooker', matchLabel: `${match.team1} vs ${match.team2}`, league: match.league || '?',
+              pickTeam, pickOdd, pickP, evPct, contextBlock: ctxLines, isLive: isLiveSnooker,
+              oddsObj: match.odds,
+              impliedP: _impSnooker ? (ml.direction === 't1' ? _impSnooker.impliedP1 : _impSnooker.impliedP2) : null,
+              maxDivPp: parseFloat(process.env.SNOOKER_MAX_DIVERGENCE_PP ?? '15'),
+            });
+            if (!aiR.passed) {
+              analyzedSnooker.set(key, { ts: now, tipSent: false });
+              log('INFO', 'AUTO-SNOOKER', `IA bloqueou: ${aiR.reason} | ${pickTeam} @ ${pickOdd}`);
+              continue;
+            }
+            _aiConfSnooker = aiR.conf;
+          }
+
           const stake = calcKellyWithP(pickP, pickOdd, 1/8);
           if (stake === '0u') { analyzedSnooker.set(key, { ts: now, tipSent: false }); continue; }
           const desiredU = parseFloat(stake) || 0;
@@ -8014,11 +8299,13 @@ async function runAutoSnooker() {
 
           const tipReason = `Rank: ${match.team1}=${enrich.rankP1 ?? 'n/a'} vs ${match.team2}=${enrich.rankP2 ?? 'n/a'} | edge=${ml.score}pp`;
 
+          let _confSnooker = ml.factorCount >= 2 ? 'MÉDIA' : 'BAIXA';
+          if (_aiConfSnooker === 'BAIXA' || (_aiConfSnooker === 'MÉDIA' && _confSnooker !== 'BAIXA')) _confSnooker = _aiConfSnooker;
           const rec = await serverPost('/record-tip', {
             matchId: String(match.id), eventName: match.league,
             p1: match.team1, p2: match.team2, tipParticipant: pickTeam,
             odds: String(pickOdd), ev: evPct.toFixed(1), stake: stakeAdj,
-            confidence: ml.factorCount >= 2 ? 'MÉDIA' : 'BAIXA',
+            confidence: _confSnooker,
             isLive: match.status === 'live' ? 1 : 0,
             market_type: 'ML',
             modelP1: ml.modelP1, modelP2: ml.modelP2, modelPPick: pickP,
