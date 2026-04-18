@@ -5049,6 +5049,9 @@ const server = http.createServer(async (req, res) => {
         { sport: 'dota',     path: '/dota-matches' },
         { sport: 'cs',       path: '/cs-matches' },
         { sport: 'valorant', path: '/valorant-matches' },
+        { sport: 'tennis',   path: '/tennis-matches' },
+        { sport: 'football', path: '/football-matches' },
+        { sport: 'mma',      path: '/mma-matches' },
       ];
       const horizonMs = Math.max(1, Math.min(48, parseInt(parsed.query.hours || '24', 10) || 24)) * 60 * 60 * 1000;
       const now = Date.now();

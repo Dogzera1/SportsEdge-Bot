@@ -1058,6 +1058,7 @@ const SPORTS_LIST = [
   { sport: 'cs', game: '',            label: 'CS2',               emoji: '🔫' },
   { sport: 'tennis', game: '',        label: 'Tênis',             emoji: '🎾' },
   { sport: 'mma', game: '',           label: 'MMA / Boxe',        emoji: '🥊' },
+  { sport: 'football', game: '',      label: 'Futebol',           emoji: '⚽' },
 ];
 
 async function loadSportRoi() {
@@ -1107,20 +1108,31 @@ async function loadUpcoming() {
   for (const sport of Object.keys(data.sports)) {
     for (const m of data.sports[sport]) all.push({ ...m, sport });
   }
-  all.sort((a, b) => (a.startsInMin || 0) - (b.startsInMin || 0));
-  const top = all.slice(0, 6);
+  // Filtro por sport (quando não Geral)
+  const filtered = currentSport === '__overall__'
+    ? all
+    : all.filter(m => {
+        const s = String(m.sport || '').toLowerCase();
+        const cs = String(currentSport || '').toLowerCase();
+        return s === cs || (cs === 'esports' && ['lol','dota','cs','valorant'].includes(s));
+      });
+  // Filtro min guard + sort
+  const valid = filtered.filter(m => Number.isFinite(m.startsInMin) && m.startsInMin >= 0);
+  valid.sort((a, b) => a.startsInMin - b.startsInMin);
+  const top = valid.slice(0, 6);
   if (!top.length) { card.style.display = 'none'; return; }
   card.style.display = '';
-  count.textContent = `${all.length} próximo${all.length > 1 ? 's' : ''}`;
+  count.textContent = `${valid.length} próximo${valid.length > 1 ? 's' : ''}`;
   list.innerHTML = top.map(m => {
     const mins = m.startsInMin;
     const when = mins < 60 ? `em ${mins}min` : `em ${Math.floor(mins / 60)}h${String(mins % 60).padStart(2,'0')}`;
-    const oddsStr = m.odds ? `<span class="live-prob">${m.odds.t1}/${m.odds.t2}</span>` : '—';
+    const oddsStr = m.odds ? `<span class="live-prob">${m.odds.t1}/${m.odds.t2}</span>` : '';
+    const bk = m.odds?.bookmaker ? ` · ${m.odds.bookmaker}` : '';
     return `
       <div class="live-row">
         <div style="color:var(--text-faint);font-size:11px">⏳</div>
         <div class="live-teams">${m.team1}<span class="vs">vs</span>${m.team2}</div>
-        <div class="live-score">${m.sport} · ${m.league || '—'} · ${when}</div>
+        <div class="live-score">${m.sport} · ${m.league || '—'} · ${when}${bk}</div>
         ${oddsStr}
       </div>
     `;
@@ -1129,26 +1141,50 @@ async function loadUpcoming() {
 
 // ─────────────────────────────────────────────────────────────
 // 4) Live snapshot
+// Server returns { sports: { lol: [row…], dota: [row…], … } }
+// Rows têm: team1, team2, league, liveStats.summary.score, odds, pinnacle.
 // ─────────────────────────────────────────────────────────────
 async function loadLive() {
   const data = await apiFetch('/live-snapshot');
   const card = document.getElementById('liveCard');
   const list = document.getElementById('liveList');
   const count = document.getElementById('liveCount');
-  if (!data?.matches?.length) { card.style.display = 'none'; return; }
-  const filtered = data.matches.slice(0, 8);
+  // Server retorna { generatedAt, sports: { lol:[...], dota:[...], ... } }
+  const sportsMap = data?.sports || {};
+  const all = [];
+  for (const sport of Object.keys(sportsMap)) {
+    const rows = Array.isArray(sportsMap[sport]) ? sportsMap[sport] : [];
+    for (const r of rows) all.push({ ...r, sport });
+  }
+  if (!all.length) { card.style.display = 'none'; return; }
+  // Filtro por sport se não for overall (mantém todos quando Geral)
+  const filteredBySport = currentSport === '__overall__'
+    ? all
+    : all.filter(m => {
+        const s = String(m.sport || '').toLowerCase();
+        const cs = String(currentSport || '').toLowerCase();
+        return s === cs || (cs === 'esports' && ['lol','dota','cs','valorant'].includes(s));
+      });
+  if (!filteredBySport.length) { card.style.display = 'none'; return; }
+  // Prioriza os com pinnacle + liveStats available
+  filteredBySport.sort((a, b) => {
+    const ap = (a.pinnacle ? 1 : 0) + (a.liveStats?.available ? 1 : 0);
+    const bp = (b.pinnacle ? 1 : 0) + (b.liveStats?.available ? 1 : 0);
+    return bp - ap;
+  });
+  const top = filteredBySport.slice(0, 8);
   card.style.display = '';
-  count.textContent = `${data.matches.length} match${data.matches.length > 1 ? 'es' : ''}`;
-  list.innerHTML = filtered.map(m => {
-    const score = m.score1 != null ? `${m.score1}-${m.score2}` : '';
-    const probHtml = m.modelP1 != null ?
-      `<span class="live-prob">${Math.round(m.modelP1 * 100)}% ${m.team1}</span>` : '—';
+  count.textContent = `${filteredBySport.length} match${filteredBySport.length > 1 ? 'es' : ''}`;
+  list.innerHTML = top.map(m => {
+    const score = m.liveStats?.summary?.score || '';
+    const oddsStr = m.odds ? `<span class="live-prob">${m.odds.t1}/${m.odds.t2}</span>` : '';
+    const bk = m.odds?.bookmaker ? ` · ${m.odds.bookmaker}` : '';
     return `
       <div class="live-row">
         <div class="live-dot"></div>
         <div class="live-teams">${m.team1}<span class="vs">vs</span>${m.team2}</div>
-        <div class="live-score">${score} · ${m.league || m.sport || '—'}</div>
-        ${probHtml}
+        <div class="live-score">${score ? score + ' · ' : ''}${m.sport} · ${m.league || '—'}${bk}</div>
+        ${oddsStr}
       </div>
     `;
   }).join('');

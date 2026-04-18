@@ -221,7 +221,9 @@
       "Bash(DB_PATH=sportsedge.db node scripts/refresh-all-isotonics.js --game tennis)",
       "Bash(awk 'NR>=800 && NR<=905' lib/tennis-model.js)",
       "Bash(awk 'NR>=700 && NR<=900' lib/tennis-model.js)",
-      "Bash(DB_PATH=sportsedge.db node scripts/backtest-new-models.js)"
+      "Bash(DB_PATH=sportsedge.db node scripts/backtest-new-models.js)",
+      "Bash(grep -n \"sendJson\\(res, { matches\" server.js)",
+      "Bash(awk -F: '$1 > 8716 && $1 < 8910 {print}')"
     ]
   }
 }
