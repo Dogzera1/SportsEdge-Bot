@@ -181,8 +181,9 @@ async function main() {
     try {
       const r = await get(url);
       if (r.status === 403 || r.status === 429) {
-        console.log(`  blocked (${r.status}), backoff 60s...`);
-        await sleep(60000);
+        // Railway proxy cf-clearance session pode estar stale; espera 5min pra renovar
+        console.log(`  blocked (${r.status}), backoff 5min (proxy CF session)...`);
+        await sleep(5 * 60 * 1000);
         continue;
       }
       if (r.status !== 200) { console.log(`  HTTP ${r.status}, stop`); break; }

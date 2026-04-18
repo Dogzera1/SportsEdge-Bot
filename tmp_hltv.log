@@ -17,4 +17,30 @@
   offset=1400: 100 parsed, +100 inserted | total=1000/1502
   offset=1500: 100 parsed, +100 inserted | total=1100/1602
   offset=1600: 100 parsed, +100 inserted | total=1200/1702
-  offset=1700: 100 parsed, +100 in
+  offset=1700: 100 parsed, +100 in  blocked (403), backoff 60s...
+  blocked (403), backoff 60s...
+  blocked (403), backoff 60s...
+  blocked (403), backoff 60s...
+otal=1500/2002
+  offset=2000: 100 parsed, +100 inserted | total=1600/2102
+  offset=2100: 100 parsed, +100 inserted | total=1700/2202
+  offset=2200: 100 parsed, +100 inserted | total=1800/2302
+  offset=2300: 100 parsed, +100 inserted | total=1900/2402
+  offset=2400: 100 parsed, +100 inserted | total=2000/2502
+  offset=2500: 100 parsed, +100 inserted | total=2100/2602
+  offset=2600: 100 parsed, +100 inserted | total=2200/2702
+  offset=2700: 100 parsed, +100 inserted | total=2300/2802
+  offset=2800: 100 parsed, +100 inserted | total=2400/2902
+  offset=2900: 100 parsed, +100 inserted | total=2500/3002
+  offset=3000: 100 parsed, +100 inserted | total=2600/3102
+  offset=3100: 100 parsed, +100 inserted | total=2700/3202
+  offset=3200: 100 parsed, +100 inserted | total=2800/3302
+  offset=3300: 100 parsed, +100 inserted | total=2900/3402
+  offset=3400: 100 parsed, +100 inserted | total=3000/3502
+  offset=3500: 100 parsed, +100 inserted | total=3100/3602
+  offset=3600: 100 parsed, +100 inserted | total=3200/3702
+  offset=3700: 100 parsed, +100 inserted | total=3300/3802
+  offset=3800: 100 parsed, +100 inserted | total=3400/3902
+  offset=3900: 100 parsed, +100 inserted | total=3500/4002
+  offset=4000: 100 parsed, +100 inserted | total=3600/4102
+  offset=4100: 100 parsed, +100 inserted | total=3700/4202
