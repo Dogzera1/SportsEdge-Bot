@@ -385,6 +385,20 @@ let lastSettlementCheck = 0;
 // Line movement
 const lineAlerted = new Map();
 const marketTipSent = new Map(); // key: match|market|line|side → ts (dedup 24h)
+
+// Rejection ring buffer — debug quando "tips não estão saindo".
+// Formato: { ts, sport, teams, reason, extra }
+const _rejections = [];
+const REJECTIONS_MAX = 200;
+function logRejection(sport, teams, reason, extra = {}) {
+  _rejections.unshift({ ts: Date.now(), sport, teams, reason, extra });
+  if (_rejections.length > REJECTIONS_MAX) _rejections.length = REJECTIONS_MAX;
+}
+function getRejections(sportFilter, limit = 50) {
+  let list = _rejections;
+  if (sportFilter) list = list.filter(r => r.sport === sportFilter);
+  return list.slice(0, Math.max(1, Math.min(limit, REJECTIONS_MAX)));
+}
 const LINE_CHECK_INTERVAL = 30 * 60 * 1000;
 let lastLineCheck = 0;
 
@@ -3707,6 +3721,7 @@ async function autoAnalyzeMatch(token, match) {
 
     if (mlPrefilterOn && !mlResult.pass) {
       log('INFO', 'AUTO', `Pré-filtro ML: edge insuficiente (${mlResult.score.toFixed(1)}pp) para ${match.team1} vs ${match.team2}. Pulando IA.`);
+      logRejection('lol', `${match.team1} vs ${match.team2}`, 'ml_prefilter_edge', { edge: +mlResult.score.toFixed(2) });
       return null;
     }
 
@@ -4719,6 +4734,36 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
         if (txt.length > 3500) { txt += '_(truncado)_'; break; }
       }
       txt += `\n_Uso: /market-tips [sport] [days] | recent [sport] [limit] | leaks [days] [minN] [sport] | watch [sport] | league [sport] [days]_`;
+      await send(token, chatId, txt);
+    } catch (e) { await send(token, chatId, `❌ ${e.message}`); }
+
+  } else if (cmd === '/rejections') {
+    if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
+    try {
+      const parts = String(text || '').trim().split(/\s+/);
+      const sportFilter = parts[1]?.toLowerCase() || null;
+      const limit = Math.max(5, Math.min(50, parseInt(parts[2] || '20', 10) || 20));
+      const items = getRejections(sportFilter, limit);
+      if (!items.length) {
+        await send(token, chatId, `📋 Nenhuma rejeição registrada${sportFilter ? ' (' + sportFilter + ')' : ''}`);
+        return;
+      }
+      // Aggregate counts by reason
+      const byReason = {};
+      for (const r of items) byReason[r.reason] = (byReason[r.reason] || 0) + 1;
+      const summary = Object.entries(byReason)
+        .sort((a, b) => b[1] - a[1])
+        .map(([r, n]) => `${r}: ${n}`).join(' · ');
+      let txt = `📋 *REJECTIONS${sportFilter ? ' — ' + sportFilter : ''}* (últimas ${items.length})\n\n`;
+      txt += `*Resumo:* ${summary}\n\n*Detalhes (recentes):*\n`;
+      const now = Date.now();
+      for (const r of items.slice(0, Math.min(15, items.length))) {
+        const ageMin = Math.floor((now - r.ts) / 60000);
+        const agoStr = ageMin < 1 ? 'agora' : ageMin < 60 ? `${ageMin}min` : `${Math.floor(ageMin/60)}h${String(ageMin%60).padStart(2,'0')}`;
+        const extraStr = Object.entries(r.extra || {}).map(([k, v]) => `${k}=${v}`).join(' ');
+        txt += `• \`${r.sport}\` ${r.teams} — *${r.reason}* ${extraStr ? '(' + extraStr + ')' : ''} · ${agoStr}\n`;
+        if (txt.length > 3500) { txt += '_(truncado)_'; break; }
+      }
       await send(token, chatId, txt);
     } catch (e) { await send(token, chatId, `❌ ${e.message}`); }
 
@@ -5763,7 +5808,8 @@ async function poll(token, sport) {
                      text.startsWith('/slugs') || text.startsWith('/lolraw') ||
                      text.startsWith('/health') || text.startsWith('/debug') ||
                      text.startsWith('/shadow') || text.startsWith('/market-tips') ||
-                     text.startsWith('/models') || text.startsWith('/val-')) {
+                     text.startsWith('/models') || text.startsWith('/val-') ||
+                     text.startsWith('/rejections')) {
             // Passa `sport` da poll (qual bot recebeu) para evitar default 'esports'
             await handleAdmin(token, chatId, text, sport);
           }
@@ -6654,6 +6700,7 @@ async function _pollDotaInner(runOnce = false) {
       const mlResult = esportsPreFilter(match, o, enrich, isLive, dotaLiveContext, null, stmts, { maxDivergence: dotaMaxDiv });
       if (!mlResult.pass) {
         log('INFO', 'AUTO-DOTA', `Pré-filtro: edge insuficiente (${mlResult.score.toFixed(1)}pp) para ${match.team1} vs ${match.team2}`);
+        logRejection('dota2', `${match.team1} vs ${match.team2}`, 'ml_prefilter_edge', { edge: +mlResult.score.toFixed(2) });
         setDotaAnalyzed({ ts: now, tipSent: false, noEdge: true });
         continue;
       }
@@ -6929,6 +6976,7 @@ Máximo 200 palavras.`;
       const evVal = parseFloat(String(tipEV).replace('%', '').replace('+', ''));
       if (evVal < evThreshold) {
         log('INFO', 'AUTO-DOTA', `EV insuficiente (${evVal}% < ${evThreshold}%): pulando`);
+        logRejection('dota2', `${match.team1} vs ${match.team2}`, 'ev_below_min', { ev: +evVal.toFixed(2), min: evThreshold });
         setDotaAnalyzed({ ts: now, tipSent: false, noEdge: true });
         await _sleep(2000); continue;
       }
@@ -7393,6 +7441,7 @@ async function pollMma(runOnce = false) {
         const mlResultMma = esportsPreFilter(fight, o, mmaEnrich, false, '', null, stmts);
         if (!mlResultMma.pass) {
           log('INFO', 'AUTO-MMA', `Pré-filtro ML: edge insuficiente (${mlResultMma.score.toFixed(1)}pp) para ${fight.team1} vs ${fight.team2}. Pulando IA.`);
+          logRejection('mma', `${fight.team1} vs ${fight.team2}`, 'ml_prefilter_edge', { edge: +mlResultMma.score.toFixed(2) });
           await new Promise(r => setTimeout(r, 500)); continue;
         }
 
@@ -8308,6 +8357,7 @@ async function pollTennis(runOnce = false) {
 
         if (!mlResultTennis.pass) {
           log('INFO', 'AUTO-TENNIS', `Pré-filtro ML: edge insuficiente (${mlResultTennis.score.toFixed(1)}pp) para ${match.team1} vs ${match.team2}. Pulando IA.`);
+          logRejection('tennis', `${match.team1} vs ${match.team2}`, 'ml_prefilter_edge', { edge: +mlResultTennis.score.toFixed(2) });
           await new Promise(r => setTimeout(r, 500)); continue;
         }
 
@@ -9674,6 +9724,7 @@ async function pollCs(runOnce = false) {
           analyzedCs.set(key, { ts: now, tipSent: false });
           const bonusTag = _segGateCs?.minEdgeBonus > 0 ? ` [seg+${_segGateCs.minEdgeBonus}pp: ${_segGateCs.reason || ''}]` : '';
           log('INFO', 'AUTO-CS', `Sem edge: ${match.team1} vs ${match.team2} | edge=${mlScore.toFixed(1)}pp (min ${csMinEdge.toFixed(1)}pp${bonusTag}) factors=${factorCount} ${useElo ? '[Elo]' : '[HLTV]'}`);
+          logRejection('cs', `${match.team1} vs ${match.team2}`, 'edge_below_threshold', { edge: +mlScore.toFixed(2), min: +csMinEdge.toFixed(2) });
           continue;
         }
 
@@ -9700,6 +9751,7 @@ async function pollCs(runOnce = false) {
         if (evPct < minEvForTier) {
           analyzedCs.set(key, { ts: now, tipSent: false });
           log('INFO', 'AUTO-CS', `EV baixo (${evPct.toFixed(1)}% < ${minEvForTier}% ${isTier1 ? 'tier1' : 'tier2+'}): ${match.team1} vs ${match.team2}`);
+          logRejection('cs', `${match.team1} vs ${match.team2}`, 'ev_below_min', { ev: +evPct.toFixed(2), min: minEvForTier, tier: isTier1 ? 'tier1' : 'tier2+' });
           continue;
         }
         // EV ceiling trained-aware
@@ -10020,6 +10072,7 @@ async function pollValorant(runOnce = false) {
         if (!useElo) {
           analyzedValorant.set(key, { ts: now, tipSent: false });
           log('INFO', 'AUTO-VAL', `Elo insuf (${match.team1}=${elo.eloMatches1}j, ${match.team2}=${elo.eloMatches2}j, min ${MIN_ELO_GAMES}): ${match.team1} vs ${match.team2}`);
+          logRejection('valorant', `${match.team1} vs ${match.team2}`, 'elo_insufficient', { t1Games: elo.eloMatches1 || 0, t2Games: elo.eloMatches2 || 0, min: MIN_ELO_GAMES });
           continue;
         }
 
@@ -10055,6 +10108,7 @@ async function pollValorant(runOnce = false) {
           analyzedValorant.set(key, { ts: now, tipSent: false });
           const bonusTag = _segGate?.minEdgeBonus > 0 ? ` [seg+${_segGate.minEdgeBonus}pp: ${_segGate.reason || ''}]` : '';
           log('INFO', 'AUTO-VAL', `Sem edge: ${match.team1} vs ${match.team2} | edge=${mlScore.toFixed(1)}pp (min ${valMinEdge.toFixed(1)}pp${bonusTag})`);
+          logRejection('valorant', `${match.team1} vs ${match.team2}`, 'edge_below_threshold', { edge: +mlScore.toFixed(2), min: +valMinEdge.toFixed(2) });
           continue;
         }
 
@@ -10066,6 +10120,7 @@ async function pollValorant(runOnce = false) {
         if (evPct < VAL_MIN_EV) {
           analyzedValorant.set(key, { ts: now, tipSent: false });
           log('INFO', 'AUTO-VAL', `EV baixo (${evPct.toFixed(1)}%): ${match.team1} vs ${match.team2}`);
+          logRejection('valorant', `${match.team1} vs ${match.team2}`, 'ev_below_min', { ev: +evPct.toFixed(2), min: VAL_MIN_EV });
           continue;
         }
         // EV ceiling trained-aware (Valorant trained é marginal → cap 50% default)
