@@ -2505,6 +2505,40 @@ async function runLiveStormCycle() {
   }
 }
 
+// ── LoL Model Freshness Check (1x/dia) ──
+// Compara lol-weights.json trainedAt vs patches/splits/idade em oracleselixir_games.
+// DMs admin em nível attention/retrain-now. Fresh = log debug only.
+async function runLolFreshnessCycle() {
+  if (!ADMIN_IDS.size) return;
+  const { exec } = require('child_process');
+  const scriptPath = require('path').join(__dirname, 'scripts', 'check-model-freshness.js');
+  exec(`node "${scriptPath}" --json`, { timeout: 30000 }, (err, stdout) => {
+    if (err && err.code !== 1 && err.code !== 2) {
+      log('WARN', 'FRESHNESS', `exec err: ${err.message}`);
+      return;
+    }
+    let r;
+    try { r = JSON.parse(stdout); } catch (e) { log('WARN', 'FRESHNESS', `parse err: ${e.message}`); return; }
+    if (r.level === 'fresh') {
+      log('DEBUG', 'FRESHNESS', `LoL model fresh (age=${r.ageDays}d)`);
+      return;
+    }
+    log(r.level === 'retrain-now' ? 'WARN' : 'INFO', 'FRESHNESS',
+      `LoL ${r.level}: ${(r.reasons || []).join(' | ')}`);
+    const tokenForAlert = Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
+    if (!tokenForAlert) return;
+    const emoji = r.level === 'retrain-now' ? '🔴' : '🟡';
+    const msg = `${emoji} *Modelo LoL ${r.level.toUpperCase()}*\n\n` +
+      `Idade: ${r.ageDays}d | Treinado em: ${(r.trainedAtIso || '').slice(0, 16)}\n\n` +
+      `Razões:\n${(r.reasons || []).map(x => `• ${x}`).join('\n')}\n\n` +
+      (r.newPatches?.length
+        ? `Patches novos: ${r.newPatches.map(p => p.patch).join(', ')}\n\n`
+        : '') +
+      `_${(r.recommendation || '').slice(0, 400)}_`;
+    for (const adminId of ADMIN_IDS) sendDM(tokenForAlert, adminId, msg).catch(() => {});
+  });
+}
+
 // ── Backtest Validator (1x/dia) ──
 let _lastBacktestAlert = 0;
 const _backtestMilestonesSeen = new Set();
@@ -9685,6 +9719,10 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   // Live Storm Manager: cron 10min, alerta admin no flip into/out-of storm.
   setInterval(() => runLiveStormCycle().catch(e => log('ERROR', 'LIVE-STORM', e.message)), 10 * 60 * 1000);
   setTimeout(() => runLiveStormCycle().catch(() => {}), 7 * 60 * 1000); // 7min pós-boot
+
+  // LoL Model Freshness: cron 24h, alerta admin se stale (patches/splits novos ou idade).
+  setInterval(() => runLolFreshnessCycle().catch(e => log('ERROR', 'FRESHNESS', e.message)), 24 * 60 * 60 * 1000);
+  setTimeout(() => runLolFreshnessCycle().catch(() => {}), 30 * 60 * 1000); // 30min pós-boot
 
   // Vetor 7 — Dota snapshot collector: cron 60s captura Steam RT + Pinnacle pareados.
   // Default ON. Desativar via DOTA_SNAPSHOT_ENABLED=false.
