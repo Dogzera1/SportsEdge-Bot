@@ -1235,6 +1235,7 @@ async function runAutoAnalysis() {
           const sharpCheck = checkSharpLine(result.o, tipTeam, match.team1, match.team2);
           if (!sharpCheck.ok) {
             log('INFO', 'AUTO', `Sharp line gate: ${tipTeam} — ${sharpCheck.reason} | ${match.team1} vs ${match.team2}`);
+            logRejection('lol', `${match.team1} vs ${match.team2}`, 'sharp_line_reject', { tip: tipTeam, reason: sharpCheck.reason });
             analyzedMatches.set(matchKey, { ts: now, tipSent: false, noEdge: true });
             continue;
           }
@@ -3514,6 +3515,7 @@ async function autoAnalyzeMatch(token, match) {
     const isLiveLoL = match.status === 'live' || match.status === 'inprogress';
     if (oddsToUse?.t1 && !isOddsFresh(oddsToUse, isLiveLoL)) {
       log('INFO', 'AUTO', `Odds stale (${oddsAgeStr(oddsToUse)}): ${match.team1} vs ${match.team2} — pulando`);
+      logRejection('lol', `${match.team1} vs ${match.team2}`, 'odds_stale', { age: oddsAgeStr(oddsToUse) });
       return null;
     }
 
@@ -4783,10 +4785,217 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
       await send(token, chatId, txt);
     } catch (e) { await send(token, chatId, `❌ ${e.message}`); }
 
+  } else if (cmd === '/tip') {
+    if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
+    try {
+      const parts = String(text || '').trim().split(/\s+/);
+      if (parts.length < 2) {
+        await send(token, chatId,
+          '*Uso:* `/tip <id>` ou `/tip <time1> vs <time2>`\n' +
+          '_Ex: `/tip 1234` ou `/tip G2 vs SK`_'
+        );
+        return;
+      }
+      let t = null;
+      const rawArg = parts.slice(1).join(' ').trim();
+      const id = parseInt(rawArg, 10);
+      if (Number.isFinite(id) && String(id) === rawArg) {
+        t = db.prepare(`SELECT * FROM tips WHERE id = ?`).get(id);
+      } else {
+        // Search by team names (pattern: "team1 vs team2" or just team1)
+        const vsMatch = rawArg.match(/^(.+?)\s+vs\.?\s+(.+)$/i);
+        if (vsMatch) {
+          const t1 = `%${vsMatch[1].trim()}%`, t2 = `%${vsMatch[2].trim()}%`;
+          t = db.prepare(`
+            SELECT * FROM tips
+            WHERE (archived IS NULL OR archived = 0)
+              AND ((participant1 LIKE ? AND participant2 LIKE ?)
+                OR (participant1 LIKE ? AND participant2 LIKE ?))
+            ORDER BY sent_at DESC LIMIT 1
+          `).get(t1, t2, t2, t1);
+        } else {
+          const q = `%${rawArg}%`;
+          t = db.prepare(`
+            SELECT * FROM tips
+            WHERE (archived IS NULL OR archived = 0)
+              AND (participant1 LIKE ? OR participant2 LIKE ? OR tip_participant LIKE ?)
+            ORDER BY sent_at DESC LIMIT 1
+          `).get(q, q, q);
+        }
+      }
+      if (!t) { await send(token, chatId, '❌ Tip não encontrada'); return; }
+
+      const statusEmoji = t.result === 'win' ? '✅' : t.result === 'loss' ? '❌' : t.result === 'void' ? '⚪' : t.result === 'push' ? '=' : '⏳';
+      const liveTag = t.is_live ? ' 🔴' : '';
+      const shadowTag = t.is_shadow ? ' 👤' : '';
+      const archivedTag = t.archived ? ' 🗄' : '';
+      let txt = `${statusEmoji} *TIP #${id}*${liveTag}${shadowTag}${archivedTag}\n`;
+      txt += `\n*Evento:* ${t.participant1} vs ${t.participant2}\n`;
+      if (t.event_name) txt += `*Liga:* ${t.event_name}\n`;
+      txt += `*Pick:* ${t.tip_participant} @ ${t.odds}\n`;
+      if (t.market_type) txt += `*Market:* ${t.market_type}\n`;
+      txt += `*Stake:* ${t.stake}${t.stake_reais ? ' (R$ ' + t.stake_reais.toFixed(2) + ')' : ''}\n`;
+      txt += `*EV:* ${t.ev}%${t.confidence ? ` · Conf: ${t.confidence}` : ''}\n`;
+      if (t.model_p_pick != null) txt += `*Model P:* ${(t.model_p_pick * 100).toFixed(1)}%\n`;
+
+      txt += `\n*Timeline:*\n`;
+      txt += `  · Enviada: ${t.sent_at || '?'}\n`;
+      if (t.odds_fetched_at) txt += `  · Odds capturadas: ${t.odds_fetched_at}\n`;
+      if (t.settled_at) txt += `  · Settled: ${t.settled_at}\n`;
+
+      if (t.result != null) {
+        txt += `\n*Resultado:* ${t.result}`;
+        if (t.profit_reais != null) txt += ` · profit: R$ ${t.profit_reais.toFixed(2)}`;
+        txt += '\n';
+      } else {
+        txt += `\n*Status:* pendente\n`;
+        if (t.current_odds) txt += `*Current odds:* ${t.current_odds}${t.current_ev ? ` (EV ${t.current_ev}%)` : ''}\n`;
+      }
+
+      // CLV
+      if (t.clv_odds) {
+        const clvPct = ((parseFloat(t.odds) / parseFloat(t.clv_odds) - 1) * 100).toFixed(2);
+        const sign = parseFloat(clvPct) >= 0 ? '+' : '';
+        txt += `*CLV:* open ${t.odds} vs close ${t.clv_odds} = ${sign}${clvPct}%\n`;
+      } else if (t.open_odds) {
+        txt += `*Open odd:* ${t.open_odds}\n`;
+      }
+
+      // Best book / line shop
+      if (t.best_book && t.best_odd) {
+        txt += `\n*Best book:* ${t.best_book} @ ${t.best_odd}`;
+        if (t.pinnacle_odd) txt += ` (Pinnacle: ${t.pinnacle_odd})`;
+        if (t.line_shop_delta_pct) txt += ` · Δ${t.line_shop_delta_pct > 0 ? '+' : ''}${t.line_shop_delta_pct.toFixed(1)}%`;
+        txt += '\n';
+      }
+
+      if (t.tip_reason) {
+        const reason = t.tip_reason.length > 500 ? t.tip_reason.slice(0, 500) + '...' : t.tip_reason;
+        txt += `\n*Reasoning:*\n_${reason}_\n`;
+      }
+
+      if (t.match_id) txt += `\n\`match_id: ${t.match_id}\``;
+      if (t.model_version) txt += `\n\`model: ${t.model_version}\``;
+
+      await send(token, chatId, txt);
+    } catch (e) { await send(token, chatId, `❌ ${e.message}`); }
+
+  } else if (cmd === '/pipeline-health' || cmd === '/pipeline') {
+    if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
+    try {
+      const fs = require('fs');
+      const path = require('path');
+      let txt = `🩺 *PIPELINE HEALTH* (${new Date().toLocaleString('pt-BR').slice(0, 16)})\n\n`;
+
+      // 1. Sports enabled
+      const enabledSports = Object.entries(SPORTS).filter(([_, v]) => v.enabled);
+      txt += `*Sports ativos (${enabledSports.length}):* ${enabledSports.map(([k]) => k).join(', ')}\n\n`;
+
+      // 2. Last tip + rejections per sport (última hora)
+      const nowMs = Date.now();
+      const cutoff = nowMs - 60 * 60 * 1000;
+      const rejBySport = {};
+      for (const r of _rejections) {
+        if (r.ts < cutoff) break;
+        rejBySport[r.sport] = (rejBySport[r.sport] || 0) + 1;
+      }
+      txt += `*Tips 24h (active only):*\n`;
+      const tipsByS = db.prepare(`
+        SELECT sport, COUNT(*) AS n, MAX(sent_at) AS last_at,
+          SUM(CASE WHEN result IS NULL THEN 1 ELSE 0 END) AS pending
+        FROM tips
+        WHERE sent_at >= datetime('now','-24 hours')
+          AND (archived IS NULL OR archived = 0)
+        GROUP BY sport
+      `).all();
+      if (!tipsByS.length) txt += `  _(sem tips em 24h)_\n`;
+      else for (const s of tipsByS) {
+        const rej = rejBySport[s.sport === 'esports' ? 'lol' : s.sport] || 0;
+        const lastMin = s.last_at ? Math.floor((nowMs - new Date(s.last_at + 'Z').getTime()) / 60000) : null;
+        const ago = lastMin != null ? (lastMin < 60 ? `${lastMin}min` : `${Math.floor(lastMin/60)}h`) : '?';
+        txt += `  · ${s.sport}: ${s.n} tips (${s.pending} pend) · últ: ${ago} · rej 1h: ${rej}\n`;
+      }
+
+      // 3. Modelos stale flags
+      const STALE_DAYS = parseInt(process.env.MODEL_STALE_DAYS || '30', 10);
+      const staleGames = [];
+      for (const g of ['lol', 'cs2', 'dota2', 'valorant', 'tennis']) {
+        const wp = path.join(__dirname, 'lib', `${g}-weights.json`);
+        if (!fs.existsSync(wp)) continue;
+        const ageDays = Math.floor((nowMs - fs.statSync(wp).mtimeMs) / (24 * 3600 * 1000));
+        if (ageDays > STALE_DAYS) staleGames.push(`${g} (${ageDays}d)`);
+      }
+      txt += `\n*Modelos stale (>${STALE_DAYS}d):* ${staleGames.length ? staleGames.join(', ') + ' ⚠️' : '✓ nenhum'}\n`;
+
+      // 4. Shadow tips settle status
+      const shadowStats = db.prepare(`
+        SELECT
+          COUNT(*) AS total,
+          SUM(CASE WHEN result IS NULL THEN 1 ELSE 0 END) AS pending,
+          SUM(CASE WHEN clv_pct IS NOT NULL THEN 1 ELSE 0 END) AS with_clv
+        FROM market_tips_shadow
+        WHERE created_at >= datetime('now','-7 days')
+      `).get();
+      txt += `\n*Market tips shadow 7d:* ${shadowStats.total} logged · ${shadowStats.pending} pendentes · ${shadowStats.with_clv} com CLV\n`;
+
+      // 5. Rejections summary cross-sport
+      const totalRej = _rejections.filter(r => r.ts >= cutoff).length;
+      txt += `\n*Rejections 1h:* ${totalRej} total`;
+      if (totalRej > 0) {
+        const topReasons = {};
+        for (const r of _rejections) {
+          if (r.ts < cutoff) break;
+          topReasons[r.reason] = (topReasons[r.reason] || 0) + 1;
+        }
+        const topList = Object.entries(topReasons).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([r, n]) => `${r}×${n}`).join(' · ');
+        txt += ` (${topList})`;
+      }
+
+      // 6. Sharp action: settlement status
+      const settledLast24h = db.prepare(`
+        SELECT COUNT(*) AS n FROM tips WHERE settled_at >= datetime('now','-24 hours')
+      `).get();
+      txt += `\n*Settlement 24h:* ${settledLast24h.n} tips liquidadas\n`;
+
+      await send(token, chatId, txt);
+    } catch (e) { await send(token, chatId, `❌ ${e.message}`); }
+
   } else if (cmd === '/rejections') {
     if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
     try {
       const parts = String(text || '').trim().split(/\s+/);
+      // /rejections summary — matrix sport × reason (cobertura completa do buffer)
+      if (parts[1]?.toLowerCase() === 'summary') {
+        if (!_rejections.length) {
+          await send(token, chatId, '📋 Buffer de rejections vazio (bot recém-reiniciado?)');
+          return;
+        }
+        const cutoff = Date.now() - 24 * 3600 * 1000;
+        const mtx = {}; // sport → { reason → count }
+        const sports = new Set();
+        const reasons = new Set();
+        for (const r of _rejections) {
+          if (r.ts < cutoff) break;
+          if (!mtx[r.sport]) mtx[r.sport] = {};
+          mtx[r.sport][r.reason] = (mtx[r.sport][r.reason] || 0) + 1;
+          sports.add(r.sport);
+          reasons.add(r.reason);
+        }
+        const sportList = [...sports].sort();
+        const reasonList = [...reasons].sort();
+        let txt = `📋 *REJECTIONS MATRIX — 24h* (${_rejections.filter(r => r.ts >= cutoff).length} total)\n\n`;
+        txt += '```\n';
+        txt += 'sport      ' + reasonList.map(r => r.slice(0, 10).padEnd(11)).join('') + 'TOTAL\n';
+        for (const s of sportList) {
+          const cells = reasonList.map(r => String(mtx[s][r] || '').padEnd(11));
+          const total = Object.values(mtx[s]).reduce((a, b) => a + b, 0);
+          txt += s.padEnd(11) + cells.join('') + total + '\n';
+        }
+        txt += '```';
+        await send(token, chatId, txt);
+        return;
+      }
+
       const sportFilter = parts[1]?.toLowerCase() || null;
       const limit = Math.max(5, Math.min(50, parseInt(parts[2] || '20', 10) || 20));
       const items = getRejections(sportFilter, limit);
@@ -4810,6 +5019,7 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
         txt += `• \`${r.sport}\` ${r.teams} — *${r.reason}* ${extraStr ? '(' + extraStr + ')' : ''} · ${agoStr}\n`;
         if (txt.length > 3500) { txt += '_(truncado)_'; break; }
       }
+      txt += `\n_Uso: /rejections [sport] [limit] | /rejections summary_`;
       await send(token, chatId, txt);
     } catch (e) { await send(token, chatId, `❌ ${e.message}`); }
 
@@ -4973,17 +5183,55 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
     } catch(e) {
       await send(token, chatId, `❌ Erro no debug: ${e.message}`);
     }
+  } else if (cmd === '/help' || cmd === '/start' || !cmd || cmd === '/') {
+    const isAdmin = ADMIN_IDS.has(String(chatId));
+    if (!isAdmin) {
+      await send(token, chatId,
+        `🤖 *SportsEdge Bot*\n\n` +
+        `Tips de apostas esportivas com modelagem estatística.\n\n` +
+        `*Comandos disponíveis:*\n` +
+        `/notificacoes — gerenciar notificações\n` +
+        `/stats — estatísticas públicas\n` +
+        `/help — esta mensagem`
+      );
+      return;
+    }
+    await send(token, chatId,
+      `📋 *COMANDOS ADMIN* (SportsEdge)\n\n` +
+      `━━ 🩺 *Health & Monitoring* ━━\n` +
+      `\`/pipeline-health\` — unified: sports/tips/modelos/rejections\n` +
+      `\`/models\` — Brier/Acc/AUC de 5 modelos + rejections 1h\n` +
+      `\`/health\` — status geral bot + DB\n` +
+      `\`/debug\` — partidas live/upcoming + uso API\n\n` +
+      `━━ 📊 *Market Tips Shadow* ━━\n` +
+      `\`/market-tips [sport] [days]\` — stats por (sport, market)\n` +
+      `\`/market-tips recent [sport] [n]\` — tips individuais\n` +
+      `\`/market-tips leaks [days] [minN]\` — 🚨 ROI negativo persistente\n` +
+      `\`/market-tips watch\` — ⏳ aproximando readiness\n` +
+      `\`/market-tips league [sport]\` — ROI por liga\n\n` +
+      `━━ 📋 *Rejection Debug* ━━\n` +
+      `\`/rejections [sport] [limit]\` — tips rejeitadas recentes\n` +
+      `\`/rejections summary\` — matrix 24h sport × reason\n` +
+      `\`/val-eligibility\` — 🎯 Valorant teams elegíveis\n` +
+      `\`/tip <id>\` ou \`/tip <team1> vs <team2>\` — detalhe de tip\n\n` +
+      `━━ 🔄 *Data Sync & Refresh* ━━\n` +
+      `\`/sync-history [sport]\` — PandaScore (valorant/cs/dota/lol)\n` +
+      `\`/reanalise [sport]\` — reavalia pendentes (esports/mma/tennis...)\n` +
+      `\`/refresh-open\` — recalcula EV de tips pendentes\n\n` +
+      `━━ 📈 *Stats & ROI* ━━\n` +
+      `\`/stats [sport]\` — ROI e calibração\n` +
+      `\`/roi\` — ROI geral\n` +
+      `\`/shadow [sport]\` — shadow tips (darts/snooker/TT)\n\n` +
+      `━━ 🔧 *Debug LoL Específico* ━━\n` +
+      `\`/slugs\` — ligas LoL cobertas + ignoradas\n` +
+      `\`/lolraw\` — dump bruto schedule LoL API\n\n` +
+      `━━ ⚠️ *Destrutivos* (cuidado) ━━\n` +
+      `\`/reset-tips\` — zera histórico + banca\n\n` +
+      `_Dashboard web: /dashboard (v2) · /logs (monitor live)_`
+    );
   } else {
     await send(token, chatId,
-      `📋 *Comandos Admin*\n\n` +
-      `/health — status do bot e DB\n` +
-      `/debug — partidas, tips pendentes, uso de API\n` +
-      `/stats esports — ROI e calibração\n` +
-      `/users — status do bot\n` +
-      `/pending — tips pendentes\n` +
-      `/settle — force settlement\n` +
-      `/slugs — ligas LoL cobertas e slugs ignorados\n` +
-      `/lolraw — dump bruto da API LoL (diagnóstico)\n`
+      `❓ Comando não reconhecido. Envie \`/help\` para lista completa.`
     );
   }
 }
@@ -5893,7 +6141,8 @@ async function poll(token, sport) {
                      text.startsWith('/shadow') || text.startsWith('/market-tips') ||
                      text.startsWith('/models') || text.startsWith('/val-') ||
                      text.startsWith('/rejections') || text.startsWith('/sync-val-') ||
-                     text.startsWith('/sync-history')) {
+                     text.startsWith('/sync-history') || text.startsWith('/pipeline') ||
+                     text.startsWith('/tip ') || text.startsWith('/help') || text.startsWith('/start')) {
             // Passa `sport` da poll (qual bot recebeu) para evitar default 'esports'
             await handleAdmin(token, chatId, text, sport);
           }
@@ -6618,6 +6867,7 @@ async function _pollDotaInner(runOnce = false) {
       const _segGateD = esportsSegmentGate('dota2', match.league, match.format);
       if (_segGateD.skip) {
         log('INFO', 'AUTO-DOTA', `Segment skip: ${match.team1} vs ${match.team2} [${match.league}] → ${_segGateD.reason}`);
+        logRejection('dota2', `${match.team1} vs ${match.team2}`, 'segment_skip', { league: match.league || '?', reason: _segGateD.reason });
         setDotaAnalyzed({ ts: now, tipSent: false, noEdge: true });
         continue;
       }
@@ -6670,6 +6920,7 @@ async function _pollDotaInner(runOnce = false) {
       }
       if (!isOddsFresh(o, isLive)) {
         log('INFO', 'AUTO-DOTA', `Odds stale (${oddsAgeStr(o)}): ${match.team1} vs ${match.team2} — pulando`);
+        logRejection('dota2', `${match.team1} vs ${match.team2}`, 'odds_stale', { age: oddsAgeStr(o) });
         continue;
       }
       logOddsHistory('dota2', match.id, match.team1, match.team2, o);
@@ -7075,6 +7326,7 @@ Máximo 200 palavras.`;
       const sharpCheckDota = checkSharpLine(o, tipTeam, match.team1, match.team2);
       if (!sharpCheckDota.ok) {
         log('INFO', 'AUTO-DOTA', `Sharp line gate: ${tipTeam} — ${sharpCheckDota.reason}`);
+        logRejection('dota2', `${match.team1} vs ${match.team2}`, 'sharp_line_reject', { tip: tipTeam, reason: sharpCheckDota.reason });
         setDotaAnalyzed({ ts: now, tipSent: false, noEdge: true });
         await _sleep(2000); continue;
       }
@@ -7936,6 +8188,7 @@ async function pollTennis(runOnce = false) {
           const proh = tennisProhibitedTournament(match.league || match.tournament || '');
           if (proh.prohibited) {
             log('INFO', 'AUTO-TENNIS', `Skip ITF exclusion: ${match.team1} vs ${match.team2} [${match.league || 'no-league'}] → ${proh.reason}`);
+            logRejection('tennis', `${match.team1} vs ${match.team2}`, 'itf_exclusion', { reason: proh.reason, tier: proh.tier });
             analyzedTennis.set(key, { ts: now, tipSent: false, noEdge: true });
             continue;
           }
@@ -7959,6 +8212,7 @@ async function pollTennis(runOnce = false) {
         const isLiveTennis = match.status === 'live';
         if (!isOddsFresh(o, isLiveTennis)) {
           log('INFO', 'AUTO-TENNIS', `Odds stale (${oddsAgeStr(o)}): ${match.team1} vs ${match.team2} — pulando`);
+          logRejection('tennis', `${match.team1} vs ${match.team2}`, 'odds_stale', { age: oddsAgeStr(o) });
           continue;
         }
         logOddsHistory('tennis', match.id, match.team1, match.team2, o);
@@ -9615,6 +9869,7 @@ async function pollCs(runOnce = false) {
         const _segGateCs = esportsSegmentGate('cs2', match.league, match.format);
         if (_segGateCs.skip) {
           log('INFO', 'AUTO-CS', `Segment skip: ${match.team1} vs ${match.team2} [${match.league}] → ${_segGateCs.reason}`);
+          logRejection('cs', `${match.team1} vs ${match.team2}`, 'segment_skip', { league: match.league || '?', reason: _segGateCs.reason });
           analyzedCs.set(key, { ts: now, tipSent: false, noEdge: true });
           continue;
         }
@@ -9622,6 +9877,7 @@ async function pollCs(runOnce = false) {
         if (!match.odds?.t1 || !match.odds?.t2) continue;
         if (!isOddsFresh(match.odds, isLiveCs)) {
           log('INFO', 'AUTO-CS', `Odds stale (${oddsAgeStr(match.odds)}): ${match.team1} vs ${match.team2} — pulando`);
+          logRejection('cs', `${match.team1} vs ${match.team2}`, 'odds_stale', { age: oddsAgeStr(match.odds) });
           continue;
         }
         const o1 = parseFloat(match.odds.t1);
@@ -10097,6 +10353,7 @@ async function pollValorant(runOnce = false) {
         const _segGate = esportsSegmentGate('valorant', match.league, match.format);
         if (_segGate.skip) {
           log('INFO', 'AUTO-VAL', `Segment skip: ${match.team1} vs ${match.team2} [${match.league}] → ${_segGate.reason}`);
+          logRejection('valorant', `${match.team1} vs ${match.team2}`, 'segment_skip', { league: match.league || '?', reason: _segGate.reason });
           analyzedValorant.set(key, { ts: now, tipSent: false, noEdge: true });
           continue;
         }
@@ -10104,6 +10361,7 @@ async function pollValorant(runOnce = false) {
         if (!match.odds?.t1 || !match.odds?.t2) continue;
         if (!isOddsFresh(match.odds, isLiveVal)) {
           log('INFO', 'AUTO-VAL', `Odds stale (${oddsAgeStr(match.odds)}): ${match.team1} vs ${match.team2} — pulando`);
+          logRejection('valorant', `${match.team1} vs ${match.team2}`, 'odds_stale', { age: oddsAgeStr(match.odds) });
           continue;
         }
         const o1 = parseFloat(match.odds.t1);
@@ -11059,12 +11317,31 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
       log('INFO', tag, 'Auto-sync history started (background)');
     } catch (e) { log('WARN', `HIST-${game.toUpperCase()}`, `err: ${e.message}`); }
   };
-  // Weekly rotation: cada sport roda 1x/semana, distribuídos em dias diferentes
+  // Weekly rotation: cada sport roda 1x/semana, distribuídos em horários diferentes
   // pra não sobrecarregar PandaScore nem o CPU. Boot-time: só valorant (mais urgente).
+  // LoL tem gol.gg como fonte primária (já cobrido via scripts/sync-golgg-matches.js
+  // run manual); PS supplement pra cobertura de LCP/CBLOL/LJL adicional.
   setInterval(() => runHistorySync('valorant', 3000), 7 * 24 * 60 * 60 * 1000);
   setInterval(() => { setTimeout(() => runHistorySync('cs-go', 3000), 6 * 60 * 60 * 1000); }, 7 * 24 * 60 * 60 * 1000);
   setInterval(() => { setTimeout(() => runHistorySync('dota2', 3000), 12 * 60 * 60 * 1000); }, 7 * 24 * 60 * 60 * 1000);
+  setInterval(() => { setTimeout(() => runHistorySync('lol', 2000), 18 * 60 * 60 * 1000); }, 7 * 24 * 60 * 60 * 1000);
   setTimeout(() => runHistorySync('valorant', 3000), 20 * 60 * 1000); // primeira run
+
+  // Tennis stats (Sackmann) — weekly, pega 2026+ quando Sackmann publicar.
+  const runTennisStatsSync = () => {
+    try {
+      const { spawn } = require('child_process');
+      const proc = spawn('node', ['scripts/sync-tennis-stats.js', '--years=2024,2025,2026', '--tours=atp,wta'], {
+        cwd: __dirname, env: process.env, detached: false,
+      });
+      proc.on('close', (code) => {
+        log(code === 0 ? 'INFO' : 'WARN', 'HIST-TENNIS', `Auto-sync tennis stats exit=${code}`);
+      });
+      log('INFO', 'HIST-TENNIS', 'Auto-sync tennis stats started (background)');
+    } catch (e) { log('WARN', 'HIST-TENNIS', `err: ${e.message}`); }
+  };
+  setInterval(runTennisStatsSync, 7 * 24 * 60 * 60 * 1000); // weekly
+  setTimeout(runTennisStatsSync, 90 * 60 * 1000); // 90min pós-boot (após os esports)
 
   // Pipeline stuck detection: 1x/hora, alerta se sport tem rejeições sem tips
   setInterval(() => { try { runPipelineStuckCheck(); } catch (_) {} }, 60 * 60 * 1000);
