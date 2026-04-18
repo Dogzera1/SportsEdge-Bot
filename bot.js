@@ -4881,6 +4881,17 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
       const fs = require('fs');
       const path = require('path');
       const games = ['lol', 'cs2', 'dota2', 'valorant', 'tennis'];
+      // Rejection count por sport (última hora) — inline com model stats
+      const nowMs = Date.now();
+      const cutoff = nowMs - 60 * 60 * 1000;
+      const rejBySport = {};
+      for (const r of _rejections) {
+        if (r.ts < cutoff) break;
+        // Map bot sport name → model game name
+        const mapSport = { cs: 'cs2', dota2: 'dota2', valorant: 'valorant', lol: 'lol', tennis: 'tennis' };
+        const g = mapSport[r.sport] || r.sport;
+        rejBySport[g] = (rejBySport[g] || 0) + 1;
+      }
       let txt = `🧠 *MODELS STATUS*\n\n`;
       for (const g of games) {
         const weightsPath = path.join(__dirname, 'lib', `${g}-weights.json`);
@@ -4904,6 +4915,8 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
           txt += `  Brier=${chosenM.brier.toFixed(4)} Acc=${(chosenM.acc*100).toFixed(1)}% AUC=${chosenM.auc.toFixed(3)}\n`;
           txt += `  chosen=${chosen} | test n=${splits.test?.n || '?'} → ${testTo}\n`;
           txt += `  isotonic: ${hasIso ? '✓ aplicada' : '✗ ausente'}\n`;
+          const rejCount = rejBySport[g] || 0;
+          if (rejCount > 0) txt += `  rejections 1h: ${rejCount}${rejCount >= 20 ? ' ⚠️' : ''}\n`;
         }
         txt += `\n`;
       }
