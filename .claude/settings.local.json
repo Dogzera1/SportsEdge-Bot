@@ -220,7 +220,8 @@
       "Bash(awk 'NR>=8470 && NR<=9421' bot.js)",
       "Bash(DB_PATH=sportsedge.db node scripts/refresh-all-isotonics.js --game tennis)",
       "Bash(awk 'NR>=800 && NR<=905' lib/tennis-model.js)",
-      "Bash(awk 'NR>=700 && NR<=900' lib/tennis-model.js)"
+      "Bash(awk 'NR>=700 && NR<=900' lib/tennis-model.js)",
+      "Bash(DB_PATH=sportsedge.db node scripts/backtest-new-models.js)"
     ]
   }
 }
