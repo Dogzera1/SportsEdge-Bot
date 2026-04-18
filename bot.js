@@ -11205,6 +11205,23 @@ async function runAutoDarts() {
             continue;
           }
 
+          // ── Darts trained model (logistic+GBDT) ──
+          // Treinado 2026-04-18 com ~6800 matches. Brier 0.239 vs baseline 0.242 (marginal).
+          // Blend conservador (conf × 0.5) — darts é high-variance (180s/checkout).
+          if (hasTrainedEsportsModel('darts')) {
+            try {
+              const ctx = buildEsportsTrainedContext(db, 'darts', match);
+              const tp = ctx ? predictTrainedEsports('darts', ctx) : null;
+              if (tp) {
+                const wT = tp.confidence * 0.5;
+                const merged = wT * tp.p1 + (1 - wT) * ml.modelP1;
+                log('INFO', 'DARTS-TRAINED', `${match.team1} vs ${match.team2}: trainedP1=${(tp.p1*100).toFixed(1)}% (conf=${tp.confidence}) | prior=${(ml.modelP1*100).toFixed(1)}% → blend=${(merged*100).toFixed(1)}%`);
+                ml.modelP1 = merged;
+                ml.modelP2 = 1 - merged;
+              }
+            } catch (e) { log('DEBUG', 'DARTS-TRAINED', `err: ${e.message}`); }
+          }
+
           // Direção, odd e stake Kelly
           const pickTeam = ml.direction === 't1' ? match.team1 : match.team2;
           const pickOdd = ml.direction === 't1' ? parseFloat(match.odds.t1) : parseFloat(match.odds.t2);
@@ -11403,6 +11420,23 @@ async function runAutoSnooker() {
             analyzedSnooker.set(key, { ts: now, tipSent: false });
             log('INFO', 'AUTO-SNOOKER', `Sem edge: ${match.team1} vs ${match.team2} | edge=${ml.score}pp factors=${ml.factorCount}`);
             continue;
+          }
+
+          // ── Snooker trained model (logistic) ──
+          // Treinado 2026-04-18 com ~2000 matches. Brier 0.238 vs baseline 0.240 (marginal).
+          // Blend conservador (conf × 0.5) — snooker é high-variance + small sample.
+          if (hasTrainedEsportsModel('snooker')) {
+            try {
+              const ctx = buildEsportsTrainedContext(db, 'snooker', match);
+              const tp = ctx ? predictTrainedEsports('snooker', ctx) : null;
+              if (tp) {
+                const wT = tp.confidence * 0.5;
+                const merged = wT * tp.p1 + (1 - wT) * ml.modelP1;
+                log('INFO', 'SNOOKER-TRAINED', `${match.team1} vs ${match.team2}: trainedP1=${(tp.p1*100).toFixed(1)}% (conf=${tp.confidence}) | prior=${(ml.modelP1*100).toFixed(1)}% → blend=${(merged*100).toFixed(1)}%`);
+                ml.modelP1 = merged;
+                ml.modelP2 = 1 - merged;
+              }
+            } catch (e) { log('DEBUG', 'SNOOKER-TRAINED', `err: ${e.message}`); }
           }
 
           const pickTeam = ml.direction === 't1' ? match.team1 : match.team2;

@@ -233,7 +233,13 @@
       "Bash(DB_PATH=sportsedge.db node scripts/shadow-compare.js --game lol --days 30)",
       "Bash(DB_PATH=sportsedge.db node scripts/sync-ufcstats-history.js --max 5 --rate-ms 300)",
       "Bash(DB_PATH=sportsedge.db node scripts/sync-ufcstats-history.js --rate-ms 400)",
-      "Bash(DB_PATH=sportsedge.db node scripts/extract-mma-features.js)"
+      "Bash(DB_PATH=sportsedge.db node scripts/extract-mma-features.js)",
+      "Bash(DB_PATH=sportsedge.db node scripts/sync-sofascore-history.js --sport snooker --days-back 7 --rate-ms 200)",
+      "Bash(DB_PATH=sportsedge.db node scripts/sync-sofascore-history.js --sport darts --days-back 365 --rate-ms 200)",
+      "Bash(DB_PATH=sportsedge.db node scripts/sync-sofascore-history.js --sport snooker --days-back 365 --rate-ms 200)",
+      "Bash(DB_PATH=sportsedge.db node scripts/sync-sofascore-history.js --sport table-tennis --days-back 180 --rate-ms 250)",
+      "Bash(DB_PATH=sportsedge.db node scripts/extract-1v1-features.js --game snooker)",
+      "Bash(DB_PATH=sportsedge.db node scripts/extract-1v1-features.js --game darts)"
     ]
   }
 }
