@@ -399,6 +399,52 @@ function getRejections(sportFilter, limit = 50) {
   if (sportFilter) list = list.filter(r => r.sport === sportFilter);
   return list.slice(0, Math.max(1, Math.min(limit, REJECTIONS_MAX)));
 }
+
+/**
+ * Pipeline health check: conta rejeições por sport na última hora.
+ * Se sport tem >=PIPELINE_STUCK_THRESHOLD rejections + 0 tips sent → log WARN.
+ * Sinaliza gates apertados demais ou modelo desligado.
+ */
+const _lastStuckAlert = {}; // sport → ts (cooldown 2h entre alertas)
+function runPipelineStuckCheck() {
+  const ONE_HOUR = 60 * 60 * 1000;
+  const COOLDOWN = 2 * ONE_HOUR;
+  const now = Date.now();
+  const cutoff = now - ONE_HOUR;
+  const threshold = parseInt(process.env.PIPELINE_STUCK_THRESHOLD || '20', 10);
+
+  // Conta rejeições por sport última hora
+  const byySport = {};
+  for (const r of _rejections) {
+    if (r.ts < cutoff) break;
+    byySport[r.sport] = (byySport[r.sport] || 0) + 1;
+  }
+
+  for (const [sport, count] of Object.entries(byySport)) {
+    if (count < threshold) continue;
+    // Conta tips enviadas esse sport na última hora (active only)
+    try {
+      const tipsRow = db.prepare(`
+        SELECT COUNT(*) AS n FROM tips
+        WHERE sport = ?
+          AND (archived IS NULL OR archived = 0)
+          AND sent_at >= datetime('now', '-1 hour')
+      `).get(sport === 'cs' ? 'cs' : sport === 'dota2' ? 'esports' : sport);
+      if (tipsRow.n > 0) continue;
+      // Sport tem muitas rejections + 0 tips. Alert com cooldown.
+      if ((now - (_lastStuckAlert[sport] || 0)) < COOLDOWN) continue;
+      _lastStuckAlert[sport] = now;
+      // Top reasons
+      const reasons = {};
+      for (const r of _rejections) {
+        if (r.ts < cutoff || r.sport !== sport) continue;
+        reasons[r.reason] = (reasons[r.reason] || 0) + 1;
+      }
+      const topReasons = Object.entries(reasons).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([r, n]) => `${r}×${n}`).join(' · ');
+      log('WARN', 'PIPELINE-STUCK', `${sport}: ${count} rejections / 0 tips na última hora. Top: ${topReasons}. Verificar gates.`);
+    } catch (_) {}
+  }
+}
 const LINE_CHECK_INTERVAL = 30 * 60 * 1000;
 let lastLineCheck = 0;
 
@@ -4767,6 +4813,30 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
       await send(token, chatId, txt);
     } catch (e) { await send(token, chatId, `❌ ${e.message}`); }
 
+  } else if (cmd === '/sync-val-history' || cmd === '/sync-history') {
+    if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
+    try {
+      const parts = String(text || '').trim().split(/\s+/);
+      const gameArg = (parts[1] || 'valorant').toLowerCase();
+      const validGames = { valorant: 'valorant', cs: 'cs-go', cs2: 'cs-go', dota: 'dota2', dota2: 'dota2', lol: 'lol' };
+      const psGame = validGames[gameArg];
+      if (!psGame) { await send(token, chatId, '❌ Sport inválido. Use: valorant, cs, dota, lol'); return; }
+      await send(token, chatId, `🔄 Iniciando sync histórico ${psGame} (PandaScore)... (1-3min)`);
+      const { spawn } = require('child_process');
+      const proc = spawn('node', ['scripts/sync-pandascore-history.js', '--game', psGame, '--from', '2024-01-01', '--max', '5000'], {
+        cwd: __dirname,
+        env: process.env,
+      });
+      let outTail = '';
+      proc.stdout.on('data', d => { outTail += d.toString(); if (outTail.length > 2000) outTail = outTail.slice(-2000); });
+      proc.stderr.on('data', d => { outTail += d.toString(); if (outTail.length > 2000) outTail = outTail.slice(-2000); });
+      proc.on('close', async (code) => {
+        const status = code === 0 ? '✅' : '⚠️';
+        const last5Lines = outTail.trim().split('\n').slice(-5).join('\n');
+        await send(token, chatId, `${status} Sync ${psGame} concluído (exit ${code}).\n\n\`\`\`\n${last5Lines}\n\`\`\``);
+      });
+    } catch (e) { await send(token, chatId, `❌ ${e.message}`); }
+
   } else if (cmd === '/val-eligibility' || cmd === '/val-status') {
     if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
     try {
@@ -5809,7 +5879,8 @@ async function poll(token, sport) {
                      text.startsWith('/health') || text.startsWith('/debug') ||
                      text.startsWith('/shadow') || text.startsWith('/market-tips') ||
                      text.startsWith('/models') || text.startsWith('/val-') ||
-                     text.startsWith('/rejections')) {
+                     text.startsWith('/rejections') || text.startsWith('/sync-val-') ||
+                     text.startsWith('/sync-history')) {
             // Passa `sport` da poll (qual bot recebeu) para evitar default 'esports'
             await handleAdmin(token, chatId, text, sport);
           }
@@ -10959,6 +11030,32 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   // LoL Model Freshness: cron 24h, alerta admin se stale (patches/splits novos ou idade).
   setInterval(() => runLolFreshnessCycle().catch(e => log('ERROR', 'FRESHNESS', e.message)), 24 * 60 * 60 * 1000);
   setTimeout(() => runLolFreshnessCycle().catch(() => {}), 30 * 60 * 1000); // 30min pós-boot
+
+  // Auto-sync histórico esports semanal (PandaScore). Refresca Elo de times
+  // novos/inativos em Valorant/CS/Dota (muita rotação em tier2/3).
+  const runHistorySync = (game, maxRows = 3000) => {
+    try {
+      const { spawn } = require('child_process');
+      const tag = `HIST-${game.toUpperCase()}`;
+      const proc = spawn('node', ['scripts/sync-pandascore-history.js', '--game', game, '--from', '2024-01-01', '--max', String(maxRows)], {
+        cwd: __dirname, env: process.env, detached: false,
+      });
+      proc.on('close', (code) => {
+        log(code === 0 ? 'INFO' : 'WARN', tag, `Auto-sync history exit=${code}`);
+      });
+      log('INFO', tag, 'Auto-sync history started (background)');
+    } catch (e) { log('WARN', `HIST-${game.toUpperCase()}`, `err: ${e.message}`); }
+  };
+  // Weekly rotation: cada sport roda 1x/semana, distribuídos em dias diferentes
+  // pra não sobrecarregar PandaScore nem o CPU. Boot-time: só valorant (mais urgente).
+  setInterval(() => runHistorySync('valorant', 3000), 7 * 24 * 60 * 60 * 1000);
+  setInterval(() => { setTimeout(() => runHistorySync('cs-go', 3000), 6 * 60 * 60 * 1000); }, 7 * 24 * 60 * 60 * 1000);
+  setInterval(() => { setTimeout(() => runHistorySync('dota2', 3000), 12 * 60 * 60 * 1000); }, 7 * 24 * 60 * 60 * 1000);
+  setTimeout(() => runHistorySync('valorant', 3000), 20 * 60 * 1000); // primeira run
+
+  // Pipeline stuck detection: 1x/hora, alerta se sport tem rejeições sem tips
+  setInterval(() => { try { runPipelineStuckCheck(); } catch (_) {} }, 60 * 60 * 1000);
+  setTimeout(() => { try { runPipelineStuckCheck(); } catch (_) {} }, 15 * 60 * 1000); // 15min pós-boot
 
   // Market tips shadow settlement: cron 30min, cruza market_tips_shadow com match_results
   const runShadowSettle = () => {
