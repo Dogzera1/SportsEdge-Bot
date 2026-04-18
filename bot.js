@@ -4555,8 +4555,9 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
       if (parts[1]?.toLowerCase() === 'leaks') {
         const days = Math.max(7, Math.min(180, parseInt(parts[2] || '60', 10) || 60));
         const minN = parseInt(parts[3] || '20', 10) || 20;
+        const sportFilter = parts[4]?.toLowerCase() || null;
         const { getShadowStats } = require('./lib/market-tips-shadow');
-        const stats = getShadowStats(db, { days });
+        const stats = getShadowStats(db, { days, sport: sportFilter });
         const leaks = stats.filter(s =>
           s.settled >= minN &&
           s.roiPct != null && s.roiPct < -5
@@ -4564,7 +4565,7 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
         const underwater = stats.filter(s =>
           s.clvN >= 10 && s.avgClv != null && s.avgClv < -1 && !leaks.includes(s)
         );
-        let txt = `🚨 *LEAK DETECTOR — ${days}d (min n=${minN} settled)*\n\n`;
+        let txt = `🚨 *LEAK DETECTOR — ${days}d (min n=${minN} settled${sportFilter ? ', ' + sportFilter : ''})*\n\n`;
         if (!leaks.length && !underwater.length) {
           txt += `✅ Nenhum leak confirmado detectado.\n`;
         }
@@ -4636,7 +4637,7 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
         txt += `  CLV=${clv} (n=${s.clvN}) profit=${s.totalProfit.toFixed(1)}u\n\n`;
         if (txt.length > 3500) { txt += '_(truncado)_'; break; }
       }
-      txt += `\n_Uso: /market-tips [sport] [days] | recent [sport] [limit] | leaks [days] [minN]_`;
+      txt += `\n_Uso: /market-tips [sport] [days] | recent [sport] [limit] | leaks [days] [minN] [sport]_`;
       await send(token, chatId, txt);
     } catch (e) { await send(token, chatId, `❌ ${e.message}`); }
 
@@ -8038,6 +8039,38 @@ async function pollTennis(runOnce = false) {
                 tennisModelResult._injuryRisk = { team1: r1, team2: r2 };
               }
             } catch (ie) { log('DEBUG', 'TENNIS-INJURY', `err: ${ie.message}`); }
+          }
+
+          // Clutch adjustment: combined BP save (serve) + BP conversion (return).
+          // Total clutch score = save% + conversion%. Diff >10pp → conf boost/downgrade até ±5%.
+          if (process.env.TENNIS_CLUTCH_ADJUSTMENT !== 'false' && tennisModelResult) {
+            try {
+              const { getPlayerClutchStats, getPlayerReturnStats } = require('./lib/tennis-player-stats');
+              const c1 = getPlayerClutchStats(db, match.team1, { sinceDays: 730, minMatches: 15 });
+              const c2 = getPlayerClutchStats(db, match.team2, { sinceDays: 730, minMatches: 15 });
+              const r1 = getPlayerReturnStats(db, match.team1, { sinceDays: 730, minMatches: 15 });
+              const r2 = getPlayerReturnStats(db, match.team2, { sinceDays: 730, minMatches: 15 });
+              if (c1 && c2 && r1 && r2) {
+                const pickIsT1 = tennisModelResult.modelP1 > 0.5;
+                // Combined clutch: BP save + BP conversion. Weighted 50/50.
+                const score1 = c1.bpSavePct + r1.bpConversionPct;
+                const score2 = c2.bpSavePct + r2.bpConversionPct;
+                const pickScore = pickIsT1 ? score1 : score2;
+                const oppScore = pickIsT1 ? score2 : score1;
+                const diff = pickScore - oppScore;
+                // Linear: diff +20pp (≈combined) → ×1.05. Clamp ±5%.
+                const mult = Math.max(0.95, Math.min(1.05, 1 + diff * 0.0025));
+                if (Math.abs(mult - 1) > 0.01) {
+                  const prev = tennisModelResult.confidence || 0;
+                  tennisModelResult.confidence = Math.min(1.0, prev * mult);
+                  tennisModelResult.factors = [...(tennisModelResult.factors || []), 'clutch'];
+                  log('INFO', 'TENNIS-CLUTCH',
+                    `${match.team1} (save ${c1.bpSavePct}% conv ${r1.bpConversionPct}%) vs ` +
+                    `${match.team2} (save ${c2.bpSavePct}% conv ${r2.bpConversionPct}%) ` +
+                    `pickDiff=${diff.toFixed(1)}pp → conf ${prev.toFixed(2)}×${mult.toFixed(3)}=${tennisModelResult.confidence.toFixed(2)}`);
+                }
+              }
+            } catch (ce) { log('DEBUG', 'TENNIS-CLUTCH', `err: ${ce.message}`); }
           }
         } catch(e) { log('DEBUG', 'TENNIS-MODEL', `Erro: ${e.message}`); }
 
