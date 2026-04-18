@@ -9973,10 +9973,15 @@ async function pollValorant(runOnce = false) {
         const ctx = { bo, score1: match.score1, score2: match.score2, currentMap: mapHint };
         const elo = getValorantModel(db, match.team1, match.team2, impliedP1, impliedP2, ctx);
 
-        const useElo = elo.pass && elo.found1 && elo.found2 && Math.min(elo.eloMatches1, elo.eloMatches2) >= 5;
+        // Min games Elo: default 3 (antes 5). VCL/Challengers têm times novos (0-4 games).
+        // Gate mais brando no lado com histórico menor — aceita se lado minoritário tem
+        // ≥VAL_MIN_ELO_GAMES (default 3), mas downgrade conf se <5.
+        const MIN_ELO_GAMES = parseInt(process.env.VAL_MIN_ELO_GAMES ?? '3', 10);
+        const minGames = Math.min(elo.eloMatches1 || 0, elo.eloMatches2 || 0);
+        const useElo = elo.pass && elo.found1 && elo.found2 && minGames >= MIN_ELO_GAMES;
         if (!useElo) {
           analyzedValorant.set(key, { ts: now, tipSent: false });
-          log('INFO', 'AUTO-VAL', `Sem Elo (${match.team1}=${elo.eloMatches1}j, ${match.team2}=${elo.eloMatches2}j): ${match.team1} vs ${match.team2}`);
+          log('INFO', 'AUTO-VAL', `Elo insuf (${match.team1}=${elo.eloMatches1}j, ${match.team2}=${elo.eloMatches2}j, min ${MIN_ELO_GAMES}): ${match.team1} vs ${match.team2}`);
           continue;
         }
 

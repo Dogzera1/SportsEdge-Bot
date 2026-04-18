@@ -7662,6 +7662,7 @@ const server = http.createServer(async (req, res) => {
           AND settled_at IS NOT NULL
           AND settled_at >= datetime('now', ?)
           AND best_book IS NOT NULL
+          AND (archived IS NULL OR archived = 0)
           ${whereSport}
       `).all(...params);
 
@@ -7757,6 +7758,7 @@ const server = http.createServer(async (req, res) => {
                COUNT(*) AS n
         FROM tips
         WHERE sent_at >= datetime('now', ?)
+          AND (archived IS NULL OR archived = 0)
           ${sportFilter}
         GROUP BY sport, is_live, DATE(sent_at)
         ORDER BY day ASC
@@ -7769,6 +7771,7 @@ const server = http.createServer(async (req, res) => {
         FROM tips
         WHERE sent_at >= datetime('now', ?)
           AND sent_at <  datetime('now', ?)
+          AND (archived IS NULL OR archived = 0)
           ${sportFilter}
         GROUP BY sport, is_live
       `).all(...baselineParams);

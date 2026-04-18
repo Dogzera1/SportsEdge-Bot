@@ -665,6 +665,20 @@
     </div>
   </div>
 
+  <!-- ROI por Bookmaker (expandable) -->
+  <div class="section" id="secBook">
+    <div class="section-head" onclick="toggleSection('secBook'); loadByBook()">
+      <div class="section-head-left">
+        <svg class="section-chevron" viewBox="0 0 16 16"><path d="M6 4l4 4-4 4" stroke="currentColor" fill="none" stroke-width="2"/></svg>
+        <span>ROI por bookmaker (line shopping)</span>
+      </div>
+      <div class="section-head-meta" id="bookMeta">60d</div>
+    </div>
+    <div class="section-body">
+      <div id="bookBody"><div class="loading">Carregando</div></div>
+    </div>
+  </div>
+
   <!-- Custos (expandable) -->
   <div class="section" id="secCost">
     <div class="section-head" onclick="toggleSection('secCost'); loadCost()">
@@ -1452,6 +1466,43 @@ async function loadShadow() {
       </div>
     </div>
     <div class="card-meta" style="margin-top:10px">Shadow = log-only (não envia DM); Ativo = tip production.</div>
+  `;
+}
+
+async function loadByBook() {
+  const sportFilter = currentSport === '__overall__' ? '' : `&sport=${currentSport}`;
+  const data = await apiFetch('/roi-by-book?days=60' + sportFilter);
+  const el = document.getElementById('bookBody');
+  const meta = document.getElementById('bookMeta');
+  const books = data?.books || [];
+  if (!books.length) { el.innerHTML = '<div class="empty-state">Sem tips com best_book registrado</div>'; return; }
+  meta.textContent = `${data.overall?.n || 0} tips · 60d`;
+  el.innerHTML = `
+    <table class="tips">
+      <thead>
+        <tr>
+          <th>Book</th>
+          <th style="text-align:right">Tips</th>
+          <th style="text-align:right">WR</th>
+          <th style="text-align:right">ROI</th>
+          <th style="text-align:right">Δ vs Pinnacle</th>
+          <th style="text-align:right">Profit</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${books.map(b => `
+          <tr>
+            <td>${b.book}</td>
+            <td class="tip-num">${b.n}</td>
+            <td class="tip-num">${b.hitRate != null ? b.hitRate.toFixed(0) + '%' : '—'}</td>
+            <td class="tip-num ${sign(b.roi)}">${fmtPct(b.roi)}</td>
+            <td class="tip-num ${sign(b.avgDelta)}">${fmtPct(b.avgDelta)}</td>
+            <td class="tip-num ${sign(b.profitR)}">${fmtMoney(b.profitR)}</td>
+          </tr>
+        `).join('')}
+      </tbody>
+    </table>
+    <div class="card-meta" style="margin-top:10px">Δ positivo = book paga melhor que Pinnacle closing — sinal de edge do book (ou timing favorável).</div>
   `;
 }
 
