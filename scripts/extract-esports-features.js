@@ -296,6 +296,10 @@ const HEADERS = [
   'days_since_last_t1', 'days_since_last_t2', 'days_since_diff',
   'matches_last14_diff',
   'n_signals',
+  // Momentum features (cheap, orthogonal; capturam hot/cold streaks + tendência)
+  'win_streak_diff',   // +N = t1 em W-streak, -N = L-streak; diff entre times
+  'wr_trend_diff',     // (wr10-wr20) diff; positivo = t1 melhorando vs t2
+  'elo_diff_sq',       // sign(elo_diff) * elo_diff^2 / 1000; captura non-linearidade
   // gol.gg team stats diffs (só populado se GAME='lol' e ambos times têm stats)
   'gpm_diff', 'gdm_diff', 'gd15_diff', 'fb_rate_diff', 'ft_rate_diff',
   'dpm_diff', 'kd_diff', 'team_wr_diff', 'dra_pct_diff', 'nash_pct_diff',
@@ -352,6 +356,29 @@ for (const r of rows) {
   const m14_1 = s1.recent.filter(x => x.t >= mCut).length;
   const m14_2 = s2.recent.filter(x => x.t >= mCut).length;
   const matchesLast14Diff = m14_1 - m14_2;
+
+  // Win streak: conta consecutivos W (positivo) ou L (negativo) no fim da lista.
+  function currentStreak(recent) {
+    if (!recent || !recent.length) return 0;
+    const last = recent[recent.length - 1].won;
+    let n = 0;
+    for (let i = recent.length - 1; i >= 0; i--) {
+      if (recent[i].won === last) n++; else break;
+    }
+    return last ? n : -n;
+  }
+  const streak1 = currentStreak(s1.recent);
+  const streak2 = currentStreak(s2.recent);
+  const winStreakDiff = streak1 - streak2;
+
+  // Trend: wr10 - wr20 diff entre times (positivo = t1 aquecendo vs t2)
+  const trend1 = (wr10_1.n >= 5 && wr20_1.n >= 10) ? (wr10_1.pct - wr20_1.pct) : 0;
+  const trend2 = (wr10_2.n >= 5 && wr20_2.n >= 10) ? (wr10_2.pct - wr20_2.pct) : 0;
+  const wrTrendDiff = trend1 - trend2;
+
+  // Elo squared (preserva sinal). Non-linearidade: mismatches grandes
+  // tem efeito maior que proporcional (escalonado /1000 pra ficar comparável).
+  const eloDiffSq = Math.sign(eloDiffOverall) * (eloDiffOverall * eloDiffOverall) / 1000;
 
   // Sinais
   let nSignals = 0;
@@ -426,6 +453,7 @@ for (const r of rows) {
       daysSince1, daysSince2, daysSinceDiff,
       matchesLast14Diff,
       nSignals,
+      winStreakDiff, wrTrendDiff.toFixed(4), eloDiffSq.toFixed(2),
       gpmDiff.toFixed(2), gdmDiff.toFixed(2), gd15Diff.toFixed(2),
       fbDiff.toFixed(4), ftDiff.toFixed(4),
       dpmDiff.toFixed(2), kdDiff.toFixed(3), teamWrDiff.toFixed(4),
