@@ -227,6 +227,8 @@ const HEADERS = [
   'h2h_surface_diff', 'h2h_overall_diff',
   'p1_games_surface', 'p2_games_surface',
   'n_signals',
+  // Momentum (cross-sport pattern; win streak dominou em esports retrain 2026-04-18)
+  'win_streak_diff', 'wr_last10_diff', 'elo_diff_sq',
   'y',
 ];
 
@@ -296,6 +298,32 @@ for (const r of matches) {
   const h2hSurfaceDiff = h2h[surface].a - h2h[surface].b;
   const h2hOverallDiff = h2h.all.a - h2h.all.b;
 
+  // Momentum features (win streak + recent wr). Usa recent[] (60d window).
+  function currentStreak(recent) {
+    if (!recent || !recent.length) return 0;
+    const last = recent[recent.length - 1].won;
+    let n = 0;
+    for (let i = recent.length - 1; i >= 0; i--) {
+      if (recent[i].won === last) n++; else break;
+    }
+    return last ? n : -n;
+  }
+  function wrLastN(recent, n) {
+    if (!recent || recent.length < n) return null;
+    const slice = recent.slice(-n);
+    let wins = 0;
+    for (const r of slice) if (r.won) wins++;
+    return wins / slice.length;
+  }
+  const streak1 = currentStreak(sp1.recent);
+  const streak2 = currentStreak(sp2.recent);
+  const winStreakDiff = streak1 - streak2;
+  const wr10_1 = wrLastN(sp1.recent, 10);
+  const wr10_2 = wrLastN(sp2.recent, 10);
+  const wrLast10Diff = (wr10_1 != null && wr10_2 != null) ? (wr10_1 - wr10_2) : 0;
+  // Non-linearidade scaled: mismatches de 200+ Elo pts têm efeito maior-que-proporcional
+  const eloDiffSq = Math.sign(eloDiffBlend) * (eloDiffBlend * eloDiffBlend) / 1000;
+
   // Conta sinais "fortes" disponíveis (p/ features de confiança da prior)
   let nSignals = 0;
   if (sp1.games.all >= 10 && sp2.games.all >= 10) nSignals++;
@@ -328,6 +356,7 @@ for (const r of matches) {
       h2hSurfaceDiff, h2hOverallDiff,
       sp1.games[surface], sp2.games[surface],
       nSignals,
+      winStreakDiff, wrLast10Diff.toFixed(4), eloDiffSq.toFixed(2),
       p1Won,
     ]);
     kept++;

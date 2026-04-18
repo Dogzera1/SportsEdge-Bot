@@ -62,13 +62,13 @@ function loadFeatureCsv(file) {
   return { headers, rows };
 }
 
-const { rows } = loadFeatureCsv(IN_PATH);
+const { headers, rows } = loadFeatureCsv(IN_PATH);
 console.log(`[train] rows: ${rows.length}`);
 rows.sort((a, b) => a.date.localeCompare(b.date));
 
 // ── Feature selection ─────────────────────────────────────────────────────
 // Features numéricas usadas no modelo. Categóricas expandidas em one-hot.
-const NUM_FEATURES = [
+const BASE_NUM_FEATURES = [
   'elo_diff_blend',
   'elo_diff_overall',
   'elo_diff_surface',
@@ -84,6 +84,12 @@ const NUM_FEATURES = [
   'h2h_overall_diff',
   'n_signals',
 ];
+// Momentum features (auto-include se CSV tem, 2026-04-18+)
+const MOMENTUM_FEATURES = ['win_streak_diff', 'wr_last10_diff', 'elo_diff_sq'];
+const NUM_FEATURES = headers.includes('win_streak_diff')
+  ? [...BASE_NUM_FEATURES, ...MOMENTUM_FEATURES]
+  : BASE_NUM_FEATURES;
+console.log(`[train] features=${NUM_FEATURES.length} (momentum=${NUM_FEATURES.includes('win_streak_diff')})`);
 const CAT_FEATURES = ['surface']; // hard/clay/grass (one-hot)
 const SURFACES = ['hard', 'clay', 'grass'];
 

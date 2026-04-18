@@ -10802,8 +10802,9 @@ async function pollValorant(runOnce = false) {
         let modelP1 = elo.modelP1;
         let modelP2 = elo.modelP2;
 
-        // ── Modelo treinado Valorant (se bateu baseline no train; atualmente OFF
-        //   pois dataset PandaScore free tier é curto demais para treinar) ──
+        // ── Modelo treinado Valorant ──
+        // ACTIVE desde 2026-04-18 (momentum features destravaram baseline).
+        // Gate automático: só entra se bateu baseline Elo no test set.
         if (hasTrainedEsportsModel('valorant')) {
           try {
             const vctx = buildEsportsTrainedContext(db, 'valorant', match);
