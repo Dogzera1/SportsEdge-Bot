@@ -15,6 +15,26 @@ const { getLolProbability } = require('./lib/lol-model');
 const { predictTrainedEsports, hasTrainedModel: hasTrainedEsportsModel } = require('./lib/esports-model-trained');
 const { buildTrainedContext: buildEsportsTrainedContext } = require('./lib/esports-runtime-features');
 
+// ── EV ceiling condicional ─────────────────────────────────────────────
+// Com modelo treinado ativo + ECE baixa (<0.03), EVs altos (50-80%) são
+// genuínos com mais frequência. Sem trained, mantém 50%.
+// Guardrail: odds baixas (<1.4) ainda limitadas a 40% (proteção anti-tip-em-favorito-forte).
+function evCeilingFor(game, odds) {
+  const oddsNum = parseFloat(odds);
+  if (Number.isFinite(oddsNum) && oddsNum > 0 && oddsNum < 1.40) return 40;
+  // Esports com modelo treinado forte (Brier ≤ baseline-5%)
+  const strongTrained = new Set(['lol', 'cs2']);
+  if (strongTrained.has(game) && hasTrainedEsportsModel(game)) return 80;
+  // Tennis: modelo treinado forte + ECE 0.026
+  if (game === 'tennis') {
+    try {
+      const { hasTrainedModel: hasTennis } = require('./lib/tennis-model-trained');
+      if (hasTennis()) return 80;
+    } catch (_) {}
+  }
+  return 50;
+}
+
 // ── Dota hero meta lookup (dota_hero_stats populado via sync-opendota-heroes) ──
 // Lê WR de pro play por herói e retorna uma linha pro prompt quando picks revelados.
 function dotaHeroMetaLine(blueTeam, redTeam) {
@@ -1099,9 +1119,11 @@ async function runAutoAnalysis() {
           const tipEV = result.tipMatch[3].trim();
           const tipConf = (result.tipMatch[5] || CONF.MEDIA).trim().toUpperCase();
           // EV sanity: bloqueia EV absurdamente alto (erro de cálculo da IA) — espelha gate do upcoming.
+          // Ceiling condicional: 80% se modelo treinado ativo (ECE baixa), 50% caso contrário.
           const tipEVnumLive = parseFloat(String(tipEV).replace(/[%+]/g, ''));
-          if (!isNaN(tipEVnumLive) && tipEVnumLive > 50) {
-            log('WARN', 'AUTO', `Gate EV sanity LIVE: ${match.team1} vs ${match.team2} → EV ${tipEVnumLive}% > 50% (provável erro de cálculo da IA) → rejeitado`);
+          const lolCeilingLive = evCeilingFor('lol', tipOdd);
+          if (!isNaN(tipEVnumLive) && tipEVnumLive > lolCeilingLive) {
+            log('WARN', 'AUTO', `Gate EV sanity LIVE: ${match.team1} vs ${match.team2} → EV ${tipEVnumLive}% > ${lolCeilingLive}% (ceiling trained-aware) → rejeitado`);
             analyzedMatches.set(matchKey, { ts: now, tipSent: false, noEdge: true });
             continue;
           }
@@ -1438,10 +1460,11 @@ async function runAutoAnalysis() {
               }
             }
 
-            // EV sanity: bloqueia EV absurdamente alto (erro de cálculo da IA)
+            // EV sanity upcoming: ceiling condicional ao modelo treinado
             const tipEVnum = parseFloat(String(tipEV).replace('%', '').replace('+', ''));
-            if (!isNaN(tipEVnum) && tipEVnum > 50) {
-              log('WARN', 'AUTO', `Gate EV sanity upcoming: ${match.team1} vs ${match.team2} → EV ${tipEVnum}% > 50% (provável erro de cálculo da IA) → rejeitado`);
+            const lolCeilingUp = evCeilingFor('lol', tipOdd);
+            if (!isNaN(tipEVnum) && tipEVnum > lolCeilingUp) {
+              log('WARN', 'AUTO', `Gate EV sanity upcoming: ${match.team1} vs ${match.team2} → EV ${tipEVnum}% > ${lolCeilingUp}% (ceiling trained-aware) → rejeitado`);
               analyzedMatches.set(matchKey, { ts: now, tipSent: false, noEdge: true });
               await new Promise(r => setTimeout(r, 3000)); continue;
             }
@@ -3659,9 +3682,10 @@ async function autoAnalyzeMatch(token, match) {
         }
       }
 
-      // Gate 4b: EV sanity — bloqueia EV absurdamente alto (erro de cálculo da IA)
-      if (filteredTipResult && !isNaN(tipEV) && tipEV > 50) {
-        log('WARN', 'AUTO', `Gate EV sanity: ${match.team1} vs ${match.team2} → EV ${tipEV}% > 50% (provável erro de cálculo da IA) → rejeitado`);
+      // Gate 4b: EV sanity — ceiling condicional ao modelo treinado (ECE baixa permite EV genuíno maior)
+      const lolCeilingAnalyze = evCeilingFor('lol', tipOdd);
+      if (filteredTipResult && !isNaN(tipEV) && tipEV > lolCeilingAnalyze) {
+        log('WARN', 'AUTO', `Gate EV sanity: ${match.team1} vs ${match.team2} → EV ${tipEV}% > ${lolCeilingAnalyze}% (ceiling trained-aware) → rejeitado`);
         filteredTipResult = null;
       }
 
@@ -7382,6 +7406,12 @@ Máximo 200 palavras. Raciocínio breve antes da decisão.`;
           log('INFO', 'AUTO-TENNIS', `Gate EV: ${tipEV}% < 7%`);
           await new Promise(r => setTimeout(r, 3000)); continue;
         }
+        // EV ceiling trained-aware (Tennis trained: ECE 0.026 → 80% cap)
+        const tennisCeiling = evCeilingFor('tennis', tipOdd);
+        if (tipEV > tennisCeiling) {
+          log('WARN', 'AUTO-TENNIS', `Gate EV sanity: EV ${tipEV}% > ${tennisCeiling}% (ceiling trained-aware) → rejeitado: ${tipPlayer} @ ${tipOdd}`);
+          await new Promise(r => setTimeout(r, 3000)); continue;
+        }
         if (tipEV > 15) {
           log('INFO', 'AUTO-TENNIS', `EV alto (${tipEV}%): ${tipPlayer} @ ${tipOdd} | P=${(_modelPPickTn*100).toFixed(1)}% | Elo ${_pickIsT1Tn?mlResultTennis.elo1:mlResultTennis.elo2}/${_pickIsT1Tn?mlResultTennis.elo2:mlResultTennis.elo1}`);
         }
@@ -8444,6 +8474,13 @@ async function pollCs(runOnce = false) {
           log('INFO', 'AUTO-CS', `EV baixo (${evPct.toFixed(1)}% < ${minEvForTier}% ${isTier1 ? 'tier1' : 'tier2+'}): ${match.team1} vs ${match.team2}`);
           continue;
         }
+        // EV ceiling trained-aware
+        const csCeiling = evCeilingFor('cs2', pickOdd);
+        if (evPct > csCeiling) {
+          analyzedCs.set(key, { ts: now, tipSent: false });
+          log('WARN', 'AUTO-CS', `Gate EV sanity: EV ${evPct.toFixed(1)}% > ${csCeiling}% (ceiling trained-aware) → rejeitado: ${match.team1} vs ${match.team2}`);
+          continue;
+        }
         if (pickOdd < CS_MIN_ODDS || pickOdd > CS_MAX_ODDS) {
           analyzedCs.set(key, { ts: now, tipSent: false });
           continue;
@@ -8784,6 +8821,13 @@ async function pollValorant(runOnce = false) {
         if (evPct < VAL_MIN_EV) {
           analyzedValorant.set(key, { ts: now, tipSent: false });
           log('INFO', 'AUTO-VAL', `EV baixo (${evPct.toFixed(1)}%): ${match.team1} vs ${match.team2}`);
+          continue;
+        }
+        // EV ceiling trained-aware (Valorant trained é marginal → cap 50% default)
+        const valCeiling = evCeilingFor('valorant', pickOdd);
+        if (evPct > valCeiling) {
+          analyzedValorant.set(key, { ts: now, tipSent: false });
+          log('WARN', 'AUTO-VAL', `Gate EV sanity: EV ${evPct.toFixed(1)}% > ${valCeiling}% → rejeitado: ${match.team1} vs ${match.team2}`);
           continue;
         }
         if (pickOdd < VAL_MIN_ODDS || pickOdd > VAL_MAX_ODDS) {
