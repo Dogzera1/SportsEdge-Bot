@@ -62,6 +62,7 @@ function dotaHeroMetaLine(blueTeam, redTeam) {
 }
 const { getFootballProbability } = require('./lib/football-model');
 const { getTennisProbability, detectSurface } = require('./lib/tennis-model');
+const { extractServeProbs, priceTennisMatch } = require('./lib/tennis-markov-model');
 const { fetchMatchNews } = require('./lib/news');
 const { tennisPairMatchesPlayers } = require('./lib/tennis-match');
 
