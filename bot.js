@@ -61,8 +61,9 @@ function dotaHeroMetaLine(blueTeam, redTeam) {
   } catch (e) { return ''; }
 }
 const { getFootballProbability } = require('./lib/football-model');
-const { getTennisProbability, detectSurface } = require('./lib/tennis-model');
+const { getTennisProbability, detectSurface, tennisProhibitedTournament } = require('./lib/tennis-model');
 const { extractServeProbs, priceTennisMatch } = require('./lib/tennis-markov-model');
+const { getPlayerInjuryRisk } = require('./lib/tennis-injury-risk');
 const { fetchMatchNews } = require('./lib/news');
 const { tennisPairMatchesPlayers } = require('./lib/tennis-match');
 
@@ -7093,6 +7094,17 @@ async function pollTennis(runOnce = false) {
           log('DEBUG', 'AUTO-TENNIS', `Skip ${match.team1} vs ${match.team2} (${match.status}): tip já enviada nesta fase`);
           continue;
         }
+        // Gate: excluir ITF low-tier (W15/W25/M15/M25) — zona de risco de match-fixing
+        // histórica (ITIA/TIU alerts concentram-se aqui). Override via env
+        // TENNIS_ITF_EXCLUDE_PRIZE_MAX (default 25) ou TENNIS_ITF_EXCLUDE=false para desativar.
+        if (process.env.TENNIS_ITF_EXCLUDE !== 'false') {
+          const proh = tennisProhibitedTournament(match.league || match.tournament || '');
+          if (proh.prohibited) {
+            log('INFO', 'AUTO-TENNIS', `Skip ITF exclusion: ${match.team1} vs ${match.team2} [${match.league || 'no-league'}] → ${proh.reason}`);
+            analyzedTennis.set(key, { ts: now, tipSent: false, noEdge: true });
+            continue;
+          }
+        }
         // Live: 15min | Pré-jogo: 6h (configurável)
         // Live Storm: multiplica cooldown quando storm ativo E sport não é fast-poll priority.
         const stormMult = _liveStormCooldownMult('tennis');
@@ -7241,6 +7253,69 @@ async function pollTennis(runOnce = false) {
           tennisModelResult = getTennisProbability(db, match, o, tennisModelEnrich, surfaceForModel || surface);
           if (tennisModelResult && tennisModelResult.confidence > 0.3) {
             log('DEBUG', 'TENNIS-MODEL', `${match.team1} vs ${match.team2}: P1=${(tennisModelResult.modelP1*100).toFixed(1)}% conf=${tennisModelResult.confidence.toFixed(2)} factors=${tennisModelResult.factors?.join('+')}`);
+          }
+          // Markov point-by-point (precifica ML + sets + totals + TB de 1 só vez).
+          // Só roda se temos serveStats dos 2 jogadores. Blendado no tennisModelResult.
+          if (serveStats1 && serveStats2 && tennisModelResult) {
+            try {
+              const markovSurface = /grass/i.test(surfaceForModel || surface) ? 'grass'
+                : /clay/i.test(surfaceForModel || surface) ? 'clay'
+                : /indoor/i.test(match.league || '') ? 'indoor' : 'hard';
+              const mSp = extractServeProbs(serveStats1, serveStats2, { surface: markovSurface });
+              if (mSp) {
+                const bestOfMarkov = /grand slam|\[g\]|wimbledon|us open|roland|australian/i.test(match.league || '') ? 5 : 3;
+                const markov = priceTennisMatch({ p1Serve: mSp.p1Serve, p2Serve: mSp.p2Serve, bestOf: bestOfMarkov, iters: 15000 });
+                // Blend com tennisModelResult.modelP1 (40% Markov / 60% modelo existente)
+                const blendedP1 = 0.40 * markov.pMatch + 0.60 * tennisModelResult.modelP1;
+                log('INFO', 'TENNIS-MARKOV',
+                  `${match.team1} vs ${match.team2} [${markovSurface} Bo${bestOfMarkov}]: markov=${(markov.pMatch*100).toFixed(1)}% ` +
+                  `(p1s=${mSp.p1Serve.toFixed(3)} p2s=${mSp.p2Serve.toFixed(3)}) ` +
+                  `| existing=${(tennisModelResult.modelP1*100).toFixed(1)}% → blend=${(blendedP1*100).toFixed(1)}% ` +
+                  `| avgGames=${markov.totalGamesAvg.toFixed(1)} pO22.5=${(markov.pOver22_5*100).toFixed(0)}% ` +
+                  `pTBmatch=${(markov.pTiebreakMatch*100).toFixed(0)}% pStrSets=${(markov.pStraightSets*100).toFixed(0)}%`);
+                tennisModelResult.modelP1 = blendedP1;
+                tennisModelResult.modelP2 = 1 - blendedP1;
+                tennisModelResult.factors = [...(tennisModelResult.factors || []), 'markov'];
+                // Disponibiliza probs de mercado pra downstream (handicap/totals pricing quando feed expor).
+                tennisModelResult._markovMarkets = markov;
+                tennisModelResult._markovServe = mSp;
+              }
+            } catch (me) { log('DEBUG', 'TENNIS-MARKOV', `err: ${me.message}`); }
+          }
+          // Injury/retirement risk — downgrade confidence + shrink P se pick é jogador high-risk.
+          // Override: TENNIS_INJURY_CHECK=false desativa; TENNIS_INJURY_MIN_GAMES (default 10).
+          if (tennisModelResult && process.env.TENNIS_INJURY_CHECK !== 'false') {
+            try {
+              const minG = parseInt(process.env.TENNIS_INJURY_MIN_GAMES || '10', 10);
+              const r1 = getPlayerInjuryRisk(db, match.team1, { minGames: minG });
+              const r2 = getPlayerInjuryRisk(db, match.team2, { minGames: minG });
+              const flags = [];
+              if (r1 && r1.level !== 'low') flags.push(`${match.team1}: ${r1.level} (${r1.reasons.join('; ')})`);
+              if (r2 && r2.level !== 'low') flags.push(`${match.team2}: ${r2.level} (${r2.reasons.join('; ')})`);
+              if (flags.length) {
+                log('WARN', 'TENNIS-INJURY', `${match.team1} vs ${match.team2}: ${flags.join(' | ')}`);
+                // Confidence downgrade: medium -15%, high -35%
+                let confMult = 1;
+                if (r1?.level === 'high' || r2?.level === 'high') confMult = 0.65;
+                else if (r1?.level === 'medium' || r2?.level === 'medium') confMult = 0.85;
+                tennisModelResult.confidence = Math.max(0, (tennisModelResult.confidence || 0) * confMult);
+                // Shrink P: se pick (modelP1>0.5) é o jogador de alto risco, puxa P de volta pra 0.5.
+                //   high: shrink 0.6 (P de 0.75 → 0.65)
+                //   medium: shrink 0.85
+                const pickIsT1 = tennisModelResult.modelP1 > 0.5;
+                const pickRisk = pickIsT1 ? r1 : r2;
+                if (pickRisk && pickRisk.level !== 'low') {
+                  const shrink = pickRisk.level === 'high' ? 0.6 : 0.85;
+                  const p = tennisModelResult.modelP1;
+                  const pShrunk = 0.5 + (p - 0.5) * shrink;
+                  tennisModelResult.modelP1 = pShrunk;
+                  tennisModelResult.modelP2 = 1 - pShrunk;
+                  log('INFO', 'TENNIS-INJURY', `  pick ${pickIsT1 ? match.team1 : match.team2} é ${pickRisk.level} risk → shrink P ${(p*100).toFixed(1)}% → ${(pShrunk*100).toFixed(1)}%`);
+                }
+                tennisModelResult.factors = [...(tennisModelResult.factors || []), 'injury'];
+                tennisModelResult._injuryRisk = { team1: r1, team2: r2 };
+              }
+            } catch (ie) { log('DEBUG', 'TENNIS-INJURY', `err: ${ie.message}`); }
           }
         } catch(e) { log('DEBUG', 'TENNIS-MODEL', `Erro: ${e.message}`); }
 
