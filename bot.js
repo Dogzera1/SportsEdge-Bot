@@ -306,12 +306,15 @@ function _impliedFromOdds(oddsObj) {
  * @returns {Promise<{passed: boolean, reason: string|null, conf: string|null}>}
  */
 async function _aiSecondOpinion(args) {
-  const { sport, matchLabel, league, pickTeam, pickOdd, pickP, evPct, contextBlock, isLive = false, tolPp = 10, oddsObj = null, impliedP = null, maxDivPp = null } = args;
+  const { sport, matchLabel, league, pickTeam, pickOdd, pickP, evPct, contextBlock, isLive = false, tolPp = 10, oddsObj = null, impliedP = null, maxDivPp = null, signalCount = 0, eloMinGames = 0 } = args;
   const tag = `AUTO-${String(sport).toUpperCase()}`;
 
   // Pré-gate: divergência modelo vs Pinnacle/Betfair (sharp anchor). Bloqueia ANTES da IA pra economizar tokens.
   if (oddsObj && Number.isFinite(impliedP) && Number.isFinite(maxDivPp)) {
-    const _div = _sharpDivergenceGate({ oddsObj, modelP: pickP, impliedP, maxPp: maxDivPp });
+    const _div = _sharpDivergenceGate({
+      oddsObj, modelP: pickP, impliedP, maxPp: maxDivPp,
+      context: { sport, league, signalCount, eloMinGames, teams: matchLabel },
+    });
     if (!_div.ok) return { passed: false, reason: _div.reason, conf: null };
   }
 
@@ -8031,7 +8034,14 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
           if (tipMatch) {
             const _impPV = _pickIsT1V ? mlResultMma.impliedP1 : mlResultMma.impliedP2;
             const _maxDivMma = parseFloat(process.env.MMA_MAX_DIVERGENCE_PP ?? '10');
-            const _div = _sharpDivergenceGate({ oddsObj: o, modelP: _modelPPickV, impliedP: _impPV, maxPp: _maxDivMma });
+            const _div = _sharpDivergenceGate({
+              oddsObj: o, modelP: _modelPPickV, impliedP: _impPV, maxPp: _maxDivMma,
+              context: {
+                sport: 'mma', league: fight.event || fight.league || '',
+                signalCount: mlResultMma.factorCount || 0,
+                eloMinGames: 20, teams: `${fight.team1} vs ${fight.team2}`,
+              },
+            });
             if (!_div.ok) {
               log('WARN', 'AUTO-MMA', `Tip rejeitada (${fight.team1} vs ${fight.team2}): ${_div.reason}`);
               tipMatch = null;
@@ -8975,7 +8985,15 @@ Máximo 200 palavras. Raciocínio breve antes da decisão.`;
             // cap 15pp bloqueava 7 tips winners; cap 20pp bloqueia só 5 outliers
             // E tem Brier ótimo do grid (0.185). Cirúrgico. Ver DECISIONS.md.
             const _maxDivTennis = parseFloat(process.env.TENNIS_MAX_DIVERGENCE_PP ?? '20');
-            const _div = _sharpDivergenceGate({ oddsObj: o, modelP: _modelPV, impliedP: _impPV, maxPp: _maxDivTennis });
+            const _div = _sharpDivergenceGate({
+              oddsObj: o, modelP: _modelPV, impliedP: _impPV, maxPp: _maxDivTennis,
+              context: {
+                sport: 'tennis', league: match.league || match.tournament || '',
+                signalCount: mlResultTennis.factorCount || 0,
+                eloMinGames: Math.min(mlResultTennis.eloMatches1 || 0, mlResultTennis.eloMatches2 || 0) || 0,
+                teams: `${match.team1} vs ${match.team2}`,
+              },
+            });
             if (!_div.ok) {
               log('WARN', 'AUTO-TENNIS', `Tip rejeitada (${match.team1} vs ${match.team2}): ${_div.reason}`);
               tipMatch2 = null;
@@ -9569,7 +9587,14 @@ Máximo 200 palavras.`;
           }
           if (_modelPFb != null && _impPFb != null) {
             const _maxDivFb = parseFloat(process.env.FOOTBALL_MAX_DIVERGENCE_PP ?? '10');
-            const _div = _sharpDivergenceGate({ oddsObj: o, modelP: _modelPFb, impliedP: _impPFb, maxPp: _maxDivFb });
+            const _div = _sharpDivergenceGate({
+              oddsObj: o, modelP: _modelPFb, impliedP: _impPFb, maxPp: _maxDivFb,
+              context: {
+                sport: 'football', league: match.league || '',
+                signalCount: fbModel?.factorCount || 0,
+                eloMinGames: 20, teams: `${match.team1} vs ${match.team2}`,
+              },
+            });
             if (!_div.ok) {
               log('WARN', 'AUTO-FOOTBALL', `Tip rejeitada (${match.team1} vs ${match.team2}, ${tipMarket}): ${_div.reason}`);
               await new Promise(r => setTimeout(r, 2000)); continue;
