@@ -4722,6 +4722,44 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
       await send(token, chatId, txt);
     } catch (e) { await send(token, chatId, `❌ ${e.message}`); }
 
+  } else if (cmd === '/val-eligibility' || cmd === '/val-status') {
+    if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
+    try {
+      const matches = await serverGet('/valorant-matches').catch(() => []);
+      if (!Array.isArray(matches) || !matches.length) {
+        await send(token, chatId, '📊 Valorant — nenhum match retornado pelo endpoint /valorant-matches');
+        return;
+      }
+      const live = matches.filter(m => m.status === 'live').slice(0, 10);
+      const upcoming = matches.filter(m => m.status === 'upcoming').slice(0, 5);
+      const minGames = parseInt(process.env.VAL_MIN_ELO_GAMES ?? '3', 10);
+      const checkTeam = (name) => {
+        const r = db.prepare(`SELECT COUNT(*) AS n FROM match_results WHERE game='valorant' AND (team1=? OR team2=?) AND resolved_at >= datetime('now','-180 days')`).get(name, name);
+        return r?.n || 0;
+      };
+      let txt = `🎯 *VALORANT — Eligibility* (min ${minGames} games)\n\n`;
+      if (live.length) {
+        txt += `*🔴 Live agora (${live.length}):*\n`;
+        for (const m of live) {
+          const g1 = checkTeam(m.team1), g2 = checkTeam(m.team2);
+          const ok = Math.min(g1, g2) >= minGames;
+          const odds = m.odds ? ` @ ${m.odds.t1}/${m.odds.t2}` : ' · sem odds';
+          txt += `${ok ? '✅' : '❌'} ${m.team1} (${g1}j) vs ${m.team2} (${g2}j)${odds}\n`;
+        }
+        txt += `\n`;
+      }
+      if (upcoming.length) {
+        txt += `*⏳ Próximos (${upcoming.length}):*\n`;
+        for (const m of upcoming) {
+          const g1 = checkTeam(m.team1), g2 = checkTeam(m.team2);
+          const ok = Math.min(g1, g2) >= minGames;
+          txt += `${ok ? '✅' : '❌'} ${m.team1} (${g1}j) vs ${m.team2} (${g2}j)\n`;
+        }
+      }
+      txt += `\n_Threshold: VAL_MIN_ELO_GAMES=${minGames}. Reduza ENV pra incluir mais teams._`;
+      await send(token, chatId, txt);
+    } catch (e) { await send(token, chatId, `❌ ${e.message}`); }
+
   } else if (cmd === '/models') {
     if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
     try {
@@ -5725,7 +5763,7 @@ async function poll(token, sport) {
                      text.startsWith('/slugs') || text.startsWith('/lolraw') ||
                      text.startsWith('/health') || text.startsWith('/debug') ||
                      text.startsWith('/shadow') || text.startsWith('/market-tips') ||
-                     text.startsWith('/models')) {
+                     text.startsWith('/models') || text.startsWith('/val-')) {
             // Passa `sport` da poll (qual bot recebeu) para evitar default 'esports'
             await handleAdmin(token, chatId, text, sport);
           }
