@@ -4551,6 +4551,42 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
     if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
     try {
       const parts = String(text || '').trim().split(/\s+/);
+      // /market-tips leaks [days] — segments com ROI negativo persistente
+      if (parts[1]?.toLowerCase() === 'leaks') {
+        const days = Math.max(7, Math.min(180, parseInt(parts[2] || '60', 10) || 60));
+        const minN = parseInt(parts[3] || '20', 10) || 20;
+        const { getShadowStats } = require('./lib/market-tips-shadow');
+        const stats = getShadowStats(db, { days });
+        const leaks = stats.filter(s =>
+          s.settled >= minN &&
+          s.roiPct != null && s.roiPct < -5
+        );
+        const underwater = stats.filter(s =>
+          s.clvN >= 10 && s.avgClv != null && s.avgClv < -1 && !leaks.includes(s)
+        );
+        let txt = `🚨 *LEAK DETECTOR — ${days}d (min n=${minN} settled)*\n\n`;
+        if (!leaks.length && !underwater.length) {
+          txt += `✅ Nenhum leak confirmado detectado.\n`;
+        }
+        if (leaks.length) {
+          txt += `*ROI leaks (>5% neg com sample ≥${minN}):*\n`;
+          for (const s of leaks) {
+            const clv = s.avgClv != null ? ` CLV=${s.avgClv >= 0 ? '+' : ''}${s.avgClv.toFixed(1)}%` : '';
+            txt += `❌ *${s.sport}/${s.market}*: n=${s.n} settled=${s.settled} ROI=*${s.roiPct.toFixed(1)}%* Hit=${s.hitRate.toFixed(1)}%${clv}\n`;
+          }
+          txt += `\n💡 Considerar: aumentar minEv, desabilitar market ou retraining.\n`;
+        }
+        if (underwater.length) {
+          txt += `\n*CLV warnings (avgCLV<-1% com n≥10):*\n`;
+          for (const s of underwater) {
+            const roi = s.roiPct != null ? `${s.roiPct >= 0 ? '+' : ''}${s.roiPct.toFixed(1)}%` : '?';
+            txt += `⚠️ *${s.sport}/${s.market}*: ROI=${roi} avgCLV=*${s.avgClv.toFixed(1)}%* (n=${s.clvN})\n`;
+          }
+          txt += `\n_CLV negativo = book corrigiu pra pior. Mesmo com ROI ok, edge é variance._\n`;
+        }
+        await send(token, chatId, txt);
+        return;
+      }
       // /market-tips recent [sport] [limit] — lista tips individuais
       if (parts[1]?.toLowerCase() === 'recent') {
         const sportFilter = parts[2]?.toLowerCase() || null;
@@ -4600,7 +4636,7 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
         txt += `  CLV=${clv} (n=${s.clvN}) profit=${s.totalProfit.toFixed(1)}u\n\n`;
         if (txt.length > 3500) { txt += '_(truncado)_'; break; }
       }
-      txt += `\n_Uso: /market-tips [sport] [days] | /market-tips recent [sport] [limit]_`;
+      txt += `\n_Uso: /market-tips [sport] [days] | recent [sport] [limit] | leaks [days] [minN]_`;
       await send(token, chatId, txt);
     } catch (e) { await send(token, chatId, `❌ ${e.message}`); }
 
