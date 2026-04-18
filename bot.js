@@ -62,7 +62,7 @@ function dotaHeroMetaLine(blueTeam, redTeam) {
 }
 const { getFootballProbability } = require('./lib/football-model');
 const { getTennisProbability, detectSurface, tennisProhibitedTournament } = require('./lib/tennis-model');
-const { extractServeProbs, priceTennisMatch } = require('./lib/tennis-markov-model');
+const { extractServeProbs, priceTennisMatch, priceTennisLive } = require('./lib/tennis-markov-model');
 const { getPlayerInjuryRisk } = require('./lib/tennis-injury-risk');
 const { fetchMatchNews } = require('./lib/news');
 const { tennisPairMatchesPlayers } = require('./lib/tennis-match');
@@ -7279,6 +7279,47 @@ async function pollTennis(runOnce = false) {
                 // Disponibiliza probs de mercado pra downstream (handicap/totals pricing quando feed expor).
                 tennisModelResult._markovMarkets = markov;
                 tennisModelResult._markovServe = mSp;
+
+                // LIVE Markov: se temos liveScoreData, recomputa a partir do state atual.
+                // Override do pMatch pré-match porque live sobrepõe.
+                if (isLiveTennis && liveScoreData?.isLive && tennisModelResult._markovServe) {
+                  try {
+                    const sets = liveScoreData.sets || [];
+                    const curSet = sets[sets.length - 1] || { home: 0, away: 0 };
+                    // currentServerIsA: quando `serving` é 'home', o jogador t1 está sacando.
+                    // Fallback por parity: quem abriu saca games pares/ímpares.
+                    let currentServerIsA;
+                    if (liveScoreData.serving === 'home') currentServerIsA = true;
+                    else if (liveScoreData.serving === 'away') currentServerIsA = false;
+                    else currentServerIsA = ((curSet.home + curSet.away) % 2 === 0);
+
+                    const live = priceTennisLive({
+                      p1Serve: mSp.p1Serve,
+                      p2Serve: mSp.p2Serve,
+                      bestOf: bestOfMarkov,
+                      state: {
+                        setsA: liveScoreData.setsHome || 0,
+                        setsB: liveScoreData.setsAway || 0,
+                        gamesA: curSet.home || 0,
+                        gamesB: curSet.away || 0,
+                        currentServerIsA,
+                        inTiebreak: (curSet.home === 6 && curSet.away === 6),
+                      },
+                      iters: 10000,
+                    });
+                    if (Number.isFinite(live.pMatch) && live.pMatch > 0 && live.pMatch < 1) {
+                      const prePmatch = tennisModelResult.modelP1;
+                      log('INFO', 'TENNIS-MARKOV-LIVE',
+                        `${match.team1} vs ${match.team2} [sets ${liveScoreData.setsHome}-${liveScoreData.setsAway}, set ${liveScoreData.currentSet}: ${curSet.home}-${curSet.away}, ${currentServerIsA ? match.team1 : match.team2} serves]: ` +
+                        `pre=${(prePmatch*100).toFixed(1)}% → live=${(live.pMatch*100).toFixed(1)}%`);
+                      // Override (não blend): live state é a realidade atual.
+                      tennisModelResult.modelP1 = live.pMatch;
+                      tennisModelResult.modelP2 = 1 - live.pMatch;
+                      tennisModelResult.factors = [...(tennisModelResult.factors || []), 'markov-live'];
+                      tennisModelResult._markovLive = live;
+                    }
+                  } catch (le) { log('DEBUG', 'TENNIS-MARKOV-LIVE', `err: ${le.message}`); }
+                }
               }
             } catch (me) { log('DEBUG', 'TENNIS-MARKOV', `err: ${me.message}`); }
           }
