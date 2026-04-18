@@ -325,6 +325,11 @@
     .live-score { font-variant-numeric: tabular-nums; color: var(--text-dim); font-size: 12px; }
     .live-prob { font-variant-numeric: tabular-nums; font-weight: 600; color: var(--primary-soft); }
     .empty-state { padding: 20px; text-align: center; color: var(--text-faint); font-size: 13px; }
+    .skeleton-state { padding: 20px; text-align: center; color: var(--text-faint); font-size: 13px; opacity: 0.55; }
+    .alert-pill { display: inline-block; padding: 3px 8px; margin-right: 6px; border-radius: 10px; font-size: 11px; font-weight: 500; }
+    .alert-pill.alert-danger { background: var(--danger-bg); color: var(--danger); }
+    .alert-pill.alert-warn { background: rgba(234,179,8,0.15); color: #eab308; }
+    .alert-pill.alert-info { background: rgba(99,102,241,0.12); color: var(--primary-soft); }
 
     /* ─────────────────────────────────────────────────────────
        Tips table
@@ -718,6 +723,12 @@ let currentGame = 'lol';
 let charts = { equity: null, calib: null, clv: null };
 let autoRefreshTimer = null;
 
+// Generation counter — cada refresh() incrementa. Se load function terminar
+// depois que novo refresh começou (user trocou sport), aborta render.
+let refreshGen = 0;
+// Alerts dedup set (substitui innerHTML.includes(...) checks frágeis)
+const _alertKeys = new Set();
+
 // ─────────────────────────────────────────────────────────────
 // API helper
 // ─────────────────────────────────────────────────────────────
@@ -730,6 +741,39 @@ async function apiFetch(path) {
     console.warn('Fetch', path, e.message);
     return null;
   }
+}
+
+// ─────────────────────────────────────────────────────────────
+// UI state helpers — loading/empty padronizados
+// ─────────────────────────────────────────────────────────────
+function setLoading(el) {
+  if (!el) return;
+  if (typeof el === 'string') el = document.getElementById(el);
+  if (!el) return;
+  el.innerHTML = '<div class="skeleton-state">⟳ carregando…</div>';
+}
+function setEmpty(el, msg = 'Sem dados no período') {
+  if (!el) return;
+  if (typeof el === 'string') el = document.getElementById(el);
+  if (!el) return;
+  el.innerHTML = `<div class="empty-state">${msg}</div>`;
+}
+function shouldAbort(gen) {
+  // Se um novo refresh começou desde que essa load foi disparada, abortar.
+  return gen !== refreshGen;
+}
+function addAlertOnce(key, level, text) {
+  if (_alertKeys.has(key)) return;
+  _alertKeys.add(key);
+  const el = document.getElementById('alerts');
+  if (!el) return;
+  const cls = level === 'danger' ? 'alert-danger' : level === 'warn' ? 'alert-warn' : 'alert-info';
+  el.innerHTML += `<span class="alert-pill ${cls}" data-alert-key="${key}">${text}</span>`;
+}
+function clearAlerts() {
+  _alertKeys.clear();
+  const el = document.getElementById('alerts');
+  if (el) el.innerHTML = '';
 }
 
 function fmtNum(n, digits = 0) {
@@ -770,30 +814,35 @@ async function refresh() {
   const btn = document.getElementById('refreshBtn');
   btn.classList.add('loading');
   document.getElementById('lastUpdated').textContent = 'atualizando...';
+  // Bump generation — loads iniciados antes desse refresh viram stale e abortam.
+  const gen = ++refreshGen;
+  clearAlerts();
 
   const isOverall = currentSport === '__overall__';
-  const overallSections = ['liveCard']; // hide live in overall view (or rebuild)
   try {
     if (isOverall) {
       await Promise.all([
-        loadOverall(),
-        loadModels(),
-        loadLive(),
-        loadUpcoming(),
-        loadTips(),
+        loadOverall(gen),
+        loadModels(gen),
+        loadLive(gen),
+        loadUpcoming(gen),
+        loadTips(gen),
       ]);
     } else {
       await Promise.all([
-        loadKPIs(),
-        loadEquity(),
-        loadSportRoi(),
-        loadLive(),
-        loadUpcoming(),
-        loadTips(),
-        loadModels(),
+        loadKPIs(gen),
+        loadEquity(gen),
+        loadSportRoi(gen),
+        loadLive(gen),
+        loadUpcoming(gen),
+        loadTips(gen),
+        loadModels(gen),
       ]);
     }
-    document.getElementById('lastUpdated').textContent = new Date().toLocaleTimeString('pt-BR').slice(0, 5);
+    // Só atualiza timestamp se ainda é o refresh mais recente
+    if (gen === refreshGen) {
+      document.getElementById('lastUpdated').textContent = new Date().toLocaleTimeString('pt-BR').slice(0, 5);
+    }
   } catch (e) { console.warn(e); }
   btn.classList.remove('loading');
 }
@@ -801,10 +850,12 @@ async function refresh() {
 // ─────────────────────────────────────────────────────────────
 // Overall view — cross-sport aggregate
 // ─────────────────────────────────────────────────────────────
-async function loadOverall() {
+async function loadOverall(gen = refreshGen) {
   const days = 30;
+  setLoading('kpis');
   const data = await apiFetch('/overall-summary?days=' + days);
-  if (!data) return;
+  if (shouldAbort(gen)) return;
+  if (!data) { setEmpty('kpis', 'Sem dados'); return; }
 
   const banca = data.banca || {};
   const ov = data.overall || {};
@@ -836,15 +887,15 @@ async function loadOverall() {
     </div>
   `;
 
-  // Render alerts
-  const alerts = [];
+  // Render alerts — usa addAlertOnce pra evitar duplicate quando múltiplas loads adicionam
   if (ov.roi != null && ov.total_tips >= 30 && ov.roi < -5) {
-    alerts.push({ level: 'danger', text: `ROI global ${ov.roi.toFixed(1)}% com ${ov.total_tips} tips — revisar pipeline` });
+    addAlertOnce('global-roi-neg', 'danger',
+      `ROI global ${ov.roi.toFixed(1)}% com ${ov.total_tips} tips — revisar pipeline`);
   }
   if (clv?.n >= 20 && clv.avg < -1) {
-    alerts.push({ level: 'danger', text: `CLV global ${clv.avg.toFixed(1)}% — mercado corrigindo contra` });
+    addAlertOnce('global-clv-neg', 'danger',
+      `CLV global ${clv.avg.toFixed(1)}% — mercado corrigindo contra`);
   }
-  renderAlerts(alerts);
 
   // Equity curve — cross-sport
   const series = data.equity?.series || [];
@@ -909,12 +960,14 @@ async function loadOverall() {
 // ─────────────────────────────────────────────────────────────
 // 1) KPIs (hero row)
 // ─────────────────────────────────────────────────────────────
-async function loadKPIs() {
+async function loadKPIs(gen = refreshGen) {
   const gq = currentGame ? '&game=' + encodeURIComponent(currentGame) : '';
+  setLoading('kpis');
   const data = await apiFetch('/roi?sport=' + currentSport + gq);
+  if (shouldAbort(gen)) return;
   const container = document.getElementById('kpis');
   if (!data) {
-    container.innerHTML = '<div class="kpi"><div class="kpi-label">Sem dados</div></div>';
+    setEmpty(container, 'Sem dados');
     return;
   }
 
@@ -955,30 +1008,25 @@ async function loadKPIs() {
   `;
   container.innerHTML = html;
 
-  // Alerts
-  const alerts = [];
+  // Alerts — usa addAlertOnce pra dedup cross-function
   if (data.clv?.count >= 10 && clv != null && clv < -1) {
-    alerts.push({ level: 'danger', text: `CLV negativo persistente (${fmtPct(clv)}) — edge pode ter evaporado` });
+    addAlertOnce('sport-clv-neg', 'danger',
+      `CLV negativo persistente (${fmtPct(clv)}) — edge pode ter evaporado`);
   }
   if (roi != null && roi < -5 && totalTips >= 20) {
-    alerts.push({ level: 'danger', text: `ROI ${fmtPct(roi)} com ${totalTips} tips — considerar pausar sport` });
+    addAlertOnce('sport-roi-neg', 'danger',
+      `ROI ${fmtPct(roi)} com ${totalTips} tips — considerar pausar sport`);
   }
-  renderAlerts(alerts);
-}
-
-function renderAlerts(alerts) {
-  const el = document.getElementById('alerts');
-  if (!alerts?.length) { el.innerHTML = ''; return; }
-  el.innerHTML = alerts.map(a => `<div class="alert-pill ${a.level || ''}">⚠ ${a.text}</div>`).join('');
 }
 
 // ─────────────────────────────────────────────────────────────
 // 2) Equity curve
 // ─────────────────────────────────────────────────────────────
-async function loadEquity() {
+async function loadEquity(gen = refreshGen) {
   const days = document.getElementById('equityDays').value;
   const gq = currentGame ? '&game=' + encodeURIComponent(currentGame) : '';
   const data = await apiFetch(`/equity-curve?sport=${currentSport}&days=${days}${gq}`);
+  if (shouldAbort(gen)) return;
   const series = data?.series || [];
   if (!series.length) {
     document.getElementById('equityKpis').innerHTML = '<span style="color:var(--text-faint)">Sem settlements no período</span>';
@@ -997,46 +1045,55 @@ async function loadEquity() {
   const maxDD = data.max_drawdown_pct;
   const sharpe = data.sharpe_annualized;
 
-  const ctx = document.getElementById('equityChart').getContext('2d');
-  if (charts.equity) charts.equity.destroy();
-  charts.equity = new Chart(ctx, {
-    type: 'line',
-    data: {
-      labels,
-      datasets: [{
-        data: values,
-        borderColor: profit >= 0 ? '#10b981' : '#ef4444',
-        backgroundColor: profit >= 0 ? 'rgba(16,185,129,0.08)' : 'rgba(239,68,68,0.08)',
-        fill: true,
-        tension: 0.25,
-        borderWidth: 2,
-        pointRadius: 0,
-        pointHoverRadius: 4,
-      }],
-    },
-    options: {
-      responsive: true, maintainAspectRatio: false,
-      plugins: {
-        legend: { display: false },
-        tooltip: {
-          mode: 'index', intersect: false,
-          backgroundColor: '#14171f', borderColor: '#1e212d', borderWidth: 1,
-          callbacks: { label: c => 'R$ ' + c.parsed.y.toFixed(2) }
-        },
+  const borderColor = profit >= 0 ? '#10b981' : '#ef4444';
+  const bgColor = profit >= 0 ? 'rgba(16,185,129,0.08)' : 'rgba(239,68,68,0.08)';
+  if (charts.equity) {
+    // Update in-place — mais suave que destroy/recreate (evita flicker no refresh)
+    charts.equity.data.labels = labels;
+    charts.equity.data.datasets[0].data = values;
+    charts.equity.data.datasets[0].borderColor = borderColor;
+    charts.equity.data.datasets[0].backgroundColor = bgColor;
+    charts.equity.update('none');
+  } else {
+    const ctx = document.getElementById('equityChart').getContext('2d');
+    charts.equity = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels,
+        datasets: [{
+          data: values,
+          borderColor, backgroundColor: bgColor,
+          fill: true,
+          tension: 0.25,
+          borderWidth: 2,
+          pointRadius: 0,
+          pointHoverRadius: 4,
+        }],
       },
-      scales: {
-        x: {
-          ticks: { color: '#64748b', font: { size: 10 }, maxRotation: 0, autoSkip: true, maxTicksLimit: 6 },
-          grid: { display: false },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            mode: 'index', intersect: false,
+            backgroundColor: '#14171f', borderColor: '#1e212d', borderWidth: 1,
+            callbacks: { label: c => 'R$ ' + c.parsed.y.toFixed(2) }
+          },
         },
-        y: {
-          ticks: { color: '#64748b', font: { size: 10 }, callback: v => 'R$ ' + v.toFixed(0) },
-          grid: { color: '#1e212d', drawBorder: false },
+        scales: {
+          x: {
+            ticks: { color: '#64748b', font: { size: 10 }, maxRotation: 0, autoSkip: true, maxTicksLimit: 6 },
+            grid: { display: false },
+          },
+          y: {
+            ticks: { color: '#64748b', font: { size: 10 }, callback: v => 'R$ ' + v.toFixed(0) },
+            grid: { color: '#1e212d', drawBorder: false },
+          },
         },
+        interaction: { mode: 'index', intersect: false },
       },
-      interaction: { mode: 'index', intersect: false },
-    },
-  });
+    });
+  }
 
   const pct = initial ? (profit / initial * 100) : 0;
   document.getElementById('equityKpis').innerHTML = `
@@ -1061,8 +1118,9 @@ const SPORTS_LIST = [
   { sport: 'football', game: '',      label: 'Futebol',           emoji: '⚽' },
 ];
 
-async function loadSportRoi() {
+async function loadSportRoi(gen = refreshGen) {
   const container = document.getElementById('sportRoiList');
+  setLoading(container);
   const results = await Promise.all(SPORTS_LIST.map(async s => {
     const gq = s.game ? '&game=' + encodeURIComponent(s.game) : '';
     const data = await apiFetch('/roi?sport=' + s.sport + gq);
@@ -1074,6 +1132,7 @@ async function loadSportRoi() {
     const tips = (ov.wins || 0) + (ov.losses || 0);
     return { ...s, roi, tips };
   }));
+  if (shouldAbort(gen)) return;
   const maxAbs = Math.max(0.1, ...results.map(r => Math.abs(r.roi || 0)));
 
   container.innerHTML = results.map(r => {
@@ -1098,8 +1157,9 @@ async function loadSportRoi() {
 // ─────────────────────────────────────────────────────────────
 // 4b) Upcoming snapshot
 // ─────────────────────────────────────────────────────────────
-async function loadUpcoming() {
+async function loadUpcoming(gen = refreshGen) {
   const data = await apiFetch('/upcoming-snapshot?hours=24');
+  if (shouldAbort(gen)) return;
   const card = document.getElementById('upcomingCard');
   const list = document.getElementById('upcomingList');
   const count = document.getElementById('upcomingCount');
@@ -1144,8 +1204,9 @@ async function loadUpcoming() {
 // Server returns { sports: { lol: [row…], dota: [row…], … } }
 // Rows têm: team1, team2, league, liveStats.summary.score, odds, pinnacle.
 // ─────────────────────────────────────────────────────────────
-async function loadLive() {
+async function loadLive(gen = refreshGen) {
   const data = await apiFetch('/live-snapshot');
+  if (shouldAbort(gen)) return;
   const card = document.getElementById('liveCard');
   const list = document.getElementById('liveList');
   const count = document.getElementById('liveCount');
@@ -1193,10 +1254,11 @@ async function loadLive() {
 // ─────────────────────────────────────────────────────────────
 // 5) Tips table
 // ─────────────────────────────────────────────────────────────
-async function loadTips() {
+async function loadTips(gen = refreshGen) {
   const limit = document.getElementById('tipsLimit').value;
   const status = document.getElementById('tipsStatus').value;
   const el = document.getElementById('tipsTable');
+  setLoading(el);
   let tips = [];
   if (currentSport === '__overall__') {
     // Cross-sport: union de vários sports por tips recentes
@@ -1205,6 +1267,7 @@ async function loadTips() {
     const results = await Promise.all(sports.map(sp =>
       apiFetch(`/tips-history?sport=${sp}&limit=10${sq}`)
     ));
+    if (shouldAbort(gen)) return;
     for (const data of results) {
       const t = data?.tips || data || [];
       if (Array.isArray(t)) tips.push(...t);
@@ -1215,10 +1278,11 @@ async function loadTips() {
     const gq = currentGame ? '&game=' + encodeURIComponent(currentGame) : '';
     const sq = status ? '&status=' + encodeURIComponent(status) : '';
     const data = await apiFetch(`/tips-history?sport=${currentSport}&limit=${limit}${gq}${sq}`);
+    if (shouldAbort(gen)) return;
     tips = data?.tips || data || [];
   }
   if (!Array.isArray(tips) || !tips.length) {
-    el.innerHTML = '<div class="empty-state">Sem tips no filtro</div>';
+    setEmpty(el, 'Sem tips no filtro');
     return;
   }
 
@@ -1282,12 +1346,14 @@ async function loadTips() {
 // ─────────────────────────────────────────────────────────────
 // 6) Models card
 // ─────────────────────────────────────────────────────────────
-async function loadModels() {
-  const data = await apiFetch('/models-status');
+async function loadModels(gen = refreshGen) {
   const grid = document.getElementById('modelsGrid');
+  setLoading(grid);
+  const data = await apiFetch('/models-status');
+  if (shouldAbort(gen)) return;
   const meta = document.getElementById('modelsHeadMeta');
   if (!data?.models?.length) {
-    grid.innerHTML = '<div class="empty-state">Sem modelos ou endpoint ausente</div>';
+    setEmpty(grid, 'Sem modelos ou endpoint ausente');
     return;
   }
   meta.textContent = `${data.models.length} ativos`;
@@ -1303,12 +1369,11 @@ async function loadModels() {
     `;
   }).join('');
 
-  // Surface stale as alert
+  // Surface stale as alert — usa addAlertOnce pra dedup
   const stale = data.models.filter(m => m.ageDays > 30);
   if (stale.length) {
-    const pill = `<div class="alert-pill">${stale.length} modelo${stale.length > 1 ? 's' : ''} stale (${stale.map(s=>s.game).join(', ')})</div>`;
-    const el = document.getElementById('alerts');
-    if (!el.innerHTML.includes('stale')) el.innerHTML += pill;
+    addAlertOnce('models-stale', 'warn',
+      `${stale.length} modelo${stale.length > 1 ? 's' : ''} stale (${stale.map(s=>s.game).join(', ')})`);
   }
 }
 
