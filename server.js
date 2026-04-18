@@ -3960,6 +3960,7 @@ const server = http.createServer(async (req, res) => {
         matchId: hit.match_id,
         gameTime: hit.game_time || 0,
         radiantLead: (swap ? -1 : 1) * (hit.radiant_lead || 0),
+        team1IsRadiant: !swap, // swap=true → team1 é Dire; false → team1 é Radiant
         blueTeam: blue,
         redTeam:  red,
         _source: steamSource ? `${liveSource}+steam-rt` : liveSource,
