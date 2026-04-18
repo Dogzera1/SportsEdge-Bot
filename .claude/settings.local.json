@@ -223,7 +223,14 @@
       "Bash(awk 'NR>=700 && NR<=900' lib/tennis-model.js)",
       "Bash(DB_PATH=sportsedge.db node scripts/backtest-new-models.js)",
       "Bash(grep -n \"sendJson\\(res, { matches\" server.js)",
-      "Bash(awk -F: '$1 > 8716 && $1 < 8910 {print}')"
+      "Bash(awk -F: '$1 > 8716 && $1 < 8910 {print}')",
+      "Bash(awk 'NR>=7917 && NR<=8460' bot.js)",
+      "Bash(awk 'NR>=8240 && NR<=8280' bot.js)",
+      "Bash(awk 'NR>=8050 && NR<=8130' bot.js)",
+      "Bash(awk 'NR>=7970 && NR<=8060' bot.js)",
+      "Bash(grep -nA 3 \"shadow-vs-active\" server.js)",
+      "Bash(DB_PATH=sportsedge.db node scripts/shadow-compare.js --game dota2 --days 30)",
+      "Bash(DB_PATH=sportsedge.db node scripts/shadow-compare.js --game lol --days 30)"
     ]
   }
 }

@@ -686,10 +686,26 @@ function serverGet(path, sport) {
 const ODDS_MAX_AGE_LIVE_MS = parseInt(process.env.ODDS_MAX_AGE_LIVE_SEC || '120', 10) * 1000;   // 2min
 const ODDS_MAX_AGE_PRE_MS  = parseInt(process.env.ODDS_MAX_AGE_PRE_SEC  || '600', 10) * 1000;   // 10min
 
-function isOddsFresh(odds, isLive) {
+// Per-sport override — sports com poll cycle lento (football 60min idle) precisam
+// tolerar odds mais velhas. Sem override, 50min de cada hora marca stale.
+// Default: football pre 65min (> 60min cycle), outros herdam ODDS_MAX_AGE_PRE_MS.
+const ODDS_MAX_AGE_PRE_MS_BY_SPORT = {
+  football: parseInt(process.env.FOOTBALL_ODDS_MAX_AGE_PRE_SEC || '3900', 10) * 1000, // 65min
+  // MMA: cycle 12h (MMA_INTERVAL_H=12) + 1h buffer. Defensivo contra PandaScore outage.
+  mma: parseInt(process.env.MMA_ODDS_MAX_AGE_PRE_SEC || '46800', 10) * 1000, // 13h
+};
+const ODDS_MAX_AGE_LIVE_MS_BY_SPORT = {
+  // Football live: 5min (poll cycle live 3min + buffer)
+  football: parseInt(process.env.FOOTBALL_ODDS_MAX_AGE_LIVE_SEC || '300', 10) * 1000,
+};
+
+function isOddsFresh(odds, isLive, sport) {
   if (!odds?._fetchedAt) return true; // sem timestamp = não bloquear (backward compat)
   const age = Date.now() - odds._fetchedAt;
-  const maxAge = isLive ? ODDS_MAX_AGE_LIVE_MS : ODDS_MAX_AGE_PRE_MS;
+  const s = String(sport || '').toLowerCase();
+  const maxAge = isLive
+    ? (ODDS_MAX_AGE_LIVE_MS_BY_SPORT[s] || ODDS_MAX_AGE_LIVE_MS)
+    : (ODDS_MAX_AGE_PRE_MS_BY_SPORT[s]  || ODDS_MAX_AGE_PRE_MS);
   return age <= maxAge;
 }
 
@@ -7658,14 +7674,21 @@ Máximo 200 palavras.`;
       const isT1bet = norm(tipTeam).includes(norm(match.team1)) || norm(match.team1).includes(norm(tipTeam));
       let kellyFraction = tipConf === 'ALTA' ? 0.25 : tipConf === 'BAIXA' ? 0.10 : 1/6;
       // Stage boost: TI/Major final → +15%, international grupos → +10%, regional final → +8%
+      // + §5b Stakes context (showmatch/exhibition deflate; decider/tiebreaker boost)
       try {
-        const { matchStage, stageConfidenceMultiplier } = require('./lib/esports-runtime-features');
+        const { matchStage, stageConfidenceMultiplier, detectStakesContext } = require('./lib/esports-runtime-features');
         const stage = matchStage(match.league || '');
-        if (stage !== 'regular') {
-          const mult = stageConfidenceMultiplier(stage);
+        const stakesCtx = detectStakesContext(match.league || '');
+        const stageMult = stage !== 'regular' ? stageConfidenceMultiplier(stage) : 1.0;
+        const stakesMult = stakesCtx.multiplier;
+        const combined = stageMult * stakesMult;
+        if (combined !== 1.0) {
           const kellyPre = kellyFraction;
-          kellyFraction = Math.min(0.30, kellyFraction * mult);
-          if (kellyFraction !== kellyPre) log('INFO', 'AUTO-DOTA', `Stage boost: ${stage} (×${mult}) → kelly ${kellyPre.toFixed(3)} → ${kellyFraction.toFixed(3)}`);
+          kellyFraction = Math.min(0.30, kellyFraction * combined);
+          const tags = [];
+          if (stage !== 'regular') tags.push(`stage=${stage}(×${stageMult})`);
+          if (stakesCtx.category !== 'normal') tags.push(`stakes=${stakesCtx.category}(×${stakesMult}; ${stakesCtx.reason})`);
+          if (kellyFraction !== kellyPre) log('INFO', 'AUTO-DOTA', `Kelly adj: ${tags.join(' + ')} → ${kellyPre.toFixed(3)} → ${kellyFraction.toFixed(3)}`);
         }
       } catch (_) {}
       const modelPForKelly = mlResult.modelP1 > 0 ? (isT1bet ? mlResult.modelP1 : mlResult.modelP2) : null;
@@ -7973,6 +7996,14 @@ async function pollMma(runOnce = false) {
 
         const o = fight.odds;
         if (!o?.t1 || !o?.t2) continue;
+
+        // Odds freshness gate defensivo: MMA cycle 12h + buffer = 13h. Protege
+        // contra feed stale prolongado (ex: PandaScore outage) mantendo passagem
+        // em operação normal. Sport-specific threshold via isOddsFresh.
+        if (!isOddsFresh(o, false, 'mma')) {
+          log('INFO', 'AUTO-MMA', `Odds stale (${oddsAgeStr(o)}): ${fight.team1} vs ${fight.team2} — pulando`);
+          continue;
+        }
 
         const fightTs = fight.time ? new Date(fight.time).getTime() : 0;
         // Descartar lutas já passadas (dado stale da API)
@@ -8837,12 +8868,39 @@ async function pollTennis(runOnce = false) {
               if (markets && ((markets.handicaps?.length || 0) + (markets.totals?.length || 0)) > 0) {
                 const { scanTennisMarkets } = require('./lib/tennis-market-scanner');
                 const minEv = parseFloat(process.env.TENNIS_MARKET_SCAN_MIN_EV ?? '4');
-                const found = scanTennisMarkets({
+                let found = scanTennisMarkets({
                   markov: tennisModelResult._markovMarkets,
                   aces: tennisModelResult._markovAces,
                   markets,
                   minEv,
                 });
+                // Correlation §12c: quando ≥2 market tips fire no mesmo match,
+                // aplica desconto de stake proporcional à correlação max com outra tip.
+                // Mitiga over-exposure (ex: ML+handicap+under todos no mesmo lado).
+                if (found.length >= 2 && process.env.TENNIS_CORRELATION_ADJ !== 'false') {
+                  try {
+                    const { adjustStakesForCorrelation, computeMarketCorrelation } = require('./lib/tennis-correlation');
+                    // adjustStakesForCorrelation espera `kellyStake` — preenche com fração provisória baseada em pModel/odd
+                    const tipsWithKelly = found.map(t => ({
+                      ...t,
+                      kellyStake: +((t.pModel - (1 - t.pModel) / (t.odd - 1)) * 100).toFixed(2) || 0,
+                    }));
+                    const adjusted = adjustStakesForCorrelation(tipsWithKelly);
+                    // Log as maiores correlações detectadas
+                    const pairs = [];
+                    for (let i = 0; i < found.length; i++) {
+                      for (let j = i + 1; j < found.length; j++) {
+                        const c = computeMarketCorrelation(found[i], found[j]);
+                        if (Math.abs(c) > 0.3) pairs.push(`${found[i].label}↔${found[j].label}=${c.toFixed(2)}`);
+                      }
+                    }
+                    if (pairs.length) {
+                      log('INFO', 'TENNIS-CORR', `${match.team1} vs ${match.team2}: ${pairs.slice(0,3).join(' | ')}`);
+                    }
+                    // Propaga `correlationDiscount` pras tips originais (shadow + DM usam)
+                    found = found.map((t, i) => ({ ...t, correlationDiscount: adjusted[i].correlationDiscount }));
+                  } catch (ce) { log('DEBUG', 'TENNIS-CORR', `err: ${ce.message}`); }
+                }
                 if (found.length) {
                   log('INFO', 'TENNIS-MARKETS',
                     `${match.team1} vs ${match.team2}: ${found.length} mercado(s) EV ≥${minEv}%`);
@@ -8852,8 +8910,9 @@ async function pollTennis(runOnce = false) {
                     for (const t of found) logShadowTip(db, { sport: 'tennis', match, bestOf: tnBestOf, tip: t });
                   } catch (_) {}
                   for (const t of found.slice(0, 5)) {
+                    const discTag = t.correlationDiscount > 0 ? ` corr-disc=${(t.correlationDiscount*100).toFixed(0)}%` : '';
                     log('INFO', 'TENNIS-MARKETS',
-                      `  • ${t.label} @ ${t.odd.toFixed(2)} | pModel=${(t.pModel*100).toFixed(1)}% pImpl=${t.pImplied ? (t.pImplied*100).toFixed(1)+'%' : '?'} EV=${t.ev.toFixed(1)}%`);
+                      `  • ${t.label} @ ${t.odd.toFixed(2)} | pModel=${(t.pModel*100).toFixed(1)}% pImpl=${t.pImplied ? (t.pImplied*100).toFixed(1)+'%' : '?'} EV=${t.ev.toFixed(1)}%${discTag}`);
                   }
                   if (process.env.TENNIS_MARKET_TIPS_ENABLED === 'true' && ADMIN_IDS.size) {
                     try {
@@ -8872,14 +8931,19 @@ async function pollTennis(runOnce = false) {
                         const dbFresh = wasAdminDmSentRecently(db, { match, market: t.market, line: t.line, side: t.side, hoursAgo: 24 });
                         if (!inMemFresh && !dbFresh) {
                           marketTipSent.set(dedupKey, Date.now());
-                          const stake = mtp.kellyStakeForMarket(t.pModel, t.odd, 100, 0.10);
+                          // Correlation discount aplicado sobre o stake Kelly (se correlacionado com outro tip detectado)
+                          let stake = mtp.kellyStakeForMarket(t.pModel, t.odd, 100, 0.10);
+                          if (t.correlationDiscount > 0 && typeof stake === 'number') {
+                            stake = +(stake * (1 - t.correlationDiscount)).toFixed(2);
+                          }
                           if (stake > 0) {
                             const dm = mtp.buildMarketTipDM({ match, tip: t, stake, league: match.league, sport: 'tennis' });
                             const tnToken = SPORTS['tennis']?.token || Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
                             if (tnToken) {
                               for (const adminId of ADMIN_IDS) sendDM(tnToken, adminId, dm).catch(() => {});
                               markAdminDmSent(db, { match, market: t.market, line: t.line, side: t.side });
-                              log('INFO', 'TENNIS-MARKET-TIP', `Admin DM: ${t.label} @ ${t.odd} EV ${t.ev}% stake ${stake}u`);
+                              const discTag = t.correlationDiscount > 0 ? ` (corr-disc ${(t.correlationDiscount*100).toFixed(0)}%)` : '';
+                              log('INFO', 'TENNIS-MARKET-TIP', `Admin DM: ${t.label} @ ${t.odd} EV ${t.ev}% stake ${stake}u${discTag}`);
                             }
                           }
                         } else {
@@ -9483,7 +9547,7 @@ async function pollFootball(runOnce = false) {
         const o = match.odds;
         if (!o?.h || !o?.d || !o?.a) continue;
         const isFbLive = match.status === 'live';
-        if (!isOddsFresh(o, isFbLive)) {
+        if (!isOddsFresh(o, isFbLive, 'football')) {
           log('INFO', 'AUTO-FOOTBALL', `Odds stale (${oddsAgeStr(o)}): ${match.team1} vs ${match.team2} — pulando`);
           continue;
         }
@@ -10556,15 +10620,20 @@ Máximo 150 palavras.`;
         }
 
         // Stage boost: IEM Major Final → ×1.15, IEM Katowice/Cologne → ×1.10
+        // + §5b Stakes context (showmatch/exhibition deflate; decider boost)
         let csKellyFrac = 1/8;
         try {
-          const { matchStage, stageConfidenceMultiplier } = require('./lib/esports-runtime-features');
+          const { matchStage, stageConfidenceMultiplier, detectStakesContext } = require('./lib/esports-runtime-features');
           const stage = matchStage(match.league || '');
-          if (stage !== 'regular') {
-            const mult = stageConfidenceMultiplier(stage);
+          const stakesCtx = detectStakesContext(match.league || '');
+          const combined = (stage !== 'regular' ? stageConfidenceMultiplier(stage) : 1.0) * stakesCtx.multiplier;
+          if (combined !== 1.0) {
             const pre = csKellyFrac;
-            csKellyFrac = Math.min(0.25, csKellyFrac * mult);
-            if (csKellyFrac !== pre) log('INFO', 'AUTO-CS', `Stage boost: ${stage} (×${mult}) → kelly ${pre.toFixed(3)} → ${csKellyFrac.toFixed(3)}`);
+            csKellyFrac = Math.min(0.25, csKellyFrac * combined);
+            const tags = [];
+            if (stage !== 'regular') tags.push(`stage=${stage}`);
+            if (stakesCtx.category !== 'normal') tags.push(`stakes=${stakesCtx.category}(${stakesCtx.reason})`);
+            if (csKellyFrac !== pre) log('INFO', 'AUTO-CS', `Kelly adj: ${tags.join(' + ')} → ${pre.toFixed(3)} → ${csKellyFrac.toFixed(3)}`);
           }
         } catch (_) {}
         const stake = calcKellyWithP(pickP, pickOdd, csKellyFrac);
