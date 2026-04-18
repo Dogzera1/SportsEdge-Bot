@@ -7463,7 +7463,18 @@ Máximo 200 palavras.`;
       }
 
       const isT1bet = norm(tipTeam).includes(norm(match.team1)) || norm(match.team1).includes(norm(tipTeam));
-      const kellyFraction = tipConf === 'ALTA' ? 0.25 : tipConf === 'BAIXA' ? 0.10 : 1/6;
+      let kellyFraction = tipConf === 'ALTA' ? 0.25 : tipConf === 'BAIXA' ? 0.10 : 1/6;
+      // Stage boost: TI/Major final → +15%, international grupos → +10%, regional final → +8%
+      try {
+        const { matchStage, stageConfidenceMultiplier } = require('./lib/esports-runtime-features');
+        const stage = matchStage(match.league || '');
+        if (stage !== 'regular') {
+          const mult = stageConfidenceMultiplier(stage);
+          const kellyPre = kellyFraction;
+          kellyFraction = Math.min(0.30, kellyFraction * mult);
+          if (kellyFraction !== kellyPre) log('INFO', 'AUTO-DOTA', `Stage boost: ${stage} (×${mult}) → kelly ${kellyPre.toFixed(3)} → ${kellyFraction.toFixed(3)}`);
+        }
+      } catch (_) {}
       const modelPForKelly = mlResult.modelP1 > 0 ? (isT1bet ? mlResult.modelP1 : mlResult.modelP2) : null;
       const tipStake = modelPForKelly
         ? calcKellyWithP(modelPForKelly, tipOdd, kellyFraction)
@@ -10351,7 +10362,19 @@ Máximo 150 palavras.`;
           aiReason = String(iaResp).split('TIP_ML:')[0].trim().slice(0, 160) || null;
         }
 
-        const stake = calcKellyWithP(pickP, pickOdd, 1/8);
+        // Stage boost: IEM Major Final → ×1.15, IEM Katowice/Cologne → ×1.10
+        let csKellyFrac = 1/8;
+        try {
+          const { matchStage, stageConfidenceMultiplier } = require('./lib/esports-runtime-features');
+          const stage = matchStage(match.league || '');
+          if (stage !== 'regular') {
+            const mult = stageConfidenceMultiplier(stage);
+            const pre = csKellyFrac;
+            csKellyFrac = Math.min(0.25, csKellyFrac * mult);
+            if (csKellyFrac !== pre) log('INFO', 'AUTO-CS', `Stage boost: ${stage} (×${mult}) → kelly ${pre.toFixed(3)} → ${csKellyFrac.toFixed(3)}`);
+          }
+        } catch (_) {}
+        const stake = calcKellyWithP(pickP, pickOdd, csKellyFrac);
         if (stake === '0u') { analyzedCs.set(key, { ts: now, tipSent: false }); continue; }
         const desiredU = parseFloat(stake) || 0;
         const riskAdj = await applyGlobalRisk('cs', desiredU, match.league);
@@ -11508,6 +11531,27 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   };
   setInterval(runTennisStatsSync, 7 * 24 * 60 * 60 * 1000); // weekly
   setTimeout(runTennisStatsSync, 90 * 60 * 1000); // 90min pós-boot (após os esports)
+
+  // Dota hero stats (OpenDota heroStats) — weekly refresh pra pegar meta shifts
+  // de patches novos. Afeta dota_hero_features.getDraftMatchupFactor.
+  const runDotaHeroSync = () => {
+    try {
+      const { spawn } = require('child_process');
+      const proc = spawn('node', ['scripts/sync-opendota-heroes.js'], {
+        cwd: __dirname, env: process.env, detached: false,
+      });
+      proc.on('close', (code) => {
+        log(code === 0 ? 'INFO' : 'WARN', 'HIST-DOTA-HEROES', `Auto-sync hero stats exit=${code}`);
+        try {
+          const { invalidateMetaCache } = require('./lib/dota-hero-features');
+          invalidateMetaCache();
+        } catch (_) {}
+      });
+      log('INFO', 'HIST-DOTA-HEROES', 'Auto-sync hero stats started (background)');
+    } catch (e) { log('WARN', 'HIST-DOTA-HEROES', `err: ${e.message}`); }
+  };
+  setInterval(runDotaHeroSync, 7 * 24 * 60 * 60 * 1000); // weekly
+  setTimeout(runDotaHeroSync, 110 * 60 * 1000); // 110min pós-boot
 
   // Pipeline stuck detection: 1x/hora, alerta se sport tem rejeições sem tips
   setInterval(() => { try { runPipelineStuckCheck(); } catch (_) {} }, 60 * 60 * 1000);
