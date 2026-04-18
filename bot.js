@@ -7,7 +7,7 @@ const fs = require('fs');
 const path = require('path');
 const initDatabase = require('./lib/database');
 const { SPORTS, getSportById, getSportByToken, getTokenToSportMap } = require('./lib/sports');
-const { log, calcKelly, calcKellyFraction, calcKellyWithP, norm, fmtDate, fmtDateTime, fmtDuration, safeParse, cachedHttpGet, markPollHeartbeat } = require('./lib/utils');
+const { log, calcKelly, calcKellyFraction, calcKellyWithP, norm, fmtDate, fmtDateTime, fmtDuration, safeParse, cachedHttpGet, markPollHeartbeat, getPollHeartbeats } = require('./lib/utils');
 const { adjustStakeUnits } = require('./lib/risk-manager');
 const { esportsPreFilter } = require('./lib/ml');
 const { formatLineShopDM } = require('./lib/line-shopping');
@@ -185,28 +185,95 @@ function _validateTipPvsModel(text, modelP, tolPp = 8) {
 }
 
 /**
+ * Classifica league tier pra ajuste de divergência gap.
+ * Tier 1 (majors, Pinnacle sharp) → cap estrito
+ * Tier 2 (Challengers, regional top) → cap +3pp
+ * Tier 3 (CCT, VCL, DPC regional, tier2 esports regionais) → cap +5pp
+ */
+function _leagueTier(sport, league) {
+  const l = String(league || '').toLowerCase();
+  const TIER1 = {
+    lol:      /\b(worlds|msi|first stand|red bull|lck|lec|lpl|lcs|cblol|ljl|pcs)\b/i,
+    dota2:    /\b(the international|ti\d|riyadh|blast.*major|esl one birmingham|pgl.*major|dreamleague major)\b/i,
+    cs:       /\b(major|iem|katowice|cologne|esl pro league|epl|blast premier|austin|rio|shanghai|paris|copenhagen)\b/i,
+    valorant: /\b(vct|valorant champions|masters|lock.?in)\b/i,
+    tennis:   /\b(grand slam|wimbledon|us open|roland garros|australian open|atp 1000|wta 1000|atp finals|wta finals|masters)\b/i,
+  };
+  const TIER3 = {
+    lol:      /\b(nacl|prime league|ultraliga|tcl|arabian|pg nationals|ljl academy|cd|superliga)\b/i,
+    dota2:    /\b(division 2|open qualifier|minor league|regional qualifier)\b/i,
+    cs:       /\b(cct|1xbet|fissure|contest|champion of champions|clutch arena)\b/i,
+    valorant: /\b(vcl|challengers|game changers|red bull)\b/i,
+    tennis:   /\b(itf|futures|challenger|\$25k|\$15k|\$50k)\b/i,
+  };
+  const re1 = TIER1[sport], re3 = TIER3[sport];
+  if (re1?.test(l)) return 1;
+  if (re3?.test(l)) return 3;
+  return 2;
+}
+
+/**
  * Gate de divergência modelo vs mercado sharp (Pinnacle/Betfair).
  * Em book sharp, edges reais são tipicamente 1-8pp. Divergência grande sem razão clara
  * = quase sempre erro do modelo (dado faltando, sample pequeno, viés). Apostar tipsum
  * com edge fictício leva a Kelly inflado e ruína de bankroll a longo prazo.
  *
+ * Cap adaptativo:
+ *   - base maxPp
+ *   - +3pp se league tier 2 (Challengers/regional)
+ *   - +5pp se league tier 3 (CCT/VCL/DPC minor — Pinnacle menos sharp ali)
+ *   - override completo (sem cap) se: signalCount ≥ 6/8 E eloMinGames ≥ 20
+ *     (modelo tem signal forte + sample grande ⇒ tip forte, não hallucination)
+ *
  * @param {object} args
- * @param {object} args.oddsObj   — { t1, t2, bookmaker } da partida
- * @param {number} args.modelP    — P do modelo pra pick (0..1)
- * @param {number} args.impliedP  — P implícita dejuiced do mercado pra pick (0..1)
- * @param {number} args.maxPp     — limite de divergência em pp (sport-specific)
- * @returns {{ ok: boolean, divPp: number|null, reason: string|null }}
+ * @param {object} args.oddsObj     — { t1, t2, bookmaker } da partida
+ * @param {number} args.modelP      — P do modelo pra pick (0..1)
+ * @param {number} args.impliedP    — P implícita dejuiced do mercado pra pick (0..1)
+ * @param {number} args.maxPp       — limite de divergência em pp (sport-specific)
+ * @param {object} [args.context]   — opcional: { sport, league, signalCount, eloMinGames, teams }
+ * @returns {{ ok: boolean, divPp: number|null, reason: string|null, effCap: number|null, tier: number|null, override: boolean }}
  */
-function _sharpDivergenceGate({ oddsObj, modelP, impliedP, maxPp }) {
-  if (!Number.isFinite(modelP) || !Number.isFinite(impliedP) || modelP <= 0 || impliedP <= 0) return { ok: true, divPp: null, reason: null };
+function _sharpDivergenceGate({ oddsObj, modelP, impliedP, maxPp, context = {} }) {
+  if (!Number.isFinite(modelP) || !Number.isFinite(impliedP) || modelP <= 0 || impliedP <= 0) return { ok: true, divPp: null, reason: null, effCap: null, tier: null, override: false };
   const bookmaker = String(oddsObj?.bookmaker || '').toLowerCase();
   const isSharp = /pinnacle|betfair/.test(bookmaker);
-  if (!isSharp) return { ok: true, divPp: null, reason: 'not_sharp_book' };
+  if (!isSharp) return { ok: true, divPp: null, reason: 'not_sharp_book', effCap: null, tier: null, override: false };
+
   const divPp = Math.abs(modelP - impliedP) * 100;
-  if (divPp > maxPp) {
-    return { ok: false, divPp, reason: `Divergência modelP=${(modelP*100).toFixed(1)}% vs ${bookmaker} dejuiced=${(impliedP*100).toFixed(1)}% Δ${divPp.toFixed(1)}pp > ${maxPp}pp cap` };
+  // Tier-based cap bump
+  const tier = context.sport ? _leagueTier(context.sport, context.league) : 2;
+  const tierBonus = tier === 1 ? 0 : tier === 2 ? 3 : 5;
+  let effCap = maxPp + tierBonus;
+
+  // Override: signal forte + sample grande → modelo é trusted
+  const signalCount = Number(context.signalCount) || 0;
+  const eloMinGames = Number(context.eloMinGames) || 0;
+  const strongSignals = signalCount >= 6 && eloMinGames >= 20;
+  const override = strongSignals;
+
+  if (!override && divPp > effCap) {
+    // Shadow-log rejeição pra backtest futuro: passou? dois cenários
+    try {
+      logRejection(context.sport || 'unknown', context.teams || '?', 'divergence_cap', {
+        divPp: +divPp.toFixed(1),
+        effCap: +effCap.toFixed(1),
+        tier,
+        modelP: +(modelP * 100).toFixed(1),
+        impliedP: +(impliedP * 100).toFixed(1),
+        signalCount,
+        eloMinGames,
+      });
+    } catch (_) {}
+    return {
+      ok: false, divPp, effCap, tier, override: false,
+      reason: `Divergência modelP=${(modelP*100).toFixed(1)}% vs ${bookmaker} dejuiced=${(impliedP*100).toFixed(1)}% Δ${divPp.toFixed(1)}pp > ${effCap.toFixed(1)}pp cap (tier${tier}, sinais ${signalCount}/8, eloMin ${eloMinGames}j)`,
+    };
   }
-  return { ok: true, divPp, reason: null };
+  if (override && divPp > effCap) {
+    // Override efetivo mas log informativo
+    log('INFO', 'DIV-OVERRIDE', `${context.teams || '?'}: Δ${divPp.toFixed(1)}pp bypassing ${effCap}pp cap (sinais ${signalCount}/8, eloMin ${eloMinGames}j) — strong signal override`);
+  }
+  return { ok: true, divPp, effCap, tier, override, reason: null };
 }
 
 /**
@@ -3955,7 +4022,15 @@ async function autoAnalyzeMatch(token, match) {
       if (tipResult) {
         const _impPV = _pickIsT1V ? mlResult.impliedP1 : mlResult.impliedP2;
         const _maxDivLol = parseFloat(process.env.LOL_MAX_DIVERGENCE_PP ?? '15');
-        const _div = _sharpDivergenceGate({ oddsObj: oddsToUse, modelP: _modelPV, impliedP: _impPV, maxPp: _maxDivLol });
+        const _div = _sharpDivergenceGate({
+          oddsObj: oddsToUse, modelP: _modelPV, impliedP: _impPV, maxPp: _maxDivLol,
+          context: {
+            sport: 'lol', league: match.league || '',
+            signalCount: mlResult.factorCount || 0,
+            eloMinGames: Math.min(lolModel?.eloGames1 || 0, lolModel?.eloGames2 || 0) || 0,
+            teams: `${match.team1} vs ${match.team2}`,
+          },
+        });
         if (!_div.ok) {
           log('WARN', 'AUTO', `Tip rejeitada (${match.team1} vs ${match.team2}): ${_div.reason}`);
           tipResult = null;
@@ -4887,9 +4962,19 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
       const path = require('path');
       let txt = `🩺 *PIPELINE HEALTH* (${new Date().toLocaleString('pt-BR').slice(0, 16)})\n\n`;
 
-      // 1. Sports enabled
+      // 1. Sports enabled + heartbeat status
       const enabledSports = Object.entries(SPORTS).filter(([_, v]) => v.enabled);
-      txt += `*Sports ativos (${enabledSports.length}):* ${enabledSports.map(([k]) => k).join(', ')}\n\n`;
+      const heartbeats = getPollHeartbeats();
+      const staleThresh = { lol: 10, dota: 15, cs: 15, valorant: 10, tennis: 15, mma: 30, football: 30, snooker: 60, darts: 60, tt: 30 };
+      const pollStatus = enabledSports.map(([k]) => {
+        const alias = k === 'esports' ? 'lol' : k === 'tabletennis' ? 'tt' : k;
+        const hb = heartbeats[alias];
+        if (!hb) return `${k}⚠️`;
+        const ageMin = Math.floor((nowMs - hb.lastTs) / 60000);
+        const maxMin = staleThresh[alias] || 30;
+        return ageMin > maxMin ? `${k}⚠️(${ageMin}m)` : k;
+      });
+      txt += `*Sports ativos (${enabledSports.length}):* ${pollStatus.join(', ')}\n\n`;
 
       // 2. Last tip + rejections per sport (última hora)
       const nowMs = Date.now();
@@ -5102,6 +5187,22 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
         const g = mapSport[r.sport] || r.sport;
         rejBySport[g] = (rejBySport[g] || 0) + 1;
       }
+      // Elo coverage: times com ≥5 games nos últimos 180d (por sport)
+      const eloCoverage = {};
+      for (const g of games) {
+        const gameKey = g === 'cs2' ? 'cs2' : g === 'dota2' ? 'dota2' : g;
+        try {
+          const cov = db.prepare(`
+            SELECT COUNT(DISTINCT team) AS teams
+            FROM (
+              SELECT team1 AS team FROM match_results WHERE game=? AND resolved_at >= datetime('now','-180 days')
+              UNION
+              SELECT team2 AS team FROM match_results WHERE game=? AND resolved_at >= datetime('now','-180 days')
+            )
+          `).get(gameKey, gameKey);
+          eloCoverage[g] = cov?.teams || 0;
+        } catch (_) { eloCoverage[g] = 0; }
+      }
       let txt = `🧠 *MODELS STATUS*\n\n`;
       for (const g of games) {
         const weightsPath = path.join(__dirname, 'lib', `${g}-weights.json`);
@@ -5127,6 +5228,8 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
           txt += `  isotonic: ${hasIso ? '✓ aplicada' : '✗ ausente'}\n`;
           const rejCount = rejBySport[g] || 0;
           if (rejCount > 0) txt += `  rejections 1h: ${rejCount}${rejCount >= 20 ? ' ⚠️' : ''}\n`;
+          const cov = eloCoverage[g] || 0;
+          txt += `  DB coverage: ${cov} teams (180d)\n`;
         }
         txt += `\n`;
       }
@@ -7265,7 +7368,15 @@ Máximo 200 palavras.`;
         if (tipMatch) {
           const _impPV = _pickIsT1V ? mlResult.impliedP1 : mlResult.impliedP2;
           const _maxDivDota = parseFloat(process.env.DOTA_MAX_DIVERGENCE_PP ?? '15');
-          const _div = _sharpDivergenceGate({ oddsObj: o, modelP: _modelPV, impliedP: _impPV, maxPp: _maxDivDota });
+          const _div = _sharpDivergenceGate({
+            oddsObj: o, modelP: _modelPV, impliedP: _impPV, maxPp: _maxDivDota,
+            context: {
+              sport: 'dota2', league: match.league || '',
+              signalCount: mlResult.factorCount || 0,
+              eloMinGames: Math.min(elo?.eloMatches1 || 0, elo?.eloMatches2 || 0) || 0,
+              teams: `${match.team1} vs ${match.team2}`,
+            },
+          });
           if (!_div.ok) {
             log('WARN', 'AUTO-DOTA', `Tip rejeitada (${match.team1} vs ${match.team2}): ${_div.reason}`);
             tipMatch = null;
@@ -10075,7 +10186,15 @@ async function pollCs(runOnce = false) {
         const evPct = (pickP * pickOdd - 1) * 100;
 
         // Gate A: divergência modelo vs Pinnacle/Betfair (sharp anchor). >12pp = quase sempre erro do modelo.
-        const _divCs = _sharpDivergenceGate({ oddsObj: match.odds, modelP: pickP, impliedP: pickImpliedP, maxPp: CS_MAX_DIVERGENCE_PP });
+        const _divCs = _sharpDivergenceGate({
+          oddsObj: match.odds, modelP: pickP, impliedP: pickImpliedP, maxPp: CS_MAX_DIVERGENCE_PP,
+          context: {
+            sport: 'cs', league: match.league || '',
+            signalCount: factorCount || 0,
+            eloMinGames: Math.min(elo?.eloMatches1 || 0, elo?.eloMatches2 || 0) || 0,
+            teams: `${match.team1} vs ${match.team2}`,
+          },
+        });
         const divergencePp = _divCs.divPp ?? 0;
         const isPinnacleOdds = /pinnacle/i.test(String(match.odds?.bookmaker || ''));
         if (!_divCs.ok) {
@@ -11346,6 +11465,33 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   // Pipeline stuck detection: 1x/hora, alerta se sport tem rejeições sem tips
   setInterval(() => { try { runPipelineStuckCheck(); } catch (_) {} }, 60 * 60 * 1000);
   setTimeout(() => { try { runPipelineStuckCheck(); } catch (_) {} }, 15 * 60 * 1000); // 15min pós-boot
+
+  // Poll heartbeat health: checa se algum sport pol parou de executar.
+  // Cron 15min; threshold por sport (LoL 10min, MMA 30min, etc).
+  const _lastPollStall = {};
+  const runPollStallCheck = () => {
+    try {
+      const hbs = getPollHeartbeats();
+      const staleThresh = { lol: 10, dota: 15, cs: 15, valorant: 10, tennis: 15, mma: 30, football: 30, snooker: 60, darts: 60, tt: 30 };
+      const now = Date.now();
+      for (const [sport, cfg] of Object.entries(SPORTS)) {
+        if (!cfg.enabled) continue;
+        const alias = sport === 'esports' ? 'lol' : sport === 'tabletennis' ? 'tt' : sport;
+        const hb = hbs[alias];
+        const maxMin = staleThresh[alias] || 30;
+        if (!hb) { log('WARN', 'POLL-STALL', `${sport}: sem heartbeat (nunca rodou?)`); continue; }
+        const ageMin = Math.floor((now - hb.lastTs) / 60000);
+        if (ageMin > maxMin * 2) {
+          // Cooldown 2h
+          if ((now - (_lastPollStall[sport] || 0)) < 2 * 60 * 60 * 1000) continue;
+          _lastPollStall[sport] = now;
+          log('WARN', 'POLL-STALL', `${sport}: poll ${ageMin}min sem rodar (threshold ${maxMin}min) — verificar logs/errors.`);
+        }
+      }
+    } catch (_) {}
+  };
+  setInterval(runPollStallCheck, 15 * 60 * 1000);
+  setTimeout(runPollStallCheck, 25 * 60 * 1000); // 25min pós-boot (dá tempo de 2 ciclos normais)
 
   // Market tips shadow settlement: cron 30min, cruza market_tips_shadow com match_results
   const runShadowSettle = () => {
