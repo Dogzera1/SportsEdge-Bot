@@ -402,6 +402,41 @@ const migrations = [
       `);
     },
   },
+  {
+    // Shadow log pra market tips (handicap, total, ace etc). Acumula detecções
+    // sem DM — permite backtest retrospectivo de ROI/CLV por market_type.
+    id: '024_market_tips_shadow',
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS market_tips_shadow (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          sport TEXT NOT NULL,
+          match_key TEXT NOT NULL,
+          team1 TEXT,
+          team2 TEXT,
+          league TEXT,
+          best_of INTEGER,
+          market TEXT NOT NULL,
+          line REAL,
+          side TEXT,
+          label TEXT,
+          p_model REAL,
+          p_implied REAL,
+          odd REAL,
+          ev_pct REAL,
+          stake_units REAL,
+          created_at TEXT DEFAULT (datetime('now')),
+          settled_at TEXT,
+          result TEXT,
+          profit_units REAL,
+          meta_json TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_mt_shadow_sport_created ON market_tips_shadow(sport, created_at);
+        CREATE INDEX IF NOT EXISTS idx_mt_shadow_match ON market_tips_shadow(match_key, market, line, side);
+        CREATE INDEX IF NOT EXISTS idx_mt_shadow_unsettled ON market_tips_shadow(result, created_at) WHERE result IS NULL;
+      `);
+    },
+  },
 ];
 
 function applyMigrations(db) {

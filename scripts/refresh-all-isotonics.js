@@ -107,6 +107,40 @@ const AFTER = {
 };
 results.after = AFTER;
 
+// ── Auto-rollback on regression ──
+// Compara Brier ANTES vs DEPOIS. Se new > old × 1.05 (5%+ worse) → restaura backup.
+// Só aplica a weights files (isotonic metrics não são comparáveis entre refits).
+// ENV: AUTO_ROLLBACK_ON_REGRESSION=true ativa. Default OFF pra dev; ON em prod (.env).
+const autoRollback = process.env.AUTO_ROLLBACK_ON_REGRESSION === 'true';
+const REGRESSION_THRESHOLD = parseFloat(process.env.REGRESSION_THRESHOLD_PCT || '5') / 100;
+results.rollbacks = [];
+
+if (autoRollback && doRetrain) {
+  const b = BEFORE.lol_weights, a = AFTER.lol_weights;
+  if (b?.brier && a?.brier && a.brier > b.brier * (1 + REGRESSION_THRESHOLD)) {
+    const pctWorse = ((a.brier - b.brier) / b.brier * 100).toFixed(1);
+    if (!asJson) console.log(`\n⚠️ Regression detected: LoL Brier ${b.brier.toFixed(4)} → ${a.brier.toFixed(4)} (+${pctWorse}%)`);
+    try {
+      const { restoreLatest } = require('../lib/model-backup');
+      // restoreLatest restaura o MAIS RECENTE backup. Mas agora o mais recente é o que acabamos de salvar.
+      // Queremos o ANTES: o segundo mais recente.
+      const { listBackups } = require('../lib/model-backup');
+      const weightsPath = path.join(ROOT, 'lib', 'lol-weights.json');
+      const backups = listBackups(weightsPath);
+      // Backups sorted by mtime desc. O mais recente é o backup criado AGORA (train-esports-model)
+      // antes do novo write. Pra rollback queremos ele mesmo (pre-refresh state).
+      if (backups.length) {
+        const r = restoreLatest(weightsPath, { name: backups[0].name });
+        results.rollbacks.push({ file: 'lib/lol-weights.json', restoredFrom: backups[0].name, reasonPct: +pctWorse });
+        if (!asJson) console.log(`  ↺ Rolled back from ${backups[0].name}`);
+      }
+    } catch (e) {
+      if (!asJson) console.log(`  ✗ Rollback falhou: ${e.message}`);
+      results.rollbacks.push({ file: 'lib/lol-weights.json', error: e.message });
+    }
+  }
+}
+
 // Diff summary
 const changes = [];
 for (const k of Object.keys(AFTER)) {
@@ -129,6 +163,13 @@ if (asJson) {
   console.log('\n── Changes ──');
   if (changes.length) for (const c of changes) console.log('  ' + c);
   else console.log('  (none — nada mudou)');
+  if (results.rollbacks?.length) {
+    console.log('\n── Rollbacks ──');
+    for (const rb of results.rollbacks) {
+      if (rb.error) console.log(`  ✗ ${rb.file}: ${rb.error}`);
+      else console.log(`  ↺ ${rb.file} restored from ${rb.restoredFrom} (new Brier was +${rb.reasonPct}%)`);
+    }
+  }
   const allOk = results.jobs.every(j => j.ok);
   console.log(`\n${allOk ? '✓ All OK' : '✗ Some jobs failed — check logs'}`);
 }

@@ -2567,15 +2567,24 @@ async function runIsotonicRefreshAsync(token) {
       return;
     }
     const allOk = r.jobs.every(j => j.ok);
+    const rollbackCount = (r.rollbacks || []).filter(rb => !rb.error).length;
     log(allOk ? 'INFO' : 'WARN', 'ISOTONIC-REFRESH',
-      `Concluído em ${Math.round(r.jobs.reduce((a,j) => a + j.durSec, 0))}s | ${r.jobs.filter(j=>j.ok).length}/${r.jobs.length} OK | changes: ${r.changes?.length || 0}`);
+      `Concluído em ${Math.round(r.jobs.reduce((a,j) => a + j.durSec, 0))}s | ${r.jobs.filter(j=>j.ok).length}/${r.jobs.length} OK | changes: ${r.changes?.length || 0}${rollbackCount ? ` | rollbacks: ${rollbackCount}` : ''}`);
     if (!token) return;
-    const emoji = allOk ? '✅' : '⚠️';
+    const emoji = rollbackCount > 0 ? '↺' : (allOk ? '✅' : '⚠️');
     const jobSummary = r.jobs.map(j => `${j.ok ? '✓' : '✗'} ${j.label}`).join('\n');
     const changesSummary = (r.changes || []).slice(0, 10).map(c => `• ${c}`).join('\n') || '_nada mudou_';
+    let rollbackSection = '';
+    if (r.rollbacks?.length) {
+      rollbackSection = '\n\n*Rollbacks (regressão detectada):*\n' +
+        r.rollbacks.map(rb => rb.error
+          ? `✗ ${rb.file}: ${rb.error}`
+          : `↺ ${rb.file} revertido (Brier piorou ${rb.reasonPct}%)`
+        ).join('\n');
+    }
     const msg = `${emoji} *Refresh automático de modelos concluído*\n\n` +
       `Jobs:\n${jobSummary}\n\n` +
-      `Changes:\n${changesSummary}`;
+      `Changes:\n${changesSummary}${rollbackSection}`;
     for (const adminId of ADMIN_IDS) sendDM(token, adminId, msg).catch(() => {});
   });
 }
@@ -3441,6 +3450,11 @@ async function autoAnalyzeMatch(token, match) {
               if (found.length) {
                 log('INFO', 'LOL-MARKETS',
                   `${match.team1} vs ${match.team2} [Bo${lolModel.bestOf}]: ${found.length} mercado(s) com EV ≥${minEv}% (pMap=${(lolModel.mapP1*100).toFixed(1)}%)`);
+                // Shadow log — acumula tips detectadas pra backtest retrospectivo.
+                try {
+                  const { logShadowTip } = require('./lib/market-tips-shadow');
+                  for (const t of found) logShadowTip(db, { sport: 'lol', match, bestOf: lolModel.bestOf || 3, tip: t });
+                } catch (_) {}
                 for (const t of found.slice(0, 5)) {
                   log('INFO', 'LOL-MARKETS',
                     `  • ${t.label} @ ${t.odd.toFixed(2)} | pModel=${(t.pModel*100).toFixed(1)}% pImpl=${t.pImplied ? (t.pImplied*100).toFixed(1)+'%' : '?'} EV=${t.ev.toFixed(1)}%`);
@@ -6291,9 +6305,40 @@ async function _pollDotaInner(runOnce = false) {
             if (found.length) {
               log('INFO', 'DOTA-MARKETS',
                 `${match.team1} vs ${match.team2} [Bo${dotaBo}]: ${found.length} mercado(s) EV ≥${minEv}% (pMap=${(pMapDota*100).toFixed(1)}%)`);
+              try {
+                const { logShadowTip } = require('./lib/market-tips-shadow');
+                for (const t of found) logShadowTip(db, { sport: 'dota2', match, bestOf: dotaBo, tip: t });
+              } catch (_) {}
               for (const t of found.slice(0, 5)) {
                 log('INFO', 'DOTA-MARKETS',
                   `  • ${t.label} @ ${t.odd.toFixed(2)} | pModel=${(t.pModel*100).toFixed(1)}% pImpl=${t.pImplied ? (t.pImplied*100).toFixed(1)+'%' : '?'} EV=${t.ev.toFixed(1)}%`);
+              }
+              if (process.env.DOTA_MARKET_TIPS_ENABLED === 'true' && ADMIN_IDS.size) {
+                try {
+                  const mtp = require('./lib/market-tip-processor');
+                  const mlDirection = mlResult.modelP1 > 0.5 ? 'team1' : 'team2';
+                  const selected = mtp.selectBestMarketTip(found, {
+                    minEv: parseFloat(process.env.DOTA_MARKET_TIP_MIN_EV ?? '8'),
+                    minPmodel: parseFloat(process.env.DOTA_MARKET_TIP_MIN_PMODEL ?? '0.55'),
+                    mlDirection, mlPick: match.team1,
+                  });
+                  if (selected?.tip) {
+                    const t = selected.tip;
+                    const dedupKey = `dota2|${match.team1}|${match.team2}|${t.market}|${t.line}|${t.side}`;
+                    if (Date.now() - (marketTipSent.get(dedupKey) || 0) > 24 * 60 * 60 * 1000) {
+                      marketTipSent.set(dedupKey, Date.now());
+                      const stake = mtp.kellyStakeForMarket(t.pModel, t.odd, 100, 0.10);
+                      if (stake > 0) {
+                        const dm = mtp.buildMarketTipDM({ match, tip: t, stake, league: match.league, sport: 'dota2' });
+                        const tokenForMT = Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
+                        if (tokenForMT) {
+                          for (const adminId of ADMIN_IDS) sendDM(tokenForMT, adminId, dm).catch(() => {});
+                          log('INFO', 'DOTA-MARKET-TIP', `Admin DM: ${t.label} @ ${t.odd} EV ${t.ev}% stake ${stake}u`);
+                        }
+                      }
+                    }
+                  }
+                } catch (mte) { log('DEBUG', 'DOTA-MARKET-TIP', `err: ${mte.message}`); }
               }
             }
           }
@@ -7605,9 +7650,41 @@ async function pollTennis(runOnce = false) {
                 if (found.length) {
                   log('INFO', 'TENNIS-MARKETS',
                     `${match.team1} vs ${match.team2}: ${found.length} mercado(s) EV ≥${minEv}%`);
+                  const tnBestOf = /grand slam|\[g\]|wimbledon|us open|roland|australian open/i.test(match.league || '') ? 5 : 3;
+                  try {
+                    const { logShadowTip } = require('./lib/market-tips-shadow');
+                    for (const t of found) logShadowTip(db, { sport: 'tennis', match, bestOf: tnBestOf, tip: t });
+                  } catch (_) {}
                   for (const t of found.slice(0, 5)) {
                     log('INFO', 'TENNIS-MARKETS',
                       `  • ${t.label} @ ${t.odd.toFixed(2)} | pModel=${(t.pModel*100).toFixed(1)}% pImpl=${t.pImplied ? (t.pImplied*100).toFixed(1)+'%' : '?'} EV=${t.ev.toFixed(1)}%`);
+                  }
+                  if (process.env.TENNIS_MARKET_TIPS_ENABLED === 'true' && ADMIN_IDS.size) {
+                    try {
+                      const mtp = require('./lib/market-tip-processor');
+                      const mlDirection = tennisModelResult.modelP1 > 0.5 ? 'team1' : 'team2';
+                      const selected = mtp.selectBestMarketTip(found, {
+                        minEv: parseFloat(process.env.TENNIS_MARKET_TIP_MIN_EV ?? '8'),
+                        minPmodel: parseFloat(process.env.TENNIS_MARKET_TIP_MIN_PMODEL ?? '0.55'),
+                        mlDirection, mlPick: match.team1,
+                      });
+                      if (selected?.tip) {
+                        const t = selected.tip;
+                        const dedupKey = `tennis|${match.team1}|${match.team2}|${t.market}|${t.line}|${t.side}`;
+                        if (Date.now() - (marketTipSent.get(dedupKey) || 0) > 24 * 60 * 60 * 1000) {
+                          marketTipSent.set(dedupKey, Date.now());
+                          const stake = mtp.kellyStakeForMarket(t.pModel, t.odd, 100, 0.10);
+                          if (stake > 0) {
+                            const dm = mtp.buildMarketTipDM({ match, tip: t, stake, league: match.league, sport: 'tennis' });
+                            const tnToken = SPORTS['tennis']?.token || Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
+                            if (tnToken) {
+                              for (const adminId of ADMIN_IDS) sendDM(tnToken, adminId, dm).catch(() => {});
+                              log('INFO', 'TENNIS-MARKET-TIP', `Admin DM: ${t.label} @ ${t.odd} EV ${t.ev}% stake ${stake}u`);
+                            }
+                          }
+                        }
+                      }
+                    } catch (mte) { log('DEBUG', 'TENNIS-MARKET-TIP', `err: ${mte.message}`); }
                   }
                 }
               }
@@ -9000,9 +9077,40 @@ async function pollCs(runOnce = false) {
               if (found.length) {
                 log('INFO', 'CS-MARKETS',
                   `${match.team1} vs ${match.team2} [Bo${csBestOf}]: ${found.length} mercado(s) EV ≥${minEv}% (pMap=${(pMapCs*100).toFixed(1)}%)`);
+                try {
+                  const { logShadowTip } = require('./lib/market-tips-shadow');
+                  for (const t of found) logShadowTip(db, { sport: 'cs2', match, bestOf: csBestOf, tip: t });
+                } catch (_) {}
                 for (const t of found.slice(0, 5)) {
                   log('INFO', 'CS-MARKETS',
                     `  • ${t.label} @ ${t.odd.toFixed(2)} | pModel=${(t.pModel*100).toFixed(1)}% pImpl=${t.pImplied ? (t.pImplied*100).toFixed(1)+'%' : '?'} EV=${t.ev.toFixed(1)}%`);
+                }
+                if (process.env.CS_MARKET_TIPS_ENABLED === 'true' && ADMIN_IDS.size) {
+                  try {
+                    const mtp = require('./lib/market-tip-processor');
+                    const mlDirection = modelP1 > 0.5 ? 'team1' : 'team2';
+                    const selected = mtp.selectBestMarketTip(found, {
+                      minEv: parseFloat(process.env.CS_MARKET_TIP_MIN_EV ?? '8'),
+                      minPmodel: parseFloat(process.env.CS_MARKET_TIP_MIN_PMODEL ?? '0.55'),
+                      mlDirection, mlPick: match.team1,
+                    });
+                    if (selected?.tip) {
+                      const t = selected.tip;
+                      const dedupKey = `cs2|${match.team1}|${match.team2}|${t.market}|${t.line}|${t.side}`;
+                      if (Date.now() - (marketTipSent.get(dedupKey) || 0) > 24 * 60 * 60 * 1000) {
+                        marketTipSent.set(dedupKey, Date.now());
+                        const stake = mtp.kellyStakeForMarket(t.pModel, t.odd, 100, 0.10);
+                        if (stake > 0) {
+                          const dm = mtp.buildMarketTipDM({ match, tip: t, stake, league: match.league, sport: 'cs2' });
+                          const tokenForMT = Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
+                          if (tokenForMT) {
+                            for (const adminId of ADMIN_IDS) sendDM(tokenForMT, adminId, dm).catch(() => {});
+                            log('INFO', 'CS-MARKET-TIP', `Admin DM: ${t.label} @ ${t.odd} EV ${t.ev}% stake ${stake}u`);
+                          }
+                        }
+                      }
+                    }
+                  } catch (mte) { log('DEBUG', 'CS-MARKET-TIP', `err: ${mte.message}`); }
                 }
               }
             }
@@ -10215,6 +10323,21 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   // LoL Model Freshness: cron 24h, alerta admin se stale (patches/splits novos ou idade).
   setInterval(() => runLolFreshnessCycle().catch(e => log('ERROR', 'FRESHNESS', e.message)), 24 * 60 * 60 * 1000);
   setTimeout(() => runLolFreshnessCycle().catch(() => {}), 30 * 60 * 1000); // 30min pós-boot
+
+  // Market tips shadow settlement: cron 30min, cruza market_tips_shadow com match_results
+  setInterval(() => {
+    try {
+      const { settleShadowTips } = require('./lib/market-tips-shadow');
+      const r = settleShadowTips(db);
+      if (r.settled > 0) log('INFO', 'MT-SHADOW', `Settled ${r.settled} market tips (skipped ${r.skipped})`);
+    } catch (e) { log('DEBUG', 'MT-SHADOW', `settle err: ${e.message}`); }
+  }, 30 * 60 * 1000);
+
+  // Market tip readiness alert: cron 24h, checa shadow stats e avisa admin
+  // quando (sport, market) atinge N≥30 settled E ROI positivo.
+  // Anti-spam: só alerta 1x por (sport, market) via _marketTipReady Set.
+  setInterval(() => runMarketTipReadinessCheck().catch(e => log('ERROR', 'MT-READY', e.message)), 24 * 60 * 60 * 1000);
+  setTimeout(() => runMarketTipReadinessCheck().catch(() => {}), 60 * 60 * 1000); // 1h pós-boot
 
   // Vetor 7 — Dota snapshot collector: cron 60s captura Steam RT + Pinnacle pareados.
   // Default ON. Desativar via DOTA_SNAPSHOT_ENABLED=false.
