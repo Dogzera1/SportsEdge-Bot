@@ -184,7 +184,13 @@
       "Bash(node scripts/sync-pandascore-history.js --game dota2 --from 2022-01-01 --max 15000 --delay 1000)",
       "Bash(echo \"dota bg: $!\")",
       "Bash(node scripts/sync-pandascore-history.js --game valorant --from 2022-01-01 --max 15000 --delay 1000)",
-      "Bash(echo \"val bg: $!\")"
+      "Bash(echo \"val bg: $!\")",
+      "Bash(node scripts/sync-opendota-matches.js --max 20000 --delay 1100)",
+      "Bash(echo \"pid: $!\")",
+      "Bash(node scripts/sync-opendota-matches.js --max 30000 --delay 1100)",
+      "Bash(echo \"OD pid: $!\")",
+      "Bash(node scripts/sync-hltv-results.js --max 500 --delay 2500)",
+      "Bash(echo \"hltv pid: $!\")"
     ]
   }
 }
