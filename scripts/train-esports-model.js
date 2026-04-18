@@ -244,17 +244,38 @@ function trainGBDT(Xtr, ytr, Xva, yva, { nTrees = 120, lr = 0.05, depth = 4, min
   return { init, lr, trees: bestTrees.length ? bestTrees : trees };
 }
 
+const GBDT_TREES = parseInt(argVal('gbdt-trees', '120'), 10);
+const GBDT_DEPTH = parseInt(argVal('gbdt-depth', '4'), 10);
+const GBDT_LR = parseFloat(argVal('gbdt-lr', '0.05'));
+const GBDT_SUB = parseFloat(argVal('gbdt-subsample', '0.7'));
+
 let gbdtM = null;
 if (USE_GBDT) {
-  console.log(`\n[gbdt] training...`);
-  gbdtM = trainGBDT(trS, tr.y, vaS, va.y, { nTrees: 120, lr: 0.05, depth: 4, minLeaf: 20, sub: 0.7, featFrac: 0.9, esRounds: 20 });
+  console.log(`\n[gbdt] training (trees=${GBDT_TREES} depth=${GBDT_DEPTH} lr=${GBDT_LR})...`);
+  gbdtM = trainGBDT(trS, tr.y, vaS, va.y, { nTrees: GBDT_TREES, lr: GBDT_LR, depth: GBDT_DEPTH, minLeaf: 20, sub: GBDT_SUB, featFrac: 0.9, esRounds: 20 });
 }
 function predGBDT(M, X) { return X.map(xi => { let F = M.init; for (const t of M.trees) F += M.lr * predTree(t, xi); return sigmoid(F); }); }
+
+// Grid search do peso do ensemble no val set (só rodado se GBDT está ativo)
+let ensWeights = { logistic: 1, gbdt: 0 };
+if (gbdtM) {
+  const pLogVa = predLog(logM, vaS);
+  const pGbVa = predGBDT(gbdtM, vaS);
+  let bestB = Infinity, bestW = 0.5;
+  for (const wG of [0, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 1.0]) {
+    const pE = pLogVa.map((p, i) => (1 - wG) * p + wG * pGbVa[i]);
+    const b = meanArr(pE.map((p, i) => (p - va.y[i]) ** 2));
+    if (b < bestB) { bestB = b; bestW = wG; }
+  }
+  ensWeights = { logistic: 1 - bestW, gbdt: bestW };
+  console.log(`[ensemble] val grid: best gbdt_weight=${bestW} → val_brier=${bestB.toFixed(5)}`);
+}
+
 function predEns(XS) {
   const pL = predLog(logM, XS);
-  if (!gbdtM) return pL;
+  if (!gbdtM || ensWeights.gbdt === 0) return pL;
   const pG = predGBDT(gbdtM, XS);
-  return pL.map((p, i) => 0.5 * (p + pG[i]));
+  return pL.map((p, i) => ensWeights.logistic * p + ensWeights.gbdt * pG[i]);
 }
 
 // ── Calibração isotônica ──
@@ -348,7 +369,7 @@ const outObj = {
   standardize: { mean, std },
   logistic: { w: logM.w, b: logM.b, l2: bestL2 },
   gbdt: gbdtM ? { init: gbdtM.init, lr: gbdtM.lr, trees: gbdtM.trees } : null,
-  ensembleWeights: gbdtM ? { logistic: 0.5, gbdt: 0.5 } : { logistic: 1, gbdt: 0 },
+  ensembleWeights: gbdtM ? ensWeights : { logistic: 1, gbdt: 0 },
   calibration: { method: 'isotonic', blocks: isoBlocks, active: useCalibration },
   metrics: {
     baseline_elo_test: metrics(pBase, te.y),
