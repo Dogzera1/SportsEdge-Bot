@@ -2789,6 +2789,92 @@ async function runMarketTipReadinessCheck() {
   log('INFO', 'MT-READY', `DM admin: ${ready.length} segments prontos pra ativar`);
 }
 
+// ── Weekly pipeline digest (1x/semana — 2ª feira 9h local) ──
+let _lastWeeklyDigestDay = null;
+async function runWeeklyPipelineDigest() {
+  if (process.env.WEEKLY_DIGEST_ENABLED === 'false') return;
+  if (!ADMIN_IDS.size) return;
+  const now = new Date();
+  if (now.getDay() !== 1 || now.getHours() !== 9) return; // 2ª feira 9h
+  const today = now.toISOString().slice(0, 10);
+  if (_lastWeeklyDigestDay === today) return;
+  _lastWeeklyDigestDay = today;
+
+  const token = Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
+  if (!token) return;
+
+  try {
+    // Tips last 7d per sport
+    const tipsBySport = db.prepare(`
+      SELECT sport, COUNT(*) AS total,
+        SUM(CASE WHEN result='win' THEN 1 ELSE 0 END) AS wins,
+        SUM(CASE WHEN result='loss' THEN 1 ELSE 0 END) AS losses,
+        SUM(CASE WHEN result IS NULL THEN 1 ELSE 0 END) AS pending,
+        ROUND(SUM(COALESCE(profit_reais, 0)), 2) AS profit,
+        ROUND(SUM(COALESCE(stake_reais, 0)), 2) AS staked
+      FROM tips
+      WHERE (archived IS NULL OR archived = 0)
+        AND sent_at >= datetime('now','-7 days')
+      GROUP BY sport ORDER BY total DESC
+    `).all();
+
+    // Banca delta
+    const banca = db.prepare(`SELECT SUM(current_banca - initial_banca) AS delta FROM bankroll`).get();
+
+    // Tasks executed (rejection + poll heartbeats últimos 7d seria ideal mas é in-memory)
+    let msg = `📅 *WEEKLY DIGEST — ${today}*\n\n`;
+    msg += `*💰 Banca total:* R$${(banca?.delta || 0).toFixed(2)} delta desde início\n\n`;
+    msg += `*📊 Tips últimos 7d:*\n`;
+    if (!tipsBySport.length) msg += `  _(sem tips na semana)_\n`;
+    else {
+      let totalProfit = 0, totalTips = 0, totalWins = 0, totalDecided = 0;
+      for (const s of tipsBySport) {
+        const decided = s.wins + s.losses;
+        const roi = s.staked > 0 ? (s.profit / s.staked * 100).toFixed(1) : '?';
+        const wr = decided > 0 ? (s.wins / decided * 100).toFixed(0) : '?';
+        msg += `  · *${s.sport}*: ${s.total} tips (${s.wins}W/${s.losses}L/${s.pending}pending) ROI=${roi}% WR=${wr}% profit=${s.profit >= 0 ? '+' : ''}R$${s.profit.toFixed(2)}\n`;
+        totalProfit += s.profit; totalTips += s.total; totalWins += s.wins; totalDecided += decided;
+      }
+      const globalROI = tipsBySport.reduce((a, s) => a + s.staked, 0);
+      msg += `  *Total*: ${totalTips} tips | ROI=${globalROI > 0 ? (totalProfit/globalROI*100).toFixed(1) : '?'}% | profit=${totalProfit >= 0 ? '+' : ''}R$${totalProfit.toFixed(2)}\n\n`;
+    }
+
+    // Shadow tips
+    try {
+      const { getShadowStats } = require('./lib/market-tips-shadow');
+      const stats = getShadowStats(db, { days: 7 });
+      if (stats.length) {
+        msg += `*📊 Shadow tips 7d (${stats.length} segments):*\n`;
+        for (const s of stats.slice(0, 5)) {
+          const hit = s.hitRate != null ? `${s.hitRate.toFixed(0)}%` : '?';
+          const roi = s.roiPct != null ? `${s.roiPct >= 0 ? '+' : ''}${s.roiPct.toFixed(0)}%` : '?';
+          const clv = s.avgClv != null ? `${s.avgClv >= 0 ? '+' : ''}${s.avgClv.toFixed(1)}%` : '?';
+          msg += `  · ${s.sport}/${s.market}: n=${s.n} Hit=${hit} ROI=${roi} CLV=${clv}\n`;
+        }
+        msg += `\n`;
+      }
+    } catch (_) {}
+
+    // Rejections summary 7d (só in-memory — pode ser parcial se bot reiniciou)
+    const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
+    const recentRej = _rejections.filter(r => r.ts >= cutoff);
+    if (recentRej.length > 0) {
+      const byReason = {};
+      for (const r of recentRej) byReason[r.reason] = (byReason[r.reason] || 0) + 1;
+      const top = Object.entries(byReason).sort((a, b) => b[1] - a[1]).slice(0, 3);
+      msg += `*📋 Top rejection reasons (buffer in-memory):*\n`;
+      for (const [r, n] of top) msg += `  · ${r}: ${n}\n`;
+    }
+
+    msg += `\n_Comandos:_ \`/pipeline-health\` · \`/alerts\` · \`/market-tips\``;
+
+    for (const adminId of ADMIN_IDS) await sendDM(token, adminId, msg).catch(() => {});
+    log('INFO', 'WEEKLY-DIGEST', `DM semanal: ${tipsBySport.length} sports`);
+  } catch (e) {
+    log('DEBUG', 'WEEKLY-DIGEST', `err: ${e.message}`);
+  }
+}
+
 // ── Daily market-tips digest (1x/dia) ──
 let _lastMtDigestDay = null;
 async function runMarketTipsDigest() {
@@ -4962,6 +5048,94 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
       await send(token, chatId, txt);
     } catch (e) { await send(token, chatId, `❌ ${e.message}`); }
 
+  } else if (cmd === '/alerts') {
+    if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
+    try {
+      const fs = require('fs');
+      const path = require('path');
+      const nowMs = Date.now();
+      const alerts = [];
+
+      // 1. Models stale (>30d)
+      for (const g of ['lol', 'cs2', 'dota2', 'valorant', 'tennis']) {
+        const wp = path.join(__dirname, 'lib', `${g}-weights.json`);
+        if (!fs.existsSync(wp)) continue;
+        const ageDays = Math.floor((nowMs - fs.statSync(wp).mtimeMs) / (24 * 3600 * 1000));
+        if (ageDays > 30) alerts.push(`🟡 Modelo ${g} stale (${ageDays}d — retrain recomendado)`);
+      }
+
+      // 2. Pipeline stuck (sports com >20 rejections + 0 tips última hora)
+      const cutoff = nowMs - 60 * 60 * 1000;
+      const rejBySport = {};
+      for (const r of _rejections) {
+        if (r.ts < cutoff) break;
+        rejBySport[r.sport] = (rejBySport[r.sport] || 0) + 1;
+      }
+      for (const [sport, count] of Object.entries(rejBySport)) {
+        if (count < 20) continue;
+        try {
+          const sportKey = sport === 'dota2' ? 'esports' : sport === 'valorant' ? 'valorant' : sport === 'cs' ? 'cs' : sport;
+          const tipsRow = db.prepare(`
+            SELECT COUNT(*) AS n FROM tips
+            WHERE sport = ? AND (archived IS NULL OR archived = 0) AND sent_at >= datetime('now','-1 hour')
+          `).get(sportKey);
+          if (tipsRow.n === 0) alerts.push(`🔴 Pipeline stuck: ${sport} ${count} rejections / 0 tips (1h)`);
+        } catch (_) {}
+      }
+
+      // 3. Poll stall (heartbeat > 2× threshold)
+      try {
+        const hbs = getPollHeartbeats();
+        const staleThresh = { lol: 10, dota: 15, cs: 15, valorant: 10, tennis: 15, mma: 30, football: 30 };
+        for (const [sport, cfg] of Object.entries(SPORTS)) {
+          if (!cfg.enabled) continue;
+          const alias = sport === 'esports' ? 'lol' : sport === 'tabletennis' ? 'tt' : sport;
+          const hb = hbs[alias];
+          const maxMin = staleThresh[alias] || 30;
+          if (!hb) continue;
+          const ageMin = Math.floor((nowMs - hb.lastTs) / 60000);
+          if (ageMin > maxMin * 2) alerts.push(`🟠 Poll stall: ${sport} sem heartbeat há ${ageMin}min (threshold ${maxMin}min)`);
+        }
+      } catch (_) {}
+
+      // 4. Shadow tips market pending settlement antigos (>48h)
+      try {
+        const oldShadow = db.prepare(`
+          SELECT COUNT(*) AS n FROM market_tips_shadow
+          WHERE result IS NULL AND created_at <= datetime('now','-48 hours')
+        `).get();
+        if (oldShadow?.n > 10) alerts.push(`🟡 ${oldShadow.n} market shadow tips pending settle >48h — verificar match_results sync`);
+      } catch (_) {}
+
+      // 5. Shadow CLV negativo persistente (leak risk)
+      try {
+        const { getShadowStats } = require('./lib/market-tips-shadow');
+        const stats = getShadowStats(db, { days: 30 });
+        for (const s of stats) {
+          if (s.clvN >= 15 && s.avgClv != null && s.avgClv < -2) {
+            alerts.push(`🔴 Leak: ${s.sport}/${s.market} avgCLV=${s.avgClv.toFixed(1)}% (n=${s.clvN}) — edge ruim persistente`);
+          }
+        }
+      } catch (_) {}
+
+      // 6. Dota hero stats stale
+      try {
+        const dhs = db.prepare(`SELECT MAX(updated_at) AS last FROM dota_hero_stats`).get();
+        if (dhs?.last) {
+          const ageH = Math.floor((nowMs - new Date(dhs.last + 'Z').getTime()) / 3600000);
+          if (ageH > 24 * 14) alerts.push(`🟡 Dota hero stats stale (${Math.floor(ageH/24)}d) — meta outdated`);
+        }
+      } catch (_) {}
+
+      // Response
+      if (!alerts.length) {
+        await send(token, chatId, `✅ *ALERTS* — sistema healthy, nenhum alerta ativo.\n\n_Últimas checks: models, pipeline stuck, poll stall, shadow lag, CLV leaks, hero stats._`);
+      } else {
+        const txt = `🚨 *ALERTS ATIVOS (${alerts.length})*\n\n${alerts.join('\n\n')}\n\n_Use /pipeline-health pra detalhes._`;
+        await send(token, chatId, txt);
+      }
+    } catch (e) { await send(token, chatId, `❌ ${e.message}`); }
+
   } else if (cmd === '/pipeline-health' || cmd === '/pipeline') {
     if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
     try {
@@ -5252,6 +5426,22 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
         }
         txt += `\n`;
       }
+      // Feed freshness inline
+      try {
+        const dhs = db.prepare(`SELECT COUNT(*) AS n, MAX(updated_at) AS last FROM dota_hero_stats`).get();
+        if (dhs?.last) {
+          const ageH = Math.floor((nowMs - new Date(dhs.last + 'Z').getTime()) / 3600000);
+          const flag = ageH > 24 * 7 ? ' ⚠️' : '';
+          txt += `_Dota hero stats: ${dhs.n} heroes, atualizado há ${ageH}h${flag}_\n`;
+        }
+      } catch (_) {}
+      try {
+        const tms = db.prepare(`SELECT COUNT(*) AS n, MAX(date) AS last FROM tennis_match_stats`).get();
+        if (tms?.last) {
+          const ageD = Math.floor((nowMs - new Date(tms.last).getTime()) / (24 * 3600000));
+          txt += `_Tennis match stats: ${tms.n} rows, última partida ${(tms.last||'?').slice(0,10)} (${ageD}d)_\n`;
+        }
+      } catch (_) {}
       // Tennis trained model flag
       txt += `_Tennis prefere trained model se active (Brier 0.215 vs Elo 0.231)._\n`;
       txt += `_Retrain: scripts/train-esports-model.js --game X; auto-backup em lib/backups/._`;
@@ -5321,6 +5511,7 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
     await send(token, chatId,
       `📋 *COMANDOS ADMIN* (SportsEdge)\n\n` +
       `━━ 🩺 *Health & Monitoring* ━━\n` +
+      `\`/alerts\` — 🚨 alertas ativos (stale, stuck, leaks, poll stall)\n` +
       `\`/pipeline-health\` — unified: sports/tips/modelos/rejections\n` +
       `\`/models\` — Brier/Acc/AUC de 5 modelos + rejections 1h\n` +
       `\`/health\` — status geral bot + DB\n` +
@@ -6264,7 +6455,8 @@ async function poll(token, sport) {
                      text.startsWith('/models') || text.startsWith('/val-') ||
                      text.startsWith('/rejections') || text.startsWith('/sync-val-') ||
                      text.startsWith('/sync-history') || text.startsWith('/pipeline') ||
-                     text.startsWith('/tip ') || text.startsWith('/help') || text.startsWith('/start')) {
+                     text.startsWith('/tip ') || text.startsWith('/help') || text.startsWith('/start') ||
+                     text.startsWith('/alerts')) {
             // Passa `sport` da poll (qual bot recebeu) para evitar default 'esports'
             await handleAdmin(token, chatId, text, sport);
           }
@@ -10976,6 +11168,7 @@ async function runAutoDarts() {
             if (!aiR.passed) {
               analyzedDarts.set(key, { ts: now, tipSent: false });
               log('INFO', 'AUTO-DARTS', `IA bloqueou: ${aiR.reason} | ${pickTeam} @ ${pickOdd}`);
+              logRejection('darts', `${match.team1} vs ${match.team2}`, 'ai_block', { reason: aiR.reason });
               continue;
             }
             _aiConfDarts = aiR.conf;
@@ -11150,6 +11343,7 @@ async function runAutoSnooker() {
             if (!aiR.passed) {
               analyzedSnooker.set(key, { ts: now, tipSent: false });
               log('INFO', 'AUTO-SNOOKER', `IA bloqueou: ${aiR.reason} | ${pickTeam} @ ${pickOdd}`);
+              logRejection('snooker', `${match.team1} vs ${match.team2}`, 'ai_block', { reason: aiR.reason });
               continue;
             }
             _aiConfSnooker = aiR.conf;
@@ -11603,6 +11797,9 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   // Digest: checa 1x/hora se é MT_DIGEST_HOUR (default 8am) e envia no primeiro tick daquele dia.
   setInterval(() => runMarketTipsDigest().catch(e => log('ERROR', 'MT-DIGEST', e.message)), 60 * 60 * 1000);
   setTimeout(() => runMarketTipsDigest().catch(() => {}), 5 * 60 * 1000); // 5min pós-boot (caso já seja a hora)
+  // Weekly pipeline digest (2ª feira 9h)
+  setInterval(() => runWeeklyPipelineDigest().catch(e => log('ERROR', 'WEEKLY-DIGEST', e.message)), 60 * 60 * 1000);
+  setTimeout(() => runWeeklyPipelineDigest().catch(() => {}), 10 * 60 * 1000);
 
   // Vetor 7 — Dota snapshot collector: cron 60s captura Steam RT + Pinnacle pareados.
   // Default ON. Desativar via DOTA_SNAPSHOT_ENABLED=false.

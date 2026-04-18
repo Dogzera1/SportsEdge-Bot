@@ -8675,7 +8675,26 @@ const server = http.createServer(async (req, res) => {
           });
         } catch (_) {}
       }
-      sendJson(res, { models: out });
+      // Dados feature adicionais: feed freshness
+      const feeds = {};
+      try {
+        const dhs = db.prepare(`SELECT COUNT(*) AS n, MAX(updated_at) AS last FROM dota_hero_stats`).get();
+        if (dhs) feeds.dota_hero_stats = { rows: dhs.n, last: dhs.last, ageHours: dhs.last ? Math.floor((nowMs - new Date(dhs.last + 'Z').getTime()) / 3600000) : null };
+      } catch (_) {}
+      try {
+        const tms = db.prepare(`SELECT COUNT(*) AS n, MAX(date) AS last FROM tennis_match_stats`).get();
+        if (tms) feeds.tennis_match_stats = { rows: tms.n, last: tms.last?.slice(0, 10), ageDays: tms.last ? Math.floor((nowMs - new Date(tms.last).getTime()) / (24 * 3600000)) : null };
+      } catch (_) {}
+      try {
+        const mr = db.prepare(`SELECT game, COUNT(*) AS n, MAX(resolved_at) AS last FROM match_results GROUP BY game`).all();
+        feeds.match_results = mr.map(r => ({
+          game: r.game, rows: r.n,
+          last: r.last?.slice(0, 16),
+          ageHours: r.last ? Math.floor((nowMs - new Date(r.last + 'Z').getTime()) / 3600000) : null,
+        }));
+      } catch (_) {}
+
+      sendJson(res, { models: out, feeds });
     } catch (e) { sendJson(res, { error: e.message }, 500); }
     return;
   }
