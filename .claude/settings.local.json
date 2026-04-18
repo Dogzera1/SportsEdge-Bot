@@ -212,7 +212,9 @@
       "Bash(DB_PATH=sportsedge.db node scripts/refresh-all-isotonics.js --game dota2)",
       "Bash(DB_PATH=sportsedge.db node scripts/extract-esports-features.js --game cs2 --out data/cs2_features.csv)",
       "Bash(DB_PATH=sportsedge.db node scripts/refresh-all-isotonics.js --game cs2)",
-      "Bash(DB_PATH=sportsedge.db node scripts/extract-esports-features.js --game valorant --out data/valorant_features.csv)"
+      "Bash(DB_PATH=sportsedge.db node scripts/extract-esports-features.js --game valorant --out data/valorant_features.csv)",
+      "Bash(DB_PATH=sportsedge.db node scripts/extract-esports-features.js --game lol --out data/lol_features.csv)",
+      "Bash(DB_PATH=sportsedge.db node scripts/refresh-all-isotonics.js --game lol)"
     ]
   }
 }
