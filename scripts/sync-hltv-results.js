@@ -111,13 +111,24 @@ function parseResults(html, dateStr) {
     // Event
     const evMatch = block.match(/<span class="event-name">([^<]+)<\/span>/);
     const event = evMatch ? evMatch[1].trim() : '';
-    // Bo inferido
+    // Bo inferido a partir do MAX (winner maps), não soma.
+    // Guarda CS round score (13-7 etc): max>3 indica rounds/map, não maps/série.
+    // Normaliza pra Bo1 1-0/0-1 preservando só o winner (scores de round perdem info mas
+    // não corrompem settlement).
     const maxS = Math.max(s1, s2);
-    const bo = maxS >= 3 ? 5 : maxS >= 2 ? 3 : 1;
+    let finalScore;
+    if (maxS > 3) {
+      // Rounds em single map (CS MR12 final 13-X). Normaliza pra Bo1.
+      const w = s1 > s2 ? '1-0' : '0-1';
+      finalScore = `Bo1 ${w}`;
+    } else {
+      const bo = maxS >= 3 ? 5 : maxS >= 2 ? 3 : 1;
+      finalScore = `Bo${bo} ${s1}-${s2}`;
+    }
     results.push({
       match_id: `hltv_${matchId}`,
       team1: t1, team2: t2, winner,
-      final_score: `Bo${bo} ${s1}-${s2}`,
+      final_score: finalScore,
       league: event,
       resolved_at: dateStr,
     });

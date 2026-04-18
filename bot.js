@@ -2657,6 +2657,54 @@ async function runMarketTipReadinessCheck() {
   log('INFO', 'MT-READY', `DM admin: ${ready.length} segments prontos pra ativar`);
 }
 
+// ── Daily market-tips digest (1x/dia) ──
+let _lastMtDigestDay = null;
+async function runMarketTipsDigest() {
+  if (process.env.MT_DIGEST_ENABLED === 'false') return;
+  if (!ADMIN_IDS.size) return;
+  const hour = parseInt(process.env.MT_DIGEST_HOUR || '8', 10);
+  const now = new Date();
+  if (now.getHours() !== hour) return;
+  const today = now.toISOString().slice(0, 10);
+  if (_lastMtDigestDay === today) return;
+  _lastMtDigestDay = today;
+
+  let stats7, stats30;
+  try {
+    const { getShadowStats } = require('./lib/market-tips-shadow');
+    stats7 = getShadowStats(db, { days: 7 });
+    stats30 = getShadowStats(db, { days: 30 });
+  } catch (e) {
+    log('DEBUG', 'MT-DIGEST', `stats err: ${e.message}`);
+    return;
+  }
+  if (!Array.isArray(stats30) || !stats30.length) return;
+
+  const token = Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
+  if (!token) return;
+
+  const fmt = (s) => {
+    const hit = s.hitRate != null ? `${s.hitRate.toFixed(0)}%` : '-';
+    const roi = s.roiPct != null ? `${s.roiPct >= 0 ? '+' : ''}${s.roiPct.toFixed(0)}%` : '-';
+    const clv = s.avgClv != null ? `${s.avgClv >= 0 ? '+' : ''}${s.avgClv.toFixed(1)}%` : '-';
+    return `${s.sport}/${s.market}: n=${s.n} Hit=${hit} ROI=${roi} CLV=${clv}`;
+  };
+
+  let msg = `📊 *MARKET TIPS DIGEST — ${today}*\n\n`;
+  msg += `*Últimos 7d:*\n`;
+  if (stats7.length) {
+    msg += stats7.slice(0, 8).map(s => `• ${fmt(s)}`).join('\n') + '\n';
+  } else {
+    msg += `_sem tips nesta janela_\n`;
+  }
+  msg += `\n*Últimos 30d:*\n`;
+  msg += stats30.slice(0, 8).map(s => `• ${fmt(s)}`).join('\n') + '\n';
+  msg += `\n_Comando /market-tips pra detalhes. Readiness alert separado quando threshold bater._`;
+
+  for (const adminId of ADMIN_IDS) await sendDM(token, adminId, msg).catch(() => {});
+  log('INFO', 'MT-DIGEST', `DM digest 7d=${stats7.length} 30d=${stats30.length}`);
+}
+
 // ── Backtest Validator (1x/dia) ──
 let _lastBacktestAlert = 0;
 const _backtestMilestonesSeen = new Set();
@@ -4503,6 +4551,37 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
     if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
     try {
       const parts = String(text || '').trim().split(/\s+/);
+      // /market-tips recent [sport] [limit] — lista tips individuais
+      if (parts[1]?.toLowerCase() === 'recent') {
+        const sportFilter = parts[2]?.toLowerCase() || null;
+        const limit = Math.max(1, Math.min(30, parseInt(parts[3] || '10', 10) || 10));
+        const where = sportFilter ? `WHERE sport = ?` : '';
+        const stmt = db.prepare(`
+          SELECT sport, team1, team2, market, line, side, label, odd, close_odd, ev_pct, clv_pct, result, created_at
+          FROM market_tips_shadow
+          ${where}
+          ORDER BY created_at DESC
+          LIMIT ${limit}
+        `);
+        const rows = sportFilter ? stmt.all(sportFilter) : stmt.all();
+        if (!rows.length) {
+          await send(token, chatId, `📊 Market tips — *nenhum tip*${sportFilter ? ' (' + sportFilter + ')' : ''}`);
+          return;
+        }
+        let txt = `📊 *MARKET TIPS — últimas ${rows.length}${sportFilter ? ' (' + sportFilter + ')' : ''}*\n\n`;
+        for (const r of rows) {
+          const emoji = r.result === 'win' ? '✅' : r.result === 'loss' ? '❌' : '⏳';
+          const clv = r.clv_pct != null ? ` CLV=${r.clv_pct >= 0 ? '+' : ''}${r.clv_pct}%` : '';
+          const closeOdd = r.close_odd ? ` (close ${r.close_odd})` : '';
+          const labelTxt = r.label || `${r.market} ${r.line ?? ''} ${r.side ?? ''}`.trim();
+          txt += `${emoji} *${r.sport}* ${r.team1} vs ${r.team2}\n`;
+          txt += `   ${labelTxt} @ ${r.odd}${closeOdd}\n`;
+          txt += `   EV ${r.ev_pct >= 0 ? '+' : ''}${r.ev_pct}%${clv} · ${String(r.created_at).slice(0, 16)}\n\n`;
+          if (txt.length > 3500) { txt += '_(truncado)_'; break; }
+        }
+        await send(token, chatId, txt);
+        return;
+      }
       const sportArg = parts[1]?.toLowerCase() || null;
       const daysArg = Math.max(1, Math.min(90, parseInt(parts[2] || '30', 10) || 30));
       const { getShadowStats } = require('./lib/market-tips-shadow');
@@ -4521,7 +4600,7 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
         txt += `  CLV=${clv} (n=${s.clvN}) profit=${s.totalProfit.toFixed(1)}u\n\n`;
         if (txt.length > 3500) { txt += '_(truncado)_'; break; }
       }
-      txt += `\n_Uso: /market-tips [sport] [days]_\n_Ex: /market-tips lol 60_`;
+      txt += `\n_Uso: /market-tips [sport] [days] | /market-tips recent [sport] [limit]_`;
       await send(token, chatId, txt);
     } catch (e) { await send(token, chatId, `❌ ${e.message}`); }
 
@@ -10520,6 +10599,9 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   // Anti-spam: só alerta 1x por (sport, market) via _marketTipReady Set.
   setInterval(() => runMarketTipReadinessCheck().catch(e => log('ERROR', 'MT-READY', e.message)), 24 * 60 * 60 * 1000);
   setTimeout(() => runMarketTipReadinessCheck().catch(() => {}), 60 * 60 * 1000); // 1h pós-boot
+  // Digest: checa 1x/hora se é MT_DIGEST_HOUR (default 8am) e envia no primeiro tick daquele dia.
+  setInterval(() => runMarketTipsDigest().catch(e => log('ERROR', 'MT-DIGEST', e.message)), 60 * 60 * 1000);
+  setTimeout(() => runMarketTipsDigest().catch(() => {}), 5 * 60 * 1000); // 5min pós-boot (caso já seja a hora)
 
   // Vetor 7 — Dota snapshot collector: cron 60s captura Steam RT + Pinnacle pareados.
   // Default ON. Desativar via DOTA_SNAPSHOT_ENABLED=false.

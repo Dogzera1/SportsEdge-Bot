@@ -113,7 +113,10 @@ function parseMatches(html, tournamentName) {
     const score2 = parseInt(s2, 10);
     const p1Win = t1Class === 'text_victory';
     const winner = p1Win ? team1 : team2;
-    const bo = (score1 + score2) >= 5 ? 5 : (score1 + score2) >= 3 ? 3 : 1;
+    // bestOf derivado do MAXIMO, não do soma. Bo3 2-0 tem sum=2 mas é Bo3.
+    // winner maps define o bestOf: max==1 → Bo1; max==2 → Bo3; max==3 → Bo5; max==4 → Bo7.
+    const maxScore = Math.max(score1, score2);
+    const bo = maxScore >= 4 ? 7 : maxScore >= 3 ? 5 : maxScore >= 2 ? 3 : 1;
     out.push({
       match_id: `golgg_${gameId}`,
       team1, team2, winner,

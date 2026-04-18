@@ -8402,7 +8402,11 @@ const server = http.createServer(async (req, res) => {
               .run(stakeR, profitR, tip.id);
             // CLV: gravar odds de fecho se ainda não tiver (captura retroativa)
             if (!tip.clv_odds && tip.odds) {
-              tipsNeedingClv.push({ id: tip.id, matchId: tip.match_id, sport, odds: tip.odds, p1: tip.participant1, p2: tip.participant2 });
+              tipsNeedingClv.push({
+                id: tip.id, matchId: tip.match_id, sport, odds: tip.odds,
+                p1: tip.participant1, p2: tip.participant2,
+                tipParticipant: tip.tip_participant,
+              });
             }
             bancaDelta += profitR;
             settled++;
@@ -8453,16 +8457,22 @@ const server = http.createServer(async (req, res) => {
                 }).catch(() => null);
 
                 if (currentOdds?.t1 && currentOdds?.t2) {
-                  // CLV = odds no qual apostamos / odds de fecho
-                  // Se apostamos em t1: clv_odds = currentOdds.t1
-                  // Se apostamos em t2: clv_odds = currentOdds.t2
-                  const tipNorm = norm(t.p1 || '');
-                  const isT1 = norm(t.p1 || '').length > 0; // tip_participant matching
+                  // CLV = odds de fecho do time APOSTADO. Determina via tip_participant match p1 ou p2.
+                  const tipNorm = norm(t.tipParticipant || '');
+                  const p1Norm = norm(t.p1 || '');
+                  const p2Norm = norm(t.p2 || '');
+                  let isT1 = null;
+                  if (tipNorm && p1Norm && (tipNorm === p1Norm || tipNorm.includes(p1Norm) || p1Norm.includes(tipNorm))) isT1 = true;
+                  else if (tipNorm && p2Norm && (tipNorm === p2Norm || tipNorm.includes(p2Norm) || p2Norm.includes(tipNorm))) isT1 = false;
+                  if (isT1 === null) {
+                    log('DEBUG', 'CLV', `tipParticipant '${t.tipParticipant}' não bate com p1/p2 — skip`);
+                    continue;
+                  }
                   const closingOdd = parseFloat(isT1 ? currentOdds.t1 : currentOdds.t2);
                   if (closingOdd > 1) {
                     stmts.updateTipCLV.run(closingOdd, t.matchId, t.sport);
                     const clvPct = ((parseFloat(t.odds) / closingOdd - 1) * 100).toFixed(1);
-                    log('INFO', 'CLV', `${t.sport} ${t.p1} vs ${t.p2}: closing=${closingOdd} tip=${t.odds} CLV=${clvPct}%`);
+                    log('INFO', 'CLV', `${t.sport} ${t.p1} vs ${t.p2} (bet ${t.tipParticipant}): closing=${closingOdd} tip=${t.odds} CLV=${clvPct}%`);
                   }
                 }
               } catch (_) {}
