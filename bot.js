@@ -10586,13 +10586,15 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   setTimeout(() => runLolFreshnessCycle().catch(() => {}), 30 * 60 * 1000); // 30min pós-boot
 
   // Market tips shadow settlement: cron 30min, cruza market_tips_shadow com match_results
-  setInterval(() => {
+  const runShadowSettle = () => {
     try {
       const { settleShadowTips } = require('./lib/market-tips-shadow');
       const r = settleShadowTips(db);
-      if (r.settled > 0) log('INFO', 'MT-SHADOW', `Settled ${r.settled} market tips (skipped ${r.skipped})`);
+      if (r.settled > 0 || r.skipped > 0) log('INFO', 'MT-SHADOW', `Settled ${r.settled} market tips (skipped ${r.skipped})`);
     } catch (e) { log('DEBUG', 'MT-SHADOW', `settle err: ${e.message}`); }
-  }, 30 * 60 * 1000);
+  };
+  setInterval(runShadowSettle, 30 * 60 * 1000);
+  setTimeout(runShadowSettle, 10 * 60 * 1000); // 10min pós-boot (não espera 30min pra primeira run)
 
   // Market tip readiness alert: cron 24h, checa shadow stats e avisa admin
   // quando (sport, market) atinge N≥30 settled E ROI positivo.
