@@ -3448,6 +3448,30 @@ async function autoAnalyzeMatch(token, match) {
           lolModel.mapP2 = lolModel.modelP2;
         }
 
+        // Blue/red side adjustment — quando live tells us who is blue vs red,
+        // usa blueWR/redWR excess vs overall WR pra ajustar mapP1 (±~2-4pp max).
+        if (lolLiveStats?.blueTeam?.name && lolLiveStats?.redTeam?.name) {
+          try {
+            const { sideAdjustMapP } = require('./lib/lol-model');
+            const { getTeamOEStats } = require('./lib/oracleselixir-features');
+            const s1 = getTeamOEStats(db, match.team1, { sinceDays: 60, minGames: 5 });
+            const s2 = getTeamOEStats(db, match.team2, { sinceDays: 60, minGames: 5 });
+            if (s1 && s2) {
+              const blueNorm = norm(lolLiveStats.blueTeam.name);
+              const t1Norm = norm(match.team1);
+              const team1IsBlue = blueNorm === t1Norm || blueNorm.includes(t1Norm) || t1Norm.includes(blueNorm);
+              const prev = lolModel.mapP1;
+              const adj = sideAdjustMapP(prev, s1, s2, team1IsBlue);
+              if (adj !== prev && Number.isFinite(adj)) {
+                lolModel.mapP1 = adj;
+                lolModel.mapP2 = 1 - adj;
+                lolModel.factors = [...(lolModel.factors || []), 'side-adj'];
+                log('INFO', 'LOL-SIDE', `${match.team1} ${team1IsBlue?'blue':'red'} — mapP1 ${(prev*100).toFixed(1)}%→${(adj*100).toFixed(1)}% (blueWR ${team1IsBlue?s1.blueWR:s2.blueWR} redWR ${team1IsBlue?s2.redWR:s1.redWR})`);
+              }
+            }
+          } catch (e) { log('DEBUG', 'LOL-SIDE', `err: ${e.message}`); }
+        }
+
         // Live series-aware override — combina live map state com pSeries prior
         // via Monte Carlo (similar ao Dota). Só quando temos lolLiveStats e bo>=3.
         if (hasLiveStats && lolLiveStats && bo >= 3 && Number.isFinite(match.score1) && Number.isFinite(match.score2)) {
