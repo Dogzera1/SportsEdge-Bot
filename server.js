@@ -7295,7 +7295,7 @@ const server = http.createServer(async (req, res) => {
         // ou partida adiada gera ID novo no dia seguinte).
         // Filtra por tip_participant pra permitir hedge legítimo em times diferentes.
         const p1n_ = norm(p1 || ''), p2n_ = norm(p2 || '');
-        const pickN_ = norm(t.tip_participant || '');
+        const pickN_ = norm(tipParticipant || '');
         const marketN_ = String(t.market_type || 'ML').toUpperCase();
         if (p1n_ && p2n_) {
           const recentDupe = db.prepare(
