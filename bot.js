@@ -65,6 +65,7 @@ const { getTennisProbability, detectSurface, tennisProhibitedTournament } = requ
 const { esportsSegmentGate } = require('./lib/esports-segment-gate');
 const { extractServeProbs, priceTennisMatch, priceTennisLive, estimateTennisAces } = require('./lib/tennis-markov-model');
 const { getPlayerInjuryRisk } = require('./lib/tennis-injury-risk');
+const { getPlayerTiebreakStats, getTiebreakAdjustment } = require('./lib/tennis-tiebreak-stats');
 const { fetchMatchNews } = require('./lib/news');
 const { tennisPairMatchesPlayers } = require('./lib/tennis-match');
 
@@ -7295,6 +7296,31 @@ async function pollTennis(runOnce = false) {
                 // Disponibiliza probs de mercado pra downstream (handicap/totals pricing quando feed expor).
                 tennisModelResult._markovMarkets = markov;
                 tennisModelResult._markovServe = mSp;
+
+                // TB rolling WR adjustment — jogador com edge histórica em TB
+                // recebe boost proporcional a P(match vai pra TB).
+                if (process.env.TENNIS_TB_ADJUSTMENT !== 'false') {
+                  try {
+                    const tbOpts = { lookbackDays: 730, recentDays: 180, minGames: 5 };
+                    const tb1 = getPlayerTiebreakStats(db, match.team1, tbOpts);
+                    const tb2 = getPlayerTiebreakStats(db, match.team2, tbOpts);
+                    const tbAdj = getTiebreakAdjustment(tb1, tb2);
+                    if (tbAdj.factor !== 1 && Number.isFinite(markov.pTiebreakMatch)) {
+                      // Impact = P(TB in match) × (factor-1) × 0.5 conservador.
+                      const impact = markov.pTiebreakMatch * (tbAdj.factor - 1) * 0.5;
+                      const pre = tennisModelResult.modelP1;
+                      const adjusted = Math.max(0.05, Math.min(0.95, pre + impact));
+                      if (Math.abs(adjusted - pre) > 0.003) {
+                        log('INFO', 'TENNIS-TB',
+                          `${match.team1} vs ${match.team2}: ${tbAdj.reason} × pTBmatch=${(markov.pTiebreakMatch*100).toFixed(0)}% → pMatch ${(pre*100).toFixed(1)}% → ${(adjusted*100).toFixed(1)}%`);
+                      }
+                      tennisModelResult.modelP1 = adjusted;
+                      tennisModelResult.modelP2 = 1 - adjusted;
+                      tennisModelResult._tbAdjustment = { ...tbAdj, pTBmatch: markov.pTiebreakMatch, impact };
+                      tennisModelResult.factors = [...(tennisModelResult.factors || []), 'tb'];
+                    }
+                  } catch (te) { log('DEBUG', 'TENNIS-TB', `err: ${te.message}`); }
+                }
 
                 // Ace market pricing (Poisson). Requer acesPerMatch dos 2 jogadores.
                 if (Number.isFinite(serveStats1?.acesPerMatch) && Number.isFinite(serveStats2?.acesPerMatch)) {
