@@ -53,6 +53,58 @@ if (GAME === 'lol') {
   } catch (e) { console.warn(`[extract-es] team_stats load err: ${e.message}`); }
 }
 
+// ── Oracle's Elixir rolling loader (só LoL) ─────────────────────────────
+// Preload game-level rows por team pra lookup rolling sem SQL no loop.
+const oeByTeam = new Map(); // normTeam → [{ t, result, side, gd15, dpm, fd, fb, ft }]
+if (GAME === 'lol') {
+  try {
+    const rows = db.prepare(`
+      SELECT teamname, date, result, side, golddiffat15, dpm,
+             firstdragon, firstbaron, firsttower
+      FROM oracleselixir_games WHERE date IS NOT NULL
+    `).all();
+    for (const r of rows) {
+      const k = String(r.teamname || '').toLowerCase().trim();
+      if (!k) continue;
+      if (!oeByTeam.has(k)) oeByTeam.set(k, []);
+      oeByTeam.get(k).push({
+        t: new Date(r.date).getTime(),
+        result: r.result || 0,
+        side: r.side,
+        gd15: r.golddiffat15,
+        dpm: r.dpm,
+        fd: r.firstdragon || 0, fb: r.firstbaron || 0, ft: r.firsttower || 0,
+      });
+    }
+    for (const arr of oeByTeam.values()) arr.sort((a, b) => a.t - b.t);
+    console.log(`[extract-es] OE loaded: ${rows.length} rows covering ${oeByTeam.size} teams`);
+  } catch (e) { console.warn(`[extract-es] OE load err: ${e.message}`); }
+}
+
+function oeStatsAt(team, tMs, sinceDays = 60, minGames = 5) {
+  const arr = oeByTeam.get(String(team || '').toLowerCase().trim());
+  if (!arr) return null;
+  const sinceT = tMs - sinceDays * 86400000;
+  // Binary search / linear — pequeno array por time (~50-100 rows max)
+  const filtered = arr.filter(r => r.t < tMs && r.t >= sinceT);
+  if (filtered.length < minGames) return null;
+  let wins = 0, gd = 0, gdN = 0, dpm = 0, dpmN = 0, fd = 0, fb = 0, ft = 0;
+  for (const r of filtered) {
+    wins += r.result || 0;
+    if (Number.isFinite(r.gd15)) { gd += r.gd15; gdN++; }
+    if (Number.isFinite(r.dpm)) { dpm += r.dpm; dpmN++; }
+    fd += r.fd; fb += r.fb; ft += r.ft;
+  }
+  const n = filtered.length;
+  return {
+    games: n,
+    wr: wins / n,
+    gd15: gdN ? gd / gdN : null,
+    dpm: dpmN ? dpm / dpmN : null,
+    obj: (fd + fb + ft) / (3 * n),
+  };
+}
+
 // Mapa data → season/split (gol.gg usa SN = Year-2010+1 aprox; simplificação)
 function seasonSplit(dateIso) {
   const [y, m] = dateIso.split('-').map(Number);
@@ -168,6 +220,8 @@ const HEADERS = [
   'gpm_diff', 'gdm_diff', 'gd15_diff', 'fb_rate_diff', 'ft_rate_diff',
   'dpm_diff', 'kd_diff', 'team_wr_diff', 'dra_pct_diff', 'nash_pct_diff',
   'has_team_stats',
+  // Oracle's Elixir rolling 60d (só LoL; 0 se algum time sem min 5 games pre-match)
+  'oe_gd15_diff', 'oe_obj_diff', 'oe_wr_diff', 'oe_dpm_diff', 'has_oe_stats',
   'y',
 ];
 
@@ -250,6 +304,19 @@ for (const r of rows) {
         nashPctDiff = (ts1.nash_pct || 0) - (ts2.nash_pct || 0);
       }
     }
+    // Oracle's Elixir rolling (só LoL)
+    let oeGd15Diff = 0, oeObjDiff = 0, oeWrDiff = 0, oeDpmDiff = 0, hasOeStats = 0;
+    if (GAME === 'lol' && oeByTeam.size > 0) {
+      const oe1 = oeStatsAt(p1Raw, t);
+      const oe2 = oeStatsAt(p2Raw, t);
+      if (oe1 && oe2) {
+        hasOeStats = 1;
+        oeGd15Diff = (oe1.gd15 || 0) - (oe2.gd15 || 0);
+        oeObjDiff = oe1.obj - oe2.obj;
+        oeWrDiff = oe1.wr - oe2.wr;
+        oeDpmDiff = (oe1.dpm || 0) - (oe2.dpm || 0);
+      }
+    }
     out.push([
       new Date(t).toISOString().slice(0, 10),
       (league || '').replace(/,/g, ' '),
@@ -269,6 +336,7 @@ for (const r of rows) {
       fbDiff.toFixed(4), ftDiff.toFixed(4),
       dpmDiff.toFixed(2), kdDiff.toFixed(3), teamWrDiff.toFixed(4),
       draPctDiff.toFixed(4), nashPctDiff.toFixed(4), hasTeamStats,
+      oeGd15Diff.toFixed(2), oeObjDiff.toFixed(4), oeWrDiff.toFixed(4), oeDpmDiff.toFixed(2), hasOeStats,
       p1Won,
     ]);
     kept++;

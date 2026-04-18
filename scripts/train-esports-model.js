@@ -69,11 +69,15 @@ const LOL_EXTRA_FEATURES = [
   'dpm_diff', 'kd_diff', 'team_wr_diff', 'dra_pct_diff', 'nash_pct_diff',
   'has_team_stats',
 ];
+// OE rolling 60d (só LoL)
+const LOL_OE_FEATURES = [
+  'oe_gd15_diff', 'oe_obj_diff', 'oe_wr_diff', 'oe_dpm_diff', 'has_oe_stats',
+];
 
 // Decide NUM_FEATURES baseado no CSV carregado (se tem colunas LoL extras, inclui)
-const NUM_FEATURES = (GAME === 'lol' && headers.includes('gpm_diff'))
-  ? [...BASE_NUM_FEATURES, ...LOL_EXTRA_FEATURES]
-  : BASE_NUM_FEATURES;
+let NUM_FEATURES = BASE_NUM_FEATURES.slice();
+if (GAME === 'lol' && headers.includes('gpm_diff')) NUM_FEATURES = [...NUM_FEATURES, ...LOL_EXTRA_FEATURES];
+if (GAME === 'lol' && headers.includes('oe_gd15_diff')) NUM_FEATURES = [...NUM_FEATURES, ...LOL_OE_FEATURES];
 const CAT_FEATURES = ['league_tier']; // 1,2,3
 
 function buildVec(row) {
