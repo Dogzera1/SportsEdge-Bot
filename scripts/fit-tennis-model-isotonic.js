@@ -214,6 +214,7 @@ function main() {
   console.log(`raw    ${(sR.bri/n).toFixed(4)}   ${(sR.ll/n).toFixed(4)}   ${(sR.cor/n*100).toFixed(1)}%   ${computeECE(sR.preds, sR.outs).toFixed(4)}`);
   console.log(`calib  ${(sC.bri/n).toFixed(4)}   ${(sC.ll/n).toFixed(4)}   ${(sC.cor/n*100).toFixed(1)}%   ${computeECE(sC.preds, sC.outs).toFixed(4)}`);
 
+  try { require('../lib/model-backup').backupBeforeWrite(OUT_PATH); } catch (_) {}
   fs.writeFileSync(OUT_PATH, JSON.stringify({
     version: 1,
     fittedAt: new Date().toISOString(),

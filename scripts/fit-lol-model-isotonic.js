@@ -283,6 +283,7 @@ async function main() {
     blocks,
     trainingNote: 'Fit sobre período calib (últimos 15% antes do test). Aplicar pós-blend dos sub-models mas antes do clamp final.',
   };
+  try { require('../lib/model-backup').backupBeforeWrite(OUT_PATH); } catch (_) {}
   fs.writeFileSync(OUT_PATH, JSON.stringify(out, null, 2));
   console.log(`\nSaved: ${OUT_PATH}`);
 }

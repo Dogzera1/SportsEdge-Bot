@@ -383,6 +383,7 @@ let lastSettlementCheck = 0;
 
 // Line movement
 const lineAlerted = new Map();
+const marketTipSent = new Map(); // key: match|market|line|side → ts (dedup 24h)
 const LINE_CHECK_INTERVAL = 30 * 60 * 1000;
 let lastLineCheck = 0;
 
@@ -2540,6 +2541,42 @@ async function runLolFreshnessCycle() {
         : '') +
       `_${(r.recommendation || '').slice(0, 400)}_`;
     for (const adminId of ADMIN_IDS) sendDM(tokenForAlert, adminId, msg).catch(() => {});
+
+    // Auto-trigger isotonic refresh quando retrain-now.
+    // Evita reactivar múltiplas vezes: usa flag global + cooldown 24h.
+    if (r.level === 'retrain-now' && process.env.AUTO_ISOTONIC_REFRESH !== 'false') {
+      if (!global.__lastIsotonicRefresh || (Date.now() - global.__lastIsotonicRefresh) > 24 * 60 * 60 * 1000) {
+        global.__lastIsotonicRefresh = Date.now();
+        runIsotonicRefreshAsync(tokenForAlert);
+      }
+    }
+  });
+}
+
+// Isotonic refresh async: roda scripts/refresh-all-isotonics.js em background.
+// DM admin com summary no fim. Trigger manual via /admin ou auto via freshness retrain-now.
+async function runIsotonicRefreshAsync(token) {
+  const { exec } = require('child_process');
+  const scriptPath = require('path').join(__dirname, 'scripts', 'refresh-all-isotonics.js');
+  log('INFO', 'ISOTONIC-REFRESH', 'Iniciando refresh automático (auto-trigger freshness)...');
+  exec(`node "${scriptPath}" --retrain --sync --json`, { timeout: 10 * 60 * 1000 }, (err, stdout) => {
+    let r;
+    try { r = JSON.parse(stdout); } catch { r = null; }
+    if (err || !r) {
+      log('ERROR', 'ISOTONIC-REFRESH', `falhou: ${err?.message || 'parse err'}`);
+      return;
+    }
+    const allOk = r.jobs.every(j => j.ok);
+    log(allOk ? 'INFO' : 'WARN', 'ISOTONIC-REFRESH',
+      `Concluído em ${Math.round(r.jobs.reduce((a,j) => a + j.durSec, 0))}s | ${r.jobs.filter(j=>j.ok).length}/${r.jobs.length} OK | changes: ${r.changes?.length || 0}`);
+    if (!token) return;
+    const emoji = allOk ? '✅' : '⚠️';
+    const jobSummary = r.jobs.map(j => `${j.ok ? '✓' : '✗'} ${j.label}`).join('\n');
+    const changesSummary = (r.changes || []).slice(0, 10).map(c => `• ${c}`).join('\n') || '_nada mudou_';
+    const msg = `${emoji} *Refresh automático de modelos concluído*\n\n` +
+      `Jobs:\n${jobSummary}\n\n` +
+      `Changes:\n${changesSummary}`;
+    for (const adminId of ADMIN_IDS) sendDM(token, adminId, msg).catch(() => {});
   });
 }
 
@@ -3407,6 +3444,40 @@ async function autoAnalyzeMatch(token, match) {
                 for (const t of found.slice(0, 5)) {
                   log('INFO', 'LOL-MARKETS',
                     `  • ${t.label} @ ${t.odd.toFixed(2)} | pModel=${(t.pModel*100).toFixed(1)}% pImpl=${t.pImplied ? (t.pImplied*100).toFixed(1)+'%' : '?'} EV=${t.ev.toFixed(1)}%`);
+                }
+                // MVP admin-only tip: seleciona melhor market tip e manda DM pros admins.
+                // Não vai pros subscribers ainda. Dedup via marketTipSent (24h cooldown).
+                if (process.env.LOL_MARKET_TIPS_ENABLED === 'true' && ADMIN_IDS.size) {
+                  try {
+                    const mtp = require('./lib/market-tip-processor');
+                    const mlDirection = lolModel.modelP1 > 0.5 ? 'team1' : 'team2';
+                    const selected = mtp.selectBestMarketTip(found, {
+                      minEv: parseFloat(process.env.LOL_MARKET_TIP_MIN_EV ?? '8'),
+                      minPmodel: parseFloat(process.env.LOL_MARKET_TIP_MIN_PMODEL ?? '0.55'),
+                      mlDirection, mlPick: match.team1,
+                    });
+                    if (selected?.tip) {
+                      const t = selected.tip;
+                      const dedupKey = `lol|${match.team1}|${match.team2}|${t.market}|${t.line}|${t.side}`;
+                      const last = marketTipSent.get(dedupKey) || 0;
+                      if (Date.now() - last > 24 * 60 * 60 * 1000) {
+                        marketTipSent.set(dedupKey, Date.now());
+                        const stake = mtp.kellyStakeForMarket(t.pModel, t.odd, 100, 0.10);
+                        if (stake > 0) {
+                          const dm = mtp.buildMarketTipDM({
+                            match, tip: t, stake, league: match.league, sport: 'lol',
+                          });
+                          const tokenForMT = Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
+                          if (tokenForMT) {
+                            for (const adminId of ADMIN_IDS) sendDM(tokenForMT, adminId, dm).catch(() => {});
+                            log('INFO', 'LOL-MARKET-TIP', `Admin DM enviado: ${t.label} @ ${t.odd} EV ${t.ev}% stake ${stake}u`);
+                          }
+                        }
+                      } else {
+                        log('DEBUG', 'LOL-MARKET-TIP', `Dedup skip: ${dedupKey}`);
+                      }
+                    }
+                  } catch (mte) { log('DEBUG', 'LOL-MARKET-TIP', `err: ${mte.message}`); }
                 }
               }
             }

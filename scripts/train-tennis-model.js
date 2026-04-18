@@ -541,6 +541,7 @@ const outObj = {
 
 const outDir = path.dirname(OUT_PATH);
 if (!fs.existsSync(outDir)) fs.mkdirSync(outDir, { recursive: true });
+try { require('../lib/model-backup').backupBeforeWrite(OUT_PATH); } catch (_) {}
 fs.writeFileSync(OUT_PATH, JSON.stringify(outObj, null, 2), 'utf8');
 console.log(`\n[train] saved: ${OUT_PATH}`);
 
