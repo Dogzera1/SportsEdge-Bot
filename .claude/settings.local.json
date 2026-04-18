@@ -192,7 +192,19 @@
       "Bash(node scripts/sync-hltv-results.js --max 500 --delay 2500)",
       "Bash(echo \"hltv pid: $!\")",
       "Bash(node scripts/train-tennis-model.js --gbdt-trees=150 --gbdt-depth=4 --gbdt-lr=0.05 --gbdt-subsample=0.7)",
-      "Bash(echo \"tennis gbdt pid: $!\")"
+      "Bash(echo \"tennis gbdt pid: $!\")",
+      "WebFetch(domain:oracleselixir.com)",
+      "WebFetch(domain:lol.timsevenhuysen.com)",
+      "Bash(grep -oE \"\\(downloadUrl|downloadLink|csvUrl|yearData|matchData\\)[^,}]{0,200}\" \"/c/Users/vict_/AppData/Local/Temp/oe.js\")",
+      "Bash(grep -oE \"[A-Za-z0-9_-]{25,45}\" \"/c/Users/vict_/AppData/Local/Temp/oe.js\")",
+      "Bash(grep -v \"^[0-9]*$\")",
+      "Bash(grep -oE \"matchData[^\\)]{0,300}\" \"/c/Users/vict_/AppData/Local/Temp/oe.js\")",
+      "Bash(grep -oE \"\\(api[^\\\\\"']{0,80}|/matchdata[^\\\\\"']{0,80}|fetchMatch[^\\\\\"']{0,80}\\)\" \"/c/Users/vict_/AppData/Local/Temp/oe.js\")",
+      "Bash(grep -oE \"datalisk\\\\.io[^\\\\\"']{0,150}\" \"/c/Users/vict_/AppData/Local/Temp/oe.js\")",
+      "Bash(grep -oE \"matchDataLinks[^\\)]{0,500}\" \"/c/Users/vict_/AppData/Local/Temp/oe.js\")",
+      "Bash(grep -oE \"\\(/public/[^\\\\\"']{0,80}|/api/[^\\\\\"']{0,80}|matchdata[^\\\\\"']{0,80}\\)\" \"/c/Users/vict_/AppData/Local/Temp/oe.js\")",
+      "Bash(grep -oE \"matchDataLinks[=:][^,;}]{0,400}\" \"/c/Users/vict_/AppData/Local/Temp/oe.js\")",
+      "Bash(python *)"
     ]
   }
 }

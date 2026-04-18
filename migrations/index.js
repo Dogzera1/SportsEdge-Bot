@@ -272,6 +272,73 @@ const migrations = [
       addColumnIfMissing(db, 'tips', 'line_shop_delta_pct', 'line_shop_delta_pct REAL');
     },
   },
+  {
+    // Oracle's Elixir ingest — dados granulares de partida pro profissional LoL.
+    // Uma linha por time por game (2 linhas por gameid). Filtrado com position='team'.
+    // Cobre §1d (side), §1g (GD@15/XPD@15/CSD@15), §1h (firsts), §1i (obj rates),
+    // §1j (KPM/DPM/WPM/damage), §4 (bans/picks), §3a (patch).
+    id: '022_oracleselixir_games',
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS oracleselixir_games (
+          gameid TEXT NOT NULL,
+          side TEXT NOT NULL,
+          date TEXT,
+          league TEXT,
+          year INTEGER,
+          split TEXT,
+          playoffs INTEGER,
+          patch TEXT,
+          teamid TEXT,
+          teamname TEXT,
+          gamelength INTEGER,
+          result INTEGER,
+          kills INTEGER,
+          deaths INTEGER,
+          firstblood INTEGER,
+          team_kpm REAL,
+          ckpm REAL,
+          firstdragon INTEGER,
+          dragons INTEGER,
+          firstherald INTEGER,
+          heralds INTEGER,
+          void_grubs INTEGER,
+          firstbaron INTEGER,
+          barons INTEGER,
+          firsttower INTEGER,
+          towers INTEGER,
+          inhibitors INTEGER,
+          dpm REAL,
+          wpm REAL,
+          vspm REAL,
+          gspd REAL,
+          gpr REAL,
+          goldat10 INTEGER,
+          xpat10 INTEGER,
+          csat10 INTEGER,
+          golddiffat10 INTEGER,
+          xpdiffat10 INTEGER,
+          csdiffat10 INTEGER,
+          goldat15 INTEGER,
+          xpat15 INTEGER,
+          csat15 INTEGER,
+          golddiffat15 INTEGER,
+          xpdiffat15 INTEGER,
+          csdiffat15 INTEGER,
+          killsat15 INTEGER,
+          deathsat15 INTEGER,
+          ban1 TEXT, ban2 TEXT, ban3 TEXT, ban4 TEXT, ban5 TEXT,
+          pick1 TEXT, pick2 TEXT, pick3 TEXT, pick4 TEXT, pick5 TEXT,
+          ingested_at TEXT DEFAULT (datetime('now')),
+          PRIMARY KEY (gameid, side)
+        );
+        CREATE INDEX IF NOT EXISTS idx_oe_team_date ON oracleselixir_games(teamname, date);
+        CREATE INDEX IF NOT EXISTS idx_oe_league_date ON oracleselixir_games(league, date);
+        CREATE INDEX IF NOT EXISTS idx_oe_patch ON oracleselixir_games(patch);
+        CREATE INDEX IF NOT EXISTS idx_oe_year_split ON oracleselixir_games(year, split);
+      `);
+    },
+  },
 ];
 
 function applyMigrations(db) {
