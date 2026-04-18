@@ -454,6 +454,33 @@ const migrations = [
       addColumnIfMissing(db, 'market_tips_shadow', 'close_captured_at', 'close_captured_at TEXT');
     },
   },
+  {
+    id: '027_tennis_match_stats',
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS tennis_match_stats (
+          match_id TEXT PRIMARY KEY,
+          tour TEXT,
+          player1 TEXT,
+          player2 TEXT,
+          winner TEXT,
+          date TEXT,
+          surface TEXT,
+          tourney_name TEXT,
+          best_of INTEGER,
+          round TEXT,
+          minutes INTEGER,
+          p1_ace INTEGER, p1_df INTEGER, p1_svpt INTEGER, p1_1st_in INTEGER, p1_1st_won INTEGER, p1_2nd_won INTEGER, p1_sv_gms INTEGER, p1_bp_saved INTEGER, p1_bp_faced INTEGER,
+          p2_ace INTEGER, p2_df INTEGER, p2_svpt INTEGER, p2_1st_in INTEGER, p2_1st_won INTEGER, p2_2nd_won INTEGER, p2_sv_gms INTEGER, p2_bp_saved INTEGER, p2_bp_faced INTEGER,
+          p1_rank INTEGER, p2_rank INTEGER,
+          score TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_tennis_stats_p1_date ON tennis_match_stats(player1, date);
+        CREATE INDEX IF NOT EXISTS idx_tennis_stats_p2_date ON tennis_match_stats(player2, date);
+        CREATE INDEX IF NOT EXISTS idx_tennis_stats_date ON tennis_match_stats(date);
+      `);
+    },
+  },
 ];
 
 function applyMigrations(db) {

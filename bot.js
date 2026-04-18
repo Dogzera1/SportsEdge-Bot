@@ -7762,20 +7762,38 @@ async function pollTennis(runOnce = false) {
             log('DEBUG', 'TENNIS-MODEL', `${match.team1} vs ${match.team2}: P1=${(tennisModelResult.modelP1*100).toFixed(1)}% conf=${tennisModelResult.confidence.toFixed(2)} factors=${tennisModelResult.factors?.join('+')}`);
           }
           // Markov point-by-point (precifica ML + sets + totals + TB de 1 só vez).
-          // Só roda se temos serveStats dos 2 jogadores. Blendado no tennisModelResult.
-          if (serveStats1 && serveStats2 && tennisModelResult) {
+          // Preferência: serveStats Sofascore (recent). Fallback: histórico DB (Sackmann)
+          // quando Sofascore ausente. Blendado no tennisModelResult.
+          if (tennisModelResult) {
             try {
               const markovSurface = /grass/i.test(surfaceForModel || surface) ? 'grass'
                 : /clay/i.test(surfaceForModel || surface) ? 'clay'
                 : /indoor/i.test(match.league || '') ? 'indoor' : 'hard';
-              const mSp = extractServeProbs(serveStats1, serveStats2, { surface: markovSurface });
+              // Fallback histórico pra cada side independentemente
+              const { getPlayerServeProfile } = require('./lib/tennis-player-stats');
+              const buildFallback = (name) => {
+                const p = getPlayerServeProfile(db, name, { surface: markovSurface, sinceDays: 730, minMatches: 10 });
+                if (!p || p.firstInPct == null || p.firstWonPct == null || p.secondWonPct == null) return null;
+                return {
+                  firstServePct: p.firstInPct * 100,
+                  firstServePointsPct: p.firstWonPct * 100,
+                  secondServePointsPct: p.secondWonPct * 100,
+                  _source: `hist(n=${p.matches})`,
+                };
+              };
+              const ss1 = serveStats1 || buildFallback(match.team1);
+              const ss2 = serveStats2 || buildFallback(match.team2);
+              const src1 = serveStats1 ? 'sofa' : (ss1?._source || '?');
+              const src2 = serveStats2 ? 'sofa' : (ss2?._source || '?');
+              if (!ss1 || !ss2) { throw new Error('no serve stats available'); }
+              const mSp = extractServeProbs(ss1, ss2, { surface: markovSurface });
               if (mSp) {
                 const bestOfMarkov = /grand slam|\[g\]|wimbledon|us open|roland|australian/i.test(match.league || '') ? 5 : 3;
                 const markov = priceTennisMatch({ p1Serve: mSp.p1Serve, p2Serve: mSp.p2Serve, bestOf: bestOfMarkov, iters: 15000 });
                 // Blend com tennisModelResult.modelP1 (40% Markov / 60% modelo existente)
                 const blendedP1 = 0.40 * markov.pMatch + 0.60 * tennisModelResult.modelP1;
                 log('INFO', 'TENNIS-MARKOV',
-                  `${match.team1} vs ${match.team2} [${markovSurface} Bo${bestOfMarkov}]: markov=${(markov.pMatch*100).toFixed(1)}% ` +
+                  `${match.team1} [${src1}] vs ${match.team2} [${src2}] [${markovSurface} Bo${bestOfMarkov}]: markov=${(markov.pMatch*100).toFixed(1)}% ` +
                   `(p1s=${mSp.p1Serve.toFixed(3)} p2s=${mSp.p2Serve.toFixed(3)}) ` +
                   `| existing=${(tennisModelResult.modelP1*100).toFixed(1)}% → blend=${(blendedP1*100).toFixed(1)}% ` +
                   `| avgGames=${markov.totalGamesAvg.toFixed(1)} pO22.5=${(markov.pOver22_5*100).toFixed(0)}% ` +
@@ -7812,23 +7830,36 @@ async function pollTennis(runOnce = false) {
                   } catch (te) { log('DEBUG', 'TENNIS-TB', `err: ${te.message}`); }
                 }
 
-                // Ace market pricing (Poisson). Requer acesPerMatch dos 2 jogadores.
-                if (Number.isFinite(serveStats1?.acesPerMatch) && Number.isFinite(serveStats2?.acesPerMatch)) {
-                  try {
+                // Ace market pricing (Poisson). Prefere histórico (Sackmann) sobre
+                // Sofascore (últimos N matches) quando disponível — sample maior, menos noise.
+                try {
+                  const { getPlayerAceRate } = require('./lib/tennis-player-stats');
+                  const historic1 = getPlayerAceRate(db, match.team1, { surface: markovSurface, sinceDays: 730, minMatches: 10 });
+                  const historic2 = getPlayerAceRate(db, match.team2, { surface: markovSurface, sinceDays: 730, minMatches: 10 });
+
+                  // Source preference: historic > sofascore. Mix quando só 1 lado tem histórico.
+                  let a1 = null, a2 = null, src1 = null, src2 = null;
+                  if (historic1) { a1 = historic1.acePerMatchAvg; src1 = `hist(n=${historic1.matches})`; }
+                  else if (Number.isFinite(serveStats1?.acesPerMatch)) { a1 = serveStats1.acesPerMatch; src1 = 'sofa'; }
+                  if (historic2) { a2 = historic2.acePerMatchAvg; src2 = `hist(n=${historic2.matches})`; }
+                  else if (Number.isFinite(serveStats2?.acesPerMatch)) { a2 = serveStats2.acesPerMatch; src2 = 'sofa'; }
+
+                  if (Number.isFinite(a1) && Number.isFinite(a2)) {
                     const aces = estimateTennisAces({
-                      acesPerMatch1: serveStats1.acesPerMatch,
-                      acesPerMatch2: serveStats2.acesPerMatch,
+                      acesPerMatch1: a1,
+                      acesPerMatch2: a2,
                       bestOf: bestOfMarkov,
                       surface: markovSurface,
                     });
                     if (aces) {
                       log('INFO', 'TENNIS-ACES',
-                        `${match.team1} (${serveStats1.acesPerMatch}/m) vs ${match.team2} (${serveStats2.acesPerMatch}/m) [${markovSurface} Bo${bestOfMarkov}]: ` +
+                        `${match.team1} (${a1}/m [${src1}]) vs ${match.team2} (${a2}/m [${src2}]) [${markovSurface} Bo${bestOfMarkov}]: ` +
                         `total~${aces.totalAcesAvg} | pO10.5=${(aces.pOver['10.5']*100).toFixed(0)}% pO15.5=${(aces.pOver['15.5']*100).toFixed(0)}% pO22.5=${(aces.pOver['22.5']*100).toFixed(0)}%`);
                       tennisModelResult._markovAces = aces;
+                      tennisModelResult._markovAcesSource = `${src1}/${src2}`;
                     }
-                  } catch (ae) { log('DEBUG', 'TENNIS-ACES', `err: ${ae.message}`); }
-                }
+                  }
+                } catch (ae) { log('DEBUG', 'TENNIS-ACES', `err: ${ae.message}`); }
 
                 // LIVE Markov: se temos liveScoreData, recomputa a partir do state atual.
                 // Override do pMatch pré-match porque live sobrepõe.
