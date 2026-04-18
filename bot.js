@@ -5910,8 +5910,15 @@ async function _pollDotaInner(runOnce = false) {
       }
       // Bloqueia duplicata pre→live ou re-cadastro com novo event ID no começo.
       // Permite tips em mapas diferentes do Bo3/Bo5 (score já avançou).
+      // IMPORTANTE: só considera "início de série" quando:
+      //   - pré-jogo (!isLive), ou
+      //   - live E score explicitamente 0-0 (ambos finite E zero)
+      // Assumir score=0 via `|| 0` para undefined bloquearia mapa 2+ quando o feed
+      // ainda não populou o placar live.
       const prevBase = analyzedDota.get(pairKeyBase);
-      const isStartOfSerie = !isLive || ((match.score1 || 0) === 0 && (match.score2 || 0) === 0);
+      const scoreIsKnownZero = Number.isFinite(match.score1) && Number.isFinite(match.score2)
+        && match.score1 === 0 && match.score2 === 0;
+      const isStartOfSerie = !isLive || scoreIsKnownZero;
       if (isStartOfSerie && prevBase?.tipSent && (now - prevBase.ts) < 12 * 60 * 60 * 1000) {
         log('DEBUG', 'AUTO-DOTA', `Skip ${match.team1} vs ${match.team2} (${match.status}): tip já enviada no início dessa série (${Math.round((now-prevBase.ts)/60000)}min atrás)`);
         continue;
