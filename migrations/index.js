@@ -482,6 +482,34 @@ const migrations = [
     },
   },
   {
+    id: '029_dota_hero_stats_extend',
+    up(db) {
+      // Table já existe de versão anterior — adiciona columns faltantes + index.
+      if (!tableExists(db, 'dota_hero_stats')) {
+        db.exec(`
+          CREATE TABLE dota_hero_stats (
+            hero_id INTEGER PRIMARY KEY,
+            localized_name TEXT,
+            primary_attr TEXT,
+            roles TEXT,
+            pub_pick INTEGER DEFAULT 0,
+            pub_win  INTEGER DEFAULT 0,
+            pub_winrate REAL,
+            pro_pick INTEGER DEFAULT 0,
+            pro_win  INTEGER DEFAULT 0,
+            pro_ban  INTEGER DEFAULT 0,
+            pro_winrate REAL,
+            pro_pickban_rate REAL,
+            updated_at TEXT DEFAULT (datetime('now'))
+          );
+        `);
+      }
+      addColumnIfMissing(db, 'dota_hero_stats', 'attack_type', 'attack_type TEXT');
+      addColumnIfMissing(db, 'dota_hero_stats', 'source', "source TEXT DEFAULT 'opendota'");
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_dota_hero_stats_name ON dota_hero_stats(localized_name);`);
+    },
+  },
+  {
     id: '028_tips_archived_flag',
     up(db) {
       if (!tableExists(db, 'tips')) return;

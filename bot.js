@@ -4149,6 +4149,7 @@ async function autoAnalyzeMatch(token, match) {
       // Gate 0: Sem odds reais → rejeitar sempre (odds estimadas não garantem valor)
       if (filteredTipResult && !hasRealOdds) {
         log('INFO', 'AUTO', `Gate odds reais: ${match.team1} vs ${match.team2} → odds estimadas → rejeitado`);
+        logRejection('lol', `${match.team1} vs ${match.team2}`, 'odds_not_real', {});
         filteredTipResult = null;
       }
 
@@ -4166,12 +4167,14 @@ async function autoAnalyzeMatch(token, match) {
 
         if (tipOdd < MIN_ODDS || tipOdd > MAX_ODDS) {
           log('INFO', 'AUTO', `Gate odds: ${match.team1} vs ${match.team2} → odd ${tipOdd} fora do range [${MIN_ODDS}, ${MAX_ODDS}] → rejeitado`);
+          logRejection('lol', `${match.team1} vs ${match.team2}`, 'odds_out_of_range', { odd: tipOdd, min: MIN_ODDS, max: MAX_ODDS });
           filteredTipResult = null;
         } else if (tipOdd > HIGH_ODDS && !isNaN(tipEV)) {
           // Odds altas passam mas exigem EV maior — aplicado antes do Gate 4 via adaptiveEV bump
           const required = adaptiveEV + HIGH_ODDS_EV_BONUS;
           if (tipEV < required) {
             log('INFO', 'AUTO', `Gate odds altas: ${match.team1} vs ${match.team2} → odd ${tipOdd} > ${HIGH_ODDS} mas EV ${tipEV}% < ${required.toFixed(1)}% → rejeitado`);
+            logRejection('lol', `${match.team1} vs ${match.team2}`, 'high_odds_ev_low', { odd: tipOdd, ev: tipEV, required: +required.toFixed(1) });
             filteredTipResult = null;
           }
         }
@@ -4258,6 +4261,7 @@ async function autoAnalyzeMatch(token, match) {
       if (!tipResult) {
         // IA não gerou TIP_ML — sem edge detectado
         log('INFO', 'AUTO', `Sem tip: ${match.team1} vs ${match.team2} → IA sem edge${summary ? ` | ${summary}` : ''} | mlEdge=${mlResult.score.toFixed(1)}pp`);
+        logRejection('lol', `${match.team1} vs ${match.team2}`, 'ai_no_edge', { mlEdge: +mlResult.score.toFixed(2) });
       } else {
         // TIP_ML gerada mas bloqueada pelos gates (já logado individualmente acima)
         log('INFO', 'AUTO', `Tip bloqueada: ${match.team1} vs ${match.team2}${summary ? ` | ${summary}` : ''} | mlEdge=${mlResult.score.toFixed(1)}pp`);
@@ -5026,17 +5030,29 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
       `).get();
       txt += `\n*Market tips shadow 7d:* ${shadowStats.total} logged · ${shadowStats.pending} pendentes · ${shadowStats.with_clv} com CLV\n`;
 
-      // 5. Rejections summary cross-sport
+      // 5. Rejections summary cross-sport com categorização
+      const BLOCKING = new Set(['odds_stale', 'odds_not_real', 'elo_insufficient', 'ai_no_edge']);
+      const TUNING = new Set(['ev_below_min', 'edge_below_threshold', 'divergence_cap', 'ml_prefilter_edge', 'high_odds_ev_low', 'sharp_line_reject', 'odds_out_of_range']);
+      const DATA = new Set(['itf_exclusion', 'segment_skip', 'ai_block']);
       const totalRej = _rejections.filter(r => r.ts >= cutoff).length;
       txt += `\n*Rejections 1h:* ${totalRej} total`;
       if (totalRej > 0) {
         const topReasons = {};
+        let blocking = 0, tuning = 0, data = 0, other = 0;
         for (const r of _rejections) {
           if (r.ts < cutoff) break;
           topReasons[r.reason] = (topReasons[r.reason] || 0) + 1;
+          if (BLOCKING.has(r.reason)) blocking++;
+          else if (TUNING.has(r.reason)) tuning++;
+          else if (DATA.has(r.reason)) data++;
+          else other++;
         }
+        txt += `\n  🚨 blocking: ${blocking} (data/config issues)`;
+        txt += `\n  🎯 tuning: ${tuning} (thresholds calibration)`;
+        txt += `\n  ✓ data: ${data} (intentional)`;
+        if (other) txt += `\n  ? other: ${other}`;
         const topList = Object.entries(topReasons).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([r, n]) => `${r}×${n}`).join(' · ');
-        txt += ` (${topList})`;
+        txt += `\n  Top: ${topList}`;
       }
 
       // 6. Sharp action: settlement status
@@ -7178,9 +7194,9 @@ async function _pollDotaInner(runOnce = false) {
           const bestOf = boMatch ? parseInt(boMatch[1], 10) : 3;
           // pMap baseline inferred from pSeries (inverse) — assume independence.
           const pMapBase = mapProbFromSeries(mlResult.modelP1, bestOf);
-          // Live map prob
+          // Live map prob (db injetado pra draft meta factor via dota-hero-features)
           const pred = predictMapWinner({
-            liveStats: od,
+            liveStats: { ...od, _db: db },
             seriesScore: { score1: match.score1, score2: match.score2, team1: match.team1, team2: match.team2 },
             baselineP: pMapBase,
             team1Name: match.team1,
@@ -7419,6 +7435,7 @@ Máximo 200 palavras.`;
       const oddVal = parseFloat(tipOdd);
       if (oddVal < minOdds || oddVal > maxOdds) {
         log('INFO', 'AUTO-DOTA', `Odd fora do range (${oddVal}): pulando`);
+        logRejection('dota2', `${match.team1} vs ${match.team2}`, 'odds_out_of_range', { odd: oddVal, min: minOdds, max: maxOdds });
         setDotaAnalyzed({ ts: now, tipSent: false, noEdge: true });
         await _sleep(2000); continue;
       }
@@ -8079,6 +8096,7 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
         }
         if (tipOdd < 1.40 || tipOdd > 5.00) {
           log('INFO', 'AUTO-MMA', `Gate odds: ${tipOdd} fora do range 1.40-5.00`);
+          logRejection('mma', `${fight.team1} vs ${fight.team2}`, 'odds_out_of_range', { odd: tipOdd, min: 1.40, max: 5.00 });
           await new Promise(r => setTimeout(r, 3000)); continue;
         }
         // Detecta book sharp (Pinnacle/Betfair). MMA TheOddsAPI pode entregar BetOnline.ag,
@@ -9025,6 +9043,7 @@ Máximo 200 palavras. Raciocínio breve antes da decisão.`;
 
         if (tipOdd < TENNIS_GATE_MIN_ODDS || tipOdd > TENNIS_GATE_MAX_ODDS) {
           log('INFO', 'AUTO-TENNIS', `Gate odds: ${tipOdd} fora do range ${TENNIS_GATE_MIN_ODDS}-${TENNIS_GATE_MAX_ODDS}`);
+          logRejection('tennis', `${match.team1} vs ${match.team2}`, 'odds_out_of_range', { odd: tipOdd, min: TENNIS_GATE_MIN_ODDS, max: TENNIS_GATE_MAX_ODDS });
           await new Promise(r => setTimeout(r, 3000)); continue;
         }
         if (tipEV < 7.0) {
@@ -9560,6 +9579,7 @@ Máximo 200 palavras.`;
 
         if (tipOdd < 1.30 || tipOdd > 6.00) {
           log('INFO', 'AUTO-FOOTBALL', `Gate odds: ${tipOdd} fora do range 1.30-6.00`);
+          logRejection('football', `${match.team1} vs ${match.team2}`, 'odds_out_of_range', { odd: tipOdd, min: 1.30, max: 6.00 });
           await new Promise(r => setTimeout(r, 2000)); continue;
         }
         if (tipEV < EV_THRESHOLD) {
@@ -9845,6 +9865,7 @@ async function pollTableTennis(runOnce = false) {
           if (!aiR.passed) {
             analyzedTT.set(key, { ts: now, tipSent: false });
             log('INFO', 'AUTO-TT', `IA bloqueou: ${aiR.reason} | ${pickTeam} @ ${pickOdd}`);
+            logRejection('tabletennis', `${match.team1} vs ${match.team2}`, 'ai_block', { reason: aiR.reason });
             continue;
           }
           _aiConfTT = aiR.conf;
@@ -10684,6 +10705,7 @@ async function pollValorant(runOnce = false) {
           if (!aiR.passed) {
             analyzedValorant.set(key, { ts: now, tipSent: false });
             log('INFO', 'AUTO-VAL', `IA bloqueou: ${aiR.reason} | ${pickTeam} @ ${pickOdd}`);
+            logRejection('valorant', `${match.team1} vs ${match.team2}`, 'ai_block', { reason: aiR.reason });
             continue;
           }
           var _aiConfVal = aiR.conf || null;
