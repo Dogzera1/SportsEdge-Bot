@@ -53,7 +53,8 @@ if (rows.length < 400) {
 }
 
 // ── Features ──────────────────────────────────────────────────────────────
-const NUM_FEATURES = [
+// Features base (todos os esportes)
+const BASE_NUM_FEATURES = [
   'elo_diff_overall', 'elo_diff_league',
   'games_t1', 'games_t2',
   'winrate_diff_10', 'winrate_diff_20',
@@ -62,6 +63,17 @@ const NUM_FEATURES = [
   'matches_last14_diff',
   'n_signals', 'best_of',
 ];
+// Extras só LoL (gol.gg team stats)
+const LOL_EXTRA_FEATURES = [
+  'gpm_diff', 'gdm_diff', 'gd15_diff', 'fb_rate_diff', 'ft_rate_diff',
+  'dpm_diff', 'kd_diff', 'team_wr_diff', 'dra_pct_diff', 'nash_pct_diff',
+  'has_team_stats',
+];
+
+// Decide NUM_FEATURES baseado no CSV carregado (se tem colunas LoL extras, inclui)
+const NUM_FEATURES = (GAME === 'lol' && headers.includes('gpm_diff'))
+  ? [...BASE_NUM_FEATURES, ...LOL_EXTRA_FEATURES]
+  : BASE_NUM_FEATURES;
 const CAT_FEATURES = ['league_tier']; // 1,2,3
 
 function buildVec(row) {

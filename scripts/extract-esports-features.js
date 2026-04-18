@@ -36,6 +36,52 @@ console.log(`[extract-es] game=${GAME} out=${OUT} min_warmup=${MIN_WARMUP}`);
 
 const { db } = initDatabase(DB_PATH);
 
+// ── Team stats loader (só LoL — gol.gg) ─────────────────────────────────
+// Estrutura: team_stats → { <normTeam>: { season→split→row } }
+const teamStatsMap = new Map();
+if (GAME === 'lol') {
+  try {
+    const rows = db.prepare(`SELECT * FROM team_stats`).all();
+    for (const r of rows) {
+      const k = String(r.team || '').toLowerCase().trim();
+      if (!teamStatsMap.has(k)) teamStatsMap.set(k, {});
+      const byT = teamStatsMap.get(k);
+      if (!byT[r.season]) byT[r.season] = {};
+      byT[r.season][r.split] = r;
+    }
+    console.log(`[extract-es] team_stats loaded: ${rows.length} rows covering ${teamStatsMap.size} teams`);
+  } catch (e) { console.warn(`[extract-es] team_stats load err: ${e.message}`); }
+}
+
+// Mapa data → season/split (gol.gg usa SN = Year-2010+1 aprox; simplificação)
+function seasonSplit(dateIso) {
+  const [y, m] = dateIso.split('-').map(Number);
+  const season = `S${y - 2010 - 2}`; // 2023→S13, 2024→S14, 2025→S15, 2026→S16
+  let split = 'ALL';
+  if (y >= 2025 && m <= 2) split = 'Winter';
+  else if (m >= 1 && m <= 5) split = 'Spring';
+  else if (m >= 6 && m <= 8) split = 'Summer';
+  else split = 'ALL';
+  return { season, split };
+}
+
+function getTeamStats(name, season, split) {
+  const k = String(name || '').toLowerCase().trim();
+  const entry = teamStatsMap.get(k);
+  if (!entry) return null;
+  // tenta split específico, depois ALL
+  if (entry[season]?.[split]) return entry[season][split];
+  if (entry[season]?.ALL) return entry[season].ALL;
+  // fallback: última season disponível
+  const seasons = Object.keys(entry).sort().reverse();
+  for (const s of seasons) {
+    if (entry[s].ALL) return entry[s].ALL;
+    const firstSplit = Object.values(entry[s])[0];
+    if (firstSplit) return firstSplit;
+  }
+  return null;
+}
+
 // Carrega matches ordenados
 const rows = db.prepare(`
   SELECT match_id, team1, team2, winner, final_score, league, resolved_at
@@ -118,6 +164,10 @@ const HEADERS = [
   'days_since_last_t1', 'days_since_last_t2', 'days_since_diff',
   'matches_last14_diff',
   'n_signals',
+  // gol.gg team stats diffs (só populado se GAME='lol' e ambos times têm stats)
+  'gpm_diff', 'gdm_diff', 'gd15_diff', 'fb_rate_diff', 'ft_rate_diff',
+  'dpm_diff', 'kd_diff', 'team_wr_diff', 'dra_pct_diff', 'nash_pct_diff',
+  'has_team_stats',
   'y',
 ];
 
@@ -177,6 +227,29 @@ for (const r of rows) {
 
   const shouldOutput = s1.gamesAll >= MIN_WARMUP && s2.gamesAll >= MIN_WARMUP;
   if (shouldOutput) {
+    // gol.gg team stats diffs (só LoL; 0 se algum time sem stats)
+    let gpmDiff = 0, gdmDiff = 0, gd15Diff = 0, fbDiff = 0, ftDiff = 0;
+    let dpmDiff = 0, kdDiff = 0, teamWrDiff = 0, draPctDiff = 0, nashPctDiff = 0;
+    let hasTeamStats = 0;
+    if (GAME === 'lol' && teamStatsMap.size > 0) {
+      const iso = new Date(t).toISOString().slice(0, 10);
+      const { season, split } = seasonSplit(iso);
+      const ts1 = getTeamStats(p1Raw, season, split);
+      const ts2 = getTeamStats(p2Raw, season, split);
+      if (ts1 && ts2) {
+        hasTeamStats = 1;
+        gpmDiff = (ts1.gpm || 0) - (ts2.gpm || 0);
+        gdmDiff = (ts1.gdm || 0) - (ts2.gdm || 0);
+        gd15Diff = (ts1.gd_at_15 || 0) - (ts2.gd_at_15 || 0);
+        fbDiff = (ts1.fb_pct || 0) - (ts2.fb_pct || 0);
+        ftDiff = (ts1.ft_pct || 0) - (ts2.ft_pct || 0);
+        dpmDiff = (ts1.dpm || 0) - (ts2.dpm || 0);
+        kdDiff = (ts1.kd_ratio || 0) - (ts2.kd_ratio || 0);
+        teamWrDiff = (ts1.winrate || 0) - (ts2.winrate || 0);
+        draPctDiff = (ts1.dra_pct || 0) - (ts2.dra_pct || 0);
+        nashPctDiff = (ts1.nash_pct || 0) - (ts2.nash_pct || 0);
+      }
+    }
     out.push([
       new Date(t).toISOString().slice(0, 10),
       (league || '').replace(/,/g, ' '),
@@ -192,6 +265,10 @@ for (const r of rows) {
       daysSince1, daysSince2, daysSinceDiff,
       matchesLast14Diff,
       nSignals,
+      gpmDiff.toFixed(2), gdmDiff.toFixed(2), gd15Diff.toFixed(2),
+      fbDiff.toFixed(4), ftDiff.toFixed(4),
+      dpmDiff.toFixed(2), kdDiff.toFixed(3), teamWrDiff.toFixed(4),
+      draPctDiff.toFixed(4), nashPctDiff.toFixed(4), hasTeamStats,
       p1Won,
     ]);
     kept++;
