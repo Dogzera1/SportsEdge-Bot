@@ -1,0 +1,87 @@
+{
+  "version": 1,
+  "fittedAt": "2026-04-18T10:42:48.262Z",
+  "method": "isotonic_pav",
+  "nCalibSamples": 1359,
+  "blocks": [
+    {
+      "pMin": 0.0529,
+      "pMax": 0.0983,
+      "yMean": 0.2,
+      "n": 20
+    },
+    {
+      "pMin": 0.1018,
+      "pMax": 0.1471,
+      "yMean": 0.2609,
+      "n": 23
+    },
+    {
+      "pMin": 0.1547,
+      "pMax": 0.2474,
+      "yMean": 0.4286,
+      "n": 84
+    },
+    {
+      "pMin": 0.2503,
+      "pMax": 0.3493,
+      "yMean": 0.5469,
+      "n": 128
+    },
+    {
+      "pMin": 0.35,
+      "pMax": 0.3999,
+      "yMean": 0.5965,
+      "n": 114
+    },
+    {
+      "pMin": 0.4004,
+      "pMax": 0.5492,
+      "yMean": 0.7419,
+      "n": 341
+    },
+    {
+      "pMin": 0.5503,
+      "pMax": 0.649,
+      "yMean": 0.7729,
+      "n": 229
+    },
+    {
+      "pMin": 0.6501,
+      "pMax": 0.7495,
+      "yMean": 0.8966,
+      "n": 203
+    },
+    {
+      "pMin": 0.7504,
+      "pMax": 0.8,
+      "yMean": 0.9265,
+      "n": 68
+    },
+    {
+      "pMin": 0.8002,
+      "pMax": 0.8499,
+      "yMean": 0.9403,
+      "n": 67
+    },
+    {
+      "pMin": 0.8502,
+      "pMax": 0.8982,
+      "yMean": 0.9796,
+      "n": 49
+    },
+    {
+      "pMin": 0.9016,
+      "pMax": 0.9485,
+      "yMean": 1,
+      "n": 22
+    },
+    {
+      "pMin": 0.955,
+      "pMax": 0.982,
+      "yMean": 1,
+      "n": 9
+    }
+  ],
+  "trainingNote": "Fit sobre surface-Elo walk-forward; aplicar após tennis-model blended output."
+}
