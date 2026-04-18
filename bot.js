@@ -12,6 +12,8 @@ const { adjustStakeUnits } = require('./lib/risk-manager');
 const { esportsPreFilter } = require('./lib/ml');
 const { formatLineShopDM } = require('./lib/line-shopping');
 const { getLolProbability } = require('./lib/lol-model');
+const { predictTrainedEsports, hasTrainedModel: hasTrainedEsportsModel } = require('./lib/esports-model-trained');
+const { buildTrainedContext: buildEsportsTrainedContext } = require('./lib/esports-runtime-features');
 const { getFootballProbability } = require('./lib/football-model');
 const { getTennisProbability, detectSurface } = require('./lib/tennis-model');
 const { fetchMatchNews } = require('./lib/news');
@@ -3176,6 +3178,17 @@ async function autoAnalyzeMatch(token, match) {
     const mlPrefilterOn = (process.env.LOL_ML_PREFILTER ?? 'true') !== 'false';
     const mlResult = esportsPreFilter(match, oddsToUse, enrich, hasLiveStats, gamesContext, compScore, stmts);
 
+    // ── Layer 1b.0: Modelo treinado (logistic+isotônico) ──
+    // Blend com o modelo específico quando disponível. Gate automático em
+    // esports-model-trained.js: só entra se bateu baseline Elo no test set.
+    let trainedLol = null;
+    if (hasTrainedEsportsModel('lol')) {
+      try {
+        const ctx = buildEsportsTrainedContext(db, 'lol', match);
+        if (ctx) trainedLol = predictTrainedEsports('lol', ctx);
+      } catch (e) { log('DEBUG', 'LOL-TRAINED', `ctx err: ${e.message}`); }
+    }
+
     // ── Layer 1b: Modelo LoL específico (Elo + Draft + Form) ──
     // Gera probabilidades melhores que o ML genérico. Usado para:
     // 1. Resgatar matches que o ML genérico rejeitou mas o modelo específico vê edge
@@ -3183,6 +3196,26 @@ async function autoAnalyzeMatch(token, match) {
     let lolModel = null;
     try {
       lolModel = getLolProbability(db, match, oddsToUse, enrich, compScore);
+      // Blend trained com lolModel usando confidence do trained
+      if (trainedLol && lolModel && lolModel.modelP1 > 0) {
+        const wT = trainedLol.confidence;
+        const mergedP1 = wT * trainedLol.p1 + (1 - wT) * lolModel.modelP1;
+        log('INFO', 'LOL-TRAINED',
+          `${match.team1} vs ${match.team2}: trainedP1=${(trainedLol.p1 * 100).toFixed(1)}% (conf=${wT}) | lolP1=${(lolModel.modelP1 * 100).toFixed(1)}% → blend=${(mergedP1 * 100).toFixed(1)}%`);
+        lolModel.modelP1 = mergedP1;
+        lolModel.modelP2 = 1 - mergedP1;
+        lolModel.method = `${lolModel.method}+${trainedLol.method}`;
+        lolModel.confidence = Math.max(lolModel.confidence, wT);
+      } else if (trainedLol && (!lolModel || !lolModel.modelP1)) {
+        log('INFO', 'LOL-TRAINED',
+          `${match.team1} vs ${match.team2}: usando trained só (lolModel indisponível), P1=${(trainedLol.p1 * 100).toFixed(1)}%`);
+        lolModel = {
+          modelP1: trainedLol.p1, modelP2: trainedLol.p2,
+          confidence: trainedLol.confidence,
+          method: trainedLol.method,
+          factors: ['trained'],
+        };
+      }
       if (lolModel && lolModel.confidence > 0.3) {
         // Merge: se o modelo específico tem confiança alta, usa suas probabilidades
         if (lolModel.modelP1 > 0 && lolModel.modelP2 > 0) {
@@ -5887,6 +5920,22 @@ async function _pollDotaInner(runOnce = false) {
         log('DEBUG', 'AUTO-DOTA', `ML edge bruto=${mlResult.rawEdge.toFixed(1)}pp (clamped→${mlResult.score.toFixed(1)}pp) | modelP1Raw=${(mlResult.modelP1Raw*100).toFixed(1)}% impliedP1=${(mlResult.impliedP1*100).toFixed(1)}% scorePts=${(mlResult.scorePoints||0).toFixed(1)} factors=[${(mlResult.factorActive||[]).join(',')}] ${match.team1} vs ${match.team2}`);
       }
 
+      // ── Modelo treinado Dota (logistic+isotônico) ──
+      if (hasTrainedEsportsModel('dota2')) {
+        try {
+          const ctx = buildEsportsTrainedContext(db, 'dota2', match);
+          const tp = ctx ? predictTrainedEsports('dota2', ctx) : null;
+          if (tp) {
+            const wT = tp.confidence;
+            const mergedP1 = wT * tp.p1 + (1 - wT) * mlResult.modelP1;
+            log('INFO', 'DOTA-TRAINED', `${match.team1} vs ${match.team2}: trainedP1=${(tp.p1*100).toFixed(1)}% (conf=${wT}) | heuristicP1=${(mlResult.modelP1*100).toFixed(1)}% → blend=${(mergedP1*100).toFixed(1)}%`);
+            mlResult.modelP1 = mergedP1;
+            mlResult.modelP2 = 1 - mergedP1;
+            mlResult.factorCount = (mlResult.factorCount || 0) + 1;
+          }
+        } catch (e) { log('DEBUG', 'DOTA-TRAINED', `err: ${e.message}`); }
+      }
+
       // ── Dados para o prompt ──
       const r1 = 1 / parseFloat(o.t1), r2 = 1 / parseFloat(o.t2);
       const overround = r1 + r2;
@@ -8305,8 +8354,24 @@ async function pollCs(runOnce = false) {
         const mlResult = esportsPreFilter(match, match.odds, enrich, false, '', null, stmts);
 
         const useElo = elo.pass && elo.found1 && elo.found2 && Math.min(elo.eloMatches1, elo.eloMatches2) >= 5;
-        const modelP1 = useElo ? elo.modelP1 : mlResult.modelP1;
-        const modelP2 = useElo ? elo.modelP2 : mlResult.modelP2;
+        let modelP1 = useElo ? elo.modelP1 : mlResult.modelP1;
+        let modelP2 = useElo ? elo.modelP2 : mlResult.modelP2;
+
+        // ── Modelo treinado CS2 (logistic+isotônico) ──
+        if (hasTrainedEsportsModel('cs2')) {
+          try {
+            const ctx = buildEsportsTrainedContext(db, 'cs2', match);
+            const tp = ctx ? predictTrainedEsports('cs2', ctx) : null;
+            if (tp) {
+              const wT = tp.confidence;
+              const mergedP1 = wT * tp.p1 + (1 - wT) * modelP1;
+              log('INFO', 'CS-TRAINED', `${match.team1} vs ${match.team2}: trainedP1=${(tp.p1*100).toFixed(1)}% (conf=${wT}) | priorP1=${(modelP1*100).toFixed(1)}% → blend=${(mergedP1*100).toFixed(1)}%`);
+              modelP1 = mergedP1;
+              modelP2 = 1 - mergedP1;
+            }
+          } catch (e) { log('DEBUG', 'CS-TRAINED', `err: ${e.message}`); }
+        }
+
         const direction = useElo
           ? (elo.direction === 'p1' ? 't1' : elo.direction === 'p2' ? 't2' : null)
           : mlResult.direction;
@@ -8644,8 +8709,24 @@ async function pollValorant(runOnce = false) {
           continue;
         }
 
-        const modelP1 = elo.modelP1;
-        const modelP2 = elo.modelP2;
+        let modelP1 = elo.modelP1;
+        let modelP2 = elo.modelP2;
+
+        // ── Modelo treinado Valorant (se bateu baseline no train; atualmente OFF
+        //   pois dataset PandaScore free tier é curto demais para treinar) ──
+        if (hasTrainedEsportsModel('valorant')) {
+          try {
+            const vctx = buildEsportsTrainedContext(db, 'valorant', match);
+            const tp = vctx ? predictTrainedEsports('valorant', vctx) : null;
+            if (tp) {
+              const wT = tp.confidence;
+              const mergedP1 = wT * tp.p1 + (1 - wT) * modelP1;
+              log('INFO', 'VAL-TRAINED', `${match.team1} vs ${match.team2}: trainedP1=${(tp.p1*100).toFixed(1)}% | priorP1=${(modelP1*100).toFixed(1)}% → blend=${(mergedP1*100).toFixed(1)}%`);
+              modelP1 = mergedP1;
+              modelP2 = 1 - mergedP1;
+            }
+          } catch (e) { log('DEBUG', 'VAL-TRAINED', `err: ${e.message}`); }
+        }
         const direction = elo.direction === 'p1' ? 't1' : elo.direction === 'p2' ? 't2' : null;
         const mlScore = elo.score;
         const factorCount = elo.factorCount;

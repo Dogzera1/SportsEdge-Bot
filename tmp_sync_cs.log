@@ -1,0 +1,5 @@
+[sync-ps] game=cs-go path=csgo db=cs2
+[sync-ps] range=2023-01-01..2026-04-17 max=12000 per_page=50 delay=600ms
+[sync-ps] match_results cs2 ANTES: 0
+[sync-ps] page 1: +50 raw → 50 inseridos (0 skipped)
+[sync-ps] page 2: +50 raw → 100 inseridos (0 skipped)

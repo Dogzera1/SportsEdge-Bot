@@ -172,7 +172,19 @@
       "Bash(grep -nE \"Stake.*\\\\*\\\\\\\\\\\\$\\\\{tipStake\\\\}|💵 Stake.*tipStake\" bot.js)",
       "Bash(grep -nE \"log\\\\\\('INFO',\\\\s*'AUTO[-_].*Iniciando|log\\\\\\('INFO',\\\\s*'AUTO',.*\\\\`LoL: \" bot.js)",
       "Bash(curl -s -k -m 25 -H \"x-admin-key: 54cd682231bdda16f405b54f55e147883cb3aaabe09b16ab88c73cd701e8523e\" \"https://sportsedge-bot-production.up.railway.app/agents/tennis-v2-smoke?limit=500\" -o /tmp/sm2.json)",
-      "Bash(cp /tmp/sm2.json _sm2.json)"
+      "Bash(cp /tmp/sm2.json _sm2.json)",
+      "Bash(node scripts/sync-pandascore-history.js --game lol --from 2023-01-01 --max 15000 --delay 300)",
+      "Bash(echo \"LOL PID: $!\")",
+      "Bash(node scripts/sync-pandascore-history.js --game dota2 --from 2023-01-01 --max 12000 --delay 600)",
+      "Bash(echo \"Dota PID: $!\")",
+      "Bash(node scripts/sync-pandascore-history.js --game valorant --from 2023-01-01 --max 12000 --delay 600)",
+      "Bash(echo \"Val PID: $!\")",
+      "Bash(node scripts/sync-pandascore-history.js --game cs-go --from 2023-01-01 --max 12000 --delay 600)",
+      "Bash(echo \"CS PID: $!\")",
+      "Bash(node scripts/sync-pandascore-history.js --game dota2 --from 2022-01-01 --max 15000 --delay 1000)",
+      "Bash(echo \"dota bg: $!\")",
+      "Bash(node scripts/sync-pandascore-history.js --game valorant --from 2022-01-01 --max 15000 --delay 1000)",
+      "Bash(echo \"val bg: $!\")"
     ]
   }
 }
