@@ -27,3 +27,62 @@
   offset=2900: 100 parsed, +0 inserted | total=0/2500
   offset=3000: 100 parsed, +0 inserted | total=0/2600
   offset=3100: 100 parsed, +0 inserted | total=0/2700
+  offset=3200: 100 parsed, +0 inserted | total=0/2800
+  offset=3300: 100 parsed, +0 inserted | total=0/2900
+  offset=3400: 100 parsed, +0 inserted | total=0/3000
+  offset=3500: 100 parsed, +0 inserted | total=0/3100
+  offset=3600: 100 parsed, +0 inserted | total=0/3200
+  offset=3700: 100 parsed, +0 inserted | total=0/3300
+  offset=3800: 100 parsed, +0 inserted | total=0/3400
+  offset=3900: 100 parsed, +0 inserted | total=0/3500
+  blocked (403), backoff 60s...
+  blocked (403), backoff 60s...
+  offset=4000: 100 parsed, +0 inserted | total=0/3600
+  offset=4100: 100 parsed, +0 inserted | total=0/3700
+  blocked (403), backoff 60s...
+  offset=4200: 100 parsed, +0 inserted | total=0/3800
+  offset=4300: 100 parsed, +0 inserted | total=0/3900
+  offset=4400: 100 parsed, +0 inserted | total=0/4000
+  offset=4500: 100 parsed, +0 inserted | total=0/4100
+  offset=4600: 100 parsed, +0 inserted | total=0/4200
+  offset=4700: 100 parsed, +0 inserted | total=0/4300
+  offset=4800: 100 parsed, +0 inserted | total=0/4400
+  offset=4900: 100 parsed, +0 inserted | total=0/4500
+  offset=5000: 100 parsed, +0 inserted | total=0/4600
+  offset=5100: 100 parsed, +0 inserted | total=0/4700
+  offset=5200: 100 parsed, +0 inserted | total=0/4800
+  offset=5300: 100 parsed, +0 inserted | total=0/4900
+  offset=5400: 100 parsed, +0 inserted | total=0/5000
+  offset=5500: 100 parsed, +0 inserted | total=0/5100
+  offset=5600: 100 parsed, +0 inserted | total=0/5200
+  offset=5700: 100 parsed, +0 inserted | total=0/5300
+  offset=5800: 100 parsed, +0 inserted | total=0/5400
+  offset=5900: 100 parsed, +0 inserted | total=0/5500
+  offset=6000: 100 parsed, +0 inserted | total=0/5600
+  offset=6100: 100 parsed, +0 inserted | total=0/5700
+  offset=6200: 100 parsed, +0 inserted | total=0/5800
+  offset=6300: 100 parsed, +0 inserted | total=0/5900
+  offset=6400: 100 parsed, +0 inserted | total=0/6000
+  offset=6500: 100 parsed, +0 inserted | total=0/6100
+  offset=6600: 100 parsed, +0 inserted | total=0/6200
+  offset=6700: 100 parsed, +0 inserted | total=0/6300
+  offset=6800: 100 parsed, +0 inserted | total=0/6400
+  offset=6900: 100 parsed, +0 inserted | total=0/6500
+  offset=7000: 100 parsed, +0 inserted | total=0/6600
+  offset=7100: 100 parsed, +0 inserted | total=0/6700
+  offset=7200: 100 parsed, +0 inserted | total=0/6800
+  offset=7300: 100 parsed, +0 inserted | total=0/6900
+  offset=7400: 100 parsed, +0 inserted | total=0/7000
+  offset=7500: 100 parsed, +0 inserted | total=0/7100
+  offset=7600: 100 parsed, +0 inserted | total=0/7200
+  offset=7700: 100 parsed, +0 inserted | total=0/7300
+  offset=7800: 100 parsed, +0 inserted | total=0/7400
+  offset=7900: 100 parsed, +0 inserted | total=0/7500
+  offset=8000: 100 parsed, +0 inserted | total=0/7600
+  offset=8100: 100 parsed, +0 inserted | total=0/7700
+  offset=8200: 100 parsed, +0 inserted | total=0/7800
+  offset=8300: 100 parsed, +0 inserted | total=0/7900
+  offset=8400: 100 parsed, +0 inserted | total=0/8000
+
+[hltv] DEPOIS: 21999 (delta +8800)
+[hltv] fetched=8000 inserted=0

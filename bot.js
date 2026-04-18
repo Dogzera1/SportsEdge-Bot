@@ -2211,7 +2211,7 @@ async function runAutoHealerCycle() {
 
 // ── Bankroll Guardian: alerta DD, auto-shadow temporário ──
 const _bankrollAlertedKey = new Map(); // sport → { ts }
-const BANKROLL_DM_COOLDOWN_MS = 60 * 60 * 1000; // 1h por sport
+const BANKROLL_DM_COOLDOWN_MS = 24 * 60 * 60 * 1000; // 24h por sport
 const _bankrollAutoShadowed = new Set(); // sports temporariamente em auto-shadow por DD
 
 async function runBankrollGuardianCycle() {
@@ -2275,7 +2275,7 @@ async function runBankrollGuardianCycle() {
     `• Atual:   R$${current} (${profitStr} | ${growthStr})\n` +
     `• Pico:    R$${peak}\n` +
     `• DD atual: ${result.overall.overall_drawdown_pct.toFixed(2)}%\n\n` +
-    `_Cooldown 1h por sport. Auto-restore quando DD<10%._`;
+    `_Cooldown 24h por sport. Auto-restore quando DD<10%._`;
   for (const adminId of ADMIN_IDS) await sendDM(tokenForAlert, adminId, msg).catch(() => {});
 }
 

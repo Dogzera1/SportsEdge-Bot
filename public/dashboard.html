@@ -281,9 +281,13 @@
 
   <!-- Tips Table -->
   <div class="table-card collapsible" id="sportTipsCard" data-collapsed="true">
-    <h3 onclick="toggleCard(this, event)" style="display:flex;align-items:center;justify-content:space-between">
+    <h3 onclick="toggleCard(this, event)" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:0.3rem">
       <span><span class="toggle-arrow">&#9662;</span>&#128203; &Uacute;ltimas Tips</span>
-      <button onclick="event.stopPropagation(); voidOldPending()" title="Anular em lote todas as tips pendentes antigas" style="font-size:0.7rem;padding:3px 8px;background:#1f2937;border:1px solid #4b5563;border-radius:4px;color:#f87171;cursor:pointer">&#128465; Anular pendentes antigas</button>
+      <span style="display:flex;gap:0.3rem;flex-wrap:wrap">
+        <button onclick="event.stopPropagation(); rerunPendingTrained()" title="Reavaliar tips pendentes com o modelo treinado (novo)" style="font-size:0.7rem;padding:3px 8px;background:#1f2937;border:1px solid #4b5563;border-radius:4px;color:#60a5fa;cursor:pointer">&#129302; Reavaliar pendentes</button>
+        <button onclick="event.stopPropagation(); backtestTrained()" title="Backtest das settled com o modelo treinado" style="font-size:0.7rem;padding:3px 8px;background:#1f2937;border:1px solid #4b5563;border-radius:4px;color:#34d399;cursor:pointer">&#128202; Backtest modelo</button>
+        <button onclick="event.stopPropagation(); voidOldPending()" title="Anular em lote todas as tips pendentes antigas" style="font-size:0.7rem;padding:3px 8px;background:#1f2937;border:1px solid #4b5563;border-radius:4px;color:#f87171;cursor:pointer">&#128465; Anular pendentes antigas</button>
+      </span>
     </h3>
     <div class="tips-controls">
       <div>
@@ -1697,6 +1701,65 @@ async function voidOldPending() {
   } catch(e) {
     alert('Erro: ' + e.message);
   }
+}
+
+// ── Reavaliar tips pendentes com modelo treinado ──────────────────────
+async function rerunPendingTrained() {
+  try {
+    const sport = currentSport || 'esports';
+    const r = await adminFetch('/admin/rerun-pending-trained?sport=' + encodeURIComponent(sport));
+    const j = await r.json();
+    if (!j.ok) { alert('Erro: ' + (j.error || 'falha')); return; }
+    if (!j.items || !j.items.length) {
+      alert('Nada para reavaliar em ' + sport.toUpperCase() + '.\n' + (j.skipped > 0 ? j.skipped + ' skipped (sem histórico no Elo)' : ''));
+      return;
+    }
+    const counts = j.counts || {};
+    const lines = j.items.slice(0, 30).map(it =>
+      '#' + it.id + ' ' + (it.pick || '').slice(0, 22).padEnd(22) +
+      ' odd=' + it.odds + ' | ' + it.oldP + '% → ' + it.newP + '% (Δ' + (it.delta >= 0 ? '+' : '') + it.delta + 'pp) | EV ' +
+      it.oldEV + '% → ' + it.newEV + '% ' +
+      (it.verdict === 'manter' ? '✅' : it.verdict === 'enfraqueceu' ? '⚠️' : '❌')
+    ).join('\n');
+    const summary = 'Sport: ' + sport.toUpperCase() + '\n' +
+      'Avaliados: ' + j.evaluated + '/' + j.totalPending + ' (skipped=' + j.skipped + ')\n' +
+      'Manter: ' + (counts.manter || 0) + ' | Enfraqueceu: ' + (counts.enfraqueceu || 0) + ' | Negativo: ' + (counts.negativo || 0) + '\n\n' +
+      lines +
+      (j.items.length > 30 ? '\n... (+' + (j.items.length - 30) + ' mais)' : '');
+    if (!confirm(summary + '\n\nAplicar essas atualizações no DB?')) { console.log('[rerun]', j); return; }
+    const r2 = await adminFetch('/admin/rerun-pending-trained?sport=' + encodeURIComponent(sport) + '&apply=1', { method: 'POST' });
+    const j2 = await r2.json();
+    if (j2.ok) {
+      alert('Atualizadas: ' + j2.applied + ' tips.');
+      loadTips();
+    } else alert('Erro apply: ' + (j2.error || 'falha'));
+  } catch (e) { alert('Erro: ' + e.message); }
+}
+
+// ── Backtest settled com modelo treinado ──────────────────────────────
+async function backtestTrained() {
+  try {
+    const sport = currentSport || 'all';
+    const r = await adminFetch('/admin/backtest-trained?sport=' + encodeURIComponent(sport));
+    const j = await r.json();
+    if (!j.ok) { alert('Erro: ' + (j.error || 'falha')); return; }
+    const bs = j.bySport || {};
+    const lines = Object.entries(bs).map(([s, b]) =>
+      s.toUpperCase() + ' (n=' + b.n + ')\n' +
+      '  Brier:   ' + b.brierOld + ' → ' + b.brierNew + (b.brierNew < b.brierOld ? ' ✅' : ' ❌') + '\n' +
+      '  Hit@0.5: ' + b.hitOld + '% → ' + b.hitNew + '%\n' +
+      '  Profit:  R$' + b.profitReal + ' | Filtrado (EV≥' + j.evThreshold + '%): R$' + b.profitFiltered + ' (' + b.nFiltered + ' tips)'
+    ).join('\n\n');
+    const agg = j.aggregate;
+    const aggLine = agg
+      ? '\n── AGREGADO (n=' + agg.n + ') ──\n' +
+        'Brier: ' + agg.brierOld + ' → ' + agg.brierNew + '\n' +
+        'Hit@0.5: ' + agg.hitOld + '% → ' + agg.hitNew + '%\n' +
+        'Profit real: R$' + agg.profitReal + ' | Filtrado: R$' + agg.profitFiltered + ' (Δ R$' + agg.profitDelta + ')'
+      : '';
+    alert('BACKTEST MODELO TREINADO — ' + sport.toUpperCase() + '\n\n' + lines + '\n' + aggLine + '\n\n(skipped=' + j.skipped + ' | total settled=' + j.totalSettled + ')');
+    console.log('[backtest]', j);
+  } catch (e) { alert('Erro: ' + e.message); }
 }
 
 bindTipsControls();

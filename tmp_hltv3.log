@@ -2,3 +2,166 @@
 [hltv] usando proxy=https://pleasant-compassion-production.up.railway.app
   offset=1000: 100 parsed, +0 inserted | total=0/100
   offset=1100: 100 parsed, +0 inserted | total=0/200
+  offset=1200: 100 parsed, +0 inserted | total=0/300
+  blocked (403), backoff 60s...
+  blocked (403), backoff 60s...
+  offset=1300: 100 parsed, +0 inserted | total=0/400
+  blocked (403), backoff 60s...
+  offset=1400: 100 parsed, +0 inserted | total=0/500
+  offset=1500: 100 parsed, +0 inserted | total=0/600
+  offset=1600: 100 parsed, +0 inserted | total=0/700
+  offset=1700: 100 parsed, +0 inserted | total=0/800
+  offset=1800: 100 parsed, +0 inserted | total=0/900
+  offset=1900: 100 parsed, +0 inserted | total=0/1000
+  offset=2000: 100 parsed, +0 inserted | total=0/1100
+  offset=2100: 100 parsed, +0 inserted | total=0/1200
+  offset=2200: 100 parsed, +0 inserted | total=0/1300
+  offset=2300: 100 parsed, +0 inserted | total=0/1400
+  offset=2400: 100 parsed, +0 inserted | total=0/1500
+  offset=2500: 100 parsed, +0 inserted | total=0/1600
+  offset=2600: 100 parsed, +0 inserted | total=0/1700
+  offset=2700: 100 parsed, +0 inserted | total=0/1800
+  offset=2800: 100 parsed, +0 inserted | total=0/1900
+  offset=2900: 100 parsed, +0 inserted | total=0/2000
+  offset=3000: 100 parsed, +0 inserted | total=0/2100
+  offset=3100: 100 parsed, +0 inserted | total=0/2200
+  offset=3200: 100 parsed, +0 inserted | total=0/2300
+  offset=3300: 100 parsed, +0 inserted | total=0/2400
+  offset=3400: 100 parsed, +0 inserted | total=0/2500
+  offset=3500: 100 parsed, +0 inserted | total=0/2600
+  offset=3600: 100 parsed, +0 inserted | total=0/2700
+  offset=3700: 100 parsed, +0 inserted | total=0/2800
+  offset=3800: 100 parsed, +0 inserted | total=0/2900
+  offset=3900: 100 parsed, +0 inserted | total=0/3000
+  offset=4000: 100 parsed, +0 inserted | total=0/3100
+  offset=4100: 100 parsed, +0 inserted | total=0/3200
+  offset=4200: 100 parsed, +0 inserted | total=0/3300
+  offset=4300: 100 parsed, +0 inserted | total=0/3400
+  offset=4400: 100 parsed, +0 inserted | total=0/3500
+  offset=4500: 100 parsed, +0 inserted | total=0/3600
+  offset=4600: 100 parsed, +0 inserted | total=0/3700
+  offset=4700: 100 parsed, +0 inserted | total=0/3800
+  offset=4800: 100 parsed, +0 inserted | total=0/3900
+  offset=4900: 100 parsed, +0 inserted | total=0/4000
+  offset=5000: 100 parsed, +0 inserted | total=0/4100
+  offset=5100: 100 parsed, +0 inserted | total=0/4200
+  offset=5200: 100 parsed, +0 inserted | total=0/4300
+  offset=5300: 100 parsed, +0 inserted | total=0/4400
+  offset=5400: 100 parsed, +0 inserted | total=0/4500
+  offset=5500: 100 parsed, +0 inserted | total=0/4600
+  offset=5600: 100 parsed, +0 inserted | total=0/4700
+  offset=5700: 100 parsed, +0 inserted | total=0/4800
+  offset=5800: 100 parsed, +0 inserted | total=0/4900
+  offset=5900: 100 parsed, +0 inserted | total=0/5000
+  offset=6000: 100 parsed, +0 inserted | total=0/5100
+  offset=6100: 100 parsed, +0 inserted | total=0/5200
+  offset=6200: 100 parsed, +0 inserted | total=0/5300
+  offset=6300: 100 parsed, +0 inserted | total=0/5400
+  offset=6400: 100 parsed, +0 inserted | total=0/5500
+  offset=6500: 100 parsed, +0 inserted | total=0/5600
+  offset=6600: 100 parsed, +0 inserted | total=0/5700
+  offset=6700: 100 parsed, +0 inserted | total=0/5800
+  offset=6800: 100 parsed, +0 inserted | total=0/5900
+  offset=6900: 100 parsed, +0 inserted | total=0/6000
+  offset=7000: 100 parsed, +0 inserted | total=0/6100
+  offset=7100: 100 parsed, +0 inserted | total=0/6200
+  offset=7200: 100 parsed, +0 inserted | total=0/6300
+  offset=7300: 100 parsed, +0 inserted | total=0/6400
+  offset=7400: 100 parsed, +0 inserted | total=0/6500
+  offset=7500: 100 parsed, +0 inserted | total=0/6600
+  offset=7600: 100 parsed, +0 inserted | total=0/6700
+  offset=7700: 100 parsed, +0 inserted | total=0/6800
+  offset=7800: 100 parsed, +0 inserted | total=0/6900
+  offset=7900: 100 parsed, +0 inserted | total=0/7000
+  offset=8000: 100 parsed, +0 inserted | total=0/7100
+  offset=8100: 100 parsed, +0 inserted | total=0/7200
+  offset=8200: 100 parsed, +0 inserted | total=0/7300
+  offset=8300: 100 parsed, +0 inserted | total=0/7400
+  offset=8400: 100 parsed, +0 inserted | total=0/7500
+  offset=8500: 100 parsed, +0 inserted | total=0/7600
+  offset=8600: 100 parsed, +0 inserted | total=0/7700
+  offset=8700: 100 parsed, +0 inserted | total=0/7800
+  offset=8800: 100 parsed, +0 inserted | total=0/7900
+  offset=8900: 100 parsed, +0 inserted | total=0/8000
+  offset=9000: 100 parsed, +0 inserted | total=0/8100
+  offset=9100: 100 parsed, +0 inserted | total=0/8200
+  offset=9200: 100 parsed, +0 inserted | total=0/8300
+  offset=9300: 100 parsed, +0 inserted | total=0/8400
+  offset=9400: 100 parsed, +0 inserted | total=0/8500
+  offset=9500: 100 parsed, +0 inserted | total=0/8600
+  offset=9600: 100 parsed, +0 inserted | total=0/8700
+  offset=9700: 100 parsed, +0 inserted | total=0/8800
+  offset=9800: 100 parsed, +0 inserted | total=0/8900
+  offset=9900: 100 parsed, +0 inserted | total=0/9000
+  offset=10000: 100 parsed, +0 inserted | total=0/9100
+  offset=10100: 100 parsed, +0 inserted | total=0/9200
+  offset=10200: 100 parsed, +0 inserted | total=0/9300
+  offset=10300: 100 parsed, +0 inserted | total=0/9400
+  offset=10400: 100 parsed, +0 inserted | total=0/9500
+  offset=10500: 100 parsed, +0 inserted | total=0/9600
+  offset=10600: 100 parsed, +0 inserted | total=0/9700
+  offset=10700: 100 parsed, +0 inserted | total=0/9800
+  offset=10800: 100 parsed, +0 inserted | total=0/9900
+  offset=10900: 100 parsed, +0 inserted | total=0/10000
+  offset=11000: 100 parsed, +0 inserted | total=0/10100
+  offset=11100: 100 parsed, +0 inserted | total=0/10200
+  offset=11200: 100 parsed, +0 inserted | total=0/10300
+  offset=11300: 100 parsed, +0 inserted | total=0/10400
+  offset=11400: 100 parsed, +0 inserted | total=0/10500
+  offset=11500: 100 parsed, +0 inserted | total=0/10600
+  offset=11600: 100 parsed, +0 inserted | total=0/10700
+  offset=11700: 100 parsed, +0 inserted | total=0/10800
+  offset=11800: 100 parsed, +0 inserted | total=0/10900
+  offset=11900: 100 parsed, +0 inserted | total=0/11000
+  offset=12000: 100 parsed, +0 inserted | total=0/11100
+  offset=12100: 100 parsed, +0 inserted | total=0/11200
+  offset=12200: 100 parsed, +0 inserted | total=0/11300
+  offset=12300: 100 parsed, +0 inserted | total=0/11400
+  offset=12400: 100 parsed, +0 inserted | total=0/11500
+  offset=12500: 100 parsed, +0 inserted | total=0/11600
+  offset=12600: 100 parsed, +0 inserted | total=0/11700
+  offset=12700: 100 parsed, +0 inserted | total=0/11800
+  offset=12800: 100 parsed, +0 inserted | total=0/11900
+  offset=12900: 100 parsed, +0 inserted | total=0/12000
+  offset=13000: 100 parsed, +0 inserted | total=0/12100
+  offset=13100: 100 parsed, +0 inserted | total=0/12200
+  offset=13200: 100 parsed, +0 inserted | total=0/12300
+  offset=13300: 100 parsed, +0 inserted | total=0/12400
+  offset=13400: 100 parsed, +0 inserted | total=0/12500
+  offset=13500: 100 parsed, +0 inserted | total=0/12600
+  offset=13600: 100 parsed, +0 inserted | total=0/12700
+  offset=13700: 100 parsed, +0 inserted | total=0/12800
+  offset=13800: 100 parsed, +0 inserted | total=0/12900
+  offset=13900: 100 parsed, +0 inserted | total=0/13000
+  offset=14000: 100 parsed, +0 inserted | total=0/13100
+  offset=14100: 100 parsed, +0 inserted | total=0/13200
+  offset=14200: 100 parsed, +0 inserted | total=0/13300
+  offset=14300: 100 parsed, +0 inserted | total=0/13400
+  offset=14400: 100 parsed, +0 inserted | total=0/13500
+  offset=14500: 100 parsed, +0 inserted | total=0/13600
+  offset=14600: 100 parsed, +0 inserted | total=0/13700
+  offset=14700: 100 parsed, +0 inserted | total=0/13800
+  offset=14800: 100 parsed, +0 inserted | total=0/13900
+  offset=14900: 100 parsed, +0 inserted | total=0/14000
+  offset=15000: 100 parsed, +0 inserted | total=0/14100
+  blocked (403), backoff 60s...
+  blocked (403), backoff 60s...
+  blocked (403), backoff 60s...
+  blocked (403), backoff 60s...
+  blocked (403), backoff 60s...
+  blocked (403), backoff 60s...
+  blocked (403), backoff 60s...
+  blocked (403), backoff 60s...
+  blocked (403), backoff 60s...
+  blocked (403), backoff 60s...
+  blocked (403), backoff 60s...
+  blocked (403), backoff 60s...
+  blocked (403), backoff 60s...
+  blocked (403), backoff 60s...
+  blocked (403), backoff 60s...
+  blocked (403), backoff 60s...
+  blocked (403), backoff 60s...
+  blocked (403), backoff 60s...
+  blocked (403), backoff 60s...
+  blocked (403), backoff 60s...
+  blocked (403), backoff 60s...

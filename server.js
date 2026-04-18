@@ -6667,6 +6667,259 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // Aplica model_p/EV/confidence calculados externamente (ex: rerun de modelos treinados).
+  // Body JSON: { updates: [{ id, model_p1, model_p2, current_ev, current_confidence }, ...] }
+  // Proteção: ADMIN_KEY (x-admin-key header ou Bearer). Retorna contagem aplicada.
+  if (p === '/admin/apply-trained-predictions' && req.method === 'POST') {
+    if (!requireAdmin(req, res)) return;
+    let body = '';
+    req.on('data', c => { if (body.length < 2_000_000) body += c; });
+    req.on('end', () => {
+      try {
+        const j = JSON.parse(body || '{}');
+        const updates = Array.isArray(j.updates) ? j.updates : null;
+        if (!updates) { sendJson(res, { error: 'body.updates[] required' }, 400); return; }
+        const upd = db.prepare(`
+          UPDATE tips
+          SET model_p1 = COALESCE(?, model_p1),
+              model_p2 = COALESCE(?, model_p2),
+              current_ev = COALESCE(?, current_ev),
+              current_confidence = COALESCE(?, current_confidence),
+              current_updated_at = datetime('now')
+          WHERE id = ?
+        `);
+        let applied = 0, skipped = 0;
+        const tx = db.transaction((arr) => {
+          for (const u of arr) {
+            const id = +u.id;
+            if (!Number.isFinite(id)) { skipped++; continue; }
+            const p1 = Number.isFinite(+u.model_p1) ? +u.model_p1 : null;
+            const p2 = Number.isFinite(+u.model_p2) ? +u.model_p2 : null;
+            const ev = Number.isFinite(+u.current_ev) ? +u.current_ev : null;
+            const cf = Number.isFinite(+u.current_confidence) ? +u.current_confidence : null;
+            const r = upd.run(p1, p2, ev, cf, id);
+            if (r.changes > 0) applied++; else skipped++;
+          }
+        });
+        tx(updates);
+        log('INFO', 'ADMIN', `apply-trained-predictions: applied=${applied} skipped=${skipped}`);
+        sendJson(res, { ok: true, applied, skipped, total: updates.length });
+      } catch (e) {
+        sendJson(res, { error: e.message }, 500);
+      }
+    });
+    return;
+  }
+
+  // ── Rerun pending tips com modelos treinados ──────────────────────────
+  // GET  /admin/rerun-pending-trained?sport=esports|tennis|dota|cs|valorant
+  // POST /admin/rerun-pending-trained?sport=X&apply=1  (aplica updates)
+  if (p === '/admin/rerun-pending-trained') {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const sport = String(parsed.query.sport || 'esports').toLowerCase();
+      const apply = req.method === 'POST' && (parsed.query.apply === '1' || parsed.query.apply === 'true');
+      const EV_THRESHOLD = parseFloat(parsed.query.evThreshold) || 5;
+
+      const SPORT_GAME = { esports: 'lol', lol: 'lol', dota: 'dota2', dota2: 'dota2', cs: 'cs2', cs2: 'cs2', valorant: 'valorant' };
+
+      const { predictTrainedEsports, hasTrainedModel } = require('./lib/esports-model-trained');
+      const { buildTrainedContext } = require('./lib/esports-runtime-features');
+      const { predictTrainedTennis, hasTrainedModel: hasTrainedTennis } = require('./lib/tennis-model-trained');
+      const { getTennisElo, extractSurface } = require('./lib/tennis-ml');
+
+      const tips = db.prepare(`
+        SELECT id, sport, participant1, participant2, tip_participant, odds, ev,
+               model_p1, model_p2, event_name, sent_at, confidence
+        FROM tips
+        WHERE LOWER(sport) = ? AND (result IS NULL OR result = 'pending')
+        ORDER BY sent_at DESC
+      `).all(sport);
+
+      const items = [];
+      const updates = [];
+      let skipped = 0;
+
+      for (const t of tips) {
+        const odds = parseFloat(t.odds);
+        if (!Number.isFinite(odds) || odds <= 1) { skipped++; continue; }
+        let pred = null;
+        try {
+          if (sport === 'tennis') {
+            if (!hasTrainedTennis()) { skipped++; continue; }
+            const league = t.event_name || '';
+            const surface = extractSurface(league);
+            const elo = getTennisElo(db, t.participant1, t.participant2, surface, 0.5, 0.5);
+            if (!elo || !elo.found1 || !elo.found2) { skipped++; continue; }
+            pred = predictTrainedTennis({
+              eloOverall1: elo.eloOverall1 || elo.elo1, eloOverall2: elo.eloOverall2 || elo.elo2,
+              eloSurface1: elo.eloSurface1 || elo.elo1, eloSurface2: elo.eloSurface2 || elo.elo2,
+              gamesSurface1: elo.surfMatches1, gamesSurface2: elo.surfMatches2,
+              surface,
+              bestOf: /grand slam|wimbledon|us open|roland|australian/i.test(league) ? 5 : 3,
+            });
+          } else {
+            const game = SPORT_GAME[sport];
+            if (!game || !hasTrainedModel(game)) { skipped++; continue; }
+            const ctx = buildTrainedContext(db, game, {
+              team1: t.participant1, team2: t.participant2, league: t.event_name || '', format: 'Bo3',
+            });
+            if (!ctx) { skipped++; continue; }
+            pred = predictTrainedEsports(game, ctx);
+          }
+        } catch (e) { skipped++; continue; }
+        if (!pred) { skipped++; continue; }
+
+        const pickSide = t.tip_participant === t.participant1 ? 'p1' : 'p2';
+        const oldPpick = pickSide === 'p1' ? (t.model_p1 || 0.5) : (t.model_p2 || 0.5);
+        const newPpick = pickSide === 'p1' ? pred.p1 : pred.p2;
+        const oldEV = +((oldPpick * odds - 1) * 100).toFixed(2);
+        const newEV = +((newPpick * odds - 1) * 100).toFixed(2);
+        const verdict = newEV >= EV_THRESHOLD ? 'manter' : newEV >= 0 ? 'enfraqueceu' : 'negativo';
+
+        items.push({
+          id: t.id, pick: t.tip_participant, match: `${t.participant1} vs ${t.participant2}`,
+          event: t.event_name, odds,
+          oldP: +(oldPpick * 100).toFixed(1), newP: +(newPpick * 100).toFixed(1),
+          delta: +((newPpick - oldPpick) * 100).toFixed(1),
+          oldEV, newEV, verdict,
+        });
+        updates.push({
+          id: t.id,
+          model_p1: pred.p1, model_p2: pred.p2,
+          current_ev: newEV, current_confidence: pred.confidence,
+        });
+      }
+
+      let applied = 0;
+      if (apply && updates.length) {
+        const upd = db.prepare(`UPDATE tips SET model_p1=?, model_p2=?, current_ev=?, current_confidence=?, current_updated_at=datetime('now') WHERE id=?`);
+        const tx = db.transaction((arr) => { for (const u of arr) { const r = upd.run(u.model_p1, u.model_p2, u.current_ev, u.current_confidence, u.id); if (r.changes > 0) applied++; } });
+        tx(updates);
+        log('INFO', 'ADMIN', `rerun-pending-trained: sport=${sport} applied=${applied}/${updates.length}`);
+      }
+
+      sendJson(res, {
+        ok: true, sport, dryRun: !apply, evThreshold: EV_THRESHOLD,
+        totalPending: tips.length, evaluated: items.length, skipped, applied,
+        counts: {
+          manter: items.filter(i => i.verdict === 'manter').length,
+          enfraqueceu: items.filter(i => i.verdict === 'enfraqueceu').length,
+          negativo: items.filter(i => i.verdict === 'negativo').length,
+        },
+        items,
+      });
+    } catch (e) { sendJson(res, { error: e.message, stack: e.stack }, 500); }
+    return;
+  }
+
+  // ── Backtest das settled tips com o modelo treinado ───────────────────
+  // GET /admin/backtest-trained?sport=esports|tennis|all&evThreshold=5
+  if (p === '/admin/backtest-trained') {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const sport = String(parsed.query.sport || 'all').toLowerCase();
+      const EV_THRESHOLD = parseFloat(parsed.query.evThreshold) || 5;
+      const SPORT_GAME = { esports: 'lol', lol: 'lol', dota: 'dota2', dota2: 'dota2', cs: 'cs2', cs2: 'cs2', valorant: 'valorant' };
+
+      const { predictTrainedEsports, hasTrainedModel } = require('./lib/esports-model-trained');
+      const { buildTrainedContext } = require('./lib/esports-runtime-features');
+      const { predictTrainedTennis, hasTrainedModel: hasTrainedTennis } = require('./lib/tennis-model-trained');
+      const { getTennisElo, extractSurface } = require('./lib/tennis-ml');
+
+      const where = sport === 'all' ? `result IN ('win','loss')` : `LOWER(sport) = ? AND result IN ('win','loss')`;
+      const params = sport === 'all' ? [] : [sport];
+      const tips = db.prepare(`SELECT id, sport, participant1, participant2, tip_participant, odds, model_p1, model_p2, event_name, result, profit_reais FROM tips WHERE ${where}`).all(...params);
+
+      const bySport = {};
+      let skipped = 0;
+
+      for (const t of tips) {
+        const s = String(t.sport).toLowerCase();
+        const odds = parseFloat(t.odds);
+        if (!Number.isFinite(odds) || odds <= 1) { skipped++; continue; }
+        let pred = null;
+        try {
+          if (s === 'tennis') {
+            if (!hasTrainedTennis()) { skipped++; continue; }
+            const league = t.event_name || '';
+            const surface = extractSurface(league);
+            const elo = getTennisElo(db, t.participant1, t.participant2, surface, 0.5, 0.5);
+            if (!elo || !elo.found1 || !elo.found2) { skipped++; continue; }
+            pred = predictTrainedTennis({
+              eloOverall1: elo.eloOverall1 || elo.elo1, eloOverall2: elo.eloOverall2 || elo.elo2,
+              eloSurface1: elo.eloSurface1 || elo.elo1, eloSurface2: elo.eloSurface2 || elo.elo2,
+              gamesSurface1: elo.surfMatches1, gamesSurface2: elo.surfMatches2, surface,
+              bestOf: /grand slam|wimbledon|us open|roland|australian/i.test(league) ? 5 : 3,
+            });
+          } else {
+            const game = SPORT_GAME[s];
+            if (!game || !hasTrainedModel(game)) { skipped++; continue; }
+            const ctx = buildTrainedContext(db, game, { team1: t.participant1, team2: t.participant2, league: t.event_name || '', format: 'Bo3' });
+            if (!ctx) { skipped++; continue; }
+            pred = predictTrainedEsports(game, ctx);
+          }
+        } catch (e) { skipped++; continue; }
+        if (!pred) { skipped++; continue; }
+
+        const pickSide = t.tip_participant === t.participant1 ? 'p1' : 'p2';
+        const oldPpick = pickSide === 'p1' ? (t.model_p1 || 0.5) : (t.model_p2 || 0.5);
+        const newPpick = pickSide === 'p1' ? pred.p1 : pred.p2;
+        const outcome = t.result === 'win' ? 1 : 0;
+        const newEV = (newPpick * odds - 1) * 100;
+        const oldEV = (oldPpick * odds - 1) * 100;
+        const profit = +t.profit_reais || 0;
+
+        if (!bySport[s]) bySport[s] = { n: 0, oldBrierSum: 0, newBrierSum: 0, oldHits: 0, newHits: 0, oldLogSum: 0, newLogSum: 0, profitTotal: 0, profitKept: 0, nKept: 0 };
+        const b = bySport[s];
+        b.n++;
+        b.oldBrierSum += (oldPpick - outcome) ** 2;
+        b.newBrierSum += (newPpick - outcome) ** 2;
+        if ((oldPpick >= 0.5 ? 1 : 0) === outcome) b.oldHits++;
+        if ((newPpick >= 0.5 ? 1 : 0) === outcome) b.newHits++;
+        const pLogOld = Math.max(1e-9, Math.min(1 - 1e-9, oldPpick));
+        const pLogNew = Math.max(1e-9, Math.min(1 - 1e-9, newPpick));
+        b.oldLogSum += -(outcome * Math.log(pLogOld) + (1 - outcome) * Math.log(1 - pLogOld));
+        b.newLogSum += -(outcome * Math.log(pLogNew) + (1 - outcome) * Math.log(1 - pLogNew));
+        b.profitTotal += profit;
+        if (newEV >= EV_THRESHOLD) { b.profitKept += profit; b.nKept++; }
+      }
+
+      const summary = {};
+      let allN = 0, allOldBr = 0, allNewBr = 0, allOldHits = 0, allNewHits = 0, allProfit = 0, allProfitKept = 0;
+      for (const [s, b] of Object.entries(bySport)) {
+        summary[s] = {
+          n: b.n,
+          brierOld: +(b.oldBrierSum / b.n).toFixed(4),
+          brierNew: +(b.newBrierSum / b.n).toFixed(4),
+          hitOld: +(b.oldHits / b.n * 100).toFixed(1),
+          hitNew: +(b.newHits / b.n * 100).toFixed(1),
+          logLossOld: +(b.oldLogSum / b.n).toFixed(4),
+          logLossNew: +(b.newLogSum / b.n).toFixed(4),
+          profitReal: +b.profitTotal.toFixed(2),
+          profitFiltered: +b.profitKept.toFixed(2),
+          nFiltered: b.nKept,
+        };
+        allN += b.n; allOldBr += b.oldBrierSum; allNewBr += b.newBrierSum;
+        allOldHits += b.oldHits; allNewHits += b.newHits;
+        allProfit += b.profitTotal; allProfitKept += b.profitKept;
+      }
+      const agg = allN > 0 ? {
+        n: allN,
+        brierOld: +(allOldBr / allN).toFixed(4),
+        brierNew: +(allNewBr / allN).toFixed(4),
+        hitOld: +(allOldHits / allN * 100).toFixed(1),
+        hitNew: +(allNewHits / allN * 100).toFixed(1),
+        profitReal: +allProfit.toFixed(2),
+        profitFiltered: +allProfitKept.toFixed(2),
+        profitDelta: +(allProfitKept - allProfit).toFixed(2),
+      } : null;
+
+      sendJson(res, { ok: true, evThreshold: EV_THRESHOLD, skipped, totalSettled: tips.length, bySport: summary, aggregate: agg });
+    } catch (e) { sendJson(res, { error: e.message, stack: e.stack }, 500); }
+    return;
+  }
+
   // Reanalisa tips pendentes de tênis com os novos gates (2026-04-15) e anula as reprovadas.
   // Aceita ?apply=1 para executar; sem apply faz dry-run.
   // Critérios (sincronizados com bot.js auto-tennis):
