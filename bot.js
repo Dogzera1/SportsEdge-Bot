@@ -62,7 +62,7 @@ function dotaHeroMetaLine(blueTeam, redTeam) {
 }
 const { getFootballProbability } = require('./lib/football-model');
 const { getTennisProbability, detectSurface, tennisProhibitedTournament } = require('./lib/tennis-model');
-const { extractServeProbs, priceTennisMatch, priceTennisLive } = require('./lib/tennis-markov-model');
+const { extractServeProbs, priceTennisMatch, priceTennisLive, estimateTennisAces } = require('./lib/tennis-markov-model');
 const { getPlayerInjuryRisk } = require('./lib/tennis-injury-risk');
 const { fetchMatchNews } = require('./lib/news');
 const { tennisPairMatchesPlayers } = require('./lib/tennis-match');
@@ -7279,6 +7279,24 @@ async function pollTennis(runOnce = false) {
                 // Disponibiliza probs de mercado pra downstream (handicap/totals pricing quando feed expor).
                 tennisModelResult._markovMarkets = markov;
                 tennisModelResult._markovServe = mSp;
+
+                // Ace market pricing (Poisson). Requer acesPerMatch dos 2 jogadores.
+                if (Number.isFinite(serveStats1?.acesPerMatch) && Number.isFinite(serveStats2?.acesPerMatch)) {
+                  try {
+                    const aces = estimateTennisAces({
+                      acesPerMatch1: serveStats1.acesPerMatch,
+                      acesPerMatch2: serveStats2.acesPerMatch,
+                      bestOf: bestOfMarkov,
+                      surface: markovSurface,
+                    });
+                    if (aces) {
+                      log('INFO', 'TENNIS-ACES',
+                        `${match.team1} (${serveStats1.acesPerMatch}/m) vs ${match.team2} (${serveStats2.acesPerMatch}/m) [${markovSurface} Bo${bestOfMarkov}]: ` +
+                        `total~${aces.totalAcesAvg} | pO10.5=${(aces.pOver['10.5']*100).toFixed(0)}% pO15.5=${(aces.pOver['15.5']*100).toFixed(0)}% pO22.5=${(aces.pOver['22.5']*100).toFixed(0)}%`);
+                      tennisModelResult._markovAces = aces;
+                    }
+                  } catch (ae) { log('DEBUG', 'TENNIS-ACES', `err: ${ae.message}`); }
+                }
 
                 // LIVE Markov: se temos liveScoreData, recomputa a partir do state atual.
                 // Override do pMatch pré-match porque live sobrepõe.
