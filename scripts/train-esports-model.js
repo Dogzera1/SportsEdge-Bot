@@ -73,11 +73,16 @@ const LOL_EXTRA_FEATURES = [
 const LOL_OE_FEATURES = [
   'oe_gd15_diff', 'oe_obj_diff', 'oe_wr_diff', 'oe_dpm_diff', 'has_oe_stats',
 ];
+// OE player-level roster stats (só LoL)
+const LOL_PLAYER_FEATURES = [
+  'avg_kda_diff', 'max_kda_diff', 'star_score_diff', 'has_roster_stats',
+];
 
 // Decide NUM_FEATURES baseado no CSV carregado (se tem colunas LoL extras, inclui)
 let NUM_FEATURES = BASE_NUM_FEATURES.slice();
 if (GAME === 'lol' && headers.includes('gpm_diff')) NUM_FEATURES = [...NUM_FEATURES, ...LOL_EXTRA_FEATURES];
 if (GAME === 'lol' && headers.includes('oe_gd15_diff')) NUM_FEATURES = [...NUM_FEATURES, ...LOL_OE_FEATURES];
+if (GAME === 'lol' && headers.includes('avg_kda_diff')) NUM_FEATURES = [...NUM_FEATURES, ...LOL_PLAYER_FEATURES];
 const CAT_FEATURES = ['league_tier']; // 1,2,3
 
 function buildVec(row) {

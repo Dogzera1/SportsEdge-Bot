@@ -105,6 +105,86 @@ function oeStatsAt(team, tMs, sinceDays = 60, minGames = 5) {
   };
 }
 
+// ── OE player-level rolling loader (LoL only) ────────────────────────────
+// Pre-load all rows per team (via teamname normalized). Pra cada match, agrega
+// os 5 jogadores mais freq do time pré-match e computa team-level roster stats.
+const oePlayersByTeam = new Map(); // normTeam → [{ t, playername, position, kills, deaths, assists }]
+if (GAME === 'lol') {
+  try {
+    const rows = db.prepare(`
+      SELECT teamname, date, playername, position, kills, deaths, assists
+      FROM oracleselixir_players WHERE date IS NOT NULL AND teamname IS NOT NULL
+        AND lower(teamname) NOT LIKE '%academy%'
+        AND lower(teamname) NOT LIKE '%challengers%'
+        AND lower(teamname) NOT LIKE '%rookies%'
+        AND lower(teamname) NOT LIKE '%youth%'
+    `).all();
+    for (const r of rows) {
+      const k = String(r.teamname || '').toLowerCase().trim();
+      if (!k) continue;
+      if (!oePlayersByTeam.has(k)) oePlayersByTeam.set(k, []);
+      oePlayersByTeam.get(k).push({
+        t: new Date(r.date).getTime(),
+        playername: r.playername,
+        position: r.position,
+        kills: r.kills || 0,
+        deaths: r.deaths || 0,
+        assists: r.assists || 0,
+      });
+    }
+    for (const arr of oePlayersByTeam.values()) arr.sort((a, b) => a.t - b.t);
+    console.log(`[extract-es] OE players loaded: ${rows.length} rows covering ${oePlayersByTeam.size} teams`);
+  } catch (e) { console.warn(`[extract-es] OE players load err: ${e.message}`); }
+}
+
+// Roster stats at time tMs: pega 5 players top-freq do time pre-match, agrega KDA.
+function rosterStatsAt(team, tMs, sinceDays = 60, minGamesPerPlayer = 10) {
+  const arr = oePlayersByTeam.get(String(team || '').toLowerCase().trim());
+  if (!arr) return null;
+  const sinceT = tMs - sinceDays * 86400000;
+  // Filter pre-match + sinceDays
+  const filtered = arr.filter(r => r.t < tMs && r.t >= sinceT);
+  if (filtered.length < 15) return null; // min 3 players × 5 games = 15 rows mínimo
+
+  // Count games per (player, position), select 1 per position
+  const byPos = new Map(); // pos → {playername → count}
+  for (const r of filtered) {
+    if (!byPos.has(r.position)) byPos.set(r.position, new Map());
+    const m = byPos.get(r.position);
+    m.set(r.playername, (m.get(r.playername) || 0) + 1);
+  }
+  const rosterPlayers = new Set();
+  for (const [pos, m] of byPos) {
+    // top player por posição
+    const sorted = [...m.entries()].sort((a, b) => b[1] - a[1]);
+    if (sorted[0] && sorted[0][1] >= minGamesPerPlayer) rosterPlayers.add(sorted[0][0]);
+  }
+  if (rosterPlayers.size < 3) return null;
+
+  // Agrega KDA por player
+  const byPlayer = new Map(); // name → { k, d, a, g }
+  for (const r of filtered) {
+    if (!rosterPlayers.has(r.playername)) continue;
+    if (!byPlayer.has(r.playername)) byPlayer.set(r.playername, { k: 0, d: 0, a: 0, g: 0 });
+    const p = byPlayer.get(r.playername);
+    p.k += r.kills; p.d += r.deaths; p.a += r.assists; p.g++;
+  }
+  const kdas = [];
+  for (const p of byPlayer.values()) {
+    const kda = p.d > 0 ? (p.k + p.a) / p.d : (p.k + p.a);
+    kdas.push(kda);
+  }
+  if (kdas.length < 3) return null;
+
+  const avgKda = kdas.reduce((a, b) => a + b, 0) / kdas.length;
+  const maxKda = Math.max(...kdas);
+  const starCount = kdas.filter(k => k > 5).length;
+  const strongCount = kdas.filter(k => k > 4).length;
+  const starScore = starCount >= 2 ? 2 : starCount === 1 ? 1 : strongCount >= 2 ? 0.5 : 0;
+
+  return { nPlayers: kdas.length, avgKda, maxKda, starScore };
+}
+
 // Mapa data → season/split (gol.gg usa SN = Year-2010+1 aprox; simplificação)
 function seasonSplit(dateIso) {
   const [y, m] = dateIso.split('-').map(Number);
@@ -222,6 +302,8 @@ const HEADERS = [
   'has_team_stats',
   // Oracle's Elixir rolling 60d (só LoL; 0 se algum time sem min 5 games pre-match)
   'oe_gd15_diff', 'oe_obj_diff', 'oe_wr_diff', 'oe_dpm_diff', 'has_oe_stats',
+  // OE player-level roster stats (só LoL; 0 se algum time sem roster válido)
+  'avg_kda_diff', 'max_kda_diff', 'star_score_diff', 'has_roster_stats',
   'y',
 ];
 
@@ -317,6 +399,18 @@ for (const r of rows) {
         oeDpmDiff = (oe1.dpm || 0) - (oe2.dpm || 0);
       }
     }
+    // OE roster (player-level) stats
+    let avgKdaDiff = 0, maxKdaDiff = 0, starScoreDiff = 0, hasRosterStats = 0;
+    if (GAME === 'lol' && oePlayersByTeam.size > 0) {
+      const r1 = rosterStatsAt(p1Raw, t);
+      const r2 = rosterStatsAt(p2Raw, t);
+      if (r1 && r2) {
+        hasRosterStats = 1;
+        avgKdaDiff = r1.avgKda - r2.avgKda;
+        maxKdaDiff = r1.maxKda - r2.maxKda;
+        starScoreDiff = r1.starScore - r2.starScore;
+      }
+    }
     out.push([
       new Date(t).toISOString().slice(0, 10),
       (league || '').replace(/,/g, ' '),
@@ -337,6 +431,7 @@ for (const r of rows) {
       dpmDiff.toFixed(2), kdDiff.toFixed(3), teamWrDiff.toFixed(4),
       draPctDiff.toFixed(4), nashPctDiff.toFixed(4), hasTeamStats,
       oeGd15Diff.toFixed(2), oeObjDiff.toFixed(4), oeWrDiff.toFixed(4), oeDpmDiff.toFixed(2), hasOeStats,
+      avgKdaDiff.toFixed(3), maxKdaDiff.toFixed(3), starScoreDiff.toFixed(2), hasRosterStats,
       p1Won,
     ]);
     kept++;
