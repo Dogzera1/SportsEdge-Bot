@@ -41,10 +41,24 @@ const PERSIST_COLS = [
   'pick1', 'pick2', 'pick3', 'pick4', 'pick5',
 ];
 
+const PLAYER_COLS = [
+  'gameid', 'participantid', 'side', 'position', 'playerid', 'playername',
+  'teamname', 'champion', 'date', 'league', 'year', 'split', 'playoffs', 'patch',
+  'gamelength', 'result', 'kills', 'deaths', 'assists',
+  'doublekills', 'triplekills', 'quadrakills', 'pentakills',
+  'damagetochampions', 'dpm', 'damageshare',
+  'wardsplaced', 'wardskilled', 'visionscore', 'vspm',
+  'totalgold', 'earnedgoldshare', 'totalcs', 'cspm',
+  'goldat10', 'xpat10', 'csat10', 'golddiffat10', 'xpdiffat10', 'csdiffat10',
+  'goldat15', 'xpat15', 'csat15', 'golddiffat15', 'xpdiffat15', 'csdiffat15',
+];
+
 // Nome no CSV → nome da coluna no DB (quando diferentes)
 const CSV_TO_DB = {
   'team kpm': 'team_kpm',
   'void_grubs': 'void_grubs',
+  'total cs': 'totalcs',
+  'damagetochampions': 'damagetochampions',
 };
 
 function parseYears(argv) {
@@ -156,22 +170,27 @@ function toText(s) { return (s === '' || s === null || s === undefined) ? null :
 
 // Tipagem por coluna (int / real / text)
 const INT_COLS = new Set([
-  'year', 'playoffs', 'gamelength', 'result', 'kills', 'deaths', 'firstblood',
+  'year', 'playoffs', 'gamelength', 'result', 'kills', 'deaths', 'assists', 'firstblood',
   'firstdragon', 'dragons', 'firstherald', 'heralds', 'void_grubs',
   'firstbaron', 'barons', 'firsttower', 'towers', 'inhibitors',
+  'doublekills', 'triplekills', 'quadrakills', 'pentakills',
+  'damagetochampions', 'wardsplaced', 'wardskilled',
+  'totalgold', 'totalcs',
   'goldat10', 'xpat10', 'csat10', 'golddiffat10', 'xpdiffat10', 'csdiffat10',
   'goldat15', 'xpat15', 'csat15', 'golddiffat15', 'xpdiffat15', 'csdiffat15',
-  'killsat15', 'deathsat15',
+  'killsat15', 'deathsat15', 'participantid',
 ]);
-const REAL_COLS = new Set(['team_kpm', 'ckpm', 'dpm', 'wpm', 'vspm', 'gspd', 'gpr']);
+const REAL_COLS = new Set([
+  'team_kpm', 'ckpm', 'dpm', 'wpm', 'vspm', 'gspd', 'gpr',
+  'damageshare', 'earnedgoldshare', 'visionscore', 'cspm',
+]);
 
-function rowToRecord(cells, header, colIdx) {
+function rowToRecord(cells, header, colIdx, cols) {
+  const targetCols = cols || PERSIST_COLS;
   const rec = {};
-  for (const dbCol of PERSIST_COLS) {
-    // Procura o nome no CSV: check CSV_TO_DB reverso + dbCol literal
+  for (const dbCol of targetCols) {
     let csvIdx = colIdx.get(dbCol);
     if (csvIdx === undefined) {
-      // procura equivalente com espaço
       for (const [csvName, dbName] of Object.entries(CSV_TO_DB)) {
         if (dbName === dbCol) { csvIdx = colIdx.get(csvName); break; }
       }
@@ -202,50 +221,78 @@ async function main() {
       ingested_at = datetime('now')
   `);
 
+  const insertPlayer = db.prepare(`
+    INSERT INTO oracleselixir_players (${PLAYER_COLS.join(', ')}, ingested_at)
+    VALUES (${PLAYER_COLS.map(c => '@' + c).join(', ')}, datetime('now'))
+    ON CONFLICT(gameid, participantid) DO UPDATE SET
+      ${PLAYER_COLS.filter(c => c !== 'gameid' && c !== 'participantid').map(c => `${c}=excluded.${c}`).join(', ')},
+      ingested_at = datetime('now')
+  `);
+
+  const PLAYER_POSITIONS = new Set(['top', 'jng', 'mid', 'bot', 'sup']);
+
   for (const year of years) {
     console.log(`\n── ${year} ──`);
     const url = URL_TEMPLATE(year);
     let header = null, colIdx = new Map();
-    let seen = 0, inserted = 0, skipped = 0, teamRows = 0;
+    let seen = 0, skipped = 0, teamRows = 0, playerRows = 0;
+    let insertedTeam = 0, insertedPlayer = 0;
     const BATCH = 500;
-    let batch = [];
+    let batchTeam = [], batchPlayer = [];
 
-    function flush() {
-      if (!batch.length) return;
-      const tx = db.transaction((rows) => {
-        for (const r of rows) insert.run(r);
-      });
-      tx(batch);
-      batch = [];
+    function flushTeam() {
+      if (!batchTeam.length) return;
+      const n = batchTeam.length;
+      const tx = db.transaction((rows) => { for (const r of rows) insert.run(r); });
+      tx(batchTeam);
+      insertedTeam += n;
+      batchTeam = [];
+    }
+    function flushPlayer() {
+      if (!batchPlayer.length) return;
+      const n = batchPlayer.length;
+      const tx = db.transaction((rows) => { for (const r of rows) insertPlayer.run(r); });
+      tx(batchPlayer);
+      insertedPlayer += n;
+      batchPlayer = [];
     }
 
     await streamCsv(url,
       (h) => {
         header = h;
         colIdx = new Map(h.map((name, i) => [name, i]));
-        // Sanity: confirm expected columns
         const missing = ['gameid', 'side', 'position', 'teamname'].filter(c => !colIdx.has(c));
-        if (missing.length) {
-          throw new Error(`CSV missing columns: ${missing.join(', ')}`);
-        }
+        if (missing.length) throw new Error(`CSV missing columns: ${missing.join(', ')}`);
       },
       (cells, h) => {
         seen++;
         const posIdx = colIdx.get('position');
-        if (cells[posIdx] !== 'team') { skipped++; return; }
-        teamRows++;
-        const rec = rowToRecord(cells, h, colIdx);
-        if (!rec.gameid || !rec.side) return;
-        batch.push(rec);
-        if (batch.length >= BATCH) { flush(); inserted += BATCH; }
+        const pos = cells[posIdx];
+        if (pos === 'team') {
+          teamRows++;
+          const rec = rowToRecord(cells, h, colIdx, PERSIST_COLS);
+          if (!rec.gameid || !rec.side) return;
+          batchTeam.push(rec);
+          if (batchTeam.length >= BATCH) flushTeam();
+        } else if (PLAYER_POSITIONS.has(pos)) {
+          playerRows++;
+          const rec = rowToRecord(cells, h, colIdx, PLAYER_COLS);
+          if (!rec.gameid || rec.participantid == null) return;
+          batchPlayer.push(rec);
+          if (batchPlayer.length >= BATCH) flushPlayer();
+        } else {
+          skipped++;
+        }
       }
     );
-    if (batch.length) { const n = batch.length; flush(); inserted += n; }
+    flushTeam();
+    flushPlayer();
 
-    console.log(`  rows seen: ${seen} | team rows: ${teamRows} | upserted: ${inserted}`);
+    console.log(`  rows seen: ${seen} | team: ${teamRows}→${insertedTeam} upserted | player: ${playerRows}→${insertedPlayer} upserted`);
 
-    const dbCount = db.prepare('SELECT COUNT(*) AS n FROM oracleselixir_games WHERE year = ?').get(year);
-    console.log(`  DB count for year ${year}: ${dbCount.n}`);
+    const gc = db.prepare('SELECT COUNT(*) AS n FROM oracleselixir_games WHERE year = ?').get(year);
+    const pc = db.prepare('SELECT COUNT(*) AS n FROM oracleselixir_players WHERE year = ?').get(year);
+    console.log(`  DB count year ${year}: games=${gc.n} players=${pc.n}`);
   }
 
   db.close();

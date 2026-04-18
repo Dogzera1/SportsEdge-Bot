@@ -273,6 +273,69 @@ const migrations = [
     },
   },
   {
+    // Oracle's Elixir ingest — player-level rows (position ∈ top/jng/mid/bot/sup).
+    // Cobre §2a (KDA individual), §2b (champion pool), §4b (ban/pick por jogador).
+    id: '023_oracleselixir_players',
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS oracleselixir_players (
+          gameid TEXT NOT NULL,
+          participantid INTEGER NOT NULL,
+          side TEXT,
+          position TEXT,
+          playerid TEXT,
+          playername TEXT,
+          teamname TEXT,
+          champion TEXT,
+          date TEXT,
+          league TEXT,
+          year INTEGER,
+          split TEXT,
+          playoffs INTEGER,
+          patch TEXT,
+          gamelength INTEGER,
+          result INTEGER,
+          kills INTEGER,
+          deaths INTEGER,
+          assists INTEGER,
+          doublekills INTEGER,
+          triplekills INTEGER,
+          quadrakills INTEGER,
+          pentakills INTEGER,
+          damagetochampions INTEGER,
+          dpm REAL,
+          damageshare REAL,
+          wardsplaced INTEGER,
+          wardskilled INTEGER,
+          visionscore REAL,
+          vspm REAL,
+          totalgold INTEGER,
+          earnedgoldshare REAL,
+          totalcs INTEGER,
+          cspm REAL,
+          goldat10 INTEGER,
+          xpat10 INTEGER,
+          csat10 INTEGER,
+          golddiffat10 INTEGER,
+          xpdiffat10 INTEGER,
+          csdiffat10 INTEGER,
+          goldat15 INTEGER,
+          xpat15 INTEGER,
+          csat15 INTEGER,
+          golddiffat15 INTEGER,
+          xpdiffat15 INTEGER,
+          csdiffat15 INTEGER,
+          ingested_at TEXT DEFAULT (datetime('now')),
+          PRIMARY KEY (gameid, participantid)
+        );
+        CREATE INDEX IF NOT EXISTS idx_oep_player ON oracleselixir_players(playerid, date);
+        CREATE INDEX IF NOT EXISTS idx_oep_playername ON oracleselixir_players(playername, date);
+        CREATE INDEX IF NOT EXISTS idx_oep_team_pos ON oracleselixir_players(teamname, position, date);
+        CREATE INDEX IF NOT EXISTS idx_oep_champion ON oracleselixir_players(champion, patch);
+      `);
+    },
+  },
+  {
     // Oracle's Elixir ingest — dados granulares de partida pro profissional LoL.
     // Uma linha por time por game (2 linhas por gameid). Filtrado com position='team'.
     // Cobre §1d (side), §1g (GD@15/XPD@15/CSD@15), §1h (firsts), §1i (obj rates),
