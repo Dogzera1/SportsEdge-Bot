@@ -8496,6 +8496,147 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // ── Overall summary — cross-sport aggregate pra dashboard "Geral" ──
+  // GET /overall-summary?days=30
+  if (p === '/overall-summary') {
+    const daysRaw = parseInt(parsed.query.days);
+    const days = Number.isFinite(daysRaw) ? Math.max(1, Math.min(365, daysRaw)) : 30;
+    try {
+      // KPIs globais: soma de banca + lucro + tips de todas as bankrolls
+      const bankrolls = db.prepare(`SELECT sport, initial_banca, current_banca FROM bankroll`).all();
+      const totalInitial = bankrolls.reduce((s, b) => s + (b.initial_banca || 0), 0);
+      const totalCurrent = bankrolls.reduce((s, b) => s + (b.current_banca || 0), 0);
+      const totalProfit = totalCurrent - totalInitial;
+      const growthPct = totalInitial > 0 ? (totalProfit / totalInitial * 100) : 0;
+
+      // Tips agregadas (não archived)
+      const tipsAgg = db.prepare(`
+        SELECT
+          COUNT(*) AS total,
+          SUM(CASE WHEN result='win' THEN 1 ELSE 0 END) AS wins,
+          SUM(CASE WHEN result='loss' THEN 1 ELSE 0 END) AS losses,
+          SUM(CASE WHEN result IS NULL THEN 1 ELSE 0 END) AS pending,
+          SUM(COALESCE(profit_reais, 0)) AS profit_reais,
+          SUM(COALESCE(stake_reais, 0)) AS stake_reais,
+          AVG(ev) AS avg_ev,
+          AVG(odds) AS avg_odds
+        FROM tips
+        WHERE (archived IS NULL OR archived = 0)
+          AND (sent_at >= datetime('now', ?) OR result IS NULL)
+      `).get(`-${days} days`);
+
+      const decided = (tipsAgg?.wins || 0) + (tipsAgg?.losses || 0);
+      const hitRate = decided > 0 ? (tipsAgg.wins / decided * 100) : null;
+      const roi = (tipsAgg?.stake_reais || 0) > 0 ? (tipsAgg.profit_reais / tipsAgg.stake_reais * 100) : null;
+
+      // CLV agregado
+      const clvAgg = db.prepare(`
+        SELECT
+          COUNT(*) AS n,
+          AVG((odds / clv_odds - 1) * 100) AS avg_clv,
+          SUM(CASE WHEN (odds / clv_odds - 1) > 0 THEN 1 ELSE 0 END) AS positive
+        FROM tips
+        WHERE (archived IS NULL OR archived = 0)
+          AND clv_odds > 1 AND odds > 1
+          AND result IN ('win','loss')
+          AND settled_at >= datetime('now', ?)
+      `).get(`-${days} days`);
+
+      // Per-sport breakdown
+      const bySport = db.prepare(`
+        SELECT
+          sport,
+          COUNT(*) AS total,
+          SUM(CASE WHEN result='win' THEN 1 ELSE 0 END) AS wins,
+          SUM(CASE WHEN result='loss' THEN 1 ELSE 0 END) AS losses,
+          SUM(CASE WHEN result IS NULL THEN 1 ELSE 0 END) AS pending,
+          SUM(COALESCE(profit_reais, 0)) AS profit,
+          SUM(COALESCE(stake_reais, 0)) AS stake
+        FROM tips
+        WHERE (archived IS NULL OR archived = 0)
+          AND (sent_at >= datetime('now', ?) OR result IS NULL)
+        GROUP BY sport
+        ORDER BY total DESC
+      `).all(`-${days} days`);
+
+      const sportsBreakdown = bySport.map(s => {
+        const dec = s.wins + s.losses;
+        return {
+          sport: s.sport,
+          total: s.total,
+          wins: s.wins,
+          losses: s.losses,
+          pending: s.pending,
+          profit_reais: +(s.profit || 0).toFixed(2),
+          stake_reais: +(s.stake || 0).toFixed(2),
+          hitRate: dec > 0 ? +(s.wins / dec * 100).toFixed(1) : null,
+          roi: s.stake > 0 ? +(s.profit / s.stake * 100).toFixed(2) : null,
+        };
+      });
+
+      // Equity diária agregada cross-sport
+      const equityRows = db.prepare(`
+        SELECT DATE(settled_at) AS day,
+               SUM(COALESCE(profit_reais, 0)) AS profit_r,
+               SUM(COALESCE(stake_reais, 0)) AS stake_r,
+               COUNT(*) AS n
+        FROM tips
+        WHERE (archived IS NULL OR archived = 0)
+          AND result IN ('win','loss','push')
+          AND settled_at IS NOT NULL
+          AND settled_at >= datetime('now', ?)
+        GROUP BY DATE(settled_at)
+        ORDER BY day ASC
+      `).all(`-${days} days`);
+
+      let cum = totalInitial;
+      let peak = cum, maxDD = 0;
+      const series = equityRows.map(r => {
+        const profit = Number(r.profit_r) || 0;
+        cum += profit;
+        if (cum > peak) peak = cum;
+        const dd = peak > 0 ? (peak - cum) / peak : 0;
+        if (dd > maxDD) maxDD = dd;
+        return { day: r.day, cum_banca: parseFloat(cum.toFixed(2)), profit_reais: profit, n: r.n };
+      });
+
+      sendJson(res, {
+        days,
+        banca: {
+          total_initial: +totalInitial.toFixed(2),
+          total_current: +totalCurrent.toFixed(2),
+          total_profit: +totalProfit.toFixed(2),
+          growthPct: +growthPct.toFixed(2),
+          bankrolls: bankrolls.length,
+        },
+        overall: {
+          total_tips: tipsAgg?.total || 0,
+          wins: tipsAgg?.wins || 0,
+          losses: tipsAgg?.losses || 0,
+          pending: tipsAgg?.pending || 0,
+          hitRate: hitRate != null ? +hitRate.toFixed(1) : null,
+          roi: roi != null ? +roi.toFixed(2) : null,
+          profit_reais: +(tipsAgg?.profit_reais || 0).toFixed(2),
+          avg_ev: tipsAgg?.avg_ev ? +tipsAgg.avg_ev.toFixed(2) : null,
+          avg_odds: tipsAgg?.avg_odds ? +tipsAgg.avg_odds.toFixed(2) : null,
+        },
+        clv: clvAgg?.n > 0 ? {
+          n: clvAgg.n,
+          avg: +clvAgg.avg_clv.toFixed(2),
+          positive_rate: +(clvAgg.positive / clvAgg.n * 100).toFixed(1),
+        } : null,
+        sports: sportsBreakdown,
+        equity: {
+          initial: +totalInitial.toFixed(2),
+          current: +cum.toFixed(2),
+          max_drawdown_pct: +(maxDD * 100).toFixed(2),
+          series,
+        },
+      });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
   // ── Models status (dashboard card) ──
   if (p === '/models-status') {
     try {
@@ -8514,7 +8655,10 @@ const server = http.createServer(async (req, res) => {
           if (!m) continue;
           const chosen = d.metrics?.chosen || 'raw';
           const cm = chosen === 'calibrated' && d.metrics?.ensemble_calibrated_test ? d.metrics.ensemble_calibrated_test : m;
-          const isoPath = path.join(__dirname, 'lib', g === 'lol' ? 'lol-model-isotonic.json' : `${g}-isotonic.json`);
+          const isoPath = path.join(__dirname, 'lib',
+            g === 'lol' ? 'lol-model-isotonic.json'
+            : g === 'tennis' ? 'tennis-model-isotonic.json'
+            : `${g}-isotonic.json`);
           out.push({
             game: g,
             brier: +(cm.brier || 0).toFixed(4),

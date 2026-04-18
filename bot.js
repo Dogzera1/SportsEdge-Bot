@@ -377,8 +377,9 @@ function _livePhaseExit(sport)  { _livePhase.delete(sport); }
 
 function _sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-// Settlement
-const SETTLEMENT_INTERVAL = 30 * 60 * 1000;
+// Settlement — roda a cada 10min (era 30min). ESPN/API de scores tipicamente já tem
+// resultado 3-8min pós-match; 10min dá margem mínima com reciprocidade boa.
+const SETTLEMENT_INTERVAL = parseInt(process.env.SETTLEMENT_INTERVAL_MS || String(10 * 60 * 1000), 10);
 let lastSettlementCheck = 0;
 
 // Line movement
@@ -4730,7 +4731,10 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
       let txt = `🧠 *MODELS STATUS*\n\n`;
       for (const g of games) {
         const weightsPath = path.join(__dirname, 'lib', `${g}-weights.json`);
-        const isoPath = path.join(__dirname, 'lib', g === 'lol' ? 'lol-model-isotonic.json' : `${g}-isotonic.json`);
+        const isoPath = path.join(__dirname, 'lib',
+          g === 'lol' ? 'lol-model-isotonic.json'
+          : g === 'tennis' ? 'tennis-model-isotonic.json'
+          : `${g}-isotonic.json`);
         if (!fs.existsSync(weightsPath)) { txt += `*${g}*: ⚠️ sem weights\n\n`; continue; }
         const data = JSON.parse(fs.readFileSync(weightsPath, 'utf8'));
         const m = data.metrics?.ensemble_raw_test || data.metrics?.logistic_test;
@@ -10840,7 +10844,10 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
         if (!m) continue;
         const chosen = d.metrics?.chosen || 'raw';
         const cm = chosen === 'calibrated' && d.metrics?.ensemble_calibrated_test ? d.metrics.ensemble_calibrated_test : m;
-        const isoPath = path.join(__dirname, 'lib', g === 'lol' ? 'lol-model-isotonic.json' : `${g}-isotonic.json`);
+        const isoPath = path.join(__dirname, 'lib',
+          g === 'lol' ? 'lol-model-isotonic.json'
+          : g === 'tennis' ? 'tennis-model-isotonic.json'
+          : `${g}-isotonic.json`);
         const iso = fs.existsSync(isoPath) ? '+iso' : '';
         const staleFlag = ageDays > STALE_DAYS ? ` ⚠️${ageDays}d` : '';
         lines.push(`${g} Brier=${cm.brier.toFixed(3)} Acc=${(cm.acc*100).toFixed(0)}% AUC=${cm.auc.toFixed(2)}${iso}${staleFlag}`);
