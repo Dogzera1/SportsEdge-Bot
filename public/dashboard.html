@@ -774,9 +774,10 @@ async function loadKPIs() {
   }
 
   const banca = data.banca || {};
-  const roi = data.roi != null ? data.roi : (data.stats?.total ? (data.stats.profit / data.stats.staked * 100) : null);
-  const totalTips = data.stats?.total || 0;
-  const wins = data.stats?.wins || 0;
+  const ov = data.overall || {};
+  const roi = ov.totalStaked > 0 ? (parseFloat(ov.totalProfit) / parseFloat(ov.totalStaked) * 100) : null;
+  const totalTips = (ov.wins || 0) + (ov.losses || 0);
+  const wins = ov.wins || 0;
   const winRate = totalTips ? (wins / totalTips * 100) : null;
   const clv = data.clv?.avg;
   const profit = banca.profitReais != null ? banca.profitReais : 0;
@@ -794,12 +795,12 @@ async function loadKPIs() {
     <div class="kpi">
       <div class="kpi-label">Lucro acumulado</div>
       <div class="kpi-value ${sign(profit)}">${profit >= 0 ? '+' : ''}${fmtMoney(profit)}</div>
-      <div class="kpi-sub">${totalTips} tips · ${winRate != null ? fmtPct(winRate, 0).replace('+','') + ' WR' : '—'}</div>
+      <div class="kpi-sub">${totalTips} tips · ${winRate != null ? winRate.toFixed(0) + '% WR' : '—'}${ov.pending ? ' · ' + ov.pending + ' pend' : ''}</div>
     </div>
     <div class="kpi">
       <div class="kpi-label">ROI</div>
       <div class="kpi-value ${sign(roi)}">${fmtPct(roi)}</div>
-      <div class="kpi-sub">EV médio ${data.stats?.avgEv ? fmtPct(data.stats.avgEv) : '—'}</div>
+      <div class="kpi-sub">EV médio ${ov.avg_ev ? fmtPct(ov.avg_ev) : '—'}</div>
     </div>
     <div class="kpi">
       <div class="kpi-label">CLV médio</div>
@@ -833,20 +834,23 @@ async function loadEquity() {
   const days = document.getElementById('equityDays').value;
   const gq = currentGame ? '&game=' + encodeURIComponent(currentGame) : '';
   const data = await apiFetch(`/equity-curve?sport=${currentSport}&days=${days}${gq}`);
-  if (!data?.points?.length) {
-    document.getElementById('equityKpis').innerHTML = '<span class="empty-state">Sem dados no período</span>';
+  const series = data?.series || [];
+  if (!series.length) {
+    document.getElementById('equityKpis').innerHTML = '<span style="color:var(--text-faint)">Sem settlements no período</span>';
     if (charts.equity) { charts.equity.destroy(); charts.equity = null; }
     return;
   }
 
-  const labels = data.points.map(p => {
-    const d = new Date(p.date);
+  const labels = series.map(p => {
+    const d = new Date(p.day);
     return d.toLocaleDateString('pt-BR', { day: '2-digit', month: 'short' });
   });
-  const values = data.points.map(p => p.banca);
-  const initial = values[0] || 0;
-  const current = values[values.length - 1] || 0;
-  const profit = current - initial;
+  const values = series.map(p => p.cum_banca);
+  const initial = data.initial_banca || values[0] || 0;
+  const current = data.current_banca || values[values.length - 1] || 0;
+  const profit = data.total_profit_reais != null ? data.total_profit_reais : (current - initial);
+  const maxDD = data.max_drawdown_pct;
+  const sharpe = data.sharpe_annualized;
 
   const ctx = document.getElementById('equityChart').getContext('2d');
   if (charts.equity) charts.equity.destroy();
@@ -891,11 +895,11 @@ async function loadEquity() {
 
   const pct = initial ? (profit / initial * 100) : 0;
   document.getElementById('equityKpis').innerHTML = `
-    <span>Início: ${fmtMoney(initial)}</span>
-    &nbsp;·&nbsp;
-    <span>Atual: ${fmtMoney(current)}</span>
+    <span>Início ${fmtMoney(initial)}</span>
     &nbsp;·&nbsp;
     <span class="delta ${sign(profit)}">${arrow(profit)} ${profit >= 0 ? '+' : ''}${fmtMoney(profit)} (${fmtPct(pct)})</span>
+    ${maxDD != null ? `&nbsp;·&nbsp;<span>DD máx ${maxDD.toFixed(1)}%</span>` : ''}
+    ${sharpe != null ? `&nbsp;·&nbsp;<span>Sharpe ${sharpe.toFixed(2)}</span>` : ''}
   `;
 }
 
@@ -916,9 +920,13 @@ async function loadSportRoi() {
   const results = await Promise.all(SPORTS_LIST.map(async s => {
     const gq = s.game ? '&game=' + encodeURIComponent(s.game) : '';
     const data = await apiFetch('/roi?sport=' + s.sport + gq);
-    if (!data?.stats) return { ...s, roi: null, tips: 0 };
-    const roi = data.stats.total ? (data.stats.profit / data.stats.staked * 100) : null;
-    return { ...s, roi, tips: data.stats.total };
+    const ov = data?.overall;
+    if (!ov) return { ...s, roi: null, tips: 0 };
+    const staked = parseFloat(ov.totalStaked) || 0;
+    const profit = parseFloat(ov.totalProfit) || 0;
+    const roi = staked > 0 ? (profit / staked * 100) : null;
+    const tips = (ov.wins || 0) + (ov.losses || 0);
+    return { ...s, roi, tips };
   }));
   const maxAbs = Math.max(0.1, ...results.map(r => Math.abs(r.roi || 0)));
 
@@ -928,9 +936,10 @@ async function loadSportRoi() {
     const cls = roi == null ? '' : roi >= 0 ? 'pos' : 'neg';
     const val = roi == null ? '—' : fmtPct(roi);
     const cssSign = sign(roi);
+    const tipsTag = r.tips ? `<span class="chip" style="font-size:10px;padding:1px 5px">${r.tips}</span>` : '';
     return `
       <div class="sport-roi-row">
-        <div class="sport-roi-name">${r.emoji} ${r.label}</div>
+        <div class="sport-roi-name">${r.emoji} ${r.label} ${tipsTag}</div>
         <div class="sport-roi-bar">
           <div class="sport-roi-bar-fill ${cls}" style="width:${pct}%; ${cls === 'neg' ? `right:50%;` : `left:50%;`}"></div>
         </div>
@@ -1077,17 +1086,20 @@ async function loadModels() {
 // 7) Expandable sections loaders
 // ─────────────────────────────────────────────────────────────
 async function loadCalibration() {
-  if (charts.calib) return; // already loaded
+  if (charts.calib) return;
   const data = await apiFetch('/calibration?sport=' + currentSport);
-  if (!data?.buckets?.length) { document.getElementById('calibMeta').textContent = 'sem dados'; return; }
+  if (!data?.buckets?.length) {
+    document.getElementById('calibMeta').textContent = 'sem dados (precisa tips settled)';
+    return;
+  }
   const ctx = document.getElementById('calibChart').getContext('2d');
   charts.calib = new Chart(ctx, {
     type: 'line',
     data: {
-      labels: data.buckets.map(b => (b.midP * 100).toFixed(0) + '%'),
+      labels: data.buckets.map(b => b.bucket),
       datasets: [
-        { label: 'Real', data: data.buckets.map(b => b.realWR * 100), borderColor: '#8b5cf6', backgroundColor: 'transparent', tension: 0.2, pointRadius: 3 },
-        { label: 'Perfeito', data: data.buckets.map(b => b.midP * 100), borderColor: '#64748b', borderDash: [4,4], pointRadius: 0 },
+        { label: 'Real (observed)', data: data.buckets.map(b => b.actual), borderColor: '#8b5cf6', backgroundColor: 'transparent', tension: 0.2, pointRadius: 4, borderWidth: 2 },
+        { label: 'Previsto (model)', data: data.buckets.map(b => b.predicted), borderColor: '#64748b', borderDash: [4,4], pointRadius: 0, borderWidth: 1 },
       ],
     },
     options: {
@@ -1095,52 +1107,82 @@ async function loadCalibration() {
       plugins: { legend: { labels: { color: '#94a3b8', font: { size: 11 } } } },
       scales: {
         x: { ticks: { color: '#64748b', font: { size: 10 } }, grid: { color: '#1e212d' } },
-        y: { ticks: { color: '#64748b', font: { size: 10 } }, grid: { color: '#1e212d' }, min: 0, max: 100 },
+        y: { ticks: { color: '#64748b', font: { size: 10 }, callback: v => v + '%' }, grid: { color: '#1e212d' }, min: 0, max: 100 },
       },
     },
   });
-  document.getElementById('calibMeta').textContent = `Brier ${data.brier?.toFixed(3) || '—'} · ECE ${data.ece?.toFixed(3) || '—'}`;
+  const brier = data.brierScore;
+  document.getElementById('calibMeta').textContent =
+    `${data.total || 0} tips · Brier ${brier != null ? brier.toFixed(3) : '—'}`;
 }
 
 async function loadClv() {
   if (charts.clv) return;
   const data = await apiFetch('/clv-decay?sport=' + currentSport + '&days=30');
-  if (!data?.points?.length) { document.getElementById('clvMeta').textContent = 'sem dados'; return; }
+  const series = data?.series || [];
+  if (!series.length) {
+    document.getElementById('clvMeta').textContent = 'sem tips com CLV capturado';
+    return;
+  }
+  const rolling = data.rolling7 || [];
   const ctx = document.getElementById('clvChart').getContext('2d');
   charts.clv = new Chart(ctx, {
     type: 'bar',
     data: {
-      labels: data.points.map(p => new Date(p.date).toLocaleDateString('pt-BR', { day: '2-digit', month: 'short' })),
-      datasets: [{
-        data: data.points.map(p => p.avg_clv),
-        backgroundColor: ctx => {
-          const v = ctx.parsed?.y;
-          return v >= 0 ? 'rgba(16,185,129,0.7)' : 'rgba(239,68,68,0.7)';
+      labels: series.map(p => new Date(p.day).toLocaleDateString('pt-BR', { day: '2-digit', month: 'short' })),
+      datasets: [
+        {
+          type: 'bar',
+          label: 'CLV diário',
+          data: series.map(p => p.clv_avg),
+          backgroundColor: series.map(p => p.clv_avg >= 0 ? 'rgba(16,185,129,0.7)' : 'rgba(239,68,68,0.7)'),
+          borderWidth: 0,
         },
-        borderWidth: 0,
-      }],
+        {
+          type: 'line',
+          label: 'rolling 7d',
+          data: rolling.map(r => r.rolling7_clv),
+          borderColor: '#8b5cf6',
+          backgroundColor: 'transparent',
+          tension: 0.3,
+          pointRadius: 0,
+          borderWidth: 2,
+        },
+      ],
     },
     options: {
       responsive: true, maintainAspectRatio: false,
-      plugins: { legend: { display: false } },
+      plugins: { legend: { labels: { color: '#94a3b8', font: { size: 11 } } } },
       scales: {
         x: { ticks: { color: '#64748b', font: { size: 10 }, maxTicksLimit: 8 }, grid: { display: false } },
         y: { ticks: { color: '#64748b', font: { size: 10 }, callback: v => v.toFixed(1) + '%' }, grid: { color: '#1e212d' } },
       },
     },
   });
-  document.getElementById('clvMeta').textContent = `média ${data.avg?.toFixed(2) || '—'}%`;
+  const avg = series.reduce((s, p) => s + p.clv_avg * p.n, 0) / series.reduce((s, p) => s + p.n, 0);
+  document.getElementById('clvMeta').textContent = `média ${isFinite(avg) ? avg.toFixed(2) + '%' : '—'} · ${series.length} dias`;
 }
 
 async function loadMatrix() {
   const data = await apiFetch('/roi-matrix?days=30');
   const el = document.getElementById('matrixTable');
-  if (!data?.rows?.length) { el.innerHTML = '<div class="empty-state">Sem dados</div>'; return; }
+  const matrix = data?.matrix || [];
+  if (!matrix.length) { el.innerHTML = '<div class="empty-state">Sem dados no período</div>'; return; }
+  const healthEmoji = h =>
+    h === 'verde' || h === 'verde_sem_clv' ? '🟢'
+    : h === 'vermelho' || h === 'vermelho_sem_clv' ? '🔴'
+    : h === 'amarelo' || h === 'amarelo_sem_clv' ? '🟡'
+    : '⚪';
+  const healthLabel = h =>
+    h === 'verde' || h === 'verde_sem_clv' ? 'scale up'
+    : h === 'vermelho' || h === 'vermelho_sem_clv' ? 'cut / shadow'
+    : h === 'amarelo' || h === 'amarelo_sem_clv' ? 'observe'
+    : 'sem dados';
   el.innerHTML = `
     <table class="tips">
       <thead>
         <tr>
-          <th>Sport / Segment</th>
+          <th>Sport / Phase / Tier</th>
           <th style="text-align:right">Tips</th>
           <th style="text-align:right">WR</th>
           <th style="text-align:right">ROI</th>
@@ -1149,23 +1191,16 @@ async function loadMatrix() {
         </tr>
       </thead>
       <tbody>
-        ${data.rows.map(r => {
-          const roiCls = r.roiPct >= 3 ? 'pos' : r.roiPct <= -5 ? 'neg' : '';
-          const statusText = r.n < 10 ? 'sem dados'
-            : (r.roiPct >= 3 && r.clvPct >= 1) ? '🟢 scale'
-            : (r.roiPct <= -5 || r.clvPct <= -1) ? '🔴 cut'
-            : '🟡 observe';
-          return `
-            <tr>
-              <td>${r.sport}${r.tier ? ' · ' + r.tier : ''}${r.phase ? ' · ' + r.phase : ''}</td>
-              <td class="tip-num">${r.n}</td>
-              <td class="tip-num">${r.wr != null ? r.wr.toFixed(0) + '%' : '—'}</td>
-              <td class="tip-num ${roiCls}">${fmtPct(r.roiPct)}</td>
-              <td class="tip-num ${sign(r.clvPct)}">${fmtPct(r.clvPct)}</td>
-              <td class="tip-meta">${statusText}</td>
-            </tr>
-          `;
-        }).join('')}
+        ${matrix.map(r => `
+          <tr>
+            <td>${r.sport} · ${r.phase} · <span class="tip-meta">${r.tier}</span></td>
+            <td class="tip-num">${r.n}</td>
+            <td class="tip-num">${r.hitRate != null ? r.hitRate.toFixed(0) + '%' : '—'}</td>
+            <td class="tip-num ${sign(r.roi)}">${fmtPct(r.roi)}</td>
+            <td class="tip-num ${sign(r.clv_avg)}">${fmtPct(r.clv_avg)}</td>
+            <td class="tip-meta">${healthEmoji(r.health)} ${healthLabel(r.health)}</td>
+          </tr>
+        `).join('')}
       </tbody>
     </table>
   `;
@@ -1184,19 +1219,31 @@ async function loadLeagueRoi() {
           <th style="text-align:right">Tips</th>
           <th style="text-align:right">WR</th>
           <th style="text-align:right">ROI</th>
-          <th style="text-align:right">Stake mult</th>
+          <th style="text-align:right">Mult</th>
+          <th>Status</th>
         </tr>
       </thead>
       <tbody>
-        ${data.leagues.map(l => `
-          <tr>
-            <td>${l.league}</td>
-            <td class="tip-num">${l.tips}</td>
-            <td class="tip-num">${l.wr != null ? l.wr.toFixed(0) + '%' : '—'}</td>
-            <td class="tip-num ${sign(l.roiPct)}">${fmtPct(l.roiPct)}</td>
-            <td class="tip-num">${(l.stakeMult || 1).toFixed(2)}x</td>
-          </tr>
-        `).join('')}
+        ${data.leagues.map(l => {
+          const a = l.all || {};
+          const wr = a.wins + a.losses > 0 ? (a.wins / (a.wins + a.losses) * 100) : null;
+          const mult = l.multiplier;
+          const status = !l.active ? '<span class="tip-meta">insuf.</span>'
+            : mult === 0 ? '<span style="color:var(--danger)">⛔ cortar</span>'
+            : mult < 1 ? `<span style="color:var(--warn)">↓ reduzir</span>`
+            : mult > 1 ? `<span style="color:var(--success)">↑ boost</span>`
+            : '<span class="tip-meta">normal</span>';
+          return `
+            <tr>
+              <td>${l.league}</td>
+              <td class="tip-num">${a.total || 0}</td>
+              <td class="tip-num">${wr != null ? wr.toFixed(0) + '%' : '—'}</td>
+              <td class="tip-num ${sign(a.roi)}">${fmtPct(a.roi)}</td>
+              <td class="tip-num">${mult != null ? mult.toFixed(2) + 'x' : '—'}</td>
+              <td>${status}</td>
+            </tr>
+          `;
+        }).join('')}
       </tbody>
     </table>
   `;
@@ -1208,20 +1255,23 @@ async function loadShadow() {
   const el = document.getElementById('shadowBody');
   const meta = document.getElementById('shadowMeta');
   if (!data) { el.innerHTML = '<div class="empty-state">Sem dados</div>'; return; }
-  meta.textContent = `${data.shadow?.total || 0} shadow · ${data.active?.total || 0} ativo`;
+  const sh = data.shadow || {};
+  const ac = data.active || {};
+  meta.textContent = `${sh.n || 0} shadow · ${ac.n || 0} ativo`;
   el.innerHTML = `
     <div class="models-grid">
       <div class="model-card">
         <div class="model-name">Shadow</div>
-        <div class="model-brier">${fmtPct(data.shadow?.roiPct)}</div>
-        <div class="model-meta">${data.shadow?.total || 0} tips · WR ${data.shadow?.wr?.toFixed(0) || '—'}%</div>
+        <div class="model-brier ${sign(sh.roi)}">${fmtPct(sh.roi)}</div>
+        <div class="model-meta">${sh.n || 0} tips · WR ${sh.hitRate != null ? (sh.hitRate * 100).toFixed(0) + '%' : '—'}</div>
       </div>
       <div class="model-card">
         <div class="model-name">Ativo</div>
-        <div class="model-brier">${fmtPct(data.active?.roiPct)}</div>
-        <div class="model-meta">${data.active?.total || 0} tips · WR ${data.active?.wr?.toFixed(0) || '—'}%</div>
+        <div class="model-brier ${sign(ac.roi)}">${fmtPct(ac.roi)}</div>
+        <div class="model-meta">${ac.n || 0} tips · WR ${ac.hitRate != null ? (ac.hitRate * 100).toFixed(0) + '%' : '—'}</div>
       </div>
     </div>
+    <div class="card-meta" style="margin-top:10px">Shadow = log-only (não envia DM); Ativo = tip production.</div>
   `;
 }
 
@@ -1230,22 +1280,38 @@ async function loadCost() {
   const el = document.getElementById('costBody');
   const meta = document.getElementById('costMeta');
   if (!data) { el.innerHTML = '<div class="empty-state">Sem dados</div>'; return; }
-  meta.textContent = `R$ ${(data.total_brl || 0).toFixed(2)}`;
-  const rows = data.services || [];
+  meta.textContent = `${data.month || ''} · R$ ${(data.total_brl || 0).toFixed(2)}`;
+  const rows = [];
+  if (data.deepseek) rows.push({
+    name: 'DeepSeek (IA análise)',
+    usage: `${(data.deepseek.calls || 0).toLocaleString('pt-BR')} calls · ${((data.deepseek.prompt_tokens || 0) + (data.deepseek.completion_tokens || 0)).toLocaleString('pt-BR')} tokens`,
+    cost_brl: data.deepseek.cost_brl || 0,
+  });
+  if (data.the_odds_api) rows.push({
+    name: 'The Odds API',
+    usage: `${data.the_odds_api.used || 0} / ${data.the_odds_api.cap || 500} (${data.the_odds_api.pct || 0}%)`,
+    cost_brl: data.the_odds_api.cost_brl || 0,
+  });
+  if (data.railway) rows.push({
+    name: 'Railway (hosting)',
+    usage: 'estimado',
+    cost_brl: data.railway.cost_brl || 0,
+  });
   if (!rows.length) { el.innerHTML = '<div class="empty-state">Sem custos registrados</div>'; return; }
   el.innerHTML = `
     <table class="tips">
-      <thead><tr><th>Serviço</th><th style="text-align:right">Uso</th><th style="text-align:right">Custo</th></tr></thead>
+      <thead><tr><th>Serviço</th><th>Uso</th><th style="text-align:right">Custo</th></tr></thead>
       <tbody>
         ${rows.map(r => `
           <tr>
             <td>${r.name}</td>
-            <td class="tip-num">${r.usage || '—'}</td>
+            <td class="tip-meta">${r.usage || '—'}</td>
             <td class="tip-num">R$ ${(r.cost_brl || 0).toFixed(2)}</td>
           </tr>
         `).join('')}
       </tbody>
     </table>
+    ${(data.warnings || []).length ? `<div class="card-meta" style="margin-top:10px;color:var(--warn)">⚠ ${data.warnings.join(' · ')}</div>` : ''}
   `;
 }
 
