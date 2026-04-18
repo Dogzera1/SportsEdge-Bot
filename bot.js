@@ -4499,6 +4499,32 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
       await send(token, chatId, txt);
     } catch(e) { await send(token, chatId, `❌ ${e.message}`); }
 
+  } else if (cmd === '/market-tips') {
+    if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
+    try {
+      const parts = String(text || '').trim().split(/\s+/);
+      const sportArg = parts[1]?.toLowerCase() || null;
+      const daysArg = Math.max(1, Math.min(90, parseInt(parts[2] || '30', 10) || 30));
+      const { getShadowStats } = require('./lib/market-tips-shadow');
+      const stats = getShadowStats(db, { sport: sportArg, days: daysArg });
+      if (!stats.length) {
+        await send(token, chatId, `📊 Market tips shadow — *nenhum tip* em ${daysArg}d${sportArg ? ' (' + sportArg + ')' : ''}`);
+        return;
+      }
+      let txt = `📊 *MARKET TIPS SHADOW — ${daysArg}d${sportArg ? ' (' + sportArg + ')' : ''}*\n\n`;
+      for (const s of stats) {
+        const hit = s.hitRate != null ? `${s.hitRate.toFixed(1)}%` : '?';
+        const roi = s.roiPct != null ? `${s.roiPct >= 0 ? '+' : ''}${s.roiPct.toFixed(1)}%` : '?';
+        const clv = s.avgClv != null ? `${s.avgClv >= 0 ? '+' : ''}${s.avgClv.toFixed(1)}%` : '?';
+        txt += `*${s.sport}/${s.market}*: n=${s.n} settled=${s.settled}\n`;
+        txt += `  Hit=${hit} ROI=${roi} avgEv=${s.avgEv.toFixed(1)}%\n`;
+        txt += `  CLV=${clv} (n=${s.clvN}) profit=${s.totalProfit.toFixed(1)}u\n\n`;
+        if (txt.length > 3500) { txt += '_(truncado)_'; break; }
+      }
+      txt += `\n_Uso: /market-tips [sport] [days]_\n_Ex: /market-tips lol 60_`;
+      await send(token, chatId, txt);
+    } catch (e) { await send(token, chatId, `❌ ${e.message}`); }
+
   } else if (cmd === '/reset-tips') {
     if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
     try {
@@ -5463,7 +5489,7 @@ async function poll(token, sport) {
                      text.startsWith('/settle') || text.startsWith('/pending') || text.startsWith('/resync') ||
                      text.startsWith('/slugs') || text.startsWith('/lolraw') ||
                      text.startsWith('/health') || text.startsWith('/debug') ||
-                     text.startsWith('/shadow')) {
+                     text.startsWith('/shadow') || text.startsWith('/market-tips')) {
             // Passa `sport` da poll (qual bot recebeu) para evitar default 'esports'
             await handleAdmin(token, chatId, text, sport);
           }
