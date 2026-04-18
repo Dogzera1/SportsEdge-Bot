@@ -1595,12 +1595,20 @@ function renderTips(tips) {
           ? '<span class="badge" style="background:#1f2937;color:#6b7280">VOID</span>'
           : '<span class="badge badge-pending">PENDING</span>' + manualBtns;
 
-    const conf = (t.confidence || 'M\u00C9DIA').toUpperCase();
+    // Confidence: se current_confidence (numérico, do modelo treinado) existe, usa-o como override
+    let conf = (t.confidence || 'M\u00C9DIA').toUpperCase();
+    if (!settled && t.current_confidence != null && t.current_confidence !== '') {
+      const cn = parseFloat(t.current_confidence);
+      if (Number.isFinite(cn)) conf = cn >= 0.70 ? 'ALTA' : cn >= 0.50 ? 'M\u00C9DIA' : 'BAIXA';
+    }
     const confBadge = conf === 'ALTA'
       ? '<span class="badge badge-alta">ALTA</span>'
       : conf === 'BAIXA'
         ? '<span class="badge badge-baixa">BAIXA</span>'
         : '<span class="badge badge-media">M\u00C9DIA</span>';
+
+    // Indicador de reavaliação: se current_updated_at recente, mostra ✨
+    const reEval = (!settled && t.current_updated_at) ? ' <span title="Reavaliado pelo modelo treinado em ' + t.current_updated_at + '" style="color:#60a5fa;font-size:0.65rem">✨</span>' : '';
 
     const evRaw = (showEvRaw != null && showEvRaw !== '' ? String(showEvRaw) : '');
     const ev = evRaw
@@ -1615,12 +1623,16 @@ function renderTips(tips) {
     const match = (t.participant1 || '?') + ' vs ' + (t.participant2 || '?');
     const why = t.tip_reason ? String(t.tip_reason).replace(/"/g, '\\"') : '';
 
+    const evCellTitle = (!settled && t.ev != null && t.current_ev != null && t.ev !== t.current_ev)
+      ? 'title="EV original: ' + parseFloat(t.ev).toFixed(1) + '% → atual: ' + parseFloat(t.current_ev).toFixed(1) + '%"'
+      : '';
+
     return '<tr title="' + (why ? ('Por quê: ' + why) : '') + '">' +
-      '<td style="color:#6b7280;font-size:0.7rem">' + date + '</td>' +
+      '<td style="color:#6b7280;font-size:0.7rem">' + date + reEval + '</td>' +
       '<td title="' + match + '" style="max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + match + '</td>' +
       '<td><strong>' + (t.tip_participant || '?') + '</strong></td>' +
       '<td>' + parseFloat(showOdds || 0).toFixed(2) + '</td>' +
-      '<td style="color:' + evColor + '">' + (ev === '\u2013' ? ev : ev + '%') + '</td>' +
+      '<td ' + evCellTitle + ' style="color:' + evColor + '">' + (ev === '\u2013' ? ev : ev + '%') + '</td>' +
       '<td>' + (t.stake || '\u2013') + '</td>' +
       '<td>' + confBadge + '</td>' +
       '<td>' + resultBadge + '</td>' +
