@@ -1,6 +1,20 @@
-[hltv] match_results.cs2 ANTES: 11999
-  blocked (403), backoff 60s...
-  blocked (403), backoff 60s...
-  blocked (403), backoff 60s...
-  blocked (403), backoff 60s...
-  blocked (403), backoff 60s...
+[hltv] match_results.cs2 ANTES: 12499
+[hltv] usando proxy=https://pleasant-compassion-production.up.railway.app
+  offset=0: 102 parsed, +0 inserted | total=0/102
+  offset=100: 100 parsed, +0 inserted | total=0/202
+  offset=200: 100 parsed, +0 inserted | total=0/302
+  offset=300: 100 parsed, +0 inserted | total=0/402
+  offset=400: 100 parsed, +0 inserted | total=0/502
+  offset=500: 100 parsed, +100 inserted | total=100/602
+  offset=600: 100 parsed, +100 inserted | total=200/702
+  offset=700: 100 parsed, +100 inserted | total=300/802
+  offset=800: 100 parsed, +100 inserted | total=400/902
+  offset=900: 100 parsed, +100 inserted | total=500/1002
+  offset=1000: 100 parsed, +100 inserted | total=600/1102
+  offset=1100: 100 parsed, +100 inserted | total=700/1202
+  offset=1200: 100 parsed, +100 inserted | total=800/1302
+  offset=1300: 100 parsed, +100 inserted | total=900/1402
+  offset=1400: 100 parsed, +100 inserted | total=1000/1502
+  offset=1500: 100 parsed, +100 inserted | total=1100/1602
+  offset=1600: 100 parsed, +100 inserted | total=1200/1702
+  offset=1700: 100 parsed, +100 in

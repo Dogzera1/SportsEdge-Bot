@@ -14,6 +14,32 @@ const { formatLineShopDM } = require('./lib/line-shopping');
 const { getLolProbability } = require('./lib/lol-model');
 const { predictTrainedEsports, hasTrainedModel: hasTrainedEsportsModel } = require('./lib/esports-model-trained');
 const { buildTrainedContext: buildEsportsTrainedContext } = require('./lib/esports-runtime-features');
+
+// ── Dota hero meta lookup (dota_hero_stats populado via sync-opendota-heroes) ──
+// Lê WR de pro play por herói e retorna uma linha pro prompt quando picks revelados.
+function dotaHeroMetaLine(blueTeam, redTeam) {
+  try {
+    const bluePicks = (blueTeam?.players || []).map(p => p.hero || p.champion).filter(Boolean);
+    const redPicks = (redTeam?.players || []).map(p => p.hero || p.champion).filter(Boolean);
+    if (bluePicks.length < 3 || redPicks.length < 3) return '';
+    const rows = db.prepare(`SELECT localized_name, pro_pick, pro_winrate FROM dota_hero_stats WHERE pro_pick >= 5`).all();
+    if (!rows.length) return '';
+    const byName = new Map(rows.map(r => [String(r.localized_name).toLowerCase(), r]));
+    function avgWR(heroes) {
+      let sum = 0, n = 0, totalN = 0;
+      for (const h of heroes) {
+        const stat = byName.get(String(h).toLowerCase());
+        if (stat && stat.pro_winrate != null) { sum += stat.pro_winrate; n++; totalN += stat.pro_pick; }
+      }
+      return n >= 3 ? { wr: sum / n * 100, n, avgSample: Math.round(totalN / n) } : null;
+    }
+    const b = avgWR(bluePicks);
+    const r = avgWR(redPicks);
+    if (!b || !r) return '';
+    const diff = b.wr - r.wr;
+    return `META PRO (hero WR): ${blueTeam.name} ${b.wr.toFixed(1)}% (n~${b.avgSample}) vs ${redTeam.name} ${r.wr.toFixed(1)}% (n~${r.avgSample}) (diff: ${diff > 0 ? '+' : ''}${diff.toFixed(1)}pp)\n`;
+  } catch (e) { return ''; }
+}
 const { getFootballProbability } = require('./lib/football-model');
 const { getTennisProbability, detectSurface } = require('./lib/tennis-model');
 const { fetchMatchNews } = require('./lib/news');
@@ -5887,6 +5913,11 @@ async function _pollDotaInner(runOnce = false) {
             if (heroLine(blue)) dotaLiveContext += `${blue.name} heroes: ${heroLine(blue)}\n`;
             if (heroLine(red))  dotaLiveContext += `${red.name} heroes: ${heroLine(red)}\n`;
           }
+          // Meta hero WR via dota_hero_stats (gol.gg equivalente pra Dota)
+          try {
+            const metaLine = dotaHeroMetaLine(blue, red);
+            if (metaLine) dotaLiveContext += metaLine;
+          } catch (e) { log('DEBUG', 'DOTA-META', `err: ${e.message}`); }
         } else if (ps?.hasLiveStats) {
           dotaHasLiveStats = true;
           const blue = ps.blueTeam, red = ps.redTeam;
@@ -5895,6 +5926,10 @@ async function _pollDotaInner(runOnce = false) {
           dotaLiveContext += `Gold: ${blue.name} ${g(blue.totalGold)} vs ${red.name} ${g(red.totalGold)} (diff: ${goldDiff>0?'+':''}${g(goldDiff)})\n`;
           dotaLiveContext += `Kills: ${blue.totalKills||0}x${red.totalKills||0}\n`;
           dotaLiveContext += `${blue.name}:\n${fmtTeam(blue)}\n${red.name}:\n${fmtTeam(red)}\n`;
+          try {
+            const metaLine = dotaHeroMetaLine(blue, red);
+            if (metaLine) dotaLiveContext += metaLine;
+          } catch (e) { log('DEBUG', 'DOTA-META', `err: ${e.message}`); }
         }
       }
 

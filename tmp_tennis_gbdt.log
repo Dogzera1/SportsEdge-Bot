@@ -1,0 +1,65 @@
+[train] in=C:\Users\vict_\Desktop\lol betting\data\tennis_features.csv out=C:\Users\vict_\Desktop\lol betting\lib\tennis-weights.json
+[train] test-frac=0.15 val-frac=0.15 gbdt=true
+[train] rows: 46070
+[train] train=32250 (2015-01-04→2022-02-14)
+[train] val  =6910 (2022-02-14→2023-07-03)
+[train] test =6910 (2023-07-03→2024-12-18)
+
+[logistic] grid search L2...
+  l2=0.0001: val_brier=0.21599 val_logloss=0.61947
+  l2=0.001: val_brier=0.21603 val_logloss=0.61953
+  l2=0.01: val_brier=0.21603 val_logloss=0.61956
+  l2=0.05: val_brier=0.21612 val_logloss=0.61993
+[logistic] best L2: 0.0001
+
+[gbdt] training (trees=150 depth=4 lr=0.05)...
+  tree 10/150: val_brier=0.23073 (best=0.23073 @10)
+  tree 20/150: val_brier=0.22292 (best=0.22292 @20)
+  tree 30/150: val_brier=0.21966 (best=0.21966 @30)
+  tree 40/150: val_brier=0.21833 (best=0.21833 @40)
+  tree 50/150: val_brier=0.21771 (best=0.21771 @50)
+  tree 60/150: val_brier=0.21735 (best=0.21734 @59)
+  tree 70/150: val_brier=0.21719 (best=0.21719 @70)
+  tree 80/150: val_brier=0.21709 (best=0.21709 @80)
+  tree 90/150: val_brier=0.21703 (best=0.21703 @90)
+  tree 100/150: val_brier=0.21697 (best=0.21694 @97)
+  tree 110/150: val_brier=0.21699 (best=0.21691 @107)
+  tree 120/150: val_brier=0.21706 (best=0.21691 @107)
+  early stopping @ tree 127 (no improvement for 20 rounds)
+
+[calibration] fitting isotonic on val...
+  isotonic blocks: 77
+
+── Métricas ────────────────────────────────
+baseline elo (test):        n=6910 | brier=0.23082 | logloss=0.65395 | acc=63.10% | auc=0.6873 | ece=0.0728
+logistic (train):           n=32250 | brier=0.21220 | logloss=0.61144 | acc=65.71% | auc=0.7215 | ece=0.0053
+logistic (val):             n=6910 | brier=0.21600 | logloss=0.61950 | acc=64.76% | auc=0.7087 | ece=0.0099
+logistic (test):            n=6910 | brier=0.21503 | logloss=0.61674 | acc=64.96% | auc=0.7118 | ece=0.0241
+gbdt (test):                n=6910 | brier=0.21557 | logloss=0.61835 | acc=64.70% | auc=0.7106 | ece=0.0208
+ensemble raw (test):        n=6910 | brier=0.21503 | logloss=0.61691 | acc=64.93% | auc=0.7119 | ece=0.0234
+ensemble calibrated (test): n=6910 | brier=0.21521 | logloss=0.62031 | acc=64.70% | auc=0.7110 | ece=0.0175
+
+── Feature importances (|w| logistic padronizado) ──
+  elo_diff_surface         +  0.413 ████████
+  rank_points_log_ratio    +  0.242 █████
+  elo_diff_overall         +  0.213 ████
+  age_diff                  -0.199 ████
+  matches_14d_diff         +  0.154 ███
+  serve_pct_diff           +  0.142 ███
+  elo_x_bestof5            +  0.115 ██
+  elo_diff_blend            -0.088 ██
+  days_since_last_diff      -0.080 ██
+  fatigue_min_7d_diff       -0.057 █
+  elo_x_grass              +  0.054 █
+  h2h_overall_diff         +  0.045 █
+  elo_x_clay               +  0.021 
+  height_diff               -0.010 
+  h2h_surface_diff         +  0.008 
+  n_signals                 -0.003 
+  surface_clay              -0.003 
+  rank_diff                 -0.002 
+  surface_hard             +  0.002 
+  surface_grass            +  0.001 
+
+[train] saved: C:\Users\vict_\Desktop\lol betting\lib\tennis-weights.json
+[train] file size: 373.3 KB

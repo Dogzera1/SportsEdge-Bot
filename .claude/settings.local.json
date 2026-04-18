@@ -190,7 +190,9 @@
       "Bash(node scripts/sync-opendota-matches.js --max 30000 --delay 1100)",
       "Bash(echo \"OD pid: $!\")",
       "Bash(node scripts/sync-hltv-results.js --max 500 --delay 2500)",
-      "Bash(echo \"hltv pid: $!\")"
+      "Bash(echo \"hltv pid: $!\")",
+      "Bash(node scripts/train-tennis-model.js --gbdt-trees=150 --gbdt-depth=4 --gbdt-lr=0.05 --gbdt-subsample=0.7)",
+      "Bash(echo \"tennis gbdt pid: $!\")"
     ]
   }
 }
