@@ -2947,6 +2947,7 @@ async function collectGameContext(game, matchId, team1, team2) {
   let liveGameNumber = null; // número do mapa atualmente ao vivo (Game 1, 2, 3...)
   let hasLiveStats = false;
   let draftComplete = false; // composições completas (10 champs definidos)
+  let lolLiveStats = null;   // objeto gd com blueTeam/redTeam/gameTime pra predictLolMapWinner
   if (game === 'lol') {
     const isPandaScore = String(matchId).startsWith('ps_');
     const isChampValid = (c) => {
@@ -2975,7 +2976,7 @@ async function collectGameContext(game, matchId, team1, team2) {
           const gameLabel = gd.gameNumber ? `GAME ${gd.gameNumber}` : 'GAME';
           const statusLabel = gd.gameStatus === 'running' ? 'AO VIVO' : gd.gameStatus || 'INFO';
           const liveNow = gd.gameStatus === 'running' && gd.hasLiveStats && gd.gameNumber;
-          if (liveNow) { liveGameNumber = gd.gameNumber; hasLiveStats = true; }
+          if (liveNow) { liveGameNumber = gd.gameNumber; hasLiveStats = true; lolLiveStats = gd; }
           gamesContext += `\n[${gameLabel} — ${statusLabel} | Série: ${gd.seriesScore||'0-0'}]\n`;
           if (gd.hasLiveStats) {
             const blue = gd.blueTeam, red = gd.redTeam;
@@ -3054,6 +3055,7 @@ async function collectGameContext(game, matchId, team1, team2) {
             log('INFO', 'LIVE-STATS', `LoL Riot game ${gid.gameId}: state=${gd.gameState||'?'} hasLiveStats=${!!gd.hasLiveStats} gold=${gd.blueTeam?.totalGold||0}/${gd.redTeam?.totalGold||0}`);
             if (gd.hasLiveStats && (gd.gameState === 'in_game' || gd.gameState === 'paused')) {
               hasLiveStats = true;
+              lolLiveStats = gd;
               if (gid.gameNumber) liveGameNumber = gid.gameNumber;
               const gfn = (v) => v >= 1000 ? (v/1000).toFixed(1)+'k' : String(v||0);
               const blue = gd.blueTeam, red = gd.redTeam;
@@ -3096,6 +3098,7 @@ async function collectGameContext(game, matchId, team1, team2) {
                 const redDragons = red.dragonTypes?.length ? red.dragonTypes.join(', ') : (red.dragons||0);
                 if (gid.gameNumber) liveGameNumber = gid.gameNumber;
                 hasLiveStats = true;
+                lolLiveStats = gd; // armazena p/ predictLolMapWinner downstream
                 gamesContext += `\n[GAME ${gid.gameNumber} — AO VIVO${delayInfo}]\nGold: ${blue.name} ${g(blue.totalGold)} vs ${red.name} ${g(red.totalGold)} (diff: ${goldDiff>0?'+':''}${g(goldDiff)})\nTorres: ${blue.towerKills||0}x${red.towerKills||0} | Dragões: ${blueDragons} vs ${redDragons}\nKills: ${blue.totalKills||0}x${red.totalKills||0} | Barões: ${blue.barons||0}x${red.barons||0} | Inibidores: ${blue.inhibitors||0}x${red.inhibitors||0}\n`;
                 if (gd.goldTrajectory?.length > 0) {
                   gamesContext += 'Gold Trajectory: ' + gd.goldTrajectory.map(gt => `${gt.minute}min:${gt.diff>0?'+':''}${g(gt.diff)}`).join(' → ') + '\n';
@@ -3344,6 +3347,41 @@ async function autoAnalyzeMatch(token, match) {
         } else {
           lolModel.mapP1 = lolModel.modelP1;
           lolModel.mapP2 = lolModel.modelP2;
+        }
+
+        // Live series-aware override — combina live map state com pSeries prior
+        // via Monte Carlo (similar ao Dota). Só quando temos lolLiveStats e bo>=3.
+        if (hasLiveStats && lolLiveStats && bo >= 3 && Number.isFinite(match.score1) && Number.isFinite(match.score2)) {
+          try {
+            const { predictLolMapWinner } = require('./lib/lol-map-model');
+            const { priceSeriesFromLiveMap } = require('./lib/lol-series-model');
+            const pred = predictLolMapWinner({
+              liveStats: lolLiveStats,
+              seriesScore: { score1: match.score1, score2: match.score2, team1: match.team1, team2: match.team2 },
+              baselineP: lolModel.mapP1,
+              team1Name: match.team1,
+            });
+            if (pred.confidence >= 0.35) {
+              const preSeries = lolModel.modelP1;
+              const pSeriesLive = priceSeriesFromLiveMap({
+                pMapCurrent: pred.p,
+                pMapBase: lolModel.mapP1,
+                bestOf: bo,
+                setsA: match.score1,
+                setsB: match.score2,
+                momentum: 0.03, // calibrado pra LoL (project_lol_series_model memory)
+                iters: 8000,
+              });
+              log('INFO', 'LOL-LIVE-SERIES',
+                `${match.team1} vs ${match.team2} [${match.score1}-${match.score2}, Bo${bo}]: pMapCur=${(pred.p*100).toFixed(1)}% base=${(lolModel.mapP1*100).toFixed(1)}% → pSeries ${(preSeries*100).toFixed(1)}% → ${(pSeriesLive*100).toFixed(1)}%`);
+              lolModel.modelP1 = pSeriesLive;
+              lolModel.modelP2 = 1 - pSeriesLive;
+              lolModel.mapP1 = pred.p;
+              lolModel.mapP2 = 1 - pred.p;
+              lolModel.factors = [...(lolModel.factors || []), 'live-series'];
+              lolModel._liveMapPred = pred;
+            }
+          } catch (e) { log('DEBUG', 'LOL-LIVE-SERIES', `err: ${e.message}`); }
         }
         const isMapMarket = !!oddsToUse?.mapMarket;
         const effP1 = isMapMarket ? lolModel.mapP1 : lolModel.modelP1;
@@ -6095,6 +6133,44 @@ async function _pollDotaInner(runOnce = false) {
         } catch (e) { log('DEBUG', 'DOTA-TRAINED', `err: ${e.message}`); }
       }
 
+      // ── Live series-aware override ──
+      // Quando isLive + live stats disponíveis, combina P(mapa atual) derivado de
+      // gold/kill diff com P(mapas restantes) baseline via Monte Carlo. Resultado:
+      // pSeries atualizada com state real do match em vez de só prior + score.
+      if (isLive && od?.hasLiveStats && Number.isFinite(match.score1) && Number.isFinite(match.score2)) {
+        try {
+          const { predictMapWinner } = require('./lib/dota-map-model');
+          const { mapProbFromSeries, priceSeriesFromLiveMap } = require('./lib/lol-series-model');
+          // Parse bestOf from match.format (e.g., 'Bo3' → 3). Default 3 (BO3 dominante em Dota).
+          const boMatch = String(match.format || 'Bo3').match(/Bo(\d)/i);
+          const bestOf = boMatch ? parseInt(boMatch[1], 10) : 3;
+          // pMap baseline inferred from pSeries (inverse) — assume independence.
+          const pMapBase = mapProbFromSeries(mlResult.modelP1, bestOf);
+          // Live map prob
+          const pred = predictMapWinner({
+            liveStats: od,
+            seriesScore: { score1: match.score1, score2: match.score2, team1: match.team1, team2: match.team2 },
+            baselineP: pMapBase,
+            team1Name: match.team1,
+          });
+          if (pred.confidence >= 0.35) {
+            const pSeriesLive = priceSeriesFromLiveMap({
+              pMapCurrent: pred.p,
+              pMapBase,
+              bestOf,
+              setsA: match.score1,
+              setsB: match.score2,
+              momentum: 0.04,
+              iters: 8000,
+            });
+            log('INFO', 'DOTA-LIVE-SERIES',
+              `${match.team1} vs ${match.team2} [${match.score1}-${match.score2}, Bo${bestOf}]: pMapCur=${(pred.p*100).toFixed(1)}% base=${(pMapBase*100).toFixed(1)}% → pSeries ${(mlResult.modelP1*100).toFixed(1)}% → ${(pSeriesLive*100).toFixed(1)}%`);
+            mlResult.modelP1 = pSeriesLive;
+            mlResult.modelP2 = 1 - pSeriesLive;
+          }
+        } catch (e) { log('DEBUG', 'DOTA-LIVE-SERIES', `err: ${e.message}`); }
+      }
+
       // ── Dados para o prompt ──
       const r1 = 1 / parseFloat(o.t1), r2 = 1 / parseFloat(o.t2);
       const overround = r1 + r2;
@@ -8715,6 +8791,41 @@ async function pollCs(runOnce = false) {
               modelP2 = 1 - mergedP1;
             }
           } catch (e) { log('DEBUG', 'CS-TRAINED', `err: ${e.message}`); }
+        }
+
+        // Live series override — usa HLTV scorebot + MC pra overrider pSeries
+        // quando isLive + scoreboard + bo>=3 + match score known.
+        const csBoMatch = String(match.format || 'Bo3').match(/Bo(\d)/i);
+        const csBestOf = csBoMatch ? parseInt(csBoMatch[1], 10) : 3;
+        if (match.status === 'live' && scoreboard && scoreboard.live && csBestOf >= 3
+            && Number.isFinite(match.score1) && Number.isFinite(match.score2)) {
+          try {
+            const { predictCsMapWinner } = require('./lib/cs-map-model');
+            const { mapProbFromSeries, priceSeriesFromLiveMap } = require('./lib/lol-series-model');
+            const pMapBase = mapProbFromSeries(modelP1, csBestOf);
+            const pred = predictCsMapWinner({
+              liveStats: scoreboard,
+              seriesScore: { score1: match.score1, score2: match.score2 },
+              baselineP: pMapBase,
+              team1Name: match.team1,
+              team1IsCT: null, // não temos mapping confiável player→team no scoreboard
+            });
+            if (pred.confidence >= 0.35) {
+              const pSeriesLive = priceSeriesFromLiveMap({
+                pMapCurrent: pred.p,
+                pMapBase,
+                bestOf: csBestOf,
+                setsA: match.score1,
+                setsB: match.score2,
+                momentum: 0.03,
+                iters: 8000,
+              });
+              log('INFO', 'CS-LIVE-SERIES',
+                `${match.team1} vs ${match.team2} [${match.score1}-${match.score2}, Bo${csBestOf}, ${scoreboard.mapName} ${scoreboard.scoreT}-${scoreboard.scoreCT}]: pMapCur=${(pred.p*100).toFixed(1)}% base=${(pMapBase*100).toFixed(1)}% → pSeries ${(modelP1*100).toFixed(1)}% → ${(pSeriesLive*100).toFixed(1)}%`);
+              modelP1 = pSeriesLive;
+              modelP2 = 1 - pSeriesLive;
+            }
+          } catch (e) { log('DEBUG', 'CS-LIVE-SERIES', `err: ${e.message}`); }
         }
 
         const direction = useElo
