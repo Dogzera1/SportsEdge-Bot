@@ -16,7 +16,7 @@ const https = require('https');
 const initDatabase = require('../lib/database');
 const { predictTrainedEsports, hasTrainedModel } = require('../lib/esports-model-trained');
 const { buildTrainedContext } = require('../lib/esports-runtime-features');
-const { predictTrainedTennis, hasTrainedModel: hasTrainedTennis } = require('../lib/tennis-model-trained');
+const { predictTrainedTennis, hasTrainedModel: hasTrainedTennis, getTennisRecentMomentum } = require('../lib/tennis-model-trained');
 const { getTennisElo, extractSurface } = require('../lib/tennis-ml');
 
 const DB_PATH = (process.env.DB_PATH || path.join(__dirname, '../sportsedge.db')).trim().replace(/^=+/, '');
@@ -70,6 +70,11 @@ function predictNew(sport, t) {
     const surface = extractSurface(league);
     const elo = getTennisElo(db, t.participant1, t.participant2, surface, 0.5, 0.5);
     if (!elo || !elo.found1 || !elo.found2) return null;
+    const m1 = getTennisRecentMomentum(db, t.participant1, t.sent_at);
+    const m2 = getTennisRecentMomentum(db, t.participant2, t.sent_at);
+    const winStreakDiff = (m1?.streak || 0) - (m2?.streak || 0);
+    const wrLast10Diff = (m1?.wrLast10 != null && m2?.wrLast10 != null)
+      ? (m1.wrLast10 - m2.wrLast10) : 0;
     return predictTrainedTennis({
       eloOverall1: elo.eloOverall1 || elo.elo1,
       eloOverall2: elo.eloOverall2 || elo.elo2,
@@ -78,6 +83,7 @@ function predictNew(sport, t) {
       gamesSurface1: elo.surfMatches1, gamesSurface2: elo.surfMatches2,
       surface,
       bestOf: /grand slam|wimbledon|us open|roland|australian/i.test(league) ? 5 : 3,
+      winStreakDiff, wrLast10Diff,
     });
   }
   const game = SPORT_TO_GAME[sport];
