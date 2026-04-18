@@ -154,6 +154,19 @@ function _parseTipMl(text) {
  * @param {number} [tolPp=8]  — tolerância em pp entre P texto e P modelo
  * @returns {{ valid: boolean, reason?: string, textP?: number, modelP?: number, diffPp?: number }}
  */
+/**
+ * Downgrade um nível de confidence. Usado quando P da IA diverge do modelo.
+ * Política (2026-04-18): divergência IA vs modelo NUNCA rejeita tip —
+ * apenas baixa confidence. Modelo é source-of-truth pra stake/EV;
+ * IA adiciona sinal qualitativo via reasoning, não via P.
+ */
+function _downgradeConf(conf) {
+  const c = String(conf || '').trim().toUpperCase();
+  if (c === 'ALTA') return 'MÉDIA';
+  if (c === 'MÉDIA' || c === 'MEDIA') return 'BAIXA';
+  return 'BAIXA';
+}
+
 function _validateTipPvsModel(text, modelP, tolPp = 8) {
   if (!Number.isFinite(modelP) || modelP <= 0 || modelP >= 1) return { valid: true, reason: 'no_model_p' };
   const pMatch = String(text || '').match(/\|P:\s*([0-9.]+)\s*%?/i);
@@ -271,11 +284,14 @@ Máximo 150 palavras.`;
     || norm(iaPick).includes(norm(pickTeam));
   if (!samePick) return { passed: false, reason: `IA pick diferente (modelo=${pickTeam} IA=${iaPick})`, conf: null };
 
-  // Validador P-vs-modelo
+  // Validador P-vs-modelo (soft): nunca rejeita, apenas baixa confidence se diverge.
   const _v = _validateTipPvsModel(iaResp, pickP, tolPp);
-  if (!_v.valid) return { passed: false, reason: _v.reason, conf: null };
-
-  const conf = (iaTip[5] || '').toUpperCase().replace('MEDIA', 'MÉDIA') || null;
+  let conf = (iaTip[5] || '').toUpperCase().replace('MEDIA', 'MÉDIA') || null;
+  if (!_v.valid) {
+    const downgraded = _downgradeConf(conf || 'MÉDIA');
+    log('INFO', tag, `P divergente modelo (${_v.reason}) — downgrade conf ${conf || 'MÉDIA'}→${downgraded}`);
+    conf = downgraded;
+  }
   return { passed: true, reason: null, conf };
 }
 
@@ -3500,8 +3516,8 @@ async function autoAnalyzeMatch(token, match) {
       const _modelPV = _pickIsT1V ? mlResult.modelP1 : mlResult.modelP2;
       const _v = _validateTipPvsModel(text, _modelPV);
       if (!_v.valid) {
-        log('WARN', 'AUTO', `Tip rejeitada (${match.team1} vs ${match.team2}): ${_v.reason}`);
-        tipResult = null;
+        // Soft: nunca rejeita. Gate 0.5/0.6 downstream baixa confidence.
+        log('INFO', 'AUTO', `P divergente modelo LoL (${_v.reason}) — Gate 0.5/0.6 ajusta confidence`);
       }
       // Gate divergência modelo vs Pinnacle (sharp anchor).
       if (tipResult) {
@@ -6119,10 +6135,14 @@ Máximo 200 palavras.`;
         const _modelPV = _pickIsT1V ? mlResult.modelP1 : mlResult.modelP2;
         const _v = _validateTipPvsModel(iaResp, _modelPV);
         if (!_v.valid) {
-          log('WARN', 'AUTO-DOTA', `Tip rejeitada (${match.team1} vs ${match.team2}): ${_v.reason}`);
-          tipMatch = null;
-        } else {
-          // Gate divergência modelo vs Pinnacle.
+          // Soft: nunca rejeita. Baixa confidence via downgrade direto no tipMatch.
+          const cIdx = 5;
+          const before = (tipMatch[cIdx] || 'MÉDIA').toUpperCase();
+          tipMatch[cIdx] = _downgradeConf(before);
+          log('INFO', 'AUTO-DOTA', `P divergente modelo (${_v.reason}) — conf ${before}→${tipMatch[cIdx]}`);
+        }
+        // Gate divergência modelo vs Pinnacle (sharp book — mantém hard-reject por ser market-truth).
+        if (tipMatch) {
           const _impPV = _pickIsT1V ? mlResult.impliedP1 : mlResult.impliedP2;
           const _maxDivDota = parseFloat(process.env.DOTA_MAX_DIVERGENCE_PP ?? '15');
           const _div = _sharpDivergenceGate({ oddsObj: o, modelP: _modelPV, impliedP: _impPV, maxPp: _maxDivDota });
@@ -6765,8 +6785,11 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
           const _modelPPickV = _pickIsT1V ? mlResultMma.modelP1 : mlResultMma.modelP2;
           const _vP = _validateTipPvsModel(text, _modelPPickV);
           if (!_vP.valid) {
-            log('WARN', 'AUTO-MMA', `Tip rejeitada (${fight.team1} vs ${fight.team2}): ${_vP.reason}`);
-            tipMatch = null;
+            // Soft: downgrade conf ao invés de rejeitar.
+            const cIdx = 5;
+            const before = (tipMatch[cIdx] || 'MÉDIA').toUpperCase();
+            tipMatch[cIdx] = _downgradeConf(before);
+            log('INFO', 'AUTO-MMA', `P divergente modelo (${_vP.reason}) — conf ${before}→${tipMatch[cIdx]}`);
           } else if (_vP.diffPp != null) {
             log('DEBUG', 'AUTO-MMA', `P consistente (Δ${_vP.diffPp.toFixed(1)}pp): IA=${(_vP.textP*100).toFixed(1)}% modelo=${(_vP.modelP*100).toFixed(1)}%`);
           }
@@ -7391,9 +7414,13 @@ Máximo 200 palavras. Raciocínio breve antes da decisão.`;
           const _modelPV = _pickIsT1V ? mlResultTennis.modelP1 : mlResultTennis.modelP2;
           const _v = _validateTipPvsModel(text, _modelPV);
           if (!_v.valid) {
-            log('WARN', 'AUTO-TENNIS', `Tip rejeitada (${match.team1} vs ${match.team2}): ${_v.reason}`);
-            tipMatch2 = null;
-          } else {
+            // Soft: downgrade conf ao invés de rejeitar.
+            const cIdx = 5;
+            const before = (tipMatch2[cIdx] || 'MÉDIA').toUpperCase();
+            tipMatch2[cIdx] = _downgradeConf(before);
+            log('INFO', 'AUTO-TENNIS', `P divergente modelo (${_v.reason}) — conf ${before}→${tipMatch2[cIdx]}`);
+          }
+          if (tipMatch2) {
             // Gate divergência modelo vs Pinnacle (tennis Pinnacle é sharp em ATP/WTA).
             const _impPair = _impliedFromOdds(o);
             const _impPV = _impPair ? (_pickIsT1V ? _impPair.impliedP1 : _impPair.impliedP2) : null;
@@ -8590,12 +8617,13 @@ Máximo 150 palavras.`;
           }
 
           const _v = _validateTipPvsModel(iaResp, pickP, 10);
-          if (!_v.valid) {
-            analyzedCs.set(key, { ts: now, tipSent: false });
-            log('WARN', 'AUTO-CS', `Tip rejeitada (${match.team1} vs ${match.team2}): ${_v.reason}`);
-            continue;
-          }
           aiConf = (iaTip[5] || '').toUpperCase().replace('MEDIA', 'MÉDIA');
+          if (!_v.valid) {
+            // Soft: downgrade conf ao invés de rejeitar.
+            const before = aiConf || 'MÉDIA';
+            aiConf = _downgradeConf(before);
+            log('INFO', 'AUTO-CS', `P divergente modelo (${_v.reason}) — conf ${before}→${aiConf}`);
+          }
           aiReason = String(iaResp).split('TIP_ML:')[0].trim().slice(0, 160) || null;
         }
 
