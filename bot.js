@@ -62,6 +62,7 @@ function dotaHeroMetaLine(blueTeam, redTeam) {
 }
 const { getFootballProbability } = require('./lib/football-model');
 const { getTennisProbability, detectSurface, tennisProhibitedTournament } = require('./lib/tennis-model');
+const { esportsSegmentGate } = require('./lib/esports-segment-gate');
 const { extractServeProbs, priceTennisMatch, priceTennisLive, estimateTennisAces } = require('./lib/tennis-markov-model');
 const { getPlayerInjuryRisk } = require('./lib/tennis-injury-risk');
 const { fetchMatchNews } = require('./lib/news');
@@ -5899,6 +5900,14 @@ async function _pollDotaInner(runOnce = false) {
         // Só marca pairKeyBase quando tipSent=true — evita bloquear análise de outros mapas
         if (val?.tipSent) analyzedDota.set(pairKeyBase, val);
       };
+
+      // Segment gate
+      const _segGateD = esportsSegmentGate('dota2', match.league, match.format);
+      if (_segGateD.skip) {
+        log('INFO', 'AUTO-DOTA', `Segment skip: ${match.team1} vs ${match.team2} [${match.league}] → ${_segGateD.reason}`);
+        setDotaAnalyzed({ ts: now, tipSent: false, noEdge: true });
+        continue;
+      }
       // Bloqueia duplicata pre→live ou re-cadastro com novo event ID no começo.
       // Permite tips em mapas diferentes do Bo3/Bo5 (score já avançou).
       const prevBase = analyzedDota.get(pairKeyBase);
@@ -8598,6 +8607,14 @@ async function pollCs(runOnce = false) {
         const csCooldown = isLiveCs ? (3 * 60 * 1000) : (30 * 60 * 1000); // live: 3min, pregame: 30min
         if (prev && (now - prev.ts < csCooldown)) continue;
 
+        // Segment gate: avalia (game, league, bestOf) contra backtest.
+        const _segGateCs = esportsSegmentGate('cs2', match.league, match.format);
+        if (_segGateCs.skip) {
+          log('INFO', 'AUTO-CS', `Segment skip: ${match.team1} vs ${match.team2} [${match.league}] → ${_segGateCs.reason}`);
+          analyzedCs.set(key, { ts: now, tipSent: false, noEdge: true });
+          continue;
+        }
+
         if (!match.odds?.t1 || !match.odds?.t2) continue;
         if (!isOddsFresh(match.odds, isLiveCs)) {
           log('INFO', 'AUTO-CS', `Odds stale (${oddsAgeStr(match.odds)}): ${match.team1} vs ${match.team2} — pulando`);
@@ -8958,6 +8975,14 @@ async function pollValorant(runOnce = false) {
         if (prev?.tipSent) continue;
         const valCooldown = isLiveVal ? (3 * 60 * 1000) : (30 * 60 * 1000);
         if (prev && (now - prev.ts < valCooldown)) continue;
+
+        // Segment gate: skip segmentos onde backtest mostrou Brier > 0.25 (noise puro).
+        const _segGate = esportsSegmentGate('valorant', match.league, match.format);
+        if (_segGate.skip) {
+          log('INFO', 'AUTO-VAL', `Segment skip: ${match.team1} vs ${match.team2} [${match.league}] → ${_segGate.reason}`);
+          analyzedValorant.set(key, { ts: now, tipSent: false, noEdge: true });
+          continue;
+        }
 
         if (!match.odds?.t1 || !match.odds?.t2) continue;
         if (!isOddsFresh(match.odds, isLiveVal)) {
