@@ -4204,6 +4204,40 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // /odds-markets?team1=X&team2=Y[&game=lol|dota2|cs2|valorant][&period=N]
+  // OU  /odds-markets?matchupId=Z&period=N
+  // Retorna handicap + totals arrays via Pinnacle pra mercados além de moneyline.
+  if (p === '/odds-markets') {
+    const period = parseInt(parsed.query.period || '0', 10);
+    let matchupId = parsed.query.matchupId || parsed.query.id;
+    // Resolve via teams se matchupId não vier
+    if (!matchupId && parsed.query.team1 && parsed.query.team2) {
+      const normTeam = s => String(s||'').toLowerCase().replace(/[^a-z0-9]/g,'');
+      const n1 = normTeam(parsed.query.team1), n2 = normTeam(parsed.query.team2);
+      // Busca em oddsCache (mesmo pattern usado em /odds)
+      for (const [k, v] of Object.entries(oddsCache)) {
+        if (!k.startsWith('esports_pin_') && !k.startsWith('pin_')) continue;
+        const vt1 = normTeam(v?.t1Name || ''), vt2 = normTeam(v?.t2Name || '');
+        if (((vt1.includes(n1) || n1.includes(vt1)) && (vt2.includes(n2) || n2.includes(vt2))) ||
+            ((vt1.includes(n2) || n2.includes(vt1)) && (vt2.includes(n1) || n1.includes(vt2)))) {
+          if (v?.fixtureId) { matchupId = String(v.fixtureId).replace(/^pin_/, ''); break; }
+        }
+      }
+    }
+    if (!matchupId) { sendJson(res, { error: 'matchupId ou team1/team2 obrigatórios' }, 400); return; }
+    try {
+      const [handicaps, totals, moneyline] = await Promise.all([
+        pinnacle.getMatchupHandicaps(matchupId, period).catch(() => []),
+        pinnacle.getMatchupTotals(matchupId, period).catch(() => []),
+        pinnacle.getMatchupMoneylineByPeriod(matchupId, period).catch(() => null),
+      ]);
+      sendJson(res, { matchupId: String(matchupId), period, moneyline, handicaps, totals });
+    } catch (e) {
+      sendJson(res, { error: e.message }, 500);
+    }
+    return;
+  }
+
   if (p === '/odds') {
     const t1 = parsed.query.team1 || parsed.query.p1 || '';
     const t2 = parsed.query.team2 || parsed.query.p2 || '';

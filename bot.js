@@ -3383,6 +3383,36 @@ async function autoAnalyzeMatch(token, match) {
             }
           } catch (e) { log('DEBUG', 'LOL-LIVE-SERIES', `err: ${e.message}`); }
         }
+
+        // Market scanner (handicap + totals) — log-only. Detecta EV positivo
+        // em mercados além de moneyline. Wire pra tip production fica pro
+        // próximo ciclo após validação observacional.
+        if (process.env.LOL_MARKET_SCAN !== 'false' && lolModel?.mapP1 > 0) {
+          try {
+            const markets = await serverGet(`/odds-markets?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}&period=0`).catch(() => null);
+            if (markets && ((markets.handicaps?.length || 0) + (markets.totals?.length || 0)) > 0) {
+              const { scanMarkets } = require('./lib/odds-markets-scanner');
+              const lolMarketsLib = require('./lib/lol-markets');
+              const minEv = parseFloat(process.env.LOL_MARKET_SCAN_MIN_EV ?? '4');
+              const found = scanMarkets({
+                markets,
+                pMap: lolModel.mapP1,
+                bestOf: lolModel.bestOf || 3,
+                pricingLib: lolMarketsLib,
+                minEv,
+              });
+              if (found.length) {
+                log('INFO', 'LOL-MARKETS',
+                  `${match.team1} vs ${match.team2} [Bo${lolModel.bestOf}]: ${found.length} mercado(s) com EV ≥${minEv}% (pMap=${(lolModel.mapP1*100).toFixed(1)}%)`);
+                for (const t of found.slice(0, 5)) {
+                  log('INFO', 'LOL-MARKETS',
+                    `  • ${t.label} @ ${t.odd.toFixed(2)} | pModel=${(t.pModel*100).toFixed(1)}% pImpl=${t.pImplied ? (t.pImplied*100).toFixed(1)+'%' : '?'} EV=${t.ev.toFixed(1)}%`);
+                }
+              }
+            }
+          } catch (e) { log('DEBUG', 'LOL-MARKETS', `scan err: ${e.message}`); }
+        }
+
         const isMapMarket = !!oddsToUse?.mapMarket;
         const effP1 = isMapMarket ? lolModel.mapP1 : lolModel.modelP1;
         const effP2 = 1 - effP1;
@@ -6171,6 +6201,34 @@ async function _pollDotaInner(runOnce = false) {
         } catch (e) { log('DEBUG', 'DOTA-LIVE-SERIES', `err: ${e.message}`); }
       }
 
+      // Market scanner Dota (log-only) — handicap + totais além de moneyline.
+      if (process.env.DOTA_MARKET_SCAN !== 'false' && mlResult.modelP1 > 0) {
+        try {
+          const { mapProbFromSeries } = require('./lib/lol-series-model');
+          const dotaBoM = String(match.format || 'Bo3').match(/Bo(\d)/i);
+          const dotaBo = dotaBoM ? parseInt(dotaBoM[1], 10) : 3;
+          const pMapDota = mapProbFromSeries(mlResult.modelP1, dotaBo);
+          const markets = await serverGet(`/odds-markets?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}&period=0`).catch(() => null);
+          if (markets && ((markets.handicaps?.length || 0) + (markets.totals?.length || 0)) > 0) {
+            const { scanMarkets } = require('./lib/odds-markets-scanner');
+            const minEv = parseFloat(process.env.DOTA_MARKET_SCAN_MIN_EV ?? '4');
+            const found = scanMarkets({
+              markets, pMap: pMapDota, bestOf: dotaBo,
+              pricingLib: require('./lib/lol-markets'),
+              minEv,
+            });
+            if (found.length) {
+              log('INFO', 'DOTA-MARKETS',
+                `${match.team1} vs ${match.team2} [Bo${dotaBo}]: ${found.length} mercado(s) EV ≥${minEv}% (pMap=${(pMapDota*100).toFixed(1)}%)`);
+              for (const t of found.slice(0, 5)) {
+                log('INFO', 'DOTA-MARKETS',
+                  `  • ${t.label} @ ${t.odd.toFixed(2)} | pModel=${(t.pModel*100).toFixed(1)}% pImpl=${t.pImplied ? (t.pImplied*100).toFixed(1)+'%' : '?'} EV=${t.ev.toFixed(1)}%`);
+              }
+            }
+          }
+        } catch (e) { log('DEBUG', 'DOTA-MARKETS', `scan err: ${e.message}`); }
+      }
+
       // ── Dados para o prompt ──
       const r1 = 1 / parseFloat(o.t1), r2 = 1 / parseFloat(o.t2);
       const overround = r1 + r2;
@@ -7459,6 +7517,32 @@ async function pollTennis(runOnce = false) {
               }
             } catch (me) { log('DEBUG', 'TENNIS-MARKOV', `err: ${me.message}`); }
           }
+
+          // Tennis market scanner (log-only) — totals games, sets handicap, TB, aces.
+          if (process.env.TENNIS_MARKET_SCAN !== 'false' && tennisModelResult?._markovMarkets) {
+            try {
+              const markets = await serverGet(`/odds-markets?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}&period=0`).catch(() => null);
+              if (markets && ((markets.handicaps?.length || 0) + (markets.totals?.length || 0)) > 0) {
+                const { scanTennisMarkets } = require('./lib/tennis-market-scanner');
+                const minEv = parseFloat(process.env.TENNIS_MARKET_SCAN_MIN_EV ?? '4');
+                const found = scanTennisMarkets({
+                  markov: tennisModelResult._markovMarkets,
+                  aces: tennisModelResult._markovAces,
+                  markets,
+                  minEv,
+                });
+                if (found.length) {
+                  log('INFO', 'TENNIS-MARKETS',
+                    `${match.team1} vs ${match.team2}: ${found.length} mercado(s) EV ≥${minEv}%`);
+                  for (const t of found.slice(0, 5)) {
+                    log('INFO', 'TENNIS-MARKETS',
+                      `  • ${t.label} @ ${t.odd.toFixed(2)} | pModel=${(t.pModel*100).toFixed(1)}% pImpl=${t.pImplied ? (t.pImplied*100).toFixed(1)+'%' : '?'} EV=${t.ev.toFixed(1)}%`);
+                  }
+                }
+              }
+            } catch (e) { log('DEBUG', 'TENNIS-MARKETS', `scan err: ${e.message}`); }
+          }
+
           // Injury/retirement risk — downgrade confidence + shrink P se pick é jogador high-risk.
           // Override: TENNIS_INJURY_CHECK=false desativa; TENNIS_INJURY_MIN_GAMES (default 10).
           if (tennisModelResult && process.env.TENNIS_INJURY_CHECK !== 'false') {
@@ -8828,15 +8912,45 @@ async function pollCs(runOnce = false) {
           } catch (e) { log('DEBUG', 'CS-LIVE-SERIES', `err: ${e.message}`); }
         }
 
+        // Market scanner CS2 (log-only) — handicap + totais de mapas.
+        if (process.env.CS_MARKET_SCAN !== 'false' && modelP1 > 0) {
+          try {
+            const { mapProbFromSeries } = require('./lib/lol-series-model');
+            const pMapCs = mapProbFromSeries(modelP1, csBestOf);
+            const markets = await serverGet(`/odds-markets?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}&period=0`).catch(() => null);
+            if (markets && ((markets.handicaps?.length || 0) + (markets.totals?.length || 0)) > 0) {
+              const { scanMarkets } = require('./lib/odds-markets-scanner');
+              const minEv = parseFloat(process.env.CS_MARKET_SCAN_MIN_EV ?? '4');
+              const found = scanMarkets({
+                markets, pMap: pMapCs, bestOf: csBestOf,
+                pricingLib: require('./lib/lol-markets'),
+                minEv,
+              });
+              if (found.length) {
+                log('INFO', 'CS-MARKETS',
+                  `${match.team1} vs ${match.team2} [Bo${csBestOf}]: ${found.length} mercado(s) EV ≥${minEv}% (pMap=${(pMapCs*100).toFixed(1)}%)`);
+                for (const t of found.slice(0, 5)) {
+                  log('INFO', 'CS-MARKETS',
+                    `  • ${t.label} @ ${t.odd.toFixed(2)} | pModel=${(t.pModel*100).toFixed(1)}% pImpl=${t.pImplied ? (t.pImplied*100).toFixed(1)+'%' : '?'} EV=${t.ev.toFixed(1)}%`);
+                }
+              }
+            }
+          } catch (e) { log('DEBUG', 'CS-MARKETS', `scan err: ${e.message}`); }
+        }
+
         const direction = useElo
           ? (elo.direction === 'p1' ? 't1' : elo.direction === 'p2' ? 't2' : null)
           : mlResult.direction;
         const mlScore = useElo ? elo.score : mlResult.score;
         const factorCount = useElo ? elo.factorCount : mlResult.factorCount;
 
-        if (!direction || mlScore < 3.0) {
+        // Segment gate bonus: exige edge adicional em segmentos com Brier fraco
+        // (ex: CS2 tier2 Bo5 +3pp, CS2 tier1 Bo1 +1pp). Baseline threshold 3.0pp.
+        const csMinEdge = 3.0 + (_segGateCs?.minEdgeBonus || 0);
+        if (!direction || mlScore < csMinEdge) {
           analyzedCs.set(key, { ts: now, tipSent: false });
-          log('INFO', 'AUTO-CS', `Sem edge: ${match.team1} vs ${match.team2} | edge=${mlScore.toFixed(1)}pp factors=${factorCount} ${useElo ? '[Elo]' : '[HLTV]'}`);
+          const bonusTag = _segGateCs?.minEdgeBonus > 0 ? ` [seg+${_segGateCs.minEdgeBonus}pp: ${_segGateCs.reason || ''}]` : '';
+          log('INFO', 'AUTO-CS', `Sem edge: ${match.team1} vs ${match.team2} | edge=${mlScore.toFixed(1)}pp (min ${csMinEdge.toFixed(1)}pp${bonusTag}) factors=${factorCount} ${useElo ? '[Elo]' : '[HLTV]'}`);
           continue;
         }
 
@@ -9207,9 +9321,12 @@ async function pollValorant(runOnce = false) {
           log('INFO', 'AUTO-VAL', `Série ${match.score1||0}-${match.score2||0} Bo${bo}: P mapa=${elo.mapP1.toFixed(3)} → P série=${modelP1.toFixed(3)}`);
         }
 
-        if (!direction || mlScore < 3.0) {
+        // Segment gate bonus — Valorant tier3 +2pp, tier2 Bo5 +2pp etc.
+        const valMinEdge = 3.0 + (_segGate?.minEdgeBonus || 0);
+        if (!direction || mlScore < valMinEdge) {
           analyzedValorant.set(key, { ts: now, tipSent: false });
-          log('INFO', 'AUTO-VAL', `Sem edge: ${match.team1} vs ${match.team2} | edge=${mlScore.toFixed(1)}pp`);
+          const bonusTag = _segGate?.minEdgeBonus > 0 ? ` [seg+${_segGate.minEdgeBonus}pp: ${_segGate.reason || ''}]` : '';
+          log('INFO', 'AUTO-VAL', `Sem edge: ${match.team1} vs ${match.team2} | edge=${mlScore.toFixed(1)}pp (min ${valMinEdge.toFixed(1)}pp${bonusTag})`);
           continue;
         }
 
