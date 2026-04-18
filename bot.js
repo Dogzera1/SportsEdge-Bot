@@ -7259,6 +7259,7 @@ async function _pollDotaInner(runOnce = false) {
       // bloqueava PandaScore por 10-30s.
       let dotaLiveContext = '';
       let dotaHasLiveStats = false;
+      let od = null; // hoisted — também usado em live-series override fora deste if
       if (isLive) {
         const g = (v) => v >= 1000 ? (v/1000).toFixed(1)+'k' : String(v||0);
         const fmtTeam = (team) => (team.players||[]).map(p =>
@@ -7273,7 +7274,7 @@ async function _pollDotaInner(runOnce = false) {
             : Promise.resolve(null),
         ]);
 
-        const od = odRes.status === 'fulfilled' ? odRes.value : null;
+        od = odRes.status === 'fulfilled' ? odRes.value : null;
         const ps = psRes.status === 'fulfilled' ? psRes.value : null;
         if (odRes.status === 'rejected') log('WARN', 'AUTO-DOTA', `OpenDota fetch falhou: ${odRes.reason?.message || odRes.reason}`);
         if (isPsMatch && psRes.status === 'rejected') log('WARN', 'AUTO-DOTA', `PS live fetch falhou: ${psRes.reason?.message || psRes.reason}`);
