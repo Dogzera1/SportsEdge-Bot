@@ -2607,8 +2607,11 @@ async function runMarketTipReadinessCheck() {
 
   const MIN_SETTLED = parseInt(process.env.MT_READY_MIN_SETTLED || '30', 10);
   const MIN_ROI = parseFloat(process.env.MT_READY_MIN_ROI || '5');
+  const MIN_CLV = parseFloat(process.env.MT_READY_MIN_CLV || '0');
+  const MIN_CLV_N = parseInt(process.env.MT_READY_MIN_CLV_N || '10', 10);
 
   const ready = [];
+  const blockedByClv = [];
   for (const s of stats) {
     if (s.settled < MIN_SETTLED) continue;
     if (s.roiPct == null || s.roiPct < MIN_ROI) continue;
@@ -2617,23 +2620,35 @@ async function runMarketTipReadinessCheck() {
     // Evita alertar pra segments já ativos via ENV.
     const envKey = `${s.sport.toUpperCase()}_MARKET_TIPS_ENABLED`;
     if (process.env[envKey] === 'true') continue;
+    // CLV guard: se temos sample suficiente (≥MIN_CLV_N) e CLV < threshold,
+    // a ROI positiva provavelmente é variance — NÃO alerta. Admin ainda pode forçar.
+    if (s.clvN >= MIN_CLV_N && s.avgClv != null && s.avgClv < MIN_CLV) {
+      blockedByClv.push(s);
+      continue;
+    }
     ready.push(s);
   }
 
+  if (blockedByClv.length) {
+    log('INFO', 'MT-READY', `${blockedByClv.length} segments ROI-ok mas CLV<${MIN_CLV}% — skipped (variance-driven)`);
+  }
   if (!ready.length) return;
 
   const tokenForAlert = Object.values(SPORTS).find(S => S?.enabled && S?.token)?.token;
   if (!tokenForAlert) return;
 
-  const lines = ready.map(s =>
-    `• *${s.sport}/${s.market}*: n=${s.n} settled=${s.settled} hitRate=${s.hitRate}% ROI=*+${s.roiPct.toFixed(1)}%* avgEv=${s.avgEv.toFixed(1)}%`
-  ).join('\n');
+  const lines = ready.map(s => {
+    const clvStr = s.clvN > 0
+      ? ` CLV=${s.avgClv >= 0 ? '+' : ''}${s.avgClv.toFixed(1)}% (n=${s.clvN})`
+      : ' CLV=?';
+    return `• *${s.sport}/${s.market}*: n=${s.n} settled=${s.settled} hitRate=${s.hitRate}% ROI=*+${s.roiPct.toFixed(1)}%* avgEv=${s.avgEv.toFixed(1)}%${clvStr}`;
+  }).join('\n');
 
   const envFlags = [...new Set(ready.map(s => s.sport))].map(sp => `${sp.toUpperCase()}_MARKET_TIPS_ENABLED=true`).join(' && ');
 
   const msg = `🎯 *MARKET TIPS — PRONTOS PRA ATIVAR*\n\n` +
     `Após shadow log acumulado, estes segments bateram o threshold ` +
-    `(N≥${MIN_SETTLED} settled, ROI≥${MIN_ROI}%):\n\n${lines}\n\n` +
+    `(N≥${MIN_SETTLED} settled, ROI≥${MIN_ROI}%, CLV≥${MIN_CLV}% se n_clv≥${MIN_CLV_N}):\n\n${lines}\n\n` +
     `Pra ativar admin-DM:\n\`${envFlags}\` no .env + restart\n\n` +
     `_Shadow continuará logando. Você só liga o DM._`;
 
@@ -3470,6 +3485,39 @@ async function autoAnalyzeMatch(token, match) {
               }
             }
           } catch (e) { log('DEBUG', 'LOL-SIDE', `err: ${e.message}`); }
+        }
+
+        // Roster sub detection — se o lineup live difere do top-5 histórico
+        // do time, downweight confidence (dados históricos menos representativos).
+        if (lolLiveStats?.blueTeam?.players?.length && lolLiveStats?.redTeam?.players?.length) {
+          try {
+            const { getExpectedRoster, detectRosterSub } = require('./lib/oracleselixir-player-features');
+            const blueLineup = lolLiveStats.blueTeam.players.map(p => p.name || p.summoner_name || p.nick).filter(Boolean);
+            const redLineup = lolLiveStats.redTeam.players.map(p => p.name || p.summoner_name || p.nick).filter(Boolean);
+            const blueNorm2 = norm(lolLiveStats.blueTeam.name);
+            const team1IsBlue2 = blueNorm2 === norm(match.team1) || blueNorm2.includes(norm(match.team1)) || norm(match.team1).includes(blueNorm2);
+            const t1Lineup = team1IsBlue2 ? blueLineup : redLineup;
+            const t2Lineup = team1IsBlue2 ? redLineup : blueLineup;
+            const t1Expected = getExpectedRoster(db, match.team1, { sinceDays: 30, minGames: 3 });
+            const t2Expected = getExpectedRoster(db, match.team2, { sinceDays: 30, minGames: 3 });
+            let subCount = 0;
+            const subSides = [];
+            if (t1Expected && t1Lineup.length) {
+              const r1 = detectRosterSub(t1Lineup, t1Expected);
+              if (r1.hasSub && r1.total >= 4) { subCount += r1.subCount; subSides.push(`${match.team1}: ${r1.subCount}sub (${r1.missing.join(',')})`); }
+            }
+            if (t2Expected && t2Lineup.length) {
+              const r2 = detectRosterSub(t2Lineup, t2Expected);
+              if (r2.hasSub && r2.total >= 4) { subCount += r2.subCount; subSides.push(`${match.team2}: ${r2.subCount}sub (${r2.missing.join(',')})`); }
+            }
+            if (subCount > 0 && lolModel?.confidence > 0) {
+              const prevConf = lolModel.confidence;
+              const penalty = subCount === 1 ? 0.85 : subCount === 2 ? 0.70 : 0.55;
+              lolModel.confidence = Math.round(prevConf * penalty * 100) / 100;
+              lolModel.factors = [...(lolModel.factors || []), 'roster-sub'];
+              log('WARN', 'LOL-ROSTER-SUB', `${subSides.join(' | ')} — confidence ${prevConf}→${lolModel.confidence} (×${penalty})`);
+            }
+          } catch (e) { log('DEBUG', 'LOL-ROSTER-SUB', `err: ${e.message}`); }
         }
 
         // Live series-aware override — combina live map state com pSeries prior
@@ -9128,12 +9176,21 @@ async function pollCs(runOnce = false) {
             const { predictCsMapWinner } = require('./lib/cs-map-model');
             const { mapProbFromSeries, priceSeriesFromLiveMap } = require('./lib/lol-series-model');
             const pMapBase = mapProbFromSeries(modelP1, csBestOf);
+            // Deriva team1IsCT via nome do team em cada side (se scorebot expuser).
+            let team1IsCT = null;
+            if (scoreboard.teamCTName && scoreboard.teamTName) {
+              const n1 = norm(match.team1);
+              const ct = norm(scoreboard.teamCTName);
+              const tt = norm(scoreboard.teamTName);
+              if (ct && n1 && (ct === n1 || ct.includes(n1) || n1.includes(ct))) team1IsCT = true;
+              else if (tt && n1 && (tt === n1 || tt.includes(n1) || n1.includes(tt))) team1IsCT = false;
+            }
             const pred = predictCsMapWinner({
               liveStats: scoreboard,
               seriesScore: { score1: match.score1, score2: match.score2 },
               baselineP: pMapBase,
               team1Name: match.team1,
-              team1IsCT: null, // não temos mapping confiável player→team no scoreboard
+              team1IsCT,
             });
             if (pred.confidence >= 0.35) {
               const pSeriesLive = priceSeriesFromLiveMap({

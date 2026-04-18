@@ -48,14 +48,16 @@ if (asJson) {
     console.log('  (nenhum market tip logado nesta janela)');
     process.exit(0);
   }
-  const hdr = 'Sport     | Market         | n     | Settled | Hit%   | AvgEv%  | ROI%   | Profit (u)';
+  const hdr = 'Sport     | Market         | n     | Settled | Hit%   | AvgEv%  | ROI%   | Profit (u) | CLVn  | AvgCLV% | CLV+%';
   console.log(hdr);
   console.log('-'.repeat(hdr.length));
   for (const r of stats) {
     const hitStr = r.hitRate != null ? r.hitRate.toFixed(1) + '%' : '?';
     const roiStr = r.roiPct != null ? (r.roiPct >= 0 ? '+' : '') + r.roiPct.toFixed(2) + '%' : '?';
+    const clvStr = r.avgClv != null ? (r.avgClv >= 0 ? '+' : '') + r.avgClv.toFixed(2) + '%' : '?';
+    const clvPosStr = r.clvPositivePct != null ? r.clvPositivePct.toFixed(1) + '%' : '?';
     console.log(
-      `${r.sport.padEnd(9)} | ${r.market.padEnd(14)} | ${String(r.n).padStart(5)} | ${String(r.settled).padStart(7)} | ${hitStr.padStart(6)} | ${(r.avgEv >= 0 ? '+' : '') + r.avgEv.toFixed(2).padStart(6)}% | ${roiStr.padStart(7)} | ${r.totalProfit.toFixed(2).padStart(8)}`
+      `${r.sport.padEnd(9)} | ${r.market.padEnd(14)} | ${String(r.n).padStart(5)} | ${String(r.settled).padStart(7)} | ${hitStr.padStart(6)} | ${(r.avgEv >= 0 ? '+' : '') + r.avgEv.toFixed(2).padStart(6)}% | ${roiStr.padStart(7)} | ${r.totalProfit.toFixed(2).padStart(8)} | ${String(r.clvN).padStart(5)} | ${clvStr.padStart(7)} | ${clvPosStr.padStart(5)}`
     );
   }
   // Summary por market

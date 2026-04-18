@@ -445,6 +445,15 @@ const migrations = [
       db.exec(`CREATE INDEX IF NOT EXISTS idx_mt_shadow_admin_dm ON market_tips_shadow(match_key, market, line, side, admin_dm_sent_at);`);
     },
   },
+  {
+    id: '026_market_tips_shadow_clv',
+    up(db) {
+      if (!tableExists(db, 'market_tips_shadow')) return;
+      addColumnIfMissing(db, 'market_tips_shadow', 'close_odd', 'close_odd REAL');
+      addColumnIfMissing(db, 'market_tips_shadow', 'clv_pct', 'clv_pct REAL');
+      addColumnIfMissing(db, 'market_tips_shadow', 'close_captured_at', 'close_captured_at TEXT');
+    },
+  },
 ];
 
 function applyMigrations(db) {
