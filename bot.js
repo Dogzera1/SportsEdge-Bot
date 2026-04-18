@@ -11,7 +11,7 @@ const { log, calcKelly, calcKellyFraction, calcKellyWithP, norm, fmtDate, fmtDat
 const { adjustStakeUnits } = require('./lib/risk-manager');
 const { esportsPreFilter } = require('./lib/ml');
 const { formatLineShopDM } = require('./lib/line-shopping');
-const { getLolProbability } = require('./lib/lol-model');
+const { getLolProbability, mapProbFromSeries } = require('./lib/lol-model');
 const { predictTrainedEsports, hasTrainedModel: hasTrainedEsportsModel } = require('./lib/esports-model-trained');
 const { buildTrainedContext: buildEsportsTrainedContext } = require('./lib/esports-runtime-features');
 
@@ -3266,26 +3266,42 @@ async function autoAnalyzeMatch(token, match) {
         };
       }
       if (lolModel && lolModel.confidence > 0.3) {
+        // Recalc map-level P após blend (modelP1 é sempre série-level).
+        // Se odds são por mapa (oddsToUse.mapMarket), comparamos contra mapP1.
+        const bo = lolModel.bestOf || 1;
+        if (bo >= 3) {
+          lolModel.mapP1 = mapProbFromSeries(lolModel.modelP1, bo);
+          lolModel.mapP2 = 1 - lolModel.mapP1;
+        } else {
+          lolModel.mapP1 = lolModel.modelP1;
+          lolModel.mapP2 = lolModel.modelP2;
+        }
+        const isMapMarket = !!oddsToUse?.mapMarket;
+        const effP1 = isMapMarket ? lolModel.mapP1 : lolModel.modelP1;
+        const effP2 = 1 - effP1;
+        if (isMapMarket) {
+          log('DEBUG', 'LOL-MODEL', `map-market detected (map ${oddsToUse.mapRequested ?? '?'}): using mapP1=${(effP1*100).toFixed(1)}% (vs seriesP1=${(lolModel.modelP1*100).toFixed(1)}%)`);
+        }
         // Merge: se o modelo específico tem confiança alta, usa suas probabilidades
-        if (lolModel.modelP1 > 0 && lolModel.modelP2 > 0) {
+        if (effP1 > 0 && effP2 > 0) {
           mlResult.modelP1 = mlResult.modelP1 > 0
-            ? mlResult.modelP1 * 0.4 + lolModel.modelP1 * 0.6  // blend: 60% modelo específico
-            : lolModel.modelP1;
+            ? mlResult.modelP1 * 0.4 + effP1 * 0.6  // blend: 60% modelo específico
+            : effP1;
           mlResult.modelP2 = 1 - mlResult.modelP1;
         }
         // Se modelo específico vê edge forte (>5pp) e ML genérico rejeitou, resgata
-        const lolEdge = Math.abs(lolModel.modelP1 - lolModel.modelP2) > 0
+        const lolEdge = Math.abs(effP1 - effP2) > 0
           ? Math.max(
-              (lolModel.modelP1 - (1 / parseFloat(oddsToUse?.t1 || 2))) * 100,
-              (lolModel.modelP2 - (1 / parseFloat(oddsToUse?.t2 || 2))) * 100
+              (effP1 - (1 / parseFloat(oddsToUse?.t1 || 2))) * 100,
+              (effP2 - (1 / parseFloat(oddsToUse?.t2 || 2))) * 100
             ) : 0;
         if (!mlResult.pass && lolEdge >= 5 && lolModel.confidence >= 0.5) {
           mlResult.pass = true;
           mlResult.score = lolEdge;
-          mlResult.direction = lolModel.modelP1 > lolModel.modelP2 ? 't1' : 't2';
-          log('INFO', 'AUTO', `Modelo LoL resgatou: ${match.team1} vs ${match.team2} | edge=${lolEdge.toFixed(1)}pp conf=${lolModel.confidence.toFixed(2)} method=${lolModel.method}`);
+          mlResult.direction = effP1 > effP2 ? 't1' : 't2';
+          log('INFO', 'AUTO', `Modelo LoL resgatou: ${match.team1} vs ${match.team2} | edge=${lolEdge.toFixed(1)}pp conf=${lolModel.confidence.toFixed(2)} method=${lolModel.method}${isMapMarket ? ' [MAP]' : ''}`);
         }
-        log('DEBUG', 'LOL-MODEL', `${match.team1} vs ${match.team2}: P1=${(lolModel.modelP1*100).toFixed(1)}% conf=${lolModel.confidence.toFixed(2)} factors=${lolModel.factors?.join('+')}`);
+        log('DEBUG', 'LOL-MODEL', `${match.team1} vs ${match.team2}: P1=${(effP1*100).toFixed(1)}%${isMapMarket ? ' (map)' : ''} conf=${lolModel.confidence.toFixed(2)} factors=${lolModel.factors?.join('+')}`);
       }
     } catch(e) { log('DEBUG', 'LOL-MODEL', `Erro: ${e.message}`); }
 
