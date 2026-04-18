@@ -6712,40 +6712,50 @@ const server = http.createServer(async (req, res) => {
   }
 
   // ── Rerun pending tips com modelos treinados ──────────────────────────
-  // GET  /admin/rerun-pending-trained?sport=esports|tennis|dota|cs|valorant
+  // GET  /admin/rerun-pending-trained?sport=esports|tennis|dota|cs|valorant|all
   // POST /admin/rerun-pending-trained?sport=X&apply=1  (aplica updates)
   if (p === '/admin/rerun-pending-trained') {
     if (!requireAdmin(req, res)) return;
     try {
-      const sport = String(parsed.query.sport || 'esports').toLowerCase();
+      const sportParam = String(parsed.query.sport || 'esports').toLowerCase();
       const apply = req.method === 'POST' && (parsed.query.apply === '1' || parsed.query.apply === 'true');
       const EV_THRESHOLD = parseFloat(parsed.query.evThreshold) || 5;
 
+      // Migration idempotente: adiciona current_stake se ausente
+      try { db.exec("ALTER TABLE tips ADD COLUMN current_stake TEXT"); } catch (_) { /* já existe */ }
+
+      const { calcKellyWithP } = require('./lib/utils');
+
       const SPORT_GAME = { esports: 'lol', lol: 'lol', dota: 'dota2', dota2: 'dota2', cs: 'cs2', cs2: 'cs2', valorant: 'valorant' };
+      const ALL_SPORTS_WITH_TRAINED = ['esports', 'tennis', 'dota', 'cs', 'valorant'];
+      const sportsToProcess = sportParam === 'all' ? ALL_SPORTS_WITH_TRAINED : [sportParam];
 
       const { predictTrainedEsports, hasTrainedModel } = require('./lib/esports-model-trained');
       const { buildTrainedContext } = require('./lib/esports-runtime-features');
       const { predictTrainedTennis, hasTrainedModel: hasTrainedTennis } = require('./lib/tennis-model-trained');
       const { getTennisElo, extractSurface } = require('./lib/tennis-ml');
 
+      // Puxa tips pendentes de 1 ou N sports
+      const placeholders = sportsToProcess.map(() => '?').join(',');
       const tips = db.prepare(`
-        SELECT id, sport, participant1, participant2, tip_participant, odds, ev,
+        SELECT id, sport, participant1, participant2, tip_participant, odds, ev, stake,
                model_p1, model_p2, event_name, sent_at, confidence
         FROM tips
-        WHERE LOWER(sport) = ? AND (result IS NULL OR result = 'pending')
+        WHERE LOWER(sport) IN (${placeholders}) AND (result IS NULL OR result = 'pending')
         ORDER BY sent_at DESC
-      `).all(sport);
+      `).all(...sportsToProcess);
 
       const items = [];
       const updates = [];
       let skipped = 0;
 
       for (const t of tips) {
+        const tipSport = String(t.sport || '').toLowerCase();
         const odds = parseFloat(t.odds);
         if (!Number.isFinite(odds) || odds <= 1) { skipped++; continue; }
         let pred = null;
         try {
-          if (sport === 'tennis') {
+          if (tipSport === 'tennis') {
             if (!hasTrainedTennis()) { skipped++; continue; }
             const league = t.event_name || '';
             const surface = extractSurface(league);
@@ -6759,7 +6769,7 @@ const server = http.createServer(async (req, res) => {
               bestOf: /grand slam|wimbledon|us open|roland|australian/i.test(league) ? 5 : 3,
             });
           } else {
-            const game = SPORT_GAME[sport];
+            const game = SPORT_GAME[tipSport];
             if (!game || !hasTrainedModel(game)) { skipped++; continue; }
             const ctx = buildTrainedContext(db, game, {
               team1: t.participant1, team2: t.participant2, league: t.event_name || '', format: 'Bo3',
@@ -6777,36 +6787,54 @@ const server = http.createServer(async (req, res) => {
         const newEV = +((newPpick * odds - 1) * 100).toFixed(2);
         const verdict = newEV >= EV_THRESHOLD ? 'manter' : newEV >= 0 ? 'enfraqueceu' : 'negativo';
 
+        // Kelly fraction por confidence (alinhado com bot.js): ALTA=¼, MÉDIA=⅙, BAIXA=1/10
+        const confNum = Number.isFinite(+pred.confidence) ? +pred.confidence : 0.5;
+        const kellyFrac = confNum >= 0.70 ? 0.25 : confNum >= 0.50 ? 0.167 : 0.10;
+        // Stake só se EV passar threshold; senão força "0u" (sem value)
+        const newStake = newEV >= EV_THRESHOLD ? calcKellyWithP(newPpick, odds, kellyFrac) : '0u';
+
         items.push({
-          id: t.id, pick: t.tip_participant, match: `${t.participant1} vs ${t.participant2}`,
+          id: t.id, sport: t.sport, pick: t.tip_participant, match: `${t.participant1} vs ${t.participant2}`,
           event: t.event_name, odds,
           oldP: +(oldPpick * 100).toFixed(1), newP: +(newPpick * 100).toFixed(1),
           delta: +((newPpick - oldPpick) * 100).toFixed(1),
           oldEV, newEV, verdict,
+          oldStake: t.stake || null, newStake,
         });
         updates.push({
           id: t.id,
           model_p1: pred.p1, model_p2: pred.p2,
           current_ev: newEV, current_confidence: pred.confidence,
+          current_stake: newStake,
         });
       }
 
       let applied = 0;
       if (apply && updates.length) {
-        const upd = db.prepare(`UPDATE tips SET model_p1=?, model_p2=?, current_ev=?, current_confidence=?, current_updated_at=datetime('now') WHERE id=?`);
-        const tx = db.transaction((arr) => { for (const u of arr) { const r = upd.run(u.model_p1, u.model_p2, u.current_ev, u.current_confidence, u.id); if (r.changes > 0) applied++; } });
+        const upd = db.prepare(`UPDATE tips SET model_p1=?, model_p2=?, current_ev=?, current_confidence=?, current_stake=?, current_updated_at=datetime('now') WHERE id=?`);
+        const tx = db.transaction((arr) => { for (const u of arr) { const r = upd.run(u.model_p1, u.model_p2, u.current_ev, u.current_confidence, u.current_stake, u.id); if (r.changes > 0) applied++; } });
         tx(updates);
         log('INFO', 'ADMIN', `rerun-pending-trained: sport=${sport} applied=${applied}/${updates.length}`);
       }
 
+      // Counts por sport (útil quando sport=all)
+      const countsBySport = {};
+      for (const it of items) {
+        const s = it.sport || '?';
+        if (!countsBySport[s]) countsBySport[s] = { manter: 0, enfraqueceu: 0, negativo: 0 };
+        countsBySport[s][it.verdict]++;
+      }
+
       sendJson(res, {
-        ok: true, sport, dryRun: !apply, evThreshold: EV_THRESHOLD,
+        ok: true, sport: sportParam, sportsProcessed: sportsToProcess,
+        dryRun: !apply, evThreshold: EV_THRESHOLD,
         totalPending: tips.length, evaluated: items.length, skipped, applied,
         counts: {
           manter: items.filter(i => i.verdict === 'manter').length,
           enfraqueceu: items.filter(i => i.verdict === 'enfraqueceu').length,
           negativo: items.filter(i => i.verdict === 'negativo').length,
         },
+        countsBySport,
         items,
       });
     } catch (e) { sendJson(res, { error: e.message, stack: e.stack }, 500); }
