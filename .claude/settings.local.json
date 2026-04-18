@@ -205,7 +205,8 @@
       "Bash(grep -oE \"\\(/public/[^\\\\\"']{0,80}|/api/[^\\\\\"']{0,80}|matchdata[^\\\\\"']{0,80}\\)\" \"/c/Users/vict_/AppData/Local/Temp/oe.js\")",
       "Bash(grep -oE \"matchDataLinks[=:][^,;}]{0,400}\" \"/c/Users/vict_/AppData/Local/Temp/oe.js\")",
       "Bash(python *)",
-      "Bash(grep -n \"AUTO-TENNIS.*Skip\\\\|for \\(const match of matches\\)\\\\|Skip \\\\${match.team\" bot.js)"
+      "Bash(grep -n \"AUTO-TENNIS.*Skip\\\\|for \\(const match of matches\\)\\\\|Skip \\\\${match.team\" bot.js)",
+      "Bash(grep -nE 'FROM tips\\( WHERE|$| t$| t WHERE\\)' server.js)"
     ]
   }
 }

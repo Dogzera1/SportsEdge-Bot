@@ -1,0 +1,1804 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SportsEdge Dashboard</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <style>
+    /* dark theme, card grid, responsive */
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Segoe UI', sans-serif; background: #0f1117; color: #e0e0e0; min-height: 100vh; }
+    header { background: #1a1d2e; padding: 1rem 2rem; border-bottom: 2px solid #7c3aed; display: flex; align-items: center; gap: 1rem; }
+    header h1 { font-size: 1.4rem; color: #a78bfa; }
+    header span { font-size: 0.8rem; color: #6b7280; }
+
+    .sport-tabs { display: flex; gap: 0.5rem; padding: 1rem 2rem; background: #13151f; flex-wrap: wrap; }
+    .sport-tab { padding: 0.5rem 1.2rem; border-radius: 6px; border: 1px solid #374151; background: #1f2937; color: #9ca3af; cursor: pointer; font-size: 0.85rem; transition: all 0.2s; }
+    a.sport-tab { text-decoration: none; color: #9ca3af; display: inline-block; }
+    a.sport-tab:hover { color: #e0e0e0; border-color: #6b7280; }
+    .sport-tab.active { background: #7c3aed; border-color: #7c3aed; color: #fff; }
+
+    .main { padding: 1.5rem 2rem; max-width: 1400px; }
+
+    /* Metric cards */
+    .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 1rem; margin-bottom: 1.5rem; }
+    .card { background: #1a1d2e; border-radius: 10px; padding: 1.2rem; border: 1px solid #2d2f45; }
+    .card .label { font-size: 0.75rem; color: #6b7280; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.4rem; }
+    .card .value { font-size: 1.8rem; font-weight: 700; }
+    .card .sub { font-size: 0.75rem; color: #6b7280; margin-top: 0.2rem; }
+    .positive { color: #34d399; }
+    .negative { color: #f87171; }
+    .neutral { color: #60a5fa; }
+
+    /* Charts grid */
+    .charts { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; margin-bottom: 1.5rem; }
+    @media (max-width: 900px) { .charts { grid-template-columns: 1fr; } }
+    .chart-card { background: #1a1d2e; border-radius: 10px; padding: 1.2rem; border: 1px solid #2d2f45; }
+    .chart-card h3 { font-size: 0.9rem; color: #a78bfa; margin-bottom: 1rem; text-transform: uppercase; letter-spacing: 0.05em; }
+    .chart-card canvas { max-height: 240px; }
+
+    /* Tips table */
+    .table-card { background: #1a1d2e; border-radius: 10px; padding: 1.2rem; border: 1px solid #2d2f45; margin-bottom: 1.5rem; overflow-x: auto; }
+    .table-card h3 { font-size: 0.9rem; color: #a78bfa; margin-bottom: 1rem; text-transform: uppercase; letter-spacing: 0.05em; }
+    /* Collapsible cards */
+    .table-card.collapsible > h3 { cursor: pointer; user-select: none; margin-bottom: 0; }
+    .table-card.collapsible > h3:hover { color: #c4b5fd; }
+    .table-card.collapsible .toggle-arrow {
+      display: inline-block; margin-right: 0.55rem; color: #6b7280; font-size: 0.72rem;
+      transition: transform 0.18s ease;
+    }
+    .table-card.collapsible[data-collapsed="true"] .toggle-arrow { transform: rotate(-90deg); }
+    .table-card.collapsible:not([data-collapsed="true"]) > h3 { margin-bottom: 1rem; }
+    .table-card.collapsible[data-collapsed="true"] > *:not(h3) { display: none !important; }
+    .tips-controls { display: grid; grid-template-columns: 1.6fr 1fr 1fr 1fr 1fr 1fr; gap: 0.6rem; margin-bottom: 0.9rem; }
+    @media (max-width: 900px) { .tips-controls { grid-template-columns: 1fr 1fr; } }
+    .tips-controls input, .tips-controls select {
+      width: 100%;
+      background: #13151f;
+      border: 1px solid #2d2f45;
+      color: #e0e0e0;
+      border-radius: 8px;
+      padding: 0.55rem 0.7rem;
+      font-size: 0.82rem;
+      outline: none;
+    }
+    .tips-controls input::placeholder { color: #6b7280; }
+    .tips-controls input:focus, .tips-controls select:focus { border-color: #7c3aed; }
+    .tips-controls .mini { color: #6b7280; font-size: 0.72rem; margin-top: -0.2rem; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+    th { text-align: left; padding: 0.6rem 0.8rem; border-bottom: 1px solid #2d2f45; color: #6b7280; font-weight: 600; text-transform: uppercase; font-size: 0.7rem; }
+    td { padding: 0.6rem 0.8rem; border-bottom: 1px solid #1f2937; }
+    tr:last-child td { border-bottom: none; }
+    .badge { display: inline-block; padding: 0.2rem 0.5rem; border-radius: 4px; font-size: 0.7rem; font-weight: 600; }
+    .badge-win { background: #065f46; color: #34d399; }
+    .badge-loss { background: #7f1d1d; color: #f87171; }
+    .badge-pending { background: #1e3a5f; color: #60a5fa; }
+    .badge-alta { background: #14532d; color: #86efac; }
+    .badge-media { background: #713f12; color: #fde68a; }
+    .badge-baixa { background: #1e3a5f; color: #93c5fd; }
+
+    .conf-breakdown { display: flex; gap: 1rem; flex-wrap: wrap; margin-top: 0.5rem; }
+    .conf-item { font-size: 0.78rem; padding: 0.3rem 0.7rem; border-radius: 5px; background: #13151f; }
+
+    .loading { text-align: center; color: #6b7280; padding: 3rem; }
+    .error { color: #f87171; font-size: 0.8rem; }
+
+    .refresh-btn { margin-left: auto; padding: 0.4rem 1rem; background: #4c1d95; border: none; border-radius: 6px; color: #e0e0e0; cursor: pointer; font-size: 0.8rem; }
+    .refresh-btn:hover { background: #7c3aed; }
+    .last-updated { font-size: 0.75rem; color: #4b5563; }
+
+    /* ML Tab */
+    #mlSection { display: none; }
+    .ml-stat-card { background: #1a1d2e; border-radius: 10px; padding: 1.2rem; border: 1px solid #2d2f45; }
+    .ml-stat-card .label { font-size: 0.75rem; color: #6b7280; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.4rem; }
+    .ml-stat-card .value { font-size: 1.8rem; font-weight: 700; }
+    .ml-stat-card .sub { font-size: 0.75rem; color: #6b7280; margin-top: 0.2rem; }
+
+    .prob-bar-wrap { display: flex; align-items: center; gap: 0.5rem; font-size: 0.78rem; }
+    .prob-bar { height: 6px; border-radius: 3px; background: #374151; flex: 1; overflow: hidden; }
+    .prob-bar-fill { height: 100%; border-radius: 3px; transition: width 0.3s; }
+
+    .acc-bar { display: inline-block; height: 8px; border-radius: 4px; vertical-align: middle; }
+    .factor-row { display: flex; align-items: center; gap: 0.6rem; margin: 0.4rem 0; font-size: 0.82rem; }
+    .factor-label { width: 70px; color: #9ca3af; font-size: 0.75rem; text-transform: uppercase; }
+    .factor-weight { width: 38px; color: #a78bfa; font-weight: 700; text-align: right; }
+    .factor-acc { font-size: 0.72rem; color: #6b7280; margin-left: 0.3rem; }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>&#9889; SportsEdge Dashboard</h1>
+  <span id="lastUpdated" class="last-updated">&ndash;</span>
+  <button class="refresh-btn" onclick="loadAll()">&#8635; Atualizar</button>
+</header>
+
+<div class="sport-tabs">
+  <button class="sport-tab active" onclick="selectSport('esports','lol', this)">&#127918; LoL</button>
+  <button class="sport-tab" onclick="selectSport('esports','dota2', this)">&#128737;&#65039; Dota 2</button>
+  <button class="sport-tab" onclick="selectSport('valorant','', this)">&#127919; Valorant</button>
+  <button class="sport-tab" onclick="selectSport('cs','', this)">&#128299; CS2</button>
+  <button class="sport-tab" onclick="selectSport('mma','mma', this)">&#129354; MMA</button>
+  <button class="sport-tab" onclick="selectSport('mma','boxing', this)">&#129307; Boxe</button>
+  <a class="sport-tab" href="/lol/ev-manual" title="Match Winner — odds manuais (LoL)">&#128200; LoL EV manual</a>
+  <button class="sport-tab" onclick="selectSport('tennis','', this)">&#127934; T&ecirc;nis</button>
+  <button class="sport-tab" onclick="selectSport('football','', this)">&#9917; Futebol</button>
+  <button class="sport-tab" onclick="selectSport('darts','', this)">&#127919; Darts</button>
+  <button class="sport-tab" onclick="selectSport('snooker','', this)">&#127921; Snooker</button>
+  <button class="sport-tab" onclick="selectSport('tabletennis','', this)">&#127955; T&ecirc;nis de Mesa</button>
+  <button class="sport-tab" onclick="selectML(this)">&#129302; ML / Treino</button>
+</div>
+
+<div class="main">
+  <!-- Metric Cards -->
+  <div class="cards" id="cards"><div class="loading">Carregando...</div></div>
+
+  <!-- Charts -->
+  <div class="charts" id="sportCharts">
+    <div class="chart-card">
+      <h3>&#128202; Calibra&ccedil;&atilde;o &mdash; Previsto vs. Real</h3>
+      <canvas id="calibrationChart"></canvas>
+      <p id="calibrationNote" style="font-size:0.72rem;color:#6b7280;margin-top:0.5rem"></p>
+    </div>
+    <div class="chart-card" id="mlWeightsCard">
+      <h3>&#9881;&#65039; Pesos ML Din&acirc;micos</h3>
+      <canvas id="weightsChart"></canvas>
+    </div>
+  </div>
+
+  <!-- Live Snapshot (lol/dota/cs/valorant) -->
+  <div class="table-card collapsible" id="liveSnapshotCard" data-collapsed="false">
+    <h3 onclick="toggleCard(this)" style="display:flex;align-items:center;justify-content:space-between;gap:0.8rem;flex-wrap:wrap">
+      <span><span class="toggle-arrow">&#9662;</span>&#128308; Live Agora &mdash; Esports</span>
+      <span id="liveSnapshotMeta" style="font-size:0.68rem;color:#6b7280;font-weight:400;text-transform:none;letter-spacing:0">&mdash;</span>
+    </h3>
+    <div id="liveSnapshotBody"><div class="loading">Carregando...</div></div>
+  </div>
+
+  <!-- Próximos Jogos (upcoming) -->
+  <div class="table-card collapsible" id="upcomingCard" data-collapsed="false">
+    <h3 onclick="toggleCard(this)" style="display:flex;align-items:center;justify-content:space-between;gap:0.8rem;flex-wrap:wrap">
+      <span><span class="toggle-arrow">&#9662;</span>&#128337; Próximos Jogos &mdash; Esports</span>
+      <span id="upcomingMeta" style="font-size:0.68rem;color:#6b7280;font-weight:400;text-transform:none;letter-spacing:0">&mdash;</span>
+    </h3>
+    <div id="upcomingBody"><div class="loading">Carregando...</div></div>
+  </div>
+
+  <!-- ROI por Liga -->
+  <div class="table-card collapsible" id="leagueRoiCard" data-collapsed="true">
+    <h3 onclick="toggleCard(this)" style="display:flex;align-items:center;justify-content:space-between;gap:0.8rem;flex-wrap:wrap">
+      <span><span class="toggle-arrow">&#9662;</span>&#127942; ROI por Liga &mdash; Stake Multiplier</span>
+      <span style="font-size:0.68rem;color:#6b7280;font-weight:400;text-transform:none;letter-spacing:0">
+        &#8805;20 tips p/ ativar &bull; ROI +15%&rarr;1.20x &bull; +5%&rarr;1.10x &bull; &minus;5%&rarr;0.75x &bull; &minus;25%&rarr;0x
+      </span>
+    </h3>
+    <div id="leagueRoiTable"><div class="loading">Carregando...</div></div>
+  </div>
+
+  <!-- ROI Matrix — base pra decisão "cortar ou manter" sport/phase/tier -->
+  <div class="table-card collapsible" id="roiMatrixCard" data-collapsed="false">
+    <h3 onclick="toggleCard(this, event)" style="display:flex;align-items:center;justify-content:space-between;gap:0.8rem;flex-wrap:wrap">
+      <span><span class="toggle-arrow">&#9662;</span>&#127919; ROI Matrix &mdash; <span style="font-weight:400;font-size:0.72rem;color:#9ca3af">cross-sport, phase, tier</span></span>
+      <span style="font-size:0.68rem;color:#6b7280;font-weight:400;text-transform:none;letter-spacing:0">
+        Janela:
+        <select id="matrixDays" onclick="event.stopPropagation()" onchange="loadRoiMatrix()" style="background:#1f2937;color:#e5e7eb;border:1px solid #374151;border-radius:4px;padding:2px 6px;font-size:0.7rem">
+          <option value="7">7 dias</option>
+          <option value="30" selected>30 dias</option>
+          <option value="90">90 dias</option>
+          <option value="365">1 ano</option>
+        </select>
+      </span>
+    </h3>
+    <div style="font-size:0.68rem;color:#6b7280;margin-bottom:0.6rem;padding:0.4rem 0.6rem;background:#0f1729;border-radius:4px">
+      🟢 Verde: ROI ≥+3% E CLV ≥+1% — <b>scale up</b> &nbsp;|&nbsp;
+      🟡 Amarelo: misto — <b>observe</b> &nbsp;|&nbsp;
+      🔴 Vermelho: ROI ≤-5% OU CLV ≤-1% — <b>shadow / cut</b> &nbsp;|&nbsp;
+      ⚪ Cinza: n&lt;10 (sem dados)
+    </div>
+    <div id="roiMatrixTable"><div class="loading">Carregando...</div></div>
+  </div>
+
+  <!-- CLV Decay — degradação de edge ao longo do tempo -->
+  <div class="table-card collapsible" id="clvDecayCard" data-collapsed="false">
+    <h3 onclick="toggleCard(this, event)" style="display:flex;align-items:center;justify-content:space-between;gap:0.8rem;flex-wrap:wrap">
+      <span><span class="toggle-arrow">&#9662;</span>&#128202; CLV Decay (sport selecionado) &mdash; <span id="clvMeta" style="font-weight:400;font-size:0.72rem;color:#9ca3af"></span></span>
+      <span style="font-size:0.68rem;color:#6b7280;font-weight:400;text-transform:none;letter-spacing:0">
+        Janela:
+        <select id="clvDays" onclick="event.stopPropagation()" onchange="loadClvDecay()" style="background:#1f2937;color:#e5e7eb;border:1px solid #374151;border-radius:4px;padding:2px 6px;font-size:0.7rem">
+          <option value="14">14 dias</option>
+          <option value="30" selected>30 dias</option>
+          <option value="90">90 dias</option>
+        </select>
+      </span>
+    </h3>
+    <canvas id="clvChart" style="max-height:200px"></canvas>
+    <div style="font-size:0.66rem;color:#6b7280;margin-top:0.4rem">
+      CLV positivo sustentado = edge real vs mercado. Negativo persistente = sport perdeu edge ou modelo está errado.
+    </div>
+  </div>
+
+  <!-- Heatmap Horários + Shadow vs Ativo (lado a lado) -->
+  <div style="display:grid;grid-template-columns:1.4fr 1fr;gap:1.2rem;margin-bottom:1.2rem" id="hourlyShadowGrid">
+    <div class="table-card collapsible" id="hourlyCard" data-collapsed="false">
+      <h3 onclick="toggleCard(this, event)" style="display:flex;align-items:center;justify-content:space-between;gap:0.8rem;flex-wrap:wrap">
+        <span><span class="toggle-arrow">&#9662;</span>&#128293; Heatmap por Hora (BRT) &mdash; <span id="hourlyMeta" style="font-weight:400;font-size:0.72rem;color:#9ca3af"></span></span>
+        <span style="font-size:0.68rem;color:#6b7280;font-weight:400;text-transform:none;letter-spacing:0">
+          Janela:
+          <select id="hourlyDays" onclick="event.stopPropagation()" onchange="loadHourly()" style="background:#1f2937;color:#e5e7eb;border:1px solid #374151;border-radius:4px;padding:2px 6px;font-size:0.7rem">
+            <option value="7">7 dias</option>
+            <option value="30" selected>30 dias</option>
+            <option value="90">90 dias</option>
+            <option value="365">1 ano</option>
+          </select>
+        </span>
+      </h3>
+      <div id="hourlyHeatmap"><div class="loading">Carregando...</div></div>
+    </div>
+
+    <div class="table-card collapsible" id="shadowCard" data-collapsed="false">
+      <h3 onclick="toggleCard(this, event)" style="display:flex;align-items:center;justify-content:space-between;gap:0.8rem;flex-wrap:wrap">
+        <span><span class="toggle-arrow">&#9662;</span>&#127770; Shadow vs Ativo</span>
+        <span style="font-size:0.68rem;color:#6b7280;font-weight:400;text-transform:none;letter-spacing:0">
+          <select id="shadowDays" onclick="event.stopPropagation()" onchange="loadShadow()" style="background:#1f2937;color:#e5e7eb;border:1px solid #374151;border-radius:4px;padding:2px 6px;font-size:0.7rem">
+            <option value="7">7d</option>
+            <option value="30" selected>30d</option>
+            <option value="90">90d</option>
+            <option value="365">1a</option>
+          </select>
+        </span>
+      </h3>
+      <div id="shadowBody"><div class="loading">Carregando...</div></div>
+    </div>
+  </div>
+
+  <!-- Cost Summary -->
+  <div class="table-card collapsible" id="costCard" data-collapsed="false">
+    <h3 onclick="toggleCard(this, event)" style="display:flex;align-items:center;justify-content:space-between;gap:0.8rem;flex-wrap:wrap">
+      <span><span class="toggle-arrow">&#9662;</span>&#128176; Custos Operacionais &mdash; <span id="costMeta" style="font-weight:400;font-size:0.78rem;color:#9ca3af"></span></span>
+      <span style="font-size:0.68rem;color:#6b7280;font-weight:400;text-transform:none;letter-spacing:0">mês atual</span>
+    </h3>
+    <div id="costBody"><div class="loading">Carregando...</div></div>
+  </div>
+
+  <!-- Equity Curve -->
+  <div class="table-card collapsible" id="equityCard" data-collapsed="false">
+    <h3 onclick="toggleCard(this, event)" style="display:flex;align-items:center;justify-content:space-between;gap:0.8rem;flex-wrap:wrap">
+      <span><span class="toggle-arrow">&#9662;</span>&#128200; Curva de Banca &mdash; <span id="equityKpis" style="font-weight:400;font-size:0.78rem;color:#9ca3af"></span></span>
+      <span style="font-size:0.68rem;color:#6b7280;font-weight:400;text-transform:none;letter-spacing:0">
+        Janela:
+        <select id="equityDays" onclick="event.stopPropagation()" onchange="loadEquityCurve()" style="background:#1f2937;color:#e5e7eb;border:1px solid #374151;border-radius:4px;padding:2px 6px;font-size:0.7rem">
+          <option value="7">7 dias</option>
+          <option value="30" selected>30 dias</option>
+          <option value="90">90 dias</option>
+          <option value="365">1 ano</option>
+        </select>
+      </span>
+    </h3>
+    <canvas id="equityChart" style="max-height:260px"></canvas>
+    <div id="equityMeta" style="font-size:0.72rem;color:#6b7280;margin-top:0.5rem;display:flex;gap:1.2rem;flex-wrap:wrap"></div>
+  </div>
+
+  <!-- Tips Table -->
+  <div class="table-card collapsible" id="sportTipsCard" data-collapsed="true">
+    <h3 onclick="toggleCard(this, event)" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:0.3rem">
+      <span><span class="toggle-arrow">&#9662;</span>&#128203; &Uacute;ltimas Tips</span>
+      <span style="display:flex;gap:0.3rem;flex-wrap:wrap">
+        <button onclick="event.stopPropagation(); rerunPendingTrained(false)" title="Reavaliar pendentes do sport atual" style="font-size:0.7rem;padding:3px 8px;background:#1f2937;border:1px solid #4b5563;border-radius:4px;color:#60a5fa;cursor:pointer">&#129302; Reavaliar (atual)</button>
+        <button onclick="event.stopPropagation(); rerunPendingTrained(true)" title="Reavaliar pendentes de TODOS os sports com modelo treinado" style="font-size:0.7rem;padding:3px 8px;background:#1f2937;border:1px solid #60a5fa;border-radius:4px;color:#93c5fd;cursor:pointer;font-weight:600">&#127760; Reavaliar TODOS</button>
+        <button onclick="event.stopPropagation(); backtestTrained(false)" title="Backtest das settled do sport atual" style="font-size:0.7rem;padding:3px 8px;background:#1f2937;border:1px solid #4b5563;border-radius:4px;color:#34d399;cursor:pointer">&#128202; Backtest (atual)</button>
+        <button onclick="event.stopPropagation(); backtestTrained(true)" title="Backtest agregado de todos os sports" style="font-size:0.7rem;padding:3px 8px;background:#1f2937;border:1px solid #34d399;border-radius:4px;color:#6ee7b7;cursor:pointer;font-weight:600">&#128202; Backtest TODOS</button>
+        <button onclick="event.stopPropagation(); voidOldPending()" title="Anular em lote todas as tips pendentes antigas" style="font-size:0.7rem;padding:3px 8px;background:#1f2937;border:1px solid #4b5563;border-radius:4px;color:#f87171;cursor:pointer">&#128465; Anular pendentes antigas</button>
+      </span>
+    </h3>
+    <div class="tips-controls">
+      <div>
+        <input id="tipsQ" type="text" placeholder="Buscar: time / atleta / evento" autocomplete="off" />
+        <div class="mini">Busca em participantes + evento</div>
+      </div>
+      <select id="tipsStatus" title="Status">
+        <option value="">Status: todos</option>
+        <option value="open">Status: pendente</option>
+        <option value="settled">Status: liquidadas</option>
+        <option value="win">Status: ganhou</option>
+        <option value="loss">Status: perdeu</option>
+        <option value="void">Status: anuladas</option>
+      </select>
+      <select id="tipsLive" title="Live">
+        <option value="">Live: todos</option>
+        <option value="1">Live: sim</option>
+        <option value="0">Live: não</option>
+      </select>
+      <select id="tipsConf" title="Confidence">
+        <option value="">Confidence: todas</option>
+        <option value="ALTA">Confidence: alta</option>
+        <option value="MÉDIA">Confidence: média</option>
+        <option value="BAIXA">Confidence: baixa</option>
+      </select>
+      <select id="tipsSort" title="Ordenação">
+        <option value="date_desc">Ordenar: data ↓</option>
+        <option value="date_asc">Ordenar: data ↑</option>
+        <option value="ev_desc">Ordenar: EV ↓</option>
+        <option value="ev_asc">Ordenar: EV ↑</option>
+        <option value="odds_desc">Ordenar: odds ↓</option>
+        <option value="odds_asc">Ordenar: odds ↑</option>
+      </select>
+      <select id="tipsLimit" title="Limite">
+        <option value="20">20 itens</option>
+        <option value="50">50 itens</option>
+        <option value="100">100 itens</option>
+      </select>
+    </div>
+    <div id="tipsTable"><div class="loading">Carregando...</div></div>
+  </div>
+
+  <!-- ── ML / Treino Tab ── -->
+  <div id="mlSection">
+    <!-- Cards -->
+    <div class="cards" id="mlCards" style="margin-bottom:1.5rem">
+      <div class="loading">Carregando...</div>
+    </div>
+
+    <!-- Charts -->
+    <div class="charts" style="margin-bottom:1.5rem">
+      <div class="chart-card">
+        <h3>&#9881;&#65039; Pesos ML por Fator</h3>
+        <canvas id="mlWeightsFullChart" style="max-height:220px"></canvas>
+        <div id="mlWeightsNote" style="font-size:0.72rem;color:#6b7280;margin-top:0.5rem"></div>
+      </div>
+      <div class="chart-card">
+        <h3>&#128200; Acur&aacute;cia Walk-Forward por M&ecirc;s</h3>
+        <canvas id="mlMonthlyChart" style="max-height:220px"></canvas>
+        <div id="mlMonthlyNote" style="font-size:0.72rem;color:#6b7280;margin-top:0.5rem"></div>
+      </div>
+    </div>
+
+    <!-- Upcoming Predictions -->
+    <div class="table-card" style="margin-bottom:1.5rem">
+      <h3>&#128302; Pr&oacute;ximas Partidas &mdash; Predi&ccedil;&otilde;es do Modelo (LoL)</h3>
+      <div id="mlPredictions"><div class="loading">Carregando...</div></div>
+    </div>
+
+    <!-- Monthly Accuracy Table -->
+    <div class="table-card">
+      <h3>&#128202; Acur&aacute;cia Mensal Walk-Forward (LoL)</h3>
+      <div id="mlMonthlyTable"><div class="loading">Carregando...</div></div>
+    </div>
+  </div>
+</div>
+
+<script>
+// Colapsa/expande o card clicado. Segundo argumento opcional (event) permite
+// parar propagação quando botões internos no h3 também querem handler próprio.
+function toggleCard(headerEl, ev) {
+  if (ev && typeof ev.stopPropagation === 'function') {
+    // Se o clique veio de dentro de um <button>, ignora o toggle.
+    const target = ev.target;
+    if (target && target.closest && target.closest('button')) return;
+  }
+  const card = headerEl.closest('.table-card');
+  if (!card) return;
+  const collapsed = card.getAttribute('data-collapsed') === 'true';
+  card.setAttribute('data-collapsed', collapsed ? 'false' : 'true');
+}
+
+const BASE = (function() {
+  const origin = window.location.origin;
+  if (origin.includes('localhost') || origin.includes('127.0.0.1')) {
+    return 'http://127.0.0.1:' + (window.location.port || '8080');
+  }
+  return origin;
+})();
+
+let currentSport = 'esports';
+let currentGame = 'lol';
+let isMLView = false;
+let calibChart = null;
+let weightsChart = null;
+let mlWeightsFullChart = null;
+let mlMonthlyChart = null;
+let tipsTimer = null;
+
+function getAdminKey() {
+  let key = sessionStorage.getItem('ADMIN_KEY') || '';
+  if (!key) {
+    key = prompt('Admin key (x-admin-key):') || '';
+    if (key) sessionStorage.setItem('ADMIN_KEY', key);
+  }
+  return key;
+}
+async function adminFetch(path, opts = {}) {
+  const key = getAdminKey();
+  const headers = Object.assign({}, opts.headers || {}, { 'x-admin-key': key });
+  const r = await fetch(BASE + path, Object.assign({}, opts, { headers }));
+  if (r.status === 401 || r.status === 403) {
+    sessionStorage.removeItem('ADMIN_KEY');
+    throw new Error('Admin key inválida/ausente — recarregue a página');
+  }
+  return r;
+}
+
+async function apiFetch(path) {
+  try {
+    const r = await fetch(BASE + path);
+    if (!r.ok) throw new Error(r.status);
+    return await r.json();
+  } catch(e) {
+    console.warn('Fetch failed:', path, e.message);
+    return null;
+  }
+}
+
+function selectSport(sport, game, el) {
+  isMLView = false;
+  currentSport = sport;
+  currentGame = game || '';
+  document.querySelectorAll('.sport-tab').forEach(t => t.classList.remove('active'));
+  el.classList.add('active');
+  document.getElementById('cards').style.display = '';
+  document.getElementById('sportCharts').style.display = '';
+  document.getElementById('leagueRoiCard').style.display = '';
+  document.getElementById('sportTipsCard').style.display = '';
+  document.getElementById('mlSection').style.display = 'none';
+  loadAll();
+}
+
+function selectML(el) {
+  isMLView = true;
+  document.querySelectorAll('.sport-tab').forEach(t => t.classList.remove('active'));
+  el.classList.add('active');
+  document.getElementById('cards').style.display = 'none';
+  document.getElementById('sportCharts').style.display = 'none';
+  document.getElementById('leagueRoiCard').style.display = 'none';
+  document.getElementById('sportTipsCard').style.display = 'none';
+  document.getElementById('mlSection').style.display = 'block';
+  loadML();
+}
+
+function gameQs() { return currentGame ? '&game=' + encodeURIComponent(currentGame) : ''; }
+
+async function loadAll() {
+  if (isMLView) { loadML(); return; }
+  document.getElementById('lastUpdated').textContent = 'Atualizando...';
+  const tipsP = loadTips();
+  const gq = gameQs();
+  const [roi, calibration, weights, leagueRoi, liveSnap, upcomingSnap] = await Promise.all([
+    apiFetch('/roi?sport=' + currentSport + gq),
+    apiFetch('/calibration?sport=' + currentSport + '&phase=all' + gq),
+    apiFetch('/ml-weights'),
+    apiFetch('/league-roi?sport=' + currentSport + gq),
+    apiFetch('/live-snapshot'),
+    apiFetch('/upcoming-snapshot?hours=24')
+  ]);
+  renderCards(roi);
+  renderCalibration(calibration);
+  renderWeights(weights);
+  renderLeagueRoi(leagueRoi);
+  renderLiveSnapshot(liveSnap);
+  renderUpcoming(upcomingSnap);
+  loadEquityCurve();
+  loadHourly();
+  loadShadow();
+  loadRoiMatrix();
+  loadClvDecay();
+  loadCostSummary();
+  await tipsP;
+  document.getElementById('lastUpdated').textContent = 'Atualizado: ' + new Date().toLocaleTimeString('pt-BR');
+}
+
+let _equityChart = null;
+async function loadEquityCurve() {
+  const days = (document.getElementById('equityDays')?.value) || '30';
+  const data = await apiFetch('/equity-curve?sport=' + currentSport + '&days=' + days);
+  if (!data || data.error) {
+    const meta = document.getElementById('equityMeta');
+    if (meta) meta.textContent = data?.error || 'sem dados';
+    return;
+  }
+  const series = Array.isArray(data.series) ? data.series : [];
+  const ctx = document.getElementById('equityChart')?.getContext?.('2d');
+  if (!ctx) return;
+  const labels = series.map(s => s.day);
+  const banca = series.map(s => s.cum_banca);
+  const drawdown = series.map(s => -Math.abs(s.drawdown_pct || 0));
+  if (_equityChart) _equityChart.destroy();
+  _equityChart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [
+        {
+          label: 'Banca (R$)',
+          data: banca,
+          borderColor: '#34d399',
+          backgroundColor: 'rgba(52,211,153,0.12)',
+          borderWidth: 2,
+          tension: 0.25,
+          fill: true,
+          yAxisID: 'y',
+        },
+        {
+          label: 'Drawdown (%)',
+          data: drawdown,
+          borderColor: '#f87171',
+          backgroundColor: 'rgba(248,113,113,0.05)',
+          borderWidth: 1.5,
+          tension: 0.2,
+          fill: false,
+          yAxisID: 'y1',
+        }
+      ]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { labels: { color: '#9ca3af', font: { size: 11 } } } },
+      scales: {
+        x: { ticks: { color: '#6b7280', font: { size: 10 } }, grid: { color: 'rgba(75,85,99,0.18)' } },
+        y: { position: 'left', ticks: { color: '#34d399', font: { size: 10 }, callback: v => 'R$' + Number(v).toFixed(0) }, grid: { color: 'rgba(75,85,99,0.18)' } },
+        y1: { position: 'right', ticks: { color: '#f87171', font: { size: 10 }, callback: v => Number(v).toFixed(1) + '%' }, grid: { drawOnChartArea: false } }
+      }
+    }
+  });
+  const initial = Number(data.initial_banca || 0);
+  const current = Number(data.current_banca || 0);
+  const profitR = Number(data.total_profit_reais || 0);
+  const growth = initial > 0 ? (profitR / initial) * 100 : 0;
+  const growthClass = profitR >= 0 ? 'positive' : 'negative';
+  document.getElementById('equityKpis').innerHTML =
+    `Banca atual <b style="color:#e5e7eb">R$${current.toFixed(2)}</b> ` +
+    `(<span class="${growthClass}">${profitR >= 0 ? '+' : ''}${profitR.toFixed(2)} | ${growth >= 0 ? '+' : ''}${growth.toFixed(2)}%</span>)`;
+  document.getElementById('equityMeta').innerHTML =
+    `<span>Pico: <b>R$${Number(data.peak_banca || 0).toFixed(2)}</b></span>` +
+    `<span>Max DD: <b style="color:#f87171">-${Number(data.max_drawdown_pct || 0).toFixed(2)}%</b></span>` +
+    `<span>Sharpe (anual): <b>${data.sharpe_annualized != null ? Number(data.sharpe_annualized).toFixed(2) : '—'}</b></span>` +
+    `<span>Dias ativos: <b>${data.days_settled || 0}</b></span>`;
+}
+
+async function loadHourly() {
+  const days = (document.getElementById('hourlyDays')?.value) || '30';
+  const data = await apiFetch('/hourly-roi?sport=' + currentSport + '&days=' + days);
+  const el = document.getElementById('hourlyHeatmap');
+  if (!el) return;
+  if (!data || data.error || !Array.isArray(data.hours)) {
+    el.innerHTML = '<div class="loading" style="color:#6b7280">' + (data?.error || 'sem dados') + '</div>';
+    return;
+  }
+  // Color scale: ROI -50% (red) → 0 (gray) → +50% (green). null/n=0 = neutro.
+  const cellColor = (h) => {
+    if (h.n === 0) return { bg: '#111827', fg: '#374151' };
+    if (h.roi == null) return { bg: '#1f2937', fg: '#6b7280' };
+    const r = Math.max(-50, Math.min(50, h.roi));
+    if (r >= 0) {
+      const t = r / 50; // 0..1
+      const g = Math.round(40 + 160 * t); // 40..200
+      return { bg: `rgba(34,${g},94,${0.15 + 0.55 * t})`, fg: t > 0.5 ? '#bbf7d0' : '#86efac' };
+    } else {
+      const t = -r / 50;
+      const rr = Math.round(40 + 160 * t);
+      return { bg: `rgba(${rr},38,38,${0.15 + 0.55 * t})`, fg: t > 0.5 ? '#fecaca' : '#fca5a5' };
+    }
+  };
+  let totalN = 0, totalProfit = 0;
+  const cells = data.hours.map(h => {
+    totalN += h.n; totalProfit += h.profit_reais || 0;
+    const { bg, fg } = cellColor(h);
+    const roiTxt = h.roi != null ? (h.roi >= 0 ? '+' : '') + h.roi.toFixed(1) + '%' : '—';
+    const tip = h.n > 0
+      ? `${String(h.hour).padStart(2,'0')}:00\nn=${h.n} | ${h.wins}W/${h.losses}L\nROI: ${roiTxt}\nLucro: R$${h.profit_reais.toFixed(2)}`
+      : `${String(h.hour).padStart(2,'0')}:00\nsem tips`;
+    return `<div title="${tip}" style="background:${bg};color:${fg};padding:6px 4px;border-radius:4px;text-align:center;font-size:0.65rem;line-height:1.2">
+      <div style="font-weight:700;color:#9ca3af;font-size:0.6rem">${String(h.hour).padStart(2,'0')}h</div>
+      <div style="font-weight:600">${roiTxt}</div>
+      <div style="opacity:0.7;font-size:0.55rem">n=${h.n}</div>
+    </div>`;
+  }).join('');
+  el.innerHTML = `<div style="display:grid;grid-template-columns:repeat(12,1fr);gap:3px">${cells}</div>`;
+  document.getElementById('hourlyMeta').textContent = `${totalN} tips | lucro R$${totalProfit.toFixed(2)} | ${data.timezone || ''}`;
+}
+
+async function loadCostSummary() {
+  const data = await apiFetch('/cost-summary');
+  const el = document.getElementById('costBody');
+  if (!el) return;
+  if (!data || data.error || !data.ok) {
+    el.innerHTML = '<div class="loading" style="color:#6b7280">' + (data?.error || 'sem dados') + '</div>';
+    return;
+  }
+  const ds = data.deepseek || {};
+  const odds = data.the_odds_api || {};
+  const rw = data.railway || {};
+  const totalUsd = data.total_usd || 0;
+  const totalBrl = data.total_brl || 0;
+  document.getElementById('costMeta').innerHTML =
+    `<b>R$${totalBrl.toFixed(2)}</b> ($${totalUsd.toFixed(2)} | rate ${data.usd_brl_rate}) — ${data.month}`;
+  const warningHtml = (data.warnings || []).length
+    ? `<div style="background:rgba(251,191,36,0.12);border-left:3px solid #fbbf24;padding:8px 12px;border-radius:4px;margin-bottom:10px;font-size:0.78rem;color:#fde68a">⚠️ ${data.warnings.join(' | ')}</div>`
+    : '';
+  el.innerHTML = warningHtml + `
+    <table style="font-size:0.82rem">
+      <thead><tr>
+        <th>Provider</th>
+        <th style="text-align:right">Uso</th>
+        <th style="text-align:right">Custo USD</th>
+        <th style="text-align:right">Custo BRL</th>
+        <th>Notas</th>
+      </tr></thead>
+      <tbody>
+        <tr>
+          <td><b>DeepSeek</b></td>
+          <td style="text-align:right">${ds.calls || 0} calls<br><span style="color:#6b7280;font-size:0.7rem">${(ds.prompt_tokens||0).toLocaleString()} in / ${(ds.completion_tokens||0).toLocaleString()} out</span></td>
+          <td style="text-align:right;font-weight:600">$${(ds.cost_usd + (ds.cost_usd_estimated_no_token_data || 0)).toFixed(4)}</td>
+          <td style="text-align:right;font-weight:600">R$${(ds.cost_brl || 0).toFixed(2)}</td>
+          <td style="font-size:0.7rem;color:#9ca3af">${ds.note || ''}</td>
+        </tr>
+        <tr>
+          <td><b>The Odds API</b></td>
+          <td style="text-align:right">${odds.used}/${odds.cap}<br><span style="color:${odds.pct>=80?'#fca5a5':'#6b7280'};font-size:0.7rem">${odds.pct}%</span></td>
+          <td style="text-align:right;font-weight:600">$${(odds.cost_usd || 0).toFixed(2)}</td>
+          <td style="text-align:right;font-weight:600">R$${(odds.cost_brl || 0).toFixed(2)}</td>
+          <td style="font-size:0.7rem;color:#9ca3af">${odds.note || ''}</td>
+        </tr>
+        <tr>
+          <td><b>Railway</b></td>
+          <td style="text-align:right;color:#6b7280">2 services</td>
+          <td style="text-align:right;font-weight:600">$${rw.estimated_usd}</td>
+          <td style="text-align:right;font-weight:600">R$${(rw.cost_brl || 0).toFixed(2)}</td>
+          <td style="font-size:0.7rem;color:#9ca3af">${rw.note || ''}</td>
+        </tr>
+        <tr style="border-top:2px solid #374151;background:#0f1729">
+          <td><b>TOTAL</b></td>
+          <td></td>
+          <td style="text-align:right;font-weight:700;color:#34d399">$${totalUsd.toFixed(2)}</td>
+          <td style="text-align:right;font-weight:700;color:#34d399">R$${totalBrl.toFixed(2)}</td>
+          <td style="font-size:0.7rem;color:#9ca3af">free APIs: Pinnacle, PandaScore, Riot, Sherdog, HLTV, VLR, ESPN</td>
+        </tr>
+      </tbody>
+    </table>
+    <div style="margin-top:8px;font-size:0.66rem;color:#6b7280">
+      Override Railway: ENV <code>RAILWAY_MONTHLY_USD_EST=10</code> | USD/BRL: ENV <code>USD_BRL_RATE=5.0</code>
+    </div>`;
+}
+
+async function loadRoiMatrix() {
+  const days = (document.getElementById('matrixDays')?.value) || '30';
+  const data = await apiFetch('/roi-matrix?days=' + days);
+  const el = document.getElementById('roiMatrixTable');
+  if (!el) return;
+  if (!data || data.error || !Array.isArray(data.matrix)) {
+    el.innerHTML = '<div class="loading" style="color:#6b7280">' + (data?.error || 'sem dados') + '</div>';
+    return;
+  }
+  if (!data.matrix.length) {
+    el.innerHTML = '<div class="loading" style="color:#6b7280">Sem tips liquidadas no período.</div>';
+    return;
+  }
+  const healthBg = {
+    verde: '#064e3b', amarelo: '#713f12', vermelho: '#7f1d1d', no_data: '#1f2937',
+    verde_sem_clv: '#064e3b', amarelo_sem_clv: '#713f12', vermelho_sem_clv: '#7f1d1d', unknown: '#1f2937'
+  };
+  const healthFg = {
+    verde: '#6ee7b7', amarelo: '#fde68a', vermelho: '#fca5a5', no_data: '#6b7280',
+    verde_sem_clv: '#86efac', amarelo_sem_clv: '#fde68a', vermelho_sem_clv: '#fca5a5', unknown: '#6b7280'
+  };
+  const healthLabel = {
+    verde: '🟢 SCALE', amarelo: '🟡 OBSERVE', vermelho: '🔴 CUT', no_data: '⚪ —',
+    verde_sem_clv: '🟢 SCALE*', amarelo_sem_clv: '🟡 OBS*', vermelho_sem_clv: '🔴 CUT*', unknown: '⚪ —'
+  };
+  const fmtNum = (v, suffix) => v == null ? '<span style="color:#4b5563">—</span>' : (v + (suffix || ''));
+  const fmtSigned = (v, suffix) => {
+    if (v == null) return '<span style="color:#4b5563">—</span>';
+    const cls = v >= 0 ? 'positive' : 'negative';
+    return '<span class="' + cls + '">' + (v >= 0 ? '+' : '') + v + (suffix || '') + '</span>';
+  };
+  const rows = data.matrix.map(b => {
+    const hbg = healthBg[b.health] || '#1f2937';
+    const hfg = healthFg[b.health] || '#9ca3af';
+    const hlabel = healthLabel[b.health] || '⚪ —';
+    const tierColor = b.tier === 'tier1' ? '#93c5fd' : '#fde68a';
+    return '<tr>' +
+      '<td style="font-weight:600">' + b.sport.toUpperCase() + '</td>' +
+      '<td>' + (b.phase === 'live' ? '🔴 LIVE' : '⏳ pré') + '</td>' +
+      '<td><span style="color:' + tierColor + '">' + b.tier + '</span></td>' +
+      '<td style="text-align:right">' + b.n + '<span style="color:#6b7280;font-size:0.65rem"> (' + b.wins + 'W/' + b.losses + 'L)</span></td>' +
+      '<td style="text-align:right">' + (b.hitRate != null ? b.hitRate + '%' : '—') + '</td>' +
+      '<td style="text-align:right;font-weight:600">' + fmtSigned(b.roi, '%') + '</td>' +
+      '<td style="text-align:right">' + fmtSigned(b.profit_reais, '') + '</td>' +
+      '<td style="text-align:right">' + fmtSigned(b.clv_avg, '%') + '<span style="color:#6b7280;font-size:0.65rem"> (n' + b.clv_n + ')</span></td>' +
+      '<td style="text-align:right">' + (b.brier != null ? b.brier : '—') + '</td>' +
+      '<td style="text-align:right">' + fmtNum(b.avg_ev, '%') + '</td>' +
+      '<td style="text-align:center;background:' + hbg + ';color:' + hfg + ';font-weight:700;font-size:0.7rem">' + hlabel + '</td>' +
+    '</tr>';
+  }).join('');
+  el.innerHTML =
+    '<table style="font-size:0.78rem">' +
+      '<thead><tr>' +
+        '<th>Sport</th><th>Phase</th><th>Tier</th>' +
+        '<th style="text-align:right">N</th><th style="text-align:right">Hit</th>' +
+        '<th style="text-align:right">ROI</th><th style="text-align:right">Lucro R$</th>' +
+        '<th style="text-align:right">CLV</th><th style="text-align:right">Brier</th>' +
+        '<th style="text-align:right">avg EV</th><th style="text-align:center">Veredito</th>' +
+      '</tr></thead>' +
+      '<tbody>' + rows + '</tbody>' +
+    '</table>' +
+    '<div style="font-size:0.62rem;color:#6b7280;margin-top:0.4rem">* sem CLV o suficiente — decisão baseada só em ROI (menos confiável)</div>';
+}
+
+let _clvChart = null;
+async function loadClvDecay() {
+  const days = (document.getElementById('clvDays')?.value) || '30';
+  const data = await apiFetch('/clv-decay?sport=' + currentSport + '&days=' + days);
+  const ctx = document.getElementById('clvChart')?.getContext?.('2d');
+  if (!ctx) return;
+  if (!data || data.error || !Array.isArray(data.series)) {
+    document.getElementById('clvMeta').textContent = data?.error || 'sem dados';
+    if (_clvChart) { _clvChart.destroy(); _clvChart = null; }
+    return;
+  }
+  const labels = data.series.map(s => s.day);
+  const dailyClv = data.series.map(s => s.clv_avg);
+  const rolling7 = (data.rolling7 || []).map(r => r.rolling7_clv);
+  const totalN = data.series.reduce((a,b) => a + b.n, 0);
+  const meanCLV = data.series.length > 0 ? (data.series.reduce((a,s) => a + s.clv_avg * s.n, 0) / Math.max(1, totalN)) : 0;
+  if (_clvChart) _clvChart.destroy();
+  _clvChart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [
+        {
+          label: 'CLV diário (%)',
+          data: dailyClv,
+          borderColor: 'rgba(96,165,250,0.4)',
+          backgroundColor: 'rgba(96,165,250,0.08)',
+          borderWidth: 1.5,
+          tension: 0.2,
+          pointRadius: 2,
+        },
+        {
+          label: 'CLV rolling 7d (%)',
+          data: rolling7,
+          borderColor: '#34d399',
+          backgroundColor: 'rgba(52,211,153,0.1)',
+          borderWidth: 2.5,
+          tension: 0.3,
+          fill: false,
+        }
+      ]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: {
+        legend: { labels: { color: '#9ca3af', font: { size: 11 } } },
+        annotation: { annotations: {} }
+      },
+      scales: {
+        x: { ticks: { color: '#6b7280', font: { size: 10 } }, grid: { color: 'rgba(75,85,99,0.18)' } },
+        y: {
+          ticks: { color: '#9ca3af', font: { size: 10 }, callback: v => Number(v).toFixed(1) + '%' },
+          grid: { color: 'rgba(75,85,99,0.18)' },
+          suggestedMin: -3, suggestedMax: 3,
+        }
+      }
+    }
+  });
+  const cls = meanCLV >= 0 ? 'positive' : 'negative';
+  document.getElementById('clvMeta').innerHTML =
+    `${currentSport.toUpperCase()} | ${totalN} tips com CLV | médio ` +
+    `<span class="${cls}">${meanCLV >= 0 ? '+' : ''}${meanCLV.toFixed(2)}%</span>`;
+}
+
+async function loadShadow() {
+  const days = (document.getElementById('shadowDays')?.value) || '30';
+  const data = await apiFetch('/shadow-vs-active?sport=' + currentSport + '&days=' + days);
+  const el = document.getElementById('shadowBody');
+  if (!el) return;
+  if (!data || data.error) {
+    el.innerHTML = '<div class="loading" style="color:#6b7280">' + (data?.error || 'sem dados') + '</div>';
+    return;
+  }
+  const fmtBucket = (label, b, color) => {
+    if (!b) return `<div style="border-left:3px solid #374151;padding:0.6rem 0.8rem;background:#0f1729;border-radius:4px">
+      <div style="font-size:0.7rem;color:#6b7280;text-transform:uppercase;letter-spacing:1px">${label}</div>
+      <div style="font-size:0.85rem;color:#4b5563;margin-top:6px">sem tips</div>
+    </div>`;
+    const roi = b.roi != null ? b.roi : 0;
+    const roiCls = roi >= 0 ? 'positive' : 'negative';
+    const roiTxt = b.roi != null ? (roi >= 0 ? '+' : '') + roi.toFixed(2) + '%' : '—';
+    const hr = b.hitRate != null ? (b.hitRate * 100).toFixed(1) + '%' : '—';
+    return `<div style="border-left:3px solid ${color};padding:0.6rem 0.8rem;background:#0f1729;border-radius:4px">
+      <div style="font-size:0.7rem;color:#9ca3af;text-transform:uppercase;letter-spacing:1px">${label}</div>
+      <div style="display:flex;justify-content:space-between;align-items:baseline;margin-top:6px">
+        <span style="font-size:1.4rem;font-weight:700" class="${roiCls}">${roiTxt}</span>
+        <span style="font-size:0.72rem;color:#6b7280">ROI</span>
+      </div>
+      <div style="display:flex;justify-content:space-between;font-size:0.72rem;color:#9ca3af;margin-top:8px">
+        <span>${b.n} tips</span>
+        <span>${b.wins}W/${b.losses}L</span>
+        <span>HR ${hr}</span>
+      </div>
+      <div style="display:flex;justify-content:space-between;font-size:0.7rem;color:#6b7280;margin-top:4px">
+        <span>Lucro: <b style="color:${b.profit_reais>=0?'#34d399':'#f87171'}">R$${b.profit_reais.toFixed(2)}</b></span>
+        <span>Odd média: ${b.avg_odds || '—'}</span>
+      </div>
+    </div>`;
+  };
+  let delta = '';
+  if (data.active && data.shadow && data.active.roi != null && data.shadow.roi != null) {
+    const d = data.active.roi - data.shadow.roi;
+    const dCls = d >= 0 ? 'positive' : 'negative';
+    delta = `<div style="text-align:center;font-size:0.72rem;color:#6b7280;margin-top:0.6rem">
+      Δ Ativo - Shadow: <span class="${dCls}" style="font-weight:700">${d >= 0 ? '+' : ''}${d.toFixed(2)}pp</span>
+      ${Math.abs(d) > 5 ? ' &nbsp;&middot; ' + (d < 0 ? '⚠️ shadow tá ganhando do ativo' : '✓ ativo melhor') : ''}
+    </div>`;
+  }
+  el.innerHTML = `<div style="display:flex;flex-direction:column;gap:0.6rem">
+    ${fmtBucket('🟢 Ativo (DM enviada)', data.active, '#34d399')}
+    ${fmtBucket('🟡 Shadow (só registrada)', data.shadow, '#fbbf24')}
+    ${delta}
+  </div>`;
+}
+
+async function loadML() {
+  document.getElementById('lastUpdated').textContent = 'Atualizando ML...';
+  const data = await apiFetch('/ml-dashboard');
+  if (!data) {
+    document.getElementById('mlCards').innerHTML = '<div class="error">Erro ao carregar dados ML.</div>';
+    return;
+  }
+  renderMLCards(data);
+  renderMLWeightsFull(data.weights || []);
+  renderMLMonthlyChart(data.monthlyAccuracy || []);
+  renderMLPredictions(data.predictions || []);
+  renderMLMonthlyTable(data.monthlyAccuracy || []);
+  document.getElementById('lastUpdated').textContent = 'Atualizado: ' + new Date().toLocaleTimeString('pt-BR');
+}
+
+function renderMLCards(data) {
+  const acc = data.overallAccuracy;
+  const n   = data.overallN || 0;
+  const accClass = acc == null ? 'neutral' : acc >= 55 ? 'positive' : acc >= 50 ? 'neutral' : 'negative';
+  const lastDate = data.lastMatch ? new Date(data.lastMatch).toLocaleDateString('pt-BR') : '—';
+
+  const weights = Array.isArray(data.weights) ? data.weights : [];
+  const bestFactor = data.factorAccuracy && data.factorAccuracy.length
+    ? data.factorAccuracy.slice().sort((a,b) => (b.acc||0)-(a.acc||0))[0]
+    : null;
+
+  document.getElementById('mlCards').innerHTML =
+    '<div class="card">' +
+      '<div class="label">Partidas LoL (DB)</div>' +
+      '<div class="value neutral">' + (data.totalMatches || 0) + '</div>' +
+      '<div class="sub">última: ' + lastDate + '</div>' +
+    '</div>' +
+    '<div class="card">' +
+      '<div class="label">Acurácia Walk-Forward</div>' +
+      '<div class="value ' + accClass + '">' + (acc != null ? acc + '%' : '—') + '</div>' +
+      '<div class="sub">n=' + n + ' (últimos 30%)</div>' +
+    '</div>' +
+    '<div class="card">' +
+      '<div class="label">Fatores no Modelo</div>' +
+      '<div class="value neutral">' + weights.length + '</div>' +
+      '<div class="sub">' + weights.map(function(w){ return w.factor; }).join(', ') + '</div>' +
+    '</div>' +
+    '<div class="card">' +
+      '<div class="label">Melhor Fator (45d)</div>' +
+      '<div class="value ' + (bestFactor ? (bestFactor.acc >= 55 ? 'positive' : 'neutral') : 'neutral') + '">' +
+        (bestFactor ? (bestFactor.factor.toUpperCase() + ' ' + bestFactor.acc + '%') : '—') +
+      '</div>' +
+      '<div class="sub">' + (bestFactor ? ('n=' + bestFactor.total + ' tips') : 'sem dados tip_factor_log') + '</div>' +
+    '</div>';
+}
+
+function renderMLWeightsFull(weights) {
+  const ctx = document.getElementById('mlWeightsFullChart').getContext('2d');
+  if (mlWeightsFullChart) { mlWeightsFullChart.destroy(); mlWeightsFullChart = null; }
+  if (!weights.length) {
+    document.getElementById('mlWeightsNote').textContent = 'Sem pesos no DB — usando padrão.';
+    return;
+  }
+  const colors = { forma: '#7c3aed', h2h: '#2563eb', comp: '#059669', streak: '#d97706', kd10: '#dc2626' };
+  const labels = weights.map(function(r) { return r.factor.toUpperCase(); });
+  const values = weights.map(function(r) { return parseFloat((r.weight * 100).toFixed(1)); });
+  const bgs    = weights.map(function(r) { return colors[r.factor] || '#6b7280'; });
+
+  const totalSamples = weights.reduce(function(s,r){ return s+(r.total||0); }, 0);
+  document.getElementById('mlWeightsNote').textContent =
+    totalSamples > 0
+      ? 'Baseado em ' + totalSamples + ' tips com factor log'
+      : 'Pesos do último treino (node scripts/train.js)';
+
+  mlWeightsFullChart = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: labels,
+      datasets: [{
+        label: 'Peso (%)',
+        data: values,
+        backgroundColor: bgs,
+        borderRadius: 5
+      }]
+    },
+    options: {
+      indexAxis: 'y',
+      responsive: true,
+      maintainAspectRatio: true,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { ticks: { color:'#6b7280', font:{size:10} }, grid:{color:'#1f2937'}, max: 60 },
+        y: { ticks: { color:'#9ca3af', font:{size:12} }, grid:{display:false} }
+      }
+    }
+  });
+}
+
+function renderMLMonthlyChart(monthly) {
+  const ctx = document.getElementById('mlMonthlyChart').getContext('2d');
+  if (mlMonthlyChart) { mlMonthlyChart.destroy(); mlMonthlyChart = null; }
+  if (!monthly.length) {
+    document.getElementById('mlMonthlyNote').textContent = 'Sem dados suficientes para o gráfico.';
+    return;
+  }
+  const labels = monthly.map(function(m){ return m.month; });
+  const accs   = monthly.map(function(m){ return m.accuracy; });
+  const avg    = accs.length ? parseFloat((accs.reduce(function(a,b){return a+b;},0)/accs.length).toFixed(1)) : 0;
+  document.getElementById('mlMonthlyNote').textContent = 'Média: ' + avg + '% | Linha ref. = 50%';
+
+  mlMonthlyChart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels: labels,
+      datasets: [
+        {
+          label: 'Acurácia (%)',
+          data: accs,
+          borderColor: '#7c3aed',
+          backgroundColor: '#7c3aed33',
+          tension: 0.3,
+          fill: true,
+          pointBackgroundColor: accs.map(function(a){ return a>=55?'#34d399':a>=50?'#fbbf24':'#f87171'; }),
+          pointRadius: 5
+        },
+        {
+          label: 'Baseline 50%',
+          data: labels.map(function(){ return 50; }),
+          borderColor: '#374151',
+          borderDash: [5,5],
+          borderWidth: 1,
+          pointRadius: 0,
+          fill: false
+        }
+      ]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: true,
+      plugins: { legend: { labels: { color:'#9ca3af', font:{size:10} } } },
+      scales: {
+        x: { ticks:{ color:'#6b7280', font:{size:10} }, grid:{color:'#1f2937'} },
+        y: { ticks:{ color:'#6b7280', font:{size:10} }, grid:{color:'#1f2937'}, min:30, max:80,
+             title:{ display:true, text:'%', color:'#6b7280', font:{size:10} } }
+      }
+    }
+  });
+}
+
+function renderMLPredictions(predictions) {
+  const el = document.getElementById('mlPredictions');
+  if (!predictions.length) {
+    el.innerHTML = '<div class="loading" style="color:#6b7280">Sem partidas LoL upcoming no DB no momento.</div>';
+    return;
+  }
+  const rows = predictions.map(function(p) {
+    const favCol   = p.p1 >= p.p2 ? '#a78bfa' : '#60a5fa';
+    const pickCol  = p.p1 >= p.p2 ? '#a78bfa' : '#60a5fa';
+    const barFill1 = p.p1 + '%';
+    const barFill2 = p.p2 + '%';
+    const dateStr  = p.match_time ? new Date(p.match_time).toLocaleString('pt-BR',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}) : '—';
+    return '<tr>' +
+      '<td style="color:#6b7280;font-size:0.7rem;white-space:nowrap">' + dateStr + '</td>' +
+      '<td style="color:#6b7280;font-size:0.72rem">' + (p.league||'?') + '</td>' +
+      '<td style="font-size:0.82rem">' +
+        '<div style="font-weight:600;margin-bottom:2px">' + p.t1 + ' vs ' + p.t2 + '</div>' +
+        '<div class="prob-bar-wrap">' +
+          '<span style="width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#e0e0e0">' + p.t1 + '</span>' +
+          '<div class="prob-bar"><div class="prob-bar-fill" style="width:' + barFill1 + ';background:#7c3aed"></div></div>' +
+          '<span style="color:#a78bfa;font-weight:700;width:36px;text-align:right">' + p.p1 + '%</span>' +
+        '</div>' +
+        '<div class="prob-bar-wrap" style="margin-top:2px">' +
+          '<span style="width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#e0e0e0">' + p.t2 + '</span>' +
+          '<div class="prob-bar"><div class="prob-bar-fill" style="width:' + barFill2 + ';background:#2563eb"></div></div>' +
+          '<span style="color:#60a5fa;font-weight:700;width:36px;text-align:right">' + p.p2 + '%</span>' +
+        '</div>' +
+      '</td>' +
+      '<td style="color:' + pickCol + ';font-weight:700">' + p.pick + '</td>' +
+      '<td style="font-size:0.72rem;color:#6b7280">' +
+        p.t1 + ' ' + p.wr1 + '% (' + p.f1n + 'g)<br>' +
+        p.t2 + ' ' + p.wr2 + '% (' + p.f2n + 'g)' +
+      '</td>' +
+      '<td style="font-size:0.72rem;color:#6b7280">' + (p.h2hn ? p.h2hn + 'g' : '—') + '</td>' +
+    '</tr>';
+  }).join('');
+
+  el.innerHTML = '<table>' +
+    '<thead><tr>' +
+      '<th>Hora</th><th>Liga</th><th>Partida / Probabilidade</th><th>Pick</th><th>Forma 45d</th><th>H2H 90d</th>' +
+    '</tr></thead>' +
+    '<tbody>' + rows + '</tbody>' +
+  '</table>';
+}
+
+function renderMLMonthlyTable(monthly) {
+  const el = document.getElementById('mlMonthlyTable');
+  if (!monthly.length) {
+    el.innerHTML = '<div class="loading" style="color:#6b7280">Sem dados de walk-forward.</div>';
+    return;
+  }
+  const rows = monthly.slice().reverse().map(function(m) {
+    const icon = m.accuracy >= 57 ? '&#9989;' : m.accuracy >= 50 ? '&#128993;' : '&#10060;';
+    const barW = Math.round(m.accuracy);
+    const barCol = m.accuracy >= 57 ? '#34d399' : m.accuracy >= 50 ? '#fbbf24' : '#f87171';
+    return '<tr>' +
+      '<td style="color:#9ca3af">' + m.month + '</td>' +
+      '<td>' + icon + '</td>' +
+      '<td>' + m.correct + '/' + m.total + '</td>' +
+      '<td style="color:' + barCol + ';font-weight:700">' + m.accuracy + '%</td>' +
+      '<td style="width:120px">' +
+        '<div class="prob-bar" style="width:' + barW + '%;background:' + barCol + ';height:8px;border-radius:4px;min-width:4px"></div>' +
+      '</td>' +
+    '</tr>';
+  }).join('');
+
+  el.innerHTML = '<table>' +
+    '<thead><tr>' +
+      '<th>M&ecirc;s</th><th></th><th>Correto/Total</th><th>Acur&aacute;cia</th><th>Barra</th>' +
+    '</tr></thead>' +
+    '<tbody>' + rows + '</tbody>' +
+  '</table>';
+}
+
+// Auto-refresh (calibração/ROI “ao vivo”)
+setInterval(loadAll, 60 * 1000);
+// Live snapshot tem cadência própria (30s) pra refletir odds/stats ao vivo mais rápido.
+setInterval(refreshLiveSnapshot, 30 * 1000);
+// Upcoming: atualiza a cada 2min (contagem regressiva + odds que chegam).
+setInterval(refreshUpcoming, 2 * 60 * 1000);
+
+function readTipsControls() {
+  const q = (document.getElementById('tipsQ')?.value || '').trim();
+  const status = document.getElementById('tipsStatus')?.value || '';
+  const live = document.getElementById('tipsLive')?.value || '';
+  const confidence = document.getElementById('tipsConf')?.value || '';
+  const sortRaw = document.getElementById('tipsSort')?.value || 'date_desc';
+  const limit = document.getElementById('tipsLimit')?.value || '20';
+
+  const [sortKey, sortDir] = sortRaw.split('_');
+  const sort = sortKey === 'ev' ? 'ev' : sortKey === 'odds' ? 'odds' : 'date';
+  const dir = sortDir === 'asc' ? 'asc' : 'desc';
+
+  return { q, status, live, confidence, sort, dir, limit };
+}
+
+function buildTipsQuery() {
+  const s = readTipsControls();
+  const qp = new URLSearchParams();
+  qp.set('sport', currentSport);
+  if (currentGame) qp.set('game', currentGame);
+  qp.set('limit', s.limit);
+  if (s.q) qp.set('q', s.q);
+  if (s.status) qp.set('status', s.status);
+  if (s.live) qp.set('live', s.live);
+  if (s.confidence) qp.set('confidence', s.confidence);
+  qp.set('sort', s.sort);
+  qp.set('dir', s.dir);
+  return '/tips-history?' + qp.toString();
+}
+
+async function loadTips() {
+  const path = buildTipsQuery();
+  document.getElementById('tipsTable').innerHTML = '<div class="loading">Carregando...</div>';
+  const tips = await apiFetch(path);
+  renderTips(tips);
+}
+
+function debounceLoadTips() {
+  if (tipsTimer) clearTimeout(tipsTimer);
+  tipsTimer = setTimeout(loadTips, 220);
+}
+
+function bindTipsControls() {
+  const q = document.getElementById('tipsQ');
+  const ids = ['tipsStatus', 'tipsLive', 'tipsConf', 'tipsSort', 'tipsLimit'];
+  if (q) q.addEventListener('input', debounceLoadTips);
+  ids.forEach(function(id) {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener('change', loadTips);
+  });
+}
+
+function renderCards(roi) {
+  if (!roi) {
+    document.getElementById('cards').innerHTML = '<div class="error">Erro ao carregar ROI</div>';
+    return;
+  }
+  const overall = roi.overall || {};
+  const roiPct = parseFloat(overall.roi || 0);
+  const profit = parseFloat(overall.totalProfit || 0);
+  const staked = parseFloat(overall.totalStaked || 0);
+  const avgOdds = parseFloat(overall.avg_odds || overall.avg_odds === 0 ? overall.avg_odds : 0);
+  const totalAll     = parseInt(overall.totalAll || overall.total || 0, 10);
+  const pending      = parseInt(overall.pending || 0, 10);
+  const wins   = parseInt(overall.wins   || 0, 10);
+  const losses = parseInt(overall.losses || 0, 10);
+  const totalSettled = wins + losses; // exclude void tips
+  const wr = (wins + losses) > 0 ? (wins / (wins + losses) * 100) : 0;
+  const profitClass = profit >= 0 ? 'positive' : 'negative';
+  const roiClass = roiPct >= 0 ? 'positive' : 'negative';
+
+  const byPhase = roi.byPhase || {};
+  const live = byPhase.live || null;
+  const pre = byPhase.preGame || null;
+  const phaseHTML = [
+    live ? ('<div class="conf-item"><strong>LIVE</strong> ' + (live.total || 0) + 't | ROI <span class="' + (parseFloat(live.roi || 0) >= 0 ? 'positive' : 'negative') + '">' + ((parseFloat(live.roi || 0) >= 0 ? '+' : '') + (parseFloat(live.roi || 0)).toFixed(1)) + '%</span></div>') : '',
+    pre ? ('<div class="conf-item"><strong>PR\u00C9</strong> ' + (pre.total || 0) + 't | ROI <span class="' + (parseFloat(pre.roi || 0) >= 0 ? 'positive' : 'negative') + '">' + ((parseFloat(pre.roi || 0) >= 0 ? '+' : '') + (parseFloat(pre.roi || 0)).toFixed(1)) + '%</span></div>') : ''
+  ].join('');
+
+  const clv = roi.clv || null;
+  const clvHTML = clv
+    ? ('<div class="conf-item"><strong>CLV</strong> ' + (clv.avg >= 0 ? '<span class="positive">+' : '<span class="negative">') + (clv.avg || 0).toFixed(2) + '%</span> | +' + (clv.positiveRate || 0) + '% | n=' + (clv.count || 0) + '</div>')
+    : '<div class="conf-item" style="color:#6b7280">CLV: sem dados</div>';
+
+  const banca = roi.banca || null;
+  const bancaHTML = banca
+    ? ('<div class="conf-item"><strong>BANCA</strong> R$ ' + (banca.currentBanca || 0).toFixed(2) + ' | ' + ((banca.growthPct || 0) >= 0 ? '<span class="positive">+' : '<span class="negative">') + (banca.growthPct || 0).toFixed(2) + '%</span></div>')
+    : '<div class="conf-item" style="color:#6b7280">Banca: sem dados</div>';
+
+  const calibM = roi.calibration_metrics || null;
+  const calibHTML = calibM
+    ? ('<div class="conf-item"><strong>BRIER</strong> ' + (calibM.brierScore || 0).toFixed(4) + ' | <strong>LOGLOSS</strong> ' + (calibM.logLoss || 0).toFixed(4) + ' | n=' + (calibM.sampleSize || 0) + '</div>')
+    : '<div class="conf-item" style="color:#6b7280">Brier: sem dados</div>';
+
+  document.getElementById('cards').innerHTML =
+    '<div class="card">' +
+      '<div class="label">Total Tips</div>' +
+      '<div class="value neutral">' + totalAll + '</div>' +
+      '<div class="sub">' + wins + 'W / ' + losses + 'L' + (pending > 0 ? ' / ' + pending + ' pend' : '') + '</div>' +
+    '</div>' +
+    '<div class="card">' +
+      '<div class="label">Win Rate</div>' +
+      '<div class="value ' + (wr >= 50 ? 'positive' : 'negative') + '">' + (totalSettled > 0 ? wr.toFixed(1) + '%' : '—') + '</div>' +
+      '<div class="sub">' + totalSettled + ' liquidadas</div>' +
+    '</div>' +
+    '<div class="card">' +
+      '<div class="label">ROI</div>' +
+      '<div class="value ' + roiClass + '">' + (roiPct >= 0 ? '+' : '') + roiPct.toFixed(2) + '%</div>' +
+      '<div class="sub">sobre ' + (staked || 0).toFixed(1) + 'u apostados</div>' +
+    '</div>' +
+    '<div class="card">' +
+      '<div class="label">Lucro / Preju\u00EDzo</div>' +
+      '<div class="value ' + profitClass + '">' + (profit >= 0 ? '+' : '') + profit.toFixed(2) + 'u</div>' +
+      '<div class="sub">Kelly fracionado</div>' +
+    '</div>' +
+    '<div class="card">' +
+      '<div class="label">Odd m\u00E9dia apostada</div>' +
+      '<div class="value neutral">' + (totalSettled > 0 ? (avgOdds || 0).toFixed(2) : '\u2014') + '</div>' +
+      '<div class="sub">' + totalSettled + ' liquidadas</div>' +
+    '</div>' +
+    '<div class="card" style="grid-column: span 2">' +
+      '<div class="label">Split / CLV / Banca</div>' +
+      '<div class="conf-breakdown">' + (phaseHTML || '<span style="color:#6b7280">Sem dados</span>') + clvHTML + bancaHTML + calibHTML + '</div>' +
+    '</div>';
+}
+
+function renderCalibration(data) {
+  const ctx = document.getElementById('calibrationChart').getContext('2d');
+  if (calibChart) { calibChart.destroy(); calibChart = null; }
+
+  if (!data || !data.buckets || !data.buckets.length) {
+    document.getElementById('calibrationNote').textContent = 'Sem dados de calibra\u00E7\u00E3o suficientes.';
+    return;
+  }
+
+  const buckets = data.buckets.filter(function(b) { return b.total > 0; });
+  if (!buckets.length) {
+    document.getElementById('calibrationNote').textContent = 'Sem tips settled suficientes.';
+    return;
+  }
+
+  const labels = buckets.map(function(b) { return b.bucket; });
+  const predicted = buckets.map(function(b) { return b.predicted; });
+  const actual = buckets.map(function(b) { return b.actual; });
+
+  calibChart = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: labels,
+      datasets: [
+        { label: 'Previsto (%)', data: predicted, backgroundColor: '#4c1d95cc', borderColor: '#7c3aed', borderWidth: 1 },
+        { label: 'Real (%)', data: actual, backgroundColor: '#065f46cc', borderColor: '#34d399', borderWidth: 1 }
+      ]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: true,
+      plugins: { legend: { labels: { color: '#9ca3af', font: { size: 11 } } } },
+      scales: {
+        x: { ticks: { color: '#6b7280', font: { size: 10 } }, grid: { color: '#1f2937' } },
+        y: { ticks: { color: '#6b7280', font: { size: 10 } }, grid: { color: '#1f2937' }, min: 0, max: 100 }
+      }
+    }
+  });
+
+  if (data.brierScore != null) {
+    document.getElementById('calibrationNote').textContent =
+      'Brier Score: ' + data.brierScore.toFixed(4) +
+      ' | Log Loss: ' + (data.logLoss || 0).toFixed(4) +
+      ' | N=' + (data.total || 0);
+  }
+}
+
+function renderWeights(data) {
+  const ctx = document.getElementById('weightsChart').getContext('2d');
+  if (weightsChart) { weightsChart.destroy(); weightsChart = null; }
+
+  if (!data || !data.weights || data.weights === 'usando padr\u00E3o') {
+    data = { weights: [
+      { factor: 'comp', weight: 0.35, wins: 0, total: 0 },
+      { factor: 'h2h', weight: 0.30, wins: 0, total: 0 },
+      { factor: 'forma', weight: 0.25, wins: 0, total: 0 }
+    ]};
+  }
+
+  const rows = Array.isArray(data.weights) ? data.weights : [];
+  const labels = rows.map(function(r) {
+    return r.factor.toUpperCase() + (r.total >= 10
+      ? ' (' + (r.wins / r.total * 100).toFixed(0) + '% acc, n=' + r.total + ')'
+      : ' (padr\u00E3o)');
+  });
+  const values = rows.map(function(r) { return (r.weight * 100).toFixed(1); });
+  const colors = ['#7c3aed', '#2563eb', '#059669'];
+
+  weightsChart = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: labels,
+      datasets: [{
+        label: 'Peso (%)',
+        data: values,
+        backgroundColor: colors.slice(0, rows.length),
+        borderRadius: 4
+      }]
+    },
+    options: {
+      indexAxis: 'y',
+      responsive: true,
+      maintainAspectRatio: true,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { ticks: { color: '#6b7280', font: { size: 10 } }, grid: { color: '#1f2937' }, max: 60 },
+        y: { ticks: { color: '#9ca3af', font: { size: 11 } }, grid: { display: false } }
+      }
+    }
+  });
+}
+
+function renderLeagueRoi(data) {
+  const el = document.getElementById('leagueRoiTable');
+  if (!el) return;
+  if (!data || !Array.isArray(data.leagues) || !data.leagues.length) {
+    el.innerHTML = '<div class="loading" style="color:#6b7280">Sem ligas com tips liquidadas.</div>';
+    return;
+  }
+
+  const fmtRoi = function(roi, total) {
+    if (!total) return '<span style="color:#4b5563">—</span>';
+    const cls = roi >= 0 ? 'positive' : 'negative';
+    return '<span class="' + cls + '">' + (roi >= 0 ? '+' : '') + roi.toFixed(1) + '%</span>';
+  };
+
+  const multBadge = function(L) {
+    if (!L.active) {
+      return '<span class="badge" style="background:#1f2937;color:#9ca3af">n=' + L.all.total + '/20</span>';
+    }
+    const m = L.multiplier;
+    let bg = '#1e3a5f', fg = '#93c5fd';
+    if (m === 0)       { bg = '#7f1d1d'; fg = '#f87171'; }
+    else if (m >= 1.20){ bg = '#064e3b'; fg = '#6ee7b7'; }
+    else if (m >= 1.10){ bg = '#065f46'; fg = '#34d399'; }
+    else if (m === 1.0){ bg = '#1f2937'; fg = '#9ca3af'; }
+    else if (m >= 0.75){ bg = '#713f12'; fg = '#fde68a'; }
+    else               { bg = '#7f1d1d'; fg = '#fca5a5'; }
+    const label = m === 0 ? 'BLOQUEADA' : (m.toFixed(2) + 'x');
+    return '<span class="badge" style="background:' + bg + ';color:' + fg + ';font-weight:700">' + label + '</span>';
+  };
+
+  const fmtConfCell = function(b) {
+    if (!b || !b.total) return '<span style="color:#374151">—</span>';
+    return '<div style="font-size:0.72rem">' + b.total + 't ' + fmtRoi(b.roi, b.total) + '</div>' +
+           '<div style="color:#6b7280;font-size:0.65rem">' + b.wins + 'W/' + b.losses + 'L</div>';
+  };
+
+  const rows = data.leagues.map(function(L) {
+    const leagueName = (L.league || '?').replace(/</g, '&lt;');
+    const profitCls = L.all.profit >= 0 ? 'positive' : 'negative';
+    const bc = L.byConf || {};
+    return '<tr>' +
+      '<td style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + leagueName + '">' + leagueName + '</td>' +
+      '<td style="text-align:center">' + multBadge(L) + '</td>' +
+      '<td style="text-align:center">' + L.all.total + '<span style="color:#4b5563;font-size:0.7rem"> (' + L.all.wins + 'W/' + L.all.losses + 'L)</span></td>' +
+      '<td style="text-align:right;font-weight:600">' + fmtRoi(L.all.roi, L.all.total) + '</td>' +
+      '<td style="text-align:right" class="' + profitCls + '">' + (L.all.profit >= 0 ? '+' : '') + L.all.profit.toFixed(2) + '</td>' +
+      '<td style="text-align:right;font-size:0.75rem">' +
+        '<div>' + L.pre.total + 't ' + fmtRoi(L.pre.roi, L.pre.total) + '</div>' +
+      '</td>' +
+      '<td style="text-align:right;font-size:0.75rem">' +
+        '<div>' + L.live.total + 't ' + fmtRoi(L.live.roi, L.live.total) + '</div>' +
+      '</td>' +
+      '<td style="text-align:right">' + fmtConfCell(bc.ALTA) + '</td>' +
+      '<td style="text-align:right">' + fmtConfCell(bc['MÉDIA']) + '</td>' +
+      '<td style="text-align:right">' + fmtConfCell(bc.BAIXA) + '</td>' +
+    '</tr>';
+  }).join('');
+
+  el.innerHTML =
+    '<table>' +
+      '<thead><tr>' +
+        '<th>Liga</th>' +
+        '<th style="text-align:center">Mult.</th>' +
+        '<th style="text-align:center">Tips</th>' +
+        '<th style="text-align:right">ROI</th>' +
+        '<th style="text-align:right">Lucro (R$)</th>' +
+        '<th style="text-align:right">Pré</th>' +
+        '<th style="text-align:right">Live</th>' +
+        '<th style="text-align:right" title="Confiança ALTA"><span style="color:#86efac">ALTA</span></th>' +
+        '<th style="text-align:right" title="Confiança MÉDIA"><span style="color:#fde68a">MÉDIA</span></th>' +
+        '<th style="text-align:right" title="Confiança BAIXA"><span style="color:#93c5fd">BAIXA</span></th>' +
+      '</tr></thead>' +
+      '<tbody>' + rows + '</tbody>' +
+    '</table>';
+}
+
+function renderLiveSnapshot(data) {
+  var body = document.getElementById('liveSnapshotBody');
+  var meta = document.getElementById('liveSnapshotMeta');
+  if (!body) return;
+  if (!data || !data.sports) {
+    body.innerHTML = '<div class="loading" style="color:#6b7280">Sem dados.</div>';
+    if (meta) meta.textContent = '—';
+    return;
+  }
+  var sports = data.sports || {};
+  var orderedKeys = ['lol', 'dota', 'cs', 'valorant'];
+  var labels = { lol: 'LoL', dota: 'Dota 2', cs: 'CS2', valorant: 'Valorant' };
+
+  var totalLive = 0, totalPinnacle = 0, totalStats = 0;
+  Object.keys(sports).forEach(function(k) {
+    (sports[k] || []).forEach(function(row) {
+      totalLive++;
+      if (row.pinnacle) totalPinnacle++;
+      if (row.liveStats && row.liveStats.available) totalStats++;
+    });
+  });
+  if (meta) {
+    meta.textContent = totalLive + ' live • ' + totalPinnacle + ' com Pinnacle • ' + totalStats +
+      ' com live stats • atualizado ' + new Date(data.generatedAt || Date.now()).toLocaleTimeString('pt-BR');
+  }
+  if (totalLive === 0) {
+    body.innerHTML = '<div class="loading" style="color:#6b7280">Nenhuma partida live no momento.</div>';
+    return;
+  }
+
+  var esc = function(s) { return String(s == null ? '' : s).replace(/</g, '&lt;'); };
+  var fmtGold = function(v) { return v >= 1000 ? (v / 1000).toFixed(1) + 'k' : String(v || 0); };
+
+  var sections = [];
+  orderedKeys.forEach(function(sp) {
+    var rows = sports[sp] || [];
+    if (!rows.length) return;
+    var trs = rows.map(function(r) {
+      var odds = r.pinnacle
+        ? '<span class="positive" style="font-weight:600">' + esc(r.pinnacle.t1) + ' / ' + esc(r.pinnacle.t2) + '</span>'
+        : r.odds
+          ? '<span style="color:#9ca3af" title="Bookmaker: ' + esc(r.odds.bookmaker || '-') + '">' + esc(r.odds.t1) + ' / ' + esc(r.odds.t2) + '</span>'
+          : '<span style="color:#4b5563">—</span>';
+
+      var statsBadge;
+      if (r.liveStats && r.liveStats.available) {
+        statsBadge = '<span class="badge" style="background:#064e3b;color:#6ee7b7;font-weight:700">LIVE</span>';
+      } else if (r.liveStats && r.liveStats.reason === 'stats_disabled') {
+        statsBadge = '<span class="badge" style="background:#7f1d1d;color:#fca5a5">disabled</span>';
+      } else {
+        statsBadge = '<span class="badge" style="background:#1f2937;color:#9ca3af">—</span>';
+      }
+
+      var detail = '';
+      var s = r.liveStats && r.liveStats.summary;
+      if (sp === 'lol' && s && s.blue && s.red) {
+        var diff = s.goldDiff || 0;
+        var diffCls = diff >= 0 ? 'positive' : 'negative';
+        var gnum = r.liveStats.gameNumber ? ('G' + r.liveStats.gameNumber + ' ') : '';
+        detail =
+          gnum + 'gold ' + fmtGold(s.blue.gold) + ' / ' + fmtGold(s.red.gold) +
+          ' (<span class="' + diffCls + '">' + (diff >= 0 ? '+' : '') + fmtGold(diff) + '</span>) • ' +
+          'K ' + s.blue.kills + '/' + s.red.kills + ' • T ' + s.blue.towers + '/' + s.red.towers +
+          ' • D ' + s.blue.dragons + '/' + s.red.dragons +
+          (s.dataDelay ? ' • ~' + s.dataDelay + 's atrás' : '');
+      } else if (sp === 'valorant' && s && s.currentMap && s.t1 && s.t2) {
+        var map = esc(s.currentMap);
+        var rnd = 'R' + s.round;
+        var mapScore = s.t1.score + '-' + s.t2.score;
+        var sideBadge = function(side) {
+          if (side === 'CT') return '<span style="color:#93c5fd">CT</span>';
+          if (side === 'Atk') return '<span style="color:#fca5a5">Atk</span>';
+          return '<span style="color:#6b7280">' + esc(side || '?') + '</span>';
+        };
+        detail = '<b>' + map + '</b> ' + rnd + ' ' + mapScore +
+          ' • ' + esc((s.t1.name || '').split(' ')[0]) + ' ' + sideBadge(s.t1.side) +
+          ' ' + (s.t1.ct || 0) + 'CT/' + (s.t1.atk || 0) + 'Atk' +
+          ' vs ' + esc((s.t2.name || '').split(' ')[0]) + ' ' + sideBadge(s.t2.side) +
+          ' ' + (s.t2.ct || 0) + 'CT/' + (s.t2.atk || 0) + 'Atk' +
+          ' <span style="color:#6b7280;font-size:0.72rem">[vlr]</span>';
+      } else if (s && s.score) {
+        detail = 'placar ' + esc(s.score);
+      } else if (r.score) {
+        detail = 'placar ' + esc(r.score);
+      }
+
+      var matchLabel = esc(r.team1) + ' vs ' + esc(r.team2);
+      var leagueLabel = r.league ? esc(r.league) : '—';
+      return '<tr>' +
+        '<td style="max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + matchLabel + '">' + matchLabel + '</td>' +
+        '<td style="color:#9ca3af;font-size:0.78rem;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + leagueLabel + '">' + leagueLabel + '</td>' +
+        '<td style="text-align:center">' + odds + '</td>' +
+        '<td style="text-align:center">' + statsBadge + '</td>' +
+        '<td style="color:#d1d5db;font-size:0.78rem">' + detail + '</td>' +
+      '</tr>';
+    }).join('');
+
+    sections.push(
+      '<div style="margin-top:0.6rem">' +
+        '<div style="font-size:0.78rem;color:#9ca3af;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:0.3rem">' +
+          esc(labels[sp] || sp) + ' <span style="color:#4b5563">(' + rows.length + ')</span>' +
+        '</div>' +
+        '<table><thead><tr>' +
+          '<th>Confronto</th><th>Liga</th>' +
+          '<th style="text-align:center">Pinnacle</th>' +
+          '<th style="text-align:center">Stats</th>' +
+          '<th>Detalhe</th>' +
+        '</tr></thead><tbody>' + trs + '</tbody></table>' +
+      '</div>'
+    );
+  });
+
+  body.innerHTML = sections.join('') || '<div class="loading" style="color:#6b7280">Nenhuma partida live.</div>';
+}
+
+async function refreshLiveSnapshot() {
+  try {
+    var data = await apiFetch('/live-snapshot');
+    if (data) renderLiveSnapshot(data);
+  } catch (_) {}
+}
+
+function renderUpcoming(data) {
+  var body = document.getElementById('upcomingBody');
+  var meta = document.getElementById('upcomingMeta');
+  if (!body) return;
+  if (!data || !data.sports) {
+    body.innerHTML = '<div class="loading" style="color:#6b7280">Sem dados.</div>';
+    if (meta) meta.textContent = '—';
+    return;
+  }
+  var sports = data.sports || {};
+  var orderedKeys = ['lol', 'dota', 'cs', 'valorant'];
+  var labels = { lol: 'LoL', dota: 'Dota 2', cs: 'CS2', valorant: 'Valorant' };
+
+  var total = 0, totalPinnacle = 0;
+  orderedKeys.forEach(function(k) {
+    var arr = sports[k] || [];
+    total += arr.length;
+    arr.forEach(function(r) { if (r.pinnacle) totalPinnacle++; });
+  });
+  if (meta) {
+    meta.textContent = total + ' próximos (' + (data.horizonHours || 24) + 'h) • ' + totalPinnacle +
+      ' com Pinnacle • ' + new Date(data.generatedAt || Date.now()).toLocaleTimeString('pt-BR');
+  }
+  if (total === 0) {
+    body.innerHTML = '<div class="loading" style="color:#6b7280">Sem jogos agendados na janela.</div>';
+    return;
+  }
+
+  var esc = function(s) { return String(s == null ? '' : s).replace(/</g, '&lt;'); };
+  var fmtTime = function(iso) {
+    try {
+      var d = new Date(iso);
+      if (isNaN(d.getTime())) return '—';
+      return d.toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+    } catch (_) { return '—'; }
+  };
+  var fmtCountdown = function(min) {
+    if (!Number.isFinite(min) || min < 0) return '—';
+    if (min < 60) return 'em ' + min + 'min';
+    var h = Math.floor(min / 60);
+    var m = min % 60;
+    return 'em ' + h + 'h' + (m ? m + 'm' : '');
+  };
+
+  var sections = [];
+  orderedKeys.forEach(function(sp) {
+    var rows = sports[sp] || [];
+    if (!rows.length) return;
+    var trs = rows.map(function(r) {
+      var odds = r.pinnacle
+        ? '<span class="positive" style="font-weight:600">' + esc(r.pinnacle.t1) + ' / ' + esc(r.pinnacle.t2) + '</span>'
+        : r.odds
+          ? '<span style="color:#9ca3af" title="Bookmaker: ' + esc(r.odds.bookmaker || '-') + '">' + esc(r.odds.t1) + ' / ' + esc(r.odds.t2) + '</span>'
+          : '<span style="color:#4b5563">—</span>';
+      var matchLabel = esc(r.team1) + ' vs ' + esc(r.team2);
+      var leagueLabel = r.league ? esc(r.league) : '—';
+      var fmt = r.format ? esc(r.format) : '';
+      return '<tr>' +
+        '<td style="color:#d1d5db;font-size:0.78rem;white-space:nowrap">' + fmtTime(r.startTime) + '<span style="color:#6b7280"> · ' + fmtCountdown(r.startsInMin) + '</span></td>' +
+        '<td style="max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + matchLabel + '">' + matchLabel + (fmt ? ' <span style="color:#6b7280;font-size:0.72rem">[' + fmt + ']</span>' : '') + '</td>' +
+        '<td style="color:#9ca3af;font-size:0.78rem;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + leagueLabel + '">' + leagueLabel + '</td>' +
+        '<td style="text-align:center">' + odds + '</td>' +
+      '</tr>';
+    }).join('');
+
+    sections.push(
+      '<div style="margin-top:0.6rem">' +
+        '<div style="font-size:0.78rem;color:#9ca3af;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:0.3rem">' +
+          esc(labels[sp] || sp) + ' <span style="color:#4b5563">(' + rows.length + ')</span>' +
+        '</div>' +
+        '<table><thead><tr>' +
+          '<th>Horário (BRT)</th><th>Confronto</th><th>Liga</th>' +
+          '<th style="text-align:center">Pinnacle</th>' +
+        '</tr></thead><tbody>' + trs + '</tbody></table>' +
+      '</div>'
+    );
+  });
+
+  body.innerHTML = sections.join('') || '<div class="loading" style="color:#6b7280">Sem jogos agendados.</div>';
+}
+
+async function refreshUpcoming() {
+  try {
+    var data = await apiFetch('/upcoming-snapshot?hours=24');
+    if (data) renderUpcoming(data);
+  } catch (_) {}
+}
+
+function renderTips(tips) {
+  if (!tips || !Array.isArray(tips) || !tips.length) {
+    document.getElementById('tipsTable').innerHTML = '<div class="loading">Nenhuma tip encontrada.</div>';
+    return;
+  }
+
+  const rows = tips.map(function(t) {
+    const sport = t.sport || currentSport;
+    const settled = t.result === 'win' || t.result === 'loss' || t.result === 'void';
+    const showOdds = settled
+      ? t.odds
+      : (t.current_odds != null && t.current_odds !== '' ? t.current_odds : t.odds);
+    const showEvRaw = settled
+      ? t.ev
+      : (t.current_ev != null && t.current_ev !== '' ? t.current_ev : t.ev);
+    const reopenBtn = (t.result === 'win' || t.result === 'loss')
+      ? '<button onclick="reopenTip(' + t.id + ',\'' + sport + '\')" title="Reabrir tip (anular liquidação incorreta)" style="margin-left:6px;padding:1px 5px;font-size:0.65rem;background:#1f2937;border:1px solid #4b5563;border-radius:3px;color:#9ca3af;cursor:pointer">↩</button>'
+      : '';
+    const manualBtns = (!t.result)
+      ? '<button onclick="settleTipManual(' + t.id + ',\'win\',\'' + sport + '\')" title="Marcar como WIN" style="margin-left:4px;padding:1px 6px;font-size:0.65rem;background:#065f46;border:1px solid #34d399;border-radius:3px;color:#34d399;cursor:pointer">W</button>' +
+        '<button onclick="settleTipManual(' + t.id + ',\'loss\',\'' + sport + '\')" title="Marcar como LOSS" style="margin-left:3px;padding:1px 6px;font-size:0.65rem;background:#7f1d1d;border:1px solid #f87171;border-radius:3px;color:#f87171;cursor:pointer">L</button>'
+      : '';
+    const resultBadge = t.result === 'win'
+      ? '<span class="badge badge-win">WIN</span>' + reopenBtn
+      : t.result === 'loss'
+        ? '<span class="badge badge-loss">LOSS</span>' + reopenBtn
+        : t.result === 'void'
+          ? '<span class="badge" style="background:#1f2937;color:#6b7280">VOID</span>'
+          : '<span class="badge badge-pending">PENDING</span>' + manualBtns;
+
+    // Confidence: se current_confidence (numérico, do modelo treinado) existe, usa-o como override
+    let conf = (t.confidence || 'M\u00C9DIA').toUpperCase();
+    if (!settled && t.current_confidence != null && t.current_confidence !== '') {
+      const cn = parseFloat(t.current_confidence);
+      if (Number.isFinite(cn)) conf = cn >= 0.70 ? 'ALTA' : cn >= 0.50 ? 'M\u00C9DIA' : 'BAIXA';
+    }
+    const confBadge = conf === 'ALTA'
+      ? '<span class="badge badge-alta">ALTA</span>'
+      : conf === 'BAIXA'
+        ? '<span class="badge badge-baixa">BAIXA</span>'
+        : '<span class="badge badge-media">M\u00C9DIA</span>';
+
+    // Indicador de reavaliação: se current_updated_at recente, mostra ✨
+    const reEval = (!settled && t.current_updated_at) ? ' <span title="Reavaliado pelo modelo treinado em ' + t.current_updated_at + '" style="color:#60a5fa;font-size:0.65rem">✨</span>' : '';
+
+    const evRaw = (showEvRaw != null && showEvRaw !== '' ? String(showEvRaw) : '');
+    const ev = evRaw
+      ? (evRaw.startsWith('+') || evRaw.startsWith('-') ? evRaw : '+' + evRaw)
+      : '\u2013';
+    const evColor = ev === '\u2013' ? '#6b7280' : (ev.startsWith('+') ? '#34d399' : '#f87171');
+
+    const date = t.sent_at
+      ? new Date(t.sent_at).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
+      : '\u2013';
+
+    const match = (t.participant1 || '?') + ' vs ' + (t.participant2 || '?');
+    const why = t.tip_reason ? String(t.tip_reason).replace(/"/g, '\\"') : '';
+
+    const evCellTitle = (!settled && t.ev != null && t.current_ev != null && t.ev !== t.current_ev)
+      ? 'title="EV original: ' + parseFloat(t.ev).toFixed(1) + '% → atual: ' + parseFloat(t.current_ev).toFixed(1) + '%"'
+      : '';
+
+    // Stake: usa current_stake (modelo reavaliado) se disponível e pending
+    const showStake = (!settled && t.current_stake != null && t.current_stake !== '') ? t.current_stake : (t.stake || '\u2013');
+    const stakeChanged = !settled && t.current_stake != null && t.current_stake !== '' && t.stake && t.current_stake !== t.stake;
+    const stakeCellTitle = stakeChanged ? 'title="Stake original: ' + t.stake + ' → atual: ' + t.current_stake + '"' : '';
+    const stakeStyle = stakeChanged ? 'style="color:#60a5fa;font-weight:500"' : '';
+
+    return '<tr title="' + (why ? ('Por quê: ' + why) : '') + '">' +
+      '<td style="color:#6b7280;font-size:0.7rem">' + date + reEval + '</td>' +
+      '<td title="' + match + '" style="max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + match + '</td>' +
+      '<td><strong>' + (t.tip_participant || '?') + '</strong></td>' +
+      '<td>' + parseFloat(showOdds || 0).toFixed(2) + '</td>' +
+      '<td ' + evCellTitle + ' style="color:' + evColor + '">' + (ev === '\u2013' ? ev : ev + '%') + '</td>' +
+      '<td ' + stakeCellTitle + ' ' + stakeStyle + '>' + showStake + '</td>' +
+      '<td>' + confBadge + '</td>' +
+      '<td>' + resultBadge + '</td>' +
+    '</tr>';
+  }).join('');
+
+  document.getElementById('tipsTable').innerHTML =
+    '<table>' +
+      '<thead><tr>' +
+        '<th>Data</th><th>Partida</th><th>Tip</th><th>Odd</th><th>EV</th><th>Stake</th><th>Conf</th><th>Resultado</th>' +
+      '</tr></thead>' +
+      '<tbody>' + rows + '</tbody>' +
+    '</table>';
+}
+
+async function reopenTip(id, sport) {
+  if (!confirm('Reabrir esta tip para re-liquidação futura?')) return;
+  try {
+    const r = await adminFetch('/reopen-tip?id=' + id + '&sport=' + encodeURIComponent(sport), { method: 'POST' });
+    const j = await r.json();
+    if (j.ok && j.changes > 0) {
+      loadTips();
+    } else {
+      alert('Não foi possível reabrir: ' + (j.error || 'sem mudanças'));
+    }
+  } catch(e) {
+    alert('Erro: ' + e.message);
+  }
+}
+
+async function settleTipManual(id, result, sport) {
+  const label = result === 'win' ? 'WIN' : 'LOSS';
+  if (!confirm('Marcar tip #' + id + ' como ' + label + '?')) return;
+  try {
+    const r = await adminFetch('/settle-manual', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, result, sport })
+    });
+    const j = await r.json();
+    if (j.ok) {
+      loadTips();
+      loadAll();
+    } else {
+      alert('Erro: ' + (j.error || 'falha desconhecida'));
+    }
+  } catch(e) {
+    alert('Erro: ' + e.message);
+  }
+}
+
+async function voidOldPending() {
+  try {
+    // Busca contagem por faixa antes de mostrar o prompt
+    const info = await fetch(BASE + '/pending-age-info?sport=' + currentSport).then(r => r.json()).catch(() => null);
+    let hint = '';
+    if (info && Array.isArray(info.buckets) && info.buckets.length) {
+      hint = '\n\nPendentes por idade:\n' + info.buckets.map(b => '  • >' + b.days + 'd: ' + b.count + ' tips').join('\n');
+      hint += '\n\n(lute já aconteceu se sent_at > ~10 dias atrás)';
+    }
+    const days = parseInt(prompt('Anular tips pendentes mais antigas que quantos dias?' + hint, info?.suggestDays || '14'), 10);
+    if (!days || isNaN(days) || days < 1) return;
+    const preview = info?.buckets?.find(b => b.days <= days);
+    const estCount = info?.buckets?.filter(b => b.days <= days).reduce((s, b) => Math.max(s, b.count), 0);
+    if (!confirm('Anular TODAS as tips pendentes de ' + currentSport.toUpperCase() + ' com mais de ' + days + ' dias?\n' + (estCount ? '~' + estCount + ' tips serão anuladas.' : '') + '\nEsta ação não pode ser desfeita.')) return;
+    const r = await adminFetch('/void-old-pending', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sport: currentSport, days })
+    });
+    const j = await r.json();
+    if (j.ok) {
+      alert('Anuladas: ' + j.voided + ' tips.');
+      loadTips(); loadAll();
+    } else {
+      alert('Erro: ' + (j.error || 'falha'));
+    }
+  } catch(e) {
+    alert('Erro: ' + e.message);
+  }
+}
+
+// ── Reavaliar tips pendentes com modelo treinado ──────────────────────
+async function rerunPendingTrained(allSports) {
+  try {
+    const sport = allSports ? 'all' : (currentSport || 'esports');
+    const r = await adminFetch('/admin/rerun-pending-trained?sport=' + encodeURIComponent(sport));
+    const j = await r.json();
+    if (!j.ok) { alert('Erro: ' + (j.error || 'falha')); return; }
+    if (!j.items || !j.items.length) {
+      alert('Nada para reavaliar em ' + sport.toUpperCase() + '.\n' + (j.skipped > 0 ? j.skipped + ' skipped (sem histórico no Elo)' : ''));
+      return;
+    }
+    const counts = j.counts || {};
+    // Sumário por sport quando "all"
+    let perSportLine = '';
+    if (allSports && j.countsBySport) {
+      perSportLine = '\nPor sport:\n' + Object.entries(j.countsBySport).map(([s, c]) =>
+        '  ' + s.toUpperCase() + ': ✅' + c.manter + ' ⚠️' + c.enfraqueceu + ' ❌' + c.negativo
+      ).join('\n');
+    }
+    // Agrupa items por sport pra visualizar melhor quando "all"
+    const itemsShown = j.items.slice(0, 40);
+    const lines = itemsShown.map(it => {
+      const sportTag = allSports && it.sport ? '[' + it.sport.substring(0, 3).toUpperCase() + '] ' : '';
+      const stakeInfo = it.oldStake && it.newStake && it.oldStake !== it.newStake
+        ? ' | stake ' + it.oldStake + '→' + it.newStake
+        : it.newStake ? ' | ' + it.newStake : '';
+      return sportTag + '#' + it.id + ' ' + (it.pick || '').slice(0, 20) +
+        ' odd=' + it.odds + ' | ' + it.oldP + '%→' + it.newP + '% | EV ' +
+        it.oldEV + '%→' + it.newEV + '%' + stakeInfo + ' ' +
+        (it.verdict === 'manter' ? '✅' : it.verdict === 'enfraqueceu' ? '⚠️' : '❌');
+    }).join('\n');
+    const summary = (allSports ? 'TODOS os sports com modelo treinado' : 'Sport: ' + sport.toUpperCase()) + '\n' +
+      'Avaliados: ' + j.evaluated + '/' + j.totalPending + ' (skipped=' + j.skipped + ')\n' +
+      'Manter: ' + (counts.manter || 0) + ' | Enfraqueceu: ' + (counts.enfraqueceu || 0) + ' | Negativo: ' + (counts.negativo || 0) +
+      perSportLine + '\n\n' +
+      lines +
+      (j.items.length > 40 ? '\n... (+' + (j.items.length - 40) + ' mais)' : '');
+    if (!confirm(summary + '\n\nAplicar essas atualizações no DB?')) { console.log('[rerun]', j); return; }
+    const r2 = await adminFetch('/admin/rerun-pending-trained?sport=' + encodeURIComponent(sport) + '&apply=1', { method: 'POST' });
+    const j2 = await r2.json();
+    if (j2.ok) {
+      alert('Atualizadas: ' + j2.applied + ' tips.');
+      loadTips();
+    } else alert('Erro apply: ' + (j2.error || 'falha'));
+  } catch (e) { alert('Erro: ' + e.message); }
+}
+
+// ── Backtest settled com modelo treinado ──────────────────────────────
+async function backtestTrained(allSports) {
+  try {
+    const sport = allSports ? 'all' : (currentSport || 'esports');
+    const r = await adminFetch('/admin/backtest-trained?sport=' + encodeURIComponent(sport));
+    const j = await r.json();
+    if (!j.ok) { alert('Erro: ' + (j.error || 'falha')); return; }
+    const bs = j.bySport || {};
+    const lines = Object.entries(bs).map(([s, b]) =>
+      s.toUpperCase() + ' (n=' + b.n + ')\n' +
+      '  Brier:   ' + b.brierOld + ' → ' + b.brierNew + (b.brierNew < b.brierOld ? ' ✅' : ' ❌') + '\n' +
+      '  Hit@0.5: ' + b.hitOld + '% → ' + b.hitNew + '%\n' +
+      '  Profit:  R$' + b.profitReal + ' | Filtrado (EV≥' + j.evThreshold + '%): R$' + b.profitFiltered + ' (' + b.nFiltered + ' tips)'
+    ).join('\n\n');
+    const agg = j.aggregate;
+    const aggLine = agg
+      ? '\n── AGREGADO (n=' + agg.n + ') ──\n' +
+        'Brier: ' + agg.brierOld + ' → ' + agg.brierNew + '\n' +
+        'Hit@0.5: ' + agg.hitOld + '% → ' + agg.hitNew + '%\n' +
+        'Profit real: R$' + agg.profitReal + ' | Filtrado: R$' + agg.profitFiltered + ' (Δ R$' + agg.profitDelta + ')'
+      : '';
+    alert('BACKTEST MODELO TREINADO — ' + sport.toUpperCase() + '\n\n' + lines + '\n' + aggLine + '\n\n(skipped=' + j.skipped + ' | total settled=' + j.totalSettled + ')');
+    console.log('[backtest]', j);
+  } catch (e) { alert('Erro: ' + e.message); }
+}
+
+bindTipsControls();
+loadAll();
+</script>
+
+</body>
+</html>

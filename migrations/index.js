@@ -481,6 +481,17 @@ const migrations = [
       `);
     },
   },
+  {
+    id: '028_tips_archived_flag',
+    up(db) {
+      if (!tableExists(db, 'tips')) return;
+      addColumnIfMissing(db, 'tips', 'archived', 'archived INTEGER DEFAULT 0');
+      // Tips até 2026-04-16 são "contaminadas" (bugs de dedup/Kelly/dados antigos).
+      // Marca como arquivadas pra não poluírem dashboard/ROI/métricas.
+      db.prepare(`UPDATE tips SET archived = 1 WHERE date(sent_at) <= '2026-04-16'`).run();
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_tips_archived_sport ON tips(archived, sport);`);
+    },
+  },
 ];
 
 function applyMigrations(db) {

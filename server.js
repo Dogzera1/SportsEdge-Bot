@@ -98,9 +98,15 @@ function updateEloMatch(homeTeam, awayTeam, winner) {
   return { homeTeam, awayTeam, before: { rH, rA }, after: { newH, newA }, K, homeAdvElo };
 }
 
-/** Escopo SQL: uma linha por partida (MAX(id)); evita duplicatas de match_id no dashboard/ROI */
+/** Escopo SQL: uma linha por partida (MAX(id)); evita duplicatas de match_id no dashboard/ROI.
+ * Também filtra archived=0 pra esconder tips contaminadas (pré 2026-04-17, bugs de dedup/Kelly). */
 function sqlTipsDedupeIdIn(alias, sportParam = '?') {
-  return `${alias}.id IN (SELECT MAX(tdx.id) FROM tips tdx WHERE tdx.sport = ${sportParam} GROUP BY COALESCE(NULLIF(TRIM(tdx.match_id), ''), 'id:' || CAST(tdx.id AS TEXT)))`;
+  return `${alias}.id IN (SELECT MAX(tdx.id) FROM tips tdx WHERE tdx.sport = ${sportParam} AND (tdx.archived IS NULL OR tdx.archived = 0) GROUP BY COALESCE(NULLIF(TRIM(tdx.match_id), ''), 'id:' || CAST(tdx.id AS TEXT)))`;
+}
+
+/** Filtro simples pra queries que não usam dedupe mas precisam excluir tips arquivadas. */
+function sqlNotArchived(alias) {
+  return `(${alias}.archived IS NULL OR ${alias}.archived = 0)`;
 }
 
 const { rollupLeague } = require('./lib/league-rollup');
@@ -7544,6 +7550,7 @@ const server = http.createServer(async (req, res) => {
         WHERE result IN ('win','loss','push')
           AND settled_at IS NOT NULL
           AND settled_at >= datetime('now', ?)
+          AND (archived IS NULL OR archived = 0)
       `).all(`-${days} days`);
 
       const buckets = new Map(); // key → agg
@@ -8103,6 +8110,7 @@ const server = http.createServer(async (req, res) => {
           AND clv_odds > 1 AND odds > 1
           AND settled_at IS NOT NULL
           AND settled_at >= datetime('now', ?)
+          AND (archived IS NULL OR archived = 0)
         GROUP BY DATE(settled_at)
         ORDER BY day ASC
       `).all(sport, `-${days} days`);
@@ -8149,6 +8157,7 @@ const server = http.createServer(async (req, res) => {
           AND result IN ('win','loss','push')
           AND settled_at IS NOT NULL
           AND settled_at >= datetime('now', ?)
+          AND (archived IS NULL OR archived = 0)
         GROUP BY hour
         ORDER BY hour ASC
       `).all(sport, `-${days} days`);
@@ -8198,6 +8207,7 @@ const server = http.createServer(async (req, res) => {
           AND result IN ('win','loss','push')
           AND settled_at IS NOT NULL
           AND settled_at >= datetime('now', ?)
+          AND (archived IS NULL OR archived = 0)
         GROUP BY COALESCE(is_shadow, 0)
       `).all(sport, `-${days} days`);
       const buckets = { active: null, shadow: null };
@@ -8239,6 +8249,7 @@ const server = http.createServer(async (req, res) => {
           AND result IN ('win','loss','push')
           AND settled_at IS NOT NULL
           AND settled_at >= datetime('now', ?)
+          AND (archived IS NULL OR archived = 0)
         GROUP BY DATE(settled_at)
         ORDER BY day ASC
       `).all(sport, `-${days} days`);
@@ -8485,6 +8496,43 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // ── Models status (dashboard card) ──
+  if (p === '/models-status') {
+    try {
+      const fs = require('fs');
+      const games = ['lol', 'cs2', 'dota2', 'valorant', 'tennis'];
+      const out = [];
+      const nowMs = Date.now();
+      for (const g of games) {
+        const wp = path.join(__dirname, 'lib', `${g}-weights.json`);
+        if (!fs.existsSync(wp)) continue;
+        try {
+          const stat = fs.statSync(wp);
+          const ageDays = Math.floor((nowMs - stat.mtimeMs) / (24 * 3600 * 1000));
+          const d = JSON.parse(fs.readFileSync(wp, 'utf8'));
+          const m = d.metrics?.ensemble_raw_test || d.metrics?.logistic_test;
+          if (!m) continue;
+          const chosen = d.metrics?.chosen || 'raw';
+          const cm = chosen === 'calibrated' && d.metrics?.ensemble_calibrated_test ? d.metrics.ensemble_calibrated_test : m;
+          const isoPath = path.join(__dirname, 'lib', g === 'lol' ? 'lol-model-isotonic.json' : `${g}-isotonic.json`);
+          out.push({
+            game: g,
+            brier: +(cm.brier || 0).toFixed(4),
+            acc: +(cm.acc || 0).toFixed(4),
+            auc: +(cm.auc || 0).toFixed(3),
+            chosen,
+            features: d.featureNames?.length || 0,
+            hasIsotonic: fs.existsSync(isoPath),
+            ageDays,
+            trainedAt: stat.mtime.toISOString(),
+          });
+        } catch (_) {}
+      }
+      sendJson(res, { models: out });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
   // ── ROI e Estatísticas ──
   if (p === '/roi') {
     const sport = parsed.query.sport || 'esports';
@@ -8700,6 +8748,7 @@ const server = http.createServer(async (req, res) => {
           ROUND(SUM(COALESCE(profit_reais, 0)), 2) AS profit
         FROM tips
         WHERE sport = ? AND result IN ('win','loss')
+          AND (archived IS NULL OR archived = 0)
         ${gameSql}
         GROUP BY league, is_live, conf
       `).all(sport);

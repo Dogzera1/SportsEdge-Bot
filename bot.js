@@ -4552,6 +4552,45 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
     try {
       const parts = String(text || '').trim().split(/\s+/);
       // /market-tips leaks [days] — segments com ROI negativo persistente
+      // /market-tips league [sport] [days] — per-league ROI breakdown
+      if (parts[1]?.toLowerCase() === 'league') {
+        const sportFilter = parts[2]?.toLowerCase() || null;
+        const days = Math.max(7, Math.min(180, parseInt(parts[3] || '60', 10) || 60));
+        const sportWhere = sportFilter ? `AND sport = '${sportFilter.replace(/'/g, "''")}'` : '';
+        const rows = db.prepare(`
+          SELECT sport, league,
+            COUNT(*) AS n,
+            SUM(CASE WHEN result IN ('win','loss') THEN 1 ELSE 0 END) AS settled,
+            SUM(CASE WHEN result = 'win' THEN 1 ELSE 0 END) AS wins,
+            SUM(COALESCE(profit_units, 0)) AS profit,
+            SUM(CASE WHEN result IN ('win','loss') THEN COALESCE(stake_units, 1) ELSE 0 END) AS stake,
+            AVG(clv_pct) AS avg_clv,
+            SUM(CASE WHEN clv_pct IS NOT NULL THEN 1 ELSE 0 END) AS clv_n
+          FROM market_tips_shadow
+          WHERE created_at >= datetime('now', '-${days} days') ${sportWhere}
+          GROUP BY sport, league
+          HAVING n >= 3
+          ORDER BY settled DESC
+          LIMIT 15
+        `).all();
+        if (!rows.length) {
+          await send(token, chatId, `📊 Nenhum league com tips em ${days}d${sportFilter ? ' (' + sportFilter + ')' : ''}`);
+          return;
+        }
+        let txt = `🏆 *MARKET TIPS POR LIGA — ${days}d${sportFilter ? ' (' + sportFilter + ')' : ''}*\n\n`;
+        for (const r of rows) {
+          const hitRate = r.settled > 0 ? (r.wins / r.settled * 100).toFixed(1) + '%' : '?';
+          const roi = r.stake > 0 ? ((r.profit / r.stake * 100).toFixed(1)) : null;
+          const roiStr = roi != null ? (roi >= 0 ? '+' : '') + roi + '%' : '?';
+          const clv = r.clv_n > 0 ? `${r.avg_clv >= 0 ? '+' : ''}${r.avg_clv.toFixed(1)}%` : '?';
+          const emoji = roi != null && roi < -5 ? '❌' : roi != null && roi > 5 ? '✅' : '⚪';
+          txt += `${emoji} *${r.sport}/${r.league || '?'}*\n`;
+          txt += `   n=${r.n} settled=${r.settled} Hit=${hitRate} ROI=${roiStr} CLV=${clv} profit=${r.profit.toFixed(1)}u\n\n`;
+          if (txt.length > 3500) { txt += '_(truncado)_'; break; }
+        }
+        await send(token, chatId, txt);
+        return;
+      }
       // /market-tips watch [sport] — segments approaching readiness threshold (70-100%)
       if (parts[1]?.toLowerCase() === 'watch') {
         const sportFilter = parts[2]?.toLowerCase() || null;
@@ -4678,7 +4717,7 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
         txt += `  CLV=${clv} (n=${s.clvN}) profit=${s.totalProfit.toFixed(1)}u\n\n`;
         if (txt.length > 3500) { txt += '_(truncado)_'; break; }
       }
-      txt += `\n_Uso: /market-tips [sport] [days] | recent [sport] [limit] | leaks [days] [minN] [sport] | watch [sport]_`;
+      txt += `\n_Uso: /market-tips [sport] [days] | recent [sport] [limit] | leaks [days] [minN] [sport] | watch [sport] | league [sport] [days]_`;
       await send(token, chatId, txt);
     } catch (e) { await send(token, chatId, `❌ ${e.message}`); }
 
@@ -10782,6 +10821,35 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   // Live Storm Manager: cron 10min, alerta admin no flip into/out-of storm.
   setInterval(() => runLiveStormCycle().catch(e => log('ERROR', 'LIVE-STORM', e.message)), 10 * 60 * 1000);
   setTimeout(() => runLiveStormCycle().catch(() => {}), 7 * 60 * 1000); // 7min pós-boot
+
+  // Model status report at boot (Brier/Acc per modelo ativo + stale detection)
+  try {
+    const fs = require('fs');
+    const lines = [];
+    const staleWarns = [];
+    const STALE_DAYS = parseInt(process.env.MODEL_STALE_DAYS || '30', 10);
+    const nowMs = Date.now();
+    for (const g of ['lol', 'cs2', 'dota2', 'valorant', 'tennis']) {
+      const p = path.join(__dirname, 'lib', `${g}-weights.json`);
+      if (!fs.existsSync(p)) continue;
+      try {
+        const stat = fs.statSync(p);
+        const ageDays = Math.floor((nowMs - stat.mtimeMs) / (24 * 3600 * 1000));
+        const d = JSON.parse(fs.readFileSync(p, 'utf8'));
+        const m = d.metrics?.ensemble_raw_test || d.metrics?.logistic_test;
+        if (!m) continue;
+        const chosen = d.metrics?.chosen || 'raw';
+        const cm = chosen === 'calibrated' && d.metrics?.ensemble_calibrated_test ? d.metrics.ensemble_calibrated_test : m;
+        const isoPath = path.join(__dirname, 'lib', g === 'lol' ? 'lol-model-isotonic.json' : `${g}-isotonic.json`);
+        const iso = fs.existsSync(isoPath) ? '+iso' : '';
+        const staleFlag = ageDays > STALE_DAYS ? ` ⚠️${ageDays}d` : '';
+        lines.push(`${g} Brier=${cm.brier.toFixed(3)} Acc=${(cm.acc*100).toFixed(0)}% AUC=${cm.auc.toFixed(2)}${iso}${staleFlag}`);
+        if (ageDays > STALE_DAYS) staleWarns.push(`${g} (${ageDays}d old)`);
+      } catch (_) {}
+    }
+    if (lines.length) log('INFO', 'MODELS', `Active: ${lines.join(' | ')}`);
+    if (staleWarns.length) log('WARN', 'MODELS', `Stale models (>${STALE_DAYS}d): ${staleWarns.join(', ')} — considerar retrain`);
+  } catch (_) {}
 
   // LoL Model Freshness: cron 24h, alerta admin se stale (patches/splits novos ou idade).
   setInterval(() => runLolFreshnessCycle().catch(e => log('ERROR', 'FRESHNESS', e.message)), 24 * 60 * 60 * 1000);
