@@ -230,7 +230,10 @@
       "Bash(awk 'NR>=7970 && NR<=8060' bot.js)",
       "Bash(grep -nA 3 \"shadow-vs-active\" server.js)",
       "Bash(DB_PATH=sportsedge.db node scripts/shadow-compare.js --game dota2 --days 30)",
-      "Bash(DB_PATH=sportsedge.db node scripts/shadow-compare.js --game lol --days 30)"
+      "Bash(DB_PATH=sportsedge.db node scripts/shadow-compare.js --game lol --days 30)",
+      "Bash(DB_PATH=sportsedge.db node scripts/sync-ufcstats-history.js --max 5 --rate-ms 300)",
+      "Bash(DB_PATH=sportsedge.db node scripts/sync-ufcstats-history.js --rate-ms 400)",
+      "Bash(DB_PATH=sportsedge.db node scripts/extract-mma-features.js)"
     ]
   }
 }

@@ -8147,6 +8147,24 @@ async function pollMma(runOnce = false) {
           await new Promise(r => setTimeout(r, 500)); continue;
         }
 
+        // ── MMA trained model (logistic+GBDT+isotônico) ──
+        // Treinado 2026-04-18 com ~3750 fights pós-warmup. Brier 0.231 vs baseline 0.247.
+        // Blend via confidence do trained (conservador pra MMA variance alta).
+        if (hasTrainedEsportsModel('mma')) {
+          try {
+            const ctx = buildEsportsTrainedContext(db, 'mma', fight);
+            const tp = ctx ? predictTrainedEsports('mma', ctx) : null;
+            if (tp) {
+              const wT = tp.confidence * 0.7; // MMA é high-variance → dampen blend
+              const mergedP1 = wT * tp.p1 + (1 - wT) * mlResultMma.modelP1;
+              log('INFO', 'MMA-TRAINED', `${fight.team1} vs ${fight.team2}: trainedP1=${(tp.p1*100).toFixed(1)}% (conf=${tp.confidence}, wEff=${wT.toFixed(2)}) | priorP1=${(mlResultMma.modelP1*100).toFixed(1)}% → blend=${(mergedP1*100).toFixed(1)}%`);
+              mlResultMma.modelP1 = mergedP1;
+              mlResultMma.modelP2 = 1 - mergedP1;
+              mlResultMma.factorCount = (mlResultMma.factorCount || 0) + 1;
+            }
+          } catch (e) { log('DEBUG', 'MMA-TRAINED', `err: ${e.message}`); }
+        }
+
         const hasModelDataMma = mlResultMma.factorCount > 0;
         // Fair odds sempre disponíveis: quando sem ESPN, modelP1=impliedP1 (de-juice puro)
         const modelP1Mma = (mlResultMma.modelP1 * 100).toFixed(1);
