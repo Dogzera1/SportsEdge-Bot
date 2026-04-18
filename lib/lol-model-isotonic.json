@@ -1,0 +1,46 @@
+{
+  "version": 1,
+  "fittedAt": "2026-04-18T09:17:31.872Z",
+  "method": "isotonic_pav",
+  "nCalibSamples": 1537,
+  "w_oe": 0.15,
+  "blocks": [
+    {
+      "pMin": 0.2143,
+      "pMax": 0.2818,
+      "yMean": 0.1538,
+      "n": 13
+    },
+    {
+      "pMin": 0.3157,
+      "pMax": 0.349,
+      "yMean": 0.1667,
+      "n": 12
+    },
+    {
+      "pMin": 0.4191,
+      "pMax": 0.4499,
+      "yMean": 0.22,
+      "n": 50
+    },
+    {
+      "pMin": 0.4501,
+      "pMax": 0.5,
+      "yMean": 0.3113,
+      "n": 604
+    },
+    {
+      "pMin": 0.5,
+      "pMax": 0.55,
+      "yMean": 0.7106,
+      "n": 743
+    },
+    {
+      "pMin": 0.5503,
+      "pMax": 0.7853,
+      "yMean": 0.7768,
+      "n": 112
+    }
+  ],
+  "trainingNote": "Fit sobre período calib (últimos 15% antes do test). Aplicar pós-blend dos sub-models mas antes do clamp final."
+}

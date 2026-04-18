@@ -2421,6 +2421,21 @@ let _liveStormActive = false;
 let _lastLiveStormDM = 0;
 const LIVE_STORM_DM_COOLDOWN_MS = 30 * 60 * 1000;
 
+// Quais sports mantêm polling rápido durante storm. Outros aplicam multiplicador
+// de cooldown (LIVE_STORM_SLOW_FACTOR, default 3x) pra liberar CPU.
+// ENV LIVE_STORM_FAST_POLL_SPORTS="dota,lol" (CSV, case-insensitive).
+function _stormFastPollSet() {
+  const raw = String(process.env.LIVE_STORM_FAST_POLL_SPORTS || 'dota,lol').toLowerCase();
+  return new Set(raw.split(',').map(s => s.trim()).filter(Boolean));
+}
+function _liveStormCooldownMult(sport) {
+  if (!_liveStormActive) return 1;
+  const fast = _stormFastPollSet();
+  if (fast.has(String(sport || '').toLowerCase())) return 1;
+  const mult = parseFloat(process.env.LIVE_STORM_SLOW_FACTOR || '3');
+  return Number.isFinite(mult) && mult > 1 ? mult : 3;
+}
+
 async function runLiveStormCycle() {
   if (!ADMIN_IDS.size) return;
   let result = null;
@@ -7021,7 +7036,9 @@ async function pollTennis(runOnce = false) {
           continue;
         }
         // Live: 15min | Pré-jogo: 6h (configurável)
-        const cooldown = isLivePhase ? TENNIS_LIVE_INTERVAL : TENNIS_PREGAME_INTERVAL;
+        // Live Storm: multiplica cooldown quando storm ativo E sport não é fast-poll priority.
+        const stormMult = _liveStormCooldownMult('tennis');
+        const cooldown = (isLivePhase ? TENNIS_LIVE_INTERVAL : TENNIS_PREGAME_INTERVAL) * stormMult;
         const phaseTs = isLivePhase ? (prev?.tsLive || 0) : (prev?.tsPre || 0);
         if (phaseTs && (now - phaseTs < cooldown)) {
           log('DEBUG', 'AUTO-TENNIS', `Skip ${match.team1} vs ${match.team2} (${match.status}): cooldown ${Math.round((cooldown-(now-phaseTs))/1000)}s restante`);
@@ -7574,8 +7591,9 @@ Máximo 200 palavras. Raciocínio breve antes da decisão.`;
     // Dual-mode: ciclo rápido (3min) se havia partidas live, lento (30min) se só upcoming
     if (!runOnce) {
       const hadLive = typeof _hasLiveT !== 'undefined' && _hasLiveT;
-      const nextMs = hadLive ? TENNIS_POLL_LIVE_MS : TENNIS_POLL_IDLE_MS;
-      log('INFO', 'AUTO-TENNIS', `Próximo ciclo em ${Math.round(nextMs / 1000)}s (${hadLive ? 'LIVE mode' : 'idle mode'})`);
+      const stormMultPoll = _liveStormCooldownMult('tennis');
+      const nextMs = (hadLive ? TENNIS_POLL_LIVE_MS : TENNIS_POLL_IDLE_MS) * stormMultPoll;
+      log('INFO', 'AUTO-TENNIS', `Próximo ciclo em ${Math.round(nextMs / 1000)}s (${hadLive ? 'LIVE mode' : 'idle mode'}${stormMultPoll > 1 ? ` | storm×${stormMultPoll}` : ''})`);
       setTimeout(loop, nextMs);
     }
     return typeof matches !== 'undefined' ? matches : [];
@@ -8339,7 +8357,7 @@ async function pollCs(runOnce = false) {
       const matches = await serverGet('/cs-matches').catch(() => []);
       if (!Array.isArray(matches) || !matches.length) {
         log('INFO', 'AUTO-CS', '0 partidas CS2 com odds');
-        if (!runOnce) { const _n = _hadLiveCs ? CS_POLL_LIVE_MS : CS_POLL_IDLE_MS; log('INFO', 'AUTO-CS', `Próximo ciclo em ${Math.round(_n/1000)}s (${_hadLiveCs ? 'LIVE' : 'idle'})`); setTimeout(loop, _n); }
+        if (!runOnce) { const _nBase = _hadLiveCs ? CS_POLL_LIVE_MS : CS_POLL_IDLE_MS; const _stMult = _liveStormCooldownMult('cs'); const _n = _nBase * _stMult; log('INFO', 'AUTO-CS', `Próximo ciclo em ${Math.round(_n/1000)}s (${_hadLiveCs ? 'LIVE' : 'idle'}${_stMult>1?` | storm×${_stMult}`:''})`); setTimeout(loop, _n); }
         return [];
       }
       log('INFO', 'AUTO-CS', `${matches.length} partidas CS2`);
@@ -8359,7 +8377,7 @@ async function pollCs(runOnce = false) {
       });
       if (!relevant.length) {
         log('INFO', 'AUTO-CS', '0 matches em janela de 6h');
-        if (!runOnce) { const _n = _hadLiveCs ? CS_POLL_LIVE_MS : CS_POLL_IDLE_MS; log('INFO', 'AUTO-CS', `Próximo ciclo em ${Math.round(_n/1000)}s (${_hadLiveCs ? 'LIVE' : 'idle'})`); setTimeout(loop, _n); }
+        if (!runOnce) { const _nBase = _hadLiveCs ? CS_POLL_LIVE_MS : CS_POLL_IDLE_MS; const _stMult = _liveStormCooldownMult('cs'); const _n = _nBase * _stMult; log('INFO', 'AUTO-CS', `Próximo ciclo em ${Math.round(_n/1000)}s (${_hadLiveCs ? 'LIVE' : 'idle'}${_stMult>1?` | storm×${_stMult}`:''})`); setTimeout(loop, _n); }
         return [];
       }
       const _hasLiveCs = relevant.some(m => m.status === 'live');
@@ -8702,7 +8720,7 @@ async function pollValorant(runOnce = false) {
       const matches = await serverGet('/valorant-matches').catch(() => []);
       if (!Array.isArray(matches) || !matches.length) {
         log('INFO', 'AUTO-VAL', '0 partidas Valorant com odds');
-        if (!runOnce) { const _n = _hadLiveVal ? VAL_POLL_LIVE_MS : VAL_POLL_IDLE_MS; log('INFO', 'AUTO-VAL', `Próximo ciclo em ${Math.round(_n/1000)}s (${_hadLiveVal ? 'LIVE' : 'idle'})`); setTimeout(loop, _n); }
+        if (!runOnce) { const _nBase = _hadLiveVal ? VAL_POLL_LIVE_MS : VAL_POLL_IDLE_MS; const _stMult = _liveStormCooldownMult('valorant'); const _n = _nBase * _stMult; log('INFO', 'AUTO-VAL', `Próximo ciclo em ${Math.round(_n/1000)}s (${_hadLiveVal ? 'LIVE' : 'idle'}${_stMult>1?` | storm×${_stMult}`:''})`); setTimeout(loop, _n); }
         return [];
       }
       log('INFO', 'AUTO-VAL', `${matches.length} partidas Valorant`);
@@ -8721,7 +8739,7 @@ async function pollValorant(runOnce = false) {
       });
       if (!relevant.length) {
         log('INFO', 'AUTO-VAL', '0 matches em janela de 6h');
-        if (!runOnce) { const _n = _hadLiveVal ? VAL_POLL_LIVE_MS : VAL_POLL_IDLE_MS; log('INFO', 'AUTO-VAL', `Próximo ciclo em ${Math.round(_n/1000)}s (${_hadLiveVal ? 'LIVE' : 'idle'})`); setTimeout(loop, _n); }
+        if (!runOnce) { const _nBase = _hadLiveVal ? VAL_POLL_LIVE_MS : VAL_POLL_IDLE_MS; const _stMult = _liveStormCooldownMult('valorant'); const _n = _nBase * _stMult; log('INFO', 'AUTO-VAL', `Próximo ciclo em ${Math.round(_n/1000)}s (${_hadLiveVal ? 'LIVE' : 'idle'}${_stMult>1?` | storm×${_stMult}`:''})`); setTimeout(loop, _n); }
         return [];
       }
       const _hasLiveVal = relevant.some(m => m.status === 'live');
