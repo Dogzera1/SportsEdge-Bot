@@ -239,7 +239,17 @@
       "Bash(DB_PATH=sportsedge.db node scripts/sync-sofascore-history.js --sport snooker --days-back 365 --rate-ms 200)",
       "Bash(DB_PATH=sportsedge.db node scripts/sync-sofascore-history.js --sport table-tennis --days-back 180 --rate-ms 250)",
       "Bash(DB_PATH=sportsedge.db node scripts/extract-1v1-features.js --game snooker)",
-      "Bash(DB_PATH=sportsedge.db node scripts/extract-1v1-features.js --game darts)"
+      "Bash(DB_PATH=sportsedge.db node scripts/extract-1v1-features.js --game darts)",
+      "Bash(DB_PATH=sportsedge.db node scripts/sync-darts-stats.js --days 180 --rate-ms 150)",
+      "Bash(DB_PATH=sportsedge.db node scripts/sync-sofascore-history.js --sport snooker --days-back 730 --rate-ms 200)",
+      "Bash(DB_PATH=sportsedge.db node scripts/sync-sofascore-history.js --sport darts --days-back 730 --rate-ms 200)",
+      "Bash(DB_PATH=sportsedge.db node scripts/extract-1v1-features.js --game mma)",
+      "Bash(awk -F: '$1 > 7100 && $1 < 7800')",
+      "Bash(awk 'NR>=7100 && NR<=7800 && /\\\\belo\\\\b/' bot.js)",
+      "Bash(awk 'NR>=7100 && NR<=7800' bot.js)",
+      "Bash(awk 'NR>=10510 && NR<=10535' bot.js)",
+      "Bash(awk 'NR>=10260 && NR<=10280' bot.js)",
+      "Bash(awk 'NR>=10100 && NR<=10530' bot.js)"
     ]
   }
 }

@@ -65,6 +65,8 @@ const BASE_NUM_FEATURES = [
 ];
 // Features momentum (adicionadas 2026-04-18; opcional se CSV não tem)
 const MOMENTUM_FEATURES = ['win_streak_diff', 'wr_trend_diff', 'elo_diff_sq'];
+// 1v1 features (MMA/darts/snooker) — SOS + same-league momentum
+const ONE_V_ONE_FEATURES = ['sos_diff', 'same_league_wins_diff', 'same_league_wr_diff'];
 // Extras só LoL (gol.gg team stats)
 const LOL_EXTRA_FEATURES = [
   'gpm_diff', 'gdm_diff', 'gd15_diff', 'fb_rate_diff', 'ft_rate_diff',
@@ -83,6 +85,7 @@ const LOL_PLAYER_FEATURES = [
 // Decide NUM_FEATURES baseado no CSV carregado (se tem colunas LoL extras, inclui)
 let NUM_FEATURES = BASE_NUM_FEATURES.slice();
 if (headers.includes('win_streak_diff')) NUM_FEATURES = [...NUM_FEATURES, ...MOMENTUM_FEATURES];
+if (headers.includes('sos_diff')) NUM_FEATURES = [...NUM_FEATURES, ...ONE_V_ONE_FEATURES];
 if (GAME === 'lol' && headers.includes('gpm_diff')) NUM_FEATURES = [...NUM_FEATURES, ...LOL_EXTRA_FEATURES];
 if (GAME === 'lol' && headers.includes('oe_gd15_diff')) NUM_FEATURES = [...NUM_FEATURES, ...LOL_OE_FEATURES];
 if (GAME === 'lol' && headers.includes('avg_kda_diff')) NUM_FEATURES = [...NUM_FEATURES, ...LOL_PLAYER_FEATURES];

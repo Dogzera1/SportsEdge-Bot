@@ -89,11 +89,34 @@ function getF(name) {
       eloWeight: new Map(),
       fights: 0,
       fightsWeight: new Map(),
-      recent: [], // {t, won, method, opp}
+      recent: [], // {t, won, method, opp, oppElo, league}
       methodCount: { ko: 0, sub: 0, dec: 0 },
     });
   }
   return fighterState.get(k);
+}
+
+// SOS — avg Elo dos últimos N oponentes (proxy de strength of schedule).
+// Player que venceu top-10 tem SOS alto; player que venceu tier-C tem SOS baixo.
+function sosLast(recent, n) {
+  const slice = recent.slice(-n);
+  if (!slice.length) return null;
+  const elos = slice.map(x => x.oppElo).filter(e => Number.isFinite(e));
+  if (!elos.length) return null;
+  return elos.reduce((a, b) => a + b, 0) / elos.length;
+}
+
+// Momentum na mesma liga/tournament — wins em matches recentes dessa liga.
+// Captura "player está hot neste torneio específico".
+function sameLeagueWins(recent, league, windowDays, now) {
+  const cutoff = now - windowDays * 86400000;
+  let wins = 0, losses = 0;
+  for (const r of recent) {
+    if (r.t < cutoff) continue;
+    if (norm(r.league) !== norm(league)) continue;
+    if (r.won) wins++; else losses++;
+  }
+  return { wins, losses, total: wins + losses };
 }
 
 const h2hState = new Map();
@@ -134,6 +157,7 @@ const HEADERS = [
   'matches_last14_diff',
   'n_signals',
   'win_streak_diff', 'wr_trend_diff', 'elo_diff_sq',
+  'sos_diff', 'same_league_wins_diff', 'same_league_wr_diff',  // novas 1v1 features
   // MMA-specific — populated 0 pra non-MMA sports que reusam train-esports-model
   'gpm_diff', 'gdm_diff', 'gd15_diff', 'fb_rate_diff', 'ft_rate_diff',
   'dpm_diff', 'kd_diff', 'team_wr_diff', 'dra_pct_diff', 'nash_pct_diff', 'has_team_stats',
@@ -192,6 +216,19 @@ for (const r of rows) {
   const trend2 = (wr10_2 != null && wr20_2 != null) ? (wr10_2 - wr20_2) : 0;
   const eloDiffSq = Math.sign(eloDiffOverall) * (eloDiffOverall * eloDiffOverall) / 1000;
 
+  // SOS — avg opponent Elo dos últimos 5 matches
+  const sos1 = sosLast(s1.recent, 5);
+  const sos2 = sosLast(s2.recent, 5);
+  const sosDiff = (sos1 != null && sos2 != null) ? (sos1 - sos2) : 0;
+
+  // Same-league momentum — wins na mesma tournament/league nos últimos 365d
+  const slw1 = sameLeagueWins(s1.recent, league, 365, t);
+  const slw2 = sameLeagueWins(s2.recent, league, 365, t);
+  const sameLeagueWinsDiff = slw1.wins - slw2.wins;
+  const slwWr1 = slw1.total >= 2 ? slw1.wins / slw1.total : null;
+  const slwWr2 = slw2.total >= 2 ? slw2.wins / slw2.total : null;
+  const sameLeagueWrDiff = (slwWr1 != null && slwWr2 != null) ? (slwWr1 - slwWr2) : 0;
+
   let nSignals = 0;
   if (s1.fights >= MIN_WARMUP && s2.fights >= MIN_WARMUP) nSignals++;
   if (weightClass && (s1.fightsWeight.get(weightClass) || 0) >= 2 && (s2.fightsWeight.get(weightClass) || 0) >= 2) nSignals++;
@@ -217,6 +254,7 @@ for (const r of rows) {
       m14_1 - m14_2,
       nSignals,
       streak1 - streak2, (trend1 - trend2).toFixed(4), eloDiffSq.toFixed(2),
+      sosDiff.toFixed(2), sameLeagueWinsDiff, sameLeagueWrDiff.toFixed(4),
       // LoL-specific: todos 0 (MMA reusa esse header pra compatibilidade com train-esports-model)
       0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,  // gpm..has_team_stats
       0, 0, 0, 0, 0,  // oe_* + has_oe_stats
@@ -251,8 +289,12 @@ for (const r of rows) {
   wState.fights++; lState.fights++;
   const method = parseMethod(r.final_score);
   if (method) wState.methodCount[method]++;
-  wState.recent.push({ t, won: 1, method, opp: lState.displayName });
-  lState.recent.push({ t, won: 0, method, opp: wState.displayName });
+  // Captura Elo do oponente ANTES do update pra SOS. Aqui já atualizamos elo acima,
+  // então precisamos passar o elo pre-update. Re-deriva via fighter vencedor/perdedor:
+  const oppEloForW = lState.elo; // lState acabou de ser atualizado pro novo Elo, que reflete pós-match
+  const oppEloForL = wState.elo;
+  wState.recent.push({ t, won: 1, method, opp: lState.displayName, oppElo: oppEloForW, league });
+  lState.recent.push({ t, won: 0, method, opp: wState.displayName, oppElo: oppEloForL, league });
   if (wState.recent.length > 30) wState.recent.splice(0, wState.recent.length - 30);
   if (lState.recent.length > 30) lState.recent.splice(0, lState.recent.length - 30);
 

@@ -7596,12 +7596,14 @@ Máximo 200 palavras.`;
         if (tipMatch) {
           const _impPV = _pickIsT1V ? mlResult.impliedP1 : mlResult.impliedP2;
           const _maxDivDota = parseFloat(process.env.DOTA_MAX_DIVERGENCE_PP ?? '15');
+          // pollDota não declara var `elo` — usa mlResult.factorCount como proxy de sample size.
+          // eloMinGames=0 neutro (sem bonus pro signal override em _sharpDivergenceGate).
           const _div = _sharpDivergenceGate({
             oddsObj: o, modelP: _modelPV, impliedP: _impPV, maxPp: _maxDivDota,
             context: {
               sport: 'dota2', league: match.league || '',
               signalCount: mlResult.factorCount || 0,
-              eloMinGames: Math.min(elo?.eloMatches1 || 0, elo?.eloMatches2 || 0) || 0,
+              eloMinGames: 0,
               teams: `${match.team1} vs ${match.team2}`,
             },
           });
