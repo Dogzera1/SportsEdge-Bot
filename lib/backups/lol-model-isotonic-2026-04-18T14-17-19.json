@@ -1,24 +1,24 @@
 {
   "version": 1,
-  "fittedAt": "2026-04-18T14:17:19.371Z",
+  "fittedAt": "2026-04-18T09:48:28.131Z",
   "method": "isotonic_pav",
   "nCalibSamples": 1537,
   "w_oe": 0.15,
   "blocks": [
     {
-      "pMin": 0.2091,
-      "pMax": 0.2819,
+      "pMin": 0.2143,
+      "pMax": 0.2818,
       "yMean": 0.1538,
       "n": 13
     },
     {
       "pMin": 0.3157,
-      "pMax": 0.3492,
+      "pMax": 0.349,
       "yMean": 0.1667,
       "n": 12
     },
     {
-      "pMin": 0.4192,
+      "pMin": 0.4191,
       "pMax": 0.4499,
       "yMean": 0.22,
       "n": 50
@@ -37,7 +37,7 @@
     },
     {
       "pMin": 0.5503,
-      "pMax": 0.7851,
+      "pMax": 0.7853,
       "yMean": 0.7768,
       "n": 112
     }

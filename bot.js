@@ -4552,6 +4552,47 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
     try {
       const parts = String(text || '').trim().split(/\s+/);
       // /market-tips leaks [days] — segments com ROI negativo persistente
+      // /market-tips watch [sport] — segments approaching readiness threshold (70-100%)
+      if (parts[1]?.toLowerCase() === 'watch') {
+        const sportFilter = parts[2]?.toLowerCase() || null;
+        const { getShadowStats } = require('./lib/market-tips-shadow');
+        const stats = getShadowStats(db, { days: 60, sport: sportFilter });
+        const MIN_SETTLED = parseInt(process.env.MT_READY_MIN_SETTLED || '30', 10);
+        const MIN_ROI = parseFloat(process.env.MT_READY_MIN_ROI || '5');
+        const watching = stats.filter(s => {
+          // Approaching: 50-99% do MIN_SETTLED, ROI positivo (trajetória boa)
+          const pct = s.settled / MIN_SETTLED;
+          if (pct < 0.5 || pct >= 1) return false;
+          return s.roiPct != null && s.roiPct >= MIN_ROI;
+        }).sort((a, b) => b.settled - a.settled);
+        const ready = stats.filter(s => s.settled >= MIN_SETTLED && s.roiPct >= MIN_ROI);
+
+        let txt = `👁️ *MARKET TIPS WATCHLIST${sportFilter ? ' — ' + sportFilter : ''}*\n\n`;
+        txt += `Threshold: N≥${MIN_SETTLED}, ROI≥${MIN_ROI}%\n\n`;
+
+        if (ready.length) {
+          txt += `✅ *Já prontos pra ativar (${ready.length}):*\n`;
+          for (const s of ready) {
+            const envKey = `${s.sport.toUpperCase()}_MARKET_TIPS_ENABLED`;
+            const status = process.env[envKey] === 'true' ? '🟢 active' : '⏸️ pending activation';
+            txt += `  • ${s.sport}/${s.market} ROI=${s.roiPct.toFixed(1)}% n=${s.settled} — ${status}\n`;
+          }
+          txt += `\n`;
+        }
+
+        if (watching.length) {
+          txt += `⏳ *Em observação — ${watching.length} segments (50-99% do threshold):*\n`;
+          for (const s of watching) {
+            const pct = Math.round(s.settled / MIN_SETTLED * 100);
+            const clv = s.avgClv != null ? ` CLV=${s.avgClv >= 0 ? '+' : ''}${s.avgClv.toFixed(1)}%` : '';
+            txt += `  • ${s.sport}/${s.market}: n=${s.settled}/${MIN_SETTLED} (${pct}%) ROI=+${s.roiPct.toFixed(1)}%${clv}\n`;
+          }
+        } else if (!ready.length) {
+          txt += `_Nenhum segment próximo do threshold._\n`;
+        }
+        await send(token, chatId, txt);
+        return;
+      }
       if (parts[1]?.toLowerCase() === 'leaks') {
         const days = Math.max(7, Math.min(180, parseInt(parts[2] || '60', 10) || 60));
         const minN = parseInt(parts[3] || '20', 10) || 20;
@@ -4637,7 +4678,42 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
         txt += `  CLV=${clv} (n=${s.clvN}) profit=${s.totalProfit.toFixed(1)}u\n\n`;
         if (txt.length > 3500) { txt += '_(truncado)_'; break; }
       }
-      txt += `\n_Uso: /market-tips [sport] [days] | recent [sport] [limit] | leaks [days] [minN] [sport]_`;
+      txt += `\n_Uso: /market-tips [sport] [days] | recent [sport] [limit] | leaks [days] [minN] [sport] | watch [sport]_`;
+      await send(token, chatId, txt);
+    } catch (e) { await send(token, chatId, `❌ ${e.message}`); }
+
+  } else if (cmd === '/models') {
+    if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
+    try {
+      const fs = require('fs');
+      const path = require('path');
+      const games = ['lol', 'cs2', 'dota2', 'valorant', 'tennis'];
+      let txt = `🧠 *MODELS STATUS*\n\n`;
+      for (const g of games) {
+        const weightsPath = path.join(__dirname, 'lib', `${g}-weights.json`);
+        const isoPath = path.join(__dirname, 'lib', g === 'lol' ? 'lol-model-isotonic.json' : `${g}-isotonic.json`);
+        if (!fs.existsSync(weightsPath)) { txt += `*${g}*: ⚠️ sem weights\n\n`; continue; }
+        const data = JSON.parse(fs.readFileSync(weightsPath, 'utf8'));
+        const m = data.metrics?.ensemble_raw_test || data.metrics?.logistic_test;
+        const cm = data.metrics?.ensemble_calibrated_test;
+        const chosen = data.metrics?.chosen || 'raw';
+        const splits = data.splits || {};
+        const testTo = (splits.test?.to || '').slice(0, 10);
+        const fsStat = fs.statSync(weightsPath);
+        const mtime = fsStat.mtime.toISOString().slice(0, 10);
+        const hasIso = fs.existsSync(isoPath);
+        txt += `*${g}* (${data.featureNames?.length || 0} feats, trained ${mtime})\n`;
+        if (m) {
+          const chosenM = chosen === 'calibrated' && cm ? cm : m;
+          txt += `  Brier=${chosenM.brier.toFixed(4)} Acc=${(chosenM.acc*100).toFixed(1)}% AUC=${chosenM.auc.toFixed(3)}\n`;
+          txt += `  chosen=${chosen} | test n=${splits.test?.n || '?'} → ${testTo}\n`;
+          txt += `  isotonic: ${hasIso ? '✓ aplicada' : '✗ ausente'}\n`;
+        }
+        txt += `\n`;
+      }
+      // Tennis trained model flag
+      txt += `_Tennis prefere trained model se active (Brier 0.215 vs Elo 0.231)._\n`;
+      txt += `_Retrain: scripts/train-esports-model.js --game X; auto-backup em lib/backups/._`;
       await send(token, chatId, txt);
     } catch (e) { await send(token, chatId, `❌ ${e.message}`); }
 
@@ -5605,7 +5681,8 @@ async function poll(token, sport) {
                      text.startsWith('/settle') || text.startsWith('/pending') || text.startsWith('/resync') ||
                      text.startsWith('/slugs') || text.startsWith('/lolraw') ||
                      text.startsWith('/health') || text.startsWith('/debug') ||
-                     text.startsWith('/shadow') || text.startsWith('/market-tips')) {
+                     text.startsWith('/shadow') || text.startsWith('/market-tips') ||
+                     text.startsWith('/models')) {
             // Passa `sport` da poll (qual bot recebeu) para evitar default 'esports'
             await handleAdmin(token, chatId, text, sport);
           }
@@ -8039,6 +8116,31 @@ async function pollTennis(runOnce = false) {
                 tennisModelResult._injuryRisk = { team1: r1, team2: r2 };
               }
             } catch (ie) { log('DEBUG', 'TENNIS-INJURY', `err: ${ie.message}`); }
+          }
+
+          // Rank-based stakes detection: elite matchup (both top-20) → conf boost +3%.
+          // Sinal de que match tem variance baixa porque ambos elite trazem A-game.
+          if (process.env.TENNIS_RANK_STAKES !== 'false' && tennisModelResult) {
+            try {
+              const { getPlayerRankInfo } = require('./lib/tennis-player-stats');
+              const r1 = getPlayerRankInfo(db, match.team1, { sinceDays: 365 });
+              const r2 = getPlayerRankInfo(db, match.team2, { sinceDays: 365 });
+              if (r1 && r2) {
+                const isElite = r1.latestRank <= 20 && r2.latestRank <= 20;
+                const isTopTen = r1.latestRank <= 10 && r2.latestRank <= 10;
+                let mult = 1;
+                let reason = null;
+                if (isTopTen) { mult = 1.05; reason = 'top-10 matchup'; }
+                else if (isElite) { mult = 1.03; reason = 'elite matchup (both top-20)'; }
+                if (mult > 1) {
+                  const prev = tennisModelResult.confidence || 0;
+                  tennisModelResult.confidence = Math.min(1.0, prev * mult);
+                  tennisModelResult.factors = [...(tennisModelResult.factors || []), 'rank-stakes'];
+                  log('INFO', 'TENNIS-RANK-STAKES',
+                    `${match.team1} #${r1.latestRank} vs ${match.team2} #${r2.latestRank} — ${reason} → conf ${prev.toFixed(2)}×${mult.toFixed(3)}=${tennisModelResult.confidence.toFixed(2)}`);
+                }
+              }
+            } catch (re) { log('DEBUG', 'TENNIS-RANK-STAKES', `err: ${re.message}`); }
           }
 
           // Clutch adjustment: combined BP save (serve) + BP conversion (return).
