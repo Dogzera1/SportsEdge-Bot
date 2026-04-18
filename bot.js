@@ -2589,6 +2589,59 @@ async function runIsotonicRefreshAsync(token) {
   });
 }
 
+// ── Market Tip Readiness Check (1x/dia) ──
+// Query shadow stats: se (sport, market) atinge N≥30 settled AND ROI>=threshold, DM admin
+// sugerindo ativação. Anti-spam: só notifica 1x por combination.
+const _marketTipReadyAlerted = new Set(); // key: sport|market — evita re-alert
+async function runMarketTipReadinessCheck() {
+  if (!ADMIN_IDS.size) return;
+  let stats;
+  try {
+    const { getShadowStats } = require('./lib/market-tips-shadow');
+    stats = getShadowStats(db, { days: 60 });
+  } catch (e) {
+    log('DEBUG', 'MT-READY', `stats err: ${e.message}`);
+    return;
+  }
+  if (!Array.isArray(stats) || !stats.length) return;
+
+  const MIN_SETTLED = parseInt(process.env.MT_READY_MIN_SETTLED || '30', 10);
+  const MIN_ROI = parseFloat(process.env.MT_READY_MIN_ROI || '5');
+
+  const ready = [];
+  for (const s of stats) {
+    if (s.settled < MIN_SETTLED) continue;
+    if (s.roiPct == null || s.roiPct < MIN_ROI) continue;
+    const k = `${s.sport}|${s.market}`;
+    if (_marketTipReadyAlerted.has(k)) continue;
+    // Evita alertar pra segments já ativos via ENV.
+    const envKey = `${s.sport.toUpperCase()}_MARKET_TIPS_ENABLED`;
+    if (process.env[envKey] === 'true') continue;
+    ready.push(s);
+  }
+
+  if (!ready.length) return;
+
+  const tokenForAlert = Object.values(SPORTS).find(S => S?.enabled && S?.token)?.token;
+  if (!tokenForAlert) return;
+
+  const lines = ready.map(s =>
+    `• *${s.sport}/${s.market}*: n=${s.n} settled=${s.settled} hitRate=${s.hitRate}% ROI=*+${s.roiPct.toFixed(1)}%* avgEv=${s.avgEv.toFixed(1)}%`
+  ).join('\n');
+
+  const envFlags = [...new Set(ready.map(s => s.sport))].map(sp => `${sp.toUpperCase()}_MARKET_TIPS_ENABLED=true`).join(' && ');
+
+  const msg = `🎯 *MARKET TIPS — PRONTOS PRA ATIVAR*\n\n` +
+    `Após shadow log acumulado, estes segments bateram o threshold ` +
+    `(N≥${MIN_SETTLED} settled, ROI≥${MIN_ROI}%):\n\n${lines}\n\n` +
+    `Pra ativar admin-DM:\n\`${envFlags}\` no .env + restart\n\n` +
+    `_Shadow continuará logando. Você só liga o DM._`;
+
+  for (const adminId of ADMIN_IDS) await sendDM(tokenForAlert, adminId, msg).catch(() => {});
+  for (const s of ready) _marketTipReadyAlerted.add(`${s.sport}|${s.market}`);
+  log('INFO', 'MT-READY', `DM admin: ${ready.length} segments prontos pra ativar`);
+}
+
 // ── Backtest Validator (1x/dia) ──
 let _lastBacktestAlert = 0;
 const _backtestMilestonesSeen = new Set();
@@ -3472,9 +3525,12 @@ async function autoAnalyzeMatch(token, match) {
                     });
                     if (selected?.tip) {
                       const t = selected.tip;
-                      const dedupKey = `lol|${match.team1}|${match.team2}|${t.market}|${t.line}|${t.side}`;
+                      const { wasAdminDmSentRecently, markAdminDmSent } = require('./lib/market-tips-shadow');
+                      const dedupKey = `lol|${norm(match.team1)}|${norm(match.team2)}|${t.market}|${t.line}|${t.side}`;
                       const last = marketTipSent.get(dedupKey) || 0;
-                      if (Date.now() - last > 24 * 60 * 60 * 1000) {
+                      const inMemFresh = Date.now() - last <= 24 * 60 * 60 * 1000;
+                      const dbFresh = wasAdminDmSentRecently(db, { match, market: t.market, line: t.line, side: t.side, hoursAgo: 24 });
+                      if (!inMemFresh && !dbFresh) {
                         marketTipSent.set(dedupKey, Date.now());
                         const stake = mtp.kellyStakeForMarket(t.pModel, t.odd, 100, 0.10);
                         if (stake > 0) {
@@ -3484,11 +3540,12 @@ async function autoAnalyzeMatch(token, match) {
                           const tokenForMT = Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
                           if (tokenForMT) {
                             for (const adminId of ADMIN_IDS) sendDM(tokenForMT, adminId, dm).catch(() => {});
+                            markAdminDmSent(db, { match, market: t.market, line: t.line, side: t.side });
                             log('INFO', 'LOL-MARKET-TIP', `Admin DM enviado: ${t.label} @ ${t.odd} EV ${t.ev}% stake ${stake}u`);
                           }
                         }
                       } else {
-                        log('DEBUG', 'LOL-MARKET-TIP', `Dedup skip: ${dedupKey}`);
+                        log('DEBUG', 'LOL-MARKET-TIP', `Dedup skip (${inMemFresh ? 'mem' : 'db'}): ${dedupKey}`);
                       }
                     }
                   } catch (mte) { log('DEBUG', 'LOL-MARKET-TIP', `err: ${mte.message}`); }
@@ -6324,8 +6381,11 @@ async function _pollDotaInner(runOnce = false) {
                   });
                   if (selected?.tip) {
                     const t = selected.tip;
-                    const dedupKey = `dota2|${match.team1}|${match.team2}|${t.market}|${t.line}|${t.side}`;
-                    if (Date.now() - (marketTipSent.get(dedupKey) || 0) > 24 * 60 * 60 * 1000) {
+                    const { wasAdminDmSentRecently, markAdminDmSent } = require('./lib/market-tips-shadow');
+                    const dedupKey = `dota2|${norm(match.team1)}|${norm(match.team2)}|${t.market}|${t.line}|${t.side}`;
+                    const inMemFresh = Date.now() - (marketTipSent.get(dedupKey) || 0) <= 24 * 60 * 60 * 1000;
+                    const dbFresh = wasAdminDmSentRecently(db, { match, market: t.market, line: t.line, side: t.side, hoursAgo: 24 });
+                    if (!inMemFresh && !dbFresh) {
                       marketTipSent.set(dedupKey, Date.now());
                       const stake = mtp.kellyStakeForMarket(t.pModel, t.odd, 100, 0.10);
                       if (stake > 0) {
@@ -6333,9 +6393,12 @@ async function _pollDotaInner(runOnce = false) {
                         const tokenForMT = Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
                         if (tokenForMT) {
                           for (const adminId of ADMIN_IDS) sendDM(tokenForMT, adminId, dm).catch(() => {});
+                          markAdminDmSent(db, { match, market: t.market, line: t.line, side: t.side });
                           log('INFO', 'DOTA-MARKET-TIP', `Admin DM: ${t.label} @ ${t.odd} EV ${t.ev}% stake ${stake}u`);
                         }
                       }
+                    } else {
+                      log('DEBUG', 'DOTA-MARKET-TIP', `Dedup skip (${inMemFresh ? 'mem' : 'db'}): ${dedupKey}`);
                     }
                   }
                 } catch (mte) { log('DEBUG', 'DOTA-MARKET-TIP', `err: ${mte.message}`); }
@@ -7670,8 +7733,11 @@ async function pollTennis(runOnce = false) {
                       });
                       if (selected?.tip) {
                         const t = selected.tip;
-                        const dedupKey = `tennis|${match.team1}|${match.team2}|${t.market}|${t.line}|${t.side}`;
-                        if (Date.now() - (marketTipSent.get(dedupKey) || 0) > 24 * 60 * 60 * 1000) {
+                        const { wasAdminDmSentRecently, markAdminDmSent } = require('./lib/market-tips-shadow');
+                        const dedupKey = `tennis|${norm(match.team1)}|${norm(match.team2)}|${t.market}|${t.line}|${t.side}`;
+                        const inMemFresh = Date.now() - (marketTipSent.get(dedupKey) || 0) <= 24 * 60 * 60 * 1000;
+                        const dbFresh = wasAdminDmSentRecently(db, { match, market: t.market, line: t.line, side: t.side, hoursAgo: 24 });
+                        if (!inMemFresh && !dbFresh) {
                           marketTipSent.set(dedupKey, Date.now());
                           const stake = mtp.kellyStakeForMarket(t.pModel, t.odd, 100, 0.10);
                           if (stake > 0) {
@@ -7679,9 +7745,12 @@ async function pollTennis(runOnce = false) {
                             const tnToken = SPORTS['tennis']?.token || Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
                             if (tnToken) {
                               for (const adminId of ADMIN_IDS) sendDM(tnToken, adminId, dm).catch(() => {});
+                              markAdminDmSent(db, { match, market: t.market, line: t.line, side: t.side });
                               log('INFO', 'TENNIS-MARKET-TIP', `Admin DM: ${t.label} @ ${t.odd} EV ${t.ev}% stake ${stake}u`);
                             }
                           }
+                        } else {
+                          log('DEBUG', 'TENNIS-MARKET-TIP', `Dedup skip (${inMemFresh ? 'mem' : 'db'}): ${dedupKey}`);
                         }
                       }
                     } catch (mte) { log('DEBUG', 'TENNIS-MARKET-TIP', `err: ${mte.message}`); }
@@ -9096,8 +9165,11 @@ async function pollCs(runOnce = false) {
                     });
                     if (selected?.tip) {
                       const t = selected.tip;
-                      const dedupKey = `cs2|${match.team1}|${match.team2}|${t.market}|${t.line}|${t.side}`;
-                      if (Date.now() - (marketTipSent.get(dedupKey) || 0) > 24 * 60 * 60 * 1000) {
+                      const { wasAdminDmSentRecently, markAdminDmSent } = require('./lib/market-tips-shadow');
+                      const dedupKey = `cs2|${norm(match.team1)}|${norm(match.team2)}|${t.market}|${t.line}|${t.side}`;
+                      const inMemFresh = Date.now() - (marketTipSent.get(dedupKey) || 0) <= 24 * 60 * 60 * 1000;
+                      const dbFresh = wasAdminDmSentRecently(db, { match, market: t.market, line: t.line, side: t.side, hoursAgo: 24 });
+                      if (!inMemFresh && !dbFresh) {
                         marketTipSent.set(dedupKey, Date.now());
                         const stake = mtp.kellyStakeForMarket(t.pModel, t.odd, 100, 0.10);
                         if (stake > 0) {
@@ -9105,9 +9177,12 @@ async function pollCs(runOnce = false) {
                           const tokenForMT = Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
                           if (tokenForMT) {
                             for (const adminId of ADMIN_IDS) sendDM(tokenForMT, adminId, dm).catch(() => {});
+                            markAdminDmSent(db, { match, market: t.market, line: t.line, side: t.side });
                             log('INFO', 'CS-MARKET-TIP', `Admin DM: ${t.label} @ ${t.odd} EV ${t.ev}% stake ${stake}u`);
                           }
                         }
+                      } else {
+                        log('DEBUG', 'CS-MARKET-TIP', `Dedup skip (${inMemFresh ? 'mem' : 'db'}): ${dedupKey}`);
                       }
                     }
                   } catch (mte) { log('DEBUG', 'CS-MARKET-TIP', `err: ${mte.message}`); }

@@ -437,6 +437,14 @@ const migrations = [
       `);
     },
   },
+  {
+    id: '025_market_tips_shadow_admin_dm',
+    up(db) {
+      if (!tableExists(db, 'market_tips_shadow')) return;
+      addColumnIfMissing(db, 'market_tips_shadow', 'admin_dm_sent_at', 'admin_dm_sent_at TEXT');
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_mt_shadow_admin_dm ON market_tips_shadow(match_key, market, line, side, admin_dm_sent_at);`);
+    },
+  },
 ];
 
 function applyMigrations(db) {
