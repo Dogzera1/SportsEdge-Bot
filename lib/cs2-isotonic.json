@@ -1,0 +1,100 @@
+{
+  "version": 1,
+  "game": "cs2",
+  "fittedAt": "2026-04-18T10:48:46.325Z",
+  "method": "isotonic_pav",
+  "nCalibSamples": 3695,
+  "blocks": [
+    {
+      "pMin": 0.0752,
+      "pMax": 0.1,
+      "yMean": 0,
+      "n": 7
+    },
+    {
+      "pMin": 0.1065,
+      "pMax": 0.1496,
+      "yMean": 0.1212,
+      "n": 33
+    },
+    {
+      "pMin": 0.1506,
+      "pMax": 0.25,
+      "yMean": 0.1989,
+      "n": 181
+    },
+    {
+      "pMin": 0.2502,
+      "pMax": 0.2993,
+      "yMean": 0.2682,
+      "n": 179
+    },
+    {
+      "pMin": 0.3001,
+      "pMax": 0.35,
+      "yMean": 0.3361,
+      "n": 241
+    },
+    {
+      "pMin": 0.3502,
+      "pMax": 0.3999,
+      "yMean": 0.388,
+      "n": 299
+    },
+    {
+      "pMin": 0.4001,
+      "pMax": 0.4496,
+      "yMean": 0.4438,
+      "n": 329
+    },
+    {
+      "pMin": 0.4505,
+      "pMax": 0.4999,
+      "yMean": 0.4603,
+      "n": 365
+    },
+    {
+      "pMin": 0.5003,
+      "pMax": 0.55,
+      "yMean": 0.5173,
+      "n": 375
+    },
+    {
+      "pMin": 0.5504,
+      "pMax": 0.6,
+      "yMean": 0.5755,
+      "n": 384
+    },
+    {
+      "pMin": 0.6002,
+      "pMax": 0.6498,
+      "yMean": 0.6409,
+      "n": 323
+    },
+    {
+      "pMin": 0.6502,
+      "pMax": 0.7497,
+      "yMean": 0.7383,
+      "n": 577
+    },
+    {
+      "pMin": 0.7502,
+      "pMax": 0.8485,
+      "yMean": 0.7979,
+      "n": 287
+    },
+    {
+      "pMin": 0.8503,
+      "pMax": 0.899,
+      "yMean": 0.8409,
+      "n": 88
+    },
+    {
+      "pMin": 0.9006,
+      "pMax": 0.9489,
+      "yMean": 0.963,
+      "n": 27
+    }
+  ],
+  "trainingNote": "Walk-forward surface-agnostic Elo; aplicar pós-trained model output."
+}

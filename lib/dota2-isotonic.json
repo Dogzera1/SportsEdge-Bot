@@ -1,0 +1,106 @@
+{
+  "version": 1,
+  "game": "dota2",
+  "fittedAt": "2026-04-18T10:48:45.953Z",
+  "method": "isotonic_pav",
+  "nCalibSamples": 5687,
+  "blocks": [
+    {
+      "pMin": 0.0503,
+      "pMax": 0.1494,
+      "yMean": 0.2143,
+      "n": 84
+    },
+    {
+      "pMin": 0.1504,
+      "pMax": 0.1999,
+      "yMean": 0.2404,
+      "n": 104
+    },
+    {
+      "pMin": 0.2002,
+      "pMax": 0.2498,
+      "yMean": 0.25,
+      "n": 156
+    },
+    {
+      "pMin": 0.2501,
+      "pMax": 0.2998,
+      "yMean": 0.3992,
+      "n": 253
+    },
+    {
+      "pMin": 0.3,
+      "pMax": 0.3498,
+      "yMean": 0.4157,
+      "n": 332
+    },
+    {
+      "pMin": 0.35,
+      "pMax": 0.4499,
+      "yMean": 0.4531,
+      "n": 1119
+    },
+    {
+      "pMin": 0.45,
+      "pMax": 0.4997,
+      "yMean": 0.5171,
+      "n": 733
+    },
+    {
+      "pMin": 0.5001,
+      "pMax": 0.5498,
+      "yMean": 0.5245,
+      "n": 713
+    },
+    {
+      "pMin": 0.55,
+      "pMax": 0.6,
+      "yMean": 0.5302,
+      "n": 613
+    },
+    {
+      "pMin": 0.6001,
+      "pMax": 0.6499,
+      "yMean": 0.5717,
+      "n": 509
+    },
+    {
+      "pMin": 0.6502,
+      "pMax": 0.7,
+      "yMean": 0.6276,
+      "n": 384
+    },
+    {
+      "pMin": 0.7001,
+      "pMax": 0.7497,
+      "yMean": 0.7115,
+      "n": 253
+    },
+    {
+      "pMin": 0.7502,
+      "pMax": 0.7998,
+      "yMean": 0.7292,
+      "n": 192
+    },
+    {
+      "pMin": 0.8005,
+      "pMax": 0.8498,
+      "yMean": 0.748,
+      "n": 123
+    },
+    {
+      "pMin": 0.8504,
+      "pMax": 0.9,
+      "yMean": 0.8485,
+      "n": 66
+    },
+    {
+      "pMin": 0.9006,
+      "pMax": 0.9662,
+      "yMean": 0.92,
+      "n": 50
+    }
+  ],
+  "trainingNote": "Walk-forward surface-agnostic Elo; aplicar pós-trained model output."
+}
