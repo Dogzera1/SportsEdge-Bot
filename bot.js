@@ -475,6 +475,26 @@ function getRejections(sportFilter, limit = 50) {
 // helper loga ERROR + dedup por signature (10min) + DM pra bugs reais de código.
 const _bugReports = new Map(); // sig → ts
 const BUG_REPORT_COOLDOWN_MS = 10 * 60 * 1000;
+// Throws de flow-control esperados (gap de dados, não bugs) — descem pra DEBUG
+// e nunca escalam DM. Extensível via ENV REPORT_BUG_BENIGN_PATTERNS (csv).
+const BENIGN_ERROR_PATTERNS = [
+  /no serve stats available/i,
+  /no stats available/i,
+  /no data available/i,
+  /insufficient data/i,
+  /no odds/i,
+  /no matchups?/i,
+  /no fixtures?/i,
+  /no lineup/i,
+  /timeout/i,
+  /ETIMEDOUT|ENETUNREACH|ECONNREFUSED|ENOTFOUND|EAI_AGAIN/i,
+];
+const _extraBenign = String(process.env.REPORT_BUG_BENIGN_PATTERNS || '')
+  .split(',').map(s => s.trim()).filter(Boolean).map(s => new RegExp(s, 'i'));
+function _isBenignErr(msg) {
+  return BENIGN_ERROR_PATTERNS.some(r => r.test(msg)) || _extraBenign.some(r => r.test(msg));
+}
+
 function reportBug(module, err, ctx = {}) {
   const name = err?.name || 'Error';
   const msg = err?.message || String(err);
@@ -483,6 +503,13 @@ function reportBug(module, err, ctx = {}) {
   const now = Date.now();
 
   const ctxStr = Object.keys(ctx).length ? ' | ' + JSON.stringify(ctx).slice(0, 300) : '';
+
+  // Data-gap esperado → DEBUG + no-DM.
+  if (_isBenignErr(msg)) {
+    log('DEBUG', module, `${name}: ${msg}${ctxStr}`);
+    return;
+  }
+
   log('ERROR', module, `${name}: ${msg}${ctxStr}`);
 
   const last = _bugReports.get(sig) || 0;
