@@ -6078,6 +6078,83 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // Debug: tenta resolver cada tip unsettled de tennis e reporta o motivo da falha.
+  // GET /tennis-settle-debug?days=30 → [{tip_id, p1, p2, sent_at, status, reason}]
+  if (p === '/tennis-settle-debug') {
+    (async () => {
+      try {
+        const days = Math.min(365, Math.max(1, parseInt(parsed.query.days || '30', 10) || 30));
+        const tips = stmts.getUnsettledTips.all('tennis', `-${days} days`);
+        const lookbackDays = Math.min(800, Math.max(14, parseInt(process.env.TENNIS_SETTLE_LOOKBACK_DAYS || '600', 10) || 600));
+        const out = [];
+        for (const tip of tips) {
+          const sentRaw = String(tip.sent_at || '').trim();
+          const tipMs = sentRaw ? Date.parse(sentRaw.includes('T') ? sentRaw : sentRaw.replace(' ', 'T')) : NaN;
+          const ageH = Number.isFinite(tipMs) ? Math.round((Date.now() - tipMs) / 3.6e6) : null;
+
+          const row = {
+            tip_id: tip.id,
+            match_id: tip.match_id,
+            p1: tip.participant1,
+            p2: tip.participant2,
+            sent_at: tip.sent_at,
+            age_h: ageH,
+            pick: tip.tip_participant,
+          };
+
+          // Try 1: DB direct
+          try {
+            const rows = getTennisSettleRowsCached(lookbackDays);
+            const best = pickBestTennisSettleRow(rows, tip.participant1, tip.participant2, tipMs);
+            if (best?.winner) {
+              row.status = 'resolvable_db';
+              row.winner = best.winner;
+              row.resolved_at = best.resolved_at;
+              out.push(row); continue;
+            }
+          } catch (e) { row.db_err = e.message; }
+
+          // Try 2: ESPN window sync around sent_at
+          try {
+            await syncTennisEspnCompletedAroundSentAt(tip.sent_at);
+            const rows2 = getTennisSettleRowsCached(lookbackDays);
+            const best2 = pickBestTennisSettleRow(rows2, tip.participant1, tip.participant2, tipMs);
+            if (best2?.winner) {
+              row.status = 'resolvable_espn_window';
+              row.winner = best2.winner;
+              row.resolved_at = best2.resolved_at;
+              out.push(row); continue;
+            }
+          } catch (e) { row.espn_win_err = e.message; }
+
+          // Diagnose why no match found: look at candidate rows near tipMs
+          try {
+            const all = getTennisSettleRowsCached(lookbackDays);
+            const nearby = [];
+            for (const r of all) {
+              const rMs = Date.parse(String(r.resolved_at || '').replace(' ', 'T'));
+              if (!Number.isFinite(rMs) || !Number.isFinite(tipMs)) continue;
+              if (Math.abs(rMs - tipMs) > 10 * 86400000) continue;
+              const nameMatch = tennisPairMatchesPlayers(tip.participant1, tip.participant2, r.team1, r.team2);
+              if (nameMatch) nearby.push({ team1: r.team1, team2: r.team2, resolved_at: r.resolved_at, winner: r.winner, name_match: true });
+            }
+            row.nearby_name_matches = nearby.length;
+            row.status = 'unresolved';
+            row.reason = nearby.length === 0
+              ? 'no_result_row_found (Sackmann+ESPN sem dado pros nomes/datas)'
+              : 'name_match_but_date_filter_rejected';
+          } catch (e) { row.reason = 'diagnose_err: ' + e.message; row.status = 'unresolved'; }
+
+          out.push(row);
+        }
+        sendJson(res, { ok: true, total: tips.length, tips: out });
+      } catch (e) {
+        sendJson(res, { ok: false, error: e.message }, 500);
+      }
+    })();
+    return;
+  }
+
   // Avalia saúde das tips live pendentes — sinal pra cashout/hedge manual.
   // GET /cashout-alerts?sport=esports&days=3
   if (p === '/cashout-alerts') {

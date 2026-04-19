@@ -5353,6 +5353,56 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
       await send(token, chatId, txt);
     } catch (e) { await send(token, chatId, `❌ ${e.message}`); }
 
+  } else if (cmd === '/unsettled' || cmd === '/settle-debug') {
+    if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
+    try {
+      const parts = String(text || '').trim().split(/\s+/);
+      const days = Math.min(120, Math.max(1, parseInt(parts[1] || '30', 10) || 30));
+      const data = await serverGet(`/tennis-settle-debug?days=${days}`, 'tennis').catch(() => null);
+      if (!data || !data.ok) {
+        await send(token, chatId, `❌ Endpoint falhou${data?.error ? ': ' + data.error : ''}`);
+        return;
+      }
+      if (!data.tips?.length) {
+        await send(token, chatId, `✅ Nenhuma tip unsettled de tennis últimos ${days}d.`);
+        return;
+      }
+
+      // Trigger settle pra qualquer "resolvable_*" encontrado
+      let autoSettled = 0;
+      for (const t of data.tips) {
+        if ((t.status === 'resolvable_db' || t.status === 'resolvable_espn_window') && t.winner && t.match_id) {
+          try {
+            await serverPost('/settle', { matchId: t.match_id, winner: t.winner }, 'tennis');
+            autoSettled++;
+          } catch (_) {}
+        }
+      }
+
+      const byStatus = {};
+      for (const t of data.tips) byStatus[t.status] = (byStatus[t.status] || 0) + 1;
+      const summary = Object.entries(byStatus).map(([k,v]) => `${k}: ${v}`).join(' · ');
+
+      let txt = `🔍 *Tennis unsettled (${days}d)* — ${data.total} tips\n${summary}\n`;
+      if (autoSettled > 0) txt += `✅ ${autoSettled} liquidadas agora.\n`;
+      txt += '\n';
+
+      const showList = data.tips.slice(0, 20);
+      for (const t of showList) {
+        const icon = t.status?.startsWith('resolvable') ? '✅'
+                   : t.status === 'unresolved' ? '⏳' : '❓';
+        const age = t.age_h != null ? `${t.age_h}h` : '?';
+        const reason = t.reason ? ` — ${t.reason}` : '';
+        const winner = t.winner ? ` → ${t.winner}` : '';
+        txt += `${icon} ${t.p1} vs ${t.p2} (${age})${winner}${reason}\n`;
+      }
+      if (data.tips.length > showList.length) txt += `\n… +${data.tips.length - showList.length} mais`;
+
+      await send(token, chatId, txt);
+    } catch (e) {
+      await send(token, chatId, `❌ Erro: ${e.message}`);
+    }
+    return;
   } else if (cmd === '/rejections') {
     if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
     try {
