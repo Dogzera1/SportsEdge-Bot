@@ -8978,8 +8978,8 @@ const server = http.createServer(async (req, res) => {
         const bk = bankrollBySport[s.sport] || {};
         const initial = bk.initial_banca || 0;
         const current = bk.current_banca != null ? bk.current_banca : 0;
-        const allocationTargetPct = baseline.amount > 0 ? +(initial / baseline.amount * 100).toFixed(2) : null;
-        const allocationActualPct = baseline.amount > 0 ? +(current / baseline.amount * 100).toFixed(2) : null;
+        const allocationTargetPct = _bl.amount > 0 ? +(initial / _bl.amount * 100).toFixed(2) : null;
+        const allocationActualPct = _bl.amount > 0 ? +(current / _bl.amount * 100).toFixed(2) : null;
         const allocationDriftPp = (allocationTargetPct != null && allocationActualPct != null)
           ? +(allocationActualPct - allocationTargetPct).toFixed(2) : null;
         const drained = current <= 0 && initial > 0;
