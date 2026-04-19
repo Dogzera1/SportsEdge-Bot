@@ -252,7 +252,11 @@
       "Bash(awk 'NR>=10100 && NR<=10530' bot.js)",
       "Read(//c/c/Users/vict_/Desktop/lol betting/**)",
       "Bash(grep -E \"\\\\.js$|lib|server\")",
-      "Bash(xargs grep *)"
+      "Bash(xargs grep *)",
+      "Bash(grep -i \"DB_PATH\" .env echo \"---\")",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(git push *)"
     ]
   }
 }
