@@ -5249,6 +5249,7 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
       // 6. Sharp action: settlement status
       const settledLast24h = db.prepare(`
         SELECT COUNT(*) AS n FROM tips WHERE settled_at >= datetime('now','-24 hours')
+          AND (archived IS NULL OR archived = 0)
       `).get();
       txt += `\n*Settlement 24h:* ${settledLast24h.n} tips liquidadas\n`;
 

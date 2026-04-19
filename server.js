@@ -6571,6 +6571,7 @@ const server = http.createServer(async (req, res) => {
         const profit = db.prepare(`
           SELECT COALESCE(SUM(profit_reais), 0) AS p FROM tips
           WHERE sport = ? AND result IN ('win', 'loss')
+            AND (archived IS NULL OR archived = 0)
         `).get(sport)?.p || 0;
         currentBanca = (bk.initial_banca || 0) + profit;
       }
@@ -6609,7 +6610,7 @@ const server = http.createServer(async (req, res) => {
       const thresholds = [3, 7, 14, 21, 30, 45, 60, 90];
       const buckets = thresholds.map(d => {
         const row = db.prepare(
-          `SELECT COUNT(*) as c FROM tips WHERE sport = ? AND result IS NULL AND sent_at < datetime('now', ?)`
+          `SELECT COUNT(*) as c FROM tips WHERE sport = ? AND result IS NULL AND sent_at < datetime('now', ?) AND (archived IS NULL OR archived = 0)`
         ).get(sport, `-${d} days`);
         return { days: d, count: row?.c || 0 };
       }).filter(b => b.count > 0);
@@ -6637,7 +6638,7 @@ const server = http.createServer(async (req, res) => {
       const MIN_EV = { mma: 5, tennis: 7, esports: 2, dota: 5, cs: 5, valorant: 5, darts: 5, snooker: 5, tabletennis: 5, football: 5 };
 
       const params = [];
-      let where = `result IS NULL AND model_p_pick IS NOT NULL AND model_p_pick > 0 AND model_p_pick < 1 AND odds IS NOT NULL AND odds > 1`;
+      let where = `result IS NULL AND model_p_pick IS NOT NULL AND model_p_pick > 0 AND model_p_pick < 1 AND odds IS NOT NULL AND odds > 1 AND (archived IS NULL OR archived = 0)`;
       if (sportFilter) { where += ` AND LOWER(sport) = ?`; params.push(sportFilter); }
 
       const rows = db.prepare(`
@@ -6801,6 +6802,7 @@ const server = http.createServer(async (req, res) => {
                model_p1, model_p2, event_name, sent_at, confidence
         FROM tips
         WHERE LOWER(sport) IN (${placeholders}) AND (result IS NULL OR result = 'pending')
+          AND (archived IS NULL OR archived = 0)
         ORDER BY sent_at DESC
       `).all(...sportsToProcess);
 
@@ -6921,7 +6923,9 @@ const server = http.createServer(async (req, res) => {
       const { predictTrainedTennis, hasTrainedModel: hasTrainedTennis, getTennisRecentMomentum } = require('./lib/tennis-model-trained');
       const { getTennisElo, extractSurface } = require('./lib/tennis-ml');
 
-      const where = sport === 'all' ? `result IN ('win','loss')` : `LOWER(sport) = ? AND result IN ('win','loss')`;
+      const where = sport === 'all'
+        ? `result IN ('win','loss') AND (archived IS NULL OR archived = 0)`
+        : `LOWER(sport) = ? AND result IN ('win','loss') AND (archived IS NULL OR archived = 0)`;
       const params = sport === 'all' ? [] : [sport];
       const tips = db.prepare(`SELECT id, sport, participant1, participant2, tip_participant, odds, model_p1, model_p2, event_name, result, profit_reais FROM tips WHERE ${where}`).all(...params);
 
