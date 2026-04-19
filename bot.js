@@ -959,28 +959,45 @@ async function applyGlobalRisk(sport, desiredUnits, leagueSlug) {
   if (!desiredUnits || desiredUnits <= 0) return { ok: false, units: 0, reason: 'stake_zero' };
 
   // ── Drawdown check: reduz/bloqueia stakes quando banca está em queda ──
+  // Gradiente: SOFT (15%)×0.5 → TAPER (20%)×0.35 → HARD (25%)=bloqueia → DRAINED (banca<=0)=bloqueia.
   let drawdownMult = 1.0;
   const cached = _drawdownCache.get(sport);
+  const DRAWDOWN_TAPER_LIMIT = parseFloat(process.env.DRAWDOWN_TAPER_LIMIT || '0.20'); // 20% intermediário
+  const applyFromPct = (drawdown) => {
+    if (drawdown >= 1) { // banca <= 0 (drenou totalmente a allocation)
+      log('WARN', 'RISK', `${sport}: ALOCAÇÃO DRENADA (banca ≤ 0) — BLOQUEADO até rebalance manual`);
+      return { ok: false, units: 0, reason: 'banca_drained' };
+    }
+    if (drawdown >= DRAWDOWN_HARD_LIMIT) {
+      log('WARN', 'RISK', `${sport}: drawdown ${(drawdown * 100).toFixed(1)}% ≥ ${(DRAWDOWN_HARD_LIMIT * 100).toFixed(0)}% — BLOQUEADO`);
+      return { ok: false, units: 0, reason: `drawdown_${(drawdown * 100).toFixed(0)}pct` };
+    }
+    if (drawdown >= DRAWDOWN_TAPER_LIMIT) {
+      log('INFO', 'RISK', `${sport}: drawdown ${(drawdown * 100).toFixed(1)}% ≥ ${(DRAWDOWN_TAPER_LIMIT * 100).toFixed(0)}% — stakes ×0.35`);
+      return { mult: 0.35 };
+    }
+    if (drawdown >= DRAWDOWN_SOFT_LIMIT) {
+      log('INFO', 'RISK', `${sport}: drawdown ${(drawdown * 100).toFixed(1)}% ≥ ${(DRAWDOWN_SOFT_LIMIT * 100).toFixed(0)}% — stakes ×0.5`);
+      return { mult: 0.5 };
+    }
+    return { mult: 1.0 };
+  };
+
   if (!cached || Date.now() - cached.checkedAt > DRAWDOWN_CACHE_TTL) {
     try {
       const bk = await serverGet(`/bankroll`, sport).catch(() => null);
-      if (bk?.initialBanca && bk?.currentBanca && bk.initialBanca > 0) {
+      if (bk?.initialBanca && bk.initialBanca > 0 && bk?.currentBanca != null) {
         const drawdown = (bk.initialBanca - bk.currentBanca) / bk.initialBanca;
         _drawdownCache.set(sport, { pct: drawdown, checkedAt: Date.now() });
-        if (drawdown >= DRAWDOWN_HARD_LIMIT) {
-          log('WARN', 'RISK', `${sport}: drawdown ${(drawdown * 100).toFixed(1)}% ≥ ${DRAWDOWN_HARD_LIMIT * 100}% — BLOQUEADO`);
-          return { ok: false, units: 0, reason: `drawdown_${(drawdown * 100).toFixed(0)}pct` };
-        }
-        if (drawdown >= DRAWDOWN_SOFT_LIMIT) {
-          drawdownMult = 0.5;
-          log('INFO', 'RISK', `${sport}: drawdown ${(drawdown * 100).toFixed(1)}% ≥ ${DRAWDOWN_SOFT_LIMIT * 100}% — stakes ×0.5`);
-        }
+        const r = applyFromPct(drawdown);
+        if (r.ok === false) return r;
+        drawdownMult = r.mult;
       }
     } catch (_) {}
-  } else if (cached.pct >= DRAWDOWN_HARD_LIMIT) {
-    return { ok: false, units: 0, reason: `drawdown_${(cached.pct * 100).toFixed(0)}pct` };
-  } else if (cached.pct >= DRAWDOWN_SOFT_LIMIT) {
-    drawdownMult = 0.5;
+  } else {
+    const r = applyFromPct(cached.pct);
+    if (r.ok === false) return r;
+    drawdownMult = r.mult;
   }
 
   // Ajuste por liga (tier-2/3 = stake reduzido proporcionalmente) — apenas esports/LoL

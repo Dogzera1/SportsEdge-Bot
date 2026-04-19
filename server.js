@@ -8963,8 +8963,26 @@ const server = http.createServer(async (req, res) => {
       }
       const bySport = Object.values(bySportMap).sort((a, b) => b.total - a.total);
 
+      // Allocation map: banca inicial per-sport (target) + atual (após profit/loss).
+      // Permite dashboard mostrar allocation drift — sport que drena >X% do portfolio
+      // está "sugando" capital dos outros.
+      const bankrollBySport = {};
+      for (const b of bankrolls) {
+        bankrollBySport[b.sport] = {
+          initial_banca: +(b.initial_banca || 0).toFixed(2),
+          current_banca: +(b.current_banca || 0).toFixed(2),
+        };
+      }
       const sportsBreakdown = bySport.map(s => {
         const dec = s.wins + s.losses;
+        const bk = bankrollBySport[s.sport] || {};
+        const initial = bk.initial_banca || 0;
+        const current = bk.current_banca != null ? bk.current_banca : 0;
+        const allocationTargetPct = baseline.amount > 0 ? +(initial / baseline.amount * 100).toFixed(2) : null;
+        const allocationActualPct = baseline.amount > 0 ? +(current / baseline.amount * 100).toFixed(2) : null;
+        const allocationDriftPp = (allocationTargetPct != null && allocationActualPct != null)
+          ? +(allocationActualPct - allocationTargetPct).toFixed(2) : null;
+        const drained = current <= 0 && initial > 0;
         return {
           sport: s.sport,
           total: s.total,
@@ -8975,6 +8993,13 @@ const server = http.createServer(async (req, res) => {
           stake_reais: +(s.stake || 0).toFixed(2),
           hitRate: dec > 0 ? +(s.wins / dec * 100).toFixed(1) : null,
           roi: s.stake > 0 ? +(s.profit / s.stake * 100).toFixed(2) : null,
+          // Allocation metrics
+          initial_banca: +initial.toFixed(2),
+          current_banca: +current.toFixed(2),
+          allocation_target_pct: allocationTargetPct,
+          allocation_actual_pct: allocationActualPct,
+          allocation_drift_pp: allocationDriftPp,
+          drained,
         };
       });
 

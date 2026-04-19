@@ -1088,7 +1088,7 @@ async function loadOverall(gen = refreshGen) {
     if (charts.equity) { charts.equity.destroy(); charts.equity = null; }
   }
 
-  // Sport breakdown — per-sport panel
+  // Sport breakdown — per-sport panel (ROI + allocation drift)
   const sports = data.sports || [];
   const maxAbsRoi = Math.max(0.1, ...sports.map(s => Math.abs(s.roi || 0)));
   document.getElementById('sportRoiList').innerHTML = sports.length ? sports.map(s => {
@@ -1097,9 +1097,18 @@ async function loadOverall(gen = refreshGen) {
     const cls = roi == null ? '' : roi >= 0 ? 'pos' : 'neg';
     const val = roi == null ? '—' : fmtPct(roi);
     const cssSign = sign(roi);
+    const drift = s.allocation_drift_pp;
+    const target = s.allocation_target_pct;
+    const actual = s.allocation_actual_pct;
+    const driftStr = (drift != null && target != null)
+      ? ` <span class="kpi-meta" title="alocação atual ${actual?.toFixed(1)}% vs target ${target.toFixed(1)}% do portfolio">${drift >= 0 ? '+' : ''}${drift.toFixed(1)}pp drift</span>`
+      : '';
+    const drainedTag = s.drained
+      ? ' <span class="chip" style="background:var(--danger-bg,rgba(239,68,68,0.15));color:var(--danger,#ef4444);font-size:10px;padding:1px 5px" title="Banca ≤ 0 — stakes bloqueadas (applyGlobalRisk)">⚠ drenado</span>'
+      : '';
     return `
       <div class="sport-roi-row">
-        <div class="sport-roi-name">${s.sport} <span class="chip" style="font-size:10px;padding:1px 5px">${s.total}t</span></div>
+        <div class="sport-roi-name">${s.sport} <span class="chip" style="font-size:10px;padding:1px 5px">${s.total}t</span>${drainedTag}${driftStr}</div>
         <div class="sport-roi-bar">
           <div class="sport-roi-bar-fill ${cls}" style="width:${pct}%; ${cls === 'neg' ? `right:50%;` : `left:50%;`}"></div>
         </div>
@@ -1133,19 +1142,34 @@ async function loadKPIs(gen = refreshGen) {
   const profit = banca.profitReais != null ? banca.profitReais : 0;
   const growthPct = banca.growthPct;
 
+  // Portfolio context — 1u vem do baseline GLOBAL (R$900 → R$9), não per-sport.
+  // Per-sport "banca" = allocation inicial (R$100) + lucro atribuído ao sport.
+  // Não é um orçamento isolado; é um ledger de contribuição ao portfolio total.
+  const unitVal = banca.unitValue || 0;
+  const initialSport = banca.initialBanca || 0;
+  const baselineAmount = banca.baselineAmount || 0;
+  const currentBancaNum = Number(banca.currentBanca) || 0;
+  const allocationPct = baselineAmount > 0 ? (initialSport / baselineAmount * 100) : null;
+  const portfolioImpactPct = baselineAmount > 0 ? (profit / baselineAmount * 100) : null;
+  // Quando per-sport é negativa significa que drenou mais que allocation — P&L real, não banca real
+  const isDrained = currentBancaNum < 0;
+  const allocationLine = allocationPct != null
+    ? `<span title="Per-sport banca é atribuição de P&L ao sport. Stakes (1u) saem do portfolio global de ${fmtMoney(baselineAmount)}.">alocação ${fmtMoney(initialSport)} · ${portfolioImpactPct != null ? (portfolioImpactPct >= 0 ? '+' : '') + portfolioImpactPct.toFixed(1) + '% portfolio' : 'portfolio ' + fmtMoney(baselineAmount)}</span>`
+    : `<span>desde início</span>`;
+
   const html = `
     <div class="kpi">
-      <div class="kpi-label">Banca</div>
-      <div class="kpi-value">${fmtMoney(banca.currentBanca)}</div>
+      <div class="kpi-label">Banca <span class="kpi-meta">(${currentSport})</span>${isDrained ? ' <span class="kpi-meta" title="Sport perdeu mais que allocation inicial — stakes continuam saindo do portfolio global" style="color:var(--danger,#ef4444)">⚠ drenado</span>' : ''}</div>
+      <div class="kpi-value ${isDrained ? 'neg' : ''}">${fmtMoney(banca.currentBanca)}</div>
       <div class="kpi-sub">
         <span class="delta ${sign(growthPct)}">${arrow(growthPct)} ${fmtPct(growthPct)}</span>
-        <span>desde início</span>
+        ${allocationLine}
       </div>
     </div>
     <div class="kpi">
       <div class="kpi-label">Lucro acumulado</div>
-      <div class="kpi-value ${sign(profit)}">${profit >= 0 ? '+' : ''}${fmtMoney(profit)}${banca.unitValue ? ` <span class="kpi-meta">(${profit >= 0 ? '+' : ''}${(profit / banca.unitValue).toFixed(2)}u)</span>` : ''}</div>
-      <div class="kpi-sub">${totalTips} tips · ${winRate != null ? winRate.toFixed(0) + '% WR' : '—'}${ov.pending ? ' · ' + ov.pending + ' pend' : ''}</div>
+      <div class="kpi-value ${sign(profit)}">${profit >= 0 ? '+' : ''}${fmtMoney(profit)}${unitVal ? ` <span class="kpi-meta">(${profit >= 0 ? '+' : ''}${(profit / unitVal).toFixed(2)}u)</span>` : ''}</div>
+      <div class="kpi-sub">${totalTips} tips · ${winRate != null ? winRate.toFixed(0) + '% WR' : '—'}${ov.pending ? ' · ' + ov.pending + ' pend' : ''}${unitVal ? ` · <span title="Unit global — 1u = ${banca.unitPct || 1}% de ${fmtMoney(baselineAmount)} (portfolio)">1u=${fmtMoney(unitVal)}</span>` : ''}</div>
     </div>
     <div class="kpi">
       <div class="kpi-label">ROI</div>
