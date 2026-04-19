@@ -12,6 +12,26 @@ const { adjustStakeUnits } = require('./lib/risk-manager');
 const { esportsPreFilter } = require('./lib/ml');
 const { formatLineShopDM, computeLineShop } = require('./lib/line-shopping');
 const { tipBetButton } = require('./lib/book-deeplink');
+
+// Helper central pra semi-auto deeplink. Usa computeLineShop pra escolher book
+// com odd maior entre preferred (PREFERRED_BOOKMAKERS no server). Retorna
+// reply_markup pronto pra spread em sendDM, ou null se book não identificado.
+function _buildTipBetButton(sport, oddsObj, pickSide, match, stakeStr, fallbackOdd) {
+  try {
+    const stakeU = parseFloat(String(stakeStr || '0').replace(/u/i, '')) || 0;
+    const unitVal = parseFloat(process.env.BANKROLL_UNIT_VALUE || '9') || 9;
+    const stakeReais = +(stakeU * unitVal).toFixed(2);
+    const ls = oddsObj && pickSide ? computeLineShop(oddsObj, pickSide) : null;
+    const book = ls?.bestBook || oddsObj?.bookmaker || 'Pinnacle';
+    const odd = ls?.bestOdd || fallbackOdd;
+    return tipBetButton(book, {
+      sport,
+      team1: match?.team1 || match?.participant1 || match?.home_name || '',
+      team2: match?.team2 || match?.participant2 || match?.away_name || '',
+      odd, stakeReais,
+    });
+  } catch (_) { return null; }
+}
 const { getLolProbability, mapProbFromSeries } = require('./lib/lol-model');
 const { predictTrainedEsports, hasTrainedModel: hasTrainedEsportsModel } = require('./lib/esports-model-trained');
 const { buildTrainedContext: buildEsportsTrainedContext } = require('./lib/esports-runtime-features');
@@ -1564,20 +1584,8 @@ async function runAutoAnalysis() {
             `${oddsLabel}${baixaNote}\n\n` +
             `⚠️ _Aposte com responsabilidade._`;
 
-          // Semi-auto: botão deeplink pra casa com a ODD MAIOR entre os preferred
-          // books (PREFERRED_BOOKMAKERS no server). computeLineShop já filtra pra
-          // best odd entre disponíveis. Ex: user com Pinnacle+Bet365 → botão aponta
-          // pro book com odd mais alta.
-          const _stakeU = parseFloat(String(tipStakeAdj || '0').replace(/u/i, '')) || 0;
-          const _unitVal = parseFloat(process.env.BANKROLL_UNIT_VALUE || '9') || 9;
-          const _stakeReais = +(_stakeU * _unitVal).toFixed(2);
-          const _ls = computeLineShop(oddsToUse, _pickSideLs);
-          const _betBook = _ls?.bestBook || oddsToUse?.bookmaker || 'Pinnacle';
-          const _betOdd = _ls?.bestOdd || tipOdd;
-          const _betBtn = tipBetButton(_betBook, {
-            sport: 'lol', team1: match.team1, team2: match.team2,
-            odd: _betOdd, stakeReais: _stakeReais,
-          });
+          // Semi-auto deeplink — book com odd maior entre preferred.
+          const _betBtn = _buildTipBetButton('lol', oddsToUse, _pickSideLs, match, tipStakeAdj, tipOdd);
 
           for (const [userId, prefs] of subscribedUsers) {
             if (!prefs.has('esports')) continue;
@@ -1837,9 +1845,10 @@ async function runAutoAnalysis() {
               `📋 _Formato Bo1 — análise por forma e H2H (draft não disponível antes do início)_\n\n` +
               `⚠️ _Aposte com responsabilidade._`;
 
+            const _betBtnUp = _buildTipBetButton('lol', result.o, _pickSideUp, match, tipStakeAdj, tipOdd);
             for (const [userId, prefs] of subscribedUsers) {
               if (!prefs.has('esports')) continue;
-              try { await sendDM(esportsConfig.token, userId, tipMsg); }
+              try { await sendDM(esportsConfig.token, userId, tipMsg, _betBtnUp || undefined); }
               catch(e) { if (e.message?.includes('403')) subscribedUsers.delete(userId); }
             }
             analyzedMatches.set(matchKey, { ts: now, tipSent: true });
@@ -7979,9 +7988,10 @@ Máximo 200 palavras.`;
           setDotaAnalyzed({ ts: now, tipSent: true, noEdge: false });
           await _sleep(2000); continue;
         }
+        const _betBtnDota = _buildTipBetButton('dota2', o, isT1bet ? 't1' : 't2', match, tipStakeAdj, tipOdd);
         for (const [uid, sports] of subscribedUsers) {
           if (!sports.has('esports')) continue;
-          await sendDM(token, uid, msg).catch(() => {});
+          await sendDM(token, uid, msg, _betBtnDota || undefined).catch(() => {});
         }
         log('INFO', 'AUTO-DOTA', `TIP${isLive ? ' [LIVE]' : ''}: ${tipTeam} @ ${tipOdd} (${tipStakeAdj})`);
         setDotaAnalyzed({ ts: now, tipSent: true, noEdge: false });
@@ -8732,9 +8742,10 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
           }, 'mma').catch(() => {});
         }
 
+        const _betBtnMma = _buildTipBetButton('mma', fight.odds, _pickSideMma, fight, tipStake, tipOdd);
         for (const [userId, prefs] of subscribedUsers) {
           if (!prefs.has('mma')) continue;
-          try { await sendDM(token, userId, tipMsg); } catch(_) {}
+          try { await sendDM(token, userId, tipMsg, _betBtnMma || undefined); } catch(_) {}
         }
         analyzedMma.set(key, { ts: now, tipSent: true });
         log('INFO', 'AUTO-MMA', `Tip enviada: ${tipTeam} @ ${tipOdd} | EV:${tipEV}% | ${tipConf}`);
@@ -9715,9 +9726,10 @@ Máximo 200 palavras. Raciocínio breve antes da decisão.`;
           }, 'tennis').catch(() => {});
         }
 
+        const _betBtnTen = _buildTipBetButton('tennis', o, pickIsT1 ? 't1' : 't2', match, tipStakeAdjTennis, tipOdd);
         for (const [userId, prefs] of subscribedUsers) {
           if (!prefs.has('tennis')) continue;
-          try { await sendDM(token, userId, tipMsg); } catch(_) {}
+          try { await sendDM(token, userId, tipMsg, _betBtnTen || undefined); } catch(_) {}
         }
         analyzedTennis.set(key, Object.assign({}, analyzedTennis.get(key) || {}, { ts: now, [isLivePhase ? 'tipSentLive' : 'tipSentPre']: true, [isLivePhase ? 'tsLive' : 'tsPre']: now }));
         log('INFO', 'AUTO-TENNIS', `Tip enviada${isLivePhase ? ' (LIVE)' : ''}: ${tipPlayer} @ ${tipOdd} | EV:${tipEV}% | ${tipConf}`);
@@ -10217,9 +10229,10 @@ Máximo 200 palavras.`;
           continue;
         }
 
+        const _betBtnFb = _buildTipBetButton('football', match.odds, _pickSideFb, match, tipStakeAdjFb, tipOdd);
         for (const [userId, prefs] of subscribedUsers) {
           if (!prefs.has('football')) continue;
-          try { await sendDM(token, userId, tipMsg); } catch(_) {}
+          try { await sendDM(token, userId, tipMsg, _betBtnFb || undefined); } catch(_) {}
         }
         analyzedFootball.set(key, { ts: now, tipSent: true });
         log('INFO', 'AUTO-FOOTBALL', `Tip enviada: ${tipTeam} @ ${tipOdd} | ${tipMarket} | EV:${tipEV}% | ${tipConf}`);
@@ -10455,9 +10468,10 @@ async function pollTableTennis(runOnce = false) {
           `_${tipReason}_\n\n` +
           `⚠️ _Aposte com responsabilidade._`;
 
+        const _betBtnTt = _buildTipBetButton('tabletennis', match.odds, direction, match, String(stakeAdj), pickOdd);
         for (const [userId, prefs] of subscribedUsers) {
           if (!prefs.has('tabletennis')) continue;
-          try { await sendDM(token, userId, msg); } catch (_) {}
+          try { await sendDM(token, userId, msg, _betBtnTt || undefined); } catch (_) {}
         }
         log('INFO', 'AUTO-TT', `Tip enviada: ${pickTeam} @ ${pickOdd} | EV:${evPct.toFixed(1)}% | ${conf}`);
         await new Promise(r => setTimeout(r, 3000));
@@ -10978,9 +10992,10 @@ Máximo 150 palavras.`;
           `_${tipReason}_\n\n` +
           `⚠️ _Aposte com responsabilidade._`;
 
+        const _betBtnCs = _buildTipBetButton('cs', match.odds, direction, match, String(stakeAdj), pickOdd);
         for (const [userId, prefs] of subscribedUsers) {
           if (!prefs.has('cs')) continue;
-          try { await sendDM(token, userId, msg); } catch (_) {}
+          try { await sendDM(token, userId, msg, _betBtnCs || undefined); } catch (_) {}
         }
         log('INFO', 'AUTO-CS', `Tip enviada: ${pickTeam} @ ${pickOdd} | EV:${evPct.toFixed(1)}% | ${conf}`);
         await new Promise(r => setTimeout(r, 3000));
@@ -11337,9 +11352,10 @@ async function pollValorant(runOnce = false) {
           `_${tipReason}_\n\n` +
           `⚠️ _Aposte com responsabilidade._`;
 
+        const _betBtnVal = _buildTipBetButton('valorant', match.odds, direction, match, String(stakeAdj), pickOdd);
         for (const [userId, prefs] of subscribedUsers) {
           if (!prefs.has('valorant')) continue;
-          try { await sendDM(token, userId, msg); } catch (_) {}
+          try { await sendDM(token, userId, msg, _betBtnVal || undefined); } catch (_) {}
         }
         log('INFO', 'AUTO-VAL', `Tip enviada: ${pickTeam} @ ${pickOdd} | EV:${evPct.toFixed(1)}% | ${conf}`);
         await new Promise(r => setTimeout(r, 3000));
@@ -11575,9 +11591,10 @@ async function runAutoDarts() {
             `🧠 Por quê: _${tipReason}_\n\n` +
             `⚠️ _Aposte com responsabilidade._`;
 
+          const _betBtnDarts = _buildTipBetButton('darts', match.odds, ml.direction, match, String(stakeAdj), pickOdd);
           for (const [userId, prefs] of subscribedUsers) {
             if (!prefs.has('darts')) continue;
-            try { await sendDM(dartsConfig.token, userId, tipMsg); } catch(_) {}
+            try { await sendDM(dartsConfig.token, userId, tipMsg, _betBtnDarts || undefined); } catch(_) {}
           }
           log('INFO', 'AUTO-DARTS', `Tip enviada: ${pickTeam} @ ${pickOdd} | EV:${evPct.toFixed(1)}%`);
           await new Promise(r => setTimeout(r, 3000));
@@ -11764,9 +11781,10 @@ async function runAutoSnooker() {
             `🧠 ${tipReason}\n\n` +
             `⚠️ _Odds Pinnacle._`;
 
+          const _betBtnSn = _buildTipBetButton('snooker', match.odds, ml.direction, match, String(stakeAdj), pickOdd);
           for (const [userId, prefs] of subscribedUsers) {
             if (!prefs.has('snooker')) continue;
-            try { await sendDM(snookerConfig.token, userId, tipMsg); } catch(_) {}
+            try { await sendDM(snookerConfig.token, userId, tipMsg, _betBtnSn || undefined); } catch(_) {}
           }
           log('INFO', 'AUTO-SNOOKER', `Tip enviada: ${pickTeam} @ ${pickOdd} | EV:${evPct.toFixed(1)}%`);
           await new Promise(r => setTimeout(r, 3000));
