@@ -78,6 +78,22 @@ try {
   for (const [k, v] of seed) ins.run(k, v);
 } catch(e) { log('WARN', 'BOOT', `Baseline seed: ${e.message}`); }
 
+// Filtra candidates odds pra manter só books que user aposta.
+// ENV: PREFERRED_BOOKMAKERS=Pinnacle,Bet365 (csv, case-insensitive, substring match).
+// Fallback: se nenhum candidate bate (ex: SX.Bet é único disponível), retorna
+// todos os candidates (better than no tip).
+function _filterPreferredBooks(candidates) {
+  const raw = process.env.PREFERRED_BOOKMAKERS;
+  if (!raw || !candidates?.length) return candidates;
+  const allowed = raw.split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+  if (!allowed.length) return candidates;
+  const filtered = candidates.filter(c => {
+    const book = String(c?.bookmaker || '').toLowerCase();
+    return allowed.some(a => book.includes(a) || a.includes(book));
+  });
+  return filtered.length ? filtered : candidates;
+}
+
 function getBaseline() {
   const rows = db.prepare("SELECT key, value FROM settings WHERE key IN ('bankroll_baseline_date','bankroll_baseline_amount','bankroll_unit_pct')").all();
   const map = Object.fromEntries(rows.map(r => [r.key, r.value]));
@@ -4481,16 +4497,21 @@ const server = http.createServer(async (req, res) => {
         return;
       }
 
+      // Filtra por PREFERRED_BOOKMAKERS (csv) — user só aposta em certas casas.
+      // Livros não-preferidos são descartados do shopping (tip com odd melhor em
+      // SX.Bet se você só tem conta Pinnacle+Bet365 é inutilizável).
+      const filteredCandidates = _filterPreferredBooks(candidates);
+
       // PRIORIZA PINNACLE (sharp anchor). SX.Bet/TheOddsAPI vão como alternativas.
-      const pinCandidate = candidates.find(c => c.bookmaker === 'Pinnacle');
-      const altCandidate = candidates.find(c => c.bookmaker !== 'Pinnacle');
+      const pinCandidate = filteredCandidates.find(c => c.bookmaker === 'Pinnacle');
+      const altCandidate = filteredCandidates.find(c => c.bookmaker !== 'Pinnacle');
       const primary = pinCandidate || altCandidate;
       if (altCandidate && pinCandidate) {
         primary._alternative = { t1: altCandidate.t1, t2: altCandidate.t2, bookmaker: altCandidate.bookmaker };
       }
-      if (candidates.length > 1) {
-        primary._allOdds = candidates.map(c => ({ t1: c.t1, t2: c.t2, bookmaker: c.bookmaker }));
-        log('INFO', 'ODDS', `Dota ${t1} vs ${t2} → primary=${primary.bookmaker} (${candidates.map(c => `${c.bookmaker}:${c.t1}/${c.t2}`).join(' | ')})`);
+      if (filteredCandidates.length > 1) {
+        primary._allOdds = filteredCandidates.map(c => ({ t1: c.t1, t2: c.t2, bookmaker: c.bookmaker }));
+        log('INFO', 'ODDS', `Dota ${t1} vs ${t2} → primary=${primary.bookmaker} (${filteredCandidates.map(c => `${c.bookmaker}:${c.t1}/${c.t2}`).join(' | ')})`);
       }
       sendJson(res, primary);
       return;
@@ -4558,18 +4579,19 @@ const server = http.createServer(async (req, res) => {
         return;
       }
 
+      // Filtra por PREFERRED_BOOKMAKERS (csv) — user só aposta em certas casas.
+      const filteredCandidates = _filterPreferredBooks(candidates);
+
       // PRIORIZA PINNACLE como base de tip (sharp anchor calibrado).
-      // Se Pinnacle disponível → primary. SX.Bet vai como `_alternative` (informa
-      // ao usuário que pode pegar linha melhor lá). User pediu Pinnacle como ground truth.
-      const pinCandidate = candidates.find(c => c.bookmaker === 'Pinnacle');
-      const sxCandidate = candidates.find(c => c.bookmaker !== 'Pinnacle');
+      const pinCandidate = filteredCandidates.find(c => c.bookmaker === 'Pinnacle');
+      const sxCandidate = filteredCandidates.find(c => c.bookmaker !== 'Pinnacle');
       const primary = pinCandidate || sxCandidate;
       if (sxCandidate && pinCandidate) {
         primary._alternative = { t1: sxCandidate.t1, t2: sxCandidate.t2, bookmaker: sxCandidate.bookmaker };
       }
-      if (candidates.length > 1) {
-        primary._allOdds = candidates.map(c => ({ t1: c.t1, t2: c.t2, bookmaker: c.bookmaker }));
-        log('INFO', 'ODDS', `LoL ${t1} vs ${t2} → primary=${primary.bookmaker} (${candidates.map(c => `${c.bookmaker}:${c.t1}/${c.t2}`).join(' | ')})`);
+      if (filteredCandidates.length > 1) {
+        primary._allOdds = filteredCandidates.map(c => ({ t1: c.t1, t2: c.t2, bookmaker: c.bookmaker }));
+        log('INFO', 'ODDS', `LoL ${t1} vs ${t2} → primary=${primary.bookmaker} (${filteredCandidates.map(c => `${c.bookmaker}:${c.t1}/${c.t2}`).join(' | ')})`);
       }
       sendJson(res, primary);
       return;

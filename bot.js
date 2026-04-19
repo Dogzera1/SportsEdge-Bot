@@ -10,7 +10,8 @@ const { SPORTS, getSportById, getSportByToken, getTokenToSportMap } = require('.
 const { log, calcKelly, calcKellyFraction, calcKellyWithP, norm, fmtDate, fmtDateTime, fmtDuration, safeParse, cachedHttpGet, markPollHeartbeat, getPollHeartbeats } = require('./lib/utils');
 const { adjustStakeUnits } = require('./lib/risk-manager');
 const { esportsPreFilter } = require('./lib/ml');
-const { formatLineShopDM } = require('./lib/line-shopping');
+const { formatLineShopDM, computeLineShop } = require('./lib/line-shopping');
+const { tipBetButton } = require('./lib/book-deeplink');
 const { getLolProbability, mapProbFromSeries } = require('./lib/lol-model');
 const { predictTrainedEsports, hasTrainedModel: hasTrainedEsportsModel } = require('./lib/esports-model-trained');
 const { buildTrainedContext: buildEsportsTrainedContext } = require('./lib/esports-runtime-features');
@@ -1563,9 +1564,24 @@ async function runAutoAnalysis() {
             `${oddsLabel}${baixaNote}\n\n` +
             `⚠️ _Aposte com responsabilidade._`;
 
+          // Semi-auto: botão deeplink pra casa com a ODD MAIOR entre os preferred
+          // books (PREFERRED_BOOKMAKERS no server). computeLineShop já filtra pra
+          // best odd entre disponíveis. Ex: user com Pinnacle+Bet365 → botão aponta
+          // pro book com odd mais alta.
+          const _stakeU = parseFloat(String(tipStakeAdj || '0').replace(/u/i, '')) || 0;
+          const _unitVal = parseFloat(process.env.BANKROLL_UNIT_VALUE || '9') || 9;
+          const _stakeReais = +(_stakeU * _unitVal).toFixed(2);
+          const _ls = computeLineShop(oddsToUse, _pickSideLs);
+          const _betBook = _ls?.bestBook || oddsToUse?.bookmaker || 'Pinnacle';
+          const _betOdd = _ls?.bestOdd || tipOdd;
+          const _betBtn = tipBetButton(_betBook, {
+            sport: 'lol', team1: match.team1, team2: match.team2,
+            odd: _betOdd, stakeReais: _stakeReais,
+          });
+
           for (const [userId, prefs] of subscribedUsers) {
             if (!prefs.has('esports')) continue;
-            try { await sendDM(esportsConfig.token, userId, tipMsg); }
+            try { await sendDM(esportsConfig.token, userId, tipMsg, _betBtn || undefined); }
             catch(e) {
               if (e.message?.includes('403')) {
                 subscribedUsers.delete(userId);
