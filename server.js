@@ -5606,7 +5606,8 @@ const server = http.createServer(async (req, res) => {
     if (!psId) { sendJson(res, { resolved: false, error: 'matchId obrigatório' }, 400); return; }
     if (!PANDASCORE_TOKEN) { sendJson(res, { resolved: false, error: 'PANDASCORE_TOKEN não configurado' }); return; }
     try {
-      const r = await httpGet(`https://api.pandascore.co/lol/matches/${psId}`, { 'Authorization': `Bearer ${PANDASCORE_TOKEN}` });
+      // PS rota correta é /matches/{id} (generic). /lol/matches/{id} retorna "Route not found".
+      const r = await httpGet(`https://api.pandascore.co/matches/${psId}`, { 'Authorization': `Bearer ${PANDASCORE_TOKEN}` });
       const m = safeParse(r.body, {});
       const winner = m.winner?.name || null;
       if (winner) {
@@ -5634,7 +5635,8 @@ const server = http.createServer(async (req, res) => {
     if (!psId) { sendJson(res, { resolved: false, error: 'matchId obrigatório' }, 400); return; }
     if (!PANDASCORE_TOKEN) { sendJson(res, { resolved: false, error: 'PANDASCORE_TOKEN não configurado' }); return; }
     try {
-      const r = await httpGet(`https://api.pandascore.co/dota2/matches/${psId}`, { 'Authorization': `Bearer ${PANDASCORE_TOKEN}` });
+      // PS rota correta é /matches/{id} (generic). /dota2/matches/{id} retorna "Route not found".
+      const r = await httpGet(`https://api.pandascore.co/matches/${psId}`, { 'Authorization': `Bearer ${PANDASCORE_TOKEN}` });
       const m = safeParse(r.body, {});
       const t1 = m.opponents?.[0]?.opponent;
       const t2 = m.opponents?.[1]?.opponent;
@@ -5687,7 +5689,8 @@ const server = http.createServer(async (req, res) => {
     const baseId = rawId.replace(/_MAP\d+$/, '');
     const psMatch = baseId.match(new RegExp('^' + sport + '_ps_(\\d+)$'));
     if (psMatch) {
-      const r = await httpGet(`https://api.pandascore.co/${pandaPath}/matches/${psMatch[1]}`, { 'Authorization': `Bearer ${PANDASCORE_TOKEN}` });
+      // PS rota correta é /matches/{id} (generic). /{pandaPath}/matches/{id} retorna "Route not found".
+      const r = await httpGet(`https://api.pandascore.co/matches/${psMatch[1]}`, { 'Authorization': `Bearer ${PANDASCORE_TOKEN}` });
       const m = safeParse(r.body, {});
       const winner = m.winner?.name || null;
       if (winner) {
