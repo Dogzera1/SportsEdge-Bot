@@ -875,19 +875,28 @@ async function loadOverall(gen = refreshGen) {
   const clv = data.clv;
 
   // KPI hero — cross-sport
-  const profit = banca.total_profit || 0;
-  const profitU = banca.total_profit_units;
-  const growthPct = banca.growthPct;
+  // Usa baseline (data + valor inicial + 1u=1%) pra calcular lucro/units em relação ao início real
+  const useBaseline = banca.baseline_amount != null && banca.baseline_date != null;
+  const profit = useBaseline ? (banca.baseline_profit || 0) : (banca.total_profit || 0);
+  const profitU = useBaseline ? banca.baseline_profit_units : banca.total_profit_units;
+  const growthPct = useBaseline ? banca.baseline_growth_pct : banca.growthPct;
+  const initialAmount = useBaseline ? banca.baseline_amount : banca.total_initial;
+  const baselineDate = useBaseline
+    ? new Date(banca.baseline_date + 'T00:00:00').toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' })
+    : null;
+  const unitLabel = useBaseline && banca.unit_value
+    ? `1u=${fmtMoney(banca.unit_value)} (${banca.unit_pct}%)`
+    : null;
   document.getElementById('kpis').innerHTML = `
     <div class="kpi">
       <div class="kpi-label">Banca total (${banca.bankrolls || 0} sports)</div>
       <div class="kpi-value">${fmtMoney(banca.total_current)}</div>
-      <div class="kpi-sub"><span class="delta ${sign(growthPct)}">${arrow(growthPct)} ${fmtPct(growthPct)}</span> desde início</div>
+      <div class="kpi-sub"><span class="delta ${sign(growthPct)}">${arrow(growthPct)} ${fmtPct(growthPct)}</span> desde ${baselineDate ? fmtMoney(initialAmount) + ' · ' + baselineDate : 'início'}</div>
     </div>
     <div class="kpi">
       <div class="kpi-label">Lucro acumulado</div>
       <div class="kpi-value ${sign(profit)}">${profit >= 0 ? '+' : ''}${fmtMoney(profit)}${profitU != null ? ` <span class="kpi-meta">(${profitU > 0 ? '+' : ''}${profitU.toFixed(2)}u)</span>` : ''}</div>
-      <div class="kpi-sub">${ov.total_tips} tips · ${ov.hitRate != null ? ov.hitRate.toFixed(0) + '% WR' : '—'}${ov.pending ? ' · ' + ov.pending + ' pend' : ''}</div>
+      <div class="kpi-sub">${ov.total_tips} tips · ${ov.hitRate != null ? ov.hitRate.toFixed(0) + '% WR' : '—'}${ov.pending ? ' · ' + ov.pending + ' pend' : ''}${unitLabel ? ' · ' + unitLabel : ''}</div>
     </div>
     <div class="kpi">
       <div class="kpi-label">ROI global</div>

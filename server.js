@@ -65,6 +65,32 @@ try {
   }
 } catch(e) { log('WARN', 'BOOT', `Limpeza odds: ${e.message}`); }
 
+// ── Bankroll baseline (total + data + unit %) ──
+// Usado pro dashboard Geral: mostra "desde R$X (DD/MM) · 1u=R$Y"
+// Defaults: R$900 em 2026-04-16 (post-archive da migration 028), unit=1%.
+try {
+  const seed = [
+    ['bankroll_baseline_date', '2026-04-16'],
+    ['bankroll_baseline_amount', '900'],
+    ['bankroll_unit_pct', '1.0'],
+  ];
+  const ins = db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)");
+  for (const [k, v] of seed) ins.run(k, v);
+} catch(e) { log('WARN', 'BOOT', `Baseline seed: ${e.message}`); }
+
+function getBaseline() {
+  const rows = db.prepare("SELECT key, value FROM settings WHERE key IN ('bankroll_baseline_date','bankroll_baseline_amount','bankroll_unit_pct')").all();
+  const map = Object.fromEntries(rows.map(r => [r.key, r.value]));
+  const amount = parseFloat(map.bankroll_baseline_amount) || 900;
+  const pct = parseFloat(map.bankroll_unit_pct) || 1.0;
+  return {
+    date: map.bankroll_baseline_date || '2026-04-16',
+    amount,
+    unit_pct: pct,
+    unit_value: +(amount * pct / 100).toFixed(4),
+  };
+}
+
 // ── Football Elo helper (1X2) ──
 function getElo(team) {
   const row = stmts.getFootballElo.get(team);
@@ -8650,6 +8676,27 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // ── Bankroll baseline: configura valor/data inicial e % por unidade ──
+  // POST /bankroll-baseline?date=2026-04-16&amount=900&unit_pct=1
+  if (p === '/bankroll-baseline' && req.method === 'POST') {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const date = (parsed.query.date || '').trim();
+      const amount = parseFloat(parsed.query.amount);
+      const unitPct = parsed.query.unit_pct != null ? parseFloat(parsed.query.unit_pct) : null;
+      const ups = db.prepare("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value");
+      if (date && /^\d{4}-\d{2}-\d{2}$/.test(date)) ups.run('bankroll_baseline_date', date);
+      if (Number.isFinite(amount) && amount > 0) ups.run('bankroll_baseline_amount', String(amount));
+      if (Number.isFinite(unitPct) && unitPct > 0) ups.run('bankroll_unit_pct', String(unitPct));
+      sendJson(res, { ok: true, baseline: getBaseline() });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+  if (p === '/bankroll-baseline' && req.method === 'GET') {
+    sendJson(res, getBaseline());
+    return;
+  }
+
   // ── Settle sweep: varre tips pendentes e liquida as que têm winner em match_results ──
   // POST /settle-sweep?sport=esports[&days=14]  ou  sem sport pra todos
   if (p === '/settle-sweep' && req.method === 'POST') {
@@ -8795,6 +8842,11 @@ const server = http.createServer(async (req, res) => {
         return { day: r.day, cum_banca: parseFloat(cum.toFixed(2)), profit_reais: profit, n: r.n };
       });
 
+      const baseline = getBaseline();
+      const baselineProfit = +(totalCurrent - baseline.amount).toFixed(2);
+      const baselineGrowth = baseline.amount > 0 ? +((baselineProfit / baseline.amount) * 100).toFixed(2) : 0;
+      const totalProfitUnitsGlobal = baseline.unit_value > 0 ? +(baselineProfit / baseline.unit_value).toFixed(2) : 0;
+
       sendJson(res, {
         days,
         banca: {
@@ -8804,6 +8856,13 @@ const server = http.createServer(async (req, res) => {
           total_profit_units: +totalProfitUnits.toFixed(2),
           growthPct: +growthPct.toFixed(2),
           bankrolls: bankrolls.length,
+          baseline_date: baseline.date,
+          baseline_amount: baseline.amount,
+          unit_pct: baseline.unit_pct,
+          unit_value: baseline.unit_value,
+          baseline_profit: baselineProfit,
+          baseline_profit_units: totalProfitUnitsGlobal,
+          baseline_growth_pct: baselineGrowth,
         },
         overall: {
           total_tips: tipsAgg?.total || 0,
