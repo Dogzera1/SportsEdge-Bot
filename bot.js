@@ -4868,8 +4868,8 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
   } else if (cmd === '/shadow') {
     if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
     // Argumento opcional: /shadow darts | /shadow snooker → default 'darts'
-    const parts = String(text || '').trim().split(/\s+/);
-    const sportArg = parts[1]?.toLowerCase() || 'darts';
+    const cmdParts = command.trim().split(/\s+/);
+    const sportArg = cmdParts[1]?.toLowerCase() || 'darts';
     try {
       const data = await serverGet(`/shadow-tips?sport=${encodeURIComponent(sportArg)}&limit=100`);
       if (data?.error) { await send(token, chatId, `❌ ${data.error}`); return; }
@@ -4896,7 +4896,7 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
   } else if (cmd === '/market-tips') {
     if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
     try {
-      const parts = String(text || '').trim().split(/\s+/);
+      const parts = command.trim().split(/\s+/);
       // /market-tips leaks [days] — segments com ROI negativo persistente
       // /market-tips league [sport] [days] — per-league ROI breakdown
       if (parts[1]?.toLowerCase() === 'league') {
@@ -5070,7 +5070,7 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
   } else if (cmd === '/tip') {
     if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
     try {
-      const parts = String(text || '').trim().split(/\s+/);
+      const parts = command.trim().split(/\s+/);
       if (parts.length < 2) {
         await send(token, chatId,
           '*Uso:* `/tip <id>` ou `/tip <time1> vs <time2>`\n' +
@@ -5356,7 +5356,6 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
   } else if (cmd === '/unsettled' || cmd === '/settle-debug') {
     if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
     try {
-      const parts = String(text || '').trim().split(/\s+/);
       const days = Math.min(120, Math.max(1, parseInt(parts[1] || '30', 10) || 30));
       const data = await serverGet(`/tennis-settle-debug?days=${days}`, 'tennis').catch(() => null);
       if (!data || !data.ok) {
@@ -5406,7 +5405,6 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
   } else if (cmd === '/rejections') {
     if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
     try {
-      const parts = String(text || '').trim().split(/\s+/);
       // /rejections summary — matrix sport × reason (cobertura completa do buffer)
       if (parts[1]?.toLowerCase() === 'summary') {
         if (!_rejections.length) {
@@ -5469,7 +5467,7 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
   } else if (cmd === '/sync-val-history' || cmd === '/sync-history') {
     if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
     try {
-      const parts = String(text || '').trim().split(/\s+/);
+      const parts = command.trim().split(/\s+/);
       const gameArg = (parts[1] || 'valorant').toLowerCase();
       const validGames = { valorant: 'valorant', cs: 'cs-go', cs2: 'cs-go', dota: 'dota2', dota2: 'dota2', lol: 'lol' };
       const psGame = validGames[gameArg];
@@ -6620,6 +6618,7 @@ async function poll(token, sport) {
                      text.startsWith('/models') || text.startsWith('/val-') ||
                      text.startsWith('/rejections') || text.startsWith('/sync-val-') ||
                      text.startsWith('/sync-history') || text.startsWith('/pipeline') ||
+                     text.startsWith('/unsettled') || text.startsWith('/settle-debug') ||
                      text.startsWith('/tip ') || text.startsWith('/help') || text.startsWith('/start') ||
                      text.startsWith('/alerts')) {
             // Passa `sport` da poll (qual bot recebeu) para evitar default 'esports'
