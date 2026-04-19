@@ -785,21 +785,94 @@ async function adminFetch(path, opts = {}) {
   return r;
 }
 
-async function settleTipManual(id, result, sport) {
+// Undo toast: pending settles com janela de 5s pra cancelar + 10s pra desfazer após efetivar.
+const _pendingSettles = new Map(); // toastId → timeoutId
+
+function showToast(html, opts = {}) {
+  let root = document.getElementById('_toastRoot');
+  if (!root) {
+    root = document.createElement('div');
+    root.id = '_toastRoot';
+    root.style.cssText = 'position:fixed;bottom:24px;right:24px;z-index:9999;display:flex;flex-direction:column;gap:8px;';
+    document.body.appendChild(root);
+  }
+  const el = document.createElement('div');
+  el.className = 'toast-item';
+  el.style.cssText = 'background:var(--surface-2,#1e293b);border:1px solid var(--border,#334155);color:var(--text,#e2e8f0);padding:10px 14px;border-radius:6px;box-shadow:0 4px 12px rgba(0,0,0,0.3);font-size:13px;min-width:280px;display:flex;align-items:center;gap:10px;';
+  el.innerHTML = html;
+  root.appendChild(el);
+  if (opts.ttl) setTimeout(() => el.remove(), opts.ttl);
+  return el;
+}
+
+async function settleTipManual(id, result, sport, force) {
   const label = result === 'win' ? 'WIN' : 'LOSS';
-  if (!confirm(`Marcar tip #${id} (${sport}) como ${label}?`)) return;
+  const color = result === 'win' ? 'var(--success,#10b981)' : 'var(--danger,#ef4444)';
+  const toastId = 'settle_' + id + '_' + Date.now();
+
+  // Janela de 5s pra cancelar antes de efetivar. Se não cancelar, chama /settle-manual.
+  if (!force) {
+    const toast = showToast(
+      `<span style="flex:1">Marcar tip #${id} como <b style="color:${color}">${label}</b> em <span id="${toastId}_cd">5</span>s…</span>
+       <button id="${toastId}_cancel" style="background:var(--surface-3,#475569);border:1px solid var(--border,#334155);color:var(--text);padding:4px 10px;border-radius:4px;cursor:pointer;font-size:12px">CANCELAR</button>`,
+    );
+    let remaining = 5;
+    const cdEl = toast.querySelector('#' + toastId + '_cd');
+    const cancelBtn = toast.querySelector('#' + toastId + '_cancel');
+    let cancelled = false;
+    cancelBtn.onclick = () => { cancelled = true; toast.remove(); };
+    const iv = setInterval(() => {
+      remaining--;
+      if (cdEl) cdEl.textContent = remaining;
+      if (remaining <= 0) clearInterval(iv);
+    }, 1000);
+    await new Promise(r => setTimeout(r, 5000));
+    clearInterval(iv);
+    toast.remove();
+    if (cancelled) return;
+  }
+
   try {
+    const body = { id, result, sport };
+    if (force) body.force = 1;
     const r = await adminFetch('/settle-manual', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id, result, sport }),
+      body: JSON.stringify(body),
     });
     const j = await r.json();
     if (j.ok) {
-      // Re-executa o refresh completo (KPIs, equity, ROI por sport, tips, overall)
-      // pra refletir banca/ROI atualizados imediatamente após liquidação manual.
+      // Toast de undo: 10s pra reverter.
+      const undoToast = showToast(
+        `<span style="flex:1">✓ Tip #${id} marcada como <b style="color:${color}">${label}</b></span>
+         <button style="background:var(--surface-3,#475569);border:1px solid var(--border,#334155);color:var(--text);padding:4px 10px;border-radius:4px;cursor:pointer;font-size:12px">DESFAZER</button>`,
+        { ttl: 10000 },
+      );
+      undoToast.querySelector('button').onclick = async () => {
+        try {
+          const rr = await adminFetch('/reopen-tip', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id, sport }),
+          });
+          const jj = await rr.json();
+          if (jj.ok) {
+            undoToast.remove();
+            showToast(`↩ Tip #${id} reaberta`, { ttl: 3000 });
+            if (typeof refresh === 'function') refresh();
+          } else {
+            alert('Erro ao desfazer: ' + (jj.error || '?'));
+          }
+        } catch (e) { alert('Erro: ' + e.message); }
+      };
       if (typeof refresh === 'function') refresh();
       else loadTips();
+    } else if (j.error === 'tip_too_recent') {
+      // Server rejeitou por idade — confirma e retenta com force.
+      const msg = `Tip enviada há apenas ${j.ageMin}min (mínimo ${j.minAgeMin}min). Jogo provavelmente ainda não acabou. Liquidar mesmo assim?`;
+      if (confirm(msg)) {
+        return settleTipManual(id, result, sport, true);
+      }
     } else {
       alert('Erro: ' + (j.error || 'falha desconhecida'));
     }

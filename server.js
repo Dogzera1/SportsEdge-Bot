@@ -3288,6 +3288,7 @@ const ADMIN_ROUTES_POST = new Set([
   '/reset-tips',
   '/settle',
   '/settle-manual',
+  '/reopen-tip',
   '/void-old-pending',
   '/set-bankroll',
   '/update-clv',
@@ -6230,17 +6231,31 @@ const server = http.createServer(async (req, res) => {
         const matchId = String(payload.matchId || parsed.query.matchId || '').trim();
         if (!idStr && !matchId) { sendJson(res, { error: 'id ou matchId obrigatório' }, 400); return; }
 
-        let changes = 0;
-        if (idStr) {
-          const id = parseInt(idStr, 10);
-          if (!Number.isFinite(id)) { sendJson(res, { error: 'id inválido' }, 400); return; }
-          const r = db.prepare(`UPDATE tips SET result = NULL, settled_at = NULL, profit_reais = NULL WHERE id = ? AND sport = ?`).run(id, sport);
-          changes = r.changes;
-        } else {
-          const r = db.prepare(`UPDATE tips SET result = NULL, settled_at = NULL, profit_reais = NULL WHERE match_id = ? AND sport = ? ORDER BY sent_at DESC LIMIT 1`).run(matchId, sport);
-          changes = r.changes;
-        }
-        sendJson(res, { ok: true, changes });
+        // Transação: pega profit_reais atual, zera result, reverte bankroll.
+        const out = db.transaction(() => {
+          let row;
+          if (idStr) {
+            const id = parseInt(idStr, 10);
+            if (!Number.isFinite(id)) return { ok: false, error: 'id inválido' };
+            row = db.prepare(`SELECT id, profit_reais FROM tips WHERE id = ? AND sport = ?`).get(id, sport);
+          } else {
+            row = db.prepare(`SELECT id, profit_reais FROM tips WHERE match_id = ? AND sport = ? ORDER BY sent_at DESC LIMIT 1`).get(matchId, sport);
+          }
+          if (!row) return { ok: true, changes: 0 };
+
+          const r = db.prepare(`UPDATE tips SET result = NULL, settled_at = NULL, profit_reais = NULL WHERE id = ? AND sport = ?`).run(row.id, sport);
+          // Reverte o impacto no current_banca (soma inversa do profit_reais).
+          if (Number.isFinite(row.profit_reais) && row.profit_reais !== 0) {
+            const bk = stmts.getBankroll.get(sport);
+            if (bk) {
+              const nova = parseFloat((bk.current_banca - row.profit_reais).toFixed(2));
+              db.prepare(`UPDATE bankroll SET current_banca = ? WHERE sport = ?`).run(nova, sport);
+            }
+          }
+          return { ok: true, changes: r.changes, revertedProfit: row.profit_reais };
+        })();
+        if (out && out.error) { sendJson(res, { error: out.error }, 400); return; }
+        sendJson(res, out);
       } catch (e) {
         sendJson(res, { error: e.message }, 500);
       }
@@ -6262,10 +6277,23 @@ const server = http.createServer(async (req, res) => {
         const id = parseInt(idStr, 10);
         if (!Number.isFinite(id)) { sendJson(res, { error: 'id inválido' }, 400); return; }
 
+        const force = payload.force === 1 || payload.force === '1' || payload.force === true;
         const settled = db.transaction(() => {
           const tip = stmts.getTipById.get(id, sport);
           if (!tip) return { ok: false, error: 'tip não encontrada' };
           if (tip.result !== null) return { ok: false, error: 'tip já liquidada — use ↩ para reabrir primeiro' };
+
+          // Gate temporal: tip nova (<30min) pode ser clique acidental — exige force=1.
+          const minAgeMin = Math.max(0, parseInt(process.env.SETTLE_MANUAL_MIN_AGE_MIN || '30', 10) || 30);
+          if (minAgeMin > 0 && !force) {
+            const sentMs = tip.sent_at ? Date.parse(String(tip.sent_at).replace(' ', 'T')) : 0;
+            if (sentMs > 0) {
+              const ageMin = (Date.now() - sentMs) / 60000;
+              if (ageMin < minAgeMin) {
+                return { ok: false, error: `tip_too_recent`, ageMin: Math.round(ageMin), minAgeMin };
+              }
+            }
+          }
 
           db.prepare(`UPDATE tips SET result = ?, settled_at = datetime('now') WHERE id = ? AND sport = ?`).run(result, id, sport);
 
