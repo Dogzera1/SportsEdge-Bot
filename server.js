@@ -91,6 +91,23 @@ function getBaseline() {
   };
 }
 
+// Unit-native recompute: stake em u × unit_value atual. DB guarda snapshots (stake_reais/
+// profit_reais) calculados no momento do settlement com unit_value daquela época; se
+// baseline mudar, recomputamos on-the-fly pra consistência.
+function tipStakeReais(tip, unitValue) {
+  const stakeU = parseFloat(String(tip.stake || '').replace(/u/i, '')) || 0;
+  return +(stakeU * unitValue).toFixed(2);
+}
+function tipProfitReais(tip, unitValue) {
+  const stakeU = parseFloat(String(tip.stake || '').replace(/u/i, '')) || 0;
+  const odds = parseFloat(tip.odds) || 1;
+  if (!stakeU || !unitValue || unitValue <= 0) return null;
+  if (tip.result === 'win')  return +((stakeU * (odds - 1) * unitValue)).toFixed(2);
+  if (tip.result === 'loss') return +(-(stakeU * unitValue)).toFixed(2);
+  if (tip.result === 'push' || tip.result === 'void') return 0;
+  return null;
+}
+
 // ── Football Elo helper (1X2) ──
 function getElo(team) {
   const row = stmts.getFootballElo.get(team);
@@ -8539,7 +8556,15 @@ const server = http.createServer(async (req, res) => {
     query += ` ORDER BY ${sortCol} ${dir}, t.id ${dir} LIMIT ?`;
     params.push(limit);
 
-    sendJson(res, db.prepare(query).all(params));
+    // Recomputa stake_reais / profit_reais usando baseline.unit_value atual.
+    // DB guarda snapshots de quando a tip foi settled; mudanças de baseline refletem aqui.
+    const _bl = getBaseline();
+    const rows = db.prepare(query).all(params).map(t => ({
+      ...t,
+      stake_reais: tipStakeReais(t, _bl.unit_value),
+      profit_reais: tipProfitReais(t, _bl.unit_value),
+    }));
+    sendJson(res, rows);
     return;
   }
 
@@ -8722,13 +8747,19 @@ const server = http.createServer(async (req, res) => {
       // para garantir consistência com tips visíveis no dashboard (bankroll pode
       // ficar stale se /roi não foi chamado para aquele sport desde o archive).
       const bankrollsRaw = db.prepare(`SELECT sport, initial_banca, current_banca FROM bankroll`).all();
-      const profitBySport = db.prepare(`
-        SELECT sport, COALESCE(SUM(profit_reais), 0) AS p
+      // Recomputa profit em unit-native usando baseline.unit_value (fonte única).
+      const _bl = getBaseline();
+      const allSettled = db.prepare(`
+        SELECT sport, stake, odds, result
         FROM tips
-        WHERE (archived IS NULL OR archived = 0)
-          AND result IS NOT NULL AND result != 'void' AND profit_reais IS NOT NULL
-        GROUP BY sport
-      `).all().reduce((m, r) => { m[r.sport] = r.p; return m; }, {});
+        WHERE (archived IS NULL OR archived = 0) AND result IN ('win','loss')
+      `).all();
+      const profitBySport = {};
+      for (const t of allSettled) {
+        const p = tipProfitReais(t, _bl.unit_value);
+        if (p == null) continue;
+        profitBySport[t.sport] = (profitBySport[t.sport] || 0) + p;
+      }
       const bankrolls = bankrollsRaw.map(b => {
         const recomputed = parseFloat(((b.initial_banca || 0) + (profitBySport[b.sport] || 0)).toFixed(2));
         if (Math.abs(recomputed - (b.current_banca || 0)) > 0.01) {
@@ -8747,25 +8778,34 @@ const server = http.createServer(async (req, res) => {
         return s + (uv > 0 ? sp / uv : 0);
       }, 0);
 
-      // Tips agregadas (não archived)
-      const tipsAgg = db.prepare(`
-        SELECT
-          COUNT(*) AS total,
-          SUM(CASE WHEN result='win' THEN 1 ELSE 0 END) AS wins,
-          SUM(CASE WHEN result='loss' THEN 1 ELSE 0 END) AS losses,
-          SUM(CASE WHEN result IS NULL THEN 1 ELSE 0 END) AS pending,
-          SUM(COALESCE(profit_reais, 0)) AS profit_reais,
-          SUM(COALESCE(stake_reais, 0)) AS stake_reais,
-          AVG(ev) AS avg_ev,
-          AVG(odds) AS avg_odds
+      // Tips agregadas (não archived) — fetch raw e agrega em JS com baseline.unit_value
+      const windowTips = db.prepare(`
+        SELECT sport, stake, odds, result, ev, settled_at
         FROM tips
         WHERE (archived IS NULL OR archived = 0)
           AND (sent_at >= datetime('now', ?) OR result IS NULL)
-      `).get(`-${days} days`);
+      `).all(`-${days} days`);
+      const tipsAgg = { total: 0, wins: 0, losses: 0, pending: 0, profit_reais: 0, stake_reais: 0, avg_ev: null, avg_odds: null };
+      let evSum = 0, evN = 0, oddsSum = 0, oddsN = 0;
+      for (const t of windowTips) {
+        tipsAgg.total++;
+        if (t.result === 'win') tipsAgg.wins++;
+        else if (t.result === 'loss') tipsAgg.losses++;
+        else if (t.result == null) tipsAgg.pending++;
+        if (t.result === 'win' || t.result === 'loss') {
+          tipsAgg.stake_reais += tipStakeReais(t, _bl.unit_value);
+          const p = tipProfitReais(t, _bl.unit_value);
+          if (p != null) tipsAgg.profit_reais += p;
+        }
+        if (t.ev != null) { evSum += Number(t.ev); evN++; }
+        if (t.odds != null) { oddsSum += Number(t.odds); oddsN++; }
+      }
+      tipsAgg.avg_ev = evN ? evSum / evN : null;
+      tipsAgg.avg_odds = oddsN ? oddsSum / oddsN : null;
 
-      const decided = (tipsAgg?.wins || 0) + (tipsAgg?.losses || 0);
+      const decided = tipsAgg.wins + tipsAgg.losses;
       const hitRate = decided > 0 ? (tipsAgg.wins / decided * 100) : null;
-      const roi = (tipsAgg?.stake_reais || 0) > 0 ? (tipsAgg.profit_reais / tipsAgg.stake_reais * 100) : null;
+      const roi = tipsAgg.stake_reais > 0 ? (tipsAgg.profit_reais / tipsAgg.stake_reais * 100) : null;
 
       // CLV agregado
       const clvAgg = db.prepare(`
@@ -8780,22 +8820,21 @@ const server = http.createServer(async (req, res) => {
           AND settled_at >= datetime('now', ?)
       `).get(`-${days} days`);
 
-      // Per-sport breakdown
-      const bySport = db.prepare(`
-        SELECT
-          sport,
-          COUNT(*) AS total,
-          SUM(CASE WHEN result='win' THEN 1 ELSE 0 END) AS wins,
-          SUM(CASE WHEN result='loss' THEN 1 ELSE 0 END) AS losses,
-          SUM(CASE WHEN result IS NULL THEN 1 ELSE 0 END) AS pending,
-          SUM(COALESCE(profit_reais, 0)) AS profit,
-          SUM(COALESCE(stake_reais, 0)) AS stake
-        FROM tips
-        WHERE (archived IS NULL OR archived = 0)
-          AND (sent_at >= datetime('now', ?) OR result IS NULL)
-        GROUP BY sport
-        ORDER BY total DESC
-      `).all(`-${days} days`);
+      // Per-sport breakdown — reusa windowTips + unit_value
+      const bySportMap = {};
+      for (const t of windowTips) {
+        const b = bySportMap[t.sport] || (bySportMap[t.sport] = { sport: t.sport, total: 0, wins: 0, losses: 0, pending: 0, profit: 0, stake: 0 });
+        b.total++;
+        if (t.result === 'win') b.wins++;
+        else if (t.result === 'loss') b.losses++;
+        else if (t.result == null) b.pending++;
+        if (t.result === 'win' || t.result === 'loss') {
+          b.stake += tipStakeReais(t, _bl.unit_value);
+          const p = tipProfitReais(t, _bl.unit_value);
+          if (p != null) b.profit += p;
+        }
+      }
+      const bySport = Object.values(bySportMap).sort((a, b) => b.total - a.total);
 
       const sportsBreakdown = bySport.map(s => {
         const dec = s.wins + s.losses;
@@ -8812,22 +8851,26 @@ const server = http.createServer(async (req, res) => {
         };
       });
 
-      // Equity diária agregada cross-sport
-      const equityRows = db.prepare(`
-        SELECT DATE(settled_at) AS day,
-               SUM(COALESCE(profit_reais, 0)) AS profit_r,
-               SUM(COALESCE(stake_reais, 0)) AS stake_r,
-               COUNT(*) AS n
+      // Equity diária agregada cross-sport — recomputa profit/stake com unit_value
+      const equityRawTips = db.prepare(`
+        SELECT DATE(settled_at) AS day, stake, odds, result
         FROM tips
         WHERE (archived IS NULL OR archived = 0)
           AND result IN ('win','loss','push')
           AND settled_at IS NOT NULL
           AND settled_at >= datetime('now', ?)
-        GROUP BY DATE(settled_at)
-        ORDER BY day ASC
       `).all(`-${days} days`);
+      const eqMap = {};
+      for (const t of equityRawTips) {
+        const d = eqMap[t.day] || (eqMap[t.day] = { day: t.day, profit_r: 0, stake_r: 0, n: 0 });
+        d.n++;
+        d.stake_r += tipStakeReais(t, _bl.unit_value);
+        const p = tipProfitReais(t, _bl.unit_value);
+        if (p != null) d.profit_r += p;
+      }
+      const equityRows = Object.values(eqMap).sort((a, b) => a.day.localeCompare(b.day));
 
-      const baseline = getBaseline();
+      const baseline = _bl;
       const baselineProfit = +(totalCurrent - baseline.amount).toFixed(2);
       const baselineGrowth = baseline.amount > 0 ? +((baselineProfit / baseline.amount) * 100).toFixed(2) : 0;
       const totalProfitUnitsGlobal = baseline.unit_value > 0 ? +(baselineProfit / baseline.unit_value).toFixed(2) : 0;
@@ -9081,16 +9124,22 @@ const server = http.createServer(async (req, res) => {
         log('INFO', 'BANCA', `[${sport}] Backfill: ${orphans.length} tips sem profit_reais recalculadas`);
       }
 
-      // Profit da banca: quando há filtro de game, escopa pro game visível
-      // (bug pré-fix: /roi filtrava wins/losses por game mas banca somava todo o sport,
-      //  causando "2 tips 100% WR" com banca/lucro destoando do que o usuário vê).
-      const profitRow = db.prepare(
-        `SELECT COALESCE(SUM(t.profit_reais), 0) as total_profit FROM tips t
+      // Profit da banca: unit-native (stake × (odds-1) × baseline.unit_value)
+      // — baseline.unit_value é fonte única da verdade; stake_reais/profit_reais no DB
+      // são snapshots do momento da settle mas não refletem mudanças de baseline.
+      const _bl = getBaseline();
+      const settledTips = db.prepare(
+        `SELECT t.stake, t.odds, t.result FROM tips t
          WHERE t.sport = ? AND ${sqlTipsDedupeIdIn('t', '?')}
-         AND t.result IS NOT NULL AND t.result != 'void' AND t.profit_reais IS NOT NULL
+         AND t.result IN ('win','loss')
          ${gameSql}`
-      ).get(sport, sport);
-      const accumulatedProfit = parseFloat((profitRow?.total_profit || 0).toFixed(2));
+      ).all(sport, sport);
+      let accumulatedProfit = 0;
+      for (const t of settledTips) {
+        const p = tipProfitReais(t, _bl.unit_value);
+        if (p != null) accumulatedProfit += p;
+      }
+      accumulatedProfit = +accumulatedProfit.toFixed(2);
       const currentBanca = parseFloat((bk.initial_banca + accumulatedProfit).toFixed(2));
       // Só sincroniza o registro quando não há filtro de game (bankroll é per-sport, não per-game)
       if (!game && Math.abs(currentBanca - bk.current_banca) > 0.01) {
@@ -9098,7 +9147,6 @@ const server = http.createServer(async (req, res) => {
       }
       // unitValue vem da baseline global (1u = 1% de R$900 = R$9), não per-sport,
       // pra dashboard mostrar units consistentes cross-sport.
-      const _bl = getBaseline();
       bancaInfo = {
         initialBanca: bk.initial_banca,
         currentBanca: currentBanca,
