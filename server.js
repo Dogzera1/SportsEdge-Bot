@@ -8527,7 +8527,24 @@ const server = http.createServer(async (req, res) => {
     const days = Number.isFinite(daysRaw) ? Math.max(1, Math.min(365, daysRaw)) : 30;
     try {
       // KPIs globais: soma de banca + lucro + tips de todas as bankrolls
-      const bankrolls = db.prepare(`SELECT sport, initial_banca, current_banca FROM bankroll`).all();
+      // Recalcula current_banca inline a partir de SUM(profit_reais WHERE archived=0)
+      // para garantir consistência com tips visíveis no dashboard (bankroll pode
+      // ficar stale se /roi não foi chamado para aquele sport desde o archive).
+      const bankrollsRaw = db.prepare(`SELECT sport, initial_banca, current_banca FROM bankroll`).all();
+      const profitBySport = db.prepare(`
+        SELECT sport, COALESCE(SUM(profit_reais), 0) AS p
+        FROM tips
+        WHERE (archived IS NULL OR archived = 0)
+          AND result IS NOT NULL AND result != 'void' AND profit_reais IS NOT NULL
+        GROUP BY sport
+      `).all().reduce((m, r) => { m[r.sport] = r.p; return m; }, {});
+      const bankrolls = bankrollsRaw.map(b => {
+        const recomputed = parseFloat(((b.initial_banca || 0) + (profitBySport[b.sport] || 0)).toFixed(2));
+        if (Math.abs(recomputed - (b.current_banca || 0)) > 0.01) {
+          stmts.updateBankroll.run(recomputed, b.sport);
+        }
+        return { ...b, current_banca: recomputed };
+      });
       const totalInitial = bankrolls.reduce((s, b) => s + (b.initial_banca || 0), 0);
       const totalCurrent = bankrolls.reduce((s, b) => s + (b.current_banca || 0), 0);
       const totalProfit = totalCurrent - totalInitial;
@@ -9732,7 +9749,7 @@ const server = http.createServer(async (req, res) => {
     const bk = stmts.getBankroll.get(sport);
     if (!bk) { sendJson(res, { error: 'Bankroll não inicializado' }, 500); return; }
     const profitRow = db.prepare(
-      "SELECT COALESCE(SUM(profit_reais), 0) as total_profit FROM tips WHERE sport = ? AND result IS NOT NULL AND result != 'void' AND profit_reais IS NOT NULL"
+      "SELECT COALESCE(SUM(profit_reais), 0) as total_profit FROM tips WHERE sport = ? AND result IS NOT NULL AND result != 'void' AND profit_reais IS NOT NULL AND (archived IS NULL OR archived = 0)"
     ).get(sport);
     const accumulatedProfit = parseFloat((profitRow?.total_profit || 0).toFixed(2));
     const currentBanca = parseFloat((bk.initial_banca + accumulatedProfit).toFixed(2));
@@ -9761,7 +9778,7 @@ const server = http.createServer(async (req, res) => {
         let currentBanca = bk?.current_banca;
         if (bk) {
           const profitRow = db.prepare(
-            "SELECT COALESCE(SUM(profit_reais), 0) as total_profit FROM tips WHERE sport = ? AND result IS NOT NULL AND profit_reais IS NOT NULL"
+            "SELECT COALESCE(SUM(profit_reais), 0) as total_profit FROM tips WHERE sport = ? AND result IS NOT NULL AND profit_reais IS NOT NULL AND (archived IS NULL OR archived = 0)"
           ).get(s);
           const accumulatedProfit = parseFloat((profitRow?.total_profit || 0).toFixed(2));
           currentBanca = parseFloat((bk.initial_banca + accumulatedProfit).toFixed(2));
@@ -9769,7 +9786,7 @@ const server = http.createServer(async (req, res) => {
         currentBanca = parseFloat(currentBanca) || 0;
 
         const pending = db.prepare(
-          "SELECT COALESCE(SUM(stake_reais), 0) as pending_reais, COUNT(*) as n FROM tips WHERE sport = ? AND result IS NULL"
+          "SELECT COALESCE(SUM(stake_reais), 0) as pending_reais, COUNT(*) as n FROM tips WHERE sport = ? AND result IS NULL AND (archived IS NULL OR archived = 0)"
         ).get(s);
         const pendingReais = parseFloat((pending?.pending_reais || 0).toFixed(2));
 
