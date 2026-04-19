@@ -3429,7 +3429,12 @@ const server = http.createServer(async (req, res) => {
     // Razão: Lolesports API falha em refletir LPL live — PS /running é a fonte correta
     const psMatches = await getPandaScoreLolMatches();
     const psBackoff = riotMatches.length < 10;
-    log('INFO', 'LOL', `/lol-matches fonte=${lolSource} riot=${riotMatches.length} ps=${psMatches.length} psBackoff=${psBackoff ? 1 : 0}`);
+    const _lolLogKey = `${lolSource}|${riotMatches.length}|${psMatches.length}|${psBackoff ? 1 : 0}`;
+    const _now = Date.now();
+    if (!global.__lolMatchesLogCache || global.__lolMatchesLogCache.key !== _lolLogKey || _now - global.__lolMatchesLogCache.at > 15000) {
+      log('INFO', 'LOL', `/lol-matches fonte=${lolSource} riot=${riotMatches.length} ps=${psMatches.length} psBackoff=${psBackoff ? 1 : 0}`);
+      global.__lolMatchesLogCache = { key: _lolLogKey, at: _now };
+    }
 
     // Mescla: PandaScore não sobrescreve Riot, mas pode promover upcoming→live
     const combined = [...riotMatches];

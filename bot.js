@@ -3935,7 +3935,7 @@ async function autoAnalyzeMatch(token, match) {
           mlResult.direction = effP1 > effP2 ? 't1' : 't2';
           log('INFO', 'AUTO', `Modelo LoL resgatou: ${match.team1} vs ${match.team2} | edge=${lolEdge.toFixed(1)}pp conf=${lolModel.confidence.toFixed(2)} method=${lolModel.method}${isMapMarket ? ' [MAP]' : ''}`);
         }
-        log('DEBUG', 'LOL-MODEL', `${match.team1} vs ${match.team2}: P1=${(effP1*100).toFixed(1)}%${isMapMarket ? ' (map)' : ''} conf=${lolModel.confidence.toFixed(2)} factors=${lolModel.factors?.join('+')}`);
+        log('DEBUG', 'LOL-MODEL', `${match.team1} vs ${match.team2}: P1=${(effP1*100).toFixed(1)}%${isMapMarket ? ' (map)' : ''} conf=${lolModel.confidence.toFixed(2)} factors=${(lolModel.factors || []).map(f => typeof f === 'string' ? f : f?.name || '?').join('+')}`);
       }
     } catch(e) { log('DEBUG', 'LOL-MODEL', `Erro: ${e.message}`); }
 
@@ -8735,7 +8735,7 @@ async function pollTennis(runOnce = false) {
           };
           tennisModelResult = getTennisProbability(db, match, o, tennisModelEnrich, surfaceForModel || surface);
           if (tennisModelResult && tennisModelResult.confidence > 0.3) {
-            log('DEBUG', 'TENNIS-MODEL', `${match.team1} vs ${match.team2}: P1=${(tennisModelResult.modelP1*100).toFixed(1)}% conf=${tennisModelResult.confidence.toFixed(2)} factors=${tennisModelResult.factors?.join('+')}`);
+            log('DEBUG', 'TENNIS-MODEL', `${match.team1} vs ${match.team2}: P1=${(tennisModelResult.modelP1*100).toFixed(1)}% conf=${tennisModelResult.confidence.toFixed(2)} factors=${(tennisModelResult.factors || []).map(f => typeof f === 'string' ? f : f?.name || '?').join('+')}`);
           }
           // Markov point-by-point (precifica ML + sets + totals + TB de 1 só vez).
           // Preferência: serveStats Sofascore (recent). Fallback: histórico DB (Sackmann)
