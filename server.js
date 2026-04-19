@@ -3386,6 +3386,114 @@ function lolCompScoreFromDraft(stmts, t1Champs, t2Champs) {
   return { compScore: null, t1N: blueN, t2N: redN, rolesDetail };
 }
 
+// ── Settle sweep helper: reusado por HTTP handler e cron interno ──
+function runSettleSweep({ sportFilter = '', days = 14 } = {}) {
+  const clampedDays = Math.max(1, Math.min(60, parseInt(days, 10) || 14));
+  const sports = sportFilter ? [sportFilter] : ['esports','tennis','mma','football','darts','snooker'];
+
+  const deriveGame = (tip) => {
+    const mid = String(tip.match_id || '');
+    const ev  = String(tip.event_name || '').toLowerCase();
+    if (tip.sport === 'tennis') return 'tennis';
+    if (tip.sport === 'football') return 'football';
+    if (tip.sport === 'darts') return 'darts';
+    if (tip.sport === 'snooker') return 'snooker';
+    if (tip.sport === 'mma') return 'mma';
+    if (tip.sport === 'esports') {
+      if (mid.startsWith('dota2_') || ev.includes('dota')) return 'dota2';
+      if (mid.startsWith('cs_') || ev.includes('cs:go') || ev.includes('counter-strike')) return 'cs';
+      if (mid.startsWith('valorant_') || ev.includes('valorant')) return 'valorant';
+      return 'lol';
+    }
+    return tip.sport;
+  };
+
+  const summary = { sports: {}, total_swept: 0, total_settled: 0, total_skipped_map: 0, total_not_found: 0 };
+
+  for (const sport of sports) {
+    const tips = stmts.getUnsettledTips.all(sport, `-${clampedDays} days`);
+    const info = { swept: 0, settled: 0, skipped_map: 0, not_found: 0, settled_ids: [] };
+
+    for (const tip of tips) {
+      info.swept++;
+      if (tip.market_type && !/^ML$|^match_winner$|^moneyline$/i.test(tip.market_type)) {
+        info.skipped_map++;
+        continue;
+      }
+
+      const game = deriveGame(tip);
+      let row = tip.match_id
+        ? db.prepare("SELECT * FROM match_results WHERE match_id = ? AND game = ? LIMIT 1").get(tip.match_id, game)
+        : null;
+
+      if (!row?.winner && tip.participant1 && tip.participant2) {
+        const t1 = `%${tip.participant1}%`;
+        const t2 = `%${tip.participant2}%`;
+        row = db.prepare(`
+          SELECT * FROM match_results
+          WHERE game = ?
+            AND ((lower(team1) LIKE lower(?) AND lower(team2) LIKE lower(?))
+              OR (lower(team1) LIKE lower(?) AND lower(team2) LIKE lower(?)))
+            AND resolved_at BETWEEN datetime(?, '-4 days') AND datetime(?, '+6 days')
+          ORDER BY resolved_at DESC LIMIT 1
+        `).get(game, t1, t2, t2, t1, tip.sent_at || new Date().toISOString(), tip.sent_at || new Date().toISOString());
+      }
+
+      if (!row?.winner) { info.not_found++; continue; }
+
+      let nameMatched, matchMethod;
+      if (sport === 'tennis') {
+        nameMatched = tennisSinglePlayerNameMatch(tip.tip_participant, row.winner);
+        matchMethod = nameMatched ? 'tennis' : 'none';
+      } else {
+        const aliases = sport === 'esports' ? LOL_ALIASES : null;
+        const r = nameMatches(tip.tip_participant, row.winner, { aliases });
+        nameMatched = r.match;
+        matchMethod = r.method;
+      }
+      if (matchMethod === 'substring_weak') {
+        log('WARN', 'SETTLE-SWEEP', `QUARANTINE ${sport} tip=${tip.id} "${tip.tip_participant}" vs "${row.winner}" — requer manual`);
+        info.not_found++;
+        continue;
+      }
+      const result = nameMatched ? 'win' : 'loss';
+
+      const stakeR = tip.stake_reais || (() => {
+        const bk = stmts.getBankroll.get(sport);
+        const uv = bk ? bk.current_banca / 100 : 1;
+        const su = parseFloat(String(tip.stake || '1').replace('u','')) || 1;
+        return parseFloat((su * uv).toFixed(2));
+      })();
+      const odds = parseFloat(tip.odds) || 1;
+      const profitR = result === 'win'
+        ? parseFloat((stakeR * (odds - 1)).toFixed(2))
+        : parseFloat((-stakeR).toFixed(2));
+
+      db.transaction(() => {
+        db.prepare(`UPDATE tips SET result = ?, settled_at = datetime('now'), stake_reais = ?, profit_reais = ? WHERE id = ? AND result IS NULL`)
+          .run(result, stakeR, profitR, tip.id);
+        const bk = stmts.getBankroll.get(sport);
+        if (bk) {
+          const nova = parseFloat((bk.current_banca + profitR).toFixed(2));
+          stmts.updateBankroll.run(nova, sport);
+        }
+      })();
+
+      log('INFO', 'SETTLE-SWEEP', `${sport} tip=${tip.id} "${tip.tip_participant}" vs winner="${row.winner}" → ${result} [${matchMethod}] Δ=${profitR}`);
+      info.settled++;
+      info.settled_ids.push(tip.id);
+    }
+
+    summary.sports[sport] = info;
+    summary.total_swept += info.swept;
+    summary.total_settled += info.settled;
+    summary.total_skipped_map += info.skipped_map;
+    summary.total_not_found += info.not_found;
+  }
+
+  return { days: clampedDays, ...summary };
+}
+
 // ── HTTP Server ──
 const server = http.createServer(async (req, res) => {
   const parsed = url.parse(req.url, true);
@@ -8539,115 +8647,11 @@ const server = http.createServer(async (req, res) => {
   if (p === '/settle-sweep' && req.method === 'POST') {
     if (!requireAdmin(req, res)) return;
     try {
-      const sportFilter = (parsed.query.sport || '').trim();
-      const days = Math.max(1, Math.min(60, parseInt(parsed.query.days || '14', 10) || 14));
-      const sports = sportFilter ? [sportFilter] : ['esports','tennis','mma','football','darts','snooker'];
-
-      const deriveGame = (tip) => {
-        const mid = String(tip.match_id || '');
-        const ev  = String(tip.event_name || '').toLowerCase();
-        if (tip.sport === 'tennis') return 'tennis';
-        if (tip.sport === 'football') return 'football';
-        if (tip.sport === 'darts') return 'darts';
-        if (tip.sport === 'snooker') return 'snooker';
-        if (tip.sport === 'mma') return 'mma';
-        if (tip.sport === 'esports') {
-          if (mid.startsWith('dota2_') || ev.includes('dota')) return 'dota2';
-          if (mid.startsWith('cs_') || ev.includes('cs:go') || ev.includes('counter-strike')) return 'cs';
-          if (mid.startsWith('valorant_') || ev.includes('valorant')) return 'valorant';
-          return 'lol';
-        }
-        return tip.sport;
-      };
-
-      const summary = { sports: {}, total_swept: 0, total_settled: 0, total_skipped_map: 0, total_not_found: 0 };
-
-      for (const sport of sports) {
-        const tips = stmts.getUnsettledTips.all(sport, `-${days} days`);
-        const info = { swept: 0, settled: 0, skipped_map: 0, not_found: 0, settled_ids: [] };
-
-        for (const tip of tips) {
-          info.swept++;
-          // Pula markets MAP/correct-score/handicap — exigem settlement especializado
-          if (tip.market_type && !/^ML$|^match_winner$|^moneyline$/i.test(tip.market_type)) {
-            info.skipped_map++;
-            continue;
-          }
-
-          const game = deriveGame(tip);
-          // Tentativa 1: match_id exato
-          let row = tip.match_id
-            ? db.prepare("SELECT * FROM match_results WHERE match_id = ? AND game = ? LIMIT 1").get(tip.match_id, game)
-            : null;
-
-          // Tentativa 2: fuzzy por team1/team2 + janela ±4/+6 dias em torno de sent_at
-          if (!row?.winner && tip.participant1 && tip.participant2) {
-            const t1 = `%${tip.participant1}%`;
-            const t2 = `%${tip.participant2}%`;
-            row = db.prepare(`
-              SELECT * FROM match_results
-              WHERE game = ?
-                AND ((lower(team1) LIKE lower(?) AND lower(team2) LIKE lower(?))
-                  OR (lower(team1) LIKE lower(?) AND lower(team2) LIKE lower(?)))
-                AND resolved_at BETWEEN datetime(?, '-4 days') AND datetime(?, '+6 days')
-              ORDER BY resolved_at DESC LIMIT 1
-            `).get(game, t1, t2, t2, t1, tip.sent_at || new Date().toISOString(), tip.sent_at || new Date().toISOString());
-          }
-
-          if (!row?.winner) { info.not_found++; continue; }
-
-          // Aplica match de nome (reusa lógica do /settle)
-          let nameMatched, matchMethod;
-          if (sport === 'tennis') {
-            nameMatched = tennisSinglePlayerNameMatch(tip.tip_participant, row.winner);
-            matchMethod = nameMatched ? 'tennis' : 'none';
-          } else {
-            const aliases = sport === 'esports' ? LOL_ALIASES : null;
-            const r = nameMatches(tip.tip_participant, row.winner, { aliases });
-            nameMatched = r.match;
-            matchMethod = r.method;
-          }
-          if (matchMethod === 'substring_weak') {
-            log('WARN', 'SETTLE-SWEEP', `QUARANTINE ${sport} tip=${tip.id} "${tip.tip_participant}" vs "${row.winner}" — requer manual`);
-            info.not_found++;
-            continue;
-          }
-          const result = nameMatched ? 'win' : 'loss';
-
-          const stakeR = tip.stake_reais || (() => {
-            const bk = stmts.getBankroll.get(sport);
-            const uv = bk ? bk.current_banca / 100 : 1;
-            const su = parseFloat(String(tip.stake || '1').replace('u','')) || 1;
-            return parseFloat((su * uv).toFixed(2));
-          })();
-          const odds = parseFloat(tip.odds) || 1;
-          const profitR = result === 'win'
-            ? parseFloat((stakeR * (odds - 1)).toFixed(2))
-            : parseFloat((-stakeR).toFixed(2));
-
-          db.transaction(() => {
-            db.prepare(`UPDATE tips SET result = ?, settled_at = datetime('now'), stake_reais = ?, profit_reais = ? WHERE id = ? AND result IS NULL`)
-              .run(result, stakeR, profitR, tip.id);
-            const bk = stmts.getBankroll.get(sport);
-            if (bk) {
-              const nova = parseFloat((bk.current_banca + profitR).toFixed(2));
-              stmts.updateBankroll.run(nova, sport);
-            }
-          })();
-
-          log('INFO', 'SETTLE-SWEEP', `${sport} tip=${tip.id} "${tip.tip_participant}" vs winner="${row.winner}" → ${result} [${matchMethod}] Δ=${profitR}`);
-          info.settled++;
-          info.settled_ids.push(tip.id);
-        }
-
-        summary.sports[sport] = info;
-        summary.total_swept += info.swept;
-        summary.total_settled += info.settled;
-        summary.total_skipped_map += info.skipped_map;
-        summary.total_not_found += info.not_found;
-      }
-
-      sendJson(res, { ok: true, days, ...summary });
+      const result = runSettleSweep({
+        sportFilter: (parsed.query.sport || '').trim(),
+        days: parsed.query.days || '14',
+      });
+      sendJson(res, { ok: true, ...result });
     } catch (e) { sendJson(res, { error: e.message }, 500); }
     return;
   }
@@ -12110,6 +12114,28 @@ server.listen(PORT, '0.0.0.0', () => {
 
   // Boot: settle rápido + recalc após 5 min
   setTimeout(() => { settleFactorLogs(stmts, log); recalcWeights(stmts, log); }, 5 * 60 * 1000);
+
+  // Settle sweep periódico — liquida tips pendentes contra match_results
+  // Roda a cada SETTLE_SWEEP_MIN (default 30min); intervalo curto é barato (só DB local).
+  const sweepMin = Math.max(5, parseInt(process.env.SETTLE_SWEEP_MIN || '30', 10) || 30);
+  const sweepDays = Math.max(1, parseInt(process.env.SETTLE_SWEEP_DAYS || '14', 10) || 14);
+  setTimeout(() => {
+    try {
+      const r = runSettleSweep({ days: sweepDays });
+      if (r.total_settled > 0 || r.total_swept > 0) {
+        log('INFO', 'SETTLE-SWEEP', `boot sweep: swept=${r.total_swept} settled=${r.total_settled} skipped_map=${r.total_skipped_map} not_found=${r.total_not_found}`);
+      }
+    } catch (e) { log('ERROR', 'SETTLE-SWEEP', `boot: ${e.message}`); }
+  }, 2 * 60 * 1000);
+  setInterval(() => {
+    try {
+      const r = runSettleSweep({ days: sweepDays });
+      if (r.total_settled > 0) {
+        log('INFO', 'SETTLE-SWEEP', `cycle: swept=${r.total_swept} settled=${r.total_settled} skipped_map=${r.total_skipped_map} not_found=${r.total_not_found}`);
+      }
+    } catch (e) { log('ERROR', 'SETTLE-SWEEP', `cycle: ${e.message}`); }
+  }, sweepMin * 60 * 1000);
+  log('INFO', 'SETTLE-SWEEP', `Cron ativo: a cada ${sweepMin}min, janela ${sweepDays}d`);
 });
 
 // fetchEsportsOddsV1 removida — código legado com odds falsas hardcoded (1.80/1.90)
