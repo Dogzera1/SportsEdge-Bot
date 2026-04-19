@@ -1041,14 +1041,22 @@ async function applyGlobalRisk(sport, desiredUnits, leagueSlug) {
     } catch (_) {}
   }
 
-  const adjusted = Math.max(0.5, Math.round(desiredUnits * leagueMult * drawdownMult * perfMult * 2) / 2);
+  // Per-sport stake multiplier — opt-in via ENV KELLY_<SPORT>_MULT.
+  // Usado pra amplificar sports com edge comprovado (tennis ROI+11% n=38) ou
+  // reduzir adicional em sports marginais sem drenar stake global. Clamp [0.3, 2.0].
+  const sportMultKey = `KELLY_${String(sport || '').toUpperCase()}_MULT`;
+  const sportMult = Math.max(0.3, Math.min(2.0, parseFloat(process.env[sportMultKey] || '1.0') || 1.0));
+
+  const adjusted = Math.max(0.5, Math.round(desiredUnits * leagueMult * drawdownMult * perfMult * sportMult * 2) / 2);
   const reason = drawdownMult < 1 ? 'drawdown_reduction'
                : perfMult !== 1.0 ? 'perf_adjusted'
                : leagueMult < 1 ? 'league_tier_reduction'
+               : sportMult !== 1.0 ? 'sport_adjusted'
                : 'ok';
   if (adjusted !== desiredUnits) {
     const perfStr = perfMult !== 1.0 ? ` perf=${perfMult}(${perfReasons.slice(0,2).join(';')})` : '';
-    log('INFO', 'RISK', `${sport}${leagueSlug ? ` (${leagueSlug})` : ''}: ${desiredUnits}u→${adjusted}u (league=${leagueMult} drawdown=${drawdownMult}${perfStr})`);
+    const spStr = sportMult !== 1.0 ? ` sport=${sportMult}` : '';
+    log('INFO', 'RISK', `${sport}${leagueSlug ? ` (${leagueSlug})` : ''}: ${desiredUnits}u→${adjusted}u (league=${leagueMult} drawdown=${drawdownMult}${perfStr}${spStr})`);
   }
   return { ok: true, units: adjusted, reason };
 }
