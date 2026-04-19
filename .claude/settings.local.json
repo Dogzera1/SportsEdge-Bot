@@ -256,7 +256,8 @@
       "Bash(grep -i \"DB_PATH\" .env echo \"---\")",
       "Bash(git add *)",
       "Bash(git commit -m ' *)",
-      "Bash(git push *)"
+      "Bash(git push *)",
+      "Bash(PYTHONIOENCODING=utf-8 curl -sSL --ssl-no-revoke --max-time 30 \"https://sportsedge-bot-production.up.railway.app/tips-history?sport=tennis&limit=50\")"
     ]
   }
 }
