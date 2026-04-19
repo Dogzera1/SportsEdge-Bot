@@ -8827,9 +8827,14 @@ const server = http.createServer(async (req, res) => {
         ORDER BY day ASC
       `).all(`-${days} days`);
 
+      const baseline = getBaseline();
+      const baselineProfit = +(totalCurrent - baseline.amount).toFixed(2);
+      const baselineGrowth = baseline.amount > 0 ? +((baselineProfit / baseline.amount) * 100).toFixed(2) : 0;
+      const totalProfitUnitsGlobal = baseline.unit_value > 0 ? +(baselineProfit / baseline.unit_value).toFixed(2) : 0;
+
       // Equity series deve terminar em totalCurrent mesmo quando existirem tips
-      // settled antes da janela (profitBySport é all-time, equityRows é windowed).
-      // Começa em totalCurrent - windowProfit pra garantir alinhamento no ponto final.
+      // settled antes da janela. Pre-pend ponto baseline (16/04 = R$900) se não existir
+      // entry nesse dia, pra curva começar visualmente na baseline configurada.
       const windowProfit = equityRows.reduce((s, r) => s + (Number(r.profit_r) || 0), 0);
       let cum = totalCurrent - windowProfit;
       let peak = cum, maxDD = 0;
@@ -8841,11 +8846,10 @@ const server = http.createServer(async (req, res) => {
         if (dd > maxDD) maxDD = dd;
         return { day: r.day, cum_banca: parseFloat(cum.toFixed(2)), profit_reais: profit, n: r.n };
       });
-
-      const baseline = getBaseline();
-      const baselineProfit = +(totalCurrent - baseline.amount).toFixed(2);
-      const baselineGrowth = baseline.amount > 0 ? +((baselineProfit / baseline.amount) * 100).toFixed(2) : 0;
-      const totalProfitUnitsGlobal = baseline.unit_value > 0 ? +(baselineProfit / baseline.unit_value).toFixed(2) : 0;
+      // Prepend baseline se a data é anterior ao primeiro ponto e não está na série
+      if (baseline.date && (!series.length || baseline.date < series[0].day)) {
+        series.unshift({ day: baseline.date, cum_banca: baseline.amount, profit_reais: 0, n: 0, baseline: true });
+      }
 
       sendJson(res, {
         days,
@@ -8882,7 +8886,8 @@ const server = http.createServer(async (req, res) => {
         } : null,
         sports: sportsBreakdown,
         equity: {
-          initial: +totalInitial.toFixed(2),
+          initial: baseline.amount,
+          baseline_date: baseline.date,
           current: +totalCurrent.toFixed(2),
           max_drawdown_pct: +(maxDD * 100).toFixed(2),
           series,
@@ -9091,26 +9096,36 @@ const server = http.createServer(async (req, res) => {
       if (!game && Math.abs(currentBanca - bk.current_banca) > 0.01) {
         stmts.updateBankroll.run(currentBanca, sport);
       }
+      // unitValue vem da baseline global (1u = 1% de R$900 = R$9), não per-sport,
+      // pra dashboard mostrar units consistentes cross-sport.
+      const _bl = getBaseline();
       bancaInfo = {
         initialBanca: bk.initial_banca,
         currentBanca: currentBanca,
-        unitValue: parseFloat((currentBanca / 100).toFixed(4)),
+        unitValue: _bl.unit_value,
         profitReais: accumulatedProfit,
         growthPct: parseFloat((accumulatedProfit / bk.initial_banca * 100).toFixed(2)),
-        updatedAt: bk.updated_at
+        updatedAt: bk.updated_at,
+        baselineDate: _bl.date,
+        baselineAmount: _bl.amount,
+        unitPct: _bl.unit_pct,
       };
     } else {
       // Se não existe registro no bankroll, cria um com valores padrão
       db.prepare('INSERT OR IGNORE INTO bankroll (sport, initial_banca, current_banca) VALUES (?, 100.0, 100.0)').run(sport);
       const newBk = stmts.getBankroll.get(sport);
       if (newBk) {
+        const _bl = getBaseline();
         bancaInfo = {
           initialBanca: newBk.initial_banca,
           currentBanca: newBk.current_banca,
-          unitValue: parseFloat((newBk.current_banca / 100).toFixed(4)),
+          unitValue: _bl.unit_value,
           profitReais: 0,
           growthPct: 0,
-          updatedAt: newBk.updated_at
+          updatedAt: newBk.updated_at,
+          baselineDate: _bl.date,
+          baselineAmount: _bl.amount,
+          unitPct: _bl.unit_pct,
         };
       }
     }

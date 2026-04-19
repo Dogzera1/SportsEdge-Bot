@@ -948,8 +948,11 @@ async function loadOverall(gen = refreshGen) {
       },
     });
     const maxDD = data.equity.max_drawdown_pct;
+    const initDate = data.equity.baseline_date
+      ? ' (' + new Date(data.equity.baseline_date + 'T00:00:00').toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' }) + ')'
+      : '';
     document.getElementById('equityKpis').innerHTML = `
-      <span>Início ${fmtMoney(data.equity.initial)}</span>
+      <span>Início ${fmtMoney(data.equity.initial)}${initDate}</span>
       &nbsp;·&nbsp;
       <span class="delta ${sign(profit)}">${arrow(profit)} ${profit >= 0 ? '+' : ''}${fmtMoney(profit)}</span>
       ${maxDD != null ? `&nbsp;·&nbsp;<span>DD máx ${maxDD.toFixed(1)}%</span>` : ''}
