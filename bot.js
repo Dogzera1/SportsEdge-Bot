@@ -470,6 +470,41 @@ function getRejections(sportFilter, limit = 50) {
   return list.slice(0, Math.max(1, Math.min(limit, REJECTIONS_MAX)));
 }
 
+// ── Bug reporter: escala erros silenciosos (ReferenceError/TypeError/SyntaxError)
+// pra DM admin. Catches DEBUG em código de produção viraram black hole — esse
+// helper loga ERROR + dedup por signature (10min) + DM pra bugs reais de código.
+const _bugReports = new Map(); // sig → ts
+const BUG_REPORT_COOLDOWN_MS = 10 * 60 * 1000;
+function reportBug(module, err, ctx = {}) {
+  const name = err?.name || 'Error';
+  const msg = err?.message || String(err);
+  const stack = err?.stack || '';
+  const sig = `${module}|${name}|${msg.slice(0, 120)}`;
+  const now = Date.now();
+
+  const ctxStr = Object.keys(ctx).length ? ' | ' + JSON.stringify(ctx).slice(0, 300) : '';
+  log('ERROR', module, `${name}: ${msg}${ctxStr}`);
+
+  const last = _bugReports.get(sig) || 0;
+  if (now - last < BUG_REPORT_COOLDOWN_MS) return;
+  _bugReports.set(sig, now);
+
+  // DM só para bugs de código (não para timeouts/rede/env).
+  const codeBugNames = new Set(['ReferenceError', 'TypeError', 'SyntaxError', 'RangeError']);
+  const isCodeBug = codeBugNames.has(name) || /is not defined|is not a function|Cannot read|Cannot set/.test(msg);
+  if (!isCodeBug) return;
+
+  if (!ADMIN_IDS.size) return;
+  try {
+    const token = Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
+    if (!token) return;
+    const stackHead = stack.split('\n').slice(0, 5).join('\n');
+    const ctxLine = Object.keys(ctx).length ? `\nctx: \`${JSON.stringify(ctx).slice(0, 200)}\`` : '';
+    const dm = `🐛 *Bug detectado*\n*${module}* — \`${name}\`\n\`${msg}\`${ctxLine}\n\n\`\`\`\n${stackHead}\n\`\`\``;
+    for (const id of ADMIN_IDS) sendDM(token, id, dm).catch(() => {});
+  } catch (_) {}
+}
+
 /**
  * Pipeline health check: conta rejeições por sport na última hora.
  * Se sport tem >=PIPELINE_STUCK_THRESHOLD rejections + 0 tips sent → log WARN.
@@ -512,6 +547,16 @@ function runPipelineStuckCheck() {
       }
       const topReasons = Object.entries(reasons).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([r, n]) => `${r}×${n}`).join(' · ');
       log('WARN', 'PIPELINE-STUCK', `${sport}: ${count} rejections / 0 tips na última hora. Top: ${topReasons}. Verificar gates.`);
+      // DM admin — sinaliza pipeline travada (gate apertado demais ou modelo off).
+      if (ADMIN_IDS.size) {
+        try {
+          const token = Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
+          if (token) {
+            const dm = `🚨 *Pipeline travada* — *${sport}*\n${count} rejeições / 0 tips na última hora\nTop motivos: ${topReasons}\n_Verificar gates ou modelo desligado._`;
+            for (const id of ADMIN_IDS) sendDM(token, id, dm).catch(() => {});
+          }
+        } catch (_) {}
+      }
     } catch (_) {}
   }
 }
@@ -621,13 +666,17 @@ function tgRequest(token, method, params) {
 
 // Handler global para promises não tratadas — evita crash do processo
 process.on('unhandledRejection', (reason) => {
-  const msg = reason instanceof Error ? reason.message : String(reason);
-  // Erros de rede do Telegram são esperados em instabilidades — não crashar
-  if (msg.includes('ETIMEDOUT') || msg.includes('ENETUNREACH') || msg.includes('ECONNREFUSED') || msg.includes('TelegramTimeout')) {
-    log('WARN', 'NET', `Telegram connection error (ignored): ${msg}`);
-  } else {
-    log('ERROR', 'UNCAUGHT', `unhandledRejection: ${msg}`);
+  const err = reason instanceof Error ? reason : new Error(String(reason));
+  // Erros de rede do Telegram são esperados em instabilidades — não crashar nem alertar.
+  if (/ETIMEDOUT|ENETUNREACH|ECONNREFUSED|TelegramTimeout/.test(err.message)) {
+    log('WARN', 'NET', `Telegram connection error (ignored): ${err.message}`);
+    return;
   }
+  reportBug('UNCAUGHT-PROMISE', err);
+});
+
+process.on('uncaughtException', (err) => {
+  reportBug('UNCAUGHT-EXCEPTION', err);
 });
 
 // ── Server Helpers ──
@@ -2886,9 +2935,7 @@ async function runWeeklyPipelineDigest() {
 
     for (const adminId of ADMIN_IDS) await sendDM(token, adminId, msg).catch(() => {});
     log('INFO', 'WEEKLY-DIGEST', `DM semanal: ${tipsBySport.length} sports`);
-  } catch (e) {
-    log('DEBUG', 'WEEKLY-DIGEST', `err: ${e.message}`);
-  }
+  } catch (e) { reportBug('WEEKLY-DIGEST', e); }
 }
 
 // ── Daily market-tips digest (1x/dia) ──
@@ -3563,7 +3610,7 @@ async function collectGameContext(game, matchId, team1, team2) {
       }
     }
   }
-  return { text: gamesContext, compScore, liveGameNumber, hasLiveStats, draftComplete };
+  return { text: gamesContext, compScore, liveGameNumber, hasLiveStats, draftComplete, lolLiveStats };
 }
 
 async function fetchEnrichment(match) {
@@ -3651,6 +3698,7 @@ async function autoAnalyzeMatch(token, match) {
     const liveGameNumber = gameCtx.liveGameNumber; // nº do mapa atual (null se não ao vivo)
     const hasLiveStats   = !!gameCtx.hasLiveStats;
     const draftComplete  = !!gameCtx.draftComplete;
+    const lolLiveStats   = gameCtx.lolLiveStats || null;
     const enrichSection = buildEnrichmentSection(match, enrich);
 
     // Draft: só analisar quando draft completo (evita tip com base em comp parcial)
@@ -3704,7 +3752,7 @@ async function autoAnalyzeMatch(token, match) {
       try {
         const ctx = buildEsportsTrainedContext(db, 'lol', match);
         if (ctx) trainedLol = predictTrainedEsports('lol', ctx);
-      } catch (e) { log('DEBUG', 'LOL-TRAINED', `ctx err: ${e.message}`); }
+      } catch (e) { reportBug('LOL-TRAINED', e, { team1: match.team1, team2: match.team2 }); }
     }
 
     // ── Layer 1b: Modelo LoL específico (Elo + Draft + Form) ──
@@ -3767,7 +3815,7 @@ async function autoAnalyzeMatch(token, match) {
                 log('INFO', 'LOL-SIDE', `${match.team1} ${team1IsBlue?'blue':'red'} — mapP1 ${(prev*100).toFixed(1)}%→${(adj*100).toFixed(1)}% (blueWR ${team1IsBlue?s1.blueWR:s2.blueWR} redWR ${team1IsBlue?s2.redWR:s1.redWR})`);
               }
             }
-          } catch (e) { log('DEBUG', 'LOL-SIDE', `err: ${e.message}`); }
+          } catch (e) { reportBug('LOL-SIDE', e, { team1: match.team1, team2: match.team2 }); }
         }
 
         // Roster sub detection — se o lineup live difere do top-5 histórico
@@ -3800,7 +3848,7 @@ async function autoAnalyzeMatch(token, match) {
               lolModel.factors = [...(lolModel.factors || []), 'roster-sub'];
               log('WARN', 'LOL-ROSTER-SUB', `${subSides.join(' | ')} — confidence ${prevConf}→${lolModel.confidence} (×${penalty})`);
             }
-          } catch (e) { log('DEBUG', 'LOL-ROSTER-SUB', `err: ${e.message}`); }
+          } catch (e) { reportBug('LOL-ROSTER-SUB', e, { team1: match.team1, team2: match.team2 }); }
         }
 
         // Live series-aware override — combina live map state com pSeries prior
@@ -3835,7 +3883,7 @@ async function autoAnalyzeMatch(token, match) {
               lolModel.factors = [...(lolModel.factors || []), 'live-series'];
               lolModel._liveMapPred = pred;
             }
-          } catch (e) { log('DEBUG', 'LOL-LIVE-SERIES', `err: ${e.message}`); }
+          } catch (e) { reportBug('LOL-LIVE-SERIES', e, { team1: match.team1, team2: match.team2, bo: lolModel?.bestOf }); }
         }
 
         // Market scanner (handicap + totals) — log-only. Detecta EV positivo
@@ -3904,11 +3952,11 @@ async function autoAnalyzeMatch(token, match) {
                         log('DEBUG', 'LOL-MARKET-TIP', `Dedup skip (${inMemFresh ? 'mem' : 'db'}): ${dedupKey}`);
                       }
                     }
-                  } catch (mte) { log('DEBUG', 'LOL-MARKET-TIP', `err: ${mte.message}`); }
+                  } catch (mte) { reportBug('LOL-MARKET-TIP', mte, { team1: match.team1, team2: match.team2 }); }
                 }
               }
             }
-          } catch (e) { log('DEBUG', 'LOL-MARKETS', `scan err: ${e.message}`); }
+          } catch (e) { reportBug('LOL-MARKETS', e, { team1: match.team1, team2: match.team2 }); }
         }
 
         const isMapMarket = !!oddsToUse?.mapMarket;
@@ -3938,7 +3986,7 @@ async function autoAnalyzeMatch(token, match) {
         }
         log('DEBUG', 'LOL-MODEL', `${match.team1} vs ${match.team2}: P1=${(effP1*100).toFixed(1)}%${isMapMarket ? ' (map)' : ''} conf=${lolModel.confidence.toFixed(2)} factors=${(lolModel.factors || []).map(f => typeof f === 'string' ? f : f?.name || '?').join('+')}`);
       }
-    } catch(e) { log('DEBUG', 'LOL-MODEL', `Erro: ${e.message}`); }
+    } catch(e) { reportBug('LOL-MODEL', e, { team1: match.team1, team2: match.team2 }); }
 
     if (mlPrefilterOn && !mlResult.pass) {
       log('INFO', 'AUTO', `Pré-filtro ML: edge insuficiente (${mlResult.score.toFixed(1)}pp) para ${match.team1} vs ${match.team2}. Pulando IA.`);
@@ -7348,7 +7396,7 @@ async function _pollDotaInner(runOnce = false) {
           try {
             const metaLine = dotaHeroMetaLine(blue, red);
             if (metaLine) dotaLiveContext += metaLine;
-          } catch (e) { log('DEBUG', 'DOTA-META', `err: ${e.message}`); }
+          } catch (e) { reportBug('DOTA-META', e); }
           // Roster observation + stand-in detection (ambos times)
           try {
             const { recordRosterObservation, detectStandIn } = require('./lib/dota-roster-detect');
@@ -7362,7 +7410,7 @@ async function _pollDotaInner(runOnce = false) {
               match._dotaStandIn = { team1: subBlue, team2: subRed };
               log('INFO', 'DOTA-ROSTER', `Stand-in detectado: ${match.team1}=${subBlue.standInCount}/5 ${match.team2}=${subRed.standInCount}/5`);
             }
-          } catch (e) { log('DEBUG', 'DOTA-ROSTER', `err: ${e.message}`); }
+          } catch (e) { reportBug('DOTA-ROSTER', e); }
         } else if (ps?.hasLiveStats) {
           dotaHasLiveStats = true;
           const blue = ps.blueTeam, red = ps.redTeam;
@@ -7374,7 +7422,7 @@ async function _pollDotaInner(runOnce = false) {
           try {
             const metaLine = dotaHeroMetaLine(blue, red);
             if (metaLine) dotaLiveContext += metaLine;
-          } catch (e) { log('DEBUG', 'DOTA-META', `err: ${e.message}`); }
+          } catch (e) { reportBug('DOTA-META', e); }
         }
       }
 
@@ -7427,7 +7475,7 @@ async function _pollDotaInner(runOnce = false) {
             mlResult.modelP2 = 1 - mergedP1;
             mlResult.factorCount = (mlResult.factorCount || 0) + 1;
           }
-        } catch (e) { log('DEBUG', 'DOTA-TRAINED', `err: ${e.message}`); }
+        } catch (e) { reportBug('DOTA-TRAINED', e); }
       }
 
       // ── Live series-aware override ──
@@ -7465,7 +7513,7 @@ async function _pollDotaInner(runOnce = false) {
             mlResult.modelP1 = pSeriesLive;
             mlResult.modelP2 = 1 - pSeriesLive;
           }
-        } catch (e) { log('DEBUG', 'DOTA-LIVE-SERIES', `err: ${e.message}`); }
+        } catch (e) { reportBug('DOTA-LIVE-SERIES', e); }
       }
 
       // Market scanner Dota (log-only) — handicap + totais além de moneyline.
@@ -7504,7 +7552,7 @@ async function _pollDotaInner(runOnce = false) {
                   }
                 }
               }
-            } catch (e) { log('DEBUG', 'DOTA-EXTRAS', `err: ${e.message}`); }
+            } catch (e) { reportBug('DOTA-EXTRAS', e); }
 
             if (found.length) {
               log('INFO', 'DOTA-MARKETS',
@@ -7548,11 +7596,11 @@ async function _pollDotaInner(runOnce = false) {
                       log('DEBUG', 'DOTA-MARKET-TIP', `Dedup skip (${inMemFresh ? 'mem' : 'db'}): ${dedupKey}`);
                     }
                   }
-                } catch (mte) { log('DEBUG', 'DOTA-MARKET-TIP', `err: ${mte.message}`); }
+                } catch (mte) { reportBug('DOTA-MARKET-TIP', mte); }
               }
             }
           }
-        } catch (e) { log('DEBUG', 'DOTA-MARKETS', `scan err: ${e.message}`); }
+        } catch (e) { reportBug('DOTA-MARKETS', e); }
       }
 
       // ── Dados para o prompt ──
@@ -8226,7 +8274,7 @@ async function pollMma(runOnce = false) {
               mlResultMma.modelP2 = 1 - mergedP1;
               mlResultMma.factorCount = (mlResultMma.factorCount || 0) + 1;
             }
-          } catch (e) { log('DEBUG', 'MMA-TRAINED', `err: ${e.message}`); }
+          } catch (e) { reportBug('MMA-TRAINED', e); }
         }
 
         const hasModelDataMma = mlResultMma.factorCount > 0;
@@ -8865,7 +8913,7 @@ async function pollTennis(runOnce = false) {
                       tennisModelResult._tbAdjustment = { ...tbAdj, pTBmatch: markov.pTiebreakMatch, impact };
                       tennisModelResult.factors = [...(tennisModelResult.factors || []), 'tb'];
                     }
-                  } catch (te) { log('DEBUG', 'TENNIS-TB', `err: ${te.message}`); }
+                  } catch (te) { reportBug('TENNIS-TB', te); }
                 }
 
                 // Ace market pricing (Poisson). Prefere histórico (Sackmann) sobre
@@ -8897,7 +8945,7 @@ async function pollTennis(runOnce = false) {
                       tennisModelResult._markovAcesSource = `${src1}/${src2}`;
                     }
                   }
-                } catch (ae) { log('DEBUG', 'TENNIS-ACES', `err: ${ae.message}`); }
+                } catch (ae) { reportBug('TENNIS-ACES', ae); }
 
                 // LIVE Markov: se temos liveScoreData, recomputa a partir do state atual.
                 // Override do pMatch pré-match porque live sobrepõe.
@@ -8937,10 +8985,10 @@ async function pollTennis(runOnce = false) {
                       tennisModelResult.factors = [...(tennisModelResult.factors || []), 'markov-live'];
                       tennisModelResult._markovLive = live;
                     }
-                  } catch (le) { log('DEBUG', 'TENNIS-MARKOV-LIVE', `err: ${le.message}`); }
+                  } catch (le) { reportBug('TENNIS-MARKOV-LIVE', le); }
                 }
               }
-            } catch (me) { log('DEBUG', 'TENNIS-MARKOV', `err: ${me.message}`); }
+            } catch (me) { reportBug('TENNIS-MARKOV', me); }
           }
 
           // Tennis market scanner (log-only) — totals games, sets handicap, TB, aces.
@@ -8981,7 +9029,7 @@ async function pollTennis(runOnce = false) {
                     }
                     // Propaga `correlationDiscount` pras tips originais (shadow + DM usam)
                     found = found.map((t, i) => ({ ...t, correlationDiscount: adjusted[i].correlationDiscount }));
-                  } catch (ce) { log('DEBUG', 'TENNIS-CORR', `err: ${ce.message}`); }
+                  } catch (ce) { reportBug('TENNIS-CORR', ce); }
                 }
                 if (found.length) {
                   log('INFO', 'TENNIS-MARKETS',
@@ -9032,11 +9080,11 @@ async function pollTennis(runOnce = false) {
                           log('DEBUG', 'TENNIS-MARKET-TIP', `Dedup skip (${inMemFresh ? 'mem' : 'db'}): ${dedupKey}`);
                         }
                       }
-                    } catch (mte) { log('DEBUG', 'TENNIS-MARKET-TIP', `err: ${mte.message}`); }
+                    } catch (mte) { reportBug('TENNIS-MARKET-TIP', mte); }
                   }
                 }
               }
-            } catch (e) { log('DEBUG', 'TENNIS-MARKETS', `scan err: ${e.message}`); }
+            } catch (e) { reportBug('TENNIS-MARKETS', e); }
           }
 
           // Injury/retirement risk — downgrade confidence + shrink P se pick é jogador high-risk.
@@ -9072,7 +9120,7 @@ async function pollTennis(runOnce = false) {
                 tennisModelResult.factors = [...(tennisModelResult.factors || []), 'injury'];
                 tennisModelResult._injuryRisk = { team1: r1, team2: r2 };
               }
-            } catch (ie) { log('DEBUG', 'TENNIS-INJURY', `err: ${ie.message}`); }
+            } catch (ie) { reportBug('TENNIS-INJURY', ie); }
           }
 
           // Rank-based stakes detection: elite matchup (both top-20) → conf boost +3%.
@@ -9097,7 +9145,7 @@ async function pollTennis(runOnce = false) {
                     `${match.team1} #${r1.latestRank} vs ${match.team2} #${r2.latestRank} — ${reason} → conf ${prev.toFixed(2)}×${mult.toFixed(3)}=${tennisModelResult.confidence.toFixed(2)}`);
                 }
               }
-            } catch (re) { log('DEBUG', 'TENNIS-RANK-STAKES', `err: ${re.message}`); }
+            } catch (re) { reportBug('TENNIS-RANK-STAKES', re); }
           }
 
           // Clutch adjustment: combined BP save (serve) + BP conversion (return).
@@ -9129,9 +9177,9 @@ async function pollTennis(runOnce = false) {
                     `pickDiff=${diff.toFixed(1)}pp → conf ${prev.toFixed(2)}×${mult.toFixed(3)}=${tennisModelResult.confidence.toFixed(2)}`);
                 }
               }
-            } catch (ce) { log('DEBUG', 'TENNIS-CLUTCH', `err: ${ce.message}`); }
+            } catch (ce) { reportBug('TENNIS-CLUTCH', ce); }
           }
-        } catch(e) { log('DEBUG', 'TENNIS-MODEL', `Erro: ${e.message}`); }
+        } catch (e) { reportBug('TENNIS-MODEL', e); }
 
         let mlResultTennis;
         if (tennisModelResult && tennisModelResult.confidence >= 0.4) {
@@ -9820,7 +9868,7 @@ async function pollFootball(runOnce = false) {
               mlScore._fbModel = fbModel;
             }
           }
-        } catch(e) { log('DEBUG', 'FB-MODEL', `Erro: ${e.message}`); }
+        } catch (e) { reportBug('FB-MODEL', e); }
 
         // Se temos dados reais e o ML diz sem edge → pular (economiza chamada de IA)
         if (fixtureInfo && !mlScore.pass) {
@@ -10448,7 +10496,7 @@ async function pollCs(runOnce = false) {
               modelP1 = mergedP1;
               modelP2 = 1 - mergedP1;
             }
-          } catch (e) { log('DEBUG', 'CS-TRAINED', `err: ${e.message}`); }
+          } catch (e) { reportBug('CS-TRAINED', e); }
         }
 
         // Live series override — usa HLTV scorebot + MC pra overrider pSeries
@@ -10492,7 +10540,7 @@ async function pollCs(runOnce = false) {
               modelP1 = pSeriesLive;
               modelP2 = 1 - pSeriesLive;
             }
-          } catch (e) { log('DEBUG', 'CS-LIVE-SERIES', `err: ${e.message}`); }
+          } catch (e) { reportBug('CS-LIVE-SERIES', e); }
         }
 
         // Market scanner CS2 (log-only) — handicap + totais de mapas.
@@ -10552,11 +10600,11 @@ async function pollCs(runOnce = false) {
                         log('DEBUG', 'CS-MARKET-TIP', `Dedup skip (${inMemFresh ? 'mem' : 'db'}): ${dedupKey}`);
                       }
                     }
-                  } catch (mte) { log('DEBUG', 'CS-MARKET-TIP', `err: ${mte.message}`); }
+                  } catch (mte) { reportBug('CS-MARKET-TIP', mte); }
                 }
               }
             }
-          } catch (e) { log('DEBUG', 'CS-MARKETS', `scan err: ${e.message}`); }
+          } catch (e) { reportBug('CS-MARKETS', e); }
         }
 
         const direction = useElo
@@ -10968,7 +11016,7 @@ async function pollValorant(runOnce = false) {
               modelP1 = mergedP1;
               modelP2 = 1 - mergedP1;
             }
-          } catch (e) { log('DEBUG', 'VAL-TRAINED', `err: ${e.message}`); }
+          } catch (e) { reportBug('VAL-TRAINED', e); }
         }
         const direction = elo.direction === 'p1' ? 't1' : elo.direction === 'p2' ? 't2' : null;
         const mlScore = elo.score;
@@ -11284,7 +11332,7 @@ async function runAutoDarts() {
                 ml.modelP1 = merged;
                 ml.modelP2 = 1 - merged;
               }
-            } catch (e) { log('DEBUG', 'DARTS-TRAINED', `err: ${e.message}`); }
+            } catch (e) { reportBug('DARTS-TRAINED', e); }
           }
 
           // Direção, odd e stake Kelly
@@ -11501,7 +11549,7 @@ async function runAutoSnooker() {
                 ml.modelP1 = merged;
                 ml.modelP2 = 1 - merged;
               }
-            } catch (e) { log('DEBUG', 'SNOOKER-TRAINED', `err: ${e.message}`); }
+            } catch (e) { reportBug('SNOOKER-TRAINED', e); }
           }
 
           const pickTeam = ml.direction === 't1' ? match.team1 : match.team2;
@@ -11972,7 +12020,7 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
       const { settleShadowTips } = require('./lib/market-tips-shadow');
       const r = settleShadowTips(db);
       if (r.settled > 0 || r.skipped > 0) log('INFO', 'MT-SHADOW', `Settled ${r.settled} market tips (skipped ${r.skipped})`);
-    } catch (e) { log('DEBUG', 'MT-SHADOW', `settle err: ${e.message}`); }
+    } catch (e) { reportBug('MT-SHADOW', e); }
   };
   setInterval(runShadowSettle, 30 * 60 * 1000);
   setTimeout(runShadowSettle, 10 * 60 * 1000); // 10min pós-boot (não espera 30min pra primeira run)
