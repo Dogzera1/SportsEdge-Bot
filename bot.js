@@ -3685,7 +3685,7 @@ async function autoAnalyzeMatch(token, match) {
 
     // ── Odds freshness gate ──
     const isLiveLoL = match.status === 'live' || match.status === 'inprogress';
-    if (oddsToUse?.t1 && !isOddsFresh(oddsToUse, isLiveLoL)) {
+    if (oddsToUse?.t1 && !isOddsFresh(oddsToUse, isLiveLoL, 'lol')) {
       log('INFO', 'AUTO', `Odds stale (${oddsAgeStr(oddsToUse)}): ${match.team1} vs ${match.team2} — pulando`);
       logRejection('lol', `${match.team1} vs ${match.team2}`, 'odds_stale', { age: oddsAgeStr(oddsToUse) });
       return null;
@@ -3854,6 +3854,7 @@ async function autoAnalyzeMatch(token, match) {
                 bestOf: lolModel.bestOf || 3,
                 pricingLib: lolMarketsLib,
                 minEv,
+                momentum: 0.03, // LoL momentum calibrado (project_lol_series_model)
               });
               if (found.length) {
                 log('INFO', 'LOL-MARKETS',
@@ -7248,7 +7249,7 @@ async function _pollDotaInner(runOnce = false) {
         setDotaAnalyzed({ ts: now, tipSent: false, noEdge: true });
         continue;
       }
-      if (!isOddsFresh(o, isLive)) {
+      if (!isOddsFresh(o, isLive, 'dota2')) {
         log('INFO', 'AUTO-DOTA', `Odds stale (${oddsAgeStr(o)}): ${match.team1} vs ${match.team2} — pulando`);
         logRejection('dota2', `${match.team1} vs ${match.team2}`, 'odds_stale', { age: oddsAgeStr(o) });
         continue;
@@ -7443,6 +7444,7 @@ async function _pollDotaInner(runOnce = false) {
               markets, pMap: pMapDota, bestOf: dotaBo,
               pricingLib: require('./lib/lol-markets'),
               minEv,
+              momentum: 0.04, // Dota2 momentum retrained (project_dota2_momentum_features)
             });
             if (found.length) {
               log('INFO', 'DOTA-MARKETS',
@@ -8604,7 +8606,7 @@ async function pollTennis(runOnce = false) {
         }
 
         const isLiveTennis = match.status === 'live';
-        if (!isOddsFresh(o, isLiveTennis)) {
+        if (!isOddsFresh(o, isLiveTennis, 'tennis')) {
           log('INFO', 'AUTO-TENNIS', `Odds stale (${oddsAgeStr(o)}): ${match.team1} vs ${match.team2} — pulando`);
           logRejection('tennis', `${match.team1} vs ${match.team2}`, 'odds_stale', { age: oddsAgeStr(o) });
           continue;
@@ -10065,7 +10067,7 @@ async function pollTableTennis(runOnce = false) {
 
         if (!match.odds?.t1 || !match.odds?.t2) continue;
         const isTTLive = match.status === 'live';
-        if (!isOddsFresh(match.odds, isTTLive)) {
+        if (!isOddsFresh(match.odds, isTTLive, 'tabletennis')) {
           log('INFO', 'AUTO-TT', `Odds stale (${oddsAgeStr(match.odds)}): ${match.team1} vs ${match.team2} — pulando`);
           continue;
         }
@@ -10320,7 +10322,7 @@ async function pollCs(runOnce = false) {
         }
 
         if (!match.odds?.t1 || !match.odds?.t2) continue;
-        if (!isOddsFresh(match.odds, isLiveCs)) {
+        if (!isOddsFresh(match.odds, isLiveCs, 'cs')) {
           log('INFO', 'AUTO-CS', `Odds stale (${oddsAgeStr(match.odds)}): ${match.team1} vs ${match.team2} — pulando`);
           logRejection('cs', `${match.team1} vs ${match.team2}`, 'odds_stale', { age: oddsAgeStr(match.odds) });
           continue;
@@ -10446,6 +10448,7 @@ async function pollCs(runOnce = false) {
                 markets, pMap: pMapCs, bestOf: csBestOf,
                 pricingLib: require('./lib/lol-markets'),
                 minEv,
+                momentum: 0.04, // CS2 momentum (project_esports_momentum_wave)
               });
               if (found.length) {
                 log('INFO', 'CS-MARKETS',
@@ -10829,7 +10832,7 @@ async function pollValorant(runOnce = false) {
         }
 
         if (!match.odds?.t1 || !match.odds?.t2) continue;
-        if (!isOddsFresh(match.odds, isLiveVal)) {
+        if (!isOddsFresh(match.odds, isLiveVal, 'valorant')) {
           log('INFO', 'AUTO-VAL', `Odds stale (${oddsAgeStr(match.odds)}): ${match.team1} vs ${match.team2} — pulando`);
           logRejection('valorant', `${match.team1} vs ${match.team2}`, 'odds_stale', { age: oddsAgeStr(match.odds) });
           continue;
@@ -11159,7 +11162,7 @@ async function runAutoDarts() {
           if (prev?.tipSent) continue;
           const cooldown = isLiveDarts ? DARTS_LIVE_COOLDOWN : DARTS_PREGAME_COOLDOWN;
           if (prev && (now - prev.ts < cooldown)) continue;
-          if (!isOddsFresh(match.odds, isLiveDarts)) {
+          if (!isOddsFresh(match.odds, isLiveDarts, 'darts')) {
             log('INFO', 'AUTO-DARTS', `Odds stale (${oddsAgeStr(match.odds)}): ${match.team1} vs ${match.team2} — pulando`);
             continue;
           }
@@ -11388,7 +11391,7 @@ async function runAutoSnooker() {
           if (prev?.tipSent) continue;
           const cooldown = isLiveSnooker ? SNOOKER_LIVE_COOLDOWN : SNOOKER_PREGAME_COOLDOWN;
           if (prev && (now - prev.ts < cooldown)) continue;
-          if (!isOddsFresh(match.odds, isLiveSnooker)) {
+          if (!isOddsFresh(match.odds, isLiveSnooker, 'snooker')) {
             log('INFO', 'AUTO-SNOOKER', `Odds stale (${oddsAgeStr(match.odds)}): ${match.team1} vs ${match.team2} — pulando`);
             continue;
           }

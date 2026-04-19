@@ -4222,17 +4222,27 @@ const server = http.createServer(async (req, res) => {
   if (p === '/odds-markets') {
     const period = parseInt(parsed.query.period || '0', 10);
     let matchupId = parsed.query.matchupId || parsed.query.id;
+    // swap=true quando cache Pinnacle tem team1=home mas nosso caller passou team1=awayName.
+    // Necessário pra scanners reorientarem handicap (home/away) ao ponto de vista de team1/team2.
+    let swap = false;
+    let homeTeam = null, awayTeam = null;
     // Resolve via teams se matchupId não vier
     if (!matchupId && parsed.query.team1 && parsed.query.team2) {
       const normTeam = s => String(s||'').toLowerCase().replace(/[^a-z0-9]/g,'');
       const n1 = normTeam(parsed.query.team1), n2 = normTeam(parsed.query.team2);
-      // Busca em oddsCache (mesmo pattern usado em /odds)
       for (const [k, v] of Object.entries(oddsCache)) {
         if (!k.startsWith('esports_pin_') && !k.startsWith('pin_')) continue;
         const vt1 = normTeam(v?.t1Name || ''), vt2 = normTeam(v?.t2Name || '');
-        if (((vt1.includes(n1) || n1.includes(vt1)) && (vt2.includes(n2) || n2.includes(vt2))) ||
-            ((vt1.includes(n2) || n2.includes(vt1)) && (vt2.includes(n1) || n1.includes(vt2)))) {
-          if (v?.fixtureId) { matchupId = String(v.fixtureId).replace(/^pin_/, ''); break; }
+        const direct = (vt1.includes(n1) || n1.includes(vt1)) && (vt2.includes(n2) || n2.includes(vt2));
+        const swapped = !direct && (vt1.includes(n2) || n2.includes(vt1)) && (vt2.includes(n1) || n1.includes(vt2));
+        if (direct || swapped) {
+          if (v?.fixtureId) {
+            matchupId = String(v.fixtureId).replace(/^pin_/, '');
+            swap = swapped;
+            homeTeam = v.t1Name || null;
+            awayTeam = v.t2Name || null;
+            break;
+          }
         }
       }
     }
@@ -4243,7 +4253,7 @@ const server = http.createServer(async (req, res) => {
         pinnacle.getMatchupTotals(matchupId, period).catch(() => []),
         pinnacle.getMatchupMoneylineByPeriod(matchupId, period).catch(() => null),
       ]);
-      sendJson(res, { matchupId: String(matchupId), period, moneyline, handicaps, totals });
+      sendJson(res, { matchupId: String(matchupId), period, moneyline, handicaps, totals, swap, homeTeam, awayTeam });
     } catch (e) {
       sendJson(res, { error: e.message }, 500);
     }
