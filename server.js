@@ -8690,6 +8690,12 @@ const server = http.createServer(async (req, res) => {
       const totalCurrent = bankrolls.reduce((s, b) => s + (b.current_banca || 0), 0);
       const totalProfit = totalCurrent - totalInitial;
       const growthPct = totalInitial > 0 ? (totalProfit / totalInitial * 100) : 0;
+      // Lucro em unidades: Σ(profit_sport / unitValue_sport), unitValue = current/100
+      const totalProfitUnits = bankrolls.reduce((s, b) => {
+        const uv = (b.current_banca || 100) / 100;
+        const sp = (b.current_banca || 0) - (b.initial_banca || 0);
+        return s + (uv > 0 ? sp / uv : 0);
+      }, 0);
 
       // Tips agregadas (não archived)
       const tipsAgg = db.prepare(`
@@ -8792,6 +8798,7 @@ const server = http.createServer(async (req, res) => {
           total_initial: +totalInitial.toFixed(2),
           total_current: +totalCurrent.toFixed(2),
           total_profit: +totalProfit.toFixed(2),
+          total_profit_units: +totalProfitUnits.toFixed(2),
           growthPct: +growthPct.toFixed(2),
           bankrolls: bankrolls.length,
         },

@@ -206,6 +206,7 @@
       margin-top: 4px;
       display: flex; align-items: center; gap: 6px;
     }
+    .kpi-meta { font-size: 13px; color: var(--text-dim); font-weight: 500; margin-left: 4px; }
     .delta { display: inline-flex; align-items: center; gap: 2px; font-weight: 600; }
     .delta.up   { color: var(--success); }
     .delta.down { color: var(--danger); }
@@ -863,6 +864,7 @@ async function loadOverall(gen = refreshGen) {
 
   // KPI hero — cross-sport
   const profit = banca.total_profit || 0;
+  const profitU = banca.total_profit_units;
   const growthPct = banca.growthPct;
   document.getElementById('kpis').innerHTML = `
     <div class="kpi">
@@ -872,7 +874,7 @@ async function loadOverall(gen = refreshGen) {
     </div>
     <div class="kpi">
       <div class="kpi-label">Lucro acumulado</div>
-      <div class="kpi-value ${sign(profit)}">${profit >= 0 ? '+' : ''}${fmtMoney(profit)}</div>
+      <div class="kpi-value ${sign(profit)}">${profit >= 0 ? '+' : ''}${fmtMoney(profit)}${profitU != null ? ` <span class="kpi-meta">(${profitU > 0 ? '+' : ''}${profitU.toFixed(2)}u)</span>` : ''}</div>
       <div class="kpi-sub">${ov.total_tips} tips · ${ov.hitRate != null ? ov.hitRate.toFixed(0) + '% WR' : '—'}${ov.pending ? ' · ' + ov.pending + ' pend' : ''}</div>
     </div>
     <div class="kpi">
@@ -992,7 +994,7 @@ async function loadKPIs(gen = refreshGen) {
     </div>
     <div class="kpi">
       <div class="kpi-label">Lucro acumulado</div>
-      <div class="kpi-value ${sign(profit)}">${profit >= 0 ? '+' : ''}${fmtMoney(profit)}</div>
+      <div class="kpi-value ${sign(profit)}">${profit >= 0 ? '+' : ''}${fmtMoney(profit)}${banca.unitValue ? ` <span class="kpi-meta">(${profit >= 0 ? '+' : ''}${(profit / banca.unitValue).toFixed(2)}u)</span>` : ''}</div>
       <div class="kpi-sub">${totalTips} tips · ${winRate != null ? winRate.toFixed(0) + '% WR' : '—'}${ov.pending ? ' · ' + ov.pending + ' pend' : ''}</div>
     </div>
     <div class="kpi">
@@ -1313,10 +1315,19 @@ async function loadTips(gen = refreshGen) {
             : statusCls === 'push' ? '=' : '⏳';
           const profit = t.profit_reais;
           const profitCls = profit > 0 ? 'pos' : profit < 0 ? 'neg' : '';
+          // Units derivados de stake (e.g., "1.5u") + odds + result, sem precisar de unitValue
+          const stakeU = parseFloat(String(t.stake || '').replace(/u/i, ''));
+          let profitU = null;
+          if (Number.isFinite(stakeU) && t.odds != null) {
+            const o = Number(t.odds);
+            if (t.result === 'win')  profitU =  stakeU * (o - 1);
+            else if (t.result === 'loss') profitU = -stakeU;
+            else if (t.result === 'push' || t.result === 'void') profitU = 0;
+          }
           const profitStr = t.result == null || t.result === 'pending'
             ? '—'
             : profit != null
-              ? (profit > 0 ? '+' : '') + fmtMoney(profit)
+              ? `${profit > 0 ? '+' : ''}${fmtMoney(profit)}${profitU != null ? ` <span class="tip-meta">(${profitU > 0 ? '+' : ''}${profitU.toFixed(2)}u)</span>` : ''}`
               : t.result;
           const clv = t.clv_pct != null ? fmtPct(t.clv_pct) :
                       (t.clv_odds && t.odds ? fmtPct((t.odds / t.clv_odds - 1) * 100) : '—');
