@@ -385,6 +385,15 @@
     .tips-pager button:disabled { opacity: 0.4; cursor: not-allowed; }
     .tips-pager .page-info { font-variant-numeric: tabular-nums; }
 
+    .settle-actions { display: inline-flex; gap: 4px; margin-left: 6px; vertical-align: middle; }
+    .btn-settle { display: inline-flex; align-items: center; justify-content: center;
+                  width: 22px; height: 22px; padding: 0; border-radius: 4px; font-size: 11px;
+                  font-weight: 700; cursor: pointer; border: 1px solid var(--border);
+                  background: var(--surface-2); color: var(--text-dim); transition: all 0.12s; }
+    .btn-settle:hover { transform: scale(1.08); }
+    .btn-settle.win:hover  { background: var(--success-bg); color: var(--success); border-color: var(--success); }
+    .btn-settle.loss:hover { background: var(--danger-bg);  color: var(--danger);  border-color: var(--danger); }
+
     /* ─────────────────────────────────────────────────────────
        Collapsible section
        ───────────────────────────────────────────────────────── */
@@ -755,6 +764,47 @@ async function apiFetch(path) {
     return null;
   }
 }
+
+// Admin fetch — x-admin-key header, prompt cached em sessionStorage.
+function getAdminKey() {
+  let key = sessionStorage.getItem('ADMIN_KEY') || '';
+  if (!key) {
+    key = prompt('Admin key (x-admin-key):') || '';
+    if (key) sessionStorage.setItem('ADMIN_KEY', key);
+  }
+  return key;
+}
+async function adminFetch(path, opts = {}) {
+  const key = getAdminKey();
+  const headers = Object.assign({}, opts.headers || {}, { 'x-admin-key': key });
+  const r = await fetch(BASE + path, Object.assign({}, opts, { headers }));
+  if (r.status === 401 || r.status === 403) {
+    sessionStorage.removeItem('ADMIN_KEY');
+    throw new Error('Admin key inválida — recarregue a página');
+  }
+  return r;
+}
+
+async function settleTipManual(id, result, sport) {
+  const label = result === 'win' ? 'WIN' : 'LOSS';
+  if (!confirm(`Marcar tip #${id} (${sport}) como ${label}?`)) return;
+  try {
+    const r = await adminFetch('/settle-manual', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, result, sport }),
+    });
+    const j = await r.json();
+    if (j.ok) {
+      loadTips();
+    } else {
+      alert('Erro: ' + (j.error || 'falha desconhecida'));
+    }
+  } catch (e) {
+    alert('Erro: ' + e.message);
+  }
+}
+window.settleTipManual = settleTipManual;
 
 // ─────────────────────────────────────────────────────────────
 // UI state helpers — loading/empty padronizados
@@ -1295,12 +1345,12 @@ async function loadTips(gen = refreshGen) {
     const sq = status ? '&status=' + encodeURIComponent(status) : '';
     const perSport = Math.ceil(LIMIT_ALL / sports.length);
     const results = await Promise.all(sports.map(sp =>
-      apiFetch(`/tips-history?sport=${sp}&limit=${perSport}${sq}`)
+      apiFetch(`/tips-history?sport=${sp}&limit=${perSport}${sq}`).then(r => ({ sp, data: r }))
     ));
     if (shouldAbort(gen)) return;
-    for (const data of results) {
+    for (const { sp, data } of results) {
       const t = data?.tips || data || [];
-      if (Array.isArray(t)) tips.push(...t);
+      if (Array.isArray(t)) tips.push(...t.map(x => ({ ...x, sport: x.sport || sp })));
     }
     tips.sort((a, b) => new Date(b.sent_at || 0) - new Date(a.sent_at || 0));
   } else {
@@ -1308,7 +1358,7 @@ async function loadTips(gen = refreshGen) {
     const sq = status ? '&status=' + encodeURIComponent(status) : '';
     const data = await apiFetch(`/tips-history?sport=${currentSport}&limit=${LIMIT_ALL}${gq}${sq}`);
     if (shouldAbort(gen)) return;
-    tips = data?.tips || data || [];
+    tips = (data?.tips || data || []).map(x => ({ ...x, sport: x.sport || currentSport }));
   }
   tipsCache = Array.isArray(tips) ? tips : [];
   tipsPage = 1;
@@ -1382,8 +1432,12 @@ function renderTipsTable() {
             else if (t.result === 'loss') profitU = -stakeU;
             else if (t.result === 'push' || t.result === 'void') profitU = 0;
           }
-          const profitStr = t.result == null || t.result === 'pending'
-            ? '—'
+          const isPending = t.result == null || t.result === 'pending';
+          const settleBtns = isPending && t.id
+            ? `<span class="settle-actions"><button class="btn-settle win" title="Marcar WIN" onclick="event.stopPropagation();settleTipManual(${t.id},'win','${(t.sport || currentSport).replace(/'/g, '')}')">W</button><button class="btn-settle loss" title="Marcar LOSS" onclick="event.stopPropagation();settleTipManual(${t.id},'loss','${(t.sport || currentSport).replace(/'/g, '')}')">L</button></span>`
+            : '';
+          const profitStr = isPending
+            ? `— ${settleBtns}`
             : profit != null
               ? `${profit > 0 ? '+' : ''}${fmtMoney(profit)}${profitU != null ? ` <span class="tip-meta">(${profitU > 0 ? '+' : ''}${profitU.toFixed(2)}u)</span>` : ''}`
               : t.result;
