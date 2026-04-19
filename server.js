@@ -8534,6 +8534,124 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // ── Settle sweep: varre tips pendentes e liquida as que têm winner em match_results ──
+  // POST /settle-sweep?sport=esports[&days=14]  ou  sem sport pra todos
+  if (p === '/settle-sweep' && req.method === 'POST') {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const sportFilter = (parsed.query.sport || '').trim();
+      const days = Math.max(1, Math.min(60, parseInt(parsed.query.days || '14', 10) || 14));
+      const sports = sportFilter ? [sportFilter] : ['esports','tennis','mma','football','darts','snooker'];
+
+      const deriveGame = (tip) => {
+        const mid = String(tip.match_id || '');
+        const ev  = String(tip.event_name || '').toLowerCase();
+        if (tip.sport === 'tennis') return 'tennis';
+        if (tip.sport === 'football') return 'football';
+        if (tip.sport === 'darts') return 'darts';
+        if (tip.sport === 'snooker') return 'snooker';
+        if (tip.sport === 'mma') return 'mma';
+        if (tip.sport === 'esports') {
+          if (mid.startsWith('dota2_') || ev.includes('dota')) return 'dota2';
+          if (mid.startsWith('cs_') || ev.includes('cs:go') || ev.includes('counter-strike')) return 'cs';
+          if (mid.startsWith('valorant_') || ev.includes('valorant')) return 'valorant';
+          return 'lol';
+        }
+        return tip.sport;
+      };
+
+      const summary = { sports: {}, total_swept: 0, total_settled: 0, total_skipped_map: 0, total_not_found: 0 };
+
+      for (const sport of sports) {
+        const tips = stmts.getUnsettledTips.all(sport, `-${days} days`);
+        const info = { swept: 0, settled: 0, skipped_map: 0, not_found: 0, settled_ids: [] };
+
+        for (const tip of tips) {
+          info.swept++;
+          // Pula markets MAP/correct-score/handicap — exigem settlement especializado
+          if (tip.market_type && !/^ML$|^match_winner$|^moneyline$/i.test(tip.market_type)) {
+            info.skipped_map++;
+            continue;
+          }
+
+          const game = deriveGame(tip);
+          // Tentativa 1: match_id exato
+          let row = tip.match_id
+            ? db.prepare("SELECT * FROM match_results WHERE match_id = ? AND game = ? LIMIT 1").get(tip.match_id, game)
+            : null;
+
+          // Tentativa 2: fuzzy por team1/team2 + janela ±4/+6 dias em torno de sent_at
+          if (!row?.winner && tip.participant1 && tip.participant2) {
+            const t1 = `%${tip.participant1}%`;
+            const t2 = `%${tip.participant2}%`;
+            row = db.prepare(`
+              SELECT * FROM match_results
+              WHERE game = ?
+                AND ((lower(team1) LIKE lower(?) AND lower(team2) LIKE lower(?))
+                  OR (lower(team1) LIKE lower(?) AND lower(team2) LIKE lower(?)))
+                AND resolved_at BETWEEN datetime(?, '-4 days') AND datetime(?, '+6 days')
+              ORDER BY resolved_at DESC LIMIT 1
+            `).get(game, t1, t2, t2, t1, tip.sent_at || new Date().toISOString(), tip.sent_at || new Date().toISOString());
+          }
+
+          if (!row?.winner) { info.not_found++; continue; }
+
+          // Aplica match de nome (reusa lógica do /settle)
+          let nameMatched, matchMethod;
+          if (sport === 'tennis') {
+            nameMatched = tennisSinglePlayerNameMatch(tip.tip_participant, row.winner);
+            matchMethod = nameMatched ? 'tennis' : 'none';
+          } else {
+            const aliases = sport === 'esports' ? LOL_ALIASES : null;
+            const r = nameMatches(tip.tip_participant, row.winner, { aliases });
+            nameMatched = r.match;
+            matchMethod = r.method;
+          }
+          if (matchMethod === 'substring_weak') {
+            log('WARN', 'SETTLE-SWEEP', `QUARANTINE ${sport} tip=${tip.id} "${tip.tip_participant}" vs "${row.winner}" — requer manual`);
+            info.not_found++;
+            continue;
+          }
+          const result = nameMatched ? 'win' : 'loss';
+
+          const stakeR = tip.stake_reais || (() => {
+            const bk = stmts.getBankroll.get(sport);
+            const uv = bk ? bk.current_banca / 100 : 1;
+            const su = parseFloat(String(tip.stake || '1').replace('u','')) || 1;
+            return parseFloat((su * uv).toFixed(2));
+          })();
+          const odds = parseFloat(tip.odds) || 1;
+          const profitR = result === 'win'
+            ? parseFloat((stakeR * (odds - 1)).toFixed(2))
+            : parseFloat((-stakeR).toFixed(2));
+
+          db.transaction(() => {
+            db.prepare(`UPDATE tips SET result = ?, settled_at = datetime('now'), stake_reais = ?, profit_reais = ? WHERE id = ? AND result IS NULL`)
+              .run(result, stakeR, profitR, tip.id);
+            const bk = stmts.getBankroll.get(sport);
+            if (bk) {
+              const nova = parseFloat((bk.current_banca + profitR).toFixed(2));
+              stmts.updateBankroll.run(nova, sport);
+            }
+          })();
+
+          log('INFO', 'SETTLE-SWEEP', `${sport} tip=${tip.id} "${tip.tip_participant}" vs winner="${row.winner}" → ${result} [${matchMethod}] Δ=${profitR}`);
+          info.settled++;
+          info.settled_ids.push(tip.id);
+        }
+
+        summary.sports[sport] = info;
+        summary.total_swept += info.swept;
+        summary.total_settled += info.settled;
+        summary.total_skipped_map += info.skipped_map;
+        summary.total_not_found += info.not_found;
+      }
+
+      sendJson(res, { ok: true, days, ...summary });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
   // ── Overall summary — cross-sport aggregate pra dashboard "Geral" ──
   // GET /overall-summary?days=30
   if (p === '/overall-summary') {
@@ -8644,7 +8762,11 @@ const server = http.createServer(async (req, res) => {
         ORDER BY day ASC
       `).all(`-${days} days`);
 
-      let cum = totalInitial;
+      // Equity series deve terminar em totalCurrent mesmo quando existirem tips
+      // settled antes da janela (profitBySport é all-time, equityRows é windowed).
+      // Começa em totalCurrent - windowProfit pra garantir alinhamento no ponto final.
+      const windowProfit = equityRows.reduce((s, r) => s + (Number(r.profit_r) || 0), 0);
+      let cum = totalCurrent - windowProfit;
       let peak = cum, maxDD = 0;
       const series = equityRows.map(r => {
         const profit = Number(r.profit_r) || 0;
@@ -8683,7 +8805,7 @@ const server = http.createServer(async (req, res) => {
         sports: sportsBreakdown,
         equity: {
           initial: +totalInitial.toFixed(2),
-          current: +cum.toFixed(2),
+          current: +totalCurrent.toFixed(2),
           max_drawdown_pct: +(maxDD * 100).toFixed(2),
           series,
         },
@@ -8855,7 +8977,8 @@ const server = http.createServer(async (req, res) => {
     let bancaInfo = null;
 
     if (bk) {
-      // Backfill: tips arquivadas sem profit_reais calculado (coluna adicionada depois do settlement)
+      // Backfill: tips arquivadas sem profit_reais calculado (coluna adicionada depois do settlement).
+      // Não filtra por game — backfill é global pro sport, rodado oportunisticamente.
       const orphans = db.prepare(
         `SELECT t.id, t.result, t.odds, t.stake, t.stake_reais FROM tips t
          WHERE t.sport = ? AND ${sqlTipsDedupeIdIn('t', '?')}
@@ -8875,15 +8998,19 @@ const server = http.createServer(async (req, res) => {
         log('INFO', 'BANCA', `[${sport}] Backfill: ${orphans.length} tips sem profit_reais recalculadas`);
       }
 
+      // Profit da banca: quando há filtro de game, escopa pro game visível
+      // (bug pré-fix: /roi filtrava wins/losses por game mas banca somava todo o sport,
+      //  causando "2 tips 100% WR" com banca/lucro destoando do que o usuário vê).
       const profitRow = db.prepare(
         `SELECT COALESCE(SUM(t.profit_reais), 0) as total_profit FROM tips t
          WHERE t.sport = ? AND ${sqlTipsDedupeIdIn('t', '?')}
-         AND t.result IS NOT NULL AND t.result != 'void' AND t.profit_reais IS NOT NULL`
+         AND t.result IS NOT NULL AND t.result != 'void' AND t.profit_reais IS NOT NULL
+         ${gameSql}`
       ).get(sport, sport);
       const accumulatedProfit = parseFloat((profitRow?.total_profit || 0).toFixed(2));
       const currentBanca = parseFloat((bk.initial_banca + accumulatedProfit).toFixed(2));
-      // Sincroniza o registro caso esteja desatualizado
-      if (Math.abs(currentBanca - bk.current_banca) > 0.01) {
+      // Só sincroniza o registro quando não há filtro de game (bankroll é per-sport, não per-game)
+      if (!game && Math.abs(currentBanca - bk.current_banca) > 0.01) {
         stmts.updateBankroll.run(currentBanca, sport);
       }
       bancaInfo = {
