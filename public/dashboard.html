@@ -373,6 +373,17 @@
     .tip-num   { font-variant-numeric: tabular-nums; font-weight: 600; text-align: right; }
     .tip-num.pos { color: var(--success); }
     .tip-num.neg { color: var(--danger); }
+    .tips-summary { display: flex; align-items: center; gap: 12px; padding: 8px 12px; font-size: 13px;
+                    border-bottom: 1px solid var(--border); color: var(--text-dim); }
+    .tips-summary .pos { color: var(--success); font-weight: 600; }
+    .tips-summary .neg { color: var(--danger); font-weight: 600; }
+    .tips-pager { display: flex; align-items: center; justify-content: center; gap: 8px; padding: 10px;
+                  border-top: 1px solid var(--border); font-size: 13px; color: var(--text-dim); }
+    .tips-pager button { background: var(--surface-2); border: 1px solid var(--border); color: var(--text);
+                         padding: 4px 10px; border-radius: 4px; cursor: pointer; font-size: 12px; }
+    .tips-pager button:hover:not(:disabled) { background: var(--surface-3); }
+    .tips-pager button:disabled { opacity: 0.4; cursor: not-allowed; }
+    .tips-pager .page-info { font-variant-numeric: tabular-nums; }
 
     /* ─────────────────────────────────────────────────────────
        Collapsible section
@@ -576,10 +587,11 @@
           <option value="win">Ganhas</option>
           <option value="loss">Perdidas</option>
         </select>
-        <select class="select-inline" id="tipsLimit" onchange="loadTips()">
-          <option value="10" selected>10</option>
-          <option value="25">25</option>
-          <option value="50">50</option>
+        <select class="select-inline" id="tipsPageSize" onchange="tipsPage=1; renderTipsTable()">
+          <option value="10">10/pág</option>
+          <option value="25" selected>25/pág</option>
+          <option value="50">50/pág</option>
+          <option value="100">100/pág</option>
         </select>
       </div>
     </div>
@@ -1256,18 +1268,22 @@ async function loadLive(gen = refreshGen) {
 // ─────────────────────────────────────────────────────────────
 // 5) Tips table
 // ─────────────────────────────────────────────────────────────
+// Estado de paginação + cache das tips carregadas (buscamos tudo e paginamos no cliente)
+let tipsCache = [];
+let tipsPage = 1;
+
 async function loadTips(gen = refreshGen) {
-  const limit = document.getElementById('tipsLimit').value;
   const status = document.getElementById('tipsStatus').value;
   const el = document.getElementById('tipsTable');
   setLoading(el);
   let tips = [];
+  const LIMIT_ALL = 1000; // cap hard do backend
   if (currentSport === '__overall__') {
-    // Cross-sport: union de vários sports por tips recentes
     const sports = ['esports', 'valorant', 'cs', 'tennis', 'mma', 'football', 'darts', 'snooker', 'tabletennis'];
     const sq = status ? '&status=' + encodeURIComponent(status) : '';
+    const perSport = Math.ceil(LIMIT_ALL / sports.length);
     const results = await Promise.all(sports.map(sp =>
-      apiFetch(`/tips-history?sport=${sp}&limit=10${sq}`)
+      apiFetch(`/tips-history?sport=${sp}&limit=${perSport}${sq}`)
     ));
     if (shouldAbort(gen)) return;
     for (const data of results) {
@@ -1275,20 +1291,50 @@ async function loadTips(gen = refreshGen) {
       if (Array.isArray(t)) tips.push(...t);
     }
     tips.sort((a, b) => new Date(b.sent_at || 0) - new Date(a.sent_at || 0));
-    tips = tips.slice(0, Number(limit));
   } else {
     const gq = currentGame ? '&game=' + encodeURIComponent(currentGame) : '';
     const sq = status ? '&status=' + encodeURIComponent(status) : '';
-    const data = await apiFetch(`/tips-history?sport=${currentSport}&limit=${limit}${gq}${sq}`);
+    const data = await apiFetch(`/tips-history?sport=${currentSport}&limit=${LIMIT_ALL}${gq}${sq}`);
     if (shouldAbort(gen)) return;
     tips = data?.tips || data || [];
   }
+  tipsCache = Array.isArray(tips) ? tips : [];
+  tipsPage = 1;
+  renderTipsTable();
+}
+
+function renderTipsTable() {
+  const el = document.getElementById('tipsTable');
+  if (!el) return;
+  const tips = tipsCache;
   if (!Array.isArray(tips) || !tips.length) {
     setEmpty(el, 'Sem tips no filtro');
     return;
   }
 
+  const pageSize = Number(document.getElementById('tipsPageSize')?.value || 25);
+  const totalPages = Math.max(1, Math.ceil(tips.length / pageSize));
+  if (tipsPage > totalPages) tipsPage = totalPages;
+  if (tipsPage < 1) tipsPage = 1;
+  const startIdx = (tipsPage - 1) * pageSize;
+  const pageSlice = tips.slice(startIdx, startIdx + pageSize);
+
+  // Summary calcula sobre o DATASET COMPLETO (não só a página visível)
+  const nWin = tips.filter(t => t.result === 'win').length;
+  const nLoss = tips.filter(t => t.result === 'loss').length;
+  const nPending = tips.filter(t => t.result == null || t.result === 'pending').length;
+  const nVoid = tips.filter(t => t.result === 'void' || t.result === 'push').length;
+  const totalProfit = tips.reduce((s, t) => s + (Number(t.profit_reais) || 0), 0);
+
   el.innerHTML = `
+    <div class="tips-summary">
+      <span><b>${tips.length}</b> tips</span>
+      <span class="pos">${nWin}W</span>
+      <span class="neg">${nLoss}L</span>
+      ${nPending ? `<span class="tip-meta">${nPending} pend</span>` : ''}
+      ${nVoid ? `<span class="tip-meta">${nVoid} void</span>` : ''}
+      <span class="${totalProfit >= 0 ? 'pos' : 'neg'}" style="margin-left:auto">${totalProfit >= 0 ? '+' : ''}${fmtMoney(totalProfit)}</span>
+    </div>
     <table class="tips">
       <thead>
         <tr>
@@ -1303,7 +1349,7 @@ async function loadTips(gen = refreshGen) {
         </tr>
       </thead>
       <tbody>
-        ${tips.slice(0, Number(limit)).map(t => {
+        ${pageSlice.map(t => {
           const statusCls = t.result === 'win' ? 'win'
             : t.result === 'loss' ? 'loss'
             : t.result === 'void' ? 'void'
@@ -1351,6 +1397,15 @@ async function loadTips(gen = refreshGen) {
         }).join('')}
       </tbody>
     </table>
+    ${totalPages > 1 ? `
+      <div class="tips-pager">
+        <button onclick="tipsPage=1; renderTipsTable()" ${tipsPage === 1 ? 'disabled' : ''}>«</button>
+        <button onclick="tipsPage--; renderTipsTable()" ${tipsPage === 1 ? 'disabled' : ''}>‹ Anterior</button>
+        <span class="page-info">Página ${tipsPage} de ${totalPages} · ${startIdx + 1}–${Math.min(startIdx + pageSize, tips.length)} de ${tips.length}</span>
+        <button onclick="tipsPage++; renderTipsTable()" ${tipsPage === totalPages ? 'disabled' : ''}>Próxima ›</button>
+        <button onclick="tipsPage=${totalPages}; renderTipsTable()" ${tipsPage === totalPages ? 'disabled' : ''}>»</button>
+      </div>
+    ` : ''}
   `;
 }
 

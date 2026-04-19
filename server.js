@@ -8445,7 +8445,7 @@ const server = http.createServer(async (req, res) => {
     const sport = parsed.query.sport || 'esports';
     const game  = parsed.query.game || '';
     const limitRaw = parseInt(parsed.query.limit);
-    const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(200, limitRaw)) : 20;
+    const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(1000, limitRaw)) : 20;
 
     // status: open/settled (alias para pending/settled)
     const status = String(parsed.query.status || '').toLowerCase();
