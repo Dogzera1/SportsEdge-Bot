@@ -7597,6 +7597,23 @@ const server = http.createServer(async (req, res) => {
         const isVoided = stmts.isVoidedMatch.get(sport, String(matchId));
         if (isVoided) { sendJson(res, { ok: true, skipped: true, reason: 'voided_odds_wrong_match' }); return; }
 
+        // EV hard cap: tip com EV absurdo (>35%) é indício de odd errada ou edge
+        // inflado por modelo overfitado. Histórico mostra que esports perdia com
+        // avg_ev 26% mesmo com CLV +3.7%. Rejeita gravação → bot aborta DM.
+        // Override via TIP_EV_MAX (default 35). Usa TIP_EV_MAX_PER_SPORT={"esports":25,"tennis":40} pra cap diferenciado.
+        if (evN != null) {
+          let evMax = parseFloat(process.env.TIP_EV_MAX || '35');
+          try {
+            const perSport = process.env.TIP_EV_MAX_PER_SPORT ? JSON.parse(process.env.TIP_EV_MAX_PER_SPORT) : null;
+            if (perSport && typeof perSport[sport] === 'number') evMax = perSport[sport];
+          } catch (_) {}
+          if (evN > evMax) {
+            log('WARN', 'EV-CAP', `${sport}: ${p1} vs ${p2} — EV ${evN.toFixed(1)}% > ${evMax}% (cap). Tip rejeitada.`);
+            sendJson(res, { ok: true, skipped: true, reason: 'ev_too_high', ev: evN, ev_max: evMax });
+            return;
+          }
+        }
+
         // Spread gate: bestOdd vs Pinnacle sharp anchor. Se soft book > 1.5x
         // Pinnacle, é forte indício de odd errada/stale. Rejeita gravação → bot
         // aborta DM (checa rec.skipped). Override via process.env.BOOKMAKER_SPREAD_MAX_RATIO.
