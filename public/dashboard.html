@@ -796,7 +796,10 @@ async function settleTipManual(id, result, sport) {
     });
     const j = await r.json();
     if (j.ok) {
-      loadTips();
+      // Re-executa o refresh completo (KPIs, equity, ROI por sport, tips, overall)
+      // pra refletir banca/ROI atualizados imediatamente após liquidação manual.
+      if (typeof refresh === 'function') refresh();
+      else loadTips();
     } else {
       alert('Erro: ' + (j.error || 'falha desconhecida'));
     }
