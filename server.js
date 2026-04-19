@@ -3416,17 +3416,18 @@ function runSettleSweep({ sportFilter = '', days = 14 } = {}) {
 
     for (const tip of tips) {
       info.swept++;
-      if (tip.market_type && !/^ML$|^match_winner$|^moneyline$/i.test(tip.market_type)) {
-        info.skipped_map++;
-        continue;
-      }
+      const isMapMarket = tip.market_type && !/^ML$|^match_winner$|^moneyline$/i.test(tip.market_type);
 
       const game = deriveGame(tip);
+      // Tentativa 1: match_id exato — funciona pra MAP markets (match_results
+      // armazena dota2_ps_*_MAP1 quando /dota-result resolve o mapa).
       let row = tip.match_id
         ? db.prepare("SELECT * FROM match_results WHERE match_id = ? AND game = ? LIMIT 1").get(tip.match_id, game)
         : null;
 
-      if (!row?.winner && tip.participant1 && tip.participant2) {
+      // Tentativa 2: fuzzy — só pra ML (MAP tips NÃO podem fallback, senão
+      // bateriam com series winner em vez de map winner).
+      if (!row?.winner && !isMapMarket && tip.participant1 && tip.participant2) {
         const t1 = `%${tip.participant1}%`;
         const t2 = `%${tip.participant2}%`;
         row = db.prepare(`
@@ -3439,7 +3440,11 @@ function runSettleSweep({ sportFilter = '', days = 14 } = {}) {
         `).get(game, t1, t2, t2, t1, tip.sent_at || new Date().toISOString(), tip.sent_at || new Date().toISOString());
       }
 
-      if (!row?.winner) { info.not_found++; continue; }
+      if (!row?.winner) {
+        if (isMapMarket) info.skipped_map++;
+        else info.not_found++;
+        continue;
+      }
 
       let nameMatched, matchMethod;
       if (sport === 'tennis') {
