@@ -7596,6 +7596,28 @@ const server = http.createServer(async (req, res) => {
         // Blacklist: se já foi VOID por odds errada, não gravar de novo
         const isVoided = stmts.isVoidedMatch.get(sport, String(matchId));
         if (isVoided) { sendJson(res, { ok: true, skipped: true, reason: 'voided_odds_wrong_match' }); return; }
+
+        // Spread gate: bestOdd vs Pinnacle sharp anchor. Se soft book > 1.5x
+        // Pinnacle, é forte indício de odd errada/stale. Rejeita gravação → bot
+        // aborta DM (checa rec.skipped). Override via process.env.BOOKMAKER_SPREAD_MAX_RATIO.
+        if (t.lineShopOdds && t.pickSide) {
+          try {
+            const { checkBookmakerSpread } = require('./lib/line-shopping');
+            const maxRatio = parseFloat(process.env.BOOKMAKER_SPREAD_MAX_RATIO || '1.5') || 1.5;
+            const sp = checkBookmakerSpread(t.lineShopOdds, t.pickSide, maxRatio);
+            if (sp.reject) {
+              log('WARN', 'SPREAD-GATE',
+                `${sport}: ${p1} vs ${p2} — ${sp.bestBook} @ ${sp.bestOdd} vs Pinnacle @ ${sp.pinnacleOdd} ratio=${sp.ratio}x (> ${sp.threshold}x). Tip rejeitada.`);
+              sendJson(res, {
+                ok: true, skipped: true, reason: 'bookmaker_spread_too_wide',
+                best_book: sp.bestBook, best_odd: sp.bestOdd,
+                pinnacle_odd: sp.pinnacleOdd, ratio: sp.ratio, threshold: sp.threshold,
+              });
+              return;
+            }
+          } catch (e) { log('DEBUG', 'SPREAD-GATE', `check failed: ${e.message}`); }
+        }
+
         const p1n = norm(p1), p2n = norm(p2);
         const marketTypeStr = clampStr(t.market_type || 'ML', 20) || 'ML';
         const daysBack = process.env.VOID_TIP_PAIR_DAYS || '90 days';
