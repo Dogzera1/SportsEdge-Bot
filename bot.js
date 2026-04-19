@@ -7195,6 +7195,17 @@ async function _pollDotaInner(runOnce = false) {
         if (val?.tipSent) analyzedDota.set(pairKeyBase, val);
       };
 
+      // Fraud/match-fix blacklist (ESIC + comunidade). Rejeita antes do segment gate
+      // porque essas ligas são no-bet zone independente de edge do modelo.
+      const { isFraudRiskLeague } = require('./lib/dota-fraud-blacklist');
+      const _fraudHit = isFraudRiskLeague(match.league);
+      if (_fraudHit) {
+        log('INFO', 'AUTO-DOTA', `Fraud-risk league skip: ${match.team1} vs ${match.team2} [${match.league}] → ${_fraudHit}`);
+        logRejection('dota2', `${match.team1} vs ${match.team2}`, 'fraud_risk_league', { league: match.league || '?', pattern: _fraudHit });
+        setDotaAnalyzed({ ts: now, tipSent: false, noEdge: true });
+        continue;
+      }
+
       // Segment gate
       const _segGateD = esportsSegmentGate('dota2', match.league, match.format);
       if (_segGateD.skip) {
@@ -7338,6 +7349,20 @@ async function _pollDotaInner(runOnce = false) {
             const metaLine = dotaHeroMetaLine(blue, red);
             if (metaLine) dotaLiveContext += metaLine;
           } catch (e) { log('DEBUG', 'DOTA-META', `err: ${e.message}`); }
+          // Roster observation + stand-in detection (ambos times)
+          try {
+            const { recordRosterObservation, detectStandIn } = require('./lib/dota-roster-detect');
+            const blueIds = (blue.players || []).map(p => p.account_id).filter(Boolean);
+            const redIds  = (red.players  || []).map(p => p.account_id).filter(Boolean);
+            if (blueIds.length === 5) recordRosterObservation(db, match.team1, blueIds);
+            if (redIds.length  === 5) recordRosterObservation(db, match.team2, redIds);
+            const subBlue = detectStandIn(db, match.team1, blueIds);
+            const subRed  = detectStandIn(db, match.team2, redIds);
+            if (subBlue.isStandIn || subRed.isStandIn) {
+              match._dotaStandIn = { team1: subBlue, team2: subRed };
+              log('INFO', 'DOTA-ROSTER', `Stand-in detectado: ${match.team1}=${subBlue.standInCount}/5 ${match.team2}=${subRed.standInCount}/5`);
+            }
+          } catch (e) { log('DEBUG', 'DOTA-ROSTER', `err: ${e.message}`); }
         } else if (ps?.hasLiveStats) {
           dotaHasLiveStats = true;
           const blue = ps.blueTeam, red = ps.redTeam;
@@ -7374,6 +7399,19 @@ async function _pollDotaInner(runOnce = false) {
       }
       if ((mlResult.rawEdge || 0) > 15) {
         log('DEBUG', 'AUTO-DOTA', `ML edge bruto=${mlResult.rawEdge.toFixed(1)}pp (clamped→${mlResult.score.toFixed(1)}pp) | modelP1Raw=${(mlResult.modelP1Raw*100).toFixed(1)}% impliedP1=${(mlResult.impliedP1*100).toFixed(1)}% scorePts=${(mlResult.scorePoints||0).toFixed(1)} factors=[${(mlResult.factorActive||[]).join(',')}] ${match.team1} vs ${match.team2}`);
+      }
+
+      // Stand-in downweight: roster mudou, modelo baseado em forma/H2H fica estranho.
+      // Escala conservadora: ×0.75 se 1 time com sub, ×0.55 se ambos.
+      if (match._dotaStandIn) {
+        const s1 = match._dotaStandIn.team1?.isStandIn ? match._dotaStandIn.team1.standInCount : 0;
+        const s2 = match._dotaStandIn.team2?.isStandIn ? match._dotaStandIn.team2.standInCount : 0;
+        if (s1 || s2) {
+          const prev = mlResult.confidence ?? 1;
+          const mult = (s1 && s2) ? 0.55 : 0.75;
+          mlResult.confidence = prev * mult;
+          log('INFO', 'DOTA-ROSTER', `Stand-in downweight conf ${prev.toFixed(2)}→${mlResult.confidence.toFixed(2)} (×${mult}) | team1 subs=${s1} team2 subs=${s2}`);
+        }
       }
 
       // ── Modelo treinado Dota (logistic+isotônico) ──
@@ -7447,6 +7485,27 @@ async function _pollDotaInner(runOnce = false) {
               minEv,
               momentum: 0.04, // Dota2 momentum retrained (project_dota2_momentum_features)
             });
+            // Extras: total kills / duration per-map (período 1 = mapa 1). Shadow-only.
+            try {
+              const mapMarkets = await serverGet(`/odds-markets?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}&period=1`).catch(() => null);
+              if (mapMarkets && (mapMarkets.totals?.length || 0) > 0) {
+                const { scanKills, scanDuration } = require('./lib/dota-extras-scanner');
+                const killTips = scanKills({ totals: mapMarkets.totals, mapNumber: 1, minEv });
+                const durTips  = scanDuration({ totals: mapMarkets.totals, mapNumber: 1, minEv });
+                const extras = [...killTips, ...durTips];
+                if (extras.length) {
+                  log('INFO', 'DOTA-EXTRAS', `${match.team1} vs ${match.team2} map1: ${extras.length} extra(s) (kills=${killTips.length} dur=${durTips.length})`);
+                  try {
+                    const { logShadowTip } = require('./lib/market-tips-shadow');
+                    for (const t of extras) logShadowTip(db, { sport: 'dota2', match, bestOf: dotaBo, tip: t, meta: { mapNumber: t.mapNumber } });
+                  } catch (_) {}
+                  for (const t of extras.slice(0, 3)) {
+                    log('INFO', 'DOTA-EXTRAS', `  • ${t.label} @ ${t.odd.toFixed(2)} | pModel=${(t.pModel*100).toFixed(1)}% EV=${t.ev.toFixed(1)}%`);
+                  }
+                }
+              }
+            } catch (e) { log('DEBUG', 'DOTA-EXTRAS', `err: ${e.message}`); }
+
             if (found.length) {
               log('INFO', 'DOTA-MARKETS',
                 `${match.team1} vs ${match.team2} [Bo${dotaBo}]: ${found.length} mercado(s) EV ≥${minEv}% (pMap=${(pMapDota*100).toFixed(1)}%)`);

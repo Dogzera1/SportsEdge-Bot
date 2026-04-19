@@ -520,6 +520,24 @@ const migrations = [
       db.exec(`CREATE INDEX IF NOT EXISTS idx_tips_archived_sport ON tips(archived, sport);`);
     },
   },
+  {
+    id: '029_dota_team_rosters',
+    up(db) {
+      // Observa account_ids de cada time Dota via /opendota-live.
+      // Permite detectar stand-in quando ≥2 dos 5 account_ids não batem com os mais frequentes.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS dota_team_rosters (
+          team_key TEXT NOT NULL,
+          account_id INTEGER NOT NULL,
+          games_count INTEGER NOT NULL DEFAULT 1,
+          first_seen TEXT NOT NULL DEFAULT (datetime('now')),
+          last_seen  TEXT NOT NULL DEFAULT (datetime('now')),
+          PRIMARY KEY (team_key, account_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_dtr_team ON dota_team_rosters(team_key, games_count DESC);
+      `);
+    },
+  },
 ];
 
 function applyMigrations(db) {

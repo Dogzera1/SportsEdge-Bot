@@ -251,7 +251,8 @@
       "Bash(awk 'NR>=10260 && NR<=10280' bot.js)",
       "Bash(awk 'NR>=10100 && NR<=10530' bot.js)",
       "Read(//c/c/Users/vict_/Desktop/lol betting/**)",
-      "Bash(grep -E \"\\\\.js$|lib|server\")"
+      "Bash(grep -E \"\\\\.js$|lib|server\")",
+      "Bash(xargs grep *)"
     ]
   }
 }
