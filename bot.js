@@ -538,22 +538,43 @@ function reportBug(module, err, ctx = {}) {
  * Sinaliza gates apertados demais ou modelo desligado.
  */
 const _lastStuckAlert = {}; // sport → ts (cooldown 2h entre alertas)
+
+// Policy rejections — não são "pipeline travada", são gates intencionais (ITF
+// excluído, odds antigas, prefilter cortando edge fraca). Exclusas do count.
+const POLICY_REJECTIONS = new Set([
+  'itf_exclusion',
+  'odds_stale',
+  'ml_prefilter_edge',
+  'segment_gate',
+  'ai_no_edge', // IA decidiu não entrar — decisão válida
+]);
+
+// Threshold per-sport via ENV. Tennis tem universo gigante (ITF/Challenger/ATP
+// rodando simultâneo) → threshold maior evita falsos positivos.
+function _stuckThresholdFor(sport) {
+  const envKey = `PIPELINE_STUCK_THRESHOLD_${sport.toUpperCase()}`;
+  if (process.env[envKey]) return parseInt(process.env[envKey], 10);
+  const defaults = { tennis: 60, table_tennis: 50, mma: 30 };
+  if (defaults[sport]) return defaults[sport];
+  return parseInt(process.env.PIPELINE_STUCK_THRESHOLD || '20', 10);
+}
+
 function runPipelineStuckCheck() {
   const ONE_HOUR = 60 * 60 * 1000;
   const COOLDOWN = 2 * ONE_HOUR;
   const now = Date.now();
   const cutoff = now - ONE_HOUR;
-  const threshold = parseInt(process.env.PIPELINE_STUCK_THRESHOLD || '20', 10);
 
-  // Conta rejeições por sport última hora
+  // Conta apenas rejeições alertáveis (exclui policy gates).
   const byySport = {};
   for (const r of _rejections) {
     if (r.ts < cutoff) break;
+    if (POLICY_REJECTIONS.has(r.reason)) continue;
     byySport[r.sport] = (byySport[r.sport] || 0) + 1;
   }
 
   for (const [sport, count] of Object.entries(byySport)) {
-    if (count < threshold) continue;
+    if (count < _stuckThresholdFor(sport)) continue;
     // Conta tips enviadas esse sport na última hora (active only)
     try {
       const tipsRow = db.prepare(`
@@ -566,10 +587,11 @@ function runPipelineStuckCheck() {
       // Sport tem muitas rejections + 0 tips. Alert com cooldown.
       if ((now - (_lastStuckAlert[sport] || 0)) < COOLDOWN) continue;
       _lastStuckAlert[sport] = now;
-      // Top reasons
+      // Top reasons (exclui policy rejections — já filtradas do count)
       const reasons = {};
       for (const r of _rejections) {
         if (r.ts < cutoff || r.sport !== sport) continue;
+        if (POLICY_REJECTIONS.has(r.reason)) continue;
         reasons[r.reason] = (reasons[r.reason] || 0) + 1;
       }
       const topReasons = Object.entries(reasons).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([r, n]) => `${r}×${n}`).join(' · ');
