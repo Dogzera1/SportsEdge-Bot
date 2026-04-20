@@ -805,6 +805,7 @@ const ADMIN_POST_PATHS = new Set([
   '/admin/seed-football-secondary',
   '/admin/train-football-poisson',
   '/admin/cleanup-football-shortleagues',
+  '/admin/eval-football-poisson',
   '/update-open-tip',
   '/claude',
   '/ps-result',

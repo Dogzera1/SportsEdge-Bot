@@ -7975,6 +7975,165 @@ const server = http.createServer(async (req, res) => {
   }
 
   // GET /dynamic-thresholds — lista valores ativos
+  // Eval football Poisson — split temporal, treina 70%, testa 30%, reporta métricas.
+  // POST /admin/eval-football-poisson?years_back=3&min_games=8[&target_leagues=csv]
+  if (p === '/admin/eval-football-poisson' && req.method === 'POST') {
+    if (!requireAdmin(req, res)) return;
+    const minGames = parseInt(parsed.query.min_games || '8', 10);
+    const yearsBack = parseInt(parsed.query.years_back || '3', 10);
+    const queryLeagues = String(parsed.query.target_leagues || '').trim();
+    const defaultTargets = 'Brazil,Sweden,Norway,Finland,Denmark,Poland,Japan,USA,Mexico,Russia,Romania,China,Ireland,Championship,League One,2.Bundesliga,Segunda,Serie B,Ligue 2,Pro League,Primeira Liga,Super Lig,Super League,Superliga,Eliteserien,Allsvenskan,Veikkausliiga,Ekstraklasa';
+    const targetPatterns = (queryLeagues || process.env.FOOTBALL_TARGET_LEAGUES || defaultTargets).split(',').map(s => s.trim()).filter(Boolean);
+    const leagueMatches = (l) => targetPatterns.some(p => String(l || '').toLowerCase().includes(p.toLowerCase()));
+    const since = new Date(); since.setFullYear(since.getFullYear() - yearsBack);
+    try {
+      const rows = db.prepare(`
+        SELECT team1, team2, winner, final_score, league, resolved_at
+        FROM match_results
+        WHERE game = 'football' AND resolved_at >= ?
+        ORDER BY resolved_at ASC
+      `).all(since.toISOString().slice(0, 10));
+      const filtered = rows.filter(r => leagueMatches(r.league));
+      if (filtered.length < 100) { sendJson(res, { ok: false, error: 'insufficient_matches', n: filtered.length }, 400); return; }
+      // Temporal split 70/30
+      const splitIdx = Math.floor(filtered.length * 0.7);
+      const trainMatches = filtered.slice(0, splitIdx);
+      const testMatches = filtered.slice(splitIdx);
+
+      // Train params from trainMatches only
+      const leagueAgg = {}, teamAgg = {};
+      const ensureTeam = (t) => teamAgg[t] || (teamAgg[t] = { home: { g: 0, gf: 0, ga: 0 }, away: { g: 0, gf: 0, ga: 0 }, leagues: new Set() });
+      for (const r of trainMatches) {
+        const [hg, ag] = String(r.final_score || '').split('-').map(n => parseInt(n));
+        if (!Number.isFinite(hg) || !Number.isFinite(ag)) continue;
+        const L = leagueAgg[r.league] || (leagueAgg[r.league] = { n: 0, hg: 0, ag: 0 });
+        L.n++; L.hg += hg; L.ag += ag;
+        const t1 = ensureTeam(r.team1); const t2 = ensureTeam(r.team2);
+        t1.home.g++; t1.home.gf += hg; t1.home.ga += ag; t1.leagues.add(r.league);
+        t2.away.g++; t2.away.gf += ag; t2.away.ga += hg; t2.leagues.add(r.league);
+      }
+      const lparams = {}; for (const L in leagueAgg) { const a = leagueAgg[L]; lparams[L] = { n: a.n, avgH: a.hg / a.n, avgA: a.ag / a.n }; }
+      const tparams = {}; for (const t in teamAgg) {
+        const s = teamAgg[t];
+        if (s.home.g + s.away.g < minGames) continue;
+        const lg = Array.from(s.leagues)[0];
+        const lp = lparams[lg]; if (!lp) continue;
+        tparams[t] = {
+          atkH: s.home.g > 0 ? s.home.gf / s.home.g / lp.avgH : 1,
+          defH: s.home.g > 0 ? s.home.ga / s.home.g / lp.avgA : 1,
+          atkA: s.away.g > 0 ? s.away.gf / s.away.g / lp.avgA : 1,
+          defA: s.away.g > 0 ? s.away.ga / s.away.g / lp.avgH : 1,
+          league: lg,
+        };
+      }
+
+      // Poisson matrix helper
+      const pmat = (lH, lA, mx = 8) => {
+        const pH = [], pA = []; let f = 1;
+        for (let k = 0; k <= mx; k++) { if (k > 0) f *= k; pH[k] = Math.exp(-lH) * Math.pow(lH, k) / f; }
+        f = 1; for (let k = 0; k <= mx; k++) { if (k > 0) f *= k; pA[k] = Math.exp(-lA) * Math.pow(lA, k) / f; }
+        let pH1 = 0, pD = 0, pA1 = 0;
+        for (let i = 0; i <= mx; i++) for (let j = 0; j <= mx; j++) {
+          const p = pH[i] * pA[j];
+          if (i > j) pH1 += p; else if (i === j) pD += p; else pA1 += p;
+        }
+        const t = pH1 + pD + pA1;
+        return { pH: pH1 / t, pD: pD / t, pA: pA1 / t };
+      };
+
+      // Evaluate on test
+      let brierSum = 0, logLossSum = 0, correct = 0, evaluable = 0;
+      const predictions = []; // { pH, pD, pA, actualClass, actualH, actualA, actualD }
+      let leagueMiss = 0, teamMiss = 0;
+      for (const m of testMatches) {
+        const [hg, ag] = String(m.final_score || '').split('-').map(n => parseInt(n));
+        if (!Number.isFinite(hg) || !Number.isFinite(ag)) continue;
+        const lp = lparams[m.league];
+        if (!lp) { leagueMiss++; continue; }
+        const tH = tparams[m.team1]; const tA = tparams[m.team2];
+        if (!tH || !tA) { teamMiss++; continue; }
+        const lamH = lp.avgH * tH.atkH * tA.defA;
+        const lamA = lp.avgA * tA.atkA * tH.defH;
+        const { pH, pD, pA } = pmat(Math.max(0.1, Math.min(6, lamH)), Math.max(0.1, Math.min(6, lamA)));
+        const actualH = hg > ag ? 1 : 0;
+        const actualD = hg === ag ? 1 : 0;
+        const actualA = hg < ag ? 1 : 0;
+        // Multi-class Brier
+        brierSum += (pH - actualH) ** 2 + (pD - actualD) ** 2 + (pA - actualA) ** 2;
+        // Log-loss
+        const pTrue = actualH ? pH : (actualD ? pD : pA);
+        logLossSum += -Math.log(Math.max(1e-6, pTrue));
+        // Accuracy
+        const predClass = pH >= pD && pH >= pA ? 'H' : pD >= pA ? 'D' : 'A';
+        const trueClass = actualH ? 'H' : (actualD ? 'D' : 'A');
+        if (predClass === trueClass) correct++;
+        evaluable++;
+        predictions.push({ pH, pA, actualH, actualA });
+      }
+      // AUC (home_win, away_win) — Mann-Whitney pairwise
+      const aucBinary = (preds, scoreKey, labelKey) => {
+        const pos = preds.filter(p => p[labelKey] === 1).map(p => p[scoreKey]);
+        const neg = preds.filter(p => p[labelKey] === 0).map(p => p[scoreKey]);
+        if (!pos.length || !neg.length) return null;
+        let greater = 0, ties = 0;
+        for (const pp of pos) for (const nn of neg) {
+          if (pp > nn) greater++;
+          else if (pp === nn) ties++;
+        }
+        return (greater + 0.5 * ties) / (pos.length * neg.length);
+      };
+      const aucHome = aucBinary(predictions, 'pH', 'actualH');
+      const aucAway = aucBinary(predictions, 'pA', 'actualA');
+      const brier = evaluable > 0 ? brierSum / evaluable : null;
+      const logLoss = evaluable > 0 ? logLossSum / evaluable : null;
+      const acc = evaluable > 0 ? correct / evaluable : null;
+
+      // Baselines pra comparação
+      const baselineMarginal = {
+        pH: trainMatches.filter(m => { const [h,a]=String(m.final_score||'').split('-').map(n=>parseInt(n)); return h>a; }).length / trainMatches.length,
+        pD: trainMatches.filter(m => { const [h,a]=String(m.final_score||'').split('-').map(n=>parseInt(n)); return h===a; }).length / trainMatches.length,
+        pA: trainMatches.filter(m => { const [h,a]=String(m.final_score||'').split('-').map(n=>parseInt(n)); return h<a; }).length / trainMatches.length,
+      };
+      let baselineBrier = 0, baselineLogLoss = 0;
+      for (const m of testMatches) {
+        const [hg, ag] = String(m.final_score || '').split('-').map(n => parseInt(n));
+        if (!Number.isFinite(hg) || !Number.isFinite(ag)) continue;
+        const aH = hg > ag ? 1 : 0, aD = hg === ag ? 1 : 0, aA = hg < ag ? 1 : 0;
+        baselineBrier += (baselineMarginal.pH - aH) ** 2 + (baselineMarginal.pD - aD) ** 2 + (baselineMarginal.pA - aA) ** 2;
+        const pT = aH ? baselineMarginal.pH : (aD ? baselineMarginal.pD : baselineMarginal.pA);
+        baselineLogLoss += -Math.log(Math.max(1e-6, pT));
+      }
+      baselineBrier /= testMatches.length;
+      baselineLogLoss /= testMatches.length;
+
+      sendJson(res, {
+        ok: true,
+        train_n: trainMatches.length,
+        test_n: testMatches.length,
+        evaluable_n: evaluable,
+        league_miss: leagueMiss,
+        team_miss: teamMiss,
+        metrics: {
+          brier: +brier?.toFixed(4),
+          log_loss: +logLoss?.toFixed(4),
+          accuracy: +acc?.toFixed(4),
+          auc_home_win: aucHome != null ? +aucHome.toFixed(4) : null,
+          auc_away_win: aucAway != null ? +aucAway.toFixed(4) : null,
+        },
+        baseline: {
+          brier: +baselineBrier.toFixed(4),
+          log_loss: +baselineLogLoss.toFixed(4),
+          description: 'marginal class rates from train set',
+        },
+        improvement: {
+          brier_pct: brier != null ? +((baselineBrier - brier) / baselineBrier * 100).toFixed(2) : null,
+          log_loss_pct: logLoss != null ? +((baselineLogLoss - logLoss) / baselineLogLoss * 100).toFixed(2) : null,
+        },
+      });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   // Train football Poisson params per-league + per-team. Usa match_results (filtrado
   // pelas target leagues) pra aprender:
   //   - home_advantage do sport (goals diff)
