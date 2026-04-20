@@ -258,7 +258,10 @@
       "Bash(git commit -m ' *)",
       "Bash(git push *)",
       "Bash(PYTHONIOENCODING=utf-8 curl -sSL --ssl-no-revoke --max-time 30 \"https://sportsedge-bot-production.up.railway.app/tips-history?sport=tennis&limit=50\")",
-      "Bash(git fetch *)"
+      "Bash(git fetch *)",
+      "Bash(git commit -m 'align /equity-curve recompute with /overall-summary \\(single unit_value source\\) *)",
+      "Bash(git commit -m 'equity-curve: include pre-window profit in opening balance *)",
+      "Bash(git commit -m 'feat: CLV→Kelly feedback loop \\(esports upcoming MVP\\) *)"
     ]
   }
 }
