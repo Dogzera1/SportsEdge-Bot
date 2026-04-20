@@ -806,6 +806,7 @@ const ADMIN_POST_PATHS = new Set([
   '/admin/train-football-poisson',
   '/admin/cleanup-football-shortleagues',
   '/admin/eval-football-poisson',
+  '/void-old-pending',
   '/update-open-tip',
   '/claude',
   '/ps-result',
@@ -12423,6 +12424,51 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   }
   setInterval(() => runFootballPoissonRetrain(), 15 * 60 * 1000);
   setTimeout(() => runFootballPoissonRetrain(), 55 * 60 * 1000);
+
+  // Auto-void stuck pending tips. Diferentes sports têm latência distinta de settlement:
+  //   LoL/CS/Valorant: matches rápidos, 12h já é tarde demais
+  //   Tennis: Sackmann tem cobertura imperfeita de Challenger/Qualifiers, 36h
+  //   MMA: Sherdog pode atrasar até 3 dias, threshold conservador 72h
+  //   Darts/Snooker: 36h/48h
+  // Gated por AUTO_VOID_STUCK_AUTO=true. Rola daily AUTO_VOID_STUCK_HOUR_UTC (default 3h UTC).
+  let _lastStuckVoidDay = null;
+  async function runAutoVoidStuck() {
+    if (!/^true$/i.test(String(process.env.AUTO_VOID_STUCK_AUTO || ''))) return;
+    const now = new Date();
+    const today = now.toISOString().slice(0, 10);
+    if (_lastStuckVoidDay === today) return;
+    const hourUtc = parseInt(process.env.AUTO_VOID_STUCK_HOUR_UTC || '3', 10);
+    if (now.getUTCHours() !== hourUtc) return;
+    _lastStuckVoidDay = today;
+
+    const thresholdsH = {
+      esports: 12, lol: 12, cs: 12, valorant: 12,
+      tennis: 36, darts: 36, snooker: 48, mma: 72,
+      football: 24,
+    };
+    const adminKey = process.env.ADMIN_KEY || '';
+    const results = [];
+    for (const [sport, hours] of Object.entries(thresholdsH)) {
+      try {
+        const r = await serverPost('/void-old-pending', { sport, hours }, null,
+          adminKey ? { 'x-admin-key': adminKey } : {});
+        if (r?.ok && r.voided > 0) {
+          results.push({ sport, hours, voided: r.voided });
+          log('INFO', 'AUTO-VOID', `${sport}: voided ${r.voided} tips pendentes >${hours}h`);
+        }
+      } catch (e) { log('ERROR', 'AUTO-VOID', `${sport}: ${e.message}`); }
+    }
+    if (results.length && ADMIN_IDS.size) {
+      let msg = `🗑️ *Auto-void stuck pending*  _${today}_\n\n`;
+      for (const r of results) msg += `• ${r.sport}: ${r.voided} tips voided (>${r.hours}h sem settle)\n`;
+      msg += `\n_Settlement não chegou após threshold. Tips ficaram com result='void'._`;
+      const routed = _pickTokenForAlert('auto_void') || _pickTokenForAlert('system');
+      const token = routed?.token;
+      if (token) for (const adminId of ADMIN_IDS) await sendDM(token, adminId, msg).catch(() => {});
+    }
+  }
+  setInterval(() => runAutoVoidStuck(), 15 * 60 * 1000);
+  setTimeout(() => runAutoVoidStuck(), 65 * 60 * 1000);
 
   // Daily Autonomy Digest: 1x/dia às AUTONOMY_DIGEST_HOUR_UTC (default 12h UTC = 9h BRT),
   // DM admins com snapshot /autonomy-status. Gated por AUTONOMY_DIGEST_AUTO=true.
