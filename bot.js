@@ -12225,6 +12225,59 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   setInterval(() => runLeagueBleedScan(), 6 * 60 * 60 * 1000);
   setTimeout(() => runLeagueBleedScan(), 20 * 60 * 1000); // primeiro scan 20min pós-boot
 
+  // Nightly Retrain: roda scripts/refresh-all-isotonics.js --all diariamente na
+  // janela NIGHTLY_RETRAIN_HOUR_UTC (default 3). Tick de 15min verifica se é a hora
+  // e se ainda não rodou hoje. Gated por NIGHTLY_RETRAIN_AUTO=true.
+  let _lastNightlyRetrainDay = null;
+  async function runNightlyRetrainCheck() {
+    if (!/^true$/i.test(String(process.env.NIGHTLY_RETRAIN_AUTO || ''))) return;
+    const hourUtc = parseInt(process.env.NIGHTLY_RETRAIN_HOUR_UTC || '3', 10);
+    const now = new Date();
+    const today = now.toISOString().slice(0, 10);
+    if (_lastNightlyRetrainDay === today) return;
+    if (now.getUTCHours() !== hourUtc) return;
+    _lastNightlyRetrainDay = today;
+    log('INFO', 'NIGHTLY-RETRAIN', `Iniciando retrain + isotonic refresh (hourUTC=${hourUtc})`);
+    const { spawn } = require('child_process');
+    const args = ['scripts/refresh-all-isotonics.js', '--all', '--json'];
+    // AUTO_ROLLBACK_ON_REGRESSION já é lido pelo script via ENV.
+    const proc = spawn('node', args, { cwd: __dirname, env: { ...process.env, AUTO_ROLLBACK_ON_REGRESSION: 'true' } });
+    let stdout = '', stderr = '';
+    proc.stdout.on('data', d => stdout += d);
+    proc.stderr.on('data', d => stderr += d);
+    proc.on('close', async (code) => {
+      let summary = null;
+      try { summary = JSON.parse(stdout); } catch (_) {}
+      if (!summary) {
+        log('ERROR', 'NIGHTLY-RETRAIN', `Script falhou (code=${code}). stderr=${stderr.slice(-400)}`);
+        return;
+      }
+      const jobsOk = summary.jobs?.filter(j => j.ok).length || 0;
+      const jobsTotal = summary.jobs?.length || 0;
+      const changes = summary.changes || [];
+      const rollbacks = summary.rollbacks || [];
+      log('INFO', 'NIGHTLY-RETRAIN', `concluído code=${code} jobs=${jobsOk}/${jobsTotal} changes=${changes.length} rollbacks=${rollbacks.length}`);
+      if (changes.length || rollbacks.length) {
+        try {
+          const adminIds = (process.env.ADMIN_CHAT_IDS || '').split(',').map(s => s.trim()).filter(Boolean);
+          if (adminIds.length && typeof bot?.telegram?.sendMessage === 'function') {
+            const msg = [
+              `🌙 *Nightly Retrain*  (${summary.ranAt || today})`,
+              `Jobs: ${jobsOk}/${jobsTotal} ok`,
+              changes.length ? `\n*Changes:*\n${changes.map(c => '• ' + c).join('\n')}` : '',
+              rollbacks.length ? `\n*Rollbacks:*\n${rollbacks.map(r => r.error ? '✗ ' + r.file + ': ' + r.error : '↺ ' + r.file + ' (+ ' + r.reasonPct + '%)').join('\n')}` : '',
+            ].filter(Boolean).join('\n');
+            for (const id of adminIds) {
+              await bot.telegram.sendMessage(id, msg, { parse_mode: 'Markdown' }).catch(() => {});
+            }
+          }
+        } catch (_) {}
+      }
+    });
+  }
+  setInterval(() => runNightlyRetrainCheck().catch(e => log('ERROR', 'NIGHTLY-RETRAIN', e.message)), 15 * 60 * 1000);
+  setTimeout(() => runNightlyRetrainCheck().catch(() => {}), 45 * 60 * 1000); // primeiro check 45min pós-boot (evita colidir com outros)
+
   // Pre-Match Final Check: cron 5min, valida tips a <30min do match.
   setInterval(() => runPreMatchFinalCheckCycle().catch(e => log('ERROR', 'PRE-MATCH-CHECK', e.message)), 5 * 60 * 1000);
   setTimeout(() => runPreMatchFinalCheckCycle().catch(() => {}), 6 * 60 * 1000);
