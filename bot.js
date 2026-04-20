@@ -1103,8 +1103,8 @@ function getLeagueEdgeBonus(sport, league) {
       SELECT
         COUNT(*) AS n,
         AVG(CASE WHEN clv_odds > 1 AND odds > 1 THEN (odds/clv_odds - 1) * 100 END) AS avg_clv,
-        SUM(COALESCE(profit_units, 0)) AS profit,
-        SUM(CASE WHEN result IN ('win','loss') THEN COALESCE(stake_units, 1) ELSE 0 END) AS staked
+        SUM(COALESCE(profit_reais, 0)) AS profit,
+        SUM(CASE WHEN result IN ('win','loss') THEN COALESCE(stake_reais, 0) ELSE 0 END) AS staked
       FROM tips
       WHERE sport = ?
         AND event_name = ?
@@ -3443,7 +3443,9 @@ async function runPathGuardCycle() {
           ELSE 'base'
         END AS path,
         COUNT(*) AS n,
-        AVG(CASE WHEN clv_odds > 1 AND odds > 1 THEN (odds/clv_odds - 1) * 100 END) AS avg_clv
+        AVG(CASE WHEN clv_odds > 1 AND odds > 1 THEN (odds/clv_odds - 1) * 100 END) AS avg_clv,
+        SUM(COALESCE(stake_reais, 0)) AS staked,
+        SUM(COALESCE(profit_reais, 0)) AS profit
       FROM tips
       WHERE sent_at >= datetime('now', '-${daysWin} days')
         AND (archived IS NULL OR archived = 0)
@@ -5971,7 +5973,8 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
     try {
       const parts2 = command.trim().split(/\s+/);
       const daysHy = Math.max(7, Math.min(180, parseInt(parts2[1] || '30', 10) || 30));
-      // Agrega por sport × path (base | hybrid | override)
+      // Agrega por sport × path (base | hybrid | override).
+      // stake_reais / profit_reais já em REAL; converte pra units via unit_value per sport.
       const rows = db.prepare(`
         SELECT sport,
           CASE
@@ -5982,8 +5985,8 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
           COUNT(*) AS n,
           SUM(CASE WHEN result = 'win' THEN 1 ELSE 0 END) AS wins,
           SUM(CASE WHEN result = 'loss' THEN 1 ELSE 0 END) AS losses,
-          SUM(CASE WHEN result IN ('win','loss') THEN COALESCE(stake_units, 1) ELSE 0 END) AS staked,
-          SUM(COALESCE(profit_units, 0)) AS profit,
+          SUM(CASE WHEN result IN ('win','loss') THEN COALESCE(stake_reais, 0) ELSE 0 END) AS staked,
+          SUM(COALESCE(profit_reais, 0)) AS profit,
           AVG(CASE WHEN clv_odds > 1 AND odds > 1 THEN (odds/clv_odds - 1) * 100 END) AS avg_clv
         FROM tips
         WHERE sent_at >= datetime('now', '-${daysHy} days')
@@ -6009,7 +6012,7 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
           const roi = r.staked > 0 ? ((r.profit / r.staked) * 100).toFixed(1) : '-';
           const clv = r.avg_clv != null ? (r.avg_clv >= 0 ? '+' : '') + r.avg_clv.toFixed(1) + '%' : '-';
           const emoji = r.path === 'hybrid' ? '🔥' : r.path === 'override' ? '⚡' : '📘';
-          txt += `${emoji} ${r.path}: n=${r.n} | W/L=${r.wins}/${r.losses} (WR ${wr}%) | ROI ${roi}% | CLV ${clv}\n`;
+          txt += `${emoji} ${r.path}: n=${r.n} | W/L=${r.wins}/${r.losses} (WR ${wr}%) | ROI ${roi}% | CLV ${clv} | stake R$${r.staked.toFixed(2)}\n`;
         }
         txt += '\n';
       }
