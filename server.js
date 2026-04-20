@@ -8038,6 +8038,7 @@ const server = http.createServer(async (req, res) => {
     const minUplift = parseFloat(process.env.THRESHOLD_AUTO_APPLY_MIN_UPLIFT_PP || '10');
     const minN = parseInt(process.env.THRESHOLD_AUTO_APPLY_MIN_N || '20', 10);
     const maxDelta = parseFloat(process.env.THRESHOLD_AUTO_APPLY_MAX_DELTA_PP || '15');
+    const bootstrapMaxDelta = parseFloat(process.env.THRESHOLD_AUTO_APPLY_BOOTSTRAP_MAX_DELTA_PP || '40');
     const cooldownH = parseInt(process.env.THRESHOLD_AUTO_APPLY_COOLDOWN_H || '24', 10);
     try {
       // Reusa lógica do /threshold-optimizer inline
@@ -8070,6 +8071,11 @@ const server = http.createServer(async (req, res) => {
         const prev = db.prepare(`SELECT value FROM dynamic_thresholds WHERE sport = ? AND key = 'ev_min'`).get(sport);
         const prevVal = prev?.value ?? 0;
         const delta = Math.abs(bestT - prevVal);
+        // Bootstrap phase: se nunca aplicou antes (prev não existe), permite delta
+        // maior (bootstrapMaxDelta default 40pp) pra sair do zero. Após primeira
+        // aplicação, cai no maxDelta normal (15pp).
+        const isBootstrap = !prev;
+        const effMaxDelta = isBootstrap ? bootstrapMaxDelta : maxDelta;
         // Cooldown check
         const lastAdj = db.prepare(`SELECT applied_at FROM threshold_adjustments WHERE sport = ? AND key = 'ev_min' AND auto = 1 ORDER BY applied_at DESC LIMIT 1`).get(sport);
         const lastAdjTs = lastAdj ? new Date(String(lastAdj.applied_at).replace(' ','T') + 'Z').getTime() : 0;
@@ -8078,7 +8084,7 @@ const server = http.createServer(async (req, res) => {
         const reasonSkip =
           uplift < minUplift ? `uplift_too_low_${uplift.toFixed(1)}pp` :
           bestN < minN ? `n_too_small_${bestN}` :
-          delta > maxDelta ? `delta_too_large_${delta.toFixed(1)}pp` :
+          delta > effMaxDelta ? `delta_too_large_${delta.toFixed(1)}pp_cap${effMaxDelta}${isBootstrap?'_bootstrap':''}` :
           inCooldown ? `cooldown_active` : null;
         if (reasonSkip) { skipped.push({ sport, suggested: bestT, uplift: +uplift.toFixed(2), n: bestN, reason: reasonSkip }); continue; }
         // Apply
