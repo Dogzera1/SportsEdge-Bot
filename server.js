@@ -7621,13 +7621,16 @@ const server = http.createServer(async (req, res) => {
       try {
         const payload = safeParse(body, {});
         const sport = payload.sport || parsed.query.sport || 'esports';
-        const days = Math.max(1, Math.min(730, parseInt(payload.days || parsed.query.days || '60', 10) || 60));
+        const days = Math.max(0, Math.min(730, parseInt(payload.days || parsed.query.days || '60', 10) || 60));
+        const hoursParam = parseInt(payload.hours || parsed.query.hours || '0', 10) || 0;
+        // Permite passar hours pra granularidade menor que 1 dia
+        const cutoffExpr = hoursParam > 0 ? `-${hoursParam} hours` : `-${days} days`;
         const r = db.prepare(
           `UPDATE tips SET result = 'void', settled_at = datetime('now'), profit_reais = 0
            WHERE sport = ? AND result IS NULL AND sent_at < datetime('now', ?)`
-        ).run(sport, `-${days} days`);
-        log('INFO', 'ADMIN', `void-old-pending: sport=${sport} days=${days} → ${r.changes} tips anuladas`);
-        sendJson(res, { ok: true, voided: r.changes, sport, days });
+        ).run(sport, cutoffExpr);
+        log('INFO', 'ADMIN', `void-old-pending: sport=${sport} cutoff=${cutoffExpr} → ${r.changes} tips anuladas`);
+        sendJson(res, { ok: true, voided: r.changes, sport, cutoff: cutoffExpr });
       } catch(e) {
         sendJson(res, { error: e.message }, 500);
       }
