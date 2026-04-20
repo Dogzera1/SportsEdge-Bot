@@ -1497,14 +1497,27 @@ async function runAutoAnalysis() {
           }
 
           // Kelly adaptado por confiança: ALTA → ¼ Kelly (max 4u) | MÉDIA → ⅙ Kelly (max 3u) | BAIXA → 1/10 Kelly (max 1.5u)
-          const kellyFraction = tipConf === CONF.ALTA ? 0.25 : tipConf === CONF.BAIXA ? 0.10 : 1/6;
+          let kellyFraction = tipConf === CONF.ALTA ? 0.25 : tipConf === CONF.BAIXA ? 0.10 : 1/6;
+          const _clvAdjLive = await fetchClvMultiplier('esports', match.league);
+          if (_clvAdjLive.mult !== 1.0) {
+            log('INFO', 'CLV-KELLY', `Ajuste esports live [${match.league}]: mult=${_clvAdjLive.mult} reason=${_clvAdjLive.reason} (CLV ${_clvAdjLive.avgClv}% n=${_clvAdjLive.n})`);
+            kellyFraction = kellyFraction * _clvAdjLive.mult;
+          }
           const isT1bet = norm(tipTeam).includes(norm(match.team1)) || norm(match.team1).includes(norm(tipTeam));
           const modelPForKelly = (result.modelP1 > 0) ? (isT1bet ? result.modelP1 : result.modelP2) : null;
           const tipStake = modelPForKelly
             ? calcKellyWithP(modelPForKelly, tipOdd, kellyFraction)
             : calcKellyFraction(tipEV, tipOdd, kellyFraction);
           // Kelly negativo → não apostar
-          if (tipStake === '0u') { log('INFO', 'AUTO', `Kelly negativo para ${tipTeam} @ ${tipOdd} — tip abortada`); continue; }
+          if (tipStake === '0u') {
+            if (_clvAdjLive.mult === 0) {
+              log('WARN', 'CLV-KELLY', `Shadow por CLV severo live: ${match.team1} vs ${match.team2} [${match.league}]`);
+              logRejection('lol', `${match.team1} vs ${match.team2}`, 'clv_shadow_live', { league: match.league, clv: _clvAdjLive.avgClv, n: _clvAdjLive.n });
+            } else {
+              log('INFO', 'AUTO', `Kelly negativo para ${tipTeam} @ ${tipOdd} — tip abortada`);
+            }
+            continue;
+          }
           // Global Risk Manager (cross-sport)
           const desiredUnits = parseFloat(String(tipStake).replace('u', '')) || 0;
           const riskAdj = await applyGlobalRisk('esports', desiredUnits, match.leagueSlug || match.league);
@@ -9740,7 +9753,19 @@ Máximo 200 palavras. Raciocínio breve antes da decisão.`;
         const pickIsT1 = norm(tipPlayer) === norm(match.team1);
         const modelPPick = pickIsT1 ? mlResultTennis.modelP1 : mlResultTennis.modelP2;
 
-        const desiredUnitsTennis = parseFloat(String(tipStake)) || 0;
+        let desiredUnitsTennis = parseFloat(String(tipStake)) || 0;
+        const _clvAdjTn = await fetchClvMultiplier('tennis', match.league);
+        if (_clvAdjTn.mult !== 1.0) {
+          log('INFO', 'CLV-KELLY', `Ajuste tennis [${match.league}]: mult=${_clvAdjTn.mult} reason=${_clvAdjTn.reason} (CLV ${_clvAdjTn.avgClv}% n=${_clvAdjTn.n})`);
+          desiredUnitsTennis = desiredUnitsTennis * _clvAdjTn.mult;
+        }
+        if (desiredUnitsTennis <= 0) {
+          if (_clvAdjTn.mult === 0) {
+            log('WARN', 'CLV-KELLY', `Shadow tennis por CLV severo: ${match.team1} vs ${match.team2} [${match.league}]`);
+            logRejection('tennis', `${match.team1} vs ${match.team2}`, 'clv_shadow', { league: match.league, clv: _clvAdjTn.avgClv, n: _clvAdjTn.n });
+          }
+          await new Promise(r => setTimeout(r, 3000)); continue;
+        }
         const riskAdjTennis = await applyGlobalRisk('tennis', desiredUnitsTennis, match.league);
         if (!riskAdjTennis.ok) { log('INFO', 'RISK', `tennis: bloqueada (${riskAdjTennis.reason})`); await new Promise(r => setTimeout(r, 3000)); continue; }
         const tipStakeAdjTennis = String(riskAdjTennis.units.toFixed(1).replace(/\.0$/, ''));
@@ -10966,8 +10991,20 @@ Máximo 150 palavras.`;
             if (csKellyFrac !== pre) log('INFO', 'AUTO-CS', `Kelly adj: ${tags.join(' + ')} → ${pre.toFixed(3)} → ${csKellyFrac.toFixed(3)}`);
           }
         } catch (_) {}
+        const _clvAdjCs = await fetchClvMultiplier('cs', match.league);
+        if (_clvAdjCs.mult !== 1.0) {
+          log('INFO', 'CLV-KELLY', `Ajuste cs [${match.league}]: mult=${_clvAdjCs.mult} reason=${_clvAdjCs.reason} (CLV ${_clvAdjCs.avgClv}% n=${_clvAdjCs.n})`);
+          csKellyFrac = csKellyFrac * _clvAdjCs.mult;
+        }
         const stake = calcKellyWithP(pickP, pickOdd, csKellyFrac);
-        if (stake === '0u') { analyzedCs.set(key, { ts: now, tipSent: false }); continue; }
+        if (stake === '0u') {
+          if (_clvAdjCs.mult === 0) {
+            log('WARN', 'CLV-KELLY', `Shadow cs por CLV severo: ${match.team1} vs ${match.team2} [${match.league}]`);
+            logRejection('cs', `${match.team1} vs ${match.team2}`, 'clv_shadow', { league: match.league, clv: _clvAdjCs.avgClv, n: _clvAdjCs.n });
+          }
+          analyzedCs.set(key, { ts: now, tipSent: false });
+          continue;
+        }
         const desiredU = parseFloat(stake) || 0;
         const riskAdj = await applyGlobalRisk('cs', desiredU, match.league);
         if (!riskAdj.ok) { log('INFO', 'RISK', `cs: bloqueada (${riskAdj.reason})`); continue; }
@@ -11328,8 +11365,21 @@ async function pollValorant(runOnce = false) {
           var _aiConfVal = aiR.conf || null;
         }
 
-        const stake = calcKellyWithP(pickP, pickOdd, 1/8);
-        if (stake === '0u') { analyzedValorant.set(key, { ts: now, tipSent: false }); continue; }
+        let _valKellyFrac = 1/8;
+        const _clvAdjVal = await fetchClvMultiplier('valorant', match.league);
+        if (_clvAdjVal.mult !== 1.0) {
+          log('INFO', 'CLV-KELLY', `Ajuste valorant [${match.league}]: mult=${_clvAdjVal.mult} reason=${_clvAdjVal.reason} (CLV ${_clvAdjVal.avgClv}% n=${_clvAdjVal.n})`);
+          _valKellyFrac = _valKellyFrac * _clvAdjVal.mult;
+        }
+        const stake = calcKellyWithP(pickP, pickOdd, _valKellyFrac);
+        if (stake === '0u') {
+          if (_clvAdjVal.mult === 0) {
+            log('WARN', 'CLV-KELLY', `Shadow valorant por CLV severo: ${match.team1} vs ${match.team2} [${match.league}]`);
+            logRejection('valorant', `${match.team1} vs ${match.team2}`, 'clv_shadow', { league: match.league, clv: _clvAdjVal.avgClv, n: _clvAdjVal.n });
+          }
+          analyzedValorant.set(key, { ts: now, tipSent: false });
+          continue;
+        }
         const desiredU = parseFloat(stake) || 0;
         const riskAdj = await applyGlobalRisk('valorant', desiredU, match.league);
         if (!riskAdj.ok) { log('INFO', 'RISK', `valorant: bloqueada (${riskAdj.reason})`); continue; }
@@ -11607,8 +11657,21 @@ async function runAutoDarts() {
           }
 
           // Kelly fracionado conservador (sem IA → 1/8 Kelly)
-          const stake = calcKellyWithP(pickP, pickOdd, 1/8);
-          if (stake === '0u') { analyzedDarts.set(key, { ts: now, tipSent: false }); continue; }
+          let _dartsKellyFrac = 1/8;
+          const _clvAdjDarts = await fetchClvMultiplier('darts', match.league);
+          if (_clvAdjDarts.mult !== 1.0) {
+            log('INFO', 'CLV-KELLY', `Ajuste darts [${match.league}]: mult=${_clvAdjDarts.mult} reason=${_clvAdjDarts.reason} (CLV ${_clvAdjDarts.avgClv}% n=${_clvAdjDarts.n})`);
+            _dartsKellyFrac = _dartsKellyFrac * _clvAdjDarts.mult;
+          }
+          const stake = calcKellyWithP(pickP, pickOdd, _dartsKellyFrac);
+          if (stake === '0u') {
+            if (_clvAdjDarts.mult === 0) {
+              log('WARN', 'CLV-KELLY', `Shadow darts por CLV severo: ${match.team1} vs ${match.team2} [${match.league}]`);
+              logRejection('darts', `${match.team1} vs ${match.team2}`, 'clv_shadow', { league: match.league, clv: _clvAdjDarts.avgClv, n: _clvAdjDarts.n });
+            }
+            analyzedDarts.set(key, { ts: now, tipSent: false });
+            continue;
+          }
           const desiredU = parseFloat(stake) || 0;
           const riskAdj = await applyGlobalRisk('darts', desiredU, match.league);
           if (!riskAdj.ok) { log('INFO', 'RISK', `darts: bloqueada (${riskAdj.reason})`); continue; }
