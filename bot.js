@@ -1084,6 +1084,52 @@ function scheduleLiveClvCapture(sport, match, tipParticipant, matchId, tipOdds, 
   }, delayMs);
 }
 
+// ── Per-league edge bonus: ligas com CLV negativo histórico exigem edge maior (preventivo) ──
+// Complementa Tier 6 (path-guard desabilita depois de 20 tips ruins). Antes de acumular
+// losses, ligas com CLV negativo já aumentam threshold preventivamente.
+const _leagueEdgeBonusCache = new Map(); // key: sport|league → { ts, bonus }
+const LEAGUE_EDGE_TTL = 60 * 60 * 1000; // 1h
+
+function getLeagueEdgeBonus(sport, league) {
+  if (!sport || !league) return 0;
+  if (/^(0|false|no)$/i.test(String(process.env.LEAGUE_EDGE_BONUS || ''))) return 0;
+  const key = `${String(sport).toLowerCase()}|${String(league).trim()}`;
+  const now = Date.now();
+  const hit = _leagueEdgeBonusCache.get(key);
+  if (hit && (now - hit.ts) < LEAGUE_EDGE_TTL) return hit.bonus;
+  try {
+    const sportKey = sport === 'esports' ? 'esports' : sport; // dota rolled under esports
+    const row = db.prepare(`
+      SELECT
+        COUNT(*) AS n,
+        AVG(CASE WHEN clv_odds > 1 AND odds > 1 THEN (odds/clv_odds - 1) * 100 END) AS avg_clv,
+        SUM(COALESCE(profit_units, 0)) AS profit,
+        SUM(CASE WHEN result IN ('win','loss') THEN COALESCE(stake_units, 1) ELSE 0 END) AS staked
+      FROM tips
+      WHERE sport = ?
+        AND event_name = ?
+        AND settled_at >= datetime('now', '-60 days')
+        AND result IN ('win','loss')
+        AND (archived IS NULL OR archived = 0)
+        AND COALESCE(is_shadow, 0) = 0
+    `).get(sportKey, league);
+    let bonus = 0;
+    const minN = parseInt(process.env.LEAGUE_EDGE_MIN_N || '15', 10);
+    if (row && row.n >= minN) {
+      const clv = row.avg_clv;
+      const roi = row.staked > 0 ? (row.profit / row.staked) * 100 : null;
+      if (clv != null && clv <= -1.5) bonus = 4;
+      else if (clv != null && clv <= -0.5) bonus = 2;
+      else if (clv == null && roi != null && roi <= -10) bonus = 2;
+    }
+    _leagueEdgeBonusCache.set(key, { ts: now, bonus });
+    return bonus;
+  } catch (_) {
+    _leagueEdgeBonusCache.set(key, { ts: now, bonus: 0 });
+    return 0;
+  }
+}
+
 async function fetchClvMultiplier(sport, league) {
   // Default ON: auto-Kelly ajusta stakes baseado em CLV rolling 30d (min n=20).
   // Desabilita via CLV_AUTO_KELLY=false. Endpoint retorna 1.0 fallback se sample<min_n,
@@ -6143,6 +6189,11 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
       `\`/stats [sport]\` — ROI e calibração\n` +
       `\`/roi\` — ROI geral\n` +
       `\`/shadow [sport]\` — shadow tips (darts/snooker/TT)\n\n` +
+      `━━ 🎯 *Hybrid Paths (auto-regulação)* ━━\n` +
+      `\`/hybrid-stats [days]\` — performance por sport × path (base/hybrid/override)\n` +
+      `\`/path-guard\` — paths desativados auto por CLV negativo\n` +
+      `\`/path-guard run\` — força ciclo imediato\n` +
+      `\`/path-guard reset [sport]\` — reativa path manual\n\n` +
       `━━ 🔧 *Debug LoL Específico* ━━\n` +
       `\`/slugs\` — ligas LoL cobertas + ignoradas\n` +
       `\`/lolraw\` — dump bruto schedule LoL API\n\n` +
@@ -9446,8 +9497,11 @@ async function pollTennis(runOnce = false) {
           oddsMovement: null
         };
 
-        // Usa override ML env para tênis com base 4.0pp — exige edge mais robusto para reduzir false positives
-        const envScoreBase = process.env.TENNIS_MIN_EDGE ? parseFloat(process.env.TENNIS_MIN_EDGE) : 4.0;
+        // Usa override ML env para tênis com base 4.0pp — exige edge mais robusto para reduzir false positives.
+        // Adiciona bonus per-league se histórico CLV ruim (Tier 7).
+        const _tennisLeagueBonus = getLeagueEdgeBonus('tennis', match.league || match.tournament || '');
+        const envScoreBase = (process.env.TENNIS_MIN_EDGE ? parseFloat(process.env.TENNIS_MIN_EDGE) : 4.0) + _tennisLeagueBonus;
+        if (_tennisLeagueBonus > 0) log('DEBUG', 'TENNIS-LEAGUE-BONUS', `${match.team1} vs ${match.team2} [${match.league}]: edge threshold +${_tennisLeagueBonus}pp (CLV leak)`);
 
         // ── Modelo Tennis Específico (Elo + Serve/Return + Fatigue + H2H Surface) ──
         let tennisModelResult = null;
@@ -11426,11 +11480,13 @@ async function pollCs(runOnce = false) {
 
         // Segment gate bonus: exige edge adicional em segmentos com Brier fraco
         // (ex: CS2 tier2 Bo5 +3pp, CS2 tier1 Bo1 +1pp). Baseline threshold 3.0pp.
-        const csMinEdge = 3.0 + (_segGateCs?.minEdgeBonus || 0);
+        const _leagueBonusCs = getLeagueEdgeBonus('cs', match.league || '');
+        const csMinEdge = 3.0 + (_segGateCs?.minEdgeBonus || 0) + _leagueBonusCs;
         if (!direction || mlScore < csMinEdge) {
           analyzedCs.set(key, { ts: now, tipSent: false });
           const bonusTag = _segGateCs?.minEdgeBonus > 0 ? ` [seg+${_segGateCs.minEdgeBonus}pp: ${_segGateCs.reason || ''}]` : '';
-          log('INFO', 'AUTO-CS', `Sem edge: ${match.team1} vs ${match.team2} | edge=${mlScore.toFixed(1)}pp (min ${csMinEdge.toFixed(1)}pp${bonusTag}) factors=${factorCount} ${useElo ? '[Elo]' : '[HLTV]'}`);
+          const leagueTag = _leagueBonusCs > 0 ? ` [liga+${_leagueBonusCs}pp CLV leak]` : '';
+          log('INFO', 'AUTO-CS', `Sem edge: ${match.team1} vs ${match.team2} | edge=${mlScore.toFixed(1)}pp (min ${csMinEdge.toFixed(1)}pp${bonusTag}${leagueTag}) factors=${factorCount} ${useElo ? '[Elo]' : '[HLTV]'}`);
           logRejection('cs', `${match.team1} vs ${match.team2}`, 'edge_below_threshold', { edge: +mlScore.toFixed(2), min: +csMinEdge.toFixed(2) });
           continue;
         }
