@@ -8623,29 +8623,36 @@ const server = http.createServer(async (req, res) => {
       // guardian/dashboard não divergirem. Snapshots profit_reais/stake_reais ficam
       // stale quando baseline muda; unit_value atual é fonte única.
       const _bl = getBaseline();
-      const tipsRaw = db.prepare(`
+      const tipsAll = db.prepare(`
         SELECT stake, odds, result, settled_at
         FROM tips
         WHERE sport = ?
-          AND result IN ('win','loss','push')
-          AND settled_at IS NOT NULL
-          AND settled_at >= datetime('now', ?)
+          AND result IN ('win','loss')
           AND (archived IS NULL OR archived = 0)
         ORDER BY settled_at ASC
-      `).all(sport, `-${days} days`);
+      `).all(sport);
+      const windowMs = days * 24 * 3600 * 1000;
+      const cutoff = Date.now() - windowMs;
       const dayMap = {};
-      for (const t of tipsRaw) {
+      let preWindowProfit = 0;
+      for (const t of tipsAll) {
+        const ts = t.settled_at ? new Date(String(t.settled_at).replace(' ', 'T') + 'Z').getTime() : 0;
+        const p = tipProfitReais(t, _bl.unit_value);
+        if (p == null) continue;
+        if (!ts || ts < cutoff) {
+          preWindowProfit += p;
+          continue;
+        }
         const day = String(t.settled_at).slice(0, 10);
         const d = dayMap[day] || (dayMap[day] = { day, profit_r: 0, stake_r: 0, n: 0 });
-        const p = tipProfitReais(t, _bl.unit_value);
-        if (p != null) d.profit_r += p;
+        d.profit_r += p;
         d.stake_r += tipStakeReais(t, _bl.unit_value);
         d.n++;
       }
       const rows = Object.values(dayMap).sort((a, b) => a.day.localeCompare(b.day));
       const bk = stmts.getBankroll.get(sport);
-      let cum = bk ? Number(bk.initial_banca || 0) : 0;
-      const initial = cum;
+      const initial = bk ? Number(bk.initial_banca || 0) : 0;
+      let cum = initial + preWindowProfit;
       let peak = cum, maxDD = 0;
       const dailyReturns = [];
       const series = rows.map(r => {
