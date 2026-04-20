@@ -1085,7 +1085,10 @@ function scheduleLiveClvCapture(sport, match, tipParticipant, matchId, tipOdds, 
 }
 
 async function fetchClvMultiplier(sport, league) {
-  if (!/^true$/i.test(String(process.env.CLV_AUTO_KELLY || ''))) {
+  // Default ON: auto-Kelly ajusta stakes baseado em CLV rolling 30d (min n=20).
+  // Desabilita via CLV_AUTO_KELLY=false. Endpoint retorna 1.0 fallback se sample<min_n,
+  // então sports novos não sofrem distorção antes de ter histórico.
+  if (/^(0|false|no)$/i.test(String(process.env.CLV_AUTO_KELLY || ''))) {
     return { mult: 1.0, reason: 'disabled', n: 0, avgClv: null };
   }
   const key = `${String(sport || '').toLowerCase()}|${String(league || '').trim()}`;
@@ -10508,17 +10511,46 @@ Máximo 200 palavras.`;
         // versões antigas do formato omitiam; aceita ambos).
         const tipMatch = text.match(/TIP_FB:([\w_.]+):([^@]+)@([\d.]+)\|EV:([+-]?[\d.]+)(?:%?\|P:[\d.]+%?)?\|STAKE:([\d.]+)u?\|CONF:(ALTA|MÉDIA|BAIXA)/i);
 
-        if (!tipMatch) {
-          log('INFO', 'AUTO-FOOTBALL', `Sem tip: ${match.team1} vs ${match.team2}`);
-          await new Promise(r => setTimeout(r, 3000)); continue;
+        // IA advisory fallback: IA não retornou TIP_FB parseável. Se modelo quantitativo
+        // (mlScore + fbTrained) tem sinal moderado, sintetiza tipMatch com CONF=BAIXA + stake=1u.
+        // CLV rolling filtra se piorar. Desabilita via FB_IA_ADVISORY=false.
+        let _fbFromOverride = false;
+        let tipMatchEff = tipMatch;
+        if (!tipMatchEff) {
+          const _advisoryOn = !/^(0|false|no)$/i.test(String(process.env.FB_IA_ADVISORY || ''));
+          const _minConf = parseFloat(process.env.FB_IA_OVERRIDE_MIN_CONF || '0.45');
+          const _minEv = parseFloat(process.env.FB_IA_OVERRIDE_MIN_EV || '5');
+          const canOverride = _advisoryOn && fbTrained &&
+            (fbModel?.confidence ?? 0) >= _minConf &&
+            parseFloat(mlScore?.bestEv ?? 0) >= _minEv;
+          if (canOverride) {
+            const dir = mlScore.direction;
+            const seleção = dir === '1X2_H' ? match.team1
+              : dir === '1X2_A' ? match.team2
+              : dir === '1X2_D' ? 'Empate'
+              : dir === 'OVER_2.5' ? 'Over 2.5'
+              : dir === 'UNDER_2.5' ? 'Under 2.5' : null;
+            const oddVal = parseFloat(mlScore.bestOdd);
+            const evVal = parseFloat(mlScore.bestEv);
+            if (seleção && oddVal > 1 && Number.isFinite(evVal)) {
+              _fbFromOverride = true;
+              // [full, mercado, seleção, odd, EV, stake, CONF]
+              tipMatchEff = [null, dir, seleção, String(oddVal.toFixed(2)), String(evVal.toFixed(1)), '1', 'BAIXA'];
+              log('INFO', 'FB-IA-OVERRIDE', `${match.team1} vs ${match.team2} [${match.league}]: override IA SEM_EDGE — ${dir}:${seleção}@${oddVal.toFixed(2)} EV=${evVal.toFixed(1)}% modelConf=${fbModel?.confidence?.toFixed(2) ?? 'n/a'} → CONF=BAIXA stake=1u`);
+            }
+          }
+          if (!_fbFromOverride) {
+            log('INFO', 'AUTO-FOOTBALL', `Sem tip: ${match.team1} vs ${match.team2}${_advisoryOn ? ` (override skip: trained=${!!fbTrained} conf=${fbModel?.confidence?.toFixed(2) ?? 'n/a'} mlEv=${mlScore?.bestEv ?? 'n/a'})` : ''}`);
+            await new Promise(r => setTimeout(r, 3000)); continue;
+          }
         }
 
-        const tipMarket = tipMatch[1].toUpperCase();
-        const tipTeam   = tipMatch[2].trim();
-        const tipOdd    = parseFloat(tipMatch[3]);
-        const tipEV     = parseFloat(tipMatch[4]);
-        const tipStake  = tipMatch[5];
-        const tipConf   = tipMatch[6].toUpperCase();
+        const tipMarket = tipMatchEff[1].toUpperCase();
+        const tipTeam   = tipMatchEff[2].trim();
+        const tipOdd    = parseFloat(tipMatchEff[3]);
+        const tipEV     = parseFloat(tipMatchEff[4]);
+        const tipStake  = tipMatchEff[5];
+        const tipConf   = tipMatchEff[6].toUpperCase();
 
         if (tipOdd < 1.30 || tipOdd > 6.00) {
           log('INFO', 'AUTO-FOOTBALL', `Gate odds: ${tipOdd} fora do range 1.30-6.00`);
@@ -11279,13 +11311,35 @@ Máximo 150 palavras.`;
             log('WARN', 'AUTO-CS', `IA erro: ${e.message}`);
           }
 
-          if (!iaResp || /SEM_EDGE/i.test(iaResp)) {
-            analyzedCs.set(key, { ts: now, tipSent: false });
-            log('INFO', 'AUTO-CS', `IA SEM_EDGE: ${pickTeam} @ ${pickOdd} (modelP=${(pickP*100).toFixed(1)}% EV=${evPct.toFixed(1)}%)`);
-            continue;
-          }
+          const _iaSaidNo = !iaResp || /SEM_EDGE/i.test(iaResp);
+          const _iaTipParsed = _iaSaidNo ? null : _parseTipMl(iaResp);
+          const _iaNoTip = !_iaSaidNo && !_iaTipParsed;
 
-          const iaTip = _parseTipMl(iaResp);
+          // IA advisory mode: quando IA disse SEM_EDGE / não parseável, NÃO mata tip.
+          // Verifica se modelo determinístico tem sinal moderado — emite com CONF=BAIXA + stake 1u.
+          // Telemetria: log [CS-IA-OVERRIDE]. CLV rolling vai filtrar se tips ruins.
+          // Desabilita via CS_IA_ADVISORY=false.
+          if (_iaSaidNo || _iaNoTip) {
+            const _advisoryOn = !/^(0|false|no)$/i.test(String(process.env.CS_IA_ADVISORY || ''));
+            const _modelMinConf = parseFloat(process.env.CS_IA_OVERRIDE_MIN_CONF || '0.45');
+            const _modelMinEdgePp = parseFloat(process.env.CS_IA_OVERRIDE_MIN_EDGE_PP || '5');
+            const _trainedOk = _csTrainedPrediction && _csTrainedPrediction.confidence >= _modelMinConf;
+            const _edgePp = (pickP - pickImpliedP) * 100;
+            const canOverride = _advisoryOn && _trainedOk && _edgePp >= _modelMinEdgePp;
+            if (!canOverride) {
+              analyzedCs.set(key, { ts: now, tipSent: false });
+              log('INFO', 'AUTO-CS', `IA ${_iaSaidNo ? 'SEM_EDGE' : 'unparseable'}: ${pickTeam} @ ${pickOdd} (modelP=${(pickP*100).toFixed(1)}% EV=${evPct.toFixed(1)}%) — sem override (trainedConf=${_csTrainedPrediction?.confidence?.toFixed(2) ?? 'n/a'} edge=${_edgePp.toFixed(1)}pp)`);
+              continue;
+            }
+            // Fake IA tip: copia pick do modelo, conf=BAIXA, stake=1u. Downstream gates (divergência,
+            // Kelly, CLV) continuam. aiConf=BAIXA fará conf final ficar BAIXA.
+            aiConf = 'BAIXA';
+            aiReason = `model-override (IA ${_iaSaidNo ? 'SEM_EDGE' : 'noparse'}, trainedConf=${_csTrainedPrediction.confidence.toFixed(2)} edge=${_edgePp.toFixed(1)}pp)`;
+            log('INFO', 'CS-IA-OVERRIDE', `${match.team1} vs ${match.team2}: override IA (${_iaSaidNo ? 'SEM_EDGE' : 'noparse'}) — ${pickTeam}@${pickOdd} trainedConf=${_csTrainedPrediction.confidence.toFixed(2)} edge=${_edgePp.toFixed(1)}pp → CONF=BAIXA stake cap=1u`);
+            // Pula os checks downstream da IA (pick match, P validate) — usou o modelo direto.
+            // Continua pro resto do pipeline (Kelly, CLV, stage, sending).
+          } else {
+          const iaTip = _iaTipParsed;
           if (!iaTip) {
             analyzedCs.set(key, { ts: now, tipSent: false });
             log('INFO', 'AUTO-CS', `IA sem TIP_ML parseável: ${match.team1} vs ${match.team2}`);
@@ -11311,6 +11365,7 @@ Máximo 150 palavras.`;
             log('INFO', 'AUTO-CS', `P divergente modelo (${_v.reason}) — conf ${before}→${aiConf}`);
           }
           aiReason = String(iaResp).split('TIP_ML:')[0].trim().slice(0, 160) || null;
+          } // fim else (IA parsed tip flow)
         }
 
         // Stage boost: IEM Major Final → ×1.15, IEM Katowice/Cologne → ×1.10
