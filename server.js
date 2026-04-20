@@ -8012,9 +8012,10 @@ const server = http.createServer(async (req, res) => {
           let buf = ''; r.on('data', d => buf += d); r.on('end', () => resolve(buf));
         }).on('error', reject);
       });
-      const lines = csv.split(/\r?\n/).filter(Boolean);
+      const csvClean = csv.replace(/^\uFEFF/, ''); // strip BOM
+      const lines = csvClean.split(/\r?\n/).filter(Boolean);
       if (lines.length < 2) { sendJson(res, { ok: false, error: 'csv vazio' }, 400); return; }
-      const header = lines[0].split(',');
+      const header = lines[0].split(',').map(h => h.trim());
       const idx = (name) => header.indexOf(name);
       const iLeague = idx('League') !== -1 ? idx('League') : idx('Div');
       const iCountry = idx('Country');
