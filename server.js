@@ -8190,15 +8190,25 @@ const server = http.createServer(async (req, res) => {
           away_win_rate: +(a.away_wins / a.n).toFixed(4),
         };
       }
-      // Per-team attack/defense per role (home/away)
+      // Per-team attack/defense per role (home/away) + rolling form (últimos N jogos)
       const teamStats = {};
-      const ensureTeam = (t) => teamStats[t] || (teamStats[t] = { home: { g: 0, gf: 0, ga: 0 }, away: { g: 0, gf: 0, ga: 0 }, leagues: new Set() });
+      const ensureTeam = (t) => teamStats[t] || (teamStats[t] = {
+        home: { g: 0, gf: 0, ga: 0 }, away: { g: 0, gf: 0, ga: 0 },
+        leagues: new Set(),
+        history: [], // {ts, points, gf, ga} chronological for rolling form
+      });
       for (const r of filtered) {
         const [hg, ag] = String(r.final_score || '').split('-').map(n => parseInt(n));
         if (!Number.isFinite(hg) || !Number.isFinite(ag)) continue;
+        const ts = new Date(String(r.resolved_at || '').replace(' ', 'T') + 'Z').getTime() || 0;
         const t1 = ensureTeam(r.team1); const t2 = ensureTeam(r.team2);
         t1.home.g++; t1.home.gf += hg; t1.home.ga += ag; t1.leagues.add(r.league);
         t2.away.g++; t2.away.gf += ag; t2.away.ga += hg; t2.leagues.add(r.league);
+        // Rolling history (chronological append — filtered already ORDER BY ASC)
+        const p1Points = hg > ag ? 3 : (hg === ag ? 1 : 0);
+        const p2Points = ag > hg ? 3 : (hg === ag ? 1 : 0);
+        t1.history.push({ ts, points: p1Points, gf: hg, ga: ag });
+        t2.history.push({ ts, points: p2Points, gf: ag, ga: hg });
       }
       const teamParams = {};
       let qualifiedTeams = 0;
@@ -8211,6 +8221,20 @@ const server = http.createServer(async (req, res) => {
         if (!lp) continue;
         const leagueHomeAvg = lp.avg_home_goals || 1.4;
         const leagueAwayAvg = lp.avg_away_goals || 1.1;
+        // Rolling form: últimos 5 jogos, PPG ponderado (decay 0.85 por jogo antigo)
+        const formWindow = 5;
+        const recent = s.history.slice(-formWindow);
+        let totalW = 0, weightedPoints = 0, weightedGf = 0, weightedGa = 0;
+        for (let i = 0; i < recent.length; i++) {
+          const w = Math.pow(0.85, recent.length - 1 - i); // mais recente = peso maior
+          weightedPoints += recent[i].points * w;
+          weightedGf += recent[i].gf * w;
+          weightedGa += recent[i].ga * w;
+          totalW += w;
+        }
+        const ppgRecent = totalW > 0 ? weightedPoints / totalW : 1.5;
+        const gfRecent = totalW > 0 ? weightedGf / totalW : (leagueHomeAvg + leagueAwayAvg) / 2;
+        const gaRecent = totalW > 0 ? weightedGa / totalW : (leagueHomeAvg + leagueAwayAvg) / 2;
         teamParams[t] = {
           primary_league: primaryLeague,
           home_games: s.home.g, away_games: s.away.g,
@@ -8218,6 +8242,10 @@ const server = http.createServer(async (req, res) => {
           defense_home: s.home.g > 0 ? +(s.home.ga / s.home.g / leagueAwayAvg).toFixed(4) : 1.0,
           attack_away: s.away.g > 0 ? +(s.away.gf / s.away.g / leagueAwayAvg).toFixed(4) : 1.0,
           defense_away: s.away.g > 0 ? +(s.away.ga / s.away.g / leagueHomeAvg).toFixed(4) : 1.0,
+          form_ppg: +ppgRecent.toFixed(3),        // 0-3, baseline 1.5
+          form_gf_avg: +gfRecent.toFixed(3),
+          form_ga_avg: +gaRecent.toFixed(3),
+          form_n: recent.length,
         };
         qualifiedTeams++;
       }
