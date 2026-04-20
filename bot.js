@@ -9867,6 +9867,30 @@ Máximo 200 palavras. Raciocínio breve antes da decisão.`;
           }
         }
 
+        // IA advisory tennis: quando tipMatch2 é null (IA SEM_EDGE ou noparse ou div rejeitou),
+        // verifica se trained model tem sinal moderado — emite com CONF=BAIXA + stake=1u.
+        // Threshold mais conservador que CS2/FB porque tennis é head-to-head com alto sinal
+        // Pinnacle (sharper market). Desabilita via TENNIS_IA_ADVISORY=false.
+        if (!tipMatch2) {
+          const _advisoryOn = !/^(0|false|no)$/i.test(String(process.env.TENNIS_IA_ADVISORY || ''));
+          const _minConf = parseFloat(process.env.TENNIS_IA_OVERRIDE_MIN_CONF || '0.50');
+          const _minEdgePp = parseFloat(process.env.TENNIS_IA_OVERRIDE_MIN_EDGE_PP || '5');
+          const _isTrained = /trained/i.test(String(mlResultTennis.method || ''));
+          const _impPairAdv = _impliedFromOdds(o);
+          if (_advisoryOn && _isTrained && _impPairAdv && (mlResultTennis.confidence ?? 0) >= _minConf) {
+            const pickP1Adv = mlResultTennis.modelP1 > mlResultTennis.modelP2;
+            const pickPAdv = pickP1Adv ? mlResultTennis.modelP1 : mlResultTennis.modelP2;
+            const pickImpAdv = pickP1Adv ? _impPairAdv.impliedP1 : _impPairAdv.impliedP2;
+            const edgeAdv = (pickPAdv - pickImpAdv) * 100;
+            const pickOddAdv = pickP1Adv ? parseFloat(o.t1) : parseFloat(o.t2);
+            const pickTeamAdv = pickP1Adv ? match.team1 : match.team2;
+            if (edgeAdv >= _minEdgePp && pickPAdv * pickOddAdv >= 1.04) {
+              tipMatch2 = [null, pickTeamAdv, String(pickOddAdv), String((pickPAdv*100).toFixed(0)), '1u', 'BAIXA'];
+              log('INFO', 'TENNIS-IA-OVERRIDE', `${match.team1} vs ${match.team2}: override IA — ${pickTeamAdv}@${pickOddAdv} P=${(pickPAdv*100).toFixed(1)}% edge=${edgeAdv.toFixed(1)}pp modelConf=${mlResultTennis.confidence?.toFixed(2)} → CONF=BAIXA stake=1u`);
+            }
+          }
+        }
+
         if (!tipMatch2) {
           log('INFO', 'AUTO-TENNIS', `Sem tip: ${match.team1} vs ${match.team2}`);
           await new Promise(r => setTimeout(r, 3000)); continue;
@@ -11370,7 +11394,18 @@ Máximo 150 palavras.`;
 
         // Stage boost: IEM Major Final → ×1.15, IEM Katowice/Cologne → ×1.10
         // + §5b Stakes context (showmatch/exhibition deflate; decider boost)
+        // Kelly fracional dinâmico: trained conf alta → aumenta Kelly frac (tip mais confiável
+        // merece mais stake); trained conf baixa ou IA override (BAIXA) → reduz.
+        // Base 1/8. Range [1/16, 1/5]. Só quando trained model disponível.
         let csKellyFrac = 1/8;
+        if (_csTrainedPrediction?.confidence != null) {
+          const tConf = _csTrainedPrediction.confidence;
+          if (aiConf === 'BAIXA') csKellyFrac = 1/16; // override ou downgrade → half stake
+          else if (tConf >= 0.75) csKellyFrac = 1/5;
+          else if (tConf >= 0.65) csKellyFrac = 1/6;
+          else if (tConf >= 0.55) csKellyFrac = 1/7;
+          // else default 1/8
+        }
         try {
           const { matchStage, stageConfidenceMultiplier, detectStakesContext } = require('./lib/esports-runtime-features');
           const stage = matchStage(match.league || '');
