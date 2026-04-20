@@ -8619,20 +8619,30 @@ const server = http.createServer(async (req, res) => {
     const daysRaw = parseInt(parsed.query.days);
     const days = Number.isFinite(daysRaw) ? Math.max(1, Math.min(365, daysRaw)) : 30;
     try {
-      const rows = db.prepare(`
-        SELECT DATE(settled_at) as day,
-               SUM(COALESCE(profit_reais, 0)) as profit_r,
-               SUM(COALESCE(stake_reais, 0)) as stake_r,
-               COUNT(*) as n
+      // Recompute profit via tipProfitReais (mesma fonte que /overall-summary) pra
+      // guardian/dashboard não divergirem. Snapshots profit_reais/stake_reais ficam
+      // stale quando baseline muda; unit_value atual é fonte única.
+      const _bl = getBaseline();
+      const tipsRaw = db.prepare(`
+        SELECT stake, odds, result, settled_at
         FROM tips
         WHERE sport = ?
           AND result IN ('win','loss','push')
           AND settled_at IS NOT NULL
           AND settled_at >= datetime('now', ?)
           AND (archived IS NULL OR archived = 0)
-        GROUP BY DATE(settled_at)
-        ORDER BY day ASC
+        ORDER BY settled_at ASC
       `).all(sport, `-${days} days`);
+      const dayMap = {};
+      for (const t of tipsRaw) {
+        const day = String(t.settled_at).slice(0, 10);
+        const d = dayMap[day] || (dayMap[day] = { day, profit_r: 0, stake_r: 0, n: 0 });
+        const p = tipProfitReais(t, _bl.unit_value);
+        if (p != null) d.profit_r += p;
+        d.stake_r += tipStakeReais(t, _bl.unit_value);
+        d.n++;
+      }
+      const rows = Object.values(dayMap).sort((a, b) => a.day.localeCompare(b.day));
       const bk = stmts.getBankroll.get(sport);
       let cum = bk ? Number(bk.initial_banca || 0) : 0;
       const initial = cum;
@@ -8646,7 +8656,7 @@ const server = http.createServer(async (req, res) => {
         if (dd > maxDD) maxDD = dd;
         const dailyR = (Number(r.stake_r) || 0) > 0 ? profit / Number(r.stake_r) : 0;
         dailyReturns.push(dailyR);
-        return { day: r.day, profit_reais: profit, cum_banca: parseFloat(cum.toFixed(2)), drawdown_pct: parseFloat((dd * 100).toFixed(2)), n: r.n };
+        return { day: r.day, profit_reais: parseFloat(profit.toFixed(2)), cum_banca: parseFloat(cum.toFixed(2)), drawdown_pct: parseFloat((dd * 100).toFixed(2)), n: r.n };
       });
       const mean = dailyReturns.length ? dailyReturns.reduce((a,b)=>a+b,0) / dailyReturns.length : 0;
       const variance = dailyReturns.length ? dailyReturns.reduce((a,b)=>a+(b-mean)**2,0) / dailyReturns.length : 0;
