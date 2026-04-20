@@ -8160,7 +8160,22 @@ const server = http.createServer(async (req, res) => {
           // Priority: CSV's Country+League > leagueOverride > 'football-data'
           const csvCountry = iCountry >= 0 ? cols[iCountry]?.trim() : '';
           const csvLeagueCol = iLeague >= 0 ? cols[iLeague]?.trim() : '';
-          const csvLeague = csvCountry && csvLeagueCol ? `${csvCountry} ${csvLeagueCol}` : csvLeagueCol || csvCountry;
+          // Div codes do /mmz4281/ → nomes legíveis
+          const DIV_MAP = {
+            E0: 'England Premier League', E1: 'England Championship', E2: 'England League One', E3: 'England League Two', EC: 'England Conference',
+            D1: 'Germany Bundesliga', D2: 'Germany 2.Bundesliga',
+            SP1: 'Spain La Liga', SP2: 'Spain Segunda',
+            I1: 'Italy Serie A', I2: 'Italy Serie B',
+            F1: 'France Ligue 1', F2: 'France Ligue 2',
+            N1: 'Netherlands Eredivisie',
+            B1: 'Belgium Pro League',
+            P1: 'Portugal Primeira Liga',
+            T1: 'Turkey Super Lig',
+            G1: 'Greece Super League',
+            SC0: 'Scotland Premiership', SC1: 'Scotland Championship', SC2: 'Scotland League One', SC3: 'Scotland League Two',
+          };
+          const prettyDiv = DIV_MAP[csvLeagueCol] || csvLeagueCol;
+          const csvLeague = csvCountry && csvLeagueCol ? `${csvCountry} ${csvLeagueCol}` : prettyDiv || csvCountry;
           const league = csvLeague || leagueOverride || 'football-data';
           leaguesSeen.add(league);
           const seasonTag = iSeason >= 0 && cols[iSeason] ? `_${cols[iSeason].trim()}` : '';
