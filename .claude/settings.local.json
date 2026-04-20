@@ -268,7 +268,13 @@
       "Bash(git commit -m 'feat\\(B\\): sport-level dynamic stake multiplier \\(auto-rebalance\\) *)",
       "Bash(git commit -m 'feat\\(C\\): nightly retrain automático *)",
       "Bash(git commit -m 'feat: /autonomy-status — snapshot agregado dos 5 loops *)",
-      "Bash(git commit -m 'chore: lower default min_n for phase-appropriate activation *)"
+      "Bash(git commit -m 'chore: lower default min_n for phase-appropriate activation *)",
+      "Bash(git commit -m 'feat\\(F\\): time-of-day gate — bloqueia horas UTC com ROI estruturalmente ruim *)",
+      "Bash(git commit -m 'feat\\(7\\): correlation-aware exposure cap *)",
+      "Bash(git commit -m 'feat\\(8\\): live risk monitor — DM admin quando tip entra em risk zone *)",
+      "Bash(git commit -m 'feat\\(9\\): threshold optimizer — Bayesian-lite grid search per sport *)",
+      "Bash(git commit -m 'feat\\(9b\\): fecha threshold optimizer com auto-apply + guardrails *)",
+      "Bash(git commit -m 'fix: excluir shadow tips \\(is_shadow=1\\) de dashboard + cálculos *)"
     ]
   }
 }
