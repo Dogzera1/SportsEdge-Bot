@@ -7874,6 +7874,98 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // ══════════════ Autonomy Status — agrega os 5 loops num snapshot ══════════════
+  // GET /autonomy-status  — retorna estado atual de cada loop por sport
+  if (p === '/autonomy-status') {
+    try {
+      const sports = ['tennis', 'esports', 'darts', 'cs', 'valorant', 'mma', 'snooker', 'football'];
+      const _bl = getBaseline();
+      const out = { at: new Date().toISOString(), flags: {
+        CLV_AUTO_KELLY: /^true$/i.test(String(process.env.CLV_AUTO_KELLY || '')),
+        BRIER_AUTO_EV_CAP: /^true$/i.test(String(process.env.BRIER_AUTO_EV_CAP || '')),
+        LEAGUE_BLEED_AUTO: /^true$/i.test(String(process.env.LEAGUE_BLEED_AUTO || '')),
+        SPORT_PERF_AUTO: /^true$/i.test(String(process.env.SPORT_PERF_AUTO || '')),
+        NIGHTLY_RETRAIN_AUTO: /^true$/i.test(String(process.env.NIGHTLY_RETRAIN_AUTO || '')),
+        AUTO_ROLLBACK_ON_REGRESSION: /^true$/i.test(String(process.env.AUTO_ROLLBACK_ON_REGRESSION || '')),
+      }, sports: [] };
+      const activeBlocks = db.prepare(`SELECT sport, league, reason, blocked_at FROM league_blocks WHERE unblocked_at IS NULL`).all();
+      const blocksBySport = {};
+      for (const b of activeBlocks) (blocksBySport[b.sport] ||= []).push(b);
+      out.active_league_blocks_total = activeBlocks.length;
+      for (const sport of sports) {
+        // Sport performance
+        const tipsRaw = db.prepare(`
+          SELECT stake, odds, result, model_p_pick, odds AS odds2, clv_odds
+          FROM tips
+          WHERE sport = ? AND result IN ('win','loss')
+            AND settled_at >= datetime('now', '-30 days')
+            AND (archived IS NULL OR archived = 0)
+        `).all(sport);
+        const n = tipsRaw.length;
+        let profit = 0, stake = 0, brierSum = 0, brierN = 0, clvSum = 0, clvN = 0, clvPos = 0;
+        for (const t of tipsRaw) {
+          const p = tipProfitReais(t, _bl.unit_value);
+          if (p != null) profit += p;
+          stake += tipStakeReais(t, _bl.unit_value);
+          if (t.model_p_pick != null && t.model_p_pick > 0 && t.model_p_pick < 1) {
+            const actual = t.result === 'win' ? 1 : 0;
+            brierSum += (Number(t.model_p_pick) - actual) ** 2;
+            brierN++;
+          }
+          if (t.clv_odds && t.clv_odds > 1 && Number(t.odds) > 1) {
+            const d = (Number(t.odds) / Number(t.clv_odds) - 1) * 100;
+            clvSum += d;
+            clvN++;
+            if (d > 0) clvPos++;
+          }
+        }
+        const roi = stake > 0 ? +(profit / stake * 100).toFixed(2) : null;
+        const bk = db.prepare(`SELECT initial_banca, current_banca FROM bankroll WHERE sport = ?`).get(sport);
+        const dd = bk?.initial_banca > 0 ? +(((bk.initial_banca - (bk.current_banca || 0)) / bk.initial_banca) * 100).toFixed(2) : null;
+        // Loop 4: sport_perf mult (replicando a regra)
+        const minN = 30;
+        let sportMult = 1.0, sportReason = 'neutral';
+        if (n < minN) { sportMult = 1.0; sportReason = 'insufficient_sample'; }
+        else if (roi != null && dd != null) {
+          const ddf = dd / 100;
+          if (roi >= 15 && ddf < 0.05) { sportMult = 1.30; sportReason = 'winner_strong'; }
+          else if (roi >= 5 && ddf < 0.15) { sportMult = 1.15; sportReason = 'winner_mild'; }
+          else if (roi <= -10 || ddf > 0.20) { sportMult = 0.70; sportReason = 'bleeder'; }
+          else if (roi <= -5 || ddf > 0.15) { sportMult = 0.85; sportReason = 'underperform'; }
+        }
+        // Loop 2: brier_ev
+        const baselineByDefault = { lol: 0.22, esports: 0.22, cs: 0.22, valorant: 0.23, tennis: 0.21, mma: 0.23, darts: 0.24, snooker: 0.24 };
+        const brierBaseline = parseFloat(process.env[`BRIER_BASELINE_${sport.toUpperCase()}`]) || baselineByDefault[sport] || 0.25;
+        const brierCurrent = brierN > 0 ? +(brierSum / brierN).toFixed(4) : null;
+        let brierReduction = 0, brierReason = 'insufficient_sample';
+        if (brierN >= 30 && brierCurrent != null) {
+          const delta = brierCurrent - brierBaseline;
+          if (delta >= 0.05) { brierReduction = 20; brierReason = 'severely_degraded'; }
+          else if (delta >= 0.03) { brierReduction = 10; brierReason = 'degraded'; }
+          else if (delta <= -0.02) { brierReduction = -5; brierReason = 'calibrated'; }
+          else brierReason = 'normal';
+        }
+        // Loop 1: clv_kelly (global, sem filtro de liga)
+        const clvAvg = clvN > 0 ? +(clvSum / clvN).toFixed(2) : null;
+        let clvMult = 1.0, clvReason = 'neutral';
+        if (clvN < 20) { clvMult = 1.0; clvReason = 'insufficient_sample'; }
+        else if (clvAvg <= -3) { clvMult = 0.0; clvReason = 'severe_negative'; }
+        else if (clvAvg <= -1) { clvMult = 0.5; clvReason = 'negative'; }
+        else if (clvAvg >= 2) { clvMult = 1.2; clvReason = 'positive'; }
+        out.sports.push({
+          sport, n, roi_pct: roi, drawdown_pct: dd,
+          bankroll: bk ? { initial: bk.initial_banca, current: bk.current_banca } : null,
+          loop1_clv_kelly: { mult: clvMult, reason: clvReason, n: clvN, avg_clv_pct: clvAvg, positive_rate: clvN ? +(clvPos/clvN*100).toFixed(1) : null },
+          loop2_brier_ev: { reduction_pp: brierReduction, reason: brierReason, brier: brierCurrent, baseline: brierBaseline, n: brierN },
+          loop3_league_blocks: blocksBySport[sport] || [],
+          loop4_sport_perf: { mult: sportMult, reason: sportReason },
+        });
+      }
+      sendJson(res, out);
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   // ══════════════ League Blocks (auto-disable de liga bleedante) ══════════════
   // GET /league-blocks?active=1 — lista blocks atuais
   if (p === '/league-blocks') {
