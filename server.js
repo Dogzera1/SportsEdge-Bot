@@ -7666,24 +7666,36 @@ const server = http.createServer(async (req, res) => {
         const existing = stmts.tipExistsByMatch.get(String(matchId), sport);
         if (existing) { sendJson(res, { ok: true, skipped: true, reason: 'duplicate' }); return; }
 
-        // Dedup secundário: mesmos times + sport + MESMO tip_participant nas últimas 24h
-        // (impede duplicata quando matchId muda entre fontes — ex: Pinnacle re-cria event ID ao virar live,
-        // ou partida adiada gera ID novo no dia seguinte).
-        // Filtra por tip_participant pra permitir hedge legítimo em times diferentes.
+        // Dedup por pair: mesmos times + sport + mesmo market nas últimas 24h.
+        // Tipo DEFAULT: bloqueia QUALQUER tip no par (anti-hedge). Tennis/MMA/esports são
+        // head-to-head 1x1 — apostar nos dois lados é auto-gole (sempre perde um lado).
+        // Override: SAME_PICK_ONLY_DEDUP_SPORTS=csv,de,sports pra só bloquear mesmo pick
+        // (casos onde hedge em markets diferentes é válido, tipo football Over + Home).
         const p1n_ = norm(p1 || ''), p2n_ = norm(p2 || '');
         const pickN_ = norm(tipParticipant || '');
         const marketN_ = String(t.market_type || 'ML').toUpperCase();
+        const samePickOnlySports = String(process.env.SAME_PICK_ONLY_DEDUP_SPORTS || '').toLowerCase().split(',').map(s => s.trim()).filter(Boolean);
+        const samePickOnly = samePickOnlySports.includes(String(sport).toLowerCase());
         if (p1n_ && p2n_) {
+          const pickClause = samePickOnly
+            ? `AND REPLACE(REPLACE(lower(tip_participant),' ',''),'-','') = ?`
+            : ``;
+          const pickParam = samePickOnly ? [pickN_] : [];
           const recentDupe = db.prepare(
-            `SELECT 1 FROM tips WHERE sport = ? AND result IS NULL
+            `SELECT id, tip_participant FROM tips WHERE sport = ? AND result IS NULL
              AND sent_at > datetime('now', '-24 hours')
-             AND REPLACE(REPLACE(lower(tip_participant),' ',''),'-','') = ?
              AND upper(COALESCE(market_type, 'ML')) = ?
+             ${pickClause}
              AND ((REPLACE(REPLACE(lower(participant1),' ',''),'-','') LIKE ? AND REPLACE(REPLACE(lower(participant2),' ',''),'-','') LIKE ?)
                OR (REPLACE(REPLACE(lower(participant1),' ',''),'-','') LIKE ? AND REPLACE(REPLACE(lower(participant2),' ',''),'-','') LIKE ?))
              LIMIT 1`
-          ).get(sport, pickN_, marketN_, `%${p1n_}%`, `%${p2n_}%`, `%${p2n_}%`, `%${p1n_}%`);
-          if (recentDupe) { sendJson(res, { ok: true, skipped: true, reason: 'duplicate_pair' }); return; }
+          ).get(sport, marketN_, ...pickParam, `%${p1n_}%`, `%${p2n_}%`, `%${p2n_}%`, `%${p1n_}%`);
+          if (recentDupe) {
+            const reason = samePickOnly ? 'duplicate_pair' : 'hedge_blocked';
+            log('INFO', 'DEDUP', `${sport} ${p1} vs ${p2}: ${reason} (existing pick=${recentDupe.tip_participant}, new=${tipParticipant})`);
+            sendJson(res, { ok: true, skipped: true, reason });
+            return;
+          }
         }
 
         // Blacklist: se já foi VOID por odds errada, não gravar de novo
