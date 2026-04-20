@@ -8357,6 +8357,25 @@ const server = http.createServer(async (req, res) => {
 
   // Diagnostic futbol: conta match_results por league (football) — pra decidir se amostra
   // é suficiente pra treinar modelo ou se precisa seed CSV histórico antes.
+  // Force reset de cooldown per-sport. Escreve arquivo signal no volume; bot checa
+  // no início de cada poll e, se mtime > last_seen, limpa o Map analyzedXxx.
+  // POST /admin/reset-sport-cooldown?sport=football
+  if (p === '/admin/reset-sport-cooldown' && req.method === 'POST') {
+    if (!requireAdmin(req, res)) return;
+    const sport = String(parsed.query.sport || '').trim().toLowerCase();
+    if (!sport) { sendJson(res, { ok: false, error: 'missing sport' }, 400); return; }
+    try {
+      const fs = require('fs');
+      const path = require('path');
+      const dir = path.dirname(path.resolve(DB_PATH));
+      const file = path.join(dir, `reset_cooldown_${sport}.flag`);
+      fs.writeFileSync(file, String(Date.now()));
+      log('INFO', 'COOLDOWN-RESET', `Flag escrito: ${file}`);
+      sendJson(res, { ok: true, sport, file, ts: Date.now() });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   // Admin cleanup: remove rows com league short (E1, E2, D2...) deixados de seed velho.
   // POST /admin/cleanup-football-shortleagues
   if (p === '/admin/cleanup-football-shortleagues' && req.method === 'POST') {

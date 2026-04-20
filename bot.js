@@ -807,6 +807,7 @@ const ADMIN_POST_PATHS = new Set([
   '/admin/cleanup-football-shortleagues',
   '/admin/eval-football-poisson',
   '/void-old-pending',
+  '/admin/reset-sport-cooldown',
   '/update-open-tip',
   '/claude',
   '/ps-result',
@@ -9998,6 +9999,22 @@ async function pollFootball(runOnce = false) {
 
   async function loop() {
     try {
+      // Verifica flag de reset de cooldown (escrito por /admin/reset-sport-cooldown)
+      try {
+        const fs = require('fs');
+        const path = require('path');
+        const dir = path.dirname(path.resolve(process.env.DB_PATH || 'sportsedge.db'));
+        const file = path.join(dir, 'reset_cooldown_football.flag');
+        if (fs.existsSync(file)) {
+          const st = fs.statSync(file);
+          const mtime = st.mtimeMs;
+          if (!loop._lastResetCheck || mtime > loop._lastResetCheck) {
+            analyzedFootball.clear();
+            loop._lastResetCheck = mtime;
+            log('INFO', 'AUTO-FOOTBALL', `Cooldown RESET — analyzedFootball limpo via flag signal`);
+          }
+        }
+      } catch (_) {}
       log('INFO', 'AUTO-FOOTBALL', 'Iniciando verificação de partidas de Futebol...');
       markPollHeartbeat('football');
       const matches = await serverGet('/football-matches').catch(() => []);
