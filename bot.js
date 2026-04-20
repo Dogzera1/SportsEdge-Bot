@@ -8623,11 +8623,13 @@ async function pollMma(runOnce = false) {
         // ── MMA trained model (logistic+GBDT+isotônico) ──
         // Treinado 2026-04-18 com ~3750 fights pós-warmup. Brier 0.231 vs baseline 0.247.
         // Blend via confidence do trained (conservador pra MMA variance alta).
+        let _mmaTrainedPrediction = null;
         if (hasTrainedEsportsModel('mma')) {
           try {
             const ctx = buildEsportsTrainedContext(db, 'mma', fight);
             const tp = ctx ? predictTrainedEsports('mma', ctx) : null;
             if (tp) {
+              _mmaTrainedPrediction = tp;
               const wT = tp.confidence * 0.7; // MMA é high-variance → dampen blend
               const mergedP1 = wT * tp.p1 + (1 - wT) * mlResultMma.modelP1;
               log('INFO', 'MMA-TRAINED', `${fight.team1} vs ${fight.team2}: trainedP1=${(tp.p1*100).toFixed(1)}% (conf=${tp.confidence}, wEff=${wT.toFixed(2)}) | priorP1=${(mlResultMma.modelP1*100).toFixed(1)}% → blend=${(mergedP1*100).toFixed(1)}%`);
@@ -8636,6 +8638,30 @@ async function pollMma(runOnce = false) {
               mlResultMma.factorCount = (mlResultMma.factorCount || 0) + 1;
             }
           } catch (e) { reportBug('MMA-TRAINED', e); }
+        }
+
+        // Hybrid path: quando trained model fires com confidence alta E edge forte vs implied,
+        // emite tip direta sem IA (IA fica como sanity check opcional). Contorna gate confidence≥7
+        // da IA quando o modelo já tem sinal robusto.
+        let _mmaHybridTip = null;
+        if (_mmaTrainedPrediction && _mmaTrainedPrediction.confidence >= 0.55) {
+          const pickP1 = mlResultMma.modelP1 > mlResultMma.modelP2;
+          const pickP = pickP1 ? mlResultMma.modelP1 : mlResultMma.modelP2;
+          const pickImp = pickP1 ? mlResultMma.impliedP1 : mlResultMma.impliedP2;
+          const edgePp = (pickP - pickImp) * 100;
+          const pickOdd = pickP1 ? parseFloat(o.t1) : parseFloat(o.t2);
+          const pickTeam = pickP1 ? fight.team1 : fight.team2;
+          const minEdge = parseFloat(process.env.MMA_HYBRID_MIN_EDGE_PP || '8');
+          if (edgePp >= minEdge && pickP * pickOdd >= 1.05) {
+            const confLabel = _mmaTrainedPrediction.confidence >= 0.70 && edgePp >= 12 ? 'ALTA'
+              : _mmaTrainedPrediction.confidence >= 0.60 && edgePp >= 10 ? 'MÉDIA' : 'BAIXA';
+            const stakeU = confLabel === 'ALTA' ? '2' : '1';
+            _mmaHybridTip = [
+              `TIP_ML:${pickTeam}@${pickOdd}|P:${(pickP*100).toFixed(0)}%|STAKE:${stakeU}u|CONF:${confLabel}`,
+              pickTeam, String(pickOdd), (pickP*100).toFixed(0), `${stakeU}u`, confLabel,
+            ];
+            log('INFO', 'MMA-HYBRID', `${fight.team1} vs ${fight.team2}: trained-direct tip ${pickTeam}@${pickOdd} | P=${(pickP*100).toFixed(1)}% impP=${(pickImp*100).toFixed(1)}% edge=${edgePp.toFixed(1)}pp conf=${confLabel}`);
+          }
         }
 
         const hasModelDataMma = mlResultMma.factorCount > 0;
@@ -8695,8 +8721,12 @@ ANÁLISE REQUERIDA — seja específico:
 5. Confiança (1-10): dados suficientes sobre AMBOS os lutadores?
 
 DECISÃO FINAL:
-- Se P × odd ≥ 1.05 E confiança ≥ 7: TIP_ML:[lutador]@[odd]|P:[%]|STAKE:[1-3]u|CONF:[ALTA/MÉDIA/BAIXA] (P = sua prob 0-100 inteiro; sistema calcula EV automaticamente)
-- Se edge inexistente ou confiança < 7: SEM_EDGE
+${hasModelDataMma
+  ? `- Se P × odd ≥ 1.05 E confiança ≥ 7: TIP_ML:[lutador]@[odd]|P:[%]|STAKE:[1-3]u|CONF:[ALTA/MÉDIA/BAIXA] (P = sua prob 0-100 inteiro; sistema calcula EV automaticamente)
+- Se edge inexistente ou confiança < 7: SEM_EDGE`
+  : `- Sem dados ESPN: aceita TIP_ML se P × odd ≥ 1.08 E confiança ≥ 6 (baseado em conhecimento geral do lutador).
+- TIP_ML:[lutador]@[odd]|P:[%]|STAKE:[1-2]u|CONF:[MÉDIA/BAIXA] (STAKE máx 2u sem dados ESPN).
+- Se não conhece nenhum lutador ou edge < 8pp: SEM_EDGE.`}
 
 Máximo 220 palavras. Seja direto e fundamentado.`
           : `Você é um analista especializado em MMA/UFC. Analise esta luta e identifique edge real se existir.
@@ -8718,34 +8748,42 @@ ANÁLISE REQUERIDA — seja específico:
 4. Confiança (1-10): você tem dados suficientes sobre ambos?
 
 DECISÃO FINAL:
-- Se P × odd ≥ 1.05 E confiança ≥ 7: TIP_ML:[lutador]@[odd]|P:[%]|STAKE:[1-3]u|CONF:[ALTA/MÉDIA/BAIXA] (P = sua prob 0-100 inteiro; sistema calcula EV automaticamente)
-- Se edge inexistente ou confiança < 7: SEM_EDGE
+${hasModelDataMma
+  ? `- Se P × odd ≥ 1.05 E confiança ≥ 7: TIP_ML:[lutador]@[odd]|P:[%]|STAKE:[1-3]u|CONF:[ALTA/MÉDIA/BAIXA] (P = sua prob 0-100 inteiro; sistema calcula EV automaticamente)
+- Se edge inexistente ou confiança < 7: SEM_EDGE`
+  : `- Sem dados ESPN: aceita TIP_ML se P × odd ≥ 1.08 E confiança ≥ 6 (baseado em conhecimento geral do lutador, estilo, histórico público).
+- TIP_ML:[lutador]@[odd]|P:[%]|STAKE:[1-2]u|CONF:[MÉDIA/BAIXA] (STAKE máx 2u sem dados ESPN).
+- Se não conhece nenhum lutador ou edge é < 8pp: SEM_EDGE.`}
 
 Máximo 220 palavras. Seja direto e fundamentado.`;
-
-        if (mmaIaCap > 0 && mmaIaCallsThisCycle >= mmaIaCap) {
-          log('INFO', 'AUTO-MMA', `Ciclo: limite ${mmaIaCap} IA(s) — resto no próximo (~30min). Ajuste MMA_MAX_IA_CALLS_PER_CYCLE.`);
-          break;
-        }
-        mmaIaCallsThisCycle++;
 
         const espnTag = espn ? ` (ESPN card: ${weightClass}, ${rounds}R)` : hasEspnRecord ? ` (ESPN athlete: ${rec1||'?'} | ${rec2||'?'})` : ' (sem dados ESPN)';
         log('INFO', 'AUTO-MMA', `Analisando: ${fight.team1} vs ${fight.team2}${espnTag}`);
         analyzedMma.set(key, { ts: now, tipSent: false });
 
+        // Hybrid path: se trained model já deu tip forte, pula IA (economiza cap + evita SEM_EDGE).
+        let text = '';
         let resp;
-        try {
-          resp = await serverPost('/claude', {
-            model: 'deepseek-chat',
-            max_tokens: 450,
-            messages: [{ role: 'user', content: prompt }]
-          });
-        } catch(e) {
-          log('WARN', 'AUTO-MMA', `AI error: ${e.message}`);
-          await new Promise(r => setTimeout(r, 3000)); continue;
+        if (_mmaHybridTip) {
+          text = _mmaHybridTip[0] + '\n'; // injeta TIP_ML no stream pra parser pegar
+        } else {
+          if (mmaIaCap > 0 && mmaIaCallsThisCycle >= mmaIaCap) {
+            log('INFO', 'AUTO-MMA', `Ciclo: limite ${mmaIaCap} IA(s) — resto no próximo (~30min). Ajuste MMA_MAX_IA_CALLS_PER_CYCLE.`);
+            break;
+          }
+          mmaIaCallsThisCycle++;
+          try {
+            resp = await serverPost('/claude', {
+              model: 'deepseek-chat',
+              max_tokens: 450,
+              messages: [{ role: 'user', content: prompt }]
+            });
+          } catch(e) {
+            log('WARN', 'AUTO-MMA', `AI error: ${e.message}`);
+            await new Promise(r => setTimeout(r, 3000)); continue;
+          }
+          text = resp?.content?.map(b => b.text || '').join('') || '';
         }
-
-        const text = resp?.content?.map(b => b.text || '').join('') || '';
         const extractTipReasonMma = (t) => {
           if (!t) return null;
           const before = t.split('TIP_ML:')[0] || '';
