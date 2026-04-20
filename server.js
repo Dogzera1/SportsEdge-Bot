@@ -7749,6 +7749,34 @@ const server = http.createServer(async (req, res) => {
           }
         }
 
+        // Correlation cap: se já há tips abertas no mesmo event_cluster (sport+league)
+        // com exposição agregada ≥ cap, rejeita. Evita sobrecarregar num único torneio
+        // (tennis slam, CS major etc) — outcomes tendem a correlacionar.
+        // Gated por CORRELATION_AUTO=true. Cap default 6u por cluster, override via
+        // CORRELATION_MAX_EXPOSURE_U ou CORRELATION_MAX_EXPOSURE_U_<SPORT>.
+        if (/^true$/i.test(String(process.env.CORRELATION_AUTO || '')) && eventName) {
+          const perSportKey = `CORRELATION_MAX_EXPOSURE_U_${String(sport).toUpperCase()}`;
+          const capU = parseFloat(process.env[perSportKey] || process.env.CORRELATION_MAX_EXPOSURE_U || '6');
+          const openRows = db.prepare(`
+            SELECT stake FROM tips
+            WHERE sport = ? AND event_name = ? AND result IS NULL
+              AND sent_at > datetime('now', '-48 hours')
+              AND (archived IS NULL OR archived = 0)
+          `).all(sport, eventName);
+          let openExposureU = 0;
+          for (const r of openRows) {
+            const u = parseFloat(String(r.stake || '').replace(/u/i, '')) || 0;
+            openExposureU += u;
+          }
+          // Stake desired (bot envia em units via t.stake como "2u" ou "2")
+          const desiredU = parseFloat(String(t.stake || '').replace(/u/i, '')) || 0;
+          if (openExposureU + desiredU > capU) {
+            log('WARN', 'CORRELATION', `${sport} / ${eventName}: exposição ${openExposureU}u + nova ${desiredU}u > cap ${capU}u → rejeitada`);
+            sendJson(res, { ok: true, skipped: true, reason: 'correlation_cap', open_u: +openExposureU.toFixed(1), desired_u: desiredU, cap_u: capU });
+            return;
+          }
+        }
+
         // EV hard cap: tip com EV absurdo (>35%) é indício de odd errada ou edge
         // inflado por modelo overfitado. Histórico mostra que esports perdia com
         // avg_ev 26% mesmo com CLV +3.7%. Rejeita gravação → bot aborta DM.
@@ -7934,6 +7962,7 @@ const server = http.createServer(async (req, res) => {
         NIGHTLY_RETRAIN_AUTO: /^true$/i.test(String(process.env.NIGHTLY_RETRAIN_AUTO || '')),
         AUTO_ROLLBACK_ON_REGRESSION: /^true$/i.test(String(process.env.AUTO_ROLLBACK_ON_REGRESSION || '')),
         TIME_OF_DAY_AUTO: /^true$/i.test(String(process.env.TIME_OF_DAY_AUTO || '')),
+        CORRELATION_AUTO: /^true$/i.test(String(process.env.CORRELATION_AUTO || '')),
       }, sports: [] };
       const activeBlocks = db.prepare(`SELECT sport, league, reason, blocked_at FROM league_blocks WHERE unblocked_at IS NULL`).all();
       const blocksBySport = {};
