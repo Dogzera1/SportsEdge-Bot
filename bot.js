@@ -5806,6 +5806,57 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
       await send(token, chatId, txt);
     } catch(e) { await send(token, chatId, `❌ ${e.message}`); }
 
+  } else if (cmd === '/hybrid-stats' || cmd === '/hybrid') {
+    if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
+    try {
+      const parts2 = command.trim().split(/\s+/);
+      const daysHy = Math.max(7, Math.min(180, parseInt(parts2[1] || '30', 10) || 30));
+      // Agrega por sport × path (base | hybrid | override)
+      const rows = db.prepare(`
+        SELECT sport,
+          CASE
+            WHEN model_label LIKE '%+hybrid%' THEN 'hybrid'
+            WHEN model_label LIKE '%+override%' THEN 'override'
+            ELSE 'base'
+          END AS path,
+          COUNT(*) AS n,
+          SUM(CASE WHEN result = 'win' THEN 1 ELSE 0 END) AS wins,
+          SUM(CASE WHEN result = 'loss' THEN 1 ELSE 0 END) AS losses,
+          SUM(CASE WHEN result IN ('win','loss') THEN COALESCE(stake_units, 1) ELSE 0 END) AS staked,
+          SUM(COALESCE(profit_units, 0)) AS profit,
+          AVG(CASE WHEN clv_odds > 1 AND odds > 1 THEN (odds/clv_odds - 1) * 100 END) AS avg_clv
+        FROM tips
+        WHERE sent_at >= datetime('now', '-${daysHy} days')
+          AND (archived IS NULL OR archived = 0)
+          AND COALESCE(is_shadow, 0) = 0
+          AND model_label IS NOT NULL
+        GROUP BY sport, path
+        ORDER BY sport ASC, path ASC
+      `).all();
+
+      if (!rows.length) { await send(token, chatId, `📊 *HYBRID STATS ${daysHy}d*\n\n_Sem dados._`); return; }
+      let txt = `📊 *HYBRID STATS — ${daysHy}d*\n\n`;
+      const grouped = {};
+      for (const r of rows) {
+        if (!grouped[r.sport]) grouped[r.sport] = [];
+        grouped[r.sport].push(r);
+      }
+      for (const sport of Object.keys(grouped)) {
+        txt += `*${sport.toUpperCase()}*\n`;
+        for (const r of grouped[sport]) {
+          const settled = r.wins + r.losses;
+          const wr = settled > 0 ? ((r.wins / settled) * 100).toFixed(0) : '-';
+          const roi = r.staked > 0 ? ((r.profit / r.staked) * 100).toFixed(1) : '-';
+          const clv = r.avg_clv != null ? (r.avg_clv >= 0 ? '+' : '') + r.avg_clv.toFixed(1) + '%' : '-';
+          const emoji = r.path === 'hybrid' ? '🔥' : r.path === 'override' ? '⚡' : '📘';
+          txt += `${emoji} ${r.path}: n=${r.n} | W/L=${r.wins}/${r.losses} (WR ${wr}%) | ROI ${roi}% | CLV ${clv}\n`;
+        }
+        txt += '\n';
+      }
+      txt += `_Ajusta thresholds via env (CS/TENNIS/FB/MMA_HYBRID_MIN_EDGE_PP, *_IA_OVERRIDE_MIN_CONF/EDGE_PP)._`;
+      await send(token, chatId, txt);
+    } catch(e) { await send(token, chatId, `❌ ${e.message}`); }
+
   } else if (cmd === '/models') {
     if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
     try {
@@ -6895,7 +6946,7 @@ async function poll(token, sport) {
                      text.startsWith('/slugs') || text.startsWith('/lolraw') ||
                      text.startsWith('/health') || text.startsWith('/debug') ||
                      text.startsWith('/shadow') || text.startsWith('/market-tips') ||
-                     text.startsWith('/models') || text.startsWith('/val-') ||
+                     text.startsWith('/models') || text.startsWith('/hybrid') || text.startsWith('/val-') ||
                      text.startsWith('/rejections') || text.startsWith('/sync-val-') ||
                      text.startsWith('/sync-history') || text.startsWith('/pipeline') ||
                      text.startsWith('/unsettled') || text.startsWith('/settle-debug') ||
@@ -8859,6 +8910,7 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
 
         // IA advisory MMA: IA SEM_EDGE mas modelo determinístico tem signal moderado → override.
         // Foca em fights SEM ESPN (onde IA sempre SEM_EDGE) — usa mlResultMma direto.
+        let _mmaFromOverride = false;
         if (!tipMatch) {
           const _advisoryOn = !/^(0|false|no)$/i.test(String(process.env.MMA_IA_ADVISORY || ''));
           const _minFactors = parseInt(process.env.MMA_IA_OVERRIDE_MIN_FACTORS || '1', 10);
@@ -8876,6 +8928,7 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
             pickOddMma >= 1.25 && pickOddMma <= 5.0;
           if (canOverride) {
             tipMatch = [null, pickTeamMma, String(pickOddMma), String((pickPMma*100).toFixed(0)), '1u', 'BAIXA'];
+            _mmaFromOverride = true;
             log('INFO', 'MMA-IA-OVERRIDE', `${fight.team1} vs ${fight.team2}: override IA SEM_EDGE — ${pickTeamMma}@${pickOddMma} P=${(pickPMma*100).toFixed(1)}% edge=${edgeMma.toFixed(1)}pp factors=${mlResultMma.factorCount} → CONF=BAIXA stake=1u`);
           } else {
             log('INFO', 'AUTO-MMA', `Sem tip: ${fight.team1} vs ${fight.team2}${_advisoryOn ? ` (override skip: factors=${mlResultMma.factorCount} edge=${edgeMma.toFixed(1)}pp)` : ''}`);
@@ -9022,7 +9075,7 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
           modelP1: mlResultMma.modelP1,
           modelP2: mlResultMma.modelP2,
           modelPPick: modelPPickMma,
-          modelLabel: fairLabelMma,
+          modelLabel: fairLabelMma + (_mmaHybridTip ? '+hybrid' : (_mmaFromOverride ? '+override' : '')),
           tipReason: tipReasonMma,
           isShadow: mmaConfig.shadowMode ? 1 : 0,
           lineShopOdds: fight.odds || null,
@@ -9907,6 +9960,7 @@ Máximo 200 palavras. Raciocínio breve antes da decisão.`;
         // verifica se trained model tem sinal moderado — emite com CONF=BAIXA + stake=1u.
         // Threshold mais conservador que CS2/FB porque tennis é head-to-head com alto sinal
         // Pinnacle (sharper market). Desabilita via TENNIS_IA_ADVISORY=false.
+        let _tennisFromOverride = false;
         if (!tipMatch2) {
           const _advisoryOn = !/^(0|false|no)$/i.test(String(process.env.TENNIS_IA_ADVISORY || ''));
           const _minConf = parseFloat(process.env.TENNIS_IA_OVERRIDE_MIN_CONF || '0.50');
@@ -9922,6 +9976,7 @@ Máximo 200 palavras. Raciocínio breve antes da decisão.`;
             const pickTeamAdv = pickP1Adv ? match.team1 : match.team2;
             if (edgeAdv >= _minEdgePp && pickPAdv * pickOddAdv >= 1.04) {
               tipMatch2 = [null, pickTeamAdv, String(pickOddAdv), String((pickPAdv*100).toFixed(0)), '1u', 'BAIXA'];
+              _tennisFromOverride = true;
               log('INFO', 'TENNIS-IA-OVERRIDE', `${match.team1} vs ${match.team2}: override IA — ${pickTeamAdv}@${pickOddAdv} P=${(pickPAdv*100).toFixed(1)}% edge=${edgeAdv.toFixed(1)}pp modelConf=${mlResultTennis.confidence?.toFixed(2)} → CONF=BAIXA stake=1u`);
             }
           }
@@ -10079,7 +10134,7 @@ Máximo 200 palavras. Raciocínio breve antes da decisão.`;
           modelP1: mlResultTennis.modelP1,
           modelP2: mlResultTennis.modelP2,
           modelPPick: modelPPick,
-          modelLabel: fairLabelTennis,
+          modelLabel: fairLabelTennis + (_tennisHybridText ? '+hybrid' : (_tennisFromOverride ? '+override' : '')),
           tipReason: tipReasonTennis,
           isShadow: tennisConfig.shadowMode ? 1 : 0,
           oddsFetchedAt: o._fetchedAt || null,
@@ -10706,7 +10761,7 @@ Máximo 200 palavras.`;
           odds: String(tipOdd), ev: String(tipEV), stake: tipStakeAdjFb,
           confidence: tipConf, isLive: false, market_type: tipMarket,
           modelP1: fbModelP1, modelP2: fbModelP2, modelPPick: fbModelPPick,
-          modelLabel: elo ? 'football-elo+poisson' : 'football-poisson',
+          modelLabel: (elo ? 'football-elo+poisson' : 'football-poisson') + (_fbHybridText ? '+hybrid' : (_fbFromOverride ? '+override' : '')),
           tipReason: fbTipReason,
           lineShopOdds: _pickSideFb ? (match.odds || null) : null,
           pickSide: _pickSideFb,
@@ -11502,7 +11557,7 @@ Máximo 150 palavras.`;
           isLive: match.status === 'live' ? 1 : 0,
           market_type: 'ML',
           modelP1, modelP2, modelPPick: pickP,
-          modelLabel: useElo ? 'cs-elo' : 'cs-ml',
+          modelLabel: (useElo ? 'cs-elo' : 'cs-ml') + (_csHybridBypass ? '+hybrid' : (aiReason && aiReason.startsWith('model-override') ? '+override' : '')),
           tipReason,
           isShadow: csConfig.shadowMode ? 1 : 0,
           sport: 'cs',
