@@ -3,7 +3,10 @@
 // do esports_elo (MMA) ou com <3 lutas. Esses fighters fazem buildEsportsTrainedContext
 // retornar null → trained model não fires → IA fica sem apoio → SEM_EDGE.
 //
-// Uso: node scripts/mma-coverage-report.js [--days=7]
+// Uso: node scripts/mma-coverage-report.js [--days=7] [--server=http://host:port]
+//   --days: janela de tips históricas a examinar (default 7)
+//   --server: se passado, ALSO fetches /mma-matches e checa fighters das odds LIVE
+//             (útil pra ver gaps antes mesmo de gerar tip)
 //   Saída: JSON com {missing: [...], low_games: [...], top_gaps_by_event: [...]}
 //   Útil como input pra priorizar backfill Sherdog/Tapology.
 
@@ -13,6 +16,24 @@ const db = new Database(path.join(__dirname, '..', process.env.DB_PATH || 'sport
 
 const argv = require('minimist')(process.argv.slice(2));
 const days = parseInt(argv.days || '7', 10);
+const serverUrl = argv.server || process.env.MMA_REPORT_SERVER || '';
+
+async function fetchJson(url) {
+  const { URL } = require('url');
+  const u = new URL(url);
+  const client = u.protocol === 'https:' ? require('https') : require('http');
+  return new Promise((resolve, reject) => {
+    const req = client.get(url, { timeout: 15000 }, res => {
+      let d = '';
+      res.on('data', c => d += c);
+      res.on('end', () => {
+        try { resolve(JSON.parse(d)); } catch (e) { reject(e); }
+      });
+    });
+    req.on('error', reject);
+    req.on('timeout', () => { req.destroy(new Error('timeout')); });
+  });
+}
 
 function norm(s) { return String(s || '').toLowerCase().replace(/[^a-z0-9]/g, ''); }
 
@@ -33,6 +54,7 @@ function bump(name) {
 }
 for (const r of eloRows) { bump(r.team1); bump(r.team2); }
 
+(async () => {
 // Fighters seen in recent tips (sport=mma, last N days)
 const tipFighters = db.prepare(`
   SELECT DISTINCT participant1 AS p1, participant2 AS p2, event_name AS event
@@ -40,6 +62,21 @@ const tipFighters = db.prepare(`
   WHERE sport = 'mma'
     AND sent_at >= datetime('now', '-${days} days')
 `).all();
+
+// Optional: fetch live /mma-matches to see gaps antes mesmo de tips serem criadas
+let liveFighters = [];
+if (serverUrl) {
+  try {
+    const url = serverUrl.replace(/\/+$/, '') + '/mma-matches';
+    const matches = await fetchJson(url);
+    if (Array.isArray(matches)) {
+      liveFighters = matches.map(m => ({ p1: m.team1, p2: m.team2, event: m.league || m.event || '?' }));
+    }
+  } catch (e) {
+    console.error(`[warn] falha ao fetchar ${serverUrl}/mma-matches: ${e.message}`);
+  }
+}
+const combinedFighters = [...tipFighters, ...liveFighters];
 
 // Fighters seen in rejections (captured more broadly)
 let rejFighters = [];
@@ -58,7 +95,7 @@ const missing = [];
 const lowGames = [];
 const allPairs = [];
 
-for (const row of tipFighters) {
+for (const row of combinedFighters) {
   for (const name of [row.p1, row.p2]) {
     const k = norm(name);
     if (seen.has(k)) continue;
@@ -84,8 +121,11 @@ const topEvents = [...eventGaps.entries()]
 const report = {
   at: new Date().toISOString(),
   days_window: days,
+  server_fetched: !!serverUrl,
+  tips_fighters: tipFighters.length,
+  live_fighters: liveFighters.length,
   total_elo_fighters: fighterGames.size,
-  total_tip_fighters: seen.size,
+  total_unique_fighters_checked: seen.size,
   missing_from_elo: missing.length,
   low_games_under3: lowGames.length,
   coverage_pct: seen.size > 0 ? +((seen.size - missing.length) / seen.size * 100).toFixed(1) : 0,
@@ -95,3 +135,4 @@ const report = {
 };
 
 console.log(JSON.stringify(report, null, 2));
+})();

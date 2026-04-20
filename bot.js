@@ -8462,6 +8462,15 @@ async function pollMma(runOnce = false) {
         }
         const isBoxing = fight.game === 'boxing';
 
+        // Boxing gate: sem elo dedicado (esports_elo é UFC-seeded, boxing tem 0 cobertura ~89%
+        // dos fighters). Trained model nunca dispara → IA sozinha em markets muito líquidos
+        // (Pinnacle boxing é sharp). Retorno esperado negativo. Habilita via MMA_ALLOW_BOXING=true
+        // quando tivermos BoxRec sync ou quiser experimento manual.
+        if (isBoxing && !/^(1|true|yes)$/i.test(String(process.env.MMA_ALLOW_BOXING ?? 'false'))) {
+          logRejection('mma', `${fight.team1} vs ${fight.team2}`, 'boxing_disabled', { league: fight.league });
+          continue;
+        }
+
         const key = `mma_${fight.id}`;
         const prev = analyzedMma.get(key);
         if (prev?.tipSent) continue;
