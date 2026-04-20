@@ -7619,6 +7619,20 @@ const server = http.createServer(async (req, res) => {
         const isVoided = stmts.isVoidedMatch.get(sport, String(matchId));
         if (isVoided) { sendJson(res, { ok: true, skipped: true, reason: 'voided_odds_wrong_match' }); return; }
 
+        // League block: se liga está bloqueada (ROI bleed ou manual), rejeita.
+        if (eventName) {
+          const block = db.prepare(`
+            SELECT reason, blocked_at, auto FROM league_blocks
+            WHERE sport = ? AND league = ? AND unblocked_at IS NULL
+            LIMIT 1
+          `).get(sport, eventName);
+          if (block) {
+            log('WARN', 'LEAGUE-BLOCK', `${sport} / ${eventName}: tip rejeitada (${block.reason || 'blocked'}, auto=${block.auto})`);
+            sendJson(res, { ok: true, skipped: true, reason: 'league_blocked', block });
+            return;
+          }
+        }
+
         // EV hard cap: tip com EV absurdo (>35%) é indício de odd errada ou edge
         // inflado por modelo overfitado. Histórico mostra que esports perdia com
         // avg_ev 26% mesmo com CLV +3.7%. Rejeita gravação → bot aborta DM.
@@ -7787,6 +7801,135 @@ const server = http.createServer(async (req, res) => {
     db.prepare("UPDATE bankroll SET current_banca = initial_banca, updated_at = datetime('now') WHERE sport = ?").run(sport);
     log('INFO', 'ADMIN', `Tips resetadas: ${count} registros removidos (sport=${sport})`);
     sendJson(res, { ok: true, deleted: count });
+    return;
+  }
+
+  // ══════════════ League Blocks (auto-disable de liga bleedante) ══════════════
+  // GET /league-blocks?active=1 — lista blocks atuais
+  if (p === '/league-blocks') {
+    const activeOnly = String(parsed.query.active || '').trim() === '1' || parsed.query.active === 'true';
+    try {
+      const rows = activeOnly
+        ? db.prepare(`SELECT sport, league, reason, threshold_details, blocked_at, auto FROM league_blocks WHERE unblocked_at IS NULL ORDER BY blocked_at DESC`).all()
+        : db.prepare(`SELECT sport, league, reason, threshold_details, blocked_at, unblocked_at, auto FROM league_blocks ORDER BY blocked_at DESC LIMIT 200`).all();
+      sendJson(res, { ok: true, count: rows.length, blocks: rows });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
+  // GET /league-bleed-scan[&apply=1][&days=30][&min_n=20][&max_roi=-15]
+  // Calcula ROI per (sport, league) e retorna candidatos a block. Com apply=1, insere.
+  if (p === '/league-bleed-scan') {
+    if (req.method === 'POST' && !requireAdmin(req, res)) return;
+    const daysRaw = parseInt(parsed.query.days);
+    const days = Number.isFinite(daysRaw) ? Math.max(7, Math.min(365, daysRaw)) : 30;
+    const minN = parseInt(parsed.query.min_n || process.env.LEAGUE_BLEED_MIN_N || '20', 10);
+    const roiThreshold = parseFloat(parsed.query.max_roi || process.env.LEAGUE_BLEED_ROI_MAX || '-15');
+    const recoveryMinN = parseInt(process.env.LEAGUE_BLEED_RECOVERY_MIN_N || '10', 10);
+    const recoveryRoiMin = parseFloat(process.env.LEAGUE_BLEED_RECOVERY_ROI_MIN || '0');
+    const apply = String(parsed.query.apply || '').trim() === '1' || parsed.query.apply === 'true';
+    try {
+      const _bl = getBaseline();
+      const rows = db.prepare(`
+        SELECT sport, event_name AS league, stake, odds, result, settled_at
+        FROM tips
+        WHERE result IN ('win','loss')
+          AND settled_at >= datetime('now', ?)
+          AND (archived IS NULL OR archived = 0)
+          AND event_name IS NOT NULL AND event_name != ''
+      `).all(`-${days} days`);
+      const agg = {};
+      for (const r of rows) {
+        const k = `${r.sport}|${r.league}`;
+        const a = agg[k] || (agg[k] = { sport: r.sport, league: r.league, n: 0, wins: 0, losses: 0, profit: 0, stake: 0 });
+        a.n++;
+        if (r.result === 'win') a.wins++; else if (r.result === 'loss') a.losses++;
+        const p = tipProfitReais(r, _bl.unit_value);
+        if (p != null) a.profit += p;
+        a.stake += tipStakeReais(r, _bl.unit_value);
+      }
+      const activeBlocks = new Map();
+      for (const b of db.prepare(`SELECT sport, league FROM league_blocks WHERE unblocked_at IS NULL`).all()) {
+        activeBlocks.set(`${b.sport}|${b.league}`, true);
+      }
+      const blockCandidates = [], unblockCandidates = [];
+      for (const k in agg) {
+        const a = agg[k];
+        const roi = a.stake > 0 ? (a.profit / a.stake * 100) : null;
+        a.roi_pct = roi != null ? +roi.toFixed(2) : null;
+        a.hit_rate = a.n ? +(a.wins / a.n * 100).toFixed(1) : null;
+        a.active_block = activeBlocks.has(k);
+        if (!a.active_block && a.n >= minN && roi != null && roi <= roiThreshold) blockCandidates.push(a);
+        if (a.active_block && a.n >= recoveryMinN && roi != null && roi > recoveryRoiMin) unblockCandidates.push(a);
+      }
+      const applied = { blocked: [], unblocked: [] };
+      if (apply && req.method === 'POST') {
+        const insertStmt = db.prepare(`
+          INSERT INTO league_blocks (sport, league, reason, threshold_details, auto)
+          VALUES (?, ?, ?, ?, 1)
+          ON CONFLICT DO NOTHING
+        `);
+        const unblockStmt = db.prepare(`
+          UPDATE league_blocks SET unblocked_at = datetime('now')
+          WHERE sport = ? AND league = ? AND unblocked_at IS NULL
+        `);
+        for (const c of blockCandidates) {
+          try {
+            insertStmt.run(c.sport, c.league, `auto_bleed_roi_${c.roi_pct}%_n${c.n}`, JSON.stringify({ n: c.n, roi_pct: c.roi_pct, hit_rate: c.hit_rate, profit: +c.profit.toFixed(2), threshold: roiThreshold }));
+            applied.blocked.push({ sport: c.sport, league: c.league, roi_pct: c.roi_pct, n: c.n });
+            log('WARN', 'LEAGUE-BLOCK-AUTO', `Blocked: ${c.sport} / ${c.league} (ROI ${c.roi_pct}% n=${c.n})`);
+          } catch (e) { log('ERROR', 'LEAGUE-BLOCK', e.message); }
+        }
+        for (const c of unblockCandidates) {
+          const info = unblockStmt.run(c.sport, c.league);
+          if (info.changes > 0) {
+            applied.unblocked.push({ sport: c.sport, league: c.league, roi_pct: c.roi_pct, n: c.n });
+            log('INFO', 'LEAGUE-BLOCK-AUTO', `Unblocked: ${c.sport} / ${c.league} (ROI ${c.roi_pct}% n=${c.n})`);
+          }
+        }
+      }
+      sendJson(res, {
+        ok: true, days, min_n: minN, roi_threshold: roiThreshold,
+        total_leagues: Object.keys(agg).length,
+        block_candidates: blockCandidates.sort((a,b) => a.roi_pct - b.roi_pct),
+        unblock_candidates: unblockCandidates.sort((a,b) => b.roi_pct - a.roi_pct),
+        applied,
+      });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
+  // POST /admin/league-block?sport=X&league=Y&reason=manual
+  if (p === '/admin/league-block' && req.method === 'POST') {
+    if (!requireAdmin(req, res)) return;
+    const sport = String(parsed.query.sport || '').trim().toLowerCase();
+    const league = String(parsed.query.league || '').trim();
+    const reason = String(parsed.query.reason || 'manual').trim();
+    if (!sport || !league) { sendJson(res, { ok: false, error: 'missing sport or league' }, 400); return; }
+    try {
+      const info = db.prepare(`
+        INSERT INTO league_blocks (sport, league, reason, auto) VALUES (?, ?, ?, 0)
+        ON CONFLICT DO NOTHING
+      `).run(sport, league, reason);
+      if (info.changes === 0) { sendJson(res, { ok: false, error: 'already_blocked' }, 409); return; }
+      log('INFO', 'LEAGUE-BLOCK', `Manual block: ${sport} / ${league} (${reason})`);
+      sendJson(res, { ok: true, sport, league, reason });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
+  // POST /admin/league-unblock?sport=X&league=Y
+  if (p === '/admin/league-unblock' && req.method === 'POST') {
+    if (!requireAdmin(req, res)) return;
+    const sport = String(parsed.query.sport || '').trim().toLowerCase();
+    const league = String(parsed.query.league || '').trim();
+    if (!sport || !league) { sendJson(res, { ok: false, error: 'missing sport or league' }, 400); return; }
+    try {
+      const info = db.prepare(`UPDATE league_blocks SET unblocked_at = datetime('now') WHERE sport = ? AND league = ? AND unblocked_at IS NULL`).run(sport, league);
+      if (info.changes === 0) { sendJson(res, { ok: false, error: 'not_blocked' }, 404); return; }
+      log('INFO', 'LEAGUE-BLOCK', `Manual unblock: ${sport} / ${league}`);
+      sendJson(res, { ok: true, sport, league, unblocked: info.changes });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
     return;
   }
 

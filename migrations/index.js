@@ -538,6 +538,29 @@ const migrations = [
       `);
     },
   },
+  {
+    id: '030_league_blocks',
+    up(db) {
+      // Tabela de bloqueios de liga (auto ou manual). /record-tip consulta antes de
+      // aceitar tip; bleed-scanner insere automaticamente quando ROI<-15% n≥20.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS league_blocks (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          sport TEXT NOT NULL,
+          league TEXT NOT NULL,
+          reason TEXT,
+          threshold_details TEXT,
+          blocked_at TEXT NOT NULL DEFAULT (datetime('now')),
+          unblocked_at TEXT,
+          auto INTEGER NOT NULL DEFAULT 1
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_league_blocks_active
+          ON league_blocks(sport, league) WHERE unblocked_at IS NULL;
+        CREATE INDEX IF NOT EXISTS idx_league_blocks_history
+          ON league_blocks(sport, league, blocked_at DESC);
+      `);
+    },
+  },
 ];
 
 function applyMigrations(db) {

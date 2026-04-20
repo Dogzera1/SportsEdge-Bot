@@ -795,6 +795,10 @@ const ADMIN_POST_PATHS = new Set([
   '/settle',
   '/set-bankroll',
   '/update-clv',
+  '/league-bleed-scan',
+  '/admin/league-block',
+  '/admin/league-unblock',
+  '/admin/delete-empty-bankroll',
   '/update-open-tip',
   '/claude',
   '/ps-result',
@@ -910,7 +914,8 @@ function serverPost(path, body, sport, extraHeaders) {
   return new Promise((resolve, reject) => {
     const s = JSON.stringify(body);
     const sportParam = sport ? `?sport=${sport}` : '';
-    const adminHeaders = (ADMIN_KEY && ADMIN_POST_PATHS.has(path))
+    const pathBase = path.split('?')[0];
+    const adminHeaders = (ADMIN_KEY && ADMIN_POST_PATHS.has(pathBase))
       ? { 'x-admin-key': ADMIN_KEY }
       : null;
     const req = http.request({
@@ -12172,6 +12177,23 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   // Brier → EV cap: refresh de 15min do cache que alimenta evCeilingFor().
   setInterval(() => refreshBrierEvAdjustments().catch(e => log('ERROR', 'BRIER-EV', e.message)), 15 * 60 * 1000);
   setTimeout(() => refreshBrierEvAdjustments().catch(() => {}), 3 * 60 * 1000); // primeiro refresh 3min pós-boot
+
+  // League Bleed Scanner: 6h. Auto-bloqueia ligas com ROI < -15% n≥20 e
+  // desbloqueia quando voltam a dar positivo com n≥10. Gated por LEAGUE_BLEED_AUTO.
+  async function runLeagueBleedScan() {
+    if (!/^true$/i.test(String(process.env.LEAGUE_BLEED_AUTO || ''))) return;
+    try {
+      const adminKey = process.env.ADMIN_KEY || '';
+      const r = await serverPost('/league-bleed-scan?apply=1', {}, null, adminKey ? { 'x-admin-key': adminKey } : {});
+      if (r?.applied) {
+        const bc = r.applied.blocked?.length || 0;
+        const uc = r.applied.unblocked?.length || 0;
+        if (bc || uc) log('INFO', 'LEAGUE-BLEED', `auto-scan: +${bc} blocked, +${uc} unblocked`);
+      }
+    } catch (e) { log('ERROR', 'LEAGUE-BLEED', e.message); }
+  }
+  setInterval(() => runLeagueBleedScan(), 6 * 60 * 60 * 1000);
+  setTimeout(() => runLeagueBleedScan(), 20 * 60 * 1000); // primeiro scan 20min pós-boot
 
   // Pre-Match Final Check: cron 5min, valida tips a <30min do match.
   setInterval(() => runPreMatchFinalCheckCycle().catch(e => log('ERROR', 'PRE-MATCH-CHECK', e.message)), 5 * 60 * 1000);
