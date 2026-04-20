@@ -6870,6 +6870,7 @@ const server = http.createServer(async (req, res) => {
         WHERE sport = ? AND result IN ('win','loss')
           AND settled_at >= datetime('now', ?)
           AND (archived IS NULL OR archived = 0)
+          AND COALESCE(is_shadow, 0) = 0
       `).all(sport, `-${days} days`);
       let profit = 0, stake = 0, n = tipsRaw.length;
       for (const t of tipsRaw) {
@@ -7709,6 +7710,7 @@ const server = http.createServer(async (req, res) => {
                 WHERE sport = ? AND result IN ('win','loss')
                   AND settled_at >= datetime('now', '-30 days')
                   AND (archived IS NULL OR archived = 0)
+                  AND COALESCE(is_shadow, 0) = 0
               `).all(sport);
               const byH = {};
               for (const r of rows) {
@@ -8011,6 +8013,7 @@ const server = http.createServer(async (req, res) => {
         SELECT sport, ev, stake, odds, result FROM tips
         WHERE result IN ('win','loss') AND settled_at >= datetime('now', '-30 days')
           AND ev IS NOT NULL AND (archived IS NULL OR archived = 0)
+          AND COALESCE(is_shadow, 0) = 0
       `).all();
       const bySport = {};
       for (const r of rows) (bySport[r.sport] ||= []).push(r);
@@ -8078,10 +8081,12 @@ const server = http.createServer(async (req, res) => {
       const sql = sportFilter === 'all'
         ? `SELECT sport, ev, stake, odds, result FROM tips
            WHERE result IN ('win','loss') AND settled_at >= datetime('now', ?)
-             AND ev IS NOT NULL AND (archived IS NULL OR archived = 0)`
+             AND ev IS NOT NULL AND (archived IS NULL OR archived = 0)
+             AND COALESCE(is_shadow, 0) = 0`
         : `SELECT sport, ev, stake, odds, result FROM tips
            WHERE sport = ? AND result IN ('win','loss') AND settled_at >= datetime('now', ?)
-             AND ev IS NOT NULL AND (archived IS NULL OR archived = 0)`;
+             AND ev IS NOT NULL AND (archived IS NULL OR archived = 0)
+             AND COALESCE(is_shadow, 0) = 0`;
       const rows = sportFilter === 'all'
         ? db.prepare(sql).all(`-${days} days`)
         : db.prepare(sql).all(sportFilter, `-${days} days`);
@@ -8169,6 +8174,7 @@ const server = http.createServer(async (req, res) => {
           WHERE sport = ? AND result IN ('win','loss')
             AND settled_at >= datetime('now', '-30 days')
             AND (archived IS NULL OR archived = 0)
+            AND COALESCE(is_shadow, 0) = 0
         `).all(sport);
         const n = tipsRaw.length;
         let profit = 0, stake = 0, brierSum = 0, brierN = 0, clvSum = 0, clvN = 0, clvPos = 0;
@@ -8229,6 +8235,7 @@ const server = http.createServer(async (req, res) => {
           SELECT CAST(STRFTIME('%H', settled_at) AS INTEGER) AS hour, stake, odds, result
           FROM tips WHERE sport = ? AND result IN ('win','loss')
             AND settled_at >= datetime('now', '-30 days') AND (archived IS NULL OR archived = 0)
+            AND COALESCE(is_shadow, 0) = 0
         `).all(sport);
         const byH = {};
         for (const r of todRows) {
@@ -8292,6 +8299,7 @@ const server = http.createServer(async (req, res) => {
         WHERE result IN ('win','loss')
           AND settled_at >= datetime('now', ?)
           AND (archived IS NULL OR archived = 0)
+          AND COALESCE(is_shadow, 0) = 0
           AND event_name IS NOT NULL AND event_name != ''
       `).all(`-${days} days`);
       const agg = {};
@@ -9101,6 +9109,7 @@ const server = http.createServer(async (req, res) => {
           AND result IN ('win','loss')
           AND settled_at >= datetime('now', ?)
           AND (archived IS NULL OR archived = 0)
+          AND COALESCE(is_shadow, 0) = 0
       `).all(sport, `-${days} days`);
       const n = rows.length;
       let brier = null, reduction = 0, reason = 'insufficient_sample';
@@ -9156,6 +9165,7 @@ const server = http.createServer(async (req, res) => {
           AND result IN ('win','loss')
           AND settled_at >= datetime('now', ?)
           AND (archived IS NULL OR archived = 0)
+          AND COALESCE(is_shadow, 0) = 0
       `;
       params.push(`-${days} days`);
       if (leagueRaw) { sql += ` AND event_name = ?`; params.push(leagueRaw); }
@@ -9254,6 +9264,7 @@ const server = http.createServer(async (req, res) => {
         WHERE sport = ? AND result IN ('win','loss')
           AND settled_at >= datetime('now', ?)
           AND (archived IS NULL OR archived = 0)
+          AND COALESCE(is_shadow, 0) = 0
       `).all(sport, `-${days} days`);
       const byHour = {};
       for (const r of rows) {
@@ -9393,6 +9404,7 @@ const server = http.createServer(async (req, res) => {
         WHERE sport = ?
           AND result IN ('win','loss')
           AND (archived IS NULL OR archived = 0)
+          AND COALESCE(is_shadow, 0) = 0
         ORDER BY settled_at ASC
       `).all(sport);
       const windowMs = days * 24 * 3600 * 1000;
@@ -9489,12 +9501,15 @@ const server = http.createServer(async (req, res) => {
 
     // desempenho: dashboard não usa match_time/match_date
     // se precisar no futuro, criar query separada com includeMatch=1
+    // Shadow tips (is_shadow=1) escondidas por default; ?include_shadow=1 override.
+    const includeShadow = String(parsed.query.include_shadow || '').trim() === '1';
     let query = `
       SELECT t.*
       FROM tips t
       WHERE t.sport = ?
       AND ${sqlTipsDedupeIdIn('t', '?')}
       ${sqlGameFilter('t', sport, game)}
+      ${includeShadow ? '' : 'AND COALESCE(t.is_shadow, 0) = 0'}
     `;
     const params = [sport, sport];
 
@@ -9716,7 +9731,8 @@ const server = http.createServer(async (req, res) => {
       const allSettled = db.prepare(`
         SELECT sport, stake, odds, result
         FROM tips
-        WHERE (archived IS NULL OR archived = 0) AND result IN ('win','loss')
+        WHERE (archived IS NULL OR archived = 0) AND COALESCE(is_shadow, 0) = 0
+          AND result IN ('win','loss')
       `).all();
       const profitBySport = {};
       for (const t of allSettled) {
@@ -9744,9 +9760,9 @@ const server = http.createServer(async (req, res) => {
 
       // Tips agregadas (não archived) — fetch raw e agrega em JS com baseline.unit_value
       const windowTips = db.prepare(`
-        SELECT sport, stake, odds, result, ev, settled_at
+        SELECT sport, stake, odds, result, ev, settled_at, is_shadow
         FROM tips
-        WHERE (archived IS NULL OR archived = 0)
+        WHERE (archived IS NULL OR archived = 0) AND COALESCE(is_shadow, 0) = 0
           AND (sent_at >= datetime('now', ?) OR result IS NULL)
       `).all(`-${days} days`);
       const tipsAgg = { total: 0, wins: 0, losses: 0, pending: 0, profit_reais: 0, stake_reais: 0, avg_ev: null, avg_odds: null };
