@@ -1051,6 +1051,37 @@ async function fetchSportPerformanceMultiplier(sport) {
 // antes de calcular stake final. Default OFF (CLV_AUTO_KELLY=true pra ativar).
 const _clvKellyCache = new Map(); // key = `${sport}|${league||''}` → { ts, mult, reason, n, avgClv }
 const CLV_KELLY_TTL = 10 * 60 * 1000;
+// Captura CLV atrasada pra live tips em sports de match curto (CS, Valorant, Tennis live).
+// Depois de X min, fetcha odds atuais do feed e POSTa /update-clv. Útil porque esses
+// matches terminam muito rápido — o updater async agendado no checkCLV não chega a tempo.
+function scheduleLiveClvCapture(sport, match, tipParticipant, matchId, tipOdds, delayMs = 3 * 60 * 1000) {
+  setTimeout(async () => {
+    try {
+      const list = await serverGet(`/${sport}-matches`).catch(() => []);
+      if (!Array.isArray(list) || !list.length) return;
+      const m = list.find(x =>
+        String(x.id) === String(matchId) ||
+        (norm(x.team1 || '') === norm(match.team1 || '') && norm(x.team2 || '') === norm(match.team2 || '')) ||
+        (norm(x.team1 || '') === norm(match.team2 || '') && norm(x.team2 || '') === norm(match.team1 || ''))
+      );
+      if (!m?.odds) return;
+      const o1 = parseFloat(m.odds.t1 || m.odds.h); const o2 = parseFloat(m.odds.t2 || m.odds.a);
+      if (!(o1 > 1) || !(o2 > 1)) return;
+      const pickN = norm(tipParticipant);
+      const t1n = norm(m.team1 || ''); const t2n = norm(m.team2 || '');
+      const pickMatchesT1 = pickN === t1n || t1n.includes(pickN) || pickN.includes(t1n);
+      const pickMatchesT2 = pickN === t2n || t2n.includes(pickN) || pickN.includes(t2n);
+      let clvOdds = null;
+      if (pickMatchesT1) clvOdds = o1; else if (pickMatchesT2) clvOdds = o2;
+      if (!clvOdds) return;
+      await serverPost('/update-clv', { matchId, clvOdds }, sport).catch(() => {});
+      const tipN = parseFloat(tipOdds);
+      const delta = tipN > 0 ? ((tipN / clvOdds - 1) * 100).toFixed(2) : '?';
+      log('INFO', 'CLV-DELAYED', `${sport}: ${match.team1} vs ${match.team2} → CLV ${clvOdds} (vs tip @${tipOdds}, delta ${delta}%)`);
+    } catch (_) {}
+  }, delayMs);
+}
+
 async function fetchClvMultiplier(sport, league) {
   if (!/^true$/i.test(String(process.env.CLV_AUTO_KELLY || ''))) {
     return { mult: 1.0, reason: 'disabled', n: 0, avgClv: null };
@@ -9917,6 +9948,8 @@ Máximo 200 palavras. Raciocínio breve antes da decisão.`;
         }
         analyzedTennis.set(key, Object.assign({}, analyzedTennis.get(key) || {}, { ts: now, [isLivePhase ? 'tipSentLive' : 'tipSentPre']: true, [isLivePhase ? 'tsLive' : 'tsPre']: now }));
         log('INFO', 'AUTO-TENNIS', `Tip enviada${isLivePhase ? ' (LIVE)' : ''}: ${tipPlayer} @ ${tipOdd} | EV:${tipEV}% | ${tipConf}`);
+        // CLV delayed pra live tennis (pregame já é pego pelo updater async normal)
+        if (isLivePhase) scheduleLiveClvCapture('tennis', match, tipPlayer, match.id, tipOdd);
         await new Promise(r => setTimeout(r, 5000));
       }
       if (!_drainedT && _hasLiveT) _livePhaseExit('tennis');
@@ -11224,6 +11257,8 @@ Máximo 150 palavras.`;
           try { await sendDM(token, userId, msg, _betBtnCs || undefined); } catch (_) {}
         }
         log('INFO', 'AUTO-CS', `Tip enviada: ${pickTeam} @ ${pickOdd} | EV:${evPct.toFixed(1)}% | ${conf}`);
+        // CLV delayed capture — match CS termina em ~30-40min, capture odds T+3min
+        scheduleLiveClvCapture('cs', match, pickTeam, match.id, pickOdd);
         await new Promise(r => setTimeout(r, 3000));
       }
       if (!_drainedCs && _hasLiveCs) _livePhaseExit('cs');
@@ -11597,6 +11632,7 @@ async function pollValorant(runOnce = false) {
           try { await sendDM(token, userId, msg, _betBtnVal || undefined); } catch (_) {}
         }
         log('INFO', 'AUTO-VAL', `Tip enviada: ${pickTeam} @ ${pickOdd} | EV:${evPct.toFixed(1)}% | ${conf}`);
+        scheduleLiveClvCapture('valorant', match, pickTeam, match.id, pickOdd);
         await new Promise(r => setTimeout(r, 3000));
       }
       if (!_drainedVal && _hasLiveVal) _livePhaseExit('valorant');
