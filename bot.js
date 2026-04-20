@@ -9774,19 +9774,49 @@ Máximo 200 palavras. Raciocínio breve antes da decisão.`;
         log('INFO', 'AUTO-TENNIS', `Analisando: ${match.team1} vs ${match.team2} | ${match.league} | ${surfacePT}${usingEloModel ? ' [Elo]' : (hasRealData ? ' [ESPN/DB+]' : '')}`);
         analyzedTennis.set(key, Object.assign({}, prev || {}, { ts: now, [isLivePhase ? 'tsLive' : 'tsPre']: now }));
 
-        let resp;
-        try {
-          resp = await serverPost('/claude', {
-            model: 'deepseek-chat',
-            max_tokens: 450,
-            messages: [{ role: 'user', content: prompt }]
-          });
-        } catch(e) {
-          log('WARN', 'AUTO-TENNIS', `AI error: ${e.message}`);
-          await new Promise(r => setTimeout(r, 3000)); continue;
+        // Hybrid path tennis: trained+isotonic model com conf alta + edge ≥ 6pp → skip IA.
+        // Trained tem Brier 0.215 vs Elo 0.231 (-7%); grid Gate Optimizer mostrou Brier ótimo
+        // em 0.185 (mais restritivo que MMA por sport ser head-to-head determinístico).
+        let _tennisHybridText = null;
+        const _tennisIsTrained = /trained/i.test(String(mlResultTennis.method || '')) ||
+          mlResultTennis._tennisModelMeta?.method === 'trained';
+        if (_tennisIsTrained && (mlResultTennis.confidence ?? 0) >= 0.65) {
+          const _impPairH = _impliedFromOdds(o);
+          if (_impPairH) {
+            const pickP1Tn = mlResultTennis.modelP1 > mlResultTennis.modelP2;
+            const pickPTn = pickP1Tn ? mlResultTennis.modelP1 : mlResultTennis.modelP2;
+            const pickImpTn = pickP1Tn ? _impPairH.impliedP1 : _impPairH.impliedP2;
+            const edgeTn = (pickPTn - pickImpTn) * 100;
+            const minEdgeTn = parseFloat(process.env.TENNIS_HYBRID_MIN_EDGE_PP || '6');
+            const pickOddTn = pickP1Tn ? parseFloat(o.t1) : parseFloat(o.t2);
+            const pickTeamTn = pickP1Tn ? match.team1 : match.team2;
+            if (edgeTn >= minEdgeTn && pickPTn * pickOddTn >= 1.05) {
+              const confLabelTn = edgeTn >= 12 && (mlResultTennis.confidence ?? 0) >= 0.75 ? 'ALTA'
+                : edgeTn >= 8 ? 'MÉDIA' : 'BAIXA';
+              const stakeTn = confLabelTn === 'ALTA' ? '2' : '1';
+              _tennisHybridText = `TIP_ML:${pickTeamTn}@${pickOddTn}|P:${(pickPTn*100).toFixed(0)}%|STAKE:${stakeTn}u|CONF:${confLabelTn}`;
+              log('INFO', 'TENNIS-HYBRID', `${match.team1} vs ${match.team2}: trained-direct bypass IA | ${pickTeamTn}@${pickOddTn} P=${(pickPTn*100).toFixed(1)}% edge=${edgeTn.toFixed(1)}pp conf=${confLabelTn} modelConf=${mlResultTennis.confidence?.toFixed(2)}`);
+            }
+          }
         }
 
-        const text = resp?.content?.map(b => b.text || '').join('') || '';
+        let text;
+        let resp;
+        if (_tennisHybridText) {
+          text = _tennisHybridText + '\n';
+        } else {
+          try {
+            resp = await serverPost('/claude', {
+              model: 'deepseek-chat',
+              max_tokens: 450,
+              messages: [{ role: 'user', content: prompt }]
+            });
+          } catch(e) {
+            log('WARN', 'AUTO-TENNIS', `AI error: ${e.message}`);
+            await new Promise(r => setTimeout(r, 3000)); continue;
+          }
+          text = resp?.content?.map(b => b.text || '').join('') || '';
+        }
         const extractReasonTennis = (t) => {
           if (!t) return null;
           const before = t.split('TIP_ML:')[0] || '';
@@ -10426,19 +10456,54 @@ Máximo 200 palavras.`;
         log('INFO', 'AUTO-FOOTBALL', `Analisando: ${match.team1} vs ${match.team2} | ${match.league}${hasRealData ? ' [com dados]' : ' [sem dados]'}`);
         analyzedFootball.set(key, { ts: now, tipSent: false });
 
-        let resp;
-        try {
-          resp = await serverPost('/claude', {
-            model: 'deepseek-chat',
-            max_tokens: 500,
-            messages: [{ role: 'user', content: prompt }]
-          });
-        } catch(e) {
-          log('WARN', 'AUTO-FOOTBALL', `AI error: ${e.message}`);
-          await new Promise(r => setTimeout(r, 3000)); continue;
+        // Hybrid path football: Poisson trained+ensemble forte + EV modelo ≥ 8% → skip IA.
+        // fbTrained existe → trained model aplicado. fbModel.confidence é o ensemble final.
+        // mlScore.bestEv já é o edge quantitativo no melhor mercado (1X2 ou OU2.5).
+        let _fbHybridText = null;
+        const _fbMinConf = parseFloat(process.env.FB_HYBRID_MIN_CONF || '0.60');
+        const _fbMinEv = parseFloat(process.env.FB_HYBRID_MIN_EV || '8');
+        if (fbTrained && (fbModel?.confidence ?? 0) >= _fbMinConf && parseFloat(mlScore?.bestEv ?? 0) >= _fbMinEv) {
+          const dir = mlScore.direction; // 1X2_H | 1X2_D | 1X2_A | OVER_2.5 | UNDER_2.5
+          const seleção = dir === '1X2_H' ? match.team1
+            : dir === '1X2_A' ? match.team2
+            : dir === '1X2_D' ? 'Empate'
+            : dir === 'OVER_2.5' ? 'Over 2.5'
+            : dir === 'UNDER_2.5' ? 'Under 2.5'
+            : null;
+          const pickP = dir === '1X2_H' ? mlScore.modelH
+            : dir === '1X2_A' ? mlScore.modelA
+            : dir === '1X2_D' ? mlScore.modelD
+            : dir === 'OVER_2.5' ? mlScore.over25Prob
+            : dir === 'UNDER_2.5' ? (100 - parseFloat(mlScore.over25Prob || 0))
+            : null;
+          const oddVal = parseFloat(mlScore.bestOdd);
+          if (seleção && pickP && oddVal > 1) {
+            const evVal = parseFloat(mlScore.bestEv);
+            const confLabel = evVal >= 12 && (fbModel.confidence ?? 0) >= 0.75 ? 'ALTA'
+              : evVal >= 9 ? 'MÉDIA' : 'BAIXA';
+            const stakeFb = confLabel === 'ALTA' ? '2' : '1';
+            _fbHybridText = `TIP_FB:${dir}:${seleção}@${oddVal.toFixed(2)}|EV:${evVal.toFixed(1)}|P:${parseFloat(pickP).toFixed(0)}|STAKE:${stakeFb}u|CONF:${confLabel}`;
+            log('INFO', 'FB-HYBRID', `${match.team1} vs ${match.team2} [${match.league}]: trained-direct bypass IA | ${dir}:${seleção}@${oddVal.toFixed(2)} EV=${evVal.toFixed(1)}% P=${parseFloat(pickP).toFixed(1)}% conf=${confLabel} modelConf=${fbModel.confidence?.toFixed(2)}`);
+          }
         }
 
-        const text = resp?.content?.map(b => b.text || '').join('') || '';
+        let text;
+        let resp;
+        if (_fbHybridText) {
+          text = _fbHybridText + '\n';
+        } else {
+          try {
+            resp = await serverPost('/claude', {
+              model: 'deepseek-chat',
+              max_tokens: 500,
+              messages: [{ role: 'user', content: prompt }]
+            });
+          } catch(e) {
+            log('WARN', 'AUTO-FOOTBALL', `AI error: ${e.message}`);
+            await new Promise(r => setTimeout(r, 3000)); continue;
+          }
+          text = resp?.content?.map(b => b.text || '').join('') || '';
+        }
         // Regex tolera campo |P:<num>| opcional entre EV e STAKE (prompt inclui P:, mas
         // versões antigas do formato omitiam; aceita ambos).
         const tipMatch = text.match(/TIP_FB:([\w_.]+):([^@]+)@([\d.]+)\|EV:([+-]?[\d.]+)(?:%?\|P:[\d.]+%?)?\|STAKE:([\d.]+)u?\|CONF:(ALTA|MÉDIA|BAIXA)/i);
@@ -10967,11 +11032,13 @@ async function pollCs(runOnce = false) {
         let modelP2 = useElo ? elo.modelP2 : mlResult.modelP2;
 
         // ── Modelo treinado CS2 (logistic+isotônico) ──
+        let _csTrainedPrediction = null;
         if (hasTrainedEsportsModel('cs2')) {
           try {
             const ctx = buildEsportsTrainedContext(db, 'cs2', match);
             const tp = ctx ? predictTrainedEsports('cs2', ctx) : null;
             if (tp) {
+              _csTrainedPrediction = tp;
               const wT = tp.confidence;
               const mergedP1 = wT * tp.p1 + (1 - wT) * modelP1;
               log('INFO', 'CS-TRAINED', `${match.team1} vs ${match.team2}: trainedP1=${(tp.p1*100).toFixed(1)}% (conf=${wT}) | priorP1=${(modelP1*100).toFixed(1)}% → blend=${(mergedP1*100).toFixed(1)}%`);
@@ -11152,11 +11219,25 @@ async function pollCs(runOnce = false) {
           continue;
         }
 
+        // Hybrid path CS2: trained model forte + edge alto → skip IA gate.
+        // Evita IA bloqueando tips onde o modelo determinístico já tem sinal confiável.
+        // Threshold conservador: conf ≥ 0.60 + edge ≥ 8pp vs implied (Pinnacle CS é sharp,
+        // conf 0.60 + 8pp é signal genuíno, não noise).
+        let _csHybridBypass = false;
+        if (_csTrainedPrediction && _csTrainedPrediction.confidence >= 0.60) {
+          const minEdge = parseFloat(process.env.CS_HYBRID_MIN_EDGE_PP || '8');
+          const edgePp = (pickP - pickImpliedP) * 100;
+          if (edgePp >= minEdge) {
+            _csHybridBypass = true;
+            log('INFO', 'CS-HYBRID', `${match.team1} vs ${match.team2}: trained-direct bypass IA | pick=${pickTeam}@${pickOdd} P=${(pickP*100).toFixed(1)}% edge=${edgePp.toFixed(1)}pp trainedConf=${_csTrainedPrediction.confidence.toFixed(2)}`);
+          }
+        }
+
         // Gate C: IA como segunda opinião (DeepSeek). Valida P do modelo Elo.
         // Se IA discorda fortemente de P (Δ>10pp pra ser tolerante a noise da IA), rejeita.
         let aiConf = null;
         let aiReason = null;
-        if (CS_USE_AI) {
+        if (CS_USE_AI && !_csHybridBypass) {
           const tierLabel = isTier1 ? 'TIER 1 (premier)' : 'TIER 2/3 (regional/academy)';
           const formStr = enrich.form1 && enrich.form2
             ? `Form últimos jogos: ${match.team1} ${(enrich.form1.wins||0)}V-${(enrich.form1.losses||0)}D | ${match.team2} ${(enrich.form2.wins||0)}V-${(enrich.form2.losses||0)}D`
