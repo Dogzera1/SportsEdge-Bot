@@ -283,7 +283,8 @@
       "WebFetch(domain:ddragon.leagueoflegends.com)",
       "WebFetch(domain:www.leagueoflegends.com)",
       "Bash(git commit -m 'fix\\(9\\): bootstrap delta permite primeira auto-apply sair do zero *)",
-      "Bash(git commit -m 'fix\\(9\\): melhorar score e filtro de candidatos anti-overfit *)"
+      "Bash(git commit -m 'fix\\(9\\): melhorar score e filtro de candidatos anti-overfit *)",
+      "Bash(git commit *)"
     ]
   }
 }
