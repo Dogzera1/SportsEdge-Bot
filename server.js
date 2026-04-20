@@ -7963,6 +7963,25 @@ const server = http.createServer(async (req, res) => {
   }
 
   // GET /dynamic-thresholds — lista valores ativos
+  // Diagnostic futbol: conta match_results por league (football) — pra decidir se amostra
+  // é suficiente pra treinar modelo ou se precisa seed CSV histórico antes.
+  if (p === '/football-data-stats') {
+    try {
+      const minYear = parseInt(parsed.query.min_year || '2024', 10);
+      const rows = db.prepare(`
+        SELECT COALESCE(league, '(null)') AS league, COUNT(*) AS n,
+               MIN(resolved_at) AS oldest, MAX(resolved_at) AS newest
+        FROM match_results
+        WHERE game = 'football' AND resolved_at >= ?
+        GROUP BY COALESCE(league, '(null)')
+        ORDER BY n DESC
+      `).all(`${minYear}-01-01`);
+      const total = rows.reduce((s, r) => s + r.n, 0);
+      sendJson(res, { ok: true, total, since: `${minYear}-01-01`, leagues: rows });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   // Diagnostic: verifica path real do DB + stats de tips (ajuda debug de volume não persistente).
   if (p === '/db-info') {
     try {
