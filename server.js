@@ -7994,7 +7994,12 @@ const server = http.createServer(async (req, res) => {
     if (!requireAdmin(req, res)) return;
     const url = String(parsed.query.url || '').trim();
     const leagueOverride = String(parsed.query.league || '').trim();
+    const clearPrefix = String(parsed.query.clear_prefix || '').trim();
     if (!url || !/^https?:\/\//.test(url)) { sendJson(res, { ok: false, error: 'url inválida' }, 400); return; }
+    if (clearPrefix) {
+      const cleared = db.prepare(`DELETE FROM match_results WHERE game = 'football' AND match_id LIKE ?`).run(`${clearPrefix}%`);
+      log('INFO', 'FOOTBALL-SEED', `Cleared ${cleared.changes} rows with prefix=${clearPrefix}`);
+    }
     try {
       const csv = await new Promise((resolve, reject) => {
         https.get(url, (r) => {
@@ -8012,6 +8017,7 @@ const server = http.createServer(async (req, res) => {
       const header = lines[0].split(',');
       const idx = (name) => header.indexOf(name);
       const iLeague = idx('League') !== -1 ? idx('League') : idx('Div');
+      const iCountry = idx('Country');
       const iDate = idx('Date') !== -1 ? idx('Date') : idx('MatchDate');
       const iHome = idx('Home') !== -1 ? idx('Home') : idx('HomeTeam');
       const iAway = idx('Away') !== -1 ? idx('Away') : idx('AwayTeam');
@@ -8050,7 +8056,11 @@ const server = http.createServer(async (req, res) => {
           const resChar = cols[iRes]?.trim().toUpperCase();
           if (!dateIso || !home || !away || !Number.isFinite(hg) || !Number.isFinite(ag)) { badRows++; continue; }
           const winner = resChar === 'H' ? home : resChar === 'A' ? away : 'draw';
-          const league = leagueOverride || (iLeague >= 0 ? cols[iLeague]?.trim() : '') || 'football-data';
+          // Priority: CSV's Country+League > leagueOverride > 'football-data'
+          const csvCountry = iCountry >= 0 ? cols[iCountry]?.trim() : '';
+          const csvLeagueCol = iLeague >= 0 ? cols[iLeague]?.trim() : '';
+          const csvLeague = csvCountry && csvLeagueCol ? `${csvCountry} ${csvLeagueCol}` : csvLeagueCol || csvCountry;
+          const league = csvLeague || leagueOverride || 'football-data';
           leaguesSeen.add(league);
           const seasonTag = iSeason >= 0 && cols[iSeason] ? `_${cols[iSeason].trim()}` : '';
           const matchId = `fd_${slug(league)}${seasonTag}_${dateIso.replace(/-/g,'')}_${slug(home)}_${slug(away)}`;
