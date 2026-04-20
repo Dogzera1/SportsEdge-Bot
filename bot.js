@@ -116,6 +116,7 @@ function dotaHeroMetaLine(blueTeam, redTeam) {
   } catch (e) { return ''; }
 }
 const { getFootballProbability } = require('./lib/football-model');
+const { hasTrainedFootballModel, predictFootball: predictFootballTrained } = require('./lib/football-poisson-trained');
 const { getTennisProbability, detectSurface, tennisProhibitedTournament } = require('./lib/tennis-model');
 const { esportsSegmentGate } = require('./lib/esports-segment-gate');
 const { extractServeProbs, priceTennisMatch, priceTennisLive, estimateTennisAces } = require('./lib/tennis-markov-model');
@@ -10168,6 +10169,22 @@ async function pollFootball(runOnce = false) {
           { leagueId: fixtureInfo?.leagueId ?? null }
         );
 
+        // ── Trained Poisson model (ligas target) ──
+        // Se tiver params treinados + league bater + teams existirem, blenda com fbModel.
+        let fbTrained = null;
+        try {
+          if (hasTrainedFootballModel()) {
+            fbTrained = predictFootballTrained({
+              teamHome: match.team1,
+              teamAway: match.team2,
+              league: match.league || match.event_name || '',
+            });
+            if (fbTrained) {
+              log('INFO', 'FB-TRAINED', `${match.team1} vs ${match.team2} [${fbTrained.league_key}]: pH=${(fbTrained.pH*100).toFixed(1)}% pD=${(fbTrained.pD*100).toFixed(1)}% pA=${(fbTrained.pA*100).toFixed(1)}% conf=${fbTrained.confidence.toFixed(2)}`);
+            }
+          }
+        } catch (e) { log('WARN', 'FB-TRAINED', e.message); }
+
         // ── Modelo Football Específico (Poisson + Elo + Form) ──
         let fbModel = null;
         try {
@@ -10176,6 +10193,20 @@ async function pollFootball(runOnce = false) {
             h2h: h2hData, standings: standingsData,
           };
           fbModel = getFootballProbability(db, match, o, fbEnrich);
+          // Blend trained Poisson (se existe) com heurístico — peso trained=0.65 quando ambos disponíveis
+          if (fbTrained && fbModel) {
+            const w = parseFloat(process.env.FB_TRAINED_BLEND || '0.65');
+            fbModel.pH = fbTrained.pH * w + fbModel.pH * (1 - w);
+            fbModel.pD = fbTrained.pD * w + fbModel.pD * (1 - w);
+            fbModel.pA = fbTrained.pA * w + fbModel.pA * (1 - w);
+            const total = fbModel.pH + fbModel.pD + fbModel.pA;
+            if (total > 0) { fbModel.pH /= total; fbModel.pD /= total; fbModel.pA /= total; }
+            fbModel.method = (fbModel.method || 'ensemble') + `+trained(w=${w})`;
+            // Boost confidence ao invés de substituir
+            fbModel.confidence = Math.min(0.95, (fbModel.confidence || 0.5) + 0.15);
+          } else if (fbTrained && !fbModel) {
+            fbModel = { pH: fbTrained.pH, pD: fbTrained.pD, pA: fbTrained.pA, confidence: fbTrained.confidence, method: 'trained_only' };
+          }
           if (fbModel && fbModel.confidence > 0.3) {
             log('DEBUG', 'FB-MODEL', `${match.team1} vs ${match.team2}: pH=${(fbModel.pH*100).toFixed(1)}% pD=${(fbModel.pD*100).toFixed(1)}% pA=${(fbModel.pA*100).toFixed(1)}% conf=${fbModel.confidence.toFixed(2)} method=${fbModel.method}`);
             // Melhorar estimativa do mlScore com probabilidades do modelo Poisson
