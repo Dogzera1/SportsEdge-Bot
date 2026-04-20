@@ -799,6 +799,8 @@ const ADMIN_POST_PATHS = new Set([
   '/admin/league-block',
   '/admin/league-unblock',
   '/admin/delete-empty-bankroll',
+  '/threshold-optimizer-apply',
+  '/admin/dynamic-threshold',
   '/update-open-tip',
   '/claude',
   '/ps-result',
@@ -12292,6 +12294,40 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   }
   setInterval(() => runLiveRiskMonitor(), 10 * 60 * 1000);
   setTimeout(() => runLiveRiskMonitor(), 8 * 60 * 1000); // primeiro check 8min pós-boot
+
+  // Threshold Auto-Apply: semanal (segunda-feira às 4h UTC), roda optimizer +
+  // aplica ajustes de EV_min per sport quando guardrails batem. Gated por
+  // THRESHOLD_AUTO_APPLY=true. Guardrails: uplift≥10pp, n≥20, |delta|≤15pp, cooldown 24h.
+  let _lastThresholdApplyDay = null;
+  async function runThresholdAutoApply() {
+    if (!/^true$/i.test(String(process.env.THRESHOLD_AUTO_APPLY || ''))) return;
+    const now = new Date();
+    const today = now.toISOString().slice(0, 10);
+    if (_lastThresholdApplyDay === today) return;
+    const isMonday = now.getUTCDay() === 1;
+    const hourUtc = parseInt(process.env.THRESHOLD_AUTO_APPLY_HOUR_UTC || '4', 10);
+    if (!isMonday || now.getUTCHours() !== hourUtc) return;
+    _lastThresholdApplyDay = today;
+    try {
+      const adminKey = process.env.ADMIN_KEY || '';
+      const r = await serverPost('/threshold-optimizer-apply', {}, null, adminKey ? { 'x-admin-key': adminKey } : {});
+      if (r?.ok) {
+        const ac = r.applied?.length || 0;
+        const sc = r.skipped?.length || 0;
+        log('INFO', 'THRESHOLD-AUTO', `semanal: ${ac} aplicados, ${sc} skipped`);
+        if (ac > 0 && ADMIN_IDS.size) {
+          let msg = `🎯 *Threshold Auto-Apply*  _${today}_\n\n`;
+          for (const a of r.applied) msg += `• ${a.sport}: EV_min ${a.from} → *${a.to}* (uplift +${a.uplift}pp, n=${a.n})\n`;
+          if (r.skipped?.length) msg += `\n_${r.skipped.length} sugestão(ões) não aplicada(s) por guardrails._`;
+          const routed = _pickTokenForAlert('threshold') || _pickTokenForAlert('system');
+          const token = routed?.token;
+          if (token) for (const adminId of ADMIN_IDS) await sendDM(token, adminId, msg).catch(() => {});
+        }
+      }
+    } catch (e) { log('ERROR', 'THRESHOLD-AUTO', e.message); }
+  }
+  setInterval(() => runThresholdAutoApply(), 15 * 60 * 1000);
+  setTimeout(() => runThresholdAutoApply(), 50 * 60 * 1000);
 
   // Daily Autonomy Digest: 1x/dia às AUTONOMY_DIGEST_HOUR_UTC (default 12h UTC = 9h BRT),
   // DM admins com snapshot /autonomy-status. Gated por AUTONOMY_DIGEST_AUTO=true.

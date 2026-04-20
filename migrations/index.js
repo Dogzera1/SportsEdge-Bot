@@ -561,6 +561,35 @@ const migrations = [
       `);
     },
   },
+  {
+    id: '032_threshold_adjustments',
+    up(db) {
+      // Auditoria de ajustes dinâmicos de threshold (EV_min per sport etc) + tabela
+      // dynamic_thresholds(sport, key) → value para /record-tip consultar.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS dynamic_thresholds (
+          sport TEXT NOT NULL,
+          key TEXT NOT NULL,
+          value REAL NOT NULL,
+          updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_by TEXT,
+          PRIMARY KEY (sport, key)
+        );
+        CREATE TABLE IF NOT EXISTS threshold_adjustments (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          sport TEXT NOT NULL,
+          key TEXT NOT NULL,
+          prev_value REAL,
+          new_value REAL NOT NULL,
+          reason TEXT,
+          details TEXT,
+          applied_at TEXT NOT NULL DEFAULT (datetime('now')),
+          auto INTEGER NOT NULL DEFAULT 1
+        );
+        CREATE INDEX IF NOT EXISTS idx_threshold_adj_history ON threshold_adjustments(sport, key, applied_at DESC);
+      `);
+    },
+  },
 ];
 
 function applyMigrations(db) {

@@ -7777,6 +7777,18 @@ const server = http.createServer(async (req, res) => {
           }
         }
 
+        // Dynamic EV_min per sport (do optimizer). Rejeita se ev < threshold ativo.
+        if (evN != null) {
+          try {
+            const dyn = db.prepare(`SELECT value FROM dynamic_thresholds WHERE sport = ? AND key = 'ev_min'`).get(sport);
+            if (dyn?.value > 0 && evN < dyn.value) {
+              log('INFO', 'EV-MIN-AUTO', `${sport}: ${p1} vs ${p2} — EV ${evN.toFixed(1)}% < ${dyn.value}% (dyn). Rejeitada.`);
+              sendJson(res, { ok: true, skipped: true, reason: 'ev_below_dynamic_min', ev: evN, ev_min: dyn.value });
+              return;
+            }
+          } catch (_) {}
+        }
+
         // EV hard cap: tip com EV absurdo (>35%) é indício de odd errada ou edge
         // inflado por modelo overfitado. Histórico mostra que esports perdia com
         // avg_ev 26% mesmo com CLV +3.7%. Rejeita gravação → bot aborta DM.
@@ -7948,6 +7960,106 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // GET /dynamic-thresholds — lista valores ativos
+  if (p === '/dynamic-thresholds') {
+    try {
+      const rows = db.prepare(`SELECT sport, key, value, updated_at, updated_by FROM dynamic_thresholds ORDER BY sport, key`).all();
+      const history = db.prepare(`SELECT sport, key, prev_value, new_value, reason, applied_at, auto FROM threshold_adjustments ORDER BY applied_at DESC LIMIT 30`).all();
+      sendJson(res, { ok: true, current: rows, history });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
+  // POST /admin/dynamic-threshold?sport=X&key=Y&value=Z[&reason=...]
+  if (p === '/admin/dynamic-threshold' && req.method === 'POST') {
+    if (!requireAdmin(req, res)) return;
+    const sport = String(parsed.query.sport || '').trim().toLowerCase();
+    const key = String(parsed.query.key || '').trim();
+    const value = parseFloat(parsed.query.value);
+    const reason = String(parsed.query.reason || 'manual').trim();
+    if (!sport || !key || !Number.isFinite(value)) { sendJson(res, { ok: false, error: 'missing sport/key/value' }, 400); return; }
+    try {
+      const prev = db.prepare(`SELECT value FROM dynamic_thresholds WHERE sport = ? AND key = ?`).get(sport, key);
+      db.prepare(`
+        INSERT INTO dynamic_thresholds (sport, key, value, updated_by) VALUES (?, ?, ?, 'admin')
+        ON CONFLICT (sport, key) DO UPDATE SET value = excluded.value, updated_at = datetime('now'), updated_by = 'admin'
+      `).run(sport, key, value);
+      db.prepare(`INSERT INTO threshold_adjustments (sport, key, prev_value, new_value, reason, auto) VALUES (?, ?, ?, ?, ?, 0)`)
+        .run(sport, key, prev?.value ?? null, value, reason);
+      log('INFO', 'THRESHOLD', `manual: ${sport}.${key} ${prev?.value ?? '—'} → ${value} (${reason})`);
+      sendJson(res, { ok: true, sport, key, prev: prev?.value ?? null, value, reason });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
+  // POST /threshold-optimizer-apply — roda optimizer e aplica recomendações
+  // que bata critérios (uplift ≥ MIN_UPLIFT_PP, n ≥ MIN_N, delta_abs ≤ MAX_DELTA_PP).
+  // Guardrails:
+  //   - Limite de mudança: novo value não pode diferir do anterior em > THRESHOLD_AUTO_APPLY_MAX_DELTA_PP (default 15pp)
+  //   - Cooldown 24h por (sport, key): evita flapping
+  //   - Só aplica se uplift significativo E amostra boa
+  if (p === '/threshold-optimizer-apply' && req.method === 'POST') {
+    if (!requireAdmin(req, res)) return;
+    const minUplift = parseFloat(process.env.THRESHOLD_AUTO_APPLY_MIN_UPLIFT_PP || '10');
+    const minN = parseInt(process.env.THRESHOLD_AUTO_APPLY_MIN_N || '20', 10);
+    const maxDelta = parseFloat(process.env.THRESHOLD_AUTO_APPLY_MAX_DELTA_PP || '15');
+    const cooldownH = parseInt(process.env.THRESHOLD_AUTO_APPLY_COOLDOWN_H || '24', 10);
+    try {
+      // Reusa lógica do /threshold-optimizer inline
+      const _bl = getBaseline();
+      const rows = db.prepare(`
+        SELECT sport, ev, stake, odds, result FROM tips
+        WHERE result IN ('win','loss') AND settled_at >= datetime('now', '-30 days')
+          AND ev IS NOT NULL AND (archived IS NULL OR archived = 0)
+      `).all();
+      const bySport = {};
+      for (const r of rows) (bySport[r.sport] ||= []).push(r);
+      const thresholds = [0, 5, 10, 15, 20, 25, 30, 35, 40];
+      const applied = [], skipped = [];
+      for (const sport in bySport) {
+        const tips = bySport[sport];
+        if (tips.length < 10) continue;
+        let baseProfit = 0, baseStake = 0;
+        for (const t of tips) { baseProfit += tipProfitReais(t, _bl.unit_value) || 0; baseStake += tipStakeReais(t, _bl.unit_value); }
+        const baseRoi = baseStake > 0 ? (baseProfit / baseStake * 100) : 0;
+        let bestT = 0, bestScore = -Infinity, bestN = 0, bestRoi = 0;
+        for (const t of thresholds) {
+          let profit = 0, stake = 0, n = 0;
+          for (const tip of tips) { if (Number(tip.ev) < t) continue; const p = tipProfitReais(tip, _bl.unit_value); if (p != null) profit += p; stake += tipStakeReais(tip, _bl.unit_value); n++; }
+          const roi = stake > 0 ? (profit / stake * 100) : 0;
+          const score = n >= 5 ? roi * Math.log(Math.max(2, n)) : -Infinity;
+          if (score > bestScore) { bestScore = score; bestT = t; bestN = n; bestRoi = roi; }
+        }
+        const uplift = bestRoi - baseRoi;
+        const prev = db.prepare(`SELECT value FROM dynamic_thresholds WHERE sport = ? AND key = 'ev_min'`).get(sport);
+        const prevVal = prev?.value ?? 0;
+        const delta = Math.abs(bestT - prevVal);
+        // Cooldown check
+        const lastAdj = db.prepare(`SELECT applied_at FROM threshold_adjustments WHERE sport = ? AND key = 'ev_min' AND auto = 1 ORDER BY applied_at DESC LIMIT 1`).get(sport);
+        const lastAdjTs = lastAdj ? new Date(String(lastAdj.applied_at).replace(' ','T') + 'Z').getTime() : 0;
+        const cooldownMs = cooldownH * 3600 * 1000;
+        const inCooldown = (Date.now() - lastAdjTs) < cooldownMs;
+        const reasonSkip =
+          uplift < minUplift ? `uplift_too_low_${uplift.toFixed(1)}pp` :
+          bestN < minN ? `n_too_small_${bestN}` :
+          delta > maxDelta ? `delta_too_large_${delta.toFixed(1)}pp` :
+          inCooldown ? `cooldown_active` : null;
+        if (reasonSkip) { skipped.push({ sport, suggested: bestT, uplift: +uplift.toFixed(2), n: bestN, reason: reasonSkip }); continue; }
+        // Apply
+        db.prepare(`
+          INSERT INTO dynamic_thresholds (sport, key, value, updated_by) VALUES (?, 'ev_min', ?, 'optimizer')
+          ON CONFLICT (sport, key) DO UPDATE SET value = excluded.value, updated_at = datetime('now'), updated_by = 'optimizer'
+        `).run(sport, bestT);
+        db.prepare(`INSERT INTO threshold_adjustments (sport, key, prev_value, new_value, reason, details, auto) VALUES (?, 'ev_min', ?, ?, ?, ?, 1)`)
+          .run(sport, prevVal, bestT, `auto_uplift_${uplift.toFixed(1)}pp`, JSON.stringify({ baseRoi: +baseRoi.toFixed(2), newRoi: +bestRoi.toFixed(2), n: bestN }));
+        applied.push({ sport, from: prevVal, to: bestT, uplift: +uplift.toFixed(2), n: bestN });
+        log('INFO', 'THRESHOLD-AUTO', `${sport}.ev_min ${prevVal} → ${bestT} (uplift +${uplift.toFixed(1)}pp n=${bestN})`);
+      }
+      sendJson(res, { ok: true, applied, skipped, guardrails: { minUplift, minN, maxDelta, cooldownH } });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   // ══════════════ Threshold Optimizer — Bayesian-lite grid search ══════════════
   // Replaya tips settled últimos `days` dias, variando EV threshold. Para cada
   // candidato t, filtra tips que teriam passado (ev ≥ t), computa ROI. Retorna
@@ -8039,7 +8151,12 @@ const server = http.createServer(async (req, res) => {
         TIME_OF_DAY_AUTO: /^true$/i.test(String(process.env.TIME_OF_DAY_AUTO || '')),
         CORRELATION_AUTO: /^true$/i.test(String(process.env.CORRELATION_AUTO || '')),
         LIVE_RISK_MONITOR_AUTO: /^true$/i.test(String(process.env.LIVE_RISK_MONITOR_AUTO || '')),
+        THRESHOLD_AUTO_APPLY: /^true$/i.test(String(process.env.THRESHOLD_AUTO_APPLY || '')),
+        AUTONOMY_DIGEST_AUTO: /^true$/i.test(String(process.env.AUTONOMY_DIGEST_AUTO || '')),
       }, sports: [] };
+      const dynThresholds = db.prepare(`SELECT sport, key, value FROM dynamic_thresholds`).all();
+      const dynBySport = {};
+      for (const d of dynThresholds) (dynBySport[d.sport] ||= {})[d.key] = d.value;
       const activeBlocks = db.prepare(`SELECT sport, league, reason, blocked_at FROM league_blocks WHERE unblocked_at IS NULL`).all();
       const blocksBySport = {};
       for (const b of activeBlocks) (blocksBySport[b.sport] ||= []).push(b);
@@ -8135,6 +8252,7 @@ const server = http.createServer(async (req, res) => {
           loop3_league_blocks: blocksBySport[sport] || [],
           loop4_sport_perf: { mult: sportMult, reason: sportReason },
           loop6_time_of_day: { blocked_hours_utc: todBlocked.sort((a,b) => a-b) },
+          loop9_dynamic_thresholds: dynBySport[sport] || {},
         });
       }
       sendJson(res, out);
