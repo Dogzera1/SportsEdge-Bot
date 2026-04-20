@@ -12895,7 +12895,13 @@ async function checkCLV(caches = {}) {
         const tipKey = norm(tip.participant1 || '') + '_' + norm(tip.participant2 || '');
         const matchStart = matchTimeMap[tipKey] || 0;
         const timeToMatch = matchStart > 0 ? matchStart - now : null;
-        if (timeToMatch === null || timeToMatch > 3 * 60 * 60 * 1000 || timeToMatch < -5 * 60 * 1000) continue;
+        if (timeToMatch === null || timeToMatch > 3 * 60 * 60 * 1000 || timeToMatch < -5 * 60 * 1000) {
+          if (sport === 'tennis' || sport === 'football') {
+            const reason = matchStart === 0 ? 'no_match_time_found' : (timeToMatch > 3 * 60 * 60 * 1000 ? `too_early_${Math.round(timeToMatch/60000)}min` : `too_late_${Math.round(-timeToMatch/60000)}min`);
+            log('DEBUG', 'CLV-SKIP', `${sport} ${tip.participant1} vs ${tip.participant2}: ${reason}`);
+          }
+          continue;
+        }
 
         let clvOdds = null;
         if (sport === 'esports') {
@@ -12922,9 +12928,14 @@ async function checkCLV(caches = {}) {
         } else if (sport === 'tennis') {
           const list = Array.isArray(caches.tennis) ? caches.tennis : [];
           const m = findTheOddsH2hMatch(list, tip);
-          if (m?.odds) {
+          if (!m) {
+            log('DEBUG', 'CLV-SKIP', `tennis ${tip.participant1} vs ${tip.participant2}: no_match_in_feed (feed_size=${list.length})`);
+          } else if (!m.odds) {
+            log('DEBUG', 'CLV-SKIP', `tennis ${tip.participant1} vs ${tip.participant2}: match_found_but_no_odds`);
+          } else {
             const o = h2hDecimalOddsForPick(m, tip.tip_participant);
             if (o && o > 1) clvOdds = String(o);
+            else log('DEBUG', 'CLV-SKIP', `tennis ${tip.participant1} vs ${tip.participant2}: odds_not_parseable (${JSON.stringify(m.odds).slice(0,120)})`);
           }
         } else if (sport === 'mma') {
           const list = caches.mma || await serverGet('/mma-matches').catch(() => []);
