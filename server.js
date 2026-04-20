@@ -7963,6 +7963,39 @@ const server = http.createServer(async (req, res) => {
   }
 
   // GET /dynamic-thresholds — lista valores ativos
+  // Diagnostic: verifica path real do DB + stats de tips (ajuda debug de volume não persistente).
+  if (p === '/db-info') {
+    try {
+      const absPath = require('path').resolve(DB_PATH);
+      let fileSize = null, fileMtime = null;
+      try {
+        const st = require('fs').statSync(absPath);
+        fileSize = st.size;
+        fileMtime = st.mtime.toISOString();
+      } catch (_) {}
+      const counts = {
+        tips_total: db.prepare(`SELECT COUNT(*) AS c FROM tips`).get().c,
+        tips_settled: db.prepare(`SELECT COUNT(*) AS c FROM tips WHERE result IN ('win','loss')`).get().c,
+        tips_pending: db.prepare(`SELECT COUNT(*) AS c FROM tips WHERE result IS NULL`).get().c,
+        bankroll_rows: db.prepare(`SELECT COUNT(*) AS c FROM bankroll`).get().c,
+        league_blocks: db.prepare(`SELECT COUNT(*) AS c FROM league_blocks`).get().c,
+        schema_migrations: db.prepare(`SELECT COUNT(*) AS c FROM schema_migrations`).get().c,
+      };
+      sendJson(res, {
+        ok: true,
+        db_path_env: process.env.DB_PATH || '(unset)',
+        db_path_resolved: absPath,
+        file_exists: fileSize != null,
+        file_size_bytes: fileSize,
+        file_mtime: fileMtime,
+        counts,
+        tips_latest: db.prepare(`SELECT id, sport, sent_at, is_shadow, result FROM tips ORDER BY sent_at DESC LIMIT 5`).all(),
+        bankroll_all: db.prepare(`SELECT sport, initial_banca, current_banca, updated_at FROM bankroll ORDER BY sport`).all(),
+      });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   if (p === '/dynamic-thresholds') {
     try {
       const rows = db.prepare(`SELECT sport, key, value, updated_at, updated_by FROM dynamic_thresholds ORDER BY sport, key`).all();
