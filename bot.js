@@ -3393,6 +3393,21 @@ async function runModelCalibrationCycle() {
   const lines = result.alerts.map(a => `🎯 *${a.sport.toUpperCase()}* — ${a.message}\n   └─ ${a.suggestions[0]}`).join('\n\n');
   const msg = `🎯 *MODEL CALIBRATION WATCHER (semanal)*\n\n${lines}\n\n_Próximo check em 7 dias._`;
   for (const adminId of ADMIN_IDS) await sendDM(tokenForAlert, adminId, msg).catch(() => {});
+
+  // Auto-retrain on drift: quando um sport tem drift > 0.03 (Brier piorou 3pp em 30d vs baseline),
+  // dispara runIsotonicRefreshAsync. Cooldown 24h compartilhado com refresh por freshness.
+  // Desabilita via MODEL_CALIB_AUTO_RETRAIN=false.
+  const autoRetrainOn = !/^(0|false|no)$/i.test(String(process.env.MODEL_CALIB_AUTO_RETRAIN || ''));
+  const hasSignificantDrift = result.alerts.some(a => a.severity === 'warning');
+  if (autoRetrainOn && hasSignificantDrift) {
+    if (!global.__lastIsotonicRefresh || (Date.now() - global.__lastIsotonicRefresh) > 24 * 60 * 60 * 1000) {
+      global.__lastIsotonicRefresh = Date.now();
+      log('WARN', 'MODEL-CALIB', `Drift ≥ 0.03 detectado em ${result.alerts.length} sport(s) — disparando auto-retrain`);
+      runIsotonicRefreshAsync(tokenForAlert);
+    } else {
+      log('INFO', 'MODEL-CALIB', 'Auto-retrain pulado (cooldown 24h)');
+    }
+  }
 }
 
 // ── Daily Health workflow (1x/dia 11h UTC = 8h BRT) ──
@@ -8842,9 +8857,30 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
           }
         }
 
+        // IA advisory MMA: IA SEM_EDGE mas modelo determinístico tem signal moderado → override.
+        // Foca em fights SEM ESPN (onde IA sempre SEM_EDGE) — usa mlResultMma direto.
         if (!tipMatch) {
-          log('INFO', 'AUTO-MMA', `Sem tip: ${fight.team1} vs ${fight.team2}`);
-          await new Promise(r => setTimeout(r, 3000)); continue;
+          const _advisoryOn = !/^(0|false|no)$/i.test(String(process.env.MMA_IA_ADVISORY || ''));
+          const _minFactors = parseInt(process.env.MMA_IA_OVERRIDE_MIN_FACTORS || '1', 10);
+          const _minEdgePp = parseFloat(process.env.MMA_IA_OVERRIDE_MIN_EDGE_PP || '8');
+          const pickP1Mma = mlResultMma.modelP1 > mlResultMma.modelP2;
+          const pickPMma = pickP1Mma ? mlResultMma.modelP1 : mlResultMma.modelP2;
+          const pickImpMma = pickP1Mma ? mlResultMma.impliedP1 : mlResultMma.impliedP2;
+          const edgeMma = (pickPMma - pickImpMma) * 100;
+          const pickOddMma = pickP1Mma ? parseFloat(o.t1) : parseFloat(o.t2);
+          const pickTeamMma = pickP1Mma ? fight.team1 : fight.team2;
+          const canOverride = _advisoryOn &&
+            (mlResultMma.factorCount || 0) >= _minFactors &&
+            edgeMma >= _minEdgePp &&
+            pickPMma * pickOddMma >= 1.06 &&
+            pickOddMma >= 1.25 && pickOddMma <= 5.0;
+          if (canOverride) {
+            tipMatch = [null, pickTeamMma, String(pickOddMma), String((pickPMma*100).toFixed(0)), '1u', 'BAIXA'];
+            log('INFO', 'MMA-IA-OVERRIDE', `${fight.team1} vs ${fight.team2}: override IA SEM_EDGE — ${pickTeamMma}@${pickOddMma} P=${(pickPMma*100).toFixed(1)}% edge=${edgeMma.toFixed(1)}pp factors=${mlResultMma.factorCount} → CONF=BAIXA stake=1u`);
+          } else {
+            log('INFO', 'AUTO-MMA', `Sem tip: ${fight.team1} vs ${fight.team2}${_advisoryOn ? ` (override skip: factors=${mlResultMma.factorCount} edge=${edgeMma.toFixed(1)}pp)` : ''}`);
+            await new Promise(r => setTimeout(r, 3000)); continue;
+          }
         }
 
         const tipTeam  = tipMatch[1].trim();
