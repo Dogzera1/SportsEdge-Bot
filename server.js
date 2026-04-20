@@ -8235,6 +8235,19 @@ const server = http.createServer(async (req, res) => {
         const ppgRecent = totalW > 0 ? weightedPoints / totalW : 1.5;
         const gfRecent = totalW > 0 ? weightedGf / totalW : (leagueHomeAvg + leagueAwayAvg) / 2;
         const gaRecent = totalW > 0 ? weightedGa / totalW : (leagueHomeAvg + leagueAwayAvg) / 2;
+        // Rest days: média de dias entre últimos N jogos. Menos de 3 dias = fadiga.
+        let avgRestDays = 7; // baseline: 1 match/week
+        if (s.history.length >= 3) {
+          const last = s.history.slice(-6);
+          const gaps = [];
+          for (let i = 1; i < last.length; i++) {
+            const d = (last[i].ts - last[i-1].ts) / 86400000;
+            if (d > 0 && d < 30) gaps.push(d);
+          }
+          if (gaps.length) avgRestDays = gaps.reduce((a,b)=>a+b,0) / gaps.length;
+        }
+        // Last match ts — pra bot calcular dias até match atual
+        const lastMatchTs = s.history.length ? s.history[s.history.length - 1].ts : 0;
         teamParams[t] = {
           primary_league: primaryLeague,
           home_games: s.home.g, away_games: s.away.g,
@@ -8246,6 +8259,8 @@ const server = http.createServer(async (req, res) => {
           form_gf_avg: +gfRecent.toFixed(3),
           form_ga_avg: +gaRecent.toFixed(3),
           form_n: recent.length,
+          avg_rest_days: +avgRestDays.toFixed(1),  // histórico médio
+          last_match_ts: lastMatchTs,              // pra calcular rest do próximo jogo
         };
         qualifiedTeams++;
       }

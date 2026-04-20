@@ -9884,7 +9884,7 @@ Máximo 200 palavras. Raciocínio breve antes da decisão.`;
           minTakeLine +
           _bookTennis +
           `📈 EV: *+${tipEV}%* | De-juice: ${tipPlayer === match.team1 ? fairP1 : fairP2}%\n` +
-          `💵 Stake: *${tipStake}u*\n` +
+          `💵 Stake: *${String(tipStake).replace(/u+$/i, '')}u*\n` +
           `${confEmoji} Confiança: *${tipConf}*\n\n` +
           `⚠️ _Aposte com responsabilidade._`;
 
