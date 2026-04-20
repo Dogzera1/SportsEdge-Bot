@@ -7119,6 +7119,8 @@ async function poll(token, sport) {
                      text.startsWith('/rejections') || text.startsWith('/sync-val-') ||
                      text.startsWith('/sync-history') || text.startsWith('/pipeline') ||
                      text.startsWith('/unsettled') || text.startsWith('/settle-debug') ||
+                     text.startsWith('/refresh-open') || text.startsWith('/loops') ||
+                     text.startsWith('/reanalise') || text.startsWith('/reset-tips') ||
                      text.startsWith('/tip ') || text.startsWith('/help') || text.startsWith('/start') ||
                      text.startsWith('/alerts')) {
             // Passa `sport` da poll (qual bot recebeu) para evitar default 'esports'
@@ -11540,6 +11542,8 @@ async function pollCs(runOnce = false) {
           continue;
         }
 
+        // Flag pra tagar tips via override (diferente de hybrid) no model_label.
+        let _csFromOverride = false;
         // Hybrid path CS2: trained model forte + edge alto → skip IA gate.
         // Evita IA bloqueando tips onde o modelo determinístico já tem sinal confiável.
         // Threshold conservador: conf ≥ 0.60 + edge ≥ 8pp vs implied (Pinnacle CS é sharp,
@@ -11624,6 +11628,7 @@ Máximo 150 palavras.`;
             // Kelly, CLV) continuam. aiConf=BAIXA fará conf final ficar BAIXA.
             aiConf = 'BAIXA';
             aiReason = `model-override (IA ${_iaSaidNo ? 'SEM_EDGE' : 'noparse'}, trainedConf=${_csTrainedPrediction.confidence.toFixed(2)} edge=${_edgePp.toFixed(1)}pp)`;
+            _csFromOverride = true;
             log('INFO', 'CS-IA-OVERRIDE', `${match.team1} vs ${match.team2}: override IA (${_iaSaidNo ? 'SEM_EDGE' : 'noparse'}) — ${pickTeam}@${pickOdd} trainedConf=${_csTrainedPrediction.confidence.toFixed(2)} edge=${_edgePp.toFixed(1)}pp → CONF=BAIXA stake cap=1u`);
             // Pula os checks downstream da IA (pick match, P validate) — usou o modelo direto.
             // Continua pro resto do pipeline (Kelly, CLV, stage, sending).
@@ -11731,7 +11736,7 @@ Máximo 150 palavras.`;
           isLive: match.status === 'live' ? 1 : 0,
           market_type: 'ML',
           modelP1, modelP2, modelPPick: pickP,
-          modelLabel: (useElo ? 'cs-elo' : 'cs-ml') + (_csHybridBypass ? '+hybrid' : (aiReason && aiReason.startsWith('model-override') ? '+override' : '')),
+          modelLabel: (useElo ? 'cs-elo' : 'cs-ml') + (_csHybridBypass ? '+hybrid' : (_csFromOverride ? '+override' : '')),
           tipReason,
           isShadow: csConfig.shadowMode ? 1 : 0,
           sport: 'cs',
