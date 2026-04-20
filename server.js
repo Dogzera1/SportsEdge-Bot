@@ -7989,7 +7989,9 @@ const server = http.createServer(async (req, res) => {
     if (!requireAdmin(req, res)) return;
     const minGames = parseInt(parsed.query.min_games || '5', 10);
     const yearsBack = parseInt(parsed.query.years_back || '3', 10);
-    const targetLeaguesEnv = process.env.FOOTBALL_TARGET_LEAGUES || 'Brazil,Sweden,Norway,Finland,Denmark,Poland,Japan,USA';
+    const queryLeagues = String(parsed.query.target_leagues || '').trim();
+    const defaultTargets = 'Brazil,Sweden,Norway,Finland,Denmark,Poland,Japan,USA,Mexico,Russia,Romania,China,Ireland,Championship,League One,2.Bundesliga,Segunda,Serie B,Ligue 2,Pro League,Primeira Liga,Super Lig,Super League,Superliga,Eliteserien,Allsvenskan,Veikkausliiga,Ekstraklasa';
+    const targetLeaguesEnv = queryLeagues || process.env.FOOTBALL_TARGET_LEAGUES || defaultTargets;
     const targetPatterns = targetLeaguesEnv.split(',').map(s => s.trim()).filter(Boolean);
     const leagueMatches = (l) => targetPatterns.some(p => String(l || '').toLowerCase().includes(p.toLowerCase()));
     const since = new Date(); since.setFullYear(since.getFullYear() - yearsBack);
