@@ -12375,7 +12375,9 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
     _lastFbRetrainDay = today;
     try {
       const adminKey = process.env.ADMIN_KEY || '';
-      const r = await serverPost('/admin/train-football-poisson?min_games=5&years_back=3', {}, null,
+      // Target leagues expandido: 2ª divisões Europa + América Latina + ligas secundárias
+      const targetLeagues = encodeURIComponent('Brazil,Sweden,Norway,Finland,Denmark,Poland,Japan,USA,Mexico,Russia,Romania,China,Ireland,Championship,League One,2.Bundesliga,Segunda,Serie B,Ligue 2,Pro League,Primeira Liga,Super Lig,Super League,Superliga,Eliteserien,Allsvenskan,Veikkausliiga,Ekstraklasa');
+      const r = await serverPost(`/admin/train-football-poisson?min_games=8&years_back=3&target_leagues=${targetLeagues}`, {}, null,
         adminKey ? { 'x-admin-key': adminKey } : {});
       if (r?.ok) {
         log('INFO', 'FB-RETRAIN', `done: ${r.totalMatches} matches, ${r.leaguesCount} leagues, ${r.teamsCount} teams`);
