@@ -1015,6 +1015,31 @@ const DRAWDOWN_CACHE_TTL = 5 * 60 * 1000; // refresh a cada 5min
 const DRAWDOWN_HARD_LIMIT = parseFloat(process.env.DRAWDOWN_HARD_LIMIT || '0.25'); // 25% = bloqueia
 const DRAWDOWN_SOFT_LIMIT = parseFloat(process.env.DRAWDOWN_SOFT_LIMIT || '0.15'); // 15% = reduz 50%
 
+// Sport performance → stake multiplier. Cache per-sport por 1h. Winners +15-30%,
+// bleeders -15-30%. Default OFF (SPORT_PERF_AUTO=true pra ativar).
+const _sportPerfCache = new Map(); // sport → { ts, mult, reason, roi, dd, n }
+const SPORT_PERF_TTL = 60 * 60 * 1000;
+async function fetchSportPerformanceMultiplier(sport) {
+  if (!/^true$/i.test(String(process.env.SPORT_PERF_AUTO || ''))) {
+    return { mult: 1.0, reason: 'disabled', n: 0, roi: null, dd: null };
+  }
+  const key = String(sport || '').toLowerCase();
+  const now = Date.now();
+  const hit = _sportPerfCache.get(key);
+  if (hit && (now - hit.ts) < SPORT_PERF_TTL) return hit;
+  try {
+    const r = await serverGet(`/sport-performance-multiplier?sport=${encodeURIComponent(sport)}`);
+    if (r?.ok) {
+      const out = { ts: now, mult: Number(r.multiplier) || 1.0, reason: r.reason, n: r.n, roi: r.roi_pct, dd: r.drawdown_pct };
+      _sportPerfCache.set(key, out);
+      return out;
+    }
+  } catch (_) {}
+  const fallback = { ts: now, mult: 1.0, reason: 'fetch_error', n: 0, roi: null, dd: null };
+  _sportPerfCache.set(key, fallback);
+  return fallback;
+}
+
 // CLV → Kelly feedback. Cache multiplier per (sport, league) por 10min; bot consulta
 // antes de calcular stake final. Default OFF (CLV_AUTO_KELLY=true pra ativar).
 const _clvKellyCache = new Map(); // key = `${sport}|${league||''}` → { ts, mult, reason, n, avgClv }
@@ -1112,7 +1137,11 @@ async function applyGlobalRisk(sport, desiredUnits, leagueSlug) {
   const sportMultKey = `KELLY_${String(sport || '').toUpperCase()}_MULT`;
   const sportMult = Math.max(0.3, Math.min(2.0, parseFloat(process.env[sportMultKey] || '1.0') || 1.0));
 
-  const adjusted = Math.max(0.5, Math.round(desiredUnits * leagueMult * drawdownMult * perfMult * sportMult * 2) / 2);
+  // Dinâmico por sport: ROI 30d + DD → multiplicador [0.7, 1.3] (auto-rebalance)
+  const sportPerf = await fetchSportPerformanceMultiplier(sport);
+  const dynMult = Number(sportPerf.mult) || 1.0;
+
+  const adjusted = Math.max(0.5, Math.round(desiredUnits * leagueMult * drawdownMult * perfMult * sportMult * dynMult * 2) / 2);
   const reason = drawdownMult < 1 ? 'drawdown_reduction'
                : perfMult !== 1.0 ? 'perf_adjusted'
                : leagueMult < 1 ? 'league_tier_reduction'
@@ -1121,7 +1150,8 @@ async function applyGlobalRisk(sport, desiredUnits, leagueSlug) {
   if (adjusted !== desiredUnits) {
     const perfStr = perfMult !== 1.0 ? ` perf=${perfMult}(${perfReasons.slice(0,2).join(';')})` : '';
     const spStr = sportMult !== 1.0 ? ` sport=${sportMult}` : '';
-    log('INFO', 'RISK', `${sport}${leagueSlug ? ` (${leagueSlug})` : ''}: ${desiredUnits}u→${adjusted}u (league=${leagueMult} drawdown=${drawdownMult}${perfStr}${spStr})`);
+    const dynStr = dynMult !== 1.0 ? ` dynSport=${dynMult}(${sportPerf.reason} ROI=${sportPerf.roi}%)` : '';
+    log('INFO', 'RISK', `${sport}${leagueSlug ? ` (${leagueSlug})` : ''}: ${desiredUnits}u→${adjusted}u (league=${leagueMult} drawdown=${drawdownMult}${perfStr}${spStr}${dynStr})`);
   }
   return { ok: true, units: adjusted, reason };
 }

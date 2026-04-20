@@ -6843,6 +6843,76 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // Sport-level performance multiplier. Unlike /stake-multiplier (per league com
+  // signals intrincados), este é sport-wide: combina ROI 30d + drawdown current.
+  // Winners ganham mais stake, bleeders reduzem.
+  //
+  // Regras (clamp [0.6, 1.4]):
+  //   ROI ≥ +15% & DD < 5%  → 1.30
+  //   ROI ≥ +5%  & DD < 15% → 1.15
+  //   ROI ≤ -10% OR DD > 20% → 0.70
+  //   ROI ≤ -5%  OR DD > 15% → 0.85
+  //   default → 1.00
+  //   n < 30 → 1.00 (insuficiente)
+  //
+  // GET /sport-performance-multiplier?sport=X[&days=30]
+  if (p === '/sport-performance-multiplier') {
+    const sport = String(parsed.query.sport || '').trim().toLowerCase();
+    if (!sport) { sendJson(res, { ok: false, error: 'missing sport' }, 400); return; }
+    const daysRaw = parseInt(parsed.query.days);
+    const days = Number.isFinite(daysRaw) ? Math.max(7, Math.min(365, daysRaw)) : 30;
+    const minN = parseInt(process.env.SPORT_PERF_MIN_N || '30', 10);
+    try {
+      const _bl = getBaseline();
+      const tipsRaw = db.prepare(`
+        SELECT stake, odds, result
+        FROM tips
+        WHERE sport = ? AND result IN ('win','loss')
+          AND settled_at >= datetime('now', ?)
+          AND (archived IS NULL OR archived = 0)
+      `).all(sport, `-${days} days`);
+      let profit = 0, stake = 0, n = tipsRaw.length;
+      for (const t of tipsRaw) {
+        const p = tipProfitReais(t, _bl.unit_value);
+        if (p != null) profit += p;
+        stake += tipStakeReais(t, _bl.unit_value);
+      }
+      const roi = stake > 0 ? (profit / stake * 100) : null;
+      // Drawdown atual: (initial − current) / initial
+      const bk = db.prepare(`SELECT initial_banca FROM bankroll WHERE sport = ?`).get(sport);
+      let dd = null;
+      if (bk) {
+        const all = db.prepare(`
+          SELECT stake, odds, result FROM tips
+          WHERE sport = ? AND result IN ('win','loss')
+            AND (archived IS NULL OR archived = 0)
+        `).all(sport);
+        let totalP = 0;
+        for (const t of all) {
+          const p = tipProfitReais(t, _bl.unit_value);
+          if (p != null) totalP += p;
+        }
+        const current = (bk.initial_banca || 0) + totalP;
+        dd = bk.initial_banca > 0 ? (bk.initial_banca - current) / bk.initial_banca : null;
+      }
+      let mult = 1.0, reason = 'neutral';
+      if (n < minN) { mult = 1.0; reason = 'insufficient_sample'; }
+      else if (roi != null && dd != null) {
+        if (roi >= 15 && dd < 0.05) { mult = 1.30; reason = 'winner_strong'; }
+        else if (roi >= 5 && dd < 0.15) { mult = 1.15; reason = 'winner_mild'; }
+        else if (roi <= -10 || dd > 0.20) { mult = 0.70; reason = 'bleeder'; }
+        else if (roi <= -5 || dd > 0.15) { mult = 0.85; reason = 'underperform'; }
+      }
+      sendJson(res, {
+        ok: true, sport, days, n, min_n: minN,
+        roi_pct: roi != null ? +roi.toFixed(2) : null,
+        drawdown_pct: dd != null ? +(dd * 100).toFixed(2) : null,
+        multiplier: mult, reason,
+      });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   if (p === '/stake-multiplier') {
     try {
       const sport = String(parsed.query.sport || '').trim();
