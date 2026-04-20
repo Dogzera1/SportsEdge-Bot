@@ -4418,20 +4418,30 @@ const server = http.createServer(async (req, res) => {
           }
         }
       }
-      // Fallback tennis: _tennisPinnacleCache (não está em oddsCache global)
-      if (!matchupId && Array.isArray(_tennisPinnacleCache?.data)) {
-        for (const m of _tennisPinnacleCache.data) {
-          const vt1 = normTeam(m?.team1 || ''), vt2 = normTeam(m?.team2 || '');
-          const direct = (vt1.includes(n1) || n1.includes(vt1)) && (vt2.includes(n2) || n2.includes(vt2));
-          const swapped = !direct && (vt1.includes(n2) || n2.includes(vt1)) && (vt2.includes(n1) || n1.includes(vt2));
-          if (direct || swapped) {
-            // id vem como 'tennis_pin_XXX' — pega número puro
-            matchupId = String(m.id).replace(/^tennis_pin_/, '');
-            swap = swapped;
-            homeTeam = m.team1 || null;
-            awayTeam = m.team2 || null;
-            break;
+      // Fallback: caches Pinnacle per-sport NÃO integrados ao oddsCache global.
+      // Cada um usa prefixo distinto: tennis_pin_, pin_cs_, pin_ (dota). Remove
+      // prefixo pra extrair matchupId numérico puro usado pela API Pinnacle.
+      const pinFallbacks = [
+        { cache: _tennisPinnacleCache, prefix: /^tennis_pin_/ },
+        { cache: _csPinnacleCache,     prefix: /^pin_cs_/ },
+        { cache: _dotaPinnacleCache,   prefix: /^pin_/ },
+      ];
+      if (!matchupId) {
+        for (const { cache, prefix } of pinFallbacks) {
+          if (!Array.isArray(cache?.data)) continue;
+          for (const m of cache.data) {
+            const vt1 = normTeam(m?.team1 || ''), vt2 = normTeam(m?.team2 || '');
+            const direct = (vt1.includes(n1) || n1.includes(vt1)) && (vt2.includes(n2) || n2.includes(vt2));
+            const swapped = !direct && (vt1.includes(n2) || n2.includes(vt1)) && (vt2.includes(n1) || n1.includes(vt2));
+            if (direct || swapped) {
+              matchupId = String(m.id).replace(prefix, '');
+              swap = swapped;
+              homeTeam = m.team1 || null;
+              awayTeam = m.team2 || null;
+              break;
+            }
           }
+          if (matchupId) break;
         }
       }
     }
