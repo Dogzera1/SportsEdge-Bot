@@ -6861,7 +6861,7 @@ const server = http.createServer(async (req, res) => {
     if (!sport) { sendJson(res, { ok: false, error: 'missing sport' }, 400); return; }
     const daysRaw = parseInt(parsed.query.days);
     const days = Number.isFinite(daysRaw) ? Math.max(7, Math.min(365, daysRaw)) : 30;
-    const minN = parseInt(process.env.SPORT_PERF_MIN_N || '30', 10);
+    const minN = parseInt(process.env.SPORT_PERF_MIN_N || '15', 10);
     try {
       const _bl = getBaseline();
       const tipsRaw = db.prepare(`
@@ -7922,8 +7922,8 @@ const server = http.createServer(async (req, res) => {
         const roi = stake > 0 ? +(profit / stake * 100).toFixed(2) : null;
         const bk = db.prepare(`SELECT initial_banca, current_banca FROM bankroll WHERE sport = ?`).get(sport);
         const dd = bk?.initial_banca > 0 ? +(((bk.initial_banca - (bk.current_banca || 0)) / bk.initial_banca) * 100).toFixed(2) : null;
-        // Loop 4: sport_perf mult (replicando a regra)
-        const minN = 30;
+        // Loop 4: sport_perf mult (replicando a regra; defaults alinhados com endpoint)
+        const minN = parseInt(process.env.SPORT_PERF_MIN_N || '15', 10);
         let sportMult = 1.0, sportReason = 'neutral';
         if (n < minN) { sportMult = 1.0; sportReason = 'insufficient_sample'; }
         else if (roi != null && dd != null) {
@@ -7938,7 +7938,8 @@ const server = http.createServer(async (req, res) => {
         const brierBaseline = parseFloat(process.env[`BRIER_BASELINE_${sport.toUpperCase()}`]) || baselineByDefault[sport] || 0.25;
         const brierCurrent = brierN > 0 ? +(brierSum / brierN).toFixed(4) : null;
         let brierReduction = 0, brierReason = 'insufficient_sample';
-        if (brierN >= 30 && brierCurrent != null) {
+        const brierMinN = parseInt(process.env.BRIER_EV_MIN_N || '20', 10);
+        if (brierN >= brierMinN && brierCurrent != null) {
           const delta = brierCurrent - brierBaseline;
           if (delta >= 0.05) { brierReduction = 20; brierReason = 'severely_degraded'; }
           else if (delta >= 0.03) { brierReduction = 10; brierReason = 'degraded'; }
@@ -8794,7 +8795,7 @@ const server = http.createServer(async (req, res) => {
     if (!sport) { sendJson(res, { ok: false, error: 'missing sport' }, 400); return; }
     const daysRaw = parseInt(parsed.query.days);
     const days = Number.isFinite(daysRaw) ? Math.max(7, Math.min(365, daysRaw)) : 30;
-    const minN = parseInt(process.env.BRIER_EV_MIN_N || '30', 10);
+    const minN = parseInt(process.env.BRIER_EV_MIN_N || '20', 10);
     const baselineByDefault = { lol: 0.22, esports: 0.22, cs: 0.22, valorant: 0.23, tennis: 0.21, mma: 0.23, darts: 0.24, snooker: 0.24 };
     const envKey = `BRIER_BASELINE_${sport.toUpperCase()}`;
     const baseline = parseFloat(process.env[envKey]) || baselineByDefault[sport] || 0.25;
