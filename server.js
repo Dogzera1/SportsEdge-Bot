@@ -8193,6 +8193,23 @@ const server = http.createServer(async (req, res) => {
 
   // Diagnostic futbol: conta match_results por league (football) — pra decidir se amostra
   // é suficiente pra treinar modelo ou se precisa seed CSV histórico antes.
+  // Admin cleanup: remove rows com league short (E1, E2, D2...) deixados de seed velho.
+  // POST /admin/cleanup-football-shortleagues
+  if (p === '/admin/cleanup-football-shortleagues' && req.method === 'POST') {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const shortCodes = ['E1','E2','E3','D2','SP2','I2','F2','B1','P1','T1','G1','SC1','SC2','SC3','N1','N2'];
+      let totalDeleted = 0;
+      for (const c of shortCodes) {
+        const r = db.prepare(`DELETE FROM match_results WHERE game = 'football' AND league = ?`).run(c);
+        totalDeleted += r.changes;
+      }
+      log('INFO', 'FOOTBALL-CLEANUP', `deleted ${totalDeleted} rows com short-league codes`);
+      sendJson(res, { ok: true, deleted: totalDeleted });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   if (p === '/football-data-stats') {
     try {
       const minYear = parseInt(parsed.query.min_year || '2024', 10);

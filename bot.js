@@ -804,6 +804,7 @@ const ADMIN_POST_PATHS = new Set([
   '/admin/dynamic-threshold',
   '/admin/seed-football-secondary',
   '/admin/train-football-poisson',
+  '/admin/cleanup-football-shortleagues',
   '/update-open-tip',
   '/claude',
   '/ps-result',
