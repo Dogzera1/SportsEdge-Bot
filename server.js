@@ -7975,6 +7975,96 @@ const server = http.createServer(async (req, res) => {
   }
 
   // GET /dynamic-thresholds — lista valores ativos
+  // Seed football secundária. Baixa CSV de football-data.co.uk (ou URL custom),
+  // parseia (Date,HomeTeam,AwayTeam,FTHG,FTAG,FTR,...) e upserta em match_results.
+  // POST /admin/seed-football-secondary?url=...&league=...&source=fd|fdnew|custom
+  //
+  // URLs padrão football-data.co.uk:
+  //   https://www.football-data.co.uk/new/BRA.csv   (Brasileirão Série A + B)
+  //   https://www.football-data.co.uk/new/SWE.csv   (Allsvenskan)
+  //   https://www.football-data.co.uk/new/NOR.csv   (Eliteserien)
+  //   https://www.football-data.co.uk/new/FIN.csv   (Veikkausliiga)
+  //   https://www.football-data.co.uk/new/POL.csv   (Ekstraklasa)
+  //   https://www.football-data.co.uk/new/JPN.csv   (J1/J2)
+  //   https://www.football-data.co.uk/new/USA.csv   (MLS)
+  //   https://www.football-data.co.uk/mmz4281/2425/N1.csv (Eredivisie)
+  //
+  // Semantic match_id: fd_<league>_<yyyymmdd>_<home_slug>_<away_slug>
+  if (p === '/admin/seed-football-secondary' && req.method === 'POST') {
+    if (!requireAdmin(req, res)) return;
+    const url = String(parsed.query.url || '').trim();
+    const leagueOverride = String(parsed.query.league || '').trim();
+    if (!url || !/^https?:\/\//.test(url)) { sendJson(res, { ok: false, error: 'url inválida' }, 400); return; }
+    try {
+      const csv = await new Promise((resolve, reject) => {
+        https.get(url, (r) => {
+          if (r.statusCode >= 300 && r.statusCode < 400 && r.headers.location) {
+            https.get(r.headers.location, (r2) => {
+              let buf = ''; r2.on('data', d => buf += d); r2.on('end', () => resolve(buf));
+            }).on('error', reject);
+            return;
+          }
+          let buf = ''; r.on('data', d => buf += d); r.on('end', () => resolve(buf));
+        }).on('error', reject);
+      });
+      const lines = csv.split(/\r?\n/).filter(Boolean);
+      if (lines.length < 2) { sendJson(res, { ok: false, error: 'csv vazio' }, 400); return; }
+      const header = lines[0].split(',');
+      const idx = (name) => header.indexOf(name);
+      const iLeague = idx('League') !== -1 ? idx('League') : idx('Div');
+      const iDate = idx('Date') !== -1 ? idx('Date') : idx('MatchDate');
+      const iHome = idx('Home') !== -1 ? idx('Home') : idx('HomeTeam');
+      const iAway = idx('Away') !== -1 ? idx('Away') : idx('AwayTeam');
+      const iHG = idx('HG') !== -1 ? idx('HG') : idx('FTHG');
+      const iAG = idx('AG') !== -1 ? idx('AG') : idx('FTAG');
+      const iRes = idx('Res') !== -1 ? idx('Res') : idx('FTR');
+      const iSeason = idx('Season');
+      if (iDate < 0 || iHome < 0 || iAway < 0 || iHG < 0 || iAG < 0 || iRes < 0) {
+        sendJson(res, { ok: false, error: 'CSV não tem colunas esperadas', header }, 400);
+        return;
+      }
+      const slug = s => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 40);
+      const parseDate = (s) => {
+        const m = String(s || '').match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})/);
+        if (!m) return null;
+        let [_, dd, mm, yy] = m;
+        if (yy.length === 2) yy = (parseInt(yy) > 50 ? '19' : '20') + yy;
+        return `${yy}-${mm.padStart(2,'0')}-${dd.padStart(2,'0')}`;
+      };
+      const insertStmt = db.prepare(`
+        INSERT OR IGNORE INTO match_results
+          (match_id, game, team1, team2, winner, final_score, league, resolved_at)
+        VALUES (?, 'football', ?, ?, ?, ?, ?, ?)
+      `);
+      let inserted = 0, skipped = 0, badRows = 0;
+      const leaguesSeen = new Set();
+      const tx = db.transaction(() => {
+        for (let i = 1; i < lines.length; i++) {
+          // Parse CSV with naive split (football-data.co.uk tem aspas em nomes raros)
+          const cols = lines[i].split(',');
+          if (cols.length < Math.max(iDate, iHome, iAway, iHG, iAG, iRes) + 1) { badRows++; continue; }
+          const dateIso = parseDate(cols[iDate]);
+          const home = cols[iHome]?.trim();
+          const away = cols[iAway]?.trim();
+          const hg = parseInt(cols[iHG]); const ag = parseInt(cols[iAG]);
+          const resChar = cols[iRes]?.trim().toUpperCase();
+          if (!dateIso || !home || !away || !Number.isFinite(hg) || !Number.isFinite(ag)) { badRows++; continue; }
+          const winner = resChar === 'H' ? home : resChar === 'A' ? away : 'draw';
+          const league = leagueOverride || (iLeague >= 0 ? cols[iLeague]?.trim() : '') || 'football-data';
+          leaguesSeen.add(league);
+          const seasonTag = iSeason >= 0 && cols[iSeason] ? `_${cols[iSeason].trim()}` : '';
+          const matchId = `fd_${slug(league)}${seasonTag}_${dateIso.replace(/-/g,'')}_${slug(home)}_${slug(away)}`;
+          const info = insertStmt.run(matchId, home, away, winner, `${hg}-${ag}`, league, `${dateIso} 00:00:00`);
+          if (info.changes > 0) inserted++; else skipped++;
+        }
+      });
+      tx();
+      log('INFO', 'FOOTBALL-SEED', `URL=${url} inserted=${inserted} skipped=${skipped} badRows=${badRows} leagues=${leaguesSeen.size}`);
+      sendJson(res, { ok: true, url, inserted, skipped, bad_rows: badRows, leagues_seen: Array.from(leaguesSeen) });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   // Diagnostic futbol: conta match_results por league (football) — pra decidir se amostra
   // é suficiente pra treinar modelo ou se precisa seed CSV histórico antes.
   if (p === '/football-data-stats') {

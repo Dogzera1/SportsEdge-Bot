@@ -801,6 +801,7 @@ const ADMIN_POST_PATHS = new Set([
   '/admin/delete-empty-bankroll',
   '/threshold-optimizer-apply',
   '/admin/dynamic-threshold',
+  '/admin/seed-football-secondary',
   '/update-open-tip',
   '/claude',
   '/ps-result',
