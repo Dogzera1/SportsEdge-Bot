@@ -803,6 +803,7 @@ const ADMIN_POST_PATHS = new Set([
   '/threshold-optimizer-apply',
   '/admin/dynamic-threshold',
   '/admin/seed-football-secondary',
+  '/admin/train-football-poisson',
   '/update-open-tip',
   '/claude',
   '/ps-result',
@@ -12360,6 +12361,28 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   }
   setInterval(() => runThresholdAutoApply(), 15 * 60 * 1000);
   setTimeout(() => runThresholdAutoApply(), 50 * 60 * 1000);
+
+  // Football Poisson retrain: segunda 5h UTC (1h após threshold optimizer).
+  // Absorve matches novos settled na última semana. Gated FOOTBALL_POISSON_AUTO_RETRAIN.
+  let _lastFbRetrainDay = null;
+  async function runFootballPoissonRetrain() {
+    if (!/^true$/i.test(String(process.env.FOOTBALL_POISSON_AUTO_RETRAIN || ''))) return;
+    const now = new Date();
+    const today = now.toISOString().slice(0, 10);
+    if (_lastFbRetrainDay === today) return;
+    if (now.getUTCDay() !== 1 || now.getUTCHours() !== 5) return;
+    _lastFbRetrainDay = today;
+    try {
+      const adminKey = process.env.ADMIN_KEY || '';
+      const r = await serverPost('/admin/train-football-poisson?min_games=5&years_back=3', {}, null,
+        adminKey ? { 'x-admin-key': adminKey } : {});
+      if (r?.ok) {
+        log('INFO', 'FB-RETRAIN', `done: ${r.totalMatches} matches, ${r.leaguesCount} leagues, ${r.teamsCount} teams`);
+      }
+    } catch (e) { log('ERROR', 'FB-RETRAIN', e.message); }
+  }
+  setInterval(() => runFootballPoissonRetrain(), 15 * 60 * 1000);
+  setTimeout(() => runFootballPoissonRetrain(), 55 * 60 * 1000);
 
   // Daily Autonomy Digest: 1x/dia às AUTONOMY_DIGEST_HOUR_UTC (default 12h UTC = 9h BRT),
   // DM admins com snapshot /autonomy-status. Gated por AUTONOMY_DIGEST_AUTO=true.
