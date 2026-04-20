@@ -5108,7 +5108,7 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
       if (s.winRate != null) txt += `Win rate: *${s.winRate}%*\n`;
       if (s.avgClvPct != null) txt += `CLV médio: *${s.avgClvPct > 0 ? '+' : ''}${s.avgClvPct}%* (n=${s.clvSamples})\n`;
       txt += `\n_Critério de graduação sugerido: ≥30 tips, CLV médio positivo, WR calibrado._\n`;
-      txt += `_Desligar shadow: env ${sportArg.toUpperCase()}_SHADOW=false + restart._`;
+      txt += `_Desligar shadow: env_ \`${sportArg.toUpperCase()}_SHADOW=false\` _+ restart._`;
       // Últimas 5 tips pra visão rápida
       const recent = (data.tips || []).slice(0, 5);
       if (recent.length) {
@@ -5118,8 +5118,13 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
           txt += `${emoji} ${r.tip_participant} @ ${r.odds} | EV:${r.ev}% | ${String(r.sent_at || '').slice(0, 10)}\n`;
         });
       }
-      await send(token, chatId, txt);
-    } catch(e) { await send(token, chatId, `❌ ${e.message}`); }
+      const sendRes = await send(token, chatId, txt).catch(e => ({ ok: false, error: e.message }));
+      log('INFO', 'CMD', `/shadow → send ok=${sendRes?.ok !== false} desc="${sendRes?.description || sendRes?.error || 'ok'}"`);
+      if (sendRes && sendRes.ok === false) {
+        // Fallback sem Markdown se parse falhou
+        await send(token, chatId, txt.replace(/[*_`]/g, ''), { parse_mode: undefined }).catch(() => {});
+      }
+    } catch(e) { log('WARN', 'CMD', `/shadow threw: ${e.message}`); await send(token, chatId, `❌ ${e.message}`).catch(() => {}); }
 
   } else if (cmd === '/market-tips') {
     if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
