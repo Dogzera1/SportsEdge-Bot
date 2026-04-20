@@ -7790,6 +7790,23 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // Remove bankroll row vazia (0 tips). Usado pra corrigir soma de bankrolls que
+  // diverge do baseline (ex: rows auto-criadas pra sports nunca usados).
+  if (p === '/admin/delete-empty-bankroll' && req.method === 'POST') {
+    if (!requireAdmin(req, res)) return;
+    const sport = String(parsed.query.sport || '').trim().toLowerCase();
+    if (!sport) { sendJson(res, { ok: false, error: 'missing sport' }, 400); return; }
+    const tipCount = db.prepare('SELECT COUNT(*) AS c FROM tips WHERE sport = ?').get(sport).c;
+    if (tipCount > 0) {
+      sendJson(res, { ok: false, error: 'bankroll has tips', sport, tips: tipCount }, 409);
+      return;
+    }
+    const info = db.prepare('DELETE FROM bankroll WHERE sport = ?').run(sport);
+    log('INFO', 'ADMIN', `Bankroll row removida: sport=${sport} (changes=${info.changes})`);
+    sendJson(res, { ok: true, sport, removed: info.changes });
+    return;
+  }
+
   // Cost Summary: estima custos mensais de APIs externas + Railway.
   // Baseado em: api_usage table (DeepSeek count + tokens) + oddsApiQuotaStatus + uptime.
   // GET /cost-summary?month=2026-04 (default mês atual)

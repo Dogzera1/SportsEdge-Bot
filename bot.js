@@ -1791,6 +1791,14 @@ async function runAutoAnalysis() {
               analyzedMatches.set(matchKey, { ts: now, tipSent: false, noEdge: true });
               await new Promise(r => setTimeout(r, 3000)); continue;
             }
+            // Kill-switch bucket esports pregame tier2+ (ROI -76%/Brier 0.302 em prod).
+            // Ative com ESPORTS_PREGAME_TIER2_DISABLE=true. Rejeita tudo que não seja tier1.
+            if (!_lolTier1Up && /^true$/i.test(String(process.env.ESPORTS_PREGAME_TIER2_DISABLE || ''))) {
+              log('WARN', 'AUTO', `Gate ESPORTS_PREGAME_TIER2_DISABLE: ${match.team1} vs ${match.team2} (${match.league}) → bucket desligado`);
+              logRejection('lol', `${match.team1} vs ${match.team2}`, 'pregame_tier2_disabled', { league: match.league, ev: +tipEVnum.toFixed(2) });
+              analyzedMatches.set(matchKey, { ts: now, tipSent: false, noEdge: true });
+              await new Promise(r => setTimeout(r, 3000)); continue;
+            }
 
             // ALTA → ¼ Kelly (max 4u) | MÉDIA → ⅙ Kelly (max 3u) | BAIXA → 1/10 Kelly (max 1.5u)
             const kellyFraction = tipConf === CONF.ALTA ? 0.25 : tipConf === CONF.BAIXA ? 0.10 : 1/6;
@@ -11429,6 +11437,18 @@ async function runAutoDarts() {
             log('INFO', 'AUTO-DARTS', `Odds stale (${oddsAgeStr(match.odds)}): ${match.team1} vs ${match.team2} — pulando`);
             continue;
           }
+          // Proximity gate pregame: mercado darts move forte nas últimas horas (CLV -2,97%/18%
+          // positive rate histórico em tier1 pregame). Só envia tip se match começar em <=
+          // DARTS_MAX_HOURS_PREGAME horas (default 4h). Antes disso, odds vão melhorar.
+          if (!isLiveDarts && match.time) {
+            const maxHours = parseFloat(process.env.DARTS_MAX_HOURS_PREGAME || '4');
+            const msToStart = new Date(match.time).getTime() - now;
+            if (msToStart > maxHours * 3600 * 1000) {
+              const hrs = (msToStart / 3600000).toFixed(1);
+              log('INFO', 'AUTO-DARTS', `Proximity gate: ${match.team1} vs ${match.team2} começa em ${hrs}h > ${maxHours}h — aguardando mercado maduro`);
+              continue;
+            }
+          }
 
           // Enriquecimento: 3-dart avg recente (últimos 10 jogos) + H2H entre os dois + live score se aplicável
           const [recentP1, recentP2, h2h, liveScore] = await Promise.all([
@@ -12338,6 +12358,7 @@ async function checkCLV(caches = {}) {
         }
       } else if (sport === 'football') {
         const matches = caches.football || await serverGet('/football-matches').catch(() => []);
+        caches.football = matches;
         if (Array.isArray(matches)) {
           for (const m of matches) {
             if (m.time) {
@@ -12351,6 +12372,7 @@ async function checkCLV(caches = {}) {
         }
       } else if (sport === 'tennis') {
         const matches = caches.tennis || await serverGet('/tennis-matches').catch(() => []);
+        caches.tennis = matches;
         if (Array.isArray(matches)) {
           for (const m of matches) {
             if (m.time) {
@@ -12412,7 +12434,7 @@ async function checkCLV(caches = {}) {
             clvOdds = (norm(tip.tip_participant) === norm(tip.participant1)) ? o.t1 : o.t2;
           }
         } else if (sport === 'football') {
-          const list = Array.isArray(footballMatches) ? footballMatches : [];
+          const list = Array.isArray(caches.football) ? caches.football : [];
           const p1 = norm(tip.participant1 || '');
           const p2 = norm(tip.participant2 || '');
           const pick = String(tip.tip_participant || '');
@@ -12428,7 +12450,7 @@ async function checkCLV(caches = {}) {
             else if (pickN === 'draw' || pickN === norm('empate')) clvOdds = m.odds.d;
           }
         } else if (sport === 'tennis') {
-          const list = Array.isArray(tennisMatches) ? tennisMatches : [];
+          const list = Array.isArray(caches.tennis) ? caches.tennis : [];
           const m = findTheOddsH2hMatch(list, tip);
           if (m?.odds) {
             const o = h2hDecimalOddsForPick(m, tip.tip_participant);
