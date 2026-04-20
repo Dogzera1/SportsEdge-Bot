@@ -274,7 +274,16 @@
       "Bash(git commit -m 'feat\\(8\\): live risk monitor — DM admin quando tip entra em risk zone *)",
       "Bash(git commit -m 'feat\\(9\\): threshold optimizer — Bayesian-lite grid search per sport *)",
       "Bash(git commit -m 'feat\\(9b\\): fecha threshold optimizer com auto-apply + guardrails *)",
-      "Bash(git commit -m 'fix: excluir shadow tips \\(is_shadow=1\\) de dashboard + cálculos *)"
+      "Bash(git commit -m 'fix: excluir shadow tips \\(is_shadow=1\\) de dashboard + cálculos *)",
+      "Bash(toml)",
+      "Bash(procfile\")",
+      "Bash(grep -iE \"railway|toml|dockerfile|procfile\" echo \"---env.example---\" cat \"C:\\\\Users\\\\vict_\\\\Desktop\\\\lol betting\\\\.env.example\")",
+      "Bash(git commit -m 'feat: /db-info endpoint — diagnostic pra volume/persistence *)",
+      "Bash(grep -iE \"\\\\.env|config\" echo \"---\" cat \"C:\\\\Users\\\\vict_\\\\Desktop\\\\lol betting\\\\start.js\")",
+      "WebFetch(domain:ddragon.leagueoflegends.com)",
+      "WebFetch(domain:www.leagueoflegends.com)",
+      "Bash(git commit -m 'fix\\(9\\): bootstrap delta permite primeira auto-apply sair do zero *)",
+      "Bash(git commit -m 'fix\\(9\\): melhorar score e filtro de candidatos anti-overfit *)"
     ]
   }
 }
