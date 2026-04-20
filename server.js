@@ -8473,6 +8473,65 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // CLV → Kelly feedback loop. Ajusta o tamanho do stake baseado no CLV realizado
+  // das últimas 30d (por sport + liga opcional). Retorna multiplicador que o bot
+  // aplica em cima da Kelly fraction antes de calcular stake final.
+  //
+  // Regra (conservadora, thresholds podem ser afinados por ENV):
+  //   n < minN          → mult 1.0 (insuficiente)
+  //   avgClv ≤ -3%      → mult 0.0 (shadow — mercado nos come)
+  //   avgClv ≤ -1%      → mult 0.5
+  //   avgClv ≥ +2%      → mult 1.2 (limitado)
+  //   caso contrário    → mult 1.0
+  //
+  // GET /clv-kelly-multiplier?sport=X[&league=Y][&days=30]
+  if (p === '/clv-kelly-multiplier') {
+    const sport = String(parsed.query.sport || '').trim().toLowerCase();
+    if (!sport) { sendJson(res, { ok: false, error: 'missing sport' }, 400); return; }
+    const leagueRaw = parsed.query.league ? String(parsed.query.league).trim() : null;
+    const daysRaw = parseInt(parsed.query.days);
+    const days = Number.isFinite(daysRaw) ? Math.max(7, Math.min(365, daysRaw)) : 30;
+    const minN = parseInt(process.env.CLV_KELLY_MIN_N || '20', 10);
+    try {
+      const params = [sport];
+      let sql = `
+        SELECT odds, clv_odds, event_name
+        FROM tips
+        WHERE sport = ?
+          AND clv_odds > 1 AND odds > 1
+          AND result IN ('win','loss')
+          AND settled_at >= datetime('now', ?)
+          AND (archived IS NULL OR archived = 0)
+      `;
+      params.push(`-${days} days`);
+      if (leagueRaw) { sql += ` AND event_name = ?`; params.push(leagueRaw); }
+      const rows = db.prepare(sql).all(...params);
+      const n = rows.length;
+      let avgClv = null, positive = 0;
+      if (n > 0) {
+        let sum = 0;
+        for (const r of rows) {
+          const delta = (Number(r.odds) / Number(r.clv_odds) - 1) * 100;
+          sum += delta;
+          if (delta > 0) positive++;
+        }
+        avgClv = +(sum / n).toFixed(3);
+      }
+      let multiplier = 1.0, reason = 'neutral';
+      if (n < minN) { multiplier = 1.0; reason = 'insufficient_sample'; }
+      else if (avgClv <= -3) { multiplier = 0.0; reason = 'severe_negative_clv'; }
+      else if (avgClv <= -1) { multiplier = 0.5; reason = 'negative_clv'; }
+      else if (avgClv >= 2) { multiplier = 1.2; reason = 'positive_clv'; }
+      sendJson(res, {
+        ok: true, sport, league: leagueRaw, days, n,
+        min_n: minN, avg_clv_pct: avgClv,
+        positive_rate: n > 0 ? +(positive / n * 100).toFixed(1) : null,
+        multiplier, reason,
+      });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   // CLV decay tracker: CLV médio diário por sport — detecta degradação ao longo do tempo.
   // GET /clv-decay?sport=X&days=30
   if (p === '/clv-decay') {

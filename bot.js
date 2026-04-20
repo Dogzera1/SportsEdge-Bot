@@ -976,6 +976,32 @@ const DRAWDOWN_CACHE_TTL = 5 * 60 * 1000; // refresh a cada 5min
 const DRAWDOWN_HARD_LIMIT = parseFloat(process.env.DRAWDOWN_HARD_LIMIT || '0.25'); // 25% = bloqueia
 const DRAWDOWN_SOFT_LIMIT = parseFloat(process.env.DRAWDOWN_SOFT_LIMIT || '0.15'); // 15% = reduz 50%
 
+// CLV → Kelly feedback. Cache multiplier per (sport, league) por 10min; bot consulta
+// antes de calcular stake final. Default OFF (CLV_AUTO_KELLY=true pra ativar).
+const _clvKellyCache = new Map(); // key = `${sport}|${league||''}` → { ts, mult, reason, n, avgClv }
+const CLV_KELLY_TTL = 10 * 60 * 1000;
+async function fetchClvMultiplier(sport, league) {
+  if (!/^true$/i.test(String(process.env.CLV_AUTO_KELLY || ''))) {
+    return { mult: 1.0, reason: 'disabled', n: 0, avgClv: null };
+  }
+  const key = `${String(sport || '').toLowerCase()}|${String(league || '').trim()}`;
+  const now = Date.now();
+  const hit = _clvKellyCache.get(key);
+  if (hit && (now - hit.ts) < CLV_KELLY_TTL) return hit;
+  try {
+    const leagueQ = league ? `&league=${encodeURIComponent(league)}` : '';
+    const r = await serverGet(`/clv-kelly-multiplier?sport=${encodeURIComponent(sport)}${leagueQ}`);
+    if (r?.ok) {
+      const out = { ts: now, mult: Number(r.multiplier) || 1.0, reason: r.reason, n: r.n, avgClv: r.avg_clv_pct };
+      _clvKellyCache.set(key, out);
+      return out;
+    }
+  } catch (_) {}
+  const fallback = { ts: now, mult: 1.0, reason: 'fetch_error', n: 0, avgClv: null };
+  _clvKellyCache.set(key, fallback);
+  return fallback;
+}
+
 async function applyGlobalRisk(sport, desiredUnits, leagueSlug) {
   if (!desiredUnits || desiredUnits <= 0) return { ok: false, units: 0, reason: 'stake_zero' };
 
@@ -1801,7 +1827,14 @@ async function runAutoAnalysis() {
             }
 
             // ALTA → ¼ Kelly (max 4u) | MÉDIA → ⅙ Kelly (max 3u) | BAIXA → 1/10 Kelly (max 1.5u)
-            const kellyFraction = tipConf === CONF.ALTA ? 0.25 : tipConf === CONF.BAIXA ? 0.10 : 1/6;
+            let kellyFraction = tipConf === CONF.ALTA ? 0.25 : tipConf === CONF.BAIXA ? 0.10 : 1/6;
+            // CLV→Kelly feedback: se CLV 30d negativo em (sport,league), reduz fraction;
+            // se CLV ≤ -3% shadowa (mult=0 → tipStake='0u' → aborta abaixo).
+            const _clvAdj = await fetchClvMultiplier('esports', match.league);
+            if (_clvAdj.mult !== 1.0) {
+              log('INFO', 'CLV-KELLY', `Ajuste esports upcoming [${match.league}]: mult=${_clvAdj.mult} reason=${_clvAdj.reason} (CLV ${_clvAdj.avgClv}% n=${_clvAdj.n})`);
+              kellyFraction = kellyFraction * _clvAdj.mult;
+            }
             // Usa p do modelo ML quando disponível (evita circularidade p←EV←IA)
             const isT1bet = norm(tipTeam).includes(norm(match.team1)) || norm(match.team1).includes(norm(tipTeam));
             const modelPForKelly = (result.modelP1 > 0) ? (isT1bet ? result.modelP1 : result.modelP2) : null;
@@ -1809,7 +1842,12 @@ async function runAutoAnalysis() {
               ? calcKellyWithP(modelPForKelly, tipOdd, kellyFraction)
               : calcKellyFraction(tipEV, tipOdd, kellyFraction);
             if (tipStake === '0u') {
-              log('INFO', 'AUTO', `Kelly negativo upcoming ${tipTeam} @ ${tipOdd} — tip abortada`);
+              if (_clvAdj.mult === 0) {
+                log('WARN', 'CLV-KELLY', `Shadow por CLV severo: ${match.team1} vs ${match.team2} [${match.league}] CLV ${_clvAdj.avgClv}% n=${_clvAdj.n}`);
+                logRejection('lol', `${match.team1} vs ${match.team2}`, 'clv_shadow', { league: match.league, clv: _clvAdj.avgClv, n: _clvAdj.n });
+              } else {
+                log('INFO', 'AUTO', `Kelly negativo upcoming ${tipTeam} @ ${tipOdd} — tip abortada`);
+              }
               await new Promise(r => setTimeout(r, 3000)); continue;
             }
             // Risk Manager cross-sport (faltava no upcoming — bug fix mid-Abr 2026)
