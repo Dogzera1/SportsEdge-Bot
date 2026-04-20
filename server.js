@@ -8060,11 +8060,14 @@ const server = http.createServer(async (req, res) => {
         for (const t of tips) { baseProfit += tipProfitReais(t, _bl.unit_value) || 0; baseStake += tipStakeReais(t, _bl.unit_value); }
         const baseRoi = baseStake > 0 ? (baseProfit / baseStake * 100) : 0;
         let bestT = 0, bestScore = -Infinity, bestN = 0, bestRoi = 0;
+        // Filtra thresholds que resultam em n muito pequeno (<minN/2) pra evitar
+        // overfit a amostras minúsculas. Score = ROI × sqrt(n) penaliza n baixo.
+        const minNForCandidate = Math.max(10, Math.floor(minN / 2));
         for (const t of thresholds) {
           let profit = 0, stake = 0, n = 0;
           for (const tip of tips) { if (Number(tip.ev) < t) continue; const p = tipProfitReais(tip, _bl.unit_value); if (p != null) profit += p; stake += tipStakeReais(tip, _bl.unit_value); n++; }
           const roi = stake > 0 ? (profit / stake * 100) : 0;
-          const score = n >= 5 ? roi * Math.log(Math.max(2, n)) : -Infinity;
+          const score = n >= minNForCandidate ? roi * Math.sqrt(n) : -Infinity;
           if (score > bestScore) { bestScore = score; bestT = t; bestN = n; bestRoi = roi; }
         }
         const uplift = bestRoi - baseRoi;
