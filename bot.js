@@ -5704,6 +5704,35 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
       await send(token, chatId, txt);
     } catch (e) { await send(token, chatId, `❌ ${e.message}`); }
 
+  } else if (cmd === '/loops') {
+    if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
+    try {
+      const r = await serverGet('/autonomy-status').catch(() => null);
+      if (!r?.sports) { await send(token, chatId, '❌ /autonomy-status unavailable'); return; }
+      const flagOn = Object.entries(r.flags).filter(([_,v]) => v).map(([k]) => k.replace('_AUTO','').replace('AUTO_','').toLowerCase());
+      const flagOff = Object.entries(r.flags).filter(([_,v]) => !v).map(([k]) => k.replace('_AUTO','').replace('AUTO_','').toLowerCase());
+      let txt = `🤖 *AUTONOMY STATUS*\n_${String(r.at).slice(11,19)} UTC_\n\n`;
+      txt += `*Flags ON (${flagOn.length}):* ${flagOn.join(', ') || '—'}\n`;
+      if (flagOff.length) txt += `*Flags OFF:* ${flagOff.join(', ')}\n`;
+      txt += `*League blocks ativos:* ${r.active_league_blocks_total}\n\n`;
+      txt += '*Per sport (com n>0):*\n```\n';
+      txt += 'sport    n   ROI%   L4mult  motivo\n';
+      for (const s of r.sports.filter(x => x.n > 0)) {
+        const n = String(s.n).padStart(3);
+        const roi = (s.roi_pct != null ? s.roi_pct.toFixed(1) : '—').padStart(6);
+        const mult = s.loop4_sport_perf.mult.toFixed(2).padEnd(5);
+        const reas = s.loop4_sport_perf.reason.substring(0, 12);
+        txt += `${s.sport.padEnd(9)}${n}  ${roi}  ${mult}   ${reas}\n`;
+      }
+      txt += '```\n';
+      const blocked = r.sports.filter(s => s.loop6_time_of_day.blocked_hours_utc.length);
+      if (blocked.length) {
+        txt += '\n*Horas bloqueadas (UTC):*\n';
+        for (const s of blocked) txt += `${s.sport}: ${s.loop6_time_of_day.blocked_hours_utc.join(', ')}\n`;
+      }
+      await send(token, chatId, txt);
+    } catch(e) { await send(token, chatId, `❌ ${e.message}`); }
+
   } else if (cmd === '/models') {
     if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
     try {
@@ -12263,6 +12292,55 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   }
   setInterval(() => runLiveRiskMonitor(), 10 * 60 * 1000);
   setTimeout(() => runLiveRiskMonitor(), 8 * 60 * 1000); // primeiro check 8min pós-boot
+
+  // Daily Autonomy Digest: 1x/dia às AUTONOMY_DIGEST_HOUR_UTC (default 12h UTC = 9h BRT),
+  // DM admins com snapshot /autonomy-status. Gated por AUTONOMY_DIGEST_AUTO=true.
+  let _lastAutonomyDigestDay = null;
+  async function runAutonomyDigest() {
+    if (!/^true$/i.test(String(process.env.AUTONOMY_DIGEST_AUTO || ''))) return;
+    if (!ADMIN_IDS.size) return;
+    const hourUtc = parseInt(process.env.AUTONOMY_DIGEST_HOUR_UTC || '12', 10);
+    const now = new Date();
+    const today = now.toISOString().slice(0, 10);
+    if (_lastAutonomyDigestDay === today) return;
+    if (now.getUTCHours() !== hourUtc) return;
+    _lastAutonomyDigestDay = today;
+    try {
+      const r = await serverGet('/autonomy-status').catch(() => null);
+      if (!r?.sports) return;
+      const flagOn = Object.entries(r.flags).filter(([_,v]) => v).length;
+      const flagTotal = Object.keys(r.flags).length;
+      const activeSports = r.sports.filter(s => s.loop4_sport_perf.mult !== 1.0);
+      const winners = activeSports.filter(s => s.loop4_sport_perf.mult > 1);
+      const bleeders = activeSports.filter(s => s.loop4_sport_perf.mult < 1);
+      let msg = `📊 *Digest Autonomia*  _${today}_\n\n`;
+      msg += `*Loops ativos:* ${flagOn}/${flagTotal}\n`;
+      msg += `*League blocks:* ${r.active_league_blocks_total}\n\n`;
+      if (winners.length) {
+        msg += `🟢 *Escalando (winner):*\n`;
+        for (const s of winners) msg += `• ${s.sport} (${s.loop4_sport_perf.mult}x) — ROI ${s.roi_pct?.toFixed(1)}% n=${s.n}\n`;
+      }
+      if (bleeders.length) {
+        msg += `\n🔴 *Reduzindo (bleeder):*\n`;
+        for (const s of bleeders) msg += `• ${s.sport} (${s.loop4_sport_perf.mult}x) — ROI ${s.roi_pct?.toFixed(1)}% DD ${s.drawdown_pct?.toFixed(1)}%\n`;
+      }
+      const allBlockedHours = r.sports.filter(s => s.loop6_time_of_day.blocked_hours_utc.length);
+      if (allBlockedHours.length) {
+        msg += `\n⏰ *Horas bloqueadas (UTC):*\n`;
+        for (const s of allBlockedHours) msg += `• ${s.sport}: ${s.loop6_time_of_day.blocked_hours_utc.join(',')}\n`;
+      }
+      msg += `\n_Digest diário. Use /loops pra snapshot ao vivo._`;
+      const routed = _pickTokenForAlert('digest') || _pickTokenForAlert('system');
+      const token = routed?.token;
+      if (!token) return;
+      for (const adminId of ADMIN_IDS) {
+        await sendDM(token, adminId, msg).catch(() => {});
+      }
+      log('INFO', 'AUTONOMY-DIGEST', `DM enviado pra ${ADMIN_IDS.size} admin(s)`);
+    } catch (e) { log('ERROR', 'AUTONOMY-DIGEST', e.message); }
+  }
+  setInterval(() => runAutonomyDigest(), 15 * 60 * 1000);
+  setTimeout(() => runAutonomyDigest(), 35 * 60 * 1000);
 
   // Nightly Retrain: roda scripts/refresh-all-isotonics.js --all diariamente na
   // janela NIGHTLY_RETRAIN_HOUR_UTC (default 3). Tick de 15min verifica se é a hora
