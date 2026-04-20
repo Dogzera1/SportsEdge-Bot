@@ -12225,6 +12225,45 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   setInterval(() => runLeagueBleedScan(), 6 * 60 * 60 * 1000);
   setTimeout(() => runLeagueBleedScan(), 20 * 60 * 1000); // primeiro scan 20min pós-boot
 
+  // Live Risk Monitor: 10min. Consome /cashout-alerts (health='alert'|'dying') e
+  // DM admin uma vez a cada 30min por tipId. Gated por LIVE_RISK_MONITOR_AUTO=true.
+  const _riskAlertDedup = new Map(); // tipId → lastDmTs
+  const RISK_ALERT_DEDUP_MS = 30 * 60 * 1000;
+  async function runLiveRiskMonitor() {
+    if (!/^true$/i.test(String(process.env.LIVE_RISK_MONITOR_AUTO || ''))) return;
+    if (!ADMIN_IDS.size) return;
+    try {
+      const sports = ['esports', 'tennis', 'darts', 'cs', 'valorant', 'mma', 'snooker', 'football'];
+      for (const sport of sports) {
+        const r = await serverGet(`/cashout-alerts?sport=${sport}&days=3`).catch(() => null);
+        const alerts = Array.isArray(r?.alerts) ? r.alerts : [];
+        for (const a of alerts) {
+          const tipId = a.tipId || `${sport}:${a.match}`;
+          const now = Date.now();
+          const last = _riskAlertDedup.get(tipId) || 0;
+          if (now - last < RISK_ALERT_DEDUP_MS) continue;
+          _riskAlertDedup.set(tipId, now);
+          const routed = _pickTokenForAlert('live_risk') || _pickTokenForAlert('system');
+          const token = routed?.token;
+          if (!token) continue;
+          const icon = a.verdict === 'dying' ? '🔴' : '⚠️';
+          const msg = `${icon} *LIVE RISK* (${sport})\n\n` +
+            `*${a.match}*\n` +
+            `Pick: ${a.pick} @ ${a.odds}\n` +
+            `Verdict: *${a.verdict}*${a.reason ? ` — ${a.reason}` : ''}\n` +
+            (a.winProbNow != null ? `P atual: ${(a.winProbNow*100).toFixed(1)}%\n` : '') +
+            `\n_Considerar cashout. Próx alerta deste tip em 30min._`;
+          for (const adminId of ADMIN_IDS) {
+            await sendDM(token, adminId, msg).catch(() => {});
+          }
+          log('WARN', 'LIVE-RISK', `[${a.verdict}] ${sport} ${a.match} → DM admin`);
+        }
+      }
+    } catch (e) { log('ERROR', 'LIVE-RISK', e.message); }
+  }
+  setInterval(() => runLiveRiskMonitor(), 10 * 60 * 1000);
+  setTimeout(() => runLiveRiskMonitor(), 8 * 60 * 1000); // primeiro check 8min pós-boot
+
   // Nightly Retrain: roda scripts/refresh-all-isotonics.js --all diariamente na
   // janela NIGHTLY_RETRAIN_HOUR_UTC (default 3). Tick de 15min verifica se é a hora
   // e se ainda não rodou hoje. Gated por NIGHTLY_RETRAIN_AUTO=true.

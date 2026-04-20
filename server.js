@@ -7963,6 +7963,7 @@ const server = http.createServer(async (req, res) => {
         AUTO_ROLLBACK_ON_REGRESSION: /^true$/i.test(String(process.env.AUTO_ROLLBACK_ON_REGRESSION || '')),
         TIME_OF_DAY_AUTO: /^true$/i.test(String(process.env.TIME_OF_DAY_AUTO || '')),
         CORRELATION_AUTO: /^true$/i.test(String(process.env.CORRELATION_AUTO || '')),
+        LIVE_RISK_MONITOR_AUTO: /^true$/i.test(String(process.env.LIVE_RISK_MONITOR_AUTO || '')),
       }, sports: [] };
       const activeBlocks = db.prepare(`SELECT sport, league, reason, blocked_at FROM league_blocks WHERE unblocked_at IS NULL`).all();
       const blocksBySport = {};
