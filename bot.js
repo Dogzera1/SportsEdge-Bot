@@ -5091,12 +5091,15 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
     );
 
   } else if (cmd === '/shadow') {
+    log('INFO', 'CMD', `/shadow recebido chatId=${chatId} callerSport=${callerSport} command="${command}"`);
     if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
     // Argumento opcional: /shadow darts | /shadow snooker → default 'darts'
     const cmdParts = command.trim().split(/\s+/);
     const sportArg = cmdParts[1]?.toLowerCase() || 'darts';
+    log('INFO', 'CMD', `/shadow → sportArg=${sportArg} — buscando /shadow-tips`);
     try {
       const data = await serverGet(`/shadow-tips?sport=${encodeURIComponent(sportArg)}&limit=100`);
+      log('INFO', 'CMD', `/shadow ← response ok=${!!data} error=${data?.error || 'none'} total=${data?.summary?.total ?? '?'}`);
       if (data?.error) { await send(token, chatId, `❌ ${data.error}`); return; }
       const s = data.summary || {};
       let txt = `🕶️ *SHADOW TIPS — ${sportArg.toUpperCase()}*\n\n`;
