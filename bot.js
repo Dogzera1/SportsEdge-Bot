@@ -12329,6 +12329,20 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
         msg += `\n⏰ *Horas bloqueadas (UTC):*\n`;
         for (const s of allBlockedHours) msg += `• ${s.sport}: ${s.loop6_time_of_day.blocked_hours_utc.join(',')}\n`;
       }
+      // Threshold optimizer recommendations (se uplift ≥ 5pp em algum sport)
+      try {
+        const opt = await serverGet('/threshold-optimizer?sport=all&days=30').catch(() => null);
+        if (opt?.sports?.length) {
+          const applies = opt.sports.filter(s => s.recommendation === 'APPLY' || s.recommendation === 'REVIEW');
+          if (applies.length) {
+            msg += `\n🎯 *Sugestões de tuning (uplift >2pp):*\n`;
+            for (const s of applies.slice(0, 4)) {
+              msg += `• ${s.sport}: EV_min ${s.suggested_ev_min} → ROI ${s.suggested_roi_pct}% (+${s.uplift_pp}pp, n=${s.suggested_n}) [${s.recommendation}]\n`;
+            }
+            msg += `_Aplicar via TIP_EV_MAX_PER_SPORT={...} ou inversamente filtrar._\n`;
+          }
+        }
+      } catch (_) {}
       msg += `\n_Digest diário. Use /loops pra snapshot ao vivo._`;
       const routed = _pickTokenForAlert('digest') || _pickTokenForAlert('system');
       const token = routed?.token;

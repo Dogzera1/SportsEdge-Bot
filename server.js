@@ -7948,6 +7948,81 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // ══════════════ Threshold Optimizer — Bayesian-lite grid search ══════════════
+  // Replaya tips settled últimos `days` dias, variando EV threshold. Para cada
+  // candidato t, filtra tips que teriam passado (ev ≥ t), computa ROI. Retorna
+  // melhor threshold por sport com uplift esperado.
+  //
+  // Score: maximize (ROI_pct × log(n)) — balanceia retorno vs sample size
+  //
+  // GET /threshold-optimizer?sport=X[&days=30]
+  //   ?sport=all retorna per sport
+  if (p === '/threshold-optimizer') {
+    const sportFilter = String(parsed.query.sport || 'all').trim().toLowerCase();
+    const daysRaw = parseInt(parsed.query.days);
+    const days = Number.isFinite(daysRaw) ? Math.max(14, Math.min(180, daysRaw)) : 30;
+    try {
+      const _bl = getBaseline();
+      const sql = sportFilter === 'all'
+        ? `SELECT sport, ev, stake, odds, result FROM tips
+           WHERE result IN ('win','loss') AND settled_at >= datetime('now', ?)
+             AND ev IS NOT NULL AND (archived IS NULL OR archived = 0)`
+        : `SELECT sport, ev, stake, odds, result FROM tips
+           WHERE sport = ? AND result IN ('win','loss') AND settled_at >= datetime('now', ?)
+             AND ev IS NOT NULL AND (archived IS NULL OR archived = 0)`;
+      const rows = sportFilter === 'all'
+        ? db.prepare(sql).all(`-${days} days`)
+        : db.prepare(sql).all(sportFilter, `-${days} days`);
+      const bySport = {};
+      for (const r of rows) (bySport[r.sport] ||= []).push(r);
+      const thresholds = [0, 5, 10, 15, 20, 25, 30, 35, 40];
+      const perSport = [];
+      for (const sport in bySport) {
+        const tips = bySport[sport];
+        if (tips.length < 10) continue;
+        // Baseline: sem filtro adicional
+        let baseProfit = 0, baseStake = 0;
+        for (const t of tips) {
+          baseProfit += tipProfitReais(t, _bl.unit_value) || 0;
+          baseStake += tipStakeReais(t, _bl.unit_value);
+        }
+        const baseRoi = baseStake > 0 ? (baseProfit / baseStake * 100) : 0;
+        const grid = [];
+        let bestT = 0, bestScore = -Infinity;
+        for (const t of thresholds) {
+          let profit = 0, stake = 0, n = 0;
+          for (const tip of tips) {
+            if (Number(tip.ev) < t) continue;
+            const p = tipProfitReais(tip, _bl.unit_value);
+            if (p != null) profit += p;
+            stake += tipStakeReais(tip, _bl.unit_value);
+            n++;
+          }
+          const roi = stake > 0 ? (profit / stake * 100) : 0;
+          const score = n >= 5 ? roi * Math.log(Math.max(2, n)) : -Infinity;
+          grid.push({ threshold: t, n, roi_pct: +roi.toFixed(2), profit_reais: +profit.toFixed(2), score: Number.isFinite(score) ? +score.toFixed(2) : null });
+          if (score > bestScore) { bestScore = score; bestT = t; }
+        }
+        const best = grid.find(g => g.threshold === bestT);
+        const uplift = best ? +(best.roi_pct - baseRoi).toFixed(2) : 0;
+        perSport.push({
+          sport,
+          total_tips: tips.length,
+          baseline_roi_pct: +baseRoi.toFixed(2),
+          suggested_ev_min: bestT,
+          suggested_roi_pct: best?.roi_pct || 0,
+          suggested_n: best?.n || 0,
+          uplift_pp: uplift,
+          recommendation: uplift > 5 ? 'APPLY' : uplift > 2 ? 'REVIEW' : 'NOOP',
+          grid,
+        });
+      }
+      perSport.sort((a, b) => b.uplift_pp - a.uplift_pp);
+      sendJson(res, { ok: true, days, sports: perSport });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   // ══════════════ Autonomy Status — agrega os 5 loops num snapshot ══════════════
   // GET /autonomy-status  — retorna estado atual de cada loop por sport
   if (p === '/autonomy-status') {
