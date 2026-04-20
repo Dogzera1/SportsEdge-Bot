@@ -7689,6 +7689,52 @@ const server = http.createServer(async (req, res) => {
         const isVoided = stmts.isVoidedMatch.get(sport, String(matchId));
         if (isVoided) { sendJson(res, { ok: true, skipped: true, reason: 'voided_odds_wrong_match' }); return; }
 
+        // Time-of-day block: se hora UTC atual está marcada como bleeder (ROI persistentemente ruim),
+        // rejeita. Cache per-sport 1h pra evitar query por tip.
+        if (/^true$/i.test(String(process.env.TIME_OF_DAY_AUTO || ''))) {
+          try {
+            if (!global._timeOfDayBlockCache) global._timeOfDayBlockCache = {};
+            const cache = global._timeOfDayBlockCache;
+            const cacheKey = sport;
+            const now = Date.now();
+            if (!cache[cacheKey] || (now - cache[cacheKey].ts) > 60 * 60 * 1000) {
+              const _bl = getBaseline();
+              const days = 30;
+              const minN = parseInt(process.env.TIME_OF_DAY_MIN_N || '8', 10);
+              const roiMax = parseFloat(process.env.TIME_OF_DAY_ROI_MAX || '-25');
+              const rows = db.prepare(`
+                SELECT CAST(STRFTIME('%H', settled_at) AS INTEGER) AS hour,
+                       stake, odds, result
+                FROM tips
+                WHERE sport = ? AND result IN ('win','loss')
+                  AND settled_at >= datetime('now', '-30 days')
+                  AND (archived IS NULL OR archived = 0)
+              `).all(sport);
+              const byH = {};
+              for (const r of rows) {
+                const b = byH[r.hour] || (byH[r.hour] = { n: 0, profit: 0, stake: 0 });
+                b.n++;
+                const p = tipProfitReais(r, _bl.unit_value);
+                if (p != null) b.profit += p;
+                b.stake += tipStakeReais(r, _bl.unit_value);
+              }
+              const blocked = [];
+              for (const h in byH) {
+                const b = byH[h];
+                const roi = b.stake > 0 ? (b.profit / b.stake * 100) : null;
+                if (b.n >= minN && roi != null && roi <= roiMax) blocked.push(Number(h));
+              }
+              cache[cacheKey] = { ts: now, blocked };
+            }
+            const currentHourUtc = new Date().getUTCHours();
+            if (cache[cacheKey].blocked.includes(currentHourUtc)) {
+              log('WARN', 'TIME-OF-DAY', `${sport}: hora UTC ${currentHourUtc} bloqueada (ROI ruim 30d) — tip rejeitada`);
+              sendJson(res, { ok: true, skipped: true, reason: 'time_of_day_blocked', hour_utc: currentHourUtc });
+              return;
+            }
+          } catch (_) {}
+        }
+
         // League block: se liga está bloqueada (ROI bleed ou manual), rejeita.
         if (eventName) {
           const block = db.prepare(`
@@ -7887,6 +7933,7 @@ const server = http.createServer(async (req, res) => {
         SPORT_PERF_AUTO: /^true$/i.test(String(process.env.SPORT_PERF_AUTO || '')),
         NIGHTLY_RETRAIN_AUTO: /^true$/i.test(String(process.env.NIGHTLY_RETRAIN_AUTO || '')),
         AUTO_ROLLBACK_ON_REGRESSION: /^true$/i.test(String(process.env.AUTO_ROLLBACK_ON_REGRESSION || '')),
+        TIME_OF_DAY_AUTO: /^true$/i.test(String(process.env.TIME_OF_DAY_AUTO || '')),
       }, sports: [] };
       const activeBlocks = db.prepare(`SELECT sport, league, reason, blocked_at FROM league_blocks WHERE unblocked_at IS NULL`).all();
       const blocksBySport = {};
@@ -7953,6 +8000,28 @@ const server = http.createServer(async (req, res) => {
         else if (clvAvg <= -3) { clvMult = 0.0; clvReason = 'severe_negative'; }
         else if (clvAvg <= -1) { clvMult = 0.5; clvReason = 'negative'; }
         else if (clvAvg >= 2) { clvMult = 1.2; clvReason = 'positive'; }
+        // Loop 6: time-of-day blocks
+        const todMinN = parseInt(process.env.TIME_OF_DAY_MIN_N || '8', 10);
+        const todRoiMax = parseFloat(process.env.TIME_OF_DAY_ROI_MAX || '-25');
+        const todRows = db.prepare(`
+          SELECT CAST(STRFTIME('%H', settled_at) AS INTEGER) AS hour, stake, odds, result
+          FROM tips WHERE sport = ? AND result IN ('win','loss')
+            AND settled_at >= datetime('now', '-30 days') AND (archived IS NULL OR archived = 0)
+        `).all(sport);
+        const byH = {};
+        for (const r of todRows) {
+          const b = byH[r.hour] || (byH[r.hour] = { n: 0, profit: 0, stake: 0 });
+          b.n++;
+          const p = tipProfitReais(r, _bl.unit_value);
+          if (p != null) b.profit += p;
+          b.stake += tipStakeReais(r, _bl.unit_value);
+        }
+        const todBlocked = [];
+        for (const h in byH) {
+          const b = byH[h];
+          const roi = b.stake > 0 ? (b.profit / b.stake * 100) : null;
+          if (b.n >= todMinN && roi != null && roi <= todRoiMax) todBlocked.push(Number(h));
+        }
         out.sports.push({
           sport, n, roi_pct: roi, drawdown_pct: dd,
           bankroll: bk ? { initial: bk.initial_banca, current: bk.current_banca } : null,
@@ -7960,6 +8029,7 @@ const server = http.createServer(async (req, res) => {
           loop2_brier_ev: { reduction_pp: brierReduction, reason: brierReason, brier: brierCurrent, baseline: brierBaseline, n: brierN },
           loop3_league_blocks: blocksBySport[sport] || [],
           loop4_sport_perf: { mult: sportMult, reason: sportReason },
+          loop6_time_of_day: { blocked_hours_utc: todBlocked.sort((a,b) => a-b) },
         });
       }
       sendJson(res, out);
@@ -8938,6 +9008,57 @@ const server = http.createServer(async (req, res) => {
 
   // Heatmap horários: ROI por hora do dia (0..23).
   // GET /hourly-roi?sport=esports&days=30
+  // Time-of-day gate: retorna se a hora UTC atual está bloqueada por ROI ruim persistente.
+  // Regra: hora com ROI ≤ TIME_OF_DAY_ROI_MAX (default -25%) e n ≥ TIME_OF_DAY_MIN_N
+  // (default 8) em days window. Útil pra filtrar horários estruturalmente ruins
+  // (madrugada com match-fixing, sports de baixa cobertura etc).
+  // GET /time-of-day-mult?sport=X[&days=30][&hour=N]
+  if (p === '/time-of-day-mult') {
+    const sport = String(parsed.query.sport || '').trim().toLowerCase();
+    if (!sport) { sendJson(res, { ok: false, error: 'missing sport' }, 400); return; }
+    const daysRaw = parseInt(parsed.query.days);
+    const days = Number.isFinite(daysRaw) ? Math.max(14, Math.min(365, daysRaw)) : 30;
+    const minN = parseInt(process.env.TIME_OF_DAY_MIN_N || '8', 10);
+    const roiMax = parseFloat(process.env.TIME_OF_DAY_ROI_MAX || '-25');
+    const hourParam = parsed.query.hour != null ? parseInt(parsed.query.hour, 10) : null;
+    const currentHour = Number.isFinite(hourParam) ? hourParam : new Date().getUTCHours();
+    try {
+      const _bl = getBaseline();
+      const rows = db.prepare(`
+        SELECT CAST(STRFTIME('%H', settled_at) AS INTEGER) AS hour,
+               stake, odds, result
+        FROM tips
+        WHERE sport = ? AND result IN ('win','loss')
+          AND settled_at >= datetime('now', ?)
+          AND (archived IS NULL OR archived = 0)
+      `).all(sport, `-${days} days`);
+      const byHour = {};
+      for (const r of rows) {
+        const h = r.hour;
+        const b = byHour[h] || (byHour[h] = { hour: h, n: 0, profit: 0, stake: 0 });
+        b.n++;
+        const p = tipProfitReais(r, _bl.unit_value);
+        if (p != null) b.profit += p;
+        b.stake += tipStakeReais(r, _bl.unit_value);
+      }
+      const blockedHours = [];
+      for (const h in byHour) {
+        const b = byHour[h];
+        const roi = b.stake > 0 ? (b.profit / b.stake * 100) : null;
+        b.roi_pct = roi != null ? +roi.toFixed(2) : null;
+        if (b.n >= minN && roi != null && roi <= roiMax) blockedHours.push(b.hour);
+      }
+      const cur = byHour[currentHour] || { hour: currentHour, n: 0, roi_pct: null };
+      const blocked = blockedHours.includes(currentHour);
+      sendJson(res, {
+        ok: true, sport, days, current_hour_utc: currentHour,
+        blocked, blocked_hours: blockedHours.sort((a,b) => a-b),
+        current: cur, thresholds: { min_n: minN, roi_max: roiMax },
+      });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   if (p === '/hourly-roi') {
     const sport = parsed.query.sport || 'esports';
     const daysRaw = parseInt(parsed.query.days);
