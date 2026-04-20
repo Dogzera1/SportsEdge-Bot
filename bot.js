@@ -1366,7 +1366,7 @@ async function loadSubscribedUsers() {
 let autoAnalysisRunning = false;
 const AUTO_ANALYSIS_MUTEX_STALE_MS =
   (parseInt(process.env.AUTO_ANALYSIS_MUTEX_STALE_MIN || '15', 10) || 15) * 60 * 1000;
-const autoAnalysisMutex = { locked: false, since: 0 };
+const autoAnalysisMutex = { locked: false, since: 0, generation: 0 };
 
 function canonicalMatchId(sport, rawId, opts = {}) {
   const id = String(rawId || '').trim();
@@ -1469,8 +1469,10 @@ async function withAutoAnalysisMutex(fn) {
   if (autoAnalysisMutex.locked) {
     const age = now - autoAnalysisMutex.since;
     if (age > AUTO_ANALYSIS_MUTEX_STALE_MS) {
-      // Lock stale: provavelmente ficou preso por crash/exception — libera
-      log('WARN', 'AUTO', `Mutex stale (${Math.round(age / 60000)}min) — liberando lock forçado`);
+      // Lock stale: ciclo antigo ainda pode estar rodando (não dá pra cancelar Promise em JS).
+      // Bump generation pra que o `finally` do ciclo antigo vire no-op e não clobbere estado novo.
+      log('WARN', 'AUTO', `Mutex stale (${Math.round(age / 60000)}min) — liberando lock forçado (ciclo antigo continua em background)`);
+      autoAnalysisMutex.generation++;
       autoAnalysisMutex.locked = false;
     } else {
       log('INFO', 'AUTO', `Análise anterior ainda em curso (${Math.round(age / 1000)}s) — pulando ciclo`);
@@ -1478,15 +1480,20 @@ async function withAutoAnalysisMutex(fn) {
     }
   }
   // Adquire lock atomicamente (JS é single-threaded, então isso é seguro dentro do mesmo processo)
+  const myGen = ++autoAnalysisMutex.generation;
   autoAnalysisMutex.locked = true;
   autoAnalysisMutex.since = now;
   autoAnalysisRunning = true;
   try {
     return await fn();
   } finally {
-    autoAnalysisRunning = false;
-    autoAnalysisMutex.locked = false;
-    autoAnalysisMutex.since = 0;
+    // Só libera se esta chamada ainda é a "dona" do lock. Se outra chamada bumpou generation
+    // (stale takeover), o lock atual pertence a ela — não clobberar.
+    if (autoAnalysisMutex.generation === myGen) {
+      autoAnalysisRunning = false;
+      autoAnalysisMutex.locked = false;
+      autoAnalysisMutex.since = 0;
+    }
   }
 }
 
@@ -9202,17 +9209,25 @@ async function pollTennis(runOnce = false) {
               const markovSurface = /grass/i.test(surfaceForModel || surface) ? 'grass'
                 : /clay/i.test(surfaceForModel || surface) ? 'clay'
                 : /indoor/i.test(match.league || '') ? 'indoor' : 'hard';
-              // Fallback histórico pra cada side independentemente
+              // Fallback histórico pra cada side independentemente — cascata 3 níveis:
+              //   1) surface-specific (≥10 matches, 730d) — melhor precisão
+              //   2) surface-agnostic (≥5 matches, 730d) — pra lower-tier com menos dados
+              //   3) surface-agnostic extended (≥3 matches, 1460d) — challengers/ITF
               const { getPlayerServeProfile } = require('./lib/tennis-player-stats');
+              const makeSs = (p, srcLabel) => ({
+                firstServePct: p.firstInPct * 100,
+                firstServePointsPct: p.firstWonPct * 100,
+                secondServePointsPct: p.secondWonPct * 100,
+                _source: srcLabel,
+              });
               const buildFallback = (name) => {
-                const p = getPlayerServeProfile(db, name, { surface: markovSurface, sinceDays: 730, minMatches: 10 });
-                if (!p || p.firstInPct == null || p.firstWonPct == null || p.secondWonPct == null) return null;
-                return {
-                  firstServePct: p.firstInPct * 100,
-                  firstServePointsPct: p.firstWonPct * 100,
-                  secondServePointsPct: p.secondWonPct * 100,
-                  _source: `hist(n=${p.matches})`,
-                };
+                let p = getPlayerServeProfile(db, name, { surface: markovSurface, sinceDays: 730, minMatches: 10 });
+                if (p && p.firstInPct != null && p.firstWonPct != null && p.secondWonPct != null) return makeSs(p, `hist(n=${p.matches})`);
+                p = getPlayerServeProfile(db, name, { sinceDays: 730, minMatches: 5 });
+                if (p && p.firstInPct != null && p.firstWonPct != null && p.secondWonPct != null) return makeSs(p, `hist-any(n=${p.matches})`);
+                p = getPlayerServeProfile(db, name, { sinceDays: 1460, minMatches: 3 });
+                if (p && p.firstInPct != null && p.firstWonPct != null && p.secondWonPct != null) return makeSs(p, `hist-ext(n=${p.matches})`);
+                return null;
               };
               const ss1 = serveStats1 || buildFallback(match.team1);
               const ss2 = serveStats2 || buildFallback(match.team2);
