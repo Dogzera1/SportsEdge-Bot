@@ -3370,6 +3370,81 @@ async function runPostFixMonitorCycle() {
 // ── Model Calibration Watcher (semanal) ──
 let _lastModelCalibAlert = 0;
 
+// ── Path auto-guard: desativa em runtime hybrid/override path com CLV persistente negativo ──
+// Map sport → { hybridDisabled: bool, overrideDisabled: bool, reasonHybrid, reasonOverride, since }
+const _pathDisableRuntime = new Map();
+
+function isPathDisabled(sport, path) {
+  const e = _pathDisableRuntime.get(String(sport).toLowerCase());
+  if (!e) return false;
+  if (path === 'hybrid') return !!e.hybridDisabled;
+  if (path === 'override') return !!e.overrideDisabled;
+  return false;
+}
+
+async function runPathGuardCycle() {
+  // Desativa via env PATH_GUARD_AUTO=false. Min sample 20 em 14d. Cutoff CLV ≤ -1%.
+  if (/^(0|false|no)$/i.test(String(process.env.PATH_GUARD_AUTO || ''))) return;
+  const minN = parseInt(process.env.PATH_GUARD_MIN_N || '20', 10);
+  const cutoff = parseFloat(process.env.PATH_GUARD_CLV_CUTOFF || '-1.0');
+  const daysWin = parseInt(process.env.PATH_GUARD_DAYS || '14', 10);
+  try {
+    const rows = db.prepare(`
+      SELECT sport,
+        CASE
+          WHEN model_label LIKE '%+hybrid%' THEN 'hybrid'
+          WHEN model_label LIKE '%+override%' THEN 'override'
+          ELSE 'base'
+        END AS path,
+        COUNT(*) AS n,
+        AVG(CASE WHEN clv_odds > 1 AND odds > 1 THEN (odds/clv_odds - 1) * 100 END) AS avg_clv
+      FROM tips
+      WHERE sent_at >= datetime('now', '-${daysWin} days')
+        AND (archived IS NULL OR archived = 0)
+        AND COALESCE(is_shadow, 0) = 0
+        AND model_label IS NOT NULL
+        AND result IN ('win','loss')
+      GROUP BY sport, path
+    `).all();
+
+    const tokenForAlert = Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
+    const alerts = [];
+    const restored = [];
+    const evaluated = new Set();
+    for (const r of rows) {
+      if (r.path === 'base') continue;
+      evaluated.add(`${r.sport}|${r.path}`);
+      const key = String(r.sport).toLowerCase();
+      const curr = _pathDisableRuntime.get(key) || {};
+      const field = r.path === 'hybrid' ? 'hybridDisabled' : 'overrideDisabled';
+      const reasonField = r.path === 'hybrid' ? 'reasonHybrid' : 'reasonOverride';
+      if (r.n >= minN && r.avg_clv != null && r.avg_clv <= cutoff) {
+        if (!curr[field]) {
+          curr[field] = true;
+          curr[reasonField] = `CLV ${r.avg_clv.toFixed(2)}% n=${r.n} (${daysWin}d)`;
+          curr.since = Date.now();
+          _pathDisableRuntime.set(key, curr);
+          alerts.push(`🚫 ${r.sport}/${r.path} desativado: CLV ${r.avg_clv.toFixed(2)}% em ${r.n} tips`);
+          log('WARN', 'PATH-GUARD', `${r.sport}/${r.path} auto-disabled: CLV=${r.avg_clv.toFixed(2)}% n=${r.n}`);
+        }
+      } else if (curr[field] && r.n >= minN && r.avg_clv != null && r.avg_clv >= 0) {
+        curr[field] = false;
+        delete curr[reasonField];
+        _pathDisableRuntime.set(key, curr);
+        restored.push(`✅ ${r.sport}/${r.path} reativado: CLV ${r.avg_clv.toFixed(2)}%`);
+        log('INFO', 'PATH-GUARD', `${r.sport}/${r.path} reativado: CLV=${r.avg_clv.toFixed(2)}%`);
+      }
+    }
+    if ((alerts.length || restored.length) && tokenForAlert && ADMIN_IDS.size) {
+      const msg = `🛡️ *PATH GUARD — ${daysWin}d*\n\n${[...alerts, ...restored].join('\n')}\n\n_Cutoff: CLV ≤ ${cutoff}% n≥${minN}. Reativa em CLV ≥ 0% n≥${minN}._`;
+      for (const adminId of ADMIN_IDS) sendDM(tokenForAlert, adminId, msg).catch(() => {});
+    }
+    log('INFO', 'PATH-GUARD', `Ciclo OK — ${evaluated.size} buckets | ${alerts.length} disabled | ${restored.length} restored`);
+  } catch (e) {
+    log('WARN', 'PATH-GUARD', `falhou: ${e.message}`);
+  }
+}
+
 async function runModelCalibrationCycle() {
   if (!ADMIN_IDS.size) return;
   let result = null;
@@ -5806,6 +5881,45 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
       await send(token, chatId, txt);
     } catch(e) { await send(token, chatId, `❌ ${e.message}`); }
 
+  } else if (cmd === '/path-guard' || cmd === '/paths') {
+    if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
+    const parts3 = command.trim().split(/\s+/);
+    const sub = (parts3[1] || '').toLowerCase();
+    if (sub === 'reset' || sub === 'enable') {
+      const sportArg = (parts3[2] || '').toLowerCase();
+      if (sportArg && _pathDisableRuntime.has(sportArg)) {
+        _pathDisableRuntime.delete(sportArg);
+        await send(token, chatId, `✅ Path guard resetado para *${sportArg}*`);
+      } else if (!sportArg) {
+        _pathDisableRuntime.clear();
+        await send(token, chatId, `✅ Path guard resetado (todos sports)`);
+      } else {
+        await send(token, chatId, `ℹ️ ${sportArg} não tinha path desativado.`);
+      }
+      return;
+    }
+    if (sub === 'run') {
+      await send(token, chatId, `🔄 Rodando path guard...`);
+      await runPathGuardCycle();
+      await send(token, chatId, `✅ Ciclo concluído. Envie /path-guard pra ver estado.`);
+      return;
+    }
+    // Default: show current state
+    if (_pathDisableRuntime.size === 0) {
+      await send(token, chatId, `🛡️ *PATH GUARD*\n\n_Nenhum path desativado. Todos ativos._\n\nComandos:\n• /path-guard run — força ciclo\n• /path-guard reset [sport] — reativa manual`);
+      return;
+    }
+    let txt = `🛡️ *PATH GUARD*\n\n`;
+    for (const [sport, e] of _pathDisableRuntime.entries()) {
+      txt += `*${sport.toUpperCase()}*\n`;
+      if (e.hybridDisabled) txt += `🚫 hybrid: ${e.reasonHybrid || '-'}\n`;
+      if (e.overrideDisabled) txt += `🚫 override: ${e.reasonOverride || '-'}\n`;
+      const ageH = e.since ? Math.round((Date.now() - e.since) / 3600000) : 0;
+      txt += `_há ${ageH}h_\n\n`;
+    }
+    txt += `Comandos:\n• /path-guard run — força ciclo\n• /path-guard reset [sport] — reativa manual`;
+    await send(token, chatId, txt);
+
   } else if (cmd === '/hybrid-stats' || cmd === '/hybrid') {
     if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
     try {
@@ -6946,7 +7060,8 @@ async function poll(token, sport) {
                      text.startsWith('/slugs') || text.startsWith('/lolraw') ||
                      text.startsWith('/health') || text.startsWith('/debug') ||
                      text.startsWith('/shadow') || text.startsWith('/market-tips') ||
-                     text.startsWith('/models') || text.startsWith('/hybrid') || text.startsWith('/val-') ||
+                     text.startsWith('/models') || text.startsWith('/hybrid') ||
+                     text.startsWith('/path-guard') || text.startsWith('/paths') || text.startsWith('/val-') ||
                      text.startsWith('/rejections') || text.startsWith('/sync-val-') ||
                      text.startsWith('/sync-history') || text.startsWith('/pipeline') ||
                      text.startsWith('/unsettled') || text.startsWith('/settle-debug') ||
@@ -8722,7 +8837,7 @@ async function pollMma(runOnce = false) {
         // emite tip direta sem IA (IA fica como sanity check opcional). Contorna gate confidence≥7
         // da IA quando o modelo já tem sinal robusto.
         let _mmaHybridTip = null;
-        if (_mmaTrainedPrediction && _mmaTrainedPrediction.confidence >= 0.55) {
+        if (_mmaTrainedPrediction && _mmaTrainedPrediction.confidence >= 0.55 && !isPathDisabled('mma', 'hybrid')) {
           const pickP1 = mlResultMma.modelP1 > mlResultMma.modelP2;
           const pickP = pickP1 ? mlResultMma.modelP1 : mlResultMma.modelP2;
           const pickImp = pickP1 ? mlResultMma.impliedP1 : mlResultMma.impliedP2;
@@ -8912,7 +9027,7 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
         // Foca em fights SEM ESPN (onde IA sempre SEM_EDGE) — usa mlResultMma direto.
         let _mmaFromOverride = false;
         if (!tipMatch) {
-          const _advisoryOn = !/^(0|false|no)$/i.test(String(process.env.MMA_IA_ADVISORY || ''));
+          const _advisoryOn = !/^(0|false|no)$/i.test(String(process.env.MMA_IA_ADVISORY || '')) && !isPathDisabled('mma', 'override');
           const _minFactors = parseInt(process.env.MMA_IA_OVERRIDE_MIN_FACTORS || '1', 10);
           const _minEdgePp = parseFloat(process.env.MMA_IA_OVERRIDE_MIN_EDGE_PP || '8');
           const pickP1Mma = mlResultMma.modelP1 > mlResultMma.modelP2;
@@ -9872,7 +9987,7 @@ Máximo 200 palavras. Raciocínio breve antes da decisão.`;
         let _tennisHybridText = null;
         const _tennisIsTrained = /trained/i.test(String(mlResultTennis.method || '')) ||
           mlResultTennis._tennisModelMeta?.method === 'trained';
-        if (_tennisIsTrained && (mlResultTennis.confidence ?? 0) >= 0.65) {
+        if (_tennisIsTrained && (mlResultTennis.confidence ?? 0) >= 0.65 && !isPathDisabled('tennis', 'hybrid')) {
           const _impPairH = _impliedFromOdds(o);
           if (_impPairH) {
             const pickP1Tn = mlResultTennis.modelP1 > mlResultTennis.modelP2;
@@ -9962,7 +10077,7 @@ Máximo 200 palavras. Raciocínio breve antes da decisão.`;
         // Pinnacle (sharper market). Desabilita via TENNIS_IA_ADVISORY=false.
         let _tennisFromOverride = false;
         if (!tipMatch2) {
-          const _advisoryOn = !/^(0|false|no)$/i.test(String(process.env.TENNIS_IA_ADVISORY || ''));
+          const _advisoryOn = !/^(0|false|no)$/i.test(String(process.env.TENNIS_IA_ADVISORY || '')) && !isPathDisabled('tennis', 'override');
           const _minConf = parseFloat(process.env.TENNIS_IA_OVERRIDE_MIN_CONF || '0.50');
           const _minEdgePp = parseFloat(process.env.TENNIS_IA_OVERRIDE_MIN_EDGE_PP || '5');
           const _isTrained = /trained/i.test(String(mlResultTennis.method || ''));
@@ -10580,7 +10695,7 @@ Máximo 200 palavras.`;
         let _fbHybridText = null;
         const _fbMinConf = parseFloat(process.env.FB_HYBRID_MIN_CONF || '0.60');
         const _fbMinEv = parseFloat(process.env.FB_HYBRID_MIN_EV || '8');
-        if (fbTrained && (fbModel?.confidence ?? 0) >= _fbMinConf && parseFloat(mlScore?.bestEv ?? 0) >= _fbMinEv) {
+        if (fbTrained && (fbModel?.confidence ?? 0) >= _fbMinConf && parseFloat(mlScore?.bestEv ?? 0) >= _fbMinEv && !isPathDisabled('football', 'hybrid')) {
           const dir = mlScore.direction; // 1X2_H | 1X2_D | 1X2_A | OVER_2.5 | UNDER_2.5
           const seleção = dir === '1X2_H' ? match.team1
             : dir === '1X2_A' ? match.team2
@@ -10632,7 +10747,7 @@ Máximo 200 palavras.`;
         let _fbFromOverride = false;
         let tipMatchEff = tipMatch;
         if (!tipMatchEff) {
-          const _advisoryOn = !/^(0|false|no)$/i.test(String(process.env.FB_IA_ADVISORY || ''));
+          const _advisoryOn = !/^(0|false|no)$/i.test(String(process.env.FB_IA_ADVISORY || '')) && !isPathDisabled('football', 'override');
           const _minConf = parseFloat(process.env.FB_IA_OVERRIDE_MIN_CONF || '0.45');
           const _minEv = parseFloat(process.env.FB_IA_OVERRIDE_MIN_EV || '5');
           const canOverride = _advisoryOn && fbTrained &&
@@ -11371,7 +11486,7 @@ async function pollCs(runOnce = false) {
         // Threshold conservador: conf ≥ 0.60 + edge ≥ 8pp vs implied (Pinnacle CS é sharp,
         // conf 0.60 + 8pp é signal genuíno, não noise).
         let _csHybridBypass = false;
-        if (_csTrainedPrediction && _csTrainedPrediction.confidence >= 0.60) {
+        if (_csTrainedPrediction && _csTrainedPrediction.confidence >= 0.60 && !isPathDisabled('cs', 'hybrid')) {
           const minEdge = parseFloat(process.env.CS_HYBRID_MIN_EDGE_PP || '8');
           const edgePp = (pickP - pickImpliedP) * 100;
           if (edgePp >= minEdge) {
@@ -11435,7 +11550,7 @@ Máximo 150 palavras.`;
           // Telemetria: log [CS-IA-OVERRIDE]. CLV rolling vai filtrar se tips ruins.
           // Desabilita via CS_IA_ADVISORY=false.
           if (_iaSaidNo || _iaNoTip) {
-            const _advisoryOn = !/^(0|false|no)$/i.test(String(process.env.CS_IA_ADVISORY || ''));
+            const _advisoryOn = !/^(0|false|no)$/i.test(String(process.env.CS_IA_ADVISORY || '')) && !isPathDisabled('cs', 'override');
             const _modelMinConf = parseFloat(process.env.CS_IA_OVERRIDE_MIN_CONF || '0.45');
             const _modelMinEdgePp = parseFloat(process.env.CS_IA_OVERRIDE_MIN_EDGE_PP || '5');
             const _trainedOk = _csTrainedPrediction && _csTrainedPrediction.confidence >= _modelMinConf;
@@ -12951,6 +13066,8 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
 
   // Model Calibration Watcher: cron 1x/semana (segunda 7h UTC = 4h BRT).
   setInterval(() => runModelCalibrationCycle().catch(e => log('ERROR', 'MODEL-CALIB', e.message)), 24 * 60 * 60 * 1000);
+  setInterval(() => runPathGuardCycle().catch(e => log('ERROR', 'PATH-GUARD', e.message)), 6 * 60 * 60 * 1000);
+  setTimeout(() => runPathGuardCycle().catch(() => {}), 30 * 60 * 1000);
   setTimeout(() => runModelCalibrationCycle().catch(() => {}), 60 * 60 * 1000); // 1h pós-boot
 
   // Backtest Validator: cron 1x/dia, valida modelo via gates retroativos.
