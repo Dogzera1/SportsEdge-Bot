@@ -7975,6 +7975,106 @@ const server = http.createServer(async (req, res) => {
   }
 
   // GET /dynamic-thresholds — lista valores ativos
+  // Train football Poisson params per-league + per-team. Usa match_results (filtrado
+  // pelas target leagues) pra aprender:
+  //   - home_advantage do sport (goals diff)
+  //   - league_avg_home_goals, league_avg_away_goals
+  //   - per team: attack_strength (home/away), defense_weakness (home/away)
+  //
+  // Output: /data/football-poisson-params.json (no volume persistente).
+  // Leagues default: Brazil Serie A, Scandinavian, Ekstraklasa, J1, MLS (target = edge).
+  //
+  // POST /admin/train-football-poisson?min_games=5&years_back=3
+  if (p === '/admin/train-football-poisson' && req.method === 'POST') {
+    if (!requireAdmin(req, res)) return;
+    const minGames = parseInt(parsed.query.min_games || '5', 10);
+    const yearsBack = parseInt(parsed.query.years_back || '3', 10);
+    const targetLeaguesEnv = process.env.FOOTBALL_TARGET_LEAGUES || 'Brazil,Sweden,Norway,Finland,Denmark,Poland,Japan,USA';
+    const targetPatterns = targetLeaguesEnv.split(',').map(s => s.trim()).filter(Boolean);
+    const leagueMatches = (l) => targetPatterns.some(p => String(l || '').toLowerCase().includes(p.toLowerCase()));
+    const since = new Date(); since.setFullYear(since.getFullYear() - yearsBack);
+    const sinceStr = since.toISOString().slice(0, 10);
+    try {
+      const rows = db.prepare(`
+        SELECT team1, team2, winner, final_score, league, resolved_at
+        FROM match_results
+        WHERE game = 'football' AND resolved_at >= ?
+        ORDER BY resolved_at ASC
+      `).all(sinceStr);
+      const filtered = rows.filter(r => leagueMatches(r.league));
+      if (!filtered.length) { sendJson(res, { ok: false, error: 'no_matches', target_leagues: targetPatterns }, 400); return; }
+      // Per-league aggregates
+      const byLeague = {};
+      for (const r of filtered) {
+        const [hg, ag] = String(r.final_score || '').split('-').map(n => parseInt(n));
+        if (!Number.isFinite(hg) || !Number.isFinite(ag)) continue;
+        const L = byLeague[r.league] || (byLeague[r.league] = { n: 0, home_wins: 0, draws: 0, away_wins: 0, hg_sum: 0, ag_sum: 0 });
+        L.n++; L.hg_sum += hg; L.ag_sum += ag;
+        if (hg > ag) L.home_wins++;
+        else if (hg < ag) L.away_wins++;
+        else L.draws++;
+      }
+      const leagueParams = {};
+      for (const L in byLeague) {
+        const a = byLeague[L];
+        leagueParams[L] = {
+          n: a.n,
+          avg_home_goals: +(a.hg_sum / a.n).toFixed(4),
+          avg_away_goals: +(a.ag_sum / a.n).toFixed(4),
+          home_win_rate: +(a.home_wins / a.n).toFixed(4),
+          draw_rate: +(a.draws / a.n).toFixed(4),
+          away_win_rate: +(a.away_wins / a.n).toFixed(4),
+        };
+      }
+      // Per-team attack/defense per role (home/away)
+      const teamStats = {};
+      const ensureTeam = (t) => teamStats[t] || (teamStats[t] = { home: { g: 0, gf: 0, ga: 0 }, away: { g: 0, gf: 0, ga: 0 }, leagues: new Set() });
+      for (const r of filtered) {
+        const [hg, ag] = String(r.final_score || '').split('-').map(n => parseInt(n));
+        if (!Number.isFinite(hg) || !Number.isFinite(ag)) continue;
+        const t1 = ensureTeam(r.team1); const t2 = ensureTeam(r.team2);
+        t1.home.g++; t1.home.gf += hg; t1.home.ga += ag; t1.leagues.add(r.league);
+        t2.away.g++; t2.away.gf += ag; t2.away.ga += hg; t2.leagues.add(r.league);
+      }
+      const teamParams = {};
+      let qualifiedTeams = 0;
+      for (const t in teamStats) {
+        const s = teamStats[t];
+        const totalG = s.home.g + s.away.g;
+        if (totalG < minGames) continue;
+        const primaryLeague = Array.from(s.leagues)[0];
+        const lp = leagueParams[primaryLeague];
+        if (!lp) continue;
+        const leagueHomeAvg = lp.avg_home_goals || 1.4;
+        const leagueAwayAvg = lp.avg_away_goals || 1.1;
+        teamParams[t] = {
+          primary_league: primaryLeague,
+          home_games: s.home.g, away_games: s.away.g,
+          attack_home: s.home.g > 0 ? +(s.home.gf / s.home.g / leagueHomeAvg).toFixed(4) : 1.0,
+          defense_home: s.home.g > 0 ? +(s.home.ga / s.home.g / leagueAwayAvg).toFixed(4) : 1.0,
+          attack_away: s.away.g > 0 ? +(s.away.gf / s.away.g / leagueAwayAvg).toFixed(4) : 1.0,
+          defense_away: s.away.g > 0 ? +(s.away.ga / s.away.g / leagueHomeAvg).toFixed(4) : 1.0,
+        };
+        qualifiedTeams++;
+      }
+      const output = {
+        trainedAt: new Date().toISOString(),
+        yearsBack, minGames, targetPatterns,
+        totalMatches: filtered.length,
+        leagues: leagueParams,
+        teams: teamParams,
+        teamsCount: qualifiedTeams,
+      };
+      const fs = require('fs');
+      const path = require('path');
+      const outPath = path.join(path.dirname(DB_PATH), 'football-poisson-params.json');
+      fs.writeFileSync(outPath, JSON.stringify(output, null, 2));
+      log('INFO', 'FOOTBALL-TRAIN', `Poisson params: ${Object.keys(leagueParams).length} leagues, ${qualifiedTeams} teams, ${filtered.length} matches → ${outPath}`);
+      sendJson(res, { ok: true, ...output, path: outPath, leaguesCount: Object.keys(leagueParams).length });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   // Seed football secundária. Baixa CSV de football-data.co.uk (ou URL custom),
   // parseia (Date,HomeTeam,AwayTeam,FTHG,FTAG,FTR,...) e upserta em match_results.
   // POST /admin/seed-football-secondary?url=...&league=...&source=fd|fdnew|custom
