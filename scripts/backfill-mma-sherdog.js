@@ -4,12 +4,20 @@
 // model / elo map tenham dados desses fighters.
 //
 // Uso:
-//   node scripts/backfill-mma-sherdog.js --names="Victor Valenzuela,Juan Martinetti,..."
-//   node scripts/backfill-mma-sherdog.js --from-coverage --server=https://your-app.railway.app
-//   node scripts/backfill-mma-sherdog.js --name="Gina Carano" --verbose
+//   node scripts/backfill-mma-sherdog.js --urls="https://sherdog.com/fighter/Gina-Carano-44,..."
+//   node scripts/backfill-mma-sherdog.js --url="https://sherdog.com/fighter/Gina-Carano-44"
 //
-// Idempotente: dedup por (winner, loser, resolved_at normalizado).
-// Rate-limit: 2s entre fighters (sherdog é anti-scrape friendly mas respeitoso).
+// IMPORTANTE: Sherdog fightfinder search NÃO funciona confiável (retorna fighters aleatórios).
+// Tapology search bloqueia scraping (Cloudflare 403). Por isso este script exige URLs diretas
+// Sherdog (fighter slug), que são estáveis e parseáveis.
+//
+// Fluxo recomendado:
+//   1. Rodar mma-coverage-report → ver quais fighters faltam
+//   2. Achar URLs Sherdog manualmente (search no Google "site:sherdog.com fighter NAME")
+//   3. Passar URLs pra este script via --urls
+//
+// Idempotente: dedup por match_id determinístico.
+// Rate-limit: 2s entre fighters.
 
 const path = require('path');
 const Database = require('better-sqlite3');
@@ -118,6 +126,50 @@ function parseFightHistory(html, fighterName) {
   return fights;
 }
 
+function nameFromSherdogUrl(url) {
+  const m = String(url).match(/\/fighter\/([^/?#]+)/);
+  if (!m) return null;
+  return m[1].replace(/-\d+$/, '').replace(/-/g, ' ');
+}
+
+async function processUrls(db, urls) {
+  const insertStmt = db.prepare(`
+    INSERT OR IGNORE INTO match_results
+      (match_id, game, team1, team2, winner, league, resolved_at)
+    VALUES (?, 'mma', ?, ?, ?, ?, ?)
+  `);
+  const stats = { fighters: 0, rows_inserted: 0, failed: [], parsed: [] };
+  for (const url of urls) {
+    stats.fighters++;
+    const name = nameFromSherdogUrl(url);
+    if (!name) { stats.failed.push({ url, reason: 'cant parse name from URL' }); continue; }
+    log(`[${stats.fighters}/${urls.length}] ${name} (${url})`);
+    const r = await httpGet(url).catch(() => null);
+    if (!r || r.status !== 200) { stats.failed.push({ name, reason: `http ${r?.status}` }); continue; }
+    const fights = parseFightHistory(r.body, name);
+    if (!fights.length) { stats.failed.push({ name, reason: 'no fight history parsed' }); continue; }
+    log(`  → ${fights.length} fights parsed`);
+    stats.parsed.push({ name, fights: fights.length });
+    let inserted = 0;
+    for (const f of fights) {
+      if (f.result !== 'win' && f.result !== 'loss') continue;
+      const winner = f.result === 'win' ? name : f.opponent;
+      const resolvedAt = `${f.date}T00:00:00.000Z`;
+      const norm = s => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+      const [a, b] = [norm(name), norm(f.opponent)].sort();
+      const matchId = `sherdog_mma_${a}_${b}_${f.date}`;
+      if (dryRun) { inserted++; continue; }
+      try {
+        const info = insertStmt.run(matchId, name, f.opponent, winner, f.event, resolvedAt);
+        if (info.changes > 0) inserted++;
+      } catch (e) { log(`  ! insert failed: ${e.message}`); }
+    }
+    stats.rows_inserted += inserted;
+    await new Promise(r => setTimeout(r, 2000));
+  }
+  return stats;
+}
+
 async function processNames(db, names) {
   const insertStmt = db.prepare(`
     INSERT OR IGNORE INTO match_results
@@ -158,47 +210,23 @@ async function processNames(db, names) {
   return stats;
 }
 
-async function resolveNames() {
-  if (argv.name) return [String(argv.name)];
-  if (argv.names) return String(argv.names).split(',').map(s => s.trim()).filter(Boolean);
-  if (argv['from-coverage']) {
-    if (!serverUrl) {
-      console.error('--from-coverage requer --server=URL');
-      process.exit(1);
-    }
-    try {
-      const matches = await fetchJson(serverUrl.replace(/\/+$/, '') + '/mma-matches');
-      if (!Array.isArray(matches)) throw new Error('invalid /mma-matches response');
-      // Filtra apenas MMA (não Boxing) e pega fighters que faltam no elo
-      const mmaFighters = new Set();
-      for (const m of matches) {
-        const isMma = (m.game === 'mma') || (m.league === 'MMA') || !/box/i.test(m.league || '');
-        if (!isMma) continue;
-        if (m.team1) mmaFighters.add(m.team1);
-        if (m.team2) mmaFighters.add(m.team2);
-      }
-      return [...mmaFighters];
-    } catch (e) {
-      console.error(`fetch failed: ${e.message}`);
-      process.exit(1);
-    }
-  }
-  console.error('Especifique --name, --names ou --from-coverage --server=URL');
-  process.exit(1);
-}
-
 (async () => {
-  const names = await resolveNames();
-  if (!names.length) { console.error('nenhum fighter'); process.exit(0); }
+  const urls = argv.url ? [String(argv.url)]
+    : argv.urls ? String(argv.urls).split(',').map(s => s.trim()).filter(Boolean)
+    : [];
+  if (!urls.length) {
+    console.error('Especifique --url=<sherdog_url> ou --urls="url1,url2,..."');
+    console.error('Sherdog search quebrado; use URLs diretas (slug).');
+    process.exit(1);
+  }
 
   const dbPath = path.join(__dirname, '..', process.env.DB_PATH || 'sportsedge.db');
   const db = new Database(dbPath);
-  console.error(`[backfill-mma] db=${dbPath} | fighters=${names.length} | dry_run=${dryRun}`);
+  console.error(`[backfill-mma] db=${dbPath} | urls=${urls.length} | dry_run=${dryRun}`);
 
-  // Garante tabela exists
   const tab = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='match_results'`).get();
-  if (!tab) { console.error('match_results table não existe nesta db'); process.exit(1); }
+  if (!tab) { console.error('match_results table não existe'); process.exit(1); }
 
-  const stats = await processNames(db, names);
+  const stats = await processUrls(db, urls);
   console.log(JSON.stringify(stats, null, 2));
 })();
