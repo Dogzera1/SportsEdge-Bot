@@ -10439,7 +10439,9 @@ Máximo 200 palavras.`;
         }
 
         const text = resp?.content?.map(b => b.text || '').join('') || '';
-        const tipMatch = text.match(/TIP_FB:([\w_.]+):([^@]+)@([\d.]+)\|EV:([+-]?[\d.]+)\|STAKE:([\d.]+)u?\|CONF:(ALTA|MÉDIA|BAIXA)/i);
+        // Regex tolera campo |P:<num>| opcional entre EV e STAKE (prompt inclui P:, mas
+        // versões antigas do formato omitiam; aceita ambos).
+        const tipMatch = text.match(/TIP_FB:([\w_.]+):([^@]+)@([\d.]+)\|EV:([+-]?[\d.]+)(?:%?\|P:[\d.]+%?)?\|STAKE:([\d.]+)u?\|CONF:(ALTA|MÉDIA|BAIXA)/i);
 
         if (!tipMatch) {
           log('INFO', 'AUTO-FOOTBALL', `Sem tip: ${match.team1} vs ${match.team2}`);
