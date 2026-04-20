@@ -261,7 +261,14 @@
       "Bash(git fetch *)",
       "Bash(git commit -m 'align /equity-curve recompute with /overall-summary \\(single unit_value source\\) *)",
       "Bash(git commit -m 'equity-curve: include pre-window profit in opening balance *)",
-      "Bash(git commit -m 'feat: CLV→Kelly feedback loop \\(esports upcoming MVP\\) *)"
+      "Bash(git commit -m 'feat: CLV→Kelly feedback loop \\(esports upcoming MVP\\) *)",
+      "Bash(git commit -m 'feat: expand CLV→Kelly loop to LoL live, CS, tennis, valorant, darts *)",
+      "Bash(git commit -m 'feat: Loop #2 Brier → EV cap dinâmico *)",
+      "Bash(git commit -m 'feat\\(A\\): auto-disable league on ROI bleed \\(detector → action\\) *)",
+      "Bash(git commit -m 'feat\\(B\\): sport-level dynamic stake multiplier \\(auto-rebalance\\) *)",
+      "Bash(git commit -m 'feat\\(C\\): nightly retrain automático *)",
+      "Bash(git commit -m 'feat: /autonomy-status — snapshot agregado dos 5 loops *)",
+      "Bash(git commit -m 'chore: lower default min_n for phase-appropriate activation *)"
     ]
   }
 }
