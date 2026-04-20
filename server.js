@@ -8473,6 +8473,61 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // Brier → EV cap feedback loop. Calcula Brier realizado 30d por sport, compara
+  // com baseline e sugere redução/acréscimo no EV_SANITY_MAX. Bot refresh-cacheia e
+  // `evCeilingFor()` subtrai a redução antes do gate. Default OFF (BRIER_AUTO_EV_CAP).
+  //
+  // Regra:
+  //   delta = brier_current − brier_baseline
+  //   delta ≥ +0.05 → -20pp (modelo muito over-confident)
+  //   delta ≥ +0.03 → -10pp
+  //   delta ≤ -0.02 → +5pp (modelo calibrado bem)
+  //
+  // GET /brier-ev-adjustment?sport=X[&days=30]
+  if (p === '/brier-ev-adjustment') {
+    const sport = String(parsed.query.sport || '').trim().toLowerCase();
+    if (!sport) { sendJson(res, { ok: false, error: 'missing sport' }, 400); return; }
+    const daysRaw = parseInt(parsed.query.days);
+    const days = Number.isFinite(daysRaw) ? Math.max(7, Math.min(365, daysRaw)) : 30;
+    const minN = parseInt(process.env.BRIER_EV_MIN_N || '30', 10);
+    const baselineByDefault = { lol: 0.22, esports: 0.22, cs: 0.22, valorant: 0.23, tennis: 0.21, mma: 0.23, darts: 0.24, snooker: 0.24 };
+    const envKey = `BRIER_BASELINE_${sport.toUpperCase()}`;
+    const baseline = parseFloat(process.env[envKey]) || baselineByDefault[sport] || 0.25;
+    try {
+      const rows = db.prepare(`
+        SELECT model_p_pick, result
+        FROM tips
+        WHERE sport = ?
+          AND model_p_pick IS NOT NULL AND model_p_pick > 0 AND model_p_pick < 1
+          AND result IN ('win','loss')
+          AND settled_at >= datetime('now', ?)
+          AND (archived IS NULL OR archived = 0)
+      `).all(sport, `-${days} days`);
+      const n = rows.length;
+      let brier = null, reduction = 0, reason = 'insufficient_sample';
+      if (n >= minN) {
+        let sum = 0;
+        for (const r of rows) {
+          const p = Number(r.model_p_pick);
+          const actual = r.result === 'win' ? 1 : 0;
+          sum += (p - actual) ** 2;
+        }
+        brier = +(sum / n).toFixed(4);
+        const delta = brier - baseline;
+        if (delta >= 0.05) { reduction = 20; reason = 'brier_severely_degraded'; }
+        else if (delta >= 0.03) { reduction = 10; reason = 'brier_degraded'; }
+        else if (delta <= -0.02) { reduction = -5; reason = 'brier_calibrated'; }
+        else { reason = 'brier_normal'; }
+      }
+      sendJson(res, {
+        ok: true, sport, days, n, min_n: minN,
+        brier, baseline, delta: brier != null ? +(brier - baseline).toFixed(4) : null,
+        ev_cap_reduction_pp: reduction, reason,
+      });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   // CLV → Kelly feedback loop. Ajusta o tamanho do stake baseado no CLV realizado
   // das últimas 30d (por sport + liga opcional). Retorna multiplicador que o bot
   // aplica em cima da Kelly fraction antes de calcular stake final.

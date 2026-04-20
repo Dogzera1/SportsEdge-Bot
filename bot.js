@@ -40,20 +40,54 @@ const { buildTrainedContext: buildEsportsTrainedContext } = require('./lib/espor
 // Com modelo treinado ativo + ECE baixa (<0.03), EVs altos (50-80%) são
 // genuínos com mais frequência. Sem trained, mantém 50%.
 // Guardrail: odds baixas (<1.4) ainda limitadas a 40% (proteção anti-tip-em-favorito-forte).
-function evCeilingFor(game, odds) {
-  const oddsNum = parseFloat(odds);
-  if (Number.isFinite(oddsNum) && oddsNum > 0 && oddsNum < 1.40) return 40;
-  // Esports com modelo treinado forte (Brier ≤ baseline-5%)
-  const strongTrained = new Set(['lol', 'cs2']);
-  if (strongTrained.has(game) && hasTrainedEsportsModel(game)) return 80;
-  // Tennis: modelo treinado forte + ECE 0.026
-  if (game === 'tennis') {
+// Cache do ajuste Brier → EV cap. Refreshed por refreshBrierEvAdjustments().
+// Key: sport-key (lol/cs/tennis/valorant/mma/darts/snooker/esports). Value: pp de redução.
+const _brierEvAdjCache = new Map();
+
+function _brierEvAdjustmentFor(game) {
+  if (!/^true$/i.test(String(process.env.BRIER_AUTO_EV_CAP || ''))) return 0;
+  const g = String(game || '').toLowerCase();
+  // 'lol' e 'cs2' → bucket 'esports'/'cs' respectivamente no tips table
+  const key = g === 'cs2' ? 'cs' : (g === 'lol' ? 'esports' : g);
+  return Number(_brierEvAdjCache.get(key)) || 0;
+}
+
+async function refreshBrierEvAdjustments() {
+  if (!/^true$/i.test(String(process.env.BRIER_AUTO_EV_CAP || ''))) return;
+  const sports = ['esports', 'cs', 'valorant', 'tennis', 'mma', 'darts', 'snooker'];
+  for (const sport of sports) {
     try {
-      const { hasTrainedModel: hasTennis } = require('./lib/tennis-model-trained');
-      if (hasTennis()) return 80;
+      const r = await serverGet(`/brier-ev-adjustment?sport=${sport}`);
+      if (r?.ok && Number.isFinite(r.ev_cap_reduction_pp)) {
+        const prev = _brierEvAdjCache.get(sport) || 0;
+        _brierEvAdjCache.set(sport, r.ev_cap_reduction_pp);
+        if (prev !== r.ev_cap_reduction_pp) {
+          log('INFO', 'BRIER-EV', `${sport}: EV cap adj ${prev >= 0 ? '+' : ''}${prev}pp → ${r.ev_cap_reduction_pp >= 0 ? '+' : ''}${r.ev_cap_reduction_pp}pp (brier=${r.brier}, baseline=${r.baseline}, reason=${r.reason})`);
+        }
+      }
     } catch (_) {}
   }
-  return 50;
+}
+
+function evCeilingFor(game, odds) {
+  const oddsNum = parseFloat(odds);
+  let base;
+  if (Number.isFinite(oddsNum) && oddsNum > 0 && oddsNum < 1.40) base = 40;
+  else {
+    // Esports com modelo treinado forte (Brier ≤ baseline-5%)
+    const strongTrained = new Set(['lol', 'cs2']);
+    if (strongTrained.has(game) && hasTrainedEsportsModel(game)) base = 80;
+    else if (game === 'tennis') {
+      let ok = false;
+      try {
+        const { hasTrainedModel: hasTennis } = require('./lib/tennis-model-trained');
+        ok = hasTennis();
+      } catch (_) {}
+      base = ok ? 80 : 50;
+    } else base = 50;
+  }
+  const adj = _brierEvAdjustmentFor(game);
+  return Math.max(20, base - adj);
 }
 
 // ── Dota hero meta lookup (dota_hero_stats populado via sync-opendota-heroes) ──
@@ -12134,6 +12168,10 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   // Bankroll Guardian: cron 1h, alerta drawdown alto + auto-shadow temporário.
   setInterval(() => runBankrollGuardianCycle().catch(e => log('ERROR', 'BANKROLL-GUARDIAN', e.message)), 60 * 60 * 1000);
   setTimeout(() => runBankrollGuardianCycle().catch(() => {}), 10 * 60 * 1000); // primeiro check 10min pós-boot
+
+  // Brier → EV cap: refresh de 15min do cache que alimenta evCeilingFor().
+  setInterval(() => refreshBrierEvAdjustments().catch(e => log('ERROR', 'BRIER-EV', e.message)), 15 * 60 * 1000);
+  setTimeout(() => refreshBrierEvAdjustments().catch(() => {}), 3 * 60 * 1000); // primeiro refresh 3min pós-boot
 
   // Pre-Match Final Check: cron 5min, valida tips a <30min do match.
   setInterval(() => runPreMatchFinalCheckCycle().catch(e => log('ERROR', 'PRE-MATCH-CHECK', e.message)), 5 * 60 * 1000);
