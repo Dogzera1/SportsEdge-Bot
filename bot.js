@@ -12890,12 +12890,19 @@ async function checkCLV(caches = {}) {
       for (const tip of unsettled) {
         if (tip.clv_odds) continue; // já registrado
 
-        // Janela CLV: < 3h antes do início (odds já refletem mercado maduro)
-        // Antes era 1h — muito restritivo, muitas tips ficavam sem CLV
+        // Janela CLV: < 3h antes do início, tolerância -60min após (Pinnacle às vezes
+        // mantém pregame após start oficial). Live tips (is_live=1) sempre capturam
+        // odds atual como proxy de CLV (compare vs odds original da tip).
         const tipKey = norm(tip.participant1 || '') + '_' + norm(tip.participant2 || '');
         const matchStart = matchTimeMap[tipKey] || 0;
         const timeToMatch = matchStart > 0 ? matchStart - now : null;
-        if (timeToMatch === null || timeToMatch > 3 * 60 * 60 * 1000 || timeToMatch < -5 * 60 * 1000) {
+        const isLiveTip = tip.is_live === 1 || tip.is_live === '1';
+        const shouldSkip = !isLiveTip && (
+          timeToMatch === null ||
+          timeToMatch > 3 * 60 * 60 * 1000 ||
+          timeToMatch < -60 * 60 * 1000
+        );
+        if (shouldSkip) {
           if (sport === 'tennis' || sport === 'football') {
             const reason = matchStart === 0 ? 'no_match_time_found' : (timeToMatch > 3 * 60 * 60 * 1000 ? `too_early_${Math.round(timeToMatch/60000)}min` : `too_late_${Math.round(-timeToMatch/60000)}min`);
             log('DEBUG', 'CLV-SKIP', `${sport} ${tip.participant1} vs ${tip.participant2}: ${reason}`);
