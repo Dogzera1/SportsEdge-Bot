@@ -85,6 +85,11 @@ const LOL_PLAYER_FEATURES = [
 const DOTA2_FEATURES = [
   'dota_rating_diff', 'dota_wr_diff', 'dota_games_diff', 'has_dota_team_stats',
 ];
+// Dota2 v2 rolling 30d (orthogonal ao Elo; populado com sync --deep + migration 048)
+const DOTA2_ROLLING_FEATURES = [
+  'dota_recent_wr_diff', 'dota_kill_margin_diff', 'dota_duration_diff',
+  'dota_streak_diff', 'dota_days_idle_diff', 'has_dota_rolling_stats',
+];
 
 // Decide NUM_FEATURES baseado no CSV carregado (se tem colunas LoL extras, inclui)
 let NUM_FEATURES = BASE_NUM_FEATURES.slice();
@@ -94,6 +99,7 @@ if (GAME === 'lol' && headers.includes('gpm_diff')) NUM_FEATURES = [...NUM_FEATU
 if (GAME === 'lol' && headers.includes('oe_gd15_diff')) NUM_FEATURES = [...NUM_FEATURES, ...LOL_OE_FEATURES];
 if (GAME === 'lol' && headers.includes('avg_kda_diff')) NUM_FEATURES = [...NUM_FEATURES, ...LOL_PLAYER_FEATURES];
 if (GAME === 'dota2' && headers.includes('dota_rating_diff')) NUM_FEATURES = [...NUM_FEATURES, ...DOTA2_FEATURES];
+if (GAME === 'dota2' && headers.includes('dota_recent_wr_diff')) NUM_FEATURES = [...NUM_FEATURES, ...DOTA2_ROLLING_FEATURES];
 const CAT_FEATURES = ['league_tier']; // 1,2,3
 
 function buildVec(row) {

@@ -187,27 +187,48 @@ function rosterStatsAt(team, tMs, sinceDays = 60, minGamesPerPlayer = 10) {
 
 // Mapa data → season/split (gol.gg usa SN = Year-2010+1 aprox; simplificação)
 // ── Dota2 OpenDota team stats loader ────────────────────────────────────
-// Usa dota_team_stats (migration 046) populado por scripts/sync-opendota-team-stats.js.
-// Lookup case-insensitive por name OR tag. Current stats (não histórico).
-const dotaTeamByName = new Map(); // normName → { rating, wr, games }
-const dotaTeamByTag = new Map();  // normTag → idem
+// Usa dota_team_stats (migration 046+048) populado por scripts/sync-opendota-team-stats.js.
+// v1: rating/wr/games | v2 --deep: rolling 30d {recent_wr, avg_kill_margin,
+// avg_duration_sec, win_streak_current, days_since_last}
+// Lookup case-insensitive por name OR tag. Current stats (leve look-ahead bias aceitável).
+const dotaTeamByName = new Map();
+const dotaTeamByTag = new Map();
 if (GAME === 'dota2') {
   try {
-    const rows = db.prepare(`
-      SELECT name, tag, rating, wins, losses, wr
-      FROM dota_team_stats
-      WHERE name IS NOT NULL AND (rating IS NOT NULL OR (wins + losses) >= 5)
-    `).all();
+    // Try v2 columns; fall back silently if migration 048 não rodou
+    let rows;
+    try {
+      rows = db.prepare(`
+        SELECT name, tag, rating, wins, losses, wr,
+               recent_n, recent_wr, avg_kill_margin, avg_duration_sec,
+               win_streak_current, days_since_last
+        FROM dota_team_stats
+        WHERE name IS NOT NULL AND (rating IS NOT NULL OR (wins + losses) >= 5)
+      `).all();
+    } catch (_) {
+      rows = db.prepare(`
+        SELECT name, tag, rating, wins, losses, wr
+        FROM dota_team_stats
+        WHERE name IS NOT NULL AND (rating IS NOT NULL OR (wins + losses) >= 5)
+      `).all();
+    }
     for (const r of rows) {
       const entry = {
         rating: Number(r.rating) || null,
         wr: Number(r.wr) || null,
         games: Number(r.wins || 0) + Number(r.losses || 0),
+        recentN: Number(r.recent_n) || 0,
+        recentWr: Number.isFinite(r.recent_wr) ? r.recent_wr : null,
+        killMargin: Number.isFinite(r.avg_kill_margin) ? r.avg_kill_margin : null,
+        durationSec: Number.isFinite(r.avg_duration_sec) ? r.avg_duration_sec : null,
+        streak: Number(r.win_streak_current) || 0,
+        daysSinceLast: Number.isFinite(r.days_since_last) ? r.days_since_last : null,
       };
       if (r.name) dotaTeamByName.set(String(r.name).toLowerCase().trim(), entry);
       if (r.tag) dotaTeamByTag.set(String(r.tag).toLowerCase().trim(), entry);
     }
-    console.log(`[extract-es] dota_team_stats loaded: ${rows.length} teams`);
+    const withDeep = rows.filter(r => r.recent_n > 0).length;
+    console.log(`[extract-es] dota_team_stats loaded: ${rows.length} teams (${withDeep} with rolling 30d)`);
   } catch (e) { console.warn(`[extract-es] dota_team_stats load err: ${e.message}`); }
 }
 
@@ -340,8 +361,11 @@ const HEADERS = [
   // OE player-level roster stats (só LoL; 0 se algum time sem roster válido)
   'avg_kda_diff', 'max_kda_diff', 'star_score_diff', 'has_roster_stats',
   // Dota2 OpenDota team stats (só Dota2; 0 se algum time sem match)
-  // Nota: stats são current-cumulative — leve look-ahead bias ok como proxy de team strength
+  // v1 (rating/wr/games — sempre presente com sync básico)
   'dota_rating_diff', 'dota_wr_diff', 'dota_games_diff', 'has_dota_team_stats',
+  // v2 rolling 30d (só populado com sync --deep; orthogonal ao Elo)
+  'dota_recent_wr_diff', 'dota_kill_margin_diff', 'dota_duration_diff',
+  'dota_streak_diff', 'dota_days_idle_diff', 'has_dota_rolling_stats',
   'y',
 ];
 
@@ -472,8 +496,11 @@ for (const r of rows) {
         starScoreDiff = r1.starScore - r2.starScore;
       }
     }
-    // Dota2 OpenDota team stats (current cumulative — proxy de team strength)
+    // Dota2 OpenDota team stats
     let dotaRatingDiff = 0, dotaWrDiff = 0, dotaGamesDiff = 0, hasDotaTeamStats = 0;
+    // v2 rolling 30d features
+    let dotaRecentWrDiff = 0, dotaKillMarginDiff = 0, dotaDurationDiff = 0;
+    let dotaStreakDiff = 0, dotaDaysIdleDiff = 0, hasDotaRollingStats = 0;
     if (GAME === 'dota2' && dotaTeamByName.size > 0) {
       const d1 = dotaTeamLookup(p1Raw);
       const d2 = dotaTeamLookup(p2Raw);
@@ -481,7 +508,19 @@ for (const r of rows) {
         hasDotaTeamStats = 1;
         dotaRatingDiff = d1.rating - d2.rating;
         dotaWrDiff = (d1.wr || 0) - (d2.wr || 0);
-        dotaGamesDiff = Math.log1p(d1.games) - Math.log1p(d2.games); // log-scale — games têm long tail
+        dotaGamesDiff = Math.log1p(d1.games) - Math.log1p(d2.games);
+      }
+      // Rolling 30d: exige ambos com recent_n >= 5
+      if (d1 && d2 && d1.recentN >= 5 && d2.recentN >= 5) {
+        hasDotaRollingStats = 1;
+        dotaRecentWrDiff = (d1.recentWr ?? 0) - (d2.recentWr ?? 0);
+        dotaKillMarginDiff = (d1.killMargin ?? 0) - (d2.killMargin ?? 0);
+        // Duration em minutos (ou 0 se null)
+        const dur1 = (d1.durationSec ?? 0) / 60;
+        const dur2 = (d2.durationSec ?? 0) / 60;
+        dotaDurationDiff = dur1 - dur2;
+        dotaStreakDiff = (d1.streak ?? 0) - (d2.streak ?? 0);
+        dotaDaysIdleDiff = (d1.daysSinceLast ?? 0) - (d2.daysSinceLast ?? 0);
       }
     }
     out.push([
@@ -507,6 +546,8 @@ for (const r of rows) {
       oeGd15Diff.toFixed(2), oeObjDiff.toFixed(4), oeWrDiff.toFixed(4), oeDpmDiff.toFixed(2), hasOeStats,
       avgKdaDiff.toFixed(3), maxKdaDiff.toFixed(3), starScoreDiff.toFixed(2), hasRosterStats,
       dotaRatingDiff.toFixed(1), dotaWrDiff.toFixed(4), dotaGamesDiff.toFixed(3), hasDotaTeamStats,
+      dotaRecentWrDiff.toFixed(4), dotaKillMarginDiff.toFixed(2), dotaDurationDiff.toFixed(2),
+      dotaStreakDiff, dotaDaysIdleDiff, hasDotaRollingStats,
       p1Won,
     ]);
     kept++;

@@ -1177,6 +1177,25 @@ const migrations = [
       try { db.exec("ALTER TABLE tips ADD COLUMN current_stake TEXT"); } catch (_) { /* já existe */ }
     },
   },
+  {
+    id: '048_dota_team_rolling_stats',
+    up(db) {
+      // Extende dota_team_stats com rolling aggregates 30d via /api/teams/{id}/matches.
+      // Features orthogonais ao Elo: kill_margin, duration, recent_form, streak, days_idle.
+      // Populado por scripts/sync-opendota-team-stats.js --deep flag.
+      const cols = [
+        "recent_n INTEGER DEFAULT 0",           // matches contabilizados (last 30d)
+        "recent_wr REAL",                        // WR últimos 30d
+        "avg_kill_margin REAL",                  // team_score - opp_score avg
+        "avg_duration_sec REAL",                 // match length avg
+        "win_streak_current INTEGER DEFAULT 0",  // +N wins, -N losses em série atual
+        "days_since_last INTEGER",               // dias desde último match
+      ];
+      for (const col of cols) {
+        try { db.exec(`ALTER TABLE dota_team_stats ADD COLUMN ${col}`); } catch (_) { /* já existe */ }
+      }
+    },
+  },
 ];
 
 function applyMigrations(db) {
