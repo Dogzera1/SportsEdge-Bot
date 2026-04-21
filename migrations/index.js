@@ -891,6 +891,85 @@ const migrations = [
     },
   },
   {
+    id: '042_archive_fuzzy_duplicates_and_resync',
+    up(db) {
+      // Após migrations 039/040 rebuild per-sport tier, bankroll sum conta tips
+      // duplicadas (legacy sport='esports' match_id='X' + novo sport='dota2' match_id='dota2_X').
+      // Dashboard display colapsa via fuzzy dedup JS mas bankroll não → gap entre hero e tips.
+      // Fix: arquiva fuzzy dupes no DB (mesma chave teams+odd+stake+date dentro de bucket),
+      // depois rerun sync bankroll pra refletir apenas tips ativas.
+      const tips = db.prepare(`
+        SELECT id, sport, participant1, participant2, tip_participant, odds, stake,
+               sent_at, match_id, event_name, result, profit_reais
+        FROM tips
+        WHERE (archived IS NULL OR archived = 0)
+          AND result IN ('win','loss','push','void')
+        ORDER BY id ASC
+      `).all();
+      const normStr = s => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+      const bucketFor = (t) => {
+        const sp = t.sport;
+        if (sp === 'esports' || sp === 'lol' || sp === 'dota2' || sp === 'dota') {
+          const mid = String(t.match_id || '');
+          const ev = String(t.event_name || '').toLowerCase();
+          if (mid.startsWith('dota2_') || ev.includes('dota')) return 'dota2_bucket';
+          return 'lol_bucket';
+        }
+        if (sp === 'mma') return 'mma_bucket';
+        return sp;
+      };
+      const groups = new Map();
+      for (const t of tips) {
+        const day = String(t.sent_at || '').slice(0, 10);
+        const key = [
+          bucketFor(t),
+          normStr(t.participant1),
+          normStr(t.participant2),
+          normStr(t.tip_participant),
+          String(t.odds || ''),
+          String(t.stake || ''),
+          day,
+        ].join('|');
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(t);
+      }
+      const archStmt = db.prepare(`UPDATE tips SET archived = 1 WHERE id = ?`);
+      for (const [, arr] of groups) {
+        if (arr.length <= 1) continue;
+        arr.sort((a, b) => a.id - b.id);
+        const keep = arr[arr.length - 1].id;
+        for (const t of arr) {
+          if (t.id !== keep) archStmt.run(t.id);
+        }
+      }
+
+      // Resync bankroll.current_banca usando tips não-archived reclassificadas.
+      const liveTips = db.prepare(`
+        SELECT sport, profit_reais, match_id, event_name FROM tips
+        WHERE (archived IS NULL OR archived = 0) AND COALESCE(is_shadow, 0) = 0
+          AND result IN ('win','loss','push','void')
+      `).all();
+      const profitBySport = {};
+      for (const t of liveTips) {
+        const p = Number(t.profit_reais || 0);
+        let sp = t.sport;
+        if (sp === 'esports') {
+          const mid = String(t.match_id || '');
+          const ev = String(t.event_name || '').toLowerCase();
+          sp = (mid.startsWith('dota2_') || ev.includes('dota')) ? 'dota2' : 'lol';
+        }
+        profitBySport[sp] = (profitBySport[sp] || 0) + p;
+      }
+      const bankrolls = db.prepare('SELECT sport, initial_banca FROM bankroll').all();
+      for (const bk of bankrolls) {
+        const init = Number(bk.initial_banca || 0);
+        const profit = profitBySport[bk.sport] || 0;
+        const newCurrent = +(init + profit).toFixed(2);
+        db.prepare("UPDATE bankroll SET current_banca=?, updated_at=datetime('now') WHERE sport=?").run(newCurrent, bk.sport);
+      }
+    },
+  },
+  {
     id: '041_sync_baseline_amount_to_sum_initials',
     up(db) {
       // Pós modelo per-sport (039/040): soma de initial_banca dos sports ativos é

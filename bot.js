@@ -1910,7 +1910,7 @@ async function runAutoAnalysis() {
                   `*${match.team1}* vs *${match.team2}*\n📋 ${match.league}\n\n` +
                   `🎯 Aposta: *${favTeam}* ${mktName}\n` +
                   `📈 EV estimado: *+${hEV.toFixed(1)}%*\n` +
-                  `💵 Stake: *${hStake}u*\n` +
+                  `💵 Stake: *${formatStakeWithReais('lol', hStake + 'u')}*\n` +
                   `🔵 Confiança: BAIXA\n\n` +
                   `⚠️ _Mercado de handicap — menor liquidez. Aposte com cautela._`;
 
@@ -10664,7 +10664,7 @@ Máximo 200 palavras. Raciocínio breve antes da decisão.`;
           minTakeLine +
           _bookTennis +
           `📈 EV: *+${tipEV}%* | De-juice: ${tipPlayer === match.team1 ? fairP1 : fairP2}%\n` +
-          `💵 Stake: *${String(tipStake).replace(/u+$/i, '')}u*\n` +
+          `💵 Stake: *${formatStakeWithReais('tennis', String(tipStake).replace(/u+$/i, ''))}*\n` +
           `${confEmoji} Confiança: *${tipConf}*\n\n` +
           `⚠️ _Aposte com responsabilidade._`;
 
@@ -11299,7 +11299,7 @@ Máximo 200 palavras.`;
           minTakeLine +
           _bookFb +
           `📈 EV: *+${tipEV}%* | Mercado: ${probMkt}%${probMdl ? ` | Modelo: ${probMdl}%` : ''}\n` +
-          `💵 Stake: *${tipStake}u*\n` +
+          `💵 Stake: *${formatStakeWithReais('football', tipStake)}*\n` +
           `${confEmoji} Confiança: *${tipConf}*\n` +
           (fixtureInfo && homeFormData ? `📊 Forma: ${fmtForm(homeFormData.form)} vs ${fmtForm(awayFormData?.form)}\n` : '') +
           `\n⚠️ _Aposte com responsabilidade._`;
@@ -11574,7 +11574,7 @@ async function pollTableTennis(runOnce = false) {
           `*${match.team1}* vs *${match.team2}*\n📋 ${match.league}\n🕐 ${fightTime} (BRT)\n\n` +
           `🎯 Aposta: *${pickTeam}* @ *${pickOdd}*\n` +
           `📈 EV: *+${evPct.toFixed(1)}%*\n` +
-          `💵 Stake: *${stakeAdj}u*\n` +
+          `💵 Stake: *${formatStakeWithReais('tabletennis', stakeAdj)}*\n` +
           `${confEmoji} Confiança: *${conf}*\n` +
           _bookTT +
           `_${tipReason}_\n\n` +
@@ -12165,7 +12165,7 @@ Máximo 150 palavras.`;
           `*${match.team1}* vs *${match.team2}*\n📋 ${match.league}${match.format ? ` (${match.format})` : ''}\n🕐 ${matchTime} (BRT)\n\n` +
           `🎯 Aposta: *${pickTeam}* @ *${pickOdd}*\n` +
           `📈 EV: *+${evPct.toFixed(1)}%*\n` +
-          `💵 Stake: *${stakeAdj}u*\n` +
+          `💵 Stake: *${formatStakeWithReais('cs', stakeAdj)}*\n` +
           `${confEmoji} Confiança: *${conf}*\n` +
           _bookCs +
           `_${tipReason}_\n\n` +
@@ -12540,7 +12540,7 @@ async function pollValorant(runOnce = false) {
           `*${match.team1}* vs *${match.team2}*\n📋 ${match.league}${match.format ? ` (${match.format})` : ''}\n🕐 ${matchTime} (BRT)\n\n` +
           `🎯 Aposta: *${pickTeam}* @ *${pickOdd}*\n` +
           `📈 EV: *+${evPct.toFixed(1)}%*\n` +
-          `💵 Stake: *${stakeAdj}u*\n` +
+          `💵 Stake: *${formatStakeWithReais('valorant', stakeAdj)}*\n` +
           `${confEmoji} Confiança: *${conf}*\n` +
           _bookVal +
           `_${tipReason}_\n\n` +
@@ -12806,7 +12806,7 @@ async function runAutoDarts() {
             `*${match.team1}* vs *${match.team2}*\n📋 ${match.league}\n\n` +
             `🎯 Aposta: *${pickTeam}* @ *${pickOdd}*\n` +
             `📈 EV: *+${evPct.toFixed(1)}%*\n` +
-            `💵 Stake: *${stakeAdj}u* _(1/8 Kelly)_\n` +
+            `💵 Stake: *${formatStakeWithReais('darts', stakeAdj)}* _(1/8 Kelly)_\n` +
             _bookDarts +
             `🧠 Por quê: _${tipReason}_\n\n` +
             `⚠️ _Aposte com responsabilidade._`;
@@ -12996,7 +12996,7 @@ async function runAutoSnooker() {
             `*${match.team1}* vs *${match.team2}*\n📋 ${match.league}\n\n` +
             `🎯 Aposta: *${pickTeam}* @ *${pickOdd}*\n` +
             `📈 EV: *+${evPct.toFixed(1)}%*\n` +
-            `💵 Stake: *${stakeAdj}u*\n` +
+            `💵 Stake: *${formatStakeWithReais('snooker', stakeAdj)}*\n` +
             _bookSn +
             `🧠 ${tipReason}\n\n` +
             `⚠️ _Odds Pinnacle._`;
