@@ -6213,20 +6213,23 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
       const r = await serverGet('/bankroll-audit');
       if (!r?.ok) { await send(token, chatId, `❌ ${r?.error || 'falha'}`); return; }
       let txt = `🔍 *BANKROLL AUDIT*\n\n`;
-      txt += `Unit: R$${(r.unit_value || 0).toFixed(2)} | Baseline: R$${r.baseline?.amount || 0} (${r.baseline?.date || '?'})\n\n`;
+      txt += `Model: ${r.model || 'legacy'} | Base unit: R$${(r.unit_base || 1).toFixed(2)}\n`;
+      txt += `Baseline: R$${r.baseline?.amount || 0} (${r.baseline?.date || '?'})\n\n`;
       txt += `*Totais:*\n`;
       txt += `  Initial: R$${r.total_initial.toFixed(2)}\n`;
-      txt += `  Current stored: R$${r.total_current_stored.toFixed(2)}\n`;
-      txt += `  Current recomputed: R$${r.total_current_recomputed.toFixed(2)}\n`;
+      txt += `  Current: R$${r.total_current_stored.toFixed(2)}\n`;
+      const delta = r.total_current_stored - r.total_initial;
+      txt += `  ${delta >= 0 ? '📈' : '📉'} P&L: ${delta >= 0 ? '+' : ''}R$${delta.toFixed(2)} (${(delta/r.total_initial*100).toFixed(1)}%)\n`;
       if (Math.abs(r.total_gap) > 0.01) {
         txt += `  ⚠️ Gap: R$${r.total_gap.toFixed(2)} — stored ≠ recomputed\n`;
       }
-      txt += `\n*Per sport:*\n`;
+      txt += `\n*Per sport (init/curr · 1u · tips profit):*\n`;
       for (const s of r.per_sport) {
         const icon = s.drift ? '⚠️' : '✓';
-        txt += `${icon} *${s.sport}*: init R$${s.initial.toFixed(0)} | curr R$${s.current_stored.toFixed(2)} | recomp R$${s.current_recomputed.toFixed(2)}`;
-        if (s.drift) txt += ` (gap R$${s.gap_stored_minus_recomputed.toFixed(2)})`;
-        txt += ` | ${s.tip_count}t profit R$${s.profit_sum.toFixed(2)}\n`;
+        const uvStr = s.tier_unit_value ? `1u=R$${s.tier_unit_value.toFixed(2)}` : '';
+        txt += `${icon} *${s.sport}*: R$${s.initial.toFixed(0)}→R$${s.current_stored.toFixed(2)} · ${uvStr}`;
+        if (s.drift) txt += ` · gap R$${s.gap_stored_minus_recomputed.toFixed(2)}`;
+        txt += ` · ${s.tip_count}t ${s.profit_sum >= 0 ? '+' : ''}R$${s.profit_sum.toFixed(2)}\n`;
         if (txt.length > 3500) { txt += '_(truncado)_'; break; }
       }
       if (r.orphan_profits?.length) {

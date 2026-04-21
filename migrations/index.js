@@ -990,6 +990,133 @@ const migrations = [
       db.prepare(`INSERT INTO settings (key, value) VALUES ('baseline', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`).run(JSON.stringify(baseline));
     },
   },
+  {
+    id: '043_force_rebuild_per_sport_tier_v2',
+    up(db) {
+      // Migration 040/042 podem ter rodado em versão antiga ou com bug silencioso
+      // (schema_migrations marca applied mesmo se não fez nada útil). Este ID novo
+      // força re-execução do rebuild completo + archive dupes + resync bankrolls.
+      //
+      // Combina 039 (init=100), 040 (rebuild tier), 042 (archive fuzzy), 041 (baseline).
+      // Idempotente por natureza: roda cronológico, resultado determinístico.
+      let getSportUnitValue;
+      try {
+        ({ getSportUnitValue } = require('../lib/sport-unit'));
+      } catch (e) {
+        getSportUnitValue = function(current, initial = 100) {
+          if (!current || current <= 0) return 0.50;
+          const r = current / (initial || 100);
+          if (r >= 3.0) return 3.0;
+          if (r >= 2.0) return 2.0;
+          if (r >= 1.5) return 1.5;
+          if (r >= 1.2) return 1.2;
+          if (r >= 0.8) return 1.0;
+          if (r >= 0.6) return 0.8;
+          if (r >= 0.4) return 0.6;
+          return 0.5;
+        };
+      }
+
+      // Step 1: force initial=R$100 em todos sports ativos, esports=0
+      const STANDARD_INITIAL = 100;
+      const sports = ['lol', 'dota2', 'mma', 'tennis', 'football', 'cs', 'valorant', 'darts', 'snooker', 'tabletennis'];
+      for (const sp of sports) {
+        const r = db.prepare('SELECT initial_banca FROM bankroll WHERE sport=?').get(sp);
+        if (!r) {
+          db.prepare("INSERT INTO bankroll (sport, initial_banca, current_banca, updated_at) VALUES (?, ?, ?, datetime('now'))").run(sp, STANDARD_INITIAL, STANDARD_INITIAL);
+        } else {
+          db.prepare("UPDATE bankroll SET initial_banca=?, updated_at=datetime('now') WHERE sport=?").run(STANDARD_INITIAL, sp);
+        }
+      }
+      db.prepare("UPDATE bankroll SET initial_banca=0, current_banca=0 WHERE sport='esports'").run();
+
+      // Step 2: archive fuzzy duplicatas ANTES de rebuild (pra rebuild não contar dupes)
+      const allTips = db.prepare(`
+        SELECT id, sport, participant1, participant2, tip_participant, odds, stake,
+               sent_at, match_id, event_name, result
+        FROM tips
+        WHERE (archived IS NULL OR archived = 0)
+          AND result IN ('win','loss','push','void')
+        ORDER BY id ASC
+      `).all();
+      const normStr = s => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+      const bucketFor = (t) => {
+        const sp = t.sport;
+        if (sp === 'esports' || sp === 'lol' || sp === 'dota2' || sp === 'dota') {
+          const mid = String(t.match_id || '');
+          const ev = String(t.event_name || '').toLowerCase();
+          return (mid.startsWith('dota2_') || ev.includes('dota')) ? 'dota2_bucket' : 'lol_bucket';
+        }
+        if (sp === 'mma') return 'mma_bucket';
+        return sp;
+      };
+      const groups = new Map();
+      for (const t of allTips) {
+        const day = String(t.sent_at || '').slice(0, 10);
+        const key = [bucketFor(t), normStr(t.participant1), normStr(t.participant2), normStr(t.tip_participant), String(t.odds || ''), String(t.stake || ''), day].join('|');
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(t);
+      }
+      const archStmt = db.prepare(`UPDATE tips SET archived = 1 WHERE id = ?`);
+      let archivedCount = 0;
+      for (const [, arr] of groups) {
+        if (arr.length <= 1) continue;
+        arr.sort((a, b) => a.id - b.id);
+        const keep = arr[arr.length - 1].id;
+        for (const t of arr) {
+          if (t.id !== keep) { archStmt.run(t.id); archivedCount++; }
+        }
+      }
+
+      // Step 3: rebuild cronológico stake_reais/profit_reais com tier unit per-sport
+      const updStmt = db.prepare(`UPDATE tips SET stake_reais = ?, profit_reais = ? WHERE id = ?`);
+      for (const sport of sports) {
+        const initial = STANDARD_INITIAL;
+        const extraSql = sport === 'dota2'
+          ? " OR (sport = 'esports' AND (match_id LIKE 'dota2_%' OR LOWER(COALESCE(event_name,'')) LIKE '%dota%'))"
+          : sport === 'lol'
+            ? " OR (sport = 'esports' AND match_id NOT LIKE 'dota2_%' AND LOWER(COALESCE(event_name,'')) NOT LIKE '%dota%')"
+            : "";
+        const sportTips = db.prepare(`
+          SELECT id, stake, odds, result FROM tips
+          WHERE (archived IS NULL OR archived = 0)
+            AND COALESCE(is_shadow, 0) = 0
+            AND result IN ('win','loss','push','void')
+            AND (sport = ?${extraSql})
+          ORDER BY COALESCE(settled_at, sent_at) ASC, id ASC
+        `).all(sport);
+        let runningBanca = initial;
+        for (const t of sportTips) {
+          const stakeU = parseFloat(String(t.stake || '0').replace(/u/i, '')) || 0;
+          if (!stakeU) continue;
+          const odds = parseFloat(t.odds) || 1;
+          const uv = getSportUnitValue(runningBanca, initial);
+          const newStakeR = +(stakeU * uv).toFixed(2);
+          let newProfitR = 0;
+          if (t.result === 'win')  newProfitR = +(stakeU * (odds - 1) * uv).toFixed(2);
+          else if (t.result === 'loss') newProfitR = +(-stakeU * uv).toFixed(2);
+          updStmt.run(newStakeR, newProfitR, t.id);
+          runningBanca = +(runningBanca + newProfitR).toFixed(2);
+        }
+        db.prepare("UPDATE bankroll SET current_banca=?, updated_at=datetime('now') WHERE sport=?").run(runningBanca, sport);
+      }
+
+      // Step 4: update settings.baseline.amount = SUM(initial_banca) ativos
+      const sumRow = db.prepare(`SELECT COALESCE(SUM(initial_banca), 0) AS total FROM bankroll WHERE sport != 'esports'`).get();
+      const newAmount = Number(sumRow?.total || 0);
+      if (newAmount > 0) {
+        const existing = db.prepare(`SELECT value FROM settings WHERE key = 'baseline'`).get();
+        let baseline = { date: new Date().toISOString().slice(0, 10), amount: newAmount, unit_pct: 1 };
+        if (existing?.value) {
+          try {
+            const parsed = JSON.parse(existing.value);
+            baseline = { ...parsed, amount: newAmount };
+          } catch (_) {}
+        }
+        db.prepare(`INSERT INTO settings (key, value) VALUES ('baseline', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`).run(JSON.stringify(baseline));
+      }
+    },
+  },
 ];
 
 function applyMigrations(db) {

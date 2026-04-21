@@ -6608,10 +6608,10 @@ const server = http.createServer(async (req, res) => {
   if (p === '/bankroll-audit') {
     try {
       const _bl = getBaseline();
-      const uv = _bl.unit_value;
+      const { getSportUnitValue } = require('./lib/sport-unit');
       const rows = db.prepare(`SELECT sport, initial_banca, current_banca FROM bankroll`).all();
       const allSettled = db.prepare(`
-        SELECT sport, stake, odds, result, match_id, event_name
+        SELECT sport, stake, odds, result, match_id, event_name, profit_reais
         FROM tips
         WHERE (archived IS NULL OR archived = 0) AND COALESCE(is_shadow, 0) = 0
           AND result IN ('win','loss','push','void')
@@ -6619,8 +6619,8 @@ const server = http.createServer(async (req, res) => {
       const profitBySport = {};
       const tipCountBySport = {};
       for (const t of allSettled) {
-        const p = tipProfitReais(t, uv);
-        if (p == null) continue;
+        // Prefere profit_reais stored (já com tier unit se rebuild 040 rodou)
+        const p = Number(t.profit_reais || 0);
         let sp = t.sport;
         if (sp === 'esports') {
           const mid = String(t.match_id || '');
@@ -6636,6 +6636,9 @@ const server = http.createServer(async (req, res) => {
         const profit = profitBySport[r.sport] || 0;
         const recomputed = +(init + profit).toFixed(2);
         const gap = +(curr - recomputed).toFixed(2);
+        // Per-sport tier unit atual (reflete o que novas tips vão usar).
+        const tierUnit = getSportUnitValue(curr, init || 100);
+        const ratio = init > 0 ? +(curr / init).toFixed(3) : null;
         return {
           sport: r.sport,
           initial: init,
@@ -6644,6 +6647,8 @@ const server = http.createServer(async (req, res) => {
           profit_sum: +profit.toFixed(2),
           gap_stored_minus_recomputed: gap,
           tip_count: tipCountBySport[r.sport] || 0,
+          tier_unit_value: tierUnit,
+          ratio_current_initial: ratio,
           drift: Math.abs(gap) > 0.01,
         };
       }).sort((a, b) => Math.abs(b.gap_stored_minus_recomputed) - Math.abs(a.gap_stored_minus_recomputed));
@@ -6653,8 +6658,9 @@ const server = http.createServer(async (req, res) => {
       const orphanSports = Object.keys(profitBySport).filter(sp => !rows.find(r => r.sport === sp));
       sendJson(res, {
         ok: true,
-        unit_value: uv,
-        baseline: _bl,
+        model: 'per_sport_tier_unit',
+        unit_base: 1.00, // R$1 na zona normal (ratio 0.8-1.2); varia por sport conforme tier_unit_value
+        baseline: _bl, // mantido pra compat (amount = SUM(initial_banca) após 041)
         total_initial: +totalInitial.toFixed(2),
         total_current_stored: +totalStored.toFixed(2),
         total_current_recomputed: +totalRecomputed.toFixed(2),
