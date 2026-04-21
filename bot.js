@@ -1839,6 +1839,12 @@ async function runAutoAnalysis() {
             }
           }
 
+          const _blockedLol1 = isLeagueBlocked('lol', match.league);
+          if (_blockedLol1) {
+            log('INFO', 'AUTO', `[BLOCK] lol/${match.league} — tip suprimida (match "${_blockedLol1}")`);
+            analyzedMatches.set(matchKey, { ts: now, tipSent: false, blocked: true });
+            continue;
+          }
           const _pickSideLs = norm(tipTeam) === norm(match.team1) ? 't1' : 't2';
           const rec = await serverPost('/record-tip', {
             matchId: canonicalMatchId('esports', String(match.id) + mapTag), eventName: match.league,
@@ -1977,6 +1983,10 @@ async function runAutoAnalysis() {
                   `🔵 Confiança: BAIXA\n\n` +
                   `⚠️ _Mercado de handicap — menor liquidez. Aposte com cautela._`;
 
+                if (isLeagueBlocked('lol', match.league)) {
+                  log('INFO', 'AUTO', `[BLOCK] lol HANDICAP ${match.league} — suprimido`);
+                  break;
+                }
                 await serverPost('/record-tip', {
                   matchId: canonicalMatchId('esports', String(match.id) + '_H'), eventName: match.league,
                   p1: match.team1, p2: match.team2, tipParticipant: favTeam,
@@ -2194,6 +2204,12 @@ async function runAutoAnalysis() {
             const kellyLabel = tipConf === CONF.ALTA ? '¼ Kelly' : tipConf === CONF.BAIXA ? '1/10 Kelly' : '⅙ Kelly';
             const mlEdgeLabel = result.mlScore > 0 ? ` | ML: ${result.mlScore.toFixed(1)}pp` : '';
 
+            const _blockedLolUp = isLeagueBlocked('lol', match.league);
+            if (_blockedLolUp) {
+              log('INFO', 'AUTO-TIP', `[BLOCK] lol upcoming ${match.league} — suprimido`);
+              analyzedMatches.set(matchKey, { ts: now, tipSent: false, blocked: true });
+              continue;
+            }
             const _pickSideUp = norm(tipTeam) === norm(match.team1) ? 't1' : 't2';
             const recUp = await serverPost('/record-tip', {
               matchId: canonicalMatchId('esports', match.id), eventName: match.league,
@@ -2970,6 +2986,35 @@ const _splitBucketShadow = new Set(); // sports split em auto-shadow
 function isBucketShadowed(sport) {
   if (SPORTS[sport]?.shadowMode) return true;
   return _splitBucketShadow.has(sport);
+}
+
+// League blocklist — substring match case-insensitive. Seed via env LEAGUE_BLOCKLIST.
+// Formato: "sport:substring" ou apenas "substring" (aplica a qualquer sport).
+// Ex: "lol:prime league,mma:LFA,tennis:challenger"
+const _leagueBlocklist = new Set(); // Set<string> entries lowercased "sport:substr" ou "*:substr"
+function _parseBlocklistEnv() {
+  const raw = String(process.env.LEAGUE_BLOCKLIST || '').trim();
+  if (!raw) return;
+  for (const e of raw.split(',')) {
+    const v = e.trim().toLowerCase();
+    if (!v) continue;
+    _leagueBlocklist.add(v.includes(':') ? v : `*:${v}`);
+  }
+}
+_parseBlocklistEnv();
+
+function isLeagueBlocked(sport, league) {
+  if (!_leagueBlocklist.size) return null;
+  const sp = String(sport || '').toLowerCase();
+  const lg = String(league || '').toLowerCase();
+  if (!lg) return null;
+  for (const entry of _leagueBlocklist) {
+    const [sPart, subPart] = entry.split(':', 2);
+    if (!subPart) continue;
+    if (sPart !== '*' && sPart !== sp) continue;
+    if (lg.includes(subPart)) return subPart;
+  }
+  return null;
 }
 
 async function runBankrollGuardianCycle() {
@@ -6200,6 +6245,80 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
     txt += `Comandos:\n• /path-guard run — força ciclo\n• /path-guard reset [sport] — reativa manual`;
     await send(token, chatId, txt);
 
+  } else if (cmd === '/block-league' || cmd === '/unblock-league' || cmd === '/blocked-leagues' || cmd === '/leagues-blocked') {
+    if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
+    try {
+      if (cmd === '/blocked-leagues' || cmd === '/leagues-blocked') {
+        if (!_leagueBlocklist.size) { await send(token, chatId, `📋 *Ligas bloqueadas:*\n_Nenhuma._\n\n_Uso: /block-league <sport> <substring>_`); return; }
+        const list = [..._leagueBlocklist].sort().map(e => `• ${e}`).join('\n');
+        await send(token, chatId, `📋 *Ligas bloqueadas (${_leagueBlocklist.size}):*\n${list}`);
+        return;
+      }
+      if (parts.length < 3) {
+        await send(token, chatId, `❌ Uso: /block-league <sport|*> <substring>\nEx: /block-league lol "prime league"`);
+        return;
+      }
+      const sportArg = (parts[1] || '').toLowerCase();
+      const substr = parts.slice(2).join(' ').toLowerCase().replace(/^["']|["']$/g, '');
+      if (!substr) { await send(token, chatId, `❌ Substring vazia`); return; }
+      const entry = `${sportArg || '*'}:${substr}`;
+      if (cmd === '/unblock-league') {
+        if (_leagueBlocklist.delete(entry)) {
+          log('INFO', 'BLOCKLIST', `UNBLOCK ${entry} via cmd`);
+          await send(token, chatId, `✅ Desbloqueado: \`${entry}\``);
+        } else {
+          await send(token, chatId, `ℹ️ Entry não existia: \`${entry}\`\n_Use /blocked-leagues pra listar._`);
+        }
+      } else {
+        _leagueBlocklist.add(entry);
+        log('WARN', 'BLOCKLIST', `BLOCK ${entry} via cmd`);
+        await send(token, chatId, `🚫 Bloqueado: \`${entry}\`\n_Tips com liga contendo "${substr}" ${sportArg !== '*' ? 'em ' + sportArg : ''} não emitirão._\n\n⚠️ _Não persiste entre restart — adicione à env LEAGUE_BLOCKLIST._`);
+      }
+    } catch (e) { await send(token, chatId, `❌ ${e.message}`); }
+
+  } else if (cmd === '/clv-league' || cmd === '/clv-by-league' || cmd === '/roi-league') {
+    if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
+    try {
+      // Uso: /clv-league [sport] [days] [min_n]
+      const sportArg = parts[1] && !/^\d+$/.test(parts[1]) ? parts[1].toLowerCase() : '';
+      const firstNum = parts.findIndex((v, i) => i > 0 && /^\d+$/.test(v));
+      const days = firstNum > 0 ? Math.max(7, Math.min(180, parseInt(parts[firstNum], 10))) : 30;
+      const minN = firstNum > 0 && parts[firstNum + 1] ? Math.max(3, parseInt(parts[firstNum + 1], 10)) : 5;
+      const qs = [];
+      if (sportArg) qs.push(`sport=${encodeURIComponent(sportArg)}`);
+      qs.push(`days=${days}`, `min=${minN}`);
+      const resp = await serverGet(`/clv-by-league?${qs.join('&')}`);
+      if (!resp?.ok) { await send(token, chatId, `❌ ${resp?.error || 'falha'}`); return; }
+      const { rows, leaks, strong } = resp;
+      const esc = (s) => String(s || '').replace(/[*_`[\]()]/g, '');
+      let txt = `📊 *CLV/ROI por Liga — ${days}d${sportArg ? ' / ' + sportArg : ''}*\n`;
+      txt += `_min n=${minN}, total=${rows?.length || 0} ligas_\n\n`;
+      if (!rows?.length) { txt += `_Sem dados._`; await send(token, chatId, txt); return; }
+      if (leaks?.length) {
+        txt += `🚨 *LEAKS* (${leaks.length}):\n`;
+        for (const r of leaks.slice(0, 8)) {
+          const clv = r.avg_clv_pct != null ? `${r.avg_clv_pct >= 0 ? '+' : ''}${r.avg_clv_pct.toFixed(1)}%` : '?';
+          const roi = r.roi_pct != null ? `${r.roi_pct >= 0 ? '+' : ''}${r.roi_pct.toFixed(1)}%` : '?';
+          txt += `• ${esc(r.sport)}/${esc(r.league).slice(0, 28)} — n=${r.n} hit=${r.hit_rate}% CLV=${clv} ROI=${roi} P&L=R$${r.profit.toFixed(2)}\n`;
+        }
+        txt += '\n';
+      }
+      if (strong?.length) {
+        txt += `✅ *STRONG* (${strong.length}):\n`;
+        for (const r of strong.slice(0, 5)) {
+          const clv = r.avg_clv_pct != null ? `${r.avg_clv_pct >= 0 ? '+' : ''}${r.avg_clv_pct.toFixed(1)}%` : '?';
+          const roi = r.roi_pct != null ? `+${r.roi_pct.toFixed(1)}%` : '?';
+          txt += `• ${esc(r.sport)}/${esc(r.league).slice(0, 28)} — n=${r.n} ROI=${roi} CLV=${clv} P&L=R$${r.profit.toFixed(2)}\n`;
+        }
+        txt += '\n';
+      }
+      const neutralCount = (rows?.length || 0) - (leaks?.length || 0) - (strong?.length || 0);
+      if (neutralCount > 0) txt += `⚪ ${neutralCount} ligas neutras\n\n`;
+      txt += `_Bloquear liga: /block-league <sport> <substring>_`;
+      const r_ = await send(token, chatId, txt).catch(e => ({ ok: false }));
+      if (r_ && r_.ok === false) await send(token, chatId, txt.replace(/[*_`]/g, ''), { parse_mode: undefined }).catch(() => {});
+    } catch (e) { await send(token, chatId, `❌ ${e.message}`); }
+
   } else if (cmd === '/hybrid-stats' || cmd === '/hybrid') {
     if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
     try {
@@ -6889,6 +7008,12 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
       `\`/path-guard\` — paths desativados auto por CLV negativo\n` +
       `\`/path-guard run\` — força ciclo imediato\n` +
       `\`/path-guard reset [sport]\` — reativa path manual\n\n` +
+      `━━ 🚫 *Liga blocklist / pause* ━━\n` +
+      `\`/clv-league [sport] [days] [min]\` — ROI/CLV por liga (flagga leaks)\n` +
+      `\`/block-league <sport|*> <substring>\` — bloqueia liga (suprime tips)\n` +
+      `\`/unblock-league <sport|*> <substring>\` — reativa liga\n` +
+      `\`/blocked-leagues\` — lista ligas bloqueadas\n` +
+      `\`/pause-sport <sport>\` · \`/unpause-sport <sport>\` — pausa manual sport\n\n` +
       `━━ 🤖 *Agents & Loops* ━━\n` +
       `\`/loops\` — status dos 9 autonomous loops\n` +
       `\`/users\` — contagem de assinantes por sport\n` +
@@ -7833,6 +7958,10 @@ async function poll(token, sport) {
                      text.startsWith('/pause-sport') || text.startsWith('/unpause-sport') ||
                      text === '/pause' || text.startsWith('/pause ') ||
                      text === '/unpause' || text.startsWith('/unpause ') ||
+                     text.startsWith('/block-league') || text.startsWith('/unblock-league') ||
+                     text.startsWith('/blocked-leagues') || text.startsWith('/leagues-blocked') ||
+                     text.startsWith('/clv-league') || text.startsWith('/clv-by-league') ||
+                     text.startsWith('/roi-league') ||
                      text.startsWith('/tip ') || text.startsWith('/help') || text.startsWith('/start') ||
                      text.startsWith('/alerts')) {
             // Passa `sport` da poll (qual bot recebeu) para evitar default 'esports'
@@ -9163,6 +9292,12 @@ Máximo 200 palavras.`;
       const _bookDota = formatLineShopDM(o, isT1bet ? 't1' : 't2').trim();
       const msg = `🎮 *DOTA 2 — ${match.league}*${liveTag}\n${match.team1} vs ${match.team2} | ${match.format || ''}\n📅 ${matchTime} BRT\n\n✅ *TIP: ${tipTeam} @ ${tipOdd}*${minTakeLine}\n💰 Stake: ${formatStakeWithReais('dota2', tipStakeAdj)} | EV: ${tipEV} | Conf: ${tipConf}\n${_bookDota || `🏦 ${o.bookmaker || 'SX.Bet'}`}`;
 
+      const _blockedDota = isLeagueBlocked('dota2', match.league);
+      if (_blockedDota) {
+        log('INFO', 'AUTO-DOTA', `[BLOCK] dota2/${match.league} — tip suprimida (match "${_blockedDota}")`);
+        setDotaAnalyzed({ ts: now, tipSent: false, noEdge: false, blocked: true });
+        await _sleep(2000); continue;
+      }
       try {
         const rec = await serverPost('/record-tip', {
           matchId,
@@ -9347,6 +9482,11 @@ async function analyzeDotaMapTip(match, token) {
     _bookDotaMap +
     `Modelo: gold/kill diff + momentum (conf ${(pred.confidence*100).toFixed(0)}%)`;
 
+  if (isLeagueBlocked('dota2', match.league)) {
+    log('INFO', 'AUTO-DOTA-MAP', `[BLOCK] dota2/${match.league} mapa ${mapN} — suprimido`);
+    analyzedDota.set(mapKey, { ts: now, tipSent: false, blocked: true });
+    return;
+  }
   try {
     const rec = await serverPost('/record-tip', {
       matchId: mapMatchId,
@@ -10003,6 +10143,10 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
         const recEventName = (!_trim || /^mma$/i.test(_trim))
           ? (isBoxing ? 'Boxing (não identificado)' : 'MMA (não identificado)')
           : leagueLine;
+        if (isLeagueBlocked('mma', recEventName)) {
+          log('INFO', 'AUTO-MMA', `[BLOCK] mma/${recEventName} — suprimido`);
+          continue;
+        }
         const _pickSideMma = norm(tipTeam) === norm(fight.team1) ? 't1' : 't2';
         const rec = await serverPost('/record-tip', {
           matchId: String(fight.id), eventName: recEventName,
@@ -11071,6 +11215,10 @@ Máximo 200 palavras. Raciocínio breve antes da decisão.`;
         if (!riskAdjTennis.ok) { log('INFO', 'RISK', `tennis: bloqueada (${riskAdjTennis.reason})`); await new Promise(r => setTimeout(r, 3000)); continue; }
         const tipStakeAdjTennis = String(riskAdjTennis.units.toFixed(1).replace(/\.0$/, ''));
 
+        if (isLeagueBlocked('tennis', match.league)) {
+          log('INFO', 'AUTO-TENNIS', `[BLOCK] tennis/${match.league} — suprimido`);
+          await new Promise(r => setTimeout(r, 3000)); continue;
+        }
         const rec = await serverPost('/record-tip', {
           matchId: String(match.id), eventName: match.league,
           p1: match.team1, p2: match.team2, tipParticipant: tipPlayer,
@@ -11700,6 +11848,10 @@ Máximo 200 palavras.`;
         const fbModelPPick = tipMarket === '1X2_H' ? fbModelP1 : tipMarket === '1X2_A' ? fbModelP2 : (mlScore?.modelD ? parseFloat(mlScore.modelD) / 100 : null);
         const fbTipReason = text ? text.split('TIP_FB:')[0].trim().split('\n').filter(Boolean).pop()?.slice(0, 160) || null : null;
 
+        if (isLeagueBlocked('football', match.league)) {
+          log('INFO', 'AUTO-FOOTBALL', `[BLOCK] football/${match.league} — suprimido`);
+          continue;
+        }
         const _pickSideFb = tipMarket === '1X2_H' ? 'h' : tipMarket === '1X2_A' ? 'a' : tipMarket === '1X2_D' ? 'd' : null;
         const recFb = await serverPost('/record-tip', {
           matchId: recordMatchId, eventName: match.league,
@@ -11923,6 +12075,10 @@ async function pollTableTennis(runOnce = false) {
           ? `Elo: ${match.team1}=${elo.elo1} (${elo.eloMatches1}j) vs ${match.team2}=${elo.elo2} (${elo.eloMatches2}j)`
           : `Sofa form/H2H: factors=${factorCount}, edge=${mlScore.toFixed(1)}pp`;
 
+        if (isLeagueBlocked('tabletennis', match.league)) {
+          log('INFO', 'AUTO-TT', `[BLOCK] tabletennis/${match.league} — suprimido`);
+          continue;
+        }
         const rec = await serverPost('/record-tip', {
           matchId: String(match.id), eventName: match.league,
           p1: match.team1, p2: match.team2, tipParticipant: pickTeam,
@@ -12500,6 +12656,10 @@ Máximo 150 palavras.`;
           ? `Elo: ${match.team1}=${elo.elo1} (${elo.eloMatches1}j) vs ${match.team2}=${elo.elo2} (${elo.eloMatches2}j)${divTag}${tierTag}`
           : `HLTV form/H2H: factors=${factorCount}, edge=${mlScore.toFixed(1)}pp${divTag}${tierTag}`) + liveCtx + aiTag;
 
+        if (isLeagueBlocked('cs', match.league)) {
+          log('INFO', 'AUTO-CS', `[BLOCK] cs/${match.league} — suprimido`);
+          continue;
+        }
         const rec = await serverPost('/record-tip', {
           matchId: String(match.id) + csMapTag, eventName: match.league,
           p1: match.team1, p2: match.team2, tipParticipant: pickTeam,
@@ -12879,6 +13039,10 @@ async function pollValorant(runOnce = false) {
           : '';
         const tipReason = `Elo: ${match.team1}=${elo.elo1} (${elo.eloMatches1}j) vs ${match.team2}=${elo.elo2} (${elo.eloMatches2}j)${formStr}${h2hStr}${mapStr}${seriesStr}${liveStr}`;
 
+        if (isLeagueBlocked('valorant', match.league)) {
+          log('INFO', 'AUTO-VAL', `[BLOCK] valorant/${match.league} — suprimido`);
+          continue;
+        }
         const rec = await serverPost('/record-tip', {
           matchId: String(match.id) + valMapTag, eventName: match.league,
           p1: match.team1, p2: match.team2, tipParticipant: pickTeam,
@@ -13156,6 +13320,10 @@ async function runAutoDarts() {
           let _confDarts = ml.factorCount >= 2 ? 'MÉDIA' : 'BAIXA';
           if (_aiConfDarts === 'BAIXA' || (_aiConfDarts === 'MÉDIA' && _confDarts !== 'BAIXA')) _confDarts = _aiConfDarts;
           // Registra tip com flag shadow
+          if (isLeagueBlocked('darts', match.league)) {
+            log('INFO', 'AUTO-DARTS', `[BLOCK] darts/${match.league} — suprimido`);
+            continue;
+          }
           const rec = await serverPost('/record-tip', {
             matchId: String(match.id), eventName: match.league,
             p1: match.team1, p2: match.team2, tipParticipant: pickTeam,
@@ -13347,6 +13515,10 @@ async function runAutoSnooker() {
 
           let _confSnooker = ml.factorCount >= 2 ? 'MÉDIA' : 'BAIXA';
           if (_aiConfSnooker === 'BAIXA' || (_aiConfSnooker === 'MÉDIA' && _confSnooker !== 'BAIXA')) _confSnooker = _aiConfSnooker;
+          if (isLeagueBlocked('snooker', match.league)) {
+            log('INFO', 'AUTO-SNOOKER', `[BLOCK] snooker/${match.league} — suprimido`);
+            continue;
+          }
           const rec = await serverPost('/record-tip', {
             matchId: String(match.id), eventName: match.league,
             p1: match.team1, p2: match.team2, tipParticipant: pickTeam,

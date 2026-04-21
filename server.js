@@ -6767,6 +6767,73 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // CLV / ROI per-league (agrupa tips settled por sport+event_name).
+  // Flagga ligas com leak (CLV neg persistente ou ROI neg com n≥5).
+  // GET /clv-by-league?sport=lol&days=30&min=5
+  if (p === '/clv-by-league') {
+    try {
+      const qs = new URL(req.url, 'http://x').searchParams;
+      const sportFilter = qs.get('sport');
+      const days = parseInt(qs.get('days') || '30', 10);
+      const minN = parseInt(qs.get('min') || '5', 10);
+      const sportSql = sportFilter ? ` AND sport = ?` : '';
+      const sportParams = sportFilter ? [sportFilter] : [];
+      const rows = db.prepare(`
+        SELECT sport, event_name, odds, clv_odds, ev, result, profit_reais,
+               COALESCE(stake_reais, 0) AS stake_reais
+        FROM tips
+        WHERE result IN ('win','loss')
+          AND odds IS NOT NULL
+          AND (archived IS NULL OR archived = 0)
+          AND COALESCE(is_shadow, 0) = 0
+          AND sent_at >= datetime('now', '-${days} days')
+          ${sportSql}
+      `).all(...sportParams);
+
+      const agg = new Map();
+      for (const r of rows) {
+        const k = `${r.sport}|${(r.event_name || '?').trim()}`;
+        if (!agg.has(k)) agg.set(k, {
+          sport: r.sport, league: (r.event_name || '?').trim(),
+          n: 0, wins: 0,
+          evSum: 0, clvPctSum: 0, clvN: 0,
+          stakeSum: 0, profitSum: 0,
+        });
+        const a = agg.get(k);
+        a.n++;
+        if (r.result === 'win') a.wins++;
+        if (Number.isFinite(r.ev)) a.evSum += Number(r.ev);
+        if (Number.isFinite(r.clv_odds) && r.clv_odds > 1 && Number.isFinite(r.odds) && r.odds > 1) {
+          a.clvPctSum += ((r.odds - r.clv_odds) / r.clv_odds) * 100;
+          a.clvN++;
+        }
+        a.stakeSum += Number(r.stake_reais) || 0;
+        a.profitSum += Number(r.profit_reais) || 0;
+      }
+
+      const out = [];
+      for (const a of agg.values()) {
+        if (a.n < minN) continue;
+        out.push({
+          sport: a.sport,
+          league: a.league,
+          n: a.n,
+          hit_rate: +(a.wins / a.n * 100).toFixed(1),
+          avg_ev: +(a.evSum / a.n).toFixed(2),
+          avg_clv_pct: a.clvN ? +(a.clvPctSum / a.clvN).toFixed(2) : null,
+          roi_pct: a.stakeSum > 0 ? +(a.profitSum / a.stakeSum * 100).toFixed(2) : null,
+          profit: +a.profitSum.toFixed(2),
+          staked: +a.stakeSum.toFixed(2),
+        });
+      }
+      out.sort((x, y) => x.profit - y.profit); // ascending: leaks first
+      const leaks = out.filter(r => r.profit < -5 || (r.roi_pct != null && r.roi_pct <= -10 && r.n >= 10));
+      const strong = out.filter(r => r.profit > 5 && r.roi_pct != null && r.roi_pct > 5);
+      sendJson(res, { ok: true, days, sport: sportFilter, min_n: minN, total: out.length, leaks, strong, rows: out });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
   // Audit bankroll: mostra initial/current stored vs recomputed, gap per-sport e total.
   // Inclui reclassificação esports legado → lol/dota2.
   // GET /bankroll-audit
