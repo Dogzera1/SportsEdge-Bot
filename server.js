@@ -6409,6 +6409,28 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // Marca market_tips_shadow como VOID quando EV>maxEv (bogus tips de scanner bug).
+  // POST /void-market-tips-bogus?sport=tennis&minEv=40&hours=24
+  if (p === '/void-market-tips-bogus' && req.method === 'POST') {
+    const sport = parsed.query.sport || 'tennis';
+    const minEv = parseFloat(parsed.query.minEv || '40');
+    const hours = parseInt(parsed.query.hours || '24', 10);
+    try {
+      const r = db.prepare(`
+        UPDATE market_tips_shadow
+        SET result = 'void', settled_at = datetime('now'), profit_units = 0
+        WHERE sport = ?
+          AND result IS NULL
+          AND ev_pct >= ?
+          AND created_at >= datetime('now', '-${hours} hours')
+      `).run(sport, minEv);
+      sendJson(res, { ok: true, voided: r.changes, sport, minEv, hours });
+    } catch (e) {
+      sendJson(res, { error: e.message }, 500);
+    }
+    return;
+  }
+
   // Seed histórico de Dota 2 via OpenDota /api/proMatches.
   // Alimenta match_results (game='dota2') pra form/H2H endpoints.
   // POST /seed-dota?days=60&apply=1
