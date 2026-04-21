@@ -10787,6 +10787,11 @@ const server = http.createServer(async (req, res) => {
       const variance = dailyReturns.length ? dailyReturns.reduce((a,b)=>a+(b-mean)**2,0) / dailyReturns.length : 0;
       const std = Math.sqrt(variance);
       const sharpe = std > 0 ? (mean / std) * Math.sqrt(252) : null; // anualizado
+      // ROI e count pra Bankroll Guardian ROI-based gate (além de DD).
+      const totalStakedAll = rows.reduce((s, r) => s + (Number(r.stake_r) || 0), 0);
+      const totalProfitAll = rows.reduce((s, r) => s + (Number(r.profit_r) || 0), 0);
+      const roiPct = totalStakedAll > 0 ? +(totalProfitAll / totalStakedAll * 100).toFixed(2) : null;
+      const settledCount = rows.reduce((s, r) => s + (Number(r.n) || 0), 0);
       sendJson(res, {
         sport,
         days,
@@ -10797,6 +10802,8 @@ const server = http.createServer(async (req, res) => {
         max_drawdown_pct: parseFloat((maxDD * 100).toFixed(2)),
         sharpe_annualized: sharpe != null ? parseFloat(sharpe.toFixed(2)) : null,
         days_settled: series.length,
+        roi_pct: roiPct,
+        settled_count: settledCount,
         series,
       });
     } catch (e) {
