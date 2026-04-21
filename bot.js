@@ -6432,22 +6432,61 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
   } else if (cmd === '/kelly-config' || cmd === '/kelly') {
     if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
     try {
+      const days = Math.max(7, Math.min(90, parseInt(parts[1] || '30', 10) || 30));
       const sports = ['lol', 'dota2', 'mma', 'tennis', 'cs', 'valorant', 'football', 'tabletennis', 'darts', 'snooker'];
-      let txt = `🎰 *Kelly fractions (efetivas)*\n\n`;
-      txt += `\`SPORT     ALTA    MÉDIA   BAIXA\`\n`;
+      // Pull ROI trailing per sport (reclassifica esports→lol/dota2)
+      const roiBySport = {};
+      for (const sp of sports) {
+        const extraSql = sp === 'dota2'
+          ? " OR (sport = 'esports' AND (match_id LIKE 'dota2_%' OR LOWER(COALESCE(event_name,'')) LIKE '%dota%'))"
+          : sp === 'lol'
+            ? " OR (sport = 'esports' AND match_id NOT LIKE 'dota2_%' AND LOWER(COALESCE(event_name,'')) NOT LIKE '%dota%')"
+            : "";
+        const r = db.prepare(`
+          SELECT COUNT(*) AS n,
+                 COALESCE(SUM(stake_reais), 0) AS staked,
+                 COALESCE(SUM(profit_reais), 0) AS profit
+          FROM tips
+          WHERE sent_at >= datetime('now', '-${days} days')
+            AND (archived IS NULL OR archived = 0)
+            AND COALESCE(is_shadow, 0) = 0
+            AND result IN ('win','loss')
+            AND (sport = ?${extraSql})
+        `).get(sp);
+        const staked = Number(r?.staked || 0);
+        const profit = Number(r?.profit || 0);
+        const n = Number(r?.n || 0);
+        roiBySport[sp] = { n, roi: staked > 0 ? (profit / staked * 100) : null };
+      }
+      // ROI band → Kelly suggestion multiplier (applied over default 0.25/0.167/0.10)
+      const suggestMultiplier = (roi, n) => {
+        if (n < 10 || roi == null) return { mult: 1.0, band: '?', rec: 'amostra baixa — manter' };
+        if (roi >= 5) return { mult: 1.0, band: 'healthy', rec: 'manter ou +10%' };
+        if (roi >= 0) return { mult: 1.0, band: 'neutral', rec: 'manter' };
+        if (roi >= -10) return { mult: 0.85, band: 'warn', rec: '-15% (cautela)' };
+        if (roi >= -25) return { mult: 0.70, band: 'review', rec: '-30%' };
+        return { mult: 0.40, band: 'leak', rec: '-60% (ou shadow)' };
+      };
+      let txt = `🎰 *Kelly — efetivas vs sugeridas (${days}d)*\n\n`;
+      txt += `\`SPORT     EFETIVA   SUGERIDA   ROI%    n   BAND\`\n`;
       for (const sp of sports) {
         const alta = getKellyFraction(sp, 'ALTA');
-        const media = getKellyFraction(sp, 'MEDIA');
-        const baixa = getKellyFraction(sp, 'BAIXA');
-        const isDefault = alta === 0.25 && Math.abs(media - 1/6) < 0.001 && baixa === 0.10;
-        const marker = isDefault ? '' : ' *';
-        txt += `\`${sp.padEnd(9)} ${alta.toFixed(3)}   ${media.toFixed(3)}   ${baixa.toFixed(3)}${marker}\`\n`;
+        const { roi, n } = roiBySport[sp] || { roi: null, n: 0 };
+        const sug = suggestMultiplier(roi, n);
+        const sugAlta = 0.25 * sug.mult;
+        const diff = Math.abs(alta - sugAlta) > 0.005;
+        const marker = diff ? '⚠️' : '✓';
+        const roiStr = roi != null ? (roi >= 0 ? '+' : '') + roi.toFixed(1) : '—';
+        txt += `\`${sp.padEnd(9)} ${alta.toFixed(3)}     ${sugAlta.toFixed(3)}     ${roiStr.padStart(6)}  ${String(n).padStart(3)}  ${sug.band}\` ${marker}\n`;
       }
-      txt += `\n_Default: ALTA ¼, MÉDIA ⅙, BAIXA 1/10 (\`*\` = override env ativa)_\n\n`;
-      txt += `*Env vars:*\n`;
-      txt += `• \`KELLY_ALTA\`, \`KELLY_MEDIA\`, \`KELLY_BAIXA\` — override global\n`;
-      txt += `• \`KELLY_<SPORT>_<CONF>\` — override per-sport (ex: KELLY_LOL_ALTA=0.20)\n`;
-      txt += `• Range válido: 0 < v ≤ 1`;
+      txt += `\n_Sugestão baseada em ROI ${days}d (n≥10). ⚠️ = efetiva difere da sugerida._\n\n`;
+      txt += `*Bandas ROI → mult Kelly ALTA:*\n`;
+      txt += `• \`healthy (≥+5%)\` → 1.00× (0.25)\n`;
+      txt += `• \`neutral (0..+5%)\` → 1.00× (0.25)\n`;
+      txt += `• \`warn (-10..0%)\` → 0.85× (0.212)\n`;
+      txt += `• \`review (-25..-10%)\` → 0.70× (0.175)\n`;
+      txt += `• \`leak (≤-25%)\` → 0.40× (0.100) ou /pause-sport\n\n`;
+      txt += `_Override: \`KELLY_<SPORT>_ALTA=<v>\` no env. /kelly 60 pra janela 60d._`;
       const r_ = await send(token, chatId, txt).catch(e => ({ ok: false }));
       if (r_ && r_.ok === false) await send(token, chatId, txt.replace(/[*_`]/g, ''), { parse_mode: undefined }).catch(() => {});
     } catch (e) { await send(token, chatId, `❌ ${e.message}`); }
