@@ -6480,6 +6480,39 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // Dedup market_tips_shadow: voida duplicatas por (match_key, market, side)
+  // mantendo só a de maior EV. POST /void-market-tips-duplicates?sport=tennis&days=7
+  if (p === '/void-market-tips-duplicates' && req.method === 'POST') {
+    const sport = parsed.query.sport || null;
+    const days = Math.max(1, Math.min(90, parseInt(parsed.query.days || '7', 10) || 7));
+    try {
+      const conds = [`created_at >= datetime('now', '-${days} days')`, 'result IS NULL'];
+      const params = [];
+      if (sport) { conds.push('sport = ?'); params.push(sport); }
+      const rows = db.prepare(`
+        SELECT id, sport, match_key, market, side, ev_pct
+        FROM market_tips_shadow
+        WHERE ${conds.join(' AND ')}
+        ORDER BY ev_pct DESC
+      `).all(...params);
+      const keep = new Set();
+      const voidIds = [];
+      for (const r of rows) {
+        const key = `${r.sport}|${r.match_key}|${r.market}|${r.side}`;
+        if (!keep.has(key)) { keep.add(key); continue; }
+        voidIds.push(r.id);
+      }
+      let voided = 0;
+      if (voidIds.length) {
+        const stmt = db.prepare(`UPDATE market_tips_shadow SET result = 'void', settled_at = datetime('now'), profit_units = 0 WHERE id = ?`);
+        const tx = db.transaction(ids => { for (const id of ids) { const r = stmt.run(id); voided += r.changes; } });
+        tx(voidIds);
+      }
+      sendJson(res, { ok: true, checked: rows.length, kept: keep.size, voided, sport: sport || 'all', days });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
   // Marca market_tips_shadow como VOID quando EV>maxEv (bogus tips de scanner bug).
   // POST /void-market-tips-bogus?sport=tennis&minEv=40&hours=24
   if (p === '/void-market-tips-bogus' && req.method === 'POST') {
