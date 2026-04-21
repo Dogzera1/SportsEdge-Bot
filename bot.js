@@ -1110,6 +1110,13 @@ async function fetchSportPerformanceMultiplier(sport) {
 // antes de calcular stake final. Default OFF (CLV_AUTO_KELLY=true pra ativar).
 const _clvKellyCache = new Map(); // key = `${sport}|${league||''}` → { ts, mult, reason, n, avgClv }
 const CLV_KELLY_TTL = 10 * 60 * 1000;
+// TTL eviction periódico pra evitar memory leak (ligas/sports podem rotacionar).
+setInterval(() => {
+  const now = Date.now();
+  for (const [k, v] of _clvKellyCache) {
+    if (!v || (now - v.ts) > CLV_KELLY_TTL * 2) _clvKellyCache.delete(k);
+  }
+}, 15 * 60 * 1000).unref?.();
 // Captura CLV atrasada pra live tips em sports de match curto (CS, Valorant, Tennis live).
 // Depois de X min, fetcha odds atuais do feed e POSTa /update-clv. Útil porque esses
 // matches terminam muito rápido — o updater async agendado no checkCLV não chega a tempo.

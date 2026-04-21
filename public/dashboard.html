@@ -793,12 +793,16 @@ const _alertKeys = new Set();
 // ─────────────────────────────────────────────────────────────
 // API helper
 // ─────────────────────────────────────────────────────────────
-async function apiFetch(path) {
+async function apiFetch(path, timeoutMs = 15000) {
+  const ctrl = new AbortController();
+  const to = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
-    const r = await fetch(BASE + path);
+    const r = await fetch(BASE + path, { signal: ctrl.signal });
+    clearTimeout(to);
     if (!r.ok) throw new Error('HTTP ' + r.status);
     return await r.json();
   } catch (e) {
+    clearTimeout(to);
     console.warn('Fetch', path, e.message);
     return null;
   }
@@ -924,11 +928,20 @@ window.settleTipManual = settleTipManual;
 // ─────────────────────────────────────────────────────────────
 // UI state helpers — loading/empty padronizados
 // ─────────────────────────────────────────────────────────────
-function setLoading(el) {
+function setLoading(el, timeoutMs = 20000) {
   if (!el) return;
   if (typeof el === 'string') el = document.getElementById(el);
   if (!el) return;
+  const stamp = Date.now();
+  el.dataset.loadingStamp = stamp;
   el.innerHTML = '<div class="skeleton-state">⟳ carregando…</div>';
+  // Safety timeout: se loader ficar >20s visível, mostra erro (evita loader eterno).
+  setTimeout(() => {
+    if (el.dataset.loadingStamp !== String(stamp)) return; // load completou/reabriu
+    if (el.querySelector('.skeleton-state')) {
+      el.innerHTML = '<div class="empty-state" style="color:var(--danger,#ef4444)">⚠ tempo esgotado — tente atualizar</div>';
+    }
+  }, timeoutMs);
 }
 function setEmpty(el, msg = 'Sem dados no período') {
   if (!el) return;
