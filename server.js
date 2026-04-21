@@ -6652,6 +6652,44 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // Debug: lista todas tips de um sport com profit_reais individual — diagnóstico de drift.
+  // GET /debug-sport-tips?sport=valorant
+  if (p === '/debug-sport-tips') {
+    try {
+      const sport = String(parsed.query.sport || 'valorant').toLowerCase();
+      const { sportSet } = resolveSportSet(sport, null);
+      const sportInSql = `(${sportSet.map(() => '?').join(',')})`;
+      const tips = db.prepare(`
+        SELECT id, sport, participant1, participant2, tip_participant, stake, odds, result,
+               stake_reais, profit_reais, archived, is_shadow, sent_at, settled_at, match_id
+        FROM tips
+        WHERE sport IN ${sportInSql}
+        ORDER BY sent_at DESC
+        LIMIT 50
+      `).all(...sportSet);
+      const dedupedSql = `
+        SELECT id, profit_reais FROM tips
+        WHERE sport IN ${sportInSql}
+          AND (archived IS NULL OR archived = 0)
+          AND result IN ('win','loss','push','void')
+          AND id IN (SELECT MAX(id) FROM tips WHERE sport IN ${sportInSql} AND (archived IS NULL OR archived = 0) GROUP BY COALESCE(NULLIF(TRIM(match_id), ''), 'id:' || CAST(id AS TEXT)))
+      `;
+      const deduped = db.prepare(dedupedSql).all(...sportSet, ...sportSet);
+      const sumDeduped = deduped.reduce((s, t) => s + Number(t.profit_reais || 0), 0);
+      const sumAll = db.prepare(`SELECT COALESCE(SUM(profit_reais), 0) AS total FROM tips WHERE sport IN ${sportInSql} AND (archived IS NULL OR archived = 0) AND result IN ('win','loss','push','void')`).get(...sportSet).total;
+      sendJson(res, {
+        ok: true,
+        sport,
+        sumAll: +Number(sumAll).toFixed(2),
+        sumDeduped: +sumDeduped.toFixed(2),
+        dedupedCount: deduped.length,
+        dedupedIds: deduped.map(d => d.id),
+        tips,
+      });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
   // Migrations status: lista migrations aplicadas com data — debug pós-deploy.
   // GET /migrations-status
   if (p === '/migrations-status') {

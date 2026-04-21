@@ -6226,6 +6226,28 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
       await send(token, chatId, txt);
     } catch (e) { await send(token, chatId, `❌ ${e.message}`); }
 
+  } else if (cmd === '/debug-sport' || cmd === '/debug-tips') {
+    if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
+    try {
+      const sport = (parts[1] || 'valorant').toLowerCase();
+      const r = await serverGet(`/debug-sport-tips?sport=${encodeURIComponent(sport)}`);
+      if (!r?.ok) { await send(token, chatId, `❌ ${r?.error || 'falha'}`); return; }
+      let txt = `🔬 *DEBUG ${sport.toUpperCase()}*\n\n`;
+      txt += `SUM all tips: R$${Number(r.sumAll).toFixed(2)}\n`;
+      txt += `SUM deduped: R$${Number(r.sumDeduped).toFixed(2)}\n`;
+      txt += `Deduped count: ${r.dedupedCount}\n`;
+      txt += `Deduped IDs: ${(r.dedupedIds || []).slice(0, 20).join(',')}\n\n`;
+      txt += `*Todas tips (${(r.tips || []).length}):*\n`;
+      for (const t of (r.tips || []).slice(0, 15)) {
+        const isDeduped = (r.dedupedIds || []).includes(t.id) ? '✓' : '✗';
+        const archFlag = t.archived ? 'A' : '';
+        txt += `${isDeduped}${archFlag} id=${t.id} ${t.result || 'pend'} profit=R$${Number(t.profit_reais || 0).toFixed(2)} stake=${t.stake} match=${(t.match_id || '').slice(0, 20)}\n`;
+        if (txt.length > 3500) { txt += '_(truncado)_'; break; }
+      }
+      const res_ = await send(token, chatId, txt).catch(e => ({ ok: false, error: e.message }));
+      if (res_ && res_.ok === false) await send(token, chatId, txt.replace(/[*_`]/g, ''), { parse_mode: undefined }).catch(() => {});
+    } catch (e) { await send(token, chatId, `❌ ${e.message}`); }
+
   } else if (cmd === '/sync-banca' || cmd === '/force-sync') {
     if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
     try {
@@ -7622,7 +7644,8 @@ async function poll(token, sport) {
                      text.startsWith('/banca-audit') || text.startsWith('/bankroll-audit') ||
                      text.startsWith('/server-errors') || text.startsWith('/fetch-errors') ||
                      text.startsWith('/migrations') || text.startsWith('/sync-banca') ||
-                     text.startsWith('/force-sync') ||
+                     text.startsWith('/force-sync') || text.startsWith('/debug-sport') ||
+                     text.startsWith('/debug-tips') ||
                      text.startsWith('/tip ') || text.startsWith('/help') || text.startsWith('/start') ||
                      text.startsWith('/alerts')) {
             // Passa `sport` da poll (qual bot recebeu) para evitar default 'esports'
