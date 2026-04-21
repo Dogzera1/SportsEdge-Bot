@@ -6767,6 +6767,50 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // GET /league-blocklist — lê table league_blocklist (populada por bot.js migration 045)
+  // Retorna entries separadas por source (manual/env/auto) + cooldowns ativos.
+  if (p === '/league-blocklist') {
+    try {
+      const now = Date.now();
+      const rows = db.prepare(`SELECT * FROM league_blocklist ORDER BY source ASC, created_at DESC`).all();
+      const blocked = [];
+      const cooldowns = [];
+      for (const r of rows) {
+        if (r.source === 'cooldown') {
+          if (r.cooldown_until && r.cooldown_until > now) {
+            cooldowns.push({
+              entry: r.entry,
+              cooldown_until: r.cooldown_until,
+              hours_remaining: +((r.cooldown_until - now) / (60 * 60 * 1000)).toFixed(1),
+            });
+          }
+          continue;
+        }
+        blocked.push({
+          entry: r.entry,
+          source: r.source,
+          reason: r.reason,
+          roi_pct: r.roi_pct,
+          clv_pct: r.clv_pct,
+          n_tips: r.n_tips,
+          age_days: +((now - (r.created_at || now)) / (24 * 60 * 60 * 1000)).toFixed(1),
+        });
+      }
+      sendJson(res, {
+        ok: true,
+        total: blocked.length,
+        by_source: {
+          auto: blocked.filter(b => b.source === 'auto').length,
+          manual: blocked.filter(b => b.source === 'manual').length,
+          env: blocked.filter(b => b.source === 'env').length,
+        },
+        blocked,
+        cooldowns,
+      });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
   // CLV / ROI per-league (agrupa tips settled por sport+event_name).
   // Flagga ligas com leak (CLV neg persistente ou ROI neg com n≥5).
   // GET /clv-by-league?sport=lol&days=30&min=5

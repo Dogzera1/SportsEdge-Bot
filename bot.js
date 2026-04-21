@@ -2990,21 +2990,94 @@ function isBucketShadowed(sport) {
   return _splitBucketShadow.has(sport);
 }
 
-// League blocklist — substring match case-insensitive. Seed via env LEAGUE_BLOCKLIST.
-// Formato: "sport:substring" ou apenas "substring" (aplica a qualquer sport).
-// Ex: "lol:prime league,mma:LFA,tennis:challenger"
-const _leagueBlocklist = new Set(); // Set<string> entries lowercased "sport:substr" ou "*:substr"
-const _autoBlockedLeagues = new Map(); // entry → { reason, since, roi, clv, n } (só auto-managed)
-const _leagueUnblockCooldown = new Map(); // entry → timestamp (não auto-re-adicionar se manualmente desbloqueado)
+// League blocklist — substring match case-insensitive. Persistido em DB (table
+// league_blocklist, migration 045). Seed adicional via env LEAGUE_BLOCKLIST.
+// Formato entry: "sport:substring" ou "*:substring" (qualquer sport), tudo lowercase.
+const _leagueBlocklist = new Set(); // Set<string> entries
+const _autoBlockedLeagues = new Map(); // entry → { reason, since, roi, clv, n }
+const _leagueUnblockCooldown = new Map(); // entry → expire_ts
+
+function _persistBlocklistEntry(entry, source, meta = {}) {
+  try {
+    db.prepare(`
+      INSERT INTO league_blocklist (entry, source, reason, roi_pct, clv_pct, n_tips, created_at, cooldown_until)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(entry) DO UPDATE SET
+        source = excluded.source,
+        reason = excluded.reason,
+        roi_pct = excluded.roi_pct,
+        clv_pct = excluded.clv_pct,
+        n_tips = excluded.n_tips,
+        created_at = excluded.created_at,
+        cooldown_until = excluded.cooldown_until
+    `).run(
+      entry, source,
+      meta.reason || null,
+      meta.roi != null ? Number(meta.roi) : null,
+      meta.clv != null ? Number(meta.clv) : null,
+      meta.n != null ? Number(meta.n) : null,
+      meta.since || Date.now(),
+      meta.cooldownUntil || null,
+    );
+  } catch (e) { log('WARN', 'BLOCKLIST-DB', `persist ${entry}: ${e.message}`); }
+}
+
+function _deleteBlocklistEntry(entry, cooldownUntil = null) {
+  try {
+    if (cooldownUntil) {
+      // Preserva row como cooldown marker (source=cooldown, não bloqueia mas impede re-block)
+      db.prepare(`UPDATE league_blocklist SET source = 'cooldown', cooldown_until = ?, reason = 'unblock manual' WHERE entry = ?`).run(cooldownUntil, entry);
+    } else {
+      db.prepare(`DELETE FROM league_blocklist WHERE entry = ?`).run(entry);
+    }
+  } catch (e) { log('WARN', 'BLOCKLIST-DB', `delete ${entry}: ${e.message}`); }
+}
+
+function _loadBlocklistFromDb() {
+  try {
+    const rows = db.prepare(`SELECT * FROM league_blocklist`).all();
+    const now = Date.now();
+    for (const r of rows) {
+      if (r.source === 'cooldown') {
+        // Só cooldown marker — não bloqueia, mas protege re-block pelo LEAGUE-GUARD
+        if (r.cooldown_until && r.cooldown_until > now) {
+          _leagueUnblockCooldown.set(r.entry, r.cooldown_until);
+        } else {
+          // Cooldown expirou — cleanup
+          db.prepare(`DELETE FROM league_blocklist WHERE entry = ?`).run(r.entry);
+        }
+        continue;
+      }
+      _leagueBlocklist.add(r.entry);
+      if (r.source === 'auto') {
+        _autoBlockedLeagues.set(r.entry, {
+          reason: r.reason || '',
+          since: r.created_at || now,
+          roi: r.roi_pct,
+          clv: r.clv_pct,
+          n: r.n_tips,
+        });
+      }
+    }
+    log('INFO', 'BLOCKLIST', `Loaded DB: ${_leagueBlocklist.size} entries (${_autoBlockedLeagues.size} auto, ${_leagueUnblockCooldown.size} cooldowns)`);
+  } catch (e) { log('WARN', 'BLOCKLIST-DB', `load: ${e.message}`); }
+}
+
 function _parseBlocklistEnv() {
   const raw = String(process.env.LEAGUE_BLOCKLIST || '').trim();
   if (!raw) return;
   for (const e of raw.split(',')) {
     const v = e.trim().toLowerCase();
     if (!v) continue;
-    _leagueBlocklist.add(v.includes(':') ? v : `*:${v}`);
+    const entry = v.includes(':') ? v : `*:${v}`;
+    if (!_leagueBlocklist.has(entry)) {
+      _leagueBlocklist.add(entry);
+      _persistBlocklistEntry(entry, 'env', { since: Date.now() });
+    }
   }
 }
+// Ordem: DB primeiro (restaura auto-blocks + cooldowns), env depois (add seeds)
+_loadBlocklistFromDb();
 _parseBlocklistEnv();
 
 function isLeagueBlocked(sport, league) {
@@ -3840,7 +3913,9 @@ async function runLeagueGuardCycle() {
         if (now < cooldownUntil) continue;
         _leagueBlocklist.add(entry);
         const reason = `ROI ${roi.toFixed(1)}% n=${r.n}${clv != null ? ` CLV ${clv.toFixed(1)}%` : ''}`;
-        _autoBlockedLeagues.set(entry, { reason, since: now, roi, clv, n: r.n });
+        const meta = { reason, since: now, roi, clv, n: r.n };
+        _autoBlockedLeagues.set(entry, meta);
+        _persistBlocklistEntry(entry, 'auto', meta);
         alerts.push(`🚫 ${entry} — ${reason}`);
         log('WARN', 'LEAGUE-GUARD', `auto-blocked ${entry}: ${reason}`);
       }
@@ -3848,6 +3923,7 @@ async function runLeagueGuardCycle() {
       else if (autoMeta && roi != null && roi >= roiRestore && r.n >= minN) {
         _leagueBlocklist.delete(entry);
         _autoBlockedLeagues.delete(entry);
+        _deleteBlocklistEntry(entry); // sem cooldown — recuperou legit
         restored.push(`✅ ${entry} — ROI recuperou pra ${roi.toFixed(1)}% (n=${r.n})`);
         log('INFO', 'LEAGUE-GUARD', `auto-restored ${entry}: ROI=${roi.toFixed(1)}%`);
       }
@@ -6427,7 +6503,9 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
           const wasAuto = _autoBlockedLeagues.delete(entry);
           // Cooldown 7d (default) pra impedir LEAGUE-GUARD de re-bloquear imediato
           const cooldownMs = parseInt(process.env.LEAGUE_GUARD_COOLDOWN_DAYS || '7', 10) * 24 * 60 * 60 * 1000;
-          _leagueUnblockCooldown.set(entry, Date.now() + cooldownMs);
+          const cooldownUntil = Date.now() + cooldownMs;
+          _leagueUnblockCooldown.set(entry, cooldownUntil);
+          _deleteBlocklistEntry(entry, cooldownUntil);
           log('INFO', 'BLOCKLIST', `UNBLOCK ${entry} via cmd (was ${wasAuto ? 'auto' : 'manual'})`);
           await send(token, chatId, `✅ Desbloqueado: \`${entry}\`\n${wasAuto ? '_Era auto-blocked — cooldown 7d antes de LEAGUE-GUARD poder re-bloquear._' : ''}`);
         } else {
@@ -6435,8 +6513,9 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
         }
       } else {
         _leagueBlocklist.add(entry);
+        _persistBlocklistEntry(entry, 'manual', { since: Date.now() });
         log('WARN', 'BLOCKLIST', `BLOCK ${entry} via cmd`);
-        await send(token, chatId, `🚫 Bloqueado: \`${entry}\`\n_Tips com liga contendo "${substr}" ${sportArg !== '*' ? 'em ' + sportArg : ''} não emitirão._\n\n⚠️ _Não persiste entre restart — adicione à env LEAGUE_BLOCKLIST._`);
+        await send(token, chatId, `🚫 Bloqueado: \`${entry}\`\n_Tips com liga contendo "${substr}" ${sportArg !== '*' ? 'em ' + sportArg : ''} não emitirão._\n\n✅ _Persiste em DB (restart-safe)._`);
       }
     } catch (e) { await send(token, chatId, `❌ ${e.message}`); }
 

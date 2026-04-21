@@ -1124,6 +1124,27 @@ const migrations = [
       db.prepare(`DELETE FROM settings WHERE key = 'baseline'`).run();
     },
   },
+  {
+    id: '045_league_blocklist_persistence',
+    up(db) {
+      // Persistência do league blocklist (antes runtime-only em bot.js _leagueBlocklist).
+      // Bot.js lê no startup → reconstitui Set + Map; escreve em cada mutação (block/unblock/auto).
+      // Server.js lê pra expor endpoint /league-blocklist (dashboard consumo).
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS league_blocklist (
+          entry TEXT PRIMARY KEY,
+          source TEXT NOT NULL,
+          reason TEXT,
+          roi_pct REAL,
+          clv_pct REAL,
+          n_tips INTEGER,
+          created_at INTEGER NOT NULL,
+          cooldown_until INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS idx_league_blocklist_source ON league_blocklist(source);
+      `);
+    },
+  },
 ];
 
 function applyMigrations(db) {

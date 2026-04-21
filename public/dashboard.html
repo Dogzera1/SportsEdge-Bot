@@ -567,6 +567,15 @@
     <div id="leagueLeaksList"></div>
   </div>
 
+  <!-- Liga blocklist: bloqueios ativos (auto/manual/env) + cooldowns -->
+  <div class="card" id="leagueBlocklistCard" style="display:none;margin-bottom:12px">
+    <div class="card-header">
+      <div class="card-title">🛡️ Blocklist ativa</div>
+      <div class="card-meta" id="leagueBlocklistMeta"></div>
+    </div>
+    <div id="leagueBlocklistList"></div>
+  </div>
+
   <!-- Main grid: Equity curve + Sport ROI list -->
   <div class="main-grid">
     <div class="card">
@@ -1047,6 +1056,7 @@ async function refresh() {
         loadTips(gen),
         loadSportsRisk(gen),
         loadLeagueLeaks(gen),
+        loadLeagueBlocklist(gen),
       ]);
     } else {
       await Promise.all([
@@ -1057,6 +1067,7 @@ async function refresh() {
         loadLiveTips(gen),
         loadSportsRisk(gen),
         loadLeagueLeaks(gen),
+        loadLeagueBlocklist(gen),
         loadUpcoming(gen),
         loadTips(gen),
         loadModels(gen),
@@ -1653,6 +1664,69 @@ async function loadLeagueLeaks(gen = refreshGen) {
     list.innerHTML = html;
   } catch (e) {
     console.warn('loadLeagueLeaks error:', e);
+    card.style.display = 'none';
+  }
+}
+
+async function loadLeagueBlocklist(gen = refreshGen) {
+  const card = document.getElementById('leagueBlocklistCard');
+  const list = document.getElementById('leagueBlocklistList');
+  const meta = document.getElementById('leagueBlocklistMeta');
+  if (!card || !list) return;
+  try {
+    const r = await apiFetch('/league-blocklist');
+    if (shouldAbort(gen)) return;
+    if (!r?.ok) { card.style.display = 'none'; return; }
+    const blocked = r.blocked || [];
+    const cooldowns = r.cooldowns || [];
+    if (!blocked.length && !cooldowns.length) { card.style.display = 'none'; return; }
+    card.style.display = '';
+    const bs = r.by_source || {};
+    meta.textContent = `${blocked.length} bloqueadas (🤖${bs.auto || 0} 🔧${bs.manual || 0} 📄${bs.env || 0}) · ⏸️ ${cooldowns.length} cooldowns`;
+    const sourceIcon = { auto: '🤖', manual: '🔧', env: '📄' };
+    const sourceColor = { auto: '#ef4444', manual: '#f59e0b', env: '#64748b' };
+    const rows = [];
+    for (const b of blocked) {
+      const color = sourceColor[b.source] || '#64748b';
+      const icon = sourceIcon[b.source] || '•';
+      const age = b.age_days != null ? `${b.age_days}d` : '—';
+      const stats = [];
+      if (b.roi_pct != null) stats.push(`ROI ${b.roi_pct.toFixed(1)}%`);
+      if (b.clv_pct != null) stats.push(`CLV ${b.clv_pct.toFixed(1)}%`);
+      if (b.n_tips != null) stats.push(`n=${b.n_tips}`);
+      const statsStr = stats.length ? ` · ${stats.join(' · ')}` : '';
+      const reasonStr = b.reason ? ` — ${b.reason.replace(/</g, '&lt;').slice(0, 60)}` : '';
+      rows.push(`
+        <div style="padding:8px 12px;border-left:3px solid ${color};background:rgba(0,0,0,0.15);margin-bottom:6px;border-radius:4px">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+              <span>${icon}</span>
+              <strong style="color:${color}">${b.source.toUpperCase()}</strong>
+              <code style="background:rgba(255,255,255,0.05);padding:2px 6px;border-radius:3px;font-size:12px">${b.entry.replace(/</g, '&lt;')}</code>
+            </div>
+            <span class="kpi-meta" style="font-size:11px">há ${age}${statsStr}</span>
+          </div>
+          ${reasonStr ? `<div class="kpi-meta" style="font-size:11px;margin-top:4px;color:var(--text-dim)">${reasonStr}</div>` : ''}
+        </div>
+      `);
+    }
+    for (const c of cooldowns) {
+      rows.push(`
+        <div style="padding:6px 12px;border-left:3px solid #3b82f6;background:rgba(59,130,246,0.08);margin-bottom:6px;border-radius:4px;opacity:0.8">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+            <div style="display:flex;gap:8px;align-items:center">
+              <span>⏸️</span>
+              <strong style="color:#3b82f6">COOLDOWN</strong>
+              <code style="background:rgba(255,255,255,0.05);padding:2px 6px;border-radius:3px;font-size:12px">${c.entry.replace(/</g, '&lt;')}</code>
+            </div>
+            <span class="kpi-meta" style="font-size:11px">${c.hours_remaining.toFixed(1)}h restantes</span>
+          </div>
+        </div>
+      `);
+    }
+    list.innerHTML = rows.join('');
+  } catch (e) {
+    console.warn('loadLeagueBlocklist error:', e);
     card.style.display = 'none';
   }
 }
