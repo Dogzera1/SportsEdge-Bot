@@ -6230,6 +6230,7 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
     try {
       const r = await serverGet('/migrations-status');
       if (!r?.ok) { await send(token, chatId, `❌ ${r?.error || 'falha'}`); return; }
+      // Backticks ao redor protegem underscores em IDs. Double-check com fallback.
       let txt = `🗄️ *MIGRATIONS* (${r.count} aplicadas)\n\n`;
       txt += `*Últimas 20:*\n`;
       for (const m of r.latest || []) {
@@ -6237,7 +6238,6 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
         txt += `  • \`${m.id}\` — ${d}\n`;
         if (txt.length > 3500) break;
       }
-      // Check se migrations críticas rodaram
       const ids = new Set((r.latest || []).map(m => m.id));
       const critical = ['039_per_sport_unit_model_reset_initial', '040_rebuild_tips_with_per_sport_unit_tiers', '043_force_rebuild_per_sport_tier_v2', '044_fix_baseline_settings_key'];
       const missing = critical.filter(c => !ids.has(c));
@@ -6247,7 +6247,10 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
       } else {
         txt += `\n✅ Migrations per-sport tier model OK`;
       }
-      await send(token, chatId, txt);
+      const sendRes = await send(token, chatId, txt).catch(e => ({ ok: false, error: e.message }));
+      if (sendRes && sendRes.ok === false) {
+        await send(token, chatId, txt.replace(/[*_`]/g, ''), { parse_mode: undefined }).catch(() => {});
+      }
     } catch (e) { await send(token, chatId, `❌ ${e.message}`); }
 
   } else if (cmd === '/server-errors' || cmd === '/fetch-errors') {
@@ -6282,16 +6285,17 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
       if (!r) { await send(token, chatId, '❌ resposta vazia do server'); return; }
       if (r.error) { await send(token, chatId, `❌ server: ${r.error}`); return; }
       if (!r.ok) { await send(token, chatId, `❌ ${r.error || 'endpoint retornou ok=false'}`); return; }
-      // Null-safety em todos os campos
       const n = (v, d = 0) => Number.isFinite(Number(v)) ? Number(v) : d;
       const fmt = (v, d = 2) => n(v).toFixed(d);
+      // Escape underscores pra não quebrar Telegram Markdown (interpreta como italic).
+      const escMd = s => String(s || '').replace(/_/g, '\\_').replace(/\*/g, '\\*');
       const totalInit = n(r.total_initial);
       const totalStored = n(r.total_current_stored);
       const delta = totalStored - totalInit;
       const pctStr = totalInit > 0 ? `${(delta/totalInit*100).toFixed(1)}%` : '—';
       let txt = `🔍 *BANKROLL AUDIT*\n\n`;
-      txt += `Model: ${r.model || 'legacy'} | Base unit: R$${fmt(r.unit_base || 1)}\n`;
-      txt += `Baseline: R$${n(r.baseline?.amount)} (${r.baseline?.date || '?'})\n\n`;
+      txt += `Model: ${escMd(r.model || 'legacy')} | Base unit: R$${fmt(r.unit_base || 1)}\n`;
+      txt += `Baseline: R$${n(r.baseline?.amount)} (${escMd(r.baseline?.date || '?')})\n\n`;
       txt += `*Totais:*\n`;
       txt += `  Initial: R$${fmt(totalInit)}\n`;
       txt += `  Current: R$${fmt(totalStored)}\n`;
@@ -6304,7 +6308,7 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
       for (const s of sports) {
         const icon = s.drift ? '⚠️' : '✓';
         const uvStr = s.tier_unit_value ? `1u=R$${fmt(s.tier_unit_value)}` : '';
-        txt += `${icon} *${s.sport}*: R$${n(s.initial).toFixed(0)}→R$${fmt(s.current_stored)} · ${uvStr}`;
+        txt += `${icon} *${escMd(s.sport)}*: R$${n(s.initial).toFixed(0)}→R$${fmt(s.current_stored)} · ${uvStr}`;
         if (s.drift) txt += ` · gap R$${fmt(s.gap_stored_minus_recomputed)}`;
         txt += ` · ${n(s.tip_count)}t ${n(s.profit_sum) >= 0 ? '+' : ''}R$${fmt(s.profit_sum)}\n`;
         if (txt.length > 3500) { txt += '_(truncado)_'; break; }
@@ -6312,10 +6316,14 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
       if (Array.isArray(r.orphan_profits) && r.orphan_profits.length) {
         txt += `\n*⚠️ Profits órfãos* (sport sem bankroll row):\n`;
         for (const o of r.orphan_profits) {
-          txt += `  • ${o.sport}: R$${fmt(o.profit)} (${n(o.tips)}t)\n`;
+          txt += `  • ${escMd(o.sport)}: R$${fmt(o.profit)} (${n(o.tips)}t)\n`;
         }
       }
-      await send(token, chatId, txt);
+      // Tenta enviar com Markdown; se falhar (parse error) fallback sem parse_mode.
+      const sendRes = await send(token, chatId, txt).catch(e => ({ ok: false, error: e.message }));
+      if (sendRes && sendRes.ok === false) {
+        await send(token, chatId, txt.replace(/[*_`]/g, ''), { parse_mode: undefined }).catch(() => {});
+      }
     } catch (e) { await send(token, chatId, `❌ exception: ${e.message}`); }
 
   } else if (cmd === '/rebuild-reais' || cmd === '/recompute-reais') {
