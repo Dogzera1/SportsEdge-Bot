@@ -1703,7 +1703,7 @@ async function runAutoAnalysis() {
           const tipTeam = result.tipMatch[1].trim();
           const tipOdd = result.tipMatch[2].trim();
           const tipEV = result.tipMatch[3].trim();
-          const tipConf = (result.tipMatch[5] || CONF.MEDIA).trim().toUpperCase();
+          let tipConf = (result.tipMatch[5] || CONF.MEDIA).trim().toUpperCase();
           // EV sanity: bloqueia EV absurdamente alto (erro de cálculo da IA) — espelha gate do upcoming.
           // Ceiling condicional: 80% se modelo treinado ativo (ECE baixa), 50% caso contrário.
           const tipEVnumLive = parseFloat(String(tipEV).replace(/[%+]/g, ''));
@@ -2080,7 +2080,33 @@ async function runAutoAnalysis() {
             const tipTeam = result.tipMatch[1].trim();
             const tipOdd = result.tipMatch[2].trim();
             const tipEV = result.tipMatch[3].trim();
-            const tipConf = (result.tipMatch[5] || CONF.MEDIA).trim().toUpperCase();
+            let tipConf = (result.tipMatch[5] || CONF.MEDIA).trim().toUpperCase();
+
+            // Tier 2/3 LoL safeguards (upcoming): degrade ALTA→MÉDIA se p>0.85,
+            // exige EV ≥ 7%, bloqueia BAIXA (learning G2 NORD bleed).
+            const _lolTierUp = _leagueTier('lol', match.league || match.leagueSlug || '');
+            if (_lolTierUp >= 2) {
+              const _isT1bet = norm(tipTeam).includes(norm(match.team1)) || norm(match.team1).includes(norm(tipTeam));
+              const _modelPPickUp = (result.modelP1 > 0) ? (_isT1bet ? result.modelP1 : result.modelP2) : null;
+              if (tipConf === CONF.ALTA && _modelPPickUp != null && _modelPPickUp > 0.85) {
+                log('INFO', 'AUTO', `Tier ${_lolTierUp} ${match.league}: p=${(_modelPPickUp*100).toFixed(1)}% > 85% → ALTA→MÉDIA (overconfidence)`);
+                tipConf = CONF.MEDIA;
+              }
+              const _tier2EvMin = parseFloat(process.env.LOL_TIER2_EV_MIN || '7') || 7;
+              const _evNumUp = parseFloat(String(tipEV).replace(/[%+]/g, '')) || 0;
+              if (_evNumUp < _tier2EvMin) {
+                log('INFO', 'AUTO', `Tier ${_lolTierUp} ${match.league}: EV ${_evNumUp}% < ${_tier2EvMin}% — rejeitada`);
+                logRejection('lol', `${match.team1} vs ${match.team2}`, 'tier2_ev_low_upcoming', { tier: _lolTierUp, ev: _evNumUp, league: match.league });
+                analyzedMatches.set(matchKey, { ts: now, tipSent: false, noEdge: true });
+                await new Promise(r => setTimeout(r, 3000)); continue;
+              }
+              if (tipConf === CONF.BAIXA) {
+                log('INFO', 'AUTO', `Tier ${_lolTierUp} ${match.league}: CONF=BAIXA bloqueada (variance alta)`);
+                logRejection('lol', `${match.team1} vs ${match.team2}`, 'tier2_baixa_blocked_upcoming', { tier: _lolTierUp, league: match.league });
+                analyzedMatches.set(matchKey, { ts: now, tipSent: false, noEdge: true });
+                await new Promise(r => setTimeout(r, 3000)); continue;
+              }
+            }
 
             // Pré-jogo BAIXA endurecido (2026-04-15): exige mlEdge ≥10pp E EV ≥ 10%
             if (tipConf === CONF.BAIXA) {
