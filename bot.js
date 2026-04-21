@@ -6868,7 +6868,7 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
     try {
       const fs = require('fs');
       const path = require('path');
-      const games = ['lol', 'cs2', 'dota2', 'valorant', 'tennis'];
+      const games = ['lol', 'cs2', 'dota2', 'valorant', 'tennis', 'mma', 'darts', 'snooker'];
       // Rejection count por sport (última hora) — inline com model stats
       const nowMs = Date.now();
       const cutoff = nowMs - 60 * 60 * 1000;
@@ -6876,7 +6876,7 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
       for (const r of _rejections) {
         if (r.ts < cutoff) break;
         // Map bot sport name → model game name
-        const mapSport = { cs: 'cs2', dota2: 'dota2', valorant: 'valorant', lol: 'lol', tennis: 'tennis' };
+        const mapSport = { cs: 'cs2', dota2: 'dota2', valorant: 'valorant', lol: 'lol', tennis: 'tennis', mma: 'mma', darts: 'darts', snooker: 'snooker' };
         const g = mapSport[r.sport] || r.sport;
         rejBySport[g] = (rejBySport[g] || 0) + 1;
       }
@@ -6913,12 +6913,22 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
         const fsStat = fs.statSync(weightsPath);
         const mtime = fsStat.mtime.toISOString().slice(0, 10);
         const hasIso = fs.existsSync(isoPath);
+        // Map game name → sport key usado em getKellyFraction/getEvThreshold
+        const sportKey = g === 'cs2' ? 'cs' : g;
+        const kAlta = getKellyFraction(sportKey, 'ALTA');
+        const evMin = getEvThreshold(sportKey);
         txt += `*${g}* (${data.featureNames?.length || 0} feats, trained ${mtime})\n`;
         if (m) {
           const chosenM = chosen === 'calibrated' && cm ? cm : m;
-          txt += `  Brier=${chosenM.brier.toFixed(4)} Acc=${(chosenM.acc*100).toFixed(1)}% AUC=${chosenM.auc.toFixed(3)}\n`;
+          // Lift vs baseline Elo — KPI principal do audit
+          const baseBrier = data.metrics?.baseline_elo_test?.brier;
+          const lift = baseBrier && chosenM.brier ? ((baseBrier - chosenM.brier) / baseBrier * 100) : null;
+          const liftStr = lift != null ? ` | lift=${lift > 0 ? '+' : ''}${lift.toFixed(1)}%` : '';
+          const liftIcon = lift == null ? '' : lift >= 20 ? ' 🟢' : lift >= 7 ? ' 🟡' : lift >= 0 ? ' 🟠' : ' 🔴';
+          txt += `  Brier=${chosenM.brier.toFixed(4)} Acc=${(chosenM.acc*100).toFixed(1)}% AUC=${chosenM.auc.toFixed(3)}${liftStr}${liftIcon}\n`;
           txt += `  chosen=${chosen} | test n=${splits.test?.n || '?'} → ${testTo}\n`;
-          txt += `  isotonic: ${hasIso ? '✓ aplicada' : '✗ ausente'}\n`;
+          txt += `  isotonic: ${hasIso ? '✓ aplicada' : '✗ ausente'} | ECE=${chosenM.ece?.toFixed(4) || '?'}\n`;
+          txt += `  Kelly_ALTA=${kAlta.toFixed(3)} · EV_min=${evMin}%\n`;
           const rejCount = rejBySport[g] || 0;
           if (rejCount > 0) txt += `  rejections 1h: ${rejCount}${rejCount >= 20 ? ' ⚠️' : ''}\n`;
           const cov = eloCoverage[g] || 0;
@@ -6926,6 +6936,7 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
         }
         txt += `\n`;
       }
+      txt += `_Lift legend: 🟢≥20% · 🟡≥7% · 🟠≥0% · 🔴<0% vs baseline Elo_\n`;
       // Feed freshness inline
       try {
         const dhs = db.prepare(`SELECT COUNT(*) AS n, MAX(updated_at) AS last FROM dota_hero_stats`).get();
