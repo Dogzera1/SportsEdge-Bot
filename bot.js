@@ -6203,6 +6203,11 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
       `\`/reanalise [sport]\` — reavalia pendentes (esports/mma/tennis...)\n` +
       `\`/refresh-open\` — recalcula EV de tips pendentes\n` +
       `\`/reanalise-void [sport] [--dry]\` — voida pendentes que falham no novo sistema\n\n` +
+      `━━ 🎫 *Tips Management* ━━\n` +
+      `\`/pending [sport]\` — lista tips pendentes\n` +
+      `\`/unsettled [sport]\` — tips não settladas +48h\n` +
+      `\`/settle-debug\` — diagnóstico por que tips não settlam\n` +
+      `\`/settle <id> <winner>\` — força settle manual\n\n` +
       `━━ 📈 *Stats & ROI* ━━\n` +
       `\`/stats [sport]\` — ROI e calibração\n` +
       `\`/roi\` — ROI geral\n` +
@@ -6212,6 +6217,10 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
       `\`/path-guard\` — paths desativados auto por CLV negativo\n` +
       `\`/path-guard run\` — força ciclo imediato\n` +
       `\`/path-guard reset [sport]\` — reativa path manual\n\n` +
+      `━━ 🤖 *Agents & Loops* ━━\n` +
+      `\`/loops\` — status dos 9 autonomous loops\n` +
+      `\`/users\` — contagem de assinantes por sport\n` +
+      `\`/resync\` — re-sync schedule LoL\n\n` +
       `━━ 🔧 *Debug LoL Específico* ━━\n` +
       `\`/slugs\` — ligas LoL cobertas + ignoradas\n` +
       `\`/lolraw\` — dump bruto schedule LoL API\n\n` +
