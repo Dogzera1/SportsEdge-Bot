@@ -1853,6 +1853,7 @@ async function runAutoAnalysis() {
             lineShopOdds: result.o || null,
             pickSide: _pickSideLs,
             sport: 'lol',
+            isShadow: isBucketShadowed('lol') ? 1 : 0,
           }, 'lol');
 
           // Aborta se DB recusou (erro ou duplicata já registrada)
@@ -1915,13 +1916,17 @@ async function runAutoAnalysis() {
           // Semi-auto deeplink — book com odd maior entre preferred.
           const _betBtn = _buildTipBetButton('lol', oddsToUse, _pickSideLs, match, tipStakeAdj, tipOdd);
 
-          for (const [userId, prefs] of subscribedUsers) {
-            if (!prefs.has('esports')) continue;
-            try { await sendDM(esportsConfig.token, userId, tipMsg, _betBtn || undefined); }
-            catch(e) {
-              if (e.message?.includes('403')) {
-                subscribedUsers.delete(userId);
-                serverPost('/save-user', { userId: String(userId), subscribed: false }, 'esports').catch(() => {});
+          if (isBucketShadowed('lol')) {
+            log('INFO', 'AUTO', `[SHADOW] ${tipTeam} @ ${tipOdd} | EV:${tipEV} | ${tipStakeAdj} | ${tipConf} — DM suprimida`);
+          } else {
+            for (const [userId, prefs] of subscribedUsers) {
+              if (!prefs.has('esports')) continue;
+              try { await sendDM(esportsConfig.token, userId, tipMsg, _betBtn || undefined); }
+              catch(e) {
+                if (e.message?.includes('403')) {
+                  subscribedUsers.delete(userId);
+                  serverPost('/save-user', { userId: String(userId), subscribed: false }, 'esports').catch(() => {});
+                }
               }
             }
           }
@@ -1978,11 +1983,16 @@ async function runAutoAnalysis() {
                   odds: String(hOdd), ev: String(hEV.toFixed(1)), stake: String(hStake),
                   confidence: 'BAIXA', isLive: true, market_type: 'HANDICAP',
                   sport: 'lol',
+                  isShadow: isBucketShadowed('lol') ? 1 : 0,
                 }, 'lol');
 
-                for (const [userId, prefs] of subscribedUsers) {
-                  if (!prefs.has('esports')) continue;
-                  try { await sendDM(esportsConfig.token, userId, hMsg); } catch(_) {}
+                if (!isBucketShadowed('lol')) {
+                  for (const [userId, prefs] of subscribedUsers) {
+                    if (!prefs.has('esports')) continue;
+                    try { await sendDM(esportsConfig.token, userId, hMsg); } catch(_) {}
+                  }
+                } else {
+                  log('INFO', 'AUTO', `[SHADOW] LoL HANDICAP ${favTeam} — DM suprimida`);
                 }
                 break;
               }
@@ -2197,6 +2207,7 @@ async function runAutoAnalysis() {
               lineShopOdds: result.o || null,
               pickSide: _pickSideUp,
               sport: 'lol',
+              isShadow: isBucketShadowed('lol') ? 1 : 0,
             }, 'lol');
 
             if (!recUp?.tipId && !recUp?.skipped) {
@@ -2222,10 +2233,14 @@ async function runAutoAnalysis() {
               `⚠️ _Aposte com responsabilidade._`;
 
             const _betBtnUp = _buildTipBetButton('lol', result.o, _pickSideUp, match, tipStakeAdj, tipOdd);
-            for (const [userId, prefs] of subscribedUsers) {
-              if (!prefs.has('esports')) continue;
-              try { await sendDM(esportsConfig.token, userId, tipMsg, _betBtnUp || undefined); }
-              catch(e) { if (e.message?.includes('403')) subscribedUsers.delete(userId); }
+            if (isBucketShadowed('lol')) {
+              log('INFO', 'AUTO-TIP', `[SHADOW] LoL upcoming ${tipTeam} @ ${tipOdd} — DM suprimida`);
+            } else {
+              for (const [userId, prefs] of subscribedUsers) {
+                if (!prefs.has('esports')) continue;
+                try { await sendDM(esportsConfig.token, userId, tipMsg, _betBtnUp || undefined); }
+                catch(e) { if (e.message?.includes('403')) subscribedUsers.delete(userId); }
+              }
             }
             analyzedMatches.set(matchKey, { ts: now, tipSent: true });
             log('INFO', 'AUTO-TIP', `Esports upcoming: ${tipTeam} @ ${tipOdd}`);
@@ -6322,6 +6337,47 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
       await send(token, chatId, txt);
     } catch (e) { await send(token, chatId, `❌ ${e.message}`); }
 
+  } else if (cmd === '/pause-sport' || cmd === '/pause' || cmd === '/unpause-sport' || cmd === '/unpause') {
+    if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
+    try {
+      const isUnpause = cmd.includes('unpause');
+      const sportArg = (parts[1] || '').toLowerCase();
+      if (!sportArg) {
+        const activeShadow = [];
+        for (const s of Object.keys(SPORTS)) if (SPORTS[s]?.shadowMode) activeShadow.push(s);
+        for (const s of _splitBucketShadow) activeShadow.push(`${s} (split)`);
+        await send(token, chatId, `📋 *Sports em shadow/pausa:*\n${activeShadow.length ? activeShadow.map(s => `• ${s}`).join('\n') : '_Nenhum_'}\n\n_Uso: \`/pause-sport <sport>\` ou \`/unpause-sport <sport>\`_`);
+        return;
+      }
+      const validSports = ['lol', 'dota2', 'mma', 'tennis', 'football', 'cs', 'valorant', 'darts', 'snooker', 'tabletennis'];
+      if (!validSports.includes(sportArg)) {
+        await send(token, chatId, `❌ Sport inválido. Válidos: ${validSports.join(', ')}`);
+        return;
+      }
+      const isSplit = sportArg === 'lol' || sportArg === 'dota2';
+      if (isUnpause) {
+        if (isSplit) {
+          _splitBucketShadow.delete(sportArg);
+          _bankrollAutoShadowed.delete(sportArg);
+        } else if (SPORTS[sportArg]) {
+          SPORTS[sportArg].shadowMode = false;
+          _bankrollAutoShadowed.delete(sportArg);
+        }
+        log('INFO', 'PAUSE', `${sportArg} UNPAUSED via cmd admin`);
+        await send(token, chatId, `✅ *${sportArg.toUpperCase()}* reativado — tips voltam a ser enviadas`);
+      } else {
+        if (isSplit) {
+          _splitBucketShadow.add(sportArg);
+          _bankrollAutoShadowed.add(sportArg);
+        } else if (SPORTS[sportArg]) {
+          SPORTS[sportArg].shadowMode = true;
+          _bankrollAutoShadowed.add(sportArg);
+        }
+        log('WARN', 'PAUSE', `${sportArg} PAUSED via cmd admin`);
+        await send(token, chatId, `🛑 *${sportArg.toUpperCase()}* pausado — tips continuam gerando (shadow) mas sem DM`);
+      }
+    } catch (e) { await send(token, chatId, `❌ ${e.message}`); }
+
   } else if (cmd === '/run-guardian' || cmd === '/guardian') {
     if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
     try {
@@ -7774,6 +7830,9 @@ async function poll(token, sport) {
                      text.startsWith('/force-sync') || text.startsWith('/debug-sport') ||
                      text.startsWith('/debug-tips') || text.startsWith('/run-guardian') ||
                      text.startsWith('/guardian') ||
+                     text.startsWith('/pause-sport') || text.startsWith('/unpause-sport') ||
+                     text === '/pause' || text.startsWith('/pause ') ||
+                     text === '/unpause' || text.startsWith('/unpause ') ||
                      text.startsWith('/tip ') || text.startsWith('/help') || text.startsWith('/start') ||
                      text.startsWith('/alerts')) {
             // Passa `sport` da poll (qual bot recebeu) para evitar default 'esports'
@@ -9122,7 +9181,7 @@ Máximo 200 palavras.`;
           modelPPick: modelPForKelly,
           modelLabel: `dota-ml (${mlResult.factorActive?.join('+') || 'base'})`,
           tipReason: iaResp ? iaResp.split('TIP_ML:')[0].trim().split('\n').filter(Boolean).pop()?.slice(0, 160) || null : null,
-          isShadow: esportsConfig.shadowMode ? 1 : 0,
+          isShadow: isBucketShadowed('dota2') ? 1 : 0,
           oddsFetchedAt: o._fetchedAt || null,
           lineShopOdds: o || null,
           pickSide: isT1bet ? 't1' : 't2',
@@ -9133,10 +9192,14 @@ Máximo 200 palavras.`;
           setDotaAnalyzed({ ts: now, tipSent: true, noEdge: false });
           await _sleep(2000); continue;
         }
-        const _betBtnDota = _buildTipBetButton('dota2', o, isT1bet ? 't1' : 't2', match, tipStakeAdj, tipOdd);
-        for (const [uid, sports] of subscribedUsers) {
-          if (!sports.has('esports')) continue;
-          await sendDM(token, uid, msg, _betBtnDota || undefined).catch(() => {});
+        if (isBucketShadowed('dota2')) {
+          log('INFO', 'AUTO-DOTA', `[SHADOW] ${tipTeam} @ ${tipOdd} | EV:${tipEV} | ${tipStakeAdj} | ${tipConf} — DM suprimida`);
+        } else {
+          const _betBtnDota = _buildTipBetButton('dota2', o, isT1bet ? 't1' : 't2', match, tipStakeAdj, tipOdd);
+          for (const [uid, sports] of subscribedUsers) {
+            if (!sports.has('esports')) continue;
+            await sendDM(token, uid, msg, _betBtnDota || undefined).catch(() => {});
+          }
         }
         log('INFO', 'AUTO-DOTA', `TIP${isLive ? ' [LIVE]' : ''}: ${tipTeam} @ ${tipOdd} (${tipStakeAdj})`);
         setDotaAnalyzed({ ts: now, tipSent: true, noEdge: false });
@@ -9311,9 +9374,13 @@ async function analyzeDotaMapTip(match, token) {
       analyzedDota.set(mapKey, { ts: now, tipSent: true });
       return;
     }
-    for (const [uid, sports] of subscribedUsers) {
-      if (!sports.has('esports')) continue;
-      await sendDM(token, uid, msg).catch(() => {});
+    if (isBucketShadowed('dota2')) {
+      log('INFO', 'AUTO-DOTA-MAP', `[SHADOW] MAPA ${mapN}: ${pickTeam} @ ${pickOdd} — DM suprimida`);
+    } else {
+      for (const [uid, sports] of subscribedUsers) {
+        if (!sports.has('esports')) continue;
+        await sendDM(token, uid, msg).catch(() => {});
+      }
     }
     log('INFO', 'AUTO-DOTA-MAP', `TIP MAPA ${mapN}: ${pickTeam} @ ${pickOdd} (EV ${pickEv.toFixed(1)}%, conf ${pred.confidence})`);
     analyzedDota.set(mapKey, { ts: now, tipSent: true });
