@@ -679,6 +679,37 @@ const migrations = [
       }
     },
   },
+  {
+    id: '036_resync_bankroll_with_esports_reclassify',
+    up(db) {
+      // 035 syncou via SUM(profit WHERE sport=bk.sport) — tips legadas sport='esports'
+      // (que são LoL/Dota historicamente) ficaram órfãs. Aqui reclassifica por
+      // match_id/event_name e distribui nos buckets lol/dota2 corretos.
+      const allSettled = db.prepare(`
+        SELECT sport, profit_reais, match_id, event_name FROM tips
+        WHERE (archived IS NULL OR archived = 0) AND COALESCE(is_shadow, 0) = 0
+          AND result IN ('win','loss','push','void')
+      `).all();
+      const profitBySport = {};
+      for (const t of allSettled) {
+        const p = Number(t.profit_reais || 0);
+        let sp = t.sport;
+        if (sp === 'esports') {
+          const mid = String(t.match_id || '');
+          const ev = String(t.event_name || '').toLowerCase();
+          sp = (mid.startsWith('dota2_') || ev.includes('dota')) ? 'dota2' : 'lol';
+        }
+        profitBySport[sp] = (profitBySport[sp] || 0) + p;
+      }
+      const rows = db.prepare('SELECT sport, initial_banca FROM bankroll').all();
+      for (const bk of rows) {
+        const init = Number(bk.initial_banca || 0);
+        const profit = profitBySport[bk.sport] || 0;
+        const newCurrent = +(init + profit).toFixed(2);
+        db.prepare("UPDATE bankroll SET current_banca=?, updated_at=datetime('now') WHERE sport=?").run(newCurrent, bk.sport);
+      }
+    },
+  },
 ];
 
 function applyMigrations(db) {

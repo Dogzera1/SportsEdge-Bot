@@ -6580,6 +6580,70 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // Audit bankroll: mostra initial/current stored vs recomputed, gap per-sport e total.
+  // Inclui reclassificação esports legado → lol/dota2.
+  // GET /bankroll-audit
+  if (p === '/bankroll-audit') {
+    try {
+      const _bl = getBaseline();
+      const uv = _bl.unit_value;
+      const rows = db.prepare(`SELECT sport, initial_banca, current_banca FROM bankroll`).all();
+      const allSettled = db.prepare(`
+        SELECT sport, stake, odds, result, match_id, event_name
+        FROM tips
+        WHERE (archived IS NULL OR archived = 0) AND COALESCE(is_shadow, 0) = 0
+          AND result IN ('win','loss','push','void')
+      `).all();
+      const profitBySport = {};
+      const tipCountBySport = {};
+      for (const t of allSettled) {
+        const p = tipProfitReais(t, uv);
+        if (p == null) continue;
+        let sp = t.sport;
+        if (sp === 'esports') {
+          const mid = String(t.match_id || '');
+          const ev = String(t.event_name || '').toLowerCase();
+          sp = (mid.startsWith('dota2_') || ev.includes('dota')) ? 'dota2' : 'lol';
+        }
+        profitBySport[sp] = (profitBySport[sp] || 0) + p;
+        tipCountBySport[sp] = (tipCountBySport[sp] || 0) + 1;
+      }
+      const audit = rows.map(r => {
+        const init = Number(r.initial_banca || 0);
+        const curr = Number(r.current_banca || 0);
+        const profit = profitBySport[r.sport] || 0;
+        const recomputed = +(init + profit).toFixed(2);
+        const gap = +(curr - recomputed).toFixed(2);
+        return {
+          sport: r.sport,
+          initial: init,
+          current_stored: curr,
+          current_recomputed: recomputed,
+          profit_sum: +profit.toFixed(2),
+          gap_stored_minus_recomputed: gap,
+          tip_count: tipCountBySport[r.sport] || 0,
+          drift: Math.abs(gap) > 0.01,
+        };
+      }).sort((a, b) => Math.abs(b.gap_stored_minus_recomputed) - Math.abs(a.gap_stored_minus_recomputed));
+      const totalInitial = rows.reduce((s, r) => s + Number(r.initial_banca || 0), 0);
+      const totalStored = rows.reduce((s, r) => s + Number(r.current_banca || 0), 0);
+      const totalRecomputed = audit.reduce((s, r) => s + r.current_recomputed, 0);
+      const orphanSports = Object.keys(profitBySport).filter(sp => !rows.find(r => r.sport === sp));
+      sendJson(res, {
+        ok: true,
+        unit_value: uv,
+        baseline: _bl,
+        total_initial: +totalInitial.toFixed(2),
+        total_current_stored: +totalStored.toFixed(2),
+        total_current_recomputed: +totalRecomputed.toFixed(2),
+        total_gap: +(totalStored - totalRecomputed).toFixed(2),
+        per_sport: audit,
+        orphan_profits: orphanSports.map(sp => ({ sport: sp, profit: +profitBySport[sp].toFixed(2), tips: tipCountBySport[sp] })),
+      });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
   // Rebuild stake_reais/profit_reais usando baseline.unit_value (global).
   // Corrige tips settadas com unit_value drifting (pré-Abr/2026-II).
   // POST /admin/rebuild-tip-reais?sport=X&apply=1 (sem apply = dry-run)
@@ -10791,16 +10855,24 @@ const server = http.createServer(async (req, res) => {
       // Recomputa profit em unit-native usando baseline.unit_value (fonte única).
       const _bl = getBaseline();
       const allSettled = db.prepare(`
-        SELECT sport, stake, odds, result
+        SELECT sport, stake, odds, result, match_id, event_name
         FROM tips
         WHERE (archived IS NULL OR archived = 0) AND COALESCE(is_shadow, 0) = 0
           AND result IN ('win','loss')
       `).all();
+      // Classifica sport efetivo: tips legadas 'esports' viram 'lol' ou 'dota2' pelo match_id
+      // pra lucro histórico pingar no bankroll correto pós-split.
       const profitBySport = {};
       for (const t of allSettled) {
         const p = tipProfitReais(t, _bl.unit_value);
         if (p == null) continue;
-        profitBySport[t.sport] = (profitBySport[t.sport] || 0) + p;
+        let sp = t.sport;
+        if (sp === 'esports') {
+          const mid = String(t.match_id || '');
+          const ev = String(t.event_name || '').toLowerCase();
+          sp = (mid.startsWith('dota2_') || ev.includes('dota')) ? 'dota2' : 'lol';
+        }
+        profitBySport[sp] = (profitBySport[sp] || 0) + p;
       }
       const bankrolls = bankrollsRaw.map(b => {
         const recomputed = parseFloat(((b.initial_banca || 0) + (profitBySport[b.sport] || 0)).toFixed(2));
@@ -10820,13 +10892,24 @@ const server = http.createServer(async (req, res) => {
         return s + (uv > 0 ? sp / uv : 0);
       }, 0);
 
-      // Tips agregadas (não archived) — fetch raw e agrega em JS com baseline.unit_value
+      // Tips agregadas (não archived) — fetch raw e agrega em JS com baseline.unit_value.
+      // match_id/event_name necessários pra reclassificar tips legadas sport='esports'
+      // em 'lol'/'dota2' no breakdown per-sport.
       const windowTips = db.prepare(`
-        SELECT sport, stake, odds, result, ev, settled_at, is_shadow
+        SELECT sport, stake, odds, result, ev, settled_at, is_shadow, match_id, event_name
         FROM tips
         WHERE (archived IS NULL OR archived = 0) AND COALESCE(is_shadow, 0) = 0
           AND (sent_at >= datetime('now', ?) OR result IS NULL)
       `).all(`-${days} days`);
+      // Helper: classifica sport efetivo (reclassifica 'esports' legado em 'lol'/'dota2'
+      // por match_id/event_name pra não aparecer como bucket separado no dashboard).
+      const effectiveSport = (t) => {
+        if (t.sport !== 'esports') return t.sport;
+        const mid = String(t.match_id || '');
+        const ev = String(t.event_name || '').toLowerCase();
+        if (mid.startsWith('dota2_') || ev.includes('dota')) return 'dota2';
+        return 'lol';
+      };
       const tipsAgg = { total: 0, wins: 0, losses: 0, pending: 0, profit_reais: 0, stake_reais: 0, avg_ev: null, avg_odds: null };
       let evSum = 0, evN = 0, oddsSum = 0, oddsN = 0;
       for (const t of windowTips) {
@@ -10862,10 +10945,13 @@ const server = http.createServer(async (req, res) => {
           AND settled_at >= datetime('now', ?)
       `).get(`-${days} days`);
 
-      // Per-sport breakdown — reusa windowTips + unit_value
+      // Per-sport breakdown — reusa windowTips + unit_value.
+      // Reclassifica tips 'esports' legadas em 'lol'/'dota2' pelo match_id/event_name,
+      // então o breakdown mostra LoL e Dota separados mesmo pra history pré-split.
       const bySportMap = {};
       for (const t of windowTips) {
-        const b = bySportMap[t.sport] || (bySportMap[t.sport] = { sport: t.sport, total: 0, wins: 0, losses: 0, pending: 0, profit: 0, stake: 0 });
+        const sportKey = effectiveSport(t);
+        const b = bySportMap[sportKey] || (bySportMap[sportKey] = { sport: sportKey, total: 0, wins: 0, losses: 0, pending: 0, profit: 0, stake: 0 });
         b.total++;
         if (t.result === 'win') b.wins++;
         else if (t.result === 'loss') b.losses++;
