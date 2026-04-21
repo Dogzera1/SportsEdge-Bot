@@ -11041,22 +11041,18 @@ const server = http.createServer(async (req, res) => {
       // com lol/dota2). Tips com sport='esports' ainda acumulam no profitBySport map,
       // mas não vão pra bankroll display/totais.
       const bankrollsRaw = db.prepare(`SELECT sport, initial_banca, current_banca FROM bankroll WHERE sport != 'esports'`).all();
-      // Recomputa profit preferindo profit_reais stored (rebuild tier per-sport).
-      // Sem profit_reais na query, fallback recompute com unit global → escala errada (R$10 pós-044)
-      // que sobrescrevia bankroll em cada /overall-summary.
+      // SUM profit_reais stored direto (tier unit) — fonte de verdade única,
+      // não recomputa via unit global. Reclassifica esports→lol/dota2 em JS.
       const _bl = getBaseline();
       const allSettled = db.prepare(`
-        SELECT sport, stake, odds, result, match_id, event_name, stake_reais, profit_reais
+        SELECT sport, profit_reais, match_id, event_name
         FROM tips
         WHERE (archived IS NULL OR archived = 0) AND COALESCE(is_shadow, 0) = 0
-          AND result IN ('win','loss')
+          AND result IN ('win','loss','push','void')
       `).all();
-      // Classifica sport efetivo: tips legadas 'esports' viram 'lol' ou 'dota2' pelo match_id
-      // pra lucro histórico pingar no bankroll correto pós-split.
       const profitBySport = {};
       for (const t of allSettled) {
-        const p = tipProfitReais(t, _bl.unit_value);
-        if (p == null) continue;
+        const p = Number(t.profit_reais || 0);
         let sp = t.sport;
         if (sp === 'esports') {
           const mid = String(t.match_id || '');
@@ -11485,27 +11481,21 @@ const server = http.createServer(async (req, res) => {
         log('INFO', 'BANCA', `[${sport}] Backfill: ${orphans.length} tips sem profit_reais recalculadas`);
       }
 
-      // Profit da banca: unit-native. Tips union cobrem legado esports + novos lol/dota2.
-      // SELECT inclui stake_reais/profit_reais pra tipProfitReais preferir stored (tier)
-      // em vez de recompute com unit global (R$10 stale pós-migration 044).
+      // Profit da banca: SQL SUM direto de profit_reais stored (já em tier unit R$1
+      // pós rebuild). Evita recompute via tipProfitReais com unit global errada.
+      // Source of truth = profit_reais column. Bankroll sync é derivado daqui.
       const _bl = getBaseline();
-      const settledTips = db.prepare(
-        `SELECT t.stake, t.odds, t.result, t.stake_reais, t.profit_reais FROM tips t
+      const settledProfitsRow = db.prepare(
+        `SELECT COALESCE(SUM(profit_reais), 0) AS total FROM tips t
          WHERE t.sport IN ${sportInSql} AND ${dedupe}
-         AND t.result IN ('win','loss')
+         AND t.result IN ('win','loss','push','void')
          ${gameSql}`
-      ).all(...sportSet, ...sportSet);
-      let accumulatedProfit = 0;
-      for (const t of settledTips) {
-        const p = tipProfitReais(t, _bl.unit_value);
-        if (p != null) accumulatedProfit += p;
-      }
-      accumulatedProfit = +accumulatedProfit.toFixed(2);
+      ).get(...sportSet, ...sportSet);
+      const accumulatedProfit = +(Number(settledProfitsRow?.total || 0)).toFixed(2);
       const currentBanca = parseFloat(((bk.initial_banca || 0) + accumulatedProfit).toFixed(2));
-      // Sync cada row do sportSet (desde que sem filtro game — bankroll é per-sport).
+      // Sync bankroll rows se diferirem (mantém dashboard consistente).
       if (!game && !effectiveGame) {
         for (const r of bkRows) {
-          // Proporcional: distribui profit conforme initial_banca (evita sync errôneo em row zerada).
           const share = bk.initial_banca > 0 ? (r.initial_banca / bk.initial_banca) : (1 / bkRows.length);
           const sportCurrent = parseFloat(((r.initial_banca || 0) + accumulatedProfit * share).toFixed(2));
           if (Math.abs(sportCurrent - r.current_banca) > 0.01) {
