@@ -186,6 +186,45 @@ function rosterStatsAt(team, tMs, sinceDays = 60, minGamesPerPlayer = 10) {
 }
 
 // Mapa data → season/split (gol.gg usa SN = Year-2010+1 aprox; simplificação)
+// ── CS2 HLTV team stats loader ──────────────────────────────────────────
+// Usa cs_team_stats (migration 049) populado por scripts/sync-hltv-cs-teams.js.
+// HLTV ranking + recent WR + streak. Lookup case-insensitive name or slug.
+const csTeamByName = new Map();
+const csTeamBySlug = new Map();
+if (GAME === 'cs') {
+  try {
+    const rows = db.prepare(`
+      SELECT name, slug, ranking, ranking_points, recent_n, recent_wr,
+             win_streak_current, last_match_date
+      FROM cs_team_stats
+      WHERE name IS NOT NULL
+    `).all();
+    for (const r of rows) {
+      const entry = {
+        ranking: Number(r.ranking) || null,
+        points: Number(r.ranking_points) || null,
+        recentN: Number(r.recent_n) || 0,
+        recentWr: Number.isFinite(r.recent_wr) ? r.recent_wr : null,
+        streak: Number(r.win_streak_current) || 0,
+        lastMatchDate: Number(r.last_match_date) || null,
+      };
+      if (r.name) csTeamByName.set(String(r.name).toLowerCase().trim(), entry);
+      if (r.slug) csTeamBySlug.set(String(r.slug).toLowerCase().trim(), entry);
+    }
+    const withForm = rows.filter(r => r.recent_n >= 5).length;
+    console.log(`[extract-es] cs_team_stats loaded: ${rows.length} teams (${withForm} with recent_n>=5)`);
+  } catch (e) { console.warn(`[extract-es] cs_team_stats load err: ${e.message}`); }
+}
+
+function csTeamLookup(name) {
+  if (!name) return null;
+  const k = String(name).toLowerCase().trim();
+  if (csTeamByName.has(k)) return csTeamByName.get(k);
+  const kSlug = k.replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+  if (csTeamBySlug.has(kSlug)) return csTeamBySlug.get(kSlug);
+  return null;
+}
+
 // ── Dota2 OpenDota team stats loader ────────────────────────────────────
 // Usa dota_team_stats (migration 046+048) populado por scripts/sync-opendota-team-stats.js.
 // v1: rating/wr/games | v2 --deep: rolling 30d {recent_wr, avg_kill_margin,
@@ -366,6 +405,10 @@ const HEADERS = [
   // v2 rolling 30d (só populado com sync --deep; orthogonal ao Elo)
   'dota_recent_wr_diff', 'dota_kill_margin_diff', 'dota_duration_diff',
   'dota_streak_diff', 'dota_days_idle_diff', 'has_dota_rolling_stats',
+  // CS2 HLTV team stats (só CS; 0 se algum time sem match no ranking HLTV)
+  // cs_rank_diff: lower ranking = stronger; usa -rank pra positivo = forte
+  'cs_rank_diff', 'cs_points_diff', 'cs_recent_wr_diff', 'cs_streak_diff',
+  'has_cs_team_stats',
   'y',
 ];
 
@@ -496,6 +539,23 @@ for (const r of rows) {
         starScoreDiff = r1.starScore - r2.starScore;
       }
     }
+    // CS2 HLTV team stats (ranking + recent form)
+    let csRankDiff = 0, csPointsDiff = 0, csRecentWrDiff = 0, csStreakDiff = 0, hasCsTeamStats = 0;
+    if (GAME === 'cs' && csTeamByName.size > 0) {
+      const c1 = csTeamLookup(p1Raw);
+      const c2 = csTeamLookup(p2Raw);
+      if (c1 && c2) {
+        hasCsTeamStats = 1;
+        // Invert rank diff so positive = t1 stronger (lower rank number is better)
+        csRankDiff = -((c1.ranking ?? 999) - (c2.ranking ?? 999));
+        csPointsDiff = (c1.points ?? 0) - (c2.points ?? 0);
+        // Only use recent_wr if both have enough sample
+        if (c1.recentN >= 5 && c2.recentN >= 5) {
+          csRecentWrDiff = (c1.recentWr ?? 0) - (c2.recentWr ?? 0);
+        }
+        csStreakDiff = (c1.streak ?? 0) - (c2.streak ?? 0);
+      }
+    }
     // Dota2 OpenDota team stats
     let dotaRatingDiff = 0, dotaWrDiff = 0, dotaGamesDiff = 0, hasDotaTeamStats = 0;
     // v2 rolling 30d features
@@ -548,6 +608,7 @@ for (const r of rows) {
       dotaRatingDiff.toFixed(1), dotaWrDiff.toFixed(4), dotaGamesDiff.toFixed(3), hasDotaTeamStats,
       dotaRecentWrDiff.toFixed(4), dotaKillMarginDiff.toFixed(2), dotaDurationDiff.toFixed(2),
       dotaStreakDiff, dotaDaysIdleDiff, hasDotaRollingStats,
+      csRankDiff, csPointsDiff, csRecentWrDiff.toFixed(4), csStreakDiff, hasCsTeamStats,
       p1Won,
     ]);
     kept++;

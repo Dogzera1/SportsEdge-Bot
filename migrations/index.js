@@ -1178,6 +1178,33 @@ const migrations = [
     },
   },
   {
+    id: '049_cs_team_stats',
+    up(db) {
+      // CS2 pro team aggregate stats via HLTV scraping (lib/hltv.js + HLTV_PROXY_BASE).
+      // Populado por scripts/sync-hltv-cs-teams.js (cron diário).
+      // Consumido por extract-esports-features.js quando GAME='cs' → adiciona
+      //   cs_rank_diff, cs_points_diff, cs_recent_wr_diff, cs_streak_diff,
+      //   cs_days_idle_diff, has_cs_team_stats ao training.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS cs_team_stats (
+          team_id INTEGER PRIMARY KEY,
+          name TEXT,
+          slug TEXT,
+          ranking INTEGER,                -- HLTV global rank (lower = better)
+          ranking_points INTEGER,
+          recent_n INTEGER DEFAULT 0,
+          recent_wr REAL,
+          win_streak_current INTEGER DEFAULT 0,
+          last_match_date INTEGER,        -- unix timestamp
+          updated_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_cs_team_name ON cs_team_stats(LOWER(name));
+        CREATE INDEX IF NOT EXISTS idx_cs_team_slug ON cs_team_stats(slug);
+        CREATE INDEX IF NOT EXISTS idx_cs_team_ranking ON cs_team_stats(ranking);
+      `);
+    },
+  },
+  {
     id: '048_dota_team_rolling_stats',
     up(db) {
       // Extende dota_team_stats com rolling aggregates 30d via /api/teams/{id}/matches.
