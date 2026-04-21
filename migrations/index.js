@@ -973,21 +973,13 @@ const migrations = [
     id: '041_sync_baseline_amount_to_sum_initials',
     up(db) {
       // Pós modelo per-sport (039/040): soma de initial_banca dos sports ativos é
-      // R$1000 (10 sports × R$100), mas settings.baseline.amount ficou stale em R$900
-      // (de 16/04 quando era unit global). Dashboard mostrava falso +R$100 growth.
-      // Atualiza baseline.amount pra sum(initial_banca) atual, preserva date original.
+      // R$1000 (10 sports × R$100), mas settings.baseline stale em R$900 (de 16/04
+      // quando era unit global). Atualiza bankroll_baseline_amount pra sum(initial_banca).
+      // Keys separadas — NÃO JSON 'baseline' (getBaseline() lê keys separadas).
       const sumRow = db.prepare(`SELECT COALESCE(SUM(initial_banca), 0) AS total FROM bankroll WHERE sport != 'esports'`).get();
       const newAmount = Number(sumRow?.total || 0);
       if (newAmount <= 0) return;
-      const existing = db.prepare(`SELECT value FROM settings WHERE key = 'baseline'`).get();
-      let baseline = { date: new Date().toISOString().slice(0, 10), amount: newAmount, unit_pct: 1 };
-      if (existing?.value) {
-        try {
-          const parsed = JSON.parse(existing.value);
-          baseline = { ...parsed, amount: newAmount }; // preserve date/unit_pct, só amount muda
-        } catch (_) {}
-      }
-      db.prepare(`INSERT INTO settings (key, value) VALUES ('baseline', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`).run(JSON.stringify(baseline));
+      db.prepare(`INSERT INTO settings (key, value) VALUES ('bankroll_baseline_amount', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`).run(String(newAmount));
     },
   },
   {
@@ -1101,20 +1093,35 @@ const migrations = [
         db.prepare("UPDATE bankroll SET current_banca=?, updated_at=datetime('now') WHERE sport=?").run(runningBanca, sport);
       }
 
-      // Step 4: update settings.baseline.amount = SUM(initial_banca) ativos
+      // Step 4: update settings baseline amount = SUM(initial_banca) ativos.
+      // IMPORTANT: getBaseline() lê keys separadas ('bankroll_baseline_amount', etc),
+      // não JSON 'baseline'. Migration 041 tinha bug escrevendo no key errado.
       const sumRow = db.prepare(`SELECT COALESCE(SUM(initial_banca), 0) AS total FROM bankroll WHERE sport != 'esports'`).get();
       const newAmount = Number(sumRow?.total || 0);
       if (newAmount > 0) {
-        const existing = db.prepare(`SELECT value FROM settings WHERE key = 'baseline'`).get();
-        let baseline = { date: new Date().toISOString().slice(0, 10), amount: newAmount, unit_pct: 1 };
-        if (existing?.value) {
-          try {
-            const parsed = JSON.parse(existing.value);
-            baseline = { ...parsed, amount: newAmount };
-          } catch (_) {}
+        db.prepare(`INSERT INTO settings (key, value) VALUES ('bankroll_baseline_amount', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`).run(String(newAmount));
+        db.prepare(`INSERT INTO settings (key, value) VALUES ('bankroll_unit_pct', '1') ON CONFLICT(key) DO UPDATE SET value = excluded.value`).run();
+        // Date: mantém se já existe, senão seta hoje.
+        const existingDate = db.prepare(`SELECT value FROM settings WHERE key = 'bankroll_baseline_date'`).get();
+        if (!existingDate?.value) {
+          db.prepare(`INSERT INTO settings (key, value) VALUES ('bankroll_baseline_date', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`).run(new Date().toISOString().slice(0, 10));
         }
-        db.prepare(`INSERT INTO settings (key, value) VALUES ('baseline', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`).run(JSON.stringify(baseline));
       }
+    },
+  },
+  {
+    id: '044_fix_baseline_settings_key',
+    up(db) {
+      // Migrations 041/043 escreviam baseline em key 'baseline' (JSON) mas getBaseline()
+      // lê de 'bankroll_baseline_amount' (key separada). Bug silencioso — baseline R$900
+      // ficou stale. Este migration sincroniza.
+      const sumRow = db.prepare(`SELECT COALESCE(SUM(initial_banca), 0) AS total FROM bankroll WHERE sport != 'esports'`).get();
+      const newAmount = Number(sumRow?.total || 0);
+      if (newAmount > 0) {
+        db.prepare(`INSERT INTO settings (key, value) VALUES ('bankroll_baseline_amount', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`).run(String(newAmount));
+      }
+      // Cleanup: remove key 'baseline' JSON legacy se existir (não usada).
+      db.prepare(`DELETE FROM settings WHERE key = 'baseline'`).run();
     },
   },
 ];

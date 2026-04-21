@@ -871,6 +871,16 @@ const ADMIN_POST_PATHS = new Set([
   '/football-result',
 ]);
 
+// Buffer diagnóstico pra falhas de serverGet/serverPost (silent catches).
+// Callers fazem .catch(() => null) pra não crashar, mas failures importantes passavam sem
+// visibilidade. Endpoint /server-get-errors + cmd /server-errors lista últimas 100 falhas.
+const _serverGetErrors = [];
+const SERVER_GET_ERRORS_MAX = 100;
+function _recordServerError(method, path, err) {
+  _serverGetErrors.unshift({ ts: Date.now(), method, path: String(path).slice(0, 120), error: String(err?.message || err).slice(0, 200) });
+  if (_serverGetErrors.length > SERVER_GET_ERRORS_MAX) _serverGetErrors.length = SERVER_GET_ERRORS_MAX;
+}
+
 function serverGet(path, sport) {
   return new Promise((resolve, reject) => {
     const sep = path.includes('?') ? '&' : '?';
@@ -897,9 +907,17 @@ function serverGet(path, sport) {
           }
           resolve(parsed);
         }
-        catch(e) { reject(new Error(`JSON Parse Error: ${e.message} | Body: ${d.slice(0,50)}`)); }
+        catch(e) {
+          const err = new Error(`JSON Parse Error: ${e.message} | Body: ${d.slice(0,50)}`);
+          _recordServerError('GET', path + sportParam, err);
+          reject(err);
+        }
       });
-    }).on('error', e => reject(new Error(`HTTP Error on ${SERVER}:${PORT}${path}: ${e.message}`)));
+    }).on('error', e => {
+      const err = new Error(`HTTP Error on ${SERVER}:${PORT}${path}: ${e.message}`);
+      _recordServerError('GET', path + sportParam, err);
+      reject(err);
+    });
   });
 }
 
@@ -6207,39 +6225,73 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
       await send(token, chatId, txt);
     } catch (e) { await send(token, chatId, `❌ ${e.message}`); }
 
-  } else if (cmd === '/banca-audit' || cmd === '/bankroll-audit') {
+  } else if (cmd === '/server-errors' || cmd === '/fetch-errors') {
     if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
     try {
-      const r = await serverGet('/bankroll-audit');
-      if (!r?.ok) { await send(token, chatId, `❌ ${r?.error || 'falha'}`); return; }
-      let txt = `🔍 *BANKROLL AUDIT*\n\n`;
-      txt += `Model: ${r.model || 'legacy'} | Base unit: R$${(r.unit_base || 1).toFixed(2)}\n`;
-      txt += `Baseline: R$${r.baseline?.amount || 0} (${r.baseline?.date || '?'})\n\n`;
-      txt += `*Totais:*\n`;
-      txt += `  Initial: R$${r.total_initial.toFixed(2)}\n`;
-      txt += `  Current: R$${r.total_current_stored.toFixed(2)}\n`;
-      const delta = r.total_current_stored - r.total_initial;
-      txt += `  ${delta >= 0 ? '📈' : '📉'} P&L: ${delta >= 0 ? '+' : ''}R$${delta.toFixed(2)} (${(delta/r.total_initial*100).toFixed(1)}%)\n`;
-      if (Math.abs(r.total_gap) > 0.01) {
-        txt += `  ⚠️ Gap: R$${r.total_gap.toFixed(2)} — stored ≠ recomputed\n`;
+      const limit = Math.max(5, Math.min(50, parseInt(parts[1] || '20', 10) || 20));
+      const recent = _serverGetErrors.slice(0, limit);
+      if (!recent.length) { await send(token, chatId, '✅ Nenhum erro serverGet/Post registrado.'); return; }
+      // Agrupa por path+error pra detectar padrões
+      const byPath = {};
+      for (const e of _serverGetErrors) {
+        const key = `${e.method} ${e.path.split('?')[0]}`;
+        byPath[key] = (byPath[key] || 0) + 1;
       }
-      txt += `\n*Per sport (init/curr · 1u · tips profit):*\n`;
-      for (const s of r.per_sport) {
-        const icon = s.drift ? '⚠️' : '✓';
-        const uvStr = s.tier_unit_value ? `1u=R$${s.tier_unit_value.toFixed(2)}` : '';
-        txt += `${icon} *${s.sport}*: R$${s.initial.toFixed(0)}→R$${s.current_stored.toFixed(2)} · ${uvStr}`;
-        if (s.drift) txt += ` · gap R$${s.gap_stored_minus_recomputed.toFixed(2)}`;
-        txt += ` · ${s.tip_count}t ${s.profit_sum >= 0 ? '+' : ''}R$${s.profit_sum.toFixed(2)}\n`;
+      const topPaths = Object.entries(byPath).sort((a, b) => b[1] - a[1]).slice(0, 5);
+      let txt = `🔍 *SERVER FETCH ERRORS* (${_serverGetErrors.length}/${SERVER_GET_ERRORS_MAX})\n\n`;
+      txt += `*Top paths com falha:*\n`;
+      for (const [p, n] of topPaths) txt += `  ${n}× ${p}\n`;
+      txt += `\n*Últimas ${recent.length}:*\n`;
+      for (const e of recent) {
+        const age = Math.floor((Date.now() - e.ts) / 60000);
+        txt += `${age}m · ${e.method} ${e.path.slice(0, 50)}\n   └ ${e.error.slice(0, 80)}\n`;
         if (txt.length > 3500) { txt += '_(truncado)_'; break; }
-      }
-      if (r.orphan_profits?.length) {
-        txt += `\n*⚠️ Profits órfãos* (sport sem bankroll row):\n`;
-        for (const o of r.orphan_profits) {
-          txt += `  • ${o.sport}: R$${o.profit.toFixed(2)} (${o.tips}t)\n`;
-        }
       }
       await send(token, chatId, txt);
     } catch (e) { await send(token, chatId, `❌ ${e.message}`); }
+
+  } else if (cmd === '/banca-audit' || cmd === '/bankroll-audit') {
+    if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
+    try {
+      const r = await serverGet('/bankroll-audit').catch(e => ({ error: e.message }));
+      if (!r) { await send(token, chatId, '❌ resposta vazia do server'); return; }
+      if (r.error) { await send(token, chatId, `❌ server: ${r.error}`); return; }
+      if (!r.ok) { await send(token, chatId, `❌ ${r.error || 'endpoint retornou ok=false'}`); return; }
+      // Null-safety em todos os campos
+      const n = (v, d = 0) => Number.isFinite(Number(v)) ? Number(v) : d;
+      const fmt = (v, d = 2) => n(v).toFixed(d);
+      const totalInit = n(r.total_initial);
+      const totalStored = n(r.total_current_stored);
+      const delta = totalStored - totalInit;
+      const pctStr = totalInit > 0 ? `${(delta/totalInit*100).toFixed(1)}%` : '—';
+      let txt = `🔍 *BANKROLL AUDIT*\n\n`;
+      txt += `Model: ${r.model || 'legacy'} | Base unit: R$${fmt(r.unit_base || 1)}\n`;
+      txt += `Baseline: R$${n(r.baseline?.amount)} (${r.baseline?.date || '?'})\n\n`;
+      txt += `*Totais:*\n`;
+      txt += `  Initial: R$${fmt(totalInit)}\n`;
+      txt += `  Current: R$${fmt(totalStored)}\n`;
+      txt += `  ${delta >= 0 ? '📈' : '📉'} P&L: ${delta >= 0 ? '+' : ''}R$${fmt(delta)} (${pctStr})\n`;
+      if (Math.abs(n(r.total_gap)) > 0.01) {
+        txt += `  ⚠️ Gap: R$${fmt(r.total_gap)} — stored ≠ recomputed\n`;
+      }
+      txt += `\n*Per sport (init/curr · 1u · tips profit):*\n`;
+      const sports = Array.isArray(r.per_sport) ? r.per_sport : [];
+      for (const s of sports) {
+        const icon = s.drift ? '⚠️' : '✓';
+        const uvStr = s.tier_unit_value ? `1u=R$${fmt(s.tier_unit_value)}` : '';
+        txt += `${icon} *${s.sport}*: R$${n(s.initial).toFixed(0)}→R$${fmt(s.current_stored)} · ${uvStr}`;
+        if (s.drift) txt += ` · gap R$${fmt(s.gap_stored_minus_recomputed)}`;
+        txt += ` · ${n(s.tip_count)}t ${n(s.profit_sum) >= 0 ? '+' : ''}R$${fmt(s.profit_sum)}\n`;
+        if (txt.length > 3500) { txt += '_(truncado)_'; break; }
+      }
+      if (Array.isArray(r.orphan_profits) && r.orphan_profits.length) {
+        txt += `\n*⚠️ Profits órfãos* (sport sem bankroll row):\n`;
+        for (const o of r.orphan_profits) {
+          txt += `  • ${o.sport}: R$${fmt(o.profit)} (${n(o.tips)}t)\n`;
+        }
+      }
+      await send(token, chatId, txt);
+    } catch (e) { await send(token, chatId, `❌ exception: ${e.message}`); }
 
   } else if (cmd === '/rebuild-reais' || cmd === '/recompute-reais') {
     if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
@@ -7496,6 +7548,7 @@ async function poll(token, sport) {
                      text.startsWith('/dedup-tips') || text.startsWith('/archive-dupes') ||
                      text.startsWith('/rebuild-reais') || text.startsWith('/recompute-reais') ||
                      text.startsWith('/banca-audit') || text.startsWith('/bankroll-audit') ||
+                     text.startsWith('/server-errors') || text.startsWith('/fetch-errors') ||
                      text.startsWith('/tip ') || text.startsWith('/help') || text.startsWith('/start') ||
                      text.startsWith('/alerts')) {
             // Passa `sport` da poll (qual bot recebeu) para evitar default 'esports'
