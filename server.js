@@ -11396,7 +11396,8 @@ const server = http.createServer(async (req, res) => {
     const { sportSet, effectiveGame } = resolveSportSet(sport, game);
     const sportInSql = `(${sportSet.map(() => '?').join(',')})`;
     // Dedup por match_id só — sem sport — pra coalesce tips duplicadas entre esports↔lol/dota2.
-    const dedupe = `t.id IN (SELECT MAX(tdx.id) FROM tips tdx WHERE tdx.sport IN ${sportInSql} AND (tdx.archived IS NULL OR tdx.archived = 0) GROUP BY COALESCE(NULLIF(TRIM(tdx.match_id), ''), 'id:' || CAST(tdx.id AS TEXT)))`;
+    // FILTRA is_shadow=0 também pra não contaminar view individual com tips shadow.
+    const dedupe = `t.id IN (SELECT MAX(tdx.id) FROM tips tdx WHERE tdx.sport IN ${sportInSql} AND (tdx.archived IS NULL OR tdx.archived = 0) AND COALESCE(tdx.is_shadow, 0) = 0 GROUP BY COALESCE(NULLIF(TRIM(tdx.match_id), ''), 'id:' || CAST(tdx.id AS TEXT)))`;
     const gameSql = sqlGameFilter('t', sport, effectiveGame);
     // Win rate / ROI excluem void E push (push = refund, não é WIN nem LOSS).
     // 'pushes' contado separadamente pra UI mostrar totais corretos.
