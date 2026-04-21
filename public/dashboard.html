@@ -692,6 +692,20 @@
     </div>
   </div>
 
+  <!-- Market Tips Shadow (expandable) -->
+  <div class="section" id="secMarketTips">
+    <div class="section-head" onclick="toggleSection('secMarketTips'); loadMarketTipsShadow()">
+      <div class="section-head-left">
+        <svg class="section-chevron" viewBox="0 0 16 16"><path d="M6 4l4 4-4 4" stroke="currentColor" fill="none" stroke-width="2"/></svg>
+        <span>🎯 Market Tips Shadow (handicap/totais/TB)</span>
+      </div>
+      <div class="section-head-meta" id="marketTipsMeta">—</div>
+    </div>
+    <div class="section-body">
+      <div id="marketTipsBody"><div class="loading">Carregando</div></div>
+    </div>
+  </div>
+
   <!-- ROI por Bookmaker (expandable) -->
   <div class="section" id="secBook">
     <div class="section-head" onclick="toggleSection('secBook'); loadByBook()">
@@ -1800,6 +1814,57 @@ async function loadShadow() {
     </div>
     <div class="card-meta" style="margin-top:10px">Shadow = log-only (não envia DM); Ativo = tip production.</div>
   `;
+}
+
+async function loadMarketTipsShadow() {
+  const sp = currentSport === '__overall__' ? '' : '&sport=' + encodeURIComponent(currentSport);
+  const data = await apiFetch('/market-tips-recent?days=14&limit=50' + sp);
+  const el = document.getElementById('marketTipsBody');
+  const meta = document.getElementById('marketTipsMeta');
+  if (!data || data.error) { el.innerHTML = '<div class="empty-state">Sem market tips</div>'; meta.textContent = '—'; return; }
+  const tips = data.tips || [];
+  meta.textContent = `${data.total || 0} tips · ${data.pending || 0} pend · ROI ${data.roi != null ? (data.roi >= 0 ? '+' : '') + data.roi + '%' : '—'} · CLV ${data.avgClvPct != null ? (data.avgClvPct >= 0 ? '+' : '') + data.avgClvPct + '%' : '—'}`;
+  if (!tips.length) { el.innerHTML = '<div class="empty-state">Nenhuma market tip nas últimas 14 dias</div>'; return; }
+  let html = `
+    <div class="card-meta" style="margin-bottom:8px">
+      🛡️ <b>SHADOW</b> — todas as tips aqui são log-only (não enviam DM).
+      Ativar DM admin: env <code>&lt;SPORT&gt;_MARKET_TIPS_ENABLED=true</code>.
+    </div>
+    <table class="tips">
+      <thead>
+        <tr>
+          <th>Data</th><th>Sport</th><th>Match</th><th>Mercado</th>
+          <th style="text-align:right">Odd</th>
+          <th style="text-align:right">pMod</th>
+          <th style="text-align:right">EV</th>
+          <th style="text-align:right">CLV</th>
+          <th style="text-align:center">Result</th>
+        </tr>
+      </thead>
+      <tbody>`;
+  for (const t of tips.slice(0, 40)) {
+    const d = (t.created_at || '').slice(5, 16).replace('T', ' ');
+    const resEmoji = t.result === 'win' ? '✅' : t.result === 'loss' ? '❌' : t.result === 'void' ? '⚪' : '⏳';
+    const clvStr = t.clv_pct != null ? (t.clv_pct >= 0 ? '+' : '') + t.clv_pct.toFixed(1) + '%' : '—';
+    const clvClass = t.clv_pct != null ? (t.clv_pct >= 0 ? 'positive' : 'negative') : '';
+    const pMod = t.p_model != null ? (t.p_model * 100).toFixed(1) + '%' : '—';
+    const evStr = t.ev_pct != null ? (t.ev_pct >= 0 ? '+' : '') + t.ev_pct.toFixed(1) + '%' : '—';
+    html += `
+      <tr>
+        <td>${d}</td>
+        <td>${t.sport}</td>
+        <td>${t.team1} vs ${t.team2}<br><span class="tip-meta">${t.league || ''}</span></td>
+        <td>${t.label || (t.market + ' ' + (t.line || '') + ' ' + t.side)}</td>
+        <td style="text-align:right">${t.odd?.toFixed(2) || '—'}</td>
+        <td style="text-align:right">${pMod}</td>
+        <td style="text-align:right" class="${t.ev_pct >= 8 ? 'positive' : ''}">${evStr}</td>
+        <td style="text-align:right" class="${clvClass}">${clvStr}</td>
+        <td style="text-align:center">${resEmoji}</td>
+      </tr>`;
+  }
+  html += '</tbody></table>';
+  if (tips.length > 40) html += `<div class="card-meta" style="margin-top:8px">Mostrando 40 de ${tips.length}</div>`;
+  el.innerHTML = html;
 }
 
 async function loadByBook() {

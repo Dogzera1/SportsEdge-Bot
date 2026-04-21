@@ -4333,7 +4333,7 @@ async function autoAnalyzeMatch(token, match) {
                 }
                 // MVP admin-only tip: seleciona melhor market tip e manda DM pros admins.
                 // Não vai pros subscribers ainda. Dedup via marketTipSent (24h cooldown).
-                if (process.env.LOL_MARKET_TIPS_ENABLED === 'true' && ADMIN_IDS.size) {
+                if (process.env.LOL_MARKET_TIPS_ENABLED === 'true' && process.env.MARKET_TIPS_DM_KILL_SWITCH !== 'true' && ADMIN_IDS.size) {
                   try {
                     const mtp = require('./lib/market-tip-processor');
                     const mlDirection = lolModel.modelP1 > 0.5 ? 'team1' : 'team2';
@@ -8190,7 +8190,7 @@ async function _pollDotaInner(runOnce = false) {
                 log('INFO', 'DOTA-MARKETS',
                   `  • ${t.label} @ ${t.odd.toFixed(2)} | pModel=${(t.pModel*100).toFixed(1)}% pImpl=${t.pImplied ? (t.pImplied*100).toFixed(1)+'%' : '?'} EV=${t.ev.toFixed(1)}%`);
               }
-              if (process.env.DOTA_MARKET_TIPS_ENABLED === 'true' && ADMIN_IDS.size) {
+              if (process.env.DOTA_MARKET_TIPS_ENABLED === 'true' && process.env.MARKET_TIPS_DM_KILL_SWITCH !== 'true' && ADMIN_IDS.size) {
                 try {
                   const mtp = require('./lib/market-tip-processor');
                   const mlDirection = mlResult.modelP1 > 0.5 ? 'team1' : 'team2';
@@ -9756,7 +9756,7 @@ async function pollTennis(runOnce = false) {
                     log('INFO', 'TENNIS-MARKETS',
                       `  • ${t.label} @ ${t.odd.toFixed(2)} | pModel=${(t.pModel*100).toFixed(1)}% pImpl=${t.pImplied ? (t.pImplied*100).toFixed(1)+'%' : '?'} EV=${t.ev.toFixed(1)}%${discTag}`);
                   }
-                  if (process.env.TENNIS_MARKET_TIPS_ENABLED === 'true' && ADMIN_IDS.size) {
+                  if (process.env.TENNIS_MARKET_TIPS_ENABLED === 'true' && process.env.MARKET_TIPS_DM_KILL_SWITCH !== 'true' && ADMIN_IDS.size) {
                     try {
                       const mtp = require('./lib/market-tip-processor');
                       const mlDirection = tennisModelResult.modelP1 > 0.5 ? 'team1' : 'team2';
@@ -11468,7 +11468,7 @@ async function pollCs(runOnce = false) {
                   log('INFO', 'CS-MARKETS',
                     `  • ${t.label} @ ${t.odd.toFixed(2)} | pModel=${(t.pModel*100).toFixed(1)}% pImpl=${t.pImplied ? (t.pImplied*100).toFixed(1)+'%' : '?'} EV=${t.ev.toFixed(1)}%`);
                 }
-                if (process.env.CS_MARKET_TIPS_ENABLED === 'true' && ADMIN_IDS.size) {
+                if (process.env.CS_MARKET_TIPS_ENABLED === 'true' && process.env.MARKET_TIPS_DM_KILL_SWITCH !== 'true' && ADMIN_IDS.size) {
                   try {
                     const mtp = require('./lib/market-tip-processor');
                     const mlDirection = modelP1 > 0.5 ? 'team1' : 'team2';

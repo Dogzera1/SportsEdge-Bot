@@ -6430,6 +6430,56 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // Lista market_tips_shadow pra dashboard. Todos são SHADOW por natureza (tabela
+  // separada de tips). Permite filtrar por sport, dias, status.
+  // GET /market-tips-recent?sport=tennis&days=7&limit=50&status=all|pending|settled
+  if (p === '/market-tips-recent') {
+    const sport = parsed.query.sport || null;
+    const days = Math.max(1, Math.min(180, parseInt(parsed.query.days || '7', 10) || 7));
+    const limit = Math.max(1, Math.min(500, parseInt(parsed.query.limit || '50', 10) || 50));
+    const status = (parsed.query.status || 'all').toLowerCase();
+    try {
+      const conds = [`created_at >= datetime('now', '-${days} days')`];
+      const params = [];
+      if (sport) { conds.push('sport = ?'); params.push(sport); }
+      if (status === 'pending') conds.push('result IS NULL');
+      else if (status === 'settled') conds.push(`result IN ('win','loss','void')`);
+      const rows = db.prepare(`
+        SELECT id, sport, team1, team2, league, best_of, market, line, side, label,
+               p_model, p_implied, odd, ev_pct, stake_units,
+               created_at, settled_at, result, profit_units,
+               close_odd, clv_pct, admin_dm_sent_at
+        FROM market_tips_shadow
+        WHERE ${conds.join(' AND ')}
+        ORDER BY created_at DESC
+        LIMIT ?
+      `).all(...params, limit);
+      // Stats
+      const settled = rows.filter(r => r.result === 'win' || r.result === 'loss');
+      const wins = settled.filter(r => r.result === 'win').length;
+      const staked = settled.reduce((s, r) => s + (r.stake_units || 1), 0);
+      const profit = rows.reduce((s, r) => s + (r.profit_units || 0), 0);
+      const clvRows = rows.filter(r => r.clv_pct != null);
+      const avgClv = clvRows.length ? +(clvRows.reduce((s, r) => s + r.clv_pct, 0) / clvRows.length).toFixed(2) : null;
+      sendJson(res, {
+        sport: sport || 'all',
+        days, limit,
+        total: rows.length,
+        settled: settled.length,
+        pending: rows.filter(r => !r.result).length,
+        wins, losses: settled.length - wins,
+        winRate: settled.length ? +(wins / settled.length * 100).toFixed(1) : null,
+        staked: +staked.toFixed(2),
+        profit: +profit.toFixed(2),
+        roi: staked > 0 ? +((profit / staked) * 100).toFixed(1) : null,
+        avgClvPct: avgClv,
+        clvSamples: clvRows.length,
+        tips: rows,
+      });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
   // Marca market_tips_shadow como VOID quando EV>maxEv (bogus tips de scanner bug).
   // POST /void-market-tips-bogus?sport=tennis&minEv=40&hours=24
   if (p === '/void-market-tips-bogus' && req.method === 'POST') {
