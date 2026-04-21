@@ -7506,16 +7506,32 @@ const server = http.createServer(async (req, res) => {
     const minN = parseInt(process.env.SPORT_PERF_MIN_N || '15', 10);
     try {
       const _bl = getBaseline();
-      // SELECT inclui stake_reais/profit_reais stored pra tipProfitReais preferir tier
-      // em vez de recompute com unit global (R$10) que inflaria valores 10x.
-      const tipsRaw = db.prepare(`
-        SELECT stake, odds, result, stake_reais, profit_reais
+      // Union cobre legado 'esports' + novos 'lol'/'dota2' pós-split Abr/2026.
+      // Sem isso, dota2 só veria tips do bucket novo (poucas) e nunca triggava bleeder.
+      const { sportSet, effectiveGame } = resolveSportSet(sport, null);
+      const sportInSql = `(${sportSet.map(() => '?').join(',')})`;
+      // Game filter em JS (SQL filter usa alias, raw tips table não tem)
+      const gameFilterJs = (t) => {
+        if (!effectiveGame) return true;
+        const mid = String(t.match_id || '');
+        const ev = String(t.event_name || '').toLowerCase();
+        if (effectiveGame === 'dota2' || effectiveGame === 'dota') {
+          return mid.startsWith('dota2_') || ev.includes('dota');
+        }
+        if (effectiveGame === 'lol') {
+          return !mid.startsWith('dota2_') && !ev.includes('dota');
+        }
+        return true;
+      };
+      const tipsRawAll = db.prepare(`
+        SELECT stake, odds, result, stake_reais, profit_reais, match_id, event_name
         FROM tips
-        WHERE sport = ? AND result IN ('win','loss')
+        WHERE sport IN ${sportInSql} AND result IN ('win','loss')
           AND settled_at >= datetime('now', ?)
           AND (archived IS NULL OR archived = 0)
           AND COALESCE(is_shadow, 0) = 0
-      `).all(sport, `-${days} days`);
+      `).all(...sportSet, `-${days} days`);
+      const tipsRaw = tipsRawAll.filter(gameFilterJs);
       let profit = 0, stake = 0, n = tipsRaw.length;
       for (const t of tipsRaw) {
         const p = tipProfitReais(t, _bl.unit_value);
