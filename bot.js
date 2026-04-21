@@ -857,6 +857,7 @@ const ADMIN_POST_PATHS = new Set([
   '/archive-cross-bucket-duplicates',
   '/archive-fuzzy-duplicates',
   '/admin/rebuild-tip-reais',
+  '/admin/force-sync-bankroll',
   '/threshold-optimizer-apply',
   '/admin/dynamic-threshold',
   '/admin/seed-football-secondary',
@@ -6225,6 +6226,29 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
       await send(token, chatId, txt);
     } catch (e) { await send(token, chatId, `❌ ${e.message}`); }
 
+  } else if (cmd === '/sync-banca' || cmd === '/force-sync') {
+    if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
+    try {
+      const apply = parts.slice(1).some(p => p.toLowerCase() === 'confirm' || p.toLowerCase() === 'apply');
+      const r = await serverPost(`/admin/force-sync-bankroll${apply ? '?apply=1' : ''}`, {});
+      if (!r?.ok) { await send(token, chatId, `❌ ${r?.error || 'falha'}`); return; }
+      let txt = `🔧 *FORCE SYNC BANKROLL — ${apply ? 'APLICADO' : 'DRY-RUN'}*\n\n`;
+      txt += `Changes: *${r.changes_count || 0}*\n\n`;
+      if (r.changes?.length) {
+        for (const c of r.changes) {
+          const sign = c.delta >= 0 ? '+' : '';
+          txt += `• *${c.sport}*: R$${c.prev.toFixed(2)} → R$${c.next.toFixed(2)} (${sign}R$${c.delta.toFixed(2)})\n`;
+        }
+      } else {
+        txt += `_Nenhum drift — tudo sincronizado._\n`;
+      }
+      if (!apply && r.changes_count > 0) {
+        txt += `\n_Pra aplicar: \`/sync-banca confirm\`_`;
+      }
+      const res_ = await send(token, chatId, txt).catch(e => ({ ok: false, error: e.message }));
+      if (res_ && res_.ok === false) await send(token, chatId, txt.replace(/[*_`]/g, ''), { parse_mode: undefined }).catch(() => {});
+    } catch (e) { await send(token, chatId, `❌ ${e.message}`); }
+
   } else if (cmd === '/migrations' || cmd === '/migrations-status') {
     if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
     try {
@@ -6335,20 +6359,35 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
       const r = await serverPost(`/admin/rebuild-tip-reais?${apply ? 'apply=1&' : ''}${sq.slice(1)}`, {});
       if (!r?.ok) { await send(token, chatId, `❌ ${r?.error || 'falha'}`); return; }
       let txt = `💰 *REBUILD TIP REAIS — ${apply ? 'APLICADO' : 'DRY-RUN'}*\n\n`;
-      txt += `Unit value: R$${(r.unit_value || 0).toFixed(2)} ${sportArg ? `(sport=${sportArg})` : '(global)'}\n`;
-      txt += `Tips analisadas: *${r.total_tips}*\n`;
-      txt += `${apply ? 'Atualizadas' : 'Seriam atualizadas'}: *${r.would_update ?? r.updated ?? 0}*\n`;
-      if (apply && r.sports_resynced) {
-        txt += `\nBankrolls re-sincronizadas: ${r.sports_resynced.join(', ') || '-'}\n`;
+      txt += `Model: ${String(r.model || 'legacy').replace(/_/g, '\\_')} ${sportArg ? `(sport=${sportArg})` : ''}\n`;
+      const updN = r.updated ?? r.would_update ?? 0;
+      txt += `Tips ${apply ? 'atualizadas' : 'que seriam atualizadas'}: *${updN}*\n`;
+      const resyncedArr = Array.isArray(r.resynced) ? r.resynced : [];
+      if (apply && resyncedArr.length) {
+        txt += `\n*Bankrolls resyncadas:*\n`;
+        for (const x of resyncedArr) {
+          const d = (x.next - x.prev).toFixed(2);
+          txt += `• ${x.sport}: R$${x.prev.toFixed(2)} → R$${x.next.toFixed(2)} (${d >= 0 ? '+' : ''}R$${d})\n`;
+        }
+      } else if (apply) {
+        txt += `\n_Nenhuma bankroll divergente — tudo em sync._\n`;
       }
-      if (!apply && r.examples?.length) {
-        txt += `\n*Exemplos:*\n`;
+      if (!apply && Array.isArray(r.resync_preview) && r.resync_preview.length) {
+        txt += `\n*Preview resync (prev → next):*\n`;
+        for (const x of r.resync_preview) {
+          const d = (x.newCurrent - x.prevCurrent).toFixed(2);
+          if (Math.abs(d) > 0.01) txt += `• ${x.sport}: R$${x.prevCurrent.toFixed(2)} → R$${x.newCurrent.toFixed(2)} (${d >= 0 ? '+' : ''}R$${d})\n`;
+        }
+      }
+      if (!apply && Array.isArray(r.examples) && r.examples.length) {
+        txt += `\n*Exemplos (tips mudando):*\n`;
         for (const ex of r.examples.slice(0, 5)) {
-          txt += `  • id=${ex.id} ${ex.sport}: stake R$${ex.prevStake}→R$${ex.newStakeR} / profit R$${ex.prevProfit}→R$${ex.newProfitR}\n`;
+          txt += `• id=${ex.id} ${ex.sport}: stake R$${ex.prevStake}→R$${ex.newStakeR} · profit R$${ex.prevProfit}→R$${ex.newProfitR}\n`;
         }
         txt += `\n_Pra aplicar: \`/rebuild-reais confirm\`_`;
       }
-      await send(token, chatId, txt);
+      const res_ = await send(token, chatId, txt).catch(e => ({ ok: false, error: e.message }));
+      if (res_ && res_.ok === false) await send(token, chatId, txt.replace(/[*_`]/g, ''), { parse_mode: undefined }).catch(() => {});
     } catch (e) { await send(token, chatId, `❌ ${e.message}`); }
 
   } else if (cmd === '/dedup-tips' || cmd === '/archive-dupes') {
@@ -7582,7 +7621,8 @@ async function poll(token, sport) {
                      text.startsWith('/rebuild-reais') || text.startsWith('/recompute-reais') ||
                      text.startsWith('/banca-audit') || text.startsWith('/bankroll-audit') ||
                      text.startsWith('/server-errors') || text.startsWith('/fetch-errors') ||
-                     text.startsWith('/migrations') ||
+                     text.startsWith('/migrations') || text.startsWith('/sync-banca') ||
+                     text.startsWith('/force-sync') ||
                      text.startsWith('/tip ') || text.startsWith('/help') || text.startsWith('/start') ||
                      text.startsWith('/alerts')) {
             // Passa `sport` da poll (qual bot recebeu) para evitar default 'esports'

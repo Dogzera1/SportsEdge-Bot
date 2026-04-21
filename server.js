@@ -6602,6 +6602,53 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // Force resync bankroll.current_banca = initial + SUM(profit_reais) por sport.
+  // Não toca tips — só corrige drift entre bankroll stored e profit real.
+  // POST /admin/force-sync-bankroll?apply=1  (sem apply = dry-run)
+  if (p === '/admin/force-sync-bankroll' && req.method === 'POST') {
+    const apply = parsed.query.apply === '1' || parsed.query.apply === 'true';
+    try {
+      const rows = db.prepare(`SELECT sport, initial_banca, current_banca FROM bankroll`).all();
+      const allTips = db.prepare(`
+        SELECT sport, profit_reais, match_id, event_name FROM tips
+        WHERE (archived IS NULL OR archived = 0) AND COALESCE(is_shadow, 0) = 0
+          AND result IN ('win','loss','push','void')
+      `).all();
+      const profitBySport = {};
+      for (const t of allTips) {
+        let sp = t.sport;
+        if (sp === 'esports') {
+          const mid = String(t.match_id || '');
+          const ev = String(t.event_name || '').toLowerCase();
+          sp = (mid.startsWith('dota2_') || ev.includes('dota')) ? 'dota2' : 'lol';
+        }
+        profitBySport[sp] = (profitBySport[sp] || 0) + Number(t.profit_reais || 0);
+      }
+      const changes = [];
+      for (const r of rows) {
+        const init = Number(r.initial_banca || 0);
+        const profit = profitBySport[r.sport] || 0;
+        const newCurrent = +(init + profit).toFixed(2);
+        const prev = Number(r.current_banca || 0);
+        if (Math.abs(newCurrent - prev) > 0.01) {
+          changes.push({ sport: r.sport, prev, next: newCurrent, delta: +(newCurrent - prev).toFixed(2) });
+        }
+      }
+      if (apply && changes.length) {
+        const stmt = db.prepare(`UPDATE bankroll SET current_banca=?, updated_at=datetime('now') WHERE sport=?`);
+        const tx = db.transaction(list => { for (const c of list) stmt.run(c.next, c.sport); });
+        tx(changes);
+      }
+      sendJson(res, {
+        ok: true,
+        dry_run: !apply,
+        changes_count: changes.length,
+        changes,
+      });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
   // Migrations status: lista migrations aplicadas com data — debug pós-deploy.
   // GET /migrations-status
   if (p === '/migrations-status') {
