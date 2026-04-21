@@ -3095,23 +3095,35 @@ function isLeagueBlocked(sport, league) {
 }
 
 // Kelly fraction per sport × confidence level, com env overrides.
-// Prioridade lookup: KELLY_<SPORT>_<CONF> → KELLY_<CONF> → default (¼ / ⅙ / 1/10)
-// Exemplos env:
-//   KELLY_ALTA=0.20                  // cap global alta pra 0.20 (reduz 20%)
-//   KELLY_LOL_ALTA=0.18              // lol alta mais conservador
-//   KELLY_MMA_MEDIA=0.12             // mma média reduzido (high variance)
+// Defaults alinhados com lift do modelo vs baseline Elo (audit 2026-04-21):
+//   LoL: lift 37% → full Kelly (0.25/0.167/0.10)
+//   CS2: lift 20% → full Kelly
+//   Tennis: lift 7% → -20% (0.20/0.133/0.08)
+//   MMA: lift 6% (n=561 teste) → -30% (0.175/0.117/0.07)
+//   Dota2/Valorant: lift 3-4% → -30% (modelo quase-baseline — overkelly perigoso)
+//   Darts/Snooker: lift 2-3% → -60% (alpha marginal, proteger capital)
+// Prioridade lookup: KELLY_<SPORT>_<CONF> → KELLY_<CONF> → per-sport default → global default.
 const _KELLY_DEFAULTS = { ALTA: 0.25, MEDIA: 1/6, BAIXA: 0.10 };
+// Multiplicador per-sport aplicado sobre _KELLY_DEFAULTS
+const _KELLY_SPORT_MULT = {
+  lol: 1.00, cs: 1.00, football: 1.00,
+  tennis: 0.80,
+  mma: 0.70, dota2: 0.70, valorant: 0.70,
+  darts: 0.40, snooker: 0.40,
+  tabletennis: 0.80,
+};
 function _normalizeConfKey(conf) {
   const c = String(conf || '').toUpperCase();
   if (c === 'ALTA' || c === 'HIGH') return 'ALTA';
   if (c === 'BAIXA' || c === 'LOW') return 'BAIXA';
-  return 'MEDIA'; // inclui 'MÉDIA', 'MED', unknown
+  return 'MEDIA';
 }
 function getKellyFraction(sport, conf) {
   const key = _normalizeConfKey(conf);
-  const sp = String(sport || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  const sp = String(sport || '').toLowerCase();
+  const spEnv = sp.toUpperCase().replace(/[^A-Z0-9]/g, '');
   // Per-sport override first
-  const perSport = process.env[`KELLY_${sp}_${key}`];
+  const perSport = process.env[`KELLY_${spEnv}_${key}`];
   if (perSport != null && perSport !== '') {
     const v = parseFloat(perSport);
     if (Number.isFinite(v) && v > 0 && v <= 1) return v;
@@ -3122,7 +3134,27 @@ function getKellyFraction(sport, conf) {
     const v = parseFloat(global);
     if (Number.isFinite(v) && v > 0 && v <= 1) return v;
   }
-  return _KELLY_DEFAULTS[key];
+  // Per-sport default (lift-based)
+  const mult = _KELLY_SPORT_MULT[sp] ?? 1.00;
+  return _KELLY_DEFAULTS[key] * mult;
+}
+
+// EV threshold default per sport — sports com lift baixo exigem edge maior pra compensar
+// ruído do modelo. Override via env <SPORT>_EV_THRESHOLD (já existente em alguns sports).
+// Formula aproximada: EV_min = 5 + (1 - lift_vs_baseline) × 10
+//   LoL/CS2 (lift ≥20%): 5%
+//   Tennis/Football: 5-7%
+//   MMA/Dota2/Valorant (lift ≤10%): 7%
+//   Darts/Snooker (lift ≤3%): 10%
+const _EV_THRESHOLD_DEFAULTS = {
+  lol: 5, cs: 5, football: 5,
+  tennis: 7, mma: 7, dota2: 7, valorant: 7,
+  tabletennis: 7,
+  darts: 10, snooker: 10,
+};
+function getEvThreshold(sport) {
+  const sp = String(sport || '').toLowerCase();
+  return _EV_THRESHOLD_DEFAULTS[sp] ?? 5;
 }
 
 async function runBankrollGuardianCycle() {
@@ -9560,7 +9592,10 @@ async function _pollDotaInner(runOnce = false) {
       }) : '—';
 
       const fairLabel = hasModelData ? 'P modelo (forma+H2H)' : 'Fair odds (de-juice)';
-      const evThreshold = hasModelData ? 5 : 6;
+      // EV threshold per-sport (Dota2 lift ≈4% → 7% default; override DOTA_EV_THRESHOLD).
+      // +1 sem model data (signal fraco).
+      const evBaseDota = parseFloat(process.env.DOTA_EV_THRESHOLD || getEvThreshold('dota2'));
+      const evThreshold = hasModelData ? evBaseDota : evBaseDota + 1;
       const minOdds = parseFloat(process.env.DOTA_MIN_ODDS || '1.30');
       const maxOdds = parseFloat(process.env.DOTA_MAX_ODDS || '5.00');
 
@@ -12405,7 +12440,8 @@ async function pollTableTennis(runOnce = false) {
   const TT_INTERVAL = 30 * 60 * 1000; // 30 min (volume alto, match curto)
   const TT_MIN_ODDS = parseFloat(process.env.TABLETENNIS_MIN_ODDS ?? '1.40');
   const TT_MAX_ODDS = parseFloat(process.env.TABLETENNIS_MAX_ODDS ?? '4.00');
-  const TT_MIN_EV = parseFloat(process.env.TABLETENNIS_MIN_EV ?? '5.0');
+  // Audit: TT lift moderado → 7% default
+  const TT_MIN_EV = parseFloat(process.env.TABLETENNIS_MIN_EV ?? String(getEvThreshold('tabletennis')));
   const { getTableTennisElo } = require('./lib/tabletennis-ml');
   const sofaTT = require('./lib/sofascore-tabletennis');
 
@@ -13238,7 +13274,8 @@ async function pollValorant(runOnce = false) {
   let _hadLiveVal = false;
   const VAL_MIN_ODDS = parseFloat(process.env.VALORANT_MIN_ODDS ?? '1.40');
   const VAL_MAX_ODDS = parseFloat(process.env.VALORANT_MAX_ODDS ?? '4.50');
-  const VAL_MIN_EV = parseFloat(process.env.VALORANT_MIN_EV ?? '5.0');
+  // Audit 2026-04-21: Valorant lift vs Elo ≈3.7% → EV min default 7% (era 5%); override VALORANT_MIN_EV
+  const VAL_MIN_EV = parseFloat(process.env.VALORANT_MIN_EV ?? String(getEvThreshold('valorant')));
   const VAL_LIVE_CONF = String(process.env.VALORANT_LIVE_CONF || 'ALL').toUpperCase();
   const { getValorantModel } = require('./lib/valorant-ml');
 
@@ -13745,7 +13782,8 @@ async function runAutoDarts() {
             }
           }
 
-          const MIN_EV_DARTS = parseFloat(process.env.DARTS_MIN_EV || '5');
+          // Audit 2026-04-21: Darts lift vs Elo ≈2.3% (marginal) → EV min default 10% (era 5%); override DARTS_MIN_EV
+          const MIN_EV_DARTS = parseFloat(process.env.DARTS_MIN_EV || String(getEvThreshold('darts')));
           if (evPct < MIN_EV_DARTS) {
             analyzedDarts.set(key, { ts: now, tipSent: false });
             log('INFO', 'AUTO-DARTS', `EV baixo (${evPct.toFixed(1)}% < ${MIN_EV_DARTS}%): ${match.team1} vs ${match.team2}`);
@@ -13966,7 +14004,9 @@ async function runAutoSnooker() {
           const pickOdd = ml.direction === 't1' ? parseFloat(match.odds.t1) : parseFloat(match.odds.t2);
           const pickP   = ml.direction === 't1' ? ml.modelP1 : ml.modelP2;
           const evPct   = ((pickP * pickOdd - 1) * 100);
-          if (evPct < 3) { analyzedSnooker.set(key, { ts: now, tipSent: false }); continue; }
+          // Audit 2026-04-21: Snooker lift ≈3.4% + ECE 0.061 (miscalibrado) → EV min default 10% (era 3%); override SNOOKER_MIN_EV
+          const MIN_EV_SNOOKER = parseFloat(process.env.SNOOKER_MIN_EV || String(getEvThreshold('snooker')));
+          if (evPct < MIN_EV_SNOOKER) { analyzedSnooker.set(key, { ts: now, tipSent: false }); continue; }
 
           // ── IA segunda opinião ──
           let _aiConfSnooker = null;
