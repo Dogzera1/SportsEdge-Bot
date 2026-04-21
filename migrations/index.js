@@ -747,6 +747,68 @@ const migrations = [
       }
     },
   },
+  {
+    id: '038_final_full_rebuild_alignment',
+    up(db) {
+      // Rebuild final (belt-and-suspenders) pra garantir alinhamento total pós-037:
+      // 1. Recomputa stake_reais/profit_reais com baseline.unit_value global (canônico)
+      // 2. Reclassifica esports→lol/dota2 no profitBySport
+      // 3. Resync TODAS bankroll.current_banca = initial + profit_reclassificado
+      // User pediu "ajuste todas tips liquidadas pra refletir novo bankroll" — aqui fica.
+      const blRow = db.prepare("SELECT value FROM settings WHERE key = 'baseline'").get();
+      let uv = 9;
+      if (blRow?.value) {
+        try {
+          const parsed = JSON.parse(blRow.value);
+          const amount = Number(parsed.amount || 0);
+          const unitPct = Number(parsed.unit_pct || 1);
+          if (amount > 0 && unitPct > 0) uv = (amount * unitPct) / 100 / 100;
+          if (!uv || uv <= 0) uv = 9;
+        } catch (_) {}
+      }
+      // Step 1: rebuild stake_reais/profit_reais
+      const tips = db.prepare(`
+        SELECT id, stake, odds, result FROM tips
+        WHERE result IN ('win','loss','push','void')
+          AND (archived IS NULL OR archived = 0)
+      `).all();
+      const updStmt = db.prepare(`UPDATE tips SET stake_reais = ?, profit_reais = ? WHERE id = ?`);
+      for (const t of tips) {
+        const stakeU = parseFloat(String(t.stake || '0').replace(/u/i, '')) || 0;
+        if (!stakeU) continue;
+        const odds = parseFloat(t.odds) || 1;
+        const newStakeR = +(stakeU * uv).toFixed(2);
+        let newProfitR = 0;
+        if (t.result === 'win') newProfitR = +(stakeU * (odds - 1) * uv).toFixed(2);
+        else if (t.result === 'loss') newProfitR = +(-stakeU * uv).toFixed(2);
+        updStmt.run(newStakeR, newProfitR, t.id);
+      }
+      // Step 2 + 3: reclassifica esports→lol/dota2 e resync bankroll.current_banca
+      const allSettled = db.prepare(`
+        SELECT sport, profit_reais, match_id, event_name FROM tips
+        WHERE (archived IS NULL OR archived = 0) AND COALESCE(is_shadow, 0) = 0
+          AND result IN ('win','loss','push','void')
+      `).all();
+      const profitBySport = {};
+      for (const t of allSettled) {
+        const p = Number(t.profit_reais || 0);
+        let sp = t.sport;
+        if (sp === 'esports') {
+          const mid = String(t.match_id || '');
+          const ev = String(t.event_name || '').toLowerCase();
+          sp = (mid.startsWith('dota2_') || ev.includes('dota')) ? 'dota2' : 'lol';
+        }
+        profitBySport[sp] = (profitBySport[sp] || 0) + p;
+      }
+      const bankrolls = db.prepare('SELECT sport, initial_banca FROM bankroll').all();
+      for (const bk of bankrolls) {
+        const init = Number(bk.initial_banca || 0);
+        const profit = profitBySport[bk.sport] || 0;
+        const newCurrent = +(init + profit).toFixed(2);
+        db.prepare("UPDATE bankroll SET current_banca=?, updated_at=datetime('now') WHERE sport=?").run(newCurrent, bk.sport);
+      }
+    },
+  },
 ];
 
 function applyMigrations(db) {

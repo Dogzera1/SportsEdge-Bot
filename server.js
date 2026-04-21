@@ -6691,16 +6691,37 @@ const server = http.createServer(async (req, res) => {
       const stmt = db.prepare(`UPDATE tips SET stake_reais = ?, profit_reais = ? WHERE id = ?`);
       const tx = db.transaction(list => { for (const u of list) stmt.run(u.newStakeR, u.newProfitR, u.id); });
       tx(updates);
-      // Resync bankroll.current_banca pra cada sport afetado
-      const affected = [...new Set(updates.map(u => u.sport))];
-      for (const sport of affected) {
-        const bk = db.prepare('SELECT initial_banca FROM bankroll WHERE sport=?').get(sport);
-        if (!bk) continue;
-        const profitRow = db.prepare(`SELECT COALESCE(SUM(profit_reais), 0) AS p FROM tips WHERE sport=? AND result IN ('win','loss','push','void') AND (archived IS NULL OR archived = 0)`).get(sport);
-        const newCurrent = +((Number(bk.initial_banca) || 0) + Number(profitRow?.p || 0)).toFixed(2);
-        stmts.updateBankroll.run(newCurrent, sport);
+      // Resync TODAS as bankrolls (não só as afetadas) com reclassificação esports→lol/dota2.
+      // Garante que profit de tips legadas sport='esports' pinga nos buckets lol/dota2 corretos.
+      const allTipsAgain = db.prepare(`
+        SELECT sport, profit_reais, match_id, event_name FROM tips
+        WHERE (archived IS NULL OR archived = 0) AND COALESCE(is_shadow, 0) = 0
+          AND result IN ('win','loss','push','void')
+      `).all();
+      const profitBySport = {};
+      for (const t of allTipsAgain) {
+        const p = Number(t.profit_reais || 0);
+        let sp = t.sport;
+        if (sp === 'esports') {
+          const mid = String(t.match_id || '');
+          const ev = String(t.event_name || '').toLowerCase();
+          sp = (mid.startsWith('dota2_') || ev.includes('dota')) ? 'dota2' : 'lol';
+        }
+        profitBySport[sp] = (profitBySport[sp] || 0) + p;
       }
-      sendJson(res, { ok: true, unit_value: uv, total_tips: tips.length, updated: updates.length, sports_resynced: affected });
+      const allBankrolls = db.prepare('SELECT sport, initial_banca, current_banca FROM bankroll').all();
+      const resynced = [];
+      for (const bk of allBankrolls) {
+        const init = Number(bk.initial_banca || 0);
+        const profit = profitBySport[bk.sport] || 0;
+        const newCurrent = +(init + profit).toFixed(2);
+        const prev = Number(bk.current_banca || 0);
+        if (Math.abs(newCurrent - prev) > 0.01) {
+          stmts.updateBankroll.run(newCurrent, bk.sport);
+          resynced.push({ sport: bk.sport, prev: prev, next: newCurrent });
+        }
+      }
+      sendJson(res, { ok: true, unit_value: uv, total_tips: tips.length, updated: updates.length, resynced });
     } catch (e) { sendJson(res, { error: e.message }, 500); }
     return;
   }
