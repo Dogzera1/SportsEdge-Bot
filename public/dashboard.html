@@ -541,6 +541,16 @@
   <!-- Alerts -->
   <div class="alerts" id="alerts"></div>
 
+  <!-- Pipeline Health & Actions: status + copy-paste remediations -->
+  <div class="card" id="pipelineHealthCard" style="display:none;margin-bottom:12px">
+    <div class="card-header">
+      <div class="card-title">🏥 Pipeline Health</div>
+      <div class="card-meta" id="pipelineHealthMeta"></div>
+    </div>
+    <div id="pipelineHealthSummary" style="margin-bottom:10px"></div>
+    <div id="pipelineHealthActions"></div>
+  </div>
+
   <!-- Sports em atenção: shadow/block/review status per sport -->
   <div class="card" id="sportsRiskCard" style="display:none;margin-bottom:12px">
     <div class="card-header">
@@ -1057,6 +1067,7 @@ async function refresh() {
         loadSportsRisk(gen),
         loadLeagueLeaks(gen),
         loadLeagueBlocklist(gen),
+        loadPipelineHealth(gen),
       ]);
     } else {
       await Promise.all([
@@ -1068,6 +1079,7 @@ async function refresh() {
         loadSportsRisk(gen),
         loadLeagueLeaks(gen),
         loadLeagueBlocklist(gen),
+        loadPipelineHealth(gen),
         loadUpcoming(gen),
         loadTips(gen),
         loadModels(gen),
@@ -1664,6 +1676,94 @@ async function loadLeagueLeaks(gen = refreshGen) {
     list.innerHTML = html;
   } catch (e) {
     console.warn('loadLeagueLeaks error:', e);
+    card.style.display = 'none';
+  }
+}
+
+async function loadPipelineHealth(gen = refreshGen) {
+  const card = document.getElementById('pipelineHealthCard');
+  const summary = document.getElementById('pipelineHealthSummary');
+  const actionsDiv = document.getElementById('pipelineHealthActions');
+  const meta = document.getElementById('pipelineHealthMeta');
+  if (!card || !summary) return;
+  try {
+    const r = await apiFetch('/pipeline-status?days=30');
+    if (shouldAbort(gen)) return;
+    if (!r?.ok) { card.style.display = 'none'; return; }
+
+    const { bankroll, sports, leaks, blocklist, actions, has_critical } = r;
+    card.style.display = '';
+    meta.innerHTML = has_critical
+      ? '<span style="color:#ef4444;font-weight:600">🚨 CRITICAL</span>'
+      : '<span style="color:#10b981">✅ saudável</span>';
+
+    // Summary line: banca + status sports
+    const bkIcon = bankroll.delta_pct >= 0 ? '🟢' : bankroll.delta_pct >= -10 ? '🟡' : '🔴';
+    const bkDelta = (bankroll.delta_abs >= 0 ? '+' : '') + 'R$' + bankroll.delta_abs.toFixed(2);
+    const bkPct = (bankroll.delta_pct >= 0 ? '+' : '') + bankroll.delta_pct.toFixed(1) + '%';
+    const bandCounts = sports.reduce((acc, s) => { acc[s.band] = (acc[s.band] || 0) + 1; return acc; }, {});
+    const bandStr = ['leak', 'review', 'warn', 'neutral', 'healthy'].map(b => bandCounts[b] ? `<span style="color:${({leak:'#ef4444',review:'#f97316',warn:'#f59e0b',neutral:'#64748b',healthy:'#10b981'})[b]}">${bandCounts[b]} ${b}</span>`: '').filter(Boolean).join(' · ') || '_sem dados_';
+    summary.innerHTML = `
+      <div style="display:flex;gap:16px;flex-wrap:wrap;padding:10px 12px;background:rgba(0,0,0,0.15);border-radius:6px">
+        <div><strong>${bkIcon} Banca:</strong> R$${bankroll.stored.toFixed(2)} / R$${bankroll.initial.toFixed(2)} (${bkDelta} · ${bkPct})</div>
+        <div><strong>Sports:</strong> ${bandStr}</div>
+        <div><strong>Blocklist:</strong> 🤖${blocklist.auto} 🔧${blocklist.manual} 📄${blocklist.env}${blocklist.cooldowns ? ' ⏸️' + blocklist.cooldowns : ''}</div>
+      </div>
+    `;
+
+    // Actions (copy-paste blocks)
+    if (!actions.length) {
+      actionsDiv.innerHTML = `<div class="kpi-meta" style="text-align:center;padding:8px;color:var(--text-dim)">_Nenhuma ação recomendada — pipeline saudável_</div>`;
+      return;
+    }
+    const copyBtn = (text) => `<button onclick="navigator.clipboard.writeText('${text.replace(/'/g, "\\'")}');this.textContent='✓';setTimeout(()=>this.textContent='📋',1500)" style="background:transparent;border:1px solid var(--border);color:var(--text);padding:2px 8px;border-radius:4px;cursor:pointer;font-size:11px" title="Copiar">📋</button>`;
+    const renderAction = (a) => {
+      if (a.type === 'kelly_env') {
+        const envLine = `${a.var}=${a.value}`;
+        return `<div style="padding:8px 12px;border-left:3px solid #f59e0b;background:rgba(245,158,11,0.08);margin-bottom:6px;border-radius:4px">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+              <span>🎰</span>
+              <code style="background:rgba(255,255,255,0.05);padding:2px 6px;border-radius:3px;font-size:12px">${envLine}</code>
+              ${copyBtn(envLine)}
+            </div>
+            <span class="kpi-meta" style="font-size:11px">${a.reason}</span>
+          </div>
+        </div>`;
+      }
+      if (a.type === 'block_league') {
+        return `<div style="padding:8px 12px;border-left:3px solid #ef4444;background:rgba(239,68,68,0.08);margin-bottom:6px;border-radius:4px">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+              <span>🚫</span>
+              <code style="background:rgba(255,255,255,0.05);padding:2px 6px;border-radius:3px;font-size:12px">${a.cmd.replace(/</g, '&lt;')}</code>
+              ${copyBtn(a.cmd)}
+            </div>
+            <span class="kpi-meta" style="font-size:11px">${a.reason.replace(/</g, '&lt;')}</span>
+          </div>
+        </div>`;
+      }
+      if (a.type === 'pause_sport') {
+        return `<div style="padding:8px 12px;border-left:3px solid #64748b;background:rgba(100,116,139,0.08);margin-bottom:6px;border-radius:4px;opacity:0.85">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+              <span>⏸️</span>
+              <code style="background:rgba(255,255,255,0.05);padding:2px 6px;border-radius:3px;font-size:12px">${a.cmd}</code>
+              ${copyBtn(a.cmd)}
+            </div>
+            <span class="kpi-meta" style="font-size:11px">${a.reason}</span>
+          </div>
+        </div>`;
+      }
+      return '';
+    };
+    actionsDiv.innerHTML = `
+      <div style="font-weight:600;margin-bottom:6px;font-size:13px">💡 Ações recomendadas (${actions.length}):</div>
+      ${actions.map(renderAction).join('')}
+      <div class="kpi-meta" style="font-size:11px;margin-top:8px;color:var(--text-dim)">_Clique 📋 pra copiar. Env vars: seta no Railway. Cmds: manda no Telegram admin._</div>
+    `;
+  } catch (e) {
+    console.warn('loadPipelineHealth error:', e);
     card.style.display = 'none';
   }
 }

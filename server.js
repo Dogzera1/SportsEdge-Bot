@@ -6767,6 +6767,133 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // GET /pipeline-status?days=30 — synthesizing endpoint pra dashboard + APIs externas.
+  // Mirrors buildPipelineStatusReport em bot.js mas retorna JSON estruturado.
+  if (p === '/pipeline-status') {
+    try {
+      const qs = new URL(req.url, 'http://x').searchParams;
+      const days = Math.max(7, Math.min(90, parseInt(qs.get('days') || '30', 10)));
+
+      // Bankroll summary (reusa /bankroll-audit logic)
+      const bankrollRows = db.prepare(`SELECT sport, initial_banca, current_banca FROM bankroll`).all();
+      let totalInit = 0, totalStored = 0;
+      for (const r of bankrollRows) {
+        if (String(r.sport).toLowerCase() === 'esports') continue; // legacy, skip
+        totalInit += Number(r.initial_banca || 0);
+        totalStored += Number(r.current_banca || 0);
+      }
+      const deltaAbs = totalStored - totalInit;
+      const deltaPct = totalInit > 0 ? (deltaAbs / totalInit * 100) : 0;
+
+      // Per-sport ROI 30d
+      const sports = ['lol', 'dota2', 'mma', 'tennis', 'cs', 'valorant', 'football', 'tabletennis', 'darts', 'snooker'];
+      const sportRows = [];
+      for (const sp of sports) {
+        const extraSql = sp === 'dota2'
+          ? " OR (sport = 'esports' AND (match_id LIKE 'dota2_%' OR LOWER(COALESCE(event_name,'')) LIKE '%dota%'))"
+          : sp === 'lol'
+            ? " OR (sport = 'esports' AND match_id NOT LIKE 'dota2_%' AND LOWER(COALESCE(event_name,'')) NOT LIKE '%dota%')"
+            : "";
+        const r = db.prepare(`
+          SELECT COUNT(*) AS n, COALESCE(SUM(stake_reais), 0) AS staked, COALESCE(SUM(profit_reais), 0) AS profit
+          FROM tips
+          WHERE sent_at >= datetime('now', '-${days} days')
+            AND (archived IS NULL OR archived = 0)
+            AND COALESCE(is_shadow, 0) = 0
+            AND result IN ('win','loss')
+            AND (sport = ?${extraSql})
+        `).get(sp);
+        const n = Number(r?.n || 0);
+        const staked = Number(r?.staked || 0);
+        const profit = Number(r?.profit || 0);
+        const roi = staked > 0 ? (profit / staked * 100) : null;
+        if (n > 0) {
+          const band = n < 10 || roi == null ? '?' :
+                       roi >= 5 ? 'healthy' :
+                       roi >= 0 ? 'neutral' :
+                       roi >= -10 ? 'warn' :
+                       roi >= -25 ? 'review' : 'leak';
+          sportRows.push({ sport: sp, n, roi: roi != null ? +roi.toFixed(2) : null, profit: +profit.toFixed(2), band });
+        }
+      }
+      sportRows.sort((a, b) => (a.roi ?? 0) - (b.roi ?? 0));
+
+      // Top 3 liga leaks
+      const leaksRaw = db.prepare(`
+        SELECT sport, event_name, COUNT(*) AS n,
+               COALESCE(SUM(stake_reais), 0) AS staked, COALESCE(SUM(profit_reais), 0) AS profit
+        FROM tips
+        WHERE sent_at >= datetime('now', '-${days} days')
+          AND (archived IS NULL OR archived = 0)
+          AND COALESCE(is_shadow, 0) = 0
+          AND result IN ('win','loss')
+          AND event_name IS NOT NULL AND TRIM(event_name) != ''
+        GROUP BY sport, event_name
+        HAVING n >= 5
+      `).all();
+      const leaks = leaksRaw
+        .map(r => ({
+          sport: r.sport,
+          league: (r.event_name || '').trim(),
+          n: r.n,
+          roi: r.staked > 0 ? +(Number(r.profit) / Number(r.staked) * 100).toFixed(2) : null,
+          profit: +Number(r.profit || 0).toFixed(2),
+        }))
+        .filter(r => r.profit < -5 && r.roi != null && r.roi < 0)
+        .sort((a, b) => a.profit - b.profit)
+        .slice(0, 3);
+
+      // Blocklist counts
+      const now = Date.now();
+      let autoCount = 0, manualCount = 0, envCount = 0, cooldownCount = 0;
+      try {
+        const blRows = db.prepare(`SELECT source, cooldown_until FROM league_blocklist`).all();
+        for (const r of blRows) {
+          if (r.source === 'auto') autoCount++;
+          else if (r.source === 'manual') manualCount++;
+          else if (r.source === 'env') envCount++;
+          else if (r.source === 'cooldown' && r.cooldown_until > now) cooldownCount++;
+        }
+      } catch (_) {} // table may not exist pre-migration 045
+
+      // Actions generator
+      const actions = [];
+      for (const s of sportRows) {
+        if (s.band === 'leak') {
+          actions.push({ type: 'kelly_env', sport: s.sport, var: `KELLY_${s.sport.toUpperCase()}_ALTA`, value: '0.10', reason: `ROI ${s.roi.toFixed(1)}% em ${s.n} tips (leak band)` });
+          actions.push({ type: 'pause_sport', sport: s.sport, cmd: `/pause-sport ${s.sport}`, reason: 'alternativa ao cap Kelly' });
+        } else if (s.band === 'review') {
+          actions.push({ type: 'kelly_env', sport: s.sport, var: `KELLY_${s.sport.toUpperCase()}_ALTA`, value: '0.175', reason: `ROI ${s.roi.toFixed(1)}% (review band)` });
+        } else if (s.band === 'warn') {
+          actions.push({ type: 'kelly_env', sport: s.sport, var: `KELLY_${s.sport.toUpperCase()}_ALTA`, value: '0.212', reason: `ROI ${s.roi.toFixed(1)}% (warn band)` });
+        }
+      }
+      for (const l of leaks) {
+        const substr = l.league.toLowerCase().split(/\s+/).slice(0, 3).join(' ');
+        actions.push({ type: 'block_league', sport: l.sport, substring: substr, cmd: `/block-league ${l.sport} ${substr}`, reason: `${l.league} — ROI ${l.roi?.toFixed(1) ?? '?'}% profit R$${l.profit.toFixed(2)}` });
+      }
+
+      const hasCritical = !!(sportRows.some(s => s.band === 'leak') || leaks.length || deltaPct <= -15);
+
+      sendJson(res, {
+        ok: true,
+        days,
+        bankroll: {
+          initial: +totalInit.toFixed(2),
+          stored: +totalStored.toFixed(2),
+          delta_abs: +deltaAbs.toFixed(2),
+          delta_pct: +deltaPct.toFixed(2),
+        },
+        sports: sportRows,
+        leaks,
+        blocklist: { auto: autoCount, manual: manualCount, env: envCount, cooldowns: cooldownCount, total: autoCount + manualCount + envCount },
+        actions,
+        has_critical: hasCritical,
+      });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
   // GET /league-blocklist — lê table league_blocklist (populada por bot.js migration 045)
   // Retorna entries separadas por source (manual/env/auto) + cooldowns ativos.
   if (p === '/league-blocklist') {
