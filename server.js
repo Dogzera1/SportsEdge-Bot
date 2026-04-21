@@ -12524,16 +12524,17 @@ const server = http.createServer(async (req, res) => {
     req.on('end', () => {
       try {
         const sport = parsed.query.sport || 'esports';
-        const { matchId, currentOdds, currentEV, currentConfidence, markNotified } = safeParse(body, {});
+        const { matchId, currentOdds, currentEV, currentConfidence, currentStake, markNotified } = safeParse(body, {});
         const mid = clampStr(matchId, 128);
         if (!mid) { badRequest(res, 'matchId obrigatório'); return; }
         const o = parseFiniteNumber(currentOdds);
         const ev = parseFiniteNumber(currentEV);
         const conf = clampStr(currentConfidence, 24) || null;
+        const stake = clampStr(currentStake, 16) || null;
         if (o == null || o <= 1) { badRequest(res, 'currentOdds inválido'); return; }
         if (ev == null) { badRequest(res, 'currentEV inválido'); return; }
-        if (markNotified) stmts.updateTipCurrentAndNotified.run(o, ev, conf, String(mid), sport);
-        else stmts.updateTipCurrent.run(o, ev, conf, String(mid), sport);
+        if (markNotified) stmts.updateTipCurrentAndNotified.run(o, ev, conf, stake, String(mid), sport);
+        else stmts.updateTipCurrent.run(o, ev, conf, stake, String(mid), sport);
         sendJson(res, { ok: true });
       } catch(e) { sendJson(res, { error: e.message }, 500); }
     });

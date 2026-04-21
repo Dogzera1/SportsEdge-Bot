@@ -13759,6 +13759,25 @@ async function refreshOpenTips(caches = {}) {
         const p = Math.max(0.01, Math.min(0.99, (1 + oldEv / 100) / oldOdds));
         const newEv = ((p * currentOdds) - 1) * 100;
 
+        // Re-deriva confidence baseado em newEv: EV alto → mantém ALTA,
+        // EV moderado → MÉDIA, EV baixo/negativo → BAIXA.
+        const oldConf = (tip.confidence || 'MÉDIA').toString().toUpperCase().replace('MEDIA','MÉDIA');
+        let newConf = oldConf;
+        if (newEv < 3) newConf = 'BAIXA';
+        else if (newEv < 8) {
+          // Downgrade: ALTA → MÉDIA em EV moderado; mantém MÉDIA/BAIXA
+          if (oldConf === 'ALTA') newConf = 'MÉDIA';
+        }
+        // Se EV caiu 50%+ do original, força BAIXA (sinal fraco)
+        if (oldEv > 0 && newEv / oldEv < 0.5) newConf = 'BAIXA';
+
+        // Re-calcula stake via Kelly fracionário: conf ALTA→¼, MÉDIA→⅙, BAIXA→1/10.
+        // Alinhado com lógica de /rerun-pending-trained (server.js:7284-7288).
+        const kellyFracByConf = newConf === 'ALTA' ? 0.25 : newConf === 'MÉDIA' ? 1/6 : 0.10;
+        let newStake = calcKellyWithP(p, currentOdds, kellyFracByConf);
+        // Força 0u quando EV sub-threshold (tip perdeu edge — sinal pra dashboard)
+        if (newEv < 3) newStake = '0u';
+
         // Dedup: notificação deve ser mostrada apenas 1 vez por tip
         const key = `${sport}|${String(tip.match_id || '')}|${norm(pick)}|${String(tip.market_type || 'ML')}`;
         const cachedTs = tipUpdateNotifyCache.get(key) || 0;
@@ -13770,7 +13789,8 @@ async function refreshOpenTips(caches = {}) {
           matchId: tip.match_id,
           currentOdds: currentOdds,
           currentEV: parseFloat(newEv.toFixed(2)),
-          currentConfidence: tip.confidence || null,
+          currentConfidence: newConf,
+          currentStake: newStake,
           markNotified: shouldNotify ? 1 : 0
         }, sport).catch(() => null);
 
