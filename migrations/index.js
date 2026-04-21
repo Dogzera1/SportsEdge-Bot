@@ -615,6 +615,70 @@ const migrations = [
       db.prepare("UPDATE bankroll SET initial_banca=0, current_banca=0, updated_at=datetime('now') WHERE sport='esports'").run();
     },
   },
+  {
+    id: '034_bump_lol_dota_bankroll_min',
+    up(db) {
+      // Post-split (033): lol/dota2 ficaram com R$50 cada (metade de esports=R$100).
+      // Banca <R$100 = thresholds "small" (BLOCK 45%/SHADOW 28%) mas 1 loss de 2u já
+      // gera ~36% DD. Bumping pra min R$150 cada: sai de "small", usa thresholds big
+      // (BLOCK 35%/SHADOW 20%/REVIEW 12%) compatíveis com variance real.
+      // Preserve cumulative profit adicionando delta a ambos initial e current.
+      const MIN_INITIAL = 150;
+      for (const sport of ['lol', 'dota2']) {
+        const r = db.prepare('SELECT initial_banca, current_banca FROM bankroll WHERE sport=?').get(sport);
+        if (!r) continue;
+        const currentInit = Number(r.initial_banca) || 0;
+        if (currentInit >= MIN_INITIAL) continue;
+        const delta = MIN_INITIAL - currentInit;
+        const newCurrent = Number(r.current_banca || 0) + delta;
+        db.prepare("UPDATE bankroll SET initial_banca=?, current_banca=?, updated_at=datetime('now') WHERE sport=?").run(MIN_INITIAL, newCurrent, sport);
+      }
+    },
+  },
+  {
+    id: '035_rebuild_tip_reais_baseline_uv',
+    up(db) {
+      // Pre-034 settlement usava bk.current_banca/100 como unit_value (drifting por DD).
+      // Agora usamos baseline global (R$9 pra baseline R$900). Rebuild stake_reais/
+      // profit_reais pra todas tips settadas usando unit_value canônico — alinha stored
+      // values com o que /overall-summary, /roi, guardian recomputam on-the-fly.
+      // Depois sync bankroll.current_banca via SUM(profit_reais) por sport.
+      const blRow = db.prepare("SELECT value FROM settings WHERE key = 'baseline'").get();
+      let uv = 9; // fallback se settings vazio
+      if (blRow?.value) {
+        try {
+          const parsed = JSON.parse(blRow.value);
+          const amount = Number(parsed.amount || 0);
+          const unitPct = Number(parsed.unit_pct || 1);
+          if (amount > 0 && unitPct > 0) uv = (amount * unitPct) / 100 / 100;
+          if (!uv || uv <= 0) uv = 9;
+        } catch (_) {}
+      }
+      const tips = db.prepare(`
+        SELECT id, stake, odds, result FROM tips
+        WHERE result IN ('win','loss','push','void')
+          AND (archived IS NULL OR archived = 0)
+      `).all();
+      const stmt = db.prepare(`UPDATE tips SET stake_reais = ?, profit_reais = ? WHERE id = ?`);
+      for (const t of tips) {
+        const stakeU = parseFloat(String(t.stake || '0').replace(/u/i, '')) || 0;
+        if (!stakeU) continue;
+        const odds = parseFloat(t.odds) || 1;
+        const newStakeR = +(stakeU * uv).toFixed(2);
+        let newProfitR = 0;
+        if (t.result === 'win') newProfitR = +(stakeU * (odds - 1) * uv).toFixed(2);
+        else if (t.result === 'loss') newProfitR = +(-stakeU * uv).toFixed(2);
+        stmt.run(newStakeR, newProfitR, t.id);
+      }
+      // Resync bankroll.current_banca por sport
+      const sports = db.prepare(`SELECT sport, initial_banca FROM bankroll`).all();
+      for (const bk of sports) {
+        const p = db.prepare(`SELECT COALESCE(SUM(profit_reais), 0) AS p FROM tips WHERE sport=? AND result IN ('win','loss','push','void') AND (archived IS NULL OR archived = 0)`).get(bk.sport);
+        const newCurrent = +(Number(bk.initial_banca || 0) + Number(p?.p || 0)).toFixed(2);
+        db.prepare("UPDATE bankroll SET current_banca=?, updated_at=datetime('now') WHERE sport=?").run(newCurrent, bk.sport);
+      }
+    },
+  },
 ];
 
 function applyMigrations(db) {

@@ -840,6 +840,7 @@ const ADMIN_POST_PATHS = new Set([
   '/admin/league-unblock',
   '/admin/delete-empty-bankroll',
   '/archive-cross-bucket-duplicates',
+  '/admin/rebuild-tip-reais',
   '/threshold-optimizer-apply',
   '/admin/dynamic-threshold',
   '/admin/seed-football-secondary',
@@ -6184,6 +6185,31 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
       await send(token, chatId, txt);
     } catch (e) { await send(token, chatId, `❌ ${e.message}`); }
 
+  } else if (cmd === '/rebuild-reais' || cmd === '/recompute-reais') {
+    if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
+    try {
+      const apply = parts.slice(1).some(p => p.toLowerCase() === 'confirm' || p.toLowerCase() === 'apply');
+      const sportArg = parts.slice(1).find(p => /^[a-z]+$/i.test(p) && p.toLowerCase() !== 'confirm' && p.toLowerCase() !== 'apply');
+      const sq = sportArg ? `&sport=${encodeURIComponent(sportArg)}` : '';
+      const r = await serverPost(`/admin/rebuild-tip-reais?${apply ? 'apply=1&' : ''}${sq.slice(1)}`, {});
+      if (!r?.ok) { await send(token, chatId, `❌ ${r?.error || 'falha'}`); return; }
+      let txt = `💰 *REBUILD TIP REAIS — ${apply ? 'APLICADO' : 'DRY-RUN'}*\n\n`;
+      txt += `Unit value: R$${(r.unit_value || 0).toFixed(2)} ${sportArg ? `(sport=${sportArg})` : '(global)'}\n`;
+      txt += `Tips analisadas: *${r.total_tips}*\n`;
+      txt += `${apply ? 'Atualizadas' : 'Seriam atualizadas'}: *${r.would_update ?? r.updated ?? 0}*\n`;
+      if (apply && r.sports_resynced) {
+        txt += `\nBankrolls re-sincronizadas: ${r.sports_resynced.join(', ') || '-'}\n`;
+      }
+      if (!apply && r.examples?.length) {
+        txt += `\n*Exemplos:*\n`;
+        for (const ex of r.examples.slice(0, 5)) {
+          txt += `  • id=${ex.id} ${ex.sport}: stake R$${ex.prevStake}→R$${ex.newStakeR} / profit R$${ex.prevProfit}→R$${ex.newProfitR}\n`;
+        }
+        txt += `\n_Pra aplicar: \`/rebuild-reais confirm\`_`;
+      }
+      await send(token, chatId, txt);
+    } catch (e) { await send(token, chatId, `❌ ${e.message}`); }
+
   } else if (cmd === '/dedup-tips' || cmd === '/archive-dupes') {
     if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
     try {
@@ -7408,6 +7434,7 @@ async function poll(token, sport) {
                      text.startsWith('/shadow-all') || text.startsWith('/mma-diag') ||
                      text.startsWith('/mma-diagnose') || text.startsWith('/split-bankroll') ||
                      text.startsWith('/dedup-tips') || text.startsWith('/archive-dupes') ||
+                     text.startsWith('/rebuild-reais') || text.startsWith('/recompute-reais') ||
                      text.startsWith('/tip ') || text.startsWith('/help') || text.startsWith('/start') ||
                      text.startsWith('/alerts')) {
             // Passa `sport` da poll (qual bot recebeu) para evitar default 'esports'

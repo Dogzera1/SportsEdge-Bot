@@ -3547,9 +3547,12 @@ function runSettleSweep({ sportFilter = '', days = 14 } = {}) {
       }
       const result = nameMatched ? 'win' : 'loss';
 
+      // Unit value = baseline GLOBAL (R$9 pra baseline R$900 + 1%), não per-sport.
+      // Antes usava bk.current_banca/100 → drifting com DD (tip settlava com unit menor
+      // conforme banca caía). Baseline global garante stake_reais consistente pra ROI.
       const stakeR = tip.stake_reais || (() => {
-        const bk = stmts.getBankroll.get(sport);
-        const uv = bk ? bk.current_banca / 100 : 1;
+        const _bl = getBaseline();
+        const uv = _bl.unit_value || 1;
         const su = parseFloat(String(tip.stake || '1').replace('u','')) || 1;
         return parseFloat((su * uv).toFixed(2));
       })();
@@ -6573,6 +6576,67 @@ const server = http.createServer(async (req, res) => {
       const { settleShadowTips } = require('./lib/market-tips-shadow');
       const r = settleShadowTips(db);
       sendJson(res, { ok: true, ...r });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
+  // Rebuild stake_reais/profit_reais usando baseline.unit_value (global).
+  // Corrige tips settadas com unit_value drifting (pré-Abr/2026-II).
+  // POST /admin/rebuild-tip-reais?sport=X&apply=1 (sem apply = dry-run)
+  if (p === '/admin/rebuild-tip-reais' && req.method === 'POST') {
+    const apply = parsed.query.apply === '1' || parsed.query.apply === 'true';
+    const sportFilter = parsed.query.sport ? String(parsed.query.sport).trim() : null;
+    try {
+      const _bl = getBaseline();
+      const uv = _bl.unit_value;
+      if (!uv || uv <= 0) { sendJson(res, { error: 'baseline unit_value inválido' }, 500); return; }
+      const sqlWhere = sportFilter ? `AND sport = ?` : '';
+      const params = sportFilter ? [sportFilter] : [];
+      const tips = db.prepare(`
+        SELECT id, sport, stake, odds, result, stake_reais, profit_reais
+        FROM tips
+        WHERE result IN ('win','loss','push','void')
+          AND (archived IS NULL OR archived = 0)
+          ${sqlWhere}
+      `).all(...params);
+      const updates = [];
+      for (const t of tips) {
+        const stakeU = parseFloat(String(t.stake || '0').replace(/u/i, '')) || 0;
+        if (!stakeU) continue;
+        const odds = parseFloat(t.odds) || 1;
+        const newStakeR = +(stakeU * uv).toFixed(2);
+        let newProfitR;
+        if (t.result === 'win')       newProfitR = +(stakeU * (odds - 1) * uv).toFixed(2);
+        else if (t.result === 'loss') newProfitR = +(-stakeU * uv).toFixed(2);
+        else if (t.result === 'push' || t.result === 'void') newProfitR = 0;
+        else continue;
+        const prevStake = Number(t.stake_reais || 0);
+        const prevProfit = Number(t.profit_reais || 0);
+        if (Math.abs(prevStake - newStakeR) > 0.01 || Math.abs(prevProfit - newProfitR) > 0.01) {
+          updates.push({ id: t.id, sport: t.sport, newStakeR, newProfitR, prevStake, prevProfit });
+        }
+      }
+      if (!apply) {
+        sendJson(res, {
+          ok: true, dry_run: true, unit_value: uv,
+          total_tips: tips.length, would_update: updates.length,
+          examples: updates.slice(0, 10),
+        });
+        return;
+      }
+      const stmt = db.prepare(`UPDATE tips SET stake_reais = ?, profit_reais = ? WHERE id = ?`);
+      const tx = db.transaction(list => { for (const u of list) stmt.run(u.newStakeR, u.newProfitR, u.id); });
+      tx(updates);
+      // Resync bankroll.current_banca pra cada sport afetado
+      const affected = [...new Set(updates.map(u => u.sport))];
+      for (const sport of affected) {
+        const bk = db.prepare('SELECT initial_banca FROM bankroll WHERE sport=?').get(sport);
+        if (!bk) continue;
+        const profitRow = db.prepare(`SELECT COALESCE(SUM(profit_reais), 0) AS p FROM tips WHERE sport=? AND result IN ('win','loss','push','void') AND (archived IS NULL OR archived = 0)`).get(sport);
+        const newCurrent = +((Number(bk.initial_banca) || 0) + Number(profitRow?.p || 0)).toFixed(2);
+        stmts.updateBankroll.run(newCurrent, sport);
+      }
+      sendJson(res, { ok: true, unit_value: uv, total_tips: tips.length, updated: updates.length, sports_resynced: affected });
     } catch (e) { sendJson(res, { error: e.message }, 500); }
     return;
   }
