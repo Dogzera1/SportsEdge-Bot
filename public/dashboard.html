@@ -1816,15 +1816,33 @@ async function loadShadow() {
   `;
 }
 
+let marketTipsState = { tips: [], page: 0, perPage: 20, sport: null };
+
 async function loadMarketTipsShadow() {
   const sp = currentSport === '__overall__' ? '' : '&sport=' + encodeURIComponent(currentSport);
-  const data = await apiFetch('/market-tips-recent?days=14&limit=50' + sp);
+  const data = await apiFetch('/market-tips-recent?days=14&limit=500' + sp);
   const el = document.getElementById('marketTipsBody');
   const meta = document.getElementById('marketTipsMeta');
   if (!data || data.error) { el.innerHTML = '<div class="empty-state">Sem market tips</div>'; meta.textContent = '—'; return; }
   const tips = data.tips || [];
   meta.textContent = `${data.total || 0} tips · ${data.pending || 0} pend · ROI ${data.roi != null ? (data.roi >= 0 ? '+' : '') + data.roi + '%' : '—'} · CLV ${data.avgClvPct != null ? (data.avgClvPct >= 0 ? '+' : '') + data.avgClvPct + '%' : '—'}`;
   if (!tips.length) { el.innerHTML = '<div class="empty-state">Nenhuma market tip nas últimas 14 dias</div>'; return; }
+  // Reset página ao trocar sport
+  if (marketTipsState.sport !== currentSport) { marketTipsState.page = 0; marketTipsState.sport = currentSport; }
+  marketTipsState.tips = tips;
+  renderMarketTipsPage();
+}
+
+function renderMarketTipsPage() {
+  const { tips, page, perPage } = marketTipsState;
+  const el = document.getElementById('marketTipsBody');
+  if (!tips.length) return;
+  const totalPages = Math.max(1, Math.ceil(tips.length / perPage));
+  const pageIdx = Math.min(page, totalPages - 1);
+  const start = pageIdx * perPage;
+  const end = Math.min(start + perPage, tips.length);
+  const pageTips = tips.slice(start, end);
+
   let html = `
     <div class="card-meta" style="margin-bottom:8px">
       🛡️ <b>SHADOW</b> — todas as tips aqui são log-only (não enviam DM).
@@ -1842,7 +1860,7 @@ async function loadMarketTipsShadow() {
         </tr>
       </thead>
       <tbody>`;
-  for (const t of tips.slice(0, 40)) {
+  for (const t of pageTips) {
     const d = (t.created_at || '').slice(5, 16).replace('T', ' ');
     const resEmoji = t.result === 'win' ? '✅' : t.result === 'loss' ? '❌' : t.result === 'void' ? '⚪' : '⏳';
     const clvStr = t.clv_pct != null ? (t.clv_pct >= 0 ? '+' : '') + t.clv_pct.toFixed(1) + '%' : '—';
@@ -1863,8 +1881,25 @@ async function loadMarketTipsShadow() {
       </tr>`;
   }
   html += '</tbody></table>';
-  if (tips.length > 40) html += `<div class="card-meta" style="margin-top:8px">Mostrando 40 de ${tips.length}</div>`;
+
+  // Paginação
+  html += `
+    <div class="pagination-bar" style="display:flex;align-items:center;justify-content:space-between;margin-top:12px;padding:8px 0;border-top:1px solid var(--border,#2a2a2a)">
+      <div class="card-meta">Mostrando ${start + 1}–${end} de ${tips.length}</div>
+      <div style="display:flex;gap:6px;align-items:center">
+        <button onclick="marketTipsGoPage(0)" ${pageIdx === 0 ? 'disabled' : ''} style="padding:4px 10px">«</button>
+        <button onclick="marketTipsGoPage(${pageIdx - 1})" ${pageIdx === 0 ? 'disabled' : ''} style="padding:4px 10px">‹ anterior</button>
+        <span style="font-size:0.9em;padding:0 8px">página ${pageIdx + 1} / ${totalPages}</span>
+        <button onclick="marketTipsGoPage(${pageIdx + 1})" ${pageIdx >= totalPages - 1 ? 'disabled' : ''} style="padding:4px 10px">próxima ›</button>
+        <button onclick="marketTipsGoPage(${totalPages - 1})" ${pageIdx >= totalPages - 1 ? 'disabled' : ''} style="padding:4px 10px">»</button>
+      </div>
+    </div>`;
   el.innerHTML = html;
+}
+
+function marketTipsGoPage(newPage) {
+  marketTipsState.page = Math.max(0, newPage);
+  renderMarketTipsPage();
 }
 
 async function loadByBook() {
