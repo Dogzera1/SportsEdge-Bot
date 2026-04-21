@@ -9681,11 +9681,15 @@ async function pollTennis(runOnce = false) {
               if (markets && ((markets.handicaps?.length || 0) + (markets.totals?.length || 0)) > 0) {
                 const { scanTennisMarkets } = require('./lib/tennis-market-scanner');
                 const minEv = parseFloat(process.env.TENNIS_MARKET_SCAN_MIN_EV ?? '4');
+                const maxEv = parseFloat(process.env.TENNIS_MARKET_SCAN_MAX_EV ?? '40');
+                const tnBestOfForScan = /grand slam|\[g\]|wimbledon|us open|roland|australian open/i.test(match.league || '') ? 5 : 3;
                 let found = scanTennisMarkets({
                   markov: tennisModelResult._markovMarkets,
                   aces: tennisModelResult._markovAces,
                   markets,
                   minEv,
+                  maxEv,
+                  bestOf: tnBestOfForScan,
                 });
                 // Correlation §12c: quando ≥2 market tips fire no mesmo match,
                 // aplica desconto de stake proporcional à correlação max com outra tip.
