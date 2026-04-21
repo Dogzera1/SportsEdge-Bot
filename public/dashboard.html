@@ -550,6 +550,23 @@
     <div id="sportsRiskList"></div>
   </div>
 
+  <!-- Liga leaks: ROI/CLV negativo persistente por liga -->
+  <div class="card" id="leagueLeaksCard" style="display:none;margin-bottom:12px">
+    <div class="card-header">
+      <div class="card-title">🚨 Ligas com leak</div>
+      <div class="card-meta">
+        <select class="select-inline" id="leagueLeaksDays" onchange="loadLeagueLeaks()">
+          <option value="14">14d</option>
+          <option value="30" selected>30d</option>
+          <option value="60">60d</option>
+          <option value="90">90d</option>
+        </select>
+        <span id="leagueLeaksMeta"></span>
+      </div>
+    </div>
+    <div id="leagueLeaksList"></div>
+  </div>
+
   <!-- Main grid: Equity curve + Sport ROI list -->
   <div class="main-grid">
     <div class="card">
@@ -1029,6 +1046,7 @@ async function refresh() {
         loadUpcoming(gen),
         loadTips(gen),
         loadSportsRisk(gen),
+        loadLeagueLeaks(gen),
       ]);
     } else {
       await Promise.all([
@@ -1038,6 +1056,7 @@ async function refresh() {
         loadLive(gen),
         loadLiveTips(gen),
         loadSportsRisk(gen),
+        loadLeagueLeaks(gen),
         loadUpcoming(gen),
         loadTips(gen),
         loadModels(gen),
@@ -1587,6 +1606,53 @@ async function loadSportsRisk(gen = refreshGen) {
     }).join('');
   } catch (e) {
     console.warn('loadSportsRisk error:', e);
+    card.style.display = 'none';
+  }
+}
+
+async function loadLeagueLeaks(gen = refreshGen) {
+  const card = document.getElementById('leagueLeaksCard');
+  const list = document.getElementById('leagueLeaksList');
+  const meta = document.getElementById('leagueLeaksMeta');
+  if (!card || !list) return;
+  try {
+    const daysSel = document.getElementById('leagueLeaksDays');
+    const days = daysSel ? daysSel.value : '30';
+    const sportFilter = (currentSport && currentSport !== '__overall__') ? `&sport=${encodeURIComponent(currentSport)}` : '';
+    const r = await apiFetch(`/clv-by-league?days=${days}&min=5${sportFilter}`);
+    if (shouldAbort(gen)) return;
+    if (!r?.ok) { card.style.display = 'none'; return; }
+    const leaks = r.leaks || [];
+    const strong = r.strong || [];
+    if (!leaks.length && !strong.length) { card.style.display = 'none'; return; }
+    card.style.display = '';
+    meta.textContent = ` · ${leaks.length} leaks · ${strong.length} strong`;
+    const labelMap = { lol: 'LoL', dota2: 'Dota2', cs: 'CS2', valorant: 'VAL', tennis: 'Tennis', mma: 'MMA', football: 'FB', darts: 'Darts', snooker: 'Snooker', tabletennis: 'TT', esports: 'ESP' };
+    const render = (items, color, icon) => items.map(r => {
+      const sport = labelMap[r.sport] || r.sport;
+      const roiStr = r.roi_pct != null ? `${r.roi_pct >= 0 ? '+' : ''}${r.roi_pct.toFixed(1)}%` : 'n/a';
+      const clvStr = r.avg_clv_pct != null ? `${r.avg_clv_pct >= 0 ? '+' : ''}${r.avg_clv_pct.toFixed(1)}%` : 'n/a';
+      const profitStr = `R$${r.profit >= 0 ? '+' : ''}${r.profit.toFixed(2)}`;
+      const league = (r.league || '?').replace(/</g, '&lt;').slice(0, 40);
+      return `
+        <div style="padding:8px 12px;border-left:3px solid ${color};background:rgba(0,0,0,0.15);margin-bottom:6px;border-radius:4px">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+              <span>${icon}</span>
+              <strong style="color:${color}">${sport}</strong>
+              <span style="font-weight:500">${league}</span>
+            </div>
+            <span class="kpi-meta" style="font-size:11px">n=${r.n} · hit ${r.hit_rate}% · ROI ${roiStr} · CLV ${clvStr} · ${profitStr}</span>
+          </div>
+        </div>
+      `;
+    }).join('');
+    let html = '';
+    if (leaks.length) html += render(leaks.slice(0, 8), '#ef4444', '🚨');
+    if (strong.length) html += render(strong.slice(0, 5), '#10b981', '✅');
+    list.innerHTML = html;
+  } catch (e) {
+    console.warn('loadLeagueLeaks error:', e);
     card.style.display = 'none';
   }
 }
