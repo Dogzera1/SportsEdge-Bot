@@ -6602,6 +6602,20 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // Migrations status: lista migrations aplicadas com data — debug pós-deploy.
+  // GET /migrations-status
+  if (p === '/migrations-status') {
+    try {
+      const rows = db.prepare(`SELECT id, applied_at FROM schema_migrations ORDER BY applied_at DESC`).all();
+      sendJson(res, {
+        ok: true,
+        count: rows.length,
+        latest: rows.slice(0, 20),
+      });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
   // Audit bankroll: mostra initial/current stored vs recomputed, gap per-sport e total.
   // Inclui reclassificação esports legado → lol/dota2.
   // GET /bankroll-audit

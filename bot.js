@@ -6225,6 +6225,31 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
       await send(token, chatId, txt);
     } catch (e) { await send(token, chatId, `❌ ${e.message}`); }
 
+  } else if (cmd === '/migrations' || cmd === '/migrations-status') {
+    if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
+    try {
+      const r = await serverGet('/migrations-status');
+      if (!r?.ok) { await send(token, chatId, `❌ ${r?.error || 'falha'}`); return; }
+      let txt = `🗄️ *MIGRATIONS* (${r.count} aplicadas)\n\n`;
+      txt += `*Últimas 20:*\n`;
+      for (const m of r.latest || []) {
+        const d = String(m.applied_at || '').slice(0, 19);
+        txt += `  • \`${m.id}\` — ${d}\n`;
+        if (txt.length > 3500) break;
+      }
+      // Check se migrations críticas rodaram
+      const ids = new Set((r.latest || []).map(m => m.id));
+      const critical = ['039_per_sport_unit_model_reset_initial', '040_rebuild_tips_with_per_sport_unit_tiers', '043_force_rebuild_per_sport_tier_v2', '044_fix_baseline_settings_key'];
+      const missing = critical.filter(c => !ids.has(c));
+      if (missing.length) {
+        txt += `\n⚠️ *Não aplicadas*:\n`;
+        for (const m of missing) txt += `  • \`${m}\`\n`;
+      } else {
+        txt += `\n✅ Migrations per-sport tier model OK`;
+      }
+      await send(token, chatId, txt);
+    } catch (e) { await send(token, chatId, `❌ ${e.message}`); }
+
   } else if (cmd === '/server-errors' || cmd === '/fetch-errors') {
     if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
     try {
@@ -7549,6 +7574,7 @@ async function poll(token, sport) {
                      text.startsWith('/rebuild-reais') || text.startsWith('/recompute-reais') ||
                      text.startsWith('/banca-audit') || text.startsWith('/bankroll-audit') ||
                      text.startsWith('/server-errors') || text.startsWith('/fetch-errors') ||
+                     text.startsWith('/migrations') ||
                      text.startsWith('/tip ') || text.startsWith('/help') || text.startsWith('/start') ||
                      text.startsWith('/alerts')) {
             // Passa `sport` da poll (qual bot recebeu) para evitar default 'esports'
