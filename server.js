@@ -177,7 +177,7 @@ const { rollupLeague } = require('./lib/league-rollup');
 function sqlGameFilter(alias, sport, game) {
   if (!game) return '';
   const g = String(game).toLowerCase();
-  if (sport === 'esports') {
+  if (sport === 'esports' || sport === 'lol' || sport === 'dota2' || sport === 'dota') {
     // Dota: match_id 'dota2_%' (PandaScore) OU event_name contém 'dota' (Pinnacle 'pin_*' não tem prefixo).
     // Bug fix 2026-04-18: tips Dota via Pinnacle (pin_*) eram contadas como LoL.
     if (g === 'dota2' || g === 'dota') {
@@ -192,6 +192,30 @@ function sqlGameFilter(alias, sport, game) {
     if (g === 'mma')                    return ` AND LOWER(COALESCE(${alias}.event_name,'')) NOT LIKE '%boxing%'`;
   }
   return '';
+}
+
+/**
+ * Pós-split LoL/Dota: mapeia sport+game pro set de sport tags a querying union.
+ * Cobre legado ('esports' bucket) + novos ('lol', 'dota2').
+ *   sport='lol' → ['esports','lol'] + sqlGameFilter(game='lol') vai aplicar NOT LIKE 'dota2_%'.
+ *   sport='dota2' → ['esports','dota2'] + sqlGameFilter(game='dota2') aplica LIKE 'dota2_%'.
+ *   sport='esports' + game='lol' → ['esports','lol'] (compat com dropdown antigo).
+ *   sport='esports' sem game → ['esports','lol','dota2'] (view combinada).
+ *   outros sports → [sport] (trivial).
+ * Retorna { sportSet, effectiveGame } — effectiveGame é injetado pra sqlGameFilter filtrar
+ * tips legadas 'esports' por match_id quando sport='lol'/'dota2' é solicitado.
+ */
+function resolveSportSet(sport, game) {
+  const s = String(sport || '').toLowerCase();
+  const g = String(game || '').toLowerCase();
+  if (s === 'lol') return { sportSet: ['esports', 'lol'], effectiveGame: 'lol' };
+  if (s === 'dota2' || s === 'dota') return { sportSet: ['esports', 'dota2'], effectiveGame: 'dota2' };
+  if (s === 'esports') {
+    if (g === 'lol') return { sportSet: ['esports', 'lol'], effectiveGame: 'lol' };
+    if (g === 'dota' || g === 'dota2') return { sportSet: ['esports', 'dota2'], effectiveGame: 'dota2' };
+    return { sportSet: ['esports', 'lol', 'dota2'], effectiveGame: '' };
+  }
+  return { sportSet: [s], effectiveGame: g };
 }
 
 // ── Import dataset CSV (football matches 2024/2025) ──
@@ -10276,27 +10300,45 @@ const server = http.createServer(async (req, res) => {
   // GET /equity-curve?sport=esports&days=30
   if (p === '/equity-curve') {
     const sport = parsed.query.sport || 'esports';
+    const game  = parsed.query.game || '';
     const daysRaw = parseInt(parsed.query.days);
     const days = Number.isFinite(daysRaw) ? Math.max(1, Math.min(365, daysRaw)) : 30;
     try {
-      // Recompute profit via tipProfitReais (mesma fonte que /overall-summary) pra
-      // guardian/dashboard não divergirem. Snapshots profit_reais/stake_reais ficam
-      // stale quando baseline muda; unit_value atual é fonte única.
+      // Union pós-split LoL/Dota: sport='lol' cobre esports-legado+lol, idem dota2.
+      const { sportSet, effectiveGame } = resolveSportSet(sport, game);
+      const sportInSql = `(${sportSet.map(() => '?').join(',')})`;
+      const gameSql = sqlGameFilter('', sport, effectiveGame).replace(/\./g, ''); // prefix vazio = sem alias
       const _bl = getBaseline();
       const tipsAll = db.prepare(`
-        SELECT stake, odds, result, settled_at
+        SELECT stake, odds, result, settled_at, match_id, event_name
         FROM tips
-        WHERE sport = ?
+        WHERE sport IN ${sportInSql}
           AND result IN ('win','loss')
           AND (archived IS NULL OR archived = 0)
           AND COALESCE(is_shadow, 0) = 0
         ORDER BY settled_at ASC
-      `).all(sport);
+      `).all(...sportSet);
       const windowMs = days * 24 * 3600 * 1000;
       const cutoff = Date.now() - windowMs;
       const dayMap = {};
       let preWindowProfit = 0;
+      // Filtro de game aplicado em JS (evita reuso do sqlGameFilter com alias vazio)
+      const gameFilter = (t) => {
+        if (!effectiveGame) return true;
+        const mid = String(t.match_id || '');
+        const ev = String(t.event_name || '').toLowerCase();
+        if (effectiveGame === 'dota2' || effectiveGame === 'dota') {
+          return mid.startsWith('dota2_') || ev.includes('dota');
+        }
+        if (effectiveGame === 'lol') {
+          return !mid.startsWith('dota2_') && !ev.includes('dota');
+        }
+        if (effectiveGame === 'boxing' || effectiveGame === 'boxe') return ev.includes('boxing');
+        if (effectiveGame === 'mma') return !ev.includes('boxing');
+        return true;
+      };
       for (const t of tipsAll) {
+        if (!gameFilter(t)) continue;
         const ts = t.settled_at ? new Date(String(t.settled_at).replace(' ', 'T') + 'Z').getTime() : 0;
         const p = tipProfitReais(t, _bl.unit_value);
         if (p == null) continue;
@@ -10311,8 +10353,9 @@ const server = http.createServer(async (req, res) => {
         d.n++;
       }
       const rows = Object.values(dayMap).sort((a, b) => a.day.localeCompare(b.day));
-      const bk = stmts.getBankroll.get(sport);
-      const initial = bk ? Number(bk.initial_banca || 0) : 0;
+      // Soma bankrolls do sportSet (esports legado + lol/dota2 novos).
+      const bkRows = db.prepare(`SELECT initial_banca, current_banca FROM bankroll WHERE sport IN ${sportInSql}`).all(...sportSet);
+      const initial = bkRows.reduce((s, b) => s + Number(b.initial_banca || 0), 0);
       let cum = initial + preWindowProfit;
       let peak = cum, maxDD = 0;
       const dailyReturns = [];
@@ -10388,18 +10431,8 @@ const server = http.createServer(async (req, res) => {
     // se precisar no futuro, criar query separada com includeMatch=1
     // Shadow tips (is_shadow=1) escondidas por default; ?include_shadow=1 override.
     const includeShadow = String(parsed.query.include_shadow || '').trim() === '1';
-    // Pós-split LoL/Dota (Abr/2026): sport='esports' legado + 'lol'/'dota2' novos.
-    // Frontend continua enviando sport=esports&game=lol|dota2 (backward compat); aqui
-    // unificamos em IN-clause. Dedup subquery replica o mesmo IN.
-    const gameLower = String(game || '').toLowerCase();
-    let sportSet;
-    if (sport === 'esports') {
-      if (gameLower === 'dota2' || gameLower === 'dota') sportSet = ['esports', 'dota2'];
-      else if (gameLower === 'lol') sportSet = ['esports', 'lol'];
-      else sportSet = ['esports', 'lol', 'dota2'];
-    } else {
-      sportSet = [sport];
-    }
+    // Resolve union cobrindo legado 'esports' + novos 'lol'/'dota2' (pós-split Abr/2026).
+    const { sportSet, effectiveGame } = resolveSportSet(sport, game);
     const sportInSql = `(${sportSet.map(() => '?').join(',')})`;
     const dedupSql = `t.id IN (SELECT MAX(tdx.id) FROM tips tdx WHERE tdx.sport IN ${sportInSql} AND (tdx.archived IS NULL OR tdx.archived = 0) GROUP BY tdx.sport, COALESCE(NULLIF(TRIM(tdx.match_id), ''), 'id:' || CAST(tdx.id AS TEXT)))`;
     let query = `
@@ -10407,7 +10440,7 @@ const server = http.createServer(async (req, res) => {
       FROM tips t
       WHERE t.sport IN ${sportInSql}
       AND ${dedupSql}
-      ${sqlGameFilter('t', sport, game)}
+      ${sqlGameFilter('t', sport, effectiveGame)}
       ${includeShadow ? '' : 'AND COALESCE(t.is_shadow, 0) = 0'}
     `;
     const params = [...sportSet, ...sportSet];
@@ -10907,20 +10940,10 @@ const server = http.createServer(async (req, res) => {
   if (p === '/roi') {
     const sport = parsed.query.sport || 'esports';
     const game  = parsed.query.game || '';
-    // Pós-split LoL/Dota: sport='esports' expande pra IN ('esports','lol','dota2')
-    // conforme game; idem em /tips-history.
-    const gameLower = String(game || '').toLowerCase();
-    let sportSet;
-    if (sport === 'esports') {
-      if (gameLower === 'dota2' || gameLower === 'dota') sportSet = ['esports', 'dota2'];
-      else if (gameLower === 'lol') sportSet = ['esports', 'lol'];
-      else sportSet = ['esports', 'lol', 'dota2'];
-    } else {
-      sportSet = [sport];
-    }
+    const { sportSet, effectiveGame } = resolveSportSet(sport, game);
     const sportInSql = `(${sportSet.map(() => '?').join(',')})`;
     const dedupe = `t.id IN (SELECT MAX(tdx.id) FROM tips tdx WHERE tdx.sport IN ${sportInSql} AND (tdx.archived IS NULL OR tdx.archived = 0) GROUP BY tdx.sport, COALESCE(NULLIF(TRIM(tdx.match_id), ''), 'id:' || CAST(tdx.id AS TEXT)))`;
-    const gameSql = sqlGameFilter('t', sport, game);
+    const gameSql = sqlGameFilter('t', sport, effectiveGame);
     // Win rate / ROI excluem void E push (push = refund, não é WIN nem LOSS).
     // 'pushes' contado separadamente pra UI mostrar totais corretos.
     const row = db.prepare(`
@@ -11014,20 +11037,26 @@ const server = http.createServer(async (req, res) => {
       count: c.count
     } : null;
 
-    // Dados da banca em reais — calcula current_banca a partir dos profits reais acumulados
-    const bk = stmts.getBankroll.get(sport);
+    // Dados da banca em reais — soma bankrolls do sportSet (legado esports zerado + lol/dota2 ativos).
+    // Pra sport='lol' com split Abr/2026: esports=R$0 + lol=R$50 → current=R$50.
+    const bkRows = db.prepare(`SELECT sport, initial_banca, current_banca FROM bankroll WHERE sport IN ${sportInSql}`).all(...sportSet);
     let bancaInfo = null;
+    const aggBk = bkRows.reduce((acc, r) => {
+      acc.initial_banca += Number(r.initial_banca || 0);
+      acc.current_banca += Number(r.current_banca || 0);
+      return acc;
+    }, { initial_banca: 0, current_banca: 0 });
+    const bk = bkRows.length > 0 ? aggBk : null;
 
     if (bk) {
       // Backfill: tips arquivadas sem profit_reais calculado (coluna adicionada depois do settlement).
-      // Não filtra por game — backfill é global pro sport, rodado oportunisticamente.
       const orphans = db.prepare(
         `SELECT t.id, t.result, t.odds, t.stake, t.stake_reais FROM tips t
-         WHERE t.sport = ? AND ${sqlTipsDedupeIdIn('t', '?')}
+         WHERE t.sport IN ${sportInSql} AND ${dedupe}
          AND t.result IS NOT NULL AND t.result != 'void' AND t.profit_reais IS NULL`
-      ).all(sport, sport);
+      ).all(...sportSet, ...sportSet);
       if (orphans.length > 0) {
-        const unitValue = bk.initial_banca / 100;
+        const unitValue = (bk.initial_banca || 100) / 100;
         const backfill = db.prepare("UPDATE tips SET stake_reais = ?, profit_reais = ? WHERE id = ?");
         for (const t of orphans) {
           const stakeR = t.stake_reais || parseFloat(((parseFloat(String(t.stake || '1').replace('u','')) || 1) * unitValue).toFixed(2));
@@ -11040,26 +11069,31 @@ const server = http.createServer(async (req, res) => {
         log('INFO', 'BANCA', `[${sport}] Backfill: ${orphans.length} tips sem profit_reais recalculadas`);
       }
 
-      // Profit da banca: unit-native (stake × (odds-1) × baseline.unit_value)
-      // — baseline.unit_value é fonte única da verdade; stake_reais/profit_reais no DB
-      // são snapshots do momento da settle mas não refletem mudanças de baseline.
+      // Profit da banca: unit-native. Tips union cobrem legado esports + novos lol/dota2.
       const _bl = getBaseline();
       const settledTips = db.prepare(
         `SELECT t.stake, t.odds, t.result FROM tips t
-         WHERE t.sport = ? AND ${sqlTipsDedupeIdIn('t', '?')}
+         WHERE t.sport IN ${sportInSql} AND ${dedupe}
          AND t.result IN ('win','loss')
          ${gameSql}`
-      ).all(sport, sport);
+      ).all(...sportSet, ...sportSet);
       let accumulatedProfit = 0;
       for (const t of settledTips) {
         const p = tipProfitReais(t, _bl.unit_value);
         if (p != null) accumulatedProfit += p;
       }
       accumulatedProfit = +accumulatedProfit.toFixed(2);
-      const currentBanca = parseFloat((bk.initial_banca + accumulatedProfit).toFixed(2));
-      // Só sincroniza o registro quando não há filtro de game (bankroll é per-sport, não per-game)
-      if (!game && Math.abs(currentBanca - bk.current_banca) > 0.01) {
-        stmts.updateBankroll.run(currentBanca, sport);
+      const currentBanca = parseFloat(((bk.initial_banca || 0) + accumulatedProfit).toFixed(2));
+      // Sync cada row do sportSet (desde que sem filtro game — bankroll é per-sport).
+      if (!game && !effectiveGame) {
+        for (const r of bkRows) {
+          // Proporcional: distribui profit conforme initial_banca (evita sync errôneo em row zerada).
+          const share = bk.initial_banca > 0 ? (r.initial_banca / bk.initial_banca) : (1 / bkRows.length);
+          const sportCurrent = parseFloat(((r.initial_banca || 0) + accumulatedProfit * share).toFixed(2));
+          if (Math.abs(sportCurrent - r.current_banca) > 0.01) {
+            stmts.updateBankroll.run(sportCurrent, r.sport);
+          }
+        }
       }
       // unitValue vem da baseline global (1u = 1% de R$900 = R$9), não per-sport,
       // pra dashboard mostrar units consistentes cross-sport.
@@ -11068,8 +11102,8 @@ const server = http.createServer(async (req, res) => {
         currentBanca: currentBanca,
         unitValue: _bl.unit_value,
         profitReais: accumulatedProfit,
-        growthPct: parseFloat((accumulatedProfit / bk.initial_banca * 100).toFixed(2)),
-        updatedAt: bk.updated_at,
+        growthPct: bk.initial_banca > 0 ? parseFloat((accumulatedProfit / bk.initial_banca * 100).toFixed(2)) : null,
+        updatedAt: null,
         baselineDate: _bl.date,
         baselineAmount: _bl.amount,
         unitPct: _bl.unit_pct,
@@ -11095,11 +11129,11 @@ const server = http.createServer(async (req, res) => {
     }
 
     const totalAllRow = db.prepare(
-      `SELECT COUNT(*) as c FROM tips t WHERE t.sport = ? AND ${sqlTipsDedupeIdIn('t', '?')} AND COALESCE(t.result,'') != 'void' ${gameSql}`
-    ).get(sport, sport);
+      `SELECT COUNT(*) as c FROM tips t WHERE t.sport IN ${sportInSql} AND ${dedupe} AND COALESCE(t.result,'') != 'void' ${gameSql}`
+    ).get(...sportSet, ...sportSet);
     const pendingRow  = db.prepare(
-      `SELECT COUNT(*) as c FROM tips t WHERE t.sport = ? AND ${sqlTipsDedupeIdIn('t', '?')} AND t.result IS NULL ${gameSql}`
-    ).get(sport, sport);
+      `SELECT COUNT(*) as c FROM tips t WHERE t.sport IN ${sportInSql} AND ${dedupe} AND t.result IS NULL ${gameSql}`
+    ).get(...sportSet, ...sportSet);
 
     sendJson(res, {
       overall: {

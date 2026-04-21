@@ -501,8 +501,8 @@
       <select class="sport-select" id="sportSelect" onchange="onSportChange()">
         <option value="__overall__|">📊 Geral (todos sports)</option>
         <optgroup label="Esports">
-          <option value="esports|lol" selected>League of Legends</option>
-          <option value="esports|dota2">Dota 2</option>
+          <option value="lol|" selected>League of Legends</option>
+          <option value="dota2|">Dota 2</option>
           <option value="valorant|">Valorant</option>
           <option value="cs|">CS2</option>
         </optgroup>
@@ -754,7 +754,23 @@ const BASE = (function() {
   return o;
 })();
 
-let currentSport = 'esports';
+let currentSport = 'lol';
+function sportDisplayLabel(sport, game) {
+  const s = String(sport || '').toLowerCase();
+  const g = String(game || '').toLowerCase();
+  if (s === 'lol' || (s === 'esports' && g === 'lol')) return 'LoL';
+  if (s === 'dota2' || s === 'dota' || (s === 'esports' && (g === 'dota' || g === 'dota2'))) return 'Dota 2';
+  if (s === 'cs') return 'CS2';
+  if (s === 'valorant') return 'Valorant';
+  if (s === 'tennis') return 'Tênis';
+  if (s === 'tabletennis') return 'TT';
+  if (s === 'mma') return g === 'boxing' ? 'Boxe' : 'MMA';
+  if (s === 'football') return 'Futebol';
+  if (s === 'darts') return 'Darts';
+  if (s === 'snooker') return 'Snooker';
+  if (s === 'esports') return 'Esports (legado)';
+  return s.toUpperCase();
+}
 let currentGame = 'lol';
 let charts = { equity: null, calib: null, clv: null };
 let autoRefreshTimer = null;
@@ -1103,7 +1119,11 @@ async function loadOverall(gen = refreshGen) {
   }
 
   // Sport breakdown — per-sport panel (ROI + allocation drift)
-  const sports = data.sports || [];
+  // Esconde bucket 'esports' legado (pós-split Abr/2026 tips novas vão pra lol/dota2);
+  // mantém se não tiver tips novas ainda (fallback).
+  const sportsRaw = data.sports || [];
+  const hasNewBuckets = sportsRaw.some(s => s.sport === 'lol' || s.sport === 'dota2');
+  const sports = hasNewBuckets ? sportsRaw.filter(s => s.sport !== 'esports') : sportsRaw;
   const maxAbsRoi = Math.max(0.1, ...sports.map(s => Math.abs(s.roi || 0)));
   document.getElementById('sportRoiList').innerHTML = sports.length ? sports.map(s => {
     const roi = s.roi;
@@ -1122,7 +1142,7 @@ async function loadOverall(gen = refreshGen) {
       : '';
     return `
       <div class="sport-roi-row">
-        <div class="sport-roi-name">${s.sport} <span class="chip" style="font-size:10px;padding:1px 5px">${s.total}t</span>${drainedTag}${driftStr}</div>
+        <div class="sport-roi-name">${sportDisplayLabel(s.sport, '')} <span class="chip" style="font-size:10px;padding:1px 5px">${s.total}t</span>${drainedTag}${driftStr}</div>
         <div class="sport-roi-bar">
           <div class="sport-roi-bar-fill ${cls}" style="width:${pct}%; ${cls === 'neg' ? `right:50%;` : `left:50%;`}"></div>
         </div>
@@ -1173,7 +1193,7 @@ async function loadKPIs(gen = refreshGen) {
 
   const html = `
     <div class="kpi">
-      <div class="kpi-label">Banca <span class="kpi-meta">(${currentSport})</span>${isDrained ? ' <span class="kpi-meta" title="Sport perdeu mais que allocation inicial — stakes continuam saindo do portfolio global" style="color:var(--danger,#ef4444)">⚠ drenado</span>' : ''}</div>
+      <div class="kpi-label">Banca <span class="kpi-meta">(${sportDisplayLabel(currentSport, currentGame)})</span>${isDrained ? ' <span class="kpi-meta" title="Sport perdeu mais que allocation inicial — stakes continuam saindo do portfolio global" style="color:var(--danger,#ef4444)">⚠ drenado</span>' : ''}</div>
       <div class="kpi-value ${isDrained ? 'neg' : ''}">${fmtMoney(banca.currentBanca)}</div>
       <div class="kpi-sub">
         <span class="delta ${sign(growthPct)}">${arrow(growthPct)} ${fmtPct(growthPct)}</span>
@@ -1299,8 +1319,8 @@ async function loadEquity(gen = refreshGen) {
 // 3) Sport ROI list (cross-sport comparison)
 // ─────────────────────────────────────────────────────────────
 const SPORTS_LIST = [
-  { sport: 'esports', game: 'lol',    label: 'League of Legends', emoji: '⚔' },
-  { sport: 'esports', game: 'dota2',  label: 'Dota 2',            emoji: '🛡' },
+  { sport: 'lol', game: '',           label: 'League of Legends', emoji: '⚔' },
+  { sport: 'dota2', game: '',         label: 'Dota 2',            emoji: '🛡' },
   { sport: 'valorant', game: '',      label: 'Valorant',          emoji: '🎯' },
   { sport: 'cs', game: '',            label: 'CS2',               emoji: '🔫' },
   { sport: 'tennis', game: '',        label: 'Tênis',             emoji: '🎾' },
