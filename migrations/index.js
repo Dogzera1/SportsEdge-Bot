@@ -890,6 +890,27 @@ const migrations = [
       }
     },
   },
+  {
+    id: '041_sync_baseline_amount_to_sum_initials',
+    up(db) {
+      // Pós modelo per-sport (039/040): soma de initial_banca dos sports ativos é
+      // R$1000 (10 sports × R$100), mas settings.baseline.amount ficou stale em R$900
+      // (de 16/04 quando era unit global). Dashboard mostrava falso +R$100 growth.
+      // Atualiza baseline.amount pra sum(initial_banca) atual, preserva date original.
+      const sumRow = db.prepare(`SELECT COALESCE(SUM(initial_banca), 0) AS total FROM bankroll WHERE sport != 'esports'`).get();
+      const newAmount = Number(sumRow?.total || 0);
+      if (newAmount <= 0) return;
+      const existing = db.prepare(`SELECT value FROM settings WHERE key = 'baseline'`).get();
+      let baseline = { date: new Date().toISOString().slice(0, 10), amount: newAmount, unit_pct: 1 };
+      if (existing?.value) {
+        try {
+          const parsed = JSON.parse(existing.value);
+          baseline = { ...parsed, amount: newAmount }; // preserve date/unit_pct, só amount muda
+        } catch (_) {}
+      }
+      db.prepare(`INSERT INTO settings (key, value) VALUES ('baseline', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`).run(JSON.stringify(baseline));
+    },
+  },
 ];
 
 function applyMigrations(db) {

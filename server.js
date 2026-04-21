@@ -11120,9 +11120,14 @@ const server = http.createServer(async (req, res) => {
       const equityRows = Object.values(eqMap).sort((a, b) => a.day.localeCompare(b.day));
 
       const baseline = _bl;
-      const baselineProfit = +(totalCurrent - baseline.amount).toFixed(2);
-      const baselineGrowth = baseline.amount > 0 ? +((baselineProfit / baseline.amount) * 100).toFixed(2) : 0;
-      const totalProfitUnitsGlobal = baseline.unit_value > 0 ? +(baselineProfit / baseline.unit_value).toFixed(2) : 0;
+      // Post per-sport tier unit (Abr/2026-III): "baseline" verdadeiro é SUM(initial_banca)
+      // das bankrolls ativas, não o settings.baseline.amount (stale de 16/04 = R$900).
+      // Se soma atual de inits != baseline.amount, usar soma como referência pra profit real.
+      const effectiveBaseline = totalInitial > 0 ? totalInitial : baseline.amount;
+      const baselineProfit = +(totalCurrent - effectiveBaseline).toFixed(2);
+      const baselineGrowth = effectiveBaseline > 0 ? +((baselineProfit / effectiveBaseline) * 100).toFixed(2) : 0;
+      // Units agora são per-sport; total em units é aproximação via unit médio (R$1 no tier normal)
+      const totalProfitUnitsGlobal = +baselineProfit.toFixed(2); // 1u=R$1 média no modelo tier
 
       // Equity series deve terminar em totalCurrent mesmo quando existirem tips
       // settled antes da janela. Pre-pend ponto baseline (16/04 = R$900) se não existir
@@ -11138,9 +11143,11 @@ const server = http.createServer(async (req, res) => {
         if (dd > maxDD) maxDD = dd;
         return { day: r.day, cum_banca: parseFloat(cum.toFixed(2)), profit_reais: profit, n: r.n };
       });
-      // Prepend baseline se a data é anterior ao primeiro ponto e não está na série
+      // Prepend baseline usando effectiveBaseline (soma atual dos inits dos sports), não
+      // settings.baseline.amount stale. Data do prepend: se baseline.date existe e é anterior
+      // ao 1º ponto, usa ela; senão usa "inicial" abstrato.
       if (baseline.date && (!series.length || baseline.date < series[0].day)) {
-        series.unshift({ day: baseline.date, cum_banca: baseline.amount, profit_reais: 0, n: 0, baseline: true });
+        series.unshift({ day: baseline.date, cum_banca: effectiveBaseline, profit_reais: 0, n: 0, baseline: true });
       }
 
       sendJson(res, {
@@ -11153,9 +11160,10 @@ const server = http.createServer(async (req, res) => {
           growthPct: +growthPct.toFixed(2),
           bankrolls: bankrolls.length,
           baseline_date: baseline.date,
-          baseline_amount: baseline.amount,
+          baseline_amount: effectiveBaseline, // SUM(initial_banca) atual, não stale R$900
+          baseline_legacy_amount: baseline.amount, // informativo, pra debug
           unit_pct: baseline.unit_pct,
-          unit_value: baseline.unit_value,
+          unit_value: 1.00, // tier unit base (per-sport varia, mas base=R$1)
           baseline_profit: baselineProfit,
           baseline_profit_units: totalProfitUnitsGlobal,
           baseline_growth_pct: baselineGrowth,
