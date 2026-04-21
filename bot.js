@@ -1744,6 +1744,38 @@ async function runAutoAnalysis() {
             continue;
           }
 
+          // ── Tier 2/3 LoL safeguards (Abr/2026-IV) ──
+          // Learning do bleed: Prime League 1st Div com modelo p=0.89 levou 2 picks
+          // repetidos em ALTA a 0% hit (G2 NORD). Degrada ALTA→MÉDIA em tier não-1
+          // quando p muito alto (overconfidence é frequente em ligas com pouco dado).
+          // Também exige EV mínimo maior pra tier 2/3.
+          const _lolTier = _leagueTier('lol', match.league || match.leagueSlug || '');
+          const isT1betCheck = norm(tipTeam).includes(norm(match.team1)) || norm(match.team1).includes(norm(tipTeam));
+          const modelPPickPre = (result.modelP1 > 0) ? (isT1betCheck ? result.modelP1 : result.modelP2) : null;
+          if (_lolTier >= 2) {
+            // Cap ALTA→MÉDIA se p > 0.85 (overconfidence em tier não-1)
+            if (tipConf === CONF.ALTA && modelPPickPre != null && modelPPickPre > 0.85) {
+              log('INFO', 'AUTO-LOL', `Tier ${_lolTier} ${match.league}: p_modelo ${(modelPPickPre*100).toFixed(1)}% > 85% → ALTA rebaixado pra MÉDIA (overconfidence guard)`);
+              tipConf = CONF.MEDIA;
+            }
+            // EV mínimo maior pra tier 2/3: exige ≥7% vs 2-3% default
+            const tierEvMin = parseFloat(process.env.LOL_TIER2_EV_MIN || '7') || 7;
+            const tipEVnum = parseFloat(tipEV) || 0;
+            if (tipEVnum < tierEvMin) {
+              log('INFO', 'AUTO-LOL', `Tier ${_lolTier} ${match.league}: EV ${tipEVnum.toFixed(1)}% < ${tierEvMin}% min — tip rejeitada`);
+              logRejection('lol', `${match.team1} vs ${match.team2}`, 'tier2_ev_low', { tier: _lolTier, ev: tipEVnum, min: tierEvMin, league: match.league });
+              analyzedMatches.set(matchKey, { ts: now, tipSent: false, noEdge: true });
+              continue;
+            }
+            // BAIXA bloqueada em tier 2/3 — variance alta + edge questionável
+            if (tipConf === CONF.BAIXA) {
+              log('INFO', 'AUTO-LOL', `Tier ${_lolTier} ${match.league}: CONF=BAIXA bloqueada (variance + edge suspeito)`);
+              logRejection('lol', `${match.team1} vs ${match.team2}`, 'tier2_baixa_blocked', { tier: _lolTier, league: match.league });
+              analyzedMatches.set(matchKey, { ts: now, tipSent: false, noEdge: true });
+              continue;
+            }
+          }
+
           // Kelly adaptado por confiança: ALTA → ¼ Kelly (max 4u) | MÉDIA → ⅙ Kelly (max 3u) | BAIXA → 1/10 Kelly (max 1.5u)
           let kellyFraction = tipConf === CONF.ALTA ? 0.25 : tipConf === CONF.BAIXA ? 0.10 : 1/6;
           const _clvAdjLive = await fetchClvMultiplier('lol', match.league);

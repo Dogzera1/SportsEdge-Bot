@@ -8410,22 +8410,31 @@ const server = http.createServer(async (req, res) => {
             ? `AND REPLACE(REPLACE(lower(tip_participant),' ',''),'-','') = ?`
             : ``;
           const pickParam = samePickOnly ? [pickN_] : [];
-          // Dedup cross-bucket também: sport=lol bloqueia pair já existente em esports legado.
+          // Dedup cross-bucket + cross-result: bloqueia pair+market emitido nas últimas 24h
+          // INDEPENDENTE do result (pending, win OU loss). Learning do bleed G2 NORD:
+          // tip 1 settled loss, tip 2 saiu logo depois porque result IS NULL não bateu.
+          // Override: DEDUP_INCLUDE_SETTLED=false pra voltar ao comportamento antigo.
+          const includeSettled = !/^(0|false|no)$/i.test(String(process.env.DEDUP_INCLUDE_SETTLED ?? 'true'));
+          const resultFilter = includeSettled ? '' : 'AND result IS NULL';
           const pairDupeSet = (typeof resolveSportSet === 'function')
             ? resolveSportSet(sport, null).sportSet : [sport];
           const pairDupePh = pairDupeSet.map(() => '?').join(',');
           const recentDupe = db.prepare(
-            `SELECT id, tip_participant FROM tips WHERE sport IN (${pairDupePh}) AND result IS NULL
+            `SELECT id, tip_participant, result FROM tips WHERE sport IN (${pairDupePh}) ${resultFilter}
+             AND (archived IS NULL OR archived = 0)
              AND sent_at > datetime('now', '-24 hours')
              AND upper(COALESCE(market_type, 'ML')) = ?
              ${pickClause}
              AND ((REPLACE(REPLACE(lower(participant1),' ',''),'-','') LIKE ? AND REPLACE(REPLACE(lower(participant2),' ',''),'-','') LIKE ?)
                OR (REPLACE(REPLACE(lower(participant1),' ',''),'-','') LIKE ? AND REPLACE(REPLACE(lower(participant2),' ',''),'-','') LIKE ?))
-             LIMIT 1`
+             ORDER BY id DESC LIMIT 1`
           ).get(...pairDupeSet, marketN_, ...pickParam, `%${p1n_}%`, `%${p2n_}%`, `%${p2n_}%`, `%${p1n_}%`);
           if (recentDupe) {
-            const reason = samePickOnly ? 'duplicate_pair' : 'hedge_blocked';
-            log('INFO', 'DEDUP', `${sport} ${p1} vs ${p2}: ${reason} (existing pick=${recentDupe.tip_participant}, new=${tipParticipant})`);
+            const prevResult = recentDupe.result ? `result=${recentDupe.result}` : 'pending';
+            const reason = recentDupe.result === 'loss' ? 'recent_loss_same_pair'
+                         : recentDupe.result ? 'recent_settle_same_pair'
+                         : (samePickOnly ? 'duplicate_pair' : 'hedge_blocked');
+            log('INFO', 'DEDUP', `${sport} ${p1} vs ${p2}: ${reason} (existing pick=${recentDupe.tip_participant}, ${prevResult}, new=${tipParticipant})`);
             sendJson(res, { ok: true, skipped: true, reason });
             return;
           }
