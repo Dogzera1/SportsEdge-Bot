@@ -1585,7 +1585,9 @@ async function loadTips(gen = refreshGen) {
   let tips = [];
   const LIMIT_ALL = 1000; // cap hard do backend
   if (currentSport === '__overall__') {
-    const sports = ['esports', 'lol', 'dota2', 'valorant', 'cs', 'tennis', 'mma', 'football', 'darts', 'snooker', 'tabletennis'];
+    // 'esports' query já unifica IN(esports,lol,dota2) via resolveSportSet — NÃO incluir
+    // 'lol'/'dota2' separados aqui senão o mesmo tip é retornado 3 vezes (triplicando).
+    const sports = ['esports', 'valorant', 'cs', 'tennis', 'mma', 'football', 'darts', 'snooker', 'tabletennis'];
     const sq = status ? '&status=' + encodeURIComponent(status) : '';
     const perSport = Math.ceil(LIMIT_ALL / sports.length);
     const results = await Promise.all(sports.map(sp =>
@@ -1596,6 +1598,24 @@ async function loadTips(gen = refreshGen) {
       const t = data?.tips || data || [];
       if (Array.isArray(t)) tips.push(...t.map(x => ({ ...x, sport: x.sport || sp })));
     }
+    // Safety net: dedup cross-sport por id (caso backend retorne overlapping).
+    const seenIds = new Set();
+    tips = tips.filter(t => {
+      if (!t.id || seenIds.has(t.id)) return !t.id; // permite rows sem id (improvável)
+      seenIds.add(t.id);
+      return true;
+    });
+    // Fuzzy dedup adicional: mesma tip com match_ids diferentes (legacy vs new).
+    const normStr = s => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    const bucketFor = sport => ['esports','lol','dota2','dota'].includes(sport) ? 'esports' : sport;
+    const fuzzyKeep = new Map();
+    for (const t of tips) {
+      const day = String(t.sent_at || '').slice(0, 10);
+      const key = [bucketFor(t.sport), normStr(t.participant1), normStr(t.participant2), normStr(t.tip_participant), String(t.odds || ''), String(t.stake || ''), day].join('|');
+      const prev = fuzzyKeep.get(key);
+      if (!prev || Number(t.id || 0) > Number(prev.id || 0)) fuzzyKeep.set(key, t);
+    }
+    tips = [...fuzzyKeep.values()];
     tips.sort((a, b) => new Date(b.sent_at || 0) - new Date(a.sent_at || 0));
   } else {
     const gq = currentGame ? '&game=' + encodeURIComponent(currentGame) : '';
@@ -1603,6 +1623,16 @@ async function loadTips(gen = refreshGen) {
     const data = await apiFetch(`/tips-history?sport=${currentSport}&limit=${LIMIT_ALL}${gq}${sq}`);
     if (shouldAbort(gen)) return;
     tips = (data?.tips || data || []).map(x => ({ ...x, sport: x.sport || currentSport }));
+    // Fuzzy dedup (mesma tip com match_ids diferentes entre esports↔lol/dota2 etc)
+    const normStr = s => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    const fuzzyKeep = new Map();
+    for (const t of tips) {
+      const day = String(t.sent_at || '').slice(0, 10);
+      const key = [normStr(t.participant1), normStr(t.participant2), normStr(t.tip_participant), String(t.odds || ''), String(t.stake || ''), day].join('|');
+      const prev = fuzzyKeep.get(key);
+      if (!prev || Number(t.id || 0) > Number(prev.id || 0)) fuzzyKeep.set(key, t);
+    }
+    tips = [...fuzzyKeep.values()].sort((a, b) => new Date(b.sent_at || 0) - new Date(a.sent_at || 0));
   }
   tipsCache = Array.isArray(tips) ? tips : [];
   tipsPage = 1;
