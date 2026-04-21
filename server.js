@@ -6409,6 +6409,27 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // Trigger reanálise de tips pendentes. Se tip não passa novo sistema, voida + DM admin.
+  // POST /admin/reanalyze-void?sport=tennis&apply=1
+  //   apply=0 → dry-run (só relata)
+  //   sport=all pra todos
+  if (p === '/admin/reanalyze-void' && req.method === 'POST') {
+    if (!requireAdmin(req, res)) return;
+    const sport = String(parsed.query.sport || 'all').trim().toLowerCase();
+    const apply = parsed.query.apply !== '0';
+    try {
+      // Bot é processo separado; delega via flag em disco + IPC trivial.
+      // Solução mais simples: escreve arquivo signal que o bot lê.
+      const fs = require('fs');
+      const path = require('path');
+      const dir = path.dirname(path.resolve(DB_PATH));
+      const file = path.join(dir, `reanalyze_void_signal.json`);
+      fs.writeFileSync(file, JSON.stringify({ sport, apply, ts: Date.now() }));
+      sendJson(res, { ok: true, sport, apply, note: 'Flag escrito; bot processará no próximo tick' });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
   // Marca market_tips_shadow como VOID quando EV>maxEv (bogus tips de scanner bug).
   // POST /void-market-tips-bogus?sport=tennis&minEv=40&hours=24
   if (p === '/void-market-tips-bogus' && req.method === 'POST') {

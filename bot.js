@@ -5179,6 +5179,20 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
       await refreshOpenTips();
       await send(token, chatId, '✅ Updates enviados. Dashboard refletirá `current_odds/current_ev`.');
     } catch(e) { await send(token, chatId, `❌ ${e.message}`); }
+  } else if (cmd === '/reanalise-void' || cmd === '/reanalyze-void') {
+    if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
+    const cmdParts = command.trim().split(/\s+/);
+    const sportArg = cmdParts[1]?.toLowerCase() || 'all';
+    const dry = cmdParts.includes('--dry');
+    try {
+      await send(token, chatId, `🔍 Reanalisando tips pendentes${dry ? ' (DRY-RUN)' : ''}...`);
+      const r = await reanalyzeAndVoidFailing({ sport: sportArg, apply: !dry, notify: true });
+      const msg = `✅ Reanálise concluída\n\n` +
+        `• Checadas: ${r.checked}\n` +
+        `• ${dry ? 'Seriam voidadas' : 'Voidadas'}: ${r.voided}\n` +
+        (r.voidedList.length ? `\nVer DM separado com detalhes.` : '_Nenhuma tip falhou — todas passam no novo sistema._');
+      await send(token, chatId, msg);
+    } catch(e) { await send(token, chatId, `❌ ${e.message}`); }
   } else if (cmd === '/slugs') {
     // Mostra ligas LoL cobertas e slugs desconhecidos vistos no schedule
     try {
@@ -6187,7 +6201,8 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
       `━━ 🔄 *Data Sync & Refresh* ━━\n` +
       `\`/sync-history [sport]\` — PandaScore (valorant/cs/dota/lol)\n` +
       `\`/reanalise [sport]\` — reavalia pendentes (esports/mma/tennis...)\n` +
-      `\`/refresh-open\` — recalcula EV de tips pendentes\n\n` +
+      `\`/refresh-open\` — recalcula EV de tips pendentes\n` +
+      `\`/reanalise-void [sport] [--dry]\` — voida pendentes que falham no novo sistema\n\n` +
       `━━ 📈 *Stats & ROI* ━━\n` +
       `\`/stats [sport]\` — ROI e calibração\n` +
       `\`/roi\` — ROI geral\n` +
@@ -7121,6 +7136,7 @@ async function poll(token, sport) {
                      text.startsWith('/unsettled') || text.startsWith('/settle-debug') ||
                      text.startsWith('/refresh-open') || text.startsWith('/loops') ||
                      text.startsWith('/reanalise') || text.startsWith('/reset-tips') ||
+                     text.startsWith('/reanalyze-void') ||
                      text.startsWith('/tip ') || text.startsWith('/help') || text.startsWith('/start') ||
                      text.startsWith('/alerts')) {
             // Passa `sport` da poll (qual bot recebeu) para evitar default 'esports'
@@ -13133,6 +13149,25 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   setTimeout(() => runIaHealthCycle().catch(() => {}), 15 * 60 * 1000);
 
   // Model Calibration Watcher: cron 1x/semana (segunda 7h UTC = 4h BRT).
+  // Watcher de signal pra reanalyze-void (escrito pelo endpoint /admin/reanalyze-void)
+  setInterval(() => {
+    try {
+      const fs = require('fs');
+      const path = require('path');
+      const dir = path.dirname(path.resolve(process.env.DB_PATH || 'sportsedge.db'));
+      const file = path.join(dir, 'reanalyze_void_signal.json');
+      if (!fs.existsSync(file)) return;
+      const stat = fs.statSync(file);
+      if (Date.now() - stat.mtimeMs > 5 * 60 * 1000) { fs.unlinkSync(file); return; } // muito velho
+      const payload = JSON.parse(fs.readFileSync(file, 'utf8'));
+      fs.unlinkSync(file);
+      log('INFO', 'REANAL-VOID', `Signal recebido: sport=${payload.sport} apply=${payload.apply}`);
+      reanalyzeAndVoidFailing({ sport: payload.sport, apply: payload.apply })
+        .then(r => log('INFO', 'REANAL-VOID', `Concluído: checked=${r.checked} voided=${r.voided}`))
+        .catch(e => log('WARN', 'REANAL-VOID', `Erro: ${e.message}`));
+    } catch(_) {}
+  }, 30 * 1000);
+
   setInterval(() => runModelCalibrationCycle().catch(e => log('ERROR', 'MODEL-CALIB', e.message)), 24 * 60 * 60 * 1000);
   setInterval(() => runPathGuardCycle().catch(e => log('ERROR', 'PATH-GUARD', e.message)), 6 * 60 * 60 * 1000);
   setTimeout(() => runPathGuardCycle().catch(() => {}), 30 * 60 * 1000);
@@ -13754,4 +13789,141 @@ async function refreshOpenTips(caches = {}) {
   } catch(_) {}
 }
 
-module.exports = { bots, subscribedUsers };
+// ─────────────────────────────────────────────────────────────
+// reanalyzeAndVoidFailing — re-fetcha odds atuais, recalcula EV e VOIDA tips
+// que não passam no novo threshold mínimo. Alerta admin via Telegram.
+// Usado pelo endpoint /admin/reanalyze-void (e por /refresh-open-strict).
+// ─────────────────────────────────────────────────────────────
+async function reanalyzeAndVoidFailing(opts = {}) {
+  const apply = opts.apply !== false; // default true
+  const notify = opts.notify !== false; // default true
+  // Floor EV % below which tip é considerado sem edge — void.
+  // Default 3% (bem conservador; o sistema normal exige 5-8% pra gerar).
+  const evFloorBySport = {
+    esports: parseFloat(process.env.REANAL_EV_FLOOR_ESPORTS ?? '3'),
+    cs:      parseFloat(process.env.REANAL_EV_FLOOR_CS      ?? '3'),
+    tennis:  parseFloat(process.env.REANAL_EV_FLOOR_TENNIS  ?? '3'),
+    football:parseFloat(process.env.REANAL_EV_FLOOR_FOOTBALL?? '3'),
+    mma:     parseFloat(process.env.REANAL_EV_FLOOR_MMA     ?? '4'),
+    valorant:parseFloat(process.env.REANAL_EV_FLOOR_VAL     ?? '3'),
+  };
+  const report = { checked: 0, voided: 0, voidedList: [] };
+
+  const enabledSports = Object.entries(SPORTS)
+    .filter(([_, s]) => s && s.enabled && s.token)
+    .map(([id]) => id);
+
+  for (const sport of enabledSports) {
+    if (opts.sport && opts.sport !== 'all' && opts.sport !== sport) continue;
+    const unsettled = await serverGet('/unsettled-tips?days=30', sport).catch(() => []);
+    if (!Array.isArray(unsettled) || !unsettled.length) continue;
+
+    for (const tip of unsettled) {
+      // Skip live tips (linha congelada)
+      if (tip.is_live) continue;
+      // Skip esports por mapa (série em andamento)
+      if (sport === 'esports' && String(tip.match_id || '').includes('_MAP')) continue;
+
+      const p1 = tip.participant1 || '';
+      const p2 = tip.participant2 || '';
+      const pick = tip.tip_participant || '';
+      const oldOdds = parseFloat(tip.odds) || 0;
+      const oldEv = parseFloat(tip.ev) || 0;
+      if (!p1 || !p2 || !pick || oldOdds <= 1) continue;
+
+      report.checked++;
+
+      // Re-fetch odds atuais por sport
+      let currentOdds = null;
+      try {
+        if (sport === 'esports') {
+          const o = await serverGet(`/odds?team1=${encodeURIComponent(p1)}&team2=${encodeURIComponent(p2)}&game=lol`);
+          if (o && parseFloat(o.t1) > 1) currentOdds = norm(pick) === norm(p1) ? parseFloat(o.t1) : parseFloat(o.t2);
+        } else if (sport === 'mma') {
+          const fights = await serverGet('/mma-matches');
+          if (Array.isArray(fights)) {
+            const m = findTheOddsH2hMatch(fights, tip);
+            if (m?.odds) currentOdds = h2hDecimalOddsForPick(m, pick);
+          }
+        } else if (sport === 'tennis') {
+          const matches = await serverGet('/tennis-matches');
+          if (Array.isArray(matches)) {
+            const m = findTheOddsH2hMatch(matches, tip);
+            if (m?.odds) currentOdds = h2hDecimalOddsForPick(m, pick);
+          }
+        } else if (sport === 'football') {
+          const matches = await serverGet('/football-matches');
+          if (Array.isArray(matches)) {
+            const m = findTheOddsH2hMatch(matches, tip);
+            if (m?.odds) currentOdds = h2hDecimalOddsForPick(m, pick);
+          }
+        } else if (sport === 'cs') {
+          const matches = await serverGet('/cs-matches');
+          if (Array.isArray(matches)) {
+            const m = findTheOddsH2hMatch(matches, tip);
+            if (m?.odds) currentOdds = h2hDecimalOddsForPick(m, pick);
+          }
+        } else if (sport === 'valorant') {
+          const matches = await serverGet('/valorant-matches');
+          if (Array.isArray(matches)) {
+            const m = findTheOddsH2hMatch(matches, tip);
+            if (m?.odds) currentOdds = h2hDecimalOddsForPick(m, pick);
+          }
+        }
+      } catch(_) {}
+
+      if (!currentOdds || !isFinite(currentOdds) || currentOdds <= 1) continue;
+
+      // Reconstrói P original do tip via EV+odds originais
+      const pOrig = Math.max(0.01, Math.min(0.99, (1 + oldEv / 100) / oldOdds));
+      const newEv = ((pOrig * currentOdds) - 1) * 100;
+      const evFloor = evFloorBySport[sport] ?? 3;
+
+      // Critério void: EV atual < floor (sport-specific).
+      // Também voida se odd se moveu >20% adverso mesmo com EV positivo —
+      // mercado sabe de algo (line move = news/lesão).
+      const oddMoveAdvPct = ((currentOdds - oldOdds) / oldOdds) * 100;
+      const oddMovedAdverse = oddMoveAdvPct <= -20; // nossa odd caiu 20%+
+      const failsEV = newEv < evFloor;
+
+      if (!failsEV && !oddMovedAdverse) continue;
+
+      const reason = failsEV ? `EV caiu: ${oldEv.toFixed(1)}% → ${newEv.toFixed(1)}% (floor ${evFloor}%)`
+        : `odd deslocou adversamente ${oddMoveAdvPct.toFixed(1)}% (${oldOdds} → ${currentOdds})`;
+
+      report.voidedList.push({
+        id: tip.id, sport, match: `${p1} vs ${p2}`, pick,
+        oldOdds, newOdds: currentOdds, oldEv, newEv: +newEv.toFixed(2), reason,
+      });
+
+      if (apply) {
+        try {
+          await serverPost(`/void-tip?id=${tip.id}`, {}, sport);
+          report.voided++;
+        } catch(e) {
+          log('WARN', 'REANAL-VOID', `Falha ao void tip #${tip.id}: ${e.message}`);
+        }
+      }
+    }
+  }
+
+  // DM admin com summary
+  if (notify && report.voidedList.length && ADMIN_IDS.size) {
+    const tokenForAlert = Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
+    if (tokenForAlert) {
+      const lines = report.voidedList.slice(0, 10).map(v =>
+        `❌ *#${v.id}* ${v.sport} — ${v.match}\n   └─ pick ${v.pick} @${v.oldOdds}→${v.newOdds} | EV ${v.oldEv.toFixed(1)}%→${v.newEv}%\n   └─ _${v.reason}_`
+      ).join('\n\n');
+      const more = report.voidedList.length > 10 ? `\n\n_+${report.voidedList.length - 10} mais..._` : '';
+      const verb = apply ? 'voidadas' : 'seriam voidadas (dry-run)';
+      const msg = `🔍 *REANALISE DE PENDENTES*\n\n${report.voidedList.length} tip(s) ${verb} por falha no novo sistema:\n\n${lines}${more}\n\n_${report.checked} tips checadas._`;
+      for (const adminId of ADMIN_IDS) {
+        await sendDM(tokenForAlert, adminId, msg).catch(() => {});
+      }
+    }
+  }
+
+  return report;
+}
+
+module.exports = { bots, subscribedUsers, reanalyzeAndVoidFailing };
