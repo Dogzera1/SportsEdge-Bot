@@ -809,6 +809,87 @@ const migrations = [
       }
     },
   },
+  {
+    id: '039_per_sport_unit_model_reset_initial',
+    up(db) {
+      // Switch pra modelo per-sport unit (Abr/2026-III).
+      // Cada sport tem initial_banca = R$100 (1u = R$1 na zona normal ±20%).
+      // esports bucket fica em 0 (legacy, não usado pra novas tips).
+      const STANDARD_INITIAL = 100;
+      const sports = ['lol', 'dota2', 'mma', 'tennis', 'football', 'cs', 'valorant', 'darts', 'snooker', 'tabletennis'];
+      for (const sp of sports) {
+        const r = db.prepare('SELECT initial_banca FROM bankroll WHERE sport=?').get(sp);
+        if (!r) {
+          db.prepare("INSERT INTO bankroll (sport, initial_banca, current_banca, updated_at) VALUES (?, ?, ?, datetime('now'))").run(sp, STANDARD_INITIAL, STANDARD_INITIAL);
+        } else if (Number(r.initial_banca) !== STANDARD_INITIAL) {
+          db.prepare("UPDATE bankroll SET initial_banca=?, updated_at=datetime('now') WHERE sport=?").run(STANDARD_INITIAL, sp);
+        }
+      }
+      // Esports legacy: garante init=0 current=0 (não conta no total)
+      db.prepare("UPDATE bankroll SET initial_banca=0, current_banca=0, updated_at=datetime('now') WHERE sport='esports'").run();
+    },
+  },
+  {
+    id: '040_rebuild_tips_with_per_sport_unit_tiers',
+    up(db) {
+      // Rebuild cronológico: pra cada sport, itera tips settled em ordem e
+      // recompute stake_reais/profit_reais usando tier unit baseado em ratio
+      // runningBanca/initialBanca, atualizando runningBanca após cada tip.
+      // Tips legacy sport='esports' são reclassificadas em lol/dota2.
+      let getSportUnitValue;
+      try {
+        ({ getSportUnitValue } = require('../lib/sport-unit'));
+      } catch (e) {
+        getSportUnitValue = function(current, initial = 100) {
+          if (!current || current <= 0) return 0.50;
+          const r = current / (initial || 100);
+          if (r >= 3.0) return 3.0;
+          if (r >= 2.0) return 2.0;
+          if (r >= 1.5) return 1.5;
+          if (r >= 1.2) return 1.2;
+          if (r >= 0.8) return 1.0;
+          if (r >= 0.6) return 0.8;
+          if (r >= 0.4) return 0.6;
+          return 0.5;
+        };
+      }
+      const sports = ['lol', 'dota2', 'mma', 'tennis', 'football', 'cs', 'valorant', 'darts', 'snooker', 'tabletennis'];
+      const updStmt = db.prepare(`UPDATE tips SET stake_reais = ?, profit_reais = ? WHERE id = ?`);
+      for (const sport of sports) {
+        const bk = db.prepare('SELECT initial_banca FROM bankroll WHERE sport=?').get(sport);
+        if (!bk) continue;
+        const initial = Number(bk.initial_banca) || 100;
+        const extraSql = sport === 'dota2'
+          ? " OR (sport = 'esports' AND (match_id LIKE 'dota2_%' OR LOWER(COALESCE(event_name,'')) LIKE '%dota%'))"
+          : sport === 'lol'
+            ? " OR (sport = 'esports' AND match_id NOT LIKE 'dota2_%' AND LOWER(COALESCE(event_name,'')) NOT LIKE '%dota%')"
+            : "";
+        const sportTips = db.prepare(`
+          SELECT id, sport, stake, odds, result, sent_at, settled_at, match_id, event_name
+          FROM tips
+          WHERE (archived IS NULL OR archived = 0)
+            AND COALESCE(is_shadow, 0) = 0
+            AND result IN ('win','loss','push','void')
+            AND (sport = ?${extraSql})
+          ORDER BY COALESCE(settled_at, sent_at) ASC, id ASC
+        `).all(sport);
+        let runningBanca = initial;
+        for (const t of sportTips) {
+          const stakeU = parseFloat(String(t.stake || '0').replace(/u/i, '')) || 0;
+          if (!stakeU) continue;
+          const odds = parseFloat(t.odds) || 1;
+          const uv = getSportUnitValue(runningBanca, initial);
+          const newStakeR = +(stakeU * uv).toFixed(2);
+          let newProfitR = 0;
+          if (t.result === 'win')  newProfitR = +(stakeU * (odds - 1) * uv).toFixed(2);
+          else if (t.result === 'loss') newProfitR = +(-stakeU * uv).toFixed(2);
+          updStmt.run(newStakeR, newProfitR, t.id);
+          runningBanca = +(runningBanca + newProfitR).toFixed(2);
+        }
+        db.prepare("UPDATE bankroll SET current_banca=?, updated_at=datetime('now') WHERE sport=?").run(runningBanca, sport);
+      }
+    },
+  },
 ];
 
 function applyMigrations(db) {

@@ -1204,17 +1204,17 @@ async function loadKPIs(gen = refreshGen) {
 
   const html = `
     <div class="kpi">
-      <div class="kpi-label">Banca <span class="kpi-meta">(${sportDisplayLabel(currentSport, currentGame)})</span>${isDrained ? ' <span class="kpi-meta" title="Sport perdeu mais que allocation inicial — stakes continuam saindo do portfolio global" style="color:var(--danger,#ef4444)">⚠ drenado</span>' : ''}</div>
+      <div class="kpi-label">Banca <span class="kpi-meta">(${sportDisplayLabel(currentSport, currentGame)})</span>${isDrained ? ' <span class="kpi-meta" title="Banca do sport ≤ 0 — tier unit em proteção" style="color:var(--danger,#ef4444)">⚠ drenado</span>' : ''}</div>
       <div class="kpi-value ${isDrained ? 'neg' : ''}">${fmtMoney(banca.currentBanca)}</div>
       <div class="kpi-sub">
         <span class="delta ${sign(growthPct)}">${arrow(growthPct)} ${fmtPct(growthPct)}</span>
-        ${allocationLine}
+        <span title="Banca inicial do sport: ${fmtMoney(initialSport)}. Tier unit ajusta em faixas de ±20%.">inicial ${fmtMoney(initialSport)}</span>
       </div>
     </div>
     <div class="kpi">
       <div class="kpi-label">Lucro acumulado</div>
       <div class="kpi-value ${sign(profit)}">${profit >= 0 ? '+' : ''}${fmtMoney(profit)}${unitVal ? ` <span class="kpi-meta">(${profit >= 0 ? '+' : ''}${(profit / unitVal).toFixed(2)}u)</span>` : ''}</div>
-      <div class="kpi-sub">${totalTips} tips · ${winRate != null ? winRate.toFixed(0) + '% WR' : '—'}${ov.pending ? ' · ' + ov.pending + ' pend' : ''}${unitVal ? ` · <span title="Unit global — 1u = ${banca.unitPct || 1}% de ${fmtMoney(baselineAmount)} (portfolio)">1u=${fmtMoney(unitVal)}</span>` : ''}</div>
+      <div class="kpi-sub">${totalTips} tips · ${winRate != null ? winRate.toFixed(0) + '% WR' : '—'}${ov.pending ? ' · ' + ov.pending + ' pend' : ''}${unitVal ? ` · <span title="Unit PER-SPORT — tier baseado em banca atual. R$1.00 na zona normal (±20% da inicial).">1u=${fmtMoney(unitVal)}</span>` : ''}</div>
     </div>
     <div class="kpi">
       <div class="kpi-label">ROI</div>

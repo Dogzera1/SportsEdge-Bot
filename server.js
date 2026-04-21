@@ -110,11 +110,21 @@ function getBaseline() {
 // Unit-native recompute: stake em u × unit_value atual. DB guarda snapshots (stake_reais/
 // profit_reais) calculados no momento do settlement com unit_value daquela época; se
 // baseline mudar, recomputamos on-the-fly pra consistência.
+// Pós modelo per-sport unit (Abr/2026-III): prefere stake_reais/profit_reais stored
+// (rebuild pelo migration 040 com tier unit per-sport). Fallback recompute só se null.
 function tipStakeReais(tip, unitValue) {
+  if (tip.stake_reais != null) {
+    const stored = Number(tip.stake_reais);
+    if (Number.isFinite(stored)) return stored;
+  }
   const stakeU = parseFloat(String(tip.stake || '').replace(/u/i, '')) || 0;
-  return +(stakeU * unitValue).toFixed(2);
+  return +(stakeU * (unitValue || 1)).toFixed(2);
 }
 function tipProfitReais(tip, unitValue) {
+  if (tip.profit_reais != null) {
+    const stored = Number(tip.profit_reais);
+    if (Number.isFinite(stored)) return stored;
+  }
   const stakeU = parseFloat(String(tip.stake || '').replace(/u/i, '')) || 0;
   const odds = parseFloat(tip.odds) || 1;
   if (!stakeU || !unitValue || unitValue <= 0) return null;
@@ -3547,12 +3557,12 @@ function runSettleSweep({ sportFilter = '', days = 14 } = {}) {
       }
       const result = nameMatched ? 'win' : 'loss';
 
-      // Unit value = baseline GLOBAL (R$9 pra baseline R$900 + 1%), não per-sport.
-      // Antes usava bk.current_banca/100 → drifting com DD (tip settlava com unit menor
-      // conforme banca caía). Baseline global garante stake_reais consistente pra ROI.
+      // Unit value PER-SPORT tier-based (Abr/2026-III): pega current_banca atual
+      // e initial_banca do sport, retorna tier discretizado. NÃO é baseline global.
       const stakeR = tip.stake_reais || (() => {
-        const _bl = getBaseline();
-        const uv = _bl.unit_value || 1;
+        const { getSportUnitValue } = require('./lib/sport-unit');
+        const bk = stmts.getBankroll.get(sport);
+        const uv = getSportUnitValue(bk?.current_banca || 0, bk?.initial_banca || 100);
         const su = parseFloat(String(tip.stake || '1').replace('u','')) || 1;
         return parseFloat((su * uv).toFixed(2));
       })();
@@ -6644,46 +6654,63 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // Rebuild stake_reais/profit_reais usando baseline.unit_value (global).
-  // Corrige tips settadas com unit_value drifting (pré-Abr/2026-II).
+  // Rebuild stake_reais/profit_reais usando PER-SPORT tier unit (Abr/2026-III).
+  // Cronológico: runningBanca começa em initial, itera tips em ordem, tier unit
+  // recalculado a cada tip, profit aplicado, runningBanca avança. Reclassifica esports→lol/dota2.
   // POST /admin/rebuild-tip-reais?sport=X&apply=1 (sem apply = dry-run)
   if (p === '/admin/rebuild-tip-reais' && req.method === 'POST') {
     const apply = parsed.query.apply === '1' || parsed.query.apply === 'true';
     const sportFilter = parsed.query.sport ? String(parsed.query.sport).trim() : null;
     try {
-      const _bl = getBaseline();
-      const uv = _bl.unit_value;
-      if (!uv || uv <= 0) { sendJson(res, { error: 'baseline unit_value inválido' }, 500); return; }
-      const sqlWhere = sportFilter ? `AND sport = ?` : '';
-      const params = sportFilter ? [sportFilter] : [];
-      const tips = db.prepare(`
-        SELECT id, sport, stake, odds, result, stake_reais, profit_reais
-        FROM tips
-        WHERE result IN ('win','loss','push','void')
-          AND (archived IS NULL OR archived = 0)
-          ${sqlWhere}
-      `).all(...params);
+      const { getSportUnitValue } = require('./lib/sport-unit');
+      const allSports = ['lol', 'dota2', 'mma', 'tennis', 'football', 'cs', 'valorant', 'darts', 'snooker', 'tabletennis'];
+      const sports = sportFilter ? allSports.filter(s => s === sportFilter) : allSports;
       const updates = [];
-      for (const t of tips) {
-        const stakeU = parseFloat(String(t.stake || '0').replace(/u/i, '')) || 0;
-        if (!stakeU) continue;
-        const odds = parseFloat(t.odds) || 1;
-        const newStakeR = +(stakeU * uv).toFixed(2);
-        let newProfitR;
-        if (t.result === 'win')       newProfitR = +(stakeU * (odds - 1) * uv).toFixed(2);
-        else if (t.result === 'loss') newProfitR = +(-stakeU * uv).toFixed(2);
-        else if (t.result === 'push' || t.result === 'void') newProfitR = 0;
-        else continue;
-        const prevStake = Number(t.stake_reais || 0);
-        const prevProfit = Number(t.profit_reais || 0);
-        if (Math.abs(prevStake - newStakeR) > 0.01 || Math.abs(prevProfit - newProfitR) > 0.01) {
-          updates.push({ id: t.id, sport: t.sport, newStakeR, newProfitR, prevStake, prevProfit });
+      const resyncPlan = []; // {sport, prevCurrent, newCurrent, initial}
+
+      for (const sport of sports) {
+        const bk = db.prepare('SELECT initial_banca, current_banca FROM bankroll WHERE sport=?').get(sport);
+        if (!bk) continue;
+        const initial = Number(bk.initial_banca) || 100;
+        const extraSql = sport === 'dota2'
+          ? " OR (sport = 'esports' AND (match_id LIKE 'dota2_%' OR LOWER(COALESCE(event_name,'')) LIKE '%dota%'))"
+          : sport === 'lol'
+            ? " OR (sport = 'esports' AND match_id NOT LIKE 'dota2_%' AND LOWER(COALESCE(event_name,'')) NOT LIKE '%dota%')"
+            : "";
+        const sportTips = db.prepare(`
+          SELECT id, sport, stake, odds, result, stake_reais, profit_reais, match_id, event_name
+          FROM tips
+          WHERE (archived IS NULL OR archived = 0)
+            AND COALESCE(is_shadow, 0) = 0
+            AND result IN ('win','loss','push','void')
+            AND (sport = ?${extraSql})
+          ORDER BY COALESCE(settled_at, sent_at) ASC, id ASC
+        `).all(sport);
+
+        let runningBanca = initial;
+        for (const t of sportTips) {
+          const stakeU = parseFloat(String(t.stake || '0').replace(/u/i, '')) || 0;
+          if (!stakeU) continue;
+          const odds = parseFloat(t.odds) || 1;
+          const uv = getSportUnitValue(runningBanca, initial);
+          const newStakeR = +(stakeU * uv).toFixed(2);
+          let newProfitR = 0;
+          if (t.result === 'win')       newProfitR = +(stakeU * (odds - 1) * uv).toFixed(2);
+          else if (t.result === 'loss') newProfitR = +(-stakeU * uv).toFixed(2);
+          const prevStake = Number(t.stake_reais || 0);
+          const prevProfit = Number(t.profit_reais || 0);
+          if (Math.abs(prevStake - newStakeR) > 0.01 || Math.abs(prevProfit - newProfitR) > 0.01) {
+            updates.push({ id: t.id, sport: t.sport, newStakeR, newProfitR, prevStake, prevProfit, unit_value: uv });
+          }
+          runningBanca = +(runningBanca + newProfitR).toFixed(2);
         }
+        resyncPlan.push({ sport, initial, prevCurrent: Number(bk.current_banca || 0), newCurrent: runningBanca });
       }
       if (!apply) {
         sendJson(res, {
-          ok: true, dry_run: true, unit_value: uv,
-          total_tips: tips.length, would_update: updates.length,
+          ok: true, dry_run: true, model: 'per_sport_tier_unit',
+          would_update: updates.length,
+          resync_preview: resyncPlan,
           examples: updates.slice(0, 10),
         });
         return;
@@ -6691,37 +6718,15 @@ const server = http.createServer(async (req, res) => {
       const stmt = db.prepare(`UPDATE tips SET stake_reais = ?, profit_reais = ? WHERE id = ?`);
       const tx = db.transaction(list => { for (const u of list) stmt.run(u.newStakeR, u.newProfitR, u.id); });
       tx(updates);
-      // Resync TODAS as bankrolls (não só as afetadas) com reclassificação esports→lol/dota2.
-      // Garante que profit de tips legadas sport='esports' pinga nos buckets lol/dota2 corretos.
-      const allTipsAgain = db.prepare(`
-        SELECT sport, profit_reais, match_id, event_name FROM tips
-        WHERE (archived IS NULL OR archived = 0) AND COALESCE(is_shadow, 0) = 0
-          AND result IN ('win','loss','push','void')
-      `).all();
-      const profitBySport = {};
-      for (const t of allTipsAgain) {
-        const p = Number(t.profit_reais || 0);
-        let sp = t.sport;
-        if (sp === 'esports') {
-          const mid = String(t.match_id || '');
-          const ev = String(t.event_name || '').toLowerCase();
-          sp = (mid.startsWith('dota2_') || ev.includes('dota')) ? 'dota2' : 'lol';
-        }
-        profitBySport[sp] = (profitBySport[sp] || 0) + p;
-      }
-      const allBankrolls = db.prepare('SELECT sport, initial_banca, current_banca FROM bankroll').all();
+      // Sync bankroll.current_banca com runningBanca final de cada sport
       const resynced = [];
-      for (const bk of allBankrolls) {
-        const init = Number(bk.initial_banca || 0);
-        const profit = profitBySport[bk.sport] || 0;
-        const newCurrent = +(init + profit).toFixed(2);
-        const prev = Number(bk.current_banca || 0);
-        if (Math.abs(newCurrent - prev) > 0.01) {
-          stmts.updateBankroll.run(newCurrent, bk.sport);
-          resynced.push({ sport: bk.sport, prev: prev, next: newCurrent });
+      for (const rp of resyncPlan) {
+        if (Math.abs(rp.newCurrent - rp.prevCurrent) > 0.01) {
+          stmts.updateBankroll.run(rp.newCurrent, rp.sport);
+          resynced.push({ sport: rp.sport, prev: rp.prevCurrent, next: rp.newCurrent, initial: rp.initial });
         }
       }
-      sendJson(res, { ok: true, unit_value: uv, total_tips: tips.length, updated: updates.length, resynced });
+      sendJson(res, { ok: true, model: 'per_sport_tier_unit', updated: updates.length, resynced });
     } catch (e) { sendJson(res, { error: e.message }, 500); }
     return;
   }
@@ -11403,12 +11408,13 @@ const server = http.createServer(async (req, res) => {
           }
         }
       }
-      // unitValue vem da baseline global (1u = 1% de R$900 = R$9), não per-sport,
-      // pra dashboard mostrar units consistentes cross-sport.
+      // Per-sport tier unit (Abr/2026-III): 1u varia com tier da banca do sport.
+      const { getSportUnitValue } = require('./lib/sport-unit');
+      const sportUnitValue = getSportUnitValue(currentBanca, bk.initial_banca || 100);
       bancaInfo = {
         initialBanca: bk.initial_banca,
         currentBanca: currentBanca,
-        unitValue: _bl.unit_value,
+        unitValue: sportUnitValue,
         profitReais: accumulatedProfit,
         growthPct: bk.initial_banca > 0 ? parseFloat((accumulatedProfit / bk.initial_banca * 100).toFixed(2)) : null,
         updatedAt: null,
@@ -11421,17 +11427,19 @@ const server = http.createServer(async (req, res) => {
       db.prepare('INSERT OR IGNORE INTO bankroll (sport, initial_banca, current_banca) VALUES (?, 100.0, 100.0)').run(sport);
       const newBk = stmts.getBankroll.get(sport);
       if (newBk) {
-        const _bl = getBaseline();
+        const { getSportUnitValue } = require('./lib/sport-unit');
+        const sportUnitValue = getSportUnitValue(newBk.current_banca, newBk.initial_banca || 100);
+        const _bl2 = getBaseline();
         bancaInfo = {
           initialBanca: newBk.initial_banca,
           currentBanca: newBk.current_banca,
-          unitValue: _bl.unit_value,
+          unitValue: sportUnitValue,
           profitReais: 0,
           growthPct: 0,
           updatedAt: newBk.updated_at,
-          baselineDate: _bl.date,
-          baselineAmount: _bl.amount,
-          unitPct: _bl.unit_pct,
+          baselineDate: _bl2.date,
+          baselineAmount: _bl2.amount,
+          unitPct: _bl2.unit_pct,
         };
       }
     }
