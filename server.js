@@ -10720,7 +10720,10 @@ const server = http.createServer(async (req, res) => {
       // Recalcula current_banca inline a partir de SUM(profit_reais WHERE archived=0)
       // para garantir consistência com tips visíveis no dashboard (bankroll pode
       // ficar stale se /roi não foi chamado para aquele sport desde o archive).
-      const bankrollsRaw = db.prepare(`SELECT sport, initial_banca, current_banca FROM bankroll`).all();
+      // Exclui 'esports' bucket legado pós-split (initial=0 normalmente; evita duplo-contar
+      // com lol/dota2). Tips com sport='esports' ainda acumulam no profitBySport map,
+      // mas não vão pra bankroll display/totais.
+      const bankrollsRaw = db.prepare(`SELECT sport, initial_banca, current_banca FROM bankroll WHERE sport != 'esports'`).all();
       // Recomputa profit em unit-native usando baseline.unit_value (fonte única).
       const _bl = getBaseline();
       const allSettled = db.prepare(`

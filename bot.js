@@ -2870,10 +2870,13 @@ async function runBankrollGuardianCycle() {
     }
   }
 
-  // Restore auto-shadow se DD recuperou (<10%)
+  // Restore auto-shadow se DD recuperou (<12% — antes 10%, match thresholds relaxados).
+  // Pra bankroll pequena (<R$100) threshold é mais alto já na própria lógica do guardian;
+  // restore usa valor único aqui, suficiente como guardrail.
+  const restoreThreshold = parseFloat(process.env.BANKROLL_RESTORE_DD_PCT || '12') || 12;
   for (const sport of _bankrollAutoShadowed) {
     const sItem = result.sports.find(s => s.sport === sport);
-    if (sItem && sItem.drawdown_pct < 10 && SPORTS[sport]?.shadowMode) {
+    if (sItem && sItem.drawdown_pct < restoreThreshold && SPORTS[sport]?.shadowMode) {
       SPORTS[sport].shadowMode = false;
       _bankrollAutoShadowed.delete(sport);
       log('INFO', 'BANKROLL-GUARDIAN', `[RESTORE] ${sport}: DD recuperou pra ${sItem.drawdown_pct.toFixed(1)}% — DMs reativados`);
@@ -2900,7 +2903,7 @@ async function runBankrollGuardianCycle() {
     `• Atual:   R$${current} (${profitStr} | ${growthStr})\n` +
     `• Pico:    R$${peak}\n` +
     `• DD atual: ${result.overall.overall_drawdown_pct.toFixed(2)}%\n\n` +
-    `_Cooldown 24h por sport. Auto-restore quando DD<10%._`;
+    `_Cooldown 24h por sport. Auto-restore quando DD<${restoreThreshold}%._`;
   for (const adminId of ADMIN_IDS) await sendDM(tokenForAlert, adminId, msg).catch(() => {});
 }
 
