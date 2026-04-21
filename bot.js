@@ -3141,20 +3141,50 @@ function getKellyFraction(sport, conf) {
 
 // EV threshold default per sport — sports com lift baixo exigem edge maior pra compensar
 // ruído do modelo. Override via env <SPORT>_EV_THRESHOLD (já existente em alguns sports).
-// Formula aproximada: EV_min = 5 + (1 - lift_vs_baseline) × 10
-//   LoL/CS2 (lift ≥20%): 5%
-//   Tennis/Football: 5-7%
-//   MMA/Dota2/Valorant (lift ≤10%): 7%
-//   Darts/Snooker (lift ≤3%): 10%
-const _EV_THRESHOLD_DEFAULTS = {
+// Formula: EV_min = base_per_sport + max(0, ECE - 0.03) × 100
+//   Base reflete lift vs baseline Elo (LoL/CS2 ≥20% → 5%, marginal → 7%, ruído → 10%)
+//   ECE penalty: modelos miscalibrados (>3%) ganham penalidade proporcional
+const _EV_THRESHOLD_BASE = {
   lol: 5, cs: 5, football: 5,
   tennis: 7, mma: 7, dota2: 7, valorant: 7,
   tabletennis: 7,
   darts: 10, snooker: 10,
 };
+
+// Cache de ECE por sport lido de lib/<sport>-weights.json no startup.
+// Se model file não existe, ECE fica null (retorna só base).
+const _MODEL_ECE_CACHE = {};
+function _loadModelEce() {
+  const fs = require('fs');
+  const path = require('path');
+  const games = ['lol', 'cs2', 'dota2', 'valorant', 'tennis', 'mma', 'darts', 'snooker'];
+  for (const g of games) {
+    try {
+      const wp = path.join(__dirname, 'lib', `${g}-weights.json`);
+      if (!fs.existsSync(wp)) continue;
+      const data = JSON.parse(fs.readFileSync(wp, 'utf8'));
+      const chosen = data.metrics?.chosen || 'raw';
+      const m = chosen === 'calibrated' && data.metrics?.ensemble_calibrated_test
+        ? data.metrics.ensemble_calibrated_test
+        : data.metrics?.ensemble_raw_test || data.metrics?.logistic_test;
+      const ece = m?.ece;
+      if (Number.isFinite(ece)) {
+        // Map game name → sport key
+        const sportKey = g === 'cs2' ? 'cs' : g;
+        _MODEL_ECE_CACHE[sportKey] = ece;
+      }
+    } catch (_) {}
+  }
+}
+_loadModelEce();
+
 function getEvThreshold(sport) {
   const sp = String(sport || '').toLowerCase();
-  return _EV_THRESHOLD_DEFAULTS[sp] ?? 5;
+  const base = _EV_THRESHOLD_BASE[sp] ?? 5;
+  const ece = _MODEL_ECE_CACHE[sp];
+  // Penalty só se ECE > 0.03 (3%) — modelos bem calibrados não penalizados
+  const ecePenalty = Number.isFinite(ece) && ece > 0.03 ? (ece - 0.03) * 100 : 0;
+  return +(base + ecePenalty).toFixed(1);
 }
 
 async function runBankrollGuardianCycle() {
