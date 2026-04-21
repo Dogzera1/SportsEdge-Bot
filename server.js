@@ -11486,9 +11486,11 @@ const server = http.createServer(async (req, res) => {
       }
 
       // Profit da banca: unit-native. Tips union cobrem legado esports + novos lol/dota2.
+      // SELECT inclui stake_reais/profit_reais pra tipProfitReais preferir stored (tier)
+      // em vez de recompute com unit global (R$10 stale pós-migration 044).
       const _bl = getBaseline();
       const settledTips = db.prepare(
-        `SELECT t.stake, t.odds, t.result FROM tips t
+        `SELECT t.stake, t.odds, t.result, t.stake_reais, t.profit_reais FROM tips t
          WHERE t.sport IN ${sportInSql} AND ${dedupe}
          AND t.result IN ('win','loss')
          ${gameSql}`
