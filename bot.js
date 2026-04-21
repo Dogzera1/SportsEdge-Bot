@@ -839,6 +839,7 @@ const ADMIN_POST_PATHS = new Set([
   '/admin/league-block',
   '/admin/league-unblock',
   '/admin/delete-empty-bankroll',
+  '/archive-cross-bucket-duplicates',
   '/threshold-optimizer-apply',
   '/admin/dynamic-threshold',
   '/admin/seed-football-secondary',
@@ -6180,6 +6181,25 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
       await send(token, chatId, txt);
     } catch (e) { await send(token, chatId, `❌ ${e.message}`); }
 
+  } else if (cmd === '/dedup-tips' || cmd === '/archive-dupes') {
+    if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
+    try {
+      const apply = parts.slice(1).some(p => p.toLowerCase() === 'confirm' || p.toLowerCase() === 'apply');
+      const r = await serverPost(`/archive-cross-bucket-duplicates${apply ? '?apply=1' : ''}`, {});
+      if (!r?.ok) { await send(token, chatId, `❌ ${r?.error || 'falha'}`); return; }
+      let txt = `🧹 *DEDUP TIPS — ${apply ? 'APLICADO' : 'DRY-RUN'}*\n\n`;
+      txt += `Grupos duplicados: *${r.duplicate_groups}*\n`;
+      txt += `${apply ? 'Tips arquivadas' : 'Seriam arquivadas'}: *${r.would_archive ?? r.archived ?? 0}*\n`;
+      if (!apply && r.examples?.length) {
+        txt += `\n*Exemplos (primeiros 10):*\n`;
+        for (const ex of r.examples) {
+          txt += `  • id=${ex.id} match=${ex.match_id} sports=[${ex.sports}]\n`;
+        }
+        txt += `\n_Pra aplicar: \`/dedup-tips confirm\`_`;
+      }
+      await send(token, chatId, txt);
+    } catch (e) { await send(token, chatId, `❌ ${e.message}`); }
+
   } else if (cmd === '/split-bankroll') {
     if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
     try {
@@ -7384,6 +7404,7 @@ async function poll(token, sport) {
                      text.startsWith('/shadow-summary') || text.startsWith('/shadow-report') ||
                      text.startsWith('/shadow-all') || text.startsWith('/mma-diag') ||
                      text.startsWith('/mma-diagnose') || text.startsWith('/split-bankroll') ||
+                     text.startsWith('/dedup-tips') || text.startsWith('/archive-dupes') ||
                      text.startsWith('/tip ') || text.startsWith('/help') || text.startsWith('/start') ||
                      text.startsWith('/alerts')) {
             // Passa `sport` da poll (qual bot recebeu) para evitar default 'esports'

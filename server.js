@@ -6577,6 +6577,44 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // Archive de tips regulares duplicadas cross-bucket (esports↔lol/dota2 após split Abr/2026).
+  // Mantém tip com MAX(id) por match_id (a mais nova), archived=1 nas demais.
+  // POST /archive-cross-bucket-duplicates?apply=1   (sem apply = dry-run)
+  if (p === '/archive-cross-bucket-duplicates' && req.method === 'POST') {
+    const apply = parsed.query.apply === '1' || parsed.query.apply === 'true';
+    try {
+      // Acha match_ids que tem >1 tip não-arquivada em qualquer um de {esports, lol, dota2}.
+      const dupes = db.prepare(`
+        SELECT match_id, GROUP_CONCAT(id) AS ids, GROUP_CONCAT(sport) AS sports, COUNT(*) AS n
+        FROM tips
+        WHERE sport IN ('esports','lol','dota2')
+          AND (archived IS NULL OR archived = 0)
+          AND match_id IS NOT NULL AND TRIM(match_id) != ''
+        GROUP BY match_id
+        HAVING n > 1
+      `).all();
+      const toArchive = [];
+      for (const d of dupes) {
+        const ids = String(d.ids).split(',').map(Number).sort((a, b) => a - b);
+        // Mantém MAX(id); arquiva os demais
+        const keep = ids[ids.length - 1];
+        for (const id of ids) {
+          if (id !== keep) toArchive.push({ id, match_id: d.match_id, sports: d.sports });
+        }
+      }
+      if (!apply) {
+        sendJson(res, { ok: true, dry_run: true, duplicate_groups: dupes.length, would_archive: toArchive.length, examples: toArchive.slice(0, 10) });
+        return;
+      }
+      let archived = 0;
+      const stmt = db.prepare(`UPDATE tips SET archived = 1 WHERE id = ?`);
+      const tx = db.transaction(list => { for (const x of list) { const r = stmt.run(x.id); archived += r.changes; } });
+      tx(toArchive);
+      sendJson(res, { ok: true, duplicate_groups: dupes.length, archived });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
   // Dedup market_tips_shadow: voida duplicatas por (sport, team1, team2, market, side)
   // mantendo LINHA LIMITE (maior p_model). Ignora match_key pra lidar com cycles
   // que geraram match_keys diferentes por mudança de time/date.
@@ -7917,9 +7955,21 @@ const server = http.createServer(async (req, res) => {
             return;
           }
         }
-        // Evitar tip duplicada para o mesmo match_id + sport
-        const existing = stmts.tipExistsByMatch.get(String(matchId), sport);
-        if (existing) { sendJson(res, { ok: true, skipped: true, reason: 'duplicate' }); return; }
+        // Evitar tip duplicada para o mesmo match_id + sport.
+        // Pós-split LoL/Dota (Abr/2026): bloqueia também quando match_id existe em
+        // bucket irmão (esports↔lol, esports↔dota2) — evita mesma tip gravada duas vezes
+        // durante migração quando bot.js passou a usar sport='lol'/'dota2' direto.
+        const { sportSet: dupeSportSet } = (typeof resolveSportSet === 'function')
+          ? resolveSportSet(sport, null) : { sportSet: [sport] };
+        const dupePlaceholders = dupeSportSet.map(() => '?').join(',');
+        const existingCross = db.prepare(
+          `SELECT id, sport FROM tips WHERE match_id = ? AND sport IN (${dupePlaceholders})
+           AND (archived IS NULL OR archived = 0) LIMIT 1`
+        ).get(String(matchId), ...dupeSportSet);
+        if (existingCross) {
+          sendJson(res, { ok: true, skipped: true, reason: 'duplicate', existing_sport: existingCross.sport });
+          return;
+        }
 
         // Dedup por pair: mesmos times + sport + mesmo market nas últimas 24h.
         // Tipo DEFAULT: bloqueia QUALQUER tip no par (anti-hedge). Tennis/MMA/esports são
@@ -7936,15 +7986,19 @@ const server = http.createServer(async (req, res) => {
             ? `AND REPLACE(REPLACE(lower(tip_participant),' ',''),'-','') = ?`
             : ``;
           const pickParam = samePickOnly ? [pickN_] : [];
+          // Dedup cross-bucket também: sport=lol bloqueia pair já existente em esports legado.
+          const pairDupeSet = (typeof resolveSportSet === 'function')
+            ? resolveSportSet(sport, null).sportSet : [sport];
+          const pairDupePh = pairDupeSet.map(() => '?').join(',');
           const recentDupe = db.prepare(
-            `SELECT id, tip_participant FROM tips WHERE sport = ? AND result IS NULL
+            `SELECT id, tip_participant FROM tips WHERE sport IN (${pairDupePh}) AND result IS NULL
              AND sent_at > datetime('now', '-24 hours')
              AND upper(COALESCE(market_type, 'ML')) = ?
              ${pickClause}
              AND ((REPLACE(REPLACE(lower(participant1),' ',''),'-','') LIKE ? AND REPLACE(REPLACE(lower(participant2),' ',''),'-','') LIKE ?)
                OR (REPLACE(REPLACE(lower(participant1),' ',''),'-','') LIKE ? AND REPLACE(REPLACE(lower(participant2),' ',''),'-','') LIKE ?))
              LIMIT 1`
-          ).get(sport, marketN_, ...pickParam, `%${p1n_}%`, `%${p2n_}%`, `%${p2n_}%`, `%${p1n_}%`);
+          ).get(...pairDupeSet, marketN_, ...pickParam, `%${p1n_}%`, `%${p2n_}%`, `%${p2n_}%`, `%${p1n_}%`);
           if (recentDupe) {
             const reason = samePickOnly ? 'duplicate_pair' : 'hedge_blocked';
             log('INFO', 'DEDUP', `${sport} ${p1} vs ${p2}: ${reason} (existing pick=${recentDupe.tip_participant}, new=${tipParticipant})`);
@@ -10309,6 +10363,7 @@ const server = http.createServer(async (req, res) => {
       const sportInSql = `(${sportSet.map(() => '?').join(',')})`;
       const gameSql = sqlGameFilter('', sport, effectiveGame).replace(/\./g, ''); // prefix vazio = sem alias
       const _bl = getBaseline();
+      // Dedup por match_id atravessando sports do set (evita dupe esports↔lol/dota2).
       const tipsAll = db.prepare(`
         SELECT stake, odds, result, settled_at, match_id, event_name
         FROM tips
@@ -10316,8 +10371,14 @@ const server = http.createServer(async (req, res) => {
           AND result IN ('win','loss')
           AND (archived IS NULL OR archived = 0)
           AND COALESCE(is_shadow, 0) = 0
+          AND id IN (
+            SELECT MAX(tdx.id) FROM tips tdx
+            WHERE tdx.sport IN ${sportInSql}
+              AND (tdx.archived IS NULL OR tdx.archived = 0)
+            GROUP BY COALESCE(NULLIF(TRIM(tdx.match_id), ''), 'id:' || CAST(tdx.id AS TEXT))
+          )
         ORDER BY settled_at ASC
-      `).all(...sportSet);
+      `).all(...sportSet, ...sportSet);
       const windowMs = days * 24 * 3600 * 1000;
       const cutoff = Date.now() - windowMs;
       const dayMap = {};
@@ -10432,9 +10493,11 @@ const server = http.createServer(async (req, res) => {
     // Shadow tips (is_shadow=1) escondidas por default; ?include_shadow=1 override.
     const includeShadow = String(parsed.query.include_shadow || '').trim() === '1';
     // Resolve union cobrindo legado 'esports' + novos 'lol'/'dota2' (pós-split Abr/2026).
+    // Dedup agrupa só por match_id (sem sport) pra evitar duplicata quando mesma tip
+    // foi gravada antes em 'esports' e depois em 'lol'/'dota2' (bot migrou mid-flight).
     const { sportSet, effectiveGame } = resolveSportSet(sport, game);
     const sportInSql = `(${sportSet.map(() => '?').join(',')})`;
-    const dedupSql = `t.id IN (SELECT MAX(tdx.id) FROM tips tdx WHERE tdx.sport IN ${sportInSql} AND (tdx.archived IS NULL OR tdx.archived = 0) GROUP BY tdx.sport, COALESCE(NULLIF(TRIM(tdx.match_id), ''), 'id:' || CAST(tdx.id AS TEXT)))`;
+    const dedupSql = `t.id IN (SELECT MAX(tdx.id) FROM tips tdx WHERE tdx.sport IN ${sportInSql} AND (tdx.archived IS NULL OR tdx.archived = 0) GROUP BY COALESCE(NULLIF(TRIM(tdx.match_id), ''), 'id:' || CAST(tdx.id AS TEXT)))`;
     let query = `
       SELECT t.*
       FROM tips t
@@ -10942,7 +11005,8 @@ const server = http.createServer(async (req, res) => {
     const game  = parsed.query.game || '';
     const { sportSet, effectiveGame } = resolveSportSet(sport, game);
     const sportInSql = `(${sportSet.map(() => '?').join(',')})`;
-    const dedupe = `t.id IN (SELECT MAX(tdx.id) FROM tips tdx WHERE tdx.sport IN ${sportInSql} AND (tdx.archived IS NULL OR tdx.archived = 0) GROUP BY tdx.sport, COALESCE(NULLIF(TRIM(tdx.match_id), ''), 'id:' || CAST(tdx.id AS TEXT)))`;
+    // Dedup por match_id só — sem sport — pra coalesce tips duplicadas entre esports↔lol/dota2.
+    const dedupe = `t.id IN (SELECT MAX(tdx.id) FROM tips tdx WHERE tdx.sport IN ${sportInSql} AND (tdx.archived IS NULL OR tdx.archived = 0) GROUP BY COALESCE(NULLIF(TRIM(tdx.match_id), ''), 'id:' || CAST(tdx.id AS TEXT)))`;
     const gameSql = sqlGameFilter('t', sport, effectiveGame);
     // Win rate / ROI excluem void E push (push = refund, não é WIN nem LOSS).
     // 'pushes' contado separadamente pra UI mostrar totais corretos.
