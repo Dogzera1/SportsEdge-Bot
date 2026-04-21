@@ -6480,8 +6480,9 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // Dedup market_tips_shadow: voida duplicatas por (match_key, market, side)
-  // mantendo LINHA LIMITE (maior p_model = mais conservadora).
+  // Dedup market_tips_shadow: voida duplicatas por (sport, team1, team2, market, side)
+  // mantendo LINHA LIMITE (maior p_model). Ignora match_key pra lidar com cycles
+  // que geraram match_keys diferentes por mudança de time/date.
   // POST /void-market-tips-duplicates?sport=tennis&days=7
   if (p === '/void-market-tips-duplicates' && req.method === 'POST') {
     const sport = parsed.query.sport || null;
@@ -6491,15 +6492,16 @@ const server = http.createServer(async (req, res) => {
       const params = [];
       if (sport) { conds.push('sport = ?'); params.push(sport); }
       const rows = db.prepare(`
-        SELECT id, sport, match_key, market, side, p_model, ev_pct
+        SELECT id, sport, team1, team2, match_key, market, side, p_model, ev_pct
         FROM market_tips_shadow
         WHERE ${conds.join(' AND ')}
         ORDER BY p_model DESC
       `).all(...params);
+      const normTeam = s => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
       const keep = new Set();
       const voidIds = [];
       for (const r of rows) {
-        const key = `${r.sport}|${r.match_key}|${r.market}|${r.side}`;
+        const key = `${r.sport}|${normTeam(r.team1)}|${normTeam(r.team2)}|${r.market}|${r.side}`;
         if (!keep.has(key)) { keep.add(key); continue; }
         voidIds.push(r.id);
       }
