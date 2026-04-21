@@ -285,7 +285,13 @@
       "Bash(git commit -m 'fix\\(9\\): bootstrap delta permite primeira auto-apply sair do zero *)",
       "Bash(git commit -m 'fix\\(9\\): melhorar score e filtro de candidatos anti-overfit *)",
       "Bash(git commit *)",
-      "Bash(awk -F: '$1 > 9800 && $1 < 10000')"
+      "Bash(awk -F: '$1 > 9800 && $1 < 10000')",
+      "Bash(where sqlite3.exe)",
+      "Bash(where sqlite.exe)",
+      "Read(//c/Program Files/**)",
+      "Bash(awk -F',' 'NR > 1 && $\\(NF-1\\) == 1 { c++ } END { print c \" rows with has_dota_team_stats=1\" }' /tmp/dota2_test.csv)",
+      "Bash(awk -F, 'NR == 2 { for \\(i=1; i<=NF; i++\\) printf \"%d: %s\\\\n\", i, $i }' /tmp/dota2_test.csv)",
+      "Bash(git restore *)"
     ]
   }
 }
