@@ -710,6 +710,43 @@ const migrations = [
       }
     },
   },
+  {
+    id: '037_revert_lol_dota_bankroll_bump',
+    up(db) {
+      // Migration 034 bumpou lol/dota2 initial pra R$150 (+R$100 delta) e somou R$100
+      // em current_banca — isso mascarava o prejuízo real. Dashboard mostrava
+      // banca crescendo quando performance dos bots foi negativa.
+      //
+      // Revert: volta lol/dota2 pra initial R$50 (post-033, metade de esports legado).
+      // Current_banca recomputa via initial + SUM(profit_reclassificado) — reflete
+      // resultado verdadeiro (pode ser negativo se perdas excedem allocation original).
+      //
+      // Trade-off: lol/dota2 voltam pra "banca pequena" no guardian (thresholds frouxos).
+      // Se user quiser mais buffer, deposita via /split-bankroll 300 confirm.
+      const allSettled = db.prepare(`
+        SELECT sport, profit_reais, match_id, event_name FROM tips
+        WHERE (archived IS NULL OR archived = 0) AND COALESCE(is_shadow, 0) = 0
+          AND result IN ('win','loss','push','void')
+      `).all();
+      const profitBySport = {};
+      for (const t of allSettled) {
+        const p = Number(t.profit_reais || 0);
+        let sp = t.sport;
+        if (sp === 'esports') {
+          const mid = String(t.match_id || '');
+          const ev = String(t.event_name || '').toLowerCase();
+          sp = (mid.startsWith('dota2_') || ev.includes('dota')) ? 'dota2' : 'lol';
+        }
+        profitBySport[sp] = (profitBySport[sp] || 0) + p;
+      }
+      const REVERTED_INITIAL = 50;
+      for (const sport of ['lol', 'dota2']) {
+        const profit = profitBySport[sport] || 0;
+        const newCurrent = +(REVERTED_INITIAL + profit).toFixed(2);
+        db.prepare("UPDATE bankroll SET initial_banca=?, current_banca=?, updated_at=datetime('now') WHERE sport=?").run(REVERTED_INITIAL, newCurrent, sport);
+      }
+    },
+  },
 ];
 
 function applyMigrations(db) {
