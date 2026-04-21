@@ -9262,6 +9262,131 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // Shadow Summary: breakdown por sport de shadow tips (tips is_shadow=1) + market_tips_shadow.
+  // Retorna ROI/profit/CLV/hit rate por sport em janela configurável.
+  // GET /shadow-summary?days=30
+  if (p === '/shadow-summary') {
+    try {
+      const daysRaw = parseInt(parsed.query.days);
+      const days = Number.isFinite(daysRaw) ? Math.max(1, Math.min(365, daysRaw)) : 30;
+
+      // Regular shadow (tabela tips, is_shadow=1). Stake é texto ("1u", "2u")—parse no JS.
+      const regularRows = db.prepare(`
+        SELECT sport, stake, odds, result, clv_odds, open_odds
+        FROM tips
+        WHERE is_shadow = 1
+          AND sent_at >= datetime('now', '-' || ? || ' days')
+      `).all(days);
+
+      const regularBySport = {};
+      for (const r of regularRows) {
+        const sp = r.sport || 'unknown';
+        if (!regularBySport[sp]) {
+          regularBySport[sp] = { sport: sp, n: 0, wins: 0, losses: 0, voids: 0, pending: 0,
+                                  profit_u: 0, stake_u: 0, clv_sum: 0, clv_n: 0 };
+        }
+        const s = regularBySport[sp];
+        s.n++;
+        const u = parseFloat(String(r.stake || '0').replace(/u/i, '')) || 0;
+        const odd = parseFloat(r.odds) || 0;
+        if (r.result === 'win') { s.wins++; s.profit_u += (odd - 1) * u; s.stake_u += u; }
+        else if (r.result === 'loss') { s.losses++; s.profit_u -= u; s.stake_u += u; }
+        else if (r.result === 'void') { s.voids++; }
+        else { s.pending++; }
+        if (r.clv_odds && r.open_odds && r.clv_odds > 0 && r.open_odds > 0) {
+          s.clv_sum += (r.open_odds / r.clv_odds - 1) * 100;
+          s.clv_n++;
+        }
+      }
+      const regular = Object.values(regularBySport).map(s => ({
+        sport: s.sport,
+        n: s.n,
+        settled: s.wins + s.losses,
+        wins: s.wins, losses: s.losses, voids: s.voids, pending: s.pending,
+        hit_rate: (s.wins + s.losses) > 0 ? +(s.wins / (s.wins + s.losses) * 100).toFixed(1) : null,
+        profit_u: +s.profit_u.toFixed(2),
+        stake_u: +s.stake_u.toFixed(2),
+        roi_pct: s.stake_u > 0 ? +(s.profit_u / s.stake_u * 100).toFixed(1) : null,
+        avg_clv: s.clv_n > 0 ? +(s.clv_sum / s.clv_n).toFixed(2) : null,
+        clv_n: s.clv_n,
+      })).sort((a, b) => b.n - a.n);
+
+      // Market tips shadow — já tem profit_units/stake_units/clv_pct nos campos.
+      const marketRows = db.prepare(`
+        SELECT sport,
+          COUNT(*) AS n,
+          SUM(CASE WHEN result IN ('win','loss') THEN 1 ELSE 0 END) AS settled,
+          SUM(CASE WHEN result = 'win' THEN 1 ELSE 0 END) AS wins,
+          SUM(CASE WHEN result = 'loss' THEN 1 ELSE 0 END) AS losses,
+          SUM(CASE WHEN result = 'void' THEN 1 ELSE 0 END) AS voids,
+          SUM(CASE WHEN result IS NULL OR result = '' OR result = 'pending' THEN 1 ELSE 0 END) AS pending,
+          SUM(COALESCE(profit_units, 0)) AS profit_u,
+          SUM(CASE WHEN result IN ('win','loss') THEN COALESCE(stake_units, 1) ELSE 0 END) AS stake_u,
+          AVG(clv_pct) AS avg_clv,
+          SUM(CASE WHEN clv_pct IS NOT NULL THEN 1 ELSE 0 END) AS clv_n
+        FROM market_tips_shadow
+        WHERE created_at >= datetime('now', '-' || ? || ' days')
+        GROUP BY sport
+        ORDER BY n DESC
+      `).all(days);
+
+      const market = marketRows.map(r => ({
+        sport: r.sport,
+        n: r.n,
+        settled: r.settled,
+        wins: r.wins, losses: r.losses, voids: r.voids, pending: r.pending,
+        hit_rate: r.settled > 0 ? +(r.wins / r.settled * 100).toFixed(1) : null,
+        profit_u: +(r.profit_u || 0).toFixed(2),
+        stake_u: +(r.stake_u || 0).toFixed(2),
+        roi_pct: r.stake_u > 0 ? +((r.profit_u / r.stake_u) * 100).toFixed(1) : null,
+        avg_clv: r.clv_n > 0 ? +(r.avg_clv || 0).toFixed(2) : null,
+        clv_n: r.clv_n,
+      }));
+
+      sendJson(res, { ok: true, days, regular, market });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
+  // AI Stats: breakdown de chamadas DeepSeek por sport no mês (requer tracking per-sport em /claude proxy).
+  // GET /ai-stats?month=YYYY-MM (default: mês atual)
+  if (p === '/ai-stats') {
+    try {
+      const monthParam = parsed.query.month || new Date().toISOString().slice(0, 7);
+      const SPORTS_LIST = ['esports','dota','cs','valorant','tennis','football','mma','tabletennis','darts','snooker'];
+      const totalRow = db.prepare(`SELECT count FROM api_usage WHERE provider = 'deepseek' AND month = ?`).get(monthParam);
+      const totalCalls = totalRow?.count || 0;
+      const promptRow = db.prepare(`SELECT count FROM api_usage WHERE provider = 'deepseek_prompt_tokens' AND month = ?`).get(monthParam);
+      const complRow  = db.prepare(`SELECT count FROM api_usage WHERE provider = 'deepseek_completion_tokens' AND month = ?`).get(monthParam);
+      const promptTokens = promptRow?.count || 0;
+      const complTokens  = complRow?.count || 0;
+      const totalCostUSD = (promptTokens / 1_000_000 * 0.14) + (complTokens / 1_000_000 * 0.28);
+      const perSport = {};
+      let sumTracked = 0;
+      for (const s of SPORTS_LIST) {
+        const row = db.prepare(`SELECT count FROM api_usage WHERE provider = ? AND month = ?`).get(`deepseek_${s}`, monthParam);
+        const pRow = db.prepare(`SELECT count FROM api_usage WHERE provider = ? AND month = ?`).get(`deepseek_prompt_tokens_${s}`, monthParam);
+        const cRow = db.prepare(`SELECT count FROM api_usage WHERE provider = ? AND month = ?`).get(`deepseek_completion_tokens_${s}`, monthParam);
+        const calls = row?.count || 0;
+        const ptok = pRow?.count || 0;
+        const ctok = cRow?.count || 0;
+        const costUSD = (ptok / 1_000_000 * 0.14) + (ctok / 1_000_000 * 0.28);
+        sumTracked += calls;
+        perSport[s] = { calls, prompt_tokens: ptok, completion_tokens: ctok, cost_usd: parseFloat(costUSD.toFixed(4)) };
+      }
+      const untracked = Math.max(0, totalCalls - sumTracked);
+      sendJson(res, {
+        ok: true,
+        month: monthParam,
+        total: { calls: totalCalls, prompt_tokens: promptTokens, completion_tokens: complTokens, cost_usd: parseFloat(totalCostUSD.toFixed(4)) },
+        per_sport: perSport,
+        untracked_calls: untracked,
+        note: untracked > 0 ? 'calls sem sport hint (antes do tracking per-sport ou /aiSecondOpinion sem contexto)' : 'all calls tagged',
+      });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
   // ROI Matrix: agregação por (sport, phase, league_tier) — base pra decisão "cortar ou manter sport".
   // GET /roi-matrix?days=30
   if (p === '/roi-matrix') {
@@ -12640,6 +12765,11 @@ const server = http.createServer(async (req, res) => {
         try {
           const month = new Date().toISOString().slice(0, 7);
           stmts.incrApiUsage.run('deepseek', month);
+          // Per-sport tracking (bot envia payload.sport no /claude body)
+          const sportRaw = String(payload.sport || '').toLowerCase().replace(/[^a-z0-9_]/g, '');
+          if (sportRaw) {
+            stmts.incrApiUsage.run(`deepseek_${sportRaw}`, month);
+          }
           // Tokens (DeepSeek retorna usage.prompt_tokens + completion_tokens quando disponível)
           const ptok = ds.usage?.prompt_tokens || 0;
           const ctok = ds.usage?.completion_tokens || 0;
@@ -12648,6 +12778,10 @@ const server = http.createServer(async (req, res) => {
             // Acumula tokens via UPDATE direto (api_usage só guarda count, hack: usar provider compositekey)
             db.prepare(`INSERT INTO api_usage (provider, month, count) VALUES (?, ?, ?) ON CONFLICT(provider, month) DO UPDATE SET count = count + excluded.count`).run('deepseek_prompt_tokens', month, ptok);
             db.prepare(`INSERT INTO api_usage (provider, month, count) VALUES (?, ?, ?) ON CONFLICT(provider, month) DO UPDATE SET count = count + excluded.count`).run('deepseek_completion_tokens', month, ctok);
+            if (sportRaw) {
+              db.prepare(`INSERT INTO api_usage (provider, month, count) VALUES (?, ?, ?) ON CONFLICT(provider, month) DO UPDATE SET count = count + excluded.count`).run(`deepseek_prompt_tokens_${sportRaw}`, month, ptok);
+              db.prepare(`INSERT INTO api_usage (provider, month, count) VALUES (?, ?, ?) ON CONFLICT(provider, month) DO UPDATE SET count = count + excluded.count`).run(`deepseek_completion_tokens_${sportRaw}`, month, ctok);
+            }
           }
         } catch (_) {}
         // Normaliza para o formato Claude (content[].text) para compatibilidade com bot.js

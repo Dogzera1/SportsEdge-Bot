@@ -394,7 +394,7 @@ Máximo 150 palavras.`;
 
   let iaResp = '';
   try {
-    const iaRaw = await serverPost('/claude', { messages: [{ role: 'user', content: prompt }], max_tokens: 350 }).catch(() => null);
+    const iaRaw = await serverPost('/claude', { messages: [{ role: 'user', content: prompt }], max_tokens: 350, sport }).catch(() => null);
     iaResp = iaRaw?.content?.[0]?.text || iaRaw?.result || iaRaw?.text || '';
   } catch (e) {
     log('WARN', tag, `IA erro: ${e.message}`);
@@ -4549,7 +4549,8 @@ async function autoAnalyzeMatch(token, match) {
     const resp = await serverPost('/claude', {
       model: 'deepseek-chat',
       max_tokens: 600,
-      messages: [{ role: 'user', content: prompt }]
+      messages: [{ role: 'user', content: prompt }],
+      sport: 'esports'
     });
     if (resp?.__status === 429 || String(resp?.error || '').toLowerCase().includes('rate')) {
       const ttl = Math.max(60 * 1000, parseInt(process.env.DEEPSEEK_BACKOFF_MS || '180000', 10) || 180000);
@@ -6169,6 +6170,70 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
       await send(token, chatId, txt);
     } catch (e) { await send(token, chatId, `❌ ${e.message}`); }
 
+  } else if (cmd === '/shadow-summary' || cmd === '/shadow-report' || cmd === '/shadow-all') {
+    if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
+    try {
+      const daysArg = Math.max(1, Math.min(365, parseInt(parts[1] || '30', 10) || 30));
+      const r = await serverGet(`/shadow-summary?days=${daysArg}`);
+      if (!r?.ok) { await send(token, chatId, `❌ ${r?.error || 'falha /shadow-summary'}`); return; }
+
+      const fmt = (v, suf = '') => v == null ? '?' : `${v >= 0 ? '+' : ''}${v}${suf}`;
+      const roiEmoji = (roi) => roi == null ? '⚪' : roi >= 5 ? '✅' : roi <= -5 ? '❌' : '⚪';
+
+      let txt = `📊 *SHADOW SUMMARY — ${r.days}d*\n`;
+      txt += `\n🕶️ *TIPS SHADOW (is_shadow=1)*\n`;
+      if (!r.regular.length) {
+        txt += `_Nenhuma tip em janela._\n`;
+      } else {
+        for (const s of r.regular) {
+          txt += `${roiEmoji(s.roi_pct)} *${s.sport}* n=${s.n} (W${s.wins}/L${s.losses}/V${s.voids}/P${s.pending})\n`;
+          txt += `   Hit=${s.hit_rate ?? '?'}% ROI=${fmt(s.roi_pct, '%')} profit=${fmt(s.profit_u, 'u')} stake=${s.stake_u}u`;
+          if (s.clv_n > 0) txt += ` CLV=${fmt(s.avg_clv, '%')}(n${s.clv_n})`;
+          txt += `\n`;
+        }
+      }
+
+      txt += `\n🧪 *MARKET TIPS SHADOW*\n`;
+      if (!r.market.length) {
+        txt += `_Nenhuma tip em janela._\n`;
+      } else {
+        for (const s of r.market) {
+          txt += `${roiEmoji(s.roi_pct)} *${s.sport}* n=${s.n} (W${s.wins}/L${s.losses}/V${s.voids}/P${s.pending})\n`;
+          txt += `   Hit=${s.hit_rate ?? '?'}% ROI=${fmt(s.roi_pct, '%')} profit=${fmt(s.profit_u, 'u')} stake=${s.stake_u}u`;
+          if (s.clv_n > 0) txt += ` CLV=${fmt(s.avg_clv, '%')}(n${s.clv_n})`;
+          txt += `\n`;
+        }
+      }
+
+      txt += `\n_uso: /shadow-summary [dias] · default 30_`;
+      await send(token, chatId, txt);
+    } catch (e) { await send(token, chatId, `❌ ${e.message}`); }
+
+  } else if (cmd === '/ai-stats' || cmd === '/ai') {
+    if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
+    try {
+      const monthArg = parts[1] && /^\d{4}-\d{2}$/.test(parts[1]) ? parts[1] : new Date().toISOString().slice(0, 7);
+      const r = await serverGet(`/ai-stats?month=${encodeURIComponent(monthArg)}`);
+      if (!r?.ok) { await send(token, chatId, `❌ ${r?.error || 'falha /ai-stats'}`); return; }
+      const t = r.total || {};
+      let txt = `🤖 *DeepSeek ${r.month}*\n`;
+      txt += `Total: ${t.calls} calls | ${(t.prompt_tokens/1000).toFixed(1)}k in + ${(t.completion_tokens/1000).toFixed(1)}k out | $${(t.cost_usd||0).toFixed(3)}\n\n`;
+      const entries = Object.entries(r.per_sport || {})
+        .map(([s, v]) => ({ sport: s, ...v }))
+        .sort((a, b) => (b.calls || 0) - (a.calls || 0));
+      for (const e of entries) {
+        if (!e.calls) continue;
+        const pct = t.calls > 0 ? ((e.calls / t.calls) * 100).toFixed(0) : '0';
+        txt += `*${e.sport}*: ${e.calls} (${pct}%) | $${(e.cost_usd||0).toFixed(3)}\n`;
+      }
+      if (r.untracked_calls > 0) {
+        const pct = t.calls > 0 ? ((r.untracked_calls / t.calls) * 100).toFixed(0) : '0';
+        txt += `_untracked_: ${r.untracked_calls} (${pct}%)\n`;
+      }
+      txt += `\n_uso: /ai-stats [YYYY-MM]_`;
+      await send(token, chatId, txt);
+    } catch (e) { await send(token, chatId, `❌ ${e.message}`); }
+
   } else if (cmd === '/reset-tips') {
     if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
     try {
@@ -7195,7 +7260,10 @@ async function poll(token, sport) {
                      text.startsWith('/unsettled') || text.startsWith('/settle-debug') ||
                      text.startsWith('/refresh-open') || text.startsWith('/loops') ||
                      text.startsWith('/reanalise') || text.startsWith('/reset-tips') ||
-                     text.startsWith('/reanalyze-void') ||
+                     text.startsWith('/reanalyze-void') || text.startsWith('/ai-stats') ||
+                     text.startsWith('/ai ') || text === '/ai' ||
+                     text.startsWith('/shadow-summary') || text.startsWith('/shadow-report') ||
+                     text.startsWith('/shadow-all') ||
                      text.startsWith('/tip ') || text.startsWith('/help') || text.startsWith('/start') ||
                      text.startsWith('/alerts')) {
             // Passa `sport` da poll (qual bot recebeu) para evitar default 'esports'
@@ -8355,7 +8423,8 @@ Máximo 200 palavras.`;
       try {
         const iaRaw = await serverPost('/claude', {
           messages: [{ role: 'user', content: prompt }],
-          max_tokens: 400
+          max_tokens: 400,
+          sport: 'dota'
         }).catch(() => null);
         // /claude retorna formato Claude-compatível: { content: [{ type:'text', text }] }
         iaResp = iaRaw?.content?.[0]?.text || iaRaw?.result || iaRaw?.text || '';
@@ -9103,7 +9172,8 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
             resp = await serverPost('/claude', {
               model: 'deepseek-chat',
               max_tokens: 450,
-              messages: [{ role: 'user', content: prompt }]
+              messages: [{ role: 'user', content: prompt }],
+              sport: 'mma'
             });
           } catch(e) {
             log('WARN', 'AUTO-MMA', `AI error: ${e.message}`);
@@ -10157,7 +10227,8 @@ Máximo 200 palavras. Raciocínio breve antes da decisão.`;
             resp = await serverPost('/claude', {
               model: 'deepseek-chat',
               max_tokens: 450,
-              messages: [{ role: 'user', content: prompt }]
+              messages: [{ role: 'user', content: prompt }],
+              sport: 'tennis'
             });
           } catch(e) {
             log('WARN', 'AUTO-TENNIS', `AI error: ${e.message}`);
@@ -10870,7 +10941,8 @@ Máximo 200 palavras.`;
             resp = await serverPost('/claude', {
               model: 'deepseek-chat',
               max_tokens: 500,
-              messages: [{ role: 'user', content: prompt }]
+              messages: [{ role: 'user', content: prompt }],
+              sport: 'football'
             });
           } catch(e) {
             log('WARN', 'AUTO-FOOTBALL', `AI error: ${e.message}`);
@@ -11680,7 +11752,7 @@ Máximo 150 palavras.`;
 
           let iaResp = '';
           try {
-            const iaRaw = await serverPost('/claude', { messages: [{ role: 'user', content: prompt }], max_tokens: 350 }).catch(() => null);
+            const iaRaw = await serverPost('/claude', { messages: [{ role: 'user', content: prompt }], max_tokens: 350, sport: 'cs' }).catch(() => null);
             iaResp = iaRaw?.content?.[0]?.text || iaRaw?.result || iaRaw?.text || '';
           } catch (e) {
             log('WARN', 'AUTO-CS', `IA erro: ${e.message}`);
