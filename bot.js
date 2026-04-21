@@ -6264,6 +6264,37 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
       await send(token, chatId, txt);
     } catch (e) { await send(token, chatId, `❌ ${e.message}`); }
 
+  } else if (cmd === '/run-guardian' || cmd === '/guardian') {
+    if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
+    try {
+      await send(token, chatId, '⏳ Executando Bankroll Guardian cycle...');
+      // Reset cooldown 24h pra forçar alerts neste ciclo mesmo se já foi alertado
+      _bankrollAlertedKey.clear();
+      await runBankrollGuardianCycle();
+      // Mostra estado atual após o run
+      const ext = require('./lib/agents-extended');
+      const result = await ext.runBankrollGuardian(`http://127.0.0.1:${process.env.PORT || 8080}`, db);
+      let txt = `🛡️ *GUARDIAN RUN COMPLETO*\n\n`;
+      txt += `Sports avaliados: ${result?.summary?.sports_evaluated || 0}\n`;
+      txt += `Alerts: ${result?.summary?.alerts || 0} (crítico: ${result?.summary?.critical || 0}, warning: ${result?.summary?.warning || 0})\n\n`;
+      if (result?.alerts?.length) {
+        txt += `*Alerts ativos:*\n`;
+        for (const a of result.alerts) {
+          const icon = a.severity === 'critical' ? '🚨' : a.severity === 'warning' ? '⚠️' : 'ℹ️';
+          txt += `${icon} *${a.sport}* ${a.action}: ${a.message}\n`;
+        }
+      } else {
+        txt += `✅ Nenhum alerta — todos sports em estado saudável.\n`;
+      }
+      txt += `\n*Estado shadow atual:*\n`;
+      if (_splitBucketShadow.size) txt += `  Split buckets: ${[..._splitBucketShadow].join(', ')}\n`;
+      const spShadow = Object.keys(SPORTS).filter(s => SPORTS[s]?.shadowMode);
+      if (spShadow.length) txt += `  SPORTS: ${spShadow.join(', ')}\n`;
+      if (!_splitBucketShadow.size && !spShadow.length) txt += `  Nenhum.\n`;
+      const res_ = await send(token, chatId, txt).catch(e => ({ ok: false, error: e.message }));
+      if (res_ && res_.ok === false) await send(token, chatId, txt.replace(/[*_`]/g, ''), { parse_mode: undefined }).catch(() => {});
+    } catch (e) { await send(token, chatId, `❌ ${e.message}`); }
+
   } else if (cmd === '/debug-sport' || cmd === '/debug-tips') {
     if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
     try {
@@ -7683,7 +7714,8 @@ async function poll(token, sport) {
                      text.startsWith('/server-errors') || text.startsWith('/fetch-errors') ||
                      text.startsWith('/migrations') || text.startsWith('/sync-banca') ||
                      text.startsWith('/force-sync') || text.startsWith('/debug-sport') ||
-                     text.startsWith('/debug-tips') ||
+                     text.startsWith('/debug-tips') || text.startsWith('/run-guardian') ||
+                     text.startsWith('/guardian') ||
                      text.startsWith('/tip ') || text.startsWith('/help') || text.startsWith('/start') ||
                      text.startsWith('/alerts')) {
             // Passa `sport` da poll (qual bot recebeu) para evitar default 'esports'
