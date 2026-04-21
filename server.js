@@ -6481,7 +6481,8 @@ const server = http.createServer(async (req, res) => {
   }
 
   // Dedup market_tips_shadow: voida duplicatas por (match_key, market, side)
-  // mantendo só a de maior EV. POST /void-market-tips-duplicates?sport=tennis&days=7
+  // mantendo LINHA LIMITE (maior p_model = mais conservadora).
+  // POST /void-market-tips-duplicates?sport=tennis&days=7
   if (p === '/void-market-tips-duplicates' && req.method === 'POST') {
     const sport = parsed.query.sport || null;
     const days = Math.max(1, Math.min(90, parseInt(parsed.query.days || '7', 10) || 7));
@@ -6490,10 +6491,10 @@ const server = http.createServer(async (req, res) => {
       const params = [];
       if (sport) { conds.push('sport = ?'); params.push(sport); }
       const rows = db.prepare(`
-        SELECT id, sport, match_key, market, side, ev_pct
+        SELECT id, sport, match_key, market, side, p_model, ev_pct
         FROM market_tips_shadow
         WHERE ${conds.join(' AND ')}
-        ORDER BY ev_pct DESC
+        ORDER BY p_model DESC
       `).all(...params);
       const keep = new Set();
       const voidIds = [];
