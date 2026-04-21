@@ -54,7 +54,7 @@ function _brierEvAdjustmentFor(game) {
 
 async function refreshBrierEvAdjustments() {
   if (!/^true$/i.test(String(process.env.BRIER_AUTO_EV_CAP || ''))) return;
-  const sports = ['esports', 'cs', 'valorant', 'tennis', 'mma', 'darts', 'snooker'];
+  const sports = ['esports', 'lol', 'dota2', 'cs', 'valorant', 'tennis', 'mma', 'darts', 'snooker'];
   for (const sport of sports) {
     try {
       const r = await serverGet(`/brier-ev-adjustment?sport=${sport}`);
@@ -1702,9 +1702,9 @@ async function runAutoAnalysis() {
 
           // Kelly adaptado por confiança: ALTA → ¼ Kelly (max 4u) | MÉDIA → ⅙ Kelly (max 3u) | BAIXA → 1/10 Kelly (max 1.5u)
           let kellyFraction = tipConf === CONF.ALTA ? 0.25 : tipConf === CONF.BAIXA ? 0.10 : 1/6;
-          const _clvAdjLive = await fetchClvMultiplier('esports', match.league);
+          const _clvAdjLive = await fetchClvMultiplier('lol', match.league);
           if (_clvAdjLive.mult !== 1.0) {
-            log('INFO', 'CLV-KELLY', `Ajuste esports live [${match.league}]: mult=${_clvAdjLive.mult} reason=${_clvAdjLive.reason} (CLV ${_clvAdjLive.avgClv}% n=${_clvAdjLive.n})`);
+            log('INFO', 'CLV-KELLY', `Ajuste lol live [${match.league}]: mult=${_clvAdjLive.mult} reason=${_clvAdjLive.reason} (CLV ${_clvAdjLive.avgClv}% n=${_clvAdjLive.n})`);
             kellyFraction = kellyFraction * _clvAdjLive.mult;
           }
           const isT1bet = norm(tipTeam).includes(norm(match.team1)) || norm(match.team1).includes(norm(tipTeam));
@@ -1724,8 +1724,8 @@ async function runAutoAnalysis() {
           }
           // Global Risk Manager (cross-sport)
           const desiredUnits = parseFloat(String(tipStake).replace('u', '')) || 0;
-          const riskAdj = await applyGlobalRisk('esports', desiredUnits, match.leagueSlug || match.league);
-          if (!riskAdj.ok) { log('INFO', 'RISK', `esports: bloqueada (${riskAdj.reason})`); continue; }
+          const riskAdj = await applyGlobalRisk('lol', desiredUnits, match.leagueSlug || match.league);
+          if (!riskAdj.ok) { log('INFO', 'RISK', `lol: bloqueada (${riskAdj.reason})`); continue; }
           const tipStakeAdj = `${riskAdj.units.toFixed(1).replace(/\.0$/, '')}u`;
           const gameIcon = '🎮';
           // Vetor 3 — linha de bookmaker com delta % vs Pinnacle (se alt ≥1.5% melhor).
@@ -1776,7 +1776,8 @@ async function runAutoAnalysis() {
             tipReason: result.tipReason || null,
             lineShopOdds: result.o || null,
             pickSide: _pickSideLs,
-          }, 'esports');
+            sport: 'lol',
+          }, 'lol');
 
           // Aborta se DB recusou (erro ou duplicata já registrada)
           if (!rec?.tipId && !rec?.skipped) {
@@ -1795,7 +1796,7 @@ async function runAutoAnalysis() {
               tipId: rec.tipId,
               factors: result.factorActive,
               predictedDir: result.mlDirection
-            }, 'esports').catch(() => {});
+            }, 'lol').catch(() => {});
           }
 
           const isDraft = match.status === 'draft';
@@ -1899,8 +1900,9 @@ async function runAutoAnalysis() {
                   matchId: canonicalMatchId('esports', String(match.id) + '_H'), eventName: match.league,
                   p1: match.team1, p2: match.team2, tipParticipant: favTeam,
                   odds: String(hOdd), ev: String(hEV.toFixed(1)), stake: String(hStake),
-                  confidence: 'BAIXA', isLive: true, market_type: 'HANDICAP'
-                }, 'esports');
+                  confidence: 'BAIXA', isLive: true, market_type: 'HANDICAP',
+                  sport: 'lol',
+                }, 'lol');
 
                 for (const [userId, prefs] of subscribedUsers) {
                   if (!prefs.has('esports')) continue;
@@ -2047,9 +2049,9 @@ async function runAutoAnalysis() {
             let kellyFraction = tipConf === CONF.ALTA ? 0.25 : tipConf === CONF.BAIXA ? 0.10 : 1/6;
             // CLV→Kelly feedback: se CLV 30d negativo em (sport,league), reduz fraction;
             // se CLV ≤ -3% shadowa (mult=0 → tipStake='0u' → aborta abaixo).
-            const _clvAdj = await fetchClvMultiplier('esports', match.league);
+            const _clvAdj = await fetchClvMultiplier('lol', match.league);
             if (_clvAdj.mult !== 1.0) {
-              log('INFO', 'CLV-KELLY', `Ajuste esports upcoming [${match.league}]: mult=${_clvAdj.mult} reason=${_clvAdj.reason} (CLV ${_clvAdj.avgClv}% n=${_clvAdj.n})`);
+              log('INFO', 'CLV-KELLY', `Ajuste lol upcoming [${match.league}]: mult=${_clvAdj.mult} reason=${_clvAdj.reason} (CLV ${_clvAdj.avgClv}% n=${_clvAdj.n})`);
               kellyFraction = kellyFraction * _clvAdj.mult;
             }
             // Usa p do modelo ML quando disponível (evita circularidade p←EV←IA)
@@ -2069,9 +2071,9 @@ async function runAutoAnalysis() {
             }
             // Risk Manager cross-sport (faltava no upcoming — bug fix mid-Abr 2026)
             const desiredUnitsUp = parseFloat(String(tipStake).replace('u', '')) || 0;
-            const riskAdjUp = await applyGlobalRisk('esports', desiredUnitsUp, match.leagueSlug || match.league);
+            const riskAdjUp = await applyGlobalRisk('lol', desiredUnitsUp, match.leagueSlug || match.league);
             if (!riskAdjUp.ok) {
-              log('INFO', 'RISK', `esports upcoming: bloqueada (${riskAdjUp.reason})`);
+              log('INFO', 'RISK', `lol upcoming: bloqueada (${riskAdjUp.reason})`);
               await new Promise(r => setTimeout(r, 3000)); continue;
             }
             const tipStakeAdj = `${riskAdjUp.units.toFixed(1).replace(/\.0$/, '')}u`;
@@ -2092,7 +2094,8 @@ async function runAutoAnalysis() {
               tipReason: result.tipReason || null,
               lineShopOdds: result.o || null,
               pickSide: _pickSideUp,
-            }, 'esports');
+              sport: 'lol',
+            }, 'lol');
 
             if (!recUp?.tipId && !recUp?.skipped) {
               log('WARN', 'AUTO', `record-tip upcoming falhou para ${tipTeam} @ ${tipOdd} — tip abortada`);
@@ -2292,8 +2295,15 @@ async function settleCompletedTips() {
   if (Date.now() - lastSettlementCheck < SETTLEMENT_INTERVAL) return;
   lastSettlementCheck = Date.now();
 
-  for (const sport of Object.keys(SPORTS)) {
-    if (!SPORTS[sport].enabled) continue;
+  // 'lol' e 'dota2' são buckets separados pós-Abr/2026 — não existem como chaves em
+  // SPORTS, mas precisam ser settle via /unsettled-tips?sport=lol|dota2.
+  const sportsToSettle = Object.keys(SPORTS);
+  if (SPORTS.esports?.enabled) {
+    if (!sportsToSettle.includes('lol')) sportsToSettle.push('lol');
+    if (!sportsToSettle.includes('dota2')) sportsToSettle.push('dota2');
+  }
+  for (const sport of sportsToSettle) {
+    if (sport !== 'lol' && sport !== 'dota2' && !SPORTS[sport]?.enabled) continue;
 
     try {
       const unsettledDays = sport === 'tennis'
@@ -8555,7 +8565,7 @@ Máximo 200 palavras.`;
         : calcKellyFraction(tipEV, tipOdd, kellyFraction);
       if (tipStake === '0u') { log('INFO', 'AUTO-DOTA', `Kelly negativo: ${tipTeam} @ ${tipOdd}`); await _sleep(2000); continue; }
 
-      const riskAdj = await applyGlobalRisk('esports', parseFloat(String(tipStake).replace('u', '')) || 0, match.league);
+      const riskAdj = await applyGlobalRisk('dota2', parseFloat(String(tipStake).replace('u', '')) || 0, match.league);
       if (!riskAdj.ok) { log('INFO', 'RISK', `dota2: bloqueada (${riskAdj.reason})`); continue; }
       const tipStakeAdj = `${riskAdj.units.toFixed(1).replace(/\.0$/, '')}u`;
 
@@ -8588,7 +8598,8 @@ Máximo 200 palavras.`;
           oddsFetchedAt: o._fetchedAt || null,
           lineShopOdds: o || null,
           pickSide: isT1bet ? 't1' : 't2',
-        }, 'esports');
+          sport: 'dota2',
+        }, 'dota2');
         if (rec?.skipped) {
           log('INFO', 'AUTO-DOTA', `Tip já existe (duplicate): ${tipTeam} @ ${tipOdd}`);
           setDotaAnalyzed({ ts: now, tipSent: true, noEdge: false });
@@ -8728,7 +8739,7 @@ async function analyzeDotaMapTip(match, token) {
   const stake = calcKellyWithP(pickP, pickOdd, 1/8);
   if (stake === '0u') { analyzedDota.set(mapKey, { ts: now, tipSent: false, reason: 'zero_stake' }); return; }
   const desiredU = parseFloat(stake) || 0;
-  const riskAdj = await applyGlobalRisk('esports', desiredU, match.league);
+  const riskAdj = await applyGlobalRisk('dota2', desiredU, match.league);
   if (!riskAdj.ok) {
     log('INFO', 'RISK', `dota map: bloqueada (${riskAdj.reason})`);
     analyzedDota.set(mapKey, { ts: now, tipSent: false, reason: 'risk_blocked' });
@@ -8765,7 +8776,8 @@ async function analyzeDotaMapTip(match, token) {
       oddsFetchedAt: null,
       lineShopOdds: match.mapOdds || null,
       pickSide: pickDir,
-    }, 'esports');
+      sport: 'dota2',
+    }, 'dota2');
     if (rec?.skipped) {
       log('INFO', 'AUTO-DOTA-MAP', `Tip mapa ${mapN} duplicada: ${pickTeam} @ ${pickOdd}`);
       analyzedDota.set(mapKey, { ts: now, tipSent: true });
@@ -13034,7 +13046,7 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
     if (!/^true$/i.test(String(process.env.LIVE_RISK_MONITOR_AUTO || ''))) return;
     if (!ADMIN_IDS.size) return;
     try {
-      const sports = ['esports', 'tennis', 'darts', 'cs', 'valorant', 'mma', 'snooker', 'football'];
+      const sports = ['esports', 'lol', 'dota2', 'tennis', 'darts', 'cs', 'valorant', 'mma', 'snooker', 'football'];
       for (const sport of sports) {
         const r = await serverGet(`/cashout-alerts?sport=${sport}&days=3`).catch(() => null);
         const alerts = Array.isArray(r?.alerts) ? r.alerts : [];
@@ -13517,7 +13529,7 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
     const snap = await serverGet('/live-snapshot').catch(() => ({ sports: {} }));
     const normPair = (a, b) => `${String(a||'').toLowerCase().replace(/[^a-z0-9]/g,'')}_${String(b||'').toLowerCase().replace(/[^a-z0-9]/g,'')}`;
 
-    for (const sport of ['esports', 'lol', 'tennis', 'darts']) {
+    for (const sport of ['esports', 'lol', 'dota2', 'tennis', 'darts']) {
       const tips = stmts.getUnsettledTips.all(sport, '-3 days').filter(t => t.is_live);
       if (!tips.length) continue;
 
@@ -13531,6 +13543,9 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
 
         if (tip.sport === 'esports' || tip.sport === 'lol') {
           const m = lookupSnap('lol');
+          liveCtx.gameData = m?.summary ? { summary: m.summary } : null;
+        } else if (tip.sport === 'dota2') {
+          const m = lookupSnap('dota');
           liveCtx.gameData = m?.summary ? { summary: m.summary } : null;
         } else if (tip.sport === 'tennis') {
           const m = lookupSnap('tennis');
@@ -13787,6 +13802,13 @@ async function refreshOpenTips(caches = {}) {
     const enabledSports = Object.entries(SPORTS)
       .filter(([_, s]) => s && s.enabled && s.token)
       .map(([id]) => id);
+    // 'lol' e 'dota2' são buckets separados (Opção A pós-Abr/2026) — o config SPORTS.esports
+    // já ligou o bot, mas as tips vão pra sport='lol' ou 'dota2'. Incluímos ambos na iteração
+    // pra que refreshOpenTips encontre essas tips via /unsettled-tips?sport=lol|dota2.
+    if (enabledSports.includes('esports')) {
+      if (!enabledSports.includes('lol')) enabledSports.push('lol');
+      if (!enabledSports.includes('dota2')) enabledSports.push('dota2');
+    }
 
     for (const sport of enabledSports) {
       const unsettled = await serverGet('/unsettled-tips?days=30', sport).catch(() => []);
@@ -13798,7 +13820,8 @@ async function refreshOpenTips(caches = {}) {
       // Nunca atualizar odds de partidas em andamento, mesmo se tip.is_live estiver falso.
       let esportsLivePairs = null; // Set("t1|t2")
       let esportsStartedByMatchId = null; // Map<baseId,bool>
-      if (sport === 'esports') {
+      const isLolBucket = (sport === 'esports' || sport === 'lol');
+      if (isLolBucket) {
         try {
           const lolList = await serverGet('/lol-matches').catch(() => []);
           const live = Array.isArray(lolList) ? lolList.filter(m => m.status === 'live' || m.status === 'draft') : [];
@@ -13816,8 +13839,8 @@ async function refreshOpenTips(caches = {}) {
 
       for (const tip of unsettled) {
         // Esports ao vivo: congela linha; MMA/tênis/futebol podem atualizar odds no dashboard
-        if (tip.is_live && sport === 'esports') continue;
-        if (sport === 'esports' && String(tip.match_id || '').includes('_MAP')) continue; // tip por mapa = jogo em andamento
+        if (tip.is_live && (isLolBucket || sport === 'dota2')) continue;
+        if ((isLolBucket || sport === 'dota2') && String(tip.match_id || '').includes('_MAP')) continue; // tip por mapa = jogo em andamento
         const p1 = tip.participant1 || '';
         const p2 = tip.participant2 || '';
         const pick = tip.tip_participant || '';
@@ -13826,14 +13849,14 @@ async function refreshOpenTips(caches = {}) {
         if (!p1 || !p2 || !pick || oldOdds <= 1) continue;
 
         // Bloqueio extra: partida atualmente live/draft
-        if (sport === 'esports' && esportsLivePairs) {
+        if (isLolBucket && esportsLivePairs) {
           const a = norm(p1), b = norm(p2);
           const k = a < b ? `${a}|${b}` : `${b}|${a}`;
           if (esportsLivePairs.has(k)) continue;
         }
 
         // Bloqueio por match_id: se Riot já reporta games ativos para esse matchId, não atualizar.
-        if (sport === 'esports' && esportsStartedByMatchId) {
+        if (isLolBucket && esportsStartedByMatchId) {
           const rawMatchId = String(tip.match_id || '');
           const baseId = rawMatchId.replace(/^lol_/, '').replace(/_MAP\d+$/i, '');
           if (baseId && /^\d+$/.test(baseId)) {
@@ -13850,7 +13873,7 @@ async function refreshOpenTips(caches = {}) {
         }
 
         let currentOdds = null;
-        if (sport === 'esports') {
+        if (isLolBucket) {
           const o = await serverGet(`/odds?team1=${encodeURIComponent(p1)}&team2=${encodeURIComponent(p2)}&game=lol`).catch(() => null);
           if (o && parseFloat(o.t1) > 1) {
             currentOdds = norm(pick) === norm(p1) ? parseFloat(o.t1) : parseFloat(o.t2);
@@ -13980,6 +14003,12 @@ async function reanalyzeAndVoidFailing(opts = {}) {
   const enabledSports = Object.entries(SPORTS)
     .filter(([_, s]) => s && s.enabled && s.token)
     .map(([id]) => id);
+  // 'lol' e 'dota2' são buckets separados do 'esports' legado — precisam também
+  // aparecer na iteração pra settle de tips novas pós-Abr/2026.
+  if (enabledSports.includes('esports')) {
+    if (!enabledSports.includes('lol')) enabledSports.push('lol');
+    if (!enabledSports.includes('dota2')) enabledSports.push('dota2');
+  }
 
   for (const sport of enabledSports) {
     if (opts.sport && opts.sport !== 'all' && opts.sport !== sport) continue;
@@ -13989,8 +14018,8 @@ async function reanalyzeAndVoidFailing(opts = {}) {
     for (const tip of unsettled) {
       // Skip live tips (linha congelada)
       if (tip.is_live) continue;
-      // Skip esports por mapa (série em andamento)
-      if (sport === 'esports' && String(tip.match_id || '').includes('_MAP')) continue;
+      // Skip esports/lol/dota por mapa (série em andamento)
+      if ((sport === 'esports' || sport === 'lol' || sport === 'dota2') && String(tip.match_id || '').includes('_MAP')) continue;
 
       const p1 = tip.participant1 || '';
       const p2 = tip.participant2 || '';
@@ -14004,8 +14033,11 @@ async function reanalyzeAndVoidFailing(opts = {}) {
       // Re-fetch odds atuais por sport
       let currentOdds = null;
       try {
-        if (sport === 'esports') {
+        if (sport === 'esports' || sport === 'lol') {
           const o = await serverGet(`/odds?team1=${encodeURIComponent(p1)}&team2=${encodeURIComponent(p2)}&game=lol`);
+          if (o && parseFloat(o.t1) > 1) currentOdds = norm(pick) === norm(p1) ? parseFloat(o.t1) : parseFloat(o.t2);
+        } else if (sport === 'dota2') {
+          const o = await serverGet(`/odds?team1=${encodeURIComponent(p1)}&team2=${encodeURIComponent(p2)}&game=dota2`);
           if (o && parseFloat(o.t1) > 1) currentOdds = norm(pick) === norm(p1) ? parseFloat(o.t1) : parseFloat(o.t2);
         } else if (sport === 'mma') {
           const fights = await serverGet('/mma-matches');
