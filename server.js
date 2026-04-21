@@ -6483,6 +6483,65 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // Repair: pra cada (sport, teams, market, side), mantém tip com MAIOR p_model
+  // como active (result=NULL) e voida as demais. Corrige casos onde void anterior
+  // usou EV ranking (errado) em vez de p_model.
+  // POST /admin/repair-market-tips-dedup?sport=tennis&days=14
+  if (p === '/admin/repair-market-tips-dedup' && req.method === 'POST') {
+    const sport = parsed.query.sport || null;
+    const days = Math.max(1, Math.min(90, parseInt(parsed.query.days || '14', 10) || 14));
+    try {
+      const conds = [`created_at >= datetime('now', '-${days} days')`];
+      const params = [];
+      if (sport) { conds.push('sport = ?'); params.push(sport); }
+      // Pega TODOS (void e pending), ordenado por p_model DESC
+      const rows = db.prepare(`
+        SELECT id, sport, team1, team2, market, side, p_model, result
+        FROM market_tips_shadow
+        WHERE ${conds.join(' AND ')}
+        ORDER BY p_model DESC
+      `).all(...params);
+      const normTeam = s => String(s || '').toLowerCase().replace(/[\s-]/g, '');
+      const winners = new Map();
+      const losers = [];
+      for (const r of rows) {
+        const k = `${r.sport}|${normTeam(r.team1)}|${normTeam(r.team2)}|${r.market}|${r.side}`;
+        if (!winners.has(k)) winners.set(k, r);
+        else losers.push(r);
+      }
+      let reactivated = 0, voided = 0;
+      const reactivate = db.prepare(`UPDATE market_tips_shadow SET result = NULL, settled_at = NULL, profit_units = NULL WHERE id = ?`);
+      const doVoid = db.prepare(`UPDATE market_tips_shadow SET result = 'void', settled_at = datetime('now'), profit_units = 0 WHERE id = ? AND (result IS NULL OR result != 'void')`);
+      const tx = db.transaction(() => {
+        for (const w of winners.values()) {
+          if (w.result === 'void') { reactivate.run(w.id); reactivated++; }
+        }
+        for (const l of losers) {
+          const r = doVoid.run(l.id);
+          if (r.changes > 0) voided++;
+        }
+      });
+      tx();
+      sendJson(res, { ok: true, checked: rows.length, winners: winners.size, reactivated, voided, sport: sport || 'all', days });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
+  // Hard-delete tips voidadas (limpa DB permanente).
+  // POST /admin/purge-voided-market-tips?sport=tennis&days=30
+  if (p === '/admin/purge-voided-market-tips' && req.method === 'POST') {
+    const sport = parsed.query.sport || null;
+    const days = Math.max(1, Math.min(365, parseInt(parsed.query.days || '30', 10) || 30));
+    try {
+      const conds = [`result = 'void'`, `created_at >= datetime('now', '-${days} days')`];
+      const params = [];
+      if (sport) { conds.push('sport = ?'); params.push(sport); }
+      const r = db.prepare(`DELETE FROM market_tips_shadow WHERE ${conds.join(' AND ')}`).run(...params);
+      sendJson(res, { ok: true, deleted: r.changes, sport: sport || 'all', days });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
   // Força settlement de market_tips_shadow (cruza com match_results).
   // POST /admin/settle-market-tips-shadow
   if (p === '/admin/settle-market-tips-shadow' && req.method === 'POST') {
