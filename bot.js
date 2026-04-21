@@ -6180,6 +6180,56 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
       await send(token, chatId, txt);
     } catch (e) { await send(token, chatId, `❌ ${e.message}`); }
 
+  } else if (cmd === '/split-bankroll') {
+    if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
+    try {
+      // parts: ['/split-bankroll', [total?], [confirm?]]
+      // Aceita: /split-bankroll                 → dry-run (metade de esports cada)
+      //         /split-bankroll 200             → dry-run (100 cada)
+      //         /split-bankroll 200 confirm     → executa
+      //         /split-bankroll confirm         → executa default
+      let totalArg = null, confirm = false;
+      for (const p of parts.slice(1)) {
+        if (p.toLowerCase() === 'confirm') confirm = true;
+        else if (/^\d+(\.\d+)?$/.test(p)) totalArg = parseFloat(p);
+      }
+      const espRow = db.prepare('SELECT initial_banca, current_banca FROM bankroll WHERE sport=?').get('esports');
+      const lolRow = db.prepare('SELECT initial_banca, current_banca FROM bankroll WHERE sport=?').get('lol');
+      const dotaRow = db.prepare('SELECT initial_banca, current_banca FROM bankroll WHERE sport=?').get('dota2');
+      const espInit = Number(espRow?.initial_banca || 0);
+      const espCurr = Number(espRow?.current_banca || 0);
+      const proposedTotal = totalArg != null ? totalArg : espInit;
+      const halfInit = proposedTotal / 2;
+      const halfCurr = totalArg != null ? halfInit : (espCurr / 2);
+
+      let txt = `💰 *SPLIT BANKROLL — ${confirm ? 'EXECUTANDO' : 'DRY-RUN'}*\n\n`;
+      txt += `*Estado atual:*\n`;
+      txt += `• esports: init=R$${espInit.toFixed(2)} curr=R$${espCurr.toFixed(2)}\n`;
+      txt += `• lol: init=R$${Number(lolRow?.initial_banca || 0).toFixed(2)} curr=R$${Number(lolRow?.current_banca || 0).toFixed(2)}\n`;
+      txt += `• dota2: init=R$${Number(dotaRow?.initial_banca || 0).toFixed(2)} curr=R$${Number(dotaRow?.current_banca || 0).toFixed(2)}\n\n`;
+      txt += `*Proposta* (total=R$${proposedTotal.toFixed(2)} ${totalArg != null ? 'manual' : 'herdado de esports init'}):\n`;
+      txt += `• lol: init=R$${halfInit.toFixed(2)} curr=R$${halfCurr.toFixed(2)}\n`;
+      txt += `• dota2: init=R$${halfInit.toFixed(2)} curr=R$${halfCurr.toFixed(2)}\n`;
+      txt += `• esports: init=R$0.00 curr=R$0.00 _(zerada — histórico de tips com sport='esports' preservado)_\n\n`;
+
+      if (!confirm) {
+        txt += `_Pra executar: \`/split-bankroll${totalArg != null ? ' ' + totalArg : ''} confirm\`_\n`;
+        txt += `_Ou especifique total: \`/split-bankroll 200 confirm\` (100 lol + 100 dota2)_`;
+        await send(token, chatId, txt);
+        return;
+      }
+
+      const tx = db.transaction(() => {
+        db.prepare('UPDATE bankroll SET initial_banca=?, current_banca=? WHERE sport=?').run(halfInit, halfCurr, 'lol');
+        db.prepare('UPDATE bankroll SET initial_banca=?, current_banca=? WHERE sport=?').run(halfInit, halfCurr, 'dota2');
+        db.prepare('UPDATE bankroll SET initial_banca=?, current_banca=? WHERE sport=?').run(0, 0, 'esports');
+      });
+      tx();
+      txt += `✅ *Executado.* Tips antigas com sport='esports' continuam no DB (histórico preservado) mas bankroll zerada.`;
+      log('WARN', 'BANKROLL', `split-bankroll executado: esports R$${espInit}→R$0, lol/dota2 R$${halfInit} cada`);
+      await send(token, chatId, txt);
+    } catch (e) { await send(token, chatId, `❌ ${e.message}`); }
+
   } else if (cmd === '/mma-diag' || cmd === '/mma-diagnose') {
     if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
     try {
@@ -7333,7 +7383,7 @@ async function poll(token, sport) {
                      text.startsWith('/ai ') || text === '/ai' ||
                      text.startsWith('/shadow-summary') || text.startsWith('/shadow-report') ||
                      text.startsWith('/shadow-all') || text.startsWith('/mma-diag') ||
-                     text.startsWith('/mma-diagnose') ||
+                     text.startsWith('/mma-diagnose') || text.startsWith('/split-bankroll') ||
                      text.startsWith('/tip ') || text.startsWith('/help') || text.startsWith('/start') ||
                      text.startsWith('/alerts')) {
             // Passa `sport` da poll (qual bot recebeu) para evitar default 'esports'
