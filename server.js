@@ -6704,6 +6704,69 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // Sports em atenção: lista sports com issue (shadow ativo, ROI negativo, stake multiplier <1).
+  // GET /sports-risk-status
+  if (p === '/sports-risk-status') {
+    try {
+      const { getSportUnitValue } = require('./lib/sport-unit');
+      const sports = ['lol', 'dota2', 'mma', 'tennis', 'football', 'cs', 'valorant', 'darts', 'snooker', 'tabletennis'];
+      const out = [];
+      for (const sport of sports) {
+        const bk = db.prepare('SELECT initial_banca, current_banca FROM bankroll WHERE sport=?').get(sport);
+        if (!bk || Number(bk.initial_banca) <= 0) continue;
+        const initial = Number(bk.initial_banca);
+        const current = Number(bk.current_banca || 0);
+        // Tips count (reclassifica esports→lol/dota2)
+        const extraSql = sport === 'dota2'
+          ? " OR (sport = 'esports' AND (match_id LIKE 'dota2_%' OR LOWER(COALESCE(event_name,'')) LIKE '%dota%'))"
+          : sport === 'lol'
+            ? " OR (sport = 'esports' AND match_id NOT LIKE 'dota2_%' AND LOWER(COALESCE(event_name,'')) NOT LIKE '%dota%')"
+            : "";
+        const stats = db.prepare(`
+          SELECT COUNT(*) AS n,
+                 COALESCE(SUM(stake_reais), 0) AS staked,
+                 COALESCE(SUM(profit_reais), 0) AS profit
+          FROM tips
+          WHERE (archived IS NULL OR archived = 0)
+            AND COALESCE(is_shadow, 0) = 0
+            AND result IN ('win','loss')
+            AND (sport = ?${extraSql})
+        `).get(sport);
+        const n = Number(stats?.n || 0);
+        const staked = Number(stats?.staked || 0);
+        const profit = Number(stats?.profit || 0);
+        const roi = staked > 0 ? (profit / staked * 100) : null;
+        const dd = initial > 0 ? ((initial - current) / initial * 100) : 0;
+        const tierUnit = getSportUnitValue(current, initial);
+        // Classifica status
+        let status = 'ok', severity = 'ok', reasons = [];
+        if (n >= 20) {
+          if (roi != null && roi <= -25) { status = 'block'; severity = 'critical'; reasons.push(`ROI ${roi.toFixed(1)}% (leak grave)`); }
+          else if (roi != null && roi <= -15) { status = 'shadow'; severity = 'warning'; reasons.push(`ROI ${roi.toFixed(1)}%`); }
+          else if (roi != null && roi <= -8) { status = 'review'; severity = 'info'; reasons.push(`ROI ${roi.toFixed(1)}%`); }
+        }
+        if (dd >= 25) { if (severity !== 'critical') { status = 'block'; severity = 'critical'; } reasons.push(`DD ${dd.toFixed(1)}%`); }
+        else if (dd >= 15) { if (severity === 'ok') { status = 'shadow'; severity = 'warning'; } reasons.push(`DD ${dd.toFixed(1)}%`); }
+        if (tierUnit < 1.0) reasons.push(`tier=R$${tierUnit.toFixed(2)}`);
+        out.push({
+          sport, initial, current: +current.toFixed(2),
+          tips: n,
+          roi_pct: roi != null ? +roi.toFixed(1) : null,
+          dd_pct: +dd.toFixed(1),
+          tier_unit: tierUnit,
+          status, severity,
+          reasons,
+        });
+      }
+      out.sort((a, b) => {
+        const order = { critical: 0, warning: 1, info: 2, ok: 3 };
+        return order[a.severity] - order[b.severity] || (a.roi_pct ?? 0) - (b.roi_pct ?? 0);
+      });
+      sendJson(res, { ok: true, sports: out });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
   // Audit bankroll: mostra initial/current stored vs recomputed, gap per-sport e total.
   // Inclui reclassificação esports legado → lol/dota2.
   // GET /bankroll-audit

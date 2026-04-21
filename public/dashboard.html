@@ -541,6 +541,15 @@
   <!-- Alerts -->
   <div class="alerts" id="alerts"></div>
 
+  <!-- Sports em atenção: shadow/block/review status per sport -->
+  <div class="card" id="sportsRiskCard" style="display:none;margin-bottom:12px">
+    <div class="card-header">
+      <div class="card-title">⚠️ Sports em atenção</div>
+      <div class="card-meta" id="sportsRiskMeta"></div>
+    </div>
+    <div id="sportsRiskList"></div>
+  </div>
+
   <!-- Main grid: Equity curve + Sport ROI list -->
   <div class="main-grid">
     <div class="card">
@@ -1019,6 +1028,7 @@ async function refresh() {
         loadLiveTips(gen),
         loadUpcoming(gen),
         loadTips(gen),
+        loadSportsRisk(gen),
       ]);
     } else {
       await Promise.all([
@@ -1027,6 +1037,7 @@ async function refresh() {
         loadSportRoi(gen),
         loadLive(gen),
         loadLiveTips(gen),
+        loadSportsRisk(gen),
         loadUpcoming(gen),
         loadTips(gen),
         loadModels(gen),
@@ -1533,6 +1544,49 @@ async function loadLiveTips(gen = refreshGen) {
     }).join('');
   } catch (e) {
     console.warn('loadLiveTips error:', e);
+    card.style.display = 'none';
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+// Sports em atenção — ROI/DD/shadow status actionable
+// ─────────────────────────────────────────────────────────────
+async function loadSportsRisk(gen = refreshGen) {
+  const card = document.getElementById('sportsRiskCard');
+  const list = document.getElementById('sportsRiskList');
+  const meta = document.getElementById('sportsRiskMeta');
+  if (!card || !list) return;
+  try {
+    const r = await apiFetch('/sports-risk-status');
+    if (shouldAbort(gen)) return;
+    if (!r?.ok) { card.style.display = 'none'; return; }
+    const atRisk = (r.sports || []).filter(s => s.severity !== 'ok');
+    if (!atRisk.length) { card.style.display = 'none'; return; }
+    card.style.display = '';
+    meta.textContent = `${atRisk.length} de ${r.sports.length}`;
+    const labelMap = { lol: 'League of Legends', dota2: 'Dota 2', cs: 'CS2', valorant: 'Valorant', tennis: 'Tênis', mma: 'MMA', football: 'Futebol', darts: 'Darts', snooker: 'Snooker', tabletennis: 'TT' };
+    const statusLabel = (s) => ({ block: '🚨 BLOCK_BOT', shadow: '⚠️ AUTO_SHADOW', review: 'ℹ️ REVIEW', ok: '✓' })[s] || s;
+    const statusColor = (sev) => ({ critical: '#ef4444', warning: '#f59e0b', info: '#3b82f6', ok: '#10b981' })[sev] || '#64748b';
+    list.innerHTML = atRisk.map(s => {
+      const color = statusColor(s.severity);
+      const sportLabel = labelMap[s.sport] || s.sport;
+      const roiStr = s.roi_pct != null ? `${s.roi_pct >= 0 ? '+' : ''}${s.roi_pct.toFixed(1)}%` : 'n/a';
+      const reasonStr = (s.reasons || []).join(' · ');
+      return `
+        <div style="padding:10px 12px;border-left:3px solid ${color};background:rgba(0,0,0,0.15);margin-bottom:6px;border-radius:4px">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+              <strong style="color:${color}">${statusLabel(s.status)}</strong>
+              <span style="font-weight:600">${sportLabel}</span>
+              <span class="kpi-meta">${s.tips}t · ROI ${roiStr} · DD ${s.dd_pct.toFixed(1)}%</span>
+            </div>
+            <span class="kpi-meta" style="color:var(--text-dim);font-size:11px">${reasonStr}</span>
+          </div>
+        </div>
+      `;
+    }).join('');
+  } catch (e) {
+    console.warn('loadSportsRisk error:', e);
     card.style.display = 'none';
   }
 }
