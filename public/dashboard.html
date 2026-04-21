@@ -1455,7 +1455,7 @@ async function loadTips(gen = refreshGen) {
   let tips = [];
   const LIMIT_ALL = 1000; // cap hard do backend
   if (currentSport === '__overall__') {
-    const sports = ['esports', 'valorant', 'cs', 'tennis', 'mma', 'football', 'darts', 'snooker', 'tabletennis'];
+    const sports = ['esports', 'lol', 'dota2', 'valorant', 'cs', 'tennis', 'mma', 'football', 'darts', 'snooker', 'tabletennis'];
     const sq = status ? '&status=' + encodeURIComponent(status) : '';
     const perSport = Math.ceil(LIMIT_ALL / sports.length);
     const results = await Promise.all(sports.map(sp =>

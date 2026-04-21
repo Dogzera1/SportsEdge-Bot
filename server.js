@@ -10388,15 +10388,29 @@ const server = http.createServer(async (req, res) => {
     // se precisar no futuro, criar query separada com includeMatch=1
     // Shadow tips (is_shadow=1) escondidas por default; ?include_shadow=1 override.
     const includeShadow = String(parsed.query.include_shadow || '').trim() === '1';
+    // Pós-split LoL/Dota (Abr/2026): sport='esports' legado + 'lol'/'dota2' novos.
+    // Frontend continua enviando sport=esports&game=lol|dota2 (backward compat); aqui
+    // unificamos em IN-clause. Dedup subquery replica o mesmo IN.
+    const gameLower = String(game || '').toLowerCase();
+    let sportSet;
+    if (sport === 'esports') {
+      if (gameLower === 'dota2' || gameLower === 'dota') sportSet = ['esports', 'dota2'];
+      else if (gameLower === 'lol') sportSet = ['esports', 'lol'];
+      else sportSet = ['esports', 'lol', 'dota2'];
+    } else {
+      sportSet = [sport];
+    }
+    const sportInSql = `(${sportSet.map(() => '?').join(',')})`;
+    const dedupSql = `t.id IN (SELECT MAX(tdx.id) FROM tips tdx WHERE tdx.sport IN ${sportInSql} AND (tdx.archived IS NULL OR tdx.archived = 0) GROUP BY tdx.sport, COALESCE(NULLIF(TRIM(tdx.match_id), ''), 'id:' || CAST(tdx.id AS TEXT)))`;
     let query = `
       SELECT t.*
       FROM tips t
-      WHERE t.sport = ?
-      AND ${sqlTipsDedupeIdIn('t', '?')}
+      WHERE t.sport IN ${sportInSql}
+      AND ${dedupSql}
       ${sqlGameFilter('t', sport, game)}
       ${includeShadow ? '' : 'AND COALESCE(t.is_shadow, 0) = 0'}
     `;
-    const params = [sport, sport];
+    const params = [...sportSet, ...sportSet];
 
     if (status === 'settled') query += " AND t.result IN ('win', 'loss')";
     else if (status === 'open' || status === 'pending') query += " AND t.result IS NULL";
@@ -10893,7 +10907,19 @@ const server = http.createServer(async (req, res) => {
   if (p === '/roi') {
     const sport = parsed.query.sport || 'esports';
     const game  = parsed.query.game || '';
-    const dedupe = sqlTipsDedupeIdIn('t', '?');
+    // Pós-split LoL/Dota: sport='esports' expande pra IN ('esports','lol','dota2')
+    // conforme game; idem em /tips-history.
+    const gameLower = String(game || '').toLowerCase();
+    let sportSet;
+    if (sport === 'esports') {
+      if (gameLower === 'dota2' || gameLower === 'dota') sportSet = ['esports', 'dota2'];
+      else if (gameLower === 'lol') sportSet = ['esports', 'lol'];
+      else sportSet = ['esports', 'lol', 'dota2'];
+    } else {
+      sportSet = [sport];
+    }
+    const sportInSql = `(${sportSet.map(() => '?').join(',')})`;
+    const dedupe = `t.id IN (SELECT MAX(tdx.id) FROM tips tdx WHERE tdx.sport IN ${sportInSql} AND (tdx.archived IS NULL OR tdx.archived = 0) GROUP BY tdx.sport, COALESCE(NULLIF(TRIM(tdx.match_id), ''), 'id:' || CAST(tdx.id AS TEXT)))`;
     const gameSql = sqlGameFilter('t', sport, game);
     // Win rate / ROI excluem void E push (push = refund, não é WIN nem LOSS).
     // 'pushes' contado separadamente pra UI mostrar totais corretos.
@@ -10905,28 +10931,28 @@ const server = http.createServer(async (req, res) => {
         ROUND(AVG(t.ev), 2) as avg_ev,
         ROUND(AVG(t.odds), 2) as avg_odds
       FROM tips t
-      WHERE t.sport = ? AND ${dedupe}
+      WHERE t.sport IN ${sportInSql} AND ${dedupe}
       AND t.result IN ('win','loss')
       ${gameSql}
-    `).get(sport, sport);
+    `).get(...sportSet, ...sportSet);
     const calibration = db.prepare(`
       SELECT t.confidence, COUNT(*) as total,
         SUM(CASE WHEN t.result='win' THEN 1 ELSE 0 END) as wins,
         ROUND(100.0 * SUM(CASE WHEN t.result='win' THEN 1 ELSE 0 END) / COUNT(*), 1) as win_rate
       FROM tips t
-      WHERE t.sport = ? AND ${dedupe}
+      WHERE t.sport IN ${sportInSql} AND ${dedupe}
       AND t.result IN ('win','loss')
       ${gameSql}
       GROUP BY t.confidence
-    `).all(sport, sport);
+    `).all(...sportSet, ...sportSet);
 
     const tips = db.prepare(`
       SELECT t.odds, t.stake, t.result, t.ev, t.is_live, t.clv_odds, t.open_odds, t.model_p_pick
       FROM tips t
-      WHERE t.sport = ? AND ${dedupe}
+      WHERE t.sport IN ${sportInSql} AND ${dedupe}
       AND t.result IN ('win','loss','push')
       ${gameSql}
-    `).all(sport, sport);
+    `).all(...sportSet, ...sportSet);
     let totalStaked = 0, totalProfit = 0;
     const liveTips = { wins: 0, losses: 0, total: 0, profit: 0, staked: 0 };
     const preTips  = { wins: 0, losses: 0, total: 0, profit: 0, staked: 0 };

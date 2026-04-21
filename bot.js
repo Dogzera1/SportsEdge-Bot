@@ -6180,6 +6180,65 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
       await send(token, chatId, txt);
     } catch (e) { await send(token, chatId, `❌ ${e.message}`); }
 
+  } else if (cmd === '/mma-diag' || cmd === '/mma-diagnose') {
+    if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
+    try {
+      const hoursArg = Math.max(1, Math.min(72, parseInt(parts[1] || '24', 10) || 24));
+      const cutoff = Date.now() - hoursArg * 60 * 60 * 1000;
+      const mmaRej = _rejections.filter(r => r.sport === 'mma' && r.ts >= cutoff);
+      const fights = await serverGet('/mma-matches').catch(() => []);
+      const fightCount = Array.isArray(fights) ? fights.length : 0;
+      const mmaCount = Array.isArray(fights) ? fights.filter(f => f.game === 'mma').length : 0;
+      const boxCount = Array.isArray(fights) ? fights.filter(f => f.game === 'boxing').length : 0;
+      const lastTip = db.prepare(`
+        SELECT sent_at, participant1, participant2, tip_participant, odds, ev, confidence
+        FROM tips WHERE sport = 'mma' AND COALESCE(is_shadow, 0) = 0
+        ORDER BY sent_at DESC LIMIT 1
+      `).get();
+
+      const byReason = {};
+      for (const r of mmaRej) byReason[r.reason] = (byReason[r.reason] || 0) + 1;
+      const topReasons = Object.entries(byReason).sort((a, b) => b[1] - a[1]).slice(0, 10);
+
+      let txt = `🥋 *MMA DIAG — últimas ${hoursArg}h*\n\n`;
+      txt += `📡 *Feed*: ${fightCount} lutas (${mmaCount} MMA · ${boxCount} boxe)\n`;
+      if (lastTip) {
+        const ageH = Math.floor((Date.now() - new Date(lastTip.sent_at + 'Z').getTime()) / 3600000);
+        txt += `🎯 *Última tip*: ${lastTip.tip_participant} @ ${lastTip.odds} EV=${lastTip.ev}% (${ageH}h atrás)\n`;
+      } else {
+        txt += `🎯 *Última tip*: nenhuma no DB\n`;
+      }
+      txt += `\n📊 *Rejections: ${mmaRej.length}*\n`;
+      if (!topReasons.length) {
+        txt += `_Nenhum reject registrado — ciclo pode não ter rodado ou feed vazio._\n`;
+      } else {
+        for (const [reason, n] of topReasons) {
+          txt += `  • *${reason}*: ${n}\n`;
+        }
+      }
+      txt += `\n*Últimas 15 rejections:*\n`;
+      const recent = mmaRej.slice(0, 15);
+      if (!recent.length) {
+        txt += `_(vazio)_\n`;
+      } else {
+        for (const r of recent) {
+          const age = Math.floor((Date.now() - r.ts) / 60000);
+          const extra = r.extra?.ev != null ? ` EV=${r.extra.ev}%` :
+                        r.extra?.odd != null ? ` @ ${r.extra.odd}` : '';
+          const book = r.extra?.book ? ` [${r.extra.book}]` : '';
+          txt += `  ${age}m · ${r.teams} · *${r.reason}*${extra}${book}\n`;
+          if (txt.length > 3500) { txt += '_(truncado)_'; break; }
+        }
+      }
+      txt += `\n_Gates ativos:_\n`;
+      txt += `• EV min sharp: ${process.env.MMA_MIN_EV || '5.0'}% | non-sharp: ${process.env.MMA_MIN_EV_NONSHARP || '8.0'}%\n`;
+      txt += `• Divergência max: ${process.env.MMA_MAX_DIVERGENCE_PP || '15'}pp\n`;
+      txt += `• Interval: ${process.env.MMA_INTERVAL_H || '6'}h | IA cap/ciclo: ${process.env.MMA_MAX_IA_CALLS_PER_CYCLE || '30'}\n`;
+      txt += `• Boxe: ${/^(1|true|yes)$/i.test(process.env.MMA_ALLOW_BOXING ?? 'false') ? 'ON' : 'OFF'}\n`;
+      txt += `\n_uso: /mma-diag [horas · default 24]_`;
+      await send(token, chatId, txt);
+    } catch (e) { await send(token, chatId, `❌ ${e.message}`); }
+
   } else if (cmd === '/shadow-summary' || cmd === '/shadow-report' || cmd === '/shadow-all') {
     if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
     try {
@@ -7273,7 +7332,8 @@ async function poll(token, sport) {
                      text.startsWith('/reanalyze-void') || text.startsWith('/ai-stats') ||
                      text.startsWith('/ai ') || text === '/ai' ||
                      text.startsWith('/shadow-summary') || text.startsWith('/shadow-report') ||
-                     text.startsWith('/shadow-all') ||
+                     text.startsWith('/shadow-all') || text.startsWith('/mma-diag') ||
+                     text.startsWith('/mma-diagnose') ||
                      text.startsWith('/tip ') || text.startsWith('/help') || text.startsWith('/start') ||
                      text.startsWith('/alerts')) {
             // Passa `sport` da poll (qual bot recebeu) para evitar default 'esports'
@@ -8800,8 +8860,9 @@ async function pollMma(runOnce = false) {
   if (!mmaConfig?.enabled || !mmaConfig?.token) return;
   const token = mmaConfig.token;
 
-  // Re-analisa a cada MMA_INTERVAL_H (default 12h — MMA odds são muito estáveis)
-  const MMA_INTERVAL = Math.max(1, parseInt(process.env.MMA_INTERVAL_H || '12', 10) || 12) * 60 * 60 * 1000;
+  // Re-analisa a cada MMA_INTERVAL_H (default 6h — antes 12h era muito restritivo,
+  // perdia janelas de odd movement pré-card. Ainda economiza IA vs live real-time).
+  const MMA_INTERVAL = Math.max(1, parseInt(process.env.MMA_INTERVAL_H || '6', 10) || 6) * 60 * 60 * 1000;
 
   async function loop() {
     try {
@@ -8827,7 +8888,7 @@ async function pollMma(runOnce = false) {
       let boxingSkippedLead = 0;
       let noDateSkipped = 0;
       let mmaIaCallsThisCycle = 0;
-      const mmaIaCap = Math.max(0, parseInt(process.env.MMA_MAX_IA_CALLS_PER_CYCLE || '18', 10) || 18);
+      const mmaIaCap = Math.max(0, parseInt(process.env.MMA_MAX_IA_CALLS_PER_CYCLE || '30', 10) || 30);
       const endOfWeek = (() => {
         const d = new Date();
         // Domingo da semana atual às 23:59
@@ -8883,6 +8944,7 @@ async function pollMma(runOnce = false) {
         // em operação normal. Sport-specific threshold via isOddsFresh.
         if (!isOddsFresh(o, false, 'mma')) {
           log('INFO', 'AUTO-MMA', `Odds stale (${oddsAgeStr(o)}): ${fight.team1} vs ${fight.team2} — pulando`);
+          logRejection('mma', `${fight.team1} vs ${fight.team2}`, 'odds_stale', { age: oddsAgeStr(o) });
           continue;
         }
 
@@ -9223,7 +9285,7 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
           // Gate divergência modelo vs Pinnacle (MMA Pinnacle é muito sharp, threshold menor).
           if (tipMatch) {
             const _impPV = _pickIsT1V ? mlResultMma.impliedP1 : mlResultMma.impliedP2;
-            const _maxDivMma = parseFloat(process.env.MMA_MAX_DIVERGENCE_PP ?? '10');
+            const _maxDivMma = parseFloat(process.env.MMA_MAX_DIVERGENCE_PP ?? '15');
             const _div = _sharpDivergenceGate({
               oddsObj: o, modelP: _modelPPickV, impliedP: _impPV, maxPp: _maxDivMma,
               context: {
@@ -9234,6 +9296,7 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
             });
             if (!_div.ok) {
               log('WARN', 'AUTO-MMA', `Tip rejeitada (${fight.team1} vs ${fight.team2}): ${_div.reason}`);
+              logRejection('mma', `${fight.team1} vs ${fight.team2}`, 'sharp_divergence', { reason: _div.reason, maxPp: _maxDivMma });
               tipMatch = null;
             }
           }
@@ -9263,6 +9326,7 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
             log('INFO', 'MMA-IA-OVERRIDE', `${fight.team1} vs ${fight.team2}: override IA SEM_EDGE — ${pickTeamMma}@${pickOddMma} P=${(pickPMma*100).toFixed(1)}% edge=${edgeMma.toFixed(1)}pp factors=${mlResultMma.factorCount} → CONF=BAIXA stake=1u`);
           } else {
             log('INFO', 'AUTO-MMA', `Sem tip: ${fight.team1} vs ${fight.team2}${_advisoryOn ? ` (override skip: factors=${mlResultMma.factorCount} edge=${edgeMma.toFixed(1)}pp)` : ''}`);
+            logRejection('mma', `${fight.team1} vs ${fight.team2}`, 'ia_no_edge', { factors: mlResultMma.factorCount, edgePp: +edgeMma.toFixed(1) });
             await new Promise(r => setTimeout(r, 3000)); continue;
           }
         }
@@ -9288,6 +9352,7 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
         // Lutas fora da semana: só ALTA passa
         if (fight._futureWeek && tipConf !== 'ALTA') {
           log('INFO', 'AUTO-MMA', `Gate semana: ${fight.team1} vs ${fight.team2} é luta futura — descartado (CONF=${tipConf}, exige ALTA)`);
+          logRejection('mma', `${fight.team1} vs ${fight.team2}`, 'future_week_not_alta', { conf: tipConf });
           await new Promise(r => setTimeout(r, 3000)); continue;
         }
         if (tipOdd < 1.40 || tipOdd > 5.00) {
@@ -9300,16 +9365,21 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
         const _bookmakerMma = String(o?.bookmaker || '').toLowerCase();
         const _isSharpBookMma = /pinnacle|betfair/.test(_bookmakerMma);
         const _mmaMinEvSharp = parseFloat(process.env.MMA_MIN_EV ?? '5.0');
-        const _mmaMinEvSoft = parseFloat(process.env.MMA_MIN_EV_NONSHARP ?? '12.0');
+        // Non-sharp default relaxado de 12% → 8% (Abr/2026). Books non-sharp (BetMGM/FanDuel)
+        // dominam MMA fora do UFC; 12% bloqueava quase tudo. 8% ainda mantém guarda contra
+        // edge ilusório em book mole — acompanhar ROI via shadow antes de relaxar mais.
+        const _mmaMinEvSoft = parseFloat(process.env.MMA_MIN_EV_NONSHARP ?? '8.0');
         const _minEvForBook = _isSharpBookMma ? _mmaMinEvSharp : _mmaMinEvSoft;
 
         if (tipEV < _minEvForBook) {
           log('INFO', 'AUTO-MMA', `Gate EV: ${tipEV}% < ${_minEvForBook}% (${_isSharpBookMma ? 'sharp' : 'non-sharp ' + _bookmakerMma})`);
+          logRejection('mma', `${fight.team1} vs ${fight.team2}`, _isSharpBookMma ? 'ev_low_sharp' : 'ev_low_nonsharp', { ev: tipEV, min: _minEvForBook, book: _bookmakerMma });
           await new Promise(r => setTimeout(r, 3000)); continue;
         }
         // Confiança BAIXA: bloqueia — MMA tem variância alta, BAIXA não compensa
         if (tipConf === 'BAIXA') {
           log('INFO', 'AUTO-MMA', `Gate conf BAIXA rejeitado: ${fight.team1} vs ${fight.team2}`);
+          logRejection('mma', `${fight.team1} vs ${fight.team2}`, 'conf_baixa', { odd: tipOdd, ev: tipEV });
           await new Promise(r => setTimeout(r, 3000)); continue;
         }
 
@@ -9343,6 +9413,7 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
           : calcKellyFraction(tipEV, tipOdd, kellyFractionMma);
         if (kellyStakeMma === '0u') {
           log('INFO', 'AUTO-MMA', `Kelly negativo ${tipTeam} @ ${tipOdd} — tip abortada`);
+          logRejection('mma', `${fight.team1} vs ${fight.team2}`, 'kelly_zero', { odd: tipOdd, p: modelPPickMma });
           await new Promise(r => setTimeout(r, 3000)); continue;
         }
         let desiredUnitsMma = parseFloat(kellyStakeMma) || 0;
