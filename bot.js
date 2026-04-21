@@ -683,6 +683,45 @@ const RE_ANALYZE_INTERVAL = 10 * 60 * 1000; // 10 min between re-analyses of sam
 const UPCOMING_ANALYZE_INTERVAL = Math.max(10, parseInt(process.env.LOL_UPCOMING_INTERVAL_MIN || '120', 10) || 120) * 60 * 1000;
 const UPCOMING_WINDOW_HOURS = 24; // analyze upcoming matches within next 24h
 
+// ── Adaptive pre-game polling ─────────────────────────────────────────
+// Escalona cadência idle com base no match mais próximo. Live em qualquer
+// lugar → baseLive. Match iminente → baseIdle. Sem nada próximo → cap (30min).
+// Protege detecção de tip: janela <30min sempre força cadência rápida.
+function _nearestMatchStartMs(matches) {
+  if (!Array.isArray(matches) || !matches.length) return null;
+  const now = Date.now();
+  let nearest = null;
+  for (const m of matches) {
+    if (!m) continue;
+    const st = String(m.status || '').toLowerCase();
+    if (st === 'finished' || st === 'completed' || st === 'canceled' || st === 'cancelled') continue;
+    const t = new Date(m.time || m.beginAt || 0).getTime();
+    if (!t || t <= now) continue;
+    if (nearest === null || t < nearest) nearest = t;
+  }
+  return nearest;
+}
+function _hasLiveMatchAny(matches) {
+  if (!Array.isArray(matches)) return false;
+  return matches.some(m => {
+    if (!m) return false;
+    const st = String(m.status || '').toLowerCase();
+    return st === 'live' || st === 'inprogress' || st === 'in_progress' || st === 'running';
+  });
+}
+function _computeAdaptivePollMs(baseLiveMs, baseIdleMs, matches, opts = {}) {
+  if (_hasLiveMatchAny(matches)) return baseLiveMs;
+  const cap = opts.maxIdleMs || 30 * 60 * 1000;
+  const nearest = _nearestMatchStartMs(matches);
+  if (!nearest) return Math.min(baseIdleMs * 4, cap);
+  const mins = (nearest - Date.now()) / 60000;
+  if (mins < 30)  return Math.max(Math.round(baseIdleMs * 0.75), baseLiveMs);
+  if (mins < 120) return baseIdleMs;
+  if (mins < 360) return Math.min(baseIdleMs * 2, cap);
+  if (mins < 720) return Math.min(baseIdleMs * 3, cap);
+  return Math.min(baseIdleMs * 4, cap);
+}
+
 // Deduplicação de updates de tip (anti-spam)
 const tipUpdateNotifyCache = new Map(); // key -> ts
 const TIP_UPDATE_DEDUP_MS =
@@ -2106,7 +2145,8 @@ async function runAutoAnalysis() {
   // Cada poll já tem error handling interno; Promise.allSettled garante isolamento total.
   const parallel = [];
   if (SPORTS['esports']?.enabled) {
-    parallel.push(pollDota(true).catch(e => log('ERROR', 'AUTO', `Dota2 unified: ${e.message}`)));
+    parallel.push(pollDota(true).then(v => { sharedCaches.dota = v; })
+      .catch(e => log('ERROR', 'AUTO', `Dota2 unified: ${e.message}`)));
   }
   if (SPORTS['mma']?.enabled) {
     parallel.push(pollMma(true).catch(e => log('ERROR', 'AUTO', `MMA unified: ${e.message}`)));
@@ -2132,6 +2172,16 @@ async function runAutoAnalysis() {
       .catch(e => log('ERROR', 'AUTO', `Valorant unified: ${e.message}`)));
   }
   await Promise.allSettled(parallel);
+
+  // Snapshot pra cadência adaptativa do scheduler global
+  try {
+    const snap = [];
+    for (const k of ['esports','dota','football','tennis','tabletennis','cs','valorant']) {
+      const arr = sharedCaches[k];
+      if (Array.isArray(arr) && arr.length) snap.push(...arr);
+    }
+    global.__lastPollSnapshot = { matches: snap, ts: Date.now() };
+  } catch (_) {}
 
   // Tarefas de fundo agora usam os dados baixados acima (mais rápido e seguro)
   await new Promise(r => setTimeout(r, 2000));
@@ -7803,7 +7853,7 @@ let _pollDotaRunning = false;
 async function pollDota(runOnce = false) {
   if (_pollDotaRunning) { log('DEBUG', 'AUTO-DOTA', 'Já em execução (mutex), pulando ciclo'); return; }
   _pollDotaRunning = true;
-  try { await _pollDotaInner(runOnce); } finally { _pollDotaRunning = false; }
+  try { return await _pollDotaInner(runOnce); } finally { _pollDotaRunning = false; }
 }
 async function _pollDotaInner(runOnce = false) {
   const esportsConfig = SPORTS['esports'];
@@ -7817,11 +7867,13 @@ async function _pollDotaInner(runOnce = false) {
   const _dotaHasSteamRT = !!process.env.STEAM_WEBAPI_KEY;
   const DOTA_LIVE_COOLDOWN = _dotaHasSteamRT ? DOTA_LIVE_COOLDOWN_FAST : DOTA_LIVE_COOLDOWN_SLOW;
   let _hasLiveDota = false;
+  let _dotaMatchesOut = [];
 
   try {
     log('INFO', 'AUTO-DOTA', 'Iniciando verificação de partidas Dota 2...');
     markPollHeartbeat('dota');
     const matches = await serverGet('/dota-matches').catch(() => []);
+    _dotaMatchesOut = Array.isArray(matches) ? matches : [];
     if (!Array.isArray(matches) || !matches.length) {
       log('INFO', 'AUTO-DOTA', 'Sem partidas Dota 2 disponíveis');
       // não return — precisa chegar ao setTimeout no final
@@ -8510,6 +8562,7 @@ Máximo 200 palavras.`;
     log('INFO', 'AUTO-DOTA', `Próximo ciclo em ${Math.round(dotaNextMs / 1000)}s (${_hasLiveDota ? 'LIVE' + (_hasRT ? ' [Steam RT]' : '') : 'idle'})`);
     setTimeout(() => pollDota().catch(e => log('ERROR', 'AUTO-DOTA', e.message)), dotaNextMs);
   }
+  return _dotaMatchesOut;
 }
 
 // ── Análise e emissão de tip por mapa ──
@@ -12763,8 +12816,22 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   }
 
   // Background tasks - Agora tudo é unificado via runAutoAnalysis
+  // Cadência adaptativa: live→6min, iminente<30min→6min, 30min-2h→6min,
+  // 2-6h→12min, 6-12h→18min, sem nada→24min (cap). Safety: match <30min sempre força rápido.
+  const AUTO_BASE_MS = 6 * 60 * 1000;
+  const AUTO_CAP_MS = Math.max(AUTO_BASE_MS, parseInt(process.env.AUTO_MAX_IDLE_MIN || '24', 10) * 60 * 1000);
   setTimeout(() => runAutoAnalysis().catch(e => log('ERROR', 'AUTO', e.message)), 15 * 1000); // 1ª análise 15s após boot
-  setInterval(() => runAutoAnalysis().catch(e => log('ERROR', 'AUTO', e.message)), 6 * 60 * 1000);
+  (function scheduleAutoAnalysis() {
+    setTimeout(async () => {
+      try { await runAutoAnalysis(); } catch (e) { log('ERROR', 'AUTO', e.message); }
+      const snap = global.__lastPollSnapshot;
+      const matches = (snap && Array.isArray(snap.matches)) ? snap.matches : [];
+      const nextMs = _computeAdaptivePollMs(AUTO_BASE_MS, AUTO_BASE_MS, matches, { maxIdleMs: AUTO_CAP_MS });
+      log('INFO', 'AUTO', `Próximo ciclo em ${Math.round(nextMs / 1000)}s (${_hasLiveMatchAny(matches) ? 'live' : 'idle-adaptive'})`);
+      scheduleAutoAnalysis._nextMs = nextMs;
+      scheduleAutoAnalysis();
+    }, scheduleAutoAnalysis._nextMs || AUTO_BASE_MS);
+  })();
   // Darts e Snooker: loops independentes (fora do mutex runAutoAnalysis) para não ser
   // bloqueados pelo Football que serializa ~25min por ciclo.
   // Darts: dual-mode scheduling (rápido se live, lento se idle)
@@ -12790,12 +12857,13 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   // Valorant: scheduler INDEPENDENTE do mutex runAutoAnalysis (fix Abr 2026 mid).
   // Antes: pollValorant rodava só dentro do mutex (a cada 6-15min). Em ciclos longos
   // (MMA com IA cap), ficava 10+min sem analisar — perdíamos partidas live VCT inteiras.
+  // Cadência adaptativa: 90s live, 5min idle base, escala até 20min sem matches próximos.
+  // Safety: qualquer match <30min força cadência 5min (janela hot pré-game).
   if (SPORTS['valorant']?.enabled) {
     (function scheduleValorant() {
       setTimeout(async () => {
         const matches = await pollValorant(true).catch(e => { log('ERROR', 'AUTO-VAL', `scheduler: ${e.message}`); return []; });
-        const hadLive = Array.isArray(matches) && matches.some(m => m.status === 'live');
-        const nextMs = hadLive ? (90 * 1000) : (5 * 60 * 1000); // 90s live, 5min idle
+        const nextMs = _computeAdaptivePollMs(90 * 1000, 5 * 60 * 1000, matches || [], { maxIdleMs: 20 * 60 * 1000 });
         scheduleValorant._nextMs = nextMs;
         scheduleValorant();
       }, scheduleValorant._nextMs || 30 * 1000);
@@ -12806,8 +12874,7 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
     (function scheduleCs() {
       setTimeout(async () => {
         const matches = await pollCs(true).catch(e => { log('ERROR', 'AUTO-CS', `scheduler: ${e.message}`); return []; });
-        const hadLive = Array.isArray(matches) && matches.some(m => m.status === 'live');
-        const nextMs = hadLive ? (90 * 1000) : (5 * 60 * 1000);
+        const nextMs = _computeAdaptivePollMs(90 * 1000, 5 * 60 * 1000, matches || [], { maxIdleMs: 20 * 60 * 1000 });
         scheduleCs._nextMs = nextMs;
         scheduleCs();
       }, scheduleCs._nextMs || 45 * 1000);
