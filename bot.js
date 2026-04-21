@@ -2721,8 +2721,15 @@ async function checkAutoShadow() {
 
   let evaluated = 0, flipped = 0, restored = 0, skippedLowN = 0;
 
-  for (const sport of Object.keys(SPORTS)) {
-    const cfg = SPORTS[sport];
+  // Inclui lol/dota2 (buckets split pós-Abr/2026) além dos sports em SPORTS config.
+  // Sem isso, Dota nunca era avaliado pra auto-shadow mesmo com CLV ruim.
+  const sportsToCheck = Object.keys(SPORTS);
+  if (SPORTS.esports?.enabled) {
+    if (!sportsToCheck.includes('lol')) sportsToCheck.push('lol');
+    if (!sportsToCheck.includes('dota2')) sportsToCheck.push('dota2');
+  }
+  for (const sport of sportsToCheck) {
+    const cfg = SPORTS[sport] || SPORTS.esports; // lol/dota2 usam esports config (mesmo bot)
     if (!cfg?.enabled || !cfg?.token) continue;
     if (!_autoShadowOriginal.has(sport)) _autoShadowOriginal.set(sport, !!cfg.shadowMode);
     const orig = _autoShadowOriginal.get(sport);
@@ -2738,9 +2745,13 @@ async function checkAutoShadow() {
     const meanClv = totalN > 0 ? weightedSum / totalN : 0;
 
     const wasAutoShadowed = _autoShadowState.has(sport);
-    if (meanClv < cutoffClvBad && !cfg.shadowMode) {
+    // Pra lol/dota2: shadow afeta gate da emissão (checado em pollDota/pollLol)
+    // mas bot token/identity vem de SPORTS.esports. Track separado via Set.
+    const isSplitBucket = sport === 'lol' || sport === 'dota2';
+    const isInShadow = isSplitBucket ? _autoShadowState.has(sport) : !!cfg.shadowMode;
+    if (meanClv < cutoffClvBad && !isInShadow) {
       // Flip: ativa shadow
-      cfg.shadowMode = true;
+      if (!isSplitBucket) cfg.shadowMode = true;
       flipped++;
       _autoShadowState.set(sport, { reason: `CLV ${meanClv.toFixed(2)}% < ${cutoffClvBad}% (n=${totalN}, 14d)`, since: now, lastCheck: now });
       log('WARN', 'AUTO-SHADOW', `[FLIP→SHADOW] ${sport}: CLV ${meanClv.toFixed(2)}% < ${cutoffClvBad}% em ${totalN} tips. DMs suspensos até CLV recuperar ≥ ${recoveryClvOk}%.`);
@@ -2880,6 +2891,13 @@ async function runAutoHealerCycle() {
 const _bankrollAlertedKey = new Map(); // sport → { ts }
 const BANKROLL_DM_COOLDOWN_MS = 24 * 60 * 60 * 1000; // 24h por sport
 const _bankrollAutoShadowed = new Set(); // sports temporariamente em auto-shadow por DD
+// Split buckets (lol/dota2) não têm entry em SPORTS mas podem ser shadowed.
+// pollLol/pollDota checam este Set pra bloquear DM quando bucket em shadow.
+const _splitBucketShadow = new Set(); // sports split em auto-shadow
+function isBucketShadowed(sport) {
+  if (SPORTS[sport]?.shadowMode) return true;
+  return _splitBucketShadow.has(sport);
+}
 
 async function runBankrollGuardianCycle() {
   if (!ADMIN_IDS.size) return;
@@ -2904,11 +2922,19 @@ async function runBankrollGuardianCycle() {
     _bankrollAlertedKey.set(alert.sport, { ts: Date.now() });
     newAlerts.push(alert);
 
-    // Auto-shadow temporário (DD>=15)
-    if (alert.action === 'AUTO_SHADOW' && SPORTS[alert.sport] && !SPORTS[alert.sport].shadowMode) {
-      SPORTS[alert.sport].shadowMode = true;
-      _bankrollAutoShadowed.add(alert.sport);
-      log('WARN', 'BANKROLL-GUARDIAN', `[FLIP→SHADOW] ${alert.sport}: DD ${alert.drawdown_pct.toFixed(1)}% — auto-shadow temporário`);
+    // Auto-shadow temporário (DD>=15% ou ROI<=-15%)
+    // Split buckets lol/dota2 usam _splitBucketShadow Set (não têm entry em SPORTS).
+    const isSplit = alert.sport === 'lol' || alert.sport === 'dota2';
+    if ((alert.action === 'AUTO_SHADOW' || alert.action === 'BLOCK_BOT')) {
+      if (isSplit && !_splitBucketShadow.has(alert.sport)) {
+        _splitBucketShadow.add(alert.sport);
+        _bankrollAutoShadowed.add(alert.sport);
+        log('WARN', 'BANKROLL-GUARDIAN', `[FLIP→SHADOW] ${alert.sport}: ${alert.action} — ${alert.message}`);
+      } else if (!isSplit && SPORTS[alert.sport] && !SPORTS[alert.sport].shadowMode) {
+        SPORTS[alert.sport].shadowMode = true;
+        _bankrollAutoShadowed.add(alert.sport);
+        log('WARN', 'BANKROLL-GUARDIAN', `[FLIP→SHADOW] ${alert.sport}: ${alert.action} — ${alert.message}`);
+      }
     }
   }
 
@@ -2918,11 +2944,23 @@ async function runBankrollGuardianCycle() {
   const restoreThreshold = parseFloat(process.env.BANKROLL_RESTORE_DD_PCT || '12') || 12;
   for (const sport of _bankrollAutoShadowed) {
     const sItem = result.sports.find(s => s.sport === sport);
-    if (sItem && sItem.drawdown_pct < restoreThreshold && SPORTS[sport]?.shadowMode) {
+    if (!sItem) continue;
+    // Restaura quando DD recupera E ROI também (se disponível, > -5%).
+    const ddOk = sItem.drawdown_pct < restoreThreshold;
+    const roiOk = sItem.roi_pct == null || sItem.roi_pct > -5;
+    const canRestore = ddOk && roiOk;
+    if (!canRestore) continue;
+    const isSplit = sport === 'lol' || sport === 'dota2';
+    if (isSplit && _splitBucketShadow.has(sport)) {
+      _splitBucketShadow.delete(sport);
+      _bankrollAutoShadowed.delete(sport);
+      log('INFO', 'BANKROLL-GUARDIAN', `[RESTORE] ${sport}: recuperou (DD ${sItem.drawdown_pct.toFixed(1)}%, ROI ${sItem.roi_pct?.toFixed(1) || 'n/a'}%)`);
+      newAlerts.push({ sport, severity: 'info', action: 'RESTORED', message: `${sport}: recuperou — DMs reativados` });
+    } else if (!isSplit && SPORTS[sport]?.shadowMode) {
       SPORTS[sport].shadowMode = false;
       _bankrollAutoShadowed.delete(sport);
-      log('INFO', 'BANKROLL-GUARDIAN', `[RESTORE] ${sport}: DD recuperou pra ${sItem.drawdown_pct.toFixed(1)}% — DMs reativados`);
-      newAlerts.push({ sport, severity: 'info', action: 'RESTORED', message: `${sport}: DD recuperou (DD ${sItem.drawdown_pct.toFixed(1)}%) — DMs reativados` });
+      log('INFO', 'BANKROLL-GUARDIAN', `[RESTORE] ${sport}: DD ${sItem.drawdown_pct.toFixed(1)}% ROI ${sItem.roi_pct?.toFixed(1) || 'n/a'}% — DMs reativados`);
+      newAlerts.push({ sport, severity: 'info', action: 'RESTORED', message: `${sport}: recuperou — DMs reativados` });
     }
   }
 
@@ -9144,7 +9182,7 @@ async function analyzeDotaMapTip(match, token) {
       modelPPick: pickP,
       modelLabel: `dota-map-${mapN} (${pred.factors.map(f => f.name).join('+') || 'base'})`,
       tipReason: pred.reason.slice(0, 160),
-      isShadow: SPORTS['esports']?.shadowMode ? 1 : 0,
+      isShadow: isBucketShadowed('dota2') ? 1 : 0,
       oddsFetchedAt: null,
       lineShopOdds: match.mapOdds || null,
       pickSide: pickDir,

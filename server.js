@@ -7506,8 +7506,10 @@ const server = http.createServer(async (req, res) => {
     const minN = parseInt(process.env.SPORT_PERF_MIN_N || '15', 10);
     try {
       const _bl = getBaseline();
+      // SELECT inclui stake_reais/profit_reais stored pra tipProfitReais preferir tier
+      // em vez de recompute com unit global (R$10) que inflaria valores 10x.
       const tipsRaw = db.prepare(`
-        SELECT stake, odds, result
+        SELECT stake, odds, result, stake_reais, profit_reais
         FROM tips
         WHERE sport = ? AND result IN ('win','loss')
           AND settled_at >= datetime('now', ?)
@@ -7521,22 +7523,13 @@ const server = http.createServer(async (req, res) => {
         stake += tipStakeReais(t, _bl.unit_value);
       }
       const roi = stake > 0 ? (profit / stake * 100) : null;
-      // Drawdown atual: (initial − current) / initial
-      const bk = db.prepare(`SELECT initial_banca FROM bankroll WHERE sport = ?`).get(sport);
+      // Drawdown atual: (initial − current) / initial. current_banca direto da tabela
+      // (não recomputar — evita divergência).
+      const bk = db.prepare(`SELECT initial_banca, current_banca FROM bankroll WHERE sport = ?`).get(sport);
       let dd = null;
-      if (bk) {
-        const all = db.prepare(`
-          SELECT stake, odds, result FROM tips
-          WHERE sport = ? AND result IN ('win','loss')
-            AND (archived IS NULL OR archived = 0)
-        `).all(sport);
-        let totalP = 0;
-        for (const t of all) {
-          const p = tipProfitReais(t, _bl.unit_value);
-          if (p != null) totalP += p;
-        }
-        const current = (bk.initial_banca || 0) + totalP;
-        dd = bk.initial_banca > 0 ? (bk.initial_banca - current) / bk.initial_banca : null;
+      if (bk && bk.initial_banca > 0) {
+        const current = Number(bk.current_banca || 0);
+        dd = (bk.initial_banca - current) / bk.initial_banca;
       }
       let mult = 1.0, reason = 'neutral';
       if (n < minN) { mult = 1.0; reason = 'insufficient_sample'; }
@@ -10530,6 +10523,7 @@ const server = http.createServer(async (req, res) => {
           AND settled_at IS NOT NULL
           AND settled_at >= datetime('now', ?)
           AND (archived IS NULL OR archived = 0)
+          AND COALESCE(is_shadow, 0) = 0
         GROUP BY DATE(settled_at)
         ORDER BY day ASC
       `).all(sport, `-${days} days`);
