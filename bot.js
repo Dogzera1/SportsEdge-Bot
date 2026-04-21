@@ -2992,6 +2992,8 @@ function isBucketShadowed(sport) {
 // Formato: "sport:substring" ou apenas "substring" (aplica a qualquer sport).
 // Ex: "lol:prime league,mma:LFA,tennis:challenger"
 const _leagueBlocklist = new Set(); // Set<string> entries lowercased "sport:substr" ou "*:substr"
+const _autoBlockedLeagues = new Map(); // entry → { reason, since, roi, clv, n } (só auto-managed)
+const _leagueUnblockCooldown = new Map(); // entry → timestamp (não auto-re-adicionar se manualmente desbloqueado)
 function _parseBlocklistEnv() {
   const raw = String(process.env.LEAGUE_BLOCKLIST || '').trim();
   if (!raw) return;
@@ -3752,6 +3754,79 @@ async function runPathGuardCycle() {
     log('INFO', 'PATH-GUARD', `Ciclo OK — ${evaluated.size} buckets | ${alerts.length} disabled | ${restored.length} restored`);
   } catch (e) {
     log('WARN', 'PATH-GUARD', `falhou: ${e.message}`);
+  }
+}
+
+// Auto-blocklist por liga. Avalia tips settled agrupadas por (sport, event_name);
+// auto-bloqueia se n≥minN + ROI≤-25% + CLV≤-2% (dupla confirmação — evita ruído em amostra pequena).
+// Restaura se blocked entry tem n≥minN recente + ROI ≥ -5%.
+// Desativa via LEAGUE_GUARD_AUTO=false. Cooldown 7d pós /unblock-league manual.
+async function runLeagueGuardCycle() {
+  if (/^(0|false|no)$/i.test(String(process.env.LEAGUE_GUARD_AUTO || ''))) return;
+  const minN = parseInt(process.env.LEAGUE_GUARD_MIN_N || '20', 10);
+  const roiCutoff = parseFloat(process.env.LEAGUE_GUARD_ROI_CUTOFF || '-25');
+  const clvCutoff = parseFloat(process.env.LEAGUE_GUARD_CLV_CUTOFF || '-2');
+  const roiRestore = parseFloat(process.env.LEAGUE_GUARD_ROI_RESTORE || '-5');
+  const daysWin = parseInt(process.env.LEAGUE_GUARD_DAYS || '30', 10);
+  const cooldownMs = parseInt(process.env.LEAGUE_GUARD_COOLDOWN_DAYS || '7', 10) * 24 * 60 * 60 * 1000;
+  try {
+    const rows = db.prepare(`
+      SELECT sport, event_name,
+             COUNT(*) AS n,
+             SUM(COALESCE(stake_reais, 0)) AS staked,
+             SUM(COALESCE(profit_reais, 0)) AS profit,
+             AVG(CASE WHEN clv_odds > 1 AND odds > 1 THEN (odds - clv_odds) / clv_odds * 100 END) AS avg_clv
+      FROM tips
+      WHERE sent_at >= datetime('now', '-${daysWin} days')
+        AND (archived IS NULL OR archived = 0)
+        AND COALESCE(is_shadow, 0) = 0
+        AND result IN ('win','loss')
+        AND event_name IS NOT NULL AND TRIM(event_name) != ''
+      GROUP BY sport, event_name
+      HAVING n >= ${minN}
+    `).all();
+
+    const tokenForAlert = Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
+    const alerts = [];
+    const restored = [];
+    const now = Date.now();
+
+    for (const r of rows) {
+      const sport = String(r.sport || '').toLowerCase();
+      const league = String(r.event_name || '').toLowerCase().trim();
+      if (!sport || !league) continue;
+      const entry = `${sport}:${league}`;
+      const roi = r.staked > 0 ? (Number(r.profit) / Number(r.staked) * 100) : null;
+      const clv = r.avg_clv != null ? Number(r.avg_clv) : null;
+      const already = _leagueBlocklist.has(entry);
+      const autoMeta = _autoBlockedLeagues.get(entry);
+
+      // Auto-block: ROI ≤ roiCutoff AND (CLV ≤ clvCutoff OR CLV null). Cooldown pós unblock manual.
+      if (!already && roi != null && roi <= roiCutoff && (clv == null || clv <= clvCutoff)) {
+        const cooldownUntil = _leagueUnblockCooldown.get(entry) || 0;
+        if (now < cooldownUntil) continue;
+        _leagueBlocklist.add(entry);
+        const reason = `ROI ${roi.toFixed(1)}% n=${r.n}${clv != null ? ` CLV ${clv.toFixed(1)}%` : ''}`;
+        _autoBlockedLeagues.set(entry, { reason, since: now, roi, clv, n: r.n });
+        alerts.push(`🚫 ${entry} — ${reason}`);
+        log('WARN', 'LEAGUE-GUARD', `auto-blocked ${entry}: ${reason}`);
+      }
+      // Auto-restore: só de entries auto-managed (não mexe em manual/env)
+      else if (autoMeta && roi != null && roi >= roiRestore && r.n >= minN) {
+        _leagueBlocklist.delete(entry);
+        _autoBlockedLeagues.delete(entry);
+        restored.push(`✅ ${entry} — ROI recuperou pra ${roi.toFixed(1)}% (n=${r.n})`);
+        log('INFO', 'LEAGUE-GUARD', `auto-restored ${entry}: ROI=${roi.toFixed(1)}%`);
+      }
+    }
+
+    if ((alerts.length || restored.length) && tokenForAlert && ADMIN_IDS.size) {
+      const msg = `🛡️ *LEAGUE GUARD — ${daysWin}d*\n\n${[...alerts, ...restored].join('\n')}\n\n_Cutoff: ROI ≤ ${roiCutoff}% + CLV ≤ ${clvCutoff}% com n≥${minN}. Restaura em ROI ≥ ${roiRestore}%._\n_Use /blocked-leagues pra ver estado._`;
+      for (const adminId of ADMIN_IDS) sendDM(tokenForAlert, adminId, msg).catch(() => {});
+    }
+    log('INFO', 'LEAGUE-GUARD', `Ciclo OK — ${rows.length} ligas avaliadas | ${alerts.length} blocked | ${restored.length} restored`);
+  } catch (e) {
+    log('WARN', 'LEAGUE-GUARD', `falhou: ${e.message}`);
   }
 }
 
@@ -6245,13 +6320,42 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
     txt += `Comandos:\n• /path-guard run — força ciclo\n• /path-guard reset [sport] — reativa manual`;
     await send(token, chatId, txt);
 
+  } else if (cmd === '/league-guard' || cmd === '/leagues-guard') {
+    if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
+    try {
+      await send(token, chatId, '⏳ Rodando LEAGUE-GUARD cycle...');
+      await runLeagueGuardCycle();
+      const autoCount = _autoBlockedLeagues.size;
+      const totalBlocked = _leagueBlocklist.size;
+      const cooldowns = [..._leagueUnblockCooldown.entries()].filter(([, ts]) => Date.now() < ts);
+      let txt = `🛡️ *LEAGUE GUARD COMPLETO*\n\n`;
+      txt += `Auto-bloqueadas agora: ${autoCount}\n`;
+      txt += `Total bloqueadas (manual+auto): ${totalBlocked}\n`;
+      txt += `Cooldowns ativos: ${cooldowns.length}\n\n`;
+      if (autoCount) {
+        txt += `*Auto-blocked:*\n`;
+        for (const [entry, meta] of _autoBlockedLeagues) {
+          const ageD = Math.round((Date.now() - meta.since) / (24 * 60 * 60 * 1000));
+          txt += `🤖 ${entry} — ${meta.reason} (há ${ageD}d)\n`;
+        }
+      }
+      await send(token, chatId, txt);
+    } catch (e) { await send(token, chatId, `❌ ${e.message}`); }
+
   } else if (cmd === '/block-league' || cmd === '/unblock-league' || cmd === '/blocked-leagues' || cmd === '/leagues-blocked') {
     if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
     try {
       if (cmd === '/blocked-leagues' || cmd === '/leagues-blocked') {
         if (!_leagueBlocklist.size) { await send(token, chatId, `📋 *Ligas bloqueadas:*\n_Nenhuma._\n\n_Uso: /block-league <sport> <substring>_`); return; }
-        const list = [..._leagueBlocklist].sort().map(e => `• ${e}`).join('\n');
-        await send(token, chatId, `📋 *Ligas bloqueadas (${_leagueBlocklist.size}):*\n${list}`);
+        const list = [..._leagueBlocklist].sort().map(e => {
+          const meta = _autoBlockedLeagues.get(e);
+          if (meta) {
+            const ageD = Math.round((Date.now() - meta.since) / (24 * 60 * 60 * 1000));
+            return `• 🤖 ${e} — ${meta.reason} (há ${ageD}d)`;
+          }
+          return `• 🔧 ${e} (manual/env)`;
+        }).join('\n');
+        await send(token, chatId, `📋 *Ligas bloqueadas (${_leagueBlocklist.size}):*\n${list}\n\n_🤖 = auto via LEAGUE-GUARD · 🔧 = manual/env_`);
         return;
       }
       if (parts.length < 3) {
@@ -6264,8 +6368,12 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
       const entry = `${sportArg || '*'}:${substr}`;
       if (cmd === '/unblock-league') {
         if (_leagueBlocklist.delete(entry)) {
-          log('INFO', 'BLOCKLIST', `UNBLOCK ${entry} via cmd`);
-          await send(token, chatId, `✅ Desbloqueado: \`${entry}\``);
+          const wasAuto = _autoBlockedLeagues.delete(entry);
+          // Cooldown 7d (default) pra impedir LEAGUE-GUARD de re-bloquear imediato
+          const cooldownMs = parseInt(process.env.LEAGUE_GUARD_COOLDOWN_DAYS || '7', 10) * 24 * 60 * 60 * 1000;
+          _leagueUnblockCooldown.set(entry, Date.now() + cooldownMs);
+          log('INFO', 'BLOCKLIST', `UNBLOCK ${entry} via cmd (was ${wasAuto ? 'auto' : 'manual'})`);
+          await send(token, chatId, `✅ Desbloqueado: \`${entry}\`\n${wasAuto ? '_Era auto-blocked — cooldown 7d antes de LEAGUE-GUARD poder re-bloquear._' : ''}`);
         } else {
           await send(token, chatId, `ℹ️ Entry não existia: \`${entry}\`\n_Use /blocked-leagues pra listar._`);
         }
@@ -7010,9 +7118,10 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
       `\`/path-guard reset [sport]\` — reativa path manual\n\n` +
       `━━ 🚫 *Liga blocklist / pause* ━━\n` +
       `\`/clv-league [sport] [days] [min]\` — ROI/CLV por liga (flagga leaks)\n` +
+      `\`/league-guard\` — força ciclo auto-blocklist (ROI≤-25% + CLV≤-2% n≥20)\n` +
       `\`/block-league <sport|*> <substring>\` — bloqueia liga (suprime tips)\n` +
-      `\`/unblock-league <sport|*> <substring>\` — reativa liga\n` +
-      `\`/blocked-leagues\` — lista ligas bloqueadas\n` +
+      `\`/unblock-league <sport|*> <substring>\` — reativa liga (cooldown 7d)\n` +
+      `\`/blocked-leagues\` — lista ligas bloqueadas (🤖 auto · 🔧 manual)\n` +
       `\`/pause-sport <sport>\` · \`/unpause-sport <sport>\` — pausa manual sport\n\n` +
       `━━ 🤖 *Agents & Loops* ━━\n` +
       `\`/loops\` — status dos 9 autonomous loops\n` +
@@ -7962,6 +8071,7 @@ async function poll(token, sport) {
                      text.startsWith('/blocked-leagues') || text.startsWith('/leagues-blocked') ||
                      text.startsWith('/clv-league') || text.startsWith('/clv-by-league') ||
                      text.startsWith('/roi-league') ||
+                     text.startsWith('/league-guard') || text.startsWith('/leagues-guard') ||
                      text.startsWith('/tip ') || text.startsWith('/help') || text.startsWith('/start') ||
                      text.startsWith('/alerts')) {
             // Passa `sport` da poll (qual bot recebeu) para evitar default 'esports'
@@ -14109,6 +14219,9 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   setInterval(() => runModelCalibrationCycle().catch(e => log('ERROR', 'MODEL-CALIB', e.message)), 24 * 60 * 60 * 1000);
   setInterval(() => runPathGuardCycle().catch(e => log('ERROR', 'PATH-GUARD', e.message)), 6 * 60 * 60 * 1000);
   setTimeout(() => runPathGuardCycle().catch(() => {}), 30 * 60 * 1000);
+
+  setInterval(() => runLeagueGuardCycle().catch(e => log('ERROR', 'LEAGUE-GUARD', e.message)), 12 * 60 * 60 * 1000);
+  setTimeout(() => runLeagueGuardCycle().catch(() => {}), 45 * 60 * 1000);
   setTimeout(() => runModelCalibrationCycle().catch(() => {}), 60 * 60 * 1000); // 1h pós-boot
 
   // Backtest Validator: cron 1x/dia, valida modelo via gates retroativos.
