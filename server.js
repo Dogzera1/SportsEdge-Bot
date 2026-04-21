@@ -10677,7 +10677,7 @@ const server = http.createServer(async (req, res) => {
       const _bl = getBaseline();
       // Dedup por match_id atravessando sports do set (evita dupe esports↔lol/dota2).
       const tipsAll = db.prepare(`
-        SELECT stake, odds, result, settled_at, match_id, event_name
+        SELECT stake, odds, result, settled_at, match_id, event_name, stake_reais, profit_reais
         FROM tips
         WHERE sport IN ${sportInSql}
           AND result IN ('win','loss')
@@ -11041,10 +11041,12 @@ const server = http.createServer(async (req, res) => {
       // com lol/dota2). Tips com sport='esports' ainda acumulam no profitBySport map,
       // mas não vão pra bankroll display/totais.
       const bankrollsRaw = db.prepare(`SELECT sport, initial_banca, current_banca FROM bankroll WHERE sport != 'esports'`).all();
-      // Recomputa profit em unit-native usando baseline.unit_value (fonte única).
+      // Recomputa profit preferindo profit_reais stored (rebuild tier per-sport).
+      // Sem profit_reais na query, fallback recompute com unit global → escala errada (R$10 pós-044)
+      // que sobrescrevia bankroll em cada /overall-summary.
       const _bl = getBaseline();
       const allSettled = db.prepare(`
-        SELECT sport, stake, odds, result, match_id, event_name
+        SELECT sport, stake, odds, result, match_id, event_name, stake_reais, profit_reais
         FROM tips
         WHERE (archived IS NULL OR archived = 0) AND COALESCE(is_shadow, 0) = 0
           AND result IN ('win','loss')
@@ -11085,7 +11087,7 @@ const server = http.createServer(async (req, res) => {
       // match_id/event_name necessários pra reclassificar tips legadas sport='esports'
       // em 'lol'/'dota2' no breakdown per-sport.
       const windowTips = db.prepare(`
-        SELECT sport, stake, odds, result, ev, settled_at, is_shadow, match_id, event_name
+        SELECT sport, stake, odds, result, ev, settled_at, is_shadow, match_id, event_name, stake_reais, profit_reais
         FROM tips
         WHERE (archived IS NULL OR archived = 0) AND COALESCE(is_shadow, 0) = 0
           AND (sent_at >= datetime('now', ?) OR result IS NULL)
