@@ -590,6 +590,31 @@ const migrations = [
       `);
     },
   },
+  {
+    id: '033_split_esports_bankroll_lol_dota',
+    up(db) {
+      // Pós-split LoL/Dota (Abr/2026): se ambos lol e dota2 já foram seeded com
+      // valores default independentes (R$100 cada) ao lado de esports legado, o total
+      // fica inflado (esports+lol+dota2 = R$300). Divide esports ao meio nos novos
+      // buckets e zera a row esports — tips com sport='esports' ficam no DB (histórico
+      // preservado) mas não contam mais pra banca.
+      const esp = db.prepare("SELECT initial_banca, current_banca FROM bankroll WHERE sport='esports'").get();
+      const lol = db.prepare("SELECT initial_banca FROM bankroll WHERE sport='lol'").get();
+      const dota = db.prepare("SELECT initial_banca FROM bankroll WHERE sport='dota2'").get();
+      // Safety: só executa quando as 3 rows existem E esports tem valor positivo.
+      // Fresh installs ou setups customizados (lol/dota2 já ajustados manualmente) não
+      // são afetados — a migration aborta sem alteração.
+      if (!esp || !lol || !dota) return;
+      const espInit = Number(esp.initial_banca) || 0;
+      if (espInit <= 0) return;
+      const espCurr = Number(esp.current_banca) || espInit;
+      const initHalf = espInit / 2;
+      const currHalf = espCurr / 2;
+      db.prepare("UPDATE bankroll SET initial_banca=?, current_banca=?, updated_at=datetime('now') WHERE sport='lol'").run(initHalf, currHalf);
+      db.prepare("UPDATE bankroll SET initial_banca=?, current_banca=?, updated_at=datetime('now') WHERE sport='dota2'").run(initHalf, currHalf);
+      db.prepare("UPDATE bankroll SET initial_banca=0, current_banca=0, updated_at=datetime('now') WHERE sport='esports'").run();
+    },
+  },
 ];
 
 function applyMigrations(db) {
