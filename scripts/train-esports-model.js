@@ -81,6 +81,10 @@ const LOL_OE_FEATURES = [
 const LOL_PLAYER_FEATURES = [
   'avg_kda_diff', 'max_kda_diff', 'star_score_diff', 'has_roster_stats',
 ];
+// Dota2 OpenDota team stats (só Dota2; populado via sync-opendota-team-stats.js + migration 046)
+const DOTA2_FEATURES = [
+  'dota_rating_diff', 'dota_wr_diff', 'dota_games_diff', 'has_dota_team_stats',
+];
 
 // Decide NUM_FEATURES baseado no CSV carregado (se tem colunas LoL extras, inclui)
 let NUM_FEATURES = BASE_NUM_FEATURES.slice();
@@ -89,6 +93,7 @@ if (headers.includes('sos_diff')) NUM_FEATURES = [...NUM_FEATURES, ...ONE_V_ONE_
 if (GAME === 'lol' && headers.includes('gpm_diff')) NUM_FEATURES = [...NUM_FEATURES, ...LOL_EXTRA_FEATURES];
 if (GAME === 'lol' && headers.includes('oe_gd15_diff')) NUM_FEATURES = [...NUM_FEATURES, ...LOL_OE_FEATURES];
 if (GAME === 'lol' && headers.includes('avg_kda_diff')) NUM_FEATURES = [...NUM_FEATURES, ...LOL_PLAYER_FEATURES];
+if (GAME === 'dota2' && headers.includes('dota_rating_diff')) NUM_FEATURES = [...NUM_FEATURES, ...DOTA2_FEATURES];
 const CAT_FEATURES = ['league_tier']; // 1,2,3
 
 function buildVec(row) {

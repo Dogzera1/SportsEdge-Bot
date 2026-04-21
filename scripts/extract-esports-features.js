@@ -186,6 +186,37 @@ function rosterStatsAt(team, tMs, sinceDays = 60, minGamesPerPlayer = 10) {
 }
 
 // Mapa data → season/split (gol.gg usa SN = Year-2010+1 aprox; simplificação)
+// ── Dota2 OpenDota team stats loader ────────────────────────────────────
+// Usa dota_team_stats (migration 046) populado por scripts/sync-opendota-team-stats.js.
+// Lookup case-insensitive por name OR tag. Current stats (não histórico).
+const dotaTeamByName = new Map(); // normName → { rating, wr, games }
+const dotaTeamByTag = new Map();  // normTag → idem
+if (GAME === 'dota2') {
+  try {
+    const rows = db.prepare(`
+      SELECT name, tag, rating, wins, losses, wr
+      FROM dota_team_stats
+      WHERE name IS NOT NULL AND (rating IS NOT NULL OR (wins + losses) >= 5)
+    `).all();
+    for (const r of rows) {
+      const entry = {
+        rating: Number(r.rating) || null,
+        wr: Number(r.wr) || null,
+        games: Number(r.wins || 0) + Number(r.losses || 0),
+      };
+      if (r.name) dotaTeamByName.set(String(r.name).toLowerCase().trim(), entry);
+      if (r.tag) dotaTeamByTag.set(String(r.tag).toLowerCase().trim(), entry);
+    }
+    console.log(`[extract-es] dota_team_stats loaded: ${rows.length} teams`);
+  } catch (e) { console.warn(`[extract-es] dota_team_stats load err: ${e.message}`); }
+}
+
+function dotaTeamLookup(name) {
+  if (!name) return null;
+  const k = String(name).toLowerCase().trim();
+  return dotaTeamByName.get(k) || dotaTeamByTag.get(k) || null;
+}
+
 function seasonSplit(dateIso) {
   const [y, m] = dateIso.split('-').map(Number);
   const season = `S${y - 2010 - 2}`; // 2023→S13, 2024→S14, 2025→S15, 2026→S16
@@ -308,6 +339,9 @@ const HEADERS = [
   'oe_gd15_diff', 'oe_obj_diff', 'oe_wr_diff', 'oe_dpm_diff', 'has_oe_stats',
   // OE player-level roster stats (só LoL; 0 se algum time sem roster válido)
   'avg_kda_diff', 'max_kda_diff', 'star_score_diff', 'has_roster_stats',
+  // Dota2 OpenDota team stats (só Dota2; 0 se algum time sem match)
+  // Nota: stats são current-cumulative — leve look-ahead bias ok como proxy de team strength
+  'dota_rating_diff', 'dota_wr_diff', 'dota_games_diff', 'has_dota_team_stats',
   'y',
 ];
 
@@ -438,6 +472,18 @@ for (const r of rows) {
         starScoreDiff = r1.starScore - r2.starScore;
       }
     }
+    // Dota2 OpenDota team stats (current cumulative — proxy de team strength)
+    let dotaRatingDiff = 0, dotaWrDiff = 0, dotaGamesDiff = 0, hasDotaTeamStats = 0;
+    if (GAME === 'dota2' && dotaTeamByName.size > 0) {
+      const d1 = dotaTeamLookup(p1Raw);
+      const d2 = dotaTeamLookup(p2Raw);
+      if (d1 && d2 && d1.rating != null && d2.rating != null && d1.games >= 5 && d2.games >= 5) {
+        hasDotaTeamStats = 1;
+        dotaRatingDiff = d1.rating - d2.rating;
+        dotaWrDiff = (d1.wr || 0) - (d2.wr || 0);
+        dotaGamesDiff = Math.log1p(d1.games) - Math.log1p(d2.games); // log-scale — games têm long tail
+      }
+    }
     out.push([
       new Date(t).toISOString().slice(0, 10),
       (league || '').replace(/,/g, ' '),
@@ -460,6 +506,7 @@ for (const r of rows) {
       draPctDiff.toFixed(4), nashPctDiff.toFixed(4), hasTeamStats,
       oeGd15Diff.toFixed(2), oeObjDiff.toFixed(4), oeWrDiff.toFixed(4), oeDpmDiff.toFixed(2), hasOeStats,
       avgKdaDiff.toFixed(3), maxKdaDiff.toFixed(3), starScoreDiff.toFixed(2), hasRosterStats,
+      dotaRatingDiff.toFixed(1), dotaWrDiff.toFixed(4), dotaGamesDiff.toFixed(3), hasDotaTeamStats,
       p1Won,
     ]);
     kept++;

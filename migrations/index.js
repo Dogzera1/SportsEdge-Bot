@@ -1145,6 +1145,38 @@ const migrations = [
       `);
     },
   },
+  {
+    id: '046_dota_team_stats',
+    up(db) {
+      // Dota2 pro team aggregate stats via OpenDota /api/teams.
+      // Populado por scripts/sync-opendota-team-stats.js (cron diário).
+      // Consumido por extract-esports-features.js quando GAME=dota2 → adiciona
+      //   {rating_diff, wr_diff, games_diff, has_team_stats} ao training.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS dota_team_stats (
+          team_id INTEGER PRIMARY KEY,
+          name TEXT,
+          tag TEXT,
+          rating REAL,
+          wins INTEGER DEFAULT 0,
+          losses INTEGER DEFAULT 0,
+          wr REAL,
+          last_match_time INTEGER,
+          updated_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_dota_team_name ON dota_team_stats(LOWER(name));
+        CREATE INDEX IF NOT EXISTS idx_dota_team_tag ON dota_team_stats(LOWER(tag));
+      `);
+    },
+  },
+  {
+    id: '047_tips_current_stake',
+    up(db) {
+      // Adiciona tips.current_stake (era ALTER TABLE inline em server.js que não
+      // rodava em contextos que só chamam migrations, crashando initDatabase).
+      try { db.exec("ALTER TABLE tips ADD COLUMN current_stake TEXT"); } catch (_) { /* já existe */ }
+    },
+  },
 ];
 
 function applyMigrations(db) {
