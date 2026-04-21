@@ -3570,7 +3570,9 @@ function runSettleSweep({ sportFilter = '', days = 14 } = {}) {
 
       // Unit value PER-SPORT tier-based (Abr/2026-III): pega current_banca atual
       // e initial_banca do sport, retorna tier discretizado. NÃO é baseline global.
-      const stakeR = tip.stake_reais || (() => {
+      // SEMPRE computa via tier (ignora tip.stake_reais stored — pode estar em escala
+      // antiga se foi pre-computado via /record-tip com unit global).
+      const stakeR = (() => {
         const { getSportUnitValue } = require('./lib/sport-unit');
         const bk = stmts.getBankroll.get(sport);
         const uv = getSportUnitValue(bk?.current_banca || 0, bk?.initial_banca || 100);
@@ -6397,7 +6399,8 @@ const server = http.createServer(async (req, res) => {
           const bk = stmts.getBankroll.get(sport);
           const uv = getSportUnitValue(bk?.current_banca || 0, bk?.initial_banca || 100);
           const su = parseFloat(String(tip.stake || '1').replace('u', '')) || 1;
-          const stakeR = tip.stake_reais || parseFloat((su * uv).toFixed(2));
+          // SEMPRE recalcula via tier (ignora stake_reais stored pre-computado com unit errada)
+          const stakeR = parseFloat((su * uv).toFixed(2));
           const odds = parseFloat(tip.odds) || 1;
           const profitR = result === 'win'
             ? parseFloat((stakeR * (odds - 1)).toFixed(2))
@@ -10891,7 +10894,8 @@ const server = http.createServer(async (req, res) => {
             log(logLevel, 'SETTLE', `${sport} matchId=${matchId} tip="${tip.tip_participant}" vs winner="${winner}" → ${result} [method=${matchMethod} score=${matchScore}]`);
             stmts.settleTip.run(result, matchId, sport);
             // Atualiza profit_reais com tier per-sport unit; acumula delta da banca.
-            const stakeR = tip.stake_reais || (() => {
+            // SEMPRE recalcula (ignora stake_reais stored — pode estar em escala antiga).
+            const stakeR = (() => {
               const { getSportUnitValue } = require('./lib/sport-unit');
               const bk = stmts.getBankroll.get(sport);
               const uv = getSportUnitValue(bk?.current_banca || 0, bk?.initial_banca || 100);
