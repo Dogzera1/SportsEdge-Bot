@@ -11,6 +11,21 @@ const { log, calcKelly, calcKellyFraction, calcKellyWithP, norm, fmtDate, fmtDat
 const { adjustStakeUnits } = require('./lib/risk-manager');
 const { esportsPreFilter } = require('./lib/ml');
 const { formatLineShopDM, computeLineShop } = require('./lib/line-shopping');
+const { getSportUnitValue } = require('./lib/sport-unit');
+
+// Helper: formata stake em "Xu (R$Y.YY)" pegando unit tier atual do sport.
+// Tier vem do DB (bankroll do sport). Se DB offline, usa R$1 base.
+function formatStakeWithReais(sport, stakeUnits) {
+  try {
+    if (!db) return `${stakeUnits}u`;
+    const bk = db.prepare('SELECT initial_banca, current_banca FROM bankroll WHERE sport=?').get(sport);
+    if (!bk) return `${stakeUnits}u`;
+    const uv = getSportUnitValue(bk.current_banca || 0, bk.initial_banca || 100);
+    const su = parseFloat(String(stakeUnits).replace(/u/i, '')) || 0;
+    const reais = (su * uv).toFixed(2);
+    return `${stakeUnits}${/u$/i.test(String(stakeUnits)) ? '' : 'u'} (R$${reais})`;
+  } catch (_) { return `${stakeUnits}u`; }
+}
 const { tipBetButton } = require('./lib/book-deeplink');
 
 // Helper central pra semi-auto deeplink. Usa computeLineShop pra escolher book
@@ -1832,7 +1847,7 @@ async function runAutoAnalysis() {
             `🎯 Aposta: *${tipTeam}* ML @ *${tipOdd}*\n` +
             bookLineLol +
             minTakeLine +
-            `📈 EV: *${tipEV}*\n💵 Stake: *${tipStakeAdj}* _(${kellyLabel})_\n` +
+            `📈 EV: *${tipEV}*\n💵 Stake: *${formatStakeWithReais('lol', tipStakeAdj)}* _(${kellyLabel})_\n` +
             `${confEmoji} Confiança: *${tipConf}*${mlEdgeLabel}\n` +
             `📋 ${match.league}\n` +
             `_${analysisLabel}_` +
@@ -2116,7 +2131,7 @@ async function runAutoAnalysis() {
               `\n🎯 Aposta: *${tipTeam}* ML @ *${tipOdd}*\n` +
               minTakeLine +
               bookLineLolUp +
-              `📈 EV: *${tipEV}*\n💵 Stake: *${tipStakeAdj}* _(${kellyLabel})_\n` +
+              `📈 EV: *${tipEV}*\n💵 Stake: *${formatStakeWithReais('lol', tipStakeAdj)}* _(${kellyLabel})_\n` +
               `${confEmoji} Confiança: *${tipConf}*${mlEdgeLabel}\n` +
               `${imminentNote}${baixaNote}` +
               `📋 _Formato Bo1 — análise por forma e H2H (draft não disponível antes do início)_\n\n` +
@@ -2299,12 +2314,11 @@ async function settleCompletedTips() {
   lastSettlementCheck = Date.now();
 
   // 'lol' e 'dota2' são buckets separados pós-Abr/2026 — não existem como chaves em
-  // SPORTS, mas precisam ser settle via /unsettled-tips?sport=lol|dota2.
+  // SPORTS, mas precisam ser settle INCONDICIONALMENTE (mesmo se SPORTS.esports=false)
+  // pra não deixar tips órfãs com result=NULL forever.
   const sportsToSettle = Object.keys(SPORTS);
-  if (SPORTS.esports?.enabled) {
-    if (!sportsToSettle.includes('lol')) sportsToSettle.push('lol');
-    if (!sportsToSettle.includes('dota2')) sportsToSettle.push('dota2');
-  }
+  if (!sportsToSettle.includes('lol')) sportsToSettle.push('lol');
+  if (!sportsToSettle.includes('dota2')) sportsToSettle.push('dota2');
   for (const sport of sportsToSettle) {
     if (sport !== 'lol' && sport !== 'dota2' && !SPORTS[sport]?.enabled) continue;
 
@@ -7647,7 +7661,7 @@ async function poll(token, sport) {
         }
       }
     } catch(e) {
-      console.error(`[POLL ${sport}]`, e.message);
+      log('ERROR', `POLL-${sport?.toUpperCase?.() || 'UNKNOWN'}`, e.message);
       consecutiveErrors++;
     }
     
@@ -8772,7 +8786,7 @@ Máximo 200 palavras.`;
       const minTakeOdds = calcMinTakeOdds(tipOdd);
       const minTakeLine = minTakeOdds ? `\n📉 Odd mínima: *${minTakeOdds}*` : '';
       const _bookDota = formatLineShopDM(o, isT1bet ? 't1' : 't2').trim();
-      const msg = `🎮 *DOTA 2 — ${match.league}*${liveTag}\n${match.team1} vs ${match.team2} | ${match.format || ''}\n📅 ${matchTime} BRT\n\n✅ *TIP: ${tipTeam} @ ${tipOdd}*${minTakeLine}\n💰 Stake: ${tipStakeAdj} | EV: ${tipEV} | Conf: ${tipConf}\n${_bookDota || `🏦 ${o.bookmaker || 'SX.Bet'}`}`;
+      const msg = `🎮 *DOTA 2 — ${match.league}*${liveTag}\n${match.team1} vs ${match.team2} | ${match.format || ''}\n📅 ${matchTime} BRT\n\n✅ *TIP: ${tipTeam} @ ${tipOdd}*${minTakeLine}\n💰 Stake: ${formatStakeWithReais('dota2', tipStakeAdj)} | EV: ${tipEV} | Conf: ${tipConf}\n${_bookDota || `🏦 ${o.bookmaker || 'SX.Bet'}`}`;
 
       try {
         const rec = await serverPost('/record-tip', {
@@ -9595,7 +9609,7 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
           minTakeLine +
           _bookMma +
           `📈 EV: *+${tipEV}%* | De-juice: ${tipTeam === fight.team1 ? fairP1 : fairP2}%\n` +
-          `💵 Stake: *${tipStakeAdjMma}u* _(${kellyLabelMma})_\n` +
+          `💵 Stake: *${formatStakeWithReais('mma', tipStakeAdjMma)}* _(${kellyLabelMma})_\n` +
           `${confEmoji} Confiança: *${_confEffMma}*${bookSourceLine}\n` +
           `⚠️ _Aposte com responsabilidade._`;
 
@@ -13693,6 +13707,32 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   };
   setInterval(runShadowSettle, 30 * 60 * 1000);
   setTimeout(runShadowSettle, 10 * 60 * 1000); // 10min pós-boot (não espera 30min pra primeira run)
+
+  // Esports legacy audit: pós-split (Abr/2026) tips novas devem usar sport='lol'/'dota2'.
+  // Se >5% de tips settadas recentes estão com sport='esports', alerta — indica que
+  // reclassificação não tá rodando ou tem path de código retrógrado.
+  const runEsportsLegacyAudit = () => {
+    try {
+      const cutoff = '2026-04-21'; // data do switch para buckets separados
+      const row = db.prepare(`
+        SELECT
+          SUM(CASE WHEN sport = 'esports' THEN 1 ELSE 0 END) AS legacy,
+          SUM(CASE WHEN sport IN ('lol','dota2') THEN 1 ELSE 0 END) AS novo,
+          COUNT(*) AS total
+        FROM tips
+        WHERE sent_at >= ?
+          AND sport IN ('esports','lol','dota2')
+          AND (archived IS NULL OR archived = 0)
+      `).get(cutoff);
+      if (!row || row.total < 10) return;
+      const legacyPct = (row.legacy / row.total) * 100;
+      if (legacyPct > 5) {
+        log('WARN', 'ESPORTS-AUDIT', `${row.legacy}/${row.total} (${legacyPct.toFixed(1)}%) tips pós-${cutoff} ainda com sport='esports' legacy — reclassificação incompleta`);
+      }
+    } catch (e) { log('DEBUG', 'ESPORTS-AUDIT', e.message); }
+  };
+  setInterval(runEsportsLegacyAudit, 6 * 60 * 60 * 1000); // 6h
+  setTimeout(runEsportsLegacyAudit, 5 * 60 * 1000);
 
   // Market tip readiness alert: cron 24h, checa shadow stats e avisa admin
   // quando (sport, market) atinge N≥30 settled E ROI positivo.

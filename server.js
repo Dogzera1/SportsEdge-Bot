@@ -3255,7 +3255,14 @@ async function getPandaScoreValorantMatches() {
 
 // ── Admin Auth + Rate Limit (in-memory) ──
 const ADMIN_KEY = (process.env.ADMIN_KEY || '').trim();
+// Security mode: 'open' (default dev, aberto se no key) vs 'strict' (bloqueia se no key).
+// Use ADMIN_KEY_STRICT=true em produção pra forçar 401 se ADMIN_KEY vazio.
+const ADMIN_STRICT = /^(1|true|yes)$/i.test(String(process.env.ADMIN_KEY_STRICT || ''));
 let _adminKeyWarnLogged = false;
+if (!ADMIN_KEY) {
+  log(ADMIN_STRICT ? 'ERROR' : 'WARN', 'SEC',
+    `ADMIN_KEY não configurada — rotas admin ${ADMIN_STRICT ? 'BLOQUEADAS (strict mode)' : 'abertas sem autenticação'}. Configure ADMIN_KEY em produção${ADMIN_STRICT ? '' : ' + ADMIN_KEY_STRICT=true'}.`);
+}
 function warnAdminKeyMissingOnce() {
   if (ADMIN_KEY || _adminKeyWarnLogged) return;
   _adminKeyWarnLogged = true;
@@ -3283,7 +3290,11 @@ function isAdminRequest(req) {
 function requireAdmin(req, res) {
   if (!ADMIN_KEY) {
     warnAdminKeyMissingOnce();
-    return true;
+    if (ADMIN_STRICT) {
+      sendJson(res, { ok: false, error: 'admin_key_not_configured_strict_mode' }, 503);
+      return false;
+    }
+    return true; // open mode dev-only
   }
   if (!isAdminRequest(req)) {
     sendJson(res, { ok: false, error: 'unauthorized' }, 401);
@@ -6382,8 +6393,9 @@ const server = http.createServer(async (req, res) => {
 
           db.prepare(`UPDATE tips SET result = ?, settled_at = datetime('now') WHERE id = ? AND sport = ?`).run(result, id, sport);
 
+          const { getSportUnitValue } = require('./lib/sport-unit');
           const bk = stmts.getBankroll.get(sport);
-          const uv = bk ? bk.current_banca / 100 : 1;
+          const uv = getSportUnitValue(bk?.current_banca || 0, bk?.initial_banca || 100);
           const su = parseFloat(String(tip.stake || '1').replace('u', '')) || 1;
           const stakeR = tip.stake_reais || parseFloat((su * uv).toFixed(2));
           const odds = parseFloat(tip.odds) || 1;
@@ -6741,14 +6753,22 @@ const server = http.createServer(async (req, res) => {
     try {
       const tips = db.prepare(`
         SELECT id, sport, participant1, participant2, tip_participant, odds, stake,
-               sent_at, match_id, result
+               sent_at, match_id, event_name, result
         FROM tips
         WHERE (archived IS NULL OR archived = 0)
         ORDER BY id ASC
       `).all();
       const normStr = s => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-      const bucketFor = sport => {
-        if (sport === 'esports' || sport === 'lol' || sport === 'dota2' || sport === 'dota') return 'esports_bucket';
+      // Bucket separa LoL/Dota via match_id/event_name — evita arquivar Dota como LoL
+      // quando match_ids diferentes apontam pra tips em sports diferentes.
+      const bucketFor = (t) => {
+        const sport = t.sport;
+        if (sport === 'esports' || sport === 'lol' || sport === 'dota2' || sport === 'dota') {
+          const mid = String(t.match_id || '');
+          const ev = String(t.event_name || '').toLowerCase();
+          if (mid.startsWith('dota2_') || ev.includes('dota')) return 'dota2_bucket';
+          return 'lol_bucket';
+        }
         if (sport === 'mma') return 'mma_bucket';
         return sport;
       };
@@ -6756,7 +6776,7 @@ const server = http.createServer(async (req, res) => {
       for (const t of tips) {
         const day = String(t.sent_at || '').slice(0, 10);
         const key = [
-          bucketFor(t.sport),
+          bucketFor(t),
           normStr(t.participant1),
           normStr(t.participant2),
           normStr(t.tip_participant),
@@ -8406,11 +8426,12 @@ const server = http.createServer(async (req, res) => {
             ? new Date(t.oddsFetchedAt).toISOString()
             : (t._oddsFetchedAt ? new Date(t._oddsFetchedAt).toISOString() : new Date().toISOString())
         });
-        // Calcula stake em reais com base na banca atual (1u = 1% da banca atual)
+        // Calcula stake em reais com tier per-sport unit (getSportUnitValue).
         try {
+          const { getSportUnitValue } = require('./lib/sport-unit');
           const bk = stmts.getBankroll.get(sport);
           if (bk && result.lastInsertRowid) {
-            const unitValue = bk.current_banca / 100;
+            const unitValue = getSportUnitValue(bk.current_banca || 0, bk.initial_banca || 100);
             const stakeUnits = parseFloat(String(t.stake || '1').replace('u','')) || 1;
             const stakeReais = parseFloat((stakeUnits * unitValue).toFixed(2));
             stmts.updateTipFinanceiro.run(stakeReais, null, result.lastInsertRowid);
@@ -10802,10 +10823,11 @@ const server = http.createServer(async (req, res) => {
             const logLevel = 'INFO';
             log(logLevel, 'SETTLE', `${sport} matchId=${matchId} tip="${tip.tip_participant}" vs winner="${winner}" → ${result} [method=${matchMethod} score=${matchScore}]`);
             stmts.settleTip.run(result, matchId, sport);
-            // Atualiza profit_reais e acumula delta da banca
+            // Atualiza profit_reais com tier per-sport unit; acumula delta da banca.
             const stakeR = tip.stake_reais || (() => {
+              const { getSportUnitValue } = require('./lib/sport-unit');
               const bk = stmts.getBankroll.get(sport);
-              const uv = bk ? bk.current_banca / 100 : 1;
+              const uv = getSportUnitValue(bk?.current_banca || 0, bk?.initial_banca || 100);
               const su = parseFloat(String(tip.stake || '1').replace('u','')) || 1;
               return parseFloat((su * uv).toFixed(2));
             })();
@@ -10826,17 +10848,21 @@ const server = http.createServer(async (req, res) => {
             bancaDelta += profitR;
             settled++;
           }
+          // Atualiza bankroll DENTRO da transaction pra evitar race condition
+          // entre ciclos paralelos de settlement. Lê fresh + grava atomicamente.
+          if (bancaDelta !== 0) {
+            const bkFresh = stmts.getBankroll.get(sport);
+            if (bkFresh) {
+              const nova = parseFloat(((Number(bkFresh.current_banca) || 0) + bancaDelta).toFixed(2));
+              stmts.updateBankroll.run(nova, sport);
+            }
+          }
           return { settled, bancaDelta };
         })();
         let { settled, bancaDelta } = settleResult;
-        // Atualiza banca total
         if (bancaDelta !== 0) {
           const bk = stmts.getBankroll.get(sport);
-          if (bk) {
-            const nova = parseFloat((bk.current_banca + bancaDelta).toFixed(2));
-            stmts.updateBankroll.run(nova, sport);
-            log('INFO', 'BANCA', `Settlement [${sport}]: delta R$${bancaDelta >= 0 ? '+' : ''}${bancaDelta.toFixed(2)} → banca agora R$${nova}`);
-          }
+          log('INFO', 'BANCA', `Settlement [${sport}]: delta R$${bancaDelta >= 0 ? '+' : ''}${bancaDelta.toFixed(2)} → banca agora R$${bk?.current_banca?.toFixed?.(2) || '?'}`);
         }
         // Atualiza Elo após settlement de futebol (só para mercados 1X2, não Over/Under)
         if (sport === 'football' && settled > 0 && winner && winner !== '__loss__') {
