@@ -3939,6 +3939,157 @@ async function runLeagueGuardCycle() {
   }
 }
 
+// Reusable: gera relatório pipeline pra /pipeline-status cmd + digest cron.
+// Retorna { txt, hasCritical }.
+async function buildPipelineStatusReport(days = 30) {
+  const ba = await serverGet('/bankroll-audit').catch(() => null);
+  const totalInit = Number(ba?.total_initial || 0);
+  const totalStored = Number(ba?.total_current_stored || 0);
+  const deltaAbs = totalStored - totalInit;
+  const deltaPct = totalInit > 0 ? (deltaAbs / totalInit * 100) : 0;
+
+  const sports = ['lol', 'dota2', 'mma', 'tennis', 'cs', 'valorant', 'football', 'tabletennis', 'darts', 'snooker'];
+  const sportRows = [];
+  for (const sp of sports) {
+    const extraSql = sp === 'dota2'
+      ? " OR (sport = 'esports' AND (match_id LIKE 'dota2_%' OR LOWER(COALESCE(event_name,'')) LIKE '%dota%'))"
+      : sp === 'lol'
+        ? " OR (sport = 'esports' AND match_id NOT LIKE 'dota2_%' AND LOWER(COALESCE(event_name,'')) NOT LIKE '%dota%')"
+        : "";
+    const r = db.prepare(`
+      SELECT COUNT(*) AS n,
+             COALESCE(SUM(stake_reais), 0) AS staked,
+             COALESCE(SUM(profit_reais), 0) AS profit
+      FROM tips
+      WHERE sent_at >= datetime('now', '-${days} days')
+        AND (archived IS NULL OR archived = 0)
+        AND COALESCE(is_shadow, 0) = 0
+        AND result IN ('win','loss')
+        AND (sport = ?${extraSql})
+    `).get(sp);
+    const n = Number(r?.n || 0);
+    const staked = Number(r?.staked || 0);
+    const profit = Number(r?.profit || 0);
+    const roi = staked > 0 ? (profit / staked * 100) : null;
+    if (n > 0) sportRows.push({ sport: sp, n, roi, profit });
+  }
+  sportRows.sort((a, b) => (a.roi ?? 0) - (b.roi ?? 0));
+
+  const bandOf = (roi, n) => {
+    if (n < 10 || roi == null) return '?';
+    if (roi >= 5) return 'healthy';
+    if (roi >= 0) return 'neutral';
+    if (roi >= -10) return 'warn';
+    if (roi >= -25) return 'review';
+    return 'leak';
+  };
+  const bandIcon = { healthy: '🟢', neutral: '⚪', warn: '🟡', review: '🟠', leak: '🔴', '?': '⚫' };
+
+  const leaksRows = db.prepare(`
+    SELECT sport, event_name, COUNT(*) AS n,
+           COALESCE(SUM(stake_reais), 0) AS staked,
+           COALESCE(SUM(profit_reais), 0) AS profit
+    FROM tips
+    WHERE sent_at >= datetime('now', '-${days} days')
+      AND (archived IS NULL OR archived = 0)
+      AND COALESCE(is_shadow, 0) = 0
+      AND result IN ('win','loss')
+      AND event_name IS NOT NULL AND TRIM(event_name) != ''
+    GROUP BY sport, event_name
+    HAVING n >= 5
+  `).all();
+  const leaks = leaksRows
+    .map(r => ({
+      sport: r.sport,
+      league: (r.event_name || '').slice(0, 30),
+      n: r.n,
+      roi: r.staked > 0 ? (r.profit / r.staked * 100) : null,
+      profit: Number(r.profit || 0),
+    }))
+    .filter(r => r.profit < -5 && r.roi != null && r.roi < 0)
+    .sort((a, b) => a.profit - b.profit)
+    .slice(0, 3);
+
+  const now = Date.now();
+  const autoCount = _autoBlockedLeagues.size;
+  const manualCount = _leagueBlocklist.size - autoCount;
+  const activeCooldowns = [..._leagueUnblockCooldown.values()].filter(ts => ts > now).length;
+
+  let txt = `🏥 *PIPELINE STATUS — ${days}d*\n\n`;
+  const deltaIcon = deltaPct >= 0 ? '🟢' : deltaPct >= -10 ? '🟡' : '🔴';
+  txt += `${deltaIcon} *Banca:* R$${totalStored.toFixed(2)} / R$${totalInit.toFixed(2)} `;
+  txt += `(${deltaAbs >= 0 ? '+' : ''}R$${deltaAbs.toFixed(2)} · ${deltaPct >= 0 ? '+' : ''}${deltaPct.toFixed(1)}%)\n\n`;
+
+  txt += `*Sports (ROI ${days}d):*\n`;
+  if (!sportRows.length) {
+    txt += `_Sem tips settled._\n`;
+  } else {
+    const problematicBands = new Set(['warn', 'review', 'leak']);
+    const problematicOnly = sportRows.filter(s => problematicBands.has(bandOf(s.roi, s.n)));
+    const toShow = problematicOnly.length ? problematicOnly : sportRows.slice(0, 5);
+    for (const s of toShow) {
+      const band = bandOf(s.roi, s.n);
+      const roiStr = s.roi != null ? (s.roi >= 0 ? '+' : '') + s.roi.toFixed(1) + '%' : '—';
+      txt += `${bandIcon[band]} ${s.sport.padEnd(9)} n=${String(s.n).padStart(3)} ROI ${roiStr.padStart(7)} P&L R$${s.profit.toFixed(2)} \`${band}\`\n`;
+    }
+    if (problematicOnly.length && problematicOnly.length < sportRows.length) {
+      txt += `_+${sportRows.length - problematicOnly.length} sports healthy/neutral omitidos_\n`;
+    }
+  }
+
+  txt += `\n*Blocklist:*\n`;
+  txt += `🤖 ${autoCount} auto · 🔧 ${manualCount} manual/env · ⏸️ ${activeCooldowns} cooldowns\n`;
+
+  if (leaks.length) {
+    txt += `\n*Top leaks (liga):*\n`;
+    for (const l of leaks) {
+      const roiStr = l.roi != null ? l.roi.toFixed(1) + '%' : '—';
+      txt += `🚨 ${l.sport}/${l.league} — n=${l.n} ROI ${roiStr} · R$${l.profit.toFixed(2)}\n`;
+    }
+  }
+
+  const criticalBands = sportRows.filter(s => bandOf(s.roi, s.n) === 'leak');
+  const reviewBands = sportRows.filter(s => bandOf(s.roi, s.n) === 'review');
+  const hasCritical = !!(criticalBands.length || leaks.length || deltaPct <= -15);
+  if (criticalBands.length || reviewBands.length || leaks.length) {
+    txt += `\n*Ações sugeridas:*\n`;
+    for (const s of criticalBands) txt += `• \`KELLY_${s.sport.toUpperCase()}_ALTA=0.10\` ou /pause-sport ${s.sport}\n`;
+    for (const s of reviewBands) txt += `• \`KELLY_${s.sport.toUpperCase()}_ALTA=0.175\` (review band)\n`;
+    if (leaks.length) txt += `• \`/block-league <sport> <substring>\` pras ligas acima\n`;
+  } else {
+    txt += `\n✅ _Pipeline saudável — nada crítico_\n`;
+  }
+  txt += `\n_Detalhes: /kelly · /clv-league · /blocked-leagues · /bankroll-audit_`;
+
+  return { txt, hasCritical, metrics: { totalInit, totalStored, deltaPct, sportRows, leaks, autoCount, manualCount, activeCooldowns } };
+}
+
+// Weekly DM digest. Desativa via PIPELINE_DIGEST_AUTO=false. Cooldown 6d evita
+// double-send em restart mid-week. Só DM se houver >= 1 admin registrado.
+let _lastPipelineDigestAt = 0;
+async function runPipelineDigestCycle() {
+  if (/^(0|false|no)$/i.test(String(process.env.PIPELINE_DIGEST_AUTO || ''))) return;
+  if (!ADMIN_IDS.size) return;
+  const cooldownMs = 6 * 24 * 60 * 60 * 1000;
+  if (Date.now() - _lastPipelineDigestAt < cooldownMs) return;
+  try {
+    const days = Math.max(7, Math.min(90, parseInt(process.env.PIPELINE_DIGEST_DAYS || '30', 10)));
+    const { txt } = await buildPipelineStatusReport(days);
+    const prefix = `📬 *Weekly Pipeline Digest*\n\n`;
+    const tokenForAlert = Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
+    if (!tokenForAlert) return;
+    for (const adminId of ADMIN_IDS) {
+      const msg = prefix + txt;
+      const r_ = await sendDM(tokenForAlert, adminId, msg).catch(() => ({ ok: false }));
+      if (r_ && r_.ok === false) await sendDM(tokenForAlert, adminId, msg.replace(/[*_`]/g, ''), { parse_mode: undefined }).catch(() => {});
+    }
+    _lastPipelineDigestAt = Date.now();
+    log('INFO', 'PIPELINE-DIGEST', `DM enviado pra ${ADMIN_IDS.size} admins`);
+  } catch (e) {
+    log('WARN', 'PIPELINE-DIGEST', `falhou: ${e.message}`);
+  }
+}
+
 async function runModelCalibrationCycle() {
   if (!ADMIN_IDS.size) return;
   let result = null;
@@ -6908,137 +7059,20 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
       await send(token, chatId, txt);
     } catch (e) { await send(token, chatId, `❌ ${e.message}`); }
 
+  } else if (cmd === '/force-digest' || cmd === '/pipeline-digest') {
+    if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
+    try {
+      await send(token, chatId, '📬 Forçando digest — reset cooldown + envio pra todos admins...');
+      _lastPipelineDigestAt = 0;
+      await runPipelineDigestCycle();
+      await send(token, chatId, '✅ Digest enviado.');
+    } catch (e) { await send(token, chatId, `❌ ${e.message}`); }
+
   } else if (cmd === '/pipeline-status' || cmd === '/pipeline' || cmd === '/health') {
     if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
     try {
       const days = Math.max(7, Math.min(90, parseInt(parts[1] || '30', 10) || 30));
-      const ba = await serverGet('/bankroll-audit').catch(() => null);
-      const totalInit = Number(ba?.total_initial || 0);
-      const totalStored = Number(ba?.total_current_stored || 0);
-      const deltaAbs = totalStored - totalInit;
-      const deltaPct = totalInit > 0 ? (deltaAbs / totalInit * 100) : 0;
-
-      // Per-sport ROI + Kelly advice (mesma logic de /kelly)
-      const sports = ['lol', 'dota2', 'mma', 'tennis', 'cs', 'valorant', 'football', 'tabletennis', 'darts', 'snooker'];
-      const sportRows = [];
-      for (const sp of sports) {
-        const extraSql = sp === 'dota2'
-          ? " OR (sport = 'esports' AND (match_id LIKE 'dota2_%' OR LOWER(COALESCE(event_name,'')) LIKE '%dota%'))"
-          : sp === 'lol'
-            ? " OR (sport = 'esports' AND match_id NOT LIKE 'dota2_%' AND LOWER(COALESCE(event_name,'')) NOT LIKE '%dota%')"
-            : "";
-        const r = db.prepare(`
-          SELECT COUNT(*) AS n,
-                 COALESCE(SUM(stake_reais), 0) AS staked,
-                 COALESCE(SUM(profit_reais), 0) AS profit
-          FROM tips
-          WHERE sent_at >= datetime('now', '-${days} days')
-            AND (archived IS NULL OR archived = 0)
-            AND COALESCE(is_shadow, 0) = 0
-            AND result IN ('win','loss')
-            AND (sport = ?${extraSql})
-        `).get(sp);
-        const n = Number(r?.n || 0);
-        const staked = Number(r?.staked || 0);
-        const profit = Number(r?.profit || 0);
-        const roi = staked > 0 ? (profit / staked * 100) : null;
-        if (n > 0) sportRows.push({ sport: sp, n, roi, profit });
-      }
-      sportRows.sort((a, b) => (a.roi ?? 0) - (b.roi ?? 0)); // ascending: pior primeiro
-
-      const bandOf = (roi, n) => {
-        if (n < 10 || roi == null) return '?';
-        if (roi >= 5) return 'healthy';
-        if (roi >= 0) return 'neutral';
-        if (roi >= -10) return 'warn';
-        if (roi >= -25) return 'review';
-        return 'leak';
-      };
-      const bandIcon = { healthy: '🟢', neutral: '⚪', warn: '🟡', review: '🟠', leak: '🔴', '?': '⚫' };
-
-      // Liga leaks top 3 (usa mesma query do /clv-by-league)
-      const leaksRows = db.prepare(`
-        SELECT sport, event_name, COUNT(*) AS n,
-               COALESCE(SUM(stake_reais), 0) AS staked,
-               COALESCE(SUM(profit_reais), 0) AS profit
-        FROM tips
-        WHERE sent_at >= datetime('now', '-${days} days')
-          AND (archived IS NULL OR archived = 0)
-          AND COALESCE(is_shadow, 0) = 0
-          AND result IN ('win','loss')
-          AND event_name IS NOT NULL AND TRIM(event_name) != ''
-        GROUP BY sport, event_name
-        HAVING n >= 5
-      `).all();
-      const leaks = leaksRows
-        .map(r => ({
-          sport: r.sport,
-          league: (r.event_name || '').slice(0, 30),
-          n: r.n,
-          roi: r.staked > 0 ? (r.profit / r.staked * 100) : null,
-          profit: Number(r.profit || 0),
-        }))
-        .filter(r => r.profit < -5 && r.roi != null && r.roi < 0)
-        .sort((a, b) => a.profit - b.profit)
-        .slice(0, 3);
-
-      // Blocklist state
-      const now = Date.now();
-      const autoCount = _autoBlockedLeagues.size;
-      const manualCount = _leagueBlocklist.size - autoCount;
-      const activeCooldowns = [..._leagueUnblockCooldown.values()].filter(ts => ts > now).length;
-
-      // Compose message
-      let txt = `🏥 *PIPELINE STATUS — ${days}d*\n\n`;
-      // Bankroll
-      const deltaIcon = deltaPct >= 0 ? '🟢' : deltaPct >= -10 ? '🟡' : '🔴';
-      txt += `${deltaIcon} *Banca:* R$${totalStored.toFixed(2)} / R$${totalInit.toFixed(2)} `;
-      txt += `(${deltaAbs >= 0 ? '+' : ''}R$${deltaAbs.toFixed(2)} · ${deltaPct >= 0 ? '+' : ''}${deltaPct.toFixed(1)}%)\n\n`;
-
-      // Per-sport
-      txt += `*Sports (ROI ${days}d):*\n`;
-      if (!sportRows.length) {
-        txt += `_Sem tips settled._\n`;
-      } else {
-        const problematicBands = new Set(['warn', 'review', 'leak']);
-        const problematicOnly = sportRows.filter(s => problematicBands.has(bandOf(s.roi, s.n)));
-        const toShow = problematicOnly.length ? problematicOnly : sportRows.slice(0, 5);
-        for (const s of toShow) {
-          const band = bandOf(s.roi, s.n);
-          const roiStr = s.roi != null ? (s.roi >= 0 ? '+' : '') + s.roi.toFixed(1) + '%' : '—';
-          txt += `${bandIcon[band]} ${s.sport.padEnd(9)} n=${String(s.n).padStart(3)} ROI ${roiStr.padStart(7)} P&L R$${s.profit.toFixed(2)} \`${band}\`\n`;
-        }
-        if (problematicOnly.length && problematicOnly.length < sportRows.length) {
-          txt += `_+${sportRows.length - problematicOnly.length} sports healthy/neutral omitidos_\n`;
-        }
-      }
-
-      // Blocklist
-      txt += `\n*Blocklist:*\n`;
-      txt += `🤖 ${autoCount} auto · 🔧 ${manualCount} manual/env · ⏸️ ${activeCooldowns} cooldowns\n`;
-
-      // Top leaks
-      if (leaks.length) {
-        txt += `\n*Top leaks (liga):*\n`;
-        for (const l of leaks) {
-          const roiStr = l.roi != null ? l.roi.toFixed(1) + '%' : '—';
-          txt += `🚨 ${l.sport}/${l.league} — n=${l.n} ROI ${roiStr} · R$${l.profit.toFixed(2)}\n`;
-        }
-      }
-
-      // Actions
-      const criticalBands = sportRows.filter(s => bandOf(s.roi, s.n) === 'leak');
-      const reviewBands = sportRows.filter(s => bandOf(s.roi, s.n) === 'review');
-      if (criticalBands.length || reviewBands.length || leaks.length) {
-        txt += `\n*Ações sugeridas:*\n`;
-        for (const s of criticalBands) txt += `• \`KELLY_${s.sport.toUpperCase()}_ALTA=0.10\` ou /pause-sport ${s.sport}\n`;
-        for (const s of reviewBands) txt += `• \`KELLY_${s.sport.toUpperCase()}_ALTA=0.175\` (review band)\n`;
-        if (leaks.length) txt += `• \`/block-league <sport> <substring>\` pras ligas acima\n`;
-      } else {
-        txt += `\n✅ _Pipeline saudável — nada crítico_\n`;
-      }
-      txt += `\n_Detalhes: /kelly · /clv-league · /blocked-leagues · /bankroll-audit_`;
-
+      const { txt, hasCritical } = await buildPipelineStatusReport(days);
       const r_ = await send(token, chatId, txt).catch(e => ({ ok: false }));
       if (r_ && r_.ok === false) await send(token, chatId, txt.replace(/[*_`]/g, ''), { parse_mode: undefined }).catch(() => {});
     } catch (e) { await send(token, chatId, `❌ ${e.message}`); }
@@ -7426,7 +7460,8 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
       `\`/path-guard run\` — força ciclo imediato\n` +
       `\`/path-guard reset [sport]\` — reativa path manual\n\n` +
       `━━ 🏥 *Pipeline health* ━━\n` +
-      `\`/pipeline [days]\` — relatório único: banca + ROI por sport + blocklist + leaks + ações\n\n` +
+      `\`/pipeline [days]\` — relatório único: banca + ROI por sport + blocklist + leaks + ações\n` +
+      `\`/force-digest\` — força envio do weekly digest pra admins (normalmente auto 1x/semana)\n\n` +
       `━━ 🎰 *Stakes / Kelly* ━━\n` +
       `\`/kelly [days]\` — Kelly efetiva vs sugerida por sport (ROI-based bands)\n\n` +
       `━━ 🚫 *Liga blocklist / pause* ━━\n` +
@@ -8388,6 +8423,7 @@ async function poll(token, sport) {
                      text.startsWith('/kelly-config') || text === '/kelly' || text.startsWith('/kelly ') ||
                      text.startsWith('/pipeline-status') || text === '/pipeline' || text.startsWith('/pipeline ') ||
                      text === '/health' || text.startsWith('/health ') ||
+                     text.startsWith('/force-digest') || text.startsWith('/pipeline-digest') ||
                      text.startsWith('/tip ') || text.startsWith('/help') || text.startsWith('/start') ||
                      text.startsWith('/alerts')) {
             // Passa `sport` da poll (qual bot recebeu) para evitar default 'esports'
@@ -14539,6 +14575,11 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   setInterval(() => runLeagueGuardCycle().catch(e => log('ERROR', 'LEAGUE-GUARD', e.message)), 12 * 60 * 60 * 1000);
   setTimeout(() => runLeagueGuardCycle().catch(() => {}), 45 * 60 * 1000);
   setTimeout(() => runModelCalibrationCycle().catch(() => {}), 60 * 60 * 1000); // 1h pós-boot
+
+  // Weekly pipeline digest: checa a cada 6h se já passaram 6d+ desde último envio
+  // (robusto a restarts — cooldown in-memory + env PIPELINE_DIGEST_AUTO pra desativar)
+  setInterval(() => runPipelineDigestCycle().catch(e => log('ERROR', 'PIPELINE-DIGEST', e.message)), 6 * 60 * 60 * 1000);
+  setTimeout(() => runPipelineDigestCycle().catch(() => {}), 90 * 60 * 1000); // 1h30 pós-boot
 
   // Backtest Validator: cron 1x/dia, valida modelo via gates retroativos.
   setInterval(() => runBacktestValidatorCycle().catch(e => log('ERROR', 'BACKTEST-VALIDATOR', e.message)), 24 * 60 * 60 * 1000);
