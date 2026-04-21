@@ -8990,7 +8990,35 @@ Máximo 200 palavras.`;
       const tipTeam = tipMatch[1].trim();
       const tipOdd = tipMatch[2].trim();
       const tipEvIa = tipMatch[3].trim(); // EV bruto da IA
-      const tipConf = (tipMatch[5] || 'MÉDIA').trim().toUpperCase().replace('MEDIA', 'MÉDIA');
+      let tipConf = (tipMatch[5] || 'MÉDIA').trim().toUpperCase().replace('MEDIA', 'MÉDIA');
+
+      // Tier 2/3 Dota safeguards (Abr/2026-IV): Dota2 acumulou ROI -34% com 22 tips.
+      // Mesmo tratamento LoL: degrade ALTA→MÉDIA se p>85%, EV min 7%, BAIXA bloqueada.
+      const _dotaTier = _leagueTier('dota2', match.league || '');
+      if (_dotaTier >= 2) {
+        const _isT1D = norm(tipTeam).includes(norm(match.team1)) || norm(match.team1).includes(norm(tipTeam));
+        const _mdPD = (mlResult.modelP1 > 0) ? (_isT1D ? mlResult.modelP1 : mlResult.modelP2) : null;
+        if (tipConf === 'ALTA' && _mdPD != null && _mdPD > 0.85) {
+          log('INFO', 'AUTO-DOTA', `Tier ${_dotaTier} ${match.league}: p=${(_mdPD*100).toFixed(1)}% > 85% → ALTA→MÉDIA`);
+          tipConf = 'MÉDIA';
+        }
+        const _tier2EvMin = parseFloat(process.env.DOTA_TIER2_EV_MIN || '7') || 7;
+        const _evNumD = parseFloat(String(tipEvIa).replace(/[%+]/g, '')) || 0;
+        if (_evNumD < _tier2EvMin) {
+          log('INFO', 'AUTO-DOTA', `Tier ${_dotaTier} ${match.league}: EV ${_evNumD}% < ${_tier2EvMin}% — rejeitada`);
+          logRejection('dota2', `${match.team1} vs ${match.team2}`, 'tier2_ev_low', { tier: _dotaTier, ev: _evNumD, league: match.league });
+          setDotaAnalyzed({ ts: now, tipSent: false, noEdge: true });
+          await _sleep(2000);
+          continue;
+        }
+        if (tipConf === 'BAIXA') {
+          log('INFO', 'AUTO-DOTA', `Tier ${_dotaTier} ${match.league}: BAIXA bloqueada (variance)`);
+          logRejection('dota2', `${match.team1} vs ${match.team2}`, 'tier2_baixa_blocked', { tier: _dotaTier, league: match.league });
+          setDotaAnalyzed({ ts: now, tipSent: false, noEdge: true });
+          await _sleep(2000);
+          continue;
+        }
+      }
 
       // Recalcula EV via modelP (ML) — evita IA inflar edge em underdogs.
       const _pickIsT1D = norm(tipTeam).includes(norm(match.team1)) || norm(match.team1).includes(norm(tipTeam));
