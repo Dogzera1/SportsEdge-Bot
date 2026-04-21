@@ -840,6 +840,7 @@ const ADMIN_POST_PATHS = new Set([
   '/admin/league-unblock',
   '/admin/delete-empty-bankroll',
   '/archive-cross-bucket-duplicates',
+  '/archive-fuzzy-duplicates',
   '/admin/rebuild-tip-reais',
   '/threshold-optimizer-apply',
   '/admin/dynamic-threshold',
@@ -6245,15 +6246,19 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
     if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
     try {
       const apply = parts.slice(1).some(p => p.toLowerCase() === 'confirm' || p.toLowerCase() === 'apply');
-      const r = await serverPost(`/archive-cross-bucket-duplicates${apply ? '?apply=1' : ''}`, {});
+      // Fuzzy dedup: agrupa por (sport_bucket, teams, pick, odds, stake, date) — pega casos
+      // onde match_id difere entre duplicatas (bug legacy/new path).
+      const r = await serverPost(`/archive-fuzzy-duplicates${apply ? '?apply=1' : ''}`, {});
       if (!r?.ok) { await send(token, chatId, `❌ ${r?.error || 'falha'}`); return; }
-      let txt = `🧹 *DEDUP TIPS — ${apply ? 'APLICADO' : 'DRY-RUN'}*\n\n`;
-      txt += `Grupos duplicados: *${r.duplicate_groups}*\n`;
+      let txt = `🧹 *DEDUP FUZZY TIPS — ${apply ? 'APLICADO' : 'DRY-RUN'}*\n\n`;
+      txt += `Grupos totais: *${r.groups || 0}*\n`;
+      txt += `Grupos com duplicata: *${r.duplicate_groups || 0}*\n`;
       txt += `${apply ? 'Tips arquivadas' : 'Seriam arquivadas'}: *${r.would_archive ?? r.archived ?? 0}*\n`;
       if (!apply && r.examples?.length) {
-        txt += `\n*Exemplos (primeiros 10):*\n`;
+        txt += `\n*Exemplos:*\n`;
         for (const ex of r.examples) {
-          txt += `  • id=${ex.id} match=${ex.match_id} sports=[${ex.sports}]\n`;
+          txt += `  • id=${ex.id} ${ex.sport} · ${ex.teams} (match=${ex.match_id || '-'}) → keep id=${ex.keep_id}\n`;
+          if (txt.length > 3500) break;
         }
         txt += `\n_Pra aplicar: \`/dedup-tips confirm\`_`;
       }

@@ -6705,6 +6705,76 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // Fuzzy dedup: arquiva tips duplicadas por (sport_bucket, norm_p1, norm_p2, norm_pick,
+  // odds, stake_units, DATE(sent_at)). Pega casos onde match_id difere (legacy 'dota2_X'
+  // vs novo 'X') mas a tip é a mesma. Mais agressivo que /archive-cross-bucket-duplicates.
+  // Mantém MAX(id), arquiva resto.
+  // POST /archive-fuzzy-duplicates?apply=1
+  if (p === '/archive-fuzzy-duplicates' && req.method === 'POST') {
+    const apply = parsed.query.apply === '1' || parsed.query.apply === 'true';
+    try {
+      const tips = db.prepare(`
+        SELECT id, sport, participant1, participant2, tip_participant, odds, stake,
+               sent_at, match_id, result
+        FROM tips
+        WHERE (archived IS NULL OR archived = 0)
+        ORDER BY id ASC
+      `).all();
+      const normStr = s => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+      const bucketFor = sport => {
+        if (sport === 'esports' || sport === 'lol' || sport === 'dota2' || sport === 'dota') return 'esports_bucket';
+        if (sport === 'mma') return 'mma_bucket';
+        return sport;
+      };
+      const groups = new Map();
+      for (const t of tips) {
+        const day = String(t.sent_at || '').slice(0, 10);
+        const key = [
+          bucketFor(t.sport),
+          normStr(t.participant1),
+          normStr(t.participant2),
+          normStr(t.tip_participant),
+          String(t.odds || ''),
+          String(t.stake || ''),
+          day,
+        ].join('|');
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(t);
+      }
+      const toArchive = [];
+      for (const [key, arr] of groups) {
+        if (arr.length <= 1) continue;
+        // Ordena por id asc; mantém o último (MAX id), arquiva o resto
+        arr.sort((a, b) => a.id - b.id);
+        const keep = arr[arr.length - 1].id;
+        for (const t of arr) {
+          if (t.id !== keep) toArchive.push({
+            id: t.id,
+            sport: t.sport,
+            teams: `${t.participant1} vs ${t.participant2}`,
+            match_id: t.match_id,
+            keep_id: keep,
+          });
+        }
+      }
+      if (!apply) {
+        sendJson(res, {
+          ok: true, dry_run: true,
+          groups: groups.size, duplicate_groups: [...groups.values()].filter(a => a.length > 1).length,
+          would_archive: toArchive.length,
+          examples: toArchive.slice(0, 10),
+        });
+        return;
+      }
+      const stmt = db.prepare(`UPDATE tips SET archived = 1 WHERE id = ?`);
+      let archived = 0;
+      const tx = db.transaction(list => { for (const x of list) { const r = stmt.run(x.id); archived += r.changes; } });
+      tx(toArchive);
+      sendJson(res, { ok: true, archived });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
   // Archive de tips regulares duplicadas cross-bucket (esports↔lol/dota2 após split Abr/2026).
   // Mantém tip com MAX(id) por match_id (a mais nova), archived=1 nas demais.
   // POST /archive-cross-bucket-duplicates?apply=1   (sem apply = dry-run)

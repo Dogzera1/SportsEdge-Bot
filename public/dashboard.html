@@ -576,6 +576,15 @@
     <div class="live-list" id="liveList"></div>
   </div>
 
+  <!-- Live tips em andamento -->
+  <div class="card" id="liveTipsCard" style="display:none">
+    <div class="card-header">
+      <div class="card-title">🎯 Tips em andamento</div>
+      <div class="card-meta" id="liveTipsCount">0</div>
+    </div>
+    <div class="live-list" id="liveTipsList"></div>
+  </div>
+
   <!-- Upcoming (próximos) -->
   <div class="card" id="upcomingCard" style="display:none">
     <div class="card-header">
@@ -994,6 +1003,7 @@ async function refresh() {
         loadOverall(gen),
         loadModels(gen),
         loadLive(gen),
+        loadLiveTips(gen),
         loadUpcoming(gen),
         loadTips(gen),
       ]);
@@ -1003,6 +1013,7 @@ async function refresh() {
         loadEquity(gen),
         loadSportRoi(gen),
         loadLive(gen),
+        loadLiveTips(gen),
         loadUpcoming(gen),
         loadTips(gen),
         loadModels(gen),
@@ -1414,6 +1425,105 @@ async function loadUpcoming(gen = refreshGen) {
 // Server returns { sports: { lol: [row…], dota: [row…], … } }
 // Rows têm: team1, team2, league, liveStats.summary.score, odds, pinnacle.
 // ─────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
+// Live Tips em andamento — cruza tips pendentes com live-snapshot
+// ─────────────────────────────────────────────────────────────
+async function loadLiveTips(gen = refreshGen) {
+  const card = document.getElementById('liveTipsCard');
+  const list = document.getElementById('liveTipsList');
+  const count = document.getElementById('liveTipsCount');
+  if (!card || !list) return;
+  try {
+    // Busca tips pendentes (result IS NULL) em todos os sports ativos
+    const sports = currentSport === '__overall__'
+      ? ['lol', 'dota2', 'valorant', 'cs', 'tennis', 'mma', 'football', 'darts', 'snooker', 'tabletennis']
+      : [currentSport];
+    const [snapshotData, ...tipsResults] = await Promise.all([
+      apiFetch('/live-snapshot').catch(() => ({ sports: {} })),
+      ...sports.map(sp => apiFetch(`/tips-history?sport=${sp}&status=pending&limit=200`).catch(() => [])),
+    ]);
+    if (shouldAbort(gen)) return;
+    const allPending = [];
+    tipsResults.forEach((data, i) => {
+      const tips = Array.isArray(data) ? data : (data?.tips || []);
+      for (const t of tips) allPending.push({ ...t, _querySport: sports[i] });
+    });
+    if (!allPending.length) { card.style.display = 'none'; return; }
+
+    // Normaliza pair key pra match com snapshot
+    const normStr = s => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    const pairKey = (a, b) => {
+      const [x, y] = [normStr(a), normStr(b)].sort();
+      return `${x}|${y}`;
+    };
+
+    // Snapshot: agrega todos live matches num lookup pair → match
+    const liveLookup = new Map();
+    const snapSports = snapshotData?.sports || {};
+    for (const sp of Object.keys(snapSports)) {
+      const rows = Array.isArray(snapSports[sp]) ? snapSports[sp] : [];
+      for (const m of rows) {
+        const [a, b] = String(m.teams || '').split(' vs ');
+        if (!a || !b) continue;
+        liveLookup.set(pairKey(a, b), { ...m, sport: sp });
+      }
+    }
+
+    // Filtra apenas tips que ESTÃO live (match in snapshot OU tip.is_live=1)
+    const liveTips = [];
+    for (const t of allPending) {
+      const k = pairKey(t.participant1, t.participant2);
+      const liveMatch = liveLookup.get(k);
+      const isLive = !!liveMatch || t.is_live === 1 || t.is_live === true;
+      if (!isLive) continue;
+      liveTips.push({ ...t, liveMatch });
+    }
+
+    if (!liveTips.length) { card.style.display = 'none'; return; }
+
+    // Ordena por mais recente (sent_at desc)
+    liveTips.sort((a, b) => new Date(b.sent_at || 0) - new Date(a.sent_at || 0));
+
+    card.style.display = '';
+    count.textContent = `${liveTips.length} tip${liveTips.length > 1 ? 's' : ''}`;
+
+    list.innerHTML = liveTips.slice(0, 20).map(t => {
+      const sentAt = t.sent_at ? new Date(String(t.sent_at).replace(' ', 'T') + 'Z') : null;
+      const ageMin = sentAt ? Math.floor((Date.now() - sentAt.getTime()) / 60000) : null;
+      const ageStr = ageMin == null ? '' : ageMin < 60 ? `${ageMin}min` : `${Math.floor(ageMin/60)}h${ageMin%60}`;
+      const score = t.liveMatch?.summary?.score || '';
+      const stakeN = parseFloat(String(t.stake || '').replace(/u/i, '')) || 0;
+      const evN = parseFloat(t.ev) || 0;
+      const evCls = evN >= 0 ? 'pos' : 'neg';
+      const sportLabel = sportDisplayLabel(t.sport, '');
+      const scoreLine = score ? `<span class="live-score" style="color:var(--text-dim);font-size:11px">${score}</span>` : '';
+      return `
+        <div class="live-row" style="border-bottom:1px solid var(--border);padding:10px 0">
+          <div style="flex:1;min-width:0">
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+              <span class="live-dot" style="background:#ef4444"></span>
+              <strong>${t.tip_participant}</strong>
+              <span style="color:var(--text-dim)">@ ${t.odds}</span>
+              <span class="chip" style="font-size:10px;padding:1px 5px">${sportLabel}</span>
+              ${scoreLine}
+            </div>
+            <div style="font-size:11px;color:var(--text-dim);margin-top:4px">
+              ${t.participant1} vs ${t.participant2} · ${t.event_name || '—'}${ageStr ? ' · há ' + ageStr : ''}
+            </div>
+          </div>
+          <div style="text-align:right;font-size:12px;white-space:nowrap">
+            <div class="${evCls}">EV ${evN >= 0 ? '+' : ''}${evN.toFixed(1)}%</div>
+            <div style="color:var(--text-dim);font-size:10px">${stakeN}u · ${t.confidence || '—'}</div>
+          </div>
+        </div>
+      `;
+    }).join('');
+  } catch (e) {
+    console.warn('loadLiveTips error:', e);
+    card.style.display = 'none';
+  }
+}
+
 async function loadLive(gen = refreshGen) {
   const data = await apiFetch('/live-snapshot');
   if (shouldAbort(gen)) return;
@@ -2006,8 +2116,8 @@ function init() {
   refresh();
   if (autoRefreshTimer) clearInterval(autoRefreshTimer);
   autoRefreshTimer = setInterval(() => {
-    if (currentSport === '__overall__') { loadOverall(); loadLive(); loadUpcoming(); }
-    else { loadKPIs(); loadLive(); loadUpcoming(); }
+    if (currentSport === '__overall__') { loadOverall(); loadLive(); loadLiveTips(); loadUpcoming(); }
+    else { loadKPIs(); loadLive(); loadLiveTips(); loadUpcoming(); }
   }, 60000); // refresh KPIs + live + upcoming a cada 60s
   document.getElementById('footerMeta').textContent = `build 2026-04-18`;
 }
