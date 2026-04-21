@@ -1777,7 +1777,8 @@ async function runAutoAnalysis() {
           }
 
           // Kelly adaptado por confiança: ALTA → ¼ Kelly (max 4u) | MÉDIA → ⅙ Kelly (max 3u) | BAIXA → 1/10 Kelly (max 1.5u)
-          let kellyFraction = tipConf === CONF.ALTA ? 0.25 : tipConf === CONF.BAIXA ? 0.10 : 1/6;
+          // Override via env KELLY_LOL_<CONF> ou KELLY_<CONF> global.
+          let kellyFraction = getKellyFraction('lol', tipConf);
           const _clvAdjLive = await fetchClvMultiplier('lol', match.league);
           if (_clvAdjLive.mult !== 1.0) {
             log('INFO', 'CLV-KELLY', `Ajuste lol live [${match.league}]: mult=${_clvAdjLive.mult} reason=${_clvAdjLive.reason} (CLV ${_clvAdjLive.avgClv}% n=${_clvAdjLive.n})`);
@@ -2168,7 +2169,8 @@ async function runAutoAnalysis() {
             }
 
             // ALTA → ¼ Kelly (max 4u) | MÉDIA → ⅙ Kelly (max 3u) | BAIXA → 1/10 Kelly (max 1.5u)
-            let kellyFraction = tipConf === CONF.ALTA ? 0.25 : tipConf === CONF.BAIXA ? 0.10 : 1/6;
+            // Override via env KELLY_LOL_<CONF> ou KELLY_<CONF> global.
+            let kellyFraction = getKellyFraction('lol', tipConf);
             // CLV→Kelly feedback: se CLV 30d negativo em (sport,league), reduz fraction;
             // se CLV ≤ -3% shadowa (mult=0 → tipStake='0u' → aborta abaixo).
             const _clvAdj = await fetchClvMultiplier('lol', match.league);
@@ -3017,6 +3019,37 @@ function isLeagueBlocked(sport, league) {
     if (lg.includes(subPart)) return subPart;
   }
   return null;
+}
+
+// Kelly fraction per sport × confidence level, com env overrides.
+// Prioridade lookup: KELLY_<SPORT>_<CONF> → KELLY_<CONF> → default (¼ / ⅙ / 1/10)
+// Exemplos env:
+//   KELLY_ALTA=0.20                  // cap global alta pra 0.20 (reduz 20%)
+//   KELLY_LOL_ALTA=0.18              // lol alta mais conservador
+//   KELLY_MMA_MEDIA=0.12             // mma média reduzido (high variance)
+const _KELLY_DEFAULTS = { ALTA: 0.25, MEDIA: 1/6, BAIXA: 0.10 };
+function _normalizeConfKey(conf) {
+  const c = String(conf || '').toUpperCase();
+  if (c === 'ALTA' || c === 'HIGH') return 'ALTA';
+  if (c === 'BAIXA' || c === 'LOW') return 'BAIXA';
+  return 'MEDIA'; // inclui 'MÉDIA', 'MED', unknown
+}
+function getKellyFraction(sport, conf) {
+  const key = _normalizeConfKey(conf);
+  const sp = String(sport || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  // Per-sport override first
+  const perSport = process.env[`KELLY_${sp}_${key}`];
+  if (perSport != null && perSport !== '') {
+    const v = parseFloat(perSport);
+    if (Number.isFinite(v) && v > 0 && v <= 1) return v;
+  }
+  // Global override
+  const global = process.env[`KELLY_${key}`];
+  if (global != null && global !== '') {
+    const v = parseFloat(global);
+    if (Number.isFinite(v) && v > 0 && v <= 1) return v;
+  }
+  return _KELLY_DEFAULTS[key];
 }
 
 async function runBankrollGuardianCycle() {
@@ -6320,6 +6353,29 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
     txt += `Comandos:\n• /path-guard run — força ciclo\n• /path-guard reset [sport] — reativa manual`;
     await send(token, chatId, txt);
 
+  } else if (cmd === '/kelly-config' || cmd === '/kelly') {
+    if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
+    try {
+      const sports = ['lol', 'dota2', 'mma', 'tennis', 'cs', 'valorant', 'football', 'tabletennis', 'darts', 'snooker'];
+      let txt = `🎰 *Kelly fractions (efetivas)*\n\n`;
+      txt += `\`SPORT     ALTA    MÉDIA   BAIXA\`\n`;
+      for (const sp of sports) {
+        const alta = getKellyFraction(sp, 'ALTA');
+        const media = getKellyFraction(sp, 'MEDIA');
+        const baixa = getKellyFraction(sp, 'BAIXA');
+        const isDefault = alta === 0.25 && Math.abs(media - 1/6) < 0.001 && baixa === 0.10;
+        const marker = isDefault ? '' : ' *';
+        txt += `\`${sp.padEnd(9)} ${alta.toFixed(3)}   ${media.toFixed(3)}   ${baixa.toFixed(3)}${marker}\`\n`;
+      }
+      txt += `\n_Default: ALTA ¼, MÉDIA ⅙, BAIXA 1/10 (\`*\` = override env ativa)_\n\n`;
+      txt += `*Env vars:*\n`;
+      txt += `• \`KELLY_ALTA\`, \`KELLY_MEDIA\`, \`KELLY_BAIXA\` — override global\n`;
+      txt += `• \`KELLY_<SPORT>_<CONF>\` — override per-sport (ex: KELLY_LOL_ALTA=0.20)\n`;
+      txt += `• Range válido: 0 < v ≤ 1`;
+      const r_ = await send(token, chatId, txt).catch(e => ({ ok: false }));
+      if (r_ && r_.ok === false) await send(token, chatId, txt.replace(/[*_`]/g, ''), { parse_mode: undefined }).catch(() => {});
+    } catch (e) { await send(token, chatId, `❌ ${e.message}`); }
+
   } else if (cmd === '/league-guard' || cmd === '/leagues-guard') {
     if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
     try {
@@ -7116,6 +7172,8 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
       `\`/path-guard\` — paths desativados auto por CLV negativo\n` +
       `\`/path-guard run\` — força ciclo imediato\n` +
       `\`/path-guard reset [sport]\` — reativa path manual\n\n` +
+      `━━ 🎰 *Stakes / Kelly* ━━\n` +
+      `\`/kelly\` — mostra Kelly fractions efetivas por sport (override via env)\n\n` +
       `━━ 🚫 *Liga blocklist / pause* ━━\n` +
       `\`/clv-league [sport] [days] [min]\` — ROI/CLV por liga (flagga leaks)\n` +
       `\`/league-guard\` — força ciclo auto-blocklist (ROI≤-25% + CLV≤-2% n≥20)\n` +
@@ -8072,6 +8130,7 @@ async function poll(token, sport) {
                      text.startsWith('/clv-league') || text.startsWith('/clv-by-league') ||
                      text.startsWith('/roi-league') ||
                      text.startsWith('/league-guard') || text.startsWith('/leagues-guard') ||
+                     text.startsWith('/kelly-config') || text === '/kelly' || text.startsWith('/kelly ') ||
                      text.startsWith('/tip ') || text.startsWith('/help') || text.startsWith('/start') ||
                      text.startsWith('/alerts')) {
             // Passa `sport` da poll (qual bot recebeu) para evitar default 'esports'
@@ -9366,7 +9425,7 @@ Máximo 200 palavras.`;
       }
 
       const isT1bet = norm(tipTeam).includes(norm(match.team1)) || norm(match.team1).includes(norm(tipTeam));
-      let kellyFraction = tipConf === 'ALTA' ? 0.25 : tipConf === 'BAIXA' ? 0.10 : 1/6;
+      let kellyFraction = getKellyFraction('dota2', tipConf);
       // Stage boost: TI/Major final → +15%, international grupos → +10%, regional final → +8%
       // + §5b Stakes context (showmatch/exhibition deflate; decider/tiebreaker boost)
       try {
@@ -10192,7 +10251,7 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
         const modelPPickMma = pickIsT1Mma ? mlResultMma.modelP1 : mlResultMma.modelP2;
 
         // Kelly fracionado: ALTA → ¼ Kelly (max 4u) | MÉDIA → ⅙ Kelly (max 3u)
-        const kellyFractionMma = _confEffMma === 'ALTA' ? 0.25 : 1/6;
+        const kellyFractionMma = getKellyFraction('mma', _confEffMma);
         const kellyStakeMma = modelPPickMma > 0
           ? calcKellyWithP(modelPPickMma, tipOdd, kellyFractionMma)
           : calcKellyFraction(tipEV, tipOdd, kellyFractionMma);
@@ -14852,7 +14911,7 @@ async function refreshOpenTips(caches = {}) {
 
         // Re-calcula stake via Kelly fracionário: conf ALTA→¼, MÉDIA→⅙, BAIXA→1/10.
         // Alinhado com lógica de /rerun-pending-trained (server.js:7284-7288).
-        const kellyFracByConf = newConf === 'ALTA' ? 0.25 : newConf === 'MÉDIA' ? 1/6 : 0.10;
+        const kellyFracByConf = getKellyFraction(sport, newConf);
         let newStake = calcKellyWithP(p, currentOdds, kellyFracByConf);
         // Força 0u quando EV sub-threshold (tip perdeu edge — sinal pra dashboard)
         if (newEv < 3) newStake = '0u';
