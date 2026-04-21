@@ -6432,18 +6432,21 @@ const server = http.createServer(async (req, res) => {
 
   // Lista market_tips_shadow pra dashboard. Todos são SHADOW por natureza (tabela
   // separada de tips). Permite filtrar por sport, dias, status.
-  // GET /market-tips-recent?sport=tennis&days=7&limit=50&status=all|pending|settled
+  // GET /market-tips-recent?sport=tennis&days=7&limit=50&status=all|pending|settled&includeVoid=0
   if (p === '/market-tips-recent') {
     const sport = parsed.query.sport || null;
     const days = Math.max(1, Math.min(180, parseInt(parsed.query.days || '7', 10) || 7));
     const limit = Math.max(1, Math.min(500, parseInt(parsed.query.limit || '50', 10) || 50));
     const status = (parsed.query.status || 'all').toLowerCase();
+    const includeVoid = parsed.query.includeVoid === '1';
     try {
       const conds = [`created_at >= datetime('now', '-${days} days')`];
       const params = [];
       if (sport) { conds.push('sport = ?'); params.push(sport); }
       if (status === 'pending') conds.push('result IS NULL');
-      else if (status === 'settled') conds.push(`result IN ('win','loss','void')`);
+      else if (status === 'settled') conds.push(`result IN ('win','loss')`);
+      // Por padrão esconde voidadas (dedup/bogus); passa includeVoid=1 pra incluir
+      if (!includeVoid) conds.push(`(result IS NULL OR result != 'void')`);
       const rows = db.prepare(`
         SELECT id, sport, team1, team2, league, best_of, market, line, side, label,
                p_model, p_implied, odd, ev_pct, stake_units,
@@ -6476,6 +6479,17 @@ const server = http.createServer(async (req, res) => {
         clvSamples: clvRows.length,
         tips: rows,
       });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
+  // Força settlement de market_tips_shadow (cruza com match_results).
+  // POST /admin/settle-market-tips-shadow
+  if (p === '/admin/settle-market-tips-shadow' && req.method === 'POST') {
+    try {
+      const { settleShadowTips } = require('./lib/market-tips-shadow');
+      const r = settleShadowTips(db);
+      sendJson(res, { ok: true, ...r });
     } catch (e) { sendJson(res, { error: e.message }, 500); }
     return;
   }
