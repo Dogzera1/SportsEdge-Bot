@@ -4064,18 +4064,44 @@ async function buildPipelineStatusReport(days = 30) {
   return { txt, hasCritical, metrics: { totalInit, totalStored, deltaPct, sportRows, leaks, autoCount, manualCount, activeCooldowns } };
 }
 
-// Weekly DM digest. Desativa via PIPELINE_DIGEST_AUTO=false. Cooldown 6d evita
-// double-send em restart mid-week. Só DM se houver >= 1 admin registrado.
+// Adaptive DM digest: critical=24h cooldown (urgent), healthy=6d (weekly),
+// transições critical→healthy envian "RECOVERED" fora de cooldown.
+// Desativa via PIPELINE_DIGEST_AUTO=false. Só DM se houver >= 1 admin registrado.
 let _lastPipelineDigestAt = 0;
+let _lastPipelineDigestState = null; // null | 'critical' | 'healthy'
 async function runPipelineDigestCycle() {
   if (/^(0|false|no)$/i.test(String(process.env.PIPELINE_DIGEST_AUTO || ''))) return;
   if (!ADMIN_IDS.size) return;
-  const cooldownMs = 6 * 24 * 60 * 60 * 1000;
-  if (Date.now() - _lastPipelineDigestAt < cooldownMs) return;
   try {
     const days = Math.max(7, Math.min(90, parseInt(process.env.PIPELINE_DIGEST_DAYS || '30', 10)));
-    const { txt } = await buildPipelineStatusReport(days);
-    const prefix = `📬 *Weekly Pipeline Digest*\n\n`;
+    const { txt, hasCritical } = await buildPipelineStatusReport(days);
+    const newState = hasCritical ? 'critical' : 'healthy';
+    const wasRecovered = _lastPipelineDigestState === 'critical' && newState === 'healthy';
+    const wasEscalated = _lastPipelineDigestState === 'healthy' && newState === 'critical';
+
+    // Cooldown adaptativo: critical 24h, healthy 6d. Bypass em qualquer transição (escalation ou recovery).
+    // Bootstrap: primeiro ciclo (lastAt=0) envia só se critical — evita digest spam no boot saudável.
+    const criticalCooldownMs = parseInt(process.env.PIPELINE_DIGEST_CRITICAL_COOLDOWN_H || '24', 10) * 60 * 60 * 1000;
+    const healthyCooldownMs = parseInt(process.env.PIPELINE_DIGEST_HEALTHY_COOLDOWN_D || '6', 10) * 24 * 60 * 60 * 1000;
+    const cooldownMs = newState === 'critical' ? criticalCooldownMs : healthyCooldownMs;
+    const isFirstRun = _lastPipelineDigestAt === 0;
+    const withinCooldown = !isFirstRun && (Date.now() - _lastPipelineDigestAt) < cooldownMs;
+    if (isFirstRun && newState === 'healthy') {
+      _lastPipelineDigestAt = Date.now();
+      _lastPipelineDigestState = newState;
+      log('DEBUG', 'PIPELINE-DIGEST', `first-run healthy — cooldown 6d iniciado, nada enviado`);
+      return;
+    }
+    if (withinCooldown && !wasRecovered && !wasEscalated) return;
+
+    const prefix = wasRecovered
+      ? `✅ *RECOVERED — Pipeline OK*\n_Estado voltou pra saudável._\n\n`
+      : wasEscalated
+        ? `🚨 *ESCALATED — Pipeline entrou em CRITICAL*\n\n`
+        : newState === 'critical'
+          ? `🚨 *CRITICAL — Pipeline Alert*\n\n`
+          : `📬 *Weekly Pipeline Digest*\n\n`;
+
     const tokenForAlert = Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
     if (!tokenForAlert) return;
     for (const adminId of ADMIN_IDS) {
@@ -4084,7 +4110,8 @@ async function runPipelineDigestCycle() {
       if (r_ && r_.ok === false) await sendDM(tokenForAlert, adminId, msg.replace(/[*_`]/g, ''), { parse_mode: undefined }).catch(() => {});
     }
     _lastPipelineDigestAt = Date.now();
-    log('INFO', 'PIPELINE-DIGEST', `DM enviado pra ${ADMIN_IDS.size} admins`);
+    _lastPipelineDigestState = newState;
+    log('INFO', 'PIPELINE-DIGEST', `DM enviado (${newState}${wasRecovered ? ',recovered' : ''}) pra ${ADMIN_IDS.size} admins`);
   } catch (e) {
     log('WARN', 'PIPELINE-DIGEST', `falhou: ${e.message}`);
   }
@@ -7062,10 +7089,12 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
   } else if (cmd === '/force-digest' || cmd === '/pipeline-digest') {
     if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
     try {
-      await send(token, chatId, '📬 Forçando digest — reset cooldown + envio pra todos admins...');
+      const stateArg = (parts[1] || '').toLowerCase();
+      await send(token, chatId, `📬 Forçando digest (reset cooldown${stateArg === 'recovered' ? ' + simula recovered' : ''})...`);
       _lastPipelineDigestAt = 0;
+      if (stateArg === 'recovered') _lastPipelineDigestState = 'critical'; // força caminho recovered
       await runPipelineDigestCycle();
-      await send(token, chatId, '✅ Digest enviado.');
+      await send(token, chatId, `✅ Digest enviado (state=${_lastPipelineDigestState}).`);
     } catch (e) { await send(token, chatId, `❌ ${e.message}`); }
 
   } else if (cmd === '/pipeline-status' || cmd === '/pipeline' || cmd === '/health') {
