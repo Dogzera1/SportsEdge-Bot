@@ -15156,9 +15156,24 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   setInterval(runPollStallCheck, 15 * 60 * 1000);
   setTimeout(runPollStallCheck, 25 * 60 * 1000); // 25min pós-boot (dá tempo de 2 ciclos normais)
 
-  // Market tips shadow settlement: cron 30min, cruza market_tips_shadow com match_results
-  const runShadowSettle = () => {
+  // Market tips shadow settlement: cron 30min, cruza market_tips_shadow com match_results.
+  // Pre-sync garante match_results fresco independente do settleCompletedTips cron
+  // (que roda em intervalo diferente e pode atrasar).
+  const runShadowSettle = async () => {
     try {
+      // Pre-sync tennis + football (sources externas) antes de tentar settlar.
+      // Esports (match_results.lol/dota2/cs2/valorant) já vem do PandaScore sync
+      // no poll loop → não precisa pre-sync dedicado aqui.
+      try {
+        await serverGet('/sync-tennis-espn-results?force=1', 'tennis').catch(() => {});
+      } catch (_) {}
+      try {
+        const r1 = await serverGet('/sync-football-sofascore?days=5', 'football').catch(() => null);
+        if (!r1?.ok || (r1.inserted || 0) === 0) {
+          await serverGet('/sync-football-espn?days=5', 'football').catch(() => {});
+        }
+      } catch (_) {}
+
       const { settleShadowTips } = require('./lib/market-tips-shadow');
       const r = settleShadowTips(db);
       if (r.settled > 0 || r.skipped > 0) log('INFO', 'MT-SHADOW', `Settled ${r.settled} market tips (skipped ${r.skipped})`);
