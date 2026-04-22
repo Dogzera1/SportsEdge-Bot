@@ -1333,8 +1333,24 @@ async function applyGlobalRisk(sport, desiredUnits, leagueSlug) {
   const sportPerf = await fetchSportPerformanceMultiplier(sport);
   const dynMult = Number(sportPerf.mult) || 1.0;
 
-  const adjusted = Math.max(0.5, Math.round(desiredUnits * leagueMult * drawdownMult * perfMult * sportMult * dynMult * 2) / 2);
-  const reason = drawdownMult < 1 ? 'drawdown_reduction'
+  let adjusted = Math.max(0.5, Math.round(desiredUnits * leagueMult * drawdownMult * perfMult * sportMult * dynMult * 2) / 2);
+  // Cap global e per-sport (audit-leaks 2026-04-22 mostrou stake 3u tóxico em
+  // esports/cs/tennis — modelo overconfident em casos extremos). Clamp final
+  // protege mesmo se Kelly + multipliers escalarem desordenadamente.
+  const sportCapKey = `${String(sport || '').toUpperCase()}_MAX_STAKE_UNITS`;
+  const perSportCap = parseFloat(process.env[sportCapKey] || '');
+  const globalCap = parseFloat(process.env.MAX_STAKE_UNITS || '');
+  let cap = null;
+  if (Number.isFinite(perSportCap) && perSportCap > 0) cap = perSportCap;
+  else if (Number.isFinite(globalCap) && globalCap > 0) cap = globalCap;
+  let stakeCapped = false;
+  if (cap != null && adjusted > cap) {
+    log('INFO', 'RISK', `${sport}: stake clamp ${adjusted}u → ${cap}u (cap ${perSportCap > 0 ? sportCapKey : 'MAX_STAKE_UNITS'})`);
+    adjusted = cap;
+    stakeCapped = true;
+  }
+  const reason = stakeCapped ? 'stake_capped'
+               : drawdownMult < 1 ? 'drawdown_reduction'
                : perfMult !== 1.0 ? 'perf_adjusted'
                : leagueMult < 1 ? 'league_tier_reduction'
                : sportMult !== 1.0 ? 'sport_adjusted'
@@ -1343,7 +1359,7 @@ async function applyGlobalRisk(sport, desiredUnits, leagueSlug) {
     const perfStr = perfMult !== 1.0 ? ` perf=${perfMult}(${perfReasons.slice(0,2).join(';')})` : '';
     const spStr = sportMult !== 1.0 ? ` sport=${sportMult}` : '';
     const dynStr = dynMult !== 1.0 ? ` dynSport=${dynMult}(${sportPerf.reason} ROI=${sportPerf.roi}%)` : '';
-    log('INFO', 'RISK', `${sport}${leagueSlug ? ` (${leagueSlug})` : ''}: ${desiredUnits}u→${adjusted}u (league=${leagueMult} drawdown=${drawdownMult}${perfStr}${spStr}${dynStr})`);
+    log('INFO', 'RISK', `${sport}${leagueSlug ? ` (${leagueSlug})` : ''}: ${desiredUnits}u→${adjusted}u (league=${leagueMult} drawdown=${drawdownMult}${perfStr}${spStr}${dynStr}${stakeCapped ? ' capped' : ''})`);
   }
   return { ok: true, units: adjusted, reason };
 }
@@ -1780,10 +1796,12 @@ async function runAutoAnalysis() {
             }
             // EV mínimo maior pra tier 2/3: exige ≥7% vs 2-3% default
             const tierEvMin = parseFloat(process.env.LOL_TIER2_EV_MIN || '7') || 7;
+            const _preBonusLolLive = require('./lib/pre-match-gate').preMatchEvBonus('lol', isLiveLoL);
+            const _evReqLolLive = tierEvMin + _preBonusLolLive;
             const tipEVnum = parseFloat(tipEV) || 0;
-            if (tipEVnum < tierEvMin) {
-              log('INFO', 'AUTO-LOL', `Tier ${_lolTier} ${match.league}: EV ${tipEVnum.toFixed(1)}% < ${tierEvMin}% min — tip rejeitada`);
-              logRejection('lol', `${match.team1} vs ${match.team2}`, 'tier2_ev_low', { tier: _lolTier, ev: tipEVnum, min: tierEvMin, league: match.league });
+            if (tipEVnum < _evReqLolLive) {
+              log('INFO', 'AUTO-LOL', `Tier ${_lolTier} ${match.league}: EV ${tipEVnum.toFixed(1)}% < ${_evReqLolLive}% min${_preBonusLolLive > 0 ? ` PRE+${_preBonusLolLive}` : ''} — tip rejeitada`);
+              logRejection('lol', `${match.team1} vs ${match.team2}`, 'tier2_ev_low', { tier: _lolTier, ev: tipEVnum, min: _evReqLolLive, league: match.league, preBonus: _preBonusLolLive });
               analyzedMatches.set(matchKey, { ts: now, tipSent: false, noEdge: true });
               continue;
             }
@@ -2134,10 +2152,13 @@ async function runAutoAnalysis() {
                 tipConf = CONF.MEDIA;
               }
               const _tier2EvMin = parseFloat(process.env.LOL_TIER2_EV_MIN || '7') || 7;
+              // Upcoming = sempre PRE-match (não live)
+              const _preBonusLolUp = require('./lib/pre-match-gate').preMatchEvBonus('lol', false);
+              const _evReqLolUp = _tier2EvMin + _preBonusLolUp;
               const _evNumUp = parseFloat(String(tipEV).replace(/[%+]/g, '')) || 0;
-              if (_evNumUp < _tier2EvMin) {
-                log('INFO', 'AUTO', `Tier ${_lolTierUp} ${match.league}: EV ${_evNumUp}% < ${_tier2EvMin}% — rejeitada`);
-                logRejection('lol', `${match.team1} vs ${match.team2}`, 'tier2_ev_low_upcoming', { tier: _lolTierUp, ev: _evNumUp, league: match.league });
+              if (_evNumUp < _evReqLolUp) {
+                log('INFO', 'AUTO', `Tier ${_lolTierUp} ${match.league}: EV ${_evNumUp}% < ${_evReqLolUp}%${_preBonusLolUp > 0 ? ` PRE+${_preBonusLolUp}` : ''} — rejeitada`);
+                logRejection('lol', `${match.team1} vs ${match.team2}`, 'tier2_ev_low_upcoming', { tier: _lolTierUp, ev: _evNumUp, league: match.league, preBonus: _preBonusLolUp });
                 analyzedMatches.set(matchKey, { ts: now, tipSent: false, noEdge: true });
                 await new Promise(r => setTimeout(r, 3000)); continue;
               }
@@ -10274,9 +10295,11 @@ Máximo 200 palavras.`;
         }
       }
       const evVal = parseFloat(String(tipEV).replace('%', '').replace('+', ''));
-      if (evVal < evThreshold) {
-        log('INFO', 'AUTO-DOTA', `EV insuficiente (${evVal}% < ${evThreshold}%): pulando`);
-        logRejection('dota2', `${match.team1} vs ${match.team2}`, 'ev_below_min', { ev: +evVal.toFixed(2), min: evThreshold });
+      const _preBonusDota = require('./lib/pre-match-gate').preMatchEvBonus('dota2', isLive);
+      const _evReqDota = evThreshold + _preBonusDota;
+      if (evVal < _evReqDota) {
+        log('INFO', 'AUTO-DOTA', `EV insuficiente (${evVal}% < ${_evReqDota}%${_preBonusDota > 0 ? ` PRE+${_preBonusDota}` : ''}): pulando`);
+        logRejection('dota2', `${match.team1} vs ${match.team2}`, 'ev_below_min', { ev: +evVal.toFixed(2), min: _evReqDota, preBonus: _preBonusDota });
         setDotaAnalyzed({ ts: now, tipSent: false, noEdge: true });
         await _sleep(2000); continue;
       }
@@ -12195,8 +12218,11 @@ Máximo 200 palavras. Raciocínio breve antes da decisão.`;
             await new Promise(r => setTimeout(r, 3000)); continue;
           }
         }
-        if (tipEV < 7.0) {
-          log('INFO', 'AUTO-TENNIS', `Gate EV: ${tipEV}% < 7%`);
+        const _preBonusTn = require('./lib/pre-match-gate').preMatchEvBonus('tennis', isLiveTennis);
+        const _evReqTn = 7.0 + _preBonusTn;
+        if (tipEV < _evReqTn) {
+          log('INFO', 'AUTO-TENNIS', `Gate EV: ${tipEV}% < ${_evReqTn}%${_preBonusTn > 0 ? ` PRE+${_preBonusTn}` : ''}`);
+          logRejection('tennis', `${match.team1} vs ${match.team2}`, 'ev_below_min', { ev: +tipEV, min: _evReqTn, preBonus: _preBonusTn });
           await new Promise(r => setTimeout(r, 3000)); continue;
         }
         // EV ceiling trained-aware (Tennis trained: ECE 0.026 → 80% cap)
@@ -12871,8 +12897,11 @@ Máximo 200 palavras.`;
             await new Promise(r => setTimeout(r, 2000)); continue;
           }
         }
-        if (tipEV < EV_THRESHOLD) {
-          log('INFO', 'AUTO-FOOTBALL', `Gate EV: ${tipEV}% < ${EV_THRESHOLD}%`);
+        const _preBonusFb = require('./lib/pre-match-gate').preMatchEvBonus('football', isFbLive);
+        const _evReqFb = EV_THRESHOLD + _preBonusFb;
+        if (tipEV < _evReqFb) {
+          log('INFO', 'AUTO-FOOTBALL', `Gate EV: ${tipEV}% < ${_evReqFb}%${_preBonusFb > 0 ? ` PRE+${_preBonusFb}` : ''}`);
+          logRejection('football', `${match.team1} vs ${match.team2}`, 'ev_below_min', { ev: +tipEV, min: _evReqFb, preBonus: _preBonusFb });
           await new Promise(r => setTimeout(r, 2000)); continue;
         }
         if (tipMarket === '1X2_D' && tipOdd < DRAW_MIN_ODDS) {
@@ -13644,10 +13673,12 @@ async function pollCs(runOnce = false) {
         const isTier1 = isCsTier1(match.league);
         const minEvForTier = isTier1 ? CS_MIN_EV : CS_TIER2_MIN_EV;
 
-        if (evPct < minEvForTier) {
+        const _preBonusCs = require('./lib/pre-match-gate').preMatchEvBonus('cs', isLiveCs);
+        const _evReqCs = minEvForTier + _preBonusCs;
+        if (evPct < _evReqCs) {
           analyzedCs.set(key, { ts: now, tipSent: false });
-          log('INFO', 'AUTO-CS', `EV baixo (${evPct.toFixed(1)}% < ${minEvForTier}% ${isTier1 ? 'tier1' : 'tier2+'}): ${match.team1} vs ${match.team2}`);
-          logRejection('cs', `${match.team1} vs ${match.team2}`, 'ev_below_min', { ev: +evPct.toFixed(2), min: minEvForTier, tier: isTier1 ? 'tier1' : 'tier2+' });
+          log('INFO', 'AUTO-CS', `EV baixo (${evPct.toFixed(1)}% < ${_evReqCs}% ${isTier1 ? 'tier1' : 'tier2+'}${_preBonusCs > 0 ? ` PRE+${_preBonusCs}` : ''}): ${match.team1} vs ${match.team2}`);
+          logRejection('cs', `${match.team1} vs ${match.team2}`, 'ev_below_min', { ev: +evPct.toFixed(2), min: _evReqCs, tier: isTier1 ? 'tier1' : 'tier2+', preBonus: _preBonusCs });
           continue;
         }
         // EV ceiling trained-aware
@@ -14114,10 +14145,12 @@ async function pollValorant(runOnce = false) {
         const pickP    = direction === 't1' ? modelP1 : modelP2;
         const evPct = (pickP * pickOdd - 1) * 100;
 
-        if (evPct < VAL_MIN_EV) {
+        const _preBonusVal = require('./lib/pre-match-gate').preMatchEvBonus('valorant', isLiveVal);
+        const _evReqVal = VAL_MIN_EV + _preBonusVal;
+        if (evPct < _evReqVal) {
           analyzedValorant.set(key, { ts: now, tipSent: false });
-          log('INFO', 'AUTO-VAL', `EV baixo (${evPct.toFixed(1)}%): ${match.team1} vs ${match.team2}`);
-          logRejection('valorant', `${match.team1} vs ${match.team2}`, 'ev_below_min', { ev: +evPct.toFixed(2), min: VAL_MIN_EV });
+          log('INFO', 'AUTO-VAL', `EV baixo (${evPct.toFixed(1)}% < ${_evReqVal}%${_preBonusVal > 0 ? ` PRE+${_preBonusVal}` : ''}): ${match.team1} vs ${match.team2}`);
+          logRejection('valorant', `${match.team1} vs ${match.team2}`, 'ev_below_min', { ev: +evPct.toFixed(2), min: _evReqVal, preBonus: _preBonusVal });
           continue;
         }
         // EV ceiling trained-aware (Valorant trained é marginal → cap 50% default)
