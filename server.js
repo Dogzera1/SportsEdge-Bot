@@ -10443,6 +10443,79 @@ ROI realizado usa <code>profit_reais</code> se presente, senão <code>stake × (
     return;
   }
 
+  // Gate diag: quantas shadow tips passariam os thresholds DM (minEv / minPmodel)
+  // se o sport estivesse habilitado. Ajuda decidir thresholds.
+  // GET /mt-gate-check?sport=tennis&days=7&min_ev=8&min_pmodel=0.55&key=XXX
+  if (p === '/mt-gate-check') {
+    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    try {
+      const sport = String(parsed.query.sport || 'tennis');
+      const days = Math.max(1, Math.min(60, parseInt(parsed.query.days || '7', 10) || 7));
+      const minEv = parseFloat(parsed.query.min_ev || '8');
+      const minPmodel = parseFloat(parsed.query.min_pmodel || '0.55');
+
+      const rows = db.prepare(`
+        SELECT id, market, line, side, p_model, p_implied, odd, ev_pct, result
+        FROM market_tips_shadow
+        WHERE sport = ?
+          AND created_at >= datetime('now', '-' || ? || ' days')
+      `).all(sport, days);
+
+      const buckets = new Map();
+      for (const r of rows) {
+        const key = r.market || 'unknown';
+        if (!buckets.has(key)) {
+          buckets.set(key, {
+            market: key, total: 0, settled: 0, wins: 0,
+            passes_ev: 0, passes_pmodel: 0, passes_both: 0,
+            ev_dist: { '<4': 0, '4-6': 0, '6-8': 0, '8-10': 0, '10-15': 0, '15+': 0 },
+            p_dist: { '<45': 0, '45-50': 0, '50-55': 0, '55-60': 0, '60-70': 0, '70+': 0 },
+          });
+        }
+        const b = buckets.get(key);
+        b.total++;
+        if (r.result === 'win' || r.result === 'loss') b.settled++;
+        if (r.result === 'win') b.wins++;
+        const ev = Number(r.ev_pct);
+        const pm = Number(r.p_model);
+        if (Number.isFinite(ev)) {
+          if (ev >= minEv) b.passes_ev++;
+          if (ev < 4) b.ev_dist['<4']++;
+          else if (ev < 6) b.ev_dist['4-6']++;
+          else if (ev < 8) b.ev_dist['6-8']++;
+          else if (ev < 10) b.ev_dist['8-10']++;
+          else if (ev < 15) b.ev_dist['10-15']++;
+          else b.ev_dist['15+']++;
+        }
+        if (Number.isFinite(pm)) {
+          if (pm >= minPmodel) b.passes_pmodel++;
+          const p100 = pm * 100;
+          if (p100 < 45) b.p_dist['<45']++;
+          else if (p100 < 50) b.p_dist['45-50']++;
+          else if (p100 < 55) b.p_dist['50-55']++;
+          else if (p100 < 60) b.p_dist['55-60']++;
+          else if (p100 < 70) b.p_dist['60-70']++;
+          else b.p_dist['70+']++;
+        }
+        if (Number.isFinite(ev) && Number.isFinite(pm) && ev >= minEv && pm >= minPmodel) {
+          b.passes_both++;
+        }
+      }
+
+      const out = [...buckets.values()].map(b => ({
+        ...b,
+        hit_rate: b.settled > 0 ? +(b.wins / b.settled * 100).toFixed(1) : null,
+        pct_passes_ev: b.total > 0 ? +(b.passes_ev / b.total * 100).toFixed(1) : 0,
+        pct_passes_pmodel: b.total > 0 ? +(b.passes_pmodel / b.total * 100).toFixed(1) : 0,
+        pct_passes_both: b.total > 0 ? +(b.passes_both / b.total * 100).toFixed(1) : 0,
+      })).sort((a, b) => b.total - a.total);
+
+      sendJson(res, { ok: true, sport, days, min_ev: minEv, min_pmodel: minPmodel, by_market: out });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
   // Market tips shadow diag: mostra sample de pending + info de match_results candidatos
   // pra cada um, pra diagnosticar por que settle não está pegando. Admin-only.
   // GET /mt-shadow-diag?sport=tennis&limit=20&key=<ADMIN_KEY>
