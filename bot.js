@@ -68,7 +68,9 @@ function _brierEvAdjustmentFor(game) {
 }
 
 async function refreshBrierEvAdjustments() {
-  if (!/^true$/i.test(String(process.env.BRIER_AUTO_EV_CAP || ''))) return;
+  // Default ON — defensivo: reduz EV ceiling quando modelo degrada (brier>baseline).
+  // Desligar via BRIER_AUTO_EV_CAP=false.
+  if (/^(0|false|no)$/i.test(String(process.env.BRIER_AUTO_EV_CAP || ''))) return;
   const sports = ['esports', 'lol', 'dota2', 'cs', 'valorant', 'tennis', 'mma', 'darts', 'snooker'];
   for (const sport of sports) {
     try {
@@ -14497,7 +14499,8 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   const _riskAlertDedup = new Map(); // tipId → lastDmTs
   const RISK_ALERT_DEDUP_MS = 30 * 60 * 1000;
   async function runLiveRiskMonitor() {
-    if (!/^true$/i.test(String(process.env.LIVE_RISK_MONITOR_AUTO || ''))) return;
+    // Default ON — só DM admin (sem ação automática). Desligar via LIVE_RISK_MONITOR_AUTO=false.
+    if (/^(0|false|no)$/i.test(String(process.env.LIVE_RISK_MONITOR_AUTO || ''))) return;
     if (!ADMIN_IDS.size) return;
     try {
       const sports = ['esports', 'lol', 'dota2', 'tennis', 'darts', 'cs', 'valorant', 'mma', 'snooker', 'football'];
@@ -14597,7 +14600,9 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   // Gated por AUTO_VOID_STUCK_AUTO=true. Rola daily AUTO_VOID_STUCK_HOUR_UTC (default 3h UTC).
   let _lastStuckVoidDay = null;
   async function runAutoVoidStuck() {
-    if (!/^true$/i.test(String(process.env.AUTO_VOID_STUCK_AUTO || ''))) return;
+    // Default ON — void pendings que passaram threshold sem settle. Evita bloat.
+    // Desligar via AUTO_VOID_STUCK_AUTO=false.
+    if (/^(0|false|no)$/i.test(String(process.env.AUTO_VOID_STUCK_AUTO || ''))) return;
     const now = new Date();
     const today = now.toISOString().slice(0, 10);
     if (_lastStuckVoidDay === today) return;
@@ -14638,7 +14643,8 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   // DM admins com snapshot /autonomy-status. Gated por AUTONOMY_DIGEST_AUTO=true.
   let _lastAutonomyDigestDay = null;
   async function runAutonomyDigest() {
-    if (!/^true$/i.test(String(process.env.AUTONOMY_DIGEST_AUTO || ''))) return;
+    // Default ON — DM 1x/dia. Desligar via AUTONOMY_DIGEST_AUTO=false.
+    if (/^(0|false|no)$/i.test(String(process.env.AUTONOMY_DIGEST_AUTO || ''))) return;
     if (!ADMIN_IDS.size) return;
     const hourUtc = parseInt(process.env.AUTONOMY_DIGEST_HOUR_UTC || '12', 10);
     const now = new Date();

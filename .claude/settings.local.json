@@ -292,7 +292,8 @@
       "Bash(awk -F',' 'NR > 1 && $\\(NF-1\\) == 1 { c++ } END { print c \" rows with has_dota_team_stats=1\" }' /tmp/dota2_test.csv)",
       "Bash(awk -F, 'NR == 2 { for \\(i=1; i<=NF; i++\\) printf \"%d: %s\\\\n\", i, $i }' /tmp/dota2_test.csv)",
       "Bash(git restore *)",
-      "Bash(grep -oE '→ [^|]+$' \"/c/Users/vict_/Downloads/logs.1776815700506.log\")"
+      "Bash(grep -oE '→ [^|]+$' \"/c/Users/vict_/Downloads/logs.1776815700506.log\")",
+      "Bash(xargs -I {} sh -c 'echo \"=== {} ===\" && head -200 {} | grep -E \"metrics|brier|baseline|lift|ece|accuracy|auc\" || true')"
     ]
   }
 }
