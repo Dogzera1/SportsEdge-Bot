@@ -1282,6 +1282,31 @@ const migrations = [
       `);
     },
   },
+  {
+    id: '053_gates_runtime_state_and_epoch',
+    up(db) {
+      // Auto-tune persistence pra pre-match EV bonus + max stake cap. Mesmo
+      // shape do league/bucket blocklist (auto + manual). runGatesAutoTuneCycle
+      // popula via cron 12h.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS gates_runtime_state (
+          sport TEXT NOT NULL,
+          gate_key TEXT NOT NULL,
+          value REAL NOT NULL,
+          source TEXT NOT NULL,
+          reason TEXT,
+          evidence TEXT,
+          updated_at INTEGER NOT NULL,
+          PRIMARY KEY (sport, gate_key)
+        );
+      `);
+      // Epoch tracking — captura git SHA + snapshot de env vars relevantes
+      // no momento do insert pra permitir filtro por regime sem mistura.
+      try { db.exec("ALTER TABLE tips ADD COLUMN code_sha TEXT"); } catch (_) {}
+      try { db.exec("ALTER TABLE tips ADD COLUMN gate_state TEXT"); } catch (_) {}
+      try { db.exec("CREATE INDEX IF NOT EXISTS idx_tips_code_sha ON tips(code_sha)"); } catch (_) {}
+    },
+  },
 ];
 
 function applyMigrations(db) {

@@ -8912,6 +8912,13 @@ const server = http.createServer(async (req, res) => {
         const botTokenStr = clampStr(t.botToken, 180);
         // marketTypeStr já definido acima
         const isShadow = t.isShadow ? 1 : 0;
+        // Epoch tracking — captura git SHA + snapshot de env/auto-tunes ativas no momento exato do insert
+        let _codeSha = null, _gateState = null;
+        try {
+          const { getCodeSha, captureGateState } = require('./lib/epoch');
+          _codeSha = getCodeSha() || null;
+          _gateState = captureGateState();
+        } catch (_) {}
         const result = stmts.insertTip.run({
           sport, matchId: String(matchId), eventName,
           p1, p2,
@@ -8926,7 +8933,9 @@ const server = http.createServer(async (req, res) => {
           isShadow,
           odds_fetched_at: t.oddsFetchedAt
             ? new Date(t.oddsFetchedAt).toISOString()
-            : (t._oddsFetchedAt ? new Date(t._oddsFetchedAt).toISOString() : new Date().toISOString())
+            : (t._oddsFetchedAt ? new Date(t._oddsFetchedAt).toISOString() : new Date().toISOString()),
+          code_sha: _codeSha,
+          gate_state: _gateState,
         });
         // Calcula stake em reais com tier per-sport unit (getSportUnitValue).
         try {

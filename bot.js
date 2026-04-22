@@ -1341,11 +1341,20 @@ async function applyGlobalRisk(sport, desiredUnits, leagueSlug) {
   const perSportCap = parseFloat(process.env[sportCapKey] || '');
   const globalCap = parseFloat(process.env.MAX_STAKE_UNITS || '');
   let cap = null;
-  if (Number.isFinite(perSportCap) && perSportCap > 0) cap = perSportCap;
-  else if (Number.isFinite(globalCap) && globalCap > 0) cap = globalCap;
+  let capSource = null;
+  if (Number.isFinite(perSportCap) && perSportCap > 0) { cap = perSportCap; capSource = 'env'; }
+  else {
+    // DB auto-tune lookup (gates_runtime_state) — só consulta se env não setado
+    try {
+      const { getGateValue, GATE_KEYS } = require('./lib/gates-runtime-state');
+      const dbCap = getGateValue(sport, GATE_KEYS.MAX_STAKE_UNITS);
+      if (dbCap != null && dbCap > 0) { cap = dbCap; capSource = 'auto'; }
+    } catch (_) {}
+    if (cap == null && Number.isFinite(globalCap) && globalCap > 0) { cap = globalCap; capSource = 'env_global'; }
+  }
   let stakeCapped = false;
   if (cap != null && adjusted > cap) {
-    log('INFO', 'RISK', `${sport}: stake clamp ${adjusted}u → ${cap}u (cap ${perSportCap > 0 ? sportCapKey : 'MAX_STAKE_UNITS'})`);
+    log('INFO', 'RISK', `${sport}: stake clamp ${adjusted}u → ${cap}u (cap source=${capSource})`);
     adjusted = cap;
     stakeCapped = true;
   }
@@ -3161,6 +3170,26 @@ try {
   }
 } catch (e) { log('WARN', 'BUCKET-GUARD', `init: ${e.message}`); }
 
+// Gates runtime state (auto-tune persistente) — pre-match EV bonus + max stake cap
+try {
+  const _grs = require('./lib/gates-runtime-state');
+  const r = _grs.loadFromDb(db);
+  if (r && !r.error) {
+    log('INFO', 'GATES-AUTOTUNE', `Loaded DB: ${r.n} entries`);
+  } else if (r?.error) {
+    log('WARN', 'GATES-AUTOTUNE', `load failed: ${r.error}`);
+  }
+} catch (e) { log('WARN', 'GATES-AUTOTUNE', `init: ${e.message}`); }
+
+// Epoch tracking — log inicial pra rastrear deploy. Capture real acontece em
+// server.js no momento exato do tip insert (via lib/epoch.js).
+try {
+  const { getCodeSha, captureGateState } = require('./lib/epoch');
+  const sha = getCodeSha();
+  const gs = JSON.parse(captureGateState());
+  log('INFO', 'EPOCH', `code_sha=${sha || 'unknown'} | env=${Object.keys(gs.env).length} active | auto=${Object.keys(gs.auto).length}`);
+} catch (e) { log('WARN', 'EPOCH', `init: ${e.message}`); }
+
 function isLeagueBlocked(sport, league) {
   if (!_leagueBlocklist.size) return null;
   const sp = String(sport || '').toLowerCase();
@@ -4356,6 +4385,163 @@ async function runOddsBucketGuardCycle() {
     log('INFO', 'BUCKET-GUARD', `Ciclo OK — ${agg.size} (sport,bucket) avaliados | ${alerts.length} blocked | ${restored.length} restored`);
   } catch (e) {
     log('WARN', 'BUCKET-GUARD', `falhou: ${e.message}`);
+  }
+}
+
+// Auto-tune dos gates pre-match EV bonus + max stake cap. Mesma filosofia
+// dos outros guards (league, bucket): cron 12h, persiste DB, DM admin em
+// changes. Toggle ODDS_GATES_AUTOTUNE=false desativa.
+async function runGatesAutoTuneCycle() {
+  if (/^(0|false|no)$/i.test(String(process.env.GATES_AUTOTUNE_AUTO || ''))) return;
+  const minN = parseInt(process.env.GATES_AUTOTUNE_MIN_N || '20', 10);
+  const daysWin = parseInt(process.env.GATES_AUTOTUNE_DAYS || '30', 10);
+  const liveGapTriggerPp = parseFloat(process.env.GATES_AUTOTUNE_PRE_GAP_PP || '20');
+  const liveGapReleasePp = parseFloat(process.env.GATES_AUTOTUNE_PRE_RELEASE_PP || '5');
+  const stakeRoiCutoff = parseFloat(process.env.GATES_AUTOTUNE_STAKE_ROI_CUTOFF || '-25');
+  const maxBonus = parseFloat(process.env.GATES_AUTOTUNE_MAX_BONUS || '8');
+  try {
+    const grs = require('./lib/gates-runtime-state');
+    const rows = db.prepare(`
+      SELECT sport, is_live, odds, stake, result,
+             COALESCE(stake_reais, 0) AS staked,
+             COALESCE(profit_reais, 0) AS profit
+      FROM tips
+      WHERE sent_at >= datetime('now', '-${daysWin} days')
+        AND (archived IS NULL OR archived = 0)
+        AND COALESCE(is_shadow, 0) = 0
+        AND result IN ('win','loss')
+        AND odds IS NOT NULL AND odds > 1
+    `).all();
+
+    function parseStakeU(s) {
+      const n = parseFloat(String(s || '').replace(/u/i, ''));
+      return Number.isFinite(n) ? n : null;
+    }
+    function bucketStake(u) {
+      if (u == null) return null;
+      if (u < 1.5) return 1;
+      if (u < 2.5) return 2;
+      if (u < 3.5) return 3;
+      return 4;
+    }
+
+    // Aggregate per (sport, isLive) e (sport, stakeBucket)
+    const sports = new Set();
+    const byLive = new Map();   // `${sport}|${0|1}` → {n,wins,staked,profit}
+    const byStake = new Map();  // `${sport}|${bucket}` → {n,wins,staked,profit}
+    for (const r of rows) {
+      const sp = String(r.sport || '').toLowerCase();
+      sports.add(sp);
+      const liveK = `${sp}|${r.is_live ? 1 : 0}`;
+      let lv = byLive.get(liveK);
+      if (!lv) { lv = { n: 0, wins: 0, staked: 0, profit: 0 }; byLive.set(liveK, lv); }
+      lv.n++; if (r.result === 'win') lv.wins++;
+      lv.staked += Number(r.staked) || 0; lv.profit += Number(r.profit) || 0;
+
+      const su = parseStakeU(r.stake);
+      const bk = bucketStake(su);
+      if (bk != null) {
+        const stK = `${sp}|${bk}`;
+        let st = byStake.get(stK);
+        if (!st) { st = { n: 0, wins: 0, staked: 0, profit: 0, bucket: bk }; byStake.set(stK, st); }
+        st.n++; if (r.result === 'win') st.wins++;
+        st.staked += Number(r.staked) || 0; st.profit += Number(r.profit) || 0;
+      }
+    }
+    function roiOf(a) { return a.staked > 0 ? (a.profit / a.staked * 100) : null; }
+
+    const tokenForAlert = Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
+    const changes = [];
+
+    for (const sp of sports) {
+      // ── PRE-match EV bonus auto-tune ──
+      // Não toca em sports onde env per-sport está manualmente setada
+      const envKey = `${sp.toUpperCase()}_PRE_MATCH_EV_BONUS`;
+      const envSet = process.env[envKey] != null && process.env[envKey] !== '';
+      if (!envSet) {
+        const pre = byLive.get(`${sp}|0`);
+        const live = byLive.get(`${sp}|1`);
+        if (pre && pre.n >= minN && live && live.n >= minN) {
+          const preRoi = roiOf(pre);
+          const liveRoi = roiOf(live);
+          if (preRoi != null && liveRoi != null) {
+            const gap = liveRoi - preRoi; // positivo = LIVE melhor que PRE
+            const cur = grs.getGateValue(sp, grs.GATE_KEYS.PRE_MATCH_EV_BONUS) ?? 0;
+            let target = cur;
+            if (gap >= liveGapTriggerPp && cur < maxBonus) target = Math.min(maxBonus, cur + 1);
+            else if (gap < liveGapReleasePp && cur > 0) target = Math.max(0, cur - 1);
+            if (target !== cur) {
+              const reason = `PRE ${preRoi.toFixed(1)}% vs LIVE ${liveRoi.toFixed(1)}% (gap ${gap.toFixed(1)}pp)`;
+              const evidence = { preN: pre.n, liveN: live.n, preRoi: +preRoi.toFixed(2), liveRoi: +liveRoi.toFixed(2), gap: +gap.toFixed(2) };
+              if (target > 0) {
+                grs.setAuto(db, sp, grs.GATE_KEYS.PRE_MATCH_EV_BONUS, target, { reason, evidence });
+                changes.push(`📈 ${sp} PRE_MATCH_EV_BONUS: ${cur}pp → ${target}pp (${reason})`);
+              } else {
+                grs.removeAuto(db, sp, grs.GATE_KEYS.PRE_MATCH_EV_BONUS);
+                changes.push(`✅ ${sp} PRE_MATCH_EV_BONUS removido (${reason})`);
+              }
+              log('INFO', 'GATES-AUTOTUNE', `${sp} pre_match_ev_bonus: ${cur} → ${target} | ${reason}`);
+            }
+          }
+        }
+      }
+
+      // ── Max stake cap auto-tune ──
+      const capEnvKey = `${sp.toUpperCase()}_MAX_STAKE_UNITS`;
+      const capEnvSet = process.env[capEnvKey] != null && process.env[capEnvKey] !== '';
+      if (!capEnvSet) {
+        const buckets = [1, 2, 3, 4]
+          .map(b => byStake.get(`${sp}|${b}`))
+          .filter(b => b && b.n >= 10);
+        if (buckets.length >= 2) {
+          // Find topmost bucket with healthy ROI (>= -10%); cap at that
+          let healthyTop = null;
+          for (const b of buckets) {
+            const roi = roiOf(b);
+            if (roi != null && roi >= -10) healthyTop = b.bucket;
+          }
+          // Find leak at higher bucket
+          let leakBucket = null;
+          for (const b of buckets) {
+            const roi = roiOf(b);
+            if (roi != null && roi <= stakeRoiCutoff && (healthyTop == null || b.bucket > healthyTop)) {
+              leakBucket = b.bucket;
+              break;
+            }
+          }
+          const cur = grs.getGateValue(sp, grs.GATE_KEYS.MAX_STAKE_UNITS);
+          let target = cur;
+          if (leakBucket != null && healthyTop != null) {
+            target = healthyTop; // cap no maior bucket saudável
+          } else if (leakBucket == null && cur != null) {
+            // Sem leak detectado — libera cap se foi auto
+            const meta = grs.getGateMeta(sp, grs.GATE_KEYS.MAX_STAKE_UNITS);
+            if (meta?.source === 'auto') target = null;
+          }
+          if (target !== cur) {
+            if (target != null && target > 0) {
+              const reason = `bucket ${leakBucket}u ROI ${roiOf(buckets.find(b => b.bucket === leakBucket))?.toFixed(1)}% < ${stakeRoiCutoff}%, healthy top=${healthyTop}u`;
+              const evidence = { buckets: buckets.map(b => ({ bucket: b.bucket, n: b.n, roi: +(roiOf(b) || 0).toFixed(2) })) };
+              grs.setAuto(db, sp, grs.GATE_KEYS.MAX_STAKE_UNITS, target, { reason, evidence });
+              changes.push(`📉 ${sp} MAX_STAKE_UNITS: ${cur ?? '∞'}u → ${target}u (${reason})`);
+              log('INFO', 'GATES-AUTOTUNE', `${sp} max_stake_units: ${cur ?? '∞'} → ${target}`);
+            } else {
+              grs.removeAuto(db, sp, grs.GATE_KEYS.MAX_STAKE_UNITS);
+              changes.push(`✅ ${sp} MAX_STAKE_UNITS cap removido (todos buckets saudáveis)`);
+              log('INFO', 'GATES-AUTOTUNE', `${sp} max_stake_units removido`);
+            }
+          }
+        }
+      }
+    }
+
+    if (changes.length && tokenForAlert && ADMIN_IDS.size) {
+      const msg = `🛡️ *GATES AUTO-TUNE — ${daysWin}d*\n\n${changes.join('\n')}\n\n_Cron 12h. Env vars manuais sempre sobrepõem auto-tune._`;
+      for (const adminId of ADMIN_IDS) sendDM(tokenForAlert, adminId, msg).catch(() => {});
+    }
+    log('INFO', 'GATES-AUTOTUNE', `Ciclo OK — ${sports.size} sports avaliados | ${changes.length} mudanças`);
+  } catch (e) {
+    log('WARN', 'GATES-AUTOTUNE', `falhou: ${e.message}`);
   }
 }
 
@@ -15367,6 +15553,9 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
 
   setInterval(() => runOddsBucketGuardCycle().catch(e => log('ERROR', 'BUCKET-GUARD', e.message)), 12 * 60 * 60 * 1000);
   setTimeout(() => runOddsBucketGuardCycle().catch(() => {}), 50 * 60 * 1000);
+
+  setInterval(() => runGatesAutoTuneCycle().catch(e => log('ERROR', 'GATES-AUTOTUNE', e.message)), 12 * 60 * 60 * 1000);
+  setTimeout(() => runGatesAutoTuneCycle().catch(() => {}), 55 * 60 * 1000);
   setTimeout(() => runModelCalibrationCycle().catch(() => {}), 60 * 60 * 1000); // 1h pós-boot
 
   // Weekly pipeline digest: checa a cada 6h se já passaram 6d+ desde último envio
