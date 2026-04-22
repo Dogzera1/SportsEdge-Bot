@@ -22,6 +22,7 @@
  *   node scripts/roi-by-odds-bucket.js                        # todos sports, 30d, breakdown por sport
  *   node scripts/roi-by-odds-bucket.js --sport=lol
  *   node scripts/roi-by-odds-bucket.js --days=90
+ *   node scripts/roi-by-odds-bucket.js --since=2026-04-22     # só regime novo (pós bucket gate + tennis iso disable)
  *   node scripts/roi-by-odds-bucket.js --global-only          # sem breakdown per-sport
  *   node scripts/roi-by-odds-bucket.js --json
  *   node scripts/roi-by-odds-bucket.js --min=10               # min n p/ aparecer na tabela
@@ -40,10 +41,15 @@ function arg(name, def) {
 }
 const SPORT = arg('sport', null);
 const DAYS = parseInt(arg('days', '30'), 10);
+const SINCE = arg('since', null); // formato YYYY-MM-DD; sobrepõe --days
 const MIN_N = parseInt(arg('min', '5'), 10);
 const asJson = argv.includes('--json');
 const globalOnly = argv.includes('--global-only');
 const includeArchived = argv.includes('--include-archived');
+
+// Regime change 2026-04-22: bucket gate + tennis isotonic disable mudaram a
+// distribuição de tips emitidas. --since=2026-04-22 mostra só o regime novo.
+const REGIME_CHANGE_DATE = '2026-04-22';
 
 const BUCKETS = [
   { label: '1.01-1.40', min: 1.01, max: 1.40, tag: 'deep_fav' },
@@ -65,6 +71,13 @@ const DB_PATH = (arg('db', null) || process.env.DB_PATH || path.resolve(__dirnam
 const db = new Database(DB_PATH, { readonly: true });
 
 const sportFilter = SPORT ? ` AND sport = '${SPORT.replace(/'/g, "''")}'` : '';
+// Filtro de tempo: --since tem prioridade sobre --days. Validar YYYY-MM-DD.
+let timeFilter;
+if (SINCE && /^\d{4}-\d{2}-\d{2}$/.test(SINCE)) {
+  timeFilter = `AND sent_at >= '${SINCE} 00:00:00'`;
+} else {
+  timeFilter = `AND sent_at >= datetime('now', '-${DAYS} days')`;
+}
 const rows = db.prepare(`
   SELECT sport, odds, clv_odds, ev, result, profit_reais,
          COALESCE(stake_reais, 1) AS eff_stake
@@ -73,7 +86,7 @@ const rows = db.prepare(`
     AND odds IS NOT NULL
     AND odds > 1
     ${includeArchived ? '' : "AND (archived IS NULL OR archived = 0)"}
-    AND sent_at >= datetime('now', '-${DAYS} days')
+    ${timeFilter}
     ${sportFilter}
 `).all();
 
@@ -158,7 +171,9 @@ function printTable(title, rows) {
 
 if (asJson) {
   const out = {
-    days: DAYS,
+    days: SINCE ? null : DAYS,
+    since: SINCE || null,
+    regimeChangeDate: REGIME_CHANGE_DATE,
     sport: SPORT,
     minN: MIN_N,
     global: buildTable('__ALL__'),
@@ -171,10 +186,16 @@ if (asJson) {
   console.log(JSON.stringify(out, null, 2));
 } else {
   const globalRows = buildTable('__ALL__');
+  const periodLabel = SINCE
+    ? `desde ${SINCE}` + (SINCE === REGIME_CHANGE_DATE ? ' [novo regime puro]' : '')
+    : `${DAYS}d`;
   printTable(
-    `ROI por faixa de odd (${DAYS}d${SPORT ? ', sport=' + SPORT : ', todos sports'}, min n=${MIN_N})`,
+    `ROI por faixa de odd (${periodLabel}${SPORT ? ', sport=' + SPORT : ', todos sports'}, min n=${MIN_N})`,
     globalRows
   );
+  if (!SINCE) {
+    console.log(`\n  ℹ️  Regime change em ${REGIME_CHANGE_DATE}. Pra análise pós-fix pura: --since=${REGIME_CHANGE_DATE}`);
+  }
 
   // Alertas globais
   const leaks = globalRows.filter(r => r.n >= 30 && r.roi !== null && r.roi < -5);
