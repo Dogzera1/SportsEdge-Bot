@@ -10443,6 +10443,163 @@ ROI realizado usa <code>profit_reais</code> se presente, senão <code>stake × (
     return;
   }
 
+  // Breakdown granular de market tips shadow por (market × side × ev_bucket × pmodel_bucket).
+  // Ordena por ROI descendente pra ver quais cortes têm signal forte — útil pra decidir
+  // se afunilar gates/restringir mercados específicos.
+  // GET /mt-tennis-breakdown?days=30&min_n=5&format=html&key=<ADMIN_KEY>
+  if (p === '/mt-tennis-breakdown' || p === '/mt-breakdown') {
+    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    try {
+      const sport = String(parsed.query.sport || 'tennis');
+      const days = Math.max(1, Math.min(365, parseInt(parsed.query.days || '30', 10) || 30));
+      const minN = Math.max(1, parseInt(parsed.query.min_n || '5', 10) || 5);
+      const wantHtml = parsed.query.format === 'html' || /text\/html/i.test(req.headers['accept'] || '');
+
+      const rows = db.prepare(`
+        SELECT market, side, odd, ev_pct, p_model, stake_units, result
+        FROM market_tips_shadow
+        WHERE sport = ?
+          AND result IN ('win', 'loss')
+          AND created_at >= datetime('now', '-' || ? || ' days')
+      `).all(sport, days);
+
+      function evBucket(ev) {
+        if (!Number.isFinite(ev)) return 'unk';
+        if (ev < 4) return '<4';
+        if (ev < 6) return '4-6';
+        if (ev < 8) return '6-8';
+        if (ev < 10) return '8-10';
+        if (ev < 15) return '10-15';
+        if (ev < 20) return '15-20';
+        return '20+';
+      }
+      function pmBucket(p) {
+        if (!Number.isFinite(p)) return 'unk';
+        const x = p * 100;
+        if (x < 50) return '<50';
+        if (x < 55) return '50-55';
+        if (x < 60) return '55-60';
+        if (x < 65) return '60-65';
+        if (x < 70) return '65-70';
+        if (x < 80) return '70-80';
+        return '80+';
+      }
+
+      // Agregação 1: por (market, side) — visão top-level
+      const bySide = new Map();
+      // Agregação 2: por (market, side, ev_bucket) — refina
+      const byEv = new Map();
+      // Agregação 3: por (market, side, pmodel_bucket) — complementa
+      const byPm = new Map();
+
+      for (const r of rows) {
+        const stake = Number(r.stake_units) || 1;
+        const odd = Number(r.odd) || 0;
+        const profit = r.result === 'win' ? stake * (odd - 1) : -stake;
+
+        const k1 = `${r.market}|${r.side}`;
+        if (!bySide.has(k1)) bySide.set(k1, { n: 0, wins: 0, stake: 0, profit: 0, ev_sum: 0 });
+        const a = bySide.get(k1);
+        a.n++; if (r.result === 'win') a.wins++;
+        a.stake += stake; a.profit += profit;
+        a.ev_sum += Number(r.ev_pct) || 0;
+
+        const k2 = `${r.market}|${r.side}|${evBucket(r.ev_pct)}`;
+        if (!byEv.has(k2)) byEv.set(k2, { n: 0, wins: 0, stake: 0, profit: 0 });
+        const b = byEv.get(k2);
+        b.n++; if (r.result === 'win') b.wins++;
+        b.stake += stake; b.profit += profit;
+
+        const k3 = `${r.market}|${r.side}|${pmBucket(r.p_model)}`;
+        if (!byPm.has(k3)) byPm.set(k3, { n: 0, wins: 0, stake: 0, profit: 0 });
+        const c = byPm.get(k3);
+        c.n++; if (r.result === 'win') c.wins++;
+        c.stake += stake; c.profit += profit;
+      }
+
+      function toArr(m, splitCols) {
+        return [...m.entries()].map(([k, v]) => {
+          const parts = k.split('|');
+          const out = {};
+          splitCols.forEach((col, i) => out[col] = parts[i]);
+          out.n = v.n;
+          out.wins = v.wins;
+          out.losses = v.n - v.wins;
+          out.hit_pct = +(v.wins / v.n * 100).toFixed(1);
+          out.roi_pct = v.stake > 0 ? +(v.profit / v.stake * 100).toFixed(1) : 0;
+          out.profit_u = +v.profit.toFixed(2);
+          if (v.ev_sum != null) out.avg_ev_pct = +(v.ev_sum / v.n).toFixed(1);
+          return out;
+        }).filter(o => o.n >= minN).sort((a, b) => b.roi_pct - a.roi_pct);
+      }
+
+      const out1 = toArr(bySide, ['market', 'side']);
+      const out2 = toArr(byEv, ['market', 'side', 'ev_bucket']);
+      const out3 = toArr(byPm, ['market', 'side', 'pmodel_bucket']);
+
+      if (!wantHtml) {
+        sendJson(res, { ok: true, sport, days, min_n: minN, by_side: out1, by_ev: out2, by_pmodel: out3 });
+        return;
+      }
+
+      const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+      const roiColor = (roi) => roi >= 10 ? '#3fb950' : roi >= 3 ? '#a5d6ff' : roi >= -3 ? '#d29922' : '#f85149';
+      const tr = (cells, tag='td', roi=null) => {
+        const styles = roi != null ? ` style="color:${roiColor(roi)}"` : '';
+        return `<tr${styles}>` + cells.map(c => `<${tag}>${c == null ? '—' : esc(c)}</${tag}>`).join('') + '</tr>';
+      };
+
+      const byrows1 = out1.map(r => tr([r.market, r.side, r.n, `${r.wins}/${r.losses}`, r.hit_pct+'%', r.avg_ev_pct+'%', r.roi_pct+'%', r.profit_u+'u'], 'td', r.roi_pct));
+      const byrows2 = out2.map(r => tr([r.market, r.side, r.ev_bucket, r.n, `${r.wins}/${r.losses}`, r.hit_pct+'%', r.roi_pct+'%', r.profit_u+'u'], 'td', r.roi_pct));
+      const byrows3 = out3.map(r => tr([r.market, r.side, r.pmodel_bucket, r.n, `${r.wins}/${r.losses}`, r.hit_pct+'%', r.roi_pct+'%', r.profit_u+'u'], 'td', r.roi_pct));
+
+      const html = `<!doctype html><html><head><meta charset="utf-8"><title>MT Breakdown — ${sport} ${days}d</title>
+<style>
+  body{font:14px/1.5 -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;background:#0e1116;color:#e6edf3;margin:0;padding:24px;max-width:1200px}
+  h1{font-size:20px;margin:0 0 4px}h2{font-size:15px;margin:24px 0 8px;color:#7d8590}
+  table{width:100%;border-collapse:collapse;margin-bottom:16px;background:#161b22;border-radius:8px;overflow:hidden;font-size:13px}
+  th,td{text-align:left;padding:7px 10px;border-bottom:1px solid #21262d}th{background:#21262d;color:#7d8590;font-weight:500}
+  tr:last-child td{border-bottom:none}
+  .nav{margin-bottom:16px}.nav a{color:#58a6ff;margin-right:12px;text-decoration:none;font-size:13px}
+  .legend{color:#7d8590;font-size:12px;margin-bottom:16px}
+  code{background:#21262d;padding:1px 5px;border-radius:4px;font-size:12px}
+</style></head><body>
+<h1>Market Tips Breakdown — ${esc(sport)}</h1>
+<div style="color:#7d8590;margin-bottom:12px">janela: <b>${days}d</b> · min n: <b>${minN}</b> · settled only · ordem por ROI desc</div>
+<div class="nav">
+  <a href="?sport=${esc(sport)}&days=7&format=html&key=${esc(parsed.query.key || '')}">7d</a>
+  <a href="?sport=${esc(sport)}&days=30&format=html&key=${esc(parsed.query.key || '')}">30d</a>
+  <a href="?sport=${esc(sport)}&days=60&format=html&key=${esc(parsed.query.key || '')}">60d</a>
+  <a href="?sport=lol&days=${days}&format=html&key=${esc(parsed.query.key || '')}">lol</a>
+  <a href="?sport=dota2&days=${days}&format=html&key=${esc(parsed.query.key || '')}">dota2</a>
+  <a href="?sport=${esc(sport)}&days=${days}&format=json&key=${esc(parsed.query.key || '')}">JSON</a>
+</div>
+<div class="legend">
+  Cor ROI: <span style="color:#3fb950">≥+10%</span> · <span style="color:#a5d6ff">+3% a +10%</span> · <span style="color:#d29922">−3% a +3% (ruído)</span> · <span style="color:#f85149">&lt;−3%</span>
+</div>
+
+<h2>Por (market × side) — visão top-level</h2>
+<table><thead>${tr(['Market','Side','n','W/L','Hit','avgEV','ROI','Profit'],'th')}</thead><tbody>${byrows1.join('')}</tbody></table>
+
+<h2>Por (market × side × EV bucket) — afunilar por edge</h2>
+<table><thead>${tr(['Market','Side','EV','n','W/L','Hit','ROI','Profit'],'th')}</thead><tbody>${byrows2.join('')}</tbody></table>
+
+<h2>Por (market × side × pModel bucket) — afunilar por confiança</h2>
+<table><thead>${tr(['Market','Side','pModel','n','W/L','Hit','ROI','Profit'],'th')}</thead><tbody>${byrows3.join('')}</tbody></table>
+
+<div class="legend" style="margin-top:24px">
+Stakes assumem 1u por tip (stake_units no shadow log). Profit = (odd-1) em win, -1 em loss.<br>
+Cortes com <code>n &lt; ${minN}</code> são omitidos. Override: <code>?min_n=3</code> pra samples menores (menos robusto).<br>
+ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 30</b> pra decisão de gate.
+</div>
+</body></html>`;
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(html);
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
   // Recomputa stakes pras shadow tips pending com o novo cap (MARKET_TIP_MAX_STAKE_UNITS).
   // Lista tips com admin_dm_sent_at nas últimas N horas (match provavelmente não resolveu
   // ainda) e mostra old_stake (Kelly sem cap) vs new_stake (capped). Opcional: envia DM
