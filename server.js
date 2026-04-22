@@ -10439,6 +10439,109 @@ ROI realizado usa <code>profit_reais</code> se presente, senão <code>stake × (
     return;
   }
 
+  // Market tips shadow diag: mostra sample de pending + info de match_results candidatos
+  // pra cada um, pra diagnosticar por que settle não está pegando. Admin-only.
+  // GET /mt-shadow-diag?sport=tennis&limit=20&key=<ADMIN_KEY>
+  if (p === '/mt-shadow-diag') {
+    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    try {
+      const sport = String(parsed.query.sport || 'tennis');
+      const limit = Math.max(1, Math.min(100, parseInt(parsed.query.limit || '20', 10) || 20));
+
+      const gameMap = { lol: 'lol', dota2: 'dota2', cs2: 'cs2', valorant: 'valorant', tennis: 'tennis', football: 'football' };
+      const game = gameMap[sport];
+
+      const pending = db.prepare(`
+        SELECT id, sport, team1, team2, league, market, line, side, odd, created_at
+        FROM market_tips_shadow
+        WHERE result IS NULL AND sport = ?
+        ORDER BY created_at DESC
+        LIMIT ?
+      `).all(sport, limit);
+
+      const norm = (s) => String(s || '').toLowerCase().trim().replace(/\s+/g, ' ');
+      const windowBefore = sport === 'tennis' ? '-10 days'
+                         : sport === 'football' ? '-48 hours' : '-12 hours';
+      const windowAfter = sport === 'tennis' ? '+10 days'
+                        : sport === 'football' ? '+72 hours' : '+48 hours';
+
+      const out = pending.map(t => {
+        const n1 = norm(t.team1), n2 = norm(t.team2);
+        // 1. Strict lookup (mesma query do settleShadowTips)
+        const strict = game ? db.prepare(`
+          SELECT winner, final_score, resolved_at, match_id, team1, team2, league
+          FROM match_results WHERE game = ?
+            AND ((lower(team1) = ? AND lower(team2) = ?) OR (lower(team1) = ? AND lower(team2) = ?))
+            AND resolved_at >= datetime(?, ?) AND resolved_at <= datetime(?, ?)
+            AND winner IS NOT NULL AND winner != ''
+          LIMIT 3
+        `).all(game, n1, n2, n2, n1, t.created_at, windowBefore, t.created_at, windowAfter) : [];
+
+        // 2. Fuzzy LIKE (pra comparar quantos candidatos a versão leniente teria)
+        const l1 = `%${n1}%`, l2 = `%${n2}%`;
+        const fuzzy = game ? db.prepare(`
+          SELECT winner, final_score, resolved_at, match_id, team1, team2, league
+          FROM match_results WHERE game = ?
+            AND ((lower(team1) LIKE ? AND lower(team2) LIKE ?) OR (lower(team1) LIKE ? AND lower(team2) LIKE ?))
+            AND resolved_at >= datetime(?, ?) AND resolved_at <= datetime(?, ?)
+            AND winner IS NOT NULL AND winner != ''
+          LIMIT 3
+        `).all(game, l1, l2, l2, l1, t.created_at, windowBefore, t.created_at, windowAfter) : [];
+
+        // 3. Sem janela temporal — só match por nome (pra ver se dados existem em outro período)
+        const anyTime = game ? db.prepare(`
+          SELECT winner, final_score, resolved_at, team1, team2, league
+          FROM match_results WHERE game = ?
+            AND ((lower(team1) LIKE ? AND lower(team2) LIKE ?) OR (lower(team1) LIKE ? AND lower(team2) LIKE ?))
+            AND winner IS NOT NULL AND winner != ''
+          ORDER BY resolved_at DESC LIMIT 2
+        `).all(game, l1, l2, l2, l1) : [];
+
+        return {
+          tip_id: t.id,
+          teams: `${t.team1} vs ${t.team2}`,
+          league: t.league,
+          market: t.market, line: t.line, side: t.side, odd: t.odd,
+          created_at: t.created_at,
+          strict_matches: strict.length,
+          fuzzy_matches: fuzzy.length,
+          any_time_matches: anyTime.length,
+          strict_sample: strict[0] || null,
+          fuzzy_sample: fuzzy[0] || null,
+          any_time_sample: anyTime[0] || null,
+        };
+      });
+
+      // Agrupar diagnóstico: tipos de falha
+      const summary = {
+        total: out.length,
+        found_strict: out.filter(x => x.strict_matches > 0).length,
+        found_only_fuzzy: out.filter(x => x.strict_matches === 0 && x.fuzzy_matches > 0).length,
+        found_only_outside_window: out.filter(x => x.strict_matches === 0 && x.fuzzy_matches === 0 && x.any_time_matches > 0).length,
+        no_match_any: out.filter(x => x.any_time_matches === 0).length,
+      };
+      summary.diagnosis = summary.found_strict > 0
+        ? 'parte match strict — settle não tá pegando por outra razão (handler faltando? parse?)'
+        : summary.found_only_fuzzy > 0
+        ? 'nome strict falha mas fuzzy pega — precisa relaxar lookup no settleShadowTips'
+        : summary.found_only_outside_window > 0
+        ? 'dados existem mas fora da janela temporal — ajustar janela'
+        : 'nenhum match em match_results — sync não populou ou nomes totalmente diferentes';
+
+      // Grupo por market (ver quais markets estão travados)
+      const marketCounts = {};
+      for (const t of pending) {
+        const k = `${t.market}|${t.side || 'null'}`;
+        marketCounts[k] = (marketCounts[k] || 0) + 1;
+      }
+
+      sendJson(res, { ok: true, sport, total_pending_in_db: db.prepare(`SELECT COUNT(*) c FROM market_tips_shadow WHERE result IS NULL AND sport = ?`).get(sport).c,
+        sample_size: out.length, summary, market_counts: marketCounts, samples: out });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
   // Sync football results via ESPN — fallback gratuito (sem API key) pro sofascore
   // que requer proxy Django ou tomava 403 direto. Varre top 30 ligas europeias +
   // brasileirão + libertadores + MLS.
