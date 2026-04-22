@@ -10443,6 +10443,70 @@ ROI realizado usa <code>profit_reais</code> se presente, senão <code>stake × (
     return;
   }
 
+  // Recomputa stakes pras shadow tips pending com o novo cap (MARKET_TIP_MAX_STAKE_UNITS).
+  // Lista tips com admin_dm_sent_at nas últimas N horas (match provavelmente não resolveu
+  // ainda) e mostra old_stake (Kelly sem cap) vs new_stake (capped). Opcional: envia DM
+  // admin com a correção via ?send=1.
+  // GET /admin/recompute-market-tip-stakes?sport=tennis&hours=24&send=1&key=<ADMIN_KEY>
+  if (p === '/admin/recompute-market-tip-stakes') {
+    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    try {
+      const sport = String(parsed.query.sport || 'tennis');
+      const hours = Math.max(1, Math.min(72, parseInt(parsed.query.hours || '24', 10) || 24));
+      const doSend = String(parsed.query.send || '').trim() === '1';
+
+      const { kellyStakeForMarket } = require('./lib/market-tip-processor');
+      const rows = db.prepare(`
+        SELECT id, sport, team1, team2, league, market, line, side, p_model, odd, ev_pct,
+               admin_dm_sent_at, created_at, result
+        FROM market_tips_shadow
+        WHERE sport = ?
+          AND admin_dm_sent_at IS NOT NULL
+          AND admin_dm_sent_at >= datetime('now', '-' || ? || ' hours')
+          AND result IS NULL
+        ORDER BY admin_dm_sent_at DESC
+      `).all(sport, hours);
+
+      const corrections = [];
+      for (const r of rows) {
+        if (!Number.isFinite(r.p_model) || !Number.isFinite(r.odd)) continue;
+        // Old stake = Kelly sem cap (simulando o bug anterior) via ENV override temporário
+        const savedEnv = process.env.MARKET_TIP_MAX_STAKE_UNITS;
+        process.env.MARKET_TIP_MAX_STAKE_UNITS = '999';
+        const oldStake = kellyStakeForMarket(r.p_model, r.odd, 100, 0.10);
+        if (savedEnv == null) delete process.env.MARKET_TIP_MAX_STAKE_UNITS;
+        else process.env.MARKET_TIP_MAX_STAKE_UNITS = savedEnv;
+
+        const newStake = kellyStakeForMarket(r.p_model, r.odd, 100, 0.10);
+        const diff = +(oldStake - newStake).toFixed(2);
+        if (diff < 0.3) continue; // ignora casos onde cap não afetou (< 0.3u diff)
+        corrections.push({
+          id: r.id,
+          teams: `${r.team1} vs ${r.team2}`,
+          league: r.league,
+          market: r.market, line: r.line, side: r.side,
+          p_model: r.p_model, odd: r.odd, ev_pct: r.ev_pct,
+          old_stake: oldStake, new_stake: newStake, diff,
+          admin_dm_sent_at: r.admin_dm_sent_at,
+        });
+      }
+
+      // Nota: server.js não tem acesso direto a ADMIN_IDS/SPORTS (viva em bot.js).
+      // JSON retornado mostra todas as correções — admin pode avaliar manualmente.
+      // Próximos DMs já saem com cap aplicado automático (commit 5d21e11).
+      sendJson(res, {
+        ok: true, sport, hours, send: doSend,
+        note: 'DMs corrigidos não são enviados do servidor — próximos pollTennis já usam cap automático',
+        total_dms_in_window: rows.length,
+        corrections_count: corrections.length,
+        total_diff_units: +corrections.reduce((s, c) => s + c.diff, 0).toFixed(1),
+        corrections,
+      });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
   // Pipeline state diag pra market tips DM: verifica todos os gates estáticos
   // (env flags, kill switch, leak guard runtime, ADMIN_IDS, recent DMs).
   // Útil pra debugar por que shadow loga mas DM não sai.
