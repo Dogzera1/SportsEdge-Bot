@@ -13725,9 +13725,12 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (p === '/tennis-matches') {
-    // Preferência: Pinnacle (se ativado) → The Odds API → Odds-API.io
+    // Preferência: Pinnacle (default) → Odds-API.io → The Odds API (desativado por default).
+    // TheOddsAPI quota (15k/mês) é preciosa — Pinnacle sharp + Odds-API.io cobrem tennis
+    // sem custo de quota. Reative via TENNIS_USE_THE_ODDS=true se precisar de cobertura extra.
     const hasPinnacle = process.env.PINNACLE_TENNIS === 'true';
-    if (!hasPinnacle && !THE_ODDS_API_KEY && !ODDS_API_IO_KEY) { sendJson(res, []); return; }
+    const theOddsKey = (process.env.TENNIS_USE_THE_ODDS === 'true') ? THE_ODDS_API_KEY : '';
+    if (!hasPinnacle && !theOddsKey && !ODDS_API_IO_KEY) { sendJson(res, []); return; }
     try {
       const now = Date.now();
 
@@ -13757,13 +13760,13 @@ const server = http.createServer(async (req, res) => {
       if (pinEmpty) log('DEBUG', 'TENNIS', 'Pinnacle vazio — descartando cache e refetching');
 
       // Se só Pinnacle está ativo (sem The Odds API / Odds-API.io), usa direto
-      if (hasPinnacle && !THE_ODDS_API_KEY && !ODDS_API_IO_KEY) {
+      if (hasPinnacle && !theOddsKey && !ODDS_API_IO_KEY) {
         sendJson(res, pinMatches);
         return;
       }
 
       // Fallback via Odds-API.io (1 request /events + N /odds; manter N baixo)
-      if (!THE_ODDS_API_KEY && ODDS_API_IO_KEY) {
+      if (!theOddsKey && ODDS_API_IO_KEY) {
         const LIVE_WINDOW_MS = parseInt(process.env.TENNIS_LIVE_WINDOW_H || '6', 10) * 60 * 60 * 1000;
         const weekAhead = now + 7 * 24 * 60 * 60 * 1000;
         const maxEventsCfg = parseInt(process.env.ODDSAPIO_TENNIS_MAX_EVENTS || '14', 10);
@@ -13843,7 +13846,7 @@ const server = http.createServer(async (req, res) => {
       const matches = [];
       for (const k of allowedKeys) {
         if (!oddsApiAllowed('ODDS')) break;
-        const urlOdds = `https://api.the-odds-api.com/v4/sports/${k}/odds/?apiKey=${THE_ODDS_API_KEY}&regions=eu&markets=h2h&oddsFormat=decimal`;
+        const urlOdds = `https://api.the-odds-api.com/v4/sports/${k}/odds/?apiKey=${theOddsKey}&regions=eu&markets=h2h&oddsFormat=decimal`;
         const r2 = await theOddsGet(urlOdds);
         if (!r2 || r2.status !== 200) continue;
         const raw = safeParse(r2.body, []);
