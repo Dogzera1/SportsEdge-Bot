@@ -12667,6 +12667,7 @@ async function pollTableTennis(runOnce = false) {
   const sofaTT = require('./lib/sofascore-tabletennis');
 
   async function loop() {
+    let _matchesForScheduler = [];
     try {
       log('INFO', 'AUTO-TT', `Iniciando verificação de Table Tennis${ttConfig.shadowMode ? ' [SHADOW]' : ''}...`);
       markPollHeartbeat('tt');
@@ -12676,6 +12677,7 @@ async function pollTableTennis(runOnce = false) {
         if (!runOnce) setTimeout(loop, TT_INTERVAL);
         return [];
       }
+      _matchesForScheduler = matches;
       log('INFO', 'AUTO-TT', `${matches.length} partidas TT com odds`);
 
       const now = Date.now();
@@ -12881,7 +12883,7 @@ async function pollTableTennis(runOnce = false) {
       _livePhaseExit('tabletennis');
     }
     if (!runOnce) setTimeout(loop, TT_INTERVAL);
-    return [];
+    return _matchesForScheduler;
   }
   const result = await loop();
   return runOnce ? (result || []) : undefined;
@@ -12913,6 +12915,7 @@ async function pollCs(runOnce = false) {
   const isCsTier1 = (league) => CS_TIER1_RE.test(String(league || ''));
 
   async function loop() {
+    let _matchesForScheduler = [];
     try {
       log('INFO', 'AUTO-CS', `Iniciando verificação de CS2${csConfig.shadowMode ? ' [SHADOW]' : ''}...`);
       markPollHeartbeat('cs');
@@ -12922,6 +12925,7 @@ async function pollCs(runOnce = false) {
         if (!runOnce) { const _nBase = _hadLiveCs ? CS_POLL_LIVE_MS : CS_POLL_IDLE_MS; const _stMult = _liveStormCooldownMult('cs'); const _n = _nBase * _stMult; log('INFO', 'AUTO-CS', `Próximo ciclo em ${Math.round(_n/1000)}s (${_hadLiveCs ? 'LIVE' : 'idle'}${_stMult>1?` | storm×${_stMult}`:''})`); setTimeout(loop, _n); }
         return [];
       }
+      _matchesForScheduler = matches;
       log('INFO', 'AUTO-CS', `${matches.length} partidas CS2`);
 
       const now = Date.now();
@@ -13481,8 +13485,7 @@ Máximo 150 palavras.`;
       log('ERROR', 'AUTO-CS', e.message);
       _livePhaseExit('cs');
     }
-    if (!runOnce) setTimeout(loop, CS_INTERVAL);
-    return [];
+    return _matchesForScheduler;
   }
   const result = await loop();
   return runOnce ? (result || []) : undefined;
@@ -13505,6 +13508,7 @@ async function pollValorant(runOnce = false) {
   const { getValorantModel } = require('./lib/valorant-ml');
 
   async function loop() {
+    let _matchesForScheduler = [];
     try {
       log('INFO', 'AUTO-VAL', `Iniciando verificação de Valorant${valConfig.shadowMode ? ' [SHADOW]' : ''}...`);
       markPollHeartbeat('valorant');
@@ -13514,6 +13518,7 @@ async function pollValorant(runOnce = false) {
         if (!runOnce) { const _nBase = _hadLiveVal ? VAL_POLL_LIVE_MS : VAL_POLL_IDLE_MS; const _stMult = _liveStormCooldownMult('valorant'); const _n = _nBase * _stMult; log('INFO', 'AUTO-VAL', `Próximo ciclo em ${Math.round(_n/1000)}s (${_hadLiveVal ? 'LIVE' : 'idle'}${_stMult>1?` | storm×${_stMult}`:''})`); setTimeout(loop, _n); }
         return [];
       }
+      _matchesForScheduler = matches;
       log('INFO', 'AUTO-VAL', `${matches.length} partidas Valorant`);
 
       const now = Date.now();
@@ -13860,7 +13865,7 @@ async function pollValorant(runOnce = false) {
       log('ERROR', 'AUTO-VAL', e.message);
       _livePhaseExit('valorant');
     }
-    return [];
+    return _matchesForScheduler;
   }
   const result = await loop();
   return runOnce ? (result || []) : undefined;
