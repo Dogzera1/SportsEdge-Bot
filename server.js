@@ -10443,6 +10443,102 @@ ROI realizado usa <code>profit_reais</code> se presente, senão <code>stake × (
     return;
   }
 
+  // Pipeline state diag pra market tips DM: verifica todos os gates estáticos
+  // (env flags, kill switch, leak guard runtime, ADMIN_IDS, recent DMs).
+  // Útil pra debugar por que shadow loga mas DM não sai.
+  // GET /mt-dm-pipeline?sport=tennis&days=7&key=<ADMIN_KEY>
+  if (p === '/mt-dm-pipeline') {
+    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    try {
+      const sport = String(parsed.query.sport || 'tennis');
+      const days = Math.max(1, Math.min(30, parseInt(parsed.query.days || '7', 10) || 7));
+      const up = sport.toUpperCase();
+      const aliasEnv = { DOTA2: 'DOTA', CS2: 'CS' }[up];
+
+      // 1. Env flags
+      const envState = {
+        kill_switch: process.env.MARKET_TIPS_DM_KILL_SWITCH === 'true',
+        sport_enabled: process.env[`${up}_MARKET_TIPS_ENABLED`] === 'true',
+        sport_enabled_alias: aliasEnv ? process.env[`${aliasEnv}_MARKET_TIPS_ENABLED`] === 'true' : null,
+        min_ev: process.env[`${up}_MARKET_TIP_MIN_EV`] || '8 (default)',
+        min_pmodel: process.env[`${up}_MARKET_TIP_MIN_PMODEL`] || '0.55 (default)',
+        market_scan_on: process.env[`${up}_MARKET_SCAN`] !== 'false',
+      };
+
+      // 2. Leak guard runtime disables — lê tabela market_tips_runtime_state
+      let runtimeDisables = [];
+      try {
+        runtimeDisables = db.prepare(`
+          SELECT sport, market, source, reason, clv_pct, clv_n, disabled, updated_at
+          FROM market_tips_runtime_state
+          WHERE sport = ?
+          ORDER BY updated_at DESC
+        `).all(sport);
+      } catch (_) {
+        runtimeDisables = [{ error: 'table market_tips_runtime_state ausente (migration 050 não rodou?)' }];
+      }
+
+      // 3. Admin DMs enviados nos últimos N dias (backstop persistente)
+      let recentAdminDms = [];
+      try {
+        recentAdminDms = db.prepare(`
+          SELECT market, line, side, team1, team2, created_at, admin_dm_sent_at
+          FROM market_tips_shadow
+          WHERE sport = ?
+            AND admin_dm_sent_at IS NOT NULL
+            AND admin_dm_sent_at >= datetime('now', '-' || ? || ' days')
+          ORDER BY admin_dm_sent_at DESC
+          LIMIT 10
+        `).all(sport, days);
+      } catch (_) {}
+
+      const recentAdminDmCount = db.prepare(`
+        SELECT COUNT(*) AS n FROM market_tips_shadow
+        WHERE sport = ? AND admin_dm_sent_at IS NOT NULL
+          AND admin_dm_sent_at >= datetime('now', '-' || ? || ' days')
+      `).get(sport, days).n;
+
+      // 4. Candidatas recentes (≥gates) que NUNCA viraram DM
+      const minEv = parseFloat(envState.min_ev) || 8;
+      const minPmodel = parseFloat(envState.min_pmodel) || 0.55;
+      const unsentCandidates = db.prepare(`
+        SELECT COUNT(*) AS n FROM market_tips_shadow
+        WHERE sport = ?
+          AND ev_pct >= ?
+          AND p_model >= ?
+          AND admin_dm_sent_at IS NULL
+          AND created_at >= datetime('now', '-' || ? || ' days')
+      `).get(sport, minEv, minPmodel, days).n;
+
+      // 5. Summary diagnóstico
+      const problems = [];
+      if (envState.kill_switch) problems.push('MARKET_TIPS_DM_KILL_SWITCH=true bloqueia TODOS os DMs');
+      if (!envState.sport_enabled && !envState.sport_enabled_alias) {
+        problems.push(`${up}_MARKET_TIPS_ENABLED não está "true" no processo (verifica env var no Railway + redeploy)`);
+      }
+      const disabledMarkets = runtimeDisables.filter(r => r.disabled === 1 || r.disabled === true);
+      if (disabledMarkets.length) {
+        problems.push(`Leak guard desabilitou runtime: ${disabledMarkets.map(d => `${d.market}(${d.reason || '?'})`).join(', ')}`);
+      }
+      if (!envState.market_scan_on) problems.push(`${up}_MARKET_SCAN=false desliga o scanner inteiro`);
+      if (recentAdminDmCount === 0 && unsentCandidates > 10) {
+        problems.push(`${unsentCandidates} candidatas passam gates mas NENHUM admin_dm_sent_at logado — DM pipeline bloqueado antes do Telegram (check logs Railway: [TENNIS-MARKET-TIP] ou [MT-GUARD])`);
+      }
+
+      sendJson(res, {
+        ok: true, sport, days,
+        env: envState,
+        leak_guard_runtime: runtimeDisables,
+        recent_admin_dm_count: recentAdminDmCount,
+        recent_admin_dms: recentAdminDms.slice(0, 5),
+        unsent_candidates_matching_gates: unsentCandidates,
+        problems: problems.length ? problems : ['Nenhum problema estático detectado — checar logs Railway em tempo real'],
+      });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
   // Gate diag: quantas shadow tips passariam os thresholds DM (minEv / minPmodel)
   // se o sport estivesse habilitado. Ajuda decidir thresholds.
   // GET /mt-gate-check?sport=tennis&days=7&min_ev=8&min_pmodel=0.55&key=XXX
