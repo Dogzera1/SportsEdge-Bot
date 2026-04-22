@@ -30,21 +30,30 @@ function arg(name, def) {
 }
 const SPORT = arg('sport', null);
 const DAYS = parseInt(arg('days', '30'), 10);
+const SINCE = arg('since', null); // YYYY-MM-DD; sobrepõe --days
 const asJson = argv.includes('--json');
 const MIN_N = parseInt(arg('min', '5'), 10);
 
-const DB_PATH = path.resolve(__dirname, '..', 'sportsedge.db');
+// Regime change 2026-04-22 — bucket gate + tennis isotonic disable.
+const REGIME_CHANGE_DATE = '2026-04-22';
+
+const DB_PATH = (arg('db', null) || process.env.DB_PATH || path.resolve(__dirname, '..', 'sportsedge.db'))
+  .trim().replace(/^=+/, '');
 const db = new Database(DB_PATH, { readonly: true });
 
-const filter = SPORT ? ` AND sport = '${SPORT.replace(/'/g, "''")}'` : '';
+const sportFilter = SPORT ? ` AND sport = '${SPORT.replace(/'/g, "''")}'` : '';
+const useSince = SINCE && /^\d{4}-\d{2}-\d{2}$/.test(SINCE);
+const timeFilter = useSince
+  ? `AND sent_at >= '${SINCE} 00:00:00'`
+  : `AND sent_at >= datetime('now', '-${DAYS} days')`;
 const rows = db.prepare(`
   SELECT sport, event_name, odds, clv_odds, ev, result, profit_reais,
          stake_reais, COALESCE(stake_reais, 1) AS eff_stake
   FROM tips
   WHERE result IN ('win', 'loss')
     AND odds IS NOT NULL
-    AND sent_at >= datetime('now', '-${DAYS} days')
-    ${filter}
+    ${timeFilter}
+    ${sportFilter}
 `).all();
 
 // Agrupa por (sport, event_name cleaned)
@@ -90,9 +99,22 @@ for (const a of agg.values()) {
 results.sort((a, b) => (b.n) - (a.n));
 
 if (asJson) {
-  console.log(JSON.stringify({ days: DAYS, sport: SPORT, minN: MIN_N, rows: results }, null, 2));
+  console.log(JSON.stringify({
+    days: useSince ? null : DAYS,
+    since: useSince ? SINCE : null,
+    regimeChangeDate: REGIME_CHANGE_DATE,
+    sport: SPORT,
+    minN: MIN_N,
+    rows: results,
+  }, null, 2));
 } else {
-  console.log(`\n── CLV per-league (last ${DAYS}d${SPORT ? ', sport=' + SPORT : ''}, min n=${MIN_N}) ──\n`);
+  const periodLabel = useSince
+    ? `desde ${SINCE}` + (SINCE === REGIME_CHANGE_DATE ? ' [novo regime puro]' : '')
+    : `last ${DAYS}d`;
+  console.log(`\n── CLV per-league (${periodLabel}${SPORT ? ', sport=' + SPORT : ''}, min n=${MIN_N}) ──\n`);
+  if (!useSince) {
+    console.log(`ℹ️  Regime change em ${REGIME_CHANGE_DATE}. Pra análise pós-fix pura: --since=${REGIME_CHANGE_DATE}\n`);
+  }
   const hdr = 'Sport     | League                                | n    | Hit%   | AvgEv%  | CLV%    | ROI%   | Profit';
   console.log(hdr);
   console.log('-'.repeat(hdr.length));

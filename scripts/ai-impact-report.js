@@ -31,15 +31,23 @@ function argVal(name, def) {
 }
 
 const DAYS = parseInt(argVal('days', '60'), 10);
+const SINCE = argVal('since', null); // YYYY-MM-DD; sobrepõe --days
 const SPORT_FILTER = argVal('sport', null);
 const DB_PATH = (argVal('db', null) || process.env.DB_PATH || path.join(__dirname, '..', 'sportsedge.db'))
   .trim().replace(/^=+/, '');
 
+// Regime change 2026-04-22 — bucket gate + tennis isotonic disable mudaram
+// distribuição. Análises cruzando essa data misturam regimes; preferir --since.
+const REGIME_CHANGE_DATE = '2026-04-22';
+
 const initDatabase = require('../lib/database');
 const { db } = initDatabase(DB_PATH);
 
+const periodLabel = SINCE && /^\d{4}-\d{2}-\d{2}$/.test(SINCE)
+  ? `desde ${SINCE}` + (SINCE === REGIME_CHANGE_DATE ? ' [novo regime puro]' : '')
+  : `${DAYS}d`;
 console.log(`[ai-impact] db=${DB_PATH}`);
-console.log(`[ai-impact] window=${DAYS}d${SPORT_FILTER ? ` sport=${SPORT_FILTER}` : ''}\n`);
+console.log(`[ai-impact] window=${periodLabel}${SPORT_FILTER ? ` sport=${SPORT_FILTER}` : ''}\n`);
 
 // Classifica path pelo model_label. Retorna 'normal' | 'override' | 'hybrid' | 'no_ai'.
 function pathOf(label, reason) {
@@ -51,15 +59,18 @@ function pathOf(label, reason) {
   return 'normal';
 }
 
+const useSince = SINCE && /^\d{4}-\d{2}-\d{2}$/.test(SINCE);
+const timeClause = useSince ? "sent_at >= ?" : "sent_at >= datetime('now', ?)";
+const timeArg = useSince ? `${SINCE} 00:00:00` : `-${DAYS} days`;
 const rows = db.prepare(`
   SELECT sport, odds, ev, stake, result, model_label, tip_reason,
          stake_reais, profit_reais, clv_odds, open_odds, is_shadow, confidence
   FROM tips
-  WHERE sent_at >= datetime('now', ?)
+  WHERE ${timeClause}
     AND result IN ('win', 'loss', 'void')
     ${SPORT_FILTER ? "AND sport = ?" : ''}
 `).all(
-  `-${DAYS} days`,
+  timeArg,
   ...(SPORT_FILTER ? [SPORT_FILTER] : [])
 );
 
@@ -113,6 +124,9 @@ const sports = new Set([...buckets.keys()].map(k => k.split('|')[0]));
 
 const fmt = (n, d = 1) => Number.isFinite(+n) ? (+n).toFixed(d) : 'n/a';
 
+if (!useSince) {
+  console.log(`ℹ️  Regime change em ${REGIME_CHANGE_DATE}. Pra análise pós-fix pura: --since=${REGIME_CHANGE_DATE}\n`);
+}
 console.log('────────────────────────────────────────────────────────────────────────────');
 console.log('Sport     Path       n    W/L/V     Hit%    avgEV%    ROI%     CLV%    Conf');
 console.log('────────────────────────────────────────────────────────────────────────────');

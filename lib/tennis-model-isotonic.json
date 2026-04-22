@@ -1,87 +1,135 @@
 {
-  "version": 1,
-  "fittedAt": "2026-04-18T17:24:58.145Z",
-  "method": "isotonic_pav",
-  "nCalibSamples": 1359,
+  "version": 2,
+  "fittedAt": "2026-04-22T22:39:18.634Z",
+  "method": "isotonic_pav_variable_bins",
+  "seed": 17,
+  "nCalibSamples": 1206,
+  "nTestSamples": 1372,
+  "fineZone": {
+    "min": 0.3,
+    "max": 0.55,
+    "width": 0.025
+  },
+  "coarseWidth": 0.05,
+  "validation": {
+    "zones": [
+      {
+        "zone": "[0.05, 0.30)",
+        "n": 166,
+        "raw": 0.1482,
+        "calib": 0.1414,
+        "status": "OK"
+      },
+      {
+        "zone": "[0.30, 0.55)",
+        "n": 533,
+        "raw": 0.2032,
+        "calib": 0.0314,
+        "status": "OK"
+      },
+      {
+        "zone": "[0.55, 0.80)",
+        "n": 536,
+        "raw": 0.1666,
+        "calib": 0.0147,
+        "status": "OK"
+      },
+      {
+        "zone": "[0.80, 0.95]",
+        "n": 128,
+        "raw": 0.1201,
+        "calib": 0.0117,
+        "status": "OK"
+      }
+    ],
+    "failed": false,
+    "forced": false
+  },
   "blocks": [
     {
-      "pMin": 0.0529,
-      "pMax": 0.0983,
-      "yMean": 0.2,
-      "n": 20
+      "pMin": 0.0523,
+      "pMax": 0.0987,
+      "yMean": 0.2308,
+      "n": 13
     },
     {
-      "pMin": 0.1018,
-      "pMax": 0.1471,
-      "yMean": 0.2609,
-      "n": 23
+      "pMin": 0.1001,
+      "pMax": 0.148,
+      "yMean": 0.4583,
+      "n": 24
     },
     {
-      "pMin": 0.1547,
-      "pMax": 0.2474,
-      "yMean": 0.4286,
-      "n": 84
+      "pMin": 0.1506,
+      "pMax": 0.1994,
+      "yMean": 0.4828,
+      "n": 29
     },
     {
-      "pMin": 0.2503,
-      "pMax": 0.3493,
-      "yMean": 0.5469,
-      "n": 128
+      "pMin": 0.2003,
+      "pMax": 0.2996,
+      "yMean": 0.5288,
+      "n": 104
     },
     {
-      "pMin": 0.35,
-      "pMax": 0.3999,
-      "yMean": 0.5965,
-      "n": 114
+      "pMin": 0.3001,
+      "pMax": 0.3248,
+      "yMean": 0.5926,
+      "n": 27
     },
     {
-      "pMin": 0.4004,
-      "pMax": 0.5492,
-      "yMean": 0.7419,
-      "n": 341
+      "pMin": 0.3255,
+      "pMax": 0.3719,
+      "yMean": 0.6234,
+      "n": 77
     },
     {
-      "pMin": 0.5503,
-      "pMax": 0.649,
-      "yMean": 0.7729,
-      "n": 229
+      "pMin": 0.3755,
+      "pMax": 0.4999,
+      "yMean": 0.6654,
+      "n": 254
     },
     {
-      "pMin": 0.6501,
-      "pMax": 0.7495,
-      "yMean": 0.8966,
-      "n": 203
+      "pMin": 0.5004,
+      "pMax": 0.5497,
+      "yMean": 0.7328,
+      "n": 131
     },
     {
-      "pMin": 0.7504,
-      "pMax": 0.8,
-      "yMean": 0.9265,
-      "n": 68
+      "pMin": 0.5501,
+      "pMax": 0.5996,
+      "yMean": 0.785,
+      "n": 107
     },
     {
-      "pMin": 0.8002,
-      "pMax": 0.8499,
-      "yMean": 0.9403,
-      "n": 67
+      "pMin": 0.6001,
+      "pMax": 0.6495,
+      "yMean": 0.79,
+      "n": 100
     },
     {
-      "pMin": 0.8502,
-      "pMax": 0.8982,
-      "yMean": 0.9796,
-      "n": 49
+      "pMin": 0.6506,
+      "pMax": 0.7986,
+      "yMean": 0.8447,
+      "n": 219
     },
     {
-      "pMin": 0.9016,
-      "pMax": 0.9485,
+      "pMin": 0.8043,
+      "pMax": 0.85,
+      "yMean": 0.9492,
+      "n": 59
+    },
+    {
+      "pMin": 0.8505,
+      "pMax": 0.8968,
+      "yMean": 0.973,
+      "n": 37
+    },
+    {
+      "pMin": 0.9006,
+      "pMax": 0.9457,
       "yMean": 1,
-      "n": 22
-    },
-    {
-      "pMin": 0.955,
-      "pMax": 0.982,
-      "yMean": 1,
-      "n": 9
+      "n": 19
     }
   ],
-  "trainingNote": "Fit sobre surface-Elo walk-forward; aplicar após tennis-model blended output."
+  "trainingNote": "v2: random-shuffle stratified (warmup chronological 70%, calib/test seeded random 50/50 do remaining), bins finos 0.025 em [0.30, 0.55], validação obrigatória por zona."
 }
