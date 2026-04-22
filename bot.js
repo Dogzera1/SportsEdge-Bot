@@ -5408,7 +5408,28 @@ async function autoAnalyzeMatch(token, match) {
       if (!clean) return null;
       return clean.slice(0, 160);
     };
-    const tipReason = extractTipReason(text);
+    // Fallback determinístico quando IA não gerou texto (backoff / desligada / erro).
+    // Evita DM sem justificativa. ENV LOL_FORCE_DETERMINISTIC_REASON=true força mesmo com IA.
+    const _forceDet = /^(1|true|yes)$/i.test(String(process.env.LOL_FORCE_DETERMINISTIC_REASON || ''));
+    let tipReason = _forceDet ? null : extractTipReason(text);
+    if (!tipReason) {
+      try {
+        const { buildTipReason } = require('./lib/tip-reason');
+        const _dir = mlResult?.direction || 't1';
+        const _pickTeam = _dir === 't2' ? match.team2 : match.team1;
+        const _pickP = _dir === 't2' ? mlResult?.modelP2 : mlResult?.modelP1;
+        const _pickOdd = _dir === 't2' ? parseFloat(oddsToUse?.t2) : parseFloat(oddsToUse?.t1);
+        const _implied = (_pickOdd > 1) ? (1 / _pickOdd) : null;
+        const _evPct = (_pickP && _pickOdd) ? ((_pickP * _pickOdd - 1) * 100) : null;
+        const _factors = (mlResult?.factorActive || []).slice(0, 3)
+          .map(f => ({ label: 'Sinal', value: String(f) }));
+        tipReason = buildTipReason({
+          sport: 'lol', pickTeam: _pickTeam,
+          modelPPick: _pickP, impliedP: _implied, evPct: _evPct,
+          factors: _factors, stage: match.league,
+        }) || null;
+      } catch (_) { /* silencia, tipReason fica null */ }
+    }
 
     // Extrai resumo da análise da IA para logar mesmo quando não há tip
     const extractAnalysisSummary = (t) => {
@@ -10058,7 +10079,21 @@ Máximo 200 palavras.`;
           modelP2: mlResult.modelP2,
           modelPPick: modelPForKelly,
           modelLabel: `dota-ml (${mlResult.factorActive?.join('+') || 'base'})`,
-          tipReason: iaResp ? iaResp.split('TIP_ML:')[0].trim().split('\n').filter(Boolean).pop()?.slice(0, 160) || null : null,
+          tipReason: (() => {
+            const _ia = iaResp ? iaResp.split('TIP_ML:')[0].trim().split('\n').filter(Boolean).pop()?.slice(0, 160) || null : null;
+            const _forceDet = /^(1|true|yes)$/i.test(String(process.env.DOTA_FORCE_DETERMINISTIC_REASON || ''));
+            if (_ia && !_forceDet) return _ia;
+            try {
+              const { buildTipReason } = require('./lib/tip-reason');
+              const _implied = (tipOdd > 1) ? (1 / tipOdd) : null;
+              return buildTipReason({
+                sport: 'dota2', pickTeam: tipTeam,
+                modelPPick: modelPForKelly, impliedP: _implied, evPct: parseFloat(evVal),
+                factors: (mlResult.factorActive || []).slice(0, 3).map(f => ({ label: 'Sinal', value: String(f) })),
+                stage: match.league,
+              }) || null;
+            } catch (_) { return null; }
+          })(),
           isShadow: isBucketShadowed('dota2') ? 1 : 0,
           oddsFetchedAt: o._fetchedAt || null,
           lineShopOdds: o || null,
