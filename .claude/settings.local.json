@@ -293,7 +293,9 @@
       "Bash(awk -F, 'NR == 2 { for \\(i=1; i<=NF; i++\\) printf \"%d: %s\\\\n\", i, $i }' /tmp/dota2_test.csv)",
       "Bash(git restore *)",
       "Bash(grep -oE '→ [^|]+$' \"/c/Users/vict_/Downloads/logs.1776815700506.log\")",
-      "Bash(xargs -I {} sh -c 'echo \"=== {} ===\" && head -200 {} | grep -E \"metrics|brier|baseline|lift|ece|accuracy|auc\" || true')"
+      "Bash(xargs -I {} sh -c 'echo \"=== {} ===\" && head -200 {} | grep -E \"metrics|brier|baseline|lift|ece|accuracy|auc\" || true')",
+      "Bash(awk -F: '$1>10276 && $1<10956')",
+      "Bash(awk -F: '$1>10276 && $1<10956 && !/\\\\/\\\\//')"
     ]
   }
 }
