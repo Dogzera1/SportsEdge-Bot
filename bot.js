@@ -617,9 +617,13 @@ const _lastStuckAlert = {}; // sport → ts (cooldown 2h entre alertas)
 const POLICY_REJECTIONS = new Set([
   'itf_exclusion',
   'odds_stale',
+  'odds_out_of_range', // odds fora do range configurado — gate intencional per-sport
   'ml_prefilter_edge',
   'segment_gate',
-  'ai_no_edge', // IA decidiu não entrar — decisão válida
+  'ai_no_edge',        // IA decidiu não entrar — decisão válida
+  'ia_no_edge',        // alias PT usado no MMA (bot.js:10811) — mesma semântica
+  'boxing_disabled',   // MMA_ALLOW_BOXING=false é default permanente (sem boxing Elo)
+  'future_week_not_alta', // luta futura + conf<ALTA = gate intencional
 ]);
 
 // Threshold per-sport via ENV. Tennis tem universo gigante (ITF/Challenger/ATP
