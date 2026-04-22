@@ -12672,12 +12672,53 @@ Máximo 200 palavras.`;
           log('INFO', 'AUTO-FOOTBALL', `[BLOCK] football/${match.league} — suprimido`);
           continue;
         }
+        // Roteamento por tipo de mercado:
+        // - 1X2_H / 1X2_A são semanticamente moneyline (pick home/away) → market_type='ML'
+        //   vão pra tabela tips + DM subscriber normal.
+        // - 1X2_D / OVER_2.5 / UNDER_2.5 são market tips → market_tips_shadow, sem DM.
+        //   Filtro permite desabilitar via FB_MARKETS_TO_SHADOW=false.
+        const _isFootballMlEquivalent = tipMarket === '1X2_H' || tipMarket === '1X2_A';
+        const _routeMarketToShadow = !/^(0|false|no)$/i.test(String(process.env.FB_MARKETS_TO_SHADOW ?? 'true'));
+        if (!_isFootballMlEquivalent && _routeMarketToShadow) {
+          try {
+            const { logShadowTip } = require('./lib/market-tips-shadow');
+            const sideMt = tipMarket === '1X2_D' ? 'd'
+                        : tipMarket === 'OVER_2.5' ? 'over'
+                        : tipMarket === 'UNDER_2.5' ? 'under' : null;
+            const marketKey = tipMarket === '1X2_D' ? 'draw' : 'totals';
+            const lineVal = tipMarket === 'OVER_2.5' || tipMarket === 'UNDER_2.5' ? 2.5 : null;
+            const pImp = parseFloat(String(tipOdd)) > 1 ? (1 / parseFloat(tipOdd)) : null;
+            const written = logShadowTip(db, {
+              sport: 'football',
+              match: { team1: match.team1, team2: match.team2, league: match.league, time: match.time, id: recordMatchId },
+              bestOf: null,
+              tip: {
+                market: marketKey, line: lineVal, side: sideMt,
+                label: tipMarket,
+                pModel: fbModelPPick,
+                pImplied: pImp,
+                odd: parseFloat(tipOdd),
+                ev: parseFloat(String(tipEV).replace(/[+%]/g, '')) || null,
+              },
+              stakeUnits: parseFloat(tipStakeAdjFb) || null,
+              meta: { source: 'pollFootball', tipReason: fbTipReason, conf: tipConf },
+            });
+            analyzedFootball.set(key, { ts: now, tipSent: true });
+            log('INFO', 'AUTO-FOOTBALL', `[SHADOW] ${tipMarket} ${tipTeam} @ ${tipOdd} | EV:${tipEV}% | ${tipConf}${written ? '' : ' (dedup)'}`);
+            await new Promise(r => setTimeout(r, 2000)); continue;
+          } catch (e) {
+            log('WARN', 'AUTO-FOOTBALL', `shadow log falhou (${tipMarket}): ${e.message} — caindo pro fluxo normal`);
+          }
+        }
+
+        // ML-equivalent (1X2_H/1X2_A) OU fallback caso shadow tenha falhado.
         const _pickSideFb = tipMarket === '1X2_H' ? 'h' : tipMarket === '1X2_A' ? 'a' : tipMarket === '1X2_D' ? 'd' : null;
+        const _recordMarketType = _isFootballMlEquivalent ? 'ML' : tipMarket;
         const recFb = await serverPost('/record-tip', {
           matchId: recordMatchId, eventName: match.league,
           p1: match.team1, p2: match.team2, tipParticipant: tipTeam,
           odds: String(tipOdd), ev: String(tipEV), stake: tipStakeAdjFb,
-          confidence: tipConf, isLive: false, market_type: tipMarket,
+          confidence: tipConf, isLive: false, market_type: _recordMarketType,
           modelP1: fbModelP1, modelP2: fbModelP2, modelPPick: fbModelPPick,
           modelLabel: (elo ? 'football-elo+poisson' : 'football-poisson') + (_fbHybridText ? '+hybrid' : (_fbFromOverride ? '+override' : '')),
           tipReason: fbTipReason,
@@ -12702,7 +12743,7 @@ Máximo 200 palavras.`;
           try { await sendDM(token, userId, tipMsg, _betBtnFb || undefined); } catch(_) {}
         }
         analyzedFootball.set(key, { ts: now, tipSent: true });
-        log('INFO', 'AUTO-FOOTBALL', `Tip enviada: ${tipTeam} @ ${tipOdd} | ${tipMarket} | EV:${tipEV}% | ${tipConf}`);
+        log('INFO', 'AUTO-FOOTBALL', `Tip enviada: ${tipTeam} @ ${tipOdd} | ${_recordMarketType} | EV:${tipEV}% | ${tipConf}`);
         await new Promise(r => setTimeout(r, 5000));
       }
       if (!_drainedFb && _hasLiveFb) _livePhaseExit('football');

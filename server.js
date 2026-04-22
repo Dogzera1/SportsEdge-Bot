@@ -10141,6 +10141,7 @@ const server = http.createServer(async (req, res) => {
         "sent_at >= datetime('now', '-' || ? || ' days')",
         "result IN ('win','loss','void')",
         "(is_shadow = 0 OR is_shadow IS NULL)",
+        "(market_type IS NULL OR market_type = 'ML')",
       ];
       const params = [days];
       if (sportFilter) { where.push('sport = ?'); params.push(sportFilter); }
@@ -11590,6 +11591,14 @@ ROI realizado usa <code>profit_reais</code> se presente, senão <code>stake × (
     else if (filter === 'loss') query += " AND t.result = 'loss'";
     else query += " AND COALESCE(t.result, '') != 'void'";
 
+    // Default: exclui market tips (OVER/UNDER, 1X2_D, HANDICAP, MAPx_WINNER etc). Dashboard
+    // mostra só ML — tips de mercado vivem em market_tips_shadow. Override via
+    // ?include_markets=1 pra consultas específicas.
+    const includeMarkets = String(parsed.query.include_markets || '').trim() === '1';
+    if (!includeMarkets) {
+      query += " AND (t.market_type IS NULL OR t.market_type = 'ML')";
+    }
+
     if (live !== null) { query += " AND t.is_live = ?"; params.push(live); }
     if (confidence) { query += " AND UPPER(t.confidence) = ?"; params.push(confidence); }
     if (q) {
@@ -11832,6 +11841,7 @@ ROI realizado usa <code>profit_reais</code> se presente, senão <code>stake × (
         SELECT sport, profit_reais, match_id, event_name
         FROM tips
         WHERE (archived IS NULL OR archived = 0) AND COALESCE(is_shadow, 0) = 0
+          AND (market_type IS NULL OR market_type = 'ML')
           AND result IN ('win','loss','push','void')
       `).all();
       const profitBySport = {};
@@ -11870,6 +11880,7 @@ ROI realizado usa <code>profit_reais</code> se presente, senão <code>stake × (
         SELECT sport, stake, odds, result, ev, settled_at, is_shadow, match_id, event_name, stake_reais, profit_reais
         FROM tips
         WHERE (archived IS NULL OR archived = 0) AND COALESCE(is_shadow, 0) = 0
+          AND (market_type IS NULL OR market_type = 'ML')
           AND (sent_at >= datetime('now', ?) OR result IS NULL)
       `).all(`-${days} days`);
       // Helper: classifica sport efetivo (reclassifica 'esports' legado em 'lol'/'dota2'
