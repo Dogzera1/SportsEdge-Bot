@@ -13818,9 +13818,14 @@ const server = http.createServer(async (req, res) => {
 
       // 1) Lista tennis_* com all=true para incluir WTA (muitas chaves vêm active=false fora do pico)
       if (!oddsApiAllowed('ODDS')) {
-        // Quota esgotada: retorna cache expirado se disponível
-        const fallback = _tennisMatchesCache?.matches?.filter(m => new Date(m.time).getTime() > now) || [];
-        sendJson(res, fallback);
+        // Quota esgotada: retorna cache expirado MERGED com Pinnacle fresh (se disponível).
+        // Sem o merge, odds Pinnacle-carimbadas no cache velho expiram pelo freshness gate
+        // e o bot para de analisar tennis até a quota resetar (dias).
+        const cached = _tennisMatchesCache?.matches?.filter(m => new Date(m.time).getTime() > now) || [];
+        const normKey = m => `${(m.team1||'').toLowerCase().replace(/[^a-z0-9]/g,'')}_${(m.team2||'').toLowerCase().replace(/[^a-z0-9]/g,'')}`;
+        const pinKeys = new Set(pinMatches.map(normKey));
+        const cachedMinusPin = cached.filter(m => !pinKeys.has(normKey(m)) && !pinKeys.has(normKey({team1:m.team2,team2:m.team1})));
+        sendJson(res, [...pinMatches, ...cachedMinusPin]);
         return;
       }
       const tennisKeys = await fetchTheOddsTennisSportKeys();
