@@ -1178,6 +1178,29 @@ const migrations = [
     },
   },
   {
+    id: '050_market_tips_runtime_state',
+    up(db) {
+      // Runtime overrides pra market tips DM. Quando shadow detecta leak
+      // (CLV<cutoff + n≥cutoff), auto-insere entry pra DESATIVAR o DM real
+      // mesmo que SPORT_MARKET_TIPS_ENABLED=true.
+      // Auto-remove quando CLV recupera ≥0%.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS market_tips_runtime_state (
+          sport TEXT NOT NULL,
+          market TEXT NOT NULL,
+          disabled INTEGER NOT NULL DEFAULT 0,
+          source TEXT,           -- 'auto_clv_leak' | 'manual'
+          reason TEXT,
+          clv_pct REAL,
+          clv_n INTEGER,
+          roi_pct REAL,
+          updated_at TEXT NOT NULL,
+          PRIMARY KEY (sport, market)
+        );
+      `);
+    },
+  },
+  {
     id: '049_cs_team_stats',
     up(db) {
       // CS2 pro team aggregate stats via HLTV scraping (lib/hltv.js + HLTV_PROXY_BASE).
