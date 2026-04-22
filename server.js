@@ -10124,6 +10124,199 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // AI Impact: mede se IA agrega ROI ao projeto. Agrupa tips settled por path
+  // (normal/override/hybrid/no_ai) derivado do model_label e tip_reason.
+  // Admin-only. Aceita key via header x-admin-key OU query ?key=XXX (browser-friendly).
+  // GET /ai-impact?days=60&sport=cs&format=html&key=XXX
+  if (p === '/ai-impact') {
+    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    try {
+      const daysRaw = parseInt(parsed.query.days);
+      const days = Number.isFinite(daysRaw) ? Math.max(1, Math.min(365, daysRaw)) : 60;
+      const sportFilter = parsed.query.sport ? String(parsed.query.sport) : null;
+      const wantHtml = parsed.query.format === 'html' || /text\/html/i.test(req.headers['accept'] || '');
+
+      const where = [
+        "sent_at >= datetime('now', '-' || ? || ' days')",
+        "result IN ('win','loss','void')",
+        "(is_shadow = 0 OR is_shadow IS NULL)",
+      ];
+      const params = [days];
+      if (sportFilter) { where.push('sport = ?'); params.push(sportFilter); }
+
+      const rows = db.prepare(`
+        SELECT sport, odds, ev, stake, result, model_label, tip_reason,
+               stake_reais, profit_reais, clv_odds, open_odds, confidence
+        FROM tips
+        WHERE ${where.join(' AND ')}
+      `).all(...params);
+
+      function pathOf(label, reason) {
+        const l = String(label || '');
+        const r = String(reason || '');
+        if (/\+override/i.test(l)) return 'override';
+        if (/\+hybrid/i.test(l))   return 'hybrid';
+        if (/fallback em backoff IA|fallback sem IA|determin/i.test(r)) return 'no_ai';
+        return 'normal';
+      }
+
+      const buckets = new Map();
+      const acc = (key) => {
+        if (!buckets.has(key)) {
+          buckets.set(key, { n: 0, wins: 0, losses: 0, voids: 0,
+            totalStake: 0, totalProfit: 0, evSum: 0, clvSum: 0, clvN: 0,
+            conf: { ALTA: 0, MÉDIA: 0, BAIXA: 0 } });
+        }
+        return buckets.get(key);
+      };
+
+      for (const r of rows) {
+        const sport = r.sport || 'unknown';
+        const pth = pathOf(r.model_label, r.tip_reason);
+        const a = acc(`${sport}|${pth}`);
+        a.n++;
+        if (r.result === 'win') a.wins++;
+        else if (r.result === 'loss') a.losses++;
+        else if (r.result === 'void') a.voids++;
+        // Tudo em units (não mistura com profit_reais que é R$)
+        const stake = parseFloat(String(r.stake || '').replace(/u/i, '')) || 0;
+        const odd = parseFloat(r.odds) || 0;
+        a.totalStake += stake;
+        const profit = r.result === 'win' ? stake * (odd - 1)
+                     : r.result === 'loss' ? -stake
+                     : 0;
+        a.totalProfit += profit;
+        a.evSum += parseFloat(r.ev) || 0;
+        if (r.clv_odds && r.open_odds && +r.clv_odds > 0 && +r.open_odds > 0) {
+          const clvPct = ((+r.clv_odds / +r.open_odds) - 1) * 100;
+          if (Number.isFinite(clvPct)) { a.clvSum += clvPct; a.clvN++; }
+        }
+        if (r.confidence && a.conf[r.confidence] !== undefined) a.conf[r.confidence]++;
+      }
+
+      const PATH_ORDER = ['normal', 'override', 'hybrid', 'no_ai'];
+      const sports = [...new Set([...buckets.keys()].map(k => k.split('|')[0]))].sort();
+      const overall = new Map();
+      const bySport = [];
+
+      for (const sport of sports) {
+        const paths = [];
+        for (const pth of PATH_ORDER) {
+          const a = buckets.get(`${sport}|${pth}`);
+          if (!a) continue;
+          const nonVoid = a.wins + a.losses;
+          const hit = nonVoid > 0 ? (a.wins / nonVoid * 100) : null;
+          const avgEV = a.n > 0 ? (a.evSum / a.n) : 0;
+          const roi = a.totalStake > 0 ? (a.totalProfit / a.totalStake * 100) : null;
+          const clv = a.clvN > 0 ? (a.clvSum / a.clvN) : null;
+          const topConf = Object.entries(a.conf).sort((x, y) => y[1] - x[1])[0];
+          paths.push({
+            path: pth, n: a.n, wins: a.wins, losses: a.losses, voids: a.voids,
+            hit_pct: hit != null ? +hit.toFixed(1) : null,
+            avg_ev_pct: +avgEV.toFixed(1),
+            roi_pct: roi != null ? +roi.toFixed(1) : null,
+            clv_pct: clv != null ? +clv.toFixed(2) : null,
+            top_conf: topConf && topConf[1] > 0 ? `${topConf[0]}/${topConf[1]}` : null,
+          });
+          const o = overall.get(pth) || { n: 0, wins: 0, nonVoid: 0, stake: 0, profit: 0, clvSum: 0, clvN: 0 };
+          o.n += a.n; o.wins += a.wins; o.nonVoid += nonVoid;
+          o.stake += a.totalStake; o.profit += a.totalProfit;
+          o.clvSum += a.clvSum; o.clvN += a.clvN;
+          overall.set(pth, o);
+        }
+        bySport.push({ sport, paths });
+      }
+
+      const overallArr = [];
+      for (const pth of PATH_ORDER) {
+        const o = overall.get(pth);
+        if (!o || !o.n) continue;
+        const hit = o.nonVoid > 0 ? (o.wins / o.nonVoid * 100) : null;
+        const roi = o.stake > 0 ? (o.profit / o.stake * 100) : null;
+        const clv = o.clvN > 0 ? (o.clvSum / o.clvN) : null;
+        overallArr.push({
+          path: pth, n: o.n,
+          hit_pct: hit != null ? +hit.toFixed(1) : null,
+          roi_pct: roi != null ? +roi.toFixed(1) : null,
+          clv_pct: clv != null ? +clv.toFixed(2) : null,
+        });
+      }
+
+      const nrm = overallArr.find(x => x.path === 'normal');
+      const ovr = overallArr.find(x => x.path === 'override');
+      let verdict = 'Amostra insuficiente (precisa n≥30 normal + n≥15 override)';
+      let verdictColor = 'gray';
+      if (nrm && ovr && nrm.n >= 30 && ovr.n >= 15 && nrm.roi_pct != null && ovr.roi_pct != null) {
+        const delta = nrm.roi_pct - ovr.roi_pct;
+        if (Math.abs(delta) < 1) { verdict = `IA não agrega valor mensurável (Δ ROI = ${delta >= 0 ? '+' : ''}${delta.toFixed(1)}pp). Considere desligar em esportes maduros.`; verdictColor = 'orange'; }
+        else if (delta > 3) { verdict = `IA filtra tips ruins (Δ ROI = +${delta.toFixed(1)}pp a favor do path normal). Manter IA como gate.`; verdictColor = 'green'; }
+        else if (delta < -3) { verdict = `IA rejeita tips lucrativas (Δ ROI = ${delta.toFixed(1)}pp, override > normal). Modelo está melhor sem IA.`; verdictColor = 'red'; }
+        else { verdict = `Efeito pequeno da IA (Δ ROI = ${delta >= 0 ? '+' : ''}${delta.toFixed(1)}pp). Olhar per-sport antes de decidir.`; verdictColor = 'gray'; }
+      }
+
+      if (!wantHtml) {
+        sendJson(res, { ok: true, days, sport_filter: sportFilter, by_sport: bySport, overall: overallArr, verdict });
+        return;
+      }
+
+      // HTML view (browser-friendly)
+      const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+      const tr = (cells, tag = 'td') => '<tr>' + cells.map(c => `<${tag}>${c == null ? '—' : esc(c)}</${tag}>`).join('') + '</tr>';
+      const sportRows = bySport.flatMap(s => s.paths.map((row, i) => tr([
+        i === 0 ? s.sport : '',
+        row.path, row.n, `${row.wins}/${row.losses}/${row.voids}`,
+        row.hit_pct != null ? row.hit_pct + '%' : null,
+        row.avg_ev_pct != null ? row.avg_ev_pct + '%' : null,
+        row.roi_pct != null ? row.roi_pct + '%' : null,
+        row.clv_pct != null ? row.clv_pct + '%' : null,
+        row.top_conf,
+      ])));
+      const overallRows = overallArr.map(o => tr([o.path, o.n,
+        o.hit_pct != null ? o.hit_pct + '%' : null,
+        o.roi_pct != null ? o.roi_pct + '%' : null,
+        o.clv_pct != null ? o.clv_pct + '%' : null,
+      ]));
+
+      const html = `<!doctype html><html><head><meta charset="utf-8"><title>AI Impact — ${days}d</title>
+<style>
+  body{font:14px/1.5 -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;background:#0e1116;color:#e6edf3;margin:0;padding:24px;max-width:1100px}
+  h1{font-size:20px;margin:0 0 4px}h2{font-size:15px;margin:24px 0 8px;color:#7d8590}
+  table{width:100%;border-collapse:collapse;margin-bottom:16px;background:#161b22;border-radius:8px;overflow:hidden;font-size:13px}
+  th,td{text-align:left;padding:8px 10px;border-bottom:1px solid #21262d}th{background:#21262d;color:#7d8590;font-weight:500}
+  tr:last-child td{border-bottom:none}
+  .verdict{padding:12px 16px;border-radius:8px;margin:16px 0;border-left:4px solid ${verdictColor};background:#161b22}
+  .nav{margin-bottom:16px}.nav a{color:#58a6ff;margin-right:12px;text-decoration:none;font-size:13px}
+  code{background:#21262d;padding:1px 5px;border-radius:4px;font-size:12px}
+</style></head><body>
+<h1>AI Impact Report</h1>
+<div style="color:#7d8590;margin-bottom:12px">janela: <b>${days}d</b>${sportFilter ? ` · sport=<b>${esc(sportFilter)}</b>` : ''} · tips reais (excluí shadow)</div>
+<div class="nav">
+  <a href="?days=30${sportFilter ? `&sport=${esc(sportFilter)}` : ''}&format=html&key=${esc(parsed.query.key || '')}">30d</a>
+  <a href="?days=60${sportFilter ? `&sport=${esc(sportFilter)}` : ''}&format=html&key=${esc(parsed.query.key || '')}">60d</a>
+  <a href="?days=90${sportFilter ? `&sport=${esc(sportFilter)}` : ''}&format=html&key=${esc(parsed.query.key || '')}">90d</a>
+  <a href="?days=${days}&format=json&key=${esc(parsed.query.key || '')}${sportFilter ? `&sport=${esc(sportFilter)}` : ''}">JSON</a>
+</div>
+
+<div class="verdict"><b>Veredito:</b> ${esc(verdict)}</div>
+
+<h2>Per sport × path</h2>
+<table><thead>${tr(['Sport','Path','n','W/L/V','Hit','avgEV','ROI','CLV','Top Conf'], 'th')}</thead><tbody>${sportRows.join('')}</tbody></table>
+
+<h2>Overall (cross-sport agregado)</h2>
+<table><thead>${tr(['Path','n','Hit','ROI','CLV'], 'th')}</thead><tbody>${overallRows.join('')}</tbody></table>
+
+<div style="color:#7d8590;font-size:12px;margin-top:24px">
+Paths derivados do <code>model_label</code>: <code>+override</code> (IA SEM_EDGE mas modelo teve edge forte — CONF=BAIXA stake=1u), <code>+hybrid</code> (path determinístico paralelo), <code>no_ai</code> (fallback backoff/desligada), <code>normal</code> (IA aprovou).<br>
+ROI realizado usa <code>profit_reais</code> se presente, senão <code>stake × (odd-1)</code>.
+</div>
+</body></html>`;
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(html);
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
   // AI Stats: breakdown de chamadas DeepSeek por sport no mês (requer tracking per-sport em /claude proxy).
   // GET /ai-stats?month=YYYY-MM (default: mês atual)
   if (p === '/ai-stats') {

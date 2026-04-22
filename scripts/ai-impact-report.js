@@ -92,8 +92,13 @@ for (const r of rows) {
   if (r.result === 'win') acc.wins++;
   else if (r.result === 'loss') acc.losses++;
   else if (r.result === 'void') acc.voids++;
-  acc.totalStake += +r.stake || 0;
-  acc.totalProfit += +r.profit_reais || ((+r.stake || 0) * ((r.result === 'win' ? (+r.odds - 1) : (r.result === 'loss' ? -1 : 0))));
+  // Tudo em units (stake já é número via `CAST`). profit = stake × (odd-1) em win, -stake em loss.
+  const _stake = parseFloat(String(r.stake || '').replace(/u/i, '')) || 0;
+  const _odd = parseFloat(r.odds) || 0;
+  acc.totalStake += _stake;
+  acc.totalProfit += r.result === 'win' ? _stake * (_odd - 1)
+                   : r.result === 'loss' ? -_stake
+                   : 0;
   acc.evSum += +r.ev || 0;
   if (r.clv_odds && r.open_odds) {
     const clvPct = ((+r.clv_odds / +r.open_odds) - 1) * 100;
