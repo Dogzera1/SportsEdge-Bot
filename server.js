@@ -13981,7 +13981,11 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (p === '/tennis-scores') {
-    if (!THE_ODDS_API_KEY) { sendJson(res, []); return; }
+    // TheOddsAPI desativado pro tennis por default (economia de quota).
+    // Settlement de tennis usa Sackmann (local) + Sofascore (scraping) → /tennis-scores
+    // é hoje redundante. Reative via TENNIS_USE_THE_ODDS=true se precisar.
+    const theOddsKey = (process.env.TENNIS_USE_THE_ODDS === 'true') ? THE_ODDS_API_KEY : '';
+    if (!theOddsKey) { sendJson(res, []); return; }
     try {
       const daysFrom = Math.min(3, Math.max(1, parseInt(u.searchParams.get('daysFrom') || '3', 10) || 3));
 
