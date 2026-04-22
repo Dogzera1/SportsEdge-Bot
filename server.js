@@ -10317,6 +10317,140 @@ ROI realizado usa <code>profit_reais</code> se presente, senão <code>stake × (
     return;
   }
 
+  // Void Audit: lista tips voided com contexto pra diagnóstico.
+  // Motivação: football com 86% void rate — provável bug de settlement ou market_type.
+  // GET /void-audit?sport=football&days=60&format=html&key=XXX
+  if (p === '/void-audit') {
+    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    try {
+      const daysRaw = parseInt(parsed.query.days);
+      const days = Number.isFinite(daysRaw) ? Math.max(1, Math.min(365, daysRaw)) : 60;
+      const sportFilter = parsed.query.sport ? String(parsed.query.sport) : null;
+      const wantHtml = parsed.query.format === 'html' || /text\/html/i.test(req.headers['accept'] || '');
+
+      const where = [
+        "sent_at >= datetime('now', '-' || ? || ' days')",
+        "result = 'void'",
+        "(is_shadow = 0 OR is_shadow IS NULL)",
+      ];
+      const params = [days];
+      if (sportFilter) { where.push('sport = ?'); params.push(sportFilter); }
+
+      const rows = db.prepare(`
+        SELECT id, sport, match_id, event_name, participant1, participant2,
+               tip_participant, odds, ev, stake, confidence, is_live,
+               market_type, model_label, tip_reason, sent_at, settled_at,
+               clv_odds, open_odds
+        FROM tips
+        WHERE ${where.join(' AND ')}
+        ORDER BY sent_at DESC
+        LIMIT 500
+      `).all(...params);
+
+      // Pattern detection — agrupa por sinais comuns de void.
+      function patternOf(r) {
+        const mt = String(r.market_type || '').toUpperCase();
+        const ev = String(r.event_name || '').toLowerCase();
+        const reason = String(r.tip_reason || '').toLowerCase();
+        if (mt && mt !== 'ML' && mt !== 'MONEYLINE') return `market_${mt}`;
+        if (/cup|copa/.test(ev)) return 'cup_or_copa';
+        if (/walkover|wo|w\.o\./.test(reason) || /walkover/.test(ev)) return 'walkover';
+        if (/retired|retir|abandon|aband/.test(reason)) return 'retirement';
+        if (/postpon|adiad|susp/.test(reason)) return 'postponed';
+        if (r.is_live) return 'live_void';
+        return 'unknown';
+      }
+
+      const patterns = {};
+      const bySport = {};
+      for (const r of rows) {
+        const pat = patternOf(r);
+        patterns[pat] = (patterns[pat] || 0) + 1;
+        const sp = r.sport || 'unknown';
+        bySport[sp] = (bySport[sp] || 0) + 1;
+      }
+
+      const tips = rows.map(r => ({
+        id: r.id, sport: r.sport, match_id: r.match_id,
+        event: r.event_name,
+        teams: `${r.participant1} vs ${r.participant2}`,
+        pick: r.tip_participant,
+        odds: r.odds, ev: r.ev, stake: r.stake, conf: r.confidence,
+        live: !!r.is_live, market_type: r.market_type || 'ML',
+        sent_at: r.sent_at, settled_at: r.settled_at,
+        pattern: patternOf(r),
+        model_label: r.model_label,
+      }));
+
+      if (!wantHtml) {
+        sendJson(res, { ok: true, days, sport_filter: sportFilter, n: rows.length,
+          by_sport: bySport, patterns, tips });
+        return;
+      }
+
+      const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+      const tr = (cells, tag = 'td') => '<tr>' + cells.map(c => `<${tag}>${c == null ? '—' : esc(c)}</${tag}>`).join('') + '</tr>';
+
+      const patternRows = Object.entries(patterns)
+        .sort((a, b) => b[1] - a[1])
+        .map(([k, v]) => tr([k, v, `${(v / rows.length * 100).toFixed(1)}%`]));
+
+      const sportRows = Object.entries(bySport)
+        .sort((a, b) => b[1] - a[1])
+        .map(([k, v]) => tr([k, v]));
+
+      const tipRows = tips.slice(0, 100).map(t => tr([
+        (t.sent_at || '').slice(0, 16),
+        t.sport, t.event, t.teams, t.pick, t.odds,
+        t.market_type, t.live ? 'live' : 'pre',
+        t.pattern,
+      ]));
+
+      const html = `<!doctype html><html><head><meta charset="utf-8"><title>Void Audit — ${days}d</title>
+<style>
+  body{font:14px/1.5 -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;background:#0e1116;color:#e6edf3;margin:0;padding:24px;max-width:1300px}
+  h1{font-size:20px;margin:0 0 4px}h2{font-size:15px;margin:24px 0 8px;color:#7d8590}
+  table{width:100%;border-collapse:collapse;margin-bottom:16px;background:#161b22;border-radius:8px;overflow:hidden;font-size:12px}
+  th,td{text-align:left;padding:6px 9px;border-bottom:1px solid #21262d;vertical-align:top}th{background:#21262d;color:#7d8590;font-weight:500}
+  tr:last-child td{border-bottom:none}
+  .nav{margin-bottom:16px}.nav a{color:#58a6ff;margin-right:12px;text-decoration:none;font-size:13px}
+  code{background:#21262d;padding:1px 5px;border-radius:4px;font-size:12px}
+  .hint{color:#7d8590;font-size:12px;margin-top:16px}
+</style></head><body>
+<h1>Void Audit</h1>
+<div style="color:#7d8590;margin-bottom:12px">janela: <b>${days}d</b>${sportFilter ? ` · sport=<b>${esc(sportFilter)}</b>` : ''} · total voided: <b>${rows.length}</b></div>
+<div class="nav">
+  <a href="?days=60&format=html&key=${esc(parsed.query.key || '')}">todos 60d</a>
+  <a href="?sport=football&days=60&format=html&key=${esc(parsed.query.key || '')}">football 60d</a>
+  <a href="?sport=tennis&days=60&format=html&key=${esc(parsed.query.key || '')}">tennis 60d</a>
+  <a href="?days=${days}${sportFilter ? `&sport=${esc(sportFilter)}` : ''}&format=json&key=${esc(parsed.query.key || '')}">JSON</a>
+</div>
+
+<h2>Padrões detectados (top→bottom)</h2>
+<table><thead>${tr(['Pattern', 'n', '%'], 'th')}</thead><tbody>${patternRows.join('')}</tbody></table>
+
+<h2>Por sport</h2>
+<table><thead>${tr(['Sport', 'n'], 'th')}</thead><tbody>${sportRows.join('')}</tbody></table>
+
+<h2>Tips (primeiras 100, mais recentes primeiro)</h2>
+<table><thead>${tr(['sent_at', 'sport', 'event', 'teams', 'pick', 'odds', 'market', 'live', 'pattern'], 'th')}</thead><tbody>${tipRows.join('')}</tbody></table>
+
+<div class="hint">
+<b>Patterns:</b><br>
+• <code>market_*</code> — tip de mercado não-ML (handicap, totais) que Pinnacle ajustou como push.<br>
+• <code>walkover</code> / <code>retirement</code> / <code>postponed</code> — tip_reason menciona esses termos.<br>
+• <code>live_void</code> — tip enviada ao vivo; provável mudança de estado.<br>
+• <code>cup_or_copa</code> — event name sugere copa (penalties/agg scoring comum).<br>
+• <code>unknown</code> — não bateu nenhum padrão; investigar case a case.
+</div>
+</body></html>`;
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(html);
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
   // AI Stats: breakdown de chamadas DeepSeek por sport no mês (requer tracking per-sport em /claude proxy).
   // GET /ai-stats?month=YYYY-MM (default: mês atual)
   if (p === '/ai-stats') {

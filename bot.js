@@ -11787,7 +11787,8 @@ Máximo 200 palavras. Raciocínio breve antes da decisão.`;
           const clean = line.replace(/^[-*•\s]+/, '').trim();
           return clean ? clean.slice(0, 160) : null;
         };
-        const tipReasonTennis = extractReasonTennis(text);
+        const _forceDetTn = /^(1|true|yes)$/i.test(String(process.env.TENNIS_FORCE_DETERMINISTIC_REASON || ''));
+        let tipReasonTennis = _forceDetTn ? null : extractReasonTennis(text);
         let tipMatch2 = _parseTipMl(text);
 
         if (tipMatch2) {
@@ -11873,6 +11874,27 @@ Máximo 200 palavras. Raciocínio breve antes da decisão.`;
         const tipEV = _detEvTn != null ? _detEvTn : tipEvIa;
         if (_detEvTn != null && Math.abs(_detEvTn - tipEvIa) >= 3) {
           log('INFO', 'EV-RECALC', `tennis ${match.team1} vs ${match.team2}: IA=${tipEvIa}% → modelo=${_detEvTn}% (P=${(_modelPPickTn*100).toFixed(1)}% @ ${tipOdd})`);
+        }
+
+        if (!tipReasonTennis) {
+          try {
+            const { buildTipReason, tennisFactors } = require('./lib/tip-reason');
+            const _implTn = (tipOdd > 1) ? (1 / tipOdd) : null;
+            const _eloCtxTn = (eloResult && Number.isFinite(eloResult.elo1) && Number.isFinite(eloResult.elo2))
+              ? { elo1: _pickIsT1Tn ? eloResult.elo1 : eloResult.elo2,
+                  elo2: _pickIsT1Tn ? eloResult.elo2 : eloResult.elo1 }
+              : null;
+            const _factorsTn = tennisFactors({
+              surface: surfacePT || surface,
+              elo: _eloCtxTn,
+            });
+            tipReasonTennis = buildTipReason({
+              sport: 'tennis', pickTeam: tipPlayer,
+              modelPPick: _modelPPickTn, impliedP: _implTn, evPct: tipEV,
+              factors: _factorsTn,
+              stage: match.league,
+            }) || null;
+          } catch (_) { /* mantém null */ }
         }
 
         if (tipOdd < TENNIS_GATE_MIN_ODDS || tipOdd > TENNIS_GATE_MAX_ODDS) {
