@@ -6622,7 +6622,11 @@ const server = http.createServer(async (req, res) => {
 
   // Força settlement de market_tips_shadow (cruza com match_results).
   // POST /admin/settle-market-tips-shadow
-  if (p === '/admin/settle-market-tips-shadow' && req.method === 'POST') {
+  if (p === '/admin/settle-market-tips-shadow' && (req.method === 'POST' || req.method === 'GET')) {
+    // GET permitido pra browser — admin-only via header ou ?key=<ADMIN_KEY>.
+    // Safe to re-run (idempotente — mesma lógica do cron 30min).
+    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     try {
       const { settleShadowTips } = require('./lib/market-tips-shadow');
       const r = settleShadowTips(db);
