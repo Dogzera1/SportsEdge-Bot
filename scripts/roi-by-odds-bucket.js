@@ -27,6 +27,7 @@
  *   node scripts/roi-by-odds-bucket.js --min=10               # min n p/ aparecer na tabela
  */
 
+try { require('dotenv').config({ override: true }); } catch (_) {}
 const path = require('path');
 const Database = require('better-sqlite3');
 
@@ -59,7 +60,8 @@ function bucketOf(odd) {
   return null;
 }
 
-const DB_PATH = path.resolve(__dirname, '..', 'sportsedge.db');
+const DB_PATH = (arg('db', null) || process.env.DB_PATH || path.resolve(__dirname, '..', 'sportsedge.db'))
+  .trim().replace(/^=+/, '');
 const db = new Database(DB_PATH, { readonly: true });
 
 const sportFilter = SPORT ? ` AND sport = '${SPORT.replace(/'/g, "''")}'` : '';
