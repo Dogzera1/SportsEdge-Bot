@@ -726,10 +726,23 @@ function _hasLiveMatchAny(matches) {
     return st === 'live' || st === 'inprogress' || st === 'in_progress' || st === 'running';
   });
 }
+// Sticky post-live: entre mapas de BO3/BO5, status some de "live" e nearest
+// match pode ficar null (beginAt da série < now). Sem isso, cai em cap 30min e
+// perde map 2 window. Solução: lembrar último "live" seen por sport e manter
+// baseIdle se foi <20min atrás.
+const _lastLiveSeenAt = new Map();
 function _computeAdaptivePollMs(baseLiveMs, baseIdleMs, matches, opts = {}) {
-  if (_hasLiveMatchAny(matches)) return baseLiveMs;
+  const key = opts.key || 'default';
+  if (_hasLiveMatchAny(matches)) {
+    _lastLiveSeenAt.set(key, Date.now());
+    return baseLiveMs;
+  }
   const cap = opts.maxIdleMs || 30 * 60 * 1000;
   const nearest = _nearestMatchStartMs(matches);
+  const lastLive = _lastLiveSeenAt.get(key);
+  const stickyMs = opts.stickyPostLiveMs ?? 20 * 60 * 1000;
+  const recentLive = lastLive && (Date.now() - lastLive) < stickyMs;
+  if (recentLive) return baseIdleMs;
   if (!nearest) return Math.min(baseIdleMs * 4, cap);
   const mins = (nearest - Date.now()) / 60000;
   if (mins < 30)  return Math.max(Math.round(baseIdleMs * 0.75), baseLiveMs);
@@ -6720,6 +6733,71 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
       if (blocked.length) {
         txt += '\n*Horas bloqueadas (UTC):*\n';
         for (const s of blocked) txt += `${s.sport}: ${s.loop6_time_of_day.blocked_hours_utc.join(', ')}\n`;
+      }
+      await send(token, chatId, txt);
+    } catch(e) { await send(token, chatId, `❌ ${e.message}`); }
+
+  } else if (cmd === '/mt-guard') {
+    if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
+    const parts = command.trim().split(/\s+/);
+    const sub = (parts[1] || '').toLowerCase();
+    // /mt-guard — lista estado atual
+    // /mt-guard restore <sport> <market> — remove override auto/manual
+    // /mt-guard disable <sport> <market> <razão> — disable manual
+    try {
+      if (sub === 'restore') {
+        const sp = (parts[2] || '').toLowerCase();
+        const mk = (parts[3] || '').toLowerCase();
+        if (!sp || !mk) { await send(token, chatId, 'Uso: `/mt-guard restore <sport> <market>`'); return; }
+        db.prepare(`DELETE FROM market_tips_runtime_state WHERE sport = ? AND market = ?`).run(sp, mk);
+        _marketTipsDisabledRuntime.delete(`${sp}|${mk}`);
+        await send(token, chatId, `✅ Removido override: ${sp}/${mk} (DM volta ativar)`);
+        return;
+      }
+      if (sub === 'disable') {
+        const sp = (parts[2] || '').toLowerCase();
+        const mk = (parts[3] || '').toLowerCase();
+        const reason = parts.slice(4).join(' ') || 'manual';
+        if (!sp || !mk) { await send(token, chatId, 'Uso: `/mt-guard disable <sport> <market> [razão]`'); return; }
+        const ts = new Date().toISOString();
+        db.prepare(`INSERT OR REPLACE INTO market_tips_runtime_state (sport, market, disabled, source, reason, updated_at) VALUES (?, ?, 1, 'manual', ?, ?)`).run(sp, mk, reason, ts);
+        _marketTipsDisabledRuntime.set(`${sp}|${mk}`, { reason, since: ts, source: 'manual' });
+        await send(token, chatId, `🚫 Disabled manual: ${sp}/${mk} (${reason})`);
+        return;
+      }
+      // Default: lista estado
+      const rows = db.prepare(`SELECT sport, market, source, reason, clv_pct, clv_n, roi_pct, updated_at FROM market_tips_runtime_state WHERE disabled = 1 ORDER BY sport, market`).all();
+      if (!rows.length) {
+        await send(token, chatId, `🛡️ *MT LEAK GUARD* — nenhum (sport, market) disabled\n\n_Auto-check rola 1x/h; fica em disable se shadow CLV ≤ -2% com n≥30._\n\nUso:\n• \`/mt-guard restore <sport> <market>\`\n• \`/mt-guard disable <sport> <market> [razão]\``);
+        return;
+      }
+      let txt = `🛡️ *MT LEAK GUARD — ${rows.length} disabled*\n\n`;
+      for (const r of rows) {
+        const src = r.source === 'auto_clv_leak' ? '🤖' : '🔧';
+        const clvStr = r.clv_pct != null ? ` CLV=${r.clv_pct.toFixed(1)}% n=${r.clv_n}` : '';
+        const since = String(r.updated_at).slice(0, 16).replace('T', ' ');
+        txt += `${src} *${r.sport}/${r.market}* — ${r.reason || 'n/a'}${clvStr}\n   _desde ${since}_\n`;
+      }
+      txt += `\n_🤖=auto 🔧=manual. Restore via \`/mt-guard restore <sport> <market>\`._`;
+      await send(token, chatId, txt);
+    } catch(e) { await send(token, chatId, `❌ ${e.message}`); }
+
+  } else if (cmd === '/gate-opt') {
+    if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
+    const parts = command.trim().split(/\s+/);
+    const days = Math.max(14, Math.min(365, parseInt(parts[1] || '90', 10) || 90));
+    const sportArg = (parts[2] || '').toLowerCase() || null;
+    try {
+      const { runGateOptimizer } = require('./lib/gate-optimizer');
+      const r = runGateOptimizer(db, { days, sport: sportArg });
+      if (!r?.ok) { await send(token, chatId, `❌ ${r?.error || 'erro'}`); return; }
+      if (!r.sports?.length) { await send(token, chatId, `📊 Sem tips com model_p_pick em ${days}d${sportArg ? ' (' + sportArg + ')' : ''}`); return; }
+      let txt = `🎯 *GATE OPTIMIZER — ${days}d${sportArg ? ' (' + sportArg + ')' : ''}*\n_n=${r.total_tips} tips_\n\n`;
+      for (const s of r.sports.slice(0, 8)) {
+        const curStr = s.current ? `cap=${s.current.cap_pp}pp ROI=${s.current.roi != null ? s.current.roi.toFixed(1) + '%' : '?'}` : 'sem dados';
+        const optStr = s.optimal ? `cap=${s.optimal.cap_pp}pp ROI=${s.optimal.roi.toFixed(1)}% (n=${s.optimal.n})` : 'n/a';
+        const delta = s.delta_roi != null ? `Δ${s.delta_roi >= 0 ? '+' : ''}${s.delta_roi}pp` : '';
+        txt += `*${s.sport}* (${s.total_tips}): ${curStr} → ${optStr} ${delta}\n  ${s.recommendation}\n\n`;
       }
       await send(token, chatId, txt);
     } catch(e) { await send(token, chatId, `❌ ${e.message}`); }
@@ -14366,7 +14444,7 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
       try { await runAutoAnalysis(); } catch (e) { log('ERROR', 'AUTO', e.message); }
       const snap = global.__lastPollSnapshot;
       const matches = (snap && Array.isArray(snap.matches)) ? snap.matches : [];
-      const nextMs = _computeAdaptivePollMs(AUTO_BASE_MS, AUTO_BASE_MS, matches, { maxIdleMs: AUTO_CAP_MS });
+      const nextMs = _computeAdaptivePollMs(AUTO_BASE_MS, AUTO_BASE_MS, matches, { key: 'lol', maxIdleMs: AUTO_CAP_MS });
       log('INFO', 'AUTO', `Próximo ciclo em ${Math.round(nextMs / 1000)}s (${_hasLiveMatchAny(matches) ? 'live' : 'idle-adaptive'})`);
       scheduleAutoAnalysis._nextMs = nextMs;
       scheduleAutoAnalysis();
@@ -14403,7 +14481,7 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
     (function scheduleValorant() {
       setTimeout(async () => {
         const matches = await pollValorant(true).catch(e => { log('ERROR', 'AUTO-VAL', `scheduler: ${e.message}`); return []; });
-        const nextMs = _computeAdaptivePollMs(90 * 1000, 5 * 60 * 1000, matches || [], { maxIdleMs: 20 * 60 * 1000 });
+        const nextMs = _computeAdaptivePollMs(90 * 1000, 5 * 60 * 1000, matches || [], { key: 'valorant', maxIdleMs: 20 * 60 * 1000 });
         scheduleValorant._nextMs = nextMs;
         scheduleValorant();
       }, scheduleValorant._nextMs || 30 * 1000);
@@ -14414,7 +14492,7 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
     (function scheduleCs() {
       setTimeout(async () => {
         const matches = await pollCs(true).catch(e => { log('ERROR', 'AUTO-CS', `scheduler: ${e.message}`); return []; });
-        const nextMs = _computeAdaptivePollMs(90 * 1000, 5 * 60 * 1000, matches || [], { maxIdleMs: 20 * 60 * 1000 });
+        const nextMs = _computeAdaptivePollMs(90 * 1000, 5 * 60 * 1000, matches || [], { key: 'cs', maxIdleMs: 20 * 60 * 1000 });
         scheduleCs._nextMs = nextMs;
         scheduleCs();
       }, scheduleCs._nextMs || 45 * 1000);
