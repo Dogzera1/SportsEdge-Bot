@@ -2557,6 +2557,22 @@ async function settleCompletedTips() {
         continue;
       }
 
+      // Pré-sync football: popula match_results com jogos finalizados recentes via sofascore
+      // antes do loop per-tip. Sem isso /football-result retorna resolved:false em massa →
+      // AUTO_VOID_STUCK voida tudo em 24h (bug observado em abr/2026: 86% void rate).
+      if (sport === 'football') {
+        try {
+          const syncDays = Math.max(2, Math.min(14,
+            parseInt(process.env.FOOTBALL_SYNC_DAYS_BACK || '5', 10) || 5));
+          const r = await serverGet(`/sync-football-sofascore?days=${syncDays}`, 'football').catch(() => null);
+          if (r?.ok && (r.inserted || 0) > 0) {
+            log('INFO', 'SETTLE', `football pre-sync: ${r.inserted} results upserted (sofascore ${syncDays}d)`);
+          } else if (r && r.total_fetched === 0 && r.hint) {
+            log('WARN', 'SETTLE', `football pre-sync vazio: ${r.hint}`);
+          }
+        } catch (e) { log('WARN', 'SETTLE', `football pre-sync: ${e.message}`); }
+      }
+
       for (const tip of unsettled) {
         if (!tip.match_id) continue;
         try {

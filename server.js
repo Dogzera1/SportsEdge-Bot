@@ -10317,6 +10317,44 @@ ROI realizado usa <code>profit_reais</code> se presente, senão <code>stake × (
     return;
   }
 
+  // Sync football results via sofascore: popula match_results com jogos FINALIZADOS
+  // nos últimos N dias. Essencial pra destravar settlement de tips football que estavam
+  // sendo auto-voided por /football-result retornar resolved:false (sem dados).
+  // GET /sync-football-sofascore?days=3&key=<ADMIN_KEY>
+  if (p === '/sync-football-sofascore') {
+    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    try {
+      const daysRaw = parseInt(parsed.query.days);
+      const daysBack = Number.isFinite(daysRaw) ? Math.max(1, Math.min(14, daysRaw)) : 3;
+      const { getFinishedMatches } = require('./lib/sofascore-football');
+      const matches = await getFinishedMatches({ daysBack });
+      let inserted = 0, skipped = 0;
+      const sample = [];
+      for (const m of matches) {
+        try {
+          const matchId = `sofa_${m.eventId}`;
+          const league = String(m.tournament || 'Football').slice(0, 120);
+          stmts.upsertMatchResultWithDate.run(
+            matchId, 'football',
+            m.home, m.away, m.winner, m.score, league, m.startIso
+          );
+          inserted++;
+          if (sample.length < 8) sample.push({ match_id: matchId, teams: `${m.home} vs ${m.away}`, winner: m.winner, score: m.score, league, at: m.startIso });
+        } catch (_) { skipped++; }
+      }
+      log('INFO', 'FOOTBALL-SYNC', `sofascore: ${inserted} matches upserted em ${daysBack}d (${skipped} skip)`);
+      sendJson(res, { ok: true, days_back: daysBack, inserted, skipped, total_fetched: matches.length, sample,
+        hint: !process.env.SOFASCORE_PROXY_BASE && !/^(1|true|yes)$/i.test(String(process.env.SOFASCORE_DIRECT || ''))
+          ? 'Nem SOFASCORE_PROXY_BASE nem SOFASCORE_DIRECT=true configurados. Resultados vazios esperados.'
+          : null });
+    } catch (e) {
+      log('ERROR', 'FOOTBALL-SYNC', e.message);
+      sendJson(res, { ok: false, error: e.message }, 500);
+    }
+    return;
+  }
+
   // Void Audit: lista tips voided com contexto pra diagnóstico.
   // Motivação: football com 86% void rate — provável bug de settlement ou market_type.
   // GET /void-audit?sport=football&days=60&format=html&key=XXX
