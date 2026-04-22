@@ -8789,7 +8789,9 @@ async function poll(token, sport) {
                      text === '/health' || text.startsWith('/health ') ||
                      text.startsWith('/force-digest') || text.startsWith('/pipeline-digest') ||
                      text.startsWith('/tip ') || text.startsWith('/help') || text.startsWith('/start') ||
-                     text.startsWith('/alerts')) {
+                     text.startsWith('/alerts') ||
+                     text === '/mt-guard' || text.startsWith('/mt-guard ') ||
+                     text === '/gate-opt' || text.startsWith('/gate-opt ')) {
             // Passa `sport` da poll (qual bot recebeu) para evitar default 'esports'
             await handleAdmin(token, chatId, text, sport);
           }
