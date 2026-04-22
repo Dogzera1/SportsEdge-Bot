@@ -14448,6 +14448,64 @@ ROI realizado usa <code>profit_reais</code> se presente, senão <code>stake × (
     return;
   }
 
+  // Varre ESPN tennis ATP+WTA em range de N dias (default 7). Diferente de
+  // /sync-tennis-espn-results que só pega scoreboard atual.
+  // GET /sync-tennis-espn-range?days=7&key=<ADMIN_KEY>
+  if (p === '/sync-tennis-espn-range') {
+    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    (async () => {
+      try {
+        const daysRaw = parseInt(parsed.query.days);
+        const days = Number.isFinite(daysRaw) ? Math.max(1, Math.min(60, daysRaw)) : 7;
+        const upserted = await syncTennisEspnCompletedRecentSpan(days);
+        sendJson(res, { ok: true, source: 'espn', days_back: days, upserted });
+      } catch (e) {
+        sendJson(res, { ok: false, error: e.message }, 500);
+      }
+    })();
+    return;
+  }
+
+  // Sync tennis finished matches via sofascore — cobre Challenger + WTA125 +
+  // ITF (ESPN só tem ATP/WTA main). Requer SOFASCORE_PROXY_BASE ou
+  // SOFASCORE_DIRECT=true em produção.
+  // GET /sync-tennis-sofascore?days=3&key=<ADMIN_KEY>
+  if (p === '/sync-tennis-sofascore') {
+    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    (async () => {
+      try {
+        const daysRaw = parseInt(parsed.query.days);
+        const daysBack = Number.isFinite(daysRaw) ? Math.max(1, Math.min(14, daysRaw)) : 3;
+        const { getFinishedMatches } = require('./lib/sofascore-tennis');
+        const matches = await getFinishedMatches({ daysBack });
+        let inserted = 0, skipped = 0;
+        const sample = [];
+        for (const m of matches) {
+          try {
+            const matchId = `sofa_ten_${m.eventId}`;
+            const league = String(m.tournament || 'Tennis').slice(0, 200);
+            stmts.upsertMatchResultWithDate.run(
+              matchId, 'tennis', m.home, m.away, m.winner, m.score, league, m.startIso
+            );
+            inserted++;
+            if (sample.length < 8) sample.push({ match_id: matchId, teams: `${m.home} vs ${m.away}`, winner: m.winner, score: m.score, league, at: m.startIso });
+          } catch (_) { skipped++; }
+        }
+        log('INFO', 'TENNIS-SYNC', `sofascore: ${inserted} matches upserted em ${daysBack}d (${skipped} skip)`);
+        sendJson(res, { ok: true, source: 'sofascore', days_back: daysBack, inserted, skipped, total_fetched: matches.length, sample,
+          hint: !process.env.SOFASCORE_PROXY_BASE && !/^(1|true|yes)$/i.test(String(process.env.SOFASCORE_DIRECT || ''))
+            ? 'Nem SOFASCORE_PROXY_BASE nem SOFASCORE_DIRECT=true configurados. Resultados vazios esperados.'
+            : null });
+      } catch (e) {
+        log('ERROR', 'TENNIS-SYNC', `sofascore: ${e.message}`);
+        sendJson(res, { ok: false, error: e.message }, 500);
+      }
+    })();
+    return;
+  }
+
   if (p === '/tennis-db-result') {
     const p1 = parsed.query.p1 || '';
     const p2 = parsed.query.p2 || '';

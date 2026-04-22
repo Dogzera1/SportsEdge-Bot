@@ -15164,8 +15164,11 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
       // Pre-sync tennis + football (sources externas) antes de tentar settlar.
       // Esports (match_results.lol/dota2/cs2/valorant) já vem do PandaScore sync
       // no poll loop → não precisa pre-sync dedicado aqui.
+      // Tennis: /sync-tennis-espn-range cobre ATP+WTA em 7 dias (> scoreboard atual);
+      // fallback sofascore pega Challenger + WTA125 + ITF que ESPN não cobre.
       try {
-        await serverGet('/sync-tennis-espn-results?force=1', 'tennis').catch(() => {});
+        await serverGet('/sync-tennis-espn-range?days=7', 'tennis').catch(() => {});
+        await serverGet('/sync-tennis-sofascore?days=5', 'tennis').catch(() => {});
       } catch (_) {}
       try {
         const r1 = await serverGet('/sync-football-sofascore?days=5', 'football').catch(() => null);
