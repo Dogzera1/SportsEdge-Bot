@@ -618,6 +618,7 @@ const POLICY_REJECTIONS = new Set([
   'itf_exclusion',
   'odds_stale',
   'odds_out_of_range', // odds fora do range configurado — gate intencional per-sport
+  'odds_bucket_block', // bucket de odd bloqueado via ODDS_BUCKET_BLOCK (leak confirmado em backtest)
   'ml_prefilter_edge',
   'segment_gate',
   'ai_no_edge',        // IA decidiu não entrar — decisão válida
@@ -5670,7 +5671,15 @@ async function autoAnalyzeMatch(token, match) {
           log('INFO', 'AUTO', `Gate odds: ${match.team1} vs ${match.team2} → odd ${tipOdd} fora do range [${MIN_ODDS}, ${MAX_ODDS}] → rejeitado`);
           logRejection('lol', `${match.team1} vs ${match.team2}`, 'odds_out_of_range', { odd: tipOdd, min: MIN_ODDS, max: MAX_ODDS });
           filteredTipResult = null;
-        } else if (tipOdd > HIGH_ODDS && !isNaN(tipEV)) {
+        } else {
+          const _bk = require('./lib/odds-bucket-gate').isBucketBlocked('lol', tipOdd);
+          if (_bk.blocked) {
+            log('INFO', 'AUTO', `Gate bucket: ${match.team1} vs ${match.team2} → odd ${tipOdd} no bucket bloqueado ${_bk.bucket} (${_bk.source}) → rejeitado`);
+            logRejection('lol', `${match.team1} vs ${match.team2}`, 'odds_bucket_block', { odd: tipOdd, bucket: _bk.bucket, source: _bk.source });
+            filteredTipResult = null;
+          }
+        }
+        if (filteredTipResult && tipOdd > HIGH_ODDS && !isNaN(tipEV)) {
           // Odds altas passam mas exigem EV maior — aplicado antes do Gate 4 via adaptiveEV bump
           const required = adaptiveEV + HIGH_ODDS_EV_BONUS;
           if (tipEV < required) {
@@ -6643,7 +6652,7 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
 
       // 5. Rejections summary cross-sport com categorização
       const BLOCKING = new Set(['odds_stale', 'odds_not_real', 'elo_insufficient', 'ai_no_edge']);
-      const TUNING = new Set(['ev_below_min', 'edge_below_threshold', 'divergence_cap', 'ml_prefilter_edge', 'high_odds_ev_low', 'sharp_line_reject', 'odds_out_of_range']);
+      const TUNING = new Set(['ev_below_min', 'edge_below_threshold', 'divergence_cap', 'ml_prefilter_edge', 'high_odds_ev_low', 'sharp_line_reject', 'odds_out_of_range', 'odds_bucket_block']);
       const DATA = new Set(['itf_exclusion', 'segment_skip', 'ai_block']);
       const totalRej = _rejections.filter(r => r.ts >= cutoff).length;
       txt += `\n*Rejections 1h:* ${totalRej} total`;
@@ -10142,6 +10151,15 @@ Máximo 200 palavras.`;
         setDotaAnalyzed({ ts: now, tipSent: false, noEdge: true });
         await _sleep(2000); continue;
       }
+      {
+        const _bk = require('./lib/odds-bucket-gate').isBucketBlocked('dota2', oddVal);
+        if (_bk.blocked) {
+          log('INFO', 'AUTO-DOTA', `Gate bucket: odd ${oddVal} no bucket bloqueado ${_bk.bucket} (${_bk.source}) — pulando`);
+          logRejection('dota2', `${match.team1} vs ${match.team2}`, 'odds_bucket_block', { odd: oddVal, bucket: _bk.bucket, source: _bk.source });
+          setDotaAnalyzed({ ts: now, tipSent: false, noEdge: true });
+          await _sleep(2000); continue;
+        }
+      }
       const evVal = parseFloat(String(tipEV).replace('%', '').replace('+', ''));
       if (evVal < evThreshold) {
         log('INFO', 'AUTO-DOTA', `EV insuficiente (${evVal}% < ${evThreshold}%): pulando`);
@@ -10958,6 +10976,14 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
           log('INFO', 'AUTO-MMA', `Gate odds: ${tipOdd} fora do range 1.40-5.00`);
           logRejection('mma', `${fight.team1} vs ${fight.team2}`, 'odds_out_of_range', { odd: tipOdd, min: 1.40, max: 5.00 });
           await new Promise(r => setTimeout(r, 3000)); continue;
+        }
+        {
+          const _bk = require('./lib/odds-bucket-gate').isBucketBlocked('mma', tipOdd);
+          if (_bk.blocked) {
+            log('INFO', 'AUTO-MMA', `Gate bucket: odd ${tipOdd} no bucket bloqueado ${_bk.bucket} (${_bk.source})`);
+            logRejection('mma', `${fight.team1} vs ${fight.team2}`, 'odds_bucket_block', { odd: tipOdd, bucket: _bk.bucket, source: _bk.source });
+            await new Promise(r => setTimeout(r, 3000)); continue;
+          }
         }
         // Detecta book sharp (Pinnacle/Betfair). MMA TheOddsAPI pode entregar BetOnline.ag,
         // BetMGM, FanDuel etc — todos non-sharp. Sem ground truth sharp, edge é mais arriscado.
@@ -12048,6 +12074,14 @@ Máximo 200 palavras. Raciocínio breve antes da decisão.`;
           logRejection('tennis', `${match.team1} vs ${match.team2}`, 'odds_out_of_range', { odd: tipOdd, min: TENNIS_GATE_MIN_ODDS, max: TENNIS_GATE_MAX_ODDS });
           await new Promise(r => setTimeout(r, 3000)); continue;
         }
+        {
+          const _bk = require('./lib/odds-bucket-gate').isBucketBlocked('tennis', tipOdd);
+          if (_bk.blocked) {
+            log('INFO', 'AUTO-TENNIS', `Gate bucket: odd ${tipOdd} no bucket bloqueado ${_bk.bucket} (${_bk.source})`);
+            logRejection('tennis', `${match.team1} vs ${match.team2}`, 'odds_bucket_block', { odd: tipOdd, bucket: _bk.bucket, source: _bk.source });
+            await new Promise(r => setTimeout(r, 3000)); continue;
+          }
+        }
         if (tipEV < 7.0) {
           log('INFO', 'AUTO-TENNIS', `Gate EV: ${tipEV}% < 7%`);
           await new Promise(r => setTimeout(r, 3000)); continue;
@@ -12715,6 +12749,14 @@ Máximo 200 palavras.`;
           log('INFO', 'AUTO-FOOTBALL', `Gate odds: ${tipOdd} fora do range 1.30-6.00`);
           logRejection('football', `${match.team1} vs ${match.team2}`, 'odds_out_of_range', { odd: tipOdd, min: 1.30, max: 6.00 });
           await new Promise(r => setTimeout(r, 2000)); continue;
+        }
+        {
+          const _bk = require('./lib/odds-bucket-gate').isBucketBlocked('football', tipOdd);
+          if (_bk.blocked) {
+            log('INFO', 'AUTO-FOOTBALL', `Gate bucket: odd ${tipOdd} no bucket bloqueado ${_bk.bucket} (${_bk.source})`);
+            logRejection('football', `${match.team1} vs ${match.team2}`, 'odds_bucket_block', { odd: tipOdd, bucket: _bk.bucket, source: _bk.source });
+            await new Promise(r => setTimeout(r, 2000)); continue;
+          }
         }
         if (tipEV < EV_THRESHOLD) {
           log('INFO', 'AUTO-FOOTBALL', `Gate EV: ${tipEV}% < ${EV_THRESHOLD}%`);
@@ -13506,6 +13548,15 @@ async function pollCs(runOnce = false) {
           analyzedCs.set(key, { ts: now, tipSent: false });
           continue;
         }
+        {
+          const _bk = require('./lib/odds-bucket-gate').isBucketBlocked('cs', pickOdd);
+          if (_bk.blocked) {
+            log('INFO', 'AUTO-CS', `Gate bucket: ${match.team1} vs ${match.team2} → odd ${pickOdd} no bucket bloqueado ${_bk.bucket} (${_bk.source})`);
+            logRejection('cs', `${match.team1} vs ${match.team2}`, 'odds_bucket_block', { odd: pickOdd, bucket: _bk.bucket, source: _bk.source });
+            analyzedCs.set(key, { ts: now, tipSent: false });
+            continue;
+          }
+        }
 
         // Flag pra tagar tips via override (diferente de hybrid) no model_label.
         let _csFromOverride = false;
@@ -13966,6 +14017,15 @@ async function pollValorant(runOnce = false) {
         if (pickOdd < VAL_MIN_ODDS || pickOdd > VAL_MAX_ODDS) {
           analyzedValorant.set(key, { ts: now, tipSent: false });
           continue;
+        }
+        {
+          const _bk = require('./lib/odds-bucket-gate').isBucketBlocked('valorant', pickOdd);
+          if (_bk.blocked) {
+            log('INFO', 'AUTO-VAL', `Gate bucket: ${match.team1} vs ${match.team2} → odd ${pickOdd} no bucket bloqueado ${_bk.bucket} (${_bk.source})`);
+            logRejection('valorant', `${match.team1} vs ${match.team2}`, 'odds_bucket_block', { odd: pickOdd, bucket: _bk.bucket, source: _bk.source });
+            analyzedValorant.set(key, { ts: now, tipSent: false });
+            continue;
+          }
         }
 
         // ── Gates específicos de LIVE (mitigam limitações do VLR) ──
