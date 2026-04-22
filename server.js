@@ -13725,185 +13725,24 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (p === '/tennis-matches') {
-    // Preferência: Pinnacle (default) → Odds-API.io → The Odds API (desativado por default).
-    // TheOddsAPI quota (15k/mês) é preciosa — Pinnacle sharp + Odds-API.io cobrem tennis
-    // sem custo de quota. Reative via TENNIS_USE_THE_ODDS=true se precisar de cobertura extra.
-    const hasPinnacle = process.env.PINNACLE_TENNIS === 'true';
-    const theOddsKey = (process.env.TENNIS_USE_THE_ODDS === 'true') ? THE_ODDS_API_KEY : '';
-    if (!hasPinnacle && !theOddsKey && !ODDS_API_IO_KEY) { sendJson(res, []); return; }
+    // Pinnacle-only: The Odds API e Odds-API.io foram removidos do fluxo de tennis.
+    if (process.env.PINNACLE_TENNIS !== 'true') { sendJson(res, []); return; }
     try {
       const now = Date.now();
-
-      // Pinnacle first: merge com cache existente (suplementa, não substitui)
-      let pinMatches = [];
-      if (hasPinnacle) {
-        pinMatches = await getPinnacleTennisMatches().catch(() => []);
-      }
-
-      // Serve do cache se ainda válido (evita 17 chamadas à API por cada pressão de botão)
-      // Guard: se Pinnacle ativo mas retornou vazio, pode ser race/falha transiente —
-      // força re-fetch (fluxo completo) pra não servir cache empobrecido.
-      const pinEmpty = hasPinnacle && pinMatches.length === 0;
-      if (!pinEmpty && _tennisMatchesCache && now - _tennisMatchesCache.ts < TENNIS_MATCHES_CACHE_TTL) {
-        const cached = _tennisMatchesCache.matches.filter(m => {
-          const t = new Date(m.time).getTime();
-          const LIVE_WINDOW_MS = parseInt(process.env.TENNIS_LIVE_WINDOW_H || '6', 10) * 60 * 60 * 1000;
-          return t > now || (t <= now && (now - t) <= LIVE_WINDOW_MS);
-        });
-        // Merge Pinnacle matches que não casam com cached (por nome normalizado)
-        const normKey = m => `${(m.team1||'').toLowerCase().replace(/[^a-z0-9]/g,'')}_${(m.team2||'').toLowerCase().replace(/[^a-z0-9]/g,'')}`;
-        const cachedKeys = new Set(cached.map(normKey));
-        const extraPin = pinMatches.filter(m => !cachedKeys.has(normKey(m)) && !cachedKeys.has(normKey({team1:m.team2,team2:m.team1})));
-        sendJson(res, [...cached, ...extraPin]);
-        return;
-      }
-      if (pinEmpty) log('DEBUG', 'TENNIS', 'Pinnacle vazio — descartando cache e refetching');
-
-      // Se só Pinnacle está ativo (sem The Odds API / Odds-API.io), usa direto
-      if (hasPinnacle && !theOddsKey && !ODDS_API_IO_KEY) {
-        sendJson(res, pinMatches);
-        return;
-      }
-
-      // Fallback via Odds-API.io (1 request /events + N /odds; manter N baixo)
-      if (!theOddsKey && ODDS_API_IO_KEY) {
-        const LIVE_WINDOW_MS = parseInt(process.env.TENNIS_LIVE_WINDOW_H || '6', 10) * 60 * 60 * 1000;
-        const weekAhead = now + 7 * 24 * 60 * 60 * 1000;
-        const maxEventsCfg = parseInt(process.env.ODDSAPIO_TENNIS_MAX_EVENTS || '14', 10);
-        const maxEvents = Math.min(30, Math.max(4, Number.isFinite(maxEventsCfg) ? maxEventsCfg : 14));
-
-        const events = await fetchOddsApiIoEvents('tennis');
-        const filtered = (events || [])
-          .map(e => {
-            const t = new Date(e.date || e.commence_time || e.start_time || e.time || '').getTime();
-            return { e, t };
-          })
-          .filter(x => Number.isFinite(x.t) && x.t <= weekAhead && (x.t > now || (x.t <= now && (now - x.t) <= LIVE_WINDOW_MS)))
-          .sort((a, b) => a.t - b.t)
-          .slice(0, maxEvents);
-
-        const matches = [];
-        for (const { e, t } of filtered) {
-          const oddsObj = await fetchOddsApiIoEventOdds(
-            e.id,
-            process.env.ODDSAPIO_TENNIS_BOOKMAKERS || process.env.ODDSAPIO_BOOKMAKERS || 'Pinnacle'
-          );
-          const bmName = oddsObj?.bookmakers ? Object.keys(oddsObj.bookmakers)[0] : null;
-          const mk = bmName ? (oddsObj.bookmakers?.[bmName] || []) : [];
-          const ml = mk.find(m => String(m?.name || '').toLowerCase() === 'ml' || String(m?.name || '').toLowerCase() === 'h2h') || mk[0];
-          const firstOdds = Array.isArray(ml?.odds) ? ml.odds[0] : null;
-          const o1 = firstOdds?.home;
-          const o2 = firstOdds?.away;
-          if (!o1 || !o2) continue;
-          matches.push({
-            id: e.id,
-            game: 'tennis',
-            status: (t <= now ? 'live' : 'upcoming'),
-            team1: e.home || e.home_team || e.team1 || '',
-            team2: e.away || e.away_team || e.team2 || '',
-            league: e.league?.name || e.league || 'Tennis',
-            time: e.date || e.commence_time || e.time,
-            odds: { t1: String(o1), t2: String(o2), bookmaker: bmName || 'Odds-API.io' }
-          });
-        }
-        matches.sort((a, b) => {
-          if (a.status === 'live' && b.status !== 'live') return -1;
-          if (b.status === 'live' && a.status !== 'live') return 1;
-          return new Date(a.time) - new Date(b.time);
-        });
-        const normKey = m => `${(m.team1||'').toLowerCase().replace(/[^a-z0-9]/g,'')}_${(m.team2||'').toLowerCase().replace(/[^a-z0-9]/g,'')}`;
-        const mKeys = new Set(matches.map(normKey));
-        const extraPin = pinMatches.filter(m => !mKeys.has(normKey(m)) && !mKeys.has(normKey({team1:m.team2,team2:m.team1})));
-        const merged = [...matches, ...extraPin];
-        merged.sort((a, b) => {
-          if (a.status === 'live' && b.status !== 'live') return -1;
-          if (b.status === 'live' && a.status !== 'live') return 1;
-          return new Date(a.time) - new Date(b.time);
-        });
-        if (merged.length) _tennisMatchesCache = { matches: merged.slice(), ts: now };
-        sendJson(res, merged);
-        return;
-      }
-
-      const weekAhead = now + 7 * 24 * 60 * 60 * 1000;
-      const LIVE_WINDOW_MS = parseInt(process.env.TENNIS_LIVE_WINDOW_H || '6', 10) * 60 * 60 * 1000; // default 6h
-
-      // 1) Lista tennis_* com all=true para incluir WTA (muitas chaves vêm active=false fora do pico)
-      if (!oddsApiAllowed('ODDS')) {
-        // Quota esgotada: retorna cache expirado MERGED com Pinnacle fresh (se disponível).
-        // Sem o merge, odds Pinnacle-carimbadas no cache velho expiram pelo freshness gate
-        // e o bot para de analisar tennis até a quota resetar (dias).
-        const cached = _tennisMatchesCache?.matches?.filter(m => new Date(m.time).getTime() > now) || [];
-        const normKey = m => `${(m.team1||'').toLowerCase().replace(/[^a-z0-9]/g,'')}_${(m.team2||'').toLowerCase().replace(/[^a-z0-9]/g,'')}`;
-        const pinKeys = new Set(pinMatches.map(normKey));
-        const cachedMinusPin = cached.filter(m => !pinKeys.has(normKey(m)) && !pinKeys.has(normKey({team1:m.team2,team2:m.team1})));
-        sendJson(res, [...pinMatches, ...cachedMinusPin]);
-        return;
-      }
-      const tennisKeys = await fetchTheOddsTennisSportKeys();
-
-      if (!tennisKeys.length) { sendJson(res, []); return; }
-
-      // 2) Busca odds (cada torneio = 1 request). Cota mínima WTA via TENNIS_MIN_WTA_KEYS
-      const maxKeysCfg = parseInt(process.env.TENNIS_MAX_KEYS || '16', 10);
-      const maxKeys = Math.min(Math.max(2, maxKeysCfg || 16), tennisKeys.length);
-
-      const { allowedKeys, wtaKeys, atpKeys } = pickBalancedTennisKeys(tennisKeys, maxKeys);
-
-      log('INFO', 'TENNIS', `Sports keys: total=${tennisKeys.length} atp=${atpKeys.length} wta=${wtaKeys.length} usando=${allowedKeys.length} (minWTA=${process.env.TENNIS_MIN_WTA_KEYS || '5'})`);
-
-      const matches = [];
-      for (const k of allowedKeys) {
-        if (!oddsApiAllowed('ODDS')) break;
-        const urlOdds = `https://api.the-odds-api.com/v4/sports/${k}/odds/?apiKey=${theOddsKey}&regions=eu&markets=h2h&oddsFormat=decimal`;
-        const r2 = await theOddsGet(urlOdds);
-        if (!r2 || r2.status !== 200) continue;
-        const raw = safeParse(r2.body, []);
-        for (const e of raw) {
-          const t = new Date(e.commence_time).getTime();
-          // upcoming: agora → 7d
-          // live: começou há <= LIVE_WINDOW_MS (The Odds API pode manter o evento por um tempo)
-          if (t > weekAhead) continue;
-          if (t <= now && (now - t) > LIVE_WINDOW_MS) continue;
-          const bm = e.bookmakers?.[0];
-          const market = bm?.markets?.find(m => m.key === 'h2h');
-          const out = market?.outcomes || [];
-          const o1 = out.find(o => o.name === e.home_team);
-          const o2 = out.find(o => o.name === e.away_team);
-          if (!o1 || !o2) continue;
-          // Completed events são descartados — não queremos analisar partidas já finalizadas
-          if (e.completed) continue;
-          matches.push({
-            id: e.id,
-            game: 'tennis',
-            sport_key: k,
-            status: (t <= now ? 'live' : 'upcoming'),
-            team1: e.home_team,
-            team2: e.away_team,
-            league: e.sport_title || 'Tennis',
-            time: e.commence_time,
-            odds: { t1: String(o1.price), t2: String(o2.price), bookmaker: bm.title }
-          });
-        }
-      }
-      matches.sort((a, b) => {
+      const LIVE_WINDOW_MS = parseInt(process.env.TENNIS_LIVE_WINDOW_H || '6', 10) * 60 * 60 * 1000;
+      const pinMatches = await getPinnacleTennisMatches().catch(() => []);
+      const filtered = pinMatches.filter(m => {
+        const t = new Date(m.time).getTime();
+        if (!Number.isFinite(t)) return false;
+        return t > now || (now - t) <= LIVE_WINDOW_MS;
+      });
+      filtered.sort((a, b) => {
         if (a.status === 'live' && b.status !== 'live') return -1;
         if (b.status === 'live' && a.status !== 'live') return 1;
         return new Date(a.time) - new Date(b.time);
       });
-      // Merge Pinnacle (mesmo que cache hit faz) — evita servir resposta empobrecida
-      const normKey = m => `${(m.team1||'').toLowerCase().replace(/[^a-z0-9]/g,'')}_${(m.team2||'').toLowerCase().replace(/[^a-z0-9]/g,'')}`;
-      const mKeys = new Set(matches.map(normKey));
-      const extraPin = pinMatches.filter(m => !mKeys.has(normKey(m)) && !mKeys.has(normKey({team1:m.team2,team2:m.team1})));
-      const merged = [...matches, ...extraPin];
-      merged.sort((a, b) => {
-        if (a.status === 'live' && b.status !== 'live') return -1;
-        if (b.status === 'live' && a.status !== 'live') return 1;
-        return new Date(a.time) - new Date(b.time);
-      });
-      // Salva no cache para reutilização por pressões de botão
-      if (merged.length) _tennisMatchesCache = { matches: merged.slice(), ts: now };
-      sendJson(res, merged);
+      if (filtered.length) _tennisMatchesCache = { matches: filtered.slice(), ts: now };
+      sendJson(res, filtered);
     } catch(e) {
       const fallback = _tennisMatchesCache?.matches?.filter(m => new Date(m.time).getTime() > Date.now()) || [];
       sendJson(res, fallback);
