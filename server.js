@@ -8748,7 +8748,7 @@ const server = http.createServer(async (req, res) => {
         // (tennis slam, CS major etc) — outcomes tendem a correlacionar.
         // Gated por CORRELATION_AUTO=true. Cap default 6u por cluster, override via
         // CORRELATION_MAX_EXPOSURE_U ou CORRELATION_MAX_EXPOSURE_U_<SPORT>.
-        if (/^true$/i.test(String(process.env.CORRELATION_AUTO || '')) && eventName) {
+        if (/^true$/i.test(String(process.env.CORRELATION_AUTO || '')) && eventName && sport !== 'football') {
           const perSportKey = `CORRELATION_MAX_EXPOSURE_U_${String(sport).toUpperCase()}`;
           const capU = parseFloat(process.env[perSportKey] || process.env.CORRELATION_MAX_EXPOSURE_U || '6');
           const openRows = db.prepare(`
