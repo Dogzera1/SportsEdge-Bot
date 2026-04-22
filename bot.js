@@ -12818,23 +12818,60 @@ Máximo 200 palavras.`;
             const marketKey = tipMarket === '1X2_D' ? 'draw' : 'totals';
             const lineVal = tipMarket === 'OVER_2.5' || tipMarket === 'UNDER_2.5' ? 2.5 : null;
             const pImp = parseFloat(String(tipOdd)) > 1 ? (1 / parseFloat(tipOdd)) : null;
+            const tipForMt = {
+              market: marketKey, line: lineVal, side: sideMt,
+              label: tipMarket,
+              pModel: fbModelPPick,
+              pImplied: pImp,
+              odd: parseFloat(tipOdd),
+              ev: parseFloat(String(tipEV).replace(/[+%]/g, '')) || null,
+            };
+            const matchForMt = { team1: match.team1, team2: match.team2, league: match.league, time: match.time, id: recordMatchId };
             const written = logShadowTip(db, {
               sport: 'football',
-              match: { team1: match.team1, team2: match.team2, league: match.league, time: match.time, id: recordMatchId },
+              match: matchForMt,
               bestOf: null,
-              tip: {
-                market: marketKey, line: lineVal, side: sideMt,
-                label: tipMarket,
-                pModel: fbModelPPick,
-                pImplied: pImp,
-                odd: parseFloat(tipOdd),
-                ev: parseFloat(String(tipEV).replace(/[+%]/g, '')) || null,
-              },
+              tip: tipForMt,
               stakeUnits: parseFloat(tipStakeAdjFb) || null,
               meta: { source: 'pollFootball', tipReason: fbTipReason, conf: tipConf },
             });
             analyzedFootball.set(key, { ts: now, tipSent: true });
             log('INFO', 'AUTO-FOOTBALL', `[SHADOW] ${tipMarket} ${tipTeam} @ ${tipOdd} | EV:${tipEV}% | ${tipConf}${written ? '' : ' (dedup)'}`);
+
+            // Admin DM path (opt-in via FOOTBALL_MARKET_TIPS_ENABLED=true + leak guard
+            // runtime state). Mesmo padrão de tennis/lol/dota/cs — shadow SEMPRE grava
+            // acima; DM só sai se sport habilitado + segment (market, side) não disabled.
+            try {
+              if (isMarketTipsEnabled('football') && ADMIN_IDS.size) {
+                const mtp = require('./lib/market-tip-processor');
+                const minEvFb = parseFloat(process.env.FOOTBALL_MARKET_TIP_MIN_EV ?? '8');
+                const minPmFb = parseFloat(process.env.FOOTBALL_MARKET_TIP_MIN_PMODEL ?? '0.55');
+                const gateFb = mtp.shouldSendMarketTip(tipForMt, { minEv: minEvFb, minPmodel: minPmFb });
+                if (!gateFb.ok) {
+                  log('DEBUG', 'FB-MARKET-GATE', `${matchForMt.team1} vs ${matchForMt.team2} ${tipMarket}: ${gateFb.reason}`);
+                } else if (!isMarketTipsEnabled('football', marketKey, sideMt)) {
+                  log('INFO', 'MT-GUARD', `football/${marketKey}/${sideMt}: DM skipped — segment disabled (auto-roi/manual)`);
+                } else {
+                  const { wasAdminDmSentRecently, markAdminDmSent } = require('./lib/market-tips-shadow');
+                  const dbFresh = wasAdminDmSentRecently(db, { match: matchForMt, market: marketKey, line: lineVal, side: sideMt, hoursAgo: 24 });
+                  if (!dbFresh) {
+                    const stakeFb = mtp.kellyStakeForMarket(fbModelPPick, parseFloat(tipOdd), 100, 0.10);
+                    if (stakeFb > 0) {
+                      const dmFb = mtp.buildMarketTipDM({ match: matchForMt, tip: tipForMt, stake: stakeFb, league: matchForMt.league, sport: 'football' });
+                      const fbToken = SPORTS['football']?.token || Object.values(SPORTS).find(S => S?.enabled && S?.token)?.token;
+                      if (fbToken) {
+                        for (const adminId of ADMIN_IDS) sendDM(fbToken, adminId, dmFb).catch(() => {});
+                        markAdminDmSent(db, { match: matchForMt, market: marketKey, line: lineVal, side: sideMt });
+                        log('INFO', 'FOOTBALL-MARKET-TIP', `Admin DM: ${tipMarket} @ ${tipOdd} EV ${tipEV}% stake ${stakeFb}u`);
+                      }
+                    }
+                  } else {
+                    log('DEBUG', 'FB-MARKET-TIP', `Dedup skip (admin_dm): ${tipMarket} ${matchForMt.team1} vs ${matchForMt.team2}`);
+                  }
+                }
+              }
+            } catch (mte) { reportBug('FOOTBALL-MARKET-TIP', mte); }
+
             await new Promise(r => setTimeout(r, 2000)); continue;
           } catch (e) {
             log('WARN', 'AUTO-FOOTBALL', `shadow log falhou (${tipMarket}): ${e.message} — caindo pro fluxo normal`);
