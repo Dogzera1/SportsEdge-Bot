@@ -14658,6 +14658,26 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
         const payload = safeParse(body, null);
         if (!payload) { sendJson(res, { error: 'Invalid JSON' }, 400); return; }
 
+        // Kill switch global: AI_DISABLED=true bloqueia todas as chamadas DeepSeek
+        // cross-sport. Callers tratam resposta vazia como "IA SEM_EDGE" → caem no
+        // fallback determinístico (advisory override + trained model bypass).
+        // Motivo: modelos ML/Markov estão maduros (Brier calibrado per-sport);
+        // IA virou advisory cosmético. Desligar economiza custo API + elimina
+        // latency 1-5s per match em live. Toggle gradual: setar pra true 2-4 semanas,
+        // medir ROI shadow — se não piorar, permanente.
+        if (/^(1|true|yes)$/i.test(String(process.env.AI_DISABLED || ''))) {
+          // Track bloqueio pra visibilidade
+          try {
+            const month = new Date().toISOString().slice(0, 7);
+            stmts.incrApiUsage.run('deepseek_blocked_by_kill_switch', month);
+            const sportRaw = String(payload.sport || '').toLowerCase().replace(/[^a-z0-9_]/g, '');
+            if (sportRaw) stmts.incrApiUsage.run(`deepseek_blocked_${sportRaw}`, month);
+          } catch (_) {}
+          // Resposta que callers interpretam como "IA sem texto" → fallback path
+          sendJson(res, { ok: true, blocked: true, reason: 'AI_DISABLED=true', content: [{ text: '' }] });
+          return;
+        }
+
         if (!DEEPSEEK_KEY) { sendJson(res, { error: 'DEEPSEEK_API_KEY ausente' }, 401); return; }
 
         // ── DeepSeek (OpenAI-compatible) ──
