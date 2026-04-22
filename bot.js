@@ -11260,9 +11260,17 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
             pickPMma * pickOddMma >= 1.06 &&
             pickOddMma >= 1.25 && pickOddMma <= 5.0;
           if (canOverride) {
-            tipMatch = [null, pickTeamMma, String(pickOddMma), String((pickPMma*100).toFixed(0)), '1u', 'BAIXA'];
+            // Promove pra MÉDIA quando edge do modelo determinístico é robusto.
+            // Sem isso, AI_DISABLED + sem trained model = override sempre BAIXA →
+            // gate BAIXA mata 100% das tips. Threshold conservador (env-tunable).
+            const _promoteEdge = parseFloat(process.env.MMA_OVERRIDE_PROMOTE_EDGE_PP || '15');
+            const _promoteMinEv = parseFloat(process.env.MMA_OVERRIDE_PROMOTE_MIN_EV || '10');
+            const _overrideEv = (pickPMma * pickOddMma - 1) * 100;
+            const _overrideConf = (edgeMma >= _promoteEdge && _overrideEv >= _promoteMinEv) ? 'MÉDIA' : 'BAIXA';
+            const _overrideStake = _overrideConf === 'MÉDIA' ? '1' : '1';
+            tipMatch = [null, pickTeamMma, String(pickOddMma), String((pickPMma*100).toFixed(0)), `${_overrideStake}u`, _overrideConf];
             _mmaFromOverride = true;
-            log('INFO', 'MMA-IA-OVERRIDE', `${fight.team1} vs ${fight.team2}: override IA SEM_EDGE — ${pickTeamMma}@${pickOddMma} P=${(pickPMma*100).toFixed(1)}% edge=${edgeMma.toFixed(1)}pp factors=${mlResultMma.factorCount} → CONF=BAIXA stake=1u`);
+            log('INFO', 'MMA-IA-OVERRIDE', `${fight.team1} vs ${fight.team2}: override IA SEM_EDGE — ${pickTeamMma}@${pickOddMma} P=${(pickPMma*100).toFixed(1)}% edge=${edgeMma.toFixed(1)}pp EV=${_overrideEv.toFixed(1)}% factors=${mlResultMma.factorCount} → CONF=${_overrideConf} stake=${_overrideStake}u`);
           } else {
             log('INFO', 'AUTO-MMA', `Sem tip: ${fight.team1} vs ${fight.team2}${_advisoryOn ? ` (override skip: factors=${mlResultMma.factorCount} edge=${edgeMma.toFixed(1)}pp)` : ''}`);
             logRejection('mma', `${fight.team1} vs ${fight.team2}`, 'ia_no_edge', { factors: mlResultMma.factorCount, edgePp: +edgeMma.toFixed(1) });
