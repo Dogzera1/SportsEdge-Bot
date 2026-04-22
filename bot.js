@@ -3700,6 +3700,81 @@ function isMarketTipsEnabled(sport, market = null, side = null) {
   return true;
 }
 
+// Side-level ROI auto-guard — complementa o CLV guard por agregação em
+// (sport, market, side). Roda no mesmo cron do runMarketTipsLeakGuard (1h).
+// Usa ROI direto porque shadow tips têm resultado final (win/loss) → sinal
+// mais direto que CLV. Cutoff e janela configuráveis via env.
+async function runMarketTipsRoiGuardSided() {
+  if (/^(0|false|no)$/i.test(String(process.env.MT_ROI_GUARD_AUTO ?? 'true'))) return;
+  if (!ADMIN_IDS.size) return;
+  const ROI_CUTOFF = parseFloat(process.env.MT_ROI_GUARD_CUTOFF || '-3');
+  const N_CUTOFF = parseInt(process.env.MT_ROI_GUARD_N_MIN || '30', 10);
+  const ROI_RESTORE = parseFloat(process.env.MT_ROI_GUARD_RESTORE || '3');
+  const WINDOW_DAYS = parseInt(process.env.MT_ROI_GUARD_WINDOW_DAYS || '14', 10);
+
+  let rows;
+  try {
+    rows = db.prepare(`
+      SELECT sport, market, side,
+        COUNT(*) AS n_settled,
+        SUM(CASE WHEN result = 'win' THEN 1 ELSE 0 END) AS wins,
+        SUM(CASE WHEN result = 'win' THEN COALESCE(stake_units, 1) * (odd - 1) ELSE 0 END)
+        - SUM(CASE WHEN result = 'loss' THEN COALESCE(stake_units, 1) ELSE 0 END) AS profit_u,
+        SUM(CASE WHEN result IN ('win','loss') THEN COALESCE(stake_units, 1) ELSE 0 END) AS stake_u
+      FROM market_tips_shadow
+      WHERE result IN ('win', 'loss')
+        AND created_at >= datetime('now', '-' || ? || ' days')
+        AND side IS NOT NULL
+      GROUP BY sport, market, side
+      HAVING n_settled >= ?
+    `).all(WINDOW_DAYS, N_CUTOFF);
+  } catch (e) { log('DEBUG', 'MT-ROI-GUARD', `query err: ${e.message}`); return; }
+
+  const disabled = [], restored = [];
+  const ts = new Date().toISOString();
+
+  for (const s of rows) {
+    const roiPct = s.stake_u > 0 ? (s.profit_u / s.stake_u) * 100 : 0;
+    const key = `${s.sport}|${s.market}|${s.side}`;
+    const wasDisabled = _marketTipsDisabledRuntime.has(key);
+
+    if (!wasDisabled && roiPct <= ROI_CUTOFF) {
+      const reason = `ROI ${roiPct.toFixed(1)}% n=${s.n_settled} hit=${(s.wins/s.n_settled*100).toFixed(0)}%`;
+      try {
+        db.prepare(`INSERT OR REPLACE INTO market_tips_runtime_state
+          (sport, market, side, disabled, source, reason, roi_pct, updated_at)
+          VALUES (?, ?, ?, 1, 'auto_roi_leak', ?, ?, ?)`).run(
+          s.sport, s.market, s.side, reason, +roiPct.toFixed(2), ts
+        );
+        _marketTipsDisabledRuntime.set(key, { reason, since: ts, roi: roiPct, n: s.n_settled, source: 'auto_roi_leak', side: s.side });
+        disabled.push(`🚫 ${s.sport}/${s.market}/${s.side} — ${reason}`);
+        log('WARN', 'MT-ROI-GUARD', `auto-disabled ${key}: ${reason}`);
+      } catch (e) { log('WARN', 'MT-ROI-GUARD', `disable err: ${e.message}`); }
+    }
+    else if (wasDisabled) {
+      const meta = _marketTipsDisabledRuntime.get(key);
+      if (meta?.source === 'auto_roi_leak' && roiPct >= ROI_RESTORE) {
+        try {
+          db.prepare(`DELETE FROM market_tips_runtime_state WHERE sport = ? AND market = ? AND side = ? AND source = 'auto_roi_leak'`).run(s.sport, s.market, s.side);
+          _marketTipsDisabledRuntime.delete(key);
+          restored.push(`✅ ${s.sport}/${s.market}/${s.side} — ROI recuperou pra ${roiPct.toFixed(1)}% (n=${s.n_settled})`);
+          log('INFO', 'MT-ROI-GUARD', `auto-restored ${key}: ROI=${roiPct.toFixed(1)}%`);
+        } catch (e) { log('WARN', 'MT-ROI-GUARD', `restore err: ${e.message}`); }
+      }
+    }
+  }
+
+  if (disabled.length || restored.length) {
+    const token = Object.values(SPORTS).find(S => S?.enabled && S?.token)?.token;
+    if (token) {
+      let msg = `🛡️ *MT ROI GUARD — auto-tune*\n\nJanela ${WINDOW_DAYS}d, ROI cutoff ${ROI_CUTOFF}% (restore ≥${ROI_RESTORE}%), n≥${N_CUTOFF}.\n\n`;
+      if (disabled.length) msg += `*Desabilitados:*\n${disabled.join('\n')}\n\n`;
+      if (restored.length) msg += `*Restaurados:*\n${restored.join('\n')}`;
+      for (const adminId of ADMIN_IDS) sendDM(token, adminId, msg).catch(() => {});
+    }
+  }
+}
+
 async function runMarketTipsLeakGuard() {
   if (/^(0|false|no)$/i.test(String(process.env.MT_LEAK_GUARD_AUTO || ''))) return;
   if (!ADMIN_IDS.size) return;
@@ -15261,6 +15336,9 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   try { _loadMarketTipsRuntimeState(); } catch (_) {}
   setInterval(() => runMarketTipsLeakGuard().catch(e => log('ERROR', 'MT-GUARD', e.message)), 60 * 60 * 1000);
   setTimeout(() => runMarketTipsLeakGuard().catch(() => {}), 15 * 60 * 1000); // 15min pós-boot
+  // ROI-based side guard (complementa CLV guard — operate em market+side granular).
+  setInterval(() => runMarketTipsRoiGuardSided().catch(e => log('ERROR', 'MT-ROI-GUARD', e.message)), 60 * 60 * 1000);
+  setTimeout(() => runMarketTipsRoiGuardSided().catch(() => {}), 20 * 60 * 1000); // 20min pós-boot (offset do CLV)
   // Digest: checa 1x/hora se é MT_DIGEST_HOUR (default 8am) e envia no primeiro tick daquele dia.
   setInterval(() => runMarketTipsDigest().catch(e => log('ERROR', 'MT-DIGEST', e.message)), 60 * 60 * 1000);
   setTimeout(() => runMarketTipsDigest().catch(() => {}), 5 * 60 * 1000); // 5min pós-boot (caso já seja a hora)

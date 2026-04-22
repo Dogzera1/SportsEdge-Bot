@@ -10600,6 +10600,91 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
     return;
   }
 
+  // Reavalia shadow tips (pending e/ou recentes) com os filtros atuais
+  // (minEv, minPmodel, maxEv, leak guard runtime). Útil depois de ajustar thresholds
+  // ou adicionar cap pra saber quantas tips JÁ LOGADAS seriam rejeitadas hoje.
+  // Com ?apply=1, marca as pending rejeitadas como result='filter_rejected' (void).
+  // GET /admin/mt-reapply-filters?sport=tennis&days=7&apply=0&key=<ADMIN_KEY>
+  if (p === '/admin/mt-reapply-filters') {
+    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    try {
+      const sport = String(parsed.query.sport || 'tennis');
+      const days = Math.max(1, Math.min(90, parseInt(parsed.query.days || '7', 10) || 7));
+      const apply = String(parsed.query.apply || '').trim() === '1';
+
+      const { shouldSendMarketTip } = require('./lib/market-tip-processor');
+      const up = sport.toUpperCase();
+      const minEv = parseFloat(process.env[`${up}_MARKET_TIP_MIN_EV`]) || 8;
+      const minPmodel = parseFloat(process.env[`${up}_MARKET_TIP_MIN_PMODEL`]) || 0.55;
+
+      const rows = db.prepare(`
+        SELECT id, sport, team1, team2, market, side, line, p_model, odd, ev_pct, result, admin_dm_sent_at, created_at
+        FROM market_tips_shadow
+        WHERE sport = ?
+          AND created_at >= datetime('now', '-' || ? || ' days')
+      `).all(sport, days);
+
+      const passes = { total: 0, settled: 0, dmed: 0, pending: 0 };
+      const fails = { total: 0, settled: 0, dmed: 0, pending: 0 };
+      const failsByReason = {};
+      const rejectedPendingIds = [];
+
+      for (const r of rows) {
+        const tip = {
+          ev: Number(r.ev_pct),
+          pModel: Number(r.p_model),
+          market: r.market,
+          side: r.side,
+          line: r.line,
+        };
+        const gate = shouldSendMarketTip(tip, { minEv, minPmodel });
+        const bucket = gate.ok ? passes : fails;
+        bucket.total++;
+        if (r.result === 'win' || r.result === 'loss') bucket.settled++;
+        if (r.admin_dm_sent_at) bucket.dmed++;
+        if (r.result == null) bucket.pending++;
+        if (!gate.ok) {
+          const reason = (gate.reason || 'unknown').split('(')[0].trim();
+          failsByReason[reason] = (failsByReason[reason] || 0) + 1;
+          if (r.result == null && !r.admin_dm_sent_at) rejectedPendingIds.push(r.id);
+        }
+      }
+
+      let appliedVoid = 0;
+      if (apply && rejectedPendingIds.length) {
+        const batch = rejectedPendingIds.slice(0, 1000); // safety cap
+        const placeholders = batch.map(() => '?').join(',');
+        const r = db.prepare(`
+          UPDATE market_tips_shadow
+          SET result = 'void', settled_at = datetime('now'), profit_units = 0
+          WHERE id IN (${placeholders}) AND result IS NULL
+        `).run(...batch);
+        appliedVoid = r.changes || 0;
+        log('INFO', 'MT-REAPPLY', `voided ${appliedVoid} pending tips rejected by filters (sport=${sport})`);
+      }
+
+      sendJson(res, {
+        ok: true, sport, days, apply,
+        thresholds_used: { min_ev: minEv, min_pmodel: minPmodel, max_ev: parseFloat(process.env.MARKET_TIP_MAX_EV) || 25 },
+        counts: {
+          total: rows.length,
+          passes: passes.total,
+          fails: fails.total,
+          pass_pct: rows.length > 0 ? +(passes.total / rows.length * 100).toFixed(1) : 0,
+        },
+        breakdown: { passes, fails },
+        fails_by_reason: failsByReason,
+        pending_rejected_count: rejectedPendingIds.length,
+        voided: appliedVoid,
+        hint: apply
+          ? `${appliedVoid} pending marcadas como void. Não vão virar DM nem contaminar shadow stats.`
+          : `${rejectedPendingIds.length} pending seriam marcadas void. Adicione &apply=1 pra executar.`,
+      });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
   // Recomputa stakes pras shadow tips pending com o novo cap (MARKET_TIP_MAX_STAKE_UNITS).
   // Lista tips com admin_dm_sent_at nas últimas N horas (match provavelmente não resolveu
   // ainda) e mostra old_stake (Kelly sem cap) vs new_stake (capped). Opcional: envia DM
