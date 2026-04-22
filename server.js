@@ -10164,7 +10164,83 @@ const server = http.createServer(async (req, res) => {
         clv_n: r.clv_n,
       }));
 
-      sendJson(res, { ok: true, days, regular, market });
+      // Extra per-market breakdown (útil pra saber se football shadow está sendo settled).
+      const marketDetailRows = db.prepare(`
+        SELECT sport, market,
+          COUNT(*) AS n,
+          SUM(CASE WHEN result IN ('win','loss') THEN 1 ELSE 0 END) AS settled,
+          SUM(CASE WHEN result = 'win' THEN 1 ELSE 0 END) AS wins,
+          SUM(CASE WHEN result IS NULL OR result = '' OR result = 'pending' THEN 1 ELSE 0 END) AS pending,
+          SUM(CASE WHEN result = 'void' THEN 1 ELSE 0 END) AS voids,
+          SUM(COALESCE(profit_units, 0)) AS profit_u,
+          SUM(CASE WHEN result IN ('win','loss') THEN COALESCE(stake_units, 1) ELSE 0 END) AS stake_u
+        FROM market_tips_shadow
+        WHERE created_at >= datetime('now', '-' || ? || ' days')
+        GROUP BY sport, market
+        ORDER BY sport, n DESC
+      `).all(days);
+      const marketByMarket = marketDetailRows.map(r => ({
+        sport: r.sport, market: r.market, n: r.n,
+        settled: r.settled, wins: r.wins, voids: r.voids, pending: r.pending,
+        hit_rate: r.settled > 0 ? +(r.wins / r.settled * 100).toFixed(1) : null,
+        roi_pct: r.stake_u > 0 ? +((r.profit_u / r.stake_u) * 100).toFixed(1) : null,
+      }));
+
+      const wantHtml = parsed.query.format === 'html' || /text\/html/i.test(req.headers['accept'] || '');
+      if (!wantHtml) {
+        sendJson(res, { ok: true, days, regular, market, market_by_market: marketByMarket });
+        return;
+      }
+
+      const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+      const tr = (cells, tag='td') => '<tr>' + cells.map(c => `<${tag}>${c == null ? '—' : esc(c)}</${tag}>`).join('') + '</tr>';
+      const regRows = regular.map(r => tr([r.sport, r.n, `${r.wins}/${r.losses}/${r.voids}`, r.pending,
+        r.hit_rate != null ? r.hit_rate + '%' : null,
+        r.roi_pct != null ? r.roi_pct + '%' : null,
+        r.avg_clv != null ? r.avg_clv + '%' : null]));
+      const mktRows = market.map(r => tr([r.sport, r.n, `${r.wins}/${r.losses}/${r.voids}`, r.pending,
+        r.hit_rate != null ? r.hit_rate + '%' : null,
+        r.roi_pct != null ? r.roi_pct + '%' : null,
+        r.avg_clv != null ? r.avg_clv + '%' : null]));
+      const mbmRows = marketByMarket.map(r => tr([r.sport, r.market, r.n,
+        `${r.wins}/${(r.settled - r.wins)}/${r.voids}`, r.pending,
+        r.hit_rate != null ? r.hit_rate + '%' : null,
+        r.roi_pct != null ? r.roi_pct + '%' : null]));
+
+      const html = `<!doctype html><html><head><meta charset="utf-8"><title>Shadow Summary — ${days}d</title>
+<style>
+  body{font:14px/1.5 -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;background:#0e1116;color:#e6edf3;margin:0;padding:24px;max-width:1200px}
+  h1{font-size:20px;margin:0 0 4px}h2{font-size:15px;margin:24px 0 8px;color:#7d8590}
+  table{width:100%;border-collapse:collapse;margin-bottom:16px;background:#161b22;border-radius:8px;overflow:hidden;font-size:13px}
+  th,td{text-align:left;padding:7px 10px;border-bottom:1px solid #21262d}th{background:#21262d;color:#7d8590;font-weight:500}
+  tr:last-child td{border-bottom:none}
+  .nav{margin-bottom:16px}.nav a{color:#58a6ff;margin-right:12px;text-decoration:none;font-size:13px}
+</style></head><body>
+<h1>Shadow Summary</h1>
+<div style="color:#7d8590;margin-bottom:12px">janela: <b>${days}d</b></div>
+<div class="nav">
+  <a href="?days=7&format=html&key=${esc(parsed.query.key || '')}">7d</a>
+  <a href="?days=30&format=html&key=${esc(parsed.query.key || '')}">30d</a>
+  <a href="?days=60&format=html&key=${esc(parsed.query.key || '')}">60d</a>
+  <a href="?days=${days}&format=json&key=${esc(parsed.query.key || '')}">JSON</a>
+</div>
+
+<h2>Regular shadow (tips com is_shadow=1)</h2>
+<table><thead>${tr(['Sport','n','W/L/V','Pending','Hit','ROI','CLV'],'th')}</thead><tbody>${regRows.join('')}</tbody></table>
+
+<h2>Market shadow por sport</h2>
+<table><thead>${tr(['Sport','n','W/L/V','Pending','Hit','ROI','CLV'],'th')}</thead><tbody>${mktRows.join('')}</tbody></table>
+
+<h2>Market shadow por (sport × market)</h2>
+<table><thead>${tr(['Sport','Market','n','W/L/V','Pending','Hit','ROI'],'th')}</thead><tbody>${mbmRows.join('')}</tbody></table>
+
+<div style="color:#7d8590;font-size:12px;margin-top:16px">
+Pending não-zero após >2h do created_at indica settle falhou. Football requer
+<code>SOFASCORE_PROXY_BASE</code> (ou <code>SOFASCORE_DIRECT=true</code>) + /sync-football-sofascore periódico.
+</div>
+</body></html>`;
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(html);
     } catch (e) { sendJson(res, { error: e.message }, 500); }
     return;
   }
