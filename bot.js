@@ -12983,7 +12983,11 @@ Máximo 200 palavras.`;
         const _fbMinConf = parseFloat(process.env.FB_HYBRID_MIN_CONF || '0.60');
         const _fbMinEv = parseFloat(process.env.FB_HYBRID_MIN_EV || '8');
         if (fbTrained && (fbModel?.confidence ?? 0) >= _fbMinConf && parseFloat(mlScore?.bestEv ?? 0) >= _fbMinEv && !isPathDisabled('football', 'hybrid')) {
-          const dir = mlScore.direction; // 1X2_H | 1X2_D | 1X2_A | OVER_2.5 | UNDER_2.5
+          // BUG FIX 2026-04-22: usar mlScore.market (códigos 1X2_H/1X2_A/...).
+          // mlScore.direction é label PT ('Casa'/'Empate'/'Fora'/'Over 2.5') que
+          // NÃO bate com os códigos comparados abaixo. Causava 100% dos hybrids
+          // skipados silenciosamente quando IA off.
+          const dir = mlScore.market; // 1X2_H | 1X2_D | 1X2_A | OVER_2.5 | UNDER_2.5
           const seleção = dir === '1X2_H' ? match.team1
             : dir === '1X2_A' ? match.team2
             : dir === '1X2_D' ? 'Empate'
@@ -13042,7 +13046,9 @@ Máximo 200 palavras.`;
             (fbModel?.confidence ?? 0) >= _minConf &&
             parseFloat(mlScore?.bestEv ?? 0) >= _minEv;
           if (canOverride) {
-            const dir = mlScore.direction;
+            // BUG FIX 2026-04-22: usar mlScore.market (não direction). Mesmo
+            // bug do hybrid path acima — direction era label PT, market é o code.
+            const dir = mlScore.market;
             const seleção = dir === '1X2_H' ? match.team1
               : dir === '1X2_A' ? match.team2
               : dir === '1X2_D' ? 'Empate'
