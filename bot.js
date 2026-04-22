@@ -3129,6 +3129,17 @@ function _parseBlocklistEnv() {
 _loadBlocklistFromDb();
 _parseBlocklistEnv();
 
+// Odds-bucket blocklist — carrega DB no boot pra restaurar auto-blocks + cooldowns
+try {
+  const _obg = require('./lib/odds-bucket-gate');
+  const r = _obg.loadFromDb(db);
+  if (r && !r.error) {
+    log('INFO', 'BUCKET-GUARD', `Loaded DB: ${r.restored} entries (${r.autoCount} auto, ${r.cooldownCount} cooldowns)`);
+  } else if (r?.error) {
+    log('WARN', 'BUCKET-GUARD', `load failed: ${r.error}`);
+  }
+} catch (e) { log('WARN', 'BUCKET-GUARD', `init: ${e.message}`); }
+
 function isLeagueBlocked(sport, league) {
   if (!_leagueBlocklist.size) return null;
   const sp = String(sport || '').toLowerCase();
@@ -4222,6 +4233,108 @@ async function runLeagueGuardCycle() {
     log('INFO', 'LEAGUE-GUARD', `Ciclo OK — ${rows.length} ligas avaliadas | ${alerts.length} blocked | ${restored.length} restored`);
   } catch (e) {
     log('WARN', 'LEAGUE-GUARD', `falhou: ${e.message}`);
+  }
+}
+
+// Auto-guard por bucket de odds. Mesma filosofia do league-guard mas agrupa por
+// (sport, bucket fixo). Buckets: 1.40-1.70, 1.70-2.20, 2.20-3.00, 3.00-99.
+// Auto-block: n≥minN AND ROI≤cutoff AND CLV≤clvCutoff.
+// Auto-restore: ROI ≥ restore com nova amostra.
+// Desativa via ODDS_BUCKET_GUARD_AUTO=false.
+const _ODDS_BUCKET_DEFS = [
+  { min: 1.40, max: 1.70 },
+  { min: 1.70, max: 2.20 },
+  { min: 2.20, max: 3.00 },
+  { min: 3.00, max: 99.00 },
+];
+function _bucketOfOdd(odd) {
+  for (const b of _ODDS_BUCKET_DEFS) {
+    if (odd >= b.min && odd < b.max) return b;
+  }
+  return null;
+}
+async function runOddsBucketGuardCycle() {
+  if (/^(0|false|no)$/i.test(String(process.env.ODDS_BUCKET_GUARD_AUTO || ''))) return;
+  const minN = parseInt(process.env.ODDS_BUCKET_GUARD_MIN_N || '30', 10);
+  const roiCutoff = parseFloat(process.env.ODDS_BUCKET_GUARD_ROI_CUTOFF || '-10');
+  const clvCutoff = parseFloat(process.env.ODDS_BUCKET_GUARD_CLV_CUTOFF || '-2');
+  const roiRestore = parseFloat(process.env.ODDS_BUCKET_GUARD_ROI_RESTORE || '-2');
+  const daysWin = parseInt(process.env.ODDS_BUCKET_GUARD_DAYS || '30', 10);
+  try {
+    const obg = require('./lib/odds-bucket-gate');
+    const rows = db.prepare(`
+      SELECT sport, odds, clv_odds, result, profit_reais, COALESCE(stake_reais, 0) AS stake
+      FROM tips
+      WHERE sent_at >= datetime('now', '-${daysWin} days')
+        AND (archived IS NULL OR archived = 0)
+        AND COALESCE(is_shadow, 0) = 0
+        AND result IN ('win','loss')
+        AND odds IS NOT NULL AND odds > 1
+    `).all();
+
+    // Agrega por (sport, bucket)
+    const agg = new Map(); // key "sport|min|max" → { n, wins, staked, profit, clvSum, clvN, sport, b }
+    for (const r of rows) {
+      const odd = Number(r.odds);
+      const b = _bucketOfOdd(odd);
+      if (!b) continue;
+      const sport = obg.normSport(r.sport).toLowerCase();
+      const key = `${sport}|${b.min}|${b.max}`;
+      let a = agg.get(key);
+      if (!a) {
+        a = { sport, b, n: 0, wins: 0, staked: 0, profit: 0, clvSum: 0, clvN: 0 };
+        agg.set(key, a);
+      }
+      a.n++;
+      if (r.result === 'win') a.wins++;
+      a.staked += Number(r.stake) || 0;
+      a.profit += Number(r.profit_reais) || 0;
+      if (Number.isFinite(r.clv_odds) && r.clv_odds > 1) {
+        a.clvSum += ((odd - r.clv_odds) / r.clv_odds) * 100;
+        a.clvN++;
+      }
+    }
+
+    const tokenForAlert = Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
+    const alerts = [];
+    const restored = [];
+    const autoBlocked = obg.getAutoBlocks();
+
+    for (const a of agg.values()) {
+      if (a.n < minN) continue;
+      const roi = a.staked > 0 ? (a.profit / a.staked * 100) : null;
+      const clv = a.clvN > 0 ? (a.clvSum / a.clvN) : null;
+      const entry = `${a.sport}:${a.b.min.toFixed(2)}-${a.b.max.toFixed(2)}`;
+
+      const already = obg.getDbBlocklist().has(entry);
+      const wasAuto = autoBlocked.has(entry);
+
+      // Auto-block
+      if (!already && roi != null && roi <= roiCutoff && (clv == null || clv <= clvCutoff)) {
+        const reason = `ROI ${roi.toFixed(1)}% n=${a.n}${clv != null ? ` CLV ${clv.toFixed(1)}%` : ''}`;
+        const meta = { reason, since: Date.now(), roi, clv, n: a.n };
+        const added = obg.autoBlock(db, a.sport, a.b.min, a.b.max, meta);
+        if (added) {
+          alerts.push(`🚫 ${entry} — ${reason}`);
+          log('WARN', 'BUCKET-GUARD', `auto-blocked ${entry}: ${reason}`);
+        }
+      }
+      // Auto-restore (só auto entries)
+      else if (wasAuto && roi != null && roi >= roiRestore && a.n >= minN) {
+        if (obg.autoRestore(db, entry)) {
+          restored.push(`✅ ${entry} — ROI ${roi.toFixed(1)}% (n=${a.n})`);
+          log('INFO', 'BUCKET-GUARD', `auto-restored ${entry}: ROI=${roi.toFixed(1)}%`);
+        }
+      }
+    }
+
+    if ((alerts.length || restored.length) && tokenForAlert && ADMIN_IDS.size) {
+      const msg = `🛡️ *BUCKET GUARD — ${daysWin}d*\n\n${[...alerts, ...restored].join('\n')}\n\n_Cutoff: ROI ≤ ${roiCutoff}% + CLV ≤ ${clvCutoff}% com n≥${minN}. Restaura em ROI ≥ ${roiRestore}%._`;
+      for (const adminId of ADMIN_IDS) sendDM(tokenForAlert, adminId, msg).catch(() => {});
+    }
+    log('INFO', 'BUCKET-GUARD', `Ciclo OK — ${agg.size} (sport,bucket) avaliados | ${alerts.length} blocked | ${restored.length} restored`);
+  } catch (e) {
+    log('WARN', 'BUCKET-GUARD', `falhou: ${e.message}`);
   }
 }
 
@@ -15218,6 +15331,9 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
 
   setInterval(() => runLeagueGuardCycle().catch(e => log('ERROR', 'LEAGUE-GUARD', e.message)), 12 * 60 * 60 * 1000);
   setTimeout(() => runLeagueGuardCycle().catch(() => {}), 45 * 60 * 1000);
+
+  setInterval(() => runOddsBucketGuardCycle().catch(e => log('ERROR', 'BUCKET-GUARD', e.message)), 12 * 60 * 60 * 1000);
+  setTimeout(() => runOddsBucketGuardCycle().catch(() => {}), 50 * 60 * 1000);
   setTimeout(() => runModelCalibrationCycle().catch(() => {}), 60 * 60 * 1000); // 1h pós-boot
 
   // Weekly pipeline digest: checa a cada 6h se já passaram 6d+ desde último envio

@@ -1260,6 +1260,28 @@ const migrations = [
       try { db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_mt_runtime_sport_market_side ON market_tips_runtime_state(sport, market, COALESCE(side, ''))"); } catch (_) {}
     },
   },
+  {
+    id: '052_odds_bucket_blocklist',
+    up(db) {
+      // Persistência do auto-guard de bucket de odds. Espelha league_blocklist:
+      //   entry = "sport:MIN-MAX" (ex: "lol:3.00-99.00") ou "*:MIN-MAX" (cross-sport)
+      //   source: 'auto' | 'manual' | 'env' | 'cooldown'
+      // Avaliado em runOddsBucketGuardCycle (12h cron). DM admin em block/restore.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS odds_bucket_blocklist (
+          entry TEXT PRIMARY KEY,
+          source TEXT NOT NULL,
+          reason TEXT,
+          roi_pct REAL,
+          clv_pct REAL,
+          n_tips INTEGER,
+          created_at INTEGER NOT NULL,
+          cooldown_until INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS idx_odds_bucket_source ON odds_bucket_blocklist(source);
+      `);
+    },
+  },
 ];
 
 function applyMigrations(db) {
