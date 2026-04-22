@@ -299,7 +299,12 @@
       "Bash(PORT=3457 ADMIN_KEY=testkey DB_PATH=sportsedge.db timeout 4 node server.js)",
       "Bash(PORT=3458 ADMIN_KEY=testkey DB_PATH=sportsedge.db timeout 4 node server.js)",
       "Bash(PORT=3460 ADMIN_KEY=testkey DB_PATH=sportsedge.db timeout 5 node server.js)",
-      "Bash(PORT=3461 ADMIN_KEY=testkey DB_PATH=sportsedge.db timeout 5 node server.js)"
+      "Bash(PORT=3461 ADMIN_KEY=testkey DB_PATH=sportsedge.db timeout 5 node server.js)",
+      "Bash(grep -n \"^  {$\" migrations/index.js)",
+      "Bash(sed -i \"s/isMarketTipsEnabled\\('lol', t\\\\.market\\)/isMarketTipsEnabled\\('lol', t.market, t.side\\)/g\" bot.js)",
+      "Bash(sed -i \"s/isMarketTipsEnabled\\('dota2', t\\\\.market\\)/isMarketTipsEnabled\\('dota2', t.market, t.side\\)/g\" bot.js)",
+      "Bash(sed -i \"s/isMarketTipsEnabled\\('cs2', t\\\\.market\\)/isMarketTipsEnabled\\('cs2', t.market, t.side\\)/g\" bot.js)",
+      "Bash(sed -i \"s/isMarketTipsEnabled\\('tennis', t\\\\.market\\)/isMarketTipsEnabled\\('tennis', t.market, t.side\\)/g\" bot.js)"
     ]
   }
 }
