@@ -772,19 +772,45 @@ function tennisResolvedAtEligibleForSentTip(resolvedAtStr, tipMs) {
   return resMs >= tipMs - slackMs;
 }
 
-function pickBestTennisSettleRow(rows, p1, p2, tipMs) {
+function _normTennisLeague(s) {
+  return String(s || '').toLowerCase()
+    .replace(/\b(atp|wta|itf|challenger|masters|1000|500|250|grand slam|main draw|qualifying|qualif|open|cup|trophy|international|men|women|singles|doubles)\b/gi, ' ')
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+function _tennisLeagueOverlap(a, b) {
+  if (!a || !b) return false;
+  const tA = a.split(' ').filter(w => w.length >= 4);
+  const tB = new Set(b.split(' ').filter(w => w.length >= 4));
+  return tA.some(w => tB.has(w));
+}
+
+function pickBestTennisSettleRow(rows, p1, p2, tipMs, tipLeague = null) {
+  // Primeiro filtra rows elegíveis (pair + resolved_at depois da tip)
+  const eligible = rows.filter(r =>
+    tennisPairMatchesPlayers(p1, p2, r.team1, r.team2) &&
+    tennisResolvedAtEligibleForSentTip(r.resolved_at, tipMs)
+  );
+  if (!eligible.length) return null;
+
+  // Tiebreak por league: mesmos jogadores podem se enfrentar em torneios consecutivos
+  // (Madrid → Rome). Se tipLeague casa com algum candidate, restringe a esses.
+  const tipLeagueN = tipLeague ? _normTennisLeague(tipLeague) : '';
+  let pool = eligible;
+  if (tipLeagueN && eligible.length > 1) {
+    const leagueHits = eligible.filter(r => _tennisLeagueOverlap(tipLeagueN, _normTennisLeague(r.league || '')));
+    if (leagueHits.length) pool = leagueHits;
+  }
+
+  // Dentro do pool filtrado, pega o resolved_at mais próximo da tipMs.
   let best = null;
   let bestDist = Infinity;
-  for (const r of rows) {
-    if (!tennisPairMatchesPlayers(p1, p2, r.team1, r.team2)) continue;
-    if (!tennisResolvedAtEligibleForSentTip(r.resolved_at, tipMs)) continue;
+  for (const r of pool) {
     const resMs = Date.parse(String(r.resolved_at || '').replace(' ', 'T'));
     if (Number.isFinite(tipMs) && Number.isFinite(resMs)) {
       const dist = Math.abs(resMs - tipMs);
-      if (dist < bestDist) {
-        bestDist = dist;
-        best = r;
-      }
+      if (dist < bestDist) { bestDist = dist; best = r; }
     } else if (Number.isFinite(resMs)) {
       const bestMs = best ? Date.parse(String(best.resolved_at || '').replace(' ', 'T')) : -Infinity;
       if (!best || resMs > bestMs) best = r;
@@ -6204,7 +6230,7 @@ const server = http.createServer(async (req, res) => {
           // Try 1: DB direct
           try {
             const rows = getTennisSettleRowsCached(lookbackDays);
-            const best = pickBestTennisSettleRow(rows, tip.participant1, tip.participant2, tipMs);
+            const best = pickBestTennisSettleRow(rows, tip.participant1, tip.participant2, tipMs, tip.event_name);
             if (best?.winner) {
               row.status = 'resolvable_db';
               row.winner = best.winner;
@@ -6217,7 +6243,7 @@ const server = http.createServer(async (req, res) => {
           try {
             await syncTennisEspnCompletedAroundSentAt(tip.sent_at);
             const rows2 = getTennisSettleRowsCached(lookbackDays);
-            const best2 = pickBestTennisSettleRow(rows2, tip.participant1, tip.participant2, tipMs);
+            const best2 = pickBestTennisSettleRow(rows2, tip.participant1, tip.participant2, tipMs, tip.event_name);
             if (best2?.winner) {
               row.status = 'resolvable_espn_window';
               row.winner = best2.winner;
@@ -11335,14 +11361,38 @@ const server = http.createServer(async (req, res) => {
 
                 if (currentOdds?.t1 && currentOdds?.t2) {
                   // CLV = odds de fecho do time APOSTADO. Determina via tip_participant match p1 ou p2.
-                  const tipNorm = norm(t.tipParticipant || '');
-                  const p1Norm = norm(t.p1 || '');
-                  const p2Norm = norm(t.p2 || '');
+                  // Usa mesmo matcher do settlement (nameMatches com aliases pra LoL,
+                  // tennisSinglePlayerNameMatch pra tennis) pra evitar false negatives tipo
+                  // "RNG" vs "Royal Never Give Up" ou "Djokovic" vs "Novak Djokovic".
                   let isT1 = null;
-                  if (tipNorm && p1Norm && (tipNorm === p1Norm || tipNorm.includes(p1Norm) || p1Norm.includes(tipNorm))) isT1 = true;
-                  else if (tipNorm && p2Norm && (tipNorm === p2Norm || tipNorm.includes(p2Norm) || p2Norm.includes(tipNorm))) isT1 = false;
+                  if (t.sport === 'tennis') {
+                    if (tennisSinglePlayerNameMatch(t.tipParticipant || '', t.p1 || '')) isT1 = true;
+                    else if (tennisSinglePlayerNameMatch(t.tipParticipant || '', t.p2 || '')) isT1 = false;
+                  } else {
+                    const aliases = (t.sport === 'esports' || t.sport === 'lol') ? LOL_ALIASES : null;
+                    const r1 = nameMatches(t.tipParticipant || '', t.p1 || '', { aliases });
+                    const r2 = nameMatches(t.tipParticipant || '', t.p2 || '', { aliases });
+                    const m1 = r1?.match && r1.method !== 'substring_weak';
+                    const m2 = r2?.match && r2.method !== 'substring_weak';
+                    if (m1 && !m2) isT1 = true;
+                    else if (m2 && !m1) isT1 = false;
+                    else if (m1 && m2) {
+                      // Ambos casaram (ex: "SK" contido em "SK Gaming" e "SK Telecom") —
+                      // fica com maior score. Empate → skip (evita guess errado).
+                      const s1 = r1.score || 0, s2 = r2.score || 0;
+                      if (s1 > s2) isT1 = true;
+                      else if (s2 > s1) isT1 = false;
+                    }
+                  }
                   if (isT1 === null) {
-                    log('DEBUG', 'CLV', `tipParticipant '${t.tipParticipant}' não bate com p1/p2 — skip`);
+                    // Último fallback: norm+includes (comportamento legado)
+                    const tipN = norm(t.tipParticipant || '');
+                    const p1n = norm(t.p1 || ''), p2n = norm(t.p2 || '');
+                    if (tipN && p1n && (tipN === p1n || tipN.includes(p1n) || p1n.includes(tipN))) isT1 = true;
+                    else if (tipN && p2n && (tipN === p2n || tipN.includes(p2n) || p2n.includes(tipN))) isT1 = false;
+                  }
+                  if (isT1 === null) {
+                    log('DEBUG', 'CLV', `${t.sport}: tipParticipant '${t.tipParticipant}' não bate com p1='${t.p1}' p2='${t.p2}' — skip`);
                     continue;
                   }
                   const closingOdd = parseFloat(isT1 ? currentOdds.t1 : currentOdds.t2);
@@ -13767,6 +13817,7 @@ const server = http.createServer(async (req, res) => {
     const p1 = parsed.query.p1 || '';
     const p2 = parsed.query.p2 || '';
     const sentAt = parsed.query.sentAt || '';
+    const tipLeague = parsed.query.league || '';
     if (!p1 || !p2) { sendJson(res, { resolved: false, error: 'p1/p2 obrigatórios' }, 400); return; }
     const lookbackDays = Math.min(800, Math.max(14, parseInt(process.env.TENNIS_SETTLE_LOOKBACK_DAYS || '600', 10) || 600));
     try {
@@ -13777,7 +13828,7 @@ const server = http.createServer(async (req, res) => {
         ? Date.parse(sentRaw.includes('T') ? sentRaw : sentRaw.replace(' ', 'T'))
         : NaN;
 
-      let best = pickBestTennisSettleRow(rows, p1, p2, tipMs);
+      let best = pickBestTennisSettleRow(rows, p1, p2, tipMs, tipLeague);
 
       if (best?.winner) {
         sendJson(res, {
@@ -13793,7 +13844,7 @@ const server = http.createServer(async (req, res) => {
 
       await syncTennisEspnCompletedAroundSentAt(sentAt);
       const rows2 = getTennisSettleRowsCached(lookbackDays);
-      best = pickBestTennisSettleRow(rows2, p1, p2, tipMs);
+      best = pickBestTennisSettleRow(rows2, p1, p2, tipMs, tipLeague);
       if (best?.winner) {
         sendJson(res, {
           resolved: true,
@@ -13809,7 +13860,7 @@ const server = http.createServer(async (req, res) => {
       const spanCfg = Math.min(90, Math.max(21, parseInt(process.env.TENNIS_ESPN_RECENT_FALLBACK_DAYS || '50', 10) || 50));
       await syncTennisEspnCompletedRecentSpan(spanCfg);
       const rows3 = getTennisSettleRowsCached(lookbackDays);
-      best = pickBestTennisSettleRow(rows3, p1, p2, tipMs);
+      best = pickBestTennisSettleRow(rows3, p1, p2, tipMs, tipLeague);
       if (best?.winner) {
         sendJson(res, {
           resolved: true,

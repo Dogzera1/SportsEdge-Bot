@@ -2489,7 +2489,7 @@ async function settleCompletedTips() {
           if (!tip.match_id) continue;
           try {
             const dbRes = await serverGet(
-              `/tennis-db-result?p1=${encodeURIComponent(tip.participant1 || '')}&p2=${encodeURIComponent(tip.participant2 || '')}&sentAt=${encodeURIComponent(tip.sent_at || '')}`,
+              `/tennis-db-result?p1=${encodeURIComponent(tip.participant1 || '')}&p2=${encodeURIComponent(tip.participant2 || '')}&sentAt=${encodeURIComponent(tip.sent_at || '')}&league=${encodeURIComponent(tip.event_name || '')}`,
               'tennis'
             ).catch(() => null);
             if (dbRes?.resolved && dbRes.winner) {
@@ -14997,6 +14997,43 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   // Weekly pipeline digest (2ª feira 9h)
   setInterval(() => runWeeklyPipelineDigest().catch(e => log('ERROR', 'WEEKLY-DIGEST', e.message)), 60 * 60 * 1000);
   setTimeout(() => runWeeklyPipelineDigest().catch(() => {}), 10 * 60 * 1000);
+
+  // Gate optimizer weekly (domingo 10h local). Roda runGateOptimizer 90d e DM admin
+  // com sports onde ótimo ≠ atual por ≥2pp ROI e n≥20. Só sugere — admin decide aplicar.
+  // Desligar via GATE_OPT_WEEKLY_AUTO=false.
+  let _lastGateOptDay = null;
+  async function runGateOptimizerWeekly() {
+    if (/^(0|false|no)$/i.test(String(process.env.GATE_OPT_WEEKLY_AUTO || ''))) return;
+    if (!ADMIN_IDS.size) return;
+    const now = new Date();
+    if (now.getDay() !== 0 || now.getHours() !== 10) return; // Domingo 10h local
+    const today = now.toISOString().slice(0, 10);
+    if (_lastGateOptDay === today) return;
+    _lastGateOptDay = today;
+    try {
+      const { runGateOptimizer } = require('./lib/gate-optimizer');
+      const r = runGateOptimizer(db, { days: 90 });
+      if (!r?.ok || !Array.isArray(r.sports)) return;
+      const significant = r.sports.filter(s =>
+        s.delta_roi != null && Math.abs(s.delta_roi) >= 2 &&
+        s.optimal && s.optimal.n >= 20 &&
+        s.recommendation && s.recommendation.startsWith('🟢')
+      );
+      if (!significant.length) {
+        log('INFO', 'GATE-OPT', `Ciclo OK — nenhum sport com delta ≥2pp ROI`);
+        return;
+      }
+      const lines = significant.slice(0, 5).map(s => s.recommendation);
+      const msg = `🎯 *GATE OPTIMIZER — ${r.days}d*\n\n` +
+        `Sports com cap divergence ≥2pp ROI (n≥20):\n\n${lines.join('\n')}\n\n` +
+        `_Admin decide aplicar via env. Ciclo próximo domingo 10h._`;
+      const token = Object.values(SPORTS).find(S => S?.enabled && S?.token)?.token;
+      if (token) for (const adminId of ADMIN_IDS) sendDM(token, adminId, msg).catch(() => {});
+      log('INFO', 'GATE-OPT', `DM admin: ${significant.length} sports com sugestão`);
+    } catch (e) { log('ERROR', 'GATE-OPT', e.message); }
+  }
+  setInterval(() => runGateOptimizerWeekly().catch(e => log('ERROR', 'GATE-OPT', e.message)), 60 * 60 * 1000);
+  setTimeout(() => runGateOptimizerWeekly().catch(() => {}), 25 * 60 * 1000);
 
   // Vetor 7 — Dota snapshot collector: cron 60s captura Steam RT + Pinnacle pareados.
   // Default ON. Desativar via DOTA_SNAPSHOT_ENABLED=false.
