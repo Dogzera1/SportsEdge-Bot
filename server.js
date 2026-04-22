@@ -13811,8 +13811,17 @@ const server = http.createServer(async (req, res) => {
           if (b.status === 'live' && a.status !== 'live') return 1;
           return new Date(a.time) - new Date(b.time);
         });
-        if (matches.length) _tennisMatchesCache = { matches: matches.slice(), ts: now };
-        sendJson(res, matches);
+        const normKey = m => `${(m.team1||'').toLowerCase().replace(/[^a-z0-9]/g,'')}_${(m.team2||'').toLowerCase().replace(/[^a-z0-9]/g,'')}`;
+        const mKeys = new Set(matches.map(normKey));
+        const extraPin = pinMatches.filter(m => !mKeys.has(normKey(m)) && !mKeys.has(normKey({team1:m.team2,team2:m.team1})));
+        const merged = [...matches, ...extraPin];
+        merged.sort((a, b) => {
+          if (a.status === 'live' && b.status !== 'live') return -1;
+          if (b.status === 'live' && a.status !== 'live') return 1;
+          return new Date(a.time) - new Date(b.time);
+        });
+        if (merged.length) _tennisMatchesCache = { matches: merged.slice(), ts: now };
+        sendJson(res, merged);
         return;
       }
 
