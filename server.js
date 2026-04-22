@@ -8592,6 +8592,51 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // Migration one-shot: remapeia football 1X2_H / 1X2_A → market_type='ML'.
+  // Essas são moneyline semânticas (pick home/away vence) mas foram gravadas com
+  // o label 1X2_H/1X2_A, o que esconde elas do dashboard depois do filtro ML-only.
+  // Dry-run por default; ?confirm=1 aplica.
+  // GET /admin/migrate-football-market-types?confirm=1&key=<ADMIN_KEY>
+  if (p === '/admin/migrate-football-market-types') {
+    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    try {
+      const confirm = String(parsed.query.confirm || '').trim() === '1';
+      const previewRow = db.prepare(`
+        SELECT market_type, COUNT(*) AS n,
+          SUM(CASE WHEN result='win' THEN 1 ELSE 0 END) AS wins,
+          SUM(CASE WHEN result='loss' THEN 1 ELSE 0 END) AS losses,
+          SUM(CASE WHEN result='void' THEN 1 ELSE 0 END) AS voids,
+          SUM(CASE WHEN result IS NULL THEN 1 ELSE 0 END) AS pending
+        FROM tips
+        WHERE sport='football' AND market_type IN ('1X2_H','1X2_A')
+        GROUP BY market_type
+      `).all();
+
+      const total = previewRow.reduce((s, r) => s + (r.n || 0), 0);
+      if (!confirm) {
+        sendJson(res, {
+          ok: true, dry_run: true, total_affected: total, by_market_type: previewRow,
+          hint: total > 0
+            ? `Adicione &confirm=1 pra aplicar. ${total} tips serão remapeadas pra market_type='ML'.`
+            : 'Nada pra migrar.',
+        });
+        return;
+      }
+
+      const r = db.prepare(`
+        UPDATE tips SET market_type='ML'
+        WHERE sport='football' AND market_type IN ('1X2_H','1X2_A')
+      `).run();
+      log('INFO', 'ADMIN', `migrate-football-market-types: ${r.changes} tips remapeadas pra ML (1X2_H/1X2_A)`);
+      sendJson(res, { ok: true, dry_run: false, remapped: r.changes, preview: previewRow });
+    } catch (e) {
+      log('ERROR', 'ADMIN', `migrate-football-market-types: ${e.message}`);
+      sendJson(res, { ok: false, error: e.message }, 500);
+    }
+    return;
+  }
+
   // Anula em lote todas as tips pendentes mais antigas que N dias (padrão: 60)
   if (p === '/void-old-pending' && req.method === 'POST') {
     let body = ''; req.on('data', d => body += d);
