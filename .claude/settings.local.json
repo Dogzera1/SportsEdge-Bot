@@ -297,7 +297,9 @@
       "Bash(awk -F: '$1>10276 && $1<10956')",
       "Bash(awk -F: '$1>10276 && $1<10956 && !/\\\\/\\\\//')",
       "Bash(PORT=3457 ADMIN_KEY=testkey DB_PATH=sportsedge.db timeout 4 node server.js)",
-      "Bash(PORT=3458 ADMIN_KEY=testkey DB_PATH=sportsedge.db timeout 4 node server.js)"
+      "Bash(PORT=3458 ADMIN_KEY=testkey DB_PATH=sportsedge.db timeout 4 node server.js)",
+      "Bash(PORT=3460 ADMIN_KEY=testkey DB_PATH=sportsedge.db timeout 5 node server.js)",
+      "Bash(PORT=3461 ADMIN_KEY=testkey DB_PATH=sportsedge.db timeout 5 node server.js)"
     ]
   }
 }
