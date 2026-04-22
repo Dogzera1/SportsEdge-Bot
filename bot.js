@@ -3665,18 +3665,26 @@ const _marketTipsDisabledRuntime = new Map(); // Map<'sport|market', { reason, s
 
 function _loadMarketTipsRuntimeState() {
   try {
-    const rows = db.prepare(`SELECT sport, market, source, reason, clv_pct, clv_n, updated_at FROM market_tips_runtime_state WHERE disabled = 1`).all();
+    // Best-effort: se migration não rodou ainda com coluna `side`, query sem ela.
+    let rows;
+    try {
+      rows = db.prepare(`SELECT sport, market, side, source, reason, clv_pct, clv_n, updated_at FROM market_tips_runtime_state WHERE disabled = 1`).all();
+    } catch (_) {
+      rows = db.prepare(`SELECT sport, market, source, reason, clv_pct, clv_n, updated_at FROM market_tips_runtime_state WHERE disabled = 1`).all().map(r => ({ ...r, side: null }));
+    }
     _marketTipsDisabledRuntime.clear();
     for (const r of rows) {
-      _marketTipsDisabledRuntime.set(`${r.sport}|${r.market}`, {
+      const key = r.side ? `${r.sport}|${r.market}|${r.side}` : `${r.sport}|${r.market}`;
+      _marketTipsDisabledRuntime.set(key, {
         reason: r.reason, since: r.updated_at, clv: r.clv_pct, n: r.clv_n, source: r.source,
+        side: r.side || null,
       });
     }
     if (_marketTipsDisabledRuntime.size) log('INFO', 'MT-GUARD', `Loaded ${_marketTipsDisabledRuntime.size} runtime disables`);
   } catch (e) { log('DEBUG', 'MT-GUARD', `load err: ${e.message}`); }
 }
 
-function isMarketTipsEnabled(sport, market = null) {
+function isMarketTipsEnabled(sport, market = null, side = null) {
   if (process.env.MARKET_TIPS_DM_KILL_SWITCH === 'true') return false;
   const up = String(sport).toUpperCase();
   // Aceita alias histórico: DOTA_* pra 'dota2', CS_* pra 'cs2'
@@ -3684,7 +3692,11 @@ function isMarketTipsEnabled(sport, market = null) {
   const enabled = process.env[`${up}_MARKET_TIPS_ENABLED`] === 'true'
     || (aliasEnv && process.env[`${aliasEnv}_MARKET_TIPS_ENABLED`] === 'true');
   if (!enabled) return false;
-  if (market && _marketTipsDisabledRuntime.has(`${sport}|${market}`)) return false;
+  if (market) {
+    // Precedência: (market+side) mais específico > market inteiro.
+    if (side && _marketTipsDisabledRuntime.has(`${sport}|${market}|${side}`)) return false;
+    if (_marketTipsDisabledRuntime.has(`${sport}|${market}`)) return false;
+  }
   return true;
 }
 
@@ -5166,7 +5178,7 @@ async function autoAnalyzeMatch(token, match) {
                     });
                     if (selected?.tip) {
                       const t = selected.tip;
-                      if (!isMarketTipsEnabled('lol', t.market)) {
+                      if (!isMarketTipsEnabled('lol', t.market, t.side)) {
                         log('INFO', 'MT-GUARD', `lol/${t.market}: DM skipped — market disabled por leak guard`);
                       } else {
                       const { wasAdminDmSentRecently, markAdminDmSent } = require('./lib/market-tips-shadow');
@@ -5191,7 +5203,7 @@ async function autoAnalyzeMatch(token, match) {
                       } else {
                         log('DEBUG', 'LOL-MARKET-TIP', `Dedup skip (${inMemFresh ? 'mem' : 'db'}): ${dedupKey}`);
                       }
-                      } // end else isMarketTipsEnabled('lol', t.market)
+                      } // end else isMarketTipsEnabled('lol', t.market, t.side)
                     }
                   } catch (mte) { reportBug('LOL-MARKET-TIP', mte, { team1: match.team1, team2: match.team2 }); }
                 }
@@ -6799,30 +6811,53 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
     // /mt-guard restore <sport> <market> — remove override auto/manual
     // /mt-guard disable <sport> <market> <razão> — disable manual
     try {
+      // Helper: detecta se parts[3]/parts[4] é side (home/away/over/under/yes/no/team1/team2/d)
+      const SIDE_TOKENS = new Set(['home','away','over','under','yes','no','team1','team2','d','t1','t2']);
       if (sub === 'restore') {
         const sp = (parts[2] || '').toLowerCase();
         const mk = (parts[3] || '').toLowerCase();
-        if (!sp || !mk) { await send(token, chatId, 'Uso: `/mt-guard restore <sport> <market>`'); return; }
-        db.prepare(`DELETE FROM market_tips_runtime_state WHERE sport = ? AND market = ?`).run(sp, mk);
-        _marketTipsDisabledRuntime.delete(`${sp}|${mk}`);
-        await send(token, chatId, `✅ Removido override: ${sp}/${mk} (DM volta ativar)`);
+        const sd = SIDE_TOKENS.has((parts[4] || '').toLowerCase()) ? (parts[4] || '').toLowerCase() : null;
+        if (!sp || !mk) { await send(token, chatId, 'Uso: `/mt-guard restore <sport> <market> [side]`'); return; }
+        if (sd) {
+          db.prepare(`DELETE FROM market_tips_runtime_state WHERE sport = ? AND market = ? AND side = ?`).run(sp, mk, sd);
+          _marketTipsDisabledRuntime.delete(`${sp}|${mk}|${sd}`);
+          await send(token, chatId, `✅ Removido override: ${sp}/${mk}/${sd} (DM volta ativar)`);
+        } else {
+          db.prepare(`DELETE FROM market_tips_runtime_state WHERE sport = ? AND market = ? AND side IS NULL`).run(sp, mk);
+          _marketTipsDisabledRuntime.delete(`${sp}|${mk}`);
+          await send(token, chatId, `✅ Removido override: ${sp}/${mk} (market inteiro)`);
+        }
         return;
       }
       if (sub === 'disable') {
         const sp = (parts[2] || '').toLowerCase();
         const mk = (parts[3] || '').toLowerCase();
-        const reason = parts.slice(4).join(' ') || 'manual';
-        if (!sp || !mk) { await send(token, chatId, 'Uso: `/mt-guard disable <sport> <market> [razão]`'); return; }
+        const sideTok = (parts[4] || '').toLowerCase();
+        const hasSide = SIDE_TOKENS.has(sideTok);
+        const sd = hasSide ? sideTok : null;
+        const reason = (hasSide ? parts.slice(5) : parts.slice(4)).join(' ') || 'manual';
+        if (!sp || !mk) { await send(token, chatId, 'Uso: `/mt-guard disable <sport> <market> [side] [razão]`\n\nSides válidos: home, away, over, under, yes, no, team1, team2, d'); return; }
         const ts = new Date().toISOString();
-        db.prepare(`INSERT OR REPLACE INTO market_tips_runtime_state (sport, market, disabled, source, reason, updated_at) VALUES (?, ?, 1, 'manual', ?, ?)`).run(sp, mk, reason, ts);
-        _marketTipsDisabledRuntime.set(`${sp}|${mk}`, { reason, since: ts, source: 'manual' });
-        await send(token, chatId, `🚫 Disabled manual: ${sp}/${mk} (${reason})`);
+        if (sd) {
+          db.prepare(`INSERT OR REPLACE INTO market_tips_runtime_state (sport, market, side, disabled, source, reason, updated_at) VALUES (?, ?, ?, 1, 'manual', ?, ?)`).run(sp, mk, sd, reason, ts);
+          _marketTipsDisabledRuntime.set(`${sp}|${mk}|${sd}`, { reason, since: ts, source: 'manual', side: sd });
+          await send(token, chatId, `🚫 Disabled manual: ${sp}/${mk}/*${sd}* (${reason})`);
+        } else {
+          db.prepare(`INSERT OR REPLACE INTO market_tips_runtime_state (sport, market, disabled, source, reason, updated_at) VALUES (?, ?, 1, 'manual', ?, ?)`).run(sp, mk, reason, ts);
+          _marketTipsDisabledRuntime.set(`${sp}|${mk}`, { reason, since: ts, source: 'manual' });
+          await send(token, chatId, `🚫 Disabled manual: ${sp}/${mk} (market inteiro) — ${reason}`);
+        }
         return;
       }
       // Default: lista estado
-      const rows = db.prepare(`SELECT sport, market, source, reason, clv_pct, clv_n, roi_pct, updated_at FROM market_tips_runtime_state WHERE disabled = 1 ORDER BY sport, market`).all();
+      let rows;
+      try {
+        rows = db.prepare(`SELECT sport, market, side, source, reason, clv_pct, clv_n, roi_pct, updated_at FROM market_tips_runtime_state WHERE disabled = 1 ORDER BY sport, market, side`).all();
+      } catch (_) {
+        rows = db.prepare(`SELECT sport, market, source, reason, clv_pct, clv_n, roi_pct, updated_at FROM market_tips_runtime_state WHERE disabled = 1 ORDER BY sport, market`).all().map(r => ({ ...r, side: null }));
+      }
       if (!rows.length) {
-        await send(token, chatId, `🛡️ *MT LEAK GUARD* — nenhum (sport, market) disabled\n\n_Auto-check rola 1x/h; fica em disable se shadow CLV ≤ -2% com n≥30._\n\nUso:\n• \`/mt-guard restore <sport> <market>\`\n• \`/mt-guard disable <sport> <market> [razão]\``);
+        await send(token, chatId, `🛡️ *MT LEAK GUARD* — nenhum disabled\n\n_Auto-check rola 1x/h; fica em disable se shadow CLV ≤ -2% com n≥30._\n\nUso:\n• \`/mt-guard disable <sport> <market> [side] [razão]\`\n• \`/mt-guard restore <sport> <market> [side]\`\n\n_Sides: home, away, over, under, yes, no, team1, team2, d._`);
         return;
       }
       let txt = `🛡️ *MT LEAK GUARD — ${rows.length} disabled*\n\n`;
@@ -6830,7 +6865,8 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
         const src = r.source === 'auto_clv_leak' ? '🤖' : '🔧';
         const clvStr = r.clv_pct != null ? ` CLV=${r.clv_pct.toFixed(1)}% n=${r.clv_n}` : '';
         const since = String(r.updated_at).slice(0, 16).replace('T', ' ');
-        txt += `${src} *${r.sport}/${r.market}* — ${r.reason || 'n/a'}${clvStr}\n   _desde ${since}_\n`;
+        const sideStr = r.side ? `/${r.side}` : '';
+        txt += `${src} *${r.sport}/${r.market}${sideStr}* — ${r.reason || 'n/a'}${clvStr}\n   _desde ${since}_\n`;
       }
       txt += `\n_🤖=auto 🔧=manual. Restore via \`/mt-guard restore <sport> <market>\`._`;
       await send(token, chatId, txt);
@@ -9809,7 +9845,7 @@ async function _pollDotaInner(runOnce = false) {
                   });
                   if (selected?.tip) {
                     const t = selected.tip;
-                    if (!isMarketTipsEnabled('dota2', t.market)) {
+                    if (!isMarketTipsEnabled('dota2', t.market, t.side)) {
                       log('INFO', 'MT-GUARD', `dota2/${t.market}: DM skipped — market disabled por leak guard`);
                     } else {
                     const { wasAdminDmSentRecently, markAdminDmSent } = require('./lib/market-tips-shadow');
@@ -9831,7 +9867,7 @@ async function _pollDotaInner(runOnce = false) {
                     } else {
                       log('DEBUG', 'DOTA-MARKET-TIP', `Dedup skip (${inMemFresh ? 'mem' : 'db'}): ${dedupKey}`);
                     }
-                    } // end else isMarketTipsEnabled('dota2', t.market)
+                    } // end else isMarketTipsEnabled('dota2', t.market, t.side)
                   }
                 } catch (mte) { reportBug('DOTA-MARKET-TIP', mte); }
               }
@@ -11463,7 +11499,7 @@ async function pollTennis(runOnce = false) {
                       });
                       if (selected?.tip) {
                         const t = selected.tip;
-                        if (!isMarketTipsEnabled('tennis', t.market)) {
+                        if (!isMarketTipsEnabled('tennis', t.market, t.side)) {
                           log('INFO', 'MT-GUARD', `tennis/${t.market}: DM skipped — market disabled por leak guard`);
                         } else {
                         const { wasAdminDmSentRecently, markAdminDmSent } = require('./lib/market-tips-shadow');
@@ -11490,7 +11526,7 @@ async function pollTennis(runOnce = false) {
                         } else {
                           log('DEBUG', 'TENNIS-MARKET-TIP', `Dedup skip (${inMemFresh ? 'mem' : 'db'}): ${dedupKey}`);
                         }
-                        } // end else isMarketTipsEnabled('tennis', t.market)
+                        } // end else isMarketTipsEnabled('tennis', t.market, t.side)
                       }
                     } catch (mte) { reportBug('TENNIS-MARKET-TIP', mte); }
                   }
@@ -13261,7 +13297,7 @@ async function pollCs(runOnce = false) {
                     });
                     if (selected?.tip) {
                       const t = selected.tip;
-                      if (!isMarketTipsEnabled('cs2', t.market)) {
+                      if (!isMarketTipsEnabled('cs2', t.market, t.side)) {
                         log('INFO', 'MT-GUARD', `cs2/${t.market}: DM skipped — market disabled por leak guard`);
                       } else {
                       const { wasAdminDmSentRecently, markAdminDmSent } = require('./lib/market-tips-shadow');
@@ -13283,7 +13319,7 @@ async function pollCs(runOnce = false) {
                       } else {
                         log('DEBUG', 'CS-MARKET-TIP', `Dedup skip (${inMemFresh ? 'mem' : 'db'}): ${dedupKey}`);
                       }
-                      } // end else isMarketTipsEnabled('cs2', t.market)
+                      } // end else isMarketTipsEnabled('cs2', t.market, t.side)
                     }
                   } catch (mte) { reportBug('CS-MARKET-TIP', mte); }
                 }

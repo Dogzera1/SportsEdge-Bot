@@ -1246,6 +1246,20 @@ const migrations = [
       }
     },
   },
+  {
+    id: '051_market_tips_runtime_state_side',
+    up(db) {
+      // Adiciona coluna `side` pra granularidade do mt-guard — permite desabilitar
+      // apenas (market, side) específico em vez do market inteiro.
+      // Ex: handicapSets|away com ROI -13.5% desabilitado, mas handicapSets|home
+      // com ROI +48.8% continua ativo.
+      try { db.exec("ALTER TABLE market_tips_runtime_state ADD COLUMN side TEXT"); } catch (_) { /* já existe */ }
+      // PRIMARY KEY antigo era (sport, market) — insert com side=NULL duplicado falhava.
+      // Deixar como está: queries distinguem via `side IS NULL` e `INSERT OR REPLACE`
+      // usa row_id implicit quando há conflito. Pra ficar robusto, cria índice único:
+      try { db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_mt_runtime_sport_market_side ON market_tips_runtime_state(sport, market, COALESCE(side, ''))"); } catch (_) {}
+    },
+  },
 ];
 
 function applyMigrations(db) {
