@@ -14627,6 +14627,83 @@ async function pollValorant(runOnce = false) {
             }
           } catch (e) { reportBug('VAL-TRAINED', e); }
         }
+
+        // Market scanner Valorant (log-only default) — handicap + totais de mapas.
+        // Modelo Val é marginal (lift 3.7% vs Elo) → EV min default 5% (era 4% em LoL/CS).
+        if (process.env.VAL_MARKET_SCAN !== 'false' && modelP1 > 0) {
+          try {
+            const { mapProbFromSeries } = require('./lib/lol-series-model');
+            const pMapVal = mapProbFromSeries(modelP1, bo);
+            const markets = await serverGet(`/odds-markets?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}&period=0`).catch(() => null);
+            if (markets && ((markets.handicaps?.length || 0) + (markets.totals?.length || 0)) > 0) {
+              const { scanMarkets } = require('./lib/odds-markets-scanner');
+              const minEv = parseFloat(process.env.VAL_MARKET_SCAN_MIN_EV ?? '5');
+              const { minOdd: minOddVal, maxOdd: maxOddVal } = _resolveMtOddBounds('valorant');
+              const found = scanMarkets({
+                markets, pMap: pMapVal, bestOf: bo,
+                pricingLib: require('./lib/lol-markets'),
+                minEv,
+                momentum: 0.04, // Valorant momentum (project_esports_momentum_wave)
+                minOdd: minOddVal,
+                maxOdd: maxOddVal,
+              });
+              if (found.length) {
+                log('INFO', 'VAL-MARKETS',
+                  `${match.team1} vs ${match.team2} [Bo${bo}]: ${found.length} mercado(s) EV ≥${minEv}% (pMap=${(pMapVal*100).toFixed(1)}%)`);
+                try {
+                  const { logShadowTip } = require('./lib/market-tips-shadow');
+                  for (const t of found) logShadowTip(db, { sport: 'valorant', match, bestOf: bo, tip: t, isLive: isLiveVal });
+                } catch (_) {}
+                for (const t of found.slice(0, 5)) {
+                  log('INFO', 'VAL-MARKETS',
+                    `  • ${t.label} @ ${t.odd.toFixed(2)} | pModel=${(t.pModel*100).toFixed(1)}% pImpl=${t.pImplied ? (t.pImplied*100).toFixed(1)+'%' : '?'} EV=${t.ev.toFixed(1)}%`);
+                }
+                if (isMarketTipsEnabled('valorant') && ADMIN_IDS.size) {
+                  try {
+                    const mtp = require('./lib/market-tip-processor');
+                    const mlDirection = modelP1 > 0.5 ? 'team1' : 'team2';
+                    const selected = mtp.selectBestMarketTip(found, {
+                      minEv: parseFloat(process.env.VAL_MARKET_TIP_MIN_EV ?? '8'),
+                      minPmodel: parseFloat(process.env.VAL_MARKET_TIP_MIN_PMODEL ?? '0.55'),
+                      mlDirection, mlPick: match.team1,
+                    });
+                    if (selected?.tip) {
+                      const t = selected.tip;
+                      if (!isMarketTipsEnabled('valorant', t.market, t.side)) {
+                        log('INFO', 'MT-GUARD', `valorant/${t.market}: DM skipped — market disabled por leak guard`);
+                      } else {
+                      const { wasAdminDmSentRecently, markAdminDmSent } = require('./lib/market-tips-shadow');
+                      const dedupKey = `valorant|${norm(match.team1)}|${norm(match.team2)}|${t.market}|${t.line}|${t.side}`;
+                      const inMemFresh = Date.now() - (marketTipSent.get(dedupKey) || 0) <= 24 * 60 * 60 * 1000;
+                      const dbFresh = wasAdminDmSentRecently(db, { sport: 'valorant', match, market: t.market, line: t.line, side: t.side, hoursAgo: 24 });
+                      if (!inMemFresh && !dbFresh) {
+                        marketTipSent.set(dedupKey, Date.now());
+                        const stake = mtp.kellyStakeForMarket(t.pModel, t.odd, 100, 0.10);
+                        if (stake > 0) {
+                          const dm = mtp.buildMarketTipDM({ match, tip: t, stake, league: match.league, sport: 'valorant', isLive: isLiveVal });
+                          const tokenForMT = Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
+                          if (tokenForMT) {
+                            const r = await sendAdminDMs(tokenForMT, dm, undefined, 'val-market-tip');
+                            if (r.sent > 0) {
+                              markAdminDmSent(db, { sport: 'valorant', match, market: t.market, line: t.line, side: t.side });
+                              log('INFO', 'VAL-MARKET-TIP', `Admin DM: ${t.label} @ ${t.odd} EV ${t.ev}% stake ${stake}u (sent=${r.sent} failed=${r.failed})`);
+                            } else {
+                              log('WARN', 'VAL-MARKET-TIP', `Todos admin DM falharam — skip dedup mark (${t.label} @ ${t.odd})`);
+                            }
+                          }
+                        }
+                      } else {
+                        log('DEBUG', 'VAL-MARKET-TIP', `Dedup skip (${inMemFresh ? 'mem' : 'db'}): ${dedupKey}`);
+                      }
+                      } // end else isMarketTipsEnabled('valorant', t.market, t.side)
+                    }
+                  } catch (mte) { reportBug('VAL-MARKET-TIP', mte); }
+                }
+              }
+            }
+          } catch (e) { reportBug('VAL-MARKETS', e); }
+        }
+
         const direction = elo.direction === 'p1' ? 't1' : elo.direction === 'p2' ? 't2' : null;
         const mlScore = elo.score;
         const factorCount = elo.factorCount;
