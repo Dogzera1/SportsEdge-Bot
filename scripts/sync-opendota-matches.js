@@ -47,9 +47,18 @@ async function main() {
   const before = db.prepare(`SELECT COUNT(*) as n FROM match_results WHERE game='dota2'`).get().n;
   console.log(`[opendota] match_results.dota2 ANTES: ${before}`);
 
+  // ON CONFLICT preserva final_score válido se excluded for vazio. Permite
+  // re-sync atualizar rows que o bot scanner inseriu com '' vazio.
   const insertStmt = db.prepare(`
-    INSERT OR IGNORE INTO match_results (match_id, game, team1, team2, winner, final_score, league, resolved_at)
+    INSERT INTO match_results (match_id, game, team1, team2, winner, final_score, league, resolved_at)
     VALUES (?, 'dota2', ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(match_id, game) DO UPDATE SET
+      team1 = excluded.team1,
+      team2 = excluded.team2,
+      winner = excluded.winner,
+      final_score = COALESCE(NULLIF(excluded.final_score, ''), final_score),
+      league = excluded.league,
+      resolved_at = excluded.resolved_at
   `);
 
   let lastId = null, totalFetched = 0, totalInserted = 0, totalSkipped = 0;

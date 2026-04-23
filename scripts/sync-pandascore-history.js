@@ -77,9 +77,19 @@ async function main() {
   const before = db.prepare(`SELECT COUNT(*) as n FROM match_results WHERE game=?`).get(cfg.dbGame).n;
   console.log(`[sync-ps] match_results ${cfg.dbGame} ANTES: ${before}`);
 
+  // ON CONFLICT preserva final_score válido se excluded for vazio. Permite
+  // re-sync sobrescrever rows que o bot scanner inseriu com '' vazio sem
+  // destruir scores válidos vindos de outro sync.
   const insertStmt = db.prepare(`
-    INSERT OR REPLACE INTO match_results (match_id, game, team1, team2, winner, final_score, league, resolved_at)
+    INSERT INTO match_results (match_id, game, team1, team2, winner, final_score, league, resolved_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(match_id, game) DO UPDATE SET
+      team1 = excluded.team1,
+      team2 = excluded.team2,
+      winner = excluded.winner,
+      final_score = COALESCE(NULLIF(excluded.final_score, ''), final_score),
+      league = excluded.league,
+      resolved_at = excluded.resolved_at
   `);
 
   let inserted = 0, skipped = 0, page = 1;
