@@ -2307,18 +2307,33 @@ async function loadMarketTipsShadow() {
 
 function renderMarketTipsBreakdown(bd) {
   if (!bd || !Array.isArray(bd.by_market_side) || !bd.by_market_side.length) return '';
-  const rowsMarketSide = bd.by_market_side.slice(0, 20);
-  const rowsMarket = bd.by_market.slice(0, 10);
-  const fmtKey = (k) => k.split('|').slice(1).join('/');  // remove sport prefix
+  const rowsMarketSide = bd.by_market_side.slice(0, 30);
+  const rowsMarket = bd.by_market.slice(0, 15);
+  // Display: "sport · market/side". Sport badge em pill colorido pra separar visualmente.
+  const sportColor = {
+    lol: '#29b6f6', dota2: '#ef5350', cs2: '#ffa726', valorant: '#ec407a',
+    tennis: '#66bb6a', football: '#ab47bc', mma: '#8d6e63',
+  };
+  const fmtSport = (s) => {
+    const c = sportColor[s] || '#888';
+    const label = s === 'dota2' ? 'DOTA' : s === 'cs2' ? 'CS' : s.toUpperCase();
+    return `<span style="background:${c};color:#fff;padding:2px 6px;border-radius:3px;font-size:0.75em;font-weight:600">${label}</span>`;
+  };
+  const fmtKeyWithSport = (k) => {
+    const parts = k.split('|');
+    const sp = parts[0] || '?';
+    const rest = parts.slice(1).join(' / ');
+    return `${fmtSport(sp)} <span style="margin-left:6px">${rest}</span>`;
+  };
   const fmtRoi = (r) => r == null ? '—' : (r >= 0 ? '+' : '') + r + '%';
   const clsRoi = (r) => r == null ? '' : (r >= 0 ? 'positive' : 'negative');
   const fmtClv = (c) => c == null ? '—' : (c >= 0 ? '+' : '') + c.toFixed(1) + '%';
 
   let html = `<div style="margin-bottom:14px">
-    <div class="card-meta" style="margin-bottom:6px"><b>📊 Breakdown por mercado × side (${bd.days}d, ${bd.total_settled} settled)</b></div>
+    <div class="card-meta" style="margin-bottom:6px"><b>📊 Breakdown por esporte × mercado × side (${bd.days}d, ${bd.total_settled} settled)</b></div>
     <table class="tips" style="margin-bottom:10px">
       <thead><tr>
-        <th>Mercado / Side</th>
+        <th>Sport · Mercado / Side</th>
         <th style="text-align:right">N</th>
         <th style="text-align:right">Win%</th>
         <th style="text-align:right">ROI</th>
@@ -2330,7 +2345,7 @@ function renderMarketTipsBreakdown(bd) {
       <tbody>`;
   for (const r of rowsMarketSide) {
     html += `<tr>
-      <td>${fmtKey(r.key)}</td>
+      <td>${fmtKeyWithSport(r.key)}</td>
       <td style="text-align:right">${r.n}</td>
       <td style="text-align:right">${r.winRate != null ? r.winRate + '%' : '—'}</td>
       <td style="text-align:right" class="${clsRoi(r.roi)}">${fmtRoi(r.roi)}</td>
@@ -2343,13 +2358,13 @@ function renderMarketTipsBreakdown(bd) {
   html += `</tbody></table>`;
 
   if (rowsMarket.length > 1) {
-    html += `<details style="margin-top:8px"><summary class="card-meta" style="cursor:pointer">Agregado por mercado (sem split de side)</summary>
+    html += `<details style="margin-top:8px"><summary class="card-meta" style="cursor:pointer">Agregado por esporte × mercado (sem split de side)</summary>
       <table class="tips" style="margin-top:6px">
-        <thead><tr><th>Mercado</th><th style="text-align:right">N</th><th style="text-align:right">Win%</th><th style="text-align:right">ROI</th><th style="text-align:right">P&L</th><th style="text-align:right">CLV</th></tr></thead>
+        <thead><tr><th>Sport · Mercado</th><th style="text-align:right">N</th><th style="text-align:right">Win%</th><th style="text-align:right">ROI</th><th style="text-align:right">P&L</th><th style="text-align:right">CLV</th></tr></thead>
         <tbody>`;
     for (const r of rowsMarket) {
       html += `<tr>
-        <td>${fmtKey(r.key)}</td>
+        <td>${fmtKeyWithSport(r.key)}</td>
         <td style="text-align:right">${r.n}</td>
         <td style="text-align:right">${r.winRate != null ? r.winRate + '%' : '—'}</td>
         <td style="text-align:right" class="${clsRoi(r.roi)}">${fmtRoi(r.roi)}</td>
