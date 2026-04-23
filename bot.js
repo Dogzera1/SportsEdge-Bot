@@ -5178,7 +5178,14 @@ async function checkLiveScoutGaps() {
   for (const adminId of ADMIN_IDS) {
     await sendDM(token, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
   }
-  log('WARN', 'LIVE-SCOUT-ALERT', `${grouped.length} gap(s) persistentes alertados via bot [${botSport}]`);
+  // Log detalhado (server side) além do DM — facilita debug sem precisar Telegram.
+  // Mostra sport|teams|flag|idade pra identificar padrão (ex: sempre no_gameids_in_ps em LPL).
+  const detailLines = grouped.slice(0, 6).map(g => {
+    const teamsStr = g.teams || g.matchId || '?';
+    const primaryFlag = (g.flags || [])[0] || 'unknown';
+    return `${g.sport}/${teamsStr}|${primaryFlag}|${g.ageMin.toFixed(1)}m`;
+  }).join(' · ');
+  log('WARN', 'LIVE-SCOUT-ALERT', `${grouped.length} gap(s) persistentes [${botSport}] — ${detailLines}${grouped.length > 6 ? ` (+${grouped.length - 6})` : ''}`);
 }
 
 async function checkPatchMetaStale(token) {
