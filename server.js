@@ -1125,6 +1125,20 @@ const FOOTBALL_MATCHES_CACHE_TTL = 8 * 60 * 60 * 1000; // 8h
 let _tennisMatchesCache = null; // { matches: Array, ts: number }
 const TENNIS_MATCHES_CACHE_TTL = 90 * 1000; // 90s
 
+// Coalescing + short TTL pra /live-snapshot e /upcoming-snapshot.
+// Motivo: ambos fazem fan-out pra 5-7 /X-matches endpoints. Dashboard
+// (auto-refresh 60s) + cashout monitor (2min) + live-scout agent chamam
+// esses endpoints concorrentemente → downstream double/triple fetch.
+// Request coalescing faz concurrent calls compartilharem a promise in-flight;
+// TTL cache serve call repetida dentro da janela sem refazer fan-out.
+let _liveSnapshotCache = { result: null, ts: 0 };
+let _liveSnapshotInFlight = null;
+const LIVE_SNAPSHOT_TTL_MS = parseInt(process.env.LIVE_SNAPSHOT_TTL_MS || '15000', 10);
+
+let _upcomingSnapshotCache = { result: null, ts: 0, horizonMs: 0 };
+let _upcomingSnapshotInFlight = null;
+const UPCOMING_SNAPSHOT_TTL_MS = parseInt(process.env.UPCOMING_SNAPSHOT_TTL_MS || '60000', 10);
+
 // Backoff em caso de 429
 let esportsBackoffUntil = 0;
 const _serverStartTs = Date.now();
