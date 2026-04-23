@@ -1139,6 +1139,18 @@ let _upcomingSnapshotCache = { result: null, ts: 0, horizonMs: 0 };
 let _upcomingSnapshotInFlight = null;
 const UPCOMING_SNAPSHOT_TTL_MS = parseInt(process.env.UPCOMING_SNAPSHOT_TTL_MS || '60000', 10);
 
+// Short-TTL cache de response para endpoints /X-matches. Motivo: múltiplos callers
+// internos (pollX + refreshOpenTips + cashout-monitor + live-snapshot fan-out)
+// batem o endpoint concorrentemente. Downstream caches (Pinnacle/PandaScore/Odds)
+// já evitam fetch externo duplicado, mas enrichment body + log rodavam 2x.
+// TTL 3s absorve near-simultaneous calls sem ofuscar dados live-stats.
+const MATCHES_RESP_TTL_MS = parseInt(process.env.MATCHES_RESP_TTL_MS || '3000', 10);
+let _dotaMatchesResp = { data: null, ts: 0 };
+let _csMatchesResp = { data: null, ts: 0 };
+let _valorantMatchesResp = { data: null, ts: 0 };
+let _tennisMatchesResp = { data: null, ts: 0 };
+let _mmaMatchesResp = { data: null, ts: 0 };
+
 // Backoff em caso de 429
 let esportsBackoffUntil = 0;
 const _serverStartTs = Date.now();
@@ -4893,6 +4905,14 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (p === '/dota-matches') {
+    // Short-TTL response cache — absorve near-simultaneous calls sem refazer
+    // enrichment body (live stats, map odds, etc). Log de /dota-matches também
+    // passa a não duplicar quando hit cache.
+    const _nowDm = Date.now();
+    if (_dotaMatchesResp.data && (_nowDm - _dotaMatchesResp.ts) < MATCHES_RESP_TTL_MS) {
+      sendJson(res, _dotaMatchesResp.data);
+      return;
+    }
     try {
       // ── Fonte primária: Pinnacle (se ativado) → Odds-API.io → The Odds API ──
       let oddsMatches = [];
@@ -4982,6 +5002,7 @@ const server = http.createServer(async (req, res) => {
       const oddsSrc = ODDS_API_IO_KEY ? 'Odds-API.io' : 'TheOdds';
       const withMapOdds = combined.filter(m => m.mapOdds).length;
       log('INFO', 'DOTA2', `/dota-matches: ${combined.length} total (${liveFromPs.length} live PS, ${oddsMatches.length} odds ${oddsSrc}${withMapOdds ? `, ${withMapOdds} com mapOdds` : ''})`);
+      _dotaMatchesResp = { data: combined, ts: Date.now() };
       sendJson(res, combined);
     } catch(e) {
       sendJson(res, []);
@@ -5023,6 +5044,11 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (p === '/cs-matches') {
+    const _nowCs = Date.now();
+    if (_csMatchesResp.data && (_nowCs - _csMatchesResp.ts) < MATCHES_RESP_TTL_MS) {
+      sendJson(res, _csMatchesResp.data);
+      return;
+    }
     try {
       const [pinMatches, psMatches] = await Promise.all([
         getPinnacleCsMatches().catch(() => []),
@@ -5065,6 +5091,7 @@ const server = http.createServer(async (req, res) => {
       });
 
       log('INFO', 'CS', `/cs-matches: ${combined.length} total (${liveFromPs.length} live PS, ${pinMatches.length} odds Pinnacle)`);
+      _csMatchesResp = { data: combined, ts: Date.now() };
       sendJson(res, combined);
     } catch (e) {
       log('ERROR', 'CS', `/cs-matches: ${e.message}`);
@@ -5074,6 +5101,11 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (p === '/valorant-matches') {
+    const _nowVal = Date.now();
+    if (_valorantMatchesResp.data && (_nowVal - _valorantMatchesResp.ts) < MATCHES_RESP_TTL_MS) {
+      sendJson(res, _valorantMatchesResp.data);
+      return;
+    }
     try {
       const [pinMatches, psMatches] = await Promise.all([
         getPinnacleValorantMatches().catch(() => []),
@@ -5114,6 +5146,7 @@ const server = http.createServer(async (req, res) => {
       });
 
       log('INFO', 'VALORANT', `/valorant-matches: ${combined.length} total (${liveFromPs.length} live PS, ${pinMatches.length} odds Pinnacle)`);
+      _valorantMatchesResp = { data: combined, ts: Date.now() };
       sendJson(res, combined);
     } catch (e) {
       log('ERROR', 'VALORANT', `/valorant-matches: ${e.message}`);
@@ -14959,6 +14992,11 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
 
   if (p === '/mma-matches') {
     if (!THE_ODDS_API_KEY) { sendJson(res, []); return; }
+    const _nowMma = Date.now();
+    if (_mmaMatchesResp.data && (_nowMma - _mmaMatchesResp.ts) < MATCHES_RESP_TTL_MS) {
+      sendJson(res, _mmaMatchesResp.data);
+      return;
+    }
     try {
       const now = Date.now();
       // Preferência de bookmaker: Pinnacle > Betfair > primeiro disponível.
@@ -14999,6 +15037,7 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
       const boxFights = rBox.status === 200 ? parseFights(safeParse(rBox.body, []), 'boxing') : [];
 
       const fights = [...mmaFights, ...boxFights].sort((a, b) => new Date(a.time) - new Date(b.time));
+      _mmaMatchesResp = { data: fights, ts: Date.now() };
       sendJson(res, fights);
     } catch(e) {
       sendJson(res, []);
@@ -15009,6 +15048,11 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
   if (p === '/tennis-matches') {
     // Pinnacle-only: The Odds API e Odds-API.io foram removidos do fluxo de tennis.
     if (process.env.PINNACLE_TENNIS !== 'true') { sendJson(res, []); return; }
+    const _nowTn = Date.now();
+    if (_tennisMatchesResp.data && (_nowTn - _tennisMatchesResp.ts) < MATCHES_RESP_TTL_MS) {
+      sendJson(res, _tennisMatchesResp.data);
+      return;
+    }
     try {
       const now = Date.now();
       const LIVE_WINDOW_MS = parseInt(process.env.TENNIS_LIVE_WINDOW_H || '6', 10) * 60 * 60 * 1000;
@@ -15024,6 +15068,7 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
         return new Date(a.time) - new Date(b.time);
       });
       if (filtered.length) _tennisMatchesCache = { matches: filtered.slice(), ts: now };
+      _tennisMatchesResp = { data: filtered, ts: now };
       sendJson(res, filtered);
     } catch(e) {
       const fallback = _tennisMatchesCache?.matches?.filter(m => new Date(m.time).getTime() > Date.now()) || [];
