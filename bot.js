@@ -13149,10 +13149,17 @@ async function pollFootball(runOnce = false) {
         let fbTrained = null;
         try {
           if (hasTrainedFootballModel()) {
+            // Enriquece league name com sport_key quando disponível. The Odds API
+            // devolve sport_title genérico tipo "League 1" (sem país) — isso faz
+            // fuzzy match bater em "Ireland Premier Division" via sinonímia 1↔premier.
+            // sport_key tem país embutido (ex: "soccer_england_league1"), resolvemos a ambigüidade.
+            const richLeague = match.sport_key
+              ? `${String(match.sport_key).replace(/^soccer_/, '').replace(/_/g, ' ')} ${match.league || ''}`.trim()
+              : (match.league || match.event_name || '');
             fbTrained = predictFootballTrained({
               teamHome: match.team1,
               teamAway: match.team2,
-              league: match.league || match.event_name || '',
+              league: richLeague,
             });
             if (fbTrained) {
               log('INFO', 'FB-TRAINED', `${match.team1} vs ${match.team2} [${fbTrained.league_key}]: pH=${(fbTrained.pH*100).toFixed(1)}% pD=${(fbTrained.pD*100).toFixed(1)}% pA=${(fbTrained.pA*100).toFixed(1)}% conf=${fbTrained.confidence.toFixed(2)}`);
