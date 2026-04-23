@@ -16383,9 +16383,26 @@ async function checkCLV(caches = {}) {
   try {
     const now = Date.now();
 
+    // BUG FIX 2026-04-23: checkCLV ignorava cs/valorant/lol/dota2 → coverage 0%
+    // em regular tips desses sports. Audit (scripts/clv-coverage.js) confirmou:
+    // football 0%, cs 0%, lol 25%, dota2 22%, valorant 16.7%.
+    // Post-split Abr/2026 tips usam sport='lol'|'dota2' (não 'esports'), então
+    // precisam estar na lista também. Tabletennis não tem /tabletennis-matches
+    // endpoint consistente — exclui até validar.
     const sportsToTrack = Object.entries(SPORTS)
-      .filter(([id, s]) => s && s.enabled && s.token && (id === 'esports' || id === 'football' || id === 'tennis' || id === 'mma' || id === 'darts' || id === 'snooker'))
+      .filter(([id, s]) => s && s.enabled && s.token && (
+        id === 'esports' || id === 'lol' || id === 'dota2' ||
+        id === 'cs' || id === 'valorant' ||
+        id === 'football' || id === 'tennis' || id === 'mma' ||
+        id === 'darts' || id === 'snooker'
+      ))
       .map(([id]) => id);
+    // 'lol'/'dota2' podem não estar em SPORTS (split bucket pós-Abr/2026) mas tips
+    // precisam ser tracked. Inclui manualmente quando 'esports' está enabled.
+    if (SPORTS.esports?.enabled && SPORTS.esports?.token) {
+      if (!sportsToTrack.includes('lol')) sportsToTrack.push('lol');
+      if (!sportsToTrack.includes('dota2')) sportsToTrack.push('dota2');
+    }
     if (!sportsToTrack.length) return;
 
     for (const sport of sportsToTrack) {
@@ -16451,6 +16468,51 @@ async function checkCLV(caches = {}) {
       } else if (sport === 'darts' || sport === 'snooker') {
         const matches = caches[sport] || await serverGet(`/${sport}-matches`).catch(() => []);
         caches[sport] = matches;
+        if (Array.isArray(matches)) {
+          for (const m of matches) {
+            if (m.time) {
+              const k1 = norm(m.team1 || '') + '_' + norm(m.team2 || '');
+              const k2 = norm(m.team2 || '') + '_' + norm(m.team1 || '');
+              const ts = new Date(m.time).getTime();
+              matchTimeMap[k1] = ts;
+              matchTimeMap[k2] = ts;
+            }
+          }
+        }
+      } else if (sport === 'cs') {
+        const matches = caches.cs || await serverGet('/cs-matches').catch(() => []);
+        caches.cs = matches;
+        if (Array.isArray(matches)) {
+          for (const m of matches) {
+            if (m.time) {
+              const k1 = norm(m.team1 || '') + '_' + norm(m.team2 || '');
+              const k2 = norm(m.team2 || '') + '_' + norm(m.team1 || '');
+              const ts = new Date(m.time).getTime();
+              matchTimeMap[k1] = ts;
+              matchTimeMap[k2] = ts;
+            }
+          }
+        }
+      } else if (sport === 'valorant') {
+        const matches = caches.valorant || await serverGet('/valorant-matches').catch(() => []);
+        caches.valorant = matches;
+        if (Array.isArray(matches)) {
+          for (const m of matches) {
+            if (m.time) {
+              const k1 = norm(m.team1 || '') + '_' + norm(m.team2 || '');
+              const k2 = norm(m.team2 || '') + '_' + norm(m.team1 || '');
+              const ts = new Date(m.time).getTime();
+              matchTimeMap[k1] = ts;
+              matchTimeMap[k2] = ts;
+            }
+          }
+        }
+      } else if (sport === 'lol' || sport === 'dota2') {
+        // 'lol'/'dota2' pós-split: reusa /lol-matches ou /dota-matches
+        const endpoint = sport === 'lol' ? '/lol-matches' : '/dota-matches';
+        const cacheKey = sport === 'lol' ? 'esports' : 'dota';
+        const matches = caches[cacheKey] || await serverGet(endpoint).catch(() => []);
+        caches[cacheKey] = matches;
         if (Array.isArray(matches)) {
           for (const m of matches) {
             if (m.time) {
@@ -16546,6 +16608,26 @@ async function checkCLV(caches = {}) {
             const pickN = norm(tip.tip_participant || '');
             const a1 = norm(m.team1 || '');
             clvOdds = pickN === a1 ? m.odds.t1 : m.odds.t2;
+          }
+        } else if (sport === 'cs') {
+          const o = await serverGet(`/odds?team1=${encodeURIComponent(tip.participant1)}&team2=${encodeURIComponent(tip.participant2)}&game=cs`).catch(() => null);
+          if (o && parseFloat(o.t1) > 1) {
+            clvOdds = (norm(tip.tip_participant) === norm(tip.participant1)) ? o.t1 : o.t2;
+          }
+        } else if (sport === 'valorant') {
+          const o = await serverGet(`/odds?team1=${encodeURIComponent(tip.participant1)}&team2=${encodeURIComponent(tip.participant2)}&game=valorant`).catch(() => null);
+          if (o && parseFloat(o.t1) > 1) {
+            clvOdds = (norm(tip.tip_participant) === norm(tip.participant1)) ? o.t1 : o.t2;
+          }
+        } else if (sport === 'lol') {
+          const o = await serverGet(`/odds?team1=${encodeURIComponent(tip.participant1)}&team2=${encodeURIComponent(tip.participant2)}&game=lol`).catch(() => null);
+          if (o && parseFloat(o.t1) > 1) {
+            clvOdds = (norm(tip.tip_participant) === norm(tip.participant1)) ? o.t1 : o.t2;
+          }
+        } else if (sport === 'dota2') {
+          const o = await serverGet(`/odds?team1=${encodeURIComponent(tip.participant1)}&team2=${encodeURIComponent(tip.participant2)}&game=dota2`).catch(() => null);
+          if (o && parseFloat(o.t1) > 1) {
+            clvOdds = (norm(tip.tip_participant) === norm(tip.participant1)) ? o.t1 : o.t2;
           }
         }
 
