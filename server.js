@@ -5127,9 +5127,28 @@ const server = http.createServer(async (req, res) => {
   // ser consumido pelo dashboard via polling (~30s) — assim o user não precisa
   // perguntar "esse jogo tem live stats/odd Pinnacle?" a cada partida.
   if (p === '/live-snapshot') {
-    try {
-      const selfPort = (req.socket && req.socket.localPort) || PORT;
-      const base = `http://127.0.0.1:${selfPort}`;
+    // Short-TTL cache hit: dashboard + cashout monitor frequentemente batem quase
+    // simultaneamente; sem cache cada call dispara fan-out completo.
+    const nowTs = Date.now();
+    if (_liveSnapshotCache.result && (nowTs - _liveSnapshotCache.ts) < LIVE_SNAPSHOT_TTL_MS) {
+      sendJson(res, _liveSnapshotCache.result);
+      return;
+    }
+    // Request coalescing: se outra call já está construindo, compartilhamos a promise.
+    if (_liveSnapshotInFlight) {
+      try {
+        const shared = await _liveSnapshotInFlight;
+        sendJson(res, shared);
+      } catch (e) {
+        sendJson(res, { error: e.message, stack: e.stack }, 500);
+      }
+      return;
+    }
+
+    const selfPort = (req.socket && req.socket.localPort) || PORT;
+    const base = `http://127.0.0.1:${selfPort}`;
+
+    _liveSnapshotInFlight = (async () => {
       const sources = [
         { sport: 'lol',      path: '/lol-matches' },
         { sport: 'dota',     path: '/dota-matches' },
@@ -5339,9 +5358,17 @@ const server = http.createServer(async (req, res) => {
         out[sport] = rows;
       }
 
-      sendJson(res, { generatedAt: new Date().toISOString(), sports: out });
+      return { generatedAt: new Date().toISOString(), sports: out };
+    })();
+
+    try {
+      const result = await _liveSnapshotInFlight;
+      _liveSnapshotCache = { result, ts: Date.now() };
+      sendJson(res, result);
     } catch (e) {
       sendJson(res, { error: e.message, stack: e.stack }, 500);
+    } finally {
+      _liveSnapshotInFlight = null;
     }
     return;
   }
@@ -5372,9 +5399,30 @@ const server = http.createServer(async (req, res) => {
   // Lista próximos jogos (upcoming) de lol/dota/cs/valorant com odds e horário.
   // Consumido pelo card "Próximos Jogos" do dashboard.
   if (p === '/upcoming-snapshot') {
-    try {
-      const selfPort = (req.socket && req.socket.localPort) || PORT;
-      const base = `http://127.0.0.1:${selfPort}`;
+    const horizonMs = Math.max(1, Math.min(48, parseInt(parsed.query.hours || '24', 10) || 24)) * 60 * 60 * 1000;
+    const now = Date.now();
+    // Cache hit (mesmo horizonMs): /upcoming-snapshot é chamado pelo dashboard
+    // no auto-refresh (60s) + cards específicos — TTL 60s absorve duplicatas.
+    if (_upcomingSnapshotCache.result
+        && _upcomingSnapshotCache.horizonMs === horizonMs
+        && (now - _upcomingSnapshotCache.ts) < UPCOMING_SNAPSHOT_TTL_MS) {
+      sendJson(res, _upcomingSnapshotCache.result);
+      return;
+    }
+    if (_upcomingSnapshotInFlight) {
+      try {
+        const shared = await _upcomingSnapshotInFlight;
+        sendJson(res, shared);
+      } catch (e) {
+        sendJson(res, { error: e.message, stack: e.stack }, 500);
+      }
+      return;
+    }
+
+    const selfPort = (req.socket && req.socket.localPort) || PORT;
+    const base = `http://127.0.0.1:${selfPort}`;
+
+    _upcomingSnapshotInFlight = (async () => {
       const sources = [
         { sport: 'lol',      path: '/lol-matches' },
         { sport: 'dota',     path: '/dota-matches' },
@@ -5384,8 +5432,6 @@ const server = http.createServer(async (req, res) => {
         { sport: 'football', path: '/football-matches' },
         { sport: 'mma',      path: '/mma-matches' },
       ];
-      const horizonMs = Math.max(1, Math.min(48, parseInt(parsed.query.hours || '24', 10) || 24)) * 60 * 60 * 1000;
-      const now = Date.now();
 
       const fetchMatches = async ({ sport, path: apiPath }) => {
         const r = await httpGet(`${base}${apiPath}`).catch(() => null);
@@ -5421,9 +5467,17 @@ const server = http.createServer(async (req, res) => {
         });
         out[sport] = rows;
       }
-      sendJson(res, { generatedAt: new Date().toISOString(), horizonHours: horizonMs / 3600000, sports: out });
+      return { generatedAt: new Date().toISOString(), horizonHours: horizonMs / 3600000, sports: out };
+    })();
+
+    try {
+      const result = await _upcomingSnapshotInFlight;
+      _upcomingSnapshotCache = { result, ts: Date.now(), horizonMs };
+      sendJson(res, result);
     } catch (e) {
       sendJson(res, { error: e.message, stack: e.stack }, 500);
+    } finally {
+      _upcomingSnapshotInFlight = null;
     }
     return;
   }
