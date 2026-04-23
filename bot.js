@@ -1383,13 +1383,36 @@ function send(token, chatId, text, extra) {
   });
 }
 
-function sendDM(token, userId, text, extra) {
-  return tgRequest(token, 'sendMessage', {
+async function sendDM(token, userId, text, extra) {
+  const res = await tgRequest(token, 'sendMessage', {
     chat_id: userId,
     text,
     parse_mode: 'Markdown',
     ...extra
   });
+  if (!res || res.ok !== false) return res;
+  const code = res.error_code;
+  const desc = String(res.description || '');
+  if (code === 403) {
+    throw Object.assign(new Error(`Telegram 403: ${desc}`), { code: 403 });
+  }
+  if (code === 400 && /parse|entities|markdown|reserved|unsupported/i.test(desc)) {
+    log('WARN', 'DM-MARKDOWN', `userId=${userId} desc="${desc.slice(0, 160)}" — retry plaintext`);
+    const plain = String(text).replace(/[*_`[\]]/g, '');
+    const retryExtra = { ...(extra || {}) };
+    delete retryExtra.parse_mode;
+    const res2 = await tgRequest(token, 'sendMessage', {
+      chat_id: userId,
+      text: plain,
+      ...retryExtra,
+    });
+    if (res2 && res2.ok === false) {
+      log('WARN', 'DM-FAIL', `plaintext retry failed userId=${userId} code=${res2.error_code} desc="${String(res2.description || '').slice(0, 160)}"`);
+    }
+    return res2;
+  }
+  log('WARN', 'DM-FAIL', `userId=${userId} code=${code} desc="${desc.slice(0, 160)}"`);
+  return res;
 }
 
 function kb(buttons) {
@@ -1978,8 +2001,11 @@ async function runAutoAnalysis() {
               try { await sendDM(esportsConfig.token, userId, tipMsg, _betBtn || undefined); }
               catch(e) {
                 if (e.message?.includes('403')) {
+                  log('WARN', 'AUTO-TIP', `403 lol userId=${userId} — auto-unsub. desc="${e.message}"`);
                   subscribedUsers.delete(userId);
                   serverPost('/save-user', { userId: String(userId), subscribed: false }, 'esports').catch(() => {});
+                } else {
+                  log('WARN', 'AUTO-TIP', `sendDM falhou lol userId=${userId}: ${e.message}`);
                 }
               }
             }
