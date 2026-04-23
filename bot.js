@@ -16147,13 +16147,17 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
       // Tennis: /sync-tennis-espn-range cobre ATP+WTA em 7 dias (> scoreboard atual);
       // fallback sofascore pega Challenger + WTA125 + ITF que ESPN não cobre.
       try {
-        await serverGet('/sync-tennis-espn-range?days=7', 'tennis').catch(() => {});
-        await serverGet('/sync-tennis-sofascore?days=5', 'tennis').catch(() => {});
+        const keyParamT = process.env.ADMIN_KEY ? `&key=${encodeURIComponent(process.env.ADMIN_KEY)}` : '';
+        await serverGet(`/sync-tennis-espn-range?days=7${keyParamT}`, 'tennis').catch(() => {});
+        await serverGet(`/sync-tennis-sofascore?days=5${keyParamT}`, 'tennis').catch(() => {});
       } catch (_) {}
       try {
-        const r1 = await serverGet('/sync-football-sofascore?days=5', 'football').catch(() => null);
+        // Endpoints /sync-football-* exigem admin auth (ADMIN_KEY query param ou header).
+        // Sem isso, endpoint retorna 401 → pre-sync silenciosamente falhava em todo ciclo.
+        const keyParam = process.env.ADMIN_KEY ? `&key=${encodeURIComponent(process.env.ADMIN_KEY)}` : '';
+        const r1 = await serverGet(`/sync-football-sofascore?days=5${keyParam}`, 'football').catch(() => null);
         if (!r1?.ok || (r1.inserted || 0) === 0) {
-          await serverGet('/sync-football-espn?days=5', 'football').catch(() => {});
+          await serverGet(`/sync-football-espn?days=5${keyParam}`, 'football').catch(() => {});
         }
       } catch (_) {}
 
