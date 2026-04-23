@@ -12233,7 +12233,7 @@ async function pollTennis(runOnce = false) {
                           // Correlation discount aplicado sobre o stake Kelly (se correlacionado com outro tip detectado)
                           let stake = mtp.kellyStakeForMarket(t.pModel, t.odd, 100, 0.10);
                           if (t.correlationDiscount > 0 && typeof stake === 'number') {
-                            stake = +(stake * (1 - t.correlationDiscount)).toFixed(2);
+                            stake = mtp.snapStakeUnits(stake * (1 - t.correlationDiscount));
                           }
                           if (stake > 0) {
                             const dm = mtp.buildMarketTipDM({ match, tip: t, stake, league: match.league, sport: 'tennis', isLive: isLiveTennis });
