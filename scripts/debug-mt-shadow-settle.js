@@ -27,6 +27,7 @@ function arg(name, def) {
 }
 const SPORT = arg('sport', null);
 const ONE_ID = arg('id', null);
+const TEAM_FILTER = arg('team', null); // grep team1 OR team2 LIKE
 
 const DB_PATH = (process.env.DB_PATH || path.resolve(__dirname, '..', 'sportsedge.db'))
   .trim().replace(/^=+/, '');
@@ -192,6 +193,9 @@ function debugOne(t) {
 const HANDLED = ['matchWinner', 'handicap', 'total'];
 const sportFilter = SPORT ? `AND sport = '${SPORT.replace(/'/g, "''")}'` : '';
 const idFilter = ONE_ID ? `AND id = ${parseInt(ONE_ID, 10)}` : '';
+const teamFilter = TEAM_FILTER
+  ? `AND (lower(team1) LIKE lower('%${TEAM_FILTER.replace(/'/g, "''")}%') OR lower(team2) LIKE lower('%${TEAM_FILTER.replace(/'/g, "''")}%'))`
+  : '';
 const sql = `
   SELECT id, sport, team1, team2, league, market, line, side, created_at
   FROM market_tips_shadow
@@ -200,6 +204,7 @@ const sql = `
     AND created_at <= datetime('now', '-2 hours')
     ${sportFilter}
     ${idFilter}
+    ${teamFilter}
   ORDER BY created_at DESC
   LIMIT 30
 `;
