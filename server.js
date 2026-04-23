@@ -12291,6 +12291,12 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
     const game  = parsed.query.game || '';
     const daysRaw = parseInt(parsed.query.days);
     const days = Number.isFinite(daysRaw) ? Math.max(1, Math.min(365, daysRaw)) : 30;
+    // Alinhamento com /overall-summary (dashboard): default filtra market_type=ML
+    // pra que Bankroll Guardian e dashboard mostrem os mesmos números. Tips de mercado
+    // (handicap, totals, etc) impactam guardian antes sem aparecer no dashboard.
+    // Opt-in via ?include_markets=1 pra analises que precisem de tudo.
+    const includeMarkets = parsed.query.include_markets === '1' || parsed.query.include_markets === 'true';
+    const marketFilterSql = includeMarkets ? '' : `AND (market_type IS NULL OR market_type = 'ML')`;
     try {
       // Union pós-split LoL/Dota: sport='lol' cobre esports-legado+lol, idem dota2.
       const { sportSet, effectiveGame } = resolveSportSet(sport, game);
@@ -12305,10 +12311,12 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
           AND result IN ('win','loss')
           AND (archived IS NULL OR archived = 0)
           AND COALESCE(is_shadow, 0) = 0
+          ${marketFilterSql}
           AND id IN (
             SELECT MAX(tdx.id) FROM tips tdx
             WHERE tdx.sport IN ${sportInSql}
               AND (tdx.archived IS NULL OR tdx.archived = 0)
+              ${marketFilterSql.replace(/market_type/g, 'tdx.market_type')}
             GROUP BY COALESCE(NULLIF(TRIM(tdx.match_id), ''), 'id:' || CAST(tdx.id AS TEXT))
           )
         ORDER BY settled_at ASC
