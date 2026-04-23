@@ -1150,6 +1150,12 @@ let _csMatchesResp = { data: null, ts: 0 };
 let _valorantMatchesResp = { data: null, ts: 0 };
 let _tennisMatchesResp = { data: null, ts: 0 };
 let _mmaMatchesResp = { data: null, ts: 0 };
+// Football-matches: itera 14 ligas TheOddsAPI (14 quota units/call). TTL mais
+// longo porque odds de futebol não movem tanto intra-minuto e o endpoint é
+// expensive. Plus in-flight coalescing pra evitar burst inicial quando
+// múltiplos callers chegam antes do cache popular.
+const FOOTBALL_MATCHES_SHORT_TTL_MS = parseInt(process.env.FOOTBALL_MATCHES_SHORT_TTL_MS || '30000', 10);
+let _footballMatchesInFlight = null;
 
 // Backoff em caso de 429
 let esportsBackoffUntil = 0;
@@ -15626,7 +15632,27 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
   }
 
   if (p === '/football-matches') {
-    try {
+    // Short-TTL hit: serve cache quando resposta recente existe. Evita fan-out
+    // em 14 ligas TheOddsAPI pra concurrent callers (pollFootball + refreshOpenTips
+    // + cashout-monitor + live-snapshot).
+    const _nowFb0 = Date.now();
+    if (_footballMatchesCache && (_nowFb0 - _footballMatchesCache.ts) < FOOTBALL_MATCHES_SHORT_TTL_MS) {
+      const cached = _footballMatchesCache.matches.filter(m => new Date(m.time).getTime() > _nowFb0);
+      sendJson(res, cached);
+      return;
+    }
+    // In-flight coalescing: 2ª request espera a 1ª em vez de refazer fan-out.
+    if (_footballMatchesInFlight) {
+      try {
+        const shared = await _footballMatchesInFlight;
+        const fresh = shared.filter(m => new Date(m.time).getTime() > Date.now());
+        sendJson(res, fresh);
+      } catch (e) {
+        sendJson(res, []);
+      }
+      return;
+    }
+    _footballMatchesInFlight = (async () => {
       const now = Date.now();
       const weekAhead = now + 7 * 24 * 60 * 60 * 1000;
 
@@ -15741,11 +15767,20 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
 
       matches.sort((a, b) => new Date(a.time) - new Date(b.time));
       log('INFO', 'AUTO-FOOTBALL', `/football-matches: ${matches.length} partidas (fonte=${oddsSource})`);
-      sendJson(res, matches);
-    } catch(e) {
+      // Atualiza cache mesmo quando fonte não é theodds pra acelerar próximos hits.
+      _footballMatchesCache = { matches: matches.slice(), ts: Date.now() };
+      return matches;
+    })();
+
+    try {
+      const result = await _footballMatchesInFlight;
+      sendJson(res, result);
+    } catch (e) {
       // Em caso de erro total, serve cache se disponível
       const fallback = _footballMatchesCache?.matches?.filter(m => new Date(m.time).getTime() > Date.now()) || [];
       sendJson(res, fallback);
+    } finally {
+      _footballMatchesInFlight = null;
     }
     return;
   }
