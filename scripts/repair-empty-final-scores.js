@@ -48,13 +48,16 @@ const before = {};
 for (const g of GAMES) {
   const r = db.prepare(`
     SELECT
-      COUNT(*) AS total,
-      SUM(CASE WHEN final_score IS NULL OR final_score = '' THEN 1 ELSE 0 END) AS empty,
-      SUM(CASE WHEN winner IS NOT NULL AND winner != '' THEN 1 ELSE 0 END) AS with_winner
+      COALESCE(COUNT(*), 0) AS total,
+      COALESCE(SUM(CASE WHEN final_score IS NULL OR final_score = '' THEN 1 ELSE 0 END), 0) AS empty,
+      COALESCE(SUM(CASE WHEN winner IS NOT NULL AND winner != '' THEN 1 ELSE 0 END), 0) AS with_winner
     FROM match_results WHERE game = ?
   `).get(g);
-  before[g] = r;
-  console.log(`  ${g.padEnd(8)} | total=${r.total.toString().padStart(6)} | empty_score=${r.empty.toString().padStart(5)} | with_winner=${r.with_winner.toString().padStart(6)}`);
+  const total = Number(r?.total || 0);
+  const empty = Number(r?.empty || 0);
+  const withW = Number(r?.with_winner || 0);
+  before[g] = { total, empty, with_winner: withW };
+  console.log(`  ${g.padEnd(8)} | total=${String(total).padStart(6)} | empty_score=${String(empty).padStart(5)} | with_winner=${String(withW).padStart(6)}`);
 }
 
 console.log('');
@@ -106,13 +109,12 @@ console.log(`\n══════ DEPOIS ══════\n`);
 const db2 = new Database(DB_PATH, { readonly: true });
 for (const g of GAMES) {
   const r = db2.prepare(`
-    SELECT
-      COUNT(*) AS total,
-      SUM(CASE WHEN final_score IS NULL OR final_score = '' THEN 1 ELSE 0 END) AS empty
+    SELECT COALESCE(SUM(CASE WHEN final_score IS NULL OR final_score = '' THEN 1 ELSE 0 END), 0) AS empty
     FROM match_results WHERE game = ?
   `).get(g);
-  const delta = before[g].empty - r.empty;
-  console.log(`  ${g.padEnd(8)} | empty: ${before[g].empty} → ${r.empty} (recovered ${delta})`);
+  const after = Number(r?.empty || 0);
+  const delta = before[g].empty - after;
+  console.log(`  ${g.padEnd(8)} | empty: ${before[g].empty} → ${after} (recovered ${delta})`);
 }
 db2.close();
 
