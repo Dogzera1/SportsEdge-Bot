@@ -304,7 +304,15 @@
       "Bash(sed -i \"s/isMarketTipsEnabled\\('lol', t\\\\.market\\)/isMarketTipsEnabled\\('lol', t.market, t.side\\)/g\" bot.js)",
       "Bash(sed -i \"s/isMarketTipsEnabled\\('dota2', t\\\\.market\\)/isMarketTipsEnabled\\('dota2', t.market, t.side\\)/g\" bot.js)",
       "Bash(sed -i \"s/isMarketTipsEnabled\\('cs2', t\\\\.market\\)/isMarketTipsEnabled\\('cs2', t.market, t.side\\)/g\" bot.js)",
-      "Bash(sed -i \"s/isMarketTipsEnabled\\('tennis', t\\\\.market\\)/isMarketTipsEnabled\\('tennis', t.market, t.side\\)/g\" bot.js)"
+      "Bash(sed -i \"s/isMarketTipsEnabled\\('tennis', t\\\\.market\\)/isMarketTipsEnabled\\('tennis', t.market, t.side\\)/g\" bot.js)",
+      "Bash(sed -n '1075,1078p' bot.js)",
+      "Bash(sed -n '1074,1080p' bot.js)",
+      "Bash(grep -c \"sendDM\\(tokenForAlert, adminId, msg\\)\\\\.catch\\(\\(\\) => {}\\)\" bot.js)",
+      "Bash(grep -nE \"sendDM\\\\\\([^\\)]+,\\\\s*adminId,\\\\s*[^\\)]+\\\\\\)\\\\.catch\\\\\\(\\\\\\(\\\\\\)\\\\s*=>\\\\s*\\\\{\\\\}\\\\\\)\" bot.js)",
+      "Bash(grep -cE \"sendDM\\\\\\([^\\)]+,\\\\s*adminId,\\\\s*[^\\)]+\\\\\\)\\\\.catch\\\\\\(\\\\\\(\\\\\\)\\\\s*=>\\\\s*\\\\{\\\\}\\\\\\)\" bot.js)",
+      "Bash(echo \"exit=$?\")",
+      "Bash(git rev-list *)",
+      "Bash(git reset *)"
     ]
   }
 }

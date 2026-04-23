@@ -1307,6 +1307,54 @@ const migrations = [
       try { db.exec("CREATE INDEX IF NOT EXISTS idx_tips_code_sha ON tips(code_sha)"); } catch (_) {}
     },
   },
+  {
+    id: '054_mt_shadow_is_live_and_stake_backfill',
+    up(db) {
+      if (!tableExists(db, 'market_tips_shadow')) return;
+      // is_live flag — caller passa quando match já está live no momento da scan.
+      // Permite separar performance pre-match vs in-play (regimes diferentes).
+      addColumnIfMissing(db, 'market_tips_shadow', 'is_live', 'is_live INTEGER DEFAULT 0');
+      // Backfill stake_units NULL com Kelly fracionário. Histórico tem 100% NULL
+      // em LoL/Dota/CS/Tennis (callers não passavam stakeUnits). ROI atual usa
+      // COALESCE(stake_units, 1) = flat 1u, perdendo visibilidade Kelly-weighted.
+      // Mesma fórmula de _defaultKellyStake (frac 0.10, cap 2u, bankroll 100u).
+      const rows = db.prepare(`
+        SELECT id, p_model, odd FROM market_tips_shadow
+        WHERE stake_units IS NULL AND p_model IS NOT NULL AND odd IS NOT NULL AND odd > 1
+      `).all();
+      const upd = db.prepare('UPDATE market_tips_shadow SET stake_units = ? WHERE id = ?');
+      let updated = 0;
+      for (const r of rows) {
+        const p = Number(r.p_model);
+        const o = Number(r.odd);
+        if (!Number.isFinite(p) || !Number.isFinite(o) || p <= 0 || o <= 1) continue;
+        const b = o - 1;
+        const fullKelly = (p * b - (1 - p)) / b;
+        if (fullKelly <= 0) continue;
+        let units = fullKelly * 0.10 * 100;
+        if (units > 2) units = 2;
+        upd.run(+units.toFixed(2), r.id);
+        updated++;
+      }
+      // Recompute profit_units pra rows já settled (result win/loss) com novo stake.
+      // Sem isso, stake muda mas profit fica fixo no flat 1u original.
+      const settled = db.prepare(`
+        SELECT id, odd, result, stake_units FROM market_tips_shadow
+        WHERE result IN ('win','loss') AND stake_units IS NOT NULL
+      `).all();
+      const updProfit = db.prepare('UPDATE market_tips_shadow SET profit_units = ? WHERE id = ?');
+      let profUpdated = 0;
+      for (const r of settled) {
+        const stake = Number(r.stake_units);
+        const odd = Number(r.odd);
+        if (!Number.isFinite(stake) || !Number.isFinite(odd) || stake <= 0) continue;
+        const newProfit = r.result === 'win' ? +(stake * (odd - 1)).toFixed(2) : -stake;
+        updProfit.run(newProfit, r.id);
+        profUpdated++;
+      }
+      try { console.log(`[migrate 054] backfill stake_units: ${updated} rows, recompute profit: ${profUpdated} rows`); } catch (_) {}
+    },
+  },
 ];
 
 function applyMigrations(db) {

@@ -4432,6 +4432,228 @@ async function runOddsBucketGuardCycle() {
   }
 }
 
+// Resolve min/max odd pra MT scanner. Precedência: env per-sport explícito >
+// gates_runtime_state (auto-guard) > default. Retorna { minOdd, maxOdd } ou
+// undefined em cada lado quando não há gate.
+//
+// Env keys: {SPORT_PREFIX}_MARKET_SCAN_MIN_ODD / _MAX_ODD
+//   lol → LOL_MARKET_SCAN_*
+//   dota2 → DOTA_MARKET_SCAN_*
+//   cs2 → CS_MARKET_SCAN_*
+//   tennis → TENNIS_MARKET_SCAN_*
+function _resolveMtOddBounds(sport, opts = {}) {
+  const envPrefix = sport === 'dota2' ? 'DOTA' : sport === 'cs2' ? 'CS' : String(sport).toUpperCase();
+  const envMin = parseFloat(process.env[`${envPrefix}_MARKET_SCAN_MIN_ODD`]);
+  const envMax = parseFloat(process.env[`${envPrefix}_MARKET_SCAN_MAX_ODD`]);
+  let minOdd = Number.isFinite(envMin) && envMin > 1 ? envMin : null;
+  let maxOdd = Number.isFinite(envMax) && envMax > 1 ? envMax : null;
+  // Env=0 desativa explicitamente o gate (impede DB override). Detectado via NaN
+  // não match, então check string "0".
+  const envMinStr = process.env[`${envPrefix}_MARKET_SCAN_MIN_ODD`];
+  const envMaxStr = process.env[`${envPrefix}_MARKET_SCAN_MAX_ODD`];
+  const minDisabled = envMinStr === '0' || envMinStr === '0.0';
+  const maxDisabled = envMaxStr === '0' || envMaxStr === '0.0';
+  // Consulta DB auto-guard se env não setado (e não desativado).
+  if (minOdd == null && !minDisabled) {
+    try {
+      const grs = require('./lib/gates-runtime-state');
+      const dbVal = grs.getGateValue(sport, grs.GATE_KEYS.MT_SCAN_MIN_ODD);
+      if (dbVal != null && dbVal > 1) minOdd = dbVal;
+    } catch (_) {}
+  }
+  if (maxOdd == null && !maxDisabled) {
+    try {
+      const grs = require('./lib/gates-runtime-state');
+      const dbVal = grs.getGateValue(sport, grs.GATE_KEYS.MT_SCAN_MAX_ODD);
+      if (dbVal != null && dbVal > 1) maxOdd = dbVal;
+    } catch (_) {}
+  }
+  // Fallback default per opts (caller pode forçar default mesmo sem dados auto).
+  if (minOdd == null && Number.isFinite(opts.defaultMinOdd) && opts.defaultMinOdd > 1 && !minDisabled) {
+    minOdd = opts.defaultMinOdd;
+  }
+  if (maxOdd == null && Number.isFinite(opts.defaultMaxOdd) && opts.defaultMaxOdd > 1 && !maxDisabled) {
+    maxOdd = opts.defaultMaxOdd;
+  }
+  return {
+    minOdd: minOdd != null ? minOdd : undefined,
+    maxOdd: maxOdd != null ? maxOdd : undefined,
+  };
+}
+
+// MT shadow per-bucket guard. Análogo ao runOddsBucketGuardCycle mas opera em
+// market_tips_shadow. Detecta leak por (sport, bucket de odd) e seta
+// MT_SCAN_MIN_ODD / MT_SCAN_MAX_ODD per-sport via gates_runtime_state. Scanner
+// callers leem o valor (env > DB auto > default) ao construir scan.
+//
+// Lógica: pra cada sport com n total ≥ MIN_TOTAL, scan buckets sorted por lower
+// bound. Identifica região contígua "saudável" (ROI > -10% OU n insuficiente).
+// min_odd = lower bound da região saudável; max_odd = upper bound.
+// Se ÚNICO bucket sangra mas isolado (não é extremo do range), não setamos —
+// um floor/cap só é útil se o leak é nas bordas.
+//
+// Toggle MT_BUCKET_GUARD_AUTO=false desativa.
+const _MT_BUCKET_DEFS = [
+  { min: 1.00, max: 1.30 },
+  { min: 1.30, max: 1.50 },
+  { min: 1.50, max: 1.80 },
+  { min: 1.80, max: 2.20 },
+  { min: 2.20, max: 3.00 },
+  { min: 3.00, max: 99.0 },
+];
+function _mtBucketOfOdd(odd) {
+  for (const b of _MT_BUCKET_DEFS) {
+    if (odd >= b.min && odd < b.max) return b;
+  }
+  return null;
+}
+async function runMtBucketGuardCycle() {
+  if (/^(0|false|no)$/i.test(String(process.env.MT_BUCKET_GUARD_AUTO || ''))) return;
+  const minN = parseInt(process.env.MT_BUCKET_GUARD_MIN_N || '20', 10);
+  const minTotal = parseInt(process.env.MT_BUCKET_GUARD_MIN_TOTAL || '60', 10);
+  const roiCutoff = parseFloat(process.env.MT_BUCKET_GUARD_ROI_CUTOFF || '-10');
+  const clvCutoff = parseFloat(process.env.MT_BUCKET_GUARD_CLV_CUTOFF || '-2');
+  const daysWin = parseInt(process.env.MT_BUCKET_GUARD_DAYS || '30', 10);
+  try {
+    const grs = require('./lib/gates-runtime-state');
+    // Verifica se a coluna existe (ambiente legado pode não ter rodado migration 054)
+    let hasShadow = false;
+    try {
+      const t = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='market_tips_shadow'").get();
+      hasShadow = !!t;
+    } catch (_) {}
+    if (!hasShadow) return;
+
+    const rows = db.prepare(`
+      SELECT sport, odd, p_model, result, COALESCE(stake_units, 1) AS stake,
+             profit_units, clv_pct
+      FROM market_tips_shadow
+      WHERE created_at >= datetime('now', '-${daysWin} days')
+        AND result IN ('win','loss')
+        AND odd IS NOT NULL AND odd > 1
+    `).all();
+
+    // Aggregate by (sport, bucket)
+    const agg = new Map(); // key sport|min|max → bucket stats
+    const sportTotals = new Map(); // sport → total settled n (pra MIN_TOTAL gate)
+    for (const r of rows) {
+      const odd = Number(r.odd);
+      const b = _mtBucketOfOdd(odd);
+      if (!b) continue;
+      const sport = String(r.sport || '').toLowerCase().trim();
+      if (!sport) continue;
+      const key = `${sport}|${b.min}|${b.max}`;
+      let a = agg.get(key);
+      if (!a) {
+        a = { sport, b, n: 0, wins: 0, staked: 0, profit: 0, clvSum: 0, clvN: 0 };
+        agg.set(key, a);
+      }
+      a.n++;
+      if (r.result === 'win') a.wins++;
+      a.staked += Number(r.stake) || 0;
+      a.profit += Number(r.profit_units) || 0;
+      if (Number.isFinite(r.clv_pct)) {
+        a.clvSum += r.clv_pct;
+        a.clvN++;
+      }
+      sportTotals.set(sport, (sportTotals.get(sport) || 0) + 1);
+    }
+
+    // Pra cada sport com sample suficiente, decide min/max odd.
+    const tokenForAlert = Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
+    const changes = [];
+    for (const [sport, total] of sportTotals) {
+      if (total < minTotal) continue;
+
+      // Junta buckets do sport, sort por lower bound.
+      const sportBuckets = _MT_BUCKET_DEFS.map(def => {
+        const a = agg.get(`${sport}|${def.min}|${def.max}`);
+        const roi = a && a.staked > 0 ? (a.profit / a.staked * 100) : null;
+        const clv = a && a.clvN > 0 ? (a.clvSum / a.clvN) : null;
+        return { def, n: a?.n || 0, roi, clv };
+      });
+
+      // Bucket é "leak" se: n ≥ minN E (ROI ≤ cutoff E (CLV null OU CLV ≤ clvCutoff)).
+      // n insuficiente = inconclusive (nem saudável nem leak).
+      const isLeak = (bk) => bk.n >= minN
+        && bk.roi != null && bk.roi <= roiCutoff
+        && (bk.clv == null || bk.clv <= clvCutoff);
+      const isHealthy = (bk) => bk.n >= minN
+        && bk.roi != null && bk.roi > roiCutoff;
+
+      // Detecta leak nas BORDAS — só seta gate se leak é em bucket extremo
+      // (primeiro low ou último high). Leak no meio sem cobertura nas bordas
+      // não faz sentido cortar via min/max.
+      // Find lowest non-leak bucket → min_odd suggestion = its lower bound
+      let suggestMin = null;
+      for (let i = 0; i < sportBuckets.length; i++) {
+        const bk = sportBuckets[i];
+        if (isLeak(bk)) continue; // pula leak — quero o primeiro saudável/inconclusivo
+        suggestMin = bk.def.min;
+        break;
+      }
+      // Find highest non-leak bucket → max_odd suggestion = its upper bound
+      let suggestMax = null;
+      for (let i = sportBuckets.length - 1; i >= 0; i--) {
+        const bk = sportBuckets[i];
+        if (isLeak(bk)) continue;
+        suggestMax = bk.def.max >= 99 ? null : bk.def.max; // 99 = sem cap
+        break;
+      }
+      // Só aplica MIN_ODD se o bucket abaixo realmente sangra com sample.
+      const lowBucket = sportBuckets[0];
+      const wantsMin = suggestMin && suggestMin > 1.0 && lowBucket.n >= minN
+        && lowBucket.roi != null && lowBucket.roi <= roiCutoff;
+      // MAX_ODD só se bucket acima da fronteira sangra com sample.
+      const highBucket = sportBuckets[sportBuckets.length - 1];
+      const wantsMax = suggestMax && highBucket.n >= minN
+        && highBucket.roi != null && highBucket.roi <= roiCutoff;
+
+      // Aplica via gates-runtime-state. Não sobrescreve manual.
+      const evidence = sportBuckets.map(bk => ({
+        bucket: `${bk.def.min}-${bk.def.max}`,
+        n: bk.n,
+        roi: bk.roi != null ? +bk.roi.toFixed(1) : null,
+        clv: bk.clv != null ? +bk.clv.toFixed(2) : null,
+      }));
+
+      const applyMt = (gateKey, newVal, label) => {
+        if (newVal == null) {
+          // Remove auto se não há mais leak.
+          const meta = grs.getGateMeta(sport, gateKey);
+          if (meta && meta.source === 'auto') {
+            grs.removeAuto(db, sport, gateKey);
+            changes.push(`✅ ${sport} ${label} — restaurado (leak desapareceu)`);
+            log('INFO', 'MT-BUCKET-GUARD', `${sport}/${gateKey}: removido (no leak)`);
+          }
+          return;
+        }
+        const cur = grs.getGateValue(sport, gateKey);
+        const meta = grs.getGateMeta(sport, gateKey);
+        if (meta && meta.source === 'manual') return; // respeita manual
+        if (cur != null && Math.abs(cur - newVal) < 0.001) return; // no change
+        grs.setAuto(db, sport, gateKey, newVal, {
+          reason: `auto from MT shadow ${daysWin}d`,
+          evidence,
+        });
+        changes.push(`🛡️ ${sport} ${label}=${newVal.toFixed(2)} (was ${cur != null ? cur.toFixed(2) : 'unset'})`);
+        log('INFO', 'MT-BUCKET-GUARD', `${sport}/${gateKey}: ${cur ?? 'unset'} → ${newVal}`);
+      };
+
+      applyMt(grs.GATE_KEYS.MT_SCAN_MIN_ODD, wantsMin ? suggestMin : null, 'MIN_ODD');
+      applyMt(grs.GATE_KEYS.MT_SCAN_MAX_ODD, wantsMax ? suggestMax : null, 'MAX_ODD');
+    }
+
+    if (changes.length && tokenForAlert && ADMIN_IDS.size) {
+      const msg = `🛡️ *MT BUCKET GUARD — ${daysWin}d*\n\n${changes.join('\n')}\n\n_Cutoff: ROI ≤ ${roiCutoff}% + CLV ≤ ${clvCutoff}% com n≥${minN}/bucket. Sport precisa ≥${minTotal} settled total._`;
+      for (const adminId of ADMIN_IDS) sendDM(tokenForAlert, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
+    }
+    log('INFO', 'MT-BUCKET-GUARD', `Ciclo OK — sports=${sportTotals.size} | mudanças=${changes.length}`);
+  } catch (e) {
+    log('WARN', 'MT-BUCKET-GUARD', `falhou: ${e.message}`);
+  }
+}
+
 // Auto-tune dos gates pre-match EV bonus + max stake cap. Mesma filosofia
 // dos outros guards (league, bucket): cron 12h, persiste DB, DM admin em
 // changes. Toggle ODDS_GATES_AUTOTUNE=false desativa.
@@ -5585,6 +5807,10 @@ async function autoAnalyzeMatch(token, match) {
               const { scanMarkets } = require('./lib/odds-markets-scanner');
               const lolMarketsLib = require('./lib/lol-markets');
               const minEv = parseFloat(process.env.LOL_MARKET_SCAN_MIN_EV ?? '4');
+              // Odd cap LoL: shadow mostrou leak severo em >2.0; resolveMtOdd
+              // prefere env > DB auto > default. Auto-guard cron (12h) atualiza
+              // o DB conforme regime atual.
+              const { minOdd: minOddLol, maxOdd: maxOddLol } = _resolveMtOddBounds('lol', { defaultMaxOdd: 2.00 });
               const found = scanMarkets({
                 markets,
                 pMap: lolModel.mapP1,
@@ -5592,6 +5818,8 @@ async function autoAnalyzeMatch(token, match) {
                 pricingLib: lolMarketsLib,
                 minEv,
                 momentum: 0.03, // LoL momentum calibrado (project_lol_series_model)
+                minOdd: minOddLol,
+                maxOdd: maxOddLol,
               });
               if (found.length) {
                 log('INFO', 'LOL-MARKETS',
@@ -5599,7 +5827,7 @@ async function autoAnalyzeMatch(token, match) {
                 // Shadow log — acumula tips detectadas pra backtest retrospectivo.
                 try {
                   const { logShadowTip } = require('./lib/market-tips-shadow');
-                  for (const t of found) logShadowTip(db, { sport: 'lol', match, bestOf: lolModel.bestOf || 3, tip: t });
+                  for (const t of found) logShadowTip(db, { sport: 'lol', match, bestOf: lolModel.bestOf || 3, tip: t, isLive: isLiveLoL });
                 } catch (_) {}
                 for (const t of found.slice(0, 5)) {
                   log('INFO', 'LOL-MARKETS',
@@ -5631,7 +5859,7 @@ async function autoAnalyzeMatch(token, match) {
                         const stake = mtp.kellyStakeForMarket(t.pModel, t.odd, 100, 0.10);
                         if (stake > 0) {
                           const dm = mtp.buildMarketTipDM({
-                            match, tip: t, stake, league: match.league, sport: 'lol',
+                            match, tip: t, stake, league: match.league, sport: 'lol', isLive: isLiveLoL,
                           });
                           const tokenForMT = Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
                           if (tokenForMT) {
@@ -10250,11 +10478,16 @@ async function _pollDotaInner(runOnce = false) {
           if (markets && ((markets.handicaps?.length || 0) + (markets.totals?.length || 0)) > 0) {
             const { scanMarkets } = require('./lib/odds-markets-scanner');
             const minEv = parseFloat(process.env.DOTA_MARKET_SCAN_MIN_EV ?? '4');
+            // Auto-guard preenche min/max odd quando shadow ROI per-bucket
+            // identificar leak. Sem default — Dota ainda sem sample suficiente.
+            const { minOdd: minOddDota, maxOdd: maxOddDota } = _resolveMtOddBounds('dota2');
             const found = scanMarkets({
               markets, pMap: pMapDota, bestOf: dotaBo,
               pricingLib: require('./lib/lol-markets'),
               minEv,
               momentum: 0.04, // Dota2 momentum retrained (project_dota2_momentum_features)
+              minOdd: minOddDota,
+              maxOdd: maxOddDota,
             });
             // Extras: total kills / duration per-map (período 1 = mapa 1). Shadow-only.
             try {
@@ -10268,7 +10501,7 @@ async function _pollDotaInner(runOnce = false) {
                   log('INFO', 'DOTA-EXTRAS', `${match.team1} vs ${match.team2} map1: ${extras.length} extra(s) (kills=${killTips.length} dur=${durTips.length})`);
                   try {
                     const { logShadowTip } = require('./lib/market-tips-shadow');
-                    for (const t of extras) logShadowTip(db, { sport: 'dota2', match, bestOf: dotaBo, tip: t, meta: { mapNumber: t.mapNumber } });
+                    for (const t of extras) logShadowTip(db, { sport: 'dota2', match, bestOf: dotaBo, tip: t, meta: { mapNumber: t.mapNumber }, isLive });
                   } catch (_) {}
                   for (const t of extras.slice(0, 3)) {
                     log('INFO', 'DOTA-EXTRAS', `  • ${t.label} @ ${t.odd.toFixed(2)} | pModel=${(t.pModel*100).toFixed(1)}% EV=${t.ev.toFixed(1)}%`);
@@ -10282,7 +10515,7 @@ async function _pollDotaInner(runOnce = false) {
                 `${match.team1} vs ${match.team2} [Bo${dotaBo}]: ${found.length} mercado(s) EV ≥${minEv}% (pMap=${(pMapDota*100).toFixed(1)}%)`);
               try {
                 const { logShadowTip } = require('./lib/market-tips-shadow');
-                for (const t of found) logShadowTip(db, { sport: 'dota2', match, bestOf: dotaBo, tip: t });
+                for (const t of found) logShadowTip(db, { sport: 'dota2', match, bestOf: dotaBo, tip: t, isLive });
               } catch (_) {}
               for (const t of found.slice(0, 5)) {
                 log('INFO', 'DOTA-MARKETS',
@@ -10310,7 +10543,7 @@ async function _pollDotaInner(runOnce = false) {
                       marketTipSent.set(dedupKey, Date.now());
                       const stake = mtp.kellyStakeForMarket(t.pModel, t.odd, 100, 0.10);
                       if (stake > 0) {
-                        const dm = mtp.buildMarketTipDM({ match, tip: t, stake, league: match.league, sport: 'dota2' });
+                        const dm = mtp.buildMarketTipDM({ match, tip: t, stake, league: match.league, sport: 'dota2', isLive });
                         const tokenForMT = Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
                         if (tokenForMT) {
                           const r = await sendAdminDMs(tokenForMT, dm, undefined, 'dota-market-tip');
@@ -11925,6 +12158,8 @@ async function pollTennis(runOnce = false) {
                 const minEv = parseFloat(process.env.TENNIS_MARKET_SCAN_MIN_EV ?? '4');
                 const maxEv = parseFloat(process.env.TENNIS_MARKET_SCAN_MAX_EV ?? '40');
                 const tnBestOfForScan = /grand slam|\[g\]|wimbledon|us open|roland|australian open/i.test(match.league || '') ? 5 : 3;
+                // Auto-guard wired: env > DB auto > default 1.50 (shadow leak <1.5).
+                const { minOdd: minOddTn, maxOdd: maxOddTn } = _resolveMtOddBounds('tennis', { defaultMinOdd: 1.50 });
                 let found = scanTennisMarkets({
                   markov: tennisModelResult._markovMarkets,
                   aces: tennisModelResult._markovAces,
@@ -11932,6 +12167,8 @@ async function pollTennis(runOnce = false) {
                   minEv,
                   maxEv,
                   bestOf: tnBestOfForScan,
+                  minOdd: minOddTn,
+                  maxOdd: maxOddTn,
                 });
                 // Correlation §12c: quando ≥2 market tips fire no mesmo match,
                 // aplica desconto de stake proporcional à correlação max com outra tip.
@@ -11966,7 +12203,7 @@ async function pollTennis(runOnce = false) {
                   const tnBestOf = /grand slam|\[g\]|wimbledon|us open|roland|australian open/i.test(match.league || '') ? 5 : 3;
                   try {
                     const { logShadowTip } = require('./lib/market-tips-shadow');
-                    for (const t of found) logShadowTip(db, { sport: 'tennis', match, bestOf: tnBestOf, tip: t });
+                    for (const t of found) logShadowTip(db, { sport: 'tennis', match, bestOf: tnBestOf, tip: t, isLive: isLiveTennis });
                   } catch (_) {}
                   for (const t of found.slice(0, 5)) {
                     const discTag = t.correlationDiscount > 0 ? ` corr-disc=${(t.correlationDiscount*100).toFixed(0)}%` : '';
@@ -11999,7 +12236,7 @@ async function pollTennis(runOnce = false) {
                             stake = +(stake * (1 - t.correlationDiscount)).toFixed(2);
                           }
                           if (stake > 0) {
-                            const dm = mtp.buildMarketTipDM({ match, tip: t, stake, league: match.league, sport: 'tennis' });
+                            const dm = mtp.buildMarketTipDM({ match, tip: t, stake, league: match.league, sport: 'tennis', isLive: isLiveTennis });
                             const tnToken = SPORTS['tennis']?.token || Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
                             if (tnToken) {
                               const r = await sendAdminDMs(tnToken, dm, undefined, 'tennis-market-tip');
@@ -13274,6 +13511,7 @@ Máximo 200 palavras.`;
               tip: tipForMt,
               stakeUnits: parseFloat(tipStakeAdjFb) || null,
               meta: { source: 'pollFootball', tipReason: fbTipReason, conf: tipConf },
+              isLive: isFbLive,
             });
             analyzedFootball.set(key, { ts: now, tipSent: true });
             log('INFO', 'AUTO-FOOTBALL', `[SHADOW] ${tipMarket} ${tipTeam} @ ${tipOdd} | EV:${tipEV}% | ${tipConf}${written ? '' : ' (dedup)'}`);
@@ -13297,7 +13535,7 @@ Máximo 200 palavras.`;
                   if (!dbFresh) {
                     const stakeFb = mtp.kellyStakeForMarket(fbModelPPick, parseFloat(tipOdd), 100, 0.10);
                     if (stakeFb > 0) {
-                      const dmFb = mtp.buildMarketTipDM({ match: matchForMt, tip: tipForMt, stake: stakeFb, league: matchForMt.league, sport: 'football' });
+                      const dmFb = mtp.buildMarketTipDM({ match: matchForMt, tip: tipForMt, stake: stakeFb, league: matchForMt.league, sport: 'football', isLive: isFbLive });
                       const fbToken = SPORTS['football']?.token || Object.values(SPORTS).find(S => S?.enabled && S?.token)?.token;
                       if (fbToken) {
                         const r = await sendAdminDMs(fbToken, dmFb, undefined, 'football-market-tip');
@@ -13827,18 +14065,21 @@ async function pollCs(runOnce = false) {
             if (markets && ((markets.handicaps?.length || 0) + (markets.totals?.length || 0)) > 0) {
               const { scanMarkets } = require('./lib/odds-markets-scanner');
               const minEv = parseFloat(process.env.CS_MARKET_SCAN_MIN_EV ?? '4');
+              const { minOdd: minOddCs, maxOdd: maxOddCs } = _resolveMtOddBounds('cs2');
               const found = scanMarkets({
                 markets, pMap: pMapCs, bestOf: csBestOf,
                 pricingLib: require('./lib/lol-markets'),
                 minEv,
                 momentum: 0.04, // CS2 momentum (project_esports_momentum_wave)
+                minOdd: minOddCs,
+                maxOdd: maxOddCs,
               });
               if (found.length) {
                 log('INFO', 'CS-MARKETS',
                   `${match.team1} vs ${match.team2} [Bo${csBestOf}]: ${found.length} mercado(s) EV ≥${minEv}% (pMap=${(pMapCs*100).toFixed(1)}%)`);
                 try {
                   const { logShadowTip } = require('./lib/market-tips-shadow');
-                  for (const t of found) logShadowTip(db, { sport: 'cs2', match, bestOf: csBestOf, tip: t });
+                  for (const t of found) logShadowTip(db, { sport: 'cs2', match, bestOf: csBestOf, tip: t, isLive: isLiveCs });
                 } catch (_) {}
                 for (const t of found.slice(0, 5)) {
                   log('INFO', 'CS-MARKETS',
@@ -13866,7 +14107,7 @@ async function pollCs(runOnce = false) {
                         marketTipSent.set(dedupKey, Date.now());
                         const stake = mtp.kellyStakeForMarket(t.pModel, t.odd, 100, 0.10);
                         if (stake > 0) {
-                          const dm = mtp.buildMarketTipDM({ match, tip: t, stake, league: match.league, sport: 'cs2' });
+                          const dm = mtp.buildMarketTipDM({ match, tip: t, stake, league: match.league, sport: 'cs2', isLive: isLiveCs });
                           const tokenForMT = Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
                           if (tokenForMT) {
                             const r = await sendAdminDMs(tokenForMT, dm, undefined, 'cs-market-tip');
@@ -15631,6 +15872,11 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
 
   setInterval(() => runOddsBucketGuardCycle().catch(e => log('ERROR', 'BUCKET-GUARD', e.message)), 12 * 60 * 60 * 1000);
   setTimeout(() => runOddsBucketGuardCycle().catch(() => {}), 50 * 60 * 1000);
+
+  // MT shadow per-bucket guard — mesma cadência (12h) que regular tip bucket guard.
+  // Boot offset distinto pra evitar contenção de DM/log.
+  setInterval(() => runMtBucketGuardCycle().catch(e => log('ERROR', 'MT-BUCKET-GUARD', e.message)), 12 * 60 * 60 * 1000);
+  setTimeout(() => runMtBucketGuardCycle().catch(() => {}), 65 * 60 * 1000);
 
   setInterval(() => runGatesAutoTuneCycle().catch(e => log('ERROR', 'GATES-AUTOTUNE', e.message)), 12 * 60 * 60 * 1000);
   setTimeout(() => runGatesAutoTuneCycle().catch(() => {}), 55 * 60 * 1000);
