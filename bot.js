@@ -3035,6 +3035,7 @@ async function runAutoHealerCycle() {
       darts: runAutoDarts,
       snooker: runAutoSnooker,
       tt: pollTableTennis,
+      football: pollFootball,
     },
     runningFlags: { dota: typeof _pollDotaRunning !== 'undefined' ? _pollDotaRunning : false },
     checkAutoShadow,
@@ -3051,7 +3052,30 @@ async function runAutoHealerCycle() {
     return;
   }
 
-  log('INFO', 'AUTO-HEALER', `Ciclo: ${sentinel.anomalies.length} anomalia(s) | ${healer.applied.length} fix(es) aplicado(s) | ${healer.skipped.length} skip(s) | ${healer.errors.length} erro(s)`);
+  // Breakdown dos skips — evita log enganoso ("5 skips" sem distinguir unfixable
+  // vs bug de fix). Categorias:
+  //   non_actionable  — anomaly.actionable=false (design: sem auto-fix possível,
+  //                     ex: endpoint_slow, tip_rate_zero, settlement_stale)
+  //   self_resolved   — precondition "situação já mudou" (ex: mutex liberou antes)
+  //   no_fix          — fix não registrado (gap: anomaly tem id sem FIXES[id])
+  //   precondition    — precondition falhou por motivo não self-resolve
+  const skipBreakdown = { non_actionable: 0, self_resolved: 0, no_fix: 0, precondition: 0 };
+  const noFixIds = [];
+  for (const s of healer.skipped) {
+    const r = s.reason || '';
+    if (/não actionable/.test(r)) skipBreakdown.non_actionable++;
+    else if (/fix não registrado/.test(r)) { skipBreakdown.no_fix++; noFixIds.push(s.id); }
+    else if (/precondition falhou/.test(r)) {
+      if (/não está locked|válido ou inativo|já rodando|não exposto/.test(r)) skipBreakdown.self_resolved++;
+      else skipBreakdown.precondition++;
+    } else skipBreakdown.precondition++;
+  }
+  const skipTag = healer.skipped.length > 0
+    ? ` (${Object.entries(skipBreakdown).filter(([_, v]) => v > 0).map(([k, v]) => `${k}:${v}`).join(', ')})`
+    : '';
+  log('INFO', 'AUTO-HEALER', `Ciclo: ${sentinel.anomalies.length} anomalia(s) | ${healer.applied.length} fix(es) aplicado(s) | ${healer.skipped.length} skip(s)${skipTag} | ${healer.errors.length} erro(s)`);
+  // Gap alert: se skip for "no_fix", temos anomaly sem FIXES registrado — bug latente.
+  if (noFixIds.length > 0) log('WARN', 'AUTO-HEALER', `Anomalies sem FIX registrado: ${noFixIds.slice(0, 5).join(', ')}`);
 
   // DM admin: agrupa fixes recentes (cooldown anti-spam por anomaly_id)
   if (!ADMIN_IDS.size) return;
