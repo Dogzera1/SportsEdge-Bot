@@ -102,10 +102,6 @@ async function step(name, fn) {
   const unsettledRes = await req('GET', `/unsettled-tips?sport=tennis&days=${args.days}`);
   const tips = Array.isArray(unsettledRes.body) ? unsettledRes.body : [];
   console.log(`\n[unsettled] ${tips.length} tip(s) tennis pending (janela ${args.days}d)`);
-  if (!tips.length) {
-    console.log('Nada pra liquidar. Saindo.');
-    return;
-  }
 
   // 5-6. Settle loop
   let settled = 0, pending = 0, failed = 0;
