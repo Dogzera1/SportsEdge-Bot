@@ -16176,6 +16176,25 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   setInterval(runShadowSettle, 30 * 60 * 1000);
   setTimeout(runShadowSettle, 10 * 60 * 1000); // 10min pós-boot (não espera 30min pra primeira run)
 
+  // CLV close-capture agressivo — cobre BOTH market_tips_shadow + regular tips.
+  // Audit scripts/clv-coverage mostrou gaps graves (cs/football 0% regular; 20-50%
+  // market tips). Cron dedicado 2min garante captura repetida até match começar
+  // (última odd capturada vira close definitivo).
+  const runClvCaptureCycle = async () => {
+    if (/^(0|false|no)$/i.test(String(process.env.CLV_CAPTURE_ENABLED ?? 'true'))) return;
+    try {
+      // 1. Market tips shadow via novo módulo
+      const { captureMarketTipsClv } = require('./lib/clv-capture');
+      const mt = await captureMarketTipsClv(db, serverGet);
+      if (mt.updated > 0) log('INFO', 'CLV-CAPTURE', `market-tips: checked=${mt.checked} updated=${mt.updated}`);
+      // 2. Regular tips via checkCLV legacy (já cobre cs/val/lol/dota2 pós fix 8dcc948)
+      await checkCLV(sharedCaches).catch(e => log('WARN', 'CLV-CAPTURE', `regular: ${e.message}`));
+    } catch (e) { log('WARN', 'CLV-CAPTURE', `cycle erro: ${e.message}`); }
+  };
+  const CLV_CAPTURE_INTERVAL_MS = parseInt(process.env.CLV_CAPTURE_INTERVAL_MS || '120000', 10); // 2min default
+  setInterval(runClvCaptureCycle, CLV_CAPTURE_INTERVAL_MS);
+  setTimeout(runClvCaptureCycle, 3 * 60 * 1000); // primeira run 3min pós-boot
+
   // Esports legacy audit: pós-split (Abr/2026) tips novas devem usar sport='lol'/'dota2'.
   // Se >5% de tips settadas recentes estão com sport='esports', alerta — indica que
   // reclassificação não tá rodando ou tem path de código retrógrado.
