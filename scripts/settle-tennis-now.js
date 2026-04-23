@@ -14,11 +14,16 @@
  * Uso:
  *   node scripts/settle-tennis-now.js
  *   node scripts/settle-tennis-now.js --days=180 --espn-range=14 --sofa=7
+ *   node scripts/settle-tennis-now.js --no-mt        # pula market tips shadow
+ *
+ * Bônus: também dispara /admin/settle-market-tips-shadow (cross-sport, idempotente).
+ * Settla market tips de Tennis + LoL + Dota + CS + Football de uma vez, porque
+ * settleShadowTips() não filtra por sport. Use --no-mt pra pular.
  *
  * Env:
  *   SERVER      (default 127.0.0.1)
  *   SERVER_PORT (default 3000)
- *   ADMIN_KEY   (necessário pra sync-tennis-espn-range + sync-tennis-sofascore)
+ *   ADMIN_KEY   (necessário pra sync-tennis-espn-range + sync-tennis-sofascore + settle-market-tips-shadow)
  */
 require('dotenv').config({ override: true });
 const http = require('http');
@@ -28,13 +33,14 @@ const PORT = parseInt(process.env.SERVER_PORT || process.env.PORT || '3000', 10)
 const ADMIN_KEY = process.env.ADMIN_KEY || '';
 
 function parseArgs() {
-  const out = { days: 120, espnRange: 7, sofa: 3, dry: false };
+  const out = { days: 120, espnRange: 7, sofa: 3, dry: false, mt: true };
   for (const a of process.argv.slice(2)) {
     const [k, v] = a.replace(/^--/, '').split('=');
     if (k === 'days') out.days = parseInt(v, 10) || out.days;
     else if (k === 'espn-range') out.espnRange = parseInt(v, 10) || out.espnRange;
     else if (k === 'sofa') out.sofa = parseInt(v, 10) || out.sofa;
     else if (k === 'dry') out.dry = true;
+    else if (k === 'no-mt') out.mt = false;
   }
   return out;
 }
@@ -125,7 +131,25 @@ async function step(name, fn) {
     }
   }
 
-  console.log(`\n[resumo] settled=${settled} pending=${pending} failed=${failed} total=${tips.length}`);
+  console.log(`\n[resumo-tips-regulares] settled=${settled} pending=${pending} failed=${failed} total=${tips.length}`);
+
+  // 7. Market tips shadow — settla cross-sport (Tennis+LoL+Dota+CS+Football).
+  // Endpoint é idempotente (mesma lógica do cron 30min). Requer ADMIN_KEY.
+  if (args.mt && !args.dry) {
+    if (!ADMIN_KEY) {
+      console.log('\n[mt-shadow] skipped — ADMIN_KEY não setada');
+    } else {
+      const r = await req('GET', `/admin/settle-market-tips-shadow?key=${encodeURIComponent(ADMIN_KEY)}`);
+      if (r.status === 200 && r.body?.ok) {
+        console.log(`\n[mt-shadow] settled=${r.body.settled || 0} skipped=${r.body.skipped || 0} (cross-sport)`);
+      } else {
+        console.log(`\n[mt-shadow] fail: ${r.body?.error || r.status}`);
+      }
+    }
+  } else if (args.mt && args.dry) {
+    console.log('\n[mt-shadow] skipped — dry run');
+  }
+
   process.exit(0);
 })().catch(e => {
   console.error('FATAL:', e);
