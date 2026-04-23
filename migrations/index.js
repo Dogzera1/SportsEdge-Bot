@@ -1355,6 +1355,29 @@ const migrations = [
       try { console.log(`[migrate 054] backfill stake_units: ${updated} rows, recompute profit: ${profUpdated} rows`); } catch (_) {}
     },
   },
+  {
+    id: '055_mt_shadow_model_version',
+    up(db) {
+      if (!tableExists(db, 'market_tips_shadow')) return;
+      // model_version — identifica a geração do modelo/scanner que emitiu a tip.
+      // Permite análise retrospectiva sem ambiguidade entre versões (ex: bug de
+      // games vs sets handicap pré-fix vs pós-fix).
+      //
+      // Convenção: 'vN_short_description', ex:
+      //   v1_pre_virtual_matchup_fix  — tips emitidas antes de 2026-04-23 (bug handicapSets)
+      //   v2_virtual_matchup_fix      — tips pós fix heurística Pinnacle virtuais
+      addColumnIfMissing(db, 'market_tips_shadow', 'model_version', 'model_version TEXT DEFAULT NULL');
+
+      // Backfill tips históricas com 'v1_pre_virtual_matchup_fix' — tudo que
+      // foi emitido antes da coluna existir é pré-fix.
+      const updated = db.prepare(`
+        UPDATE market_tips_shadow
+        SET model_version = 'v1_pre_virtual_matchup_fix'
+        WHERE model_version IS NULL
+      `).run();
+      try { console.log(`[migrate 055] backfill model_version: ${updated.changes} rows marked v1_pre_virtual_matchup_fix`); } catch (_) {}
+    },
+  },
 ];
 
 function applyMigrations(db) {

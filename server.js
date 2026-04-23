@@ -6653,16 +6653,32 @@ const server = http.createServer(async (req, res) => {
       else if (status === 'settled') conds.push(`result IN ('win','loss')`);
       // Por padrão esconde voidadas (dedup/bogus); passa includeVoid=1 pra incluir
       if (!includeVoid) conds.push(`(result IS NULL OR result != 'void')`);
-      const rows = db.prepare(`
-        SELECT id, sport, team1, team2, league, best_of, market, line, side, label,
-               p_model, p_implied, odd, ev_pct, stake_units,
-               created_at, settled_at, result, profit_units,
-               close_odd, clv_pct, admin_dm_sent_at
-        FROM market_tips_shadow
-        WHERE ${conds.join(' AND ')}
-        ORDER BY created_at DESC
-        LIMIT ?
-      `).all(...params, limit);
+      // Try/catch: tenta incluir model_version (migration 055). Se DB ainda não
+      // aplicou, cai pra query legacy sem a coluna.
+      let rows;
+      try {
+        rows = db.prepare(`
+          SELECT id, sport, team1, team2, league, best_of, market, line, side, label,
+                 p_model, p_implied, odd, ev_pct, stake_units,
+                 created_at, settled_at, result, profit_units,
+                 close_odd, clv_pct, admin_dm_sent_at, model_version
+          FROM market_tips_shadow
+          WHERE ${conds.join(' AND ')}
+          ORDER BY created_at DESC
+          LIMIT ?
+        `).all(...params, limit);
+      } catch (_) {
+        rows = db.prepare(`
+          SELECT id, sport, team1, team2, league, best_of, market, line, side, label,
+                 p_model, p_implied, odd, ev_pct, stake_units,
+                 created_at, settled_at, result, profit_units,
+                 close_odd, clv_pct, admin_dm_sent_at
+          FROM market_tips_shadow
+          WHERE ${conds.join(' AND ')}
+          ORDER BY created_at DESC
+          LIMIT ?
+        `).all(...params, limit);
+      }
       // Stats
       const settled = rows.filter(r => r.result === 'win' || r.result === 'loss');
       const wins = settled.filter(r => r.result === 'win').length;
