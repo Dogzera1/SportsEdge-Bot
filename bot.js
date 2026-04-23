@@ -16601,13 +16601,15 @@ async function refreshOpenTips(caches = {}) {
             currentOdds = norm(pick) === norm(p1) ? parseFloat(o.t1) : parseFloat(o.t2);
           }
         } else if (sport === 'mma') {
-          const fights = caches.mma || await serverGet('/mma-matches').catch(() => []);
+          if (!caches.mma) caches.mma = await serverGet('/mma-matches').catch(() => []);
+          const fights = caches.mma;
           if (Array.isArray(fights) && fights.length) {
             const m = findTheOddsH2hMatch(fights, tip);
             if (m?.odds) currentOdds = h2hDecimalOddsForPick(m, pick);
           }
         } else if (sport === 'football') {
-          const matches = caches.football || await serverGet('/football-matches').catch(() => []);
+          if (!caches.football) caches.football = await serverGet('/football-matches').catch(() => []);
+          const matches = caches.football;
           if (matches.length) {
             const n1 = norm(p1), n2 = norm(p2);
             const m = matches.find(x => {
@@ -16624,7 +16626,8 @@ async function refreshOpenTips(caches = {}) {
             }
           }
         } else if (sport === 'tennis') {
-          const matches = caches.tennis || await serverGet('/tennis-matches').catch(() => []);
+          if (!caches.tennis) caches.tennis = await serverGet('/tennis-matches').catch(() => []);
+          const matches = caches.tennis;
           if (matches.length) {
             const m = findTheOddsH2hMatch(matches, tip);
             if (m?.odds) currentOdds = h2hDecimalOddsForPick(m, pick);
@@ -16732,6 +16735,13 @@ async function reanalyzeAndVoidFailing(opts = {}) {
     if (!enabledSports.includes('dota2')) enabledSports.push('dota2');
   }
 
+  // Cache por-sport compartilhado entre iterações de tips.
+  // Antes: cada tip fetchava /football-matches (ou /tennis-matches etc.) fresh,
+  // causando fan-out de N tips × N API calls (14 ligas × quota/liga em football).
+  // Uma única tip pendente já dispara 10-14 units de quota Odds API; 5 tips = 50+ units.
+  // Reset per-sport — odds atuais são diferentes entre sports.
+  const reanalCaches = {};
+
   for (const sport of enabledSports) {
     if (opts.sport && opts.sport !== 'all' && opts.sport !== sport) continue;
     const unsettled = await serverGet('/unsettled-tips?days=30', sport).catch(() => []);
@@ -16762,31 +16772,36 @@ async function reanalyzeAndVoidFailing(opts = {}) {
           const o = await serverGet(`/odds?team1=${encodeURIComponent(p1)}&team2=${encodeURIComponent(p2)}&game=dota2`);
           if (o && parseFloat(o.t1) > 1) currentOdds = norm(pick) === norm(p1) ? parseFloat(o.t1) : parseFloat(o.t2);
         } else if (sport === 'mma') {
-          const fights = await serverGet('/mma-matches');
+          if (!reanalCaches.mma) reanalCaches.mma = await serverGet('/mma-matches').catch(() => []);
+          const fights = reanalCaches.mma;
           if (Array.isArray(fights)) {
             const m = findTheOddsH2hMatch(fights, tip);
             if (m?.odds) currentOdds = h2hDecimalOddsForPick(m, pick);
           }
         } else if (sport === 'tennis') {
-          const matches = await serverGet('/tennis-matches');
+          if (!reanalCaches.tennis) reanalCaches.tennis = await serverGet('/tennis-matches').catch(() => []);
+          const matches = reanalCaches.tennis;
           if (Array.isArray(matches)) {
             const m = findTheOddsH2hMatch(matches, tip);
             if (m?.odds) currentOdds = h2hDecimalOddsForPick(m, pick);
           }
         } else if (sport === 'football') {
-          const matches = await serverGet('/football-matches');
+          if (!reanalCaches.football) reanalCaches.football = await serverGet('/football-matches').catch(() => []);
+          const matches = reanalCaches.football;
           if (Array.isArray(matches)) {
             const m = findTheOddsH2hMatch(matches, tip);
             if (m?.odds) currentOdds = h2hDecimalOddsForPick(m, pick);
           }
         } else if (sport === 'cs') {
-          const matches = await serverGet('/cs-matches');
+          if (!reanalCaches.cs) reanalCaches.cs = await serverGet('/cs-matches').catch(() => []);
+          const matches = reanalCaches.cs;
           if (Array.isArray(matches)) {
             const m = findTheOddsH2hMatch(matches, tip);
             if (m?.odds) currentOdds = h2hDecimalOddsForPick(m, pick);
           }
         } else if (sport === 'valorant') {
-          const matches = await serverGet('/valorant-matches');
+          if (!reanalCaches.valorant) reanalCaches.valorant = await serverGet('/valorant-matches').catch(() => []);
+          const matches = reanalCaches.valorant;
           if (Array.isArray(matches)) {
             const m = findTheOddsH2hMatch(matches, tip);
             if (m?.odds) currentOdds = h2hDecimalOddsForPick(m, pick);
