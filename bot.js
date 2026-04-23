@@ -4094,6 +4094,66 @@ async function runMarketTipsDigest() {
   log('INFO', 'MT-DIGEST', `DM digest 7d=${stats7.length} 30d=${stats30.length}`);
 }
 
+// ── ML Shadow Digest (1x/dia) ──
+// Cobre tips regulares com is_shadow=1 (sport experimental antes de ir live).
+// Complementa runMarketTipsDigest (esse só cobre market_tips_shadow). Mesma
+// hora default (8am) — pode personalizar via SHADOW_DIGEST_HOUR.
+let _lastShadowDigestDay = null;
+async function runMlShadowDigest() {
+  if (/^(0|false|no)$/i.test(String(process.env.SHADOW_DIGEST_ENABLED ?? 'true')) === false &&
+      process.env.SHADOW_DIGEST_ENABLED === 'false') return;
+  if (!ADMIN_IDS.size) return;
+  const hour = parseInt(process.env.SHADOW_DIGEST_HOUR || '8', 10);
+  const now = new Date();
+  if (now.getHours() !== hour) return;
+  const today = now.toISOString().slice(0, 10);
+  if (_lastShadowDigestDay === today) return;
+  _lastShadowDigestDay = today;
+
+  let r7, r30;
+  try {
+    r7 = await serverGet(`/shadow-summary?days=7`);
+    r30 = await serverGet(`/shadow-summary?days=30`);
+  } catch (e) {
+    log('DEBUG', 'SHADOW-DIGEST', `summary err: ${e.message}`);
+    return;
+  }
+  if (!r7?.ok || !r30?.ok) return;
+  // Só envia se há tips ML shadow (não market) — esse digest é específico ML.
+  if (!r30.regular?.length && !r7.regular?.length) return;
+
+  const token = Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
+  if (!token) return;
+
+  const fmt = (v, suf = '') => v == null ? '?' : `${v >= 0 ? '+' : ''}${v}${suf}`;
+  const roiEmoji = (roi) => roi == null ? '⚪' : roi >= 5 ? '✅' : roi <= -5 ? '❌' : '🟡';
+  const fmtSport = (s) => {
+    const hit = s.hit_rate != null ? `${s.hit_rate}%` : '?';
+    const roi = s.roi_pct != null ? fmt(s.roi_pct, '%') : '?';
+    const clv = s.clv_n > 0 ? ` CLV ${fmt(s.avg_clv, '%')}(n${s.clv_n})` : '';
+    return `${roiEmoji(s.roi_pct)} *${s.sport}* n=${s.n} (${s.wins}W/${s.losses}L/${s.pending}P) Hit ${hit} ROI ${roi}${clv}`;
+  };
+
+  let msg = `🕶️ *ML SHADOW DIGEST — ${today}*\n\n`;
+  msg += `*Últimos 7d:*\n`;
+  if (r7.regular?.length) {
+    msg += r7.regular.map(fmtSport).join('\n') + '\n';
+  } else {
+    msg += `_sem tips ML shadow nesta janela_\n`;
+  }
+  msg += `\n*Últimos 30d:*\n`;
+  if (r30.regular?.length) {
+    msg += r30.regular.map(fmtSport).join('\n') + '\n';
+  } else {
+    msg += `_sem tips_\n`;
+  }
+  msg += `\n_Critério graduação: n≥30, CLV+, ROI estável._`;
+  msg += `\n_Cmds: /shadow [sport] · /shadow-summary [days]_`;
+
+  for (const adminId of ADMIN_IDS) await sendDM(token, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
+  log('INFO', 'SHADOW-DIGEST', `DM ML shadow 7d=${r7.regular?.length || 0} 30d=${r30.regular?.length || 0}`);
+}
+
 // ── Backtest Validator (1x/dia) ──
 let _lastBacktestAlert = 0;
 const _backtestMilestonesSeen = new Set();
@@ -8372,7 +8432,32 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
       await send(token, chatId, txt);
     } catch (e) { await send(token, chatId, `❌ ${e.message}`); }
 
-  } else if (cmd === '/shadow-summary' || cmd === '/shadow-report' || cmd === '/shadow-all') {
+  } else if (cmd === '/shadow-today' || cmd === '/shadow-hoje') {
+    if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
+    try {
+      const r = await serverGet(`/shadow-summary?days=1`);
+      if (!r?.ok) { await send(token, chatId, `❌ ${r?.error || 'falha'}`); return; }
+      const fmt = (v, suf = '') => v == null ? '?' : `${v >= 0 ? '+' : ''}${v}${suf}`;
+      const ico = (roi) => roi == null ? '⚪' : roi >= 5 ? '✅' : roi <= -5 ? '❌' : '🟡';
+      let txt = `📅 *SHADOW HOJE (24h)*\n\n`;
+      txt += `🕶️ *ML Regular*\n`;
+      if (!r.regular?.length) txt += `_Nenhuma tip ML shadow nas últimas 24h._\n`;
+      else for (const s of r.regular) {
+        txt += `${ico(s.roi_pct)} ${s.sport} n=${s.n} W${s.wins}/L${s.losses}/P${s.pending} ROI ${fmt(s.roi_pct, '%')}`;
+        if (s.clv_n > 0) txt += ` CLV ${fmt(s.avg_clv, '%')}`;
+        txt += `\n`;
+      }
+      txt += `\n🧪 *Market Tips*\n`;
+      if (!r.market?.length) txt += `_Nenhuma market tip._\n`;
+      else for (const s of r.market) {
+        txt += `${ico(s.roi_pct)} ${s.sport} n=${s.n} W${s.wins}/L${s.losses}/P${s.pending} ROI ${fmt(s.roi_pct, '%')}`;
+        if (s.clv_n > 0) txt += ` CLV ${fmt(s.avg_clv, '%')}`;
+        txt += `\n`;
+      }
+      txt += `\n_/shadow-summary [dias] · /shadow [sport]_`;
+      await send(token, chatId, txt);
+    } catch (e) { await send(token, chatId, `❌ ${e.message}`); }
+  } else if (cmd === '/ml-shadow' || cmd === '/shadow-summary' || cmd === '/shadow-report' || cmd === '/shadow-all') {
     if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
     try {
       const daysArg = Math.max(1, Math.min(365, parseInt(parts[1] || '30', 10) || 30));
@@ -9466,7 +9551,7 @@ async function poll(token, sport) {
                      text.startsWith('/settle') || text.startsWith('/pending') || text.startsWith('/resync') ||
                      text.startsWith('/slugs') || text.startsWith('/lolraw') ||
                      text.startsWith('/health') || text.startsWith('/debug') ||
-                     text.startsWith('/shadow') || text.startsWith('/market-tips') ||
+                     text.startsWith('/shadow') || text.startsWith('/ml-shadow') || text.startsWith('/market-tips') ||
                      text.startsWith('/models') || text.startsWith('/hybrid') ||
                      text.startsWith('/path-guard') || text.startsWith('/paths') || text.startsWith('/val-') ||
                      text.startsWith('/rejections') || text.startsWith('/sync-val-') ||
@@ -16239,6 +16324,11 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   // Digest: checa 1x/hora se é MT_DIGEST_HOUR (default 8am) e envia no primeiro tick daquele dia.
   setInterval(() => runMarketTipsDigest().catch(e => log('ERROR', 'MT-DIGEST', e.message)), 60 * 60 * 1000);
   setTimeout(() => runMarketTipsDigest().catch(() => {}), 5 * 60 * 1000); // 5min pós-boot (caso já seja a hora)
+
+  // ML Shadow Digest — mesmo padrão. Hora separada (SHADOW_DIGEST_HOUR, default 8).
+  // Cobre tips regulares com is_shadow=1 (sport experimental antes de graduate).
+  setInterval(() => runMlShadowDigest().catch(e => log('ERROR', 'SHADOW-DIGEST', e.message)), 60 * 60 * 1000);
+  setTimeout(() => runMlShadowDigest().catch(() => {}), 6 * 60 * 1000); // 6min pós-boot
   // Weekly pipeline digest (2ª feira 9h)
   setInterval(() => runWeeklyPipelineDigest().catch(e => log('ERROR', 'WEEKLY-DIGEST', e.message)), 60 * 60 * 1000);
   setTimeout(() => runWeeklyPipelineDigest().catch(() => {}), 10 * 60 * 1000);
