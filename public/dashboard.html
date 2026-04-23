@@ -2283,11 +2283,15 @@ async function loadShadow() {
   `;
 }
 
-let marketTipsState = { tips: [], page: 0, perPage: 20, sport: null };
+let marketTipsState = { tips: [], page: 0, perPage: 20, sport: null, breakdown: null };
 
 async function loadMarketTipsShadow() {
   const sp = currentSport === '__overall__' ? '' : '&sport=' + encodeURIComponent(currentSport);
-  const data = await apiFetch('/market-tips-recent?days=14&limit=500' + sp);
+  // Fetch em paralelo: lista detalhada + breakdown agregado
+  const [data, breakdown] = await Promise.all([
+    apiFetch('/market-tips-recent?days=14&limit=500' + sp),
+    apiFetch('/market-tips-breakdown?days=30' + sp),
+  ]);
   const el = document.getElementById('marketTipsBody');
   const meta = document.getElementById('marketTipsMeta');
   if (!data || data.error) { el.innerHTML = '<div class="empty-state">Sem market tips</div>'; meta.textContent = '—'; return; }
@@ -2297,7 +2301,66 @@ async function loadMarketTipsShadow() {
   // Reset página ao trocar sport
   if (marketTipsState.sport !== currentSport) { marketTipsState.page = 0; marketTipsState.sport = currentSport; }
   marketTipsState.tips = tips;
+  marketTipsState.breakdown = breakdown?.error ? null : breakdown;
   renderMarketTipsPage();
+}
+
+function renderMarketTipsBreakdown(bd) {
+  if (!bd || !Array.isArray(bd.by_market_side) || !bd.by_market_side.length) return '';
+  const rowsMarketSide = bd.by_market_side.slice(0, 20);
+  const rowsMarket = bd.by_market.slice(0, 10);
+  const fmtKey = (k) => k.split('|').slice(1).join('/');  // remove sport prefix
+  const fmtRoi = (r) => r == null ? '—' : (r >= 0 ? '+' : '') + r + '%';
+  const clsRoi = (r) => r == null ? '' : (r >= 0 ? 'positive' : 'negative');
+  const fmtClv = (c) => c == null ? '—' : (c >= 0 ? '+' : '') + c.toFixed(1) + '%';
+
+  let html = `<div style="margin-bottom:14px">
+    <div class="card-meta" style="margin-bottom:6px"><b>📊 Breakdown por mercado × side (${bd.days}d, ${bd.total_settled} settled)</b></div>
+    <table class="tips" style="margin-bottom:10px">
+      <thead><tr>
+        <th>Mercado / Side</th>
+        <th style="text-align:right">N</th>
+        <th style="text-align:right">Win%</th>
+        <th style="text-align:right">ROI</th>
+        <th style="text-align:right">P&L</th>
+        <th style="text-align:right">CLV</th>
+        <th style="text-align:right">avg EV</th>
+        <th style="text-align:right">avg Odd</th>
+      </tr></thead>
+      <tbody>`;
+  for (const r of rowsMarketSide) {
+    html += `<tr>
+      <td>${fmtKey(r.key)}</td>
+      <td style="text-align:right">${r.n}</td>
+      <td style="text-align:right">${r.winRate != null ? r.winRate + '%' : '—'}</td>
+      <td style="text-align:right" class="${clsRoi(r.roi)}">${fmtRoi(r.roi)}</td>
+      <td style="text-align:right" class="${clsRoi(r.profit)}">${r.profit >= 0 ? '+' : ''}${r.profit.toFixed(1)}u</td>
+      <td style="text-align:right">${fmtClv(r.avgClv)}${r.clvN > 0 ? ` <span class="tip-meta">(${r.clvN})</span>` : ''}</td>
+      <td style="text-align:right">${r.avgEv != null ? (r.avgEv >= 0 ? '+' : '') + r.avgEv.toFixed(1) + '%' : '—'}</td>
+      <td style="text-align:right">${r.avgOdd != null ? r.avgOdd.toFixed(2) : '—'}</td>
+    </tr>`;
+  }
+  html += `</tbody></table>`;
+
+  if (rowsMarket.length > 1) {
+    html += `<details style="margin-top:8px"><summary class="card-meta" style="cursor:pointer">Agregado por mercado (sem split de side)</summary>
+      <table class="tips" style="margin-top:6px">
+        <thead><tr><th>Mercado</th><th style="text-align:right">N</th><th style="text-align:right">Win%</th><th style="text-align:right">ROI</th><th style="text-align:right">P&L</th><th style="text-align:right">CLV</th></tr></thead>
+        <tbody>`;
+    for (const r of rowsMarket) {
+      html += `<tr>
+        <td>${fmtKey(r.key)}</td>
+        <td style="text-align:right">${r.n}</td>
+        <td style="text-align:right">${r.winRate != null ? r.winRate + '%' : '—'}</td>
+        <td style="text-align:right" class="${clsRoi(r.roi)}">${fmtRoi(r.roi)}</td>
+        <td style="text-align:right" class="${clsRoi(r.profit)}">${r.profit >= 0 ? '+' : ''}${r.profit.toFixed(1)}u</td>
+        <td style="text-align:right">${fmtClv(r.avgClv)}</td>
+      </tr>`;
+    }
+    html += `</tbody></table></details>`;
+  }
+  html += `</div>`;
+  return html;
 }
 
 function renderMarketTipsPage() {
@@ -2315,6 +2378,7 @@ function renderMarketTipsPage() {
       🛡️ <b>SHADOW</b> — todas as tips aqui são log-only (não enviam DM).
       Ativar DM admin: env <code>&lt;SPORT&gt;_MARKET_TIPS_ENABLED=true</code>.
     </div>
+    ${renderMarketTipsBreakdown(marketTipsState.breakdown)}
     <table class="tips">
       <thead>
         <tr>

@@ -6689,6 +6689,69 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // GET /market-tips-breakdown?sport=X&days=30&includeLive=0
+  // Agrega tips settled por (sport, market, side) — útil pra ver onde tem edge
+  // ou leak. Também retorna agregados só por market e só por side.
+  if (p === '/market-tips-breakdown') {
+    const sport = parsed.query.sport || null;
+    const days = Math.max(1, Math.min(365, parseInt(parsed.query.days || '30', 10) || 30));
+    const includeLive = parsed.query.includeLive === '1';
+    try {
+      const conds = [`created_at >= datetime('now', '-${days} days')`, `result IN ('win','loss')`];
+      const params = [];
+      if (sport) { conds.push('sport = ?'); params.push(sport); }
+      if (!includeLive) conds.push('(is_live IS NULL OR is_live = 0)');
+      const rows = db.prepare(`
+        SELECT sport, market, side, result, stake_units, profit_units, clv_pct, ev_pct, odd
+        FROM market_tips_shadow
+        WHERE ${conds.join(' AND ')}
+      `).all(...params);
+
+      // Aggregator: group key → { n, wins, staked, profit, clvSum, clvN, evSum, oddSum }
+      const agg = (rows, keyFn) => {
+        const map = new Map();
+        for (const r of rows) {
+          const k = keyFn(r);
+          if (!k) continue;
+          const st = map.get(k) || { n: 0, wins: 0, staked: 0, profit: 0, clvSum: 0, clvN: 0, evSum: 0, oddSum: 0 };
+          st.n++;
+          if (r.result === 'win') st.wins++;
+          const stake = Number(r.stake_units || 1);
+          st.staked += stake;
+          st.profit += Number(r.profit_units || 0);
+          if (r.clv_pct != null && Number.isFinite(r.clv_pct)) { st.clvSum += r.clv_pct; st.clvN++; }
+          st.evSum += Number(r.ev_pct || 0);
+          st.oddSum += Number(r.odd || 0);
+          map.set(k, st);
+        }
+        return [...map.entries()].map(([key, st]) => ({
+          key,
+          n: st.n,
+          wins: st.wins,
+          losses: st.n - st.wins,
+          winRate: st.n ? +(st.wins / st.n * 100).toFixed(1) : null,
+          staked: +st.staked.toFixed(2),
+          profit: +st.profit.toFixed(2),
+          roi: st.staked > 0 ? +(st.profit / st.staked * 100).toFixed(1) : null,
+          avgClv: st.clvN ? +(st.clvSum / st.clvN).toFixed(2) : null,
+          clvN: st.clvN,
+          avgEv: st.n ? +(st.evSum / st.n).toFixed(2) : null,
+          avgOdd: st.n ? +(st.oddSum / st.n).toFixed(2) : null,
+        })).sort((a, b) => b.staked - a.staked);
+      };
+
+      sendJson(res, {
+        sport: sport || 'all',
+        days,
+        total_settled: rows.length,
+        by_market_side: agg(rows, r => `${r.sport}|${r.market}|${r.side}`),
+        by_market: agg(rows, r => `${r.sport}|${r.market}`),
+        by_side: agg(rows, r => `${r.sport}|${r.side}`),
+      });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
   // Repair: pra cada (sport, teams, market, side), mantém tip com MAIOR p_model
   // como active (result=NULL) e voida as demais. Corrige casos onde void anterior
   // usou EV ranking (errado) em vez de p_model.
