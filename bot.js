@@ -601,7 +601,7 @@ function reportBug(module, err, ctx = {}) {
     const stackHead = stack.split('\n').slice(0, 5).join('\n');
     const ctxLine = Object.keys(ctx).length ? `\nctx: \`${JSON.stringify(ctx).slice(0, 200)}\`` : '';
     const dm = `🐛 *Bug detectado*\n*${module}* — \`${name}\`\n\`${msg}\`${ctxLine}\n\n\`\`\`\n${stackHead}\n\`\`\``;
-    for (const id of ADMIN_IDS) sendDM(token, id, dm).catch(() => {});
+    for (const id of ADMIN_IDS) sendDM(token, id, dm).catch(e => log('WARN', 'BUG-REPORT-FAIL', `adminId=${id}: ${e.message}`));
   } catch (_) {}
 }
 
@@ -680,7 +680,7 @@ function runPipelineStuckCheck() {
           const token = Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
           if (token) {
             const dm = `🚨 *Pipeline travada* — *${sport}*\n${count} rejeições / 0 tips na última hora\nTop motivos: ${topReasons}\n_Verificar gates ou modelo desligado._`;
-            for (const id of ADMIN_IDS) sendDM(token, id, dm).catch(() => {});
+            for (const id of ADMIN_IDS) sendDM(token, id, dm).catch(e => log('WARN', 'PIPELINE-ALERT-FAIL', `adminId=${id}: ${e.message}`));
           }
         } catch (_) {}
       }
@@ -1413,6 +1413,24 @@ async function sendDM(token, userId, text, extra) {
   }
   log('WARN', 'DM-FAIL', `userId=${userId} code=${code} desc="${desc.slice(0, 160)}"`);
   return res;
+}
+
+// Envia DM pra todos ADMIN_IDS, retorna { sent, failed }.
+// Callers devem skippar markAdminDmSent/dedup se sent===0 — evita trap
+// de 24h onde falha silenciosa trava re-entrega.
+async function sendAdminDMs(token, text, extra, context) {
+  let sent = 0, failed = 0;
+  for (const adminId of ADMIN_IDS) {
+    try {
+      const r = await sendDM(token, adminId, text, extra);
+      if (r && r.ok !== false) sent++;
+      else failed++;
+    } catch (e) {
+      failed++;
+      log('WARN', 'ADMIN-DM-FAIL', `${context || '?'} adminId=${adminId}: ${e.message}`);
+    }
+  }
+  return { sent, failed };
 }
 
 function kb(buttons) {
@@ -2888,7 +2906,7 @@ async function checkCriticalAlerts() {
       `\`${alert.id}\`\n${alert.msg}\n\n` +
       `_Enviado via bot [${routed.sport}] — próxima em ${Math.round(CRITICAL_ALERT_COOLDOWN_MS/60000)}min se persistir._`;
     for (const adminId of ADMIN_IDS) {
-      await sendDM(routed.token, adminId, msg).catch(() => {});
+      await sendDM(routed.token, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `routed adminId=${adminId}: ${e.message}`));
     }
     log('WARN', 'ALERT', `[${alert.severity}] ${alert.id} → bot [${routed.sport}]: ${alert.msg}`);
   }
@@ -2955,7 +2973,7 @@ async function checkAutoShadow() {
       const tokenForAlert = Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
       if (tokenForAlert) {
         const msg = `🛑 *AUTO-SHADOW ATIVADO — ${sport.toUpperCase()}*\n\nCLV médio (14d): *${meanClv.toFixed(2)}%* em ${totalN} tips\nCutoff: ${cutoffClvBad}%\n\nTips continuam sendo geradas e gravadas no DB (com \`is_shadow=1\`), mas DMs suspensos.\n\n_Auto-restaura quando CLV ≥ ${recoveryClvOk}% (mesmo \`AUTO_SHADOW_NEGATIVE_CLV\`)._`;
-        for (const adminId of ADMIN_IDS) await sendDM(tokenForAlert, adminId, msg).catch(() => {});
+        for (const adminId of ADMIN_IDS) await sendDM(tokenForAlert, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
       }
     } else if (wasAutoShadowed && meanClv >= recoveryClvOk && cfg.shadowMode === true && orig === false) {
       // Recovery: desfaz auto-shadow se CLV recuperou
@@ -2966,7 +2984,7 @@ async function checkAutoShadow() {
       const tokenForAlert = Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
       if (tokenForAlert) {
         const msg = `✅ *AUTO-SHADOW RESTAURADO — ${sport.toUpperCase()}*\n\nCLV (14d): *+${meanClv.toFixed(2)}%* em ${totalN} tips\n\nDMs reativados.`;
-        for (const adminId of ADMIN_IDS) await sendDM(tokenForAlert, adminId, msg).catch(() => {});
+        for (const adminId of ADMIN_IDS) await sendDM(tokenForAlert, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
       }
     } else if (wasAutoShadowed) {
       _autoShadowState.get(sport).lastCheck = now;
@@ -3079,7 +3097,7 @@ async function runAutoHealerCycle() {
     `_Próximo ciclo em ${Math.round(AUTO_HEALER_CHECK_INTERVAL_MS / 60000)}min. Cooldown DM ${Math.round(AUTO_HEALER_DM_COOLDOWN_MS / 60000)}min/anomaly._`;
 
   for (const adminId of ADMIN_IDS) {
-    await sendDM(tokenForAlert, adminId, msg).catch(() => {});
+    await sendDM(tokenForAlert, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
   }
 }
 
@@ -3408,7 +3426,7 @@ async function runBankrollGuardianCycle() {
     `• Pico:    R$${peak}\n` +
     `• DD atual: ${result.overall.overall_drawdown_pct.toFixed(2)}%\n\n` +
     `_Cooldown 24h por sport. Auto-restore quando DD<${restoreThreshold}%._`;
-  for (const adminId of ADMIN_IDS) await sendDM(tokenForAlert, adminId, msg).catch(() => {});
+  for (const adminId of ADMIN_IDS) await sendDM(tokenForAlert, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
 }
 
 // ── News Monitor ──
@@ -3461,7 +3479,7 @@ async function runNewsMonitorCycle() {
     return `${sevIcon[a.severity]} *${a.sport.toUpperCase()}*${tipNote}\n   ${a.title}${sourceNote}`;
   }).join('\n\n');
   const msg = `📰 *NEWS MONITOR*\n\n${lines}\n\n_Próximo ciclo em 15min. Cooldown DM 30min._`;
-  for (const adminId of ADMIN_IDS) await sendDM(tokenForAlert, adminId, msg).catch(() => {});
+  for (const adminId of ADMIN_IDS) await sendDM(tokenForAlert, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
 
   log('WARN', 'NEWS-MONITOR', `${dmWorthy.length} alerta(s) enviado(s) | tips afetadas: ${result.summary.tips_affected}`);
 }
@@ -3493,7 +3511,7 @@ async function runPreMatchFinalCheckCycle() {
   const sevIcon = { critical: '🚨', warning: '⚠️' };
   const lines = newAlerts.slice(0, 8).map(a => `${sevIcon[a.severity] || '⚠️'} *Tip #${a.tip_id}* (${a.sport})\n   └─ ${a.detail}`).join('\n');
   const msg = `🔍 *PRE-MATCH FINAL CHECK*\n\n${lines}\n\n_Tips a <30min do match com mudanças significativas._`;
-  for (const adminId of ADMIN_IDS) await sendDM(tokenForAlert, adminId, msg).catch(() => {});
+  for (const adminId of ADMIN_IDS) await sendDM(tokenForAlert, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
 }
 
 // ── IA Health Monitor ──
@@ -3520,7 +3538,7 @@ async function runIaHealthCycle() {
   const sevIcon = { critical: '🚨', warning: '⚠️' };
   const lines = result.alerts.map(a => `${sevIcon[a.severity] || '⚠️'} ${a.message}\n   └─ Sugestão: ${a.suggestion}`).join('\n');
   const msg = `🤖 *IA HEALTH MONITOR*\n\n${lines}\n\n_Cooldown 4h. Próximo check em 1h._`;
-  for (const adminId of ADMIN_IDS) await sendDM(tokenForAlert, adminId, msg).catch(() => {});
+  for (const adminId of ADMIN_IDS) await sendDM(tokenForAlert, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
 }
 
 // ── Live Storm Manager (cron 10min) ──
@@ -3575,7 +3593,7 @@ async function runLiveStormCycle() {
           `Por sport:\n${sportsLine}\n\n` +
           `Recomendações:\n${recsLine}\n\n` +
           `_Vou avisar quando voltar ao normal. Cooldown 30min._`;
-        for (const adminId of ADMIN_IDS) await sendDM(tokenForAlert, adminId, msg).catch(() => {});
+        for (const adminId of ADMIN_IDS) await sendDM(tokenForAlert, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
       }
     }
   }
@@ -3588,7 +3606,7 @@ async function runLiveStormCycle() {
       const msg = `✅ *LIVE STORM RESOLVIDO*\n\n` +
         `Voltou ao volume normal: *${result.live_total}* partidas live.\n` +
         `Sistema operando em capacidade padrão.`;
-      for (const adminId of ADMIN_IDS) await sendDM(tokenForAlert, adminId, msg).catch(() => {});
+      for (const adminId of ADMIN_IDS) await sendDM(tokenForAlert, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
     }
   }
 
@@ -3628,7 +3646,7 @@ async function runLolFreshnessCycle() {
         ? `Patches novos: ${r.newPatches.map(p => p.patch).join(', ')}\n\n`
         : '') +
       `_${(r.recommendation || '').slice(0, 400)}_`;
-    for (const adminId of ADMIN_IDS) sendDM(tokenForAlert, adminId, msg).catch(() => {});
+    for (const adminId of ADMIN_IDS) sendDM(tokenForAlert, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
 
     // Auto-trigger isotonic refresh quando retrain-now.
     // Evita reactivar múltiplas vezes: usa flag global + cooldown 24h.
@@ -3673,7 +3691,7 @@ async function runIsotonicRefreshAsync(token) {
     const msg = `${emoji} *Refresh automático de modelos concluído*\n\n` +
       `Jobs:\n${jobSummary}\n\n` +
       `Changes:\n${changesSummary}${rollbackSection}`;
-    for (const adminId of ADMIN_IDS) sendDM(token, adminId, msg).catch(() => {});
+    for (const adminId of ADMIN_IDS) sendDM(token, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
   });
 }
 
@@ -3740,7 +3758,7 @@ async function runMarketTipReadinessCheck() {
     `Pra ativar admin-DM:\n\`${envFlags}\` no .env + restart\n\n` +
     `_Shadow continuará logando. Você só liga o DM._`;
 
-  for (const adminId of ADMIN_IDS) await sendDM(tokenForAlert, adminId, msg).catch(() => {});
+  for (const adminId of ADMIN_IDS) await sendDM(tokenForAlert, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
   for (const s of ready) _marketTipReadyAlerted.add(`${s.sport}|${s.market}`);
   log('INFO', 'MT-READY', `DM admin: ${ready.length} segments prontos pra ativar`);
 }
@@ -3858,7 +3876,7 @@ async function runMarketTipsRoiGuardSided() {
       let msg = `🛡️ *MT ROI GUARD — auto-tune*\n\nJanela ${WINDOW_DAYS}d, ROI cutoff ${ROI_CUTOFF}% (restore ≥${ROI_RESTORE}%), n≥${N_CUTOFF}.\n\n`;
       if (disabled.length) msg += `*Desabilitados:*\n${disabled.join('\n')}\n\n`;
       if (restored.length) msg += `*Restaurados:*\n${restored.join('\n')}`;
-      for (const adminId of ADMIN_IDS) sendDM(token, adminId, msg).catch(() => {});
+      for (const adminId of ADMIN_IDS) sendDM(token, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
     }
   }
 }
@@ -3914,7 +3932,7 @@ async function runMarketTipsLeakGuard() {
     const token = Object.values(SPORTS).find(S => S?.enabled && S?.token)?.token;
     if (token) {
       const msg = `🛡️ *MT LEAK GUARD — 30d*\n\n${[...disabled, ...restored].join('\n')}\n\n_Cutoff: CLV ≤ ${CLV_CUTOFF}% com n≥${N_CUTOFF}. Restaura em CLV ≥ ${CLV_RESTORE}%._`;
-      for (const adminId of ADMIN_IDS) sendDM(token, adminId, msg).catch(() => {});
+      for (const adminId of ADMIN_IDS) sendDM(token, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
     }
   }
   log('INFO', 'MT-GUARD', `Ciclo OK — ${stats.length} segments | ${disabled.length} disabled | ${restored.length} restored`);
@@ -3999,7 +4017,7 @@ async function runWeeklyPipelineDigest() {
 
     msg += `\n_Comandos:_ \`/pipeline-health\` · \`/alerts\` · \`/market-tips\``;
 
-    for (const adminId of ADMIN_IDS) await sendDM(token, adminId, msg).catch(() => {});
+    for (const adminId of ADMIN_IDS) await sendDM(token, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
     log('INFO', 'WEEKLY-DIGEST', `DM semanal: ${tipsBySport.length} sports`);
   } catch (e) { reportBug('WEEKLY-DIGEST', e); }
 }
@@ -4048,7 +4066,7 @@ async function runMarketTipsDigest() {
   msg += stats30.slice(0, 8).map(s => `• ${fmt(s)}`).join('\n') + '\n';
   msg += `\n_Comando /market-tips pra detalhes. Readiness alert separado quando threshold bater._`;
 
-  for (const adminId of ADMIN_IDS) await sendDM(token, adminId, msg).catch(() => {});
+  for (const adminId of ADMIN_IDS) await sendDM(token, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
   log('INFO', 'MT-DIGEST', `DM digest 7d=${stats7.length} 30d=${stats30.length}`);
 }
 
@@ -4098,7 +4116,7 @@ async function runBacktestValidatorCycle() {
     for (const m of newMilestones) lines.push(`  🎯 ${m.sport}: ${m.milestone}`);
   }
   const msg = `🔬 *BACKTEST VALIDATOR*\n\n${lines.join('\n')}\n\n_Cron 1x/dia. Cooldown DM 24h._`;
-  for (const adminId of ADMIN_IDS) await sendDM(tokenForAlert, adminId, msg).catch(() => {});
+  for (const adminId of ADMIN_IDS) await sendDM(tokenForAlert, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
 }
 
 // ── Post-Fix Monitor (cron diário) ──
@@ -4153,7 +4171,7 @@ async function runPostFixMonitorCycle() {
     lines.push(`  ${s.verdict.label.split(' — ')[0]} *${s.sport}* — n=${s.settled} ROI ${roiStr}`);
   }
   const msg = `🩺 *POST-FIX MONITOR*\n\n${lines.join('\n')}\n\n_Cron 1x/dia. Alerta se bleed ou flood+bleed em sport com n≥10._`;
-  for (const adminId of ADMIN_IDS) await sendDM(tokenForAlert, adminId, msg).catch(() => {});
+  for (const adminId of ADMIN_IDS) await sendDM(tokenForAlert, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
 }
 
 // ── Model Calibration Watcher (semanal) ──
@@ -4228,7 +4246,7 @@ async function runPathGuardCycle() {
     }
     if ((alerts.length || restored.length) && tokenForAlert && ADMIN_IDS.size) {
       const msg = `🛡️ *PATH GUARD — ${daysWin}d*\n\n${[...alerts, ...restored].join('\n')}\n\n_Cutoff: CLV ≤ ${cutoff}% n≥${minN}. Reativa em CLV ≥ 0% n≥${minN}._`;
-      for (const adminId of ADMIN_IDS) sendDM(tokenForAlert, adminId, msg).catch(() => {});
+      for (const adminId of ADMIN_IDS) sendDM(tokenForAlert, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
     }
     log('INFO', 'PATH-GUARD', `Ciclo OK — ${evaluated.size} buckets | ${alerts.length} disabled | ${restored.length} restored`);
   } catch (e) {
@@ -4304,7 +4322,7 @@ async function runLeagueGuardCycle() {
 
     if ((alerts.length || restored.length) && tokenForAlert && ADMIN_IDS.size) {
       const msg = `🛡️ *LEAGUE GUARD — ${daysWin}d*\n\n${[...alerts, ...restored].join('\n')}\n\n_Cutoff: ROI ≤ ${roiCutoff}% + CLV ≤ ${clvCutoff}% com n≥${minN}. Restaura em ROI ≥ ${roiRestore}%._\n_Use /blocked-leagues pra ver estado._`;
-      for (const adminId of ADMIN_IDS) sendDM(tokenForAlert, adminId, msg).catch(() => {});
+      for (const adminId of ADMIN_IDS) sendDM(tokenForAlert, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
     }
     log('INFO', 'LEAGUE-GUARD', `Ciclo OK — ${rows.length} ligas avaliadas | ${alerts.length} blocked | ${restored.length} restored`);
   } catch (e) {
@@ -4406,7 +4424,7 @@ async function runOddsBucketGuardCycle() {
 
     if ((alerts.length || restored.length) && tokenForAlert && ADMIN_IDS.size) {
       const msg = `🛡️ *BUCKET GUARD — ${daysWin}d*\n\n${[...alerts, ...restored].join('\n')}\n\n_Cutoff: ROI ≤ ${roiCutoff}% + CLV ≤ ${clvCutoff}% com n≥${minN}. Restaura em ROI ≥ ${roiRestore}%._`;
-      for (const adminId of ADMIN_IDS) sendDM(tokenForAlert, adminId, msg).catch(() => {});
+      for (const adminId of ADMIN_IDS) sendDM(tokenForAlert, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
     }
     log('INFO', 'BUCKET-GUARD', `Ciclo OK — ${agg.size} (sport,bucket) avaliados | ${alerts.length} blocked | ${restored.length} restored`);
   } catch (e) {
@@ -4563,7 +4581,7 @@ async function runGatesAutoTuneCycle() {
 
     if (changes.length && tokenForAlert && ADMIN_IDS.size) {
       const msg = `🛡️ *GATES AUTO-TUNE — ${daysWin}d*\n\n${changes.join('\n')}\n\n_Cron 12h. Env vars manuais sempre sobrepõem auto-tune._`;
-      for (const adminId of ADMIN_IDS) sendDM(tokenForAlert, adminId, msg).catch(() => {});
+      for (const adminId of ADMIN_IDS) sendDM(tokenForAlert, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
     }
     log('INFO', 'GATES-AUTOTUNE', `Ciclo OK — ${sports.size} sports avaliados | ${changes.length} mudanças`);
   } catch (e) {
@@ -4771,7 +4789,7 @@ async function runModelCalibrationCycle() {
   if (!tokenForAlert) return;
   const lines = result.alerts.map(a => `🎯 *${a.sport.toUpperCase()}* — ${a.message}\n   └─ ${a.suggestions[0]}`).join('\n\n');
   const msg = `🎯 *MODEL CALIBRATION WATCHER (semanal)*\n\n${lines}\n\n_Próximo check em 7 dias._`;
-  for (const adminId of ADMIN_IDS) await sendDM(tokenForAlert, adminId, msg).catch(() => {});
+  for (const adminId of ADMIN_IDS) await sendDM(tokenForAlert, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
 
   // Auto-retrain on drift: quando um sport tem drift > 0.03 (Brier piorou 3pp em 30d vs baseline),
   // dispara runIsotonicRefreshAsync. Cooldown 24h compartilhado com refresh por freshness.
@@ -4831,7 +4849,7 @@ async function runDailyHealthIfTime() {
       summary.push(`✂️ Cuts: ${ca.ready_to_cut} prontos pra cortar (R$${ca.total_daily_loss_at_risk_reais}/dia em risco)`);
     }
     const msg = `🌅 *DAILY HEALTH REPORT*\n\n${summary.join('\n')}\n\n*Steps:*\n\`\`\`${stepsHtml}\`\`\`\n\n_Próximo report amanhã 8h BRT._`;
-    for (const adminId of ADMIN_IDS) await sendDM(tokenForAlert, adminId, msg).catch(() => {});
+    for (const adminId of ADMIN_IDS) await sendDM(tokenForAlert, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
   } catch (e) { log('WARN', 'DAILY-HEALTH', e.message); }
 }
 
@@ -4912,7 +4930,7 @@ async function checkLiveScoutGaps() {
     `_Threshold ${LIVE_SCOUT_ALERT_THRESHOLD_MIN}min | cooldown ${Math.round(LIVE_SCOUT_ALERT_COOLDOWN_MS/60000)}min/gap_`;
 
   for (const adminId of ADMIN_IDS) {
-    await sendDM(token, adminId, msg).catch(() => {});
+    await sendDM(token, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
   }
   log('WARN', 'LIVE-SCOUT-ALERT', `${grouped.length} gap(s) persistentes alertados via bot [${botSport}]`);
 }
@@ -4930,7 +4948,7 @@ async function checkPatchMetaStale(token) {
       `• \`PATCH_META_DATE=YYYY-MM-DD\`\n\n` +
       `_Análises de LoL estão usando meta desatualizado!_`;
     for (const adminId of ADMIN_IDS) {
-      await sendDM(token, adminId, msg).catch(() => {});
+      await sendDM(token, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
     }
   }
 }
@@ -5617,9 +5635,13 @@ async function autoAnalyzeMatch(token, match) {
                           });
                           const tokenForMT = Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
                           if (tokenForMT) {
-                            for (const adminId of ADMIN_IDS) sendDM(tokenForMT, adminId, dm).catch(() => {});
-                            markAdminDmSent(db, { sport: 'lol', match, market: t.market, line: t.line, side: t.side });
-                            log('INFO', 'LOL-MARKET-TIP', `Admin DM enviado: ${t.label} @ ${t.odd} EV ${t.ev}% stake ${stake}u`);
+                            const r = await sendAdminDMs(tokenForMT, dm, undefined, 'lol-market-tip');
+                            if (r.sent > 0) {
+                              markAdminDmSent(db, { sport: 'lol', match, market: t.market, line: t.line, side: t.side });
+                              log('INFO', 'LOL-MARKET-TIP', `Admin DM enviado: ${t.label} @ ${t.odd} EV ${t.ev}% stake ${stake}u (sent=${r.sent} failed=${r.failed})`);
+                            } else {
+                              log('WARN', 'LOL-MARKET-TIP', `Todos admin DM falharam — skip dedup mark (${t.label} @ ${t.odd})`);
+                            }
                           }
                         }
                       } else {
@@ -10291,9 +10313,13 @@ async function _pollDotaInner(runOnce = false) {
                         const dm = mtp.buildMarketTipDM({ match, tip: t, stake, league: match.league, sport: 'dota2' });
                         const tokenForMT = Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
                         if (tokenForMT) {
-                          for (const adminId of ADMIN_IDS) sendDM(tokenForMT, adminId, dm).catch(() => {});
-                          markAdminDmSent(db, { sport: 'dota2', match, market: t.market, line: t.line, side: t.side });
-                          log('INFO', 'DOTA-MARKET-TIP', `Admin DM: ${t.label} @ ${t.odd} EV ${t.ev}% stake ${stake}u`);
+                          const r = await sendAdminDMs(tokenForMT, dm, undefined, 'dota-market-tip');
+                          if (r.sent > 0) {
+                            markAdminDmSent(db, { sport: 'dota2', match, market: t.market, line: t.line, side: t.side });
+                            log('INFO', 'DOTA-MARKET-TIP', `Admin DM: ${t.label} @ ${t.odd} EV ${t.ev}% stake ${stake}u (sent=${r.sent} failed=${r.failed})`);
+                          } else {
+                            log('WARN', 'DOTA-MARKET-TIP', `Todos admin DM falharam — skip dedup mark (${t.label} @ ${t.odd})`);
+                          }
                         }
                       }
                     } else {
@@ -11976,10 +12002,14 @@ async function pollTennis(runOnce = false) {
                             const dm = mtp.buildMarketTipDM({ match, tip: t, stake, league: match.league, sport: 'tennis' });
                             const tnToken = SPORTS['tennis']?.token || Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
                             if (tnToken) {
-                              for (const adminId of ADMIN_IDS) sendDM(tnToken, adminId, dm).catch(() => {});
-                              markAdminDmSent(db, { sport: 'tennis', match, market: t.market, line: t.line, side: t.side });
-                              const discTag = t.correlationDiscount > 0 ? ` (corr-disc ${(t.correlationDiscount*100).toFixed(0)}%)` : '';
-                              log('INFO', 'TENNIS-MARKET-TIP', `Admin DM: ${t.label} @ ${t.odd} EV ${t.ev}% stake ${stake}u${discTag}`);
+                              const r = await sendAdminDMs(tnToken, dm, undefined, 'tennis-market-tip');
+                              if (r.sent > 0) {
+                                markAdminDmSent(db, { sport: 'tennis', match, market: t.market, line: t.line, side: t.side });
+                                const discTag = t.correlationDiscount > 0 ? ` (corr-disc ${(t.correlationDiscount*100).toFixed(0)}%)` : '';
+                                log('INFO', 'TENNIS-MARKET-TIP', `Admin DM: ${t.label} @ ${t.odd} EV ${t.ev}% stake ${stake}u${discTag} (sent=${r.sent} failed=${r.failed})`);
+                              } else {
+                                log('WARN', 'TENNIS-MARKET-TIP', `Todos admin DM falharam — skip dedup mark (${t.label} @ ${t.odd})`);
+                              }
                             }
                           }
                         } else {
@@ -13270,9 +13300,13 @@ Máximo 200 palavras.`;
                       const dmFb = mtp.buildMarketTipDM({ match: matchForMt, tip: tipForMt, stake: stakeFb, league: matchForMt.league, sport: 'football' });
                       const fbToken = SPORTS['football']?.token || Object.values(SPORTS).find(S => S?.enabled && S?.token)?.token;
                       if (fbToken) {
-                        for (const adminId of ADMIN_IDS) sendDM(fbToken, adminId, dmFb).catch(() => {});
-                        markAdminDmSent(db, { sport: 'football', match: matchForMt, market: marketKey, line: lineVal, side: sideMt });
-                        log('INFO', 'FOOTBALL-MARKET-TIP', `Admin DM: ${tipMarket} @ ${tipOdd} EV ${tipEV}% stake ${stakeFb}u`);
+                        const r = await sendAdminDMs(fbToken, dmFb, undefined, 'football-market-tip');
+                        if (r.sent > 0) {
+                          markAdminDmSent(db, { sport: 'football', match: matchForMt, market: marketKey, line: lineVal, side: sideMt });
+                          log('INFO', 'FOOTBALL-MARKET-TIP', `Admin DM: ${tipMarket} @ ${tipOdd} EV ${tipEV}% stake ${stakeFb}u (sent=${r.sent} failed=${r.failed})`);
+                        } else {
+                          log('WARN', 'FOOTBALL-MARKET-TIP', `Todos admin DM falharam — skip dedup mark (${tipMarket})`);
+                        }
                       }
                     }
                   } else {
@@ -13835,9 +13869,13 @@ async function pollCs(runOnce = false) {
                           const dm = mtp.buildMarketTipDM({ match, tip: t, stake, league: match.league, sport: 'cs2' });
                           const tokenForMT = Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
                           if (tokenForMT) {
-                            for (const adminId of ADMIN_IDS) sendDM(tokenForMT, adminId, dm).catch(() => {});
-                            markAdminDmSent(db, { sport: 'cs2', match, market: t.market, line: t.line, side: t.side });
-                            log('INFO', 'CS-MARKET-TIP', `Admin DM: ${t.label} @ ${t.odd} EV ${t.ev}% stake ${stake}u`);
+                            const r = await sendAdminDMs(tokenForMT, dm, undefined, 'cs-market-tip');
+                            if (r.sent > 0) {
+                              markAdminDmSent(db, { sport: 'cs2', match, market: t.market, line: t.line, side: t.side });
+                              log('INFO', 'CS-MARKET-TIP', `Admin DM: ${t.label} @ ${t.odd} EV ${t.ev}% stake ${stake}u (sent=${r.sent} failed=${r.failed})`);
+                            } else {
+                              log('WARN', 'CS-MARKET-TIP', `Todos admin DM falharam — skip dedup mark (${t.label} @ ${t.odd})`);
+                            }
                           }
                         }
                       } else {
@@ -15320,7 +15358,7 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
             (a.winProbNow != null ? `P atual: ${(a.winProbNow*100).toFixed(1)}%\n` : '') +
             `\n_Considerar cashout. Próx alerta deste tip em 30min._`;
           for (const adminId of ADMIN_IDS) {
-            await sendDM(token, adminId, msg).catch(() => {});
+            await sendDM(token, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
           }
           log('WARN', 'LIVE-RISK', `[${a.verdict}] ${sport} ${a.match} → DM admin`);
         }
@@ -15356,7 +15394,7 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
           if (r.skipped?.length) msg += `\n_${r.skipped.length} sugestão(ões) não aplicada(s) por guardrails._`;
           const routed = _pickTokenForAlert('threshold') || _pickTokenForAlert('system');
           const token = routed?.token;
-          if (token) for (const adminId of ADMIN_IDS) await sendDM(token, adminId, msg).catch(() => {});
+          if (token) for (const adminId of ADMIN_IDS) await sendDM(token, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
         }
       }
     } catch (e) { log('ERROR', 'THRESHOLD-AUTO', e.message); }
@@ -15429,7 +15467,7 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
       msg += `\n_Settlement não chegou após threshold. Tips ficaram com result='void'._`;
       const routed = _pickTokenForAlert('auto_void') || _pickTokenForAlert('system');
       const token = routed?.token;
-      if (token) for (const adminId of ADMIN_IDS) await sendDM(token, adminId, msg).catch(() => {});
+      if (token) for (const adminId of ADMIN_IDS) await sendDM(token, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
     }
   }
   setInterval(() => runAutoVoidStuck(), 15 * 60 * 1000);
@@ -15491,7 +15529,7 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
       const token = routed?.token;
       if (!token) return;
       for (const adminId of ADMIN_IDS) {
-        await sendDM(token, adminId, msg).catch(() => {});
+        await sendDM(token, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
       }
       log('INFO', 'AUTONOMY-DIGEST', `DM enviado pra ${ADMIN_IDS.size} admin(s)`);
     } catch (e) { log('ERROR', 'AUTONOMY-DIGEST', e.message); }
@@ -15851,7 +15889,7 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
         `Sports com cap divergence ≥2pp ROI (n≥20):\n\n${lines.join('\n')}\n\n` +
         `_Admin decide aplicar via env. Ciclo próximo domingo 10h._`;
       const token = Object.values(SPORTS).find(S => S?.enabled && S?.token)?.token;
-      if (token) for (const adminId of ADMIN_IDS) sendDM(token, adminId, msg).catch(() => {});
+      if (token) for (const adminId of ADMIN_IDS) sendDM(token, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
       log('INFO', 'GATE-OPT', `DM admin: ${significant.length} sports com sugestão`);
     } catch (e) { log('ERROR', 'GATE-OPT', e.message); }
   }
@@ -16479,7 +16517,7 @@ async function reanalyzeAndVoidFailing(opts = {}) {
       const verb = apply ? 'voidadas' : 'seriam voidadas (dry-run)';
       const msg = `🔍 *REANALISE DE PENDENTES*\n\n${report.voidedList.length} tip(s) ${verb} por falha no novo sistema:\n\n${lines}${more}\n\n_${report.checked} tips checadas._`;
       for (const adminId of ADMIN_IDS) {
-        await sendDM(tokenForAlert, adminId, msg).catch(() => {});
+        await sendDM(tokenForAlert, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
       }
     }
   }
