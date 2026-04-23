@@ -29,7 +29,7 @@ const MARKET = argVal('market', null);
 const SIDE = argVal('side', null);
 const SPORT = argVal('sport', 'tennis');
 
-const db = initDatabase(DB_PATH);
+const { db } = initDatabase(DB_PATH);
 
 function bucket(x, edges, labels) {
   for (let i = 0; i < edges.length; i++) if (x < edges[i]) return labels[i];
