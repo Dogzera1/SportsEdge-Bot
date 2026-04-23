@@ -2886,9 +2886,19 @@ async function getPinnacleDotaMatches() {
     return _dotaPinnacleCache.data;
   }
   try {
+    // Diagnóstico: conta ligas vistas e amostra ligas descartadas quando filtro zera resultado.
+    // Motivo: Pinnacle ocasionalmente muda o nome da liga ("Dota 2" → "DotA2" / "Dota2") e o
+    // filtro estrito `.includes('dota 2')` descartava tudo silenciosamente.
+    let leaguesSeen = 0;
+    const leaguesSkipped = new Set();
     const rows = await pinnacle.fetchSportMatchOdds(12, (m) => {
       const name = String(m?.league?.name || '').toLowerCase();
-      if (!name.includes('dota 2')) return false;
+      leaguesSeen++;
+      // Regex relaxado: "dota 2", "dota2", "dota  2", "dota - 2", etc.
+      if (!/\bdota\s*-?\s*2?\b/i.test(name)) {
+        if (leaguesSkipped.size < 10 && name) leaguesSkipped.add(name.slice(0, 40));
+        return false;
+      }
       const p1 = String(m?.participants?.[0]?.name || '');
       const p2 = String(m?.participants?.[1]?.name || '');
       // Descarta: (Kills) mercado de total kills + handicap de map ("X 0, Y 2 vs X 1, Y 2")
@@ -2906,7 +2916,12 @@ async function getPinnacleDotaMatches() {
       odds: { t1: String(r.oddsT1), t2: String(r.oddsT2), bookmaker: 'Pinnacle' }
     }));
     _dotaPinnacleCache = { data: matches, ts: Date.now() };
-    log('INFO', 'ODDS', `Pinnacle Dota 2: ${matches.length} partidas cacheadas`);
+    if (matches.length === 0 && leaguesSeen > 0) {
+      const sample = [...leaguesSkipped].slice(0, 5).join(', ');
+      log('INFO', 'ODDS', `Pinnacle Dota 2: 0 (de ${leaguesSeen} esports markets; ligas vistas: ${sample || '-'})`);
+    } else {
+      log('INFO', 'ODDS', `Pinnacle Dota 2: ${matches.length} partidas cacheadas`);
+    }
     return matches;
   } catch (e) {
     log('ERROR', 'ODDS', `Pinnacle Dota 2: ${e.message}`);
@@ -2972,20 +2987,26 @@ async function getOddsApiIoDotaMatches() {
   const leagueRe = new RegExp(process.env.DOTA_LEAGUE_REGEX || 'dota', 'i');
 
   const events = await fetchOddsApiIoEvents('esports');
-  const filtered = (events || [])
-    .map(e => {
-      const t = new Date(e.date || e.commence_time || e.start_time || e.time || '').getTime();
-      const leagueName = (e.league?.name || e.league || '').toString();
-      const sportName = (e.sport?.name || e.sport || '').toString();
-      const sportSlug = (e.sport?.slug || '').toString();
-      const hay = `${leagueName} ${sportName} ${sportSlug}`.trim();
-      return { e, t, leagueName, hay };
-    })
-    // Alguns eventos vêm sem league; usa sport.* como fallback
-    .filter(x => leagueRe.test(x.hay || x.leagueName || ''))
+  const eventCount = Array.isArray(events) ? events.length : 0;
+  const mapped = (events || []).map(e => {
+    const t = new Date(e.date || e.commence_time || e.start_time || e.time || '').getTime();
+    const leagueName = (e.league?.name || e.league || '').toString();
+    const sportName = (e.sport?.name || e.sport || '').toString();
+    const sportSlug = (e.sport?.slug || '').toString();
+    const hay = `${leagueName} ${sportName} ${sportSlug}`.trim();
+    return { e, t, leagueName, hay };
+  });
+  // Alguns eventos vêm sem league; usa sport.* como fallback
+  const matchedLeague = mapped.filter(x => leagueRe.test(x.hay || x.leagueName || ''));
+  const filtered = matchedLeague
     .filter(x => Number.isFinite(x.t) && x.t <= weekAhead && (x.t > now || (x.t <= now && (now - x.t) <= LIVE_WINDOW_MS)))
     .sort((a, b) => a.t - b.t)
     .slice(0, maxEvents);
+  // Diagnóstico quando nada passa: mostra sample de ligas pra identificar gap.
+  if (filtered.length === 0 && eventCount > 0) {
+    const sample = [...new Set(mapped.map(x => x.leagueName).filter(Boolean))].slice(0, 5).join(', ');
+    log('INFO', 'DOTA2', `Odds-API.io: 0 Dota 2 (de ${eventCount} esports events, ${matchedLeague.length} matched league regex; ligas: ${sample || '-'})`);
+  }
 
   const matches = [];
   for (const { e, t, leagueName } of filtered) {
