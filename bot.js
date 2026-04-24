@@ -3282,6 +3282,19 @@ function isLeagueBlocked(sport, league) {
 //   Dota2: lift 4% + CLV -45% observado 23/04 → -80% (scanner lento/contrarian ruim; corta leak)
 //   Darts/Snooker: lift 2-3% → -60% (alpha marginal, proteger capital)
 // Prioridade lookup: KELLY_<SPORT>_<CONF> → KELLY_<CONF> → per-sport default → global default.
+// Silencia DM de ciclos de sistema. Lista env: MUTED_CYCLES=csv (ex: "news-monitor,mt-leak-guard"); "all" muta todos.
+// Side-effect preservation:
+//   - 7 ciclos com auto-gate (mt-readiness, mt-roi-guard, mt-leak-guard, league-guard, odds-bucket-guard,
+//     path-guard, lol-freshness) rodam normalmente — só o DM silencia.
+//   - 9 ciclos DM-only (news-monitor, pre-match-check, ia-health, backtest-validator, postfix-monitor,
+//     model-calibration, live-scout-gaps, patch-meta-stale) fazem early-return (sem state pra perder).
+function _isCycleMuted(kind) {
+  const raw = String(process.env.MUTED_CYCLES || '').trim().toLowerCase();
+  if (!raw) return false;
+  if (raw === 'all') return true;
+  return raw.split(',').map(s => s.trim()).filter(Boolean).includes(String(kind).toLowerCase());
+}
+
 const _KELLY_DEFAULTS = { ALTA: 0.25, MEDIA: 1/6, BAIXA: 0.10 };
 // Multiplicador per-sport aplicado sobre _KELLY_DEFAULTS
 const _KELLY_SPORT_MULT = {
@@ -3461,6 +3474,7 @@ const NEWS_DM_COOLDOWN_MS = 30 * 60 * 1000; // 30min cooldown global
 
 let _lastNewsDM = 0;
 async function runNewsMonitorCycle() {
+  if (_isCycleMuted('news-monitor')) { return; }
   if (!ADMIN_IDS.size) return;
   let result = null;
   try {
@@ -3514,6 +3528,7 @@ async function runNewsMonitorCycle() {
 const _preMatchAlerted = new Set();
 
 async function runPreMatchFinalCheckCycle() {
+  if (_isCycleMuted('pre-match-check')) { return; }
   if (!ADMIN_IDS.size) return;
   let result = null;
   try {
@@ -3545,6 +3560,7 @@ let _lastIaHealthAlert = 0;
 const IA_HEALTH_DM_COOLDOWN_MS = 4 * 60 * 60 * 1000; // 4h
 
 async function runIaHealthCycle() {
+  if (_isCycleMuted('ia-health')) { return; }
   if (!ADMIN_IDS.size) return;
   let result = null;
   try {
@@ -3672,7 +3688,7 @@ async function runLolFreshnessCycle() {
         ? `Patches novos: ${r.newPatches.map(p => p.patch).join(', ')}\n\n`
         : '') +
       `_${(r.recommendation || '').slice(0, 400)}_`;
-    for (const adminId of ADMIN_IDS) sendDM(tokenForAlert, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
+    if (!_isCycleMuted('lol-freshness')) for (const adminId of ADMIN_IDS) sendDM(tokenForAlert, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
 
     // Auto-trigger isotonic refresh quando retrain-now.
     // Evita reactivar múltiplas vezes: usa flag global + cooldown 24h.
@@ -3784,7 +3800,7 @@ async function runMarketTipReadinessCheck() {
     `Pra ativar admin-DM:\n\`${envFlags}\` no .env + restart\n\n` +
     `_Shadow continuará logando. Você só liga o DM._`;
 
-  for (const adminId of ADMIN_IDS) await sendDM(tokenForAlert, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
+  if (!_isCycleMuted('mt-readiness')) for (const adminId of ADMIN_IDS) await sendDM(tokenForAlert, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
   for (const s of ready) _marketTipReadyAlerted.add(`${s.sport}|${s.market}`);
   log('INFO', 'MT-READY', `DM admin: ${ready.length} segments prontos pra ativar`);
 }
@@ -3902,7 +3918,7 @@ async function runMarketTipsRoiGuardSided() {
       let msg = `🛡️ *MT ROI GUARD — auto-tune*\n\nJanela ${WINDOW_DAYS}d, ROI cutoff ${ROI_CUTOFF}% (restore ≥${ROI_RESTORE}%), n≥${N_CUTOFF}.\n\n`;
       if (disabled.length) msg += `*Desabilitados:*\n${disabled.join('\n')}\n\n`;
       if (restored.length) msg += `*Restaurados:*\n${restored.join('\n')}`;
-      for (const adminId of ADMIN_IDS) sendDM(token, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
+      if (!_isCycleMuted('mt-roi-guard')) for (const adminId of ADMIN_IDS) sendDM(token, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
     }
   }
 }
@@ -3958,7 +3974,7 @@ async function runMarketTipsLeakGuard() {
     const token = Object.values(SPORTS).find(S => S?.enabled && S?.token)?.token;
     if (token) {
       const msg = `🛡️ *MT LEAK GUARD — 30d*\n\n${[...disabled, ...restored].join('\n')}\n\n_Cutoff: CLV ≤ ${CLV_CUTOFF}% com n≥${N_CUTOFF}. Restaura em CLV ≥ ${CLV_RESTORE}%._`;
-      for (const adminId of ADMIN_IDS) sendDM(token, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
+      if (!_isCycleMuted('mt-leak-guard')) for (const adminId of ADMIN_IDS) sendDM(token, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
     }
   }
   log('INFO', 'MT-GUARD', `Ciclo OK — ${stats.length} segments | ${disabled.length} disabled | ${restored.length} restored`);
@@ -4160,6 +4176,7 @@ async function runMlShadowDigest() {
 let _lastBacktestAlert = 0;
 const _backtestMilestonesSeen = new Set();
 async function runBacktestValidatorCycle() {
+  if (_isCycleMuted('backtest-validator')) { return; }
   if (!ADMIN_IDS.size) return;
   let result = null;
   try {
@@ -4211,6 +4228,7 @@ let _lastPostFixAlert = 0;
 const _postFixAlertsSeen = new Set(); // `${sport}|${verdict_code}` — pra alertar só mudanças de estado
 
 async function runPostFixMonitorCycle() {
+  if (_isCycleMuted('postfix-monitor')) { return; }
   if (!ADMIN_IDS.size) return;
   const cutoff = process.env.POST_FIX_CUTOFF || '2026-04-17';
   let result = null;
@@ -4332,7 +4350,7 @@ async function runPathGuardCycle() {
     }
     if ((alerts.length || restored.length) && tokenForAlert && ADMIN_IDS.size) {
       const msg = `🛡️ *PATH GUARD — ${daysWin}d*\n\n${[...alerts, ...restored].join('\n')}\n\n_Cutoff: CLV ≤ ${cutoff}% n≥${minN}. Reativa em CLV ≥ 0% n≥${minN}._`;
-      for (const adminId of ADMIN_IDS) sendDM(tokenForAlert, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
+      if (!_isCycleMuted('path-guard')) for (const adminId of ADMIN_IDS) sendDM(tokenForAlert, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
     }
     log('INFO', 'PATH-GUARD', `Ciclo OK — ${evaluated.size} buckets | ${alerts.length} disabled | ${restored.length} restored`);
   } catch (e) {
@@ -4408,7 +4426,7 @@ async function runLeagueGuardCycle() {
 
     if ((alerts.length || restored.length) && tokenForAlert && ADMIN_IDS.size) {
       const msg = `🛡️ *LEAGUE GUARD — ${daysWin}d*\n\n${[...alerts, ...restored].join('\n')}\n\n_Cutoff: ROI ≤ ${roiCutoff}% + CLV ≤ ${clvCutoff}% com n≥${minN}. Restaura em ROI ≥ ${roiRestore}%._\n_Use /blocked-leagues pra ver estado._`;
-      for (const adminId of ADMIN_IDS) sendDM(tokenForAlert, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
+      if (!_isCycleMuted('league-guard')) for (const adminId of ADMIN_IDS) sendDM(tokenForAlert, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
     }
     log('INFO', 'LEAGUE-GUARD', `Ciclo OK — ${rows.length} ligas avaliadas | ${alerts.length} blocked | ${restored.length} restored`);
   } catch (e) {
@@ -4510,7 +4528,7 @@ async function runOddsBucketGuardCycle() {
 
     if ((alerts.length || restored.length) && tokenForAlert && ADMIN_IDS.size) {
       const msg = `🛡️ *BUCKET GUARD — ${daysWin}d*\n\n${[...alerts, ...restored].join('\n')}\n\n_Cutoff: ROI ≤ ${roiCutoff}% + CLV ≤ ${clvCutoff}% com n≥${minN}. Restaura em ROI ≥ ${roiRestore}%._`;
-      for (const adminId of ADMIN_IDS) sendDM(tokenForAlert, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
+      if (!_isCycleMuted('odds-bucket-guard')) for (const adminId of ADMIN_IDS) sendDM(tokenForAlert, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
     }
     log('INFO', 'BUCKET-GUARD', `Ciclo OK — ${agg.size} (sport,bucket) avaliados | ${alerts.length} blocked | ${restored.length} restored`);
   } catch (e) {
@@ -5076,6 +5094,7 @@ async function runPipelineDigestCycle() {
 }
 
 async function runModelCalibrationCycle() {
+  if (_isCycleMuted('model-calibration')) { return; }
   if (!ADMIN_IDS.size) return;
   let result = null;
   try {
@@ -5170,6 +5189,7 @@ let _lastLiveScoutCheck = 0;
 const LIVE_SCOUT_CHECK_INTERVAL_MS = parseInt(process.env.LIVE_SCOUT_CHECK_INTERVAL_MIN || '3', 10) * 60 * 1000;
 
 async function checkLiveScoutGaps() {
+  if (_isCycleMuted('live-scout-gaps')) { return; }
   if (!ADMIN_IDS.size) return;
   if (!/^(1|true|yes)$/i.test(String(process.env.LIVE_SCOUT_ALERTS ?? 'true'))) return;
   const now = Date.now();
@@ -5251,6 +5271,7 @@ async function checkLiveScoutGaps() {
 }
 
 async function checkPatchMetaStale(token) {
+  if (_isCycleMuted('patch-meta-stale')) { return; }
   if (!ADMIN_IDS.size) return;
   if (Date.now() - lastPatchAlert < PATCH_ALERT_INTERVAL) return;
   const age = getPatchMetaAgeDays();
