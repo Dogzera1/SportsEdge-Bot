@@ -13852,6 +13852,7 @@ Máximo 200 palavras.`;
           p1: match.team1, p2: match.team2, tipParticipant: tipTeam,
           odds: String(tipOdd), ev: String(tipEV), stake: tipStakeAdjFb,
           confidence: tipConf, isLive: false, market_type: _recordMarketType,
+          isShadow: fbConfig?.shadowMode ? 1 : 0,
           modelP1: fbModelP1, modelP2: fbModelP2, modelPPick: fbModelPPick,
           modelLabel: (elo ? 'football-elo+poisson' : 'football-poisson') + (_fbHybridText ? '+hybrid' : (_fbFromOverride ? '+override' : '')),
           tipReason: fbTipReason,
@@ -13867,6 +13868,13 @@ Máximo 200 palavras.`;
         if (recFb?.skipped) {
           analyzedFootball.set(key, { ts: now, tipSent: true });
           log('INFO', 'AUTO-FOOTBALL', `Tip duplicada (já registrada), Telegram ignorado: ${match.team1} vs ${match.team2}`);
+          continue;
+        }
+
+        // Shadow gate: DB registrou (isShadow=1 acima); não envia DM.
+        if (fbConfig?.shadowMode) {
+          analyzedFootball.set(key, { ts: now, tipSent: true });
+          log('INFO', 'AUTO-FOOTBALL', `[SHADOW] ${tipTeam} @ ${tipOdd} | ${_recordMarketType} | EV:${tipEV}% | ${tipConf} (DB log only)`);
           continue;
         }
 
