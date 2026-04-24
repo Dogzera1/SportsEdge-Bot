@@ -99,11 +99,14 @@ function getBaseline() {
   const map = Object.fromEntries(rows.map(r => [r.key, r.value]));
   const amount = parseFloat(map.bankroll_baseline_amount) || 900;
   const pct = parseFloat(map.bankroll_unit_pct) || 1.0;
+  // Per-sport tier model (Abr/2026-III): 1u = R$1 base por sport, independente do baseline.
+  // Fórmula legada `amount * pct / 100` dava 10 pra baseline 1000, inflando fallback
+  // recomputes em queries que não selecionam stake_reais/profit_reais stored.
   return {
     date: map.bankroll_baseline_date || '2026-04-16',
     amount,
     unit_pct: pct,
-    unit_value: +(amount * pct / 100).toFixed(4),
+    unit_value: 1.0,
   };
 }
 
@@ -13065,9 +13068,11 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
         };
       });
 
-      // Equity diária agregada cross-sport — recomputa profit/stake com unit_value
+      // Equity diária agregada cross-sport — usa stake_reais/profit_reais stored (tier unit
+      // per-sport). Fallback recompute só se stored NULL; unit_value global agora é 10.00
+      // (1000 × 1%), mas tier model grava em R$1/u direto — por isso precisa do stored.
       const equityRawTips = db.prepare(`
-        SELECT DATE(settled_at) AS day, stake, odds, result
+        SELECT DATE(settled_at) AS day, stake, odds, result, stake_reais, profit_reais
         FROM tips
         WHERE (archived IS NULL OR archived = 0)
           AND result IN ('win','loss','push')
