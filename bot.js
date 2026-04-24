@@ -1790,9 +1790,38 @@ async function runAutoAnalysis() {
 
         if (result.tipMatch) {
           const tipTeam = result.tipMatch[1].trim();
-          const tipOdd = result.tipMatch[2].trim();
-          const tipEV = result.tipMatch[3].trim();
+          let tipOdd = result.tipMatch[2].trim();
+          let tipEV = result.tipMatch[3].trim();
           let tipConf = (result.tipMatch[5] || CONF.MEDIA).trim().toUpperCase();
+
+          // Line shopping EV recalc (opt-in LINE_SHOP_EV_RECALC, default true pra primary sports).
+          // Se best book disponível tem odd maior que Pinnacle E spread dentro do cap (stale/arb
+          // guard), recomputa EV com best odd — Kelly fica sized pro que o user vai efetivamente
+          // apostar. formatLineShopDM já mostra best book no DM.
+          if (process.env.LINE_SHOP_EV_RECALC !== 'false') {
+            try {
+              const { checkBookmakerSpread } = require('./lib/line-shopping');
+              const _pickLs = norm(tipTeam).includes(norm(match.team1)) || norm(match.team1).includes(norm(tipTeam)) ? 't1' : 't2';
+              const _ls = computeLineShop(result.o, _pickLs);
+              const _pinOdd = parseFloat(tipOdd);
+              if (_ls && Number.isFinite(_pinOdd) && _ls.bestOdd > _pinOdd && _ls.pinnacleOdd != null) {
+                const _maxRatio = parseFloat(process.env.LINE_SHOP_MAX_RATIO || '1.15');
+                const _spread = checkBookmakerSpread(result.o, _pickLs, _maxRatio);
+                if (!_spread.reject) {
+                  const _modelPLs = (result.modelP1 > 0)
+                    ? (_pickLs === 't1' ? result.modelP1 : result.modelP2)
+                    : null;
+                  const _newEvLs = _modelPLs ? ((_modelPLs * _ls.bestOdd - 1) * 100).toFixed(1) : null;
+                  log('INFO', 'LINE-SHOP', `${match.team1} vs ${match.team2} LIVE: odd ${tipOdd}→${_ls.bestOdd.toFixed(3)} (${_ls.bestBook}, +${_ls.deltaPct?.toFixed(1)}%)${_newEvLs ? ` EV ${tipEV}%→${_newEvLs}%` : ''}`);
+                  tipOdd = _ls.bestOdd.toFixed(3);
+                  if (_newEvLs) tipEV = _newEvLs;
+                } else {
+                  log('INFO', 'LINE-SHOP', `${match.team1} vs ${match.team2} LIVE: best ${_ls.bestBook}@${_ls.bestOdd} vs Pinnacle ${_ls.pinnacleOdd} ratio ${_spread.ratio} > cap ${_maxRatio} — mantendo Pinnacle (stale/arb guard)`);
+                }
+              }
+            } catch (e) { reportBug('LINE-SHOP-LIVE', e, { team1: match.team1, team2: match.team2 }); }
+          }
+
           // EV sanity: bloqueia EV absurdamente alto (erro de cálculo da IA) — espelha gate do upcoming.
           // Ceiling condicional: 80% se modelo treinado ativo (ECE baixa), 50% caso contrário.
           const tipEVnumLive = parseFloat(String(tipEV).replace(/[%+]/g, ''));
@@ -2193,9 +2222,34 @@ async function runAutoAnalysis() {
 
           if (result.tipMatch) {
             const tipTeam = result.tipMatch[1].trim();
-            const tipOdd = result.tipMatch[2].trim();
-            const tipEV = result.tipMatch[3].trim();
+            let tipOdd = result.tipMatch[2].trim();
+            let tipEV = result.tipMatch[3].trim();
             let tipConf = (result.tipMatch[5] || CONF.MEDIA).trim().toUpperCase();
+
+            // Line shopping EV recalc (opt-in LINE_SHOP_EV_RECALC, default true).
+            if (process.env.LINE_SHOP_EV_RECALC !== 'false') {
+              try {
+                const { checkBookmakerSpread } = require('./lib/line-shopping');
+                const _pickLs = norm(tipTeam).includes(norm(match.team1)) || norm(match.team1).includes(norm(tipTeam)) ? 't1' : 't2';
+                const _ls = computeLineShop(result.o, _pickLs);
+                const _pinOdd = parseFloat(tipOdd);
+                if (_ls && Number.isFinite(_pinOdd) && _ls.bestOdd > _pinOdd && _ls.pinnacleOdd != null) {
+                  const _maxRatio = parseFloat(process.env.LINE_SHOP_MAX_RATIO || '1.15');
+                  const _spread = checkBookmakerSpread(result.o, _pickLs, _maxRatio);
+                  if (!_spread.reject) {
+                    const _modelPLs = (result.modelP1 > 0)
+                      ? (_pickLs === 't1' ? result.modelP1 : result.modelP2)
+                      : null;
+                    const _newEvLs = _modelPLs ? ((_modelPLs * _ls.bestOdd - 1) * 100).toFixed(1) : null;
+                    log('INFO', 'LINE-SHOP', `${match.team1} vs ${match.team2} UP: odd ${tipOdd}→${_ls.bestOdd.toFixed(3)} (${_ls.bestBook}, +${_ls.deltaPct?.toFixed(1)}%)${_newEvLs ? ` EV ${tipEV}%→${_newEvLs}%` : ''}`);
+                    tipOdd = _ls.bestOdd.toFixed(3);
+                    if (_newEvLs) tipEV = _newEvLs;
+                  } else {
+                    log('INFO', 'LINE-SHOP', `${match.team1} vs ${match.team2} UP: best ${_ls.bestBook}@${_ls.bestOdd} ratio ${_spread.ratio} > cap ${_maxRatio} — mantém Pinnacle`);
+                  }
+                }
+              } catch (e) { reportBug('LINE-SHOP-UP', e, { team1: match.team1, team2: match.team2 }); }
+            }
 
             // Tier 2/3 LoL safeguards (upcoming): degrade ALTA→MÉDIA se p>0.85,
             // exige EV ≥ 7%, bloqueia BAIXA (learning G2 NORD bleed).
