@@ -1877,7 +1877,7 @@ async function runAutoAnalysis() {
               tipConf = CONF.MEDIA;
             }
             // EV mínimo maior pra tier 2/3: exige ≥7% vs 2-3% default
-            const tierEvMin = parseFloat(process.env.LOL_TIER2_EV_MIN || '7') || 7;
+            const tierEvMin = parseFloat(process.env.LOL_TIER2_EV_MIN || '5') || 5;
             const _preBonusLolLive = require('./lib/pre-match-gate').preMatchEvBonus('lol', isLiveLoL);
             const _evReqLolLive = tierEvMin + _preBonusLolLive;
             const tipEVnum = parseFloat(tipEV) || 0;
@@ -2261,7 +2261,7 @@ async function runAutoAnalysis() {
                 log('INFO', 'AUTO', `Tier ${_lolTierUp} ${match.league}: p=${(_modelPPickUp*100).toFixed(1)}% > 85% → ALTA→MÉDIA (overconfidence)`);
                 tipConf = CONF.MEDIA;
               }
-              const _tier2EvMin = parseFloat(process.env.LOL_TIER2_EV_MIN || '7') || 7;
+              const _tier2EvMin = parseFloat(process.env.LOL_TIER2_EV_MIN || '5') || 5;
               // Upcoming = sempre PRE-match (não live)
               const _preBonusLolUp = require('./lib/pre-match-gate').preMatchEvBonus('lol', false);
               const _evReqLolUp = _tier2EvMin + _preBonusLolUp;
@@ -13599,10 +13599,40 @@ Máximo 200 palavras.`;
 
         const tipMarket = tipMatchEff[1].toUpperCase();
         const tipTeam   = tipMatchEff[2].trim();
-        const tipOdd    = parseFloat(tipMatchEff[3]);
-        const tipEV     = parseFloat(tipMatchEff[4]);
+        let   tipOdd    = parseFloat(tipMatchEff[3]);
+        let   tipEV     = parseFloat(tipMatchEff[4]);
         const tipStake  = tipMatchEff[5];
         const tipConf   = tipMatchEff[6].toUpperCase();
+
+        // Line shopping: football odds vêm de TheOddsAPI com múltiplos bookmakers
+        // em match.odds._allOdds (populado em server.js /football-matches). Swap
+        // tipOdd pra best disponível (spread cap protege stale/arb). Só 1X2; totals
+        // ficam pra iteração futura (keys aninhadas em ou25).
+        if (process.env.LINE_SHOP_EV_RECALC !== 'false' && match.odds?._allOdds) {
+          const _pickKey = tipMarket === '1X2_H' ? 'h' : tipMarket === '1X2_A' ? 'a' : tipMarket === '1X2_D' ? 'd' : null;
+          if (_pickKey) {
+            try {
+              const { checkBookmakerSpread } = require('./lib/line-shopping');
+              const _ls = computeLineShop(match.odds, _pickKey);
+              if (_ls && Number.isFinite(tipOdd) && _ls.bestOdd > tipOdd) {
+                const _maxRatio = parseFloat(process.env.LINE_SHOP_MAX_RATIO || '1.15');
+                const _spread = checkBookmakerSpread(match.odds, _pickKey, _maxRatio);
+                if (!_spread.reject) {
+                  // pickP: recomputa EV com best odd. fbModel probability está em mlScore.
+                  const _pickP = tipMarket === '1X2_H' ? parseFloat(mlScore?.modelH)
+                    : tipMarket === '1X2_A' ? parseFloat(mlScore?.modelA)
+                    : tipMarket === '1X2_D' ? parseFloat(mlScore?.modelD) : null;
+                  const _newEv = (_pickP && _pickP > 0) ? ((_pickP / 100) * _ls.bestOdd - 1) * 100 : null;
+                  log('INFO', 'LINE-SHOP', `FB ${match.team1} vs ${match.team2} [${tipMarket}]: ${tipOdd.toFixed(2)}→${_ls.bestOdd.toFixed(2)} (${_ls.bestBook}, +${_ls.deltaPct?.toFixed(1)}%)${_newEv != null ? ` EV ${tipEV}%→${_newEv.toFixed(1)}%` : ''}`);
+                  tipOdd = _ls.bestOdd;
+                  if (_newEv != null) tipEV = +_newEv.toFixed(1);
+                } else {
+                  log('INFO', 'LINE-SHOP', `FB ${match.team1} vs ${match.team2}: best ${_ls.bestBook}@${_ls.bestOdd} ratio ${_spread.ratio} > cap ${_maxRatio} — mantém Pinnacle`);
+                }
+              }
+            } catch (e) { reportBug('LINE-SHOP-FB', e, { team1: match.team1, team2: match.team2 }); }
+          }
+        }
 
         if (tipOdd < 1.30 || tipOdd > 6.00) {
           log('INFO', 'AUTO-FOOTBALL', `Gate odds: ${tipOdd} fora do range 1.30-6.00`);
