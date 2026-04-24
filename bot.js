@@ -3381,7 +3381,7 @@ function getKellyFraction(sport, conf) {
   const key = _normalizeConfKey(conf);
   const sp = String(sport || '').toLowerCase();
   const spEnv = sp.toUpperCase().replace(/[^A-Z0-9]/g, '');
-  // Per-sport override first
+  // Per-sport override first (env tem precedência sobre auto-tune)
   const perSport = process.env[`KELLY_${spEnv}_${key}`];
   if (perSport != null && perSport !== '') {
     const v = parseFloat(perSport);
@@ -3393,6 +3393,14 @@ function getKellyFraction(sport, conf) {
     const v = parseFloat(global);
     if (Number.isFinite(v) && v > 0 && v <= 1) return v;
   }
+  // Auto-tune runtime state (daily cron runKellyAutoTune)
+  try {
+    const { getGateValue } = require('./lib/gates-runtime-state');
+    const autoMult = getGateValue(sp, 'kelly_mult');
+    if (Number.isFinite(autoMult) && autoMult >= 0.2 && autoMult <= 1.2) {
+      return _KELLY_DEFAULTS[key] * autoMult;
+    }
+  } catch (_) {}
   // Per-sport default (lift-based)
   const mult = _KELLY_SPORT_MULT[sp] ?? 1.00;
   return _KELLY_DEFAULTS[key] * mult;
@@ -13605,29 +13613,38 @@ Máximo 200 palavras.`;
         const tipConf   = tipMatchEff[6].toUpperCase();
 
         // Line shopping: football odds vêm de TheOddsAPI com múltiplos bookmakers
-        // em match.odds._allOdds (populado em server.js /football-matches). Swap
-        // tipOdd pra best disponível (spread cap protege stale/arb). Só 1X2; totals
-        // ficam pra iteração futura (keys aninhadas em ou25).
-        if (process.env.LINE_SHOP_EV_RECALC !== 'false' && match.odds?._allOdds) {
-          const _pickKey = tipMarket === '1X2_H' ? 'h' : tipMarket === '1X2_A' ? 'a' : tipMarket === '1X2_D' ? 'd' : null;
-          if (_pickKey) {
+        // em match.odds._allOdds (1X2) e match.odds.ou25._allOdds (totals). Swap
+        // tipOdd pra best disponível (spread cap protege stale/arb).
+        if (process.env.LINE_SHOP_EV_RECALC !== 'false') {
+          const _is1x2 = tipMarket === '1X2_H' || tipMarket === '1X2_A' || tipMarket === '1X2_D';
+          const _isOu = tipMarket === 'OVER_2.5' || tipMarket === 'UNDER_2.5';
+          const _lsOddsObj = _is1x2 ? match.odds : (_isOu ? match.odds?.ou25 : null);
+          const _pickKey = tipMarket === '1X2_H' ? 'h'
+            : tipMarket === '1X2_A' ? 'a'
+            : tipMarket === '1X2_D' ? 'd'
+            : tipMarket === 'OVER_2.5' ? 'over'
+            : tipMarket === 'UNDER_2.5' ? 'under'
+            : null;
+          if (_pickKey && _lsOddsObj?._allOdds) {
             try {
               const { checkBookmakerSpread } = require('./lib/line-shopping');
-              const _ls = computeLineShop(match.odds, _pickKey);
+              const _ls = computeLineShop(_lsOddsObj, _pickKey);
               if (_ls && Number.isFinite(tipOdd) && _ls.bestOdd > tipOdd) {
                 const _maxRatio = parseFloat(process.env.LINE_SHOP_MAX_RATIO || '1.15');
-                const _spread = checkBookmakerSpread(match.odds, _pickKey, _maxRatio);
+                const _spread = checkBookmakerSpread(_lsOddsObj, _pickKey, _maxRatio);
                 if (!_spread.reject) {
-                  // pickP: recomputa EV com best odd. fbModel probability está em mlScore.
                   const _pickP = tipMarket === '1X2_H' ? parseFloat(mlScore?.modelH)
                     : tipMarket === '1X2_A' ? parseFloat(mlScore?.modelA)
-                    : tipMarket === '1X2_D' ? parseFloat(mlScore?.modelD) : null;
+                    : tipMarket === '1X2_D' ? parseFloat(mlScore?.modelD)
+                    : tipMarket === 'OVER_2.5' ? parseFloat(mlScore?.over25Prob)
+                    : tipMarket === 'UNDER_2.5' ? (100 - parseFloat(mlScore?.over25Prob || 0))
+                    : null;
                   const _newEv = (_pickP && _pickP > 0) ? ((_pickP / 100) * _ls.bestOdd - 1) * 100 : null;
                   log('INFO', 'LINE-SHOP', `FB ${match.team1} vs ${match.team2} [${tipMarket}]: ${tipOdd.toFixed(2)}→${_ls.bestOdd.toFixed(2)} (${_ls.bestBook}, +${_ls.deltaPct?.toFixed(1)}%)${_newEv != null ? ` EV ${tipEV}%→${_newEv.toFixed(1)}%` : ''}`);
                   tipOdd = _ls.bestOdd;
                   if (_newEv != null) tipEV = +_newEv.toFixed(1);
                 } else {
-                  log('INFO', 'LINE-SHOP', `FB ${match.team1} vs ${match.team2}: best ${_ls.bestBook}@${_ls.bestOdd} ratio ${_spread.ratio} > cap ${_maxRatio} — mantém Pinnacle`);
+                  log('INFO', 'LINE-SHOP', `FB ${match.team1} vs ${match.team2} [${tipMarket}]: best ${_ls.bestBook}@${_ls.bestOdd} ratio ${_spread.ratio} > cap ${_maxRatio} — mantém Pinnacle`);
                 }
               }
             } catch (e) { reportBug('LINE-SHOP-FB', e, { team1: match.team1, team2: match.team2 }); }
@@ -16515,6 +16532,41 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   }
   setInterval(() => runGateOptimizerWeekly().catch(e => log('ERROR', 'GATE-OPT', e.message)), 60 * 60 * 1000);
   setTimeout(() => runGateOptimizerWeekly().catch(() => {}), 25 * 60 * 1000);
+
+  // Kelly auto-tune diário (08h local). Rolling 30d ROI+CLV per-sport → ajusta
+  // kelly_mult em gates_runtime_state (getKellyFraction consulta antes do default).
+  // Conservador: step up +0.05 / down -0.10, bounds [0.20, 1.20]. Opt-out:
+  // KELLY_AUTO_TUNE=false. DM admin com sports que mudaram.
+  let _lastKellyTuneDay = null;
+  async function runKellyAutoTuneDaily() {
+    if (/^(0|false|no)$/i.test(String(process.env.KELLY_AUTO_TUNE || ''))) return;
+    const now = new Date();
+    if (now.getHours() !== 8) return;
+    const today = now.toISOString().slice(0, 10);
+    if (_lastKellyTuneDay === today) return;
+    _lastKellyTuneDay = today;
+    try {
+      const { runKellyAutoTune } = require('./lib/kelly-auto-tune');
+      const r = runKellyAutoTune(db, {});
+      const changed = r.results.filter(x => x.action === 'up' || x.action === 'down');
+      const holdsAtBound = r.results.filter(x => x.action === 'hold_floor' || x.action === 'hold_ceiling');
+      log('INFO', 'KELLY-TUNE', `${r.results.length} sports avaliados | ${changed.length} mudaram | ${holdsAtBound.length} no bound`);
+      for (const c of changed) {
+        log('INFO', 'KELLY-TUNE', `${c.sport}: mult ${c.prev}→${c.mult} (${c.action}) — ${c.reason}`);
+      }
+      if (changed.length && ADMIN_IDS.size) {
+        const lines = changed.slice(0, 8).map(c => {
+          const arrow = c.action === 'up' ? '📈' : '📉';
+          return `${arrow} ${c.sport}: ${c.prev}→${c.mult} | ROI=${c.metrics.roi ?? '?'}% CLV=${c.metrics.avg_clv ?? '?'}% n=${c.metrics.n}`;
+        });
+        const msg = `🎯 *KELLY AUTO-TUNE — ${r.days}d*\n\n${lines.join('\n')}\n\n_Aplicado em gates_runtime_state. Revert via setManual ou env KELLY_<SPORT>_<CONF>._`;
+        const token = Object.values(SPORTS).find(S => S?.enabled && S?.token)?.token;
+        if (token) for (const adminId of ADMIN_IDS) sendDM(token, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
+      }
+    } catch (e) { log('ERROR', 'KELLY-TUNE', e.message); }
+  }
+  setInterval(() => runKellyAutoTuneDaily().catch(e => log('ERROR', 'KELLY-TUNE', e.message)), 60 * 60 * 1000);
+  setTimeout(() => runKellyAutoTuneDaily().catch(() => {}), 30 * 60 * 1000);
 
   // Vetor 7 — Dota snapshot collector: cron 60s captura Steam RT + Pinnacle pareados.
   // Default ON. Desativar via DOTA_SNAPSHOT_ENABLED=false.

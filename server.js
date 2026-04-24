@@ -15905,20 +15905,31 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
             const odds = { h: String(oH.price), d: String(oD.price), a: String(oA.price), bookmaker: bm.title };
             if (over && under) odds.ou25 = { over: String(over.price), under: String(under.price), point: over.point };
             // Line shopping: TheOddsAPI retorna múltiplos bookmakers — expõe todos em
-            // _allOdds pra computeLineShop extrair best odd por side.
+            // _allOdds pra computeLineShop extrair best odd por side (1X2 + totals).
             if (Array.isArray(e.bookmakers) && e.bookmakers.length >= 2) {
               const _all = [];
+              const _allOu = [];
               for (const bmi of e.bookmakers) {
                 const h2hI = bmi.markets?.find(m => m.key === 'h2h');
-                if (!h2hI) continue;
-                const oHi = h2hI.outcomes?.find(o => o.name === e.home_team);
-                const oDi = h2hI.outcomes?.find(o => o.name === 'Draw');
-                const oAi = h2hI.outcomes?.find(o => o.name === e.away_team);
-                if (oHi && oDi && oAi) {
-                  _all.push({ h: String(oHi.price), d: String(oDi.price), a: String(oAi.price), bookmaker: bmi.title });
+                if (h2hI) {
+                  const oHi = h2hI.outcomes?.find(o => o.name === e.home_team);
+                  const oDi = h2hI.outcomes?.find(o => o.name === 'Draw');
+                  const oAi = h2hI.outcomes?.find(o => o.name === e.away_team);
+                  if (oHi && oDi && oAi) {
+                    _all.push({ h: String(oHi.price), d: String(oDi.price), a: String(oAi.price), bookmaker: bmi.title });
+                  }
+                }
+                const totalsI = bmi.markets?.find(m => m.key === 'totals');
+                if (totalsI) {
+                  const ovI = totalsI.outcomes?.find(o => o.name === 'Over' && Math.abs((o.point ?? 0) - 2.5) < 0.01);
+                  const unI = totalsI.outcomes?.find(o => o.name === 'Under' && Math.abs((o.point ?? 0) - 2.5) < 0.01);
+                  if (ovI && unI) {
+                    _allOu.push({ over: String(ovI.price), under: String(unI.price), point: ovI.point, bookmaker: bmi.title });
+                  }
                 }
               }
               if (_all.length >= 2) odds._allOdds = _all;
+              if (_allOu.length >= 2 && odds.ou25) odds.ou25._allOdds = _allOu;
             }
             matches.push({
               id: e.id, game: 'football', sport_key: k, status: 'upcoming',
