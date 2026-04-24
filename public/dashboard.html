@@ -746,6 +746,20 @@
     </div>
   </div>
 
+  <!-- ML Shadow por esporte (expandable) -->
+  <div class="section" id="secMlShadow">
+    <div class="section-head" onclick="toggleSection('secMlShadow'); loadMlShadowBySport()">
+      <div class="section-head-left">
+        <svg class="section-chevron" viewBox="0 0 16 16"><path d="M6 4l4 4-4 4" stroke="currentColor" fill="none" stroke-width="2"/></svg>
+        <span>🥷 ML Shadow por Esporte</span>
+      </div>
+      <div class="section-head-meta" id="mlShadowMeta">—</div>
+    </div>
+    <div class="section-body">
+      <div id="mlShadowBody"><div class="loading">Carregando</div></div>
+    </div>
+  </div>
+
   <!-- Market Tips Shadow (expandable) -->
   <div class="section" id="secMarketTips">
     <div class="section-head" onclick="toggleSection('secMarketTips'); loadMarketTipsShadow()">
@@ -2281,6 +2295,82 @@ async function loadShadow() {
     </div>
     <div class="card-meta" style="margin-top:10px">Shadow = log-only (não envia DM); Ativo = tip production.</div>
   `;
+}
+
+// ML Shadow por esporte — cross-sport breakdown de tips em shadow (sem DM).
+// Usado pra avaliar se sport está pronto pra promover pra produção.
+async function loadMlShadowBySport() {
+  const data = await apiFetch('/ml-shadow-by-sport?days=30');
+  const el = document.getElementById('mlShadowBody');
+  const meta = document.getElementById('mlShadowMeta');
+  if (!data || data.error) { el.innerHTML = '<div class="empty-state">Sem dados shadow</div>'; meta.textContent = '—'; return; }
+  const t = data.totals || {};
+  const sports = data.per_sport || [];
+  meta.textContent = `${t.n || 0} tips · ${t.pending || 0} pend · ROI ${t.roi != null ? (t.roi >= 0 ? '+' : '') + t.roi + '%' : '—'}`;
+  if (!sports.length) {
+    el.innerHTML = '<div class="empty-state">Nenhuma tip ML em shadow nos últimos ' + data.days + 'd</div>';
+    return;
+  }
+
+  const sportEmoji = { lol:'🎮', dota2:'🎮', cs:'🔫', valorant:'🎯', tennis:'🎾', football:'⚽', mma:'🥊', darts:'🎯', snooker:'🎱', tabletennis:'🏓' };
+  const sportLabel = { lol:'LoL', dota2:'Dota2', cs:'CS2', valorant:'Valorant', tennis:'Tênis', football:'Futebol', mma:'MMA', darts:'Darts', snooker:'Snooker', tabletennis:'Table Tennis' };
+
+  const fmtOrDash = (v, prec = 1) => v == null ? '—' : (v >= 0 ? '+' : '') + v.toFixed(prec) + '%';
+  const fmtProfit = v => v == null ? '—' : (v >= 0 ? '+' : '') + 'R$ ' + v.toFixed(2);
+  const clsSign = v => v == null ? '' : (v >= 0 ? 'positive' : 'negative');
+
+  let html = `<div style="margin-bottom:10px" class="card-meta">
+    <b>${data.days}d</b> · ${t.n} tips shadow (${t.wins}W / ${t.losses}L / ${t.pending}P) ·
+    ROI <span class="${clsSign(t.roi)}">${fmtOrDash(t.roi, 2)}</span> ·
+    Lucro <span class="${clsSign(t.profit_reais)}">${fmtProfit(t.profit_reais)}</span>
+  </div>`;
+
+  html += `<table class="tips">
+    <thead><tr>
+      <th>Esporte</th>
+      <th style="text-align:right">Tips</th>
+      <th style="text-align:right">W/L/P</th>
+      <th style="text-align:right">Hit%</th>
+      <th style="text-align:right">ROI</th>
+      <th style="text-align:right">CLV</th>
+      <th style="text-align:right">Lucro</th>
+      <th style="text-align:right">EV méd</th>
+      <th style="text-align:right">Odd méd</th>
+    </tr></thead>
+    <tbody>`;
+
+  for (const s of sports) {
+    const emoji = sportEmoji[s.sport] || '📊';
+    const label = sportLabel[s.sport] || s.sport.toUpperCase();
+    const decided = (s.wins || 0) + (s.losses || 0);
+    // Readiness heuristic — precisa n>=30 settled + ROI>=0 + CLV>=0 pra cogitar promoção
+    const readyForPromo = decided >= 30 && (s.roi ?? -1) >= 0 && (s.avg_clv ?? -1) >= 0;
+    const readyLowN = decided < 30 && decided >= 10;
+    const badge = readyForPromo
+      ? '<span style="background:#16a34a;color:#fff;padding:1px 6px;border-radius:3px;font-size:0.7em;margin-left:4px">PROMOVER</span>'
+      : readyLowN
+        ? '<span style="background:#ca8a04;color:#fff;padding:1px 6px;border-radius:3px;font-size:0.7em;margin-left:4px">n&lt;30</span>'
+        : '';
+
+    html += `<tr>
+      <td>${emoji} ${label}${badge}</td>
+      <td style="text-align:right">${s.n}</td>
+      <td style="text-align:right">${s.wins || 0}/${s.losses || 0}/${s.pending || 0}</td>
+      <td style="text-align:right">${s.hitRate != null ? s.hitRate.toFixed(1) + '%' : '—'}</td>
+      <td style="text-align:right" class="${clsSign(s.roi)}">${fmtOrDash(s.roi, 2)}</td>
+      <td style="text-align:right" class="${clsSign(s.avg_clv)}">${fmtOrDash(s.avg_clv, 1)} <span style="opacity:0.5;font-size:0.85em">(n=${s.clv_n})</span></td>
+      <td style="text-align:right" class="${clsSign(s.profit_reais)}">${fmtProfit(s.profit_reais)}</td>
+      <td style="text-align:right">${s.avg_ev != null ? s.avg_ev.toFixed(1) + '%' : '—'}</td>
+      <td style="text-align:right">${s.avg_odds != null ? s.avg_odds.toFixed(2) : '—'}</td>
+    </tr>`;
+  }
+
+  html += `</tbody></table>
+  <div class="card-meta" style="margin-top:10px">
+    Shadow = tip gerada mas sem DM. Promover quando: n≥30 settled, ROI≥0%, CLV≥0%. CLV é leading indicator (não espera settle).
+  </div>`;
+
+  el.innerHTML = html;
 }
 
 let marketTipsState = { tips: [], page: 0, perPage: 20, sport: null, breakdown: null };

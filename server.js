@@ -12488,6 +12488,75 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
     return;
   }
 
+  // GET /ml-shadow-by-sport?days=30
+  // Agregado cross-sport de tips ML em shadow (is_shadow=1). Mostra pending + settled,
+  // hit rate, ROI, CLV, profit por esporte. Usado no dashboard pra observar sports
+  // em shadow (sem DM) até amostra ser suficiente pra promover.
+  if (p === '/ml-shadow-by-sport') {
+    const daysRaw = parseInt(parsed.query.days);
+    const days = Number.isFinite(daysRaw) ? Math.max(1, Math.min(365, daysRaw)) : 30;
+    try {
+      const rows = db.prepare(`
+        SELECT sport,
+               COUNT(*) AS n,
+               SUM(CASE WHEN result='win' THEN 1 ELSE 0 END) AS wins,
+               SUM(CASE WHEN result='loss' THEN 1 ELSE 0 END) AS losses,
+               SUM(CASE WHEN result='push' THEN 1 ELSE 0 END) AS pushes,
+               SUM(CASE WHEN result IS NULL THEN 1 ELSE 0 END) AS pending,
+               SUM(COALESCE(profit_reais, 0)) AS profit_r,
+               SUM(COALESCE(stake_reais, 0)) AS stake_r,
+               AVG(odds) AS avg_odds,
+               AVG(ev) AS avg_ev,
+               AVG(CASE WHEN clv_odds > 1 AND odds > 1 THEN (odds / clv_odds - 1) * 100 END) AS avg_clv,
+               SUM(CASE WHEN clv_odds > 1 AND odds > 1 THEN 1 ELSE 0 END) AS clv_n
+        FROM tips
+        WHERE is_shadow = 1
+          AND (archived IS NULL OR archived = 0)
+          AND (market_type IS NULL OR market_type = 'ML')
+          AND (sent_at >= datetime('now', ?) OR result IS NULL)
+        GROUP BY sport
+        ORDER BY n DESC
+      `).all(`-${days} days`);
+
+      const per_sport = rows.map(r => {
+        const decided = (r.wins || 0) + (r.losses || 0);
+        const hitRate = decided > 0 ? r.wins / decided : null;
+        const roi = (r.stake_r || 0) > 0 ? (r.profit_r / r.stake_r) * 100 : null;
+        return {
+          sport: r.sport,
+          n: r.n, wins: r.wins, losses: r.losses, pushes: r.pushes, pending: r.pending,
+          hitRate: hitRate != null ? parseFloat((hitRate * 100).toFixed(1)) : null,
+          roi: roi != null ? parseFloat(roi.toFixed(2)) : null,
+          profit_reais: parseFloat((r.profit_r || 0).toFixed(2)),
+          stake_reais: parseFloat((r.stake_r || 0).toFixed(2)),
+          avg_odds: r.avg_odds ? parseFloat(r.avg_odds.toFixed(2)) : null,
+          avg_ev: r.avg_ev ? parseFloat(r.avg_ev.toFixed(2)) : null,
+          avg_clv: r.avg_clv != null ? parseFloat(r.avg_clv.toFixed(2)) : null,
+          clv_n: r.clv_n || 0,
+        };
+      });
+
+      // Totals cross-sport
+      const tot = per_sport.reduce((a, s) => ({
+        n: a.n + s.n, wins: a.wins + s.wins, losses: a.losses + s.losses,
+        pending: a.pending + s.pending,
+        profit_reais: a.profit_reais + s.profit_reais,
+        stake_reais: a.stake_reais + s.stake_reais,
+      }), { n: 0, wins: 0, losses: 0, pending: 0, profit_reais: 0, stake_reais: 0 });
+      const totDecided = tot.wins + tot.losses;
+      const totals = {
+        ...tot,
+        hitRate: totDecided > 0 ? parseFloat(((tot.wins / totDecided) * 100).toFixed(1)) : null,
+        roi: tot.stake_reais > 0 ? parseFloat(((tot.profit_reais / tot.stake_reais) * 100).toFixed(2)) : null,
+        profit_reais: parseFloat(tot.profit_reais.toFixed(2)),
+        stake_reais: parseFloat(tot.stake_reais.toFixed(2)),
+      };
+
+      sendJson(res, { days, totals, per_sport });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
   // Equity curve diária: cumulative profit em R$ por dia (após settlement).
   // Inclui drawdown (queda do pico), Sharpe daily ratio, max drawdown.
   // GET /equity-curve?sport=esports&days=30
