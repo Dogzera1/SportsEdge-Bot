@@ -312,7 +312,10 @@
       "Bash(grep -cE \"sendDM\\\\\\([^\\)]+,\\\\s*adminId,\\\\s*[^\\)]+\\\\\\)\\\\.catch\\\\\\(\\\\\\(\\\\\\)\\\\s*=>\\\\s*\\\\{\\\\}\\\\\\)\" bot.js)",
       "Bash(echo \"exit=$?\")",
       "Bash(git rev-list *)",
-      "Bash(git reset *)"
+      "Bash(git reset *)",
+      "Bash(ls tips.db)",
+      "Bash(echo \"---grep exit: $?\")",
+      "Bash(DB_PATH=sportsedge.db node scripts/sync-tennis-stats.js)"
     ]
   }
 }

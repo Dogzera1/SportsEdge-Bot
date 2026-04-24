@@ -12128,10 +12128,15 @@ async function pollTennis(runOnce = false) {
           oddsMovement: null
         };
 
-        // Usa override ML env para tênis com base 4.0pp — exige edge mais robusto para reduzir false positives.
+        // Threshold tiered: Slam/Masters com backtest Brier 0.21 suportam edge menor (2.5pp).
+        // Resto (Challenger/250/ITF) fica em 4.0pp por ruído maior. Env TENNIS_MIN_EDGE_TOP / TENNIS_MIN_EDGE.
         // Adiciona bonus per-league se histórico CLV ruim (Tier 7).
         const _tennisLeagueBonus = getLeagueEdgeBonus('tennis', match.league || match.tournament || '');
-        const envScoreBase = (process.env.TENNIS_MIN_EDGE ? parseFloat(process.env.TENNIS_MIN_EDGE) : 4.0) + _tennisLeagueBonus;
+        const _tennisTopTier = isGrandSlam || isMasters;
+        const _tennisBase = _tennisTopTier
+          ? (process.env.TENNIS_MIN_EDGE_TOP ? parseFloat(process.env.TENNIS_MIN_EDGE_TOP) : 2.5)
+          : (process.env.TENNIS_MIN_EDGE ? parseFloat(process.env.TENNIS_MIN_EDGE) : 4.0);
+        const envScoreBase = _tennisBase + _tennisLeagueBonus;
         if (_tennisLeagueBonus > 0) log('DEBUG', 'TENNIS-LEAGUE-BONUS', `${match.team1} vs ${match.team2} [${match.league}]: edge threshold +${_tennisLeagueBonus}pp (CLV leak)`);
 
         // ── Modelo Tennis Específico (Elo + Serve/Return + Fatigue + H2H Surface) ──
