@@ -6148,6 +6148,16 @@ async function autoAnalyzeMatch(token, match) {
     if (process.env.LOG_IA_PROMPT === 'true' && text) {
       log('DEBUG', 'IA-RESP', `${match.team1} vs ${match.team2}: ${text.slice(0, 400)}...`);
     }
+    // Visibility: distingue causas de "sem texto" (status=200 mas content vazio vs error real)
+    if (!text) {
+      const hasStatus = resp?.__status ? String(resp.__status) : 'null';
+      const hasContent = Array.isArray(resp?.content) ? `array[${resp.content.length}]` : typeof resp?.content;
+      const silentTimeout = hasStatus === '200' && hasContent !== 'array[1]';
+      if (silentTimeout) {
+        global.__deepseekSilentTimeouts = (global.__deepseekSilentTimeouts || 0) + 1;
+        log('WARN', 'DEEPSEEK-SILENT', `${match.team1} vs ${match.team2}: status=200 mas content=${hasContent} (count=${global.__deepseekSilentTimeouts}) — possível timeout do proxy`);
+      }
+    }
     if (!text) {
       // Fallback sem IA: envia tip baseada no modelo quando há edge claro
       const direction = mlResult.direction;

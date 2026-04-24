@@ -98,7 +98,12 @@ async function main() {
         const resolvedAt = new Date(startMs + (m.duration || 0) * 1000)
           .toISOString().replace('T', ' ').replace('Z', '').slice(0, 19);
         const league = m.league_name || `League_${m.leagueid || 0}`;
-        const finalScore = `Bo${m.series_type === 0 ? 1 : m.series_type === 1 ? 3 : m.series_type === 2 ? 5 : 1} ${m.radiant_score || 0}-${m.dire_score || 0}`;
+        // OpenDota API `radiant_score`/`dire_score` = kills (não map wins). Series info
+        // vem em m.series_type mas map-wins reais requerem outro endpoint. Armazena só Bo-format
+        // sem score pra evitar settlement parsing erroneamente kills como mapas (ex: "Bo3 40-27"
+        // → _parseEsportsMapScore lia como 40-27 maps). Winner já é correto (radiant_win bool).
+        const boFormat = m.series_type === 1 ? 'Bo3' : m.series_type === 2 ? 'Bo5' : 'Bo1';
+        const finalScore = boFormat; // sem kills — evita mislabel em settlement
         const res = insertStmt.run(`od_${m.match_id}`, t1, t2, winner, finalScore, league, resolvedAt);
         if (res.changes > 0) pageInserted++;
       }
