@@ -24,7 +24,7 @@ const { computeRegionalStrengths, classifyLeagueRegion } = require('../lib/lol-r
 const { shrinkForBestOf } = require('../lib/lol-series-model');
 const { classifyLeague } = require('../lib/lol-model');
 
-const DB_PATH = path.resolve(__dirname, '..', 'sportsedge.db');
+const DB_PATH = (process.env.DB_PATH || path.resolve(__dirname, '..', 'sportsedge.db')).trim().replace(/^=+/, '');
 const OUT_PATH = path.resolve(__dirname, '..', 'lib', 'lol-model-isotonic.json');
 const BIN_WIDTH = 0.05;
 const MIN_BIN = 5; // mínimo de obs por bin pra considerar
