@@ -2648,7 +2648,12 @@ async function settleCompletedTips() {
         try {
           const syncDays = Math.max(2, Math.min(14,
             parseInt(process.env.FOOTBALL_SYNC_DAYS_BACK || '5', 10) || 5));
-          const preferEspn = /^(1|true|yes)$/i.test(String(process.env.FOOTBALL_SYNC_PREFER_ESPN || ''));
+          // ESPN primary desde 2026-04-24: proxy sofascore Railway vivo mas Cloudflare
+          // bloqueia curl_cffi upstream (retorna 404 "Sofascore API unreachable" em todas rotas).
+          // ESPN cobre 34 ligas sem key e está funcionando consistentemente (143 matches/sync).
+          // Opt-out: FOOTBALL_SYNC_PREFER_ESPN=false (volta pra sofascore primary).
+          const envFlag = String(process.env.FOOTBALL_SYNC_PREFER_ESPN || '').toLowerCase();
+          const preferEspn = !(envFlag === '0' || envFlag === 'false' || envFlag === 'no');
           const primary = preferEspn ? 'espn' : 'sofascore';
           const fallback = preferEspn ? 'sofascore' : 'espn';
           const tryOne = async (source) => serverGet(
@@ -16803,8 +16808,13 @@ async function checkCLV(caches = {}) {
 
         const clvN = parseFloat(clvOdds);
         if (clvN && clvN > 1) {
+          const prevClv = parseFloat(tip.clv_odds || 0);
+          const changed = !prevClv || Math.abs(clvN - prevClv) >= 0.005;
           await serverPost('/update-clv', { matchId: tip.match_id, clvOdds: clvN }, sport).catch(() => {});
-          log('INFO', 'CLV', `Registrado CLV ${clvN} (${sport}) para ${tip.participant1} vs ${tip.participant2}`);
+          // Near-regime re-captura a cada ciclo; só loga INFO quando odd muda pra evitar spam.
+          const level = changed ? 'INFO' : 'DEBUG';
+          const suffix = (changed && prevClv) ? ` (prev=${prevClv})` : '';
+          log(level, 'CLV', `Registrado CLV ${clvN} (${sport}) para ${tip.participant1} vs ${tip.participant2}${suffix}`);
         }
       }
     }
