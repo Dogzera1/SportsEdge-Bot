@@ -1631,8 +1631,11 @@ function tennisEspnRecentResultEligibleForTip(r, tipMs) {
 /** Remove prefixo interno para comparar com id do The Odds API */
 function stripTheOddsMatchId(raw) {
   let s = String(raw || '').trim();
-  if (s.startsWith('tennis_')) s = s.slice(7);
-  else if (s.startsWith('mma_')) s = s.slice(4);
+  // Cobertura expandida 2026-04-24: antes só tennis_/mma_; CS/dota2/LoL/val/football
+  // também carregam prefixo (ex: tips têm 'dota2_pin_1628922137', feed tem 'pin_1628922137'
+  // → findTheOddsH2hMatch por id falha → cai em name match → falha em team variants).
+  const m = s.match(/^(tennis|mma|lol|dota2|cs|valorant|football|darts|snooker|tabletennis)_(.+)$/i);
+  if (m) return m[2];
   return s;
 }
 
@@ -16566,8 +16569,10 @@ async function checkCLV(caches = {}) {
             if (m.time) {
               const k1 = norm(m.team1 || '') + '_' + norm(m.team2 || '');
               const k2 = norm(m.team2 || '') + '_' + norm(m.team1 || '');
-              matchTimeMap[k1] = new Date(m.time).getTime();
-              matchTimeMap[k2] = new Date(m.time).getTime();
+              const ts = new Date(m.time).getTime();
+              matchTimeMap[k1] = ts;
+              matchTimeMap[k2] = ts;
+              if (m.id) matchTimeMap[String(m.id)] = ts;
             }
           }
         }
@@ -16582,6 +16587,7 @@ async function checkCLV(caches = {}) {
               const ts = new Date(m.time).getTime();
               matchTimeMap[k1] = ts;
               matchTimeMap[k2] = ts;
+              if (m.id) matchTimeMap[String(m.id)] = ts;
             }
           }
         }
@@ -16596,6 +16602,7 @@ async function checkCLV(caches = {}) {
               const ts = new Date(m.time).getTime();
               matchTimeMap[k1] = ts;
               matchTimeMap[k2] = ts;
+              if (m.id) matchTimeMap[String(m.id)] = ts;
             }
           }
         }
@@ -16610,6 +16617,7 @@ async function checkCLV(caches = {}) {
               const ts = new Date(m.time).getTime();
               matchTimeMap[k1] = ts;
               matchTimeMap[k2] = ts;
+              if (m.id) matchTimeMap[String(m.id)] = ts;
             }
           }
         }
@@ -16624,6 +16632,7 @@ async function checkCLV(caches = {}) {
               const ts = new Date(m.time).getTime();
               matchTimeMap[k1] = ts;
               matchTimeMap[k2] = ts;
+              if (m.id) matchTimeMap[String(m.id)] = ts;
             }
           }
         }
@@ -16638,6 +16647,7 @@ async function checkCLV(caches = {}) {
               const ts = new Date(m.time).getTime();
               matchTimeMap[k1] = ts;
               matchTimeMap[k2] = ts;
+              if (m.id) matchTimeMap[String(m.id)] = ts;
             }
           }
         }
@@ -16652,6 +16662,7 @@ async function checkCLV(caches = {}) {
               const ts = new Date(m.time).getTime();
               matchTimeMap[k1] = ts;
               matchTimeMap[k2] = ts;
+              if (m.id) matchTimeMap[String(m.id)] = ts;
             }
           }
         }
@@ -16669,6 +16680,7 @@ async function checkCLV(caches = {}) {
               const ts = new Date(m.time).getTime();
               matchTimeMap[k1] = ts;
               matchTimeMap[k2] = ts;
+              if (m.id) matchTimeMap[String(m.id)] = ts;
             }
           }
         }
@@ -16686,7 +16698,8 @@ async function checkCLV(caches = {}) {
         //   far-future (timeToMatch ∈ [+3h, +7d]): captura 1x (proxy de open; se já tem, skip)
         //   live/sem match_time: mantém comportamento antigo (captura 1x se clv_odds NULL)
         const tipKey = norm(tip.participant1 || '') + '_' + norm(tip.participant2 || '');
-        const matchStart = matchTimeMap[tipKey] || 0;
+        const strippedMid = tip.match_id ? stripTheOddsMatchId(tip.match_id) : '';
+        const matchStart = (strippedMid && matchTimeMap[strippedMid]) || matchTimeMap[tipKey] || 0;
         const timeToMatch = matchStart > 0 ? matchStart - now : null;
         const isLiveTip = tip.is_live === 1 || tip.is_live === '1';
         const FAR_FUTURE_MAX_MS = 7 * 24 * 60 * 60 * 1000; // 7d cobre MMA fight cards
