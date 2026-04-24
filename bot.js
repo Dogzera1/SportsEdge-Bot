@@ -3278,7 +3278,8 @@ function isLeagueBlocked(sport, league) {
 //   CS2: lift 20% → full Kelly
 //   Tennis: lift 7% → -20% (0.20/0.133/0.08)
 //   MMA: lift 6% (n=561 teste) → -30% (0.175/0.117/0.07)
-//   Dota2/Valorant: lift 3-4% → -30% (modelo quase-baseline — overkelly perigoso)
+//   Valorant: lift 4% → -30% (modelo quase-baseline — overkelly perigoso)
+//   Dota2: lift 4% + CLV -45% observado 23/04 → -80% (scanner lento/contrarian ruim; corta leak)
 //   Darts/Snooker: lift 2-3% → -60% (alpha marginal, proteger capital)
 // Prioridade lookup: KELLY_<SPORT>_<CONF> → KELLY_<CONF> → per-sport default → global default.
 const _KELLY_DEFAULTS = { ALTA: 0.25, MEDIA: 1/6, BAIXA: 0.10 };
@@ -3286,7 +3287,8 @@ const _KELLY_DEFAULTS = { ALTA: 0.25, MEDIA: 1/6, BAIXA: 0.10 };
 const _KELLY_SPORT_MULT = {
   lol: 1.00, cs: 1.00, football: 1.00,
   tennis: 0.80,
-  mma: 0.70, dota2: 0.70, valorant: 0.70,
+  mma: 0.70, valorant: 0.70,
+  dota2: 0.20,
   darts: 0.40, snooker: 0.40,
   tabletennis: 0.80,
 };
@@ -3326,7 +3328,7 @@ const _EV_THRESHOLD_BASE = {
   lol: 5, cs: 5, football: 5,
   tennis: 7, mma: 7, dota2: 7, valorant: 7,
   tabletennis: 7,
-  darts: 10, snooker: 10,
+  darts: 10, snooker: 7,
 };
 
 // Cache de ECE por sport lido de lib/<sport>-weights.json no startup.
@@ -13506,11 +13508,21 @@ Máximo 200 palavras.`;
           await new Promise(r => setTimeout(r, 2000)); continue;
         }
         {
-          const _bk = require('./lib/odds-bucket-gate').isBucketBlocked('football', tipOdd);
-          if (_bk.blocked) {
-            log('INFO', 'AUTO-FOOTBALL', `Gate bucket: odd ${tipOdd} no bucket bloqueado ${_bk.bucket} (${_bk.source})`);
-            logRejection('football', `${match.team1} vs ${match.team2}`, 'odds_bucket_block', { odd: tipOdd, bucket: _bk.bucket, source: _bk.source });
-            await new Promise(r => setTimeout(r, 2000)); continue;
+          // Bypass bucket gate para football trained-direct (FB-HYBRID) com CONF≠BAIXA.
+          // Leak original do bucket 2.20-3.00 (ROI -58% em 2026-04-22) veio de paths
+          // fracos agregados cross-sport. FB-HYBRID exige trained+ensemble modelConf≥0.60
+          // + EV≥8% — perfil distinto. FB-IA-OVERRIDE SEM_EDGE (CONF=BAIXA 1u) continua
+          // sujeito ao gate (é o perfil que casou com o leak).
+          const _fbHighConf = !!_fbHybridText && tipConf !== 'BAIXA';
+          if (!_fbHighConf) {
+            const _bk = require('./lib/odds-bucket-gate').isBucketBlocked('football', tipOdd);
+            if (_bk.blocked) {
+              log('INFO', 'AUTO-FOOTBALL', `Gate bucket: odd ${tipOdd} no bucket bloqueado ${_bk.bucket} (${_bk.source})`);
+              logRejection('football', `${match.team1} vs ${match.team2}`, 'odds_bucket_block', { odd: tipOdd, bucket: _bk.bucket, source: _bk.source });
+              await new Promise(r => setTimeout(r, 2000)); continue;
+            }
+          } else {
+            log('INFO', 'AUTO-FOOTBALL', `Gate bucket bypass (FB-HYBRID ${tipConf}): odd ${tipOdd} → entra pra próximos gates`);
           }
         }
         const _preBonusFb = require('./lib/pre-match-gate').preMatchEvBonus('football', isFbLive);
@@ -16273,7 +16285,9 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
       const mt = await captureMarketTipsClv(db, serverGet);
       if (mt.updated > 0) log('INFO', 'CLV-CAPTURE', `market-tips: checked=${mt.checked} updated=${mt.updated}`);
       // 2. Regular tips via checkCLV legacy (já cobre cs/val/lol/dota2 pós fix 8dcc948)
-      await checkCLV(sharedCaches).catch(e => log('WARN', 'CLV-CAPTURE', `regular: ${e.message}`));
+      // caches={} força refetch via serverGet — cron não compartilha sharedCaches
+      // do ciclo principal (ReferenceError pré-fix 2026-04-23).
+      await checkCLV({}).catch(e => log('WARN', 'CLV-CAPTURE', `regular: ${e.message}`));
     } catch (e) { log('WARN', 'CLV-CAPTURE', `cycle erro: ${e.message}`); }
   };
   const CLV_CAPTURE_INTERVAL_MS = parseInt(process.env.CLV_CAPTURE_INTERVAL_MS || '120000', 10); // 2min default
