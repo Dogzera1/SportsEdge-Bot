@@ -16678,27 +16678,36 @@ async function checkCLV(caches = {}) {
       const currentSportMatches = caches[sport] || await serverGet(`/${sport}-matches`).catch(() => []);
       
       for (const tip of unsettled) {
-        if (tip.clv_odds) continue; // já registrado
-
-        // Janela CLV: < 3h antes do início, tolerância -60min após (Pinnacle às vezes
-        // mantém pregame após start oficial). Live tips (is_live=1) sempre capturam
-        // odds atual como proxy de CLV (compare vs odds original da tip).
+        // Janela CLV — refatorada 2026-04-24 pra cobrir tips emitidas 5h+ antes do start
+        // (MMA/Football/Tennis/LoL long-prematch). Gap anterior: 68% settled sem clv_odds.
+        //
+        // 3 regimes:
+        //   near-match (timeToMatch ∈ [-60min, +3h]): sempre re-captura (última fica como close)
+        //   far-future (timeToMatch ∈ [+3h, +7d]): captura 1x (proxy de open; se já tem, skip)
+        //   live/sem match_time: mantém comportamento antigo (captura 1x se clv_odds NULL)
         const tipKey = norm(tip.participant1 || '') + '_' + norm(tip.participant2 || '');
         const matchStart = matchTimeMap[tipKey] || 0;
         const timeToMatch = matchStart > 0 ? matchStart - now : null;
         const isLiveTip = tip.is_live === 1 || tip.is_live === '1';
-        const shouldSkip = !isLiveTip && (
-          timeToMatch === null ||
-          timeToMatch > 3 * 60 * 60 * 1000 ||
-          timeToMatch < -60 * 60 * 1000
-        );
-        if (shouldSkip) {
+        const FAR_FUTURE_MAX_MS = 7 * 24 * 60 * 60 * 1000; // 7d cobre MMA fight cards
+
+        let regime;
+        if (isLiveTip) regime = 'live';
+        else if (timeToMatch === null) regime = 'unknown';
+        else if (timeToMatch >= -60 * 60 * 1000 && timeToMatch <= 3 * 60 * 60 * 1000) regime = 'near';
+        else if (timeToMatch > 3 * 60 * 60 * 1000 && timeToMatch <= FAR_FUTURE_MAX_MS) regime = 'far';
+        else regime = 'out'; // muito passado ou muito distante
+
+        if (regime === 'out') {
           if (sport === 'tennis' || sport === 'football') {
-            const reason = matchStart === 0 ? 'no_match_time_found' : (timeToMatch > 3 * 60 * 60 * 1000 ? `too_early_${Math.round(timeToMatch/60000)}min` : `too_late_${Math.round(-timeToMatch/60000)}min`);
+            const reason = timeToMatch < 0 ? `too_late_${Math.round(-timeToMatch/60000)}min` : `too_early_${Math.round(timeToMatch/3600000)}h`;
             log('DEBUG', 'CLV-SKIP', `${sport} ${tip.participant1} vs ${tip.participant2}: ${reason}`);
           }
           continue;
         }
+        // far + live + unknown: só captura se ainda não temos CLV (primeira vez)
+        // near: sempre re-captura (sobrescreve com valor mais próximo do close)
+        if (regime !== 'near' && tip.clv_odds) continue;
 
         let clvOdds = null;
         if (sport === 'esports') {
