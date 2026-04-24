@@ -3132,6 +3132,10 @@ const _bankrollAutoShadowed = new Set(); // sports temporariamente em auto-shado
 // Split buckets (lol/dota2) não têm entry em SPORTS mas podem ser shadowed.
 // pollLol/pollDota checam este Set pra bloquear DM quando bucket em shadow.
 const _splitBucketShadow = new Set(); // sports split em auto-shadow
+// Seed do env: DOTA2_SHADOW=true / LOL_SHADOW=true ativam shadow no boot.
+for (const b of ['lol', 'dota2']) {
+  if (process.env[`${b.toUpperCase()}_SHADOW`] === 'true') _splitBucketShadow.add(b);
+}
 function isBucketShadowed(sport) {
   if (SPORTS[sport]?.shadowMode) return true;
   return _splitBucketShadow.has(sport);
