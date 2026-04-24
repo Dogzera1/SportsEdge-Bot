@@ -2373,14 +2373,15 @@ async function loadMlShadowBySport() {
   el.innerHTML = html;
 }
 
-let marketTipsState = { tips: [], page: 0, perPage: 20, sport: null, breakdown: null };
+let marketTipsState = { tips: [], page: 0, perPage: 20, sport: null, breakdown: null, includeLive: true };
 
 async function loadMarketTipsShadow() {
   const sp = currentSport === '__overall__' ? '' : '&sport=' + encodeURIComponent(currentSport);
+  const liveQ = marketTipsState.includeLive ? '&includeLive=1' : '';
   // Fetch em paralelo: lista detalhada + breakdown agregado
   const [data, breakdown] = await Promise.all([
     apiFetch('/market-tips-recent?days=14&limit=500' + sp),
-    apiFetch('/market-tips-breakdown?days=30' + sp),
+    apiFetch('/market-tips-breakdown?days=30' + sp + liveQ),
   ]);
   const el = document.getElementById('marketTipsBody');
   const meta = document.getElementById('marketTipsMeta');
@@ -2393,6 +2394,11 @@ async function loadMarketTipsShadow() {
   marketTipsState.tips = tips;
   marketTipsState.breakdown = breakdown?.error ? null : breakdown;
   renderMarketTipsPage();
+}
+
+function toggleMarketTipsLive() {
+  marketTipsState.includeLive = !marketTipsState.includeLive;
+  loadMarketTipsShadow();
 }
 
 function renderMarketTipsBreakdown(bd) {
@@ -2419,8 +2425,10 @@ function renderMarketTipsBreakdown(bd) {
   const clsRoi = (r) => r == null ? '' : (r >= 0 ? 'positive' : 'negative');
   const fmtClv = (c) => c == null ? '—' : (c >= 0 ? '+' : '') + c.toFixed(1) + '%';
 
+  const liveLabel = marketTipsState.includeLive ? 'PRE+LIVE' : 'PRE only';
+  const toggleBtn = `<button onclick="toggleMarketTipsLive()" style="margin-left:10px;padding:2px 10px;font-size:0.85em;background:var(--surface-2,#1e293b);border:1px solid var(--border,#334155);color:var(--text,#e2e8f0);border-radius:4px;cursor:pointer">${marketTipsState.includeLive ? '🔴 Excluir live' : '➕ Incluir live'}</button>`;
   let html = `<div style="margin-bottom:14px">
-    <div class="card-meta" style="margin-bottom:6px"><b>📊 Breakdown por esporte × mercado × side (${bd.days}d, ${bd.total_settled} settled)</b></div>
+    <div class="card-meta" style="margin-bottom:6px"><b>📊 Breakdown por esporte × mercado × side (${bd.days}d, ${bd.total_settled} settled · ${liveLabel})</b>${toggleBtn}</div>
     <table class="tips" style="margin-bottom:10px">
       <thead><tr>
         <th>Sport · Mercado / Side</th>
