@@ -7242,6 +7242,123 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // Admin: diagnósticos CLV em JSON. Aceita ?snapshot=1 pra ler DB histórico.
+  // GET /admin/clv-leak?days=30&snapshot=1
+  // GET /admin/clv-coverage?days=30&snapshot=1
+  if (p === '/admin/clv-leak' || p === '/admin/clv-coverage') {
+    if (!requireAdmin(req, res)) return;
+    const qs = new URL(req.url, 'http://x').searchParams;
+    const days = Math.max(1, parseInt(qs.get('days') || '30', 10));
+    const useSnapshot = /^(1|true|yes)$/i.test(String(qs.get('snapshot') || ''));
+
+    let analysisDb = db;
+    let snapshotPath = null;
+    if (useSnapshot) {
+      const path = require('path');
+      const fs = require('fs');
+      const dir = path.dirname(path.resolve(DB_PATH));
+      const candidates = fs.readdirSync(dir)
+        .filter(f => /^sportsedge_snapshot_.+\.db$/.test(f))
+        .map(f => path.join(dir, f))
+        .sort()
+        .reverse();
+      if (!candidates.length) {
+        sendJson(res, { ok: false, error: 'no_snapshot_found', searched: dir }, 404);
+        return;
+      }
+      snapshotPath = candidates[0];
+      try { analysisDb = new (require('better-sqlite3'))(snapshotPath, { readonly: true }); }
+      catch (e) { sendJson(res, { ok: false, error: 'snapshot_open_failed', detail: e.message }, 500); return; }
+    }
+
+    try {
+      if (p === '/admin/clv-leak') {
+        const totals = analysisDb.prepare(`
+          SELECT COUNT(*) n,
+                 SUM(CASE WHEN clv_odds IS NOT NULL AND open_odds IS NOT NULL THEN 1 ELSE 0 END) n_clv,
+                 SUM(CASE WHEN odds_fetched_at IS NOT NULL AND sent_at IS NOT NULL THEN 1 ELSE 0 END) n_delay
+            FROM tips
+           WHERE sent_at >= datetime('now', ?) AND UPPER(result) IN ('WIN','LOSS')
+        `).get(`-${days} days`);
+
+        const bySport = analysisDb.prepare(`
+          SELECT sport, COUNT(*) n,
+                 ROUND(AVG((open_odds - clv_odds) / clv_odds * 100), 2) avg_clv_pct,
+                 SUM(CASE WHEN clv_odds < open_odds THEN 1 ELSE 0 END) n_pos,
+                 SUM(CASE WHEN clv_odds > open_odds THEN 1 ELSE 0 END) n_neg,
+                 ROUND(AVG(open_odds), 3) avg_open,
+                 ROUND(AVG(clv_odds), 3) avg_close
+            FROM tips
+           WHERE sent_at >= datetime('now', ?) AND UPPER(result) IN ('WIN','LOSS')
+             AND open_odds IS NOT NULL AND clv_odds IS NOT NULL
+           GROUP BY sport ORDER BY avg_clv_pct ASC
+        `).all(`-${days} days`);
+
+        const delays = analysisDb.prepare(`
+          SELECT sport, COUNT(*) n,
+                 ROUND(AVG((julianday(sent_at) - julianday(odds_fetched_at)) * 86400), 1) avg_delay_s,
+                 ROUND(MIN((julianday(sent_at) - julianday(odds_fetched_at)) * 86400), 1) min_delay_s,
+                 ROUND(MAX((julianday(sent_at) - julianday(odds_fetched_at)) * 86400), 1) max_delay_s
+            FROM tips
+           WHERE sent_at >= datetime('now', ?) AND odds_fetched_at IS NOT NULL
+           GROUP BY sport ORDER BY avg_delay_s DESC
+        `).all(`-${days} days`);
+
+        const liveSplit = analysisDb.prepare(`
+          SELECT sport, is_live, COUNT(*) n,
+                 ROUND(AVG((open_odds - clv_odds) / clv_odds * 100), 2) avg_clv_pct,
+                 ROUND(AVG((julianday(sent_at) - julianday(odds_fetched_at)) * 86400), 1) avg_delay_s
+            FROM tips
+           WHERE sent_at >= datetime('now', ?) AND UPPER(result) IN ('WIN','LOSS')
+             AND open_odds IS NOT NULL AND clv_odds IS NOT NULL
+           GROUP BY sport, is_live ORDER BY sport, is_live
+        `).all(`-${days} days`);
+
+        const byLeague = analysisDb.prepare(`
+          SELECT sport, COALESCE(NULLIF(TRIM(event_name), ''), '(sem liga)') league, COUNT(*) n,
+                 ROUND(AVG((open_odds - clv_odds) / clv_odds * 100), 2) avg_clv_pct,
+                 ROUND(SUM(profit_reais), 2) profit
+            FROM tips
+           WHERE sent_at >= datetime('now', ?) AND UPPER(result) IN ('WIN','LOSS')
+             AND open_odds IS NOT NULL AND clv_odds IS NOT NULL
+           GROUP BY sport, league HAVING n >= 3
+           ORDER BY avg_clv_pct ASC LIMIT 50
+        `).all(`-${days} days`);
+
+        sendJson(res, { ok: true, days, snapshot: snapshotPath, totals, bySport, delays, liveSplit, byLeague });
+      } else {
+        const coverage = analysisDb.prepare(`
+          SELECT sport, COUNT(*) n,
+                 SUM(CASE WHEN clv_odds IS NOT NULL THEN 1 ELSE 0 END) n_with_clv,
+                 SUM(CASE WHEN is_live = 1 THEN 1 ELSE 0 END) n_live,
+                 SUM(CASE WHEN is_live = 1 AND clv_odds IS NOT NULL THEN 1 ELSE 0 END) n_live_clv,
+                 SUM(CASE WHEN (is_live IS NULL OR is_live = 0) AND clv_odds IS NOT NULL THEN 1 ELSE 0 END) n_pre_clv
+            FROM tips
+           WHERE sent_at >= datetime('now', ?) AND UPPER(result) IN ('WIN','LOSS')
+           GROUP BY sport ORDER BY n DESC
+        `).all(`-${days} days`);
+
+        const categories = analysisDb.prepare(`
+          SELECT sport, COUNT(*) n,
+                 SUM(CASE WHEN clv_odds IS NOT NULL THEN 1 ELSE 0 END) ok,
+                 SUM(CASE WHEN clv_odds IS NULL AND (julianday(settled_at) - julianday(sent_at)) * 1440 < 15 THEN 1 ELSE 0 END) gap_fast,
+                 SUM(CASE WHEN clv_odds IS NULL AND is_live = 1 AND (julianday(settled_at) - julianday(sent_at)) * 1440 >= 15 THEN 1 ELSE 0 END) gap_live,
+                 SUM(CASE WHEN clv_odds IS NULL AND (is_live IS NULL OR is_live = 0) AND (julianday(settled_at) - julianday(sent_at)) * 1440 >= 15 THEN 1 ELSE 0 END) gap_pre
+            FROM tips
+           WHERE sent_at >= datetime('now', ?) AND UPPER(result) IN ('WIN','LOSS')
+           GROUP BY sport HAVING n >= 5 ORDER BY n DESC
+        `).all(`-${days} days`);
+
+        sendJson(res, { ok: true, days, snapshot: snapshotPath, coverage, categories });
+      }
+    } catch (e) {
+      sendJson(res, { ok: false, error: e.message }, 500);
+    } finally {
+      if (useSnapshot && analysisDb !== db) try { analysisDb.close(); } catch (_) {}
+    }
+    return;
+  }
+
   // Audit bankroll: mostra initial/current stored vs recomputed, gap per-sport e total.
   // Inclui reclassificação esports legado → lol/dota2.
   // GET /bankroll-audit
