@@ -2368,9 +2368,82 @@ async function loadMlShadowBySport() {
   html += `</tbody></table>
   <div class="card-meta" style="margin-top:10px">
     Shadow = tip gerada mas sem DM. Promover quando: n≥30 settled, ROI≥0%, CLV≥0%. CLV é leading indicator (não espera settle).
-  </div>`;
+  </div>
+  <div id="mlShadowTipsList" style="margin-top:16px"><div class="loading">Carregando tips individuais…</div></div>`;
 
   el.innerHTML = html;
+
+  // Carrega lista paginada de tips individuais (shadow ML)
+  loadMlShadowTipsList(sports.map(s => s.sport));
+}
+
+// Lista paginada de tips ML shadow individuais (cross-sport)
+async function loadMlShadowTipsList(sportList) {
+  const container = document.getElementById('mlShadowTipsList');
+  if (!container) return;
+  // Fetch cross-sport — /tips-history precisa ser chamado por sport. Paralelo.
+  const all = await Promise.all(sportList.map(sp =>
+    apiFetch('/tips-history?sport=' + sp + '&include_shadow=1&limit=200').catch(() => null)
+  ));
+  const tips = [];
+  all.forEach((arr, idx) => {
+    if (!Array.isArray(arr)) return;
+    for (const t of arr) {
+      if (t?.is_shadow !== 1) continue;
+      tips.push({ ...t, _sport: sportList[idx] });
+    }
+  });
+  tips.sort((a, b) => String(b.sent_at || '').localeCompare(String(a.sent_at || '')));
+
+  if (!tips.length) {
+    container.innerHTML = '<div class="empty-state">Nenhuma tip shadow individual</div>';
+    return;
+  }
+
+  const sportEmoji = { lol:'🎮', dota2:'🎮', cs:'🔫', valorant:'🎯', tennis:'🎾', football:'⚽', mma:'🥊', darts:'🎯', snooker:'🎱', tabletennis:'🏓' };
+  const resultBadge = r => r === 'win' ? '<span style="color:#16a34a">✓</span>'
+    : r === 'loss' ? '<span style="color:#dc2626">✗</span>'
+    : r === 'void' ? '<span style="color:#ca8a04">−</span>'
+    : '<span style="opacity:0.5">⋯</span>';
+
+  let html = `<div class="card-meta" style="margin-bottom:6px"><b>🗒️ Tips ML shadow individuais</b> (${tips.length} total, ordenado por data desc)</div>
+    <table class="tips">
+      <thead><tr>
+        <th>Sport</th>
+        <th>Data</th>
+        <th>Match</th>
+        <th>Pick</th>
+        <th style="text-align:right">Odd</th>
+        <th style="text-align:right">EV</th>
+        <th style="text-align:right">Stake</th>
+        <th style="text-align:center">Conf</th>
+        <th style="text-align:center">Live</th>
+        <th style="text-align:center">Result</th>
+        <th style="text-align:right">CLV</th>
+      </tr></thead><tbody>`;
+  for (const t of tips.slice(0, 100)) {
+    const sp = t._sport || t.sport;
+    const emoji = sportEmoji[sp] || '📊';
+    const ts = (t.sent_at || '').replace('T', ' ').slice(5, 16);
+    const clv = (t.clv_odds && t.odds) ? ((t.odds / t.clv_odds - 1) * 100) : null;
+    const clvCls = clv == null ? '' : (clv >= 0 ? 'positive' : 'negative');
+    html += `<tr>
+      <td>${emoji} ${sp}</td>
+      <td style="white-space:nowrap;font-size:0.85em">${ts}</td>
+      <td style="font-size:0.9em">${t.participant1 || '?'} vs ${t.participant2 || '?'}</td>
+      <td><b>${t.tip_participant || '—'}</b></td>
+      <td style="text-align:right">${t.odds != null ? Number(t.odds).toFixed(2) : '—'}</td>
+      <td style="text-align:right">${t.ev != null ? Number(t.ev).toFixed(1) + '%' : '—'}</td>
+      <td style="text-align:right">${t.stake || '—'}</td>
+      <td style="text-align:center;font-size:0.85em">${t.confidence || '—'}</td>
+      <td style="text-align:center">${t.is_live ? '🔴' : ''}</td>
+      <td style="text-align:center">${resultBadge(t.result)}</td>
+      <td style="text-align:right" class="${clvCls}">${clv != null ? (clv >= 0 ? '+' : '') + clv.toFixed(1) + '%' : '—'}</td>
+    </tr>`;
+  }
+  html += `</tbody></table>`;
+  if (tips.length > 100) html += `<div class="card-meta" style="margin-top:6px">Mostrando 100 mais recentes de ${tips.length}</div>`;
+  container.innerHTML = html;
 }
 
 let marketTipsState = { tips: [], page: 0, perPage: 20, sport: null, breakdown: null, includeLive: true };
