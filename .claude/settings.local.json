@@ -315,7 +315,10 @@
       "Bash(git reset *)",
       "Bash(ls tips.db)",
       "Bash(echo \"---grep exit: $?\")",
-      "Bash(DB_PATH=sportsedge.db node scripts/sync-tennis-stats.js)"
+      "Bash(DB_PATH=sportsedge.db node scripts/sync-tennis-stats.js)",
+      "Bash(railway run *)",
+      "Bash(railway ssh *)",
+      "Bash(base64 -w0 scripts/rebalance-bankroll-1000.js)"
     ]
   }
 }
