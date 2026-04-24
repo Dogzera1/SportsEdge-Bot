@@ -46,7 +46,7 @@ const totals = db.prepare(`
     SUM(CASE WHEN odds_fetched_at IS NOT NULL AND sent_at IS NOT NULL THEN 1 ELSE 0 END) n_delay
   FROM tips
   WHERE sent_at >= datetime('now', ?)
-    AND result IN ('WIN','LOSS')
+    AND UPPER(result) IN ('WIN','LOSS')
 `).get(`-${DAYS} days`);
 
 console.log(`## Overview`);
@@ -97,7 +97,7 @@ const clvBySport = db.prepare(`
     ROUND(AVG(clv_odds), 3) avg_close
   FROM tips
   WHERE sent_at >= datetime('now', ?)
-    AND result IN ('WIN','LOSS')
+    AND UPPER(result) IN ('WIN','LOSS')
     AND open_odds IS NOT NULL AND clv_odds IS NOT NULL
   GROUP BY sport
   ORDER BY avg_clv_pct ASC
@@ -124,7 +124,7 @@ const clvLive = db.prepare(`
     ROUND(AVG((julianday(sent_at) - julianday(odds_fetched_at)) * 86400), 1) avg_delay_s
   FROM tips
   WHERE sent_at >= datetime('now', ?)
-    AND result IN ('WIN','LOSS')
+    AND UPPER(result) IN ('WIN','LOSS')
     AND open_odds IS NOT NULL AND clv_odds IS NOT NULL
   GROUP BY sport, is_live
   ORDER BY sport, is_live
@@ -150,7 +150,7 @@ const byHour = db.prepare(`
     ROUND(AVG((julianday(sent_at) - julianday(odds_fetched_at)) * 86400), 1) avg_delay_s
   FROM tips
   WHERE sent_at >= datetime('now', ?)
-    AND result IN ('WIN','LOSS')
+    AND UPPER(result) IN ('WIN','LOSS')
     AND open_odds IS NOT NULL AND clv_odds IS NOT NULL
   GROUP BY hour_utc
   HAVING n >= 3
@@ -177,7 +177,7 @@ const byLeague = db.prepare(`
     ROUND(SUM(profit_reais), 2) profit
   FROM tips
   WHERE sent_at >= datetime('now', ?)
-    AND result IN ('WIN','LOSS')
+    AND UPPER(result) IN ('WIN','LOSS')
     AND open_odds IS NOT NULL AND clv_odds IS NOT NULL
   GROUP BY sport, league
   HAVING n >= 3
@@ -211,7 +211,7 @@ const byOddBucket = db.prepare(`
     ROUND(SUM(profit_reais), 2) profit
   FROM tips
   WHERE sent_at >= datetime('now', ?)
-    AND result IN ('WIN','LOSS')
+    AND UPPER(result) IN ('WIN','LOSS')
     AND open_odds IS NOT NULL AND clv_odds IS NOT NULL
   GROUP BY sport, bucket
   HAVING n >= 3
