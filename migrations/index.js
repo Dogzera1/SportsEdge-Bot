@@ -1378,6 +1378,34 @@ const migrations = [
       try { console.log(`[migrate 055] backfill model_version: ${updated.changes} rows marked v1_pre_virtual_matchup_fix`); } catch (_) {}
     },
   },
+  {
+    id: '056_bookmaker_delta_samples',
+    up(db) {
+      // Coleta amostras manuais de odds (Pinnacle vs casa BR) pra calcular delta
+      // histórico médio por (sport, bookmaker). Usado em line shopping pra estimar
+      // best odd em casas BR sem scraping (reduz ROI sub-bet quando user aposta
+      // em casa BR mas EV foi calculado com odd Pinnacle).
+      //
+      // Coleta via cmd Telegram /odd-sample <sport> <casa> <pinnacle> <br_odd>.
+      // Agregado em /admin/bookmaker-deltas.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS bookmaker_delta_samples (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          sport TEXT NOT NULL,
+          bookmaker TEXT NOT NULL,
+          pinnacle_odd REAL NOT NULL,
+          br_odd REAL NOT NULL,
+          delta_pct REAL NOT NULL,
+          match_label TEXT,
+          captured_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_bookmaker_delta_sport_book
+          ON bookmaker_delta_samples (sport, bookmaker);
+        CREATE INDEX IF NOT EXISTS idx_bookmaker_delta_captured
+          ON bookmaker_delta_samples (captured_at DESC);
+      `);
+    },
+  },
 ];
 
 function applyMigrations(db) {

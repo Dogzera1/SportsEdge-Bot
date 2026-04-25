@@ -7245,6 +7245,34 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // GET/POST /admin/bookmaker-deltas
+  // GET retorna agregado: avg delta_pct por (sport, bookmaker) com n samples.
+  // POST adiciona amostra: {sport, bookmaker, pinnacleOdd, brOdd, matchLabel?}
+  if (p === '/admin/bookmaker-deltas') {
+    if (!requireAdmin(req, res)) return;
+    const { getAllDeltas, addSample } = require('./lib/bookmaker-delta');
+    if (req.method === 'POST') {
+      let body = ''; req.on('data', c => body += c);
+      req.on('end', () => {
+        try {
+          const j = JSON.parse(body || '{}');
+          const r = addSample(db, j.sport, j.bookmaker, j.pinnacleOdd, j.brOdd, j.matchLabel || null);
+          if (!r.ok) return sendJson(res, { ok: false, error: r.error }, 400);
+          sendJson(res, r);
+        } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+      });
+      return;
+    }
+    try {
+      const days = Math.max(1, Math.min(365, parseInt(parsed.query.days || '90', 10)));
+      const minN = Math.max(1, parseInt(parsed.query.min_n || '5', 10));
+      const deltas = getAllDeltas(db, { days, minN });
+      const totalSamples = db.prepare(`SELECT COUNT(*) n FROM bookmaker_delta_samples WHERE captured_at >= datetime('now', ?)`).get(`-${days} days`).n;
+      sendJson(res, { ok: true, days, total_samples: totalSamples, deltas });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   // Admin: diagnósticos CLV em JSON. Aceita ?snapshot=1 pra ler DB histórico.
   // GET /admin/clv-leak?days=30&snapshot=1
   // GET /admin/clv-coverage?days=30&snapshot=1

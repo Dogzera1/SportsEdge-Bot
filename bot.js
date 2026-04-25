@@ -7871,6 +7871,45 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
       if (r_ && r_.ok === false) await send(token, chatId, txt.replace(/[*_`]/g, ''), { parse_mode: undefined }).catch(() => {});
     } catch (e) { await send(token, chatId, `❌ ${e.message}`); }
 
+  } else if (cmd === '/odd-sample' || cmd === '/oddsample' || cmd === '/sample-odd') {
+    // /odd-sample <sport> <casa> <pinnacle> <br_odd> [match label opcional]
+    // Adiciona uma amostra de delta Pinnacle vs casa BR.
+    if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
+    try {
+      const [, sportArg, bookArg, pinArg, brArg, ...labelParts] = parts;
+      if (!sportArg || !bookArg || !pinArg || !brArg) {
+        await send(token, chatId, `Uso: /odd-sample <sport> <casa> <pinnacle_odd> <br_odd> [label]\nEx: /odd-sample tennis betano 2.05 2.10 Sinner vs Bonzi`);
+        return;
+      }
+      const { addSample } = require('./lib/bookmaker-delta');
+      const r = addSample(db, sportArg, bookArg, pinArg, brArg, labelParts.join(' ') || null);
+      if (!r.ok) { await send(token, chatId, `❌ ${r.error}`); return; }
+      const sign = r.deltaPct >= 0 ? '+' : '';
+      await send(token, chatId, `✓ amostra #${r.id}: ${r.sport}/${r.bookmaker} delta=${sign}${r.deltaPct.toFixed(2)}%\n_use /bookmaker-deltas pra ver agregado_`);
+    } catch (e) { await send(token, chatId, `❌ ${e.message}`); }
+
+  } else if (cmd === '/bookmaker-deltas' || cmd === '/odd-deltas') {
+    if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
+    try {
+      const days = Math.max(7, Math.min(180, parseInt(parts[1] || '90', 10) || 90));
+      const { getAllDeltas } = require('./lib/bookmaker-delta');
+      const deltas = getAllDeltas(db, { days, minN: 3 });
+      if (!deltas.length) {
+        await send(token, chatId, `📊 *DELTAS PINNACLE → BR* (${days}d, n≥3)\n\n_Nenhuma amostra ainda._\n\nColete via:\n\`/odd-sample <sport> <casa> <pinnacle> <br>\``);
+        return;
+      }
+      let txt = `📊 *DELTAS PINNACLE → BR* (${days}d)\n\n`;
+      let lastSport = null;
+      for (const d of deltas) {
+        if (d.sport !== lastSport) { txt += `\n*${d.sport.toUpperCase()}*\n`; lastSport = d.sport; }
+        const sign = d.avgDeltaPct >= 0 ? '+' : '';
+        const ready = d.n >= 10 ? '✓' : `n=${d.n}`;
+        txt += `\`${d.bookmaker.padEnd(12)} ${sign}${d.avgDeltaPct.toFixed(2).padStart(6)}%  (n=${d.n})\` ${ready}\n`;
+      }
+      txt += `\n_n≥10 ativa estimativa em line shop. /odd-sample pra adicionar._`;
+      await send(token, chatId, txt);
+    } catch (e) { await send(token, chatId, `❌ ${e.message}`); }
+
   } else if (cmd === '/league-guard' || cmd === '/leagues-guard') {
     if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
     try {
