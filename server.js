@@ -7388,6 +7388,196 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // GET /clv-histogram?sport=X&days=30 — distribuição de CLV pra sanity check.
+  // Healthy = right-skewed (mais tips com CLV positivo que negativo).
+  if (p === '/clv-histogram') {
+    try {
+      const days = Math.min(180, Math.max(7, parseInt(parsed.query.days || '30', 10) || 30));
+      const sport = parsed.query.sport || null;
+      const conds = [`clv_pct IS NOT NULL`, `result IN ('win','loss')`, `sent_at >= datetime('now', '-${days} days')`];
+      const params = [];
+      if (sport) { conds.push('sport = ?'); params.push(sport); }
+      const rows = db.prepare(`
+        SELECT clv_pct, result, COALESCE(stake_reais, 0) AS stake, COALESCE(profit_reais, 0) AS profit
+        FROM tips
+        WHERE ${conds.join(' AND ')}
+      `).all(...params);
+      // Bucket: <-10, -10 to -5, -5 to 0, 0 to 5, 5 to 10, >10
+      const buckets = [
+        { label: '< -10%', min: -Infinity, max: -10, n: 0, wins: 0, profit: 0, stake: 0 },
+        { label: '-10 a -5%', min: -10, max: -5, n: 0, wins: 0, profit: 0, stake: 0 },
+        { label: '-5 a 0%', min: -5, max: 0, n: 0, wins: 0, profit: 0, stake: 0 },
+        { label: '0 a 5%', min: 0, max: 5, n: 0, wins: 0, profit: 0, stake: 0 },
+        { label: '5 a 10%', min: 5, max: 10, n: 0, wins: 0, profit: 0, stake: 0 },
+        { label: '> 10%', min: 10, max: Infinity, n: 0, wins: 0, profit: 0, stake: 0 },
+      ];
+      let totalN = 0, sum = 0;
+      let posN = 0, negN = 0;
+      for (const r of rows) {
+        const v = r.clv_pct;
+        totalN++;
+        sum += v;
+        if (v >= 0) posN++; else negN++;
+        for (const b of buckets) {
+          if (v >= b.min && v < b.max) {
+            b.n++;
+            if (r.result === 'win') b.wins++;
+            b.stake += r.stake;
+            b.profit += r.profit;
+            break;
+          }
+        }
+      }
+      // Se falta no último bucket (Infinity) tem que cobrir >=
+      const lastBucket = buckets[buckets.length - 1];
+      if (lastBucket.n === 0) {
+        for (const r of rows) {
+          if (r.clv_pct >= lastBucket.min) {
+            lastBucket.n++;
+            if (r.result === 'win') lastBucket.wins++;
+            lastBucket.stake += r.stake;
+            lastBucket.profit += r.profit;
+          }
+        }
+      }
+      const enrichedBuckets = buckets.map(b => ({
+        ...b,
+        hitRate: b.n > 0 ? +(b.wins / b.n * 100).toFixed(1) : null,
+        roi: b.stake > 0 ? +(b.profit / b.stake * 100).toFixed(1) : null,
+      }));
+      sendJson(res, {
+        sport: sport || 'all', days,
+        totalN, avgClv: totalN ? +(sum / totalN).toFixed(2) : null,
+        positivePct: totalN ? +(posN / totalN * 100).toFixed(1) : null,
+        negativePct: totalN ? +(negN / totalN * 100).toFixed(1) : null,
+        buckets: enrichedBuckets,
+      });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
+  // GET /roi-by-ev-bucket?sport=X&days=30 — performance por faixa de EV registrada.
+  if (p === '/roi-by-ev-bucket') {
+    try {
+      const days = Math.min(180, Math.max(7, parseInt(parsed.query.days || '30', 10) || 30));
+      const sport = parsed.query.sport || null;
+      const conds = [`ev IS NOT NULL`, `result IN ('win','loss')`, `sent_at >= datetime('now', '-${days} days')`];
+      const params = [];
+      if (sport) { conds.push('sport = ?'); params.push(sport); }
+      const rows = db.prepare(`
+        SELECT
+          CAST(REPLACE(REPLACE(ev, '+', ''), '%', '') AS REAL) AS ev_num,
+          result,
+          COALESCE(stake_reais, 0) AS stake,
+          COALESCE(profit_reais, 0) AS profit,
+          COALESCE(clv_pct, NULL) AS clv
+        FROM tips
+        WHERE ${conds.join(' AND ')}
+      `).all(...params);
+      // Buckets: <0, 0-3, 3-5, 5-8, 8-12, >12
+      const buckets = [
+        { label: '< 0%', min: -Infinity, max: 0 },
+        { label: '0-3%', min: 0, max: 3 },
+        { label: '3-5%', min: 3, max: 5 },
+        { label: '5-8%', min: 5, max: 8 },
+        { label: '8-12%', min: 8, max: 12 },
+        { label: '> 12%', min: 12, max: Infinity },
+      ].map(b => ({ ...b, n: 0, wins: 0, profit: 0, stake: 0, clvSum: 0, clvN: 0 }));
+      for (const r of rows) {
+        if (!Number.isFinite(r.ev_num)) continue;
+        for (const b of buckets) {
+          if (r.ev_num >= b.min && r.ev_num < b.max) {
+            b.n++;
+            if (r.result === 'win') b.wins++;
+            b.stake += r.stake;
+            b.profit += r.profit;
+            if (r.clv != null) { b.clvSum += r.clv; b.clvN++; }
+            break;
+          }
+        }
+      }
+      // Cobrir >12% (ultimo bucket com Infinity)
+      const lastBucket = buckets[buckets.length - 1];
+      if (lastBucket.n === 0) {
+        for (const r of rows) {
+          if (Number.isFinite(r.ev_num) && r.ev_num >= lastBucket.min) {
+            lastBucket.n++;
+            if (r.result === 'win') lastBucket.wins++;
+            lastBucket.stake += r.stake;
+            lastBucket.profit += r.profit;
+            if (r.clv != null) { lastBucket.clvSum += r.clv; lastBucket.clvN++; }
+          }
+        }
+      }
+      const enriched = buckets.map(b => ({
+        label: b.label,
+        n: b.n,
+        wins: b.wins,
+        losses: b.n - b.wins,
+        hitRate: b.n > 0 ? +(b.wins / b.n * 100).toFixed(1) : null,
+        stake: +b.stake.toFixed(2),
+        profit: +b.profit.toFixed(2),
+        roi: b.stake > 0 ? +(b.profit / b.stake * 100).toFixed(1) : null,
+        avgClv: b.clvN > 0 ? +(b.clvSum / b.clvN).toFixed(2) : null,
+      }));
+      sendJson(res, { sport: sport || 'all', days, buckets: enriched });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
+  // GET /tips-em-risco?sport=X — alias público de /cashout-alerts pra dashboard.
+  if (p === '/tips-em-risco') {
+    try {
+      const sport = parsed.query.sport || 'esports';
+      const days = parsed.query.days || '3';
+      const tips = stmts.getUnsettledTips.all(sport, `-${days} days`).filter(t => t.is_live);
+      if (!tips.length) { sendJson(res, { sport, count: 0, alerts: [] }); return; }
+      const { checkTipHealth } = require('./lib/cashout-monitor');
+      const selfPort = (req.socket && req.socket.localPort) || PORT;
+      const base = `http://127.0.0.1:${selfPort}`;
+      const snapR = await httpGet(`${base}/live-snapshot`).catch(() => null);
+      const snap = (snapR && snapR.status === 200) ? safeParse(snapR.body, { sports: {} }) : { sports: {} };
+      const alerts = [];
+      for (const tip of tips) {
+        const liveCtx = { sport: tip.sport };
+        const normPair = (a, b) => `${String(a||'').toLowerCase().replace(/[^a-z0-9]/g,'')}_${String(b||'').toLowerCase().replace(/[^a-z0-9]/g,'')}`;
+        const tipPair = normPair(tip.participant1, tip.participant2);
+        const findInSnap = (sportKey) => (snap.sports?.[sportKey] || []).find(m => {
+          const [a,b] = (m.teams || '').split(' vs ');
+          return normPair(a,b) === tipPair || normPair(b,a) === tipPair;
+        });
+        if (tip.sport === 'esports' || tip.sport === 'lol') {
+          const m = findInSnap('lol');
+          liveCtx.gameData = m?.summary ? { summary: m.summary } : null;
+        } else if (tip.sport === 'tennis') {
+          const m = findInSnap('tennis');
+          if (m?.summary?.sets) {
+            liveCtx.liveScore = { isLive: true, setsHome: parseInt((m.summary.score||'0-0').split('-')[0],10), setsAway: parseInt((m.summary.score||'0-0').split('-')[1],10) };
+          }
+        }
+        const health = checkTipHealth(tip, liveCtx);
+        if (health.verdict === 'alert' || health.verdict === 'dying') {
+          alerts.push({
+            tipId: tip.id,
+            match: `${tip.participant1} vs ${tip.participant2}`,
+            pick: tip.tip_participant,
+            odds: tip.odds,
+            sport: tip.sport,
+            originalEv: tip.ev,
+            verdict: health.verdict,
+            originalP: health.originalP,
+            currentP: health.currentP,
+            deltaP: health.deltaP,
+            currentEv: health.currentEv,
+            reason: health.reason,
+          });
+        }
+      }
+      sendJson(res, { sport, count: alerts.length, alerts });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
   // GET /pending-tips-audit?days=30 — diagnostica tips pending com idade + razão.
   // Reason: future_match (jogo no futuro), recent_complete (<24h), stale (>24h),
   // match_id_missing, no_match_results, name_mismatch.

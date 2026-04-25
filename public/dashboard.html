@@ -760,6 +760,48 @@
     </div>
   </div>
 
+  <!-- Tips em Risco (cashout alerts) -->
+  <div class="section" id="secRisk">
+    <div class="section-head" onclick="toggleSection('secRisk'); loadTipsEmRisco()">
+      <div class="section-head-left">
+        <svg class="section-chevron" viewBox="0 0 16 16"><path d="M6 4l4 4-4 4" stroke="currentColor" fill="none" stroke-width="2"/></svg>
+        <span>🚨 Tips em Risco (cashout)</span>
+      </div>
+      <div class="section-head-meta" id="riskMeta">—</div>
+    </div>
+    <div class="section-body">
+      <div id="riskBody"><div class="loading">Carregando</div></div>
+    </div>
+  </div>
+
+  <!-- Per-EV bucket performance (expandable) -->
+  <div class="section" id="secEvBucket">
+    <div class="section-head" onclick="toggleSection('secEvBucket'); loadEvBucket()">
+      <div class="section-head-left">
+        <svg class="section-chevron" viewBox="0 0 16 16"><path d="M6 4l4 4-4 4" stroke="currentColor" fill="none" stroke-width="2"/></svg>
+        <span>🎯 ROI por faixa de EV (30d)</span>
+      </div>
+      <div class="section-head-meta" id="evBucketMeta">—</div>
+    </div>
+    <div class="section-body">
+      <div id="evBucketBody"><div class="loading">Carregando</div></div>
+    </div>
+  </div>
+
+  <!-- CLV Histogram (expandable) -->
+  <div class="section" id="secClvHist">
+    <div class="section-head" onclick="toggleSection('secClvHist'); loadClvHistogram()">
+      <div class="section-head-left">
+        <svg class="section-chevron" viewBox="0 0 16 16"><path d="M6 4l4 4-4 4" stroke="currentColor" fill="none" stroke-width="2"/></svg>
+        <span>📊 CLV Histogram (sanity check)</span>
+      </div>
+      <div class="section-head-meta" id="clvHistMeta">—</div>
+    </div>
+    <div class="section-body">
+      <div id="clvHistBody"><div class="loading">Carregando</div></div>
+    </div>
+  </div>
+
   <!-- Tips Pendentes Audit (expandable) -->
   <div class="section" id="secPending">
     <div class="section-head" onclick="toggleSection('secPending'); loadPendingAudit()">
@@ -2514,6 +2556,162 @@ async function loadMarketTipsShadow() {
 function toggleMarketTipsLive() {
   marketTipsState.includeLive = !marketTipsState.includeLive;
   loadMarketTipsShadow();
+}
+
+// Tips em Risco — cashout alerts (live tips com health 'alert' ou 'dying')
+async function loadTipsEmRisco() {
+  const sport = currentSport === '__overall__' ? 'esports' : currentSport;
+  const data = await apiFetch('/tips-em-risco?sport=' + encodeURIComponent(sport) + '&days=3');
+  const el = document.getElementById('riskBody');
+  const meta = document.getElementById('riskMeta');
+  if (!data || data.error) { el.innerHTML = '<div class="empty-state">Sem dados</div>'; meta.textContent = '—'; return; }
+  meta.textContent = `${data.count} alertas`;
+  if (!data.count) { el.innerHTML = '<div class="empty-state">✅ Nenhuma tip em risco no momento</div>'; return; }
+  const fmtPct = (v, d=0) => v == null ? '—' : (v >= 0 ? '+' : '') + (Number(v) * (Math.abs(v) < 1.5 ? 100 : 1)).toFixed(d) + '%';
+  let html = `
+    <div class="card-meta" style="margin-bottom:10px">
+      Tips ao vivo onde a probabilidade caiu drasticamente (verdict 'alert' ≥10pp drop, 'dying' ≥20pp drop). Cron interno já manda DM aos admins.
+    </div>
+    <table class="tips">
+      <thead><tr>
+        <th>Status</th><th>Sport</th><th>Match</th><th>Pick</th>
+        <th style="text-align:right">Odd</th>
+        <th style="text-align:right">P orig</th>
+        <th style="text-align:right">P atual</th>
+        <th style="text-align:right">Δ</th>
+        <th style="text-align:right">EV atual</th>
+        <th>Razão</th>
+      </tr></thead>
+      <tbody>
+        ${data.alerts.map(a => `<tr>
+          <td>${a.verdict === 'dying' ? '🚨 dying' : '⚠️ alert'}</td>
+          <td>${a.sport}</td>
+          <td>${a.match}</td>
+          <td><b>${a.pick}</b></td>
+          <td style="text-align:right">${a.odds}</td>
+          <td style="text-align:right">${(a.originalP * 100).toFixed(0)}%</td>
+          <td style="text-align:right">${(a.currentP * 100).toFixed(0)}%</td>
+          <td style="text-align:right" class="${a.deltaP < 0 ? 'negative' : ''}">${(a.deltaP * 100).toFixed(0)}pp</td>
+          <td style="text-align:right" class="${parseFloat(a.currentEv) >= 0 ? 'positive' : 'negative'}">${a.currentEv}</td>
+          <td><span style="font-size:0.8em">${a.reason || ''}</span></td>
+        </tr>`).join('')}
+      </tbody>
+    </table>`;
+  el.innerHTML = html;
+}
+
+// ROI por faixa de EV — qual edge bucket converte melhor
+async function loadEvBucket() {
+  const sp = currentSport === '__overall__' ? '' : '&sport=' + encodeURIComponent(currentSport);
+  const data = await apiFetch('/roi-by-ev-bucket?days=30' + sp);
+  const el = document.getElementById('evBucketBody');
+  const meta = document.getElementById('evBucketMeta');
+  if (!data || data.error) { el.innerHTML = '<div class="empty-state">Sem dados</div>'; meta.textContent = '—'; return; }
+  const totalN = data.buckets.reduce((s, b) => s + b.n, 0);
+  meta.textContent = `${totalN} settled · 30d`;
+  if (!totalN) { el.innerHTML = '<div class="empty-state">Sem tips settled nos últimos 30d</div>'; return; }
+  let html = `
+    <div class="card-meta" style="margin-bottom:10px">
+      Performance por faixa de EV registrada na tip. <b>Faixa esperada:</b> ROI cresce com EV se modelo está calibrado. Se ROI cai em EV alto = edge inflado, modelo overconfident.
+    </div>
+    <table class="tips">
+      <thead><tr>
+        <th>Faixa EV</th>
+        <th style="text-align:right">N</th>
+        <th style="text-align:right">Hit</th>
+        <th style="text-align:right">Stake</th>
+        <th style="text-align:right">Profit</th>
+        <th style="text-align:right">ROI</th>
+        <th style="text-align:right">CLV médio</th>
+      </tr></thead>
+      <tbody>
+        ${data.buckets.map(b => `<tr>
+          <td><b>${b.label}</b></td>
+          <td style="text-align:right">${b.n}</td>
+          <td style="text-align:right">${b.hitRate != null ? b.hitRate + '%' : '—'}</td>
+          <td style="text-align:right">R$${b.stake.toFixed(2)}</td>
+          <td style="text-align:right" class="${b.profit >= 0 ? 'positive' : 'negative'}">${b.profit >= 0 ? '+' : ''}R$${b.profit.toFixed(2)}</td>
+          <td style="text-align:right" class="${b.roi >= 0 ? 'positive' : 'negative'}">${b.roi != null ? (b.roi >= 0 ? '+' : '') + b.roi + '%' : '—'}</td>
+          <td style="text-align:right">${b.avgClv != null ? (b.avgClv >= 0 ? '+' : '') + b.avgClv + '%' : '—'}</td>
+        </tr>`).join('')}
+      </tbody>
+    </table>`;
+  el.innerHTML = html;
+}
+
+// CLV Histogram — distribuição de CLV pra sanity check
+async function loadClvHistogram() {
+  const sp = currentSport === '__overall__' ? '' : '&sport=' + encodeURIComponent(currentSport);
+  const data = await apiFetch('/clv-histogram?days=30' + sp);
+  const el = document.getElementById('clvHistBody');
+  const meta = document.getElementById('clvHistMeta');
+  if (!data || data.error) { el.innerHTML = '<div class="empty-state">Sem dados</div>'; meta.textContent = '—'; return; }
+  if (!data.totalN) { el.innerHTML = '<div class="empty-state">Sem CLV registrado nos últimos 30d</div>'; meta.textContent = '—'; return; }
+  meta.textContent = `${data.totalN} tips · avg ${data.avgClv >= 0 ? '+' : ''}${data.avgClv}% · ${data.positivePct}% positiva`;
+
+  // SVG bar chart: 6 buckets
+  const w = 800, h = 240, pad = 40;
+  const barW = (w - 2*pad) / data.buckets.length;
+  const maxN = Math.max(1, ...data.buckets.map(b => b.n));
+  const colors = ['#dc2626', '#f97316', '#fbbf24', '#84cc16', '#22c55e', '#16a34a'];
+
+  let bars = '';
+  data.buckets.forEach((b, i) => {
+    const barH = (b.n / maxN) * (h - 2*pad - 20);
+    const x = pad + i * barW + barW * 0.1;
+    const y = h - pad - barH;
+    bars += `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${(barW*0.8).toFixed(1)}" height="${barH.toFixed(1)}" fill="${colors[i]}" rx="2"/>`;
+    bars += `<text x="${(x + barW*0.4).toFixed(1)}" y="${(y - 4).toFixed(1)}" fill="#aaa" font-size="11" text-anchor="middle">${b.n}</text>`;
+    bars += `<text x="${(x + barW*0.4).toFixed(1)}" y="${(h - pad + 14).toFixed(1)}" fill="#888" font-size="10" text-anchor="middle">${b.label}</text>`;
+  });
+
+  let html = `
+    <div class="card-meta" style="margin-bottom:10px">
+      Distribuição CLV. <b>Healthy:</b> right-skewed (mais tips à direita = positivo). Avg CLV positivo = consistentemente superando close odds. Negativo persistente = modelo lento ou sharp money sumindo do mercado.
+    </div>
+    <div class="models-grid" style="grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:14px">
+      <div class="model-card">
+        <div class="model-name">📊 Tips com CLV</div>
+        <div class="model-brier">${data.totalN}</div>
+        <div class="model-meta">últimos 30d</div>
+      </div>
+      <div class="model-card">
+        <div class="model-name">📈 CLV médio</div>
+        <div class="model-brier ${data.avgClv >= 0 ? 'positive' : 'negative'}">${data.avgClv >= 0 ? '+' : ''}${data.avgClv}%</div>
+        <div class="model-meta">objetivo: > 0</div>
+      </div>
+      <div class="model-card">
+        <div class="model-name">✅ Positiva</div>
+        <div class="model-brier">${data.positivePct}%</div>
+        <div class="model-meta">${data.negativePct}% negativa</div>
+      </div>
+    </div>
+    <svg viewBox="0 0 ${w} ${h}" style="width:100%;height:auto;background:var(--bg-secondary,#0f0f0f);border:1px solid var(--border,#2a2a2a);border-radius:6px">
+      <text x="${w/2}" y="${pad/2+4}" fill="#aaa" font-size="11" text-anchor="middle">distribuição CLV (n por bucket)</text>
+      ${bars}
+    </svg>
+    <div class="card-meta" style="margin:14px 0 6px"><b>Performance por bucket:</b></div>
+    <table class="tips">
+      <thead><tr>
+        <th>Faixa CLV</th>
+        <th style="text-align:right">N</th>
+        <th style="text-align:right">%</th>
+        <th style="text-align:right">Hit</th>
+        <th style="text-align:right">ROI</th>
+        <th style="text-align:right">Profit</th>
+      </tr></thead>
+      <tbody>
+        ${data.buckets.map(b => `<tr>
+          <td><b>${b.label}</b></td>
+          <td style="text-align:right">${b.n}</td>
+          <td style="text-align:right">${data.totalN > 0 ? (b.n / data.totalN * 100).toFixed(0) : 0}%</td>
+          <td style="text-align:right">${b.hitRate != null ? b.hitRate + '%' : '—'}</td>
+          <td style="text-align:right" class="${b.roi >= 0 ? 'positive' : 'negative'}">${b.roi != null ? (b.roi >= 0 ? '+' : '') + b.roi + '%' : '—'}</td>
+          <td style="text-align:right" class="${b.profit >= 0 ? 'positive' : 'negative'}">${b.profit >= 0 ? '+' : ''}R$${b.profit.toFixed(2)}</td>
+        </tr>`).join('')}
+      </tbody>
+    </table>`;
+  el.innerHTML = html;
 }
 
 // Tips Pendentes Audit — diagnostica por que tips não foram liquidadas
