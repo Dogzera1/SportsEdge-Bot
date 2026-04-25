@@ -12150,10 +12150,25 @@ async function pollTennis(runOnce = false) {
         const o1f = parseFloat(o.t1), o2f = parseFloat(o.t2);
         const isFav1 = o1f < o2f;
 
+        // Detect Slam/Masters via sport_key (TheOddsAPI feed) E league string (Pinnacle feed
+        // só popula league, não sport_key — sem fallback isMasters seria sempre false e
+        // TENNIS_NON_SLAM_DISABLED matava tudo). Excluir Challenger/ITF explicitamente.
         const key2 = match.sport_key || '';
-        const isGrandSlam = ['aus_open', 'french_open', 'wimbledon', 'us_open'].some(k => key2.includes(k));
-        const isMasters = ['indian_wells', 'miami', 'madrid', 'italian', 'canadian', 'cincinnati', 'shanghai', 'paris', 'monte'].some(k => key2.includes(k));
-        const tour = key2.includes('_wta_') ? 'WTA' : 'ATP';
+        const leagueLow = String(match.league || match.tournament || '').toLowerCase();
+        const isChallengerOrItf = /\bchallenger\b|\bitf\b|\b125k?\b|\bw15\b|\bw25\b|\bw50\b|\bm15\b|\bm25\b/.test(leagueLow);
+        const slamKeys = ['aus_open', 'french_open', 'wimbledon', 'us_open'];
+        const slamLeague = ['australian open', 'french open', 'roland garros', 'wimbledon', 'us open'];
+        const isGrandSlam = slamKeys.some(k => key2.includes(k))
+          || slamLeague.some(k => leagueLow.includes(k));
+        const mastersKeys = ['indian_wells', 'miami', 'madrid', 'italian', 'canadian', 'cincinnati', 'shanghai', 'paris', 'monte'];
+        const mastersLeague = ['indian wells', 'miami open', 'madrid', 'italian open', 'rome master', 'canadian open', 'toronto master', 'montreal master', 'cincinnati', 'shanghai master', 'paris master', 'paris bercy', 'monte carlo'];
+        const isMasters = !isChallengerOrItf && (
+          mastersKeys.some(k => key2.includes(k))
+          || mastersLeague.some(k => leagueLow.includes(k))
+          // ATP/WTA Madrid/Roma Masters geralmente vem como "ATP Madrid", "WTA Roma" etc
+          || /^(atp|wta)\s+(madrid|rome|roma|monte\s*carlo|paris|cincinnati|shanghai|miami|indian\s*wells|toronto|montreal)\b/i.test(leagueLow)
+        );
+        const tour = key2.includes('_wta_') ? 'WTA' : (leagueLow.includes('wta') ? 'WTA' : 'ATP');
         const espnEvent = tour === 'WTA' ? wtaEvent : atpEvent;
 
         // Superfície: ESPN event tem priority, senão usa detectSurface (lista completa
