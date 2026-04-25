@@ -4738,32 +4738,50 @@ const server = http.createServer(async (req, res) => {
         const { estimateTennisAces, estimateTennisDoubleFaults } = require('./lib/tennis-markov-model');
         const out = [];
         for (const m of upcoming) {
-          const aceR1 = getPlayerAceRate(db, m.team1);
-          const aceR2 = getPlayerAceRate(db, m.team2);
-          const dfR1 = getPlayerDfRate(db, m.team1);
-          const dfR2 = getPlayerDfRate(db, m.team2);
-          const surface = m.surface || 'hard';
+          // Surface inferida do league string (Madrid/Rome=clay, Wimbledon=grass, default=hard)
+          const inferredSurface = (() => {
+            const ll = (m.league || '').toLowerCase();
+            if (/wimbledon|grass|halle|queen|stuttgart|s-hertogenbosch|nottingham/i.test(ll)) return 'grass';
+            if (/madrid|rome|monte.carlo|barcelona|hamburg|estoril|munich|french open|roland|umag|kitzbuhel|gstaad/i.test(ll)) return 'clay';
+            return 'hard';
+          })();
+          const surface = m.surface || inferredSurface;
+          // Tenta com surface + 730d minMatches=5 (mais permissivo); se null, tenta sem surface; se null, all-time
+          let aceR1 = getPlayerAceRate(db, m.team1, { surface, sinceDays: 730, minMatches: 5 })
+                   || getPlayerAceRate(db, m.team1, { sinceDays: 730, minMatches: 5 })
+                   || getPlayerAceRate(db, m.team1, { sinceDays: 9999, minMatches: 5 });
+          let aceR2 = getPlayerAceRate(db, m.team2, { surface, sinceDays: 730, minMatches: 5 })
+                   || getPlayerAceRate(db, m.team2, { sinceDays: 730, minMatches: 5 })
+                   || getPlayerAceRate(db, m.team2, { sinceDays: 9999, minMatches: 5 });
+          let dfR1 = getPlayerDfRate(db, m.team1, { surface, sinceDays: 730, minMatches: 5 })
+                  || getPlayerDfRate(db, m.team1, { sinceDays: 730, minMatches: 5 })
+                  || getPlayerDfRate(db, m.team1, { sinceDays: 9999, minMatches: 5 });
+          let dfR2 = getPlayerDfRate(db, m.team2, { surface, sinceDays: 730, minMatches: 5 })
+                  || getPlayerDfRate(db, m.team2, { sinceDays: 730, minMatches: 5 })
+                  || getPlayerDfRate(db, m.team2, { sinceDays: 9999, minMatches: 5 });
           const bestOf = (m.league && /grand slam|us open|french open|wimbledon|australian open|roland garros/i.test(m.league)) ? 5 : 3;
           let acesEstimate = null, dfEstimate = null;
           try {
             acesEstimate = estimateTennisAces({
-              acesPerMatch1: aceR1?.acesPerMatch, acesPerMatch2: aceR2?.acesPerMatch,
+              acesPerMatch1: aceR1?.acePerMatchAvg, acesPerMatch2: aceR2?.acePerMatchAvg,
               bestOf, surface,
             });
           } catch (_) {}
           try {
             dfEstimate = estimateTennisDoubleFaults({
-              dfPerMatch1: dfR1?.dfPerMatch, dfPerMatch2: dfR2?.dfPerMatch,
+              dfPerMatch1: dfR1?.dfPerMatchAvg, dfPerMatch2: dfR2?.dfPerMatchAvg,
               bestOf, surface,
             });
           } catch (_) {}
           const mkt = await fetchJson2(`/odds-markets?team1=${encodeURIComponent(m.team1)}&team2=${encodeURIComponent(m.team2)}&separate_aces=1`).catch(() => null);
           out.push({
             team1: m.team1, team2: m.team2, league: m.league, surface, bestOf,
-            t1AceRate: aceR1?.acesPerMatch || null,
-            t2AceRate: aceR2?.acesPerMatch || null,
-            t1DfRate: dfR1?.dfPerMatch || null,
-            t2DfRate: dfR2?.dfPerMatch || null,
+            t1AceRate: aceR1?.acePerMatchAvg || null,
+            t1AceMatches: aceR1?.matches || 0,
+            t2AceRate: aceR2?.acePerMatchAvg || null,
+            t2AceMatches: aceR2?.matches || 0,
+            t1DfRate: dfR1?.dfPerMatchAvg || null,
+            t2DfRate: dfR2?.dfPerMatchAvg || null,
             modelAcesAvg: acesEstimate?.totalAcesAvg || null,
             modelDfAvg: dfEstimate?.totalDfAvg || null,
             pinnacleAcesLines: (mkt?.acesTotals?.length) || 0,
