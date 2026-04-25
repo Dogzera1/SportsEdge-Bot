@@ -2041,7 +2041,7 @@ async function runAutoAnalysis() {
           }, 'lol');
 
           // Aborta se DB recusou (erro ou duplicata já registrada)
-          if (!rec?.tipId && !rec?.skipped) {
+          if (!rec?.tipId) {
             log('WARN', 'AUTO', `record-tip falhou para ${tipTeam} @ ${tipOdd} (${match.team1} vs ${match.team2}) — tip abortada`);
             continue;
           }
@@ -2453,7 +2453,7 @@ async function runAutoAnalysis() {
               isShadow: isBucketShadowed('lol') ? 1 : 0,
             }, 'lol');
 
-            if (!recUp?.tipId && !recUp?.skipped) {
+            if (!recUp?.tipId) {
               log('WARN', 'AUTO', `record-tip upcoming falhou para ${tipTeam} @ ${tipOdd} — tip abortada`);
               await new Promise(r => setTimeout(r, 3000)); continue;
             }
@@ -12226,7 +12226,7 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
           pickSide: _pickSideMma,
         }, 'mma');
 
-        if (!rec?.tipId && !rec?.skipped) {
+        if (!rec?.tipId) {
           log('WARN', 'AUTO-MMA', `record-tip falhou para ${tipTeam} @ ${tipOdd} (${fight.team1} vs ${fight.team2}) — tip abortada`);
           await new Promise(r => setTimeout(r, 3000)); continue;
         }
@@ -13423,7 +13423,7 @@ Máximo 200 palavras. Raciocínio breve antes da decisão.`;
           pickSide: pickIsT1 ? 't1' : 't2',
         }, 'tennis');
 
-        if (!rec?.tipId && !rec?.skipped) {
+        if (!rec?.tipId) {
           log('WARN', 'AUTO-TENNIS', `record-tip falhou para ${tipPlayer} @ ${tipOdd} (${match.team1} vs ${match.team2}) — tip abortada`);
           await new Promise(r => setTimeout(r, 3000)); continue;
         }
@@ -14218,7 +14218,7 @@ Máximo 200 palavras.`;
           pickSide: _pickSideFb,
         }, 'football');
 
-        if (!recFb?.tipId && !recFb?.skipped) {
+        if (!recFb?.tipId) {
           log('WARN', 'AUTO-FOOTBALL', `record-tip falhou para ${tipTeam} @ ${tipOdd} (${match.team1} vs ${match.team2}) — tip abortada`);
           await new Promise(r => setTimeout(r, 2000)); continue;
         }
@@ -14457,7 +14457,7 @@ async function pollTableTennis(runOnce = false) {
           pickSide: direction,
         }, 'tabletennis');
 
-        if (!rec?.tipId && !rec?.skipped) {
+        if (!rec?.tipId) {
           log('WARN', 'AUTO-TT', `record-tip falhou: ${pickTeam} @ ${pickOdd}`);
           continue;
         }
@@ -15063,7 +15063,7 @@ Máximo 150 palavras.`;
           pickSide: direction,
         }, 'cs');
 
-        if (!rec?.tipId && !rec?.skipped) {
+        if (!rec?.tipId) {
           log('WARN', 'AUTO-CS', `record-tip falhou: ${pickTeam} @ ${pickOdd}`);
           continue;
         }
@@ -15536,7 +15536,7 @@ async function pollValorant(runOnce = false) {
           pickSide: direction,
         }, 'valorant');
 
-        if (!rec?.tipId && !rec?.skipped) {
+        if (!rec?.tipId) {
           log('WARN', 'AUTO-VAL', `record-tip falhou: ${pickTeam} @ ${pickOdd}`);
           continue;
         }
@@ -15817,7 +15817,7 @@ async function runAutoDarts() {
             pickSide: ml.direction,
           }, 'darts');
 
-          if (!rec?.tipId && !rec?.skipped) {
+          if (!rec?.tipId) {
             log('WARN', 'AUTO-DARTS', `record-tip falhou: ${pickTeam} @ ${pickOdd}`);
             continue;
           }
@@ -16014,7 +16014,7 @@ async function runAutoSnooker() {
             pickSide: ml.direction,
           }, 'snooker');
 
-          if (!rec?.tipId && !rec?.skipped) {
+          if (!rec?.tipId) {
             log('WARN', 'AUTO-SNOOKER', `record-tip falhou: ${pickTeam} @ ${pickOdd}`);
             continue;
           }
