@@ -16683,6 +16683,7 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
     try {
       const { checkStaleLines, shouldDm, persistEvent } = require('./lib/stale-line-detector');
       const sod = require('./lib/super-odd-detector');
+      const arb = require('./lib/arb-detector');
       const http = require('http');
       const port = process.env.PORT || 3000;
       const fetchJson = (path) => new Promise((res, rej) => {
@@ -16695,6 +16696,7 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
 
       let alerts = 0;
       let superOdds = 0;
+      let arbs = 0;
       // Football: _allOdds em match.odds com 21+ books
       try {
         const fb = await fetchJson('/football-matches');
@@ -16704,6 +16706,34 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
           const pin = all.find(b => /pinnacle/i.test(b.bookmaker));
           if (!pin) continue;
           const others = all.filter(b => !/pinnacle/i.test(b.bookmaker));
+
+          // 3-way arb football (h, d, a cross-book)
+          const arb3 = arb.detect3WayArb({ sport: 'football', team1: m.team1, team2: m.team2, allOdds: all });
+          if (arb3 && arb.shouldDm(arb3.sport, arb3.matchKey, arb3.marketType)) {
+            arb.persistEvent(db, arb3);
+            arbs++;
+            if (ADMIN_IDS.size) {
+              const x = arb3._extra;
+              const stakeRef = 100;
+              const sumImpl = (1/x.bestH.odd) + (1/x.bestD.odd) + (1/x.bestA.odd);
+              const sH = +((stakeRef * (1/x.bestH.odd) / sumImpl)).toFixed(2);
+              const sD = +((stakeRef * (1/x.bestD.odd) / sumImpl)).toFixed(2);
+              const sA = +((stakeRef * (1/x.bestA.odd) / sumImpl)).toFixed(2);
+              const payout = +(stakeRef / sumImpl).toFixed(2);
+              const msg = `💎 *ARB 3-WAY — FOOTBALL*\n\n` +
+                `*${arb3.matchLabel}*\n\n` +
+                `Casa @ home: *${x.bestH.bookmaker}* @ ${x.bestH.odd.toFixed(2)}\n` +
+                `Casa @ draw: *${x.bestD.bookmaker}* @ ${x.bestD.odd.toFixed(2)}\n` +
+                `Casa @ away: *${x.bestA.bookmaker}* @ ${x.bestA.odd.toFixed(2)}\n\n` +
+                `Lucro garantido: *+${arb3.arbPct}%* (implied sum=${(arb3.impliedSum*100).toFixed(2)}%)\n\n` +
+                `Stake split p/ R$${stakeRef} total:\n` +
+                `  Home: R$${sH}  Draw: R$${sD}  Away: R$${sA}\n` +
+                `  Payout (qualquer resultado): *R$${payout}* | lucro R$${(payout-stakeRef).toFixed(2)}`;
+              const tk = Object.values(SPORTS).find(S => S?.enabled && S?.token)?.token;
+              if (tk) for (const adminId of ADMIN_IDS) sendDM(tk, adminId, msg).catch(() => {});
+            }
+          }
+
           // Check h, d, a sides
           for (const side of ['h', 'd', 'a']) {
             const pinOdd = parseFloat(pin[side]);
@@ -16760,6 +16790,27 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
           const pin = all.find(b => /pinnacle/i.test(b.bookmaker));
           if (!pin) continue;
           const others = all.filter(b => !/pinnacle/i.test(b.bookmaker));
+
+          // 2-way arb LoL (t1, t2 cross-book)
+          const arb2 = arb.detect2WayArb({ sport: 'lol', team1: m.team1, team2: m.team2, allOdds: all });
+          if (arb2 && arb.shouldDm(arb2.sport, arb2.matchKey, arb2.marketType)) {
+            arb.persistEvent(db, arb2);
+            arbs++;
+            if (ADMIN_IDS.size) {
+              const split = arb.stakeSplit2Way(arb2.oddA, arb2.oddB, 100);
+              const msg = `💎 *ARB 2-WAY — LOL*\n\n` +
+                `*${arb2.matchLabel}*\n\n` +
+                `*${arb2.sideA}*: ${arb2.bookA} @ ${arb2.oddA}\n` +
+                `*${arb2.sideB}*: ${arb2.bookB} @ ${arb2.oddB}\n\n` +
+                `Lucro garantido: *+${arb2.arbPct}%* (implied sum=${(arb2.impliedSum*100).toFixed(2)}%)\n\n` +
+                `Stake split p/ R$100:\n` +
+                `  ${arb2.sideA}: R$${split.stakeA}  |  ${arb2.sideB}: R$${split.stakeB}\n` +
+                `  Payout (qualquer resultado): *R$${split.payout}* | lucro R$${split.profit}`;
+              const tk = Object.values(SPORTS).find(S => S?.enabled && S?.token)?.token;
+              if (tk) for (const adminId of ADMIN_IDS) sendDM(tk, adminId, msg).catch(() => {});
+            }
+          }
+
           for (const side of ['t1', 't2']) {
             const pinOdd = parseFloat(pin[side]);
             const brBooks = others.map(b => ({ bookmaker: b.bookmaker, odd: parseFloat(b[side]) })).filter(x => Number.isFinite(x.odd));
@@ -16778,7 +16829,7 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
         }
       } catch (_) {}
 
-      if (alerts > 0 || superOdds > 0) log('INFO', 'STALE-LINE', `${alerts} stale, ${superOdds} super-odd`);
+      if (alerts > 0 || superOdds > 0 || arbs > 0) log('INFO', 'STALE-LINE', `${alerts} stale, ${superOdds} super-odd, ${arbs} arb`);
     } catch (e) { log('ERROR', 'STALE-LINE', e.message); }
   }
   setInterval(() => runStaleLineCron(), 5 * 60 * 1000); // 5min

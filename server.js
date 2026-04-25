@@ -7245,6 +7245,19 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // GET /admin/arb-events?hours=24&sport=football
+  if (p === '/admin/arb-events') {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const { getRecentEvents } = require('./lib/arb-detector');
+      const hours = Math.max(1, Math.min(168, parseInt(parsed.query.hours || '24', 10)));
+      const sport = parsed.query.sport || null;
+      const events = getRecentEvents(db, { hours, sport });
+      sendJson(res, { ok: true, hours, sport: sport || 'all', count: events.length, events });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   // GET /admin/super-odd-events?hours=24&sport=lol
   if (p === '/admin/super-odd-events') {
     if (!requireAdmin(req, res)) return;

@@ -1460,6 +1460,35 @@ const migrations = [
       `);
     },
   },
+  {
+    id: '059_arb_events',
+    up(db) {
+      // Cross-book arbitrage detector: registra quando soma das implied
+      // probabilities entre 2 books diferentes < 1 (= margin negativa)
+      // → ganho mecânico travado independente de quem vence.
+      // Casas BR às vezes desalinham com Pinnacle/Bet365 EU criando arbs
+      // de 0.5-2% (raros mas legítimos).
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS arb_events (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          sport TEXT NOT NULL,
+          match_label TEXT,
+          market_type TEXT,
+          side_a TEXT,
+          side_b TEXT,
+          odd_a REAL NOT NULL,
+          odd_b REAL NOT NULL,
+          book_a TEXT NOT NULL,
+          book_b TEXT NOT NULL,
+          implied_sum REAL NOT NULL,
+          arb_pct REAL NOT NULL,
+          detected_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_arb_sport_at
+          ON arb_events (sport, detected_at DESC);
+      `);
+    },
+  },
 ];
 
 function applyMigrations(db) {
