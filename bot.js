@@ -619,6 +619,7 @@ const _lastStuckAlert = {}; // sport → ts (cooldown 2h entre alertas)
 // excluído, odds antigas, prefilter cortando edge fraca). Exclusas do count.
 const POLICY_REJECTIONS = new Set([
   'itf_exclusion',
+  'non_slam_disabled', // TENNIS_NON_SLAM_DISABLED=true é policy ativa (Brier non-top 0.23+); mesma natureza de itf_exclusion
   'odds_stale',
   'odds_out_of_range', // odds fora do range configurado — gate intencional per-sport
   'odds_bucket_block', // bucket de odd bloqueado via ODDS_BUCKET_BLOCK (leak confirmado em backtest)
