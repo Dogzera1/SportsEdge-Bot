@@ -16050,6 +16050,17 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
         if (b.status === 'live' && a.status !== 'live') return 1;
         return new Date(a.time) - new Date(b.time);
       });
+      // Enriquece com BR books (Bet365/Betano/Sportingbet/KTO/etc) via Supabase aggregator.
+      // Tennis ATP Madrid Masters publicado pelos scrapers; outras ligas conforme expandirem.
+      try {
+        if (process.env.SUPABASE_URL && process.env.SUPABASE_ANON_KEY && process.env.AGGREGATOR_DISABLED !== 'true') {
+          const aggClient = require('./lib/odds-aggregator-client');
+          const r = await aggClient.enrichTennisMatches(filtered);
+          if (r?.enriched > 0) {
+            log('INFO', 'AGGREGATOR-TENNIS', `BR odds enriched ${r.enriched}/${filtered.length} (${r.totalTennis || 0} tennis jogos)`);
+          }
+        }
+      } catch (e) { log('WARN', 'AGGREGATOR-TENNIS', `enrich err: ${e.message}`); }
       if (filtered.length) _tennisMatchesCache = { matches: filtered.slice(), ts: now };
       _tennisMatchesResp = { data: filtered, ts: now };
       sendJson(res, filtered);
