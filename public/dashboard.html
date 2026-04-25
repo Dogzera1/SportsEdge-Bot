@@ -2572,6 +2572,7 @@ function renderMarketTipsPage() {
           <th style="text-align:right">Odd</th>
           <th style="text-align:right">pMod</th>
           <th style="text-align:right">EV</th>
+          <th style="text-align:right">Stake</th>
           <th style="text-align:right">CLV</th>
           <th style="text-align:center">Result</th>
         </tr>
@@ -2584,6 +2585,10 @@ function renderMarketTipsPage() {
     const clvClass = t.clv_pct != null ? (t.clv_pct >= 0 ? 'positive' : 'negative') : '';
     const pMod = t.p_model != null ? (t.p_model * 100).toFixed(1) + '%' : '—';
     const evStr = t.ev_pct != null ? (t.ev_pct >= 0 ? '+' : '') + t.ev_pct.toFixed(1) + '%' : '—';
+    const stakeUnits = Number(t.stake_units);
+    const stakeStr = Number.isFinite(stakeUnits) && stakeUnits > 0
+      ? stakeUnits.toFixed(2).replace(/\.?0+$/, '') + 'u'
+      : '—';
     html += `
       <tr>
         <td>${d}</td>
@@ -2593,6 +2598,7 @@ function renderMarketTipsPage() {
         <td style="text-align:right">${t.odd?.toFixed(2) || '—'}</td>
         <td style="text-align:right">${pMod}</td>
         <td style="text-align:right" class="${t.ev_pct >= 8 ? 'positive' : ''}">${evStr}</td>
+        <td style="text-align:right">${stakeStr}</td>
         <td style="text-align:right" class="${clvClass}">${clvStr}</td>
         <td style="text-align:center">${resEmoji}</td>
       </tr>`;
