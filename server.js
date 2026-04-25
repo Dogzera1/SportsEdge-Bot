@@ -4587,10 +4587,11 @@ const server = http.createServer(async (req, res) => {
         wantSeparateAces ? pinnacle.getMatchupTotals(matchupId, period, { groupByMatchup: true }).catch(() => []) : Promise.resolve(null),
       ]);
 
-      // Tennis 3-bucket detection via mediana das lines:
-      //   median <11 → double_faults (lines 3-10)
-      //   11 ≤ median <18 → aces (lines 8-22)
+      // Tennis 3-bucket detection via mediana + min lines:
+      //   median 4-10 + ≥2 lines → double_faults (DF totals típicas 5-12)
+      //   median 11-17 → aces (lines 8-22)
       //   median ≥18 → games (lines 18-30)
+      //   median <4 OU 1 line → ignora (provavelmente total_sets 2.5 Bo3, não DF)
       // Buckets podem coexistir; aces+games comum, DF mais raro em Pinnacle tennis.
       let acesTotals = null, gamesTotals = null, dfTotals = null;
       if (wantSeparateAces && Array.isArray(allTotalGroups) && allTotalGroups.length >= 2) {
@@ -4603,11 +4604,12 @@ const server = http.createServer(async (req, res) => {
           if (!grp.lines?.length) continue;
           const med = median(grp.lines.map(l => l.line));
           if (med == null) continue;
-          if (med < 11) {
+          // DF requer médian ≥4 (filtra total_sets 2.5/3.5) E ≥2 lines distintas
+          if (med >= 4 && med < 11 && grp.lines.length >= 2) {
             if (!dfTotals || grp.lines.length > dfTotals.length) dfTotals = grp.lines;
-          } else if (med < 18) {
+          } else if (med >= 11 && med < 18) {
             if (!acesTotals || grp.lines.length > acesTotals.length) acesTotals = grp.lines;
-          } else {
+          } else if (med >= 18) {
             if (!gamesTotals || grp.lines.length > gamesTotals.length) gamesTotals = grp.lines;
           }
         }
