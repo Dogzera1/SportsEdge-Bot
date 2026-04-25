@@ -2787,8 +2787,11 @@ async function settleCompletedTips() {
           const preferEspn = !(envFlag === '0' || envFlag === 'false' || envFlag === 'no');
           const primary = preferEspn ? 'espn' : 'sofascore';
           const fallback = preferEspn ? 'sofascore' : 'espn';
+          // Mesma cópia em bot.js:16844 já aplicava esse keyParam — sem ele,
+          // /sync-football-* retorna 401 e o pre-sync falha em silêncio toda iteração.
+          const keyParam = process.env.ADMIN_KEY ? `&key=${encodeURIComponent(process.env.ADMIN_KEY)}` : '';
           const tryOne = async (source) => serverGet(
-            `/sync-football-${source}?days=${syncDays}`, 'football'
+            `/sync-football-${source}?days=${syncDays}${keyParam}`, 'football'
           ).catch(() => null);
           let r = await tryOne(primary);
           if (!r?.ok || (r.inserted || 0) === 0) {
@@ -16415,14 +16418,26 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
 
   // Football Poisson retrain: segunda 5h UTC (1h após threshold optimizer).
   // Absorve matches novos settled na última semana. Gated FOOTBALL_POISSON_AUTO_RETRAIN.
+  // Bootstrap: se o arquivo de params não existe, treina imediatamente (uma vez) sem
+  // esperar segunda-feira nem flag — caso contrário fbTrained=null em 100% dos jogos
+  // e o override path skipa todo football (descoberto 2026-04-25).
   let _lastFbRetrainDay = null;
+  let _fbBootstrapDone = false;
   async function runFootballPoissonRetrain() {
-    if (!/^true$/i.test(String(process.env.FOOTBALL_POISSON_AUTO_RETRAIN || ''))) return;
     const now = new Date();
     const today = now.toISOString().slice(0, 10);
-    if (_lastFbRetrainDay === today) return;
-    if (now.getUTCDay() !== 1 || now.getUTCHours() !== 5) return;
+    let isBootstrap = false;
+    try {
+      const { hasTrainedFootballModel } = require('./lib/football-poisson-trained');
+      if (!hasTrainedFootballModel() && !_fbBootstrapDone) isBootstrap = true;
+    } catch (_) {}
+    if (!isBootstrap) {
+      if (!/^true$/i.test(String(process.env.FOOTBALL_POISSON_AUTO_RETRAIN || ''))) return;
+      if (_lastFbRetrainDay === today) return;
+      if (now.getUTCDay() !== 1 || now.getUTCHours() !== 5) return;
+    }
     _lastFbRetrainDay = today;
+    if (isBootstrap) _fbBootstrapDone = true;
     try {
       const adminKey = process.env.ADMIN_KEY || '';
       // Target leagues expandido: 2ª divisões Europa + América Latina + ligas secundárias
@@ -16430,12 +16445,20 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
       const r = await serverPost(`/admin/train-football-poisson?min_games=8&years_back=3&target_leagues=${targetLeagues}`, {}, null,
         adminKey ? { 'x-admin-key': adminKey } : {});
       if (r?.ok) {
-        log('INFO', 'FB-RETRAIN', `done: ${r.totalMatches} matches, ${r.leaguesCount} leagues, ${r.teamsCount} teams`);
+        log('INFO', 'FB-RETRAIN', `${isBootstrap ? 'bootstrap' : 'weekly'}: ${r.totalMatches} matches, ${r.leaguesCount} leagues, ${r.teamsCount} teams`);
+      } else {
+        log('WARN', 'FB-RETRAIN', `${isBootstrap ? 'bootstrap' : 'weekly'} falhou: ${r?.error || 'no response'}`);
+        if (isBootstrap) _fbBootstrapDone = false; // reabre tentativa próximo ciclo
       }
-    } catch (e) { log('ERROR', 'FB-RETRAIN', e.message); }
+    } catch (e) {
+      log('ERROR', 'FB-RETRAIN', e.message);
+      if (isBootstrap) _fbBootstrapDone = false;
+    }
   }
   setInterval(() => runFootballPoissonRetrain(), 15 * 60 * 1000);
   setTimeout(() => runFootballPoissonRetrain(), 55 * 60 * 1000);
+  // Bootstrap rápido: se não existe params, tenta em 90s ao invés de esperar 55min.
+  setTimeout(() => runFootballPoissonRetrain(), 90 * 1000);
 
   // Auto-void stuck pending tips. Diferentes sports têm latência distinta de settlement:
   //   LoL/CS/Valorant: matches rápidos, 12h já é tarde demais
