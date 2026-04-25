@@ -3173,6 +3173,10 @@ async function runAutoHealerCycle() {
   );
   if (newApplied.length === 0 && criticalUnresolved.length === 0) return;
 
+  // DM silencioso por default — só envia se ENV opt-in. Silencia ruído operacional.
+  // Ativar com AUTO_HEALER_DM_ENABLED=true. Logs continuam (visibility no console).
+  if (!/^(1|true|yes)$/i.test(String(process.env.AUTO_HEALER_DM_ENABLED || ''))) return;
+
   const tokenForAlert = Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
   if (!tokenForAlert) return;
 
@@ -3701,10 +3705,14 @@ async function runLiveStormCycle() {
   const wasActive = _liveStormActive;
   _liveStormActive = !!result.storm_active;
 
+  // DM silencioso por default — só envia se ENV opt-in. Logs continuam.
+  // Ativar com LIVE_STORM_DM_ENABLED=true.
+  const stormDmEnabled = /^(1|true|yes)$/i.test(String(process.env.LIVE_STORM_DM_ENABLED || ''));
+
   // Storm INICIOU
   if (_liveStormActive && !wasActive) {
     log('WARN', 'LIVE-STORM', `STORM ATIVO: ${result.live_total} partidas live (threshold ${result.storm_threshold})`);
-    if (Date.now() - _lastLiveStormDM > LIVE_STORM_DM_COOLDOWN_MS) {
+    if (stormDmEnabled && Date.now() - _lastLiveStormDM > LIVE_STORM_DM_COOLDOWN_MS) {
       _lastLiveStormDM = Date.now();
       const tokenForAlert = Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
       if (tokenForAlert) {
@@ -3724,12 +3732,14 @@ async function runLiveStormCycle() {
   // Storm RESOLVEU
   if (!_liveStormActive && wasActive) {
     log('INFO', 'LIVE-STORM', `Storm resolvido: ${result.live_total} live (abaixo do threshold)`);
-    const tokenForAlert = Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
-    if (tokenForAlert) {
-      const msg = `✅ *LIVE STORM RESOLVIDO*\n\n` +
-        `Voltou ao volume normal: *${result.live_total}* partidas live.\n` +
-        `Sistema operando em capacidade padrão.`;
-      for (const adminId of ADMIN_IDS) await sendDM(tokenForAlert, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
+    if (stormDmEnabled) {
+      const tokenForAlert = Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
+      if (tokenForAlert) {
+        const msg = `✅ *LIVE STORM RESOLVIDO*\n\n` +
+          `Voltou ao volume normal: *${result.live_total}* partidas live.\n` +
+          `Sistema operando em capacidade padrão.`;
+        for (const adminId of ADMIN_IDS) await sendDM(tokenForAlert, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
+      }
     }
   }
 
