@@ -774,6 +774,20 @@
     </div>
   </div>
 
+  <!-- Exploração de Ineficiências BR (expandable) -->
+  <div class="section" id="secExploit">
+    <div class="section-head" onclick="toggleSection('secExploit'); loadExploitSummary()">
+      <div class="section-head-left">
+        <svg class="section-chevron" viewBox="0 0 16 16"><path d="M6 4l4 4-4 4" stroke="currentColor" fill="none" stroke-width="2"/></svg>
+        <span>🔍 Exploração de Ineficiências BR (24h)</span>
+      </div>
+      <div class="section-head-meta" id="exploitMeta">—</div>
+    </div>
+    <div class="section-body">
+      <div id="exploitBody"><div class="loading">Carregando</div></div>
+    </div>
+  </div>
+
   <!-- ROI por Bookmaker (expandable) -->
   <div class="section" id="secBook">
     <div class="section-head" onclick="toggleSection('secBook'); loadByBook()">
@@ -2472,6 +2486,143 @@ async function loadMarketTipsShadow() {
 function toggleMarketTipsLive() {
   marketTipsState.includeLive = !marketTipsState.includeLive;
   loadMarketTipsShadow();
+}
+
+// Exploração de Ineficiências BR — agregado dos 3 detectores persistidos
+// (stale-line, super-odd, arb). Velocity é em-memória, não aparece aqui.
+async function loadExploitSummary() {
+  const data = await apiFetch('/exploit-summary?hours=24');
+  const el = document.getElementById('exploitBody');
+  const meta = document.getElementById('exploitMeta');
+  if (!data || data.error) {
+    el.innerHTML = '<div class="empty-state">Sem dados</div>';
+    meta.textContent = '—';
+    return;
+  }
+  const t = data.totals || {};
+  const r = data.recent || {};
+  meta.textContent = `${t.stale_line || 0} stale · ${t.super_odd || 0} super · ${t.arb || 0} arb`;
+
+  const fmtTime = (s) => (s || '').replace('T', ' ').slice(5, 16);
+  const sportEmoji = { lol: '🎮', dota2: '🎮', cs: '🔫', cs2: '🔫', tennis: '🎾', football: '⚽', valorant: '🎯', mma: '🥊' };
+  const e = (sp) => sportEmoji[sp] || '📊';
+  const sign = (v) => v == null ? '' : (v >= 0 ? 'positive' : 'negative');
+  const fmtPct = (v, d = 2) => v == null ? '—' : (v >= 0 ? '+' : '') + Number(v).toFixed(d) + '%';
+
+  let html = `
+    <div class="card-meta" style="margin-bottom:10px">
+      <b>4 detectores ativos</b> rodam cron 5min comparando Pinnacle vs outros books cached.
+      <br><span style="opacity:0.7">Stale = casa atrasou · Super = book ≥20% acima Pinnacle · Arb = lucro travado · Velocity = sharp money em-memória</span>
+    </div>
+
+    <div class="models-grid" style="grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:14px">
+      <div class="model-card">
+        <div class="model-name">📍 Stale Lines</div>
+        <div class="model-brier">${t.stale_line || 0}</div>
+        <div class="model-meta">eventos 24h</div>
+      </div>
+      <div class="model-card">
+        <div class="model-name">🎰 Super Odds</div>
+        <div class="model-brier">${t.super_odd || 0}</div>
+        <div class="model-meta">eventos 24h</div>
+      </div>
+      <div class="model-card">
+        <div class="model-name">💎 Arbs</div>
+        <div class="model-brier">${t.arb || 0}</div>
+        <div class="model-meta">eventos 24h</div>
+      </div>
+    </div>
+  `;
+
+  // Tabela arbs
+  if (Array.isArray(r.arb) && r.arb.length) {
+    html += `
+      <div class="card-meta" style="margin:14px 0 6px"><b>💎 Arbs recentes</b> (top 10)</div>
+      <table class="tips">
+        <thead><tr>
+          <th>Hora</th><th>Sport</th><th>Match</th><th>Mercado</th>
+          <th style="text-align:right">Lucro</th><th>Books</th>
+        </tr></thead>
+        <tbody>
+          ${r.arb.map(x => `
+            <tr>
+              <td>${fmtTime(x.detected_at)}</td>
+              <td>${e(x.sport)} ${x.sport}</td>
+              <td>${x.match_label}</td>
+              <td>${x.market_type}</td>
+              <td style="text-align:right" class="positive"><b>+${Number(x.arb_pct).toFixed(2)}%</b></td>
+              <td><span style="font-size:0.85em">${x.book_a} @ ${Number(x.odd_a).toFixed(2)} / ${x.book_b} @ ${Number(x.odd_b).toFixed(2)}</span></td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    `;
+  }
+
+  // Tabela super odds
+  if (Array.isArray(r.super_odd) && r.super_odd.length) {
+    html += `
+      <div class="card-meta" style="margin:14px 0 6px"><b>🎰 Super Odds recentes</b> (top 10)</div>
+      <table class="tips">
+        <thead><tr>
+          <th>Hora</th><th>Sport</th><th>Match</th><th>Lado</th>
+          <th style="text-align:right">Pinnacle</th><th>Casa</th>
+          <th style="text-align:right">EV est.</th>
+        </tr></thead>
+        <tbody>
+          ${r.super_odd.map(x => `
+            <tr>
+              <td>${fmtTime(x.detected_at)}</td>
+              <td>${e(x.sport)} ${x.sport}</td>
+              <td>${x.match_label}</td>
+              <td>${x.pick_side}</td>
+              <td style="text-align:right">${Number(x.pinnacle_odd).toFixed(2)}</td>
+              <td><b>${x.super_book}</b> @ ${Number(x.super_odd).toFixed(2)}</td>
+              <td style="text-align:right" class="${sign(x.ev_pct_estimated)}">${fmtPct(x.ev_pct_estimated, 1)}</td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    `;
+  }
+
+  // Tabela stale lines
+  if (Array.isArray(r.stale_line) && r.stale_line.length) {
+    html += `
+      <div class="card-meta" style="margin:14px 0 6px"><b>📍 Stale Lines recentes</b> (top 10)</div>
+      <table class="tips">
+        <thead><tr>
+          <th>Hora</th><th>Sport</th><th>Match</th><th>Lado</th>
+          <th style="text-align:right">Pin (was→now)</th>
+          <th style="text-align:right">Δ%</th><th>Casa</th>
+        </tr></thead>
+        <tbody>
+          ${r.stale_line.map(x => `
+            <tr>
+              <td>${fmtTime(x.detected_at)}</td>
+              <td>${e(x.sport)} ${x.sport}</td>
+              <td>${x.match_label}</td>
+              <td>${x.pick_side}</td>
+              <td style="text-align:right" style="font-size:0.85em">${Number(x.pin_old).toFixed(2)}→${Number(x.pin_new).toFixed(2)}</td>
+              <td style="text-align:right" class="${sign(x.pin_delta_pct)}">${fmtPct(x.pin_delta_pct, 1)}</td>
+              <td><b>${x.br_book}</b> @ ${Number(x.br_odd).toFixed(2)}</td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    `;
+  }
+
+  if (!t.stale_line && !t.super_odd && !t.arb) {
+    html += `
+      <div class="empty-state" style="margin-top:14px">
+        Nenhum evento detectado nas últimas 24h.<br>
+        <span style="opacity:0.7">Detectores rodam a cada 5min mas só alertam quando achados ≥ threshold (stale Δ5%, super 20% acima Pinnacle, arb 0.5% lucro).</span>
+      </div>
+    `;
+  }
+
+  el.innerHTML = html;
 }
 
 function renderMarketTipsBreakdown(bd) {

@@ -7245,6 +7245,48 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // GET /exploit-summary?hours=24 (público read-only — usado pelo dashboard)
+  // Agrega counts + amostra dos 3 detectores persistidos (stale, super, arb)
+  // Velocity tracker é em-memória, não persiste, então não aparece aqui.
+  if (p === '/exploit-summary') {
+    try {
+      const hours = Math.max(1, Math.min(168, parseInt(parsed.query.hours || '24', 10)));
+      const since = `-${hours} hours`;
+
+      const stale = db.prepare(`
+        SELECT sport, match_label, pick_side, pin_old, pin_new, pin_delta_pct, br_book, br_odd, detected_at
+        FROM stale_line_events
+        WHERE detected_at >= datetime('now', ?)
+        ORDER BY detected_at DESC LIMIT 10
+      `).all(since);
+      const staleCnt = db.prepare(`SELECT COUNT(*) n FROM stale_line_events WHERE detected_at >= datetime('now', ?)`).get(since).n;
+
+      const sup = db.prepare(`
+        SELECT sport, match_label, pick_side, pinnacle_odd, super_book, super_odd, ratio, ev_pct_estimated, detected_at
+        FROM super_odd_events
+        WHERE detected_at >= datetime('now', ?)
+        ORDER BY detected_at DESC LIMIT 10
+      `).all(since);
+      const supCnt = db.prepare(`SELECT COUNT(*) n FROM super_odd_events WHERE detected_at >= datetime('now', ?)`).get(since).n;
+
+      const arb = db.prepare(`
+        SELECT sport, match_label, market_type, side_a, side_b, odd_a, odd_b, book_a, book_b, arb_pct, detected_at
+        FROM arb_events
+        WHERE detected_at >= datetime('now', ?)
+        ORDER BY detected_at DESC LIMIT 10
+      `).all(since);
+      const arbCnt = db.prepare(`SELECT COUNT(*) n FROM arb_events WHERE detected_at >= datetime('now', ?)`).get(since).n;
+
+      sendJson(res, {
+        ok: true,
+        hours,
+        totals: { stale_line: staleCnt, super_odd: supCnt, arb: arbCnt },
+        recent: { stale_line: stale, super_odd: sup, arb },
+      });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   // GET /admin/arb-events?hours=24&sport=football
   if (p === '/admin/arb-events') {
     if (!requireAdmin(req, res)) return;
