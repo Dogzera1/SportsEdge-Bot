@@ -146,9 +146,12 @@ const SERVER = '127.0.0.1';
 const PORT = parseInt(process.env.SERVER_PORT) || parseInt(process.env.PORT) || 8080;
 const ADMIN_IDS = new Set((process.env.ADMIN_USER_IDS || '').split(',').filter(Boolean));
 const DEEPSEEK_KEY = process.env.DEEPSEEK_API_KEY;
+const _AI_DISABLED = /^(1|true|yes)$/i.test(String(process.env.AI_DISABLED || ''));
 
-if (!DEEPSEEK_KEY) {
-  console.error('❌ Configure DEEPSEEK_API_KEY no .env');
+// AI_DISABLED=true retira DeepSeek totalmente (sem boot check, sem chamadas, sem cooldown).
+// Útil quando provider está degradado retornando 200 vazio sem corpo.
+if (!DEEPSEEK_KEY && !_AI_DISABLED) {
+  console.error('❌ Configure DEEPSEEK_API_KEY no .env (ou AI_DISABLED=true pra retirar IA)');
   process.exit(1);
 }
 
@@ -6262,6 +6265,40 @@ async function autoAnalyzeMatch(token, match) {
     const FALLBACK_MAX_ODDS = parseFloat(process.env.LOL_MAX_ODDS ?? '4.00');
     if (!global.__deepseekBackoffUntil) global.__deepseekBackoffUntil = 0;
     if (!global.__deepseekLastCallTs) global.__deepseekLastCallTs = 0;
+    // AI_DISABLED early-exit: pula direto pra fallback model sem esperar cooldown
+    // nem chamar /claude. Evita 15-25s desperdiçados por análise quando provider
+    // está degradado (status=200 vazio).
+    if (_AI_DISABLED) {
+      const direction = mlResult.direction;
+      const pickTeam = direction === 't2' ? match.team2 : match.team1;
+      const pickOdd = direction === 't2' ? parseFloat(oddsToUse?.t2) : parseFloat(oddsToUse?.t1);
+      const pickP = direction === 't2' ? mlResult.modelP2 : mlResult.modelP1;
+      const evPct = (pickP && pickOdd) ? ((pickP * pickOdd - 1) * 100) : 0;
+      if (pickOdd >= FALLBACK_MIN_ODDS && pickOdd <= FALLBACK_MAX_ODDS && evPct >= 5 && mlResult.score >= 5) {
+        const stake = calcKellyWithP(pickP, pickOdd, 0.15);
+        log('INFO', 'AUTO', `AI_DISABLED: fallback modelo ${pickTeam} @ ${pickOdd} EV=${evPct.toFixed(1)}% edge=${mlResult.score.toFixed(1)}pp`);
+        return {
+          ok: true,
+          tipMatch: [
+            `TIP_ML: ${pickTeam} @ ${pickOdd} |EV: +${evPct.toFixed(1)}% |STAKE: ${String(stake || '1u')} |CONF: MÉDIA`,
+            String(pickTeam), String(pickOdd), `+${evPct.toFixed(1)}%`, String(stake || '1u'), CONF.MEDIA
+          ],
+          tipTeam: pickTeam, tipOdd: pickOdd, tipEV: parseFloat(evPct.toFixed(1)),
+          tipStake: String(stake || '1u'), tipConf: CONF.MEDIA,
+          tipReason: 'Value detectado pelo modelo (AI_DISABLED)',
+          debugVars: {
+            source: 'ai_disabled_fallback', game, status: match.status, league: match.league,
+            t1: match.team1, t2: match.team2, hasLiveStats, liveGameNumber,
+            odds: { t1: oddsToUse?.t1, t2: oddsToUse?.t2, bookmaker: oddsToUse?.bookmaker, market: oddsToUse?.market, mapMarket: oddsToUse?.mapMarket },
+            modelP1: mlResult.modelP1, modelP2: mlResult.modelP2,
+            pick: { team: pickTeam, odd: pickOdd, p: pickP, evPct: parseFloat(evPct.toFixed(1)), stake: String(stake || '1u'), conf: CONF.MEDIA },
+            ml: { pass: mlResult.pass, direction: mlResult.direction, edgePp: parseFloat(mlResult.score.toFixed(1)), factors: mlResult.factorActive || [], factorCount: mlResult.factorCount || 0 },
+            signals: { sigCount, evThreshold: adaptiveEV }, compScore
+          }
+        };
+      }
+      return null;
+    }
     // Cooldown mínimo entre chamadas (evita 429 por múltiplos live matches simultâneos)
     // O backoff pós-429 só é setado após a resposta chegar — este cooldown é preventivo
     const DS_COOLDOWN_MS = Math.max(3000, parseInt(process.env.DEEPSEEK_CALL_COOLDOWN_MS || '20000', 10) || 20000);
@@ -14458,7 +14495,8 @@ async function pollTableTennis(runOnce = false) {
         }, 'tabletennis');
 
         if (!rec?.tipId) {
-          log('WARN', 'AUTO-TT', `record-tip falhou: ${pickTeam} @ ${pickOdd}`);
+          log('WARN', 'AUTO-TT', `record-tip falhou: ${pickTeam} @ ${pickOdd}${rec?.reason ? ` (${rec.reason})` : ''}`);
+          analyzedTT.set(key, { ts: now, tipSent: false, skipped: true, reason: rec?.reason || null });
           continue;
         }
         analyzedTT.set(key, { ts: now, tipSent: true });
@@ -15064,7 +15102,8 @@ Máximo 150 palavras.`;
         }, 'cs');
 
         if (!rec?.tipId) {
-          log('WARN', 'AUTO-CS', `record-tip falhou: ${pickTeam} @ ${pickOdd}`);
+          log('WARN', 'AUTO-CS', `record-tip falhou: ${pickTeam} @ ${pickOdd}${rec?.reason ? ` (${rec.reason})` : ''}`);
+          analyzedCs.set(key, { ts: now, tipSent: false, skipped: true, reason: rec?.reason || null });
           continue;
         }
         analyzedCs.set(key, { ts: now, tipSent: true });
@@ -15537,7 +15576,9 @@ async function pollValorant(runOnce = false) {
         }, 'valorant');
 
         if (!rec?.tipId) {
-          log('WARN', 'AUTO-VAL', `record-tip falhou: ${pickTeam} @ ${pickOdd}`);
+          log('WARN', 'AUTO-VAL', `record-tip falhou: ${pickTeam} @ ${pickOdd}${rec?.reason ? ` (${rec.reason})` : ''}`);
+          // Dedup: marca analyzed mesmo quando skipped/falhou pra não loopar.
+          analyzedValorant.set(key, { ts: now, tipSent: false, skipped: true, reason: rec?.reason || null });
           continue;
         }
         analyzedValorant.set(key, { ts: now, tipSent: true });
@@ -15818,7 +15859,8 @@ async function runAutoDarts() {
           }, 'darts');
 
           if (!rec?.tipId) {
-            log('WARN', 'AUTO-DARTS', `record-tip falhou: ${pickTeam} @ ${pickOdd}`);
+            log('WARN', 'AUTO-DARTS', `record-tip falhou: ${pickTeam} @ ${pickOdd}${rec?.reason ? ` (${rec.reason})` : ''}`);
+            analyzedDarts.set(key, { ts: now, tipSent: false, skipped: true, reason: rec?.reason || null });
             continue;
           }
           analyzedDarts.set(key, { ts: now, tipSent: true });
@@ -16015,7 +16057,8 @@ async function runAutoSnooker() {
           }, 'snooker');
 
           if (!rec?.tipId) {
-            log('WARN', 'AUTO-SNOOKER', `record-tip falhou: ${pickTeam} @ ${pickOdd}`);
+            log('WARN', 'AUTO-SNOOKER', `record-tip falhou: ${pickTeam} @ ${pickOdd}${rec?.reason ? ` (${rec.reason})` : ''}`);
+            analyzedSnooker.set(key, { ts: now, tipSent: false, skipped: true, reason: rec?.reason || null });
             continue;
           }
           analyzedSnooker.set(key, { ts: now, tipSent: true });
