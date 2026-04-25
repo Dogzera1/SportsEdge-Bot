@@ -17124,6 +17124,76 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
         }
       } catch (_) {}
 
+      // Tennis (ATP Madrid Masters via Supabase): cross-validation Pinnacle vs BR books
+      try {
+        const tnMatches = await fetchJson('/tennis-matches');
+        for (const m of (tnMatches || []).slice(0, 50)) {
+          if (!m.team1 || !m.team2) continue;
+          const all = m.odds?._allOdds;
+          if (!Array.isArray(all) || all.length < 2) continue;
+          const pin = all.find(b => /pinnacle/i.test(b.bookmaker || ''));
+          const others = pin ? all.filter(b => !/pinnacle/i.test(b.bookmaker || '')) : all.slice();
+          const crossBookMode = !pin && all.length >= 3;
+          if (!pin && !crossBookMode) continue;
+
+          // 2-way arb tennis (t1 vs t2 cross-book)
+          const arb2tn = arb.detect2WayArb({ sport: 'tennis', team1: m.team1, team2: m.team2, allOdds: all });
+          if (arb2tn && arb.shouldDm(arb2tn.sport, arb2tn.matchKey, arb2tn.marketType)) {
+            arb.persistEvent(db, arb2tn);
+            arbs++;
+            if (ADMIN_IDS.size) {
+              const split = arb.stakeSplit2Way(arb2tn.oddA, arb2tn.oddB, 100);
+              const msg = `💎 *ARB 2-WAY — TENNIS*\n\n` +
+                `*${arb2tn.matchLabel}*\n\n` +
+                `*${arb2tn.sideA}*: ${arb2tn.bookA} @ ${arb2tn.oddA}\n` +
+                `*${arb2tn.sideB}*: ${arb2tn.bookB} @ ${arb2tn.oddB}\n\n` +
+                `Lucro garantido: *+${arb2tn.arbPct}%*\n\n` +
+                `Stake split p/ R$100:\n  ${arb2tn.sideA}: R$${split.stakeA} | ${arb2tn.sideB}: R$${split.stakeB}\n  Payout: *R$${split.payout}* | lucro R$${split.profit}`;
+              const tk = resolveAlertsToken();
+              if (tk) for (const adminId of ADMIN_IDS) sendDM(tk, adminId, msg).catch(() => {});
+            }
+          }
+
+          for (const side of ['t1', 't2']) {
+            const pinOdd = pin ? parseFloat(pin[side]) : null;
+            const brBooks = others.map(b => ({ bookmaker: b.bookmaker, odd: parseFloat(b[side]) })).filter(x => Number.isFinite(x.odd));
+            const allBooksSide = all.map(b => ({ bookmaker: b.bookmaker, odd: parseFloat(b[side]) })).filter(x => Number.isFinite(x.odd));
+            // Super-odd
+            const superArgsTn = pin
+              ? { sport: 'tennis', team1: m.team1, team2: m.team2, side, pinOdd, otherBooks: brBooks }
+              : { sport: 'tennis', team1: m.team1, team2: m.team2, side, books: allBooksSide };
+            const superEvtTn = sod.detectSuperOdd(superArgsTn);
+            if (superEvtTn && sod.shouldDm(superEvtTn.sport, superEvtTn.matchKey, superEvtTn.side)) {
+              sod.persistEvent(db, superEvtTn);
+              superOdds++;
+              if (ADMIN_IDS.size) {
+                const sideLabel = side === 't1' ? superEvtTn.matchLabel.split(' vs ')[0] : superEvtTn.matchLabel.split(' vs ')[1];
+                const refLabel = superEvtTn.mode === 'crossbook' ? `Mediana ${superEvtTn.sampleSize} books` : 'Pinnacle';
+                const msg = `🎰 *SUPER ODD — TENNIS*\n\n*${superEvtTn.matchLabel}* (${sideLabel})\n\n${refLabel}: ${superEvtTn.pinOdd}\n${superEvtTn.superBook}: *${superEvtTn.superOdd}* (+${(superEvtTn.ratio * 100 - 100).toFixed(0)}%)\nEV est: *+${superEvtTn.evPct}%*`;
+                const tk = resolveAlertsToken();
+                if (tk) for (const adminId of ADMIN_IDS) sendDM(tk, adminId, msg).catch(() => {});
+              }
+            }
+            // Stale line + velocity
+            const staleArgsTn = pin
+              ? { sport: 'tennis', team1: m.team1, team2: m.team2, side, pinOdd, brBooks }
+              : { sport: 'tennis', team1: m.team1, team2: m.team2, side, books: allBooksSide };
+            const evtTn = checkStaleLines(staleArgsTn);
+            const velEvtTn = pin
+              ? vel.checkVelocity(slDet._ringBuf, { sport: 'tennis', team1: m.team1, team2: m.team2, side })
+              : vel.checkVelocityCrossBook(slDet._ringBuf, { sport: 'tennis', team1: m.team1, team2: m.team2, side, books: allBooksSide });
+            if (velEvtTn && vel.shouldDm(velEvtTn.sport, velEvtTn.matchKey, velEvtTn.side)) {
+              vel.persistEvent(db, velEvtTn);
+              velocities++;
+            }
+            if (evtTn && shouldDm(evtTn.sport, evtTn.matchKey)) {
+              persistEvent(db, evtTn);
+              alerts++;
+            }
+          }
+        }
+      } catch (_) {}
+
       if (alerts > 0 || superOdds > 0 || arbs > 0 || velocities > 0) log('INFO', 'STALE-LINE', `${alerts} stale, ${superOdds} super-odd, ${arbs} arb, ${velocities} velocity`);
     } catch (e) { log('ERROR', 'STALE-LINE', e.message); }
   }
