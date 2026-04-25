@@ -11252,6 +11252,20 @@ Máximo 200 palavras.`;
         await _sleep(2000); continue;
       }
 
+      // SX.Bet bloqueado pra tips Dota (mesma decisão LoL: liquidez baixa = stale).
+      // SX.Bet continua usado pra discovery + cross-validation, NÃO pra dispatch.
+      // Opt-out: DOTA_BLOCK_SX_TIPS=false.
+      if (process.env.DOTA_BLOCK_SX_TIPS !== 'false') {
+        const _bkDota = String(o?.bookmaker || '').toLowerCase();
+        if (_bkDota.includes('sx')) {
+          log('WARN', 'AUTO-DOTA',
+            `Gate SX-blocked: ${match.team1} vs ${match.team2} odd ${tipOdd} EV ${tipEV} — SX.Bet bloqueado pra tips esports`);
+          logRejection('dota2', `${match.team1} vs ${match.team2}`, 'sx_book_blocked', { ev: tipEV, odd: tipOdd, isLive });
+          setDotaAnalyzed({ ts: now, tipSent: false, noEdge: true });
+          await _sleep(2000); continue;
+        }
+      }
+
       const isT1bet = norm(tipTeam).includes(norm(match.team1)) || norm(match.team1).includes(norm(tipTeam));
       let kellyFraction = getKellyFraction('dota2', tipConf);
       // Stage boost: TI/Major final → +15%, international grupos → +10%, regional final → +8%
