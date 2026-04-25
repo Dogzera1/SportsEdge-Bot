@@ -23,7 +23,9 @@ const path = require('path');
 const Database = require('better-sqlite3');
 const { applyMigrations } = require('../migrations');
 
-const DB_PATH = path.resolve(__dirname, '..', 'sportsedge.db');
+// DB_PATH: usa env quando disponível (Railway: /data/sportsedge.db).
+// Fallback ao DB local quando rodando do dev. Trim p/ evitar bug "=foo" do Railway.
+const DB_PATH = (process.env.DB_PATH || path.resolve(__dirname, '..', 'sportsedge.db')).trim().replace(/^=+/, '');
 const URL_TEMPLATE = (year) =>
   `https://oracles-elixir.s3.amazonaws.com/${year}_LoL_esports_match_data_from_OraclesElixir.csv`;
 
