@@ -1927,7 +1927,7 @@ async function runAutoAnalysis() {
           const gameIcon = '🎮';
           // Vetor 3 — linha de bookmaker com delta % vs Pinnacle (se alt ≥1.5% melhor).
           const _pickSideDm = norm(tipTeam) === norm(match.team1) ? 't1' : 't2';
-          const bookLineLol = formatLineShopDM(result.o, _pickSideDm);
+          const bookLineLol = formatLineShopDM(result.o, _pickSideDm, { sport: 'lol', db });
           const oddsLabel = hasRealOdds ? '' : '\n⚠️ _Odds estimadas (sem mercado disponível)_';
           const mlEdgeLabel = result.mlScore > 0 ? ` | ML: ${result.mlScore.toFixed(1)}pp` : '';
           const baixaNote = tipConf === 'BAIXA' ? '\n⚠️ _Tip de confiança BAIXA — stake reduzido. Aposte com cautela._' : '';
@@ -2388,7 +2388,7 @@ async function runAutoAnalysis() {
             const baixaNote = tipConf === 'BAIXA' ? `⚠️ _Confiança BAIXA (ML-edge ${result.mlScore.toFixed(1)}pp) — stake reduzido. Aposte com cautela._\n` : '';
             const minTakeOdds = calcMinTakeOdds(tipOdd);
             const minTakeLine = minTakeOdds ? `📉 Odd mínima: *${minTakeOdds}*\n` : '';
-            const bookLineLolUp = formatLineShopDM(result.o, _pickSideUp);
+            const bookLineLolUp = formatLineShopDM(result.o, _pickSideUp, { sport: 'lol', db });
             const tipMsg = `${gameIcon} 💰 *TIP PRÉ-JOGO ESPORTS (Bo1)*\n` +
               `*${match.team1}* vs *${match.team2}*\n📋 ${match.league}\n` +
               (match.time ? `🕐 Início: *${matchTime}* (BRT)\n` : '') +
@@ -11086,7 +11086,7 @@ Máximo 200 palavras.`;
       const liveTag = isLive ? ' 🔴 AO VIVO' : '';
       const minTakeOdds = calcMinTakeOdds(tipOdd);
       const minTakeLine = minTakeOdds ? `\n📉 Odd mínima: *${minTakeOdds}*` : '';
-      const _bookDota = formatLineShopDM(o, isT1bet ? 't1' : 't2').trim();
+      const _bookDota = formatLineShopDM(o, isT1bet ? 't1' : 't2', { sport: 'dota2', db }).trim();
       const msg = `🎮 *DOTA 2 — ${match.league}*${liveTag}\n${match.team1} vs ${match.team2} | ${match.format || ''}\n📅 ${matchTime} BRT\n\n✅ *TIP: ${tipTeam} @ ${tipOdd}*${minTakeLine}\n💰 Stake: ${formatStakeWithReais('dota2', tipStakeAdj)} | EV: ${tipEV} | Conf: ${tipConf}\n${_bookDota || `🏦 ${o.bookmaker || 'SX.Bet'}`}`;
 
       const _blockedDota = isLeagueBlocked('dota2', match.league);
@@ -11285,7 +11285,7 @@ async function analyzeDotaMapTip(match, token) {
   const stakeAdj = String(riskAdj.units.toFixed(1).replace(/\.0$/, '')) + 'u';
 
   const tipConf = pickEv >= 15 ? 'ALTA' : pickEv >= 8 ? 'MÉDIA' : 'BAIXA';
-  const _bookDotaMap = formatLineShopDM(match.mapOdds, pickDir);
+  const _bookDotaMap = formatLineShopDM(match.mapOdds, pickDir, { sport: 'dota2', db });
   const msg = `🟥 💰 *TIP DOTA2 MAPA ${mapN} (AO VIVO 🔴)*\n` +
     `${match.team1} vs ${match.team2} — série ${match.score1||0}-${match.score2||0}\n` +
     `Pick: *${pickTeam}* (mapa ${mapN})\n` +
@@ -11950,7 +11950,7 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
         const leagueLine = fight._eventName
           ? `${fight._org ? fight._org + ' — ' : ''}${fight._eventName}`
           : fight.league;
-        const _bookMma = formatLineShopDM(fight.odds, norm(tipTeam) === norm(fight.team1) ? 't1' : 't2');
+        const _bookMma = formatLineShopDM(fight.odds, norm(tipTeam) === norm(fight.team1) ? 't1' : 't2', { sport: 'mma', db });
         const tipMsg = `${orgLabel}\n` +
           `*${fight.team1}* vs *${fight.team2}*\n📋 ${leagueLine}\n` +
           `🕐 ${fightTime} (BRT)${recLine}${catLine}\n\n` +
@@ -13057,7 +13057,7 @@ Máximo 200 palavras. Raciocínio breve antes da decisão.`;
           liveScoreLine = `📊 Placar: *${ls.setsHome}-${ls.setsAway}* (${setsDetail})\n`;
         }
 
-        const _bookTennis = formatLineShopDM(o, norm(tipPlayer) === norm(match.team1) ? 't1' : 't2');
+        const _bookTennis = formatLineShopDM(o, norm(tipPlayer) === norm(match.team1) ? 't1' : 't2', { sport: 'tennis', db });
         const tipMsg = `🎾 💰 *TIP TÊNIS${isLiveTennis ? ' (AO VIVO 🔴)' : ''}*\n` +
           `*${match.team1}* vs *${match.team2}*\n` +
           `📋 ${match.league}${grandSlamBadge}\n` +
@@ -13771,7 +13771,7 @@ Máximo 200 palavras.`;
         const minTakeLine = minTakeOdds ? `📉 Odd mínima: *${minTakeOdds}*\n` : '';
 
         const _pickSideFbDm = tipMarket === '1X2_H' ? 'h' : tipMarket === '1X2_A' ? 'a' : tipMarket === '1X2_D' ? 'd' : null;
-        const _bookFb = _pickSideFbDm ? formatLineShopDM(match.odds, _pickSideFbDm) : '';
+        const _bookFb = _pickSideFbDm ? formatLineShopDM(match.odds, _pickSideFbDm, { sport: 'football', db }) : '';
         const tipMsg = `⚽ 💰 *TIP FUTEBOL*\n` +
           `*${match.team1}* vs *${match.team2}*\n` +
           `📋 ${match.league}\n` +
@@ -14152,7 +14152,7 @@ async function pollTableTennis(runOnce = false) {
 
         const confEmoji = { ALTA: '🟢', MÉDIA: '🟡', BAIXA: '🔴' }[conf] || '🟡';
         const fightTime = match.time ? new Date(match.time).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—';
-        const _bookTT = formatLineShopDM(match.odds, direction);
+        const _bookTT = formatLineShopDM(match.odds, direction, { sport: 'tabletennis', db });
         const msg = `🏓 💰 *TIP TÊNIS DE MESA*\n\n` +
           `*${match.team1}* vs *${match.team2}*\n📋 ${match.league}\n🕐 ${fightTime} (BRT)\n\n` +
           `🎯 Aposta: *${pickTeam}* @ *${pickOdd}*\n` +
@@ -14771,7 +14771,7 @@ Máximo 150 palavras.`;
         const confEmoji = { ALTA: '🟢', MÉDIA: '🟡', BAIXA: '🔴' }[conf] || '🟡';
         const matchTime = match.time ? new Date(match.time).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—';
         const phaseLabel = csMapNum > 0 ? ` — MAPA ${csMapNum} (série ${match.score1||0}-${match.score2||0})` : '';
-        const _bookCs = formatLineShopDM(match.odds, direction);
+        const _bookCs = formatLineShopDM(match.odds, direction, { sport: 'cs', db });
         const msg = `🔫 💰 *TIP CS2${phaseLabel}*\n\n` +
           `*${match.team1}* vs *${match.team2}*\n📋 ${match.league}${match.format ? ` (${match.format})` : ''}\n🕐 ${matchTime} (BRT)\n\n` +
           `🎯 Aposta: *${pickTeam}* @ *${pickOdd}*\n` +
@@ -15240,7 +15240,7 @@ async function pollValorant(runOnce = false) {
         const confEmoji = { ALTA: '🟢', MÉDIA: '🟡', BAIXA: '🔴' }[conf] || '🟡';
         const matchTime = match.time ? new Date(match.time).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—';
         const phaseLabel = valMapNum > 0 ? ` — MAPA ${valMapNum} (série ${match.score1||0}-${match.score2||0})` : '';
-        const _bookVal = formatLineShopDM(match.odds, direction);
+        const _bookVal = formatLineShopDM(match.odds, direction, { sport: 'valorant', db });
         const msg = `🎯 💰 *TIP VALORANT${phaseLabel}*\n\n` +
           `*${match.team1}* vs *${match.team2}*\n📋 ${match.league}${match.format ? ` (${match.format})` : ''}\n🕐 ${matchTime} (BRT)\n\n` +
           `🎯 Aposta: *${pickTeam}* @ *${pickOdd}*\n` +
@@ -15511,7 +15511,7 @@ async function runAutoDarts() {
             continue;
           }
 
-          const _bookDarts = formatLineShopDM(match.odds, ml.direction);
+          const _bookDarts = formatLineShopDM(match.odds, ml.direction, { sport: 'darts', db });
           const tipMsg = `🎯 💰 *TIP DARTS${isLiveDarts ? ' (AO VIVO 🔴)' : ''}*\n` +
             `*${match.team1}* vs *${match.team2}*\n📋 ${match.league}\n\n` +
             `🎯 Aposta: *${pickTeam}* @ *${pickOdd}*\n` +
@@ -15707,7 +15707,7 @@ async function runAutoSnooker() {
             continue;
           }
 
-          const _bookSn = formatLineShopDM(match.odds, ml.direction);
+          const _bookSn = formatLineShopDM(match.odds, ml.direction, { sport: 'snooker', db });
           const tipMsg = `🎱 💰 *TIP SNOOKER${isLiveSnooker ? ' (AO VIVO 🔴)' : ''}*\n` +
             `*${match.team1}* vs *${match.team2}*\n📋 ${match.league}\n\n` +
             `🎯 Aposta: *${pickTeam}* @ *${pickOdd}*\n` +
