@@ -7888,6 +7888,56 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
       if (r_ && r_.ok === false) await send(token, chatId, txt.replace(/[*_`]/g, ''), { parse_mode: undefined }).catch(() => {});
     } catch (e) { await send(token, chatId, `❌ ${e.message}`); }
 
+  } else if (cmd === '/explore' || cmd === '/exploits' || cmd === '/explorar') {
+    // Resumo dos 4 detectores BR (stale-line, super-odd, arb, velocity)
+    if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
+    try {
+      const hours = Math.max(1, Math.min(168, parseInt(parts[1] || '24', 10) || 24));
+      const since = `-${hours} hours`;
+
+      const staleCnt = db.prepare(`SELECT COUNT(*) n FROM stale_line_events WHERE detected_at >= datetime('now', ?)`).get(since).n;
+      const supCnt = db.prepare(`SELECT COUNT(*) n FROM super_odd_events WHERE detected_at >= datetime('now', ?)`).get(since).n;
+      const arbCnt = db.prepare(`SELECT COUNT(*) n FROM arb_events WHERE detected_at >= datetime('now', ?)`).get(since).n;
+      let velCnt = 0;
+      try { velCnt = db.prepare(`SELECT COUNT(*) n FROM velocity_events WHERE detected_at >= datetime('now', ?)`).get(since).n; } catch (_) {}
+
+      const arbTop = db.prepare(`
+        SELECT sport, match_label, market_type, arb_pct, book_a, book_b, odd_a, odd_b
+        FROM arb_events WHERE detected_at >= datetime('now', ?)
+        ORDER BY arb_pct DESC LIMIT 5
+      `).all(since);
+
+      const supTop = db.prepare(`
+        SELECT sport, match_label, super_book, super_odd, ev_pct_estimated
+        FROM super_odd_events WHERE detected_at >= datetime('now', ?)
+        ORDER BY ev_pct_estimated DESC LIMIT 5
+      `).all(since);
+
+      let txt = `🔍 *EXPLORAÇÃO BR — ${hours}h*\n\n`;
+      txt += `📍 Stale Lines: *${staleCnt}*\n`;
+      txt += `🎰 Super Odds: *${supCnt}*\n`;
+      txt += `💎 Arbs: *${arbCnt}*\n`;
+      txt += `⚡ Velocity: *${velCnt}*\n\n`;
+
+      if (arbTop.length) {
+        txt += `*Top 💎 Arbs:*\n`;
+        for (const a of arbTop) {
+          txt += `  +${Number(a.arb_pct).toFixed(2)}% — ${a.match_label} ${a.market_type} (${a.book_a}/${a.book_b})\n`;
+        }
+        txt += `\n`;
+      }
+      if (supTop.length) {
+        txt += `*Top 🎰 Super Odds:*\n`;
+        for (const s of supTop) {
+          txt += `  EV ${(s.ev_pct_estimated >= 0 ? '+' : '') + Number(s.ev_pct_estimated).toFixed(1)}% — ${s.match_label} (${s.super_book} @ ${Number(s.super_odd).toFixed(2)})\n`;
+        }
+        txt += `\n`;
+      }
+
+      txt += `_Detail: dashboard /exploit-summary ou /admin/{stale|super-odd|arb|velocity}-events_`;
+      await send(token, chatId, txt);
+    } catch (e) { await send(token, chatId, `❌ ${e.message}`); }
+
   } else if (cmd === '/odd-sample' || cmd === '/oddsample' || cmd === '/sample-odd') {
     // /odd-sample <sport> <casa> <pinnacle> <br_odd> [match label opcional]
     // Adiciona uma amostra de delta Pinnacle vs casa BR.
@@ -16762,6 +16812,7 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
             // Velocity check (sharp money entrando no Pinnacle)
             const velEvt = vel.checkVelocity(slDet._ringBuf, { sport: 'football', team1: m.team1, team2: m.team2, side });
             if (velEvt && vel.shouldDm(velEvt.sport, velEvt.matchKey, velEvt.side)) {
+              vel.persistEvent(db, velEvt);
               velocities++;
               if (ADMIN_IDS.size) {
                 const sideLabel = side === 'h' ? velEvt.matchLabel.split(' vs ')[0] : side === 'a' ? velEvt.matchLabel.split(' vs ')[1] : 'Empate';
@@ -16846,6 +16897,7 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
             // Velocity LoL (silent — só count, accumula data)
             const velEvtLol = vel.checkVelocity(slDet._ringBuf, { sport: 'lol', team1: m.team1, team2: m.team2, side });
             if (velEvtLol && vel.shouldDm(velEvtLol.sport, velEvtLol.matchKey, velEvtLol.side)) {
+              vel.persistEvent(db, velEvtLol);
               velocities++;
             }
             if (evt && shouldDm(evt.sport, evt.matchKey)) {

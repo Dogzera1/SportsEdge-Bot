@@ -2501,7 +2501,7 @@ async function loadExploitSummary() {
   }
   const t = data.totals || {};
   const r = data.recent || {};
-  meta.textContent = `${t.stale_line || 0} stale · ${t.super_odd || 0} super · ${t.arb || 0} arb`;
+  meta.textContent = `${t.stale_line || 0} stale · ${t.super_odd || 0} super · ${t.arb || 0} arb · ${t.velocity || 0} velo`;
 
   const fmtTime = (s) => (s || '').replace('T', ' ').slice(5, 16);
   const sportEmoji = { lol: '🎮', dota2: '🎮', cs: '🔫', cs2: '🔫', tennis: '🎾', football: '⚽', valorant: '🎯', mma: '🥊' };
@@ -2515,7 +2515,7 @@ async function loadExploitSummary() {
       <br><span style="opacity:0.7">Stale = casa atrasou · Super = book ≥20% acima Pinnacle · Arb = lucro travado · Velocity = sharp money em-memória</span>
     </div>
 
-    <div class="models-grid" style="grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:14px">
+    <div class="models-grid" style="grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:14px">
       <div class="model-card">
         <div class="model-name">📍 Stale Lines</div>
         <div class="model-brier">${t.stale_line || 0}</div>
@@ -2531,8 +2531,40 @@ async function loadExploitSummary() {
         <div class="model-brier">${t.arb || 0}</div>
         <div class="model-meta">eventos 24h</div>
       </div>
+      <div class="model-card">
+        <div class="model-name">⚡ Velocity</div>
+        <div class="model-brier">${t.velocity || 0}</div>
+        <div class="model-meta">eventos 24h</div>
+      </div>
     </div>
   `;
+
+  // Tabela velocity (sharp moves)
+  if (Array.isArray(r.velocity) && r.velocity.length) {
+    html += `
+      <div class="card-meta" style="margin:14px 0 6px"><b>⚡ Sharp Moves recentes</b> (top 10)</div>
+      <table class="tips">
+        <thead><tr>
+          <th>Hora</th><th>Sport</th><th>Match</th><th>Lado</th>
+          <th style="text-align:right">Pinnacle</th>
+          <th style="text-align:right">Velocity</th><th>Direção</th>
+        </tr></thead>
+        <tbody>
+          ${r.velocity.map(x => `
+            <tr>
+              <td>${fmtTime(x.detected_at)}</td>
+              <td>${e(x.sport)} ${x.sport}</td>
+              <td>${x.match_label}</td>
+              <td>${x.pick_side}</td>
+              <td style="text-align:right" style="font-size:0.85em">${Number(x.old_odd).toFixed(2)}→${Number(x.new_odd).toFixed(2)}</td>
+              <td style="text-align:right" class="${sign(x.velocity_pct)}">${fmtPct(x.velocity_pct, 1)}</td>
+              <td>${x.direction === 'down' ? '📉 fav' : '📈 dog'}</td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    `;
+  }
 
   // Tabela arbs
   if (Array.isArray(r.arb) && r.arb.length) {
@@ -2613,7 +2645,7 @@ async function loadExploitSummary() {
     `;
   }
 
-  if (!t.stale_line && !t.super_odd && !t.arb) {
+  if (!t.stale_line && !t.super_odd && !t.arb && !t.velocity) {
     html += `
       <div class="empty-state" style="margin-top:14px">
         Nenhum evento detectado nas últimas 24h.<br>

@@ -7277,11 +7277,23 @@ const server = http.createServer(async (req, res) => {
       `).all(since);
       const arbCnt = db.prepare(`SELECT COUNT(*) n FROM arb_events WHERE detected_at >= datetime('now', ?)`).get(since).n;
 
+      // Velocity events (migration 060)
+      let velocity = [], velocityCnt = 0;
+      try {
+        velocity = db.prepare(`
+          SELECT sport, match_label, pick_side, old_odd, new_odd, velocity_pct, window_min, direction, detected_at
+          FROM velocity_events
+          WHERE detected_at >= datetime('now', ?)
+          ORDER BY detected_at DESC LIMIT 10
+        `).all(since);
+        velocityCnt = db.prepare(`SELECT COUNT(*) n FROM velocity_events WHERE detected_at >= datetime('now', ?)`).get(since).n;
+      } catch (_) { /* migração ainda não aplicada */ }
+
       sendJson(res, {
         ok: true,
         hours,
-        totals: { stale_line: staleCnt, super_odd: supCnt, arb: arbCnt },
-        recent: { stale_line: stale, super_odd: sup, arb },
+        totals: { stale_line: staleCnt, super_odd: supCnt, arb: arbCnt, velocity: velocityCnt },
+        recent: { stale_line: stale, super_odd: sup, arb, velocity },
       });
     } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
     return;

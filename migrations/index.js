@@ -1461,6 +1461,29 @@ const migrations = [
     },
   },
   {
+    id: '060_velocity_events',
+    up(db) {
+      // Velocity tracker persistência: registra movimentos rápidos
+      // Pinnacle (>3%/5min default = sharp money). Antes era só em-memória.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS velocity_events (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          sport TEXT NOT NULL,
+          match_label TEXT,
+          pick_side TEXT,
+          old_odd REAL NOT NULL,
+          new_odd REAL NOT NULL,
+          velocity_pct REAL NOT NULL,
+          window_min INTEGER NOT NULL,
+          direction TEXT NOT NULL,
+          detected_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_velocity_sport_at
+          ON velocity_events (sport, detected_at DESC);
+      `);
+    },
+  },
+  {
     id: '059_arb_events',
     up(db) {
       // Cross-book arbitrage detector: registra quando soma das implied
