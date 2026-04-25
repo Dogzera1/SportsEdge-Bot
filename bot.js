@@ -2334,6 +2334,29 @@ async function runAutoAnalysis() {
               analyzedMatches.set(matchKey, { ts: now, tipSent: false, noEdge: true });
               await new Promise(r => setTimeout(r, 3000)); continue;
             }
+
+            // SX.Bet single-source guard: liquidez baixa = odds podem ser wide/stale.
+            // Quando bot só tem SX.Bet (Pinnacle não abriu mercado ainda, típico >6-12h
+            // antes do jogo), edge muito alto provavelmente reflete mispricing SX.Bet,
+            // não edge real. Aguarda Pinnacle abrir antes de disparar tip.
+            // Opt-out: LOL_SX_ONLY_GUARD=false. Threshold EV: LOL_SX_ONLY_MAX_EV (default 15).
+            // Threshold horas: LOL_SX_ONLY_HOURS_GUARD (default 6).
+            if (process.env.LOL_SX_ONLY_GUARD !== 'false') {
+              const _bk = String(result.o?.bookmaker || '').toLowerCase();
+              const _isSxOnly = _bk.includes('sx');
+              if (_isSxOnly && match.time && !isNaN(tipEVnum)) {
+                const hUntil = (new Date(match.time).getTime() - Date.now()) / 3600000;
+                const maxEvSx = parseFloat(process.env.LOL_SX_ONLY_MAX_EV || '15');
+                const hoursGuard = parseFloat(process.env.LOL_SX_ONLY_HOURS_GUARD || '6');
+                if (hUntil > hoursGuard && tipEVnum > maxEvSx) {
+                  log('WARN', 'AUTO',
+                    `Gate SX-only: ${match.team1} vs ${match.team2} EV ${tipEVnum}% > ${maxEvSx}% sem Pinnacle (faltam ${hUntil.toFixed(1)}h) — aguarda Pinnacle abrir mercado`);
+                  logRejection('lol', `${match.team1} vs ${match.team2}`, 'sx_only_high_ev_pre_pinnacle', { ev: tipEVnum, hUntil: +hUntil.toFixed(1), bookmaker: result.o?.bookmaker });
+                  analyzedMatches.set(matchKey, { ts: now, tipSent: false, noEdge: true });
+                  await new Promise(r => setTimeout(r, 3000)); continue;
+                }
+              }
+            }
             // Cap LoL tier 2-3 upcoming: bleed histórico ROI -56% por EV inflado em ligas não-premier.
             const _lolTier1Up = isLolTier1(match.leagueSlug || match.league);
             if (!_lolTier1Up && !isNaN(tipEVnum) && tipEVnum > 25) {
