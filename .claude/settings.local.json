@@ -320,5 +320,9 @@
       "Bash(railway ssh *)",
       "Bash(base64 -w0 scripts/rebalance-bankroll-1000.js)"
     ]
-  }
+  },
+  "enabledMcpjsonServers": [
+    "supabase"
+  ],
+  "enableAllProjectMcpServers": true
 }
