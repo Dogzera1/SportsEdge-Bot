@@ -6874,7 +6874,7 @@ const server = http.createServer(async (req, res) => {
           SELECT id, sport, team1, team2, league, best_of, market, line, side, label,
                  p_model, p_implied, odd, ev_pct, stake_units,
                  created_at, settled_at, result, profit_units,
-                 close_odd, clv_pct, admin_dm_sent_at, model_version
+                 close_odd, clv_pct, admin_dm_sent_at, is_live, model_version
           FROM market_tips_shadow
           WHERE ${conds.join(' AND ')}
           ORDER BY created_at DESC
@@ -6885,7 +6885,7 @@ const server = http.createServer(async (req, res) => {
           SELECT id, sport, team1, team2, league, best_of, market, line, side, label,
                  p_model, p_implied, odd, ev_pct, stake_units,
                  created_at, settled_at, result, profit_units,
-                 close_odd, clv_pct, admin_dm_sent_at
+                 close_odd, clv_pct, admin_dm_sent_at, is_live
           FROM market_tips_shadow
           WHERE ${conds.join(' AND ')}
           ORDER BY created_at DESC

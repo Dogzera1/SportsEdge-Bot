@@ -12782,7 +12782,24 @@ async function pollTennis(runOnce = false) {
                       });
                       if (selected?.tip) {
                         const t = selected.tip;
-                        if (!isMarketTipsEnabled('tennis', t.market, t.side)) {
+                        // Allowlist filter (audit 2026-04-25): tennis MT DM gated por
+                        // (market, side) lista do user. Default: 'handicapGames:home'
+                        // (7-0 settled, ROI +126%, CLV +60% no audit shadow). Outras
+                        // sides ficam só em shadow até hit threshold.
+                        // Override: TENNIS_MT_DM_FILTER=csv. 'all'/'*'/empty = sem filter.
+                        const dmFilter = (process.env.TENNIS_MT_DM_FILTER ?? 'handicapGames:home').trim();
+                        let _dmFilterAllowed = true;
+                        if (dmFilter && dmFilter !== 'all' && dmFilter !== '*') {
+                          const allowed = dmFilter.split(',').map(s => s.trim().toLowerCase());
+                          const tipKey = `${String(t.market || '').toLowerCase()}:${String(t.side || '').toLowerCase()}`;
+                          if (!allowed.includes(tipKey)) {
+                            log('INFO', 'MT-FILTER', `tennis/${t.market}/${t.side}: DM skipped — não está em TENNIS_MT_DM_FILTER ('${dmFilter}')`);
+                            _dmFilterAllowed = false;
+                          }
+                        }
+                        if (!_dmFilterAllowed) {
+                          // skip DM, shadow já gravado anteriormente
+                        } else if (!isMarketTipsEnabled('tennis', t.market, t.side)) {
                           log('INFO', 'MT-GUARD', `tennis/${t.market}: DM skipped — market disabled por leak guard`);
                         } else {
                         const { wasAdminDmSentRecently, markAdminDmSent } = require('./lib/market-tips-shadow');
