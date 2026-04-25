@@ -7553,6 +7553,31 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // GET /admin/aggregator-status — status do cliente Supabase BR aggregator
+  if (p === '/admin/aggregator-status') {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const aggClient = require('./lib/odds-aggregator-client');
+      const status = aggClient.getStatus();
+      // Optional: refresh + sample first 3 jogos
+      let sample = null;
+      if (parsed.query.refresh === '1') {
+        const jogos = await aggClient.fetchUpcomingJogos({ daysAhead: 14, force: true });
+        if (Array.isArray(jogos)) {
+          sample = jogos.slice(0, 5).map(j => ({
+            slug: j.slug,
+            inicio: j.inicio,
+            mandante: j.mandante?.nome,
+            visitante: j.visitante?.nome,
+            casas: (j.odds || []).map(o => o.casa),
+          }));
+        }
+      }
+      sendJson(res, { ok: true, status, sample });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   // GET /admin/oe-status — counts per year
   if (p === '/admin/oe-status') {
     if (!requireAdmin(req, res)) return;
@@ -16438,6 +16463,17 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
       }
 
       matches.sort((a, b) => new Date(a.time) - new Date(b.time));
+      // Enriquece _allOdds com casas BR via Supabase aggregator (vw_jogos_publicos).
+      // Append-only: TheOddsAPI tem prioridade quando books overlap. Cache 5min.
+      try {
+        if (process.env.SUPABASE_URL && process.env.SUPABASE_ANON_KEY && process.env.AGGREGATOR_DISABLED !== 'true') {
+          const aggClient = require('./lib/odds-aggregator-client');
+          const r = await aggClient.enrichMatches(matches);
+          if (r?.enriched > 0) {
+            log('INFO', 'AGGREGATOR', `BR odds enriched ${r.enriched}/${matches.length} matches (${r.totalJogos} jogos disponíveis no agregador)`);
+          }
+        }
+      } catch (e) { log('WARN', 'AGGREGATOR', `enrichMatches err: ${e.message}`); }
       log('INFO', 'AUTO-FOOTBALL', `/football-matches: ${matches.length} partidas (fonte=${oddsSource})`);
       // Atualiza cache mesmo quando fonte não é theodds pra acelerar próximos hits.
       _footballMatchesCache = { matches: matches.slice(), ts: Date.now() };
