@@ -8389,9 +8389,15 @@ const server = http.createServer(async (req, res) => {
     const maxPModel = parsed.query.maxPModel ? parseFloat(parsed.query.maxPModel) : null;
     const minPModel = parsed.query.minPModel ? parseFloat(parsed.query.minPModel) : null;
     const maxAbsLine = parsed.query.maxAbsLine ? parseFloat(parsed.query.maxAbsLine) : null;
+    // includeSettled=1 → também voida tips já settled (win/loss) que matcham critérios.
+    // Útil pra limpar histórico contaminado por bug pós-fix (ex: handicapGames com
+    // line do virtual sets gerou wins fantasma).
+    const includeSettled = parsed.query.includeSettled === '1' || parsed.query.includeSettled === 'true';
     try {
-      const conds = ['sport = ?', 'result IS NULL', "created_at >= datetime('now', ?)"];
+      const conds = ['sport = ?', "created_at >= datetime('now', ?)"];
       const params = [sport, `-${days} days`];
+      if (!includeSettled) { conds.push('result IS NULL'); }
+      else { conds.push("(result IS NULL OR result IN ('win','loss'))"); }
       if (market) { conds.push('market = ?'); params.push(market); }
       if (minEv != null) { conds.push('ev_pct >= ?'); params.push(minEv); }
       if (maxPModel != null) { conds.push('p_model > ?'); params.push(maxPModel); }
@@ -8399,7 +8405,7 @@ const server = http.createServer(async (req, res) => {
       if (maxAbsLine != null) { conds.push('ABS(line) <= ?'); params.push(maxAbsLine); }
       const sql = `UPDATE market_tips_shadow SET result='void', settled_at=datetime('now'), profit_units=0 WHERE ${conds.join(' AND ')}`;
       const r = db.prepare(sql).run(...params);
-      sendJson(res, { ok: true, voided: r.changes, sport, criteria: { days, market, minEv, maxPModel, minPModel, maxAbsLine } });
+      sendJson(res, { ok: true, voided: r.changes, sport, criteria: { days, market, minEv, maxPModel, minPModel, maxAbsLine, includeSettled } });
     } catch (e) { sendJson(res, { error: e.message }, 500); }
     return;
   }
