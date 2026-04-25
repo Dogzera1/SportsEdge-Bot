@@ -6039,55 +6039,6 @@ async function autoAnalyzeMatch(token, match) {
                     `  • ${t.label} @ ${t.odd.toFixed(2)} | pModel=${(t.pModel*100).toFixed(1)}% pImpl=${t.pImplied ? (t.pImplied*100).toFixed(1)+'%' : '?'} EV=${t.ev.toFixed(1)}%`);
                 }
 
-                // Total Kills market multi-mapa (period=1,2,3 conforme bestOf).
-                // Modelo Poisson player-level mesmo lambda por mapa (assume independência).
-                if (process.env.LOL_KILLS_SCAN !== 'false') {
-                  try {
-                    const { getTeamRosterStats } = require('./lib/oracleselixir-player-features');
-                    const t1Roster = getTeamRosterStats(db, match.team1);
-                    const t2Roster = getTeamRosterStats(db, match.team2);
-                    if (t1Roster && t2Roster) {
-                      const { predictMapKills, scanKillsMarkets } = require('./lib/lol-kills-model');
-                      const predict = predictMapKills(t1Roster, t2Roster);
-                      if (predict) {
-                        const minEvKills = parseFloat(process.env.LOL_KILLS_SCAN_MIN_EV ?? '5');
-                        const bestOf = lolModel.bestOf || 3;
-                        // Bo3 → mapas 1,2,3. Bo5 → 1,2,3,4,5. Skip mapa já finalizado.
-                        const startMap = (Number.isFinite(match.score1) && Number.isFinite(match.score2))
-                          ? Math.min(bestOf, (match.score1 + match.score2) + 1)
-                          : 1;
-                        const totalKillsTipsAll = [];
-                        for (let mapNum = startMap; mapNum <= bestOf; mapNum++) {
-                          const killsMkt = await serverGet(`/odds-markets?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}&period=${mapNum}&game=lol`).catch(() => null);
-                          if (!killsMkt || !Array.isArray(killsMkt.totals) || !killsMkt.totals.length) continue;
-                          const killTips = scanKillsMarkets({ pinTotals: killsMkt.totals, predict, minEv: minEvKills });
-                          if (!killTips.length) {
-                            log('DEBUG', 'LOL-KILLS', `${match.team1} vs ${match.team2} [Mapa ${mapNum}]: λ=${predict.lambda}, sem EV ≥${minEvKills}% em ${killsMkt.totals.length} lines`);
-                            continue;
-                          }
-                          // Tag mapa em label/market pra dedup distinguir
-                          for (const t of killTips) {
-                            t.market = `total_kills_map${mapNum}`;
-                            t.label = `Mapa ${mapNum}: ${t.label}`;
-                            totalKillsTipsAll.push(t);
-                          }
-                          log('INFO', 'LOL-KILLS',
-                            `${match.team1} vs ${match.team2} [Mapa ${mapNum}]: ${killTips.length} kills tip(s) | λ=${predict.lambda} conf=${predict.confidence}`);
-                          for (const t of killTips.slice(0, 2)) {
-                            log('INFO', 'LOL-KILLS',
-                              `  • ${t.label} @ ${t.odd.toFixed(2)} | pModel=${(t.pModel*100).toFixed(1)}% EV=${t.ev.toFixed(1)}%`);
-                          }
-                        }
-                        if (totalKillsTipsAll.length) {
-                          try {
-                            const { logShadowTip } = require('./lib/market-tips-shadow');
-                            for (const t of totalKillsTipsAll) logShadowTip(db, { sport: 'lol', match, bestOf, tip: t, isLive: isLiveLoL });
-                          } catch (_) {}
-                        }
-                      }
-                    }
-                  } catch (e) { reportBug('LOL-KILLS', e, { team1: match.team1, team2: match.team2 }); }
-                }
                 // MVP admin-only tip: seleciona melhor market tip e manda DM pros admins.
                 // Não vai pros subscribers ainda. Dedup via marketTipSent (24h cooldown).
                 if (isMarketTipsEnabled('lol') && ADMIN_IDS.size) {
@@ -6137,6 +6088,56 @@ async function autoAnalyzeMatch(token, match) {
               }
             }
           } catch (e) { reportBug('LOL-MARKETS', e, { team1: match.team1, team2: match.team2 }); }
+        }
+
+        // Total Kills market multi-mapa (period=1,2,3 conforme bestOf).
+        // INDEPENDENTE do scanner de handicap/totals — roda mesmo se não há edge series.
+        // Modelo Poisson player-level mesmo lambda por mapa (assume independência).
+        if (process.env.LOL_KILLS_SCAN !== 'false' && lolModel?.mapP1 > 0) {
+          try {
+            const { getTeamRosterStats } = require('./lib/oracleselixir-player-features');
+            const t1Roster = getTeamRosterStats(db, match.team1);
+            const t2Roster = getTeamRosterStats(db, match.team2);
+            if (t1Roster && t2Roster) {
+              const { predictMapKills, scanKillsMarkets } = require('./lib/lol-kills-model');
+              const predict = predictMapKills(t1Roster, t2Roster);
+              if (predict) {
+                const minEvKills = parseFloat(process.env.LOL_KILLS_SCAN_MIN_EV ?? '5');
+                const bestOf = lolModel.bestOf || 3;
+                // Bo3 → mapas 1,2,3. Bo5 → 1,2,3,4,5. Skip mapa já finalizado.
+                const startMap = (Number.isFinite(match.score1) && Number.isFinite(match.score2))
+                  ? Math.min(bestOf, (match.score1 + match.score2) + 1)
+                  : 1;
+                const totalKillsTipsAll = [];
+                for (let mapNum = startMap; mapNum <= bestOf; mapNum++) {
+                  const killsMkt = await serverGet(`/odds-markets?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}&period=${mapNum}&game=lol`).catch(() => null);
+                  if (!killsMkt || !Array.isArray(killsMkt.totals) || !killsMkt.totals.length) continue;
+                  const killTips = scanKillsMarkets({ pinTotals: killsMkt.totals, predict, minEv: minEvKills });
+                  if (!killTips.length) {
+                    log('DEBUG', 'LOL-KILLS', `${match.team1} vs ${match.team2} [Mapa ${mapNum}]: λ=${predict.lambda}, sem EV ≥${minEvKills}% em ${killsMkt.totals.length} lines`);
+                    continue;
+                  }
+                  for (const t of killTips) {
+                    t.market = `total_kills_map${mapNum}`;
+                    t.label = `Mapa ${mapNum}: ${t.label}`;
+                    totalKillsTipsAll.push(t);
+                  }
+                  log('INFO', 'LOL-KILLS',
+                    `${match.team1} vs ${match.team2} [Mapa ${mapNum}]: ${killTips.length} kills tip(s) | λ=${predict.lambda} conf=${predict.confidence}`);
+                  for (const t of killTips.slice(0, 2)) {
+                    log('INFO', 'LOL-KILLS',
+                      `  • ${t.label} @ ${t.odd.toFixed(2)} | pModel=${(t.pModel*100).toFixed(1)}% EV=${t.ev.toFixed(1)}%`);
+                  }
+                }
+                if (totalKillsTipsAll.length) {
+                  try {
+                    const { logShadowTip } = require('./lib/market-tips-shadow');
+                    for (const t of totalKillsTipsAll) logShadowTip(db, { sport: 'lol', match, bestOf, tip: t, isLive: isLiveLoL });
+                  } catch (_) {}
+                }
+              }
+            }
+          } catch (e) { reportBug('LOL-KILLS', e, { team1: match.team1, team2: match.team2 }); }
         }
 
         const isMapMarket = !!oddsToUse?.mapMarket;
