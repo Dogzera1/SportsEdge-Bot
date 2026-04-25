@@ -8404,6 +8404,20 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // POST /admin/restore-voided-market-tips?ids=1,2,3 — un-void tips voidadas por
+  // engano (volta result=NULL pra re-settle no próximo cron). IDs CSV.
+  if (p === '/admin/restore-voided-market-tips' && req.method === 'POST') {
+    if (!requireAdmin(req, res)) return;
+    const ids = String(parsed.query.ids || '').split(',').map(s => parseInt(s.trim(), 10)).filter(n => Number.isFinite(n) && n > 0);
+    if (!ids.length) { sendJson(res, { error: 'ids obrigatório (csv de inteiros)' }, 400); return; }
+    try {
+      const placeholders = ids.map(() => '?').join(',');
+      const r = db.prepare(`UPDATE market_tips_shadow SET result=NULL, settled_at=NULL, profit_units=NULL WHERE id IN (${placeholders}) AND result='void'`).run(...ids);
+      sendJson(res, { ok: true, restored: r.changes, ids });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
   // POST /void-market-tips-bogus?sport=tennis&minEv=40&hours=24
   if (p === '/void-market-tips-bogus' && req.method === 'POST') {
     const sport = parsed.query.sport || 'tennis';
