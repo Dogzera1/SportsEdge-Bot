@@ -16912,17 +16912,18 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
       let superOdds = 0;
       let arbs = 0;
       let velocities = 0;
-      // Football: _allOdds em match.odds com 21+ books
+      // Football: _allOdds em match.odds — Pinnacle anchor OU cross-book (BR-only)
       try {
         const fb = await fetchJson('/football-matches');
         for (const m of (fb || [])) {
           const all = m.odds?._allOdds;
           if (!Array.isArray(all) || all.length < 2) continue;
           const pin = all.find(b => /pinnacle/i.test(b.bookmaker));
-          if (!pin) continue;
-          const others = all.filter(b => !/pinnacle/i.test(b.bookmaker));
+          const others = pin ? all.filter(b => !/pinnacle/i.test(b.bookmaker)) : all.slice();
+          const crossBookMode = !pin && all.length >= 3;
+          if (!pin && !crossBookMode) continue;
 
-          // 3-way arb football (h, d, a cross-book)
+          // 3-way arb football (h, d, a cross-book) — funciona em ambos modos
           const arb3 = arb.detect3WayArb({ sport: 'football', team1: m.team1, team2: m.team2, allOdds: all });
           if (arb3 && arb.shouldDm(arb3.sport, arb3.matchKey, arb3.marketType)) {
             arb.persistEvent(db, arb3);
@@ -16951,28 +16952,39 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
 
           // Check h, d, a sides
           for (const side of ['h', 'd', 'a']) {
-            const pinOdd = parseFloat(pin[side]);
+            const pinOdd = pin ? parseFloat(pin[side]) : null;
             const brBooks = others.map(b => ({ bookmaker: b.bookmaker, odd: parseFloat(b[side]) })).filter(x => Number.isFinite(x.odd));
-            // Super-odd check FIRST (independente de stale line)
-            const superEvt = sod.detectSuperOdd({ sport: 'football', team1: m.team1, team2: m.team2, side, pinOdd, otherBooks: brBooks });
+            const allBooksSide = all.map(b => ({ bookmaker: b.bookmaker, odd: parseFloat(b[side]) })).filter(x => Number.isFinite(x.odd));
+            // Super-odd: Pinnacle anchor se disponível, senão cross-book mediana
+            const superArgs = pin
+              ? { sport: 'football', team1: m.team1, team2: m.team2, side, pinOdd, otherBooks: brBooks }
+              : { sport: 'football', team1: m.team1, team2: m.team2, side, books: allBooksSide };
+            const superEvt = sod.detectSuperOdd(superArgs);
             if (superEvt && sod.shouldDm(superEvt.sport, superEvt.matchKey, superEvt.side)) {
               sod.persistEvent(db, superEvt);
               superOdds++;
               if (ADMIN_IDS.size) {
                 const sideLabel = side === 'h' ? superEvt.matchLabel.split(' vs ')[0] : side === 'a' ? superEvt.matchLabel.split(' vs ')[1] : 'Empate';
+                const refLabel = superEvt.mode === 'crossbook' ? `Mediana ${superEvt.sampleSize} books` : 'Pinnacle';
                 const msg = `🎰 *SUPER ODD — ${superEvt.sport.toUpperCase()}*\n\n` +
                   `*${superEvt.matchLabel}* (lado: ${sideLabel})\n\n` +
-                  `Pinnacle: ${superEvt.pinOdd} (implied ${superEvt.pinImpliedPct}%)\n` +
-                  `${superEvt.superBook}: *${superEvt.superOdd}* (${(superEvt.ratio * 100 - 100).toFixed(0)}% acima Pinnacle)\n\n` +
-                  `EV estimado: *+${superEvt.evPct}%* assumindo Pinnacle como verdade.\n\n` +
+                  `${refLabel}: ${superEvt.pinOdd} (implied ${superEvt.pinImpliedPct}%)\n` +
+                  `${superEvt.superBook}: *${superEvt.superOdd}* (${(superEvt.ratio * 100 - 100).toFixed(0)}% acima ref)\n\n` +
+                  `EV estimado: *+${superEvt.evPct}%* assumindo referência como verdade.\n\n` +
                   `_Possíveis causas: super odd promo, erro de book, pre-news edge. Verificar antes de apostar pq book pode voidar erro óbvio._`;
                 const tk = resolveAlertsToken();
                 if (tk) for (const adminId of ADMIN_IDS) sendDM(tk, adminId, msg).catch(() => {});
               }
             }
-            const evt = checkStaleLines({ sport: 'football', team1: m.team1, team2: m.team2, side, pinOdd, brBooks });
-            // Velocity check (sharp money entrando no Pinnacle)
-            const velEvt = vel.checkVelocity(slDet._ringBuf, { sport: 'football', team1: m.team1, team2: m.team2, side });
+            // Stale line: Pinnacle anchor ou cross-book
+            const staleArgs = pin
+              ? { sport: 'football', team1: m.team1, team2: m.team2, side, pinOdd, brBooks }
+              : { sport: 'football', team1: m.team1, team2: m.team2, side, books: allBooksSide };
+            const evt = checkStaleLines(staleArgs);
+            // Velocity check
+            const velEvt = pin
+              ? vel.checkVelocity(slDet._ringBuf, { sport: 'football', team1: m.team1, team2: m.team2, side })
+              : vel.checkVelocityCrossBook(slDet._ringBuf, { sport: 'football', team1: m.team1, team2: m.team2, side, books: allBooksSide });
             if (velEvt && vel.shouldDm(velEvt.sport, velEvt.matchKey, velEvt.side)) {
               vel.persistEvent(db, velEvt);
               velocities++;
