@@ -8361,6 +8361,31 @@ const server = http.createServer(async (req, res) => {
   }
 
   // Marca market_tips_shadow como VOID quando EV>maxEv (bogus tips de scanner bug).
+  // POST /void-market-tips-by-criteria — void tips com critérios combinados
+  // ?sport=X (req) &days=14 &market=totals &minEv=N &maxPModel=N &minPModel=N
+  // Útil pra cleanup pós-bug fix sem precisar de SQL direto.
+  if (p === '/void-market-tips-by-criteria' && req.method === 'POST') {
+    const sport = parsed.query.sport;
+    if (!sport) { sendJson(res, { error: 'sport obrigatório' }, 400); return; }
+    const days = parseInt(parsed.query.days || '14', 10);
+    const market = parsed.query.market || null;
+    const minEv = parsed.query.minEv ? parseFloat(parsed.query.minEv) : null;
+    const maxPModel = parsed.query.maxPModel ? parseFloat(parsed.query.maxPModel) : null;
+    const minPModel = parsed.query.minPModel ? parseFloat(parsed.query.minPModel) : null;
+    try {
+      const conds = ['sport = ?', 'result IS NULL', `created_at >= datetime('now', '-${days} days')`];
+      const params = [sport];
+      if (market) { conds.push('market = ?'); params.push(market); }
+      if (minEv != null) { conds.push('ev_pct >= ?'); params.push(minEv); }
+      if (maxPModel != null) { conds.push('p_model > ?'); params.push(maxPModel); }
+      if (minPModel != null) { conds.push('p_model < ?'); params.push(minPModel); }
+      const sql = `UPDATE market_tips_shadow SET result='void', settled_at=datetime('now'), profit_units=0 WHERE ${conds.join(' AND ')}`;
+      const r = db.prepare(sql).run(...params);
+      sendJson(res, { ok: true, voided: r.changes, sport, criteria: { days, market, minEv, maxPModel, minPModel } });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
   // POST /void-market-tips-bogus?sport=tennis&minEv=40&hours=24
   if (p === '/void-market-tips-bogus' && req.method === 'POST') {
     const sport = parsed.query.sport || 'tennis';
