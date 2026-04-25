@@ -16549,6 +16549,24 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   setInterval(runTennisStatsSync, 7 * 24 * 60 * 60 * 1000); // weekly
   setTimeout(runTennisStatsSync, 90 * 60 * 1000); // 90min pós-boot (após os esports)
 
+  // Oracle's Elixir players + games (LoL pro stats) — weekly refresh.
+  // CRITICAL: LoL kills scanner depende de oracleselixir_players (rosters per team).
+  // Sem isso, predictMapKills retorna null → 0 tips. Boot-time = 60min pós-start.
+  const runOeSync = () => {
+    try {
+      const { spawn } = require('child_process');
+      const proc = spawn('node', ['scripts/sync-oracleselixir.js', '--year=2025', '--year=2026'], {
+        cwd: __dirname, env: process.env, detached: false,
+      });
+      proc.on('close', (code) => {
+        log(code === 0 ? 'INFO' : 'WARN', 'HIST-OE', `Auto-sync OE exit=${code}`);
+      });
+      log('INFO', 'HIST-OE', 'Auto-sync Oracle\'s Elixir started (background)');
+    } catch (e) { log('WARN', 'HIST-OE', `err: ${e.message}`); }
+  };
+  setInterval(runOeSync, 7 * 24 * 60 * 60 * 1000); // weekly
+  setTimeout(runOeSync, 60 * 60 * 1000); // 60min pós-boot
+
   // Dota hero stats (OpenDota heroStats) — weekly refresh pra pegar meta shifts
   // de patches novos. Afeta dota_hero_features.getDraftMatchupFactor.
   const runDotaHeroSync = () => {
