@@ -1406,6 +1406,32 @@ const migrations = [
       `);
     },
   },
+  {
+    id: '057_stale_line_events',
+    up(db) {
+      // Stale line detector: registra quando Pinnacle moveu >threshold mas
+      // outra casa (geralmente BR) ainda está com odd antiga = oportunidade.
+      // Usado pra alertar admin que tem janela de ~5-15min pra apostar
+      // no lado favorecido com odd defasada.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS stale_line_events (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          sport TEXT NOT NULL,
+          match_label TEXT,
+          pick_side TEXT,
+          pin_old REAL,
+          pin_new REAL,
+          pin_delta_pct REAL,
+          br_book TEXT,
+          br_odd REAL,
+          br_implied_delta_pct REAL,
+          detected_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_stale_line_sport_at
+          ON stale_line_events (sport, detected_at DESC);
+      `);
+    },
+  },
 ];
 
 function applyMigrations(db) {

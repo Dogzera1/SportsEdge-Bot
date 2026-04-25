@@ -16674,6 +16674,91 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   setInterval(() => runAutoSampleCron(), 60 * 60 * 1000); // 1h
   setTimeout(() => runAutoSampleCron(), 5 * 60 * 1000);   // primeira run após 5min de boot
 
+  // Stale line detector: cron 5min varre /football-matches + /lol-matches comparando
+  // Pinnacle current vs odd 15min atrás. Se Pinnacle moveu >5% mas casa não-Pinnacle
+  // ainda alinhada com odd antiga = stale → alert admin (cooldown 1h por match).
+  // Opt-out: STALE_LINE_DISABLED=true.
+  async function runStaleLineCron() {
+    if (/^(1|true|yes)$/i.test(String(process.env.STALE_LINE_DISABLED || ''))) return;
+    try {
+      const { checkStaleLines, shouldDm, persistEvent } = require('./lib/stale-line-detector');
+      const http = require('http');
+      const port = process.env.PORT || 3000;
+      const fetchJson = (path) => new Promise((res, rej) => {
+        http.get('http://localhost:' + port + path, (r) => {
+          let body = '';
+          r.on('data', c => body += c);
+          r.on('end', () => { try { res(JSON.parse(body)); } catch (e) { rej(e); } });
+        }).on('error', rej);
+      });
+
+      let alerts = 0;
+      // Football: _allOdds em match.odds com 21+ books
+      try {
+        const fb = await fetchJson('/football-matches');
+        for (const m of (fb || [])) {
+          const all = m.odds?._allOdds;
+          if (!Array.isArray(all) || all.length < 2) continue;
+          const pin = all.find(b => /pinnacle/i.test(b.bookmaker));
+          if (!pin) continue;
+          const others = all.filter(b => !/pinnacle/i.test(b.bookmaker));
+          // Check h, d, a sides
+          for (const side of ['h', 'd', 'a']) {
+            const pinOdd = parseFloat(pin[side]);
+            const brBooks = others.map(b => ({ bookmaker: b.bookmaker, odd: parseFloat(b[side]) })).filter(x => Number.isFinite(x.odd));
+            const evt = checkStaleLines({ sport: 'football', team1: m.team1, team2: m.team2, side, pinOdd, brBooks });
+            if (evt && shouldDm(evt.sport, evt.matchKey)) {
+              persistEvent(db, evt);
+              alerts++;
+              if (ADMIN_IDS.size) {
+                const dirArrow = evt.pinDeltaPct < 0 ? '📉' : '📈';
+                const sideLabel = side === 'h' ? evt.matchLabel.split(' vs ')[0] : side === 'a' ? evt.matchLabel.split(' vs ')[1] : 'Empate';
+                const advice = evt.pinDeltaPct < 0
+                  ? `Pinnacle baixou (favorito ficou mais favorito). *Aposte ${sideLabel}* @ ${evt.brOdd} em ${evt.brBook} antes da casa ajustar.`
+                  : `Pinnacle subiu (lado virou underdog). Casa BR ainda oferece odd antiga em ${sideLabel} @ ${evt.brOdd} — odd alta vai cair.`;
+                const msg = `⚡ *STALE LINE — ${evt.sport.toUpperCase()}*\n\n` +
+                  `*${evt.matchLabel}* (lado: ${sideLabel})\n\n` +
+                  `Pinnacle: ${evt.pinOld} → ${evt.pinNew} (${dirArrow} ${evt.pinDeltaPct >= 0 ? '+' : ''}${evt.pinDeltaPct}%)\n` +
+                  `${evt.brBook}: *${evt.brOdd}* (delta vs Pinnacle novo: ${evt.brImpliedDeltaPct >= 0 ? '+' : ''}${evt.brImpliedDeltaPct}%)\n\n` +
+                  `${advice}\n\n` +
+                  `_Janela típica: 5-15min antes da casa ajustar._`;
+                const tk = Object.values(SPORTS).find(S => S?.enabled && S?.token)?.token;
+                if (tk) for (const adminId of ADMIN_IDS) sendDM(tk, adminId, msg).catch(() => {});
+              }
+            }
+          }
+        }
+      } catch (_) {}
+
+      // LoL via /odds endpoint (já tem _allOdds quando SX.Bet+Pinnacle disponíveis)
+      try {
+        const lolMatches = await fetchJson('/lol-matches');
+        for (const m of (lolMatches || []).slice(0, 30)) {
+          if (!m.team1 || !m.team2) continue;
+          const o = await fetchJson('/odds?team1=' + encodeURIComponent(m.team1) + '&team2=' + encodeURIComponent(m.team2) + '&game=lol').catch(() => null);
+          const all = o?._allOdds;
+          if (!Array.isArray(all) || all.length < 2) continue;
+          const pin = all.find(b => /pinnacle/i.test(b.bookmaker));
+          if (!pin) continue;
+          const others = all.filter(b => !/pinnacle/i.test(b.bookmaker));
+          for (const side of ['t1', 't2']) {
+            const pinOdd = parseFloat(pin[side]);
+            const brBooks = others.map(b => ({ bookmaker: b.bookmaker, odd: parseFloat(b[side]) })).filter(x => Number.isFinite(x.odd));
+            const evt = checkStaleLines({ sport: 'lol', team1: m.team1, team2: m.team2, side, pinOdd, brBooks });
+            if (evt && shouldDm(evt.sport, evt.matchKey)) {
+              persistEvent(db, evt);
+              alerts++;
+            }
+          }
+        }
+      } catch (_) {}
+
+      if (alerts > 0) log('INFO', 'STALE-LINE', `${alerts} stale line(s) detectadas`);
+    } catch (e) { log('ERROR', 'STALE-LINE', e.message); }
+  }
+  setInterval(() => runStaleLineCron(), 5 * 60 * 1000); // 5min
+  setTimeout(() => runStaleLineCron(), 7 * 60 * 1000);  // primeira run 7min boot (após 1ª auto-sample)
+
   // Vetor 7 — Dota snapshot collector: cron 60s captura Steam RT + Pinnacle pareados.
   // Default ON. Desativar via DOTA_SNAPSHOT_ENABLED=false.
   if (/^(1|true|yes)$/i.test(String(process.env.DOTA_SNAPSHOT_ENABLED ?? 'true'))) {

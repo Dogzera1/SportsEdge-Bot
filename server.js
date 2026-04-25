@@ -7245,6 +7245,19 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // GET /admin/stale-line-events?hours=24&sport=lol
+  if (p === '/admin/stale-line-events') {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const { getRecentEvents } = require('./lib/stale-line-detector');
+      const hours = Math.max(1, Math.min(168, parseInt(parsed.query.hours || '24', 10)));
+      const sport = parsed.query.sport || null;
+      const events = getRecentEvents(db, { hours, sport });
+      sendJson(res, { ok: true, hours, sport: sport || 'all', count: events.length, events });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   // GET/POST /admin/bookmaker-deltas
   // GET retorna agregado: avg delta_pct por (sport, bookmaker) com n samples.
   // POST adiciona amostra: {sport, bookmaker, pinnacleOdd, brOdd, matchLabel?}
