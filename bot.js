@@ -136,7 +136,7 @@ const { getFootballProbability } = require('./lib/football-model');
 const { hasTrainedFootballModel, predictFootball: predictFootballTrained } = require('./lib/football-poisson-trained');
 const { getTennisProbability, detectSurface, tennisProhibitedTournament } = require('./lib/tennis-model');
 const { esportsSegmentGate } = require('./lib/esports-segment-gate');
-const { extractServeProbs, priceTennisMatch, priceTennisLive, estimateTennisAces } = require('./lib/tennis-markov-model');
+const { extractServeProbs, priceTennisMatch, priceTennisLive, estimateTennisAces, estimateTennisDoubleFaults } = require('./lib/tennis-markov-model');
 const { getPlayerInjuryRisk } = require('./lib/tennis-injury-risk');
 const { getPlayerTiebreakStats, getTiebreakAdjustment } = require('./lib/tennis-tiebreak-stats');
 const { fetchMatchNews } = require('./lib/news');
@@ -12514,6 +12514,27 @@ async function pollTennis(runOnce = false) {
                   }
                 } catch (ae) { reportBug('TENNIS-ACES', ae); }
 
+                // Double Faults market pricing (gêmeo de aces, surf invertido).
+                try {
+                  const { getPlayerDfRate } = require('./lib/tennis-player-stats');
+                  const df1 = getPlayerDfRate(db, match.team1, { surface: markovSurface, sinceDays: 730, minMatches: 10 });
+                  const df2 = getPlayerDfRate(db, match.team2, { surface: markovSurface, sinceDays: 730, minMatches: 10 });
+                  if (df1 && df2 && Number.isFinite(df1.dfPerMatchAvg) && Number.isFinite(df2.dfPerMatchAvg)) {
+                    const dfEst = estimateTennisDoubleFaults({
+                      dfPerMatch1: df1.dfPerMatchAvg,
+                      dfPerMatch2: df2.dfPerMatchAvg,
+                      bestOf: bestOfMarkov,
+                      surface: markovSurface,
+                    });
+                    if (dfEst) {
+                      log('INFO', 'TENNIS-DF',
+                        `${match.team1} (${df1.dfPerMatchAvg}/m) vs ${match.team2} (${df2.dfPerMatchAvg}/m) [${markovSurface} Bo${bestOfMarkov}]: ` +
+                        `total~${dfEst.totalDfAvg} | pO5.5=${(dfEst.pOver['5.5']*100).toFixed(0)}% pO7.5=${(dfEst.pOver['7.5']*100).toFixed(0)}%`);
+                      tennisModelResult._markovDoubleFaults = dfEst;
+                    }
+                  }
+                } catch (dfe) { reportBug('TENNIS-DF', dfe); }
+
                 // LIVE Markov: se temos liveScoreData, recomputa a partir do state atual.
                 // Override do pMatch pré-match porque live sobrepõe.
                 if (isLiveTennis && liveScoreData?.isLive && tennisModelResult._markovServe) {
@@ -12562,7 +12583,7 @@ async function pollTennis(runOnce = false) {
           if (process.env.TENNIS_MARKET_SCAN !== 'false' && tennisModelResult?._markovMarkets) {
             try {
               const markets = await serverGet(`/odds-markets?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}&period=0&separate_aces=1`).catch(() => null);
-              if (markets && ((markets.handicaps?.length || 0) + (markets.totals?.length || 0) + (markets.acesTotals?.length || 0)) > 0) {
+              if (markets && ((markets.handicaps?.length || 0) + (markets.totals?.length || 0) + (markets.acesTotals?.length || 0) + (markets.dfTotals?.length || 0)) > 0) {
                 const { scanTennisMarkets } = require('./lib/tennis-market-scanner');
                 const minEv = parseFloat(process.env.TENNIS_MARKET_SCAN_MIN_EV ?? '4');
                 const maxEv = parseFloat(process.env.TENNIS_MARKET_SCAN_MAX_EV ?? '40');
@@ -12572,6 +12593,7 @@ async function pollTennis(runOnce = false) {
                 let found = scanTennisMarkets({
                   markov: tennisModelResult._markovMarkets,
                   aces: tennisModelResult._markovAces,
+                  doubleFaults: tennisModelResult._markovDoubleFaults,
                   markets,
                   minEv,
                   maxEv,

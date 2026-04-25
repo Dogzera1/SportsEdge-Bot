@@ -4587,10 +4587,12 @@ const server = http.createServer(async (req, res) => {
         wantSeparateAces ? pinnacle.getMatchupTotals(matchupId, period, { groupByMatchup: true }).catch(() => []) : Promise.resolve(null),
       ]);
 
-      // Tennis aces detection: median das lines distingue games (~22-24) vs aces (~8-15).
-      // Threshold 17.5 é ponto neutro entre clusters típicos.
-      let acesTotals = null;
-      let gamesTotals = null;
+      // Tennis 3-bucket detection via mediana das lines:
+      //   median <11 → double_faults (lines 3-10)
+      //   11 ≤ median <18 → aces (lines 8-22)
+      //   median ≥18 → games (lines 18-30)
+      // Buckets podem coexistir; aces+games comum, DF mais raro em Pinnacle tennis.
+      let acesTotals = null, gamesTotals = null, dfTotals = null;
       if (wantSeparateAces && Array.isArray(allTotalGroups) && allTotalGroups.length >= 2) {
         const median = (arr) => {
           if (!arr.length) return null;
@@ -4601,11 +4603,11 @@ const server = http.createServer(async (req, res) => {
           if (!grp.lines?.length) continue;
           const med = median(grp.lines.map(l => l.line));
           if (med == null) continue;
-          if (med < 17.5) {
-            // Provável aces (lines típicas 5-15)
+          if (med < 11) {
+            if (!dfTotals || grp.lines.length > dfTotals.length) dfTotals = grp.lines;
+          } else if (med < 18) {
             if (!acesTotals || grp.lines.length > acesTotals.length) acesTotals = grp.lines;
           } else {
-            // Provável games (lines típicas 18-30)
             if (!gamesTotals || grp.lines.length > gamesTotals.length) gamesTotals = grp.lines;
           }
         }
@@ -4613,6 +4615,7 @@ const server = http.createServer(async (req, res) => {
       sendJson(res, {
         matchupId: String(matchupId), period, moneyline, handicaps, totals,
         ...(acesTotals ? { acesTotals } : {}),
+        ...(dfTotals ? { dfTotals } : {}),
         ...(gamesTotals ? { gamesTotals } : {}),
         swap, homeTeam, awayTeam,
       });
