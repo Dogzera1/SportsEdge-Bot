@@ -16615,6 +16615,23 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   setInterval(() => runKellyAutoTuneDaily().catch(e => log('ERROR', 'KELLY-TUNE', e.message)), 60 * 60 * 1000);
   setTimeout(() => runKellyAutoTuneDaily().catch(() => {}), 30 * 60 * 1000);
 
+  // Auto-sample bookmaker deltas: cron 1h coleta Pinnacle vs outros books cross-sport
+  // (football/lol/dota2). Cap MAX_PER_PAIR_7D=300 por (sport, casa) evita inflação.
+  // Opt-out: AUTO_SAMPLE_DELTAS=false.
+  async function runAutoSampleCron() {
+    if (/^(0|false|no)$/i.test(String(process.env.AUTO_SAMPLE_DELTAS || ''))) return;
+    try {
+      const { runAutoSampleDeltas } = require('./lib/auto-sample-deltas');
+      const r = await runAutoSampleDeltas(db);
+      if (r) {
+        const summary = r.results.map(x => `${x.sport}=${x.added}/${x.scanned}`).join(' ');
+        log('INFO', 'AUTO-SAMPLE', `+${r.totalAdded} samples (${summary}) em ${r.ms}ms`);
+      }
+    } catch (e) { log('ERROR', 'AUTO-SAMPLE', e.message); }
+  }
+  setInterval(() => runAutoSampleCron(), 60 * 60 * 1000); // 1h
+  setTimeout(() => runAutoSampleCron(), 5 * 60 * 1000);   // primeira run após 5min de boot
+
   // Vetor 7 — Dota snapshot collector: cron 60s captura Steam RT + Pinnacle pareados.
   // Default ON. Desativar via DOTA_SNAPSHOT_ENABLED=false.
   if (/^(1|true|yes)$/i.test(String(process.env.DOTA_SNAPSHOT_ENABLED ?? 'true'))) {
