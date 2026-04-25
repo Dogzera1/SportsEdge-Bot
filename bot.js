@@ -12512,8 +12512,15 @@ async function pollTennis(runOnce = false) {
                 // Sofascore (últimos N matches) quando disponível — sample maior, menos noise.
                 try {
                   const { getPlayerAceRate } = require('./lib/tennis-player-stats');
-                  const historic1 = getPlayerAceRate(db, match.team1, { surface: markovSurface, sinceDays: 730, minMatches: 10 });
-                  const historic2 = getPlayerAceRate(db, match.team2, { surface: markovSurface, sinceDays: 730, minMatches: 10 });
+                  // Cascata 3-níveis: surface-specific(n≥10/730d) → all-surface(n≥5/730d) → all-time(n≥5/9999d).
+                  // Tennis stats Sackmann tem cap 2024-12-18 (ainda não publicou 2025-26),
+                  // então 730d cobre só ~8 meses úteis. Fallback all-time é necessário.
+                  const fetchAce = (name) =>
+                    getPlayerAceRate(db, name, { surface: markovSurface, sinceDays: 730, minMatches: 10 })
+                    || getPlayerAceRate(db, name, { sinceDays: 730, minMatches: 5 })
+                    || getPlayerAceRate(db, name, { sinceDays: 9999, minMatches: 5 });
+                  const historic1 = fetchAce(match.team1);
+                  const historic2 = fetchAce(match.team2);
 
                   // Source preference: historic > sofascore. Mix quando só 1 lado tem histórico.
                   let a1 = null, a2 = null, src1 = null, src2 = null;
@@ -12542,8 +12549,12 @@ async function pollTennis(runOnce = false) {
                 // Double Faults market pricing (gêmeo de aces, surf invertido).
                 try {
                   const { getPlayerDfRate } = require('./lib/tennis-player-stats');
-                  const df1 = getPlayerDfRate(db, match.team1, { surface: markovSurface, sinceDays: 730, minMatches: 10 });
-                  const df2 = getPlayerDfRate(db, match.team2, { surface: markovSurface, sinceDays: 730, minMatches: 10 });
+                  const fetchDf = (name) =>
+                    getPlayerDfRate(db, name, { surface: markovSurface, sinceDays: 730, minMatches: 10 })
+                    || getPlayerDfRate(db, name, { sinceDays: 730, minMatches: 5 })
+                    || getPlayerDfRate(db, name, { sinceDays: 9999, minMatches: 5 });
+                  const df1 = fetchDf(match.team1);
+                  const df2 = fetchDf(match.team2);
                   if (df1 && df2 && Number.isFinite(df1.dfPerMatchAvg) && Number.isFinite(df2.dfPerMatchAvg)) {
                     const dfEst = estimateTennisDoubleFaults({
                       dfPerMatch1: df1.dfPerMatchAvg,
