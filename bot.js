@@ -1425,7 +1425,7 @@ function resolveTipsToken(sportId) {
   return SPORTS[sportId]?.token || null;
 }
 
-// Token pra alertas de sistema (auto-healer, BR detectors, OE-sync, etc).
+// Token pra alertas de sistema (auto-healer, OE-sync, DB issues — operacional).
 // SYSTEM_ALERTS_TOKEN: override explícito.
 // Default: TELEGRAM_TOKEN_ESPORTS (LoL bot, primeiro enabled historicamente).
 function resolveAlertsToken() {
@@ -1433,6 +1433,21 @@ function resolveAlertsToken() {
   if (override) return override;
   // Fallback: TELEGRAM_TOKEN_ESPORTS, depois primeiro sport enabled.
   if (process.env.TELEGRAM_TOKEN_ESPORTS) return process.env.TELEGRAM_TOKEN_ESPORTS;
+  for (const _sCfg of Object.values(SPORTS)) {
+    if (_sCfg?.enabled && _sCfg?.token) return _sCfg.token;
+  }
+  return null;
+}
+
+// Token pra OPORTUNIDADES de bet (arb, super-odd, stale, sharp moves).
+// Diferente de "system alerts" (auto-healer/OE-sync) — são acionáveis pra bet.
+// Default: TIPS_UNIFIED_TOKEN (mesmo bot das tips). Override: OPPORTUNITY_TOKEN.
+function resolveOpportunitiesToken() {
+  const override = (process.env.OPPORTUNITY_TOKEN || '').trim();
+  if (override) return override;
+  const unified = (process.env.TIPS_UNIFIED_TOKEN || '').trim();
+  if (unified) return unified;
+  // Fallback: primeiro sport enabled
   for (const _sCfg of Object.values(SPORTS)) {
     if (_sCfg?.enabled && _sCfg?.token) return _sCfg.token;
   }
@@ -10957,7 +10972,14 @@ async function _pollDotaInner(runOnce = false) {
               if (mapMarkets && (mapMarkets.totals?.length || 0) > 0) {
                 const { scanKills, scanDuration } = require('./lib/dota-extras-scanner');
                 const killTips = scanKills({ totals: mapMarkets.totals, mapNumber: 1, minEv });
-                const durTips  = scanDuration({ totals: mapMarkets.totals, mapNumber: 1, minEv });
+                // BUG FIX (audit 2026-04-25): scanDuration roda no mesmo array de totals
+                // que scanKills, mas Pinnacle não distingue duration/kills via metadata.
+                // Linhas 30-50 podem ser kills (norm μ=50) ou duration (norm μ=38).
+                // Resultado: duplicate scoring com EV inflado (88-109%).
+                // Disable default. Reativar via DOTA_DURATION_SCAN=true.
+                const durTips = /^(1|true|yes)$/i.test(String(process.env.DOTA_DURATION_SCAN || ''))
+                  ? scanDuration({ totals: mapMarkets.totals, mapNumber: 1, minEv })
+                  : [];
                 const extras = [...killTips, ...durTips];
                 if (extras.length) {
                   log('INFO', 'DOTA-EXTRAS', `${match.team1} vs ${match.team2} map1: ${extras.length} extra(s) (kills=${killTips.length} dur=${durTips.length})`);
@@ -14067,7 +14089,15 @@ Máximo 200 palavras.`;
 
         const fbModelP1 = mlScore?.modelH ? parseFloat(mlScore.modelH) / 100 : null;
         const fbModelP2 = mlScore?.modelA ? parseFloat(mlScore.modelA) / 100 : null;
-        const fbModelPPick = tipMarket === '1X2_H' ? fbModelP1 : tipMarket === '1X2_A' ? fbModelP2 : (mlScore?.modelD ? parseFloat(mlScore.modelD) / 100 : null);
+        // BUG FIX: pModel pra OVER/UNDER 2.5 deve usar over25Prob, não modelD (que é P de empate).
+        // Bug detectado em audit shadow: tips OVER_2.5 com pModel ~0.28 (drawProb) vs EV +45%
+        // → math inconsistente. Agora cada market usa seu próprio P do modelo.
+        const fbModelPPick = tipMarket === '1X2_H' ? fbModelP1
+                           : tipMarket === '1X2_A' ? fbModelP2
+                           : tipMarket === '1X2_D'    ? (mlScore?.modelD       ? parseFloat(mlScore.modelD)       / 100 : null)
+                           : tipMarket === 'OVER_2.5' ? (mlScore?.over25Prob   ? parseFloat(mlScore.over25Prob)   / 100 : null)
+                           : tipMarket === 'UNDER_2.5'? (mlScore?.over25Prob   ? (100 - parseFloat(mlScore.over25Prob)) / 100 : null)
+                           : null;
         const fbTipReason = text ? text.split('TIP_FB:')[0].trim().split('\n').filter(Boolean).pop()?.slice(0, 160) || null : null;
 
         if (isLeagueBlocked('football', match.league)) {
@@ -16987,7 +17017,7 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
                 `Stake split p/ R$${stakeRef} total:\n` +
                 `  Home: R$${sH}  Draw: R$${sD}  Away: R$${sA}\n` +
                 `  Payout (qualquer resultado): *R$${payout}* | lucro R$${(payout-stakeRef).toFixed(2)}`;
-              const tk = resolveAlertsToken();
+              const tk = resolveOpportunitiesToken();
               if (tk) for (const adminId of ADMIN_IDS) sendDM(tk, adminId, msg).catch(() => {});
             }
           }
@@ -17014,7 +17044,7 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
                   `${superEvt.superBook}: *${superEvt.superOdd}* (${(superEvt.ratio * 100 - 100).toFixed(0)}% acima ref)\n\n` +
                   `EV estimado: *+${superEvt.evPct}%* assumindo referência como verdade.\n\n` +
                   `_Possíveis causas: super odd promo, erro de book, pre-news edge. Verificar antes de apostar pq book pode voidar erro óbvio._`;
-                const tk = resolveAlertsToken();
+                const tk = resolveOpportunitiesToken();
                 if (tk) for (const adminId of ADMIN_IDS) sendDM(tk, adminId, msg).catch(() => {});
               }
             }
@@ -17041,7 +17071,7 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
                   `Pinnacle: ${velEvt.oldOdd} → ${velEvt.newOdd} em ~${velEvt.windowMin}min\n` +
                   `Velocity: ${arrow} *${velEvt.velocityPct >= 0 ? '+' : ''}${velEvt.velocityPct}%*\n\n` +
                   `${advice}`;
-                const tk = resolveAlertsToken();
+                const tk = resolveOpportunitiesToken();
                 if (tk) for (const adminId of ADMIN_IDS) sendDM(tk, adminId, msg).catch(() => {});
               }
             }
@@ -17060,7 +17090,7 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
                   `${evt.brBook}: *${evt.brOdd}* (delta vs Pinnacle novo: ${evt.brImpliedDeltaPct >= 0 ? '+' : ''}${evt.brImpliedDeltaPct}%)\n\n` +
                   `${advice}\n\n` +
                   `_Janela típica: 5-15min antes da casa ajustar._`;
-                const tk = resolveAlertsToken();
+                const tk = resolveOpportunitiesToken();
                 if (tk) for (const adminId of ADMIN_IDS) sendDM(tk, adminId, msg).catch(() => {});
               }
             }
@@ -17095,7 +17125,7 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
                 `Stake split p/ R$100:\n` +
                 `  ${arb2.sideA}: R$${split.stakeA}  |  ${arb2.sideB}: R$${split.stakeB}\n` +
                 `  Payout (qualquer resultado): *R$${split.payout}* | lucro R$${split.profit}`;
-              const tk = resolveAlertsToken();
+              const tk = resolveOpportunitiesToken();
               if (tk) for (const adminId of ADMIN_IDS) sendDM(tk, adminId, msg).catch(() => {});
             }
           }
@@ -17149,7 +17179,7 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
                 `*${arb2tn.sideB}*: ${arb2tn.bookB} @ ${arb2tn.oddB}\n\n` +
                 `Lucro garantido: *+${arb2tn.arbPct}%*\n\n` +
                 `Stake split p/ R$100:\n  ${arb2tn.sideA}: R$${split.stakeA} | ${arb2tn.sideB}: R$${split.stakeB}\n  Payout: *R$${split.payout}* | lucro R$${split.profit}`;
-              const tk = resolveAlertsToken();
+              const tk = resolveOpportunitiesToken();
               if (tk) for (const adminId of ADMIN_IDS) sendDM(tk, adminId, msg).catch(() => {});
             }
           }
@@ -17170,7 +17200,7 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
                 const sideLabel = side === 't1' ? superEvtTn.matchLabel.split(' vs ')[0] : superEvtTn.matchLabel.split(' vs ')[1];
                 const refLabel = superEvtTn.mode === 'crossbook' ? `Mediana ${superEvtTn.sampleSize} books` : 'Pinnacle';
                 const msg = `🎰 *SUPER ODD — TENNIS*\n\n*${superEvtTn.matchLabel}* (${sideLabel})\n\n${refLabel}: ${superEvtTn.pinOdd}\n${superEvtTn.superBook}: *${superEvtTn.superOdd}* (+${(superEvtTn.ratio * 100 - 100).toFixed(0)}%)\nEV est: *+${superEvtTn.evPct}%*`;
-                const tk = resolveAlertsToken();
+                const tk = resolveOpportunitiesToken();
                 if (tk) for (const adminId of ADMIN_IDS) sendDM(tk, adminId, msg).catch(() => {});
               }
             }
