@@ -596,7 +596,7 @@ function reportBug(module, err, ctx = {}) {
 
   if (!ADMIN_IDS.size) return;
   try {
-    const token = Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
+    const token = resolveAlertsToken();
     if (!token) return;
     const stackHead = stack.split('\n').slice(0, 5).join('\n');
     const ctxLine = Object.keys(ctx).length ? `\nctx: \`${JSON.stringify(ctx).slice(0, 200)}\`` : '';
@@ -677,7 +677,7 @@ function runPipelineStuckCheck() {
       // DM admin — sinaliza pipeline travada (gate apertado demais ou modelo off).
       if (ADMIN_IDS.size) {
         try {
-          const token = Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
+          const token = resolveAlertsToken();
           if (token) {
             const dm = `🚨 *Pipeline travada* — *${sport}*\n${count} rejeições / 0 tips na última hora\nTop motivos: ${topReasons}\n_Verificar gates ou modelo desligado._`;
             for (const id of ADMIN_IDS) sendDM(token, id, dm).catch(e => log('WARN', 'PIPELINE-ALERT-FAIL', `adminId=${id}: ${e.message}`));
@@ -1415,6 +1415,30 @@ async function sendDM(token, userId, text, extra) {
   return res;
 }
 
+// ── Token routing helpers ──
+// Quando TIPS_UNIFIED_TOKEN está setado, TODAS tips (qualquer sport) usam
+// esse token único — útil pra consolidar deliveries num só bot Telegram.
+// Default: token per-sport configurado em SPORTS[sportId].token.
+function resolveTipsToken(sportId) {
+  const unified = (process.env.TIPS_UNIFIED_TOKEN || '').trim();
+  if (unified) return unified;
+  return SPORTS[sportId]?.token || null;
+}
+
+// Token pra alertas de sistema (auto-healer, BR detectors, OE-sync, etc).
+// SYSTEM_ALERTS_TOKEN: override explícito.
+// Default: TELEGRAM_TOKEN_ESPORTS (LoL bot, primeiro enabled historicamente).
+function resolveAlertsToken() {
+  const override = (process.env.SYSTEM_ALERTS_TOKEN || '').trim();
+  if (override) return override;
+  // Fallback: TELEGRAM_TOKEN_ESPORTS, depois primeiro sport enabled.
+  if (process.env.TELEGRAM_TOKEN_ESPORTS) return process.env.TELEGRAM_TOKEN_ESPORTS;
+  for (const _sCfg of Object.values(SPORTS)) {
+    if (_sCfg?.enabled && _sCfg?.token) return _sCfg.token;
+  }
+  return null;
+}
+
 // Envia DM pra todos ADMIN_IDS, retorna { sent, failed }.
 // Callers devem skippar markAdminDmSent/dedup se sent===0 — evita trap
 // de 24h onde falha silenciosa trava re-entrega.
@@ -1776,7 +1800,7 @@ async function runAutoAnalysis() {
           : (prev?.noEdge ? RE_ANALYZE_INTERVAL * 2 : RE_ANALYZE_INTERVAL);
         if (prev && (now - prev.ts < liveCooldown)) continue;
 
-        const result = await autoAnalyzeMatch(esportsConfig.token, match);
+        const result = await autoAnalyzeMatch(resolveTipsToken('esports'), match);
         // Persiste se teve stats nesse ciclo pra ajustar cooldown na próxima
         analyzedMatches.set(matchKey, {
           ts: now,
@@ -2053,7 +2077,7 @@ async function runAutoAnalysis() {
           } else {
             for (const [userId, prefs] of subscribedUsers) {
               if (!prefs.has('esports')) continue;
-              try { await sendDM(esportsConfig.token, userId, tipMsg, _betBtn || undefined); }
+              try { await sendDM(resolveTipsToken('esports'), userId, tipMsg, _betBtn || undefined); }
               catch(e) {
                 if (e.message?.includes('403')) {
                   log('WARN', 'AUTO-TIP', `403 lol userId=${userId} — auto-unsub. desc="${e.message}"`);
@@ -2128,7 +2152,7 @@ async function runAutoAnalysis() {
                 if (!isBucketShadowed('lol')) {
                   for (const [userId, prefs] of subscribedUsers) {
                     if (!prefs.has('esports')) continue;
-                    try { await sendDM(esportsConfig.token, userId, hMsg); } catch(_) {}
+                    try { await sendDM(resolveTipsToken('esports'), userId, hMsg); } catch(_) {}
                   }
                 } else {
                   log('INFO', 'AUTO', `[SHADOW] LoL HANDICAP ${favTeam} — DM suprimida`);
@@ -2220,7 +2244,7 @@ async function runAutoAnalysis() {
           const matchTime = match.time ? new Date(match.time).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit' }) : '—';
           log('INFO', 'AUTO', `Esports upcoming: ${match.team1} vs ${match.team2} (${match.league}) às ${matchTime}${hasRealOdds ? ' — odds disponíveis' : ' — odds estimadas'}${isImminentMatch ? ' [IMINENTE <2h]' : ''}`);
 
-          const result = await autoAnalyzeMatch(esportsConfig.token, match);
+          const result = await autoAnalyzeMatch(resolveTipsToken('esports'), match);
           analyzedMatches.set(matchKey, { ts: now, tipSent: false, noEdge: !result?.tipMatch });
 
           if (!result) { await new Promise(r => setTimeout(r, 2000)); continue; }
@@ -2414,7 +2438,7 @@ async function runAutoAnalysis() {
             } else {
               for (const [userId, prefs] of subscribedUsers) {
                 if (!prefs.has('esports')) continue;
-                try { await sendDM(esportsConfig.token, userId, tipMsg, _betBtnUp || undefined); }
+                try { await sendDM(resolveTipsToken('esports'), userId, tipMsg, _betBtnUp || undefined); }
                 catch(e) { if (e.message?.includes('403')) subscribedUsers.delete(userId); }
               }
             }
@@ -2855,7 +2879,7 @@ async function checkLineMovement() {
 
       for (const [userId, prefs] of subscribedUsers) {
         if (!prefs.has('esports')) continue;
-        try { await sendDM(esportsConfig.token, userId, msg); }
+        try { await sendDM(resolveTipsToken('esports'), userId, msg); }
         catch(e) { if (e.message?.includes('403')) subscribedUsers.delete(userId); }
       }
 
@@ -2935,6 +2959,9 @@ function _alertSportFor(alertId) {
 }
 
 function _pickTokenForAlert(alertId) {
+  // SYSTEM_ALERTS_TOKEN sobrescreve toda lógica de roteamento de alertas.
+  const override = (process.env.SYSTEM_ALERTS_TOKEN || '').trim();
+  if (override) return { token: override, sport: 'system' };
   const preferred = _alertSportFor(alertId);
   if (preferred !== 'system') {
     const cfg = SPORTS[preferred];
@@ -3039,7 +3066,7 @@ async function checkAutoShadow() {
       _autoShadowState.set(sport, { reason: `CLV ${meanClv.toFixed(2)}% < ${cutoffClvBad}% (n=${totalN}, 14d)`, since: now, lastCheck: now });
       log('WARN', 'AUTO-SHADOW', `[FLIP→SHADOW] ${sport}: CLV ${meanClv.toFixed(2)}% < ${cutoffClvBad}% em ${totalN} tips. DMs suspensos até CLV recuperar ≥ ${recoveryClvOk}%.`);
       // Notifica admin
-      const tokenForAlert = Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
+      const tokenForAlert = resolveAlertsToken();
       if (tokenForAlert) {
         const msg = `🛑 *AUTO-SHADOW ATIVADO — ${sport.toUpperCase()}*\n\nCLV médio (14d): *${meanClv.toFixed(2)}%* em ${totalN} tips\nCutoff: ${cutoffClvBad}%\n\nTips continuam sendo geradas e gravadas no DB (com \`is_shadow=1\`), mas DMs suspensos.\n\n_Auto-restaura quando CLV ≥ ${recoveryClvOk}% (mesmo \`AUTO_SHADOW_NEGATIVE_CLV\`)._`;
         for (const adminId of ADMIN_IDS) await sendDM(tokenForAlert, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
@@ -3050,7 +3077,7 @@ async function checkAutoShadow() {
       restored++;
       _autoShadowState.delete(sport);
       log('INFO', 'AUTO-SHADOW', `[RESTORE→ATIVO] ${sport}: CLV recuperou ${meanClv.toFixed(2)}% ≥ ${recoveryClvOk}%. DMs reativados.`);
-      const tokenForAlert = Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
+      const tokenForAlert = resolveAlertsToken();
       if (tokenForAlert) {
         const msg = `✅ *AUTO-SHADOW RESTAURADO — ${sport.toUpperCase()}*\n\nCLV (14d): *+${meanClv.toFixed(2)}%* em ${totalN} tips\n\nDMs reativados.`;
         for (const adminId of ADMIN_IDS) await sendDM(tokenForAlert, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
@@ -3177,7 +3204,7 @@ async function runAutoHealerCycle() {
   // Ativar com AUTO_HEALER_DM_ENABLED=true. Logs continuam (visibility no console).
   if (!/^(1|true|yes)$/i.test(String(process.env.AUTO_HEALER_DM_ENABLED || ''))) return;
 
-  const tokenForAlert = Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
+  const tokenForAlert = resolveAlertsToken();
   if (!tokenForAlert) return;
 
   const sevIcon = { critical: '🚨', warning: '⚠️', info: 'ℹ️' };
@@ -3531,7 +3558,7 @@ async function runBankrollGuardianCycle() {
   }
 
   if (!newAlerts.length) return;
-  const tokenForAlert = Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
+  const tokenForAlert = resolveAlertsToken();
   if (!tokenForAlert) return;
 
   const sevIcon = { critical: '🚨', warning: '⚠️', info: 'ℹ️' };
@@ -3594,7 +3621,7 @@ async function runNewsMonitorCycle() {
   const dmWorthy = newAlerts.filter(a => a.matched_tips_count > 0 || a.severity === 'critical');
   if (!dmWorthy.length) return;
 
-  const tokenForAlert = Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
+  const tokenForAlert = resolveAlertsToken();
   if (!tokenForAlert) return;
 
   const sevIcon = { critical: '🚨', warning: '⚠️' };
@@ -3631,7 +3658,7 @@ async function runPreMatchFinalCheckCycle() {
 
   log('WARN', 'PRE-MATCH-CHECK', `${newAlerts.length} alerta(s) novo(s) de ${result.tips_checked} tips analisadas`);
 
-  const tokenForAlert = Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
+  const tokenForAlert = resolveAlertsToken();
   if (!tokenForAlert) return;
 
   const sevIcon = { critical: '🚨', warning: '⚠️' };
@@ -3660,7 +3687,7 @@ async function runIaHealthCycle() {
   if (Date.now() - _lastIaHealthAlert < IA_HEALTH_DM_COOLDOWN_MS) return;
   _lastIaHealthAlert = Date.now();
 
-  const tokenForAlert = Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
+  const tokenForAlert = resolveAlertsToken();
   if (!tokenForAlert) return;
   const sevIcon = { critical: '🚨', warning: '⚠️' };
   const lines = result.alerts.map(a => `${sevIcon[a.severity] || '⚠️'} ${a.message}\n   └─ Sugestão: ${a.suggestion}`).join('\n');
@@ -3714,7 +3741,7 @@ async function runLiveStormCycle() {
     log('WARN', 'LIVE-STORM', `STORM ATIVO: ${result.live_total} partidas live (threshold ${result.storm_threshold})`);
     if (stormDmEnabled && Date.now() - _lastLiveStormDM > LIVE_STORM_DM_COOLDOWN_MS) {
       _lastLiveStormDM = Date.now();
-      const tokenForAlert = Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
+      const tokenForAlert = resolveAlertsToken();
       if (tokenForAlert) {
         const sportsLine = Object.entries(result.by_sport || {}).sort((a, b) => b[1] - a[1])
           .map(([s, n]) => `*${s}*: ${n}`).join(' | ');
@@ -3733,7 +3760,7 @@ async function runLiveStormCycle() {
   if (!_liveStormActive && wasActive) {
     log('INFO', 'LIVE-STORM', `Storm resolvido: ${result.live_total} live (abaixo do threshold)`);
     if (stormDmEnabled) {
-      const tokenForAlert = Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
+      const tokenForAlert = resolveAlertsToken();
       if (tokenForAlert) {
         const msg = `✅ *LIVE STORM RESOLVIDO*\n\n` +
           `Voltou ao volume normal: *${result.live_total}* partidas live.\n` +
@@ -3769,7 +3796,7 @@ async function runLolFreshnessCycle() {
     }
     log(r.level === 'retrain-now' ? 'WARN' : 'INFO', 'FRESHNESS',
       `LoL ${r.level}: ${(r.reasons || []).join(' | ')}`);
-    const tokenForAlert = Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
+    const tokenForAlert = resolveAlertsToken();
     if (!tokenForAlert) return;
     const emoji = r.level === 'retrain-now' ? '🔴' : '🟡';
     const msg = `${emoji} *Modelo LoL ${r.level.toUpperCase()}*\n\n` +
@@ -3873,7 +3900,7 @@ async function runMarketTipReadinessCheck() {
   }
   if (!ready.length) return;
 
-  const tokenForAlert = Object.values(SPORTS).find(S => S?.enabled && S?.token)?.token;
+  const tokenForAlert = resolveAlertsToken();
   if (!tokenForAlert) return;
 
   const lines = ready.map(s => {
@@ -4004,7 +4031,7 @@ async function runMarketTipsRoiGuardSided() {
   }
 
   if (disabled.length || restored.length) {
-    const token = Object.values(SPORTS).find(S => S?.enabled && S?.token)?.token;
+    const token = resolveAlertsToken();
     if (token) {
       let msg = `🛡️ *MT ROI GUARD — auto-tune*\n\nJanela ${WINDOW_DAYS}d, ROI cutoff ${ROI_CUTOFF}% (restore ≥${ROI_RESTORE}%), n≥${N_CUTOFF}.\n\n`;
       if (disabled.length) msg += `*Desabilitados:*\n${disabled.join('\n')}\n\n`;
@@ -4062,7 +4089,7 @@ async function runMarketTipsLeakGuard() {
   }
 
   if (disabled.length || restored.length) {
-    const token = Object.values(SPORTS).find(S => S?.enabled && S?.token)?.token;
+    const token = resolveAlertsToken();
     if (token) {
       const msg = `🛡️ *MT LEAK GUARD — 30d*\n\n${[...disabled, ...restored].join('\n')}\n\n_Cutoff: CLV ≤ ${CLV_CUTOFF}% com n≥${N_CUTOFF}. Restaura em CLV ≥ ${CLV_RESTORE}%._`;
       if (!_isCycleMuted('mt-leak-guard')) for (const adminId of ADMIN_IDS) sendDM(token, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
@@ -4082,7 +4109,7 @@ async function runWeeklyPipelineDigest() {
   if (_lastWeeklyDigestDay === today) return;
   _lastWeeklyDigestDay = today;
 
-  const token = Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
+  const token = resolveAlertsToken();
   if (!token) return;
 
   try {
@@ -4178,7 +4205,7 @@ async function runMarketTipsDigest() {
   }
   if (!Array.isArray(stats30) || !stats30.length) return;
 
-  const token = Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
+  const token = resolveAlertsToken();
   if (!token) return;
 
   const fmt = (s) => {
@@ -4231,7 +4258,7 @@ async function runMlShadowDigest() {
   // Só envia se há tips ML shadow (não market) — esse digest é específico ML.
   if (!r30.regular?.length && !r7.regular?.length) return;
 
-  const token = Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
+  const token = resolveAlertsToken();
   if (!token) return;
 
   const fmt = (v, suf = '') => v == null ? '?' : `${v >= 0 ? '+' : ''}${v}${suf}`;
@@ -4290,7 +4317,7 @@ async function runBacktestValidatorCycle() {
   if (!newMilestones.length && !hasBleed && !cooldownExpired) return;
 
   _lastBacktestAlert = Date.now();
-  const tokenForAlert = Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
+  const tokenForAlert = resolveAlertsToken();
   if (!tokenForAlert) return;
 
   const overall = result.overall;
@@ -4343,7 +4370,7 @@ async function runPostFixMonitorCycle() {
   if (!newAlerts.length && !hasHighSeverity && !cooldownExpired) return;
 
   _lastPostFixAlert = Date.now();
-  const tokenForAlert = Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
+  const tokenForAlert = resolveAlertsToken();
   if (!tokenForAlert) return;
 
   const lines = [];
@@ -4411,7 +4438,7 @@ async function runPathGuardCycle() {
       GROUP BY sport, path
     `).all();
 
-    const tokenForAlert = Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
+    const tokenForAlert = resolveAlertsToken();
     const alerts = [];
     const restored = [];
     const evaluated = new Set();
@@ -4478,7 +4505,7 @@ async function runLeagueGuardCycle() {
       HAVING n >= ${minN}
     `).all();
 
-    const tokenForAlert = Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
+    const tokenForAlert = resolveAlertsToken();
     const alerts = [];
     const restored = [];
     const now = Date.now();
@@ -4584,7 +4611,7 @@ async function runOddsBucketGuardCycle() {
       }
     }
 
-    const tokenForAlert = Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
+    const tokenForAlert = resolveAlertsToken();
     const alerts = [];
     const restored = [];
     const autoBlocked = obg.getAutoBlocks();
@@ -4755,7 +4782,7 @@ async function runMtBucketGuardCycle() {
     }
 
     // Pra cada sport com sample suficiente, decide min/max odd.
-    const tokenForAlert = Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
+    const tokenForAlert = resolveAlertsToken();
     const changes = [];
     for (const [sport, total] of sportTotals) {
       if (total < minTotal) continue;
@@ -4911,7 +4938,7 @@ async function runGatesAutoTuneCycle() {
     }
     function roiOf(a) { return a.staked > 0 ? (a.profit / a.staked * 100) : null; }
 
-    const tokenForAlert = Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
+    const tokenForAlert = resolveAlertsToken();
     const changes = [];
 
     for (const sp of sports) {
@@ -5169,7 +5196,7 @@ async function runPipelineDigestCycle() {
           ? `🚨 *CRITICAL — Pipeline Alert*\n\n`
           : `📬 *Weekly Pipeline Digest*\n\n`;
 
-    const tokenForAlert = Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
+    const tokenForAlert = resolveAlertsToken();
     if (!tokenForAlert) return;
     for (const adminId of ADMIN_IDS) {
       const msg = prefix + txt;
@@ -5203,7 +5230,7 @@ async function runModelCalibrationCycle() {
   if (Date.now() - _lastModelCalibAlert < 24 * 60 * 60 * 1000) return;
   _lastModelCalibAlert = Date.now();
 
-  const tokenForAlert = Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
+  const tokenForAlert = resolveAlertsToken();
   if (!tokenForAlert) return;
   const lines = result.alerts.map(a => `🎯 *${a.sport.toUpperCase()}* — ${a.message}\n   └─ ${a.suggestions[0]}`).join('\n\n');
   const msg = `🎯 *MODEL CALIBRATION WATCHER (semanal)*\n\n${lines}\n\n_Próximo check em 7 dias._`;
@@ -5242,7 +5269,7 @@ async function runDailyHealthIfTime() {
     const orchR = await serverGet('/agents/orchestrator?workflow=daily_health').catch(() => null);
     if (!orchR?.ok) return;
 
-    const tokenForAlert = Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
+    const tokenForAlert = resolveAlertsToken();
     if (!tokenForAlert) return;
 
     const stepsHtml = orchR.steps.map(s => `${s.ok ? '✅' : '❌'} ${s.name}${s.duration_ms ? ` (${s.duration_ms}ms)` : ''}`).join('\n');
@@ -6067,7 +6094,7 @@ async function autoAnalyzeMatch(token, match) {
                           const dm = mtp.buildMarketTipDM({
                             match, tip: t, stake, league: match.league, sport: 'lol', isLive: isLiveLoL,
                           });
-                          const tokenForMT = Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
+                          const tokenForMT = resolveAlertsToken();
                           if (tokenForMT) {
                             const r = await sendAdminDMs(tokenForMT, dm, undefined, 'lol-market-tip');
                             if (r.sent > 0) {
@@ -10536,7 +10563,8 @@ async function pollDota(runOnce = false) {
 async function _pollDotaInner(runOnce = false) {
   const esportsConfig = SPORTS['esports'];
   if (!esportsConfig?.enabled || !esportsConfig?.token) return;
-  const token = esportsConfig.token;
+  // TIPS_UNIFIED_TOKEN sobrescreve esportsConfig pra delivery — tips Dota podem ir pra bot diferente do polling.
+  const token = resolveTipsToken('esports');
   const DOTA_INTERVAL = 4 * 60 * 60 * 1000;
   // Cooldown live adaptativo: 90s quando temos Steam RT (delay ~15s) ou stats live frescas;
   // 3min quando só OpenDota (delay nativo 3min — não vale re-analisar antes).
@@ -10948,7 +10976,7 @@ async function _pollDotaInner(runOnce = false) {
                       const stake = mtp.kellyStakeForMarket(t.pModel, t.odd, 100, 0.10);
                       if (stake > 0) {
                         const dm = mtp.buildMarketTipDM({ match, tip: t, stake, league: match.league, sport: 'dota2', isLive });
-                        const tokenForMT = Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
+                        const tokenForMT = resolveAlertsToken();
                         if (tokenForMT) {
                           const r = await sendAdminDMs(tokenForMT, dm, undefined, 'dota-market-tip');
                           if (r.sent > 0) {
@@ -11486,7 +11514,7 @@ async function analyzeDotaMapTip(match, token) {
 async function pollMma(runOnce = false) {
   const mmaConfig = SPORTS['mma'];
   if (!mmaConfig?.enabled || !mmaConfig?.token) return;
-  const token = mmaConfig.token;
+  const token = resolveTipsToken('mma');
 
   // Re-analisa a cada MMA_INTERVAL_H (default 6h — antes 12h era muito restritivo,
   // perdia janelas de odd movement pré-card. Ainda economiza IA vs live real-time).
@@ -12182,7 +12210,7 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
 async function pollTennis(runOnce = false) {
   const tennisConfig = SPORTS['tennis'];
   if (!tennisConfig?.enabled || !tennisConfig?.token) return;
-  const token = tennisConfig.token;
+  const token = resolveTipsToken('tennis');
 
   // Live: cooldown curto (15min) para re-análise com score atualizado
   // Pré-jogo: usa TENNIS_PREGAME_INTERVAL_H (default 6h)
@@ -12704,7 +12732,7 @@ async function pollTennis(runOnce = false) {
                           }
                           if (stake > 0) {
                             const dm = mtp.buildMarketTipDM({ match, tip: t, stake, league: match.league, sport: 'tennis', isLive: isLiveTennis });
-                            const tnToken = SPORTS['tennis']?.token || Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
+                            const tnToken = SPORTS['tennis']?.token || resolveAlertsToken();
                             if (tnToken) {
                               const r = await sendAdminDMs(tnToken, dm, undefined, 'tennis-market-tip');
                               if (r.sent > 0) {
@@ -13365,7 +13393,7 @@ Máximo 200 palavras. Raciocínio breve antes da decisão.`;
 async function pollFootball(runOnce = false) {
   const fbConfig = SPORTS['football'];
   if (!fbConfig?.enabled || !fbConfig?.token) return;
-  const token = fbConfig.token;
+  const token = resolveTipsToken('football');
 
   const { calcFootballScore } = require('./lib/football-ml');
   const footballData = require('./lib/football-data');
@@ -14059,7 +14087,7 @@ Máximo 200 palavras.`;
                     const stakeFb = mtp.kellyStakeForMarket(fbModelPPick, parseFloat(tipOdd), 100, 0.10);
                     if (stakeFb > 0) {
                       const dmFb = mtp.buildMarketTipDM({ match: matchForMt, tip: tipForMt, stake: stakeFb, league: matchForMt.league, sport: 'football', isLive: isFbLive });
-                      const fbToken = SPORTS['football']?.token || Object.values(SPORTS).find(S => S?.enabled && S?.token)?.token;
+                      const fbToken = SPORTS['football']?.token || resolveAlertsToken();
                       if (fbToken) {
                         const r = await sendAdminDMs(fbToken, dmFb, undefined, 'football-market-tip');
                         if (r.sent > 0) {
@@ -14150,7 +14178,7 @@ Máximo 200 palavras.`;
 async function pollTableTennis(runOnce = false) {
   const ttConfig = SPORTS['tabletennis'];
   if (!ttConfig?.enabled || !ttConfig?.token) return [];
-  const token = ttConfig.token;
+  const token = resolveTipsToken('tabletennis');
 
   const TT_INTERVAL = 30 * 60 * 1000; // 30 min (volume alto, match curto)
   const TT_MIN_ODDS = parseFloat(process.env.TABLETENNIS_MIN_ODDS ?? '1.40');
@@ -14387,7 +14415,7 @@ async function pollTableTennis(runOnce = false) {
 async function pollCs(runOnce = false) {
   const csConfig = SPORTS['cs'];
   if (!csConfig?.enabled || !csConfig?.token) return [];
-  const token = csConfig.token;
+  const token = resolveTipsToken('cs');
 
   const CS_POLL_LIVE_MS = 2 * 60 * 1000;  // 2min quando há live
   const CS_POLL_IDLE_MS = 5 * 60 * 1000;  // 5min idle
@@ -14639,7 +14667,7 @@ async function pollCs(runOnce = false) {
                         const stake = mtp.kellyStakeForMarket(t.pModel, t.odd, 100, 0.10);
                         if (stake > 0) {
                           const dm = mtp.buildMarketTipDM({ match, tip: t, stake, league: match.league, sport: 'cs2', isLive: isLiveCs });
-                          const tokenForMT = Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
+                          const tokenForMT = resolveAlertsToken();
                           if (tokenForMT) {
                             const r = await sendAdminDMs(tokenForMT, dm, undefined, 'cs-market-tip');
                             if (r.sent > 0) {
@@ -15007,7 +15035,7 @@ Máximo 150 palavras.`;
 async function pollValorant(runOnce = false) {
   const valConfig = SPORTS['valorant'];
   if (!valConfig?.enabled || !valConfig?.token) return [];
-  const token = valConfig.token;
+  const token = resolveTipsToken('valorant');
 
   const VAL_POLL_LIVE_MS = 2 * 60 * 1000;
   const VAL_POLL_IDLE_MS = 5 * 60 * 1000;
@@ -15212,7 +15240,7 @@ async function pollValorant(runOnce = false) {
                         const stake = mtp.kellyStakeForMarket(t.pModel, t.odd, 100, 0.10);
                         if (stake > 0) {
                           const dm = mtp.buildMarketTipDM({ match, tip: t, stake, league: match.league, sport: 'valorant', isLive: isLiveVal });
-                          const tokenForMT = Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
+                          const tokenForMT = resolveAlertsToken();
                           if (tokenForMT) {
                             const r = await sendAdminDMs(tokenForMT, dm, undefined, 'val-market-tip');
                             if (r.sent > 0) {
@@ -16790,7 +16818,7 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
       const msg = `🎯 *GATE OPTIMIZER — ${r.days}d*\n\n` +
         `Sports com cap divergence ≥2pp ROI (n≥20):\n\n${lines.join('\n')}\n\n` +
         `_Admin decide aplicar via env. Ciclo próximo domingo 10h._`;
-      const token = Object.values(SPORTS).find(S => S?.enabled && S?.token)?.token;
+      const token = resolveAlertsToken();
       if (token) for (const adminId of ADMIN_IDS) sendDM(token, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
       log('INFO', 'GATE-OPT', `DM admin: ${significant.length} sports com sugestão`);
     } catch (e) { log('ERROR', 'GATE-OPT', e.message); }
@@ -16825,7 +16853,7 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
           return `${arrow} ${c.sport}: ${c.prev}→${c.mult} | ROI=${c.metrics.roi ?? '?'}% CLV=${c.metrics.avg_clv ?? '?'}% n=${c.metrics.n}`;
         });
         const msg = `🎯 *KELLY AUTO-TUNE — ${r.days}d*\n\n${lines.join('\n')}\n\n_Aplicado em gates_runtime_state. Revert via setManual ou env KELLY_<SPORT>_<CONF>._`;
-        const token = Object.values(SPORTS).find(S => S?.enabled && S?.token)?.token;
+        const token = resolveAlertsToken();
         if (token) for (const adminId of ADMIN_IDS) sendDM(token, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
       }
     } catch (e) { log('ERROR', 'KELLY-TUNE', e.message); }
@@ -16908,7 +16936,7 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
                 `Stake split p/ R$${stakeRef} total:\n` +
                 `  Home: R$${sH}  Draw: R$${sD}  Away: R$${sA}\n` +
                 `  Payout (qualquer resultado): *R$${payout}* | lucro R$${(payout-stakeRef).toFixed(2)}`;
-              const tk = Object.values(SPORTS).find(S => S?.enabled && S?.token)?.token;
+              const tk = resolveAlertsToken();
               if (tk) for (const adminId of ADMIN_IDS) sendDM(tk, adminId, msg).catch(() => {});
             }
           }
@@ -16930,7 +16958,7 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
                   `${superEvt.superBook}: *${superEvt.superOdd}* (${(superEvt.ratio * 100 - 100).toFixed(0)}% acima Pinnacle)\n\n` +
                   `EV estimado: *+${superEvt.evPct}%* assumindo Pinnacle como verdade.\n\n` +
                   `_Possíveis causas: super odd promo, erro de book, pre-news edge. Verificar antes de apostar pq book pode voidar erro óbvio._`;
-                const tk = Object.values(SPORTS).find(S => S?.enabled && S?.token)?.token;
+                const tk = resolveAlertsToken();
                 if (tk) for (const adminId of ADMIN_IDS) sendDM(tk, adminId, msg).catch(() => {});
               }
             }
@@ -16951,7 +16979,7 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
                   `Pinnacle: ${velEvt.oldOdd} → ${velEvt.newOdd} em ~${velEvt.windowMin}min\n` +
                   `Velocity: ${arrow} *${velEvt.velocityPct >= 0 ? '+' : ''}${velEvt.velocityPct}%*\n\n` +
                   `${advice}`;
-                const tk = Object.values(SPORTS).find(S => S?.enabled && S?.token)?.token;
+                const tk = resolveAlertsToken();
                 if (tk) for (const adminId of ADMIN_IDS) sendDM(tk, adminId, msg).catch(() => {});
               }
             }
@@ -16970,7 +16998,7 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
                   `${evt.brBook}: *${evt.brOdd}* (delta vs Pinnacle novo: ${evt.brImpliedDeltaPct >= 0 ? '+' : ''}${evt.brImpliedDeltaPct}%)\n\n` +
                   `${advice}\n\n` +
                   `_Janela típica: 5-15min antes da casa ajustar._`;
-                const tk = Object.values(SPORTS).find(S => S?.enabled && S?.token)?.token;
+                const tk = resolveAlertsToken();
                 if (tk) for (const adminId of ADMIN_IDS) sendDM(tk, adminId, msg).catch(() => {});
               }
             }
@@ -17005,7 +17033,7 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
                 `Stake split p/ R$100:\n` +
                 `  ${arb2.sideA}: R$${split.stakeA}  |  ${arb2.sideB}: R$${split.stakeB}\n` +
                 `  Payout (qualquer resultado): *R$${split.payout}* | lucro R$${split.profit}`;
-              const tk = Object.values(SPORTS).find(S => S?.enabled && S?.token)?.token;
+              const tk = resolveAlertsToken();
               if (tk) for (const adminId of ADMIN_IDS) sendDM(tk, adminId, msg).catch(() => {});
             }
           }
@@ -17773,7 +17801,7 @@ async function reanalyzeAndVoidFailing(opts = {}) {
 
   // DM admin com summary
   if (notify && report.voidedList.length && ADMIN_IDS.size) {
-    const tokenForAlert = Object.values(SPORTS).find(s => s?.enabled && s?.token)?.token;
+    const tokenForAlert = resolveAlertsToken();
     if (tokenForAlert) {
       const lines = report.voidedList.slice(0, 10).map(v =>
         `❌ *#${v.id}* ${v.sport} — ${v.match}\n   └─ pick ${v.pick} @${v.oldOdds}→${v.newOdds} | EV ${v.oldEv.toFixed(1)}%→${v.newEv}%\n   └─ _${v.reason}_`
