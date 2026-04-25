@@ -1855,6 +1855,19 @@ async function runAutoAnalysis() {
             analyzedMatches.set(matchKey, { ts: now, tipSent: false, noEdge: true });
             continue;
           }
+          // SX.Bet bloqueado pra tips LIVE também (config user). Pinnacle live pode
+          // estar lento; se for sport=lol e source=SX, skipa em vez de mandar.
+          // Opt-out: LOL_BLOCK_SX_TIPS_LIVE=false (permite SX live em emergência).
+          if (process.env.LOL_BLOCK_SX_TIPS_LIVE !== 'false') {
+            const _bkLive = String(result.o?.bookmaker || '').toLowerCase();
+            if (_bkLive.includes('sx')) {
+              log('WARN', 'AUTO',
+                `Gate SX-blocked LIVE: ${match.team1} vs ${match.team2} odd ${tipOdd} EV ${tipEVnumLive}% — SX.Bet bloqueado pra tips esports`);
+              logRejection('lol', `${match.team1} vs ${match.team2}`, 'sx_book_blocked_live', { ev: tipEVnumLive, odd: tipOdd });
+              analyzedMatches.set(matchKey, { ts: now, tipSent: false, noEdge: true });
+              continue;
+            }
+          }
           // Cap LoL tier 2-3: histórico ROI -56% nessas ligas (Prime League/LFL/Rift Legends/etc) por EV inflado.
           // Em tier 2-3, EV reportado > 25% é red flag de modelo errado; rebaixa conf.
           const _lolTier1Live = isLolTier1(match.leagueSlug || match.league);
@@ -2335,26 +2348,18 @@ async function runAutoAnalysis() {
               await new Promise(r => setTimeout(r, 3000)); continue;
             }
 
-            // SX.Bet single-source guard: liquidez baixa = odds podem ser wide/stale.
-            // Quando bot só tem SX.Bet (Pinnacle não abriu mercado ainda, típico >6-12h
-            // antes do jogo), edge muito alto provavelmente reflete mispricing SX.Bet,
-            // não edge real. Aguarda Pinnacle abrir antes de disparar tip.
-            // Opt-out: LOL_SX_ONLY_GUARD=false. Threshold EV: LOL_SX_ONLY_MAX_EV (default 15).
-            // Threshold horas: LOL_SX_ONLY_HOURS_GUARD (default 6).
-            if (process.env.LOL_SX_ONLY_GUARD !== 'false') {
+            // SX.Bet bloqueado pra tips: liquidez baixa em LEC/LCK = odds wide/stale.
+            // SX.Bet continua usado pra: live odds detection (Pinnacle slow live),
+            // match discovery, cross-validation. NÃO pra tip dispatch.
+            // Opt-out: LOL_BLOCK_SX_TIPS=false (volta ao guard só EV-alto+hora).
+            if (process.env.LOL_BLOCK_SX_TIPS !== 'false') {
               const _bk = String(result.o?.bookmaker || '').toLowerCase();
-              const _isSxOnly = _bk.includes('sx');
-              if (_isSxOnly && match.time && !isNaN(tipEVnum)) {
-                const hUntil = (new Date(match.time).getTime() - Date.now()) / 3600000;
-                const maxEvSx = parseFloat(process.env.LOL_SX_ONLY_MAX_EV || '15');
-                const hoursGuard = parseFloat(process.env.LOL_SX_ONLY_HOURS_GUARD || '6');
-                if (hUntil > hoursGuard && tipEVnum > maxEvSx) {
-                  log('WARN', 'AUTO',
-                    `Gate SX-only: ${match.team1} vs ${match.team2} EV ${tipEVnum}% > ${maxEvSx}% sem Pinnacle (faltam ${hUntil.toFixed(1)}h) — aguarda Pinnacle abrir mercado`);
-                  logRejection('lol', `${match.team1} vs ${match.team2}`, 'sx_only_high_ev_pre_pinnacle', { ev: tipEVnum, hUntil: +hUntil.toFixed(1), bookmaker: result.o?.bookmaker });
-                  analyzedMatches.set(matchKey, { ts: now, tipSent: false, noEdge: true });
-                  await new Promise(r => setTimeout(r, 3000)); continue;
-                }
+              if (_bk.includes('sx')) {
+                log('WARN', 'AUTO',
+                  `Gate SX-blocked: ${match.team1} vs ${match.team2} odd ${tipOdd} EV ${tipEVnum}% — SX.Bet bloqueado pra tips (esports). Aguarda Pinnacle/outro book.`);
+                logRejection('lol', `${match.team1} vs ${match.team2}`, 'sx_book_blocked', { ev: tipEVnum, odd: tipOdd });
+                analyzedMatches.set(matchKey, { ts: now, tipSent: false, noEdge: true });
+                await new Promise(r => setTimeout(r, 3000)); continue;
               }
             }
             // Cap LoL tier 2-3 upcoming: bleed histórico ROI -56% por EV inflado em ligas não-premier.
