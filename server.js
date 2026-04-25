@@ -9947,12 +9947,25 @@ const server = http.createServer(async (req, res) => {
           } catch (_) {}
         }
 
-        // EV hard cap: tip com EV absurdo (>35%) é indício de odd errada ou edge
-        // inflado por modelo overfitado. Histórico mostra que esports perdia com
-        // avg_ev 26% mesmo com CLV +3.7%. Rejeita gravação → bot aborta DM.
-        // Override via TIP_EV_MAX (default 35). Usa TIP_EV_MAX_PER_SPORT={"esports":25,"tennis":40} pra cap diferenciado.
+        // EV hard cap: tip com EV absurdo é indício de odd errada ou edge inflado.
+        // Histórico mostra que esports perdia com avg_ev 26% mesmo com CLV +3.7%.
+        // Rejeita gravação → bot aborta DM (após fix 806830e).
+        //
+        // Defaults per-sport (2026-04-25): caps mais apertados que o global 35
+        // baseado em variance + reliability dos modelos. LoL Bo1 com EV >25% é
+        // quase sempre odd errada (caso real Karmine @ 1.95 EV +70.4% quando
+        // Pinnacle pagava 1.065). Tennis tem mais tolerância (Slam edges reais).
+        // Override total via TIP_EV_MAX (legacy global) ou TIP_EV_MAX_PER_SPORT JSON
+        // — env vars têm precedência sobre defaults.
         if (evN != null) {
-          let evMax = parseFloat(process.env.TIP_EV_MAX || '35');
+          const PER_SPORT_DEFAULTS = {
+            lol: 25, cs2: 25, dota2: 25, valorant: 25,
+            tennis: 30, mma: 30,
+            football: 25, tabletennis: 25,
+            darts: 25, snooker: 25,
+          };
+          let evMax = PER_SPORT_DEFAULTS[sport] != null ? PER_SPORT_DEFAULTS[sport] : 35;
+          if (process.env.TIP_EV_MAX) evMax = parseFloat(process.env.TIP_EV_MAX);
           try {
             const perSport = process.env.TIP_EV_MAX_PER_SPORT ? JSON.parse(process.env.TIP_EV_MAX_PER_SPORT) : null;
             if (perSport && typeof perSport[sport] === 'number') evMax = perSport[sport];
