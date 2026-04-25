@@ -4625,6 +4625,162 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // GET /player-props-debug?sport=lol|tennis&limit=20
+  // Diagnostica por que scanners de player props não estão produzindo tips.
+  // Roda model + pega Pinnacle lines + computa edges sem aplicar gates.
+  if (p === '/player-props-debug') {
+    const sport = (parsed.query.sport || 'lol').toLowerCase();
+    const limit = Math.max(1, Math.min(50, parseInt(parsed.query.limit || '20', 10) || 20));
+    try {
+      if (sport === 'lol') {
+        const http2 = require('http');
+        const port2 = process.env.PORT || 3000;
+        const fetchJson2 = (path) => new Promise((res2, rej) => {
+          http2.get('http://localhost:' + port2 + path, (r) => {
+            let body = '';
+            r.on('data', c => body += c);
+            r.on('end', () => { try { res2(JSON.parse(body)); } catch (e) { rej(e); } });
+          }).on('error', rej);
+        });
+        const matches = await fetchJson2('/lol-matches').catch(() => []);
+        const upcoming = (Array.isArray(matches) ? matches : [])
+          .filter(m => m.status === 'upcoming')
+          .slice(0, limit);
+        const { getTeamRosterStats } = require('./lib/oracleselixir-player-features');
+        const { predictMapKills, scanKillsMarkets } = require('./lib/lol-kills-model');
+        const out = [];
+        for (const m of upcoming) {
+          const t1Roster = getTeamRosterStats(db, m.team1);
+          const t2Roster = getTeamRosterStats(db, m.team2);
+          let rosterStatus = 'ok';
+          if (!t1Roster && !t2Roster) rosterStatus = 'both_missing';
+          else if (!t1Roster) rosterStatus = 't1_missing';
+          else if (!t2Roster) rosterStatus = 't2_missing';
+          let predict = null, lambda = null;
+          if (t1Roster && t2Roster) {
+            predict = predictMapKills(t1Roster, t2Roster);
+            lambda = predict?.lambda;
+          }
+          const mkt = await fetchJson2(`/odds-markets?team1=${encodeURIComponent(m.team1)}&team2=${encodeURIComponent(m.team2)}&period=1&game=lol`).catch(() => null);
+          const totals = mkt?.totals || [];
+          let bestEdgeUp = null, bestEdgeDn = null, bestEdgeAny = null;
+          if (predict) {
+            for (const t of totals) {
+              const line = parseFloat(t.line);
+              const oddOver = parseFloat(t.oddsOver);
+              const oddUnder = parseFloat(t.oddsUnder);
+              if (Number.isFinite(line)) {
+                if (Number.isFinite(oddOver)) {
+                  const p2 = predict.pOver(line);
+                  const ev = (p2 * oddOver - 1) * 100;
+                  if (!bestEdgeUp || ev > bestEdgeUp.ev) bestEdgeUp = { line, side: 'over', odd: oddOver, pModel: +p2.toFixed(3), ev: +ev.toFixed(2) };
+                  if (!bestEdgeAny || ev > bestEdgeAny.ev) bestEdgeAny = { line, side: 'over', odd: oddOver, pModel: +p2.toFixed(3), ev: +ev.toFixed(2) };
+                }
+                if (Number.isFinite(oddUnder)) {
+                  const p2 = predict.pUnder(line);
+                  const ev = (p2 * oddUnder - 1) * 100;
+                  if (!bestEdgeDn || ev > bestEdgeDn.ev) bestEdgeDn = { line, side: 'under', odd: oddUnder, pModel: +p2.toFixed(3), ev: +ev.toFixed(2) };
+                  if (!bestEdgeAny || ev > bestEdgeAny.ev) bestEdgeAny = { line, side: 'under', odd: oddUnder, pModel: +p2.toFixed(3), ev: +ev.toFixed(2) };
+                }
+              }
+            }
+          }
+          const passingTips = predict ? scanKillsMarkets({ pinTotals: totals, predict, minEv: parseFloat(process.env.LOL_KILLS_SCAN_MIN_EV ?? '5') }) : [];
+          let reason = 'edge_passing';
+          if (rosterStatus !== 'ok') reason = `roster_${rosterStatus}`;
+          else if (!predict) reason = 'lambda_out_of_range';
+          else if (!totals.length) reason = 'no_pinnacle_lines';
+          else if (!passingTips.length) reason = 'no_edge_above_min_ev';
+          out.push({
+            team1: m.team1, team2: m.team2, league: m.league, time: m.time,
+            roster: rosterStatus,
+            t1Lambda: t1Roster ? (() => {
+              let s = 0, c = 0;
+              for (const p of Object.values(t1Roster.roster || {})) {
+                if (p && Number.isFinite(p.kills)) { s += p.kills; c++; }
+              }
+              return c >= 3 ? +(c < 5 ? s * 5 / c : s).toFixed(2) : null;
+            })() : null,
+            t2Lambda: t2Roster ? (() => {
+              let s = 0, c = 0;
+              for (const p of Object.values(t2Roster.roster || {})) {
+                if (p && Number.isFinite(p.kills)) { s += p.kills; c++; }
+              }
+              return c >= 3 ? +(c < 5 ? s * 5 / c : s).toFixed(2) : null;
+            })() : null,
+            lambda,
+            pinnacleLines: totals.length,
+            bestEdgeOver: bestEdgeUp,
+            bestEdgeUnder: bestEdgeDn,
+            bestEdgeAny,
+            passingTips: passingTips.length,
+            reason,
+          });
+        }
+        sendJson(res, { sport, limit, matches: out });
+        return;
+      }
+      if (sport === 'tennis') {
+        const http2 = require('http');
+        const port2 = process.env.PORT || 3000;
+        const fetchJson2 = (path) => new Promise((res2, rej) => {
+          http2.get('http://localhost:' + port2 + path, (r) => {
+            let body = '';
+            r.on('data', c => body += c);
+            r.on('end', () => { try { res2(JSON.parse(body)); } catch (e) { rej(e); } });
+          }).on('error', rej);
+        });
+        const matches = await fetchJson2('/tennis-matches').catch(() => []);
+        const upcoming = (Array.isArray(matches) ? matches : []).slice(0, limit);
+        const { getPlayerAceRate, getPlayerDfRate } = require('./lib/tennis-player-stats');
+        const { estimateTennisAces, estimateTennisDoubleFaults } = require('./lib/tennis-markov-model');
+        const out = [];
+        for (const m of upcoming) {
+          const aceR1 = getPlayerAceRate(db, m.team1);
+          const aceR2 = getPlayerAceRate(db, m.team2);
+          const dfR1 = getPlayerDfRate(db, m.team1);
+          const dfR2 = getPlayerDfRate(db, m.team2);
+          const surface = m.surface || 'hard';
+          const bestOf = (m.league && /grand slam|us open|french open|wimbledon|australian open|roland garros/i.test(m.league)) ? 5 : 3;
+          let acesEstimate = null, dfEstimate = null;
+          try {
+            acesEstimate = estimateTennisAces({
+              acesPerMatch1: aceR1?.acesPerMatch, acesPerMatch2: aceR2?.acesPerMatch,
+              bestOf, surface,
+            });
+          } catch (_) {}
+          try {
+            dfEstimate = estimateTennisDoubleFaults({
+              dfPerMatch1: dfR1?.dfPerMatch, dfPerMatch2: dfR2?.dfPerMatch,
+              bestOf, surface,
+            });
+          } catch (_) {}
+          const mkt = await fetchJson2(`/odds-markets?team1=${encodeURIComponent(m.team1)}&team2=${encodeURIComponent(m.team2)}&separate_aces=1`).catch(() => null);
+          out.push({
+            team1: m.team1, team2: m.team2, league: m.league, surface, bestOf,
+            t1AceRate: aceR1?.acesPerMatch || null,
+            t2AceRate: aceR2?.acesPerMatch || null,
+            t1DfRate: dfR1?.dfPerMatch || null,
+            t2DfRate: dfR2?.dfPerMatch || null,
+            modelAcesAvg: acesEstimate?.totalAcesAvg || null,
+            modelDfAvg: dfEstimate?.totalDfAvg || null,
+            pinnacleAcesLines: (mkt?.acesTotals?.length) || 0,
+            pinnacleDfLines: (mkt?.dfTotals?.length) || 0,
+            pinnacleGamesLines: (mkt?.gamesTotals?.length) || 0,
+            sampleAcesLines: (mkt?.acesTotals || []).slice(0, 3).map(l => ({ line: l.line, over: l.oddsOver, under: l.oddsUnder })),
+            sampleDfLines: (mkt?.dfTotals || []).slice(0, 3).map(l => ({ line: l.line, over: l.oddsOver, under: l.oddsUnder })),
+          });
+        }
+        sendJson(res, { sport, limit, matches: out });
+        return;
+      }
+      sendJson(res, { error: 'sport não suportado: use lol ou tennis' }, 400);
+    } catch (e) {
+      sendJson(res, { error: e.message }, 500);
+    }
+    return;
+  }
+
   if (p === '/odds') {
     const t1 = parsed.query.team1 || parsed.query.p1 || '';
     const t2 = parsed.query.team2 || parsed.query.p2 || '';
