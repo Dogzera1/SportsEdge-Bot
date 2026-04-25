@@ -4580,12 +4580,23 @@ const server = http.createServer(async (req, res) => {
     if (!matchupId) { sendJson(res, { error: 'matchupId ou team1/team2 obrigatórios' }, 400); return; }
     try {
       const wantSeparateAces = parsed.query.separate_aces === '1' || parsed.query.separate_aces === 'true';
-      const [handicaps, totals, moneyline, allTotalGroups] = await Promise.all([
-        pinnacle.getMatchupHandicaps(matchupId, period).catch(() => []),
+      // Tennis path (sem game= param) precisa sets/games separados pra evitar bug
+      // de pricing handicapGames com line do virtual SETS (Pinnacle pre-game cedo
+      // ou matches com cobertura parcial expõem só virtual Sets).
+      const isTennisPath = !parsed.query.game;
+      const [handicapsRaw, totals, moneyline, allTotalGroups] = await Promise.all([
+        isTennisPath
+          ? pinnacle.getMatchupHandicaps(matchupId, period, { groupByVirtual: true }).catch(() => ({ sets: [], games: [] }))
+          : pinnacle.getMatchupHandicaps(matchupId, period).catch(() => []),
         pinnacle.getMatchupTotals(matchupId, period).catch(() => []),
         pinnacle.getMatchupMoneylineByPeriod(matchupId, period).catch(() => null),
         wantSeparateAces ? pinnacle.getMatchupTotals(matchupId, period, { groupByMatchup: true }).catch(() => []) : Promise.resolve(null),
       ]);
+      // Tennis: handicaps fica = games (backward compat de scanner antigo); sets/games separados
+      // ficam expostos. Esports: array flat preserva shape histórico.
+      const handicaps = isTennisPath ? (handicapsRaw.games || []) : handicapsRaw;
+      const setsHandicaps = isTennisPath ? (handicapsRaw.sets || []) : undefined;
+      const gamesHandicaps = isTennisPath ? (handicapsRaw.games || []) : undefined;
 
       // Tennis 3-bucket detection via mediana + min lines:
       //   median 4-10 + ≥2 lines → double_faults (DF totals típicas 5-12)
@@ -4616,6 +4627,8 @@ const server = http.createServer(async (req, res) => {
       }
       sendJson(res, {
         matchupId: String(matchupId), period, moneyline, handicaps, totals,
+        ...(setsHandicaps !== undefined ? { setsHandicaps } : {}),
+        ...(gamesHandicaps !== undefined ? { gamesHandicaps } : {}),
         ...(acesTotals ? { acesTotals } : {}),
         ...(dfTotals ? { dfTotals } : {}),
         ...(gamesTotals ? { gamesTotals } : {}),
@@ -8363,25 +8376,30 @@ const server = http.createServer(async (req, res) => {
   // Marca market_tips_shadow como VOID quando EV>maxEv (bogus tips de scanner bug).
   // POST /void-market-tips-by-criteria — void tips com critérios combinados
   // ?sport=X (req) &days=14 &market=totals &minEv=N &maxPModel=N &minPModel=N
+  //   &maxAbsLine=2.5 (line filter, e.g. void all tennis handicapGames com abs(line)≤2.5
+  //                   = sets handicap mispricado pelo virtual bug pré-2026-04-25)
   // Útil pra cleanup pós-bug fix sem precisar de SQL direto.
   if (p === '/void-market-tips-by-criteria' && req.method === 'POST') {
     const sport = parsed.query.sport;
     if (!sport) { sendJson(res, { error: 'sport obrigatório' }, 400); return; }
     const days = parseInt(parsed.query.days || '14', 10);
+    if (!Number.isFinite(days) || days < 1 || days > 365) { sendJson(res, { error: 'days fora do range 1-365' }, 400); return; }
     const market = parsed.query.market || null;
     const minEv = parsed.query.minEv ? parseFloat(parsed.query.minEv) : null;
     const maxPModel = parsed.query.maxPModel ? parseFloat(parsed.query.maxPModel) : null;
     const minPModel = parsed.query.minPModel ? parseFloat(parsed.query.minPModel) : null;
+    const maxAbsLine = parsed.query.maxAbsLine ? parseFloat(parsed.query.maxAbsLine) : null;
     try {
-      const conds = ['sport = ?', 'result IS NULL', `created_at >= datetime('now', '-${days} days')`];
-      const params = [sport];
+      const conds = ['sport = ?', 'result IS NULL', "created_at >= datetime('now', ?)"];
+      const params = [sport, `-${days} days`];
       if (market) { conds.push('market = ?'); params.push(market); }
       if (minEv != null) { conds.push('ev_pct >= ?'); params.push(minEv); }
       if (maxPModel != null) { conds.push('p_model > ?'); params.push(maxPModel); }
       if (minPModel != null) { conds.push('p_model < ?'); params.push(minPModel); }
+      if (maxAbsLine != null) { conds.push('ABS(line) <= ?'); params.push(maxAbsLine); }
       const sql = `UPDATE market_tips_shadow SET result='void', settled_at=datetime('now'), profit_units=0 WHERE ${conds.join(' AND ')}`;
       const r = db.prepare(sql).run(...params);
-      sendJson(res, { ok: true, voided: r.changes, sport, criteria: { days, market, minEv, maxPModel, minPModel } });
+      sendJson(res, { ok: true, voided: r.changes, sport, criteria: { days, market, minEv, maxPModel, minPModel, maxAbsLine } });
     } catch (e) { sendJson(res, { error: e.message }, 500); }
     return;
   }
