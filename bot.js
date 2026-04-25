@@ -1870,22 +1870,27 @@ async function runAutoAnalysis() {
           const _lolTier = _leagueTier('lol', match.league || match.leagueSlug || '');
           const isT1betCheck = norm(tipTeam).includes(norm(match.team1)) || norm(match.team1).includes(norm(tipTeam));
           const modelPPickPre = (result.modelP1 > 0) ? (isT1betCheck ? result.modelP1 : result.modelP2) : null;
+          // EV mínimo per-tier (LCK/LPL/LEC/LCS = tier 1, PCS/LJL = tier 2, LFL/Prime = tier 3)
+          // Defaults baseados em audit: tier 1 modelo confiável → 3%, tier 2 → 5%, tier 3 → 8%
+          const _evMinByTier = {
+            1: parseFloat(process.env.LOL_TIER1_EV_MIN || '3') || 3,
+            2: parseFloat(process.env.LOL_TIER2_EV_MIN || '5') || 5,
+            3: parseFloat(process.env.LOL_TIER3_EV_MIN || '8') || 8,
+          };
+          const _preBonusLolLive = require('./lib/pre-match-gate').preMatchEvBonus('lol', isLiveLoL);
+          const _evReqLolLive = (_evMinByTier[_lolTier] || 5) + _preBonusLolLive;
+          const tipEVnum = parseFloat(tipEV) || 0;
+          if (tipEVnum < _evReqLolLive) {
+            log('INFO', 'AUTO-LOL', `Tier ${_lolTier} ${match.league}: EV ${tipEVnum.toFixed(1)}% < ${_evReqLolLive}% min${_preBonusLolLive > 0 ? ` PRE+${_preBonusLolLive}` : ''} — tip rejeitada`);
+            logRejection('lol', `${match.team1} vs ${match.team2}`, `tier${_lolTier}_ev_low`, { tier: _lolTier, ev: tipEVnum, min: _evReqLolLive, league: match.league, preBonus: _preBonusLolLive });
+            analyzedMatches.set(matchKey, { ts: now, tipSent: false, noEdge: true });
+            continue;
+          }
           if (_lolTier >= 2) {
             // Cap ALTA→MÉDIA se p > 0.85 (overconfidence em tier não-1)
             if (tipConf === CONF.ALTA && modelPPickPre != null && modelPPickPre > 0.85) {
               log('INFO', 'AUTO-LOL', `Tier ${_lolTier} ${match.league}: p_modelo ${(modelPPickPre*100).toFixed(1)}% > 85% → ALTA rebaixado pra MÉDIA (overconfidence guard)`);
               tipConf = CONF.MEDIA;
-            }
-            // EV mínimo maior pra tier 2/3: exige ≥7% vs 2-3% default
-            const tierEvMin = parseFloat(process.env.LOL_TIER2_EV_MIN || '5') || 5;
-            const _preBonusLolLive = require('./lib/pre-match-gate').preMatchEvBonus('lol', isLiveLoL);
-            const _evReqLolLive = tierEvMin + _preBonusLolLive;
-            const tipEVnum = parseFloat(tipEV) || 0;
-            if (tipEVnum < _evReqLolLive) {
-              log('INFO', 'AUTO-LOL', `Tier ${_lolTier} ${match.league}: EV ${tipEVnum.toFixed(1)}% < ${_evReqLolLive}% min${_preBonusLolLive > 0 ? ` PRE+${_preBonusLolLive}` : ''} — tip rejeitada`);
-              logRejection('lol', `${match.team1} vs ${match.team2}`, 'tier2_ev_low', { tier: _lolTier, ev: tipEVnum, min: _evReqLolLive, league: match.league, preBonus: _preBonusLolLive });
-              analyzedMatches.set(matchKey, { ts: now, tipSent: false, noEdge: true });
-              continue;
             }
             // BAIXA bloqueada em tier 2/3 — variance alta + edge questionável
             if (tipConf === CONF.BAIXA) {
@@ -2251,26 +2256,28 @@ async function runAutoAnalysis() {
               } catch (e) { reportBug('LINE-SHOP-UP', e, { team1: match.team1, team2: match.team2 }); }
             }
 
-            // Tier 2/3 LoL safeguards (upcoming): degrade ALTA→MÉDIA se p>0.85,
-            // exige EV ≥ 7%, bloqueia BAIXA (learning G2 NORD bleed).
+            // EV mínimo per-tier upcoming (LCK/LPL/LEC = tier 1, etc)
             const _lolTierUp = _leagueTier('lol', match.league || match.leagueSlug || '');
+            const _isT1bet = norm(tipTeam).includes(norm(match.team1)) || norm(match.team1).includes(norm(tipTeam));
+            const _modelPPickUp = (result.modelP1 > 0) ? (_isT1bet ? result.modelP1 : result.modelP2) : null;
+            const _evMinByTierUp = {
+              1: parseFloat(process.env.LOL_TIER1_EV_MIN || '3') || 3,
+              2: parseFloat(process.env.LOL_TIER2_EV_MIN || '5') || 5,
+              3: parseFloat(process.env.LOL_TIER3_EV_MIN || '8') || 8,
+            };
+            const _preBonusLolUp = require('./lib/pre-match-gate').preMatchEvBonus('lol', false);
+            const _evReqLolUp = (_evMinByTierUp[_lolTierUp] || 5) + _preBonusLolUp;
+            const _evNumUp = parseFloat(String(tipEV).replace(/[%+]/g, '')) || 0;
+            if (_evNumUp < _evReqLolUp) {
+              log('INFO', 'AUTO', `Tier ${_lolTierUp} ${match.league}: EV ${_evNumUp}% < ${_evReqLolUp}%${_preBonusLolUp > 0 ? ` PRE+${_preBonusLolUp}` : ''} — rejeitada`);
+              logRejection('lol', `${match.team1} vs ${match.team2}`, `tier${_lolTierUp}_ev_low_upcoming`, { tier: _lolTierUp, ev: _evNumUp, league: match.league, preBonus: _preBonusLolUp });
+              analyzedMatches.set(matchKey, { ts: now, tipSent: false, noEdge: true });
+              await new Promise(r => setTimeout(r, 3000)); continue;
+            }
             if (_lolTierUp >= 2) {
-              const _isT1bet = norm(tipTeam).includes(norm(match.team1)) || norm(match.team1).includes(norm(tipTeam));
-              const _modelPPickUp = (result.modelP1 > 0) ? (_isT1bet ? result.modelP1 : result.modelP2) : null;
               if (tipConf === CONF.ALTA && _modelPPickUp != null && _modelPPickUp > 0.85) {
                 log('INFO', 'AUTO', `Tier ${_lolTierUp} ${match.league}: p=${(_modelPPickUp*100).toFixed(1)}% > 85% → ALTA→MÉDIA (overconfidence)`);
                 tipConf = CONF.MEDIA;
-              }
-              const _tier2EvMin = parseFloat(process.env.LOL_TIER2_EV_MIN || '5') || 5;
-              // Upcoming = sempre PRE-match (não live)
-              const _preBonusLolUp = require('./lib/pre-match-gate').preMatchEvBonus('lol', false);
-              const _evReqLolUp = _tier2EvMin + _preBonusLolUp;
-              const _evNumUp = parseFloat(String(tipEV).replace(/[%+]/g, '')) || 0;
-              if (_evNumUp < _evReqLolUp) {
-                log('INFO', 'AUTO', `Tier ${_lolTierUp} ${match.league}: EV ${_evNumUp}% < ${_evReqLolUp}%${_preBonusLolUp > 0 ? ` PRE+${_preBonusLolUp}` : ''} — rejeitada`);
-                logRejection('lol', `${match.team1} vs ${match.team2}`, 'tier2_ev_low_upcoming', { tier: _lolTierUp, ev: _evNumUp, league: match.league, preBonus: _preBonusLolUp });
-                analyzedMatches.set(matchKey, { ts: now, tipSent: false, noEdge: true });
-                await new Promise(r => setTimeout(r, 3000)); continue;
               }
               if (tipConf === CONF.BAIXA) {
                 log('INFO', 'AUTO', `Tier ${_lolTierUp} ${match.league}: CONF=BAIXA bloqueada (variance alta)`);
@@ -12244,6 +12251,16 @@ async function pollTennis(runOnce = false) {
         // Adiciona bonus per-league se histórico CLV ruim (Tier 7).
         const _tennisLeagueBonus = getLeagueEdgeBonus('tennis', match.league || match.tournament || '');
         const _tennisTopTier = isGrandSlam || isMasters;
+
+        // Kill switch: TENNIS_NON_SLAM_DISABLED=true bloqueia tudo que não é Slam/Masters.
+        // Justificativa: Brier non-top é 0.23+ (próximo de chute aleatório). Cortar tail
+        // negativa pra rastreio de ROI puro. Reativar quando modelo non-top calibrar.
+        if (!_tennisTopTier && /^(1|true|yes)$/i.test(String(process.env.TENNIS_NON_SLAM_DISABLED || ''))) {
+          log('INFO', 'AUTO-TENNIS', `Skip non-Slam/non-Masters: ${match.team1} vs ${match.team2} [${match.league}] — TENNIS_NON_SLAM_DISABLED=true`);
+          logRejection('tennis', `${match.team1} vs ${match.team2}`, 'non_slam_disabled', { league: match.league });
+          continue;
+        }
+
         const _tennisBase = _tennisTopTier
           ? (process.env.TENNIS_MIN_EDGE_TOP ? parseFloat(process.env.TENNIS_MIN_EDGE_TOP) : 2.5)
           : (process.env.TENNIS_MIN_EDGE ? parseFloat(process.env.TENNIS_MIN_EDGE) : 4.0);
