@@ -203,15 +203,21 @@ function rowToRecord(cells, header, colIdx, cols) {
   return rec;
 }
 
-// ── Main ──────────────────────────────────────────────────────────────────
+// ── Sync (callable) ───────────────────────────────────────────────────────
 
-async function main() {
-  const years = parseYears(process.argv.slice(2));
-  console.log(`Sync Oracle's Elixir — years: ${years.join(', ')}`);
-
-  const db = new Database(DB_PATH);
-  db.pragma('journal_mode = WAL');
-  applyMigrations(db);
+/**
+ * Sync Oracle's Elixir CSV(s) into provided DB. Idempotent (UPSERT por gameid+side
+ * pra games, gameid+participantid pra players).
+ *
+ * @param {object} args
+ * @param {Database} args.db — instância better-sqlite3 (caller owns lifecycle)
+ * @param {Array<number>} args.years — anos a sincronizar (ex: [2025, 2026])
+ * @param {function} [args.logger] — fn(level, msg) p/ output (default console.log)
+ * @returns {Promise<{ years: object[], totalGames, totalPlayers, ms }>}
+ */
+async function syncOracleselixirYears({ db, years, logger = null }) {
+  const log = logger || ((lvl, msg) => console.log(`[${lvl}]`, msg));
+  const t0 = Date.now();
 
   const insert = db.prepare(`
     INSERT INTO oracleselixir_games (${PERSIST_COLS.join(', ')}, ingested_at)
@@ -230,9 +236,10 @@ async function main() {
   `);
 
   const PLAYER_POSITIONS = new Set(['top', 'jng', 'mid', 'bot', 'sup']);
+  const yearsResults = [];
 
   for (const year of years) {
-    console.log(`\n── ${year} ──`);
+    log('INFO', `── ${year} ──`);
     const url = URL_TEMPLATE(year);
     let header = null, colIdx = new Map();
     let seen = 0, skipped = 0, teamRows = 0, playerRows = 0;
@@ -288,15 +295,36 @@ async function main() {
     flushTeam();
     flushPlayer();
 
-    console.log(`  rows seen: ${seen} | team: ${teamRows}→${insertedTeam} upserted | player: ${playerRows}→${insertedPlayer} upserted`);
+    log('INFO', `  rows seen: ${seen} | team: ${teamRows}→${insertedTeam} upserted | player: ${playerRows}→${insertedPlayer} upserted`);
 
     const gc = db.prepare('SELECT COUNT(*) AS n FROM oracleselixir_games WHERE year = ?').get(year);
     const pc = db.prepare('SELECT COUNT(*) AS n FROM oracleselixir_players WHERE year = ?').get(year);
-    console.log(`  DB count year ${year}: games=${gc.n} players=${pc.n}`);
+    log('INFO', `  DB count year ${year}: games=${gc.n} players=${pc.n}`);
+    yearsResults.push({ year, gamesRows: gc.n, playerRows: pc.n, insertedTeam, insertedPlayer });
   }
 
-  db.close();
-  console.log('\nDone.');
+  return {
+    years: yearsResults,
+    totalGames: yearsResults.reduce((s, r) => s + (r.insertedTeam || 0), 0),
+    totalPlayers: yearsResults.reduce((s, r) => s + (r.insertedPlayer || 0), 0),
+    ms: Date.now() - t0,
+  };
 }
 
-main().catch(e => { console.error('ERR:', e.message); process.exit(1); });
+// ── CLI wrapper ───────────────────────────────────────────────────────────
+async function main() {
+  const years = parseYears(process.argv.slice(2));
+  console.log(`Sync Oracle's Elixir — years: ${years.join(', ')}`);
+  const db = new Database(DB_PATH);
+  db.pragma('journal_mode = WAL');
+  applyMigrations(db);
+  const r = await syncOracleselixirYears({ db, years });
+  db.close();
+  console.log(`\nDone. ${r.totalGames} games + ${r.totalPlayers} players upserted em ${r.ms}ms.`);
+}
+
+module.exports = { syncOracleselixirYears };
+
+if (require.main === module) {
+  main().catch(e => { console.error('ERR:', e.message); process.exit(1); });
+}

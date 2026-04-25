@@ -7502,6 +7502,50 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // POST /admin/sync-oe-players?year=2026 (ou ?years=2025,2026)
+  // Roda Oracle's Elixir CSV ingest em background. Necessário pra LoL kills
+  // scanner ter rosters (player KDA per-team últimos 60d).
+  if (p === '/admin/sync-oe-players' && (req.method === 'POST' || req.method === 'GET')) {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const yearParam = parsed.query.year || parsed.query.years || String(new Date().getFullYear());
+      const years = String(yearParam).split(',').map(s => parseInt(s.trim(), 10)).filter(y => Number.isFinite(y) && y >= 2014 && y <= 2030);
+      if (!years.length) { sendJson(res, { ok: false, error: 'invalid years param' }, 400); return; }
+      // Pre-flight: count atual antes do sync
+      const beforeP = db.prepare(`SELECT COUNT(*) AS n FROM oracleselixir_players WHERE year IN (${years.map(() => '?').join(',')})`).get(...years).n;
+      const beforeG = db.prepare(`SELECT COUNT(*) AS n FROM oracleselixir_games WHERE year IN (${years.map(() => '?').join(',')})`).get(...years).n;
+      // Responde imediato — sync roda em bg
+      sendJson(res, {
+        ok: true, message: 'Sync iniciado em background (CSV stream pode levar 2-10min/ano)',
+        years, beforePlayers: beforeP, beforeGames: beforeG,
+      });
+      // Background sync
+      setImmediate(async () => {
+        try {
+          const { syncOracleselixirYears } = require('./scripts/sync-oracleselixir');
+          const r = await syncOracleselixirYears({ db, years, logger: (lvl, msg) => log(lvl, 'OE-SYNC', msg) });
+          log('INFO', 'OE-SYNC', `Done: +${r.totalGames} games, +${r.totalPlayers} players em ${r.ms}ms`);
+        } catch (e) {
+          log('ERROR', 'OE-SYNC', `Failed: ${e.message}`);
+        }
+      });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
+  // GET /admin/oe-status — counts per year
+  if (p === '/admin/oe-status') {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const games = db.prepare(`SELECT year, COUNT(*) AS n FROM oracleselixir_games GROUP BY year ORDER BY year DESC`).all();
+      const players = db.prepare(`SELECT year, COUNT(*) AS n FROM oracleselixir_players GROUP BY year ORDER BY year DESC`).all();
+      const playersTotal = players.reduce((s, r) => s + r.n, 0);
+      const gamesTotal = games.reduce((s, r) => s + r.n, 0);
+      sendJson(res, { ok: true, gamesTotal, playersTotal, games, players });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   // GET /admin/super-odd-events?hours=24&sport=lol
   if (p === '/admin/super-odd-events') {
     if (!requireAdmin(req, res)) return;
