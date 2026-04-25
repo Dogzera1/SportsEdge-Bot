@@ -16681,9 +16681,11 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   async function runStaleLineCron() {
     if (/^(1|true|yes)$/i.test(String(process.env.STALE_LINE_DISABLED || ''))) return;
     try {
-      const { checkStaleLines, shouldDm, persistEvent } = require('./lib/stale-line-detector');
+      const slDet = require('./lib/stale-line-detector');
+      const { checkStaleLines, shouldDm, persistEvent } = slDet;
       const sod = require('./lib/super-odd-detector');
       const arb = require('./lib/arb-detector');
+      const vel = require('./lib/velocity-tracker');
       const http = require('http');
       const port = process.env.PORT || 3000;
       const fetchJson = (path) => new Promise((res, rej) => {
@@ -16697,6 +16699,7 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
       let alerts = 0;
       let superOdds = 0;
       let arbs = 0;
+      let velocities = 0;
       // Football: _allOdds em match.odds com 21+ books
       try {
         const fb = await fetchJson('/football-matches');
@@ -16756,6 +16759,25 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
               }
             }
             const evt = checkStaleLines({ sport: 'football', team1: m.team1, team2: m.team2, side, pinOdd, brBooks });
+            // Velocity check (sharp money entrando no Pinnacle)
+            const velEvt = vel.checkVelocity(slDet._ringBuf, { sport: 'football', team1: m.team1, team2: m.team2, side });
+            if (velEvt && vel.shouldDm(velEvt.sport, velEvt.matchKey, velEvt.side)) {
+              velocities++;
+              if (ADMIN_IDS.size) {
+                const sideLabel = side === 'h' ? velEvt.matchLabel.split(' vs ')[0] : side === 'a' ? velEvt.matchLabel.split(' vs ')[1] : 'Empate';
+                const arrow = velEvt.direction === 'down' ? '📉' : '📈';
+                const advice = velEvt.direction === 'down'
+                  ? `Sharp money entrando neste lado. *Aposte ${sideLabel}* em qualquer book ANTES do consenso chegar.`
+                  : `Sharp money saindo deste lado (virou underdog). Considere fade ou aguardar.`;
+                const msg = `⚡ *SHARP MOVE — FOOTBALL*\n\n` +
+                  `*${velEvt.matchLabel}* (${sideLabel})\n\n` +
+                  `Pinnacle: ${velEvt.oldOdd} → ${velEvt.newOdd} em ~${velEvt.windowMin}min\n` +
+                  `Velocity: ${arrow} *${velEvt.velocityPct >= 0 ? '+' : ''}${velEvt.velocityPct}%*\n\n` +
+                  `${advice}`;
+                const tk = Object.values(SPORTS).find(S => S?.enabled && S?.token)?.token;
+                if (tk) for (const adminId of ADMIN_IDS) sendDM(tk, adminId, msg).catch(() => {});
+              }
+            }
             if (evt && shouldDm(evt.sport, evt.matchKey)) {
               persistEvent(db, evt);
               alerts++;
@@ -16821,6 +16843,11 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
               superOdds++;
             }
             const evt = checkStaleLines({ sport: 'lol', team1: m.team1, team2: m.team2, side, pinOdd, brBooks });
+            // Velocity LoL (silent — só count, accumula data)
+            const velEvtLol = vel.checkVelocity(slDet._ringBuf, { sport: 'lol', team1: m.team1, team2: m.team2, side });
+            if (velEvtLol && vel.shouldDm(velEvtLol.sport, velEvtLol.matchKey, velEvtLol.side)) {
+              velocities++;
+            }
             if (evt && shouldDm(evt.sport, evt.matchKey)) {
               persistEvent(db, evt);
               alerts++;
@@ -16829,7 +16856,7 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
         }
       } catch (_) {}
 
-      if (alerts > 0 || superOdds > 0 || arbs > 0) log('INFO', 'STALE-LINE', `${alerts} stale, ${superOdds} super-odd, ${arbs} arb`);
+      if (alerts > 0 || superOdds > 0 || arbs > 0 || velocities > 0) log('INFO', 'STALE-LINE', `${alerts} stale, ${superOdds} super-odd, ${arbs} arb, ${velocities} velocity`);
     } catch (e) { log('ERROR', 'STALE-LINE', e.message); }
   }
   setInterval(() => runStaleLineCron(), 5 * 60 * 1000); // 5min
