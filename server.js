@@ -7388,6 +7388,115 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // GET /pending-tips-audit?days=30 — diagnostica tips pending com idade + razão.
+  // Reason: future_match (jogo no futuro), recent_complete (<24h), stale (>24h),
+  // match_id_missing, no_match_results, name_mismatch.
+  if (p === '/pending-tips-audit') {
+    try {
+      const days = Math.min(180, Math.max(1, parseInt(parsed.query.days || '30', 10) || 30));
+      const sport = parsed.query.sport || null;
+      const conds = [`(result IS NULL OR result = '')`, `sent_at >= datetime('now', '-${days} days')`];
+      const params = [];
+      if (sport) { conds.push('sport = ?'); params.push(sport); }
+      const rows = db.prepare(`
+        SELECT id, sport, match_id, participant1, participant2, tip_participant,
+               odds, ev, sent_at, is_shadow, market_type, event_name
+        FROM tips
+        WHERE ${conds.join(' AND ')}
+        ORDER BY sent_at DESC
+      `).all(...params);
+      const now = Date.now();
+      const enrichedTips = rows.map(t => {
+        const sentMs = t.sent_at ? Date.parse(t.sent_at.replace(' ', 'T') + 'Z') : NaN;
+        const ageHours = Number.isFinite(sentMs) ? (now - sentMs) / 3600000 : null;
+        let reason = 'unknown';
+        let result_in_db = null;
+        if (!t.match_id) {
+          reason = 'match_id_missing';
+        } else {
+          // Verifica se match_results tem o jogo
+          try {
+            const mr = db.prepare(`
+              SELECT winner, score, resolved_at FROM match_results
+              WHERE id = ? OR match_id = ?
+              LIMIT 1
+            `).get(t.match_id, t.match_id);
+            if (mr) {
+              result_in_db = { winner: mr.winner, score: mr.score };
+              reason = 'has_match_result_but_not_settled';
+            } else if (ageHours != null && ageHours < 0) {
+              reason = 'future_match';
+            } else if (ageHours != null && ageHours < 24) {
+              reason = 'recent_complete';
+            } else if (ageHours != null && ageHours >= 24 && ageHours < 168) {
+              reason = 'no_match_results_1_7d';
+            } else {
+              reason = 'no_match_results_old';
+            }
+          } catch (_) {}
+        }
+        return { ...t, ageHours: ageHours != null ? +ageHours.toFixed(1) : null, reason, result_in_db };
+      });
+      // Aggregations
+      const bySport = {};
+      const byReason = {};
+      for (const t of enrichedTips) {
+        bySport[t.sport] = (bySport[t.sport] || 0) + 1;
+        byReason[t.reason] = (byReason[t.reason] || 0) + 1;
+      }
+      sendJson(res, {
+        total: enrichedTips.length,
+        days, sport: sport || 'all',
+        bySport, byReason,
+        tips: enrichedTips,
+      });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
+  // GET /roi-timeline?days=30&sport=X — agrega tips settled por dia
+  if (p === '/roi-timeline') {
+    try {
+      const days = Math.min(180, Math.max(7, parseInt(parsed.query.days || '30', 10) || 30));
+      const sport = parsed.query.sport || null;
+      const conds = [`result IN ('win','loss')`, `sent_at >= datetime('now', '-${days} days')`];
+      const params = [];
+      if (sport) { conds.push('sport = ?'); params.push(sport); }
+      const rows = db.prepare(`
+        SELECT DATE(sent_at) AS day,
+               COUNT(*) AS n,
+               SUM(CASE WHEN result = 'win' THEN 1 ELSE 0 END) AS wins,
+               SUM(COALESCE(stake_reais, 0)) AS staked,
+               SUM(COALESCE(profit_reais, 0)) AS profit,
+               AVG(CASE WHEN clv_pct IS NOT NULL THEN clv_pct END) AS avg_clv
+        FROM tips
+        WHERE ${conds.join(' AND ')}
+        GROUP BY DATE(sent_at)
+        ORDER BY day ASC
+      `).all(...params);
+      // Cumulative profit/ROI
+      let cumProfit = 0, cumStaked = 0;
+      const series = rows.map(r => {
+        cumProfit += (r.profit || 0);
+        cumStaked += (r.staked || 0);
+        return {
+          day: r.day,
+          n: r.n,
+          wins: r.wins,
+          hitRate: r.n > 0 ? +(r.wins / r.n * 100).toFixed(1) : null,
+          staked: +(r.staked || 0).toFixed(2),
+          profit: +(r.profit || 0).toFixed(2),
+          dailyRoi: r.staked > 0 ? +(r.profit / r.staked * 100).toFixed(2) : null,
+          cumProfit: +cumProfit.toFixed(2),
+          cumRoi: cumStaked > 0 ? +(cumProfit / cumStaked * 100).toFixed(2) : null,
+          avgClv: r.avg_clv != null ? +r.avg_clv.toFixed(2) : null,
+        };
+      });
+      sendJson(res, { sport: sport || 'all', days, series });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
   // CLV / ROI per-league (agrupa tips settled por sport+event_name).
   // Flagga ligas com leak (CLV neg persistente ou ROI neg com n≥5).
   // GET /clv-by-league?sport=lol&days=30&min=5
