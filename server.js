@@ -16468,9 +16468,9 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
       try {
         if (process.env.SUPABASE_URL && process.env.SUPABASE_ANON_KEY && process.env.AGGREGATOR_DISABLED !== 'true') {
           const aggClient = require('./lib/odds-aggregator-client');
-          const r = await aggClient.enrichMatches(matches);
-          if (r?.enriched > 0) {
-            log('INFO', 'AGGREGATOR', `BR odds enriched ${r.enriched}/${matches.length} matches (${r.totalJogos} jogos disponíveis no agregador)`);
+          const r = await aggClient.enrichMatches(matches, { addMissing: true });
+          if (r && (r.enriched > 0 || r.injected > 0 || r.enrichedOu > 0)) {
+            log('INFO', 'AGGREGATOR', `BR odds: enriched=${r.enriched} ou25=${r.enrichedOu} injected=${r.injected} (total ${r.totalJogos} jogos no agregador)`);
           }
         }
       } catch (e) { log('WARN', 'AGGREGATOR', `enrichMatches err: ${e.message}`); }
