@@ -6985,6 +6985,30 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
       await refreshOpenTips();
       await send(token, chatId, '✅ Updates enviados. Dashboard refletirá `current_odds/current_ev`.');
     } catch(e) { await send(token, chatId, `❌ ${e.message}`); }
+  } else if (cmd === '/sync-oe' || cmd === '/oe-sync') {
+    if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
+    try {
+      const before = db.prepare(`SELECT COUNT(*) AS p FROM oracleselixir_players`).get().p;
+      const beforeG = db.prepare(`SELECT COUNT(*) AS g FROM oracleselixir_games`).get().g;
+      await send(token, chatId, `⏳ OE sync iniciado (anos 2025+2026, CSV streamado)...\n\nAntes: ${beforeG} games, ${before} players.\n\n_Pode levar 5-10min total — vai te avisar quando terminar._`);
+      const { syncOracleselixirYears } = require('./scripts/sync-oracleselixir');
+      // Roda em background (não bloqueia o handler)
+      syncOracleselixirYears({ db, years: [2025, 2026], logger: (lvl, msg) => log(lvl, 'OE-SYNC', msg) })
+        .then(r => {
+          const after = db.prepare(`SELECT COUNT(*) AS p FROM oracleselixir_players`).get().p;
+          const afterG = db.prepare(`SELECT COUNT(*) AS g FROM oracleselixir_games`).get().g;
+          send(token, chatId,
+            `✅ *OE sync concluído*\n\n` +
+            `Games: ${beforeG} → ${afterG} (+${afterG - beforeG})\n` +
+            `Players: ${before} → ${after} (+${after - before})\n` +
+            `Tempo: ${Math.round(r.ms / 1000)}s\n\n` +
+            `_LoL kills scanner deve produzir tips no próximo ciclo._`
+          ).catch(() => {});
+        })
+        .catch(e => {
+          send(token, chatId, `❌ OE sync falhou: ${e.message}`).catch(() => {});
+        });
+    } catch (e) { await send(token, chatId, `❌ ${e.message}`); }
   } else if (cmd === '/reanalise-void' || cmd === '/reanalyze-void') {
     if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
     const cmdParts = command.trim().split(/\s+/);
