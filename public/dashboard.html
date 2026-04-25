@@ -2460,7 +2460,7 @@ async function loadMlShadowTipsList(sportList) {
   container.innerHTML = html;
 }
 
-let marketTipsState = { tips: [], page: 0, perPage: 20, sport: null, breakdown: null, includeLive: true };
+let marketTipsState = { tips: [], page: 0, perPage: 20, sport: null, breakdown: null, includeLive: true, viewMode: 'all' };
 
 async function loadMarketTipsShadow() {
   const sp = currentSport === '__overall__' ? '' : '&sport=' + encodeURIComponent(currentSport);
@@ -2732,15 +2732,53 @@ function renderMarketTipsBreakdown(bd) {
   return html;
 }
 
+function _statsForTipsSubset(tips) {
+  const settled = tips.filter(t => t.result === 'win' || t.result === 'loss');
+  const wins = settled.filter(t => t.result === 'win').length;
+  const staked = settled.reduce((s, t) => s + (Number(t.stake_units) || 1), 0);
+  const profit = tips.reduce((s, t) => s + (Number(t.profit_units) || 0), 0);
+  const clvRows = tips.filter(t => t.clv_pct != null);
+  const avgClv = clvRows.length ? clvRows.reduce((s, t) => s + Number(t.clv_pct), 0) / clvRows.length : null;
+  return {
+    n: tips.length,
+    settled: settled.length,
+    pending: tips.filter(t => !t.result).length,
+    wins, losses: settled.length - wins,
+    hitRate: settled.length ? (wins / settled.length * 100) : null,
+    roi: staked > 0 ? (profit / staked * 100) : null,
+    avgClv,
+  };
+}
+
 function renderMarketTipsPage() {
-  const { tips, page, perPage } = marketTipsState;
+  const { tips, page, perPage, viewMode } = marketTipsState;
   const el = document.getElementById('marketTipsBody');
   if (!tips.length) return;
-  const totalPages = Math.max(1, Math.ceil(tips.length / perPage));
+
+  // Filter por live/pre/all
+  const preTips = tips.filter(t => !t.is_live);
+  const liveTips = tips.filter(t => t.is_live);
+  const filtered = viewMode === 'live' ? liveTips : viewMode === 'pre' ? preTips : tips;
+
+  const totalPages = Math.max(1, Math.ceil(filtered.length / perPage));
   const pageIdx = Math.min(page, totalPages - 1);
   const start = pageIdx * perPage;
-  const end = Math.min(start + perPage, tips.length);
-  const pageTips = tips.slice(start, end);
+  const end = Math.min(start + perPage, filtered.length);
+  const pageTips = filtered.slice(start, end);
+
+  // Stats por segmento
+  const allStats = _statsForTipsSubset(tips);
+  const preStats = _statsForTipsSubset(preTips);
+  const liveStats = _statsForTipsSubset(liveTips);
+  const fmtPct = (v, d=1) => v == null ? '—' : (v >= 0 ? '+' : '') + Number(v).toFixed(d) + '%';
+  const tabBtn = (label, mode, stats) => {
+    const isActive = viewMode === mode;
+    const styleActive = isActive ? 'background:var(--accent,#3b82f6);color:white;' : 'background:var(--bg-secondary,#1a1a1a);';
+    const roiText = stats.roi != null ? ` (ROI ${fmtPct(stats.roi)})` : '';
+    return `<button onclick="setMarketTipsView('${mode}')" style="${styleActive}border:1px solid var(--border,#2a2a2a);padding:6px 14px;border-radius:6px;cursor:pointer;font-size:0.85em">
+      ${label} <b>${stats.n}</b>${roiText}
+    </button>`;
+  };
 
   let html = `
     <div class="card-meta" style="margin-bottom:8px">
@@ -2748,10 +2786,24 @@ function renderMarketTipsPage() {
       Ativar DM admin: env <code>&lt;SPORT&gt;_MARKET_TIPS_ENABLED=true</code>.
     </div>
     ${renderMarketTipsBreakdown(marketTipsState.breakdown)}
+    <div style="display:flex;gap:8px;margin:10px 0 6px;flex-wrap:wrap">
+      ${tabBtn('📊 Todas', 'all', allStats)}
+      ${tabBtn('📅 Pre-match', 'pre', preStats)}
+      ${tabBtn('🔴 Live', 'live', liveStats)}
+    </div>
+    <div class="card-meta" style="margin-bottom:8px;font-size:0.85em">
+      ${viewMode === 'live' ? '🔴' : viewMode === 'pre' ? '📅' : '📊'}
+      Mostrando: <b>${filtered.length}</b> tips ·
+      ${(filtered === tips ? allStats : viewMode === 'live' ? liveStats : preStats).settled} settled ·
+      ${(filtered === tips ? allStats : viewMode === 'live' ? liveStats : preStats).pending} pendentes ·
+      Hit ${fmtPct((filtered === tips ? allStats : viewMode === 'live' ? liveStats : preStats).hitRate)} ·
+      ROI ${fmtPct((filtered === tips ? allStats : viewMode === 'live' ? liveStats : preStats).roi)} ·
+      CLV ${fmtPct((filtered === tips ? allStats : viewMode === 'live' ? liveStats : preStats).avgClv)}
+    </div>
     <table class="tips">
       <thead>
         <tr>
-          <th>Data</th><th>Sport</th><th>Match</th><th>Mercado</th>
+          <th>Data</th><th>Sport</th><th>Live</th><th>Match</th><th>Mercado</th>
           <th style="text-align:right">Odd</th>
           <th style="text-align:right">pMod</th>
           <th style="text-align:right">EV</th>
@@ -2781,6 +2833,7 @@ function renderMarketTipsPage() {
       <tr>
         <td>${d}</td>
         <td>${t.sport}</td>
+        <td style="text-align:center">${t.is_live ? '<span style="color:var(--danger,#ef4444)">🔴</span>' : ''}</td>
         <td>${t.team1} vs ${t.team2}<br><span class="tip-meta">${t.league || ''}</span></td>
         <td>${t.label || (t.market + ' ' + (t.line || '') + ' ' + t.side)}</td>
         <td style="text-align:right">${t.odd?.toFixed(2) || '—'}</td>
@@ -2796,7 +2849,7 @@ function renderMarketTipsPage() {
   // Paginação
   html += `
     <div class="pagination-bar" style="display:flex;align-items:center;justify-content:space-between;margin-top:12px;padding:8px 0;border-top:1px solid var(--border,#2a2a2a)">
-      <div class="card-meta">Mostrando ${start + 1}–${end} de ${tips.length}</div>
+      <div class="card-meta">Mostrando ${filtered.length ? start + 1 : 0}–${end} de ${filtered.length}</div>
       <div style="display:flex;gap:6px;align-items:center">
         <button onclick="marketTipsGoPage(0)" ${pageIdx === 0 ? 'disabled' : ''} style="padding:4px 10px">«</button>
         <button onclick="marketTipsGoPage(${pageIdx - 1})" ${pageIdx === 0 ? 'disabled' : ''} style="padding:4px 10px">‹ anterior</button>
@@ -2806,6 +2859,12 @@ function renderMarketTipsPage() {
       </div>
     </div>`;
   el.innerHTML = html;
+}
+
+function setMarketTipsView(mode) {
+  marketTipsState.viewMode = mode;
+  marketTipsState.page = 0;
+  renderMarketTipsPage();
 }
 
 function marketTipsGoPage(newPage) {
