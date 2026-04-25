@@ -2585,8 +2585,13 @@ function renderMarketTipsPage() {
     const clvClass = t.clv_pct != null ? (t.clv_pct >= 0 ? 'positive' : 'negative') : '';
     const pMod = t.p_model != null ? (t.p_model * 100).toFixed(1) + '%' : '—';
     const evStr = t.ev_pct != null ? (t.ev_pct >= 0 ? '+' : '') + t.ev_pct.toFixed(1) + '%' : '—';
-    const stakeUnits = Number(t.stake_units);
-    const stakeStr = Number.isFinite(stakeUnits) && stakeUnits > 0
+    const stakeUnitsRaw = Number(t.stake_units);
+    // Arredonda pra step 0.25u (granularidade comum em betting). Tips legadas com
+    // valores arbitrários (ex 0.731234) ficam visíveis como 0.75u.
+    const stakeUnits = Number.isFinite(stakeUnitsRaw) && stakeUnitsRaw > 0
+      ? Math.max(0.5, Math.round(stakeUnitsRaw / 0.25) * 0.25)
+      : null;
+    const stakeStr = stakeUnits != null
       ? stakeUnits.toFixed(2).replace(/\.?0+$/, '') + 'u'
       : '—';
     html += `
