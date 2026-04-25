@@ -1432,6 +1432,34 @@ const migrations = [
       `);
     },
   },
+  {
+    id: '058_super_odd_events',
+    up(db) {
+      // Super-odd detector: registra quando casa não-Pinnacle tem odd
+      // >threshold% acima de Pinnacle (default 20%). Sinais:
+      //   - Super odd promocional (Betano/Sportingbet rodam diariamente)
+      //   - Erro de book (odd esquecida pós-movimentação)
+      //   - Pre-news edge (info não incorporada ainda)
+      // Em todos casos, oportunidade de EV+ quando bate threshold + tip do bot.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS super_odd_events (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          sport TEXT NOT NULL,
+          match_label TEXT,
+          pick_side TEXT,
+          pinnacle_odd REAL NOT NULL,
+          pinnacle_implied_pct REAL,
+          super_book TEXT NOT NULL,
+          super_odd REAL NOT NULL,
+          ratio REAL NOT NULL,
+          ev_pct_estimated REAL,
+          detected_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_super_odd_sport_at
+          ON super_odd_events (sport, detected_at DESC);
+      `);
+    },
+  },
 ];
 
 function applyMigrations(db) {

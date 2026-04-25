@@ -16682,6 +16682,7 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
     if (/^(1|true|yes)$/i.test(String(process.env.STALE_LINE_DISABLED || ''))) return;
     try {
       const { checkStaleLines, shouldDm, persistEvent } = require('./lib/stale-line-detector');
+      const sod = require('./lib/super-odd-detector');
       const http = require('http');
       const port = process.env.PORT || 3000;
       const fetchJson = (path) => new Promise((res, rej) => {
@@ -16693,6 +16694,7 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
       });
 
       let alerts = 0;
+      let superOdds = 0;
       // Football: _allOdds em match.odds com 21+ books
       try {
         const fb = await fetchJson('/football-matches');
@@ -16706,6 +16708,23 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
           for (const side of ['h', 'd', 'a']) {
             const pinOdd = parseFloat(pin[side]);
             const brBooks = others.map(b => ({ bookmaker: b.bookmaker, odd: parseFloat(b[side]) })).filter(x => Number.isFinite(x.odd));
+            // Super-odd check FIRST (independente de stale line)
+            const superEvt = sod.detectSuperOdd({ sport: 'football', team1: m.team1, team2: m.team2, side, pinOdd, otherBooks: brBooks });
+            if (superEvt && sod.shouldDm(superEvt.sport, superEvt.matchKey, superEvt.side)) {
+              sod.persistEvent(db, superEvt);
+              superOdds++;
+              if (ADMIN_IDS.size) {
+                const sideLabel = side === 'h' ? superEvt.matchLabel.split(' vs ')[0] : side === 'a' ? superEvt.matchLabel.split(' vs ')[1] : 'Empate';
+                const msg = `🎰 *SUPER ODD — ${superEvt.sport.toUpperCase()}*\n\n` +
+                  `*${superEvt.matchLabel}* (lado: ${sideLabel})\n\n` +
+                  `Pinnacle: ${superEvt.pinOdd} (implied ${superEvt.pinImpliedPct}%)\n` +
+                  `${superEvt.superBook}: *${superEvt.superOdd}* (${(superEvt.ratio * 100 - 100).toFixed(0)}% acima Pinnacle)\n\n` +
+                  `EV estimado: *+${superEvt.evPct}%* assumindo Pinnacle como verdade.\n\n` +
+                  `_Possíveis causas: super odd promo, erro de book, pre-news edge. Verificar antes de apostar pq book pode voidar erro óbvio._`;
+                const tk = Object.values(SPORTS).find(S => S?.enabled && S?.token)?.token;
+                if (tk) for (const adminId of ADMIN_IDS) sendDM(tk, adminId, msg).catch(() => {});
+              }
+            }
             const evt = checkStaleLines({ sport: 'football', team1: m.team1, team2: m.team2, side, pinOdd, brBooks });
             if (evt && shouldDm(evt.sport, evt.matchKey)) {
               persistEvent(db, evt);
@@ -16744,6 +16763,12 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
           for (const side of ['t1', 't2']) {
             const pinOdd = parseFloat(pin[side]);
             const brBooks = others.map(b => ({ bookmaker: b.bookmaker, odd: parseFloat(b[side]) })).filter(x => Number.isFinite(x.odd));
+            // Super-odd LoL: persiste silencioso (acumula data antes de DM)
+            const superEvt = sod.detectSuperOdd({ sport: 'lol', team1: m.team1, team2: m.team2, side, pinOdd, otherBooks: brBooks });
+            if (superEvt && sod.shouldDm(superEvt.sport, superEvt.matchKey, superEvt.side)) {
+              sod.persistEvent(db, superEvt);
+              superOdds++;
+            }
             const evt = checkStaleLines({ sport: 'lol', team1: m.team1, team2: m.team2, side, pinOdd, brBooks });
             if (evt && shouldDm(evt.sport, evt.matchKey)) {
               persistEvent(db, evt);
@@ -16753,7 +16778,7 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
         }
       } catch (_) {}
 
-      if (alerts > 0) log('INFO', 'STALE-LINE', `${alerts} stale line(s) detectadas`);
+      if (alerts > 0 || superOdds > 0) log('INFO', 'STALE-LINE', `${alerts} stale, ${superOdds} super-odd`);
     } catch (e) { log('ERROR', 'STALE-LINE', e.message); }
   }
   setInterval(() => runStaleLineCron(), 5 * 60 * 1000); // 5min
