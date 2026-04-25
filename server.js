@@ -4579,12 +4579,43 @@ const server = http.createServer(async (req, res) => {
     }
     if (!matchupId) { sendJson(res, { error: 'matchupId ou team1/team2 obrigatórios' }, 400); return; }
     try {
-      const [handicaps, totals, moneyline] = await Promise.all([
+      const wantSeparateAces = parsed.query.separate_aces === '1' || parsed.query.separate_aces === 'true';
+      const [handicaps, totals, moneyline, allTotalGroups] = await Promise.all([
         pinnacle.getMatchupHandicaps(matchupId, period).catch(() => []),
         pinnacle.getMatchupTotals(matchupId, period).catch(() => []),
         pinnacle.getMatchupMoneylineByPeriod(matchupId, period).catch(() => null),
+        wantSeparateAces ? pinnacle.getMatchupTotals(matchupId, period, { groupByMatchup: true }).catch(() => []) : Promise.resolve(null),
       ]);
-      sendJson(res, { matchupId: String(matchupId), period, moneyline, handicaps, totals, swap, homeTeam, awayTeam });
+
+      // Tennis aces detection: median das lines distingue games (~22-24) vs aces (~8-15).
+      // Threshold 17.5 é ponto neutro entre clusters típicos.
+      let acesTotals = null;
+      let gamesTotals = null;
+      if (wantSeparateAces && Array.isArray(allTotalGroups) && allTotalGroups.length >= 2) {
+        const median = (arr) => {
+          if (!arr.length) return null;
+          const s = [...arr].sort((a, b) => a - b);
+          return s[Math.floor(s.length / 2)];
+        };
+        for (const grp of allTotalGroups) {
+          if (!grp.lines?.length) continue;
+          const med = median(grp.lines.map(l => l.line));
+          if (med == null) continue;
+          if (med < 17.5) {
+            // Provável aces (lines típicas 5-15)
+            if (!acesTotals || grp.lines.length > acesTotals.length) acesTotals = grp.lines;
+          } else {
+            // Provável games (lines típicas 18-30)
+            if (!gamesTotals || grp.lines.length > gamesTotals.length) gamesTotals = grp.lines;
+          }
+        }
+      }
+      sendJson(res, {
+        matchupId: String(matchupId), period, moneyline, handicaps, totals,
+        ...(acesTotals ? { acesTotals } : {}),
+        ...(gamesTotals ? { gamesTotals } : {}),
+        swap, homeTeam, awayTeam,
+      });
     } catch (e) {
       sendJson(res, { error: e.message }, 500);
     }

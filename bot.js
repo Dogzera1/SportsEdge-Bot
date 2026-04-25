@@ -12546,8 +12546,8 @@ async function pollTennis(runOnce = false) {
           // Tennis market scanner (log-only) — totals games, sets handicap, TB, aces.
           if (process.env.TENNIS_MARKET_SCAN !== 'false' && tennisModelResult?._markovMarkets) {
             try {
-              const markets = await serverGet(`/odds-markets?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}&period=0`).catch(() => null);
-              if (markets && ((markets.handicaps?.length || 0) + (markets.totals?.length || 0)) > 0) {
+              const markets = await serverGet(`/odds-markets?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}&period=0&separate_aces=1`).catch(() => null);
+              if (markets && ((markets.handicaps?.length || 0) + (markets.totals?.length || 0) + (markets.acesTotals?.length || 0)) > 0) {
                 const { scanTennisMarkets } = require('./lib/tennis-market-scanner');
                 const minEv = parseFloat(process.env.TENNIS_MARKET_SCAN_MIN_EV ?? '4');
                 const maxEv = parseFloat(process.env.TENNIS_MARKET_SCAN_MAX_EV ?? '40');
