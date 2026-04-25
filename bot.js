@@ -7024,6 +7024,8 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
         .then(r => {
           const after = db.prepare(`SELECT COUNT(*) AS p FROM oracleselixir_players`).get().p;
           const afterG = db.prepare(`SELECT COUNT(*) AS g FROM oracleselixir_games`).get().g;
+          // Invalida cache pra próximas queries verem dados frescos
+          try { require('./lib/oracleselixir-player-features').invalidateCache(); } catch (_) {}
           send(token, chatId,
             `✅ *OE sync concluído*\n\n` +
             `Games: ${beforeG} → ${afterG} (+${afterG - beforeG})\n` +
@@ -16623,6 +16625,12 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
       });
       proc.on('close', (code) => {
         log(code === 0 ? 'INFO' : 'WARN', 'HIST-OE', `Auto-sync OE exit=${code}`);
+        // Invalida cache de roster — sync pode ter populado team que estava em "null cache".
+        try {
+          const { invalidateCache } = require('./lib/oracleselixir-player-features');
+          invalidateCache();
+          log('INFO', 'HIST-OE', 'Cache de roster invalidado — próximas queries vão recarregar do DB.');
+        } catch (_) {}
       });
       log('INFO', 'HIST-OE', 'Auto-sync Oracle\'s Elixir started (background)');
     } catch (e) { log('WARN', 'HIST-OE', `err: ${e.message}`); }
