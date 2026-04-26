@@ -17216,20 +17216,26 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
               ? { sport: 'football', team1: m.team1, team2: m.team2, side, pinOdd, otherBooks: brBooks }
               : { sport: 'football', team1: m.team1, team2: m.team2, side, books: allBooksSide };
             const superEvt = sod.detectSuperOdd(superArgs);
-            if (superEvt && sod.shouldDm(superEvt.sport, superEvt.matchKey, superEvt.side)) {
+            if (superEvt) {
+              // Tier dual: persist sempre (visível em /admin/super-odd-events e /casa-stats),
+              // DM só se ratio >= SUPER_ODD_RATIO_DM (default 1.20). Tier soft (1.13-1.20)
+              // logado mas sem DM — captura sinais como KTO Brasileirão away (+13%).
               sod.persistEvent(db, superEvt);
               superOdds++;
-              if (ADMIN_IDS.size) {
-                const sideLabel = side === 'h' ? superEvt.matchLabel.split(' vs ')[0] : side === 'a' ? superEvt.matchLabel.split(' vs ')[1] : 'Empate';
-                const refLabel = superEvt.mode === 'crossbook' ? `Mediana ${superEvt.sampleSize} books` : 'Pinnacle';
-                const msg = `🎰 *SUPER ODD — ${superEvt.sport.toUpperCase()}*\n\n` +
-                  `*${superEvt.matchLabel}* (lado: ${sideLabel})\n\n` +
-                  `${refLabel}: ${superEvt.pinOdd} (implied ${superEvt.pinImpliedPct}%)\n` +
-                  `${superEvt.superBook}: *${superEvt.superOdd}* (${(superEvt.ratio * 100 - 100).toFixed(0)}% acima ref)\n\n` +
-                  `EV estimado: *+${superEvt.evPct}%* assumindo referência como verdade.\n\n` +
-                  `_Possíveis causas: super odd promo, erro de book, pre-news edge. Verificar antes de apostar pq book pode voidar erro óbvio._`;
-                const tk = resolveOpportunitiesToken();
-                if (tk) for (const adminId of ADMIN_IDS) sendDM(tk, adminId, msg).catch(() => {});
+              const dmThreshold = parseFloat(process.env.SUPER_ODD_RATIO_DM || '1.20');
+              if (superEvt.ratio >= dmThreshold && sod.shouldDm(superEvt.sport, superEvt.matchKey, superEvt.side)) {
+                if (ADMIN_IDS.size) {
+                  const sideLabel = side === 'h' ? superEvt.matchLabel.split(' vs ')[0] : side === 'a' ? superEvt.matchLabel.split(' vs ')[1] : 'Empate';
+                  const refLabel = superEvt.mode === 'crossbook' ? `Mediana ${superEvt.sampleSize} books` : 'Pinnacle';
+                  const msg = `🎰 *SUPER ODD — ${superEvt.sport.toUpperCase()}*\n\n` +
+                    `*${superEvt.matchLabel}* (lado: ${sideLabel})\n\n` +
+                    `${refLabel}: ${superEvt.pinOdd} (implied ${superEvt.pinImpliedPct}%)\n` +
+                    `${superEvt.superBook}: *${superEvt.superOdd}* (${(superEvt.ratio * 100 - 100).toFixed(0)}% acima ref)\n\n` +
+                    `EV estimado: *+${superEvt.evPct}%* assumindo referência como verdade.\n\n` +
+                    `_Possíveis causas: super odd promo, erro de book, pre-news edge. Verificar antes de apostar pq book pode voidar erro óbvio._`;
+                  const tk = resolveOpportunitiesToken();
+                  if (tk) for (const adminId of ADMIN_IDS) sendDM(tk, adminId, msg).catch(() => {});
+                }
               }
             }
             // Stale line: Pinnacle anchor ou cross-book
