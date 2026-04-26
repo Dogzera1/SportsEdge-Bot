@@ -16978,8 +16978,6 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   const runShadowSettle = async () => {
     try {
       // Pre-sync tennis + football (sources externas) antes de tentar settlar.
-      // Esports (match_results.lol/dota2/cs2/valorant) já vem do PandaScore sync
-      // no poll loop → não precisa pre-sync dedicado aqui.
       // Tennis: /sync-tennis-espn-range cobre ATP+WTA em 7 dias (> scoreboard atual);
       // fallback sofascore pega Challenger + WTA125 + ITF que ESPN não cobre.
       try {
@@ -16995,6 +16993,13 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
         if (!r1?.ok || (r1.inserted || 0) === 0) {
           await serverGet(`/sync-football-espn?days=5${keyParam}`, 'football').catch(() => {});
         }
+      } catch (_) {}
+      try {
+        // Esports pre-sync: /ps-result e /dota-result legacy não populam final_score
+        // (sempre '') → handicap/total nunca liquidavam. Sync dedicado puxa matches
+        // finalizados de PandaScore com score "Bo3 2-1" parseável.
+        const keyParamE = process.env.ADMIN_KEY ? `&key=${encodeURIComponent(process.env.ADMIN_KEY)}` : '';
+        await serverGet(`/sync-pandascore-results?days=5${keyParamE}`, 'esports').catch(() => {});
       } catch (_) {}
 
       const { settleShadowTips } = require('./lib/market-tips-shadow');

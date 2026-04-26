@@ -94,6 +94,21 @@ function _filterPreferredBooks(candidates) {
   return filtered.length ? filtered : candidates;
 }
 
+// PandaScore /matches/{id} response → "Bo3 2-1" string pra match_results.final_score.
+// Sem isso, _parseEsportsMapScore não tem dado pra liquidar handicap/total esports.
+// Retorna '' se faltam campos essenciais — caller mantém row sem score (settle vai skip).
+function _psSeriesScore(m) {
+  const t1Id = m?.opponents?.[0]?.opponent?.id;
+  const t2Id = m?.opponents?.[1]?.opponent?.id;
+  const results = Array.isArray(m?.results) ? m.results : [];
+  if (!t1Id || !t2Id || results.length < 2) return '';
+  const r1 = results.find(x => x.team_id === t1Id)?.score;
+  const r2 = results.find(x => x.team_id === t2Id)?.score;
+  if (!Number.isFinite(r1) || !Number.isFinite(r2)) return '';
+  const bo = Number.isFinite(m?.number_of_games) ? m.number_of_games : null;
+  return bo ? `Bo${bo} ${r1}-${r2}` : `${r1}-${r2}`;
+}
+
 function getBaseline() {
   const rows = db.prepare("SELECT key, value FROM settings WHERE key IN ('bankroll_baseline_date','bankroll_baseline_amount','bankroll_unit_pct')").all();
   const map = Object.fromEntries(rows.map(r => [r.key, r.value]));
@@ -6165,7 +6180,7 @@ const server = http.createServer(async (req, res) => {
       if (winner) {
         const t1 = m.opponents?.[0]?.opponent?.name || '';
         const t2 = m.opponents?.[1]?.opponent?.name || '';
-        stmts.upsertMatchResult.run(rawId, 'lol', t1, t2, winner, '', m.league?.name || '');
+        stmts.upsertMatchResult.run(rawId, 'lol', t1, t2, winner, _psSeriesScore(m), m.league?.name || '');
         sendJson(res, { matchId: rawId, winner, resolved: true });
       } else {
         sendJson(res, { matchId: rawId, resolved: false });
@@ -6206,7 +6221,9 @@ const server = http.createServer(async (req, res) => {
         if (game.winner.id === t1?.id) winner = t1.name;
         else if (game.winner.id === t2?.id) winner = t2.name;
         if (winner) {
-          stmts.upsertMatchResult.run(rawId, 'dota2', t1?.name || '', t2?.name || '', winner, '', m.league?.name || '');
+          // Per-map row: final_score do série ainda útil pra handicap/total markets futuros
+          // que apontem pra mesma rawId. Helper retorna '' se série não terminou.
+          stmts.upsertMatchResult.run(rawId, 'dota2', t1?.name || '', t2?.name || '', winner, _psSeriesScore(m), m.league?.name || '');
           sendJson(res, { matchId: rawId, winner, resolved: true, map: mapN });
         } else {
           sendJson(res, { matchId: rawId, resolved: false, map: mapN });
@@ -6217,7 +6234,7 @@ const server = http.createServer(async (req, res) => {
       // Settlement da série (comportamento original)
       const winner = m.winner?.name || null;
       if (winner) {
-        stmts.upsertMatchResult.run(rawId, 'dota2', t1?.name || '', t2?.name || '', winner, '', m.league?.name || '');
+        stmts.upsertMatchResult.run(rawId, 'dota2', t1?.name || '', t2?.name || '', winner, _psSeriesScore(m), m.league?.name || '');
         sendJson(res, { matchId: rawId, winner, resolved: true });
       } else {
         sendJson(res, { matchId: rawId, resolved: false });
@@ -6250,7 +6267,7 @@ const server = http.createServer(async (req, res) => {
         const p2 = m.opponents?.[1]?.opponent?.name || t2 || '';
         // Use baseId (sem _MAP) pra evitar Elo inflation quando múltiplas phase-tips
         // do mesmo match são settled — INSERT OR IGNORE dedupe series result.
-        stmts.upsertMatchResult.run(baseId, game, p1, p2, winner, '', m.league?.name || '');
+        stmts.upsertMatchResult.run(baseId, game, p1, p2, winner, _psSeriesScore(m), m.league?.name || '');
         return { resolved: true, winner };
       }
       return { resolved: false };
@@ -6280,7 +6297,7 @@ const server = http.createServer(async (req, res) => {
         if (!matched) continue;
         const winner = m.winner?.name;
         if (winner) {
-          stmts.upsertMatchResult.run(baseId, game, a, b, winner, '', m.league?.name || '');
+          stmts.upsertMatchResult.run(baseId, game, a, b, winner, _psSeriesScore(m), m.league?.name || '');
           return { resolved: true, winner };
         }
       }
@@ -12335,6 +12352,76 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
     return;
   }
 
+  // Sync esports results via PandaScore — popula match_results com final_score formatado
+  // ("Bo3 2-1") essencial pra liquidar handicap/total/handicapSets em market_tips_shadow.
+  // Pré /ps-result e /dota-result nunca preenchiam final_score; este endpoint cobre o gap
+  // pegando matches finalizados das últimas 24h-7d e re-upsertando com score parseável.
+  // GET /sync-pandascore-results?days=3&games=lol,dota2,csgo,valorant&key=<ADMIN_KEY>
+  if (p === '/sync-pandascore-results') {
+    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    if (!PANDASCORE_TOKEN) { sendJson(res, { ok: false, error: 'PANDASCORE_TOKEN missing' }, 400); return; }
+    try {
+      const daysRaw = parseInt(parsed.query.days);
+      const daysBack = Number.isFinite(daysRaw) ? Math.max(1, Math.min(14, daysRaw)) : 3;
+      const gamesRaw = String(parsed.query.games || 'lol,dota2,csgo,valorant').toLowerCase();
+      // Map endpoint slug → match_results.game value. csgo/cs2 ambos viram 'cs2'
+      // (consistente com seed-cs-history e fontes existentes).
+      const gameMap = { lol: { ps: 'lol', mr: 'lol' },
+                        dota2: { ps: 'dota2', mr: 'dota2' },
+                        csgo: { ps: 'csgo', mr: 'cs2' },
+                        cs2: { ps: 'csgo', mr: 'cs2' },
+                        valorant: { ps: 'valorant', mr: 'valorant' } };
+      const wanted = gamesRaw.split(',').map(s => s.trim()).filter(g => gameMap[g]);
+      if (!wanted.length) { sendJson(res, { ok: false, error: 'invalid games param' }, 400); return; }
+
+      const sinceIso = new Date(Date.now() - daysBack * 86400 * 1000).toISOString().slice(0, 19);
+      const untilIso = new Date(Date.now() + 3600 * 1000).toISOString().slice(0, 19);
+      const headers = { 'Authorization': `Bearer ${PANDASCORE_TOKEN}` };
+
+      const out = {};
+      for (const g of wanted) {
+        const cfg = gameMap[g];
+        let inserted = 0, scanned = 0, skipped = 0;
+        // 3 páginas × 100/page = 300 matches/jogo. Suficiente p/ 3-7 dias normais.
+        for (let page = 1; page <= 3; page++) {
+          const url = `https://api.pandascore.co/${cfg.ps}/matches/past?per_page=100&page=${page}&sort=-end_at&filter[finished]=true&range[end_at]=${encodeURIComponent(sinceIso)},${encodeURIComponent(untilIso)}`;
+          const r = await httpGet(url, headers).catch(() => null);
+          if (!r || r.status !== 200) break;
+          const arr = safeParse(r.body, []);
+          if (!Array.isArray(arr) || !arr.length) break;
+          for (const m of arr) {
+            scanned++;
+            try {
+              const t1 = m.opponents?.[0]?.opponent?.name || '';
+              const t2 = m.opponents?.[1]?.opponent?.name || '';
+              const winner = m.winner?.name || null;
+              if (!t1 || !t2 || !winner) { skipped++; continue; }
+              const score = _psSeriesScore(m);
+              if (!score) { skipped++; continue; } // sem score parseável — não vale upsertar
+              const matchId = `${cfg.mr}_ps_${m.id}`;
+              const league = String(m.league?.name || cfg.mr).slice(0, 120);
+              const resolvedAt = m.end_at
+                ? new Date(m.end_at).toISOString().replace('T', ' ').slice(0, 19)
+                : new Date().toISOString().replace('T', ' ').slice(0, 19);
+              stmts.upsertMatchResultWithDate.run(matchId, cfg.mr, t1, t2, winner, score, league, resolvedAt);
+              inserted++;
+            } catch (_) { skipped++; }
+          }
+          if (arr.length < 100) break;
+          await new Promise(r => setTimeout(r, 200));
+        }
+        out[g] = { inserted, scanned, skipped };
+        log('INFO', 'ESPORTS-SYNC', `pandascore ${g}: ${inserted}/${scanned} upserted em ${daysBack}d (${skipped} skip)`);
+      }
+      sendJson(res, { ok: true, days_back: daysBack, results: out });
+    } catch (e) {
+      log('ERROR', 'ESPORTS-SYNC', `pandascore: ${e.message}`);
+      sendJson(res, { ok: false, error: e.message }, 500);
+    }
+    return;
+  }
+
   // Sync football results via sofascore: popula match_results com jogos FINALIZADOS
   // nos últimos N dias. Essencial pra destravar settlement de tips football que estavam
   // sendo auto-voided por /football-result retornar resolved:false (sem dados).
@@ -17214,7 +17301,7 @@ async function syncProStats({ forceResync = false } = {}) {
 
     // Popula match_results (form dos times)
     if (winnerName) {
-      stmts.upsertMatchResult.run(psId, 'lol', t1.name, t2.name, winnerName, '', m.league?.name || '');
+      stmts.upsertMatchResult.run(psId, 'lol', t1.name, t2.name, winnerName, _psSeriesScore(m), m.league?.name || '');
       matchCount++;
     }
 
