@@ -12926,7 +12926,10 @@ async function pollTennis(runOnce = false) {
                             stake = mtp.snapStakeUnits(stake * (1 - t.correlationDiscount));
                           }
                           if (stake > 0) {
-                            const dm = mtp.buildMarketTipDM({ match, tip: t, stake, league: match.league, sport: 'tennis', isLive: isLiveTennis });
+                            // Passa `markets` (raw Pinnacle) pra buildMarketTipDM listar
+                            // todas as linhas alternativas — clarifica que -3.5 era line
+                            // alternativa quando -4.5 é a principal exibida no site.
+                            const dm = mtp.buildMarketTipDM({ match, tip: t, stake, league: match.league, sport: 'tennis', isLive: isLiveTennis, markets });
                             const tnToken = SPORTS['tennis']?.token || resolveAlertsToken();
                             if (tnToken) {
                               const r = await sendAdminDMs(tnToken, dm, undefined, 'tennis-market-tip');
