@@ -1792,9 +1792,12 @@ async function runAutoAnalysis() {
       if (_hasLiveLol) _livePhaseEnter('lol');
 
       for (const match of allLive) {
-        // Ao vivo: dedup por mapa atual (uma tip por mapa, não por série inteira)
+        // Ao vivo: dedup por mapa atual (uma tip por mapa, não por série inteira).
+        // matchId 'ps_*' não resolve em getEventDetails Riot (Path 1 do /live-gameids
+        // espera Riot numeric ID). Passa team1/team2 também pra ativar Path 2 (fallback
+        // por nomes via getSchedule) e recuperar currentMap em PS-live matches.
         const liveIds = (match.status === 'live')
-          ? await serverGet(`/live-gameids?matchId=${encodeURIComponent(String(match.id))}`).catch(() => [])
+          ? await serverGet(`/live-gameids?matchId=${encodeURIComponent(String(match.id))}&team1=${encodeURIComponent(match.team1 || '')}&team2=${encodeURIComponent(match.team2 || '')}`).catch(() => [])
           : [];
         const currentMap = Array.isArray(liveIds) ? (liveIds.find(x => x.hasLiveData)?.gameNumber || null) : null;
         const mapSuffix = (match.status === 'live' && currentMap) ? `_MAP${currentMap}` : '';
@@ -6140,7 +6143,10 @@ async function autoAnalyzeMatch(token, match) {
                           const dm = mtp.buildMarketTipDM({
                             match, tip: t, stake, league: match.league, sport: 'lol', isLive: isLiveLoL,
                           });
-                          const tokenForMT = resolveAlertsToken();
+                          // Market tips são TIPS — roteia pro bot de tips (separação 2026-04-26).
+                          // Antes ia em resolveAlertsToken → caía no bot de alertas e DM
+                          // não chegava no canal que o usuário monitora.
+                          const tokenForMT = resolveTipsToken('esports');
                           if (tokenForMT) {
                             const r = await sendAdminDMs(tokenForMT, dm, undefined, 'lol-market-tip');
                             if (r.sent > 0) {
@@ -11184,7 +11190,7 @@ async function _pollDotaInner(runOnce = false) {
                       const stake = mtp.kellyStakeForMarket(t.pModel, t.odd, 100, 0.10);
                       if (stake > 0) {
                         const dm = mtp.buildMarketTipDM({ match, tip: t, stake, league: match.league, sport: 'dota2', isLive });
-                        const tokenForMT = resolveAlertsToken();
+                        const tokenForMT = resolveTipsToken('esports');
                         if (tokenForMT) {
                           const r = await sendAdminDMs(tokenForMT, dm, undefined, 'dota-market-tip');
                           if (r.sent > 0) {
@@ -14926,7 +14932,7 @@ async function pollCs(runOnce = false) {
                         const stake = mtp.kellyStakeForMarket(t.pModel, t.odd, 100, 0.10);
                         if (stake > 0) {
                           const dm = mtp.buildMarketTipDM({ match, tip: t, stake, league: match.league, sport: 'cs2', isLive: isLiveCs });
-                          const tokenForMT = resolveAlertsToken();
+                          const tokenForMT = resolveTipsToken('esports');
                           if (tokenForMT) {
                             const r = await sendAdminDMs(tokenForMT, dm, undefined, 'cs-market-tip');
                             if (r.sent > 0) {
@@ -15500,7 +15506,7 @@ async function pollValorant(runOnce = false) {
                         const stake = mtp.kellyStakeForMarket(t.pModel, t.odd, 100, 0.10);
                         if (stake > 0) {
                           const dm = mtp.buildMarketTipDM({ match, tip: t, stake, league: match.league, sport: 'valorant', isLive: isLiveVal });
-                          const tokenForMT = resolveAlertsToken();
+                          const tokenForMT = resolveTipsToken('esports');
                           if (tokenForMT) {
                             const r = await sendAdminDMs(tokenForMT, dm, undefined, 'val-market-tip');
                             if (r.sent > 0) {
