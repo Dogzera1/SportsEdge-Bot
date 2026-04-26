@@ -17530,13 +17530,23 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
       const minEv = parseFloat(process.env.BR_EDGES_AUTO_DM_MIN_EV || '8');
       const cooldownMs = parseInt(process.env.BR_EDGES_AUTO_DM_COOLDOWN_MIN || '360', 10) * 60 * 1000;
       const aggClient = require('./lib/odds-aggregator-client');
-      const edges = await aggClient.fetchActiveEdgesBr({ minRatio });
+      const [edges, health] = await Promise.all([
+        aggClient.fetchActiveEdgesBr({ minRatio }),
+        aggClient.fetchScraperHealth().catch(() => null),
+      ]);
       if (!Array.isArray(edges)) return;
+      // Casa health map: skip edges de casa cujo scraper não está saudavel
+      // (dados velhos = falso positivo "edge sustentado" que na verdade é só
+      // snapshot estagnado).
+      const healthByCasa = new Map((health?.houses || []).map(h => [h.casa, h.state]));
       const now = Date.now();
       const sustained = [];
       const seenThisRun = new Set();
+      let skippedUnhealthy = 0;
       for (const e of edges) {
         if (e.ev_estimado_pct < minEv) continue;
+        const casaState = healthByCasa.get(e.casa);
+        if (casaState && casaState !== 'saudavel') { skippedUnhealthy++; continue; }
         const k = `${e.jogo_id}|${e.casa}|${e.market}|${e.side}`;
         seenThisRun.add(k);
         const prev = _brEdgesPrev.get(k);
@@ -17547,6 +17557,7 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
         }
         _brEdgesPrev.set(k, { ratio: e.ratio, ev: e.ev_estimado_pct, ts: now });
       }
+      if (skippedUnhealthy > 0) log('DEBUG', 'BR-EDGES-DM', `skipped ${skippedUnhealthy} edges (casa não-saudavel)`);
       // Limpa entries velhas (>30min)
       for (const [k, v] of _brEdgesPrev) {
         if (now - v.ts > 30 * 60 * 1000) _brEdgesPrev.delete(k);
