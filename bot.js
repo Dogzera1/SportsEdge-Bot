@@ -7347,6 +7347,113 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
         await send(token, chatId, txt);
         return;
       }
+      // /market-tips audit [sport] [days] — auditoria consolidada com recomendação por segment.
+      // Categoriza (sport, market, side, isLive) em ATIVAR / OBSERVAR / LEAK / CLV-WARN / NEUTRAL.
+      if (parts[1]?.toLowerCase() === 'audit') {
+        const sportFilter = parts[2]?.toLowerCase() || null;
+        const days = Math.max(7, Math.min(180, parseInt(parts[3] || '60', 10) || 60));
+        const MIN_SETTLED = parseInt(process.env.MT_READY_MIN_SETTLED || '30', 10);
+        const MIN_ROI = parseFloat(process.env.MT_READY_MIN_ROI || '5');
+        const MIN_CLV_N = parseInt(process.env.MT_READY_MIN_CLV_N || '10', 10);
+        const sportWhere = sportFilter ? `AND sport = '${sportFilter.replace(/'/g, "''")}'` : '';
+        const rows = db.prepare(`
+          SELECT sport, market, COALESCE(side, '-') AS side,
+            COALESCE(is_live, 0) AS is_live,
+            COUNT(*) AS n,
+            SUM(CASE WHEN result IN ('win','loss') THEN 1 ELSE 0 END) AS settled,
+            SUM(CASE WHEN result = 'win' THEN 1 ELSE 0 END) AS wins,
+            SUM(COALESCE(profit_units, 0)) AS profit,
+            SUM(CASE WHEN result IN ('win','loss') THEN COALESCE(stake_units, 1) ELSE 0 END) AS stake,
+            AVG(ev_pct) AS avg_ev,
+            SUM(CASE WHEN clv_pct IS NOT NULL THEN 1 ELSE 0 END) AS clv_n,
+            AVG(clv_pct) AS avg_clv,
+            SUM(CASE WHEN clv_pct > 0 THEN 1 ELSE 0 END) AS clv_pos
+          FROM market_tips_shadow
+          WHERE created_at >= datetime('now', '-${days} days')
+            ${sportWhere}
+          GROUP BY sport, market, COALESCE(side, '-'), COALESCE(is_live, 0)
+          HAVING settled >= 5
+          ORDER BY sport, market, is_live, side
+        `).all();
+        if (!rows.length) {
+          await send(token, chatId, `📊 Audit: nenhum segment com ≥5 settled em ${days}d${sportFilter ? ' ('+sportFilter+')' : ''}`);
+          return;
+        }
+        const cat = { activate: [], watch: [], leak: [], clvWarn: [], neutral: [] };
+        for (const r of rows) {
+          r.hitRate = r.settled > 0 ? +(r.wins / r.settled * 100).toFixed(1) : null;
+          r.roi = r.stake > 0 ? +(r.profit / r.stake * 100).toFixed(1) : null;
+          r.clvAvg = r.clv_n > 0 ? +(r.avg_clv || 0).toFixed(2) : null;
+          r.clvPosPct = r.clv_n > 0 ? +(r.clv_pos / r.clv_n * 100).toFixed(0) : null;
+          const envKey = `${r.sport.toUpperCase()}_MARKET_TIPS_ENABLED`;
+          r.envActive = process.env[envKey] === 'true';
+          // LEAK: settled≥20 + ROI<-5% OR CLV<-2% com n_clv≥15
+          if ((r.settled >= 20 && r.roi != null && r.roi < -5) ||
+              (r.clv_n >= 15 && r.clvAvg != null && r.clvAvg < -2)) {
+            cat.leak.push(r); continue;
+          }
+          // ATIVAR: settled≥MIN, ROI≥MIN, CLV≥0 quando n_clv≥10
+          if (r.settled >= MIN_SETTLED && r.roi != null && r.roi >= MIN_ROI &&
+              (r.clv_n < MIN_CLV_N || (r.clvAvg != null && r.clvAvg >= 0))) {
+            cat.activate.push(r); continue;
+          }
+          // CLV-WARN: ROI ok mas CLV negativo persistente — variance-driven
+          if (r.settled >= 20 && r.roi != null && r.roi >= 0 &&
+              r.clv_n >= MIN_CLV_N && r.clvAvg != null && r.clvAvg < -1) {
+            cat.clvWarn.push(r); continue;
+          }
+          // OBSERVAR: 50-99% threshold com ROI positivo + CLV não-negativo
+          const pct = r.settled / MIN_SETTLED;
+          if (pct >= 0.5 && pct < 1 && r.roi != null && r.roi >= 0 &&
+              (r.clvAvg == null || r.clvAvg >= -2)) {
+            cat.watch.push(r); continue;
+          }
+          cat.neutral.push(r);
+        }
+        const fmt = r => {
+          const live = r.is_live ? ' 🔴live' : '';
+          const roi = r.roi != null ? `${r.roi >= 0 ? '+' : ''}${r.roi}%` : '?';
+          const clv = r.clvAvg != null ? `${r.clvAvg >= 0 ? '+' : ''}${r.clvAvg.toFixed(1)}%(n=${r.clv_n})` : `?(n=0)`;
+          const hit = r.hitRate != null ? `${r.hitRate}%` : '?';
+          const flag = r.envActive ? ' 🟢env' : '';
+          return `${r.sport}/${r.market}/${r.side}${live}: n=${r.settled} Hit=${hit} ROI=${roi} CLV=${clv}${flag}`;
+        };
+        let txt = `🔍 *MARKET TIPS — AUDIT ${days}d${sportFilter ? ' ('+sportFilter+')' : ''}*\n\n`;
+        txt += `Threshold: settled≥${MIN_SETTLED} ROI≥${MIN_ROI}% CLV≥0% (n_clv≥${MIN_CLV_N})\n\n`;
+        if (cat.activate.length) {
+          txt += `🟢 *ATIVAR (${cat.activate.length}):*\n`;
+          cat.activate.sort((a,b) => b.roi - a.roi);
+          for (const r of cat.activate) txt += `  ${fmt(r)}\n`;
+          const sports = [...new Set(cat.activate.filter(r => !r.envActive).map(r => r.sport))];
+          if (sports.length) txt += `_Env:_ \`${sports.map(s => s.toUpperCase()+'_MARKET_TIPS_ENABLED=true').join(' && ')}\`\n`;
+          txt += `\n`;
+        }
+        if (cat.leak.length) {
+          txt += `🔴 *LEAK (${cat.leak.length}) — desligar/ajustar:*\n`;
+          cat.leak.sort((a,b) => (a.roi ?? 0) - (b.roi ?? 0));
+          for (const r of cat.leak) txt += `  ${fmt(r)}\n`;
+          txt += `\n`;
+        }
+        if (cat.clvWarn.length) {
+          txt += `⚠️ *CLV-WARN (${cat.clvWarn.length}) — ROI+ mas CLV negativo (variance):*\n`;
+          for (const r of cat.clvWarn) txt += `  ${fmt(r)}\n`;
+          txt += `\n`;
+        }
+        if (cat.watch.length) {
+          txt += `🟡 *OBSERVAR (${cat.watch.length}) — 50-99% threshold + ROI≥0:*\n`;
+          cat.watch.sort((a,b) => b.settled - a.settled);
+          for (const r of cat.watch.slice(0, 12)) txt += `  ${fmt(r)}\n`;
+          if (cat.watch.length > 12) txt += `  _(+${cat.watch.length - 12} truncado)_\n`;
+          txt += `\n`;
+        }
+        if (cat.neutral.length) {
+          txt += `⚪ Neutros: ${cat.neutral.length}\n`;
+        }
+        if (txt.length > 3800) txt = txt.slice(0, 3800) + '\n_(truncado)_';
+        await send(token, chatId, txt);
+        return;
+      }
+
       // /market-tips recent [sport] [limit] — lista tips individuais
       if (parts[1]?.toLowerCase() === 'recent') {
         const sportFilter = parts[2]?.toLowerCase() || null;
@@ -7396,7 +7503,7 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
         txt += `  CLV=${clv} (n=${s.clvN}) profit=${s.totalProfit.toFixed(1)}u\n\n`;
         if (txt.length > 3500) { txt += '_(truncado)_'; break; }
       }
-      txt += `\n_Uso: /market-tips [sport] [days] | recent [sport] [limit] | leaks [days] [minN] [sport] | watch [sport] | league [sport] [days]_`;
+      txt += `\n_Uso: /market-tips [sport] [days] | audit [sport] [days] | recent [sport] [limit] | leaks [days] [minN] [sport] | watch [sport] | league [sport] [days]_`;
       await send(token, chatId, txt);
     } catch (e) { await send(token, chatId, `❌ ${e.message}`); }
 
