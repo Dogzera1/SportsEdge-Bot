@@ -3314,6 +3314,24 @@ function renderMarketTipsBySportCards(bs) {
   const fmtPct = (v, d=1) => v == null ? '—' : (v >= 0 ? '+' : '') + Number(v).toFixed(d) + '%';
   const cls = (v) => v == null ? '' : (v >= 0 ? 'positive' : 'negative');
 
+  // Critérios de promoção (memory): settled≥30, ROI≥5%, CLV≥0% (n_clv≥10)
+  const MIN_SETTLED = 30, MIN_ROI = 5, MIN_CLV = 0, MIN_CLV_N = 10;
+  const promoStatus = (s) => {
+    if (s.dm_sent > 0) return { tag: '🟢 ATIVO', color: '#10b981', need: null };
+    const reasons = [];
+    if (s.settled < MIN_SETTLED) reasons.push(`+${MIN_SETTLED - s.settled} settled`);
+    if (s.roi == null) reasons.push('ROI?');
+    else if (s.roi < MIN_ROI) reasons.push(`ROI ${fmtPct(s.roi)} < +${MIN_ROI}%`);
+    if (s.clvN < MIN_CLV_N) reasons.push(`+${MIN_CLV_N - s.clvN} CLV samples`);
+    else if (s.avgClv < MIN_CLV) reasons.push(`CLV ${fmtPct(s.avgClv)} < 0%`);
+    if (!reasons.length) return { tag: '🟡 PROMOVER', color: '#fbbf24', need: 'Bate threshold — ativar env <SPORT>_MARKET_TIPS_ENABLED=true' };
+    // LEAK red flag: ROI muito negativo ou CLV negativo persistente
+    const isLeak = (s.settled >= 20 && s.roi != null && s.roi < -5) ||
+                   (s.clvN >= MIN_CLV_N && s.avgClv != null && s.avgClv < -2);
+    if (isLeak) return { tag: '🔴 LEAK', color: '#ef4444', need: reasons.join(' · ') };
+    return { tag: '⏳ OBSERVAR', color: '#64748b', need: reasons.slice(0, 2).join(' · ') };
+  };
+
   const cards = bs.sports.map(s => {
     const c = sportColor[s.sport] || '#888';
     const label = sportLabel(s.sport);
@@ -3321,8 +3339,16 @@ function renderMarketTipsBySportCards(bs) {
     const dmBadge = s.dm_sent > 0
       ? `<span style="background:#10b981;color:#fff;padding:1px 5px;border-radius:3px;font-size:0.7em;margin-left:6px" title="${s.dm_sent} DM enviadas em ${bs.days}d">DM ${s.dm_sent}</span>`
       : (s.n > 0 ? `<span style="background:#475569;color:#fff;padding:1px 5px;border-radius:3px;font-size:0.7em;margin-left:6px" title="Nenhum DM enviado — shadow only">shadow</span>` : '');
+    const status = promoStatus(s);
+    const statusBanner = status.need
+      ? `<div style="margin-top:8px;padding:5px 7px;background:${status.color}15;border-left:3px solid ${status.color};border-radius:3px;font-size:0.72em;color:${status.color}" title="${status.need}">
+          <b>${status.tag}</b><br><span style="opacity:0.85">${status.need}</span>
+        </div>`
+      : `<div style="margin-top:8px;padding:5px 7px;background:${status.color}15;border-left:3px solid ${status.color};border-radius:3px;font-size:0.72em;color:${status.color}">
+          <b>${status.tag}</b>
+        </div>`;
     return `
-      <div onclick="filterToSport('${s.sport}')" style="cursor:pointer;border:2px solid ${isActive ? c : 'var(--border,#2a2a2a)'};background:var(--surface,#0f172a);border-radius:8px;padding:10px 12px;min-width:160px;flex:1;transition:transform 0.1s" onmouseover="this.style.transform='translateY(-2px)'" onmouseout="this.style.transform='translateY(0)'">
+      <div onclick="filterToSport('${s.sport}')" style="cursor:pointer;border:2px solid ${isActive ? c : 'var(--border,#2a2a2a)'};background:var(--surface,#0f172a);border-radius:8px;padding:10px 12px;min-width:170px;flex:1;transition:transform 0.1s" onmouseover="this.style.transform='translateY(-2px)'" onmouseout="this.style.transform='translateY(0)'">
         <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">
           <span style="background:${c};color:#fff;padding:2px 7px;border-radius:3px;font-size:0.75em;font-weight:600">${label}</span>
           ${dmBadge}
@@ -3337,6 +3363,7 @@ function renderMarketTipsBySportCards(bs) {
           <span class="${cls(s.avgClv)}">CLV: ${fmtPct(s.avgClv)}${s.clvN > 0 ? ` <span style="opacity:0.6">(${s.clvN})</span>` : ''}</span>
           <span class="${cls(s.profit)}">${s.profit >= 0 ? '+' : ''}${s.profit.toFixed(1)}u</span>
         </div>
+        ${statusBanner}
       </div>`;
   }).join('');
 

@@ -17229,8 +17229,12 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
       if (r.settled > 0 || r.skipped > 0) log('INFO', 'MT-SHADOW', `Settled ${r.settled} market tips (skipped ${r.skipped})`);
     } catch (e) { reportBug('MT-SHADOW', e); }
   };
-  setInterval(runShadowSettle, 30 * 60 * 1000);
-  setTimeout(runShadowSettle, 10 * 60 * 1000); // 10min pós-boot (não espera 30min pra primeira run)
+  // Settle interval reduzido 30→10min pra acelerar acumulação de settled rows
+  // (gargalo pra promoção de market tips: precisa 30 settled antes de ATIVAR).
+  // Override: MT_SETTLE_INTERVAL_MS no env.
+  const MT_SETTLE_INTERVAL_MS = parseInt(process.env.MT_SETTLE_INTERVAL_MS || '600000', 10); // 10min default
+  setInterval(runShadowSettle, MT_SETTLE_INTERVAL_MS);
+  setTimeout(runShadowSettle, 5 * 60 * 1000); // primeira run em 5min pós-boot
 
   // CLV close-capture agressivo — cobre BOTH market_tips_shadow + regular tips.
   // Audit scripts/clv-coverage mostrou gaps graves (cs/football 0% regular; 20-50%
