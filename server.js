@@ -6911,69 +6911,237 @@ const server = http.createServer(async (req, res) => {
 
   // Lista market_tips_shadow pra dashboard. Todos são SHADOW por natureza (tabela
   // separada de tips). Permite filtrar por sport, dias, status.
-  // GET /market-tips-recent?sport=tennis&days=7&limit=50&status=all|pending|settled&includeVoid=0
+  // GET /market-tips-recent?sport=tennis&days=7&limit=50&offset=0&status=all|pending|settled&includeVoid=0&dedup=1
+  // Stats agregados são SEMPRE da janela inteira (não da página) — paginação só
+  // afeta `tips[]`. Field `total` é o total na janela; `offset` reflete o cursor
+  // atual. Caller usa total/limit pra calcular totalPages.
+  // dedup=1 (default): colapsa por (sport, teams_norm, market, side) mantendo a
+  // row com maior p_model (representa "melhor estimativa" que o modelo deu pro
+  // segmento). Útil pra auditoria — evita inflar contagem com rebroadcasts da
+  // mesma decisão (ex: line oscilando +4.5 → +2.5 entre cycles).
   if (p === '/market-tips-recent') {
     const sport = parsed.query.sport || null;
     const days = Math.max(1, Math.min(180, parseInt(parsed.query.days || '7', 10) || 7));
     const limit = Math.max(1, Math.min(500, parseInt(parsed.query.limit || '50', 10) || 50));
+    const offset = Math.max(0, parseInt(parsed.query.offset || '0', 10) || 0);
     const status = (parsed.query.status || 'all').toLowerCase();
     const includeVoid = parsed.query.includeVoid === '1';
+    const dedup = parsed.query.dedup !== '0'; // default ON
     try {
       const conds = [`created_at >= datetime('now', '-${days} days')`];
       const params = [];
       if (sport) { conds.push('sport = ?'); params.push(sport); }
       if (status === 'pending') conds.push('result IS NULL');
       else if (status === 'settled') conds.push(`result IN ('win','loss')`);
-      // Por padrão esconde voidadas (dedup/bogus); passa includeVoid=1 pra incluir
       if (!includeVoid) conds.push(`(result IS NULL OR result != 'void')`);
+
+      // Norm SQL espelhando _normStrict: lower + strip space/hyphen/dot/apóstrofo
+      const T1 = "lower(REPLACE(REPLACE(REPLACE(REPLACE(team1,' ',''),'-',''),'.',''),'''',''))";
+      const T2 = "lower(REPLACE(REPLACE(REPLACE(REPLACE(team2,' ',''),'-',''),'.',''),'''',''))";
+      // Pair canônica order-invariant: junta normalizado de T1/T2 ordenado alfabeticamente
+      // (CASE WHEN T1<T2 THEN T1||'|'||T2 ELSE T2||'|'||T1 END). Garante que rows com
+      // ordem invertida (Riot ↔ PandaScore às vezes inverte) caiam no mesmo grupo.
+      const PAIR = `CASE WHEN ${T1} < ${T2} THEN ${T1}||'|'||${T2} ELSE ${T2}||'|'||${T1} END`;
+
+      // Aggregator stats — quando dedup=1, agrega POR GRUPO (não por row).
+      // Pra ROI: pega o profit_units do "representante" (a row preservada na dedup).
+      // Quando dedup=0, agrega por row simples.
+      let aggRow;
+      if (dedup) {
+        // Sub-query: para cada grupo, pega 1 row (maior p_model). Stats vêm dessas.
+        aggRow = db.prepare(`
+          WITH ranked AS (
+            SELECT *,
+              ROW_NUMBER() OVER (
+                PARTITION BY sport, ${PAIR}, market, COALESCE(side, '')
+                ORDER BY COALESCE(p_model, 0) DESC, created_at DESC
+              ) AS rn
+            FROM market_tips_shadow
+            WHERE ${conds.join(' AND ')}
+          )
+          SELECT
+            COUNT(*) AS n,
+            SUM(CASE WHEN result IS NULL THEN 1 ELSE 0 END) AS pending,
+            SUM(CASE WHEN result IN ('win','loss') THEN 1 ELSE 0 END) AS settled,
+            SUM(CASE WHEN result = 'win' THEN 1 ELSE 0 END) AS wins,
+            SUM(CASE WHEN result IN ('win','loss') THEN COALESCE(stake_units,1) ELSE 0 END) AS staked,
+            SUM(COALESCE(profit_units, 0)) AS profit,
+            AVG(clv_pct) AS avg_clv,
+            SUM(CASE WHEN clv_pct IS NOT NULL THEN 1 ELSE 0 END) AS clv_n
+          FROM ranked WHERE rn = 1
+        `).get(...params);
+      } else {
+        aggRow = db.prepare(`
+          SELECT
+            COUNT(*) AS n,
+            SUM(CASE WHEN result IS NULL THEN 1 ELSE 0 END) AS pending,
+            SUM(CASE WHEN result IN ('win','loss') THEN 1 ELSE 0 END) AS settled,
+            SUM(CASE WHEN result = 'win' THEN 1 ELSE 0 END) AS wins,
+            SUM(CASE WHEN result IN ('win','loss') THEN COALESCE(stake_units,1) ELSE 0 END) AS staked,
+            SUM(COALESCE(profit_units, 0)) AS profit,
+            AVG(clv_pct) AS avg_clv,
+            SUM(CASE WHEN clv_pct IS NOT NULL THEN 1 ELSE 0 END) AS clv_n
+          FROM market_tips_shadow
+          WHERE ${conds.join(' AND ')}
+        `).get(...params);
+      }
+      // Total raw (sem dedup) sempre disponível pra UI exibir "X dupes ocultadas"
+      const rawTotal = db.prepare(`
+        SELECT COUNT(*) AS n FROM market_tips_shadow WHERE ${conds.join(' AND ')}
+      `).get(...params).n || 0;
+
       // Try/catch: tenta incluir model_version (migration 055). Se DB ainda não
       // aplicou, cai pra query legacy sem a coluna.
+      const baseCols = `id, sport, team1, team2, league, best_of, market, line, side, label,
+        p_model, p_implied, odd, ev_pct, stake_units,
+        created_at, settled_at, result, profit_units,
+        close_odd, clv_pct, admin_dm_sent_at, is_live`;
+      const buildSelectSql = (extraCol) => {
+        if (dedup) {
+          return `
+            WITH ranked AS (
+              SELECT ${baseCols}${extraCol},
+                COUNT(*) OVER (PARTITION BY sport, ${PAIR}, market, COALESCE(side, '')) AS dupe_count,
+                ROW_NUMBER() OVER (
+                  PARTITION BY sport, ${PAIR}, market, COALESCE(side, '')
+                  ORDER BY COALESCE(p_model, 0) DESC, created_at DESC
+                ) AS rn
+              FROM market_tips_shadow
+              WHERE ${conds.join(' AND ')}
+            )
+            SELECT * FROM ranked WHERE rn = 1
+            ORDER BY created_at DESC
+            LIMIT ? OFFSET ?`;
+        }
+        return `
+          SELECT ${baseCols}${extraCol}, 1 AS dupe_count
+          FROM market_tips_shadow
+          WHERE ${conds.join(' AND ')}
+          ORDER BY created_at DESC
+          LIMIT ? OFFSET ?`;
+      };
       let rows;
       try {
-        rows = db.prepare(`
-          SELECT id, sport, team1, team2, league, best_of, market, line, side, label,
-                 p_model, p_implied, odd, ev_pct, stake_units,
-                 created_at, settled_at, result, profit_units,
-                 close_odd, clv_pct, admin_dm_sent_at, is_live, model_version
-          FROM market_tips_shadow
-          WHERE ${conds.join(' AND ')}
-          ORDER BY created_at DESC
-          LIMIT ?
-        `).all(...params, limit);
+        rows = db.prepare(buildSelectSql(', model_version')).all(...params, limit, offset);
       } catch (_) {
-        rows = db.prepare(`
-          SELECT id, sport, team1, team2, league, best_of, market, line, side, label,
-                 p_model, p_implied, odd, ev_pct, stake_units,
-                 created_at, settled_at, result, profit_units,
-                 close_odd, clv_pct, admin_dm_sent_at, is_live
-          FROM market_tips_shadow
-          WHERE ${conds.join(' AND ')}
-          ORDER BY created_at DESC
-          LIMIT ?
-        `).all(...params, limit);
+        rows = db.prepare(buildSelectSql('')).all(...params, limit, offset);
       }
-      // Stats
-      const settled = rows.filter(r => r.result === 'win' || r.result === 'loss');
-      const wins = settled.filter(r => r.result === 'win').length;
-      const staked = settled.reduce((s, r) => s + (r.stake_units || 1), 0);
-      const profit = rows.reduce((s, r) => s + (r.profit_units || 0), 0);
-      const clvRows = rows.filter(r => r.clv_pct != null);
-      const avgClv = clvRows.length ? +(clvRows.reduce((s, r) => s + r.clv_pct, 0) / clvRows.length).toFixed(2) : null;
+      // Remove rn da resposta (interno)
+      for (const r of rows) delete r.rn;
+      const wins = aggRow.wins || 0;
+      const settled = aggRow.settled || 0;
+      const staked = aggRow.staked || 0;
+      const profit = aggRow.profit || 0;
+      const clvN = aggRow.clv_n || 0;
       sendJson(res, {
         sport: sport || 'all',
-        days, limit,
-        total: rows.length,
-        settled: settled.length,
-        pending: rows.filter(r => !r.result).length,
-        wins, losses: settled.length - wins,
-        winRate: settled.length ? +(wins / settled.length * 100).toFixed(1) : null,
+        days, limit, offset, dedup,
+        total: aggRow.n || 0,
+        rawTotal,
+        dupesHidden: dedup ? Math.max(0, rawTotal - (aggRow.n || 0)) : 0,
+        page: Math.floor(offset / limit),
+        totalPages: Math.max(1, Math.ceil((aggRow.n || 0) / limit)),
+        settled,
+        pending: aggRow.pending || 0,
+        wins, losses: settled - wins,
+        winRate: settled > 0 ? +(wins / settled * 100).toFixed(1) : null,
         staked: +staked.toFixed(2),
         profit: +profit.toFixed(2),
         roi: staked > 0 ? +((profit / staked) * 100).toFixed(1) : null,
-        avgClvPct: avgClv,
-        clvSamples: clvRows.length,
+        avgClvPct: clvN > 0 ? +(aggRow.avg_clv || 0).toFixed(2) : null,
+        clvSamples: clvN,
         tips: rows,
       });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
+  // GET /market-tips-by-sport?days=30&includeVoid=0&dedup=1
+  // Stats agregados POR ESPORTE — n total/settled/pending, hit, ROI, CLV, profit.
+  // dedup=1 (default): colapsa por (sport, teams_norm, market, side) — mostra
+  // tips ÚNICAS (não rebroadcasts).
+  if (p === '/market-tips-by-sport') {
+    const days = Math.max(1, Math.min(180, parseInt(parsed.query.days || '30', 10) || 30));
+    const includeVoid = parsed.query.includeVoid === '1';
+    const dedup = parsed.query.dedup !== '0';
+    try {
+      const conds = [`created_at >= datetime('now', '-${days} days')`];
+      if (!includeVoid) conds.push(`(result IS NULL OR result != 'void')`);
+      const T1 = "lower(REPLACE(REPLACE(REPLACE(REPLACE(team1,' ',''),'-',''),'.',''),'''',''))";
+      const T2 = "lower(REPLACE(REPLACE(REPLACE(REPLACE(team2,' ',''),'-',''),'.',''),'''',''))";
+      const PAIR = `CASE WHEN ${T1} < ${T2} THEN ${T1}||'|'||${T2} ELSE ${T2}||'|'||${T1} END`;
+      const rows = db.prepare(dedup ? `
+        WITH ranked AS (
+          SELECT *,
+            ROW_NUMBER() OVER (
+              PARTITION BY sport, ${PAIR}, market, COALESCE(side, '')
+              ORDER BY COALESCE(p_model, 0) DESC, created_at DESC
+            ) AS rn
+          FROM market_tips_shadow
+          WHERE ${conds.join(' AND ')}
+        )
+        SELECT
+          sport,
+          COUNT(*) AS n,
+          SUM(CASE WHEN result IS NULL THEN 1 ELSE 0 END) AS pending,
+          SUM(CASE WHEN result = 'void' THEN 1 ELSE 0 END) AS voided,
+          SUM(CASE WHEN result IN ('win','loss') THEN 1 ELSE 0 END) AS settled,
+          SUM(CASE WHEN result = 'win' THEN 1 ELSE 0 END) AS wins,
+          SUM(CASE WHEN is_live = 1 THEN 1 ELSE 0 END) AS live_n,
+          SUM(CASE WHEN admin_dm_sent_at IS NOT NULL THEN 1 ELSE 0 END) AS dm_sent,
+          SUM(CASE WHEN result IN ('win','loss') THEN COALESCE(stake_units,1) ELSE 0 END) AS staked,
+          SUM(COALESCE(profit_units, 0)) AS profit,
+          AVG(ev_pct) AS avg_ev,
+          AVG(clv_pct) AS avg_clv,
+          SUM(CASE WHEN clv_pct IS NOT NULL THEN 1 ELSE 0 END) AS clv_n,
+          SUM(CASE WHEN clv_pct > 0 THEN 1 ELSE 0 END) AS clv_pos,
+          MAX(created_at) AS last_at
+        FROM ranked WHERE rn = 1
+        GROUP BY sport
+        ORDER BY n DESC
+      ` : `
+        SELECT
+          sport,
+          COUNT(*) AS n,
+          SUM(CASE WHEN result IS NULL THEN 1 ELSE 0 END) AS pending,
+          SUM(CASE WHEN result = 'void' THEN 1 ELSE 0 END) AS voided,
+          SUM(CASE WHEN result IN ('win','loss') THEN 1 ELSE 0 END) AS settled,
+          SUM(CASE WHEN result = 'win' THEN 1 ELSE 0 END) AS wins,
+          SUM(CASE WHEN is_live = 1 THEN 1 ELSE 0 END) AS live_n,
+          SUM(CASE WHEN admin_dm_sent_at IS NOT NULL THEN 1 ELSE 0 END) AS dm_sent,
+          SUM(CASE WHEN result IN ('win','loss') THEN COALESCE(stake_units,1) ELSE 0 END) AS staked,
+          SUM(COALESCE(profit_units, 0)) AS profit,
+          AVG(ev_pct) AS avg_ev,
+          AVG(clv_pct) AS avg_clv,
+          SUM(CASE WHEN clv_pct IS NOT NULL THEN 1 ELSE 0 END) AS clv_n,
+          SUM(CASE WHEN clv_pct > 0 THEN 1 ELSE 0 END) AS clv_pos,
+          MAX(created_at) AS last_at
+        FROM market_tips_shadow
+        WHERE ${conds.join(' AND ')}
+        GROUP BY sport
+        ORDER BY n DESC
+      `).all();
+      const sports = rows.map(r => ({
+        sport: r.sport,
+        n: r.n,
+        pending: r.pending || 0,
+        voided: r.voided || 0,
+        settled: r.settled || 0,
+        wins: r.wins || 0,
+        losses: (r.settled || 0) - (r.wins || 0),
+        live_n: r.live_n || 0,
+        dm_sent: r.dm_sent || 0,
+        hitRate: r.settled > 0 ? +((r.wins / r.settled) * 100).toFixed(1) : null,
+        staked: +(r.staked || 0).toFixed(2),
+        profit: +(r.profit || 0).toFixed(2),
+        roi: r.staked > 0 ? +((r.profit / r.staked) * 100).toFixed(1) : null,
+        avgEv: r.n > 0 ? +(r.avg_ev || 0).toFixed(1) : null,
+        avgClv: r.clv_n > 0 ? +(r.avg_clv || 0).toFixed(2) : null,
+        clvN: r.clv_n || 0,
+        clvPosPct: r.clv_n > 0 ? +((r.clv_pos / r.clv_n) * 100).toFixed(0) : null,
+        lastAt: r.last_at,
+      }));
+      sendJson(res, { days, dedup, sports });
     } catch (e) { sendJson(res, { error: e.message }, 500); }
     return;
   }

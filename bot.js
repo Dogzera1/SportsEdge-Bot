@@ -7347,6 +7347,77 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
         await send(token, chatId, txt);
         return;
       }
+      // /market-tips diag <sport> — mostra o estado de todos os gates pra explicar
+      // por que o DM real (admin) não dispara mesmo com shadow gerando tips.
+      if (parts[1]?.toLowerCase() === 'diag') {
+        const sp = (parts[2] || 'lol').toLowerCase();
+        const up = sp.toUpperCase();
+        const aliasUp = { dota2: 'DOTA', cs2: 'CS' }[sp] || up;
+        const envFlag = process.env[`${up}_MARKET_TIPS_ENABLED`] === 'true'
+          || process.env[`${aliasUp}_MARKET_TIPS_ENABLED`] === 'true';
+        const killSwitch = process.env.MARKET_TIPS_DM_KILL_SWITCH === 'true';
+        const tokenUni = (process.env.TIPS_UNIFIED_TOKEN || '').trim();
+        const tokenEsp = !!process.env.TELEGRAM_TOKEN_ESPORTS;
+        const tokenSpec = !!process.env[`TELEGRAM_TOKEN_${up}`];
+        const minEv = parseFloat(process.env[`${up}_MARKET_TIP_MIN_EV`] ?? '8');
+        const minPm = parseFloat(process.env[`${up}_MARKET_TIP_MIN_PMODEL`] ?? '0.55');
+        const maxEv = parseFloat(process.env.MARKET_TIP_MAX_EV ?? '25');
+        const minOddFloor = parseFloat(process.env.MT_MIN_ODD ?? '1.4');
+        const scanMinOdd = process.env[`${aliasUp}_MARKET_SCAN_MIN_ODD`];
+        const scanMaxOdd = process.env[`${aliasUp}_MARKET_SCAN_MAX_ODD`];
+        const scanOn = process.env[`${aliasUp}_MARKET_SCAN`] !== 'false';
+        // Runtime state (auto-disable per market+side)
+        const disabledRows = db.prepare(`
+          SELECT market, side, source, reason, clv_pct, clv_n, roi_pct, updated_at
+          FROM market_tips_runtime_state
+          WHERE sport = ? AND disabled = 1
+          ORDER BY updated_at DESC
+        `).all(sp).catch(() => []);
+        // Shadow recent
+        const shadowRecent = db.prepare(`
+          SELECT
+            COUNT(*) AS n_total,
+            SUM(CASE WHEN created_at >= datetime('now','-24 hours') THEN 1 ELSE 0 END) AS n_24h,
+            SUM(CASE WHEN created_at >= datetime('now','-7 days') THEN 1 ELSE 0 END) AS n_7d,
+            SUM(CASE WHEN admin_dm_sent_at IS NOT NULL AND admin_dm_sent_at >= datetime('now','-7 days') THEN 1 ELSE 0 END) AS dm_7d,
+            MAX(created_at) AS last
+          FROM market_tips_shadow
+          WHERE sport = ?
+        `).get(sp);
+        const dmDedupRows = db.prepare(`
+          SELECT COUNT(*) AS n, MAX(last_dm_at) AS last
+          FROM market_tip_dm_sent
+          WHERE sport = ?
+        `).get(sp).catch(() => ({ n: 0, last: null }));
+        let txt = `🔧 *MT DIAG — ${sp}*\n\n`;
+        txt += `*Gates:*\n`;
+        txt += `${envFlag ? '✅' : '❌'} \`${up}_MARKET_TIPS_ENABLED\`\n`;
+        txt += `${killSwitch ? '❌ ON (kill switch ATIVO!)' : '✅ MARKET_TIPS_DM_KILL_SWITCH off'}\n`;
+        txt += `${scanOn ? '✅' : '❌'} \`${aliasUp}_MARKET_SCAN\` (scanner ${scanOn ? 'ON' : 'OFF'})\n`;
+        txt += `${ADMIN_IDS.size ? '✅' : '❌'} ADMIN_IDS (${ADMIN_IDS.size})\n\n`;
+        txt += `*Token routing (\`resolveTipsToken('esports')\`):*\n`;
+        txt += `${tokenUni ? '✅ TIPS_UNIFIED_TOKEN' : (tokenEsp ? '✅ TELEGRAM_TOKEN_ESPORTS' : '❌ NENHUM')}${tokenSpec ? ` + \`TELEGRAM_TOKEN_${up}\` set` : ''}\n\n`;
+        txt += `*Thresholds:*\n`;
+        txt += `EV ${minEv}–${maxEv}% · pModel ≥${(minPm*100).toFixed(0)}%\n`;
+        txt += `MT_MIN_ODD floor: ${minOddFloor}\n`;
+        txt += `Scanner odd: ${scanMinOdd ?? 'auto'}–${scanMaxOdd ?? 'auto'}\n\n`;
+        txt += `*Shadow ${sp}:*\n`;
+        txt += `total=${shadowRecent.n_total} 7d=${shadowRecent.n_7d} 24h=${shadowRecent.n_24h}\n`;
+        txt += `last shadow: ${String(shadowRecent.last||'?').slice(0,16)}\n`;
+        txt += `DMs enviados 7d: ${shadowRecent.dm_7d}\n`;
+        txt += `Dedup table (062): n=${dmDedupRows.n} last=${String(dmDedupRows.last||'?').slice(0,16)}\n\n`;
+        if (disabledRows.length) {
+          txt += `🚫 *Auto-disabled (${disabledRows.length}):*\n`;
+          for (const r of disabledRows.slice(0, 8)) {
+            txt += `  ${r.market}/${r.side ?? '*'}: ${r.source} (${r.reason})\n`;
+          }
+        } else {
+          txt += `✅ Nenhum (sport,market,side) auto-disabled\n`;
+        }
+        await send(token, chatId, txt);
+        return;
+      }
+
       // /market-tips audit [sport] [days] — auditoria consolidada com recomendação por segment.
       // Categoriza (sport, market, side, isLive) em ATIVAR / OBSERVAR / LEAK / CLV-WARN / NEUTRAL.
       if (parts[1]?.toLowerCase() === 'audit') {
