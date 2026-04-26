@@ -6150,7 +6150,7 @@ async function autoAnalyzeMatch(token, match) {
                           if (tokenForMT) {
                             const r = await sendAdminDMs(tokenForMT, dm, undefined, 'lol-market-tip');
                             if (r.sent > 0) {
-                              markAdminDmSent(db, { sport: 'lol', match, market: t.market, line: t.line, side: t.side });
+                              markAdminDmSent(db, { sport: 'lol', match, market: t.market, line: t.line, side: t.side, odd: t.odd, ev: t.ev });
                               log('INFO', 'LOL-MARKET-TIP', `Admin DM enviado: ${t.label} @ ${t.odd} EV ${t.ev}% stake ${stake}u (sent=${r.sent} failed=${r.failed})`);
                             } else {
                               log('WARN', 'LOL-MARKET-TIP', `Todos admin DM falharam — skip dedup mark (${t.label} @ ${t.odd})`);
@@ -7356,10 +7356,24 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
         const MIN_ROI = parseFloat(process.env.MT_READY_MIN_ROI || '5');
         const MIN_CLV_N = parseInt(process.env.MT_READY_MIN_CLV_N || '10', 10);
         const sportWhere = sportFilter ? `AND sport = '${sportFilter.replace(/'/g, "''")}'` : '';
+        // Diagnóstico geral antes de filtrar — assim o usuário vê quando shadow tá vazio
+        // ou quando settle não tá rodando, em vez de mensagem ambígua "nenhum segment".
+        const overall = db.prepare(`
+          SELECT COUNT(*) AS n,
+            SUM(CASE WHEN result IS NULL THEN 1 ELSE 0 END) AS pending,
+            SUM(CASE WHEN result = 'void' THEN 1 ELSE 0 END) AS voided,
+            SUM(CASE WHEN result IN ('win','loss') THEN 1 ELSE 0 END) AS settled,
+            MIN(created_at) AS oldest,
+            MAX(created_at) AS newest
+          FROM market_tips_shadow
+          WHERE created_at >= datetime('now', '-${days} days') ${sportWhere}
+        `).get();
         const rows = db.prepare(`
           SELECT sport, market, COALESCE(side, '-') AS side,
             COALESCE(is_live, 0) AS is_live,
             COUNT(*) AS n,
+            SUM(CASE WHEN result IS NULL THEN 1 ELSE 0 END) AS pending,
+            SUM(CASE WHEN result = 'void' THEN 1 ELSE 0 END) AS voided,
             SUM(CASE WHEN result IN ('win','loss') THEN 1 ELSE 0 END) AS settled,
             SUM(CASE WHEN result = 'win' THEN 1 ELSE 0 END) AS wins,
             SUM(COALESCE(profit_units, 0)) AS profit,
@@ -7372,11 +7386,25 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
           WHERE created_at >= datetime('now', '-${days} days')
             ${sportWhere}
           GROUP BY sport, market, COALESCE(side, '-'), COALESCE(is_live, 0)
-          HAVING settled >= 5
+          HAVING n >= 3
           ORDER BY sport, market, is_live, side
         `).all();
         if (!rows.length) {
-          await send(token, chatId, `📊 Audit: nenhum segment com ≥5 settled em ${days}d${sportFilter ? ' ('+sportFilter+')' : ''}`);
+          let txt = `📊 *AUDIT — sem segments (n≥3) em ${days}d${sportFilter ? ' ('+sportFilter+')' : ''}*\n\n`;
+          txt += `Total tips no período: *${overall.n || 0}*\n`;
+          if (overall.n > 0) {
+            txt += `  pending=${overall.pending} void=${overall.voided} settled=${overall.settled}\n`;
+            txt += `  janela: ${String(overall.oldest||'').slice(0,16)} → ${String(overall.newest||'').slice(0,16)}\n\n`;
+            if (overall.settled === 0) {
+              txt += `⚠️ *0 settled* — settlement gap. Cheque:\n`;
+              txt += `  • match_results sync rodando? (gol.gg/HLTV/OE/Sofascore)\n`;
+              txt += `  • runShadowSettle cron ativo?\n`;
+              txt += `  • Tips ainda recentes? (settle só roda em tips ≥2h)\n`;
+            }
+          } else {
+            txt += `Shadow vazio. Scanner não logou nada — cheque \`*_MARKET_TIPS_ENABLED\` e \`MT_MIN_ODD\`.\n`;
+          }
+          await send(token, chatId, txt);
           return;
         }
         const cat = { activate: [], watch: [], leak: [], clvWarn: [], neutral: [] };
@@ -11301,7 +11329,7 @@ async function _pollDotaInner(runOnce = false) {
                         if (tokenForMT) {
                           const r = await sendAdminDMs(tokenForMT, dm, undefined, 'dota-market-tip');
                           if (r.sent > 0) {
-                            markAdminDmSent(db, { sport: 'dota2', match, market: t.market, line: t.line, side: t.side });
+                            markAdminDmSent(db, { sport: 'dota2', match, market: t.market, line: t.line, side: t.side, odd: t.odd, ev: t.ev });
                             log('INFO', 'DOTA-MARKET-TIP', `Admin DM: ${t.label} @ ${t.odd} EV ${t.ev}% stake ${stake}u (sent=${r.sent} failed=${r.failed})`);
                           } else {
                             log('WARN', 'DOTA-MARKET-TIP', `Todos admin DM falharam — skip dedup mark (${t.label} @ ${t.odd})`);
@@ -13091,7 +13119,7 @@ async function pollTennis(runOnce = false) {
                             if (tnToken) {
                               const r = await sendAdminDMs(tnToken, dm, undefined, 'tennis-market-tip');
                               if (r.sent > 0) {
-                                markAdminDmSent(db, { sport: 'tennis', match, market: t.market, line: t.line, side: t.side });
+                                markAdminDmSent(db, { sport: 'tennis', match, market: t.market, line: t.line, side: t.side, odd: t.odd, ev: t.ev });
                                 const discTag = t.correlationDiscount > 0 ? ` (corr-disc ${(t.correlationDiscount*100).toFixed(0)}%)` : '';
                                 log('INFO', 'TENNIS-MARKET-TIP', `Admin DM: ${t.label} @ ${t.odd} EV ${t.ev}% stake ${stake}u${discTag} (sent=${r.sent} failed=${r.failed})`);
                               } else {
@@ -15043,7 +15071,7 @@ async function pollCs(runOnce = false) {
                           if (tokenForMT) {
                             const r = await sendAdminDMs(tokenForMT, dm, undefined, 'cs-market-tip');
                             if (r.sent > 0) {
-                              markAdminDmSent(db, { sport: 'cs2', match, market: t.market, line: t.line, side: t.side });
+                              markAdminDmSent(db, { sport: 'cs2', match, market: t.market, line: t.line, side: t.side, odd: t.odd, ev: t.ev });
                               log('INFO', 'CS-MARKET-TIP', `Admin DM: ${t.label} @ ${t.odd} EV ${t.ev}% stake ${stake}u (sent=${r.sent} failed=${r.failed})`);
                             } else {
                               log('WARN', 'CS-MARKET-TIP', `Todos admin DM falharam — skip dedup mark (${t.label} @ ${t.odd})`);
@@ -15617,7 +15645,7 @@ async function pollValorant(runOnce = false) {
                           if (tokenForMT) {
                             const r = await sendAdminDMs(tokenForMT, dm, undefined, 'val-market-tip');
                             if (r.sent > 0) {
-                              markAdminDmSent(db, { sport: 'valorant', match, market: t.market, line: t.line, side: t.side });
+                              markAdminDmSent(db, { sport: 'valorant', match, market: t.market, line: t.line, side: t.side, odd: t.odd, ev: t.ev });
                               log('INFO', 'VAL-MARKET-TIP', `Admin DM: ${t.label} @ ${t.odd} EV ${t.ev}% stake ${stake}u (sent=${r.sent} failed=${r.failed})`);
                             } else {
                               log('WARN', 'VAL-MARKET-TIP', `Todos admin DM falharam — skip dedup mark (${t.label} @ ${t.odd})`);

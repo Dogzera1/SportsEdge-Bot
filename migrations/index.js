@@ -1536,6 +1536,32 @@ const migrations = [
       `);
     },
   },
+  {
+    id: '062_market_tip_dm_sent',
+    up(db) {
+      // Tabela dedicada pra dedup de market-tip DM, independente de market_tips_shadow.
+      // Antes o dedup lia admin_dm_sent_at do shadow row — frágil porque UPGRADE,
+      // result settlement, void cleanup e race conditions podiam zerar o sinal.
+      // Chave: (sport, t1_norm, t2_norm, market, side) — IGNORA line de propósito
+      // (model bouncing entre +4.5 / +2.5 no mesmo (market, side) NÃO deve gerar 2 DMs).
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS market_tip_dm_sent (
+          sport TEXT NOT NULL,
+          team1_norm TEXT NOT NULL,
+          team2_norm TEXT NOT NULL,
+          market TEXT NOT NULL,
+          side TEXT,
+          last_dm_at TEXT NOT NULL,
+          last_line REAL,
+          last_odd REAL,
+          last_ev_pct REAL,
+          PRIMARY KEY (sport, team1_norm, team2_norm, market, side)
+        );
+        CREATE INDEX IF NOT EXISTS idx_mt_dm_sent_at
+          ON market_tip_dm_sent (last_dm_at DESC);
+      `);
+    },
+  },
 ];
 
 function applyMigrations(db) {
