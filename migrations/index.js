@@ -1512,6 +1512,30 @@ const migrations = [
       `);
     },
   },
+  {
+    id: '061_book_bug_events',
+    up(db) {
+      // Book bug finder (intra-book inconsistency): registra quando casa BR
+      // tem mercado com bug matemático — implied sum <100% (arb grátis dentro
+      // do mesmo book) ou divergência forte BTTS↔OU2.5 que indica mispricing.
+      // Diferente de super_odd_events (cross-book outlier vs mediana),
+      // bug_events foca em inconsistências INTERNAS do book.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS book_bug_events (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          casa TEXT NOT NULL,
+          jogo_id TEXT,
+          bug_type TEXT NOT NULL,
+          payload_json TEXT,
+          detected_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_book_bug_casa_at
+          ON book_bug_events (casa, detected_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_book_bug_type_at
+          ON book_bug_events (bug_type, detected_at DESC);
+      `);
+    },
+  },
 ];
 
 function applyMigrations(db) {

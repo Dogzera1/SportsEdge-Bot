@@ -3795,6 +3795,13 @@ const server = http.createServer(async (req, res) => {
       return new Date(a.time) - new Date(b.time);
     });
 
+    try {
+      if (process.env.SUPABASE_URL && process.env.SUPABASE_ANON_KEY && process.env.AGGREGATOR_DISABLED !== 'true') {
+        const aggClient = require('./lib/odds-aggregator-client');
+        const r = await aggClient.enrichEsportsMatches(combined);
+        if (r?.enriched > 0) log('INFO', 'AGGREGATOR-LOL', `BR odds enriched ${r.enriched}/${combined.length} (${r.totalEsports || 0} esports jogos)`);
+      }
+    } catch (e) { log('WARN', 'AGGREGATOR-LOL', `enrich err: ${e.message}`); }
     sendJson(res, combined.slice(0, 30));
     return;
   }
@@ -5233,6 +5240,13 @@ const server = http.createServer(async (req, res) => {
 
       const oddsSrc = ODDS_API_IO_KEY ? 'Odds-API.io' : 'TheOdds';
       const withMapOdds = combined.filter(m => m.mapOdds).length;
+      try {
+        if (process.env.SUPABASE_URL && process.env.SUPABASE_ANON_KEY && process.env.AGGREGATOR_DISABLED !== 'true') {
+          const aggClient = require('./lib/odds-aggregator-client');
+          const r = await aggClient.enrichEsportsMatches(combined);
+          if (r?.enriched > 0) log('INFO', 'AGGREGATOR-DOTA', `BR odds enriched ${r.enriched}/${combined.length} (${r.totalEsports || 0} esports jogos)`);
+        }
+      } catch (e) { log('WARN', 'AGGREGATOR-DOTA', `enrich err: ${e.message}`); }
       log('INFO', 'DOTA2', `/dota-matches: ${combined.length} total (${liveFromPs.length} live PS, ${oddsMatches.length} odds ${oddsSrc}${withMapOdds ? `, ${withMapOdds} com mapOdds` : ''})`);
       _dotaMatchesResp = { data: combined, ts: Date.now() };
       sendJson(res, combined);
@@ -5322,6 +5336,15 @@ const server = http.createServer(async (req, res) => {
         return new Date(a.time) - new Date(b.time);
       });
 
+      // BR books enrichment (Sportingbet/KTO/Betnacional) via Supabase aggregator.
+      // Hoje view só publica esporte={futebol,tenis} — função no-op até scraper publicar esports.
+      try {
+        if (process.env.SUPABASE_URL && process.env.SUPABASE_ANON_KEY && process.env.AGGREGATOR_DISABLED !== 'true') {
+          const aggClient = require('./lib/odds-aggregator-client');
+          const r = await aggClient.enrichEsportsMatches(combined);
+          if (r?.enriched > 0) log('INFO', 'AGGREGATOR-CS', `BR odds enriched ${r.enriched}/${combined.length} (${r.totalEsports || 0} esports jogos)`);
+        }
+      } catch (e) { log('WARN', 'AGGREGATOR-CS', `enrich err: ${e.message}`); }
       log('INFO', 'CS', `/cs-matches: ${combined.length} total (${liveFromPs.length} live PS, ${pinMatches.length} odds Pinnacle)`);
       _csMatchesResp = { data: combined, ts: Date.now() };
       sendJson(res, combined);
@@ -5377,6 +5400,13 @@ const server = http.createServer(async (req, res) => {
         return new Date(a.time) - new Date(b.time);
       });
 
+      try {
+        if (process.env.SUPABASE_URL && process.env.SUPABASE_ANON_KEY && process.env.AGGREGATOR_DISABLED !== 'true') {
+          const aggClient = require('./lib/odds-aggregator-client');
+          const r = await aggClient.enrichEsportsMatches(combined);
+          if (r?.enriched > 0) log('INFO', 'AGGREGATOR-VAL', `BR odds enriched ${r.enriched}/${combined.length} (${r.totalEsports || 0} esports jogos)`);
+        }
+      } catch (e) { log('WARN', 'AGGREGATOR-VAL', `enrich err: ${e.message}`); }
       log('INFO', 'VALORANT', `/valorant-matches: ${combined.length} total (${liveFromPs.length} live PS, ${pinMatches.length} odds Pinnacle)`);
       _valorantMatchesResp = { data: combined, ts: Date.now() };
       sendJson(res, combined);

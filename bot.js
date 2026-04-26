@@ -17314,6 +17314,109 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   setInterval(() => runStaleLineCron(), 5 * 60 * 1000); // 5min
   setTimeout(() => runStaleLineCron(), 7 * 60 * 1000);  // primeira run 7min boot (após 1ª auto-sample)
 
+  // Book bug finder: varre snapshots_odds Supabase, detecta arb intra-book
+  // (1X2 / OU / BTTS implied <100%) + divergência cross-market. Diferente do
+  // super-odd-detector — aqui o bug é MATEMATICAMENTE errado dentro do mesmo
+  // book, não outlier vs outros books. Cron 5min.
+  async function runBookBugFinderCron() {
+    if (/^(1|true|yes)$/i.test(String(process.env.BUG_FINDER_DISABLED || ''))) return;
+    if (!process.env.SUPABASE_URL || !process.env.SUPABASE_ANON_KEY) return;
+    try {
+      const aggClient = require('./lib/odds-aggregator-client');
+      const finder = require('./lib/book-bug-finder');
+      const snapshots = await aggClient.fetchRecentSnapshots({ hoursBack: 1 });
+      if (!Array.isArray(snapshots) || !snapshots.length) return;
+      let bugCount = 0;
+      const dmsToSend = [];
+      for (const snap of snapshots) {
+        const bugs = finder.findBugsInSnapshot(snap);
+        for (const evt of bugs) {
+          finder.persistEvent(db, evt);
+          bugCount++;
+          if (finder.shouldDm(evt.casa, evt.jogoId, evt.bug)) dmsToSend.push(evt);
+        }
+      }
+      if (bugCount > 0) log('INFO', 'BUG-FINDER', `${bugCount} bug(s) detectado(s) em ${snapshots.length} snapshots; ${dmsToSend.length} DM(s) novos`);
+      if (dmsToSend.length && ADMIN_IDS.size) {
+        const tk = resolveOpportunitiesToken();
+        if (tk) {
+          for (const evt of dmsToSend.slice(0, 5)) {
+            let body;
+            if (evt.bug === 'arb_1x2') {
+              const stake = 100;
+              const sH = +(stake * (1/evt.odds.h) * evt.impliedSum).toFixed(2);
+              const sD = +(stake * (1/evt.odds.d) * evt.impliedSum).toFixed(2);
+              const sA = +(stake * (1/evt.odds.a) * evt.impliedSum).toFixed(2);
+              const payout = +(stake / evt.impliedSum).toFixed(2);
+              body = `🐛 *BUG INTRA-BOOK — 1X2*\n\n*${evt.casa}* tem implied sum *${evt.impliedPct}%* (<100%, arb grátis dentro do mesmo book)\n\n` +
+                `Casa: ${evt.odds.h}  Empate: ${evt.odds.d}  Fora: ${evt.odds.a}\n` +
+                `Lucro garantido: *+${evt.profitPct}%*\n\n` +
+                `Stake R$${stake} total: H R$${sH} · D R$${sD} · A R$${sA}\n` +
+                `Payout qualquer resultado: *R$${payout}*`;
+            } else if (evt.bug === 'arb_ou25') {
+              const stake = 100;
+              const sO = +(stake * (1/evt.odds.over) * evt.impliedSum).toFixed(2);
+              const sU = +(stake * (1/evt.odds.under) * evt.impliedSum).toFixed(2);
+              const payout = +(stake / evt.impliedSum).toFixed(2);
+              body = `🐛 *BUG INTRA-BOOK — OU 2.5*\n\n*${evt.casa}* tem implied *${evt.impliedPct}%*\n\nOver: ${evt.odds.over}  Under: ${evt.odds.under}\nLucro: *+${evt.profitPct}%*\n\nStake R$${stake}: O R$${sO} · U R$${sU} → *R$${payout}*`;
+            } else if (evt.bug === 'arb_btts') {
+              body = `🐛 *BUG INTRA-BOOK — BTTS*\n\n*${evt.casa}* implied *${evt.impliedPct}%*\nSim: ${evt.odds.yes}  Não: ${evt.odds.no}\nLucro: *+${evt.profitPct}%*`;
+            } else if (evt.bug === 'btts_ou_divergence') {
+              body = `🐛 *MISPRICING — ${evt.casa}*\n\nBTTS↔OU2.5 divergem ${evt.divPp}pp (P_over=${(evt.pOverDevig*100).toFixed(0)}% vs P_btts=${(evt.pBttsDevig*100).toFixed(0)}%)\n\nOver ${evt.odds.over} / Under ${evt.odds.under}\nBTTS Sim ${evt.odds.btts_yes} / Não ${evt.odds.btts_no}\n\nProvável bug: *${evt.culprit}*`;
+            }
+            if (body) for (const adminId of ADMIN_IDS) sendDM(tk, adminId, body).catch(() => {});
+          }
+        }
+      }
+    } catch (e) { log('ERROR', 'BUG-FINDER', e.message); }
+  }
+  setInterval(() => runBookBugFinderCron(), 5 * 60 * 1000);
+  setTimeout(() => runBookBugFinderCron(), 8 * 60 * 1000);
+
+  // Scraper health monitor: cron 30min consulta execucoes_scraper no Supabase
+  // e DMa admin quando casa muda de estado (saudavel→degradada→morta).
+  // Trata `sucesso-vazio` em massa como sinal de seletor quebrado / Cloudflare.
+  // Memory: estado anterior por casa pra emitir só transições, não spam.
+  const _lastScraperHealth = new Map();
+  let _scraperHealthFirstRun = true;
+  async function runScraperHealthCron() {
+    if (/^(1|true|yes)$/i.test(String(process.env.SCRAPER_HEALTH_DISABLED || ''))) return;
+    if (!process.env.SUPABASE_URL || !process.env.SUPABASE_ANON_KEY) return;
+    try {
+      const aggClient = require('./lib/odds-aggregator-client');
+      const health = await aggClient.fetchScraperHealth();
+      if (!health || !Array.isArray(health.houses)) return;
+      const transitions = [];
+      for (const h of health.houses) {
+        const prev = _lastScraperHealth.get(h.casa) || 'saudavel';
+        if (prev !== h.state) transitions.push({ ...h, prev });
+        _lastScraperHealth.set(h.casa, h.state);
+      }
+      // Primeiro run: reporta SÓ casas degradada/morta sem reclamar de transição
+      if (_scraperHealthFirstRun) {
+        _scraperHealthFirstRun = false;
+        const bad = health.houses.filter(h => h.state !== 'saudavel');
+        if (bad.length) log('WARN', 'SCRAPER-HEALTH', `${bad.length} casa(s) não-saudáveis no boot: ${bad.map(b => `${b.casa}=${b.state}`).join(', ')}`);
+      }
+      if (transitions.length) {
+        log('INFO', 'SCRAPER-HEALTH', `${transitions.length} transição(ões): ${transitions.map(t => `${t.casa} ${t.prev}→${t.state}`).join(', ')}`);
+        if (ADMIN_IDS.size) {
+          const tk = resolveAlertsToken();
+          if (tk) {
+            const lines = transitions.map(t => {
+              const emoji = t.state === 'morta' ? '💀' : t.state === 'degradada' ? '⚠️' : '✅';
+              return `${emoji} *${t.casa}*: ${t.prev} → *${t.state}*` + (t.reason ? `\n   _${t.reason}_` : '');
+            });
+            const msg = `🔧 *Scraper BR — health update*\n\n${lines.join('\n\n')}`;
+            for (const adminId of ADMIN_IDS) sendDM(tk, adminId, msg).catch(() => {});
+          }
+        }
+      }
+    } catch (e) { log('ERROR', 'SCRAPER-HEALTH', e.message); }
+  }
+  setInterval(() => runScraperHealthCron(), 30 * 60 * 1000);
+  setTimeout(() => runScraperHealthCron(), 4 * 60 * 1000);
+
   // Vetor 7 — Dota snapshot collector: cron 60s captura Steam RT + Pinnacle pareados.
   // Default ON. Desativar via DOTA_SNAPSHOT_ENABLED=false.
   if (/^(1|true|yes)$/i.test(String(process.env.DOTA_SNAPSHOT_ENABLED ?? 'true'))) {
