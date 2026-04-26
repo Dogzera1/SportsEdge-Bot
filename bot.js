@@ -17514,6 +17514,65 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   setInterval(() => runBookBugFinderCron(), 5 * 60 * 1000);
   setTimeout(() => runBookBugFinderCron(), 8 * 60 * 1000);
 
+  // BR Edges auto-DM: dispara DM admin quando edge cross-book persiste em 2
+  // ciclos consecutivos (sustentado >5min). Diferente do super-odd-detector
+  // (que dispara já no 1º hit) — exige confirmação pra reduzir falso positivo
+  // de book moveu por 1min e voltou. Cooldown DM 6h por (casa, jogo, side).
+  // Opt-out: BR_EDGES_AUTO_DM_DISABLED=true.
+  const _brEdgesPrev = new Map(); // key=`${jogo}|${casa}|${market}|${side}` → {ratio, ev, ts}
+  const _brEdgesDmAt = new Map();
+  async function runBrEdgesAutoDmCron() {
+    if (/^(1|true|yes)$/i.test(String(process.env.BR_EDGES_AUTO_DM_DISABLED || ''))) return;
+    if (!process.env.SUPABASE_URL || !process.env.SUPABASE_ANON_KEY) return;
+    if (!ADMIN_IDS.size) return;
+    try {
+      const minRatio = parseFloat(process.env.BR_EDGES_AUTO_DM_MIN_RATIO || '1.10');
+      const minEv = parseFloat(process.env.BR_EDGES_AUTO_DM_MIN_EV || '8');
+      const cooldownMs = parseInt(process.env.BR_EDGES_AUTO_DM_COOLDOWN_MIN || '360', 10) * 60 * 1000;
+      const aggClient = require('./lib/odds-aggregator-client');
+      const edges = await aggClient.fetchActiveEdgesBr({ minRatio });
+      if (!Array.isArray(edges)) return;
+      const now = Date.now();
+      const sustained = [];
+      const seenThisRun = new Set();
+      for (const e of edges) {
+        if (e.ev_estimado_pct < minEv) continue;
+        const k = `${e.jogo_id}|${e.casa}|${e.market}|${e.side}`;
+        seenThisRun.add(k);
+        const prev = _brEdgesPrev.get(k);
+        if (prev) {
+          // Edge sustentado ≥1 ciclo (≈5min)
+          const lastDm = _brEdgesDmAt.get(k) || 0;
+          if (now - lastDm >= cooldownMs) sustained.push(e);
+        }
+        _brEdgesPrev.set(k, { ratio: e.ratio, ev: e.ev_estimado_pct, ts: now });
+      }
+      // Limpa entries velhas (>30min)
+      for (const [k, v] of _brEdgesPrev) {
+        if (now - v.ts > 30 * 60 * 1000) _brEdgesPrev.delete(k);
+      }
+      if (!sustained.length) return;
+      const tk = resolveOpportunitiesToken();
+      if (!tk) return;
+      log('INFO', 'BR-EDGES-DM', `${sustained.length} edge(s) sustentados`);
+      for (const e of sustained.slice(0, 5)) {
+        const k = `${e.jogo_id}|${e.casa}|${e.market}|${e.side}`;
+        _brEdgesDmAt.set(k, now);
+        const when = e.inicio ? new Date(e.inicio).toISOString().slice(5, 16).replace('T', ' ') : '?';
+        const msg = `🇧🇷 *BR EDGE SUSTENTADO* (${e.casa})\n\n` +
+          `*${e.mandante || '?'} × ${e.visitante || '?'}* (${when})\n` +
+          `Pick: *${e.label}* @ ${e.casa} *${e.odd_outlier}*\n` +
+          `Mediana ${e.n_books} books: ${e.odd_mediana} (+${((e.ratio-1)*100).toFixed(1)}%)\n\n` +
+          `EV estimado: *+${e.ev_estimado_pct}%*\n\n` +
+          `_Edge presente em ≥2 ciclos consecutivos (sustentado >5min)._\n` +
+          `_Cooldown 6h por (casa, jogo, side)._`;
+        for (const adminId of ADMIN_IDS) sendDM(tk, adminId, msg).catch(() => {});
+      }
+    } catch (e) { log('ERROR', 'BR-EDGES-DM', e.message); }
+  }
+  setInterval(() => runBrEdgesAutoDmCron(), 5 * 60 * 1000);
+  setTimeout(() => runBrEdgesAutoDmCron(), 9 * 60 * 1000);
+
   // Scraper health monitor: cron 30min consulta execucoes_scraper no Supabase
   // e DMa admin quando casa muda de estado (saudavel→degradada→morta).
   // Trata `sucesso-vazio` em massa como sinal de seletor quebrado / Cloudflare.
