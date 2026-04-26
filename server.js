@@ -11981,6 +11981,76 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
     return;
   }
 
+  // Lista duplicatas em market_tips_shadow agrupadas por (sport, teams_norm, market[, side]).
+  // Útil pra diagnosticar bypasses de dedup. Default mostra dupes pending; pendingOnly=0 inclui settled.
+  // GET /admin/mt-dupes?days=7&sport=tennis&pendingOnly=1&groupBy=match|market|sideline&key=<ADMIN_KEY>
+  if (p === '/admin/mt-dupes') {
+    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    try {
+      const days = Math.max(1, Math.min(90, parseInt(parsed.query.days || '7', 10) || 7));
+      const sport = parsed.query.sport ? String(parsed.query.sport) : null;
+      const pendingOnly = String(parsed.query.pendingOnly ?? '1') === '1';
+      const groupBy = String(parsed.query.groupBy || 'match'); // match|market|sideline
+      const NORM_PAIR = `
+        CASE WHEN
+          lower(REPLACE(REPLACE(REPLACE(REPLACE(team1,' ',''),'-',''),'.',''),'''','''))
+          <
+          lower(REPLACE(REPLACE(REPLACE(REPLACE(team2,' ',''),'-',''),'.',''),'''','''))
+        THEN
+          lower(REPLACE(REPLACE(REPLACE(REPLACE(team1,' ',''),'-',''),'.',''),'''',''''))
+          || '|' ||
+          lower(REPLACE(REPLACE(REPLACE(REPLACE(team2,' ',''),'-',''),'.',''),'''',''''))
+        ELSE
+          lower(REPLACE(REPLACE(REPLACE(REPLACE(team2,' ',''),'-',''),'.',''),'''',''''))
+          || '|' ||
+          lower(REPLACE(REPLACE(REPLACE(REPLACE(team1,' ',''),'-',''),'.',''),'''',''''))
+        END
+      `;
+      let groupCols, extraCols;
+      if (groupBy === 'sideline') {
+        groupCols = `sport, ${NORM_PAIR}, market, side, line`;
+        extraCols = `, market, side, line`;
+      } else if (groupBy === 'market') {
+        groupCols = `sport, ${NORM_PAIR}, market`;
+        extraCols = `, market`;
+      } else {
+        groupCols = `sport, ${NORM_PAIR}`;
+        extraCols = ``;
+      }
+      const sportFilter = sport ? `AND sport = ?` : '';
+      const resultFilter = pendingOnly ? 'AND result IS NULL' : '';
+      const args = sport ? [days, sport] : [days];
+      const sql = `
+        SELECT sport ${extraCols},
+          COUNT(*) AS n,
+          GROUP_CONCAT(id) AS ids,
+          GROUP_CONCAT(team1 || ' vs ' || team2, ' || ') AS pairs,
+          GROUP_CONCAT(market || '/' || COALESCE(side,'-') || '@' || COALESCE(line,'-'), ', ') AS lines,
+          GROUP_CONCAT(odd, ',') AS odds,
+          GROUP_CONCAT(ROUND(ev_pct,1), ',') AS evs,
+          GROUP_CONCAT(created_at, ',') AS created_ats,
+          GROUP_CONCAT(COALESCE(result,'pending'), ',') AS results
+        FROM market_tips_shadow
+        WHERE created_at >= datetime('now', '-' || ? || ' days')
+          ${sportFilter}
+          ${resultFilter}
+        GROUP BY ${groupCols}
+        HAVING n > 1
+        ORDER BY n DESC, created_ats DESC
+        LIMIT 200
+      `;
+      const dupes = db.prepare(sql).all(...args);
+      sendJson(res, {
+        ok: true, days, sport, pendingOnly, groupBy,
+        totalDupeGroups: dupes.length,
+        totalDupeRows: dupes.reduce((s, d) => s + d.n, 0),
+        dupes,
+      });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
   // Recomputa stakes pras shadow tips pending com o novo cap (MARKET_TIP_MAX_STAKE_UNITS).
   // Lista tips com admin_dm_sent_at nas últimas N horas (match provavelmente não resolveu
   // ainda) e mostra old_stake (Kelly sem cap) vs new_stake (capped). Opcional: envia DM
