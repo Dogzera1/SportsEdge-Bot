@@ -17591,7 +17591,9 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
         }
         _brEdgesPrev.set(k, { ratio: e.ratio, ev: e.ev_estimado_pct, ts: now });
       }
-      if (skippedUnhealthy > 0) log('DEBUG', 'BR-EDGES-DM', `skipped ${skippedUnhealthy} edges (casa não-saudavel)`);
+      // Diagnostic: sempre logamos pra rastrear ciclos do cron + entender 0-sustained
+      const qualified = edges.filter(e => e.ev_estimado_pct >= minEv && healthByCasa.get(e.casa) === 'saudavel').length;
+      log('INFO', 'BR-EDGES-DM', `cycle: edges=${edges.length} qualified=${qualified} prev=${_brEdgesPrev.size} sustained=${sustained.length} skipped_unhealthy=${skippedUnhealthy}`);
       // Limpa entries velhas (>30min)
       for (const [k, v] of _brEdgesPrev) {
         if (now - v.ts > 30 * 60 * 1000) _brEdgesPrev.delete(k);
