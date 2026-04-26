@@ -9,3 +9,10 @@ data/
 start-bot.bat
 mma betting/
 .fuse_hidden*
+.tmp_*.json
+*.log
+tmp_server.log
+hist*.json
+_h*.json
+_hist*.json
+dash_hist.json
