@@ -1443,19 +1443,15 @@ function resolveAlertsToken() {
   return null;
 }
 
-// Token pra OPORTUNIDADES de bet (arb, super-odd, stale, sharp moves).
-// Diferente de "system alerts" (auto-healer/OE-sync) — são acionáveis pra bet.
-// Default: TIPS_UNIFIED_TOKEN (mesmo bot das tips). Override: OPPORTUNITY_TOKEN.
+// Token pra OPORTUNIDADES de bet (arb, super-odd, stale, sharp moves, BR edges,
+// book bugs). Roteia pro bot de ALERTAS por padrão (SYSTEM_ALERTS_TOKEN) —
+// usuário pediu separação 2026-04-26: tips no bot de tips, todo resto (alertas
+// + ineficiência de book + oportunidades cross-book) no bot de alertas.
+// Override explícito: OPPORTUNITY_TOKEN (se quiser bot dedicado).
 function resolveOpportunitiesToken() {
   const override = (process.env.OPPORTUNITY_TOKEN || '').trim();
   if (override) return override;
-  const unified = (process.env.TIPS_UNIFIED_TOKEN || '').trim();
-  if (unified) return unified;
-  // Fallback: primeiro sport enabled
-  for (const _sCfg of Object.values(SPORTS)) {
-    if (_sCfg?.enabled && _sCfg?.token) return _sCfg.token;
-  }
-  return null;
+  return resolveAlertsToken();
 }
 
 // Envia DM pra todos ADMIN_IDS, retorna { sent, failed }.
@@ -17211,7 +17207,7 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
 
           // 3-way arb football (h, d, a cross-book) — funciona em ambos modos
           const arb3 = arb.detect3WayArb({ sport: 'football', team1: m.team1, team2: m.team2, allOdds: all });
-          if (arb3 && arb.shouldDm(arb3.sport, arb3.matchKey, arb3.marketType)) {
+          if (arb3 && arb.shouldDm(arb3.sport, arb3.matchKey, arb3.marketType, undefined, db)) {
             arb.persistEvent(db, arb3);
             arbs++;
             if (ADMIN_IDS.size) {
@@ -17311,7 +17307,7 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
             const velEvt = pin
               ? vel.checkVelocity(slDet._ringBuf, { sport: 'football', team1: m.team1, team2: m.team2, side })
               : vel.checkVelocityCrossBook(slDet._ringBuf, { sport: 'football', team1: m.team1, team2: m.team2, side, books: allBooksSide });
-            if (velEvt && vel.shouldDm(velEvt.sport, velEvt.matchKey, velEvt.side)) {
+            if (velEvt && vel.shouldDm(velEvt.sport, velEvt.matchKey, velEvt.side, undefined, db)) {
               vel.persistEvent(db, velEvt);
               velocities++;
               if (ADMIN_IDS.size) {
@@ -17366,7 +17362,7 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
 
           // 2-way arb LoL (t1, t2 cross-book)
           const arb2 = arb.detect2WayArb({ sport: 'lol', team1: m.team1, team2: m.team2, allOdds: all });
-          if (arb2 && arb.shouldDm(arb2.sport, arb2.matchKey, arb2.marketType)) {
+          if (arb2 && arb.shouldDm(arb2.sport, arb2.matchKey, arb2.marketType, undefined, db)) {
             arb.persistEvent(db, arb2);
             arbs++;
             if (ADMIN_IDS.size) {
@@ -17396,7 +17392,7 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
             const evt = checkStaleLines({ sport: 'lol', team1: m.team1, team2: m.team2, side, pinOdd, brBooks });
             // Velocity LoL (silent — só count, accumula data)
             const velEvtLol = vel.checkVelocity(slDet._ringBuf, { sport: 'lol', team1: m.team1, team2: m.team2, side });
-            if (velEvtLol && vel.shouldDm(velEvtLol.sport, velEvtLol.matchKey, velEvtLol.side)) {
+            if (velEvtLol && vel.shouldDm(velEvtLol.sport, velEvtLol.matchKey, velEvtLol.side, undefined, db)) {
               vel.persistEvent(db, velEvtLol);
               velocities++;
             }
@@ -17422,7 +17418,7 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
 
           // 2-way arb tennis (t1 vs t2 cross-book)
           const arb2tn = arb.detect2WayArb({ sport: 'tennis', team1: m.team1, team2: m.team2, allOdds: all });
-          if (arb2tn && arb.shouldDm(arb2tn.sport, arb2tn.matchKey, arb2tn.marketType)) {
+          if (arb2tn && arb.shouldDm(arb2tn.sport, arb2tn.matchKey, arb2tn.marketType, undefined, db)) {
             arb.persistEvent(db, arb2tn);
             arbs++;
             if (ADMIN_IDS.size) {
@@ -17466,7 +17462,7 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
             const velEvtTn = pin
               ? vel.checkVelocity(slDet._ringBuf, { sport: 'tennis', team1: m.team1, team2: m.team2, side })
               : vel.checkVelocityCrossBook(slDet._ringBuf, { sport: 'tennis', team1: m.team1, team2: m.team2, side, books: allBooksSide });
-            if (velEvtTn && vel.shouldDm(velEvtTn.sport, velEvtTn.matchKey, velEvtTn.side)) {
+            if (velEvtTn && vel.shouldDm(velEvtTn.sport, velEvtTn.matchKey, velEvtTn.side, undefined, db)) {
               vel.persistEvent(db, velEvtTn);
               velocities++;
             }
