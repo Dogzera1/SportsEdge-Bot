@@ -17395,10 +17395,13 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
     try {
       const aggClient = require('./lib/odds-aggregator-client');
       const finder = require('./lib/book-bug-finder');
+      // 1h cobre velocity (15min window) + bugs point-in-time. Snapshot mais antigo
+      // que 1h não traz sinal acionável (linha provavelmente já moveu).
       const snapshots = await aggClient.fetchRecentSnapshots({ hoursBack: 1 });
       if (!Array.isArray(snapshots) || !snapshots.length) return;
       let bugCount = 0;
       const dmsToSend = [];
+      // (a) bugs point-in-time
       for (const snap of snapshots) {
         const bugs = finder.findBugsInSnapshot(snap);
         for (const evt of bugs) {
@@ -17407,7 +17410,14 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
           if (finder.shouldDm(evt.casa, evt.jogoId, evt.bug)) dmsToSend.push(evt);
         }
       }
-      if (bugCount > 0) log('INFO', 'BUG-FINDER', `${bugCount} bug(s) detectado(s) em ${snapshots.length} snapshots; ${dmsToSend.length} DM(s) novos`);
+      // (b) velocity intra-book (movimento >5% em 15min mesma casa)
+      const velEvts = finder.detectBrVelocity(snapshots);
+      for (const evt of velEvts) {
+        finder.persistEvent(db, evt);
+        bugCount++;
+        if (finder.shouldDm(evt.casa, evt.jogoId, `br_velocity_${evt.market}_${evt.side}`)) dmsToSend.push(evt);
+      }
+      if (bugCount > 0) log('INFO', 'BUG-FINDER', `${bugCount} bug(s)/velocity em ${snapshots.length} snapshots; ${dmsToSend.length} DM(s) novos`);
       if (dmsToSend.length && ADMIN_IDS.size) {
         const tk = resolveOpportunitiesToken();
         if (tk) {
@@ -17434,6 +17444,9 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
               body = `🐛 *BUG INTRA-BOOK — BTTS*\n\n*${evt.casa}* implied *${evt.impliedPct}%*\nSim: ${evt.odds.yes}  Não: ${evt.odds.no}\nLucro: *+${evt.profitPct}%*`;
             } else if (evt.bug === 'btts_ou_divergence') {
               body = `🐛 *MISPRICING — ${evt.casa}*\n\nBTTS↔OU2.5 divergem ${evt.divPp}pp (P_over=${(evt.pOverDevig*100).toFixed(0)}% vs P_btts=${(evt.pBttsDevig*100).toFixed(0)}%)\n\nOver ${evt.odds.over} / Under ${evt.odds.under}\nBTTS Sim ${evt.odds.btts_yes} / Não ${evt.odds.btts_no}\n\nProvável bug: *${evt.culprit}*`;
+            } else if (evt.bug === 'br_velocity') {
+              const arrow = evt.direction === 'up' ? '↑' : '↓';
+              body = `⚡ *BR VELOCITY — ${evt.casa}*\n\n*${evt.market}/${evt.side}* moveu ${arrow} *${Math.abs(evt.deltaPct)}%* em ${evt.windowMin}min\n\n${evt.oldOdd} → ${evt.newOdd}\n\n_Sharp money intra-book ou erro scraper_`;
             }
             if (body) for (const adminId of ADMIN_IDS) sendDM(tk, adminId, body).catch(() => {});
           }
