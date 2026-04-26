@@ -13904,6 +13904,14 @@ async function pollFootball(runOnce = false) {
             });
             if (fbTrained) {
               log('INFO', 'FB-TRAINED', `${match.team1} vs ${match.team2} [${fbTrained.league_key}]: pH=${(fbTrained.pH*100).toFixed(1)}% pD=${(fbTrained.pD*100).toFixed(1)}% pA=${(fbTrained.pA*100).toFixed(1)}% conf=${fbTrained.confidence.toFixed(2)}`);
+            } else if (richLeague) {
+              // Diagnóstico: log warn-once por league name desconhecido. Ajuda
+              // usuário ver gap entre nomes do feed live e keys nos params trained.
+              global._fbUnknownLeagues = global._fbUnknownLeagues || new Set();
+              if (!global._fbUnknownLeagues.has(richLeague)) {
+                global._fbUnknownLeagues.add(richLeague);
+                log('WARN', 'FB-TRAINED', `league not found in trained params: '${richLeague}' (params has ${Object.keys(require('./lib/football-poisson-trained').getParams()?.leagues || {}).length} leagues)`);
+              }
             }
           }
         } catch (e) { log('WARN', 'FB-TRAINED', e.message); }
@@ -17654,6 +17662,10 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   // Trata `sucesso-vazio` em massa como sinal de seletor quebrado / Cloudflare.
   // Memory: estado anterior por casa pra emitir só transições, não spam.
   const _lastScraperHealth = new Map();
+  // Anti-flap: cooldown DM por (casa, target_state). Suprime quando uma casa
+  // oscila saudavel↔degradada↔saudavel em <6h (state da Supabase pode flutuar
+  // por janela 6h e gerar 2-3 DMs/dia da mesma casa sem novo sinal real).
+  const _scraperHealthDmAt = new Map(); // key=`${casa}|${state}` → ts
   let _scraperHealthFirstRun = true;
   async function runScraperHealthCron() {
     if (/^(1|true|yes)$/i.test(String(process.env.SCRAPER_HEALTH_DISABLED || ''))) return;
@@ -17662,22 +17674,40 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
       const aggClient = require('./lib/odds-aggregator-client');
       const health = await aggClient.fetchScraperHealth();
       if (!health || !Array.isArray(health.houses)) return;
+      // Dedup intra-ciclo: se Supabase devolver mesma casa duas vezes, mantém só a última.
+      const houseMap = new Map();
+      for (const h of health.houses) houseMap.set(h.casa, h);
+      const houses = Array.from(houseMap.values());
       // First run: SÓ popula baseline + log summary; sem DM (estado anterior é
       // desconhecido, não saudavel — antes contava tudo como falsa transição
       // saudavel→morta inundando o admin).
       if (_scraperHealthFirstRun) {
         _scraperHealthFirstRun = false;
-        for (const h of health.houses) _lastScraperHealth.set(h.casa, h.state);
-        const bad = health.houses.filter(h => h.state !== 'saudavel');
+        for (const h of houses) _lastScraperHealth.set(h.casa, h.state);
+        const bad = houses.filter(h => h.state !== 'saudavel');
         if (bad.length) log('WARN', 'SCRAPER-HEALTH', `boot baseline: ${bad.length} casa(s) não-saudáveis: ${bad.map(b => `${b.casa}=${b.state}`).join(', ')}`);
-        else log('INFO', 'SCRAPER-HEALTH', `boot baseline: todas ${health.houses.length} casas saudáveis`);
+        else log('INFO', 'SCRAPER-HEALTH', `boot baseline: todas ${houses.length} casas saudáveis`);
         return;
       }
+      const cooldownMs = parseInt(process.env.SCRAPER_HEALTH_DM_COOLDOWN_MIN || '360', 10) * 60 * 1000;
+      const now = Date.now();
       const transitions = [];
-      for (const h of health.houses) {
+      const suppressed = [];
+      for (const h of houses) {
         const prev = _lastScraperHealth.get(h.casa);
-        if (prev && prev !== h.state) transitions.push({ ...h, prev });
+        if (prev && prev !== h.state) {
+          const dmKey = `${h.casa}|${h.state}`;
+          const lastDm = _scraperHealthDmAt.get(dmKey) || 0;
+          if (now - lastDm < cooldownMs) {
+            suppressed.push(`${h.casa} ${prev}→${h.state} (cooldown)`);
+          } else {
+            transitions.push({ ...h, prev });
+          }
+        }
         _lastScraperHealth.set(h.casa, h.state);
+      }
+      if (suppressed.length) {
+        log('DEBUG', 'SCRAPER-HEALTH', `${suppressed.length} transição(ões) suprimidas por cooldown: ${suppressed.join(', ')}`);
       }
       if (transitions.length) {
         log('INFO', 'SCRAPER-HEALTH', `${transitions.length} transição(ões): ${transitions.map(t => `${t.casa} ${t.prev}→${t.state}`).join(', ')}`);
@@ -17689,9 +17719,19 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
               return `${emoji} *${t.casa}*: ${t.prev} → *${t.state}*` + (t.reason ? `\n   _${t.reason}_` : '');
             });
             const msg = `🔧 *Scraper BR — health update*\n\n${lines.join('\n\n')}`;
-            for (const adminId of ADMIN_IDS) sendDM(tk, adminId, msg).catch(() => {});
+            const sent = new Set();
+            for (const adminId of ADMIN_IDS) {
+              if (sent.has(adminId)) continue;
+              sent.add(adminId);
+              sendDM(tk, adminId, msg).catch(() => {});
+            }
+            for (const t of transitions) _scraperHealthDmAt.set(`${t.casa}|${t.state}`, now);
           }
         }
+      }
+      // GC: limpa entries de dm cooldown >24h
+      for (const [k, ts] of _scraperHealthDmAt) {
+        if (now - ts > 24 * 60 * 60 * 1000) _scraperHealthDmAt.delete(k);
       }
     } catch (e) { log('ERROR', 'SCRAPER-HEALTH', e.message); }
   }
