@@ -17470,17 +17470,22 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
       const aggClient = require('./lib/odds-aggregator-client');
       const health = await aggClient.fetchScraperHealth();
       if (!health || !Array.isArray(health.houses)) return;
-      const transitions = [];
-      for (const h of health.houses) {
-        const prev = _lastScraperHealth.get(h.casa) || 'saudavel';
-        if (prev !== h.state) transitions.push({ ...h, prev });
-        _lastScraperHealth.set(h.casa, h.state);
-      }
-      // Primeiro run: reporta SÓ casas degradada/morta sem reclamar de transição
+      // First run: SÓ popula baseline + log summary; sem DM (estado anterior é
+      // desconhecido, não saudavel — antes contava tudo como falsa transição
+      // saudavel→morta inundando o admin).
       if (_scraperHealthFirstRun) {
         _scraperHealthFirstRun = false;
+        for (const h of health.houses) _lastScraperHealth.set(h.casa, h.state);
         const bad = health.houses.filter(h => h.state !== 'saudavel');
-        if (bad.length) log('WARN', 'SCRAPER-HEALTH', `${bad.length} casa(s) não-saudáveis no boot: ${bad.map(b => `${b.casa}=${b.state}`).join(', ')}`);
+        if (bad.length) log('WARN', 'SCRAPER-HEALTH', `boot baseline: ${bad.length} casa(s) não-saudáveis: ${bad.map(b => `${b.casa}=${b.state}`).join(', ')}`);
+        else log('INFO', 'SCRAPER-HEALTH', `boot baseline: todas ${health.houses.length} casas saudáveis`);
+        return;
+      }
+      const transitions = [];
+      for (const h of health.houses) {
+        const prev = _lastScraperHealth.get(h.casa);
+        if (prev && prev !== h.state) transitions.push({ ...h, prev });
+        _lastScraperHealth.set(h.casa, h.state);
       }
       if (transitions.length) {
         log('INFO', 'SCRAPER-HEALTH', `${transitions.length} transição(ões): ${transitions.map(t => `${t.casa} ${t.prev}→${t.state}`).join(', ')}`);
