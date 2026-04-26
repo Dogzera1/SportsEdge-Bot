@@ -7989,6 +7989,22 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // GET /admin/br-edges-now?minRatio=1.10&minBooks=3
+  // Surface oportunidades cross-book ATIVAS no momento (snapshot pontual,
+  // independente de cron). Compara cada casa BR vs mediana das outras casas
+  // pro mesmo (jogo, side). Retorna sorted por ratio desc.
+  if (p === '/admin/br-edges-now') {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const minRatio = parseFloat(parsed.query.minRatio || '1.10');
+      const minBooks = parseInt(parsed.query.minBooks || '3', 10);
+      const aggClient = require('./lib/odds-aggregator-client');
+      const edges = await aggClient.fetchActiveEdgesBr({ minRatio, minBooks });
+      sendJson(res, { ok: true, minRatio, minBooks, count: edges?.length || 0, edges: edges || [] });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   // GET /admin/casa-scorecard?days=7 — agrega métricas por casa BR pra decisão de
   // onde apostar. Combina:
   //   - scraper health (uptime, last_success)

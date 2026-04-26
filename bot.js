@@ -8172,6 +8172,28 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
       await send(token, chatId, txt);
     } catch (e) { await send(token, chatId, `❌ ${e.message}`); }
 
+  } else if (cmd === '/br-edges' || cmd === '/edges' || cmd === '/edges-now') {
+    if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
+    try {
+      const minRatio = parts[1] ? parseFloat(parts[1]) : 1.10;
+      const port = process.env.PORT || 8080;
+      const r = await new Promise((res) => {
+        require('http').get(`http://127.0.0.1:${port}/admin/br-edges-now?minRatio=${minRatio}`, {
+          headers: process.env.ADMIN_KEY ? { 'x-admin-key': process.env.ADMIN_KEY } : {},
+        }, resp => { let b=''; resp.on('data',c=>b+=c); resp.on('end',()=>{ try{res(JSON.parse(b));}catch{res(null);} }); }).on('error',()=>res(null));
+      });
+      if (!r?.ok) { await send(token, chatId, `❌ Falha: ${r?.error || 'sem resposta'}`); return; }
+      if (!r.edges?.length) { await send(token, chatId, `🇧🇷 *BR Edges agora* — 0 oportunidades (ratio ≥${minRatio})`); return; }
+      let txt = `🇧🇷 *BR Edges AGORA* — ${r.count} (ratio ≥${r.minRatio})\n\n`;
+      for (const e of r.edges.slice(0, 12)) {
+        const when = e.inicio ? new Date(e.inicio).toISOString().slice(5, 16).replace('T', ' ') : '?';
+        txt += `*${e.mandante || '?'} × ${e.visitante || '?'}* (${when})\n`;
+        txt += `  ${e.label} @ *${e.casa}* ${e.odd_outlier} vs med ${e.odd_mediana} (+${((e.ratio-1)*100).toFixed(1)}%)\n`;
+        txt += `  EV est: *+${e.ev_estimado_pct}%* (${e.n_books} books)\n\n`;
+      }
+      await send(token, chatId, txt);
+    } catch (e) { await send(token, chatId, `❌ ${e.message}`); }
+
   } else if (cmd === '/casa-stats' || cmd === '/casas' || cmd === '/scorecard') {
     if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
     try {
