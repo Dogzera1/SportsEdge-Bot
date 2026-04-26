@@ -17229,10 +17229,44 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
           }
 
           // Check h, d, a sides
+          const finder = require('./lib/book-bug-finder');
           for (const side of ['h', 'd', 'a']) {
             const pinOdd = pin ? parseFloat(pin[side]) : null;
             const brBooks = others.map(b => ({ bookmaker: b.bookmaker, odd: parseFloat(b[side]) })).filter(x => Number.isFinite(x.odd));
             const allBooksSide = all.map(b => ({ bookmaker: b.bookmaker, odd: parseFloat(b[side]) })).filter(x => Number.isFinite(x.odd));
+            // Pin vs BR mediana lag detector — sinal: Pinnacle moveu mas BR
+            // mediana ficou estagnada como bloco (sharp money entrou pin, BR
+            // não acompanhou). Reusa _ringBuf da stale-line pra pinOld; mantém
+            // ring próprio de BR mediana em book-bug-finder.
+            if (pinOdd && brBooks.length >= 3) {
+              try {
+                const matchKeyLag = [m.team1, m.team2].map(s => String(s||'').toLowerCase().replace(/[^a-z0-9]/g,'')).sort().join('-');
+                const pinOld = slDet._getOldOdd('football', matchKeyLag, side, 15);
+                if (pinOld) {
+                  const lagEvt = finder.detectPinVsBrLag({
+                    sport: 'football', team1: m.team1, team2: m.team2, side,
+                    pinOdd, brOdds: brBooks.map(b => b.odd),
+                  }, { pinOld });
+                  if (lagEvt) {
+                    finder.persistEvent(db, lagEvt);
+                    if (finder.shouldDm('br_block', lagEvt.matchKey, `lag_${side}`) && ADMIN_IDS.size && lagEvt.advice === 'apostar_neste_lado') {
+                      const sideLabel = side === 'h' ? m.team1 : side === 'a' ? m.team2 : 'Empate';
+                      const arrow = lagEvt.pinDeltaPct < 0 ? '📉' : '📈';
+                      const tk = resolveOpportunitiesToken();
+                      if (tk) {
+                        const msg = `🌊 *PIN-vs-BR LAG — FOOTBALL*\n\n` +
+                          `*${m.team1} × ${m.team2}* (${sideLabel})\n\n` +
+                          `Pinnacle: ${lagEvt.pinOld} → ${lagEvt.pinNew} (${arrow} ${lagEvt.pinDeltaPct >= 0 ? '+' : ''}${lagEvt.pinDeltaPct}% em ${lagEvt.histMin}min)\n` +
+                          `BR mediana ${brBooks.length} books: ${lagEvt.brMedOld} → ${lagEvt.brMedNew} (${lagEvt.brDeltaPct >= 0 ? '+' : ''}${lagEvt.brDeltaPct}%)\n\n` +
+                          `Sharp money entrou em ${sideLabel}. *BR ainda paga preço antigo.* Aposte ${sideLabel} em qualquer book BR ANTES do consenso ajustar.\n\n` +
+                          `_Janela típica: 5-15min._`;
+                        for (const adminId of ADMIN_IDS) sendDM(tk, adminId, msg).catch(() => {});
+                      }
+                    }
+                  }
+                }
+              } catch (_) {}
+            }
             // Super-odd: Pinnacle anchor se disponível, senão cross-book mediana
             const superArgs = pin
               ? { sport: 'football', team1: m.team1, team2: m.team2, side, pinOdd, otherBooks: brBooks }
