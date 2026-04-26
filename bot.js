@@ -17551,19 +17551,48 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
       for (const [k, v] of _brEdgesPrev) {
         if (now - v.ts > 30 * 60 * 1000) _brEdgesPrev.delete(k);
       }
-      if (!sustained.length) return;
+      // Persiste TODOS os edges sustentados em book_bug_events (não só DMed).
+      // Type 'br_edge_sustained' alimenta casa-scorecard com sinal estrutural.
+      try {
+        const finder = require('./lib/book-bug-finder');
+        for (const e of sustained) {
+          finder.persistEvent(db, {
+            casa: e.casa, jogoId: e.jogo_id, bug: 'br_edge_sustained',
+            market: e.market, side: e.side, label: e.label,
+            oddOutlier: e.odd_outlier, oddMediana: e.odd_mediana,
+            ratio: e.ratio, evPct: e.ev_estimado_pct, nBooks: e.n_books,
+            mandante: e.mandante, visitante: e.visitante, inicio: e.inicio,
+          });
+        }
+      } catch (_) {}
       const tk = resolveOpportunitiesToken();
       if (!tk) return;
-      log('INFO', 'BR-EDGES-DM', `${sustained.length} edge(s) sustentados`);
+      log('INFO', 'BR-EDGES-DM', `${sustained.length} edge(s) sustentados (DM ${Math.min(sustained.length, 5)})`);
       for (const e of sustained.slice(0, 5)) {
         const k = `${e.jogo_id}|${e.casa}|${e.market}|${e.side}`;
         _brEdgesDmAt.set(k, now);
         const when = e.inicio ? new Date(e.inicio).toISOString().slice(5, 16).replace('T', ' ') : '?';
+        // Histórico do mesmo casa+market+side em 7d (alimentado pela persist acima)
+        let histLine = '';
+        try {
+          const hist = db.prepare(`
+            SELECT COUNT(*) AS n, AVG(json_extract(payload_json, '$.evPct')) AS avg_ev
+            FROM book_bug_events
+            WHERE casa = ? AND bug_type = 'br_edge_sustained'
+              AND json_extract(payload_json, '$.market') = ?
+              AND json_extract(payload_json, '$.side') = ?
+              AND detected_at >= datetime('now', '-7 days')
+          `).get(e.casa, e.market, e.side);
+          if (hist?.n >= 2) {
+            histLine = `_Histórico ${e.casa}/${e.market}/${e.side} 7d: ${hist.n} hits, EV médio +${hist.avg_ev?.toFixed(1)}%_\n`;
+          }
+        } catch (_) {}
         const msg = `🇧🇷 *BR EDGE SUSTENTADO* (${e.casa})\n\n` +
           `*${e.mandante || '?'} × ${e.visitante || '?'}* (${when})\n` +
           `Pick: *${e.label}* @ ${e.casa} *${e.odd_outlier}*\n` +
           `Mediana ${e.n_books} books: ${e.odd_mediana} (+${((e.ratio-1)*100).toFixed(1)}%)\n\n` +
           `EV estimado: *+${e.ev_estimado_pct}%*\n\n` +
+          histLine +
           `_Edge presente em ≥2 ciclos consecutivos (sustentado >5min)._\n` +
           `_Cooldown 6h por (casa, jogo, side)._`;
         for (const adminId of ADMIN_IDS) sendDM(tk, adminId, msg).catch(() => {});
