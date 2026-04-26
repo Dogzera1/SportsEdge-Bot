@@ -7959,6 +7959,36 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // GET /admin/book-bug-events?hours=24&casa=betnacional
+  if (p === '/admin/book-bug-events') {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const { getRecentEvents } = require('./lib/book-bug-finder');
+      const hours = Math.max(1, Math.min(168, parseInt(parsed.query.hours || '24', 10)));
+      const casa = parsed.query.casa || null;
+      const events = getRecentEvents(db, { hours, casa });
+      // Parse payload pra display fácil
+      const enriched = events.map(e => {
+        let payload = null;
+        try { payload = JSON.parse(e.payload_json || '{}'); } catch (_) {}
+        return { ...e, payload };
+      });
+      sendJson(res, { ok: true, hours, casa: casa || 'all', count: enriched.length, events: enriched });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
+  // GET /admin/scraper-health — snapshot do health check do scraper BR
+  if (p === '/admin/scraper-health') {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const aggClient = require('./lib/odds-aggregator-client');
+      const health = await aggClient.fetchScraperHealth();
+      sendJson(res, { ok: true, ...health });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   // GET/POST /admin/bookmaker-deltas
   // GET retorna agregado: avg delta_pct por (sport, bookmaker) com n samples.
   // POST adiciona amostra: {sport, bookmaker, pinnacleOdd, brOdd, matchLabel?}

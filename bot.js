@@ -8088,6 +8088,8 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
       const arbCnt = db.prepare(`SELECT COUNT(*) n FROM arb_events WHERE detected_at >= datetime('now', ?)`).get(since).n;
       let velCnt = 0;
       try { velCnt = db.prepare(`SELECT COUNT(*) n FROM velocity_events WHERE detected_at >= datetime('now', ?)`).get(since).n; } catch (_) {}
+      let bugCnt = 0;
+      try { bugCnt = db.prepare(`SELECT COUNT(*) n FROM book_bug_events WHERE detected_at >= datetime('now', ?)`).get(since).n; } catch (_) {}
 
       const arbTop = db.prepare(`
         SELECT sport, match_label, market_type, arb_pct, book_a, book_b, odd_a, odd_b
@@ -8105,7 +8107,8 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
       txt += `📍 Stale Lines: *${staleCnt}*\n`;
       txt += `🎰 Super Odds: *${supCnt}*\n`;
       txt += `💎 Arbs: *${arbCnt}*\n`;
-      txt += `⚡ Velocity: *${velCnt}*\n\n`;
+      txt += `⚡ Velocity: *${velCnt}*\n`;
+      txt += `🐛 Book Bugs: *${bugCnt}*\n\n`;
 
       if (arbTop.length) {
         txt += `*Top 💎 Arbs:*\n`;
@@ -8122,7 +8125,75 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
         txt += `\n`;
       }
 
-      txt += `_Detail: dashboard /exploit-summary ou /admin/{stale|super-odd|arb|velocity}-events_`;
+      let bugTop = [];
+      try {
+        bugTop = db.prepare(`
+          SELECT casa, bug_type, payload_json FROM book_bug_events
+          WHERE detected_at >= datetime('now', ?)
+          ORDER BY detected_at DESC LIMIT 5
+        `).all(since);
+      } catch (_) {}
+      if (bugTop.length) {
+        txt += `*Top 🐛 Book Bugs:*\n`;
+        for (const b of bugTop) {
+          let extra = '';
+          try {
+            const p = JSON.parse(b.payload_json || '{}');
+            if (p.profitPct != null) extra = ` (+${p.profitPct}% lucro)`;
+            else if (p.divPp != null) extra = ` (Δ${p.divPp}pp)`;
+          } catch (_) {}
+          txt += `  ${b.bug_type} — ${b.casa}${extra}\n`;
+        }
+        txt += `\n`;
+      }
+
+      txt += `_Detail: dashboard /exploit-summary ou /admin/{stale|super-odd|arb|velocity|book-bug}-events_`;
+      await send(token, chatId, txt);
+    } catch (e) { await send(token, chatId, `❌ ${e.message}`); }
+
+  } else if (cmd === '/scraper-health' || cmd === '/scrapers' || cmd === '/scrapers-br') {
+    if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
+    try {
+      const aggClient = require('./lib/odds-aggregator-client');
+      const health = await aggClient.fetchScraperHealth();
+      if (!health || !Array.isArray(health.houses)) {
+        await send(token, chatId, `❌ Sem dados (Supabase off ou erro: ${health?.error || 'unknown'})`);
+        return;
+      }
+      const order = { morta: 0, degradada: 1, saudavel: 2 };
+      health.houses.sort((a, b) => (order[a.state] ?? 9) - (order[b.state] ?? 9));
+      let txt = `🔧 *Scraper BR — health (${health.houses.length} casas)*\n\n`;
+      for (const h of health.houses) {
+        const emoji = h.state === 'morta' ? '💀' : h.state === 'degradada' ? '⚠️' : '✅';
+        const ageStr = h.lastSuccessMinAgo == null ? 'nunca' : h.lastSuccessMinAgo < 60 ? `${h.lastSuccessMinAgo}min` : `${(h.lastSuccessMinAgo/60).toFixed(1)}h`;
+        txt += `${emoji} *${h.casa}* — ${h.state} (last_ok ${ageStr}, ${h.runs6h}runs/6h, ${(h.emptyRate6h*100).toFixed(0)}% vazio)\n`;
+        if (h.reason) txt += `   _${h.reason}_\n`;
+      }
+      await send(token, chatId, txt);
+    } catch (e) { await send(token, chatId, `❌ ${e.message}`); }
+
+  } else if (cmd === '/book-bugs' || cmd === '/bookbugs' || cmd === '/bugs') {
+    if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
+    try {
+      const hours = Math.max(1, Math.min(168, parseInt(parts[1] || '24', 10) || 24));
+      const finder = require('./lib/book-bug-finder');
+      const events = finder.getRecentEvents(db, { hours });
+      if (!events.length) { await send(token, chatId, `🐛 *Book Bugs ${hours}h*\n\nNenhum bug detectado.`); return; }
+      let txt = `🐛 *Book Bugs ${hours}h — ${events.length} eventos*\n\n`;
+      const byType = {};
+      for (const e of events) byType[e.bug_type] = (byType[e.bug_type] || 0) + 1;
+      txt += `*Por tipo:*\n${Object.entries(byType).map(([k, v]) => `  ${k}: ${v}`).join('\n')}\n\n`;
+      txt += `*Últimos 8:*\n`;
+      for (const e of events.slice(0, 8)) {
+        let extra = '';
+        try {
+          const p = JSON.parse(e.payload_json || '{}');
+          if (p.profitPct != null) extra = ` +${p.profitPct}%`;
+          else if (p.divPp != null) extra = ` Δ${p.divPp}pp`;
+        } catch (_) {}
+        const when = e.detected_at?.replace('T', ' ').slice(5, 16);
+        txt += `  ${when} ${e.bug_type} — ${e.casa}${extra}\n`;
+      }
       await send(token, chatId, txt);
     } catch (e) { await send(token, chatId, `❌ ${e.message}`); }
 
