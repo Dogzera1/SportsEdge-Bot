@@ -8172,6 +8172,32 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
       await send(token, chatId, txt);
     } catch (e) { await send(token, chatId, `❌ ${e.message}`); }
 
+  } else if (cmd === '/casa-stats' || cmd === '/casas' || cmd === '/scorecard') {
+    if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
+    try {
+      const days = Math.max(1, Math.min(30, parseInt(parts[1] || '7', 10) || 7));
+      const port = process.env.PORT || 8080;
+      const adminKey = process.env.ADMIN_KEY ? `&key=${encodeURIComponent(process.env.ADMIN_KEY)}` : '';
+      const r = await new Promise((res) => {
+        require('http').get(`http://127.0.0.1:${port}/admin/casa-scorecard?days=${days}${adminKey}`, {
+          headers: process.env.ADMIN_KEY ? { 'x-admin-key': process.env.ADMIN_KEY } : {},
+        }, resp => { let b=''; resp.on('data',c=>b+=c); resp.on('end',()=>{ try{res(JSON.parse(b));}catch{res(null);} }); }).on('error',()=>res(null));
+      });
+      if (!r?.ok) { await send(token, chatId, `❌ Falha: ${r?.error || 'sem resposta'}`); return; }
+      let txt = `📊 *Casa Scorecard — ${days}d*\n\n_Score = bugs×5 + superOdds×2 + arbs×4, penalty -20 morta / -10 degradada_\n\n`;
+      for (const c of r.casas) {
+        const emoji = c.state === 'morta' ? '💀' : c.state === 'degradada' ? '⚠️' : c.state === 'saudavel' ? '✅' : '❓';
+        txt += `${emoji} *${c.casa}* — score *${c.score}*\n`;
+        txt += `   bugs=${c.bugs_total} · super=${c.super_odds_count}${c.super_odds_avg_ev ? `(EV+${c.super_odds_avg_ev}%)` : ''} · arbs=${c.arb_appearances}\n`;
+        if (c.last_success_min_ago != null) {
+          const ageStr = c.last_success_min_ago < 60 ? `${c.last_success_min_ago}m` : `${(c.last_success_min_ago/60).toFixed(1)}h`;
+          txt += `   _last_ok ${ageStr} · runs ${c.runs_6h}/6h · empty ${(c.empty_rate_6h*100).toFixed(0)}%_\n`;
+        }
+        txt += `\n`;
+      }
+      await send(token, chatId, txt);
+    } catch (e) { await send(token, chatId, `❌ ${e.message}`); }
+
   } else if (cmd === '/book-bugs' || cmd === '/bookbugs' || cmd === '/bugs') {
     if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
     try {

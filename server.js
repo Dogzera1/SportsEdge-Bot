@@ -7989,6 +7989,83 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // GET /admin/casa-scorecard?days=7 — agrega métricas por casa BR pra decisão de
+  // onde apostar. Combina:
+  //   - scraper health (uptime, last_success)
+  //   - bugs detectados (book_bug_events: arb intra-book, divergência cross-market)
+  //   - super-odd promos (super_odd_events onde super_book = casa)
+  //   - arb participations (arb_events onde book_a/book_b = casa)
+  //   - velocity intra-book (book_bug_events bug_type=br_velocity)
+  // Casa com muito bug = mais oportunidade exploit. Casa morta = não usar.
+  if (p === '/admin/casa-scorecard') {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const days = Math.max(1, Math.min(60, parseInt(parsed.query.days || '7', 10)));
+      const since = `-${days} days`;
+      const aggClient = require('./lib/odds-aggregator-client');
+      const health = await aggClient.fetchScraperHealth().catch(() => ({ houses: [] }));
+      const healthByCasa = new Map((health?.houses || []).map(h => [h.casa, h]));
+      // Books com pelo menos 1 evento ou aparição em scraper
+      const casaSet = new Set(healthByCasa.keys());
+      // Eventos por casa
+      const bugRows = db.prepare(`
+        SELECT casa, bug_type, COUNT(*) AS n FROM book_bug_events
+        WHERE detected_at >= datetime('now', ?) GROUP BY casa, bug_type
+      `).all(since);
+      for (const r of bugRows) casaSet.add(r.casa);
+      const superRows = db.prepare(`
+        SELECT super_book AS casa, COUNT(*) AS n, AVG(ev_pct_estimated) AS avg_ev FROM super_odd_events
+        WHERE detected_at >= datetime('now', ?) GROUP BY super_book
+      `).all(since);
+      for (const r of superRows) casaSet.add(r.casa);
+      const arbRows = db.prepare(`
+        SELECT casa, COUNT(*) AS n FROM (
+          SELECT book_a AS casa FROM arb_events WHERE detected_at >= datetime('now', ?)
+          UNION ALL
+          SELECT book_b AS casa FROM arb_events WHERE detected_at >= datetime('now', ?)
+        ) GROUP BY casa
+      `).all(since, since);
+      for (const r of arbRows) casaSet.add(r.casa);
+      // Bug por tipo (cross-tabulado)
+      const bugByCasa = new Map();
+      for (const r of bugRows) {
+        if (!bugByCasa.has(r.casa)) bugByCasa.set(r.casa, { total: 0 });
+        bugByCasa.get(r.casa)[r.bug_type] = r.n;
+        bugByCasa.get(r.casa).total += r.n;
+      }
+      const superByCasa = new Map(superRows.map(r => [r.casa, { n: r.n, avgEv: +(r.avg_ev || 0).toFixed(2) }]));
+      const arbByCasa = new Map(arbRows.map(r => [r.casa, r.n]));
+      const scorecards = [];
+      for (const casa of casaSet) {
+        const h = healthByCasa.get(casa) || {};
+        const bugs = bugByCasa.get(casa) || { total: 0 };
+        const sup = superByCasa.get(casa) || { n: 0, avgEv: 0 };
+        const arb = arbByCasa.get(casa) || 0;
+        // Score composto: positivo = mais oportunidade exploit (bugs/super/arb).
+        // Negativo: scraper mort/degradada (sem dados confiáveis).
+        let score = bugs.total * 5 + sup.n * 2 + arb * 4;
+        if (h.state === 'morta') score -= 20;
+        else if (h.state === 'degradada') score -= 10;
+        scorecards.push({
+          casa,
+          state: h.state || 'unknown',
+          last_success_min_ago: h.lastSuccessMinAgo ?? null,
+          empty_rate_6h: h.emptyRate6h ?? null,
+          runs_6h: h.runs6h ?? null,
+          bugs_total: bugs.total,
+          bugs_by_type: { ...bugs, total: undefined },
+          super_odds_count: sup.n,
+          super_odds_avg_ev: sup.avgEv,
+          arb_appearances: arb,
+          score,
+        });
+      }
+      scorecards.sort((a, b) => b.score - a.score);
+      sendJson(res, { ok: true, days, casas: scorecards });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   // GET/POST /admin/bookmaker-deltas
   // GET retorna agregado: avg delta_pct por (sport, bookmaker) com n samples.
   // POST adiciona amostra: {sport, bookmaker, pinnacleOdd, brOdd, matchLabel?}
