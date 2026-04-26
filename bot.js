@@ -7366,29 +7366,39 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
         const scanMinOdd = process.env[`${aliasUp}_MARKET_SCAN_MIN_ODD`];
         const scanMaxOdd = process.env[`${aliasUp}_MARKET_SCAN_MAX_ODD`];
         const scanOn = process.env[`${aliasUp}_MARKET_SCAN`] !== 'false';
-        // Runtime state (auto-disable per market+side)
-        const disabledRows = db.prepare(`
-          SELECT market, side, source, reason, clv_pct, clv_n, roi_pct, updated_at
-          FROM market_tips_runtime_state
-          WHERE sport = ? AND disabled = 1
-          ORDER BY updated_at DESC
-        `).all(sp).catch(() => []);
+        // Runtime state (auto-disable per market+side). better-sqlite3 é síncrono;
+        // try/catch ao redor pra cobrir 'no such table'.
+        let disabledRows = [];
+        try {
+          disabledRows = db.prepare(`
+            SELECT market, side, source, reason, clv_pct, clv_n, roi_pct, updated_at
+            FROM market_tips_runtime_state
+            WHERE sport = ? AND disabled = 1
+            ORDER BY updated_at DESC
+          `).all(sp);
+        } catch (_) { disabledRows = []; }
         // Shadow recent
-        const shadowRecent = db.prepare(`
-          SELECT
-            COUNT(*) AS n_total,
-            SUM(CASE WHEN created_at >= datetime('now','-24 hours') THEN 1 ELSE 0 END) AS n_24h,
-            SUM(CASE WHEN created_at >= datetime('now','-7 days') THEN 1 ELSE 0 END) AS n_7d,
-            SUM(CASE WHEN admin_dm_sent_at IS NOT NULL AND admin_dm_sent_at >= datetime('now','-7 days') THEN 1 ELSE 0 END) AS dm_7d,
-            MAX(created_at) AS last
-          FROM market_tips_shadow
-          WHERE sport = ?
-        `).get(sp);
-        const dmDedupRows = db.prepare(`
-          SELECT COUNT(*) AS n, MAX(last_dm_at) AS last
-          FROM market_tip_dm_sent
-          WHERE sport = ?
-        `).get(sp).catch(() => ({ n: 0, last: null }));
+        let shadowRecent = { n_total: 0, n_24h: 0, n_7d: 0, dm_7d: 0, last: null };
+        try {
+          shadowRecent = db.prepare(`
+            SELECT
+              COUNT(*) AS n_total,
+              SUM(CASE WHEN created_at >= datetime('now','-24 hours') THEN 1 ELSE 0 END) AS n_24h,
+              SUM(CASE WHEN created_at >= datetime('now','-7 days') THEN 1 ELSE 0 END) AS n_7d,
+              SUM(CASE WHEN admin_dm_sent_at IS NOT NULL AND admin_dm_sent_at >= datetime('now','-7 days') THEN 1 ELSE 0 END) AS dm_7d,
+              MAX(created_at) AS last
+            FROM market_tips_shadow
+            WHERE sport = ?
+          `).get(sp) || shadowRecent;
+        } catch (_) {}
+        let dmDedupRows = { n: 0, last: null };
+        try {
+          dmDedupRows = db.prepare(`
+            SELECT COUNT(*) AS n, MAX(last_dm_at) AS last
+            FROM market_tip_dm_sent
+            WHERE sport = ?
+          `).get(sp) || dmDedupRows;
+        } catch (_) {}
         let txt = `🔧 *MT DIAG — ${sp}*\n\n`;
         txt += `*Gates:*\n`;
         txt += `${envFlag ? '✅' : '❌'} \`${up}_MARKET_TIPS_ENABLED\`\n`;
