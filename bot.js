@@ -4015,6 +4015,98 @@ function isMarketTipsEnabled(sport, market = null, side = null) {
   return true;
 }
 
+// Mapa market_type pro /record-tip (canônico maiúsculo). Mantém compat com o
+// settle propagation em market-tips-shadow.js que reverte pro market original.
+const _MT_MARKET_TYPE_MAP = {
+  handicap: 'HANDICAP',
+  handicapSets: 'HANDICAP_SETS',
+  handicapGames: 'HANDICAP_GAMES',
+  total: 'TOTAL',
+  totals: 'TOTAL',
+  totalGames: 'TOTAL_GAMES',
+  tiebreakMatch: 'TIEBREAK',
+  totalAces: 'TOTAL_ACES',
+  draw: 'DRAW',
+};
+
+// Resolve participant pra market tip (não-ML). Pra h2h side (team1/team2/home/away)
+// usa nome real. Pra over/under/yes/no usa label sintético — preserva semântica
+// na coluna tip_participant pra dedup/UI.
+function _mtParticipant(match, tip) {
+  const s = String(tip.side || '').toLowerCase();
+  if (s === 'team1' || s === 'home' || s === 'h') return match.team1;
+  if (s === 'team2' || s === 'away' || s === 'a') return match.team2;
+  if (s === 'over' || s === 'under') {
+    const unit = tip.market === 'totalGames' ? 'games'
+               : tip.market === 'totals' ? 'gols'
+               : tip.market === 'totalAces' ? 'aces' : 'maps';
+    return `${s.toUpperCase()} ${tip.line ?? ''} ${unit}`.trim();
+  }
+  if (s === 'yes' || s === 'no') return s.toUpperCase();
+  if (s === 'd') return 'EMPATE';
+  return tip.label || `${tip.market} ${s}`;
+}
+
+// Grava market tip como tip "real" no DB via /record-tip — ativa quando o
+// sport correspondente tem MT promovido (DM real, não shadow). Permite que o
+// stake conte na exposição da banca, settlement propague pro bankroll, e a tip
+// apareça na seção "Tips recentes" do dashboard.
+//
+// Synthetic match_id: ${match.id}::mt::${market}::${side} pra coexistir com
+// tip ML do mesmo jogo (que usa match.id puro). Ambas as tips podem rodar em
+// paralelo sem trigger do dedup match_id.
+//
+// Returns the tipId on success, null on error/skip.
+async function recordMarketTipAsRegular({ sport, match, tip, stake, isLive }) {
+  try {
+    if (!sport || !match || !tip) return null;
+    const matchIdBase = String(match.id || `mt_${sport}_${Date.now()}`);
+    const marketKey = String(tip.market || 'unknown');
+    const sideKey = String(tip.side || 'na');
+    const syntheticMatchId = `${matchIdBase}::mt::${marketKey}::${sideKey}`;
+    const market_type = _MT_MARKET_TYPE_MAP[marketKey] || marketKey.toUpperCase();
+    const participant = _mtParticipant(match, tip);
+    const stakeStr = typeof stake === 'number' ? `${stake}u` : String(stake || '1u');
+    const conf = tip.ev >= 15 ? 'ALTA' : tip.ev >= 8 ? 'MÉDIA' : 'BAIXA';
+    const rec = await serverPost('/record-tip', {
+      matchId: syntheticMatchId,
+      eventName: match.league || sport,
+      p1: match.team1, p2: match.team2,
+      tipParticipant: participant,
+      odds: tip.odd,
+      ev: tip.ev,
+      stake: stakeStr,
+      confidence: conf,
+      isLive: !!isLive,
+      market_type,
+      modelP1: tip.pModelHome ?? null,
+      modelP2: tip.pModelAway ?? null,
+      modelPPick: tip.pModel ?? null,
+      modelLabel: tip.label || null,
+      tipReason: `MT scanner ${tip.label || tip.market}/${tip.side}`,
+      sport,
+      isShadow: 0,
+      // Meta extra pra debugging/audit
+      mtSourceMarket: marketKey,
+      mtSourceSide: sideKey,
+      mtSourceLine: tip.line ?? null,
+    }, sport).catch(e => { log('WARN', 'MT-RECORD', `serverPost err: ${e.message}`); return null; });
+    if (!rec) return null;
+    if (rec.skipped) {
+      log('INFO', 'MT-RECORD', `${sport}/${marketKey}/${sideKey} skipped (${rec.reason})`);
+      return null;
+    }
+    if (rec.tipId) {
+      log('INFO', 'MT-RECORD', `${sport}/${marketKey}/${sideKey} → tip id=${rec.tipId} stake=${stakeStr}`);
+      return rec.tipId;
+    }
+    return null;
+  } catch (e) {
+    log('WARN', 'MT-RECORD', `err: ${e.message}`);
+    return null;
+  }
+}
+
 // Side-level ROI auto-guard — complementa o CLV guard por agregação em
 // (sport, market, side). Roda no mesmo cron do runMarketTipsLeakGuard (1h).
 // Usa ROI direto porque shadow tips têm resultado final (win/loss) → sinal
@@ -6152,6 +6244,7 @@ async function autoAnalyzeMatch(token, match) {
                             if (r.sent > 0) {
                               markAdminDmSent(db, { sport: 'lol', match, market: t.market, line: t.line, side: t.side, odd: t.odd, ev: t.ev });
                               log('INFO', 'LOL-MARKET-TIP', `Admin DM enviado: ${t.label} @ ${t.odd} EV ${t.ev}% stake ${stake}u (sent=${r.sent} failed=${r.failed})`);
+                              await recordMarketTipAsRegular({ sport: 'lol', match, tip: t, stake, isLive: isLiveLoL });
                             } else {
                               log('WARN', 'LOL-MARKET-TIP', `Todos admin DM falharam — skip dedup mark (${t.label} @ ${t.odd})`);
                             }
@@ -11412,6 +11505,7 @@ async function _pollDotaInner(runOnce = false) {
                           if (r.sent > 0) {
                             markAdminDmSent(db, { sport: 'dota2', match, market: t.market, line: t.line, side: t.side, odd: t.odd, ev: t.ev });
                             log('INFO', 'DOTA-MARKET-TIP', `Admin DM: ${t.label} @ ${t.odd} EV ${t.ev}% stake ${stake}u (sent=${r.sent} failed=${r.failed})`);
+                            await recordMarketTipAsRegular({ sport: 'dota2', match, tip: t, stake, isLive });
                           } else {
                             log('WARN', 'DOTA-MARKET-TIP', `Todos admin DM falharam — skip dedup mark (${t.label} @ ${t.odd})`);
                           }
@@ -13203,6 +13297,9 @@ async function pollTennis(runOnce = false) {
                                 markAdminDmSent(db, { sport: 'tennis', match, market: t.market, line: t.line, side: t.side, odd: t.odd, ev: t.ev });
                                 const discTag = t.correlationDiscount > 0 ? ` (corr-disc ${(t.correlationDiscount*100).toFixed(0)}%)` : '';
                                 log('INFO', 'TENNIS-MARKET-TIP', `Admin DM: ${t.label} @ ${t.odd} EV ${t.ev}% stake ${stake}u${discTag} (sent=${r.sent} failed=${r.failed})`);
+                                // Promovido pra produção (env tennis_MARKET_TIPS_ENABLED + DM real) →
+                                // grava como tip "regular" no DB pra contar na banca/exposição.
+                                await recordMarketTipAsRegular({ sport: 'tennis', match, tip: t, stake, isLive: isLiveTennis });
                               } else {
                                 log('WARN', 'TENNIS-MARKET-TIP', `Todos admin DM falharam — skip dedup mark (${t.label} @ ${t.odd})`);
                               }
@@ -14573,6 +14670,7 @@ Máximo 200 palavras.`;
                         if (r.sent > 0) {
                           markAdminDmSent(db, { sport: 'football', match: matchForMt, market: marketKey, line: lineVal, side: sideMt });
                           log('INFO', 'FOOTBALL-MARKET-TIP', `Admin DM: ${tipMarket} @ ${tipOdd} EV ${tipEV}% stake ${stakeFb}u (sent=${r.sent} failed=${r.failed})`);
+                          await recordMarketTipAsRegular({ sport: 'football', match: matchForMt, tip: tipForMt, stake: stakeFb, isLive: isFbLive });
                         } else {
                           log('WARN', 'FOOTBALL-MARKET-TIP', `Todos admin DM falharam — skip dedup mark (${tipMarket})`);
                         }
@@ -15154,6 +15252,7 @@ async function pollCs(runOnce = false) {
                             if (r.sent > 0) {
                               markAdminDmSent(db, { sport: 'cs2', match, market: t.market, line: t.line, side: t.side, odd: t.odd, ev: t.ev });
                               log('INFO', 'CS-MARKET-TIP', `Admin DM: ${t.label} @ ${t.odd} EV ${t.ev}% stake ${stake}u (sent=${r.sent} failed=${r.failed})`);
+                              await recordMarketTipAsRegular({ sport: 'cs2', match, tip: t, stake, isLive: isLiveCs });
                             } else {
                               log('WARN', 'CS-MARKET-TIP', `Todos admin DM falharam — skip dedup mark (${t.label} @ ${t.odd})`);
                             }
@@ -15727,6 +15826,7 @@ async function pollValorant(runOnce = false) {
                             const r = await sendAdminDMs(tokenForMT, dm, undefined, 'val-market-tip');
                             if (r.sent > 0) {
                               markAdminDmSent(db, { sport: 'valorant', match, market: t.market, line: t.line, side: t.side, odd: t.odd, ev: t.ev });
+                              await recordMarketTipAsRegular({ sport: 'valorant', match, tip: t, stake, isLive: isLiveVal });
                               log('INFO', 'VAL-MARKET-TIP', `Admin DM: ${t.label} @ ${t.odd} EV ${t.ev}% stake ${stake}u (sent=${r.sent} failed=${r.failed})`);
                             } else {
                               log('WARN', 'VAL-MARKET-TIP', `Todos admin DM falharam — skip dedup mark (${t.label} @ ${t.odd})`);
