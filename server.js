@@ -9028,7 +9028,10 @@ const server = http.createServer(async (req, res) => {
     const apply = parsed.query.apply === '1' || parsed.query.apply === 'true';
     const days = Math.max(1, Math.min(180, parseInt(parsed.query.days || '30', 10) || 30));
     try {
-      // Tips MT regulares cujo participant ainda não tem sinal de linha (novo formato tem +/-)
+      // Inclui tips com OU sem sinal — overwrite=1 força re-back-fill (fix
+      // double-inversion bug 2026-04-27 onde label saía com sinal errado).
+      const overwrite = parsed.query.overwrite === '1' || parsed.query.overwrite === 'true';
+      const signFilter = overwrite ? '' : `AND tip_participant NOT LIKE '%+%' AND tip_participant NOT LIKE '%-%'`;
       const tips = db.prepare(`
         SELECT id, sport, match_id, participant1, participant2, tip_participant, market_type, sent_at
         FROM tips
@@ -9037,8 +9040,7 @@ const server = http.createServer(async (req, res) => {
           AND (archived IS NULL OR archived = 0)
           AND market_type IN ('HANDICAP_GAMES','HANDICAP','HANDICAP_SETS')
           AND tip_participant IS NOT NULL
-          AND tip_participant NOT LIKE '%+%'
-          AND tip_participant NOT LIKE '%-%'
+          ${signFilter}
       `).all(days);
       const updated = [];
       const skipped = [];
@@ -9060,11 +9062,13 @@ const server = http.createServer(async (req, res) => {
           LIMIT 1
         `).get(t.sport, t.participant1, t.participant2, t.participant2, t.participant1, market, side, t.sent_at, t.sent_at);
         if (!shadow || shadow.line == null) { skipped.push({ id: t.id, reason: 'shadow não encontrado ou sem line' }); continue; }
-        // Sinaliza linha: home/team1 = como veio; away/team2 = invertida
-        const isAway = side === 'team2' || side === 'away' || side === 'a';
-        const v = isAway ? -shadow.line : shadow.line;
-        const lineStr = v >= 0 ? `+${v}` : `${v}`;
-        const newLabel = `${t.tip_participant} ${lineStr}`;
+        // BUG FIX 2026-04-27: scanners JÁ emitem line na perspectiva do side
+        // (line=-3.5 + side=away → away player cobre -3.5). NÃO inverter aqui.
+        const lineStr = shadow.line >= 0 ? `+${shadow.line}` : `${shadow.line}`;
+        // Strip qualquer sinal antigo de back-fill anterior (overwrite mode)
+        const baseName = String(t.tip_participant).replace(/\s*[+-]\d+(\.\d+)?\s*$/, '').trim();
+        const newLabel = `${baseName} ${lineStr}`;
+        if (newLabel === t.tip_participant) { skipped.push({ id: t.id, reason: 'já está correto' }); continue; }
         updated.push({ id: t.id, before: t.tip_participant, after: newLabel, line: shadow.line, side });
       }
       if (apply && updated.length) {

@@ -4033,22 +4033,24 @@ const _MT_MARKET_TYPE_MAP = {
 // inclui linha sinalizada (ex: "Alexander Zverev -3.5") pra dashboard mostrar
 // qual handicap foi tippado sem precisar de coluna extra. Pra over/under/yes/no
 // preserva label sintético com linha+unidade.
+//
+// IMPORTANT: scanners (odds-markets-scanner.js:97, tennis-market-scanner.js:167)
+// JÁ EMITEM line na perspectiva do side — line=-3.5 + side=away significa
+// "Zverev (away) cobre -3.5". NÃO inverter sinal aqui. Bug fix 2026-04-27:
+// versão anterior flipava → double-inversão (line=-3.5 virava "+3.5" no label).
 function _mtParticipant(match, tip) {
   const s = String(tip.side || '').toLowerCase();
-  // Sinaliza a linha pra side: home/team1 usa line como veio; away/team2 inverte
-  // o sinal (linha Pinnacle é sempre relativa ao home, então away é o oposto).
-  const fmtLine = (line, isAway) => {
+  const fmtLine = (line) => {
     const n = Number(line);
     if (!Number.isFinite(n)) return '';
-    const v = isAway ? -n : n;
-    return v >= 0 ? `+${v}` : `${v}`;
+    return n >= 0 ? `+${n}` : `${n}`;
   };
   if (s === 'team1' || s === 'home' || s === 'h') {
-    const ln = fmtLine(tip.line, false);
+    const ln = fmtLine(tip.line);
     return ln ? `${match.team1} ${ln}` : match.team1;
   }
   if (s === 'team2' || s === 'away' || s === 'a') {
-    const ln = fmtLine(tip.line, true);
+    const ln = fmtLine(tip.line);
     return ln ? `${match.team2} ${ln}` : match.team2;
   }
   if (s === 'over' || s === 'under') {
