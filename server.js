@@ -9166,7 +9166,7 @@ const server = http.createServer(async (req, res) => {
       if (sportFilter) { conds.push('t.sport = ?'); params.push(sportFilter); }
       const tips = db.prepare(`
         SELECT t.id, t.sport, t.match_id, t.market_type, t.participant1, t.participant2,
-          t.tip_participant, t.model_label, t.tip_reason, t.odds, t.stake,
+          t.tip_participant, t.model_label, t.tip_reason, t.odds, t.stake, t.sent_at,
           t.result AS prev_result, t.profit_reais AS prev_profit
         FROM tips t
         WHERE ${conds.join(' AND ')}
@@ -9221,8 +9221,14 @@ const server = http.createServer(async (req, res) => {
           const mtMarket = sideMatch ? sideMatch[1] : null;
           const mtSide = sideMatch ? sideMatch[2] : null;
           const tipLine = _parseLine(t.tip_participant, t.model_label);
+          // BUG FIX 2026-04-28: ORDER BY usava match_id.split('::')[0] (= "tennis_pin_XXX",
+          // NÃO uma data) → julianday() retornava NULL → pegava QUALQUER match
+          // histórico do par (Tsitsipas×Ruud de anos atrás liquidando tip de R16
+          // que ainda não aconteceu). Fix: usa t.sent_at + filtra range ±5 dias
+          // pra rejeitar matches antigos/futuros do mesmo par.
+          const tipSentAt = t.sent_at || new Date().toISOString();
           const mr = db.prepare(`
-            SELECT team1, team2, winner, final_score
+            SELECT team1, team2, winner, final_score, resolved_at
             FROM match_results
             WHERE game = 'tennis'
               AND ((REPLACE(REPLACE(REPLACE(REPLACE(lower(team1),' ',''),'-',''),'.',''),'''','') = ?
@@ -9230,8 +9236,10 @@ const server = http.createServer(async (req, res) => {
                 OR (REPLACE(REPLACE(REPLACE(REPLACE(lower(team1),' ',''),'-',''),'.',''),'''','') = ?
                    AND REPLACE(REPLACE(REPLACE(REPLACE(lower(team2),' ',''),'-',''),'.',''),'''','') = ?))
               AND winner IS NOT NULL AND final_score IS NOT NULL
+              AND resolved_at >= datetime(?, '-1 days')
+              AND resolved_at <= datetime(?, '+5 days')
             ORDER BY ABS(julianday(resolved_at) - julianday(?)) ASC LIMIT 1
-          `).get(n1, n2, n2, n1, t.match_id ? t.match_id.split('::')[0] : new Date().toISOString());
+          `).get(n1, n2, n2, n1, tipSentAt, tipSentAt, tipSentAt);
           const parsed = mr && mr.final_score ? parseTennisScore(mr.final_score) : null;
           if (parsed && Number.isFinite(tipLine)) {
             const mrT1Ln = _lastNameSrv(mr.team1 || '');
