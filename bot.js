@@ -4111,7 +4111,17 @@ async function recordMarketTipAsRegular({ sport, match, tip, stake, isLive }) {
     const matchIdBase = String(match.id || `mt_${sport}_${Date.now()}`);
     const marketKey = String(tip.market || 'unknown');
     const sideKey = String(tip.side || 'na');
-    const syntheticMatchId = `${matchIdBase}::mt::${marketKey}::${sideKey}`;
+    // Encode line no match_id pra eliminar line-mismatch no propagator. Format:
+    // `${base}::mt::${market}::${side}::ln<line_sanitized>` (e.g., ::lnN3.5 pra -3.5,
+    // ::lnP4.5 pra +4.5, ::ln21.5 pra over/under). Propagator extrai e valida.
+    // ML/draw sem line: omite suffix ::ln (compat com tips legacy).
+    let lineSuffix = '';
+    if (Number.isFinite(tip.line)) {
+      const ln = Number(tip.line);
+      const tag = ln < 0 ? `N${Math.abs(ln)}` : ln > 0 ? `P${ln}` : '0';
+      lineSuffix = `::ln${tag}`;
+    }
+    const syntheticMatchId = `${matchIdBase}::mt::${marketKey}::${sideKey}${lineSuffix}`;
     const market_type = _MT_MARKET_TYPE_MAP[marketKey] || marketKey.toUpperCase();
     const participant = _mtParticipant(match, tip);
     const stakeStr = typeof stake === 'number' ? `${stake}u` : String(stake || '1u');
