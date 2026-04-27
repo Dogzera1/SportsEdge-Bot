@@ -14713,7 +14713,8 @@ Máximo 200 palavras.`;
                     const stakeFb = mtp.kellyStakeForMarket(fbModelPPick, parseFloat(tipOdd), 100, 0.10);
                     if (stakeFb > 0) {
                       const dmFb = mtp.buildMarketTipDM({ match: matchForMt, tip: tipForMt, stake: stakeFb, league: matchForMt.league, sport: 'football', isLive: isFbLive });
-                      const fbToken = SPORTS['football']?.token || resolveAlertsToken();
+                      // resolveTipsToken honra TIPS_UNIFIED_TOKEN — todas MT DMs caem no mesmo bot.
+                      const fbToken = resolveTipsToken('football') || SPORTS['football']?.token || resolveAlertsToken();
                       if (fbToken) {
                         const r = await sendAdminDMs(fbToken, dmFb, undefined, 'football-market-tip');
                         if (r.sent > 0) {

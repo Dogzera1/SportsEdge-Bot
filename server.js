@@ -17692,21 +17692,31 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
       const now = Date.now();
       const weekAhead = now + 7 * 24 * 60 * 60 * 1000;
 
+      // Default cobre TOP TIER (Big 5 europeias + Brasileirão A + competições UEFA)
+      // + tiers secundários históricos. Override via env FOOTBALL_LEAGUES.
+      // Cada liga = 1 request The Odds API por cycle; cuide do quota.
       const defaultLeagues = [
+        // ── Top tier (ligas principais) ──
+        'soccer_epl',                        // Premier League
+        'soccer_spain_la_liga',              // La Liga
+        'soccer_italy_serie_a',              // Serie A
+        'soccer_germany_bundesliga',         // Bundesliga
+        'soccer_france_ligue_one',           // Ligue 1
+        'soccer_brazil_campeonato',          // Brasileirão Serie A
+        'soccer_portugal_primeira_liga',     // Primeira Liga
+        'soccer_netherlands_eredivisie',     // Eredivisie
+        'soccer_uefa_champs_league',         // UCL
+        'soccer_uefa_europa_league',         // UEL
+        'soccer_uefa_europa_conference_league', // UECL
+        // ── Secundárias (mantidas pra cobertura) ──
         'soccer_brazil_serie_b',
-        'soccer_brazil_serie_c',
-        'soccer_england_league1',
-        'soccer_england_league2',
-        'soccer_germany_3_liga',
-        'soccer_france_ligue_2',
-        'soccer_italy_serie_b',
+        'soccer_england_efl_champ',          // Championship (segunda EN)
+        'soccer_germany_bundesliga2',        // 2.Bundesliga
         'soccer_spain_segunda_division',
+        'soccer_italy_serie_b',
+        'soccer_france_ligue_2',
         'soccer_portugal_segunda_liga',
         'soccer_netherlands_eerste_divisie',
-        'soccer_belgium_first_division_b',
-        'soccer_turkey_1_lig',
-        'soccer_sweden_superettan',
-        'soccer_norway_obos_ligaen',
       ].join(',');
 
       const configured = (process.env.FOOTBALL_LEAGUES || defaultLeagues)
