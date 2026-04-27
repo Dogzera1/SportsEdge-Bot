@@ -9166,7 +9166,8 @@ const server = http.createServer(async (req, res) => {
       if (sportFilter) { conds.push('t.sport = ?'); params.push(sportFilter); }
       const tips = db.prepare(`
         SELECT t.id, t.sport, t.match_id, t.market_type, t.participant1, t.participant2,
-          t.tip_participant, t.odds, t.stake, t.result AS prev_result, t.profit_reais AS prev_profit
+          t.tip_participant, t.model_label, t.tip_reason, t.odds, t.stake,
+          t.result AS prev_result, t.profit_reais AS prev_profit
         FROM tips t
         WHERE ${conds.join(' AND ')}
       `).all(...params);
@@ -9188,10 +9189,15 @@ const server = http.createServer(async (req, res) => {
         const toks = clean.split(' ').filter(w => w.length >= 2);
         return toks.length ? toks[toks.length - 1] : clean;
       };
-      // Extract tip line from tip_participant (formato típico "Player +X.X" ou "Player -X.X" ou "OVER X.X games")
-      const _parseLine = (tp) => {
-        const m = String(tp||'').match(/([+-]?\d+\.?\d*)\s*$/);
-        return m ? parseFloat(m[1]) : null;
+      // Extract tip line from tip_participant ou model_label.
+      // tip_participant: "Player +X.X", "Player -X.X", "OVER X.X games" (regex trailing number)
+      // model_label: "Handicap +4.5 games team1", "Under 22.5 games" (search any number after sign)
+      const _parseLine = (tp, label) => {
+        const m1 = String(tp||'').match(/([+-]?\d+\.?\d*)\s*(?:games?)?\s*$/);
+        if (m1 && Number.isFinite(parseFloat(m1[1]))) return parseFloat(m1[1]);
+        // Fallback model_label: "Handicap +4.5 games team1" → +4.5; "Under 22.5 games" → 22.5
+        const m2 = String(label||'').match(/([+-]?\d+\.?\d+)/);
+        return m2 ? parseFloat(m2[1]) : null;
       };
       for (const t of tips) {
         const market = MARKET_TYPE_REVERSE[t.market_type] || String(t.market_type || '').toLowerCase();
@@ -9214,7 +9220,7 @@ const server = http.createServer(async (req, res) => {
           const sideMatch = String(t.match_id || '').match(/::mt::([^:]+)::([^:]+)$/);
           const mtMarket = sideMatch ? sideMatch[1] : null;
           const mtSide = sideMatch ? sideMatch[2] : null;
-          const tipLine = _parseLine(t.tip_participant);
+          const tipLine = _parseLine(t.tip_participant, t.model_label);
           const mr = db.prepare(`
             SELECT team1, team2, winner, final_score
             FROM match_results
