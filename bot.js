@@ -3999,13 +3999,29 @@ function _loadMarketTipsRuntimeState() {
   } catch (e) { log('DEBUG', 'MT-GUARD', `load err: ${e.message}`); }
 }
 
+// Promove tip MT pra `tips` (regular)? Apenas quando env `<SPORT>_MARKET_TIPS_ENABLED=true`.
+// Diferente de `isMarketTipsEnabled` que pode retornar true só pra DM (via
+// MT_SHADOW_DM_ALL) sem promover — promoção é mais estrita.
+function isMarketTipsPromoteEnabled(sport) {
+  const up = String(sport).toUpperCase();
+  const aliasEnv = { DOTA2: 'DOTA', CS2: 'CS' }[up];
+  return process.env[`${up}_MARKET_TIPS_ENABLED`] === 'true'
+    || (aliasEnv && process.env[`${aliasEnv}_MARKET_TIPS_ENABLED`] === 'true');
+}
+
 function isMarketTipsEnabled(sport, market = null, side = null) {
   if (process.env.MARKET_TIPS_DM_KILL_SWITCH === 'true') return false;
   const up = String(sport).toUpperCase();
   // Aceita alias histórico: DOTA_* pra 'dota2', CS_* pra 'cs2'
   const aliasEnv = { DOTA2: 'DOTA', CS2: 'CS' }[up];
-  const enabled = process.env[`${up}_MARKET_TIPS_ENABLED`] === 'true'
+  const envEnabled = process.env[`${up}_MARKET_TIPS_ENABLED`] === 'true'
     || (aliasEnv && process.env[`${aliasEnv}_MARKET_TIPS_ENABLED`] === 'true');
+  // MT_SHADOW_DM_ALL=true: força DM pra todos sports MT (mesmo sem promoção
+  // ativa). Útil pra centralizar visibilidade de TODAS oportunidades MT em
+  // um bot único antes de decidir promover. recordMarketTipAsRegular continua
+  // gateado por isMarketTipsPromoteEnabled (só promove quando env explícito).
+  const shadowDmAll = /^true$/i.test(process.env.MT_SHADOW_DM_ALL || '');
+  const enabled = envEnabled || shadowDmAll;
   if (!enabled) return false;
   if (market) {
     // Precedência: (market+side) mais específico > market inteiro.
@@ -6261,7 +6277,7 @@ async function autoAnalyzeMatch(token, match) {
                             if (r.sent > 0) {
                               markAdminDmSent(db, { sport: 'lol', match, market: t.market, line: t.line, side: t.side, odd: t.odd, ev: t.ev });
                               log('INFO', 'LOL-MARKET-TIP', `Admin DM enviado: ${t.label} @ ${t.odd} EV ${t.ev}% stake ${stake}u (sent=${r.sent} failed=${r.failed})`);
-                              await recordMarketTipAsRegular({ sport: 'lol', match, tip: t, stake, isLive: isLiveLoL });
+                              if (isMarketTipsPromoteEnabled('lol')) await recordMarketTipAsRegular({ sport: 'lol', match, tip: t, stake, isLive: isLiveLoL });
                             } else {
                               log('WARN', 'LOL-MARKET-TIP', `Todos admin DM falharam — skip dedup mark (${t.label} @ ${t.odd})`);
                             }
@@ -11537,7 +11553,7 @@ async function _pollDotaInner(runOnce = false) {
                           if (r.sent > 0) {
                             markAdminDmSent(db, { sport: 'dota2', match, market: t.market, line: t.line, side: t.side, odd: t.odd, ev: t.ev });
                             log('INFO', 'DOTA-MARKET-TIP', `Admin DM: ${t.label} @ ${t.odd} EV ${t.ev}% stake ${stake}u (sent=${r.sent} failed=${r.failed})`);
-                            await recordMarketTipAsRegular({ sport: 'dota2', match, tip: t, stake, isLive });
+                            if (isMarketTipsPromoteEnabled('dota2')) await recordMarketTipAsRegular({ sport: 'dota2', match, tip: t, stake, isLive });
                           } else {
                             log('WARN', 'DOTA-MARKET-TIP', `Todos admin DM falharam — skip dedup mark (${t.label} @ ${t.odd})`);
                           }
@@ -13322,7 +13338,8 @@ async function pollTennis(runOnce = false) {
                             // todas as linhas alternativas — clarifica que -3.5 era line
                             // alternativa quando -4.5 é a principal exibida no site.
                             const dm = mtp.buildMarketTipDM({ match, tip: t, stake, league: match.league, sport: 'tennis', isLive: isLiveTennis, markets });
-                            const tnToken = SPORTS['tennis']?.token || resolveAlertsToken();
+                            // resolveTipsToken honra TIPS_UNIFIED_TOKEN — todas MT DMs caem no mesmo bot.
+                            const tnToken = resolveTipsToken('tennis') || SPORTS['tennis']?.token || resolveAlertsToken();
                             if (tnToken) {
                               const r = await sendAdminDMs(tnToken, dm, undefined, 'tennis-market-tip');
                               if (r.sent > 0) {
@@ -13331,7 +13348,7 @@ async function pollTennis(runOnce = false) {
                                 log('INFO', 'TENNIS-MARKET-TIP', `Admin DM: ${t.label} @ ${t.odd} EV ${t.ev}% stake ${stake}u${discTag} (sent=${r.sent} failed=${r.failed})`);
                                 // Promovido pra produção (env tennis_MARKET_TIPS_ENABLED + DM real) →
                                 // grava como tip "regular" no DB pra contar na banca/exposição.
-                                await recordMarketTipAsRegular({ sport: 'tennis', match, tip: t, stake, isLive: isLiveTennis });
+                                if (isMarketTipsPromoteEnabled('tennis')) await recordMarketTipAsRegular({ sport: 'tennis', match, tip: t, stake, isLive: isLiveTennis });
                               } else {
                                 log('WARN', 'TENNIS-MARKET-TIP', `Todos admin DM falharam — skip dedup mark (${t.label} @ ${t.odd})`);
                               }
@@ -14702,7 +14719,7 @@ Máximo 200 palavras.`;
                         if (r.sent > 0) {
                           markAdminDmSent(db, { sport: 'football', match: matchForMt, market: marketKey, line: lineVal, side: sideMt });
                           log('INFO', 'FOOTBALL-MARKET-TIP', `Admin DM: ${tipMarket} @ ${tipOdd} EV ${tipEV}% stake ${stakeFb}u (sent=${r.sent} failed=${r.failed})`);
-                          await recordMarketTipAsRegular({ sport: 'football', match: matchForMt, tip: tipForMt, stake: stakeFb, isLive: isFbLive });
+                          if (isMarketTipsPromoteEnabled('football')) await recordMarketTipAsRegular({ sport: 'football', match: matchForMt, tip: tipForMt, stake: stakeFb, isLive: isFbLive });
                         } else {
                           log('WARN', 'FOOTBALL-MARKET-TIP', `Todos admin DM falharam — skip dedup mark (${tipMarket})`);
                         }
@@ -15284,7 +15301,7 @@ async function pollCs(runOnce = false) {
                             if (r.sent > 0) {
                               markAdminDmSent(db, { sport: 'cs2', match, market: t.market, line: t.line, side: t.side, odd: t.odd, ev: t.ev });
                               log('INFO', 'CS-MARKET-TIP', `Admin DM: ${t.label} @ ${t.odd} EV ${t.ev}% stake ${stake}u (sent=${r.sent} failed=${r.failed})`);
-                              await recordMarketTipAsRegular({ sport: 'cs2', match, tip: t, stake, isLive: isLiveCs });
+                              if (isMarketTipsPromoteEnabled('cs2')) await recordMarketTipAsRegular({ sport: 'cs2', match, tip: t, stake, isLive: isLiveCs });
                             } else {
                               log('WARN', 'CS-MARKET-TIP', `Todos admin DM falharam — skip dedup mark (${t.label} @ ${t.odd})`);
                             }
@@ -15858,7 +15875,7 @@ async function pollValorant(runOnce = false) {
                             const r = await sendAdminDMs(tokenForMT, dm, undefined, 'val-market-tip');
                             if (r.sent > 0) {
                               markAdminDmSent(db, { sport: 'valorant', match, market: t.market, line: t.line, side: t.side, odd: t.odd, ev: t.ev });
-                              await recordMarketTipAsRegular({ sport: 'valorant', match, tip: t, stake, isLive: isLiveVal });
+                              if (isMarketTipsPromoteEnabled('valorant')) await recordMarketTipAsRegular({ sport: 'valorant', match, tip: t, stake, isLive: isLiveVal });
                               log('INFO', 'VAL-MARKET-TIP', `Admin DM: ${t.label} @ ${t.odd} EV ${t.ev}% stake ${stake}u (sent=${r.sent} failed=${r.failed})`);
                             } else {
                               log('WARN', 'VAL-MARKET-TIP', `Todos admin DM falharam — skip dedup mark (${t.label} @ ${t.odd})`);
