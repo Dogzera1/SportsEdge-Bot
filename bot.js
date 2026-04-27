@@ -11723,6 +11723,27 @@ Máximo 200 palavras.`;
         }
       }
 
+      // AI_DISABLED fallback Dota: pick por MAIOR EV POSITIVO baseado no model.
+      if (!tipMatch && _AI_DISABLED && o && Number.isFinite(mlResult.modelP1) && Number.isFinite(mlResult.modelP2)) {
+        const _o1d = parseFloat(o.t1) || 0;
+        const _o2d = parseFloat(o.t2) || 0;
+        const _ev1d = (_o1d > 1) ? mlResult.modelP1 * _o1d - 1 : -999;
+        const _ev2d = (_o2d > 1) ? mlResult.modelP2 * _o2d - 1 : -999;
+        const _bestT1d = _ev1d >= _ev2d;
+        const _pickPd = _bestT1d ? mlResult.modelP1 : mlResult.modelP2;
+        const _pickOddD = _bestT1d ? _o1d : _o2d;
+        const _pickTeamD = _bestT1d ? match.team1 : match.team2;
+        const _evPctD = (_pickPd * _pickOddD - 1) * 100;
+        const _minEvD = parseFloat(process.env.DOTA_FALLBACK_MIN_EV || '5');
+        if (_evPctD >= _minEvD && _pickPd >= 0.20 && _pickOddD >= 1.30 && _pickOddD <= 4.0 && mlResult.score >= 5) {
+          tipMatch = [
+            `TIP_ML: ${_pickTeamD} @ ${_pickOddD.toFixed(2)} |EV: +${_evPctD.toFixed(1)}% |STAKE: 1u |CONF: BAIXA`,
+            String(_pickTeamD), String(_pickOddD.toFixed(2)), `+${_evPctD.toFixed(1)}%`, '1u', 'BAIXA',
+          ];
+          log('INFO', 'DOTA-AI-DISABLED', `${match.team1} vs ${match.team2}: fallback ${_pickTeamD}@${_pickOddD.toFixed(2)} EV=${_evPctD.toFixed(1)}% pickP=${(_pickPd*100).toFixed(1)}% edge=${mlResult.score.toFixed(1)}pp`);
+        }
+      }
+
       if (!tipMatch) {
         log('INFO', 'AUTO-DOTA', `Sem tip: ${match.team1} vs ${match.team2}`);
         setDotaAnalyzed({ ts: now, tipSent: false, noEdge: true });
@@ -14972,7 +14993,7 @@ async function pollTableTennis(runOnce = false) {
         const useElo = elo.pass && elo.found1 && elo.found2 && Math.min(elo.eloMatches1, elo.eloMatches2) >= 5;
         const modelP1 = useElo ? elo.modelP1 : mlResult.modelP1;
         const modelP2 = useElo ? elo.modelP2 : mlResult.modelP2;
-        const direction = useElo
+        let direction = useElo
           ? (elo.direction === 'p1' ? 't1' : elo.direction === 'p2' ? 't2' : null)
           : mlResult.direction;
         const mlScore = useElo ? elo.score : mlResult.score;
@@ -14984,6 +15005,10 @@ async function pollTableTennis(runOnce = false) {
           continue;
         }
 
+        // Pick por MAIOR EV POSITIVO (override direction se ambos lados válidos).
+        const _evTT1 = (modelP1 && o1) ? modelP1 * o1 - 1 : -999;
+        const _evTT2 = (modelP2 && o2) ? modelP2 * o2 - 1 : -999;
+        if (_evTT1 > -999 && _evTT2 > -999) direction = _evTT1 >= _evTT2 ? 't1' : 't2';
         const pickTeam = direction === 't1' ? match.team1 : match.team2;
         const pickOdd = direction === 't1' ? o1 : o2;
         const pickP = direction === 't1' ? modelP1 : modelP2;
@@ -15391,11 +15416,16 @@ async function pollCs(runOnce = false) {
           } catch (e) { reportBug('CS-MARKETS', e); }
         }
 
-        const direction = useElo
+        let direction = useElo
           ? (elo.direction === 'p1' ? 't1' : elo.direction === 'p2' ? 't2' : null)
           : mlResult.direction;
         const mlScore = useElo ? elo.score : mlResult.score;
         const factorCount = useElo ? elo.factorCount : mlResult.factorCount;
+
+        // Pick por MAIOR EV POSITIVO (override direction se ambos lados válidos).
+        const _evCs1 = (modelP1 && o1) ? modelP1 * o1 - 1 : -999;
+        const _evCs2 = (modelP2 && o2) ? modelP2 * o2 - 1 : -999;
+        if (_evCs1 > -999 && _evCs2 > -999) direction = _evCs1 >= _evCs2 ? 't1' : 't2';
 
         // Segment gate bonus: exige edge adicional em segmentos com Brier fraco
         // (ex: CS2 tier2 Bo5 +3pp, CS2 tier1 Bo1 +1pp). Baseline threshold 3.0pp.
@@ -15972,9 +16002,14 @@ async function pollValorant(runOnce = false) {
           } catch (e) { reportBug('VAL-MARKETS', e); }
         }
 
-        const direction = elo.direction === 'p1' ? 't1' : elo.direction === 'p2' ? 't2' : null;
+        let direction = elo.direction === 'p1' ? 't1' : elo.direction === 'p2' ? 't2' : null;
         const mlScore = elo.score;
         const factorCount = elo.factorCount;
+
+        // Pick por MAIOR EV POSITIVO (override direction se ambos lados válidos).
+        const _evVal1 = (modelP1 && o1) ? modelP1 * o1 - 1 : -999;
+        const _evVal2 = (modelP2 && o2) ? modelP2 * o2 - 1 : -999;
+        if (_evVal1 > -999 && _evVal2 > -999) direction = _evVal1 >= _evVal2 ? 't1' : 't2';
 
         if (elo.inSeriesAdjusted) {
           log('INFO', 'AUTO-VAL', `Série ${match.score1||0}-${match.score2||0} Bo${bo}: P mapa=${elo.mapP1.toFixed(3)} → P série=${modelP1.toFixed(3)}`);
@@ -16333,9 +16368,14 @@ async function runAutoDarts() {
             } catch (e) { reportBug('DARTS-TRAINED', e); }
           }
 
-          // Direção, odd e stake Kelly
+          // Direção, odd e stake Kelly. Pick por MAIOR EV POSITIVO (não favorito do model).
+          const _odd1Da = parseFloat(match.odds.t1) || 0;
+          const _odd2Da = parseFloat(match.odds.t2) || 0;
+          const _ev1Da = (ml.modelP1 && _odd1Da) ? ml.modelP1 * _odd1Da - 1 : -999;
+          const _ev2Da = (ml.modelP2 && _odd2Da) ? ml.modelP2 * _odd2Da - 1 : -999;
+          if (_ev1Da > -999 && _ev2Da > -999) ml.direction = _ev1Da >= _ev2Da ? 't1' : 't2';
           const pickTeam = ml.direction === 't1' ? match.team1 : match.team2;
-          const pickOdd = ml.direction === 't1' ? parseFloat(match.odds.t1) : parseFloat(match.odds.t2);
+          const pickOdd = ml.direction === 't1' ? _odd1Da : _odd2Da;
           const pickP   = ml.direction === 't1' ? ml.modelP1 : ml.modelP2;
           const evPct   = ((pickP * pickOdd - 1) * 100);
 
@@ -16570,8 +16610,14 @@ async function runAutoSnooker() {
             } catch (e) { reportBug('SNOOKER-TRAINED', e); }
           }
 
+          // Pick por MAIOR EV POSITIVO (não favorito do model).
+          const _odd1Sn = parseFloat(match.odds.t1) || 0;
+          const _odd2Sn = parseFloat(match.odds.t2) || 0;
+          const _ev1Sn = (ml.modelP1 && _odd1Sn) ? ml.modelP1 * _odd1Sn - 1 : -999;
+          const _ev2Sn = (ml.modelP2 && _odd2Sn) ? ml.modelP2 * _odd2Sn - 1 : -999;
+          if (_ev1Sn > -999 && _ev2Sn > -999) ml.direction = _ev1Sn >= _ev2Sn ? 't1' : 't2';
           const pickTeam = ml.direction === 't1' ? match.team1 : match.team2;
-          const pickOdd = ml.direction === 't1' ? parseFloat(match.odds.t1) : parseFloat(match.odds.t2);
+          const pickOdd = ml.direction === 't1' ? _odd1Sn : _odd2Sn;
           const pickP   = ml.direction === 't1' ? ml.modelP1 : ml.modelP2;
           const evPct   = ((pickP * pickOdd - 1) * 100);
           // Audit 2026-04-21: Snooker lift ≈3.4% + ECE 0.061 (miscalibrado) → EV min default 10% (era 3%); override SNOOKER_MIN_EV
