@@ -2694,6 +2694,8 @@ async function loadMlShadowBySport() {
 }
 
 // Lista paginada de tips ML shadow individuais (cross-sport)
+let mlShadowTipsState = { allTips: [], page: 0, perPage: 25 };
+
 async function loadMlShadowTipsList(sportList) {
   const container = document.getElementById('mlShadowTipsList');
   if (!container) return;
@@ -2710,11 +2712,25 @@ async function loadMlShadowTipsList(sportList) {
     }
   });
   tips.sort((a, b) => String(b.sent_at || '').localeCompare(String(a.sent_at || '')));
+  mlShadowTipsState.allTips = tips;
+  mlShadowTipsState.page = 0;
+  renderMlShadowTipsList();
+}
 
-  if (!tips.length) {
+function renderMlShadowTipsList() {
+  const container = document.getElementById('mlShadowTipsList');
+  if (!container) return;
+  const { allTips, page, perPage } = mlShadowTipsState;
+  if (!allTips.length) {
     container.innerHTML = '<div class="empty-state">Nenhuma tip shadow individual</div>';
     return;
   }
+
+  const totalPages = Math.max(1, Math.ceil(allTips.length / perPage));
+  const pageIdx = Math.min(page, totalPages - 1);
+  const start = pageIdx * perPage;
+  const end = Math.min(start + perPage, allTips.length);
+  const pageTips = allTips.slice(start, end);
 
   const sportEmoji = { lol:'🎮', dota2:'🎮', cs:'🔫', valorant:'🎯', tennis:'🎾', football:'⚽', mma:'🥊', darts:'🎯', snooker:'🎱', tabletennis:'🏓' };
   const resultBadge = r => r === 'win' ? '<span style="color:#16a34a">✓</span>'
@@ -2722,7 +2738,7 @@ async function loadMlShadowTipsList(sportList) {
     : r === 'void' ? '<span style="color:#ca8a04">−</span>'
     : '<span style="opacity:0.5">⋯</span>';
 
-  let html = `<div class="card-meta" style="margin-bottom:6px"><b>🗒️ Tips ML shadow individuais</b> (${tips.length} total, ordenado por data desc)</div>
+  let html = `<div class="card-meta" style="margin-bottom:6px"><b>🗒️ Tips ML shadow individuais</b> (${allTips.length} total, ordenado por data desc)</div>
     <table class="tips">
       <thead><tr>
         <th>Sport</th>
@@ -2737,7 +2753,7 @@ async function loadMlShadowTipsList(sportList) {
         <th style="text-align:center">Result</th>
         <th style="text-align:right">CLV</th>
       </tr></thead><tbody>`;
-  for (const t of tips.slice(0, 100)) {
+  for (const t of pageTips) {
     const sp = t._sport || t.sport;
     const emoji = sportEmoji[sp] || '📊';
     const ts = (t.sent_at || '').replace('T', ' ').slice(5, 16);
@@ -2758,8 +2774,40 @@ async function loadMlShadowTipsList(sportList) {
     </tr>`;
   }
   html += `</tbody></table>`;
-  if (tips.length > 100) html += `<div class="card-meta" style="margin-top:6px">Mostrando 100 mais recentes de ${tips.length}</div>`;
+
+  html += `
+    <div class="pagination-bar" style="display:flex;align-items:center;justify-content:space-between;margin-top:12px;padding:8px 0;border-top:1px solid var(--border,#2a2a2a);gap:10px;flex-wrap:wrap">
+      <div class="card-meta">Mostrando ${allTips.length ? start + 1 : 0}–${end} de ${allTips.length}</div>
+      <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+        <button onclick="mlShadowTipsGoPage(0)" ${pageIdx === 0 ? 'disabled' : ''} style="padding:4px 10px">«</button>
+        <button onclick="mlShadowTipsGoPage(${pageIdx - 1})" ${pageIdx === 0 ? 'disabled' : ''} style="padding:4px 10px">‹</button>
+        <span style="font-size:0.9em;padding:0 4px">página
+          <input type="number" min="1" max="${totalPages}" value="${pageIdx + 1}" onchange="mlShadowTipsGoPage(parseInt(this.value, 10) - 1)" style="width:60px;text-align:center;background:var(--bg-secondary,#1a1a1a);color:var(--text,#e2e8f0);border:1px solid var(--border,#2a2a2a);padding:2px 4px;border-radius:4px"> / ${totalPages}
+        </span>
+        <button onclick="mlShadowTipsGoPage(${pageIdx + 1})" ${pageIdx >= totalPages - 1 ? 'disabled' : ''} style="padding:4px 10px">›</button>
+        <button onclick="mlShadowTipsGoPage(${totalPages - 1})" ${pageIdx >= totalPages - 1 ? 'disabled' : ''} style="padding:4px 10px">»</button>
+        <label style="font-size:0.85em;margin-left:6px">
+          por pág:
+          <select onchange="setMlShadowTipsPerPage(this.value)" style="background:var(--bg-secondary,#1a1a1a);color:var(--text,#e2e8f0);border:1px solid var(--border,#2a2a2a);padding:2px 4px;border-radius:4px">
+            ${[10, 25, 50, 100].map(n => `<option value="${n}" ${n === perPage ? 'selected' : ''}>${n}</option>`).join('')}
+          </select>
+        </label>
+      </div>
+    </div>`;
   container.innerHTML = html;
+}
+
+function mlShadowTipsGoPage(newPage) {
+  if (!Number.isFinite(newPage)) return;
+  const totalPages = Math.max(1, Math.ceil(mlShadowTipsState.allTips.length / mlShadowTipsState.perPage));
+  mlShadowTipsState.page = Math.max(0, Math.min(totalPages - 1, newPage));
+  renderMlShadowTipsList();
+}
+
+function setMlShadowTipsPerPage(n) {
+  mlShadowTipsState.perPage = Math.max(5, Math.min(200, parseInt(n, 10) || 25));
+  mlShadowTipsState.page = 0;
+  renderMlShadowTipsList();
 }
 
 let marketTipsState = {
