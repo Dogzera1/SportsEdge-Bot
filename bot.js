@@ -17550,7 +17550,12 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
       // 1. Market tips shadow via novo módulo
       const { captureMarketTipsClv } = require('./lib/clv-capture');
       const mt = await captureMarketTipsClv(db, serverGet);
-      if (mt.updated > 0) log('INFO', 'CLV-CAPTURE', `market-tips: checked=${mt.checked} updated=${mt.updated}`);
+      if (mt.checked > 0) {
+        const skipDetail = `match=${mt.skipped?.match||0} sameOdd=${mt.skipped?.sameOdd||0} badOdd=${mt.skipped?.badOdd||0}`;
+        const sportDetail = Object.entries(mt.bySport || {}).map(([s, n]) => `${s}=${n}`).join(' ');
+        log(mt.updated > 0 || mt.errors > 0 ? 'INFO' : 'DEBUG', 'CLV-CAPTURE',
+          `market-tips: checked=${mt.checked} updated=${mt.updated} errors=${mt.errors}${mt.firstError ? ' (' + mt.firstError + ')' : ''} | ${skipDetail} | ${sportDetail}`);
+      }
       // 2. Regular tips via checkCLV legacy (já cobre cs/val/lol/dota2 pós fix 8dcc948)
       // caches={} força refetch via serverGet — cron não compartilha sharedCaches
       // do ciclo principal (ReferenceError pré-fix 2026-04-23).
