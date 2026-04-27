@@ -9001,6 +9001,67 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // GET /admin/mt-tip-trace?id=N&key=<KEY>
+  // Mostra TODAS as match_results candidatas pra uma tip MT (pra auditar
+  // qual row foi usada no settle, mesmo que detector mt-revert-suspects
+  // não tenha flagado). Útil quando settle parece errado mas critério
+  // automático não pegou.
+  if (p === '/admin/mt-tip-trace') {
+    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const id = parseInt(parsed.query.id || '', 10);
+    if (!Number.isFinite(id) || id <= 0) { sendJson(res, { error: 'id obrigatório' }, 400); return; }
+    try {
+      const tip = db.prepare(`SELECT * FROM tips WHERE id = ?`).get(id);
+      if (!tip) { sendJson(res, { error: 'tip não encontrada' }, 404); return; }
+      const _norm = s => String(s||'').toLowerCase().replace(/[\s\-.']/g, '');
+      const n1 = _norm(tip.participant1), n2 = _norm(tip.participant2);
+      // Strict: exatos + LIKE fuzzy
+      const exact = db.prepare(`
+        SELECT match_id, league, team1, team2, winner, final_score, resolved_at
+        FROM match_results
+        WHERE game = ?
+          AND ((REPLACE(REPLACE(REPLACE(REPLACE(lower(team1),' ',''),'-',''),'.',''),'''','') = ?
+                AND REPLACE(REPLACE(REPLACE(REPLACE(lower(team2),' ',''),'-',''),'.',''),'''','') = ?)
+            OR (REPLACE(REPLACE(REPLACE(REPLACE(lower(team1),' ',''),'-',''),'.',''),'''','') = ?
+                AND REPLACE(REPLACE(REPLACE(REPLACE(lower(team2),' ',''),'-',''),'.',''),'''','') = ?))
+        ORDER BY resolved_at DESC
+        LIMIT 20
+      `).all(tip.sport, n1, n2, n2, n1);
+      const fuzzy = db.prepare(`
+        SELECT match_id, league, team1, team2, winner, final_score, resolved_at
+        FROM match_results
+        WHERE game = ?
+          AND ((lower(team1) LIKE ? AND lower(team2) LIKE ?) OR (lower(team1) LIKE ? AND lower(team2) LIKE ?))
+        ORDER BY resolved_at DESC
+        LIMIT 20
+      `).all(tip.sport, `%${n1}%`, `%${n2}%`, `%${n2}%`, `%${n1}%`);
+      // Shadow row associada
+      const shadow = db.prepare(`
+        SELECT id, market, side, line, odd, ev_pct, p_model, result, profit_units,
+          created_at, settled_at
+        FROM market_tips_shadow
+        WHERE sport = ?
+          AND ((lower(team1) = lower(?) AND lower(team2) = lower(?)) OR (lower(team1) = lower(?) AND lower(team2) = lower(?)))
+          AND ABS(julianday(created_at) - julianday(?)) < 0.5
+        ORDER BY id DESC LIMIT 5
+      `).all(tip.sport, tip.participant1, tip.participant2, tip.participant2, tip.participant1, tip.sent_at);
+      sendJson(res, {
+        ok: true,
+        tip: {
+          id: tip.id, sport: tip.sport, match: `${tip.participant1} vs ${tip.participant2}`,
+          tip_participant: tip.tip_participant, market_type: tip.market_type,
+          odds: tip.odds, result: tip.result, profit_reais: tip.profit_reais,
+          sent_at: tip.sent_at, settled_at: tip.settled_at,
+        },
+        match_results_exact: exact,
+        match_results_fuzzy_extra: fuzzy.filter(f => !exact.some(e => e.match_id === f.match_id)),
+        shadow_rows: shadow,
+      });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
   // POST /admin/mt-revert-suspects?days=14&apply=0&buffer_min=5&key=<KEY>
   // Auto-detecta MT tips com match-mismatch e reverte.
   //
