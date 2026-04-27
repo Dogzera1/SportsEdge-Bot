@@ -1185,6 +1185,10 @@ async function refresh() {
         loadModels(gen),
       ]);
     }
+    // MT shadow card é independente de overall/per-sport e respeita currentSport
+    // internamente. Chamar sempre garante que ao trocar sport via dropdown ou
+    // card-click, o painel MT acompanhe.
+    try { await loadMarketTipsShadow(); } catch (_) {}
     // Só atualiza timestamp se ainda é o refresh mais recente
     if (gen === refreshGen) {
       document.getElementById('lastUpdated').textContent = new Date().toLocaleTimeString('pt-BR').slice(0, 5);
@@ -3461,13 +3465,12 @@ function renderMarketTipsBySportCards(bs) {
 
 function filterToSport(sp) {
   currentSport = sp;
-  // Atualiza dropdown principal pra refletir mudança
+  // Dropdown value tem formato "sport|game", pipe é obrigatório pro match.
   const sel = document.getElementById('sportSelect');
-  if (sel) sel.value = sp;
+  if (sel) sel.value = sp + '|';
   marketTipsState.page = 0;
   marketTipsState.sport = sp;
-  // BUG FIX 2026-04-27: antes chamava loadAll() (não definida) — só MT atualizava.
-  // refresh() é o handler global que dispara todas as seções (KPI, tips, live etc).
+  // refresh() já inclui loadMarketTipsShadow agora (commit 2b44c3f+).
   if (typeof refresh === 'function') refresh();
   else loadMarketTipsShadow();
 }
