@@ -8942,6 +8942,67 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // GET /tips-by-league?sport=X&days=30
+  // Stats por liga das tips REAIS (is_shadow=0). Útil pra ver onde está vindo
+  // o ROI / leak por liga. Filtra por sport ativo (ou cross-sport se __overall__).
+  if (p === '/tips-by-league') {
+    const sport = parsed.query.sport && parsed.query.sport !== '__overall__' ? parsed.query.sport : null;
+    const days = Math.max(1, Math.min(365, parseInt(parsed.query.days || '30', 10) || 30));
+    const minN = Math.max(1, parseInt(parsed.query.min_n || '2', 10) || 2);
+    try {
+      const conds = [
+        `sent_at >= datetime('now', '-' || ? || ' days')`,
+        `COALESCE(is_shadow, 0) = 0`,
+        `(archived IS NULL OR archived = 0)`,
+        `event_name IS NOT NULL AND TRIM(event_name) != ''`,
+      ];
+      const params = [days];
+      if (sport) {
+        const { sportSet } = (typeof resolveSportSet === 'function')
+          ? resolveSportSet(sport, null) : { sportSet: [sport] };
+        conds.push(`sport IN (${sportSet.map(() => '?').join(',')})`);
+        params.push(...sportSet);
+      }
+      const rows = db.prepare(`
+        SELECT
+          event_name AS league,
+          sport,
+          COUNT(*) AS n,
+          SUM(CASE WHEN result IS NULL THEN 1 ELSE 0 END) AS pending,
+          SUM(CASE WHEN result IN ('win','loss') THEN 1 ELSE 0 END) AS settled,
+          SUM(CASE WHEN result = 'win' THEN 1 ELSE 0 END) AS wins,
+          SUM(COALESCE(profit_reais, 0)) AS profit,
+          SUM(COALESCE(stake_reais, 0)) AS staked,
+          AVG(CASE WHEN clv_odds > 1 AND odds > 1 THEN (odds / clv_odds - 1) * 100 END) AS avg_clv,
+          SUM(CASE WHEN clv_odds > 1 AND odds > 1 THEN 1 ELSE 0 END) AS clv_n,
+          SUM(CASE WHEN match_id LIKE '%::mt::%' THEN 1 ELSE 0 END) AS mt_n
+        FROM tips
+        WHERE ${conds.join(' AND ')}
+        GROUP BY event_name, sport
+        HAVING n >= ?
+        ORDER BY n DESC, profit DESC
+      `).all(...params, minN);
+      const out = rows.map(r => ({
+        league: r.league,
+        sport: r.sport,
+        n: r.n,
+        pending: r.pending || 0,
+        settled: r.settled || 0,
+        wins: r.wins || 0,
+        mt_n: r.mt_n || 0,
+        ml_n: (r.n || 0) - (r.mt_n || 0),
+        hitRate: r.settled > 0 ? +(r.wins / r.settled * 100).toFixed(1) : null,
+        profit: +(r.profit || 0).toFixed(2),
+        staked: +(r.staked || 0).toFixed(2),
+        roi: r.staked > 0 ? +((r.profit / r.staked) * 100).toFixed(1) : null,
+        avgClv: r.clv_n > 0 ? +(r.avg_clv || 0).toFixed(2) : null,
+        clvN: r.clv_n || 0,
+      }));
+      sendJson(res, { ok: true, sport: sport || 'all', days, min_n: minN, leagues: out });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
   // GET /tips-by-sport?days=30
   // Stats por sport das tips REAIS (is_shadow=0). Inclui ML + MT promovidas.
   // Equivalente ao /market-tips-by-sport mas pra tips que contam pra banca.

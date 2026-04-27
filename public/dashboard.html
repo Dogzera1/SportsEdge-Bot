@@ -660,6 +660,8 @@
     </div>
     <!-- Stats por esporte — só real tips (is_shadow=0). Click filtra dashboard. -->
     <div id="tipsBySport" style="margin-bottom:10px"></div>
+    <!-- Stats por liga — filtra por sport ativo, top N ligas. Click filtra tabela. -->
+    <div id="tipsByLeague" style="margin-bottom:10px"></div>
     <!-- Stats por mercado (ML, HG, TG, etc) — só real tips (is_shadow=0) -->
     <div id="tipsByMarket" style="margin-bottom:10px"></div>
     <div id="tipsTable"><div class="loading">Carregando</div></div>
@@ -2054,9 +2056,86 @@ async function loadTips(gen = refreshGen) {
   tipsCache = Array.isArray(tips) ? tips : [];
   tipsPage = 1;
   renderTipsTable();
-  // Stats por esporte + por mercado — fetch paralelo, não bloqueiam tabela
+  // Stats por esporte + liga + mercado — fetch paralelo, não bloqueiam tabela
   loadTipsBySport(gen).catch(() => {});
+  loadTipsByLeague(gen).catch(() => {});
   loadTipsByMarket(gen).catch(() => {});
+}
+
+// Filtro de liga aplicado no renderTipsTable. null = todas. String = filter event_name.
+let tipsLeagueFilter = null;
+
+function filterTipsByLeague(league) {
+  // Toggle: clicar mesma liga → limpa filtro
+  if (tipsLeagueFilter === league) {
+    tipsLeagueFilter = null;
+  } else {
+    tipsLeagueFilter = league;
+  }
+  tipsPage = 1;
+  renderTipsTable();
+  // Re-render cards pra atualizar destaque
+  loadTipsByLeague(refreshGen).catch(() => {});
+}
+
+// Stats por liga pras tips REAIS (is_shadow=0). Cards horizontais filtráveis.
+async function loadTipsByLeague(gen = refreshGen) {
+  const el = document.getElementById('tipsByLeague');
+  if (!el) return;
+  const sportQ = currentSport === '__overall__' ? '' : '&sport=' + encodeURIComponent(currentSport);
+  const data = await apiFetch(`/tips-by-league?days=30&min_n=2${sportQ}`).catch(() => null);
+  if (shouldAbort(gen)) return;
+  if (!data || !Array.isArray(data.leagues) || !data.leagues.length) {
+    el.innerHTML = '';
+    return;
+  }
+  // Limita top 12 pra UI ficar manejável
+  const top = data.leagues.slice(0, 12);
+  const fmtPctVal = (v, d=1) => v == null ? '—' : (v >= 0 ? '+' : '') + Number(v).toFixed(d) + '%';
+  const cls = (v) => v == null ? '' : (v >= 0 ? 'pos' : 'neg');
+  const sportColor = {
+    lol: '#29b6f6', dota2: '#ef5350', cs2: '#ffa726', valorant: '#ec407a',
+    tennis: '#66bb6a', football: '#ab47bc', mma: '#8d6e63',
+    darts: '#26a69a', snooker: '#5c6bc0', tabletennis: '#ff7043',
+  };
+  const escapeQ = (s) => String(s).replace(/'/g, "&#39;").replace(/"/g, '&quot;');
+  const cards = top.map(l => {
+    const isActive = tipsLeagueFilter === l.league;
+    const c = sportColor[l.sport] || '#888';
+    // Truncate long league names
+    const shortName = l.league.length > 28 ? l.league.slice(0, 25) + '…' : l.league;
+    const mtBadge = l.mt_n > 0
+      ? `<span style="background:#7c3aed;color:#fff;padding:1px 4px;border-radius:3px;font-size:0.65em;margin-left:4px">MT ${l.mt_n}</span>`
+      : '';
+    const cleanLeague = escapeQ(l.league);
+    return `
+      <div onclick="filterTipsByLeague('${cleanLeague}')" title="${cleanLeague}"
+           style="cursor:pointer;border:2px solid ${isActive ? c : 'var(--border,#2a2a2a)'};background:var(--surface,#0f172a);border-radius:6px;padding:8px 10px;min-width:180px;flex:1;transition:transform 0.1s"
+           onmouseover="this.style.transform='translateY(-2px)'" onmouseout="this.style.transform='translateY(0)'">
+        <div style="display:flex;align-items:center;gap:4px;margin-bottom:3px">
+          <span style="background:${c};color:#fff;padding:1px 5px;border-radius:3px;font-size:0.65em;font-weight:600">${l.sport.toUpperCase()}</span>
+          ${mtBadge}
+        </div>
+        <div style="font-size:0.85em;font-weight:600;color:var(--text,#e2e8f0);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${shortName}</div>
+        <div style="font-size:0.7em;color:#888;margin-top:1px">${l.n} tips · ${l.pending} pend · ${l.settled} sett</div>
+        <div style="display:flex;justify-content:space-between;font-size:0.75em;margin-top:4px">
+          <span>Hit <b>${fmtPctVal(l.hitRate, 0)}</b></span>
+          <span class="${cls(l.roi)}">ROI <b>${fmtPctVal(l.roi)}</b></span>
+        </div>
+        <div style="display:flex;justify-content:space-between;font-size:0.72em;margin-top:1px">
+          <span class="${cls(l.avgClv)}">CLV ${fmtPctVal(l.avgClv)}</span>
+          <span class="${cls(l.profit)}">${l.profit >= 0 ? '+' : ''}R$ ${l.profit.toFixed(0)}</span>
+        </div>
+      </div>`;
+  }).join('');
+  const filterHint = tipsLeagueFilter
+    ? `<span style="margin-left:8px;color:#3b82f6;cursor:pointer;font-size:0.8em" onclick="filterTipsByLeague('${escapeQ(tipsLeagueFilter)}')">✕ limpar filtro: <b>${tipsLeagueFilter}</b></span>`
+    : '';
+  el.innerHTML = `
+    <div class="card-meta" style="margin-bottom:6px;font-size:0.8em">
+      🏆 <b>Stats por liga (${data.days}d, top ${top.length}${data.leagues.length > top.length ? ' de ' + data.leagues.length : ''})</b> — clique pra filtrar tabela${filterHint}
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">${cards}</div>`;
 }
 
 // Stats por sport pras tips REAIS (is_shadow=0). Cards horizontais com count,
@@ -2176,9 +2255,14 @@ async function loadTipsByMarket(gen = refreshGen) {
 function renderTipsTable() {
   const el = document.getElementById('tipsTable');
   if (!el) return;
-  const tips = tipsCache;
+  let tips = tipsCache;
+  // Aplica filtro de liga (se ativo) — case-insensitive exact match no event_name
+  if (tipsLeagueFilter) {
+    const lf = String(tipsLeagueFilter).toLowerCase();
+    tips = (tipsCache || []).filter(t => String(t.event_name || '').toLowerCase() === lf);
+  }
   if (!Array.isArray(tips) || !tips.length) {
-    setEmpty(el, 'Sem tips no filtro');
+    setEmpty(el, tipsLeagueFilter ? `Sem tips na liga "${tipsLeagueFilter}"` : 'Sem tips no filtro');
     return;
   }
 
