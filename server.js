@@ -9147,9 +9147,18 @@ const server = http.createServer(async (req, res) => {
     const sportFilter = parsed.query.sport ? String(parsed.query.sport).slice(0, 20) : null;
     try {
       const ML_OK = "('ML','1X2_H','1X2_A','1X2_D','OVER_2.5','UNDER_2.5')";
+      // includePending=1 inclui tips MT pending (pra forçar settle quando shadow row
+      // não disparou propagator). Default só examina settled (re-sincronia post-fix).
+      const includePending = parsed.query.includePending === '1' || parsed.query.includePending === 'true';
+      const resultClause = includePending
+        ? `(t.result IN ('win','loss') OR t.result IS NULL)`
+        : `t.result IN ('win','loss')`;
+      const dateClause = includePending
+        ? `t.sent_at >= datetime('now', '-' || ? || ' days')`
+        : `t.settled_at >= datetime('now', '-' || ? || ' days')`;
       const conds = [
-        `t.settled_at >= datetime('now', '-' || ? || ' days')`,
-        `t.result IN ('win','loss')`,
+        dateClause,
+        resultClause,
         `(t.archived IS NULL OR t.archived = 0)`,
         `(t.match_id LIKE '%::mt::%' OR (t.market_type IS NOT NULL AND t.market_type NOT IN ${ML_OK}))`,
       ];
