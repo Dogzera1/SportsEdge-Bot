@@ -9134,6 +9134,102 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // POST /admin/mt-repropagate?days=14&sport=tennis&apply=0&key=<KEY>
+  // Pra cada MT tip settled, busca shadow row matching (sport+market_type+pair+odd≈)
+  // e força result/profit_reais a refletir o shadow row. Útil após batch re-settle
+  // de shadow rows com lógica nova: tips ficaram com result velho, esse endpoint
+  // sincroniza.
+  if (p === '/admin/mt-repropagate') {
+    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const days = Math.max(1, Math.min(60, parseInt(parsed.query.days || '14', 10) || 14));
+    const apply = parsed.query.apply === '1' || parsed.query.apply === 'true';
+    const sportFilter = parsed.query.sport ? String(parsed.query.sport).slice(0, 20) : null;
+    try {
+      const ML_OK = "('ML','1X2_H','1X2_A','1X2_D','OVER_2.5','UNDER_2.5')";
+      const conds = [
+        `t.settled_at >= datetime('now', '-' || ? || ' days')`,
+        `t.result IN ('win','loss')`,
+        `(t.archived IS NULL OR t.archived = 0)`,
+        `(t.match_id LIKE '%::mt::%' OR (t.market_type IS NOT NULL AND t.market_type NOT IN ${ML_OK}))`,
+      ];
+      const params = [days];
+      if (sportFilter) { conds.push('t.sport = ?'); params.push(sportFilter); }
+      const tips = db.prepare(`
+        SELECT t.id, t.sport, t.match_id, t.market_type, t.participant1, t.participant2,
+          t.tip_participant, t.odds, t.stake, t.result AS prev_result, t.profit_reais AS prev_profit
+        FROM tips t
+        WHERE ${conds.join(' AND ')}
+      `).all(...params);
+      const T1S = "lower(REPLACE(REPLACE(REPLACE(REPLACE(team1,' ',''),'-',''),'.',''),'''',''))";
+      const T2S = "lower(REPLACE(REPLACE(REPLACE(REPLACE(team2,' ',''),'-',''),'.',''),'''',''))";
+      const _norm = s => String(s||'').toLowerCase().replace(/[\s\-.']/g, '');
+      const MARKET_TYPE_REVERSE = {
+        HANDICAP: 'handicap', HANDICAP_SETS: 'handicapSets', HANDICAP_GAMES: 'handicapGames',
+        TOTAL: 'total', TOTAL_GAMES: 'totalGames', TIEBREAK: 'tiebreakMatch',
+        TOTAL_ACES: 'totalAces', DRAW: 'draw',
+      };
+      const updates = [];
+      let resynced = 0;
+      const { getSportUnitValue } = require('./lib/sport-unit');
+      for (const t of tips) {
+        const market = MARKET_TYPE_REVERSE[t.market_type] || String(t.market_type || '').toLowerCase();
+        const n1 = _norm(t.participant1), n2 = _norm(t.participant2);
+        const candidates = db.prepare(`
+          SELECT id, market, side, line, odd, result, profit_units
+          FROM market_tips_shadow
+          WHERE sport = ? AND market = ?
+            AND ((${T1S} = ? AND ${T2S} = ?) OR (${T1S} = ? AND ${T2S} = ?))
+            AND result IN ('win','loss','void')
+          ORDER BY ABS(julianday(created_at) - julianday(?)) ASC LIMIT 5
+        `).all(t.sport, market, n1, n2, n2, n1, t.match_id ? t.match_id.split('::')[0] : '');
+        const oddTol = (t.odds || 1) * 0.07;
+        const shadow = candidates.find(c => Math.abs((c.odd || 0) - (t.odds || 0)) <= oddTol);
+        if (!shadow) {
+          updates.push({ id: t.id, action: 'skip', reason: 'no shadow with matching odd', candidates: candidates.length });
+          continue;
+        }
+        const newResult = shadow.result;
+        if (newResult === t.prev_result) {
+          updates.push({ id: t.id, action: 'noop', shadow_id: shadow.id, result: newResult });
+          continue;
+        }
+        // Recompute profit_reais
+        const stakeU = parseFloat(String(t.stake || '1').replace(/u/i, '')) || 1;
+        const odds = Number(t.odds) || 1;
+        const bk = db.prepare(`SELECT current_banca, initial_banca FROM bankroll WHERE sport = ?`).get(t.sport);
+        const uv = getSportUnitValue(bk?.current_banca || 0, bk?.initial_banca || 100);
+        const stakeR = parseFloat((stakeU * uv).toFixed(2));
+        const newProfitR = newResult === 'win' ? parseFloat((stakeR * (odds - 1)).toFixed(2))
+                         : newResult === 'void' ? 0
+                         : parseFloat((-stakeR).toFixed(2));
+        const delta = newProfitR - (Number(t.prev_profit) || 0);
+        updates.push({
+          id: t.id, sport: t.sport, action: 'update',
+          shadow_id: shadow.id, shadow_line: shadow.line, shadow_odd: shadow.odd,
+          tip_odd: t.odds, prev_result: t.prev_result, new_result: newResult,
+          prev_profit: t.prev_profit, new_profit: newProfitR, delta,
+        });
+        if (apply) {
+          db.transaction(() => {
+            db.prepare(`UPDATE tips SET result = ?, profit_reais = ?, stake_reais = ? WHERE id = ?`)
+              .run(newResult, newProfitR, stakeR, t.id);
+            if (bk) {
+              const nova = parseFloat((bk.current_banca + delta).toFixed(2));
+              db.prepare(`UPDATE bankroll SET current_banca = ?, updated_at = datetime('now') WHERE sport = ?`)
+                .run(nova, t.sport);
+            }
+          })();
+          resynced++;
+          log('INFO', 'MT-REPROP',
+            `tip ${t.id} ${t.sport} ${t.market_type} ${t.participant1} vs ${t.participant2}: ${t.prev_result}→${newResult} (Δ R$${delta.toFixed(2)})`);
+        }
+      }
+      sendJson(res, { ok: true, days, sport: sportFilter, apply, examined: tips.length, resynced, updates });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
   // POST /admin/mt-shadow-unsettle?id=N&key=<KEY>
   // Reverte shadow row pra pending pra cron settler re-rodar com lógica nova.
   // Caso de uso: bug de orientação (mrT1IsShadowT1) liquidou shadow rows com
