@@ -8942,6 +8942,61 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // GET /tips-by-sport?days=30
+  // Stats por sport das tips REAIS (is_shadow=0). Inclui ML + MT promovidas.
+  // Equivalente ao /market-tips-by-sport mas pra tips que contam pra banca.
+  if (p === '/tips-by-sport') {
+    const days = Math.max(1, Math.min(365, parseInt(parsed.query.days || '30', 10) || 30));
+    try {
+      const rows = db.prepare(`
+        SELECT
+          CASE
+            WHEN sport = 'esports' THEN
+              CASE
+                WHEN match_id LIKE 'dota2_%' OR lower(COALESCE(event_name,'')) LIKE '%dota%' THEN 'dota2'
+                ELSE 'lol'
+              END
+            ELSE sport
+          END AS sp,
+          COUNT(*) AS n,
+          SUM(CASE WHEN result IS NULL THEN 1 ELSE 0 END) AS pending,
+          SUM(CASE WHEN result IN ('win','loss') THEN 1 ELSE 0 END) AS settled,
+          SUM(CASE WHEN result = 'win' THEN 1 ELSE 0 END) AS wins,
+          SUM(CASE WHEN is_live = 1 THEN 1 ELSE 0 END) AS live_n,
+          SUM(COALESCE(profit_reais, 0)) AS profit,
+          SUM(COALESCE(stake_reais, 0)) AS staked,
+          AVG(CASE WHEN clv_odds > 1 AND odds > 1 THEN (odds / clv_odds - 1) * 100 END) AS avg_clv,
+          SUM(CASE WHEN clv_odds > 1 AND odds > 1 THEN 1 ELSE 0 END) AS clv_n,
+          SUM(CASE WHEN match_id LIKE '%::mt::%' THEN 1 ELSE 0 END) AS mt_n
+        FROM tips
+        WHERE sent_at >= datetime('now', '-' || ? || ' days')
+          AND COALESCE(is_shadow, 0) = 0
+          AND (archived IS NULL OR archived = 0)
+        GROUP BY sp
+        HAVING n > 0
+        ORDER BY n DESC
+      `).all(days);
+      const out = rows.map(r => ({
+        sport: r.sp,
+        n: r.n,
+        pending: r.pending || 0,
+        settled: r.settled || 0,
+        wins: r.wins || 0,
+        live_n: r.live_n || 0,
+        mt_n: r.mt_n || 0,
+        ml_n: (r.n || 0) - (r.mt_n || 0),
+        hitRate: r.settled > 0 ? +(r.wins / r.settled * 100).toFixed(1) : null,
+        profit: +(r.profit || 0).toFixed(2),
+        staked: +(r.staked || 0).toFixed(2),
+        roi: r.staked > 0 ? +((r.profit / r.staked) * 100).toFixed(1) : null,
+        avgClv: r.clv_n > 0 ? +(r.avg_clv || 0).toFixed(2) : null,
+        clvN: r.clv_n || 0,
+      }));
+      sendJson(res, { ok: true, days, sports: out });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
   // GET /tips-by-market?sport=X&days=30
   // Stats por market_type das tips REAIS (is_shadow=0) — incluí ML + MT promovidas.
   // Diferente de /market-tips-by-sport que cobre só shadow rows. Usado no dashboard

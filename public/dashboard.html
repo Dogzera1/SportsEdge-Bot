@@ -658,6 +658,8 @@
         </select>
       </div>
     </div>
+    <!-- Stats por esporte — só real tips (is_shadow=0). Click filtra dashboard. -->
+    <div id="tipsBySport" style="margin-bottom:10px"></div>
     <!-- Stats por mercado (ML, HG, TG, etc) — só real tips (is_shadow=0) -->
     <div id="tipsByMarket" style="margin-bottom:10px"></div>
     <div id="tipsTable"><div class="loading">Carregando</div></div>
@@ -2052,8 +2054,71 @@ async function loadTips(gen = refreshGen) {
   tipsCache = Array.isArray(tips) ? tips : [];
   tipsPage = 1;
   renderTipsTable();
-  // Stats por mercado (ML/HG/TG/HS/HC/TT/TA/TB/X) — fetch separado, não bloqueia
+  // Stats por esporte + por mercado — fetch paralelo, não bloqueiam tabela
+  loadTipsBySport(gen).catch(() => {});
   loadTipsByMarket(gen).catch(() => {});
+}
+
+// Stats por sport pras tips REAIS (is_shadow=0). Cards horizontais com count,
+// hit, ROI, CLV, profit. Click filtra dashboard pra aquele sport.
+async function loadTipsBySport(gen = refreshGen) {
+  const el = document.getElementById('tipsBySport');
+  if (!el) return;
+  const data = await apiFetch(`/tips-by-sport?days=30`).catch(() => null);
+  if (shouldAbort(gen)) return;
+  if (!data || !Array.isArray(data.sports) || !data.sports.length) {
+    el.innerHTML = '';
+    return;
+  }
+  const sportColor = {
+    lol: '#29b6f6', dota2: '#ef5350', cs2: '#ffa726', valorant: '#ec407a',
+    tennis: '#66bb6a', football: '#ab47bc', mma: '#8d6e63',
+    darts: '#26a69a', snooker: '#5c6bc0', tabletennis: '#ff7043', cs: '#ffa726',
+  };
+  const sportLabel = (s) => s === 'dota2' ? 'DOTA' : (s === 'cs2' || s === 'cs') ? 'CS'
+    : s === 'tabletennis' ? 'TT' : s.toUpperCase();
+  const fmtPctVal = (v, d=1) => v == null ? '—' : (v >= 0 ? '+' : '') + Number(v).toFixed(d) + '%';
+  const cls = (v) => v == null ? '' : (v >= 0 ? 'pos' : 'neg');
+  const totalN = data.sports.reduce((s, sp) => s + sp.n, 0);
+  const totalProfit = data.sports.reduce((s, sp) => s + (sp.profit || 0), 0);
+  const overallBtn = `
+    <div onclick="filterToSport('__overall__')" style="cursor:pointer;border:2px solid ${currentSport === '__overall__' ? '#3b82f6' : 'var(--border,#2a2a2a)'};background:var(--surface,#0f172a);border-radius:8px;padding:10px 12px;min-width:120px;display:flex;flex-direction:column;justify-content:center;align-items:center">
+      <div style="font-size:0.85em;color:#888">📊 Todos</div>
+      <div style="font-size:1.4em;font-weight:600">${totalN}</div>
+      <div style="font-size:0.75em;${totalProfit >= 0 ? 'color:#10b981' : 'color:#ef4444'}">${totalProfit >= 0 ? '+' : ''}R$ ${totalProfit.toFixed(2)}</div>
+    </div>`;
+  const cards = data.sports.map(s => {
+    const c = sportColor[s.sport] || '#888';
+    const label = sportLabel(s.sport);
+    const isActive = currentSport === s.sport
+      || (currentSport === 'esports' && (s.sport === 'lol' || s.sport === 'dota2'))
+      || (currentSport === 'cs' && s.sport === 'cs2');
+    const mtBadge = s.mt_n > 0
+      ? `<span style="background:#7c3aed;color:#fff;padding:1px 5px;border-radius:3px;font-size:0.7em;margin-left:4px" title="${s.mt_n} MT promovidas">MT ${s.mt_n}</span>`
+      : '';
+    return `
+      <div onclick="filterToSport('${s.sport}')" style="cursor:pointer;border:2px solid ${isActive ? c : 'var(--border,#2a2a2a)'};background:var(--surface,#0f172a);border-radius:8px;padding:10px 12px;min-width:160px;flex:1;transition:transform 0.1s" onmouseover="this.style.transform='translateY(-2px)'" onmouseout="this.style.transform='translateY(0)'">
+        <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">
+          <span style="background:${c};color:#fff;padding:2px 7px;border-radius:3px;font-size:0.75em;font-weight:600">${label}</span>
+          ${mtBadge}
+        </div>
+        <div style="font-size:1.4em;font-weight:600;color:var(--text,#e2e8f0)">${s.n}<span style="font-size:0.55em;color:#888;margin-left:4px">tips</span></div>
+        <div style="font-size:0.75em;color:#888;margin-top:2px">${s.pending} pend · ${s.settled} sett${s.live_n > 0 ? ' · '+s.live_n+' live' : ''}</div>
+        <div style="font-size:0.85em;margin-top:6px;display:flex;justify-content:space-between">
+          <span>Hit: <b>${fmtPctVal(s.hitRate, 0)}</b></span>
+          <span class="${cls(s.roi)}">ROI: <b>${fmtPctVal(s.roi)}</b></span>
+        </div>
+        <div style="font-size:0.85em;margin-top:2px;display:flex;justify-content:space-between">
+          <span class="${cls(s.avgClv)}">CLV: ${fmtPctVal(s.avgClv)}${s.clvN > 0 ? ` <span style="opacity:0.6">(${s.clvN})</span>` : ''}</span>
+          <span class="${cls(s.profit)}">${s.profit >= 0 ? '+' : ''}R$ ${s.profit.toFixed(0)}</span>
+        </div>
+      </div>`;
+  }).join('');
+  el.innerHTML = `
+    <div class="card-meta" style="margin-bottom:6px;font-size:0.8em">
+      🏆 <b>Stats por esporte (${data.days}d)</b> — clique pra filtrar tabela
+    </div>
+    <div style="display:flex;gap:10px;flex-wrap:wrap">${overallBtn}${cards}</div>`;
 }
 
 // Stats por market_type pras tips REAIS (is_shadow=0). Roda em paralelo
