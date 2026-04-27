@@ -9001,6 +9001,92 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // POST /admin/mt-revert-suspects?days=14&apply=0&key=<KEY>
+  // Auto-detecta MT tips com settle suspeito (match-mismatch) e reverte.
+  // Critérios:
+  //  - Tip MT promovida (match_id LIKE '%::mt::%') settled win/loss/void
+  //  - Shadow row correspondente settled muito rápido (<30min após criação)
+  //    pra esports/tennis/football onde match dura ≥30min
+  //  - OU shadow row settled após tip mas tip NÃO é live (is_live=0)
+  // Reverte: zera result/profit_reais/settled_at/is_live tip + estorna delta
+  // bankroll + zera shadow result/settled_at pra ela re-settle correto na
+  // próxima passada do settleShadowTips com nova lógica strict.
+  if (p === '/admin/mt-revert-suspects' && (req.method === 'POST' || req.method === 'GET')) {
+    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const days = Math.max(1, Math.min(60, parseInt(parsed.query.days || '14', 10) || 14));
+    const apply = parsed.query.apply === '1' || parsed.query.apply === 'true';
+    try {
+      // Busca tips MT settled recentes
+      const tips = db.prepare(`
+        SELECT t.id, t.sport, t.match_id, t.participant1, t.participant2, t.result, t.profit_reais,
+          t.is_live, t.sent_at, t.settled_at,
+          (julianday(t.settled_at) - julianday(t.sent_at)) * 24 * 60 AS settle_minutes
+        FROM tips t
+        WHERE t.match_id LIKE '%::mt::%'
+          AND t.result IN ('win','loss','void')
+          AND t.sent_at >= datetime('now', '-' || ? || ' days')
+          AND (t.archived IS NULL OR t.archived = 0)
+        ORDER BY t.id DESC
+      `).all(days);
+      // Per-sport min match duration (minutos) — settle <X = suspeito
+      const MIN_DUR_MIN = { tennis: 30, lol: 25, dota2: 25, cs2: 30, valorant: 25, football: 90 };
+      const suspects = [];
+      for (const t of tips) {
+        const minDur = MIN_DUR_MIN[t.sport] || 20;
+        const tooFast = t.settle_minutes != null && t.settle_minutes < minDur && t.is_live === 0;
+        if (tooFast) {
+          suspects.push({
+            id: t.id, sport: t.sport,
+            match: `${t.participant1} vs ${t.participant2}`,
+            result: t.result, profit_reais: t.profit_reais,
+            settle_minutes: +t.settle_minutes.toFixed(1),
+            min_required: minDur,
+            sent_at: t.sent_at, settled_at: t.settled_at,
+          });
+        }
+      }
+      let applied = 0;
+      const reverted = [];
+      if (apply && suspects.length) {
+        const tx = db.transaction(() => {
+          for (const s of suspects) {
+            // Estorna bankroll
+            const bk = db.prepare(`SELECT current_banca FROM bankroll WHERE sport = ?`).get(s.sport);
+            if (bk && Number.isFinite(s.profit_reais)) {
+              const nova = +(bk.current_banca - s.profit_reais).toFixed(2);
+              db.prepare(`UPDATE bankroll SET current_banca = ?, updated_at = datetime('now') WHERE sport = ?`).run(nova, s.sport);
+            }
+            // Reverte tip
+            db.prepare(`UPDATE tips SET result = NULL, profit_reais = NULL, settled_at = NULL, is_live = 0 WHERE id = ?`).run(s.id);
+            applied++;
+            reverted.push({ id: s.id, prev_result: s.result, profit_reverted: s.profit_reais });
+          }
+          // Reverte shadow rows correspondentes (pra re-settle com lógica nova)
+          for (const s of suspects) {
+            db.prepare(`
+              UPDATE market_tips_shadow
+              SET result = NULL, settled_at = NULL, profit_units = NULL
+              WHERE sport = ?
+                AND ((lower(team1) = lower(?) AND lower(team2) = lower(?)) OR (lower(team1) = lower(?) AND lower(team2) = lower(?)))
+                AND result IN ('win','loss','void')
+                AND ABS(julianday(created_at) - julianday(?)) < 0.5
+            `).run(s.sport, s.match.split(' vs ')[0], s.match.split(' vs ')[1], s.match.split(' vs ')[1], s.match.split(' vs ')[0], s.sent_at);
+          }
+        });
+        tx();
+      }
+      sendJson(res, {
+        ok: true, applied: !!apply, days,
+        scanned: tips.length,
+        suspects_count: suspects.length,
+        suspects,
+        reverted: applied,
+      });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
   // GET/POST /admin/clear-stale-is-live?apply=0&key=<KEY>
   // Limpa is_live=1 stale em tips já settled (settle path antes de 928d775
   // não zerava is_live → tips win/loss apareciam com chip LIVE no dashboard
