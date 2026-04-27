@@ -8777,6 +8777,68 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // POST /admin/mt-resettle-suspects?sport=cs2&days=14&apply=0
+  // Detecta tips esports settled com line fora do range Bo (lógica idêntica ao
+  // void no settleShadowTips pós-3b90e6d). Default dry-run (lista IDs +
+  // razão). Com ?apply=1 unsettle + chama settleShadowTips → re-roda com
+  // lógica nova → tips erradas viram void automático.
+  if (p === '/admin/mt-resettle-suspects' && (req.method === 'POST' || req.method === 'GET')) {
+    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const sport = parsed.query.sport && parsed.query.sport !== 'all' ? parsed.query.sport : null;
+    const days = Math.max(1, Math.min(180, parseInt(parsed.query.days || '14', 10) || 14));
+    const apply = parsed.query.apply === '1' || parsed.query.apply === 'true';
+    try {
+      const conds = [
+        `result IN ('win','loss')`,
+        `created_at >= datetime('now', '-${days} days')`,
+        `sport IN ('lol','dota2','cs2','valorant')`,
+        `market IN ('handicap','handicapSets','total')`,
+        `best_of IS NOT NULL AND best_of > 0`,
+        `line IS NOT NULL`,
+      ];
+      const params = [];
+      if (sport) { conds.push('sport = ?'); params.push(sport); }
+      const rows = db.prepare(`
+        SELECT id, sport, team1, team2, market, line, side, best_of, result, profit_units, created_at
+        FROM market_tips_shadow
+        WHERE ${conds.join(' AND ')}
+        ORDER BY id DESC
+      `).all(...params);
+      const suspects = [];
+      for (const r of rows) {
+        const bo = r.best_of;
+        const maxMargin = Math.ceil(bo / 2);
+        const minTotal = Math.ceil(bo / 2);
+        const maxTotal = bo;
+        let reason = null;
+        if (r.market === 'total') {
+          if (r.line >= maxTotal) reason = `total line=${r.line}>=max=${maxTotal} Bo${bo}`;
+          else if (r.line < minTotal) reason = `total line=${r.line}<min=${minTotal} Bo${bo}`;
+        } else if (r.market === 'handicap' || r.market === 'handicapSets') {
+          if (Math.abs(r.line) > maxMargin) reason = `${r.market} |line|=${Math.abs(r.line)}>max=${maxMargin} Bo${bo}`;
+        }
+        if (reason) suspects.push({ id: r.id, sport: r.sport, teams: `${r.team1} vs ${r.team2}`, market: r.market, line: r.line, side: r.side, best_of: bo, result: r.result, profit_units: r.profit_units, reason });
+      }
+      const out = { ok: true, sport: sport || 'all', days, scanned: rows.length, suspects_count: suspects.length, suspects, applied: false };
+      if (apply && suspects.length) {
+        const ids = suspects.map(s => s.id);
+        const placeholders = ids.map(() => '?').join(',');
+        const u = db.prepare(`UPDATE market_tips_shadow SET result=NULL, settled_at=NULL, profit_units=NULL WHERE id IN (${placeholders})`).run(...ids);
+        let resettleResult = null;
+        try {
+          const { settleShadowTips } = require('./lib/market-tips-shadow');
+          resettleResult = settleShadowTips(db);
+        } catch (e) { resettleResult = { error: e.message }; }
+        out.applied = true;
+        out.unsettled = u.changes;
+        out.resettle = resettleResult;
+      }
+      sendJson(res, out);
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
   // POST /void-market-tips-bogus?sport=tennis&minEv=40&hours=24
   if (p === '/void-market-tips-bogus' && req.method === 'POST') {
     const sport = parsed.query.sport || 'tennis';
