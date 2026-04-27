@@ -12364,14 +12364,21 @@ async function pollMma(runOnce = false) {
         // da IA quando o modelo já tem sinal robusto.
         let _mmaHybridTip = null;
         if (_mmaTrainedPrediction && _mmaTrainedPrediction.confidence >= 0.55 && !isPathDisabled('mma', 'hybrid')) {
-          const pickP1 = mlResultMma.modelP1 > mlResultMma.modelP2;
+          // Pick por MAIOR EDGE POSITIVO (mesmo fix do tennis 43fd012).
+          // Lutas com favorito muito favorito têm edge zero/negativo no fav e
+          // potencialmente positivo no underdog. Pickar fav = sempre 'no edge'.
+          const _e1 = (mlResultMma.modelP1 - mlResultMma.impliedP1) * 100;
+          const _e2 = (mlResultMma.modelP2 - mlResultMma.impliedP2) * 100;
+          const pickP1 = _e1 >= _e2;
           const pickP = pickP1 ? mlResultMma.modelP1 : mlResultMma.modelP2;
           const pickImp = pickP1 ? mlResultMma.impliedP1 : mlResultMma.impliedP2;
           const edgePp = (pickP - pickImp) * 100;
           const pickOdd = pickP1 ? parseFloat(o.t1) : parseFloat(o.t2);
           const pickTeam = pickP1 ? fight.team1 : fight.team2;
           const minEdge = parseFloat(process.env.MMA_HYBRID_MIN_EDGE_PP || '8');
-          if (edgePp >= minEdge && pickP * pickOdd >= 1.05) {
+          const _evMult = pickP * pickOdd;
+          const _maxEv = parseFloat(process.env.MMA_HYBRID_MAX_EV || '2.0');
+          if (edgePp >= minEdge && _evMult >= 1.05 && _evMult <= _maxEv && pickP >= 0.20) {
             const confLabel = _mmaTrainedPrediction.confidence >= 0.70 && edgePp >= 12 ? 'ALTA'
               : _mmaTrainedPrediction.confidence >= 0.60 && edgePp >= 10 ? 'MÉDIA' : 'BAIXA';
             const stakeU = confLabel === 'ALTA' ? '2' : '1';
@@ -12558,16 +12565,22 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
           const _advisoryOn = !/^(0|false|no)$/i.test(String(process.env.MMA_IA_ADVISORY || '')) && !isPathDisabled('mma', 'override');
           const _minFactors = parseInt(process.env.MMA_IA_OVERRIDE_MIN_FACTORS || '1', 10);
           const _minEdgePp = parseFloat(process.env.MMA_IA_OVERRIDE_MIN_EDGE_PP || '8');
-          const pickP1Mma = mlResultMma.modelP1 > mlResultMma.modelP2;
+          // Pick por MAIOR EDGE POSITIVO (mesmo fix do hybrid path).
+          const _eMma1 = (mlResultMma.modelP1 - mlResultMma.impliedP1) * 100;
+          const _eMma2 = (mlResultMma.modelP2 - mlResultMma.impliedP2) * 100;
+          const pickP1Mma = _eMma1 >= _eMma2;
           const pickPMma = pickP1Mma ? mlResultMma.modelP1 : mlResultMma.modelP2;
           const pickImpMma = pickP1Mma ? mlResultMma.impliedP1 : mlResultMma.impliedP2;
           const edgeMma = (pickPMma - pickImpMma) * 100;
           const pickOddMma = pickP1Mma ? parseFloat(o.t1) : parseFloat(o.t2);
           const pickTeamMma = pickP1Mma ? fight.team1 : fight.team2;
+          const _evMultMma = pickPMma * pickOddMma;
+          const _maxEvMma = parseFloat(process.env.MMA_OVERRIDE_MAX_EV || '2.0');
           const canOverride = _advisoryOn &&
             (mlResultMma.factorCount || 0) >= _minFactors &&
             edgeMma >= _minEdgePp &&
-            pickPMma * pickOddMma >= 1.06 &&
+            _evMultMma >= 1.06 && _evMultMma <= _maxEvMma &&
+            pickPMma >= 0.20 &&
             pickOddMma >= 1.25 && pickOddMma <= 5.0;
           if (canOverride) {
             // Promove pra MÉDIA quando edge do modelo determinístico é robusto.
