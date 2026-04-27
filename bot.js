@@ -14254,27 +14254,39 @@ async function pollFootball(runOnce = false) {
         let fbTrained = null;
         try {
           if (hasTrainedFootballModel()) {
-            // Enriquece league name com sport_key quando disponível. The Odds API
-            // devolve sport_title genérico tipo "League 1" (sem país) — isso faz
-            // fuzzy match bater em "Ireland Premier Division" via sinonímia 1↔premier.
-            // sport_key tem país embutido (ex: "soccer_england_league1"), resolvemos a ambigüidade.
+            // BUG FIX 2026-04-27: tenta múltiplos formatos de league name pra cobrir
+            // ambos casos: feed simples (Sofascore: "Serie B") e feed com sport_key
+            // (TheOddsApi: "soccer_brazil_serie_b" → "brasil serie b" enriquecido).
+            // Antes só tentava o richLeague — top tier (Premier/La Liga/Brasileirão)
+            // falhava 100% porque slug+name confundia o fuzzy matcher.
+            const simpleName = match.league || match.event_name || '';
             const richLeague = match.sport_key
               ? `${String(match.sport_key).replace(/^soccer_/, '').replace(/_/g, ' ')} ${match.league || ''}`.trim()
-              : (match.league || match.event_name || '');
+              : simpleName;
+            // Tenta simples primeiro (mais provável de bater diretamente);
+            // se falhar, tenta enriquecido (resolve "League 1" ambíguo via país).
             fbTrained = predictFootballTrained({
               teamHome: match.team1,
               teamAway: match.team2,
-              league: richLeague,
+              league: simpleName,
             });
+            if (!fbTrained && richLeague && richLeague !== simpleName) {
+              fbTrained = predictFootballTrained({
+                teamHome: match.team1,
+                teamAway: match.team2,
+                league: richLeague,
+              });
+            }
             if (fbTrained) {
               log('INFO', 'FB-TRAINED', `${match.team1} vs ${match.team2} [${fbTrained.league_key}]: pH=${(fbTrained.pH*100).toFixed(1)}% pD=${(fbTrained.pD*100).toFixed(1)}% pA=${(fbTrained.pA*100).toFixed(1)}% conf=${fbTrained.confidence.toFixed(2)}`);
-            } else if (richLeague) {
+            } else if (simpleName || richLeague) {
               // Diagnóstico: log warn-once por league name desconhecido. Ajuda
               // usuário ver gap entre nomes do feed live e keys nos params trained.
+              const keyForLog = simpleName || richLeague;
               global._fbUnknownLeagues = global._fbUnknownLeagues || new Set();
-              if (!global._fbUnknownLeagues.has(richLeague)) {
-                global._fbUnknownLeagues.add(richLeague);
-                log('WARN', 'FB-TRAINED', `league not found in trained params: '${richLeague}' (params has ${Object.keys(require('./lib/football-poisson-trained').getParams()?.leagues || {}).length} leagues)`);
+              if (!global._fbUnknownLeagues.has(keyForLog)) {
+                global._fbUnknownLeagues.add(keyForLog);
+                log('WARN', 'FB-TRAINED', `league not found (tried both '${simpleName}' and '${richLeague}'): params has ${Object.keys(require('./lib/football-poisson-trained').getParams()?.leagues || {}).length} leagues`);
               }
             }
           }
