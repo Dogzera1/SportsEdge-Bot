@@ -9172,6 +9172,18 @@ const server = http.createServer(async (req, res) => {
       const updates = [];
       let resynced = 0;
       const { getSportUnitValue } = require('./lib/sport-unit');
+      const { parseTennisScore } = require('./lib/market-tips-shadow');
+      const _lastNameSrv = s => {
+        const clean = String(s||'').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase()
+          .replace(/[^a-z\s'-]/g, ' ').replace(/\s+/g, ' ').trim();
+        const toks = clean.split(' ').filter(w => w.length >= 2);
+        return toks.length ? toks[toks.length - 1] : clean;
+      };
+      // Extract tip line from tip_participant (formato típico "Player +X.X" ou "Player -X.X" ou "OVER X.X games")
+      const _parseLine = (tp) => {
+        const m = String(tp||'').match(/([+-]?\d+\.?\d*)\s*$/);
+        return m ? parseFloat(m[1]) : null;
+      };
       for (const t of tips) {
         const market = MARKET_TYPE_REVERSE[t.market_type] || String(t.market_type || '').toLowerCase();
         const n1 = _norm(t.participant1), n2 = _norm(t.participant2);
@@ -9185,13 +9197,53 @@ const server = http.createServer(async (req, res) => {
         `).all(t.sport, market, n1, n2, n2, n1, t.match_id ? t.match_id.split('::')[0] : '');
         const oddTol = (t.odds || 1) * 0.07;
         const shadow = candidates.find(c => Math.abs((c.odd || 0) - (t.odds || 0)) <= oddTol);
-        if (!shadow) {
-          updates.push({ id: t.id, action: 'skip', reason: 'no shadow with matching odd', candidates: candidates.length });
+        let newResult = shadow ? shadow.result : null;
+
+        // FALLBACK: sem shadow row matching, computa direto de match_results
+        // (apenas tennis handicapGames/totalGames por enquanto — extender se preciso)
+        if (!shadow && t.sport === 'tennis') {
+          const sideMatch = String(t.match_id || '').match(/::mt::([^:]+)::([^:]+)$/);
+          const mtMarket = sideMatch ? sideMatch[1] : null;
+          const mtSide = sideMatch ? sideMatch[2] : null;
+          const tipLine = _parseLine(t.tip_participant);
+          const mr = db.prepare(`
+            SELECT team1, team2, winner, final_score
+            FROM match_results
+            WHERE game = 'tennis'
+              AND ((REPLACE(REPLACE(REPLACE(REPLACE(lower(team1),' ',''),'-',''),'.',''),'''','') = ?
+                   AND REPLACE(REPLACE(REPLACE(REPLACE(lower(team2),' ',''),'-',''),'.',''),'''','') = ?)
+                OR (REPLACE(REPLACE(REPLACE(REPLACE(lower(team1),' ',''),'-',''),'.',''),'''','') = ?
+                   AND REPLACE(REPLACE(REPLACE(REPLACE(lower(team2),' ',''),'-',''),'.',''),'''','') = ?))
+              AND winner IS NOT NULL AND final_score IS NOT NULL
+            ORDER BY ABS(julianday(resolved_at) - julianday(?)) ASC LIMIT 1
+          `).get(n1, n2, n2, n1, t.match_id ? t.match_id.split('::')[0] : new Date().toISOString());
+          const parsed = mr && mr.final_score ? parseTennisScore(mr.final_score) : null;
+          if (parsed && Number.isFinite(tipLine)) {
+            const mrT1Ln = _lastNameSrv(mr.team1 || '');
+            const t1Ln = _lastNameSrv(t.participant1);
+            const mrT1IsT1 = !!(mrT1Ln && t1Ln && mrT1Ln === t1Ln);
+            let gT1 = 0, gT2 = 0;
+            for (const st of parsed.sets) { gT1 += st.t1; gT2 += st.t2; }
+            if (!mrT1IsT1) { [gT1, gT2] = [gT2, gT1]; }
+            const margin = gT1 - gT2;
+            if (mtMarket === 'handicapGames') {
+              const sideIsT1 = mtSide === 'home' || mtSide === 'team1';
+              const covers = sideIsT1 ? (margin + tipLine > 0) : (-margin + tipLine > 0);
+              newResult = covers ? 'win' : 'loss';
+            } else if (mtMarket === 'totalGames') {
+              const total = gT1 + gT2;
+              const over = total > tipLine;
+              newResult = (mtSide === 'over') === over ? 'win' : 'loss';
+            }
+          }
+        }
+
+        if (!newResult) {
+          updates.push({ id: t.id, action: 'skip', reason: shadow ? 'shadow result null' : 'no shadow + no match_results fallback', candidates: candidates.length });
           continue;
         }
-        const newResult = shadow.result;
         if (newResult === t.prev_result) {
-          updates.push({ id: t.id, action: 'noop', shadow_id: shadow.id, result: newResult });
+          updates.push({ id: t.id, action: 'noop', shadow_id: shadow?.id || null, result: newResult });
           continue;
         }
         // Recompute profit_reais
@@ -9205,8 +9257,8 @@ const server = http.createServer(async (req, res) => {
                          : parseFloat((-stakeR).toFixed(2));
         const delta = newProfitR - (Number(t.prev_profit) || 0);
         updates.push({
-          id: t.id, sport: t.sport, action: 'update',
-          shadow_id: shadow.id, shadow_line: shadow.line, shadow_odd: shadow.odd,
+          id: t.id, sport: t.sport, action: shadow ? 'update' : 'update_via_fallback',
+          shadow_id: shadow?.id || null, shadow_line: shadow?.line, shadow_odd: shadow?.odd,
           tip_odd: t.odds, prev_result: t.prev_result, new_result: newResult,
           prev_profit: t.prev_profit, new_profit: newProfitR, delta,
         });
