@@ -2127,7 +2127,11 @@ function renderTipsTable() {
           const clv = t.clv_pct != null ? fmtPct(t.clv_pct) :
                       (t.clv_odds && t.odds ? fmtPct((t.odds / t.clv_odds - 1) * 100) : '—');
           const clvCls = t.clv_pct != null ? sign(t.clv_pct) : '';
-          const live = t.is_live ? '<span class="chip" style="background:var(--danger-bg);color:var(--danger);border-color:transparent">LIVE</span>' : '';
+          // LIVE chip só pra tips ainda pending — settled herda is_live=1 stale do
+          // momento da criação, mas o match já terminou. Mostrar LIVE em tip ✓W
+          // confunde (parece "match em andamento já settled" — visual bug).
+          const isPendingLive = t.is_live && (t.result == null || t.result === 'pending');
+          const live = isPendingLive ? '<span class="chip" style="background:var(--danger-bg);color:var(--danger);border-color:transparent">LIVE</span>' : '';
           // Badge market_type: ML = sem badge (default), outros = chip colorido (HG/TG/HS/TB/etc)
           const _mtRaw = String(t.market_type || 'ML').toUpperCase();
           const _mtAbbr = _mtRaw === 'ML' ? '' :
