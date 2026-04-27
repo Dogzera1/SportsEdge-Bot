@@ -2715,6 +2715,9 @@ async function settleCompletedTips() {
         ];
         for (const tip of unsettled) {
           if (!tip.match_id) continue;
+          // MT-promoted tennis tips (handicapGames/totalGames/tiebreak) settle via
+          // settleShadowTips → propagator, NÃO por nome do winner.
+          if (String(tip.match_id).includes('::mt::')) continue;
           try {
             const dbRes = await serverGet(
               `/tennis-db-result?p1=${encodeURIComponent(tip.participant1 || '')}&p2=${encodeURIComponent(tip.participant2 || '')}&sentAt=${encodeURIComponent(tip.sent_at || '')}&league=${encodeURIComponent(tip.event_name || '')}`,
@@ -2811,6 +2814,11 @@ async function settleCompletedTips() {
 
       for (const tip of unsettled) {
         if (!tip.match_id) continue;
+        // MT-promoted tips (handicap/totais/TB) usam settle por score parseado em
+        // settleShadowTips + propagator. Esse settler genérico só sabe casar nome
+        // do winner — pra HANDICAP_GAMES "+3.5" o nome nunca casa e marca loss
+        // determinístico (bug de 2026-04-27 com Karen Khachanov +3.5 vs Mensik).
+        if (String(tip.match_id).includes('::mt::')) continue;
         try {
           let endpoint;
           if (sport === 'football') {

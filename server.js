@@ -882,7 +882,33 @@ function upsertTennisPostCompetitionsFromEspnJson(j, slug) {
         if (!t1 || !t2 || !winner) continue;
         const compId = comp.id != null ? String(comp.id) : `${comp.date || ''}_${norm(t1)}_${norm(t2)}`;
         const matchId = `espn_${slug}_${compId}`.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 128);
-        const score = String(comp.status?.displayClock || comp.status?.type?.shortDetail || '').trim();
+        // ESPN tennis: shortDetail vem "Final" (literal) sem placar. Constrói score
+        // real a partir de comp.competitors[*].linescores (array de sets) quando
+        // disponível. Sem score parseável, MT settler trava em handicapGames/totalGames
+        // e o settler genérico cai no name-match buggy → bug 2026-04-27.
+        let score = '';
+        try {
+          const ls0 = Array.isArray(comps[0]?.linescores) ? comps[0].linescores : [];
+          const ls1 = Array.isArray(comps[1]?.linescores) ? comps[1].linescores : [];
+          const setCount = Math.min(ls0.length, ls1.length);
+          if (setCount > 0) {
+            const parts = [];
+            for (let i = 0; i < setCount; i++) {
+              const a = parseInt(ls0[i]?.value ?? ls0[i]?.displayValue, 10);
+              const b = parseInt(ls1[i]?.value ?? ls1[i]?.displayValue, 10);
+              if (!Number.isFinite(a) || !Number.isFinite(b)) { parts.length = 0; break; }
+              parts.push(`${a}-${b}`);
+            }
+            if (parts.length > 0) score = parts.join(' ');
+          }
+        } catch (_) { /* ignore */ }
+        // Fallback ao shortDetail só pra status (RET/W.O.) — mas se score não foi
+        // construído, drop a row pra não envenenar match_results com "Final"/"".
+        if (!score) {
+          const fallback = String(comp.status?.displayClock || comp.status?.type?.shortDetail || '').trim();
+          if (!/\d+-\d+/.test(fallback)) continue;
+          score = fallback;
+        }
         const league = `${String(slug).toUpperCase()} ${evName}`.slice(0, 220);
         const dateIso = String(comp.date || '').trim();
         let resolvedAt = null;
