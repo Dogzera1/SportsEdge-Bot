@@ -9062,6 +9062,78 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // GET /admin/mt-settle-diag?id=N&key=<KEY>
+  // Dry-run settler em uma shadow row específica. Retorna mr selecionado +
+  // todas variáveis intermediárias (mrT1IsShadowT1, gamesT1/T2, margin, covers).
+  // Pra depurar deploy: se código novo rodar, deve mostrar mrT1IsShadowT1 calculado.
+  if (p === '/admin/mt-settle-diag') {
+    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const id = parseInt(parsed.query.id || '', 10);
+    if (!Number.isFinite(id) || id <= 0) { sendJson(res, { error: 'id inválido' }, 400); return; }
+    try {
+      const t = db.prepare(`SELECT * FROM market_tips_shadow WHERE id = ?`).get(id);
+      if (!t) { sendJson(res, { error: 'shadow row não encontrada' }, 404); return; }
+      const _norm = s => String(s||'').toLowerCase().replace(/[\s\-.']/g, '');
+      const _lastName = s => {
+        const clean = String(s||'').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase()
+          .replace(/[^a-z\s'-]/g, ' ').replace(/\s+/g, ' ').trim();
+        const toks = clean.split(' ').filter(w => w.length >= 2);
+        return toks.length ? toks[toks.length - 1] : clean;
+      };
+      const { parseTennisScore } = require('./lib/market-tips-shadow');
+      const n1 = _norm(t.team1), n2 = _norm(t.team2);
+      const candidates = db.prepare(`
+        SELECT match_id, league, team1, team2, winner, final_score, resolved_at
+        FROM match_results
+        WHERE game = ?
+          AND ((REPLACE(REPLACE(REPLACE(REPLACE(lower(team1),' ',''),'-',''),'.',''),'''','') = ?
+                AND REPLACE(REPLACE(REPLACE(REPLACE(lower(team2),' ',''),'-',''),'.',''),'''','') = ?)
+            OR (REPLACE(REPLACE(REPLACE(REPLACE(lower(team1),' ',''),'-',''),'.',''),'''','') = ?
+                AND REPLACE(REPLACE(REPLACE(REPLACE(lower(team2),' ',''),'-',''),'.',''),'''','') = ?))
+        ORDER BY resolved_at DESC LIMIT 10
+      `).all(t.sport, n1, n2, n2, n1);
+      const traces = [];
+      for (const mr of candidates) {
+        const winLn = _lastName(mr.winner);
+        const t1Ln = _lastName(t.team1);
+        const mrT1Ln = _lastName(mr.team1 || '');
+        const winnerIs1 = !!(winLn && t1Ln && winLn === t1Ln);
+        const mrT1IsShadowT1 = !!(mrT1Ln && t1Ln && mrT1Ln === t1Ln);
+        const parsed = parseTennisScore(mr.final_score);
+        let computed = null;
+        if (parsed && t.market === 'handicapGames') {
+          let gamesT1 = 0, gamesT2 = 0;
+          for (const st of parsed.sets) { gamesT1 += st.t1; gamesT2 += st.t2; }
+          if (!mrT1IsShadowT1) { [gamesT1, gamesT2] = [gamesT2, gamesT1]; }
+          const margin = gamesT1 - gamesT2;
+          const sideIsT1 = t.side === 'team1' || t.side === 'home';
+          const covers = sideIsT1 ? (margin + t.line > 0) : (-margin + t.line > 0);
+          computed = { gamesT1, gamesT2, margin, sideIsT1, covers, result: covers ? 'win' : 'loss' };
+        }
+        traces.push({
+          mr_match_id: mr.match_id,
+          mr_team1: mr.team1, mr_team2: mr.team2, mr_winner: mr.winner,
+          mr_final_score: mr.final_score, mr_resolved_at: mr.resolved_at,
+          winnerIs1, mrT1IsShadowT1,
+          parsed_sets: parsed?.sets, parsed_total: parsed?.totalGames,
+          computed,
+        });
+      }
+      sendJson(res, {
+        ok: true,
+        shadow: {
+          id: t.id, sport: t.sport, market: t.market, side: t.side, line: t.line,
+          team1: t.team1, team2: t.team2, league: t.league,
+          stored_result: t.result, stored_profit_units: t.profit_units,
+        },
+        candidates_count: candidates.length,
+        traces,
+      });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
   // POST /admin/mt-shadow-unsettle?id=N&key=<KEY>
   // Reverte shadow row pra pending pra cron settler re-rodar com lógica nova.
   // Caso de uso: bug de orientação (mrT1IsShadowT1) liquidou shadow rows com
