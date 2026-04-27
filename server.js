@@ -9062,6 +9062,155 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // GET /admin/mt-shadow-audit?days=14&sport=tennis&apply=0&key=<KEY>
+  // Re-computa o result esperado de cada shadow row settled e compara com o
+  // stored. Mismatches = bugs históricos. apply=1 reverte os mismatches pra
+  // pending — cron próximo re-settla com lógica atual.
+  if (p === '/admin/mt-shadow-audit') {
+    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const days = Math.max(1, Math.min(60, parseInt(parsed.query.days || '14', 10) || 14));
+    const apply = parsed.query.apply === '1' || parsed.query.apply === 'true';
+    const sportFilter = parsed.query.sport ? String(parsed.query.sport).slice(0, 20) : null;
+    const marketFilter = parsed.query.market ? String(parsed.query.market).slice(0, 30) : null;
+    try {
+      const { parseTennisScore } = require('./lib/market-tips-shadow');
+      const _norm = s => String(s||'').toLowerCase().replace(/[\s\-.']/g, '');
+      const _lastName = s => {
+        const clean = String(s||'').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase()
+          .replace(/[^a-z\s'-]/g, ' ').replace(/\s+/g, ' ').trim();
+        const toks = clean.split(' ').filter(w => w.length >= 2);
+        return toks.length ? toks[toks.length - 1] : clean;
+      };
+      const conds = [
+        `result IN ('win','loss','void')`,
+        `settled_at >= datetime('now', '-' || ? || ' days')`,
+      ];
+      const params = [days];
+      if (sportFilter) { conds.push('sport = ?'); params.push(sportFilter); }
+      if (marketFilter) { conds.push('market = ?'); params.push(marketFilter); }
+      const rows = db.prepare(`
+        SELECT id, sport, team1, team2, league, market, side, line, odd, best_of,
+          result, profit_units, created_at, settled_at, stake_units
+        FROM market_tips_shadow
+        WHERE ${conds.join(' AND ')}
+        ORDER BY id DESC LIMIT 500
+      `).all(...params);
+
+      const T1S = "lower(REPLACE(REPLACE(REPLACE(REPLACE(team1,' ',''),'-',''),'.',''),'''',''))";
+      const T2S = "lower(REPLACE(REPLACE(REPLACE(REPLACE(team2,' ',''),'-',''),'.',''),'''',''))";
+      const mismatches = [];
+      const validations = [];
+      for (const r of rows) {
+        const n1 = _norm(r.team1), n2 = _norm(r.team2);
+        // Recreate same lookup logic of settleShadowTips primary query
+        const windowBefore = r.sport === 'tennis' ? '-10 days' : r.sport === 'football' ? '-48 hours' : '-24 hours';
+        const windowAfter = r.sport === 'tennis' ? '+10 days' : r.sport === 'football' ? '+72 hours' : '+7 days';
+        const candidates = db.prepare(`
+          SELECT match_id, league, team1, team2, winner, final_score, resolved_at
+          FROM match_results
+          WHERE game = ?
+            AND ((${T1S} = ? AND ${T2S} = ?) OR (${T1S} = ? AND ${T2S} = ?))
+            AND resolved_at >= datetime(?, ?)
+            AND resolved_at <= datetime(?, ?)
+            AND winner IS NOT NULL AND winner != ''
+          ORDER BY ABS(julianday(resolved_at) - julianday(?)) ASC LIMIT 5
+        `).all(r.sport, n1, n2, n2, n1, r.created_at, windowBefore, r.created_at, windowAfter, r.created_at);
+        if (!candidates.length) {
+          validations.push({ id: r.id, status: 'no_match_results', stored: r.result });
+          continue;
+        }
+        // Pick most parseable + closest in time (mimics settleShadowTips)
+        const mr = candidates.find(c => {
+          if (r.sport === 'tennis') return parseTennisScore(c.final_score) != null;
+          return /\d+-\d+/.test(String(c.final_score || ''));
+        }) || candidates[0];
+        if (!mr) {
+          validations.push({ id: r.id, status: 'no_parseable_score', stored: r.result });
+          continue;
+        }
+        const mrT1Ln = _lastName(mr.team1);
+        const t1Ln = _lastName(r.team1);
+        const mrT1IsT1 = !!(mrT1Ln && t1Ln && (mrT1Ln === t1Ln ||
+          (r.sport !== 'tennis' && (_norm(mr.team1).includes(n1) || n1.includes(_norm(mr.team1))))));
+        let expected = null, debug = '';
+
+        if (r.sport === 'tennis' && r.market === 'handicapGames') {
+          const parsed = parseTennisScore(mr.final_score);
+          if (parsed) {
+            let gT1 = 0, gT2 = 0;
+            for (const st of parsed.sets) { gT1 += st.t1; gT2 += st.t2; }
+            if (!mrT1IsT1) { [gT1, gT2] = [gT2, gT1]; }
+            const margin = gT1 - gT2;
+            const sideIsT1 = r.side === 'team1' || r.side === 'home';
+            const covers = sideIsT1 ? (margin + r.line > 0) : (-margin + r.line > 0);
+            expected = covers ? 'win' : 'loss';
+            debug = `gT1=${gT1} gT2=${gT2} margin=${margin} sideIsT1=${sideIsT1} line=${r.line}`;
+          }
+        } else if (r.sport === 'tennis' && r.market === 'totalGames') {
+          const parsed = parseTennisScore(mr.final_score);
+          if (parsed) {
+            const over = parsed.totalGames > r.line;
+            expected = (r.side === 'over') === over ? 'win' : 'loss';
+            debug = `total=${parsed.totalGames} line=${r.line} over=${over}`;
+          }
+        } else if (r.sport === 'tennis' && (r.market === 'handicap' || r.market === 'handicapSets')) {
+          const parsed = parseTennisScore(mr.final_score);
+          if (parsed) {
+            let s1 = parsed.t1Sets, s2 = parsed.t2Sets;
+            if (!mrT1IsT1) { [s1, s2] = [s2, s1]; }
+            const sideIsT1 = r.side === 'team1' || r.side === 'home';
+            const diff = s1 - s2;
+            const covers = sideIsT1 ? (diff + r.line > 0) : (-diff + r.line > 0);
+            expected = covers ? 'win' : 'loss';
+            debug = `t1Sets=${s1} t2Sets=${s2} diff=${diff} line=${r.line}`;
+          }
+        } else if (r.sport === 'tennis' && r.market === 'tiebreakMatch') {
+          const parsed = parseTennisScore(mr.final_score);
+          if (parsed) {
+            expected = (r.side === 'yes') === parsed.hasTiebreak ? 'win' : 'loss';
+            debug = `hasTB=${parsed.hasTiebreak}`;
+          }
+        }
+        // Esports/football skipped na auditoria por enquanto (lógica complexa Bo)
+
+        if (expected && expected !== r.result) {
+          mismatches.push({
+            id: r.id, sport: r.sport, market: r.market, side: r.side, line: r.line,
+            team1: r.team1, team2: r.team2, league: r.league,
+            mr_id: mr.match_id, mr_score: mr.final_score, mr_winner: mr.winner,
+            stored_result: r.result, expected_result: expected, debug,
+          });
+        } else if (expected) {
+          validations.push({ id: r.id, status: 'ok', result: r.result });
+        } else {
+          validations.push({ id: r.id, status: 'skipped_unsupported_market', market: r.market });
+        }
+      }
+
+      let reverted = 0;
+      if (apply && mismatches.length > 0) {
+        const upd = db.prepare(`UPDATE market_tips_shadow SET result = NULL, profit_units = NULL, settled_at = NULL WHERE id = ?`);
+        for (const m of mismatches) {
+          upd.run(m.id);
+          reverted++;
+          log('WARN', 'MT-SHADOW-AUDIT', `revert shadow#${m.id} ${m.sport}/${m.market}/${m.side} stored=${m.stored_result} expected=${m.expected_result} (${m.debug})`);
+        }
+      }
+
+      sendJson(res, {
+        ok: true, days, sport: sportFilter, market: marketFilter, apply,
+        examined: rows.length,
+        ok_count: validations.filter(v => v.status === 'ok').length,
+        skipped: validations.filter(v => v.status !== 'ok').length,
+        mismatches_count: mismatches.length,
+        reverted,
+        mismatches,
+      });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
   // GET /admin/mt-settle-diag?id=N&key=<KEY>
   // Dry-run settler em uma shadow row específica. Retorna mr selecionado +
   // todas variáveis intermediárias (mrT1IsShadowT1, gamesT1/T2, margin, covers).
