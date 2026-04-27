@@ -9001,27 +9001,24 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // POST /admin/mt-revert-suspects?days=14&apply=0&key=<KEY>
-  // Auto-detecta MT tips com settle suspeito (match-mismatch) e reverte.
-  // Critérios:
-  //  - Tip MT promovida (match_id LIKE '%::mt::%') settled win/loss/void
-  //  - Shadow row correspondente settled muito rápido (<30min após criação)
-  //    pra esports/tennis/football onde match dura ≥30min
-  //  - OU shadow row settled após tip mas tip NÃO é live (is_live=0)
-  // Reverte: zera result/profit_reais/settled_at/is_live tip + estorna delta
-  // bankroll + zera shadow result/settled_at pra ela re-settle correto na
-  // próxima passada do settleShadowTips com nova lógica strict.
+  // POST /admin/mt-revert-suspects?days=14&apply=0&buffer_min=5&key=<KEY>
+  // Auto-detecta MT tips com match-mismatch e reverte.
+  //
+  // CRITÉRIO DEFINITIVO: pra cada MT tip settled, busca o match_results
+  // que provavelmente foi usado (mesmo sport+pair, resolved_at antes do
+  // settled_at) e checa se resolved_at < tip.sent_at - buffer_min. Se sim,
+  // o match_results é de evento ANTERIOR (R1/qualifier/diferente torneio)
+  // e a tip foi settled errada.
   if (p === '/admin/mt-revert-suspects' && (req.method === 'POST' || req.method === 'GET')) {
     const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     const days = Math.max(1, Math.min(60, parseInt(parsed.query.days || '14', 10) || 14));
+    const bufferMin = Math.max(0, Math.min(60, parseInt(parsed.query.buffer_min || '5', 10) || 5));
     const apply = parsed.query.apply === '1' || parsed.query.apply === 'true';
     try {
-      // Busca tips MT settled recentes
       const tips = db.prepare(`
         SELECT t.id, t.sport, t.match_id, t.participant1, t.participant2, t.result, t.profit_reais,
-          t.is_live, t.sent_at, t.settled_at,
-          (julianday(t.settled_at) - julianday(t.sent_at)) * 24 * 60 AS settle_minutes
+          t.is_live, t.sent_at, t.settled_at
         FROM tips t
         WHERE t.match_id LIKE '%::mt::%'
           AND t.result IN ('win','loss','void')
@@ -9029,25 +9026,45 @@ const server = http.createServer(async (req, res) => {
           AND (t.archived IS NULL OR t.archived = 0)
         ORDER BY t.id DESC
       `).all(days);
-      // Per-sport min match duration (minutos) — settle <X = suspeito
-      const MIN_DUR_MIN = { tennis: 30, lol: 25, dota2: 25, cs2: 30, valorant: 25, football: 90 };
       const suspects = [];
+      const _norm = s => String(s||'').toLowerCase().replace(/[\s\-.']/g, '');
       for (const t of tips) {
-        const minDur = MIN_DUR_MIN[t.sport] || 20;
-        const tooFast = t.settle_minutes != null && t.settle_minutes < minDur && t.is_live === 0;
-        if (tooFast) {
+        // Busca match_results candidate que MELHOR explica a tip settled.
+        // Mesma lógica do settleShadowTips: order by ABS time delta.
+        const n1 = _norm(t.participant1), n2 = _norm(t.participant2);
+        const cand = db.prepare(`
+          SELECT match_id, league, winner, final_score, resolved_at
+          FROM match_results
+          WHERE game = ?
+            AND ((REPLACE(REPLACE(REPLACE(REPLACE(lower(team1),' ',''),'-',''),'.',''),'''','') = ?
+                  AND REPLACE(REPLACE(REPLACE(REPLACE(lower(team2),' ',''),'-',''),'.',''),'''','') = ?)
+              OR (REPLACE(REPLACE(REPLACE(REPLACE(lower(team1),' ',''),'-',''),'.',''),'''','') = ?
+                  AND REPLACE(REPLACE(REPLACE(REPLACE(lower(team2),' ',''),'-',''),'.',''),'''','') = ?))
+            AND winner IS NOT NULL AND winner != ''
+            AND resolved_at <= ?
+          ORDER BY ABS(julianday(resolved_at) - julianday(?)) ASC
+          LIMIT 1
+        `).get(t.sport, n1, n2, n2, n1, t.settled_at, t.sent_at);
+        if (!cand) continue; // sem match_results, não conseguimos auditar (deixa pendente)
+        const tipTs = new Date(t.sent_at).getTime();
+        const candTs = new Date(cand.resolved_at).getTime();
+        const gapMin = (candTs - tipTs) / 60000;
+        // Suspeito: candidate resolvido mais que `bufferMin` ANTES do tip.sent_at
+        // → match anterior do par, não é o jogo da tip
+        if (gapMin < -bufferMin) {
           suspects.push({
             id: t.id, sport: t.sport,
             match: `${t.participant1} vs ${t.participant2}`,
+            tip_sent_at: t.sent_at,
+            candidate_resolved_at: cand.resolved_at,
+            candidate_league: cand.league,
+            gap_minutes: +gapMin.toFixed(1),
             result: t.result, profit_reais: t.profit_reais,
-            settle_minutes: +t.settle_minutes.toFixed(1),
-            min_required: minDur,
-            sent_at: t.sent_at, settled_at: t.settled_at,
+            reason: `match_results resolved ${(-gapMin).toFixed(0)}min ANTES da tip — match anterior do par`,
           });
         }
       }
       let applied = 0;
-      const reverted = [];
       if (apply && suspects.length) {
         const tx = db.transaction(() => {
           for (const s of suspects) {
@@ -9057,13 +9074,10 @@ const server = http.createServer(async (req, res) => {
               const nova = +(bk.current_banca - s.profit_reais).toFixed(2);
               db.prepare(`UPDATE bankroll SET current_banca = ?, updated_at = datetime('now') WHERE sport = ?`).run(nova, s.sport);
             }
-            // Reverte tip
             db.prepare(`UPDATE tips SET result = NULL, profit_reais = NULL, settled_at = NULL, is_live = 0 WHERE id = ?`).run(s.id);
             applied++;
-            reverted.push({ id: s.id, prev_result: s.result, profit_reverted: s.profit_reais });
-          }
-          // Reverte shadow rows correspondentes (pra re-settle com lógica nova)
-          for (const s of suspects) {
+            // Reverte shadow row (re-settle com lógica nova 5min)
+            const [pa, pb] = String(s.match).split(' vs ');
             db.prepare(`
               UPDATE market_tips_shadow
               SET result = NULL, settled_at = NULL, profit_units = NULL
@@ -9071,16 +9085,14 @@ const server = http.createServer(async (req, res) => {
                 AND ((lower(team1) = lower(?) AND lower(team2) = lower(?)) OR (lower(team1) = lower(?) AND lower(team2) = lower(?)))
                 AND result IN ('win','loss','void')
                 AND ABS(julianday(created_at) - julianday(?)) < 0.5
-            `).run(s.sport, s.match.split(' vs ')[0], s.match.split(' vs ')[1], s.match.split(' vs ')[1], s.match.split(' vs ')[0], s.sent_at);
+            `).run(s.sport, pa, pb, pb, pa, s.tip_sent_at);
           }
         });
         tx();
       }
       sendJson(res, {
-        ok: true, applied: !!apply, days,
-        scanned: tips.length,
-        suspects_count: suspects.length,
-        suspects,
+        ok: true, applied: !!apply, days, buffer_min: bufferMin,
+        scanned: tips.length, suspects_count: suspects.length, suspects,
         reverted: applied,
       });
     } catch (e) { sendJson(res, { error: e.message }, 500); }
