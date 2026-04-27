@@ -6927,6 +6927,9 @@ const server = http.createServer(async (req, res) => {
     const status = (parsed.query.status || 'all').toLowerCase();
     const includeVoid = parsed.query.includeVoid === '1';
     const dedup = parsed.query.dedup !== '0'; // default ON
+    // viewMode='all'|'pre'|'live' — server-side filter por is_live (antes era
+    // só client-side filter da página, causava UI vazia quando page não tinha live).
+    const viewMode = (parsed.query.viewMode || parsed.query.view || 'all').toLowerCase();
     try {
       const conds = [`created_at >= datetime('now', '-${days} days')`];
       const params = [];
@@ -6934,6 +6937,8 @@ const server = http.createServer(async (req, res) => {
       if (status === 'pending') conds.push('result IS NULL');
       else if (status === 'settled') conds.push(`result IN ('win','loss')`);
       if (!includeVoid) conds.push(`(result IS NULL OR result != 'void')`);
+      if (viewMode === 'pre') conds.push(`COALESCE(is_live, 0) = 0`);
+      else if (viewMode === 'live') conds.push(`COALESCE(is_live, 0) = 1`);
 
       // Norm SQL espelhando _normStrict: lower + strip space/hyphen/dot/apóstrofo
       const T1 = "lower(REPLACE(REPLACE(REPLACE(REPLACE(team1,' ',''),'-',''),'.',''),'''',''))";
@@ -7035,7 +7040,7 @@ const server = http.createServer(async (req, res) => {
       const clvN = aggRow.clv_n || 0;
       sendJson(res, {
         sport: sport || 'all',
-        days, limit, offset, dedup,
+        days, limit, offset, dedup, viewMode,
         total: aggRow.n || 0,
         rawTotal,
         dupesHidden: dedup ? Math.max(0, rawTotal - (aggRow.n || 0)) : 0,
@@ -12510,6 +12515,122 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
       })).sort((a, b) => b.total - a.total);
 
       sendJson(res, { ok: true, sport, days, min_ev: minEv, min_pmodel: minPmodel, by_market: out });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
+  // Diag: por que MT shadow não está promovendo a regular tip?
+  // GET /admin/mt-promote-diag?sport=tennis&days=7&key=<ADMIN_KEY>
+  // Reporta cada gate em ordem: env enabled → leak guard → DM sent → tip recorded.
+  if (p === '/admin/mt-promote-diag') {
+    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const sport = parsed.query.sport || 'tennis';
+    const days = Math.max(1, Math.min(30, parseInt(parsed.query.days || '7', 10) || 7));
+    try {
+      const up = sport.toUpperCase();
+      const aliasEnv = { DOTA2: 'DOTA', CS2: 'CS' }[up];
+      const envEnabled = process.env[`${up}_MARKET_TIPS_ENABLED`] === 'true'
+        || (aliasEnv && process.env[`${aliasEnv}_MARKET_TIPS_ENABLED`] === 'true');
+      const dmFilter = process.env[`${up}_MT_DM_FILTER`] || (sport === 'tennis' ? 'handicapGames:home' : 'all');
+      const killSwitch = process.env.MARKET_TIPS_DM_KILL_SWITCH === 'true';
+      const minEv = parseFloat(process.env[`${up}_MARKET_TIP_MIN_EV`] || '8');
+      const minPmodel = parseFloat(process.env[`${up}_MARKET_TIP_MIN_PMODEL`] || '0.55');
+
+      // Shadow rows na janela
+      const shadowStats = db.prepare(`
+        SELECT COUNT(*) AS total,
+          SUM(CASE WHEN admin_dm_sent_at IS NOT NULL THEN 1 ELSE 0 END) AS dm_sent,
+          SUM(CASE WHEN ev_pct >= ? AND p_model >= ? THEN 1 ELSE 0 END) AS would_qualify
+        FROM market_tips_shadow
+        WHERE sport = ? AND created_at >= datetime('now', '-' || ? || ' days')
+      `).get(minEv, minPmodel, sport, days);
+
+      // Leak guard runtime state pra esse sport
+      let leakGuardRows = [];
+      try {
+        leakGuardRows = db.prepare(`
+          SELECT market, side, source, reason, roi_pct, clv_pct, updated_at
+          FROM market_tips_runtime_state
+          WHERE sport = ? AND disabled = 1
+        `).all(sport);
+      } catch (_) {}
+
+      // Tips regulares promovidas (synthetic match_id ::mt::)
+      let promotedTips = [];
+      try {
+        promotedTips = db.prepare(`
+          SELECT id, match_id, participant1, participant2, market_type, odds, stake, result, sent_at
+          FROM tips
+          WHERE sport = ? AND match_id LIKE '%::mt::%'
+            AND sent_at >= datetime('now', '-' || ? || ' days')
+          ORDER BY sent_at DESC LIMIT 10
+        `).all(sport, days);
+      } catch (_) {}
+
+      // Top 5 shadow tips eligíveis recentes (would_qualify) + se DM foi enviado
+      const recentEligible = db.prepare(`
+        SELECT id, team1, team2, market, line, side, ev_pct, p_model, odd,
+          admin_dm_sent_at, created_at, result
+        FROM market_tips_shadow
+        WHERE sport = ?
+          AND created_at >= datetime('now', '-' || ? || ' days')
+          AND ev_pct >= ?
+          AND p_model >= ?
+        ORDER BY created_at DESC LIMIT 10
+      `).all(sport, days, minEv, minPmodel);
+
+      // Aplicar dmFilter pra mostrar quantas dos eligible passariam o filter
+      const applyDmFilter = (t) => {
+        const filter = String(dmFilter).trim().toLowerCase();
+        if (!filter || filter === 'all' || filter === '*') return true;
+        const allowed = filter.split(',').map(s => s.trim());
+        const tipKey = `${String(t.market || '').toLowerCase()}:${String(t.side || '').toLowerCase()}`;
+        return allowed.includes(tipKey);
+      };
+      const passDmFilter = recentEligible.filter(applyDmFilter);
+
+      sendJson(res, {
+        ok: true,
+        sport, days,
+        env: {
+          enabled: envEnabled,
+          var: `${up}_MARKET_TIPS_ENABLED`,
+          dm_filter: dmFilter,
+          dm_filter_var: `${up}_MT_DM_FILTER`,
+          kill_switch_active: killSwitch,
+          min_ev: minEv,
+          min_pmodel: minPmodel,
+        },
+        shadow: {
+          total_rows: shadowStats.total || 0,
+          dm_sent: shadowStats.dm_sent || 0,
+          would_qualify_ev_pmodel: shadowStats.would_qualify || 0,
+        },
+        leak_guard_disabled: leakGuardRows,
+        recent_eligible_count: recentEligible.length,
+        recent_eligible_passing_dm_filter: passDmFilter.length,
+        recent_eligible_sample: recentEligible.map(t => ({
+          ...t,
+          dm_sent: t.admin_dm_sent_at ? true : false,
+          passes_dm_filter: applyDmFilter(t),
+        })),
+        promoted_tips_recent: promotedTips,
+        promoted_count: promotedTips.length,
+        diagnosis: !envEnabled
+          ? `BLOCKER: env ${up}_MARKET_TIPS_ENABLED não está 'true'`
+          : killSwitch
+          ? 'BLOCKER: MARKET_TIPS_DM_KILL_SWITCH=true mata todos DMs'
+          : leakGuardRows.length > 0
+          ? `Leak guard ativo: ${leakGuardRows.map(r => `${r.market}/${r.side}`).join(', ')}`
+          : recentEligible.length === 0
+          ? `Nenhum shadow eligível EV≥${minEv}% pModel≥${minPmodel} em ${days}d — modelo não está achando edge`
+          : passDmFilter.length === 0
+          ? `Nenhum eligível passa DM filter '${dmFilter}' — abrir pra 'all' ou ajustar filter`
+          : promotedTips.length > 0
+          ? `OK — ${promotedTips.length} tips regulares promovidas em ${days}d`
+          : `Eligíveis existem mas nenhum promovido — checar logs bot.js MT-RECORD/TENNIS-MARKET-TIP`,
+      });
     } catch (e) { sendJson(res, { error: e.message }, 500); }
     return;
   }

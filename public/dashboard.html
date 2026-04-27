@@ -2559,12 +2559,13 @@ async function loadMarketTipsShadow() {
   const liveQ = marketTipsState.includeLive ? '&includeLive=1' : '';
   const voidQ = marketTipsState.includeVoid ? '&includeVoid=1' : '';
   const dedupQ = marketTipsState.dedup ? '&dedup=1' : '&dedup=0';
+  const viewQ = `&viewMode=${marketTipsState.viewMode || 'all'}`;
   const offset = marketTipsState.page * marketTipsState.perPage;
   const days = marketTipsState.daysWindow;
   const daysSport = marketTipsState.daysSportWindow;
   // Fetch em paralelo: lista paginada + breakdown agregado + per-sport
   const [data, breakdown, bySport] = await Promise.all([
-    apiFetch(`/market-tips-recent?days=${days}&limit=${marketTipsState.perPage}&offset=${offset}${sp}${voidQ}${dedupQ}`),
+    apiFetch(`/market-tips-recent?days=${days}&limit=${marketTipsState.perPage}&offset=${offset}${sp}${voidQ}${dedupQ}${viewQ}`),
     apiFetch(`/market-tips-breakdown?days=30${sp}${liveQ}`),
     apiFetch(`/market-tips-by-sport?days=${daysSport}${voidQ}${dedupQ}`),
   ]);
@@ -3164,13 +3165,9 @@ function renderMarketTipsPage() {
   const start = pageIdx * perPage;
   const end = Math.min(start + tips.length, total);
 
-  // viewMode (all/pre/live) opera APENAS no payload da página atual — o totalizador
-  // do servidor não distingue. Pra ver só live/pre, usuário ativa o toggle live (que
-  // já recarrega) ou aceita o filtro client-side da página corrente. Simplificação:
-  // viewMode='live' filtra a página, mas a paginação server segue baseada em todos.
-  const preTips = tips.filter(t => !t.is_live);
-  const liveTips = tips.filter(t => t.is_live);
-  const pageFiltered = viewMode === 'live' ? liveTips : viewMode === 'pre' ? preTips : tips;
+  // viewMode (all/pre/live) é aplicado SERVER-side — `tips[]` já vem filtrado
+  // por viewMode. `total` reflete count da janela específica do viewMode.
+  const pageFiltered = tips;
 
   const fmtPct = (v, d=1) => v == null ? '—' : (v >= 0 ? '+' : '') + Number(v).toFixed(d) + '%';
   // Stats da janela (server-side, refletem o total — não a página)
@@ -3185,11 +3182,14 @@ function renderMarketTipsPage() {
     avgClv: ws.avgClvPct,
     profit: ws.profit || 0,
   };
-  const tabBtn = (label, mode, count) => {
+  // Count só na aba ativa (server filtra por viewMode → total reflete só uma view).
+  // Inativas mostram label sem count — clicar refaz fetch e mostra count correto.
+  const tabBtn = (label, mode) => {
     const isActive = viewMode === mode;
     const styleActive = isActive ? 'background:var(--accent,#3b82f6);color:white;' : 'background:var(--bg-secondary,#1a1a1a);';
+    const countBadge = isActive ? ` <b>${total}</b>` : '';
     return `<button onclick="setMarketTipsView('${mode}')" style="${styleActive}border:1px solid var(--border,#2a2a2a);padding:6px 14px;border-radius:6px;cursor:pointer;font-size:0.85em">
-      ${label} <b>${count}</b>
+      ${label}${countBadge}
     </button>`;
   };
 
@@ -3201,9 +3201,9 @@ function renderMarketTipsPage() {
     ${renderMarketTipsBySportCards(marketTipsState.bySport)}
     ${renderMarketTipsBreakdown(marketTipsState.breakdown)}
     <div style="display:flex;gap:8px;margin:10px 0 6px;flex-wrap:wrap;align-items:center">
-      ${tabBtn('📊 Todas', 'all', tips.length)}
-      ${tabBtn('📅 Pre-match', 'pre', preTips.length)}
-      ${tabBtn('🔴 Live', 'live', liveTips.length)}
+      ${tabBtn('📊 Todas', 'all')}
+      ${tabBtn('📅 Pre-match', 'pre')}
+      ${tabBtn('🔴 Live', 'live')}
       <span style="margin-left:auto;display:flex;gap:10px;align-items:center;font-size:0.85em;flex-wrap:wrap">
         <label>janela:
           <select onchange="setMarketTipsWindow(this.value)" style="background:var(--bg-secondary,#1a1a1a);color:var(--text,#e2e8f0);border:1px solid var(--border,#2a2a2a);padding:3px 6px;border-radius:4px">
@@ -3283,7 +3283,7 @@ function renderMarketTipsPage() {
   // Paginação SERVER-SIDE: mudar de página dispara fetch novo (não slice client)
   html += `
     <div class="pagination-bar" style="display:flex;align-items:center;justify-content:space-between;margin-top:12px;padding:8px 0;border-top:1px solid var(--border,#2a2a2a);gap:10px;flex-wrap:wrap">
-      <div class="card-meta">Mostrando ${total ? start + 1 : 0}–${end} de ${total}${viewMode !== 'all' ? ` <span style="opacity:0.7">(filtro client: ${pageFiltered.length})</span>` : ''}</div>
+      <div class="card-meta">Mostrando ${total ? start + 1 : 0}–${end} de ${total}${viewMode !== 'all' ? ` <span style="opacity:0.7">(${viewMode})</span>` : ''}</div>
       <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
         <button onclick="marketTipsGoPage(0)" ${pageIdx === 0 ? 'disabled' : ''} style="padding:4px 10px">«</button>
         <button onclick="marketTipsGoPage(${pageIdx - 1})" ${pageIdx === 0 ? 'disabled' : ''} style="padding:4px 10px">‹</button>
@@ -3393,8 +3393,12 @@ function filterToSport(sp) {
 }
 
 function setMarketTipsView(mode) {
+  if (marketTipsState.viewMode === mode) return;
   marketTipsState.viewMode = mode;
-  renderMarketTipsPage();
+  // Page reset + refetch (server agora filtra is_live, então o total da janela
+  // é específico do viewMode — paginação tem que refletir o count filtrado).
+  marketTipsState.page = 0;
+  loadMarketTipsShadow();
 }
 
 function marketTipsGoPage(newPage) {
