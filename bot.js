@@ -13641,7 +13641,8 @@ Máximo 200 palavras. Raciocínio breve antes da decisão.`;
         let _tennisHybridText = null;
         const _tennisIsTrained = /trained/i.test(String(mlResultTennis.method || '')) ||
           mlResultTennis._tennisModelMeta?.method === 'trained';
-        if (_tennisIsTrained && (mlResultTennis.confidence ?? 0) >= 0.65 && !isPathDisabled('tennis', 'hybrid')) {
+        const _tennisHybridMinConf = parseFloat(process.env.TENNIS_HYBRID_MIN_CONF || '0.65');
+        if (_tennisIsTrained && (mlResultTennis.confidence ?? 0) >= _tennisHybridMinConf && !isPathDisabled('tennis', 'hybrid')) {
           const _impPairH = _impliedFromOdds(o);
           if (_impPairH) {
             const pickP1Tn = mlResultTennis.modelP1 > mlResultTennis.modelP2;
