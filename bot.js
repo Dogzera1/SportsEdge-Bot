@@ -1889,8 +1889,9 @@ async function runAutoAnalysis() {
           // Cap LoL tier 2-3: histórico ROI -56% nessas ligas (Prime League/LFL/Rift Legends/etc) por EV inflado.
           // Em tier 2-3, EV reportado > 25% é red flag de modelo errado; rebaixa conf.
           const _lolTier1Live = isLolTier1(match.leagueSlug || match.league);
-          if (!_lolTier1Live && !isNaN(tipEVnumLive) && tipEVnumLive > 25) {
-            log('WARN', 'AUTO', `Gate LoL tier2+ LIVE: ${match.team1} vs ${match.team2} (${match.league}) → EV ${tipEVnumLive}% > 25% em liga não-premier → rejeitado`);
+          const _lolTier2EvCapLive = parseFloat(process.env.LOL_TIER2_EV_CAP || '25');
+          if (!_lolTier1Live && !isNaN(tipEVnumLive) && tipEVnumLive > _lolTier2EvCapLive) {
+            log('WARN', 'AUTO', `Gate LoL tier2+ LIVE: ${match.team1} vs ${match.team2} (${match.league}) → EV ${tipEVnumLive}% > ${_lolTier2EvCapLive}% em liga não-premier → rejeitado`);
             analyzedMatches.set(matchKey, { ts: now, tipSent: false, noEdge: true });
             continue;
           }
@@ -2382,8 +2383,9 @@ async function runAutoAnalysis() {
             }
             // Cap LoL tier 2-3 upcoming: bleed histórico ROI -56% por EV inflado em ligas não-premier.
             const _lolTier1Up = isLolTier1(match.leagueSlug || match.league);
-            if (!_lolTier1Up && !isNaN(tipEVnum) && tipEVnum > 25) {
-              log('WARN', 'AUTO', `Gate LoL tier2+ upcoming: ${match.team1} vs ${match.team2} (${match.league}) → EV ${tipEVnum}% > 25% em liga não-premier → rejeitado`);
+            const _lolTier2EvCapUp = parseFloat(process.env.LOL_TIER2_EV_CAP || '25');
+            if (!_lolTier1Up && !isNaN(tipEVnum) && tipEVnum > _lolTier2EvCapUp) {
+              log('WARN', 'AUTO', `Gate LoL tier2+ upcoming: ${match.team1} vs ${match.team2} (${match.league}) → EV ${tipEVnum}% > ${_lolTier2EvCapUp}% em liga não-premier → rejeitado`);
               analyzedMatches.set(matchKey, { ts: now, tipSent: false, noEdge: true });
               await new Promise(r => setTimeout(r, 3000)); continue;
             }
@@ -6402,9 +6404,17 @@ async function autoAnalyzeMatch(token, match) {
     // nem chamar /claude. Evita 15-25s desperdiçados por análise quando provider
     // está degradado (status=200 vazio).
     if (_AI_DISABLED) {
-      const direction = mlResult.direction;
+      // BUG FIX 2026-04-27: pick por MAIOR EV POSITIVO (não favorito do model).
+      // Com AI removida, fallback é o único path. Pickar favorito do model
+      // quando model concorda com market = sempre EV pequeno/negativo no fav.
+      // Edge positivo está no underdog quando model e market discordam de magnitude.
+      const _odd1 = parseFloat(oddsToUse?.t1) || 0;
+      const _odd2 = parseFloat(oddsToUse?.t2) || 0;
+      const _ev1 = (mlResult.modelP1 && _odd1) ? (mlResult.modelP1 * _odd1 - 1) * 100 : -999;
+      const _ev2 = (mlResult.modelP2 && _odd2) ? (mlResult.modelP2 * _odd2 - 1) * 100 : -999;
+      const direction = _ev1 >= _ev2 ? 't1' : 't2';
       const pickTeam = direction === 't2' ? match.team2 : match.team1;
-      const pickOdd = direction === 't2' ? parseFloat(oddsToUse?.t2) : parseFloat(oddsToUse?.t1);
+      const pickOdd = direction === 't2' ? _odd2 : _odd1;
       const pickP = direction === 't2' ? mlResult.modelP2 : mlResult.modelP1;
       const evPct = (pickP && pickOdd) ? ((pickP * pickOdd - 1) * 100) : 0;
       if (pickOdd >= FALLBACK_MIN_ODDS && pickOdd <= FALLBACK_MAX_ODDS && evPct >= 5 && mlResult.score >= 5) {
@@ -6448,9 +6458,14 @@ async function autoAnalyzeMatch(token, match) {
       }
     }
     if (Date.now() < global.__deepseekBackoffUntil) {
-      const direction = mlResult.direction;
+      // BUG FIX 2026-04-27: pick por MAIOR EV POSITIVO (não favorito do model).
+      const _odd1 = parseFloat(oddsToUse?.t1) || 0;
+      const _odd2 = parseFloat(oddsToUse?.t2) || 0;
+      const _ev1 = (mlResult.modelP1 && _odd1) ? (mlResult.modelP1 * _odd1 - 1) * 100 : -999;
+      const _ev2 = (mlResult.modelP2 && _odd2) ? (mlResult.modelP2 * _odd2 - 1) * 100 : -999;
+      const direction = _ev1 >= _ev2 ? 't1' : 't2';
       const pickTeam = direction === 't2' ? match.team2 : match.team1;
-      const pickOdd = direction === 't2' ? parseFloat(oddsToUse?.t2) : parseFloat(oddsToUse?.t1);
+      const pickOdd = direction === 't2' ? _odd2 : _odd1;
       const pickP = direction === 't2' ? mlResult.modelP2 : mlResult.modelP1;
       const evPct = (pickP && pickOdd) ? ((pickP * pickOdd - 1) * 100) : 0;
       if (pickOdd >= FALLBACK_MIN_ODDS && pickOdd <= FALLBACK_MAX_ODDS && evPct >= 5 && mlResult.score >= 5) {
@@ -6530,9 +6545,14 @@ async function autoAnalyzeMatch(token, match) {
     }
     if (!text) {
       // Fallback sem IA: envia tip baseada no modelo quando há edge claro
-      const direction = mlResult.direction;
+      // BUG FIX 2026-04-27: pick por MAIOR EV POSITIVO (não favorito do model).
+      const _odd1 = parseFloat(oddsToUse?.t1) || 0;
+      const _odd2 = parseFloat(oddsToUse?.t2) || 0;
+      const _ev1 = (mlResult.modelP1 && _odd1) ? (mlResult.modelP1 * _odd1 - 1) * 100 : -999;
+      const _ev2 = (mlResult.modelP2 && _odd2) ? (mlResult.modelP2 * _odd2 - 1) * 100 : -999;
+      const direction = _ev1 >= _ev2 ? 't1' : 't2';
       const pickTeam = direction === 't2' ? match.team2 : match.team1;
-      const pickOdd = direction === 't2' ? parseFloat(oddsToUse?.t2) : parseFloat(oddsToUse?.t1);
+      const pickOdd = direction === 't2' ? _odd2 : _odd1;
       const pickP = direction === 't2' ? mlResult.modelP2 : mlResult.modelP1;
       const evPct = (pickP && pickOdd) ? ((pickP * pickOdd - 1) * 100) : 0;
       if (pickOdd >= FALLBACK_MIN_ODDS && pickOdd <= FALLBACK_MAX_ODDS && evPct >= 5 && mlResult.score >= 5) {
