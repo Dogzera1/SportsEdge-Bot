@@ -10882,6 +10882,7 @@ const server = http.createServer(async (req, res) => {
         const pickN_ = norm(tipParticipant || '');
         const marketN_ = String(t.market_type || 'ML').toUpperCase();
         const isMtTip = String(matchId).includes('::mt::');
+        const newIsLive = !!t.isLive;
         const samePickOnlySports = String(process.env.SAME_PICK_ONLY_DEDUP_SPORTS || '').toLowerCase().split(',').map(s => s.trim()).filter(Boolean);
         const samePickOnly = samePickOnlySports.includes(String(sport).toLowerCase());
         if (p1n_ && p2n_) {
@@ -10889,6 +10890,12 @@ const server = http.createServer(async (req, res) => {
             ? `AND REPLACE(REPLACE(lower(tip_participant),' ',''),'-','') = ?`
             : ``;
           const pickParam = samePickOnly ? [pickN_] : [];
+          // 2026-04-27: nova tip LIVE permite override de tip PRE-game existente
+          // mesmo (pair, market). Justificativa: pre-game e live são contextos
+          // distintos — odds/state mudam, novo edge pode aparecer com a partida
+          // em andamento. Se nova tip é live, dedup só bloqueia hits onde
+          // existing também é live.
+          const liveOverrideClause = newIsLive ? `AND COALESCE(is_live, 0) = 1` : '';
           // Dedup cross-bucket + cross-result: bloqueia pair+market emitido nas últimas 24h
           // INDEPENDENTE do result (pending, win OU loss). Learning do bleed G2 NORD:
           // tip 1 settled loss, tip 2 saiu logo depois porque result IS NULL não bateu.
@@ -10899,10 +10906,11 @@ const server = http.createServer(async (req, res) => {
             ? resolveSportSet(sport, null).sportSet : [sport];
           const pairDupePh = pairDupeSet.map(() => '?').join(',');
           const recentDupe = db.prepare(
-            `SELECT id, tip_participant, result FROM tips WHERE sport IN (${pairDupePh}) ${resultFilter}
+            `SELECT id, tip_participant, result, is_live FROM tips WHERE sport IN (${pairDupePh}) ${resultFilter}
              AND (archived IS NULL OR archived = 0)
              AND sent_at > datetime('now', '-24 hours')
              AND upper(COALESCE(market_type, 'ML')) = ?
+             ${liveOverrideClause}
              ${pickClause}
              AND ((REPLACE(REPLACE(lower(participant1),' ',''),'-','') LIKE ? AND REPLACE(REPLACE(lower(participant2),' ',''),'-','') LIKE ?)
                OR (REPLACE(REPLACE(lower(participant1),' ',''),'-','') LIKE ? AND REPLACE(REPLACE(lower(participant2),' ',''),'-','') LIKE ?))
