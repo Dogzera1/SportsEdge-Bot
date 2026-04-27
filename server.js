@@ -3682,7 +3682,7 @@ function runSettleSweep({ sportFilter = '', days = 14 } = {}) {
         : parseFloat((-stakeR).toFixed(2));
 
       db.transaction(() => {
-        db.prepare(`UPDATE tips SET result = ?, settled_at = datetime('now'), stake_reais = ?, profit_reais = ? WHERE id = ? AND result IS NULL`)
+        db.prepare(`UPDATE tips SET result = ?, settled_at = datetime('now'), stake_reais = ?, profit_reais = ?, is_live = 0 WHERE id = ? AND result IS NULL`)
           .run(result, stakeR, profitR, tip.id);
         const bk = stmts.getBankroll.get(sport);
         if (bk) {
@@ -6820,7 +6820,7 @@ const server = http.createServer(async (req, res) => {
             }
           }
 
-          db.prepare(`UPDATE tips SET result = ?, settled_at = datetime('now') WHERE id = ? AND sport = ?`).run(result, id, sport);
+          db.prepare(`UPDATE tips SET result = ?, settled_at = datetime('now'), is_live = 0 WHERE id = ? AND sport = ?`).run(result, id, sport);
 
           const { getSportUnitValue } = require('./lib/sport-unit');
           const bk = stmts.getBankroll.get(sport);
@@ -8938,6 +8938,126 @@ const server = http.createServer(async (req, res) => {
       }
       db.prepare(`UPDATE tips SET result = NULL, profit_reais = NULL, settled_at = NULL WHERE id = ?`).run(id);
       sendJson(res, { ok: true, id, sport: row.sport, prev_result: row.result, reverted_profit: row.profit_reais });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
+  // GET/POST /admin/mt-resync-bankroll?apply=0&days=30&key=<KEY>
+  // Recomputa profit_reais/stake_reais pra tips MT settled com profit_reais NULL
+  // (bug do propagator antes do fix 2026-04-27 deixava NULL → bankroll desatualizado).
+  // apply=1 atualiza tips + bankroll.current_banca (delta acumulado).
+  if (p === '/admin/mt-resync-bankroll' && (req.method === 'POST' || req.method === 'GET')) {
+    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const apply = parsed.query.apply === '1' || parsed.query.apply === 'true';
+    const days = Math.max(1, Math.min(180, parseInt(parsed.query.days || '30', 10) || 30));
+    try {
+      const tips = db.prepare(`
+        SELECT id, sport, stake, odds, result, profit_reais, stake_reais
+        FROM tips
+        WHERE match_id LIKE '%::mt::%'
+          AND result IN ('win','loss')
+          AND profit_reais IS NULL
+          AND sent_at >= datetime('now', '-' || ? || ' days')
+          AND (archived IS NULL OR archived = 0)
+      `).all(days);
+      const { getSportUnitValue } = require('./lib/sport-unit');
+      const updates = [];
+      const deltaBySport = {};
+      for (const t of tips) {
+        const stakeU = parseFloat(String(t.stake || '1').replace(/u/i, '')) || 1;
+        const odds = Number(t.odds) || 1;
+        const bk = db.prepare(`SELECT current_banca, initial_banca FROM bankroll WHERE sport = ?`).get(t.sport);
+        const uv = getSportUnitValue(bk?.current_banca || 0, bk?.initial_banca || 100);
+        const stakeR = parseFloat((stakeU * uv).toFixed(2));
+        const profitR = t.result === 'win'
+          ? parseFloat((stakeR * (odds - 1)).toFixed(2))
+          : parseFloat((-stakeR).toFixed(2));
+        updates.push({ id: t.id, sport: t.sport, stakeR, profitR, result: t.result });
+        deltaBySport[t.sport] = (deltaBySport[t.sport] || 0) + profitR;
+      }
+      if (apply && updates.length) {
+        const updTip = db.prepare(`UPDATE tips SET stake_reais = ?, profit_reais = ?, is_live = 0 WHERE id = ?`);
+        const updBk = db.prepare(`UPDATE bankroll SET current_banca = current_banca + ?, updated_at = datetime('now') WHERE sport = ?`);
+        const tx = db.transaction(() => {
+          for (const u of updates) updTip.run(u.stakeR, u.profitR, u.id);
+          for (const [sp, delta] of Object.entries(deltaBySport)) updBk.run(parseFloat(delta.toFixed(2)), sp);
+        });
+        tx();
+      }
+      sendJson(res, {
+        ok: true, applied: !!apply, days,
+        scanned: tips.length,
+        bankroll_delta_by_sport: Object.fromEntries(
+          Object.entries(deltaBySport).map(([k, v]) => [k, +v.toFixed(2)])
+        ),
+        sample_updates: updates.slice(0, 30),
+      });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
+  // GET/POST /admin/backfill-mt-labels?apply=0&days=30&key=<KEY>
+  // Back-fill tip_participant pra tips MT antigas com a linha do shadow.
+  // Tip "Alexander Zverev" → "Alexander Zverev -3.5" (HG home line=-3.5)
+  // Tip "Tomas Martin Etcheverry" → "Tomas Martin Etcheverry +2.5" (HG away line=2.5 invertida)
+  // Tips novas (pós-aaab32d) já vêm com linha — back-fill ignora se já tem +/-.
+  if (p === '/admin/backfill-mt-labels' && (req.method === 'POST' || req.method === 'GET')) {
+    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const apply = parsed.query.apply === '1' || parsed.query.apply === 'true';
+    const days = Math.max(1, Math.min(180, parseInt(parsed.query.days || '30', 10) || 30));
+    try {
+      // Tips MT regulares cujo participant ainda não tem sinal de linha (novo formato tem +/-)
+      const tips = db.prepare(`
+        SELECT id, sport, match_id, participant1, participant2, tip_participant, market_type, sent_at
+        FROM tips
+        WHERE match_id LIKE '%::mt::%'
+          AND sent_at >= datetime('now', '-' || ? || ' days')
+          AND (archived IS NULL OR archived = 0)
+          AND market_type IN ('HANDICAP_GAMES','HANDICAP','HANDICAP_SETS')
+          AND tip_participant IS NOT NULL
+          AND tip_participant NOT LIKE '%+%'
+          AND tip_participant NOT LIKE '%-%'
+      `).all(days);
+      const updated = [];
+      const skipped = [];
+      for (const t of tips) {
+        // Parse market + side do match_id sintético: <base>::mt::<market>::<side>
+        const m = String(t.match_id).match(/::mt::([^:]+)::([^:]+)$/);
+        if (!m) { skipped.push({ id: t.id, reason: 'match_id sem padrão ::mt::market::side' }); continue; }
+        const market = m[1], side = m[2];
+        // Busca shadow row mais próxima do sent_at (mesmo pair + market + side)
+        const shadow = db.prepare(`
+          SELECT id, line, side, created_at
+          FROM market_tips_shadow
+          WHERE sport = ?
+            AND ((lower(team1) = lower(?) AND lower(team2) = lower(?)) OR (lower(team1) = lower(?) AND lower(team2) = lower(?)))
+            AND market = ?
+            AND side = ?
+            AND ABS(julianday(created_at) - julianday(?)) < 1
+          ORDER BY ABS(julianday(created_at) - julianday(?)) ASC
+          LIMIT 1
+        `).get(t.sport, t.participant1, t.participant2, t.participant2, t.participant1, market, side, t.sent_at, t.sent_at);
+        if (!shadow || shadow.line == null) { skipped.push({ id: t.id, reason: 'shadow não encontrado ou sem line' }); continue; }
+        // Sinaliza linha: home/team1 = como veio; away/team2 = invertida
+        const isAway = side === 'team2' || side === 'away' || side === 'a';
+        const v = isAway ? -shadow.line : shadow.line;
+        const lineStr = v >= 0 ? `+${v}` : `${v}`;
+        const newLabel = `${t.tip_participant} ${lineStr}`;
+        updated.push({ id: t.id, before: t.tip_participant, after: newLabel, line: shadow.line, side });
+      }
+      if (apply && updated.length) {
+        const stmt = db.prepare(`UPDATE tips SET tip_participant = ? WHERE id = ?`);
+        const tx = db.transaction(list => { for (const u of list) stmt.run(u.after, u.id); });
+        tx(updated);
+      }
+      sendJson(res, {
+        ok: true, applied: !!apply, days,
+        scanned: tips.length, would_update: updated.length, skipped_count: skipped.length,
+        sample_updated: updated.slice(0, 20),
+        skipped_sample: skipped.slice(0, 10),
+      });
     } catch (e) { sendJson(res, { error: e.message }, 500); }
     return;
   }
