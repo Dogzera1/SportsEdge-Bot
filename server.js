@@ -8844,6 +8844,104 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // GET /admin/mt-tips-suspect?days=14&key=<KEY>
+  // Lista tips MT promovidas (match_id LIKE '%::mt::%') liquidadas mas com
+  // sinais de settle errado:
+  //  - is_live=1 + result definido (live nunca foi limpo, possível settle pre-final)
+  //  - settled_at - sent_at < 30min (settle muito rápido, suspeito de match-mismatch)
+  //  - shadow row correspondente teve match_results.resolved_at bem antes do tip.sent_at
+  //    (indica que o match casado pelo shadow não é o match da tip)
+  if (p === '/admin/mt-tips-suspect') {
+    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const days = Math.max(1, Math.min(60, parseInt(parsed.query.days || '14', 10) || 14));
+    const sport = parsed.query.sport && parsed.query.sport !== 'all' ? parsed.query.sport : null;
+    try {
+      const conds = [
+        `t.match_id LIKE '%::mt::%'`,
+        `t.result IN ('win','loss')`,
+        `t.sent_at >= datetime('now', '-' || ? || ' days')`,
+        `(t.archived IS NULL OR t.archived = 0)`,
+      ];
+      const params = [days];
+      if (sport) { conds.push('t.sport = ?'); params.push(sport); }
+      const rows = db.prepare(`
+        SELECT t.id, t.sport, t.participant1, t.participant2, t.tip_participant,
+          t.market_type, t.odds, t.stake, t.result, t.profit_reais,
+          t.is_live, t.sent_at, t.settled_at,
+          (julianday(t.settled_at) - julianday(t.sent_at)) * 24 * 60 AS settle_minutes
+        FROM tips t
+        WHERE ${conds.join(' AND ')}
+        ORDER BY t.id DESC
+      `).all(...params);
+      const suspects = [];
+      for (const r of rows) {
+        const reasons = [];
+        if (r.is_live === 1) reasons.push('is_live=1 + result (live nunca limpo)');
+        if (r.settle_minutes != null && r.settle_minutes < 30) reasons.push(`settle muito rápido (${r.settle_minutes.toFixed(1)}min)`);
+        // Cross-check: shadow row do MT pra esse pair + market — se shadow.created_at
+        // pegou match_results bem antes, alerta.
+        try {
+          const shadow = db.prepare(`
+            SELECT id, created_at, settled_at, result
+            FROM market_tips_shadow
+            WHERE sport = ? AND result IN ('win','loss')
+              AND ((lower(team1) = lower(?) AND lower(team2) = lower(?)) OR (lower(team1) = lower(?) AND lower(team2) = lower(?)))
+              AND ABS(julianday(created_at) - julianday(?)) < 0.5
+            ORDER BY id DESC LIMIT 1
+          `).get(r.sport, r.participant1, r.participant2, r.participant2, r.participant1, r.sent_at);
+          if (shadow && shadow.settled_at) {
+            const shadowSettleMin = (new Date(shadow.settled_at).getTime() - new Date(r.sent_at).getTime()) / 60000;
+            if (shadowSettleMin < 30) reasons.push(`shadow settled ${shadowSettleMin.toFixed(1)}min após tip — match-mismatch?`);
+          }
+        } catch (_) {}
+        if (reasons.length) suspects.push({
+          id: r.id, sport: r.sport,
+          tip: `${r.tip_participant} (${r.market_type})`,
+          match: `${r.participant1} vs ${r.participant2}`,
+          odds: r.odds, stake: r.stake, result: r.result, profit_reais: r.profit_reais,
+          is_live: r.is_live, sent_at: r.sent_at, settled_at: r.settled_at,
+          settle_minutes: r.settle_minutes != null ? +r.settle_minutes.toFixed(1) : null,
+          reasons,
+        });
+      }
+      sendJson(res, {
+        ok: true, sport: sport || 'all', days,
+        scanned: rows.length, suspects_count: suspects.length,
+        suspects,
+        next_steps: suspects.length
+          ? `Pra reverter: POST /admin/unsettle-tip-by-id?id=<ID>&key=<KEY>. Ou se for muitos, share os IDs.`
+          : 'Nenhum suspect encontrado.',
+      });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
+  // POST /admin/unsettle-tip-by-id?id=N — reverte settle de uma tip regular
+  // (zera result/profit_reais/settled_at + reverte impacto no current_banca).
+  if (p === '/admin/unsettle-tip-by-id' && (req.method === 'POST' || req.method === 'GET')) {
+    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const id = parseInt(parsed.query.id || '', 10);
+    if (!Number.isFinite(id) || id <= 0) { sendJson(res, { error: 'id inválido' }, 400); return; }
+    try {
+      const row = db.prepare(`SELECT id, sport, profit_reais, result FROM tips WHERE id = ?`).get(id);
+      if (!row) { sendJson(res, { error: 'tip não encontrada' }, 404); return; }
+      if (row.result == null) { sendJson(res, { ok: true, skipped: true, reason: 'já está pending' }); return; }
+      // Reverte impacto no bankroll antes de zerar
+      if (Number.isFinite(Number(row.profit_reais))) {
+        const bk = db.prepare(`SELECT current_banca FROM bankroll WHERE sport = ?`).get(row.sport);
+        if (bk) {
+          const nova = +(bk.current_banca - Number(row.profit_reais)).toFixed(2);
+          db.prepare(`UPDATE bankroll SET current_banca = ?, updated_at = datetime('now') WHERE sport = ?`).run(nova, row.sport);
+        }
+      }
+      db.prepare(`UPDATE tips SET result = NULL, profit_reais = NULL, settled_at = NULL WHERE id = ?`).run(id);
+      sendJson(res, { ok: true, id, sport: row.sport, prev_result: row.result, reverted_profit: row.profit_reais });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
   // POST /void-market-tips-bogus?sport=tennis&minEv=40&hours=24
   if (p === '/void-market-tips-bogus' && req.method === 'POST') {
     const sport = parsed.query.sport || 'tennis';

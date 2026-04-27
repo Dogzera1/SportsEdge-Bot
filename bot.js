@@ -4030,12 +4030,27 @@ const _MT_MARKET_TYPE_MAP = {
 };
 
 // Resolve participant pra market tip (não-ML). Pra h2h side (team1/team2/home/away)
-// usa nome real. Pra over/under/yes/no usa label sintético — preserva semântica
-// na coluna tip_participant pra dedup/UI.
+// inclui linha sinalizada (ex: "Alexander Zverev -3.5") pra dashboard mostrar
+// qual handicap foi tippado sem precisar de coluna extra. Pra over/under/yes/no
+// preserva label sintético com linha+unidade.
 function _mtParticipant(match, tip) {
   const s = String(tip.side || '').toLowerCase();
-  if (s === 'team1' || s === 'home' || s === 'h') return match.team1;
-  if (s === 'team2' || s === 'away' || s === 'a') return match.team2;
+  // Sinaliza a linha pra side: home/team1 usa line como veio; away/team2 inverte
+  // o sinal (linha Pinnacle é sempre relativa ao home, então away é o oposto).
+  const fmtLine = (line, isAway) => {
+    const n = Number(line);
+    if (!Number.isFinite(n)) return '';
+    const v = isAway ? -n : n;
+    return v >= 0 ? `+${v}` : `${v}`;
+  };
+  if (s === 'team1' || s === 'home' || s === 'h') {
+    const ln = fmtLine(tip.line, false);
+    return ln ? `${match.team1} ${ln}` : match.team1;
+  }
+  if (s === 'team2' || s === 'away' || s === 'a') {
+    const ln = fmtLine(tip.line, true);
+    return ln ? `${match.team2} ${ln}` : match.team2;
+  }
   if (s === 'over' || s === 'under') {
     const unit = tip.market === 'totalGames' ? 'games'
                : tip.market === 'totals' ? 'gols'
