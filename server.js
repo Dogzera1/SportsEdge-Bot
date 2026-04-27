@@ -8942,6 +8942,26 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // GET/POST /admin/clear-stale-is-live?apply=0&key=<KEY>
+  // Limpa is_live=1 stale em tips já settled (settle path antes de 928d775
+  // não zerava is_live → tips win/loss apareciam com chip LIVE no dashboard
+  // e flagavam como suspect no /admin/mt-tips-suspect).
+  if (p === '/admin/clear-stale-is-live' && (req.method === 'POST' || req.method === 'GET')) {
+    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const apply = parsed.query.apply === '1' || parsed.query.apply === 'true';
+    try {
+      const count = db.prepare(`SELECT COUNT(*) AS n FROM tips WHERE is_live = 1 AND result IN ('win','loss','void','push')`).get().n || 0;
+      let changed = 0;
+      if (apply && count > 0) {
+        const r = db.prepare(`UPDATE tips SET is_live = 0 WHERE is_live = 1 AND result IN ('win','loss','void','push')`).run();
+        changed = r.changes;
+      }
+      sendJson(res, { ok: true, applied: !!apply, would_update: count, updated: changed });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
   // GET/POST /admin/mt-resync-bankroll?apply=0&days=30&key=<KEY>
   // Recomputa profit_reais/stake_reais pra tips MT settled com profit_reais NULL
   // (bug do propagator antes do fix 2026-04-27 deixava NULL → bankroll desatualizado).
