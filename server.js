@@ -9062,6 +9062,69 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // POST /admin/mt-shadow-unsettle?id=N&key=<KEY>
+  // Reverte shadow row pra pending pra cron settler re-rodar com lógica nova.
+  // Caso de uso: bug de orientação (mrT1IsShadowT1) liquidou shadow rows com
+  // result invertido — após fix, unsettle + esperar cron tick → re-settle correto
+  // → propagator re-propaga pra tip.
+  if (p === '/admin/mt-shadow-unsettle' && (req.method === 'POST' || req.method === 'GET')) {
+    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const id = parseInt(parsed.query.id || '', 10);
+    if (!Number.isFinite(id) || id <= 0) { sendJson(res, { error: 'id inválido' }, 400); return; }
+    try {
+      const row = db.prepare(`SELECT id, sport, market, side, line, odd, result, profit_units FROM market_tips_shadow WHERE id = ?`).get(id);
+      if (!row) { sendJson(res, { error: 'shadow row não encontrada' }, 404); return; }
+      if (row.result == null) { sendJson(res, { ok: true, skipped: true, reason: 'já está pending' }); return; }
+      db.prepare(`
+        UPDATE market_tips_shadow
+        SET result = NULL, profit_units = NULL, settled_at = NULL
+        WHERE id = ?
+      `).run(id);
+      log('INFO', 'MT-SHADOW-UNSETTLE', `id=${id} ${row.sport}/${row.market}/${row.side} line=${row.line} reverted`);
+      sendJson(res, { ok: true, id, prev_result: row.result, prev_profit_units: row.profit_units });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
+  // POST /admin/mt-shadow-unsettle-batch?days=14&apply=0&market=handicapGames&key=<KEY>
+  // Reverte EM MASSA shadow rows settled no período pra forçar re-settle com lógica
+  // nova. Filtros opcionais por sport/market. apply=0 = preview.
+  if (p === '/admin/mt-shadow-unsettle-batch' && (req.method === 'POST' || req.method === 'GET')) {
+    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const days = Math.max(1, Math.min(60, parseInt(parsed.query.days || '14', 10) || 14));
+    const apply = parsed.query.apply === '1' || parsed.query.apply === 'true';
+    const sportFilter = parsed.query.sport ? String(parsed.query.sport).slice(0, 20) : null;
+    const marketFilter = parsed.query.market ? String(parsed.query.market).slice(0, 30) : null;
+    try {
+      const conds = [
+        `result IN ('win','loss','void')`,
+        `settled_at >= datetime('now', '-' || ? || ' days')`,
+      ];
+      const params = [days];
+      if (sportFilter) { conds.push('sport = ?'); params.push(sportFilter); }
+      if (marketFilter) { conds.push('market = ?'); params.push(marketFilter); }
+      const rows = db.prepare(`
+        SELECT id, sport, market, side, line, odd, team1, team2, result, profit_units, created_at, settled_at
+        FROM market_tips_shadow
+        WHERE ${conds.join(' AND ')}
+        ORDER BY id DESC LIMIT 500
+      `).all(...params);
+      let reverted = 0;
+      if (apply) {
+        const upd = db.prepare(`UPDATE market_tips_shadow SET result = NULL, profit_units = NULL, settled_at = NULL WHERE id = ?`);
+        for (const r of rows) {
+          upd.run(r.id);
+          reverted++;
+        }
+        log('WARN', 'MT-SHADOW-UNSETTLE-BATCH', `revert ${reverted} rows (sport=${sportFilter || 'all'}, market=${marketFilter || 'all'}, days=${days})`);
+      }
+      sendJson(res, { ok: true, days, sport: sportFilter, market: marketFilter, apply, count: rows.length, reverted, sample: rows.slice(0, 20) });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
   // GET /tips-by-league?sport=X&days=30
   // Stats por liga das tips REAIS (is_shadow=0). Útil pra ver onde está vindo
   // o ROI / leak por liga. Filtra por sport ativo (ou cross-sport se __overall__).
