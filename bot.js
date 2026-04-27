@@ -13648,14 +13648,25 @@ Máximo 200 palavras. Raciocínio breve antes da decisão.`;
         if (_tennisIsTrained && (mlResultTennis.confidence ?? 0) >= _tennisHybridMinConf && !isPathDisabled('tennis', 'hybrid')) {
           const _impPairH = _impliedFromOdds(o);
           if (_impPairH) {
-            const pickP1Tn = mlResultTennis.modelP1 > mlResultTennis.modelP2;
+            // BUG FIX 2026-04-27: pick por MAIOR EDGE POSITIVO, não por maior P
+            // do modelo. Pinnacle é sharp — quando model concorda com direção
+            // do market, edge é pequeno/negativo no favorito mas positivo no
+            // underdog. Pickar favorito = sempre 'no edge' / Sem tip.
+            const _edge1 = (mlResultTennis.modelP1 - _impPairH.impliedP1) * 100;
+            const _edge2 = (mlResultTennis.modelP2 - _impPairH.impliedP2) * 100;
+            const pickP1Tn = _edge1 >= _edge2;
             const pickPTn = pickP1Tn ? mlResultTennis.modelP1 : mlResultTennis.modelP2;
             const pickImpTn = pickP1Tn ? _impPairH.impliedP1 : _impPairH.impliedP2;
             const edgeTn = (pickPTn - pickImpTn) * 100;
             const minEdgeTn = parseFloat(process.env.TENNIS_HYBRID_MIN_EDGE_PP || '6');
             const pickOddTn = pickP1Tn ? parseFloat(o.t1) : parseFloat(o.t2);
             const pickTeamTn = pickP1Tn ? match.team1 : match.team2;
-            if (edgeTn >= minEdgeTn && pickPTn * pickOddTn >= 1.05) {
+            const evMult = pickPTn * pickOddTn;
+            // Gate: edge≥min + EV entre 1.05 e cap (env TENNIS_HYBRID_MAX_EV default 1.8 = +80%).
+            // Cap evita underdog extremos (EV +200% requer sample gigante pra validar).
+            // Floor pickP 0.15 evita long-shot abaixo de 15% prob.
+            const maxEvMult = parseFloat(process.env.TENNIS_HYBRID_MAX_EV || '1.8');
+            if (edgeTn >= minEdgeTn && evMult >= 1.05 && evMult <= maxEvMult && pickPTn >= 0.15) {
               const confLabelTn = edgeTn >= 12 && (mlResultTennis.confidence ?? 0) >= 0.75 ? 'ALTA'
                 : edgeTn >= 8 ? 'MÉDIA' : 'BAIXA';
               const stakeTn = confLabelTn === 'ALTA' ? '2' : '1';
@@ -13743,13 +13754,18 @@ Máximo 200 palavras. Raciocínio breve antes da decisão.`;
           const _isTrained = /trained/i.test(String(mlResultTennis.method || ''));
           const _impPairAdv = _impliedFromOdds(o);
           if (_advisoryOn && _isTrained && _impPairAdv && (mlResultTennis.confidence ?? 0) >= _minConf) {
-            const pickP1Adv = mlResultTennis.modelP1 > mlResultTennis.modelP2;
+            // Pick lado de MAIOR EDGE POSITIVO (mesmo fix do hybrid path).
+            const _edge1 = (mlResultTennis.modelP1 - _impPairAdv.impliedP1) * 100;
+            const _edge2 = (mlResultTennis.modelP2 - _impPairAdv.impliedP2) * 100;
+            const pickP1Adv = _edge1 >= _edge2;
             const pickPAdv = pickP1Adv ? mlResultTennis.modelP1 : mlResultTennis.modelP2;
             const pickImpAdv = pickP1Adv ? _impPairAdv.impliedP1 : _impPairAdv.impliedP2;
             const edgeAdv = (pickPAdv - pickImpAdv) * 100;
             const pickOddAdv = pickP1Adv ? parseFloat(o.t1) : parseFloat(o.t2);
             const pickTeamAdv = pickP1Adv ? match.team1 : match.team2;
-            if (edgeAdv >= _minEdgePp && pickPAdv * pickOddAdv >= 1.04) {
+            const evMultAdv = pickPAdv * pickOddAdv;
+            const maxEvMultAdv = parseFloat(process.env.TENNIS_OVERRIDE_MAX_EV || '1.8');
+            if (edgeAdv >= _minEdgePp && evMultAdv >= 1.04 && evMultAdv <= maxEvMultAdv && pickPAdv >= 0.15) {
               tipMatch2 = [null, pickTeamAdv, String(pickOddAdv), String((pickPAdv*100).toFixed(0)), '1u', 'BAIXA'];
               _tennisFromOverride = true;
               log('INFO', 'TENNIS-IA-OVERRIDE', `${match.team1} vs ${match.team2}: override IA — ${pickTeamAdv}@${pickOddAdv} P=${(pickPAdv*100).toFixed(1)}% edge=${edgeAdv.toFixed(1)}pp modelConf=${mlResultTennis.confidence?.toFixed(2)} → CONF=BAIXA stake=1u`);
