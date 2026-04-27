@@ -8335,6 +8335,32 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // Admin: trigger manual do captureMarketTipsClv pra diagnosticar por que
+  // football MT shadow tem 0 CLV samples enquanto tennis tem 100+. Retorna
+  // JSON com checked/updated/skipped/bySport/firstError sem alterar comportamento
+  // do cron (que continua rodando 2min).
+  // GET /admin/clv-capture-trace
+  if (p === '/admin/clv-capture-trace') {
+    if (!requireAdmin(req, res)) return;
+    (async () => {
+      try {
+        const serverGet = (path) => new Promise((resolve, reject) => {
+          const http = require('http');
+          http.get({ hostname: '127.0.0.1', port: PORT, path, timeout: 15000 }, (r) => {
+            let d = ''; r.on('data', c => d += c);
+            r.on('end', () => { try { resolve(JSON.parse(d)); } catch (e) { reject(e); } });
+          }).on('error', reject);
+        });
+        const { captureMarketTipsClv } = require('./lib/clv-capture');
+        const out = await captureMarketTipsClv(db, serverGet);
+        sendJson(res, { ok: true, result: out }, 200);
+      } catch (e) {
+        sendJson(res, { ok: false, error: e.message }, 500);
+      }
+    })();
+    return;
+  }
+
   // Admin: diagnósticos CLV em JSON. Aceita ?snapshot=1 pra ler DB histórico.
   // GET /admin/clv-leak?days=30&snapshot=1
   // GET /admin/clv-coverage?days=30&snapshot=1
@@ -9171,8 +9197,48 @@ const server = http.createServer(async (req, res) => {
             expected = (r.side === 'yes') === parsed.hasTiebreak ? 'win' : 'loss';
             debug = `hasTB=${parsed.hasTiebreak}`;
           }
+        } else if (['lol','dota2','cs2','valorant'].includes(r.sport) && (r.market === 'handicap' || r.market === 'handicapSets')) {
+          const m = String(mr.final_score || '').match(/(?:bo(\d+)\s+)?(\d+)\s*-\s*(\d+)/i);
+          if (m) {
+            const bo = m[1] ? parseInt(m[1], 10) : null;
+            const a = parseInt(m[2], 10), b = parseInt(m[3], 10);
+            const winnerMaps = Math.max(a, b), loserMaps = Math.min(a, b);
+            const winnerIs1 = (_norm(mr.winner) === n1) || (_norm(mr.winner).includes(n1) || n1.includes(_norm(mr.winner)));
+            const t1Sets = winnerIs1 ? winnerMaps : loserMaps;
+            const t2Sets = winnerIs1 ? loserMaps : winnerMaps;
+            const sideIsT1 = r.side === 'team1' || r.side === 'home';
+            const diff = t1Sets - t2Sets;
+            if (bo && Math.abs(r.line) > Math.ceil(bo / 2)) expected = 'void';
+            else if (r.best_of && bo && r.best_of !== bo) expected = 'void';
+            else expected = (sideIsT1 ? (diff + r.line > 0) : (-diff + r.line > 0)) ? 'win' : 'loss';
+            debug = `bo=${bo} maps=${t1Sets}-${t2Sets} diff=${diff} line=${r.line}`;
+          }
+        } else if (['lol','dota2','cs2','valorant'].includes(r.sport) && r.market === 'total') {
+          const m = String(mr.final_score || '').match(/(?:bo(\d+)\s+)?(\d+)\s*-\s*(\d+)/i);
+          if (m) {
+            const bo = m[1] ? parseInt(m[1], 10) : null;
+            const a = parseInt(m[2], 10), b = parseInt(m[3], 10);
+            const totalMaps = a + b;
+            const minTotal = bo ? Math.ceil(bo / 2) : 1;
+            const maxTotal = bo || 99;
+            if (bo && (r.line >= maxTotal || r.line < minTotal)) expected = 'void';
+            else if (r.best_of && bo && r.best_of !== bo) expected = 'void';
+            else expected = ((r.side === 'over') === (totalMaps > r.line)) ? 'win' : 'loss';
+            debug = `bo=${bo} total=${totalMaps} line=${r.line}`;
+          }
+        } else if (r.sport === 'football' && r.market === 'draw') {
+          const isDraw = /^draw$/i.test(String(mr.winner || '').trim());
+          expected = isDraw ? 'win' : 'loss';
+          debug = `winner=${mr.winner}`;
+        } else if (r.sport === 'football' && (r.market === 'totals' || r.market === 'total')) {
+          const m = String(mr.final_score || '').match(/^\s*(\d+)\s*[-–]\s*(\d+)/);
+          if (m) {
+            const totalGoals = parseInt(m[1], 10) + parseInt(m[2], 10);
+            const line = Number(r.line) || 2.5;
+            expected = ((r.side === 'over') === (totalGoals > line)) ? 'win' : 'loss';
+            debug = `goals=${totalGoals} line=${line}`;
+          }
         }
-        // Esports/football skipped na auditoria por enquanto (lógica complexa Bo)
 
         if (expected && expected !== r.result) {
           mismatches.push({
