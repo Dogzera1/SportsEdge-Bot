@@ -14234,12 +14234,11 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
     const game  = parsed.query.game || '';
     const daysRaw = parseInt(parsed.query.days);
     const days = Number.isFinite(daysRaw) ? Math.max(1, Math.min(365, daysRaw)) : 30;
-    // Alinhamento com /overall-summary (dashboard): default filtra market_type=ML
-    // pra que Bankroll Guardian e dashboard mostrem os mesmos números. Tips de mercado
-    // (handicap, totals, etc) impactam guardian antes sem aparecer no dashboard.
-    // Opt-in via ?include_markets=1 pra analises que precisem de tudo.
-    const includeMarkets = parsed.query.include_markets === '1' || parsed.query.include_markets === 'true';
-    const marketFilterSql = includeMarkets ? '' : `AND (market_type IS NULL OR market_type = 'ML')`;
+    // BUG FIX 2026-04-27: default era filtrar ML; agora inclui MT promovidas
+    // (handicap/totals) na curva de banca pra match com /overall-summary KPIs.
+    // Opt-out via ?ml_only=1 pra analyses que precisem só ML.
+    const mlOnly = parsed.query.ml_only === '1' || parsed.query.ml_only === 'true';
+    const marketFilterSql = mlOnly ? `AND (market_type IS NULL OR market_type = 'ML')` : '';
     try {
       // Union pós-split LoL/Dota: sport='lol' cobre esports-legado+lol, idem dota2.
       const { sportSet, effectiveGame } = resolveSportSet(sport, game);
@@ -14657,11 +14656,14 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
       // SUM profit_reais stored direto (tier unit) — fonte de verdade única,
       // não recomputa via unit global. Reclassifica esports→lol/dota2 em JS.
       const _bl = getBaseline();
+      // BUG FIX 2026-04-27: filtro market_type='ML' EXCLUÍA MT promovidas do total
+      // → recompute reescrevia bankroll.current_banca sem o impacto MT, anulando
+      // o update do propagator. KPI hero "Banca total" não refletia tips MT.
+      // Agora inclui todas tips reais (is_shadow=0).
       const allSettled = db.prepare(`
         SELECT sport, profit_reais, match_id, event_name
         FROM tips
         WHERE (archived IS NULL OR archived = 0) AND COALESCE(is_shadow, 0) = 0
-          AND (market_type IS NULL OR market_type = 'ML')
           AND result IN ('win','loss','push','void')
       `).all();
       const profitBySport = {};
@@ -14696,11 +14698,12 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
       // Tips agregadas (não archived) — fetch raw e agrega em JS com baseline.unit_value.
       // match_id/event_name necessários pra reclassificar tips legadas sport='esports'
       // em 'lol'/'dota2' no breakdown per-sport.
+      // Sem filtro market_type — inclui MT promovidas (handicap/totals/etc) nos
+      // KPIs ROI/CLV/W-L da janela. MT é real money tip (is_shadow=0).
       const windowTips = db.prepare(`
         SELECT sport, stake, odds, result, ev, settled_at, is_shadow, match_id, event_name, stake_reais, profit_reais
         FROM tips
         WHERE (archived IS NULL OR archived = 0) AND COALESCE(is_shadow, 0) = 0
-          AND (market_type IS NULL OR market_type = 'ML')
           AND (sent_at >= datetime('now', ?) OR result IS NULL)
       `).all(`-${days} days`);
       // Helper: classifica sport efetivo (reclassifica 'esports' legado em 'lol'/'dota2'

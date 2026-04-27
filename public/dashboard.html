@@ -1603,8 +1603,8 @@ async function loadLiveTips(gen = refreshGen) {
       ? ['lol', 'dota2', 'valorant', 'cs', 'tennis', 'mma', 'football', 'darts', 'snooker', 'tabletennis']
       : [currentSport];
     const [snapshotData, ...tipsResults] = await Promise.all([
-      apiFetch('/live-snapshot').catch(() => ({ sports: {} })),
-      ...sports.map(sp => apiFetch(`/tips-history?sport=${sp}&status=pending&limit=200&include_markets=1`).catch(() => [])),
+      apiFetch('/live-snapshot').catch(e => { console.warn('liveTips snapshot failed:', e?.message || e); return { sports: {} }; }),
+      ...sports.map(sp => apiFetch(`/tips-history?sport=${sp}&status=pending&limit=200&include_markets=1`).catch(e => { console.warn(`liveTips ${sp} pending failed:`, e?.message || e); return []; })),
     ]);
     if (shouldAbort(gen)) return;
     const allPending = [];
@@ -3410,9 +3410,10 @@ function filterToSport(sp) {
   if (sel) sel.value = sp;
   marketTipsState.page = 0;
   marketTipsState.sport = sp;
-  loadMarketTipsShadow();
-  // Re-render outras seções relevantes do sport ativo
-  if (typeof loadAll === 'function') loadAll();
+  // BUG FIX 2026-04-27: antes chamava loadAll() (não definida) — só MT atualizava.
+  // refresh() é o handler global que dispara todas as seções (KPI, tips, live etc).
+  if (typeof refresh === 'function') refresh();
+  else loadMarketTipsShadow();
 }
 
 function setMarketTipsView(mode) {
