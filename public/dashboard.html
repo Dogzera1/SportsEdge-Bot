@@ -1604,7 +1604,7 @@ async function loadLiveTips(gen = refreshGen) {
       : [currentSport];
     const [snapshotData, ...tipsResults] = await Promise.all([
       apiFetch('/live-snapshot').catch(() => ({ sports: {} })),
-      ...sports.map(sp => apiFetch(`/tips-history?sport=${sp}&status=pending&limit=200`).catch(() => [])),
+      ...sports.map(sp => apiFetch(`/tips-history?sport=${sp}&status=pending&limit=200&include_markets=1`).catch(() => [])),
     ]);
     if (shouldAbort(gen)) return;
     const allPending = [];
@@ -1996,7 +1996,7 @@ async function loadTips(gen = refreshGen) {
     const sq = status ? '&status=' + encodeURIComponent(status) : '';
     const perSport = Math.ceil(LIMIT_ALL / sports.length);
     const results = await Promise.all(sports.map(sp =>
-      apiFetch(`/tips-history?sport=${sp}&limit=${perSport}${sq}`).then(r => ({ sp, data: r }))
+      apiFetch(`/tips-history?sport=${sp}&limit=${perSport}&include_markets=1${sq}`).then(r => ({ sp, data: r }))
     ));
     if (shouldAbort(gen)) return;
     for (const { sp, data } of results) {
@@ -2016,7 +2016,10 @@ async function loadTips(gen = refreshGen) {
     const fuzzyKeep = new Map();
     for (const t of tips) {
       const day = String(t.sent_at || '').slice(0, 10);
-      const key = [bucketFor(t.sport), normStr(t.participant1), normStr(t.participant2), normStr(t.tip_participant), String(t.odds || ''), String(t.stake || ''), day].join('|');
+      // market_type no key separa MT (HANDICAP_GAMES/TOTAL_GAMES/...) de ML no
+      // mesmo match — caso contrário tip MT seria deduplicada com ML do mesmo dia.
+      const mt = String(t.market_type || 'ML').toUpperCase();
+      const key = [bucketFor(t.sport), mt, normStr(t.participant1), normStr(t.participant2), normStr(t.tip_participant), String(t.odds || ''), String(t.stake || ''), day].join('|');
       const prev = fuzzyKeep.get(key);
       if (!prev || Number(t.id || 0) > Number(prev.id || 0)) fuzzyKeep.set(key, t);
     }
@@ -2025,7 +2028,7 @@ async function loadTips(gen = refreshGen) {
   } else {
     const gq = currentGame ? '&game=' + encodeURIComponent(currentGame) : '';
     const sq = status ? '&status=' + encodeURIComponent(status) : '';
-    const data = await apiFetch(`/tips-history?sport=${currentSport}&limit=${LIMIT_ALL}${gq}${sq}`);
+    const data = await apiFetch(`/tips-history?sport=${currentSport}&limit=${LIMIT_ALL}&include_markets=1${gq}${sq}`);
     if (shouldAbort(gen)) return;
     tips = (data?.tips || data || []).map(x => ({ ...x, sport: x.sport || currentSport }));
     // Fuzzy dedup (mesma tip com match_ids diferentes entre esports↔lol/dota2 etc)
@@ -2033,7 +2036,8 @@ async function loadTips(gen = refreshGen) {
     const fuzzyKeep = new Map();
     for (const t of tips) {
       const day = String(t.sent_at || '').slice(0, 10);
-      const key = [normStr(t.participant1), normStr(t.participant2), normStr(t.tip_participant), String(t.odds || ''), String(t.stake || ''), day].join('|');
+      const mt = String(t.market_type || 'ML').toUpperCase();
+      const key = [mt, normStr(t.participant1), normStr(t.participant2), normStr(t.tip_participant), String(t.odds || ''), String(t.stake || ''), day].join('|');
       const prev = fuzzyKeep.get(key);
       if (!prev || Number(t.id || 0) > Number(prev.id || 0)) fuzzyKeep.set(key, t);
     }
@@ -2124,6 +2128,21 @@ function renderTipsTable() {
                       (t.clv_odds && t.odds ? fmtPct((t.odds / t.clv_odds - 1) * 100) : '—');
           const clvCls = t.clv_pct != null ? sign(t.clv_pct) : '';
           const live = t.is_live ? '<span class="chip" style="background:var(--danger-bg);color:var(--danger);border-color:transparent">LIVE</span>' : '';
+          // Badge market_type: ML = sem badge (default), outros = chip colorido (HG/TG/HS/TB/etc)
+          const _mtRaw = String(t.market_type || 'ML').toUpperCase();
+          const _mtAbbr = _mtRaw === 'ML' ? '' :
+            _mtRaw === 'HANDICAP_GAMES' ? 'HG' :
+            _mtRaw === 'TOTAL_GAMES' ? 'TG' :
+            _mtRaw === 'HANDICAP_SETS' ? 'HS' :
+            _mtRaw === 'HANDICAP' ? 'HC' :
+            _mtRaw === 'TOTAL' ? 'TT' :
+            _mtRaw === 'TOTAL_ACES' ? 'TA' :
+            _mtRaw === 'TIEBREAK' ? 'TB' :
+            _mtRaw === 'DRAW' ? 'X' :
+            _mtRaw.slice(0, 4);
+          const mtBadge = _mtAbbr
+            ? `<span class="chip" title="Market Tip (${_mtRaw}) — promovida do MT scanner" style="background:#7c3aed;color:#fff;border-color:transparent;font-size:0.7em;padding:1px 6px;margin-right:4px">${_mtAbbr}</span>`
+            : '';
           return `
             <tr>
               <td><span class="tip-status ${statusCls}">${statusCh}</span></td>
@@ -2131,7 +2150,7 @@ function renderTipsTable() {
                 <div class="tip-event">${t.participant1 || '?'} <span class="tip-meta">vs</span> ${t.participant2 || '?'}</div>
                 <div class="tip-meta">${t.event_name || t.league || ''} ${live}</div>
               </td>
-              <td><div class="tip-pick">${t.tip_participant || '—'}</div></td>
+              <td><div class="tip-pick">${mtBadge}${t.tip_participant || '—'}</div></td>
               <td class="tip-num">${t.odds != null ? Number(t.odds).toFixed(2) : '—'}</td>
               <td class="tip-num">${t.ev != null ? fmtPct(t.ev) : '—'}</td>
               <td class="tip-num">${t.stake || '—'}</td>
