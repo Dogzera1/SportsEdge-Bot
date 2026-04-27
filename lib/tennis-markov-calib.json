@@ -1,0 +1,151 @@
+{
+  "version": 1,
+  "fittedAt": "2026-04-27T23:35:49.259Z",
+  "method": "pav_with_beta_smoothing",
+  "target": "outcome (win/loss)",
+  "prior": {
+    "source": "p_implied_close",
+    "vig": 0.025,
+    "alpha": 8
+  },
+  "minBin": 6,
+  "nSamples": 94,
+  "markets": {
+    "handicapGames": {
+      "bins": [
+        {
+          "lo": 0.3,
+          "hi": 0.65,
+          "mid": 0.5362,
+          "n": 12,
+          "wins": 6,
+          "rawP": 0.5,
+          "priorP": 0.4336,
+          "pCalib": 0.4734
+        },
+        {
+          "lo": 0.65,
+          "hi": 0.75,
+          "mid": 0.7184,
+          "n": 13,
+          "wins": 9,
+          "rawP": 0.6923,
+          "priorP": 0.4929,
+          "pCalib": 0.6139
+        },
+        {
+          "lo": 0.75,
+          "hi": 0.8,
+          "mid": 0.786,
+          "n": 12,
+          "wins": 10,
+          "rawP": 0.8333,
+          "priorP": 0.4324,
+          "pCalib": 0.6139
+        },
+        {
+          "lo": 0.8,
+          "hi": 0.92,
+          "mid": 0.8613,
+          "n": 8,
+          "wins": 5,
+          "rawP": 0.625,
+          "priorP": 0.5555,
+          "pCalib": 0.6139
+        },
+        {
+          "lo": 0.92,
+          "hi": 1.001,
+          "mid": 0.9469,
+          "n": 6,
+          "wins": 3,
+          "rawP": 0.5,
+          "priorP": 0.5381,
+          "pCalib": 0.6139
+        }
+      ],
+      "coverage": [
+        0.3,
+        1.001
+      ],
+      "nTotal": 53
+    },
+    "totalGames": {
+      "bins": [
+        {
+          "lo": 0.3,
+          "hi": 0.65,
+          "mid": 0.5346,
+          "n": 6,
+          "wins": 5,
+          "rawP": 0.8333,
+          "priorP": 0.434,
+          "pCalib": 0.4181
+        },
+        {
+          "lo": 0.65,
+          "hi": 0.7,
+          "mid": 0.6708,
+          "n": 12,
+          "wins": 2,
+          "rawP": 0.1667,
+          "priorP": 0.5616,
+          "pCalib": 0.4181
+        },
+        {
+          "lo": 0.7,
+          "hi": 0.75,
+          "mid": 0.7186,
+          "n": 12,
+          "wins": 7,
+          "rawP": 0.5833,
+          "priorP": 0.5386,
+          "pCalib": 0.5654
+        },
+        {
+          "lo": 0.75,
+          "hi": 1.001,
+          "mid": 0.8195,
+          "n": 11,
+          "wins": 8,
+          "rawP": 0.7273,
+          "priorP": 0.5531,
+          "pCalib": 0.654
+        }
+      ],
+      "coverage": [
+        0.3,
+        1.001
+      ],
+      "nTotal": 41
+    }
+  },
+  "backtest": {
+    "pre": {
+      "label": "PRE  (raw)",
+      "n": 84,
+      "wins": 50,
+      "hit": 59.5,
+      "profit": 8.45,
+      "roi": 10.1,
+      "avgP": 0.69,
+      "avgEV": 27.3,
+      "avgClv": -0.22,
+      "brier": 0.2369,
+      "ece": 0.1549
+    },
+    "post": {
+      "label": "POST (calib)",
+      "n": 38,
+      "wins": 21,
+      "hit": 55.3,
+      "profit": 5.73,
+      "roi": 15.1,
+      "avgP": 0.564,
+      "avgEV": 24.3,
+      "avgClv": -4.2,
+      "brier": 0.2369,
+      "ece": 0.0584
+    }
+  }
+}

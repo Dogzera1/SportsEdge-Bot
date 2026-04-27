@@ -62,6 +62,7 @@ const BEFORE = {
   tennis_iso: readIsotonic('lib/tennis-model-isotonic.json'),
   dota_iso: readIsotonic('lib/dota2-isotonic.json'),
   cs_iso: readIsotonic('lib/cs2-isotonic.json'),
+  tennis_markov_calib: readIsotonic('lib/tennis-markov-calib.json'),
 };
 
 const results = { ranAt: new Date().toISOString(), jobs: [], before: BEFORE };
@@ -97,6 +98,10 @@ run('Fit LoL isotonic (blend)', 'node scripts/fit-lol-model-isotonic.js');
 run('Fit tennis isotonic', 'node scripts/fit-tennis-model-isotonic.js');
 run('Fit Dota isotonic', 'node scripts/fit-esports-isotonic.js --game=dota2');
 run('Fit CS2 isotonic', 'node scripts/fit-esports-isotonic.js --game=cs2');
+// Tennis Markov MT calib (handicapGames + totalGames). Pula se sample
+// não cresceu ≥30 settled desde o fit anterior — evita re-fits sobre
+// ruído incremental. ECE regression guard interno aborta se calib piora.
+run('Fit tennis Markov MT calib', 'node scripts/fit-tennis-markov-calibration.js --min-new-samples=30');
 
 const AFTER = {
   lol_weights: readWeights('lib/lol-weights.json'),
@@ -104,6 +109,7 @@ const AFTER = {
   tennis_iso: readIsotonic('lib/tennis-model-isotonic.json'),
   dota_iso: readIsotonic('lib/dota2-isotonic.json'),
   cs_iso: readIsotonic('lib/cs2-isotonic.json'),
+  tennis_markov_calib: readIsotonic('lib/tennis-markov-calib.json'),
 };
 results.after = AFTER;
 
