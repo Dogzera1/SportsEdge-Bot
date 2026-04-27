@@ -10809,23 +10809,20 @@ const server = http.createServer(async (req, res) => {
         }
 
         // Dedup por pair: mesmos times + sport + mesmo market nas últimas 24h.
-        // Tipo DEFAULT: bloqueia QUALQUER tip no par (anti-hedge). Tennis/MMA/esports são
-        // head-to-head 1x1 — apostar nos dois lados é auto-gole (sempre perde um lado).
-        // Override: SAME_PICK_ONLY_DEDUP_SPORTS=csv,de,sports pra só bloquear mesmo pick
-        // (casos onde hedge em markets diferentes é válido, tipo football Over + Home).
-        //
-        // BUG FIX 2026-04-27: tips MT (handicap/totals/etc — match_id LIKE '%::mt::%')
-        // têm correlation discount no Kelly e são markets DIFERENTES (HG +3.5 Kypson
-        // vs HG -2.5 Berrettini não são inversos um do outro, são linhas diferentes).
-        // Force samePickOnly=true só pras tips MT — bloqueia só dupes literais
-        // (mesmo participant), permite múltiplas tips per match com lines/sides
-        // distintos. ML continua com anti-hedge global.
+        // Tipo DEFAULT: bloqueia QUALQUER tip no par dentro do mesmo market_type
+        // (anti-hedge por mercado). MT tips do mesmo match no mesmo mercado
+        // (HG +3.5 Kypson vs HG -2.5 Berrettini) NÃO devem coexistir — são lados
+        // do mesmo mercado, geralmente correlacionados negativamente.
+        // Mercados DIFERENTES no mesmo match (HG + TG) coexistem porque a query
+        // filtra por market_type exato.
+        // Override: SAME_PICK_ONLY_DEDUP_SPORTS=csv,de,sports pra só bloquear
+        // mesmo pick literal (casos especiais).
         const p1n_ = norm(p1 || ''), p2n_ = norm(p2 || '');
         const pickN_ = norm(tipParticipant || '');
         const marketN_ = String(t.market_type || 'ML').toUpperCase();
         const isMtTip = String(matchId).includes('::mt::');
         const samePickOnlySports = String(process.env.SAME_PICK_ONLY_DEDUP_SPORTS || '').toLowerCase().split(',').map(s => s.trim()).filter(Boolean);
-        const samePickOnly = isMtTip || samePickOnlySports.includes(String(sport).toLowerCase());
+        const samePickOnly = samePickOnlySports.includes(String(sport).toLowerCase());
         if (p1n_ && p2n_) {
           const pickClause = samePickOnly
             ? `AND REPLACE(REPLACE(lower(tip_participant),' ',''),'-','') = ?`

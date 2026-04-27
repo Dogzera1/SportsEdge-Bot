@@ -6248,10 +6248,18 @@ async function autoAnalyzeMatch(token, match) {
                     const minEvGate = parseFloat(process.env.LOL_MARKET_TIP_MIN_EV ?? '8');
                     const minPmGate = parseFloat(process.env.LOL_MARKET_TIP_MIN_PMODEL ?? '0.55');
                     // 2026-04-27: itera sobre TODAS tips elegíveis (não só best).
-                    const eligibles = found.filter(t =>
+                    const eligiblesRaw = found.filter(t =>
                       Number.isFinite(t.ev) && Number.isFinite(t.pModel) &&
                       t.ev >= minEvGate && t.pModel >= minPmGate
                     );
+                    // Dedup por market_type — 1 tip por mercado por match.
+                    const _byMarket = new Map();
+                    for (const t of eligiblesRaw) {
+                      const k = String(t.market || '');
+                      const prev = _byMarket.get(k);
+                      if (!prev || (t.ev || 0) > (prev.ev || 0)) _byMarket.set(k, t);
+                    }
+                    const eligibles = [..._byMarket.values()];
                     const { wasAdminDmSentRecently, markAdminDmSent } = require('./lib/market-tips-shadow');
                     for (const t of eligibles) {
                       if (!isMarketTipsEnabled('lol', t.market, t.side)) {
@@ -11521,10 +11529,18 @@ async function _pollDotaInner(runOnce = false) {
                   const mtp = require('./lib/market-tip-processor');
                   const minEvGate = parseFloat(process.env.DOTA_MARKET_TIP_MIN_EV ?? '8');
                   const minPmGate = parseFloat(process.env.DOTA_MARKET_TIP_MIN_PMODEL ?? '0.55');
-                  const eligibles = found.filter(t =>
-                    Number.isFinite(t.ev) && Number.isFinite(t.pModel) &&
-                    t.ev >= minEvGate && t.pModel >= minPmGate
-                  );
+                  const eligiblesRaw = found.filter(t =>
+                      Number.isFinite(t.ev) && Number.isFinite(t.pModel) &&
+                      t.ev >= minEvGate && t.pModel >= minPmGate
+                    );
+                    // Dedup por market_type — 1 tip por mercado por match.
+                    const _byMarket = new Map();
+                    for (const t of eligiblesRaw) {
+                      const k = String(t.market || '');
+                      const prev = _byMarket.get(k);
+                      if (!prev || (t.ev || 0) > (prev.ev || 0)) _byMarket.set(k, t);
+                    }
+                    const eligibles = [..._byMarket.values()];
                   const { wasAdminDmSentRecently, markAdminDmSent } = require('./lib/market-tips-shadow');
                   for (const t of eligibles) {
                     if (!isMarketTipsEnabled('dota2', t.market, t.side)) {
@@ -13285,14 +13301,21 @@ async function pollTennis(runOnce = false) {
                       const mtp = require('./lib/market-tip-processor');
                       const minEvGate = parseFloat(process.env.TENNIS_MARKET_TIP_MIN_EV ?? '8');
                       const minPmGate = parseFloat(process.env.TENNIS_MARKET_TIP_MIN_PMODEL ?? '0.55');
-                      // 2026-04-27: usuário pediu promoção de TODAS tips elegíveis
-                      // (não só a melhor). Itera over `found` filtrando EV/pModel
-                      // gates. Correlation discount já aplicado em `t.correlationDiscount`
-                      // (linha 13278) — aplicado no kelly stake individualmente.
-                      const eligibles = found.filter(t =>
+                      // 2026-04-27: promove tips elegíveis com 1 por (market_type) por match.
+                      // Mesmo mercado mesmo match = 1 tip (lados opostos, ex: HG home + HG away
+                      // são correlacionados negativamente — 1 vence só com margin exato).
+                      // Mercados DIFERENTES no mesmo match (HG + TG + TB) coexistem.
+                      const eligiblesRaw = found.filter(t =>
                         Number.isFinite(t.ev) && Number.isFinite(t.pModel) &&
                         t.ev >= minEvGate && t.pModel >= minPmGate
                       );
+                      const _byMarket = new Map();
+                      for (const t of eligiblesRaw) {
+                        const k = String(t.market || '');
+                        const prev = _byMarket.get(k);
+                        if (!prev || (t.ev || 0) > (prev.ev || 0)) _byMarket.set(k, t);
+                      }
+                      const eligibles = [..._byMarket.values()];
                       const dmFilter = (process.env.TENNIS_MT_DM_FILTER ?? 'all').trim();
                       const dmFilterAllowed = (mt, sd) => {
                         if (!dmFilter || dmFilter === 'all' || dmFilter === '*') return true;
@@ -15266,10 +15289,18 @@ async function pollCs(runOnce = false) {
                     const mtp = require('./lib/market-tip-processor');
                     const minEvGate = parseFloat(process.env.CS_MARKET_TIP_MIN_EV ?? '8');
                     const minPmGate = parseFloat(process.env.CS_MARKET_TIP_MIN_PMODEL ?? '0.55');
-                    const eligibles = found.filter(t =>
+                    const eligiblesRaw = found.filter(t =>
                       Number.isFinite(t.ev) && Number.isFinite(t.pModel) &&
                       t.ev >= minEvGate && t.pModel >= minPmGate
                     );
+                    // Dedup por market_type — 1 tip por mercado por match.
+                    const _byMarket = new Map();
+                    for (const t of eligiblesRaw) {
+                      const k = String(t.market || '');
+                      const prev = _byMarket.get(k);
+                      if (!prev || (t.ev || 0) > (prev.ev || 0)) _byMarket.set(k, t);
+                    }
+                    const eligibles = [..._byMarket.values()];
                     const { wasAdminDmSentRecently, markAdminDmSent } = require('./lib/market-tips-shadow');
                     for (const t of eligibles) {
                       if (!isMarketTipsEnabled('cs2', t.market, t.side)) {
@@ -15838,10 +15869,18 @@ async function pollValorant(runOnce = false) {
                     const mtp = require('./lib/market-tip-processor');
                     const minEvGate = parseFloat(process.env.VAL_MARKET_TIP_MIN_EV ?? '8');
                     const minPmGate = parseFloat(process.env.VAL_MARKET_TIP_MIN_PMODEL ?? '0.55');
-                    const eligibles = found.filter(t =>
+                    const eligiblesRaw = found.filter(t =>
                       Number.isFinite(t.ev) && Number.isFinite(t.pModel) &&
                       t.ev >= minEvGate && t.pModel >= minPmGate
                     );
+                    // Dedup por market_type — 1 tip por mercado por match.
+                    const _byMarket = new Map();
+                    for (const t of eligiblesRaw) {
+                      const k = String(t.market || '');
+                      const prev = _byMarket.get(k);
+                      if (!prev || (t.ev || 0) > (prev.ev || 0)) _byMarket.set(k, t);
+                    }
+                    const eligibles = [..._byMarket.values()];
                     const { wasAdminDmSentRecently, markAdminDmSent } = require('./lib/market-tips-shadow');
                     for (const t of eligibles) {
                       if (!isMarketTipsEnabled('valorant', t.market, t.side)) {
