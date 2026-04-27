@@ -2684,6 +2684,8 @@ async function settleCompletedTips() {
         const espnFights = await fetchEspnMmaFights().catch(() => []);
         for (const tip of unsettled) {
           if (!tip.match_id) continue;
+          // MT-promoted tips (match_id ::mt::) usam shadow pipeline + propagator
+          if (String(tip.match_id).includes('::mt::')) continue;
           try {
             const espn = findEspnFight(espnFights, tip.participant1, tip.participant2);
             if (!espn || espn.statusState !== 'post' || !espn.winner) continue;

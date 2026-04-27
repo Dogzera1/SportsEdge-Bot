@@ -3644,6 +3644,15 @@ function runSettleSweep({ sportFilter = '', days = 14 } = {}) {
 
     for (const tip of tips) {
       info.swept++;
+      // HARD SKIP: MT-promoted tips (match_id ::mt:: ou market_type non-ML) jamais
+      // passam por runSettleSweep — esse sweep usa name-match (tennisSinglePlayerNameMatch
+      // / nameMatches) que falha pra HANDICAP/TOTAL/TIEBREAK e marca loss errado.
+      // MT settle só via lib/mt-result-propagator.js (com final_score parseado).
+      const ML_MARKETS_SWEEP = new Set(['ML', '1X2_H', '1X2_A', '1X2_D', 'OVER_2.5', 'UNDER_2.5']);
+      const _mkt = String(tip.market_type || 'ML').toUpperCase();
+      if (String(tip.match_id || '').includes('::mt::') || !ML_MARKETS_SWEEP.has(_mkt)) {
+        continue;
+      }
       const isMapMarket = tip.market_type && !/^ML$|^match_winner$|^moneyline$/i.test(tip.market_type);
 
       const game = deriveGame(tip);
@@ -8964,6 +8973,91 @@ const server = http.createServer(async (req, res) => {
       }
       db.prepare(`UPDATE tips SET result = NULL, profit_reais = NULL, settled_at = NULL WHERE id = ?`).run(id);
       sendJson(res, { ok: true, id, sport: row.sport, prev_result: row.result, reverted_profit: row.profit_reais });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
+  // GET /admin/mt-settle-audit?days=30&apply=0&key=<KEY>
+  // INVARIANTE: tips MT settled (match_id ::mt:: OU market_type non-ML) só podem ter
+  // sido liquidadas por mt-result-propagator. Detecta bypass: tip settled MAS
+  // shadow row pending = settler genérico fez name-match (bug 2026-04-27).
+  // Retorna lista; apply=1 reverte tudo automaticamente.
+  if (p === '/admin/mt-settle-audit') {
+    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const days = Math.max(1, Math.min(180, parseInt(parsed.query.days || '30', 10) || 30));
+    const apply = parsed.query.apply === '1' || parsed.query.apply === 'true';
+    try {
+      const ML_OK = "('ML','1X2_H','1X2_A','1X2_D','OVER_2.5','UNDER_2.5')";
+      // Tips MT settled candidatas
+      const mtSettled = db.prepare(`
+        SELECT id, sport, match_id, market_type, participant1, participant2,
+          tip_participant, odds, result, profit_reais, sent_at, settled_at
+        FROM tips
+        WHERE settled_at >= datetime('now', '-' || ? || ' days')
+          AND result IN ('win','loss')
+          AND (archived IS NULL OR archived = 0)
+          AND (
+            match_id LIKE '%::mt::%'
+            OR (market_type IS NOT NULL AND market_type NOT IN ${ML_OK})
+          )
+      `).all(days);
+      // Pra cada MT settled, busca shadow row equivalente. Se shadow pending OU
+      // não existe, é suspeito (settler genérico passou por cima).
+      const T1 = "lower(REPLACE(REPLACE(REPLACE(REPLACE(team1,' ',''),'-',''),'.',''),'''',''))";
+      const T2 = "lower(REPLACE(REPLACE(REPLACE(REPLACE(team2,' ',''),'-',''),'.',''),'''',''))";
+      const _norm = s => String(s||'').toLowerCase().replace(/[\s\-.']/g, '');
+      const suspects = [];
+      for (const t of mtSettled) {
+        const n1 = _norm(t.participant1), n2 = _norm(t.participant2);
+        const shadow = db.prepare(`
+          SELECT id, market, side, result, settled_at
+          FROM market_tips_shadow
+          WHERE sport = ?
+            AND ((${T1} = ? AND ${T2} = ?) OR (${T1} = ? AND ${T2} = ?))
+            AND created_at >= datetime(?, '-7 days')
+            AND created_at <= datetime(?, '+1 days')
+          ORDER BY id DESC LIMIT 5
+        `).all(t.sport, n1, n2, n2, n1, t.sent_at, t.sent_at);
+        const anyPending = shadow.some(s => s.result == null);
+        const anySettled = shadow.some(s => s.result === 'win' || s.result === 'loss');
+        const noShadow = shadow.length === 0;
+        if (noShadow || (anyPending && !anySettled)) {
+          suspects.push({
+            ...t,
+            shadow_count: shadow.length,
+            shadow_pending: anyPending,
+            shadow_settled: anySettled,
+          });
+        }
+      }
+      let reverted = 0;
+      const reverts = [];
+      if (apply) {
+        for (const t of suspects) {
+          if (Number.isFinite(Number(t.profit_reais))) {
+            const bk = db.prepare(`SELECT current_banca FROM bankroll WHERE sport = ?`).get(t.sport);
+            if (bk) {
+              const nova = +(bk.current_banca - Number(t.profit_reais)).toFixed(2);
+              db.prepare(`UPDATE bankroll SET current_banca = ?, updated_at = datetime('now') WHERE sport = ?`)
+                .run(nova, t.sport);
+            }
+          }
+          db.prepare(`UPDATE tips SET result = NULL, profit_reais = NULL, settled_at = NULL WHERE id = ?`)
+            .run(t.id);
+          reverts.push({ id: t.id, sport: t.sport, prev_result: t.result, reverted_profit: t.profit_reais });
+          reverted++;
+          log('WARN', 'MT-AUDIT', `revert id=${t.id} ${t.sport} ${t.market_type} ${t.participant1} vs ${t.participant2}: ${t.result} profit=${t.profit_reais} → pending (shadow=${t.shadow_pending ? 'pending' : 'none'})`);
+        }
+      }
+      sendJson(res, {
+        ok: true, days, apply,
+        total_mt_settled: mtSettled.length,
+        suspects_count: suspects.length,
+        reverted,
+        suspects,
+        reverts,
+      });
     } catch (e) { sendJson(res, { error: e.message }, 500); }
     return;
   }
@@ -14927,14 +15021,37 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
         const { matchId, winner, home, away } = safeParse(body, {});
         const sport = parsed.query.sport || 'esports';
         if (!matchId || !winner) { sendJson(res, { error: 'Missing matchId/winner' }, 400); return; }
+        // HARD GUARD: MT-promoted tips (match_id LIKE '%::mt::%' OR market_type non-ML)
+        // jamais passam pelo /settle name-match — esse endpoint só sabe casar winner
+        // com tip_participant, o que falha pra HANDICAP/TOTAL/TIEBREAK e marca loss
+        // determinístico. MT tips settle só via propagator (lib/mt-result-propagator.js)
+        // que parseia final_score real. Bug 2026-04-27 (Karen Khachanov +3.5 vs Mensik
+        // settled loss errado) era exatamente esse path. Ver bot.js:settleCompletedTips
+        // pro skip equivalente upstream.
+        const ML_MARKETS = new Set(['ML', '1X2_H', '1X2_A', '1X2_D', 'OVER_2.5', 'UNDER_2.5']);
+        if (String(matchId).includes('::mt::')) {
+          log('WARN', 'SETTLE-GUARD',
+            `${sport} matchId=${matchId} bloqueado em /settle (MT-promoted, deve usar propagator)`);
+          sendJson(res, { ok: true, settled: 0, skipped: 'mt_tip_must_use_propagator' });
+          return;
+        }
         // Usa transaction para garantir atomicidade: SELECT + UPDATE acontecem juntos,
         // evitando que dois ciclos de settlement processem o mesmo tip simultaneamente.
         const tipsNeedingClv = [];
         const settleResult = db.transaction(() => {
           const tips = db.prepare("SELECT * FROM tips WHERE match_id = ? AND sport = ? AND result IS NULL").all(matchId, sport);
+          // Filtro defensivo extra: mesmo se match_id passou pelo guard acima, qualquer
+          // tip individual com market_type non-ML é rejeitada (defesa em profundidade).
+          const eligibleTips = tips.filter(tip => {
+            const mkt = String(tip.market_type || 'ML').toUpperCase();
+            if (ML_MARKETS.has(mkt)) return true;
+            log('WARN', 'SETTLE-GUARD',
+              `${sport} tip id=${tip.id} market_type=${mkt} rejeitada em /settle (non-ML)`);
+            return false;
+          });
           let settled = 0;
           let bancaDelta = 0;
-          for (const tip of tips) {
+          for (const tip of eligibleTips) {
             let nameMatched, matchMethod, matchScore;
             if (sport === 'tennis') {
               nameMatched = tennisSinglePlayerNameMatch(tip.tip_participant, winner);
