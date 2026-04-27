@@ -8942,6 +8942,65 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // GET /tips-by-market?sport=X&days=30
+  // Stats por market_type das tips REAIS (is_shadow=0) — incluí ML + MT promovidas.
+  // Diferente de /market-tips-by-sport que cobre só shadow rows. Usado no dashboard
+  // pra mostrar ROI/CLV/Hit por mercado das tips que contam pra banca.
+  if (p === '/tips-by-market') {
+    const sport = parsed.query.sport && parsed.query.sport !== '__overall__' ? parsed.query.sport : null;
+    const days = Math.max(1, Math.min(365, parseInt(parsed.query.days || '30', 10) || 30));
+    try {
+      const conds = [
+        `sent_at >= datetime('now', '-' || ? || ' days')`,
+        `COALESCE(is_shadow, 0) = 0`,
+        `(archived IS NULL OR archived = 0)`,
+      ];
+      const params = [days];
+      if (sport) {
+        const { sportSet } = (typeof resolveSportSet === 'function')
+          ? resolveSportSet(sport, null) : { sportSet: [sport] };
+        conds.push(`sport IN (${sportSet.map(() => '?').join(',')})`);
+        params.push(...sportSet);
+      }
+      const rows = db.prepare(`
+        SELECT
+          COALESCE(NULLIF(TRIM(market_type), ''), 'ML') AS market_type,
+          COUNT(*) AS n,
+          SUM(CASE WHEN result IS NULL THEN 1 ELSE 0 END) AS pending,
+          SUM(CASE WHEN result IN ('win','loss') THEN 1 ELSE 0 END) AS settled,
+          SUM(CASE WHEN result = 'win' THEN 1 ELSE 0 END) AS wins,
+          SUM(COALESCE(profit_reais, 0)) AS profit,
+          SUM(COALESCE(stake_reais, 0)) AS staked,
+          AVG(odds) AS avg_odds,
+          AVG(ev) AS avg_ev,
+          AVG(CASE WHEN clv_odds > 1 AND odds > 1 THEN (odds / clv_odds - 1) * 100 END) AS avg_clv,
+          SUM(CASE WHEN clv_odds > 1 AND odds > 1 THEN 1 ELSE 0 END) AS clv_n
+        FROM tips
+        WHERE ${conds.join(' AND ')}
+        GROUP BY COALESCE(NULLIF(TRIM(market_type), ''), 'ML')
+        ORDER BY n DESC
+      `).all(...params);
+      const out = rows.map(r => ({
+        market_type: r.market_type,
+        n: r.n,
+        pending: r.pending || 0,
+        settled: r.settled || 0,
+        wins: r.wins || 0,
+        losses: (r.settled || 0) - (r.wins || 0),
+        hitRate: r.settled > 0 ? +(r.wins / r.settled * 100).toFixed(1) : null,
+        profit: +(r.profit || 0).toFixed(2),
+        staked: +(r.staked || 0).toFixed(2),
+        roi: r.staked > 0 ? +((r.profit / r.staked) * 100).toFixed(1) : null,
+        avgOdds: +(r.avg_odds || 0).toFixed(2),
+        avgEv: +(r.avg_ev || 0).toFixed(2),
+        avgClv: r.clv_n > 0 ? +(r.avg_clv || 0).toFixed(2) : null,
+        clvN: r.clv_n || 0,
+      }));
+      sendJson(res, { ok: true, sport: sport || 'all', days, markets: out });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
   // GET/POST /admin/clear-stale-is-live?apply=0&key=<KEY>
   // Limpa is_live=1 stale em tips já settled (settle path antes de 928d775
   // não zerava is_live → tips win/loss apareciam com chip LIVE no dashboard

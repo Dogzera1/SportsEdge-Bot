@@ -658,6 +658,8 @@
         </select>
       </div>
     </div>
+    <!-- Stats por mercado (ML, HG, TG, etc) — só real tips (is_shadow=0) -->
+    <div id="tipsByMarket" style="margin-bottom:10px"></div>
     <div id="tipsTable"><div class="loading">Carregando</div></div>
   </div>
 
@@ -2046,6 +2048,60 @@ async function loadTips(gen = refreshGen) {
   tipsCache = Array.isArray(tips) ? tips : [];
   tipsPage = 1;
   renderTipsTable();
+  // Stats por mercado (ML/HG/TG/HS/HC/TT/TA/TB/X) — fetch separado, não bloqueia
+  loadTipsByMarket(gen).catch(() => {});
+}
+
+// Stats por market_type pras tips REAIS (is_shadow=0). Roda em paralelo
+// ao loadTips() pra não atrasar a tabela. Card é cosmético (sem affecting state).
+async function loadTipsByMarket(gen = refreshGen) {
+  const el = document.getElementById('tipsByMarket');
+  if (!el) return;
+  const sportQ = currentSport === '__overall__' ? '' : '&sport=' + encodeURIComponent(currentSport);
+  const data = await apiFetch(`/tips-by-market?days=30${sportQ}`).catch(() => null);
+  if (shouldAbort(gen)) return;
+  if (!data || !Array.isArray(data.markets) || !data.markets.length) {
+    el.innerHTML = '';
+    return;
+  }
+  const fmtPctVal = (v, d=1) => v == null ? '—' : (v >= 0 ? '+' : '') + Number(v).toFixed(d) + '%';
+  const cls = (v) => v == null ? '' : (v >= 0 ? 'pos' : 'neg');
+  // Map market_type → label curto + cor
+  const mtMeta = {
+    ML: { label: 'ML', color: '#3b82f6', long: 'Moneyline (h2h)' },
+    HANDICAP_GAMES: { label: 'HG', color: '#7c3aed', long: 'Handicap Games (tennis)' },
+    HANDICAP_SETS: { label: 'HS', color: '#9333ea', long: 'Handicap Sets (tennis)' },
+    HANDICAP: { label: 'HC', color: '#a855f7', long: 'Handicap maps (esports)' },
+    TOTAL_GAMES: { label: 'TG', color: '#f59e0b', long: 'Total Games (tennis)' },
+    TOTAL: { label: 'TT', color: '#ef4444', long: 'Total maps (esports)' },
+    TOTAL_ACES: { label: 'TA', color: '#10b981', long: 'Total Aces (tennis)' },
+    TIEBREAK: { label: 'TB', color: '#06b6d4', long: 'Tiebreak match (tennis)' },
+    DRAW: { label: 'X', color: '#8b5cf6', long: 'Empate (football)' },
+  };
+  const cards = data.markets.map(m => {
+    const meta = mtMeta[m.market_type] || { label: m.market_type.slice(0, 4), color: '#64748b', long: m.market_type };
+    return `
+      <div title="${meta.long} — ${m.n} tips em ${data.days}d (${m.settled} settled, ${m.pending} pend)"
+           style="border:1px solid var(--border,#2a2a2a);background:var(--surface,#0f172a);border-radius:6px;padding:8px 10px;min-width:130px;flex:1">
+        <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">
+          <span style="background:${meta.color};color:#fff;padding:1px 6px;border-radius:3px;font-size:0.7em;font-weight:600">${meta.label}</span>
+          <span style="font-size:0.75em;color:#888">${m.n} tips</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;font-size:0.8em">
+          <span>Hit <b>${fmtPctVal(m.hitRate, 0)}</b></span>
+          <span class="${cls(m.roi)}">ROI <b>${fmtPctVal(m.roi)}</b></span>
+        </div>
+        <div style="display:flex;justify-content:space-between;font-size:0.78em;margin-top:2px">
+          <span class="${cls(m.avgClv)}">CLV ${fmtPctVal(m.avgClv)}${m.clvN ? ` <span style="opacity:0.6">(${m.clvN})</span>` : ''}</span>
+          <span class="${cls(m.profit)}">${m.profit >= 0 ? '+' : ''}R$ ${m.profit.toFixed(2)}</span>
+        </div>
+      </div>`;
+  }).join('');
+  el.innerHTML = `
+    <div class="card-meta" style="margin-bottom:6px;font-size:0.8em">
+      📈 <b>Stats por mercado (${data.days}d)</b> — só tips reais (contam pra banca)
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">${cards}</div>`;
 }
 
 function renderTipsTable() {
