@@ -93,6 +93,10 @@
   .tip-row.r-risk      .reason { background: rgba(248,113,113,.15); color: var(--err); }
   .tip-row.r-baixa-gate .reason { background: rgba(251,191,36,.15); color: var(--warn); }
   .tip-row.r-sem-dados .reason { background: rgba(124,134,147,.2); color: var(--muted); }
+  .tip-row.r-mt-dedup     .reason { background: rgba(96,165,250,.15); color: #60a5fa; }
+  .tip-row.r-mt-filter    .reason { background: rgba(168,85,247,.15); color: #c084fc; }
+  .tip-row.r-mt-leak-guard .reason { background: rgba(248,113,113,.20); color: var(--err); }
+  .tip-row.r-mt-ev-cap    .reason { background: rgba(251,191,36,.15); color: var(--warn); }
   .tips-empty { color: var(--muted); font-size: 12px; padding: 16px; text-align: center; }
   .tip-filters { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 8px; }
   .tip-filters .pill { background: var(--panel2); border: 1px solid var(--border); padding: 2px 8px; border-radius: 999px; font-size: 11px; cursor: pointer; user-select: none; color: var(--text); }
@@ -578,8 +582,13 @@
     container.innerHTML = filt.map(i => {
       const reasonTag = denied && i.reason ? `<span class="reason">${i.reason}</span>` : '';
       const liveTag = i.isLive ? `<span class="live-badge">LIVE</span>` : '';
+      // Badge de tipo (ML/MT/MT-RECORD) pra sent — distingue Moneyline tradicional
+      // de Market Tip (handicap/totals/etc) promovida ou shadow-DM.
+      const kindTag = (!denied && i.kind && i.kind !== 'ML')
+        ? `<span class="reason" style="background:rgba(124,58,237,.18);color:#a78bfa">${i.kind}</span>`
+        : '';
       const cls = (denied ? `tip-row r-${i.reason || ''}` : 'tip-row') + (i.isLive ? ' live' : '');
-      return `<div class="${cls}"><span class="tt">${fmtTime(i.t)}</span><span class="bb">${i.bot}</span><span>${reasonTag}${liveTag}${escapeHtml(i.text)}</span></div>`;
+      return `<div class="${cls}"><span class="tt">${fmtTime(i.t)}</span><span class="bb">${i.bot}</span><span>${kindTag}${reasonTag}${liveTag}${escapeHtml(i.text)}</span></div>`;
     }).join('');
   }
 
