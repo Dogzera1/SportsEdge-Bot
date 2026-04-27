@@ -2087,9 +2087,12 @@ async function runAutoAnalysis() {
           const whyLine = result.tipReason ? `\n🧠 Por quê: _${result.tipReason}_\n` : '\n';
           const minTakeOdds = calcMinTakeOdds(tipOdd);
           const minTakeLine = minTakeOdds ? `📉 Odd mínima: *${minTakeOdds}*\n` : '';
+          const _matchTimeLolLive = match.time ? fmtMatchTime(match.time) : '';
+          const _timeLineLolLive = _matchTimeLolLive ? `🕐 Início: *${_matchTimeLolLive}* (BRT)\n` : '';
           const tipMsg = `${tipHeader}\n` +
             `${serieScore}${formatLabel}\n` +
             (mapaLabel ? `${mapaLabel}\n` : '') +
+            _timeLineLolLive +
             whyLine +
             `🎯 Aposta: *${tipTeam}* ML @ *${tipOdd}*\n` +
             bookLineLol +
@@ -2273,7 +2276,7 @@ async function runAutoAnalysis() {
             ? await forceOddsRefreshQueued(match.team1, match.team2, 'lol')
             : await serverGet(`/odds?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}&game=lol`).catch(() => null);
           const hasRealOdds = !!(oddsCheck?.t1 && parseFloat(oddsCheck.t1) > 1);
-          const matchTime = match.time ? new Date(match.time).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit' }) : '—';
+          const matchTime = match.time ? new Date(match.time).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—';
           log('INFO', 'AUTO', `Esports upcoming: ${match.team1} vs ${match.team2} (${match.league}) às ${matchTime}${hasRealOdds ? ' — odds disponíveis' : ' — odds estimadas'}${isImminentMatch ? ' [IMINENTE <2h]' : ''}`);
 
           const result = await autoAnalyzeMatch(resolveTipsToken('esports'), match);
@@ -12100,8 +12103,12 @@ async function analyzeDotaMapTip(match, token) {
 
   const tipConf = pickEv >= 15 ? 'ALTA' : pickEv >= 8 ? 'MÉDIA' : 'BAIXA';
   const _bookDotaMap = formatLineShopDM(match.mapOdds, pickDir, { sport: 'dota2', db });
+  const _matchTimeDota = match.time ? fmtMatchTime(match.time) : '';
+  const _timeLineDota = _matchTimeDota ? `🕐 Início: *${_matchTimeDota}* (BRT)\n` : '';
   const msg = `🟥 💰 *TIP DOTA2 MAPA ${mapN} (AO VIVO 🔴)*\n` +
     `${match.team1} vs ${match.team2} — série ${match.score1||0}-${match.score2||0}\n` +
+    `📋 ${match.league || 'Dota 2'}\n` +
+    _timeLineDota +
     `Pick: *${pickTeam}* (mapa ${mapN})\n` +
     `Odd: ${pickOdd.toFixed(2)} | EV: ${pickEv.toFixed(1)}% | Stake: ${stakeAdj}\n` +
     _bookDotaMap +
@@ -16502,8 +16509,10 @@ async function runAutoDarts() {
           }
 
           const _bookDarts = formatLineShopDM(match.odds, ml.direction, { sport: 'darts', db });
+          const _matchTimeDarts = match.time ? fmtMatchTime(match.time) : '';
+          const _timeLineDarts = _matchTimeDarts ? `🕐 ${_matchTimeDarts} (BRT)\n` : '';
           const tipMsg = `🎯 💰 *TIP DARTS${isLiveDarts ? ' (AO VIVO 🔴)' : ''}*\n` +
-            `*${match.team1}* vs *${match.team2}*\n📋 ${match.league}\n\n` +
+            `*${match.team1}* vs *${match.team2}*\n📋 ${match.league}\n${_timeLineDarts}\n` +
             `🎯 Aposta: *${pickTeam}* @ *${pickOdd}*\n` +
             `📈 EV: *+${evPct.toFixed(1)}%*\n` +
             `💵 Stake: *${formatStakeWithReais('darts', stakeAdj)}* _(1/8 Kelly)_\n` +
@@ -16705,8 +16714,10 @@ async function runAutoSnooker() {
           }
 
           const _bookSn = formatLineShopDM(match.odds, ml.direction, { sport: 'snooker', db });
+          const _matchTimeSn = match.time ? fmtMatchTime(match.time) : '';
+          const _timeLineSn = _matchTimeSn ? `🕐 ${_matchTimeSn} (BRT)\n` : '';
           const tipMsg = `🎱 💰 *TIP SNOOKER${isLiveSnooker ? ' (AO VIVO 🔴)' : ''}*\n` +
-            `*${match.team1}* vs *${match.team2}*\n📋 ${match.league}\n\n` +
+            `*${match.team1}* vs *${match.team2}*\n📋 ${match.league}\n${_timeLineSn}\n` +
             `🎯 Aposta: *${pickTeam}* @ *${pickOdd}*\n` +
             `📈 EV: *+${evPct.toFixed(1)}%*\n` +
             `💵 Stake: *${formatStakeWithReais('snooker', stakeAdj)}*\n` +
