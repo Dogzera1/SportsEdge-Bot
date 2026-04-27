@@ -8203,10 +8203,25 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
     const sub = (parts[1] || '').toLowerCase();
     // /mt-guard — lista estado atual
     // /mt-guard restore <sport> <market> — remove override auto/manual
+    // /mt-guard restore-all <sport> — remove TODOS overrides do sport (bulk)
     // /mt-guard disable <sport> <market> <razão> — disable manual
     try {
       // Helper: detecta se parts[3]/parts[4] é side (home/away/over/under/yes/no/team1/team2/d)
       const SIDE_TOKENS = new Set(['home','away','over','under','yes','no','team1','team2','d','t1','t2']);
+      if (sub === 'restore-all') {
+        const sp = (parts[2] || '').toLowerCase();
+        if (!sp) { await send(token, chatId, 'Uso: `/mt-guard restore-all <sport>`'); return; }
+        const before = db.prepare(`SELECT market, side FROM market_tips_runtime_state WHERE sport = ? AND disabled = 1`).all(sp);
+        const r = db.prepare(`DELETE FROM market_tips_runtime_state WHERE sport = ?`).run(sp);
+        // Limpa in-memory map pra mudança ser instantânea (sem esperar próximo guard cycle)
+        for (const row of before) {
+          const sd = row.side;
+          _marketTipsDisabledRuntime.delete(sd ? `${sp}|${row.market}|${sd}` : `${sp}|${row.market}`);
+        }
+        const list = before.map(r => `• ${r.market}${r.side ? '/' + r.side : ''}`).join('\n');
+        await send(token, chatId, `✅ Removidos ${r.changes} overrides de *${sp}*${list ? '\n' + list : ''}\n\n_Auto-guard re-bloqueia se ROI/CLV cair abaixo do cutoff._`);
+        return;
+      }
       if (sub === 'restore') {
         const sp = (parts[2] || '').toLowerCase();
         const mk = (parts[3] || '').toLowerCase();
