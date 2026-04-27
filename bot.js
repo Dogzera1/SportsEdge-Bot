@@ -13294,70 +13294,57 @@ async function pollTennis(runOnce = false) {
                   if (isMarketTipsEnabled('tennis') && ADMIN_IDS.size) {
                     try {
                       const mtp = require('./lib/market-tip-processor');
-                      const mlDirection = tennisModelResult.modelP1 > 0.5 ? 'team1' : 'team2';
-                      const selected = mtp.selectBestMarketTip(found, {
-                        minEv: parseFloat(process.env.TENNIS_MARKET_TIP_MIN_EV ?? '8'),
-                        minPmodel: parseFloat(process.env.TENNIS_MARKET_TIP_MIN_PMODEL ?? '0.55'),
-                        mlDirection, mlPick: match.team1,
-                      });
-                      if (selected?.tip) {
-                        const t = selected.tip;
-                        // Allowlist filter (audit 2026-04-25): tennis MT DM gated por
-                        // (market, side) lista do user. Default: 'handicapGames:home'
-                        // (7-0 settled, ROI +126%, CLV +60% no audit shadow). Outras
-                        // sides ficam só em shadow até hit threshold.
-                        // Override: TENNIS_MT_DM_FILTER=csv. 'all'/'*'/empty = sem filter.
-                        const dmFilter = (process.env.TENNIS_MT_DM_FILTER ?? 'handicapGames:home').trim();
-                        let _dmFilterAllowed = true;
-                        if (dmFilter && dmFilter !== 'all' && dmFilter !== '*') {
-                          const allowed = dmFilter.split(',').map(s => s.trim().toLowerCase());
-                          const tipKey = `${String(t.market || '').toLowerCase()}:${String(t.side || '').toLowerCase()}`;
-                          if (!allowed.includes(tipKey)) {
-                            log('INFO', 'MT-FILTER', `tennis/${t.market}/${t.side}: DM skipped — não está em TENNIS_MT_DM_FILTER ('${dmFilter}')`);
-                            _dmFilterAllowed = false;
-                          }
+                      const minEvGate = parseFloat(process.env.TENNIS_MARKET_TIP_MIN_EV ?? '8');
+                      const minPmGate = parseFloat(process.env.TENNIS_MARKET_TIP_MIN_PMODEL ?? '0.55');
+                      // 2026-04-27: usuário pediu promoção de TODAS tips elegíveis
+                      // (não só a melhor). Itera over `found` filtrando EV/pModel
+                      // gates. Correlation discount já aplicado em `t.correlationDiscount`
+                      // (linha 13278) — aplicado no kelly stake individualmente.
+                      const eligibles = found.filter(t =>
+                        Number.isFinite(t.ev) && Number.isFinite(t.pModel) &&
+                        t.ev >= minEvGate && t.pModel >= minPmGate
+                      );
+                      const dmFilter = (process.env.TENNIS_MT_DM_FILTER ?? 'all').trim();
+                      const dmFilterAllowed = (mt, sd) => {
+                        if (!dmFilter || dmFilter === 'all' || dmFilter === '*') return true;
+                        const allowed = dmFilter.split(',').map(s => s.trim().toLowerCase());
+                        return allowed.includes(`${String(mt||'').toLowerCase()}:${String(sd||'').toLowerCase()}`);
+                      };
+                      const { wasAdminDmSentRecently, markAdminDmSent } = require('./lib/market-tips-shadow');
+                      for (const t of eligibles) {
+                        if (!dmFilterAllowed(t.market, t.side)) {
+                          log('INFO', 'MT-FILTER', `tennis/${t.market}/${t.side}: DM skipped — não está em TENNIS_MT_DM_FILTER ('${dmFilter}')`);
+                          continue;
                         }
-                        if (!_dmFilterAllowed) {
-                          // skip DM, shadow já gravado anteriormente
-                        } else if (!isMarketTipsEnabled('tennis', t.market, t.side)) {
-                          log('INFO', 'MT-GUARD', `tennis/${t.market}: DM skipped — market disabled por leak guard`);
-                        } else {
-                        const { wasAdminDmSentRecently, markAdminDmSent } = require('./lib/market-tips-shadow');
+                        if (!isMarketTipsEnabled('tennis', t.market, t.side)) {
+                          log('INFO', 'MT-GUARD', `tennis/${t.market}/${t.side}: DM skipped — market disabled por leak guard`);
+                          continue;
+                        }
                         const dedupKey = `tennis|${norm(match.team1)}|${norm(match.team2)}|${t.market}|${t.line}|${t.side}`;
                         const inMemFresh = Date.now() - (marketTipSent.get(dedupKey) || 0) <= 24 * 60 * 60 * 1000;
                         const dbFresh = wasAdminDmSentRecently(db, { sport: 'tennis', match, market: t.market, line: t.line, side: t.side, hoursAgo: 24 });
-                        if (!inMemFresh && !dbFresh) {
-                          marketTipSent.set(dedupKey, Date.now());
-                          // Correlation discount aplicado sobre o stake Kelly (se correlacionado com outro tip detectado)
-                          let stake = mtp.kellyStakeForMarket(t.pModel, t.odd, 100, 0.10);
-                          if (t.correlationDiscount > 0 && typeof stake === 'number') {
-                            stake = mtp.snapStakeUnits(stake * (1 - t.correlationDiscount));
-                          }
-                          if (stake > 0) {
-                            // Passa `markets` (raw Pinnacle) pra buildMarketTipDM listar
-                            // todas as linhas alternativas — clarifica que -3.5 era line
-                            // alternativa quando -4.5 é a principal exibida no site.
-                            const dm = mtp.buildMarketTipDM({ match, tip: t, stake, league: match.league, sport: 'tennis', isLive: isLiveTennis, markets });
-                            // resolveTipsToken honra TIPS_UNIFIED_TOKEN — todas MT DMs caem no mesmo bot.
-                            const tnToken = resolveTipsToken('tennis') || SPORTS['tennis']?.token || resolveAlertsToken();
-                            if (tnToken) {
-                              const r = await sendAdminDMs(tnToken, dm, undefined, 'tennis-market-tip');
-                              if (r.sent > 0) {
-                                markAdminDmSent(db, { sport: 'tennis', match, market: t.market, line: t.line, side: t.side, odd: t.odd, ev: t.ev });
-                                const discTag = t.correlationDiscount > 0 ? ` (corr-disc ${(t.correlationDiscount*100).toFixed(0)}%)` : '';
-                                log('INFO', 'TENNIS-MARKET-TIP', `Admin DM: ${t.label} @ ${t.odd} EV ${t.ev}% stake ${stake}u${discTag} (sent=${r.sent} failed=${r.failed})`);
-                                // Promovido pra produção (env tennis_MARKET_TIPS_ENABLED + DM real) →
-                                // grava como tip "regular" no DB pra contar na banca/exposição.
-                                if (isMarketTipsPromoteEnabled('tennis')) await recordMarketTipAsRegular({ sport: 'tennis', match, tip: t, stake, isLive: isLiveTennis });
-                              } else {
-                                log('WARN', 'TENNIS-MARKET-TIP', `Todos admin DM falharam — skip dedup mark (${t.label} @ ${t.odd})`);
-                              }
-                            }
-                          }
-                        } else {
+                        if (inMemFresh || dbFresh) {
                           log('DEBUG', 'TENNIS-MARKET-TIP', `Dedup skip (${inMemFresh ? 'mem' : 'db'}): ${dedupKey}`);
+                          continue;
                         }
-                        } // end else isMarketTipsEnabled('tennis', t.market, t.side)
+                        marketTipSent.set(dedupKey, Date.now());
+                        let stake = mtp.kellyStakeForMarket(t.pModel, t.odd, 100, 0.10);
+                        if (t.correlationDiscount > 0 && typeof stake === 'number') {
+                          stake = mtp.snapStakeUnits(stake * (1 - t.correlationDiscount));
+                        }
+                        if (!(stake > 0)) continue;
+                        const dm = mtp.buildMarketTipDM({ match, tip: t, stake, league: match.league, sport: 'tennis', isLive: isLiveTennis, markets });
+                        const tnToken = resolveTipsToken('tennis') || SPORTS['tennis']?.token || resolveAlertsToken();
+                        if (!tnToken) continue;
+                        const r = await sendAdminDMs(tnToken, dm, undefined, 'tennis-market-tip');
+                        if (r.sent > 0) {
+                          markAdminDmSent(db, { sport: 'tennis', match, market: t.market, line: t.line, side: t.side, odd: t.odd, ev: t.ev });
+                          const discTag = t.correlationDiscount > 0 ? ` (corr-disc ${(t.correlationDiscount*100).toFixed(0)}%)` : '';
+                          log('INFO', 'TENNIS-MARKET-TIP', `Admin DM: ${t.label} @ ${t.odd} EV ${t.ev}% stake ${stake}u${discTag} (sent=${r.sent} failed=${r.failed})`);
+                          if (isMarketTipsPromoteEnabled('tennis')) await recordMarketTipAsRegular({ sport: 'tennis', match, tip: t, stake, isLive: isLiveTennis });
+                        } else {
+                          log('WARN', 'TENNIS-MARKET-TIP', `Todos admin DM falharam — skip dedup mark (${t.label} @ ${t.odd})`);
+                        }
                       }
                     } catch (mte) { reportBug('TENNIS-MARKET-TIP', mte); }
                   }
