@@ -6245,48 +6245,40 @@ async function autoAnalyzeMatch(token, match) {
                 if (isMarketTipsEnabled('lol') && ADMIN_IDS.size) {
                   try {
                     const mtp = require('./lib/market-tip-processor');
-                    const mlDirection = lolModel.modelP1 > 0.5 ? 'team1' : 'team2';
-                    const selected = mtp.selectBestMarketTip(found, {
-                      minEv: parseFloat(process.env.LOL_MARKET_TIP_MIN_EV ?? '8'),
-                      minPmodel: parseFloat(process.env.LOL_MARKET_TIP_MIN_PMODEL ?? '0.55'),
-                      mlDirection, mlPick: match.team1,
-                    });
-                    if (selected?.tip) {
-                      const t = selected.tip;
+                    const minEvGate = parseFloat(process.env.LOL_MARKET_TIP_MIN_EV ?? '8');
+                    const minPmGate = parseFloat(process.env.LOL_MARKET_TIP_MIN_PMODEL ?? '0.55');
+                    // 2026-04-27: itera sobre TODAS tips elegíveis (não só best).
+                    const eligibles = found.filter(t =>
+                      Number.isFinite(t.ev) && Number.isFinite(t.pModel) &&
+                      t.ev >= minEvGate && t.pModel >= minPmGate
+                    );
+                    const { wasAdminDmSentRecently, markAdminDmSent } = require('./lib/market-tips-shadow');
+                    for (const t of eligibles) {
                       if (!isMarketTipsEnabled('lol', t.market, t.side)) {
-                        log('INFO', 'MT-GUARD', `lol/${t.market}: DM skipped — market disabled por leak guard`);
-                      } else {
-                      const { wasAdminDmSentRecently, markAdminDmSent } = require('./lib/market-tips-shadow');
-                      const dedupKey = `lol|${norm(match.team1)}|${norm(match.team2)}|${t.market}|${t.line}|${t.side}`;
-                      const last = marketTipSent.get(dedupKey) || 0;
-                      const inMemFresh = Date.now() - last <= 24 * 60 * 60 * 1000;
-                      const dbFresh = wasAdminDmSentRecently(db, { sport: 'lol', match, market: t.market, line: t.line, side: t.side, hoursAgo: 24 });
-                      if (!inMemFresh && !dbFresh) {
-                        marketTipSent.set(dedupKey, Date.now());
-                        const stake = mtp.kellyStakeForMarket(t.pModel, t.odd, 100, 0.10);
-                        if (stake > 0) {
-                          const dm = mtp.buildMarketTipDM({
-                            match, tip: t, stake, league: match.league, sport: 'lol', isLive: isLiveLoL,
-                          });
-                          // Market tips são TIPS — roteia pro bot de tips (separação 2026-04-26).
-                          // Antes ia em resolveAlertsToken → caía no bot de alertas e DM
-                          // não chegava no canal que o usuário monitora.
-                          const tokenForMT = resolveTipsToken('esports');
-                          if (tokenForMT) {
-                            const r = await sendAdminDMs(tokenForMT, dm, undefined, 'lol-market-tip');
-                            if (r.sent > 0) {
-                              markAdminDmSent(db, { sport: 'lol', match, market: t.market, line: t.line, side: t.side, odd: t.odd, ev: t.ev });
-                              log('INFO', 'LOL-MARKET-TIP', `Admin DM enviado: ${t.label} @ ${t.odd} EV ${t.ev}% stake ${stake}u (sent=${r.sent} failed=${r.failed})`);
-                              if (isMarketTipsPromoteEnabled('lol')) await recordMarketTipAsRegular({ sport: 'lol', match, tip: t, stake, isLive: isLiveLoL });
-                            } else {
-                              log('WARN', 'LOL-MARKET-TIP', `Todos admin DM falharam — skip dedup mark (${t.label} @ ${t.odd})`);
-                            }
-                          }
-                        }
-                      } else {
-                        log('DEBUG', 'LOL-MARKET-TIP', `Dedup skip (${inMemFresh ? 'mem' : 'db'}): ${dedupKey}`);
+                        log('INFO', 'MT-GUARD', `lol/${t.market}/${t.side}: DM skipped — market disabled por leak guard`);
+                        continue;
                       }
-                      } // end else isMarketTipsEnabled('lol', t.market, t.side)
+                      const dedupKey = `lol|${norm(match.team1)}|${norm(match.team2)}|${t.market}|${t.line}|${t.side}`;
+                      const inMemFresh = Date.now() - (marketTipSent.get(dedupKey) || 0) <= 24 * 60 * 60 * 1000;
+                      const dbFresh = wasAdminDmSentRecently(db, { sport: 'lol', match, market: t.market, line: t.line, side: t.side, hoursAgo: 24 });
+                      if (inMemFresh || dbFresh) {
+                        log('DEBUG', 'LOL-MARKET-TIP', `Dedup skip (${inMemFresh ? 'mem' : 'db'}): ${dedupKey}`);
+                        continue;
+                      }
+                      marketTipSent.set(dedupKey, Date.now());
+                      const stake = mtp.kellyStakeForMarket(t.pModel, t.odd, 100, 0.10);
+                      if (!(stake > 0)) continue;
+                      const dm = mtp.buildMarketTipDM({ match, tip: t, stake, league: match.league, sport: 'lol', isLive: isLiveLoL });
+                      const tokenForMT = resolveTipsToken('esports');
+                      if (!tokenForMT) continue;
+                      const r = await sendAdminDMs(tokenForMT, dm, undefined, 'lol-market-tip');
+                      if (r.sent > 0) {
+                        markAdminDmSent(db, { sport: 'lol', match, market: t.market, line: t.line, side: t.side, odd: t.odd, ev: t.ev });
+                        log('INFO', 'LOL-MARKET-TIP', `Admin DM: ${t.label} @ ${t.odd} EV ${t.ev}% stake ${stake}u (sent=${r.sent} failed=${r.failed})`);
+                        if (isMarketTipsPromoteEnabled('lol')) await recordMarketTipAsRegular({ sport: 'lol', match, tip: t, stake, isLive: isLiveLoL });
+                      } else {
+                        log('WARN', 'LOL-MARKET-TIP', `Todos admin DM falharam — skip dedup mark (${t.label} @ ${t.odd})`);
+                      }
                     }
                   } catch (mte) { reportBug('LOL-MARKET-TIP', mte, { team1: match.team1, team2: match.team2 }); }
                 }
@@ -11527,42 +11519,39 @@ async function _pollDotaInner(runOnce = false) {
               if (isMarketTipsEnabled('dota2') && ADMIN_IDS.size) {
                 try {
                   const mtp = require('./lib/market-tip-processor');
-                  const mlDirection = mlResult.modelP1 > 0.5 ? 'team1' : 'team2';
-                  const selected = mtp.selectBestMarketTip(found, {
-                    minEv: parseFloat(process.env.DOTA_MARKET_TIP_MIN_EV ?? '8'),
-                    minPmodel: parseFloat(process.env.DOTA_MARKET_TIP_MIN_PMODEL ?? '0.55'),
-                    mlDirection, mlPick: match.team1,
-                  });
-                  if (selected?.tip) {
-                    const t = selected.tip;
+                  const minEvGate = parseFloat(process.env.DOTA_MARKET_TIP_MIN_EV ?? '8');
+                  const minPmGate = parseFloat(process.env.DOTA_MARKET_TIP_MIN_PMODEL ?? '0.55');
+                  const eligibles = found.filter(t =>
+                    Number.isFinite(t.ev) && Number.isFinite(t.pModel) &&
+                    t.ev >= minEvGate && t.pModel >= minPmGate
+                  );
+                  const { wasAdminDmSentRecently, markAdminDmSent } = require('./lib/market-tips-shadow');
+                  for (const t of eligibles) {
                     if (!isMarketTipsEnabled('dota2', t.market, t.side)) {
-                      log('INFO', 'MT-GUARD', `dota2/${t.market}: DM skipped — market disabled por leak guard`);
-                    } else {
-                    const { wasAdminDmSentRecently, markAdminDmSent } = require('./lib/market-tips-shadow');
+                      log('INFO', 'MT-GUARD', `dota2/${t.market}/${t.side}: DM skipped — market disabled por leak guard`);
+                      continue;
+                    }
                     const dedupKey = `dota2|${norm(match.team1)}|${norm(match.team2)}|${t.market}|${t.line}|${t.side}`;
                     const inMemFresh = Date.now() - (marketTipSent.get(dedupKey) || 0) <= 24 * 60 * 60 * 1000;
                     const dbFresh = wasAdminDmSentRecently(db, { sport: 'dota2', match, market: t.market, line: t.line, side: t.side, hoursAgo: 24 });
-                    if (!inMemFresh && !dbFresh) {
-                      marketTipSent.set(dedupKey, Date.now());
-                      const stake = mtp.kellyStakeForMarket(t.pModel, t.odd, 100, 0.10);
-                      if (stake > 0) {
-                        const dm = mtp.buildMarketTipDM({ match, tip: t, stake, league: match.league, sport: 'dota2', isLive });
-                        const tokenForMT = resolveTipsToken('esports');
-                        if (tokenForMT) {
-                          const r = await sendAdminDMs(tokenForMT, dm, undefined, 'dota-market-tip');
-                          if (r.sent > 0) {
-                            markAdminDmSent(db, { sport: 'dota2', match, market: t.market, line: t.line, side: t.side, odd: t.odd, ev: t.ev });
-                            log('INFO', 'DOTA-MARKET-TIP', `Admin DM: ${t.label} @ ${t.odd} EV ${t.ev}% stake ${stake}u (sent=${r.sent} failed=${r.failed})`);
-                            if (isMarketTipsPromoteEnabled('dota2')) await recordMarketTipAsRegular({ sport: 'dota2', match, tip: t, stake, isLive });
-                          } else {
-                            log('WARN', 'DOTA-MARKET-TIP', `Todos admin DM falharam — skip dedup mark (${t.label} @ ${t.odd})`);
-                          }
-                        }
-                      }
-                    } else {
+                    if (inMemFresh || dbFresh) {
                       log('DEBUG', 'DOTA-MARKET-TIP', `Dedup skip (${inMemFresh ? 'mem' : 'db'}): ${dedupKey}`);
+                      continue;
                     }
-                    } // end else isMarketTipsEnabled('dota2', t.market, t.side)
+                    marketTipSent.set(dedupKey, Date.now());
+                    const stake = mtp.kellyStakeForMarket(t.pModel, t.odd, 100, 0.10);
+                    if (!(stake > 0)) continue;
+                    const dm = mtp.buildMarketTipDM({ match, tip: t, stake, league: match.league, sport: 'dota2', isLive });
+                    const tokenForMT = resolveTipsToken('esports');
+                    if (!tokenForMT) continue;
+                    const r = await sendAdminDMs(tokenForMT, dm, undefined, 'dota-market-tip');
+                    if (r.sent > 0) {
+                      markAdminDmSent(db, { sport: 'dota2', match, market: t.market, line: t.line, side: t.side, odd: t.odd, ev: t.ev });
+                      log('INFO', 'DOTA-MARKET-TIP', `Admin DM: ${t.label} @ ${t.odd} EV ${t.ev}% stake ${stake}u (sent=${r.sent} failed=${r.failed})`);
+                      if (isMarketTipsPromoteEnabled('dota2')) await recordMarketTipAsRegular({ sport: 'dota2', match, tip: t, stake, isLive });
+                    } else {
+                      log('WARN', 'DOTA-MARKET-TIP', `Todos admin DM falharam — skip dedup mark (${t.label} @ ${t.odd})`);
+                    }
                   }
                 } catch (mte) { reportBug('DOTA-MARKET-TIP', mte); }
               }
@@ -15275,42 +15264,39 @@ async function pollCs(runOnce = false) {
                 if (isMarketTipsEnabled('cs2') && ADMIN_IDS.size) {
                   try {
                     const mtp = require('./lib/market-tip-processor');
-                    const mlDirection = modelP1 > 0.5 ? 'team1' : 'team2';
-                    const selected = mtp.selectBestMarketTip(found, {
-                      minEv: parseFloat(process.env.CS_MARKET_TIP_MIN_EV ?? '8'),
-                      minPmodel: parseFloat(process.env.CS_MARKET_TIP_MIN_PMODEL ?? '0.55'),
-                      mlDirection, mlPick: match.team1,
-                    });
-                    if (selected?.tip) {
-                      const t = selected.tip;
+                    const minEvGate = parseFloat(process.env.CS_MARKET_TIP_MIN_EV ?? '8');
+                    const minPmGate = parseFloat(process.env.CS_MARKET_TIP_MIN_PMODEL ?? '0.55');
+                    const eligibles = found.filter(t =>
+                      Number.isFinite(t.ev) && Number.isFinite(t.pModel) &&
+                      t.ev >= minEvGate && t.pModel >= minPmGate
+                    );
+                    const { wasAdminDmSentRecently, markAdminDmSent } = require('./lib/market-tips-shadow');
+                    for (const t of eligibles) {
                       if (!isMarketTipsEnabled('cs2', t.market, t.side)) {
-                        log('INFO', 'MT-GUARD', `cs2/${t.market}: DM skipped — market disabled por leak guard`);
-                      } else {
-                      const { wasAdminDmSentRecently, markAdminDmSent } = require('./lib/market-tips-shadow');
+                        log('INFO', 'MT-GUARD', `cs2/${t.market}/${t.side}: DM skipped — market disabled por leak guard`);
+                        continue;
+                      }
                       const dedupKey = `cs2|${norm(match.team1)}|${norm(match.team2)}|${t.market}|${t.line}|${t.side}`;
                       const inMemFresh = Date.now() - (marketTipSent.get(dedupKey) || 0) <= 24 * 60 * 60 * 1000;
                       const dbFresh = wasAdminDmSentRecently(db, { sport: 'cs2', match, market: t.market, line: t.line, side: t.side, hoursAgo: 24 });
-                      if (!inMemFresh && !dbFresh) {
-                        marketTipSent.set(dedupKey, Date.now());
-                        const stake = mtp.kellyStakeForMarket(t.pModel, t.odd, 100, 0.10);
-                        if (stake > 0) {
-                          const dm = mtp.buildMarketTipDM({ match, tip: t, stake, league: match.league, sport: 'cs2', isLive: isLiveCs });
-                          const tokenForMT = resolveTipsToken('esports');
-                          if (tokenForMT) {
-                            const r = await sendAdminDMs(tokenForMT, dm, undefined, 'cs-market-tip');
-                            if (r.sent > 0) {
-                              markAdminDmSent(db, { sport: 'cs2', match, market: t.market, line: t.line, side: t.side, odd: t.odd, ev: t.ev });
-                              log('INFO', 'CS-MARKET-TIP', `Admin DM: ${t.label} @ ${t.odd} EV ${t.ev}% stake ${stake}u (sent=${r.sent} failed=${r.failed})`);
-                              if (isMarketTipsPromoteEnabled('cs2')) await recordMarketTipAsRegular({ sport: 'cs2', match, tip: t, stake, isLive: isLiveCs });
-                            } else {
-                              log('WARN', 'CS-MARKET-TIP', `Todos admin DM falharam — skip dedup mark (${t.label} @ ${t.odd})`);
-                            }
-                          }
-                        }
-                      } else {
+                      if (inMemFresh || dbFresh) {
                         log('DEBUG', 'CS-MARKET-TIP', `Dedup skip (${inMemFresh ? 'mem' : 'db'}): ${dedupKey}`);
+                        continue;
                       }
-                      } // end else isMarketTipsEnabled('cs2', t.market, t.side)
+                      marketTipSent.set(dedupKey, Date.now());
+                      const stake = mtp.kellyStakeForMarket(t.pModel, t.odd, 100, 0.10);
+                      if (!(stake > 0)) continue;
+                      const dm = mtp.buildMarketTipDM({ match, tip: t, stake, league: match.league, sport: 'cs2', isLive: isLiveCs });
+                      const tokenForMT = resolveTipsToken('esports');
+                      if (!tokenForMT) continue;
+                      const r = await sendAdminDMs(tokenForMT, dm, undefined, 'cs-market-tip');
+                      if (r.sent > 0) {
+                        markAdminDmSent(db, { sport: 'cs2', match, market: t.market, line: t.line, side: t.side, odd: t.odd, ev: t.ev });
+                        log('INFO', 'CS-MARKET-TIP', `Admin DM: ${t.label} @ ${t.odd} EV ${t.ev}% stake ${stake}u (sent=${r.sent} failed=${r.failed})`);
+                        if (isMarketTipsPromoteEnabled('cs2')) await recordMarketTipAsRegular({ sport: 'cs2', match, tip: t, stake, isLive: isLiveCs });
+                      } else {
+                        log('WARN', 'CS-MARKET-TIP', `Todos admin DM falharam — skip dedup mark (${t.label} @ ${t.odd})`);
+                      }
                     }
                   } catch (mte) { reportBug('CS-MARKET-TIP', mte); }
                 }
@@ -15850,42 +15836,39 @@ async function pollValorant(runOnce = false) {
                 if (isMarketTipsEnabled('valorant') && ADMIN_IDS.size) {
                   try {
                     const mtp = require('./lib/market-tip-processor');
-                    const mlDirection = modelP1 > 0.5 ? 'team1' : 'team2';
-                    const selected = mtp.selectBestMarketTip(found, {
-                      minEv: parseFloat(process.env.VAL_MARKET_TIP_MIN_EV ?? '8'),
-                      minPmodel: parseFloat(process.env.VAL_MARKET_TIP_MIN_PMODEL ?? '0.55'),
-                      mlDirection, mlPick: match.team1,
-                    });
-                    if (selected?.tip) {
-                      const t = selected.tip;
+                    const minEvGate = parseFloat(process.env.VAL_MARKET_TIP_MIN_EV ?? '8');
+                    const minPmGate = parseFloat(process.env.VAL_MARKET_TIP_MIN_PMODEL ?? '0.55');
+                    const eligibles = found.filter(t =>
+                      Number.isFinite(t.ev) && Number.isFinite(t.pModel) &&
+                      t.ev >= minEvGate && t.pModel >= minPmGate
+                    );
+                    const { wasAdminDmSentRecently, markAdminDmSent } = require('./lib/market-tips-shadow');
+                    for (const t of eligibles) {
                       if (!isMarketTipsEnabled('valorant', t.market, t.side)) {
-                        log('INFO', 'MT-GUARD', `valorant/${t.market}: DM skipped — market disabled por leak guard`);
-                      } else {
-                      const { wasAdminDmSentRecently, markAdminDmSent } = require('./lib/market-tips-shadow');
+                        log('INFO', 'MT-GUARD', `valorant/${t.market}/${t.side}: DM skipped — market disabled por leak guard`);
+                        continue;
+                      }
                       const dedupKey = `valorant|${norm(match.team1)}|${norm(match.team2)}|${t.market}|${t.line}|${t.side}`;
                       const inMemFresh = Date.now() - (marketTipSent.get(dedupKey) || 0) <= 24 * 60 * 60 * 1000;
                       const dbFresh = wasAdminDmSentRecently(db, { sport: 'valorant', match, market: t.market, line: t.line, side: t.side, hoursAgo: 24 });
-                      if (!inMemFresh && !dbFresh) {
-                        marketTipSent.set(dedupKey, Date.now());
-                        const stake = mtp.kellyStakeForMarket(t.pModel, t.odd, 100, 0.10);
-                        if (stake > 0) {
-                          const dm = mtp.buildMarketTipDM({ match, tip: t, stake, league: match.league, sport: 'valorant', isLive: isLiveVal });
-                          const tokenForMT = resolveTipsToken('esports');
-                          if (tokenForMT) {
-                            const r = await sendAdminDMs(tokenForMT, dm, undefined, 'val-market-tip');
-                            if (r.sent > 0) {
-                              markAdminDmSent(db, { sport: 'valorant', match, market: t.market, line: t.line, side: t.side, odd: t.odd, ev: t.ev });
-                              if (isMarketTipsPromoteEnabled('valorant')) await recordMarketTipAsRegular({ sport: 'valorant', match, tip: t, stake, isLive: isLiveVal });
-                              log('INFO', 'VAL-MARKET-TIP', `Admin DM: ${t.label} @ ${t.odd} EV ${t.ev}% stake ${stake}u (sent=${r.sent} failed=${r.failed})`);
-                            } else {
-                              log('WARN', 'VAL-MARKET-TIP', `Todos admin DM falharam — skip dedup mark (${t.label} @ ${t.odd})`);
-                            }
-                          }
-                        }
-                      } else {
+                      if (inMemFresh || dbFresh) {
                         log('DEBUG', 'VAL-MARKET-TIP', `Dedup skip (${inMemFresh ? 'mem' : 'db'}): ${dedupKey}`);
+                        continue;
                       }
-                      } // end else isMarketTipsEnabled('valorant', t.market, t.side)
+                      marketTipSent.set(dedupKey, Date.now());
+                      const stake = mtp.kellyStakeForMarket(t.pModel, t.odd, 100, 0.10);
+                      if (!(stake > 0)) continue;
+                      const dm = mtp.buildMarketTipDM({ match, tip: t, stake, league: match.league, sport: 'valorant', isLive: isLiveVal });
+                      const tokenForMT = resolveTipsToken('esports');
+                      if (!tokenForMT) continue;
+                      const r = await sendAdminDMs(tokenForMT, dm, undefined, 'val-market-tip');
+                      if (r.sent > 0) {
+                        markAdminDmSent(db, { sport: 'valorant', match, market: t.market, line: t.line, side: t.side, odd: t.odd, ev: t.ev });
+                        if (isMarketTipsPromoteEnabled('valorant')) await recordMarketTipAsRegular({ sport: 'valorant', match, tip: t, stake, isLive: isLiveVal });
+                        log('INFO', 'VAL-MARKET-TIP', `Admin DM: ${t.label} @ ${t.odd} EV ${t.ev}% stake ${stake}u (sent=${r.sent} failed=${r.failed})`);
+                      } else {
+                        log('WARN', 'VAL-MARKET-TIP', `Todos admin DM falharam — skip dedup mark (${t.label} @ ${t.odd})`);
+                      }
                     }
                   } catch (mte) { reportBug('VAL-MARKET-TIP', mte); }
                 }
