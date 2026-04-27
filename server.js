@@ -9001,6 +9001,82 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // GET/POST /admin/mt-shadow-revert-suspects?days=14&apply=0&buffer_min=5&key=<KEY>
+  // Equivalente ao mt-revert-suspects mas pra MARKET_TIPS_SHADOW (não tips).
+  // Detecta shadow rows settled (win/loss/void) onde o match_results
+  // correspondente resolveu ANTES do shadow.created_at - buffer (= match
+  // anterior do par usado no settle errado pré-fix do buffer 5min).
+  if (p === '/admin/mt-shadow-revert-suspects' && (req.method === 'POST' || req.method === 'GET')) {
+    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const days = Math.max(1, Math.min(60, parseInt(parsed.query.days || '14', 10) || 14));
+    const bufferMin = Math.max(0, Math.min(60, parseInt(parsed.query.buffer_min || '5', 10) || 5));
+    const apply = parsed.query.apply === '1' || parsed.query.apply === 'true';
+    try {
+      const rows = db.prepare(`
+        SELECT id, sport, team1, team2, market, line, side, result, profit_units,
+          stake_units, odd, created_at, settled_at
+        FROM market_tips_shadow
+        WHERE result IN ('win','loss','void')
+          AND created_at >= datetime('now', '-' || ? || ' days')
+        ORDER BY id DESC
+      `).all(days);
+      const _norm = s => String(s||'').toLowerCase().replace(/[\s\-.']/g, '');
+      const suspects = [];
+      for (const r of rows) {
+        const n1 = _norm(r.team1), n2 = _norm(r.team2);
+        const cand = db.prepare(`
+          SELECT match_id, league, winner, final_score, resolved_at
+          FROM match_results
+          WHERE game = ?
+            AND ((REPLACE(REPLACE(REPLACE(REPLACE(lower(team1),' ',''),'-',''),'.',''),'''','') = ?
+                  AND REPLACE(REPLACE(REPLACE(REPLACE(lower(team2),' ',''),'-',''),'.',''),'''','') = ?)
+              OR (REPLACE(REPLACE(REPLACE(REPLACE(lower(team1),' ',''),'-',''),'.',''),'''','') = ?
+                  AND REPLACE(REPLACE(REPLACE(REPLACE(lower(team2),' ',''),'-',''),'.',''),'''','') = ?))
+            AND winner IS NOT NULL AND winner != ''
+            AND resolved_at <= COALESCE(?, datetime('now'))
+          ORDER BY ABS(julianday(resolved_at) - julianday(?)) ASC
+          LIMIT 1
+        `).get(r.sport, n1, n2, n2, n1, r.settled_at, r.created_at);
+        if (!cand) continue;
+        const tipTs = new Date(r.created_at).getTime();
+        const candTs = new Date(cand.resolved_at).getTime();
+        const gapMin = (candTs - tipTs) / 60000;
+        if (gapMin < -bufferMin) {
+          suspects.push({
+            id: r.id, sport: r.sport,
+            match: `${r.team1} vs ${r.team2}`,
+            market: r.market, side: r.side, line: r.line,
+            shadow_created_at: r.created_at,
+            candidate_resolved_at: cand.resolved_at,
+            candidate_league: cand.league,
+            gap_minutes: +gapMin.toFixed(1),
+            result: r.result, profit_units: r.profit_units,
+            reason: `match_results resolved ${(-gapMin).toFixed(0)}min ANTES do shadow — match anterior do par`,
+          });
+        }
+      }
+      let applied = 0;
+      if (apply && suspects.length) {
+        const stmt = db.prepare(`
+          UPDATE market_tips_shadow
+          SET result = NULL, settled_at = NULL, profit_units = NULL
+          WHERE id = ?
+        `);
+        const tx = db.transaction(() => {
+          for (const s of suspects) { stmt.run(s.id); applied++; }
+        });
+        tx();
+      }
+      sendJson(res, {
+        ok: true, applied: !!apply, days, buffer_min: bufferMin,
+        scanned: rows.length, suspects_count: suspects.length, suspects,
+        reverted: applied,
+      });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
   // GET /admin/mt-tip-trace?id=N&key=<KEY>
   // Mostra TODAS as match_results candidatas pra uma tip MT (pra auditar
   // qual row foi usada no settle, mesmo que detector mt-revert-suspects
