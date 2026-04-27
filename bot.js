@@ -6279,7 +6279,8 @@ async function autoAnalyzeMatch(token, match) {
                       const dm = mtp.buildMarketTipDM({ match, tip: t, stake, league: match.league, sport: 'lol', isLive: isLiveLoL });
                       const tokenForMT = resolveTipsToken('esports');
                       if (!tokenForMT) continue;
-                      const r = await sendAdminDMs(tokenForMT, dm, undefined, 'lol-market-tip');
+                      const _mtMarkup_lol = mtp.buildMarketTipReplyMarkup({ match: match, sport: 'lol' });
+                          const r = await sendAdminDMs(tokenForMT, dm, _mtMarkup_lol ? { reply_markup: _mtMarkup_lol } : undefined, 'lol-market-tip');
                       if (r.sent > 0) {
                         markAdminDmSent(db, { sport: 'lol', match, market: t.market, line: t.line, side: t.side, odd: t.odd, ev: t.ev });
                         log('INFO', 'LOL-MARKET-TIP', `Admin DM: ${t.label} @ ${t.odd} EV ${t.ev}% stake ${stake}u (sent=${r.sent} failed=${r.failed})`);
@@ -11560,7 +11561,8 @@ async function _pollDotaInner(runOnce = false) {
                     const dm = mtp.buildMarketTipDM({ match, tip: t, stake, league: match.league, sport: 'dota2', isLive });
                     const tokenForMT = resolveTipsToken('esports');
                     if (!tokenForMT) continue;
-                    const r = await sendAdminDMs(tokenForMT, dm, undefined, 'dota-market-tip');
+                    const _mtMarkup_dota = mtp.buildMarketTipReplyMarkup({ match: match, sport: 'dota2' });
+                          const r = await sendAdminDMs(tokenForMT, dm, _mtMarkup_dota ? { reply_markup: _mtMarkup_dota } : undefined, 'dota-market-tip');
                     if (r.sent > 0) {
                       markAdminDmSent(db, { sport: 'dota2', match, market: t.market, line: t.line, side: t.side, odd: t.odd, ev: t.ev });
                       log('INFO', 'DOTA-MARKET-TIP', `Admin DM: ${t.label} @ ${t.odd} EV ${t.ev}% stake ${stake}u (sent=${r.sent} failed=${r.failed})`);
@@ -13348,7 +13350,8 @@ async function pollTennis(runOnce = false) {
                         const dm = mtp.buildMarketTipDM({ match, tip: t, stake, league: match.league, sport: 'tennis', isLive: isLiveTennis, markets });
                         const tnToken = resolveTipsToken('tennis') || SPORTS['tennis']?.token || resolveAlertsToken();
                         if (!tnToken) continue;
-                        const r = await sendAdminDMs(tnToken, dm, undefined, 'tennis-market-tip');
+                        const _mtMarkup_tennis = mtp.buildMarketTipReplyMarkup({ match: match, sport: 'tennis' });
+                          const r = await sendAdminDMs(tnToken, dm, _mtMarkup_tennis ? { reply_markup: _mtMarkup_tennis } : undefined, 'tennis-market-tip');
                         if (r.sent > 0) {
                           markAdminDmSent(db, { sport: 'tennis', match, market: t.market, line: t.line, side: t.side, odd: t.odd, ev: t.ev });
                           const discTag = t.correlationDiscount > 0 ? ` (corr-disc ${(t.correlationDiscount*100).toFixed(0)}%)` : '';
@@ -14728,7 +14731,8 @@ Máximo 200 palavras.`;
                       // resolveTipsToken honra TIPS_UNIFIED_TOKEN — todas MT DMs caem no mesmo bot.
                       const fbToken = resolveTipsToken('football') || SPORTS['football']?.token || resolveAlertsToken();
                       if (fbToken) {
-                        const r = await sendAdminDMs(fbToken, dmFb, undefined, 'football-market-tip');
+                        const _mtMarkup_football = mtp.buildMarketTipReplyMarkup({ match: matchForMt, sport: 'football' });
+                          const r = await sendAdminDMs(fbToken, dmFb, _mtMarkup_football ? { reply_markup: _mtMarkup_football } : undefined, 'football-market-tip');
                         if (r.sent > 0) {
                           markAdminDmSent(db, { sport: 'football', match: matchForMt, market: marketKey, line: lineVal, side: sideMt });
                           log('INFO', 'FOOTBALL-MARKET-TIP', `Admin DM: ${tipMarket} @ ${tipOdd} EV ${tipEV}% stake ${stakeFb}u (sent=${r.sent} failed=${r.failed})`);
@@ -15321,7 +15325,8 @@ async function pollCs(runOnce = false) {
                       const dm = mtp.buildMarketTipDM({ match, tip: t, stake, league: match.league, sport: 'cs2', isLive: isLiveCs });
                       const tokenForMT = resolveTipsToken('esports');
                       if (!tokenForMT) continue;
-                      const r = await sendAdminDMs(tokenForMT, dm, undefined, 'cs-market-tip');
+                      const _mtMarkup_cs = mtp.buildMarketTipReplyMarkup({ match: match, sport: 'cs2' });
+                          const r = await sendAdminDMs(tokenForMT, dm, _mtMarkup_cs ? { reply_markup: _mtMarkup_cs } : undefined, 'cs-market-tip');
                       if (r.sent > 0) {
                         markAdminDmSent(db, { sport: 'cs2', match, market: t.market, line: t.line, side: t.side, odd: t.odd, ev: t.ev });
                         log('INFO', 'CS-MARKET-TIP', `Admin DM: ${t.label} @ ${t.odd} EV ${t.ev}% stake ${stake}u (sent=${r.sent} failed=${r.failed})`);
@@ -15901,7 +15906,8 @@ async function pollValorant(runOnce = false) {
                       const dm = mtp.buildMarketTipDM({ match, tip: t, stake, league: match.league, sport: 'valorant', isLive: isLiveVal });
                       const tokenForMT = resolveTipsToken('esports');
                       if (!tokenForMT) continue;
-                      const r = await sendAdminDMs(tokenForMT, dm, undefined, 'val-market-tip');
+                      const _mtMarkup_valorant = mtp.buildMarketTipReplyMarkup({ match: match, sport: 'valorant' });
+                          const r = await sendAdminDMs(tokenForMT, dm, _mtMarkup_valorant ? { reply_markup: _mtMarkup_valorant } : undefined, 'val-market-tip');
                       if (r.sent > 0) {
                         markAdminDmSent(db, { sport: 'valorant', match, market: t.market, line: t.line, side: t.side, odd: t.odd, ev: t.ev });
                         if (isMarketTipsPromoteEnabled('valorant')) await recordMarketTipAsRegular({ sport: 'valorant', match, tip: t, stake, isLive: isLiveVal });
