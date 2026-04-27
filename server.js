@@ -10813,11 +10813,19 @@ const server = http.createServer(async (req, res) => {
         // head-to-head 1x1 — apostar nos dois lados é auto-gole (sempre perde um lado).
         // Override: SAME_PICK_ONLY_DEDUP_SPORTS=csv,de,sports pra só bloquear mesmo pick
         // (casos onde hedge em markets diferentes é válido, tipo football Over + Home).
+        //
+        // BUG FIX 2026-04-27: tips MT (handicap/totals/etc — match_id LIKE '%::mt::%')
+        // têm correlation discount no Kelly e são markets DIFERENTES (HG +3.5 Kypson
+        // vs HG -2.5 Berrettini não são inversos um do outro, são linhas diferentes).
+        // Force samePickOnly=true só pras tips MT — bloqueia só dupes literais
+        // (mesmo participant), permite múltiplas tips per match com lines/sides
+        // distintos. ML continua com anti-hedge global.
         const p1n_ = norm(p1 || ''), p2n_ = norm(p2 || '');
         const pickN_ = norm(tipParticipant || '');
         const marketN_ = String(t.market_type || 'ML').toUpperCase();
+        const isMtTip = String(matchId).includes('::mt::');
         const samePickOnlySports = String(process.env.SAME_PICK_ONLY_DEDUP_SPORTS || '').toLowerCase().split(',').map(s => s.trim()).filter(Boolean);
-        const samePickOnly = samePickOnlySports.includes(String(sport).toLowerCase());
+        const samePickOnly = isMtTip || samePickOnlySports.includes(String(sport).toLowerCase());
         if (p1n_ && p2n_) {
           const pickClause = samePickOnly
             ? `AND REPLACE(REPLACE(lower(tip_participant),' ',''),'-','') = ?`
@@ -10923,7 +10931,10 @@ const server = http.createServer(async (req, res) => {
         // (tennis slam, CS major etc) — outcomes tendem a correlacionar.
         // Gated por CORRELATION_AUTO=true. Cap default 6u por cluster, override via
         // CORRELATION_MAX_EXPOSURE_U ou CORRELATION_MAX_EXPOSURE_U_<SPORT>.
-        if (/^true$/i.test(String(process.env.CORRELATION_AUTO || '')) && eventName && sport !== 'football') {
+        // BUG FIX 2026-04-27: MT tips (handicap/totals) já têm correlation discount
+        // no Kelly aplicado em bot.js — bypass cap pra não duplicar penalidade.
+        // ML continua sob cap (correlation entre múltiplas ML é mais forte).
+        if (/^true$/i.test(String(process.env.CORRELATION_AUTO || '')) && eventName && sport !== 'football' && !isMtTip) {
           const perSportKey = `CORRELATION_MAX_EXPOSURE_U_${String(sport).toUpperCase()}`;
           const capU = parseFloat(process.env[perSportKey] || process.env.CORRELATION_MAX_EXPOSURE_U || '6');
           const openRows = db.prepare(`
@@ -10947,7 +10958,10 @@ const server = http.createServer(async (req, res) => {
         }
 
         // Dynamic EV_min per sport (do optimizer). Rejeita se ev < threshold ativo.
-        if (evN != null) {
+        // BUG FIX 2026-04-27: MT tips passam por seu próprio EV gate em bot.js
+        // (TENNIS_MARKET_TIP_MIN_EV, etc) — bypass dinâmico que era calibrado pra
+        // ML e estava bloqueando MT 8-14% mesmo com env=8 do user.
+        if (evN != null && !isMtTip) {
           try {
             const dyn = db.prepare(`SELECT value FROM dynamic_thresholds WHERE sport = ? AND key = 'ev_min'`).get(sport);
             if (dyn?.value > 0 && evN < dyn.value) {
