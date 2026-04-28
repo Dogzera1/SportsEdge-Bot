@@ -2408,6 +2408,34 @@ async function loadTipsByMarket(gen = refreshGen) {
     <div style="display:flex;gap:8px;flex-wrap:wrap">${cards}</div>`;
 }
 
+// 2026-04-28: export CSV das tips visíveis (após filtros). Usa tipsCache,
+// não recarrega — exporta exatamente o que user vê.
+function exportTipsCsv() {
+  const tips = (window.tipsCache || []).slice();
+  if (!tips.length) { alert('Sem tips pra exportar'); return; }
+  const header = ['id','sport','sent_at','event','participant1','participant2','tip_participant','market_type','odds','ev','stake','stake_reais','result','profit_reais','clv_pct'];
+  const csvRow = (vals) => vals.map(v => {
+    if (v == null) return '';
+    const s = String(v);
+    return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+  }).join(',');
+  const lines = [csvRow(header)];
+  for (const t of tips) {
+    lines.push(csvRow([
+      t.id, t.sport, t.sent_at, t.event_name, t.participant1, t.participant2,
+      t.tip_participant, t.market_type, t.odds, t.ev, t.stake, t.stake_reais,
+      t.result, t.profit_reais, t.clv_pct,
+    ]));
+  }
+  const blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `tips_${currentSport || 'all'}_${new Date().toISOString().slice(0,10)}.csv`;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
 function renderTipsTable() {
   const el = document.getElementById('tipsTable');
   if (!el) return;
@@ -2451,6 +2479,7 @@ function renderTipsTable() {
       ${nPending ? `<span class="tip-meta">${nPending} pend</span>` : ''}
       ${nVoid ? `<span class="tip-meta">${nVoid} void</span>` : ''}
       <span class="${totalProfit >= 0 ? 'pos' : 'neg'}" style="margin-left:auto">${totalProfit >= 0 ? '+' : ''}${fmtMoney(totalProfit)}</span>
+      <button onclick="exportTipsCsv()" title="Exportar tips visíveis pra CSV" style="margin-left:8px;background:transparent;border:1px solid var(--border);color:var(--text-dim);padding:3px 8px;border-radius:4px;cursor:pointer;font-size:11px">📥 CSV</button>
     </div>
     <div class="tips-wrap"><table class="tips">
       <thead>
@@ -3275,17 +3304,23 @@ async function loadMtCalibHealth() {
         <th>Status</th>
       </tr></thead>
       <tbody>
-        ${(valData?.buckets || []).map(b => `<tr>
-          <td><b>${b.sport}</b></td>
-          <td>${b.market}</td>
-          <td style="text-align:right">${b.n}</td>
-          <td style="text-align:right">${(b.predP*100).toFixed(0)}%</td>
-          <td style="text-align:right">${(b.realHit*100).toFixed(0)}%</td>
-          <td style="text-align:right" class="${b.gapPp>=0?'positive':'negative'}">${b.gapPp>=0?'+':''}${b.gapPp}pp</td>
-          <td style="text-align:right" class="${b.roi>=0?'positive':'negative'}">${b.roi>=0?'+':''}${b.roi}%</td>
+        ${(valData?.buckets || []).map(b => {
+          // 2026-04-28: K1/K2/K3 wiring + escape + null guards.
+          const _mkt = String(b.market || '');
+          const _kMatch = _mkt.match(/^total_kills_map(\d+)$/i);
+          const _mktLabel = _kMatch ? `K${_kMatch[1]} (Total Kills Mapa ${_kMatch[1]})` : _mkt;
+          return `<tr>
+          <td><b>${escHtml(b.sport)}</b></td>
+          <td>${escHtml(_mktLabel)}</td>
+          <td style="text-align:right">${b.n != null ? b.n : '—'}</td>
+          <td style="text-align:right">${b.predP != null ? (b.predP*100).toFixed(0) : '—'}%</td>
+          <td style="text-align:right">${b.realHit != null ? (b.realHit*100).toFixed(0) : '—'}%</td>
+          <td style="text-align:right" class="${b.gapPp>=0?'positive':'negative'}">${b.gapPp!=null?(b.gapPp>=0?'+':'')+b.gapPp:'—'}pp</td>
+          <td style="text-align:right" class="${b.roi>=0?'positive':'negative'}">${b.roi!=null?(b.roi>=0?'+':'')+b.roi:'—'}%</td>
           <td style="text-align:right">${b.clvPct!=null?(b.clvPct>=0?'+':'')+b.clvPct+'%':'—'}</td>
           <td>${statusBadge(b.status)}</td>
-        </tr>`).join('')}
+        </tr>`;
+        }).join('')}
       </tbody>
     </table>`;
 
