@@ -780,6 +780,20 @@
     </div>
   </div>
 
+  <!-- MT Calib Health — gap predP vs realHit + Brier drift (expandable) -->
+  <div class="section" id="secMtCalibHealth">
+    <div class="section-head" onclick="toggleSection('secMtCalibHealth'); loadMtCalibHealth()">
+      <div class="section-head-left">
+        <svg class="section-chevron" viewBox="0 0 16 16"><path d="M6 4l4 4-4 4" stroke="currentColor" fill="none" stroke-width="2"/></svg>
+        <span>🧪 MT Calib Health</span>
+      </div>
+      <div class="section-head-meta" id="mtCalibHealthMeta">—</div>
+    </div>
+    <div class="section-body">
+      <div id="mtCalibHealthBody"><div class="loading">Carregando</div></div>
+    </div>
+  </div>
+
   <!-- Per-EV bucket performance (expandable) -->
   <div class="section" id="secEvBucket">
     <div class="section-head" onclick="toggleSection('secEvBucket'); loadEvBucket()">
@@ -3155,6 +3169,100 @@ async function loadClvHistogram() {
         </tr>`).join('')}
       </tbody>
     </table>`;
+  el.innerHTML = html;
+}
+
+// MT Calib Health — diagnostica calibração modelos MT.
+// Combina /admin/mt-calib-validation (snapshot predP vs realHit per bucket) +
+// /admin/mt-brier-history (drift Brier semanal).
+async function loadMtCalibHealth() {
+  const el = document.getElementById('mtCalibHealthBody');
+  const meta = document.getElementById('mtCalibHealthMeta');
+  el.innerHTML = '<div class="loading">Carregando…</div>';
+  let valData = null, brierData = null;
+  try {
+    const [r1, r2] = await Promise.all([
+      adminFetch('/admin/mt-calib-validation?days=90&min_n=10').then(r => r.json()).catch(() => null),
+      adminFetch('/admin/mt-brier-history?days=90&window=7').then(r => r.json()).catch(() => null),
+    ]);
+    valData = r1; brierData = r2;
+  } catch (e) {
+    el.innerHTML = `<div class="empty-state">Erro auth: ${e.message}</div>`;
+    return;
+  }
+  if (!valData?.ok && !brierData?.ok) {
+    el.innerHTML = '<div class="empty-state">Sem dados ou auth inválida</div>';
+    meta.textContent = '—';
+    return;
+  }
+  const flagged = (valData?.buckets || []).filter(b => b.status !== 'ok');
+  const driftDegrading = (brierData?.groups || []).filter(g => g.status === 'degrading');
+  meta.textContent = `${valData?.n_buckets || 0} buckets · ${flagged.length} flagged · ${driftDegrading.length} degrading`;
+
+  const statusBadge = (s) => {
+    const colors = { critical: '#d44', flag: '#e80', monitor: '#fa3', ok: '#4a4', degrading: '#d44', stable: '#888', improving: '#4a4', unknown: '#888' };
+    const c = colors[s] || '#888';
+    return `<span style="background:${c};color:#fff;padding:2px 6px;border-radius:3px;font-size:0.85em">${s}</span>`;
+  };
+
+  let html = `
+    <div class="card-meta" style="margin-bottom:10px">
+      <b>Predição vs realidade</b> per (sport, market) últimos 90d.
+      Gap = realHit − predP. <b>flag/critical = refit calib recomendado</b> (gap ≥10pp).
+      Auto-disable ativo: 3 runs ≥15pp viram disabled (sprint 6).
+    </div>
+    <table class="tips">
+      <thead><tr>
+        <th>Sport</th><th>Market</th>
+        <th style="text-align:right">N</th>
+        <th style="text-align:right">predP</th>
+        <th style="text-align:right">realHit</th>
+        <th style="text-align:right">Gap</th>
+        <th style="text-align:right">ROI</th>
+        <th style="text-align:right">CLV</th>
+        <th>Status</th>
+      </tr></thead>
+      <tbody>
+        ${(valData?.buckets || []).map(b => `<tr>
+          <td><b>${b.sport}</b></td>
+          <td>${b.market}</td>
+          <td style="text-align:right">${b.n}</td>
+          <td style="text-align:right">${(b.predP*100).toFixed(0)}%</td>
+          <td style="text-align:right">${(b.realHit*100).toFixed(0)}%</td>
+          <td style="text-align:right" class="${b.gapPp>=0?'positive':'negative'}">${b.gapPp>=0?'+':''}${b.gapPp}pp</td>
+          <td style="text-align:right" class="${b.roi>=0?'positive':'negative'}">${b.roi>=0?'+':''}${b.roi}%</td>
+          <td style="text-align:right">${b.clvPct!=null?(b.clvPct>=0?'+':'')+b.clvPct+'%':'—'}</td>
+          <td>${statusBadge(b.status)}</td>
+        </tr>`).join('')}
+      </tbody>
+    </table>`;
+
+  if (brierData?.groups?.length) {
+    html += `
+    <div class="card-meta" style="margin:16px 0 8px">
+      <b>Brier drift</b> — janelas de 7d últimos 90d. <b>degrading = Brier mais alto que histórico médio (calib piorando)</b>.
+    </div>
+    <table class="tips">
+      <thead><tr>
+        <th>Sport</th><th>Market</th>
+        <th style="text-align:right">Brier recent</th>
+        <th style="text-align:right">Brier hist</th>
+        <th style="text-align:right">Drift</th>
+        <th>Status</th>
+      </tr></thead>
+      <tbody>
+        ${brierData.groups.map(g => `<tr>
+          <td><b>${g.sport}</b></td>
+          <td>${g.market}</td>
+          <td style="text-align:right">${g.recent_brier}</td>
+          <td style="text-align:right">${g.historical_avg_brier ?? '—'}</td>
+          <td style="text-align:right" class="${(g.drift ?? 0)<=0?'positive':'negative'}">${g.drift!=null?(g.drift>=0?'+':'')+g.drift:'—'}</td>
+          <td>${statusBadge(g.status)}</td>
+        </tr>`).join('')}
+      </tbody>
+    </table>`;
+  }
+
   el.innerHTML = html;
 }
 
