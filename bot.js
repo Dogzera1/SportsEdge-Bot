@@ -906,7 +906,7 @@ function _recordServerError(method, path, err) {
   if (_serverGetErrors.length > SERVER_GET_ERRORS_MAX) _serverGetErrors.length = SERVER_GET_ERRORS_MAX;
 }
 
-function serverGet(path, sport) {
+function serverGet(path, sport, extraHeaders) {
   return new Promise((resolve, reject) => {
     const sep = path.includes('?') ? '&' : '?';
     const sportParam = sport ? `${sep}sport=${sport}` : '';
@@ -914,7 +914,8 @@ function serverGet(path, sport) {
       hostname: SERVER,
       port: PORT,
       path: path + sportParam,
-      timeout: 15000
+      timeout: 15000,
+      headers: extraHeaders || undefined,
     }, res => {
       let d = '';
       res.on('data', c => d += c);
@@ -6417,6 +6418,7 @@ async function autoAnalyzeMatch(token, match) {
                 const t1Norm = norm(match.team1);
                 team1IsBlue = blueNorm === t1Norm || blueNorm.includes(t1Norm) || t1Norm.includes(blueNorm);
               }
+              // Predict baseline (sem mapIndex) — usado pra confidence + sanity gate
               const predict = predictMapKills(t1Roster, t2Roster, {
                 league: match.league || match.tournament,
                 team1IsBlue,
@@ -6432,9 +6434,17 @@ async function autoAnalyzeMatch(token, match) {
                 for (let mapNum = startMap; mapNum <= bestOf; mapNum++) {
                   const killsMkt = await serverGet(`/odds-markets?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}&period=${mapNum}&game=lol`).catch(() => null);
                   if (!killsMkt || !Array.isArray(killsMkt.totals) || !killsMkt.totals.length) continue;
-                  const killTips = scanKillsMarkets({ pinTotals: killsMkt.totals, predict, minEv: minEvKills });
+                  // Recompute predict per mapa pra capturar map-specific scaling
+                  // (Mapa 3 decisivo tem -3% kills empirical).
+                  const predictForMap = predictMapKills(t1Roster, t2Roster, {
+                    league: match.league || match.tournament,
+                    team1IsBlue,
+                    mapIndex: mapNum,
+                  });
+                  if (!predictForMap) continue;
+                  const killTips = scanKillsMarkets({ pinTotals: killsMkt.totals, predict: predictForMap, minEv: minEvKills });
                   if (!killTips.length) {
-                    log('DEBUG', 'LOL-KILLS', `${match.team1} vs ${match.team2} [Mapa ${mapNum}]: λ=${predict.lambda}, sem EV ≥${minEvKills}% em ${killsMkt.totals.length} lines`);
+                    log('DEBUG', 'LOL-KILLS', `${match.team1} vs ${match.team2} [Mapa ${mapNum}]: λ=${predictForMap.lambda}, sem EV ≥${minEvKills}% em ${killsMkt.totals.length} lines`);
                     continue;
                   }
                   for (const t of killTips) {
@@ -6443,7 +6453,7 @@ async function autoAnalyzeMatch(token, match) {
                     totalKillsTipsAll.push(t);
                   }
                   log('INFO', 'LOL-KILLS',
-                    `${match.team1} vs ${match.team2} [Mapa ${mapNum}]: ${killTips.length} kills tip(s) | λ=${predict.lambda} conf=${predict.confidence}`);
+                    `${match.team1} vs ${match.team2} [Mapa ${mapNum}]: ${killTips.length} kills tip(s) | λ=${predictForMap.lambda} conf=${predictForMap.confidence}`);
                   for (const t of killTips.slice(0, 2)) {
                     log('INFO', 'LOL-KILLS',
                       `  • ${t.label} @ ${t.odd.toFixed(2)} | pModel=${(t.pModel*100).toFixed(1)}% EV=${t.ev.toFixed(1)}%`);
@@ -17473,6 +17483,51 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   }
   setInterval(() => runMtCalibRefit(), 60 * 60 * 1000); // check 1h
   setTimeout(() => runMtCalibRefit(), 5 * 60 * 1000);  // bootstrap 5min após boot
+
+  // MT calib validation daily — DM admins quando bucket flagged (gap >=10pp).
+  // Roda diário 9h UTC. Default ON; opt-out MT_VALIDATION_DM_DISABLED=true.
+  let _lastValidationDay = null;
+  async function runMtCalibValidationAlert() {
+    if (/^(1|true|yes)$/i.test(String(process.env.MT_VALIDATION_DM_DISABLED || ''))) return;
+    if (!ADMIN_IDS.size) return;
+    const now = new Date();
+    const today = now.toISOString().slice(0, 10);
+    if (_lastValidationDay === today) return;
+    if (now.getUTCHours() !== 9) return;
+    _lastValidationDay = today;
+    try {
+      const adminKey = process.env.ADMIN_KEY || '';
+      const data = await serverGet('/admin/mt-calib-validation?days=90&min_n=10', null, {
+        ...(adminKey ? { 'x-admin-key': adminKey } : {})
+      }).catch(() => null);
+      if (!data?.ok) {
+        log('WARN', 'MT-VALIDATION', `endpoint failed: ${data?.error || 'no response'}`);
+        return;
+      }
+      const flagged = (data.buckets || []).filter(b => b.status !== 'ok');
+      if (!flagged.length) {
+        log('INFO', 'MT-VALIDATION', `daily check: ${data.n_buckets} buckets, all ok`);
+        return;
+      }
+      // Construir DM
+      const lines = ['🔍 *MT Calib Validation* — buckets flagged'];
+      for (const b of flagged.slice(0, 10)) {
+        const icon = b.status === 'critical' ? '🔴' : b.status === 'flag' ? '🟠' : '🟡';
+        const gapStr = (b.gapPp >= 0 ? '+' : '') + b.gapPp + 'pp';
+        const clvStr = b.clvPct != null ? `${b.clvPct >= 0 ? '+' : ''}${b.clvPct}%` : '—';
+        lines.push(`${icon} \`${b.sport}/${b.market}\` n=${b.n} predP=${(b.predP*100).toFixed(0)}% real=${(b.realHit*100).toFixed(0)}% gap=${gapStr} ROI=${b.roi}% CLV=${clvStr}`);
+      }
+      if (flagged.length > 10) lines.push(`...+${flagged.length - 10} mais`);
+      lines.push('\nGap >=10pp sugere refit calib. /admin/mt-calib-validation pra detalhe.');
+      const dm = lines.join('\n');
+      const tokenAlert = resolveAlertsToken();
+      if (tokenAlert) {
+        const r = await sendAdminDMs(tokenAlert, dm, undefined, 'mt-calib-validation');
+        log('INFO', 'MT-VALIDATION', `daily DM: ${flagged.length} flagged buckets (sent=${r.sent})`);
+      }
+    } catch (e) { log('ERROR', 'MT-VALIDATION', e.message); }
+  }
+  setInterval(() => runMtCalibValidationAlert(), 30 * 60 * 1000); // check 30min
 
   // Auto-void stuck pending tips. Diferentes sports têm latência distinta de settlement:
   //   LoL/CS/Valorant: matches rápidos, 12h já é tarde demais

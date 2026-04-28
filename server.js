@@ -12596,6 +12596,42 @@ const server = http.createServer(async (req, res) => {
         t1.history.push({ ts, points: p1Points, gf: hg, ga: ag });
         t2.history.push({ ts, points: p2Points, gf: ag, ga: hg });
       }
+      // H2H pairwise — agrega goals + winners em confrontos diretos.
+      // Pra cada par (sorted alfabeticamente) acumula stats. Usado em predictFootball
+      // como multiplicador suave de lambda (cap ±10%).
+      const _normTeam = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+      const h2hPairs = {};
+      for (const r of filtered) {
+        const [hg, ag] = String(r.final_score || '').split('-').map(n => parseInt(n));
+        if (!Number.isFinite(hg) || !Number.isFinite(ag)) continue;
+        const t1n = _normTeam(r.team1);
+        const t2n = _normTeam(r.team2);
+        if (!t1n || !t2n || t1n === t2n) continue;
+        const [a, b] = t1n < t2n ? [t1n, t2n] : [t2n, t1n];
+        const key = `${a}__${b}`;
+        if (!h2hPairs[key]) h2hPairs[key] = { n: 0, total_goals: 0, home_wins: 0, away_wins: 0, draws: 0 };
+        h2hPairs[key].n++;
+        h2hPairs[key].total_goals += hg + ag;
+        if (hg > ag) h2hPairs[key].home_wins++;
+        else if (hg < ag) h2hPairs[key].away_wins++;
+        else h2hPairs[key].draws++;
+      }
+      // Reduz a média/factor por par (n>=3 cobertura mínima)
+      const h2hParams = {};
+      let h2hQualified = 0;
+      for (const k in h2hPairs) {
+        const h = h2hPairs[k];
+        if (h.n < 3) continue;
+        h2hParams[k] = {
+          n: h.n,
+          avg_total_goals: +(h.total_goals / h.n).toFixed(3),
+          home_wr: +(h.home_wins / h.n).toFixed(3),
+          away_wr: +(h.away_wins / h.n).toFixed(3),
+          draw_rate: +(h.draws / h.n).toFixed(3),
+        };
+        h2hQualified++;
+      }
+
       const teamParams = {};
       let qualifiedTeams = 0;
       for (const t in teamStats) {
@@ -12657,6 +12693,8 @@ const server = http.createServer(async (req, res) => {
         leagues: leagueParams,
         teams: teamParams,
         teamsCount: qualifiedTeams,
+        h2h: h2hParams,
+        h2hCount: h2hQualified,
       };
       const fs = require('fs');
       const path = require('path');
