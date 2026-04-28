@@ -6985,11 +6985,22 @@ const server = http.createServer(async (req, res) => {
     const viewMode = (parsed.query.viewMode || parsed.query.view || 'all').toLowerCase();
     // league filter — match exato (case-insensitive). Pra dashboard cards filtráveis.
     const leagueFilter = parsed.query.league ? String(parsed.query.league).slice(0, 200) : null;
+    // leagueIn — lista de ligas (pipe-separated, urlencoded). Pra tier filter
+    // que precisa cobrir múltiplas ligas. Cap 50 ligas pra evitar SQL gigante.
+    const leagueInRaw = parsed.query.leagueIn ? String(parsed.query.leagueIn).slice(0, 4000) : null;
+    const leagueIn = leagueInRaw
+      ? leagueInRaw.split('|').map(s => s.trim()).filter(Boolean).slice(0, 50)
+      : null;
     try {
       const conds = [`created_at >= datetime('now', '-${days} days')`];
       const params = [];
       if (sport) { conds.push('sport = ?'); params.push(sport); }
       if (leagueFilter) { conds.push('lower(league) = lower(?)'); params.push(leagueFilter); }
+      if (leagueIn && leagueIn.length) {
+        const placeholders = leagueIn.map(() => 'lower(?)').join(',');
+        conds.push(`lower(league) IN (${placeholders})`);
+        params.push(...leagueIn);
+      }
       if (status === 'pending') conds.push('result IS NULL');
       else if (status === 'settled') conds.push(`result IN ('win','loss')`);
       if (!includeVoid) conds.push(`(result IS NULL OR result != 'void')`);

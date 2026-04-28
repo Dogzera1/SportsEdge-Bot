@@ -2822,6 +2822,10 @@ let marketTipsState = {
   // Per-league breakdown (cards filtráveis)
   byLeague: null,
   leagueFilter: null,
+  // Tier-level grouping (ATP Slam, ATP Challenger, WTA 125K, etc).
+  // Default 'tier' (cards agrupados); 'league' mostra per-liga (legacy).
+  groupView: 'tier',
+  tierFilter: null,
   daysWindow: 14,
   daysSportWindow: 30,
   includeVoid: false,
@@ -2838,6 +2842,8 @@ async function loadMarketTipsShadow() {
     marketTipsState.page = 0;
     marketTipsState.sport = currentSport;
     marketTipsState.leagueFilter = null; // sport mudou — filter de liga não vale
+    marketTipsState.tierFilter = null;
+    marketTipsState.tierSport = null;
   }
   const sp = currentSport === '__overall__' ? '' : '&sport=' + encodeURIComponent(currentSport);
   const liveQ = marketTipsState.includeLive ? '&includeLive=1' : '';
@@ -2846,7 +2852,18 @@ async function loadMarketTipsShadow() {
   const viewQ = `&viewMode=${marketTipsState.viewMode || 'all'}`;
   // League filter agora é server-side (antes filtrava client-side fragmentando
   // páginas — totalPages errado, navegação next-page mostrava vazio).
-  const leagueQ = marketTipsState.leagueFilter ? `&league=${encodeURIComponent(marketTipsState.leagueFilter)}` : '';
+  let leagueQ = marketTipsState.leagueFilter ? `&league=${encodeURIComponent(marketTipsState.leagueFilter)}` : '';
+  // Tier filter: client expande pra lista de ligas matching, envia como leagueIn.
+  if (marketTipsState.tierFilter && marketTipsState.byLeague?.leagues) {
+    const matching = marketTipsState.byLeague.leagues
+      .filter(l => l.sport === marketTipsState.tierSport
+              && _classifyLeagueTier(l.sport, l.league) === marketTipsState.tierFilter)
+      .map(l => l.league)
+      .slice(0, 50);
+    if (matching.length) {
+      leagueQ = `&leagueIn=${encodeURIComponent(matching.join('|'))}`;
+    }
+  }
   const offset = marketTipsState.page * marketTipsState.perPage;
   const days = marketTipsState.daysWindow;
   const daysSport = marketTipsState.daysSportWindow;
@@ -3488,7 +3505,7 @@ function renderMarketTipsPage() {
       Ativar DM admin: env <code>&lt;SPORT&gt;_MARKET_TIPS_ENABLED=true</code>.
     </div>
     ${renderMarketTipsBySportCards(marketTipsState.bySport)}
-    ${renderMarketTipsByLeagueCards(marketTipsState.byLeague)}
+    ${marketTipsState.groupView === 'tier' ? renderMarketTipsByTierCards(marketTipsState.byLeague) : renderMarketTipsByLeagueCards(marketTipsState.byLeague)}
     ${renderMarketTipsBreakdown(marketTipsState.breakdown)}
     <div style="display:flex;gap:8px;margin:10px 0 6px;flex-wrap:wrap;align-items:center">
       ${tabBtn('📊 Todas', 'all')}
@@ -3668,6 +3685,158 @@ function renderMarketTipsBySportCards(bs) {
     <div class="card-meta" style="margin-bottom:8px"><b>📊 Stats por esporte (${bs.days}d)</b> — clique pra filtrar</div>
     <div style="display:flex;gap:10px;flex-wrap:wrap">${overallBtn}${cards}</div>
   </div>`;
+}
+
+// Classificador de tier (espelha lib/league-classifier.js — duplicado aqui
+// pra evitar dependency em browser sem bundler). Usado pra agrupar cards
+// por tier abstrato em vez de per-liga.
+function _classifyLeagueTier(sport, league) {
+  if (!league) return 'Outros';
+  const low = String(league).toLowerCase();
+  const sp = String(sport).toLowerCase();
+  if (sp === 'tennis') {
+    const isWta = /\bwta\b|\bwomen\b/.test(low);
+    const isAtp = /\batp\b(?!.*\bchallenger\b)|\bmen\b/.test(low);
+    const tour = isWta ? 'WTA' : (isAtp ? 'ATP' : null);
+    if (/(australian open|aus open|french open|roland garros|wimbledon|us open)/.test(low)) {
+      return tour ? `${tour} Slam` : 'Slam';
+    }
+    if (/\bchallenger\b/.test(low)) return 'ATP Challenger';
+    if (/\b(m15|m25)\b|\bitf m\b/.test(low)) return 'ITF M';
+    if (/\b(w15|w25|w50|w60|w75|w80|w100)\b|\bitf w\b/.test(low)) return 'ITF W';
+    if (/\bwta\b.*\b(125k|125)\b|\b125k\b/.test(low)) return 'WTA 125K';
+    if (/(madrid|monte\s*carlo|paris\s+master|paris\s+bercy|miami\s+open|indian\s*wells|cincinnati|shanghai\s*master|toronto\s*master|montreal\s*master|canadian\s*open|rome\s*master|italian\s*open)/.test(low)
+        || /^(atp|wta)\s+(madrid|rome|roma|monte\s*carlo|paris|cincinnati|shanghai|miami|indian\s*wells|toronto|montreal)\b/.test(low)) {
+      return tour === 'WTA' ? 'WTA Masters' : 'ATP Masters';
+    }
+    if (tour === 'WTA') return 'WTA 250/500';
+    if (tour === 'ATP') return 'ATP 250/500';
+    return 'Outros';
+  }
+  if (['lol','cs2','dota2','valorant'].includes(sp)) {
+    if (/\b(worlds|msi|the\s+international|riyadh\s+masters|major\s+championship)\b/.test(low)) return 'Major';
+    if (/\b(challenger|challengers|academy|secondary|tier\s*2|tier\s*3|circuito)\b/.test(low)) return 'Tier 3';
+    if (/\b(lck|lpl|lec|lcs|cblol|vcs|pcs|ljl|hltv|esl\s+pro|blast\s+premier|skyesports|iem)\b/.test(low)) return 'Tier 1';
+    return 'Tier 2';
+  }
+  if (sp === 'football') {
+    if (/(premier\s*league|la\s*liga|serie\s*a|bundesliga|ligue\s*1)\b/.test(low)) return 'Top 5';
+    if (/(champions\s*league|europa|conference|libertadores|sul-americana|sudamericana)\b/.test(low)) return 'Continental';
+    if (/(brasileirão|brasileirao|série\s*a|serie\s*b|primera|championship|eredivisie|jupiler)\b/.test(low)) return 'Major Other';
+    if (/\b(cup|copa|taça|fa\s*cup|league\s*cup|carabao)\b/.test(low)) return 'Cups';
+  }
+  return 'Outros';
+}
+
+const TIER_COLORS = {
+  'ATP Slam': '#fbbf24', 'WTA Slam': '#f472b6', 'Slam': '#fbbf24',
+  'ATP Masters': '#3b82f6', 'WTA Masters': '#a855f7',
+  'WTA 125K': '#a78bfa', 'ATP Challenger': '#10b981',
+  'ATP 250/500': '#06b6d4', 'WTA 250/500': '#ec4899',
+  'ITF M': '#64748b', 'ITF W': '#94a3b8',
+  'Major': '#fbbf24', 'Tier 1': '#3b82f6', 'Tier 2': '#10b981', 'Tier 3': '#64748b',
+  'Top 5': '#3b82f6', 'Major Other': '#10b981', 'Continental': '#fbbf24', 'Cups': '#a855f7',
+  'Outros': '#64748b',
+};
+
+// Agrega marketTipsState.byLeague em tiers + render cards. Click → tier filter.
+function renderMarketTipsByTierCards(bl) {
+  if (!bl || !Array.isArray(bl.leagues) || !bl.leagues.length) return '';
+  const tiers = new Map(); // tierKey → aggregate
+  for (const l of bl.leagues) {
+    const tier = _classifyLeagueTier(l.sport, l.league);
+    const key = `${l.sport}|${tier}`;
+    const ag = tiers.get(key) || {
+      sport: l.sport, tier,
+      n: 0, settled: 0, pending: 0, wins: 0, live_n: 0,
+      profit: 0, staked: 0, clvSum: 0, clvN: 0,
+      leagueCount: 0, leagues: [],
+    };
+    ag.n += l.n;
+    ag.settled += l.settled;
+    ag.pending += l.pending;
+    ag.wins += l.wins;
+    ag.live_n += l.live_n;
+    ag.profit += l.profit;
+    ag.staked += l.staked;
+    if (l.avgClv != null && l.clvN > 0) {
+      ag.clvSum += l.avgClv * l.clvN;
+      ag.clvN += l.clvN;
+    }
+    ag.leagueCount += 1;
+    ag.leagues.push(l.league);
+    tiers.set(key, ag);
+  }
+  const groups = [...tiers.values()].sort((a, b) => b.n - a.n);
+  const fmtPct = (v, d=1) => v == null ? '—' : (v >= 0 ? '+' : '') + Number(v).toFixed(d) + '%';
+  const cls = (v) => v == null ? '' : (v >= 0 ? 'positive' : 'negative');
+  const escapeQ = (s) => String(s).replace(/'/g, "&#39;").replace(/"/g, '&quot;');
+
+  const cards = groups.map(g => {
+    const isActive = marketTipsState.tierFilter === g.tier && marketTipsState.tierSport === g.sport;
+    const c = TIER_COLORS[g.tier] || '#888';
+    const hitRate = g.settled > 0 ? (g.wins / g.settled * 100) : null;
+    const roi = g.staked > 0 ? (g.profit / g.staked * 100) : null;
+    const avgClv = g.clvN > 0 ? (g.clvSum / g.clvN) : null;
+    const liveBadge = g.live_n > 0
+      ? `<span style="background:#ef4444;color:#fff;padding:1px 4px;border-radius:3px;font-size:0.65em;margin-left:4px">🔴 ${g.live_n}</span>`
+      : '';
+    const leagueBadge = g.leagueCount > 1
+      ? `<span style="background:#475569;color:#fff;padding:1px 4px;border-radius:3px;font-size:0.65em;margin-left:4px" title="${escapeQ(g.leagues.slice(0,5).join(' · '))}${g.leagues.length>5?' …':''}">${g.leagueCount} ligas</span>`
+      : '';
+    return `
+      <div onclick="filterMarketTipsByTier('${g.sport}','${escapeQ(g.tier)}')"
+           style="cursor:pointer;border:2px solid ${isActive ? c : 'var(--border,#2a2a2a)'};background:var(--surface,#0f172a);border-radius:6px;padding:9px 11px;min-width:200px;flex:1;transition:transform 0.1s"
+           onmouseover="this.style.transform='translateY(-2px)'" onmouseout="this.style.transform='translateY(0)'">
+        <div style="display:flex;align-items:center;gap:4px;margin-bottom:4px;flex-wrap:wrap">
+          <span style="background:${c};color:#fff;padding:2px 7px;border-radius:3px;font-size:0.72em;font-weight:600">${g.tier}</span>
+          ${liveBadge}${leagueBadge}
+        </div>
+        <div style="font-size:0.7em;color:#888;margin-top:1px">${g.sport.toUpperCase()} · ${g.n} tips · ${g.pending} pend · ${g.settled} sett</div>
+        <div style="display:flex;justify-content:space-between;font-size:0.78em;margin-top:5px">
+          <span>Hit <b>${fmtPct(hitRate, 0)}</b></span>
+          <span class="${cls(roi)}">ROI <b>${fmtPct(roi)}</b></span>
+        </div>
+        <div style="display:flex;justify-content:space-between;font-size:0.74em;margin-top:1px">
+          <span class="${cls(avgClv)}">CLV ${fmtPct(avgClv)}${g.clvN>0?` <span style="opacity:0.6">(${g.clvN})</span>`:''}</span>
+          <span class="${cls(g.profit)}">${g.profit >= 0 ? '+' : ''}${g.profit.toFixed(1)}u</span>
+        </div>
+      </div>`;
+  }).join('');
+  const filterHint = marketTipsState.tierFilter
+    ? `<span style="margin-left:8px;color:#3b82f6;cursor:pointer;font-size:0.8em" onclick="filterMarketTipsByTier(null,null)">✕ limpar filtro: <b>${marketTipsState.tierFilter}</b></span>`
+    : '';
+  const toggleBtn = `<button onclick="toggleMarketTipsGroupView()" style="margin-left:auto;padding:2px 8px;font-size:0.75em;background:var(--surface-2,#1e293b);border:1px solid var(--border,#334155);color:var(--text,#e2e8f0);border-radius:4px;cursor:pointer">${marketTipsState.groupView === 'tier' ? '📂 Ver por liga' : '📁 Ver por tier'}</button>`;
+  return `
+    <div style="margin-bottom:14px">
+      <div class="card-meta" style="margin-bottom:6px;font-size:0.8em;display:flex;align-items:center">
+        🏆 <b style="margin-left:4px">Stats MT por tier (${bl.days}d, ${groups.length} grupos)</b> — clique pra filtrar tabela${filterHint}
+        ${toggleBtn}
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">${cards}</div>
+    </div>`;
+}
+
+function toggleMarketTipsGroupView() {
+  marketTipsState.groupView = marketTipsState.groupView === 'tier' ? 'league' : 'tier';
+  marketTipsState.tierFilter = null;
+  marketTipsState.tierSport = null;
+  marketTipsState.leagueFilter = null;
+  marketTipsState.page = 0;
+  loadMarketTipsShadow();
+}
+
+function filterMarketTipsByTier(sport, tier) {
+  if (!sport || !tier || (marketTipsState.tierFilter === tier && marketTipsState.tierSport === sport)) {
+    marketTipsState.tierFilter = null;
+    marketTipsState.tierSport = null;
+  } else {
+    marketTipsState.tierFilter = tier;
+    marketTipsState.tierSport = sport;
+    marketTipsState.leagueFilter = null;
+  }
+  marketTipsState.page = 0;
+  loadMarketTipsShadow();
 }
 
 // Cards horizontais com stats por liga (MT shadow). Click filtra tabela
