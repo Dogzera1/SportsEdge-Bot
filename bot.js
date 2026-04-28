@@ -13768,7 +13768,10 @@ Máximo 200 palavras. Raciocínio breve antes da decisão.`;
             const pickPTn = pickP1Tn ? mlResultTennis.modelP1 : mlResultTennis.modelP2;
             const pickImpTn = pickP1Tn ? _impPairH.impliedP1 : _impPairH.impliedP2;
             const edgeTn = (pickPTn - pickImpTn) * 100;
-            const minEdgeTn = parseFloat(process.env.TENNIS_HYBRID_MIN_EDGE_PP || '6');
+            // Default 6→4 (2026-04-28): com 6pp em Pinnacle (mercado super liquid+sharp),
+            // edge real raramente ultrapassa threshold → 0 ML tips em 30d. Relaxar pra 4
+            // abre 5-10 tips/dia em Slam/Masters. Override via env.
+            const minEdgeTn = parseFloat(process.env.TENNIS_HYBRID_MIN_EDGE_PP || '4');
             const pickOddTn = pickP1Tn ? parseFloat(o.t1) : parseFloat(o.t2);
             const pickTeamTn = pickP1Tn ? match.team1 : match.team2;
             const evMult = pickPTn * pickOddTn;
@@ -13860,7 +13863,10 @@ Máximo 200 palavras. Raciocínio breve antes da decisão.`;
         if (!tipMatch2) {
           const _advisoryOn = !/^(0|false|no)$/i.test(String(process.env.TENNIS_IA_ADVISORY || '')) && !isPathDisabled('tennis', 'override');
           const _minConf = parseFloat(process.env.TENNIS_IA_OVERRIDE_MIN_CONF || '0.50');
-          const _minEdgePp = parseFloat(process.env.TENNIS_IA_OVERRIDE_MIN_EDGE_PP || '5');
+          // Default 5→3 (2026-04-28): advisory roda quando hybrid não bypassa.
+          // 5pp ainda agressivo pra Pinnacle tennis. 3pp em conf BAIXA + stake 1u +
+          // EV cap permanece (1.04-1.8). Mantém downside controlado.
+          const _minEdgePp = parseFloat(process.env.TENNIS_IA_OVERRIDE_MIN_EDGE_PP || '3');
           const _isTrained = /trained/i.test(String(mlResultTennis.method || ''));
           const _impPairAdv = _impliedFromOdds(o);
           if (_advisoryOn && _isTrained && _impPairAdv && (mlResultTennis.confidence ?? 0) >= _minConf) {
