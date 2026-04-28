@@ -15075,15 +15075,23 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
       const promptTokens = promptRow?.count || 0;
       const complTokens  = complRow?.count || 0;
       const totalCostUSD = (promptTokens / 1_000_000 * 0.14) + (complTokens / 1_000_000 * 0.28);
+      // 2026-04-28: N+1 fix — antes 30 queries (10 sports × 3 providers).
+      // Agora 1 query com IN clause + agrupamento JS.
       const perSport = {};
       let sumTracked = 0;
+      const allProviders = [];
       for (const s of SPORTS_LIST) {
-        const row = db.prepare(`SELECT count FROM api_usage WHERE provider = ? AND month = ?`).get(`deepseek_${s}`, monthParam);
-        const pRow = db.prepare(`SELECT count FROM api_usage WHERE provider = ? AND month = ?`).get(`deepseek_prompt_tokens_${s}`, monthParam);
-        const cRow = db.prepare(`SELECT count FROM api_usage WHERE provider = ? AND month = ?`).get(`deepseek_completion_tokens_${s}`, monthParam);
-        const calls = row?.count || 0;
-        const ptok = pRow?.count || 0;
-        const ctok = cRow?.count || 0;
+        allProviders.push(`deepseek_${s}`, `deepseek_prompt_tokens_${s}`, `deepseek_completion_tokens_${s}`);
+      }
+      const placeholders = allProviders.map(() => '?').join(',');
+      const allRows = db.prepare(
+        `SELECT provider, count FROM api_usage WHERE month = ? AND provider IN (${placeholders})`
+      ).all(monthParam, ...allProviders);
+      const byProvider = new Map(allRows.map(r => [r.provider, r.count || 0]));
+      for (const s of SPORTS_LIST) {
+        const calls = byProvider.get(`deepseek_${s}`) || 0;
+        const ptok = byProvider.get(`deepseek_prompt_tokens_${s}`) || 0;
+        const ctok = byProvider.get(`deepseek_completion_tokens_${s}`) || 0;
         const costUSD = (ptok / 1_000_000 * 0.14) + (ctok / 1_000_000 * 0.28);
         sumTracked += calls;
         perSport[s] = { calls, prompt_tokens: ptok, completion_tokens: ctok, cost_usd: parseFloat(costUSD.toFixed(4)) };
@@ -16255,8 +16263,24 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
       params.push(like, like, like, like);
     }
 
-    query += ` ORDER BY ${sortCol} ${dir}, t.id ${dir} LIMIT ?`;
+    // 2026-04-28: paginação opt-in via offset + format=paginated (retorna
+    // { rows, total, offset, limit }). Default mantém shape array pra compat.
+    const offsetRaw = parseInt(parsed.query.offset, 10);
+    const offset = Number.isFinite(offsetRaw) && offsetRaw >= 0 ? Math.min(offsetRaw, 100000) : 0;
+    const formatPaginated = String(parsed.query.format || '').toLowerCase() === 'paginated';
+
+    // Compute total count quando paginated (count antes do LIMIT/OFFSET)
+    let totalCount = null;
+    if (formatPaginated) {
+      const countQuery = `SELECT COUNT(*) AS n FROM (${query.replace('SELECT t.*', 'SELECT t.id')}) sub`;
+      try {
+        totalCount = db.prepare(countQuery).get(...params)?.n || 0;
+      } catch (_) { totalCount = null; }
+    }
+
+    query += ` ORDER BY ${sortCol} ${dir}, t.id ${dir} LIMIT ?${offset > 0 ? ' OFFSET ?' : ''}`;
     params.push(limit);
+    if (offset > 0) params.push(offset);
 
     // Recomputa stake_reais / profit_reais usando baseline.unit_value atual.
     // DB guarda snapshots de quando a tip foi settled; mudanças de baseline refletem aqui.
@@ -16266,7 +16290,11 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
       stake_reais: tipStakeReais(t, _bl.unit_value),
       profit_reais: tipProfitReais(t, _bl.unit_value),
     }));
-    sendJson(res, rows);
+    if (formatPaginated) {
+      sendJson(res, { rows, total: totalCount, offset, limit });
+    } else {
+      sendJson(res, rows);
+    }
     return;
   }
 
@@ -16514,6 +16542,15 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
   if (p === '/overall-summary') {
     const daysRaw = parseInt(parsed.query.days);
     const days = Number.isFinite(daysRaw) ? Math.max(1, Math.min(365, daysRaw)) : 30;
+    // 2026-04-28: cache TTL 30s — dashboard refresh 60s, query é heavy
+    // (full scan tips + bankroll). Antes cada hit recalculava do zero.
+    const _osKey = `overall:${days}`;
+    if (!global._overallCache) global._overallCache = new Map();
+    const _osHit = global._overallCache.get(_osKey);
+    if (_osHit && (Date.now() - _osHit.ts) < 30_000) {
+      sendJson(res, _osHit.data);
+      return;
+    }
     try {
       // KPIs globais: soma de banca + lucro + tips de todas as bankrolls
       // Recalcula current_banca inline a partir de SUM(profit_reais WHERE archived=0)
@@ -16731,7 +16768,7 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
         series.unshift({ day: baseline.date, cum_banca: effectiveBaseline, profit_reais: 0, n: 0, baseline: true });
       }
 
-      sendJson(res, {
+      const _payload = {
         days,
         banca: {
           total_initial: +totalInitial.toFixed(2),
@@ -16773,7 +16810,15 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
           max_drawdown_pct: +(maxDD * 100).toFixed(2),
           series,
         },
-      });
+      };
+      // Cache + send
+      global._overallCache.set(_osKey, { ts: Date.now(), data: _payload });
+      // Cache eviction simples (max 10 entries)
+      if (global._overallCache.size > 10) {
+        const oldest = [...global._overallCache.entries()].sort((a, b) => a[1].ts - b[1].ts)[0];
+        if (oldest) global._overallCache.delete(oldest[0]);
+      }
+      sendJson(res, _payload);
     } catch (e) { sendJson(res, { error: e.message }, 500); }
     return;
   }

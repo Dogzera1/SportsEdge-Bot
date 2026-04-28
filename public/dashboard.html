@@ -568,12 +568,13 @@
     <div class="card-header">
       <div class="card-title">🚨 Ligas com leak</div>
       <div class="card-meta">
-        <select class="select-inline" id="leagueLeaksDays" onchange="loadLeagueLeaks()">
+        <select class="select-inline" id="leagueLeaksDays" onchange="_saveFilter('leagueLeaksDays', this.value); loadLeagueLeaks()">
           <option value="14">14d</option>
           <option value="30" selected>30d</option>
           <option value="60">60d</option>
           <option value="90">90d</option>
         </select>
+        <button onclick="loadLeagueLeaks()" title="Refresh leaks" style="background:transparent;border:1px solid var(--border);color:var(--text-dim);padding:2px 6px;border-radius:4px;cursor:pointer;font-size:11px;margin-left:4px">↻</button>
         <span id="leagueLeaksMeta"></span>
       </div>
     </div>
@@ -595,11 +596,12 @@
       <div class="card-header">
         <div class="card-title">Curva de banca</div>
         <div class="card-meta">
-          <select class="select-inline" id="equityDays" onchange="loadEquity()">
+          <select class="select-inline" id="equityDays" onchange="_saveFilter('equityDays', this.value); loadEquity()">
             <option value="7">7 dias</option>
             <option value="30" selected>30 dias</option>
             <option value="90">90 dias</option>
           </select>
+          <button onclick="loadEquity()" title="Refresh equity" style="background:transparent;border:1px solid var(--border);color:var(--text-dim);padding:2px 6px;border-radius:4px;cursor:pointer;font-size:11px;margin-left:4px">↻</button>
         </div>
       </div>
       <div class="chart-wrap"><canvas id="equityChart"></canvas></div>
@@ -647,18 +649,19 @@
     <div class="card-header">
       <div class="card-title">Tips recentes</div>
       <div style="display:flex;gap:8px;align-items:center">
-        <select class="select-inline" id="tipsStatus" onchange="loadTips()">
+        <select class="select-inline" id="tipsStatus" onchange="_saveFilter('tipsStatus', this.value); loadTips()">
           <option value="">Todas</option>
           <option value="open">Pendentes</option>
           <option value="win">Ganhas</option>
           <option value="loss">Perdidas</option>
         </select>
-        <select class="select-inline" id="tipsPageSize" onchange="tipsPage=1; renderTipsTable()">
+        <select class="select-inline" id="tipsPageSize" onchange="_saveFilter('tipsPageSize', this.value); tipsPage=1; renderTipsTable()">
           <option value="10">10/pág</option>
           <option value="25" selected>25/pág</option>
           <option value="50">50/pág</option>
           <option value="100">100/pág</option>
         </select>
+        <button onclick="loadTips()" title="Refresh tips" style="background:transparent;border:1px solid var(--border);color:var(--text-dim);padding:3px 8px;border-radius:4px;cursor:pointer;font-size:11px">↻</button>
       </div>
     </div>
     <!-- Stats por esporte — só real tips (is_shadow=0). Click filtra dashboard. -->
@@ -4343,6 +4346,27 @@ async function loadCost() {
 // Init
 // ─────────────────────────────────────────────────────────────
 function init() {
+  // 2026-04-28: restore filtros persistidos antes do primeiro refresh.
+  const _restoreSelect = (id, key) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const saved = _loadFilter(key, null);
+    if (saved && [...el.options].some(o => o.value === saved)) el.value = saved;
+  };
+  _restoreSelect('tipsStatus', 'tipsStatus');
+  _restoreSelect('tipsPageSize', 'tipsPageSize');
+  _restoreSelect('equityDays', 'equityDays');
+  _restoreSelect('leagueLeaksDays', 'leagueLeaksDays');
+  // sportSelect já está no DOM com options dinâmicos — restaura currentSport
+  const ss = document.getElementById('sportSelect');
+  if (ss) {
+    const v = currentSport || 'lol';
+    if ([...ss.options].some(o => o.value.startsWith(v))) {
+      const opt = [...ss.options].find(o => o.value === v || o.value.startsWith(v + '|'));
+      if (opt) ss.value = opt.value;
+    }
+  }
+
   refresh();
   if (autoRefreshTimer) clearInterval(autoRefreshTimer);
   // 2026-04-28: pausa auto-refresh quando aba em background. Antes timer rodava
