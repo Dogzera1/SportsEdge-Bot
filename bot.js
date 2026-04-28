@@ -13580,7 +13580,20 @@ async function pollTennis(runOnce = false) {
                     log('INFO', 'TENNIS-MARKETS',
                       `  • ${t.label} @ ${t.odd.toFixed(2)} | pModel=${(t.pModel*100).toFixed(1)}% pImpl=${t.pImplied ? (t.pImplied*100).toFixed(1)+'%' : '?'} EV=${t.ev.toFixed(1)}%${discTag}`);
                   }
-                  if (isMarketTipsEnabled('tennis') && ADMIN_IDS.size && !_tennisShadowOnly) {
+                  // 2026-04-28: log diagnóstico quando gate bloqueia DM/promoção.
+                  // Antes era silent fail — impossível debugar por que tip ficou
+                  // só em shadow.
+                  const _gateMtEnabled = isMarketTipsEnabled('tennis');
+                  const _gateAdmins = ADMIN_IDS.size > 0;
+                  const _gateNotShadow = !_tennisShadowOnly;
+                  if (!(_gateMtEnabled && _gateAdmins && _gateNotShadow) && found.length > 0) {
+                    const reasons = [];
+                    if (!_gateMtEnabled) reasons.push('mt_disabled (TENNIS_MARKET_TIPS_ENABLED!=true OR market in leak guard)');
+                    if (!_gateAdmins) reasons.push('no_admin_ids');
+                    if (!_gateNotShadow) reasons.push(`shadow_only (topTier=${_tennisTopTier} tier2Promote=${_tennisTier2Promote} chall/itf=${isChallengerOrItf})`);
+                    log('INFO', 'MT-GATE-SKIP', `tennis ${match.team1} vs ${match.team2} [${match.league}]: ${found.length} MT tip(s) found mas DM/promoção bloqueada — ${reasons.join(' | ')}`);
+                  }
+                  if (_gateMtEnabled && _gateAdmins && _gateNotShadow) {
                     try {
                       const mtp = require('./lib/market-tip-processor');
                       const minEvGate = parseFloat(process.env.TENNIS_MARKET_TIP_MIN_EV ?? '8');
