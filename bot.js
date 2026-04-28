@@ -13489,6 +13489,14 @@ async function pollTennis(runOnce = false) {
           if (process.env.TENNIS_MARKET_SCAN !== 'false' && tennisModelResult?._markovMarkets) {
             try {
               const markets = await serverGet(`/odds-markets?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}&period=0&separate_aces=1`).catch(() => null);
+              // Diag: aces feed coverage. Tennis aces tips n=0 em audit Apr/28 90d
+              // — possíveis causas: (a) Pinnacle não expõe acesTotals nesse matchup,
+              // (b) bucket detection (server.js mediana 11-17) não classificou, (c)
+              // gate p_model muito alto em scanner.
+              if (markets && tennisModelResult?._markovAces) {
+                log('DEBUG', 'TENNIS-ACES-FEED',
+                  `${match.team1} vs ${match.team2}: handi=${markets.handicaps?.length||0} tot=${markets.totals?.length||0} aces=${markets.acesTotals?.length||0} df=${markets.dfTotals?.length||0}`);
+              }
               if (markets && ((markets.handicaps?.length || 0) + (markets.totals?.length || 0) + (markets.acesTotals?.length || 0) + (markets.dfTotals?.length || 0)) > 0) {
                 const { scanTennisMarkets } = require('./lib/tennis-market-scanner');
                 const minEv = parseFloat(process.env.TENNIS_MARKET_SCAN_MIN_EV ?? '4');
@@ -17484,6 +17492,11 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   setInterval(() => runMtCalibRefit(), 60 * 60 * 1000); // check 1h
   setTimeout(() => runMtCalibRefit(), 5 * 60 * 1000);  // bootstrap 5min após boot
 
+  // Persistent calib gap tracker — buckets com gap >=15pp por N runs consecutivos
+  // viram disabled via market_tips_runtime_state (mesma tabela do ROI guard).
+  // Roda junto do daily validation alert.
+  const _persistentCalibGapCount = new Map(); // 'sport|market' → consecutive_run_count
+
   // MT calib validation daily — DM admins quando bucket flagged (gap >=10pp).
   // Roda diário 9h UTC. Default ON; opt-out MT_VALIDATION_DM_DISABLED=true.
   let _lastValidationDay = null;
@@ -17505,7 +17518,40 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
         return;
       }
       const flagged = (data.buckets || []).filter(b => b.status !== 'ok');
-      if (!flagged.length) {
+      // Auto-disable: tracking de buckets críticos persistentes (gap>=15pp por 3 runs).
+      // Buckets ok resetam contador. critical/flag novos incrementam.
+      const PERSIST_THRESHOLD = parseInt(process.env.MT_CALIB_PERSIST_RUNS || '3', 10);
+      const seenThisRun = new Set();
+      const newlyDisabled = [];
+      for (const b of (data.buckets || [])) {
+        const k = `${b.sport}|${b.market}`;
+        seenThisRun.add(k);
+        if (b.status === 'critical') {
+          const cnt = (_persistentCalibGapCount.get(k) || 0) + 1;
+          _persistentCalibGapCount.set(k, cnt);
+          if (cnt >= PERSIST_THRESHOLD && !_marketTipsDisabledRuntime.has(k)) {
+            try {
+              const reason = `calib gap ${b.gapPp}pp persistente ${cnt} runs (predP=${(b.predP*100).toFixed(0)}% real=${(b.realHit*100).toFixed(0)}%)`;
+              const ts = new Date().toISOString();
+              db.prepare(`INSERT OR REPLACE INTO market_tips_runtime_state
+                (sport, market, side, disabled, source, reason, updated_at)
+                VALUES (?, ?, NULL, 1, 'auto_calib_gap', ?, ?)`).run(b.sport, b.market, reason, ts);
+              _marketTipsDisabledRuntime.set(k, { reason, since: ts, source: 'auto_calib_gap' });
+              newlyDisabled.push(`🚫 ${b.sport}/${b.market} — gap ${b.gapPp}pp x${cnt}`);
+              log('WARN', 'MT-CALIB-AUTO-DISABLE', `${k}: ${reason}`);
+            } catch (e) { log('WARN', 'MT-CALIB-AUTO-DISABLE', `disable err: ${e.message}`); }
+          }
+        } else {
+          // ok ou monitor — reseta contador
+          _persistentCalibGapCount.delete(k);
+        }
+      }
+      // Buckets que sumiram (sem dado nesse run) também resetam
+      for (const k of [..._persistentCalibGapCount.keys()]) {
+        if (!seenThisRun.has(k)) _persistentCalibGapCount.delete(k);
+      }
+
+      if (!flagged.length && !newlyDisabled.length) {
         log('INFO', 'MT-VALIDATION', `daily check: ${data.n_buckets} buckets, all ok`);
         return;
       }
@@ -17518,6 +17564,10 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
         lines.push(`${icon} \`${b.sport}/${b.market}\` n=${b.n} predP=${(b.predP*100).toFixed(0)}% real=${(b.realHit*100).toFixed(0)}% gap=${gapStr} ROI=${b.roi}% CLV=${clvStr}`);
       }
       if (flagged.length > 10) lines.push(`...+${flagged.length - 10} mais`);
+      if (newlyDisabled.length) {
+        lines.push('\n*Auto-disabled (calib gap persistente):*');
+        for (const d of newlyDisabled) lines.push(d);
+      }
       lines.push('\nGap >=10pp sugere refit calib. /admin/mt-calib-validation pra detalhe.');
       const dm = lines.join('\n');
       const tokenAlert = resolveAlertsToken();

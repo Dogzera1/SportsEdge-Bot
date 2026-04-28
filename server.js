@@ -8335,6 +8335,84 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // GET /admin/mt-brier-history?days=90&window=7 — Brier score per (sport,market)
+  // em janelas semanais. Permite ver se calibração está degradando over time.
+  if (p === '/admin/mt-brier-history') {
+    if (!requireAdmin(req, res)) return;
+    const days = Math.max(14, Math.min(365, parseInt(parsed.query.days || '90', 10) || 90));
+    const windowDays = Math.max(3, Math.min(30, parseInt(parsed.query.window || '7', 10) || 7));
+    const minN = parseInt(parsed.query.min_n || '5', 10);
+    try {
+      const rows = db.prepare(`
+        SELECT sport, market, p_model, result, created_at
+        FROM market_tips_shadow
+        WHERE created_at >= datetime('now', '-' || ? || ' days')
+          AND result IN ('win', 'loss')
+          AND p_model IS NOT NULL
+        ORDER BY created_at ASC
+      `).all(days);
+      // Bucket por (sport, market, week_offset)
+      const now = Date.now();
+      const ms = windowDays * 86400000;
+      const series = new Map(); // key 'sport|market' → [{ window_start, n, brier, hit, predP }]
+      for (const r of rows) {
+        const tsR = new Date(String(r.created_at).replace(' ', 'T') + 'Z').getTime();
+        const offset = Math.floor((now - tsR) / ms); // 0 = janela mais recente
+        const k = `${r.sport}|${r.market}|${offset}`;
+        if (!series.has(k)) series.set(k, { sport: r.sport, market: r.market, offset, n: 0, sumP: 0, wins: 0, brierSum: 0 });
+        const b = series.get(k);
+        b.n++;
+        const p = Number(r.p_model);
+        const y = r.result === 'win' ? 1 : 0;
+        b.sumP += p;
+        b.wins += y;
+        b.brierSum += (p - y) ** 2;
+      }
+      // Group por (sport, market)
+      const grouped = new Map();
+      for (const b of series.values()) {
+        if (b.n < minN) continue;
+        const k = `${b.sport}|${b.market}`;
+        if (!grouped.has(k)) grouped.set(k, { sport: b.sport, market: b.market, windows: [] });
+        const g = grouped.get(k);
+        g.windows.push({
+          offset: b.offset,
+          window_days: windowDays,
+          n: b.n,
+          predP: +(b.sumP / b.n).toFixed(4),
+          hit: +(b.wins / b.n).toFixed(4),
+          brier: +(b.brierSum / b.n).toFixed(4),
+        });
+      }
+      // Sort windows oldest-to-newest within each group
+      const out = [];
+      for (const g of grouped.values()) {
+        g.windows.sort((a, b) => b.offset - a.offset); // older first
+        // Trend: Brier mais recente vs avg historical
+        const recent = g.windows[g.windows.length - 1];
+        const histAvg = g.windows.length > 1
+          ? g.windows.slice(0, -1).reduce((a, w) => a + w.brier * w.n, 0) /
+            g.windows.slice(0, -1).reduce((a, w) => a + w.n, 0)
+          : null;
+        const drift = histAvg != null ? +(recent.brier - histAvg).toFixed(4) : null;
+        const status = drift == null ? 'unknown'
+          : drift >= 0.04 ? 'degrading'
+          : drift <= -0.04 ? 'improving'
+          : 'stable';
+        out.push({
+          sport: g.sport, market: g.market,
+          windows: g.windows,
+          recent_brier: recent.brier,
+          historical_avg_brier: histAvg != null ? +histAvg.toFixed(4) : null,
+          drift, status,
+        });
+      }
+      out.sort((a, b) => (b.drift ?? 0) - (a.drift ?? 0));
+      sendJson(res, { ok: true, days, window_days: windowDays, min_n: minN, n_groups: out.length, groups: out });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   // GET /admin/mt-calib-validation?days=90 — diagnóstico calib MT.
   // Para cada (sport, market) com >=10 settled, retorna avg predP vs hit% real
   // + ROI + flag de gap (>10pp = miscalibrado, considerar refit).
