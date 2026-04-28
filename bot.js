@@ -10830,7 +10830,9 @@ async function poll(token, sport) {
                      text.startsWith('/tip ') || text.startsWith('/help') || text.startsWith('/start') ||
                      text.startsWith('/alerts') ||
                      text === '/mt-guard' || text.startsWith('/mt-guard ') ||
-                     text === '/gate-opt' || text.startsWith('/gate-opt ')) {
+                     text === '/gate-opt' || text.startsWith('/gate-opt ') ||
+                     text === '/mt-gates' || text.startsWith('/mt-gates ') ||
+                     text === '/move-football-mt-shadow' || text.startsWith('/move-football-mt-shadow ')) {
             // Passa `sport` da poll (qual bot recebeu) para evitar default 'esports'
             await handleAdmin(token, chatId, text, sport);
           }
