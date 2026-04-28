@@ -15062,7 +15062,9 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
 
   // AI Stats: breakdown de chamadas DeepSeek por sport no mês (requer tracking per-sport em /claude proxy).
   // GET /ai-stats?month=YYYY-MM (default: mês atual)
+  // 2026-04-28: requer admin auth — expõe custos USD por sport, info de uso interno.
   if (p === '/ai-stats') {
+    if (!requireAdmin(req, res)) return;
     try {
       const monthParam = parsed.query.month || new Date().toISOString().slice(0, 7);
       const SPORTS_LIST = ['esports','dota','cs','valorant','tennis','football','mma','tabletennis','darts','snooker'];
@@ -17784,15 +17786,20 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
       const phase = String(parsed.query.phase || 'all'); // all | live | pre
       const gameSql = sqlGameFilter('t', sport, game);
 
+      // 2026-04-28: expande sport via resolveSportSet (legacy esports → lol+dota2)
+      // pra alinhar com /tips-history /roi /equity-curve. Antes /calibration?sport=lol
+      // ocultava tips antigas em sport='esports'.
+      const { sportSet } = resolveSportSet(sport, game);
+      const sportPlaceholders = sportSet.map(() => '?').join(',');
       const tips = db.prepare(
         `SELECT t.odds, t.ev, t.result, t.is_live, t.model_p_pick, t.sent_at, t.settled_at
          FROM tips t
-         WHERE t.sport = ? AND ${sqlTipsDedupeIdIn('t', '?')}
+         WHERE t.sport IN (${sportPlaceholders}) AND ${sqlTipsDedupeIdIn('t', '?')}
          AND t.result IN ('win','loss')
          ${gameSql}
          ORDER BY COALESCE(t.settled_at, t.sent_at) DESC
          LIMIT ?`
-      ).all(sport, sport, limit);
+      ).all(...sportSet, sport, limit);
 
       function tipToP(t) {
         const odds = parseFloat(t.odds) || 0;
