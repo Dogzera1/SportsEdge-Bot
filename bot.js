@@ -7689,14 +7689,16 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
         `).all(sport, days);
       } catch (_) {}
       const adminN = ADMIN_IDS.size;
-      let txt = `🔒 *MT GATES — ${sport.toUpperCase()} (${days}d)*\n\n`;
-      txt += `*Envs:*\n`;
+      // Plain text — evita Markdown parse error com nomes de times/ligas
+      // contendo `_` ou `*` (send() default usa parse_mode=Markdown sem fallback).
+      let txt = `🔒 MT GATES — ${sport.toUpperCase()} (${days}d)\n\n`;
+      txt += `Envs:\n`;
       txt += `• ${up}_MARKET_TIPS_ENABLED: ${sportEnabled ? '✅ true' : '❌ false'}\n`;
       txt += `• MARKET_TIPS_DM_KILL_SWITCH: ${killSwitch ? '⚠️ true (kills all)' : '✅ false'}\n`;
       txt += `• MT_SHADOW_DM_ALL: ${shadowDmAll ? 'true' : 'false'}\n`;
       txt += `• ADMIN_IDS: ${adminN > 0 ? '✅ ' + adminN : '❌ 0'}\n\n`;
-      txt += `*Leak guard disables (${runtimeDisables.length}):*\n`;
-      if (!runtimeDisables.length) txt += `_(nenhum)_\n`;
+      txt += `Leak guard disables (${runtimeDisables.length}):\n`;
+      if (!runtimeDisables.length) txt += `(nenhum)\n`;
       else {
         for (const r of runtimeDisables.slice(0, 10)) {
           if (r.error) { txt += `❌ ${r.error}\n`; continue; }
@@ -7706,15 +7708,18 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
           txt += `❌ ${parts2.join('/')} | clv=${r.clv_pct}% n=${r.clv_n} src=${r.source}\n`;
         }
       }
-      txt += `\n*Recent DMs (${recentDms.length}):*\n`;
-      if (!recentDms.length) txt += `_(nenhum em ${days}d)_\n`;
+      txt += `\nRecent DMs (${recentDms.length}):\n`;
+      if (!recentDms.length) txt += `(nenhum em ${days}d)\n`;
       else {
         for (const r of recentDms) {
           txt += `• ${r.market}/${r.side || '?'} ${r.team1} vs ${r.team2} @ ${r.admin_dm_sent_at}\n`;
         }
       }
-      await send(token, chatId, txt);
-    } catch (e) { await send(token, chatId, `❌ /mt-gates: ${e.message}`); }
+      await send(token, chatId, txt, { parse_mode: undefined });
+    } catch (e) {
+      log('WARN', 'CMD', `/mt-gates threw: ${e.message}`);
+      await send(token, chatId, `❌ /mt-gates: ${e.message}`, { parse_mode: undefined }).catch(() => {});
+    }
 
   } else if (cmd === '/market-tips') {
     if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
