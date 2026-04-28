@@ -78,6 +78,24 @@ try {
   for (const [k, v] of seed) ins.run(k, v);
 } catch(e) { log('WARN', 'BOOT', `Baseline seed: ${e.message}`); }
 
+// MT promote settings: lê settings.mt_promote_<sport>=true e seta process.env.<UP>_MARKET_TIPS_ENABLED.
+// Permite persistência cross-restart via /admin/mt-promote endpoint. Railway env var
+// continua tendo precedência (se setada, não é tocada).
+try {
+  const rows = db.prepare(`SELECT key, value FROM settings WHERE key LIKE 'mt_promote_%'`).all();
+  let applied = 0;
+  for (const r of rows) {
+    const sport = r.key.replace(/^mt_promote_/, '');
+    const envKey = `${sport.toUpperCase()}_MARKET_TIPS_ENABLED`;
+    if (process.env[envKey] !== undefined) continue; // env já setada manualmente — não sobrescreve
+    if (r.value === 'true') {
+      process.env[envKey] = 'true';
+      applied++;
+    }
+  }
+  if (applied > 0) log('INFO', 'BOOT', `MT promote: ${applied} sport(s) ativados via settings`);
+} catch (e) { log('WARN', 'BOOT', `MT promote loader: ${e.message}`); }
+
 // Filtra candidates odds pra manter só books que user aposta.
 // ENV: PREFERRED_BOOKMAKERS=Pinnacle,Bet365 (csv, case-insensitive, substring match).
 // Fallback: se nenhum candidate bate (ex: SX.Bet é único disponível), retorna
@@ -9085,6 +9103,64 @@ const server = http.createServer(async (req, res) => {
         reverts,
       });
     } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
+  // POST /admin/mt-promote?sports=lol,dota2,cs,valorant,tennis,football,mma,tabletennis,darts,snooker&enabled=1&key=<KEY>
+  // Liga (ou desliga com enabled=0) `<SPORT>_MARKET_TIPS_ENABLED` em RUNTIME via
+  // process.env mutation + persiste em settings table. Bot lê process.env por-call,
+  // então fica ativo imediatamente. Próximo restart carrega de settings (loadMtPromoteSettings).
+  if (p === '/admin/mt-promote' && (req.method === 'POST' || req.method === 'GET')) {
+    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const enabled = parsed.query.enabled === '1' || parsed.query.enabled === 'true';
+    const ALL_SPORTS = ['lol', 'dota2', 'cs', 'valorant', 'tennis', 'football', 'mma', 'tabletennis', 'darts', 'snooker'];
+    const requested = parsed.query.sports
+      ? String(parsed.query.sports).split(',').map(s => s.trim().toLowerCase()).filter(Boolean)
+      : ALL_SPORTS;
+    try {
+      const ups = db.prepare(`INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`);
+      const applied = [];
+      for (const sport of requested) {
+        const up = sport.toUpperCase();
+        const envKey = `${up}_MARKET_TIPS_ENABLED`;
+        const settingKey = `mt_promote_${sport}`;
+        if (enabled) {
+          process.env[envKey] = 'true';
+          ups.run(settingKey, 'true');
+        } else {
+          delete process.env[envKey];
+          ups.run(settingKey, 'false');
+        }
+        applied.push({ sport, env: envKey, value: enabled ? 'true' : 'false' });
+        log('INFO', 'MT-PROMOTE', `${sport}: ${envKey}=${enabled ? 'true' : 'false'} (runtime + persisted)`);
+      }
+      sendJson(res, { ok: true, enabled, applied });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
+  // GET /admin/mt-promote-status?key=<KEY>
+  // Mostra status atual (env + settings persisted) por sport.
+  if (p === '/admin/mt-promote-status') {
+    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const ALL_SPORTS = ['lol', 'dota2', 'cs', 'valorant', 'tennis', 'football', 'mma', 'tabletennis', 'darts', 'snooker'];
+    const out = ALL_SPORTS.map(sport => {
+      const up = sport.toUpperCase();
+      const envKey = `${up}_MARKET_TIPS_ENABLED`;
+      const settingKey = `mt_promote_${sport}`;
+      const envVal = process.env[envKey];
+      const settingRow = db.prepare(`SELECT value FROM settings WHERE key = ?`).get(settingKey);
+      return {
+        sport,
+        env_key: envKey,
+        env_value: envVal || null,
+        setting_value: settingRow?.value || null,
+        promote_enabled: envVal === 'true',
+      };
+    });
+    sendJson(res, { ok: true, sports: out });
     return;
   }
 
