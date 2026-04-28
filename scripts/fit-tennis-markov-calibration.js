@@ -2,29 +2,24 @@
 'use strict';
 
 /**
- * fit-tennis-markov-calibration.js
+ * fit-tennis-markov-calibration.js (sport-agnostic apesar do nome legacy)
  *
- * Fit calibração isotônica (PAV + Beta smoothing) sobre p_markov pré-jogo
- * usando market_tips_shadow tennis settled. Target = outcome (win/loss),
- * com prior toward p_implied_close (Pinnacle close devigado approx).
+ * Fit calibração isotônica (PAV + Beta smoothing) sobre p_model registrado em
+ * market_tips_shadow. Target = outcome (win/loss), prior toward p_implied_close
+ * (closing odd devigado approx).
  *
- * Saída: lib/tennis-markov-calib.json
- *   {
- *     version, fittedAt, nSamples,
- *     markets: {
- *       handicapGames: { bins: [{lo, hi, mid, pCalib, n, raw}], coverage: [pMin, pMax] },
- *       totalGames:    { ... }
- *     }
- *   }
- *
- * Backtest comparativo (pré vs pós calib) impresso ao final.
+ * Saída: lib/<sport>-mt-calib.json (tennis mantém lib/tennis-markov-calib.json
+ * por compat). Markets são detectados automaticamente do shadow data — qualquer
+ * (sport, market) com >=12 settled tips é fitado.
  *
  * Uso:
- *   node scripts/fit-tennis-markov-calibration.js
- *   node scripts/fit-tennis-markov-calibration.js --src=tmp_tn_full.json
- *   node scripts/fit-tennis-markov-calibration.js --remote=https://...up.railway.app --days=90
+ *   node scripts/fit-tennis-markov-calibration.js                       # tennis (legacy default)
+ *   node scripts/fit-tennis-markov-calibration.js --sport=lol           # outros sports
+ *   node scripts/fit-tennis-markov-calibration.js --sport=football
+ *   node scripts/fit-tennis-markov-calibration.js --src=tmp.json
+ *   node scripts/fit-tennis-markov-calibration.js --remote=https://x.up.railway.app
  *   node scripts/fit-tennis-markov-calibration.js --dry-run    # nao salva
- *   node scripts/fit-tennis-markov-calibration.js --min-bin=8  # min size por bin
+ *   node scripts/fit-tennis-markov-calibration.js --filter=live  # só is_live=1
  */
 
 const fs = require('fs');
@@ -51,7 +46,11 @@ const VIG = parseFloat(arg('vig', '0.025'));
 //         'live' (só is_live=1 — fita em markets.live.X). Live precisa
 //         sample suficiente (≥30 settled por mercado) ou aborta.
 const FILTER = String(arg('filter', 'all')).toLowerCase();
-const OUT_PATH = path.resolve(__dirname, '..', 'lib', 'tennis-markov-calib.json');
+// SPORT: tennis (default, legacy) | lol | cs2 | dota2 | valorant | football
+const SPORT = String(arg('sport', 'tennis')).toLowerCase();
+// Output filename: tennis mantém legacy nome, demais sports recebem prefix.
+const OUT_FILENAME = SPORT === 'tennis' ? 'tennis-markov-calib.json' : `${SPORT}-mt-calib.json`;
+const OUT_PATH = path.resolve(__dirname, '..', 'lib', OUT_FILENAME);
 
 const MIN_EV = 4;
 
@@ -69,7 +68,7 @@ function fetchRemote(url) {
 
 async function loadTips() {
   if (REMOTE) {
-    const url = `${REMOTE.replace(/\/$/, '')}/market-tips-recent?sport=tennis&days=${DAYS}&limit=1000&status=all&dedup=0&includeVoid=0`;
+    const url = `${REMOTE.replace(/\/$/, '')}/market-tips-recent?sport=${encodeURIComponent(SPORT)}&days=${DAYS}&limit=1000&status=all&dedup=0&includeVoid=0`;
     console.log(`[fetch] ${url}`);
     const j = await fetchRemote(url);
     return j.tips || [];
@@ -79,15 +78,15 @@ async function loadTips() {
   if (dbPath || (!SRC && fs.existsSync(path.resolve(__dirname, '..', 'sportsedge.db')))) {
     const Database = require('better-sqlite3');
     const fullDb = dbPath ? path.resolve(dbPath) : path.resolve(__dirname, '..', 'sportsedge.db');
-    console.log(`[db] ${fullDb}`);
+    console.log(`[db] ${fullDb} (sport=${SPORT})`);
     const db = new Database(fullDb, { readonly: true });
     const rows = db.prepare(`
       SELECT id, sport, market, side, line, p_model, odd, close_odd, clv_pct, result,
              stake_units, profit_units, ev_pct, is_live, created_at
       FROM market_tips_shadow
-      WHERE sport = 'tennis'
+      WHERE sport = ?
         AND created_at >= datetime('now', '-${DAYS} days')
-    `).all();
+    `).all(SPORT);
     db.close();
     return rows;
   }
@@ -95,6 +94,20 @@ async function loadTips() {
   console.log(`[load] ${file}`);
   const j = JSON.parse(fs.readFileSync(path.resolve(file), 'utf8'));
   return j.tips || [];
+}
+
+// Auto-detecta markets fitáveis a partir do sample (mercados com >=12 settled)
+function detectMarkets(tips) {
+  const counts = {};
+  for (const t of tips) {
+    if (t.result !== 'win' && t.result !== 'loss') continue;
+    if (!t.market) continue;
+    counts[t.market] = (counts[t.market] || 0) + 1;
+  }
+  return Object.entries(counts)
+    .filter(([_, n]) => n >= 12)
+    .sort((a, b) => b[1] - a[1])
+    .map(([m]) => m);
 }
 
 // ── PAV (Pool Adjacent Violators) ───────────────────────────────
@@ -147,6 +160,7 @@ function fitMarket(tips, marketName) {
 
   // Bins: mais finos onde há volume (0.65-0.85), grossos nas pontas.
   const edges = [0.30, 0.55, 0.65, 0.70, 0.75, 0.80, 0.85, 0.92, 1.001];
+  const EDGES_MIN = edges[0];
   const bins = [];
   for (let i = 0; i < edges.length - 1; i++) {
     const lo = edges[i], hi = edges[i + 1];
@@ -162,6 +176,12 @@ function fitMarket(tips, marketName) {
     bins.push({ lo, hi, mid, n: sub.length, wins, rawP, priorP, pSmoothed: smoothedP });
   }
 
+  // Empty bins — sample fora da janela esperada (ex: football pModel é
+   // implied-style 0.10-0.30 vs tennis Markov 0.50-0.95). Fail-safe early.
+  if (!bins.length) {
+    console.log(`[${marketName}] all tips fell outside fitting range [${EDGES_MIN}, 1.001) — skipping (n=${lst.length} settled mas pModel não cobre janela)`);
+    return null;
+  }
   // Pool bins com n < MIN_BIN com vizinho mais próximo
   let merged = [...bins];
   let i = 0;
@@ -285,7 +305,22 @@ function backtest(tips, calibByMarket) {
   }
 
   const calibByMarket = {};
-  for (const m of ['handicapGames', 'totalGames']) {
+  // Markets default por sport (legacy paths) + detecção automática
+  const defaultMarkets = {
+    tennis:   ['handicapGames', 'totalGames'],
+    lol:      ['handicap', 'total'],
+    cs2:      ['handicap', 'total'],
+    dota2:    ['handicap', 'total'],
+    valorant: ['handicap', 'total'],
+    football: ['totals'],
+  };
+  const marketsToFit = defaultMarkets[SPORT] || detectMarkets(tips);
+  if (!marketsToFit.length) {
+    console.error(`[abort] no markets to fit for sport=${SPORT}`);
+    process.exit(1);
+  }
+  console.log(`[fit] sport=${SPORT} markets=${marketsToFit.join(',')}`);
+  for (const m of marketsToFit) {
     const c = fitMarket(tips, m);
     if (c) calibByMarket[m] = c;
   }
@@ -352,6 +387,7 @@ function backtest(tips, calibByMarket) {
 
   const payload = {
     version: 1,
+    sport: SPORT,
     fittedAt: new Date().toISOString(),
     method: 'pav_with_beta_smoothing',
     target: 'outcome (win/loss)',
@@ -363,5 +399,5 @@ function backtest(tips, calibByMarket) {
     backtest: bt,
   };
   fs.writeFileSync(OUT_PATH, JSON.stringify(payload, null, 2));
-  console.log(`\n[saved] ${OUT_PATH} (filter=${FILTER})`);
+  console.log(`\n[saved] ${OUT_PATH} (sport=${SPORT}, filter=${FILTER})`);
 })().catch(e => { console.error(e); process.exit(1); });
