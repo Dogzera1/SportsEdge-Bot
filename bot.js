@@ -3448,6 +3448,13 @@ function _parseBlocklistEnv() {
     const v = e.trim().toLowerCase();
     if (!v) continue;
     const entry = v.includes(':') ? v : `*:${v}`;
+    // 2026-04-28: respeita cooldown manual unblock. Antes env re-adicionava
+    // entry mesmo durante cooldown (manual unblock recente) → cooldown ineficaz.
+    const cooldownUntil = _leagueUnblockCooldown.get(entry) || 0;
+    if (cooldownUntil > Date.now()) {
+      log('INFO', 'BLOCKLIST', `env entry ${entry} skipped (cooldown ativo até ${new Date(cooldownUntil).toISOString()})`);
+      continue;
+    }
     if (!_leagueBlocklist.has(entry)) {
       _leagueBlocklist.add(entry);
       _persistBlocklistEntry(entry, 'env', { since: Date.now() });
@@ -5964,7 +5971,8 @@ async function collectGameContext(game, matchId, team1, team2) {
           const gameLabel = gd.gameNumber ? `GAME ${gd.gameNumber}` : 'GAME';
           const statusLabel = gd.gameStatus === 'running' ? 'AO VIVO' : gd.gameStatus || 'INFO';
           const liveNow = gd.gameStatus === 'running' && gd.hasLiveStats && gd.gameNumber;
-          if (liveNow) { liveGameNumber = gd.gameNumber; hasLiveStats = true; lolLiveStats = gd; }
+          // 2026-04-28: tag _fetchedAt pra freshness gate downstream.
+          if (liveNow) { liveGameNumber = gd.gameNumber; hasLiveStats = true; lolLiveStats = { ...gd, _fetchedAt: Date.now() }; }
           gamesContext += `\n[${gameLabel} — ${statusLabel} | Série: ${gd.seriesScore||'0-0'}]\n`;
           if (gd.hasLiveStats) {
             const blue = gd.blueTeam, red = gd.redTeam;
@@ -6043,7 +6051,7 @@ async function collectGameContext(game, matchId, team1, team2) {
             log('INFO', 'LIVE-STATS', `LoL Riot game ${gid.gameId}: state=${gd.gameState||'?'} hasLiveStats=${!!gd.hasLiveStats} gold=${gd.blueTeam?.totalGold||0}/${gd.redTeam?.totalGold||0}`);
             if (gd.hasLiveStats && (gd.gameState === 'in_game' || gd.gameState === 'paused')) {
               hasLiveStats = true;
-              lolLiveStats = gd;
+              lolLiveStats = { ...gd, _fetchedAt: Date.now() };
               if (gid.gameNumber) liveGameNumber = gid.gameNumber;
               const gfn = (v) => v >= 1000 ? (v/1000).toFixed(1)+'k' : String(v||0);
               const blue = gd.blueTeam, red = gd.redTeam;
@@ -6086,7 +6094,7 @@ async function collectGameContext(game, matchId, team1, team2) {
                 const redDragons = red.dragonTypes?.length ? red.dragonTypes.join(', ') : (red.dragons||0);
                 if (gid.gameNumber) liveGameNumber = gid.gameNumber;
                 hasLiveStats = true;
-                lolLiveStats = gd; // armazena p/ predictLolMapWinner downstream
+                lolLiveStats = { ...gd, _fetchedAt: Date.now() }; // armazena p/ predictLolMapWinner downstream
                 gamesContext += `\n[GAME ${gid.gameNumber} — AO VIVO${delayInfo}]\nGold: ${blue.name} ${g(blue.totalGold)} vs ${red.name} ${g(red.totalGold)} (diff: ${goldDiff>0?'+':''}${g(goldDiff)})\nTorres: ${blue.towerKills||0}x${red.towerKills||0} | Dragões: ${blueDragons} vs ${redDragons}\nKills: ${blue.totalKills||0}x${red.totalKills||0} | Barões: ${blue.barons||0}x${red.barons||0} | Inibidores: ${blue.inhibitors||0}x${red.inhibitors||0}\n`;
                 if (gd.goldTrajectory?.length > 0) {
                   gamesContext += 'Gold Trajectory: ' + gd.goldTrajectory.map(gt => `${gt.minute}min:${gt.diff>0?'+':''}${g(gt.diff)}`).join(' → ') + '\n';
@@ -6617,7 +6625,19 @@ async function autoAnalyzeMatch(token, match) {
                   // live model com kills atuais como baseline. Senão, pre-game.
                   const inferredCurrentMap = (Number.isFinite(match.score1) && Number.isFinite(match.score2))
                     ? (match.score1 + match.score2) + 1 : 1;
-                  const isCurrentMapLive = lolLiveStats?.gameTime > 30 && mapNum === inferredCurrentMap;
+                  // 2026-04-28: freshness gate — skip live mode se lolLiveStats
+                  // foi cached >60s atrás (gameTime stale). Em mapa rápido (15min),
+                  // 60s = 7% do mapa = teamfight crítico passou.
+                  const _liveStatsAgeMs = lolLiveStats?._fetchedAt
+                    ? Date.now() - lolLiveStats._fetchedAt
+                    : 0;
+                  const _liveStatsFresh = !lolLiveStats?._fetchedAt || _liveStatsAgeMs < 60_000;
+                  const isCurrentMapLive = lolLiveStats?.gameTime > 30
+                    && mapNum === inferredCurrentMap
+                    && _liveStatsFresh;
+                  if (lolLiveStats?._fetchedAt && !_liveStatsFresh) {
+                    log('DEBUG', 'LOL-KILLS', `lolLiveStats stale (${Math.round(_liveStatsAgeMs/1000)}s) — usando pre-game predict`);
+                  }
                   let predictForMap;
                   if (isCurrentMapLive && Array.isArray(lolLiveStats?.blueTeam?.players) && Array.isArray(lolLiveStats?.redTeam?.players)) {
                     const blueK = lolLiveStats.blueTeam.players.reduce((a, p) => a + (Number(p.kills) || 0), 0);
@@ -14381,7 +14401,12 @@ Máximo 200 palavras. Raciocínio breve antes da decisão.`;
             // Gate: edge≥min + EV entre 1.05 e cap (env TENNIS_HYBRID_MAX_EV default 1.8 = +80%).
             // Cap evita underdog extremos (EV +200% requer sample gigante pra validar).
             // Floor pickP 0.15 evita long-shot abaixo de 15% prob.
-            const maxEvMult = parseFloat(process.env.TENNIS_HYBRID_MAX_EV || '1.8');
+            // 2026-04-28: cap relaxado pra 2.5 quando confidence alta + edge forte.
+            // Antes 1.8 fixo bloqueava underdog legítimo (pickP 0.40 @5.0 = 2.0).
+            const _baseMaxEv = parseFloat(process.env.TENNIS_HYBRID_MAX_EV || '1.8');
+            const _maxEvHighConf = parseFloat(process.env.TENNIS_HYBRID_MAX_EV_HIGH_CONF || '2.5');
+            const _highConfQualified = (mlResultTennis.confidence ?? 0) >= 0.80 && edgeTn >= 10;
+            const maxEvMult = _highConfQualified ? _maxEvHighConf : _baseMaxEv;
             if (edgeTn >= minEdgeTn && evMult >= 1.05 && evMult <= maxEvMult && pickPTn >= 0.15) {
               let confLabelTn = edgeTn >= 12 && (mlResultTennis.confidence ?? 0) >= 0.75 ? 'ALTA'
                 : edgeTn >= 8 ? 'MÉDIA' : 'BAIXA';
@@ -15122,6 +15147,13 @@ async function pollFootball(runOnce = false) {
                 const elapsedMin = elapsedRaw > 60
                   ? Math.min(95, Math.max(45, elapsedRaw - 15))
                   : Math.min(45, elapsedRaw);
+                // 2026-04-28: gate min 1 — race condition kickoff (match.time < now
+                // mas isFbLive=true por feed delay). Pula live override pra evitar
+                // tratar pre-game como elapsed=0.
+                if (elapsedMin < 1) {
+                  log('DEBUG', 'FB-MT-LIVE', `${match.team1} vs ${match.team2}: elapsedMin=${elapsedMin.toFixed(1)} (kickoff race) — usando pre-game markets`);
+                  // mantém mtMarkets = fbTrained.markets (pre-game), isLiveScan=false
+                } else {
                 const sh = Number.isFinite(match.score1) ? match.score1 : 0;
                 const sa = Number.isFinite(match.score2) ? match.score2 : 0;
                 try {
@@ -15136,6 +15168,7 @@ async function pollFootball(runOnce = false) {
                     log('DEBUG', 'FB-MT-LIVE', `${match.team1} vs ${match.team2} min=${Math.round(elapsedMin)} score=${sh}-${sa} λResid=${live.lamHResid}/${live.lamAResid} OU2.5over=${(live.markets.ou['2.5'].over*100).toFixed(0)}%`);
                   }
                 } catch (le) { reportBug('FB-MT-LIVE', le); }
+                } // close elapsedMin >= 1 else
               } else {
                 // Live mas live model desabilitado — pula scan
                 throw new Error('FOOTBALL_MT_LIVE_DISABLED ou lamH/lamA missing');
