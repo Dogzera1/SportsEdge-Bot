@@ -13586,7 +13586,14 @@ async function pollTennis(runOnce = false) {
             score: edgePp,
             factorCount: tennisModelResult.factors?.length || 1,
             direction: tennisModelResult.modelP1 > tennisModelResult.modelP2 ? 't1' : 't2',
+            // BUG FIX 2026-04-28: campos confidence/method faltavam, fazendo
+            // hybrid (>=0.65 conf + /trained/ method) e advisory (>=0.50 conf
+            // + isTrained) NUNCA fire. Resultado: 0 tennis ML em 30 dias —
+            // todas tips tennis eram MT promovidas. Propagação direta resolve.
+            confidence: tennisModelResult.confidence,
+            method: tennisModelResult.method,
             _tennisModel: tennisModelResult,
+            _tennisModelMeta: { method: tennisModelResult.method, confidence: tennisModelResult.confidence },
             _eloResult: eloResult,
           };
           // Se Elo antigo também está disponível, faz blend
