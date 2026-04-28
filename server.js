@@ -7615,17 +7615,19 @@ const server = http.createServer(async (req, res) => {
     const days = Number.isFinite(daysRaw) ? Math.max(1, Math.min(180, daysRaw)) : 30;
     try {
       // Tips pendentes (result IS NULL) na janela.
+      // 2026-04-28: agora INCLUI MT tips (match_id LIKE '%::mt::%') —
+      // HANDICAP_GAMES/TOTAL_GAMES resolvem via parseTennisScore;
+      // total_kills_map<N> skipa (sem kill data server-side).
       const sportClause = sportFilter && /^[a-z0-9]+$/.test(sportFilter)
         ? `AND sport = ?`
         : '';
       const sportArgs = sportClause ? [sportFilter] : [];
       const pending = db.prepare(`
-        SELECT id, sport, match_id, participant1, participant2, tip_participant, odds, sent_at
+        SELECT id, sport, match_id, participant1, participant2, tip_participant, odds, sent_at, market_type, stake
         FROM tips
         WHERE result IS NULL
           AND (archived IS NULL OR archived = 0)
           AND COALESCE(is_shadow, 0) = 0
-          AND match_id NOT LIKE '%::mt::%'
           AND sent_at >= datetime('now', ?)
           ${sportClause}
         ORDER BY sent_at DESC
@@ -7679,11 +7681,20 @@ const server = http.createServer(async (req, res) => {
             } catch (_) { return 1; }
           })();
           const odds = parseFloat(t.odds) || 1;
+          // 2026-04-28: detecção de market type pra resolução específica.
+          // ML/1X2: name match contra winner. HG/TG: parse score tennis.
+          // total_kills_map<N>: skip (sem kill data). HANDICAP/TOTAL esports: skip.
+          const mt = String(t.market_type || 'ML').toUpperCase();
+          const isMlLike = ['ML','1X2_H','1X2_A','1X2_D','OVER_2.5','UNDER_2.5','DRAW'].includes(mt);
+          const isTennisHg = mt === 'HANDICAP_GAMES' && t.sport === 'tennis';
+          const isTennisTg = mt === 'TOTAL_GAMES' && t.sport === 'tennis';
+          const isKills = /^TOTAL_KILLS_MAP\d+$/.test(mt);
+
           if (isWalkover) {
             result = 'void';
             profitR = 0;
             summary.voided++;
-          } else {
+          } else if (isMlLike) {
             // Match name vs winner: norm comparison
             const winnerN = _norm(m.winner);
             const tipN = _norm(t.tip_participant);
@@ -7691,6 +7702,64 @@ const server = http.createServer(async (req, res) => {
             result = isWin ? 'win' : 'loss';
             profitR = isWin ? +(stakeR * (odds - 1)).toFixed(2) : -stakeR;
             summary.settled++;
+          } else if (isTennisHg || isTennisTg) {
+            // Tennis MT: parse score "6-4 7-5" → totalGames + per-side games.
+            // tip_participant tem formato "Player Name +3.5" ou "OVER 21.5 games".
+            try {
+              const { parseTennisScore } = require('./lib/market-tips-shadow');
+              const winnerIsT1 = _norm(m.winner) === _norm(t.participant1) || _norm(m.winner).includes(_norm(t.participant1));
+              const parsed = parseTennisScore(m.final_score, winnerIsT1);
+              if (!parsed || !parsed.sets?.length) {
+                summary.skipped++; continue;
+              }
+              // Per-side total games
+              const t1Games = parsed.sets.reduce((s, st) => s + st.t1, 0);
+              const t2Games = parsed.sets.reduce((s, st) => s + st.t2, 0);
+              const totalGames = parsed.totalGames;
+              if (isTennisTg) {
+                // tip_participant: "OVER 21.5 games" / "UNDER 21.5 games"
+                const tipStr = String(t.tip_participant || '').toUpperCase();
+                const lineMatch = tipStr.match(/(OVER|UNDER)\s*(\d+(?:\.\d+)?)/);
+                if (!lineMatch) { summary.skipped++; continue; }
+                const side = lineMatch[1];
+                const line = parseFloat(lineMatch[2]);
+                const isWin = side === 'OVER' ? totalGames > line : totalGames < line;
+                result = isWin ? 'win' : 'loss';
+                profitR = isWin ? +(stakeR * (odds - 1)).toFixed(2) : -stakeR;
+                summary.settled++;
+              } else {
+                // HG: tip_participant: "Player Name +3.5" or "-3.5"
+                const tipStr = String(t.tip_participant || '');
+                const lineMatch = tipStr.match(/([+-]\d+(?:\.\d+)?)/);
+                if (!lineMatch) { summary.skipped++; continue; }
+                const line = parseFloat(lineMatch[1]);
+                // Detect side: tip_participant inclui o nome — match com participant1/participant2
+                const tipN = _norm(tipStr.replace(/[+-]?\d+(?:\.\d+)?/, ''));
+                const isT1 = _norm(t.participant1).includes(tipN) || tipN.includes(_norm(t.participant1));
+                // Side games + line vs opponent games
+                const sideGames = isT1 ? t1Games : t2Games;
+                const oppGames = isT1 ? t2Games : t1Games;
+                // line pode ser negativa (-3.5 = side cobre se ganhar por 4+)
+                // ou positiva (+3.5 = side cobre se perder por <4)
+                const cover = (sideGames + line) > oppGames;
+                result = cover ? 'win' : 'loss';
+                profitR = cover ? +(stakeR * (odds - 1)).toFixed(2) : -stakeR;
+                summary.settled++;
+              }
+            } catch (e) {
+              summary.skipped++;
+              continue;
+            }
+          } else if (isKills) {
+            // total_kills_map<N>: precisa kill counts da PandaScore game data,
+            // não disponível em match_results. Skip — handler dedicado pendente.
+            summary.skipped++;
+            continue;
+          } else {
+            // HANDICAP esports / TOTAL maps esports: também precisa map score
+            // detalhado, não temos. Skip.
+            summary.skipped++;
+            continue;
           }
           // Atualiza tip + bankroll na mesma transaction
           const tx = db.transaction(() => {
