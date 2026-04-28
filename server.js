@@ -8335,6 +8335,61 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // GET /admin/mt-calib-validation?days=90 — diagnóstico calib MT.
+  // Para cada (sport, market) com >=10 settled, retorna avg predP vs hit% real
+  // + ROI + flag de gap (>10pp = miscalibrado, considerar refit).
+  if (p === '/admin/mt-calib-validation') {
+    if (!requireAdmin(req, res)) return;
+    const days = Math.max(7, Math.min(365, parseInt(parsed.query.days || '90', 10) || 90));
+    const minN = parseInt(parsed.query.min_n || '10', 10);
+    try {
+      const rows = db.prepare(`
+        SELECT sport, market, side, p_model, odd, result, profit_units, stake_units, clv_pct
+        FROM market_tips_shadow
+        WHERE created_at >= datetime('now', '-' || ? || ' days')
+          AND result IN ('win', 'loss')
+          AND p_model IS NOT NULL
+      `).all(days);
+      const buckets = new Map();
+      for (const r of rows) {
+        const k = `${r.sport}|${r.market}`;
+        if (!buckets.has(k)) buckets.set(k, { sport: r.sport, market: r.market, n: 0, wins: 0, sumP: 0, profit: 0, staked: 0, sumClv: 0, nClv: 0 });
+        const b = buckets.get(k);
+        b.n++;
+        if (r.result === 'win') b.wins++;
+        b.sumP += Number(r.p_model);
+        b.profit += Number(r.profit_units || 0);
+        b.staked += Number(r.stake_units || 1);
+        if (r.clv_pct != null) { b.sumClv += Number(r.clv_pct); b.nClv++; }
+      }
+      const out = [];
+      for (const b of buckets.values()) {
+        if (b.n < minN) continue;
+        const predP = b.sumP / b.n;
+        const realHit = b.wins / b.n;
+        const gap = realHit - predP;
+        const roi = b.staked > 0 ? (b.profit / b.staked * 100) : 0;
+        const clv = b.nClv > 0 ? (b.sumClv / b.nClv) : null;
+        const status = Math.abs(gap) >= 0.15 ? 'critical'
+          : Math.abs(gap) >= 0.10 ? 'flag'
+          : Math.abs(gap) >= 0.05 ? 'monitor'
+          : 'ok';
+        out.push({
+          sport: b.sport, market: b.market, n: b.n, wins: b.wins,
+          predP: +predP.toFixed(4), realHit: +realHit.toFixed(4),
+          gapPp: +(gap * 100).toFixed(1),
+          roi: +roi.toFixed(2),
+          clvPct: clv != null ? +clv.toFixed(2) : null,
+          status,
+        });
+      }
+      out.sort((a, b) => Math.abs(b.gapPp) - Math.abs(a.gapPp));
+      const flagged = out.filter(r => r.status !== 'ok');
+      sendJson(res, { ok: true, days, minN, n_buckets: out.length, n_flagged: flagged.length, buckets: out });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   // GET /admin/super-odd-events?hours=24&sport=lol
   if (p === '/admin/super-odd-events') {
     if (!requireAdmin(req, res)) return;

@@ -14658,8 +14658,11 @@ async function pollFootball(runOnce = false) {
               const fbMtMinPm = parseFloat(process.env.FOOTBALL_MT_MIN_PMODEL ?? '0.50');
               const fbMtMinOdd = parseFloat(process.env.FOOTBALL_MT_MIN_ODD ?? '1.50');
               const fbMtMaxOdd = parseFloat(process.env.FOOTBALL_MT_MAX_ODD ?? '3.50');
+              // Inject BTTS odds do aggregator (não vem do Pinnacle direct, mas
+              // está disponível em match.odds.btts via Supabase/odds-aggregator).
+              const pinMktWithBtts = match.odds?.btts ? { ...pinMkt, btts: match.odds.btts } : pinMkt;
               const fbMtFound = scanFootballMarkets({
-                pinMarkets: pinMkt,
+                pinMarkets: pinMktWithBtts,
                 trainedMarkets: fbTrained.markets,
                 minEv: fbMtMinEv,
                 minPmodel: fbMtMinPm,
@@ -17413,6 +17416,63 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   setTimeout(() => runFootballPoissonRetrain(), 55 * 60 * 1000);
   // Bootstrap rápido: se não existe params, tenta em 90s ao invés de esperar 55min.
   setTimeout(() => runFootballPoissonRetrain(), 90 * 1000);
+
+  // Auto-refit MT calibrações (tennis Markov + outros sports quando n>=20).
+  // Roda dom 4h UTC (low-traffic). Default ON; opt-out CALIB_AUTO_REFIT_DISABLED=true.
+  // Lê market_tips_shadow direto via /market-tips-recent — não depende de DB local.
+  let _lastCalibRefitDay = null;
+  async function runMtCalibRefit() {
+    if (/^(1|true|yes)$/i.test(String(process.env.CALIB_AUTO_REFIT_DISABLED || ''))) return;
+    const now = new Date();
+    const today = now.toISOString().slice(0, 10);
+    const isBootstrap = !_lastCalibRefitDay;
+    if (!isBootstrap) {
+      // Weekly: domingo (UTC), hora 4
+      if (_lastCalibRefitDay === today) return;
+      if (now.getUTCDay() !== 0 || now.getUTCHours() !== 4) return;
+    }
+    _lastCalibRefitDay = today;
+    try {
+      const path = require('path');
+      const { spawn } = require('child_process');
+      const script = path.join(__dirname, 'scripts', 'refit-tennis-markov-calib-inline.js');
+      const fs = require('fs');
+      if (!fs.existsSync(script)) {
+        log('WARN', 'CALIB-REFIT', `Script não encontrado: ${script}`);
+        return;
+      }
+      // Pull dados via HTTP do próprio server (fallback pra DB local em prod)
+      const baseUrl = `http://${process.env.SERVER || '127.0.0.1'}:${process.env.PORT || process.env.SERVER_PORT || 3000}`;
+      const url = `${baseUrl}/market-tips-recent?sport=tennis&days=90&limit=2000&dedup=0&status=all&includeVoid=0`;
+      const tmp = path.join(path.dirname(process.env.DB_PATH || './data/tipsbot.db'), '.tmp_calib_refit_tennis.json');
+      const data = await serverGet(`/market-tips-recent?sport=tennis&days=90&limit=2000&dedup=0&status=all&includeVoid=0`).catch(() => null);
+      if (!data?.tips?.length) {
+        log('INFO', 'CALIB-REFIT', `tennis sem dados (skip ${isBootstrap ? 'bootstrap' : 'weekly'})`);
+        return;
+      }
+      fs.writeFileSync(tmp, JSON.stringify(data));
+      // Spawn refit script. STDOUT capturado via Promise pra log.
+      await new Promise((resolve) => {
+        const child = spawn(process.execPath, [script, `--src=${tmp}`], { cwd: __dirname });
+        let out = '';
+        child.stdout.on('data', d => out += d);
+        child.stderr.on('data', d => out += d);
+        child.on('close', (code) => {
+          // Extrai linha de backtest POST (calib) pra log resumido
+          const postLine = out.split('\n').find(l => l.includes('POST (calib)')) || '';
+          log('INFO', 'CALIB-REFIT', `tennis ${isBootstrap ? 'bootstrap' : 'weekly'}: exit=${code} ${postLine.trim()}`);
+          try { fs.unlinkSync(tmp); } catch (_) {}
+          resolve();
+        });
+        // Safety timeout 60s
+        setTimeout(() => { try { child.kill(); } catch (_) {} resolve(); }, 60_000);
+      });
+    } catch (e) {
+      log('ERROR', 'CALIB-REFIT', e.message);
+    }
+  }
+  setInterval(() => runMtCalibRefit(), 60 * 60 * 1000); // check 1h
+  setTimeout(() => runMtCalibRefit(), 5 * 60 * 1000);  // bootstrap 5min após boot
 
   // Auto-void stuck pending tips. Diferentes sports têm latência distinta de settlement:
   //   LoL/CS/Valorant: matches rápidos, 12h já é tarde demais
