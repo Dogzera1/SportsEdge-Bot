@@ -2459,6 +2459,38 @@ async function loadTipsByMarket(gen = refreshGen) {
     <div style="display:flex;gap:8px;flex-wrap:wrap">${cards}</div>`;
 }
 
+// 2026-04-28: force-settle bulk pra tips pendentes do sport atual.
+// Chama /admin/run-settle backend que itera tips pending → busca match_results
+// → settle ou void (walkover detection). Depois re-carrega.
+async function forceSettleTips(btn) {
+  if (!confirm('Force-settle vai tentar resolver TODAS as tips pendentes do sport atual via match_results. Walkovers viram void. Continuar?')) return;
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ rodando...'; }
+  try {
+    const sportQ = currentSport && currentSport !== '__overall__' ? `&sport=${encodeURIComponent(currentSport)}` : '';
+    const r = await adminFetch(`/admin/run-settle?days=30${sportQ}`, { method: 'POST' });
+    const j = await r.json();
+    if (!r.ok || !j?.ok) {
+      const msg = j?.error || `HTTP ${r.status}`;
+      alert(`❌ Force-settle falhou: ${msg}`);
+      return;
+    }
+    const summary = `Tentativas: ${j.attempted}\n` +
+                    `✅ Settled: ${j.settled}\n` +
+                    `⚪ Void (walkover): ${j.voided}\n` +
+                    `⏭️ Skipped (sem match_results): ${j.skipped}\n` +
+                    `❌ Errors: ${j.errors}`;
+    alert(summary);
+    // Reload tips
+    await loadTips();
+    if (typeof loadOverall === 'function' && currentSport === '__overall__') await loadOverall();
+    if (typeof loadKPIs === 'function' && currentSport !== '__overall__') await loadKPIs();
+  } catch (e) {
+    alert(`❌ ${e.message}`);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '⚡ Force settle'; }
+  }
+}
+
 // 2026-04-28: export CSV das tips visíveis (após filtros). Usa tipsCache,
 // não recarrega — exporta exatamente o que user vê.
 function exportTipsCsv() {
@@ -2545,6 +2577,7 @@ function renderTipsTable() {
       ${nPending ? `<span class="tip-meta">${nPending} pend</span>` : ''}
       ${nVoid ? `<span class="tip-meta">${nVoid} void</span>` : ''}
       <span class="${totalProfit >= 0 ? 'pos' : 'neg'}" style="margin-left:auto">${totalProfit >= 0 ? '+' : ''}${fmtMoney(totalProfit)}</span>
+      ${nPending > 0 ? `<button onclick="forceSettleTips(this)" title="Tenta settle automático em todas as ${nPending} pendentes via match_results (cobra DM admin)" style="margin-left:8px;background:transparent;border:1px solid var(--accent,#3b82f6);color:var(--accent,#3b82f6);padding:3px 10px;border-radius:4px;cursor:pointer;font-size:11px">⚡ Force settle (${nPending})</button>` : ''}
       <button onclick="exportTipsCsv()" title="Exportar tips visíveis pra CSV" style="margin-left:8px;background:transparent;border:1px solid var(--border);color:var(--text-dim);padding:3px 8px;border-radius:4px;cursor:pointer;font-size:11px">📥 CSV</button>
     </div>
     <div class="tips-wrap"><table class="tips">

@@ -7603,6 +7603,122 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // Force-settle: itera tips pendentes e tenta resolver via match_results
+  // (idêntico ao settleCompletedTips do bot.js, mas server-side, callable via
+  // dashboard). Honra walkover detection no /settle interno.
+  // GET/POST /admin/run-settle?sport=lol&days=30&key=<KEY>
+  // Retorna: { ok, attempted, settled, voided, skipped, errors, samples }
+  if (p === '/admin/run-settle') {
+    if (!requireAdmin(req, res)) return;
+    const sportFilter = String(parsed.query.sport || '').toLowerCase().trim();
+    const daysRaw = parseInt(parsed.query.days, 10);
+    const days = Number.isFinite(daysRaw) ? Math.max(1, Math.min(180, daysRaw)) : 30;
+    try {
+      // Tips pendentes (result IS NULL) na janela.
+      const sportClause = sportFilter && /^[a-z0-9]+$/.test(sportFilter)
+        ? `AND sport = ?`
+        : '';
+      const sportArgs = sportClause ? [sportFilter] : [];
+      const pending = db.prepare(`
+        SELECT id, sport, match_id, participant1, participant2, tip_participant, odds, sent_at
+        FROM tips
+        WHERE result IS NULL
+          AND (archived IS NULL OR archived = 0)
+          AND COALESCE(is_shadow, 0) = 0
+          AND match_id NOT LIKE '%::mt::%'
+          AND sent_at >= datetime('now', ?)
+          ${sportClause}
+        ORDER BY sent_at DESC
+        LIMIT 500
+      `).all(`-${days} days`, ...sportArgs);
+
+      const summary = { ok: true, sport_filter: sportFilter || 'all', days, attempted: 0, settled: 0, voided: 0, skipped: 0, errors: 0, samples: [] };
+      const _norm = s => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+      const _walkoverRe = /\b(ret|retir|w\.?o\.?|walkover|abandoned|cancell?ed|no\s*contest|w\/o|wd|withdrew)\b/i;
+
+      // Map sport→game_in_match_results (CS legado é 'cs' OR 'cs2')
+      const gameMap = { lol: ['lol','esports'], dota2: ['dota2','esports'], cs: ['cs','cs2'], cs2: ['cs','cs2'], valorant: ['valorant','esports'], tennis: ['tennis'], football: ['football'], mma: ['mma'], snooker: ['snooker'], darts: ['darts'], tabletennis: ['tabletennis'] };
+
+      for (const t of pending) {
+        summary.attempted++;
+        try {
+          const games = gameMap[t.sport] || [t.sport];
+          const placeholders = games.map(() => '?').join(',');
+          const n1 = _norm(t.participant1), n2 = _norm(t.participant2);
+          if (!n1 || !n2) { summary.skipped++; continue; }
+          // Janela ±7d em torno do sent_at (esports/MMA) ou ±10d (tennis/football)
+          const windowDays = ['tennis','football'].includes(t.sport) ? 10 : 7;
+          const tipMs = Date.parse(String(t.sent_at).includes('T') ? t.sent_at : t.sent_at.replace(' ', 'T'));
+          if (!Number.isFinite(tipMs)) { summary.skipped++; continue; }
+          const before = new Date(tipMs - windowDays * 86400_000).toISOString().slice(0, 19).replace('T', ' ');
+          const after = new Date(tipMs + windowDays * 86400_000).toISOString().slice(0, 19).replace('T', ' ');
+          const matches = db.prepare(`
+            SELECT winner, final_score, resolved_at, league
+            FROM match_results
+            WHERE game IN (${placeholders})
+              AND winner IS NOT NULL AND winner != ''
+              AND resolved_at >= ? AND resolved_at <= ?
+              AND ((lower(replace(replace(replace(team1,' ',''),'-',''),'.','')) = ? AND lower(replace(replace(replace(team2,' ',''),'-',''),'.','')) = ?)
+                OR (lower(replace(replace(replace(team1,' ',''),'-',''),'.','')) = ? AND lower(replace(replace(replace(team2,' ',''),'-',''),'.','')) = ?))
+            ORDER BY ABS(julianday(resolved_at) - julianday(?)) ASC
+            LIMIT 1
+          `).all(...games, before, after, n1, n2, n2, n1, t.sent_at);
+          if (!matches.length) { summary.skipped++; continue; }
+          const m = matches[0];
+          // Walkover detection
+          const isWalkover = _walkoverRe.test(String(m.final_score || ''));
+          let result, profitR;
+          const stakeR = (() => {
+            const sport = t.sport;
+            try {
+              const { getSportUnitValue } = require('./lib/sport-unit');
+              const bk = stmts.getBankroll.get(sport);
+              const uv = getSportUnitValue(bk?.current_banca || 0, bk?.initial_banca || 100);
+              const su = parseFloat(String(t.stake || '1').replace('u','')) || 1;
+              return parseFloat((su * uv).toFixed(2));
+            } catch (_) { return 1; }
+          })();
+          const odds = parseFloat(t.odds) || 1;
+          if (isWalkover) {
+            result = 'void';
+            profitR = 0;
+            summary.voided++;
+          } else {
+            // Match name vs winner: norm comparison
+            const winnerN = _norm(m.winner);
+            const tipN = _norm(t.tip_participant);
+            const isWin = winnerN === tipN || winnerN.includes(tipN) || tipN.includes(winnerN);
+            result = isWin ? 'win' : 'loss';
+            profitR = isWin ? +(stakeR * (odds - 1)).toFixed(2) : -stakeR;
+            summary.settled++;
+          }
+          // Atualiza tip + bankroll na mesma transaction
+          const tx = db.transaction(() => {
+            db.prepare(`UPDATE tips SET result = ?, settled_at = datetime('now'), stake_reais = ?, profit_reais = ? WHERE id = ?`)
+              .run(result, stakeR, profitR, t.id);
+            if (profitR !== 0) {
+              db.prepare(`UPDATE bankroll SET current_banca = current_banca + ?, updated_at = datetime('now') WHERE sport = ?`)
+                .run(profitR, t.sport);
+            }
+          });
+          tx();
+          if (summary.samples.length < 10) {
+            summary.samples.push({
+              id: t.id, sport: t.sport, tip: t.tip_participant, winner: m.winner,
+              result, profit_reais: profitR, score: m.final_score,
+            });
+          }
+        } catch (e) {
+          summary.errors++;
+          log('WARN', 'FORCE-SETTLE', `tip#${t.id}: ${e.message}`);
+        }
+      }
+      log('INFO', 'FORCE-SETTLE', `${summary.attempted} attempted | ${summary.settled} settled | ${summary.voided} voided | ${summary.skipped} skipped | ${summary.errors} errors`);
+      sendJson(res, summary);
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   // Move football MT tips (sport=football + match_id LIKE '%::mt::%') de
   // is_shadow=0 → is_shadow=1. Reverte promote pra shadow-only sem perder
   // dados (settled tips ficam em market_tips_shadow + tips com is_shadow=1).
