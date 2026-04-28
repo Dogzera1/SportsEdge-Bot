@@ -7560,6 +7560,87 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
       }
     } catch(e) { log('WARN', 'CMD', `/shadow threw: ${e.message}`); await send(token, chatId, `❌ ${e.message}`).catch(() => {}); }
 
+  } else if (cmd === '/move-football-mt-shadow') {
+    // Move football MT tips (sport=football + match_id LIKE '%::mt::%') que
+    // foram pra tips reais (is_shadow=0) → is_shadow=1, depois resync bankroll.
+    // Reverte promote sem perder dados. Uso:
+    //   /move-football-mt-shadow              → dry-run últimos 60d
+    //   /move-football-mt-shadow 30           → dry-run 30d
+    //   /move-football-mt-shadow 60 confirm   → APLICA mudança
+    if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
+    try {
+      const parts = command.trim().split(/\s+/);
+      const days = Math.max(1, Math.min(365, parseInt(parts[1] || '60', 10) || 60));
+      const apply = (parts[2] || '').toLowerCase() === 'confirm';
+      const tips = db.prepare(`
+        SELECT id, market_type, tip_participant, stake, odds, result, profit_reais, sent_at
+        FROM tips
+        WHERE sport = 'football'
+          AND match_id LIKE '%::mt::%'
+          AND COALESCE(is_shadow, 0) = 0
+          AND (archived IS NULL OR archived = 0)
+          AND sent_at >= datetime('now', '-' || ? || ' days')
+        ORDER BY sent_at DESC
+      `).all(days);
+      const settled = tips.filter(t => t.result && ['win','loss','push','void'].includes(t.result));
+      const pending = tips.filter(t => !t.result || t.result === 'pending');
+      const profitDelta = +settled.reduce((s, t) => s + Number(t.profit_reais || 0), 0).toFixed(2);
+      let txt = `🔄 *MOVE FOOTBALL MT → SHADOW*\n\n`;
+      txt += `*Janela:* ${days}d\n`;
+      txt += `*Total tips encontradas:* ${tips.length}\n`;
+      txt += `*Settled:* ${settled.length} (P&L revert: ${profitDelta >= 0 ? '+' : ''}R$${profitDelta.toFixed(2)})\n`;
+      txt += `*Pending:* ${pending.length}\n\n`;
+      if (tips.length === 0) {
+        txt += `_Nenhuma tip MT football com is_shadow=0 nessa janela._`;
+        await send(token, chatId, txt);
+        return;
+      }
+      txt += `*Sample (top 8):*\n`;
+      for (const t of tips.slice(0, 8)) {
+        const dt = String(t.sent_at || '').slice(5, 16);
+        const r = t.result || 'pending';
+        const p = t.profit_reais != null ? `R$${Number(t.profit_reais).toFixed(2)}` : '-';
+        txt += `• #${t.id} ${dt} ${t.market_type} ${t.tip_participant} @${t.odds} → ${r} ${p}\n`;
+      }
+      if (!apply) {
+        txt += `\n⚠️ *DRY-RUN* — pra aplicar mande:\n\`/move-football-mt-shadow ${days} confirm\``;
+        await send(token, chatId, txt);
+        return;
+      }
+      // APPLY
+      const ids = tips.map(t => t.id);
+      const tx = db.transaction(() => {
+        const stmt = db.prepare(`UPDATE tips SET is_shadow=1 WHERE id=?`);
+        for (const id of ids) stmt.run(id);
+      });
+      tx();
+      // Resync bankroll football
+      const rows = db.prepare(`SELECT sport, initial_banca, current_banca FROM bankroll WHERE sport='football'`).all();
+      let bankrollDelta = null;
+      if (rows.length) {
+        const sumProfit = db.prepare(`
+          SELECT COALESCE(SUM(profit_reais),0) AS p FROM tips
+          WHERE sport='football' AND COALESCE(is_shadow,0)=0
+            AND (archived IS NULL OR archived=0)
+            AND result IN ('win','loss','push','void')
+        `).get().p;
+        const r = rows[0];
+        const init = Number(r.initial_banca || 0);
+        const newCurrent = +(init + Number(sumProfit || 0)).toFixed(2);
+        const prev = Number(r.current_banca || 0);
+        db.prepare(`UPDATE bankroll SET current_banca=?, updated_at=datetime('now') WHERE sport='football'`).run(newCurrent);
+        bankrollDelta = { prev, next: newCurrent, delta: +(newCurrent - prev).toFixed(2) };
+      }
+      log('INFO', 'MT-MOVE', `Moved ${ids.length} football MT tips to shadow via Telegram (profit revert=${profitDelta})`);
+      let resp = `✅ *APPLIED*\n\n`;
+      resp += `Tips movidas: ${ids.length}\n`;
+      resp += `Profit revertido: ${profitDelta >= 0 ? '+' : ''}R$${profitDelta.toFixed(2)}\n`;
+      if (bankrollDelta) {
+        resp += `Bankroll football: R$${bankrollDelta.prev.toFixed(2)} → R$${bankrollDelta.next.toFixed(2)} (Δ ${bankrollDelta.delta >= 0 ? '+' : ''}R$${bankrollDelta.delta.toFixed(2)})\n`;
+      }
+      await send(token, chatId, resp);
+    } catch (e) { await send(token, chatId, `❌ /move-football-mt-shadow: ${e.message}`); }
+
   } else if (cmd === '/mt-gates') {
     // Diagnóstico de gates MT: env enabled, leak guard runtime disables,
     // recent admin DMs. Espelha /mt-dm-pipeline endpoint sem precisar de

@@ -7565,6 +7565,76 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // Move football MT tips (sport=football + match_id LIKE '%::mt::%') de
+  // is_shadow=0 → is_shadow=1. Reverte promote pra shadow-only sem perder
+  // dados (settled tips ficam em market_tips_shadow + tips com is_shadow=1).
+  // Bankroll é auto-resyncada via /admin/force-sync-bankroll após.
+  // GET (dry-run) ou POST com ?confirm=1 pra aplicar.
+  // GET/POST /admin/move-football-mt-to-shadow?confirm=0&days=60&key=<KEY>
+  if (p === '/admin/move-football-mt-to-shadow') {
+    if (!requireAdmin(req, res)) return;
+    const confirm = parsed.query.confirm === '1' || parsed.query.confirm === 'true';
+    const days = Math.max(1, Math.min(365, parseInt(parsed.query.days || '60', 10) || 60));
+    try {
+      const tips = db.prepare(`
+        SELECT id, sport, match_id, event_name, participant1, participant2,
+               tip_participant, stake, odds, result, stake_reais, profit_reais,
+               is_shadow, sent_at, settled_at, market_type
+        FROM tips
+        WHERE sport = 'football'
+          AND match_id LIKE '%::mt::%'
+          AND COALESCE(is_shadow, 0) = 0
+          AND (archived IS NULL OR archived = 0)
+          AND sent_at >= datetime('now', '-' || ? || ' days')
+        ORDER BY sent_at DESC
+      `).all(days);
+      const settled = tips.filter(t => t.result && ['win','loss','push','void'].includes(t.result));
+      const pending = tips.filter(t => !t.result || t.result === 'pending');
+      const profitDelta = +settled.reduce((s, t) => s + Number(t.profit_reais || 0), 0).toFixed(2);
+      const summary = {
+        ok: true,
+        dry_run: !confirm,
+        window_days: days,
+        total: tips.length,
+        settled_count: settled.length,
+        pending_count: pending.length,
+        bankroll_profit_to_revert: profitDelta,
+        sample: tips.slice(0, 10).map(t => ({
+          id: t.id, market_type: t.market_type, participant: t.tip_participant,
+          stake: t.stake, odds: t.odds, result: t.result,
+          profit_reais: t.profit_reais, sent_at: t.sent_at,
+        })),
+      };
+      if (confirm && tips.length) {
+        const ids = tips.map(t => t.id);
+        const tx = db.transaction(() => {
+          const stmt = db.prepare(`UPDATE tips SET is_shadow=1 WHERE id=?`);
+          for (const id of ids) stmt.run(id);
+        });
+        tx();
+        // Resync bankroll: current_banca = initial + SUM(profit_reais WHERE is_shadow=0)
+        const rows = db.prepare(`SELECT sport, initial_banca, current_banca FROM bankroll WHERE sport='football'`).all();
+        if (rows.length) {
+          const sumProfit = db.prepare(`
+            SELECT COALESCE(SUM(profit_reais),0) AS p FROM tips
+            WHERE sport='football' AND COALESCE(is_shadow,0)=0
+              AND (archived IS NULL OR archived=0)
+              AND result IN ('win','loss','push','void')
+          `).get().p;
+          const r = rows[0];
+          const init = Number(r.initial_banca || 0);
+          const newCurrent = +(init + Number(sumProfit || 0)).toFixed(2);
+          db.prepare(`UPDATE bankroll SET current_banca=?, updated_at=datetime('now') WHERE sport='football'`).run(newCurrent);
+          summary.bankroll_football = { prev: Number(r.current_banca), next: newCurrent, delta: +(newCurrent - Number(r.current_banca || 0)).toFixed(2) };
+        }
+        summary.applied = ids.length;
+        log('INFO', 'MT-MOVE', `Moved ${ids.length} football MT tips to shadow (profit delta=${profitDelta}, bankroll resync done)`);
+      }
+      sendJson(res, summary);
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
   // Debug: lista todas tips de um sport com profit_reais individual — diagnóstico de drift.
   // GET /debug-sport-tips?sport=valorant
   if (p === '/debug-sport-tips') {
