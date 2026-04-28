@@ -12547,8 +12547,13 @@ const server = http.createServer(async (req, res) => {
         // no Kelly aplicado em bot.js — bypass cap pra não duplicar penalidade.
         // ML continua sob cap (correlation entre múltiplas ML é mais forte).
         if (/^true$/i.test(String(process.env.CORRELATION_AUTO || '')) && eventName && sport !== 'football' && !isMtTip) {
+          // 2026-04-28: per-sport sensible defaults (env override sempre ganha).
+          // Tennis: 6u (single match, 3-5 markets correlated). LoL/CS: 8u (BO5
+          // série tem 3+ mapas, cada com 1-2 markets). MMA/Tennis: 6u (1 fight).
+          const _CORR_DEFAULTS = { tennis: 6, lol: 8, cs2: 8, dota2: 8, valorant: 7, mma: 6, snooker: 5, darts: 5 };
           const perSportKey = `CORRELATION_MAX_EXPOSURE_U_${String(sport).toUpperCase()}`;
-          const capU = parseFloat(process.env[perSportKey] || process.env.CORRELATION_MAX_EXPOSURE_U || '6');
+          const _defaultCap = _CORR_DEFAULTS[String(sport).toLowerCase()] ?? 6;
+          const capU = parseFloat(process.env[perSportKey] || process.env.CORRELATION_MAX_EXPOSURE_U || String(_defaultCap));
           const openRows = db.prepare(`
             SELECT stake FROM tips
             WHERE sport = ? AND event_name = ? AND result IS NULL
