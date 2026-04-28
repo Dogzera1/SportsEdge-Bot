@@ -1934,7 +1934,7 @@ async function runAutoAnalysis() {
             2: parseFloat(process.env.LOL_TIER2_EV_MIN || '5') || 5,
             3: parseFloat(process.env.LOL_TIER3_EV_MIN || '8') || 8,
           };
-          const _preBonusLolLive = require('./lib/pre-match-gate').preMatchEvBonus('lol', isLiveLoL);
+          const _preBonusLolLive = require('./lib/pre-match-gate').preMatchEvBonus('lol', isLiveMatch);
           const _evReqLolLive = (_evMinByTier[_lolTier] || 5) + _preBonusLolLive;
           const tipEVnum = parseFloat(tipEV) || 0;
           if (tipEVnum < _evReqLolLive) {
