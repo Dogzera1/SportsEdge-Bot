@@ -1821,14 +1821,19 @@ async function loadLeagueLeaks(gen = refreshGen) {
       const roiStr = r.roi_pct != null ? `${r.roi_pct >= 0 ? '+' : ''}${r.roi_pct.toFixed(1)}%` : 'n/a';
       const clvStr = r.avg_clv_pct != null ? `${r.avg_clv_pct >= 0 ? '+' : ''}${r.avg_clv_pct.toFixed(1)}%` : 'n/a';
       const profitStr = `R$${r.profit >= 0 ? '+' : ''}${r.profit.toFixed(2)}`;
-      const league = (r.league || '?').replace(/</g, '&lt;').slice(0, 40);
+      const leagueRaw = String(r.league || '?').slice(0, 60);
+      const leagueDisplay = escHtml(leagueRaw.slice(0, 40));
+      // 2026-04-28: cross-section deeplink — clique filtra tips por liga.
+      // Aplica tipsLeagueFilter + scrolla pra seção tips.
+      const onclickAttr = `_filterTipsByLeague('${escAttr(leagueRaw).replace(/'/g, '\\\'')}','${escAttr(r.sport || '')}')`;
       return `
-        <div style="padding:8px 12px;border-left:3px solid ${color};background:rgba(0,0,0,0.15);margin-bottom:6px;border-radius:4px">
+        <div onclick="${onclickAttr}" style="padding:8px 12px;border-left:3px solid ${color};background:rgba(0,0,0,0.15);margin-bottom:6px;border-radius:4px;cursor:pointer" title="Clique pra filtrar tips por esta liga">
           <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
               <span>${icon}</span>
-              <strong style="color:${color}">${sport}</strong>
-              <span style="font-weight:500">${league}</span>
+              <strong style="color:${color}">${escHtml(sport)}</strong>
+              <span style="font-weight:500">${leagueDisplay}</span>
+              <span class="chip" style="font-size:10px;color:var(--text-dim)">→ tips</span>
             </div>
             <span class="kpi-meta" style="font-size:11px">n=${r.n} · hit ${r.hit_rate}% · ROI ${roiStr} · CLV ${clvStr} · ${profitStr}</span>
           </div>
@@ -2151,6 +2156,29 @@ function filterTipsByTier(sport, tier) {
   tipsPage = 1;
   renderTipsTable();
   loadTipsByLeague(refreshGen).catch(() => {});
+}
+
+// 2026-04-28: cross-section deeplink helper. Switch sport + filter liga +
+// scroll pra seção tips. Usado em league-leaks card e league-blocklist card.
+function _filterTipsByLeague(league, sport) {
+  // Switch sport se diferente do current
+  if (sport && sport !== currentSport) {
+    const ss = document.getElementById('sportSelect');
+    if (ss) {
+      const opt = [...ss.options].find(o => o.value === sport || o.value.startsWith(sport + '|'));
+      if (opt) {
+        ss.value = opt.value;
+        onSportChange(); // dispara refresh com sport novo
+      }
+    }
+  }
+  // Aplica filtro tipsLeagueFilter (caseinsensitive exact em renderTipsTable)
+  filterTipsByLeague(league);
+  // Scroll pra seção tips
+  setTimeout(() => {
+    const tipsCard = document.getElementById('tipsTable')?.closest('.card');
+    if (tipsCard) tipsCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, 100);
 }
 
 function toggleTipsGroupView() {
