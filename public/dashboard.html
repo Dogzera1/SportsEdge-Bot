@@ -3901,12 +3901,12 @@ function renderMarketTipsPage() {
       : '';
     html += `
       <tr>
-        <td>${d}</td>
-        <td>${t.sport}</td>
+        <td>${escHtml(d)}</td>
+        <td>${escHtml(t.sport)}</td>
         <td style="text-align:center">${t.is_live ? '<span style="color:var(--danger,#ef4444)">🔴</span>' : ''}</td>
-        <td>${t.team1} vs ${t.team2}<br><span class="tip-meta">${t.league || ''}</span></td>
-        <td>${t.label || (t.market + ' ' + (t.line || '') + ' ' + t.side)}</td>
-        <td style="text-align:right">${t.odd?.toFixed(2) || '—'}</td>
+        <td>${escHtml(t.team1)} vs ${escHtml(t.team2)}<br><span class="tip-meta">${escHtml(t.league || '')}</span></td>
+        <td>${escHtml(t.label || (t.market + ' ' + (t.line || '') + ' ' + t.side))}</td>
+        <td style="text-align:right">${(t.odd != null && Number.isFinite(Number(t.odd))) ? Number(t.odd).toFixed(2) : '—'}</td>
         <td style="text-align:right">${pMod}</td>
         <td style="text-align:right" class="${t.ev_pct >= 8 ? 'positive' : ''}">${evStr}</td>
         <td style="text-align:right">${stakeStr}</td>
