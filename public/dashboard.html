@@ -2055,10 +2055,20 @@ async function loadLive(gen = refreshGen) {
 let tipsCache = [];
 let tipsPage = 1;
 
+// 2026-04-28: race protection — se já tem fetch em progresso, ignora
+// chamadas concurrentes. Antes user clicando rapidamente disparava 3-4
+// requests sobrepostas e renders intercalados (botões "sumiam" porque
+// render anterior re-popula DOM em ordem indeterminada).
+let _loadingTips = false;
 async function loadTips(gen = refreshGen) {
-  const status = document.getElementById('tipsStatus').value;
-  const el = document.getElementById('tipsTable');
-  setLoading(el);
+  if (_loadingTips) return;
+  _loadingTips = true;
+  try {
+    const statusEl = document.getElementById('tipsStatus');
+    const status = statusEl ? statusEl.value : '';
+    const el = document.getElementById('tipsTable');
+    if (!el) return;
+    setLoading(el);
   let tips = [];
   const LIMIT_ALL = 1000; // cap hard do backend
   if (currentSport === '__overall__') {
@@ -2122,6 +2132,9 @@ async function loadTips(gen = refreshGen) {
   loadTipsBySport(gen).catch(() => {});
   loadTipsByLeague(gen).catch(() => {});
   loadTipsByMarket(gen).catch(() => {});
+  } finally {
+    _loadingTips = false;
+  }
 }
 
 // Filtro de liga aplicado no renderTipsTable. null = todas. String = filter event_name.
@@ -2160,19 +2173,26 @@ function filterTipsByTier(sport, tier) {
 
 // 2026-04-28: cross-section deeplink helper. Switch sport + filter liga +
 // scroll pra seção tips. Usado em league-leaks card e league-blocklist card.
-function _filterTipsByLeague(league, sport) {
-  // Switch sport se diferente do current
+// 2026-04-28 update: aguarda loadTips terminar antes de aplicar filter
+// (antes filter era aplicado contra tipsCache vazio durante refresh assíncrono).
+async function _filterTipsByLeague(league, sport) {
+  // Switch sport se diferente do current — refresh é async, aguardamos.
   if (sport && sport !== currentSport) {
     const ss = document.getElementById('sportSelect');
     if (ss) {
       const opt = [...ss.options].find(o => o.value === sport || o.value.startsWith(sport + '|'));
       if (opt) {
         ss.value = opt.value;
-        onSportChange(); // dispara refresh com sport novo
+        const [s, g] = opt.value.split('|');
+        currentSport = s;
+        currentGame = g || '';
+        _saveFilter('sport', s);
+        // Aguarda load completo antes de aplicar filtro
+        await refresh().catch(() => {});
       }
     }
   }
-  // Aplica filtro tipsLeagueFilter (caseinsensitive exact em renderTipsTable)
+  // Aplica filtro tipsLeagueFilter (case-insensitive exact em renderTipsTable)
   filterTipsByLeague(league);
   // Scroll pra seção tips
   setTimeout(() => {
@@ -2471,10 +2491,16 @@ function renderTipsTable() {
   const el = document.getElementById('tipsTable');
   if (!el) return;
   let tips = tipsCache;
-  // Aplica filtro de liga (se ativo) — case-insensitive exact match no event_name
+  // Aplica filtro de liga (se ativo).
+  // 2026-04-28: case-insensitive INCLUDES (era exact). Antes click "ATP Madrid"
+  // (no leak card) buscava event_name === "ATP Madrid" mas DB tinha "ATP Madrid - QF"
+  // → filtro vazia silenciosamente. Agora substring match cobre variantes de round.
   if (tipsLeagueFilter) {
-    const lf = String(tipsLeagueFilter).toLowerCase();
-    tips = (tipsCache || []).filter(t => String(t.event_name || '').toLowerCase() === lf);
+    const lf = String(tipsLeagueFilter).toLowerCase().trim();
+    tips = (tipsCache || []).filter(t => {
+      const en = String(t.event_name || '').toLowerCase();
+      return en === lf || en.includes(lf) || lf.includes(en);
+    });
   } else if (tipsTierFilter && tipsTierSport) {
     // Filtro por tier — classifica cada tip's event_name e checa match.
     tips = (tipsCache || []).filter(t =>
@@ -2482,9 +2508,18 @@ function renderTipsTable() {
       _classifyLeagueTier(t.sport, t.event_name) === tipsTierFilter
     );
   }
+  // 2026-04-28: empty state com botão "limpar filtro" pra desbloquear UX.
+  // Antes filter sem match deixava user preso (precisava recarregar página).
   if (!Array.isArray(tips) || !tips.length) {
     const filterLabel = tipsLeagueFilter || tipsTierFilter;
-    setEmpty(el, filterLabel ? `Sem tips no filtro "${filterLabel}"` : 'Sem tips no filtro');
+    if (filterLabel) {
+      el.innerHTML = `<div class="empty-state" style="padding:20px;text-align:center">
+        Sem tips no filtro "<b>${escHtml(filterLabel)}</b>"<br>
+        <button onclick="tipsLeagueFilter=null;tipsTierFilter=null;tipsTierSport=null;renderTipsTable()" style="margin-top:8px;background:var(--accent,#3b82f6);color:#fff;border:none;padding:6px 14px;border-radius:4px;cursor:pointer">✕ Limpar filtro</button>
+      </div>`;
+    } else {
+      setEmpty(el, 'Sem tips');
+    }
     return;
   }
 
@@ -2604,15 +2639,16 @@ function renderTipsTable() {
         }).join('')}
       </tbody>
     </table></div>
-    ${totalPages > 1 ? `
-      <div class="tips-pager">
-        <button onclick="tipsPage=1; renderTipsTable()" ${tipsPage === 1 ? 'disabled' : ''}>«</button>
-        <button onclick="tipsPage--; renderTipsTable()" ${tipsPage === 1 ? 'disabled' : ''}>‹ Anterior</button>
-        <span class="page-info">Página ${tipsPage} de ${totalPages} · ${startIdx + 1}–${Math.min(startIdx + pageSize, tips.length)} de ${tips.length}</span>
-        <button onclick="tipsPage++; renderTipsTable()" ${tipsPage === totalPages ? 'disabled' : ''}>Próxima ›</button>
-        <button onclick="tipsPage=${totalPages}; renderTipsTable()" ${tipsPage === totalPages ? 'disabled' : ''}>»</button>
-      </div>
-    ` : ''}
+    <!-- 2026-04-28: pagination SEMPRE visível (antes some quando totalPages=1
+         após filter aplicado, user reportou como bug). Botões disabled quando
+         na borda mas info de página clarifica estado atual. -->
+    <div class="tips-pager">
+      <button onclick="tipsPage=1; renderTipsTable()" ${tipsPage === 1 ? 'disabled' : ''}>«</button>
+      <button onclick="if(tipsPage>1){tipsPage--; renderTipsTable()}" ${tipsPage === 1 ? 'disabled' : ''}>‹ Anterior</button>
+      <span class="page-info">Página ${tipsPage} de ${totalPages} · ${startIdx + 1}–${Math.min(startIdx + pageSize, tips.length)} de ${tips.length}</span>
+      <button onclick="if(tipsPage<${totalPages}){tipsPage++; renderTipsTable()}" ${tipsPage >= totalPages ? 'disabled' : ''}>Próxima ›</button>
+      <button onclick="tipsPage=${totalPages}; renderTipsTable()" ${tipsPage >= totalPages ? 'disabled' : ''}>»</button>
+    </div>
   `;
 }
 
@@ -3066,7 +3102,15 @@ let marketTipsState = {
   dupesHidden: 0,
 };
 
+// 2026-04-28: race protection MT shadow. Antes click rápido em sport cards
+// disparava 3-4 fetches sobrepostos; render último a chegar dependia de
+// network timing, mostrando lista errada vs sport selecionado. Bloqueia
+// chamadas concurrentes; nova chamada só roda após current acabar.
+let _loadingMtShadow = false;
 async function loadMarketTipsShadow() {
+  if (_loadingMtShadow) return;
+  _loadingMtShadow = true;
+  try {
   // Reset página/sport
   if (marketTipsState.sport !== currentSport) {
     marketTipsState.page = 0;
@@ -3121,6 +3165,9 @@ async function loadMarketTipsShadow() {
     : '';
   meta.textContent = `${data.total || 0} tips únicas (${days}d) · ${data.pending || 0} pend · ROI ${data.roi != null ? (data.roi >= 0 ? '+' : '') + data.roi + '%' : '—'} · CLV ${data.avgClvPct != null ? (data.avgClvPct >= 0 ? '+' : '') + data.avgClvPct + '%' : '—'}${dedupSuffix}`;
   renderMarketTipsPage();
+  } finally {
+    _loadingMtShadow = false;
+  }
 }
 
 function toggleMarketTipsLive() {
@@ -4243,9 +4290,15 @@ function filterMarketTipsByLeague(league) {
 
 function filterToSport(sp) {
   currentSport = sp;
-  // Dropdown value tem formato "sport|game", pipe é obrigatório pro match.
+  // 2026-04-28: persist + dropdown sync robusto. Antes if option não existir,
+  // dropdown ficava com value antigo (visual desync vs currentSport).
+  _saveFilter('sport', sp);
   const sel = document.getElementById('sportSelect');
-  if (sel) sel.value = sp + '|';
+  if (sel) {
+    // Dropdown value tem formato "sport|game" — busca opção exata ou prefixo.
+    const opt = [...sel.options].find(o => o.value === sp || o.value.startsWith(sp + '|'));
+    if (opt) sel.value = opt.value;
+  }
   marketTipsState.page = 0;
   marketTipsState.sport = sp;
   // refresh() já inclui loadMarketTipsShadow agora (commit 2b44c3f+).
