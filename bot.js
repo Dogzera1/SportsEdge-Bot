@@ -13133,6 +13133,14 @@ async function pollTennis(runOnce = false) {
           continue;
         }
 
+        // Shadow-only mode pra non-top-tier: tips são GERADAS e GRAVADAS em
+        // shadow (tips.is_shadow=1 + market_tips_shadow), mas sem DM admin/subs
+        // e sem promoção pra tabela tips regular. Mantém pipeline de aprendizado
+        // (CLV/calib) sem expor tips ao bankroll. Override via env
+        // TENNIS_NON_SLAM_SHADOW_ONLY=false (libera DM normal, default ON).
+        const _tennisShadowOnly = !_tennisTopTier
+          && !/^(0|false|no)$/i.test(String(process.env.TENNIS_NON_SLAM_SHADOW_ONLY ?? 'true'));
+
         const _tennisBase = _tennisTopTier
           ? (process.env.TENNIS_MIN_EDGE_TOP ? parseFloat(process.env.TENNIS_MIN_EDGE_TOP) : 2.5)
           : (process.env.TENNIS_MIN_EDGE ? parseFloat(process.env.TENNIS_MIN_EDGE) : 4.0);
@@ -13400,7 +13408,7 @@ async function pollTennis(runOnce = false) {
                     log('INFO', 'TENNIS-MARKETS',
                       `  • ${t.label} @ ${t.odd.toFixed(2)} | pModel=${(t.pModel*100).toFixed(1)}% pImpl=${t.pImplied ? (t.pImplied*100).toFixed(1)+'%' : '?'} EV=${t.ev.toFixed(1)}%${discTag}`);
                   }
-                  if (isMarketTipsEnabled('tennis') && ADMIN_IDS.size) {
+                  if (isMarketTipsEnabled('tennis') && ADMIN_IDS.size && !_tennisShadowOnly) {
                     try {
                       const mtp = require('./lib/market-tip-processor');
                       const minEvGate = parseFloat(process.env.TENNIS_MARKET_TIP_MIN_EV ?? '8');
@@ -14084,9 +14092,9 @@ Máximo 200 palavras. Raciocínio breve antes da decisão.`;
           modelP1: mlResultTennis.modelP1,
           modelP2: mlResultTennis.modelP2,
           modelPPick: modelPPick,
-          modelLabel: fairLabelTennis + (_tennisHybridText ? '+hybrid' : (_tennisFromOverride ? '+override' : '')),
+          modelLabel: fairLabelTennis + (_tennisHybridText ? '+hybrid' : (_tennisFromOverride ? '+override' : '')) + (_tennisShadowOnly ? '+shadowonly' : ''),
           tipReason: tipReasonTennis,
-          isShadow: tennisConfig.shadowMode ? 1 : 0,
+          isShadow: (_tennisShadowOnly || tennisConfig.shadowMode) ? 1 : 0,
           oddsFetchedAt: o._fetchedAt || null,
           lineShopOdds: o || null,
           pickSide: pickIsT1 ? 't1' : 't2',
@@ -14112,12 +14120,15 @@ Máximo 200 palavras. Raciocínio breve antes da decisão.`;
         }
 
         const _betBtnTen = _buildTipBetButton('tennis', o, pickIsT1 ? 't1' : 't2', match, tipStakeAdjTennis, tipOdd);
-        for (const [userId, prefs] of subscribedUsers) {
-          if (!prefs.has('tennis')) continue;
-          try { await sendDM(token, userId, tipMsg, _betBtnTen || undefined); } catch(_) {}
+        if (!_tennisShadowOnly) {
+          for (const [userId, prefs] of subscribedUsers) {
+            if (!prefs.has('tennis')) continue;
+            try { await sendDM(token, userId, tipMsg, _betBtnTen || undefined); } catch(_) {}
+          }
         }
         analyzedTennis.set(key, Object.assign({}, analyzedTennis.get(key) || {}, { ts: now, [isLivePhase ? 'tipSentLive' : 'tipSentPre']: true, [isLivePhase ? 'tsLive' : 'tsPre']: now }));
-        log('INFO', 'AUTO-TENNIS', `Tip enviada${isLivePhase ? ' (LIVE)' : ''}: ${tipPlayer} @ ${tipOdd} | EV:${tipEV}% | ${tipConf}`);
+        const shadowTag = _tennisShadowOnly ? ' [SHADOW non-top-tier]' : '';
+        log('INFO', 'AUTO-TENNIS', `Tip ${_tennisShadowOnly ? 'shadow-only' : 'enviada'}${isLivePhase ? ' (LIVE)' : ''}${shadowTag}: ${tipPlayer} @ ${tipOdd} | EV:${tipEV}% | ${tipConf}`);
         // CLV delayed pra live tennis (pregame já é pego pelo updater async normal)
         if (isLivePhase) scheduleLiveClvCapture('tennis', match, tipPlayer, match.id, tipOdd);
         await new Promise(r => setTimeout(r, 5000));
