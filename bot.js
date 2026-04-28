@@ -4088,6 +4088,9 @@ function isMarketTipsEnabled(sport, market = null, side = null, league = null) {
 
 // Mapa market_type pro /record-tip (canônico maiúsculo). Mantém compat com o
 // settle propagation em market-tips-shadow.js que reverte pro market original.
+// 2026-04-28: espelhado em lib/mt-result-propagator.js MARKET_TYPE_MAP.
+// Mantenha sincronizado pra que recordMarketTipAsRegular escreva e
+// propagateMtResultToTips leia o mesmo market_type.
 const _MT_MARKET_TYPE_MAP = {
   handicap: 'HANDICAP',
   handicapSets: 'HANDICAP_SETS',
@@ -4098,6 +4101,11 @@ const _MT_MARKET_TYPE_MAP = {
   tiebreakMatch: 'TIEBREAK',
   totalAces: 'TOTAL_ACES',
   draw: 'DRAW',
+  doubleChance: 'DOUBLECHANCE',
+  correctScore: 'CORRECTSCORE',
+  duration: 'DURATION',
+  mapWinner: 'MAPWINNER',
+  firstBlood: 'FIRSTBLOOD',
 };
 
 // Resolve participant pra market tip (não-ML). Pra h2h side (team1/team2/home/away)
@@ -6421,7 +6429,7 @@ async function autoAnalyzeMatch(token, match) {
                       }
                       if (!(stake > 0)) continue;
                       const dm = mtp.buildMarketTipDM({ match, tip: t, stake, league: match.league, sport: 'lol', isLive: isLiveLoL });
-                      const tokenForMT = resolveTipsToken('esports');
+                      const tokenForMT = resolveTipsToken('esports') || resolveAlertsToken();
                       if (!tokenForMT) continue;
                       const _mtMarkup_lol = mtp.buildMarketTipReplyMarkup({ match: match, sport: 'lol' });
                           const r = await sendAdminDMs(tokenForMT, dm, _mtMarkup_lol ? { reply_markup: _mtMarkup_lol } : undefined, 'lol-market-tip');
@@ -6556,7 +6564,7 @@ async function autoAnalyzeMatch(token, match) {
                         const stake = mtp.kellyStakeForMarket(t.pModel, t.odd, 100, getKellyFraction('lol', 'BAIXA'));
                         if (!(stake > 0)) continue;
                         const dm = mtp.buildMarketTipDM({ match, tip: t, stake, league: match.league, sport: 'lol', isLive: isLiveLoL });
-                        const tokenForMT = resolveTipsToken('esports');
+                        const tokenForMT = resolveTipsToken('esports') || resolveAlertsToken();
                         if (!tokenForMT) continue;
                         const _mtMarkup = mtp.buildMarketTipReplyMarkup({ match, sport: 'lol' });
                         const r = await sendAdminDMs(tokenForMT, dm, _mtMarkup ? { reply_markup: _mtMarkup } : undefined, 'lol-kills-tip');
@@ -11974,7 +11982,7 @@ async function _pollDotaInner(runOnce = false) {
                     }
                     if (!(stake > 0)) continue;
                     const dm = mtp.buildMarketTipDM({ match, tip: t, stake, league: match.league, sport: 'dota2', isLive });
-                    const tokenForMT = resolveTipsToken('esports');
+                    const tokenForMT = resolveTipsToken('esports') || resolveAlertsToken();
                     if (!tokenForMT) continue;
                     const _mtMarkup_dota = mtp.buildMarketTipReplyMarkup({ match: match, sport: 'dota2' });
                           const r = await sendAdminDMs(tokenForMT, dm, _mtMarkup_dota ? { reply_markup: _mtMarkup_dota } : undefined, 'dota-market-tip');
@@ -11986,7 +11994,7 @@ async function _pollDotaInner(runOnce = false) {
                       log('WARN', 'DOTA-MARKET-TIP', `Todos admin DM falharam — skip dedup mark (${t.label} @ ${t.odd})`);
                     }
                   }
-                } catch (mte) { reportBug('DOTA-MARKET-TIP', mte); }
+                } catch (mte) { reportBug('DOTA-MARKET-TIP', mte, { team1: match.team1, team2: match.team2, league: match.league }); }
               }
             }
           }
@@ -13772,7 +13780,10 @@ async function pollTennis(runOnce = false) {
                 if (found.length) {
                   log('INFO', 'TENNIS-MARKETS',
                     `${match.team1} vs ${match.team2}: ${found.length} mercado(s) EV ≥${minEv}%`);
-                  const tnBestOf = /grand slam|\[g\]|wimbledon|us open|roland|australian open/i.test(match.league || '') ? 5 : 3;
+                  // 2026-04-28: reusa tnBestOfForScan (linha 13738) — antes havia
+                  // `tnBestOf` recomputado com mesmo regex. Risco de drift se um
+                  // regex mudar e o outro não.
+                  const tnBestOf = tnBestOfForScan;
                   try {
                     const { logShadowTip } = require('./lib/market-tips-shadow');
                     for (const t of found) logShadowTip(db, { sport: 'tennis', match, bestOf: tnBestOf, tip: t, isLive: isLiveTennis });
@@ -13878,7 +13889,7 @@ async function pollTennis(runOnce = false) {
                           log('WARN', 'TENNIS-MARKET-TIP', `Todos admin DM falharam — skip dedup mark (${t.label} @ ${t.odd})`);
                         }
                       }
-                    } catch (mte) { reportBug('TENNIS-MARKET-TIP', mte); }
+                    } catch (mte) { reportBug('TENNIS-MARKET-TIP', mte, { team1: match.team1, team2: match.team2, league: match.league }); }
                   }
                 }
               }
@@ -15462,7 +15473,7 @@ Máximo 200 palavras.`;
                   }
                 }
               }
-            } catch (mte) { reportBug('FOOTBALL-MARKET-TIP', mte); }
+            } catch (mte) { reportBug('FOOTBALL-MARKET-TIP', mte, { team1: match.team1, team2: match.team2, league: match.league }); }
 
             await new Promise(r => setTimeout(r, 2000)); continue;
           } catch (e) {
@@ -16045,7 +16056,7 @@ async function pollCs(runOnce = false) {
                       }
                       if (!(stake > 0)) continue;
                       const dm = mtp.buildMarketTipDM({ match, tip: t, stake, league: match.league, sport: 'cs2', isLive: isLiveCs });
-                      const tokenForMT = resolveTipsToken('esports');
+                      const tokenForMT = resolveTipsToken('esports') || resolveAlertsToken();
                       if (!tokenForMT) continue;
                       const _mtMarkup_cs = mtp.buildMarketTipReplyMarkup({ match: match, sport: 'cs2' });
                           const r = await sendAdminDMs(tokenForMT, dm, _mtMarkup_cs ? { reply_markup: _mtMarkup_cs } : undefined, 'cs-market-tip');
@@ -16057,7 +16068,7 @@ async function pollCs(runOnce = false) {
                         log('WARN', 'CS-MARKET-TIP', `Todos admin DM falharam — skip dedup mark (${t.label} @ ${t.odd})`);
                       }
                     }
-                  } catch (mte) { reportBug('CS-MARKET-TIP', mte); }
+                  } catch (mte) { reportBug('CS-MARKET-TIP', mte, { team1: match.team1, team2: match.team2, league: match.league }); }
                 }
               }
             }
@@ -16637,7 +16648,7 @@ async function pollValorant(runOnce = false) {
                       }
                       if (!(stake > 0)) continue;
                       const dm = mtp.buildMarketTipDM({ match, tip: t, stake, league: match.league, sport: 'valorant', isLive: isLiveVal });
-                      const tokenForMT = resolveTipsToken('esports');
+                      const tokenForMT = resolveTipsToken('esports') || resolveAlertsToken();
                       if (!tokenForMT) continue;
                       const _mtMarkup_valorant = mtp.buildMarketTipReplyMarkup({ match: match, sport: 'valorant' });
                           const r = await sendAdminDMs(tokenForMT, dm, _mtMarkup_valorant ? { reply_markup: _mtMarkup_valorant } : undefined, 'val-market-tip');
@@ -16649,7 +16660,7 @@ async function pollValorant(runOnce = false) {
                         log('WARN', 'VAL-MARKET-TIP', `Todos admin DM falharam — skip dedup mark (${t.label} @ ${t.odd})`);
                       }
                     }
-                  } catch (mte) { reportBug('VAL-MARKET-TIP', mte); }
+                  } catch (mte) { reportBug('VAL-MARKET-TIP', mte, { team1: match.team1, team2: match.team2, league: match.league }); }
                 }
               }
             }

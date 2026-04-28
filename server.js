@@ -16301,8 +16301,13 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
             log(logLevel, 'SETTLE', `${sport} matchId=${matchId} tip="${tip.tip_participant}" vs winner="${winner}" → ${result} [method=${matchMethod} score=${matchScore}]`);
             stmts.settleTip.run(result, matchId, sport);
             // Atualiza profit_reais com tier per-sport unit; acumula delta da banca.
-            // SEMPRE recalcula (ignora stake_reais stored — pode estar em escala antiga).
+            // 2026-04-28: usa stake_reais stored quando settled_at original (tier
+            // já gravado em record-tip). Recompute só quando stake_reais NULL ou
+            // settled antes de migration 035 (rebuild reais). Reduz drift entre
+            // alocação real (no momento da tip) e tier atual (que pode ter caído).
             const stakeR = (() => {
+              const stored = Number(tip.stake_reais);
+              if (Number.isFinite(stored) && stored > 0) return stored;
               const { getSportUnitValue } = require('./lib/sport-unit');
               const bk = stmts.getBankroll.get(sport);
               const uv = getSportUnitValue(bk?.current_banca || 0, bk?.initial_banca || 100);
