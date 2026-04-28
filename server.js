@@ -7267,6 +7267,87 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // GET /market-tips-by-league?sport=X&days=30&min_n=2
+  // Stats por liga das MT shadow tips (market_tips_shadow). Espelha
+  // /tips-by-league mas em unidades (não reais) e com top_market por liga.
+  if (p === '/market-tips-by-league') {
+    const sport = parsed.query.sport && parsed.query.sport !== '__overall__' ? parsed.query.sport : null;
+    const days = Math.max(1, Math.min(365, parseInt(parsed.query.days || '30', 10) || 30));
+    const minN = Math.max(1, parseInt(parsed.query.min_n || '2', 10) || 2);
+    const includeVoid = parsed.query.includeVoid === '1';
+    try {
+      const conds = [`created_at >= datetime('now', '-' || ? || ' days')`];
+      const params = [days];
+      if (sport) {
+        const { sportSet } = (typeof resolveSportSet === 'function')
+          ? resolveSportSet(sport, null) : { sportSet: [sport] };
+        conds.push(`sport IN (${sportSet.map(() => '?').join(',')})`);
+        params.push(...sportSet);
+      }
+      if (!includeVoid) conds.push(`(result IS NULL OR result != 'void')`);
+      conds.push(`league IS NOT NULL AND TRIM(league) != ''`);
+      const rows = db.prepare(`
+        SELECT
+          league,
+          sport,
+          COUNT(*) AS n,
+          SUM(CASE WHEN result IS NULL THEN 1 ELSE 0 END) AS pending,
+          SUM(CASE WHEN result IN ('win','loss') THEN 1 ELSE 0 END) AS settled,
+          SUM(CASE WHEN result = 'win' THEN 1 ELSE 0 END) AS wins,
+          SUM(CASE WHEN result IN ('win','loss') THEN COALESCE(profit_units, 0) ELSE 0 END) AS profit,
+          SUM(CASE WHEN result IN ('win','loss') THEN COALESCE(stake_units, 1) ELSE 0 END) AS staked,
+          AVG(clv_pct) AS avg_clv,
+          SUM(CASE WHEN clv_pct IS NOT NULL THEN 1 ELSE 0 END) AS clv_n,
+          SUM(CASE WHEN clv_pct > 0 THEN 1 ELSE 0 END) AS clv_positive,
+          AVG(ev_pct) AS avg_ev,
+          SUM(CASE WHEN is_live = 1 THEN 1 ELSE 0 END) AS live_n
+        FROM market_tips_shadow
+        WHERE ${conds.join(' AND ')}
+        GROUP BY league, sport
+        HAVING n >= ?
+        ORDER BY n DESC, profit DESC
+      `).all(...params, minN);
+
+      // Top market por liga (qual mercado domina? handicapGames/totalGames/etc)
+      const topMarketByLeague = {};
+      try {
+        const mkRows = db.prepare(`
+          SELECT league, sport, market, COUNT(*) AS c
+          FROM market_tips_shadow
+          WHERE ${conds.join(' AND ')}
+          GROUP BY league, sport, market
+        `).all(...params);
+        for (const r of mkRows) {
+          const k = `${r.sport}|${r.league}`;
+          if (!topMarketByLeague[k] || r.c > topMarketByLeague[k].c) {
+            topMarketByLeague[k] = { market: r.market, c: r.c };
+          }
+        }
+      } catch (_) {}
+
+      const out = rows.map(r => ({
+        league: r.league,
+        sport: r.sport,
+        n: r.n,
+        pending: r.pending || 0,
+        settled: r.settled || 0,
+        wins: r.wins || 0,
+        live_n: r.live_n || 0,
+        topMarket: topMarketByLeague[`${r.sport}|${r.league}`]?.market || null,
+        hitRate: r.settled > 0 ? +(r.wins / r.settled * 100).toFixed(1) : null,
+        profit: +(r.profit || 0).toFixed(2),
+        staked: +(r.staked || 0).toFixed(2),
+        roi: r.staked > 0 ? +((r.profit / r.staked) * 100).toFixed(1) : null,
+        avgClv: r.clv_n > 0 ? +(r.avg_clv || 0).toFixed(2) : null,
+        clvN: r.clv_n || 0,
+        clvPositivePct: r.clv_n > 0 ? +(r.clv_positive / r.clv_n * 100).toFixed(0) : null,
+        avgEv: +(r.avg_ev || 0).toFixed(2),
+      }));
+      sendJson(res, { ok: true, sport: sport || 'all', days, min_n: minN, leagues: out });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
   // Repair: pra cada (sport, teams, market, side), mantém tip com MAIOR p_model
   // como active (result=NULL) e voida as demais. Corrige casos onde void anterior
   // usou EV ranking (errado) em vez de p_model.

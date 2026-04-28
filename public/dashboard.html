@@ -2819,6 +2819,9 @@ let marketTipsState = {
   windowStats: null,
   // Per-sport breakdown
   bySport: null,
+  // Per-league breakdown (cards filtráveis)
+  byLeague: null,
+  leagueFilter: null,
   daysWindow: 14,
   daysSportWindow: 30,
   includeVoid: false,
@@ -2834,6 +2837,7 @@ async function loadMarketTipsShadow() {
   if (marketTipsState.sport !== currentSport) {
     marketTipsState.page = 0;
     marketTipsState.sport = currentSport;
+    marketTipsState.leagueFilter = null; // sport mudou — filter de liga não vale
   }
   const sp = currentSport === '__overall__' ? '' : '&sport=' + encodeURIComponent(currentSport);
   const liveQ = marketTipsState.includeLive ? '&includeLive=1' : '';
@@ -2843,11 +2847,12 @@ async function loadMarketTipsShadow() {
   const offset = marketTipsState.page * marketTipsState.perPage;
   const days = marketTipsState.daysWindow;
   const daysSport = marketTipsState.daysSportWindow;
-  // Fetch em paralelo: lista paginada + breakdown agregado + per-sport
-  const [data, breakdown, bySport] = await Promise.all([
+  // Fetch em paralelo: lista paginada + breakdown agregado + per-sport + per-league
+  const [data, breakdown, bySport, byLeague] = await Promise.all([
     apiFetch(`/market-tips-recent?days=${days}&limit=${marketTipsState.perPage}&offset=${offset}${sp}${voidQ}${dedupQ}${viewQ}`),
     apiFetch(`/market-tips-breakdown?days=30${sp}${liveQ}`),
     apiFetch(`/market-tips-by-sport?days=${daysSport}${voidQ}${dedupQ}`),
+    apiFetch(`/market-tips-by-league?days=${daysSport}&min_n=2${sp}${voidQ}`),
   ]);
   const el = document.getElementById('marketTipsBody');
   const meta = document.getElementById('marketTipsMeta');
@@ -2860,6 +2865,7 @@ async function loadMarketTipsShadow() {
   marketTipsState.windowStats = data;
   marketTipsState.breakdown = breakdown?.error ? null : breakdown;
   marketTipsState.bySport = bySport?.error ? null : bySport;
+  marketTipsState.byLeague = byLeague?.error ? null : byLeague;
   const dedupSuffix = (marketTipsState.dedup && marketTipsState.dupesHidden > 0)
     ? ` · 🧹 ${marketTipsState.dupesHidden} dupes ocultos`
     : '';
@@ -3447,7 +3453,12 @@ function renderMarketTipsPage() {
 
   // viewMode (all/pre/live) é aplicado SERVER-side — `tips[]` já vem filtrado
   // por viewMode. `total` reflete count da janela específica do viewMode.
-  const pageFiltered = tips;
+  // Filtro de liga é client-side: clicar num card filtra apenas a página atual.
+  // Pra ver todas tips daquela liga é necessário ampliar a janela ou usar
+  // /market-tips-recent direto com filtro de league no backend.
+  const pageFiltered = marketTipsState.leagueFilter
+    ? tips.filter(t => String(t.league || '').toLowerCase() === String(marketTipsState.leagueFilter).toLowerCase())
+    : tips;
 
   const fmtPct = (v, d=1) => v == null ? '—' : (v >= 0 ? '+' : '') + Number(v).toFixed(d) + '%';
   // Stats da janela (server-side, refletem o total — não a página)
@@ -3479,6 +3490,7 @@ function renderMarketTipsPage() {
       Ativar DM admin: env <code>&lt;SPORT&gt;_MARKET_TIPS_ENABLED=true</code>.
     </div>
     ${renderMarketTipsBySportCards(marketTipsState.bySport)}
+    ${renderMarketTipsByLeagueCards(marketTipsState.byLeague)}
     ${renderMarketTipsBreakdown(marketTipsState.breakdown)}
     <div style="display:flex;gap:8px;margin:10px 0 6px;flex-wrap:wrap;align-items:center">
       ${tabBtn('📊 Todas', 'all')}
@@ -3658,6 +3670,78 @@ function renderMarketTipsBySportCards(bs) {
     <div class="card-meta" style="margin-bottom:8px"><b>📊 Stats por esporte (${bs.days}d)</b> — clique pra filtrar</div>
     <div style="display:flex;gap:10px;flex-wrap:wrap">${overallBtn}${cards}</div>
   </div>`;
+}
+
+// Cards horizontais com stats por liga (MT shadow). Click filtra tabela
+// pela liga clicada — espelha pattern de loadTipsByLeague mas usando
+// /market-tips-by-league em vez de /tips-by-league.
+function renderMarketTipsByLeagueCards(bl) {
+  if (!bl || !Array.isArray(bl.leagues) || !bl.leagues.length) return '';
+  // Limita top 12 pra UI manejável
+  const top = bl.leagues.slice(0, 12);
+  const sportColor = {
+    lol: '#29b6f6', dota2: '#ef5350', cs2: '#ffa726', valorant: '#ec407a',
+    tennis: '#66bb6a', football: '#ab47bc', mma: '#8d6e63',
+    darts: '#26a69a', snooker: '#5c6bc0', tabletennis: '#ff7043',
+  };
+  const fmtPct = (v, d=1) => v == null ? '—' : (v >= 0 ? '+' : '') + Number(v).toFixed(d) + '%';
+  const cls = (v) => v == null ? '' : (v >= 0 ? 'positive' : 'negative');
+  const escapeQ = (s) => String(s).replace(/'/g, "&#39;").replace(/"/g, '&quot;');
+
+  const cards = top.map(l => {
+    const isActive = marketTipsState.leagueFilter === l.league;
+    const c = sportColor[l.sport] || '#888';
+    const shortName = l.league.length > 28 ? l.league.slice(0, 25) + '…' : l.league;
+    const cleanLeague = escapeQ(l.league);
+    const liveBadge = l.live_n > 0
+      ? `<span style="background:#ef4444;color:#fff;padding:1px 4px;border-radius:3px;font-size:0.65em;margin-left:4px">🔴 ${l.live_n}</span>`
+      : '';
+    const mktBadge = l.topMarket
+      ? `<span style="background:#475569;color:#fff;padding:1px 4px;border-radius:3px;font-size:0.65em;margin-left:4px" title="Mercado dominante">${l.topMarket}</span>`
+      : '';
+    return `
+      <div onclick="filterMarketTipsByLeague('${cleanLeague}')" title="${cleanLeague}"
+           style="cursor:pointer;border:2px solid ${isActive ? c : 'var(--border,#2a2a2a)'};background:var(--surface,#0f172a);border-radius:6px;padding:8px 10px;min-width:190px;flex:1;transition:transform 0.1s"
+           onmouseover="this.style.transform='translateY(-2px)'" onmouseout="this.style.transform='translateY(0)'">
+        <div style="display:flex;align-items:center;gap:4px;margin-bottom:3px;flex-wrap:wrap">
+          <span style="background:${c};color:#fff;padding:1px 5px;border-radius:3px;font-size:0.65em;font-weight:600">${l.sport.toUpperCase()}</span>
+          ${liveBadge}
+          ${mktBadge}
+        </div>
+        <div style="font-size:0.85em;font-weight:600;color:var(--text,#e2e8f0);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${shortName}</div>
+        <div style="font-size:0.7em;color:#888;margin-top:1px">${l.n} tips · ${l.pending} pend · ${l.settled} sett</div>
+        <div style="display:flex;justify-content:space-between;font-size:0.75em;margin-top:4px">
+          <span>Hit <b>${fmtPct(l.hitRate, 0)}</b></span>
+          <span class="${cls(l.roi)}">ROI <b>${fmtPct(l.roi)}</b></span>
+        </div>
+        <div style="display:flex;justify-content:space-between;font-size:0.72em;margin-top:1px">
+          <span class="${cls(l.avgClv)}">CLV ${fmtPct(l.avgClv)}${l.clvN > 0 ? ` <span style="opacity:0.6">(${l.clvN})</span>` : ''}</span>
+          <span class="${cls(l.profit)}">${l.profit >= 0 ? '+' : ''}${l.profit.toFixed(1)}u</span>
+        </div>
+      </div>`;
+  }).join('');
+  const filterHint = marketTipsState.leagueFilter
+    ? `<span style="margin-left:8px;color:#3b82f6;cursor:pointer;font-size:0.8em" onclick="filterMarketTipsByLeague('${escapeQ(marketTipsState.leagueFilter)}')">✕ limpar filtro: <b>${marketTipsState.leagueFilter}</b></span>`
+    : '';
+  return `
+    <div style="margin-bottom:14px">
+      <div class="card-meta" style="margin-bottom:6px;font-size:0.8em">
+        🏆 <b>Stats MT por liga (${bl.days}d, top ${top.length}${bl.leagues.length > top.length ? ' de ' + bl.leagues.length : ''})</b> — clique pra filtrar tabela${filterHint}
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">${cards}</div>
+    </div>`;
+}
+
+function filterMarketTipsByLeague(league) {
+  // Toggle: clicar no mesmo card limpa filtro
+  if (marketTipsState.leagueFilter === league) {
+    marketTipsState.leagueFilter = null;
+  } else {
+    marketTipsState.leagueFilter = league;
+  }
+  marketTipsState.page = 0;
+  // Re-render imediato (filter aplicado client-side em pageFiltered)
+  renderMarketTipsPage();
 }
 
 function filterToSport(sp) {
