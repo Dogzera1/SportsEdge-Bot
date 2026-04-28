@@ -16233,9 +16233,16 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
     let body = ''; req.on('data', d => body += d);
     req.on('end', () => {
       try {
-        const { matchId, winner, home, away } = safeParse(body, {});
+        const { matchId, winner, home, away, score } = safeParse(body, {});
         const sport = parsed.query.sport || 'esports';
         if (!matchId || !winner) { sendJson(res, { error: 'Missing matchId/winner' }, 400); return; }
+        // 2026-04-28: walkover/retirement detection. Tennis match com RET/W.O./
+        // Walkover/Cancelled vira VOID (não loss do perdedor). MMA "no contest"
+        // idem. ESPN sometimes retorna winner mesmo em RET; sem essa guard,
+        // tip do perdedor virava loss fantasma.
+        const _scoreStr = String(score || '').trim();
+        const _walkoverRe = /\b(ret|retir|w\.?o\.?|walkover|abandoned|cancell?ed|no\s*contest|w\/o|wd\b|withdrew)\b/i;
+        const _isWalkover = _scoreStr && _walkoverRe.test(_scoreStr);
         // HARD GUARD: MT-promoted tips (match_id LIKE '%::mt::%' OR market_type non-ML)
         // jamais passam pelo /settle name-match — esse endpoint só sabe casar winner
         // com tip_participant, o que falha pra HANDICAP/TOTAL/TIEBREAK e marca loss
@@ -16279,9 +16286,14 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
               matchMethod = r.method;
               matchScore = r.score;
             }
-            const result = nameMatched ? 'win' : 'loss';
+            // Walkover/RET → void (override result). Aplica antes do quarantine
+            // pra cobrir ambos perdedor (loss fantasma) e vencedor por walkover.
+            const result = _isWalkover ? 'void' : (nameMatched ? 'win' : 'loss');
+            if (_isWalkover) {
+              log('INFO', 'SETTLE', `${sport} matchId=${matchId} tip="${tip.tip_participant}" → VOID (walkover/RET detectado em score="${_scoreStr.slice(0, 50)}")`);
+            }
             // substring_weak = match fraco — quarentena para evitar false positive/negative
-            if (matchMethod === 'substring_weak') {
+            if (matchMethod === 'substring_weak' && !_isWalkover) {
               log('WARN', 'SETTLE', `QUARANTINE ${sport} matchId=${matchId} tip="${tip.tip_participant}" vs winner="${winner}" → ${result} [method=${matchMethod} score=${matchScore}] — NÃO liquidado (requer /settle-manual)`);
               continue;
             }
@@ -16300,6 +16312,7 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
             const odds = parseFloat(tip.odds) || 1;
             const profitR = result === 'win'
               ? parseFloat((stakeR * (odds - 1)).toFixed(2))
+              : result === 'void' ? 0
               : parseFloat((-stakeR).toFixed(2));
             db.prepare("UPDATE tips SET stake_reais = ?, profit_reais = ? WHERE id = ?")
               .run(stakeR, profitR, tip.id);

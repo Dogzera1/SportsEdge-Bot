@@ -2690,7 +2690,7 @@ async function settleCompletedTips() {
           try {
             const espn = findEspnFight(espnFights, tip.participant1, tip.participant2);
             if (!espn || espn.statusState !== 'post' || !espn.winner) continue;
-            await serverPost('/settle', { matchId: tip.match_id, winner: espn.winner }, 'mma');
+            await serverPost('/settle', { matchId: tip.match_id, winner: espn.winner, score: espn.method || espn.detail || '' }, 'mma');
             log('INFO', 'SETTLE', `mma: ${tip.participant1} vs ${tip.participant2} → ${espn.winner}`);
             settled++;
           } catch(e) {
@@ -2727,7 +2727,7 @@ async function settleCompletedTips() {
               'tennis'
             ).catch(() => null);
             if (dbRes?.resolved && dbRes.winner) {
-              await serverPost('/settle', { matchId: tip.match_id, winner: dbRes.winner }, 'tennis');
+              await serverPost('/settle', { matchId: tip.match_id, winner: dbRes.winner, score: dbRes.score || dbRes.final_score || '' }, 'tennis');
               log('INFO', 'SETTLE', `tennis: ${tip.participant1} vs ${tip.participant2} → ${dbRes.winner} (DB)`);
               settled++;
               continue;
@@ -2752,7 +2752,10 @@ async function settleCompletedTips() {
                   ? (sa > sb ? a.name : b.name)
                   : null;
                 if (winner) {
-                  await serverPost('/settle', { matchId: tip.match_id, winner }, 'tennis');
+                  // s.scores contém apenas placar; status retired vem em s.status — passar
+                  // ambos como score combinado pra detection de walkover no /settle.
+                  const _scoreStr = s.status ? `${a?.score}-${b?.score} ${s.status}` : '';
+                  await serverPost('/settle', { matchId: tip.match_id, winner, score: _scoreStr }, 'tennis');
                   log('INFO', 'SETTLE', `tennis: ${tip.participant1} vs ${tip.participant2} → ${winner}`);
                   settled++;
                   continue;
@@ -2767,7 +2770,7 @@ async function settleCompletedTips() {
               return tennisPairMatchesPlayers(tip.participant1, tip.participant2, r.p1, r.p2);
             });
             if (!res) continue;
-            await serverPost('/settle', { matchId: tip.match_id, winner: res.winner }, 'tennis');
+            await serverPost('/settle', { matchId: tip.match_id, winner: res.winner, score: res.score || res.final_score || '' }, 'tennis');
             log('INFO', 'SETTLE', `tennis: ${tip.participant1} vs ${tip.participant2} → ${res.winner}`);
             settled++;
           } catch(e) {
@@ -14943,7 +14946,27 @@ async function pollFootball(runOnce = false) {
                   try {
                     const mtp = require('./lib/market-tip-processor');
                     const { wasAdminDmSentRecently, markAdminDmSent } = require('./lib/market-tips-shadow');
-                    for (const t of fbMtFound) {
+                    // 2026-04-28: replicar pattern LoL/CS/Dota — filtro per-market EV/pmodel
+                    // + dedup byMarket (1 tip per market type por match, escolhe maior EV).
+                    // Antes: scanner produzia 5 tips correlacionadas (BTTS+OU+AH+TT) e todas
+                    // viravam DM = over-exposure no mesmo match.
+                    const _minEvPromo = parseFloat(process.env.FOOTBALL_MT_PROMOTE_MIN_EV ?? '8');
+                    const _minPmPromo = parseFloat(process.env.FOOTBALL_MT_PROMOTE_MIN_PMODEL ?? '0.55');
+                    const _eligiblesRaw = fbMtFound.filter(t =>
+                      Number.isFinite(t.ev) && Number.isFinite(t.pModel) &&
+                      t.ev >= _minEvPromo && t.pModel >= _minPmPromo
+                    );
+                    const _byMarketFb = new Map();
+                    for (const t of _eligiblesRaw) {
+                      const k = String(t.market || '');
+                      const prev = _byMarketFb.get(k);
+                      if (!prev || (t.ev || 0) > (prev.ev || 0)) _byMarketFb.set(k, t);
+                    }
+                    const _eligiblesFb = [..._byMarketFb.values()];
+                    if (_eligiblesFb.length < fbMtFound.length) {
+                      log('INFO', 'FB-MT-SCAN', `${fbMtFound.length}→${_eligiblesFb.length} elegíveis após gate (EV≥${_minEvPromo}% pM≥${_minPmPromo} + dedup byMarket)`);
+                    }
+                    for (const t of _eligiblesFb) {
                       if (!isMarketTipsEnabled('football', t.market, t.side, match.league)) {
                         log('INFO', 'MT-GUARD', `football/${t.market}/${t.side}: DM skipped — disabled por leak guard`);
                         continue;
@@ -16567,7 +16590,7 @@ async function pollValorant(runOnce = false) {
                     const eligibles = [..._byMarket.values()];
                     const { wasAdminDmSentRecently, markAdminDmSent } = require('./lib/market-tips-shadow');
                     for (const t of eligibles) {
-                      if (!isMarketTipsEnabled('valorant', t.market, t.side)) {
+                      if (!isMarketTipsEnabled('valorant', t.market, t.side, match.league)) {
                         log('INFO', 'MT-GUARD', `valorant/${t.market}/${t.side}: DM skipped — market disabled por leak guard`);
                         continue;
                       }
