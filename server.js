@@ -10656,6 +10656,31 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // GET /recent-emitted-match-ids?sport=football&hours=24
+  // Lista distinct match_id de tips emitidas nas últimas N horas (não shadow,
+  // não arquivadas, ainda pending OU recém settled). Usado pelo bot pra warm
+  // o cache analyzedFootball/Tennis/etc após cooldown reset, evitando re-emit
+  // de duplicates conhecidos.
+  if (p === '/recent-emitted-match-ids') {
+    const sport = String(parsed.query.sport || '').trim().toLowerCase();
+    const hours = Math.max(1, Math.min(168, parseInt(parsed.query.hours || '24', 10) || 24));
+    if (!sport) { sendJson(res, { ok: false, error: 'missing sport' }, 400); return; }
+    try {
+      const { sportSet } = (typeof resolveSportSet === 'function')
+        ? resolveSportSet(sport, null) : { sportSet: [sport] };
+      const ph = sportSet.map(() => '?').join(',');
+      const rows = db.prepare(
+        `SELECT DISTINCT match_id FROM tips
+         WHERE sport IN (${ph})
+           AND (archived IS NULL OR archived = 0)
+           AND sent_at >= datetime('now', '-' || ? || ' hours')
+           AND match_id IS NOT NULL`
+      ).all(...sportSet, hours);
+      sendJson(res, { ok: true, sport, hours, match_ids: rows.map(r => r.match_id) });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   // GET/POST /admin/mt-shadow-revert-suspects?days=14&apply=0&buffer_min=5&key=<KEY>
   // Equivalente ao mt-revert-suspects mas pra MARKET_TIPS_SHADOW (não tips).
   // Detecta shadow rows settled (win/loss/void) onde o match_results
@@ -20469,6 +20494,35 @@ server.listen(PORT, '0.0.0.0', () => {
     } catch (e) { log('ERROR', 'SETTLE-SWEEP', `cycle: ${e.message}`); }
   }, sweepMin * 60 * 1000);
   log('INFO', 'SETTLE-SWEEP', `Cron ativo: a cada ${sweepMin}min, janela ${sweepDays}d`);
+
+  // Auto-archive non-ML tips órfãs em `tips` table — settle-guard rejeita
+  // toda passada (MAP1_WINNER, totalGames, handicapGames…), criando loop
+  // infinito de "rejeitada em /settle (non-ML)". Mercados não-ML devem ir
+  // pra market_tips_shadow via propagator. Esta cron arquiva tips antigas
+  // (>48h sem result) com market_type fora de ML_MARKETS — defesa de
+  // limpeza após bug de roteamento que possa ter inserido orfã em tips.
+  // Opt-out: NON_ML_AUTOARCHIVE_DISABLED=true
+  if (!/^(1|true|yes)$/i.test(String(process.env.NON_ML_AUTOARCHIVE_DISABLED || ''))) {
+    const archiveOrphanNonML = () => {
+      try {
+        const ML_M = ['ML','1X2_H','1X2_A','1X2_D','OVER_2.5','UNDER_2.5'];
+        const ph = ML_M.map(() => '?').join(',');
+        const r = db.prepare(
+          `UPDATE tips SET archived = 1
+           WHERE result IS NULL
+             AND (archived IS NULL OR archived = 0)
+             AND sent_at <= datetime('now', '-48 hours')
+             AND upper(COALESCE(market_type, 'ML')) NOT IN (${ph})`
+        ).run(...ML_M);
+        if (r.changes > 0) {
+          log('INFO', 'NON-ML-AUTOARCHIVE', `${r.changes} non-ML orphan tip(s) arquivada(s) (≥48h pending)`);
+        }
+      } catch (e) { log('ERROR', 'NON-ML-AUTOARCHIVE', e.message); }
+    };
+    setTimeout(archiveOrphanNonML, 3 * 60 * 1000);
+    setInterval(archiveOrphanNonML, 60 * 60 * 1000);
+    log('INFO', 'NON-ML-AUTOARCHIVE', 'Cron ativo: hourly, threshold 48h');
+  }
 });
 
 // fetchEsportsOddsV1 removida — código legado com odds falsas hardcoded (1.80/1.90)

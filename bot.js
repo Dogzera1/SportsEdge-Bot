@@ -14814,12 +14814,29 @@ async function pollFootball(runOnce = false) {
           if (!loop._lastResetCheck || mtime > loop._lastResetCheck) {
             analyzedFootball.clear();
             loop._lastResetCheck = mtime;
+            loop._needsCacheWarm = true;
             log('INFO', 'AUTO-FOOTBALL', `Cooldown RESET — analyzedFootball limpo via flag signal`);
           }
         }
       } catch (_) {}
       log('INFO', 'AUTO-FOOTBALL', 'Iniciando verificação de partidas de Futebol...');
       markPollHeartbeat('football');
+
+      // Warm cache from DB on first iteration ou após reset: marca match_ids
+      // de tips football emitidas nas últimas 24h como tipSent=true. Evita
+      // re-análise+IA+/record-tip de duplicates conhecidos quando o map
+      // está vazio (boot, post-reset).
+      if (analyzedFootball.size === 0 || loop._needsCacheWarm) {
+        try {
+          const r = await serverGet('/recent-emitted-match-ids?sport=football&hours=24').catch(() => null);
+          const ids = Array.isArray(r?.match_ids) ? r.match_ids : [];
+          const warmTs = Date.now();
+          for (const mid of ids) analyzedFootball.set(`football_${mid}`, { ts: warmTs, tipSent: true });
+          loop._needsCacheWarm = false;
+          if (ids.length) log('INFO', 'AUTO-FOOTBALL', `Cache warm: ${ids.length} match_id(s) recentes pré-marcados (skip re-emit)`);
+        } catch (_) { loop._needsCacheWarm = false; }
+      }
+
       const matches = await serverGet('/football-matches').catch(() => []);
       if (!Array.isArray(matches) || !matches.length) {
         if (!runOnce) setTimeout(loop, 60 * 60 * 1000);
