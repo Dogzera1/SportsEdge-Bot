@@ -2844,12 +2844,15 @@ async function loadMarketTipsShadow() {
   const voidQ = marketTipsState.includeVoid ? '&includeVoid=1' : '';
   const dedupQ = marketTipsState.dedup ? '&dedup=1' : '&dedup=0';
   const viewQ = `&viewMode=${marketTipsState.viewMode || 'all'}`;
+  // League filter agora é server-side (antes filtrava client-side fragmentando
+  // páginas — totalPages errado, navegação next-page mostrava vazio).
+  const leagueQ = marketTipsState.leagueFilter ? `&league=${encodeURIComponent(marketTipsState.leagueFilter)}` : '';
   const offset = marketTipsState.page * marketTipsState.perPage;
   const days = marketTipsState.daysWindow;
   const daysSport = marketTipsState.daysSportWindow;
   // Fetch em paralelo: lista paginada + breakdown agregado + per-sport + per-league
   const [data, breakdown, bySport, byLeague] = await Promise.all([
-    apiFetch(`/market-tips-recent?days=${days}&limit=${marketTipsState.perPage}&offset=${offset}${sp}${voidQ}${dedupQ}${viewQ}`),
+    apiFetch(`/market-tips-recent?days=${days}&limit=${marketTipsState.perPage}&offset=${offset}${sp}${voidQ}${dedupQ}${viewQ}${leagueQ}`),
     apiFetch(`/market-tips-breakdown?days=30${sp}${liveQ}`),
     apiFetch(`/market-tips-by-sport?days=${daysSport}${voidQ}${dedupQ}`),
     apiFetch(`/market-tips-by-league?days=${daysSport}&min_n=2${sp}${voidQ}`),
@@ -3451,14 +3454,9 @@ function renderMarketTipsPage() {
   const start = pageIdx * perPage;
   const end = Math.min(start + tips.length, total);
 
-  // viewMode (all/pre/live) é aplicado SERVER-side — `tips[]` já vem filtrado
-  // por viewMode. `total` reflete count da janela específica do viewMode.
-  // Filtro de liga é client-side: clicar num card filtra apenas a página atual.
-  // Pra ver todas tips daquela liga é necessário ampliar a janela ou usar
-  // /market-tips-recent direto com filtro de league no backend.
-  const pageFiltered = marketTipsState.leagueFilter
-    ? tips.filter(t => String(t.league || '').toLowerCase() === String(marketTipsState.leagueFilter).toLowerCase())
-    : tips;
+  // viewMode + league filter são SERVER-side. `tips[]` já vem filtrado e
+  // `total/totalPages` refletem o count da janela com filtro aplicado.
+  const pageFiltered = tips;
 
   const fmtPct = (v, d=1) => v == null ? '—' : (v >= 0 ? '+' : '') + Number(v).toFixed(d) + '%';
   // Stats da janela (server-side, refletem o total — não a página)
@@ -3740,8 +3738,8 @@ function filterMarketTipsByLeague(league) {
     marketTipsState.leagueFilter = league;
   }
   marketTipsState.page = 0;
-  // Re-render imediato (filter aplicado client-side em pageFiltered)
-  renderMarketTipsPage();
+  // Filter agora é server-side — refetch pra recalcular total/pages com o filtro
+  loadMarketTipsShadow();
 }
 
 function filterToSport(sp) {

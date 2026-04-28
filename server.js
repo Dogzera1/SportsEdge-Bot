@@ -6983,10 +6983,13 @@ const server = http.createServer(async (req, res) => {
     // viewMode='all'|'pre'|'live' — server-side filter por is_live (antes era
     // só client-side filter da página, causava UI vazia quando page não tinha live).
     const viewMode = (parsed.query.viewMode || parsed.query.view || 'all').toLowerCase();
+    // league filter — match exato (case-insensitive). Pra dashboard cards filtráveis.
+    const leagueFilter = parsed.query.league ? String(parsed.query.league).slice(0, 200) : null;
     try {
       const conds = [`created_at >= datetime('now', '-${days} days')`];
       const params = [];
       if (sport) { conds.push('sport = ?'); params.push(sport); }
+      if (leagueFilter) { conds.push('lower(league) = lower(?)'); params.push(leagueFilter); }
       if (status === 'pending') conds.push('result IS NULL');
       else if (status === 'settled') conds.push(`result IN ('win','loss')`);
       if (!includeVoid) conds.push(`(result IS NULL OR result != 'void')`);
@@ -8938,6 +8941,117 @@ const server = http.createServer(async (req, res) => {
       const placeholders = ids.map(() => '?').join(',');
       const r = db.prepare(`UPDATE market_tips_shadow SET result=NULL, settled_at=NULL, profit_units=NULL WHERE id IN (${placeholders}) AND result IS NOT NULL`).run(...ids);
       sendJson(res, { ok: true, unsettled: r.changes, ids });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
+  // GET /admin/mt-pending-trace?sport=tennis&days=7&minAgeHours=12&key=<KEY>
+  // Pra cada pending tip que JÁ deveria ter settled (>minAgeHours desde
+  // criação), tenta achar match_results match e retorna por que falhou.
+  // Helps diagnose stuck-pending issues.
+  if (p === '/admin/mt-pending-trace') {
+    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const sport = parsed.query.sport || null;
+    const days = Math.max(1, Math.min(30, parseInt(parsed.query.days || '7', 10) || 7));
+    const minAgeHours = Math.max(2, parseInt(parsed.query.minAgeHours || '12', 10) || 12);
+    try {
+      const conds = [
+        `result IS NULL`,
+        `created_at >= datetime('now', '-${days} days')`,
+        `created_at <= datetime('now', '-${minAgeHours} hours')`,
+      ];
+      const params = [];
+      if (sport) { conds.push('sport = ?'); params.push(sport); }
+      const pendings = db.prepare(`
+        SELECT id, sport, team1, team2, league, market, side, line, created_at
+        FROM market_tips_shadow
+        WHERE ${conds.join(' AND ')}
+        ORDER BY created_at ASC
+        LIMIT 100
+      `).all(...params);
+
+      const _norm = (s) => String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]/g, '');
+      const _lastName = (s) => {
+        const parts = String(s || '').trim().split(/\s+/);
+        return _norm(parts[parts.length - 1] || '');
+      };
+      const gameMap = { lol: 'lol', dota2: 'dota2', cs2: 'cs2', valorant: 'valorant', tennis: 'tennis', football: 'football' };
+
+      const traces = [];
+      for (const t of pendings) {
+        const game = gameMap[t.sport];
+        const n1 = _norm(t.team1), n2 = _norm(t.team2);
+        const trace = { id: t.id, sport: t.sport, team1: t.team1, team2: t.team2, league: t.league, market: t.market, side: t.side, created_at: t.created_at };
+
+        if (!game) { trace.reason = 'sport_not_mapped'; traces.push(trace); continue; }
+
+        const windowBefore = t.sport === 'tennis' ? '-10 days' : t.sport === 'football' ? '-48 hours' : '-72 hours';
+        const windowAfter = t.sport === 'tennis' ? '+10 days' : t.sport === 'football' ? '+72 hours' : '+7 days';
+
+        // 1) strict
+        let cands = db.prepare(`
+          SELECT winner, final_score, resolved_at, team1, team2, league
+          FROM match_results
+          WHERE game = ?
+            AND ((lower(team1) = ? AND lower(team2) = ?) OR (lower(team1) = ? AND lower(team2) = ?))
+            AND resolved_at >= datetime(?, ?)
+            AND resolved_at <= datetime(?, ?)
+            AND winner IS NOT NULL AND winner != ''
+          ORDER BY ABS(julianday(resolved_at) - julianday(?)) ASC
+          LIMIT 5
+        `).all(game, n1, n2, n2, n1, t.created_at, windowBefore, t.created_at, windowAfter, t.created_at);
+
+        let strategy = 'strict';
+        if (!cands.length && t.sport === 'tennis') {
+          const ln1 = _lastName(t.team1), ln2 = _lastName(t.team2);
+          if (ln1 && ln2 && ln1.length >= 3 && ln2.length >= 3) {
+            cands = db.prepare(`
+              SELECT winner, final_score, resolved_at, team1, team2, league
+              FROM match_results
+              WHERE game = ?
+                AND ((lower(team1) LIKE ? AND lower(team2) LIKE ?) OR (lower(team1) LIKE ? AND lower(team2) LIKE ?))
+                AND resolved_at >= datetime(?, ?)
+                AND resolved_at <= datetime(?, ?)
+                AND winner IS NOT NULL AND winner != ''
+              ORDER BY ABS(julianday(resolved_at) - julianday(?)) ASC
+              LIMIT 5
+            `).all(game, `%${ln1}%`, `%${ln2}%`, `%${ln2}%`, `%${ln1}%`, t.created_at, windowBefore, t.created_at, windowAfter, t.created_at);
+            strategy = 'tennis_lastname';
+          }
+        }
+
+        if (!cands.length) {
+          trace.reason = 'no_match_results';
+          trace.searched = { game, n1, n2, windowBefore, windowAfter };
+        } else {
+          // Found candidates but settle didn't match — show why
+          trace.candidates = cands.map(c => ({
+            mr_team1: c.team1, mr_team2: c.team2, league: c.league,
+            winner: c.winner, score: c.final_score, resolved_at: c.resolved_at,
+          }));
+          trace.strategy = strategy;
+          // Check if league overlap (settle uses league tiebreak)
+          const tipLeagueLow = String(t.league || '').toLowerCase();
+          if (t.sport === 'tennis' && tipLeagueLow) {
+            const overlap = cands.some(c => {
+              const cLow = String(c.league || '').toLowerCase();
+              return cLow && tipLeagueLow && (cLow.includes(tipLeagueLow.slice(0, 8)) || tipLeagueLow.includes(cLow.slice(0, 8)));
+            });
+            trace.reason = overlap ? 'has_match_unknown_settle_failure' : 'league_no_overlap';
+          } else if (cands[0].final_score) {
+            trace.reason = 'has_match_settle_failure_check_score_parsing';
+          } else {
+            trace.reason = 'final_score_empty';
+          }
+        }
+        traces.push(trace);
+      }
+
+      // Counters
+      const byReason = {};
+      for (const t of traces) byReason[t.reason] = (byReason[t.reason] || 0) + 1;
+      sendJson(res, { ok: true, sport: sport || 'all', days, minAgeHours, total_pending: pendings.length, byReason, traces });
     } catch (e) { sendJson(res, { error: e.message }, 500); }
     return;
   }
