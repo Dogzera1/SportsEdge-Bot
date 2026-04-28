@@ -6410,9 +6410,50 @@ async function autoAnalyzeMatch(token, match) {
                 }
                 if (totalKillsTipsAll.length) {
                   try {
-                    const { logShadowTip } = require('./lib/market-tips-shadow');
+                    const { logShadowTip, wasAdminDmSentRecently, markAdminDmSent } = require('./lib/market-tips-shadow');
                     for (const t of totalKillsTipsAll) logShadowTip(db, { sport: 'lol', match, bestOf, tip: t, isLive: isLiveLoL });
-                  } catch (_) {}
+
+                    // Promove kills tips pra DM admin + tips regular quando habilitado.
+                    // Gate: LOL_KILLS_PROMOTE=true (default false). Reusa MT_TIPS infra
+                    // (isMarketTipsEnabled gate, dedup 24h, Kelly 0.10).
+                    const promoteOn = /^(1|true|yes)$/i.test(String(process.env.LOL_KILLS_PROMOTE || ''));
+                    if (promoteOn && isMarketTipsEnabled('lol') && ADMIN_IDS.size) {
+                      const mtp = require('./lib/market-tip-processor');
+                      const minEvGate = parseFloat(process.env.LOL_KILLS_PROMOTE_MIN_EV ?? '8');
+                      const minPmGate = parseFloat(process.env.LOL_KILLS_PROMOTE_MIN_PMODEL ?? '0.55');
+                      const _byKey = new Map();
+                      for (const t of totalKillsTipsAll) {
+                        if (!Number.isFinite(t.ev) || !Number.isFinite(t.pModel)) continue;
+                        if (t.ev < minEvGate || t.pModel < minPmGate) continue;
+                        const k = `${t.market}|${t.side}|${t.line}`;
+                        const prev = _byKey.get(k);
+                        if (!prev || (t.ev || 0) > (prev.ev || 0)) _byKey.set(k, t);
+                      }
+                      for (const t of [..._byKey.values()]) {
+                        if (!isMarketTipsEnabled('lol', t.market, t.side, match.league)) {
+                          log('INFO', 'MT-GUARD', `lol/${t.market}/${t.side}: kills DM skipped — disabled por leak guard`);
+                          continue;
+                        }
+                        const dedupKey = `lol|${norm(match.team1)}|${norm(match.team2)}|${t.market}|${t.line}|${t.side}`;
+                        const inMemFresh = Date.now() - (marketTipSent.get(dedupKey) || 0) <= 24 * 60 * 60 * 1000;
+                        const dbFresh = wasAdminDmSentRecently(db, { sport: 'lol', match, market: t.market, line: t.line, side: t.side, hoursAgo: 24 });
+                        if (inMemFresh || dbFresh) continue;
+                        marketTipSent.set(dedupKey, Date.now());
+                        const stake = mtp.kellyStakeForMarket(t.pModel, t.odd, 100, 0.10);
+                        if (!(stake > 0)) continue;
+                        const dm = mtp.buildMarketTipDM({ match, tip: t, stake, league: match.league, sport: 'lol', isLive: isLiveLoL });
+                        const tokenForMT = resolveTipsToken('esports');
+                        if (!tokenForMT) continue;
+                        const _mtMarkup = mtp.buildMarketTipReplyMarkup({ match, sport: 'lol' });
+                        const r = await sendAdminDMs(tokenForMT, dm, _mtMarkup ? { reply_markup: _mtMarkup } : undefined, 'lol-kills-tip');
+                        if (r.sent > 0) {
+                          markAdminDmSent(db, { sport: 'lol', match, market: t.market, line: t.line, side: t.side, odd: t.odd, ev: t.ev });
+                          log('INFO', 'LOL-KILLS-TIP', `Admin DM: ${t.label} @ ${t.odd} EV ${t.ev}% stake ${stake}u (sent=${r.sent})`);
+                          if (isMarketTipsPromoteEnabled('lol')) await recordMarketTipAsRegular({ sport: 'lol', match, tip: t, stake, isLive: isLiveLoL });
+                        }
+                      }
+                    }
+                  } catch (e) { log('WARN', 'LOL-KILLS-PROMOTE', e.message); }
                 }
               }
             }
@@ -13163,7 +13204,15 @@ async function pollTennis(runOnce = false) {
         // mas sem DM admin/subs e sem promoção pra tabela tips regular. Mantém
         // pipeline de aprendizado (CLV/calib) sem expor ao bankroll.
         // Override via TENNIS_NON_SLAM_SHADOW_ONLY=false (libera DM normal).
+        //
+        // 2026-04-28: novo gate TENNIS_MT_TIER2_PROMOTE=true permite tier 2
+        // (ATP/WTA 500/250) promover, mantendo Challenger/ITF/W125 em shadow.
+        // Útil pra estender escopo após audit confirmar Slam/Masters performando
+        // sem precisar liberar 100% non-top.
+        const _tennisTier2Promote = /^(1|true|yes)$/i.test(String(process.env.TENNIS_MT_TIER2_PROMOTE || ''));
+        const _tennisAllowedNonTop = _tennisTier2Promote && !isChallengerOrItf;
         const _tennisShadowOnly = !_tennisTopTier
+          && !_tennisAllowedNonTop
           && !/^(0|false|no)$/i.test(String(process.env.TENNIS_NON_SLAM_SHADOW_ONLY ?? 'true'));
         // Tennis ML em shadow GLOBAL (todos os tiers, incluindo Slam/Masters).
         // Justificativa 2026-04-28: ML path acabou de ser destravado (commit
