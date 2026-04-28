@@ -2046,13 +2046,10 @@ async function runAutoAnalysis() {
 
           // Aborta se DB recusou (erro ou duplicata já registrada)
           if (!rec?.tipId) {
-            log('WARN', 'AUTO', `record-tip falhou para ${tipTeam} @ ${tipOdd} (${match.team1} vs ${match.team2}) — tip abortada`);
-            continue;
-          }
-
-          if (rec?.skipped) {
-            analyzedMatches.set(matchKey, { ts: now, tipSent: true });
-            log('INFO', 'AUTO', `Tip duplicada (já registrada), Telegram ignorado: ${match.team1} vs ${match.team2}`);
+            const why = rec?.reason ? ` (${rec.reason})` : '';
+            const lvl = rec?.skipped ? 'INFO' : 'WARN';
+            log(lvl, 'AUTO', `record-tip falhou para ${tipTeam} @ ${tipOdd} (${match.team1} vs ${match.team2})${why} — tip abortada`);
+            if (rec?.skipped) analyzedMatches.set(matchKey, { ts: now, tipSent: true });
             continue;
           }
 
@@ -12886,14 +12883,11 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
         }, 'mma');
 
         if (!rec?.tipId) {
-          log('WARN', 'AUTO-MMA', `record-tip falhou para ${tipTeam} @ ${tipOdd} (${fight.team1} vs ${fight.team2}) — tip abortada`);
+          const why = rec?.reason ? ` (${rec.reason})` : '';
+          const lvl = rec?.skipped ? 'INFO' : 'WARN';
+          log(lvl, 'AUTO-MMA', `record-tip falhou para ${tipTeam} @ ${tipOdd} (${fight.team1} vs ${fight.team2})${why} — tip abortada`);
+          if (rec?.skipped) analyzedMma.set(key, { ts: now, tipSent: true });
           await new Promise(r => setTimeout(r, 3000)); continue;
-        }
-
-        if (rec?.skipped) {
-          analyzedMma.set(key, { ts: now, tipSent: true });
-          log('INFO', 'AUTO-MMA', `Tip duplicada (já registrada), Telegram ignorado: ${fight.team1} vs ${fight.team2}`);
-          continue;
         }
 
         if (rec?.tipId && mlResultMma.factorActive?.length && mlResultMma.direction) {
@@ -14141,14 +14135,11 @@ Máximo 200 palavras. Raciocínio breve antes da decisão.`;
         }, 'tennis');
 
         if (!rec?.tipId) {
-          log('WARN', 'AUTO-TENNIS', `record-tip falhou para ${tipPlayer} @ ${tipOdd} (${match.team1} vs ${match.team2}) — tip abortada`);
+          const why = rec?.reason ? ` (${rec.reason})` : '';
+          const lvl = rec?.skipped ? 'INFO' : 'WARN';
+          log(lvl, 'AUTO-TENNIS', `record-tip falhou para ${tipPlayer} @ ${tipOdd} (${match.team1} vs ${match.team2})${why} — tip abortada`);
+          if (rec?.skipped) analyzedTennis.set(key, Object.assign({}, analyzedTennis.get(key) || {}, { ts: now, [isLivePhase ? 'tipSentLive' : 'tipSentPre']: true, [isLivePhase ? 'tsLive' : 'tsPre']: now }));
           await new Promise(r => setTimeout(r, 3000)); continue;
-        }
-
-        if (rec?.skipped) {
-          analyzedTennis.set(key, Object.assign({}, analyzedTennis.get(key) || {}, { ts: now, [isLivePhase ? 'tipSentLive' : 'tipSentPre']: true, [isLivePhase ? 'tsLive' : 'tsPre']: now }));
-          log('INFO', 'AUTO-TENNIS', `Tip duplicada (já registrada), Telegram ignorado: ${match.team1} vs ${match.team2}`);
-          continue;
         }
 
         if (rec?.tipId && mlResultTennis.factorActive?.length && mlResultTennis.direction) {
@@ -14973,14 +14964,11 @@ Máximo 200 palavras.`;
         }, 'football');
 
         if (!recFb?.tipId) {
-          log('WARN', 'AUTO-FOOTBALL', `record-tip falhou para ${tipTeam} @ ${tipOdd} (${match.team1} vs ${match.team2}) — tip abortada`);
+          const why = recFb?.reason ? ` (${recFb.reason})` : '';
+          const lvl = recFb?.skipped ? 'INFO' : 'WARN';
+          log(lvl, 'AUTO-FOOTBALL', `record-tip falhou para ${tipTeam} @ ${tipOdd} (${match.team1} vs ${match.team2})${why} — tip abortada`);
+          if (recFb?.skipped) analyzedFootball.set(key, { ts: now, tipSent: true });
           await new Promise(r => setTimeout(r, 2000)); continue;
-        }
-
-        if (recFb?.skipped) {
-          analyzedFootball.set(key, { ts: now, tipSent: true });
-          log('INFO', 'AUTO-FOOTBALL', `Tip duplicada (já registrada), Telegram ignorado: ${match.team1} vs ${match.team2}`);
-          continue;
         }
 
         // Shadow gate: DB registrou (isShadow=1 acima); não envia DM.
@@ -18717,16 +18705,24 @@ async function checkCLV(caches = {}) {
             else if (pickN === 'draw' || pickN === norm('empate')) clvOdds = m.odds.d;
           }
         } else if (sport === 'tennis') {
-          const list = Array.isArray(caches.tennis) ? caches.tennis : [];
-          const m = findTheOddsH2hMatch(list, tip);
-          if (!m) {
-            log('DEBUG', 'CLV-SKIP', `tennis ${tip.participant1} vs ${tip.participant2}: no_match_in_feed (feed_size=${list.length})`);
-          } else if (!m.odds) {
-            log('DEBUG', 'CLV-SKIP', `tennis ${tip.participant1} vs ${tip.participant2}: match_found_but_no_odds`);
+          // CLV via H2H feed só vale pra ML — MT tips (handicapGames/totalGames/aces)
+          // têm odds próprias por linha que não estão neste feed. Pular evita
+          // odds_not_parseable spam e captura errada (pickN não bate team1/team2).
+          const mtKind = String(tip.market_type || 'ML').toUpperCase();
+          if (mtKind !== 'ML') {
+            // intencional: MT tem CLV próprio via market-tips capture
           } else {
-            const o = h2hDecimalOddsForPick(m, tip.tip_participant);
-            if (o && o > 1) clvOdds = String(o);
-            else log('DEBUG', 'CLV-SKIP', `tennis ${tip.participant1} vs ${tip.participant2}: odds_not_parseable (${JSON.stringify(m.odds).slice(0,120)})`);
+            const list = Array.isArray(caches.tennis) ? caches.tennis : [];
+            const m = findTheOddsH2hMatch(list, tip);
+            if (!m) {
+              log('DEBUG', 'CLV-SKIP', `tennis ${tip.participant1} vs ${tip.participant2}: no_match_in_feed (feed_size=${list.length})`);
+            } else if (!m.odds) {
+              log('DEBUG', 'CLV-SKIP', `tennis ${tip.participant1} vs ${tip.participant2}: match_found_but_no_odds`);
+            } else {
+              const o = h2hDecimalOddsForPick(m, tip.tip_participant);
+              if (o && o > 1) clvOdds = String(o);
+              else log('DEBUG', 'CLV-SKIP', `tennis ${tip.participant1} vs ${tip.participant2}: odds_not_parseable (${JSON.stringify(m.odds).slice(0,120)})`);
+            }
           }
         } else if (sport === 'mma') {
           const list = caches.mma || await serverGet('/mma-matches').catch(() => []);
@@ -18776,6 +18772,13 @@ async function checkCLV(caches = {}) {
         const clvN = parseFloat(clvOdds);
         if (clvN && clvN > 1) {
           const prevClv = parseFloat(tip.clv_odds || 0);
+          // Sanity cap: salto >3x prev (com prev ≥1.5) é quase sempre fuzzy match
+          // pegou outro evento do mesmo par (próximo round/torneio). Rejeita pra
+          // não contaminar relatório CLV (ex: tennis 3.69 → 84.93 sem motivo).
+          if (prevClv >= 1.5 && (clvN / prevClv >= 3 || prevClv / clvN >= 3)) {
+            log('WARN', 'CLV-SKIP', `${sport} ${tip.participant1} vs ${tip.participant2}: outlier rejected (${prevClv} → ${clvN}, likely wrong-event match)`);
+            continue;
+          }
           const changed = !prevClv || Math.abs(clvN - prevClv) >= 0.005;
           await serverPost('/update-clv', { matchId: tip.match_id, clvOdds: clvN }, sport).catch(() => {});
           // Near-regime re-captura a cada ciclo; só loga INFO quando odd muda pra evitar spam.
