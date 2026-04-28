@@ -14615,6 +14615,80 @@ async function pollFootball(runOnce = false) {
           }
         } catch (e) { reportBug('FB-MODEL', e); }
 
+        // ── Football Multi-Market Scanner (pre-game only) ──
+        // Pinnacle football matchup → /odds-markets retorna handicap + totals.
+        // Cruza com fbTrained.markets (BTTS/OU/AH) → tips MT.
+        // Gateado por FOOTBALL_MT_SCAN=true E PINNACLE_FOOTBALL=true E !isFbLive.
+        // Pre-game only por design — live football MT requer ajuste de minutes
+        // restantes que ainda não foi modelado.
+        if (process.env.FOOTBALL_MT_SCAN === 'true'
+            && process.env.PINNACLE_FOOTBALL === 'true'
+            && !isFbLive
+            && fbTrained?.markets) {
+          try {
+            const pinMkt = await serverGet(`/odds-markets?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}&game=football&period=0`).catch(() => null);
+            if (pinMkt && ((pinMkt.totals?.length || 0) + (pinMkt.handicaps?.length || 0)) > 0) {
+              const { scanFootballMarkets } = require('./lib/football-mt-scanner');
+              const fbMtMinEv = parseFloat(process.env.FOOTBALL_MT_MIN_EV ?? '5');
+              const fbMtMinPm = parseFloat(process.env.FOOTBALL_MT_MIN_PMODEL ?? '0.50');
+              const fbMtMinOdd = parseFloat(process.env.FOOTBALL_MT_MIN_ODD ?? '1.50');
+              const fbMtMaxOdd = parseFloat(process.env.FOOTBALL_MT_MAX_ODD ?? '3.50');
+              const fbMtFound = scanFootballMarkets({
+                pinMarkets: pinMkt,
+                trainedMarkets: fbTrained.markets,
+                minEv: fbMtMinEv,
+                minPmodel: fbMtMinPm,
+                minOdd: fbMtMinOdd,
+                maxOdd: fbMtMaxOdd,
+              });
+              if (fbMtFound.length) {
+                log('INFO', 'FB-MT-SCAN',
+                  `${match.team1} vs ${match.team2} [${match.league}]: ${fbMtFound.length} mercado(s) EV ≥${fbMtMinEv}%`);
+                try {
+                  const { logShadowTip } = require('./lib/market-tips-shadow');
+                  for (const t of fbMtFound) logShadowTip(db, { sport: 'football', match, bestOf: null, tip: t, isLive: false });
+                } catch (_) {}
+                for (const t of fbMtFound.slice(0, 5)) {
+                  log('INFO', 'FB-MT-SCAN',
+                    `  • ${t.label} @ ${t.odd.toFixed(2)} | pModel=${(t.pModel*100).toFixed(1)}% pImpl=${t.pImplied ? (t.pImplied*100).toFixed(1)+'%' : '?'} EV=${t.ev.toFixed(1)}%`);
+                }
+
+                // Promote path: admin DM + recordMarketTipAsRegular se gates passam.
+                // Reusa infra MT (isMarketTipsEnabled, dedup admin, Kelly 0.10).
+                if (isMarketTipsEnabled('football') && ADMIN_IDS.size) {
+                  try {
+                    const mtp = require('./lib/market-tip-processor');
+                    const { wasAdminDmSentRecently, markAdminDmSent } = require('./lib/market-tips-shadow');
+                    for (const t of fbMtFound) {
+                      if (!isMarketTipsEnabled('football', t.market, t.side, match.league)) {
+                        log('INFO', 'MT-GUARD', `football/${t.market}/${t.side}: DM skipped — disabled por leak guard`);
+                        continue;
+                      }
+                      const dedupKey = `football|${norm(match.team1)}|${norm(match.team2)}|${t.market}|${t.line}|${t.side}`;
+                      const inMemFresh = Date.now() - (marketTipSent.get(dedupKey) || 0) <= 24 * 60 * 60 * 1000;
+                      const dbFresh = wasAdminDmSentRecently(db, { sport: 'football', match, market: t.market, line: t.line, side: t.side, hoursAgo: 24 });
+                      if (inMemFresh || dbFresh) continue;
+                      marketTipSent.set(dedupKey, Date.now());
+                      const stake = mtp.kellyStakeForMarket(t.pModel, t.odd, 100, 0.10);
+                      if (!(stake > 0)) continue;
+                      const dm = mtp.buildMarketTipDM({ match, tip: t, stake, league: match.league, sport: 'football', isLive: false });
+                      const tokenForMT = resolveTipsToken('football') || SPORTS['football']?.token || resolveAlertsToken();
+                      if (!tokenForMT) continue;
+                      const _mtMarkup_fb = mtp.buildMarketTipReplyMarkup({ match, sport: 'football' });
+                      const r = await sendAdminDMs(tokenForMT, dm, _mtMarkup_fb ? { reply_markup: _mtMarkup_fb } : undefined, 'football-mt-scan-tip');
+                      if (r.sent > 0) {
+                        markAdminDmSent(db, { sport: 'football', match, market: t.market, line: t.line, side: t.side, odd: t.odd, ev: t.ev });
+                        log('INFO', 'FB-MT-TIP', `Admin DM: ${t.label} @ ${t.odd} EV ${t.ev}% stake ${stake}u (sent=${r.sent})`);
+                        if (isMarketTipsPromoteEnabled('football')) await recordMarketTipAsRegular({ sport: 'football', match, tip: t, stake, isLive: false });
+                      }
+                    }
+                  } catch (mte) { reportBug('FB-MT-PROMOTE', mte); }
+                }
+              }
+            }
+          } catch (e) { log('WARN', 'FB-MT-SCAN', `${match.team1} vs ${match.team2}: ${e.message}`); }
+        }
+
         // Se temos dados reais e o ML diz sem edge → pular (economiza chamada de IA)
         if (fixtureInfo && !mlScore.pass) {
           log('INFO', 'AUTO-FOOTBALL', `ML sem edge: ${match.team1} vs ${match.team2} | best EV: ${mlScore.bestEv}%`);

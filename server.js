@@ -3023,6 +3023,64 @@ async function getPinnacleDotaMatches() {
   }
 }
 
+// ── Pinnacle — Soccer (sportId=29) ──
+// Filtro de ligas: top-tier + Brasileirão + 2nd-tier europeias maduras (volume sob controle).
+// Pinnacle soccer é alto volume (200+ jogos/dia globais); filtro evita estourar quota.
+let _footballPinnacleCache = { data: [], ts: 0 };
+const FOOTBALL_PINNACLE_TTL_IDLE = 10 * 60 * 1000;
+const FOOTBALL_PINNACLE_TTL_LIVE = 60 * 1000;
+
+const FOOTBALL_PINNACLE_LEAGUE_PATTERNS = [
+  // Top tier (volume sharp)
+  /premier league/i, /la liga/i, /\bserie a\b/i, /bundesliga/i, /ligue 1/i,
+  /eredivisie/i, /primeira liga/i, /\bsuper lig\b/i,
+  // Continental
+  /champions league/i, /europa league/i, /conference league/i,
+  // South America
+  /brasileir/i, /libertadores/i, /sudamericana/i, /argentina.*primera/i,
+  // 2nd tier Europe (volume razoável)
+  /championship/i, /league one/i, /league two/i, /2\.\s*bundesliga/i,
+  /serie b/i, /segunda/i, /ligue 2/i, /eerste divisie/i,
+  // Major cups
+  /\bfa cup\b/i, /\bdfb pokal\b/i, /\bcoppa italia\b/i, /\bcopa del rey\b/i,
+];
+
+async function getPinnacleFootballMatches() {
+  if (process.env.PINNACLE_FOOTBALL !== 'true') return [];
+  const hadLive = _footballPinnacleCache.data.some(m => m.status === 'live');
+  const ttl = hadLive ? FOOTBALL_PINNACLE_TTL_LIVE : FOOTBALL_PINNACLE_TTL_IDLE;
+  if (_footballPinnacleCache.data.length && (Date.now() - _footballPinnacleCache.ts) < ttl) {
+    return _footballPinnacleCache.data;
+  }
+  try {
+    const rows = await pinnacle.fetchSportMatchOdds(29, (m) => {
+      const name = String(m?.league?.name || '');
+      if (!FOOTBALL_PINNACLE_LEAGUE_PATTERNS.some(rx => rx.test(name))) return false;
+      const p1 = String(m?.participants?.[0]?.name || '');
+      const p2 = String(m?.participants?.[1]?.name || '');
+      // Descarta props/corners/cards
+      if (/\((corners|cards|bookings|fouls|shots)\)/i.test(p1 + p2)) return false;
+      return true;
+    });
+    const _fetchedAt = Date.now();
+    const matches = rows.map(r => ({
+      id: `pin_fb_${r.id}`,
+      team1: r.team1, team2: r.team2,
+      league: r.league,
+      sport_key: 'soccer',
+      status: r.status === 'live' ? 'live' : 'upcoming',
+      time: r.startTime,
+      odds: { t1: String(r.oddsT1), t2: String(r.oddsT2), bookmaker: 'Pinnacle', _fetchedAt }
+    }));
+    _footballPinnacleCache = { data: matches, ts: Date.now() };
+    log('INFO', 'ODDS', `Pinnacle Football: ${matches.length} partidas cacheadas`);
+    return matches;
+  } catch (e) {
+    log('ERROR', 'ODDS', `Pinnacle Football: ${e.message}`);
+    return [];
+  }
+}
+
 // ── Pinnacle — Counter-Strike 2 (sportId=12 E-Sports, league filter "Counter-Strike"|"CS2"|"CS:GO") ──
 let _csPinnacleCache = { data: [], ts: 0 };
 const CS_PINNACLE_TTL = 3 * 60 * 1000;
@@ -4628,10 +4686,16 @@ const server = http.createServer(async (req, res) => {
       // Fallback: caches Pinnacle per-sport NÃO integrados ao oddsCache global.
       // Cada um usa prefixo distinto: tennis_pin_, pin_cs_, pin_ (dota). Remove
       // prefixo pra extrair matchupId numérico puro usado pela API Pinnacle.
+      // Football lazy warm: PINNACLE_FOOTBALL=true e cache vazio → fetch agora.
+      // Adicionado 2026-04-28 pra desbloquear MT football multi-market sem cron.
+      if (parsed.query.game === 'football' && !_footballPinnacleCache.data.length) {
+        try { await getPinnacleFootballMatches(); } catch (_) {}
+      }
       const pinFallbacks = [
-        { cache: _tennisPinnacleCache, prefix: /^tennis_pin_/ },
-        { cache: _csPinnacleCache,     prefix: /^pin_cs_/ },
-        { cache: _dotaPinnacleCache,   prefix: /^pin_/ },
+        { cache: _tennisPinnacleCache,   prefix: /^tennis_pin_/ },
+        { cache: _csPinnacleCache,       prefix: /^pin_cs_/ },
+        { cache: _dotaPinnacleCache,     prefix: /^pin_/ },
+        { cache: _footballPinnacleCache, prefix: /^pin_fb_/ },
       ];
       if (!matchupId) {
         for (const { cache, prefix } of pinFallbacks) {
