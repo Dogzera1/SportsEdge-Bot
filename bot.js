@@ -13133,13 +13133,22 @@ async function pollTennis(runOnce = false) {
           continue;
         }
 
-        // Shadow-only mode pra non-top-tier: tips são GERADAS e GRAVADAS em
-        // shadow (tips.is_shadow=1 + market_tips_shadow), mas sem DM admin/subs
-        // e sem promoção pra tabela tips regular. Mantém pipeline de aprendizado
-        // (CLV/calib) sem expor tips ao bankroll. Override via env
-        // TENNIS_NON_SLAM_SHADOW_ONLY=false (libera DM normal, default ON).
+        // Shadow-only mode pra non-top-tier (Challenger/ITF/WTA125): tips são
+        // GERADAS e GRAVADAS em shadow (tips.is_shadow=1 + market_tips_shadow),
+        // mas sem DM admin/subs e sem promoção pra tabela tips regular. Mantém
+        // pipeline de aprendizado (CLV/calib) sem expor ao bankroll.
+        // Override via TENNIS_NON_SLAM_SHADOW_ONLY=false (libera DM normal).
         const _tennisShadowOnly = !_tennisTopTier
           && !/^(0|false|no)$/i.test(String(process.env.TENNIS_NON_SLAM_SHADOW_ONLY ?? 'true'));
+        // Tennis ML em shadow GLOBAL (todos os tiers, incluindo Slam/Masters).
+        // Justificativa 2026-04-28: ML path acabou de ser destravado (commit
+        // c3229f9 — confidence/method propagation). Antes de promover ML pra
+        // bankroll, validar empiricamente: 50+ settled, ROI≥0%, CLV≥0%.
+        // Default ON. Quando validar, flipar TENNIS_ML_SHADOW_ALL=false (ou
+        // remover env) — mantém shadow-non-top automaticamente via
+        // _tennisShadowOnly acima.
+        const _tennisMlShadow = _tennisShadowOnly
+          || !/^(0|false|no)$/i.test(String(process.env.TENNIS_ML_SHADOW_ALL ?? 'true'));
 
         const _tennisBase = _tennisTopTier
           ? (process.env.TENNIS_MIN_EDGE_TOP ? parseFloat(process.env.TENNIS_MIN_EDGE_TOP) : 2.5)
@@ -14092,9 +14101,9 @@ Máximo 200 palavras. Raciocínio breve antes da decisão.`;
           modelP1: mlResultTennis.modelP1,
           modelP2: mlResultTennis.modelP2,
           modelPPick: modelPPick,
-          modelLabel: fairLabelTennis + (_tennisHybridText ? '+hybrid' : (_tennisFromOverride ? '+override' : '')) + (_tennisShadowOnly ? '+shadowonly' : ''),
+          modelLabel: fairLabelTennis + (_tennisHybridText ? '+hybrid' : (_tennisFromOverride ? '+override' : '')) + (_tennisMlShadow ? '+shadowonly' : ''),
           tipReason: tipReasonTennis,
-          isShadow: (_tennisShadowOnly || tennisConfig.shadowMode) ? 1 : 0,
+          isShadow: (_tennisMlShadow || tennisConfig.shadowMode) ? 1 : 0,
           oddsFetchedAt: o._fetchedAt || null,
           lineShopOdds: o || null,
           pickSide: pickIsT1 ? 't1' : 't2',
@@ -14120,15 +14129,17 @@ Máximo 200 palavras. Raciocínio breve antes da decisão.`;
         }
 
         const _betBtnTen = _buildTipBetButton('tennis', o, pickIsT1 ? 't1' : 't2', match, tipStakeAdjTennis, tipOdd);
-        if (!_tennisShadowOnly) {
+        if (!_tennisMlShadow) {
           for (const [userId, prefs] of subscribedUsers) {
             if (!prefs.has('tennis')) continue;
             try { await sendDM(token, userId, tipMsg, _betBtnTen || undefined); } catch(_) {}
           }
         }
         analyzedTennis.set(key, Object.assign({}, analyzedTennis.get(key) || {}, { ts: now, [isLivePhase ? 'tipSentLive' : 'tipSentPre']: true, [isLivePhase ? 'tsLive' : 'tsPre']: now }));
-        const shadowTag = _tennisShadowOnly ? ' [SHADOW non-top-tier]' : '';
-        log('INFO', 'AUTO-TENNIS', `Tip ${_tennisShadowOnly ? 'shadow-only' : 'enviada'}${isLivePhase ? ' (LIVE)' : ''}${shadowTag}: ${tipPlayer} @ ${tipOdd} | EV:${tipEV}% | ${tipConf}`);
+        const shadowReason = _tennisMlShadow
+          ? (_tennisShadowOnly ? ' [SHADOW non-top-tier]' : ' [SHADOW ml-validation]')
+          : '';
+        log('INFO', 'AUTO-TENNIS', `Tip ${_tennisMlShadow ? 'shadow-only' : 'enviada'}${isLivePhase ? ' (LIVE)' : ''}${shadowReason}: ${tipPlayer} @ ${tipOdd} | EV:${tipEV}% | ${tipConf}`);
         // CLV delayed pra live tennis (pregame já é pego pelo updater async normal)
         if (isLivePhase) scheduleLiveClvCapture('tennis', match, tipPlayer, match.id, tipOdd);
         await new Promise(r => setTimeout(r, 5000));
