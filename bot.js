@@ -17246,15 +17246,21 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
       try {
         const r = await serverPost('/void-old-pending', { sport, hours }, null,
           adminKey ? { 'x-admin-key': adminKey } : {});
-        if (r?.ok && r.voided > 0) {
-          results.push({ sport, hours, voided: r.voided });
-          log('INFO', 'AUTO-VOID', `${sport}: voided ${r.voided} tips pendentes >${hours}h`);
+        const total = (r?.voided || 0) + (r?.voided_mt || 0);
+        if (r?.ok && total > 0) {
+          results.push({ sport, hours, voided: r.voided || 0, voided_mt: r.voided_mt || 0 });
+          log('INFO', 'AUTO-VOID', `${sport}: voided tips=${r.voided||0} mt=${r.voided_mt||0} pendentes >${hours}h`);
         }
       } catch (e) { log('ERROR', 'AUTO-VOID', `${sport}: ${e.message}`); }
     }
     if (results.length && ADMIN_IDS.size) {
       let msg = `🗑️ *Auto-void stuck pending*  _${today}_\n\n`;
-      for (const r of results) msg += `• ${r.sport}: ${r.voided} tips voided (>${r.hours}h sem settle)\n`;
+      for (const r of results) {
+        const parts = [];
+        if (r.voided > 0) parts.push(`${r.voided} tips`);
+        if (r.voided_mt > 0) parts.push(`${r.voided_mt} MT shadow`);
+        msg += `• ${r.sport}: ${parts.join(' + ')} voided (>${r.hours}h sem settle)\n`;
+      }
       msg += `\n_Settlement não chegou após threshold. Tips ficaram com result='void'._`;
       const routed = _pickTokenForAlert('auto_void') || _pickTokenForAlert('system');
       const token = routed?.token;

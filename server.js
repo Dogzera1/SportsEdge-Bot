@@ -8987,6 +8987,16 @@ const server = http.createServer(async (req, res) => {
         const parts = String(s || '').trim().split(/\s+/);
         return _norm(parts[parts.length - 1] || '');
       };
+      // Mesma logic de settleShadowTips. Strip tier keywords + pontuação.
+      const _normLeague = (s) => String(s || '').toLowerCase()
+        .replace(/\b(atp|wta|itf|challenger|masters|1000|500|250|grand slam|main draw|qualifying|qualif|open|cup|trophy|international)\b/gi, ' ')
+        .replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
+      const _leagueOverlap = (a, b) => {
+        if (!a || !b) return false;
+        const tA = a.split(' ').filter(w => w.length >= 4);
+        const tB = new Set(b.split(' ').filter(w => w.length >= 4));
+        return tA.some(w => tB.has(w));
+      };
       const gameMap = { lol: 'lol', dota2: 'dota2', cs2: 'cs2', valorant: 'valorant', tennis: 'tennis', football: 'football' };
 
       const traces = [];
@@ -9035,27 +9045,57 @@ const server = http.createServer(async (req, res) => {
         if (!cands.length) {
           trace.reason = 'no_match_results';
           trace.searched = { game, n1, n2, windowBefore, windowAfter };
-        } else {
-          // Found candidates but settle didn't match — show why
-          trace.candidates = cands.map(c => ({
-            mr_team1: c.team1, mr_team2: c.team2, league: c.league,
-            winner: c.winner, score: c.final_score, resolved_at: c.resolved_at,
-          }));
-          trace.strategy = strategy;
-          // Check if league overlap (settle uses league tiebreak)
-          const tipLeagueLow = String(t.league || '').toLowerCase();
-          if (t.sport === 'tennis' && tipLeagueLow) {
-            const overlap = cands.some(c => {
-              const cLow = String(c.league || '').toLowerCase();
-              return cLow && tipLeagueLow && (cLow.includes(tipLeagueLow.slice(0, 8)) || tipLeagueLow.includes(cLow.slice(0, 8)));
-            });
-            trace.reason = overlap ? 'has_match_unknown_settle_failure' : 'league_no_overlap';
-          } else if (cands[0].final_score) {
-            trace.reason = 'has_match_settle_failure_check_score_parsing';
-          } else {
-            trace.reason = 'final_score_empty';
+          traces.push(trace); continue;
+        }
+        // Found candidates — diagnosticar por que settle falha. Usa MESMA lógica
+        // do settleShadowTips (overlap+window+score parse) pra reportar reason real.
+        trace.candidates = cands.map(c => ({
+          mr_team1: c.team1, mr_team2: c.team2, league: c.league,
+          winner: c.winner, score: c.final_score, resolved_at: c.resolved_at,
+        }));
+        trace.strategy = strategy;
+
+        // Step 1: league overlap (mesma logic settleShadowTips)
+        const tipLeagueN = _normLeague(t.league || '');
+        let filtered = cands;
+        if (tipLeagueN) {
+          const leagueMatches = cands.filter(c => _leagueOverlap(tipLeagueN, _normLeague(c.league || '')));
+          if (leagueMatches.length) {
+            filtered = leagueMatches;
+          } else if (t.sport === 'tennis') {
+            trace.reason = 'league_no_overlap';
+            traces.push(trace); continue;
           }
         }
+        // Step 2: 5-min guardrail (cTs >= tipTs - 5min)
+        const tipTs = new Date(t.created_at).getTime();
+        const within = filtered.filter(c => {
+          const cTs = new Date(c.resolved_at).getTime();
+          return Number.isFinite(cTs) && (cTs >= tipTs - 5 * 60 * 1000);
+        });
+        if (!within.length) {
+          trace.reason = 'all_resolved_before_tip';
+          traces.push(trace); continue;
+        }
+        // Step 3: score validade — walkover/retirement
+        const mr = within[0];
+        if (mr.final_score && /\b(walkover|w\/o|retired|retirement|abandoned|cancelled|canceled)\b/i.test(String(mr.final_score))) {
+          trace.reason = 'walkover_or_retired';
+          traces.push(trace); continue;
+        }
+        if (!mr.final_score || !mr.final_score.trim()) {
+          trace.reason = 'final_score_empty';
+          traces.push(trace); continue;
+        }
+        // Tennis specific: score parseável?
+        if (t.sport === 'tennis' && t.market !== 'tiebreakMatch') {
+          const parts = String(mr.final_score).match(/\d+-\d+/g);
+          if (!parts || parts.length === 0) {
+            trace.reason = 'tennis_score_unparseable';
+            traces.push(trace); continue;
+          }
+        }
+        trace.reason = 'should_settle_unknown_failure';
         traces.push(trace);
       }
 
@@ -11740,8 +11780,15 @@ const server = http.createServer(async (req, res) => {
           `UPDATE tips SET result = 'void', settled_at = datetime('now'), profit_reais = 0
            WHERE sport = ? AND result IS NULL AND sent_at < datetime('now', ?)`
         ).run(sport, cutoffExpr);
-        log('INFO', 'ADMIN', `void-old-pending: sport=${sport} cutoff=${cutoffExpr} → ${r.changes} tips anuladas`);
-        sendJson(res, { ok: true, voided: r.changes, sport, cutoff: cutoffExpr });
+        // Extensão 2026-04-28: void também em market_tips_shadow stuck. Critério
+        // mesmo (sport, criação > cutoff, result IS NULL). Antes só cobria tabela
+        // tips regular — MT shadow ficava acumulando pendings para sempre.
+        const mtR = db.prepare(
+          `UPDATE market_tips_shadow SET result = 'void', settled_at = datetime('now'), profit_units = 0
+           WHERE sport = ? AND result IS NULL AND created_at < datetime('now', ?)`
+        ).run(sport, cutoffExpr);
+        log('INFO', 'ADMIN', `void-old-pending: sport=${sport} cutoff=${cutoffExpr} → tips=${r.changes} mt_shadow=${mtR.changes}`);
+        sendJson(res, { ok: true, voided: r.changes, voided_mt: mtR.changes, sport, cutoff: cutoffExpr });
       } catch(e) {
         sendJson(res, { error: e.message }, 500);
       }
