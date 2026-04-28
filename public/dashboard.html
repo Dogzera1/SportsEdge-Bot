@@ -335,7 +335,10 @@
     /* ─────────────────────────────────────────────────────────
        Tips table
        ───────────────────────────────────────────────────────── */
-    table.tips { width: 100%; border-collapse: collapse; }
+    /* 2026-04-28: wrapper com overflow-x:auto pra mobile (tabela tem 8 colunas).
+       Antes em <600px colunas direitas eram cortadas silenciosamente. */
+    .tips-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+    table.tips { width: 100%; border-collapse: collapse; min-width: 720px; }
     table.tips th {
       text-align: left;
       padding: 8px 12px;
@@ -926,7 +929,23 @@ const BASE = (function() {
   return o;
 })();
 
-let currentSport = 'lol';
+// 2026-04-28: filter persistence helpers. localStorage com TTL 7d evita
+// reset a cada F5. URL hash tem precedência (compartilhar links).
+function _loadFilter(key, defaultVal) {
+  try {
+    const hashParams = new URLSearchParams(location.hash.replace(/^#/, ''));
+    if (hashParams.has(key)) return hashParams.get(key);
+    const raw = localStorage.getItem(`dash:${key}`);
+    if (!raw) return defaultVal;
+    const o = JSON.parse(raw);
+    if (Date.now() - (o.ts || 0) > 7 * 86400_000) return defaultVal;
+    return o.v;
+  } catch (_) { return defaultVal; }
+}
+function _saveFilter(key, val) {
+  try { localStorage.setItem(`dash:${key}`, JSON.stringify({ v: val, ts: Date.now() })); } catch (_) {}
+}
+let currentSport = _loadFilter('sport', 'lol');
 function sportDisplayLabel(sport, game) {
   const s = String(sport || '').toLowerCase();
   const g = String(game || '').toLowerCase();
@@ -1011,10 +1030,15 @@ function showToast(html, opts = {}) {
   return el;
 }
 
-async function settleTipManual(id, result, sport, force) {
+async function settleTipManual(id, result, sport, btnOrForce) {
   const label = result === 'win' ? 'WIN' : 'LOSS';
   const color = result === 'win' ? 'var(--success,#10b981)' : 'var(--danger,#ef4444)';
   const toastId = 'settle_' + id + '_' + Date.now();
+  // 2026-04-28: btn como 4º arg pra disable durante fetch (evita clique duplo →
+  // 2 settles). Compat retro: se 4º arg é truthy não-Element, é o force flag.
+  const btn = (btnOrForce && btnOrForce.disabled !== undefined) ? btnOrForce : null;
+  const force = (btnOrForce && !btn) ? btnOrForce : false;
+  if (btn) btn.disabled = true;
 
   // Janela de 5s pra cancelar antes de efetivar. Se não cancelar, chama /settle-manual.
   if (!force) {
@@ -1035,7 +1059,7 @@ async function settleTipManual(id, result, sport, force) {
     await new Promise(r => setTimeout(r, 5000));
     clearInterval(iv);
     toast.remove();
-    if (cancelled) return;
+    if (cancelled) { if (btn) btn.disabled = false; return; }
   }
 
   try {
@@ -1130,6 +1154,21 @@ function clearAlerts() {
   if (el) el.innerHTML = '';
 }
 
+// 2026-04-28: escape HTML pra interpolações de strings vindas da API.
+// Antes team names / event_name / tip_participant / pick contendo
+// `<img src=x onerror=...>` injetavam JS no admin dashboard. ESC_MAP cobre
+// todos os 5 chars perigosos.
+const _ESC_MAP = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+function escHtml(s) {
+  if (s == null) return '';
+  return String(s).replace(/[&<>"']/g, c => _ESC_MAP[c]);
+}
+// Escape pra atributos HTML (.replace(/'/g) era parcial). Usa entity encoding.
+function escAttr(s) {
+  if (s == null) return '';
+  return String(s).replace(/[&<>"']/g, c => _ESC_MAP[c]);
+}
+
 function fmtNum(n, digits = 0) {
   if (n == null || !isFinite(n)) return '—';
   return Number(n).toLocaleString('pt-BR', { maximumFractionDigits: digits, minimumFractionDigits: digits });
@@ -1151,6 +1190,7 @@ function onSportChange() {
   const [s, g] = v.split('|');
   currentSport = s;
   currentGame = g || '';
+  _saveFilter('sport', s);
   refresh();
 }
 
@@ -1684,24 +1724,24 @@ async function loadLiveTips(gen = refreshGen) {
       const evN = parseFloat(t.ev) || 0;
       const evCls = evN >= 0 ? 'pos' : 'neg';
       const sportLabel = sportDisplayLabel(t.sport, '');
-      const scoreLine = score ? `<span class="live-score" style="color:var(--text-dim);font-size:11px">${score}</span>` : '';
+      const scoreLine = score ? `<span class="live-score" style="color:var(--text-dim);font-size:11px">${escHtml(score)}</span>` : '';
       return `
         <div class="live-row" style="border-bottom:1px solid var(--border);padding:10px 0">
           <div style="flex:1;min-width:0">
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
               <span class="live-dot" style="background:#ef4444"></span>
-              <strong>${t.tip_participant}</strong>
-              <span style="color:var(--text-dim)">@ ${t.odds}</span>
-              <span class="chip" style="font-size:10px;padding:1px 5px">${sportLabel}</span>
+              <strong>${escHtml(t.tip_participant)}</strong>
+              <span style="color:var(--text-dim)">@ ${escHtml(t.odds)}</span>
+              <span class="chip" style="font-size:10px;padding:1px 5px">${escHtml(sportLabel)}</span>
               ${scoreLine}
             </div>
             <div style="font-size:11px;color:var(--text-dim);margin-top:4px">
-              ${t.participant1} vs ${t.participant2} · ${t.event_name || '—'}${ageStr ? ' · há ' + ageStr : ''}
+              ${escHtml(t.participant1)} vs ${escHtml(t.participant2)} · ${escHtml(t.event_name || '—')}${ageStr ? ' · há ' + escHtml(ageStr) : ''}
             </div>
           </div>
           <div style="text-align:right;font-size:12px;white-space:nowrap">
             <div class="${evCls}">EV ${evN >= 0 ? '+' : ''}${evN.toFixed(1)}%</div>
-            <div style="color:var(--text-dim);font-size:10px">${stakeN}u · ${t.confidence || '—'}</div>
+            <div style="color:var(--text-dim);font-size:10px">${stakeN}u · ${escHtml(t.confidence || '—')}</div>
           </div>
         </div>
       `;
@@ -2412,7 +2452,7 @@ function renderTipsTable() {
       ${nVoid ? `<span class="tip-meta">${nVoid} void</span>` : ''}
       <span class="${totalProfit >= 0 ? 'pos' : 'neg'}" style="margin-left:auto">${totalProfit >= 0 ? '+' : ''}${fmtMoney(totalProfit)}</span>
     </div>
-    <table class="tips">
+    <div class="tips-wrap"><table class="tips">
       <thead>
         <tr>
           <th style="width:30px"></th>
@@ -2448,8 +2488,12 @@ function renderTipsTable() {
             else if (t.result === 'push' || t.result === 'void') profitU = 0;
           }
           const isPending = t.result == null || t.result === 'pending';
-          const settleBtns = isPending && t.id
-            ? `<span class="settle-actions"><button class="btn-settle win" title="Marcar WIN" onclick="event.stopPropagation();settleTipManual(${t.id},'win','${(t.sport || currentSport).replace(/'/g, '')}')">W</button><button class="btn-settle loss" title="Marcar LOSS" onclick="event.stopPropagation();settleTipManual(${t.id},'loss','${(t.sport || currentSport).replace(/'/g, '')}')">L</button></span>`
+          // 2026-04-28: sport whitelist client-side. Antes .replace(/'/g) parcial
+          // — sport com `<` ou `\` quebrava onclick attr. Agora rejeita non-alpha.
+          const _sportRaw = String(t.sport || currentSport || '').toLowerCase();
+          const _sportSafe = /^[a-z0-9]+$/.test(_sportRaw) ? _sportRaw : '';
+          const settleBtns = isPending && t.id && _sportSafe
+            ? `<span class="settle-actions"><button class="btn-settle win" title="Marcar WIN" onclick="event.stopPropagation();settleTipManual(${t.id},'win','${_sportSafe}',this)">W</button><button class="btn-settle loss" title="Marcar LOSS" onclick="event.stopPropagation();settleTipManual(${t.id},'loss','${_sportSafe}',this)">L</button></span>`
             : '';
           const profitStr = isPending
             ? `— ${settleBtns}`
@@ -2486,20 +2530,20 @@ function renderTipsTable() {
             <tr>
               <td><span class="tip-status ${statusCls}">${statusCh}</span></td>
               <td>
-                <div class="tip-event">${t.participant1 || '?'} <span class="tip-meta">vs</span> ${t.participant2 || '?'}</div>
-                <div class="tip-meta">${t.event_name || t.league || ''} ${live}</div>
+                <div class="tip-event">${escHtml(t.participant1 || '?')} <span class="tip-meta">vs</span> ${escHtml(t.participant2 || '?')}</div>
+                <div class="tip-meta">${escHtml(t.event_name || t.league || '')} ${live}</div>
               </td>
-              <td><div class="tip-pick">${mtBadge}${t.tip_participant || '—'}</div></td>
-              <td class="tip-num">${t.odds != null ? Number(t.odds).toFixed(2) : '—'}</td>
+              <td><div class="tip-pick">${mtBadge}${escHtml(t.tip_participant || '—')}</div></td>
+              <td class="tip-num">${(t.odds != null && t.odds !== '' && Number.isFinite(Number(t.odds))) ? Number(t.odds).toFixed(2) : '—'}</td>
               <td class="tip-num">${t.ev != null ? fmtPct(t.ev) : '—'}</td>
-              <td class="tip-num">${t.stake || '—'}</td>
+              <td class="tip-num">${escHtml(t.stake || '—')}</td>
               <td class="tip-num ${profitCls}">${profitStr}</td>
               <td class="tip-num ${clvCls}">${clv}</td>
             </tr>
           `;
         }).join('')}
       </tbody>
-    </table>
+    </table></div>
     ${totalPages > 1 ? `
       <div class="tips-pager">
         <button onclick="tipsPage=1; renderTipsTable()" ${tipsPage === 1 ? 'disabled' : ''}>«</button>
@@ -3051,15 +3095,15 @@ async function loadTipsEmRisco() {
       <tbody>
         ${data.alerts.map(a => `<tr>
           <td>${a.verdict === 'dying' ? '🚨 dying' : '⚠️ alert'}</td>
-          <td>${a.sport}</td>
-          <td>${a.match}</td>
-          <td><b>${a.pick}</b></td>
-          <td style="text-align:right">${a.odds}</td>
-          <td style="text-align:right">${(a.originalP * 100).toFixed(0)}%</td>
-          <td style="text-align:right">${(a.currentP * 100).toFixed(0)}%</td>
-          <td style="text-align:right" class="${a.deltaP < 0 ? 'negative' : ''}">${(a.deltaP * 100).toFixed(0)}pp</td>
-          <td style="text-align:right" class="${parseFloat(a.currentEv) >= 0 ? 'positive' : 'negative'}">${a.currentEv}</td>
-          <td><span style="font-size:0.8em">${a.reason || ''}</span></td>
+          <td>${escHtml(a.sport)}</td>
+          <td>${escHtml(a.match)}</td>
+          <td><b>${escHtml(a.pick)}</b></td>
+          <td style="text-align:right">${escHtml(a.odds)}</td>
+          <td style="text-align:right">${a.originalP != null ? (a.originalP * 100).toFixed(0) : '—'}%</td>
+          <td style="text-align:right">${a.currentP != null ? (a.currentP * 100).toFixed(0) : '—'}%</td>
+          <td style="text-align:right" class="${a.deltaP < 0 ? 'negative' : ''}">${a.deltaP != null ? (a.deltaP * 100).toFixed(0) : '—'}pp</td>
+          <td style="text-align:right" class="${parseFloat(a.currentEv) >= 0 ? 'positive' : 'negative'}">${escHtml(a.currentEv)}</td>
+          <td><span style="font-size:0.8em">${escHtml(a.reason || '')}</span></td>
         </tr>`).join('')}
       </tbody>
     </table>`;
@@ -4266,11 +4310,19 @@ async function loadCost() {
 function init() {
   refresh();
   if (autoRefreshTimer) clearInterval(autoRefreshTimer);
-  autoRefreshTimer = setInterval(() => {
+  // 2026-04-28: pausa auto-refresh quando aba em background. Antes timer rodava
+  // sempre, gastando API quota + CPU mesmo com aba escondida. visibilitychange
+  // resume automático quando user volta.
+  const _refreshFn = () => {
+    if (document.hidden) return; // skip silenciosamente
     if (currentSport === '__overall__') { loadOverall(); loadLive(); loadLiveTips(); loadUpcoming(); }
     else { loadKPIs(); loadLive(); loadLiveTips(); loadUpcoming(); }
-  }, 60000); // refresh KPIs + live + upcoming a cada 60s
-  document.getElementById('footerMeta').textContent = `build 2026-04-18`;
+  };
+  autoRefreshTimer = setInterval(_refreshFn, 60000);
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) _refreshFn(); // catch-up imediato ao retornar
+  });
+  document.getElementById('footerMeta').textContent = `build 2026-04-28`;
 }
 init();
 </script>

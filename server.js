@@ -3499,6 +3499,17 @@ function getClientIp(req) {
   return ip || req.socket?.remoteAddress || 'unknown';
 }
 
+// 2026-04-28: gate pra exposição de stack trace em error responses.
+// `stack: _EXPOSE_STACK_DEV ? e.stack : undefined` em prod expunha paths internos / estrutura de módulos
+// pra qualquer caller. Default só expõe em dev (NODE_ENV !== 'production')
+// ou quando admin auth é válido (debug interno).
+const _EXPOSE_STACK_DEV = process.env.NODE_ENV !== 'production';
+function _stackForReq(req, e) {
+  if (_EXPOSE_STACK_DEV) return e?.stack;
+  if (req && isAdminRequest(req)) return e?.stack;
+  return undefined;
+}
+
 function isAdminRequest(req) {
   if (!ADMIN_KEY) return false;
   const xk = (req.headers['x-admin-key'] || '').toString().trim();
@@ -5612,7 +5623,7 @@ const server = http.createServer(async (req, res) => {
         const shared = await _liveSnapshotInFlight;
         sendJson(res, shared);
       } catch (e) {
-        sendJson(res, { error: e.message, stack: e.stack }, 500);
+        sendJson(res, { error: e.message, stack: _EXPOSE_STACK_DEV ? e.stack : undefined }, 500);
       }
       return;
     }
@@ -5838,7 +5849,7 @@ const server = http.createServer(async (req, res) => {
       _liveSnapshotCache = { result, ts: Date.now() };
       sendJson(res, result);
     } catch (e) {
-      sendJson(res, { error: e.message, stack: e.stack }, 500);
+      sendJson(res, { error: e.message, stack: _EXPOSE_STACK_DEV ? e.stack : undefined }, 500);
     } finally {
       _liveSnapshotInFlight = null;
     }
@@ -5863,7 +5874,7 @@ const server = http.createServer(async (req, res) => {
       const summary = (team1 && team2) ? vlr.summarizeLive(stats, team1, team2) : null;
       sendJson(res, { found, stats, summary });
     } catch (e) {
-      sendJson(res, { error: e.message, stack: e.stack }, 500);
+      sendJson(res, { error: e.message, stack: _EXPOSE_STACK_DEV ? e.stack : undefined }, 500);
     }
     return;
   }
@@ -5886,7 +5897,7 @@ const server = http.createServer(async (req, res) => {
         const shared = await _upcomingSnapshotInFlight;
         sendJson(res, shared);
       } catch (e) {
-        sendJson(res, { error: e.message, stack: e.stack }, 500);
+        sendJson(res, { error: e.message, stack: _EXPOSE_STACK_DEV ? e.stack : undefined }, 500);
       }
       return;
     }
@@ -5947,7 +5958,7 @@ const server = http.createServer(async (req, res) => {
       _upcomingSnapshotCache = { result, ts: Date.now(), horizonMs };
       sendJson(res, result);
     } catch (e) {
-      sendJson(res, { error: e.message, stack: e.stack }, 500);
+      sendJson(res, { error: e.message, stack: _EXPOSE_STACK_DEV ? e.stack : undefined }, 500);
     } finally {
       _upcomingSnapshotInFlight = null;
     }
@@ -8254,8 +8265,9 @@ const server = http.createServer(async (req, res) => {
     try {
       const qs = new URL(req.url, 'http://x').searchParams;
       const sportFilter = qs.get('sport');
-      const days = parseInt(qs.get('days') || '30', 10);
-      const minN = parseInt(qs.get('min') || '5', 10);
+      // 2026-04-28: clamp days. Antes parseInt('') = NaN → SQL '-NaN days' = 500.
+      const days = Math.max(1, Math.min(365, parseInt(qs.get('days') || '30', 10) || 30));
+      const minN = Math.max(1, Math.min(1000, parseInt(qs.get('min') || '5', 10) || 5));
       const sportSql = sportFilter ? ` AND sport = ?` : '';
       const sportParams = sportFilter ? [sportFilter] : [];
       const rows = db.prepare(`
@@ -8266,9 +8278,9 @@ const server = http.createServer(async (req, res) => {
           AND odds IS NOT NULL
           AND (archived IS NULL OR archived = 0)
           AND COALESCE(is_shadow, 0) = 0
-          AND sent_at >= datetime('now', '-${days} days')
+          AND sent_at >= datetime('now', ?)
           ${sportSql}
-      `).all(...sportParams);
+      `).all(`-${days} days`, ...sportParams);
 
       const agg = new Map();
       for (const r of rows) {
@@ -11189,7 +11201,7 @@ const server = http.createServer(async (req, res) => {
         gameDetail,
       });
     } catch (e) {
-      sendJson(res, { error: e.message, stack: e.stack }, 500);
+      sendJson(res, { error: e.message, stack: _EXPOSE_STACK_DEV ? e.stack : undefined }, 500);
     }
     return;
   }
@@ -11289,7 +11301,7 @@ const server = http.createServer(async (req, res) => {
         pairs,
       });
     } catch (e) {
-      sendJson(res, { error: e.message, stack: e.stack }, 500);
+      sendJson(res, { error: e.message, stack: _EXPOSE_STACK_DEV ? e.stack : undefined }, 500);
     }
     return;
   }
@@ -11539,7 +11551,7 @@ const server = http.createServer(async (req, res) => {
         items,
       });
     } catch (e) {
-      sendJson(res, { error: e.message, stack: e.stack }, 500);
+      sendJson(res, { error: e.message, stack: _EXPOSE_STACK_DEV ? e.stack : undefined }, 500);
     }
     return;
   }
@@ -11722,7 +11734,7 @@ const server = http.createServer(async (req, res) => {
         countsBySport,
         items,
       });
-    } catch (e) { sendJson(res, { error: e.message, stack: e.stack }, 500); }
+    } catch (e) { sendJson(res, { error: e.message, stack: _EXPOSE_STACK_DEV ? e.stack : undefined }, 500); }
     return;
   }
 
@@ -11837,7 +11849,7 @@ const server = http.createServer(async (req, res) => {
       } : null;
 
       sendJson(res, { ok: true, evThreshold: EV_THRESHOLD, skipped, totalSettled: tips.length, bySport: summary, aggregate: agg });
-    } catch (e) { sendJson(res, { error: e.message, stack: e.stack }, 500); }
+    } catch (e) { sendJson(res, { error: e.message, stack: _EXPOSE_STACK_DEV ? e.stack : undefined }, 500); }
     return;
   }
 
@@ -12068,7 +12080,7 @@ const server = http.createServer(async (req, res) => {
         log('INFO', 'ADMIN', `backfill-mma-events: dryRun=${dryRun} scanned=${rows.length} resolved=${rows.length - unresolved} updated=${updated}`);
         sendJson(res, { ok: true, dryRun, scanned: rows.length, resolved: rows.length - unresolved, unresolved, updated, items: results });
       } catch (e) {
-        sendJson(res, { error: e.message, stack: e.stack }, 500);
+        sendJson(res, { error: e.message, stack: _EXPOSE_STACK_DEV ? e.stack : undefined }, 500);
       }
     })();
     return;
@@ -19175,7 +19187,7 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
         pairs,
       });
     } catch (e) {
-      sendJson(res, { error: e.message, stack: e.stack }, 500);
+      sendJson(res, { error: e.message, stack: _EXPOSE_STACK_DEV ? e.stack : undefined }, 500);
     }
     return;
   }
@@ -19209,7 +19221,7 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
         scoreboardSummary: scoreboardProbe ? (hltv.summarizeScoreboard(scoreboardProbe) || scoreboardProbe) : null,
       });
     } catch (e) {
-      sendJson(res, { error: e.message, stack: e.stack });
+      sendJson(res, { error: e.message, stack: _EXPOSE_STACK_DEV ? e.stack : undefined });
     }
     return;
   }
@@ -19645,9 +19657,34 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
   if (p === '/roi-by-market') {
     const sport = parsed.query.sport || 'esports';
     try {
-      const rows = stmts.getRoiByMarket.all(sport);
+      // 2026-04-28: expande sport via resolveSportSet (legacy esports → lol+dota2).
+      // Antes /roi-by-market?sport=lol retornava 0 rows porque tips antigas em
+      // sport='esports'. Ainda mantém path single-prepared como fallback.
+      const { sportSet } = resolveSportSet(sport, null);
+      let rows;
+      if (sportSet && sportSet.length > 1) {
+        const placeholders = sportSet.map(() => '?').join(',');
+        rows = db.prepare(`
+          SELECT market_type,
+                 COUNT(*) AS total,
+                 SUM(CASE WHEN result='win' THEN 1 ELSE 0 END) AS wins,
+                 SUM(CASE WHEN result='loss' THEN 1 ELSE 0 END) AS losses,
+                 ROUND(SUM(profit_reais) / NULLIF(SUM(stake_reais),0) * 100, 2) AS roi
+          FROM tips
+          WHERE sport IN (${placeholders})
+            AND result IN ('win','loss')
+            AND (archived IS NULL OR archived = 0)
+            AND COALESCE(is_shadow, 0) = 0
+            AND market_type IS NOT NULL
+          GROUP BY market_type
+          ORDER BY total DESC
+        `).all(...sportSet);
+      } else {
+        rows = stmts.getRoiByMarket.all(sport);
+      }
       sendJson(res, rows);
     } catch(e) {
+      log('WARN', 'ROI-MARKET', `${sport}: ${e.message}`);
       sendJson(res, []);
     }
     return;
