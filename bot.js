@@ -4094,9 +4094,16 @@ function _mtParticipant(match, tip) {
     return ln ? `${match.team2} ${ln}` : match.team2;
   }
   if (s === 'over' || s === 'under') {
-    const unit = tip.market === 'totalGames' ? 'games'
-               : tip.market === 'totals' ? 'gols'
-               : tip.market === 'totalAces' ? 'aces' : 'maps';
+    // 2026-04-28: total_kills_map<N> dropava o número do mapa no display.
+    // Extrai mapN se presente + corrige unit (kills, não "maps").
+    const mkt = String(tip.market || '');
+    const killsMapMatch = mkt.match(/^total_kills_map(\d+)$/);
+    if (killsMapMatch) {
+      return `Mapa ${killsMapMatch[1]} ${s.toUpperCase()} ${tip.line ?? ''} kills`.trim();
+    }
+    const unit = mkt === 'totalGames' ? 'games'
+               : mkt === 'totals' ? 'gols'
+               : mkt === 'totalAces' ? 'aces' : 'maps';
     return `${s.toUpperCase()} ${tip.line ?? ''} ${unit}`.trim();
   }
   if (s === 'yes' || s === 'no') return s.toUpperCase();

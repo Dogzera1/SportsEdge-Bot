@@ -2338,7 +2338,12 @@ async function loadTipsByMarket(gen = refreshGen) {
     DRAW: { label: 'X', color: '#8b5cf6', long: 'Empate (football)' },
   };
   const cards = data.markets.map(m => {
-    const meta = mtMeta[m.market_type] || { label: m.market_type.slice(0, 4), color: '#64748b', long: m.market_type };
+    // total_kills_map<N> → "K<N>" + label longo "Total Kills Mapa N"
+    const _killsMapMatch = String(m.market_type || '').toUpperCase().match(/^TOTAL_KILLS_MAP(\d+)$/);
+    const _killsMapMeta = _killsMapMatch
+      ? { label: `K${_killsMapMatch[1]}`, color: '#10b981', long: `Total Kills Mapa ${_killsMapMatch[1]} (LoL)` }
+      : null;
+    const meta = mtMeta[m.market_type] || _killsMapMeta || { label: m.market_type.slice(0, 4), color: '#64748b', long: m.market_type };
     return `
       <div title="${meta.long} — ${m.n} tips em ${data.days}d (${m.settled} settled, ${m.pending} pend)"
            style="border:1px solid var(--border,#2a2a2a);background:var(--surface,#0f172a);border-radius:6px;padding:8px 10px;min-width:130px;flex:1">
@@ -2461,6 +2466,8 @@ function renderTipsTable() {
           const live = isPendingLive ? '<span class="chip" style="background:var(--danger-bg);color:var(--danger);border-color:transparent">LIVE</span>' : '';
           // Badge market_type: ML = sem badge (default), outros = chip colorido (HG/TG/HS/TB/etc)
           const _mtRaw = String(t.market_type || 'ML').toUpperCase();
+          // total_kills_map<N> → "K<N>" (ex: TOTAL_KILLS_MAP3 → K3)
+          const _killsMapMatch = _mtRaw.match(/^TOTAL_KILLS_MAP(\d+)$/);
           const _mtAbbr = _mtRaw === 'ML' ? '' :
             _mtRaw === 'HANDICAP_GAMES' ? 'HG' :
             _mtRaw === 'TOTAL_GAMES' ? 'TG' :
@@ -2470,6 +2477,7 @@ function renderTipsTable() {
             _mtRaw === 'TOTAL_ACES' ? 'TA' :
             _mtRaw === 'TIEBREAK' ? 'TB' :
             _mtRaw === 'DRAW' ? 'X' :
+            _killsMapMatch ? `K${_killsMapMatch[1]}` :
             _mtRaw.slice(0, 4);
           const mtBadge = _mtAbbr
             ? `<span class="chip" title="Market Tip (${_mtRaw}) — promovida do MT scanner" style="background:#7c3aed;color:#fff;border-color:transparent;font-size:0.7em;padding:1px 6px;margin-right:4px">${_mtAbbr}</span>`
