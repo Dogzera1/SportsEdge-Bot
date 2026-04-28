@@ -313,7 +313,27 @@ function _sharpDivergenceGate({ oddsObj, modelP, impliedP, maxPp, context = {} }
   if (!Number.isFinite(modelP) || !Number.isFinite(impliedP) || modelP <= 0 || impliedP <= 0) return { ok: true, divPp: null, reason: null, effCap: null, tier: null, override: false };
   const bookmaker = String(oddsObj?.bookmaker || '').toLowerCase();
   const isSharp = /pinnacle|betfair/.test(bookmaker);
-  if (!isSharp) return { ok: true, divPp: null, reason: 'not_sharp_book', effCap: null, tier: null, override: false };
+  // 2026-04-28: non-sharp book em tier 2/3 exige EV mínimo elevado (compensa
+  // ausência de proteção sharp). Antes passava direto sem nenhum gate.
+  if (!isSharp) {
+    const tier = context.sport ? _leagueTier(context.sport, context.league) : 2;
+    if (tier >= 2) {
+      const ev = Number(context.tipEv);
+      const _minEvNonSharp = parseFloat(process.env.NON_SHARP_TIER2_MIN_EV || '10');
+      if (Number.isFinite(ev) && ev < _minEvNonSharp) {
+        try {
+          logRejection(context.sport || 'unknown', context.teams || '?', 'non_sharp_low_ev', {
+            tier, ev: +ev.toFixed(1), minEv: _minEvNonSharp, bookmaker,
+          });
+        } catch (_) {}
+        return {
+          ok: false, divPp: null, effCap: null, tier, override: false,
+          reason: `Non-sharp book ${bookmaker} em tier${tier} exige EV ≥ ${_minEvNonSharp}% (atual: ${ev.toFixed(1)}%)`,
+        };
+      }
+    }
+    return { ok: true, divPp: null, reason: 'not_sharp_book', effCap: null, tier: null, override: false };
+  }
 
   const divPp = Math.abs(modelP - impliedP) * 100;
   // Tier-based cap bump
@@ -13693,8 +13713,16 @@ async function pollTennis(runOnce = false) {
               if (mSp) {
                 const bestOfMarkov = /grand slam|\[g\]|wimbledon|us open|roland|australian/i.test(match.league || '') ? 5 : 3;
                 const markov = priceTennisMatch({ p1Serve: mSp.p1Serve, p2Serve: mSp.p2Serve, bestOf: bestOfMarkov, iters: 15000 });
-                // Blend com tennisModelResult.modelP1 (40% Markov / 60% modelo existente)
-                const blendedP1 = 0.40 * markov.pMatch + 0.60 * tennisModelResult.modelP1;
+                // 2026-04-28: Markov blend só aplica quando modelConf >= 0.6.
+                // Antes blend 40/60 SEMPRE desfazia isotonic+segment (modelP1
+                // já calibrado, Markov puxava pro raw). Com conf baixa, Markov
+                // markets ainda salvos pra MT scanner (handicap/totalGames),
+                // mas modelP1 ML preserva calibração.
+                const _markovMinConf = parseFloat(process.env.TENNIS_MARKOV_MIN_CONF || '0.6');
+                const _confAdequate = (tennisModelResult.confidence ?? 0) >= _markovMinConf;
+                const blendedP1 = _confAdequate
+                  ? 0.40 * markov.pMatch + 0.60 * tennisModelResult.modelP1
+                  : tennisModelResult.modelP1; // preserva sem blend
                 log('INFO', 'TENNIS-MARKOV',
                   `${match.team1} [${src1}] vs ${match.team2} [${src2}] [${markovSurface} Bo${bestOfMarkov}]: markov=${(markov.pMatch*100).toFixed(1)}% ` +
                   `(p1s=${mSp.p1Serve.toFixed(3)} p2s=${mSp.p2Serve.toFixed(3)}) ` +
@@ -18234,9 +18262,12 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
       const payload = JSON.parse(fs.readFileSync(file, 'utf8'));
       fs.unlinkSync(file);
       log('INFO', 'REANAL-VOID', `Signal recebido: sport=${payload.sport} apply=${payload.apply}`);
+      // 2026-04-28: lockfile cleanup pós-conclusão pra liberar pra próxima chamada.
+      const _lockPath = path.join(path.dirname(file), 'reanalyze_void_signal.lock');
       reanalyzeAndVoidFailing({ sport: payload.sport, apply: payload.apply })
         .then(r => log('INFO', 'REANAL-VOID', `Concluído: checked=${r.checked} voided=${r.voided}`))
-        .catch(e => log('WARN', 'REANAL-VOID', `Erro: ${e.message}`));
+        .catch(e => log('WARN', 'REANAL-VOID', `Erro: ${e.message}`))
+        .finally(() => { try { if (fs.existsSync(_lockPath)) fs.unlinkSync(_lockPath); } catch (_) {} });
     } catch(_) {}
   }, 30 * 1000);
 

@@ -7071,13 +7071,31 @@ const server = http.createServer(async (req, res) => {
     const apply = parsed.query.apply !== '0';
     try {
       // Bot é processo separado; delega via flag em disco + IPC trivial.
-      // Solução mais simples: escreve arquivo signal que o bot lê.
+      // 2026-04-28: lockfile pra prevenir race com auto-void cron / Telegram cmd
+      // simultaneous calls. lock TTL 60s (operação completa em <30s normalmente).
       const fs = require('fs');
       const path = require('path');
       const dir = path.dirname(path.resolve(DB_PATH));
       const file = path.join(dir, `reanalyze_void_signal.json`);
-      fs.writeFileSync(file, JSON.stringify({ sport, apply, ts: Date.now() }));
-      sendJson(res, { ok: true, sport, apply, note: 'Flag escrito; bot processará no próximo tick' });
+      const lockFile = path.join(dir, `reanalyze_void_signal.lock`);
+      const now = Date.now();
+      const LOCK_TTL_MS = 60_000;
+      // Check lock
+      try {
+        const lockStat = fs.existsSync(lockFile) ? fs.readFileSync(lockFile, 'utf8') : null;
+        if (lockStat) {
+          const lockTs = parseInt(lockStat, 10);
+          if (Number.isFinite(lockTs) && (now - lockTs) < LOCK_TTL_MS) {
+            const ageSec = Math.round((now - lockTs) / 1000);
+            sendJson(res, { ok: false, error: 'reanalyze_in_progress', age_seconds: ageSec, retry_after_seconds: Math.ceil((LOCK_TTL_MS - (now - lockTs)) / 1000) }, 409);
+            return;
+          }
+        }
+      } catch (_) {}
+      // Acquire lock + write signal atomically
+      try { fs.writeFileSync(lockFile, String(now), { flag: 'w' }); } catch (_) {}
+      fs.writeFileSync(file, JSON.stringify({ sport, apply, ts: now }));
+      sendJson(res, { ok: true, sport, apply, note: 'Flag escrito; bot processará no próximo tick. Lock TTL 60s.' });
     } catch (e) { sendJson(res, { error: e.message }, 500); }
     return;
   }
