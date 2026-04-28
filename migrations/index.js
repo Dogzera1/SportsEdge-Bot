@@ -1597,18 +1597,31 @@ function applyMigrations(db) {
   const pending = migrations.filter(m => !applied.has(m.id));
   if (pending.length === 0) return { applied: 0 };
 
-  const runAll = db.transaction(() => {
-    for (const m of pending) {
-      m.up(db);
-      db.prepare('INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)').run(
-        m.id,
-        nowIso()
-      );
+  // 2026-04-28: cada migration roda em sua própria transaction. Antes runAll
+  // envolvia TODAS migrations num único `db.transaction(...)` — falha em N
+  // revertia 1..N-1 mas marcava nada → próximo boot retentava tudo, sempre
+  // batendo o mesmo erro. Agora migrations bem-sucedidas ficam persistidas;
+  // quem falhou loga + interrompe pra correção manual.
+  let appliedCount = 0;
+  for (const m of pending) {
+    try {
+      const tx = db.transaction(() => {
+        m.up(db);
+        db.prepare('INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)').run(
+          m.id,
+          nowIso()
+        );
+      });
+      tx();
+      appliedCount++;
+    } catch (e) {
+      const err = new Error(`Migration ${m.id} failed: ${e.message}`);
+      err.failedMigration = m.id;
+      err.appliedBefore = appliedCount;
+      throw err;
     }
-  });
-
-  runAll();
-  return { applied: pending.length };
+  }
+  return { applied: appliedCount };
 }
 
 module.exports = {

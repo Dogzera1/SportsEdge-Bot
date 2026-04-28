@@ -4034,6 +4034,34 @@ function isMarketTipsPromoteEnabled(sport) {
     || (aliasEnv && process.env[`${aliasEnv}_MARKET_TIPS_ENABLED`] === 'true');
 }
 
+// 2026-04-28: per-market EV gate genérico. Sport pode definir gates diferentes
+// por tipo de mercado (ex: handicap calibrado bem, total leak). Tennis já usa
+// padrão similar (TENNIS_TG_MIN_EV, _HG_MIN_EV) — esta função generaliza.
+// Usage: const minEv = perMarketEvGate(sport, t.market, defaultMinEv);
+function perMarketEvGate(sport, market, defaultEv) {
+  const sp = String(sport).toUpperCase().replace(/[^A-Z0-9]/g, '');
+  const mk = String(market || '').toUpperCase().replace(/[^A-Z0-9_]/g, '');
+  // Mapping de aliases comuns pra envs curtas
+  const shortKey = mk === 'HANDICAP' ? 'HC'
+    : mk === 'HANDICAPSETS' ? 'HS'
+    : mk === 'HANDICAPGAMES' ? 'HG'
+    : mk === 'TOTAL' ? 'TT'
+    : mk === 'TOTALGAMES' ? 'TG'
+    : mk === 'TOTALACES' ? 'TA'
+    : /^TOTAL_KILLS_MAP\d+$/.test(mk) ? 'TK'
+    : null;
+  // Tenta env por short key (ex: LOL_MT_HC_MIN_EV) e fallback long key (LOL_MT_HANDICAP_MIN_EV)
+  const candidates = [
+    shortKey ? `${sp}_MT_${shortKey}_MIN_EV` : null,
+    `${sp}_MT_${mk}_MIN_EV`,
+  ].filter(Boolean);
+  for (const k of candidates) {
+    const v = parseFloat(process.env[k]);
+    if (Number.isFinite(v) && v >= 0) return v;
+  }
+  return defaultEv;
+}
+
 function isMarketTipsEnabled(sport, market = null, side = null, league = null) {
   if (process.env.MARKET_TIPS_DM_KILL_SWITCH === 'true') return false;
   const up = String(sport).toUpperCase();
@@ -6346,7 +6374,7 @@ async function autoAnalyzeMatch(token, match) {
                 try {
                   const { logShadowTip } = require('./lib/market-tips-shadow');
                   for (const t of found) logShadowTip(db, { sport: 'lol', match, bestOf: lolModel.bestOf || 3, tip: t, isLive: isLiveLoL });
-                } catch (_) {}
+                } catch (e) { log('WARN', 'MT-SHADOW', `lol logShadowTip: ${e.message}`); }
                 for (const t of found.slice(0, 5)) {
                   log('INFO', 'LOL-MARKETS',
                     `  • ${t.label} @ ${t.odd.toFixed(2)} | pModel=${(t.pModel*100).toFixed(1)}% pImpl=${t.pImplied ? (t.pImplied*100).toFixed(1)+'%' : '?'} EV=${t.ev.toFixed(1)}%`);
@@ -6360,9 +6388,10 @@ async function autoAnalyzeMatch(token, match) {
                     const minEvGate = parseFloat(process.env.LOL_MARKET_TIP_MIN_EV ?? '8');
                     const minPmGate = parseFloat(process.env.LOL_MARKET_TIP_MIN_PMODEL ?? '0.55');
                     // 2026-04-27: itera sobre TODAS tips elegíveis (não só best).
+                    // 2026-04-28: per-market EV gate (LOL_MT_HC_MIN_EV / LOL_MT_TT_MIN_EV / LOL_MT_TK_MIN_EV).
                     const eligiblesRaw = found.filter(t =>
                       Number.isFinite(t.ev) && Number.isFinite(t.pModel) &&
-                      t.ev >= minEvGate && t.pModel >= minPmGate
+                      t.ev >= perMarketEvGate('lol', t.market, minEvGate) && t.pModel >= minPmGate
                     );
                     // Dedup por market_type — 1 tip por mercado por match.
                     const _byMarket = new Map();
@@ -6386,7 +6415,7 @@ async function autoAnalyzeMatch(token, match) {
                         continue;
                       }
                       marketTipSent.set(dedupKey, Date.now());
-                      let stake = mtp.kellyStakeForMarket(t.pModel, t.odd, 100, 0.10);
+                      let stake = mtp.kellyStakeForMarket(t.pModel, t.odd, 100, getKellyFraction('lol', 'BAIXA'));
                       if (t.correlationDiscount > 0 && typeof stake === 'number') {
                         stake = mtp.snapStakeUnits(stake * (1 - t.correlationDiscount));
                       }
@@ -6524,7 +6553,7 @@ async function autoAnalyzeMatch(token, match) {
                         const dbFresh = wasAdminDmSentRecently(db, { sport: 'lol', match, market: t.market, line: t.line, side: t.side, hoursAgo: 24 });
                         if (inMemFresh || dbFresh) continue;
                         marketTipSent.set(dedupKey, Date.now());
-                        const stake = mtp.kellyStakeForMarket(t.pModel, t.odd, 100, 0.10);
+                        const stake = mtp.kellyStakeForMarket(t.pModel, t.odd, 100, getKellyFraction('lol', 'BAIXA'));
                         if (!(stake > 0)) continue;
                         const dm = mtp.buildMarketTipDM({ match, tip: t, stake, league: match.league, sport: 'lol', isLive: isLiveLoL });
                         const tokenForMT = resolveTipsToken('esports');
@@ -11889,7 +11918,7 @@ async function _pollDotaInner(runOnce = false) {
                   try {
                     const { logShadowTip } = require('./lib/market-tips-shadow');
                     for (const t of extras) logShadowTip(db, { sport: 'dota2', match, bestOf: dotaBo, tip: t, meta: { mapNumber: t.mapNumber }, isLive });
-                  } catch (_) {}
+                  } catch (e) { log('WARN', 'MT-SHADOW', `dota2 extras logShadowTip: ${e.message}`); }
                   for (const t of extras.slice(0, 3)) {
                     log('INFO', 'DOTA-EXTRAS', `  • ${t.label} @ ${t.odd.toFixed(2)} | pModel=${(t.pModel*100).toFixed(1)}% EV=${t.ev.toFixed(1)}%`);
                   }
@@ -11903,7 +11932,7 @@ async function _pollDotaInner(runOnce = false) {
               try {
                 const { logShadowTip } = require('./lib/market-tips-shadow');
                 for (const t of found) logShadowTip(db, { sport: 'dota2', match, bestOf: dotaBo, tip: t, isLive });
-              } catch (_) {}
+              } catch (e) { log('WARN', 'MT-SHADOW', `dota2 logShadowTip: ${e.message}`); }
               for (const t of found.slice(0, 5)) {
                 log('INFO', 'DOTA-MARKETS',
                   `  • ${t.label} @ ${t.odd.toFixed(2)} | pModel=${(t.pModel*100).toFixed(1)}% pImpl=${t.pImplied ? (t.pImplied*100).toFixed(1)+'%' : '?'} EV=${t.ev.toFixed(1)}%`);
@@ -11915,7 +11944,7 @@ async function _pollDotaInner(runOnce = false) {
                   const minPmGate = parseFloat(process.env.DOTA_MARKET_TIP_MIN_PMODEL ?? '0.55');
                   const eligiblesRaw = found.filter(t =>
                       Number.isFinite(t.ev) && Number.isFinite(t.pModel) &&
-                      t.ev >= minEvGate && t.pModel >= minPmGate
+                      t.ev >= perMarketEvGate('dota2', t.market, minEvGate) && t.pModel >= minPmGate
                     );
                     // Dedup por market_type — 1 tip por mercado por match.
                     const _byMarket = new Map();
@@ -11939,7 +11968,7 @@ async function _pollDotaInner(runOnce = false) {
                       continue;
                     }
                     marketTipSent.set(dedupKey, Date.now());
-                    let stake = mtp.kellyStakeForMarket(t.pModel, t.odd, 100, 0.10);
+                    let stake = mtp.kellyStakeForMarket(t.pModel, t.odd, 100, getKellyFraction('dota2', 'BAIXA'));
                     if (t.correlationDiscount > 0 && typeof stake === 'number') {
                       stake = mtp.snapStakeUnits(stake * (1 - t.correlationDiscount));
                     }
@@ -13747,7 +13776,7 @@ async function pollTennis(runOnce = false) {
                   try {
                     const { logShadowTip } = require('./lib/market-tips-shadow');
                     for (const t of found) logShadowTip(db, { sport: 'tennis', match, bestOf: tnBestOf, tip: t, isLive: isLiveTennis });
-                  } catch (_) {}
+                  } catch (e) { log('WARN', 'MT-SHADOW', `tennis logShadowTip: ${e.message}`); }
                   for (const t of found.slice(0, 5)) {
                     const discTag = t.correlationDiscount > 0 ? ` corr-disc=${(t.correlationDiscount*100).toFixed(0)}%` : '';
                     log('INFO', 'TENNIS-MARKETS',
@@ -13822,7 +13851,7 @@ async function pollTennis(runOnce = false) {
                           continue;
                         }
                         marketTipSent.set(dedupKey, Date.now());
-                        let stake = mtp.kellyStakeForMarket(t.pModel, t.odd, 100, 0.10);
+                        let stake = mtp.kellyStakeForMarket(t.pModel, t.odd, 100, getKellyFraction('tennis', 'BAIXA'));
                         if (t.correlationDiscount > 0 && typeof stake === 'number') {
                           stake = mtp.snapStakeUnits(stake * (1 - t.correlationDiscount));
                         }
@@ -14929,7 +14958,7 @@ async function pollFootball(runOnce = false) {
                 try {
                   const { logShadowTip } = require('./lib/market-tips-shadow');
                   for (const t of fbMtFound) logShadowTip(db, { sport: 'football', match, bestOf: null, tip: t, isLive: isLiveScan });
-                } catch (_) {}
+                } catch (e) { log('WARN', 'MT-SHADOW', `football logShadowTip: ${e.message}`); }
                 for (const t of fbMtFound.slice(0, 5)) {
                   log('INFO', 'FB-MT-SCAN',
                     `  • ${t.label} @ ${t.odd.toFixed(2)} | pModel=${(t.pModel*100).toFixed(1)}% pImpl=${t.pImplied ? (t.pImplied*100).toFixed(1)+'%' : '?'} EV=${t.ev.toFixed(1)}%`);
@@ -14976,7 +15005,7 @@ async function pollFootball(runOnce = false) {
                       const dbFresh = wasAdminDmSentRecently(db, { sport: 'football', match, market: t.market, line: t.line, side: t.side, hoursAgo: 24 });
                       if (inMemFresh || dbFresh) continue;
                       marketTipSent.set(dedupKey, Date.now());
-                      const stake = mtp.kellyStakeForMarket(t.pModel, t.odd, 100, 0.10);
+                      const stake = mtp.kellyStakeForMarket(t.pModel, t.odd, 100, getKellyFraction('football', 'BAIXA'));
                       if (!(stake > 0)) continue;
                       const dm = mtp.buildMarketTipDM({ match, tip: t, stake, league: match.league, sport: 'football', isLive: isLiveScan });
                       const tokenForMT = resolveTipsToken('football') || SPORTS['football']?.token || resolveAlertsToken();
@@ -15411,7 +15440,7 @@ Máximo 200 palavras.`;
                   const { wasAdminDmSentRecently, markAdminDmSent } = require('./lib/market-tips-shadow');
                   const dbFresh = wasAdminDmSentRecently(db, { sport: 'football', match: matchForMt, market: marketKey, line: lineVal, side: sideMt, hoursAgo: 24 });
                   if (!dbFresh) {
-                    const stakeFb = mtp.kellyStakeForMarket(fbModelPPick, parseFloat(tipOdd), 100, 0.10);
+                    const stakeFb = mtp.kellyStakeForMarket(fbModelPPick, parseFloat(tipOdd), 100, getKellyFraction('football', 'BAIXA'));
                     if (stakeFb > 0) {
                       const dmFb = mtp.buildMarketTipDM({ match: matchForMt, tip: tipForMt, stake: stakeFb, league: matchForMt.league, sport: 'football', isLive: isFbLive });
                       // resolveTipsToken honra TIPS_UNIFIED_TOKEN — todas MT DMs caem no mesmo bot.
@@ -15974,7 +16003,7 @@ async function pollCs(runOnce = false) {
                 try {
                   const { logShadowTip } = require('./lib/market-tips-shadow');
                   for (const t of found) logShadowTip(db, { sport: 'cs2', match, bestOf: csBestOf, tip: t, isLive: isLiveCs });
-                } catch (_) {}
+                } catch (e) { log('WARN', 'MT-SHADOW', `cs2 logShadowTip: ${e.message}`); }
                 for (const t of found.slice(0, 5)) {
                   log('INFO', 'CS-MARKETS',
                     `  • ${t.label} @ ${t.odd.toFixed(2)} | pModel=${(t.pModel*100).toFixed(1)}% pImpl=${t.pImplied ? (t.pImplied*100).toFixed(1)+'%' : '?'} EV=${t.ev.toFixed(1)}%`);
@@ -15986,7 +16015,7 @@ async function pollCs(runOnce = false) {
                     const minPmGate = parseFloat(process.env.CS_MARKET_TIP_MIN_PMODEL ?? '0.55');
                     const eligiblesRaw = found.filter(t =>
                       Number.isFinite(t.ev) && Number.isFinite(t.pModel) &&
-                      t.ev >= minEvGate && t.pModel >= minPmGate
+                      t.ev >= perMarketEvGate('cs2', t.market, minEvGate) && t.pModel >= minPmGate
                     );
                     // Dedup por market_type — 1 tip por mercado por match.
                     const _byMarket = new Map();
@@ -16010,7 +16039,7 @@ async function pollCs(runOnce = false) {
                         continue;
                       }
                       marketTipSent.set(dedupKey, Date.now());
-                      let stake = mtp.kellyStakeForMarket(t.pModel, t.odd, 100, 0.10);
+                      let stake = mtp.kellyStakeForMarket(t.pModel, t.odd, 100, getKellyFraction('cs2', 'BAIXA'));
                       if (t.correlationDiscount > 0 && typeof stake === 'number') {
                         stake = mtp.snapStakeUnits(stake * (1 - t.correlationDiscount));
                       }
@@ -16566,7 +16595,7 @@ async function pollValorant(runOnce = false) {
                 try {
                   const { logShadowTip } = require('./lib/market-tips-shadow');
                   for (const t of found) logShadowTip(db, { sport: 'valorant', match, bestOf: bo, tip: t, isLive: isLiveVal });
-                } catch (_) {}
+                } catch (e) { log('WARN', 'MT-SHADOW', `valorant logShadowTip: ${e.message}`); }
                 for (const t of found.slice(0, 5)) {
                   log('INFO', 'VAL-MARKETS',
                     `  • ${t.label} @ ${t.odd.toFixed(2)} | pModel=${(t.pModel*100).toFixed(1)}% pImpl=${t.pImplied ? (t.pImplied*100).toFixed(1)+'%' : '?'} EV=${t.ev.toFixed(1)}%`);
@@ -16578,7 +16607,7 @@ async function pollValorant(runOnce = false) {
                     const minPmGate = parseFloat(process.env.VAL_MARKET_TIP_MIN_PMODEL ?? '0.55');
                     const eligiblesRaw = found.filter(t =>
                       Number.isFinite(t.ev) && Number.isFinite(t.pModel) &&
-                      t.ev >= minEvGate && t.pModel >= minPmGate
+                      t.ev >= perMarketEvGate('valorant', t.market, minEvGate) && t.pModel >= minPmGate
                     );
                     // Dedup por market_type — 1 tip por mercado por match.
                     const _byMarket = new Map();
@@ -16602,7 +16631,7 @@ async function pollValorant(runOnce = false) {
                         continue;
                       }
                       marketTipSent.set(dedupKey, Date.now());
-                      let stake = mtp.kellyStakeForMarket(t.pModel, t.odd, 100, 0.10);
+                      let stake = mtp.kellyStakeForMarket(t.pModel, t.odd, 100, getKellyFraction('valorant', 'BAIXA'));
                       if (t.correlationDiscount > 0 && typeof stake === 'number') {
                         stake = mtp.snapStakeUnits(stake * (1 - t.correlationDiscount));
                       }
