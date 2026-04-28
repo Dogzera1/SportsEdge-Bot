@@ -1562,6 +1562,24 @@ const migrations = [
       `);
     },
   },
+  {
+    id: '063_market_tips_runtime_state_league',
+    up(db) {
+      // Granularidade extra: leak guard agora pode bloquear (sport, market, side, league).
+      // Motivo (2026-04-28): ATP Madrid|handicapGames com ROI -23% mas WTA Madrid
+      // mesmo (market, side) com ROI +37%. Block global mataria o lado bom.
+      // Per-league permite blocking cirúrgico.
+      try { db.exec("ALTER TABLE market_tips_runtime_state ADD COLUMN league TEXT"); } catch (_) {}
+      // Index único atualizado pra incluir league. SQLite UNIQUE com COALESCE
+      // permite múltiplas rows com side=NULL desde que league diferente.
+      try { db.exec("DROP INDEX IF EXISTS idx_mt_runtime_sport_market_side"); } catch (_) {}
+      try {
+        db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_mt_runtime_full ON market_tips_runtime_state(
+          sport, market, COALESCE(side, ''), COALESCE(league, '')
+        )`);
+      } catch (_) {}
+    },
+  },
 ];
 
 function applyMigrations(db) {

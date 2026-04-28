@@ -3995,19 +3995,28 @@ const _marketTipsDisabledRuntime = new Map(); // Map<'sport|market', { reason, s
 
 function _loadMarketTipsRuntimeState() {
   try {
-    // Best-effort: se migration não rodou ainda com coluna `side`, query sem ela.
+    // Migrations progressivas: 050 base · 051 add side · 063 add league.
+    // Best-effort cascading downgrade se schema antigo.
     let rows;
     try {
-      rows = db.prepare(`SELECT sport, market, side, source, reason, clv_pct, clv_n, updated_at FROM market_tips_runtime_state WHERE disabled = 1`).all();
+      rows = db.prepare(`SELECT sport, market, side, league, source, reason, clv_pct, clv_n, updated_at FROM market_tips_runtime_state WHERE disabled = 1`).all();
     } catch (_) {
-      rows = db.prepare(`SELECT sport, market, source, reason, clv_pct, clv_n, updated_at FROM market_tips_runtime_state WHERE disabled = 1`).all().map(r => ({ ...r, side: null }));
+      try {
+        rows = db.prepare(`SELECT sport, market, side, source, reason, clv_pct, clv_n, updated_at FROM market_tips_runtime_state WHERE disabled = 1`).all().map(r => ({ ...r, league: null }));
+      } catch (__) {
+        rows = db.prepare(`SELECT sport, market, source, reason, clv_pct, clv_n, updated_at FROM market_tips_runtime_state WHERE disabled = 1`).all().map(r => ({ ...r, side: null, league: null }));
+      }
     }
     _marketTipsDisabledRuntime.clear();
     for (const r of rows) {
-      const key = r.side ? `${r.sport}|${r.market}|${r.side}` : `${r.sport}|${r.market}`;
+      const parts = [r.sport, r.market];
+      if (r.side) parts.push(r.side);
+      if (r.league) parts.push(r.league);
+      const key = parts.join('|');
       _marketTipsDisabledRuntime.set(key, {
         reason: r.reason, since: r.updated_at, clv: r.clv_pct, n: r.clv_n, source: r.source,
         side: r.side || null,
+        league: r.league || null,
       });
     }
     if (_marketTipsDisabledRuntime.size) log('INFO', 'MT-GUARD', `Loaded ${_marketTipsDisabledRuntime.size} runtime disables`);
@@ -4024,7 +4033,7 @@ function isMarketTipsPromoteEnabled(sport) {
     || (aliasEnv && process.env[`${aliasEnv}_MARKET_TIPS_ENABLED`] === 'true');
 }
 
-function isMarketTipsEnabled(sport, market = null, side = null) {
+function isMarketTipsEnabled(sport, market = null, side = null, league = null) {
   if (process.env.MARKET_TIPS_DM_KILL_SWITCH === 'true') return false;
   const up = String(sport).toUpperCase();
   // Aceita alias histórico: DOTA_* pra 'dota2', CS_* pra 'cs2'
@@ -4039,7 +4048,9 @@ function isMarketTipsEnabled(sport, market = null, side = null) {
   const enabled = envEnabled || shadowDmAll;
   if (!enabled) return false;
   if (market) {
-    // Precedência: (market+side) mais específico > market inteiro.
+    // Precedência: (market+side+league) > (market+side) > market inteiro.
+    // League é match completo (não normalize) — leak guard salva exato.
+    if (side && league && _marketTipsDisabledRuntime.has(`${sport}|${market}|${side}|${league}`)) return false;
     if (side && _marketTipsDisabledRuntime.has(`${sport}|${market}|${side}`)) return false;
     if (_marketTipsDisabledRuntime.has(`${sport}|${market}`)) return false;
   }
@@ -4247,38 +4258,51 @@ async function runMarketTipsLeakGuard() {
   const N_CUTOFF = parseInt(process.env.MT_LEAK_N_CUTOFF || '30', 10);
   // Side-level pode usar n menor (granularidade fina). Default = max(N_CUTOFF/2, 15).
   const N_CUTOFF_SIDE = parseInt(process.env.MT_LEAK_N_CUTOFF_SIDE || String(Math.max(15, Math.floor(N_CUTOFF / 2))), 10);
+  // League-level: granularidade ainda mais fina, requer n menor pra detectar leak antes
+  // que cause prejuízo grande. Default 10. Cutoff CLV mais agressivo (default = CLV_CUTOFF)
+  // pra evitar block prematuro em sample apertado.
+  const N_CUTOFF_LEAGUE = parseInt(process.env.MT_LEAK_N_CUTOFF_LEAGUE || '10', 10);
   const CLV_RESTORE = parseFloat(process.env.MT_LEAK_CLV_RESTORE || '0');
-  // Side-level guard pode ser desligado isoladamente
   const SIDE_GUARD_DISABLED = /^(0|false|no)$/i.test(String(process.env.MT_LEAK_GUARD_SIDE_AUTO ?? 'true'));
+  const LEAGUE_GUARD_DISABLED = /^(0|false|no)$/i.test(String(process.env.MT_LEAK_GUARD_LEAGUE_AUTO ?? 'true'));
 
-  let statsMarket, statsBySide;
+  let statsMarket, statsBySide, statsByLeague;
   try {
     const { getShadowStats } = require('./lib/market-tips-shadow');
     statsMarket = getShadowStats(db, { days: 30 });
     statsBySide = SIDE_GUARD_DISABLED ? [] : getShadowStats(db, { days: 30, bySide: true });
+    statsByLeague = LEAGUE_GUARD_DISABLED ? [] : getShadowStats(db, { days: 30, bySide: true, byLeague: true });
   } catch (_) { return; }
-  if ((!Array.isArray(statsMarket) || !statsMarket.length) && !statsBySide.length) return;
+  if ((!Array.isArray(statsMarket) || !statsMarket.length) && !statsBySide.length && !statsByLeague.length) return;
 
   const disabled = [], restored = [];
   const ts = new Date().toISOString();
 
-  // Helper compartilhado pra disable/restore com chave market ou market+side
+  // Helper compartilhado pra disable/restore. Granularidade decrescente:
+  //   1. (sport, market)               — N_CUTOFF, mais conservador
+  //   2. (sport, market, side)         — N_CUTOFF_SIDE
+  //   3. (sport, market, side, league) — N_CUTOFF_LEAGUE, mais agressivo
   const processSegment = (s) => {
     const sideKey = s.side || null;
-    const key = sideKey ? `${s.sport}|${s.market}|${sideKey}` : `${s.sport}|${s.market}`;
-    const label = sideKey ? `${s.sport}/${s.market}/${sideKey}` : `${s.sport}/${s.market}`;
-    const nThreshold = sideKey ? N_CUTOFF_SIDE : N_CUTOFF;
+    const leagueKey = s.league || null;
+    const parts = [s.sport, s.market];
+    const labelParts = [s.sport, s.market];
+    if (sideKey) { parts.push(sideKey); labelParts.push(sideKey); }
+    if (leagueKey) { parts.push(leagueKey); labelParts.push(leagueKey); }
+    const key = parts.join('|');
+    const label = labelParts.join('/');
+    const nThreshold = leagueKey ? N_CUTOFF_LEAGUE : (sideKey ? N_CUTOFF_SIDE : N_CUTOFF);
     const wasDisabled = _marketTipsDisabledRuntime.has(key);
 
     if (!wasDisabled && s.clvN >= nThreshold && s.avgClv != null && s.avgClv < CLV_CUTOFF) {
       const reason = `CLV ${s.avgClv.toFixed(1)}% n=${s.clvN} ROI=${s.roiPct != null ? s.roiPct.toFixed(1)+'%' : '?'}`;
       try {
         db.prepare(`INSERT OR REPLACE INTO market_tips_runtime_state
-          (sport, market, side, disabled, source, reason, clv_pct, clv_n, roi_pct, updated_at)
-          VALUES (?, ?, ?, 1, 'auto_clv_leak', ?, ?, ?, ?, ?)`).run(
-          s.sport, s.market, sideKey, reason, s.avgClv, s.clvN, s.roiPct, ts,
+          (sport, market, side, league, disabled, source, reason, clv_pct, clv_n, roi_pct, updated_at)
+          VALUES (?, ?, ?, ?, 1, 'auto_clv_leak', ?, ?, ?, ?, ?)`).run(
+          s.sport, s.market, sideKey, leagueKey, reason, s.avgClv, s.clvN, s.roiPct, ts,
         );
-        _marketTipsDisabledRuntime.set(key, { reason, since: ts, clv: s.avgClv, n: s.clvN, source: 'auto_clv_leak' });
+        _marketTipsDisabledRuntime.set(key, { reason, since: ts, clv: s.avgClv, n: s.clvN, source: 'auto_clv_leak', side: sideKey, league: leagueKey });
         disabled.push(`🚫 ${label} — ${reason}`);
         log('WARN', 'MT-GUARD', `auto-disabled ${key}: ${reason}`);
       } catch (e) { log('WARN', 'MT-GUARD', `disable err: ${e.message}`); }
@@ -4287,11 +4311,14 @@ async function runMarketTipsLeakGuard() {
       const meta = _marketTipsDisabledRuntime.get(key);
       if (meta?.source === 'auto_clv_leak' && s.clvN >= nThreshold && s.avgClv != null && s.avgClv >= CLV_RESTORE) {
         try {
-          if (sideKey) {
-            db.prepare(`DELETE FROM market_tips_runtime_state WHERE sport = ? AND market = ? AND side = ? AND source = 'auto_clv_leak'`).run(s.sport, s.market, sideKey);
-          } else {
-            db.prepare(`DELETE FROM market_tips_runtime_state WHERE sport = ? AND market = ? AND side IS NULL AND source = 'auto_clv_leak'`).run(s.sport, s.market);
-          }
+          // DELETE com null-safe match em side/league. Schema mantém NULL pra
+          // segments market-level e side-level, valor explícito pra league-level.
+          const sideCond = sideKey ? 'side = ?' : 'side IS NULL';
+          const leagueCond = leagueKey ? 'league = ?' : 'league IS NULL';
+          const stmtParams = [s.sport, s.market];
+          if (sideKey) stmtParams.push(sideKey);
+          if (leagueKey) stmtParams.push(leagueKey);
+          db.prepare(`DELETE FROM market_tips_runtime_state WHERE sport = ? AND market = ? AND ${sideCond} AND ${leagueCond} AND source = 'auto_clv_leak'`).run(...stmtParams);
           _marketTipsDisabledRuntime.delete(key);
           restored.push(`✅ ${label} — CLV recuperou pra ${s.avgClv.toFixed(1)}% (n=${s.clvN})`);
           log('INFO', 'MT-GUARD', `auto-restored ${key}: CLV=${s.avgClv.toFixed(1)}%`);
@@ -4302,19 +4329,23 @@ async function runMarketTipsLeakGuard() {
 
   // Market-level (existente, n cutoff = N_CUTOFF)
   for (const s of statsMarket) processSegment(s);
-  // Side-level (novo, n cutoff = N_CUTOFF_SIDE menor pra granularidade fina)
+  // Side-level (n cutoff = N_CUTOFF_SIDE menor pra granularidade fina)
   for (const s of statsBySide) {
     if (s.side) processSegment(s);
+  }
+  // League-level (n cutoff = N_CUTOFF_LEAGUE — mais agressivo pra detectar leak cedo)
+  for (const s of statsByLeague) {
+    if (s.side && s.league) processSegment(s);
   }
 
   if (disabled.length || restored.length) {
     const token = resolveAlertsToken();
     if (token) {
-      const msg = `🛡️ *MT LEAK GUARD — 30d*\n\n${[...disabled, ...restored].join('\n')}\n\n_Market: CLV ≤ ${CLV_CUTOFF}% n≥${N_CUTOFF}. Side: n≥${N_CUTOFF_SIDE}. Restaura em CLV ≥ ${CLV_RESTORE}%._`;
+      const msg = `🛡️ *MT LEAK GUARD — 30d*\n\n${[...disabled, ...restored].join('\n')}\n\n_Market n≥${N_CUTOFF} · Side n≥${N_CUTOFF_SIDE} · League n≥${N_CUTOFF_LEAGUE} · CLV ≤ ${CLV_CUTOFF}%. Restaura em CLV ≥ ${CLV_RESTORE}%._`;
       if (!_isCycleMuted('mt-leak-guard')) for (const adminId of ADMIN_IDS) sendDM(token, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
     }
   }
-  log('INFO', 'MT-GUARD', `Ciclo OK — ${statsMarket.length} markets + ${statsBySide.length} sides | ${disabled.length} disabled | ${restored.length} restored`);
+  log('INFO', 'MT-GUARD', `Ciclo OK — ${statsMarket.length} markets + ${statsBySide.length} sides + ${statsByLeague.length} leagues | ${disabled.length} disabled | ${restored.length} restored`);
 }
 
 // ── Weekly pipeline digest (1x/semana — 2ª feira 9h local) ──
@@ -6307,7 +6338,7 @@ async function autoAnalyzeMatch(token, match) {
                     const eligibles = [..._byMarket.values()];
                     const { wasAdminDmSentRecently, markAdminDmSent } = require('./lib/market-tips-shadow');
                     for (const t of eligibles) {
-                      if (!isMarketTipsEnabled('lol', t.market, t.side)) {
+                      if (!isMarketTipsEnabled('lol', t.market, t.side, match.league)) {
                         log('INFO', 'MT-GUARD', `lol/${t.market}/${t.side}: DM skipped — market disabled por leak guard`);
                         continue;
                       }
@@ -11607,7 +11638,7 @@ async function _pollDotaInner(runOnce = false) {
                     const eligibles = [..._byMarket.values()];
                   const { wasAdminDmSentRecently, markAdminDmSent } = require('./lib/market-tips-shadow');
                   for (const t of eligibles) {
-                    if (!isMarketTipsEnabled('dota2', t.market, t.side)) {
+                    if (!isMarketTipsEnabled('dota2', t.market, t.side, match.league)) {
                       log('INFO', 'MT-GUARD', `dota2/${t.market}/${t.side}: DM skipped — market disabled por leak guard`);
                       continue;
                     }
@@ -13449,7 +13480,7 @@ async function pollTennis(runOnce = false) {
                           log('INFO', 'MT-FILTER', `tennis/${t.market}/${t.side}: DM skipped — não está em TENNIS_MT_DM_FILTER ('${dmFilter}')`);
                           continue;
                         }
-                        if (!isMarketTipsEnabled('tennis', t.market, t.side)) {
+                        if (!isMarketTipsEnabled('tennis', t.market, t.side, match.league)) {
                           log('INFO', 'MT-GUARD', `tennis/${t.market}/${t.side}: DM skipped — market disabled por leak guard`);
                           continue;
                         }
@@ -14679,12 +14710,15 @@ Máximo 200 palavras.`;
         if (process.env.LINE_SHOP_EV_RECALC !== 'false') {
           const _is1x2 = tipMarket === '1X2_H' || tipMarket === '1X2_A' || tipMarket === '1X2_D';
           const _isOu = tipMarket === 'OVER_2.5' || tipMarket === 'UNDER_2.5';
-          const _lsOddsObj = _is1x2 ? match.odds : (_isOu ? match.odds?.ou25 : null);
+          const _isBtts = tipMarket === 'BTTS_YES' || tipMarket === 'BTTS_NO';
+          const _lsOddsObj = _is1x2 ? match.odds : (_isOu ? match.odds?.ou25 : (_isBtts ? match.odds?.btts : null));
           const _pickKey = tipMarket === '1X2_H' ? 'h'
             : tipMarket === '1X2_A' ? 'a'
             : tipMarket === '1X2_D' ? 'd'
             : tipMarket === 'OVER_2.5' ? 'over'
             : tipMarket === 'UNDER_2.5' ? 'under'
+            : tipMarket === 'BTTS_YES' ? 'yes'
+            : tipMarket === 'BTTS_NO' ? 'no'
             : null;
           if (_pickKey && _lsOddsObj?._allOdds) {
             try {
@@ -14699,6 +14733,8 @@ Máximo 200 palavras.`;
                     : tipMarket === '1X2_D' ? parseFloat(mlScore?.modelD)
                     : tipMarket === 'OVER_2.5' ? parseFloat(mlScore?.over25Prob)
                     : tipMarket === 'UNDER_2.5' ? (100 - parseFloat(mlScore?.over25Prob || 0))
+                    : tipMarket === 'BTTS_YES' ? parseFloat(mlScore?.bttsProb)
+                    : tipMarket === 'BTTS_NO' ? (100 - parseFloat(mlScore?.bttsProb || 0))
                     : null;
                   const _newEv = (_pickP && _pickP > 0) ? ((_pickP / 100) * _ls.bestOdd - 1) * 100 : null;
                   log('INFO', 'LINE-SHOP', `FB ${match.team1} vs ${match.team2} [${tipMarket}]: ${tipOdd.toFixed(2)}→${_ls.bestOdd.toFixed(2)} (${_ls.bestBook}, +${_ls.deltaPct?.toFixed(1)}%)${_newEv != null ? ` EV ${tipEV}%→${_newEv.toFixed(1)}%` : ''}`);
@@ -14844,8 +14880,12 @@ Máximo 200 palavras.`;
             const { logShadowTip } = require('./lib/market-tips-shadow');
             const sideMt = tipMarket === '1X2_D' ? 'd'
                         : tipMarket === 'OVER_2.5' ? 'over'
-                        : tipMarket === 'UNDER_2.5' ? 'under' : null;
-            const marketKey = tipMarket === '1X2_D' ? 'draw' : 'totals';
+                        : tipMarket === 'UNDER_2.5' ? 'under'
+                        : tipMarket === 'BTTS_YES' ? 'yes'
+                        : tipMarket === 'BTTS_NO' ? 'no' : null;
+            const marketKey = tipMarket === '1X2_D' ? 'draw'
+                            : (tipMarket === 'BTTS_YES' || tipMarket === 'BTTS_NO') ? 'btts'
+                            : 'totals';
             const lineVal = tipMarket === 'OVER_2.5' || tipMarket === 'UNDER_2.5' ? 2.5 : null;
             const pImp = parseFloat(String(tipOdd)) > 1 ? (1 / parseFloat(tipOdd)) : null;
             const tipForMt = {
@@ -14880,7 +14920,7 @@ Máximo 200 palavras.`;
                 const gateFb = mtp.shouldSendMarketTip(tipForMt, { minEv: minEvFb, minPmodel: minPmFb });
                 if (!gateFb.ok) {
                   log('DEBUG', 'FB-MARKET-GATE', `${matchForMt.team1} vs ${matchForMt.team2} ${tipMarket}: ${gateFb.reason}`);
-                } else if (!isMarketTipsEnabled('football', marketKey, sideMt)) {
+                } else if (!isMarketTipsEnabled('football', marketKey, sideMt, match.league)) {
                   log('INFO', 'MT-GUARD', `football/${marketKey}/${sideMt}: DM skipped — segment disabled (auto-roi/manual)`);
                 } else {
                   const { wasAdminDmSentRecently, markAdminDmSent } = require('./lib/market-tips-shadow');
@@ -15473,7 +15513,7 @@ async function pollCs(runOnce = false) {
                     const eligibles = [..._byMarket.values()];
                     const { wasAdminDmSentRecently, markAdminDmSent } = require('./lib/market-tips-shadow');
                     for (const t of eligibles) {
-                      if (!isMarketTipsEnabled('cs2', t.market, t.side)) {
+                      if (!isMarketTipsEnabled('cs2', t.market, t.side, match.league)) {
                         log('INFO', 'MT-GUARD', `cs2/${t.market}/${t.side}: DM skipped — market disabled por leak guard`);
                         continue;
                       }
