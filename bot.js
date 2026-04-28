@@ -7560,6 +7560,81 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
       }
     } catch(e) { log('WARN', 'CMD', `/shadow threw: ${e.message}`); await send(token, chatId, `❌ ${e.message}`).catch(() => {}); }
 
+  } else if (cmd === '/mt-gates') {
+    // Diagnóstico de gates MT: env enabled, leak guard runtime disables,
+    // recent admin DMs. Espelha /mt-dm-pipeline endpoint sem precisar de
+    // ADMIN_KEY na URL. Uso: /mt-gates [sport=tennis] [days=7]
+    if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
+    try {
+      const parts = command.trim().split(/\s+/);
+      const sport = (parts[1] || 'tennis').toLowerCase();
+      const days = Math.max(1, Math.min(30, parseInt(parts[2] || '7', 10) || 7));
+      const up = sport.toUpperCase();
+      const aliasEnv = { DOTA2: 'DOTA', CS2: 'CS' }[up];
+      const sportEnabled = process.env[`${up}_MARKET_TIPS_ENABLED`] === 'true'
+        || (aliasEnv && process.env[`${aliasEnv}_MARKET_TIPS_ENABLED`] === 'true');
+      const killSwitch = process.env.MARKET_TIPS_DM_KILL_SWITCH === 'true';
+      const shadowDmAll = /^true$/i.test(process.env.MT_SHADOW_DM_ALL || '');
+      let runtimeDisables = [];
+      try {
+        runtimeDisables = db.prepare(`
+          SELECT market, side, league, source, reason, clv_pct, clv_n, updated_at
+          FROM market_tips_runtime_state
+          WHERE sport = ? AND disabled = 1
+          ORDER BY updated_at DESC
+          LIMIT 20
+        `).all(sport);
+      } catch (_) {
+        try {
+          runtimeDisables = db.prepare(`
+            SELECT market, source, reason, clv_pct, clv_n, updated_at
+            FROM market_tips_runtime_state
+            WHERE sport = ? AND disabled = 1
+            ORDER BY updated_at DESC
+            LIMIT 20
+          `).all(sport);
+        } catch (__) { runtimeDisables = [{ error: 'table_missing' }]; }
+      }
+      let recentDms = [];
+      try {
+        recentDms = db.prepare(`
+          SELECT market, line, side, team1, team2, league, admin_dm_sent_at
+          FROM market_tips_shadow
+          WHERE sport = ?
+            AND admin_dm_sent_at IS NOT NULL
+            AND admin_dm_sent_at >= datetime('now', '-' || ? || ' days')
+          ORDER BY admin_dm_sent_at DESC
+          LIMIT 8
+        `).all(sport, days);
+      } catch (_) {}
+      const adminN = ADMIN_IDS.size;
+      let txt = `🔒 *MT GATES — ${sport.toUpperCase()} (${days}d)*\n\n`;
+      txt += `*Envs:*\n`;
+      txt += `• ${up}_MARKET_TIPS_ENABLED: ${sportEnabled ? '✅ true' : '❌ false'}\n`;
+      txt += `• MARKET_TIPS_DM_KILL_SWITCH: ${killSwitch ? '⚠️ true (kills all)' : '✅ false'}\n`;
+      txt += `• MT_SHADOW_DM_ALL: ${shadowDmAll ? 'true' : 'false'}\n`;
+      txt += `• ADMIN_IDS: ${adminN > 0 ? '✅ ' + adminN : '❌ 0'}\n\n`;
+      txt += `*Leak guard disables (${runtimeDisables.length}):*\n`;
+      if (!runtimeDisables.length) txt += `_(nenhum)_\n`;
+      else {
+        for (const r of runtimeDisables.slice(0, 10)) {
+          if (r.error) { txt += `❌ ${r.error}\n`; continue; }
+          const parts2 = [r.market];
+          if (r.side) parts2.push(r.side);
+          if (r.league) parts2.push(r.league);
+          txt += `❌ ${parts2.join('/')} | clv=${r.clv_pct}% n=${r.clv_n} src=${r.source}\n`;
+        }
+      }
+      txt += `\n*Recent DMs (${recentDms.length}):*\n`;
+      if (!recentDms.length) txt += `_(nenhum em ${days}d)_\n`;
+      else {
+        for (const r of recentDms) {
+          txt += `• ${r.market}/${r.side || '?'} ${r.team1} vs ${r.team2} @ ${r.admin_dm_sent_at}\n`;
+        }
+      }
+      await send(token, chatId, txt);
+    } catch (e) { await send(token, chatId, `❌ /mt-gates: ${e.message}`); }
+
   } else if (cmd === '/market-tips') {
     if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
     try {
