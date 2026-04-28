@@ -6410,7 +6410,7 @@ async function autoAnalyzeMatch(token, match) {
             const t1Roster = getTeamRosterStats(db, match.team1);
             const t2Roster = getTeamRosterStats(db, match.team2);
             if (t1Roster && t2Roster) {
-              const { predictMapKills, scanKillsMarkets } = require('./lib/lol-kills-model');
+              const { predictMapKills, predictMapKillsLive, scanKillsMarkets } = require('./lib/lol-kills-model');
               // Side detection: live data tem blueTeam.name; pre-game = null (neutro).
               let team1IsBlue = null;
               if (lolLiveStats?.blueTeam?.name) {
@@ -6434,13 +6434,37 @@ async function autoAnalyzeMatch(token, match) {
                 for (let mapNum = startMap; mapNum <= bestOf; mapNum++) {
                   const killsMkt = await serverGet(`/odds-markets?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}&period=${mapNum}&game=lol`).catch(() => null);
                   if (!killsMkt || !Array.isArray(killsMkt.totals) || !killsMkt.totals.length) continue;
-                  // Recompute predict per mapa pra capturar map-specific scaling
-                  // (Mapa 3 decisivo tem -3% kills empirical).
-                  const predictForMap = predictMapKills(t1Roster, t2Roster, {
-                    league: match.league || match.tournament,
-                    team1IsBlue,
-                    mapIndex: mapNum,
-                  });
+                  // Recompute predict per mapa pra capturar map-specific scaling.
+                  // Mapa em curso (gameTime > 0 e mapNum == score atual + 1): usa
+                  // live model com kills atuais como baseline. Senão, pre-game.
+                  const inferredCurrentMap = (Number.isFinite(match.score1) && Number.isFinite(match.score2))
+                    ? (match.score1 + match.score2) + 1 : 1;
+                  const isCurrentMapLive = lolLiveStats?.gameTime > 30 && mapNum === inferredCurrentMap;
+                  let predictForMap;
+                  if (isCurrentMapLive && Array.isArray(lolLiveStats?.blueTeam?.players) && Array.isArray(lolLiveStats?.redTeam?.players)) {
+                    const blueK = lolLiveStats.blueTeam.players.reduce((a, p) => a + (Number(p.kills) || 0), 0);
+                    const redK = lolLiveStats.redTeam.players.reduce((a, p) => a + (Number(p.kills) || 0), 0);
+                    const currentKillsTotal = blueK + redK;
+                    predictForMap = predictMapKillsLive(t1Roster, t2Roster, {
+                      league: match.league || match.tournament,
+                      team1IsBlue,
+                      mapIndex: mapNum,
+                    }, {
+                      gameTimeSeconds: lolLiveStats.gameTime,
+                      currentKillsTotal,
+                    });
+                    if (predictForMap) {
+                      log('DEBUG', 'LOL-KILLS-LIVE',
+                        `${match.team1} vs ${match.team2} [Mapa ${mapNum}]: gameTime=${Math.round(lolLiveStats.gameTime/60)}min currentKills=${currentKillsTotal} λResid=${predictForMap.lambda} (full=${predictForMap.lambdaFull})`);
+                    }
+                  }
+                  if (!predictForMap) {
+                    predictForMap = predictMapKills(t1Roster, t2Roster, {
+                      league: match.league || match.tournament,
+                      team1IsBlue,
+                      mapIndex: mapNum,
+                    });
+                  }
                   if (!predictForMap) continue;
                   const killTips = scanKillsMarkets({ pinTotals: killsMkt.totals, predict: predictForMap, minEv: minEvKills });
                   if (!killTips.length) {
