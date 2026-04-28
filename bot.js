@@ -1803,10 +1803,21 @@ async function runAutoAnalysis() {
         const currentMap = Array.isArray(liveIds) ? (liveIds.find(x => x.hasLiveData)?.gameNumber || null) : null;
         const mapSuffix = (match.status === 'live' && currentMap) ? `_MAP${currentMap}` : '';
         const matchKey = `${match.game}_${match.id}${mapSuffix}`;
+        const matchKeyBase = `${match.game}_${match.id}`; // sem map suffix
         // Bloqueia ligas principais — tips apenas em ligas secundárias
         if (isMainLeague(match.leagueSlug || match.league)) { log('INFO', 'AUTO', `Liga principal ignorada (draft): ${match.league} (${match.team1} vs ${match.team2})`); continue; }
         const prev = analyzedMatches.get(matchKey);
-        if (prev?.tipSent) continue; // uma tip por partida — não repetir
+        const prevBase = analyzedMatches.get(matchKeyBase);
+        // 2026-04-28: cross-state dedup — pre-game tip já enviada bloqueia
+        // live tip no mesmo match. Antes matchKey diferenciava por MAP suffix
+        // → 2 tips no mesmo match (pre-game + live). Opt-in via env pra
+        // habilitar tip live após pre-game tip.
+        const _allowLiveAfterPre = /^(1|true|yes)$/i.test(String(process.env.LOL_LIVE_TIP_AFTER_PRE || ''));
+        if (prev?.tipSent) continue; // uma tip por (match, mapa)
+        if (!_allowLiveAfterPre && mapSuffix && prevBase?.tipSent) {
+          log('DEBUG', 'AUTO', `Live skip ${match.team1} vs ${match.team2}: pre-game tip já enviada (LOL_LIVE_TIP_AFTER_PRE=false)`);
+          continue;
+        }
         // Live matches: cooldown agressivo pra pegar janela quando Riot popula feed.
         //   - Sem stats antes (hasLiveStats=false): 3 min (pode aparecer a qualquer momento)
         //   - Com stats mas sem edge: 8 min (IA já analisou com dados reais, improvável mudar rápido)
@@ -2123,6 +2134,8 @@ async function runAutoAnalysis() {
             }
           }
           analyzedMatches.set(matchKey, { ts: now, tipSent: true });
+          // 2026-04-28: também marca matchKeyBase pra cross-state dedup pre↔live.
+          analyzedMatches.set(matchKeyBase, { ts: now, tipSent: true });
           // Registra a tip na serie-level dedup map (suprime re-tip no proximo mapa sem mudanca de estado).
           lolSeriesLastTip.set(String(match.id), {
             pick: tipTeam, ev: tipEV,
@@ -6378,10 +6391,28 @@ async function autoAnalyzeMatch(token, match) {
                 momentum: 0.03, // calibrado pra LoL (project_lol_series_model memory)
                 iters: 8000,
               });
+              // 2026-04-28: cap delta máximo pra evitar live override violento.
+              // Antes pSeriesLive substituía P pre-game sem revalidar gates
+              // (EV/divergence). Tip emitida com pre-game P passou EV gate,
+              // depois live promoveu P 55%→75% → EV inflado calculado downstream.
+              // Cap shift ±15pp limita move agressivo; >15pp marca como _liveOverride
+              // pra log e força revalidação.
+              const _maxLiveShiftPp = parseFloat(process.env.LOL_LIVE_MAX_SHIFT_PP || '15');
+              const shiftPp = Math.abs(pSeriesLive - preSeries) * 100;
+              if (shiftPp > _maxLiveShiftPp) {
+                log('WARN', 'LOL-LIVE-SERIES',
+                  `${match.team1} vs ${match.team2}: shift ${shiftPp.toFixed(1)}pp > ${_maxLiveShiftPp}pp cap — limitando swing.`);
+                // Aplica metade do shift máximo (conservador)
+                const sign = pSeriesLive > preSeries ? 1 : -1;
+                const _capped = preSeries + sign * (_maxLiveShiftPp / 100);
+                lolModel.modelP1 = Math.max(0.05, Math.min(0.95, _capped));
+                lolModel.modelP2 = 1 - lolModel.modelP1;
+              } else {
+                lolModel.modelP1 = pSeriesLive;
+                lolModel.modelP2 = 1 - pSeriesLive;
+              }
               log('INFO', 'LOL-LIVE-SERIES',
-                `${match.team1} vs ${match.team2} [${match.score1}-${match.score2}, Bo${bo}]: pMapCur=${(pred.p*100).toFixed(1)}% base=${(lolModel.mapP1*100).toFixed(1)}% → pSeries ${(preSeries*100).toFixed(1)}% → ${(pSeriesLive*100).toFixed(1)}%`);
-              lolModel.modelP1 = pSeriesLive;
-              lolModel.modelP2 = 1 - pSeriesLive;
+                `${match.team1} vs ${match.team2} [${match.score1}-${match.score2}, Bo${bo}]: pMapCur=${(pred.p*100).toFixed(1)}% base=${(lolModel.mapP1*100).toFixed(1)}% → pSeries ${(preSeries*100).toFixed(1)}% → ${(lolModel.modelP1*100).toFixed(1)}%${shiftPp > _maxLiveShiftPp ? ' [CAPPED]' : ''}`);
               lolModel.mapP1 = pred.p;
               lolModel.mapP2 = 1 - pred.p;
               lolModel.factors = [...(lolModel.factors || []), 'live-series'];
@@ -11257,6 +11288,18 @@ function parseEspnMmaScoreboardJson(json) {
       const winnerName = winnerComp
         ? (athleteName(winnerComp.athlete) || winnerComp.displayName || winnerComp.name || '')
         : '';
+      // 2026-04-28: extract method/details pra detectar DQ/No Contest/etc.
+      // ESPN expõe via comp.status.type.detail, comp.notes (array), ou
+      // comp.status.type.shortDetail. Combina tudo num string.
+      const methodParts = [];
+      const detail = comp.status?.type?.detail || comp.status?.type?.shortDetail || '';
+      if (detail) methodParts.push(detail);
+      const notes = Array.isArray(comp.notes) ? comp.notes : [];
+      for (const n of notes) {
+        const t = n?.headline || n?.text || (typeof n === 'string' ? n : '');
+        if (t) methodParts.push(t);
+      }
+      const method = methodParts.join(' | ').slice(0, 300);
       fights.push({
         name1: athleteName(f1.athlete) || f1.displayName || f1.name || '',
         name2: athleteName(f2.athlete) || f2.displayName || f2.name || '',
@@ -11267,7 +11310,8 @@ function parseEspnMmaScoreboardJson(json) {
         eventName: event.name || '',
         date: comp.date || '',
         statusState: comp.status?.type?.state || 'pre',
-        winner: winnerName
+        winner: winnerName,
+        method,
       });
     }
   }
@@ -15011,9 +15055,16 @@ async function pollFootball(runOnce = false) {
             if (isFbLive) {
               // Live override habilitado por env (default ON quando lamH/lamA disponíveis).
               if (process.env.FOOTBALL_MT_LIVE_DISABLED !== 'true' && fbTrained.lamH > 0 && fbTrained.lamA > 0) {
-                // Estimar elapsed: match.start_time → now. Cap [0, 95]. HT (45-60) approximado.
+                // 2026-04-28: subtrai 15min de halftime quando elapsed > 60. Antes
+                // jogo "min 50" real (5min após HT) era tratado como elapsed=65 →
+                // λ_residual subestimado em ~17%. ESPN/Sofascore feeds não expõem
+                // current minute live em tempo real, fallback é (now - kickoff).
                 const startTs = match.time ? new Date(match.time).getTime() : 0;
-                const elapsedMin = startTs > 0 ? Math.max(0, Math.min(95, (Date.now() - startTs) / 60000)) : 45;
+                const elapsedRaw = startTs > 0 ? Math.max(0, Math.min(110, (Date.now() - startTs) / 60000)) : 45;
+                // Aplica HT shift: minutos 60-75 reais (45+HT) viram minutos 45-60 do match.
+                const elapsedMin = elapsedRaw > 60
+                  ? Math.min(95, Math.max(45, elapsedRaw - 15))
+                  : Math.min(45, elapsedRaw);
                 const sh = Number.isFinite(match.score1) ? match.score1 : 0;
                 const sa = Number.isFinite(match.score2) ? match.score2 : 0;
                 try {

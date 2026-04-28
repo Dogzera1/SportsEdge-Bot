@@ -7636,7 +7636,9 @@ const server = http.createServer(async (req, res) => {
 
       const summary = { ok: true, sport_filter: sportFilter || 'all', days, attempted: 0, settled: 0, voided: 0, skipped: 0, errors: 0, samples: [] };
       const _norm = s => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-      const _walkoverRe = /\b(ret|retir|w\.?o\.?|walkover|abandoned|cancell?ed|no\s*contest|w\/o|wd|withdrew)\b/i;
+      // 2026-04-28: regex expandida pra MMA — DQ (disqualification),
+      // NC (no contest abreviado), TKO N/A, technical decision overturned.
+      const _walkoverRe = /\b(ret|retir|w\.?o\.?|walkover|abandoned|cancell?ed|no\s*contest|w\/o|wd|withdrew|disqualif|\bdq\b|\bnc\b|overturned)\b/i;
 
       // Map sport→game_in_match_results (CS legado é 'cs' OR 'cs2')
       const gameMap = { lol: ['lol','esports'], dota2: ['dota2','esports'], cs: ['cs','cs2'], cs2: ['cs','cs2'], valorant: ['valorant','esports'], tennis: ['tennis'], football: ['football'], mma: ['mma'], snooker: ['snooker'], darts: ['darts'], tabletennis: ['tabletennis'] };
@@ -16500,7 +16502,7 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
         // idem. ESPN sometimes retorna winner mesmo em RET; sem essa guard,
         // tip do perdedor virava loss fantasma.
         const _scoreStr = String(score || '').trim();
-        const _walkoverRe = /\b(ret|retir|w\.?o\.?|walkover|abandoned|cancell?ed|no\s*contest|w\/o|wd\b|withdrew)\b/i;
+        const _walkoverRe = /\b(ret|retir|w\.?o\.?|walkover|abandoned|cancell?ed|no\s*contest|w\/o|wd\b|withdrew|disqualif|\bdq\b|\bnc\b|overturned)\b/i;
         const _isWalkover = _scoreStr && _walkoverRe.test(_scoreStr);
         // HARD GUARD: MT-promoted tips (match_id LIKE '%::mt::%' OR market_type non-ML)
         // jamais passam pelo /settle name-match — esse endpoint só sabe casar winner
