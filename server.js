@@ -12577,7 +12577,12 @@ const server = http.createServer(async (req, res) => {
             darts: 25, snooker: 25,
           };
           let evMax = PER_SPORT_DEFAULTS[sport] != null ? PER_SPORT_DEFAULTS[sport] : 35;
-          if (process.env.TIP_EV_MAX) evMax = parseFloat(process.env.TIP_EV_MAX);
+          // 2026-04-28: TIP_EV_MAX agora é TETO ADICIONAL (Math.min com per-sport
+          // default), não substituto. Antes user setando TIP_EV_MAX=35 inflava
+          // cap LoL/CS/Dota de 25→35, anulando proteção. Per-sport JSON override
+          // continua absoluto (override explícito).
+          const _globalMax = parseFloat(process.env.TIP_EV_MAX);
+          if (Number.isFinite(_globalMax)) evMax = Math.min(evMax, _globalMax);
           try {
             const perSport = process.env.TIP_EV_MAX_PER_SPORT ? JSON.parse(process.env.TIP_EV_MAX_PER_SPORT) : null;
             if (perSport && typeof perSport[sport] === 'number') evMax = perSport[sport];

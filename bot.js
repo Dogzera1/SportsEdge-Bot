@@ -6288,7 +6288,19 @@ async function autoAnalyzeMatch(token, match) {
             if (s1 && s2) {
               const blueNorm = norm(lolLiveStats.blueTeam.name);
               const t1Norm = norm(match.team1);
-              const team1IsBlue = blueNorm === t1Norm || blueNorm.includes(t1Norm) || t1Norm.includes(blueNorm);
+              // 2026-04-28: strict match — antes substring permissive deixava
+              // "T1" casar com "T1 Faker" / "TT1 Esports" (score 2/8 = 0.25),
+              // aplicando side-adj pro lado errado. Agora exact OR substring
+              // com score >=0.5 (shorter/longer ratio).
+              const _matchStrict = (a, b) => {
+                if (!a || !b) return false;
+                if (a === b) return true;
+                if (a.length < 4 || b.length < 4) return false;
+                if (!a.includes(b) && !b.includes(a)) return false;
+                const ratio = Math.min(a.length, b.length) / Math.max(a.length, b.length);
+                return ratio >= 0.5;
+              };
+              const team1IsBlue = _matchStrict(blueNorm, t1Norm);
               const prev = lolModel.mapP1;
               const adj = sideAdjustMapP(prev, s1, s2, team1IsBlue);
               if (adj !== prev && Number.isFinite(adj)) {
@@ -6309,7 +6321,16 @@ async function autoAnalyzeMatch(token, match) {
             const blueLineup = lolLiveStats.blueTeam.players.map(p => p.name || p.summoner_name || p.nick).filter(Boolean);
             const redLineup = lolLiveStats.redTeam.players.map(p => p.name || p.summoner_name || p.nick).filter(Boolean);
             const blueNorm2 = norm(lolLiveStats.blueTeam.name);
-            const team1IsBlue2 = blueNorm2 === norm(match.team1) || blueNorm2.includes(norm(match.team1)) || norm(match.team1).includes(blueNorm2);
+            const t1Norm2 = norm(match.team1);
+            // 2026-04-28: strict match (vide bot.js:6291).
+            const _matchStrict2 = (a, b) => {
+              if (!a || !b) return false;
+              if (a === b) return true;
+              if (a.length < 4 || b.length < 4) return false;
+              if (!a.includes(b) && !b.includes(a)) return false;
+              return Math.min(a.length, b.length) / Math.max(a.length, b.length) >= 0.5;
+            };
+            const team1IsBlue2 = _matchStrict2(blueNorm2, t1Norm2);
             const t1Lineup = team1IsBlue2 ? blueLineup : redLineup;
             const t2Lineup = team1IsBlue2 ? redLineup : blueLineup;
             const t1Expected = getExpectedRoster(db, match.team1, { sinceDays: 30, minGames: 3 });
@@ -6482,11 +6503,18 @@ async function autoAnalyzeMatch(token, match) {
             if (t1Roster && t2Roster) {
               const { predictMapKills, predictMapKillsLive, scanKillsMarkets } = require('./lib/lol-kills-model');
               // Side detection: live data tem blueTeam.name; pre-game = null (neutro).
+              // 2026-04-28: strict match — vide bot.js:6291 fix.
               let team1IsBlue = null;
               if (lolLiveStats?.blueTeam?.name) {
                 const blueNorm = norm(lolLiveStats.blueTeam.name);
                 const t1Norm = norm(match.team1);
-                team1IsBlue = blueNorm === t1Norm || blueNorm.includes(t1Norm) || t1Norm.includes(blueNorm);
+                if (blueNorm === t1Norm) {
+                  team1IsBlue = true;
+                } else if (blueNorm.length >= 4 && t1Norm.length >= 4 && (blueNorm.includes(t1Norm) || t1Norm.includes(blueNorm))) {
+                  const ratio = Math.min(blueNorm.length, t1Norm.length) / Math.max(blueNorm.length, t1Norm.length);
+                  team1IsBlue = ratio >= 0.5;
+                  if (!team1IsBlue) team1IsBlue = null; // ambiguous — não força red side
+                }
               }
               // Predict baseline (sem mapIndex) — usado pra confidence + sanity gate
               const predict = predictMapKills(t1Roster, t2Roster, {
@@ -6618,12 +6646,16 @@ async function autoAnalyzeMatch(token, match) {
             : effP1;
           mlResult.modelP2 = 1 - mlResult.modelP1;
         }
-        // Se modelo específico vê edge forte (>5pp) e ML genérico rejeitou, resgata
+        // Se modelo específico vê edge forte (>5pp) e ML genérico rejeitou, resgata.
+        // 2026-04-28: edge calc usa implied DEJUICED (sem vig). Antes `1/odd` raw
+        // incluía vig do book → edge inflado ~2pp (audit memory).
+        const _o1 = parseFloat(oddsToUse?.t1 || 2);
+        const _o2 = parseFloat(oddsToUse?.t2 || 2);
+        const _r1 = 1 / _o1, _r2 = 1 / _o2, _vig = _r1 + _r2;
+        const _impP1 = _vig > 0 ? _r1 / _vig : 0.5;
+        const _impP2 = _vig > 0 ? _r2 / _vig : 0.5;
         const lolEdge = Math.abs(effP1 - effP2) > 0
-          ? Math.max(
-              (effP1 - (1 / parseFloat(oddsToUse?.t1 || 2))) * 100,
-              (effP2 - (1 / parseFloat(oddsToUse?.t2 || 2))) * 100
-            ) : 0;
+          ? Math.max((effP1 - _impP1) * 100, (effP2 - _impP2) * 100) : 0;
         if (!mlResult.pass && lolEdge >= 5 && lolModel.confidence >= 0.5) {
           mlResult.pass = true;
           mlResult.score = lolEdge;
@@ -12514,6 +12546,28 @@ async function analyzeDotaMapTip(match, token) {
   }
   const stakeAdj = String(riskAdj.units.toFixed(1).replace(/\.0$/, '')) + 'u';
 
+  // 2026-04-28: divergence gate + EV ceiling antes de definir conf. Antes
+  // hardcoded `EV >= 15 → ALTA` sem proteção contra modelP overshoot vs
+  // Pinnacle implied. Adicionado check.
+  try {
+    const _impP1Dota = (1 / o1) / ((1 / o1) + (1 / o2));
+    const _impPickDota = pickDir === 't1' ? _impP1Dota : 1 - _impP1Dota;
+    const _divPpDota = (pickP - _impPickDota) * 100;
+    const _maxDivDota = parseFloat(process.env.DOTA_MAP_MAX_DIVERGENCE_PP || '20');
+    if (Math.abs(_divPpDota) > _maxDivDota) {
+      log('WARN', 'AUTO-DOTA-MAP', `divergência ${_divPpDota.toFixed(1)}pp > ${_maxDivDota}pp — Map ${mapN} ${match.team1} vs ${match.team2} rejeitada`);
+      analyzedDota.set(mapKey, { ts: now, tipSent: false, reason: 'divergence_too_high' });
+      return;
+    }
+    // EV ceiling: descarta EV irreais (model error)
+    const _evCeilingDota = parseFloat(process.env.DOTA_MAP_EV_CEILING || '40');
+    if (pickEv > _evCeilingDota) {
+      log('WARN', 'AUTO-DOTA-MAP', `EV ${pickEv.toFixed(1)}% > ${_evCeilingDota}% ceiling — Map ${mapN} ${match.team1} vs ${match.team2} rejeitada`);
+      analyzedDota.set(mapKey, { ts: now, tipSent: false, reason: 'ev_above_ceiling' });
+      return;
+    }
+  } catch (_) {}
+
   const tipConf = pickEv >= 15 ? 'ALTA' : pickEv >= 8 ? 'MÉDIA' : 'BAIXA';
   const _bookDotaMap = formatLineShopDM(match.mapOdds, pickDir, { sport: 'dota2', db });
   const _matchTimeDota = match.time ? fmtMatchTime(match.time) : '';
@@ -14228,8 +14282,16 @@ Máximo 200 palavras. Raciocínio breve antes da decisão.`;
             // Floor pickP 0.15 evita long-shot abaixo de 15% prob.
             const maxEvMult = parseFloat(process.env.TENNIS_HYBRID_MAX_EV || '1.8');
             if (edgeTn >= minEdgeTn && evMult >= 1.05 && evMult <= maxEvMult && pickPTn >= 0.15) {
-              const confLabelTn = edgeTn >= 12 && (mlResultTennis.confidence ?? 0) >= 0.75 ? 'ALTA'
+              let confLabelTn = edgeTn >= 12 && (mlResultTennis.confidence ?? 0) >= 0.75 ? 'ALTA'
                 : edgeTn >= 8 ? 'MÉDIA' : 'BAIXA';
+              // 2026-04-28: tier guard — ALTA só em Slam/Masters. Tier 2/3
+              // (Challenger/ITF/W125) com trained model marginal não deve
+              // emitir ALTA. Audit identificou ML shadow ROI -32% — overshoot
+              // tendia a inflar confidence em segments low-quality.
+              if (confLabelTn === 'ALTA' && !_tennisTopTier) {
+                confLabelTn = 'MÉDIA';
+                log('DEBUG', 'TENNIS-HYBRID', `${match.team1} vs ${match.team2}: ALTA→MÉDIA (não-top-tier ${match.league})`);
+              }
               const stakeTn = confLabelTn === 'ALTA' ? '2' : '1';
               _tennisHybridText = `TIP_ML:${pickTeamTn}@${pickOddTn}|P:${(pickPTn*100).toFixed(0)}%|STAKE:${stakeTn}u|CONF:${confLabelTn}`;
               log('INFO', 'TENNIS-HYBRID', `${match.team1} vs ${match.team2}: trained-direct bypass IA | ${pickTeamTn}@${pickOddTn} P=${(pickPTn*100).toFixed(1)}% edge=${edgeTn.toFixed(1)}pp conf=${confLabelTn} modelConf=${mlResultTennis.confidence?.toFixed(2)}`);
@@ -14286,7 +14348,11 @@ Máximo 200 palavras. Raciocínio breve antes da decisão.`;
             // Cap relaxado de 15 → 20pp baseado em Gate Optimizer (n=25, 90d):
             // cap 15pp bloqueava 7 tips winners; cap 20pp bloqueia só 5 outliers
             // E tem Brier ótimo do grid (0.185). Cirúrgico. Ver DECISIONS.md.
-            const _maxDivTennis = parseFloat(process.env.TENNIS_MAX_DIVERGENCE_PP ?? '20');
+            // 2026-04-28: cap reduzido pra 18pp em tier 2/3 (Challenger/ITF/W125)
+            // após audit ML shadow ROI -32% (audit memory: divergence 25pp deixava
+            // passar overshoots em segments low-quality).
+            const _maxDivTennisDefault = _tennisTopTier ? '20' : '18';
+            const _maxDivTennis = parseFloat(process.env.TENNIS_MAX_DIVERGENCE_PP ?? _maxDivTennisDefault);
             const _div = _sharpDivergenceGate({
               oddsObj: o, modelP: _modelPV, impliedP: _impPV, maxPp: _maxDivTennis,
               context: {
@@ -15155,11 +15221,14 @@ Máximo 200 palavras.`;
             : dir === 'OVER_2.5' ? 'Over 2.5'
             : dir === 'UNDER_2.5' ? 'Under 2.5'
             : null;
+          // 2026-04-28: NaN/100% guard pra OVER/UNDER. Antes `over25Prob || 0`
+          // quando null retornava `100 - 0 = 100%` → tip UNDER com P=100% falso.
+          const _over25 = mlScore.over25Prob != null ? parseFloat(mlScore.over25Prob) : null;
           const pickP = dir === '1X2_H' ? mlScore.modelH
             : dir === '1X2_A' ? mlScore.modelA
             : dir === '1X2_D' ? mlScore.modelD
-            : dir === 'OVER_2.5' ? mlScore.over25Prob
-            : dir === 'UNDER_2.5' ? (100 - parseFloat(mlScore.over25Prob || 0))
+            : dir === 'OVER_2.5' ? (Number.isFinite(_over25) ? _over25 : null)
+            : dir === 'UNDER_2.5' ? (Number.isFinite(_over25) ? 100 - _over25 : null)
             : null;
           const oddVal = parseFloat(mlScore.bestOdd);
           if (seleção && pickP && oddVal > 1) {
