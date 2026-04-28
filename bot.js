@@ -4910,6 +4910,29 @@ async function runOddsBucketGuardCycle() {
 //   dota2 → DOTA_MARKET_SCAN_*
 //   cs2 → CS_MARKET_SCAN_*
 //   tennis → TENNIS_MARKET_SCAN_*
+// Aplica esports-correlation em tips MT do scanner (LoL/CS2/Dota2/Val).
+// Propaga `correlationDiscount` em cada tip — promote path multiplica stake por (1-discount).
+// Loga top correlações detectadas (|c|>0.3).
+function _applyEsportsCorrelation(found, sport, match) {
+  const { adjustStakesForCorrelation, computeMarketCorrelation } = require('./lib/esports-correlation');
+  const tipsWithKelly = found.map(t => ({
+    ...t,
+    kellyStake: +((t.pModel - (1 - t.pModel) / (t.odd - 1)) * 100).toFixed(2) || 0,
+  }));
+  const adjusted = adjustStakesForCorrelation(tipsWithKelly);
+  const pairs = [];
+  for (let i = 0; i < found.length; i++) {
+    for (let j = i + 1; j < found.length; j++) {
+      const c = computeMarketCorrelation(found[i], found[j]);
+      if (Math.abs(c) > 0.3) pairs.push(`${found[i].label}↔${found[j].label}=${c.toFixed(2)}`);
+    }
+  }
+  if (pairs.length) {
+    log('INFO', `${String(sport).toUpperCase()}-CORR`, `${match.team1} vs ${match.team2}: ${pairs.slice(0, 3).join(' | ')}`);
+  }
+  return found.map((t, i) => ({ ...t, correlationDiscount: adjusted[i].correlationDiscount }));
+}
+
 function _resolveMtOddBounds(sport, opts = {}) {
   const envPrefix = sport === 'dota2' ? 'DOTA' : sport === 'cs2' ? 'CS' : String(sport).toUpperCase();
   const envMin = parseFloat(process.env[`${envPrefix}_MARKET_SCAN_MIN_ODD`]);
@@ -6290,7 +6313,7 @@ async function autoAnalyzeMatch(token, match) {
               // prefere env > DB auto > default. Auto-guard cron (12h) atualiza
               // o DB conforme regime atual.
               const { minOdd: minOddLol, maxOdd: maxOddLol } = _resolveMtOddBounds('lol', { defaultMaxOdd: 2.00 });
-              const found = scanMarkets({
+              let found = scanMarkets({
                 markets,
                 pMap: lolModel.mapP1,
                 bestOf: lolModel.bestOf || 3,
@@ -6300,6 +6323,11 @@ async function autoAnalyzeMatch(token, match) {
                 minOdd: minOddLol,
                 maxOdd: maxOddLol,
               });
+              // Correlation matrix esports — gateado por LOL_CORRELATION_ADJ (default ON).
+              // Propaga `correlationDiscount` pra tips → reduz stake em multi-market overlap.
+              if (found.length >= 2 && process.env.LOL_CORRELATION_ADJ !== 'false') {
+                try { found = _applyEsportsCorrelation(found, 'lol', match); } catch (e) { reportBug('LOL-CORR', e); }
+              }
               if (found.length) {
                 log('INFO', 'LOL-MARKETS',
                   `${match.team1} vs ${match.team2} [Bo${lolModel.bestOf}]: ${found.length} mercado(s) com EV ≥${minEv}% (pMap=${(lolModel.mapP1*100).toFixed(1)}%)`);
@@ -6347,7 +6375,10 @@ async function autoAnalyzeMatch(token, match) {
                         continue;
                       }
                       marketTipSent.set(dedupKey, Date.now());
-                      const stake = mtp.kellyStakeForMarket(t.pModel, t.odd, 100, 0.10);
+                      let stake = mtp.kellyStakeForMarket(t.pModel, t.odd, 100, 0.10);
+                      if (t.correlationDiscount > 0 && typeof stake === 'number') {
+                        stake = mtp.snapStakeUnits(stake * (1 - t.correlationDiscount));
+                      }
                       if (!(stake > 0)) continue;
                       const dm = mtp.buildMarketTipDM({ match, tip: t, stake, league: match.league, sport: 'lol', isLive: isLiveLoL });
                       const tokenForMT = resolveTipsToken('esports');
@@ -11610,7 +11641,7 @@ async function _pollDotaInner(runOnce = false) {
             // Auto-guard preenche min/max odd quando shadow ROI per-bucket
             // identificar leak. Sem default — Dota ainda sem sample suficiente.
             const { minOdd: minOddDota, maxOdd: maxOddDota } = _resolveMtOddBounds('dota2');
-            const found = scanMarkets({
+            let found = scanMarkets({
               markets, pMap: pMapDota, bestOf: dotaBo,
               pricingLib: require('./lib/lol-markets'),
               minEv,
@@ -11618,6 +11649,9 @@ async function _pollDotaInner(runOnce = false) {
               minOdd: minOddDota,
               maxOdd: maxOddDota,
             });
+            if (found.length >= 2 && process.env.DOTA_CORRELATION_ADJ !== 'false') {
+              try { found = _applyEsportsCorrelation(found, 'dota2', match); } catch (e) { reportBug('DOTA-CORR', e); }
+            }
             // Extras: total kills / duration per-map (período 1 = mapa 1). Shadow-only.
             try {
               const mapMarkets = await serverGet(`/odds-markets?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}&period=1`).catch(() => null);
@@ -11688,7 +11722,10 @@ async function _pollDotaInner(runOnce = false) {
                       continue;
                     }
                     marketTipSent.set(dedupKey, Date.now());
-                    const stake = mtp.kellyStakeForMarket(t.pModel, t.odd, 100, 0.10);
+                    let stake = mtp.kellyStakeForMarket(t.pModel, t.odd, 100, 0.10);
+                    if (t.correlationDiscount > 0 && typeof stake === 'number') {
+                      stake = mtp.snapStakeUnits(stake * (1 - t.correlationDiscount));
+                    }
                     if (!(stake > 0)) continue;
                     const dm = mtp.buildMarketTipDM({ match, tip: t, stake, league: match.league, sport: 'dota2', isLive });
                     const tokenForMT = resolveTipsToken('esports');
@@ -13496,13 +13533,25 @@ async function pollTennis(runOnce = false) {
                       const mtp = require('./lib/market-tip-processor');
                       const minEvGate = parseFloat(process.env.TENNIS_MARKET_TIP_MIN_EV ?? '8');
                       const minPmGate = parseFloat(process.env.TENNIS_MARKET_TIP_MIN_PMODEL ?? '0.55');
+                      // 2026-04-28: per-market EV gate. totalGames ficou vazando em audit 90d:
+                      // n=50 ROI -4% predP=70.6% realHit=52% (gap calib -18.6pp pós Markov calib).
+                      // handicapGames OK: n=64 ROI +11% gap -9.2pp.
+                      // Default totalGames=12 (vs handicapGames=8). Reduz volume mas corta tail neg.
+                      const minEvTg = parseFloat(process.env.TENNIS_TG_MIN_EV ?? '12');
+                      const minEvHg = parseFloat(process.env.TENNIS_HG_MIN_EV ?? String(minEvGate));
+                      const evGateForMarket = (market) => {
+                        const m = String(market || '').toLowerCase();
+                        if (m === 'totalgames') return minEvTg;
+                        if (m === 'handicapgames') return minEvHg;
+                        return minEvGate;
+                      };
                       // 2026-04-27: promove tips elegíveis com 1 por (market_type) por match.
                       // Mesmo mercado mesmo match = 1 tip (lados opostos, ex: HG home + HG away
                       // são correlacionados negativamente — 1 vence só com margin exato).
                       // Mercados DIFERENTES no mesmo match (HG + TG + TB) coexistem.
                       const eligiblesRaw = found.filter(t =>
                         Number.isFinite(t.ev) && Number.isFinite(t.pModel) &&
-                        t.ev >= minEvGate && t.pModel >= minPmGate
+                        t.ev >= evGateForMarket(t.market) && t.pModel >= minPmGate
                       );
                       const _byMarket = new Map();
                       for (const t of eligiblesRaw) {
@@ -15512,7 +15561,7 @@ async function pollCs(runOnce = false) {
               const { scanMarkets } = require('./lib/odds-markets-scanner');
               const minEv = parseFloat(process.env.CS_MARKET_SCAN_MIN_EV ?? '4');
               const { minOdd: minOddCs, maxOdd: maxOddCs } = _resolveMtOddBounds('cs2');
-              const found = scanMarkets({
+              let found = scanMarkets({
                 markets, pMap: pMapCs, bestOf: csBestOf,
                 pricingLib: require('./lib/lol-markets'),
                 minEv,
@@ -15520,6 +15569,9 @@ async function pollCs(runOnce = false) {
                 minOdd: minOddCs,
                 maxOdd: maxOddCs,
               });
+              if (found.length >= 2 && process.env.CS_CORRELATION_ADJ !== 'false') {
+                try { found = _applyEsportsCorrelation(found, 'cs2', match); } catch (e) { reportBug('CS-CORR', e); }
+              }
               if (found.length) {
                 log('INFO', 'CS-MARKETS',
                   `${match.team1} vs ${match.team2} [Bo${csBestOf}]: ${found.length} mercado(s) EV ≥${minEv}% (pMap=${(pMapCs*100).toFixed(1)}%)`);
@@ -15562,7 +15614,10 @@ async function pollCs(runOnce = false) {
                         continue;
                       }
                       marketTipSent.set(dedupKey, Date.now());
-                      const stake = mtp.kellyStakeForMarket(t.pModel, t.odd, 100, 0.10);
+                      let stake = mtp.kellyStakeForMarket(t.pModel, t.odd, 100, 0.10);
+                      if (t.correlationDiscount > 0 && typeof stake === 'number') {
+                        stake = mtp.snapStakeUnits(stake * (1 - t.correlationDiscount));
+                      }
                       if (!(stake > 0)) continue;
                       const dm = mtp.buildMarketTipDM({ match, tip: t, stake, league: match.league, sport: 'cs2', isLive: isLiveCs });
                       const tokenForMT = resolveTipsToken('esports');
@@ -16098,7 +16153,7 @@ async function pollValorant(runOnce = false) {
               const { scanMarkets } = require('./lib/odds-markets-scanner');
               const minEv = parseFloat(process.env.VAL_MARKET_SCAN_MIN_EV ?? '5');
               const { minOdd: minOddVal, maxOdd: maxOddVal } = _resolveMtOddBounds('valorant');
-              const found = scanMarkets({
+              let found = scanMarkets({
                 markets, pMap: pMapVal, bestOf: bo,
                 pricingLib: require('./lib/lol-markets'),
                 minEv,
@@ -16106,6 +16161,9 @@ async function pollValorant(runOnce = false) {
                 minOdd: minOddVal,
                 maxOdd: maxOddVal,
               });
+              if (found.length >= 2 && process.env.VAL_CORRELATION_ADJ !== 'false') {
+                try { found = _applyEsportsCorrelation(found, 'valorant', match); } catch (e) { reportBug('VAL-CORR', e); }
+              }
               if (found.length) {
                 log('INFO', 'VAL-MARKETS',
                   `${match.team1} vs ${match.team2} [Bo${bo}]: ${found.length} mercado(s) EV ≥${minEv}% (pMap=${(pMapVal*100).toFixed(1)}%)`);
@@ -16148,7 +16206,10 @@ async function pollValorant(runOnce = false) {
                         continue;
                       }
                       marketTipSent.set(dedupKey, Date.now());
-                      const stake = mtp.kellyStakeForMarket(t.pModel, t.odd, 100, 0.10);
+                      let stake = mtp.kellyStakeForMarket(t.pModel, t.odd, 100, 0.10);
+                      if (t.correlationDiscount > 0 && typeof stake === 'number') {
+                        stake = mtp.snapStakeUnits(stake * (1 - t.correlationDiscount));
+                      }
                       if (!(stake > 0)) continue;
                       const dm = mtp.buildMarketTipDM({ match, tip: t, stake, league: match.league, sport: 'valorant', isLive: isLiveVal });
                       const tokenForMT = resolveTipsToken('esports');
