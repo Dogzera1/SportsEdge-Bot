@@ -14839,7 +14839,12 @@ async function pollFootball(runOnce = false) {
 
                 // Promote path: admin DM + recordMarketTipAsRegular se gates passam.
                 // Reusa infra MT (isMarketTipsEnabled, dedup admin, Kelly 0.10).
-                if (isMarketTipsEnabled('football') && ADMIN_IDS.size) {
+                // 2026-04-28: shadow-only por padrão (usuário pediu hold em
+                // football MT). Flip via FOOTBALL_MT_SHADOW_ONLY=false pra re-promover.
+                const _fbMtShadowOnly = !/^(0|false|no)$/i.test(String(process.env.FOOTBALL_MT_SHADOW_ONLY ?? 'true'));
+                if (_fbMtShadowOnly) {
+                  log('DEBUG', 'FB-MT-SCAN', `${match.team1} vs ${match.team2}: ${fbMtFound.length} MT tips em shadow (FOOTBALL_MT_SHADOW_ONLY=true)`);
+                } else if (isMarketTipsEnabled('football') && ADMIN_IDS.size) {
                   try {
                     const mtp = require('./lib/market-tip-processor');
                     const { wasAdminDmSentRecently, markAdminDmSent } = require('./lib/market-tips-shadow');
@@ -15270,8 +15275,12 @@ Máximo 200 palavras.`;
             // Admin DM path (opt-in via FOOTBALL_MARKET_TIPS_ENABLED=true + leak guard
             // runtime state). Mesmo padrão de tennis/lol/dota/cs — shadow SEMPRE grava
             // acima; DM só sai se sport habilitado + segment (market, side) não disabled.
+            // 2026-04-28: shadow-only por padrão (FOOTBALL_MT_SHADOW_ONLY=true).
             try {
-              if (isMarketTipsEnabled('football') && ADMIN_IDS.size) {
+              const _fbMtShadowOnlyP2 = !/^(0|false|no)$/i.test(String(process.env.FOOTBALL_MT_SHADOW_ONLY ?? 'true'));
+              if (_fbMtShadowOnlyP2) {
+                log('DEBUG', 'FB-MARKET-GATE', `${matchForMt.team1} vs ${matchForMt.team2} ${tipMarket}: shadow-only mode (FOOTBALL_MT_SHADOW_ONLY=true)`);
+              } else if (isMarketTipsEnabled('football') && ADMIN_IDS.size) {
                 const mtp = require('./lib/market-tip-processor');
                 const minEvFb = parseFloat(process.env.FOOTBALL_MARKET_TIP_MIN_EV ?? '8');
                 const minPmFb = parseFloat(process.env.FOOTBALL_MARKET_TIP_MIN_PMODEL ?? '0.55');
