@@ -4245,56 +4245,76 @@ async function runMarketTipsLeakGuard() {
   if (!ADMIN_IDS.size) return;
   const CLV_CUTOFF = parseFloat(process.env.MT_LEAK_CLV_CUTOFF || '-2');
   const N_CUTOFF = parseInt(process.env.MT_LEAK_N_CUTOFF || '30', 10);
+  // Side-level pode usar n menor (granularidade fina). Default = max(N_CUTOFF/2, 15).
+  const N_CUTOFF_SIDE = parseInt(process.env.MT_LEAK_N_CUTOFF_SIDE || String(Math.max(15, Math.floor(N_CUTOFF / 2))), 10);
   const CLV_RESTORE = parseFloat(process.env.MT_LEAK_CLV_RESTORE || '0');
+  // Side-level guard pode ser desligado isoladamente
+  const SIDE_GUARD_DISABLED = /^(0|false|no)$/i.test(String(process.env.MT_LEAK_GUARD_SIDE_AUTO ?? 'true'));
 
-  let stats;
+  let statsMarket, statsBySide;
   try {
     const { getShadowStats } = require('./lib/market-tips-shadow');
-    stats = getShadowStats(db, { days: 30 });
+    statsMarket = getShadowStats(db, { days: 30 });
+    statsBySide = SIDE_GUARD_DISABLED ? [] : getShadowStats(db, { days: 30, bySide: true });
   } catch (_) { return; }
-  if (!Array.isArray(stats) || !stats.length) return;
+  if ((!Array.isArray(statsMarket) || !statsMarket.length) && !statsBySide.length) return;
 
   const disabled = [], restored = [];
   const ts = new Date().toISOString();
 
-  for (const s of stats) {
-    const key = `${s.sport}|${s.market}`;
+  // Helper compartilhado pra disable/restore com chave market ou market+side
+  const processSegment = (s) => {
+    const sideKey = s.side || null;
+    const key = sideKey ? `${s.sport}|${s.market}|${sideKey}` : `${s.sport}|${s.market}`;
+    const label = sideKey ? `${s.sport}/${s.market}/${sideKey}` : `${s.sport}/${s.market}`;
+    const nThreshold = sideKey ? N_CUTOFF_SIDE : N_CUTOFF;
     const wasDisabled = _marketTipsDisabledRuntime.has(key);
 
-    if (!wasDisabled && s.clvN >= N_CUTOFF && s.avgClv != null && s.avgClv < CLV_CUTOFF) {
+    if (!wasDisabled && s.clvN >= nThreshold && s.avgClv != null && s.avgClv < CLV_CUTOFF) {
       const reason = `CLV ${s.avgClv.toFixed(1)}% n=${s.clvN} ROI=${s.roiPct != null ? s.roiPct.toFixed(1)+'%' : '?'}`;
       try {
         db.prepare(`INSERT OR REPLACE INTO market_tips_runtime_state
-          (sport, market, disabled, source, reason, clv_pct, clv_n, roi_pct, updated_at)
-          VALUES (?, ?, 1, 'auto_clv_leak', ?, ?, ?, ?, ?)`).run(
-          s.sport, s.market, reason, s.avgClv, s.clvN, s.roiPct, ts,
+          (sport, market, side, disabled, source, reason, clv_pct, clv_n, roi_pct, updated_at)
+          VALUES (?, ?, ?, 1, 'auto_clv_leak', ?, ?, ?, ?, ?)`).run(
+          s.sport, s.market, sideKey, reason, s.avgClv, s.clvN, s.roiPct, ts,
         );
         _marketTipsDisabledRuntime.set(key, { reason, since: ts, clv: s.avgClv, n: s.clvN, source: 'auto_clv_leak' });
-        disabled.push(`🚫 ${s.sport}/${s.market} — ${reason}`);
+        disabled.push(`🚫 ${label} — ${reason}`);
         log('WARN', 'MT-GUARD', `auto-disabled ${key}: ${reason}`);
       } catch (e) { log('WARN', 'MT-GUARD', `disable err: ${e.message}`); }
     }
     else if (wasDisabled) {
       const meta = _marketTipsDisabledRuntime.get(key);
-      if (meta?.source === 'auto_clv_leak' && s.clvN >= N_CUTOFF && s.avgClv != null && s.avgClv >= CLV_RESTORE) {
+      if (meta?.source === 'auto_clv_leak' && s.clvN >= nThreshold && s.avgClv != null && s.avgClv >= CLV_RESTORE) {
         try {
-          db.prepare(`DELETE FROM market_tips_runtime_state WHERE sport = ? AND market = ? AND source = 'auto_clv_leak'`).run(s.sport, s.market);
+          if (sideKey) {
+            db.prepare(`DELETE FROM market_tips_runtime_state WHERE sport = ? AND market = ? AND side = ? AND source = 'auto_clv_leak'`).run(s.sport, s.market, sideKey);
+          } else {
+            db.prepare(`DELETE FROM market_tips_runtime_state WHERE sport = ? AND market = ? AND side IS NULL AND source = 'auto_clv_leak'`).run(s.sport, s.market);
+          }
           _marketTipsDisabledRuntime.delete(key);
-          restored.push(`✅ ${s.sport}/${s.market} — CLV recuperou pra ${s.avgClv.toFixed(1)}% (n=${s.clvN})`);
+          restored.push(`✅ ${label} — CLV recuperou pra ${s.avgClv.toFixed(1)}% (n=${s.clvN})`);
           log('INFO', 'MT-GUARD', `auto-restored ${key}: CLV=${s.avgClv.toFixed(1)}%`);
         } catch (e) { log('WARN', 'MT-GUARD', `restore err: ${e.message}`); }
       }
     }
+  };
+
+  // Market-level (existente, n cutoff = N_CUTOFF)
+  for (const s of statsMarket) processSegment(s);
+  // Side-level (novo, n cutoff = N_CUTOFF_SIDE menor pra granularidade fina)
+  for (const s of statsBySide) {
+    if (s.side) processSegment(s);
   }
 
   if (disabled.length || restored.length) {
     const token = resolveAlertsToken();
     if (token) {
-      const msg = `🛡️ *MT LEAK GUARD — 30d*\n\n${[...disabled, ...restored].join('\n')}\n\n_Cutoff: CLV ≤ ${CLV_CUTOFF}% com n≥${N_CUTOFF}. Restaura em CLV ≥ ${CLV_RESTORE}%._`;
+      const msg = `🛡️ *MT LEAK GUARD — 30d*\n\n${[...disabled, ...restored].join('\n')}\n\n_Market: CLV ≤ ${CLV_CUTOFF}% n≥${N_CUTOFF}. Side: n≥${N_CUTOFF_SIDE}. Restaura em CLV ≥ ${CLV_RESTORE}%._`;
       if (!_isCycleMuted('mt-leak-guard')) for (const adminId of ADMIN_IDS) sendDM(token, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
     }
   }
-  log('INFO', 'MT-GUARD', `Ciclo OK — ${stats.length} segments | ${disabled.length} disabled | ${restored.length} restored`);
+  log('INFO', 'MT-GUARD', `Ciclo OK — ${statsMarket.length} markets + ${statsBySide.length} sides | ${disabled.length} disabled | ${restored.length} restored`);
 }
 
 // ── Weekly pipeline digest (1x/semana — 2ª feira 9h local) ──
@@ -13338,6 +13358,7 @@ async function pollTennis(runOnce = false) {
                   bestOf: tnBestOfForScan,
                   minOdd: minOddTn,
                   maxOdd: maxOddTn,
+                  isLive: isLiveTennis,
                 });
                 // Correlation §12c: quando ≥2 market tips fire no mesmo match,
                 // aplica desconto de stake proporcional à correlação max com outra tip.
@@ -13426,6 +13447,14 @@ async function pollTennis(runOnce = false) {
                         let stake = mtp.kellyStakeForMarket(t.pModel, t.odd, 100, 0.10);
                         if (t.correlationDiscount > 0 && typeof stake === 'number') {
                           stake = mtp.snapStakeUnits(stake * (1 - t.correlationDiscount));
+                        }
+                        // Calib confidence haircut: tips com calib shrink forte
+                        // (ratio p_calib/p_raw < 1) ganham stake reduzido. Reflete
+                        // incerteza adicional do model quando p_raw foi recalibrado.
+                        // Default ON; opt-out TENNIS_MT_STAKE_ADJUST_DISABLED=true.
+                        const stakeAdjustDisabled = /^(1|true|yes)$/i.test(String(process.env.TENNIS_MT_STAKE_ADJUST_DISABLED || ''));
+                        if (!stakeAdjustDisabled && Number.isFinite(t.stakeAdjust) && t.stakeAdjust < 1 && typeof stake === 'number') {
+                          stake = mtp.snapStakeUnits(stake * t.stakeAdjust);
                         }
                         if (!(stake > 0)) continue;
                         const dm = mtp.buildMarketTipDM({ match, tip: t, stake, league: match.league, sport: 'tennis', isLive: isLiveTennis, markets });

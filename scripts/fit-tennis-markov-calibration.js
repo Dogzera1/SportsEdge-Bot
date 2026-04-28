@@ -46,6 +46,11 @@ const DRY = argv.includes('--dry-run');
 const MIN_BIN = parseInt(arg('min-bin', '6'), 10);
 const ALPHA = parseFloat(arg('alpha', '8'));
 const VIG = parseFloat(arg('vig', '0.025'));
+// FILTER: 'all' (default — comportamento legacy, fita TUDO em markets.X),
+//         'pre'  (só is_live=0 — fita em markets.X explicitamente),
+//         'live' (só is_live=1 — fita em markets.live.X). Live precisa
+//         sample suficiente (≥30 settled por mercado) ou aborta.
+const FILTER = String(arg('filter', 'all')).toLowerCase();
 const OUT_PATH = path.resolve(__dirname, '..', 'lib', 'tennis-markov-calib.json');
 
 const MIN_EV = 4;
@@ -257,9 +262,13 @@ function backtest(tips, calibByMarket) {
 }
 
 (async () => {
-  const tips = await loadTips();
+  let tips = await loadTips();
+  // Filtra is_live conforme --filter
+  if (FILTER === 'pre') tips = tips.filter(t => !t.is_live);
+  else if (FILTER === 'live') tips = tips.filter(t => !!t.is_live);
+  // 'all' não filtra (legacy + fits global)
   const settled = tips.filter(t => t.result === 'win' || t.result === 'loss').length;
-  console.log(`[loaded] ${tips.length} tips total (${settled} settled)`);
+  console.log(`[loaded] ${tips.length} tips total (${settled} settled) [filter=${FILTER}]`);
 
   // Skip refit se sample não cresceu o suficiente desde último fit
   const minNewSamples = parseInt(arg('min-new-samples', '0'), 10);
@@ -321,6 +330,26 @@ function backtest(tips, calibByMarket) {
     process.exit(1);
   }
 
+  // Lê payload existente pra preservar a outra metade (live se fitando pre, etc).
+  let existingPayload = null;
+  if (fs.existsSync(OUT_PATH)) {
+    try { existingPayload = JSON.parse(fs.readFileSync(OUT_PATH, 'utf8')); } catch {}
+  }
+
+  let markets;
+  if (FILTER === 'live') {
+    // Mantém pre intacto, atualiza só markets.live
+    markets = { ...(existingPayload?.markets || {}), live: calibByMarket };
+  } else if (FILTER === 'pre') {
+    // Atualiza markets pre, preserva markets.live se existir
+    markets = { ...calibByMarket, live: existingPayload?.markets?.live };
+    if (!markets.live) delete markets.live;
+  } else {
+    // 'all' (legacy): substitui markets pre, preserva live
+    markets = { ...calibByMarket, live: existingPayload?.markets?.live };
+    if (!markets.live) delete markets.live;
+  }
+
   const payload = {
     version: 1,
     fittedAt: new Date().toISOString(),
@@ -329,9 +358,10 @@ function backtest(tips, calibByMarket) {
     prior: { source: 'p_implied_close', vig: VIG, alpha: ALPHA },
     minBin: MIN_BIN,
     nSamples: tips.filter(t => t.result === 'win' || t.result === 'loss').length,
-    markets: calibByMarket,
+    filter: FILTER,
+    markets,
     backtest: bt,
   };
   fs.writeFileSync(OUT_PATH, JSON.stringify(payload, null, 2));
-  console.log(`\n[saved] ${OUT_PATH}`);
+  console.log(`\n[saved] ${OUT_PATH} (filter=${FILTER})`);
 })().catch(e => { console.error(e); process.exit(1); });
