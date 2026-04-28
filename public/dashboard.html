@@ -2064,6 +2064,12 @@ async function loadTips(gen = refreshGen) {
 
 // Filtro de liga aplicado no renderTipsTable. null = todas. String = filter event_name.
 let tipsLeagueFilter = null;
+// Tier filter: agrupa por tier (ATP Slam/WTA Masters/etc). Click no card filtra
+// tabela por (sport, tier). Mutuamente exclusivo com leagueFilter.
+let tipsTierFilter = null;
+let tipsTierSport = null;
+// View mode: 'tier' (default — agrupado) ou 'league' (per-liga, legacy).
+let tipsGroupView = 'tier';
 
 function filterTipsByLeague(league) {
   // Toggle: clicar mesma liga → limpa filtro
@@ -2071,14 +2077,35 @@ function filterTipsByLeague(league) {
     tipsLeagueFilter = null;
   } else {
     tipsLeagueFilter = league;
+    tipsTierFilter = null; tipsTierSport = null; // mutuamente exclusivo
   }
   tipsPage = 1;
   renderTipsTable();
-  // Re-render cards pra atualizar destaque
   loadTipsByLeague(refreshGen).catch(() => {});
 }
 
-// Stats por liga pras tips REAIS (is_shadow=0). Cards horizontais filtráveis.
+function filterTipsByTier(sport, tier) {
+  if (!sport || !tier || (tipsTierFilter === tier && tipsTierSport === sport)) {
+    tipsTierFilter = null; tipsTierSport = null;
+  } else {
+    tipsTierFilter = tier; tipsTierSport = sport;
+    tipsLeagueFilter = null;
+  }
+  tipsPage = 1;
+  renderTipsTable();
+  loadTipsByLeague(refreshGen).catch(() => {});
+}
+
+function toggleTipsGroupView() {
+  tipsGroupView = tipsGroupView === 'tier' ? 'league' : 'tier';
+  tipsLeagueFilter = null; tipsTierFilter = null; tipsTierSport = null;
+  tipsPage = 1;
+  renderTipsTable();
+  loadTipsByLeague(refreshGen).catch(() => {});
+}
+
+// Stats por liga (ou tier agrupado) pras tips REAIS (is_shadow=0). Cards
+// horizontais filtráveis. Toggle entre tipsGroupView='tier' (agrupado) e 'league'.
 async function loadTipsByLeague(gen = refreshGen) {
   const el = document.getElementById('tipsByLeague');
   if (!el) return;
@@ -2089,8 +2116,6 @@ async function loadTipsByLeague(gen = refreshGen) {
     el.innerHTML = '';
     return;
   }
-  // Limita top 12 pra UI ficar manejável
-  const top = data.leagues.slice(0, 12);
   const fmtPctVal = (v, d=1) => v == null ? '—' : (v >= 0 ? '+' : '') + Number(v).toFixed(d) + '%';
   const cls = (v) => v == null ? '' : (v >= 0 ? 'pos' : 'neg');
   const sportColor = {
@@ -2099,10 +2124,81 @@ async function loadTipsByLeague(gen = refreshGen) {
     darts: '#26a69a', snooker: '#5c6bc0', tabletennis: '#ff7043',
   };
   const escapeQ = (s) => String(s).replace(/'/g, "&#39;").replace(/"/g, '&quot;');
+  const toggleBtn = `<button onclick="toggleTipsGroupView()" style="margin-left:auto;padding:2px 8px;font-size:0.75em;background:var(--surface-2,#1e293b);border:1px solid var(--border,#334155);color:var(--text,#e2e8f0);border-radius:4px;cursor:pointer">${tipsGroupView === 'tier' ? '📂 Ver por liga' : '📁 Ver por tier'}</button>`;
+
+  if (tipsGroupView === 'tier') {
+    // Agrega ligas por tier abstrato. Reusa _classifyLeagueTier + TIER_COLORS
+    // já definidos no MT shadow (via commit 33582b7).
+    const tiers = new Map();
+    for (const l of data.leagues) {
+      const tier = _classifyLeagueTier(l.sport, l.league);
+      const key = `${l.sport}|${tier}`;
+      const ag = tiers.get(key) || {
+        sport: l.sport, tier, n: 0, settled: 0, pending: 0, wins: 0, mt_n: 0, ml_n: 0,
+        profit: 0, staked: 0, clvSum: 0, clvN: 0, leagueCount: 0, leagues: [],
+      };
+      ag.n += l.n;
+      ag.settled += l.settled || 0;
+      ag.pending += l.pending || 0;
+      ag.wins += l.wins || 0;
+      ag.mt_n += l.mt_n || 0;
+      ag.ml_n += l.ml_n || 0;
+      ag.profit += l.profit || 0;
+      ag.staked += l.staked || 0;
+      if (l.avgClv != null && l.clvN > 0) { ag.clvSum += l.avgClv * l.clvN; ag.clvN += l.clvN; }
+      ag.leagueCount += 1;
+      ag.leagues.push(l.league);
+      tiers.set(key, ag);
+    }
+    const groups = [...tiers.values()].sort((a, b) => b.n - a.n);
+    const cards = groups.map(g => {
+      const isActive = tipsTierFilter === g.tier && tipsTierSport === g.sport;
+      const c = TIER_COLORS[g.tier] || '#888';
+      const hitRate = g.settled > 0 ? (g.wins / g.settled * 100) : null;
+      const roi = g.staked > 0 ? (g.profit / g.staked * 100) : null;
+      const avgClv = g.clvN > 0 ? (g.clvSum / g.clvN) : null;
+      const mtBadge = g.mt_n > 0
+        ? `<span style="background:#7c3aed;color:#fff;padding:1px 4px;border-radius:3px;font-size:0.65em;margin-left:4px">MT ${g.mt_n}</span>`
+        : '';
+      const leagueBadge = g.leagueCount > 1
+        ? `<span style="background:#475569;color:#fff;padding:1px 4px;border-radius:3px;font-size:0.65em;margin-left:4px" title="${escapeQ(g.leagues.slice(0,5).join(' · '))}${g.leagues.length>5?' …':''}">${g.leagueCount} ligas</span>`
+        : '';
+      return `
+        <div onclick="filterTipsByTier('${g.sport}','${escapeQ(g.tier)}')"
+             style="cursor:pointer;border:2px solid ${isActive ? c : 'var(--border,#2a2a2a)'};background:var(--surface,#0f172a);border-radius:6px;padding:9px 11px;min-width:200px;flex:1;transition:transform 0.1s"
+             onmouseover="this.style.transform='translateY(-2px)'" onmouseout="this.style.transform='translateY(0)'">
+          <div style="display:flex;align-items:center;gap:4px;margin-bottom:4px;flex-wrap:wrap">
+            <span style="background:${c};color:#fff;padding:2px 7px;border-radius:3px;font-size:0.72em;font-weight:600">${g.tier}</span>
+            ${mtBadge}${leagueBadge}
+          </div>
+          <div style="font-size:0.7em;color:#888;margin-top:1px">${g.sport.toUpperCase()} · ${g.n} tips · ${g.pending} pend · ${g.settled} sett</div>
+          <div style="display:flex;justify-content:space-between;font-size:0.78em;margin-top:5px">
+            <span>Hit <b>${fmtPctVal(hitRate, 0)}</b></span>
+            <span class="${cls(roi)}">ROI <b>${fmtPctVal(roi)}</b></span>
+          </div>
+          <div style="display:flex;justify-content:space-between;font-size:0.74em;margin-top:1px">
+            <span class="${cls(avgClv)}">CLV ${fmtPctVal(avgClv)}${g.clvN>0?` <span style="opacity:0.6">(${g.clvN})</span>`:''}</span>
+            <span class="${cls(g.profit)}">${g.profit >= 0 ? '+' : ''}R$ ${g.profit.toFixed(0)}</span>
+          </div>
+        </div>`;
+    }).join('');
+    const filterHint = tipsTierFilter
+      ? `<span style="margin-left:8px;color:#3b82f6;cursor:pointer;font-size:0.8em" onclick="filterTipsByTier(null,null)">✕ limpar filtro: <b>${tipsTierFilter}</b></span>`
+      : '';
+    el.innerHTML = `
+      <div class="card-meta" style="margin-bottom:6px;font-size:0.8em;display:flex;align-items:center">
+        🏆 <b style="margin-left:4px">Stats por tier (${data.days}d, ${groups.length} grupos)</b> — clique pra filtrar tabela${filterHint}
+        ${toggleBtn}
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">${cards}</div>`;
+    return;
+  }
+
+  // groupView='league' — top 12 ligas individuais (legacy)
+  const top = data.leagues.slice(0, 12);
   const cards = top.map(l => {
     const isActive = tipsLeagueFilter === l.league;
     const c = sportColor[l.sport] || '#888';
-    // Truncate long league names
     const shortName = l.league.length > 28 ? l.league.slice(0, 25) + '…' : l.league;
     const mtBadge = l.mt_n > 0
       ? `<span style="background:#7c3aed;color:#fff;padding:1px 4px;border-radius:3px;font-size:0.65em;margin-left:4px">MT ${l.mt_n}</span>`
@@ -2132,8 +2228,9 @@ async function loadTipsByLeague(gen = refreshGen) {
     ? `<span style="margin-left:8px;color:#3b82f6;cursor:pointer;font-size:0.8em" onclick="filterTipsByLeague('${escapeQ(tipsLeagueFilter)}')">✕ limpar filtro: <b>${tipsLeagueFilter}</b></span>`
     : '';
   el.innerHTML = `
-    <div class="card-meta" style="margin-bottom:6px;font-size:0.8em">
-      🏆 <b>Stats por liga (${data.days}d, top ${top.length}${data.leagues.length > top.length ? ' de ' + data.leagues.length : ''})</b> — clique pra filtrar tabela${filterHint}
+    <div class="card-meta" style="margin-bottom:6px;font-size:0.8em;display:flex;align-items:center">
+      🏆 <b style="margin-left:4px">Stats por liga (${data.days}d, top ${top.length}${data.leagues.length > top.length ? ' de ' + data.leagues.length : ''})</b> — clique pra filtrar tabela${filterHint}
+      ${toggleBtn}
     </div>
     <div style="display:flex;gap:8px;flex-wrap:wrap">${cards}</div>`;
 }
@@ -2260,9 +2357,16 @@ function renderTipsTable() {
   if (tipsLeagueFilter) {
     const lf = String(tipsLeagueFilter).toLowerCase();
     tips = (tipsCache || []).filter(t => String(t.event_name || '').toLowerCase() === lf);
+  } else if (tipsTierFilter && tipsTierSport) {
+    // Filtro por tier — classifica cada tip's event_name e checa match.
+    tips = (tipsCache || []).filter(t =>
+      t.sport === tipsTierSport &&
+      _classifyLeagueTier(t.sport, t.event_name) === tipsTierFilter
+    );
   }
   if (!Array.isArray(tips) || !tips.length) {
-    setEmpty(el, tipsLeagueFilter ? `Sem tips na liga "${tipsLeagueFilter}"` : 'Sem tips no filtro');
+    const filterLabel = tipsLeagueFilter || tipsTierFilter;
+    setEmpty(el, filterLabel ? `Sem tips no filtro "${filterLabel}"` : 'Sem tips no filtro');
     return;
   }
 
