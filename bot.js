@@ -14658,21 +14658,47 @@ async function pollFootball(runOnce = false) {
           }
         } catch (e) { reportBug('FB-MODEL', e); }
 
-        // ── Football Multi-Market Scanner (pre-game only) ──
+        // ── Football Multi-Market Scanner (pre-game + live) ──
         // Pinnacle football matchup → /odds-markets retorna handicap + totals.
-        // Cruza com fbTrained.markets (BTTS/OU/AH) → tips MT.
-        // Gateado por FOOTBALL_MT_SCAN=true E PINNACLE_FOOTBALL=true E !isFbLive.
-        // Pre-game only por design — live football MT requer ajuste de minutes
-        // restantes que ainda não foi modelado.
+        // Pre-game: cruza com fbTrained.markets (BTTS/OU/AH).
+        // Live: cruza com predictFootballLive (Poisson residual baseado em score+minute).
         if (process.env.FOOTBALL_MT_SCAN === 'true'
             && process.env.PINNACLE_FOOTBALL === 'true'
-            && !isFbLive
             && fbTrained?.markets) {
           try {
+            // Compute trainedMarkets pra usar — pre-game ou live ajustado.
+            let mtMarkets = fbTrained.markets;
+            let isLiveScan = false;
+            if (isFbLive) {
+              // Live override habilitado por env (default ON quando lamH/lamA disponíveis).
+              if (process.env.FOOTBALL_MT_LIVE_DISABLED !== 'true' && fbTrained.lamH > 0 && fbTrained.lamA > 0) {
+                // Estimar elapsed: match.start_time → now. Cap [0, 95]. HT (45-60) approximado.
+                const startTs = match.time ? new Date(match.time).getTime() : 0;
+                const elapsedMin = startTs > 0 ? Math.max(0, Math.min(95, (Date.now() - startTs) / 60000)) : 45;
+                const sh = Number.isFinite(match.score1) ? match.score1 : 0;
+                const sa = Number.isFinite(match.score2) ? match.score2 : 0;
+                try {
+                  const { predictFootballLive } = require('./lib/football-live-model');
+                  const live = predictFootballLive({
+                    lamH: fbTrained.lamH, lamA: fbTrained.lamA,
+                    elapsed: elapsedMin, scoreH: sh, scoreA: sa,
+                  });
+                  if (live?.markets) {
+                    mtMarkets = live.markets;
+                    isLiveScan = true;
+                    log('DEBUG', 'FB-MT-LIVE', `${match.team1} vs ${match.team2} min=${Math.round(elapsedMin)} score=${sh}-${sa} λResid=${live.lamHResid}/${live.lamAResid} OU2.5over=${(live.markets.ou['2.5'].over*100).toFixed(0)}%`);
+                  }
+                } catch (le) { reportBug('FB-MT-LIVE', le); }
+              } else {
+                // Live mas live model desabilitado — pula scan
+                throw new Error('FOOTBALL_MT_LIVE_DISABLED ou lamH/lamA missing');
+              }
+            }
             const pinMkt = await serverGet(`/odds-markets?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}&game=football&period=0`).catch(() => null);
             if (pinMkt && ((pinMkt.totals?.length || 0) + (pinMkt.handicaps?.length || 0)) > 0) {
               const { scanFootballMarkets } = require('./lib/football-mt-scanner');
-              const fbMtMinEv = parseFloat(process.env.FOOTBALL_MT_MIN_EV ?? '5');
+              // Live tem volatilidade maior — exige EV gate mais alto pra cobrir movimento de odds.
+              const fbMtMinEv = parseFloat(process.env[isLiveScan ? 'FOOTBALL_MT_LIVE_MIN_EV' : 'FOOTBALL_MT_MIN_EV'] ?? (isLiveScan ? '8' : '5'));
               const fbMtMinPm = parseFloat(process.env.FOOTBALL_MT_MIN_PMODEL ?? '0.50');
               const fbMtMinOdd = parseFloat(process.env.FOOTBALL_MT_MIN_ODD ?? '1.50');
               const fbMtMaxOdd = parseFloat(process.env.FOOTBALL_MT_MAX_ODD ?? '3.50');
@@ -14681,7 +14707,7 @@ async function pollFootball(runOnce = false) {
               const pinMktWithBtts = match.odds?.btts ? { ...pinMkt, btts: match.odds.btts } : pinMkt;
               const fbMtFound = scanFootballMarkets({
                 pinMarkets: pinMktWithBtts,
-                trainedMarkets: fbTrained.markets,
+                trainedMarkets: mtMarkets,
                 minEv: fbMtMinEv,
                 minPmodel: fbMtMinPm,
                 minOdd: fbMtMinOdd,
@@ -14689,10 +14715,10 @@ async function pollFootball(runOnce = false) {
               });
               if (fbMtFound.length) {
                 log('INFO', 'FB-MT-SCAN',
-                  `${match.team1} vs ${match.team2} [${match.league}]: ${fbMtFound.length} mercado(s) EV ≥${fbMtMinEv}%`);
+                  `${match.team1} vs ${match.team2} [${match.league}]${isLiveScan ? ' [LIVE]' : ''}: ${fbMtFound.length} mercado(s) EV ≥${fbMtMinEv}%`);
                 try {
                   const { logShadowTip } = require('./lib/market-tips-shadow');
-                  for (const t of fbMtFound) logShadowTip(db, { sport: 'football', match, bestOf: null, tip: t, isLive: false });
+                  for (const t of fbMtFound) logShadowTip(db, { sport: 'football', match, bestOf: null, tip: t, isLive: isLiveScan });
                 } catch (_) {}
                 for (const t of fbMtFound.slice(0, 5)) {
                   log('INFO', 'FB-MT-SCAN',
@@ -14717,15 +14743,15 @@ async function pollFootball(runOnce = false) {
                       marketTipSent.set(dedupKey, Date.now());
                       const stake = mtp.kellyStakeForMarket(t.pModel, t.odd, 100, 0.10);
                       if (!(stake > 0)) continue;
-                      const dm = mtp.buildMarketTipDM({ match, tip: t, stake, league: match.league, sport: 'football', isLive: false });
+                      const dm = mtp.buildMarketTipDM({ match, tip: t, stake, league: match.league, sport: 'football', isLive: isLiveScan });
                       const tokenForMT = resolveTipsToken('football') || SPORTS['football']?.token || resolveAlertsToken();
                       if (!tokenForMT) continue;
                       const _mtMarkup_fb = mtp.buildMarketTipReplyMarkup({ match, sport: 'football' });
                       const r = await sendAdminDMs(tokenForMT, dm, _mtMarkup_fb ? { reply_markup: _mtMarkup_fb } : undefined, 'football-mt-scan-tip');
                       if (r.sent > 0) {
                         markAdminDmSent(db, { sport: 'football', match, market: t.market, line: t.line, side: t.side, odd: t.odd, ev: t.ev });
-                        log('INFO', 'FB-MT-TIP', `Admin DM: ${t.label} @ ${t.odd} EV ${t.ev}% stake ${stake}u (sent=${r.sent})`);
-                        if (isMarketTipsPromoteEnabled('football')) await recordMarketTipAsRegular({ sport: 'football', match, tip: t, stake, isLive: false });
+                        log('INFO', 'FB-MT-TIP', `Admin DM${isLiveScan ? ' [LIVE]' : ''}: ${t.label} @ ${t.odd} EV ${t.ev}% stake ${stake}u (sent=${r.sent})`);
+                        if (isMarketTipsPromoteEnabled('football')) await recordMarketTipAsRegular({ sport: 'football', match, tip: t, stake, isLive: isLiveScan });
                       }
                     }
                   } catch (mte) { reportBug('FB-MT-PROMOTE', mte); }
