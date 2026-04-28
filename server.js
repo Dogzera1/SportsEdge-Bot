@@ -2755,7 +2755,15 @@ async function getPandaScoreLolMatches() {
     return psMatches;
   } catch(e) {
     log('WARN', 'PANDASCORE', 'Erro: ' + e.message);
-    return _pandaCache.data; // retorna cache antigo em caso de erro
+    // 2026-04-28: age check no fallback. Antes retornava cache stale por
+    // horas se PandaScore estivesse fora — bot continuava operando com
+    // dados antigos sem alarm. Cap 30min, depois retorna [] + log STALE.
+    const ageMs = Date.now() - (_pandaCache.ts || 0);
+    if (ageMs > 30 * 60 * 1000) {
+      log('WARN', 'PANDASCORE', `cache STALE (${Math.round(ageMs/60000)}min) — retornando vazio em vez de dados antigos`);
+      return [];
+    }
+    return _pandaCache.data;
   }
 }
 
@@ -3468,13 +3476,16 @@ async function getPandaScoreValorantMatches() {
 
 // ── Admin Auth + Rate Limit (in-memory) ──
 const ADMIN_KEY = (process.env.ADMIN_KEY || '').trim();
-// Security mode: 'open' (default dev, aberto se no key) vs 'strict' (bloqueia se no key).
-// Use ADMIN_KEY_STRICT=true em produção pra forçar 401 se ADMIN_KEY vazio.
-const ADMIN_STRICT = /^(1|true|yes)$/i.test(String(process.env.ADMIN_KEY_STRICT || ''));
+// 2026-04-28: default flipado pra STRICT=true. Antes ADMIN_KEY=='' deixava
+// /admin/* abertos em prod (deploy sem env exposto). Agora bloqueia em prod;
+// dev local opt-in via ADMIN_KEY_OPEN=true (escape válido).
+const ADMIN_OPEN_OPT_OUT = /^(1|true|yes)$/i.test(String(process.env.ADMIN_KEY_OPEN || ''));
+const ADMIN_STRICT_EXPLICIT = /^(0|false|no)$/i.test(String(process.env.ADMIN_KEY_STRICT || ''));
+const ADMIN_STRICT = !ADMIN_OPEN_OPT_OUT && !ADMIN_STRICT_EXPLICIT;
 let _adminKeyWarnLogged = false;
 if (!ADMIN_KEY) {
   log(ADMIN_STRICT ? 'ERROR' : 'WARN', 'SEC',
-    `ADMIN_KEY não configurada — rotas admin ${ADMIN_STRICT ? 'BLOQUEADAS (strict mode)' : 'abertas sem autenticação'}. Configure ADMIN_KEY em produção${ADMIN_STRICT ? '' : ' + ADMIN_KEY_STRICT=true'}.`);
+    `ADMIN_KEY não configurada — rotas admin ${ADMIN_STRICT ? 'BLOQUEADAS (strict mode default)' : 'abertas sem autenticação (ADMIN_KEY_OPEN=true)'}. Configure ADMIN_KEY em produção.`);
 }
 function warnAdminKeyMissingOnce() {
   if (ADMIN_KEY || _adminKeyWarnLogged) return;
@@ -3517,6 +3528,16 @@ function requireAdmin(req, res) {
 }
 
 const _rl = new Map(); // key -> { count, resetAt }
+// 2026-04-28: TTL eviction cron 5min — antes Map crescia indefinido com
+// 1 entry per (bucket, IP) único. DDoS scan podia vazar memória.
+setInterval(() => {
+  const now = Date.now();
+  let removed = 0;
+  for (const [k, v] of _rl) {
+    if (now > v.resetAt + 60_000) { _rl.delete(k); removed++; }
+  }
+  if (removed > 100) log('DEBUG', 'RL', `evicted ${removed} stale entries (size=${_rl.size})`);
+}, 5 * 60 * 1000);
 function rateLimit(req, res, limitPerMin, bucket) {
   const ip = getClientIp(req);
   const key = `${bucket}|${ip}`;
@@ -3850,6 +3871,12 @@ const server = http.createServer(async (req, res) => {
     res.end();
     return;
   }
+  // 2026-04-28: security headers básicos. Dashboard servido em / antes era
+  // clickjackable (sem X-Frame-Options). nosniff bloqueia MIME sniffing
+  // (XSS via .json renderizado como HTML).
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
 
   // Rate limit (antes de rotas pesadas)
   const bucket = EXPENSIVE_ROUTES.has(p) ? `expensive:${p}` : `general:${p}`;

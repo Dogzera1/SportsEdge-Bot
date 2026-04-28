@@ -3573,14 +3573,20 @@ async function runBankrollGuardianCycle() {
   }
 
   // Aplica auto-shadow / block conforme severidade
+  // 2026-04-28: cooldown só BLOQUEIA DM, não a ação. Antes `continue` pulava
+  // tudo — se sport piorasse 12h depois, nada acontecia até 24h. Agora ação
+  // sempre executa (idempotente via Set checks); DM respeita cooldown.
   const newAlerts = [];
   for (const alert of result.alerts) {
     const last = _bankrollAlertedKey.get(alert.sport);
-    if (last && (Date.now() - last.ts) < BANKROLL_DM_COOLDOWN_MS) continue;
-    _bankrollAlertedKey.set(alert.sport, { ts: Date.now() });
-    newAlerts.push(alert);
+    const dmCooled = !(last && (Date.now() - last.ts) < BANKROLL_DM_COOLDOWN_MS);
+    if (dmCooled) {
+      _bankrollAlertedKey.set(alert.sport, { ts: Date.now() });
+      newAlerts.push(alert);
+    }
 
-    // Auto-shadow temporário (DD>=15% ou ROI<=-15%)
+    // Auto-shadow temporário (DD>=15% ou ROI<=-15%) — sempre executa
+    // (Set.add é idempotente, log já só dispara em transição).
     // Split buckets lol/dota2 usam _splitBucketShadow Set (não têm entry em SPORTS).
     const isSplit = alert.sport === 'lol' || alert.sport === 'dota2';
     if ((alert.action === 'AUTO_SHADOW' || alert.action === 'BLOCK_BOT')) {
@@ -4833,6 +4839,23 @@ async function runLeagueGuardCycle() {
         _deleteBlocklistEntry(entry); // sem cooldown — recuperou legit
         restored.push(`✅ ${entry} — ROI recuperou pra ${roi.toFixed(1)}% (n=${r.n})`);
         log('INFO', 'LEAGUE-GUARD', `auto-restored ${entry}: ROI=${roi.toFixed(1)}%`);
+      }
+    }
+    // 2026-04-28: TTL absoluto pra liga blocked sem novas tips. Antes deadlock
+    // silencioso: ROI ruim → block → bloqueia novas tips → não acumula sample
+    // → restore nunca dispara (n<minN sempre). Após LEAGUE_GUARD_AUTO_TTL_DAYS
+    // (default 30d), força re-avaliação independente de N (limpa flag).
+    const ttlDays = parseInt(process.env.LEAGUE_GUARD_AUTO_TTL_DAYS || '30', 10);
+    if (ttlDays > 0) {
+      const ttlMs = ttlDays * 86400 * 1000;
+      for (const [entry, meta] of _autoBlockedLeagues) {
+        if (meta.since && (now - meta.since) > ttlMs) {
+          _leagueBlocklist.delete(entry);
+          _autoBlockedLeagues.delete(entry);
+          _deleteBlocklistEntry(entry);
+          restored.push(`⏰ ${entry} — TTL ${ttlDays}d expirado, liberado pra re-avaliação`);
+          log('INFO', 'LEAGUE-GUARD', `auto-restored ${entry} via TTL (${ttlDays}d)`);
+        }
       }
     }
 

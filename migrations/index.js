@@ -9,13 +9,25 @@ function tableExists(db, tableName) {
   return !!row;
 }
 
+// 2026-04-28: whitelist guard pra DDL — better-sqlite3 não suporta bind em
+// PRAGMA/ALTER, então validar via regex antes de interpolar.
+function _validIdent(s) {
+  return typeof s === 'string' && /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(s);
+}
+
 function columnExists(db, tableName, columnName) {
+  if (!_validIdent(tableName) || !_validIdent(columnName)) {
+    throw new Error(`columnExists: invalid identifier (table='${tableName}' col='${columnName}')`);
+  }
   if (!tableExists(db, tableName)) return false;
   const cols = db.prepare(`PRAGMA table_info(${tableName})`).all();
   return cols.some(c => c.name === columnName);
 }
 
 function addColumnIfMissing(db, tableName, columnName, columnSqlDef) {
+  if (!_validIdent(tableName) || !_validIdent(columnName)) {
+    throw new Error(`addColumnIfMissing: invalid identifier (table='${tableName}' col='${columnName}')`);
+  }
   if (columnExists(db, tableName, columnName)) return false;
   db.exec(`ALTER TABLE ${tableName} ADD COLUMN ${columnSqlDef}`);
   return true;
