@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "fittedAt": "2026-04-27T23:35:49.259Z",
+  "fittedAt": "2026-04-28T13:01:22.897Z",
   "method": "pav_with_beta_smoothing",
   "target": "outcome (win/loss)",
   "prior": {
@@ -9,88 +9,98 @@
     "alpha": 8
   },
   "minBin": 6,
-  "nSamples": 94,
+  "nSamples": 115,
   "markets": {
     "handicapGames": {
       "bins": [
         {
           "lo": 0.3,
-          "hi": 0.65,
-          "mid": 0.5362,
+          "hi": 0.55,
+          "mid": 0.4374,
+          "n": 8,
+          "wins": 3,
+          "rawP": 0.375,
+          "priorP": 0.5576,
+          "pCalib": 0.4663
+        },
+        {
+          "lo": 0.55,
+          "hi": 0.7,
+          "mid": 0.6248,
           "n": 12,
           "wins": 6,
           "rawP": 0.5,
-          "priorP": 0.4336,
-          "pCalib": 0.4734
+          "priorP": 0.4312,
+          "pCalib": 0.4725
         },
         {
-          "lo": 0.65,
+          "lo": 0.7,
           "hi": 0.75,
-          "mid": 0.7184,
-          "n": 13,
-          "wins": 9,
-          "rawP": 0.6923,
-          "priorP": 0.4929,
-          "pCalib": 0.6139
+          "mid": 0.7323,
+          "n": 11,
+          "wins": 8,
+          "rawP": 0.7273,
+          "priorP": 0.4833,
+          "pCalib": 0.6245
         },
         {
           "lo": 0.75,
           "hi": 0.8,
-          "mid": 0.786,
-          "n": 12,
-          "wins": 10,
-          "rawP": 0.8333,
-          "priorP": 0.4324,
-          "pCalib": 0.6139
+          "mid": 0.7836,
+          "n": 13,
+          "wins": 11,
+          "rawP": 0.8462,
+          "priorP": 0.4549,
+          "pCalib": 0.6515
         },
         {
           "lo": 0.8,
           "hi": 0.92,
-          "mid": 0.8613,
-          "n": 8,
-          "wins": 5,
-          "rawP": 0.625,
-          "priorP": 0.5555,
-          "pCalib": 0.6139
+          "mid": 0.8563,
+          "n": 10,
+          "wins": 7,
+          "rawP": 0.7,
+          "priorP": 0.5312,
+          "pCalib": 0.6515
         },
         {
           "lo": 0.92,
           "hi": 1.001,
-          "mid": 0.9469,
-          "n": 6,
-          "wins": 3,
-          "rawP": 0.5,
-          "priorP": 0.5381,
-          "pCalib": 0.6139
+          "mid": 0.9448,
+          "n": 8,
+          "wins": 5,
+          "rawP": 0.625,
+          "priorP": 0.5964,
+          "pCalib": 0.6515
         }
       ],
       "coverage": [
         0.3,
         1.001
       ],
-      "nTotal": 53
+      "nTotal": 64
     },
     "totalGames": {
       "bins": [
         {
           "lo": 0.3,
           "hi": 0.65,
-          "mid": 0.5346,
-          "n": 6,
-          "wins": 5,
-          "rawP": 0.8333,
-          "priorP": 0.434,
-          "pCalib": 0.4181
+          "mid": 0.5258,
+          "n": 8,
+          "wins": 6,
+          "rawP": 0.75,
+          "priorP": 0.445,
+          "pCalib": 0.4028
         },
         {
           "lo": 0.65,
           "hi": 0.7,
-          "mid": 0.6708,
-          "n": 12,
+          "mid": 0.6711,
+          "n": 14,
           "wins": 2,
-          "rawP": 0.1667,
-          "priorP": 0.5616,
-          "pCalib": 0.4181
+          "rawP": 0.1429,
+          "priorP": 0.5516,
+          "pCalib": 0.4028
         },
         {
           "lo": 0.7,
@@ -104,48 +114,30 @@
         },
         {
           "lo": 0.75,
-          "hi": 1.001,
-          "mid": 0.8195,
+          "hi": 0.8,
+          "mid": 0.7727,
           "n": 11,
-          "wins": 8,
-          "rawP": 0.7273,
-          "priorP": 0.5531,
-          "pCalib": 0.654
+          "wins": 7,
+          "rawP": 0.6364,
+          "priorP": 0.5614,
+          "pCalib": 0.602
+        },
+        {
+          "lo": 0.8,
+          "hi": 1.001,
+          "mid": 0.8804,
+          "n": 6,
+          "wins": 4,
+          "rawP": 0.6667,
+          "priorP": 0.5445,
+          "pCalib": 0.602
         }
       ],
       "coverage": [
         0.3,
         1.001
       ],
-      "nTotal": 41
-    }
-  },
-  "backtest": {
-    "pre": {
-      "label": "PRE  (raw)",
-      "n": 84,
-      "wins": 50,
-      "hit": 59.5,
-      "profit": 8.45,
-      "roi": 10.1,
-      "avgP": 0.69,
-      "avgEV": 27.3,
-      "avgClv": -0.22,
-      "brier": 0.2369,
-      "ece": 0.1549
-    },
-    "post": {
-      "label": "POST (calib)",
-      "n": 38,
-      "wins": 21,
-      "hit": 55.3,
-      "profit": 5.73,
-      "roi": 15.1,
-      "avgP": 0.564,
-      "avgEV": 24.3,
-      "avgClv": -4.2,
-      "brier": 0.2369,
-      "ece": 0.0584
+      "nTotal": 51
     }
   }
 }

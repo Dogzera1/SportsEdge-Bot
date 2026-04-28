@@ -6410,7 +6410,17 @@ async function autoAnalyzeMatch(token, match) {
             const t2Roster = getTeamRosterStats(db, match.team2);
             if (t1Roster && t2Roster) {
               const { predictMapKills, scanKillsMarkets } = require('./lib/lol-kills-model');
-              const predict = predictMapKills(t1Roster, t2Roster);
+              // Side detection: live data tem blueTeam.name; pre-game = null (neutro).
+              let team1IsBlue = null;
+              if (lolLiveStats?.blueTeam?.name) {
+                const blueNorm = norm(lolLiveStats.blueTeam.name);
+                const t1Norm = norm(match.team1);
+                team1IsBlue = blueNorm === t1Norm || blueNorm.includes(t1Norm) || t1Norm.includes(blueNorm);
+              }
+              const predict = predictMapKills(t1Roster, t2Roster, {
+                league: match.league || match.tournament,
+                team1IsBlue,
+              });
               if (predict) {
                 const minEvKills = parseFloat(process.env.LOL_KILLS_SCAN_MIN_EV ?? '5');
                 const bestOf = lolModel.bestOf || 3;
@@ -14611,6 +14621,21 @@ async function pollFootball(runOnce = false) {
               const total = (mlScore.pH || 0) + (mlScore.pD || 0) + (mlScore.pA || 0);
               if (total > 0) { mlScore.pH /= total; mlScore.pD /= total; mlScore.pA /= total; }
               mlScore._fbModel = fbModel;
+              // 2026-04-28: trained Poisson tem markets.ou expandido (commit 2be634a).
+              // calcFootballScore.over25Prob é Poisson genérico — subestima goals em
+              // ligas tier-3 (League One/Two/Serie B Italia: predP 21.8% vs hit 64.7%
+              // em audit 90d). Usar trained markets.ou['2.5'].over quando disponível
+              // corrige o gap. mlScore.over25Prob é em escala 0-100, fbTrained em 0-1.
+              if (fbTrained?.markets?.ou?.['2.5']?.over != null) {
+                const newOver25 = +(fbTrained.markets.ou['2.5'].over * 100).toFixed(1);
+                if (mlScore.over25Prob != null && Math.abs(newOver25 - mlScore.over25Prob) >= 5) {
+                  log('DEBUG', 'FB-MODEL', `${match.team1} vs ${match.team2}: over25 ${mlScore.over25Prob}%→${newOver25}% (trained Poisson markets)`);
+                }
+                mlScore.over25Prob = newOver25;
+              }
+              if (fbTrained?.markets?.btts?.yes != null) {
+                mlScore.bttsProb = +(fbTrained.markets.btts.yes * 100).toFixed(1);
+              }
             }
           }
         } catch (e) { reportBug('FB-MODEL', e); }
