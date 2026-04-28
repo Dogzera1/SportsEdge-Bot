@@ -100,7 +100,11 @@ function evCeilingFor(game, odds) {
         const { hasTrainedModel: hasTennis } = require('./lib/tennis-model-trained');
         ok = hasTennis();
       } catch (_) {}
-      base = ok ? 80 : 50;
+      // 2026-04-28: tennis ceiling reduzido 80→60 quando isotonic disabled
+      // (default true após audit ML shadow ROI -32%). Sem isotonic, raw
+      // model é bom mas não tão calibrado quanto trained+isotonic. Conservador.
+      const isotonicDisabled = !/^(0|false|no)$/i.test(String(process.env.TENNIS_ISOTONIC_DISABLED ?? 'true'));
+      base = ok ? (isotonicDisabled ? 60 : 80) : 50;
     } else base = 50;
   }
   const adj = _brierEvAdjustmentFor(game);
@@ -1288,9 +1292,15 @@ async function applyGlobalRisk(sport, desiredUnits, leagueSlug) {
 
   // ── Drawdown check: reduz/bloqueia stakes quando banca está em queda ──
   // Gradiente: SOFT (15%)×0.5 → TAPER (20%)×0.35 → HARD (25%)=bloqueia → DRAINED (banca<=0)=bloqueia.
+  // 2026-04-28: histerese restore — quando sport entra em taper, exige
+  // DD <12% pra sair (vs threshold de entrada 15%). Antes flicker on/off
+  // se DD oscilava em 14-16%. _drawdownState tracking persistente per-sport.
+  if (!global._drawdownState) global._drawdownState = new Map();
+  const _ddState = global._drawdownState.get(sport) || { taper: false, soft: false };
   let drawdownMult = 1.0;
   const cached = _drawdownCache.get(sport);
   const DRAWDOWN_TAPER_LIMIT = parseFloat(process.env.DRAWDOWN_TAPER_LIMIT || '0.20'); // 20% intermediário
+  const RESTORE_BUFFER = parseFloat(process.env.DRAWDOWN_RESTORE_BUFFER || '0.03'); // 3pp histerese
   const applyFromPct = (drawdown) => {
     if (drawdown >= 1) { // banca <= 0 (drenou totalmente a allocation)
       log('WARN', 'RISK', `${sport}: ALOCAÇÃO DRENADA (banca ≤ 0) — BLOQUEADO até rebalance manual`);
@@ -1300,13 +1310,32 @@ async function applyGlobalRisk(sport, desiredUnits, leagueSlug) {
       log('WARN', 'RISK', `${sport}: drawdown ${(drawdown * 100).toFixed(1)}% ≥ ${(DRAWDOWN_HARD_LIMIT * 100).toFixed(0)}% — BLOQUEADO`);
       return { ok: false, units: 0, reason: `drawdown_${(drawdown * 100).toFixed(0)}pct` };
     }
-    if (drawdown >= DRAWDOWN_TAPER_LIMIT) {
-      log('INFO', 'RISK', `${sport}: drawdown ${(drawdown * 100).toFixed(1)}% ≥ ${(DRAWDOWN_TAPER_LIMIT * 100).toFixed(0)}% — stakes ×0.35`);
+    // TAPER state: enter @ TAPER_LIMIT, exit @ TAPER_LIMIT - RESTORE_BUFFER
+    const taperEnter = drawdown >= DRAWDOWN_TAPER_LIMIT;
+    const taperExit = drawdown < (DRAWDOWN_TAPER_LIMIT - RESTORE_BUFFER);
+    if (taperEnter || (_ddState.taper && !taperExit)) {
+      _ddState.taper = true;
+      _ddState.soft = true; // taper implica soft
+      global._drawdownState.set(sport, _ddState);
+      log('INFO', 'RISK', `${sport}: drawdown ${(drawdown * 100).toFixed(1)}% — taper ×0.35${_ddState.taper && !taperEnter ? ' (sticky até <' + ((DRAWDOWN_TAPER_LIMIT - RESTORE_BUFFER) * 100).toFixed(0) + '%)' : ''}`);
       return { mult: 0.35 };
     }
-    if (drawdown >= DRAWDOWN_SOFT_LIMIT) {
-      log('INFO', 'RISK', `${sport}: drawdown ${(drawdown * 100).toFixed(1)}% ≥ ${(DRAWDOWN_SOFT_LIMIT * 100).toFixed(0)}% — stakes ×0.5`);
+    // SOFT state: enter @ SOFT_LIMIT, exit @ SOFT_LIMIT - RESTORE_BUFFER
+    const softEnter = drawdown >= DRAWDOWN_SOFT_LIMIT;
+    const softExit = drawdown < (DRAWDOWN_SOFT_LIMIT - RESTORE_BUFFER);
+    if (softEnter || (_ddState.soft && !softExit)) {
+      _ddState.taper = false;
+      _ddState.soft = true;
+      global._drawdownState.set(sport, _ddState);
+      log('INFO', 'RISK', `${sport}: drawdown ${(drawdown * 100).toFixed(1)}% — soft ×0.5${_ddState.soft && !softEnter ? ' (sticky até <' + ((DRAWDOWN_SOFT_LIMIT - RESTORE_BUFFER) * 100).toFixed(0) + '%)' : ''}`);
       return { mult: 0.5 };
+    }
+    // Restore: clear state
+    if (_ddState.taper || _ddState.soft) {
+      log('INFO', 'RISK', `${sport}: drawdown ${(drawdown * 100).toFixed(1)}% — restored full stakes`);
+      _ddState.taper = false;
+      _ddState.soft = false;
+      global._drawdownState.set(sport, _ddState);
     }
     return { mult: 1.0 };
   };

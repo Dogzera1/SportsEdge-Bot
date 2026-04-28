@@ -1143,9 +1143,14 @@ async function fetchMapOddsByFixtureId(fixtureId, mapNumber) {
 
   // marketId: 173/175/177/179/181
   const marketId = 173 + ((n - 1) * 2);
-  const cacheKey = `map_${fid}_${n}`;
+  // 2026-04-28: cache key inclui provider prefix ('oddspapi:') pra evitar
+  // colisão se outros providers compartilharem fixtureId numérico no futuro.
+  const cacheKey = `oddspapi:map_${fid}_${n}`;
   const cached = mapOddsCache.get(cacheKey);
-  const ttlMs = Math.max(2000, parseInt(process.env.ODDSPAPI_MAP_ODDS_TTL_MS || '8000', 10) || 8000);
+  // 2026-04-28: TTL 3s default (era 8s). Em CS clutch (round 12-12),
+  // 8s = mudança de 1.85→2.10 → CLV ruim. 3s captura odd fresca pra
+  // tip live emitida mid-round.
+  const ttlMs = Math.max(1000, parseInt(process.env.ODDSPAPI_MAP_ODDS_TTL_MS || '3000', 10) || 3000);
   if (cached && (Date.now() - cached.ts) < ttlMs) return cached;
 
   const urls = [
