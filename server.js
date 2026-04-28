@@ -8956,6 +8956,48 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // POST /admin/mt-unvoid-recent?sport=tennis&hours=12&apply=1&key=<KEY>
+  // Reverte void recente em market_tips_shadow → result=NULL pra settle cron
+  // re-tentar com pipeline atual (force-settle). Usa quando void foi bulk
+  // (e.g., /void-old-pending) mas pipeline foi melhorado pra settle aqueles
+  // com score disponível.
+  if (p === '/admin/mt-unvoid-recent' && (req.method === 'POST' || req.method === 'GET')) {
+    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const sport = parsed.query.sport && parsed.query.sport !== 'all' ? parsed.query.sport : null;
+    const hours = Math.max(1, Math.min(168, parseInt(parsed.query.hours || '12', 10) || 12));
+    const apply = parsed.query.apply === '1' || parsed.query.apply === 'true';
+    try {
+      const conds = [
+        `result = 'void'`,
+        `profit_units = 0`,
+        `settled_at >= datetime('now', '-${hours} hours')`,
+      ];
+      const params = [];
+      if (sport) { conds.push('sport = ?'); params.push(sport); }
+      const targets = db.prepare(`
+        SELECT id, sport, team1, team2, league, market, side, settled_at
+        FROM market_tips_shadow
+        WHERE ${conds.join(' AND ')}
+        ORDER BY settled_at DESC
+        LIMIT 500
+      `).all(...params);
+      if (!apply) {
+        sendJson(res, { ok: true, dry_run: true, sport: sport || 'all', hours, count: targets.length, sample: targets.slice(0, 5) });
+        return;
+      }
+      let updated = 0;
+      const stmt = db.prepare(`UPDATE market_tips_shadow
+        SET result = NULL, settled_at = NULL, profit_units = NULL
+        WHERE id = ? AND result = 'void' AND profit_units = 0`);
+      for (const t of targets) {
+        try { const r = stmt.run(t.id); if (r.changes > 0) updated++; } catch (_) {}
+      }
+      sendJson(res, { ok: true, sport: sport || 'all', hours, target_count: targets.length, unvoided: updated });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
   // GET /admin/mt-pending-trace?sport=tennis&days=7&minAgeHours=12&key=<KEY>
   // Pra cada pending tip que JÁ deveria ter settled (>minAgeHours desde
   // criação), tenta achar match_results match e retorna por que falhou.
