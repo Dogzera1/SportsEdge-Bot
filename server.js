@@ -929,11 +929,25 @@ function upsertTennisPostCompetitionsFromEspnJson(j, slug) {
         }
         const league = `${String(slug).toUpperCase()} ${evName}`.slice(0, 220);
         const dateIso = String(comp.date || '').trim();
+        // 2026-04-28: ESPN scoreboard expõe `comp.date` como MATCH START, sem
+        // finish time. Tennis matches duram 1-3h em média; usar start cru fazia
+        // MT-SHADOW skipar tips live (criadas durante o jogo) com "all candidates
+        // resolved >5min before tip created_at" — 54 tips skipadas em log 16:01.
+        // Adiciona +2h pra aproximar fim típico ATP/WTA Bo3 (Slams Bo5 ~3h
+        // ainda passam guard 5min). Earlier matches do mesmo par ainda blocked
+        // (R1 11h → +2h = 13h vs R2 tip 14:30-5min=14:25 → 13:00<14:25 ✓).
         let resolvedAt = null;
+        const TENNIS_DUR_MS = 2 * 60 * 60 * 1000;
         if (dateIso.includes('T')) {
-          resolvedAt = dateIso.replace('T', ' ').replace(/\.\d{3}Z?$/, '').slice(0, 19);
+          const startMs = Date.parse(dateIso);
+          if (Number.isFinite(startMs)) {
+            const endMs = startMs + TENNIS_DUR_MS;
+            resolvedAt = new Date(endMs).toISOString().replace('T', ' ').slice(0, 19);
+          } else {
+            resolvedAt = dateIso.replace('T', ' ').replace(/\.\d{3}Z?$/, '').slice(0, 19);
+          }
         } else if (dateIso.length >= 10) {
-          resolvedAt = `${dateIso.slice(0, 10)} 12:00:00`;
+          resolvedAt = `${dateIso.slice(0, 10)} 14:00:00`;
         }
         if (!resolvedAt) continue;
         try {
@@ -4506,7 +4520,11 @@ const server = http.createServer(async (req, res) => {
       if (wr.status !== 200) wr = await httpGet(base, LOL_HEADERS); // fallback com key
       const raw = wr.status === 200 ? safeParse(wr.body, {}) : {};
       if (wr.status !== 200) {
-        log('INFO', 'LIVE-GAME', `window/${gameId}: base status=${wr.status} — tentando varredura mesmo assim`);
+        // 2026-04-28: rebaixado de INFO pra DEBUG. O resultado da varredura
+        // é logado abaixo (INFO se achou gold, DEBUG se vazio). Esse pre-log
+        // só polui quando jogo ainda não tem feed (Esports World Cup novos
+        // matches retornam 204 base + 400 nas primeiras janelas por minutos).
+        log('DEBUG', 'LIVE-GAME', `window/${gameId}: base status=${wr.status} — tentando varredura mesmo assim`);
       }
 
       // 2) Varredura paralela. DESCOBERTA 2026-04-15: Riot retém livestats em janela curta

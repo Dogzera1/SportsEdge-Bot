@@ -8,9 +8,12 @@
  * tennis_match_stats. Complementa match_results (que tem só winner + final_score).
  *
  * Uso:
- *   node scripts/sync-tennis-stats.js                      # default 2024+2025+2026, atp+wta
+ *   node scripts/sync-tennis-stats.js                      # default 2024+2025+2026, atp+wta, main+chall
  *   node scripts/sync-tennis-stats.js --years=2023,2024,2025
  *   node scripts/sync-tennis-stats.js --tours=atp
+ *   node scripts/sync-tennis-stats.js --tiers=main          # só ATP/WTA main tour
+ *   node scripts/sync-tennis-stats.js --tiers=main,chall    # +ATP Challenger / WTA 125
+ *   node scripts/sync-tennis-stats.js --tiers=main,chall,futures  # +ITF
  *   node scripts/sync-tennis-stats.js --delay=500
  */
 
@@ -30,7 +33,27 @@ const argVal = (n, d) => {
 
 const YEARS = (argVal('years', '2024,2025,2026')).split(',').map(s => s.trim()).filter(Boolean);
 const TOURS = (argVal('tours', 'atp,wta')).split(',').map(s => s.trim()).filter(Boolean);
+// 2026-04-28: tiers configurável — main tour only deixa 80% das tips lower-tier
+// sem serve stats (Markov falha "no serve stats available"). Chall+futures cobre
+// ATP Challenger + ITF Men + WTA 125 + ITF Women.
+const TIERS = (argVal('tiers', 'main,chall')).split(',').map(s => s.trim()).filter(Boolean);
 const DELAY = parseInt(argVal('delay', '400'), 10);
+
+// Sackmann CSV path por (tour, tier, year)
+function buildUrl(tour, tier, year) {
+  const repo = tour === 'wta' ? 'tennis_wta' : 'tennis_atp';
+  let prefix;
+  if (tour === 'atp') {
+    prefix = tier === 'chall' ? 'atp_matches_qual_chall'
+      : tier === 'futures' ? 'atp_matches_futures'
+      : 'atp_matches';
+  } else {
+    prefix = tier === 'chall' ? 'wta_matches_qual_itf'
+      : tier === 'futures' ? 'wta_matches_qual_itf'  // WTA não separa futures
+      : 'wta_matches';
+  }
+  return `https://raw.githubusercontent.com/JeffSackmann/${repo}/master/${prefix}_${year}.csv`;
+}
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
@@ -87,21 +110,24 @@ async function main() {
   `);
 
   let total = 0, inserted = 0, skipped = 0;
+  // Dedup chall+futures pra WTA (mesmo arquivo)
+  const seenUrls = new Set();
   for (const tour of TOURS) {
-    for (const year of YEARS) {
-      const repo = tour === 'wta' ? 'tennis_wta' : 'tennis_atp';
-      const prefix = tour === 'wta' ? 'wta_matches' : 'atp_matches';
-      const url = `https://raw.githubusercontent.com/JeffSackmann/${repo}/master/${prefix}_${year}.csv`;
-      console.log(`  ${tour}/${year}: fetching...`);
-      let csv;
-      try { csv = await httpGetText(url); }
-      catch (e) { console.log(`    err: ${e.message}`); continue; }
-      const rows = parseCsv(csv);
-      total += rows.length;
+    for (const tier of TIERS) {
+      for (const year of YEARS) {
+        const url = buildUrl(tour, tier, year);
+        if (seenUrls.has(url)) continue;
+        seenUrls.add(url);
+        console.log(`  ${tour}/${tier}/${year}: fetching...`);
+        let csv;
+        try { csv = await httpGetText(url); }
+        catch (e) { console.log(`    err: ${e.message}`); continue; }
+        const rows = parseCsv(csv);
+        total += rows.length;
 
       const tx = db.transaction((rs) => {
         for (const r of rs) {
-          const matchId = `sackmann_${tour}_${r.tourney_id}_${r.match_num}`;
+          const matchId = `sackmann_${tour}_${tier}_${r.tourney_id}_${r.match_num}`;
           // Sackmann ordena (winner, loser). Convertemos pra (p1=winner, p2=loser).
           const p1 = r.winner_name, p2 = r.loser_name;
           if (!p1 || !p2) { skipped++; continue; }
@@ -121,9 +147,10 @@ async function main() {
           inserted++;
         }
       });
-      tx(rows);
-      console.log(`    parsed=${rows.length}, skipped=${rows.length - (inserted)}`);
-      await sleep(DELAY);
+        tx(rows);
+        console.log(`    parsed=${rows.length}, skipped=${rows.length - (inserted)}`);
+        await sleep(DELAY);
+      }
     }
   }
 

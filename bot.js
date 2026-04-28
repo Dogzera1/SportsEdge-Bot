@@ -14929,7 +14929,17 @@ Máximo 200 palavras.`;
           const _advisoryOn = !/^(0|false|no)$/i.test(String(process.env.FB_IA_ADVISORY || '')) && !isPathDisabled('football', 'override');
           const _minConf = parseFloat(process.env.FB_IA_OVERRIDE_MIN_CONF || '0.45');
           const _minEv = parseFloat(process.env.FB_IA_OVERRIDE_MIN_EV || '5');
-          const canOverride = _advisoryOn && fbTrained &&
+          // 2026-04-28: trained Poisson cobre só edge leagues (Brazil/Scandi/Russia/etc).
+          // PL/La Liga/Serie A/Bundesliga/Ligue 1 ficavam 100% skipadas mesmo com mlEv>20%
+          // pois fbTrained=null. Allow heuristic-only override quando fbModel é
+          // poisson+form (Poisson genérico + form factor) com conf alta. Bar mais
+          // alto que trained (0.60 vs 0.45) e EV mínimo separado.
+          const _heurMinConf = parseFloat(process.env.FB_OVERRIDE_HEURISTIC_MIN_CONF || '0.60');
+          const _heurMinEv = parseFloat(process.env.FB_OVERRIDE_HEURISTIC_MIN_EV || '8');
+          const _heurOk = !fbTrained && fbModel && /poisson/i.test(String(fbModel.method || '')) &&
+            (fbModel.confidence ?? 0) >= _heurMinConf &&
+            parseFloat(mlScore?.bestEv ?? 0) >= _heurMinEv;
+          const canOverride = _advisoryOn && (fbTrained || _heurOk) &&
             (fbModel?.confidence ?? 0) >= _minConf &&
             parseFloat(mlScore?.bestEv ?? 0) >= _minEv;
           if (canOverride) {
@@ -14947,7 +14957,8 @@ Máximo 200 palavras.`;
               _fbFromOverride = true;
               // [full, mercado, seleção, odd, EV, stake, CONF]
               tipMatchEff = [null, dir, seleção, String(oddVal.toFixed(2)), String(evVal.toFixed(1)), '1', 'BAIXA'];
-              log('INFO', 'FB-IA-OVERRIDE', `${match.team1} vs ${match.team2} [${match.league}]: override IA SEM_EDGE — ${dir}:${seleção}@${oddVal.toFixed(2)} EV=${evVal.toFixed(1)}% modelConf=${fbModel?.confidence?.toFixed(2) ?? 'n/a'} → CONF=BAIXA stake=1u`);
+              const _src = fbTrained ? 'trained' : 'heuristic';
+              log('INFO', 'FB-IA-OVERRIDE', `${match.team1} vs ${match.team2} [${match.league}]: override IA SEM_EDGE [${_src}] — ${dir}:${seleção}@${oddVal.toFixed(2)} EV=${evVal.toFixed(1)}% modelConf=${fbModel?.confidence?.toFixed(2) ?? 'n/a'} method=${fbModel?.method || 'n/a'} → CONF=BAIXA stake=1u`);
             }
           }
           if (!_fbFromOverride) {
@@ -17932,7 +17943,10 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   const runTennisStatsSync = () => {
     try {
       const { spawn } = require('child_process');
-      const proc = spawn('node', ['scripts/sync-tennis-stats.js', '--years=2024,2025,2026', '--tours=atp,wta'], {
+      // tiers=main,chall cobre ATP main + Challengers + WTA main + WTA 125/ITF
+      // (Markov antes falhava p/ ~80% dos lower-tier matches sem stats).
+      const _tiers = process.env.TENNIS_STATS_TIERS || 'main,chall';
+      const proc = spawn('node', ['scripts/sync-tennis-stats.js', '--years=2024,2025,2026', '--tours=atp,wta', `--tiers=${_tiers}`], {
         cwd: __dirname, env: process.env, detached: false,
       });
       proc.on('close', (code) => {
