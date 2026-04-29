@@ -10057,6 +10057,41 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // GET /league-trust?sport=tennis&league=ATP+Madrid+-+R3&market=HANDICAP_GAMES&key=<KEY>
+  // OU /league-trust?sport=tennis (lista trust de todas as ligas conhecidas pro sport).
+  // Sprint 3.1 — debug/audit do bayesian trust score.
+  if (p === '/league-trust') {
+    if (!requireAdmin(req, res)) return;
+    const sport = String(parsed.query.sport || '').toLowerCase().trim();
+    const leagueParam = parsed.query.league ? String(parsed.query.league).trim() : null;
+    const market = parsed.query.market ? String(parsed.query.market).trim() : null;
+    if (!sport) { sendJson(res, { ok: false, error: 'sport required' }, 400); return; }
+    try {
+      const { getLeagueTrust } = require('./lib/league-trust');
+      if (leagueParam) {
+        const t = getLeagueTrust(db, sport, leagueParam, market, { cacheBypass: true });
+        sendJson(res, { ok: true, sport, league: leagueParam, market, ...t });
+        return;
+      }
+      // Lista todas ligas com tips no sport (60d window)
+      const leagues = db.prepare(`
+        SELECT DISTINCT event_name AS league FROM tips
+        WHERE sport = ? AND sent_at >= datetime('now','-60 days')
+          AND COALESCE(is_shadow,0) = 0
+        UNION
+        SELECT DISTINCT league FROM market_tips_shadow
+        WHERE sport = ? AND created_at >= datetime('now','-60 days')
+      `).all(sport, sport).map(r => r.league).filter(Boolean);
+
+      const out = leagues.map(lg => {
+        const t = getLeagueTrust(db, sport, lg, market, { cacheBypass: true });
+        return { league: lg, ...t };
+      }).sort((a, b) => (b.n || 0) - (a.n || 0));
+      sendJson(res, { ok: true, sport, market, count: out.length, leagues: out });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   // GET /leak-radar?days=14&min_n=5&roi_max=-15&key=<KEY>
   // Sprint 2.2: scanner cross-(sport,liga,market,side) com gates conservadores.
   // Identifica leaks ANTES de virar -50%. Cron pode bater 6h e DM admin.

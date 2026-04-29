@@ -4302,7 +4302,29 @@ async function recordMarketTipAsRegular({ sport, match, tip, stake, isLive }) {
     const syntheticMatchId = `${matchIdBase}::mt::${marketKey}::${sideKey}${lineSuffix}`;
     const market_type = _MT_MARKET_TYPE_MAP[marketKey] || marketKey.toUpperCase();
     const participant = _mtParticipant(match, tip);
-    const stakeStr = typeof stake === 'number' ? `${stake}u` : String(stake || '1u');
+
+    // ── Sprint 3.1: Bayesian league trust score ──
+    // Multiplica stake_raw × trust(0.15..1.20) baseado em ROI rolling 60d da
+    // (sport, liga, market). Liga "morna" recebe stake reduzido sem block total.
+    let stakeAdjusted = stake;
+    let trustInfo = null;
+    try {
+      const { applyTrustToStake } = require('./lib/league-trust');
+      const stakeNum = typeof stake === 'number' ? stake : parseFloat(String(stake || '1').replace('u','')) || 1;
+      const t = applyTrustToStake(db, sport, match.league, market_type, stakeNum);
+      if (t.applied) {
+        log('INFO', 'LEAGUE-TRUST', `${sport}/${match.league}/${market_type}: trust=${t.trust} (n=${t.info.n} ROI=${t.info.roi}% src=${t.info.source}) stake ${stakeNum}u → ${t.stakeFinal}u`);
+        // Floor 0.1u — stakes < 0.1u não valem dispatch (custo fixo > EV).
+        if (t.stakeFinal < 0.1) {
+          log('INFO', 'LEAGUE-TRUST', `${sport}/${match.league}/${market_type}: stake_final ${t.stakeFinal}u < 0.1u floor — skip dispatch`);
+          return null;
+        }
+        stakeAdjusted = t.stakeFinal;
+      }
+      trustInfo = t.info;
+    } catch (e) { log('DEBUG', 'LEAGUE-TRUST', `err: ${e.message}`); }
+
+    const stakeStr = typeof stakeAdjusted === 'number' ? `${stakeAdjusted}u` : String(stakeAdjusted || '1u');
     const conf = tip.ev >= 15 ? 'ALTA' : tip.ev >= 8 ? 'MÉDIA' : 'BAIXA';
     const rec = await serverPost('/record-tip', {
       matchId: syntheticMatchId,
