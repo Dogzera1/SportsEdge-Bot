@@ -7695,6 +7695,56 @@ const server = http.createServer(async (req, res) => {
         if (_psKillsTrace.length < 12) _psKillsTrace.push({ ps: psMatchId, map: mapIndex, step, ...(extra || {}) });
       };
 
+      // Resolve kills via Oracle's Elixir DB local (oracleselixir_games):
+      // 2 rows por gameid (blue+red), com kills por team. Cobre top-tier
+      // (LCK/LPL/LEC/LCS/EWC/MSI/Worlds) com lag 24-48h pós-match.
+      function _fetchKillsOE(team1, team2, mapIndex, sentAt) {
+        try {
+          if (!team1 || !team2) return { reason: 'oe_no_teams' };
+          const normT = s => String(s||'').toLowerCase().replace(/[^a-z0-9]/g, '');
+          const t1n = normT(team1), t2n = normT(team2);
+          // Janela ±10d em torno do sent_at
+          const tipMs = Date.parse(String(sentAt).includes('T') ? sentAt : String(sentAt).replace(' ', 'T'));
+          if (!Number.isFinite(tipMs)) return { reason: 'oe_no_date' };
+          const before = new Date(tipMs - 10 * 86400000).toISOString().slice(0, 10);
+          const after = new Date(tipMs + 10 * 86400000).toISOString().slice(0, 10);
+          // OE tem 2 rows por gameid (uma por side). Agrupa por gameid + soma kills.
+          // Filtro de teams: ambos devem aparecer no mesmo gameid.
+          const games = db.prepare(`
+            SELECT gameid, MIN(date) as date, SUM(kills) as total_kills,
+                   GROUP_CONCAT(lower(replace(replace(replace(teamname,' ',''),'-',''),'.','')), '|') as teams_norm
+            FROM oracleselixir_games
+            WHERE date >= ? AND date <= ?
+            GROUP BY gameid
+            HAVING (instr(teams_norm, ?) > 0 AND instr(teams_norm, ?) > 0)
+            ORDER BY date ASC
+          `).all(before, after, t1n, t2n);
+          if (!games.length) return { reason: 'oe_no_games_in_window' };
+          // Filtra games com AMBOS os teams (defensive — instr é frouxo)
+          const valid = games.filter(g => {
+            const norms = (g.teams_norm || '').split('|');
+            return norms.some(n => n.includes(t1n) || t1n.includes(n))
+                && norms.some(n => n.includes(t2n) || t2n.includes(n));
+          });
+          if (!valid.length) return { reason: 'oe_no_team_match' };
+          // mapIndex 1-based — pega o N-ésimo game ordenado por date
+          const target = valid[mapIndex - 1];
+          if (!target) {
+            // Mapa pedido > games disponíveis = sweep, não jogou
+            const allDone = valid.length >= 1; // pelo menos 1 game existe
+            if (allDone) return { mapNotPlayed: true, available_count: valid.length };
+            return { reason: 'oe_map_index_oob', available: valid.length };
+          }
+          const totalKills = Number(target.total_kills);
+          if (!Number.isFinite(totalKills) || totalKills <= 0) {
+            return { reason: 'oe_invalid_kills', kills: target.total_kills };
+          }
+          return { totalKills, source: 'oe', gameid: target.gameid };
+        } catch (e) {
+          return { reason: 'oe_exception', msg: e.message };
+        }
+      }
+
       // Resolve kills via Riot livestats: matcha por team1/team2 no schedule,
       // pega game ID do mapa N, fetcha livestats final frame.
       async function _fetchKillsRiot(team1, team2, mapIndex, riotMatchId) {
@@ -7884,7 +7934,21 @@ const server = http.createServer(async (req, res) => {
           } catch (e) { trace('ps_exception', { msg: e.message }); }
         }
 
-        // ── Tier 2: Riot livestats ──
+        // ── Tier 2: Oracle's Elixir (DB local, top-tier coverage com 24-48h lag) ──
+        const oeRes = _fetchKillsOE(team1, team2, mapIndex, sentAt);
+        if (oeRes.totalKills != null) {
+          trace('oe_ok', { kills: oeRes.totalKills, gameid: oeRes.gameid });
+          const out = { totalKills: oeRes.totalKills, source: 'oe' };
+          _psKillsCache.set(cacheKey, out); return out;
+        }
+        if (oeRes.mapNotPlayed) {
+          trace('oe_map_not_played', { available: oeRes.available_count });
+          const out = { mapNotPlayed: true, source: 'oe' };
+          _psKillsCache.set(cacheKey, out); return out;
+        }
+        trace('oe_fail', { reason: oeRes.reason });
+
+        // ── Tier 3: Riot livestats ──
         const riotRes = await _fetchKillsRiot(team1, team2, mapIndex, riotMatchId);
         if (riotRes.totalKills != null) {
           trace('riot_ok', { kills: riotRes.totalKills });
