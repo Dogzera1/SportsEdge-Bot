@@ -9054,7 +9054,28 @@ const server = http.createServer(async (req, res) => {
       const players = db.prepare(`SELECT year, COUNT(*) AS n FROM oracleselixir_players GROUP BY year ORDER BY year DESC`).all();
       const playersTotal = players.reduce((s, r) => s + r.n, 0);
       const gamesTotal = games.reduce((s, r) => s + r.n, 0);
-      sendJson(res, { ok: true, gamesTotal, playersTotal, games, players });
+      const latestDate = db.prepare(`SELECT MAX(date) AS d FROM oracleselixir_games`).get();
+      // Optional team1/team2 search pra debug coverage
+      let teamSearch = null;
+      const t1q = String(parsed.query.team1 || '').trim();
+      const t2q = String(parsed.query.team2 || '').trim();
+      if (t1q && t2q) {
+        const normT = s => String(s||'').toLowerCase().replace(/[^a-z0-9]/g, '');
+        const t1n = normT(t1q), t2n = normT(t2q);
+        const matches = db.prepare(`
+          SELECT gameid, MIN(date) as date, league,
+                 GROUP_CONCAT(teamname, ' vs ') as teams,
+                 SUM(kills) as total_kills
+          FROM oracleselixir_games
+          WHERE date >= date('now', '-30 days')
+          GROUP BY gameid
+          HAVING (instr(lower(replace(replace(replace(teams,' ',''),'-',''),'.','')), ?) > 0
+              AND instr(lower(replace(replace(replace(teams,' ',''),'-',''),'.','')), ?) > 0)
+          ORDER BY date DESC LIMIT 20
+        `).all(t1n, t2n);
+        teamSearch = matches;
+      }
+      sendJson(res, { ok: true, gamesTotal, playersTotal, latestDate: latestDate?.d, games, players, teamSearch });
     } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
     return;
   }
