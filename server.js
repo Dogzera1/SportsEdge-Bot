@@ -7939,8 +7939,13 @@ const server = http.createServer(async (req, res) => {
         // ── Tier 3: gol.gg scrape (DB lookup → match URL) ──
         const ggRes = await _fetchKillsGolgg(team1, team2, mapIndex, sentAt, leagueHint);
         if (ggRes.totalKills != null) {
-          trace('golgg_ok', { kills: ggRes.totalKills });
+          trace('golgg_ok', { kills: ggRes.totalKills, source: ggRes.source, foundVia: ggRes.foundVia });
           const out = { totalKills: ggRes.totalKills, source: 'golgg' };
+          _psKillsCache.set(cacheKey, out); return out;
+        }
+        if (ggRes.mapNotPlayed) {
+          trace('golgg_map_not_played', { available: ggRes.available_count });
+          const out = { mapNotPlayed: true, source: 'golgg' };
           _psKillsCache.set(cacheKey, out); return out;
         }
         trace('golgg_fail', { reason: ggRes.reason });
