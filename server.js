@@ -7709,10 +7709,85 @@ const server = http.createServer(async (req, res) => {
           const placeholders = games.map(() => '?').join(',');
           const n1 = _norm(t.participant1), n2 = _norm(t.participant2);
           if (!n1 || !n2) { summary.skipped++; continue; }
-          // Janela ±7d em torno do sent_at (esports/MMA) ou ±10d (tennis/football)
-          const windowDays = ['tennis','football'].includes(t.sport) ? 10 : 7;
           const tipMs = Date.parse(String(t.sent_at).includes('T') ? t.sent_at : t.sent_at.replace(' ', 'T'));
           if (!Number.isFinite(tipMs)) { summary.skipped++; continue; }
+          const odds = parseFloat(t.odds) || 1;
+          const stakeR = (() => {
+            const sport = t.sport;
+            try {
+              const { getSportUnitValue } = require('./lib/sport-unit');
+              const bk = stmts.getBankroll.get(sport);
+              const uv = getSportUnitValue(bk?.current_banca || 0, bk?.initial_banca || 100);
+              const su = parseFloat(String(t.stake || '1').replace('u','')) || 1;
+              return parseFloat((su * uv).toFixed(2));
+            } catch (_) { return 1; }
+          })();
+          // 2026-04-28: detecção de market type pra resolução específica.
+          // ML/1X2: name match contra winner. HG/TG: parse score tennis.
+          // 2026-04-29: total_kills_map<N> (LoL) → PandaScore games API.
+          // HANDICAP/TOTAL maps esports: skip.
+          const mt = String(t.market_type || 'ML').toUpperCase();
+          const isMlLike = ['ML','1X2_H','1X2_A','1X2_D','OVER_2.5','UNDER_2.5','DRAW'].includes(mt);
+          const isTennisHg = mt === 'HANDICAP_GAMES' && t.sport === 'tennis';
+          const isTennisTg = mt === 'TOTAL_GAMES' && t.sport === 'tennis';
+          const isKills = /^TOTAL_KILLS_MAP\d+$/.test(mt);
+
+          // 2026-04-29 BUGFIX: kills tips têm `ps_<id>` direto em t.match_id —
+          // bypass match_results lookup (que falhava sem sync prévio). Walkover
+          // detection não se aplica a totais (kills parciais ainda contam).
+          let result, profitR;
+          if (isKills) {
+            if (t.sport !== 'lol') { summary.skipped++; continue; }
+            const mapMatch = mt.match(/^TOTAL_KILLS_MAP(\d+)$/);
+            if (!mapMatch) { summary.skipped++; continue; }
+            const mapIndex = parseInt(mapMatch[1], 10);
+            // Extrai PS id direto do match_id da tip (ex: 'ps_1466110::mt::...')
+            const tipPsMatch = String(t.match_id || '').match(/(?:^|_)ps_(\d+)/);
+            if (!tipPsMatch) { summary.skipped++; continue; }
+            const psMatchId = tipPsMatch[1];
+            // Parse line e side
+            let line = NaN, side = '';
+            const lnTag = String(t.match_id || '').match(/::ln(N|P)?([\d.]+)/);
+            if (lnTag) {
+              const sign = lnTag[1] === 'N' ? -1 : 1;
+              line = sign * parseFloat(lnTag[2]);
+            }
+            const sideTag = String(t.match_id || '').match(/::mt::total_kills_map\d+::(over|under)/i);
+            if (sideTag) side = sideTag[1].toLowerCase();
+            if (!Number.isFinite(line) || !side) {
+              const tipStr = String(t.tip_participant || '').toUpperCase();
+              const fallback = tipStr.match(/(OVER|UNDER)\s+(\d+(?:\.\d+)?)/);
+              if (fallback) { side = fallback[1].toLowerCase(); line = parseFloat(fallback[2]); }
+            }
+            if (!Number.isFinite(line) || !side) { summary.skipped++; continue; }
+            const killsRes = await _fetchLolMapKills(psMatchId, mapIndex);
+            if (!killsRes) { summary.skipped++; continue; }
+            if (killsRes.unfinished) { summary.skipped++; continue; }
+            const totalKills = Number(killsRes.totalKills);
+            if (!Number.isFinite(totalKills) || totalKills <= 0) { summary.skipped++; continue; }
+            const isWin = side === 'over' ? totalKills > line : totalKills < line;
+            result = isWin ? 'win' : 'loss';
+            profitR = isWin ? +(stakeR * (odds - 1)).toFixed(2) : -stakeR;
+            summary.settled++;
+            log('INFO', 'FORCE-SETTLE-KILLS', `tip#${t.id} lol map${mapIndex} ${side} ${line} → kills=${totalKills} → ${result}`);
+            // Atualiza e segue (skip o resto do pipeline match_results)
+            const tx = db.transaction(() => {
+              db.prepare(`UPDATE tips SET result = ?, settled_at = datetime('now'), stake_reais = ?, profit_reais = ? WHERE id = ?`)
+                .run(result, stakeR, profitR, t.id);
+              if (profitR !== 0) {
+                db.prepare(`UPDATE bankroll SET current_banca = current_banca + ?, updated_at = datetime('now') WHERE sport = ?`)
+                  .run(profitR, t.sport);
+              }
+            });
+            tx();
+            if (summary.samples.length < 10) {
+              summary.samples.push({ id: t.id, sport: t.sport, tip: t.tip_participant, total_kills: totalKills, line, side, result, profit_reais: profitR });
+            }
+            continue;
+          }
+
+          // Janela ±7d em torno do sent_at (esports/MMA) ou ±10d (tennis/football)
+          const windowDays = ['tennis','football'].includes(t.sport) ? 10 : 7;
           const before = new Date(tipMs - windowDays * 86400_000).toISOString().slice(0, 19).replace('T', ' ');
           const after = new Date(tipMs + windowDays * 86400_000).toISOString().slice(0, 19).replace('T', ' ');
           const matches = db.prepare(`
@@ -7730,27 +7805,6 @@ const server = http.createServer(async (req, res) => {
           const m = matches[0];
           // Walkover detection
           const isWalkover = _walkoverRe.test(String(m.final_score || ''));
-          let result, profitR;
-          const stakeR = (() => {
-            const sport = t.sport;
-            try {
-              const { getSportUnitValue } = require('./lib/sport-unit');
-              const bk = stmts.getBankroll.get(sport);
-              const uv = getSportUnitValue(bk?.current_banca || 0, bk?.initial_banca || 100);
-              const su = parseFloat(String(t.stake || '1').replace('u','')) || 1;
-              return parseFloat((su * uv).toFixed(2));
-            } catch (_) { return 1; }
-          })();
-          const odds = parseFloat(t.odds) || 1;
-          // 2026-04-28: detecção de market type pra resolução específica.
-          // ML/1X2: name match contra winner. HG/TG: parse score tennis.
-          // 2026-04-29: total_kills_map<N> (LoL) → PandaScore games API.
-          // HANDICAP/TOTAL maps esports: skip.
-          const mt = String(t.market_type || 'ML').toUpperCase();
-          const isMlLike = ['ML','1X2_H','1X2_A','1X2_D','OVER_2.5','UNDER_2.5','DRAW'].includes(mt);
-          const isTennisHg = mt === 'HANDICAP_GAMES' && t.sport === 'tennis';
-          const isTennisTg = mt === 'TOTAL_GAMES' && t.sport === 'tennis';
-          const isKills = /^TOTAL_KILLS_MAP\d+$/.test(mt);
 
           if (isWalkover) {
             result = 'void';
@@ -7812,45 +7866,6 @@ const server = http.createServer(async (req, res) => {
               summary.skipped++;
               continue;
             }
-          } else if (isKills) {
-            // total_kills_map<N>: busca kills via PandaScore /lol/matches/{id}
-            // → /lol/games/{gameId} (somente sport=lol). Match_id da row em
-            // match_results tem prefixo 'lol_ps_' ou 'ps_' → extrai numeric ID.
-            if (t.sport !== 'lol') { summary.skipped++; continue; }
-            const mapMatch = mt.match(/^TOTAL_KILLS_MAP(\d+)$/);
-            if (!mapMatch) { summary.skipped++; continue; }
-            const mapIndex = parseInt(mapMatch[1], 10);
-            // Extrai PS id de match_results.match_id (ex: 'lol_ps_1466110' ou 'ps_1466110')
-            const mrId = String(m.match_id || '');
-            const psIdMatch = mrId.match(/(?:^|_)ps_(\d+)$/);
-            if (!psIdMatch) { summary.skipped++; continue; }
-            const psMatchId = psIdMatch[1];
-            // Parse line e side: prefere ::ln<tag> em t.match_id (formato preciso),
-            // fallback regex em tip_participant ("Mapa 3 OVER 21.5 kills").
-            let line = NaN, side = '';
-            const lnTag = String(t.match_id || '').match(/::ln(N|P)?([\d.]+)/);
-            if (lnTag) {
-              const sign = lnTag[1] === 'N' ? -1 : 1;
-              line = sign * parseFloat(lnTag[2]);
-            }
-            const sideTag = String(t.match_id || '').match(/::mt::total_kills_map\d+::(over|under)/i);
-            if (sideTag) side = sideTag[1].toLowerCase();
-            if (!Number.isFinite(line) || !side) {
-              const tipStr = String(t.tip_participant || '').toUpperCase();
-              const fallback = tipStr.match(/(OVER|UNDER)\s+(\d+(?:\.\d+)?)/);
-              if (fallback) { side = fallback[1].toLowerCase(); line = parseFloat(fallback[2]); }
-            }
-            if (!Number.isFinite(line) || !side) { summary.skipped++; continue; }
-            const killsRes = await _fetchLolMapKills(psMatchId, mapIndex);
-            if (!killsRes) { summary.skipped++; continue; }
-            if (killsRes.unfinished) { summary.skipped++; continue; }
-            const totalKills = Number(killsRes.totalKills);
-            if (!Number.isFinite(totalKills) || totalKills <= 0) { summary.skipped++; continue; }
-            const isWin = side === 'over' ? totalKills > line : totalKills < line;
-            result = isWin ? 'win' : 'loss';
-            profitR = isWin ? +(stakeR * (odds - 1)).toFixed(2) : -stakeR;
-            summary.settled++;
-            log('INFO', 'FORCE-SETTLE-KILLS', `tip#${t.id} lol map${mapIndex} ${side} ${line} → kills=${totalKills} → ${result}`);
           } else {
             // HANDICAP esports / TOTAL maps esports: também precisa map score
             // detalhado, não temos. Skip.
