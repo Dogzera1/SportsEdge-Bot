@@ -7690,79 +7690,229 @@ const server = http.createServer(async (req, res) => {
       // no mesmo match — evita refetch /lol/matches/{id} + /lol/games/{id}).
       // Key = `psMatchId|mapIndex`, value = { totalKills, gameStatus } | null.
       const _psKillsCache = new Map();
-      const _psKillsTrace = []; // diag: até 8 últimas tentativas com motivo de falha
-      async function _fetchLolMapKills(psMatchId, mapIndex) {
+      const _psKillsTrace = []; // diag: até 12 últimas tentativas com motivo de falha
+      const _trace = (psMatchId, mapIndex, step, extra) => {
+        if (_psKillsTrace.length < 12) _psKillsTrace.push({ ps: psMatchId, map: mapIndex, step, ...(extra || {}) });
+      };
+
+      // Resolve kills via Riot livestats: matcha por team1/team2 no schedule,
+      // pega game ID do mapa N, fetcha livestats final frame.
+      async function _fetchKillsRiot(team1, team2, mapIndex, riotMatchId) {
+        try {
+          // Resolve gameIds via getEventDetails (preferido) ou schedule lookup por teams.
+          let games = [];
+          if (riotMatchId && /^\d+$/.test(String(riotMatchId))) {
+            const dr = await httpGet(`${LOL_BASE}/getEventDetails?hl=en-US&id=${riotMatchId}`, LOL_HEADERS);
+            const dd = safeParse(dr.body, {});
+            const match = dd?.data?.event?.match;
+            if (match?.games) {
+              for (const g of match.games) {
+                if (g.id) games.push({ gameId: g.id, gameNumber: g.number, state: g.state });
+              }
+            }
+          }
+          if (!games.length && team1 && team2) {
+            // Schedule lookup por teams (mesma logica do /live-gameids path 2)
+            const normT = s => String(s||'').toLowerCase().replace(/[^a-z0-9]/g, '');
+            const has = (a, b) => a && b && (a.includes(b) || b.includes(a));
+            const teamsMatch = (a, b, qa, qb) => {
+              const na = normT(a), nb = normT(b), nqa = normT(qa), nqb = normT(qb);
+              return (has(na, nqa) && has(nb, nqb)) || (has(na, nqb) && has(nb, nqa));
+            };
+            const schedules = await Promise.all([
+              httpGet(`${LOL_BASE}/getSchedule?hl=en-US`, LOL_HEADERS).catch(() => ({ body: '{}' })),
+              httpGet(`${LOL_BASE}/getSchedule?hl=zh-CN`, LOL_HEADERS).catch(() => ({ body: '{}' })),
+            ]);
+            const events = [];
+            for (const s of schedules) {
+              const d = safeParse(s.body, {});
+              const evs = d?.data?.schedule?.events || [];
+              for (const e of evs) if (e.type === 'match' && e.match) events.push(e);
+            }
+            events.sort((a, b) => new Date(b.startTime || 0) - new Date(a.startTime || 0));
+            const hit = events.find(e => {
+              const teams = e.match?.teams || [];
+              return teamsMatch(teams[0]?.name, teams[1]?.name, team1, team2);
+            });
+            if (hit?.match?.id) {
+              const dr = await httpGet(`${LOL_BASE}/getEventDetails?hl=en-US&id=${hit.match.id}`, LOL_HEADERS);
+              const dd = safeParse(dr.body, {});
+              const m = dd?.data?.event?.match;
+              if (m?.games) {
+                for (const g of m.games) {
+                  if (g.id) games.push({ gameId: g.id, gameNumber: g.number, state: g.state });
+                }
+              }
+            }
+          }
+          if (!games.length) return { reason: 'riot_no_games' };
+          const target = games.find(g => Number(g.gameNumber) === Number(mapIndex));
+          if (!target) {
+            // Mapa não jogado (sweep) → void
+            const allFinished = games.every(g => g.state === 'completed');
+            if (allFinished) return { mapNotPlayed: true };
+            return { reason: 'riot_map_not_found', positions: games.map(g => g.gameNumber) };
+          }
+          if (target.state !== 'completed') return { unfinished: true };
+          // Fetch livestats final frame: sample múltiplos timestamps recentes pra
+          // garantir que pegamos o último frame com dados (jogo já terminou).
+          const base = `https://feed.lolesports.com/livestats/v1/window/${target.gameId}`;
+          // Tenta sem startingTime primeiro (retorna últimos frames)
+          let r = await httpGet(base, LOL_HEADERS);
+          let d = r.status === 200 ? safeParse(r.body, {}) : null;
+          let frames = d?.frames || [];
+          // Se vazio, tenta com startingTime há 5min atrás
+          if (!frames.length) {
+            const ts = new Date(Math.floor((Date.now() - 300000) / 10000) * 10000).toISOString();
+            r = await httpGet(`${base}?startingTime=${encodeURIComponent(ts)}`, LOL_HEADERS);
+            d = r.status === 200 ? safeParse(r.body, {}) : null;
+            frames = d?.frames || [];
+          }
+          if (!frames.length) return { reason: 'riot_no_frames', status: r?.status };
+          // Último frame tem totalKills final
+          const last = frames[frames.length - 1];
+          const blueK = Number(last?.blueTeam?.totalKills);
+          const redK = Number(last?.redTeam?.totalKills);
+          if (!Number.isFinite(blueK) || !Number.isFinite(redK)) return { reason: 'riot_no_kills_field' };
+          return { totalKills: blueK + redK, source: 'riot_livestats' };
+        } catch (e) {
+          return { reason: 'riot_exception', msg: e.message };
+        }
+      }
+
+      // Resolve kills via gol.gg scrape: matcha tournament+match por nomes/data,
+      // pega gameIds do match e scrape /game/stats/<gameId>/page-summary/.
+      async function _fetchKillsGolgg(team1, team2, mapIndex, dateHint) {
+        try {
+          if (!team1 || !team2) return { reason: 'golgg_no_teams' };
+          const HTTP_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+          const ggHeaders = { 'User-Agent': HTTP_UA, 'Accept': 'text/html,application/xhtml+xml' };
+          const normT = s => String(s||'').toLowerCase().replace(/[^a-z0-9]/g, '');
+          const t1n = normT(team1), t2n = normT(team2);
+          // Search por season corrente — gol.gg URL patterns:
+          // List tournaments: /tournament/list/ (HTML), busca AJAX /tournament/ajax.trlist.php
+          // Pra simplificar: hit /tournament/tournament-matchlist/<tournamentId>/ direto se conhecemos.
+          // Como não temos tournamentId, fazemos search via página de TODAS as matches recentes
+          // ("/tournament/tournament-stats/Esports+World+Cup+2026/"). Mas variável.
+          //
+          // Approach pragmático: usar match listing global via /matches.
+          // Endpoint /esports-history/competitions retorna competições + matches.
+          // Fallback: scrape match detail from team page /teams/team-stats/<teamId>/.
+          //
+          // SIMPLEST: direct scrape /game/stats/{gameId}/page-summary/ requer gameId.
+          // Sem gameId, não conseguimos. Registro como reason pra futuro completar.
+          //
+          // Por ora, gol.gg fallback fica como NO-OP até termos ID mapping.
+          // Plano: indexar gol.gg gameIds por match (script sync-golgg-matches já tem
+          // os gameIds em pro_match_results — query DB por team1+team2+date).
+          const dateStr = dateHint ? String(dateHint).slice(0, 10) : '';
+          const row = db.prepare(`
+            SELECT match_id FROM match_results
+            WHERE game = 'lol'
+              AND lower(replace(replace(replace(team1,' ',''),'-',''),'.','')) IN (?, ?)
+              AND lower(replace(replace(replace(team2,' ',''),'-',''),'.','')) IN (?, ?)
+              AND match_id LIKE 'golgg_%'
+              AND (? = '' OR substr(resolved_at, 1, 10) = ?)
+            ORDER BY ABS(julianday(resolved_at) - julianday(?)) ASC
+            LIMIT 1
+          `).get(t1n, t2n, t1n, t2n, dateStr, dateStr, dateStr || new Date().toISOString().slice(0,10));
+          if (!row) return { reason: 'golgg_no_match_in_db' };
+          // match_id format esperado: 'golgg_<seriesId>'. Buscar matchlist HTML pra obter gameIds.
+          // Fora de scope agora — registrar e retornar.
+          return { reason: 'golgg_lookup_pending', match_id: row.match_id };
+        } catch (e) {
+          return { reason: 'golgg_exception', msg: e.message };
+        }
+      }
+
+      async function _fetchLolMapKills(psMatchId, mapIndex, ctx) {
         const cacheKey = `${psMatchId}|${mapIndex}`;
         if (_psKillsCache.has(cacheKey)) return _psKillsCache.get(cacheKey);
-        const _trace = (step, extra) => {
-          if (_psKillsTrace.length < 8) _psKillsTrace.push({ ps: psMatchId, map: mapIndex, step, ...(extra || {}) });
-        };
-        if (!PANDASCORE_TOKEN || PANDASCORE_TOKEN === 'your-pandascore-token') {
-          _trace('no_token');
-          _psKillsCache.set(cacheKey, null); return null;
+        const trace = (step, extra) => _trace(psMatchId, mapIndex, step, extra);
+        const team1 = ctx?.team1 || '';
+        const team2 = ctx?.team2 || '';
+        const sentAt = ctx?.sentAt || '';
+        const riotMatchId = ctx?.riotMatchId || '';
+
+        // ── Tier 1: PandaScore ──
+        if (PANDASCORE_TOKEN && PANDASCORE_TOKEN !== 'your-pandascore-token' && psMatchId) {
+          const headers = { 'Authorization': `Bearer ${PANDASCORE_TOKEN}` };
+          try {
+            const mr = await httpGet(`https://api.pandascore.co/matches/${psMatchId}`, headers);
+            if (mr && mr.status === 200) {
+              const m = safeParse(mr.body, {});
+              const games = Array.isArray(m.games) ? m.games : [];
+              const game = games.find(g => Number(g.position) === Number(mapIndex));
+              if (!game || !game.id) {
+                const allFinished = games.length > 0 && games.every(g => g.status === 'finished');
+                if (allFinished) {
+                  trace('map_not_played', { available_positions: games.map(g => g.position) });
+                  const out = { mapNotPlayed: true, source: 'ps' };
+                  _psKillsCache.set(cacheKey, out); return out;
+                }
+                trace('ps_game_not_found', { available_positions: games.map(g => g.position) });
+              } else if (game.status && game.status !== 'finished') {
+                trace('map_unfinished', { status: game.status });
+                const out = { unfinished: true, source: 'ps' };
+                _psKillsCache.set(cacheKey, out); return out;
+              } else {
+                let players = Array.isArray(game.players) ? game.players : [];
+                let totalKillsFromMatch = null;
+                if (!players.length && Number.isFinite(Number(game.kills_team_1)) && Number.isFinite(Number(game.kills_team_2))) {
+                  totalKillsFromMatch = Number(game.kills_team_1) + Number(game.kills_team_2);
+                }
+                if (!players.length && totalKillsFromMatch == null) {
+                  const gr = await httpGet(`https://api.pandascore.co/lol/games/${game.id}`, headers);
+                  if (gr && gr.status === 200) {
+                    const gd = safeParse(gr.body, {});
+                    players = Array.isArray(gd.players) ? gd.players : [];
+                  } else {
+                    trace('ps_game_http_fail', { status: gr?.status });
+                  }
+                }
+                if (players.length || totalKillsFromMatch != null) {
+                  const totalKills = totalKillsFromMatch != null
+                    ? totalKillsFromMatch
+                    : players.reduce((s, p) => s + (Number(p.kills) || 0), 0);
+                  const out = { totalKills, source: 'ps_player_inline' };
+                  _psKillsCache.set(cacheKey, out); return out;
+                }
+              }
+            } else {
+              trace('ps_match_http_fail', { status: mr?.status });
+            }
+          } catch (e) { trace('ps_exception', { msg: e.message }); }
         }
-        const headers = { 'Authorization': `Bearer ${PANDASCORE_TOKEN}` };
-        try {
-          // Rota generic /matches/{id} — /lol/matches/{id} retorna 403 "Access Denied"
-          // no plano atual (mesmo motivo do /ps-result usar generic em server.js:6354).
-          const mr = await httpGet(`https://api.pandascore.co/matches/${psMatchId}`, headers);
-          if (!mr || mr.status !== 200) {
-            _trace('match_http_fail', { status: mr?.status, body_head: String(mr?.body || '').slice(0, 120) });
-            _psKillsCache.set(cacheKey, null); return null;
-          }
-          const m = safeParse(mr.body, {});
-          const games = Array.isArray(m.games) ? m.games : [];
-          const game = games.find(g => Number(g.position) === Number(mapIndex));
-          if (!game || !game.id) {
-            // Mapa não existe na série (ex: sweep 2-0 e tip pede mapa 3) → VOID.
-            // Detectamos isso quando todos os games disponíveis estão `finished`
-            // mas a position pedida não está entre eles.
-            const allFinished = games.length > 0 && games.every(g => g.status === 'finished');
-            if (allFinished) {
-              _trace('map_not_played', { available_positions: games.map(g => g.position) });
-              const out = { mapNotPlayed: true };
-              _psKillsCache.set(cacheKey, out); return out;
-            }
-            _trace('game_not_found', { available_positions: games.map(g => g.position), available_status: games.map(g => g.status) });
-            _psKillsCache.set(cacheKey, null); return null;
-          }
-          if (game.status && game.status !== 'finished') {
-            _trace('map_unfinished', { status: game.status });
-            _psKillsCache.set(cacheKey, { unfinished: true }); return { unfinished: true };
-          }
-          // 1ª preferência: players inline em m.games[N].players (já vem no match payload).
-          // Fallback: /lol/games/{id} (rota com lol prefix; /games/{id} generic retorna 404).
-          let players = Array.isArray(game.players) ? game.players : [];
-          let totalKillsFromMatch = null;
-          // PS embeda total_kills no game às vezes (em vez de detalhar por player).
-          // Cobrir ambos: se vier game.kills_team_1+2 ou similar.
-          if (!players.length && Number.isFinite(Number(game.kills_team_1)) && Number.isFinite(Number(game.kills_team_2))) {
-            totalKillsFromMatch = Number(game.kills_team_1) + Number(game.kills_team_2);
-          }
-          if (!players.length && totalKillsFromMatch == null) {
-            const gr = await httpGet(`https://api.pandascore.co/lol/games/${game.id}`, headers);
-            if (!gr || gr.status !== 200) {
-              _trace('game_http_fail', { status: gr?.status, body_head: String(gr?.body || '').slice(0, 120) });
-              _psKillsCache.set(cacheKey, null); return null;
-            }
-            const gd = safeParse(gr.body, {});
-            players = Array.isArray(gd.players) ? gd.players : [];
-            if (!players.length) {
-              _trace('no_players', { gd_keys: Object.keys(gd || {}).slice(0, 10), game_keys: Object.keys(game || {}).slice(0, 12) });
-              _psKillsCache.set(cacheKey, null); return null;
-            }
-          }
-          const totalKills = totalKillsFromMatch != null
-            ? totalKillsFromMatch
-            : players.reduce((s, p) => s + (Number(p.kills) || 0), 0);
-          const out = { totalKills, gameStatus: game.status || 'finished' };
-          _psKillsCache.set(cacheKey, out);
-          return out;
-        } catch (e) {
-          log('DEBUG', 'FORCE-SETTLE-KILLS', `ps fetch err ${psMatchId}/${mapIndex}: ${e.message}`);
-          _trace('exception', { msg: e.message });
-          _psKillsCache.set(cacheKey, null); return null;
+
+        // ── Tier 2: Riot livestats ──
+        const riotRes = await _fetchKillsRiot(team1, team2, mapIndex, riotMatchId);
+        if (riotRes.totalKills != null) {
+          trace('riot_ok', { kills: riotRes.totalKills });
+          const out = { totalKills: riotRes.totalKills, source: 'riot_livestats' };
+          _psKillsCache.set(cacheKey, out); return out;
         }
+        if (riotRes.mapNotPlayed) {
+          trace('riot_map_not_played');
+          const out = { mapNotPlayed: true, source: 'riot' };
+          _psKillsCache.set(cacheKey, out); return out;
+        }
+        if (riotRes.unfinished) {
+          trace('riot_unfinished');
+          const out = { unfinished: true, source: 'riot' };
+          _psKillsCache.set(cacheKey, out); return out;
+        }
+        trace('riot_fail', { reason: riotRes.reason });
+
+        // ── Tier 3: gol.gg scrape (DB lookup → match URL) ──
+        const ggRes = await _fetchKillsGolgg(team1, team2, mapIndex, sentAt);
+        if (ggRes.totalKills != null) {
+          trace('golgg_ok', { kills: ggRes.totalKills });
+          const out = { totalKills: ggRes.totalKills, source: 'golgg' };
+          _psKillsCache.set(cacheKey, out); return out;
+        }
+        trace('golgg_fail', { reason: ggRes.reason });
+
+        _psKillsCache.set(cacheKey, null); return null;
       }
 
       for (const t of pending) {
@@ -7811,9 +7961,12 @@ const server = http.createServer(async (req, res) => {
             if (!mapMatch) { _killReason('mt_regex_fail'); summary.skipped++; continue; }
             const mapIndex = parseInt(mapMatch[1], 10);
             // Extrai PS id direto do match_id da tip (ex: 'ps_1466110::mt::...')
+            // OU Riot ID puro (ex: '115548128962840655::mt::...').
             const tipPsMatch = String(t.match_id || '').match(/(?:^|_)ps_(\d+)/);
-            if (!tipPsMatch) { _killReason('no_ps_id'); summary.skipped++; continue; }
-            const psMatchId = tipPsMatch[1];
+            const tipRiotMatch = String(t.match_id || '').match(/^(\d{15,})::/);
+            const psMatchId = tipPsMatch ? tipPsMatch[1] : '';
+            const riotMatchId = tipRiotMatch ? tipRiotMatch[1] : '';
+            if (!psMatchId && !riotMatchId) { _killReason('no_match_id'); summary.skipped++; continue; }
             // Parse line e side
             let line = NaN, side = '';
             const lnTag = String(t.match_id || '').match(/::ln(N|P)?([\d.]+)/);
@@ -7829,7 +7982,10 @@ const server = http.createServer(async (req, res) => {
               if (fallback) { side = fallback[1].toLowerCase(); line = parseFloat(fallback[2]); }
             }
             if (!Number.isFinite(line) || !side) { _killReason('no_line_side'); summary.skipped++; continue; }
-            const killsRes = await _fetchLolMapKills(psMatchId, mapIndex);
+            const killsRes = await _fetchLolMapKills(psMatchId, mapIndex, {
+              team1: t.participant1, team2: t.participant2,
+              sentAt: t.sent_at, riotMatchId,
+            });
             if (!killsRes) { _killReason('ps_api_null'); summary.skipped++; continue; }
             if (killsRes.unfinished) { _killReason('map_unfinished'); summary.skipped++; continue; }
             // Mapa não foi jogado (sweep 2-0 e tip pediu mapa 3+) → VOID.
