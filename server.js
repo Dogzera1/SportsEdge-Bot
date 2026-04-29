@@ -7915,6 +7915,9 @@ const server = http.createServer(async (req, res) => {
         trace('oe_fail', { reason: oeRes.reason });
 
         // ── Tier 3: Riot livestats ──
+        // Só aborta cedo em mapNotPlayed (sweep confirmado) ou totalKills.
+        // Unfinished pode ser falso positivo (Riot lookup achou match errado),
+        // continuar pra gol.gg.
         const riotRes = await _fetchKillsRiot(team1, team2, mapIndex, riotMatchId);
         if (riotRes.totalKills != null) {
           trace('riot_ok', { kills: riotRes.totalKills });
@@ -7926,12 +7929,12 @@ const server = http.createServer(async (req, res) => {
           const out = { mapNotPlayed: true, source: 'riot' };
           _psKillsCache.set(cacheKey, out); return out;
         }
-        if (riotRes.unfinished) {
-          trace('riot_unfinished');
-          const out = { unfinished: true, source: 'riot' };
-          _psKillsCache.set(cacheKey, out); return out;
+        const riotMaybeUnfinished = !!riotRes.unfinished;
+        if (riotMaybeUnfinished) {
+          trace('riot_unfinished_fallthrough');
+        } else {
+          trace('riot_fail', { reason: riotRes.reason });
         }
-        trace('riot_fail', { reason: riotRes.reason });
 
         // ── Tier 3: gol.gg scrape (DB lookup → match URL) ──
         const ggRes = await _fetchKillsGolgg(team1, team2, mapIndex, sentAt, leagueHint);
@@ -7942,6 +7945,12 @@ const server = http.createServer(async (req, res) => {
         }
         trace('golgg_fail', { reason: ggRes.reason });
 
+        // Se Riot disse unfinished mas gol.gg também não tem, manter unfinished
+        // como sinal final (skip por agora, tentar de novo depois).
+        if (riotMaybeUnfinished) {
+          const out = { unfinished: true, source: 'riot_unfinished_no_fallback' };
+          _psKillsCache.set(cacheKey, out); return out;
+        }
         _psKillsCache.set(cacheKey, null); return null;
       }
 
