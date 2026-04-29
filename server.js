@@ -9075,7 +9075,14 @@ const server = http.createServer(async (req, res) => {
         `).all(t1n, t2n);
         teamSearch = matches;
       }
-      sendJson(res, { ok: true, gamesTotal, playersTotal, latestDate: latestDate?.d, games, players, teamSearch });
+      // Leagues + recent dates
+      const recentLeagues = db.prepare(`
+        SELECT league, COUNT(DISTINCT gameid) as n, MAX(date) as latest
+        FROM oracleselixir_games
+        WHERE date >= date('now', '-7 days')
+        GROUP BY league ORDER BY latest DESC
+      `).all();
+      sendJson(res, { ok: true, gamesTotal, playersTotal, latestDate: latestDate?.d, games, players, teamSearch, recentLeagues });
     } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
     return;
   }
