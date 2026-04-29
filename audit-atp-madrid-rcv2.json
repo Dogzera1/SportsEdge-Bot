@@ -1,0 +1,772 @@
+{
+  "raw": 92,
+  "dedup": 81,
+  "byLeague": [
+    [
+      "ATP Madrid - R3",
+      {
+        "n": 31,
+        "wins": 19,
+        "losses": 11,
+        "voids": 1,
+        "profit": -0.17550000000000043,
+        "staked": 49.25
+      }
+    ],
+    [
+      "ATP Madrid - R2",
+      {
+        "n": 28,
+        "wins": 12,
+        "losses": 14,
+        "voids": 2,
+        "profit": -5.690250000000001,
+        "staked": 40.5
+      }
+    ],
+    [
+      "ATP Madrid - R16",
+      {
+        "n": 12,
+        "wins": 3,
+        "losses": 9,
+        "voids": 0,
+        "profit": -7.719499999999999,
+        "staked": 19
+      }
+    ],
+    [
+      "ATP Challenger Mauthausen - R1",
+      {
+        "n": 10,
+        "wins": 3,
+        "losses": 7,
+        "voids": 0,
+        "profit": -6.098,
+        "staked": 19
+      }
+    ]
+  ],
+  "byMatch": [
+    [
+      "ATP Madrid - R3 | Karen Khachanov vs Jakub Mensik",
+      {
+        "n": 3,
+        "wins": 3,
+        "losses": 0,
+        "voids": 0,
+        "profit": 1.0847499999999999,
+        "staked": 1.75,
+        "markets": {}
+      }
+    ],
+    [
+      "ATP Madrid - R3 | Terence Atmane vs Alexander Zverev",
+      {
+        "n": 3,
+        "wins": 2,
+        "losses": 1,
+        "voids": 0,
+        "profit": 0.10599999999999987,
+        "staked": 6,
+        "markets": {}
+      }
+    ],
+    [
+      "ATP Madrid - R3 | Adolfo Daniel Vallejo vs Flavio Cobolli",
+      {
+        "n": 2,
+        "wins": 2,
+        "losses": 0,
+        "voids": 0,
+        "profit": 3.0220000000000002,
+        "staked": 4,
+        "markets": {}
+      }
+    ],
+    [
+      "ATP Madrid - R3 | Francisco Cerundolo vs Luciano Darderi",
+      {
+        "n": 10,
+        "wins": 0,
+        "losses": 10,
+        "voids": 0,
+        "profit": -17,
+        "staked": 17,
+        "markets": {}
+      }
+    ],
+    [
+      "ATP Madrid - R3 | Daniil Medvedev vs Nicolai Budkov Kjaer",
+      {
+        "n": 2,
+        "wins": 0,
+        "losses": 2,
+        "voids": 0,
+        "profit": -4,
+        "staked": 4,
+        "markets": {}
+      }
+    ],
+    [
+      "ATP Madrid - R3 | Stefanos Tsitsipas vs Daniel Merida Aguilar",
+      {
+        "n": 2,
+        "wins": 0,
+        "losses": 0,
+        "voids": 2,
+        "profit": 0,
+        "staked": 0,
+        "markets": {}
+      }
+    ],
+    [
+      "ATP Madrid - R3 | Joao Fonseca vs Rafael Jodar",
+      {
+        "n": 2,
+        "wins": 2,
+        "losses": 0,
+        "voids": 0,
+        "profit": 0.7779999999999999,
+        "staked": 1,
+        "markets": {}
+      }
+    ],
+    [
+      "ATP Madrid - R3 | Alexander Blockx vs Felix Auger-Aliassime",
+      {
+        "n": 3,
+        "wins": 2,
+        "losses": 1,
+        "voids": 0,
+        "profit": 0.8360000000000003,
+        "staked": 6,
+        "markets": {}
+      }
+    ],
+    [
+      "ATP Madrid - R3 | Alejandro Davidovich Fokina vs Casper Ruud",
+      {
+        "n": 4,
+        "wins": 1,
+        "losses": 3,
+        "voids": 0,
+        "profit": -2.4400000000000004,
+        "staked": 7,
+        "markets": {}
+      }
+    ],
+    [
+      "ATP Madrid - R3 | Tallon Griekspoor vs Lorenzo Musetti",
+      {
+        "n": 2,
+        "wins": 2,
+        "losses": 0,
+        "voids": 0,
+        "profit": 1.7759999999999998,
+        "staked": 4,
+        "markets": {}
+      }
+    ],
+    [
+      "ATP Madrid - R3 | Cameron Norrie vs Thiago Agustin Tirante",
+      {
+        "n": 2,
+        "wins": 0,
+        "losses": 2,
+        "voids": 0,
+        "profit": -2.75,
+        "staked": 2.75,
+        "markets": {}
+      }
+    ],
+    [
+      "ATP Madrid - R3 | Jiri Lehecka vs Alex Michelsen",
+      {
+        "n": 2,
+        "wins": 1,
+        "losses": 1,
+        "voids": 0,
+        "profit": 0.33999999999999986,
+        "staked": 4,
+        "markets": {}
+      }
+    ],
+    [
+      "ATP Madrid - R3 | Arthur Fils vs Emilio Nava",
+      {
+        "n": 2,
+        "wins": 2,
+        "losses": 0,
+        "voids": 0,
+        "profit": 2.628,
+        "staked": 4,
+        "markets": {}
+      }
+    ],
+    [
+      "ATP Madrid - R3 | Dino Prizmic vs Tomas Martin Etcheverry",
+      {
+        "n": 1,
+        "wins": 1,
+        "losses": 0,
+        "voids": 0,
+        "profit": 0.5595,
+        "staked": 0.75,
+        "markets": {}
+      }
+    ],
+    [
+      "ATP Madrid - R3 | Jannik Sinner vs Elmer Moller",
+      {
+        "n": 1,
+        "wins": 1,
+        "losses": 0,
+        "voids": 0,
+        "profit": 0.5902499999999999,
+        "staked": 0.75,
+        "markets": {}
+      }
+    ],
+    [
+      "ATP Madrid - R3 | Vit Kopriva vs Arthur Rinderknech",
+      {
+        "n": 1,
+        "wins": 1,
+        "losses": 0,
+        "voids": 0,
+        "profit": 1.5739999999999998,
+        "staked": 2,
+        "markets": {}
+      }
+    ],
+    [
+      "ATP Madrid - R2 | Nicolai Budkov Kjaer vs Denis Shapovalov",
+      {
+        "n": 2,
+        "wins": 1,
+        "losses": 1,
+        "voids": 0,
+        "profit": -0.8380000000000001,
+        "staked": 4,
+        "markets": {}
+      }
+    ],
+    [
+      "ATP Madrid - R2 | Alexander Bublik vs Stefanos Tsitsipas",
+      {
+        "n": 3,
+        "wins": 2,
+        "losses": 1,
+        "voids": 0,
+        "profit": 1.3137500000000002,
+        "staked": 3.25,
+        "markets": {}
+      }
+    ],
+    [
+      "ATP Madrid - R2 | Camilo Ugo Carabelli vs Flavio Cobolli",
+      {
+        "n": 2,
+        "wins": 1,
+        "losses": 1,
+        "voids": 0,
+        "profit": -0.6019999999999999,
+        "staked": 4,
+        "markets": {}
+      }
+    ],
+    [
+      "ATP Madrid - R2 | Vilius Gaubas vs Felix Auger-Aliassime",
+      {
+        "n": 2,
+        "wins": 1,
+        "losses": 1,
+        "voids": 0,
+        "profit": -1.355,
+        "staked": 3,
+        "markets": {}
+      }
+    ],
+    [
+      "ATP Madrid - R2 | Brandon Nakashima vs Alexander Blockx",
+      {
+        "n": 2,
+        "wins": 2,
+        "losses": 0,
+        "voids": 0,
+        "profit": 2.796,
+        "staked": 4,
+        "markets": {}
+      }
+    ],
+    [
+      "ATP Madrid - R2 | Karen Khachanov vs Adam Walton",
+      {
+        "n": 1,
+        "wins": 0,
+        "losses": 1,
+        "voids": 0,
+        "profit": -2,
+        "staked": 2,
+        "markets": {}
+      }
+    ],
+    [
+      "ATP Madrid - R2 | Daniil Medvedev vs Fabian Marozsan",
+      {
+        "n": 1,
+        "wins": 1,
+        "losses": 0,
+        "voids": 0,
+        "profit": 1.4700000000000002,
+        "staked": 2,
+        "markets": {}
+      }
+    ],
+    [
+      "ATP Madrid - R2 | Daniel Merida Aguilar vs Corentin Moutet",
+      {
+        "n": 1,
+        "wins": 0,
+        "losses": 0,
+        "voids": 1,
+        "profit": 0,
+        "staked": 0,
+        "markets": {}
+      }
+    ],
+    [
+      "ATP Madrid - R2 | Learner Tien vs Adolfo Daniel Vallejo",
+      {
+        "n": 1,
+        "wins": 0,
+        "losses": 1,
+        "voids": 0,
+        "profit": -2,
+        "staked": 2,
+        "markets": {}
+      }
+    ],
+    [
+      "ATP Madrid - R2 | Martin Damm vs Jakub Mensik",
+      {
+        "n": 1,
+        "wins": 0,
+        "losses": 1,
+        "voids": 0,
+        "profit": -1.25,
+        "staked": 1.25,
+        "markets": {}
+      }
+    ],
+    [
+      "ATP Madrid - R2 | Juan Manuel Cerundolo vs Luciano Darderi",
+      {
+        "n": 1,
+        "wins": 0,
+        "losses": 1,
+        "voids": 0,
+        "profit": -1.25,
+        "staked": 1.25,
+        "markets": {}
+      }
+    ],
+    [
+      "ATP Madrid - R2 | Mariano Navone vs Alexander Zverev",
+      {
+        "n": 1,
+        "wins": 0,
+        "losses": 1,
+        "voids": 0,
+        "profit": -2,
+        "staked": 2,
+        "markets": {}
+      }
+    ],
+    [
+      "ATP Madrid - R2 | Ugo Humbert vs Terence Atmane",
+      {
+        "n": 1,
+        "wins": 1,
+        "losses": 0,
+        "voids": 0,
+        "profit": 0.27149999999999996,
+        "staked": 0.5,
+        "markets": {}
+      }
+    ],
+    [
+      "ATP Madrid - R2 | Jaume Munar vs Casper Ruud",
+      {
+        "n": 1,
+        "wins": 0,
+        "losses": 1,
+        "voids": 0,
+        "profit": -0.75,
+        "staked": 0.75,
+        "markets": {}
+      }
+    ],
+    [
+      "ATP Madrid - R2 | Alejandro Davidovich Fokina vs Pablo Carreno Busta",
+      {
+        "n": 1,
+        "wins": 0,
+        "losses": 1,
+        "voids": 0,
+        "profit": -2,
+        "staked": 2,
+        "markets": {}
+      }
+    ],
+    [
+      "ATP Madrid - R2 | Francisco Cerundolo vs Yannick Hanfmann",
+      {
+        "n": 1,
+        "wins": 0,
+        "losses": 1,
+        "voids": 0,
+        "profit": -1.25,
+        "staked": 1.25,
+        "markets": {}
+      }
+    ],
+    [
+      "ATP Madrid - R2 | Thiago Agustin Tirante vs Tommy Paul",
+      {
+        "n": 1,
+        "wins": 1,
+        "losses": 0,
+        "voids": 0,
+        "profit": 1.142,
+        "staked": 2,
+        "markets": {}
+      }
+    ],
+    [
+      "ATP Madrid - R2 | Cameron Norrie vs Tomas Machac",
+      {
+        "n": 1,
+        "wins": 0,
+        "losses": 1,
+        "voids": 0,
+        "profit": -1.25,
+        "staked": 1.25,
+        "markets": {}
+      }
+    ],
+    [
+      "ATP Madrid - R2 | Jiri Lehecka vs Alejandro Tabilo",
+      {
+        "n": 1,
+        "wins": 1,
+        "losses": 0,
+        "voids": 0,
+        "profit": 1.3239999999999998,
+        "staked": 2,
+        "markets": {}
+      }
+    ],
+    [
+      "ATP Madrid - R2 | Dusan Lajovic vs Arthur Rinderknech",
+      {
+        "n": 1,
+        "wins": 0,
+        "losses": 1,
+        "voids": 0,
+        "profit": -0.75,
+        "staked": 0.75,
+        "markets": {}
+      }
+    ],
+    [
+      "ATP Madrid - R2 | Emilio Nava vs Valentin Vacherot",
+      {
+        "n": 1,
+        "wins": 1,
+        "losses": 0,
+        "voids": 0,
+        "profit": 3.2874999999999996,
+        "staked": 1.25,
+        "markets": {}
+      }
+    ],
+    [
+      "ATP Madrid - R2 | Joao Fonseca vs Marin Cilic",
+      {
+        "n": 1,
+        "wins": 0,
+        "losses": 0,
+        "voids": 1,
+        "profit": 0,
+        "staked": 0,
+        "markets": {}
+      }
+    ],
+    [
+      "ATP Madrid - R16 | Jakub Mensik vs Alexander Zverev",
+      {
+        "n": 2,
+        "wins": 0,
+        "losses": 2,
+        "voids": 0,
+        "profit": -3.5,
+        "staked": 3.5,
+        "markets": {}
+      }
+    ],
+    [
+      "ATP Madrid - R16 | Daniil Medvedev vs Flavio Cobolli",
+      {
+        "n": 1,
+        "wins": 0,
+        "losses": 1,
+        "voids": 0,
+        "profit": -1.25,
+        "staked": 1.25,
+        "markets": {}
+      }
+    ],
+    [
+      "ATP Madrid - R16 | Vit Kopriva vs Rafael Jodar",
+      {
+        "n": 2,
+        "wins": 1,
+        "losses": 1,
+        "voids": 0,
+        "profit": -0.9575,
+        "staked": 2.75,
+        "markets": {}
+      }
+    ],
+    [
+      "ATP Madrid - R16 | Jiri Lehecka vs Lorenzo Musetti",
+      {
+        "n": 2,
+        "wins": 1,
+        "losses": 1,
+        "voids": 0,
+        "profit": 2.6500000000000004,
+        "staked": 3.25,
+        "markets": {}
+      }
+    ],
+    [
+      "ATP Madrid - R16 | Jannik Sinner vs Cameron Norrie",
+      {
+        "n": 1,
+        "wins": 0,
+        "losses": 1,
+        "voids": 0,
+        "profit": -2,
+        "staked": 2,
+        "markets": {}
+      }
+    ],
+    [
+      "ATP Madrid - R16 | Tomas Martin Etcheverry vs Arthur Fils",
+      {
+        "n": 2,
+        "wins": 0,
+        "losses": 2,
+        "voids": 0,
+        "profit": -2.25,
+        "staked": 2.25,
+        "markets": {}
+      }
+    ],
+    [
+      "ATP Madrid - R16 | Francisco Cerundolo vs Alexander Blockx",
+      {
+        "n": 1,
+        "wins": 0,
+        "losses": 1,
+        "voids": 0,
+        "profit": -2,
+        "staked": 2,
+        "markets": {}
+      }
+    ],
+    [
+      "ATP Madrid - R16 | Stefanos Tsitsipas vs Casper Ruud",
+      {
+        "n": 1,
+        "wins": 1,
+        "losses": 0,
+        "voids": 0,
+        "profit": 1.588,
+        "staked": 2,
+        "markets": {}
+      }
+    ],
+    [
+      "ATP Challenger Mauthausen - R1 | Andrea Guerrieri vs Jaime Faria",
+      {
+        "n": 1,
+        "wins": 0,
+        "losses": 1,
+        "voids": 0,
+        "profit": -2,
+        "staked": 2,
+        "markets": {}
+      }
+    ],
+    [
+      "ATP Challenger Mauthausen - R1 | Francesco Maestrelli vs Miguel Damas",
+      {
+        "n": 1,
+        "wins": 0,
+        "losses": 1,
+        "voids": 0,
+        "profit": -2,
+        "staked": 2,
+        "markets": {}
+      }
+    ],
+    [
+      "ATP Challenger Mauthausen - R1 | Marko Topo vs Martin Krumich",
+      {
+        "n": 1,
+        "wins": 0,
+        "losses": 1,
+        "voids": 0,
+        "profit": -2,
+        "staked": 2,
+        "markets": {}
+      }
+    ],
+    [
+      "ATP Challenger Mauthausen - R1 | Mika Brunold vs Alex Barrena",
+      {
+        "n": 1,
+        "wins": 1,
+        "losses": 0,
+        "voids": 0,
+        "profit": 0.962,
+        "staked": 1,
+        "markets": {}
+      }
+    ],
+    [
+      "ATP Challenger Mauthausen - R1 | Roman Safiullin vs Cezar Cretu",
+      {
+        "n": 1,
+        "wins": 1,
+        "losses": 0,
+        "voids": 0,
+        "profit": 3.16,
+        "staked": 2,
+        "markets": {}
+      }
+    ],
+    [
+      "ATP Challenger Mauthausen - R1 | David Jorda Sanchis vs Daniel Cukierman",
+      {
+        "n": 1,
+        "wins": 0,
+        "losses": 1,
+        "voids": 0,
+        "profit": -2,
+        "staked": 2,
+        "markets": {}
+      }
+    ],
+    [
+      "ATP Challenger Mauthausen - R1 | Nikoloz Basilashvili vs Sandro Kopp",
+      {
+        "n": 1,
+        "wins": 0,
+        "losses": 1,
+        "voids": 0,
+        "profit": -2,
+        "staked": 2,
+        "markets": {}
+      }
+    ],
+    [
+      "ATP Challenger Mauthausen - R1 | Lukas Neumayer vs Chun Hsin Tseng",
+      {
+        "n": 1,
+        "wins": 1,
+        "losses": 0,
+        "voids": 0,
+        "profit": 3.7800000000000002,
+        "staked": 2,
+        "markets": {}
+      }
+    ],
+    [
+      "ATP Challenger Mauthausen - R1 | Joel Josef Schwaerzler vs Jan Choinski",
+      {
+        "n": 1,
+        "wins": 0,
+        "losses": 1,
+        "voids": 0,
+        "profit": -2,
+        "staked": 2,
+        "markets": {}
+      }
+    ],
+    [
+      "ATP Challenger Mauthausen - R1 | Timofey Skatov vs Titouan Droguet",
+      {
+        "n": 1,
+        "wins": 0,
+        "losses": 1,
+        "voids": 0,
+        "profit": -2,
+        "staked": 2,
+        "markets": {}
+      }
+    ]
+  ],
+  "exactDupes": [
+    {
+      "key": "Francisco Cerundolo|Luciano Darderi|totalgames|21.5|over",
+      "count": 7,
+      "results": [
+        "loss",
+        "loss",
+        "loss",
+        "loss",
+        "loss",
+        "loss",
+        "loss"
+      ]
+    },
+    {
+      "key": "Francisco Cerundolo|Luciano Darderi|handicapgames|3.5|away",
+      "count": 3,
+      "results": [
+        "loss",
+        "loss",
+        "loss"
+      ]
+    },
+    {
+      "key": "Stefanos Tsitsipas|Daniel Merida Aguilar|handicapgames|3.5|away",
+      "count": 2,
+      "results": [
+        "void",
+        "void"
+      ]
+    },
+    {
+      "key": "Terence Atmane|Alexander Zverev|handicapgames|-3.5|away",
+      "count": 2,
+      "results": [
+        "win",
+        "win"
+      ]
+    },
+    {
+      "key": "Cameron Norrie|Thiago Agustin Tirante|totalgames|24.5|under",
+      "count": 2,
+      "results": [
+        "loss",
+        "loss"
+      ]
+    }
+  ]
+}
