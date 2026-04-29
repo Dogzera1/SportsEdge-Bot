@@ -9023,9 +9023,10 @@ const server = http.createServer(async (req, res) => {
       const team2 = String(parsed.query.team2 || '').trim();
       const mapIndex = parseInt(parsed.query.map || '1', 10);
       const sentAt = String(parsed.query.date || new Date().toISOString().slice(0, 10));
+      const leagueHint = String(parsed.query.leagueHint || parsed.query.league || '').trim();
       const { fetchKillsViaGolgg } = require('./lib/golgg-kills-scraper');
-      const r = await fetchKillsViaGolgg({ team1, team2, mapIndex, sentAt, db });
-      sendJson(res, { ok: true, input: { team1, team2, mapIndex, sentAt }, result: r });
+      const r = await fetchKillsViaGolgg({ team1, team2, mapIndex, sentAt, db, leagueHint });
+      sendJson(res, { ok: true, input: { team1, team2, mapIndex, sentAt, leagueHint }, result: r });
     } catch (e) { sendJson(res, { ok: false, error: e.message, stack: e.stack }, 500); }
     return;
   }
