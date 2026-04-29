@@ -2949,6 +2949,30 @@ async function settleCompletedTips() {
       }
 
       if (settled > 0) log('INFO', 'SETTLE', `${sport}: ${settled} tips liquidadas`);
+
+      // 2026-04-29: MT tips com `::mt::` no match_id são puladas no loop acima
+      // (legacy só sabe casar nome do winner). Pra sport=lol, TOTAL_KILLS_MAP<N>
+      // resolve via PandaScore games API — delega ao endpoint /admin/run-settle
+      // que já tem o handler implementado (server.js:7634). Auto-trigger só pra
+      // LoL por enquanto; opt-out via MT_AUTO_RUN_SETTLE_LOL=false.
+      if (sport === 'lol' && process.env.MT_AUTO_RUN_SETTLE_LOL !== 'false') {
+        try {
+          const adminKey = (process.env.ADMIN_KEY || '').trim();
+          if (adminKey) {
+            const days = parseInt(process.env.MT_AUTO_RUN_SETTLE_DAYS || '7', 10) || 7;
+            const r = await serverGet(
+              `/admin/run-settle?sport=lol&days=${days}`,
+              null,
+              { 'x-admin-key': adminKey }
+            ).catch(e => ({ error: e.message }));
+            if (r?.ok && (r.settled || r.voided)) {
+              log('INFO', 'SETTLE', `lol MT auto-run-settle: ${r.settled||0} settled, ${r.voided||0} voided, ${r.skipped||0} skipped`);
+            } else if (r?.error) {
+              log('DEBUG', 'SETTLE', `lol MT auto-run-settle: ${r.error}`);
+            }
+          }
+        } catch (e) { log('DEBUG', 'SETTLE', `lol MT auto-run-settle err: ${e.message}`); }
+      }
     } catch(e) {
       log('WARN', 'SETTLE', `${sport}: ${e.message}`);
     }
