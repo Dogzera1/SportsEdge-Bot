@@ -7690,33 +7690,54 @@ const server = http.createServer(async (req, res) => {
       // no mesmo match — evita refetch /lol/matches/{id} + /lol/games/{id}).
       // Key = `psMatchId|mapIndex`, value = { totalKills, gameStatus } | null.
       const _psKillsCache = new Map();
+      const _psKillsTrace = []; // diag: até 8 últimas tentativas com motivo de falha
       async function _fetchLolMapKills(psMatchId, mapIndex) {
         const cacheKey = `${psMatchId}|${mapIndex}`;
         if (_psKillsCache.has(cacheKey)) return _psKillsCache.get(cacheKey);
+        const _trace = (step, extra) => {
+          if (_psKillsTrace.length < 8) _psKillsTrace.push({ ps: psMatchId, map: mapIndex, step, ...(extra || {}) });
+        };
         if (!PANDASCORE_TOKEN || PANDASCORE_TOKEN === 'your-pandascore-token') {
+          _trace('no_token');
           _psKillsCache.set(cacheKey, null); return null;
         }
         const headers = { 'Authorization': `Bearer ${PANDASCORE_TOKEN}` };
         try {
           const mr = await httpGet(`https://api.pandascore.co/lol/matches/${psMatchId}`, headers);
-          if (!mr || mr.status !== 200) { _psKillsCache.set(cacheKey, null); return null; }
+          if (!mr || mr.status !== 200) {
+            _trace('match_http_fail', { status: mr?.status, body_head: String(mr?.body || '').slice(0, 120) });
+            _psKillsCache.set(cacheKey, null); return null;
+          }
           const m = safeParse(mr.body, {});
           const games = Array.isArray(m.games) ? m.games : [];
           const game = games.find(g => Number(g.position) === Number(mapIndex));
-          if (!game || !game.id) { _psKillsCache.set(cacheKey, null); return null; }
-          if (game.status && game.status !== 'finished') { _psKillsCache.set(cacheKey, { unfinished: true }); return { unfinished: true }; }
+          if (!game || !game.id) {
+            _trace('game_not_found', { available_positions: games.map(g => g.position), available_status: games.map(g => g.status) });
+            _psKillsCache.set(cacheKey, null); return null;
+          }
+          if (game.status && game.status !== 'finished') {
+            _trace('map_unfinished', { status: game.status });
+            _psKillsCache.set(cacheKey, { unfinished: true }); return { unfinished: true };
+          }
           const gr = await httpGet(`https://api.pandascore.co/lol/games/${game.id}`, headers);
-          if (!gr || gr.status !== 200) { _psKillsCache.set(cacheKey, null); return null; }
+          if (!gr || gr.status !== 200) {
+            _trace('game_http_fail', { status: gr?.status, body_head: String(gr?.body || '').slice(0, 120) });
+            _psKillsCache.set(cacheKey, null); return null;
+          }
           const gd = safeParse(gr.body, {});
           const players = Array.isArray(gd.players) ? gd.players
                         : Array.isArray(game.players) ? game.players : [];
-          if (!players.length) { _psKillsCache.set(cacheKey, null); return null; }
+          if (!players.length) {
+            _trace('no_players', { gd_keys: Object.keys(gd || {}).slice(0, 10) });
+            _psKillsCache.set(cacheKey, null); return null;
+          }
           const totalKills = players.reduce((s, p) => s + (Number(p.kills) || 0), 0);
           const out = { totalKills, gameStatus: game.status || 'finished' };
           _psKillsCache.set(cacheKey, out);
           return out;
         } catch (e) {
           log('DEBUG', 'FORCE-SETTLE-KILLS', `ps fetch err ${psMatchId}/${mapIndex}: ${e.message}`);
+          _trace('exception', { msg: e.message });
           _psKillsCache.set(cacheKey, null); return null;
         }
       }
@@ -7921,6 +7942,7 @@ const server = http.createServer(async (req, res) => {
         }
       }
       if (shadowMtResult) summary.shadow_mt = shadowMtResult;
+      if (_psKillsTrace.length) summary.ps_kills_trace = _psKillsTrace;
       log('INFO', 'FORCE-SETTLE', `${summary.attempted} attempted | ${summary.settled} settled | ${summary.voided} voided | ${summary.skipped} skipped | ${summary.errors} errors${shadowMtResult ? ` | shadow_mt: ${shadowMtResult.settled||0}/${shadowMtResult.skipped||0}` : ''}`);
       sendJson(res, summary);
     } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
