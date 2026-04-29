@@ -10057,6 +10057,68 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // POST/GET /admin/mt-disable?sport=tennis&market=totalGames&side=over&reason=...&key=<KEY>
+  // Espelha /mt-guard disable do Telegram, exposto via HTTP. Escreve em
+  // market_tips_runtime_state + popula _marketTipsDisabledRuntime in-process
+  // (mas o bot.js precisa reler — que ele faz no boot e no scanner via
+  // isMarketTipsEnabled checkando a Map, que é populada via cron MT_LEAK_GUARD).
+  // side opcional: omita pra disable do market inteiro pra esse sport.
+  // 2026-04-29: sem side → key='${sport}|${market}'; com side → '${sport}|${market}|${side}'.
+  if (p === '/admin/mt-disable' && (req.method === 'POST' || req.method === 'GET')) {
+    if (!requireAdmin(req, res)) return;
+    const sport = String(parsed.query.sport || '').trim().toLowerCase();
+    const market = String(parsed.query.market || '').trim();
+    const side = parsed.query.side ? String(parsed.query.side).trim().toLowerCase() : null;
+    const reason = String(parsed.query.reason || 'manual').trim();
+    if (!sport || !market) { sendJson(res, { ok: false, error: 'missing sport or market' }, 400); return; }
+    try {
+      const ts = new Date().toISOString();
+      if (side) {
+        db.prepare(`INSERT OR REPLACE INTO market_tips_runtime_state
+          (sport, market, side, disabled, source, reason, updated_at)
+          VALUES (?, ?, ?, 1, 'manual', ?, ?)`).run(sport, market, side, reason, ts);
+      } else {
+        db.prepare(`INSERT OR REPLACE INTO market_tips_runtime_state
+          (sport, market, disabled, source, reason, updated_at)
+          VALUES (?, ?, 1, 'manual', ?, ?)`).run(sport, market, reason, ts);
+      }
+      log('INFO', 'MT-DISABLE', `${sport}/${market}${side ? '/' + side : ''} disabled (${reason})`);
+      sendJson(res, { ok: true, sport, market, side, reason, applied_at: ts,
+        note: 'bot.js precisa estar com MT_LEAK_GUARD_AUTO=true (default true) — Map _marketTipsDisabledRuntime é repopulada na próxima execução do cron leak guard (1h) ou no próximo restart. Pra applicar imediato, restart o bot.' });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
+  // POST/GET /admin/mt-enable?sport=tennis&market=totalGames&side=over&key=<KEY>
+  // Reverte /admin/mt-disable. Remove row de market_tips_runtime_state.
+  if (p === '/admin/mt-enable' && (req.method === 'POST' || req.method === 'GET')) {
+    if (!requireAdmin(req, res)) return;
+    const sport = String(parsed.query.sport || '').trim().toLowerCase();
+    const market = String(parsed.query.market || '').trim();
+    const side = parsed.query.side ? String(parsed.query.side).trim().toLowerCase() : null;
+    if (!sport || !market) { sendJson(res, { ok: false, error: 'missing sport or market' }, 400); return; }
+    try {
+      const info = side
+        ? db.prepare(`DELETE FROM market_tips_runtime_state WHERE sport=? AND market=? AND side=?`).run(sport, market, side)
+        : db.prepare(`DELETE FROM market_tips_runtime_state WHERE sport=? AND market=? AND side IS NULL`).run(sport, market);
+      log('INFO', 'MT-DISABLE', `${sport}/${market}${side ? '/' + side : ''} re-enabled (rows=${info.changes})`);
+      sendJson(res, { ok: true, sport, market, side, removed: info.changes });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
+  // GET /admin/mt-disable-list?key=<KEY>
+  // Lista todos os disables ativos em market_tips_runtime_state.
+  if (p === '/admin/mt-disable-list') {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const rows = db.prepare(`SELECT sport, market, side, source, reason, roi_pct, clv_pct, n_tips, updated_at
+        FROM market_tips_runtime_state WHERE disabled = 1 ORDER BY sport, market, side`).all();
+      sendJson(res, { ok: true, count: rows.length, disables: rows });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   // GET /admin/mt-shadow-audit?days=14&sport=tennis&apply=0&key=<KEY>
   // Re-computa o result esperado de cada shadow row settled e compara com o
   // stored. Mismatches = bugs históricos. apply=1 reverte os mismatches pra

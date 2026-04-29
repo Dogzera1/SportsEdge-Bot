@@ -1,0 +1,1707 @@
+{
+  "fetched_at": "2026-04-29T18:58:22.760Z",
+  "base": "https://sportsedge-bot-production.up.railway.app",
+  "days": 7,
+  "results": {
+    "overall_summary": {
+      "status": 200,
+      "ok": true,
+      "body": {
+        "days": 7,
+        "banca": {
+          "total_initial": 1100,
+          "total_current": 1082.22,
+          "total_profit": -17.78,
+          "total_profit_units": -20.38,
+          "growthPct": -1.62,
+          "bankrolls": 11,
+          "baseline_date": "2026-04-24",
+          "baseline_amount": 1100,
+          "baseline_legacy_amount": 1000,
+          "unit_pct": 1,
+          "unit_value": 1,
+          "baseline_profit": -17.78,
+          "baseline_profit_units": -17.78,
+          "baseline_growth_pct": -1.62
+        },
+        "overall": {
+          "total_tips": 122,
+          "wins": 46,
+          "losses": 47,
+          "pending": 27,
+          "hitRate": 49.5,
+          "roi": -10.87,
+          "profit_reais": -17.78,
+          "avg_ev": 20.31,
+          "avg_odds": 1.79
+        },
+        "clv": {
+          "n": 124,
+          "avg": -9.12,
+          "positive_rate": 16.1
+        },
+        "sports": [
+          {
+            "sport": "tennis",
+            "total": 75,
+            "wins": 34,
+            "losses": 35,
+            "pending": 6,
+            "profit_reais": -14.53,
+            "stake_reais": 117.5,
+            "hitRate": 49.3,
+            "roi": -12.37,
+            "initial_banca": 100,
+            "current_banca": 85.47,
+            "allocation_target_pct": 10,
+            "allocation_actual_pct": 8.55,
+            "allocation_drift_pp": -1.45,
+            "drained": false
+          },
+          {
+            "sport": "lol",
+            "total": 39,
+            "wins": 11,
+            "losses": 6,
+            "pending": 20,
+            "profit_reais": 1.24,
+            "stake_reais": 39,
+            "hitRate": 64.7,
+            "roi": 3.18,
+            "initial_banca": 100,
+            "current_banca": 101.24,
+            "allocation_target_pct": 10,
+            "allocation_actual_pct": 10.12,
+            "allocation_drift_pp": 0.12,
+            "drained": false
+          },
+          {
+            "sport": "cs",
+            "total": 7,
+            "wins": 1,
+            "losses": 5,
+            "pending": 1,
+            "profit_reais": -2.99,
+            "stake_reais": 5.5,
+            "hitRate": 16.7,
+            "roi": -54.36,
+            "initial_banca": 100,
+            "current_banca": 97.01,
+            "allocation_target_pct": 10,
+            "allocation_actual_pct": 9.7,
+            "allocation_drift_pp": -0.3,
+            "drained": false
+          },
+          {
+            "sport": "cs2",
+            "total": 1,
+            "wins": 0,
+            "losses": 1,
+            "pending": 0,
+            "profit_reais": -1.5,
+            "stake_reais": 1.5,
+            "hitRate": 0,
+            "roi": -100,
+            "initial_banca": 100,
+            "current_banca": 98.5,
+            "allocation_target_pct": 10,
+            "allocation_actual_pct": 9.85,
+            "allocation_drift_pp": -0.15,
+            "drained": false
+          }
+        ],
+        "equity": {
+          "initial": 1000,
+          "baseline_date": "2026-04-24",
+          "current": 1082.22,
+          "max_drawdown_pct": 3.53,
+          "series": [
+            {
+              "day": "2026-04-24",
+              "cum_banca": 1117.88,
+              "profit_reais": 1.44,
+              "n": 1
+            },
+            {
+              "day": "2026-04-25",
+              "cum_banca": 1113.2,
+              "profit_reais": -4.680000000000002,
+              "n": 28
+            },
+            {
+              "day": "2026-04-26",
+              "cum_banca": 1113.56,
+              "profit_reais": 0.3600000000000001,
+              "n": 3
+            },
+            {
+              "day": "2026-04-27",
+              "cum_banca": 1121.83,
+              "profit_reais": 8.27,
+              "n": 6
+            },
+            {
+              "day": "2026-04-28",
+              "cum_banca": 1087.62,
+              "profit_reais": -34.210000000000015,
+              "n": 97
+            },
+            {
+              "day": "2026-04-29",
+              "cum_banca": 1082.22,
+              "profit_reais": -5.400000000000002,
+              "n": 27
+            }
+          ]
+        }
+      }
+    },
+    "ai_impact": {
+      "status": 200,
+      "ok": true,
+      "body": {
+        "ok": true,
+        "days": 7,
+        "sport_filter": null,
+        "by_sport": [
+          {
+            "sport": "cs",
+            "paths": [
+              {
+                "path": "override",
+                "n": 6,
+                "wins": 1,
+                "losses": 5,
+                "voids": 0,
+                "hit_pct": 16.7,
+                "avg_ev_pct": 18.1,
+                "roi_pct": -54.4,
+                "clv_pct": 0,
+                "top_conf": "BAIXA/6"
+              }
+            ]
+          },
+          {
+            "sport": "football",
+            "paths": [
+              {
+                "path": "hybrid",
+                "n": 2,
+                "wins": 1,
+                "losses": 0,
+                "voids": 1,
+                "hit_pct": 100,
+                "avg_ev_pct": 10.3,
+                "roi_pct": 28,
+                "clv_pct": -0.82,
+                "top_conf": "ALTA/1"
+              }
+            ]
+          },
+          {
+            "sport": "lol",
+            "paths": [
+              {
+                "path": "normal",
+                "n": 7,
+                "wins": 4,
+                "losses": 3,
+                "voids": 0,
+                "hit_pct": 57.1,
+                "avg_ev_pct": 17.8,
+                "roi_pct": 1.5,
+                "clv_pct": 0,
+                "top_conf": "MÉDIA/7"
+              },
+              {
+                "path": "no_ai",
+                "n": 9,
+                "wins": 6,
+                "losses": 2,
+                "voids": 1,
+                "hit_pct": 75,
+                "avg_ev_pct": 17.2,
+                "roi_pct": 16.6,
+                "clv_pct": -2.15,
+                "top_conf": "MÉDIA/9"
+              }
+            ]
+          },
+          {
+            "sport": "mma",
+            "paths": [
+              {
+                "path": "override",
+                "n": 1,
+                "wins": 0,
+                "losses": 0,
+                "voids": 1,
+                "hit_pct": null,
+                "avg_ev_pct": 25.6,
+                "roi_pct": 0,
+                "clv_pct": -7.47,
+                "top_conf": "MÉDIA/1"
+              }
+            ]
+          },
+          {
+            "sport": "tennis",
+            "paths": [
+              {
+                "path": "hybrid",
+                "n": 1,
+                "wins": 0,
+                "losses": 1,
+                "voids": 0,
+                "hit_pct": 0,
+                "avg_ev_pct": 37.4,
+                "roi_pct": -100,
+                "clv_pct": 0,
+                "top_conf": "MÉDIA/1"
+              }
+            ]
+          }
+        ],
+        "overall": [
+          {
+            "path": "normal",
+            "n": 7,
+            "hit_pct": 57.1,
+            "roi_pct": 1.5,
+            "clv_pct": 0
+          },
+          {
+            "path": "override",
+            "n": 7,
+            "hit_pct": 16.7,
+            "roi_pct": -46,
+            "clv_pct": -2.49
+          },
+          {
+            "path": "hybrid",
+            "n": 3,
+            "hit_pct": 50,
+            "roi_pct": -4,
+            "clv_pct": -0.54
+          },
+          {
+            "path": "no_ai",
+            "n": 9,
+            "hit_pct": 75,
+            "roi_pct": 16.6,
+            "clv_pct": -2.15
+          }
+        ],
+        "verdict": "Amostra insuficiente (precisa n≥30 normal + n≥15 override)"
+      }
+    },
+    "bankroll_audit": {
+      "status": 200,
+      "ok": true,
+      "body": {
+        "ok": true,
+        "model": "per_sport_tier_unit",
+        "unit_base": 1,
+        "baseline": {
+          "date": "2026-04-24",
+          "amount": 1000,
+          "unit_pct": 1,
+          "unit_value": 1
+        },
+        "total_initial": 1100,
+        "total_current_stored": 1082.22,
+        "total_current_recomputed": 1082.22,
+        "total_gap": 0,
+        "per_sport": [
+          {
+            "sport": "esports",
+            "initial": 0,
+            "current_stored": 0,
+            "current_recomputed": 0,
+            "profit_sum": 0,
+            "gap_stored_minus_recomputed": 0,
+            "tip_count": 0,
+            "tier_unit_value": 0.5,
+            "ratio_current_initial": null,
+            "drift": false
+          },
+          {
+            "sport": "mma",
+            "initial": 100,
+            "current_stored": 100,
+            "current_recomputed": 100,
+            "profit_sum": 0,
+            "gap_stored_minus_recomputed": 0,
+            "tip_count": 0,
+            "tier_unit_value": 1,
+            "ratio_current_initial": 1,
+            "drift": false
+          },
+          {
+            "sport": "tennis",
+            "initial": 100,
+            "current_stored": 85.47,
+            "current_recomputed": 85.47,
+            "profit_sum": -14.53,
+            "gap_stored_minus_recomputed": 0,
+            "tip_count": 69,
+            "tier_unit_value": 1,
+            "ratio_current_initial": 0.855,
+            "drift": false
+          },
+          {
+            "sport": "football",
+            "initial": 100,
+            "current_stored": 100,
+            "current_recomputed": 100,
+            "profit_sum": 0,
+            "gap_stored_minus_recomputed": 0,
+            "tip_count": 0,
+            "tier_unit_value": 1,
+            "ratio_current_initial": 1,
+            "drift": false
+          },
+          {
+            "sport": "darts",
+            "initial": 100,
+            "current_stored": 100,
+            "current_recomputed": 100,
+            "profit_sum": 0,
+            "gap_stored_minus_recomputed": 0,
+            "tip_count": 0,
+            "tier_unit_value": 1,
+            "ratio_current_initial": 1,
+            "drift": false
+          },
+          {
+            "sport": "snooker",
+            "initial": 100,
+            "current_stored": 100,
+            "current_recomputed": 100,
+            "profit_sum": 0,
+            "gap_stored_minus_recomputed": 0,
+            "tip_count": 0,
+            "tier_unit_value": 1,
+            "ratio_current_initial": 1,
+            "drift": false
+          },
+          {
+            "sport": "tabletennis",
+            "initial": 100,
+            "current_stored": 100,
+            "current_recomputed": 100,
+            "profit_sum": 0,
+            "gap_stored_minus_recomputed": 0,
+            "tip_count": 0,
+            "tier_unit_value": 1,
+            "ratio_current_initial": 1,
+            "drift": false
+          },
+          {
+            "sport": "cs",
+            "initial": 100,
+            "current_stored": 97.01,
+            "current_recomputed": 97.01,
+            "profit_sum": -2.99,
+            "gap_stored_minus_recomputed": 0,
+            "tip_count": 6,
+            "tier_unit_value": 1,
+            "ratio_current_initial": 0.97,
+            "drift": false
+          },
+          {
+            "sport": "valorant",
+            "initial": 100,
+            "current_stored": 100,
+            "current_recomputed": 100,
+            "profit_sum": 0,
+            "gap_stored_minus_recomputed": 0,
+            "tip_count": 0,
+            "tier_unit_value": 1,
+            "ratio_current_initial": 1,
+            "drift": false
+          },
+          {
+            "sport": "lol",
+            "initial": 100,
+            "current_stored": 101.24,
+            "current_recomputed": 101.24,
+            "profit_sum": 1.24,
+            "gap_stored_minus_recomputed": 0,
+            "tip_count": 19,
+            "tier_unit_value": 1,
+            "ratio_current_initial": 1.012,
+            "drift": false
+          },
+          {
+            "sport": "dota2",
+            "initial": 100,
+            "current_stored": 100,
+            "current_recomputed": 100,
+            "profit_sum": 0,
+            "gap_stored_minus_recomputed": 0,
+            "tip_count": 0,
+            "tier_unit_value": 1,
+            "ratio_current_initial": 1,
+            "drift": false
+          },
+          {
+            "sport": "cs2",
+            "initial": 100,
+            "current_stored": 98.5,
+            "current_recomputed": 98.5,
+            "profit_sum": -1.5,
+            "gap_stored_minus_recomputed": 0,
+            "tip_count": 1,
+            "tier_unit_value": 1,
+            "ratio_current_initial": 0.985,
+            "drift": false
+          }
+        ],
+        "orphan_profits": []
+      }
+    },
+    "league_blocklist": {
+      "status": 200,
+      "ok": true,
+      "body": {
+        "ok": true,
+        "total": 1,
+        "by_source": {
+          "auto": 0,
+          "manual": 1,
+          "env": 0
+        },
+        "blocked": [
+          {
+            "entry": "esports:dota 2 -",
+            "source": "manual",
+            "reason": null,
+            "roi_pct": null,
+            "clv_pct": null,
+            "n_tips": null,
+            "age_days": 7.8
+          }
+        ],
+        "cooldowns": []
+      }
+    },
+    "loops_state": {
+      "status": 404,
+      "ok": false,
+      "body": {
+        "error": "Not found"
+      }
+    },
+    "void_dota2": {
+      "status": 200,
+      "ok": true,
+      "body": {
+        "ok": true,
+        "days": 7,
+        "sport_filter": "dota2",
+        "n": 0,
+        "by_sport": {},
+        "patterns": {},
+        "tips": []
+      }
+    },
+    "void_valorant": {
+      "status": 200,
+      "ok": true,
+      "body": {
+        "ok": true,
+        "days": 7,
+        "sport_filter": "valorant",
+        "n": 0,
+        "by_sport": {},
+        "patterns": {},
+        "tips": []
+      }
+    },
+    "void_lol": {
+      "status": 200,
+      "ok": true,
+      "body": {
+        "ok": true,
+        "days": 7,
+        "sport_filter": "lol",
+        "n": 2,
+        "by_sport": {
+          "lol": 2
+        },
+        "patterns": {
+          "market_TOTAL_KILLS_MAP3": 1,
+          "unknown": 1
+        },
+        "tips": [
+          {
+            "id": 655,
+            "sport": "lol",
+            "match_id": "115615924499588629::mt::total_kills_map3::over::lnP26.5",
+            "event": "LPL",
+            "teams": "TOP ESPORTS vs WeiboGaming",
+            "pick": "OVER 26.5 maps",
+            "odds": 1.513,
+            "ev": 19.94,
+            "stake": "2u",
+            "conf": "ALTA",
+            "live": true,
+            "market_type": "TOTAL_KILLS_MAP3",
+            "sent_at": "2026-04-28 12:34:00",
+            "settled_at": "2026-04-29 03:10:09",
+            "pattern": "market_TOTAL_KILLS_MAP3",
+            "model_label": "Mapa 3: Over 26.5 kills"
+          },
+          {
+            "id": 546,
+            "sport": "lol",
+            "match_id": "lol_115548668059523676",
+            "event": "LEC",
+            "teams": "Shifters vs Natus Vincere",
+            "pick": "Natus Vincere",
+            "odds": 1.6,
+            "ev": 33.5,
+            "stake": "3u",
+            "conf": "MÉDIA",
+            "live": false,
+            "market_type": "ML",
+            "sent_at": "2026-04-25 15:11:03",
+            "settled_at": "2026-04-25 15:20:02",
+            "pattern": "unknown",
+            "model_label": "esports-ml"
+          }
+        ]
+      }
+    },
+    "ml_shadow_by_sport": {
+      "status": 200,
+      "ok": true,
+      "body": {
+        "days": 7,
+        "totals": {
+          "n": 114,
+          "wins": 26,
+          "losses": 48,
+          "pending": 33,
+          "profit_reais": -24.02,
+          "stake_reais": 128,
+          "hitRate": 35.1,
+          "roi": -18.77
+        },
+        "per_sport": [
+          {
+            "sport": "football",
+            "n": 51,
+            "wins": 11,
+            "losses": 10,
+            "pushes": 0,
+            "pending": 24,
+            "hitRate": 52.4,
+            "roi": -7.02,
+            "profit_reais": -4.21,
+            "stake_reais": 60,
+            "avg_odds": 2.41,
+            "avg_ev": 13.45,
+            "avg_clv": 1.18,
+            "clv_n": 39
+          },
+          {
+            "sport": "tennis",
+            "n": 50,
+            "wins": 8,
+            "losses": 33,
+            "pushes": 0,
+            "pending": 9,
+            "hitRate": 19.5,
+            "roi": -46.33,
+            "profit_reais": -23.63,
+            "stake_reais": 51,
+            "avg_odds": 2.86,
+            "avg_ev": 27.03,
+            "avg_clv": 0.34,
+            "clv_n": 50
+          },
+          {
+            "sport": "valorant",
+            "n": 12,
+            "wins": 7,
+            "losses": 5,
+            "pushes": 0,
+            "pending": 0,
+            "hitRate": 58.3,
+            "roi": 23.88,
+            "profit_reais": 3.82,
+            "stake_reais": 16,
+            "avg_odds": 2.13,
+            "avg_ev": 15.19,
+            "avg_clv": null,
+            "clv_n": 0
+          },
+          {
+            "sport": "mma",
+            "n": 1,
+            "wins": 0,
+            "losses": 0,
+            "pushes": 0,
+            "pending": 0,
+            "hitRate": null,
+            "roi": 0,
+            "profit_reais": 0,
+            "stake_reais": 1,
+            "avg_odds": 1.61,
+            "avg_ev": 22.6,
+            "avg_clv": 0,
+            "clv_n": 1
+          }
+        ]
+      }
+    },
+    "mt_summary_dota2": {
+      "status": 404,
+      "ok": false,
+      "body": {
+        "error": "Not found"
+      }
+    },
+    "shadow_summary": {
+      "status": 200,
+      "ok": true,
+      "body": {
+        "ok": true,
+        "days": 7,
+        "regular": [
+          {
+            "sport": "football",
+            "n": 61,
+            "settled": 21,
+            "wins": 11,
+            "losses": 10,
+            "voids": 8,
+            "pending": 32,
+            "hit_rate": 52.4,
+            "profit_u": -4.21,
+            "stake_u": 27,
+            "roi_pct": -15.6,
+            "avg_clv": 1.18,
+            "clv_n": 39
+          },
+          {
+            "sport": "tennis",
+            "n": 50,
+            "settled": 41,
+            "wins": 8,
+            "losses": 33,
+            "voids": 0,
+            "pending": 9,
+            "hit_rate": 19.5,
+            "profit_u": -23.63,
+            "stake_u": 42,
+            "roi_pct": -56.3,
+            "avg_clv": 0.34,
+            "clv_n": 50
+          },
+          {
+            "sport": "valorant",
+            "n": 12,
+            "settled": 12,
+            "wins": 7,
+            "losses": 5,
+            "voids": 0,
+            "pending": 0,
+            "hit_rate": 58.3,
+            "profit_u": 3.82,
+            "stake_u": 16,
+            "roi_pct": 23.9,
+            "avg_clv": null,
+            "clv_n": 0
+          },
+          {
+            "sport": "dota2",
+            "n": 4,
+            "settled": 3,
+            "wins": 1,
+            "losses": 2,
+            "voids": 0,
+            "pending": 1,
+            "hit_rate": 33.3,
+            "profit_u": -0.73,
+            "stake_u": 3,
+            "roi_pct": -24.3,
+            "avg_clv": -6.26,
+            "clv_n": 4
+          },
+          {
+            "sport": "mma",
+            "n": 1,
+            "settled": 0,
+            "wins": 0,
+            "losses": 0,
+            "voids": 1,
+            "pending": 0,
+            "hit_rate": null,
+            "profit_u": 0,
+            "stake_u": 0,
+            "roi_pct": null,
+            "avg_clv": 0,
+            "clv_n": 1
+          }
+        ],
+        "market": [
+          {
+            "sport": "tennis",
+            "n": 282,
+            "settled": 214,
+            "wins": 110,
+            "losses": 104,
+            "voids": 22,
+            "pending": 46,
+            "hit_rate": 51.4,
+            "profit_u": 1.86,
+            "stake_u": 368.5,
+            "roi_pct": 0.5,
+            "avg_clv": 1.78,
+            "clv_n": 240
+          },
+          {
+            "sport": "football",
+            "n": 60,
+            "settled": 17,
+            "wins": 11,
+            "losses": 6,
+            "voids": 28,
+            "pending": 15,
+            "hit_rate": 64.7,
+            "profit_u": 8.41,
+            "stake_u": 28,
+            "roi_pct": 30,
+            "avg_clv": 0.56,
+            "clv_n": 13
+          },
+          {
+            "sport": "lol",
+            "n": 53,
+            "settled": 14,
+            "wins": 9,
+            "losses": 5,
+            "voids": 26,
+            "pending": 13,
+            "hit_rate": 64.3,
+            "profit_u": -0.04,
+            "stake_u": 23.5,
+            "roi_pct": -0.2,
+            "avg_clv": -1.94,
+            "clv_n": 15
+          },
+          {
+            "sport": "cs2",
+            "n": 33,
+            "settled": 22,
+            "wins": 14,
+            "losses": 8,
+            "voids": 11,
+            "pending": 0,
+            "hit_rate": 63.6,
+            "profit_u": 3.33,
+            "stake_u": 23.25,
+            "roi_pct": 14.3,
+            "avg_clv": 10.23,
+            "clv_n": 30
+          },
+          {
+            "sport": "dota2",
+            "n": 17,
+            "settled": 4,
+            "wins": 2,
+            "losses": 2,
+            "voids": 8,
+            "pending": 5,
+            "hit_rate": 50,
+            "profit_u": -1.13,
+            "stake_u": 4,
+            "roi_pct": -28.3,
+            "avg_clv": 19.8,
+            "clv_n": 7
+          }
+        ],
+        "market_by_market": [
+          {
+            "sport": "cs2",
+            "market": "total",
+            "n": 22,
+            "settled": 16,
+            "wins": 11,
+            "voids": 6,
+            "pending": 0,
+            "hit_rate": 68.8,
+            "roi_pct": 21.9
+          },
+          {
+            "sport": "cs2",
+            "market": "handicap",
+            "n": 11,
+            "settled": 6,
+            "wins": 3,
+            "voids": 5,
+            "pending": 0,
+            "hit_rate": 50,
+            "roi_pct": 0.5
+          },
+          {
+            "sport": "dota2",
+            "market": "totalKills",
+            "n": 5,
+            "settled": 0,
+            "wins": 0,
+            "voids": 0,
+            "pending": 5,
+            "hit_rate": null,
+            "roi_pct": null
+          },
+          {
+            "sport": "dota2",
+            "market": "total",
+            "n": 5,
+            "settled": 2,
+            "wins": 1,
+            "voids": 3,
+            "pending": 0,
+            "hit_rate": 50,
+            "roi_pct": 22.4
+          },
+          {
+            "sport": "dota2",
+            "market": "duration",
+            "n": 5,
+            "settled": 0,
+            "wins": 0,
+            "voids": 5,
+            "pending": 0,
+            "hit_rate": null,
+            "roi_pct": null
+          },
+          {
+            "sport": "dota2",
+            "market": "handicap",
+            "n": 2,
+            "settled": 2,
+            "wins": 1,
+            "voids": 0,
+            "pending": 0,
+            "hit_rate": 50,
+            "roi_pct": -67.8
+          },
+          {
+            "sport": "football",
+            "market": "totals",
+            "n": 60,
+            "settled": 17,
+            "wins": 11,
+            "voids": 28,
+            "pending": 15,
+            "hit_rate": 64.7,
+            "roi_pct": 30
+          },
+          {
+            "sport": "lol",
+            "market": "total_kills_map1",
+            "n": 15,
+            "settled": 0,
+            "wins": 0,
+            "voids": 11,
+            "pending": 4,
+            "hit_rate": null,
+            "roi_pct": null
+          },
+          {
+            "sport": "lol",
+            "market": "total_kills_map2",
+            "n": 12,
+            "settled": 0,
+            "wins": 0,
+            "voids": 8,
+            "pending": 4,
+            "hit_rate": null,
+            "roi_pct": null
+          },
+          {
+            "sport": "lol",
+            "market": "total",
+            "n": 10,
+            "settled": 7,
+            "wins": 3,
+            "voids": 2,
+            "pending": 1,
+            "hit_rate": 42.9,
+            "roi_pct": -54.8
+          },
+          {
+            "sport": "lol",
+            "market": "handicap",
+            "n": 10,
+            "settled": 7,
+            "wins": 6,
+            "voids": 3,
+            "pending": 0,
+            "hit_rate": 85.7,
+            "roi_pct": 45.9
+          },
+          {
+            "sport": "lol",
+            "market": "total_kills_map3",
+            "n": 6,
+            "settled": 0,
+            "wins": 0,
+            "voids": 2,
+            "pending": 4,
+            "hit_rate": null,
+            "roi_pct": null
+          },
+          {
+            "sport": "tennis",
+            "market": "handicapGames",
+            "n": 166,
+            "settled": 121,
+            "wins": 68,
+            "voids": 11,
+            "pending": 34,
+            "hit_rate": 56.2,
+            "roi_pct": 9.9
+          },
+          {
+            "sport": "tennis",
+            "market": "totalGames",
+            "n": 116,
+            "settled": 93,
+            "wins": 42,
+            "voids": 11,
+            "pending": 12,
+            "hit_rate": 45.2,
+            "roi_pct": -12.1
+          }
+        ]
+      }
+    },
+    "void_cs2": {
+      "status": 200,
+      "ok": true,
+      "body": {
+        "ok": true,
+        "days": 7,
+        "sport_filter": "cs2",
+        "n": 0,
+        "by_sport": {},
+        "patterns": {},
+        "tips": []
+      }
+    },
+    "mt_summary_valorant": {
+      "status": 404,
+      "ok": false,
+      "body": {
+        "error": "Not found"
+      }
+    },
+    "clv_capture_trace": {
+      "status": 401,
+      "ok": false,
+      "body": {
+        "ok": false,
+        "error": "unauthorized"
+      }
+    },
+    "mt_settled_suspects": {
+      "status": 404,
+      "ok": false,
+      "body": {
+        "error": "Not found"
+      }
+    },
+    "void_tennis": {
+      "status": 200,
+      "ok": true,
+      "body": {
+        "ok": true,
+        "days": 7,
+        "sport_filter": "tennis",
+        "n": 0,
+        "by_sport": {},
+        "patterns": {},
+        "tips": []
+      }
+    },
+    "tips_lol": {
+      "status": 200,
+      "ok": true,
+      "body": [
+        {
+          "id": 750,
+          "sport": "lol",
+          "match_id": "lol_115548128962840619",
+          "event_name": "LCK",
+          "participant1": "kt Rolster",
+          "participant2": "Hanwha Life Esports",
+          "tip_participant": "Hanwha Life Esports",
+          "odds": 1.68,
+          "ev": 14.7,
+          "stake": "3u",
+          "confidence": "MÉDIA",
+          "is_live": 0,
+          "sent_at": "2026-04-29 08:17:42",
+          "result": "win",
+          "settled_at": "2026-04-29 12:00:23",
+          "bot_token": "",
+          "clv_odds": 1.68,
+          "open_odds": 1.68,
+          "stake_reais": 3,
+          "profit_reais": 2.04,
+          "market_type": "ML",
+          "current_odds": null,
+          "current_ev": null,
+          "current_confidence": null,
+          "current_updated_at": null,
+          "model_p1": null,
+          "model_p2": null,
+          "model_p_pick": null,
+          "model_label": "esports-ml",
+          "tip_reason": "Value detectado pelo modelo (AI_DISABLED)",
+          "last_notified_at": null,
+          "is_shadow": 0,
+          "odds_fetched_at": "2026-04-29T08:17:42.805Z",
+          "model_version": "v1",
+          "best_book": null,
+          "best_odd": null,
+          "pinnacle_odd": null,
+          "line_shop_delta_pct": null,
+          "current_stake": null,
+          "archived": 0,
+          "code_sha": null,
+          "gate_state": "{\"env\":{\"TENNIS_ISOTONIC_DISABLED\":\"true\",\"AI_DISABLED\":\"true\"},\"auto\":{}}"
+        },
+        {
+          "id": 650,
+          "sport": "lol",
+          "match_id": "ps_1446611",
+          "event_name": "Esports World Cup",
+          "participant1": "FlyQuest",
+          "participant2": "Team Liquid",
+          "tip_participant": "Team Liquid",
+          "odds": 1.455,
+          "ev": 13.9,
+          "stake": "3u",
+          "confidence": "MÉDIA",
+          "is_live": 0,
+          "sent_at": "2026-04-28 10:30:57",
+          "result": "loss",
+          "settled_at": "2026-04-28 20:40:29",
+          "bot_token": "",
+          "clv_odds": 1.455,
+          "open_odds": 1.455,
+          "stake_reais": 3,
+          "profit_reais": -3,
+          "market_type": "ML",
+          "current_odds": null,
+          "current_ev": null,
+          "current_confidence": null,
+          "current_updated_at": null,
+          "model_p1": null,
+          "model_p2": null,
+          "model_p_pick": null,
+          "model_label": "esports-ml",
+          "tip_reason": "Value detectado pelo modelo (AI_DISABLED)",
+          "last_notified_at": null,
+          "is_shadow": 0,
+          "odds_fetched_at": "2026-04-28T10:30:57.711Z",
+          "model_version": "v1",
+          "best_book": null,
+          "best_odd": null,
+          "pinnacle_odd": null,
+          "line_shop_delta_pct": null,
+          "current_stake": null,
+          "archived": 0,
+          "code_sha": null,
+          "gate_state": "{\"env\":{\"TENNIS_ISOTONIC_DISABLED\":\"true\",\"AI_DISABLED\":\"true\"},\"auto\":{}}"
+        },
+        {
+          "id": 649,
+          "sport": "lol",
+          "match_id": "ps_1466111",
+          "event_name": "Esports World Cup",
+          "participant1": "Team Heretics",
+          "participant2": "SK Gaming",
+          "tip_participant": "SK Gaming",
+          "odds": 1.909,
+          "ev": 29.1,
+          "stake": "3u",
+          "confidence": "MÉDIA",
+          "is_live": 0,
+          "sent_at": "2026-04-28 10:30:53",
+          "result": "win",
+          "settled_at": "2026-04-28 20:14:50",
+          "bot_token": "",
+          "clv_odds": 1.909,
+          "open_odds": 1.909,
+          "stake_reais": 3,
+          "profit_reais": 2.73,
+          "market_type": "ML",
+          "current_odds": null,
+          "current_ev": null,
+          "current_confidence": null,
+          "current_updated_at": null,
+          "model_p1": null,
+          "model_p2": null,
+          "model_p_pick": null,
+          "model_label": "esports-ml",
+          "tip_reason": "Value detectado pelo modelo (AI_DISABLED)",
+          "last_notified_at": null,
+          "is_shadow": 0,
+          "odds_fetched_at": "2026-04-28T10:30:53.492Z",
+          "model_version": "v1",
+          "best_book": null,
+          "best_odd": null,
+          "pinnacle_odd": null,
+          "line_shop_delta_pct": null,
+          "current_stake": null,
+          "archived": 0,
+          "code_sha": null,
+          "gate_state": "{\"env\":{\"TENNIS_ISOTONIC_DISABLED\":\"true\",\"AI_DISABLED\":\"true\"},\"auto\":{}}"
+        },
+        {
+          "id": 648,
+          "sport": "lol",
+          "match_id": "lol_116249441374168874",
+          "event_name": "Road of Legends",
+          "participant1": "Once Upon a Team",
+          "participant2": "Dynasty",
+          "tip_participant": "Once Upon a Team",
+          "odds": 2.21,
+          "ev": 22.3,
+          "stake": "3u",
+          "confidence": "MÉDIA",
+          "is_live": 0,
+          "sent_at": "2026-04-28 10:30:46",
+          "result": "win",
+          "settled_at": "2026-04-28 21:04:49",
+          "bot_token": "",
+          "clv_odds": 2.21,
+          "open_odds": 2.21,
+          "stake_reais": 3,
+          "profit_reais": 3.63,
+          "market_type": "ML",
+          "current_odds": null,
+          "current_ev": null,
+          "current_confidence": null,
+          "current_updated_at": null,
+          "model_p1": null,
+          "model_p2": null,
+          "model_p_pick": null,
+          "model_label": "esports-ml",
+          "tip_reason": "Value detectado pelo modelo (AI_DISABLED)",
+          "last_notified_at": null,
+          "is_shadow": 0,
+          "odds_fetched_at": "2026-04-28T10:30:46.167Z",
+          "model_version": "v1",
+          "best_book": null,
+          "best_odd": null,
+          "pinnacle_odd": null,
+          "line_shop_delta_pct": null,
+          "current_stake": null,
+          "archived": 0,
+          "code_sha": null,
+          "gate_state": "{\"env\":{\"TENNIS_ISOTONIC_DISABLED\":\"true\",\"AI_DISABLED\":\"true\"},\"auto\":{}}"
+        },
+        {
+          "id": 642,
+          "sport": "lol",
+          "match_id": "ps_1420925",
+          "event_name": "LPL",
+          "participant1": "Weibo Gaming",
+          "participant2": "Top Esports",
+          "tip_participant": "Top Esports",
+          "odds": 1.403,
+          "ev": 22.3,
+          "stake": "3u",
+          "confidence": "MÉDIA",
+          "is_live": 0,
+          "sent_at": "2026-04-28 09:11:36",
+          "result": "loss",
+          "settled_at": "2026-04-28 13:04:02",
+          "bot_token": "",
+          "clv_odds": 1.403,
+          "open_odds": 1.403,
+          "stake_reais": 3,
+          "profit_reais": -3,
+          "market_type": "ML",
+          "current_odds": null,
+          "current_ev": null,
+          "current_confidence": null,
+          "current_updated_at": null,
+          "model_p1": null,
+          "model_p2": null,
+          "model_p_pick": null,
+          "model_label": "esports-ml",
+          "tip_reason": "Value detectado pelo modelo (AI_DISABLED)",
+          "last_notified_at": null,
+          "is_shadow": 0,
+          "odds_fetched_at": "2026-04-28T09:11:36.269Z",
+          "model_version": "v1",
+          "best_book": null,
+          "best_odd": null,
+          "pinnacle_odd": null,
+          "line_shop_delta_pct": null,
+          "current_stake": null,
+          "archived": 0,
+          "code_sha": null,
+          "gate_state": "{\"env\":{\"TENNIS_ISOTONIC_DISABLED\":\"true\",\"AI_DISABLED\":\"true\"},\"auto\":{}}"
+        },
+        {
+          "id": 639,
+          "sport": "lol",
+          "match_id": "ps_1417058",
+          "event_name": "LCK Challengers League",
+          "participant1": "KT Rolster Challengers",
+          "participant2": "T1 Academy",
+          "tip_participant": "T1 Academy",
+          "odds": 1.599,
+          "ev": 6.2,
+          "stake": "1.5u",
+          "confidence": "MÉDIA",
+          "is_live": 0,
+          "sent_at": "2026-04-28 08:18:52",
+          "result": "win",
+          "settled_at": "2026-04-28 12:33:08",
+          "bot_token": "",
+          "clv_odds": 1.599,
+          "open_odds": 1.599,
+          "stake_reais": 1.5,
+          "profit_reais": 0.9,
+          "market_type": "ML",
+          "current_odds": 1.685,
+          "current_ev": 11.91,
+          "current_confidence": "MÉDIA",
+          "current_updated_at": "2026-04-28 09:44:30",
+          "model_p1": null,
+          "model_p2": null,
+          "model_p_pick": null,
+          "model_label": "esports-ml",
+          "tip_reason": "Value detectado pelo modelo (AI_DISABLED)",
+          "last_notified_at": "2026-04-28 09:05:25",
+          "is_shadow": 0,
+          "odds_fetched_at": "2026-04-28T08:18:52.919Z",
+          "model_version": "v1",
+          "best_book": null,
+          "best_odd": null,
+          "pinnacle_odd": null,
+          "line_shop_delta_pct": null,
+          "current_stake": "3u",
+          "archived": 0,
+          "code_sha": null,
+          "gate_state": "{\"env\":{\"TENNIS_ISOTONIC_DISABLED\":\"true\",\"AI_DISABLED\":\"true\"},\"auto\":{}}"
+        },
+        {
+          "id": 595,
+          "sport": "lol",
+          "match_id": "ps_1417057",
+          "event_name": "LCK Challengers League",
+          "participant1": "BNK FearX Youth",
+          "participant2": "Kiwoom DRX Challengers",
+          "tip_participant": "Kiwoom DRX Challengers",
+          "odds": 1.465,
+          "ev": 16.1,
+          "stake": "3u",
+          "confidence": "MÉDIA",
+          "is_live": 0,
+          "sent_at": "2026-04-27 22:53:41",
+          "result": "loss",
+          "settled_at": "2026-04-28 09:28:05",
+          "bot_token": "",
+          "clv_odds": 1.465,
+          "open_odds": 1.465,
+          "stake_reais": 3,
+          "profit_reais": -3,
+          "market_type": "ML",
+          "current_odds": 1.538,
+          "current_ev": 21.89,
+          "current_confidence": "MÉDIA",
+          "current_updated_at": "2026-04-28 07:46:07",
+          "model_p1": null,
+          "model_p2": null,
+          "model_p_pick": null,
+          "model_label": "esports-ml",
+          "tip_reason": "Value detectado pelo modelo (AI_DISABLED)",
+          "last_notified_at": "2026-04-28 00:18:07",
+          "is_shadow": 0,
+          "odds_fetched_at": "2026-04-27T22:53:41.912Z",
+          "model_version": "v1",
+          "best_book": null,
+          "best_odd": null,
+          "pinnacle_odd": null,
+          "line_shop_delta_pct": null,
+          "current_stake": "3u",
+          "archived": 0,
+          "code_sha": null,
+          "gate_state": "{\"env\":{\"TENNIS_ISOTONIC_DISABLED\":\"true\",\"AI_DISABLED\":\"true\"},\"auto\":{}}"
+        },
+        {
+          "id": 549,
+          "sport": "lol",
+          "match_id": "lol_115615924499588647",
+          "event_name": "LPL",
+          "participant1": "Ultra Prime",
+          "participant2": "LGD GAMING",
+          "tip_participant": "LGD GAMING",
+          "odds": 1.521,
+          "ev": 20.3,
+          "stake": "3u",
+          "confidence": "MÉDIA",
+          "is_live": 0,
+          "sent_at": "2026-04-25 18:22:27",
+          "result": "loss",
+          "settled_at": "2026-04-26 11:06:08",
+          "bot_token": "",
+          "clv_odds": 1.521,
+          "open_odds": 1.521,
+          "stake_reais": 3,
+          "profit_reais": -3,
+          "market_type": "ML",
+          "current_odds": null,
+          "current_ev": null,
+          "current_confidence": null,
+          "current_updated_at": null,
+          "model_p1": null,
+          "model_p2": null,
+          "model_p_pick": null,
+          "model_label": "esports-ml",
+          "tip_reason": "Value detectado pelo modelo (fallback sem IA)",
+          "last_notified_at": null,
+          "is_shadow": 0,
+          "odds_fetched_at": "2026-04-25T18:22:27.884Z",
+          "model_version": "v1",
+          "best_book": null,
+          "best_odd": null,
+          "pinnacle_odd": null,
+          "line_shop_delta_pct": null,
+          "current_stake": null,
+          "archived": 0,
+          "code_sha": null,
+          "gate_state": "{\"env\":{\"ODDS_BUCKET_BLOCK\":\"2.20-3.00\",\"TENNIS_ISOTONIC_DISABLED\":\"true\",\"AI_DISABLED\":\"true\",\"VALORANT_ODDS_BUCKET_BLOCK\":\"2.20-99\"},\"auto\":{}}"
+        },
+        {
+          "id": 540,
+          "sport": "lol",
+          "match_id": "ps_1420921",
+          "event_name": "LPL",
+          "participant1": "Weibo Gaming",
+          "participant2": "Anyone's Legend",
+          "tip_participant": "Anyone's Legend",
+          "odds": 1.488,
+          "ev": 5.6,
+          "stake": "2u",
+          "confidence": "MÉDIA",
+          "is_live": 0,
+          "sent_at": "2026-04-25 07:07:49",
+          "result": "win",
+          "settled_at": "2026-04-25 13:42:16",
+          "bot_token": "",
+          "clv_odds": 1.488,
+          "open_odds": 1.488,
+          "stake_reais": 2,
+          "profit_reais": 0.98,
+          "market_type": "ML",
+          "current_odds": null,
+          "current_ev": null,
+          "current_confidence": null,
+          "current_updated_at": null,
+          "model_p1": null,
+          "model_p2": null,
+          "model_p_pick": null,
+          "model_label": "esports-ml",
+          "tip_reason": "Value detectado pelo modelo (fallback sem IA)",
+          "last_notified_at": null,
+          "is_shadow": 0,
+          "odds_fetched_at": "2026-04-25T07:07:49.047Z",
+          "model_version": "v1",
+          "best_book": null,
+          "best_odd": null,
+          "pinnacle_odd": null,
+          "line_shop_delta_pct": null,
+          "current_stake": null,
+          "archived": 0,
+          "code_sha": null,
+          "gate_state": "{\"env\":{\"ODDS_BUCKET_BLOCK\":\"2.20-3.00\",\"TENNIS_ISOTONIC_DISABLED\":\"true\",\"AI_DISABLED\":\"true\",\"VALORANT_ODDS_BUCKET_BLOCK\":\"2.20-99\"},\"auto\":{}}"
+        }
+      ]
+    },
+    "tips_valorant": {
+      "status": 200,
+      "ok": true,
+      "body": []
+    },
+    "tips_cs2": {
+      "status": 200,
+      "ok": true,
+      "body": []
+    },
+    "tips_football": {
+      "status": 200,
+      "ok": true,
+      "body": []
+    },
+    "mt_summary_cs2": {
+      "status": 404,
+      "ok": false,
+      "body": {
+        "error": "Not found"
+      }
+    },
+    "mt_summary_football": {
+      "status": 404,
+      "ok": false,
+      "body": {
+        "error": "Not found"
+      }
+    },
+    "mt_summary_tennis": {
+      "status": 404,
+      "ok": false,
+      "body": {
+        "error": "Not found"
+      }
+    },
+    "tips_tennis": {
+      "status": 200,
+      "ok": true,
+      "body": [
+        {
+          "id": 623,
+          "sport": "tennis",
+          "match_id": "tennis_pin_1629520941",
+          "event_name": "ATP Challenger Shymkent - R1",
+          "participant1": "Svyatoslav Gulin",
+          "participant2": "Andrej Nedic",
+          "tip_participant": "Svyatoslav Gulin",
+          "odds": 2.55,
+          "ev": 37.4,
+          "stake": "1",
+          "confidence": "MÉDIA",
+          "is_live": 0,
+          "sent_at": "2026-04-28 01:20:07",
+          "result": "loss",
+          "settled_at": "2026-04-28 13:23:05",
+          "bot_token": "",
+          "clv_odds": 2.55,
+          "open_odds": 2.55,
+          "stake_reais": 1,
+          "profit_reais": -1,
+          "market_type": "ML",
+          "current_odds": null,
+          "current_ev": null,
+          "current_confidence": null,
+          "current_updated_at": null,
+          "model_p1": 0.5387,
+          "model_p2": 0.4613,
+          "model_p_pick": 0.5387,
+          "model_label": "P modelo (Elo superfície)+hybrid",
+          "tip_reason": "Modelo Svyatoslav Gulin 54% (implied 39%, +14.7pp, EV +37.4%) | Surf Quadra dura | Elo 1531/1470 (+61) | ATP Challenger Shymkent - R1",
+          "last_notified_at": null,
+          "is_shadow": 0,
+          "odds_fetched_at": "2026-04-28T01:18:45.958Z",
+          "model_version": "v1",
+          "best_book": "Pinnacle",
+          "best_odd": 2.55,
+          "pinnacle_odd": 2.55,
+          "line_shop_delta_pct": 0,
+          "current_stake": null,
+          "archived": 0,
+          "code_sha": null,
+          "gate_state": "{\"env\":{\"TENNIS_ISOTONIC_DISABLED\":\"true\",\"AI_DISABLED\":\"true\"},\"auto\":{}}"
+        }
+      ]
+    },
+    "odds_bucket_roi": {
+      "status": 404,
+      "ok": false,
+      "body": {
+        "error": "Not found"
+      }
+    },
+    "mt_summary_lol": {
+      "status": 404,
+      "ok": false,
+      "body": {
+        "error": "Not found"
+      }
+    },
+    "void_snooker": {
+      "status": 200,
+      "ok": true,
+      "body": {
+        "ok": true,
+        "days": 7,
+        "sport_filter": "snooker",
+        "n": 0,
+        "by_sport": {},
+        "patterns": {},
+        "tips": []
+      }
+    },
+    "tips_darts": {
+      "status": 200,
+      "ok": true,
+      "body": []
+    },
+    "mt_summary_snooker": {
+      "status": 404,
+      "ok": false,
+      "body": {
+        "error": "Not found"
+      }
+    },
+    "mt_summary_tabletennis": {
+      "status": 404,
+      "ok": false,
+      "body": {
+        "error": "Not found"
+      }
+    },
+    "mt_summary_darts": {
+      "status": 404,
+      "ok": false,
+      "body": {
+        "error": "Not found"
+      }
+    },
+    "tips_snooker": {
+      "status": 200,
+      "ok": true,
+      "body": []
+    },
+    "models_summary": {
+      "status": 404,
+      "ok": false,
+      "body": {
+        "error": "Not found"
+      }
+    },
+    "void_tabletennis": {
+      "status": 200,
+      "ok": true,
+      "body": {
+        "ok": true,
+        "days": 7,
+        "sport_filter": "tabletennis",
+        "n": 0,
+        "by_sport": {},
+        "patterns": {},
+        "tips": []
+      }
+    },
+    "void_football": {
+      "status": 200,
+      "ok": true,
+      "body": {
+        "ok": true,
+        "days": 7,
+        "sport_filter": "football",
+        "n": 1,
+        "by_sport": {
+          "football": 1
+        },
+        "patterns": {
+          "unknown": 1
+        },
+        "tips": [
+          {
+            "id": 504,
+            "sport": "football",
+            "match_id": "3051c87ee3a2a191d75ecea5124dadc1",
+            "event": "La Liga 2 - Spain",
+            "teams": "AD Ceuta FC vs Real Racing Club de Santander",
+            "pick": "AD Ceuta FC",
+            "odds": 3.4,
+            "ev": 12.6,
+            "stake": "2",
+            "conf": "ALTA",
+            "live": false,
+            "market_type": "ML",
+            "sent_at": "2026-04-22 23:38:45",
+            "settled_at": "2026-04-24 03:09:53",
+            "pattern": "unknown",
+            "model_label": "football-elo+poisson+hybrid"
+          }
+        ]
+      }
+    },
+    "void_darts": {
+      "status": 200,
+      "ok": true,
+      "body": {
+        "ok": true,
+        "days": 7,
+        "sport_filter": "darts",
+        "n": 0,
+        "by_sport": {},
+        "patterns": {},
+        "tips": []
+      }
+    },
+    "tips_mma": {
+      "status": 200,
+      "ok": true,
+      "body": []
+    },
+    "tips_tabletennis": {
+      "status": 200,
+      "ok": true,
+      "body": []
+    },
+    "void_mma": {
+      "status": 200,
+      "ok": true,
+      "body": {
+        "ok": true,
+        "days": 7,
+        "sport_filter": "mma",
+        "n": 1,
+        "by_sport": {
+          "mma": 1
+        },
+        "patterns": {
+          "unknown": 1
+        },
+        "tips": [
+          {
+            "id": 503,
+            "sport": "mma",
+            "match_id": "1b133f01c3e4dd8ae3d9be72d7758752",
+            "event": "MMA (não identificado)",
+            "teams": "Colby Thicknesse vs Vince Morales",
+            "pick": "Colby Thicknesse",
+            "odds": 1.74,
+            "ev": 25.6,
+            "stake": "1",
+            "conf": "MÉDIA",
+            "live": false,
+            "market_type": "ML",
+            "sent_at": "2026-04-22 23:35:31",
+            "settled_at": "2026-04-26 03:07:26",
+            "pattern": "unknown",
+            "model_label": "P modelo (record ESPN)+override"
+          }
+        ]
+      }
+    },
+    "mt_summary_mma": {
+      "status": 404,
+      "ok": false,
+      "body": {
+        "error": "Not found"
+      }
+    },
+    "tips_dota2": {
+      "status": 200,
+      "ok": true,
+      "body": []
+    }
+  }
+}

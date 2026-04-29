@@ -18646,6 +18646,10 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   // mostra CLV persistente <MT_LEAK_CLV_CUTOFF com n≥MT_LEAK_N_CUTOFF. Auto-restaura
   // quando recupera. Persiste em market_tips_runtime_state.
   try { _loadMarketTipsRuntimeState(); } catch (_) {}
+  // 2026-04-29: reload periódico (5min) pra capturar disables manuais via
+  // /admin/mt-disable HTTP endpoint (escreve em DB, mas Map é in-memory por
+  // processo — bot.js precisa reler).
+  setInterval(() => { try { _loadMarketTipsRuntimeState(); } catch (_) {} }, 5 * 60 * 1000);
   setInterval(() => runMarketTipsLeakGuard().catch(e => log('ERROR', 'MT-GUARD', e.message)), 60 * 60 * 1000);
   setTimeout(() => runMarketTipsLeakGuard().catch(() => {}), 15 * 60 * 1000); // 15min pós-boot
   // ROI-based side guard (complementa CLV guard — operate em market+side granular).
