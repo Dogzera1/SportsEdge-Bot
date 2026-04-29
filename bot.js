@@ -13986,6 +13986,20 @@ async function pollTennis(runOnce = false) {
                 const tnBestOfForScan = /grand slam|\[g\]|wimbledon|us open|roland|australian open/i.test(match.league || '') ? 5 : 3;
                 // Auto-guard wired: env > DB auto > default 1.50 (shadow leak <1.5).
                 const { minOdd: minOddTn, maxOdd: maxOddTn } = _resolveMtOddBounds('tennis', { defaultMinOdd: 1.50 });
+                // 2026-04-29 Sprint 2.1: gender-aware games shrink. Audit 7d:
+                // ATP men's non-Slam Bo3 totalGames OVER -23.7% n=73 vs WTA +5%.
+                // Detecção tour: presença de 'WTA' (caixa qualquer, com/sem 125k)
+                // → wta. ATP/Challenger sem WTA → atp. Slam (Bo5) sem shrink (sample
+                // misto + Markov calibra melhor em Slam por baseline mais sólido).
+                let _gamesScale = 1.0;
+                try {
+                  const lg = String(match.league || '');
+                  const isWta = /\bWTA\b/i.test(lg);
+                  const isAtp = !isWta && (/\bATP\b/i.test(lg) || /\bChallenger\b/i.test(lg));
+                  if (isAtp && tnBestOfForScan === 3) {
+                    _gamesScale = parseFloat(process.env.TENNIS_ATP_NONSLAM_GAMES_SCALE || '0.95');
+                  }
+                } catch (_) {}
                 let found = scanTennisMarkets({
                   markov: tennisModelResult._markovMarkets,
                   aces: tennisModelResult._markovAces,
@@ -13997,7 +14011,11 @@ async function pollTennis(runOnce = false) {
                   minOdd: minOddTn,
                   maxOdd: maxOddTn,
                   isLive: isLiveTennis,
+                  gamesScale: _gamesScale,
                 });
+                if (_gamesScale !== 1.0) {
+                  log('DEBUG', 'TENNIS-MARKET-SCAN', `${match.team1} vs ${match.team2} [${match.league}]: ATP non-Slam games shrink ×${_gamesScale.toFixed(2)} aplicado`);
+                }
                 // Correlation §12c: quando ≥2 market tips fire no mesmo match,
                 // aplica desconto de stake proporcional à correlação max com outra tip.
                 // Mitiga over-exposure (ex: ML+handicap+under todos no mesmo lado).
@@ -18633,6 +18651,63 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   const MT_SETTLE_INTERVAL_MS = parseInt(process.env.MT_SETTLE_INTERVAL_MS || '600000', 10); // 10min default
   setInterval(runShadowSettle, MT_SETTLE_INTERVAL_MS);
   setTimeout(runShadowSettle, 5 * 60 * 1000); // primeira run em 5min pós-boot
+
+  // Sprint 2.3 — Football MT auto-promote checker (cron 6h).
+  // Quando football MT shadow acumula n≥30 settled com ROI≥+10% e CLV≥0,
+  // alerta admin pra considerar flip FOOTBALL_MT_SHADOW_ONLY=false.
+  // NÃO promove automaticamente (decisão final humana — football tem
+  // baseline diferente que pode ser sazonal).
+  async function checkFootballMtPromoteReadiness() {
+    if (/^(0|false|no)$/i.test(String(process.env.FOOTBALL_PROMOTE_CHECK_AUTO ?? 'true'))) return;
+    if (!ADMIN_IDS.size) return;
+    try {
+      const minN = parseInt(process.env.FOOTBALL_PROMOTE_MIN_N || '30', 10);
+      const minRoi = parseFloat(process.env.FOOTBALL_PROMOTE_MIN_ROI || '10');
+      const minClv = parseFloat(process.env.FOOTBALL_PROMOTE_MIN_CLV || '0');
+      const days = parseInt(process.env.FOOTBALL_PROMOTE_WINDOW_DAYS || '14', 10);
+      const stats = db.prepare(`
+        SELECT COUNT(*) AS n,
+          SUM(CASE WHEN result='win' THEN 1 ELSE 0 END) AS wins,
+          SUM(CASE WHEN result='win' THEN COALESCE(stake_units,1) * (odd-1) ELSE 0 END)
+          - SUM(CASE WHEN result='loss' THEN COALESCE(stake_units,1) ELSE 0 END) AS profit_u,
+          SUM(CASE WHEN result IN ('win','loss') THEN COALESCE(stake_units,1) ELSE 0 END) AS staked_u,
+          AVG(clv_pct) AS avg_clv,
+          COUNT(clv_pct) AS clv_n
+        FROM market_tips_shadow
+        WHERE sport = 'football'
+          AND result IN ('win','loss')
+          AND created_at >= datetime('now', '-' || ? || ' days')
+      `).get(days);
+      if (!stats || stats.n < minN) {
+        log('DEBUG', 'FB-PROMOTE-CHECK', `n=${stats?.n||0}/${minN} (aguardando sample)`);
+        return;
+      }
+      const roiPct = stats.staked_u > 0 ? +(stats.profit_u / stats.staked_u * 100).toFixed(1) : 0;
+      const hitPct = +(stats.wins / stats.n * 100).toFixed(1);
+      const avgClv = stats.avg_clv != null ? +stats.avg_clv.toFixed(1) : null;
+      const ready = roiPct >= minRoi && (avgClv == null || avgClv >= minClv);
+      log('INFO', 'FB-PROMOTE-CHECK',
+        `n=${stats.n} hit=${hitPct}% ROI=${roiPct}% CLV=${avgClv}%(n=${stats.clv_n}) → ${ready ? 'READY' : 'aguardando'}`);
+      if (ready) {
+        // Dedup DM 24h via settings key
+        const key = 'fb_promote_alert_at';
+        const last = db.prepare(`SELECT value FROM settings WHERE key=?`).get(key);
+        const lastMs = last?.value ? Date.parse(last.value) : 0;
+        if (Date.now() - lastMs < 24 * 60 * 60 * 1000) return;
+        db.prepare(`INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)`)
+          .run(key, new Date().toISOString());
+        const msg = `⚽ <b>Football MT pronto pra promote</b>\n\n` +
+          `n=${stats.n} (${days}d) | hit=${hitPct}% | ROI=${roiPct}%\n` +
+          `CLV avg=${avgClv ?? 'n/a'}%\n\n` +
+          `Pra promover, set env Railway:\n<code>FOOTBALL_MT_SHADOW_ONLY=false</code>\n` +
+          `(considere também FOOTBALL_MT_KELLY_MULT=0.6 inicialmente)`;
+        const tok = resolveAlertsToken();
+        if (tok) await sendAdminDMs(tok, msg, undefined, 'fb-promote-check');
+      }
+    } catch (e) { log('DEBUG', 'FB-PROMOTE-CHECK', `err: ${e.message}`); }
+  }
+  setInterval(() => checkFootballMtPromoteReadiness().catch(() => {}), 6 * 60 * 60 * 1000); // cron 6h
+  setTimeout(() => checkFootballMtPromoteReadiness().catch(() => {}), 30 * 60 * 1000); // 30min pós-boot
 
   // CLV close-capture agressivo — cobre BOTH market_tips_shadow + regular tips.
   // Audit scripts/clv-coverage mostrou gaps graves (cs/football 0% regular; 20-50%

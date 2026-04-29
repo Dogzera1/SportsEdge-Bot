@@ -10057,6 +10057,89 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // GET /leak-radar?days=14&min_n=5&roi_max=-15&key=<KEY>
+  // Sprint 2.2: scanner cross-(sport,liga,market,side) com gates conservadores.
+  // Identifica leaks ANTES de virar -50%. Cron pode bater 6h e DM admin.
+  // Combina ML real (tips) + MT shadow (market_tips_shadow) — usa a tabela
+  // com mais sinal por sport/market.
+  if (p === '/leak-radar') {
+    if (!requireAdmin(req, res)) return;
+    const days = Math.max(1, Math.min(60, parseInt(parsed.query.days || '14', 10) || 14));
+    const minN = Math.max(3, parseInt(parsed.query.min_n || '5', 10) || 5);
+    const roiMax = parseFloat(parsed.query.roi_max || '-15');
+    try {
+      // ML real (tips): por (sport, event_name, market_type, tip_participant pra side proxy)
+      const realRows = db.prepare(`
+        SELECT sport, event_name AS league, market_type AS market,
+          COUNT(*) AS n,
+          SUM(CASE WHEN result='win' THEN 1 ELSE 0 END) AS wins,
+          SUM(CASE WHEN result='win' THEN COALESCE(stake_reais,0) * (odds-1) ELSE 0 END)
+          - SUM(CASE WHEN result='loss' THEN COALESCE(stake_reais,0) ELSE 0 END) AS profit_brl,
+          SUM(CASE WHEN result IN ('win','loss') THEN COALESCE(stake_reais,0) ELSE 0 END) AS staked_brl,
+          AVG(CASE WHEN clv_odds>0 AND open_odds>0 THEN (open_odds/clv_odds - 1)*100 END) AS avg_clv
+        FROM tips
+        WHERE COALESCE(is_shadow,0) = 0
+          AND COALESCE(archived,0) = 0
+          AND result IN ('win','loss')
+          AND sent_at >= datetime('now', '-' || ? || ' days')
+        GROUP BY sport, event_name, market_type
+        HAVING n >= ?
+      `).all(days, minN);
+
+      // MT shadow: por (sport, league, market, side)
+      let shadowRows = [];
+      try {
+        shadowRows = db.prepare(`
+          SELECT sport, league, market, side,
+            COUNT(*) AS n,
+            SUM(CASE WHEN result='win' THEN 1 ELSE 0 END) AS wins,
+            SUM(CASE WHEN result='win' THEN COALESCE(stake_units,1) * (odd-1) ELSE 0 END)
+            - SUM(CASE WHEN result='loss' THEN COALESCE(stake_units,1) ELSE 0 END) AS profit_u,
+            SUM(CASE WHEN result IN ('win','loss') THEN COALESCE(stake_units,1) ELSE 0 END) AS staked_u,
+            AVG(clv_pct) AS avg_clv
+          FROM market_tips_shadow
+          WHERE result IN ('win','loss')
+            AND created_at >= datetime('now', '-' || ? || ' days')
+          GROUP BY sport, league, market, side
+          HAVING n >= ?
+        `).all(days, minN);
+      } catch (_) {}
+
+      const realLeaks = realRows
+        .map(r => ({
+          source: 'ml_real',
+          key: `${r.sport}|${r.league}|${r.market}`,
+          sport: r.sport, league: r.league, market: r.market, side: null,
+          n: r.n, wins: r.wins, hit: +(r.wins / r.n * 100).toFixed(1),
+          roi_pct: r.staked_brl > 0 ? +(r.profit_brl / r.staked_brl * 100).toFixed(1) : null,
+          profit: +r.profit_brl.toFixed(2),
+          avg_clv: r.avg_clv != null ? +r.avg_clv.toFixed(1) : null,
+        }))
+        .filter(r => r.roi_pct != null && r.roi_pct <= roiMax);
+
+      const shadowLeaks = shadowRows
+        .map(r => ({
+          source: 'mt_shadow',
+          key: `${r.sport}|${r.league}|${r.market}|${r.side}`,
+          sport: r.sport, league: r.league, market: r.market, side: r.side,
+          n: r.n, wins: r.wins, hit: +(r.wins / r.n * 100).toFixed(1),
+          roi_pct: r.staked_u > 0 ? +(r.profit_u / r.staked_u * 100).toFixed(1) : null,
+          profit: +r.profit_u.toFixed(2),
+          avg_clv: r.avg_clv != null ? +r.avg_clv.toFixed(1) : null,
+        }))
+        .filter(r => r.roi_pct != null && r.roi_pct <= roiMax);
+
+      const all = [...realLeaks, ...shadowLeaks].sort((a, b) => a.profit - b.profit);
+      sendJson(res, {
+        ok: true, days, min_n: minN, roi_max: roiMax,
+        ml_real_count: realLeaks.length,
+        mt_shadow_count: shadowLeaks.length,
+        leaks: all,
+      });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   // POST/GET /admin/mt-disable?sport=tennis&market=totalGames&side=over&reason=...&key=<KEY>
   // Espelha /mt-guard disable do Telegram, exposto via HTTP. Escreve em
   // market_tips_runtime_state + popula _marketTipsDisabledRuntime in-process
