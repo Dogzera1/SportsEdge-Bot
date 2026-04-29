@@ -7830,46 +7830,11 @@ const server = http.createServer(async (req, res) => {
         }
       }
 
-      // Resolve kills via gol.gg scrape: matcha tournament+match por nomes/data,
-      // pega gameIds do match e scrape /game/stats/<gameId>/page-summary/.
+      // Resolve kills via gol.gg scrape — delegated pra lib/golgg-kills-scraper.js
       async function _fetchKillsGolgg(team1, team2, mapIndex, dateHint) {
         try {
-          if (!team1 || !team2) return { reason: 'golgg_no_teams' };
-          const HTTP_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
-          const ggHeaders = { 'User-Agent': HTTP_UA, 'Accept': 'text/html,application/xhtml+xml' };
-          const normT = s => String(s||'').toLowerCase().replace(/[^a-z0-9]/g, '');
-          const t1n = normT(team1), t2n = normT(team2);
-          // Search por season corrente — gol.gg URL patterns:
-          // List tournaments: /tournament/list/ (HTML), busca AJAX /tournament/ajax.trlist.php
-          // Pra simplificar: hit /tournament/tournament-matchlist/<tournamentId>/ direto se conhecemos.
-          // Como não temos tournamentId, fazemos search via página de TODAS as matches recentes
-          // ("/tournament/tournament-stats/Esports+World+Cup+2026/"). Mas variável.
-          //
-          // Approach pragmático: usar match listing global via /matches.
-          // Endpoint /esports-history/competitions retorna competições + matches.
-          // Fallback: scrape match detail from team page /teams/team-stats/<teamId>/.
-          //
-          // SIMPLEST: direct scrape /game/stats/{gameId}/page-summary/ requer gameId.
-          // Sem gameId, não conseguimos. Registro como reason pra futuro completar.
-          //
-          // Por ora, gol.gg fallback fica como NO-OP até termos ID mapping.
-          // Plano: indexar gol.gg gameIds por match (script sync-golgg-matches já tem
-          // os gameIds em pro_match_results — query DB por team1+team2+date).
-          const dateStr = dateHint ? String(dateHint).slice(0, 10) : '';
-          const row = db.prepare(`
-            SELECT match_id FROM match_results
-            WHERE game = 'lol'
-              AND lower(replace(replace(replace(team1,' ',''),'-',''),'.','')) IN (?, ?)
-              AND lower(replace(replace(replace(team2,' ',''),'-',''),'.','')) IN (?, ?)
-              AND match_id LIKE 'golgg_%'
-              AND (? = '' OR substr(resolved_at, 1, 10) = ?)
-            ORDER BY ABS(julianday(resolved_at) - julianday(?)) ASC
-            LIMIT 1
-          `).get(t1n, t2n, t1n, t2n, dateStr, dateStr, dateStr || new Date().toISOString().slice(0,10));
-          if (!row) return { reason: 'golgg_no_match_in_db' };
-          // match_id format esperado: 'golgg_<seriesId>'. Buscar matchlist HTML pra obter gameIds.
-          // Fora de scope agora — registrar e retornar.
-          return { reason: 'golgg_lookup_pending', match_id: row.match_id };
+          const { fetchKillsViaGolgg } = require('./lib/golgg-kills-scraper');
+          return await fetchKillsViaGolgg({ team1, team2, mapIndex, sentAt: dateHint, db });
         } catch (e) {
           return { reason: 'golgg_exception', msg: e.message };
         }
@@ -9047,6 +9012,51 @@ const server = http.createServer(async (req, res) => {
   }
 
   // GET /admin/oe-status — counts per year
+  // GET /admin/golgg-test?team1=X&team2=Y&map=N&date=YYYY-MM-DD
+  // Debug: tenta scrape gol.gg pra esse jogo, retorna trace completo.
+  if (p === '/admin/golgg-test') {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const team1 = String(parsed.query.team1 || '').trim();
+      const team2 = String(parsed.query.team2 || '').trim();
+      const mapIndex = parseInt(parsed.query.map || '1', 10);
+      const sentAt = String(parsed.query.date || new Date().toISOString().slice(0, 10));
+      const { fetchKillsViaGolgg } = require('./lib/golgg-kills-scraper');
+      const r = await fetchKillsViaGolgg({ team1, team2, mapIndex, sentAt, db });
+      sendJson(res, { ok: true, input: { team1, team2, mapIndex, sentAt }, result: r });
+    } catch (e) { sendJson(res, { ok: false, error: e.message, stack: e.stack }, 500); }
+    return;
+  }
+
+  // POST /admin/sync-golgg-matches?seasons=S16 — dispara sync em background
+  if (p === '/admin/sync-golgg-matches' && (req.method === 'POST' || req.method === 'GET')) {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const seasonsRaw = String(parsed.query.seasons || 'S16').toUpperCase();
+      const seasons = seasonsRaw.split(',').map(s => s.trim()).filter(s => /^S\d{1,2}$/.test(s));
+      if (!seasons.length) { sendJson(res, { ok: false, error: 'invalid seasons' }, 400); return; }
+      const beforeCount = db.prepare(`SELECT COUNT(*) AS n FROM match_results WHERE game='lol' AND match_id LIKE 'golgg_%'`).get().n;
+      sendJson(res, { ok: true, message: 'Sync gol.gg iniciado em bg', seasons, beforeCount });
+      setImmediate(() => {
+        try {
+          const { spawn } = require('child_process');
+          const path = require('path');
+          const child = spawn(process.execPath, [path.join(__dirname, 'scripts/sync-golgg-matches.js'), `--seasons=${seasons.join(',')}`], {
+            env: { ...process.env, DB_PATH: process.env.DB_PATH || path.join(__dirname, 'sportsedge.db') },
+            stdio: ['ignore', 'pipe', 'pipe'],
+          });
+          let out = '', err = '';
+          child.stdout.on('data', d => out += d);
+          child.stderr.on('data', d => err += d);
+          child.on('exit', code => {
+            log('INFO', 'GOLGG-SYNC', `exit=${code} stdout_tail=${out.slice(-200)}${err ? ' stderr_tail='+err.slice(-200) : ''}`);
+          });
+        } catch (e) { log('ERROR', 'GOLGG-SYNC', e.message); }
+      });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   if (p === '/admin/oe-status') {
     if (!requireAdmin(req, res)) return;
     try {
