@@ -10112,8 +10112,20 @@ const server = http.createServer(async (req, res) => {
   if (p === '/admin/mt-disable-list') {
     if (!requireAdmin(req, res)) return;
     try {
-      const rows = db.prepare(`SELECT sport, market, side, source, reason, roi_pct, clv_pct, n_tips, updated_at
-        FROM market_tips_runtime_state WHERE disabled = 1 ORDER BY sport, market, side`).all();
+      // Schema cascading: 050 base · 051 side · 063 league.
+      let rows;
+      try {
+        rows = db.prepare(`SELECT sport, market, side, league, source, reason, roi_pct, clv_pct, clv_n, updated_at
+          FROM market_tips_runtime_state WHERE disabled = 1 ORDER BY sport, market, side`).all();
+      } catch (_) {
+        try {
+          rows = db.prepare(`SELECT sport, market, side, source, reason, roi_pct, clv_pct, clv_n, updated_at
+            FROM market_tips_runtime_state WHERE disabled = 1 ORDER BY sport, market, side`).all();
+        } catch (__) {
+          rows = db.prepare(`SELECT sport, market, source, reason, roi_pct, clv_pct, clv_n, updated_at
+            FROM market_tips_runtime_state WHERE disabled = 1 ORDER BY sport, market`).all();
+        }
+      }
       sendJson(res, { ok: true, count: rows.length, disables: rows });
     } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
     return;
