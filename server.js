@@ -7831,10 +7831,10 @@ const server = http.createServer(async (req, res) => {
       }
 
       // Resolve kills via gol.gg scrape — delegated pra lib/golgg-kills-scraper.js
-      async function _fetchKillsGolgg(team1, team2, mapIndex, dateHint) {
+      async function _fetchKillsGolgg(team1, team2, mapIndex, dateHint, leagueHint) {
         try {
           const { fetchKillsViaGolgg } = require('./lib/golgg-kills-scraper');
-          return await fetchKillsViaGolgg({ team1, team2, mapIndex, sentAt: dateHint, db });
+          return await fetchKillsViaGolgg({ team1, team2, mapIndex, sentAt: dateHint, db, leagueHint });
         } catch (e) {
           return { reason: 'golgg_exception', msg: e.message };
         }
@@ -7848,6 +7848,7 @@ const server = http.createServer(async (req, res) => {
         const team2 = ctx?.team2 || '';
         const sentAt = ctx?.sentAt || '';
         const riotMatchId = ctx?.riotMatchId || '';
+        const leagueHint = ctx?.leagueHint || '';
 
         // ── Tier 1: PandaScore ──
         if (PANDASCORE_TOKEN && PANDASCORE_TOKEN !== 'your-pandascore-token' && psMatchId) {
@@ -7933,7 +7934,7 @@ const server = http.createServer(async (req, res) => {
         trace('riot_fail', { reason: riotRes.reason });
 
         // ── Tier 3: gol.gg scrape (DB lookup → match URL) ──
-        const ggRes = await _fetchKillsGolgg(team1, team2, mapIndex, sentAt);
+        const ggRes = await _fetchKillsGolgg(team1, team2, mapIndex, sentAt, leagueHint);
         if (ggRes.totalKills != null) {
           trace('golgg_ok', { kills: ggRes.totalKills });
           const out = { totalKills: ggRes.totalKills, source: 'golgg' };
@@ -8014,6 +8015,7 @@ const server = http.createServer(async (req, res) => {
             const killsRes = await _fetchLolMapKills(psMatchId, mapIndex, {
               team1: t.participant1, team2: t.participant2,
               sentAt: t.sent_at, riotMatchId,
+              leagueHint: t.event_name || '',
             });
             if (!killsRes) { _killReason('ps_api_null'); summary.skipped++; continue; }
             if (killsRes.unfinished) { _killReason('map_unfinished'); summary.skipped++; continue; }
