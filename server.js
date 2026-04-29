@@ -7714,6 +7714,15 @@ const server = http.createServer(async (req, res) => {
           const games = Array.isArray(m.games) ? m.games : [];
           const game = games.find(g => Number(g.position) === Number(mapIndex));
           if (!game || !game.id) {
+            // Mapa não existe na série (ex: sweep 2-0 e tip pede mapa 3) → VOID.
+            // Detectamos isso quando todos os games disponíveis estão `finished`
+            // mas a position pedida não está entre eles.
+            const allFinished = games.length > 0 && games.every(g => g.status === 'finished');
+            if (allFinished) {
+              _trace('map_not_played', { available_positions: games.map(g => g.position) });
+              const out = { mapNotPlayed: true };
+              _psKillsCache.set(cacheKey, out); return out;
+            }
             _trace('game_not_found', { available_positions: games.map(g => g.position), available_status: games.map(g => g.status) });
             _psKillsCache.set(cacheKey, null); return null;
           }
@@ -7721,19 +7730,31 @@ const server = http.createServer(async (req, res) => {
             _trace('map_unfinished', { status: game.status });
             _psKillsCache.set(cacheKey, { unfinished: true }); return { unfinished: true };
           }
-          const gr = await httpGet(`https://api.pandascore.co/games/${game.id}`, headers);
-          if (!gr || gr.status !== 200) {
-            _trace('game_http_fail', { status: gr?.status, body_head: String(gr?.body || '').slice(0, 120) });
-            _psKillsCache.set(cacheKey, null); return null;
+          // 1ª preferência: players inline em m.games[N].players (já vem no match payload).
+          // Fallback: /lol/games/{id} (rota com lol prefix; /games/{id} generic retorna 404).
+          let players = Array.isArray(game.players) ? game.players : [];
+          let totalKillsFromMatch = null;
+          // PS embeda total_kills no game às vezes (em vez de detalhar por player).
+          // Cobrir ambos: se vier game.kills_team_1+2 ou similar.
+          if (!players.length && Number.isFinite(Number(game.kills_team_1)) && Number.isFinite(Number(game.kills_team_2))) {
+            totalKillsFromMatch = Number(game.kills_team_1) + Number(game.kills_team_2);
           }
-          const gd = safeParse(gr.body, {});
-          const players = Array.isArray(gd.players) ? gd.players
-                        : Array.isArray(game.players) ? game.players : [];
-          if (!players.length) {
-            _trace('no_players', { gd_keys: Object.keys(gd || {}).slice(0, 10) });
-            _psKillsCache.set(cacheKey, null); return null;
+          if (!players.length && totalKillsFromMatch == null) {
+            const gr = await httpGet(`https://api.pandascore.co/lol/games/${game.id}`, headers);
+            if (!gr || gr.status !== 200) {
+              _trace('game_http_fail', { status: gr?.status, body_head: String(gr?.body || '').slice(0, 120) });
+              _psKillsCache.set(cacheKey, null); return null;
+            }
+            const gd = safeParse(gr.body, {});
+            players = Array.isArray(gd.players) ? gd.players : [];
+            if (!players.length) {
+              _trace('no_players', { gd_keys: Object.keys(gd || {}).slice(0, 10), game_keys: Object.keys(game || {}).slice(0, 12) });
+              _psKillsCache.set(cacheKey, null); return null;
+            }
           }
-          const totalKills = players.reduce((s, p) => s + (Number(p.kills) || 0), 0);
+          const totalKills = totalKillsFromMatch != null
+            ? totalKillsFromMatch
+            : players.reduce((s, p) => s + (Number(p.kills) || 0), 0);
           const out = { totalKills, gameStatus: game.status || 'finished' };
           _psKillsCache.set(cacheKey, out);
           return out;
@@ -7811,13 +7832,21 @@ const server = http.createServer(async (req, res) => {
             const killsRes = await _fetchLolMapKills(psMatchId, mapIndex);
             if (!killsRes) { _killReason('ps_api_null'); summary.skipped++; continue; }
             if (killsRes.unfinished) { _killReason('map_unfinished'); summary.skipped++; continue; }
-            const totalKills = Number(killsRes.totalKills);
-            if (!Number.isFinite(totalKills) || totalKills <= 0) { _killReason('no_kills_data'); summary.skipped++; continue; }
-            const isWin = side === 'over' ? totalKills > line : totalKills < line;
-            result = isWin ? 'win' : 'loss';
-            profitR = isWin ? +(stakeR * (odds - 1)).toFixed(2) : -stakeR;
-            summary.settled++;
-            log('INFO', 'FORCE-SETTLE-KILLS', `tip#${t.id} lol map${mapIndex} ${side} ${line} → kills=${totalKills} → ${result}`);
+            // Mapa não foi jogado (sweep 2-0 e tip pediu mapa 3+) → VOID.
+            if (killsRes.mapNotPlayed) {
+              result = 'void';
+              profitR = 0;
+              summary.voided++;
+              log('INFO', 'FORCE-SETTLE-KILLS', `tip#${t.id} lol map${mapIndex} ${side} ${line} → mapa não jogado (sweep) → VOID`);
+            } else {
+              const totalKills = Number(killsRes.totalKills);
+              if (!Number.isFinite(totalKills) || totalKills <= 0) { _killReason('no_kills_data'); summary.skipped++; continue; }
+              const isWin = side === 'over' ? totalKills > line : totalKills < line;
+              result = isWin ? 'win' : 'loss';
+              profitR = isWin ? +(stakeR * (odds - 1)).toFixed(2) : -stakeR;
+              summary.settled++;
+              log('INFO', 'FORCE-SETTLE-KILLS', `tip#${t.id} lol map${mapIndex} ${side} ${line} → kills=${totalKills} → ${result}`);
+            }
             // Atualiza e segue (skip o resto do pipeline match_results)
             // Shadow tips: settled mas NÃO mexem em bankroll.
             const tx = db.transaction(() => {
