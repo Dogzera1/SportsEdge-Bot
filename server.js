@@ -7703,7 +7703,9 @@ const server = http.createServer(async (req, res) => {
         }
         const headers = { 'Authorization': `Bearer ${PANDASCORE_TOKEN}` };
         try {
-          const mr = await httpGet(`https://api.pandascore.co/lol/matches/${psMatchId}`, headers);
+          // Rota generic /matches/{id} — /lol/matches/{id} retorna 403 "Access Denied"
+          // no plano atual (mesmo motivo do /ps-result usar generic em server.js:6354).
+          const mr = await httpGet(`https://api.pandascore.co/matches/${psMatchId}`, headers);
           if (!mr || mr.status !== 200) {
             _trace('match_http_fail', { status: mr?.status, body_head: String(mr?.body || '').slice(0, 120) });
             _psKillsCache.set(cacheKey, null); return null;
@@ -7719,7 +7721,7 @@ const server = http.createServer(async (req, res) => {
             _trace('map_unfinished', { status: game.status });
             _psKillsCache.set(cacheKey, { unfinished: true }); return { unfinished: true };
           }
-          const gr = await httpGet(`https://api.pandascore.co/lol/games/${game.id}`, headers);
+          const gr = await httpGet(`https://api.pandascore.co/games/${game.id}`, headers);
           if (!gr || gr.status !== 200) {
             _trace('game_http_fail', { status: gr?.status, body_head: String(gr?.body || '').slice(0, 120) });
             _psKillsCache.set(cacheKey, null); return null;
