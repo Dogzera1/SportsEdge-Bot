@@ -7636,7 +7636,25 @@ const server = http.createServer(async (req, res) => {
     const sportFilter = String(parsed.query.sport || '').toLowerCase().trim();
     const daysRaw = parseInt(parsed.query.days, 10);
     const days = Number.isFinite(daysRaw) ? Math.max(1, Math.min(180, daysRaw)) : 30;
+    // 2026-04-29: include_shadow=1 inclui tips com is_shadow=1 no settle
+    // (ML shadow). Útil pro botão dashboard cobrir tudo de uma vez.
+    const includeShadow = parsed.query.include_shadow === '1' || parsed.query.include_shadow === 'true';
+    // 2026-04-29: shadow_mt=1 dispara settleShadowTips (market_tips_shadow)
+    // antes do loop de tips reais. Combina shadow MT + ML shadow + reais
+    // num único click.
+    const shadowMt = parsed.query.shadow_mt === '1' || parsed.query.shadow_mt === 'true';
     try {
+      // 2026-04-29: pré-step opcional — settle market_tips_shadow primeiro.
+      // settleShadowTips chama propagator no final, então tips reais que
+      // já tinham shadow row settled herdam o resultado antes do loop principal.
+      let shadowMtResult = null;
+      if (shadowMt) {
+        try {
+          const { settleShadowTips } = require('./lib/market-tips-shadow');
+          shadowMtResult = settleShadowTips(db);
+        } catch (e) { shadowMtResult = { error: e.message }; }
+      }
+
       // Tips pendentes (result IS NULL) na janela.
       // 2026-04-28: agora INCLUI MT tips (match_id LIKE '%::mt::%') —
       // HANDICAP_GAMES/TOTAL_GAMES resolvem via parseTennisScore;
@@ -7646,12 +7664,13 @@ const server = http.createServer(async (req, res) => {
         ? `AND sport = ?`
         : '';
       const sportArgs = sportClause ? [sportFilter] : [];
+      const shadowClause = includeShadow ? '' : 'AND COALESCE(is_shadow, 0) = 0';
       const pending = db.prepare(`
-        SELECT id, sport, match_id, participant1, participant2, tip_participant, odds, sent_at, market_type, stake
+        SELECT id, sport, match_id, participant1, participant2, tip_participant, odds, sent_at, market_type, stake, is_shadow
         FROM tips
         WHERE result IS NULL
           AND (archived IS NULL OR archived = 0)
-          AND COALESCE(is_shadow, 0) = 0
+          ${shadowClause}
           AND sent_at >= datetime('now', ?)
           ${sportClause}
         ORDER BY sent_at DESC
@@ -7771,17 +7790,18 @@ const server = http.createServer(async (req, res) => {
             summary.settled++;
             log('INFO', 'FORCE-SETTLE-KILLS', `tip#${t.id} lol map${mapIndex} ${side} ${line} → kills=${totalKills} → ${result}`);
             // Atualiza e segue (skip o resto do pipeline match_results)
+            // Shadow tips: settled mas NÃO mexem em bankroll.
             const tx = db.transaction(() => {
               db.prepare(`UPDATE tips SET result = ?, settled_at = datetime('now'), stake_reais = ?, profit_reais = ? WHERE id = ?`)
                 .run(result, stakeR, profitR, t.id);
-              if (profitR !== 0) {
+              if (profitR !== 0 && !t.is_shadow) {
                 db.prepare(`UPDATE bankroll SET current_banca = current_banca + ?, updated_at = datetime('now') WHERE sport = ?`)
                   .run(profitR, t.sport);
               }
             });
             tx();
             if (summary.samples.length < 10) {
-              summary.samples.push({ id: t.id, sport: t.sport, tip: t.tip_participant, total_kills: totalKills, line, side, result, profit_reais: profitR });
+              summary.samples.push({ id: t.id, sport: t.sport, tip: t.tip_participant, total_kills: totalKills, line, side, result, profit_reais: profitR, shadow: !!t.is_shadow });
             }
             continue;
           }
@@ -7872,11 +7892,12 @@ const server = http.createServer(async (req, res) => {
             summary.skipped++;
             continue;
           }
-          // Atualiza tip + bankroll na mesma transaction
+          // Atualiza tip + bankroll na mesma transaction.
+          // Shadow tips: settled mas NÃO mexem em bankroll.
           const tx = db.transaction(() => {
             db.prepare(`UPDATE tips SET result = ?, settled_at = datetime('now'), stake_reais = ?, profit_reais = ? WHERE id = ?`)
               .run(result, stakeR, profitR, t.id);
-            if (profitR !== 0) {
+            if (profitR !== 0 && !t.is_shadow) {
               db.prepare(`UPDATE bankroll SET current_banca = current_banca + ?, updated_at = datetime('now') WHERE sport = ?`)
                 .run(profitR, t.sport);
             }
@@ -7885,7 +7906,7 @@ const server = http.createServer(async (req, res) => {
           if (summary.samples.length < 10) {
             summary.samples.push({
               id: t.id, sport: t.sport, tip: t.tip_participant, winner: m.winner,
-              result, profit_reais: profitR, score: m.final_score,
+              result, profit_reais: profitR, score: m.final_score, shadow: !!t.is_shadow,
             });
           }
         } catch (e) {
@@ -7893,7 +7914,8 @@ const server = http.createServer(async (req, res) => {
           log('WARN', 'FORCE-SETTLE', `tip#${t.id}: ${e.message}`);
         }
       }
-      log('INFO', 'FORCE-SETTLE', `${summary.attempted} attempted | ${summary.settled} settled | ${summary.voided} voided | ${summary.skipped} skipped | ${summary.errors} errors`);
+      if (shadowMtResult) summary.shadow_mt = shadowMtResult;
+      log('INFO', 'FORCE-SETTLE', `${summary.attempted} attempted | ${summary.settled} settled | ${summary.voided} voided | ${summary.skipped} skipped | ${summary.errors} errors${shadowMtResult ? ` | shadow_mt: ${shadowMtResult.settled||0}/${shadowMtResult.skipped||0}` : ''}`);
       sendJson(res, summary);
     } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
     return;

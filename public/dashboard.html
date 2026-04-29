@@ -2462,23 +2462,30 @@ async function loadTipsByMarket(gen = refreshGen) {
 // 2026-04-28: force-settle bulk pra tips pendentes do sport atual.
 // Chama /admin/run-settle backend que itera tips pending → busca match_results
 // → settle ou void (walkover detection). Depois re-carrega.
+// 2026-04-29: também roda settleShadowTips (market_tips_shadow) e inclui
+// is_shadow=1 (ML shadow). Tudo num único click.
 async function forceSettleTips(btn) {
-  if (!confirm('Force-settle vai tentar resolver TODAS as tips pendentes do sport atual via match_results. Walkovers viram void. Continuar?')) return;
+  if (!confirm('Force-settle vai tentar resolver TODAS as tips pendentes (reais + ML shadow + market shadow) do sport atual. Walkovers viram void. Bankroll só é atualizado pra tips reais (shadow não conta). Continuar?')) return;
   if (btn) { btn.disabled = true; btn.textContent = '⏳ rodando...'; }
   try {
     const sportQ = currentSport && currentSport !== '__overall__' ? `&sport=${encodeURIComponent(currentSport)}` : '';
-    const r = await adminFetch(`/admin/run-settle?days=30${sportQ}`, { method: 'POST' });
+    const r = await adminFetch(`/admin/run-settle?days=30&include_shadow=1&shadow_mt=1${sportQ}`, { method: 'POST' });
     const j = await r.json();
     if (!r.ok || !j?.ok) {
       const msg = j?.error || `HTTP ${r.status}`;
       alert(`❌ Force-settle falhou: ${msg}`);
       return;
     }
-    const summary = `Tentativas: ${j.attempted}\n` +
+    const shadowMt = j.shadow_mt
+      ? `\n\n📊 Market shadow:\n  ✅ ${j.shadow_mt.settled || 0} settled · ⏭️ ${j.shadow_mt.skipped || 0} skipped${j.shadow_mt.error ? `\n  ⚠️ ${j.shadow_mt.error}` : ''}`
+      : '';
+    const summary = `Tips reais + ML shadow:\n` +
+                    `Tentativas: ${j.attempted}\n` +
                     `✅ Settled: ${j.settled}\n` +
                     `⚪ Void (walkover): ${j.voided}\n` +
                     `⏭️ Skipped (sem match_results): ${j.skipped}\n` +
-                    `❌ Errors: ${j.errors}`;
+                    `❌ Errors: ${j.errors}` +
+                    shadowMt;
     alert(summary);
     // Reload tips
     await loadTips();
