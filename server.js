@@ -7640,7 +7640,8 @@ const server = http.createServer(async (req, res) => {
       // Tips pendentes (result IS NULL) na janela.
       // 2026-04-28: agora INCLUI MT tips (match_id LIKE '%::mt::%') —
       // HANDICAP_GAMES/TOTAL_GAMES resolvem via parseTennisScore;
-      // total_kills_map<N> skipa (sem kill data server-side).
+      // 2026-04-29: TOTAL_KILLS_MAP<N> (LoL) resolve via PandaScore
+      // /lol/matches/{psId} → /lol/games/{gameId} (cache por request).
       const sportClause = sportFilter && /^[a-z0-9]+$/.test(sportFilter)
         ? `AND sport = ?`
         : '';
@@ -7666,6 +7667,41 @@ const server = http.createServer(async (req, res) => {
       // Map sport→game_in_match_results (CS legado é 'cs' OR 'cs2')
       const gameMap = { lol: ['lol','esports'], dota2: ['dota2','esports'], cs: ['cs','cs2'], cs2: ['cs','cs2'], valorant: ['valorant','esports'], tennis: ['tennis'], football: ['football'], mma: ['mma'], snooker: ['snooker'], darts: ['darts'], tabletennis: ['tabletennis'] };
 
+      // Cache PS lookups durante este force-settle (várias kills tips podem cair
+      // no mesmo match — evita refetch /lol/matches/{id} + /lol/games/{id}).
+      // Key = `psMatchId|mapIndex`, value = { totalKills, gameStatus } | null.
+      const _psKillsCache = new Map();
+      async function _fetchLolMapKills(psMatchId, mapIndex) {
+        const cacheKey = `${psMatchId}|${mapIndex}`;
+        if (_psKillsCache.has(cacheKey)) return _psKillsCache.get(cacheKey);
+        if (!PANDASCORE_TOKEN || PANDASCORE_TOKEN === 'your-pandascore-token') {
+          _psKillsCache.set(cacheKey, null); return null;
+        }
+        const headers = { 'Authorization': `Bearer ${PANDASCORE_TOKEN}` };
+        try {
+          const mr = await httpGet(`https://api.pandascore.co/lol/matches/${psMatchId}`, headers);
+          if (!mr || mr.status !== 200) { _psKillsCache.set(cacheKey, null); return null; }
+          const m = safeParse(mr.body, {});
+          const games = Array.isArray(m.games) ? m.games : [];
+          const game = games.find(g => Number(g.position) === Number(mapIndex));
+          if (!game || !game.id) { _psKillsCache.set(cacheKey, null); return null; }
+          if (game.status && game.status !== 'finished') { _psKillsCache.set(cacheKey, { unfinished: true }); return { unfinished: true }; }
+          const gr = await httpGet(`https://api.pandascore.co/lol/games/${game.id}`, headers);
+          if (!gr || gr.status !== 200) { _psKillsCache.set(cacheKey, null); return null; }
+          const gd = safeParse(gr.body, {});
+          const players = Array.isArray(gd.players) ? gd.players
+                        : Array.isArray(game.players) ? game.players : [];
+          if (!players.length) { _psKillsCache.set(cacheKey, null); return null; }
+          const totalKills = players.reduce((s, p) => s + (Number(p.kills) || 0), 0);
+          const out = { totalKills, gameStatus: game.status || 'finished' };
+          _psKillsCache.set(cacheKey, out);
+          return out;
+        } catch (e) {
+          log('DEBUG', 'FORCE-SETTLE-KILLS', `ps fetch err ${psMatchId}/${mapIndex}: ${e.message}`);
+          _psKillsCache.set(cacheKey, null); return null;
+        }
+      }
+
       for (const t of pending) {
         summary.attempted++;
         try {
@@ -7680,7 +7716,7 @@ const server = http.createServer(async (req, res) => {
           const before = new Date(tipMs - windowDays * 86400_000).toISOString().slice(0, 19).replace('T', ' ');
           const after = new Date(tipMs + windowDays * 86400_000).toISOString().slice(0, 19).replace('T', ' ');
           const matches = db.prepare(`
-            SELECT winner, final_score, resolved_at, league
+            SELECT match_id, winner, final_score, resolved_at, league
             FROM match_results
             WHERE game IN (${placeholders})
               AND winner IS NOT NULL AND winner != ''
@@ -7708,7 +7744,8 @@ const server = http.createServer(async (req, res) => {
           const odds = parseFloat(t.odds) || 1;
           // 2026-04-28: detecção de market type pra resolução específica.
           // ML/1X2: name match contra winner. HG/TG: parse score tennis.
-          // total_kills_map<N>: skip (sem kill data). HANDICAP/TOTAL esports: skip.
+          // 2026-04-29: total_kills_map<N> (LoL) → PandaScore games API.
+          // HANDICAP/TOTAL maps esports: skip.
           const mt = String(t.market_type || 'ML').toUpperCase();
           const isMlLike = ['ML','1X2_H','1X2_A','1X2_D','OVER_2.5','UNDER_2.5','DRAW'].includes(mt);
           const isTennisHg = mt === 'HANDICAP_GAMES' && t.sport === 'tennis';
@@ -7776,10 +7813,44 @@ const server = http.createServer(async (req, res) => {
               continue;
             }
           } else if (isKills) {
-            // total_kills_map<N>: precisa kill counts da PandaScore game data,
-            // não disponível em match_results. Skip — handler dedicado pendente.
-            summary.skipped++;
-            continue;
+            // total_kills_map<N>: busca kills via PandaScore /lol/matches/{id}
+            // → /lol/games/{gameId} (somente sport=lol). Match_id da row em
+            // match_results tem prefixo 'lol_ps_' ou 'ps_' → extrai numeric ID.
+            if (t.sport !== 'lol') { summary.skipped++; continue; }
+            const mapMatch = mt.match(/^TOTAL_KILLS_MAP(\d+)$/);
+            if (!mapMatch) { summary.skipped++; continue; }
+            const mapIndex = parseInt(mapMatch[1], 10);
+            // Extrai PS id de match_results.match_id (ex: 'lol_ps_1466110' ou 'ps_1466110')
+            const mrId = String(m.match_id || '');
+            const psIdMatch = mrId.match(/(?:^|_)ps_(\d+)$/);
+            if (!psIdMatch) { summary.skipped++; continue; }
+            const psMatchId = psIdMatch[1];
+            // Parse line e side: prefere ::ln<tag> em t.match_id (formato preciso),
+            // fallback regex em tip_participant ("Mapa 3 OVER 21.5 kills").
+            let line = NaN, side = '';
+            const lnTag = String(t.match_id || '').match(/::ln(N|P)?([\d.]+)/);
+            if (lnTag) {
+              const sign = lnTag[1] === 'N' ? -1 : 1;
+              line = sign * parseFloat(lnTag[2]);
+            }
+            const sideTag = String(t.match_id || '').match(/::mt::total_kills_map\d+::(over|under)/i);
+            if (sideTag) side = sideTag[1].toLowerCase();
+            if (!Number.isFinite(line) || !side) {
+              const tipStr = String(t.tip_participant || '').toUpperCase();
+              const fallback = tipStr.match(/(OVER|UNDER)\s+(\d+(?:\.\d+)?)/);
+              if (fallback) { side = fallback[1].toLowerCase(); line = parseFloat(fallback[2]); }
+            }
+            if (!Number.isFinite(line) || !side) { summary.skipped++; continue; }
+            const killsRes = await _fetchLolMapKills(psMatchId, mapIndex);
+            if (!killsRes) { summary.skipped++; continue; }
+            if (killsRes.unfinished) { summary.skipped++; continue; }
+            const totalKills = Number(killsRes.totalKills);
+            if (!Number.isFinite(totalKills) || totalKills <= 0) { summary.skipped++; continue; }
+            const isWin = side === 'over' ? totalKills > line : totalKills < line;
+            result = isWin ? 'win' : 'loss';
+            profitR = isWin ? +(stakeR * (odds - 1)).toFixed(2) : -stakeR;
+            summary.settled++;
+            log('INFO', 'FORCE-SETTLE-KILLS', `tip#${t.id} lol map${mapIndex} ${side} ${line} → kills=${totalKills} → ${result}`);
           } else {
             // HANDICAP esports / TOTAL maps esports: também precisa map score
             // detalhado, não temos. Skip.
