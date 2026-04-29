@@ -10121,23 +10121,38 @@ const server = http.createServer(async (req, res) => {
         HAVING n >= ?
       `).all(days, minN);
 
-      // MT shadow: por (sport, league, market, side)
+      // MT shadow: por (sport, league, market, side) — mas DEDUP por
+      // (team1,team2,market,line,side) primeiro pra evitar contagem inflada
+      // por re-emissão do scanner (root-cause fix 2026-04-29).
       let shadowRows = [];
       try {
-        shadowRows = db.prepare(`
-          SELECT sport, league, market, side,
-            COUNT(*) AS n,
-            SUM(CASE WHEN result='win' THEN 1 ELSE 0 END) AS wins,
-            SUM(CASE WHEN result='win' THEN COALESCE(stake_units,1) * (odd-1) ELSE 0 END)
-            - SUM(CASE WHEN result='loss' THEN COALESCE(stake_units,1) ELSE 0 END) AS profit_u,
-            SUM(CASE WHEN result IN ('win','loss') THEN COALESCE(stake_units,1) ELSE 0 END) AS staked_u,
-            AVG(clv_pct) AS avg_clv
+        const rawShadow = db.prepare(`
+          SELECT id, sport, league, team1, team2, market, side, line, odd, stake_units, result, clv_pct, created_at
           FROM market_tips_shadow
           WHERE result IN ('win','loss')
             AND created_at >= datetime('now', '-' || ? || ' days')
-          GROUP BY sport, league, market, side
-          HAVING n >= ?
-        `).all(days, minN);
+        `).all(days);
+        const dedup = new Map();
+        for (const r of rawShadow) {
+          const k = `${r.sport}|${r.league}|${r.team1}|${r.team2}|${r.market}|${r.line}|${r.side}`;
+          const prev = dedup.get(k);
+          if (!prev || (r.created_at || '') > (prev.created_at || '')) dedup.set(k, r);
+        }
+        const grouped = new Map();
+        for (const r of dedup.values()) {
+          const gk = `${r.sport}|${r.league}|${r.market}|${r.side}`;
+          let g = grouped.get(gk);
+          if (!g) { g = { sport: r.sport, league: r.league, market: r.market, side: r.side, n: 0, wins: 0, profit_u: 0, staked_u: 0, clv_sum: 0, clv_n: 0 }; grouped.set(gk, g); }
+          g.n++;
+          const stake = Number(r.stake_units) || 1;
+          const odd = Number(r.odd) || 0;
+          if (r.result === 'win') { g.wins++; g.profit_u += stake * (odd - 1); g.staked_u += stake; }
+          else if (r.result === 'loss') { g.profit_u -= stake; g.staked_u += stake; }
+          if (Number.isFinite(r.clv_pct)) { g.clv_sum += r.clv_pct; g.clv_n++; }
+        }
+        shadowRows = [...grouped.values()].filter(g => g.n >= minN).map(g => ({
+          ...g, avg_clv: g.clv_n > 0 ? g.clv_sum / g.clv_n : null,
+        }));
       } catch (_) {}
 
       const realLeaks = realRows
