@@ -13837,8 +13837,9 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && !requireAdmin(req, res)) return;
     const daysRaw = parseInt(parsed.query.days);
     const days = Number.isFinite(daysRaw) ? Math.max(7, Math.min(365, daysRaw)) : 30;
-    const minN = parseInt(parsed.query.min_n || process.env.LEAGUE_BLEED_MIN_N || '20', 10);
-    const roiThreshold = parseFloat(parsed.query.max_roi || process.env.LEAGUE_BLEED_ROI_MAX || '-15');
+    // 2026-04-29 Sprint 1.3: gates relaxados (Mauthausen -42% n=9 passou batido).
+    const minN = parseInt(parsed.query.min_n || process.env.LEAGUE_BLEED_MIN_N || '10', 10);
+    const roiThreshold = parseFloat(parsed.query.max_roi || process.env.LEAGUE_BLEED_ROI_MAX || '-12');
     const recoveryMinN = parseInt(process.env.LEAGUE_BLEED_RECOVERY_MIN_N || '10', 10);
     const recoveryRoiMin = parseFloat(process.env.LEAGUE_BLEED_RECOVERY_ROI_MIN || '0');
     const apply = String(parsed.query.apply || '').trim() === '1' || parsed.query.apply === 'true';

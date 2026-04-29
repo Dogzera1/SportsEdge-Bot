@@ -4241,6 +4241,54 @@ async function recordMarketTipAsRegular({ sport, match, tip, stake, isLive }) {
     const matchIdBase = String(match.id || `mt_${sport}_${Date.now()}`);
     const marketKey = String(tip.market || 'unknown');
     const sideKey = String(tip.side || 'na');
+
+    // ── Sprint 1.1: Tournament exposure cap ──
+    // Limita tips/torneio/dia pra evitar concentração (ATP Madrid: 78 tips em 7d).
+    // env: MAX_TIPS_PER_TOURNAMENT_PER_DAY (default 8). 0 = disabled.
+    const maxTtPerDay = parseInt(process.env.MAX_TIPS_PER_TOURNAMENT_PER_DAY || '8', 10);
+    if (maxTtPerDay > 0 && match.league) {
+      try {
+        const cnt = db.prepare(`
+          SELECT COUNT(*) AS n FROM tips
+          WHERE sport = ? AND event_name = ?
+            AND COALESCE(is_shadow,0) = 0
+            AND COALESCE(archived,0) = 0
+            AND date(sent_at) = date('now')
+        `).get(sport, match.league);
+        if (cnt && cnt.n >= maxTtPerDay) {
+          log('INFO', 'MT-EXPOSURE-CAP', `${sport}/${match.league}: ${cnt.n}/${maxTtPerDay} tips hoje — skip ${tip.market}/${tip.side}`);
+          return null;
+        }
+      } catch (_) {}
+    }
+
+    // ── Sprint 1.2: CLV pre-dispatch gate (velocity-based) ──
+    // Se Pinnacle moveu >X% CONTRA o side da tip nos últimos Y min, segura
+    // (sharp money entrou no lado oposto = tip provavelmente já stale).
+    // env: CLV_PREDISPATCH_GATE=true (default true), CLV_PREDISPATCH_THRESHOLD=2.5
+    const clvGateOn = !/^(0|false|no)$/i.test(String(process.env.CLV_PREDISPATCH_GATE ?? 'true'));
+    if (clvGateOn) {
+      try {
+        const slDet = require('./lib/stale-line-detector');
+        const vel = require('./lib/velocity-tracker');
+        const threshold = parseFloat(process.env.CLV_PREDISPATCH_THRESHOLD || '2.5');
+        const windowMinPrev = process.env.VELOCITY_WINDOW_MIN;
+        process.env.VELOCITY_WINDOW_MIN = process.env.CLV_PREDISPATCH_WINDOW_MIN || '10';
+        const evt = vel.checkVelocity(slDet._ringBuf, {
+          sport, team1: match.team1, team2: match.team2, side: tip.side,
+        });
+        if (windowMinPrev !== undefined) process.env.VELOCITY_WINDOW_MIN = windowMinPrev;
+        else delete process.env.VELOCITY_WINDOW_MIN;
+        // velocityPct < 0 = odd CAIU = side virou favorito = sharp comprou esse lado
+        // velocityPct > 0 = odd SUBIU = sharp vendeu = nosso side está virando azarão
+        // Bloqueia quando odd subiu acima do threshold (=mercado discordando da tip).
+        if (evt && evt.velocityPct >= threshold) {
+          log('WARN', 'MT-CLV-GATE', `${sport}/${marketKey}/${sideKey} ${match.team1} vs ${match.team2}: Pinnacle ${tip.side} odd subiu ${evt.velocityPct.toFixed(1)}% em ${evt.windowMin}min (${evt.oldOdd}→${evt.newOdd}) — skip dispatch`);
+          return null;
+        }
+      } catch (_) { /* velocity opcional */ }
+    }
+
     // Encode line no match_id pra eliminar line-mismatch no propagator. Format:
     // `${base}::mt::${market}::${side}::ln<line_sanitized>` (e.g., ::lnN3.5 pra -3.5,
     // ::lnP4.5 pra +4.5, ::ln21.5 pra over/under). Propagator extrai e valida.
@@ -4302,8 +4350,10 @@ async function recordMarketTipAsRegular({ sport, match, tip, stake, isLive }) {
 async function runMarketTipsRoiGuardSided() {
   if (/^(0|false|no)$/i.test(String(process.env.MT_ROI_GUARD_AUTO ?? 'true'))) return;
   if (!ADMIN_IDS.size) return;
-  const ROI_CUTOFF = parseFloat(process.env.MT_ROI_GUARD_CUTOFF || '-3');
-  const N_CUTOFF = parseInt(process.env.MT_ROI_GUARD_N_MIN || '30', 10);
+  // 2026-04-29 Sprint 1.3: gates relaxados pra detecção mais rápida
+  // (Saint Malo -56% n=8 passou batido com n_min=30; agora bloqueia em n=10).
+  const ROI_CUTOFF = parseFloat(process.env.MT_ROI_GUARD_CUTOFF || '-8');
+  const N_CUTOFF = parseInt(process.env.MT_ROI_GUARD_N_MIN || '10', 10);
   const ROI_RESTORE = parseFloat(process.env.MT_ROI_GUARD_RESTORE || '3');
   const WINDOW_DAYS = parseInt(process.env.MT_ROI_GUARD_WINDOW_DAYS || '14', 10);
 
