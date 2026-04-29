@@ -10057,6 +10057,65 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // POST /admin/clv-clean-suspect?sport=tennis&cutoff=-25&apply=0&key=<KEY>
+  // Sprint 4: limpa close_odd + clv_pct de market_tips_shadow rows com CLV
+  // suspeito (provavelmente captura post-match-start). Default cutoff=-25%.
+  // apply=0 → dry-run (lista candidatos). apply=1 → seta close_odd/clv_pct=NULL.
+  if (p === '/admin/clv-clean-suspect' && (req.method === 'POST' || req.method === 'GET')) {
+    if (!requireAdmin(req, res)) return;
+    const sport = parsed.query.sport ? String(parsed.query.sport).toLowerCase() : null;
+    const cutoff = parseFloat(parsed.query.cutoff || '-25');
+    const apply = parsed.query.apply === '1' || parsed.query.apply === 'true';
+    try {
+      const conds = ['clv_pct IS NOT NULL', 'clv_pct < ?'];
+      const args = [cutoff];
+      if (sport) { conds.push('sport = ?'); args.push(sport); }
+      const rows = db.prepare(`
+        SELECT id, sport, league, team1, team2, market, side, line, odd, close_odd, clv_pct, created_at, close_captured_at, is_live
+        FROM market_tips_shadow
+        WHERE ${conds.join(' AND ')}
+        ORDER BY clv_pct ASC
+        LIMIT 500
+      `).all(...args);
+      let cleared = 0;
+      if (apply && rows.length) {
+        const upd = db.prepare(`UPDATE market_tips_shadow SET close_odd = NULL, clv_pct = NULL, close_captured_at = NULL WHERE id = ?`);
+        const tx = db.transaction((ids) => { for (const id of ids) { upd.run(id); cleared++; } });
+        tx(rows.map(r => r.id));
+      }
+      sendJson(res, {
+        ok: true, sport: sport || 'all', cutoff, apply,
+        candidates: rows.length, cleared,
+        sample: rows.slice(0, 15).map(r => ({
+          id: r.id, sport: r.sport, league: r.league, teams: `${r.team1} vs ${r.team2}`,
+          market: r.market, side: r.side, line: r.line,
+          open: r.odd, close: r.close_odd, clv_pct: r.clv_pct, is_live: !!r.is_live,
+        })),
+      });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
+  // POST /admin/auto-shadow-reset?sport=tennis&key=<KEY>
+  // Sprint 4: força reset do auto-shadow flip pra um sport. Usado quando o
+  // CLV usado pelo flip foi artifact (clv-capture late). Não funciona via
+  // HTTP-only — bot.js precisa expor. Endpoint apenas marca settings flag
+  // que bot.js consome no próximo ciclo.
+  if (p === '/admin/auto-shadow-reset' && (req.method === 'POST' || req.method === 'GET')) {
+    if (!requireAdmin(req, res)) return;
+    const sport = String(parsed.query.sport || '').toLowerCase().trim();
+    if (!sport) { sendJson(res, { ok: false, error: 'sport required' }, 400); return; }
+    try {
+      const ts = new Date().toISOString();
+      db.prepare(`INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)`)
+        .run(`auto_shadow_force_reset_${sport}`, ts);
+      log('INFO', 'AUTO-SHADOW-RESET', `${sport}: signal pra reset escrito em settings (bot consome no próximo ciclo 6h ou restart)`);
+      sendJson(res, { ok: true, sport, signaled_at: ts,
+        note: 'Bot.js precisa ler `auto_shadow_force_reset_<sport>` no próximo ciclo checkAutoShadow OU restart pra aplicar imediato. Próximo cron em até 6h.' });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   // GET /league-trust?sport=tennis&league=ATP+Madrid+-+R3&market=HANDICAP_GAMES&key=<KEY>
   // OU /league-trust?sport=tennis (lista trust de todas as ligas conhecidas pro sport).
   // Sprint 3.1 — debug/audit do bayesian trust score.

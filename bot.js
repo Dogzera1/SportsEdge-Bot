@@ -3171,6 +3171,20 @@ async function checkAutoShadow() {
     if (!_autoShadowOriginal.has(sport)) _autoShadowOriginal.set(sport, !!cfg.shadowMode);
     const orig = _autoShadowOriginal.get(sport);
 
+    // 2026-04-29 Sprint 4: força-reset signal via /admin/auto-shadow-reset.
+    // Quando flag presente, restaura cfg.shadowMode pro original e limpa state.
+    try {
+      const resetRow = db.prepare(`SELECT value FROM settings WHERE key = ?`).get(`auto_shadow_force_reset_${sport}`);
+      if (resetRow?.value) {
+        cfg.shadowMode = orig;
+        _autoShadowState.delete(sport);
+        db.prepare(`DELETE FROM settings WHERE key = ?`).run(`auto_shadow_force_reset_${sport}`);
+        log('INFO', 'AUTO-SHADOW', `[FORCE-RESET] ${sport}: state limpo via signal admin (cfg.shadowMode=${orig})`);
+        restored++;
+        continue;
+      }
+    } catch (_) {}
+
     let clvData = null;
     try { clvData = await serverGet(`/clv-decay?sport=${encodeURIComponent(sport)}&days=14`).catch(() => null); }
     catch (_) {}
