@@ -7756,13 +7756,19 @@ const server = http.createServer(async (req, res) => {
           // detection não se aplica a totais (kills parciais ainda contam).
           let result, profitR;
           if (isKills) {
-            if (t.sport !== 'lol') { summary.skipped++; continue; }
+            const _killReason = (r) => {
+              if (!summary.skipped_reasons) summary.skipped_reasons = {};
+              summary.skipped_reasons[r] = (summary.skipped_reasons[r] || 0) + 1;
+              if (!summary.skipped_samples) summary.skipped_samples = [];
+              if (summary.skipped_samples.length < 8) summary.skipped_samples.push({ id: t.id, match_id: t.match_id, reason: r });
+            };
+            if (t.sport !== 'lol') { _killReason('not_lol'); summary.skipped++; continue; }
             const mapMatch = mt.match(/^TOTAL_KILLS_MAP(\d+)$/);
-            if (!mapMatch) { summary.skipped++; continue; }
+            if (!mapMatch) { _killReason('mt_regex_fail'); summary.skipped++; continue; }
             const mapIndex = parseInt(mapMatch[1], 10);
             // Extrai PS id direto do match_id da tip (ex: 'ps_1466110::mt::...')
             const tipPsMatch = String(t.match_id || '').match(/(?:^|_)ps_(\d+)/);
-            if (!tipPsMatch) { summary.skipped++; continue; }
+            if (!tipPsMatch) { _killReason('no_ps_id'); summary.skipped++; continue; }
             const psMatchId = tipPsMatch[1];
             // Parse line e side
             let line = NaN, side = '';
@@ -7778,12 +7784,12 @@ const server = http.createServer(async (req, res) => {
               const fallback = tipStr.match(/(OVER|UNDER)\s+(\d+(?:\.\d+)?)/);
               if (fallback) { side = fallback[1].toLowerCase(); line = parseFloat(fallback[2]); }
             }
-            if (!Number.isFinite(line) || !side) { summary.skipped++; continue; }
+            if (!Number.isFinite(line) || !side) { _killReason('no_line_side'); summary.skipped++; continue; }
             const killsRes = await _fetchLolMapKills(psMatchId, mapIndex);
-            if (!killsRes) { summary.skipped++; continue; }
-            if (killsRes.unfinished) { summary.skipped++; continue; }
+            if (!killsRes) { _killReason('ps_api_null'); summary.skipped++; continue; }
+            if (killsRes.unfinished) { _killReason('map_unfinished'); summary.skipped++; continue; }
             const totalKills = Number(killsRes.totalKills);
-            if (!Number.isFinite(totalKills) || totalKills <= 0) { summary.skipped++; continue; }
+            if (!Number.isFinite(totalKills) || totalKills <= 0) { _killReason('no_kills_data'); summary.skipped++; continue; }
             const isWin = side === 'over' ? totalKills > line : totalKills < line;
             result = isWin ? 'win' : 'loss';
             profitR = isWin ? +(stakeR * (odds - 1)).toFixed(2) : -stakeR;
