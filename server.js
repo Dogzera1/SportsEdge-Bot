@@ -10057,6 +10057,56 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // POST /admin/tips-clv-clean-suspect?sport=tennis&cutoff=-25&apply=0&key=<KEY>
+  // Sprint 4 (rec #5): espelho de /admin/clv-clean-suspect mas pra `tips` table
+  // (ML real + MT promovidas). Limpa clv_odds + open_odds quando clv ratio
+  // sugere artifact (capturado pós-match-start). Tips reais tinham CLV -24%
+  // tennis sendo poluído pela mesma fonte.
+  if (p === '/admin/tips-clv-clean-suspect' && (req.method === 'POST' || req.method === 'GET')) {
+    if (!requireAdmin(req, res)) return;
+    const sport = parsed.query.sport ? String(parsed.query.sport).toLowerCase() : null;
+    const cutoff = parseFloat(parsed.query.cutoff || '-25');
+    const apply = parsed.query.apply === '1' || parsed.query.apply === 'true';
+    try {
+      const conds = [
+        'open_odds IS NOT NULL', 'clv_odds IS NOT NULL',
+        'open_odds > 1', 'clv_odds > 1',
+        '((open_odds / clv_odds - 1) * 100) < ?',
+      ];
+      const args = [cutoff];
+      if (sport) { conds.push('sport = ?'); args.push(sport); }
+      const rows = db.prepare(`
+        SELECT id, sport, event_name, participant1, participant2, market_type, tip_participant,
+               odds, open_odds, clv_odds, sent_at, settled_at, is_live,
+               ((open_odds / clv_odds - 1) * 100) AS clv_pct
+        FROM tips
+        WHERE ${conds.join(' AND ')}
+        ORDER BY clv_pct ASC
+        LIMIT 500
+      `).all(...args);
+      let cleared = 0;
+      if (apply && rows.length) {
+        // Reset clv_odds=open_odds (CLV→0) — não nullifica pra preservar tracking
+        // de que captura foi tentada, só remove a inflação artifact.
+        const upd = db.prepare(`UPDATE tips SET clv_odds = open_odds WHERE id = ?`);
+        const tx = db.transaction((ids) => { for (const id of ids) { upd.run(id); cleared++; } });
+        tx(rows.map(r => r.id));
+      }
+      sendJson(res, {
+        ok: true, sport: sport || 'all', cutoff, apply,
+        candidates: rows.length, cleared,
+        sample: rows.slice(0, 15).map(r => ({
+          id: r.id, sport: r.sport, league: r.event_name,
+          teams: `${r.participant1} vs ${r.participant2}`,
+          market: r.market_type, tip: r.tip_participant,
+          odd: r.odds, open: r.open_odds, close: r.clv_odds, clv_pct: +r.clv_pct.toFixed(1),
+          is_live: !!r.is_live,
+        })),
+      });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   // POST /admin/clv-clean-suspect?sport=tennis&cutoff=-25&apply=0&key=<KEY>
   // Sprint 4: limpa close_odd + clv_pct de market_tips_shadow rows com CLV
   // suspeito (provavelmente captura post-match-start). Default cutoff=-25%.

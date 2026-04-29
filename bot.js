@@ -18745,6 +18745,85 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   setInterval(() => checkFootballMtPromoteReadiness().catch(() => {}), 6 * 60 * 60 * 1000); // cron 6h
   setTimeout(() => checkFootballMtPromoteReadiness().catch(() => {}), 30 * 60 * 1000); // 30min pós-boot
 
+  // Sprint 4 (rec #7): CLV crash alarm proativo. Cron 1h escaneia tips das
+  // últimas 24h com clv_pct < -30%. Se >=5 num dia → DM admin com top 5 IDs
+  // pra investigação manual (provável artifact de captura tarde, ou regime
+  // change real). Anti-spam dedup 12h por sport via settings.
+  async function checkClvCrashAlarm() {
+    if (/^(0|false|no)$/i.test(String(process.env.CLV_CRASH_ALARM_AUTO ?? 'true'))) return;
+    if (!ADMIN_IDS.size) return;
+    const cutoff = parseFloat(process.env.CLV_CRASH_CUTOFF || '-30');
+    const minN = parseInt(process.env.CLV_CRASH_MIN_N || '5', 10);
+    const cooldownH = parseInt(process.env.CLV_CRASH_COOLDOWN_HOURS || '12', 10);
+    try {
+      // 1. Tips reais (ML+MT promoted) com CLV crash 24h
+      const realRows = db.prepare(`
+        SELECT sport, COUNT(*) AS n,
+               GROUP_CONCAT(id) AS ids,
+               AVG((open_odds / clv_odds - 1) * 100) AS avg_clv
+        FROM tips
+        WHERE COALESCE(is_shadow,0) = 0
+          AND COALESCE(archived,0) = 0
+          AND open_odds > 1 AND clv_odds > 1
+          AND ((open_odds / clv_odds - 1) * 100) < ?
+          AND sent_at >= datetime('now', '-24 hours')
+        GROUP BY sport
+        HAVING n >= ?
+      `).all(cutoff, minN);
+
+      // 2. MT shadow CLV crash 24h
+      let shadowRows = [];
+      try {
+        shadowRows = db.prepare(`
+          SELECT sport, COUNT(*) AS n,
+                 GROUP_CONCAT(id) AS ids,
+                 AVG(clv_pct) AS avg_clv
+          FROM market_tips_shadow
+          WHERE clv_pct IS NOT NULL AND clv_pct < ?
+            AND created_at >= datetime('now', '-24 hours')
+          GROUP BY sport
+          HAVING n >= ?
+        `).all(cutoff, minN);
+      } catch (_) {}
+
+      const allCrashes = [
+        ...realRows.map(r => ({ source: 'ml_real', ...r })),
+        ...shadowRows.map(r => ({ source: 'mt_shadow', ...r })),
+      ];
+      if (!allCrashes.length) {
+        log('DEBUG', 'CLV-CRASH-ALARM', `nenhum sport com >=${minN} tips clv<${cutoff}% em 24h`);
+        return;
+      }
+
+      const tokenForAlert = resolveAlertsToken();
+      if (!tokenForAlert) return;
+      for (const c of allCrashes) {
+        const dedupKey = `clv_crash_alert_${c.source}_${c.sport}`;
+        const last = db.prepare(`SELECT value FROM settings WHERE key = ?`).get(dedupKey);
+        const lastMs = last?.value ? Date.parse(last.value) : 0;
+        if (Date.now() - lastMs < cooldownH * 60 * 60 * 1000) continue;
+        db.prepare(`INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)`)
+          .run(dedupKey, new Date().toISOString());
+        const idsTrunc = String(c.ids || '').split(',').slice(0, 5).join(', ');
+        const msg = `⚠️ <b>CLV CRASH — ${c.source} ${c.sport.toUpperCase()}</b>\n\n` +
+          `${c.n} tips com CLV &lt; ${cutoff}% em 24h (avg: ${(+c.avg_clv).toFixed(1)}%)\n\n` +
+          `Sample IDs: ${idsTrunc}\n\n` +
+          `Provável: 1) clv-capture artifact (match started antes de capture) ` +
+          `OU 2) regime change real / book stale.\n\n` +
+          `Inspecionar via:\n` +
+          `<code>/admin/${c.source === 'ml_real' ? 'tips-' : ''}clv-clean-suspect?sport=${c.sport}&apply=0&cutoff=-30</code>\n` +
+          `Limpar (apply=1) se artifact confirmado.`;
+        for (const adminId of ADMIN_IDS) {
+          await sendDM(tokenForAlert, adminId, msg, { parse_mode: 'HTML' })
+            .catch(e => log('WARN', 'CLV-CRASH-ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
+        }
+        log('WARN', 'CLV-CRASH-ALARM', `${c.source}/${c.sport}: ${c.n} tips clv<${cutoff}% (avg ${(+c.avg_clv).toFixed(1)}%) → DM admin`);
+      }
+    } catch (e) { log('DEBUG', 'CLV-CRASH-ALARM', `err: ${e.message}`); }
+  }
+  setInterval(() => checkClvCrashAlarm().catch(() => {}), 60 * 60 * 1000); // cron 1h
+  setTimeout(() => checkClvCrashAlarm().catch(() => {}), 10 * 60 * 1000); // 10min pós-boot
+
   // CLV close-capture agressivo — cobre BOTH market_tips_shadow + regular tips.
   // Audit scripts/clv-coverage mostrou gaps graves (cs/football 0% regular; 20-50%
   // market tips). Cron dedicado 2min garante captura repetida até match começar
