@@ -9074,6 +9074,21 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // GET /admin/kills-calibration?days=14&league=LCK
+  // Métricas rolling Brier/ECE/MAE per-league pra LoL kills market.
+  if (p === '/admin/kills-calibration') {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const { computeKillsCalibration, evaluateKillsAutoDisable } = require('./lib/lol-kills-calibration');
+      const days = parseInt(parsed.query.days || '14', 10) || 14;
+      const leagueLike = String(parsed.query.league || '').trim() || null;
+      const calib = computeKillsCalibration(db, { days, sport: 'lol', leagueLike });
+      const decision = evaluateKillsAutoDisable(db, calib);
+      sendJson(res, { ok: true, calib, decision });
+    } catch (e) { sendJson(res, { ok: false, error: e.message, stack: e.stack }, 500); }
+    return;
+  }
+
   if (p === '/admin/oe-status') {
     if (!requireAdmin(req, res)) return;
     try {

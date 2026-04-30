@@ -4407,6 +4407,37 @@ async function recordMarketTipAsRegular({ sport, match, tip, stake, isLive }) {
 // (sport, market, side). Roda no mesmo cron do runMarketTipsLeakGuard (1h).
 // Usa ROI direto porque shadow tips têm resultado final (win/loss) → sinal
 // mais direto que CLV. Cutoff e janela configuráveis via env.
+// LoL kills model calibration check — rodado 1x/dia.
+// Lê via /admin/kills-calibration → log + DM admin se degraded.
+async function runKillsCalibrationCheck() {
+  if (/^(0|false|no)$/i.test(String(process.env.KILLS_CALIB_AUTO ?? 'true'))) return;
+  const targetHour = parseInt(process.env.KILLS_CALIB_HOUR || '3', 10) || 3;
+  const now = new Date();
+  if (now.getHours() !== targetHour) return;
+  // Já rodou hoje? (cache simples no module scope)
+  const today = now.toISOString().slice(0, 10);
+  if (runKillsCalibrationCheck._lastRunDay === today) return;
+  runKillsCalibrationCheck._lastRunDay = today;
+  try {
+    const adminKey = (process.env.ADMIN_KEY || '').trim();
+    if (!adminKey) { log('DEBUG', 'KILLS-CALIB', 'sem ADMIN_KEY — skip'); return; }
+    const days = parseInt(process.env.KILLS_CALIB_DAYS || '14', 10) || 14;
+    const r = await serverGet(`/admin/kills-calibration?days=${days}`, null, { 'x-admin-key': adminKey })
+      .catch(e => ({ error: e.message }));
+    if (r?.error) { log('WARN', 'KILLS-CALIB', `endpoint err: ${r.error}`); return; }
+    if (!r?.calib?.overall) { log('INFO', 'KILLS-CALIB', `n=${r?.calib?.n || 0} insufficient sample`); return; }
+    const o = r.calib.overall;
+    const dec = r.decision || {};
+    const msg = `LoL kills calib (${days}d): n=${o.n} brier=${o.brier} ece=${r.calib.byBucket ? '✓' : '?'} mae=${o.mae} hit=${(o.hit_rate*100).toFixed(1)}% ROI=${o.roi_pct}% → ${dec.action || 'unknown'}`;
+    log(dec.action === 'disable_recommended' ? 'WARN' : 'INFO', 'KILLS-CALIB', msg);
+    if (dec.action === 'disable_recommended') {
+      const dmText = `⚠️ *Kills Model Calib Degraded*\n\n${msg}\n\nThresholds: brier>${dec.threshold.brier}, mae>${dec.threshold.mae}\n\nRecomendo desativar com \`LOL_MARKET_SCAN=false\` ou recalibrar.`;
+      try { await sendAdminDMs(resolveAlertsToken(), dmText, { parse_mode: 'Markdown' }, 'kills-calib'); }
+      catch (_) {}
+    }
+  } catch (e) { log('ERROR', 'KILLS-CALIB', e.message); }
+}
+
 async function runMarketTipsRoiGuardSided() {
   if (/^(0|false|no)$/i.test(String(process.env.MT_ROI_GUARD_AUTO ?? 'true'))) return;
   if (!ADMIN_IDS.size) return;
@@ -18927,6 +18958,14 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   // Cobre tips regulares com is_shadow=1 (sport experimental antes de graduate).
   setInterval(() => runMlShadowDigest().catch(e => log('ERROR', 'SHADOW-DIGEST', e.message)), 60 * 60 * 1000);
   setTimeout(() => runMlShadowDigest().catch(() => {}), 6 * 60 * 1000); // 6min pós-boot
+
+  // ── LoL kills model calibration check ──
+  // Roda 1x/dia (3 AM local default). Calcula Brier/ECE/MAE últimas 14d em
+  // market_tips_shadow → persist em gates_runtime_state. Auto-recommend
+  // disable se brier > 0.30 OU mae > 0.10 com n >= 30.
+  // Opt-out: KILLS_CALIB_AUTO=false.
+  setInterval(() => runKillsCalibrationCheck().catch(e => log('ERROR', 'KILLS-CALIB', e.message)), 60 * 60 * 1000);
+  setTimeout(() => runKillsCalibrationCheck().catch(() => {}), 25 * 60 * 1000); // 25min pós-boot
   // Weekly pipeline digest (2ª feira 9h)
   setInterval(() => runWeeklyPipelineDigest().catch(e => log('ERROR', 'WEEKLY-DIGEST', e.message)), 60 * 60 * 1000);
   setTimeout(() => runWeeklyPipelineDigest().catch(() => {}), 10 * 60 * 1000);
