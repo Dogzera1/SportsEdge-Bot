@@ -9045,6 +9045,48 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // ── Tennis Abstract: serve/return stats ──
+  // GET /admin/tennis-abstract-test?player=Carlos%20Alcaraz
+  // POST /admin/sync-tennis-abstract?players=Alcaraz,Sinner,...
+  if (p === '/admin/tennis-abstract-test') {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const { fetchPlayerStats } = require('./lib/tennis-abstract-scraper');
+      const player = String(parsed.query.player || '').trim();
+      if (!player) { sendJson(res, { ok: false, error: 'player required' }, 400); return; }
+      const r = await fetchPlayerStats(player);
+      sendJson(res, r);
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+  if (p === '/admin/sync-tennis-abstract' && (req.method === 'POST' || req.method === 'GET')) {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const playersParam = String(parsed.query.players || '').trim();
+      let players = playersParam ? playersParam.split(',').map(s => s.trim()).filter(Boolean) : null;
+      // Default: top 100 ATP+WTA via tennis_match_stats existentes (recentes 60d)
+      if (!players) {
+        const rows = db.prepare(`
+          SELECT player1 AS p FROM tennis_match_stats WHERE date >= date('now', '-60 days')
+          UNION
+          SELECT player2 AS p FROM tennis_match_stats WHERE date >= date('now', '-60 days')
+          LIMIT 200
+        `).all();
+        players = rows.map(r => r.p).filter(Boolean);
+      }
+      const beforeCount = db.prepare(`SELECT COUNT(*) AS n FROM tennis_player_serve_stats`).get().n;
+      sendJson(res, { ok: true, message: 'Sync iniciado em bg', count: players.length, beforeCount });
+      setImmediate(async () => {
+        try {
+          const { syncPlayerStats } = require('./lib/tennis-abstract-scraper');
+          const r = await syncPlayerStats(db, players, { delayMs: 1500 });
+          log('INFO', 'TENNIS-ABSTRACT-SYNC', `done: inserted=${r.inserted}/${r.total} errors=${r.errors}`);
+        } catch (e) { log('ERROR', 'TENNIS-ABSTRACT-SYNC', e.message); }
+      });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   // ── Understat: xG football scraper ──
   // GET /admin/understat-test?league=EPL&year=2025  → debug fetchSeasonMatches
   // POST /admin/sync-understat?leagues=EPL,La_Liga&year=2025 → bulk sync bg

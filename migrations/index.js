@@ -1593,6 +1593,30 @@ const migrations = [
     },
   },
   {
+    id: '066_tennis_player_serve_stats',
+    up(db) {
+      // Serve/return stats per player de tennisabstract.com.
+      // Alimenta tennis-markov-model com input real (hoje usa empirical Sackmann).
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS tennis_player_serve_stats (
+          player_norm TEXT PRIMARY KEY,
+          player_name TEXT,
+          slug TEXT,
+          first_serve_pct REAL,
+          first_serve_win_pct REAL,
+          second_serve_win_pct REAL,
+          bp_saved_pct REAL,
+          sv_games_won_pct REAL,
+          rt_games_won_pct REAL,
+          ace_pct REAL,
+          df_pct REAL,
+          source TEXT,
+          ingested_at TEXT DEFAULT (datetime('now'))
+        );
+      `);
+    },
+  },
+  {
     id: '065_understat_matches',
     up(db) {
       // xG (expected goals) per match das 6 ligas top via understat.com.
