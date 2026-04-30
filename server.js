@@ -8542,6 +8542,7 @@ setInterval(load, 60000);
     // Daily crons: 24h. Weekly: 7d. Demais: scan tick interval.
     const _expectedMs = {
       // Crons in-process (interval-based)
+      'auto_analysis':      6 * 60 * 1000,   // 6min base, adaptive até 24min
       'mem_watchdog':       5 * 60 * 1000,   // 5min
       'sweep_analyzed':     60 * 60 * 1000,  // 1h
       'news_monitor':       15 * 60 * 1000,  // 15min

@@ -1983,6 +1983,7 @@ async function withAutoAnalysisMutex(fn) {
 
 async function runAutoAnalysis() {
   return withAutoAnalysisMutex(async () => {
+  const _autoT0 = Date.now();
   const now = Date.now();
 
   // usado depois em sharedCaches (CLV/refreshOpenTips)
@@ -2805,6 +2806,12 @@ async function runAutoAnalysis() {
   await checkCLV(sharedCaches).catch(e => log('ERROR', 'AUTO', `CLV internal: ${e.message}`));
   await refreshOpenTips(sharedCaches).catch(e => log('ERROR', 'AUTO', `Refresh internal: ${e.message}`));
 
+  // Cycle heartbeat: registra duração total + visivel em /admin/cron-status.
+  try {
+    const _dur = Date.now() - _autoT0;
+    markCronHeartbeat('auto_analysis', { result: 'ok', durationMs: _dur, note: `${parallel.length} sports` });
+    _metrics.timing('auto_analysis_cycle_ms', _dur);
+  } catch (_) {}
   });
 }
 
