@@ -740,6 +740,22 @@ function _bridgeBotMetricsToServer() {
 setInterval(_bridgeBotMetricsToServer, 60 * 1000);
 setTimeout(_bridgeBotMetricsToServer, 30 * 1000); // primeiro flush 30s pós-boot
 
+// Helper genérico pra wrappar cron com heartbeat automático.
+// Usa: setInterval(_wrapCron('name', () => doStuff()), interval).
+// Trata sync e async fns; nunca propaga exception (cron loop não morre).
+function _wrapCron(name, fn) {
+  return async () => {
+    const t0 = Date.now();
+    try {
+      await Promise.resolve(fn());
+      try { markCronHeartbeat(name, { result: 'ok', durationMs: Date.now() - t0 }); } catch (_) {}
+    } catch (e) {
+      try { markCronHeartbeat(name, { result: 'error', error: String(e?.message || e), durationMs: Date.now() - t0 }); } catch (_) {}
+      // Não re-throw: setInterval continua chamando.
+    }
+  };
+}
+
 // ── Memory watchdog (com auto-tune dinâmico) ──
 // Monitora process.memoryUsage().rss e mantém histograma das últimas 7d
 // (288 amostras × 5min × 7d). Threshold dinâmico = P95 baseline × 1.3 quando
@@ -18576,12 +18592,12 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   setTimeout(() => runAutoHealerCycle().catch(() => {}), 4 * 60 * 1000); // primeiro check 4min pós-boot
 
   // Bankroll Guardian: cron 1h, alerta drawdown alto + auto-shadow temporário.
-  setInterval(() => runBankrollGuardianCycle().catch(e => log('ERROR', 'BANKROLL-GUARDIAN', e.message)), 60 * 60 * 1000);
-  setTimeout(() => runBankrollGuardianCycle().catch(() => {}), 10 * 60 * 1000); // primeiro check 10min pós-boot
+  setInterval(_wrapCron('bankroll_guardian', runBankrollGuardianCycle), 60 * 60 * 1000);
+  setTimeout(_wrapCron('bankroll_guardian', runBankrollGuardianCycle), 10 * 60 * 1000); // primeiro check 10min pós-boot
 
   // Brier → EV cap: refresh de 15min do cache que alimenta evCeilingFor().
-  setInterval(() => refreshBrierEvAdjustments().catch(e => log('ERROR', 'BRIER-EV', e.message)), 15 * 60 * 1000);
-  setTimeout(() => refreshBrierEvAdjustments().catch(() => {}), 3 * 60 * 1000); // primeiro refresh 3min pós-boot
+  setInterval(_wrapCron('brier_ev', refreshBrierEvAdjustments), 15 * 60 * 1000);
+  setTimeout(_wrapCron('brier_ev', refreshBrierEvAdjustments), 3 * 60 * 1000); // primeiro refresh 3min pós-boot
 
   // League Bleed Scanner: 6h. Auto-bloqueia ligas com ROI < -15% n≥20 e
   // desbloqueia quando voltam a dar positivo com n≥10. Gated por LEAGUE_BLEED_AUTO.
@@ -18637,8 +18653,8 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
       }
     } catch (e) { log('ERROR', 'LIVE-RISK', e.message); }
   }
-  setInterval(() => runLiveRiskMonitor(), 10 * 60 * 1000);
-  setTimeout(() => runLiveRiskMonitor(), 8 * 60 * 1000); // primeiro check 8min pós-boot
+  setInterval(_wrapCron('live_risk_monitor', runLiveRiskMonitor), 10 * 60 * 1000);
+  setTimeout(_wrapCron('live_risk_monitor', runLiveRiskMonitor), 8 * 60 * 1000); // primeiro check 8min pós-boot
 
   // Threshold Auto-Apply: semanal (segunda-feira às 4h UTC), roda optimizer +
   // aplica ajustes de EV_min per sport quando guardrails batem. Gated por
@@ -19363,11 +19379,11 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
 
   // MT shadow per-bucket guard — mesma cadência (12h) que regular tip bucket guard.
   // Boot offset distinto pra evitar contenção de DM/log.
-  setInterval(() => runMtBucketGuardCycle().catch(e => log('ERROR', 'MT-BUCKET-GUARD', e.message)), 12 * 60 * 60 * 1000);
-  setTimeout(() => runMtBucketGuardCycle().catch(() => {}), 65 * 60 * 1000);
+  setInterval(_wrapCron('mt_bucket_guard', runMtBucketGuardCycle), 12 * 60 * 60 * 1000);
+  setTimeout(_wrapCron('mt_bucket_guard', runMtBucketGuardCycle), 65 * 60 * 1000);
 
-  setInterval(() => runGatesAutoTuneCycle().catch(e => log('ERROR', 'GATES-AUTOTUNE', e.message)), 12 * 60 * 60 * 1000);
-  setTimeout(() => runGatesAutoTuneCycle().catch(() => {}), 55 * 60 * 1000);
+  setInterval(_wrapCron('gates_autotune', runGatesAutoTuneCycle), 12 * 60 * 60 * 1000);
+  setTimeout(_wrapCron('gates_autotune', runGatesAutoTuneCycle), 55 * 60 * 1000);
   setTimeout(() => runModelCalibrationCycle().catch(() => {}), 60 * 60 * 1000); // 1h pós-boot
 
   // Weekly pipeline digest: checa a cada 6h se já passaram 6d+ desde último envio
