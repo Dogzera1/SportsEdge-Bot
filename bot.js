@@ -6643,6 +6643,25 @@ async function autoAnalyzeMatch(token, match) {
                 minOdd: minOddLol,
                 maxOdd: maxOddLol,
               });
+              // ── Frente 4: extra markets (dragons/barons/towers) ──
+              // Shadow-only por enquanto (LOL_EXTRA_MARKETS=true ativa).
+              // Empirical lambda via lol_game_objectives table (Frente 3).
+              if (process.env.LOL_EXTRA_MARKETS === 'true') {
+                try {
+                  const { getEmpiricalRates, scanExtraMarkets } = require('./lib/lol-extra-markets');
+                  const rates = getEmpiricalRates(db, { league: match.league, lookbackDays: 90 });
+                  if (rates && rates.n >= 30) {
+                    const extras = scanExtraMarkets({ markets, rates, minEv: 5 });
+                    if (extras.length) {
+                      log('INFO', 'LOL-EXTRA-MARKETS',
+                        `${match.team1} vs ${match.team2}: ${extras.length} extra tip(s) (rates n=${rates.n} dragons/g=${rates.dragons_pg} barons/g=${rates.barons_pg})`);
+                      // Adiciona ao found pra ser logado em shadow + correlation
+                      found = found.concat(extras);
+                    }
+                  }
+                } catch (e) { log('DEBUG', 'LOL-EXTRA-MARKETS', e.message); }
+              }
+
               // Correlation matrix esports — gateado por LOL_CORRELATION_ADJ (default ON).
               // Propaga `correlationDiscount` pra tips → reduz stake em multi-market overlap.
               if (found.length >= 2 && process.env.LOL_CORRELATION_ADJ !== 'false') {
