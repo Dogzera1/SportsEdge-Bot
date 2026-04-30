@@ -6425,6 +6425,33 @@ setInterval(load, 10000);
     return;
   }
 
+  // POST /metrics/ingest — recebe snapshot de processos irmãos (bot.js).
+  // Body: { snapshot: { counters, timings, gauges }, prefix?: 'bot' }
+  // Mescla no metrics local com prefix opcional pra distinguir source.
+  // Sem auth pq é IPC interno (chamadas de localhost via launcher).
+  // Defesa: timeout HTTP curto, body cap 256KB, prefix sanitizado.
+  if (p === '/metrics/ingest' && req.method === 'POST') {
+    let body = '';
+    let bodySize = 0;
+    req.on('data', d => {
+      bodySize += d.length;
+      if (bodySize > 256 * 1024) { req.destroy(); return; }
+      body += d;
+    });
+    req.on('end', () => {
+      try {
+        const payload = safeParse(body, null);
+        if (!payload || !payload.snapshot) { sendJson(res, { ok: false, error: 'bad payload' }, 400); return; }
+        const prefix = String(payload.prefix || '').replace(/[^a-z0-9_]/g, '').slice(0, 16);
+        const tagged = prefix ? `${prefix}:` : '';
+        const metrics = require('./lib/metrics');
+        const ok = metrics.mergeSnapshot(payload.snapshot, { prefix: tagged });
+        sendJson(res, { ok, prefix: tagged });
+      } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    });
+    return;
+  }
+
   // /health/metrics — counters in-memory acumulados desde boot (counters,
   // timings, gauges) + snapshot rolling 1h. Wirado em logRejection / record-tip
   // / scanner cycles via lib/metrics.js. Reset apenas em restart.

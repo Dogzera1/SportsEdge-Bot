@@ -614,6 +614,36 @@ function sweepAnalyzedMaps() {
 // do setInterval). Roda 1x por hora.
 setInterval(() => { try { sweepAnalyzedMaps(); } catch (_) {} }, 60 * 60 * 1000);
 
+// ── Metrics bridge bot.js → server.js ──
+// Counters/gauges/timings registrados no bot.js (pollers, sweep, etc) ficam
+// em processo SEPARADO do server.js. Sem este bridge, /health/metrics no
+// server só mostra counters de endpoints (record-tip, /claude, settle).
+// Cron 60s POST snapshot do _metrics local pra /metrics/ingest, com prefix
+// 'bot' pra não colidir com counters do próprio server (ex: ai_call_ms vira
+// bot:ai_call_ms só no server).
+function _bridgeBotMetricsToServer() {
+  try {
+    const snap = _metrics.snapshot();
+    // Skip se nada acumulou ainda
+    if (Object.keys(snap.counters).length === 0
+        && Object.keys(snap.timings).length === 0
+        && Object.keys(snap.gauges).length === 0) return;
+    const port = process.env.SERVER_PORT || process.env.PORT || 3000;
+    const http = require('http');
+    const payload = JSON.stringify({ snapshot: snap, prefix: 'bot' });
+    const req = http.request({
+      host: '127.0.0.1', port, path: '/metrics/ingest', method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) },
+      timeout: 4000,
+    }, res => res.resume());
+    req.on('error', () => {}); // server pode estar reiniciando
+    req.on('timeout', () => req.destroy());
+    req.write(payload); req.end();
+  } catch (_) {}
+}
+setInterval(_bridgeBotMetricsToServer, 60 * 1000);
+setTimeout(_bridgeBotMetricsToServer, 30 * 1000); // primeiro flush 30s pós-boot
+
 // ── Memory watchdog (com auto-tune dinâmico) ──
 // Monitora process.memoryUsage().rss e mantém histograma das últimas 7d
 // (288 amostras × 5min × 7d). Threshold dinâmico = P95 baseline × 1.3 quando
