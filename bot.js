@@ -12913,6 +12913,10 @@ Máximo 200 palavras.`;
           lineShopOdds: o || null,
           pickSide: isT1bet ? 't1' : 't2',
           sport: 'dota2',
+          // tip_context_json:
+          factors: mlResult.factorActive || null,
+          mlScore: Number.isFinite(mlResult.score) ? +mlResult.score.toFixed(2) : null,
+          factorCount: (mlResult.factorActive || []).length || null,
         }, 'dota2');
         if (rec?.skipped) {
           log('INFO', 'AUTO-DOTA', `Tip já existe (duplicate): ${tipTeam} @ ${tipOdd}`);
@@ -13831,6 +13835,11 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
           isShadow: mmaConfig.shadowMode ? 1 : 0,
           lineShopOdds: fight.odds || null,
           pickSide: _pickSideMma,
+          // tip_context_json:
+          factors: mlResultMma.factorActive || null,
+          mlScore: Number.isFinite(mlResultMma.score) ? +mlResultMma.score.toFixed(2) : null,
+          factorCount: mlResultMma.factorCount || null,
+          trainedConf: _mmaTrainedPrediction?.confidence ?? null,
         }, 'mma');
 
         if (!rec?.tipId) {
@@ -17636,6 +17645,10 @@ async function pollValorant(runOnce = false) {
           sport: 'valorant',
           lineShopOdds: match.odds || null,
           pickSide: direction,
+          // tip_context_json:
+          factors: factorCount > 0 ? [{ label: 'Valorant', value: `factors=${factorCount}` }] : null,
+          mlScore: Number.isFinite(mlScore) ? +mlScore.toFixed(2) : null,
+          factorCount: factorCount || null,
         }, 'valorant');
 
         if (!rec?.tipId) {
