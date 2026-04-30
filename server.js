@@ -13885,10 +13885,11 @@ setInterval(load, 60000);
       if (sport) { conds.push('sport = ?'); params.push(sport); }
       const tips = db.prepare(`
         SELECT id, sport, market_type, tip_participant, participant1, participant2,
-          odds, stake, result, profit_reais, sent_at, settled_at, match_id
+          odds, stake, result, profit_reais, sent_at, settled_at, match_id,
+          is_shadow, model_label, model_p_pick, event_name
         FROM tips
         WHERE ${conds.join(' AND ')}
-        ORDER BY id DESC LIMIT 30
+        ORDER BY id DESC LIMIT 50
       `).all(...params);
       // Shadow rows
       const sConds = [`created_at >= datetime('now', '-' || ? || ' days')`];
