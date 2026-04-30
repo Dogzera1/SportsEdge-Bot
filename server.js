@@ -13676,13 +13676,11 @@ setInterval(load, 60000);
       const _norm = s => String(s||'').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/[^a-z0-9]/g, '');
       const tips = db.prepare(`
         SELECT id, participant1, participant2, tip_participant, odds, stake,
-          market_type, sent_at, match_id, model_label
+          market_type, sent_at, match_id, model_label, archived, is_shadow
         FROM tips
         WHERE sport = 'tennis'
           AND market_type IN ('HANDICAP_GAMES', 'HANDICAP_SETS', 'HANDICAP')
           AND result IS NULL
-          AND (archived IS NULL OR archived = 0)
-          AND COALESCE(is_shadow, 0) = 0
           AND sent_at >= datetime('now', '-' || ? || ' days')
         ORDER BY id ASC
       `).all(days);
