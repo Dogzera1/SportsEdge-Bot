@@ -2357,7 +2357,7 @@ async function runAutoAnalysis() {
                     ? (_pickLs === 't1' ? result.modelP1 : result.modelP2)
                     : null;
                   const _newEvLs = _modelPLs ? ((_modelPLs * _ls.bestOdd - 1) * 100).toFixed(1) : null;
-                  log('INFO', 'LINE-SHOP', `${match.team1} vs ${match.team2} LIVE: odd ${tipOdd}→${_ls.bestOdd.toFixed(3)} (${_ls.bestBook}, +${_ls.deltaPct?.toFixed(1)}%)${_newEvLs ? ` EV ${tipEV}%→${_newEvLs}%` : ''}`);
+                  log('INFO', 'LINE-SHOP', `${match.team1} vs ${match.team2} LIVE: odd ${tipOdd}→${_ls.bestOdd.toFixed(3)} (${_ls.bestBook}, ${Number.isFinite(_ls.deltaPct) ? `+${_ls.deltaPct.toFixed(1)}%` : 'no-pin-ref'})${_newEvLs ? ` EV ${tipEV}%→${_newEvLs}%` : ''}`);
                   tipOdd = _ls.bestOdd.toFixed(3);
                   if (_newEvLs) tipEV = _newEvLs;
                 } else {
@@ -2811,7 +2811,7 @@ async function runAutoAnalysis() {
                       ? (_pickLs === 't1' ? result.modelP1 : result.modelP2)
                       : null;
                     const _newEvLs = _modelPLs ? ((_modelPLs * _ls.bestOdd - 1) * 100).toFixed(1) : null;
-                    log('INFO', 'LINE-SHOP', `${match.team1} vs ${match.team2} UP: odd ${tipOdd}→${_ls.bestOdd.toFixed(3)} (${_ls.bestBook}, +${_ls.deltaPct?.toFixed(1)}%)${_newEvLs ? ` EV ${tipEV}%→${_newEvLs}%` : ''}`);
+                    log('INFO', 'LINE-SHOP', `${match.team1} vs ${match.team2} UP: odd ${tipOdd}→${_ls.bestOdd.toFixed(3)} (${_ls.bestBook}, ${Number.isFinite(_ls.deltaPct) ? `+${_ls.deltaPct.toFixed(1)}%` : 'no-pin-ref'})${_newEvLs ? ` EV ${tipEV}%→${_newEvLs}%` : ''}`);
                     tipOdd = _ls.bestOdd.toFixed(3);
                     if (_newEvLs) tipEV = _newEvLs;
                   } else {
@@ -16402,7 +16402,7 @@ Máximo 200 palavras.`;
                     : tipMarket === 'BTTS_NO' ? (100 - parseFloat(mlScore?.bttsProb || 0))
                     : null;
                   const _newEv = (_pickP && _pickP > 0) ? ((_pickP / 100) * _ls.bestOdd - 1) * 100 : null;
-                  log('INFO', 'LINE-SHOP', `FB ${match.team1} vs ${match.team2} [${tipMarket}]: ${tipOdd.toFixed(2)}→${_ls.bestOdd.toFixed(2)} (${_ls.bestBook}, +${_ls.deltaPct?.toFixed(1)}%)${_newEv != null ? ` EV ${tipEV}%→${_newEv.toFixed(1)}%` : ''}`);
+                  log('INFO', 'LINE-SHOP', `FB ${match.team1} vs ${match.team2} [${tipMarket}]: ${tipOdd.toFixed(2)}→${_ls.bestOdd.toFixed(2)} (${_ls.bestBook}, ${Number.isFinite(_ls.deltaPct) ? `+${_ls.deltaPct.toFixed(1)}%` : 'no-pin-ref'})${_newEv != null ? ` EV ${tipEV}%→${_newEv.toFixed(1)}%` : ''}`);
                   tipOdd = _ls.bestOdd;
                   if (_newEv != null) tipEV = +_newEv.toFixed(1);
                 } else {

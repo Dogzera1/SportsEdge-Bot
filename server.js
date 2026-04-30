@@ -12196,6 +12196,55 @@ setInterval(load, 60000);
     return;
   }
 
+  // POST /admin/mt-resettle-tennis-handicap?days=30&apply=0&key=<KEY>
+  // Bug fix 2026-04-30: handicapGames/handicapSets em tennis usavam swap baseado
+  // em mr.team1 vs shadow.team1 (line 823 antigo) — quebrava quando ESPN/Sofa
+  // gravaram final_score em winner-first frame. Esse endpoint identifica todas
+  // tennis handicap shadow rows settled e re-roda settle (post-fix).
+  if (p === '/admin/mt-resettle-tennis-handicap' && (req.method === 'POST' || req.method === 'GET')) {
+    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const days = Math.max(1, Math.min(180, parseInt(parsed.query.days || '30', 10) || 30));
+    const apply = parsed.query.apply === '1' || parsed.query.apply === 'true';
+    try {
+      const rows = db.prepare(`
+        SELECT id, sport, team1, team2, market, line, side, result, profit_units, created_at, settled_at
+        FROM market_tips_shadow
+        WHERE sport = 'tennis'
+          AND market IN ('handicapGames','handicap','handicapSets')
+          AND result IN ('win','loss')
+          AND created_at >= datetime('now', '-' || ? || ' days')
+        ORDER BY id DESC
+      `).all(days);
+      const out = { ok: true, days, found: rows.length, sample: rows.slice(0, 10), applied: false };
+      if (apply && rows.length) {
+        const ids = rows.map(r => r.id);
+        const placeholders = ids.map(() => '?').join(',');
+        // Reset shadow rows
+        const u = db.prepare(`UPDATE market_tips_shadow SET result=NULL, settled_at=NULL, profit_units=NULL WHERE id IN (${placeholders})`).run(...ids);
+        // Reset propagated tips em tips table (match_id LIKE '%::mt::handicap%' do tennis)
+        const tipReset = db.prepare(`
+          UPDATE tips SET result=NULL, settled_at=NULL, profit_reais=NULL
+          WHERE sport='tennis' AND market_type IN ('HANDICAP_GAMES','HANDICAP_SETS','HANDICAP')
+            AND result IS NOT NULL
+            AND sent_at >= datetime('now', '-' || ? || ' days')
+        `).run(days);
+        // Reverte bankroll por ids tips alterados (best-effort, recomputa via re-settle)
+        let resettleResult = null;
+        try {
+          const { settleShadowTips } = require('./lib/market-tips-shadow');
+          resettleResult = settleShadowTips(db);
+        } catch (e) { resettleResult = { error: e.message }; }
+        out.applied = true;
+        out.shadow_unsettled = u.changes;
+        out.tips_reset = tipReset.changes;
+        out.resettle = resettleResult;
+      }
+      sendJson(res, out);
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
   // POST /admin/mt-resettle-suspects?sport=cs2&days=14&apply=0
   // Detecta tips esports settled com line fora do range Bo (lógica idêntica ao
   // void no settleShadowTips pós-3b90e6d). Default dry-run (lista IDs +
