@@ -513,6 +513,40 @@ try {
   const restored = loadCronHeartbeats(CRON_STATE_FILE, { maxAgeMs: 24 * 3600 * 1000 });
   if (restored > 0) log('INFO', 'BOOT', `restored ${restored} cron heartbeats from disk`);
 } catch (_) {}
+
+// Boot count tracking — detecta restart loops (count alto + uptime baixo).
+// Usa arquivo separado pra não acoplar a heartbeats. Reset manual via delete file.
+const BOOT_COUNT_FILE = (() => {
+  try {
+    const dbDir = path.dirname(path.isAbsolute(DB_PATH) ? DB_PATH : path.resolve(DB_PATH));
+    return path.join(dbDir, 'boot_count.json');
+  } catch(_) { return path.resolve('boot_count.json'); }
+})();
+try {
+  let prev = { count: 0, lastBootTs: 0, recentBoots: [] };
+  if (fs.existsSync(BOOT_COUNT_FILE)) {
+    prev = safeParse(fs.readFileSync(BOOT_COUNT_FILE, 'utf8'), prev) || prev;
+  }
+  const nowTs = Date.now();
+  const recentBoots = (Array.isArray(prev.recentBoots) ? prev.recentBoots : [])
+    .filter(ts => Number.isFinite(ts) && (nowTs - ts) < 24 * 3600 * 1000)
+    .concat(nowTs)
+    .slice(-50); // Cap 50 entries.
+  const next = { count: (prev.count || 0) + 1, lastBootTs: nowTs, recentBoots };
+  fs.writeFileSync(BOOT_COUNT_FILE, JSON.stringify(next));
+  // Gauge: bot_boot_count_24h alimenta /health alerts.
+  try {
+    const m = require('./lib/metrics');
+    m.gauge('bot_boot_count_total', next.count);
+    m.gauge('bot_boot_count_24h', recentBoots.length);
+  } catch (_) {}
+  if (recentBoots.length >= 5) {
+    log('WARN', 'BOOT', `restart loop suspected: ${recentBoots.length} boots in 24h`);
+  } else {
+    log('INFO', 'BOOT', `boot #${next.count} (${recentBoots.length} in last 24h)`);
+  }
+} catch (e) { log('WARN', 'BOOT', `boot count tracking failed: ${e.message}`); }
+
 // Dump periódico (a cada 60s — overhead mínimo, ~2KB).
 setInterval(() => {
   try { dumpCronHeartbeats(CRON_STATE_FILE); } catch (_) {}

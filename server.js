@@ -6297,12 +6297,18 @@ const server = http.createServer(async (req, res) => {
         db_integrity_ok: get('db_integrity_ok'),
         db_size_mb: get('db_size_mb'),
         bot_uptime_s: get('bot_uptime_s'),
+        bot_boot_count_24h: get('bot_boot_count_24h'),
+        bot_boot_count_total: get('bot_boot_count_total'),
       };
       if (botGauges.db_integrity_ok === 0) {
         alerts.push({ id: 'db_integrity_failed', severity: 'critical', msg: 'PRAGMA integrity_check retornou erro — investigar urgente' });
       }
       if (Number.isFinite(botGauges.db_size_mb) && botGauges.db_size_mb > 300) {
         alerts.push({ id: 'db_size_high', severity: 'warning', msg: `DB ${botGauges.db_size_mb}MB (>300MB threshold) — considerar VACUUM ou archive de tips antigas` });
+      }
+      // Restart loop: 5+ boots em 24h = sintoma de crash repetido.
+      if (Number.isFinite(botGauges.bot_boot_count_24h) && botGauges.bot_boot_count_24h >= 5) {
+        alerts.push({ id: 'bot_restart_loop', severity: 'warning', msg: `${botGauges.bot_boot_count_24h} boots em 24h — checar logs por crash recorrente` });
       }
     } catch (_) {}
 
