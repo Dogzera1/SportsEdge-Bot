@@ -13662,6 +13662,130 @@ setInterval(load, 60000);
   // qual row foi usada no settle, mesmo que detector mt-revert-suspects
   // não tenha flagado). Útil quando settle parece errado mas critério
   // automático não pegou.
+  // POST /admin/settle-tennis-hg-orphans?days=14&apply=0&key=<KEY>
+  // Tips tennis HG real (não-shadow) pending sem shadow row pra propagar.
+  // Procura match_results e settla direto via parseTennisScore + winner-frame fix.
+  // Workaround pros 37 tennis HG órfãos identificados em 2026-04-30.
+  if (p === '/admin/settle-tennis-hg-orphans' && (req.method === 'POST' || req.method === 'GET')) {
+    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const days = Math.max(1, Math.min(60, parseInt(parsed.query.days || '14', 10) || 14));
+    const apply = parsed.query.apply === '1' || parsed.query.apply === 'true';
+    try {
+      const { parseTennisScore } = require('./lib/market-tips-shadow');
+      const _norm = s => String(s||'').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/[^a-z0-9]/g, '');
+      const tips = db.prepare(`
+        SELECT id, participant1, participant2, tip_participant, odds, stake,
+          market_type, sent_at, match_id, model_label
+        FROM tips
+        WHERE sport = 'tennis'
+          AND market_type IN ('HANDICAP_GAMES', 'HANDICAP_SETS', 'HANDICAP')
+          AND result IS NULL
+          AND (archived IS NULL OR archived = 0)
+          AND COALESCE(is_shadow, 0) = 0
+          AND sent_at >= datetime('now', '-' || ? || ' days')
+        ORDER BY id ASC
+      `).all(days);
+
+      const results = { ok: true, days, found: tips.length, applied: apply, settled: 0, voided: 0, skipped: 0, samples: [] };
+      for (const t of tips) {
+        const n1 = _norm(t.participant1), n2 = _norm(t.participant2);
+        if (!n1 || !n2) { results.skipped++; continue; }
+        // Procura match_results (janela ±10d)
+        const tipMs = Date.parse(String(t.sent_at).replace(' ', 'T'));
+        if (!Number.isFinite(tipMs)) { results.skipped++; continue; }
+        const before = new Date(tipMs - 10*86400_000).toISOString().slice(0,19).replace('T',' ');
+        const after = new Date(tipMs + 10*86400_000).toISOString().slice(0,19).replace('T',' ');
+        const candidates = db.prepare(`
+          SELECT match_id, team1, team2, winner, final_score, resolved_at, league
+          FROM match_results
+          WHERE game = 'tennis'
+            AND winner IS NOT NULL AND winner != ''
+            AND resolved_at >= ? AND resolved_at <= ?
+          ORDER BY ABS(julianday(resolved_at) - julianday(?)) ASC
+          LIMIT 50
+        `).all(before, after, t.sent_at);
+        // Match por nome (normalizado)
+        let mr = null;
+        for (const c of candidates) {
+          const ct1 = _norm(c.team1), ct2 = _norm(c.team2);
+          const matched = (ct1 === n1 && ct2 === n2) || (ct1 === n2 && ct2 === n1);
+          if (matched && parseTennisScore(c.final_score)) { mr = c; break; }
+        }
+        if (!mr) { results.skipped++; continue; }
+        // Walkover
+        if (/\b(walkover|w\/o|retired|retirement|abandoned|cancelled|canceled|disqualifi|ret\b)\b/i.test(String(mr.final_score || ''))) {
+          if (apply) {
+            db.prepare(`UPDATE tips SET result='void', settled_at=datetime('now'), profit_reais=0 WHERE id=?`).run(t.id);
+            results.voided++;
+          }
+          if (results.samples.length < 10) results.samples.push({ id: t.id, action: 'void', score: mr.final_score });
+          continue;
+        }
+        // parseTennisScore
+        const parsed = parseTennisScore(mr.final_score);
+        if (!parsed || !parsed.sets?.length) { results.skipped++; continue; }
+        let gT1 = parsed.sets.reduce((s,st)=>s+st.t1,0), gT2 = parsed.sets.reduce((s,st)=>s+st.t2,0);
+        // Winner-frame swap (mesma lógica do fix)
+        const winnerIsT1 = _norm(mr.winner) === _norm(t.participant1) || _norm(mr.winner).includes(_norm(t.participant1));
+        const posT1Won = gT1 > gT2;
+        if (posT1Won !== winnerIsT1) { [gT1, gT2] = [gT2, gT1]; }
+        // Parse line do match_id (lnPx.x ou lnNx.x ou tip_participant)
+        let line = NaN, side = '';
+        const lnTag = String(t.match_id || '').match(/::ln([NP])([\d.]+)/);
+        if (lnTag) { line = (lnTag[1] === 'N' ? -1 : 1) * parseFloat(lnTag[2]); }
+        const sideTag = String(t.match_id || '').match(/::mt::handicap[a-zA-Z]*::(home|away|team1|team2|over|under)/i);
+        if (sideTag) side = sideTag[1].toLowerCase();
+        // Fallback: parse from tip_participant ("Player Name +3.5" or "-3.5")
+        if (!Number.isFinite(line)) {
+          const m = String(t.tip_participant || '').match(/([+-]\d+(?:\.\d+)?)/);
+          if (m) line = parseFloat(m[1]);
+        }
+        if (!side) {
+          // Detecta side pelo tip_participant vs participant1/2
+          const tipName = _norm(String(t.tip_participant||'').replace(/[+-]?\d+(?:\.\d+)?/, ''));
+          if (tipName && n1.includes(tipName) || tipName.includes(n1)) side = 'home';
+          else if (tipName && n2.includes(tipName) || tipName.includes(n2)) side = 'away';
+        }
+        if (!Number.isFinite(line) || !side) { results.skipped++; continue; }
+        const sideIsT1 = side === 'home' || side === 'team1';
+        const sideGames = sideIsT1 ? gT1 : gT2;
+        const oppGames = sideIsT1 ? gT2 : gT1;
+        const cover = (sideGames + line) > oppGames;
+        const result = cover ? 'win' : 'loss';
+        const odds = parseFloat(t.odds) || 1;
+        const stakeU = parseFloat(String(t.stake || '1').replace('u','')) || 1;
+        // Stake_reais via tier
+        let stakeR = stakeU;
+        try {
+          const { getSportUnitValue } = require('./lib/sport-unit');
+          const bk = stmts.getBankroll.get('tennis');
+          const uv = getSportUnitValue(bk?.current_banca || 0, bk?.initial_banca || 100);
+          stakeR = parseFloat((stakeU * uv).toFixed(2));
+        } catch (_) {}
+        const profitR = result === 'win' ? +(stakeR * (odds - 1)).toFixed(2) : -stakeR;
+        if (apply) {
+          db.transaction(() => {
+            db.prepare(`UPDATE tips SET result=?, settled_at=datetime('now'), stake_reais=?, profit_reais=? WHERE id=?`)
+              .run(result, stakeR, profitR, t.id);
+            db.prepare(`UPDATE bankroll SET current_banca = current_banca + ?, updated_at = datetime('now') WHERE sport = 'tennis'`)
+              .run(profitR);
+          })();
+        }
+        results.settled++;
+        if (results.samples.length < 10) {
+          results.samples.push({
+            id: t.id, action: result, score: mr.final_score,
+            tip_participant: t.tip_participant, side, line,
+            sideGames, oppGames, cover, profit_reais: profitR,
+          });
+        }
+      }
+      sendJson(res, results);
+    } catch (e) { sendJson(res, { error: e.message, stack: e.stack }, 500); }
+    return;
+  }
+
   // GET /admin/ml-calibration?sport=tennis&days=30&key=<KEY>
   // Calibration analysis: bucketize tips por model_p_pick, mostra hit rate
   // real vs expected. Detecta drift e overconfidence.
