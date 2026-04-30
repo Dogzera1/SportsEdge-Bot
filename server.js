@@ -8701,6 +8701,10 @@ setInterval(load, 60000);
       'news_monitor':       15 * 60 * 1000,  // 15min
       'pre_match_check':    5 * 60 * 1000,   // 5min
       'ia_health':          60 * 60 * 1000,  // 1h
+      'brier_ev':           15 * 60 * 1000,  // 15min
+      'live_risk_monitor':  10 * 60 * 1000,  // 10min
+      // Hourly
+      'bankroll_guardian':  60 * 60 * 1000,
       // Daily
       'autonomy_digest':    24 * 60 * 60 * 1000,
       'db_backup':          24 * 60 * 60 * 1000,
@@ -8708,6 +8712,9 @@ setInterval(load, 60000);
       'mt_restore':         24 * 60 * 60 * 1000,
       'weekly_digest':      7 * 24 * 60 * 60 * 1000,
       'nightly_retrain':    24 * 60 * 60 * 1000,
+      // 12h
+      'mt_bucket_guard':    12 * 60 * 60 * 1000,
+      'gates_autotune':     12 * 60 * 60 * 1000,
       // Pollers (varia por sport, default 6-10min)
       'lol':         6 * 60 * 1000,
       'dota':        6 * 60 * 1000,
