@@ -13652,6 +13652,47 @@ setInterval(load, 60000);
   // qual row foi usada no settle, mesmo que detector mt-revert-suspects
   // não tenha flagado). Útil quando settle parece errado mas critério
   // automático não pegou.
+  // GET /admin/tip-find?q=GIANTX&sport=lol&days=30&key=<KEY>
+  // Busca tips em tips + market_tips_shadow por participant fuzzy (LIKE).
+  // Útil pra localizar tip reportada pelo user sem ter o ID exato.
+  if (p === '/admin/tip-find') {
+    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const q = String(parsed.query.q || '').slice(0, 60).trim();
+    if (!q) { sendJson(res, { error: 'q obrigatório' }, 400); return; }
+    const sport = String(parsed.query.sport || '').slice(0, 20) || null;
+    const days = Math.max(1, Math.min(90, parseInt(parsed.query.days || '30', 10) || 30));
+    try {
+      const conds = [`sent_at >= datetime('now', '-' || ? || ' days')`];
+      const params = [days];
+      conds.push(`(participant1 LIKE ? OR participant2 LIKE ? OR tip_participant LIKE ?)`);
+      params.push(`%${q}%`, `%${q}%`, `%${q}%`);
+      if (sport) { conds.push('sport = ?'); params.push(sport); }
+      const tips = db.prepare(`
+        SELECT id, sport, market_type, tip_participant, participant1, participant2,
+          odds, stake, result, profit_reais, sent_at, settled_at, match_id
+        FROM tips
+        WHERE ${conds.join(' AND ')}
+        ORDER BY id DESC LIMIT 30
+      `).all(...params);
+      // Shadow rows
+      const sConds = [`created_at >= datetime('now', '-' || ? || ' days')`];
+      const sParams = [days];
+      sConds.push(`(team1 LIKE ? OR team2 LIKE ?)`);
+      sParams.push(`%${q}%`, `%${q}%`);
+      if (sport) { sConds.push('sport = ?'); sParams.push(sport); }
+      const shadow = db.prepare(`
+        SELECT id, sport, team1, team2, market, side, line, odd, ev_pct, p_model,
+          result, profit_units, stake_units, created_at, settled_at, league
+        FROM market_tips_shadow
+        WHERE ${sConds.join(' AND ')}
+        ORDER BY id DESC LIMIT 30
+      `).all(...sParams);
+      sendJson(res, { ok: true, q, sport, days, tips, shadow });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
   if (p === '/admin/mt-tip-trace') {
     const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
