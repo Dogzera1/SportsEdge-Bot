@@ -8395,7 +8395,8 @@ setInterval(load, 60000);
         ...Object.entries(crons).map(([k, v]) => [k, _enrich(v, k)]),
         ...Object.entries(externalCrons).map(([k, v]) => [k, _enrich(v, k)]),
       ]),
-      // Sumário rápido pra alertas
+      // Sumário rápido pra alertas. Errors = só lastError populated (excludes
+      // notes informativos como '104MB' que antes eram salvos em lastError).
       summary: (() => {
         const allEntries = [
           ...Object.entries(polls).map(([k, v]) => [k, _enrich(v, k)]),
@@ -8404,7 +8405,12 @@ setInterval(load, 60000);
           ...Object.entries(externalCrons).map(([k, v]) => [k, _enrich(v, k)]),
         ];
         const stale = allEntries.filter(([, v]) => v && v.is_stale).map(([k]) => k);
-        const errors = allEntries.filter(([, v]) => v && v.lastError).map(([k]) => k);
+        // Error real = lastError truthy AND result starts with 'error'/'failed'
+        const errors = allEntries.filter(([, v]) => {
+          if (!v?.lastError) return false;
+          const r = String(v.lastResult || '').toLowerCase();
+          return r.startsWith('error') || r === 'failed';
+        }).map(([k]) => k);
         return {
           total: allEntries.length,
           stale_count: stale.length,

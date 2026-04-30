@@ -674,7 +674,9 @@ function _percentile(arr, pct) {
 }
 function _memWatchdogTick() {
   const _t0 = Date.now();
-  const _hb = (result, error) => { try { markCronHeartbeat('mem_watchdog', { result, error, durationMs: Date.now() - _t0 }); } catch (_) {} };
+  // result=ok|alerted|error. note=contexto OK (RSS atual). error=exception only.
+  const _hb = (result, note) => { try { markCronHeartbeat('mem_watchdog', { result, note, durationMs: Date.now() - _t0 }); } catch (_) {} };
+  const _hbErr = (result, error) => { try { markCronHeartbeat('mem_watchdog', { result, error, durationMs: Date.now() - _t0 }); } catch (_) {} };
   if (/^(1|true|yes)$/i.test(String(process.env.MEM_WATCHDOG_DISABLED || ''))) { _hb('disabled'); return; }
   try {
     const mem = process.memoryUsage();
@@ -710,7 +712,7 @@ function _memWatchdogTick() {
     _lastMemAlertDay = today;
     const routed = _pickTokenForAlert('system');
     const token = routed?.token;
-    if (!token) { _hb('above_threshold_no_token'); return; }
+    if (!token) { _hb('above_threshold_no_token', `${rssMb}MB`); return; }
     const p50 = _percentile(_rssSamples, 0.5);
     const p95v = _percentile(_rssSamples, 0.95);
     const baselineNote = p50 != null
@@ -719,7 +721,7 @@ function _memWatchdogTick() {
     const msg = `⚠️ *Memory Watchdog*\n\nRSS: *${rssMb}MB* (threshold ${threshold}MB)\nHeap used: ${heapMb}MB${baselineNote}\n\n_Possível leak. Cheque /health/metrics gauges (analyzed_size, market_tip_sent_size). Considere restart se sustentado._`;
     for (const adminId of ADMIN_IDS) sendDM(token, adminId, msg).catch(e => log('DEBUG', 'MEM-WATCHDOG', `DM err ${adminId}: ${e.message}`));
     _hb('alerted', `${rssMb}MB`);
-  } catch (e) { _hb('error', e.message); }
+  } catch (e) { _hbErr('error', e.message); }
 }
 setInterval(_memWatchdogTick, 5 * 60 * 1000);
 setTimeout(_memWatchdogTick, 30 * 1000);
@@ -18933,7 +18935,8 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   let _dbBackupRunning = false;
   async function runDbBackupCheck() {
     const _t0 = Date.now();
-    const _hb = (result, error) => { try { markCronHeartbeat('db_backup', { result, error, durationMs: Date.now() - _t0 }); } catch (_) {} };
+    const _hb = (result, note) => { try { markCronHeartbeat('db_backup', { result, note, durationMs: Date.now() - _t0 }); } catch (_) {} };
+    const _hbErr = (result, error) => { try { markCronHeartbeat('db_backup', { result, error, durationMs: Date.now() - _t0 }); } catch (_) {} };
     if (!/^true$/i.test(String(process.env.DB_BACKUP_AUTO || 'true'))) { _hb('disabled'); return; }
     if (_dbBackupRunning) { _hb('already_running'); return; }
     const hourUtc = parseInt(process.env.DB_BACKUP_HOUR_UTC || '4', 10);
@@ -18952,11 +18955,11 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
         _hb('ok', `${(r.dest_size_bytes / 1024 / 1024).toFixed(1)}MB`);
       } else {
         log('WARN', 'DB-BACKUP', `falhou: ${r.reason}${r.error ? ` (${r.error})` : ''}`);
-        _hb('failed', r.reason);
+        _hbErr('failed', r.reason);
       }
     } catch (e) {
       log('ERROR', 'DB-BACKUP', `exception: ${e.message}`);
-      _hb('error', e.message);
+      _hbErr('error', e.message);
     } finally {
       _dbBackupRunning = false;
     }
@@ -18973,7 +18976,8 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   let _lastLeaksDigestDay = null;
   async function runDailyLeaksDigest() {
     const _t0 = Date.now();
-    const _hb = (result, error) => { try { markCronHeartbeat('leaks_digest', { result, error, durationMs: Date.now() - _t0 }); } catch (_) {} };
+    const _hb = (result, note) => { try { markCronHeartbeat('leaks_digest', { result, note, durationMs: Date.now() - _t0 }); } catch (_) {} };
+    const _hbErr = (result, error) => { try { markCronHeartbeat('leaks_digest', { result, error, durationMs: Date.now() - _t0 }); } catch (_) {} };
     if (/^(0|false|no)$/i.test(String(process.env.DAILY_LEAKS_DIGEST_AUTO || 'true'))) { _hb('disabled'); return; }
     if (!ADMIN_IDS.size) { _hb('no_admins'); return; }
     const hourUtc = parseInt(process.env.DAILY_LEAKS_DIGEST_HOUR_UTC || '13', 10);
@@ -19027,7 +19031,7 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
       _hb('ok', `${rows.length} leaks`);
     } catch (e) {
       log('WARN', 'LEAKS-DIGEST', `err: ${e.message}`);
-      _hb('error', e.message);
+      _hbErr('error', e.message);
     }
   }
   setInterval(() => runDailyLeaksDigest().catch(() => {}), 30 * 60 * 1000);
@@ -19039,7 +19043,10 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   let _lastWeeklyDigestWeek = null;
   async function runWeeklyDigest() {
     const _t0 = Date.now();
-    const _heartbeat = (result, error) => {
+    const _heartbeat = (result, note) => {
+      try { markCronHeartbeat('weekly_digest', { result, note, durationMs: Date.now() - _t0 }); } catch (_) {}
+    };
+    const _heartbeatErr = (result, error) => {
       try { markCronHeartbeat('weekly_digest', { result, error, durationMs: Date.now() - _t0 }); } catch (_) {}
     };
     if (/^(0|false|no)$/i.test(String(process.env.WEEKLY_DIGEST_AUTO || 'true'))) { _heartbeat('disabled'); return; }
@@ -19109,7 +19116,7 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
       _heartbeat('ok');
     } catch (e) {
       log('WARN', 'WEEKLY-DIGEST', `err: ${e.message}`);
-      _heartbeat('error', e.message);
+      _heartbeatErr('error', e.message);
     }
   }
   setInterval(() => runWeeklyDigest().catch(() => {}), 30 * 60 * 1000);
@@ -19123,7 +19130,8 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   let _lastRestoreCheckDay = null;
   async function runMtRestoreCheck() {
     const _t0 = Date.now();
-    const _hb = (result, error) => { try { markCronHeartbeat('mt_restore', { result, error, durationMs: Date.now() - _t0 }); } catch (_) {} };
+    const _hb = (result, note) => { try { markCronHeartbeat('mt_restore', { result, note, durationMs: Date.now() - _t0 }); } catch (_) {} };
+    const _hbErr = (result, error) => { try { markCronHeartbeat('mt_restore', { result, error, durationMs: Date.now() - _t0 }); } catch (_) {} };
     if (/^(0|false|no)$/i.test(String(process.env.MT_RESTORE_AUTO || 'true'))) { _hb('disabled'); return; }
     if (!ADMIN_IDS.size) { _hb('no_admins'); return; }
     const hourUtc = parseInt(process.env.MT_RESTORE_HOUR_UTC || '14', 10);
@@ -19193,7 +19201,7 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
       _hb('ok', `${candidates.length} candidates`);
     } catch (e) {
       log('WARN', 'MT-RESTORE', `err: ${e.message}`);
-      _hb('error', e.message);
+      _hbErr('error', e.message);
     }
   }
   setInterval(() => runMtRestoreCheck().catch(() => {}), 30 * 60 * 1000);
