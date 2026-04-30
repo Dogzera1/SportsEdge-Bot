@@ -19268,6 +19268,56 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   setInterval(() => runWeeklyDigest().catch(() => {}), 30 * 60 * 1000);
   setTimeout(() => runWeeklyDigest().catch(() => {}), 80 * 60 * 1000);
 
+  // ── Scraper Smoke Test: 1x/dia checa se understat/tennis-abstract/cuetracker
+  // ainda parseiam HTML. Sites externos mudam markup sem aviso → return zero
+  // silencioso. Smoke test usa entidades estáveis (EPL 2024, Alcaraz, Judd Trump).
+  // Default hora 12 UTC (9h BRT). Opt-out: SCRAPER_SMOKE_AUTO=false.
+  let _lastScraperSmokeDay = null;
+  async function runScraperSmokeTestCron() {
+    const _t0 = Date.now();
+    const _hb = (result, note) => { try { markCronHeartbeat('scraper_smoke', { result, note, durationMs: Date.now() - _t0 }); } catch (_) {} };
+    const _hbErr = (result, error) => { try { markCronHeartbeat('scraper_smoke', { result, error, durationMs: Date.now() - _t0 }); } catch (_) {} };
+    if (/^(0|false|no)$/i.test(String(process.env.SCRAPER_SMOKE_AUTO || 'true'))) { _hb('disabled'); return; }
+    const hourUtc = parseInt(process.env.SCRAPER_SMOKE_HOUR_UTC || '12', 10);
+    const now = new Date();
+    const today = now.toISOString().slice(0, 10);
+    if (_lastScraperSmokeDay === today) return;
+    if (now.getUTCHours() !== hourUtc) return;
+    _lastScraperSmokeDay = today;
+    try {
+      const { runScraperSmokeTests } = require('./scripts/scraper-smoke-test');
+      const r = await runScraperSmokeTests();
+      if (r.ok) {
+        log('INFO', 'SCRAPER-SMOKE', `${r.total}/${r.total} OK (${r.results.map(x => `${x.name}=${x.items}`).join(' ')})`);
+        _hb('ok', `${r.total}/${r.total}`);
+        return;
+      }
+      // Some failures: alert admin
+      const failed = r.results.filter(x => !x.ok);
+      const msg = [
+        `⚠️ *Scraper Smoke Test* — ${failed.length}/${r.total} falhou`,
+        '',
+        ...failed.map(f => `🔴 \`${f.name}\` items=${f.items} latency=${f.latency_ms}ms reason=${f.reason || 'unknown'}`),
+        '',
+        '_Schema drift provável. Verificar markup do site / regex do scraper._',
+      ].join('\n');
+      const routed = _pickTokenForAlert('system');
+      const token = routed?.token;
+      if (token && ADMIN_IDS.size) {
+        for (const adminId of ADMIN_IDS) {
+          await sendDM(token, adminId, msg).catch(() => false);
+        }
+      }
+      log('WARN', 'SCRAPER-SMOKE', `${failed.length}/${r.total} falhou: ${failed.map(f => f.name).join(',')}`);
+      _hb('failed', `${failed.length}/${r.total}`);
+    } catch (e) {
+      log('ERROR', 'SCRAPER-SMOKE', `exception: ${e.message}`);
+      _hbErr('error', e.message);
+    }
+  }
+  setInterval(() => runScraperSmokeTestCron().catch(() => {}), 30 * 60 * 1000);
+  setTimeout(() => runScraperSmokeTestCron().catch(() => {}), 70 * 60 * 1000);
+
   // ── Auto-restore MT permanent disable: avalia se markets em
   // MT_PERMANENT_DISABLE_LIST recuperaram em shadow. NÃO altera env auto
   // (env é fonte da verdade) — só DM admin com sugestão. User decide se remove.

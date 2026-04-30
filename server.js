@@ -17,7 +17,10 @@ const { nameMatches } = require('./lib/name-match');
 const sofascoreDarts = require('./lib/sofascore-darts');
 const pinnacleSnooker = require('./lib/pinnacle-snooker');
 const pinnacle = require('./lib/pinnacle');
-// lib/betfair.js mantido no repo mas não usado aqui (Betfair bloqueia IPs brasileiros).
+// Betfair: opt-in fallback pra snooker quando Pinnacle retorna vazio. Default desligado
+// (BR bloqueia IPs Betfair). Auto-ativa se BF_APP_KEY+BF_USER+BF_PASS no env (deploy
+// non-BR). Sem cost quando desligado: isConfigured() retorna false e shortcuts.
+const betfair = require('./lib/betfair');
 const { esportsPreFilter } = require('./lib/ml');
 const tennisML = require('./lib/tennis-ml');
 const { fetchGridEnrichForMatch } = require('./lib/grid');
@@ -8721,6 +8724,7 @@ setInterval(load, 60000);
       'db_backup':          24 * 60 * 60 * 1000,
       'leaks_digest':       24 * 60 * 60 * 1000,
       'mt_restore':         24 * 60 * 60 * 1000,
+      'scraper_smoke':      24 * 60 * 60 * 1000,
       'weekly_digest':      7 * 24 * 60 * 60 * 1000,
       'nightly_retrain':    24 * 60 * 60 * 1000,
       // 6h
@@ -22606,7 +22610,7 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
       }
       const rows = await pinnacleSnooker.fetchSnookerMatchOdds();
       const now = Date.now();
-      const matches = rows.map(r => {
+      let matches = rows.map(r => {
         const t = r.startTime ? new Date(r.startTime).getTime() : 0;
         const isLive = r.status === 'live' || (t > 0 && t <= now);
         return {
@@ -22622,13 +22626,45 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
           odds: { t1: String(r.oddsT1), t2: String(r.oddsT2), bookmaker: 'Pinnacle' }
         };
       });
+      // Fallback Betfair quando Pinnacle volta vazio (snooker single-source — sem ele,
+      // outage Pinnacle = blackhole). Só dispara se BF_APP_KEY+USER+PASS configurados
+      // (deploy non-BR). isConfigured() retorna false silenciosamente em BR.
+      let bookSource = 'Pinnacle';
+      if (matches.length === 0 && betfair.isConfigured()) {
+        try {
+          const bfRows = await betfair.fetchSnookerMatchOdds(14);
+          matches = bfRows.map(r => {
+            const t = r.startTime ? new Date(r.startTime).getTime() : 0;
+            const isLive = t > 0 && t <= now;
+            const r1 = r.runners?.[0] || {};
+            const r2 = r.runners?.[1] || {};
+            return {
+              id: `snooker_bf_${r.eventId}`,
+              pinMatchupId: null,
+              betfairEventId: r.eventId,
+              betfairMarketId: r.marketId,
+              game: 'snooker',
+              status: isLive ? 'live' : 'upcoming',
+              team1: r1.name,
+              team2: r2.name,
+              league: r.competition || '',
+              leagueGroup: '',
+              time: r.startTime,
+              odds: { t1: String(r1.backPrice || ''), t2: String(r2.backPrice || ''), bookmaker: 'Betfair' }
+            };
+          }).filter(m => m.team1 && m.team2 && m.odds.t1 && m.odds.t2);
+          if (matches.length) bookSource = 'Betfair (fallback)';
+        } catch (e) {
+          log('WARN', 'SNOOKER', `Betfair fallback falhou: ${e.message}`);
+        }
+      }
       matches.sort((a, b) => {
         if (a.status === 'live' && b.status !== 'live') return -1;
         if (b.status === 'live' && a.status !== 'live') return 1;
         return new Date(a.time || 0).getTime() - new Date(b.time || 0).getTime();
       });
       global.__snookerCache = { ts: Date.now(), data: matches };
-      log('INFO', 'SNOOKER', `/snooker-matches: ${matches.length} partidas (Pinnacle)`);
+      log('INFO', 'SNOOKER', `/snooker-matches: ${matches.length} partidas (${bookSource})`);
       sendJson(res, matches);
     } catch (e) {
       log('ERROR', 'SNOOKER', e.message);
