@@ -16665,6 +16665,13 @@ async function pollCs(runOnce = false) {
           const found = await hltv.getHltvMatchId(match.team1, match.team2, match.time).catch(() => null);
           if (!found?.matchId) {
             try { _metrics.incr('cs_scoreboard', { status: 'no_match' }); } catch (_) {}
+          } else if (found.live === false) {
+            // HLTV diz que match não está live (pause entre maps/warmup/finished)
+            // mesmo PS marcando live. Skip scoreboard fetch — economiza ~1s req
+            // ao proxy. Padrão observado em prod 2026-04-30: PS é mais agressivo
+            // que HLTV nesse status. Counter pra trackear frequência.
+            hltvMatchId = found.matchId;
+            try { _metrics.incr('cs_scoreboard', { status: 'hltv_not_live' }); } catch (_) {}
           } else {
             hltvMatchId = found.matchId;
             const raw = await hltv.getScoreboard(found.matchId, 10).catch(() => null);
