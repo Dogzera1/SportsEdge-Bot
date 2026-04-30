@@ -6314,6 +6314,95 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // /health/metrics.html — dashboard HTML simples (auto-refresh 30s) lendo
+  // /health/metrics. Sem JS framework — só fetch + table. Útil pra debugar
+  // sem precisar parse JSON manualmente.
+  if (p === '/health/metrics.html' || p === '/metrics.html') {
+    const html = `<!DOCTYPE html>
+<html lang="pt-BR"><head><meta charset="utf-8">
+<title>Health Metrics</title>
+<meta http-equiv="refresh" content="30">
+<style>
+body { font: 13px/1.4 -apple-system,BlinkMacSystemFont,monospace; margin: 16px; background: #0d1117; color: #c9d1d9; }
+h1 { color: #58a6ff; margin: 0 0 8px; font-size: 18px; }
+h2 { color: #58a6ff; border-bottom: 1px solid #30363d; padding-bottom: 4px; margin: 16px 0 8px; font-size: 14px; }
+.meta { color: #8b949e; font-size: 11px; margin-bottom: 12px; }
+table { border-collapse: collapse; width: 100%; max-width: 720px; }
+td { padding: 3px 8px; border-bottom: 1px solid #21262d; }
+td:last-child { text-align: right; color: #d2a8ff; }
+.warn { color: #f85149; }
+.ok { color: #3fb950; }
+.tag { color: #8b949e; font-size: 11px; }
+.grid { display: grid; grid-template-columns: 1fr 1fr; gap: 32px; }
+@media (max-width: 800px) { .grid { grid-template-columns: 1fr; } }
+.process { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+.process > div { padding: 8px; background: #161b22; border-radius: 4px; }
+.process strong { display: block; color: #58a6ff; font-size: 18px; }
+.process small { color: #8b949e; font-size: 11px; }
+</style></head>
+<body>
+<h1>📊 Health Metrics</h1>
+<div class="meta" id="meta">carregando…</div>
+<div class="process" id="process"></div>
+<div class="grid">
+  <div><h2>Counters (totais)</h2><table id="counters"></table></div>
+  <div><h2>Counters (rolling 1h)</h2><table id="rolling"></table></div>
+  <div><h2>Timings</h2><table id="timings"></table></div>
+  <div><h2>Gauges</h2><table id="gauges"></table></div>
+</div>
+<script>
+function fmtNum(n) { return Number(n).toLocaleString('pt-BR'); }
+function fmtKey(k) {
+  // metric|tag1=v,tag2=w → "metric · tag1=v,tag2=w"
+  const i = k.indexOf('|');
+  if (i < 0) return k;
+  return k.slice(0, i) + ' · <span class="tag">' + k.slice(i+1) + '</span>';
+}
+async function load() {
+  try {
+    const r = await fetch('/health/metrics');
+    if (!r.ok) throw new Error('http ' + r.status);
+    const j = await r.json();
+    document.getElementById('meta').innerHTML =
+      'uptime ' + fmtNum(j.process.uptime_s) + 's · ' +
+      'pending tips ' + fmtNum(j.db?.pending_tips || 0) + ' · ' +
+      'pending MT shadow ' + fmtNum(j.db?.pending_mt_shadow || 0) + ' · ' +
+      'snapshot ' + j.ts;
+    const proc = j.process;
+    document.getElementById('process').innerHTML = [
+      '<div><small>RSS</small><strong>' + proc.rss_mb + 'MB</strong></div>',
+      '<div><small>Heap used</small><strong>' + proc.heap_used_mb + 'MB</strong></div>',
+      '<div><small>Heap total</small><strong>' + proc.heap_total_mb + 'MB</strong></div>',
+      '<div><small>External</small><strong>' + proc.external_mb + 'MB</strong></div>',
+    ].join('');
+    function renderKV(id, obj, fmt) {
+      const sorted = Object.entries(obj || {}).sort((a, b) => {
+        const va = typeof a[1] === 'object' ? (a[1].count || a[1].value || 0) : a[1];
+        const vb = typeof b[1] === 'object' ? (b[1].count || b[1].value || 0) : b[1];
+        return vb - va;
+      });
+      const html = sorted.map(([k, v]) => '<tr><td>' + fmtKey(k) + '</td><td>' + fmt(v) + '</td></tr>').join('');
+      document.getElementById(id).innerHTML = html || '<tr><td colspan="2" class="tag">vazio</td></tr>';
+    }
+    renderKV('counters', j.totals.counters, fmtNum);
+    renderKV('rolling', j.rolling_1h.counters, fmtNum);
+    renderKV('timings', j.totals.timings, v =>
+      'count ' + fmtNum(v.count) + ' · avg ' + v.avg_ms + 'ms · max ' + v.max_ms + 'ms');
+    renderKV('gauges', j.totals.gauges, v =>
+      fmtNum(v.value) + ' <span class="tag">(' + v.age_s + 's atrás)</span>');
+  } catch (e) {
+    document.getElementById('meta').innerHTML = '<span class="warn">erro: ' + e.message + '</span>';
+  }
+}
+load();
+setInterval(load, 10000);
+</script>
+</body></html>`;
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end(html);
+    return;
+  }
+
   // /health/metrics — counters in-memory acumulados desde boot (counters,
   // timings, gauges) + snapshot rolling 1h. Wirado em logRejection / record-tip
   // / scanner cycles via lib/metrics.js. Reset apenas em restart.

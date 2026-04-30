@@ -2636,32 +2636,40 @@ async function runAutoAnalysis() {
 
   // ── Execução PARALELA dos esportes (antes era série → MMA bloqueava ~15min o resto)
   // Cada poll já tem error handling interno; Promise.allSettled garante isolamento total.
+  // _timed wrappa pollX pra registrar duração no metrics — visibilidade de scanner
+  // health via /health/metrics (timings.scanner_cycle_ms{sport=...}).
+  const _timed = (sport, fn) => {
+    const t0 = Date.now();
+    return Promise.resolve(fn()).finally(() => {
+      try { _metrics.timing('scanner_cycle_ms', Date.now() - t0, { sport }); } catch (_) {}
+    });
+  };
   const parallel = [];
   if (SPORTS['esports']?.enabled) {
-    parallel.push(pollDota(true).then(v => { sharedCaches.dota = v; })
+    parallel.push(_timed('dota2', () => pollDota(true)).then(v => { sharedCaches.dota = v; })
       .catch(e => log('ERROR', 'AUTO', `Dota2 unified: ${e.message}`)));
   }
   if (SPORTS['mma']?.enabled) {
-    parallel.push(pollMma(true).catch(e => log('ERROR', 'AUTO', `MMA unified: ${e.message}`)));
+    parallel.push(_timed('mma', () => pollMma(true)).catch(e => log('ERROR', 'AUTO', `MMA unified: ${e.message}`)));
   }
   if (SPORTS['football']?.enabled) {
-    parallel.push(pollFootball(true).then(v => { sharedCaches.football = v; })
+    parallel.push(_timed('football', () => pollFootball(true)).then(v => { sharedCaches.football = v; })
       .catch(e => log('ERROR', 'AUTO', `Football unified: ${e.message}`)));
   }
   if (SPORTS['tennis']?.enabled) {
-    parallel.push(pollTennis(true).then(v => { sharedCaches.tennis = v; })
+    parallel.push(_timed('tennis', () => pollTennis(true)).then(v => { sharedCaches.tennis = v; })
       .catch(e => log('ERROR', 'AUTO', `Tennis unified: ${e.message}`)));
   }
   if (SPORTS['tabletennis']?.enabled) {
-    parallel.push(pollTableTennis(true).then(v => { sharedCaches.tabletennis = v; })
+    parallel.push(_timed('tabletennis', () => pollTableTennis(true)).then(v => { sharedCaches.tabletennis = v; })
       .catch(e => log('ERROR', 'AUTO', `TableTennis unified: ${e.message}`)));
   }
   if (SPORTS['cs']?.enabled) {
-    parallel.push(pollCs(true).then(v => { sharedCaches.cs = v; })
+    parallel.push(_timed('cs', () => pollCs(true)).then(v => { sharedCaches.cs = v; })
       .catch(e => log('ERROR', 'AUTO', `CS2 unified: ${e.message}`)));
   }
   if (SPORTS['valorant']?.enabled) {
-    parallel.push(pollValorant(true).then(v => { sharedCaches.valorant = v; })
+    parallel.push(_timed('valorant', () => pollValorant(true)).then(v => { sharedCaches.valorant = v; })
       .catch(e => log('ERROR', 'AUTO', `Valorant unified: ${e.message}`)));
   }
   await Promise.allSettled(parallel);
@@ -18823,6 +18831,85 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   }
   setInterval(() => runDailyLeaksDigest().catch(() => {}), 30 * 60 * 1000);
   setTimeout(() => runDailyLeaksDigest().catch(() => {}), 50 * 60 * 1000);
+
+  // ── Auto-restore MT permanent disable: avalia se markets em
+  // MT_PERMANENT_DISABLE_LIST recuperaram em shadow. NÃO altera env auto
+  // (env é fonte da verdade) — só DM admin com sugestão. User decide se remove.
+  // Critério restore: ROI≥0% e CLV≥0% por janela MT_RESTORE_DAYS, n≥MT_RESTORE_MIN_N.
+  // Cron diário (DAILY_LEAKS_DIGEST_HOUR_UTC + 1h pra não colidir com leaks digest).
+  let _lastRestoreCheckDay = null;
+  async function runMtRestoreCheck() {
+    if (/^(0|false|no)$/i.test(String(process.env.MT_RESTORE_AUTO || 'true'))) return;
+    if (!ADMIN_IDS.size) return;
+    const hourUtc = parseInt(process.env.MT_RESTORE_HOUR_UTC || '14', 10);
+    const now = new Date();
+    const today = now.toISOString().slice(0, 10);
+    if (_lastRestoreCheckDay === today) return;
+    if (now.getUTCHours() !== hourUtc) return;
+    _lastRestoreCheckDay = today;
+    try {
+      const minN = parseInt(process.env.MT_RESTORE_MIN_N || '30', 10);
+      const days = parseInt(process.env.MT_RESTORE_DAYS || '14', 10);
+      const minRoi = parseFloat(process.env.MT_RESTORE_MIN_ROI || '0');
+      const minClv = parseFloat(process.env.MT_RESTORE_MIN_CLV || '0');
+      const permList = String(process.env.MT_PERMANENT_DISABLE_LIST ?? 'tennis|totalGames|over')
+        .split(',').map(s => s.trim()).filter(Boolean);
+      if (!permList.length) return;
+      const candidates = [];
+      for (const entry of permList) {
+        const parts = entry.split('|');
+        if (parts.length < 2) continue;
+        const sport = parts[0], market = parts[1], side = parts[2] || null;
+        try {
+          const where = side
+            ? `sport=? AND market=? AND side=?`
+            : `sport=? AND market=?`;
+          const args = side ? [sport, market, side] : [sport, market];
+          const r = db.prepare(`
+            SELECT COUNT(*) AS n,
+              ROUND(SUM(profit_units)*1.0/NULLIF(SUM(stake_units),0)*100,1) AS roi_pct,
+              ROUND(AVG(clv_pct),1) AS avg_clv,
+              ROUND(SUM(profit_units),2) AS profit_u
+            FROM market_tips_shadow
+            WHERE ${where}
+              AND created_at >= datetime('now', '-' || ? || ' days')
+              AND result IN ('win','loss')
+          `).get(...args, days);
+          if (!r || r.n < minN) continue;
+          if (r.roi_pct >= minRoi && (r.avg_clv == null || r.avg_clv >= minClv)) {
+            candidates.push({ entry, ...r });
+          }
+        } catch (e) {
+          log('DEBUG', 'MT-RESTORE', `query err ${entry}: ${e.message}`);
+        }
+      }
+      if (!candidates.length) {
+        log('INFO', 'MT-RESTORE', `${permList.length} bloqueados verificados, nenhum recuperou (n≥${minN}, ROI≥${minRoi}%, CLV≥${minClv}%)`);
+        return;
+      }
+      const lines = [`✅ *MT Auto-Restore — ${days}d*`, ''];
+      for (const c of candidates) {
+        const profit = `${c.profit_u >= 0 ? '+' : ''}${c.profit_u}u`;
+        const clv = c.avg_clv != null ? `${c.avg_clv >= 0 ? '+' : ''}${c.avg_clv}%` : '—';
+        lines.push(`🟢 \`${c.entry}\` n=${c.n} ROI=${c.roi_pct}% CLV=${clv} P&L=${profit}`);
+      }
+      lines.push('');
+      lines.push(`_Critério: n≥${minN}, ROI≥${minRoi}%, CLV≥${minClv}%. Considerar remover do MT_PERMANENT_DISABLE_LIST._`);
+      const msg = lines.join('\n');
+      const routed = _pickTokenForAlert('digest') || _pickTokenForAlert('system');
+      const token = routed?.token;
+      if (!token) return;
+      let sent = 0;
+      for (const adminId of ADMIN_IDS) {
+        if (await sendDM(token, adminId, msg).catch(() => false)) sent++;
+      }
+      log('INFO', 'MT-RESTORE', `${candidates.length} candidate(s) DM ${sent}/${ADMIN_IDS.size} admin(s)`);
+    } catch (e) {
+      log('WARN', 'MT-RESTORE', `err: ${e.message}`);
+    }
+  }
+  setInterval(() => runMtRestoreCheck().catch(() => {}), 30 * 60 * 1000);
+  setTimeout(() => runMtRestoreCheck().catch(() => {}), 70 * 60 * 1000);
 
   // Pre-Match Final Check: cron 5min, valida tips a <30min do match.
   setInterval(() => runPreMatchFinalCheckCycle().catch(e => log('ERROR', 'PRE-MATCH-CHECK', e.message)), 5 * 60 * 1000);
