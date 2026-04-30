@@ -7996,17 +7996,55 @@ applyKey();
 
   // ── /admin/cron-status: heartbeats de polls + crons in-process.
   // GET /admin/cron-status?key=<ADMIN_KEY>
-  // Mostra: lastTs, count, lastResult, lastError, lastDurationMs.
-  // Útil pra detectar cron travado (lastTs > expected interval).
+  // Mostra: lastTs, count, lastResult, lastError, lastDurationMs, age_s,
+  // expected_interval_ms, is_stale (age > 2x expected).
   if (p === '/admin/cron-status' && (req.method === 'GET' || req.method === 'POST')) {
     const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     const polls = getPollHeartbeats();
     const crons = getCronHeartbeats();
     const now = Date.now();
-    const _enrich = (hb) => {
+    // Expected intervals (ms) por nome — pra detectar cron stale.
+    // Daily crons: 24h. Weekly: 7d. Demais: scan tick interval.
+    const _expectedMs = {
+      // Crons in-process (interval-based)
+      'mem_watchdog':       5 * 60 * 1000,   // 5min
+      'sweep_analyzed':     60 * 60 * 1000,  // 1h
+      'news_monitor':       15 * 60 * 1000,  // 15min
+      'pre_match_check':    5 * 60 * 1000,   // 5min
+      'ia_health':          60 * 60 * 1000,  // 1h
+      // Daily
+      'autonomy_digest':    24 * 60 * 60 * 1000,
+      'db_backup':          24 * 60 * 60 * 1000,
+      'leaks_digest':       24 * 60 * 60 * 1000,
+      'mt_restore':         24 * 60 * 60 * 1000,
+      'weekly_digest':      7 * 24 * 60 * 60 * 1000,
+      'nightly_retrain':    24 * 60 * 60 * 1000,
+      // Pollers (varia por sport, default 6-10min)
+      'lol':         6 * 60 * 1000,
+      'dota':        6 * 60 * 1000,
+      'cs':          6 * 60 * 1000,
+      'valorant':    20 * 60 * 1000, // longer cycle pra Valorant
+      'tennis':      10 * 60 * 1000,
+      'football':    10 * 60 * 1000,
+      'mma':         15 * 60 * 1000,
+      'darts':       30 * 60 * 1000,
+      'snooker':     30 * 60 * 1000,
+      'tt':          15 * 60 * 1000,
+    };
+    const _enrich = (hb, name) => {
       if (!hb || !hb.lastTs) return hb;
-      return { ...hb, age_s: Math.round((now - hb.lastTs) / 1000) };
+      // name pode ter prefix 'bot:' — strip pra lookup
+      const lookup = String(name || '').replace(/^bot:/, '');
+      const expected = _expectedMs[lookup] || null;
+      const age_ms = now - hb.lastTs;
+      const result = { ...hb, age_s: Math.round(age_ms / 1000) };
+      if (expected) {
+        result.expected_interval_ms = expected;
+        // Stale = age > 2x expected (margem pra atraso normal)
+        result.is_stale = age_ms > 2 * expected;
+      }
+      return result;
     };
     // Mescla heartbeats externos (bot.js via /metrics/ingest bridge)
     const externalPolls = {}, externalCrons = {};
@@ -8023,13 +8061,31 @@ applyKey();
       ok: true,
       ts: new Date().toISOString(),
       polls: Object.fromEntries([
-        ...Object.entries(polls).map(([k, v]) => [k, _enrich(v)]),
-        ...Object.entries(externalPolls).map(([k, v]) => [k, _enrich(v)]),
+        ...Object.entries(polls).map(([k, v]) => [k, _enrich(v, k)]),
+        ...Object.entries(externalPolls).map(([k, v]) => [k, _enrich(v, k)]),
       ]),
       crons: Object.fromEntries([
-        ...Object.entries(crons).map(([k, v]) => [k, _enrich(v)]),
-        ...Object.entries(externalCrons).map(([k, v]) => [k, _enrich(v)]),
+        ...Object.entries(crons).map(([k, v]) => [k, _enrich(v, k)]),
+        ...Object.entries(externalCrons).map(([k, v]) => [k, _enrich(v, k)]),
       ]),
+      // Sumário rápido pra alertas
+      summary: (() => {
+        const allEntries = [
+          ...Object.entries(polls).map(([k, v]) => [k, _enrich(v, k)]),
+          ...Object.entries(externalPolls).map(([k, v]) => [k, _enrich(v, k)]),
+          ...Object.entries(crons).map(([k, v]) => [k, _enrich(v, k)]),
+          ...Object.entries(externalCrons).map(([k, v]) => [k, _enrich(v, k)]),
+        ];
+        const stale = allEntries.filter(([, v]) => v && v.is_stale).map(([k]) => k);
+        const errors = allEntries.filter(([, v]) => v && v.lastError).map(([k]) => k);
+        return {
+          total: allEntries.length,
+          stale_count: stale.length,
+          stale_names: stale,
+          error_count: errors.length,
+          error_names: errors,
+        };
+      })(),
       // Cron envs status (ON/OFF detection)
       cron_envs: {
         AUTONOMY_DIGEST_AUTO: !/^(0|false|no)$/i.test(String(process.env.AUTONOMY_DIGEST_AUTO ?? 'true')),
