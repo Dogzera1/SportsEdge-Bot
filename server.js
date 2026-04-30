@@ -7713,6 +7713,91 @@ setInterval(load, 10000);
     return;
   }
 
+  // ── /admin/repair: bundle idempotente de operações de healing.
+  // Roda em sequência: settle-shadow + auto-archive non-ML + bankroll sync (dry).
+  // Útil pós-deploy ou quando dashboard mostra inconsistência. Não modifica
+  // bankroll sem ?apply=1 (operações destrutivas continuam exigir flag).
+  // GET/POST /admin/repair?key=<ADMIN_KEY>&apply=0
+  if (p === '/admin/repair' && (req.method === 'GET' || req.method === 'POST')) {
+    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const apply = parsed.query.apply === '1' || parsed.query.apply === 'true';
+    const out = { ok: true, started_at: new Date().toISOString(), steps: {}, apply };
+    try {
+      // 1. Settle shadow (idempotente)
+      try {
+        const { settleShadowTips } = require('./lib/market-tips-shadow');
+        const r = settleShadowTips(db);
+        out.steps.shadow_settle = { ok: true, ...r };
+      } catch (e) { out.steps.shadow_settle = { ok: false, error: e.message }; }
+
+      // 2. Auto-archive non-ML órfãs (>48h pending fora de ML_MARKETS)
+      try {
+        const ph = ML_MARKETS_LIST.map(() => '?').join(',');
+        const r = db.prepare(
+          `UPDATE tips SET archived = 1
+           WHERE result IS NULL AND (archived IS NULL OR archived = 0)
+             AND sent_at <= datetime('now', '-48 hours')
+             AND upper(COALESCE(market_type, 'ML')) NOT IN (${ph})`
+        ).run(...ML_MARKETS_LIST);
+        out.steps.archive_orphan_non_ml = { ok: true, archived: r.changes };
+      } catch (e) { out.steps.archive_orphan_non_ml = { ok: false, error: e.message }; }
+
+      // 3. Bankroll diff stored vs computed (dry-run sempre, mesmo com apply)
+      try {
+        const rows = db.prepare(`SELECT sport, initial_banca, current_banca FROM bankroll`).all();
+        const diffs = [];
+        for (const b of rows) {
+          const tips = db.prepare(`
+            SELECT COALESCE(SUM(profit_reais), 0) AS total_profit
+            FROM tips WHERE sport = ? AND result IS NOT NULL AND result != 'void' AND (archived IS NULL OR archived = 0)
+          `).get(b.sport);
+          const computed = +(b.initial_banca + (tips.total_profit || 0)).toFixed(2);
+          const drift = +(b.current_banca - computed).toFixed(2);
+          if (Math.abs(drift) > 0.5) {
+            diffs.push({ sport: b.sport, stored: b.current_banca, computed, drift });
+          }
+        }
+        out.steps.bankroll_audit = { ok: true, drifts: diffs };
+      } catch (e) { out.steps.bankroll_audit = { ok: false, error: e.message }; }
+
+      // 4. Stats: total tips por result + pending
+      try {
+        const stats = db.prepare(`
+          SELECT
+            COUNT(*) AS total,
+            SUM(CASE WHEN result IS NULL THEN 1 ELSE 0 END) AS pending,
+            SUM(CASE WHEN result = 'win' THEN 1 ELSE 0 END) AS wins,
+            SUM(CASE WHEN result = 'loss' THEN 1 ELSE 0 END) AS losses,
+            SUM(CASE WHEN result = 'void' THEN 1 ELSE 0 END) AS voids,
+            SUM(CASE WHEN archived = 1 THEN 1 ELSE 0 END) AS archived
+          FROM tips
+        `).get();
+        out.steps.tips_stats = { ok: true, ...stats };
+      } catch (e) { out.steps.tips_stats = { ok: false, error: e.message }; }
+
+      // 5. Stats market_tips_shadow
+      try {
+        const stats = db.prepare(`
+          SELECT
+            COUNT(*) AS total,
+            SUM(CASE WHEN result IS NULL THEN 1 ELSE 0 END) AS pending,
+            SUM(CASE WHEN result = 'win' THEN 1 ELSE 0 END) AS wins,
+            SUM(CASE WHEN result = 'loss' THEN 1 ELSE 0 END) AS losses,
+            SUM(CASE WHEN result = 'void' THEN 1 ELSE 0 END) AS voids
+          FROM market_tips_shadow
+        `).get();
+        out.steps.shadow_stats = { ok: true, ...stats };
+      } catch (e) { out.steps.shadow_stats = { ok: false, error: e.message }; }
+
+      out.duration_ms = Date.now() - new Date(out.started_at).getTime();
+      sendJson(res, out);
+    } catch (e) {
+      sendJson(res, { ok: false, error: e.message }, 500);
+    }
+    return;
+  }
+
   // Force resync bankroll.current_banca = initial + SUM(profit_reais) por sport.
   // Não toca tips — só corrige drift entre bankroll stored e profit real.
   // POST /admin/force-sync-bankroll?apply=1  (sem apply = dry-run)
@@ -13620,6 +13705,16 @@ setInterval(load, 10000);
         if (!tipParticipant) { badRequest(res, 'tipParticipant obrigatório'); return; }
         if (oddsN == null || oddsN <= 1) { badRequest(res, 'odds inválidas'); return; }
         if (evN == null) { badRequest(res, 'ev inválido'); return; }
+        // Helper centralizado pra skip — incrementa counter por reason+sport
+        // ANTES de sendJson. Permite /health/metrics rastrear quais gates
+        // estão derrubando volume sem precisar parsear logs.
+        const _emitSkip = (reason, extra = {}) => {
+          try {
+            const m = require('./lib/metrics');
+            m.incr('record_tip_skip', { sport, reason });
+          } catch (_) {}
+          sendJson(res, { ok: true, skipped: true, reason, ...extra });
+        };
         // Guardrail: evita odds absurdas por bug de matching/mercado
         if (sport === 'esports') {
           const minOdds = parseFiniteNumber(process.env.LOL_MIN_ODDS) ?? 1.10;
@@ -13641,7 +13736,7 @@ setInterval(load, 10000);
            AND (archived IS NULL OR archived = 0) LIMIT 1`
         ).get(String(matchId), ...dupeSportSet);
         if (existingCross) {
-          sendJson(res, { ok: true, skipped: true, reason: 'duplicate', existing_sport: existingCross.sport });
+          _emitSkip('duplicate', { existing_sport: existingCross.sport });
           return;
         }
 
@@ -13698,14 +13793,14 @@ setInterval(load, 10000);
                          : recentDupe.result ? 'recent_settle_same_pair'
                          : (samePickOnly ? 'duplicate_pair' : 'hedge_blocked');
             log('INFO', 'DEDUP', `${sport} ${p1} vs ${p2}: ${reason} (existing pick=${recentDupe.tip_participant}, ${prevResult}, new=${tipParticipant})`);
-            sendJson(res, { ok: true, skipped: true, reason });
+            _emitSkip(reason);
             return;
           }
         }
 
         // Blacklist: se já foi VOID por odds errada, não gravar de novo
         const isVoided = stmts.isVoidedMatch.get(sport, String(matchId));
-        if (isVoided) { sendJson(res, { ok: true, skipped: true, reason: 'voided_odds_wrong_match' }); return; }
+        if (isVoided) { _emitSkip('voided_odds_wrong_match'); return; }
 
         // Time-of-day block: se hora UTC atual está marcada como bleeder (ROI persistentemente ruim),
         // rejeita. Cache per-sport 1h pra evitar query por tip.
@@ -13748,7 +13843,7 @@ setInterval(load, 10000);
             const currentHourUtc = new Date().getUTCHours();
             if (cache[cacheKey].blocked.includes(currentHourUtc)) {
               log('WARN', 'TIME-OF-DAY', `${sport}: hora UTC ${currentHourUtc} bloqueada (ROI ruim 30d) — tip rejeitada`);
-              sendJson(res, { ok: true, skipped: true, reason: 'time_of_day_blocked', hour_utc: currentHourUtc });
+              _emitSkip('time_of_day_blocked', { hour_utc: currentHourUtc });
               return;
             }
           } catch (_) {}
@@ -13763,7 +13858,7 @@ setInterval(load, 10000);
           `).get(sport, eventName);
           if (block) {
             log('WARN', 'LEAGUE-BLOCK', `${sport} / ${eventName}: tip rejeitada (${block.reason || 'blocked'}, auto=${block.auto})`);
-            sendJson(res, { ok: true, skipped: true, reason: 'league_blocked', block });
+            _emitSkip('league_blocked', { block });
             return;
           }
         }
@@ -13799,7 +13894,7 @@ setInterval(load, 10000);
           const desiredU = parseFloat(String(t.stake || '').replace(/u/i, '')) || 0;
           if (openExposureU + desiredU > capU) {
             log('WARN', 'CORRELATION', `${sport} / ${eventName}: exposição ${openExposureU}u + nova ${desiredU}u > cap ${capU}u → rejeitada`);
-            sendJson(res, { ok: true, skipped: true, reason: 'correlation_cap', open_u: +openExposureU.toFixed(1), desired_u: desiredU, cap_u: capU });
+            _emitSkip('correlation_cap', { open_u: +openExposureU.toFixed(1), desired_u: desiredU, cap_u: capU });
             return;
           }
         }
@@ -13813,7 +13908,7 @@ setInterval(load, 10000);
             const dyn = db.prepare(`SELECT value FROM dynamic_thresholds WHERE sport = ? AND key = 'ev_min'`).get(sport);
             if (dyn?.value > 0 && evN < dyn.value) {
               log('INFO', 'EV-MIN-AUTO', `${sport}: ${p1} vs ${p2} — EV ${evN.toFixed(1)}% < ${dyn.value}% (dyn). Rejeitada.`);
-              sendJson(res, { ok: true, skipped: true, reason: 'ev_below_dynamic_min', ev: evN, ev_min: dyn.value });
+              _emitSkip('ev_below_dynamic_min', { ev: evN, ev_min: dyn.value });
               return;
             }
           } catch (_) {}
@@ -13849,7 +13944,7 @@ setInterval(load, 10000);
           } catch (_) {}
           if (evN > evMax) {
             log('WARN', 'EV-CAP', `${sport}: ${p1} vs ${p2} — EV ${evN.toFixed(1)}% > ${evMax}% (cap). Tip rejeitada.`);
-            sendJson(res, { ok: true, skipped: true, reason: 'ev_too_high', ev: evN, ev_max: evMax });
+            _emitSkip('ev_too_high', { ev: evN, ev_max: evMax });
             return;
           }
         }
@@ -13879,7 +13974,7 @@ setInterval(load, 10000);
         const marketTypeStr = clampStr(t.market_type || 'ML', 20) || 'ML';
         const daysBack = process.env.VOID_TIP_PAIR_DAYS || '90 days';
         const isVoidedPair = stmts.isVoidedPairRecent.get(sport, marketTypeStr, p1n, p2n, p2n, p1n, `-${daysBack}`);
-        if (isVoidedPair) { sendJson(res, { ok: true, skipped: true, reason: 'voided_odds_wrong_pair_recent' }); return; }
+        if (isVoidedPair) { _emitSkip('voided_odds_wrong_pair_recent'); return; }
         const isLive = t.isLive ? 1 : 0;
         const modelP1 = t.modelP1 != null ? parseFiniteNumber(t.modelP1) : null;
         const modelP2 = t.modelP2 != null ? parseFiniteNumber(t.modelP2) : null;
@@ -20217,9 +20312,18 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
   if (p === '/claude' && req.method === 'POST') {
     let body = ''; req.on('data', d => body += d);
     req.on('end', async () => {
+      const _aiT0 = Date.now();
+      const _emitAiMetric = (status, sport) => {
+        try {
+          const m = require('./lib/metrics');
+          m.incr('ai_call', { sport: sport || 'unknown', status });
+          m.timing('ai_call_ms', Date.now() - _aiT0, { sport: sport || 'unknown', status });
+        } catch (_) {}
+      };
       try {
         const payload = safeParse(body, null);
-        if (!payload) { sendJson(res, { error: 'Invalid JSON' }, 400); return; }
+        if (!payload) { sendJson(res, { error: 'Invalid JSON' }, 400); _emitAiMetric('bad_payload', null); return; }
+        const _sportTag = String(payload.sport || 'unknown').toLowerCase().replace(/[^a-z0-9_]/g, '') || 'unknown';
 
         // Kill switch global: AI_DISABLED=true bloqueia todas as chamadas DeepSeek
         // cross-sport. Callers tratam resposta vazia como "IA SEM_EDGE" → caem no
@@ -20236,12 +20340,13 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
             const sportRaw = String(payload.sport || '').toLowerCase().replace(/[^a-z0-9_]/g, '');
             if (sportRaw) stmts.incrApiUsage.run(`deepseek_blocked_${sportRaw}`, month);
           } catch (_) {}
+          _emitAiMetric('disabled', _sportTag);
           // Resposta que callers interpretam como "IA sem texto" → fallback path
           sendJson(res, { ok: true, blocked: true, reason: 'AI_DISABLED=true', content: [{ text: '' }] });
           return;
         }
 
-        if (!DEEPSEEK_KEY) { sendJson(res, { error: 'DEEPSEEK_API_KEY ausente' }, 401); return; }
+        if (!DEEPSEEK_KEY) { sendJson(res, { error: 'DEEPSEEK_API_KEY ausente' }, 401); _emitAiMetric('no_key', _sportTag); return; }
 
         // ── DeepSeek (OpenAI-compatible) ──
         const dsPayload = {
@@ -20261,9 +20366,11 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
         if (!text) {
           const errMsg = ds.error?.message || ds.error?.code || '';
           log('WARN', 'AI', `DeepSeek vazio: status=${r?.status} err=${errMsg || '-'} body=${String(r?.body || '').slice(0, 900)}`);
+          _emitAiMetric(r?.status === 429 ? 'rate_limited' : 'empty', _sportTag);
           sendJson(res, { error: errMsg || 'DeepSeek sem resposta' }, r.status || 502);
           return;
         }
+        _emitAiMetric('ok', _sportTag);
         // Track usage: count + tokens (prompt + completion)
         try {
           const month = new Date().toISOString().slice(0, 7);
@@ -20291,6 +20398,7 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
         sendJson(res, { content: [{ type: 'text', text }], model: dsPayload.model, provider: 'deepseek' });
       } catch(e) {
         log('WARN', 'AI', `DeepSeek exception: ${e.code || '-'} ${e.message || String(e)}`);
+        _emitAiMetric('exception', null);
         sendJson(res, { error: e.message }, e.status || 500);
       }
     });
