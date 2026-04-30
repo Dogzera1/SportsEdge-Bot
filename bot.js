@@ -4438,6 +4438,33 @@ async function runKillsCalibrationCheck() {
   } catch (e) { log('ERROR', 'KILLS-CALIB', e.message); }
 }
 
+// LoL cross-source kill validation — rodado 1x/dia.
+async function runLolCrossCheckDaily() {
+  if (/^(0|false|no)$/i.test(String(process.env.LOL_XCHECK_AUTO ?? 'true'))) return;
+  const targetHour = parseInt(process.env.LOL_XCHECK_HOUR || '4', 10) || 4;
+  const now = new Date();
+  if (now.getHours() !== targetHour) return;
+  const today = now.toISOString().slice(0, 10);
+  if (runLolCrossCheckDaily._lastRunDay === today) return;
+  runLolCrossCheckDaily._lastRunDay = today;
+  try {
+    const adminKey = (process.env.ADMIN_KEY || '').trim();
+    if (!adminKey) return;
+    const r = await serverGet(`/admin/lol-xcheck?days=14&run=1`, null, { 'x-admin-key': adminKey })
+      .catch(e => ({ error: e.message }));
+    if (r?.error) { log('WARN', 'LOL-XCHECK', `endpoint err: ${r.error}`); return; }
+    const rr = r?.runResult;
+    if (!rr) return;
+    const msg = `LoL cross-source check: ${rr.n} games, ${rr.flagged} flagged disagreement`;
+    log(rr.flagged > 0 ? 'WARN' : 'INFO', 'LOL-XCHECK', msg);
+    if (rr.flagged >= parseInt(process.env.LOL_XCHECK_DM_THRESHOLD || '5', 10)) {
+      const samples = (rr.results || []).slice(0, 5).map(s => `• ${s.teams} spread=${s.spread} (${JSON.stringify(s.sources)})`).join('\n');
+      const dmText = `⚠️ *LoL Source Disagreement*\n\n${msg}\n\nSamples:\n${samples}\n\nReview \`lol_source_disagreement\` table.`;
+      try { await sendAdminDMs(resolveAlertsToken(), dmText, { parse_mode: 'Markdown' }, 'lol-xcheck'); } catch (_) {}
+    }
+  } catch (e) { log('ERROR', 'LOL-XCHECK', e.message); }
+}
+
 async function runMarketTipsRoiGuardSided() {
   if (/^(0|false|no)$/i.test(String(process.env.MT_ROI_GUARD_AUTO ?? 'true'))) return;
   if (!ADMIN_IDS.size) return;
@@ -18985,6 +19012,12 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   // Opt-out: KILLS_CALIB_AUTO=false.
   setInterval(() => runKillsCalibrationCheck().catch(e => log('ERROR', 'KILLS-CALIB', e.message)), 60 * 60 * 1000);
   setTimeout(() => runKillsCalibrationCheck().catch(() => {}), 25 * 60 * 1000); // 25min pós-boot
+
+  // ── LoL cross-source kill validation (Frente 5) ──
+  // Roda 1x/dia (4 AM default). Compara kills entre gol.gg + OE → flag
+  // matches com divergência. Opt-out: LOL_XCHECK_AUTO=false.
+  setInterval(() => runLolCrossCheckDaily().catch(e => log('ERROR', 'LOL-XCHECK', e.message)), 60 * 60 * 1000);
+  setTimeout(() => runLolCrossCheckDaily().catch(() => {}), 35 * 60 * 1000); // 35min pós-boot
   // Weekly pipeline digest (2ª feira 9h)
   setInterval(() => runWeeklyPipelineDigest().catch(e => log('ERROR', 'WEEKLY-DIGEST', e.message)), 60 * 60 * 1000);
   setTimeout(() => runWeeklyPipelineDigest().catch(() => {}), 10 * 60 * 1000);

@@ -9045,6 +9045,23 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // GET /admin/lol-xcheck?days=14&run=1 → cross-source kill validation.
+  // run=1 dispara nova varredura; sem param só lista flagged.
+  if (p === '/admin/lol-xcheck') {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const { runCrossSourceCheck, listFlaggedGames } = require('./lib/lol-source-cross-check');
+      const days = Math.max(1, Math.min(60, parseInt(parsed.query.days || '14', 10) || 14));
+      const tolerance = parseInt(parsed.query.tolerance || '4', 10) || 4;
+      const run = parsed.query.run === '1' || parsed.query.run === 'true';
+      let runResult = null;
+      if (run) runResult = await runCrossSourceCheck(db, { days, tolerance });
+      const flagged = listFlaggedGames(db, { days });
+      sendJson(res, { ok: true, ran: !!run, runResult, flagged });
+    } catch (e) { sendJson(res, { ok: false, error: e.message, stack: e.stack }, 500); }
+    return;
+  }
+
   // GET /admin/golgg-objectives?gameid=77175  → debug scrape único.
   // POST /admin/sync-golgg-objectives?days=7 → bulk: scrape último N dias e
   // popular lol_game_objectives. Pra alimentar lol-kills-model com objective
