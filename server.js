@@ -3829,6 +3829,7 @@ function runSettleSweep({ sportFilter = '', days = 14 } = {}) {
       }
       if (matchMethod === 'substring_weak') {
         log('WARN', 'SETTLE-SWEEP', `QUARANTINE ${sport} tip=${tip.id} "${tip.tip_participant}" vs "${row.winner}" — requer manual`);
+        try { require('./lib/metrics').incr('settle_quarantine', { sport, reason: 'substring_weak' }); } catch (_) {}
         info.not_found++;
         continue;
       }
@@ -6317,6 +6318,23 @@ const server = http.createServer(async (req, res) => {
 
     if (p === '/alerts') { sendJson(res, { alerts, ts: new Date().toISOString() }); return; }
 
+    // Build identity: code SHA, boot timestamp, metrics cardinality. Antes precisava
+    // cruzar tip mais recente pra saber qual SHA está rodando — agora exposto direto.
+    let buildInfo = null;
+    try {
+      const { getCodeSha } = require('./lib/epoch');
+      buildInfo = {
+        code_sha: getCodeSha() || 'unknown',
+        boot_at: new Date(_serverStartTs).toISOString(),
+        uptime_s: Math.round((Date.now() - _serverStartTs) / 1000),
+      };
+    } catch (_) {}
+    let metricsCardinality = null;
+    try {
+      const m = require('./lib/metrics');
+      metricsCardinality = m.getCardinalityStats?.() || null;
+    } catch (_) {}
+
     const status = !dbOk ? 'error' : (alerts.some(a => a.severity === 'critical') ? 'degraded' : (stale ? 'degraded' : 'ok'));
     sendJson(res, {
       status,
@@ -6340,6 +6358,8 @@ const server = http.createServer(async (req, res) => {
       },
       alerts,
       botGauges,
+      build: buildInfo,
+      metricsCardinality,
       metricsLite: getMetricsLite()
     });
     return;
@@ -19501,6 +19521,7 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
             // substring_weak = match fraco — quarentena para evitar false positive/negative
             if (matchMethod === 'substring_weak' && !_isWalkover) {
               log('WARN', 'SETTLE', `QUARANTINE ${sport} matchId=${matchId} tip="${tip.tip_participant}" vs winner="${winner}" → ${result} [method=${matchMethod} score=${matchScore}] — NÃO liquidado (requer /settle-manual)`);
+              try { require('./lib/metrics').incr('settle_quarantine', { sport, reason: 'substring_weak' }); } catch (_) {}
               continue;
             }
             const logLevel = 'INFO';

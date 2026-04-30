@@ -823,6 +823,44 @@ function _memWatchdogTick() {
       const m = require('./lib/metrics');
       m.gauge('rss_mb', rssMb);
       m.gauge('heap_used_mb', heapMb);
+      // Drawdown + bankroll per-sport — antes só visível via /banca cmd. Snapshot
+      // a cada 5min cobre dashboards. Lê de stmts.getBankroll (sync, fast).
+      try {
+        const sports = ['lol', 'dota2', 'cs', 'valorant', 'tennis', 'football', 'mma', 'darts', 'snooker', 'tabletennis'];
+        for (const sp of sports) {
+          const bk = stmts.getBankroll.get(sp);
+          if (!bk || !Number.isFinite(bk.current_banca)) continue;
+          m.gauge('bankroll_current', +bk.current_banca.toFixed(2), { sport: sp });
+          if (Number.isFinite(bk.initial_banca) && bk.initial_banca > 0) {
+            const ddPct = +((bk.initial_banca - bk.current_banca) / bk.initial_banca * 100).toFixed(2);
+            m.gauge('drawdown_pct', ddPct, { sport: sp });
+          }
+        }
+      } catch (_) {}
+      // Active handles (file descriptors / sockets / timers proxy) — leak indicator
+      try {
+        const handles = process._getActiveHandles?.()?.length || 0;
+        const requests = process._getActiveRequests?.()?.length || 0;
+        m.gauge('active_handles', handles);
+        m.gauge('active_requests', requests);
+      } catch (_) {}
+      // Tips pending age — flag tips travadas (substring_weak quarantine, AUTO_VOID
+      // pendente, settle silencioso). Antes só visível via /unsettled cmd manual.
+      try {
+        const rows = db.prepare(`
+          SELECT sport, MAX(CAST((julianday('now') - julianday(sent_at)) * 24 * 60 AS INTEGER)) AS age_min
+          FROM tips
+          WHERE result IS NULL
+            AND (archived IS NULL OR archived = 0)
+            AND COALESCE(is_shadow, 0) = 0
+          GROUP BY sport
+        `).all();
+        for (const r of rows) {
+          if (r.sport && Number.isFinite(r.age_min)) {
+            m.gauge('tips_pending_age_max_min', r.age_min, { sport: r.sport });
+          }
+        }
+      } catch (_) {}
     } catch (_) {}
     // Acumula sample no ring
     _rssSamples.push(rssMb);
@@ -1165,9 +1203,18 @@ function tgRequest(token, method, params) {
   const maxAttempts = Math.max(1, Math.min(4, parseInt(process.env.TELEGRAM_HTTP_ATTEMPTS || '2', 10) || 2));
   return (async () => {
     let lastErr;
+    const t0 = Date.now();
     for (let a = 1; a <= maxAttempts; a++) {
       try {
-        return await tgRequestOnce(token, method, params, timeoutMs);
+        const r = await tgRequestOnce(token, method, params, timeoutMs);
+        // Telemetry: latency + outcome code (200/400/403/429/500...). Antes era
+        // 100% caixa preta — DM lenta ou 403 silencioso só apareciam em log scan.
+        try {
+          const code = r?.ok === false ? (r.error_code || 'api_err') : 'ok';
+          _metrics.timing('tg_send_ms', Date.now() - t0, { method });
+          _metrics.incr('tg_result', { method, code: String(code) });
+        } catch (_) {}
+        return r;
       } catch (e) {
         lastErr = e;
         const msg = String(e && e.message || '');
@@ -1175,6 +1222,11 @@ function tgRequest(token, method, params) {
           await new Promise(r => setTimeout(r, 1500 * a));
           continue;
         }
+        // Counter de erro definitivo (após retries exhausted)
+        try {
+          _metrics.timing('tg_send_ms', Date.now() - t0, { method });
+          _metrics.incr('tg_result', { method, code: e?.code === 'ETIMEDOUT' ? 'timeout' : 'error' });
+        } catch (_) {}
         throw e;
       }
     }
@@ -7679,6 +7731,7 @@ async function autoAnalyzeMatch(token, match) {
       if (silentTimeout) {
         global.__deepseekSilentTimeouts = (global.__deepseekSilentTimeouts || 0) + 1;
         log('WARN', 'DEEPSEEK-SILENT', `${match.team1} vs ${match.team2}: status=200 mas content=${hasContent} (count=${global.__deepseekSilentTimeouts}) — possível timeout do proxy`);
+        try { _metrics.incr('ai_silent_timeout', { provider: resp?.provider || 'deepseek' }); } catch (_) {}
       }
     }
     if (!text) {
@@ -7750,6 +7803,7 @@ async function autoAnalyzeMatch(token, match) {
     if (!tipResult && text && text.length > 20 && !text.toLowerCase().includes('sem edge') && !text.toLowerCase().includes('sem tip') && !/\bsem_?tip\b/i.test(text)) {
       const snippet = text.slice(0, 200).replace(/\n/g, ' ');
       log('DEBUG', 'IA-PARSE', `Sem TIP_ML na resposta para ${match.team1} vs ${match.team2}: "${snippet}"`);
+      try { _metrics.incr('ai_parse_fail', { provider: resp?.provider || 'deepseek' }); } catch (_) {}
     }
     if (tipResult) {
       // Valida P-texto vs P-modelo. EV será recalculado via _modelEv downstream.
