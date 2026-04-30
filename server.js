@@ -7792,6 +7792,49 @@ setInterval(load, 10000);
     return;
   }
 
+  // ── /admin/mt-status: snapshot do MT pipeline cross-sport.
+  // Mostra qual sport está shadow-only vs promote-enabled, blocklist,
+  // shadow vs real counts 7d. Útil pra ver "tô promovendo o quê?".
+  // GET /admin/mt-status?key=<ADMIN_KEY>
+  if (p === '/admin/mt-status' && (req.method === 'GET' || req.method === 'POST')) {
+    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const sports = ['lol','dota2','cs2','valorant','tennis','football','mma'];
+    const out = { ok: true, ts: new Date().toISOString(), sports: {}, blocklist: [], global: {} };
+    out.global.mt_shadow_dm_all = /^(1|true|yes)$/i.test(String(process.env.MT_SHADOW_DM_ALL || ''));
+    out.global.market_tips_dm_kill_switch = process.env.MARKET_TIPS_DM_KILL_SWITCH === 'true';
+    const blocklistEnv = String(process.env.MT_PERMANENT_DISABLE_LIST ?? 'tennis|totalGames|over,lol|total').trim();
+    out.blocklist = blocklistEnv.split(',').map(s => s.trim()).filter(Boolean);
+    for (const sp of sports) {
+      const up = sp.toUpperCase();
+      const aliasEnv = { DOTA2: 'DOTA', CS2: 'CS' }[up];
+      const promoteEnabled = process.env[`${up}_MARKET_TIPS_ENABLED`] === 'true'
+        || (aliasEnv && process.env[`${aliasEnv}_MARKET_TIPS_ENABLED`] === 'true');
+      const shadowOnly = sp === 'football'
+        ? !/^(0|false|no)$/i.test(String(process.env.FOOTBALL_MT_SHADOW_ONLY ?? 'true'))
+        : null;
+      let shadow7d = 0, real7d = 0;
+      try {
+        const sh = db.prepare(
+          `SELECT COUNT(*) AS n FROM market_tips_shadow WHERE sport = ? AND created_at >= datetime('now', '-7 days')`
+        ).get(sp);
+        shadow7d = sh?.n || 0;
+        const re = db.prepare(
+          `SELECT COUNT(*) AS n FROM tips WHERE sport = ? AND match_id LIKE '%::mt::%' AND sent_at >= datetime('now', '-7 days')`
+        ).get(sp);
+        real7d = re?.n || 0;
+      } catch (_) {}
+      out.sports[sp] = {
+        promote_enabled: promoteEnabled,
+        shadow_only: shadowOnly,  // null se sport não tem flag específico
+        shadow_count_7d: shadow7d,
+        promoted_count_7d: real7d,
+      };
+    }
+    sendJson(res, out);
+    return;
+  }
+
   // ── /admin/cs-live-debug: testa HLTV scoreboard fetch pra um match.
   // GET /admin/cs-live-debug?team1=X&team2=Y&time=ISO&key=<ADMIN_KEY>
   // Retorna proxyConfigured + matchId resolvido + scoreboard raw + parsed.
