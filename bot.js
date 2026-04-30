@@ -594,6 +594,18 @@ function sweepAnalyzedMaps() {
       if (Number.isFinite(ts) && (now - ts) > MARKET_TIP_SENT_TTL_MS) { marketTipSent.delete(key); total++; }
     }
   }
+  // DB size gauge — visibilidade de crescimento. Refletido em /health/metrics.
+  try {
+    const fs = require('fs');
+    const path = require('path');
+    const dbPath = path.resolve(__dirname, process.env.DB_PATH || 'sportsedge.db');
+    if (fs.existsSync(dbPath)) {
+      const stat = fs.statSync(dbPath);
+      const sizeMb = +(stat.size / 1024 / 1024).toFixed(1);
+      const m = require('./lib/metrics');
+      m.gauge('db_size_mb', sizeMb);
+    }
+  } catch (_) {}
   // Gauge sizes per Map — visibilidade de leak in-flight via /health/metrics.
   try {
     const metrics = require('./lib/metrics');

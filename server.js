@@ -7894,6 +7894,7 @@ input[name=key] { background: #0d1117; border: 1px solid #30363d; color: #c9d1d9
 
 <div class="card"><h2>📊 Status & Health</h2>
 <ul>
+<li><a href="/admin/quick-stats.html" class="hk">/admin/quick-stats.html</a> <span class="tag">📊 ALL-IN-ONE 3-col</span></li>
 <li><a href="/admin/today.html" class="hk">/admin/today.html</a> <span class="tag">📅 daily summary UI</span></li>
 <li><a href="/admin/today" class="hk">/admin/today</a> <span class="tag">JSON</span></li>
 <li><a href="/health" class="hk">/health</a> <span class="tag">overview + alerts</span></li>
@@ -8101,6 +8102,127 @@ if (urlParams.get('tip_id')) {
   document.getElementById('tipId').value = urlParams.get('tip_id');
   if (k) load();
 }
+</script>
+</body></html>`;
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end(html);
+    return;
+  }
+
+  // ── /admin/quick-stats.html: single-page combinando today + cron + mt.
+  if (p === '/admin/quick-stats.html') {
+    const html = `<!DOCTYPE html>
+<html lang="pt-BR"><head><meta charset="utf-8">
+<title>Quick Stats — SportsEdge</title>
+<meta http-equiv="refresh" content="120">
+<style>
+body { font: 13px/1.4 -apple-system,BlinkMacSystemFont,monospace; margin: 0; padding: 12px; background: #0d1117; color: #c9d1d9; }
+h1 { color: #58a6ff; margin: 0 0 4px; font-size: 18px; }
+.sub { color: #8b949e; font-size: 11px; margin-bottom: 8px; }
+input { background: #0d1117; border: 1px solid #30363d; color: #c9d1d9; padding: 4px 8px; border-radius: 4px; font: inherit; width: 280px; margin-bottom: 8px; }
+.grid3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
+.col { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 10px; min-height: 200px; }
+.col h2 { color: #58a6ff; font-size: 12px; margin: 0 0 6px; padding-bottom: 4px; border-bottom: 1px solid #21262d; text-transform: uppercase; }
+.kv { display: flex; justify-content: space-between; padding: 2px 0; font-size: 11px; }
+.kv span:last-child { color: #d2a8ff; }
+.win { color: #3fb950; }
+.loss { color: #f85149; }
+.warn { color: #d29922; }
+.tag { color: #6e7681; font-size: 10px; }
+.note-line { font-size: 10px; color: #8b949e; }
+@media (max-width: 900px) { .grid3 { grid-template-columns: 1fr; } }
+</style></head>
+<body>
+<h1>📊 Quick Stats</h1>
+<div class="sub" id="meta">carregando…</div>
+<input type="text" id="adminKey" placeholder="ADMIN_KEY" />
+<div class="grid3" id="grid"></div>
+<div class="note-line" style="margin-top:12px"><a href="/admin/" style="color:#d2a8ff">← Admin Console</a> · <a href="/admin/today.html" style="color:#d2a8ff">today</a> · <a href="/admin/cron-status.html" style="color:#d2a8ff">cron-status</a> · auto-refresh 2min</div>
+<script>
+const k = localStorage.getItem('adminKey') || '';
+document.getElementById('adminKey').value = k;
+document.getElementById('adminKey').addEventListener('input', e => { localStorage.setItem('adminKey', e.target.value.trim()); load(); });
+async function load() {
+  const key = document.getElementById('adminKey').value.trim();
+  if (!key) { document.getElementById('grid').innerHTML = '<div class="warn">cole ADMIN_KEY.</div>'; return; }
+  try {
+    const [today, cronS, mtS] = await Promise.all([
+      fetch('/admin/today?key=' + encodeURIComponent(key)).then(r => r.json()),
+      fetch('/admin/cron-status?key=' + encodeURIComponent(key)).then(r => r.json()),
+      fetch('/admin/mt-status?key=' + encodeURIComponent(key)).then(r => r.json()),
+    ]);
+    document.getElementById('meta').textContent = 'snapshot ' + new Date().toISOString();
+
+    function fmtBrl(v) { if (v == null) return '—'; const n = Number(v); return (n >= 0 ? '+' : '') + n.toFixed(2); }
+    function fmtPct(v) { if (v == null) return '—'; const n = Number(v); return (n >= 0 ? '+' : '') + n + '%'; }
+
+    // Col 1: Today
+    const ts = today.summary || {};
+    const profCls = (ts.profit_brl_today ?? 0) >= 0 ? 'win' : 'loss';
+    let col1 = '<h2>📅 Today</h2>' +
+      '<div class="kv"><span>Tips emitidas</span><span>' + (ts.tips_emitted_today ?? 0) + '</span></div>' +
+      '<div class="kv"><span>Settled hoje</span><span>' + (ts.tips_settled_today ?? 0) + '</span></div>' +
+      '<div class="kv"><span>MT shadow</span><span>' + (ts.mt_shadow_today ?? 0) + '</span></div>' +
+      '<div class="kv"><span>P&L</span><span class="' + profCls + '">R$ ' + fmtBrl(ts.profit_brl_today) + '</span></div>' +
+      '<div class="kv"><span>ROI</span><span class="' + profCls + '">' + fmtPct(ts.roi_today_pct) + '</span></div>' +
+      '<div class="kv"><span>Staked</span><span>R$ ' + (ts.staked_brl_today ?? 0) + '</span></div>';
+    if (today.tips_today?.length) {
+      col1 += '<h2 style="margin-top:10px">Por sport (settled hoje)</h2>';
+      for (const r of today.tips_settled_today || []) {
+        const c = r.profit_brl >= 0 ? 'win' : 'loss';
+        col1 += '<div class="kv"><span>' + r.sport + '</span><span class="' + c + '">' + fmtBrl(r.profit_brl) + ' (' + r.n + ')</span></div>';
+      }
+    }
+
+    // Col 2: Cron status
+    const cs = cronS.summary || {};
+    const cronCls = cs.error_count > 0 ? 'loss' : cs.stale_count > 0 ? 'warn' : 'win';
+    let col2 = '<h2>⏰ Crons</h2>' +
+      '<div class="kv"><span>Total heartbeats</span><span>' + (cs.total ?? 0) + '</span></div>' +
+      '<div class="kv"><span>Stale</span><span class="' + cronCls + '">' + (cs.stale_count ?? 0) + '</span></div>' +
+      '<div class="kv"><span>Errors</span><span class="' + cronCls + '">' + (cs.error_count ?? 0) + '</span></div>';
+    if (cs.stale_names?.length) col2 += '<div class="note-line warn">stale: ' + cs.stale_names.join(', ') + '</div>';
+    if (cs.error_names?.length) col2 += '<div class="note-line loss">err: ' + cs.error_names.join(', ') + '</div>';
+    col2 += '<h2 style="margin-top:10px">Pollers</h2>';
+    const polls = cronS.polls || {};
+    Object.entries(polls).sort().forEach(([k, v]) => {
+      const c = v.is_stale ? 'loss' : 'win';
+      const ext = v.matches != null ? ' (' + v.matches + ' m)' : '';
+      col2 += '<div class="kv"><span class="' + c + '">' + k.replace('bot:', '') + '</span><span>' + Math.round((v.age_s||0)/60) + 'min' + ext + '</span></div>';
+    });
+    col2 += '<h2 style="margin-top:10px">Crons (last run)</h2>';
+    const crons = cronS.crons || {};
+    Object.entries(crons).sort().forEach(([k, v]) => {
+      const c = v.is_stale ? 'loss' : 'win';
+      col2 += '<div class="kv"><span class="' + c + '">' + k.replace('bot:', '') + '</span><span>' + (v.lastResult || '—') + '</span></div>';
+    });
+
+    // Col 3: MT status
+    let col3 = '<h2>🎯 MT Pipeline</h2>';
+    if (mtS.global) {
+      col3 += '<div class="kv"><span>Shadow DM all</span><span class="' + (mtS.global.mt_shadow_dm_all ? 'win' : 'tag') + '">' + (mtS.global.mt_shadow_dm_all ? 'ON' : 'off') + '</span></div>';
+      col3 += '<div class="kv"><span>Kill switch</span><span class="' + (mtS.global.market_tips_dm_kill_switch ? 'loss' : 'win') + '">' + (mtS.global.market_tips_dm_kill_switch ? 'ENGAGED' : 'off') + '</span></div>';
+    }
+    col3 += '<h2 style="margin-top:10px">Por sport (7d)</h2>';
+    Object.entries(mtS.sports || {}).sort().forEach(([sp, v]) => {
+      const c = (v.promoted_count_7d ?? 0) > 0 ? 'win' : 'tag';
+      col3 += '<div class="kv"><span>' + sp + '</span><span class="' + c + '">shadow=' + (v.shadow_count_7d ?? 0) + ' / promo=' + (v.promoted_count_7d ?? 0) + '</span></div>';
+    });
+    if (mtS.blocklist?.length) {
+      col3 += '<h2 style="margin-top:10px">Blocklist</h2>';
+      for (const b of mtS.blocklist) col3 += '<div class="kv"><span class="loss">🚫 ' + b + '</span><span></span></div>';
+    }
+
+    document.getElementById('grid').innerHTML =
+      '<div class="col">' + col1 + '</div>' +
+      '<div class="col">' + col2 + '</div>' +
+      '<div class="col">' + col3 + '</div>';
+  } catch (e) {
+    document.getElementById('meta').innerHTML = '<span class="loss">' + e.message + '</span>';
+  }
+}
+load();
+setInterval(load, 120000);
 </script>
 </body></html>`;
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
