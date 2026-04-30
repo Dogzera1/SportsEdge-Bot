@@ -6346,6 +6346,15 @@ td:last-child { text-align: right; color: #d2a8ff; }
 <h1>📊 Health Metrics</h1>
 <div class="meta" id="meta">carregando…</div>
 <div class="process" id="process"></div>
+<div style="margin:10px 0;font-size:11px;color:#8b949e">
+  <strong style="color:#58a6ff">Admin endpoints (precisa key):</strong>
+  <a href="/admin/mt-status" style="color:#d2a8ff">mt-status</a> ·
+  <a href="/admin/blocklist-stats" style="color:#d2a8ff">blocklist-stats</a> ·
+  <a href="/admin/repair" style="color:#d2a8ff">repair</a> ·
+  <a href="/admin/cs-live-debug" style="color:#d2a8ff">cs-live-debug</a> ·
+  <a href="/admin/forensics" style="color:#d2a8ff">forensics</a> ·
+  <a href="/dashboard.html" style="color:#d2a8ff">← dashboard</a>
+</div>
 <div class="grid">
   <div><h2>Counters (totais)</h2><table id="counters"></table></div>
   <div><h2>Counters (rolling 1h)</h2><table id="rolling"></table></div>
