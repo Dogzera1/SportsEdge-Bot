@@ -472,6 +472,25 @@ Máximo 150 palavras.`;
 const DB_PATH = (process.env.DB_PATH || 'sportsedge.db').trim().replace(/^=+/, '');
 const { db, stmts } = initDatabase(DB_PATH);
 
+// DB integrity check no boot — detecta corruption silenciosa após restart.
+// Se result !== 'ok', loga critical mas continua (corruption parcial usualmente
+// ainda permite read).
+try {
+  const t0 = Date.now();
+  const row = db.prepare('PRAGMA integrity_check').get();
+  const result = row?.integrity_check || 'unknown';
+  const dt = Date.now() - t0;
+  if (result === 'ok') {
+    log('INFO', 'BOOT', `db integrity check: ok (${dt}ms)`);
+    try { require('./lib/metrics').gauge('db_integrity_ok', 1); } catch (_) {}
+  } else {
+    log('WARN', 'BOOT', `DB INTEGRITY FAILED: ${result} (${dt}ms) — investigar urgente`);
+    try { require('./lib/metrics').gauge('db_integrity_ok', 0); } catch (_) {}
+  }
+} catch (e) {
+  log('WARN', 'BOOT', `db integrity check threw: ${e.message}`);
+}
+
 // ── Patch Meta Persistência ──
 // Salva no mesmo diretório do DB para sobreviver restarts no volume Railway
 const PATCH_META_FILE = (() => {
@@ -604,6 +623,9 @@ function sweepAnalyzedMaps() {
       const sizeMb = +(stat.size / 1024 / 1024).toFixed(1);
       const m = require('./lib/metrics');
       m.gauge('db_size_mb', sizeMb);
+      // bot.js uptime gauge — detecta restart loop (uptime sempre baixo + count
+      // de heartbeats não cresce → loop crash).
+      m.gauge('bot_uptime_s', Math.round(process.uptime()));
     }
   } catch (_) {}
   // Gauge sizes per Map — visibilidade de leak in-flight via /health/metrics.
