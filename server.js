@@ -9079,12 +9079,13 @@ const server = http.createServer(async (req, res) => {
   if (p === '/admin/kills-calibration') {
     if (!requireAdmin(req, res)) return;
     try {
-      const { computeKillsCalibration, evaluateKillsAutoDisable } = require('./lib/lol-kills-calibration');
+      const { computeKillsCalibration, evaluateKillsAutoDisable, getLeagueCoverage } = require('./lib/lol-kills-calibration');
       const days = parseInt(parsed.query.days || '14', 10) || 14;
       const leagueLike = String(parsed.query.league || '').trim() || null;
       const calib = computeKillsCalibration(db, { days, sport: 'lol', leagueLike });
       const decision = evaluateKillsAutoDisable(db, calib);
-      sendJson(res, { ok: true, calib, decision });
+      const coverage = getLeagueCoverage(db, { days });
+      sendJson(res, { ok: true, calib, decision, coverage });
     } catch (e) { sendJson(res, { ok: false, error: e.message, stack: e.stack }, 500); }
     return;
   }
