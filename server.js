@@ -8703,8 +8703,14 @@ setInterval(load, 60000);
       'ia_health':          60 * 60 * 1000,  // 1h
       'brier_ev':           15 * 60 * 1000,  // 15min
       'live_risk_monitor':  10 * 60 * 1000,  // 10min
+      'critical_alerts':    10 * 60 * 1000,  // 10min
+      'live_scout_gaps':    15 * 60 * 1000,  // varia, default 15min
       // Hourly
       'bankroll_guardian':  60 * 60 * 1000,
+      // 6h
+      'auto_shadow':        6 * 60 * 60 * 1000,
+      'auto_healer':        15 * 60 * 1000,  // varia, default 15min
+      'weekly_recalc':      7 * 24 * 60 * 60 * 1000,
       // Daily
       'autonomy_digest':    24 * 60 * 60 * 1000,
       'db_backup':          24 * 60 * 60 * 1000,

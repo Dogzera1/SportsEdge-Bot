@@ -18582,27 +18582,27 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
       log('ERROR', 'ML-WEIGHTS', `Recalc weekly: ${e.message}`);
     }
   }
-  setInterval(() => runWeeklyRecalc().catch(() => {}), WEIGHTS_RECALC_INTERVAL);
-  setTimeout(() => runWeeklyRecalc().catch(() => {}), 5 * 60 * 1000); // primeiro check 5min pós-boot
+  setInterval(_wrapCron('weekly_recalc', runWeeklyRecalc), WEIGHTS_RECALC_INTERVAL);
+  setTimeout(_wrapCron('weekly_recalc', runWeeklyRecalc), 5 * 60 * 1000); // primeiro check 5min pós-boot
   // Notificações de line movement desativadas a pedido do usuário
   // setInterval(() => checkLineMovement().catch(e => log('ERROR', 'LINE', e.message)), LINE_CHECK_INTERVAL);
   // Alertas críticos: polling /alerts a cada 10 min → DM admins (throttled 1h por alert id)
-  setInterval(() => checkCriticalAlerts().catch(e => log('ERROR', 'ALERT', e.message)), 10 * 60 * 1000);
-  setTimeout(() => checkCriticalAlerts().catch(() => {}), 30 * 1000); // primeiro check 30s pós-boot
+  setInterval(_wrapCron('critical_alerts', checkCriticalAlerts), 10 * 60 * 1000);
+  setTimeout(_wrapCron('critical_alerts', checkCriticalAlerts), 30 * 1000); // primeiro check 30s pós-boot
 
   // Live Scout gaps: alerta admin quando partida live tem stats faltando >5min
-  setInterval(() => checkLiveScoutGaps().catch(e => log('ERROR', 'LIVE-SCOUT-ALERT', e.message)), LIVE_SCOUT_CHECK_INTERVAL_MS);
-  setTimeout(() => checkLiveScoutGaps().catch(() => {}), 60 * 1000); // primeiro check 60s pós-boot
+  setInterval(_wrapCron('live_scout_gaps', checkLiveScoutGaps), LIVE_SCOUT_CHECK_INTERVAL_MS);
+  setTimeout(_wrapCron('live_scout_gaps', checkLiveScoutGaps), 60 * 1000); // primeiro check 60s pós-boot
 
   // Auto-shadow: avalia CLV a cada 6h e flipa shadowMode pra sports com edge negativo persistente.
   // Default OFF — ativar via AUTO_SHADOW_NEGATIVE_CLV=true
-  setInterval(() => checkAutoShadow().catch(e => log('ERROR', 'AUTO-SHADOW', e.message)), AUTO_SHADOW_CHECK_INTERVAL_MS);
-  setTimeout(() => checkAutoShadow().catch(() => {}), 5 * 60 * 1000); // primeiro check 5min pós-boot (DB já tá warm)
+  setInterval(_wrapCron('auto_shadow', checkAutoShadow), AUTO_SHADOW_CHECK_INTERVAL_MS);
+  setTimeout(_wrapCron('auto_shadow', checkAutoShadow), 5 * 60 * 1000); // primeiro check 5min pós-boot (DB já tá warm)
 
   // Auto-Healer: detecta anomalias via Health Sentinel e aplica fixes operacionais.
   // Default ON — desativar via AUTO_HEALER_ENABLED=false
-  setInterval(() => runAutoHealerCycle().catch(e => log('ERROR', 'AUTO-HEALER', e.message)), AUTO_HEALER_CHECK_INTERVAL_MS);
-  setTimeout(() => runAutoHealerCycle().catch(() => {}), 4 * 60 * 1000); // primeiro check 4min pós-boot
+  setInterval(_wrapCron('auto_healer', runAutoHealerCycle), AUTO_HEALER_CHECK_INTERVAL_MS);
+  setTimeout(_wrapCron('auto_healer', runAutoHealerCycle), 4 * 60 * 1000); // primeiro check 4min pós-boot
 
   // Bankroll Guardian: cron 1h, alerta drawdown alto + auto-shadow temporário.
   setInterval(_wrapCron('bankroll_guardian', runBankrollGuardianCycle), 60 * 60 * 1000);
