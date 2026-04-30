@@ -606,9 +606,13 @@ setInterval(() => { try { sweepAnalyzedMaps(); } catch (_) {} }, 60 * 60 * 1000)
 // Formato: { ts, sport, teams, reason, extra }
 const _rejections = [];
 const REJECTIONS_MAX = 200;
+// Metrics counters cross-process — wirado em logRejection + tip dispatch.
+// /health/metrics endpoint expõe acumulado + rolling 1h.
+const _metrics = require('./lib/metrics');
 function logRejection(sport, teams, reason, extra = {}) {
   _rejections.unshift({ ts: Date.now(), sport, teams, reason, extra });
   if (_rejections.length > REJECTIONS_MAX) _rejections.length = REJECTIONS_MAX;
+  try { _metrics.incr('rejection', { sport: sport || 'unknown', reason: reason || 'unknown' }); } catch (_) {}
 }
 function getRejections(sportFilter, limit = 50) {
   let list = _rejections;
@@ -6949,6 +6953,24 @@ async function autoAnalyzeMatch(token, match) {
                   }
                 }
                 if (totalKillsTipsAll.length) {
+                  // Cross-source kill validation gate (frente-5): se OE↔gol.gg
+                  // discordam significativamente em jogos recentes desses teams,
+                  // dados de modelagem são suspeitos → bloqueia tips kills.
+                  // Opt-out: LOL_KILLS_XCHECK_GATE=false. Default ON.
+                  let _xCheckBlocked = null;
+                  if (!/^(0|false|no)$/i.test(String(process.env.LOL_KILLS_XCHECK_GATE ?? 'true'))) {
+                    try {
+                      const { hasRecentSourceDisagreement } = require('./lib/lol-source-cross-check');
+                      const _xDays = parseInt(process.env.LOL_KILLS_XCHECK_DAYS || '7', 10);
+                      const xc = hasRecentSourceDisagreement(db, match.team1, match.team2, { days: _xDays });
+                      if (xc.blocked) {
+                        log('WARN', 'LOL-KILLS-XCHECK', `${match.team1} vs ${match.team2}: ${xc.reason} → kills tips bloqueadas (${totalKillsTipsAll.length} skipped)`);
+                        try { _metrics.incr('rejection', { sport: 'lol', reason: 'xcheck_kill_disagreement' }); } catch (_) {}
+                        _xCheckBlocked = xc;
+                      }
+                    } catch (_) {}
+                  }
+                  if (_xCheckBlocked) { /* skip todo o bloco kills */ } else {
                   try {
                     const { logShadowTip, wasAdminDmSentRecently, markAdminDmSent } = require('./lib/market-tips-shadow');
                     for (const t of totalKillsTipsAll) logShadowTip(db, { sport: 'lol', match, bestOf, tip: t, isLive: isLiveLoL });
@@ -6994,6 +7016,7 @@ async function autoAnalyzeMatch(token, match) {
                       }
                     }
                   } catch (e) { log('WARN', 'LOL-KILLS-PROMOTE', e.message); }
+                  } // fim else (xCheck não bloqueou)
                 }
               }
             }

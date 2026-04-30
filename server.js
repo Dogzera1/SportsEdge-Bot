@@ -6314,6 +6314,49 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // /health/metrics — counters in-memory acumulados desde boot (counters,
+  // timings, gauges) + snapshot rolling 1h. Wirado em logRejection / record-tip
+  // / scanner cycles via lib/metrics.js. Reset apenas em restart.
+  if (p === '/health/metrics' || p === '/metrics') {
+    try {
+      const metrics = require('./lib/metrics');
+      const snap = metrics.snapshot();
+      const rolling = metrics.snapshot1h();
+      // Inclui process memory + db stats pra contexto operacional.
+      const mem = process.memoryUsage();
+      const dbStats = (() => {
+        try {
+          const r = db.prepare(`SELECT
+            (SELECT COUNT(*) FROM tips WHERE result IS NULL) AS pending_tips,
+            (SELECT COUNT(*) FROM market_tips_shadow WHERE result IS NULL) AS pending_mt_shadow
+          `).get();
+          return r;
+        } catch (_) { return null; }
+      })();
+      sendJson(res, {
+        ok: true,
+        ts: new Date().toISOString(),
+        process: {
+          uptime_s: snap.uptime_s,
+          rss_mb: +(mem.rss / 1024 / 1024).toFixed(1),
+          heap_used_mb: +(mem.heapUsed / 1024 / 1024).toFixed(1),
+          heap_total_mb: +(mem.heapTotal / 1024 / 1024).toFixed(1),
+          external_mb: +(mem.external / 1024 / 1024).toFixed(1),
+        },
+        db: dbStats,
+        totals: {
+          counters: snap.counters,
+          timings: snap.timings,
+          gauges: snap.gauges,
+        },
+        rolling_1h: rolling,
+      });
+    } catch (e) {
+      sendJson(res, { ok: false, error: e.message }, 500);
+    }
+    return;
+  }
+
   if (p === '/record-analysis' && req.method === 'POST') {
     lastAnalysisAt = new Date().toISOString();
     sendJson(res, { ok: true });
@@ -13813,8 +13856,23 @@ const server = http.createServer(async (req, res) => {
           } catch (e) { log('WARN', 'LINE-SHOP', `Fail compute: ${e.message}`); }
         }
         stmts.incrementApiUsage.run(sport, new Date().toISOString().slice(0,7));
+        // Metrics: counter por sport + isLive + isShadow.
+        try {
+          const metrics = require('./lib/metrics');
+          metrics.incr('tips_emitted', {
+            sport,
+            live: t.isLive ? '1' : '0',
+            shadow: t.isShadow ? '1' : '0',
+          });
+        } catch (_) {}
         sendJson(res, { ok: true, tipId: result?.lastInsertRowid || null });
-      } catch(e) { sendJson(res, { error: e.message }, 500); }
+      } catch(e) {
+        try {
+          const metrics = require('./lib/metrics');
+          metrics.incr('record_tip_error', { sport: parsed.query.sport || 'unknown' });
+        } catch (_) {}
+        sendJson(res, { error: e.message }, 500);
+      }
     });
     return;
   }
