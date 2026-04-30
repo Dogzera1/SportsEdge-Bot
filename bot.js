@@ -4280,6 +4280,33 @@ async function recordMarketTipAsRegular({ sport, match, tip, stake, isLive }) {
     const marketKey = String(tip.market || 'unknown');
     const sideKey = String(tip.side || 'na');
 
+    // ── Football: market divergence gate ──
+    // Pra sport=football, se model diverge >MAX pp de Pinnacle closing
+    // benchmark (H2H direto de football_data_csv), segura tip.
+    // Sharp money discordando = sinal de model errado/dados velhos.
+    // env: FB_DIVERGENCE_GATE=true (default true), FB_DIVERGENCE_MAX_PP=12
+    if (sport === 'football' && !/^(0|false|no)$/i.test(String(process.env.FB_DIVERGENCE_GATE ?? 'true'))) {
+      try {
+        const { getClosingOddsBenchmark, getMarketDivergence } = require('./lib/football-data-features');
+        const market = getClosingOddsBenchmark(db, match.team1, match.team2);
+        if (market && tip.pModel != null) {
+          // Mapeia side da tip pra prob (1X2_H/A/D ou ML)
+          const isHome = /^(1X2_H|H|home|1)$/i.test(String(tip.side || ''));
+          const isAway = /^(1X2_A|A|away|2)$/i.test(String(tip.side || ''));
+          const isDraw = /^(1X2_D|D|draw|X)$/i.test(String(tip.side || ''));
+          const marketSideP = isHome ? market.pH : isAway ? market.pA : isDraw ? market.pD : null;
+          if (marketSideP != null) {
+            const pp = Math.abs(tip.pModel - marketSideP) * 100;
+            const maxPp = parseFloat(process.env.FB_DIVERGENCE_MAX_PP || '12');
+            if (pp > maxPp) {
+              log('WARN', 'FB-DIVERGENCE-GATE', `${match.team1} vs ${match.team2} ${tip.market}/${tip.side}: model=${(tip.pModel*100).toFixed(1)}% vs Pinn close=${(marketSideP*100).toFixed(1)}% (${pp.toFixed(1)}pp > ${maxPp}pp) — skip`);
+              return null;
+            }
+          }
+        }
+      } catch (_) { /* opcional, não bloqueia */ }
+    }
+
     // ── Sprint 1.1: Tournament exposure cap ──
     // Limita tips/torneio/dia pra evitar concentração (ATP Madrid: 78 tips em 7d).
     // env: MAX_TIPS_PER_TOURNAMENT_PER_DAY (default 8). 0 = disabled.

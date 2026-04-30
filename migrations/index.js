@@ -1618,6 +1618,24 @@ const migrations = [
     },
   },
   {
+    id: '070_football_data_csv_shots',
+    up(db) {
+      // Add shots cols (HS/AS/HST/AST + ou25 closing odds) pra xG proxy.
+      const cols = [
+        ['home_shots', 'INTEGER'],
+        ['away_shots', 'INTEGER'],
+        ['home_shots_target', 'INTEGER'],
+        ['away_shots_target', 'INTEGER'],
+        ['ou25_over_close', 'REAL'],   // P>2.5 (Pinnacle closing over 2.5)
+        ['ou25_under_close', 'REAL'],  // P<2.5
+        ['ah_line', 'REAL'],            // AHCh (Asian Handicap closing line)
+      ];
+      for (const [name, type] of cols) {
+        try { db.exec(`ALTER TABLE football_data_csv ADD COLUMN ${name} ${type}`); } catch (_) {}
+      }
+    },
+  },
+  {
     id: '068_valorant_team_stats',
     up(db) {
       // thespike.gg: map win rate + agent composition per team Valorant.
