@@ -6347,7 +6347,7 @@ td:last-child { text-align: right; color: #d2a8ff; }
 <div class="meta" id="meta">carregando…</div>
 <div class="process" id="process"></div>
 <div style="margin:10px 0;font-size:11px;color:#8b949e">
-  <strong style="color:#58a6ff">🛠️ Admin endpoints (precisa key):</strong><br>
+  <strong style="color:#58a6ff">🛠️ <a href="/admin/" style="color:#d2a8ff;text-decoration:underline">Admin Console (todos endpoints)</a> · ou direto:</strong><br>
   <em style="color:#7d8590">Status:</em>
   <a href="/admin/cron-status" style="color:#d2a8ff">cron-status</a> ·
   <a href="/admin/env-audit" style="color:#d2a8ff">env-audit</a> ·
@@ -7857,6 +7857,140 @@ setInterval(load, 10000);
     } catch (e) {
       sendJson(res, { ok: false, error: e.message }, 500);
     }
+    return;
+  }
+
+  // ── /admin/index.html: meta-dashboard listando endpoints admin.
+  // Standalone HTML, sem auth (links dentro requerem ADMIN_KEY).
+  if (p === '/admin/index.html' || p === '/admin/' || p === '/admin') {
+    const html = `<!DOCTYPE html>
+<html lang="pt-BR"><head><meta charset="utf-8">
+<title>Admin Console — SportsEdge</title>
+<style>
+body { font: 13px/1.5 -apple-system,BlinkMacSystemFont,monospace; margin: 0; padding: 16px; background: #0d1117; color: #c9d1d9; }
+h1 { color: #58a6ff; margin: 0 0 4px; font-size: 20px; }
+.sub { color: #8b949e; font-size: 11px; margin-bottom: 16px; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 14px; }
+.card { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 12px; }
+h2 { color: #d2a8ff; font-size: 13px; margin: 0 0 8px; padding-bottom: 4px; border-bottom: 1px solid #21262d; }
+ul { list-style: none; padding: 0; margin: 0; }
+li { padding: 3px 0; }
+a { color: #58a6ff; text-decoration: none; }
+a:hover { text-decoration: underline; }
+.tag { color: #8b949e; font-size: 10px; }
+.warn { color: #d29922; }
+.crit { color: #f85149; }
+.section-meta { font-size: 11px; color: #6e7681; margin-top: 4px; }
+input[name=key] { background: #0d1117; border: 1px solid #30363d; color: #c9d1d9; padding: 4px 8px; border-radius: 4px; font: inherit; width: 100%; box-sizing: border-box; margin-bottom: 12px; }
+.note { background: #161b22; border-left: 3px solid #58a6ff; padding: 8px 12px; margin: 12px 0; font-size: 11px; color: #8b949e; }
+</style></head>
+<body>
+<h1>🛠️ Admin Console</h1>
+<div class="sub">SportsEdge Bot · meta-dashboard de endpoints admin</div>
+<input type="text" name="key" id="adminKey" placeholder="ADMIN_KEY (preenche todos links automaticamente)" />
+<div class="note">Cole o ADMIN_KEY acima — todos links abaixo recebem <code>?key=...</code> automaticamente. <a href="/dashboard.html">← Dashboard principal</a></div>
+<div class="grid">
+
+<div class="card"><h2>📊 Status & Health</h2>
+<ul>
+<li><a href="/health" class="hk">/health</a> <span class="tag">overview + alerts</span></li>
+<li><a href="/health/metrics" class="hk">/health/metrics</a> <span class="tag">JSON counters/gauges</span></li>
+<li><a href="/health/metrics.html" class="hk">/health/metrics.html</a> <span class="tag">UI metrics</span></li>
+<li><a href="/admin/cron-status" class="hk">/admin/cron-status</a> <span class="tag">polls + crons heartbeats</span></li>
+<li><a href="/admin/env-audit" class="hk">/admin/env-audit</a> <span class="tag">envs sanity check</span></li>
+<li><a href="/admin/scraper-health" class="hk">/admin/scraper-health</a> <span class="tag">scrapers status</span></li>
+<li><a href="/admin/aggregator-status" class="hk">/admin/aggregator-status</a> <span class="tag">BR aggregator</span></li>
+</ul></div>
+
+<div class="card"><h2>🎯 MT Pipeline</h2>
+<ul>
+<li><a href="/admin/mt-status" class="hk">/admin/mt-status</a> <span class="tag">cross-sport overview</span></li>
+<li><a href="/admin/blocklist-stats?days=14" class="hk">/admin/blocklist-stats</a> <span class="tag">disable list perf</span></li>
+<li><a href="/admin/mt-shadow-audit" class="hk">/admin/mt-shadow-audit</a> <span class="tag">shadow audit</span></li>
+<li><a href="/admin/mt-promote-status" class="hk">/admin/mt-promote-status</a> <span class="tag">promote state</span></li>
+<li><a href="/admin/mt-disable-list" class="hk">/admin/mt-disable-list</a> <span class="tag">runtime disabled</span></li>
+<li><a href="/admin/mt-calib-validation?days=90&min_n=10" class="hk">/admin/mt-calib-validation</a> <span class="tag">calib drift</span></li>
+<li><a href="/admin/mt-brier-history?days=90&window=7" class="hk">/admin/mt-brier-history</a> <span class="tag">Brier semana</span></li>
+</ul></div>
+
+<div class="card"><h2>🔬 Diagnostics</h2>
+<ul>
+<li><a href="/admin/sport-detail?sport=tennis" class="hk">/admin/sport-detail?sport=X</a> <span class="tag">drill-down sport</span></li>
+<li><a href="/admin/forensics?tip_id=1" class="hk">/admin/forensics?tip_id=N</a> <span class="tag">tip post-mortem</span></li>
+<li><a href="/admin/cs-live-debug?team1=&team2=" class="hk">/admin/cs-live-debug</a> <span class="tag">HLTV scoreboard</span></li>
+<li><a href="/admin/tg-commands" class="hk">/admin/tg-commands</a> <span class="tag">listar TG cmds</span></li>
+<li><a href="/admin/clv-capture-trace" class="hk">/admin/clv-capture-trace</a> <span class="tag">CLV capture diag</span></li>
+<li><a href="/admin/clv-coverage" class="hk">/admin/clv-coverage</a> <span class="tag">CLV % cobertura</span></li>
+<li><a href="/admin/oe-status" class="hk">/admin/oe-status</a> <span class="tag">Oracle Elixir status</span></li>
+</ul></div>
+
+<div class="card"><h2>⚡ Detection events</h2>
+<ul>
+<li><a href="/admin/arb-events?hours=24" class="hk">/admin/arb-events</a> <span class="tag">arbitragem</span></li>
+<li><a href="/admin/super-odd-events" class="hk">/admin/super-odd-events</a> <span class="tag">odds anômalas</span></li>
+<li><a href="/admin/stale-line-events" class="hk">/admin/stale-line-events</a> <span class="tag">odds defasadas</span></li>
+<li><a href="/admin/book-bug-events" class="hk">/admin/book-bug-events</a> <span class="tag">arbs intra-book</span></li>
+<li><a href="/admin/br-edges-now" class="hk">/admin/br-edges-now</a> <span class="tag">BR edges live</span></li>
+<li><a href="/admin/lol-xcheck" class="hk">/admin/lol-xcheck</a> <span class="tag">cross-source kills</span></li>
+</ul></div>
+
+<div class="card"><h2>🔧 Operations</h2>
+<ul>
+<li><a href="/admin/repair" class="hk">/admin/repair</a> <span class="tag">healing bundle</span></li>
+<li><a href="/admin/run-settle?days=30" class="hk">/admin/run-settle</a> <span class="tag">force settle</span></li>
+<li><a href="/admin/settle-market-tips-shadow" class="hk">/admin/settle-market-tips-shadow</a> <span class="tag">settle MT</span></li>
+<li><a href="/admin/force-sync-bankroll?apply=0" class="hk">/admin/force-sync-bankroll</a> <span class="tag">resync banca</span></li>
+<li><a href="/admin/recompute-ev-pending" class="hk">/admin/recompute-ev-pending</a> <span class="tag">EV pending</span></li>
+<li><a href="/admin/rebuild-tip-reais" class="hk">/admin/rebuild-tip-reais</a> <span class="tag">stake/profit reais</span></li>
+</ul></div>
+
+<div class="card"><h2>📥 Data sync</h2>
+<ul>
+<li><a href="/admin/sync-football-data?league=Premier%20League&season=2526" class="hk">/admin/sync-football-data</a></li>
+<li><a href="/admin/sync-golgg-objectives?days=14" class="hk">/admin/sync-golgg-objectives</a></li>
+<li><a href="/admin/sync-oe-players?years=2026" class="hk">/admin/sync-oe-players</a></li>
+<li><a href="/admin/sync-sackmann?days=7" class="hk">/admin/sync-sackmann</a></li>
+<li><a href="/admin/sync-stratz-matchups" class="hk">/admin/sync-stratz-matchups</a></li>
+<li><a href="/admin/sync-thespike" class="hk">/admin/sync-thespike</a></li>
+<li><a href="/admin/sync-understat" class="hk">/admin/sync-understat</a></li>
+<li><a href="/admin/sync-tennis-abstract?players=Djokovic" class="hk">/admin/sync-tennis-abstract</a></li>
+</ul></div>
+
+<div class="card"><h2>⚠️ MT settle / cleanup (cuidado)</h2>
+<ul>
+<li><a href="/admin/mt-resettle-suspects?days=14" class="hk">/admin/mt-resettle-suspects</a></li>
+<li><a href="/admin/mt-shadow-revert-suspects" class="hk">/admin/mt-shadow-revert-suspects</a></li>
+<li><a href="/admin/mt-shadow-unsettle?ids=" class="hk warn">/admin/mt-shadow-unsettle</a></li>
+<li><a href="/admin/mt-unvoid-recent" class="hk warn">/admin/mt-unvoid-recent</a></li>
+<li><a href="/admin/restore-voided-market-tips?ids=" class="hk warn">/admin/restore-voided-market-tips</a></li>
+<li><a href="/admin/purge-voided-market-tips?days=30" class="hk crit">/admin/purge-voided-market-tips</a></li>
+</ul></div>
+
+</div>
+<div class="section-meta" style="margin-top:24px;text-align:center">
+<a href="/dashboard.html">← Dashboard principal</a> · <a href="/logs.html">📜 logs</a> · <a href="/health/metrics.html">📊 metrics</a>
+</div>
+<script>
+const k = localStorage.getItem('adminKey') || '';
+document.getElementById('adminKey').value = k;
+document.getElementById('adminKey').addEventListener('input', e => {
+  const v = e.target.value.trim();
+  localStorage.setItem('adminKey', v);
+  applyKey();
+});
+function applyKey() {
+  const key = document.getElementById('adminKey').value.trim();
+  document.querySelectorAll('a.hk').forEach(a => {
+    const href = a.getAttribute('href').replace(/[?&]key=[^&]*/g, '');
+    if (!key) { a.setAttribute('href', href); return; }
+    a.setAttribute('href', href + (href.includes('?') ? '&' : '?') + 'key=' + encodeURIComponent(key));
+  });
+}
+applyKey();
+</script>
+</body></html>`;
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end(html);
     return;
   }
 
