@@ -160,6 +160,54 @@ module.exports = function runTests(t) {
     t.assert(hbs.test_cron2.lastNote === 'good', 'lastNote stick from prev');
   });
 
+  t.test('cron heartbeat: dump/load roundtrip', () => {
+    const utils = require('../lib/utils');
+    const fs = require('fs');
+    const os = require('os');
+    const path = require('path');
+    const tmpFile = path.join(os.tmpdir(), `cron_state_test_${Date.now()}.json`);
+
+    utils.markCronHeartbeat('persist_test', { result: 'ok', note: 'fresh', durationMs: 10 });
+    const dumped = utils.dumpCronHeartbeats(tmpFile);
+    t.assert(dumped === true, 'dump retorna true');
+    t.assert(fs.existsSync(tmpFile), 'arquivo criado');
+
+    // Load não duplica entries (sobrescreve in-memory).
+    const loaded = utils.loadCronHeartbeats(tmpFile);
+    t.assert(loaded >= 1, `loaded=${loaded}`);
+    const hbs = utils.getCronHeartbeats();
+    t.assert(hbs.persist_test != null);
+    t.assert(hbs.persist_test.lastResult === 'ok');
+    t.assert(hbs.persist_test.lastNote === 'fresh');
+
+    try { fs.unlinkSync(tmpFile); } catch (_) {}
+  });
+
+  t.test('cron heartbeat: load skip stale entries', () => {
+    const utils = require('../lib/utils');
+    const fs = require('fs');
+    const os = require('os');
+    const path = require('path');
+    const tmpFile = path.join(os.tmpdir(), `cron_state_stale_${Date.now()}.json`);
+
+    // Forja arquivo com timestamp antigo.
+    const ancient = Date.now() - 48 * 3600 * 1000;
+    fs.writeFileSync(tmpFile, JSON.stringify({
+      savedAt: ancient,
+      heartbeats: { ancient_cron: { lastTs: ancient, count: 1, lastResult: 'ok' } },
+    }));
+    const loaded = utils.loadCronHeartbeats(tmpFile, { maxAgeMs: 24 * 3600 * 1000 });
+    t.assert(loaded === 0, `stale entries skipped (loaded=${loaded})`);
+
+    try { fs.unlinkSync(tmpFile); } catch (_) {}
+  });
+
+  t.test('cron heartbeat: load handles arquivo ausente', () => {
+    const utils = require('../lib/utils');
+    const loaded = utils.loadCronHeartbeats('/tmp/__nonexistent_cron_state__.json');
+    t.assert(loaded === 0, 'no-op para arquivo missing');
+  });
+
   t.test('mergeSnapshot ignora valores inválidos', () => {
     m.reset();
     m.mergeSnapshot({

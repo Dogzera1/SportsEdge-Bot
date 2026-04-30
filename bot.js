@@ -7,7 +7,7 @@ const fs = require('fs');
 const path = require('path');
 const initDatabase = require('./lib/database');
 const { SPORTS, getSportById, getSportByToken, getTokenToSportMap } = require('./lib/sports');
-const { log, calcKelly, calcKellyFraction, calcKellyWithP, norm, fmtDate, fmtDateTime, fmtDuration, safeParse, cachedHttpGet, markPollHeartbeat, getPollHeartbeats, markCronHeartbeat, getCronHeartbeats } = require('./lib/utils');
+const { log, calcKelly, calcKellyFraction, calcKellyWithP, norm, fmtDate, fmtDateTime, fmtDuration, safeParse, cachedHttpGet, markPollHeartbeat, getPollHeartbeats, markCronHeartbeat, getCronHeartbeats, dumpCronHeartbeats, loadCronHeartbeats } = require('./lib/utils');
 const { adjustStakeUnits } = require('./lib/risk-manager');
 const { esportsPreFilter } = require('./lib/ml');
 const { formatLineShopDM, computeLineShop } = require('./lib/line-shopping');
@@ -499,6 +499,24 @@ const PATCH_META_FILE = (() => {
     return path.join(dbDir, 'patch_meta.json');
   } catch(_) { return path.resolve('patch_meta.json'); }
 })();
+
+// ── Cron Heartbeats Persistência ──
+// Sobrevive restart Railway. Sem isso, /admin/cron-status mostra tudo "stale"
+// pelos primeiros 2-15min pós-deploy até cada cron rodar.
+const CRON_STATE_FILE = (() => {
+  try {
+    const dbDir = path.dirname(path.isAbsolute(DB_PATH) ? DB_PATH : path.resolve(DB_PATH));
+    return path.join(dbDir, 'cron_state.json');
+  } catch(_) { return path.resolve('cron_state.json'); }
+})();
+try {
+  const restored = loadCronHeartbeats(CRON_STATE_FILE, { maxAgeMs: 24 * 3600 * 1000 });
+  if (restored > 0) log('INFO', 'BOOT', `restored ${restored} cron heartbeats from disk`);
+} catch (_) {}
+// Dump periódico (a cada 60s — overhead mínimo, ~2KB).
+setInterval(() => {
+  try { dumpCronHeartbeats(CRON_STATE_FILE); } catch (_) {}
+}, 60_000).unref();
 
 function loadPatchMetaFromFile() {
   try {
