@@ -6430,6 +6430,18 @@ setInterval(load, 10000);
             (SELECT COUNT(*) FROM tips WHERE result IS NULL) AS pending_tips,
             (SELECT COUNT(*) FROM market_tips_shadow WHERE result IS NULL) AS pending_mt_shadow
           `).get();
+          // Per-sport pending breakdown — granularidade pra detectar quando 1 sport
+          // está acumulando pending (settle gap, sync down, modelo travado).
+          try {
+            const perSport = db.prepare(`
+              SELECT sport, COUNT(*) AS n FROM tips WHERE result IS NULL GROUP BY sport
+            `).all();
+            r.pending_tips_by_sport = Object.fromEntries(perSport.map(x => [x.sport, x.n]));
+            const shPerSport = db.prepare(`
+              SELECT sport, COUNT(*) AS n FROM market_tips_shadow WHERE result IS NULL GROUP BY sport
+            `).all();
+            r.pending_mt_shadow_by_sport = Object.fromEntries(shPerSport.map(x => [x.sport, x.n]));
+          } catch (_) {}
           return r;
         } catch (_) { return null; }
       })();
