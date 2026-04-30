@@ -9162,9 +9162,8 @@ const server = http.createServer(async (req, res) => {
       const league = String(parsed.query.league || 'EPL');
       const year = parseInt(parsed.query.year || '2025', 10) || 2025;
       const r = await fetchSeasonMatches(league, year);
-      const out = { ok: r.ok, league: r.league, year, total: r.matches?.length, sample: (r.matches || []).slice(0, 3) };
-      sendJson(res, out);
-    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+      sendJson(res, { ...r, year, sample: (r.matches || []).slice(0, 3), total: r.matches?.length, matches: undefined });
+    } catch (e) { sendJson(res, { ok: false, error: e.message, stack: e.stack }, 500); }
     return;
   }
   if (p === '/admin/sync-understat' && (req.method === 'POST' || req.method === 'GET')) {
