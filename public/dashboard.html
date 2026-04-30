@@ -912,8 +912,12 @@
     </div>
   </div>
 
-  <!-- Footer / legacy link -->
-  <div style="text-align:center;padding:20px 0 8px;color:var(--text-faint);font-size:11px">
+  <!-- Footer / quick actions + links -->
+  <div style="text-align:center;padding:18px 0 4px">
+    <button onclick="adminRepair()" style="background:transparent;border:1px solid var(--accent,#3b82f6);color:var(--accent,#3b82f6);padding:4px 12px;border-radius:4px;cursor:pointer;font-size:11px;margin-right:6px">🔧 Repair (settle+archive+stats)</button>
+    <button onclick="forensicsPrompt()" style="background:transparent;border:1px solid var(--accent,#3b82f6);color:var(--accent,#3b82f6);padding:4px 12px;border-radius:4px;cursor:pointer;font-size:11px">🔍 Forensics tip</button>
+  </div>
+  <div style="text-align:center;padding:8px 0 8px;color:var(--text-faint);font-size:11px">
     <a href="/health/metrics.html" style="color:var(--text-faint);text-decoration:underline">📊 health metrics</a>
     &nbsp;·&nbsp;
     <a href="/logs.html" style="color:var(--text-faint);text-decoration:underline">📜 logs</a>
@@ -2468,6 +2472,44 @@ async function loadTipsByMarket(gen = refreshGen) {
 // → settle ou void (walkover detection). Depois re-carrega.
 // 2026-04-29: também roda settleShadowTips (market_tips_shadow) e inclui
 // is_shadow=1 (ML shadow). Tudo num único click.
+// Quick action: /admin/repair (idempotente)
+async function adminRepair() {
+  if (!confirm('Roda repair: settle shadow + auto-archive non-ML órfãs (>48h) + bankroll audit + stats. Idempotente, não destrutivo. Continuar?')) return;
+  try {
+    const r = await adminFetch('/admin/repair', { method: 'POST' });
+    const j = await r.json();
+    if (!r.ok || !j?.ok) { alert('❌ Repair falhou: ' + (j?.error || 'HTTP ' + r.status)); return; }
+    const lines = [`✅ Repair OK (${j.duration_ms}ms)`];
+    if (j.steps?.shadow_settle) lines.push(`shadow_settle: settled=${j.steps.shadow_settle.settled || 0} skipped=${j.steps.shadow_settle.skipped || 0}`);
+    if (j.steps?.archive_orphan_non_ml) lines.push(`archive_orphan: ${j.steps.archive_orphan_non_ml.archived || 0} archived`);
+    if (j.steps?.bankroll_audit?.drifts?.length) lines.push(`bankroll drifts: ${j.steps.bankroll_audit.drifts.length} sports (cheque /bankroll-audit)`);
+    if (j.steps?.tips_stats) lines.push(`tips: total=${j.steps.tips_stats.total} pending=${j.steps.tips_stats.pending} archived=${j.steps.tips_stats.archived}`);
+    if (j.steps?.shadow_stats) lines.push(`mt_shadow: total=${j.steps.shadow_stats.total} pending=${j.steps.shadow_stats.pending}`);
+    alert(lines.join('\n'));
+  } catch (e) { alert('❌ ' + e.message); }
+}
+
+// Quick action: /admin/forensics?tip_id=N
+async function forensicsPrompt() {
+  const id = prompt('Tip ID pra forensics (post-mortem completo):');
+  if (!id) return;
+  const tipId = parseInt(id, 10);
+  if (!Number.isFinite(tipId) || tipId <= 0) { alert('ID inválido'); return; }
+  try {
+    const r = await adminFetch(`/admin/forensics?tip_id=${tipId}`);
+    const j = await r.json();
+    if (!r.ok || !j?.ok) { alert('❌ ' + (j?.error || 'HTTP ' + r.status)); return; }
+    // Open new window with formatted JSON pretty-print
+    const html = `<!DOCTYPE html><html><head><title>Forensics tip#${tipId}</title>
+      <style>body{font:13px monospace;background:#0d1117;color:#c9d1d9;padding:16px}h1{color:#58a6ff;font-size:16px}pre{background:#161b22;padding:12px;border-radius:4px;overflow:auto;white-space:pre-wrap}</style>
+      </head><body><h1>🔍 Forensics tip#${tipId}</h1><pre>${JSON.stringify(j, null, 2).replace(/</g,'&lt;')}</pre></body></html>`;
+    const w = window.open('', '_blank');
+    if (w) { w.document.write(html); w.document.close(); }
+    else alert('Popup bloqueado — abra DevTools console pra inspecionar');
+    console.log('forensics tip#' + tipId, j);
+  } catch (e) { alert('❌ ' + e.message); }
+}
+
 async function forceSettleTips(btn) {
   if (!confirm('Force-settle vai tentar resolver TODAS as tips pendentes (reais + ML shadow + market shadow) do sport atual. Walkovers viram void. Bankroll só é atualizado pra tips reais (shadow não conta). Continuar?')) return;
   if (btn) { btn.disabled = true; btn.textContent = '⏳ rodando...'; }
