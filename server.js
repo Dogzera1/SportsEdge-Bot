@@ -9858,9 +9858,19 @@ setInterval(load, 60000);
               if (!parsed || !parsed.sets?.length) {
                 summary.skipped++; continue;
               }
-              // Per-side total games
-              const t1Games = parsed.sets.reduce((s, st) => s + st.t1, 0);
-              const t2Games = parsed.sets.reduce((s, st) => s + st.t2, 0);
+              // Per-side total games — POSITIONAL do score string (typically winner-first)
+              let t1Games = parsed.sets.reduce((s, st) => s + st.t1, 0);
+              let t2Games = parsed.sets.reduce((s, st) => s + st.t2, 0);
+              // BUG FIX 2026-04-30: ESPN/Sofascore guardam final_score em winner-first
+              // frame. Antes assumia t1Games == t.participant1's games — quebra quando
+              // winner = participant2 (positional t1 = winner != participant1).
+              // Sintoma: Cobolli vs Zverev "6-1 6-4" (Zverev won), tip "Zverev -2.5"
+              // settled loss porque t1Games=12 (Zverev positional) era atribuído a
+              // Cobolli (participant1). Fix: alinhar via winnerIsT1.
+              const posT1Won = t1Games > t2Games;
+              if (posT1Won !== winnerIsT1) {
+                [t1Games, t2Games] = [t2Games, t1Games];
+              }
               const totalGames = parsed.totalGames;
               if (isTennisTg) {
                 // tip_participant: "OVER 21.5 games" / "UNDER 21.5 games"
