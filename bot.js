@@ -614,6 +614,41 @@ function sweepAnalyzedMaps() {
 // do setInterval). Roda 1x por hora.
 setInterval(() => { try { sweepAnalyzedMaps(); } catch (_) {} }, 60 * 60 * 1000);
 
+// ── Memory watchdog ──
+// Monitora process.memoryUsage().rss vs MEM_WATCHDOG_RSS_MB threshold.
+// Quando ultrapassa, loga WARN + grava metrics + DM admin (1x por dia, dedup).
+// Default threshold 800MB (Railway hobby tier ~512MB, paid 8GB+ — 800 cobre
+// a maioria com folga). Opt-out: MEM_WATCHDOG_DISABLED=true.
+let _lastMemAlertDay = null;
+function _memWatchdogTick() {
+  if (/^(1|true|yes)$/i.test(String(process.env.MEM_WATCHDOG_DISABLED || ''))) return;
+  try {
+    const mem = process.memoryUsage();
+    const rssMb = +(mem.rss / 1024 / 1024).toFixed(1);
+    const heapMb = +(mem.heapUsed / 1024 / 1024).toFixed(1);
+    try {
+      const m = require('./lib/metrics');
+      m.gauge('rss_mb', rssMb);
+      m.gauge('heap_used_mb', heapMb);
+    } catch (_) {}
+    const threshold = parseFloat(process.env.MEM_WATCHDOG_RSS_MB || '800');
+    if (!Number.isFinite(threshold) || threshold <= 0) return;
+    if (rssMb < threshold) return;
+    log('WARN', 'MEM-WATCHDOG', `RSS ${rssMb}MB > threshold ${threshold}MB (heap=${heapMb}MB)`);
+    // DM 1x/dia (dedup por today), só se ADMIN_IDS setado.
+    const today = new Date().toISOString().slice(0, 10);
+    if (_lastMemAlertDay === today || !ADMIN_IDS.size) return;
+    _lastMemAlertDay = today;
+    const routed = _pickTokenForAlert('system');
+    const token = routed?.token;
+    if (!token) return;
+    const msg = `⚠️ *Memory Watchdog*\n\nRSS: *${rssMb}MB* (threshold ${threshold}MB)\nHeap used: ${heapMb}MB\n\n_Possível leak. Cheque /health/metrics gauges (analyzed_size, market_tip_sent_size). Considere restart se sustentado._`;
+    for (const adminId of ADMIN_IDS) sendDM(token, adminId, msg).catch(e => log('DEBUG', 'MEM-WATCHDOG', `DM err ${adminId}: ${e.message}`));
+  } catch (_) {}
+}
+setInterval(_memWatchdogTick, 5 * 60 * 1000);
+setTimeout(_memWatchdogTick, 30 * 1000);
+
 // Rejection ring buffer — debug quando "tips não estão saindo".
 // Formato: { ts, sport, teams, reason, extra }
 const _rejections = [];

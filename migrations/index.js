@@ -1733,6 +1733,47 @@ const migrations = [
     },
   },
   {
+    id: '071_index_audit_dedup',
+    up(db) {
+      // Index audit 2026-04-30: dropa duplicatas + adiciona compostos pra
+      // queries hot do leaks digest e MT settle.
+      // Drops são best-effort (catch silencioso) — index pode não existir
+      // em DBs antigos que pularam migrations intermediárias.
+      const _safeDrop = (name) => {
+        try { db.exec(`DROP INDEX IF EXISTS ${name}`); } catch (_) {}
+      };
+      // Tips: idx_tips_sport_sent é dup exato de idx_tips_sport_sent_at.
+      _safeDrop('idx_tips_sport_sent');
+      // Tips: idx_tips_sport ⊂ idx_tips_sport_sent_at (prefix scan cobre).
+      _safeDrop('idx_tips_sport');
+      // Tips: idx_tips_result raramente usado isolado (queries cruzam c/ sport).
+      _safeDrop('idx_tips_result');
+      // Tips: idx_tips_match_id ⊂ idx_tips_match_sport (prefix).
+      _safeDrop('idx_tips_match_id');
+      // match_results: idx_mr_team1/team2 são dup exatos de idx_match_results_team*
+      _safeDrop('idx_mr_team1');
+      _safeDrop('idx_mr_team2');
+      // dota_hero_stats: idx_dota_hero_name é dup de idx_dota_hero_stats_name.
+      _safeDrop('idx_dota_hero_name');
+
+      // Adiciona composto pra leaks digest query:
+      //   WHERE created_at >= ? AND result IN ('win','loss')
+      //   GROUP BY sport, market, side
+      // Index parcial cobre o filtro de result.
+      try {
+        db.exec(`CREATE INDEX IF NOT EXISTS idx_mt_shadow_settled_grouping
+          ON market_tips_shadow(created_at, sport, market, side)
+          WHERE result IN ('win','loss')`);
+      } catch (_) {}
+      // Composto pra MT auto-restore query:
+      //   WHERE sport=? AND market=? AND side=? AND created_at >= ? AND result IN ('win','loss')
+      try {
+        db.exec(`CREATE INDEX IF NOT EXISTS idx_mt_shadow_lookup_settled
+          ON market_tips_shadow(sport, market, side, result, created_at)`);
+      } catch (_) {}
+    },
+  },
+  {
     id: '064_lol_game_objectives',
     up(db) {
       // Per-game objective stats scraped do gol.gg. Uma row por (golgg_gameid).
