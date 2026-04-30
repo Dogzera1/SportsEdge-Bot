@@ -13578,7 +13578,30 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
         const recLine = espn ? `\n📊 Registros: ${fight.team1} ${rec1||'?'} | ${fight.team2} ${rec2||'?'}` : '';
         const catLine = espn ? `\n🏷️ ${weightClass || fight.league}${isTitleFight ? ' — TITLE FIGHT' : ''}` : '';
 
-        const tipReasonMma = extractTipReasonMma(text);
+        const _forceDetMma = /^(1|true|yes)$/i.test(String(process.env.MMA_FORCE_DETERMINISTIC_REASON || ''));
+        let tipReasonMma = _forceDetMma ? null : extractTipReasonMma(text);
+        if (!tipReasonMma) {
+          // Fallback determinístico — evita DM sem justificativa quando IA falha
+          // ou foi desabilitada. Usa esportsFactors (mesmo helper de LoL/Dota/CS).
+          try {
+            const { buildTipReason, esportsFactors } = require('./lib/tip-reason');
+            const _pickIsT1Mma = norm(tipTeam) === norm(fight.team1);
+            const _modelPPickMmaPre = _pickIsT1Mma ? mlResultMma.modelP1 : mlResultMma.modelP2;
+            const _impliedPick = _pickIsT1Mma ? mlResultMma.impliedP1 : mlResultMma.impliedP2;
+            tipReasonMma = buildTipReason({
+              sport: 'mma',
+              pickTeam: tipTeam,
+              modelPPick: _modelPPickMmaPre,
+              impliedP: _impliedPick,
+              evPct: parseFloat(String(tipEV).replace(/[%+]/g, '')) || null,
+              factors: esportsFactors({
+                form1: mmaEnrich?.form1, form2: mmaEnrich?.form2,
+                h2h: mmaEnrich?.h2h,
+              }),
+              stage: fight._org || fight.league || null,
+            }) || null;
+          } catch (_) { /* tipReasonMma fica null se erro */ }
+        }
         const whyLineMma = tipReasonMma ? `\n🧠 Por quê: _${tipReasonMma}_\n` : '\n';
         const minTakeOdds = calcMinTakeOdds(tipOdd);
         const minTakeLine = minTakeOdds ? `📉 Odd mínima: *${minTakeOdds}*\n` : '';
@@ -15922,7 +15945,40 @@ Máximo 200 palavras.`;
                            : tipMarket === 'OVER_2.5' ? (mlScore?.over25Prob   ? parseFloat(mlScore.over25Prob)   / 100 : null)
                            : tipMarket === 'UNDER_2.5'? (mlScore?.over25Prob   ? (100 - parseFloat(mlScore.over25Prob)) / 100 : null)
                            : null;
-        const fbTipReason = text ? text.split('TIP_FB:')[0].trim().split('\n').filter(Boolean).pop()?.slice(0, 160) || null : null;
+        const _forceDetFb = /^(1|true|yes)$/i.test(String(process.env.FOOTBALL_FORCE_DETERMINISTIC_REASON || ''));
+        let fbTipReason = _forceDetFb || !text
+          ? null
+          : text.split('TIP_FB:')[0].trim().split('\n').filter(Boolean).pop()?.slice(0, 160) || null;
+        if (!fbTipReason) {
+          // Fallback determinístico — usa modelP/implied + sinais Poisson trained.
+          // Evita DM "sem porquê" quando IA falha ou está disabled.
+          try {
+            const { buildTipReason } = require('./lib/tip-reason');
+            const _pImp = parseFloat(tipOdd) > 1 ? (1 / parseFloat(tipOdd)) : null;
+            const _evNum = parseFloat(String(tipEV).replace(/[%+]/g, ''));
+            // Pick label simplificado pra reason (1X2_H → home, etc).
+            const _pickLabel = tipMarket === '1X2_H' ? `${match.team1} (home)`
+                            : tipMarket === '1X2_A' ? `${match.team2} (away)`
+                            : tipMarket === '1X2_D' ? 'Empate'
+                            : tipMarket === 'OVER_2.5' ? 'Over 2.5'
+                            : tipMarket === 'UNDER_2.5' ? 'Under 2.5'
+                            : tipMarket;
+            const _factors = [];
+            if (mlScore?.method) _factors.push({ label: 'Método', value: String(mlScore.method).slice(0, 40) });
+            if (homeFormData?.form && awayFormData?.form) {
+              _factors.push({ label: 'Forma', value: `${match.team1} ${homeFormData.form} vs ${match.team2} ${awayFormData.form}` });
+            }
+            fbTipReason = buildTipReason({
+              sport: 'football',
+              pickTeam: _pickLabel,
+              modelPPick: fbModelPPick,
+              impliedP: _pImp,
+              evPct: Number.isFinite(_evNum) ? _evNum : null,
+              factors: _factors,
+              stage: match.league || null,
+            }) || null;
+          } catch (_) { /* fbTipReason fica null se erro */ }
+        }
 
         if (isLeagueBlocked('football', match.league)) {
           log('INFO', 'AUTO-FOOTBALL', `[BLOCK] football/${match.league} — suprimido`);

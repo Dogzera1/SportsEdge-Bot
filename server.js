@@ -7,6 +7,7 @@ const dns = require('dns');
 dns.setDefaultResultOrder('ipv4first');
 const initDatabase = require('./lib/database');
 const { SPORTS, getSportById } = require('./lib/sports');
+const { ML_MARKETS, ML_MARKETS_LIST, isMlMarket } = require('./lib/constants');
 const { log, sendJson, safeParse, norm, httpGet, cachedHttpGet, aiPost, oddsApiAllowed, oddsApiPeek, oddsApiQuotaStatus, getMetricsLite, calcKellyWithP, getLogBuffer, addLogClient, removeLogClient, ingestExternalLog } = require('./lib/utils');
 const dashboard = require('./lib/dashboard');
 const footballData  = require('./lib/football-data');
@@ -3769,9 +3770,7 @@ function runSettleSweep({ sportFilter = '', days = 14 } = {}) {
   // passam por runSettleSweep — esse sweep usa name-match (tennisSinglePlayerNameMatch
   // / nameMatches) que falha pra HANDICAP/TOTAL/TIEBREAK e marca loss errado.
   // MT settle só via lib/mt-result-propagator.js (com final_score parseado).
-  // Set declarado fora do loop pra evitar realocação per-iteração (ex: 5k tips
-  // = 5k Sets criados a cada chamada do /settle-sweep).
-  const ML_MARKETS_SWEEP = new Set(['ML', '1X2_H', '1X2_A', '1X2_D', 'OVER_2.5', 'UNDER_2.5']);
+  // Set vem de lib/constants pra eliminar duplicação cross-arquivo.
 
   for (const sport of sports) {
     const tips = stmts.getUnsettledTips.all(sport, `-${clampedDays} days`);
@@ -3780,7 +3779,7 @@ function runSettleSweep({ sportFilter = '', days = 14 } = {}) {
     for (const tip of tips) {
       info.swept++;
       const _mkt = String(tip.market_type || 'ML').toUpperCase();
-      if (String(tip.match_id || '').includes('::mt::') || !ML_MARKETS_SWEEP.has(_mkt)) {
+      if (String(tip.match_id || '').includes('::mt::') || !ML_MARKETS.has(_mkt)) {
         continue;
       }
       const isMapMarket = tip.market_type && !/^ML$|^match_winner$|^moneyline$/i.test(tip.market_type);
@@ -17639,7 +17638,7 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
         // que parseia final_score real. Bug 2026-04-27 (Karen Khachanov +3.5 vs Mensik
         // settled loss errado) era exatamente esse path. Ver bot.js:settleCompletedTips
         // pro skip equivalente upstream.
-        const ML_MARKETS = new Set(['ML', '1X2_H', '1X2_A', '1X2_D', 'OVER_2.5', 'UNDER_2.5']);
+        // ML_MARKETS importado do top do arquivo (lib/constants).
         if (String(matchId).includes('::mt::')) {
           log('WARN', 'SETTLE-GUARD',
             `${sport} matchId=${matchId} bloqueado em /settle (MT-promoted, deve usar propagator)`);
@@ -21585,15 +21584,14 @@ server.listen(PORT, '0.0.0.0', () => {
   if (!/^(1|true|yes)$/i.test(String(process.env.NON_ML_AUTOARCHIVE_DISABLED || ''))) {
     const archiveOrphanNonML = () => {
       try {
-        const ML_M = ['ML','1X2_H','1X2_A','1X2_D','OVER_2.5','UNDER_2.5'];
-        const ph = ML_M.map(() => '?').join(',');
+        const ph = ML_MARKETS_LIST.map(() => '?').join(',');
         const r = db.prepare(
           `UPDATE tips SET archived = 1
            WHERE result IS NULL
              AND (archived IS NULL OR archived = 0)
              AND sent_at <= datetime('now', '-48 hours')
              AND upper(COALESCE(market_type, 'ML')) NOT IN (${ph})`
-        ).run(...ML_M);
+        ).run(...ML_MARKETS_LIST);
         if (r.changes > 0) {
           log('INFO', 'NON-ML-AUTOARCHIVE', `${r.changes} non-ML orphan tip(s) arquivada(s) (≥48h pending)`);
         }
