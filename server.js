@@ -6425,9 +6425,9 @@ setInterval(load, 10000);
     return;
   }
 
-  // POST /metrics/ingest — recebe snapshot de processos irmãos (bot.js).
-  // Body: { snapshot: { counters, timings, gauges }, prefix?: 'bot' }
-  // Mescla no metrics local com prefix opcional pra distinguir source.
+  // POST /metrics/ingest — recebe snapshot + heartbeats de processos irmãos (bot.js).
+  // Body: { snapshot: {counters,timings,gauges}, heartbeats?: {polls,crons}, prefix?: 'bot' }
+  // Mescla metrics no local com prefix; armazena heartbeats em cache externo.
   // Sem auth pq é IPC interno (chamadas de localhost via launcher).
   // Defesa: timeout HTTP curto, body cap 256KB, prefix sanitizado.
   if (p === '/metrics/ingest' && req.method === 'POST') {
@@ -6446,6 +6446,15 @@ setInterval(load, 10000);
         const tagged = prefix ? `${prefix}:` : '';
         const metrics = require('./lib/metrics');
         const ok = metrics.mergeSnapshot(payload.snapshot, { prefix: tagged });
+        // Heartbeats: armazena em cache global (visível via /admin/cron-status)
+        if (payload.heartbeats) {
+          if (!global._externalHeartbeats) global._externalHeartbeats = {};
+          global._externalHeartbeats[prefix || 'unknown'] = {
+            polls: payload.heartbeats.polls || {},
+            crons: payload.heartbeats.crons || {},
+            lastIngestTs: Date.now(),
+          };
+        }
         sendJson(res, { ok, prefix: tagged });
       } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
     });
@@ -7865,11 +7874,28 @@ setInterval(load, 10000);
       if (!hb || !hb.lastTs) return hb;
       return { ...hb, age_s: Math.round((now - hb.lastTs) / 1000) };
     };
+    // Mescla heartbeats externos (bot.js via /metrics/ingest bridge)
+    const externalPolls = {}, externalCrons = {};
+    const externals = global._externalHeartbeats || {};
+    for (const [prefix, ext] of Object.entries(externals)) {
+      for (const [name, hb] of Object.entries(ext.polls || {})) {
+        externalPolls[`${prefix}:${name}`] = hb;
+      }
+      for (const [name, hb] of Object.entries(ext.crons || {})) {
+        externalCrons[`${prefix}:${name}`] = hb;
+      }
+    }
     const out = {
       ok: true,
       ts: new Date().toISOString(),
-      polls: Object.fromEntries(Object.entries(polls).map(([k, v]) => [k, _enrich(v)])),
-      crons: Object.fromEntries(Object.entries(crons).map(([k, v]) => [k, _enrich(v)])),
+      polls: Object.fromEntries([
+        ...Object.entries(polls).map(([k, v]) => [k, _enrich(v)]),
+        ...Object.entries(externalPolls).map(([k, v]) => [k, _enrich(v)]),
+      ]),
+      crons: Object.fromEntries([
+        ...Object.entries(crons).map(([k, v]) => [k, _enrich(v)]),
+        ...Object.entries(externalCrons).map(([k, v]) => [k, _enrich(v)]),
+      ]),
       // Cron envs status (ON/OFF detection)
       cron_envs: {
         AUTONOMY_DIGEST_AUTO: !/^(0|false|no)$/i.test(String(process.env.AUTONOMY_DIGEST_AUTO ?? 'true')),

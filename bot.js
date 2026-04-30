@@ -626,13 +626,21 @@ setInterval(() => { try { sweepAnalyzedMaps(); } catch (_) {} }, 60 * 60 * 1000)
 function _bridgeBotMetricsToServer() {
   try {
     const snap = _metrics.snapshot();
+    const polls = getPollHeartbeats();
+    const crons = getCronHeartbeats();
     // Skip se nada acumulou ainda
     if (Object.keys(snap.counters).length === 0
         && Object.keys(snap.timings).length === 0
-        && Object.keys(snap.gauges).length === 0) return;
+        && Object.keys(snap.gauges).length === 0
+        && Object.keys(polls).length === 0
+        && Object.keys(crons).length === 0) return;
     const port = process.env.SERVER_PORT || process.env.PORT || 3000;
     const http = require('http');
-    const payload = JSON.stringify({ snapshot: snap, prefix: 'bot' });
+    const payload = JSON.stringify({
+      snapshot: snap,
+      prefix: 'bot',
+      heartbeats: { polls, crons },
+    });
     const req = http.request({
       host: '127.0.0.1', port, path: '/metrics/ingest', method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) },
