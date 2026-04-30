@@ -13652,6 +13652,66 @@ setInterval(load, 60000);
   // qual row foi usada no settle, mesmo que detector mt-revert-suspects
   // não tenha flagado). Útil quando settle parece errado mas critério
   // automático não pegou.
+  // GET /admin/lol-kills-debug?ps=1466122&map=2&key=<KEY>
+  // Query PandaScore + OE pra um match específico, retorna kills count + source.
+  // Usado pra investigar settle errado de TOTAL_KILLS_MAPN tips.
+  if (p === '/admin/lol-kills-debug') {
+    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const ps = String(parsed.query.ps || '').replace(/[^0-9]/g, '');
+    const mapIdx = parseInt(parsed.query.map || '1', 10);
+    if (!ps || !Number.isFinite(mapIdx)) { sendJson(res, { error: 'ps + map obrigatórios' }, 400); return; }
+    const out = { ps, map: mapIdx, sources: {} };
+    try {
+      // PandaScore raw
+      if (PANDASCORE_TOKEN) {
+        const headers = { 'Authorization': `Bearer ${PANDASCORE_TOKEN}` };
+        const mr = await httpGet(`https://api.pandascore.co/matches/${ps}`, headers).catch(e => ({ status: 0, error: e.message }));
+        if (mr?.status === 200) {
+          const m = safeParse(mr.body, {});
+          const games = Array.isArray(m.games) ? m.games : [];
+          const game = games.find(g => Number(g.position) === mapIdx);
+          out.sources.ps_match = {
+            status: m.status, winner_id: m.winner_id,
+            n_games: games.length,
+            games_summary: games.map(g => ({ position: g.position, status: g.status, kills_t1: g.kills_team_1, kills_t2: g.kills_team_2, finished: g.finished })),
+          };
+          if (game) {
+            out.sources.ps_game = {
+              id: game.id, status: game.status, position: game.position,
+              kills_team_1: game.kills_team_1, kills_team_2: game.kills_team_2,
+              total_kills_inline: (Number(game.kills_team_1) || 0) + (Number(game.kills_team_2) || 0),
+            };
+            // Try /lol/games/<id> for full player data
+            if (game.id) {
+              const gr = await httpGet(`https://api.pandascore.co/lol/games/${game.id}`, headers).catch(() => null);
+              if (gr?.status === 200) {
+                const gd = safeParse(gr.body, {});
+                const players = Array.isArray(gd.players) ? gd.players : [];
+                const totalKills = players.reduce((s, p) => s + (Number(p.kills) || 0), 0);
+                out.sources.ps_game_players = {
+                  n_players: players.length,
+                  total_kills_summed: totalKills,
+                  per_team: players.reduce((acc, p) => {
+                    const tid = p.team_id ?? p.opponent?.id ?? 'unknown';
+                    acc[tid] = (acc[tid] || 0) + (Number(p.kills) || 0);
+                    return acc;
+                  }, {}),
+                };
+              }
+            }
+          }
+        } else {
+          out.sources.ps_match = { error: 'http_fail', status: mr?.status, sample: String(mr?.body || mr?.error || '').slice(0, 200) };
+        }
+      } else {
+        out.sources.ps_match = { error: 'no_token' };
+      }
+    } catch (e) { out.error = e.message; }
+    sendJson(res, out);
+    return;
+  }
+
   // GET /admin/tip-find?q=GIANTX&sport=lol&days=30&key=<KEY>
   // Busca tips em tips + market_tips_shadow por participant fuzzy (LIKE).
   // Útil pra localizar tip reportada pelo user sem ter o ID exato.
