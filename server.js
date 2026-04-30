@@ -23241,9 +23241,54 @@ async function syncGolggRoleImpact() {
   warnAdminKeyMissingOnce();
 })();
 
+// ── Signal + crash handlers ─────────────────────────────────────────────────
+// Antes ausentes: throw async derrubava o process abruptamente, db nunca era
+// fechado e SSE clients (/logs/stream) ficavam pendurados. Railway SIGTERM
+// também não tinha drain — agora chega a process.exit cleanup window de 10s.
+let _shuttingDown = false;
+function _gracefulShutdown(signal) {
+  if (_shuttingDown) return;
+  _shuttingDown = true;
+  log('INFO', 'SHUTDOWN', `${signal} recebido, drenando...`);
+  // 10s window pra finalizar requests em andamento
+  const forceTimer = setTimeout(() => {
+    log('WARN', 'SHUTDOWN', 'force exit (10s timeout)');
+    process.exit(1);
+  }, 10000);
+  forceTimer.unref?.();
+  try { server.close(() => log('INFO', 'SHUTDOWN', 'http closed')); } catch (_) {}
+  try { db.close(); log('INFO', 'SHUTDOWN', 'db closed'); } catch (e) { log('WARN', 'SHUTDOWN', `db close: ${e.message}`); }
+  // Pequeno delay pra logs flush antes de exit
+  setTimeout(() => process.exit(0), 1000).unref?.();
+}
+process.on('SIGTERM', () => _gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => _gracefulShutdown('SIGINT'));
+process.on('uncaughtException', (err) => {
+  // Best practice: log + exit pra Railway restartar em estado limpo. Não tentar
+  // continuar (process pode estar inconsistente).
+  log('ERROR', 'UNCAUGHT', `${err?.message || err}\n${err?.stack || ''}`);
+  try { db.close(); } catch (_) {}
+  setTimeout(() => process.exit(1), 500).unref?.();
+});
+process.on('unhandledRejection', (reason) => {
+  // Não exit em rejection — geralmente é falha de fetch externo isolada.
+  // Log + segue. Exits seriam disruptivos demais (todo .catch falho mata o bot).
+  const msg = reason?.message || String(reason);
+  log('WARN', 'UNHANDLED', msg.length > 500 ? msg.slice(0, 500) + '...' : msg);
+});
+
+// HTTP timeouts: defaults Node 5s vs Railway proxy idle 100s = Slowloris +
+// zombie connections em CLOSE_WAIT. 120s keep-alive cobre proxy idle, 125s
+// headers timeout > keepAlive (rule of thumb), 60s requestTimeout protege
+// contra clients lentos.
+server.keepAliveTimeout = parseInt(process.env.HTTP_KEEPALIVE_MS || '120000', 10) || 120000;
+server.headersTimeout = parseInt(process.env.HTTP_HEADERS_TIMEOUT_MS || '125000', 10) || 125000;
+server.requestTimeout = parseInt(process.env.HTTP_REQUEST_TIMEOUT_MS || '60000', 10) || 60000;
+
 server.listen(PORT, '0.0.0.0', () => {
   log('INFO', 'SERVER', `SportsEdge API em http://0.0.0.0:${PORT}`);
   log('INFO', 'SERVER', `Esportes: LoL (Riot API + LoLEsports)`);
+  log('INFO', 'SERVER', `HTTP timeouts: keepAlive=${server.keepAliveTimeout}ms headers=${server.headersTimeout}ms request=${server.requestTimeout}ms`);
   if (SXBET_ENABLED) log('INFO', 'ODDS', `SX.Bet ativo: base=${SXBET_BASE_URL}`);
   if (GRID_API_KEY) log('INFO', 'GRID', 'GRID_API_KEY configurada — /grid-enrich ativo (LoL)');
 

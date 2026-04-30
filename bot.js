@@ -668,6 +668,17 @@ function sweepAnalyzedMaps() {
       if (Number.isFinite(ts) && (now - ts) > MARKET_TIP_SENT_TTL_MS) { marketTipSent.delete(key); total++; }
     }
   }
+  // Sweep maps de cooldown/dedup que cresciam append-only — TTLs derivados
+  // do uso típico de cada caso. Sem teto, append-only deixava memory leak
+  // silencioso após semanas/meses de uptime.
+  total += _sweepTsMap(_alertedTips, 7 * 24 * 3600 * 1000, now);            // tips alertadas — 7d (settle ciclo já passou)
+  total += _sweepTsMap(_preMatchAlerted, 24 * 3600 * 1000, now);            // pre-match alerts — 24h (curtos)
+  total += _sweepTsMap(_marketTipReadyAlerted, 7 * 24 * 3600 * 1000, now);  // mt readiness — 7d
+  total += _sweepTsMap(_bugReports, 60 * 60 * 1000, now);                   // bug reports — 1h (já dedup 10min interno)
+  total += _sweepTsMap(tipUpdateNotifyCache, 4 * 3600 * 1000, now);         // tip updates — 4h (tip live cycle)
+  total += _sweepTsMap(_oddsHistoryLogged, 24 * 3600 * 1000, now);          // odds history dedup — 24h
+  total += _sweepTsMap(_criticalAlertCooldown, 7 * 24 * 3600 * 1000, now);  // critical alert cooldown — 7d
+  total += _sweepTsMap(_autoHealerLastAppliedKey, 7 * 24 * 3600 * 1000, now); // auto-healer dedup — 7d (value={ts,count})
   // DB size gauge — visibilidade de crescimento. Refletido em /health/metrics.
   try {
     const fs = require('fs');
@@ -1391,6 +1402,12 @@ function serverPost(path, body, sport, extraHeaders) {
       });
     });
     req.on('error', reject);
+    // Timeout: protege contra server hang. Sem isso, socket fica em CLOSE_WAIT
+    // e bridge bot↔server pode acumular conexões zombie. 5s é generoso pra
+    // request loopback (typical p99 < 200ms).
+    req.setTimeout(parseInt(process.env.SERVER_POST_TIMEOUT_MS || '5000', 10) || 5000, () => {
+      req.destroy(Object.assign(new Error('serverPost timeout'), { code: 'ETIMEDOUT' }));
+    });
     req.write(s);
     req.end();
   });
@@ -3016,7 +3033,9 @@ async function sendDailySummary() {
 }
 
 // ── Odds movement alerts + Tip expiry ──
-const _alertedTips = new Set(); // evita alertar a mesma tip múltiplas vezes
+// 2026-04-30: Set → Map<key, ts> pra permitir sweep TTL (antes append-only crescia
+// ~50-200/dia indefinidamente). Lookup .has() ainda funciona idêntico.
+const _alertedTips = new Map(); // key=`${sport}_${tipId}` → ts
 const TIP_EXPIRY_MS = parseInt(process.env.TIP_EXPIRY_MIN || '30', 10) * 60 * 1000; // 30min default
 const ODDS_DROP_THRESHOLD = parseFloat(process.env.ODDS_DROP_ALERT_PCT || '12') / 100; // 12% default
 
@@ -3039,7 +3058,7 @@ async function checkPendingTipsAlerts() {
 
         // Tip expiry: log only (sem DM — user não quer notificações extras)
         if (age > TIP_EXPIRY_MS && age < TIP_EXPIRY_MS + SETTLEMENT_INTERVAL) {
-          _alertedTips.add(alertKey);
+          _alertedTips.set(alertKey, Date.now());
           log('INFO', 'EXPIRY', `${sport}: tip ${tip.id} expirada (${Math.round(age / 60000)}min) — ${tip.participant1} vs ${tip.participant2}`);
         }
       }
@@ -4154,7 +4173,9 @@ async function runNewsMonitorCycle() {
 }
 
 // ── Pre-Match Final Check ──
-const _preMatchAlerted = new Set();
+// 2026-04-30: Set → Map<key, ts> pra sweep TTL (24h). Antes crescia com cada
+// (tip_id, alert) emitido em pre-match — sem teto.
+const _preMatchAlerted = new Map();
 
 async function runPreMatchFinalCheckCycle() {
   const _t0 = Date.now();
@@ -4174,7 +4195,7 @@ async function runPreMatchFinalCheckCycle() {
   if (!result?.ok || !result.alerts?.length) { _hb('ok_no_alerts'); return; }
 
   const newAlerts = result.alerts.filter(a => !_preMatchAlerted.has(`${a.tip_id}_${a.alert}`));
-  for (const a of newAlerts) _preMatchAlerted.add(`${a.tip_id}_${a.alert}`);
+  for (const a of newAlerts) _preMatchAlerted.set(`${a.tip_id}_${a.alert}`, Date.now());
   if (!newAlerts.length) { _hb('ok_seen'); return; }
 
   log('WARN', 'PRE-MATCH-CHECK', `${newAlerts.length} alerta(s) novo(s) de ${result.tips_checked} tips analisadas`);
@@ -4385,7 +4406,7 @@ async function runIsotonicRefreshAsync(token) {
 // ── Market Tip Readiness Check (1x/dia) ──
 // Query shadow stats: se (sport, market) atinge N≥30 settled AND ROI>=threshold, DM admin
 // sugerindo ativação. Anti-spam: só notifica 1x por combination.
-const _marketTipReadyAlerted = new Set(); // key: sport|market — evita re-alert
+const _marketTipReadyAlerted = new Map(); // key: sport|market → ts (sweep TTL 7d)
 async function runMarketTipReadinessCheck() {
   if (!ADMIN_IDS.size) return;
   let stats;
@@ -4446,7 +4467,7 @@ async function runMarketTipReadinessCheck() {
     `_Shadow continuará logando. Você só liga o DM._`;
 
   if (!_isCycleMuted('mt-readiness')) for (const adminId of ADMIN_IDS) await sendDM(tokenForAlert, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
-  for (const s of ready) _marketTipReadyAlerted.add(`${s.sport}|${s.market}`);
+  for (const s of ready) _marketTipReadyAlerted.set(`${s.sport}|${s.market}`, Date.now());
   log('INFO', 'MT-READY', `DM admin: ${ready.length} segments prontos pra ativar`);
 }
 

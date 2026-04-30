@@ -112,6 +112,18 @@ async function runBackup(opts = {}) {
     // Escape single quotes in path (Windows users).
     const escaped = dest.replace(/'/g, "''");
     db.exec(`VACUUM INTO '${escaped}'`);
+    // Checkpoint TRUNCATE: força WAL flush + shrink. Sem isso, journal pode
+    // crescer entre backups quando journal_size_limit não consegue compactar
+    // sozinho (lock contention durante hot loops). Best-effort: se falhar,
+    // backup já foi feito, não bloqueia o sucesso.
+    try {
+      const cp = db.pragma('wal_checkpoint(TRUNCATE)');
+      // Retorno: [{busy: 0|1, log: <pages>, checkpointed: <pages>}]
+      // Logamos só se não-silent.
+      if (!opts.silent && Array.isArray(cp) && cp[0]) {
+        console.log(`[backup-db] wal_checkpoint(TRUNCATE) busy=${cp[0].busy} pages_log=${cp[0].log} cp=${cp[0].checkpointed}`);
+      }
+    } catch (_) { /* best-effort */ }
     db.close();
   } catch (e) {
     if (db) try { db.close(); } catch (_) {}
