@@ -8282,22 +8282,24 @@ async function load() {
     function renderTable(title, entries) {
       if (!Object.keys(entries).length) return '<h2 style="font-size:13px;color:#58a6ff;margin:12px 0 4px">' + title + '</h2><div class="tag">vazio</div>';
       const rows = Object.entries(entries).sort().map(([name, hb]) => {
-        const stale = hb.is_stale ? 'stale' : (hb.lastError ? 'error' : 'ok');
-        const result = hb.lastResult || hb.hadLive != null ? (hb.hadLive ? 'live' : 'idle') : '—';
+        // Real error: lastError populated AND result starts with error/failed.
+        const isRealError = hb.lastError && (String(hb.lastResult||'').toLowerCase().startsWith('error') || hb.lastResult === 'failed');
+        const cls = hb.is_stale ? 'stale' : (isRealError ? 'error' : 'ok');
         const expected = hb.expected_interval_ms ? fmtMs(hb.expected_interval_ms) : '—';
         return '<tr>' +
           '<td><code>' + name + '</code></td>' +
-          '<td class="' + stale + '">' + (hb.is_stale ? '⚠️ stale' : (hb.lastError ? '⚠️' : '✓')) + '</td>' +
+          '<td class="' + cls + '">' + (hb.is_stale ? '⚠️ stale' : (isRealError ? '⚠️ err' : '✓')) + '</td>' +
           '<td>' + (hb.count || 0) + '</td>' +
           '<td>' + fmtAge(hb.age_s) + '</td>' +
           '<td>' + expected + '</td>' +
           '<td>' + (hb.lastResult || (hb.hadLive != null ? (hb.hadLive ? 'live' : 'idle') : '—')) + '</td>' +
           '<td>' + (hb.lastDurationMs != null ? fmtMs(hb.lastDurationMs) : (hb.matches != null ? hb.matches + ' matches' : '—')) + '</td>' +
-          '<td class="error">' + (hb.lastError || '') + '</td>' +
+          '<td>' + (hb.lastNote || '') + '</td>' +
+          '<td class="error">' + (isRealError ? hb.lastError : '') + '</td>' +
         '</tr>';
       }).join('');
       return '<h2 style="font-size:13px;color:#58a6ff;margin:16px 0 4px">' + title + '</h2>' +
-             '<table><tr><th>name</th><th>status</th><th>count</th><th>age</th><th>expected</th><th>result</th><th>extra</th><th>error</th></tr>' + rows + '</table>';
+             '<table><tr><th>name</th><th>status</th><th>count</th><th>age</th><th>expected</th><th>result</th><th>extra</th><th>note</th><th>error</th></tr>' + rows + '</table>';
     }
     let html = renderTable('🔄 Polls', j.polls || {});
     html += renderTable('⏰ Crons', j.crons || {});

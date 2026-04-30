@@ -3951,7 +3951,8 @@ const NEWS_DM_COOLDOWN_MS = 30 * 60 * 1000; // 30min cooldown global
 let _lastNewsDM = 0;
 async function runNewsMonitorCycle() {
   const _t0 = Date.now();
-  const _hb = (result, error) => { try { markCronHeartbeat('news_monitor', { result, error, durationMs: Date.now() - _t0 }); } catch (_) {} };
+  const _hb = (result, note) => { try { markCronHeartbeat('news_monitor', { result, note, durationMs: Date.now() - _t0 }); } catch (_) {} };
+  const _hbErr = (result, error) => { try { markCronHeartbeat('news_monitor', { result, error, durationMs: Date.now() - _t0 }); } catch (_) {} };
   if (_isCycleMuted('news-monitor')) { _hb('muted'); return; }
   if (!ADMIN_IDS.size) { _hb('no_admins'); return; }
   let result = null;
@@ -3960,7 +3961,7 @@ async function runNewsMonitorCycle() {
     result = await ext.runNewsMonitor(`http://127.0.0.1:${process.env.PORT || 8080}`, db);
   } catch (e) {
     log('WARN', 'NEWS-MONITOR', `falhou: ${e.message}`);
-    _hb('error', e.message);
+    _hbErr('error', e.message);
     return;
   }
   if (!result?.ok || !result.alerts?.length) {
@@ -4010,7 +4011,8 @@ const _preMatchAlerted = new Set();
 
 async function runPreMatchFinalCheckCycle() {
   const _t0 = Date.now();
-  const _hb = (result, error) => { try { markCronHeartbeat('pre_match_check', { result, error, durationMs: Date.now() - _t0 }); } catch (_) {} };
+  const _hb = (result, note) => { try { markCronHeartbeat('pre_match_check', { result, note, durationMs: Date.now() - _t0 }); } catch (_) {} };
+  const _hbErr = (result, error) => { try { markCronHeartbeat('pre_match_check', { result, error, durationMs: Date.now() - _t0 }); } catch (_) {} };
   if (_isCycleMuted('pre-match-check')) { _hb('muted'); return; }
   if (!ADMIN_IDS.size) { _hb('no_admins'); return; }
   let result = null;
@@ -4019,7 +4021,7 @@ async function runPreMatchFinalCheckCycle() {
     result = await ext.runPreMatchFinalCheck(`http://127.0.0.1:${process.env.PORT || 8080}`, db, { windowMin: 30 });
   } catch (e) {
     log('WARN', 'PRE-MATCH-CHECK', `falhou: ${e.message}`);
-    _hb('error', e.message);
+    _hbErr('error', e.message);
     return;
   }
   if (!result?.ok || !result.alerts?.length) { _hb('ok_no_alerts'); return; }
@@ -4046,7 +4048,8 @@ const IA_HEALTH_DM_COOLDOWN_MS = 4 * 60 * 60 * 1000; // 4h
 
 async function runIaHealthCycle() {
   const _t0 = Date.now();
-  const _hb = (result, error) => { try { markCronHeartbeat('ia_health', { result, error, durationMs: Date.now() - _t0 }); } catch (_) {} };
+  const _hb = (result, note) => { try { markCronHeartbeat('ia_health', { result, note, durationMs: Date.now() - _t0 }); } catch (_) {} };
+  const _hbErr = (result, error) => { try { markCronHeartbeat('ia_health', { result, error, durationMs: Date.now() - _t0 }); } catch (_) {} };
   if (_isCycleMuted('ia-health')) { _hb('muted'); return; }
   if (!ADMIN_IDS.size) { _hb('no_admins'); return; }
   let result = null;
@@ -4056,7 +4059,7 @@ async function runIaHealthCycle() {
     result = await ext.runIaHealthMonitor(`http://127.0.0.1:${process.env.PORT || 8080}`, dashboard.getClassifiedBuffer);
   } catch (e) {
     log('WARN', 'IA-HEALTH', `falhou: ${e.message}`);
-    _hb('error', e.message);
+    _hbErr('error', e.message);
     return;
   }
   if (!result?.ok || !result.alerts?.length) { _hb('ok_no_alerts'); return; }
@@ -18812,7 +18815,8 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   let _lastAutonomyDigestDay = null;
   async function runAutonomyDigest() {
     const _t0 = Date.now();
-    const _hb = (result, error) => { try { markCronHeartbeat('autonomy_digest', { result, error, durationMs: Date.now() - _t0 }); } catch (_) {} };
+    const _hb = (result, note) => { try { markCronHeartbeat('autonomy_digest', { result, note, durationMs: Date.now() - _t0 }); } catch (_) {} };
+    const _hbErr = (result, error) => { try { markCronHeartbeat('autonomy_digest', { result, error, durationMs: Date.now() - _t0 }); } catch (_) {} };
     // Default ON — DM 1x/dia. Desligar via AUTONOMY_DIGEST_AUTO=false.
     if (/^(0|false|no)$/i.test(String(process.env.AUTONOMY_DIGEST_AUTO || ''))) { _hb('disabled'); return; }
     if (!ADMIN_IDS.size) { _hb('no_admins'); return; }
@@ -18869,7 +18873,7 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
       }
       log('INFO', 'AUTONOMY-DIGEST', `DM enviado pra ${ADMIN_IDS.size} admin(s)`);
       _hb('ok');
-    } catch (e) { log('ERROR', 'AUTONOMY-DIGEST', e.message); _hb('error', e.message); }
+    } catch (e) { log('ERROR', 'AUTONOMY-DIGEST', e.message); _hbErr('error', e.message); }
   }
   setInterval(() => runAutonomyDigest(), 15 * 60 * 1000);
   setTimeout(() => runAutonomyDigest(), 35 * 60 * 1000);
