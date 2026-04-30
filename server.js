@@ -8725,6 +8725,8 @@ setInterval(load, 60000);
       'nightly_retrain':    24 * 60 * 60 * 1000,
       // 6h
       'path_guard':         6 * 60 * 60 * 1000,
+      'league_bleed':       6 * 60 * 60 * 1000,
+      'pipeline_digest':    6 * 60 * 60 * 1000,
       // 12h
       'mt_bucket_guard':    12 * 60 * 60 * 1000,
       'gates_autotune':     12 * 60 * 60 * 1000,
@@ -8732,6 +8734,8 @@ setInterval(load, 60000);
       'odds_bucket_guard':  12 * 60 * 60 * 1000,
       // Daily
       'model_calibration':  24 * 60 * 60 * 1000,
+      'backtest_validator': 24 * 60 * 60 * 1000,
+      'post_fix_monitor':   24 * 60 * 60 * 1000,
       // Pollers (varia por sport, default 6-10min)
       'lol':         6 * 60 * 1000,
       'dota':        6 * 60 * 1000,

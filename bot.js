@@ -18626,8 +18626,8 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
       }
     } catch (e) { log('ERROR', 'LEAGUE-BLEED', e.message); }
   }
-  setInterval(() => runLeagueBleedScan(), 6 * 60 * 60 * 1000);
-  setTimeout(() => runLeagueBleedScan(), 20 * 60 * 1000); // primeiro scan 20min pós-boot
+  setInterval(_wrapCron('league_bleed', runLeagueBleedScan), 6 * 60 * 60 * 1000);
+  setTimeout(_wrapCron('league_bleed', runLeagueBleedScan), 20 * 60 * 1000); // primeiro scan 20min pós-boot
 
   // Live Risk Monitor: 10min. Consome /cashout-alerts (health='alert'|'dying') e
   // DM admin uma vez a cada 30min por tipId. Gated por LIVE_RISK_MONITOR_AUTO=true.
@@ -19401,16 +19401,16 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
 
   // Weekly pipeline digest: checa a cada 6h se já passaram 6d+ desde último envio
   // (robusto a restarts — cooldown in-memory + env PIPELINE_DIGEST_AUTO pra desativar)
-  setInterval(() => runPipelineDigestCycle().catch(e => log('ERROR', 'PIPELINE-DIGEST', e.message)), 6 * 60 * 60 * 1000);
-  setTimeout(() => runPipelineDigestCycle().catch(() => {}), 90 * 60 * 1000); // 1h30 pós-boot
+  setInterval(_wrapCron('pipeline_digest', runPipelineDigestCycle), 6 * 60 * 60 * 1000);
+  setTimeout(_wrapCron('pipeline_digest', runPipelineDigestCycle), 90 * 60 * 1000); // 1h30 pós-boot
 
   // Backtest Validator: cron 1x/dia, valida modelo via gates retroativos.
-  setInterval(() => runBacktestValidatorCycle().catch(e => log('ERROR', 'BACKTEST-VALIDATOR', e.message)), 24 * 60 * 60 * 1000);
-  setTimeout(() => runBacktestValidatorCycle().catch(() => {}), 30 * 60 * 1000); // 30min pós-boot
+  setInterval(_wrapCron('backtest_validator', runBacktestValidatorCycle), 24 * 60 * 60 * 1000);
+  setTimeout(_wrapCron('backtest_validator', runBacktestValidatorCycle), 30 * 60 * 1000); // 30min pós-boot
 
   // Post-Fix Monitor: cron 1x/dia, alerta se algum sport sangra ou tem FLOOD+BLEED pós gate-fix.
-  setInterval(() => runPostFixMonitorCycle().catch(e => log('ERROR', 'POST-FIX-MONITOR', e.message)), 24 * 60 * 60 * 1000);
-  setTimeout(() => runPostFixMonitorCycle().catch(() => {}), 45 * 60 * 1000); // 45min pós-boot
+  setInterval(_wrapCron('post_fix_monitor', runPostFixMonitorCycle), 24 * 60 * 60 * 1000);
+  setTimeout(_wrapCron('post_fix_monitor', runPostFixMonitorCycle), 45 * 60 * 1000); // 45min pós-boot
 
   // Live Storm Manager: cron 10min, alerta admin no flip into/out-of storm.
   setInterval(() => runLiveStormCycle().catch(e => log('ERROR', 'LIVE-STORM', e.message)), 10 * 60 * 1000);
