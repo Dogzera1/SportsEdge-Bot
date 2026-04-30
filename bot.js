@@ -614,12 +614,24 @@ function sweepAnalyzedMaps() {
 // do setInterval). Roda 1x por hora.
 setInterval(() => { try { sweepAnalyzedMaps(); } catch (_) {} }, 60 * 60 * 1000);
 
-// ── Memory watchdog ──
-// Monitora process.memoryUsage().rss vs MEM_WATCHDOG_RSS_MB threshold.
-// Quando ultrapassa, loga WARN + grava metrics + DM admin (1x por dia, dedup).
-// Default threshold 800MB (Railway hobby tier ~512MB, paid 8GB+ — 800 cobre
-// a maioria com folga). Opt-out: MEM_WATCHDOG_DISABLED=true.
+// ── Memory watchdog (com auto-tune dinâmico) ──
+// Monitora process.memoryUsage().rss e mantém histograma das últimas 7d
+// (288 amostras × 5min × 7d). Threshold dinâmico = P95 baseline × 1.3 quando
+// MEM_WATCHDOG_AUTO=true (default). Opt-out: MEM_WATCHDOG_DISABLED=true ou
+// override hard via MEM_WATCHDOG_RSS_MB.
+//
+// Por que P95: P50 (mediana) seria muito sensível; P99 só pega spike único.
+// P95 captura outlier real sem alarme falso. Margem 1.3x acomoda variance
+// natural sem flagging baseline normal.
 let _lastMemAlertDay = null;
+const _rssSamples = []; // ring buffer
+const RSS_SAMPLE_CAP = 7 * 24 * (60 / 5); // 7d × 24h × 12 amostras/h = 2016
+function _percentile(arr, pct) {
+  if (!arr.length) return null;
+  const sorted = [...arr].sort((a, b) => a - b);
+  const idx = Math.min(sorted.length - 1, Math.floor(sorted.length * pct));
+  return sorted[idx];
+}
 function _memWatchdogTick() {
   if (/^(1|true|yes)$/i.test(String(process.env.MEM_WATCHDOG_DISABLED || ''))) return;
   try {
@@ -631,10 +643,25 @@ function _memWatchdogTick() {
       m.gauge('rss_mb', rssMb);
       m.gauge('heap_used_mb', heapMb);
     } catch (_) {}
-    const threshold = parseFloat(process.env.MEM_WATCHDOG_RSS_MB || '800');
-    if (!Number.isFinite(threshold) || threshold <= 0) return;
+    // Acumula sample no ring
+    _rssSamples.push(rssMb);
+    if (_rssSamples.length > RSS_SAMPLE_CAP) _rssSamples.shift();
+    // Threshold: env hard override > auto-tune > default fallback
+    let threshold;
+    const hardEnv = parseFloat(process.env.MEM_WATCHDOG_RSS_MB);
+    const autoOn = !/^(0|false|no)$/i.test(String(process.env.MEM_WATCHDOG_AUTO ?? 'true'));
+    if (Number.isFinite(hardEnv) && hardEnv > 0) {
+      threshold = hardEnv;
+    } else if (autoOn && _rssSamples.length >= 144) { // 12h mínimo de amostras
+      const p95 = _percentile(_rssSamples, 0.95);
+      const margin = parseFloat(process.env.MEM_WATCHDOG_AUTO_MARGIN || '1.3');
+      threshold = +(p95 * (Number.isFinite(margin) && margin > 1 ? margin : 1.3)).toFixed(1);
+      try { require('./lib/metrics').gauge('rss_threshold_mb', threshold); } catch (_) {}
+    } else {
+      threshold = 800; // bootstrap antes de coletar amostras
+    }
     if (rssMb < threshold) return;
-    log('WARN', 'MEM-WATCHDOG', `RSS ${rssMb}MB > threshold ${threshold}MB (heap=${heapMb}MB)`);
+    log('WARN', 'MEM-WATCHDOG', `RSS ${rssMb}MB > threshold ${threshold}MB (heap=${heapMb}MB, n=${_rssSamples.length} samples)`);
     // DM 1x/dia (dedup por today), só se ADMIN_IDS setado.
     const today = new Date().toISOString().slice(0, 10);
     if (_lastMemAlertDay === today || !ADMIN_IDS.size) return;
@@ -642,7 +669,12 @@ function _memWatchdogTick() {
     const routed = _pickTokenForAlert('system');
     const token = routed?.token;
     if (!token) return;
-    const msg = `⚠️ *Memory Watchdog*\n\nRSS: *${rssMb}MB* (threshold ${threshold}MB)\nHeap used: ${heapMb}MB\n\n_Possível leak. Cheque /health/metrics gauges (analyzed_size, market_tip_sent_size). Considere restart se sustentado._`;
+    const p50 = _percentile(_rssSamples, 0.5);
+    const p95v = _percentile(_rssSamples, 0.95);
+    const baselineNote = p50 != null
+      ? `\nBaseline 7d: P50=${p50}MB, P95=${p95v}MB (${_rssSamples.length} samples)`
+      : '';
+    const msg = `⚠️ *Memory Watchdog*\n\nRSS: *${rssMb}MB* (threshold ${threshold}MB)\nHeap used: ${heapMb}MB${baselineNote}\n\n_Possível leak. Cheque /health/metrics gauges (analyzed_size, market_tip_sent_size). Considere restart se sustentado._`;
     for (const adminId of ADMIN_IDS) sendDM(token, adminId, msg).catch(e => log('DEBUG', 'MEM-WATCHDOG', `DM err ${adminId}: ${e.message}`));
   } catch (_) {}
 }

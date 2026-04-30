@@ -7715,6 +7715,83 @@ setInterval(load, 10000);
     return;
   }
 
+  // ── /admin/forensics: post-mortem completo de uma tip específica.
+  // Combina row da tips + tip_context_json parsed + match_result + voided
+  // entry (se houver) + tip_factor_log + shadow row equivalente (se MT).
+  // Útil pra investigar por que uma tip virou loss/void inesperado.
+  // GET /admin/forensics?tip_id=N&key=<ADMIN_KEY>
+  if (p === '/admin/forensics' && (req.method === 'GET' || req.method === 'POST')) {
+    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const tipId = parseInt(parsed.query.tip_id || parsed.query.id, 10);
+    if (!Number.isFinite(tipId) || tipId <= 0) {
+      sendJson(res, { ok: false, error: 'tip_id obrigatório (inteiro)' }, 400); return;
+    }
+    try {
+      const tip = db.prepare(`SELECT * FROM tips WHERE id = ?`).get(tipId);
+      if (!tip) { sendJson(res, { ok: false, error: 'tip not found', tip_id: tipId }, 404); return; }
+
+      const out = { ok: true, tip_id: tipId, tip };
+      // Parse tip_context_json (defensivo: pode ser NULL ou malformado)
+      if (tip.tip_context_json) {
+        try { out.context = JSON.parse(tip.tip_context_json); }
+        catch (_) { out.context_parse_error = true; out.context = tip.tip_context_json; }
+      }
+
+      // Match result equivalente
+      try {
+        out.match_result = db.prepare(
+          `SELECT * FROM match_results WHERE match_id = ? LIMIT 1`
+        ).get(tip.match_id) || null;
+      } catch (_) {}
+
+      // Voided entry — se tip foi rejeitada como voided_odds
+      try {
+        const _norm = s => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+        const p1n = _norm(tip.participant1), p2n = _norm(tip.participant2);
+        out.voided_entry = db.prepare(`
+          SELECT * FROM voided_tips
+          WHERE sport = ? AND market_type = ?
+            AND ((p1_norm = ? AND p2_norm = ?) OR (p1_norm = ? AND p2_norm = ?))
+            AND created_at >= datetime(?, '-7 days')
+            AND created_at <= datetime(?, '+7 days')
+          ORDER BY created_at DESC LIMIT 1
+        `).get(tip.sport, tip.market_type || 'ML', p1n, p2n, p2n, p1n, tip.sent_at, tip.sent_at) || null;
+      } catch (_) {}
+
+      // Tip factor log
+      try {
+        out.factor_log = db.prepare(
+          `SELECT * FROM tip_factor_log WHERE tip_id = ?`
+        ).all(tipId);
+      } catch (_) { out.factor_log = []; }
+
+      // Shadow row equivalente (caso MT-promoted)
+      try {
+        if (String(tip.match_id || '').includes('::mt::')) {
+          // Extrai matchKeyBase do sintetético `${base}::mt::${market}::${side}`
+          const baseId = String(tip.match_id).split('::mt::')[0];
+          out.shadow_row = db.prepare(
+            `SELECT * FROM market_tips_shadow WHERE match_key LIKE ? ORDER BY created_at DESC LIMIT 5`
+          ).all(`${baseId}%`);
+        }
+      } catch (_) {}
+
+      // Snapshot atual: outros tips do mesmo match (cross-bucket dedup awareness)
+      try {
+        out.sibling_tips = db.prepare(
+          `SELECT id, sport, tip_participant, odds, ev, result, market_type, sent_at
+           FROM tips WHERE match_id = ? AND id != ? ORDER BY sent_at DESC LIMIT 10`
+        ).all(tip.match_id, tipId);
+      } catch (_) {}
+
+      sendJson(res, out);
+    } catch (e) {
+      sendJson(res, { ok: false, error: e.message }, 500);
+    }
+    return;
+  }
+
   // ── /admin/repair: bundle idempotente de operações de healing.
   // Roda em sequência: settle-shadow + auto-archive non-ML + bankroll sync (dry).
   // Útil pós-deploy ou quando dashboard mostra inconsistência. Não modifica
