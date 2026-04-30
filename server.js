@@ -6282,6 +6282,30 @@ const server = http.createServer(async (req, res) => {
       alerts.push({ id: 'analysis_stale', severity: 'warning', msg: `Nenhuma análise há >2h (última: ${lastAnalysisAt})` });
     }
 
+    // Gauges úteis bridge'd do bot.js (db_integrity_ok, db_size_mb, bot_uptime_s).
+    // Alerta se DB integrity falhou ou se DB cresceu >300MB (limite Railway hobby tier).
+    let botGauges = {};
+    try {
+      const snap = require('./lib/metrics').snapshot();
+      const get = (k) => {
+        const direct = snap.gauges?.[k]?.value;
+        if (Number.isFinite(direct)) return direct;
+        const bridged = snap.gauges?.[`bot:${k}`]?.value;
+        return Number.isFinite(bridged) ? bridged : null;
+      };
+      botGauges = {
+        db_integrity_ok: get('db_integrity_ok'),
+        db_size_mb: get('db_size_mb'),
+        bot_uptime_s: get('bot_uptime_s'),
+      };
+      if (botGauges.db_integrity_ok === 0) {
+        alerts.push({ id: 'db_integrity_failed', severity: 'critical', msg: 'PRAGMA integrity_check retornou erro — investigar urgente' });
+      }
+      if (Number.isFinite(botGauges.db_size_mb) && botGauges.db_size_mb > 300) {
+        alerts.push({ id: 'db_size_high', severity: 'warning', msg: `DB ${botGauges.db_size_mb}MB (>300MB threshold) — considerar VACUUM ou archive de tips antigas` });
+      }
+    } catch (_) {}
+
     if (p === '/alerts') { sendJson(res, { alerts, ts: new Date().toISOString() }); return; }
 
     const status = !dbOk ? 'error' : (alerts.some(a => a.severity === 'critical') ? 'degraded' : (stale ? 'degraded' : 'ok'));
@@ -6306,6 +6330,7 @@ const server = http.createServer(async (req, res) => {
         apiFootball: { keyConfigured: !!(process.env.API_FOOTBALL_KEY || process.env.API_SPORTS_KEY || process.env.APISPORTS_KEY) },
       },
       alerts,
+      botGauges,
       metricsLite: getMetricsLite()
     });
     return;
