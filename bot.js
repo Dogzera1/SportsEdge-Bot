@@ -701,6 +701,14 @@ function sweepAnalyzedMaps() {
 // Inicia sweep periódico — só quando log() já está disponível (lazy evaluation
 // do setInterval). Roda 1x por hora.
 setInterval(() => { try { sweepAnalyzedMaps(); } catch (_) {} }, 60 * 60 * 1000);
+// Bootstrap: roda 1x 30s pós-boot pra popular gauges (db_size_mb, bot_uptime_s)
+// imediatamente em vez de esperar 1h pro primeiro tick.
+setTimeout(() => { try { sweepAnalyzedMaps(); } catch (_) {} }, 30 * 1000);
+// Uptime gauge precisa de tick mais curto pra refletir progresso real (sweep 1h
+// é grosseiro demais — ficaria 0s sempre que /health for chamado mid-cycle).
+setInterval(() => {
+  try { require('./lib/metrics').gauge('bot_uptime_s', Math.round(process.uptime())); } catch (_) {}
+}, 60 * 1000).unref();
 
 // ── Metrics bridge bot.js → server.js ──
 // Counters/gauges/timings registrados no bot.js (pollers, sweep, etc) ficam
