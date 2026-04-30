@@ -13728,22 +13728,30 @@ setInterval(load, 60000);
         const winnerIsT1 = _norm(mr.winner) === _norm(t.participant1) || _norm(mr.winner).includes(_norm(t.participant1));
         const posT1Won = gT1 > gT2;
         if (posT1Won !== winnerIsT1) { [gT1, gT2] = [gT2, gT1]; }
-        // Parse line do match_id (lnPx.x ou lnNx.x ou tip_participant)
+        // Parse line do match_id (lnPx.x ou lnNx.x), fallback model_label / tip_participant.
         let line = NaN, side = '';
         const lnTag = String(t.match_id || '').match(/::ln([NP])([\d.]+)/);
         if (lnTag) { line = (lnTag[1] === 'N' ? -1 : 1) * parseFloat(lnTag[2]); }
         const sideTag = String(t.match_id || '').match(/::mt::handicap[a-zA-Z]*::(home|away|team1|team2|over|under)/i);
         if (sideTag) side = sideTag[1].toLowerCase();
-        // Fallback: parse from tip_participant ("Player Name +3.5" or "-3.5")
+        // Fallback line: model_label ("Handicap +4.5 games team1") ou tip_participant
         if (!Number.isFinite(line)) {
-          const m = String(t.tip_participant || '').match(/([+-]\d+(?:\.\d+)?)/);
-          if (m) line = parseFloat(m[1]);
+          const lblM = String(t.model_label || '').match(/([+-]?\d+(?:\.\d+)?)\s*games?/i);
+          if (lblM) line = parseFloat(lblM[1]);
+        }
+        if (!Number.isFinite(line)) {
+          const tipM = String(t.tip_participant || '').match(/([+-]\d+(?:\.\d+)?)/);
+          if (tipM) line = parseFloat(tipM[1]);
+        }
+        // Fallback side: model_label ("... team1") ou tip_participant nome match
+        if (!side) {
+          const lblSide = String(t.model_label || '').match(/team(1|2)/i);
+          if (lblSide) side = `team${lblSide[1]}`;
         }
         if (!side) {
-          // Detecta side pelo tip_participant vs participant1/2
           const tipName = _norm(String(t.tip_participant||'').replace(/[+-]?\d+(?:\.\d+)?/, ''));
-          if (tipName && n1.includes(tipName) || tipName.includes(n1)) side = 'home';
-          else if (tipName && n2.includes(tipName) || tipName.includes(n2)) side = 'away';
+          if (tipName && (n1.includes(tipName) || tipName.includes(n1))) side = 'home';
+          else if (tipName && (n2.includes(tipName) || tipName.includes(n2))) side = 'away';
         }
         if (!Number.isFinite(line) || !side) { results.skipped++; continue; }
         const sideIsT1 = side === 'home' || side === 'team1';
