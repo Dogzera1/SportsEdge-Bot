@@ -1621,17 +1621,22 @@ const migrations = [
     id: '070_football_data_csv_shots',
     up(db) {
       // Add shots cols (HS/AS/HST/AST + ou25 closing odds) pra xG proxy.
+      // Usa addColumnIfMissing pra evitar silenciar erros REAIS (ex.: tabela
+      // não existe, ou type inválido). Antes era try{ALTER...} catch(_){} —
+      // dupe column era silenciado mas erro de schema também.
+      if (!tableExists(db, 'football_data_csv')) return;
       const cols = [
-        ['home_shots', 'INTEGER'],
-        ['away_shots', 'INTEGER'],
-        ['home_shots_target', 'INTEGER'],
-        ['away_shots_target', 'INTEGER'],
-        ['ou25_over_close', 'REAL'],   // P>2.5 (Pinnacle closing over 2.5)
-        ['ou25_under_close', 'REAL'],  // P<2.5
-        ['ah_line', 'REAL'],            // AHCh (Asian Handicap closing line)
+        ['home_shots', 'home_shots INTEGER'],
+        ['away_shots', 'away_shots INTEGER'],
+        ['home_shots_target', 'home_shots_target INTEGER'],
+        ['away_shots_target', 'away_shots_target INTEGER'],
+        ['ou25_over_close', 'ou25_over_close REAL'],   // P>2.5 (Pinnacle closing over 2.5)
+        ['ou25_under_close', 'ou25_under_close REAL'], // P<2.5
+        ['ah_line', 'ah_line REAL'],                    // AHCh (Asian Handicap closing line)
       ];
-      for (const [name, type] of cols) {
-        try { db.exec(`ALTER TABLE football_data_csv ADD COLUMN ${name} ${type}`); } catch (_) {}
+      for (const [name, def] of cols) {
+        try { addColumnIfMissing(db, 'football_data_csv', name, def); }
+        catch (e) { console.error(`[mig 070] add col ${name} fail:`, e.message); }
       }
     },
   },

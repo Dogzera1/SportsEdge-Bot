@@ -3765,17 +3765,20 @@ function runSettleSweep({ sportFilter = '', days = 14 } = {}) {
 
   const summary = { sports: {}, total_swept: 0, total_settled: 0, total_skipped_map: 0, total_not_found: 0 };
 
+  // HARD SKIP: MT-promoted tips (match_id ::mt:: ou market_type non-ML) jamais
+  // passam por runSettleSweep — esse sweep usa name-match (tennisSinglePlayerNameMatch
+  // / nameMatches) que falha pra HANDICAP/TOTAL/TIEBREAK e marca loss errado.
+  // MT settle só via lib/mt-result-propagator.js (com final_score parseado).
+  // Set declarado fora do loop pra evitar realocação per-iteração (ex: 5k tips
+  // = 5k Sets criados a cada chamada do /settle-sweep).
+  const ML_MARKETS_SWEEP = new Set(['ML', '1X2_H', '1X2_A', '1X2_D', 'OVER_2.5', 'UNDER_2.5']);
+
   for (const sport of sports) {
     const tips = stmts.getUnsettledTips.all(sport, `-${clampedDays} days`);
     const info = { swept: 0, settled: 0, skipped_map: 0, not_found: 0, settled_ids: [] };
 
     for (const tip of tips) {
       info.swept++;
-      // HARD SKIP: MT-promoted tips (match_id ::mt:: ou market_type non-ML) jamais
-      // passam por runSettleSweep — esse sweep usa name-match (tennisSinglePlayerNameMatch
-      // / nameMatches) que falha pra HANDICAP/TOTAL/TIEBREAK e marca loss errado.
-      // MT settle só via lib/mt-result-propagator.js (com final_score parseado).
-      const ML_MARKETS_SWEEP = new Set(['ML', '1X2_H', '1X2_A', '1X2_D', 'OVER_2.5', 'UNDER_2.5']);
       const _mkt = String(tip.market_type || 'ML').toUpperCase();
       if (String(tip.match_id || '').includes('::mt::') || !ML_MARKETS_SWEEP.has(_mkt)) {
         continue;
@@ -17685,7 +17688,12 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
             }
             const logLevel = 'INFO';
             log(logLevel, 'SETTLE', `${sport} matchId=${matchId} tip="${tip.tip_participant}" vs winner="${winner}" → ${result} [method=${matchMethod} score=${matchScore}]`);
-            stmts.settleTip.run(result, matchId, sport);
+            // Per-tip settle (não settleTip por match_id) — quando há múltiplas
+            // tips do mesmo match (lados opostos via audit fix ou MT-promote),
+            // settleTip antigo herdava o result da 1ª iteração para todas as
+            // tips do match e deixava as demais com profit_reais correto mas
+            // result inconsistente. Usar id-based settle elimina essa drift.
+            stmts.settleTipById.run(result, tip.id);
             // Atualiza profit_reais com tier per-sport unit; acumula delta da banca.
             // 2026-04-28: usa stake_reais stored quando settled_at original (tier
             // já gravado em record-tip). Recompute só quando stake_reais NULL ou

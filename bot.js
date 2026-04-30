@@ -556,6 +556,52 @@ let lastSettlementCheck = 0;
 const lineAlerted = new Map();
 const marketTipSent = new Map(); // key: match|market|line|side → ts (dedup 24h)
 
+// ── TTL sweep dos Maps "analyzed*" e dedup ──
+// Sem isso eles crescem indefinidamente (cada matchId único vira uma entry e
+// nunca sai). Em produção 24/7 isso vira leak silencioso de memória — 7-10 dias
+// num scanner com 200 matches/dia já passa de 50k entries.
+// Sweep a cada 1h: remove entries cuja ts é mais velha que TTL.
+const ANALYZED_TTL_MS = parseInt(process.env.ANALYZED_TTL_MS || String(72 * 3600 * 1000), 10); // 72h
+const MARKET_TIP_SENT_TTL_MS = parseInt(process.env.MARKET_TIP_SENT_TTL_MS || String(48 * 3600 * 1000), 10); // 48h
+function _sweepTsMap(map, ttlMs, now) {
+  if (!map || !map.size) return 0;
+  let removed = 0;
+  for (const [key, value] of map.entries()) {
+    const ts = (value && Number(value.ts)) || (typeof value === 'number' ? value : 0);
+    if (ts > 0 && (now - ts) > ttlMs) { map.delete(key); removed++; }
+  }
+  return removed;
+}
+function sweepAnalyzedMaps() {
+  const now = Date.now();
+  let total = 0;
+  total += _sweepTsMap(analyzedMatches, ANALYZED_TTL_MS, now);
+  total += _sweepTsMap(analyzedMma, ANALYZED_TTL_MS, now);
+  total += _sweepTsMap(analyzedTennis, ANALYZED_TTL_MS, now);
+  total += _sweepTsMap(analyzedFootball, ANALYZED_TTL_MS, now);
+  total += _sweepTsMap(analyzedDota, ANALYZED_TTL_MS, now);
+  total += _sweepTsMap(analyzedCs, ANALYZED_TTL_MS, now);
+  total += _sweepTsMap(analyzedValorant, ANALYZED_TTL_MS, now);
+  total += _sweepTsMap(analyzedDarts, ANALYZED_TTL_MS, now);
+  total += _sweepTsMap(analyzedSnooker, ANALYZED_TTL_MS, now);
+  total += _sweepTsMap(analyzedTT, ANALYZED_TTL_MS, now);
+  total += _sweepTsMap(lolSeriesLastTip, ANALYZED_TTL_MS, now);
+  total += _sweepTsMap(lineAlerted, ANALYZED_TTL_MS, now);
+  // marketTipSent stora ts direto (number), não wrapped em objeto.
+  if (marketTipSent.size) {
+    for (const [key, ts] of marketTipSent.entries()) {
+      if (Number.isFinite(ts) && (now - ts) > MARKET_TIP_SENT_TTL_MS) { marketTipSent.delete(key); total++; }
+    }
+  }
+  if (total > 0) {
+    try { log('DEBUG', 'MEM-SWEEP', `removed ${total} stale analyzed entries (TTL ${Math.round(ANALYZED_TTL_MS/3600000)}h)`); } catch (_) {}
+  }
+  return total;
+}
+// Inicia sweep periódico — só quando log() já está disponível (lazy evaluation
+// do setInterval). Roda 1x por hora.
+setInterval(() => { try { sweepAnalyzedMaps(); } catch (_) {} }, 60 * 60 * 1000);
+
 // Rejection ring buffer — debug quando "tips não estão saindo".
 // Formato: { ts, sport, teams, reason, extra }
 const _rejections = [];
@@ -4285,15 +4331,22 @@ async function recordMarketTipAsRegular({ sport, match, tip, stake, isLive }) {
     // benchmark (H2H direto de football_data_csv), segura tip.
     // Sharp money discordando = sinal de model errado/dados velhos.
     // env: FB_DIVERGENCE_GATE=true (default true), FB_DIVERGENCE_MAX_PP=12
-    if (sport === 'football' && !/^(0|false|no)$/i.test(String(process.env.FB_DIVERGENCE_GATE ?? 'true'))) {
+    //
+    // Restringe a tips 1X2 (ML/draw): closing odds H/D/A do Pinnacle só
+    // referem ao match winner. Comparar prob handicap/totals/btts com
+    // pH/pD/pA é categoria errada — precisa do mercado correspondente
+    // (que ainda não temos no benchmark). Skip silencioso pra outros markets.
+    const _mktLowerFB = String(tip.market || '').toLowerCase();
+    const _isFb1X2 = _mktLowerFB === 'ml' || _mktLowerFB === '1x2' || _mktLowerFB === 'draw';
+    if (sport === 'football' && _isFb1X2 && !/^(0|false|no)$/i.test(String(process.env.FB_DIVERGENCE_GATE ?? 'true'))) {
       try {
-        const { getClosingOddsBenchmark, getMarketDivergence } = require('./lib/football-data-features');
+        const { getClosingOddsBenchmark } = require('./lib/football-data-features');
         const market = getClosingOddsBenchmark(db, match.team1, match.team2);
         if (market && tip.pModel != null) {
           // Mapeia side da tip pra prob (1X2_H/A/D ou ML)
           const isHome = /^(1X2_H|H|home|1)$/i.test(String(tip.side || ''));
           const isAway = /^(1X2_A|A|away|2)$/i.test(String(tip.side || ''));
-          const isDraw = /^(1X2_D|D|draw|X)$/i.test(String(tip.side || ''));
+          const isDraw = /^(1X2_D|D|draw|X|d)$/i.test(String(tip.side || ''));
           const marketSideP = isHome ? market.pH : isAway ? market.pA : isDraw ? market.pD : null;
           if (marketSideP != null) {
             const pp = Math.abs(tip.pModel - marketSideP) * 100;
