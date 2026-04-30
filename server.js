@@ -9045,6 +9045,84 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // GET /admin/golgg-objectives?gameid=77175  → debug scrape único.
+  // POST /admin/sync-golgg-objectives?days=7 → bulk: scrape último N dias e
+  // popular lol_game_objectives. Pra alimentar lol-kills-model com objective
+  // control rates per-team.
+  if (p === '/admin/golgg-objectives') {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const { fetchObjectivesViaGolgg } = require('./lib/golgg-objectives-scraper');
+      const gameid = String(parsed.query.gameid || '').trim();
+      if (!gameid) { sendJson(res, { ok: false, error: 'gameid required' }, 400); return; }
+      const r = await fetchObjectivesViaGolgg(gameid);
+      sendJson(res, r);
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
+  if (p === '/admin/sync-golgg-objectives' && (req.method === 'POST' || req.method === 'GET')) {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const days = Math.max(1, Math.min(60, parseInt(parsed.query.days || '7', 10) || 7));
+      const limit = Math.max(10, Math.min(500, parseInt(parsed.query.limit || '100', 10) || 100));
+      const beforeCount = db.prepare(`SELECT COUNT(*) AS n FROM lol_game_objectives`).get().n;
+      // Encontra séries gol.gg sincronizadas que NÃO têm objectives ainda.
+      const series = db.prepare(`
+        SELECT match_id, team1, team2, league, resolved_at
+        FROM match_results
+        WHERE game = 'lol' AND match_id LIKE 'golgg_%'
+          AND resolved_at >= date('now', '-' || ? || ' days')
+          AND match_id NOT IN (SELECT 'golgg_' || gameid FROM lol_game_objectives)
+        ORDER BY resolved_at DESC
+        LIMIT ?
+      `).all(days, limit);
+      sendJson(res, { ok: true, message: 'Sync rodando bg', candidates: series.length, beforeCount });
+      // Background bulk scrape
+      setImmediate(async () => {
+        try {
+          const { fetchObjectivesViaGolgg } = require('./lib/golgg-objectives-scraper');
+          let inserted = 0, errors = 0, skipped = 0;
+          const upsert = db.prepare(`
+            INSERT OR REPLACE INTO lol_game_objectives (
+              gameid, series_id, team_blue, team_red, league, date, map_index,
+              kills_blue, kills_red, kills_total,
+              towers_blue, towers_red, towers_total,
+              inhibitors_blue, inhibitors_red, inhibitors_total,
+              drakes_blue, drakes_red, drakes_total,
+              barons_blue, barons_red, barons_total,
+              heralds_blue, heralds_red, heralds_total,
+              gold_blue, gold_red, gold_total,
+              source, ingested_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?,  ?, ?, ?,  ?, ?, ?,  ?, ?, ?,  ?, ?, ?,  ?, ?, ?,  ?, ?, ?,  ?, ?, ?,  'golgg', datetime('now'))
+          `);
+          for (const s of series) {
+            const seriesId = String(s.match_id).replace(/^golgg_/, '');
+            const r = await fetchObjectivesViaGolgg(seriesId);
+            if (!r.ok) { errors++; continue; }
+            const o = r.objectives || {};
+            try {
+              upsert.run(
+                seriesId, seriesId, s.team1, s.team2, s.league || null, String(s.resolved_at).slice(0, 10), 1,
+                o.kills_blue ?? null, o.kills_red ?? null, o.kills_total ?? null,
+                o.towers_blue ?? null, o.towers_red ?? null, o.towers_total ?? null,
+                o.inhibitors_blue ?? null, o.inhibitors_red ?? null, o.inhibitors_total ?? null,
+                o.drakes_blue ?? null, o.drakes_red ?? null, o.drakes_total ?? null,
+                o.barons_blue ?? null, o.barons_red ?? null, o.barons_total ?? null,
+                o.heralds_blue ?? null, o.heralds_red ?? null, o.heralds_total ?? null,
+                o.gold_blue ?? null, o.gold_red ?? null, o.gold_total ?? null
+              );
+              inserted++;
+            } catch (e) { errors++; }
+            await new Promise(res => setTimeout(res, 250));
+          }
+          log('INFO', 'GOLGG-OBJ-SYNC', `done: inserted=${inserted} errors=${errors} skipped=${skipped} candidates=${series.length}`);
+        } catch (e) { log('ERROR', 'GOLGG-OBJ-SYNC', e.message); }
+      });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   // POST /admin/sync-golgg-matches?seasons=S16 — dispara sync em background
   if (p === '/admin/sync-golgg-matches' && (req.method === 'POST' || req.method === 'GET')) {
     if (!requireAdmin(req, res)) return;

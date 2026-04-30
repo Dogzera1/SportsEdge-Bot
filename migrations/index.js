@@ -1592,6 +1592,34 @@ const migrations = [
       } catch (_) {}
     },
   },
+  {
+    id: '064_lol_game_objectives',
+    up(db) {
+      // Per-game objective stats scraped do gol.gg. Uma row por (golgg_gameid).
+      // Inputs pro lol-kills-model refinado (objective control rates).
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS lol_game_objectives (
+          gameid TEXT PRIMARY KEY,
+          series_id TEXT,
+          team_blue TEXT, team_red TEXT,
+          league TEXT, date TEXT,
+          map_index INTEGER,
+          kills_blue INTEGER, kills_red INTEGER, kills_total INTEGER,
+          towers_blue INTEGER, towers_red INTEGER, towers_total INTEGER,
+          inhibitors_blue INTEGER, inhibitors_red INTEGER, inhibitors_total INTEGER,
+          drakes_blue INTEGER, drakes_red INTEGER, drakes_total INTEGER,
+          barons_blue INTEGER, barons_red INTEGER, barons_total INTEGER,
+          heralds_blue INTEGER, heralds_red INTEGER, heralds_total INTEGER,
+          gold_blue INTEGER, gold_red INTEGER, gold_total INTEGER,
+          source TEXT DEFAULT 'golgg',
+          ingested_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_lol_obj_series ON lol_game_objectives(series_id, map_index);
+        CREATE INDEX IF NOT EXISTS idx_lol_obj_teams_date ON lol_game_objectives(team_blue, team_red, date);
+        CREATE INDEX IF NOT EXISTS idx_lol_obj_league_date ON lol_game_objectives(league, date);
+      `);
+    },
+  },
 ];
 
 function applyMigrations(db) {
