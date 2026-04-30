@@ -3948,18 +3948,22 @@ const NEWS_DM_COOLDOWN_MS = 30 * 60 * 1000; // 30min cooldown global
 
 let _lastNewsDM = 0;
 async function runNewsMonitorCycle() {
-  if (_isCycleMuted('news-monitor')) { return; }
-  if (!ADMIN_IDS.size) return;
+  const _t0 = Date.now();
+  const _hb = (result, error) => { try { markCronHeartbeat('news_monitor', { result, error, durationMs: Date.now() - _t0 }); } catch (_) {} };
+  if (_isCycleMuted('news-monitor')) { _hb('muted'); return; }
+  if (!ADMIN_IDS.size) { _hb('no_admins'); return; }
   let result = null;
   try {
     const ext = require('./lib/agents-extended');
     result = await ext.runNewsMonitor(`http://127.0.0.1:${process.env.PORT || 8080}`, db);
   } catch (e) {
     log('WARN', 'NEWS-MONITOR', `falhou: ${e.message}`);
+    _hb('error', e.message);
     return;
   }
   if (!result?.ok || !result.alerts?.length) {
     log('DEBUG', 'NEWS-MONITOR', `Ciclo OK — ${result?.summary?.sources_ok || 0}/${result?.summary?.sources_fetched || 0} sources, 0 alertas`);
+    _hb('ok_no_alerts');
     return;
   }
 
@@ -3970,7 +3974,7 @@ async function runNewsMonitorCycle() {
     _newsAlerted.add(key);
     return true;
   });
-  if (!newAlerts.length) return;
+  if (!newAlerts.length) { _hb('ok_seen'); return; }
 
   // Cooldown DM global pra agrupar
   if (Date.now() - _lastNewsDM < NEWS_DM_COOLDOWN_MS) {
@@ -3996,37 +4000,42 @@ async function runNewsMonitorCycle() {
   for (const adminId of ADMIN_IDS) await sendDM(tokenForAlert, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
 
   log('WARN', 'NEWS-MONITOR', `${dmWorthy.length} alerta(s) enviado(s) | tips afetadas: ${result.summary.tips_affected}`);
+  _hb('ok', `${dmWorthy.length} alerts`);
 }
 
 // ── Pre-Match Final Check ──
 const _preMatchAlerted = new Set();
 
 async function runPreMatchFinalCheckCycle() {
-  if (_isCycleMuted('pre-match-check')) { return; }
-  if (!ADMIN_IDS.size) return;
+  const _t0 = Date.now();
+  const _hb = (result, error) => { try { markCronHeartbeat('pre_match_check', { result, error, durationMs: Date.now() - _t0 }); } catch (_) {} };
+  if (_isCycleMuted('pre-match-check')) { _hb('muted'); return; }
+  if (!ADMIN_IDS.size) { _hb('no_admins'); return; }
   let result = null;
   try {
     const ext = require('./lib/agents-extended');
     result = await ext.runPreMatchFinalCheck(`http://127.0.0.1:${process.env.PORT || 8080}`, db, { windowMin: 30 });
   } catch (e) {
     log('WARN', 'PRE-MATCH-CHECK', `falhou: ${e.message}`);
+    _hb('error', e.message);
     return;
   }
-  if (!result?.ok || !result.alerts?.length) return;
+  if (!result?.ok || !result.alerts?.length) { _hb('ok_no_alerts'); return; }
 
   const newAlerts = result.alerts.filter(a => !_preMatchAlerted.has(`${a.tip_id}_${a.alert}`));
   for (const a of newAlerts) _preMatchAlerted.add(`${a.tip_id}_${a.alert}`);
-  if (!newAlerts.length) return;
+  if (!newAlerts.length) { _hb('ok_seen'); return; }
 
   log('WARN', 'PRE-MATCH-CHECK', `${newAlerts.length} alerta(s) novo(s) de ${result.tips_checked} tips analisadas`);
 
   const tokenForAlert = resolveAlertsToken();
-  if (!tokenForAlert) return;
+  if (!tokenForAlert) { _hb('no_token'); return; }
 
   const sevIcon = { critical: '🚨', warning: '⚠️' };
   const lines = newAlerts.slice(0, 8).map(a => `${sevIcon[a.severity] || '⚠️'} *Tip #${a.tip_id}* (${a.sport})\n   └─ ${a.detail}`).join('\n');
   const msg = `🔍 *PRE-MATCH FINAL CHECK*\n\n${lines}\n\n_Tips a <30min do match com mudanças significativas._`;
   for (const adminId of ADMIN_IDS) await sendDM(tokenForAlert, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
+  _hb('ok', `${newAlerts.length} alerts`);
 }
 
 // ── IA Health Monitor ──
@@ -4034,8 +4043,10 @@ let _lastIaHealthAlert = 0;
 const IA_HEALTH_DM_COOLDOWN_MS = 4 * 60 * 60 * 1000; // 4h
 
 async function runIaHealthCycle() {
-  if (_isCycleMuted('ia-health')) { return; }
-  if (!ADMIN_IDS.size) return;
+  const _t0 = Date.now();
+  const _hb = (result, error) => { try { markCronHeartbeat('ia_health', { result, error, durationMs: Date.now() - _t0 }); } catch (_) {} };
+  if (_isCycleMuted('ia-health')) { _hb('muted'); return; }
+  if (!ADMIN_IDS.size) { _hb('no_admins'); return; }
   let result = null;
   try {
     const ext = require('./lib/agents-extended');
@@ -4043,18 +4054,20 @@ async function runIaHealthCycle() {
     result = await ext.runIaHealthMonitor(`http://127.0.0.1:${process.env.PORT || 8080}`, dashboard.getClassifiedBuffer);
   } catch (e) {
     log('WARN', 'IA-HEALTH', `falhou: ${e.message}`);
+    _hb('error', e.message);
     return;
   }
-  if (!result?.ok || !result.alerts?.length) return;
-  if (Date.now() - _lastIaHealthAlert < IA_HEALTH_DM_COOLDOWN_MS) return;
+  if (!result?.ok || !result.alerts?.length) { _hb('ok_no_alerts'); return; }
+  if (Date.now() - _lastIaHealthAlert < IA_HEALTH_DM_COOLDOWN_MS) { _hb('cooldown'); return; }
   _lastIaHealthAlert = Date.now();
 
   const tokenForAlert = resolveAlertsToken();
-  if (!tokenForAlert) return;
+  if (!tokenForAlert) { _hb('no_token'); return; }
   const sevIcon = { critical: '🚨', warning: '⚠️' };
   const lines = result.alerts.map(a => `${sevIcon[a.severity] || '⚠️'} ${a.message}\n   └─ Sugestão: ${a.suggestion}`).join('\n');
   const msg = `🤖 *IA HEALTH MONITOR*\n\n${lines}\n\n_Cooldown 4h. Próximo check em 1h._`;
   for (const adminId of ADMIN_IDS) await sendDM(tokenForAlert, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
+  _hb('ok', `${result.alerts.length} alerts`);
 }
 
 // ── Live Storm Manager (cron 10min) ──
