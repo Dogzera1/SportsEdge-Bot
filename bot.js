@@ -1112,6 +1112,18 @@ process.on('uncaughtException', (err) => {
   reportBug('UNCAUGHT-EXCEPTION', err);
 });
 
+// Graceful shutdown: salva último cron heartbeat antes de morrer.
+// SIGTERM = Railway re-deploy. SIGINT = Ctrl+C local.
+['SIGTERM', 'SIGINT'].forEach((sig) => {
+  process.on(sig, () => {
+    try {
+      dumpCronHeartbeats(CRON_STATE_FILE);
+      log('INFO', 'BOOT', `${sig} received — heartbeats dumped, exiting`);
+    } catch (_) {}
+    process.exit(0);
+  });
+});
+
 // ── Server Helpers ──
 const ADMIN_KEY = (process.env.ADMIN_KEY || '').trim();
 const ADMIN_POST_PATHS = new Set([
