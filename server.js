@@ -7792,6 +7792,73 @@ setInterval(load, 10000);
     return;
   }
 
+  // ── /admin/cs-live-debug: testa HLTV scoreboard fetch pra um match.
+  // GET /admin/cs-live-debug?team1=X&team2=Y&time=ISO&key=<ADMIN_KEY>
+  // Retorna proxyConfigured + matchId resolvido + scoreboard raw + parsed.
+  // Útil pra debugar HLTV_PROXY_BASE off ou matchId não encontrado sem
+  // depender de ciclo do bot completar.
+  if (p === '/admin/cs-live-debug' && (req.method === 'GET' || req.method === 'POST')) {
+    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const team1 = String(parsed.query.team1 || '').trim();
+    const team2 = String(parsed.query.team2 || '').trim();
+    const timeIso = String(parsed.query.time || '').trim() || new Date().toISOString();
+    if (!team1 || !team2) {
+      sendJson(res, { ok: false, error: 'team1 e team2 obrigatórios' }, 400); return;
+    }
+    const out = {
+      ok: true,
+      ts: new Date().toISOString(),
+      proxy_configured: !!process.env.HLTV_PROXY_BASE,
+      proxy_base: process.env.HLTV_PROXY_BASE
+        ? process.env.HLTV_PROXY_BASE.replace(/\/+$/, '')
+        : null,
+      team1, team2, time: timeIso,
+    };
+    if (!out.proxy_configured) {
+      out.error = 'HLTV_PROXY_BASE env ausente — scoreboard sempre null';
+      sendJson(res, out);
+      return;
+    }
+    try {
+      const hltv = require('./lib/hltv');
+      const t0 = Date.now();
+      const found = await hltv.getHltvMatchId(team1, team2, timeIso).catch(e => ({ error: e.message }));
+      out.match_id_lookup = {
+        ms: Date.now() - t0,
+        result: found || null,
+      };
+      if (!found?.matchId) {
+        out.scoreboard = null;
+        out.diagnosis = 'matchId não resolvido — verifique nomes ou se HLTV listou o match';
+        sendJson(res, out);
+        return;
+      }
+      const t1 = Date.now();
+      const raw = await hltv.getScoreboard(found.matchId, 6).catch(e => ({ error: e.message }));
+      out.scoreboard_fetch = {
+        ms: Date.now() - t1,
+        is_object: typeof raw === 'object' && raw !== null,
+        has_scoreboard_field: !!(raw && raw.scoreboard),
+        error: raw?.error || null,
+      };
+      const summary = raw && raw.scoreboard ? hltv.summarizeScoreboard(raw) : null;
+      out.summary = summary;
+      out.diagnosis = summary
+        ? 'OK — scoreboard parsed com sucesso'
+        : (raw?.error
+            ? `proxy fetch erro: ${raw.error}`
+            : (raw && !raw.scoreboard
+              ? 'proxy retornou mas sem campo scoreboard (match talvez já terminou)'
+              : 'proxy retornou null/empty'));
+      sendJson(res, out);
+    } catch (e) {
+      out.error = e.message;
+      sendJson(res, out, 500);
+    }
+    return;
+  }
+
   // ── /admin/repair: bundle idempotente de operações de healing.
   // Roda em sequência: settle-shadow + auto-archive non-ML + bankroll sync (dry).
   // Útil pós-deploy ou quando dashboard mostra inconsistência. Não modifica
