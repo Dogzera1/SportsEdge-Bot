@@ -593,6 +593,18 @@ function sweepAnalyzedMaps() {
       if (Number.isFinite(ts) && (now - ts) > MARKET_TIP_SENT_TTL_MS) { marketTipSent.delete(key); total++; }
     }
   }
+  // Gauge sizes per Map — visibilidade de leak in-flight via /health/metrics.
+  try {
+    const metrics = require('./lib/metrics');
+    metrics.gauge('analyzed_size', analyzedMatches.size, { sport: 'lol' });
+    metrics.gauge('analyzed_size', analyzedDota.size, { sport: 'dota2' });
+    metrics.gauge('analyzed_size', analyzedCs.size, { sport: 'cs' });
+    metrics.gauge('analyzed_size', analyzedValorant.size, { sport: 'valorant' });
+    metrics.gauge('analyzed_size', analyzedTennis.size, { sport: 'tennis' });
+    metrics.gauge('analyzed_size', analyzedFootball.size, { sport: 'football' });
+    metrics.gauge('analyzed_size', analyzedMma.size, { sport: 'mma' });
+    metrics.gauge('market_tip_sent_size', marketTipSent.size);
+  } catch (_) {}
   if (total > 0) {
     try { log('DEBUG', 'MEM-SWEEP', `removed ${total} stale analyzed entries (TTL ${Math.round(ANALYZED_TTL_MS/3600000)}h)`); } catch (_) {}
   }
@@ -4225,6 +4237,22 @@ function perMarketEvGate(sport, market, defaultEv) {
   return defaultEv;
 }
 
+// MT_PERMANENT_DISABLE_LIST — env-driven blocklist permanente, csv com
+// `sport|market` ou `sport|market|side` (case-sensitive na parte do market).
+// Aplica-se ANTES do runtime guard, sem precisar persistir em DB.
+// Ex: MT_PERMANENT_DISABLE_LIST=tennis|totalGames|over,lol|total_kills_map3
+// Default inclui leak conhecido (audit prod 2026-04-30): tennis totalGames over.
+let _MT_PERMANENT_DISABLE = null;
+function _getMtPermanentDisable() {
+  if (_MT_PERMANENT_DISABLE !== null) return _MT_PERMANENT_DISABLE;
+  const raw = String(process.env.MT_PERMANENT_DISABLE_LIST ?? 'tennis|totalGames|over').trim();
+  _MT_PERMANENT_DISABLE = new Set();
+  for (const entry of raw.split(',').map(s => s.trim()).filter(Boolean)) {
+    _MT_PERMANENT_DISABLE.add(entry);
+  }
+  return _MT_PERMANENT_DISABLE;
+}
+
 function isMarketTipsEnabled(sport, market = null, side = null, league = null) {
   if (process.env.MARKET_TIPS_DM_KILL_SWITCH === 'true') return false;
   const up = String(sport).toUpperCase();
@@ -4240,7 +4268,11 @@ function isMarketTipsEnabled(sport, market = null, side = null, league = null) {
   const enabled = envEnabled || shadowDmAll;
   if (!enabled) return false;
   if (market) {
-    // Precedência: (market+side+league) > (market+side) > market inteiro.
+    // Permanent blocklist (env-driven, antes de runtime/DB checks).
+    const perm = _getMtPermanentDisable();
+    if (side && perm.has(`${sport}|${market}|${side}`)) return false;
+    if (perm.has(`${sport}|${market}`)) return false;
+    // Precedência runtime: (market+side+league) > (market+side) > market inteiro.
     // League é match completo (não normalize) — leak guard salva exato.
     if (side && league && _marketTipsDisabledRuntime.has(`${sport}|${market}|${side}|${league}`)) return false;
     if (side && _marketTipsDisabledRuntime.has(`${sport}|${market}|${side}`)) return false;
@@ -14246,6 +14278,16 @@ async function pollTennis(runOnce = false) {
                 const { scanTennisMarkets } = require('./lib/tennis-market-scanner');
                 const minEv = parseFloat(process.env.TENNIS_MARKET_SCAN_MIN_EV ?? '4');
                 const maxEv = parseFloat(process.env.TENNIS_MARKET_SCAN_MAX_EV ?? '40');
+                // Per-market EV cap (shadow 30d prod): handicapGames ROI +10%
+                // n=118 com avgEV ~30 — cap 40 cortava cauda legítima. Relax pra 55.
+                // totalGames mantém 40 default (over -22.9% leak; under +12.7% mas
+                // sample <30 não justifica relax assimétrico).
+                const _maxEvHG = parseFloat(process.env.TENNIS_MARKET_SCAN_MAX_EV_HANDICAPGAMES ?? '55');
+                const _maxEvTG = parseFloat(process.env.TENNIS_MARKET_SCAN_MAX_EV_TOTALGAMES ?? '40');
+                const maxEvPerMarket = {
+                  handicapGames: _maxEvHG,
+                  totalGames: _maxEvTG,
+                };
                 const tnBestOfForScan = /grand slam|\[g\]|wimbledon|us open|roland|australian open/i.test(match.league || '') ? 5 : 3;
                 // Auto-guard wired: env > DB auto > default 1.50 (shadow leak <1.5).
                 const { minOdd: minOddTn, maxOdd: maxOddTn } = _resolveMtOddBounds('tennis', { defaultMinOdd: 1.50 });
@@ -14270,6 +14312,7 @@ async function pollTennis(runOnce = false) {
                   markets,
                   minEv,
                   maxEv,
+                  maxEvPerMarket,
                   bestOf: tnBestOfForScan,
                   minOdd: minOddTn,
                   maxOdd: maxOddTn,
@@ -18718,6 +18761,68 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   // Primeiro check 25min pós-boot — não força backup imediato (espera hora UTC),
   // mas garante que mesmo bot que sobe já no horário pegue o slot.
   setTimeout(() => runDbBackupCheck().catch(() => {}), 25 * 60 * 1000);
+
+  // ── Daily Leaks Digest: 1x/dia DM admin com top leaks (sport, market, side)
+  // de market_tips_shadow nos últimos 7d. Foca em ROI<-15% n>=20.
+  // Gated por DAILY_LEAKS_DIGEST_AUTO=true (default true).
+  // Hora: DAILY_LEAKS_DIGEST_HOUR_UTC (default 13 = 10h BRT).
+  let _lastLeaksDigestDay = null;
+  async function runDailyLeaksDigest() {
+    if (/^(0|false|no)$/i.test(String(process.env.DAILY_LEAKS_DIGEST_AUTO || 'true'))) return;
+    if (!ADMIN_IDS.size) return;
+    const hourUtc = parseInt(process.env.DAILY_LEAKS_DIGEST_HOUR_UTC || '13', 10);
+    const now = new Date();
+    const today = now.toISOString().slice(0, 10);
+    if (_lastLeaksDigestDay === today) return;
+    if (now.getUTCHours() !== hourUtc) return;
+    _lastLeaksDigestDay = today;
+    try {
+      const minN = parseInt(process.env.DAILY_LEAKS_MIN_N || '20', 10);
+      const roiCutoff = parseFloat(process.env.DAILY_LEAKS_ROI_CUTOFF || '-15');
+      const days = parseInt(process.env.DAILY_LEAKS_DAYS || '7', 10);
+      const rows = db.prepare(`
+        SELECT sport, market, side,
+          COUNT(*) AS n,
+          SUM(CASE WHEN result='win' THEN 1 ELSE 0 END) AS wins,
+          ROUND(SUM(profit_units)*1.0/NULLIF(SUM(stake_units),0)*100,1) AS roi_pct,
+          ROUND(AVG(clv_pct),1) AS avg_clv,
+          ROUND(SUM(profit_units),2) AS profit_u
+        FROM market_tips_shadow
+        WHERE created_at >= datetime('now', '-' || ? || ' days')
+          AND result IN ('win','loss')
+        GROUP BY sport, market, side
+        HAVING n >= ? AND roi_pct <= ?
+        ORDER BY roi_pct ASC
+        LIMIT 10
+      `).all(days, minN, roiCutoff);
+      if (!rows.length) {
+        log('INFO', 'LEAKS-DIGEST', `${days}d: sem leaks (n>=${minN}, ROI<=${roiCutoff}%)`);
+        return;
+      }
+      const lines = [`🚨 *Leaks Digest ${days}d*  _${today}_`, ''];
+      for (const r of rows) {
+        const clv = r.avg_clv != null ? `${r.avg_clv >= 0 ? '+' : ''}${r.avg_clv}%` : '—';
+        const profit = `${r.profit_u >= 0 ? '+' : ''}${r.profit_u}u`;
+        lines.push(`🔴 \`${r.sport}/${r.market}/${r.side}\` n=${r.n} ROI=${r.roi_pct}% CLV=${clv} P&L=${profit}`);
+      }
+      lines.push('');
+      lines.push(`_Cutoff: ROI≤${roiCutoff}% & n≥${minN}. Considerar adicionar ao MT_PERMANENT_DISABLE_LIST._`);
+      const msg = lines.join('\n');
+      const routed = _pickTokenForAlert('digest') || _pickTokenForAlert('system');
+      const token = routed?.token;
+      if (!token) return;
+      let sent = 0;
+      for (const adminId of ADMIN_IDS) {
+        if (await sendDM(token, adminId, msg).catch(() => false)) sent++;
+      }
+      log('INFO', 'LEAKS-DIGEST', `${rows.length} leaks DM ${sent}/${ADMIN_IDS.size} admin(s)`);
+      try { _metrics.gauge('leaks_count', rows.length); } catch (_) {}
+    } catch (e) {
+      log('WARN', 'LEAKS-DIGEST', `err: ${e.message}`);
+    }
+  }
+  setInterval(() => runDailyLeaksDigest().catch(() => {}), 30 * 60 * 1000);
+  setTimeout(() => runDailyLeaksDigest().catch(() => {}), 50 * 60 * 1000);
 
   // Pre-Match Final Check: cron 5min, valida tips a <30min do match.
   setInterval(() => runPreMatchFinalCheckCycle().catch(e => log('ERROR', 'PRE-MATCH-CHECK', e.message)), 5 * 60 * 1000);
