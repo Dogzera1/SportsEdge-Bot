@@ -16471,7 +16471,7 @@ setInterval(load, 60000);
           else if (roi <= -5 || ddf > 0.15) { sportMult = 0.85; sportReason = 'underperform'; }
         }
         // Loop 2: brier_ev
-        const baselineByDefault = { lol: 0.22, esports: 0.22, cs: 0.22, valorant: 0.23, tennis: 0.21, mma: 0.23, darts: 0.24, snooker: 0.24 };
+        const baselineByDefault = { lol: 0.22, esports: 0.22, cs: 0.22, valorant: 0.23, tennis: 0.21, mma: 0.23, darts: 0.24, snooker: 0.24, football: 0.21 };
         const brierBaseline = parseFloat(process.env[`BRIER_BASELINE_${sport.toUpperCase()}`]) || baselineByDefault[sport] || 0.25;
         const brierCurrent = brierN > 0 ? +(brierSum / brierN).toFixed(4) : null;
         let brierReduction = 0, brierReason = 'insufficient_sample';
@@ -18806,7 +18806,7 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
     const daysRaw = parseInt(parsed.query.days);
     const days = Number.isFinite(daysRaw) ? Math.max(7, Math.min(365, daysRaw)) : 30;
     const minN = parseInt(process.env.BRIER_EV_MIN_N || '20', 10);
-    const baselineByDefault = { lol: 0.22, esports: 0.22, cs: 0.22, valorant: 0.23, tennis: 0.21, mma: 0.23, darts: 0.24, snooker: 0.24 };
+    const baselineByDefault = { lol: 0.22, esports: 0.22, cs: 0.22, valorant: 0.23, tennis: 0.21, mma: 0.23, darts: 0.24, snooker: 0.24, football: 0.21 };
     const envKey = `BRIER_BASELINE_${sport.toUpperCase()}`;
     const baseline = parseFloat(process.env[envKey]) || baselineByDefault[sport] || 0.25;
     try {

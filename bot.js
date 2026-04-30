@@ -71,7 +71,7 @@ async function refreshBrierEvAdjustments() {
   // Default ON — defensivo: reduz EV ceiling quando modelo degrada (brier>baseline).
   // Desligar via BRIER_AUTO_EV_CAP=false.
   if (/^(0|false|no)$/i.test(String(process.env.BRIER_AUTO_EV_CAP || ''))) return;
-  const sports = ['esports', 'lol', 'dota2', 'cs', 'valorant', 'tennis', 'mma', 'darts', 'snooker'];
+  const sports = ['esports', 'lol', 'dota2', 'cs', 'valorant', 'tennis', 'mma', 'darts', 'snooker', 'football'];
   for (const sport of sports) {
     try {
       const r = await serverGet(`/brier-ev-adjustment?sport=${sport}`);
@@ -378,14 +378,17 @@ function _sharpDivergenceGate({ oddsObj, modelP, impliedP, maxPp, context = {} }
 
 /**
  * Calcula impliedP1/impliedP2 dejuiced a partir de odds {t1, t2}.
+ *
+ * Usa power method (lib/devig.js) — canônico para sharps com vig não-uniforme.
+ * O multiplicative simples (r/Σr) subestima impliedP em outsiders quando o
+ * vig é distribuído desigualmente (Pinnacle típicamente cobra mais vig em
+ * underdogs), gerando false-positive divergence em edge calc.
  */
+const _devigLib = require('./lib/devig');
 function _impliedFromOdds(oddsObj) {
-  const o1 = parseFloat(oddsObj?.t1);
-  const o2 = parseFloat(oddsObj?.t2);
-  if (!Number.isFinite(o1) || !Number.isFinite(o2) || o1 <= 1 || o2 <= 1) return null;
-  const r1 = 1 / o1, r2 = 1 / o2;
-  const vig = r1 + r2;
-  return { impliedP1: r1 / vig, impliedP2: r2 / vig };
+  const r = _devigLib.devigPower(oddsObj?.t1, oddsObj?.t2);
+  if (!r) return null;
+  return { impliedP1: r.p1, impliedP2: r.p2 };
 }
 
 /**
@@ -3851,6 +3854,8 @@ try {
   } else if (r?.error) {
     log('WARN', 'GATES-AUTOTUNE', `load failed: ${r.error}`);
   }
+  // Hydrate _pathDisableRuntime ocorre depois (linha ~5390 onde a const é declarada);
+  // chamada aqui quebraria por TDZ. loadFromDb já populou o cache do gates-runtime-state.
 } catch (e) { log('WARN', 'GATES-AUTOTUNE', `init: ${e.message}`); }
 
 // Epoch tracking — log inicial pra rastrear deploy. Capture real acontece em
@@ -5343,7 +5348,50 @@ let _lastModelCalibAlert = 0;
 
 // ── Path auto-guard: desativa em runtime hybrid/override path com CLV persistente negativo ──
 // Map sport → { hybridDisabled: bool, overrideDisabled: bool, reasonHybrid, reasonOverride, since }
+//
+// Persistência: gates_runtime_state com gate_key='path_hybrid_disabled' / 'path_override_disabled'.
+// Hydrate no boot pra não perder disable state em restart (sem persistir, ficava 6h
+// até próximo cron re-bloquear sport leak).
 const _pathDisableRuntime = new Map();
+const _PATH_GATE_KEY = { hybrid: 'path_hybrid_disabled', override: 'path_override_disabled' };
+
+function _hydratePathDisableFromGates() {
+  try {
+    const grs = require('./lib/gates-runtime-state');
+    const all = grs.getAll();
+    for (const [k, meta] of all.entries()) {
+      const [sport, gateKey] = k.split('|', 2);
+      if (gateKey !== _PATH_GATE_KEY.hybrid && gateKey !== _PATH_GATE_KEY.override) continue;
+      if (Number(meta.value) !== 1) continue;
+      const cur = _pathDisableRuntime.get(sport) || {};
+      if (gateKey === _PATH_GATE_KEY.hybrid) {
+        cur.hybridDisabled = true;
+        cur.reasonHybrid = meta.reason || null;
+      } else {
+        cur.overrideDisabled = true;
+        cur.reasonOverride = meta.reason || null;
+      }
+      cur.since = cur.since || (meta.updatedAt ? Number(meta.updatedAt) : Date.now());
+      _pathDisableRuntime.set(sport, cur);
+    }
+    if (_pathDisableRuntime.size > 0) {
+      log('INFO', 'PATH-GUARD', `Hydrated ${_pathDisableRuntime.size} sports from DB`);
+    }
+  } catch (e) { log('WARN', 'PATH-GUARD', `hydrate: ${e.message}`); }
+}
+
+function _persistPathDisable(sport, path, disabled, reason) {
+  try {
+    const grs = require('./lib/gates-runtime-state');
+    const gateKey = _PATH_GATE_KEY[path];
+    if (!gateKey) return;
+    if (disabled) {
+      grs.setAuto(db, sport, gateKey, 1, { reason: reason || null });
+    } else {
+      grs.removeAuto(db, sport, gateKey);
+    }
+  } catch (e) { log('WARN', 'PATH-GUARD', `persist ${sport}/${path}: ${e.message}`); }
+}
 
 function isPathDisabled(sport, path) {
   const e = _pathDisableRuntime.get(String(sport).toLowerCase());
@@ -5352,6 +5400,10 @@ function isPathDisabled(sport, path) {
   if (path === 'override') return !!e.overrideDisabled;
   return false;
 }
+
+// Hydrate disabled paths do gates_runtime_state. Roda só uma vez no boot;
+// loadFromDb já correu antes (linha ~3850 do boot try-block).
+_hydratePathDisableFromGates();
 
 async function runPathGuardCycle() {
   // Desativa via env PATH_GUARD_AUTO=false. Min sample 20 em 14d. Cutoff CLV ≤ -1%.
@@ -5393,10 +5445,12 @@ async function runPathGuardCycle() {
       const reasonField = r.path === 'hybrid' ? 'reasonHybrid' : 'reasonOverride';
       if (r.n >= minN && r.avg_clv != null && r.avg_clv <= cutoff) {
         if (!curr[field]) {
+          const reasonStr = `CLV ${r.avg_clv.toFixed(2)}% n=${r.n} (${daysWin}d)`;
           curr[field] = true;
-          curr[reasonField] = `CLV ${r.avg_clv.toFixed(2)}% n=${r.n} (${daysWin}d)`;
+          curr[reasonField] = reasonStr;
           curr.since = Date.now();
           _pathDisableRuntime.set(key, curr);
+          _persistPathDisable(key, r.path, true, reasonStr);
           alerts.push(`🚫 ${r.sport}/${r.path} desativado: CLV ${r.avg_clv.toFixed(2)}% em ${r.n} tips`);
           log('WARN', 'PATH-GUARD', `${r.sport}/${r.path} auto-disabled: CLV=${r.avg_clv.toFixed(2)}% n=${r.n}`);
         }
@@ -5404,6 +5458,7 @@ async function runPathGuardCycle() {
         curr[field] = false;
         delete curr[reasonField];
         _pathDisableRuntime.set(key, curr);
+        _persistPathDisable(key, r.path, false, null);
         restored.push(`✅ ${r.sport}/${r.path} reativado: CLV ${r.avg_clv.toFixed(2)}%`);
         log('INFO', 'PATH-GUARD', `${r.sport}/${r.path} reativado: CLV=${r.avg_clv.toFixed(2)}%`);
       }
@@ -9525,8 +9580,14 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
       const sportArg = (parts3[2] || '').toLowerCase();
       if (sportArg && _pathDisableRuntime.has(sportArg)) {
         _pathDisableRuntime.delete(sportArg);
+        _persistPathDisable(sportArg, 'hybrid', false);
+        _persistPathDisable(sportArg, 'override', false);
         await send(token, chatId, `✅ Path guard resetado para *${sportArg}*`);
       } else if (!sportArg) {
+        for (const sp of _pathDisableRuntime.keys()) {
+          _persistPathDisable(sp, 'hybrid', false);
+          _persistPathDisable(sp, 'override', false);
+        }
         _pathDisableRuntime.clear();
         await send(token, chatId, `✅ Path guard resetado (todos sports)`);
       } else {
