@@ -6,6 +6,7 @@ tokens.txt
 *.db-wal
 *.db-shm
 data/
+backups/
 start-bot.bat
 mma betting/
 .fuse_hidden*

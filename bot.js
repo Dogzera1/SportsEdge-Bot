@@ -18604,6 +18604,42 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   setInterval(() => runNightlyRetrainCheck().catch(e => log('ERROR', 'NIGHTLY-RETRAIN', e.message)), 15 * 60 * 1000);
   setTimeout(() => runNightlyRetrainCheck().catch(() => {}), 45 * 60 * 1000); // primeiro check 45min pós-boot (evita colidir com outros)
 
+  // ── DB Backup diário ──
+  // VACUUM INTO snapshot pra backups/ (default DB_BACKUP_HOUR_UTC=4 = 1h BRT).
+  // Retention DB_BACKUP_KEEP_DAYS (default 7d). Gated por DB_BACKUP_AUTO=true.
+  // Cron tick 30min checa hora; runOnce por dia via _lastDbBackupDay.
+  let _lastDbBackupDay = null;
+  let _dbBackupRunning = false;
+  async function runDbBackupCheck() {
+    if (!/^true$/i.test(String(process.env.DB_BACKUP_AUTO || 'true'))) return;
+    if (_dbBackupRunning) return;
+    const hourUtc = parseInt(process.env.DB_BACKUP_HOUR_UTC || '4', 10);
+    const now = new Date();
+    const today = now.toISOString().slice(0, 10);
+    if (_lastDbBackupDay === today) return;
+    if (now.getUTCHours() !== hourUtc) return;
+    _lastDbBackupDay = today;
+    _dbBackupRunning = true;
+    try {
+      const { runBackup } = require('./scripts/backup-db');
+      const r = await runBackup({ silent: true });
+      if (r.ok) {
+        log('INFO', 'DB-BACKUP',
+          `${require('path').basename(r.dest)} | ${(r.dest_size_bytes / 1024 / 1024).toFixed(1)}MB | ${r.duration_ms}ms | swept=${r.swept_count} (>${r.keep_days}d)`);
+      } else {
+        log('WARN', 'DB-BACKUP', `falhou: ${r.reason}${r.error ? ` (${r.error})` : ''}`);
+      }
+    } catch (e) {
+      log('ERROR', 'DB-BACKUP', `exception: ${e.message}`);
+    } finally {
+      _dbBackupRunning = false;
+    }
+  }
+  setInterval(() => runDbBackupCheck().catch(() => {}), 30 * 60 * 1000);
+  // Primeiro check 25min pós-boot — não força backup imediato (espera hora UTC),
+  // mas garante que mesmo bot que sobe já no horário pegue o slot.
+  setTimeout(() => runDbBackupCheck().catch(() => {}), 25 * 60 * 1000);
+
   // Pre-Match Final Check: cron 5min, valida tips a <30min do match.
   setInterval(() => runPreMatchFinalCheckCycle().catch(e => log('ERROR', 'PRE-MATCH-CHECK', e.message)), 5 * 60 * 1000);
   setTimeout(() => runPreMatchFinalCheckCycle().catch(() => {}), 6 * 60 * 1000);
