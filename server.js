@@ -9045,6 +9045,42 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // ── thespike.gg Valorant: team map + agent stats ──
+  // GET /admin/thespike-test?slug=fnatic&id=1234
+  // POST /admin/sync-thespike?teams=slug:id,slug2:id2
+  if (p === '/admin/thespike-test') {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const { fetchTeamStats } = require('./lib/thespike-valorant-scraper');
+      const slug = String(parsed.query.slug || '').trim();
+      const id = String(parsed.query.id || '').trim();
+      if (!slug || !id) { sendJson(res, { ok: false, error: 'slug+id required' }, 400); return; }
+      const r = await fetchTeamStats(slug, id);
+      sendJson(res, r);
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+  if (p === '/admin/sync-thespike' && (req.method === 'POST' || req.method === 'GET')) {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const teamsParam = String(parsed.query.teams || '').trim();
+      if (!teamsParam) { sendJson(res, { ok: false, error: 'teams=slug1:id1,slug2:id2 required' }, 400); return; }
+      const teams = teamsParam.split(',').map(p => {
+        const [slug, id, name] = p.split(':');
+        return { slug, id, name: name || slug };
+      }).filter(t => t.slug && t.id);
+      sendJson(res, { ok: true, message: 'Sync iniciado em bg', count: teams.length });
+      setImmediate(async () => {
+        try {
+          const { syncTeamStats } = require('./lib/thespike-valorant-scraper');
+          const r = await syncTeamStats(db, teams);
+          log('INFO', 'THESPIKE-SYNC', `done: teams_ok=${r.teams_ok}/${r.total} errors=${r.errors}`);
+        } catch (e) { log('ERROR', 'THESPIKE-SYNC', e.message); }
+      });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   // ── STRATZ Dota: hero matchup table ──
   // GET /admin/stratz-test?heroId=1
   // POST /admin/sync-stratz-matchups → bulk all heroes (138)

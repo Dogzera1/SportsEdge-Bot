@@ -1593,6 +1593,32 @@ const migrations = [
     },
   },
   {
+    id: '068_valorant_team_stats',
+    up(db) {
+      // thespike.gg: map win rate + agent composition per team Valorant.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS valorant_team_map_stats (
+          team_slug TEXT NOT NULL,
+          team_id TEXT NOT NULL,
+          team_name TEXT,
+          map TEXT NOT NULL,
+          played INTEGER, won INTEGER, win_rate REAL,
+          ingested_at TEXT DEFAULT (datetime('now')),
+          PRIMARY KEY (team_id, map)
+        );
+        CREATE TABLE IF NOT EXISTS valorant_team_agent_stats (
+          team_slug TEXT NOT NULL,
+          team_id TEXT NOT NULL,
+          team_name TEXT,
+          agent TEXT NOT NULL,
+          pick_pct REAL, win_rate REAL,
+          ingested_at TEXT DEFAULT (datetime('now')),
+          PRIMARY KEY (team_id, agent)
+        );
+      `);
+    },
+  },
+  {
     id: '067_stratz_hero_matchups',
     up(db) {
       // STRATZ hero matchup table — winrate advantage A vs B.
