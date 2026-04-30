@@ -9045,6 +9045,42 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // ── Understat: xG football scraper ──
+  // GET /admin/understat-test?league=EPL&year=2025  → debug fetchSeasonMatches
+  // POST /admin/sync-understat?leagues=EPL,La_Liga&year=2025 → bulk sync bg
+  if (p === '/admin/understat-test') {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const { fetchSeasonMatches } = require('./lib/understat-scraper');
+      const league = String(parsed.query.league || 'EPL');
+      const year = parseInt(parsed.query.year || '2025', 10) || 2025;
+      const r = await fetchSeasonMatches(league, year);
+      const out = { ok: r.ok, league: r.league, year, total: r.matches?.length, sample: (r.matches || []).slice(0, 3) };
+      sendJson(res, out);
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+  if (p === '/admin/sync-understat' && (req.method === 'POST' || req.method === 'GET')) {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const leagues = String(parsed.query.leagues || 'EPL,La_Liga,Bundesliga,Serie_A,Ligue_1').split(',').map(s => s.trim()).filter(Boolean);
+      const year = parseInt(parsed.query.year || String(new Date().getFullYear() - (new Date().getMonth() < 6 ? 1 : 0)), 10);
+      const beforeCount = db.prepare(`SELECT COUNT(*) AS n FROM understat_matches`).get().n;
+      sendJson(res, { ok: true, message: 'Sync iniciado em bg', leagues, year, beforeCount });
+      setImmediate(async () => {
+        try {
+          const { syncLeagueSeason } = require('./lib/understat-scraper');
+          for (const lg of leagues) {
+            const r = await syncLeagueSeason(db, lg, year);
+            log('INFO', 'UNDERSTAT-SYNC', `${lg} ${year}: ${r.ok ? `${r.inserted}/${r.total_seen}` : 'FAIL ' + r.reason}`);
+            await new Promise(res => setTimeout(res, 1500));
+          }
+        } catch (e) { log('ERROR', 'UNDERSTAT-SYNC', e.message); }
+      });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   // GET /admin/lol-xcheck?days=14&run=1 → cross-source kill validation.
   // run=1 dispara nova varredura; sem param só lista flagged.
   if (p === '/admin/lol-xcheck') {

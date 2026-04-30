@@ -1593,6 +1593,28 @@ const migrations = [
     },
   },
   {
+    id: '065_understat_matches',
+    up(db) {
+      // xG (expected goals) per match das 6 ligas top via understat.com.
+      // Alimenta Poisson model de football com λ_xG melhor que goals históricos.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS understat_matches (
+          match_id TEXT PRIMARY KEY,
+          league TEXT NOT NULL,
+          season_year INTEGER,
+          date TEXT,
+          team_h TEXT, team_a TEXT,
+          goals_h INTEGER, goals_a INTEGER,
+          xg_h REAL, xg_a REAL,
+          is_result INTEGER DEFAULT 0,
+          ingested_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_understat_teams ON understat_matches(team_h, team_a, date);
+        CREATE INDEX IF NOT EXISTS idx_understat_league_date ON understat_matches(league, date);
+      `);
+    },
+  },
+  {
     id: '064_lol_game_objectives',
     up(db) {
       // Per-game objective stats scraped do gol.gg. Uma row por (golgg_gameid).
