@@ -6196,6 +6196,7 @@ async function checkLiveNotifications() {
     const now = Date.now();
     const lolList = await serverGet('/lol-matches').catch(() => []);
     const allLive = Array.isArray(lolList) ? lolList.filter(m => m.status === 'live') : [];
+    try { _metrics.gauge('live_matches', allLive.length, { sport: 'lol' }); } catch (_) {}
 
     for (const match of allLive) {
       // Ao vivo: determinar mapa atual via Riot OU via placar da série (PS-only)
@@ -12141,6 +12142,7 @@ async function _pollDotaInner(runOnce = false) {
 
     const now = Date.now();
     const liveCount = matches.filter(m => m.status === 'live').length;
+    try { _metrics.gauge('live_matches', liveCount, { sport: 'dota2' }); } catch (_) {}
     log('INFO', 'AUTO-DOTA', `${matches.length} partidas (${liveCount} live, ${matches.length - liveCount} upcoming)`);
 
     // Prioridade: live primeiro, depois upcoming por horário asc
@@ -13916,6 +13918,7 @@ async function pollTennis(runOnce = false) {
         return new Date(a.time || 0) - new Date(b.time || 0);
       });
       const _hasLiveT = matches.some(m => m.status === 'live');
+      try { _metrics.gauge('live_matches', matches.filter(m => m.status === 'live').length, { sport: 'tennis' }); } catch (_) {}
       if (_hasLiveT) _livePhaseEnter('tennis');
       let _drainedT = false;
       for (const match of matches) {
@@ -15317,6 +15320,7 @@ async function pollFootball(runOnce = false) {
         return new Date(a.time || 0) - new Date(b.time || 0);
       });
       const _hasLiveFb = matches.some(m => m.status === 'live');
+      try { _metrics.gauge('live_matches', matches.filter(m => m.status === 'live').length, { sport: 'football' }); } catch (_) {}
       if (_hasLiveFb) _livePhaseEnter('football');
       let _drainedFb = false;
       for (const match of matches) {
@@ -16591,6 +16595,8 @@ async function pollCs(runOnce = false) {
         return [];
       }
       const _hasLiveCs = relevant.some(m => m.status === 'live');
+      const _liveCsCount = relevant.filter(m => m.status === 'live').length;
+      try { _metrics.gauge('live_matches', _liveCsCount, { sport: 'cs' }); } catch (_) {}
       _hadLiveCs = _hasLiveCs;
       if (_hasLiveCs) _livePhaseEnter('cs');
       let _drainedCs = false;
@@ -16650,13 +16656,28 @@ async function pollCs(runOnce = false) {
         let scoreboard = null;
         let hltvMatchId = null;
         if (match.status === 'live') {
+          // Visibility: track scoreboard fetch outcomes pra detectar HLTV_PROXY_BASE
+          // off/degradado em prod. Counters em /health/metrics:
+          //   cs_scoreboard|status=ok        → fetched + parsed
+          //   cs_scoreboard|status=no_match  → HLTV match_id não resolvido
+          //   cs_scoreboard|status=fetch_fail → proxy 5xx/timeout/missing
+          //   cs_scoreboard|status=parse_null → proxy ok mas sem campo scoreboard
           const found = await hltv.getHltvMatchId(match.team1, match.team2, match.time).catch(() => null);
-          if (found?.matchId) {
+          if (!found?.matchId) {
+            try { _metrics.incr('cs_scoreboard', { status: 'no_match' }); } catch (_) {}
+          } else {
             hltvMatchId = found.matchId;
             const raw = await hltv.getScoreboard(found.matchId, 10).catch(() => null);
-            scoreboard = hltv.summarizeScoreboard(raw);
-            if (scoreboard) {
-              log('INFO', 'AUTO-CS', `Scorebot ${match.team1} vs ${match.team2}: ${scoreboard.mapName} ${scoreboard.scoreT}-${scoreboard.scoreCT} (round ${scoreboard.round})`);
+            if (!raw) {
+              try { _metrics.incr('cs_scoreboard', { status: 'fetch_fail' }); } catch (_) {}
+            } else {
+              scoreboard = hltv.summarizeScoreboard(raw);
+              if (scoreboard) {
+                try { _metrics.incr('cs_scoreboard', { status: 'ok' }); } catch (_) {}
+                log('INFO', 'AUTO-CS', `Scorebot ${match.team1} vs ${match.team2}: ${scoreboard.mapName} ${scoreboard.scoreT}-${scoreboard.scoreCT} (round ${scoreboard.round})`);
+              } else {
+                try { _metrics.incr('cs_scoreboard', { status: 'parse_null' }); } catch (_) {}
+              }
             }
           }
         }
@@ -17225,6 +17246,7 @@ async function pollValorant(runOnce = false) {
         return [];
       }
       const _hasLiveVal = relevant.some(m => m.status === 'live');
+      try { _metrics.gauge('live_matches', relevant.filter(m => m.status === 'live').length, { sport: 'valorant' }); } catch (_) {}
       _hadLiveVal = _hasLiveVal;
       if (_hasLiveVal) _livePhaseEnter('valorant');
       let _drainedVal = false;
