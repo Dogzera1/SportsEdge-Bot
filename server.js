@@ -7179,13 +7179,20 @@ setInterval(load, 10000);
           if (idStr) {
             const id = parseInt(idStr, 10);
             if (!Number.isFinite(id)) return { ok: false, error: 'id inválido' };
-            row = db.prepare(`SELECT id, profit_reais FROM tips WHERE id = ? AND sport = ?`).get(id, sport);
+            row = db.prepare(`SELECT id, result, profit_reais FROM tips WHERE id = ? AND sport = ?`).get(id, sport);
           } else {
-            row = db.prepare(`SELECT id, profit_reais FROM tips WHERE match_id = ? AND sport = ? ORDER BY sent_at DESC LIMIT 1`).get(matchId, sport);
+            row = db.prepare(`SELECT id, result, profit_reais FROM tips WHERE match_id = ? AND sport = ? ORDER BY sent_at DESC LIMIT 1`).get(matchId, sport);
           }
           if (!row) return { ok: true, changes: 0 };
 
           const r = db.prepare(`UPDATE tips SET result = NULL, settled_at = NULL, profit_reais = NULL WHERE id = ? AND sport = ?`).run(row.id, sport);
+          // Audit trail: registra reversão pra forensics. Mig 073 garante tabela.
+          try {
+            db.prepare(`
+              INSERT INTO tip_settlement_audit (tip_id, sport, prev_result, new_result, prev_profit_reais, new_profit_reais, actor, reason, source)
+              VALUES (?, ?, ?, NULL, ?, NULL, ?, ?, ?)
+            `).run(row.id, sport, row.result || null, row.profit_reais ?? null, 'admin', 'reopen', '/reopen-tip');
+          } catch (_) {}
           // Reverte o impacto no current_banca (soma inversa do profit_reais).
           if (Number.isFinite(row.profit_reais) && row.profit_reais !== 0) {
             const bk = stmts.getBankroll.get(sport);
@@ -12324,6 +12331,12 @@ setInterval(load, 60000);
         }
       }
       db.prepare(`UPDATE tips SET result = NULL, profit_reais = NULL, settled_at = NULL WHERE id = ?`).run(id);
+      try {
+        db.prepare(`
+          INSERT INTO tip_settlement_audit (tip_id, sport, prev_result, new_result, prev_profit_reais, new_profit_reais, actor, reason, source)
+          VALUES (?, ?, ?, NULL, ?, NULL, ?, ?, ?)
+        `).run(id, row.sport, row.result || null, row.profit_reais ?? null, 'admin', 'mt_settle_revert', '/admin/mt-revert');
+      } catch (_) {}
       sendJson(res, { ok: true, id, sport: row.sport, prev_result: row.result, reverted_profit: row.profit_reais });
     } catch (e) { sendJson(res, { error: e.message }, 500); }
     return;
@@ -12397,6 +12410,12 @@ setInterval(load, 60000);
           }
           db.prepare(`UPDATE tips SET result = NULL, profit_reais = NULL, settled_at = NULL WHERE id = ?`)
             .run(t.id);
+          try {
+            db.prepare(`
+              INSERT INTO tip_settlement_audit (tip_id, sport, prev_result, new_result, prev_profit_reais, new_profit_reais, actor, reason, source)
+              VALUES (?, ?, ?, NULL, ?, NULL, ?, ?, ?)
+            `).run(t.id, t.sport, t.result || null, t.profit_reais ?? null, 'admin', 'mt_settle_audit_revert', '/admin/mt-settle-audit');
+          } catch (_) {}
           reverts.push({ id: t.id, sport: t.sport, prev_result: t.result, reverted_profit: t.profit_reais });
           reverted++;
           log('WARN', 'MT-AUDIT', `revert id=${t.id} ${t.sport} ${t.market_type} ${t.participant1} vs ${t.participant2}: ${t.result} profit=${t.profit_reais} → pending (shadow=${t.shadow_pending ? 'pending' : 'none'})`);
@@ -13694,6 +13713,12 @@ setInterval(load, 60000);
               db.prepare(`UPDATE bankroll SET current_banca = ?, updated_at = datetime('now') WHERE sport = ?`).run(nova, s.sport);
             }
             db.prepare(`UPDATE tips SET result = NULL, profit_reais = NULL, settled_at = NULL, is_live = 0 WHERE id = ?`).run(s.id);
+            try {
+              db.prepare(`
+                INSERT INTO tip_settlement_audit (tip_id, sport, prev_result, new_result, prev_profit_reais, new_profit_reais, actor, reason, source)
+                VALUES (?, ?, ?, NULL, ?, NULL, ?, ?, ?)
+              `).run(s.id, s.sport, s.result || null, s.profit_reais ?? null, 'admin', 'suspect_settle_revert', '/admin/audit-revert-suspect');
+            } catch (_) {}
             applied++;
             // Reverte shadow row (re-settle com lógica nova 5min)
             const [pa, pb] = String(s.match).split(' vs ');

@@ -1616,8 +1616,45 @@ async function fetchClvMultiplier(sport, league) {
   return fallback;
 }
 
+// ── Daily tip limit ────────────────────────────────────────────────────────
+// Defesa contra bug em scanner / loop que possa emitir tips em rajada (50/h).
+// Stake cap não protege contra concentração temporal — DAILY_TIP_LIMIT sim.
+// Opt-in: DAILY_TIP_LIMIT_<SPORT> (per-sport) > DAILY_TIP_LIMIT (global).
+// Sem env setada, comportamento original (sem cap por contagem).
+function _getDailyTipLimit(sport) {
+  const sportKey = `DAILY_TIP_LIMIT_${String(sport || '').toUpperCase()}`;
+  const sportLimit = parseInt(process.env[sportKey] || '', 10);
+  if (Number.isFinite(sportLimit) && sportLimit > 0) return sportLimit;
+  const globalLimit = parseInt(process.env.DAILY_TIP_LIMIT || '', 10);
+  if (Number.isFinite(globalLimit) && globalLimit > 0) return globalLimit;
+  return null;
+}
+function _getDailyTipCount(sport) {
+  try {
+    const r = db.prepare(`
+      SELECT COUNT(*) AS n FROM tips
+      WHERE sport = ?
+        AND sent_at >= datetime('now', 'start of day')
+        AND (archived IS NULL OR archived = 0)
+        AND COALESCE(is_shadow, 0) = 0
+    `).get(sport);
+    return r?.n || 0;
+  } catch (_) { return 0; }
+}
+
 async function applyGlobalRisk(sport, desiredUnits, leagueSlug) {
   if (!desiredUnits || desiredUnits <= 0) return { ok: false, units: 0, reason: 'stake_zero' };
+
+  // Daily tip limit gate — bloqueia se contagem do dia atingiu cap configurado.
+  // Reset natural à meia-noite (sent_at >= start of day).
+  const dailyLimit = _getDailyTipLimit(sport);
+  if (dailyLimit != null) {
+    const count = _getDailyTipCount(sport);
+    if (count >= dailyLimit) {
+      log('WARN', 'RISK', `${sport}: daily tip limit ${count}/${dailyLimit} atingido — BLOQUEADO até 00:00`);
+      return { ok: false, units: 0, reason: 'daily_tip_limit' };
+    }
+  }
 
   // ── Drawdown check: reduz/bloqueia stakes quando banca está em queda ──
   // Gradiente: SOFT (15%)×0.5 → TAPER (20%)×0.35 → HARD (25%)=bloqueia → DRAINED (banca<=0)=bloqueia.
@@ -1756,6 +1793,26 @@ async function applyGlobalRisk(sport, desiredUnits, leagueSlug) {
   return { ok: true, units: adjusted, reason };
 }
 
+// ── Opt-out helper ──
+// Remove user de todas as subscriptions. Usado por /stop cmd e auto-trigger
+// em Telegram 403 (bot bloqueado). Best-effort — falha de DB persistence não
+// impede o flush local.
+async function _unsubscribeUserAll(userId, reason) {
+  try {
+    subscribedUsers.delete(userId);
+    await serverPost('/save-user', {
+      userId,
+      subscribed: false,
+      sportPrefs: [],
+    }).catch(() => null);
+    log('INFO', 'OPT-OUT', `userId=${userId} unsubscribed (reason=${reason})`);
+    return true;
+  } catch (e) {
+    log('WARN', 'OPT-OUT', `userId=${userId} fail: ${e.message}`);
+    return false;
+  }
+}
+
 // ── Send Helpers ──
 function send(token, chatId, text, extra) {
   return tgRequest(token, 'sendMessage', {
@@ -1777,6 +1834,9 @@ async function sendDM(token, userId, text, extra) {
   const code = res.error_code;
   const desc = String(res.description || '');
   if (code === 403) {
+    // Auto-unsubscribe — Telegram 403 = user bloqueou o bot. Continuar tentando
+    // gera log noise + rate-limit. Best-effort (não throw se save falhar).
+    _unsubscribeUserAll(userId, 'tg_403_blocked').catch(() => {});
     throw Object.assign(new Error(`Telegram 403: ${desc}`), { code: 403 });
   }
   if (code === 400 && /parse|entities|markdown|reserved|unsupported/i.test(desc)) {
@@ -7151,6 +7211,7 @@ async function autoAnalyzeMatch(token, match) {
                 momentum: 0.03, // LoL momentum calibrado (project_lol_series_model)
                 minOdd: minOddLol,
                 maxOdd: maxOddLol,
+                maxPerMatch: parseInt(process.env.LOL_MARKET_MAX_PER_MATCH || '', 10) || null,
               });
               // ── Frente 4: extra markets (dragons/barons/towers) ──
               // Shadow-only por enquanto (LOL_EXTRA_MARKETS=true ativa).
@@ -10721,7 +10782,12 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
         `*Comandos disponíveis:*\n` +
         `/notificacoes — gerenciar notificações\n` +
         `/stats — estatísticas públicas\n` +
-        `/help — esta mensagem`
+        `/stop — parar de receber tips\n` +
+        `/help — esta mensagem\n\n` +
+        `⚠️ *Aviso:* Tips são recomendações baseadas em modelo estatístico, ` +
+        `não garantia de retorno. Apostas envolvem risco de perda. ` +
+        `Aposte apenas com responsabilidade e maioridade (+18). ` +
+        `Em caso de dificuldades com jogo: jogadoresanonimos.org.br`
       );
       return;
     }
@@ -11571,6 +11637,13 @@ async function poll(token, sport) {
             await handleProximas(token, chatId, sport);
           } else if (text === '⚖️ Fair Odds') {
             await handleFairOdds(token, chatId, sport);
+          } else if (text === '/stop' || text === '/parar' || text === '/unsubscribe') {
+            // Hard opt-out: remove de todas subscriptions de todos sports.
+            await _unsubscribeUserAll(chatId, 'user_cmd');
+            await send(token, chatId,
+              `🔕 *Notificações desativadas em todos os esportes.*\n\n` +
+              `Você não receberá mais tips. Use /notificacoes em qualquer sport para reativar quando quiser.`
+            );
           } else if (text.startsWith('/notificacoes') || text.startsWith('/notificações')) {
             const action = text.split(' ')[1];
             await handleNotificacoes(token, chatId, sport, action);
@@ -12765,6 +12838,7 @@ async function _pollDotaInner(runOnce = false) {
               momentum: 0.04, // Dota2 momentum retrained (project_dota2_momentum_features)
               minOdd: minOddDota,
               maxOdd: maxOddDota,
+              maxPerMatch: parseInt(process.env.DOTA_MARKET_MAX_PER_MATCH || '', 10) || null,
             });
             if (found.length >= 2 && process.env.DOTA_CORRELATION_ADJ !== 'false') {
               try { found = _applyEsportsCorrelation(found, 'dota2', match); } catch (e) { reportBug('DOTA-CORR', e); }
@@ -17080,6 +17154,7 @@ async function pollCs(runOnce = false) {
                 momentum: 0.04, // CS2 momentum (project_esports_momentum_wave)
                 minOdd: minOddCs,
                 maxOdd: maxOddCs,
+                maxPerMatch: parseInt(process.env.CS_MARKET_MAX_PER_MATCH || '', 10) || null,
               });
               if (found.length >= 2 && process.env.CS_CORRELATION_ADJ !== 'false') {
                 try { found = _applyEsportsCorrelation(found, 'cs2', match); } catch (e) { reportBug('CS-CORR', e); }
@@ -17678,6 +17753,7 @@ async function pollValorant(runOnce = false) {
                 momentum: 0.04, // Valorant momentum (project_esports_momentum_wave)
                 minOdd: minOddVal,
                 maxOdd: maxOddVal,
+                maxPerMatch: parseInt(process.env.VAL_MARKET_MAX_PER_MATCH || '', 10) || null,
               });
               if (found.length >= 2 && process.env.VAL_CORRELATION_ADJ !== 'false') {
                 try { found = _applyEsportsCorrelation(found, 'valorant', match); } catch (e) { reportBug('VAL-CORR', e); }

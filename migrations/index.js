@@ -1783,6 +1783,31 @@ const migrations = [
     },
   },
   {
+    id: '073_tip_settlement_audit',
+    up(db) {
+      // Audit log de settle/void/reactivate em tips. Antes server.js:7188 e :7774
+      // permitiam result=NULL sem trail — admin podia voidar/re-settlar sem registro.
+      // Tabela append-only: cada mudança em result/profit_reais gera row.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS tip_settlement_audit (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          tip_id INTEGER NOT NULL,
+          sport TEXT,
+          prev_result TEXT,
+          new_result TEXT,
+          prev_profit_reais REAL,
+          new_profit_reais REAL,
+          actor TEXT,
+          reason TEXT,
+          source TEXT,
+          created_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_settle_audit_tip ON tip_settlement_audit(tip_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_settle_audit_recent ON tip_settlement_audit(created_at DESC);
+      `);
+    },
+  },
+  {
     id: '064_lol_game_objectives',
     up(db) {
       // Per-game objective stats scraped do gol.gg. Uma row por (golgg_gameid).
