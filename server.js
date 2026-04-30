@@ -9152,6 +9152,32 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // GET /admin/fb-features?home=X&away=Y&league=Premier%20League
+  // Retorna market closing benchmark + recent form de football_data_csv +
+  // model prediction blended.
+  if (p === '/admin/fb-features') {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const home = String(parsed.query.home || '').trim();
+      const away = String(parsed.query.away || '').trim();
+      const league = String(parsed.query.league || 'Premier League').trim();
+      if (!home || !away) { sendJson(res, { ok: false, error: 'home+away required' }, 400); return; }
+      const { getClosingOddsBenchmark, getShotXgForm, getMarketDivergence, getLeagueBaseline } = require('./lib/football-data-features');
+      const market = getClosingOddsBenchmark(db, home, away);
+      const homeForm = getShotXgForm(db, home, { days: 90 });
+      const awayForm = getShotXgForm(db, away, { days: 90 });
+      const leagueBaseline = getLeagueBaseline(db, league);
+      let model = null, divergence = null;
+      try {
+        const { predictFootball } = require('./lib/football-poisson-trained');
+        model = predictFootball({ teamHome: home, teamAway: away, league, db });
+        if (model && market) divergence = getMarketDivergence(model, market);
+      } catch (_) {}
+      sendJson(res, { ok: true, input: { home, away, league }, market, homeForm, awayForm, leagueBaseline, model, divergence });
+    } catch (e) { sendJson(res, { ok: false, error: e.message, stack: e.stack }, 500); }
+    return;
+  }
+
   // ── football-data.co.uk: CSV histórico (substituiu understat - SPA mudou) ──
   // GET /admin/football-data-test?league=EPL&season=2425
   // POST /admin/sync-football-data?leagues=EPL,La%20Liga&season=2425

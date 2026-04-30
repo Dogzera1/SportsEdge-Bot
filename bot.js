@@ -15268,16 +15268,20 @@ async function pollFootball(runOnce = false) {
               teamHome: match.team1,
               teamAway: match.team2,
               league: simpleName,
+              db,
             });
             if (!fbTrained && richLeague && richLeague !== simpleName) {
               fbTrained = predictFootballTrained({
                 teamHome: match.team1,
                 teamAway: match.team2,
                 league: richLeague,
+                db,
               });
             }
             if (fbTrained) {
-              log('INFO', 'FB-TRAINED', `${match.team1} vs ${match.team2} [${fbTrained.league_key}]: pH=${(fbTrained.pH*100).toFixed(1)}% pD=${(fbTrained.pD*100).toFixed(1)}% pA=${(fbTrained.pA*100).toFixed(1)}% conf=${fbTrained.confidence.toFixed(2)}`);
+              const _md = fbTrained.market_divergence;
+              const _mdMsg = _md ? ` mkt_div=${(_md.max_divergence*100).toFixed(1)}pp${_md.suspect ? ' [SUSPECT]' : ''}` : '';
+              log('INFO', 'FB-TRAINED', `${match.team1} vs ${match.team2} [${fbTrained.league_key}]: pH=${(fbTrained.pH*100).toFixed(1)}% pD=${(fbTrained.pD*100).toFixed(1)}% pA=${(fbTrained.pA*100).toFixed(1)}% conf=${fbTrained.confidence.toFixed(2)}${_mdMsg}`);
             } else if (simpleName || richLeague) {
               // Diagnóstico: log warn-once por league name desconhecido. Ajuda
               // usuário ver gap entre nomes do feed live e keys nos params trained.
