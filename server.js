@@ -13694,15 +13694,21 @@ setInterval(load, 60000);
         if (!Number.isFinite(tipMs)) { results.skipped++; continue; }
         const before = new Date(tipMs - 10*86400_000).toISOString().slice(0,19).replace('T',' ');
         const after = new Date(tipMs + 10*86400_000).toISOString().slice(0,19).replace('T',' ');
+        // Procura em match_results com filtro DIRETO de nome (lower+strip mesma normalização do JS).
+        // Antes só por data → 50 candidates não cobria todo o tennis circuit em 20d.
         const candidates = db.prepare(`
           SELECT match_id, team1, team2, winner, final_score, resolved_at, league
           FROM match_results
           WHERE game = 'tennis'
             AND winner IS NOT NULL AND winner != ''
             AND resolved_at >= ? AND resolved_at <= ?
+            AND (
+              REPLACE(REPLACE(REPLACE(REPLACE(lower(team1),' ',''),'-',''),'.',''),'''','') IN (?, ?)
+              OR REPLACE(REPLACE(REPLACE(REPLACE(lower(team2),' ',''),'-',''),'.',''),'''','') IN (?, ?)
+            )
           ORDER BY ABS(julianday(resolved_at) - julianday(?)) ASC
-          LIMIT 50
-        `).all(before, after, t.sent_at);
+          LIMIT 200
+        `).all(before, after, n1, n2, n1, n2, t.sent_at);
         // Match por nome (normalizado)
         let mr = null;
         for (const c of candidates) {
