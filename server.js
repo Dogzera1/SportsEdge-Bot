@@ -9152,9 +9152,43 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // ── Understat: xG football scraper ──
-  // GET /admin/understat-test?league=EPL&year=2025  → debug fetchSeasonMatches
-  // POST /admin/sync-understat?leagues=EPL,La_Liga&year=2025 → bulk sync bg
+  // ── football-data.co.uk: CSV histórico (substituiu understat - SPA mudou) ──
+  // GET /admin/football-data-test?league=EPL&season=2425
+  // POST /admin/sync-football-data?leagues=EPL,La%20Liga&season=2425
+  if (p === '/admin/football-data-test') {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const { fetchLeagueSeason } = require('./lib/football-data-csv');
+      const league = String(parsed.query.league || 'EPL');
+      const season = String(parsed.query.season || '2425');
+      const r = await fetchLeagueSeason(league, season);
+      const out = { ok: r.ok, reason: r.reason, status: r.status, league: r.league, season, total: r.rows?.length, sample: (r.rows || []).slice(0, 2), url: r.url };
+      sendJson(res, out);
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+  if (p === '/admin/sync-football-data' && (req.method === 'POST' || req.method === 'GET')) {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const leagues = String(parsed.query.leagues || 'EPL,La Liga,Bundesliga,Serie A,Ligue 1').split(',').map(s => s.trim()).filter(Boolean);
+      const season = String(parsed.query.season || '2425');
+      const beforeCount = db.prepare(`SELECT COUNT(*) AS n FROM football_data_csv`).get().n;
+      sendJson(res, { ok: true, message: 'Sync iniciado em bg', leagues, season, beforeCount });
+      setImmediate(async () => {
+        try {
+          const { syncLeagueSeason } = require('./lib/football-data-csv');
+          for (const lg of leagues) {
+            const r = await syncLeagueSeason(db, lg, season);
+            log('INFO', 'FD-CSV-SYNC', `${lg} ${season}: ${r.ok ? `${r.inserted}/${r.total}` : 'FAIL ' + r.reason}`);
+            await new Promise(res => setTimeout(res, 800));
+          }
+        } catch (e) { log('ERROR', 'FD-CSV-SYNC', e.message); }
+      });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
+  // Understat (deprecated — site SPA agora, mantido pra ref)
   if (p === '/admin/understat-test') {
     if (!requireAdmin(req, res)) return;
     try {
@@ -9162,7 +9196,7 @@ const server = http.createServer(async (req, res) => {
       const league = String(parsed.query.league || 'EPL');
       const year = parseInt(parsed.query.year || '2025', 10) || 2025;
       const r = await fetchSeasonMatches(league, year);
-      sendJson(res, { ...r, year, sample: (r.matches || []).slice(0, 3), total: r.matches?.length, matches: undefined });
+      sendJson(res, { ...r, year, deprecated: true, hint: 'use /admin/football-data-test instead', sample: (r.matches || []).slice(0, 3), total: r.matches?.length, matches: undefined });
     } catch (e) { sendJson(res, { ok: false, error: e.message, stack: e.stack }, 500); }
     return;
   }

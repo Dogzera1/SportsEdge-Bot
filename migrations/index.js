@@ -1593,6 +1593,31 @@ const migrations = [
     },
   },
   {
+    id: '069_football_data_csv',
+    up(db) {
+      // football-data.co.uk: histórico CSV per liga × season com odds
+      // open + scores + cards + corners. Free, sem rate limit.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS football_data_csv (
+          match_id TEXT PRIMARY KEY,
+          league TEXT, season TEXT, date TEXT,
+          home TEXT, away TEXT,
+          fthg INTEGER, ftag INTEGER, ftr TEXT,
+          hthg INTEGER, htag INTEGER, htr TEXT,
+          home_corners INTEGER, away_corners INTEGER,
+          home_yellows INTEGER, away_yellows INTEGER,
+          home_reds INTEGER, away_reds INTEGER,
+          b365_h REAL, b365_d REAL, b365_a REAL,
+          bw_h REAL, bw_d REAL, bw_a REAL,
+          ps_h REAL, ps_d REAL, ps_a REAL,
+          ingested_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_fd_csv_teams ON football_data_csv(home, away, date);
+        CREATE INDEX IF NOT EXISTS idx_fd_csv_league_season ON football_data_csv(league, season);
+      `);
+    },
+  },
+  {
     id: '068_valorant_team_stats',
     up(db) {
       // thespike.gg: map win rate + agent composition per team Valorant.
