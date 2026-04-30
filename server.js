@@ -8,7 +8,7 @@ dns.setDefaultResultOrder('ipv4first');
 const initDatabase = require('./lib/database');
 const { SPORTS, getSportById } = require('./lib/sports');
 const { ML_MARKETS, ML_MARKETS_LIST, isMlMarket } = require('./lib/constants');
-const { log, sendJson, safeParse, norm, httpGet, cachedHttpGet, aiPost, oddsApiAllowed, oddsApiPeek, oddsApiQuotaStatus, getMetricsLite, calcKellyWithP, getLogBuffer, addLogClient, removeLogClient, ingestExternalLog } = require('./lib/utils');
+const { log, sendJson, safeParse, norm, httpGet, cachedHttpGet, aiPost, oddsApiAllowed, oddsApiPeek, oddsApiQuotaStatus, getMetricsLite, calcKellyWithP, getLogBuffer, addLogClient, removeLogClient, ingestExternalLog, getPollHeartbeats, getCronHeartbeats } = require('./lib/utils');
 const dashboard = require('./lib/dashboard');
 const footballData  = require('./lib/football-data');
 const apiFootball   = require('./lib/api-football');
@@ -6347,12 +6347,23 @@ td:last-child { text-align: right; color: #d2a8ff; }
 <div class="meta" id="meta">carregando…</div>
 <div class="process" id="process"></div>
 <div style="margin:10px 0;font-size:11px;color:#8b949e">
-  <strong style="color:#58a6ff">Admin endpoints (precisa key):</strong>
+  <strong style="color:#58a6ff">🛠️ Admin endpoints (precisa key):</strong><br>
+  <em style="color:#7d8590">Status:</em>
+  <a href="/admin/cron-status" style="color:#d2a8ff">cron-status</a> ·
+  <a href="/admin/env-audit" style="color:#d2a8ff">env-audit</a> ·
   <a href="/admin/mt-status" style="color:#d2a8ff">mt-status</a> ·
+  <a href="/admin/sport-detail?sport=tennis" style="color:#d2a8ff">sport-detail</a> ·
   <a href="/admin/blocklist-stats" style="color:#d2a8ff">blocklist-stats</a> ·
-  <a href="/admin/repair" style="color:#d2a8ff">repair</a> ·
-  <a href="/admin/cs-live-debug" style="color:#d2a8ff">cs-live-debug</a> ·
+  <a href="/admin/scraper-health" style="color:#d2a8ff">scraper-health</a><br>
+  <em style="color:#7d8590">Diag:</em>
   <a href="/admin/forensics" style="color:#d2a8ff">forensics</a> ·
+  <a href="/admin/cs-live-debug" style="color:#d2a8ff">cs-live-debug</a> ·
+  <a href="/admin/tg-commands" style="color:#d2a8ff">tg-commands</a> ·
+  <a href="/admin/mt-shadow-audit" style="color:#d2a8ff">mt-shadow-audit</a><br>
+  <em style="color:#7d8590">Ops:</em>
+  <a href="/admin/repair" style="color:#d2a8ff">repair</a> ·
+  <a href="/admin/run-settle" style="color:#d2a8ff">run-settle</a> ·
+  <a href="/admin/settle-market-tips-shadow" style="color:#d2a8ff">settle-shadow</a> ·
   <a href="/dashboard.html" style="color:#d2a8ff">← dashboard</a>
 </div>
 <div class="grid">
@@ -7813,6 +7824,264 @@ setInterval(load, 10000);
     return;
   }
 
+  // ── /admin/cron-status: heartbeats de polls + crons in-process.
+  // GET /admin/cron-status?key=<ADMIN_KEY>
+  // Mostra: lastTs, count, lastResult, lastError, lastDurationMs.
+  // Útil pra detectar cron travado (lastTs > expected interval).
+  if (p === '/admin/cron-status' && (req.method === 'GET' || req.method === 'POST')) {
+    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const polls = getPollHeartbeats();
+    const crons = getCronHeartbeats();
+    const now = Date.now();
+    const _enrich = (hb) => {
+      if (!hb || !hb.lastTs) return hb;
+      return { ...hb, age_s: Math.round((now - hb.lastTs) / 1000) };
+    };
+    const out = {
+      ok: true,
+      ts: new Date().toISOString(),
+      polls: Object.fromEntries(Object.entries(polls).map(([k, v]) => [k, _enrich(v)])),
+      crons: Object.fromEntries(Object.entries(crons).map(([k, v]) => [k, _enrich(v)])),
+      // Cron envs status (ON/OFF detection)
+      cron_envs: {
+        AUTONOMY_DIGEST_AUTO: !/^(0|false|no)$/i.test(String(process.env.AUTONOMY_DIGEST_AUTO ?? 'true')),
+        DAILY_LEAKS_DIGEST_AUTO: !/^(0|false|no)$/i.test(String(process.env.DAILY_LEAKS_DIGEST_AUTO ?? 'true')),
+        WEEKLY_DIGEST_AUTO: !/^(0|false|no)$/i.test(String(process.env.WEEKLY_DIGEST_AUTO ?? 'true')),
+        MT_RESTORE_AUTO: !/^(0|false|no)$/i.test(String(process.env.MT_RESTORE_AUTO ?? 'true')),
+        DB_BACKUP_AUTO: !/^(0|false|no)$/i.test(String(process.env.DB_BACKUP_AUTO ?? 'true')),
+        NIGHTLY_RETRAIN_AUTO: /^true$/i.test(String(process.env.NIGHTLY_RETRAIN_AUTO || '')),
+        AUTO_VOID_STUCK_AUTO: !/^(0|false|no)$/i.test(String(process.env.AUTO_VOID_STUCK_AUTO ?? 'true')),
+        BRIER_AUTO_EV_CAP: !/^(0|false|no)$/i.test(String(process.env.BRIER_AUTO_EV_CAP ?? 'true')),
+        LIVE_RISK_MONITOR_AUTO: !/^(0|false|no)$/i.test(String(process.env.LIVE_RISK_MONITOR_AUTO ?? 'true')),
+        MT_LEAK_GUARD_AUTO: !/^(0|false|no)$/i.test(String(process.env.MT_LEAK_GUARD_AUTO ?? 'true')),
+        MEM_WATCHDOG_DISABLED: /^(1|true|yes)$/i.test(String(process.env.MEM_WATCHDOG_DISABLED || '')),
+      },
+    };
+    sendJson(res, out);
+    return;
+  }
+
+  // ── /admin/env-audit: sanity check de envs críticas.
+  // GET /admin/env-audit?key=<ADMIN_KEY>
+  // Mostra: configurada/null + tipo (bool/string/number) + valor masked se sensitive.
+  if (p === '/admin/env-audit' && (req.method === 'GET' || req.method === 'POST')) {
+    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const _mask = (v) => {
+      if (!v) return null;
+      const s = String(v);
+      if (s.length <= 8) return '***';
+      return s.slice(0, 4) + '...' + s.slice(-4);
+    };
+    const _bool = (v) => v == null ? null : !/^(0|false|no)$/i.test(String(v));
+    const out = {
+      ok: true,
+      ts: new Date().toISOString(),
+      // Critical: tokens, keys, paths
+      critical: {
+        ADMIN_KEY: { set: !!process.env.ADMIN_KEY, masked: _mask(process.env.ADMIN_KEY) },
+        ADMIN_USER_IDS: { set: !!process.env.ADMIN_USER_IDS, count: String(process.env.ADMIN_USER_IDS || '').split(',').filter(Boolean).length },
+        DB_PATH: { set: !!process.env.DB_PATH, value: process.env.DB_PATH || null },
+        TIPS_UNIFIED_TOKEN: { set: !!process.env.TIPS_UNIFIED_TOKEN, masked: _mask(process.env.TIPS_UNIFIED_TOKEN) },
+        SYSTEM_ALERTS_TOKEN: { set: !!process.env.SYSTEM_ALERTS_TOKEN, masked: _mask(process.env.SYSTEM_ALERTS_TOKEN) },
+        DEEPSEEK_API_KEY: { set: !!process.env.DEEPSEEK_API_KEY, masked: _mask(process.env.DEEPSEEK_API_KEY) },
+        THE_ODDS_API_KEY: { set: !!process.env.THE_ODDS_API_KEY, masked: _mask(process.env.THE_ODDS_API_KEY) },
+        PANDASCORE_TOKEN: { set: !!process.env.PANDASCORE_TOKEN, masked: _mask(process.env.PANDASCORE_TOKEN) },
+        HLTV_PROXY_BASE: { set: !!process.env.HLTV_PROXY_BASE, value: process.env.HLTV_PROXY_BASE || null },
+        SOFASCORE_PROXY_BASE: { set: !!process.env.SOFASCORE_PROXY_BASE, value: process.env.SOFASCORE_PROXY_BASE || null },
+        SUPABASE_URL: { set: !!process.env.SUPABASE_URL, value: process.env.SUPABASE_URL || null },
+        SUPABASE_ANON_KEY: { set: !!process.env.SUPABASE_ANON_KEY, masked: _mask(process.env.SUPABASE_ANON_KEY) },
+      },
+      // Feature flags
+      flags: {
+        AI_DISABLED: _bool(process.env.AI_DISABLED) || false,
+        FOOTBALL_MT_SHADOW_ONLY: _bool(process.env.FOOTBALL_MT_SHADOW_ONLY ?? 'true'),
+        TENNIS_ISOTONIC_DISABLED: _bool(process.env.TENNIS_ISOTONIC_DISABLED ?? 'true'),
+        LOL_ISOTONIC_DISABLED: _bool(process.env.LOL_ISOTONIC_DISABLED ?? 'true'),
+        FB_USE_FD_CSV: process.env.FB_USE_FD_CSV !== 'false',
+        FB_DIVERGENCE_GATE: !/^(0|false|no)$/i.test(String(process.env.FB_DIVERGENCE_GATE ?? 'true')),
+        FB_XG_BLEND_DISABLED: _bool(process.env.FB_XG_BLEND_DISABLED) || false,
+        MT_SHADOW_DM_ALL: /^true$/i.test(process.env.MT_SHADOW_DM_ALL || ''),
+        TENNIS_CORRELATION_ADJ: process.env.TENNIS_CORRELATION_ADJ !== 'false',
+        LOL_KILLS_PROMOTE: /^(1|true|yes)$/i.test(String(process.env.LOL_KILLS_PROMOTE || '')),
+        LOL_KILLS_XCHECK_GATE: !/^(0|false|no)$/i.test(String(process.env.LOL_KILLS_XCHECK_GATE ?? 'true')),
+        DB_SLOW_QUERY_MS: parseInt(process.env.DB_SLOW_QUERY_MS || '0', 10),
+      },
+      // Tuning numérico
+      tuning: {
+        MARKET_TIP_MAX_EV: parseFloat(process.env.MARKET_TIP_MAX_EV || 'NaN') || null,
+        MAX_STAKE_UNITS: parseFloat(process.env.MAX_STAKE_UNITS || 'NaN') || null,
+        TENNIS_MARKET_SCAN_MAX_EV: parseFloat(process.env.TENNIS_MARKET_SCAN_MAX_EV || '40'),
+        TENNIS_MARKET_SCAN_MAX_EV_HANDICAPGAMES: parseFloat(process.env.TENNIS_MARKET_SCAN_MAX_EV_HANDICAPGAMES || '55'),
+        TENNIS_MARKET_SCAN_MAX_EV_TOTALGAMES: parseFloat(process.env.TENNIS_MARKET_SCAN_MAX_EV_TOTALGAMES || '40'),
+        FB_DIVERGENCE_MAX_PP: parseFloat(process.env.FB_DIVERGENCE_MAX_PP || '12'),
+        ANALYZED_TTL_MS: parseInt(process.env.ANALYZED_TTL_MS || String(72 * 3600 * 1000), 10),
+        MEM_WATCHDOG_RSS_MB: process.env.MEM_WATCHDOG_RSS_MB ? parseFloat(process.env.MEM_WATCHDOG_RSS_MB) : null,
+      },
+      // Lists / blocklists
+      lists: {
+        MT_PERMANENT_DISABLE_LIST: String(process.env.MT_PERMANENT_DISABLE_LIST ?? 'tennis|totalGames|over,lol|total').split(',').map(s => s.trim()).filter(Boolean),
+        ODDS_BUCKET_BLOCK: String(process.env.ODDS_BUCKET_BLOCK || '').split(',').map(s => s.trim()).filter(Boolean),
+      },
+    };
+    // Sanity warnings
+    out.warnings = [];
+    if (!out.critical.ADMIN_KEY.set) out.warnings.push('ADMIN_KEY ausente — admin endpoints abertos!');
+    if (!out.critical.ADMIN_USER_IDS.set) out.warnings.push('ADMIN_USER_IDS ausente — DMs admin não funcionam');
+    if (!out.critical.DB_PATH.set) out.warnings.push('DB_PATH ausente — fallback pode usar working dir');
+    if (out.flags.AI_DISABLED) out.warnings.push('AI_DISABLED=true — DeepSeek desligado, fallback determinístico ativo');
+    if (!out.critical.HLTV_PROXY_BASE.set) out.warnings.push('HLTV_PROXY_BASE ausente — CS scoreboard live indisponível');
+    sendJson(res, out);
+    return;
+  }
+
+  // ── /admin/tg-commands: lista comandos Telegram disponíveis.
+  if (p === '/admin/tg-commands' && (req.method === 'GET' || req.method === 'POST')) {
+    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    // Listagem hardcoded — descoberta direto do bot.js handler. Mantém em sync
+    // com bot.js:11409+ cascade. Atualizar quando adicionar comando novo.
+    const commands = {
+      user: {
+        '/start': 'Menu principal de subscriptions',
+        '/notificacoes': 'Toggle notificações por sport',
+        '/tracking': 'Lista tips ativas + status',
+        '/meustats': 'Stats user atual',
+        '/debug_odds': 'Debug odds (admin only)',
+      },
+      stats: {
+        '/stats': 'Geral por período',
+        '/roi': 'ROI por sport',
+        '/users': 'Total subscribers',
+        '/pending': 'Tips pendentes',
+        '/health': 'Health check rápido',
+        '/loops': 'Status loops autonomy',
+        '/loops [sport]': 'Loops detalhe',
+        '/shadow [days]': 'Shadow regular per sport',
+        '/ml-shadow': 'ML shadow per sport',
+        '/market-tips [sport] [days]': 'MT shadow stats',
+        '/shadow-summary [days]': 'Cross-sport unified',
+        '/models': 'Brier/Acc/AUC dos modelos',
+        '/ai-stats': 'IA per-sport tracking',
+      },
+      ops: {
+        '/settle': 'Trigger settle manual',
+        '/settle-debug': 'Debug settle path',
+        '/resync': 'Resync bankroll',
+        '/banca-audit': 'Audit gap stored vs computed',
+        '/sync-banca': 'Force-sync bankroll',
+        '/dedup-tips': 'Dedup fuzzy tips',
+        '/archive-dupes': 'Archive duplicates',
+        '/migrations': 'Status migrations',
+        '/run-guardian': 'Trigger bankroll guardian',
+        '/pause | /unpause [sport]': 'Pausa scanner per sport',
+        '/block-league | /unblock-league': 'Liga blocklist',
+        '/blocked-leagues': 'Lista blocked',
+        '/clv-by-league [sport]': 'CLV per liga',
+        '/kelly': 'Status Kelly per-sport',
+        '/mt-guard | /mt-gates': 'MT runtime state',
+      },
+      admin: {
+        '/force-digest': 'Trigger autonomy digest',
+        '/pipeline-digest': 'Pipeline status digest',
+        '/reanalyze-void': 'Reanalisa voids recentes',
+        '/reset-tips': 'Reset tips em buckets',
+        '/split-bankroll [total]': 'Split esports → lol+dota2',
+        '/rebuild-reais': 'Rebuild stake_reais/profit_reais',
+        '/move-football-mt-shadow': 'Move football MT pra shadow',
+      },
+      info: {
+        '/help': 'Ajuda + comandos',
+        '/alerts': 'Lista alerts ativos',
+        '/rejections [sport]': 'Tips rejeitadas recentes',
+        '/server-errors': 'Errors recentes',
+        '/fetch-errors': 'HTTP errors',
+        '/mma-diag': 'MMA diagnose',
+        '/val-eligibility': 'Valorant Elo eligibility',
+      },
+    };
+    sendJson(res, { ok: true, ts: new Date().toISOString(), commands });
+    return;
+  }
+
+  // ── /admin/sport-detail: drill-down completo de um sport.
+  // Combina pending counts + last tip + last shadow + blocklist matches +
+  // 7d/30d ROI summary. Útil pra investigação focada.
+  // GET /admin/sport-detail?sport=tennis&key=<ADMIN_KEY>
+  if (p === '/admin/sport-detail' && (req.method === 'GET' || req.method === 'POST')) {
+    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const sport = String(parsed.query.sport || '').toLowerCase().trim();
+    if (!sport || !/^[a-z0-9_]+$/.test(sport)) {
+      sendJson(res, { ok: false, error: 'sport obrigatório (a-z0-9_)' }, 400); return;
+    }
+    const out = { ok: true, ts: new Date().toISOString(), sport };
+    try {
+      // Pending counts
+      out.pending = {
+        real_tips: db.prepare(`SELECT COUNT(*) AS n FROM tips WHERE sport=? AND result IS NULL AND COALESCE(archived,0)=0`).get(sport).n,
+        mt_shadow: db.prepare(`SELECT COUNT(*) AS n FROM market_tips_shadow WHERE sport=? AND result IS NULL`).get(sport).n,
+        ml_shadow: db.prepare(`SELECT COUNT(*) AS n FROM tips WHERE sport=? AND result IS NULL AND COALESCE(is_shadow,0)=1`).get(sport).n,
+      };
+      // Last tip (real + shadow)
+      const lastTip = db.prepare(`
+        SELECT id, match_id, participant1, participant2, tip_participant, odds, ev, stake, confidence,
+               sent_at, result, market_type, is_shadow
+        FROM tips WHERE sport=? ORDER BY sent_at DESC LIMIT 1
+      `).get(sport);
+      out.last_tip = lastTip || null;
+      const lastShadow = db.prepare(`
+        SELECT id, match_key, team1, team2, league, market, line, side, odd, ev_pct, p_model,
+               created_at, result, profit_units
+        FROM market_tips_shadow WHERE sport=? ORDER BY created_at DESC LIMIT 1
+      `).get(sport);
+      out.last_shadow = lastShadow || null;
+      // ROI summary 7d/30d (real)
+      out.roi_real = {};
+      for (const days of [7, 30]) {
+        const r = db.prepare(`
+          SELECT COUNT(*) AS n,
+            ROUND(SUM(profit_reais)*1.0/NULLIF(SUM(stake_reais),0)*100,1) AS roi_pct,
+            ROUND(AVG(clv_pct),1) AS avg_clv
+          FROM tips WHERE sport=? AND sent_at >= datetime('now', ?)
+            AND result IN ('win','loss') AND COALESCE(is_shadow,0)=0
+            AND COALESCE(archived,0)=0
+        `).get(sport, `-${days} days`);
+        out.roi_real[`d${days}`] = r;
+      }
+      // ROI shadow 7d/30d
+      out.roi_shadow = {};
+      for (const days of [7, 30]) {
+        const r = db.prepare(`
+          SELECT COUNT(*) AS n,
+            ROUND(SUM(profit_units)*1.0/NULLIF(SUM(stake_units),0)*100,1) AS roi_pct,
+            ROUND(AVG(clv_pct),1) AS avg_clv
+          FROM market_tips_shadow WHERE sport=? AND created_at >= datetime('now', ?)
+            AND result IN ('win','loss')
+        `).get(sport, `-${days} days`);
+        out.roi_shadow[`d${days}`] = r;
+      }
+      // Blocklist matches (entries que afetam esse sport)
+      const blocklistEnv = String(process.env.MT_PERMANENT_DISABLE_LIST ?? 'tennis|totalGames|over,lol|total').trim();
+      out.blocklist_entries = blocklistEnv.split(',').map(s => s.trim()).filter(e => e.startsWith(sport + '|'));
+      // Top markets shadow 30d
+      try {
+        out.top_markets_shadow_30d = db.prepare(`
+          SELECT market, side, COUNT(*) AS n,
+            ROUND(SUM(profit_units)*1.0/NULLIF(SUM(stake_units),0)*100,1) AS roi_pct
+          FROM market_tips_shadow
+          WHERE sport=? AND created_at >= datetime('now', '-30 days') AND result IN ('win','loss')
+          GROUP BY market, side ORDER BY n DESC LIMIT 6
+        `).all(sport);
+      } catch (_) {}
+      sendJson(res, out);
+    } catch (e) {
+      sendJson(res, { ok: false, error: e.message, sport }, 500);
+    }
+    return;
+  }
+
   // ── /admin/blocklist-stats: performance shadow de cada entry no
   // MT_PERMANENT_DISABLE_LIST. Mostra se vale manter bloqueado ou
   // se shadow recuperou (candidato pra remover).
@@ -9099,13 +9368,20 @@ setInterval(load, 10000);
       const conds = [`ev IS NOT NULL`, `result IN ('win','loss')`, `sent_at >= datetime('now', '-${days} days')`];
       const params = [];
       if (sport) { conds.push('sport = ?'); params.push(sport); }
+      // BUG FIX 2026-04-30: tabela `tips` não tem coluna clv_pct (que existe em
+      // market_tips_shadow). Computar pct via clv_odds vs odds: pct = (odds/clv_odds-1)*100.
+      // CLV positivo = pegou odd MAIOR que fechamento (valor capturado).
       const rows = db.prepare(`
         SELECT
           CAST(REPLACE(REPLACE(ev, '+', ''), '%', '') AS REAL) AS ev_num,
           result,
           COALESCE(stake_reais, 0) AS stake,
           COALESCE(profit_reais, 0) AS profit,
-          COALESCE(clv_pct, NULL) AS clv
+          CASE
+            WHEN clv_odds IS NOT NULL AND clv_odds > 1 AND odds > 1
+            THEN (odds * 1.0 / clv_odds - 1) * 100
+            ELSE NULL
+          END AS clv
         FROM tips
         WHERE ${conds.join(' AND ')}
       `).all(...params);

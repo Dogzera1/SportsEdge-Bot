@@ -912,10 +912,15 @@
     </div>
   </div>
 
-  <!-- Footer / quick actions + links -->
+  <!-- Footer / quick actions + admin links -->
   <div style="text-align:center;padding:18px 0 4px">
-    <button onclick="adminRepair()" style="background:transparent;border:1px solid var(--accent,#3b82f6);color:var(--accent,#3b82f6);padding:4px 12px;border-radius:4px;cursor:pointer;font-size:11px;margin-right:6px">🔧 Repair (settle+archive+stats)</button>
-    <button onclick="forensicsPrompt()" style="background:transparent;border:1px solid var(--accent,#3b82f6);color:var(--accent,#3b82f6);padding:4px 12px;border-radius:4px;cursor:pointer;font-size:11px">🔍 Forensics tip</button>
+    <button onclick="adminRepair()" style="background:transparent;border:1px solid var(--accent,#3b82f6);color:var(--accent,#3b82f6);padding:4px 12px;border-radius:4px;cursor:pointer;font-size:11px;margin:2px">🔧 Repair</button>
+    <button onclick="forensicsPrompt()" style="background:transparent;border:1px solid var(--accent,#3b82f6);color:var(--accent,#3b82f6);padding:4px 12px;border-radius:4px;cursor:pointer;font-size:11px;margin:2px">🔍 Forensics tip</button>
+    <button onclick="adminFetchPretty('/admin/cron-status')" style="background:transparent;border:1px solid var(--accent,#3b82f6);color:var(--accent,#3b82f6);padding:4px 12px;border-radius:4px;cursor:pointer;font-size:11px;margin:2px">⏰ Cron status</button>
+    <button onclick="adminFetchPretty('/admin/env-audit')" style="background:transparent;border:1px solid var(--accent,#3b82f6);color:var(--accent,#3b82f6);padding:4px 12px;border-radius:4px;cursor:pointer;font-size:11px;margin:2px">🔐 Env audit</button>
+    <button onclick="adminFetchPretty('/admin/mt-status')" style="background:transparent;border:1px solid var(--accent,#3b82f6);color:var(--accent,#3b82f6);padding:4px 12px;border-radius:4px;cursor:pointer;font-size:11px;margin:2px">📊 MT status</button>
+    <button onclick="adminFetchPretty('/admin/blocklist-stats?days=14')" style="background:transparent;border:1px solid var(--accent,#3b82f6);color:var(--accent,#3b82f6);padding:4px 12px;border-radius:4px;cursor:pointer;font-size:11px;margin:2px">🚫 Blocklist stats</button>
+    <button onclick="sportDetailPrompt()" style="background:transparent;border:1px solid var(--accent,#3b82f6);color:var(--accent,#3b82f6);padding:4px 12px;border-radius:4px;cursor:pointer;font-size:11px;margin:2px">🎯 Sport detail</button>
   </div>
   <div style="text-align:center;padding:8px 0 8px;color:var(--text-faint);font-size:11px">
     <a href="/health/metrics.html" style="color:var(--text-faint);text-decoration:underline">📊 health metrics</a>
@@ -2472,6 +2477,29 @@ async function loadTipsByMarket(gen = refreshGen) {
 // → settle ou void (walkover detection). Depois re-carrega.
 // 2026-04-29: também roda settleShadowTips (market_tips_shadow) e inclui
 // is_shadow=1 (ML shadow). Tudo num único click.
+// Helper: GET admin endpoint + abre window com JSON formatado
+async function adminFetchPretty(path, title) {
+  try {
+    const r = await adminFetch(path);
+    const j = await r.json();
+    if (!r.ok) { alert('❌ ' + (j?.error || 'HTTP ' + r.status)); return; }
+    const html = `<!DOCTYPE html><html><head><title>${title || path}</title>
+      <style>body{font:13px monospace;background:#0d1117;color:#c9d1d9;padding:16px}h1{color:#58a6ff;font-size:14px;margin:0 0 8px}pre{background:#161b22;padding:12px;border-radius:4px;overflow:auto;white-space:pre-wrap}</style>
+      </head><body><h1>${path}</h1><pre>${JSON.stringify(j, null, 2).replace(/</g,'&lt;')}</pre></body></html>`;
+    const w = window.open('', '_blank');
+    if (w) { w.document.write(html); w.document.close(); }
+    else alert('Popup bloqueado — abra DevTools console pra inspecionar');
+    console.log(path, j);
+  } catch (e) { alert('❌ ' + e.message); }
+}
+
+// Sport-detail prompt
+async function sportDetailPrompt() {
+  const sport = prompt('Sport pra drill-down (lol/dota2/cs2/valorant/tennis/football/mma):');
+  if (!sport) return;
+  await adminFetchPretty('/admin/sport-detail?sport=' + encodeURIComponent(sport.trim().toLowerCase()), 'sport-detail ' + sport);
+}
+
 // Quick action: /admin/repair (idempotente)
 async function adminRepair() {
   if (!confirm('Roda repair: settle shadow + auto-archive non-ML órfãs (>48h) + bankroll audit + stats. Idempotente, não destrutivo. Continuar?')) return;

@@ -7,7 +7,7 @@ const fs = require('fs');
 const path = require('path');
 const initDatabase = require('./lib/database');
 const { SPORTS, getSportById, getSportByToken, getTokenToSportMap } = require('./lib/sports');
-const { log, calcKelly, calcKellyFraction, calcKellyWithP, norm, fmtDate, fmtDateTime, fmtDuration, safeParse, cachedHttpGet, markPollHeartbeat, getPollHeartbeats } = require('./lib/utils');
+const { log, calcKelly, calcKellyFraction, calcKellyWithP, norm, fmtDate, fmtDateTime, fmtDuration, safeParse, cachedHttpGet, markPollHeartbeat, getPollHeartbeats, markCronHeartbeat, getCronHeartbeats } = require('./lib/utils');
 const { adjustStakeUnits } = require('./lib/risk-manager');
 const { esportsPreFilter } = require('./lib/ml');
 const { formatLineShopDM, computeLineShop } = require('./lib/line-shopping');
@@ -18908,8 +18908,10 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   // Hora: DAILY_LEAKS_DIGEST_HOUR_UTC (default 13 = 10h BRT).
   let _lastLeaksDigestDay = null;
   async function runDailyLeaksDigest() {
-    if (/^(0|false|no)$/i.test(String(process.env.DAILY_LEAKS_DIGEST_AUTO || 'true'))) return;
-    if (!ADMIN_IDS.size) return;
+    const _t0 = Date.now();
+    const _hb = (result, error) => { try { markCronHeartbeat('leaks_digest', { result, error, durationMs: Date.now() - _t0 }); } catch (_) {} };
+    if (/^(0|false|no)$/i.test(String(process.env.DAILY_LEAKS_DIGEST_AUTO || 'true'))) { _hb('disabled'); return; }
+    if (!ADMIN_IDS.size) { _hb('no_admins'); return; }
     const hourUtc = parseInt(process.env.DAILY_LEAKS_DIGEST_HOUR_UTC || '13', 10);
     const now = new Date();
     const today = now.toISOString().slice(0, 10);
@@ -18937,6 +18939,7 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
       `).all(days, minN, roiCutoff);
       if (!rows.length) {
         log('INFO', 'LEAKS-DIGEST', `${days}d: sem leaks (n>=${minN}, ROI<=${roiCutoff}%)`);
+        _hb('ok_no_leaks');
         return;
       }
       const lines = [`🚨 *Leaks Digest ${days}d*  _${today}_`, ''];
@@ -18957,8 +18960,10 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
       }
       log('INFO', 'LEAKS-DIGEST', `${rows.length} leaks DM ${sent}/${ADMIN_IDS.size} admin(s)`);
       try { _metrics.gauge('leaks_count', rows.length); } catch (_) {}
+      _hb('ok', `${rows.length} leaks`);
     } catch (e) {
       log('WARN', 'LEAKS-DIGEST', `err: ${e.message}`);
+      _hb('error', e.message);
     }
   }
   setInterval(() => runDailyLeaksDigest().catch(() => {}), 30 * 60 * 1000);
@@ -18969,8 +18974,12 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   // Combina /shadow-summary + /admin/mt-status + /admin/blocklist-stats.
   let _lastWeeklyDigestWeek = null;
   async function runWeeklyDigest() {
-    if (/^(0|false|no)$/i.test(String(process.env.WEEKLY_DIGEST_AUTO || 'true'))) return;
-    if (!ADMIN_IDS.size) return;
+    const _t0 = Date.now();
+    const _heartbeat = (result, error) => {
+      try { markCronHeartbeat('weekly_digest', { result, error, durationMs: Date.now() - _t0 }); } catch (_) {}
+    };
+    if (/^(0|false|no)$/i.test(String(process.env.WEEKLY_DIGEST_AUTO || 'true'))) { _heartbeat('disabled'); return; }
+    if (!ADMIN_IDS.size) { _heartbeat('no_admins'); return; }
     const dayUtc = parseInt(process.env.WEEKLY_DIGEST_DAY_UTC || '1', 10); // 1=Mon
     const hourUtc = parseInt(process.env.WEEKLY_DIGEST_HOUR_UTC || '14', 10);
     const now = new Date();
@@ -19033,8 +19042,10 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
         if (await sendDM(token, adminId, msg).catch(() => false)) sent++;
       }
       log('INFO', 'WEEKLY-DIGEST', `${realStats.length}+${shadowStats.length} sports DM ${sent}/${ADMIN_IDS.size} admin(s)`);
+      _heartbeat('ok');
     } catch (e) {
       log('WARN', 'WEEKLY-DIGEST', `err: ${e.message}`);
+      _heartbeat('error', e.message);
     }
   }
   setInterval(() => runWeeklyDigest().catch(() => {}), 30 * 60 * 1000);
