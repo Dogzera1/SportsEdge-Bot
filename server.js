@@ -7857,13 +7857,15 @@ setInterval(load, 10000);
     const sportFilter = String(parsed.query.sport || '').toLowerCase().trim();
     const daysRaw = parseInt(parsed.query.days, 10);
     const days = Number.isFinite(daysRaw) ? Math.max(1, Math.min(180, daysRaw)) : 30;
-    // 2026-04-29: include_shadow=1 inclui tips com is_shadow=1 no settle
-    // (ML shadow). Útil pro botão dashboard cobrir tudo de uma vez.
-    const includeShadow = parsed.query.include_shadow === '1' || parsed.query.include_shadow === 'true';
-    // 2026-04-29: shadow_mt=1 dispara settleShadowTips (market_tips_shadow)
-    // antes do loop de tips reais. Combina shadow MT + ML shadow + reais
-    // num único click.
-    const shadowMt = parsed.query.shadow_mt === '1' || parsed.query.shadow_mt === 'true';
+    // 2026-04-30: defaults flippados pra `true` — antes a default cobrir só
+    // ML reais era confuso (user precisava lembrar de adicionar 2 flags pra
+    // settle completo). settle é idempotente (já settled fica settled), então
+    // incluir tudo por default é seguro.
+    // Override pra comportamento antigo (só ML reais, sem shadow):
+    //   ?include_shadow=0&shadow_mt=0
+    const _flagOff = (v) => v === '0' || v === 'false' || v === 'no';
+    const includeShadow = !_flagOff(parsed.query.include_shadow);
+    const shadowMt = !_flagOff(parsed.query.shadow_mt);
     try {
       // 2026-04-29: pré-step opcional — settle market_tips_shadow primeiro.
       // settleShadowTips chama propagator no final, então tips reais que
@@ -13995,6 +13997,34 @@ setInterval(load, 10000);
           _codeSha = getCodeSha() || null;
           _gateState = captureGateState();
         } catch (_) {}
+        // Snapshot estruturado pra forensics: pega campos opcionais que bot
+        // envia (factors, mlScore details, gate decisions). NULL se nada
+        // disponível. Mantemos size pequeno (<2KB típico) — só metadados,
+        // não logs completos.
+        let _tipContextJson = null;
+        try {
+          const ctx = {};
+          if (t.factors) ctx.factors = t.factors;                 // array de {label, value}
+          if (t.mlScore != null) ctx.ml_score = t.mlScore;        // número (edge raw em pp)
+          if (t.factorCount != null) ctx.factor_count = t.factorCount;
+          if (t.trainedConf != null) ctx.trained_conf = t.trainedConf;
+          if (t.divergencePp != null) ctx.divergence_pp = t.divergencePp;
+          if (t.lineShopOdds && typeof t.lineShopOdds === 'object') {
+            // Reduz pra resumo (book + odd selecionada) — array completo é grande.
+            const ls = t.lineShopOdds;
+            ctx.line_shop = {
+              best_book: ls.bestBook, best_odd: ls.bestOdd,
+              pinnacle_odd: ls.pinnacleOdd, delta_pct: ls.deltaPct,
+            };
+          }
+          if (t.pickSide) ctx.pick_side = t.pickSide;
+          if (t.kellyFrac != null) ctx.kelly_frac = t.kellyFrac;
+          if (t.stakeAdjust != null) ctx.stake_adjust = t.stakeAdjust;
+          if (t.preMatchBonus != null) ctx.pre_match_bonus = t.preMatchBonus;
+          if (Object.keys(ctx).length > 0) {
+            _tipContextJson = JSON.stringify(ctx).slice(0, 4000); // hard cap 4KB
+          }
+        } catch (_) { /* opcional */ }
         const result = stmts.insertTip.run({
           sport, matchId: String(matchId), eventName,
           p1, p2,
@@ -14012,6 +14042,7 @@ setInterval(load, 10000);
             : (t._oddsFetchedAt ? new Date(t._oddsFetchedAt).toISOString() : new Date().toISOString()),
           code_sha: _codeSha,
           gate_state: _gateState,
+          tip_context_json: _tipContextJson,
         });
         // Calcula stake em reais com tier per-sport unit (getSportUnitValue).
         try {

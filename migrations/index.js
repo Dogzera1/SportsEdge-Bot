@@ -1733,6 +1733,15 @@ const migrations = [
     },
   },
   {
+    id: '072_tips_tip_context_json',
+    up(db) {
+      // Snapshot estruturado do contexto da tip (factors, gates, modelP raw)
+      // pra forensics post-mortem. NULL pra tips antigas; preenchido a partir
+      // do payload do /record-tip quando bot envia campos relevantes.
+      addColumnIfMissing(db, 'tips', 'tip_context_json', 'tip_context_json TEXT');
+    },
+  },
+  {
     id: '071_index_audit_dedup',
     up(db) {
       // Index audit 2026-04-30: dropa duplicatas + adiciona compostos pra
