@@ -21,7 +21,9 @@ const pinnacle = require('./lib/pinnacle');
 const { esportsPreFilter } = require('./lib/ml');
 const tennisML = require('./lib/tennis-ml');
 const { fetchGridEnrichForMatch } = require('./lib/grid');
-const { radarGetInfo, radarGetByPath } = require('./lib/radar-sport');
+// 2026-04-30: radar-sport-api removido (axios chain CVE high, lib teste-only).
+// Endpoint /radar retorna 410 Gone. Reactivar = restore lib + add npm dep
+// + revisar exposição vuln.
 
 // Railway sets $PORT automatically; start.js bridges it to SERVER_PORT
 const PORT = parseInt(process.env.PORT || process.env.SERVER_PORT) || 3000;
@@ -17862,10 +17864,19 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
   if (p === '/settle' && req.method === 'POST') {
     let body = ''; req.on('data', d => body += d);
     req.on('end', () => {
+      const _settleT0 = Date.now();
+      const _emitSettleMetric = (status, sport, settledCount = 0) => {
+        try {
+          const m = require('./lib/metrics');
+          m.incr('settle_call', { sport: sport || 'unknown', status });
+          m.timing('settle_call_ms', Date.now() - _settleT0, { sport: sport || 'unknown' });
+          if (settledCount > 0) m.incr('settle_tips_settled', { sport: sport || 'unknown' }, settledCount);
+        } catch (_) {}
+      };
       try {
         const { matchId, winner, home, away, score } = safeParse(body, {});
         const sport = parsed.query.sport || 'esports';
-        if (!matchId || !winner) { sendJson(res, { error: 'Missing matchId/winner' }, 400); return; }
+        if (!matchId || !winner) { sendJson(res, { error: 'Missing matchId/winner' }, 400); _emitSettleMetric('bad_payload', sport); return; }
         // 2026-04-28: walkover/retirement detection. Tennis match com RET/W.O./
         // Walkover/Cancelled vira VOID (não loss do perdedor). MMA "no contest"
         // idem. ESPN sometimes retorna winner mesmo em RET; sem essa guard,
@@ -17884,6 +17895,7 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
         if (String(matchId).includes('::mt::')) {
           log('WARN', 'SETTLE-GUARD',
             `${sport} matchId=${matchId} bloqueado em /settle (MT-promoted, deve usar propagator)`);
+          _emitSettleMetric('mt_blocked', sport);
           sendJson(res, { ok: true, settled: 0, skipped: 'mt_tip_must_use_propagator' });
           return;
         }
@@ -17996,6 +18008,7 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
             catch(e) { log('WARN', 'ELO', `Elo update falhou: ${e.message}`); }
           }
         }
+        _emitSettleMetric('ok', sport, settled);
         sendJson(res, { ok: true, settled, bancaDelta: parseFloat(bancaDelta.toFixed(2)) });
 
         // CLV retroativo: busca odds de fecho para tips que não tinham clv_odds
@@ -18063,7 +18076,13 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
             }
           });
         }
-      } catch(e) { sendJson(res, { error: e.message }, 500); }
+      } catch(e) {
+        try {
+          const m = require('./lib/metrics');
+          m.incr('settle_call', { sport: parsed.query.sport || 'unknown', status: 'exception' });
+        } catch (_) {}
+        sendJson(res, { error: e.message }, 500);
+      }
     });
     return;
   }
@@ -21321,33 +21340,12 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
     return;
   }
 
-  // ── Radar Sport API (scraping) — endpoint de teste/controlado ──
-  // Exemplo:
-  // /radar?type=info&book=betfair&region=Europe:Berlin&method=stats_season_meta&value=76415
-  // /radar?type=path&book=betfair&path=en/America:Montevideo/gismo/config_tree_mini/41/0/16
+  // ── Radar Sport API removido 2026-04-30 ──
+  // Lib radar-sport-api dependia de axios com CVEs high (SSRF, CSRF, DoS) sem
+  // fix upstream. Endpoint era teste-only (raramente usado). Pra reactivar:
+  // npm install radar-sport-api + restaurar lib/radar-sport.js do git history.
   if (p === '/radar') {
-    try {
-      const type = String(parsed.query.type || 'info');
-      const book = String(parsed.query.book || 'betfair');
-      const ttlMs = Math.max(30 * 1000, parseInt(String(parsed.query.ttlMs || ''), 10) || (5 * 60 * 1000));
-      const minDelayMs = Math.max(200, parseInt(String(parsed.query.minDelayMs || ''), 10) || 900);
-
-      if (type === 'path') {
-        const pathQ = String(parsed.query.path || '');
-        const data = await radarGetByPath({ book, path: pathQ, ttlMs, minDelayMs });
-        sendJson(res, { ok: true, type, book, data });
-        return;
-      }
-
-      const region = String(parsed.query.region || 'Europe:Berlin');
-      const method = String(parsed.query.method || '');
-      const valueRaw = parsed.query.value;
-      const value = (valueRaw != null && String(valueRaw).match(/^\d+$/)) ? parseInt(String(valueRaw), 10) : String(valueRaw || '');
-      const data = await radarGetInfo({ book, region, method, value, ttlMs, minDelayMs });
-      sendJson(res, { ok: true, type: 'info', book, region, method, value, data });
-    } catch (e) {
-      sendJson(res, { ok: false, error: e.message }, 500);
-    }
+    sendJson(res, { ok: false, error: 'gone', reason: 'radar-sport-api removed (CVE chain) — use scraper específico ou betfair direto' }, 410);
     return;
   }
 

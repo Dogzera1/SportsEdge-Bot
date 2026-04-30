@@ -16,8 +16,7 @@
   },
   "dependencies": {
     "better-sqlite3": "^11.0.0",
-    "dotenv": "^16.0.0",
-    "radar-sport-api": "^1.0.5"
+    "dotenv": "^16.0.0"
   },
   "engines": {
     "node": ">=18.0.0"
