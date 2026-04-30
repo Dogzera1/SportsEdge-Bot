@@ -7917,8 +7917,8 @@ input[name=key] { background: #0d1117; border: 1px solid #30363d; color: #c9d1d9
 
 <div class="card"><h2>🔬 Diagnostics</h2>
 <ul>
-<li><a href="/admin/sport-detail?sport=tennis" class="hk">/admin/sport-detail?sport=X</a> <span class="tag">drill-down sport</span></li>
-<li><a href="/admin/forensics?tip_id=1" class="hk">/admin/forensics?tip_id=N</a> <span class="tag">tip post-mortem</span></li>
+<li><a href="/admin/sport-detail.html" class="hk">/admin/sport-detail.html</a> <span class="tag">UI</span> · <a href="/admin/sport-detail?sport=tennis" class="hk">JSON</a></li>
+<li><a href="/admin/forensics.html" class="hk">/admin/forensics.html</a> <span class="tag">UI</span> · <a href="/admin/forensics?tip_id=1" class="hk">JSON</a></li>
 <li><a href="/admin/cs-live-debug?team1=&team2=" class="hk">/admin/cs-live-debug</a> <span class="tag">HLTV scoreboard</span></li>
 <li><a href="/admin/tg-commands" class="hk">/admin/tg-commands</a> <span class="tag">listar TG cmds</span></li>
 <li><a href="/admin/clv-capture-trace" class="hk">/admin/clv-capture-trace</a> <span class="tag">CLV capture diag</span></li>
@@ -7989,6 +7989,219 @@ function applyKey() {
   });
 }
 applyKey();
+</script>
+</body></html>`;
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end(html);
+    return;
+  }
+
+  // ── /admin/forensics.html: UI dedicada pra forensics tip post-mortem.
+  if (p === '/admin/forensics.html') {
+    const html = `<!DOCTYPE html>
+<html lang="pt-BR"><head><meta charset="utf-8">
+<title>Forensics — SportsEdge</title>
+<style>
+body { font: 13px/1.5 -apple-system,BlinkMacSystemFont,monospace; margin: 0; padding: 16px; background: #0d1117; color: #c9d1d9; }
+h1 { color: #58a6ff; margin: 0 0 4px; font-size: 18px; }
+.sub { color: #8b949e; font-size: 11px; margin-bottom: 12px; }
+input { background: #0d1117; border: 1px solid #30363d; color: #c9d1d9; padding: 6px 10px; border-radius: 4px; font: inherit; margin: 0 4px 8px 0; }
+.section { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 12px; margin: 12px 0; }
+.section h2 { color: #58a6ff; font-size: 13px; margin: 0 0 8px; padding-bottom: 4px; border-bottom: 1px solid #30363d; }
+table { border-collapse: collapse; width: 100%; font-size: 12px; }
+td { padding: 3px 8px; border-bottom: 1px solid #21262d; }
+td:first-child { color: #d2a8ff; min-width: 140px; }
+pre { background: #0d1117; padding: 8px; border-radius: 4px; font-size: 11px; overflow: auto; max-height: 300px; border: 1px solid #21262d; }
+.win { color: #3fb950; font-weight: bold; }
+.loss { color: #f85149; font-weight: bold; }
+.void { color: #8b949e; }
+.pending { color: #d29922; }
+.tag { color: #6e7681; font-size: 11px; }
+.note { font-size: 11px; color: #8b949e; margin-top: 16px; }
+</style></head>
+<body>
+<h1>🔍 Forensics — Tip Post-Mortem</h1>
+<div class="sub">Snapshot completo de uma tip: row + context + match_result + factor_log + sibling tips.</div>
+<input type="text" id="adminKey" placeholder="ADMIN_KEY" style="width:300px" />
+<input type="number" id="tipId" placeholder="tip_id" style="width:120px" min="1" />
+<button onclick="load()" style="background:#58a6ff;color:#0d1117;border:none;padding:6px 16px;border-radius:4px;cursor:pointer;font:inherit">Carregar</button>
+<div id="content"></div>
+<div class="note"><a href="/admin/" style="color:#d2a8ff">← Admin Console</a></div>
+<script>
+const k = localStorage.getItem('adminKey') || '';
+document.getElementById('adminKey').value = k;
+document.getElementById('adminKey').addEventListener('input', e => localStorage.setItem('adminKey', e.target.value.trim()));
+async function load() {
+  const key = document.getElementById('adminKey').value.trim();
+  const id = document.getElementById('tipId').value.trim();
+  if (!key || !id) { document.getElementById('content').innerHTML = '<div class="pending">Preencha key + tip_id.</div>'; return; }
+  try {
+    const r = await fetch('/admin/forensics?tip_id=' + encodeURIComponent(id) + '&key=' + encodeURIComponent(key));
+    const j = await r.json();
+    if (!r.ok || !j?.ok) { document.getElementById('content').innerHTML = '<div class="loss">' + (j?.error || 'HTTP ' + r.status) + '</div>'; return; }
+    const t = j.tip;
+    const resultCls = t.result === 'win' ? 'win' : t.result === 'loss' ? 'loss' : t.result === 'void' ? 'void' : 'pending';
+    let html = '<div class="section"><h2>📍 Tip #' + j.tip_id + '</h2><table>' +
+      '<tr><td>Sport</td><td>' + t.sport + '</td></tr>' +
+      '<tr><td>Match</td><td>' + (t.participant1 || '?') + ' vs ' + (t.participant2 || '?') + '</td></tr>' +
+      '<tr><td>League</td><td>' + (t.event_name || '—') + '</td></tr>' +
+      '<tr><td>Pick</td><td><strong>' + t.tip_participant + '</strong> @ <strong>' + t.odds + '</strong></td></tr>' +
+      '<tr><td>EV</td><td>' + t.ev + '</td></tr>' +
+      '<tr><td>Stake</td><td>' + t.stake + ' (' + (t.stake_reais || 0) + 'R$)</td></tr>' +
+      '<tr><td>Confidence</td><td>' + t.confidence + '</td></tr>' +
+      '<tr><td>Result</td><td class="' + resultCls + '">' + (t.result || 'pending') + '</td></tr>' +
+      '<tr><td>Profit (R$)</td><td class="' + resultCls + '">' + (t.profit_reais ?? '—') + '</td></tr>' +
+      '<tr><td>Sent at</td><td>' + (t.sent_at || '—') + '</td></tr>' +
+      '<tr><td>Settled at</td><td>' + (t.settled_at || '—') + '</td></tr>' +
+      '<tr><td>Market type</td><td>' + (t.market_type || 'ML') + '</td></tr>' +
+      '<tr><td>Model P pick</td><td>' + (t.model_p_pick != null ? (t.model_p_pick * 100).toFixed(1) + '%' : '—') + '</td></tr>' +
+      '<tr><td>Model label</td><td>' + (t.model_label || '—') + '</td></tr>' +
+      '<tr><td>CLV odds</td><td>' + (t.clv_odds || '—') + '</td></tr>' +
+      '<tr><td>Open odds</td><td>' + (t.open_odds || '—') + '</td></tr>' +
+      '<tr><td>Reason</td><td>' + (t.tip_reason || '—') + '</td></tr>' +
+      '<tr><td>Match ID</td><td><code>' + t.match_id + '</code></td></tr>' +
+      '<tr><td>Shadow</td><td>' + (t.is_shadow ? 'YES' : 'no') + '</td></tr>' +
+      '<tr><td>Archived</td><td>' + (t.archived ? 'YES' : 'no') + '</td></tr>' +
+      '</table></div>';
+    if (j.context) {
+      html += '<div class="section"><h2>🧠 tip_context_json</h2><pre>' + JSON.stringify(j.context, null, 2).replace(/</g,'&lt;') + '</pre></div>';
+    }
+    if (j.match_result) {
+      html += '<div class="section"><h2>🏆 Match result</h2><pre>' + JSON.stringify(j.match_result, null, 2).replace(/</g,'&lt;') + '</pre></div>';
+    }
+    if (j.factor_log?.length) {
+      html += '<div class="section"><h2>📐 Factor log</h2><table><tr><th>Factor</th><th>Predicted dir</th><th>Actual winner</th><th>Logged at</th></tr>';
+      for (const f of j.factor_log) {
+        html += '<tr><td>' + (f.factor || '?') + '</td><td>' + (f.predicted_dir || '?') + '</td><td>' + (f.actual_winner || '?') + '</td><td>' + (f.logged_at || '—') + '</td></tr>';
+      }
+      html += '</table></div>';
+    }
+    if (j.voided_entry) {
+      html += '<div class="section"><h2>⚠️ Voided entry</h2><pre>' + JSON.stringify(j.voided_entry, null, 2).replace(/</g,'&lt;') + '</pre></div>';
+    }
+    if (j.shadow_row?.length) {
+      html += '<div class="section"><h2>🥷 Shadow rows</h2><pre>' + JSON.stringify(j.shadow_row, null, 2).replace(/</g,'&lt;') + '</pre></div>';
+    }
+    if (j.sibling_tips?.length) {
+      html += '<div class="section"><h2>👥 Sibling tips (mesmo match)</h2><table><tr><th>id</th><th>sport</th><th>pick</th><th>odds</th><th>ev</th><th>result</th><th>market</th></tr>';
+      for (const s of j.sibling_tips) {
+        const cls = s.result === 'win' ? 'win' : s.result === 'loss' ? 'loss' : '';
+        html += '<tr><td>' + s.id + '</td><td>' + s.sport + '</td><td>' + s.tip_participant + '</td><td>' + s.odds + '</td><td>' + s.ev + '</td><td class="' + cls + '">' + (s.result || 'pending') + '</td><td>' + (s.market_type || 'ML') + '</td></tr>';
+      }
+      html += '</table></div>';
+    }
+    document.getElementById('content').innerHTML = html;
+  } catch (e) { document.getElementById('content').innerHTML = '<div class="loss">' + e.message + '</div>'; }
+}
+// Auto-load via ?tip_id=X URL param
+const urlParams = new URLSearchParams(window.location.search);
+if (urlParams.get('tip_id')) {
+  document.getElementById('tipId').value = urlParams.get('tip_id');
+  if (k) load();
+}
+</script>
+</body></html>`;
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end(html);
+    return;
+  }
+
+  // ── /admin/sport-detail.html: dashboard pra drill-down per-sport.
+  if (p === '/admin/sport-detail.html') {
+    const html = `<!DOCTYPE html>
+<html lang="pt-BR"><head><meta charset="utf-8">
+<title>Sport Detail — SportsEdge</title>
+<style>
+body { font: 13px/1.5 -apple-system,BlinkMacSystemFont,monospace; margin: 0; padding: 16px; background: #0d1117; color: #c9d1d9; }
+h1 { color: #58a6ff; margin: 0 0 4px; font-size: 18px; }
+.sub { color: #8b949e; font-size: 11px; margin-bottom: 12px; }
+input, select { background: #0d1117; border: 1px solid #30363d; color: #c9d1d9; padding: 6px 10px; border-radius: 4px; font: inherit; margin: 0 4px 8px 0; }
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; margin: 12px 0; }
+.card { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 10px; }
+.card h3 { color: #58a6ff; margin: 0 0 6px; font-size: 11px; text-transform: uppercase; }
+.card .v { font-size: 20px; font-weight: bold; color: #d2a8ff; }
+.card .sub { font-size: 10px; color: #8b949e; margin-top: 2px; }
+table { border-collapse: collapse; width: 100%; margin: 8px 0; font-size: 12px; }
+th { text-align: left; color: #58a6ff; padding: 4px 8px; border-bottom: 1px solid #30363d; }
+td { padding: 4px 8px; border-bottom: 1px solid #21262d; }
+.tag { color: #8b949e; font-size: 11px; }
+.ok { color: #3fb950; }
+.warn { color: #d29922; }
+.crit { color: #f85149; }
+h2 { color: #58a6ff; font-size: 14px; margin: 16px 0 6px; padding-bottom: 4px; border-bottom: 1px solid #30363d; }
+pre { background: #161b22; padding: 8px; border-radius: 4px; font-size: 11px; overflow: auto; max-height: 200px; }
+.note { font-size: 11px; color: #8b949e; margin-top: 16px; }
+</style></head>
+<body>
+<h1>🎯 Sport Detail</h1>
+<div class="sub">Drill-down completo per sport. ROI/CLV 7d & 30d, last tip, blocklist matches.</div>
+<input type="text" id="adminKey" placeholder="ADMIN_KEY" style="width:300px" />
+<select id="sport">
+  <option value="">— sport —</option>
+  <option value="lol">lol</option>
+  <option value="dota2">dota2</option>
+  <option value="cs">cs</option>
+  <option value="valorant">valorant</option>
+  <option value="tennis">tennis</option>
+  <option value="football">football</option>
+  <option value="mma">mma</option>
+</select>
+<button onclick="load()" style="background:#58a6ff;color:#0d1117;border:none;padding:6px 16px;border-radius:4px;cursor:pointer;font:inherit">Carregar</button>
+<div id="content"></div>
+<div class="note"><a href="/admin/" style="color:#d2a8ff">← Admin Console</a></div>
+<script>
+const k = localStorage.getItem('adminKey') || '';
+document.getElementById('adminKey').value = k;
+document.getElementById('adminKey').addEventListener('input', e => localStorage.setItem('adminKey', e.target.value.trim()));
+async function load() {
+  const key = document.getElementById('adminKey').value.trim();
+  const sport = document.getElementById('sport').value;
+  if (!key || !sport) { document.getElementById('content').innerHTML = '<div class="warn">Preencha key + sport.</div>'; return; }
+  try {
+    const r = await fetch('/admin/sport-detail?sport=' + encodeURIComponent(sport) + '&key=' + encodeURIComponent(key));
+    const j = await r.json();
+    if (!r.ok || !j?.ok) { document.getElementById('content').innerHTML = '<div class="crit">' + (j?.error || 'HTTP ' + r.status) + '</div>'; return; }
+    const fmtRoi = (r) => {
+      if (r == null) return '<span class="tag">—</span>';
+      const cls = r >= 5 ? 'ok' : r >= -5 ? 'warn' : 'crit';
+      return '<span class="' + cls + '">' + (r >= 0 ? '+' : '') + r + '%</span>';
+    };
+    let html = '<h2>🔢 Pending</h2><div class="cards">' +
+      '<div class="card"><h3>Real tips</h3><div class="v">' + (j.pending?.real_tips ?? '—') + '</div></div>' +
+      '<div class="card"><h3>MT shadow</h3><div class="v">' + (j.pending?.mt_shadow ?? '—') + '</div></div>' +
+      '<div class="card"><h3>ML shadow</h3><div class="v">' + (j.pending?.ml_shadow ?? '—') + '</div></div>' +
+      '</div>';
+    html += '<h2>📈 ROI Real</h2><table><tr><th>Janela</th><th>n</th><th>ROI</th><th>CLV</th></tr>';
+    for (const days of [7, 30]) {
+      const r = j.roi_real?.['d' + days];
+      html += '<tr><td>' + days + 'd</td><td>' + (r?.n ?? 0) + '</td><td>' + fmtRoi(r?.roi_pct) + '</td><td>' + fmtRoi(r?.avg_clv) + '</td></tr>';
+    }
+    html += '</table>';
+    html += '<h2>🥷 ROI Shadow</h2><table><tr><th>Janela</th><th>n</th><th>ROI</th><th>CLV</th></tr>';
+    for (const days of [7, 30]) {
+      const r = j.roi_shadow?.['d' + days];
+      html += '<tr><td>' + days + 'd</td><td>' + (r?.n ?? 0) + '</td><td>' + fmtRoi(r?.roi_pct) + '</td><td>' + fmtRoi(r?.avg_clv) + '</td></tr>';
+    }
+    html += '</table>';
+    if (j.top_markets_shadow_30d?.length) {
+      html += '<h2>📊 Top markets shadow 30d</h2><table><tr><th>Market</th><th>Side</th><th>n</th><th>ROI</th></tr>';
+      for (const m of j.top_markets_shadow_30d) {
+        html += '<tr><td>' + (m.market || '') + '</td><td>' + (m.side || '') + '</td><td>' + (m.n || 0) + '</td><td>' + fmtRoi(m.roi_pct) + '</td></tr>';
+      }
+      html += '</table>';
+    }
+    if (j.blocklist_entries?.length) {
+      html += '<h2>🚫 Blocklist matches</h2><pre>' + j.blocklist_entries.join('\\n') + '</pre>';
+    }
+    if (j.last_tip) {
+      html += '<h2>📍 Last tip (real)</h2><pre>' + JSON.stringify(j.last_tip, null, 2).replace(/</g,'&lt;') + '</pre>';
+    }
+    if (j.last_shadow) {
+      html += '<h2>📍 Last shadow</h2><pre>' + JSON.stringify(j.last_shadow, null, 2).replace(/</g,'&lt;') + '</pre>';
+    }
+    document.getElementById('content').innerHTML = html;
+  } catch (e) { document.getElementById('content').innerHTML = '<div class="crit">' + e.message + '</div>'; }
+}
 </script>
 </body></html>`;
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
