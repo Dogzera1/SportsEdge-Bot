@@ -2232,6 +2232,10 @@ async function runAutoAnalysis() {
             pickSide: _pickSideLs,
             sport: 'lol',
             isShadow: isBucketShadowed('lol') ? 1 : 0,
+            // tip_context_json fields (forensics):
+            factors: result.factorActive || null,
+            mlScore: Number.isFinite(result.mlScore) ? +result.mlScore.toFixed(2) : null,
+            factorCount: (result.factorActive || []).length || null,
           }, 'lol');
 
           // Aborta se DB recusou (erro ou duplicata já registrada)
@@ -15172,6 +15176,10 @@ Máximo 200 palavras. Raciocínio breve antes da decisão.`;
           oddsFetchedAt: o._fetchedAt || null,
           lineShopOdds: o || null,
           pickSide: pickIsT1 ? 't1' : 't2',
+          // tip_context_json fields:
+          factors: mlResultTennis.factorActive || null,
+          mlScore: Number.isFinite(mlResultTennis.score) ? +mlResultTennis.score.toFixed(2) : null,
+          factorCount: mlResultTennis.factorCount || null,
         }, 'tennis');
 
         if (!rec?.tipId) {
@@ -16231,6 +16239,9 @@ Máximo 200 palavras.`;
           tipReason: fbTipReason,
           lineShopOdds: _pickSideFb ? (match.odds || null) : null,
           pickSide: _pickSideFb,
+          // tip_context_json fields:
+          factors: (mlScore?.method ? [{ label: 'Método', value: String(mlScore.method).slice(0, 40) }] : null),
+          factorCount: mlScore?.method ? 1 : null,
         }, 'football');
 
         if (!recFb?.tipId) {
@@ -17096,6 +17107,11 @@ Máximo 150 palavras.`;
           sport: 'cs',
           lineShopOdds: match.odds || null,
           pickSide: direction,
+          // tip_context_json:
+          factors: factorCount > 0 ? [{ label: useElo ? 'Elo' : 'HLTV', value: useElo ? `${elo.elo1}/${elo.elo2}` : `factors=${factorCount}` }] : null,
+          mlScore: Number.isFinite(mlScore) ? +mlScore.toFixed(2) : null,
+          factorCount: factorCount || null,
+          divergencePp: isPinnacleOdds && Number.isFinite(divergencePp) ? +divergencePp.toFixed(2) : null,
         }, 'cs');
 
         if (!rec?.tipId) {
