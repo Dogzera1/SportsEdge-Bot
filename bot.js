@@ -4324,7 +4324,10 @@ function perMarketEvGate(sport, market, defaultEv) {
 let _MT_PERMANENT_DISABLE = null;
 function _getMtPermanentDisable() {
   if (_MT_PERMANENT_DISABLE !== null) return _MT_PERMANENT_DISABLE;
-  const raw = String(process.env.MT_PERMANENT_DISABLE_LIST ?? 'tennis|totalGames|over').trim();
+  // Default blocklist (audits prod 2026-04-30):
+  //   tennis|totalGames|over: ROI -20.2% n=57 (sample sólido, leak persistente)
+  //   lol|total:               ROI -54% n=10 (sample baixo mas magnitude clara)
+  const raw = String(process.env.MT_PERMANENT_DISABLE_LIST ?? 'tennis|totalGames|over,lol|total').trim();
   _MT_PERMANENT_DISABLE = new Set();
   for (const entry of raw.split(',').map(s => s.trim()).filter(Boolean)) {
     _MT_PERMANENT_DISABLE.add(entry);
