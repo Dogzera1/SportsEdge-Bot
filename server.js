@@ -6349,7 +6349,8 @@ td:last-child { text-align: right; color: #d2a8ff; }
 <div style="margin:10px 0;font-size:11px;color:#8b949e">
   <strong style="color:#58a6ff">🛠️ <a href="/admin/" style="color:#d2a8ff;text-decoration:underline">Admin Console (todos endpoints)</a> · ou direto:</strong><br>
   <em style="color:#7d8590">Status:</em>
-  <a href="/admin/cron-status" style="color:#d2a8ff">cron-status</a> ·
+  <a href="/admin/cron-status.html" style="color:#d2a8ff">cron-status (HTML)</a> ·
+  <a href="/admin/cron-status" style="color:#d2a8ff">JSON</a> ·
   <a href="/admin/env-audit" style="color:#d2a8ff">env-audit</a> ·
   <a href="/admin/mt-status" style="color:#d2a8ff">mt-status</a> ·
   <a href="/admin/sport-detail?sport=tennis" style="color:#d2a8ff">sport-detail</a> ·
@@ -7896,7 +7897,8 @@ input[name=key] { background: #0d1117; border: 1px solid #30363d; color: #c9d1d9
 <li><a href="/health" class="hk">/health</a> <span class="tag">overview + alerts</span></li>
 <li><a href="/health/metrics" class="hk">/health/metrics</a> <span class="tag">JSON counters/gauges</span></li>
 <li><a href="/health/metrics.html" class="hk">/health/metrics.html</a> <span class="tag">UI metrics</span></li>
-<li><a href="/admin/cron-status" class="hk">/admin/cron-status</a> <span class="tag">polls + crons heartbeats</span></li>
+<li><a href="/admin/cron-status.html" class="hk">/admin/cron-status.html</a> <span class="tag">polls + crons UI</span></li>
+<li><a href="/admin/cron-status" class="hk">/admin/cron-status</a> <span class="tag">JSON</span></li>
 <li><a href="/admin/env-audit" class="hk">/admin/env-audit</a> <span class="tag">envs sanity check</span></li>
 <li><a href="/admin/scraper-health" class="hk">/admin/scraper-health</a> <span class="tag">scrapers status</span></li>
 <li><a href="/admin/aggregator-status" class="hk">/admin/aggregator-status</a> <span class="tag">BR aggregator</span></li>
@@ -7987,6 +7989,118 @@ function applyKey() {
   });
 }
 applyKey();
+</script>
+</body></html>`;
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end(html);
+    return;
+  }
+
+  // ── /admin/cron-status.html: dashboard auto-refresh dos heartbeats.
+  if (p === '/admin/cron-status.html') {
+    const html = `<!DOCTYPE html>
+<html lang="pt-BR"><head><meta charset="utf-8">
+<title>Cron Status — SportsEdge</title>
+<meta http-equiv="refresh" content="60">
+<style>
+body { font: 13px/1.5 -apple-system,BlinkMacSystemFont,monospace; margin: 0; padding: 16px; background: #0d1117; color: #c9d1d9; }
+h1 { color: #58a6ff; margin: 0 0 4px; font-size: 18px; }
+.sub { color: #8b949e; font-size: 11px; margin-bottom: 12px; }
+.summary { padding: 8px 12px; margin: 12px 0; background: #161b22; border-radius: 6px; border-left: 3px solid #3fb950; }
+.summary.warn { border-left-color: #d29922; }
+.summary.crit { border-left-color: #f85149; }
+table { border-collapse: collapse; width: 100%; max-width: 100%; margin: 12px 0; }
+th { text-align: left; color: #58a6ff; font-size: 11px; padding: 6px 8px; border-bottom: 1px solid #30363d; }
+td { padding: 4px 8px; border-bottom: 1px solid #21262d; font-size: 12px; }
+.stale { color: #f85149; font-weight: bold; }
+.error { color: #d29922; }
+.ok { color: #3fb950; }
+.tag { color: #8b949e; font-size: 10px; }
+input[name=key] { background: #0d1117; border: 1px solid #30363d; color: #c9d1d9; padding: 4px 8px; border-radius: 4px; font: inherit; width: 100%; max-width: 500px; box-sizing: border-box; margin-bottom: 8px; }
+.note { font-size: 11px; color: #8b949e; }
+</style></head>
+<body>
+<h1>⏰ Cron Status</h1>
+<div class="sub">Heartbeats de polls + crons. Auto-refresh 60s.</div>
+<input type="text" name="key" id="adminKey" placeholder="ADMIN_KEY" />
+<div id="summary"></div>
+<div id="content">carregando…</div>
+<div class="note" style="margin-top:24px"><a href="/admin/" style="color:#d2a8ff">← Admin Console</a> · <a href="/health/metrics.html" style="color:#d2a8ff">📊 Health</a></div>
+<script>
+const k = localStorage.getItem('adminKey') || '';
+document.getElementById('adminKey').value = k;
+document.getElementById('adminKey').addEventListener('input', e => {
+  localStorage.setItem('adminKey', e.target.value.trim());
+  load();
+});
+function fmtAge(s) {
+  if (s == null) return '—';
+  if (s < 60) return s + 's';
+  if (s < 3600) return Math.round(s/60) + 'min';
+  if (s < 86400) return Math.round(s/3600) + 'h';
+  return Math.round(s/86400) + 'd';
+}
+function fmtMs(ms) {
+  if (ms == null) return '—';
+  if (ms < 1000) return ms + 'ms';
+  return (ms/1000).toFixed(1) + 's';
+}
+async function load() {
+  const key = document.getElementById('adminKey').value.trim();
+  if (!key) {
+    document.getElementById('summary').innerHTML = '<div class="summary warn">Cole ADMIN_KEY acima pra carregar.</div>';
+    return;
+  }
+  try {
+    const r = await fetch('/admin/cron-status?key=' + encodeURIComponent(key));
+    const j = await r.json();
+    if (!r.ok || !j?.ok) {
+      document.getElementById('summary').innerHTML = '<div class="summary crit">Erro: ' + (j?.error || 'HTTP ' + r.status) + '</div>';
+      return;
+    }
+    const sum = j.summary || {};
+    const cls = sum.stale_count > 0 ? 'crit' : sum.error_count > 0 ? 'warn' : '';
+    document.getElementById('summary').innerHTML =
+      '<div class="summary ' + cls + '">' +
+        '<strong>Total:</strong> ' + sum.total + ' | ' +
+        '<strong>Stale:</strong> ' + sum.stale_count + (sum.stale_names?.length ? ' (' + sum.stale_names.join(', ') + ')' : '') + ' | ' +
+        '<strong>Erros:</strong> ' + sum.error_count + (sum.error_names?.length ? ' (' + sum.error_names.join(', ') + ')' : '') +
+      '</div>';
+    function renderTable(title, entries) {
+      if (!Object.keys(entries).length) return '<h2 style="font-size:13px;color:#58a6ff;margin:12px 0 4px">' + title + '</h2><div class="tag">vazio</div>';
+      const rows = Object.entries(entries).sort().map(([name, hb]) => {
+        const stale = hb.is_stale ? 'stale' : (hb.lastError ? 'error' : 'ok');
+        const result = hb.lastResult || hb.hadLive != null ? (hb.hadLive ? 'live' : 'idle') : '—';
+        const expected = hb.expected_interval_ms ? fmtMs(hb.expected_interval_ms) : '—';
+        return '<tr>' +
+          '<td><code>' + name + '</code></td>' +
+          '<td class="' + stale + '">' + (hb.is_stale ? '⚠️ stale' : (hb.lastError ? '⚠️' : '✓')) + '</td>' +
+          '<td>' + (hb.count || 0) + '</td>' +
+          '<td>' + fmtAge(hb.age_s) + '</td>' +
+          '<td>' + expected + '</td>' +
+          '<td>' + (hb.lastResult || (hb.hadLive != null ? (hb.hadLive ? 'live' : 'idle') : '—')) + '</td>' +
+          '<td>' + (hb.lastDurationMs != null ? fmtMs(hb.lastDurationMs) : (hb.matches != null ? hb.matches + ' matches' : '—')) + '</td>' +
+          '<td class="error">' + (hb.lastError || '') + '</td>' +
+        '</tr>';
+      }).join('');
+      return '<h2 style="font-size:13px;color:#58a6ff;margin:16px 0 4px">' + title + '</h2>' +
+             '<table><tr><th>name</th><th>status</th><th>count</th><th>age</th><th>expected</th><th>result</th><th>extra</th><th>error</th></tr>' + rows + '</table>';
+    }
+    let html = renderTable('🔄 Polls', j.polls || {});
+    html += renderTable('⏰ Crons', j.crons || {});
+    // Cron envs section
+    const envs = j.cron_envs || {};
+    const envRows = Object.entries(envs).map(([k, v]) =>
+      '<tr><td><code>' + k + '</code></td><td class="' + (v ? 'ok' : 'tag') + '">' + (v ? '✓ ON' : '○ OFF') + '</td></tr>'
+    ).join('');
+    html += '<h2 style="font-size:13px;color:#58a6ff;margin:16px 0 4px">🔧 Cron envs</h2><table><tr><th>env</th><th>status</th></tr>' + envRows + '</table>';
+    document.getElementById('content').innerHTML = html;
+  } catch (e) {
+    document.getElementById('summary').innerHTML = '<div class="summary crit">' + e.message + '</div>';
+  }
+}
+load();
+setInterval(load, 60000);
 </script>
 </body></html>`;
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
