@@ -19062,8 +19062,8 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
       }
     });
   }
-  setInterval(() => runNightlyRetrainCheck().catch(e => log('ERROR', 'NIGHTLY-RETRAIN', e.message)), 15 * 60 * 1000);
-  setTimeout(() => runNightlyRetrainCheck().catch(() => {}), 45 * 60 * 1000); // primeiro check 45min pós-boot (evita colidir com outros)
+  setInterval(_wrapCron('nightly_retrain', runNightlyRetrainCheck), 15 * 60 * 1000);
+  setTimeout(_wrapCron('nightly_retrain', runNightlyRetrainCheck), 45 * 60 * 1000); // primeiro check 45min pós-boot (evita colidir com outros)
 
   // ── DB Backup diário ──
   // VACUUM INTO snapshot pra backups/ (default DB_BACKUP_HOUR_UTC=4 = 1h BRT).
@@ -19380,15 +19380,15 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
     } catch(_) {}
   }, 30 * 1000);
 
-  setInterval(() => runModelCalibrationCycle().catch(e => log('ERROR', 'MODEL-CALIB', e.message)), 24 * 60 * 60 * 1000);
-  setInterval(() => runPathGuardCycle().catch(e => log('ERROR', 'PATH-GUARD', e.message)), 6 * 60 * 60 * 1000);
-  setTimeout(() => runPathGuardCycle().catch(() => {}), 30 * 60 * 1000);
+  setInterval(_wrapCron('model_calibration', runModelCalibrationCycle), 24 * 60 * 60 * 1000);
+  setInterval(_wrapCron('path_guard', runPathGuardCycle), 6 * 60 * 60 * 1000);
+  setTimeout(_wrapCron('path_guard', runPathGuardCycle), 30 * 60 * 1000);
 
-  setInterval(() => runLeagueGuardCycle().catch(e => log('ERROR', 'LEAGUE-GUARD', e.message)), 12 * 60 * 60 * 1000);
-  setTimeout(() => runLeagueGuardCycle().catch(() => {}), 45 * 60 * 1000);
+  setInterval(_wrapCron('league_guard', runLeagueGuardCycle), 12 * 60 * 60 * 1000);
+  setTimeout(_wrapCron('league_guard', runLeagueGuardCycle), 45 * 60 * 1000);
 
-  setInterval(() => runOddsBucketGuardCycle().catch(e => log('ERROR', 'BUCKET-GUARD', e.message)), 12 * 60 * 60 * 1000);
-  setTimeout(() => runOddsBucketGuardCycle().catch(() => {}), 50 * 60 * 1000);
+  setInterval(_wrapCron('odds_bucket_guard', runOddsBucketGuardCycle), 12 * 60 * 60 * 1000);
+  setTimeout(_wrapCron('odds_bucket_guard', runOddsBucketGuardCycle), 50 * 60 * 1000);
 
   // MT shadow per-bucket guard — mesma cadência (12h) que regular tip bucket guard.
   // Boot offset distinto pra evitar contenção de DM/log.
