@@ -131,6 +131,35 @@ module.exports = function runTests(t) {
     t.assert(s.counters.x === 1, 'estado preservado');
   });
 
+  t.test('cron heartbeat: markCronHeartbeat + getCronHeartbeats', () => {
+    const utils = require('../lib/utils');
+    // First call: define todos os campos
+    utils.markCronHeartbeat('test_cron', { result: 'ok', note: 'fresh', durationMs: 50 });
+    let hbs = utils.getCronHeartbeats();
+    t.assert(hbs.test_cron != null, 'heartbeat existe');
+    t.assert(hbs.test_cron.lastResult === 'ok');
+    t.assert(hbs.test_cron.lastNote === 'fresh');
+    t.assert(hbs.test_cron.lastError == null, 'lastError null quando não passado');
+    t.assert(hbs.test_cron.count === 1);
+
+    // Second call: só passa novo result, prev fields preservados
+    utils.markCronHeartbeat('test_cron', { result: 'ok' });
+    hbs = utils.getCronHeartbeats();
+    t.assert(hbs.test_cron.count === 2);
+    t.assert(hbs.test_cron.lastNote === 'fresh', 'lastNote preservado quando não passado');
+    t.assert(hbs.test_cron.lastError == null);
+  });
+
+  t.test('cron heartbeat: error path overwrite', () => {
+    const utils = require('../lib/utils');
+    utils.markCronHeartbeat('test_cron2', { result: 'ok', note: 'good' });
+    utils.markCronHeartbeat('test_cron2', { result: 'error', error: 'broken' });
+    const hbs = utils.getCronHeartbeats();
+    t.assert(hbs.test_cron2.lastResult === 'error');
+    t.assert(hbs.test_cron2.lastError === 'broken');
+    t.assert(hbs.test_cron2.lastNote === 'good', 'lastNote stick from prev');
+  });
+
   t.test('mergeSnapshot ignora valores inválidos', () => {
     m.reset();
     m.mergeSnapshot({
