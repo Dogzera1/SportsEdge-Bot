@@ -1593,6 +1593,26 @@ const migrations = [
     },
   },
   {
+    id: '067_stratz_hero_matchups',
+    up(db) {
+      // STRATZ hero matchup table — winrate advantage A vs B.
+      // Alimenta dota-hero-features.js getDraftMatchupFactor.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS stratz_hero_matchups (
+          hero_id INTEGER NOT NULL,
+          vs_hero_id INTEGER NOT NULL,
+          advantage REAL,
+          disadvantage REAL,
+          synergy REAL,
+          wins_avg REAL,
+          ingested_at TEXT DEFAULT (datetime('now')),
+          PRIMARY KEY (hero_id, vs_hero_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_stratz_matchups_hero ON stratz_hero_matchups(hero_id);
+      `);
+    },
+  },
+  {
     id: '066_tennis_player_serve_stats',
     up(db) {
       // Serve/return stats per player de tennisabstract.com.

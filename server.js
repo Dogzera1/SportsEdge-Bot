@@ -9045,6 +9045,35 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // ── STRATZ Dota: hero matchup table ──
+  // GET /admin/stratz-test?heroId=1
+  // POST /admin/sync-stratz-matchups → bulk all heroes (138)
+  if (p === '/admin/stratz-test') {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const { fetchHeroMatchups } = require('./lib/stratz-dota-scraper');
+      const heroId = parseInt(parsed.query.heroId || '1', 10) || 1;
+      const r = await fetchHeroMatchups(heroId);
+      sendJson(res, r);
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+  if (p === '/admin/sync-stratz-matchups' && (req.method === 'POST' || req.method === 'GET')) {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const beforeCount = db.prepare(`SELECT COUNT(*) AS n FROM stratz_hero_matchups`).get().n;
+      sendJson(res, { ok: true, message: 'Sync STRATZ iniciado em bg (138 heroes ~3min)', beforeCount });
+      setImmediate(async () => {
+        try {
+          const { syncAllHeroMatchups } = require('./lib/stratz-dota-scraper');
+          const r = await syncAllHeroMatchups(db);
+          log('INFO', 'STRATZ-SYNC', `done: ${r.inserted} matchups, ${r.errors} errors, ${r.skipped} skipped`);
+        } catch (e) { log('ERROR', 'STRATZ-SYNC', e.message); }
+      });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   // ── Tennis Abstract: serve/return stats ──
   // GET /admin/tennis-abstract-test?player=Carlos%20Alcaraz
   // POST /admin/sync-tennis-abstract?players=Alcaraz,Sinner,...
