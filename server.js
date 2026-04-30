@@ -8705,6 +8705,11 @@ setInterval(load, 60000);
       'live_risk_monitor':  10 * 60 * 1000,  // 10min
       'critical_alerts':    10 * 60 * 1000,  // 10min
       'live_scout_gaps':    15 * 60 * 1000,  // varia, default 15min
+      'auto_void_stuck':    15 * 60 * 1000,  // 15min
+      'football_poisson_retrain': 15 * 60 * 1000,
+      'threshold_auto_apply':     15 * 60 * 1000,
+      'mt_calib_validation':      30 * 60 * 1000,
+      'mt_calib_refit':     60 * 60 * 1000,
       // Hourly
       'bankroll_guardian':  60 * 60 * 1000,
       // 6h

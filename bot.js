@@ -18700,8 +18700,8 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
       }
     } catch (e) { log('ERROR', 'THRESHOLD-AUTO', e.message); }
   }
-  setInterval(() => runThresholdAutoApply(), 15 * 60 * 1000);
-  setTimeout(() => runThresholdAutoApply(), 50 * 60 * 1000);
+  setInterval(_wrapCron('threshold_auto_apply', runThresholdAutoApply), 15 * 60 * 1000);
+  setTimeout(_wrapCron('threshold_auto_apply', runThresholdAutoApply), 50 * 60 * 1000);
 
   // Football Poisson retrain: segunda 5h UTC (1h após threshold optimizer).
   // Absorve matches novos settled na última semana. Gated FOOTBALL_POISSON_AUTO_RETRAIN.
@@ -18742,10 +18742,10 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
       if (isBootstrap) _fbBootstrapDone = false;
     }
   }
-  setInterval(() => runFootballPoissonRetrain(), 15 * 60 * 1000);
-  setTimeout(() => runFootballPoissonRetrain(), 55 * 60 * 1000);
+  setInterval(_wrapCron('football_poisson_retrain', runFootballPoissonRetrain), 15 * 60 * 1000);
+  setTimeout(_wrapCron('football_poisson_retrain', runFootballPoissonRetrain), 55 * 60 * 1000);
   // Bootstrap rápido: se não existe params, tenta em 90s ao invés de esperar 55min.
-  setTimeout(() => runFootballPoissonRetrain(), 90 * 1000);
+  setTimeout(_wrapCron('football_poisson_retrain', runFootballPoissonRetrain), 90 * 1000);
 
   // Auto-refit MT calibrações (tennis Markov + outros sports quando n>=20).
   // Roda dom 4h UTC (low-traffic). Default ON; opt-out CALIB_AUTO_REFIT_DISABLED=true.
@@ -18801,8 +18801,8 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
       log('ERROR', 'CALIB-REFIT', e.message);
     }
   }
-  setInterval(() => runMtCalibRefit(), 60 * 60 * 1000); // check 1h
-  setTimeout(() => runMtCalibRefit(), 5 * 60 * 1000);  // bootstrap 5min após boot
+  setInterval(_wrapCron('mt_calib_refit', runMtCalibRefit), 60 * 60 * 1000); // check 1h
+  setTimeout(_wrapCron('mt_calib_refit', runMtCalibRefit), 5 * 60 * 1000);  // bootstrap 5min após boot
 
   // Persistent calib gap tracker — buckets com gap >=15pp por N runs consecutivos
   // viram disabled via market_tips_runtime_state (mesma tabela do ROI guard).
@@ -18889,7 +18889,7 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
       }
     } catch (e) { log('ERROR', 'MT-VALIDATION', e.message); }
   }
-  setInterval(() => runMtCalibValidationAlert(), 30 * 60 * 1000); // check 30min
+  setInterval(_wrapCron('mt_calib_validation', runMtCalibValidationAlert), 30 * 60 * 1000); // check 30min
 
   // Auto-void stuck pending tips. Diferentes sports têm latência distinta de settlement:
   //   LoL/CS/Valorant: matches rápidos, 12h já é tarde demais
@@ -18941,8 +18941,8 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
       if (token) for (const adminId of ADMIN_IDS) await sendDM(token, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
     }
   }
-  setInterval(() => runAutoVoidStuck(), 15 * 60 * 1000);
-  setTimeout(() => runAutoVoidStuck(), 65 * 60 * 1000);
+  setInterval(_wrapCron('auto_void_stuck', runAutoVoidStuck), 15 * 60 * 1000);
+  setTimeout(_wrapCron('auto_void_stuck', runAutoVoidStuck), 65 * 60 * 1000);
 
   // Daily Autonomy Digest: 1x/dia às AUTONOMY_DIGEST_HOUR_UTC (default 12h UTC = 9h BRT),
   // DM admins com snapshot /autonomy-status. Gated por AUTONOMY_DIGEST_AUTO=true.
