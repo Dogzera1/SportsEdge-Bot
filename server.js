@@ -13662,6 +13662,151 @@ setInterval(load, 60000);
   // qual row foi usada no settle, mesmo que detector mt-revert-suspects
   // não tenha flagado). Útil quando settle parece errado mas critério
   // automático não pegou.
+  // GET /admin/ml-calibration?sport=tennis&days=30&key=<KEY>
+  // Calibration analysis: bucketize tips por model_p_pick, mostra hit rate
+  // real vs expected. Detecta drift e overconfidence.
+  if (p === '/admin/ml-calibration') {
+    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const sport = String(parsed.query.sport || 'tennis').slice(0, 20);
+    const days = Math.max(1, Math.min(365, parseInt(parsed.query.days || '30', 10) || 30));
+    const market = parsed.query.market ? String(parsed.query.market).slice(0, 30) : 'ML';
+    try {
+      const rows = db.prepare(`
+        SELECT id, model_p_pick, odds, result, profit_reais, stake_reais,
+          tip_participant, participant1, participant2, event_name, sent_at,
+          model_label, market_type
+        FROM tips
+        WHERE sport = ?
+          AND COALESCE(market_type, 'ML') = ?
+          AND result IN ('win','loss')
+          AND model_p_pick IS NOT NULL AND model_p_pick > 0 AND model_p_pick < 1
+          AND settled_at >= datetime('now', '-' || ? || ' days')
+          AND (archived IS NULL OR archived = 0)
+          AND COALESCE(is_shadow, 0) = 0
+        ORDER BY id DESC
+      `).all(sport, market, days);
+
+      // Bucketize por probabilidade
+      const buckets = [
+        { lo: 0.40, hi: 0.50, label: '40-50%' },
+        { lo: 0.50, hi: 0.55, label: '50-55%' },
+        { lo: 0.55, hi: 0.60, label: '55-60%' },
+        { lo: 0.60, hi: 0.65, label: '60-65%' },
+        { lo: 0.65, hi: 0.70, label: '65-70%' },
+        { lo: 0.70, hi: 0.80, label: '70-80%' },
+        { lo: 0.80, hi: 1.00, label: '80%+' },
+      ];
+      for (const b of buckets) {
+        b.n = 0; b.wins = 0; b.profit = 0; b.stake = 0;
+        b.avgP = 0; b.avgOdds = 0; b.avgImpliedP = 0;
+      }
+      let totalBrier = 0, totalLogLoss = 0;
+      for (const r of rows) {
+        const p = Number(r.model_p_pick);
+        const o = Number(r.odds);
+        const win = r.result === 'win' ? 1 : 0;
+        const impP = o > 1 ? 1/o : 0;
+        const b = buckets.find(b => p >= b.lo && p < b.hi);
+        if (b) {
+          b.n++;
+          b.wins += win;
+          b.profit += Number(r.profit_reais) || 0;
+          b.stake += Number(r.stake_reais) || 0;
+          b.avgP += p;
+          b.avgOdds += o;
+          b.avgImpliedP += impP;
+        }
+        totalBrier += (p - win) ** 2;
+        if (win === 1) totalLogLoss -= Math.log(Math.max(p, 1e-10));
+        else totalLogLoss -= Math.log(Math.max(1 - p, 1e-10));
+      }
+      // Avgs + hit rate
+      for (const b of buckets) {
+        if (b.n > 0) {
+          b.avgP = +(b.avgP / b.n).toFixed(3);
+          b.avgOdds = +(b.avgOdds / b.n).toFixed(2);
+          b.avgImpliedP = +(b.avgImpliedP / b.n).toFixed(3);
+          b.hitRate = +(b.wins / b.n).toFixed(3);
+          b.deltaPp = +((b.hitRate - b.avgP) * 100).toFixed(1); // delta entre real e modelo (pp)
+          b.roi = b.stake > 0 ? +((b.profit / b.stake) * 100).toFixed(1) : 0;
+        } else {
+          b.hitRate = null; b.deltaPp = null; b.roi = null;
+        }
+      }
+      const brier = rows.length > 0 ? +(totalBrier / rows.length).toFixed(4) : null;
+      const logLoss = rows.length > 0 ? +(totalLogLoss / rows.length).toFixed(4) : null;
+
+      // Path breakdown (model_label tipos: trained, hybrid, override, base)
+      const byPath = {};
+      for (const r of rows) {
+        const ml = String(r.model_label || '').toLowerCase();
+        let path = 'base';
+        if (ml.includes('+hybrid')) path = 'hybrid';
+        else if (ml.includes('+override')) path = 'override';
+        else if (ml.includes('trained')) path = 'trained';
+        else if (ml.includes('markov')) path = 'markov';
+        if (!byPath[path]) byPath[path] = { n: 0, wins: 0, profit: 0, stake: 0, brier: 0 };
+        byPath[path].n++;
+        byPath[path].wins += r.result === 'win' ? 1 : 0;
+        byPath[path].profit += Number(r.profit_reais) || 0;
+        byPath[path].stake += Number(r.stake_reais) || 0;
+        byPath[path].brier += (Number(r.model_p_pick) - (r.result === 'win' ? 1 : 0)) ** 2;
+      }
+      for (const k of Object.keys(byPath)) {
+        const v = byPath[k];
+        v.hitRate = v.n > 0 ? +(v.wins / v.n).toFixed(3) : null;
+        v.roi = v.stake > 0 ? +((v.profit / v.stake) * 100).toFixed(1) : null;
+        v.brier = v.n > 0 ? +(v.brier / v.n).toFixed(4) : null;
+      }
+
+      // Distribuição odds bucket
+      const oddBuckets = [
+        { lo: 1.00, hi: 1.40, label: '<1.40' },
+        { lo: 1.40, hi: 1.60, label: '1.40-1.60' },
+        { lo: 1.60, hi: 1.80, label: '1.60-1.80' },
+        { lo: 1.80, hi: 2.00, label: '1.80-2.00' },
+        { lo: 2.00, hi: 2.50, label: '2.00-2.50' },
+        { lo: 2.50, hi: 99, label: '2.50+' },
+      ];
+      for (const b of oddBuckets) { b.n = 0; b.wins = 0; b.profit = 0; b.stake = 0; }
+      for (const r of rows) {
+        const o = Number(r.odds);
+        const b = oddBuckets.find(b => o >= b.lo && o < b.hi);
+        if (b) {
+          b.n++;
+          b.wins += r.result === 'win' ? 1 : 0;
+          b.profit += Number(r.profit_reais) || 0;
+          b.stake += Number(r.stake_reais) || 0;
+        }
+      }
+      for (const b of oddBuckets) {
+        b.hitRate = b.n > 0 ? +(b.wins / b.n).toFixed(3) : null;
+        b.roi = b.stake > 0 ? +((b.profit / b.stake) * 100).toFixed(1) : null;
+      }
+
+      sendJson(res, {
+        ok: true, sport, market, days,
+        n_total: rows.length,
+        brier, log_loss: logLoss,
+        prob_buckets: buckets,
+        odds_buckets: oddBuckets,
+        by_path: byPath,
+        worst_losses: rows.filter(r => r.result === 'loss').sort((a, b) => Number(b.model_p_pick) - Number(a.model_p_pick)).slice(0, 10).map(r => ({
+          id: r.id, p: r.model_p_pick, odds: r.odds, tip: r.tip_participant,
+          match: `${r.participant1} vs ${r.participant2}`, league: r.event_name,
+          model_label: r.model_label, sent_at: r.sent_at,
+        })),
+        best_wins: rows.filter(r => r.result === 'win').sort((a, b) => Number(a.model_p_pick) - Number(b.model_p_pick)).slice(0, 5).map(r => ({
+          id: r.id, p: r.model_p_pick, odds: r.odds, tip: r.tip_participant,
+          match: `${r.participant1} vs ${r.participant2}`, league: r.event_name,
+          model_label: r.model_label,
+        })),
+      });
+    } catch (e) { sendJson(res, { error: e.message, stack: e.stack }, 500); }
+    return;
+  }
+
   // GET /admin/lol-kills-debug?ps=1466122&map=2&key=<KEY>
   // Query PandaScore + OE pra um match específico, retorna kills count + source.
   // Usado pra investigar settle errado de TOTAL_KILLS_MAPN tips.
