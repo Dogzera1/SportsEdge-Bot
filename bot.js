@@ -731,9 +731,22 @@ function _bridgeBotMetricsToServer() {
       host: '127.0.0.1', port, path: '/metrics/ingest', method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) },
       timeout: 4000,
-    }, res => res.resume());
-    req.on('error', () => {}); // server pode estar reiniciando
-    req.on('timeout', () => req.destroy());
+    }, res => {
+      res.resume();
+      if (res.statusCode === 200) {
+        try { require('./lib/metrics').incr('bridge_flush_ok'); } catch (_) {}
+      } else {
+        try { require('./lib/metrics').incr('bridge_flush_err', { status: String(res.statusCode) }); } catch (_) {}
+      }
+    });
+    req.on('error', () => {
+      // server pode estar reiniciando — counter só pra visibilidade.
+      try { require('./lib/metrics').incr('bridge_flush_err', { status: 'network' }); } catch (_) {}
+    });
+    req.on('timeout', () => {
+      try { require('./lib/metrics').incr('bridge_flush_err', { status: 'timeout' }); } catch (_) {}
+      req.destroy();
+    });
     req.write(payload); req.end();
   } catch (_) {}
 }
