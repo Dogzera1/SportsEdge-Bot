@@ -4584,6 +4584,10 @@ async function recordMarketTipAsRegular({ sport, match, tip, stake, isLive }) {
       mtSourceMarket: marketKey,
       mtSourceSide: sideKey,
       mtSourceLine: tip.line ?? null,
+      // tip_context_json fields:
+      factors: [{ label: 'MT', value: `${tip.market}/${tip.side}${tip.line != null ? ` line=${tip.line}` : ''}` }],
+      stakeAdjust: Number.isFinite(tip.stakeAdjust) ? tip.stakeAdjust : null,
+      pickSide: tip.side || null,
     }, sport).catch(e => { log('WARN', 'MT-RECORD', `serverPost err: ${e.message}`); return null; });
     if (!rec) return null;
     if (rec.skipped) {

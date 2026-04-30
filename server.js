@@ -7792,6 +7792,61 @@ setInterval(load, 10000);
     return;
   }
 
+  // ── /admin/blocklist-stats: performance shadow de cada entry no
+  // MT_PERMANENT_DISABLE_LIST. Mostra se vale manter bloqueado ou
+  // se shadow recuperou (candidato pra remover).
+  // GET /admin/blocklist-stats?days=14&key=<ADMIN_KEY>
+  if (p === '/admin/blocklist-stats' && (req.method === 'GET' || req.method === 'POST')) {
+    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const days = Math.max(1, Math.min(180, parseInt(parsed.query.days || '14', 10) || 14));
+    const blocklistEnv = String(process.env.MT_PERMANENT_DISABLE_LIST ?? 'tennis|totalGames|over,lol|total').trim();
+    const entries = blocklistEnv.split(',').map(s => s.trim()).filter(Boolean);
+    const out = { ok: true, ts: new Date().toISOString(), days, entries: [] };
+    for (const entry of entries) {
+      const parts = entry.split('|');
+      if (parts.length < 2) {
+        out.entries.push({ entry, error: 'malformed' });
+        continue;
+      }
+      const sport = parts[0], market = parts[1], side = parts[2] || null;
+      try {
+        const where = side ? `sport=? AND market=? AND side=?` : `sport=? AND market=?`;
+        const args = side ? [sport, market, side] : [sport, market];
+        const r = db.prepare(`
+          SELECT
+            COUNT(*) AS n,
+            SUM(CASE WHEN result='win' THEN 1 ELSE 0 END) AS wins,
+            SUM(CASE WHEN result='loss' THEN 1 ELSE 0 END) AS losses,
+            SUM(CASE WHEN result='void' THEN 1 ELSE 0 END) AS voids,
+            ROUND(SUM(profit_units)*1.0/NULLIF(SUM(stake_units),0)*100,1) AS roi_pct,
+            ROUND(AVG(clv_pct),1) AS avg_clv,
+            ROUND(SUM(profit_units),2) AS profit_u,
+            ROUND(AVG(ev_pct),1) AS avg_ev,
+            ROUND(AVG(odd),2) AS avg_odd
+          FROM market_tips_shadow
+          WHERE ${where}
+            AND created_at >= datetime('now', '-' || ? || ' days')
+            AND result IN ('win','loss','void')
+        `).get(...args, days);
+        const restoreEligible = r && r.n >= 30 && (r.roi_pct ?? -100) >= 0 && (r.avg_clv ?? -100) >= 0;
+        out.entries.push({
+          entry, sport, market, side,
+          ...r,
+          restore_eligible: restoreEligible,
+          recommendation: restoreEligible
+            ? 'considerar remover do MT_PERMANENT_DISABLE_LIST'
+            : (r?.n < 10 ? 'sample insuficiente, manter bloqueado'
+              : (r?.roi_pct < 0 ? 'leak persistente, manter' : 'observar — sample marginal')),
+        });
+      } catch (e) {
+        out.entries.push({ entry, error: e.message });
+      }
+    }
+    sendJson(res, out);
+    return;
+  }
+
   // ── /admin/mt-status: snapshot do MT pipeline cross-sport.
   // Mostra qual sport está shadow-only vs promote-enabled, blocklist,
   // shadow vs real counts 7d. Útil pra ver "tô promovendo o quê?".
