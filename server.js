@@ -7894,6 +7894,8 @@ input[name=key] { background: #0d1117; border: 1px solid #30363d; color: #c9d1d9
 
 <div class="card"><h2>📊 Status & Health</h2>
 <ul>
+<li><a href="/admin/today.html" class="hk">/admin/today.html</a> <span class="tag">📅 daily summary UI</span></li>
+<li><a href="/admin/today" class="hk">/admin/today</a> <span class="tag">JSON</span></li>
 <li><a href="/health" class="hk">/health</a> <span class="tag">overview + alerts</span></li>
 <li><a href="/health/metrics" class="hk">/health/metrics</a> <span class="tag">JSON counters/gauges</span></li>
 <li><a href="/health/metrics.html" class="hk">/health/metrics.html</a> <span class="tag">UI metrics</span></li>
@@ -8099,6 +8101,209 @@ if (urlParams.get('tip_id')) {
   document.getElementById('tipId').value = urlParams.get('tip_id');
   if (k) load();
 }
+</script>
+</body></html>`;
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end(html);
+    return;
+  }
+
+  // ── /admin/today: snapshot do que aconteceu hoje (UTC).
+  // Tips emitidas, settled, profit por sport, alerts emitidos pelos crons.
+  if (p === '/admin/today' && (req.method === 'GET' || req.method === 'POST')) {
+    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const out = { ok: true, ts: new Date().toISOString(), tz: 'UTC' };
+    try {
+      // Tips emitidas hoje
+      out.tips_today = db.prepare(`
+        SELECT sport, COUNT(*) AS n,
+          SUM(CASE WHEN result = 'win' THEN 1 ELSE 0 END) AS wins,
+          SUM(CASE WHEN result = 'loss' THEN 1 ELSE 0 END) AS losses,
+          SUM(CASE WHEN result IS NULL THEN 1 ELSE 0 END) AS pending,
+          SUM(CASE WHEN COALESCE(is_shadow,0) = 1 THEN 1 ELSE 0 END) AS shadow,
+          ROUND(SUM(profit_reais), 2) AS profit_brl
+        FROM tips
+        WHERE date(sent_at) = date('now')
+          AND COALESCE(archived,0) = 0
+        GROUP BY sport ORDER BY n DESC
+      `).all();
+
+      // MT shadow emitidas hoje
+      out.mt_shadow_today = db.prepare(`
+        SELECT sport, COUNT(*) AS n,
+          SUM(CASE WHEN result = 'win' THEN 1 ELSE 0 END) AS wins,
+          SUM(CASE WHEN result = 'loss' THEN 1 ELSE 0 END) AS losses,
+          SUM(CASE WHEN result IS NULL THEN 1 ELSE 0 END) AS pending,
+          ROUND(SUM(profit_units), 2) AS profit_u
+        FROM market_tips_shadow
+        WHERE date(created_at) = date('now')
+        GROUP BY sport ORDER BY n DESC
+      `).all();
+
+      // Tips settled hoje (não necessariamente emitidas hoje)
+      out.tips_settled_today = db.prepare(`
+        SELECT sport, COUNT(*) AS n,
+          SUM(CASE WHEN result = 'win' THEN 1 ELSE 0 END) AS wins,
+          SUM(CASE WHEN result = 'loss' THEN 1 ELSE 0 END) AS losses,
+          SUM(CASE WHEN result = 'void' THEN 1 ELSE 0 END) AS voids,
+          ROUND(SUM(profit_reais), 2) AS profit_brl,
+          ROUND(SUM(stake_reais), 2) AS staked_brl
+        FROM tips
+        WHERE date(settled_at) = date('now')
+          AND COALESCE(archived,0) = 0
+          AND COALESCE(is_shadow,0) = 0
+          AND result IS NOT NULL
+        GROUP BY sport ORDER BY n DESC
+      `).all();
+
+      // Total profit hoje
+      let totalProfit = 0, totalStaked = 0, totalSettled = 0;
+      for (const r of out.tips_settled_today) {
+        totalProfit += r.profit_brl || 0;
+        totalStaked += r.staked_brl || 0;
+        totalSettled += r.n || 0;
+      }
+      out.summary = {
+        tips_emitted_today: out.tips_today.reduce((s, r) => s + (r.n || 0), 0),
+        tips_settled_today: totalSettled,
+        mt_shadow_today: out.mt_shadow_today.reduce((s, r) => s + (r.n || 0), 0),
+        profit_brl_today: +totalProfit.toFixed(2),
+        staked_brl_today: +totalStaked.toFixed(2),
+        roi_today_pct: totalStaked > 0 ? +(totalProfit / totalStaked * 100).toFixed(1) : null,
+      };
+
+      // Bankroll snapshot
+      try {
+        out.bankroll = db.prepare(`SELECT sport, current_banca, initial_banca FROM bankroll ORDER BY current_banca DESC`).all();
+      } catch (_) {}
+
+      // Pending tips per sport (snapshot atual)
+      try {
+        out.pending = db.prepare(`SELECT sport, COUNT(*) AS n FROM tips WHERE result IS NULL AND COALESCE(archived,0) = 0 GROUP BY sport ORDER BY n DESC`).all();
+      } catch (_) {}
+    } catch (e) {
+      out.error = e.message;
+    }
+    sendJson(res, out);
+    return;
+  }
+
+  // ── /admin/today.html: UI render do /admin/today
+  if (p === '/admin/today.html') {
+    const html = `<!DOCTYPE html>
+<html lang="pt-BR"><head><meta charset="utf-8">
+<title>Today — SportsEdge</title>
+<meta http-equiv="refresh" content="120">
+<style>
+body { font: 13px/1.5 -apple-system,BlinkMacSystemFont,monospace; margin: 0; padding: 16px; background: #0d1117; color: #c9d1d9; }
+h1 { color: #58a6ff; margin: 0 0 4px; font-size: 20px; }
+.sub { color: #8b949e; font-size: 11px; margin-bottom: 12px; }
+input { background: #0d1117; border: 1px solid #30363d; color: #c9d1d9; padding: 6px 10px; border-radius: 4px; font: inherit; width: 300px; margin-bottom: 8px; }
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; margin: 12px 0; }
+.card { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 12px; }
+.card h3 { color: #58a6ff; margin: 0 0 4px; font-size: 11px; text-transform: uppercase; }
+.card .v { font-size: 24px; font-weight: bold; color: #d2a8ff; }
+.card .vl { font-size: 18px; }
+.card.profit-pos .v { color: #3fb950; }
+.card.profit-neg .v { color: #f85149; }
+.card .sub { font-size: 10px; color: #8b949e; margin-top: 4px; }
+table { border-collapse: collapse; width: 100%; margin: 8px 0; font-size: 12px; }
+th { text-align: left; color: #58a6ff; padding: 6px 8px; border-bottom: 1px solid #30363d; }
+td { padding: 4px 8px; border-bottom: 1px solid #21262d; }
+.win { color: #3fb950; }
+.loss { color: #f85149; }
+.void { color: #8b949e; }
+.tag { color: #6e7681; font-size: 10px; }
+h2 { color: #58a6ff; font-size: 14px; margin: 16px 0 6px; }
+.note { font-size: 11px; color: #8b949e; margin-top: 16px; }
+</style></head>
+<body>
+<h1>📅 Today</h1>
+<div class="sub" id="ts">carregando…</div>
+<input type="text" id="adminKey" placeholder="ADMIN_KEY" />
+<div id="content"></div>
+<div class="note"><a href="/admin/" style="color:#d2a8ff">← Admin Console</a> · auto-refresh 2min</div>
+<script>
+const k = localStorage.getItem('adminKey') || '';
+document.getElementById('adminKey').value = k;
+document.getElementById('adminKey').addEventListener('input', e => { localStorage.setItem('adminKey', e.target.value.trim()); load(); });
+function fmtBrl(v) {
+  if (v == null) return '—';
+  const n = Number(v);
+  return (n >= 0 ? '+' : '') + n.toFixed(2);
+}
+async function load() {
+  const key = document.getElementById('adminKey').value.trim();
+  if (!key) { document.getElementById('content').innerHTML = '<div class="loss">Cole ADMIN_KEY.</div>'; return; }
+  try {
+    const r = await fetch('/admin/today?key=' + encodeURIComponent(key));
+    const j = await r.json();
+    if (!r.ok || !j?.ok) { document.getElementById('content').innerHTML = '<div class="loss">' + (j?.error || 'HTTP ' + r.status) + '</div>'; return; }
+    document.getElementById('ts').textContent = 'snapshot ' + j.ts + ' (' + j.tz + ')';
+    const s = j.summary || {};
+    const profitCls = (s.profit_brl_today ?? 0) >= 0 ? 'profit-pos' : 'profit-neg';
+    let html = '<div class="cards">' +
+      '<div class="card"><h3>Tips emitidas</h3><div class="v">' + (s.tips_emitted_today ?? 0) + '</div><div class="sub">hoje</div></div>' +
+      '<div class="card"><h3>Tips settled</h3><div class="v">' + (s.tips_settled_today ?? 0) + '</div><div class="sub">resolvidas hoje</div></div>' +
+      '<div class="card"><h3>MT shadow</h3><div class="v">' + (s.mt_shadow_today ?? 0) + '</div><div class="sub">shadow hoje</div></div>' +
+      '<div class="card ' + profitCls + '"><h3>Profit (R$)</h3><div class="v">' + fmtBrl(s.profit_brl_today) + '</div><div class="sub">staked R$' + (s.staked_brl_today ?? 0) + '</div></div>' +
+      '<div class="card ' + profitCls + '"><h3>ROI</h3><div class="v">' + (s.roi_today_pct != null ? (s.roi_today_pct >= 0 ? '+' : '') + s.roi_today_pct + '%' : '—') + '</div><div class="sub">profit / staked</div></div>' +
+    '</div>';
+
+    function table(title, rows, cols) {
+      if (!rows?.length) return '<h2>' + title + '</h2><div class="tag">vazio</div>';
+      const head = '<tr>' + cols.map(c => '<th>' + c.label + '</th>').join('') + '</tr>';
+      const body = rows.map(r => '<tr>' + cols.map(c => {
+        const v = c.fmt ? c.fmt(r[c.key], r) : r[c.key];
+        return '<td' + (c.cls ? ' class="' + c.cls(r) + '"' : '') + '>' + (v ?? '—') + '</td>';
+      }).join('') + '</tr>').join('');
+      return '<h2>' + title + '</h2><table>' + head + body + '</table>';
+    }
+    html += table('🎯 Tips emitidas hoje (real)', j.tips_today, [
+      { key: 'sport', label: 'Sport' },
+      { key: 'n', label: 'n' },
+      { key: 'wins', label: 'Wins', cls: () => 'win' },
+      { key: 'losses', label: 'Losses', cls: () => 'loss' },
+      { key: 'pending', label: 'Pending' },
+      { key: 'shadow', label: 'Shadow' },
+      { key: 'profit_brl', label: 'P&L R$', fmt: fmtBrl, cls: r => r.profit_brl >= 0 ? 'win' : 'loss' },
+    ]);
+    html += table('🥷 MT shadow emitidas hoje', j.mt_shadow_today, [
+      { key: 'sport', label: 'Sport' },
+      { key: 'n', label: 'n' },
+      { key: 'wins', label: 'Wins', cls: () => 'win' },
+      { key: 'losses', label: 'Losses', cls: () => 'loss' },
+      { key: 'pending', label: 'Pending' },
+      { key: 'profit_u', label: 'P&L u', fmt: fmtBrl, cls: r => (r.profit_u || 0) >= 0 ? 'win' : 'loss' },
+    ]);
+    html += table('✅ Tips settled hoje', j.tips_settled_today, [
+      { key: 'sport', label: 'Sport' },
+      { key: 'n', label: 'n' },
+      { key: 'wins', label: 'W', cls: () => 'win' },
+      { key: 'losses', label: 'L', cls: () => 'loss' },
+      { key: 'voids', label: 'V', cls: () => 'void' },
+      { key: 'staked_brl', label: 'Staked R$' },
+      { key: 'profit_brl', label: 'P&L R$', fmt: fmtBrl, cls: r => r.profit_brl >= 0 ? 'win' : 'loss' },
+    ]);
+    if (j.bankroll?.length) {
+      html += table('💰 Bankroll snapshot', j.bankroll, [
+        { key: 'sport', label: 'Sport' },
+        { key: 'current_banca', label: 'Atual', fmt: v => 'R$' + Number(v || 0).toFixed(2) },
+        { key: 'initial_banca', label: 'Inicial', fmt: v => 'R$' + Number(v || 0).toFixed(2) },
+      ]);
+    }
+    if (j.pending?.length) {
+      html += table('⏳ Pending agora', j.pending, [
+        { key: 'sport', label: 'Sport' },
+        { key: 'n', label: 'n' },
+      ]);
+    }
+    document.getElementById('content').innerHTML = html;
+  } catch (e) { document.getElementById('content').innerHTML = '<div class="loss">' + e.message + '</div>'; }
+}
+load();
+setInterval(load, 120000);
 </script>
 </body></html>`;
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
