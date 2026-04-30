@@ -18964,6 +18964,82 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   setInterval(() => runDailyLeaksDigest().catch(() => {}), 30 * 60 * 1000);
   setTimeout(() => runDailyLeaksDigest().catch(() => {}), 50 * 60 * 1000);
 
+  // ── Weekly Performance Digest: 1x/semana (default segunda 14h UTC = 11h BRT)
+  // sumário consolidado pra revisar performance + decidir tuning.
+  // Combina /shadow-summary + /admin/mt-status + /admin/blocklist-stats.
+  let _lastWeeklyDigestWeek = null;
+  async function runWeeklyDigest() {
+    if (/^(0|false|no)$/i.test(String(process.env.WEEKLY_DIGEST_AUTO || 'true'))) return;
+    if (!ADMIN_IDS.size) return;
+    const dayUtc = parseInt(process.env.WEEKLY_DIGEST_DAY_UTC || '1', 10); // 1=Mon
+    const hourUtc = parseInt(process.env.WEEKLY_DIGEST_HOUR_UTC || '14', 10);
+    const now = new Date();
+    const isoWeek = `${now.getUTCFullYear()}-W${Math.ceil((now.getUTCDate() + 6 - now.getUTCDay()) / 7)}`;
+    if (_lastWeeklyDigestWeek === isoWeek) return;
+    if (now.getUTCDay() !== dayUtc || now.getUTCHours() !== hourUtc) return;
+    _lastWeeklyDigestWeek = isoWeek;
+    try {
+      const days = parseInt(process.env.WEEKLY_DIGEST_DAYS || '7', 10);
+      // Shadow stats per sport
+      const shadowStats = db.prepare(`
+        SELECT sport, COUNT(*) AS n,
+          ROUND(SUM(profit_units)*1.0/NULLIF(SUM(stake_units),0)*100,1) AS roi,
+          ROUND(AVG(clv_pct),1) AS clv
+        FROM market_tips_shadow
+        WHERE created_at >= datetime('now', '-' || ? || ' days')
+          AND result IN ('win','loss')
+        GROUP BY sport ORDER BY n DESC
+      `).all(days);
+      // Real tips stats per sport
+      const realStats = db.prepare(`
+        SELECT sport, COUNT(*) AS n,
+          ROUND(SUM(profit_reais)*1.0/NULLIF(SUM(stake_reais),0)*100,1) AS roi,
+          ROUND(AVG(clv_pct),1) AS clv
+        FROM tips
+        WHERE sent_at >= datetime('now', '-' || ? || ' days')
+          AND result IN ('win','loss')
+          AND COALESCE(is_shadow, 0) = 0
+          AND (archived IS NULL OR archived = 0)
+        GROUP BY sport ORDER BY n DESC
+      `).all(days);
+      const lines = [`📅 *Weekly Digest ${days}d*`, ''];
+      lines.push('🎯 *Tips reais:*');
+      if (realStats.length) {
+        for (const s of realStats) {
+          const roi = s.roi != null ? `${s.roi >= 0 ? '+' : ''}${s.roi}%` : '—';
+          const clv = s.clv != null ? `${s.clv >= 0 ? '+' : ''}${s.clv}%` : '—';
+          const emoji = (s.roi || 0) >= 5 ? '🟢' : (s.roi || 0) >= -5 ? '🟡' : '🔴';
+          lines.push(`${emoji} ${s.sport}: n=${s.n} ROI=${roi} CLV=${clv}`);
+        }
+      } else lines.push('  (sem settled)');
+      lines.push('');
+      lines.push('🥷 *Shadow MT:*');
+      if (shadowStats.length) {
+        for (const s of shadowStats.slice(0, 8)) {
+          const roi = s.roi != null ? `${s.roi >= 0 ? '+' : ''}${s.roi}%` : '—';
+          const clv = s.clv != null ? `${s.clv >= 0 ? '+' : ''}${s.clv}%` : '—';
+          const emoji = (s.roi || 0) >= 5 ? '🟢' : (s.roi || 0) >= -5 ? '🟡' : '🔴';
+          lines.push(`${emoji} ${s.sport}: n=${s.n} ROI=${roi} CLV=${clv}`);
+        }
+      } else lines.push('  (sem shadow settled)');
+      lines.push('');
+      lines.push('_Detalhes: /admin/mt-status · /admin/blocklist-stats · /admin/forensics_');
+      const msg = lines.join('\n');
+      const routed = _pickTokenForAlert('digest') || _pickTokenForAlert('system');
+      const token = routed?.token;
+      if (!token) return;
+      let sent = 0;
+      for (const adminId of ADMIN_IDS) {
+        if (await sendDM(token, adminId, msg).catch(() => false)) sent++;
+      }
+      log('INFO', 'WEEKLY-DIGEST', `${realStats.length}+${shadowStats.length} sports DM ${sent}/${ADMIN_IDS.size} admin(s)`);
+    } catch (e) {
+      log('WARN', 'WEEKLY-DIGEST', `err: ${e.message}`);
+    }
+  }
+  setInterval(() => runWeeklyDigest().catch(() => {}), 30 * 60 * 1000);
+  setTimeout(() => runWeeklyDigest().catch(() => {}), 80 * 60 * 1000);
+
   // ── Auto-restore MT permanent disable: avalia se markets em
   // MT_PERMANENT_DISABLE_LIST recuperaram em shadow. NÃO altera env auto
   // (env é fonte da verdade) — só DM admin com sugestão. User decide se remove.
