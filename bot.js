@@ -16566,10 +16566,20 @@ Máximo 200 palavras.`;
             const evVal = parseFloat(mlScore.bestEv);
             if (seleção && oddVal > 1 && Number.isFinite(evVal)) {
               _fbFromOverride = true;
+              // 2026-05-01: trained com conf alta + EV substancial escala pra
+              // MÉDIA/2u. Antes: hardcode 1u BAIXA para todo override (incluindo
+              // Leeds-Burnley conf 0.90 / São Paulo-Bahia EV 16.4%) deixava
+              // valor na mesa. Heurístico permanece BAIXA/1u (sem trained gate).
+              const _isTrained = !!fbTrained;
+              const _modelConf = fbModel?.confidence ?? 0;
+              const _scaleStake = _isTrained && _modelConf >= 0.80 && evVal >= 10;
+              const _scaleConf = _isTrained && _modelConf >= 0.80 && evVal >= 10;
+              const _stake = _scaleStake ? '2' : '1';
+              const _conf = _scaleConf ? 'MÉDIA' : 'BAIXA';
               // [full, mercado, seleção, odd, EV, stake, CONF]
-              tipMatchEff = [null, dir, seleção, String(oddVal.toFixed(2)), String(evVal.toFixed(1)), '1', 'BAIXA'];
-              const _src = fbTrained ? 'trained' : 'heuristic';
-              log('INFO', 'FB-IA-OVERRIDE', `${match.team1} vs ${match.team2} [${match.league}]: override IA SEM_EDGE [${_src}] — ${dir}:${seleção}@${oddVal.toFixed(2)} EV=${evVal.toFixed(1)}% modelConf=${fbModel?.confidence?.toFixed(2) ?? 'n/a'} method=${fbModel?.method || 'n/a'} → CONF=BAIXA stake=1u`);
+              tipMatchEff = [null, dir, seleção, String(oddVal.toFixed(2)), String(evVal.toFixed(1)), _stake, _conf];
+              const _src = _isTrained ? 'trained' : 'heuristic';
+              log('INFO', 'FB-IA-OVERRIDE', `${match.team1} vs ${match.team2} [${match.league}]: override IA SEM_EDGE [${_src}] — ${dir}:${seleção}@${oddVal.toFixed(2)} EV=${evVal.toFixed(1)}% modelConf=${_modelConf.toFixed(2)} method=${fbModel?.method || 'n/a'} → CONF=${_conf} stake=${_stake}u`);
             }
           }
           if (!_fbFromOverride) {

@@ -12354,6 +12354,78 @@ setInterval(load, 60000);
     return;
   }
 
+  // POST /admin/void-orphan-market-tips?sport=tennis&days=7&apply=1&key=<KEY>
+  // Voida tips em market_tips_shadow onde TODOS os candidates (match_results)
+  // resolveram >5min antes da tip ser criada — caso clássico "scanner emitiu
+  // após match terminar" (cache stale ou live cycle atrasado). Essas tips
+  // ficam presas no settle loop spammando log a cada ciclo até atingir
+  // ZOMBIE_THRESHOLD. Endpoint força void preventivo.
+  //
+  // Default dryRun. Adicione apply=1 pra executar.
+  // ?sport=tennis (default) &days=7 (1-30) &guardMin=5 (default 5min)
+  if (p === '/admin/void-orphan-market-tips' && (req.method === 'POST' || req.method === 'GET')) {
+    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const sport = parsed.query.sport || 'tennis';
+    const days = Math.max(1, Math.min(30, parseInt(parsed.query.days || '7', 10)));
+    const guardMin = Math.max(1, Math.min(60, parseInt(parsed.query.guardMin || '5', 10)));
+    const apply = parsed.query.apply === '1' || parsed.query.apply === 'true';
+    try {
+      // Pega tips pendentes do sport+janela
+      const tips = db.prepare(`
+        SELECT id, sport, team1, team2, league, market, line, side, created_at
+        FROM market_tips_shadow
+        WHERE sport = ? AND result IS NULL AND created_at >= datetime('now', ?)
+      `).all(sport, `-${days} days`);
+      const orphans = [];
+      const guardSec = guardMin * 60;
+      // Tennis usa 'tennis' como game; outros sports mapeiam differently mas
+      // pra esse cleanup escopo atual = tennis (escopo expansível depois).
+      const game = sport === 'tennis' ? 'tennis' : sport;
+      const findCands = db.prepare(`
+        SELECT resolved_at, final_score, team1, team2 FROM match_results
+        WHERE game = ?
+          AND ((LOWER(team1) = LOWER(?) AND LOWER(team2) = LOWER(?))
+            OR (LOWER(team1) = LOWER(?) AND LOWER(team2) = LOWER(?)))
+      `);
+      for (const t of tips) {
+        if (!t.team1 || !t.team2) continue;
+        const cands = findCands.all(game, t.team1, t.team2, t.team2, t.team1);
+        if (!cands.length) continue;
+        const tipEpoch = Math.floor(new Date(t.created_at + 'Z').getTime() / 1000);
+        if (!Number.isFinite(tipEpoch)) continue;
+        // orphan se NENHUM candidate tem resolved_at >= tip.created_at - guardSec
+        const hasFresh = cands.some(c => {
+          const cEpoch = Math.floor(new Date(c.resolved_at + 'Z').getTime() / 1000);
+          return Number.isFinite(cEpoch) && cEpoch >= (tipEpoch - guardSec);
+        });
+        if (!hasFresh) {
+          const newest = cands.reduce((acc, c) => {
+            const ts = Math.floor(new Date(c.resolved_at + 'Z').getTime() / 1000);
+            return (!acc || ts > acc.ts) ? { ts, row: c } : acc;
+          }, null);
+          orphans.push({
+            id: t.id, team1: t.team1, team2: t.team2, league: t.league,
+            market: t.market, side: t.side, line: t.line,
+            tip_created: t.created_at,
+            newest_candidate_resolved: newest?.row.resolved_at,
+            gap_min: newest ? Math.round((tipEpoch - newest.ts) / 60) : null,
+            candidates: cands.length,
+          });
+        }
+      }
+      let voided = 0;
+      if (apply && orphans.length) {
+        const ids = orphans.map(o => o.id);
+        const placeholders = ids.map(() => '?').join(',');
+        const r = db.prepare(`UPDATE market_tips_shadow SET result='void', settled_at=datetime('now'), profit_units=0 WHERE id IN (${placeholders}) AND result IS NULL`).run(...ids);
+        voided = r.changes;
+      }
+      sendJson(res, { ok: true, dryRun: !apply, sport, days, guardMin, scanned: tips.length, orphan_count: orphans.length, voided, orphans });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
   // POST /admin/mt-unvoid-recent?sport=tennis&hours=12&apply=1&key=<KEY>
   // Reverte void recente em market_tips_shadow → result=NULL pra settle cron
   // re-tentar com pipeline atual (force-settle). Usa quando void foi bulk
