@@ -4918,7 +4918,7 @@ const server = http.createServer(async (req, res) => {
               }
             }
           }
-          const passingTips = predict ? scanKillsMarkets({ pinTotals: totals, predict, minEv: parseFloat(process.env.LOL_KILLS_SCAN_MIN_EV ?? '5') }) : [];
+          const passingTips = predict ? scanKillsMarkets({ pinTotals: totals, predict, minEv: parseFloat(process.env.LOL_KILLS_SCAN_MIN_EV ?? '12') }) : [];
           let reason = 'edge_passing';
           if (rosterStatus !== 'ok') reason = `roster_${rosterStatus}`;
           else if (!predict) reason = 'lambda_out_of_range';

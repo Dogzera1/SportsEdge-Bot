@@ -3965,18 +3965,23 @@ function _loadBlocklistFromDb() {
   } catch (e) { log('WARN', 'BLOCKLIST-DB', `load: ${e.message}`); }
 }
 
+// 2026-05-01: defaults baseados em audit ROI 14d. Tratados como env-seeds —
+// usuário pode unblock via /unblock-league (ativa cooldown 7d que respeita aqui).
+// LPL: n=6 W=1 ROI=-78.7% (calibração quebrada pós-split de elenco).
+const _BLOCKLIST_DEFAULTS = ['lol:lpl'];
+
 function _parseBlocklistEnv() {
-  const raw = String(process.env.LEAGUE_BLOCKLIST || '').trim();
-  if (!raw) return;
-  for (const e of raw.split(',')) {
-    const v = e.trim().toLowerCase();
+  const envRaw = String(process.env.LEAGUE_BLOCKLIST || '').trim();
+  const sources = [..._BLOCKLIST_DEFAULTS, ...(envRaw ? envRaw.split(',') : [])];
+  for (const e of sources) {
+    const v = String(e || '').trim().toLowerCase();
     if (!v) continue;
     const entry = v.includes(':') ? v : `*:${v}`;
     // 2026-04-28: respeita cooldown manual unblock. Antes env re-adicionava
     // entry mesmo durante cooldown (manual unblock recente) → cooldown ineficaz.
     const cooldownUntil = _leagueUnblockCooldown.get(entry) || 0;
     if (cooldownUntil > Date.now()) {
-      log('INFO', 'BLOCKLIST', `env entry ${entry} skipped (cooldown ativo até ${new Date(cooldownUntil).toISOString()})`);
+      log('INFO', 'BLOCKLIST', `seed entry ${entry} skipped (cooldown ativo até ${new Date(cooldownUntil).toISOString()})`);
       continue;
     }
     if (!_leagueBlocklist.has(entry)) {
@@ -7416,7 +7421,10 @@ async function autoAnalyzeMatch(token, match) {
                 team1IsBlue,
               });
               if (predict) {
-                const minEvKills = parseFloat(process.env.LOL_KILLS_SCAN_MIN_EV ?? '5');
+                // 2026-05-01: bump 5→12 após audit ROI -32.6% n=7 EWC TOTAL_KILLS_MAP2
+                // avgCLV -16.9% (Pinnacle drift constante contra). Modelo Poisson kills
+                // overshoots overs em mapa 2; threshold mais alto seleciona edges reais.
+                const minEvKills = parseFloat(process.env.LOL_KILLS_SCAN_MIN_EV ?? '12');
                 const bestOf = lolModel.bestOf || 3;
                 // Bo3 → mapas 1,2,3. Bo5 → 1,2,3,4,5. Skip mapa já finalizado.
                 const startMap = (Number.isFinite(match.score1) && Number.isFinite(match.score2))
