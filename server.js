@@ -11165,6 +11165,96 @@ setInterval(load, 60000);
     return;
   }
 
+  // Single-glance overview pra solo bot ops. Agrega: feed health alerts +
+  // ROI drift CUSUM + recent errors top + pending tip aging + bankroll status.
+  // Uma URL = "tudo que precisa atenção agora".
+  if (p === '/admin/health-overview') {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const out = { ts: new Date().toISOString(), warnings: [] };
+
+      // 1. Feed heartbeat
+      try {
+        const fh = require('./lib/feed-heartbeat');
+        const alerts = fh.checkFeedHealth({ staleMultiplier: 3, minObservations: 2 });
+        out.feed_health = {
+          all: fh.getFeedHealth(),
+          degraded_count: alerts.length,
+          degraded: alerts,
+        };
+        for (const a of alerts) {
+          out.warnings.push(`🔌 Feed ${a.source}/${a.sport} ${a.status} (last ${a.lastSuccessMin}min ago)`);
+        }
+      } catch (e) { out.feed_health = { error: e.message }; }
+
+      // 2. ROI drift (CUSUM ad-hoc; same params as cron default)
+      try {
+        const { runRoiDriftCusum } = require('./lib/roi-drift-cusum');
+        const driftAlerts = runRoiDriftCusum(db, {
+          k: parseFloat(process.env.ROI_CUSUM_K || '0.5'),
+          h: parseFloat(process.env.ROI_CUSUM_H || '4'),
+        });
+        out.roi_drift = { count: driftAlerts.length, alerts: driftAlerts };
+        for (const a of driftAlerts) {
+          out.warnings.push(`📉 ${a.sport} drift ${a.direction}: baseline ${a.baselineRoi}% → recent ${a.recentRoi}%`);
+        }
+      } catch (e) { out.roi_drift = { error: e.message }; }
+
+      // 3. Recent errors (24h top by frequency)
+      try {
+        const recent = db.prepare(`
+          SELECT module, error_name, COUNT(*) AS n, MAX(ts) AS last_ts
+          FROM error_log WHERE ts >= datetime('now', '-24 hours')
+          GROUP BY module, error_name ORDER BY n DESC LIMIT 10
+        `).all();
+        out.recent_errors_24h = recent;
+        const totalErrors = recent.reduce((s, r) => s + r.n, 0);
+        if (totalErrors > 50) {
+          out.warnings.push(`🐛 ${totalErrors} errors in last 24h (top: ${recent[0]?.module}/${recent[0]?.error_name} ×${recent[0]?.n})`);
+        }
+      } catch (e) { out.recent_errors_24h = []; }
+
+      // 4. Pending tips age — flagga se >10 pending older than 48h
+      try {
+        const pending = db.prepare(`
+          SELECT sport, COUNT(*) AS n,
+                 ROUND(AVG((julianday('now') - julianday(sent_at)) * 24), 1) AS avg_age_h,
+                 MAX(ROUND((julianday('now') - julianday(sent_at)) * 24, 1)) AS max_age_h
+          FROM tips WHERE result IS NULL
+            AND COALESCE(is_shadow, 0) = 0
+            AND COALESCE(archived, 0) = 0
+            AND sent_at >= datetime('now', '-7 days')
+          GROUP BY sport HAVING n > 0 ORDER BY max_age_h DESC
+        `).all();
+        out.pending_tips = pending;
+        for (const p of pending) {
+          if (p.max_age_h > 48) {
+            out.warnings.push(`⏳ ${p.sport}: ${p.n} pending tips, oldest ${p.max_age_h}h ago — settle stuck`);
+          }
+        }
+      } catch (e) { out.pending_tips = []; }
+
+      // 5. Bankroll drift vs initial
+      try {
+        const bks = db.prepare(`SELECT sport, initial_banca, current_banca FROM bankroll WHERE sport != 'esports'`).all();
+        const drifts = bks.map(b => ({
+          sport: b.sport,
+          initial: b.initial_banca,
+          current: b.current_banca,
+          delta_pct: b.initial_banca > 0 ? +((b.current_banca - b.initial_banca) / b.initial_banca * 100).toFixed(2) : 0,
+        }));
+        out.bankroll = drifts;
+        for (const d of drifts) {
+          if (d.delta_pct < -15) out.warnings.push(`💸 ${d.sport} banca ${d.delta_pct}% (${d.current}/${d.initial})`);
+        }
+      } catch (e) { out.bankroll = []; }
+
+      out.warnings_count = out.warnings.length;
+      sendJson(res, out);
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
   if (p === '/admin/errors') {
     if (!requireAdmin(req, res)) return;
     try {
