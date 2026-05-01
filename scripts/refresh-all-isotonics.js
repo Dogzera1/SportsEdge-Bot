@@ -63,6 +63,12 @@ const BEFORE = {
   dota_iso: readIsotonic('lib/dota2-isotonic.json'),
   cs_iso: readIsotonic('lib/cs2-isotonic.json'),
   tennis_markov_calib: readIsotonic('lib/tennis-markov-calib.json'),
+  // CLV calibration (layer pós-isotonic, treinada em closing line)
+  lol_clv: readIsotonic('lib/lol-clv-calibration.json'),
+  tennis_clv: readIsotonic('lib/tennis-clv-calibration.json'),
+  dota_clv: readIsotonic('lib/dota2-clv-calibration.json'),
+  cs_clv: readIsotonic('lib/cs2-clv-calibration.json'),
+  football_clv: readIsotonic('lib/football-clv-calibration.json'),
 };
 
 const results = { ranAt: new Date().toISOString(), jobs: [], before: BEFORE };
@@ -102,6 +108,10 @@ run('Fit CS2 isotonic', 'node scripts/fit-esports-isotonic.js --game=cs2');
 // não cresceu ≥30 settled desde o fit anterior — evita re-fits sobre
 // ruído incremental. ECE regression guard interno aborta se calib piora.
 run('Fit tennis Markov MT calib', 'node scripts/fit-tennis-markov-calibration.js --min-new-samples=30');
+// 2026-05-01: CLV calibration layer (camada pós-isotonic). Treina pra puxar
+// model_p_pick em direção a closing line — signal de menor variância.
+// Skip safe quando n<50 settled tips com clv_odds. Lit: arxiv 2410.21484.
+run('Fit CLV calibration (all sports)', 'node scripts/fit-clv-calibration.js --sport=all');
 
 const AFTER = {
   lol_weights: readWeights('lib/lol-weights.json'),
@@ -110,6 +120,11 @@ const AFTER = {
   dota_iso: readIsotonic('lib/dota2-isotonic.json'),
   cs_iso: readIsotonic('lib/cs2-isotonic.json'),
   tennis_markov_calib: readIsotonic('lib/tennis-markov-calib.json'),
+  lol_clv: readIsotonic('lib/lol-clv-calibration.json'),
+  tennis_clv: readIsotonic('lib/tennis-clv-calibration.json'),
+  dota_clv: readIsotonic('lib/dota2-clv-calibration.json'),
+  cs_clv: readIsotonic('lib/cs2-clv-calibration.json'),
+  football_clv: readIsotonic('lib/football-clv-calibration.json'),
 };
 results.after = AFTER;
 
