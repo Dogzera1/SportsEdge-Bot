@@ -1835,6 +1835,36 @@ const migrations = [
       `);
     },
   },
+  {
+    id: '074_consolidate_cs2_into_cs',
+    up(db) {
+      // Bug histórico: CS market tips foram gravadas com sport='cs2' em `tips` e
+      // `bankroll` (deveria ser 'cs' — convenção do bucket). Resultado: bucket
+      // cs2 paralelo ao cs, banca inicial duplicada (R$200 p/ 1 esporte) e tips
+      // cs2 ausentes do overall view do dashboard.
+      //
+      // Convenção do projeto:
+      //   - `bankroll.sport` e `tips.sport` = bucket ('cs')
+      //   - `market_tips_shadow.sport`, `mt_*`, `match_results.game` = game id ('cs2')
+      // Mig só toca tips/bankroll. Demais tabelas mantêm 'cs2' (correto por design).
+      const cs2Bk = db.prepare(`SELECT initial_banca, current_banca FROM bankroll WHERE sport='cs2'`).get();
+      if (cs2Bk) {
+        const delta = (cs2Bk.current_banca || 0) - (cs2Bk.initial_banca || 0);
+        const csBk = db.prepare(`SELECT 1 FROM bankroll WHERE sport='cs'`).get();
+        if (csBk) {
+          db.prepare(`UPDATE bankroll SET current_banca = current_banca + ?, updated_at = datetime('now') WHERE sport='cs'`).run(delta);
+        } else {
+          db.prepare(`INSERT INTO bankroll (sport, initial_banca, current_banca) VALUES ('cs', 100, ?)`).run(100 + delta);
+        }
+        db.prepare(`DELETE FROM bankroll WHERE sport='cs2'`).run();
+      }
+      try {
+        if (tableExists(db, 'tips')) {
+          db.prepare(`UPDATE tips SET sport='cs' WHERE sport='cs2'`).run();
+        }
+      } catch (_) { /* coluna sport ausente — improvável */ }
+    },
+  },
 ];
 
 function applyMigrations(db) {

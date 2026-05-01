@@ -2093,6 +2093,8 @@ async function loadTips(gen = refreshGen) {
   if (currentSport === '__overall__') {
     // 'esports' query já unifica IN(esports,lol,dota2) via resolveSportSet — NÃO incluir
     // 'lol'/'dota2' separados aqui senão o mesmo tip é retornado 3 vezes (triplicando).
+    // 'esports' query unifica IN(esports,lol,dota2). 'cs' cobre tudo pós-mig 074
+    // (cs2 consolidado em cs). Não incluir buckets unified separadamente — duplica.
     const sports = ['esports', 'valorant', 'cs', 'tennis', 'mma', 'football', 'darts', 'snooker', 'tabletennis'];
     const sq = status ? '&status=' + encodeURIComponent(status) : '';
     const perSport = Math.ceil(LIMIT_ALL / sports.length);

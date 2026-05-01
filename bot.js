@@ -17268,7 +17268,11 @@ async function pollCs(runOnce = false) {
                       if (r.sent > 0) {
                         markAdminDmSent(db, { sport: 'cs2', match, market: t.market, line: t.line, side: t.side, odd: t.odd, ev: t.ev });
                         log('INFO', 'CS-MARKET-TIP', `Admin DM: ${t.label} @ ${t.odd} EV ${t.ev}% stake ${stake}u (sent=${r.sent} failed=${r.failed})`);
-                        if (isMarketTipsPromoteEnabled('cs2')) await recordMarketTipAsRegular({ sport: 'cs2', match, tip: t, stake, isLive: isLiveCs });
+                        // 'cs2' = game id (canônico em market-tips-shadow lib). Mas
+                        // recordMarketTipAsRegular grava em `tips` table que usa
+                        // bucket bankroll ('cs') — sem isso bucket cs2 paralelo é
+                        // recriado e quebra dashboard overall view (mig 074 fix).
+                        if (isMarketTipsPromoteEnabled('cs2')) await recordMarketTipAsRegular({ sport: 'cs', match, tip: t, stake, isLive: isLiveCs });
                       } else {
                         log('WARN', 'CS-MARKET-TIP', `Todos admin DM falharam — skip dedup mark (${t.label} @ ${t.odd})`);
                       }
