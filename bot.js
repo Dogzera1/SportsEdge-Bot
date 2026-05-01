@@ -11792,7 +11792,7 @@ async function poll(token, sport) {
               try {
                 const placed = db.prepare(`
                   SELECT t.id, t.sport, t.tip_participant, t.odds, t.result,
-                         t.stake, t.profit_reais, t.stake_reais,
+                         t.stake, t.profit_reais, t.stake_reais, t.clv_odds,
                          a.real_stake_units
                   FROM tips t
                   JOIN tip_user_action a ON a.tip_id = t.id AND a.action = 'placed'
@@ -11817,6 +11817,7 @@ async function poll(token, sport) {
                 `).all(days);
 
                 let realStake = 0, realProfit = 0, realWins = 0, realSettled = 0;
+                let clvSum = 0, clvN = 0, clvPositive = 0;
                 for (const t of placed) {
                   const stk = Number(t.real_stake_units || 0);
                   if (!stk || (t.result !== 'win' && t.result !== 'loss')) continue;
@@ -11825,6 +11826,14 @@ async function poll(token, sport) {
                   const pf = t.result === 'win' ? stk * (Number(t.odds) - 1) : -stk;
                   realProfit += pf;
                   if (t.result === 'win') realWins++;
+                  // CLV per tip = (odds_taken / odds_close - 1) × 100
+                  // CLV+% = bati o mercado de fechamento; CLV-% = fui pego perto.
+                  if (t.clv_odds && Number(t.clv_odds) > 1 && Number(t.odds) > 1) {
+                    const clv = (Number(t.odds) / Number(t.clv_odds) - 1) * 100;
+                    clvSum += clv;
+                    clvN++;
+                    if (clv > 0) clvPositive++;
+                  }
                 }
                 let skippedSettled = 0, skippedProfit = 0;
                 for (const t of skipped) {
@@ -11854,7 +11863,14 @@ async function poll(token, sport) {
                   msg += `*🎯 Real (via /confirm)*\n`;
                   if (realSettled > 0) {
                     msg += `${realWins}W ${realSettled - realWins}L (${realHit.toFixed(0)}% hit) | ROI: *${realRoi >= 0 ? '+' : ''}${realRoi.toFixed(1)}%*\n`;
-                    msg += `Profit: *${realProfit >= 0 ? '+' : ''}${realProfit.toFixed(2)}u* | Stake: ${realStake.toFixed(1)}u\n\n`;
+                    msg += `Profit: *${realProfit >= 0 ? '+' : ''}${realProfit.toFixed(2)}u* | Stake: ${realStake.toFixed(1)}u\n`;
+                    if (clvN > 0) {
+                      const clvAvg = clvSum / clvN;
+                      const clvPosRate = clvPositive / clvN * 100;
+                      const clvIcon = clvAvg > 1 ? '🟢' : clvAvg > -1 ? '🟡' : '🔴';
+                      msg += `${clvIcon} CLV: *${clvAvg >= 0 ? '+' : ''}${clvAvg.toFixed(2)}%* (${clvPosRate.toFixed(0)}% positivos, n=${clvN})\n`;
+                    }
+                    msg += '\n';
                   } else {
                     msg += `_Nenhuma tip confirmada com /confirm em ${days}d._\n\n`;
                   }
