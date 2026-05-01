@@ -61,6 +61,18 @@ try {
 }
 const { db, stmts } = initDatabase(DB_PATH);
 
+// EV→ROI calibration cache: refresh inicial + cron 6h. Lib/utils + market-tip-processor
+// leem mults via getEvCalibrationMult; substitui HIGH_EV_THROTTLE hardcoded por
+// curva data-driven per (sport, bucket EV).
+try {
+  const { refreshEvCalibration } = require('./lib/ev-calibration');
+  refreshEvCalibration(db);
+  setInterval(() => {
+    try { refreshEvCalibration(db); }
+    catch (e) { log('WARN', 'EV-CALIB', `refresh: ${e.message}`); }
+  }, parseInt(process.env.EV_CALIB_REFRESH_MS || String(6 * 60 * 60 * 1000), 10));
+} catch (e) { log('WARN', 'EV-CALIB', `init: ${e.message}`); }
+
 // Limpeza única de integridade: só executa se nunca rodou (evita deletar tips legítimas no futuro)
 try {
   const alreadyCleaned = db.prepare("SELECT 1 FROM settings WHERE key='odds_cleanup_v1' LIMIT 1").get();
@@ -10377,6 +10389,20 @@ setInterval(load, 60000);
         buckets: enrichedBuckets,
       });
     } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
+  // GET /admin/ev-calibration — snapshot da calibration EV→ROI usada pelo Kelly.
+  // Mostra mult per (sport, bucket) + global. Refresh manual: ?refresh=1.
+  if (p === '/admin/ev-calibration') {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const ev = require('./lib/ev-calibration');
+      if (parsed.query.refresh === '1' || parsed.query.refresh === 'true') {
+        ev.refreshEvCalibration(db);
+      }
+      sendJson(res, { ok: true, ...ev.getEvCalibrationSnapshot() });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
     return;
   }
 
