@@ -21402,9 +21402,14 @@ async function checkCLV(caches = {}) {
         if (regime !== 'near' && tip.clv_odds) continue;
 
         let clvOdds = null;
+        // 2026-05-01: skip pinnacle-cache fallback — Pinnacle dropou o match,
+        // /odds retorna valor antigo (frequentemente == open) → CLV falsificado.
+        // Audit LPL mostrou 6/6 tips com clv=open por este path. Esports only;
+        // football/tennis/mma/darts/snooker usam fontes próprias (não /odds).
+        const isFreshOdds = (o) => o && parseFloat(o.t1) > 1 && o.fallback !== 'pinnacle-cache';
         if (sport === 'esports') {
           const o = await serverGet(`/odds?team1=${encodeURIComponent(tip.participant1)}&team2=${encodeURIComponent(tip.participant2)}&game=lol`).catch(() => null);
-          if (o && parseFloat(o.t1) > 1) {
+          if (isFreshOdds(o)) {
             clvOdds = (norm(tip.tip_participant) === norm(tip.participant1)) ? o.t1 : o.t2;
           }
         } else if (sport === 'football') {
@@ -21468,22 +21473,22 @@ async function checkCLV(caches = {}) {
           }
         } else if (sport === 'cs') {
           const o = await serverGet(`/odds?team1=${encodeURIComponent(tip.participant1)}&team2=${encodeURIComponent(tip.participant2)}&game=cs`).catch(() => null);
-          if (o && parseFloat(o.t1) > 1) {
+          if (isFreshOdds(o)) {
             clvOdds = (norm(tip.tip_participant) === norm(tip.participant1)) ? o.t1 : o.t2;
           }
         } else if (sport === 'valorant') {
           const o = await serverGet(`/odds?team1=${encodeURIComponent(tip.participant1)}&team2=${encodeURIComponent(tip.participant2)}&game=valorant`).catch(() => null);
-          if (o && parseFloat(o.t1) > 1) {
+          if (isFreshOdds(o)) {
             clvOdds = (norm(tip.tip_participant) === norm(tip.participant1)) ? o.t1 : o.t2;
           }
         } else if (sport === 'lol') {
           const o = await serverGet(`/odds?team1=${encodeURIComponent(tip.participant1)}&team2=${encodeURIComponent(tip.participant2)}&game=lol`).catch(() => null);
-          if (o && parseFloat(o.t1) > 1) {
+          if (isFreshOdds(o)) {
             clvOdds = (norm(tip.tip_participant) === norm(tip.participant1)) ? o.t1 : o.t2;
           }
         } else if (sport === 'dota2') {
           const o = await serverGet(`/odds?team1=${encodeURIComponent(tip.participant1)}&team2=${encodeURIComponent(tip.participant2)}&game=dota2`).catch(() => null);
-          if (o && parseFloat(o.t1) > 1) {
+          if (isFreshOdds(o)) {
             clvOdds = (norm(tip.tip_participant) === norm(tip.participant1)) ? o.t1 : o.t2;
           }
         }

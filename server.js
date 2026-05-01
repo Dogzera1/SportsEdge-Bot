@@ -20507,6 +20507,14 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
                   req.end();
                 }).catch(() => null);
 
+                // Skip cache-fallback responses — Pinnacle removeu o match mas oddsCache
+                // ainda tem valor antigo (frequentemente == open). Audit 2026-05-01 mostrou
+                // 6/6 tips LPL com clv_odds=open_odds via este path — clv falsificado
+                // sugeria avgCLV=0% mesmo com modelo errado, mascarando leak.
+                if (currentOdds?.fallback === 'pinnacle-cache') {
+                  log('DEBUG', 'CLV', `${t.sport} ${t.p1} vs ${t.p2}: skip retroactive (pinnacle-cache fallback, not real close)`);
+                  continue;
+                }
                 if (currentOdds?.t1 && currentOdds?.t2) {
                   // CLV = odds de fecho do time APOSTADO. Determina via tip_participant match p1 ou p2.
                   // Usa mesmo matcher do settlement (nameMatches com aliases pra LoL,
