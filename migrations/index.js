@@ -1836,6 +1836,26 @@ const migrations = [
     },
   },
   {
+    id: '075_error_log',
+    up(db) {
+      // Persistent error log — sobrevive restart (in-memory _bugReports zera).
+      // Cap 500 entries via FIFO evict (manual em INSERT).
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS error_log (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          ts TEXT DEFAULT (datetime('now')),
+          module TEXT,
+          error_name TEXT,
+          message TEXT,
+          stack_head TEXT,
+          ctx_json TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_error_log_ts ON error_log(ts DESC);
+        CREATE INDEX IF NOT EXISTS idx_error_log_module ON error_log(module, ts DESC);
+      `);
+    },
+  },
+  {
     id: '074_consolidate_cs2_into_cs',
     up(db) {
       // Bug histórico: CS market tips foram gravadas com sport='cs2' em `tips` e

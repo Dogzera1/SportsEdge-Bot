@@ -961,6 +961,27 @@ function reportBug(module, err, ctx = {}) {
 
   log('ERROR', module, `${name}: ${msg}${ctxStr}`);
 
+  // Persist em error_log (mig 075) — sobrevive restart, queryable via SQL.
+  // Cap 500 entries c/ FIFO eviction. Best-effort; falha de DB não bloqueia.
+  try {
+    db.prepare(`
+      INSERT INTO error_log (module, error_name, message, stack_head, ctx_json)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(
+      String(module).slice(0, 60),
+      String(name).slice(0, 60),
+      String(msg).slice(0, 400),
+      stack.split('\n').slice(0, 6).join('\n').slice(0, 800),
+      Object.keys(ctx).length ? JSON.stringify(ctx).slice(0, 600) : null,
+    );
+    // Evict oldest se passou 500 (verifica raro pra não overhead)
+    if (Math.random() < 0.05) {
+      db.prepare(`DELETE FROM error_log WHERE id IN (
+        SELECT id FROM error_log ORDER BY id ASC LIMIT MAX(0, (SELECT COUNT(*) FROM error_log) - 500)
+      )`).run();
+    }
+  } catch (_) { /* migrations não rodaram ainda OU table missing */ }
+
   const last = _bugReports.get(sig) || 0;
   if (now - last < BUG_REPORT_COOLDOWN_MS) return;
   _bugReports.set(sig, now);

@@ -11165,6 +11165,34 @@ setInterval(load, 60000);
     return;
   }
 
+  if (p === '/admin/errors') {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const limit = Math.max(1, Math.min(500, parseInt(parsed.query.limit || '50', 10) || 50));
+      const moduleFilter = parsed.query.module || null;
+      const sinceHours = parsed.query.since_hours ? parseInt(parsed.query.since_hours, 10) : null;
+      const conds = [];
+      const args = [];
+      if (moduleFilter) { conds.push('module = ?'); args.push(moduleFilter); }
+      if (sinceHours) { conds.push(`ts >= datetime('now', '-${sinceHours} hours')`); }
+      const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
+      const rows = db.prepare(`
+        SELECT id, ts, module, error_name, message, stack_head, ctx_json
+        FROM error_log ${where}
+        ORDER BY id DESC LIMIT ?
+      `).all(...args, limit);
+      const summary = db.prepare(`
+        SELECT module, error_name, COUNT(*) AS n, MAX(ts) AS last_ts
+        FROM error_log
+        WHERE ts >= datetime('now', '-24 hours')
+        GROUP BY module, error_name
+        ORDER BY n DESC LIMIT 20
+      `).all();
+      sendJson(res, { ok: true, total: rows.length, errors: rows, top_24h: summary });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
   if (p === '/admin/feed-health') {
     if (!requireAdmin(req, res)) return;
     try {
