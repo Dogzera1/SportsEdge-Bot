@@ -13976,7 +13976,7 @@ setInterval(load, 60000);
   // de duplicates conhecidos.
   if (p === '/recent-emitted-match-ids') {
     const sport = String(parsed.query.sport || '').trim().toLowerCase();
-    const hours = Math.max(1, Math.min(168, parseInt(parsed.query.hours || '24', 10) || 24));
+    const hours = Math.max(1, Math.min(720, parseInt(parsed.query.hours || '24', 10) || 24));
     if (!sport) { sendJson(res, { ok: false, error: 'missing sport' }, 400); return; }
     try {
       const { sportSet } = (typeof resolveSportSet === 'function')

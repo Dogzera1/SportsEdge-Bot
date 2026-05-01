@@ -15933,7 +15933,11 @@ async function pollFootball(runOnce = false) {
       // está vazio (boot, post-reset).
       if (analyzedFootball.size === 0 || loop._needsCacheWarm) {
         try {
-          const r = await serverGet('/recent-emitted-match-ids?sport=football&hours=24').catch(() => null);
+          // Janela 720h (30d): pre-match de futebol pode ter sent_at >24h pré-kickoff
+          // (jogos da próxima semana). 24h subestimava e causava duplicate-storm
+          // após reset_cooldown — bot reanalisava+chamava IA pra cada match já emitido,
+          // server rejeitava via existingCross (sem filtro temporal). Ver logs 2026-05-01.
+          const r = await serverGet('/recent-emitted-match-ids?sport=football&hours=720').catch(() => null);
           const ids = Array.isArray(r?.match_ids) ? r.match_ids : [];
           const warmTs = Date.now();
           for (const mid of ids) analyzedFootball.set(`football_${mid}`, { ts: warmTs, tipSent: true });
