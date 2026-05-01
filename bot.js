@@ -14614,7 +14614,19 @@ async function pollTennis(runOnce = false) {
               const src1 = serveStats1 ? 'sofa' : (ss1?._source || '?');
               const src2 = serveStats2 ? 'sofa' : (ss2?._source || '?');
               if (!ss1 || !ss2) { throw new Error('no serve stats available'); }
-              const mSp = extractServeProbs(ss1, ss2, { surface: markovSurface });
+              // RPW (return points won) opcional pra Klaassen-Magnus full.
+              // Cascata mesma do serve profile: surface-specific → all-surface → all-time.
+              const { getPlayerReturnPointsWon } = require('./lib/tennis-player-stats');
+              const fetchRpw = (name) =>
+                getPlayerReturnPointsWon(db, name, { surface: markovSurface, sinceDays: 730, minMatches: 10 })
+                || getPlayerReturnPointsWon(db, name, { sinceDays: 730, minMatches: 5 })
+                || getPlayerReturnPointsWon(db, name, { sinceDays: 1460, minMatches: 3 });
+              const rpw1Data = fetchRpw(match.team1);
+              const rpw2Data = fetchRpw(match.team2);
+              const rpwOpts = (rpw1Data && rpw2Data)
+                ? { surface: markovSurface, rpw1: rpw1Data.rpwPct, rpw2: rpw2Data.rpwPct }
+                : { surface: markovSurface };
+              const mSp = extractServeProbs(ss1, ss2, rpwOpts);
               if (mSp) {
                 const bestOfMarkov = /grand slam|\[g\]|wimbledon|us open|roland|australian/i.test(match.league || '') ? 5 : 3;
                 const markov = priceTennisMatch({ p1Serve: mSp.p1Serve, p2Serve: mSp.p2Serve, bestOf: bestOfMarkov, iters: 15000 });
@@ -14628,9 +14640,12 @@ async function pollTennis(runOnce = false) {
                 const blendedP1 = _confAdequate
                   ? 0.40 * markov.pMatch + 0.60 * tennisModelResult.modelP1
                   : tennisModelResult.modelP1; // preserva sem blend
+                const kmTag = mSp.method === 'km_full'
+                  ? ` rpw1=${mSp.rpw1.toFixed(3)} rpw2=${mSp.rpw2.toFixed(3)} [km_full]`
+                  : ' [km_shortcut]';
                 log('INFO', 'TENNIS-MARKOV',
                   `${match.team1} [${src1}] vs ${match.team2} [${src2}] [${markovSurface} Bo${bestOfMarkov}]: markov=${(markov.pMatch*100).toFixed(1)}% ` +
-                  `(p1s=${mSp.p1Serve.toFixed(3)} p2s=${mSp.p2Serve.toFixed(3)}) ` +
+                  `(p1s=${mSp.p1Serve.toFixed(3)} p2s=${mSp.p2Serve.toFixed(3)}${kmTag}) ` +
                   `| existing=${(tennisModelResult.modelP1*100).toFixed(1)}% → blend=${(blendedP1*100).toFixed(1)}% ` +
                   `| avgGames=${markov.totalGamesAvg.toFixed(1)} pO22.5=${(markov.pOver22_5*100).toFixed(0)}% ` +
                   `pTBmatch=${(markov.pTiebreakMatch*100).toFixed(0)}% pStrSets=${(markov.pStraightSets*100).toFixed(0)}%`);
