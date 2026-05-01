@@ -19932,9 +19932,30 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
           const tips = db.prepare("SELECT * FROM tips WHERE match_id = ? AND sport = ? AND result IS NULL").all(matchId, sport);
           // Filtro defensivo extra: mesmo se match_id passou pelo guard acima, qualquer
           // tip individual com market_type non-ML é rejeitada (defesa em profundidade).
+          // Exceção: MAP{N}_WINNER esports é settable via sweep detection (vencedor da
+          // série venceu todos os mapas se loserMaps=0). Non-sweep ainda rejeita —
+          // precisa per-map data; cron NON_ML_AUTOARCHIVE limpa após 48h.
+          const _esportsSports = new Set(['esports','dota2','lol','cs','cs2','valorant']);
           const eligibleTips = tips.filter(tip => {
             const mkt = String(tip.market_type || 'ML').toUpperCase();
             if (ML_MARKETS.has(mkt)) return true;
+            const mapMatch = mkt.match(/^MAP(\d+)_WINNER$/);
+            if (mapMatch && _esportsSports.has(sport)) {
+              try {
+                const { settleMapWinnerFromSweep } = require('./lib/market-tips-shadow');
+                const mapN = parseInt(mapMatch[1], 10);
+                // Sniff sweep: se winnerSeries == winnerMap (sweep), tip pode liquidar
+                // por name-match contra `winner` (que é o series winner). Caso contrário
+                // skip — admin/propagator manuais ou auto-archive.
+                const probe = settleMapWinnerFromSweep(mapN, _scoreStr, true);
+                if (probe.result === 'win' || probe.result === 'loss' || probe.result === 'void') {
+                  return true;
+                }
+              } catch (_) {}
+              log('WARN', 'SETTLE-GUARD',
+                `${sport} tip id=${tip.id} market_type=${mkt} rejeitada (non-sweep, precisa per-map data)`);
+              return false;
+            }
             log('WARN', 'SETTLE-GUARD',
               `${sport} tip id=${tip.id} market_type=${mkt} rejeitada em /settle (non-ML)`);
             return false;
@@ -19956,9 +19977,26 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
             }
             // Walkover/RET → void (override result). Aplica antes do quarantine
             // pra cobrir ambos perdedor (loss fantasma) e vencedor por walkover.
-            const result = _isWalkover ? 'void' : (nameMatched ? 'win' : 'loss');
+            // MAP{N}_WINNER esports: usa sweep helper p/ classificar map_not_played
+            // como void (Bo3 2-0 tip MAP3 = void: mapa 3 nunca jogado).
+            const _mkt = String(tip.market_type || 'ML').toUpperCase();
+            const _mapTipMatch = _mkt.match(/^MAP(\d+)_WINNER$/);
+            let mapVoidReason = null;
+            if (_mapTipMatch && !_isWalkover) {
+              try {
+                const { settleMapWinnerFromSweep } = require('./lib/market-tips-shadow');
+                const mapN = parseInt(_mapTipMatch[1], 10);
+                const probe = settleMapWinnerFromSweep(mapN, _scoreStr, true);
+                if (probe.result === 'void') mapVoidReason = probe.reason;
+              } catch (_) {}
+            }
+            const result = _isWalkover ? 'void'
+              : mapVoidReason ? 'void'
+              : (nameMatched ? 'win' : 'loss');
             if (_isWalkover) {
               log('INFO', 'SETTLE', `${sport} matchId=${matchId} tip="${tip.tip_participant}" → VOID (walkover/RET detectado em score="${_scoreStr.slice(0, 50)}")`);
+            } else if (mapVoidReason) {
+              log('INFO', 'SETTLE', `${sport} matchId=${matchId} tip="${tip.tip_participant}" mkt=${_mkt} → VOID (${mapVoidReason}, score="${_scoreStr.slice(0, 50)}")`);
             }
             // substring_weak = match fraco — quarentena para evitar false positive/negative
             if (matchMethod === 'substring_weak' && !_isWalkover) {
