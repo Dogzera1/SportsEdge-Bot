@@ -11883,6 +11883,42 @@ setInterval(load, 60000);
     return;
   }
 
+  // 2026-05-01: trigger HTTP do refresh-all-isotonics. Sem isso usuário
+  // precisa SSH/Railway shell pra rodar o script. Default async + JSON
+  // response imediata; resultado loga via stdout.
+  // GET /admin/refresh-isotonics?retrain=1&sync=1
+  // - retrain=1 → inclui train-esports-model LoL (lento, ~5min)
+  // - sync=1    → inclui sync-oracleselixir (lento, ~3-10min)
+  // - default   → só fits isotônicos + CLV calibration (rápido, <1min)
+  if (p === '/admin/refresh-isotonics') {
+    if (!requireAdmin(req, res)) return;
+    const wantRetrain = parsed.query.retrain === '1';
+    const wantSync = parsed.query.sync === '1';
+    const path = require('path');
+    const { spawn } = require('child_process');
+    const scriptPath = path.join(__dirname, 'scripts', 'refresh-all-isotonics.js');
+    const args = [scriptPath, '--json'];
+    if (wantRetrain) args.push('--retrain');
+    if (wantSync) args.push('--sync');
+    const child = spawn(process.execPath, args, { cwd: __dirname, detached: false });
+    let stdout = '';
+    child.stdout.on('data', d => { stdout += d.toString('utf8'); });
+    child.stderr.on('data', d => { try { log('DEBUG', 'REFRESH-ISO', `stderr: ${d.toString('utf8').slice(0, 500)}`); } catch (_) {} });
+    const startedAt = Date.now();
+    child.on('close', (code) => {
+      const dur = Math.round((Date.now() - startedAt) / 1000);
+      try {
+        const parsed = JSON.parse(stdout);
+        log(code === 0 ? 'INFO' : 'WARN', 'REFRESH-ISO',
+          `done in ${dur}s (exit=${code}) | jobs=${parsed.jobs?.length || 0} ok=${parsed.jobs?.filter(j=>j.ok).length || 0} | changes=${parsed.changes?.length || 0}`);
+      } catch (_) { log('WARN', 'REFRESH-ISO', `done in ${dur}s but stdout não JSON-parseável`); }
+    });
+    // Safety timeout: 15min hard cap (kills child se travou)
+    setTimeout(() => { try { child.kill('SIGKILL'); } catch (_) {} }, 15 * 60 * 1000).unref?.();
+    sendJson(res, { ok: true, started_at: new Date().toISOString(), retrain: wantRetrain, sync: wantSync, message: 'Background refresh disparado. Logs via /logs/history ou Telegram quando concluir.' });
+    return;
+  }
+
   // 2026-05-01: terminal CLV-set pra tips fora da janela de captura (regime
   // 'out' too_late >2h). Antes: bot.js loop CLV recapturava mesma tip todo ciclo
   // só pra logar too_late_164min→166min→178min. Aqui marca clv_odds=open (sem

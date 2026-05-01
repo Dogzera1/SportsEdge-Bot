@@ -483,23 +483,35 @@ Máximo 150 palavras.`;
 const DB_PATH = (process.env.DB_PATH || 'sportsedge.db').trim().replace(/^=+/, '');
 const { db, stmts } = initDatabase(DB_PATH);
 
-// DB integrity check no boot — detecta corruption silenciosa após restart.
-// Se result !== 'ok', loga critical mas continua (corruption parcial usualmente
-// ainda permite read).
-try {
-  const t0 = Date.now();
-  const row = db.prepare('PRAGMA integrity_check').get();
-  const result = row?.integrity_check || 'unknown';
-  const dt = Date.now() - t0;
-  if (result === 'ok') {
-    log('INFO', 'BOOT', `db integrity check: ok (${dt}ms)`);
-    try { require('./lib/metrics').gauge('db_integrity_ok', 1); } catch (_) {}
-  } else {
-    log('WARN', 'BOOT', `DB INTEGRITY FAILED: ${result} (${dt}ms) — investigar urgente`);
-    try { require('./lib/metrics').gauge('db_integrity_ok', 0); } catch (_) {}
+// DB integrity check — DEFERRED background (era 6.3s blocking, atrasava boot).
+// 2026-05-01: log audit identificou 36 boots/24h; Railway pode estar com
+// healthcheck timeout. Boot rápido > integridade síncrona. Detecta corruption
+// igualmente, só não bloqueia inicialização. Override: BOOT_INTEGRITY_SYNC=true
+// pra voltar ao comportamento anterior.
+const _integritySync = /^(1|true|yes)$/i.test(String(process.env.BOOT_INTEGRITY_SYNC || ''));
+function _runIntegrityCheck() {
+  try {
+    const t0 = Date.now();
+    const row = db.prepare('PRAGMA integrity_check').get();
+    const result = row?.integrity_check || 'unknown';
+    const dt = Date.now() - t0;
+    if (result === 'ok') {
+      log('INFO', 'BOOT', `db integrity check: ok (${dt}ms)`);
+      try { require('./lib/metrics').gauge('db_integrity_ok', 1); } catch (_) {}
+    } else {
+      log('WARN', 'BOOT', `DB INTEGRITY FAILED: ${result} (${dt}ms) — investigar urgente`);
+      try { require('./lib/metrics').gauge('db_integrity_ok', 0); } catch (_) {}
+    }
+  } catch (e) {
+    log('WARN', 'BOOT', `db integrity check threw: ${e.message}`);
   }
-} catch (e) {
-  log('WARN', 'BOOT', `db integrity check threw: ${e.message}`);
+}
+if (_integritySync) {
+  _runIntegrityCheck();
+} else {
+  // Background: 30s pós-boot. Bot já está running, polls iniciaram, healthchecks
+  // passaram. Integridade ainda checada, só não bloqueia.
+  setTimeout(_runIntegrityCheck, 30 * 1000).unref?.();
 }
 
 // ── Patch Meta Persistência ──
@@ -20834,6 +20846,99 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   setInterval(() => runAutoSampleCron(), 60 * 60 * 1000); // 1h
   setTimeout(() => runAutoSampleCron(), 5 * 60 * 1000);   // primeira run após 5min de boot
 
+  // 2026-05-01: Pinnacle drop follower (item #4 da arquitetura review).
+  // Quando Pinnacle dropa >3% em <5min em algum side (sharp money entrou),
+  // outros books seguem em 1-5min. Window de valor curto: capturar tip com
+  // melhor odd do book lagging ANTES de convergir com Pinnacle.
+  //
+  // Defaults conservadores:
+  //   PINNACLE_FOLLOWER_ENABLED=false (opt-in)
+  //   PINNACLE_FOLLOWER_MIN_DROP_PCT=3 (≥3% drop em pinnacle)
+  //   PINNACLE_FOLLOWER_MIN_EV=5 (≥5% EV no book lagging)
+  //   PINNACLE_FOLLOWER_STAKE=1 (1u stake conservador)
+  //
+  // Cooldown 30min por (sport, matchKey) evita re-emit no mesmo movimento.
+  const _pinFollowerLastEmit = new Map(); // sport|matchKey → ts
+  async function _tryEmitPinnacleFollowTip({ sport, match, velEvt, side, allBooksSide, sideLabel }) {
+    if (!/^(1|true|yes)$/i.test(String(process.env.PINNACLE_FOLLOWER_ENABLED || ''))) return;
+    if (!velEvt || velEvt.direction !== 'down') return;
+    const minDrop = parseFloat(process.env.PINNACLE_FOLLOWER_MIN_DROP_PCT || '3');
+    if (Math.abs(velEvt.velocityPct) < minDrop) return;
+    const cooldownMs = 30 * 60 * 1000;
+    const cdKey = `${sport}|${velEvt.matchKey}`;
+    const last = _pinFollowerLastEmit.get(cdKey) || 0;
+    if (Date.now() - last < cooldownMs) return;
+    if (!Array.isArray(allBooksSide) || allBooksSide.length < 2) return;
+
+    // Procura book com odd ainda PRÓXIMA do oldOdd (window aberta).
+    // Threshold: book.odd ≥ oldOdd × 0.97 (aceita drift natural ≤3%).
+    const lagThresh = velEvt.oldOdd * 0.97;
+    const lagging = allBooksSide
+      .filter(b => Number.isFinite(b.odd) && b.odd >= lagThresh && !/pinnacle/i.test(b.bookmaker || ''))
+      .sort((a, b) => b.odd - a.odd);
+    if (!lagging.length) return;
+    const bestBook = lagging[0];
+
+    // Computa EV: nova pinnacle odd é estimativa "verdadeira" pós-sharp.
+    // Sharp move = market consensus updated. Best book ainda na old odd → +EV.
+    const fairP = 1 / velEvt.newOdd;
+    const ev = (fairP * bestBook.odd - 1) * 100;
+    const minEv = parseFloat(process.env.PINNACLE_FOLLOWER_MIN_EV || '5');
+    if (ev < minEv) return;
+
+    // Sanity gates: odd extremos rejeitam (provável erro de scrape)
+    if (bestBook.odd < 1.20 || bestBook.odd > 5.00) return;
+
+    _pinFollowerLastEmit.set(cdKey, Date.now());
+
+    // Match-id sintético com tag — distingue de tips do scanner principal,
+    // evita dedup colidir com pre-game tip se ambos dispararem no mesmo par.
+    const baseMid = String(match.id || `${match.team1}_${match.team2}_${Date.now()}`).replace(/[^\w-]/g, '_');
+    const matchId = `${baseMid}::pinfollow::${side}`;
+    const stake = String(process.env.PINNACLE_FOLLOWER_STAKE || '1');
+
+    try {
+      const rec = await serverPost('/record-tip', {
+        matchId, eventName: match.league || sport,
+        p1: match.team1, p2: match.team2,
+        tipParticipant: sideLabel,
+        odds: String(bestBook.odd),
+        ev: ev.toFixed(2),
+        stake,
+        confidence: 'BAIXA', // sharp follower é sinal probabilístico, não modelo
+        isLive: !!match.is_live || match.status === 'live',
+        market_type: 'ML',
+        modelP1: null, modelP2: null,
+        modelPPick: fairP,
+        modelLabel: 'pinnacle-follower',
+        tipReason: `Pinnacle ${side}: ${velEvt.oldOdd}→${velEvt.newOdd} (${velEvt.velocityPct.toFixed(1)}% em ${velEvt.windowMin}min) — sharp money entered. Best book ${bestBook.bookmaker} ainda em ${bestBook.odd.toFixed(2)} (lag).`,
+        pickSide: side,
+      }, sport);
+      if (rec?.tipId) {
+        log('INFO', 'PIN-FOLLOWER',
+          `${sport} ${match.team1} vs ${match.team2} (${sideLabel}): Pin ${velEvt.oldOdd}→${velEvt.newOdd} → tip ${bestBook.bookmaker} @ ${bestBook.odd} EV=${ev.toFixed(1)}% [tip#${rec.tipId}]`);
+        // DM admin (opcional, separa do alert SHARP MOVE)
+        if (ADMIN_IDS.size) {
+          const tk = resolveAlertsToken();
+          if (tk) {
+            const arrow = '📉';
+            const msg = `🎯 *PINNACLE FOLLOWER — ${sport.toUpperCase()}*\n\n` +
+              `*${match.team1} vs ${match.team2}* (${sideLabel})\n\n` +
+              `Pinnacle: ${velEvt.oldOdd} → ${velEvt.newOdd} ${arrow} ${velEvt.velocityPct.toFixed(1)}% em ${velEvt.windowMin}min\n` +
+              `*Tip*: ${bestBook.bookmaker} @ ${bestBook.odd.toFixed(2)} (lag)\n` +
+              `EV: *+${ev.toFixed(1)}%* | Stake: ${stake}u\n\n` +
+              `_Sharp money entrou ${sideLabel}. Aposte antes do consenso chegar._`;
+            for (const adminId of ADMIN_IDS) sendDM(tk, adminId, msg).catch(() => {});
+          }
+        }
+      } else if (rec?.skipped) {
+        log('DEBUG', 'PIN-FOLLOWER', `${sport} ${match.team1} vs ${match.team2}: skipped — ${rec.reason || 'unknown'}`);
+      }
+    } catch (e) {
+      log('WARN', 'PIN-FOLLOWER', `record-tip falhou: ${e.message}`);
+    }
+  }
+
   // Stale line detector: cron 5min varre /football-matches + /lol-matches comparando
   // Pinnacle current vs odd 15min atrás. Se Pinnacle moveu >5% mas casa não-Pinnacle
   // ainda alinhada com odd antiga = stale → alert admin (cooldown 1h por match).
@@ -20976,8 +21081,8 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
             if (velEvt && vel.shouldDm(velEvt.sport, velEvt.matchKey, velEvt.side, undefined, db)) {
               vel.persistEvent(db, velEvt);
               velocities++;
+              const sideLabel = side === 'h' ? velEvt.matchLabel.split(' vs ')[0] : side === 'a' ? velEvt.matchLabel.split(' vs ')[1] : 'Empate';
               if (ADMIN_IDS.size) {
-                const sideLabel = side === 'h' ? velEvt.matchLabel.split(' vs ')[0] : side === 'a' ? velEvt.matchLabel.split(' vs ')[1] : 'Empate';
                 const arrow = velEvt.direction === 'down' ? '📉' : '📈';
                 const advice = velEvt.direction === 'down'
                   ? `Sharp money entrando neste lado. *Aposte ${sideLabel}* em qualquer book ANTES do consenso chegar.`
@@ -20990,6 +21095,11 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
                 const tk = resolveOpportunitiesToken();
                 if (tk) for (const adminId of ADMIN_IDS) sendDM(tk, adminId, msg).catch(() => {});
               }
+              // 2026-05-01: Pinnacle drop follower (item #4) — auto-emite tip
+              // quando velocity é DOWN e algum book ainda lagga na odd antiga.
+              await _tryEmitPinnacleFollowTip({
+                sport: 'football', match: m, velEvt, side, allBooksSide, sideLabel,
+              }).catch(() => {});
             }
             if (evt && shouldDm(evt.sport, evt.matchKey)) {
               persistEvent(db, evt);
@@ -21061,6 +21171,12 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
             if (velEvtLol && vel.shouldDm(velEvtLol.sport, velEvtLol.matchKey, velEvtLol.side, undefined, db)) {
               vel.persistEvent(db, velEvtLol);
               velocities++;
+              // Pinnacle drop follower (#4)
+              const sideLabelLol = side === 't1' ? m.team1 : m.team2;
+              const allBooksSideLol = all.map(b => ({ bookmaker: b.bookmaker, odd: parseFloat(b[side]) })).filter(x => Number.isFinite(x.odd));
+              await _tryEmitPinnacleFollowTip({
+                sport: 'lol', match: m, velEvt: velEvtLol, side, allBooksSide: allBooksSideLol, sideLabel: sideLabelLol,
+              }).catch(() => {});
             }
             if (evt && shouldDm(evt.sport, evt.matchKey)) {
               persistEvent(db, evt);
@@ -21131,6 +21247,11 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
             if (velEvtTn && vel.shouldDm(velEvtTn.sport, velEvtTn.matchKey, velEvtTn.side, undefined, db)) {
               vel.persistEvent(db, velEvtTn);
               velocities++;
+              // Pinnacle drop follower (#4)
+              const sideLabelTn = side === 't1' ? m.team1 : m.team2;
+              await _tryEmitPinnacleFollowTip({
+                sport: 'tennis', match: m, velEvt: velEvtTn, side, allBooksSide, sideLabel: sideLabelTn,
+              }).catch(() => {});
             }
             if (evtTn && shouldDm(evtTn.sport, evtTn.matchKey)) {
               persistEvent(db, evtTn);
