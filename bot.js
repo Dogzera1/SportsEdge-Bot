@@ -5728,42 +5728,50 @@ async function runLeagueGuardCycle() {
   }
 }
 
-// Drift Guard via Brier rolling. Complementa LeagueGuard:
+// Drift Guard via Brier skill score + ratio. Complementa LeagueGuard:
 //   - LeagueGuard: requer n≥20 + ROI≤-25% + CLV≤-2% → não pega leaks tier-2 com volume baixo
 //   - DriftGuard:  n≥10, sem depender de CLV (NULL pra ligas sem coverage Pinnacle)
-// Compara Brier rolling 7d (per sport, league) vs baseline sport-level 30d.
-// Brier = (p_pred - actual)^2 onde actual = 1 win / 0 loss. Quando model_p_pick
-// está NULL, deriva via p_implied = (ev/100 + 1) / odds. Limita window a tips
-// não-shadow não-archived com odds>1.
-// Trigger: ratio = brier_recent / brier_baseline ≥ 1.5 → block + cooldown 14d.
-// Restore: ratio ≤ 1.1 → unblock automático.
-// Wired no boot via setInterval 6h. Disable via DRIFT_GUARD_AUTO=false.
-// Caso de uso real: LPL bleed -78% n=6 não acionou LeagueGuard (n<20, CLV=0).
-// DriftGuard pega porque Brier_LPL_7d → ~0.30 vs baseline sport ~0.21 = ratio 1.43.
+//
+// Sinal primário: SKILL SCORE = 1 - brier_model / brier_market (1/odds raw).
+//   skill > 0 → modelo bate o mercado (edge real)
+//   skill = 0 → modelo equivale a apostar pela implied probability
+//   skill < 0 → modelo PIOR que mercado (sem edge → leak)
+// Skill é teoricamente mais sólido que ratio cross-league: não sofre masking
+// (LCK puxando baseline LoL pra baixo enquanto LPL leak passa).
+//
+// Sinal secundário: ratio = brier_recent / brier_baseline_sport (legacy,
+// ainda útil pra detectar drift relativo dentro do mesmo sport).
+//
+// Block: skill ≤ -0.02 (modelo 2% pior que mercado) OR ratio ≥ 1.5x.
+// Restore: skill ≥ 0 AND ratio ≤ 1.1x.
+// Brier per-tip: model_p_pick quando disponível, fallback p_implied.
+// Cooldown 14d, cron 6h, disable via DRIFT_GUARD_AUTO=false.
 async function runDriftGuardCycle() {
   if (/^(0|false|no)$/i.test(String(process.env.DRIFT_GUARD_AUTO || ''))) return;
   const minN = parseInt(process.env.DRIFT_GUARD_MIN_N || '10', 10);
   const ratioCutoff = parseFloat(process.env.DRIFT_GUARD_RATIO_CUTOFF || '1.5');
   const restoreRatio = parseFloat(process.env.DRIFT_GUARD_RESTORE_RATIO || '1.1');
+  const skillCutoff = parseFloat(process.env.DRIFT_GUARD_SKILL_CUTOFF || '-0.02');
+  const skillRestore = parseFloat(process.env.DRIFT_GUARD_SKILL_RESTORE || '0');
   const recentDays = parseInt(process.env.DRIFT_GUARD_RECENT_DAYS || '7', 10);
   const baselineDays = parseInt(process.env.DRIFT_GUARD_BASELINE_DAYS || '30', 10);
   const baselineMinN = parseInt(process.env.DRIFT_GUARD_BASELINE_MIN_N || '30', 10);
 
-  // Brier per-tip embutido: se model_p_pick null, deriva (ev/100 + 1) / odds.
-  // Clampa p em [0.01, 0.99] pra evitar log(0) ou divisão; CASE inline simples.
-  const brierExpr = `(
-    (CASE
+  const pModelExpr = `(CASE
        WHEN model_p_pick IS NOT NULL AND model_p_pick > 0 AND model_p_pick < 1 THEN model_p_pick
        WHEN ev IS NOT NULL AND odds > 1 THEN MIN(0.99, MAX(0.01, (ev/100.0 + 1.0) / odds))
        ELSE NULL
-     END) - (CASE WHEN result='win' THEN 1.0 ELSE 0.0 END)
-  )`;
+     END)`;
+  const pMarketExpr = `(1.0 / odds)`;
+  const actualExpr = `(CASE WHEN result='win' THEN 1.0 ELSE 0.0 END)`;
+  const brierModelExpr = `(${pModelExpr} - ${actualExpr}) * (${pModelExpr} - ${actualExpr})`;
+  const brierMarketExpr = `(${pMarketExpr} - ${actualExpr}) * (${pMarketExpr} - ${actualExpr})`;
 
   try {
-    // Recent (rolling N days, per sport+event_name)
     const recentRows = db.prepare(`
       SELECT sport, event_name AS league,
-        AVG(${brierExpr} * ${brierExpr}) AS brier,
+        AVG(${brierModelExpr}) AS brier_model,
+        AVG(${brierMarketExpr}) AS brier_market,
         COUNT(*) AS n,
         SUM(CASE WHEN result='win' THEN 1 ELSE 0 END) AS wins
       FROM tips
@@ -5775,13 +5783,12 @@ async function runDriftGuardCycle() {
         AND (model_p_pick IS NOT NULL OR ev IS NOT NULL)
         AND event_name IS NOT NULL AND TRIM(event_name) != ''
       GROUP BY sport, event_name
-      HAVING n >= ${minN} AND brier IS NOT NULL
+      HAVING n >= ${minN} AND brier_model IS NOT NULL AND brier_market IS NOT NULL
     `).all();
 
-    // Baseline per-sport (cross-league dentro do sport)
     const baselineRows = db.prepare(`
       SELECT sport,
-        AVG(${brierExpr} * ${brierExpr}) AS brier,
+        AVG(${brierModelExpr}) AS brier_model,
         COUNT(*) AS n
       FROM tips
       WHERE sent_at >= datetime('now', '-${baselineDays} days')
@@ -5791,10 +5798,10 @@ async function runDriftGuardCycle() {
         AND odds > 1
         AND (model_p_pick IS NOT NULL OR ev IS NOT NULL)
       GROUP BY sport
-      HAVING n >= ${baselineMinN} AND brier IS NOT NULL
+      HAVING n >= ${baselineMinN} AND brier_model IS NOT NULL
     `).all();
     const baselineMap = new Map();
-    for (const r of baselineRows) baselineMap.set(String(r.sport).toLowerCase(), Number(r.brier));
+    for (const r of baselineRows) baselineMap.set(String(r.sport).toLowerCase(), Number(r.brier_model));
 
     const alerts = [];
     const restored = [];
@@ -5804,45 +5811,48 @@ async function runDriftGuardCycle() {
       const sport = String(r.sport || '').toLowerCase();
       const league = String(r.league || '').toLowerCase().trim();
       if (!sport || !league) continue;
+      const brierModel = Number(r.brier_model);
+      const brierMarket = Number(r.brier_market);
+      if (brierMarket <= 0) continue;
+      const skill = 1 - brierModel / brierMarket;
       const baseline = baselineMap.get(sport);
-      // Baseline < 0.10 é suspeito (Brier de modelo trivial 1/odds Pinnacle ~0.21).
-      // Pode ser artifact de N pequeno ou tips com p_pick artificial → ratio explode
-      // e bloqueia ligas legítimas. Safety floor.
-      if (!baseline || baseline < 0.10) continue;
-      const recentBrier = Number(r.brier);
-      const ratio = recentBrier / baseline;
+      const ratio = (baseline && baseline >= 0.10) ? brierModel / baseline : null;
       const entry = `${sport}:${league}`;
       const already = _leagueBlocklist.has(entry);
       const autoMeta = _autoBlockedLeagues.get(entry);
       const hit = r.n > 0 ? (Number(r.wins) / r.n * 100) : null;
 
-      if (!already && ratio >= ratioCutoff) {
+      const triggers = [];
+      if (skill <= skillCutoff) triggers.push(`skill=${skill.toFixed(3)}`);
+      if (ratio != null && ratio >= ratioCutoff) triggers.push(`ratio=${ratio.toFixed(2)}x`);
+
+      if (!already && triggers.length) {
         const cooldownUntil = _leagueUnblockCooldown.get(entry) || 0;
         if (now < cooldownUntil) continue;
         _leagueBlocklist.add(entry);
-        const reason = `Brier ${recentBrier.toFixed(3)} vs baseline ${baseline.toFixed(3)} (${ratio.toFixed(2)}x) n=${r.n} hit=${hit != null ? hit.toFixed(0) + '%' : '?'}`;
-        const meta = { reason, since: now, brier: recentBrier, baseline, ratio, n: r.n, source: 'drift' };
+        const reason = `${triggers.join(' ')} brier_m=${brierModel.toFixed(3)} brier_mkt=${brierMarket.toFixed(3)} n=${r.n} hit=${hit != null ? hit.toFixed(0) + '%' : '?'}`;
+        const meta = { reason, since: now, brier_model: brierModel, brier_market: brierMarket, skill, ratio, n: r.n, source: 'drift' };
         _autoBlockedLeagues.set(entry, meta);
         _persistBlocklistEntry(entry, 'auto', meta);
         alerts.push(`🚫 ${entry} — ${reason}`);
         log('WARN', 'DRIFT-GUARD', `auto-blocked ${entry}: ${reason}`);
-      } else if (autoMeta && autoMeta.source === 'drift' && ratio <= restoreRatio) {
+      } else if (autoMeta && autoMeta.source === 'drift' && skill >= skillRestore && (ratio == null || ratio <= restoreRatio)) {
         _leagueBlocklist.delete(entry);
         _autoBlockedLeagues.delete(entry);
         _deleteBlocklistEntry(entry);
-        restored.push(`✅ ${entry} — Brier ratio ${ratio.toFixed(2)}x recuperou (n=${r.n})`);
-        log('INFO', 'DRIFT-GUARD', `auto-restored ${entry}: ratio=${ratio.toFixed(2)}x`);
+        restored.push(`✅ ${entry} — skill=${skill.toFixed(3)} ratio=${ratio != null ? ratio.toFixed(2) + 'x' : '?'} (n=${r.n})`);
+        log('INFO', 'DRIFT-GUARD', `auto-restored ${entry}: skill=${skill.toFixed(3)}`);
       }
     }
 
     if ((alerts.length || restored.length)) {
       const tokenForAlert = resolveAlertsToken();
       if (tokenForAlert && ADMIN_IDS.size) {
-        const msg = `🛡️ *DRIFT GUARD — ${recentDays}d vs ${baselineDays}d baseline*\n\n${[...alerts, ...restored].join('\n')}\n\n_Cutoff: Brier ratio ≥ ${ratioCutoff}x baseline com n≥${minN}. Restaura em ratio ≤ ${restoreRatio}x._\n_Use /blocked-leagues pra ver estado._`;
+        const msg = `🛡️ *DRIFT GUARD — ${recentDays}d (skill vs market + ratio vs ${baselineDays}d baseline)*\n\n${[...alerts, ...restored].join('\n')}\n\n_Cutoff: skill ≤ ${skillCutoff} OR ratio ≥ ${ratioCutoff}x com n≥${minN}._\n_Restore: skill ≥ ${skillRestore} AND ratio ≤ ${restoreRatio}x._\n_Use /blocked-leagues pra ver estado._`;
         if (!_isCycleMuted('drift-guard')) for (const adminId of ADMIN_IDS) sendDM(tokenForAlert, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
       }
     }
-    log('INFO', 'DRIFT-GUARD', `Ciclo OK — ${recentRows.length} (sport,league) recentes, ${baselineRows.length} sport baselines | ${alerts.length} blocked | ${restored.length} restored`);
+    log('INFO', 'DRIFT-GUARD', `Ciclo OK — ${recentRows.length} segments | ${alerts.length} blocked | ${restored.length} restored`);
   } catch (e) {
     log('WARN', 'DRIFT-GUARD', `falhou: ${e.message}`);
   }

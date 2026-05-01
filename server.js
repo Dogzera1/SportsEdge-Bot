@@ -17545,9 +17545,10 @@ setInterval(load, 60000);
     return;
   }
 
-  // GET /admin/drift-guard-stats?recent=7&baseline=30&min_n=10
-  // Read-only: mostra (sport, league) onde Brier rolling 7d desviou do baseline 30d.
-  // Usado pra dry-run antes do DriftGuard auto-block. Mesma fórmula Brier que bot.js.
+  // GET /admin/drift-guard-stats?recent=7&baseline=30&min_n=10&skill_cutoff=-0.02
+  // Read-only: mostra (sport, league) brier_model vs brier_market (1/odds), skill score,
+  // ratio vs baseline sport. Skill = 1 - brier_model/brier_market. Negative = worse than market.
+  // Usado pra dry-run antes do DriftGuard auto-block.
   if (p === '/admin/drift-guard-stats') {
     if (!requireAdmin(req, res)) return;
     const recentDays = Math.max(1, Math.min(60, parseInt(parsed.query.recent || '7', 10) || 7));
@@ -17555,19 +17556,28 @@ setInterval(load, 60000);
     const minN = Math.max(3, Math.min(100, parseInt(parsed.query.min_n || '10', 10) || 10));
     const baselineMinN = Math.max(10, Math.min(500, parseInt(parsed.query.baseline_min_n || '30', 10) || 30));
     const ratioCutoff = parseFloat(parsed.query.ratio || '1.5');
+    const skillCutoff = parseFloat(parsed.query.skill_cutoff || '-0.02');
     try {
-      const brierExpr = `(
-        (CASE
+      // Brier model: usa model_p_pick quando disponível, fallback p_implied = (ev/100+1)/odds.
+      const pModelExpr = `(CASE
            WHEN model_p_pick IS NOT NULL AND model_p_pick > 0 AND model_p_pick < 1 THEN model_p_pick
            WHEN ev IS NOT NULL AND odds > 1 THEN MIN(0.99, MAX(0.01, (ev/100.0 + 1.0) / odds))
            ELSE NULL
-         END) - (CASE WHEN result='win' THEN 1.0 ELSE 0.0 END)
-      )`;
+         END)`;
+      // Brier market: usa 1/odds direto (probabilidade implícita raw — sem devig).
+      // Bias é igual em todos os segmentos, então skill score ainda compara fair.
+      const pMarketExpr = `(1.0 / odds)`;
+      const actualExpr = `(CASE WHEN result='win' THEN 1.0 ELSE 0.0 END)`;
+      const brierModelExpr = `(${pModelExpr} - ${actualExpr}) * (${pModelExpr} - ${actualExpr})`;
+      const brierMarketExpr = `(${pMarketExpr} - ${actualExpr}) * (${pMarketExpr} - ${actualExpr})`;
+
       const recent = db.prepare(`
         SELECT sport, event_name AS league,
-          AVG(${brierExpr} * ${brierExpr}) AS brier,
+          AVG(${brierModelExpr}) AS brier_model,
+          AVG(${brierMarketExpr}) AS brier_market,
           COUNT(*) AS n,
-          SUM(CASE WHEN result='win' THEN 1 ELSE 0 END) AS wins
+          SUM(CASE WHEN result='win' THEN 1 ELSE 0 END) AS wins,
+          AVG(odds) AS avg_odds
         FROM tips
         WHERE sent_at >= datetime('now', '-' || ? || ' days')
           AND result IN ('win','loss')
@@ -17577,11 +17587,12 @@ setInterval(load, 60000);
           AND (model_p_pick IS NOT NULL OR ev IS NOT NULL)
           AND event_name IS NOT NULL AND TRIM(event_name) != ''
         GROUP BY sport, event_name
-        HAVING n >= ? AND brier IS NOT NULL
+        HAVING n >= ? AND brier_model IS NOT NULL
       `).all(recentDays, minN);
       const baselines = db.prepare(`
         SELECT sport,
-          AVG(${brierExpr} * ${brierExpr}) AS brier,
+          AVG(${brierModelExpr}) AS brier_model,
+          AVG(${brierMarketExpr}) AS brier_market,
           COUNT(*) AS n
         FROM tips
         WHERE sent_at >= datetime('now', '-' || ? || ' days')
@@ -17591,30 +17602,43 @@ setInterval(load, 60000);
           AND odds > 1
           AND (model_p_pick IS NOT NULL OR ev IS NOT NULL)
         GROUP BY sport
-        HAVING n >= ? AND brier IS NOT NULL
+        HAVING n >= ? AND brier_model IS NOT NULL
       `).all(baselineDays, baselineMinN);
       const baselineMap = new Map();
-      for (const r of baselines) baselineMap.set(String(r.sport).toLowerCase(), { brier: Number(r.brier), n: r.n });
+      for (const r of baselines) baselineMap.set(String(r.sport).toLowerCase(), { brier: Number(r.brier_model), brier_market: Number(r.brier_market), n: r.n });
       const enriched = recent.map(r => {
         const sport = String(r.sport || '').toLowerCase();
         const b = baselineMap.get(sport);
-        const recentBrier = Number(r.brier);
-        const ratio = b ? recentBrier / b.brier : null;
+        const brierModel = Number(r.brier_model);
+        const brierMarket = Number(r.brier_market);
+        const skill = brierMarket > 0 ? 1 - brierModel / brierMarket : null;
+        const ratio = b ? brierModel / b.brier : null;
         const hit = r.n > 0 ? Number(r.wins) / r.n * 100 : null;
         return {
           sport, league: r.league, n: r.n, wins: r.wins,
           hit_pct: hit != null ? +hit.toFixed(1) : null,
-          brier_recent: +recentBrier.toFixed(4),
+          avg_odds: +Number(r.avg_odds).toFixed(2),
+          brier_model: +brierModel.toFixed(4),
+          brier_market: +brierMarket.toFixed(4),
+          skill_score: skill != null ? +skill.toFixed(4) : null,
           brier_baseline: b ? +b.brier.toFixed(4) : null,
-          baseline_n: b ? b.n : null,
           ratio: ratio != null ? +ratio.toFixed(3) : null,
-          would_block: ratio != null && ratio >= ratioCutoff,
+          would_block: (ratio != null && ratio >= ratioCutoff) || (skill != null && skill <= skillCutoff),
+          block_reason: (skill != null && skill <= skillCutoff) ? 'negative_skill'
+                      : (ratio != null && ratio >= ratioCutoff) ? 'high_ratio'
+                      : null,
         };
-      }).sort((a, z) => (z.ratio || 0) - (a.ratio || 0));
+      }).sort((a, z) => (a.skill_score ?? 99) - (z.skill_score ?? 99));
       sendJson(res, {
         ok: true,
-        params: { recent_days: recentDays, baseline_days: baselineDays, min_n: minN, baseline_min_n: baselineMinN, ratio_cutoff: ratioCutoff },
-        sport_baselines: baselines.map(r => ({ sport: r.sport, brier: +Number(r.brier).toFixed(4), n: r.n })),
+        params: { recent_days: recentDays, baseline_days: baselineDays, min_n: minN, baseline_min_n: baselineMinN, ratio_cutoff: ratioCutoff, skill_cutoff: skillCutoff },
+        sport_baselines: baselines.map(r => ({
+          sport: r.sport,
+          brier_model: +Number(r.brier_model).toFixed(4),
+          brier_market: +Number(r.brier_market).toFixed(4),
+          skill_score: r.brier_market > 0 ? +(1 - Number(r.brier_model) / Number(r.brier_market)).toFixed(4) : null,
+          n: r.n,
+        })),
         segments: enriched,
         would_block_count: enriched.filter(e => e.would_block).length,
       });
