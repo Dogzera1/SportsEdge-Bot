@@ -5728,6 +5728,126 @@ async function runLeagueGuardCycle() {
   }
 }
 
+// Drift Guard via Brier rolling. Complementa LeagueGuard:
+//   - LeagueGuard: requer n≥20 + ROI≤-25% + CLV≤-2% → não pega leaks tier-2 com volume baixo
+//   - DriftGuard:  n≥10, sem depender de CLV (NULL pra ligas sem coverage Pinnacle)
+// Compara Brier rolling 7d (per sport, league) vs baseline sport-level 30d.
+// Brier = (p_pred - actual)^2 onde actual = 1 win / 0 loss. Quando model_p_pick
+// está NULL, deriva via p_implied = (ev/100 + 1) / odds. Limita window a tips
+// não-shadow não-archived com odds>1.
+// Trigger: ratio = brier_recent / brier_baseline ≥ 1.5 → block + cooldown 14d.
+// Restore: ratio ≤ 1.1 → unblock automático.
+// Wired no boot via setInterval 6h. Disable via DRIFT_GUARD_AUTO=false.
+// Caso de uso real: LPL bleed -78% n=6 não acionou LeagueGuard (n<20, CLV=0).
+// DriftGuard pega porque Brier_LPL_7d → ~0.30 vs baseline sport ~0.21 = ratio 1.43.
+async function runDriftGuardCycle() {
+  if (/^(0|false|no)$/i.test(String(process.env.DRIFT_GUARD_AUTO || ''))) return;
+  const minN = parseInt(process.env.DRIFT_GUARD_MIN_N || '10', 10);
+  const ratioCutoff = parseFloat(process.env.DRIFT_GUARD_RATIO_CUTOFF || '1.5');
+  const restoreRatio = parseFloat(process.env.DRIFT_GUARD_RESTORE_RATIO || '1.1');
+  const recentDays = parseInt(process.env.DRIFT_GUARD_RECENT_DAYS || '7', 10);
+  const baselineDays = parseInt(process.env.DRIFT_GUARD_BASELINE_DAYS || '30', 10);
+  const baselineMinN = parseInt(process.env.DRIFT_GUARD_BASELINE_MIN_N || '30', 10);
+
+  // Brier per-tip embutido: se model_p_pick null, deriva (ev/100 + 1) / odds.
+  // Clampa p em [0.01, 0.99] pra evitar log(0) ou divisão; CASE inline simples.
+  const brierExpr = `(
+    (CASE
+       WHEN model_p_pick IS NOT NULL AND model_p_pick > 0 AND model_p_pick < 1 THEN model_p_pick
+       WHEN ev IS NOT NULL AND odds > 1 THEN MIN(0.99, MAX(0.01, (ev/100.0 + 1.0) / odds))
+       ELSE NULL
+     END) - (CASE WHEN result='win' THEN 1.0 ELSE 0.0 END)
+  )`;
+
+  try {
+    // Recent (rolling N days, per sport+event_name)
+    const recentRows = db.prepare(`
+      SELECT sport, event_name AS league,
+        AVG(${brierExpr} * ${brierExpr}) AS brier,
+        COUNT(*) AS n,
+        SUM(CASE WHEN result='win' THEN 1 ELSE 0 END) AS wins
+      FROM tips
+      WHERE sent_at >= datetime('now', '-${recentDays} days')
+        AND result IN ('win','loss')
+        AND COALESCE(is_shadow, 0) = 0
+        AND COALESCE(archived, 0) = 0
+        AND odds > 1
+        AND (model_p_pick IS NOT NULL OR ev IS NOT NULL)
+        AND event_name IS NOT NULL AND TRIM(event_name) != ''
+      GROUP BY sport, event_name
+      HAVING n >= ${minN} AND brier IS NOT NULL
+    `).all();
+
+    // Baseline per-sport (cross-league dentro do sport)
+    const baselineRows = db.prepare(`
+      SELECT sport,
+        AVG(${brierExpr} * ${brierExpr}) AS brier,
+        COUNT(*) AS n
+      FROM tips
+      WHERE sent_at >= datetime('now', '-${baselineDays} days')
+        AND result IN ('win','loss')
+        AND COALESCE(is_shadow, 0) = 0
+        AND COALESCE(archived, 0) = 0
+        AND odds > 1
+        AND (model_p_pick IS NOT NULL OR ev IS NOT NULL)
+      GROUP BY sport
+      HAVING n >= ${baselineMinN} AND brier IS NOT NULL
+    `).all();
+    const baselineMap = new Map();
+    for (const r of baselineRows) baselineMap.set(String(r.sport).toLowerCase(), Number(r.brier));
+
+    const alerts = [];
+    const restored = [];
+    const now = Date.now();
+
+    for (const r of recentRows) {
+      const sport = String(r.sport || '').toLowerCase();
+      const league = String(r.league || '').toLowerCase().trim();
+      if (!sport || !league) continue;
+      const baseline = baselineMap.get(sport);
+      // Baseline < 0.10 é suspeito (Brier de modelo trivial 1/odds Pinnacle ~0.21).
+      // Pode ser artifact de N pequeno ou tips com p_pick artificial → ratio explode
+      // e bloqueia ligas legítimas. Safety floor.
+      if (!baseline || baseline < 0.10) continue;
+      const recentBrier = Number(r.brier);
+      const ratio = recentBrier / baseline;
+      const entry = `${sport}:${league}`;
+      const already = _leagueBlocklist.has(entry);
+      const autoMeta = _autoBlockedLeagues.get(entry);
+      const hit = r.n > 0 ? (Number(r.wins) / r.n * 100) : null;
+
+      if (!already && ratio >= ratioCutoff) {
+        const cooldownUntil = _leagueUnblockCooldown.get(entry) || 0;
+        if (now < cooldownUntil) continue;
+        _leagueBlocklist.add(entry);
+        const reason = `Brier ${recentBrier.toFixed(3)} vs baseline ${baseline.toFixed(3)} (${ratio.toFixed(2)}x) n=${r.n} hit=${hit != null ? hit.toFixed(0) + '%' : '?'}`;
+        const meta = { reason, since: now, brier: recentBrier, baseline, ratio, n: r.n, source: 'drift' };
+        _autoBlockedLeagues.set(entry, meta);
+        _persistBlocklistEntry(entry, 'auto', meta);
+        alerts.push(`🚫 ${entry} — ${reason}`);
+        log('WARN', 'DRIFT-GUARD', `auto-blocked ${entry}: ${reason}`);
+      } else if (autoMeta && autoMeta.source === 'drift' && ratio <= restoreRatio) {
+        _leagueBlocklist.delete(entry);
+        _autoBlockedLeagues.delete(entry);
+        _deleteBlocklistEntry(entry);
+        restored.push(`✅ ${entry} — Brier ratio ${ratio.toFixed(2)}x recuperou (n=${r.n})`);
+        log('INFO', 'DRIFT-GUARD', `auto-restored ${entry}: ratio=${ratio.toFixed(2)}x`);
+      }
+    }
+
+    if ((alerts.length || restored.length)) {
+      const tokenForAlert = resolveAlertsToken();
+      if (tokenForAlert && ADMIN_IDS.size) {
+        const msg = `🛡️ *DRIFT GUARD — ${recentDays}d vs ${baselineDays}d baseline*\n\n${[...alerts, ...restored].join('\n')}\n\n_Cutoff: Brier ratio ≥ ${ratioCutoff}x baseline com n≥${minN}. Restaura em ratio ≤ ${restoreRatio}x._\n_Use /blocked-leagues pra ver estado._`;
+        if (!_isCycleMuted('drift-guard')) for (const adminId of ADMIN_IDS) sendDM(tokenForAlert, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
+      }
+    }
+    log('INFO', 'DRIFT-GUARD', `Ciclo OK — ${recentRows.length} (sport,league) recentes, ${baselineRows.length} sport baselines | ${alerts.length} blocked | ${restored.length} restored`);
+  } catch (e) {
+    log('WARN', 'DRIFT-GUARD', `falhou: ${e.message}`);
+  }
+}
+
 // Auto-guard por bucket de odds. Mesma filosofia do league-guard mas agrupa por
 // (sport, bucket fixo). Buckets: 1.40-1.70, 1.70-2.20, 2.20-3.00, 3.00-99.
 // Auto-block: n≥minN AND ROI≤cutoff AND CLV≤clvCutoff.
@@ -19898,6 +20018,12 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
 
   setInterval(_wrapCron('league_guard', runLeagueGuardCycle), 12 * 60 * 60 * 1000);
   setTimeout(_wrapCron('league_guard', runLeagueGuardCycle), 45 * 60 * 1000);
+
+  // Drift Guard: cron 6h (mais frequente que league_guard pra agir cedo).
+  // Boot offset 80min — espera league_guard rodar primeiro (45min) pra evitar
+  // double-DM no mesmo ciclo se ambos detectarem o mesmo block.
+  setInterval(_wrapCron('drift_guard', runDriftGuardCycle), 6 * 60 * 60 * 1000);
+  setTimeout(_wrapCron('drift_guard', runDriftGuardCycle), 80 * 60 * 1000);
 
   setInterval(_wrapCron('odds_bucket_guard', runOddsBucketGuardCycle), 12 * 60 * 60 * 1000);
   setTimeout(_wrapCron('odds_bucket_guard', runOddsBucketGuardCycle), 50 * 60 * 1000);
