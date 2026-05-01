@@ -433,7 +433,14 @@
       transition: max-height 0.3s ease;
     }
     .section.open .section-body {
-      max-height: 2000px;
+      /* 2026-05-01: bump 2000px → none. Antes seções com tabela longa
+         (Market Tips Shadow com 20 rows + breakdown + stats + pager) eram
+         clippadas por overflow:hidden — paginação sumia. Trocar por `none`
+         remove cap; close-transition (open → fechado) ainda funciona pq sai
+         de altura computada → 0. Open-transition perde animação mas é
+         imperceptível na prática (sections grandes já abriam "saltando"). */
+      max-height: none;
+      overflow: visible;
       padding: 0 var(--space-lg) var(--space-lg);
     }
 
