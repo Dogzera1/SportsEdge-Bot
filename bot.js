@@ -15026,6 +15026,32 @@ async function pollTennis(runOnce = false) {
                   } catch (te) { reportBug('TENNIS-TB', te); }
                 }
 
+                // 2026-05-01 H2H ensemble (Wang & Drekic 2026): blenda Markov com
+                // pH2h calculado de H2H last 730d (já fetched em dbH2h). Peso máximo
+                // 30% quando n≥10. Não aplica se n<3 ou Markov com conf baixa.
+                // Disable: TENNIS_H2H_ENSEMBLE=false.
+                if (process.env.TENNIS_H2H_ENSEMBLE !== 'false' && _confAdequate && dbH2h && Number(dbH2h.totalMatches) >= 3) {
+                  try {
+                    const { computeH2HEnsemble } = require('./lib/tennis-h2h-ensemble');
+                    const minN = parseInt(process.env.TENNIS_H2H_MIN_N || '3', 10);
+                    const maxW = parseFloat(process.env.TENNIS_H2H_MAX_WEIGHT || '0.30');
+                    const ens = computeH2HEnsemble(dbH2h, tennisModelResult.modelP1, { minN, maxWeight: maxW });
+                    if (ens.applied) {
+                      const pre = tennisModelResult.modelP1;
+                      const delta = Math.abs(ens.pBlend - pre);
+                      if (delta > 0.003) {
+                        log('INFO', 'TENNIS-H2H',
+                          `${match.team1} vs ${match.team2}: pH2h=${(ens.pH2h*100).toFixed(1)}% (${ens.t1Wins}/${ens.n}) ` +
+                          `× weight=${ens.weight} → pMatch ${(pre*100).toFixed(1)}% → ${(ens.pBlend*100).toFixed(1)}% (Δ=${(delta*100).toFixed(1)}pp)`);
+                      }
+                      tennisModelResult.modelP1 = ens.pBlend;
+                      tennisModelResult.modelP2 = 1 - ens.pBlend;
+                      tennisModelResult._h2hEnsemble = { ...ens, pre };
+                      tennisModelResult.factors = [...(tennisModelResult.factors || []), 'h2h-ens'];
+                    }
+                  } catch (he) { reportBug('TENNIS-H2H-ENSEMBLE', he); }
+                }
+
                 // Ace market pricing (Poisson). Prefere histórico (Sackmann) sobre
                 // Sofascore (últimos N matches) quando disponível — sample maior, menos noise.
                 try {
