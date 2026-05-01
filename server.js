@@ -11259,6 +11259,119 @@ setInterval(load, 60000);
   //   theoretical: assume usuário apostou todas tips com stake recomendado
   //   real: só tips com tip_user_action='placed' c/ real_stake_units
   // Útil pra solo: quanto eu *de fato* ganhei/perdi vs quanto o modelo predisse.
+  // Scenario simulator: aplica filters retroativos pra ver ROI hipotético.
+  // Solo: "se eu só apostase ALTA conf, qual seria meu ROI dos últimos 30d?"
+  // Query params:
+  //   days=30 sports=tennis,lol min_ev=8 min_conf=ALTA min_odd=1.5 max_odd=4
+  //   markets=ML,HANDICAP_GAMES leagues=ATP,WTA exclude_leagues=Challenger
+  //   exclude_live=1 only_live=1
+  if (p === '/admin/scenarios') {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const days = Math.max(1, Math.min(365, parseInt(parsed.query.days || '30', 10) || 30));
+      const sportsArg = parsed.query.sports
+        ? String(parsed.query.sports).split(',').map(s => s.trim().toLowerCase()).filter(Boolean)
+        : null;
+      const minEv = parseFloat(parsed.query.min_ev);
+      const minConf = parsed.query.min_conf || null;
+      const minOdd = parseFloat(parsed.query.min_odd);
+      const maxOdd = parseFloat(parsed.query.max_odd);
+      const marketsArg = parsed.query.markets
+        ? String(parsed.query.markets).split(',').map(s => s.trim().toUpperCase()).filter(Boolean)
+        : null;
+      const leaguesArg = parsed.query.leagues
+        ? String(parsed.query.leagues).split(',').map(s => s.trim().toLowerCase()).filter(Boolean)
+        : null;
+      const excludeLeaguesArg = parsed.query.exclude_leagues
+        ? String(parsed.query.exclude_leagues).split(',').map(s => s.trim().toLowerCase()).filter(Boolean)
+        : null;
+      const excludeLive = /^(1|true|yes)$/i.test(String(parsed.query.exclude_live || ''));
+      const onlyLive = /^(1|true|yes)$/i.test(String(parsed.query.only_live || ''));
+
+      const conds = [
+        `result IN ('win','loss')`,
+        `COALESCE(is_shadow, 0) = 0`,
+        `(archived IS NULL OR archived = 0)`,
+        `sent_at >= datetime('now', '-' || ? || ' days')`,
+        `stake_reais > 0`,
+      ];
+      const args = [days];
+      if (sportsArg && sportsArg.length) {
+        conds.push(`sport IN (${sportsArg.map(() => '?').join(',')})`);
+        args.push(...sportsArg);
+      }
+      if (Number.isFinite(minEv)) { conds.push(`ev >= ?`); args.push(minEv); }
+      if (minConf) {
+        const order = { BAIXA: 1, 'MÉDIA': 2, MEDIA: 2, ALTA: 3 };
+        const min = order[minConf.toUpperCase()] || 1;
+        const include = Object.entries(order).filter(([_, v]) => v >= min).map(([k]) => k);
+        conds.push(`upper(confidence) IN (${include.map(() => '?').join(',')})`);
+        args.push(...include);
+      }
+      if (Number.isFinite(minOdd)) { conds.push(`odds >= ?`); args.push(minOdd); }
+      if (Number.isFinite(maxOdd)) { conds.push(`odds <= ?`); args.push(maxOdd); }
+      if (marketsArg && marketsArg.length) {
+        conds.push(`upper(COALESCE(market_type, 'ML')) IN (${marketsArg.map(() => '?').join(',')})`);
+        args.push(...marketsArg);
+      }
+      if (excludeLive) conds.push(`COALESCE(is_live, 0) = 0`);
+      if (onlyLive) conds.push(`is_live = 1`);
+
+      const where = conds.join(' AND ');
+      const rows = db.prepare(`
+        SELECT sport, result, odds, ev, stake_reais, profit_reais, confidence,
+               event_name, market_type, is_live, sent_at
+        FROM tips WHERE ${where}
+        ORDER BY sent_at DESC
+      `).all(...args);
+
+      // League filter (in-JS pq event_name é fuzzy)
+      const filtered = rows.filter(r => {
+        const ev = String(r.event_name || '').toLowerCase();
+        if (leaguesArg && !leaguesArg.some(l => ev.includes(l))) return false;
+        if (excludeLeaguesArg && excludeLeaguesArg.some(l => ev.includes(l))) return false;
+        return true;
+      });
+
+      let stake = 0, profit = 0, wins = 0;
+      const bySport = {};
+      for (const r of filtered) {
+        stake += Number(r.stake_reais || 0);
+        profit += Number(r.profit_reais || 0);
+        if (r.result === 'win') wins++;
+        if (!bySport[r.sport]) bySport[r.sport] = { n: 0, wins: 0, stake: 0, profit: 0 };
+        const s = bySport[r.sport];
+        s.n++;
+        if (r.result === 'win') s.wins++;
+        s.stake += Number(r.stake_reais || 0);
+        s.profit += Number(r.profit_reais || 0);
+      }
+      sendJson(res, {
+        ok: true,
+        filters: {
+          days, sports: sportsArg, min_ev: minEv || null, min_conf: minConf,
+          min_odd: minOdd || null, max_odd: maxOdd || null,
+          markets: marketsArg, leagues: leaguesArg, exclude_leagues: excludeLeaguesArg,
+          exclude_live: excludeLive || null, only_live: onlyLive || null,
+        },
+        n: filtered.length,
+        wins, losses: filtered.length - wins,
+        hit_rate: filtered.length > 0 ? +(wins / filtered.length * 100).toFixed(1) : null,
+        stake_reais: +stake.toFixed(2),
+        profit_reais: +profit.toFixed(2),
+        roi_pct: stake > 0 ? +(profit / stake * 100).toFixed(2) : null,
+        by_sport: Object.entries(bySport).map(([sport, s]) => ({
+          sport, n: s.n, wins: s.wins,
+          hit_rate: s.n > 0 ? +(s.wins / s.n * 100).toFixed(1) : null,
+          stake_reais: +s.stake.toFixed(2),
+          profit_reais: +s.profit.toFixed(2),
+          roi_pct: s.stake > 0 ? +(s.profit / s.stake * 100).toFixed(2) : null,
+        })).sort((a, b) => b.n - a.n),
+      });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
   if (p === '/admin/real-pl') {
     if (!requireAdmin(req, res)) return;
     try {
