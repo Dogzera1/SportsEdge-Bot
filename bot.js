@@ -1271,7 +1271,29 @@ process.on('unhandledRejection', (reason) => {
 
 process.on('uncaughtException', (err) => {
   reportBug('UNCAUGHT-EXCEPTION', err);
+  _writeBotLastExit('uncaught_exception', `${err?.name || 'Error'}: ${err?.message || err}\n${(err?.stack || '').slice(0, 1500)}`);
 });
+
+// 2026-05-01: persiste exit reason em disco — pareia com server.js BOOT-RESUME log.
+// Bot.js geralmente NÃO exita em uncaughtException (reportBug só loga); persistir
+// mesmo assim ajuda correlacionar quando bot some sem aviso (ex: process.exit
+// disparado em algum dependency). SIGKILL/OOM continua sem grace.
+function _writeBotLastExit(reason, detail) {
+  try {
+    const fsLib = require('fs');
+    const pathLib = require('path');
+    const dbDir = pathLib.dirname(pathLib.isAbsolute(DB_PATH) ? DB_PATH : pathLib.resolve(DB_PATH));
+    const out = pathLib.join(dbDir, 'last_exit_bot.json');
+    const m = process.memoryUsage();
+    const payload = {
+      reason, detail: String(detail || '').slice(0, 2000),
+      at: new Date().toISOString(),
+      heap_mb: Math.round(m.heapUsed / 1048576),
+      rss_mb: Math.round(m.rss / 1048576),
+    };
+    fsLib.writeFileSync(out, JSON.stringify(payload));
+  } catch (_) {}
+}
 
 // Graceful shutdown: salva último cron heartbeat antes de morrer.
 // SIGTERM = Railway re-deploy. SIGINT = Ctrl+C local.
@@ -1279,11 +1301,46 @@ process.on('uncaughtException', (err) => {
   process.on(sig, () => {
     try {
       dumpCronHeartbeats(CRON_STATE_FILE);
+      _writeBotLastExit(`signal_${sig.toLowerCase()}`, sig);
       log('INFO', 'BOOT', `${sig} received — heartbeats dumped, exiting`);
     } catch (_) {}
     process.exit(0);
   });
 });
+
+// Boot: log da causa do exit anterior + memory guard 60s
+setTimeout(() => {
+  try {
+    const fsLib = require('fs');
+    const pathLib = require('path');
+    const dbDir = pathLib.dirname(pathLib.isAbsolute(DB_PATH) ? DB_PATH : pathLib.resolve(DB_PATH));
+    const lastFile = pathLib.join(dbDir, 'last_exit_bot.json');
+    if (fsLib.existsSync(lastFile)) {
+      const data = JSON.parse(fsLib.readFileSync(lastFile, 'utf8'));
+      const ageMin = data.at ? Math.round((Date.now() - new Date(data.at).getTime()) / 60000) : null;
+      log('INFO', 'BOOT-RESUME', `previous bot exit: reason=${data.reason} heap=${data.heap_mb}MB rss=${data.rss_mb}MB age=${ageMin}min ago — detail=${(data.detail || '').slice(0, 250)}`);
+      try { fsLib.unlinkSync(lastFile); } catch (_) {}
+    }
+  } catch (_) {}
+}, 5000).unref?.();
+
+// Memory guard 60s — alinhado com server.js. Threshold defaults p/ Railway hobby (512MB).
+const _BOT_MEM_HEAP_WARN_MB = parseInt(process.env.BOOT_MEM_HEAP_WARN_MB || '256', 10);
+const _BOT_MEM_RSS_WARN_MB = parseInt(process.env.BOOT_MEM_RSS_WARN_MB || '400', 10);
+let _botLastMemWarnAt = 0;
+setInterval(() => {
+  try {
+    const m = process.memoryUsage();
+    const heapMb = Math.round(m.heapUsed / 1048576);
+    const rssMb = Math.round(m.rss / 1048576);
+    if ((heapMb >= _BOT_MEM_HEAP_WARN_MB || rssMb >= _BOT_MEM_RSS_WARN_MB) && Date.now() - _botLastMemWarnAt > 5 * 60 * 1000) {
+      log('WARN', 'MEM-GUARD', `bot heap=${heapMb}MB (warn=${_BOT_MEM_HEAP_WARN_MB}) rss=${rssMb}MB (warn=${_BOT_MEM_RSS_WARN_MB}) — proximo OOM se subir mais`);
+      _botLastMemWarnAt = Date.now();
+    }
+    try { require('./lib/metrics').gauge('bot_heap_mb', heapMb); } catch (_) {}
+    try { require('./lib/metrics').gauge('bot_rss_mb', rssMb); } catch (_) {}
+  } catch (_) {}
+}, 60 * 1000).unref?.();
 
 // ── Server Helpers ──
 const ADMIN_KEY = (process.env.ADMIN_KEY || '').trim();

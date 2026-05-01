@@ -24415,14 +24415,36 @@ async function syncGolggRoleImpact() {
 // Antes ausentes: throw async derrubava o process abruptamente, db nunca era
 // fechado e SSE clients (/logs/stream) ficavam pendurados. Railway SIGTERM
 // também não tinha drain — agora chega a process.exit cleanup window de 10s.
+//
+// 2026-05-01: persiste exit reason em disco (DB_DIR/last_exit_server.json) pra
+// próximo boot logar a causa do reboot anterior. Sem isso voamos cego — 32
+// boots/24h sem saber se é OOM, uncaughtException ou redeploy.
 let _shuttingDown = false;
+function _writeLastExit(reason, detail) {
+  try {
+    const fs = require('fs');
+    const path = require('path');
+    const dbDir = path.dirname(path.isAbsolute(DB_PATH) ? DB_PATH : path.resolve(DB_PATH));
+    const out = path.join(dbDir, 'last_exit_server.json');
+    const payload = {
+      reason, detail: String(detail || '').slice(0, 2000),
+      at: new Date().toISOString(),
+      uptime_s: Math.round((Date.now() - _serverStartTs) / 1000),
+      heap_mb: Math.round(process.memoryUsage().heapUsed / 1048576),
+      rss_mb: Math.round(process.memoryUsage().rss / 1048576),
+    };
+    fs.writeFileSync(out, JSON.stringify(payload));
+  } catch (_) {}
+}
 function _gracefulShutdown(signal) {
   if (_shuttingDown) return;
   _shuttingDown = true;
   log('INFO', 'SHUTDOWN', `${signal} recebido, drenando...`);
+  _writeLastExit(`signal_${signal.toLowerCase()}`, signal);
   // 10s window pra finalizar requests em andamento
   const forceTimer = setTimeout(() => {
     log('WARN', 'SHUTDOWN', 'force exit (10s timeout)');
+    _writeLastExit('force_timeout', '10s shutdown drain stalled');
     process.exit(1);
   }, 10000);
   forceTimer.unref?.();
@@ -24437,6 +24459,7 @@ process.on('uncaughtException', (err) => {
   // Best practice: log + exit pra Railway restartar em estado limpo. Não tentar
   // continuar (process pode estar inconsistente).
   log('ERROR', 'UNCAUGHT', `${err?.message || err}\n${err?.stack || ''}`);
+  _writeLastExit('uncaught_exception', `${err?.name || 'Error'}: ${err?.message || err}\n${(err?.stack || '').slice(0, 1500)}`);
   try { db.close(); } catch (_) {}
   setTimeout(() => process.exit(1), 500).unref?.();
 });
@@ -24459,6 +24482,71 @@ server.listen(PORT, '0.0.0.0', () => {
   log('INFO', 'SERVER', `SportsEdge API em http://0.0.0.0:${PORT}`);
   log('INFO', 'SERVER', `Esportes: LoL (Riot API + LoLEsports)`);
   log('INFO', 'SERVER', `HTTP timeouts: keepAlive=${server.keepAliveTimeout}ms headers=${server.headersTimeout}ms request=${server.requestTimeout}ms`);
+
+  // 2026-05-01: log da causa do exit anterior. Cruzamos 2 fontes:
+  //   - last_exit_server.json (escrito pelo próprio server.js em SIGTERM/uncaught)
+  //   - last_child_exit_server_js.json (escrito pelo launcher start.js no 'exit' event)
+  // SIGKILL/OOM mata server abruptamente → só launcher capturou {code:null, signal:'SIGKILL'}.
+  // Sem launcher info (todo container kill) → arquivo missing = pista de OOM/Railway kill.
+  try {
+    const fs = require('fs');
+    const path = require('path');
+    const dbDir = path.dirname(path.isAbsolute(DB_PATH) ? DB_PATH : path.resolve(DB_PATH));
+    const lastFile = path.join(dbDir, 'last_exit_server.json');
+    const launcherFile = path.join(dbDir, 'last_child_exit_server_js.json');
+    let inProcExit = null, launcherExit = null;
+    if (fs.existsSync(lastFile)) {
+      try { inProcExit = JSON.parse(fs.readFileSync(lastFile, 'utf8')); } catch (_) {}
+      try { fs.unlinkSync(lastFile); } catch (_) {}
+    }
+    if (fs.existsSync(launcherFile)) {
+      try { launcherExit = JSON.parse(fs.readFileSync(launcherFile, 'utf8')); } catch (_) {}
+      try { fs.unlinkSync(launcherFile); } catch (_) {}
+    }
+
+    if (inProcExit) {
+      const ageMin = inProcExit.at ? Math.round((Date.now() - new Date(inProcExit.at).getTime()) / 60000) : null;
+      log('INFO', 'BOOT-RESUME', `previous exit: reason=${inProcExit.reason} uptime=${inProcExit.uptime_s}s heap=${inProcExit.heap_mb}MB rss=${inProcExit.rss_mb}MB age=${ageMin}min ago — detail=${(inProcExit.detail || '').slice(0, 250)}`);
+      if ((inProcExit.rss_mb || 0) > 400) {
+        log('WARN', 'BOOT-RESUME', `RSS ${inProcExit.rss_mb}MB no exit anterior — possível OOM kill se Railway plan tem cap <512MB`);
+      }
+    }
+    if (launcherExit) {
+      const ageMin = launcherExit.at ? Math.round((Date.now() - new Date(launcherExit.at).getTime()) / 60000) : null;
+      const upS = Math.round((launcherExit.uptime_ms || 0) / 1000);
+      log('INFO', 'BOOT-RESUME', `launcher saw child exit: code=${launcherExit.code} signal=${launcherExit.signal} uptime=${upS}s age=${ageMin}min ago`);
+      if (launcherExit.signal === 'SIGKILL' || launcherExit.signal === 'SIGSEGV') {
+        log('WARN', 'BOOT-RESUME', `signal=${launcherExit.signal} → kernel/Railway killed process (provável OOM ou container restart)`);
+      } else if (launcherExit.code === 1 && !inProcExit) {
+        log('WARN', 'BOOT-RESUME', `code=1 sem in-proc reason — uncaught síncrono no boot ou similar`);
+      }
+    }
+    if (!inProcExit && !launcherExit) {
+      const bootFile = path.join(dbDir, 'boot_count.json');
+      if (fs.existsSync(bootFile)) {
+        log('WARN', 'BOOT-RESUME', 'previous exit: NENHUM signal (in-proc nem launcher) — container inteiro foi recriado (deploy ou Railway scheduler)');
+      }
+    }
+  } catch (e) { log('DEBUG', 'BOOT-RESUME', `read last_exit failed: ${e.message}`); }
+
+  // Memory guard: log WARN se heap >256MB ou RSS >400MB. Cron 60s, baixo overhead.
+  // Threshold defaults Railway hobby (512MB cap). Override via env BOOT_MEM_*_MB.
+  const _memHeapWarnMb = parseInt(process.env.BOOT_MEM_HEAP_WARN_MB || '256', 10);
+  const _memRssWarnMb = parseInt(process.env.BOOT_MEM_RSS_WARN_MB || '400', 10);
+  let _lastMemWarnAt = 0;
+  setInterval(() => {
+    try {
+      const m = process.memoryUsage();
+      const heapMb = Math.round(m.heapUsed / 1048576);
+      const rssMb = Math.round(m.rss / 1048576);
+      if ((heapMb >= _memHeapWarnMb || rssMb >= _memRssWarnMb) && Date.now() - _lastMemWarnAt > 5 * 60 * 1000) {
+        log('WARN', 'MEM-GUARD', `heap=${heapMb}MB (warn=${_memHeapWarnMb}) rss=${rssMb}MB (warn=${_memRssWarnMb}) — proximo OOM se subir mais`);
+        _lastMemWarnAt = Date.now();
+      }
+      try { require('./lib/metrics').gauge('process_heap_mb', heapMb); } catch (_) {}
+      try { require('./lib/metrics').gauge('process_rss_mb', rssMb); } catch (_) {}
+    } catch (_) {}
+  }, 60 * 1000).unref?.();
   if (SXBET_ENABLED) log('INFO', 'ODDS', `SX.Bet ativo: base=${SXBET_BASE_URL}`);
   if (GRID_API_KEY) log('INFO', 'GRID', 'GRID_API_KEY configurada — /grid-enrich ativo (LoL)');
 

@@ -54,12 +54,30 @@ process.env.DB_PATH = DB_PATH;
 console.log(`[LAUNCHER] PORT=${PORT} | DB=${DB_PATH}`);
 
 const _crashCount = {};
+const _spawnTs = {};
+
+// 2026-05-01: persiste exit signature do child em disco. Se SIGKILL/OOM (sem
+// grace period), o próprio child não tem chance de escrever last_exit_*.json,
+// mas o launcher captura via 'exit' event e persiste {code, signal, uptime_ms}.
+// Boot subsequente do server lê e correlaciona.
+function _writeChildExit(name, code, signal, uptimeMs) {
+  try {
+    const fs = require('fs');
+    const path = require('path');
+    const dbDir = path.dirname(path.isAbsolute(DB_PATH) ? DB_PATH : path.resolve(DB_PATH));
+    const out = path.join(dbDir, `last_child_exit_${name.replace(/\W+/g,'_')}.json`);
+    const payload = { name, code, signal, uptime_ms: uptimeMs, at: new Date().toISOString() };
+    fs.writeFileSync(out, JSON.stringify(payload));
+  } catch (_) {}
+}
+
 function spawnChild(name, file) {
   // Captura stdout/stderr via pipe pra espelhar no Railway console E ingerir no buffer do server.
   const child = spawn('node', [file], {
     stdio: ['inherit', 'pipe', 'pipe'],
     env: process.env
   });
+  _spawnTs[name] = Date.now();
 
   let outBuf = '', errBuf = '';
   child.stdout.on('data', d => {
@@ -83,9 +101,11 @@ function spawnChild(name, file) {
 
   child.on('exit', (code, signal) => {
     _crashCount[name] = (_crashCount[name] || 0) + 1;
+    const uptimeMs = Date.now() - (_spawnTs[name] || Date.now());
+    _writeChildExit(name, code, signal, uptimeMs);
     // Backoff exponencial: 3s, 6s, 12s, 24s, max 60s
     const delay = Math.min(3000 * Math.pow(2, Math.min(_crashCount[name] - 1, 4)), 60000);
-    console.error(`[LAUNCHER] ${name} exited (code=${code} signal=${signal}) — restart #${_crashCount[name]} em ${delay/1000}s`);
+    console.error(`[LAUNCHER] ${name} exited (code=${code} signal=${signal} uptime=${Math.round(uptimeMs/1000)}s) — restart #${_crashCount[name]} em ${delay/1000}s`);
     setTimeout(() => spawnChild(name, file), delay);
   });
 
