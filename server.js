@@ -17629,6 +17629,40 @@ setInterval(load, 60000);
                       : null,
         };
       }).sort((a, z) => (a.skill_score ?? 99) - (z.skill_score ?? 99));
+      // 2026-05-01: per-market breakdown — essencial para tennis onde HG vs TG têm
+      // skill bem diferentes (HG +0.155, TG -0.10). Sport-level skim mascara isso.
+      const marketBreakdown = db.prepare(`
+        SELECT sport, COALESCE(market_type, 'ML') AS market,
+          AVG(${brierModelExpr}) AS brier_model,
+          AVG(${brierMarketExpr}) AS brier_market,
+          COUNT(*) AS n,
+          SUM(CASE WHEN result='win' THEN 1 ELSE 0 END) AS wins,
+          SUM(COALESCE(profit_reais, 0)) AS profit,
+          SUM(COALESCE(stake_reais, 0)) AS stake
+        FROM tips
+        WHERE sent_at >= datetime('now', '-' || ? || ' days')
+          AND result IN ('win','loss')
+          AND COALESCE(is_shadow, 0) = 0
+          AND COALESCE(archived, 0) = 0
+          AND odds > 1
+          AND (model_p_pick IS NOT NULL OR ev IS NOT NULL)
+        GROUP BY sport, COALESCE(market_type, 'ML')
+        HAVING n >= ? AND brier_model IS NOT NULL
+      `).all(recentDays, Math.max(3, Math.floor(minN / 2)));
+      const enrichedMarket = marketBreakdown.map(r => {
+        const bm = Number(r.brier_model), bk = Number(r.brier_market);
+        const skill = bk > 0 ? 1 - bm / bk : null;
+        const hit = r.n > 0 ? Number(r.wins) / r.n * 100 : null;
+        const roi = r.stake > 0 ? Number(r.profit) / Number(r.stake) * 100 : null;
+        return {
+          sport: r.sport, market: r.market, n: r.n, wins: r.wins,
+          hit_pct: hit != null ? +hit.toFixed(1) : null,
+          roi_pct: roi != null ? +roi.toFixed(1) : null,
+          brier_model: +bm.toFixed(4),
+          brier_market: +bk.toFixed(4),
+          skill_score: skill != null ? +skill.toFixed(4) : null,
+        };
+      }).sort((a, z) => (a.skill_score ?? 99) - (z.skill_score ?? 99));
       sendJson(res, {
         ok: true,
         params: { recent_days: recentDays, baseline_days: baselineDays, min_n: minN, baseline_min_n: baselineMinN, ratio_cutoff: ratioCutoff, skill_cutoff: skillCutoff },
@@ -17639,6 +17673,7 @@ setInterval(load, 60000);
           skill_score: r.brier_market > 0 ? +(1 - Number(r.brier_model) / Number(r.brier_market)).toFixed(4) : null,
           n: r.n,
         })),
+        market_breakdown: enrichedMarket,
         segments: enriched,
         would_block_count: enriched.filter(e => e.would_block).length,
       });

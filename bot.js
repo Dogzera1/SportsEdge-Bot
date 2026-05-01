@@ -15257,8 +15257,9 @@ async function pollTennis(runOnce = false) {
                       // 2026-04-28: per-market EV gate. totalGames ficou vazando em audit 90d:
                       // n=50 ROI -4% predP=70.6% realHit=52% (gap calib -18.6pp pós Markov calib).
                       // handicapGames OK: n=64 ROI +11% gap -9.2pp.
-                      // Default totalGames=12 (vs handicapGames=8). Reduz volume mas corta tail neg.
-                      const minEvTg = parseFloat(process.env.TENNIS_TG_MIN_EV ?? '12');
+                      // 2026-05-01: prod 14d audit: HG skill +0.155 ROI +43% (ouro), TG skill -0.10
+                      // ROI -15%. Bumpa TG_MIN_EV default 12→15 pra cortar mais cauda fraca.
+                      const minEvTg = parseFloat(process.env.TENNIS_TG_MIN_EV ?? '15');
                       const minEvHg = parseFloat(process.env.TENNIS_HG_MIN_EV ?? String(minEvGate));
                       const evGateForMarket = (market) => {
                         const m = String(market || '').toLowerCase();
@@ -15305,7 +15306,27 @@ async function pollTennis(runOnce = false) {
                           continue;
                         }
                         marketTipSent.set(dedupKey, Date.now());
-                        let stake = mtp.kellyStakeForMarket(t.pModel, t.odd, 100, getKellyFraction('tennis', 'BAIXA'));
+                        // 2026-05-01: stake bump pra HG Masters/Slam c/ EV alto.
+                        // Audit 14d: HG skill +0.155 (modelo 15.5% melhor que mercado),
+                        // ROI +43% n=24 hit 75%. Edge robusto sustenta Kelly maior.
+                        // Fração 0.10 (BAIXA) → 0.15 (~50% bump) só em segmento ouro.
+                        // Tier detection inline (mesmo regex do gate non-Slam).
+                        const _kellyBaseFrac = getKellyFraction('tennis', 'BAIXA');
+                        const _isHgGoldSegment = (() => {
+                          if (String(t.market).toLowerCase() !== 'handicapgames') return false;
+                          const lg = String(match.league || '');
+                          const isTopTier = /grand slam|wimbledon|us open|roland|french open|australian open|atp 1000|wta 1000|masters/i.test(lg)
+                            || /madrid|monte carlo|cincinnati|miami|indian wells|paris|rome|toronto|montreal|shanghai/i.test(lg);
+                          const minEvForBoost = parseFloat(process.env.TENNIS_HG_BOOST_MIN_EV ?? '15');
+                          return isTopTier && Number.isFinite(t.ev) && t.ev >= minEvForBoost;
+                        })();
+                        const _kellyFracForTip = _isHgGoldSegment
+                          ? parseFloat(process.env.TENNIS_HG_GOLD_KELLY_FRAC ?? '0.15')
+                          : _kellyBaseFrac;
+                        if (_isHgGoldSegment) {
+                          log('INFO', 'TENNIS-MT-STAKE-BOOST', `${t.market}/${t.side} ${match.team1} vs ${match.team2} [${match.league}]: gold segment EV=${t.ev}% → frac ${_kellyFracForTip} (vs base ${_kellyBaseFrac})`);
+                        }
+                        let stake = mtp.kellyStakeForMarket(t.pModel, t.odd, 100, _kellyFracForTip);
                         if (t.correlationDiscount > 0 && typeof stake === 'number') {
                           stake = mtp.snapStakeUnits(stake * (1 - t.correlationDiscount));
                         }
