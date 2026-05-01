@@ -385,10 +385,18 @@ function _sharpDivergenceGate({ oddsObj, modelP, impliedP, maxPp, context = {} }
  * underdogs), gerando false-positive divergence em edge calc.
  */
 const _devigLib = require('./lib/devig');
+// 2026-05-01: trocou power → ensemble (auto routing power vs Shin baseado em
+// asimetria das odds). Em mismatches pesados (|o1-o2|≥1.5), Shin extrai prob
+// justa ~2-4pp diferente de power, alinhada com Smith et al 2009 + C&F 2012.
+// Default threshold 1.5; override via env DEVIG_ASYMMETRY_THRESHOLD ou
+// DEVIG_METHOD=power|shin|multiplicative pra forçar.
+const _devigMethod = String(process.env.DEVIG_METHOD || 'auto').toLowerCase();
+const _devigAsymThr = parseFloat(process.env.DEVIG_ASYMMETRY_THRESHOLD ?? '1.5');
 function _impliedFromOdds(oddsObj) {
-  const r = _devigLib.devigPower(oddsObj?.t1, oddsObj?.t2);
+  const r = _devigLib.devigEnsemble(oddsObj?.t1, oddsObj?.t2,
+    { method: _devigMethod, asymmetryThreshold: _devigAsymThr });
   if (!r) return null;
-  return { impliedP1: r.p1, impliedP2: r.p2 };
+  return { impliedP1: r.p1, impliedP2: r.p2, devig_method: r.method };
 }
 
 /**
@@ -17149,6 +17157,15 @@ Máximo 200 palavras.`;
         // ML-equivalent (1X2_H/1X2_A) OU fallback caso shadow tenha falhado.
         const _pickSideFb = tipMarket === '1X2_H' ? 'h' : tipMarket === '1X2_A' ? 'a' : tipMarket === '1X2_D' ? 'd' : null;
         const _recordMarketType = _isFootballMlEquivalent ? 'ML' : tipMarket;
+        // 2026-05-01: distribuição completa pH/pD/pA persistida em
+        // tip_context_json — habilita RPS (Ranked Probability Score) na
+        // calibration watcher. Brier sozinho trata 1X2 como 3 binários
+        // independentes; RPS pune mais "previu home, deu away" que
+        // "previu home, deu draw" (ordering matters em 1X2).
+        const _fbDist = (fbModel && Number.isFinite(fbModel.pH) && Number.isFinite(fbModel.pD) && Number.isFinite(fbModel.pA))
+          ? { pH: +fbModel.pH.toFixed(4), pD: +fbModel.pD.toFixed(4), pA: +fbModel.pA.toFixed(4) }
+          : null;
+        const _factors = mlScore?.method ? [{ label: 'Método', value: String(mlScore.method).slice(0, 40) }] : null;
         const recFb = await serverPost('/record-tip', {
           matchId: recordMatchId, eventName: match.league,
           p1: match.team1, p2: match.team2, tipParticipant: tipTeam,
@@ -17161,8 +17178,11 @@ Máximo 200 palavras.`;
           lineShopOdds: _pickSideFb ? (match.odds || null) : null,
           pickSide: _pickSideFb,
           // tip_context_json fields:
-          factors: (mlScore?.method ? [{ label: 'Método', value: String(mlScore.method).slice(0, 40) }] : null),
-          factorCount: mlScore?.method ? 1 : null,
+          factors: _factors,
+          factorCount: _factors ? 1 : null,
+          // RPS prep: distribuição 1X2 completa (apenas pra markets 1X2_*).
+          // /record-tip persiste como ctx.fb_dist em tip_context_json.
+          fb_dist: (_fbDist && /^1X2_/.test(_recordMarketType)) ? _fbDist : null,
         }, 'football');
 
         if (!recFb?.tipId) {

@@ -16461,6 +16461,46 @@ setInterval(load, 60000);
         const daysBack = process.env.VOID_TIP_PAIR_DAYS || '90 days';
         const isVoidedPair = stmts.isVoidedPairRecent.get(sport, marketTypeStr, p1n, p2n, p2n, p1n, `-${daysBack}`);
         if (isVoidedPair) { _emitSkip('voided_odds_wrong_pair_recent'); return; }
+
+        // 2026-05-01: stop-loss por match — bloqueia novas tips em série
+        // (Bo3/Bo5 esports, match tennis multi-set, etc) onde já perdemos ≥
+        // MATCH_STOP_LOSS_UNITS units. Reduz tilt amplification: se Map 1 e
+        // Map 2 perderam (2u down), Map 3 não recebe nova tip do mesmo match.
+        // Default OFF (env opt-in) pra preservar comportamento existente
+        // até validar em shadow. Ativa via MATCH_STOP_LOSS_UNITS=2.
+        const _stopLossUnits = parseFloat(process.env.MATCH_STOP_LOSS_UNITS || '0');
+        if (_stopLossUnits > 0) {
+          // Strip suffixes pra agrupar mesma série: ::mt::* (MT-promoted),
+          // ::ln* (kills line tags), _map\d+ (per-map ML), suffix de fase.
+          // Base = match_id antes do primeiro separador `::` ou `_map`.
+          const baseMatchId = String(matchId).split('::')[0].replace(/_map\d+$/i, '');
+          if (baseMatchId && baseMatchId.length >= 4) {
+            try {
+              // Cumulative loss (gross, não net) em mesma série últimas 6h.
+              // Janela curta cobre Bo5 longo (~3h) + buffer; >6h é tornei diferente.
+              const lossRow = db.prepare(`
+                SELECT COALESCE(SUM(
+                  CASE WHEN result = 'loss'
+                    THEN CAST(REPLACE(REPLACE(stake, 'u', ''), 'U', '') AS REAL)
+                    ELSE 0 END
+                ), 0) AS units_lost
+                FROM tips
+                WHERE sport = ?
+                  AND (match_id = ? OR match_id LIKE ?)
+                  AND result = 'loss'
+                  AND sent_at > datetime('now', '-6 hours')
+                  AND COALESCE(is_shadow, 0) = 0
+              `).get(sport, baseMatchId, `${baseMatchId}%`);
+              const lostU = Number(lossRow?.units_lost) || 0;
+              if (lostU >= _stopLossUnits) {
+                log('INFO', 'STOP-LOSS-MATCH',
+                  `${sport} ${p1} vs ${p2} (${baseMatchId}): bloqueado — perdeu ${lostU.toFixed(2)}u nas últimas 6h ≥ ${_stopLossUnits}u threshold`);
+                _emitSkip('match_stop_loss', { units_lost: +lostU.toFixed(2), threshold: _stopLossUnits, base_match_id: baseMatchId });
+                return;
+              }
+            } catch (e) { log('DEBUG', 'STOP-LOSS-MATCH', `check failed: ${e.message}`); }
+          }
+        }
         const isLive = t.isLive ? 1 : 0;
         const modelP1 = t.modelP1 != null ? parseFiniteNumber(t.modelP1) : null;
         const modelP2 = t.modelP2 != null ? parseFiniteNumber(t.modelP2) : null;
@@ -16503,6 +16543,11 @@ setInterval(load, 60000);
           if (t.kellyFrac != null) ctx.kelly_frac = t.kellyFrac;
           if (t.stakeAdjust != null) ctx.stake_adjust = t.stakeAdjust;
           if (t.preMatchBonus != null) ctx.pre_match_bonus = t.preMatchBonus;
+          // 2026-05-01: full 1X2 distribution (football pH/pD/pA) pra RPS metric
+          if (t.fb_dist && typeof t.fb_dist === 'object'
+            && Number.isFinite(t.fb_dist.pH) && Number.isFinite(t.fb_dist.pD) && Number.isFinite(t.fb_dist.pA)) {
+            ctx.fb_dist = { pH: +t.fb_dist.pH, pD: +t.fb_dist.pD, pA: +t.fb_dist.pA };
+          }
           if (Object.keys(ctx).length > 0) {
             _tipContextJson = JSON.stringify(ctx).slice(0, 4000); // hard cap 4KB
           }
