@@ -1,7 +1,19 @@
 'use strict';
 
 const assert = require('assert');
-const { computeH2HEnsemble } = require('../lib/tennis-h2h-ensemble');
+const { computeH2HEnsemble, inferSurface } = require('../lib/tennis-h2h-ensemble');
+
+// inferSurface tests
+assert.strictEqual(inferSurface('ATP Madrid - QF'), 'clay');
+assert.strictEqual(inferSurface('Wimbledon - R64'), 'grass');
+assert.strictEqual(inferSurface('US Open - SF'), 'hard');
+assert.strictEqual(inferSurface('Roland Garros - R128'), 'clay');
+assert.strictEqual(inferSurface('Paris Bercy - F'), 'hard_indoor');
+assert.strictEqual(inferSurface('ATP Finals'), 'hard_indoor');
+assert.strictEqual(inferSurface('ATP Random Tournament'), 'unknown');
+assert.strictEqual(inferSurface(''), 'unknown');
+assert.strictEqual(inferSurface(null), 'unknown');
+console.log('OK: inferSurface covers Slam/Masters/indoor/unknown');
 
 // Caso 1: sem dados — mantém pMarkov
 {
@@ -68,6 +80,39 @@ const { computeH2HEnsemble } = require('../lib/tennis-h2h-ensemble');
   // Não bate clamp. Mas se Markov fosse 0.94 e weight fosse maior...
   assert(r.pBlend <= 0.95);
   console.log(`OK: clamping respected (pBlend=${r.pBlend.toFixed(4)})`);
+}
+
+// Caso 8: surface-aware — Federer-Nadal style: 5 matches, 4 no clay, 1 no hard.
+// Cenário: jogo atual no clay; H2H mostra t1=Nadal dominante no clay (4-0) + 1 hard loss.
+// Sem surface: t1Wins=4, total=5, pH2h~0.75
+// Com surface=clay: weighted_t1Wins ~ 4*1.0 = 4, weighted_total = 4*1.0 + 1*0.4 = 4.4
+//   → pH2h = (4+0.5)/(4.4+1) = 0.833 (mais forte!)
+{
+  const results = [];
+  const today = Date.now();
+  // 4 vitorias t1 (homeGoals=2, awayGoals=0) em clay, 1 derrota t1 em hard
+  for (let i = 0; i < 4; i++) {
+    results.push({ home: 'Nadal', away: 'Federer', homeGoals: 2, awayGoals: 0, date: new Date(today - i * 30 * 86400e3).toISOString(), league: 'Roland Garros - F' });
+  }
+  results.push({ home: 'Nadal', away: 'Federer', homeGoals: 0, awayGoals: 2, date: new Date(today - 200 * 86400e3).toISOString(), league: 'Wimbledon - F' });
+  const h2h = { totalMatches: 5, t1Wins: 4, t2Wins: 1, results };
+
+  // Sem surface filter
+  const rNoSurf = computeH2HEnsemble(h2h, 0.50);
+  // Com surface=clay (mesma da maioria)
+  const rClay = computeH2HEnsemble(h2h, 0.50, { currentSurface: 'clay' });
+  // Com surface=grass (so 1 match nesta superficie, rest desvalorizado)
+  const rGrass = computeH2HEnsemble(h2h, 0.50, { currentSurface: 'grass' });
+
+  console.log(`OK: surface-aware Nadal/Federer-style:`);
+  console.log(`   no surface: pH2h=${rNoSurf.pH2h} weight=${rNoSurf.weight} pBlend=${rNoSurf.pBlend.toFixed(4)}`);
+  console.log(`   clay (4 same): pH2h=${rClay.pH2h} weight=${rClay.weight} surfMatches=${rClay.surfaceMatches} pBlend=${rClay.pBlend.toFixed(4)}`);
+  console.log(`   grass (1 same): pH2h=${rGrass.pH2h} weight=${rGrass.weight} surfMatches=${rGrass.surfaceMatches} pBlend=${rGrass.pBlend.toFixed(4)}`);
+
+  // Clay deve puxar mais pra cima que grass (clay tem mais matches matching)
+  assert(rClay.pBlend > rGrass.pBlend, `clay (${rClay.pBlend}) should pull more than grass (${rGrass.pBlend})`);
+  // Clay deve agora ser MAIS confiante que sem surface filter (porque os match clay são reforçados)
+  assert(rClay.pH2h > rNoSurf.pH2h, `clay-weighted pH2h (${rClay.pH2h}) should be > no-surface pH2h (${rNoSurf.pH2h})`);
 }
 
 console.log('\\nAll tennis-h2h-ensemble tests passed.');

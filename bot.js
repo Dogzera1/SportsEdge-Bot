@@ -15035,13 +15035,19 @@ async function pollTennis(runOnce = false) {
                     const { computeH2HEnsemble } = require('./lib/tennis-h2h-ensemble');
                     const minN = parseInt(process.env.TENNIS_H2H_MIN_N || '3', 10);
                     const maxW = parseFloat(process.env.TENNIS_H2H_MAX_WEIGHT || '0.30');
-                    const ens = computeH2HEnsemble(dbH2h, tennisModelResult.modelP1, { minN, maxWeight: maxW });
+                    // 2026-05-01: surface-aware. markovSurface já normalizado pra
+                    // 'clay'/'grass'/'indoor'/'hard'. mapMarkov 'indoor'→'hard_indoor'
+                    // pra alinhar com inferSurface() do ensemble.
+                    const _surfMap = { hard: 'hard', clay: 'clay', grass: 'grass', indoor: 'hard_indoor' };
+                    const _h2hSurface = _surfMap[markovSurface] || 'hard';
+                    const ens = computeH2HEnsemble(dbH2h, tennisModelResult.modelP1, { minN, maxWeight: maxW, currentSurface: _h2hSurface });
                     if (ens.applied) {
                       const pre = tennisModelResult.modelP1;
                       const delta = Math.abs(ens.pBlend - pre);
                       if (delta > 0.003) {
+                        const surfTag = ens.surfaceMatches != null ? ` [${ens.surfaceMatches}/${ens.n} on ${_h2hSurface}]` : '';
                         log('INFO', 'TENNIS-H2H',
-                          `${match.team1} vs ${match.team2}: pH2h=${(ens.pH2h*100).toFixed(1)}% (${ens.t1Wins}/${ens.n}) ` +
+                          `${match.team1} vs ${match.team2}: pH2h=${(ens.pH2h*100).toFixed(1)}% (${ens.t1Wins}/${ens.n}${surfTag}) ` +
                           `× weight=${ens.weight} → pMatch ${(pre*100).toFixed(1)}% → ${(ens.pBlend*100).toFixed(1)}% (Δ=${(delta*100).toFixed(1)}pp)`);
                       }
                       tennisModelResult.modelP1 = ens.pBlend;

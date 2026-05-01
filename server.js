@@ -22753,7 +22753,9 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
         hG = parseInt(parts[0]) || 0;
         aG = parseInt(parts[1]) || 0;
       }
-      return { home: r.team1, away: r.team2, homeGoals: hG, awayGoals: aG, date: r.resolved_at };
+      // 2026-05-01: incluir league no payload pra surface-specific H2H ensemble.
+      // Tennis H2H weighing by surface match (clay vs hard vs grass) move-edge real.
+      return { home: r.team1, away: r.team2, homeGoals: hG, awayGoals: aG, date: r.resolved_at, league: r.league || null };
     });
     sendJson(res, { totalMatches: rows.length, t1Wins: t1w, t2Wins: t2w, results });
     return;
