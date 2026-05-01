@@ -11719,6 +11719,67 @@ async function poll(token, sport) {
               `🔕 *Notificações desativadas em todos os esportes.*\n\n` +
               `Você não receberá mais tips. Use /notificacoes em qualquer sport para reativar quando quiser.`
             );
+          } else if (text.startsWith('/confirm') || text === '/skip') {
+            // Reply-based: user replies to a tip DM com "/confirm <stake>" pra
+            // marcar que apostou, ou "/skip" pra marcar que pulou. Solo only —
+            // gate by ADMIN_IDS. Match tip via team1/team2 do reply_to_message.text.
+            if (!ADMIN_IDS.has(chatId)) {
+              await send(token, chatId, '⛔ Comando admin-only.');
+            } else if (!update.message.reply_to_message?.text) {
+              await send(token, chatId,
+                `❓ Use como reply à mensagem do tip:\n` +
+                `• \`/confirm 2u\` — apostei 2 units\n` +
+                `• \`/confirm\` — apostei o stake recomendado\n` +
+                `• \`/skip\` — pulei essa tip`);
+            } else {
+              const replyText = update.message.reply_to_message.text;
+              // Extrai team1/team2 — formato comum: "*Team1* vs *Team2*" ou "Team1 vs Team2"
+              const teamsMatch = replyText.match(/\*?([^*\n]+?)\*?\s+vs\s+\*?([^*\n]+?)\*?(?:\n|$)/i);
+              if (!teamsMatch) {
+                await send(token, chatId, '⚠️ Não consegui identificar a tip do reply (formato esperado: "Team1 vs Team2").');
+              } else {
+                const t1q = teamsMatch[1].trim();
+                const t2q = teamsMatch[2].trim();
+                const norm = s => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+                const t1n = norm(t1q), t2n = norm(t2q);
+                // Busca tip mais recente pendente OU settled <24h c/ esses times
+                const candidates = db.prepare(`
+                  SELECT id, sport, participant1, participant2, tip_participant, odds, stake,
+                         result, sent_at, market_type
+                  FROM tips
+                  WHERE COALESCE(is_shadow, 0) = 0 AND COALESCE(archived, 0) = 0
+                    AND sent_at >= datetime('now', '-48 hours')
+                  ORDER BY sent_at DESC LIMIT 200
+                `).all();
+                const tip = candidates.find(t => {
+                  const a = norm(t.participant1), b = norm(t.participant2);
+                  return (a.includes(t1n) || t1n.includes(a)) && (b.includes(t2n) || t2n.includes(b))
+                      || (a.includes(t2n) || t2n.includes(a)) && (b.includes(t1n) || t1n.includes(b));
+                });
+                if (!tip) {
+                  await send(token, chatId, `⚠️ Tip não encontrada nas últimas 48h pra "${t1q} vs ${t2q}".`);
+                } else if (text === '/skip') {
+                  try {
+                    db.prepare(`INSERT OR REPLACE INTO tip_user_action (tip_id, action, real_stake_units, ts) VALUES (?, 'skipped', NULL, datetime('now'))`).run(tip.id);
+                    await send(token, chatId, `⏭️ *Skipped* — tip #${tip.id} marcada como não apostada\n${tip.tip_participant} @ ${tip.odds} (${tip.sport})`);
+                  } catch (e) { await send(token, chatId, `❌ ${e.message}`); }
+                } else {
+                  // /confirm [stake]
+                  const stakeArg = text.split(/\s+/)[1];
+                  let realStake = parseFloat(String(stakeArg || '').replace('u', '').replace(',', '.'));
+                  if (!Number.isFinite(realStake) || realStake < 0) {
+                    realStake = parseFloat(String(tip.stake || '1').replace('u', '')) || 1;
+                  }
+                  try {
+                    db.prepare(`INSERT OR REPLACE INTO tip_user_action (tip_id, action, real_stake_units, ts) VALUES (?, 'placed', ?, datetime('now'))`).run(tip.id, realStake);
+                    await send(token, chatId,
+                      `✅ *Confirmed* — tip #${tip.id} marcada como apostada\n` +
+                      `${tip.tip_participant} @ ${tip.odds} | stake real: *${realStake}u* (rec: ${tip.stake})\n` +
+                      `Sport: ${tip.sport} | Status: ${tip.result || 'pending'}`);
+                  } catch (e) { await send(token, chatId, `❌ ${e.message}`); }
+                }
+              }
+            }
           } else if (text.startsWith('/notificacoes') || text.startsWith('/notificações')) {
             const action = text.split(' ')[1];
             await handleNotificacoes(token, chatId, sport, action);

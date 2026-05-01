@@ -11255,6 +11255,91 @@ setInterval(load, 60000);
     return;
   }
 
+  // Real P&L baseado em /confirm + /skip do usuário. Distingue:
+  //   theoretical: assume usuário apostou todas tips com stake recomendado
+  //   real: só tips com tip_user_action='placed' c/ real_stake_units
+  // Útil pra solo: quanto eu *de fato* ganhei/perdi vs quanto o modelo predisse.
+  if (p === '/admin/real-pl') {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const days = Math.max(1, Math.min(365, parseInt(parsed.query.days || '30', 10) || 30));
+      // Tips placed: JOIN com tip_user_action
+      const placed = db.prepare(`
+        SELECT t.id, t.sport, t.tip_participant, t.odds, t.result,
+               t.stake, t.profit_reais, t.stake_reais, t.sent_at,
+               a.real_stake_units, a.ts AS confirmed_at
+        FROM tips t
+        JOIN tip_user_action a ON a.tip_id = t.id AND a.action = 'placed'
+        WHERE t.sent_at >= datetime('now', '-' || ? || ' days')
+        ORDER BY t.sent_at DESC
+      `).all(days);
+      const skipped = db.prepare(`
+        SELECT t.id, t.sport, t.tip_participant, t.odds, t.result, t.profit_reais
+        FROM tips t
+        JOIN tip_user_action a ON a.tip_id = t.id AND a.action = 'skipped'
+        WHERE t.sent_at >= datetime('now', '-' || ? || ' days')
+        ORDER BY t.sent_at DESC LIMIT 100
+      `).all(days);
+      // Real P&L: profit recompute c/ real_stake_units em vez de tip.stake
+      let realProfit = 0, realStake = 0, realWins = 0, realSettled = 0;
+      const bySport = {};
+      for (const t of placed) {
+        const stk = Number(t.real_stake_units || 0);
+        if (!stk) continue;
+        if (t.result === 'win' || t.result === 'loss') {
+          realSettled++;
+          realStake += stk;
+          // Recompute profit: win = stk*(odds-1); loss = -stk
+          const profit = t.result === 'win' ? stk * (Number(t.odds) - 1) : -stk;
+          realProfit += profit;
+          if (t.result === 'win') realWins++;
+          if (!bySport[t.sport]) bySport[t.sport] = { n: 0, settled: 0, wins: 0, profit: 0, stake: 0 };
+          bySport[t.sport].settled++;
+          bySport[t.sport].profit += profit;
+          bySport[t.sport].stake += stk;
+          if (t.result === 'win') bySport[t.sport].wins++;
+        }
+        if (!bySport[t.sport]) bySport[t.sport] = { n: 0, settled: 0, wins: 0, profit: 0, stake: 0 };
+        bySport[t.sport].n++;
+      }
+      // Skipped P&L (would-have): theoretical profit/loss em tips skipped
+      let skippedSettled = 0, skippedWouldHaveWins = 0, skippedWouldHaveProfit = 0;
+      for (const t of skipped) {
+        if (t.result === 'win' || t.result === 'loss') {
+          skippedSettled++;
+          if (t.result === 'win') skippedWouldHaveWins++;
+          skippedWouldHaveProfit += Number(t.profit_reais || 0);
+        }
+      }
+      sendJson(res, {
+        ok: true, days,
+        real_placed: {
+          n: placed.length,
+          settled: realSettled,
+          wins: realWins,
+          hit_rate: realSettled > 0 ? +(realWins / realSettled * 100).toFixed(1) : null,
+          stake_units: +realStake.toFixed(2),
+          profit_units: +realProfit.toFixed(2),
+          roi_pct: realStake > 0 ? +(realProfit / realStake * 100).toFixed(2) : null,
+        },
+        skipped: {
+          n: skipped.length,
+          settled: skippedSettled,
+          wins_missed: skippedWouldHaveWins,
+          would_have_profit_reais: +skippedWouldHaveProfit.toFixed(2),
+          // Negativo = bom: skip evitou perda. Positivo = ruim: skip evitou ganho.
+        },
+        by_sport: Object.entries(bySport).map(([sport, s]) => ({
+          sport, ...s,
+          roi_pct: s.stake > 0 ? +(s.profit / s.stake * 100).toFixed(2) : null,
+          hit_rate: s.settled > 0 ? +(s.wins / s.settled * 100).toFixed(1) : null,
+        })),
+        recent_placed: placed.slice(0, 10),
+      });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
   if (p === '/admin/errors') {
     if (!requireAdmin(req, res)) return;
     try {

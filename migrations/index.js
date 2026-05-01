@@ -1836,6 +1836,26 @@ const migrations = [
     },
   },
   {
+    id: '076_tip_user_action',
+    up(db) {
+      // User confirmation/skip tracking — tip_id ←→ ação real do usuário.
+      // Solo bot: distingue "model recomendou" de "eu efetivamente apostei".
+      // Permite calcular real ROI vs theoretical ROI.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS tip_user_action (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          tip_id INTEGER NOT NULL,
+          action TEXT NOT NULL CHECK(action IN ('placed','skipped')),
+          real_stake_units REAL,
+          ts TEXT DEFAULT (datetime('now')),
+          UNIQUE(tip_id, action)
+        );
+        CREATE INDEX IF NOT EXISTS idx_user_action_tip ON tip_user_action(tip_id);
+        CREATE INDEX IF NOT EXISTS idx_user_action_ts ON tip_user_action(ts DESC);
+      `);
+    },
+  },
+  {
     id: '075_error_log',
     up(db) {
       // Persistent error log — sobrevive restart (in-memory _bugReports zera).
