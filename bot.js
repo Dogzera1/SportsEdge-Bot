@@ -537,16 +537,19 @@ try {
     .slice(-50); // Cap 50 entries.
   const next = { count: (prev.count || 0) + 1, lastBootTs: nowTs, recentBoots };
   fs.writeFileSync(BOOT_COUNT_FILE, JSON.stringify(next));
-  // Gauge: bot_boot_count_24h alimenta /health alerts.
+  // Boots em rajada (last 1h) é o sinal real de crash loop — 24h captura deploys também.
+  const oneHourAgo = nowTs - 3600 * 1000;
+  const rapidBoots1h = recentBoots.filter(ts => ts >= oneHourAgo).length;
   try {
     const m = require('./lib/metrics');
     m.gauge('bot_boot_count_total', next.count);
     m.gauge('bot_boot_count_24h', recentBoots.length);
+    m.gauge('bot_rapid_boot_count_1h', rapidBoots1h);
   } catch (_) {}
-  if (recentBoots.length >= 5) {
-    log('WARN', 'BOOT', `restart loop suspected: ${recentBoots.length} boots in 24h`);
+  if (rapidBoots1h >= 5) {
+    log('WARN', 'BOOT', `restart loop suspected: ${rapidBoots1h} boots in last 1h (${recentBoots.length} in 24h)`);
   } else {
-    log('INFO', 'BOOT', `boot #${next.count} (${recentBoots.length} in last 24h)`);
+    log('INFO', 'BOOT', `boot #${next.count} (${rapidBoots1h} in last 1h, ${recentBoots.length} in 24h)`);
   }
 } catch (e) { log('WARN', 'BOOT', `boot count tracking failed: ${e.message}`); }
 

@@ -6313,6 +6313,7 @@ const server = http.createServer(async (req, res) => {
         bot_uptime_s: get('bot_uptime_s'),
         bot_boot_count_24h: get('bot_boot_count_24h'),
         bot_boot_count_total: get('bot_boot_count_total'),
+        bot_rapid_boot_count_1h: get('bot_rapid_boot_count_1h'),
       };
       if (botGauges.db_integrity_ok === 0) {
         alerts.push({ id: 'db_integrity_failed', severity: 'critical', msg: 'PRAGMA integrity_check retornou erro — investigar urgente' });
@@ -6320,9 +6321,12 @@ const server = http.createServer(async (req, res) => {
       if (Number.isFinite(botGauges.db_size_mb) && botGauges.db_size_mb > 300) {
         alerts.push({ id: 'db_size_high', severity: 'warning', msg: `DB ${botGauges.db_size_mb}MB (>300MB threshold) — considerar VACUUM ou archive de tips antigas` });
       }
-      // Restart loop: 5+ boots em 24h = sintoma de crash repetido.
-      if (Number.isFinite(botGauges.bot_boot_count_24h) && botGauges.bot_boot_count_24h >= 5) {
-        alerts.push({ id: 'bot_restart_loop', severity: 'warning', msg: `${botGauges.bot_boot_count_24h} boots em 24h — checar logs por crash recorrente` });
+      // Restart loop: usa rapid_boot_count_1h (deploys de dev não acionam) + uptime curto pra
+      // só alertar quando bot ainda está fragilizado. Threshold: 5+ boots/1h E uptime atual <10min.
+      const rapid1h = botGauges.bot_rapid_boot_count_1h;
+      const uptime = botGauges.bot_uptime_s;
+      if (Number.isFinite(rapid1h) && rapid1h >= 5 && Number.isFinite(uptime) && uptime < 600) {
+        alerts.push({ id: 'bot_restart_loop', severity: 'warning', msg: `${rapid1h} boots na última hora (${botGauges.bot_boot_count_24h ?? '?'} em 24h, uptime ${uptime}s) — checar crash recorrente` });
       }
     } catch (_) {}
 
