@@ -7781,6 +7781,10 @@ async function autoAnalyzeMatch(token, match) {
           tipTeam: pickTeam, tipOdd: pickOdd, tipEV: parseFloat(evPct.toFixed(1)),
           tipStake: String(stake || '1u'), tipConf: CONF.MEDIA,
           tipReason: 'Value detectado pelo modelo (AI_DISABLED)',
+          // 2026-05-01: hoist modelP1/P2 pra top-level. Sem isso, consumer
+          // (line 2496) lê null → model_p_pick=null no DB → DriftGuard/Brier
+          // diagnostics sem dado real do modelo (caía pro p_implied fallback).
+          modelP1: mlResult.modelP1, modelP2: mlResult.modelP2,
           debugVars: {
             source: 'ai_disabled_fallback', game, status: match.status, league: match.league,
             t1: match.team1, t2: match.team2, hasLiveStats, liveGameNumber,
@@ -7839,6 +7843,7 @@ async function autoAnalyzeMatch(token, match) {
           tipStake: String(stake || '1u'),
           tipConf: CONF.MEDIA,
           tipReason: 'Value detectado pelo modelo (fallback em backoff IA)',
+          modelP1: mlResult.modelP1, modelP2: mlResult.modelP2,
           debugVars: {
             source: 'fallback_backoff',
             game,
@@ -7930,6 +7935,7 @@ async function autoAnalyzeMatch(token, match) {
           tipStake: String(stake || '1u'),
           tipConf: CONF.MEDIA,
           tipReason: 'Value detectado pelo modelo (fallback sem IA)',
+          modelP1: mlResult.modelP1, modelP2: mlResult.modelP2,
           debugVars: {
             source: 'fallback_no_ai',
             game,
