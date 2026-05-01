@@ -16337,9 +16337,16 @@ setInterval(load, 60000);
         // Override total via TIP_EV_MAX (legacy global) ou TIP_EV_MAX_PER_SPORT JSON
         // — env vars têm precedência sobre defaults.
         if (evN != null) {
+          // 2026-05-01: tighten LoL/Tennis/CS após audit ROI por bucket 30d.
+          //   bucket EV 8-12%: lol -31.7%, tennis -32.1% (reject)
+          //   bucket EV >12%: cs -31.8%, lol -4.8%, tennis -8.2%, overall -9.3%
+          //   bucket EV 5-8%: lol -10.3%, tennis -8.0% (mantém — corte via throttle)
+          // Caps direcionam tips pra zona safe (3-8%) e cortam selection-bias
+          // (EV alto = linha stale ou modelo overconfident). Sports sem dados
+          // ou bucket positivo (cs 8-12% +29.9%) mantêm cap mais largo.
           const PER_SPORT_DEFAULTS = {
-            lol: 25, cs2: 25, dota2: 25, valorant: 25,
-            tennis: 30, mma: 30,
+            lol: 12, cs2: 15, dota2: 25, valorant: 25,
+            tennis: 12, mma: 30,
             football: 25, tabletennis: 25,
             darts: 25, snooker: 25,
           };
