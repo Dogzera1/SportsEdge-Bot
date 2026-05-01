@@ -1,0 +1,75 @@
+# ── n8n: external orchestration / uptime monitor ───────────────────────────
+# Uso opcional. Não substitui os 51 crons in-process do bot.js — apenas adiciona
+# uma camada externa pra:
+#   - Probe HTTP /health a cada 5min (captura os 32 reboots/24h se voltarem)
+#   - Cross-channel alerts (espelhar Telegram → Discord/Slack se quiser)
+#   - Daily digest agregando outputs de /agents/* sob demanda
+#
+# Run local:
+#   docker compose -f docker-compose.n8n.yml up -d
+#   open http://localhost:5678  (admin/admin no primeiro acesso)
+#
+# Volume `n8n_data` persiste workflows entre restarts. SQLite embutido (sem
+# Postgres separado pra ficar leve — adequado pra <500 executions/dia).
+#
+# Em produção (Railway/etc):
+#   - Setar N8N_BASIC_AUTH_USER / N8N_BASIC_AUTH_PASSWORD com creds reais
+#   - Setar N8N_HOST e WEBHOOK_URL pro domínio público
+#   - Volume mapeado em disco persistente do provedor
+#
+# 2026-05-01 — opt-in deployment, não levanta automaticamente com docker-compose.yml
+
+version: '3.8'
+
+services:
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: sportsedge-n8n
+    restart: unless-stopped
+    ports:
+      - "5678:5678"
+    environment:
+      # Auth básica — TROCAR EM PRODUÇÃO
+      N8N_BASIC_AUTH_ACTIVE: "true"
+      N8N_BASIC_AUTH_USER: "${N8N_USER:-admin}"
+      N8N_BASIC_AUTH_PASSWORD: "${N8N_PASSWORD:-admin}"
+
+      # Storage SQLite (default). Pra escala, trocar por postgres via DB_TYPE=postgresdb
+      DB_TYPE: "sqlite"
+
+      # Timezone alinhado com bot (cron schedules visuais)
+      GENERIC_TIMEZONE: "${TZ:-America/Sao_Paulo}"
+      TZ: "${TZ:-America/Sao_Paulo}"
+
+      # Endpoint base do bot pra workflows chamarem.
+      # Em local: http://host.docker.internal:8080  (Docker Desktop Mac/Win)
+      # Em Linux: http://172.17.0.1:8080  (default Docker bridge gateway)
+      # Em prod: https://sportsedge-bot-production.up.railway.app
+      BOT_BASE_URL: "${BOT_BASE_URL:-http://host.docker.internal:8080}"
+
+      # Admin key do bot pra workflows autenticarem em /agents/* e /admin/*
+      BOT_ADMIN_KEY: "${ADMIN_KEY:-}"
+
+      # Telegram bot token pra alertas (workflow envia DM ao admin)
+      TG_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN:-}"
+      TG_ADMIN_CHAT_ID: "${TELEGRAM_ADMIN_CHAT_ID:-}"
+
+      # Logs em JSON pra fácil parsing
+      N8N_LOG_LEVEL: "info"
+      N8N_LOG_OUTPUT: "console"
+
+      # Disable telemetry
+      N8N_DIAGNOSTICS_ENABLED: "false"
+      N8N_VERSION_NOTIFICATIONS_ENABLED: "false"
+
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - ./n8n/workflows:/home/node/.n8n/workflows-import:ro
+
+    extra_hosts:
+      # Permite container chamar host machine (bot.js rodando no host)
+      - "host.docker.internal:host-gateway"
+
+volumes:
+  n8n_data:
+    driver: local

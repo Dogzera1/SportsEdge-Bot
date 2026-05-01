@@ -1,0 +1,97 @@
+{
+  "name": "SportsEdge — Uptime Monitor",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 5
+            }
+          ]
+        }
+      },
+      "id": "schedule-trigger",
+      "name": "Every 5min",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.BOT_BASE_URL }}/health",
+        "options": {
+          "timeout": 8000
+        }
+      },
+      "id": "fetch-health",
+      "name": "GET /health",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [460, 300],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [
+            {
+              "id": "1",
+              "leftValue": "={{ $json.status || 'down' }}",
+              "rightValue": "ok",
+              "operator": { "type": "string", "operation": "notEquals" }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "is-degraded",
+      "name": "Status != ok?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "url": "=https://api.telegram.org/bot{{ $env.TG_BOT_TOKEN }}/sendMessage",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "chat_id", "value": "={{ $env.TG_ADMIN_CHAT_ID }}" },
+            { "name": "text", "value": "=🚨 *SportsEdge degraded*\n\nstatus: `{{ $('GET /health').item.json.status }}`\nuptime: `{{ $('GET /health').item.json.botGauges.bot_uptime_s }}s`\nboots 24h: `{{ $('GET /health').item.json.botGauges.bot_boot_count_24h }}`\nrapid 1h: `{{ $('GET /health').item.json.botGauges.bot_rapid_boot_count_1h }}`\n\nalerts: {{ JSON.stringify($('GET /health').item.json.alerts) }}" },
+            { "name": "parse_mode", "value": "Markdown" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "tg-alert",
+      "name": "Telegram alert",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [900, 200]
+    }
+  ],
+  "connections": {
+    "Every 5min": {
+      "main": [[{ "node": "GET /health", "type": "main", "index": 0 }]]
+    },
+    "GET /health": {
+      "main": [[{ "node": "Status != ok?", "type": "main", "index": 0 }]]
+    },
+    "Status != ok?": {
+      "main": [
+        [{ "node": "Telegram alert", "type": "main", "index": 0 }],
+        []
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "uptime-1",
+  "id": "sportsedge-uptime"
+}
