@@ -41,15 +41,34 @@ const SPORT_TO_GAME = {
 };
 
 async function main() {
-  const tips = db.prepare(`
-    SELECT id, sport, match_id, participant1, participant2, tip_participant,
-           odds, ev, stake, confidence, is_live, sent_at, result,
-           model_p1, model_p2, event_name, profit_reais, stake_reais
-    FROM tips
-    ORDER BY sent_at ASC
-  `).all();
+  // Filtra tips pra POST-TRAINING period — re-avaliar tips que estavam no train
+  // set conflate train+test e infla métricas. Pega o trainedAt mais recente
+  // entre todos os modelos pra ser conservador.
+  const fs = require('fs');
+  const trainedAts = [];
+  for (const f of ['lol-weights.json', 'dota2-weights.json', 'cs2-weights.json',
+                   'valorant-weights.json', 'tennis-weights.json']) {
+    try {
+      const w = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'lib', f), 'utf8'));
+      if (w.trainedAt) trainedAts.push(new Date(w.trainedAt).toISOString());
+    } catch (_) {}
+  }
+  const cutoff = trainedAts.length ? trainedAts.sort().pop() : null;
+  if (cutoff) {
+    console.log(`[backtest] cutoff: tips com sent_at > ${cutoff} (post-training period)`);
+  }
+  const sql = cutoff
+    ? `SELECT id, sport, match_id, participant1, participant2, tip_participant,
+              odds, ev, stake, confidence, is_live, sent_at, result,
+              model_p1, model_p2, event_name, profit_reais, stake_reais
+       FROM tips WHERE sent_at > ? ORDER BY sent_at ASC`
+    : `SELECT id, sport, match_id, participant1, participant2, tip_participant,
+              odds, ev, stake, confidence, is_live, sent_at, result,
+              model_p1, model_p2, event_name, profit_reais, stake_reais
+       FROM tips ORDER BY sent_at ASC`;
+  const tips = cutoff ? db.prepare(sql).all(cutoff) : db.prepare(sql).all();
 
-  console.log(`[backtest] ${tips.length} tips totais`);
+  console.log(`[backtest] ${tips.length} tips totais (pós-cutoff)`);
   const settled = tips.filter(t => t.result === 'win' || t.result === 'loss');
   const pending = tips.filter(t => t.result === null || t.result === 'pending');
   console.log(`[backtest] settled: ${settled.length} | pending: ${pending.length}`);
