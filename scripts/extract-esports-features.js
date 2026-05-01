@@ -32,7 +32,16 @@ const OUT = path.resolve(argVal('out', `data/${GAME}_features.csv`));
 const MIN_WARMUP = parseInt(argVal('min-games-warmup', '5'), 10);
 const DB_PATH = (process.env.DB_PATH || path.join(__dirname, '../sportsedge.db')).trim().replace(/^=+/, '');
 
-console.log(`[extract-es] game=${GAME} out=${OUT} min_warmup=${MIN_WARMUP}`);
+// Snapshot leak gate: cs_team_stats e dota_team_stats são tabelas SNAPSHOT
+// (HLTV/OpenDota current state). Usar pra match histórico = forward-looking
+// leak (match 2024 vê ranking/streak/recent_wr de 2026). Default OFF;
+// re-habilitar só com replacement walk-forward (rolling from match_results).
+const LEAKY_FEATURES = argFlag('leaky-snapshot-features');
+if (LEAKY_FEATURES) {
+  console.warn(`[extract-es] ⚠️  --leaky-snapshot-features ATIVO — cs_team_stats/dota_team_stats com snapshot leak. Métricas de teste vão inflar.`);
+}
+
+console.log(`[extract-es] game=${GAME} out=${OUT} min_warmup=${MIN_WARMUP} leaky=${LEAKY_FEATURES}`);
 
 const { db } = initDatabase(DB_PATH);
 
@@ -189,9 +198,11 @@ function rosterStatsAt(team, tMs, sinceDays = 60, minGamesPerPlayer = 10) {
 // ── CS2 HLTV team stats loader ──────────────────────────────────────────
 // Usa cs_team_stats (migration 049) populado por scripts/sync-hltv-cs-teams.js.
 // HLTV ranking + recent WR + streak. Lookup case-insensitive name or slug.
+// LEAK: tabela é snapshot atual; usar pra match histórico vaza future info.
+// Default OFF (ver LEAKY_FEATURES). Habilita c/ --leaky-snapshot-features.
 const csTeamByName = new Map();
 const csTeamBySlug = new Map();
-if (GAME === 'cs') {
+if (GAME === 'cs' && LEAKY_FEATURES) {
   try {
     const rows = db.prepare(`
       SELECT name, slug, ranking, ranking_points, recent_n, recent_wr,
@@ -226,13 +237,14 @@ function csTeamLookup(name) {
 }
 
 // ── Dota2 OpenDota team stats loader ────────────────────────────────────
+// LEAK: dota_team_stats também snapshot. Default OFF; gate via LEAKY_FEATURES.
 // Usa dota_team_stats (migration 046+048) populado por scripts/sync-opendota-team-stats.js.
 // v1: rating/wr/games | v2 --deep: rolling 30d {recent_wr, avg_kill_margin,
 // avg_duration_sec, win_streak_current, days_since_last}
 // Lookup case-insensitive por name OR tag. Current stats (leve look-ahead bias aceitável).
 const dotaTeamByName = new Map();
 const dotaTeamByTag = new Map();
-if (GAME === 'dota2') {
+if (GAME === 'dota2' && LEAKY_FEATURES) {
   try {
     // Try v2 columns; fall back silently if migration 048 não rodou
     let rows;
