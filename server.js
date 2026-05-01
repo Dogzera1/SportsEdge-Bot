@@ -1709,8 +1709,10 @@ async function fetchLoLOddsFromPinnacle() {
     lastPinnacleLoLUpdate = Date.now();
     lastEsportsOddsUpdate = Date.now(); // também atualiza o timestamp geral para /health
     log('INFO', 'ODDS', `Pinnacle LoL: ${cached} partidas cacheadas (${liveCount} live, ${cached - liveCount} upcoming)`);
+    try { require('./lib/feed-heartbeat').markFeedSuccess('pinnacle', 'lol', cached); } catch (_) {}
   } catch (e) {
     log('ERROR', 'ODDS', `Pinnacle LoL: ${e.message}`);
+    try { require('./lib/feed-heartbeat').markFeedFailure('pinnacle', 'lol', e.message); } catch (_) {}
   }
 }
 
@@ -2762,10 +2764,12 @@ async function getPandaScoreLolMatches() {
     if (psMatches.length) {
       log('INFO', 'PANDASCORE', `${psMatches.length} partidas LoL (${live.length} live)`);
     }
+    try { require('./lib/feed-heartbeat').markFeedSuccess('pandascore', 'lol', psMatches.length); } catch (_) {}
     _pandaCache = { data: psMatches, ts: Date.now() };
     return psMatches;
   } catch(e) {
     log('WARN', 'PANDASCORE', 'Erro: ' + e.message);
+    try { require('./lib/feed-heartbeat').markFeedFailure('pandascore', 'lol', e.message); } catch (_) {}
     // 2026-04-28: age check no fallback. Antes retornava cache stale por
     // horas se PandaScore estivesse fora — bot continuava operando com
     // dados antigos sem alarm. Cap 30min, depois retorna [] + log STALE.
@@ -2951,9 +2955,11 @@ async function getPinnacleTennisMatches() {
     }));
     _tennisPinnacleCache = { data: matches, ts: Date.now() };
     log('INFO', 'ODDS', `Pinnacle Tennis: ${matches.length} partidas cacheadas`);
+    try { require('./lib/feed-heartbeat').markFeedSuccess('pinnacle', 'tennis', matches.length); } catch (_) {}
     return matches;
   } catch (e) {
     log('ERROR', 'ODDS', `Pinnacle Tennis: ${e.message}`);
+    try { require('./lib/feed-heartbeat').markFeedFailure('pinnacle', 'tennis', e.message); } catch (_) {}
     return [];
   }
 }
@@ -3148,9 +3154,11 @@ async function getPinnacleCsMatches() {
     }));
     _csPinnacleCache = { data: matches, ts: Date.now() };
     log('INFO', 'ODDS', `Pinnacle CS2: ${matches.length} partidas cacheadas`);
+    try { require('./lib/feed-heartbeat').markFeedSuccess('pinnacle', 'cs', matches.length); } catch (_) {}
     return matches;
   } catch (e) {
     log('ERROR', 'ODDS', `Pinnacle CS2: ${e.message}`);
+    try { require('./lib/feed-heartbeat').markFeedFailure('pinnacle', 'cs', e.message); } catch (_) {}
     return [];
   }
 }
@@ -3298,10 +3306,12 @@ async function getPandaScoreDotaMatches() {
 
     const result = [...live, ...next];
     if (result.length) log('INFO', 'DOTA2', `PandaScore: ${result.length} partidas (${live.length} live)`);
+    try { require('./lib/feed-heartbeat').markFeedSuccess('pandascore', 'dota2', result.length); } catch (_) {}
     _pandaDotaCache = { data: result, ts: Date.now() };
     return result;
   } catch(e) {
     log('WARN', 'DOTA2', 'getPandaScoreDotaMatches: ' + e.message);
+    try { require('./lib/feed-heartbeat').markFeedFailure('pandascore', 'dota2', e.message); } catch (_) {}
     return _pandaDotaCache.data;
   }
 }
@@ -11152,6 +11162,17 @@ setInterval(load, 60000);
       const coverage = getLeagueCoverage(db, { days });
       sendJson(res, { ok: true, calib, decision, coverage });
     } catch (e) { sendJson(res, { ok: false, error: e.message, stack: e.stack }, 500); }
+    return;
+  }
+
+  if (p === '/admin/feed-health') {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const fh = require('./lib/feed-heartbeat');
+      const all = fh.getFeedHealth();
+      const alerts = fh.checkFeedHealth({ staleMultiplier: 3, minObservations: 2 });
+      sendJson(res, { ok: true, all, alerts, total: all.length, degraded: alerts.length });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
     return;
   }
 

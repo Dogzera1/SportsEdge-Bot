@@ -20247,6 +20247,44 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   setInterval(() => runRoiDriftCusumDaily().catch(e => log('ERROR', 'ROI-CUSUM', e.message)), 60 * 60 * 1000);
   setTimeout(() => runRoiDriftCusumDaily().catch(() => {}), 35 * 60 * 1000);
 
+  // Feed heartbeat watchdog: cron 5min checa staleness de Pinnacle/PandaScore/etc.
+  // Cooldown 30min por (source,sport) pra evitar spam quando feed fica down várias
+  // checks. Opt-out: FEED_HEARTBEAT_DISABLED=true.
+  const _lastFeedAlertAt = new Map();
+  async function runFeedHealthCheck() {
+    if (/^(1|true|yes)$/i.test(String(process.env.FEED_HEARTBEAT_DISABLED || ''))) return;
+    try {
+      const fh = require('./lib/feed-heartbeat');
+      const alerts = fh.checkFeedHealth({ staleMultiplier: 3, minObservations: 2 });
+      if (!alerts.length) return;
+      const cooldownMs = 30 * 60 * 1000;
+      const fresh = [];
+      for (const a of alerts) {
+        const k = `${a.source}|${a.sport}`;
+        const last = _lastFeedAlertAt.get(k) || 0;
+        if (Date.now() - last < cooldownMs) continue;
+        _lastFeedAlertAt.set(k, Date.now());
+        fresh.push(a);
+      }
+      if (!fresh.length) return;
+      for (const a of fresh) {
+        log('WARN', 'FEED-HEARTBEAT',
+          `${a.source}/${a.sport}: ${a.status} (last_success=${a.lastSuccessMin}min, expected=${a.expectedIntervalMin}min, ratio=${a.ratio}, reason="${a.lastReason}")`);
+      }
+      if (ADMIN_IDS.size && !_isCycleMuted('feed-heartbeat')) {
+        const lines = fresh.slice(0, 8).map(a => {
+          const last = a.lastSuccessMin == null ? 'never' : `${a.lastSuccessMin}min ago`;
+          return `🔌 ${a.source}/${a.sport}: ${a.status} | last success ${last} (expected ${a.expectedIntervalMin}min) reason="${a.lastReason || '-'}"`;
+        });
+        const msg = `⚠️ *FEED HEARTBEAT — degraded sources*\n\n${lines.join('\n')}\n\nVerificar API key/quota/network.`;
+        const token = resolveAlertsToken();
+        if (token) for (const adminId of ADMIN_IDS) sendDM(token, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
+      }
+    } catch (e) { log('ERROR', 'FEED-HEARTBEAT', e.message); }
+  }
+  setInterval(() => runFeedHealthCheck().catch(e => log('ERROR', 'FEED-HEARTBEAT', e.message)), 5 * 60 * 1000);
+  setTimeout(() => runFeedHealthCheck().catch(() => {}), 10 * 60 * 1000); // 10min pós-boot warmup
+
   // Auto-sample bookmaker deltas: cron 1h coleta Pinnacle vs outros books cross-sport
   // (football/lol/dota2). Cap MAX_PER_PAIR_7D=300 por (sport, casa) evita inflação.
   // Opt-out: AUTO_SAMPLE_DELTAS=false.
