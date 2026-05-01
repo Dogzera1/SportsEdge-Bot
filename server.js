@@ -9442,6 +9442,13 @@ setInterval(load, 60000);
         : '';
       const sportArgs = sportClause ? [sportFilter] : [];
       const shadowClause = includeShadow ? '' : 'AND COALESCE(is_shadow, 0) = 0';
+      // 2026-05-01: pre-filter market_type pra evitar attempt em markets sem handler
+      // aqui (force-settle só sabe ML/HG/TG-tennis/total_kills_map). MAP1_WINNER e
+      // outros non-ML caem em "skipped" silencioso. Antes: 31 attempted/0 settled
+      // poluia stats (NON_ML_AUTOARCHIVE limpa em 48h via cron, mas attempted
+      // inflava enquanto isso). Filtro por upper(market_type) IN supported set.
+      const _SETTLE_MARKETS = ['ML', '1X2_H', '1X2_A', '1X2_D', 'OVER_2.5', 'UNDER_2.5', 'DRAW', 'HANDICAP_GAMES', 'TOTAL_GAMES'];
+      const _settlePh = _SETTLE_MARKETS.map(() => '?').join(',');
       const pending = db.prepare(`
         SELECT id, sport, match_id, participant1, participant2, tip_participant, odds, sent_at, market_type, stake, is_shadow
         FROM tips
@@ -9450,9 +9457,13 @@ setInterval(load, 60000);
           ${shadowClause}
           AND sent_at >= datetime('now', ?)
           ${sportClause}
+          AND (
+            upper(COALESCE(market_type, 'ML')) IN (${_settlePh})
+            OR upper(COALESCE(market_type, '')) LIKE 'TOTAL_KILLS_MAP%'
+          )
         ORDER BY sent_at DESC
         LIMIT 500
-      `).all(`-${days} days`, ...sportArgs);
+      `).all(`-${days} days`, ...sportArgs, ..._SETTLE_MARKETS);
 
       const summary = { ok: true, sport_filter: sportFilter || 'all', days, attempted: 0, settled: 0, voided: 0, skipped: 0, errors: 0, samples: [] };
       const _norm = s => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
@@ -11869,6 +11880,36 @@ setInterval(load, 60000);
       const totalSamples = db.prepare(`SELECT COUNT(*) n FROM bookmaker_delta_samples WHERE captured_at >= datetime('now', ?)`).get(`-${days} days`).n;
       sendJson(res, { ok: true, days, total_samples: totalSamples, deltas });
     } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
+  // 2026-05-01: terminal CLV-set pra tips fora da janela de captura (regime
+  // 'out' too_late >2h). Antes: bot.js loop CLV recapturava mesma tip todo ciclo
+  // só pra logar too_late_164min→166min→178min. Aqui marca clv_odds=open (sem
+  // movimento detectável) + clv_pct=0 → próximo ciclo skip cedo (clv_odds != NULL).
+  // POST /admin/set-tip-clv  body { tip_id, clv_odds, terminal: true }
+  if (p === '/admin/set-tip-clv' && req.method === 'POST') {
+    if (!requireAdmin(req, res)) return;
+    let body = ''; req.on('data', c => body += c);
+    req.on('end', () => {
+      try {
+        const j = JSON.parse(body || '{}');
+        const tipId = parseInt(j?.tip_id, 10);
+        const clvOdds = parseFloat(j?.clv_odds);
+        if (!Number.isFinite(tipId) || !Number.isFinite(clvOdds) || clvOdds <= 1) {
+          return sendJson(res, { ok: false, error: 'invalid_tip_id_or_odds' }, 400);
+        }
+        const tip = db.prepare('SELECT id, odds, clv_odds FROM tips WHERE id = ?').get(tipId);
+        if (!tip) return sendJson(res, { ok: false, error: 'tip_not_found' }, 404);
+        if (tip.clv_odds != null) {
+          return sendJson(res, { ok: true, skipped: 'already_set', clv_odds: tip.clv_odds });
+        }
+        const openOdd = parseFloat(tip.odds);
+        const clvPct = (Number.isFinite(openOdd) && openOdd > 1) ? +(((openOdd / clvOdds) - 1) * 100).toFixed(2) : 0;
+        db.prepare(`UPDATE tips SET clv_odds = ?, clv_pct = ? WHERE id = ?`).run(clvOdds, clvPct, tipId);
+        sendJson(res, { ok: true, tip_id: tipId, clv_odds: clvOdds, clv_pct: clvPct, terminal: !!j?.terminal });
+      } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    });
     return;
   }
 
@@ -18968,18 +19009,24 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
       const matches = await getFinishedMatches({ daysBack });
       let inserted = 0, skipped = 0;
       const sample = [];
-      for (const m of matches) {
-        try {
-          const matchId = `espn_${m.eventId}`;
-          const league = String(m.tournament || 'Football').slice(0, 120);
-          stmts.upsertMatchResultWithDate.run(
-            matchId, 'football',
-            m.home, m.away, m.winner, m.score, league, m.startIso
-          );
-          inserted++;
-          if (sample.length < 8) sample.push({ match_id: matchId, teams: `${m.home} vs ${m.away}`, winner: m.winner, score: m.score, league, at: m.startIso });
-        } catch (_) { skipped++; }
-      }
+      // 2026-05-01: wrap em transaction. Antes 156 INSERTs sequenciais geravam
+      // 12+ DB-SLOW WARNs (110-200ms cada) de fsync/journal flush por linha.
+      // Single commit reduz fsync overhead ~150×.
+      const txInsertEspn = db.transaction((rows) => {
+        for (const m of rows) {
+          try {
+            const matchId = `espn_${m.eventId}`;
+            const league = String(m.tournament || 'Football').slice(0, 120);
+            stmts.upsertMatchResultWithDate.run(
+              matchId, 'football',
+              m.home, m.away, m.winner, m.score, league, m.startIso
+            );
+            inserted++;
+            if (sample.length < 8) sample.push({ match_id: matchId, teams: `${m.home} vs ${m.away}`, winner: m.winner, score: m.score, league, at: m.startIso });
+          } catch (_) { skipped++; }
+        }
+      });
+      txInsertEspn(matches);
       log('INFO', 'FOOTBALL-SYNC', `espn: ${inserted} matches upserted em ${daysBack}d (${skipped} skip)`);
       sendJson(res, { ok: true, source: 'espn', days_back: daysBack, inserted, skipped, total_fetched: matches.length, sample });
     } catch (e) {
@@ -19027,24 +19074,29 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
           if (!r || r.status !== 200) break;
           const arr = safeParse(r.body, []);
           if (!Array.isArray(arr) || !arr.length) break;
-          for (const m of arr) {
-            scanned++;
-            try {
-              const t1 = m.opponents?.[0]?.opponent?.name || '';
-              const t2 = m.opponents?.[1]?.opponent?.name || '';
-              const winner = m.winner?.name || null;
-              if (!t1 || !t2 || !winner) { skipped++; continue; }
-              const score = _psSeriesScore(m);
-              if (!score) { skipped++; continue; } // sem score parseável — não vale upsertar
-              const matchId = `${cfg.mr}_ps_${m.id}`;
-              const league = String(m.league?.name || cfg.mr).slice(0, 120);
-              const resolvedAt = m.end_at
-                ? new Date(m.end_at).toISOString().replace('T', ' ').slice(0, 19)
-                : new Date().toISOString().replace('T', ' ').slice(0, 19);
-              stmts.upsertMatchResultWithDate.run(matchId, cfg.mr, t1, t2, winner, score, league, resolvedAt);
-              inserted++;
-            } catch (_) { skipped++; }
-          }
+          // 2026-05-01: tx batch — mesmo princípio do espn sync. 100 inserts/page
+          // ficavam serializados → fsync por row.
+          const txInsertPs = db.transaction((rows) => {
+            for (const m of rows) {
+              scanned++;
+              try {
+                const t1 = m.opponents?.[0]?.opponent?.name || '';
+                const t2 = m.opponents?.[1]?.opponent?.name || '';
+                const winner = m.winner?.name || null;
+                if (!t1 || !t2 || !winner) { skipped++; continue; }
+                const score = _psSeriesScore(m);
+                if (!score) { skipped++; continue; }
+                const matchId = `${cfg.mr}_ps_${m.id}`;
+                const league = String(m.league?.name || cfg.mr).slice(0, 120);
+                const resolvedAt = m.end_at
+                  ? new Date(m.end_at).toISOString().replace('T', ' ').slice(0, 19)
+                  : new Date().toISOString().replace('T', ' ').slice(0, 19);
+                stmts.upsertMatchResultWithDate.run(matchId, cfg.mr, t1, t2, winner, score, league, resolvedAt);
+                inserted++;
+              } catch (_) { skipped++; }
+            }
+          });
+          txInsertPs(arr);
           if (arr.length < 100) break;
           await new Promise(r => setTimeout(r, 200));
         }
@@ -24572,21 +24624,35 @@ server.listen(PORT, '0.0.0.0', () => {
     const archiveOrphanNonML = () => {
       try {
         const ph = ML_MARKETS_LIST.map(() => '?').join(',');
+        // 2026-05-01: threshold 48h→36h. MAP{N}_WINNER non-sweep ficavam pingando
+        // SETTLE-GUARD WARN por 48h mesmo sem chance de resolução. 36h é alinhado
+        // com tennis ZOMBIE_THRESHOLD (36h). TOTAL_KILLS_MAP* mantém 48h pra dar
+        // chance de PandaScore retro-fetch (kills resolvable até final do torneio).
         const r = db.prepare(
           `UPDATE tips SET archived = 1
            WHERE result IS NULL
              AND (archived IS NULL OR archived = 0)
-             AND sent_at <= datetime('now', '-48 hours')
-             AND upper(COALESCE(market_type, 'ML')) NOT IN (${ph})`
+             AND sent_at <= datetime('now', '-36 hours')
+             AND upper(COALESCE(market_type, 'ML')) NOT IN (${ph})
+             AND upper(COALESCE(market_type, '')) NOT LIKE 'TOTAL_KILLS_MAP%'`
         ).run(...ML_MARKETS_LIST);
-        if (r.changes > 0) {
-          log('INFO', 'NON-ML-AUTOARCHIVE', `${r.changes} non-ML orphan tip(s) arquivada(s) (≥48h pending)`);
+        // TOTAL_KILLS_MAP separado: 48h
+        const rk = db.prepare(
+          `UPDATE tips SET archived = 1
+           WHERE result IS NULL
+             AND (archived IS NULL OR archived = 0)
+             AND sent_at <= datetime('now', '-48 hours')
+             AND upper(COALESCE(market_type, '')) LIKE 'TOTAL_KILLS_MAP%'`
+        ).run();
+        const total = r.changes + rk.changes;
+        if (total > 0) {
+          log('INFO', 'NON-ML-AUTOARCHIVE', `${total} non-ML orphan tip(s) arquivada(s) (${r.changes} non-ML ≥36h, ${rk.changes} kills_map ≥48h)`);
         }
       } catch (e) { log('ERROR', 'NON-ML-AUTOARCHIVE', e.message); }
     };
     setTimeout(archiveOrphanNonML, 3 * 60 * 1000);
     setInterval(archiveOrphanNonML, 60 * 60 * 1000);
-    log('INFO', 'NON-ML-AUTOARCHIVE', 'Cron ativo: hourly, threshold 48h');
+    log('INFO', 'NON-ML-AUTOARCHIVE', 'Cron ativo: hourly, threshold 36h non-ML / 48h kills_map');
   }
 });
 

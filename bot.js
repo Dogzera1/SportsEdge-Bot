@@ -16744,9 +16744,13 @@ Máximo 200 palavras.`;
           // 2026-04-28: trained Poisson cobre só edge leagues (Brazil/Scandi/Russia/etc).
           // PL/La Liga/Serie A/Bundesliga/Ligue 1 ficavam 100% skipadas mesmo com mlEv>20%
           // pois fbTrained=null. Allow heuristic-only override quando fbModel é
-          // poisson+form (Poisson genérico + form factor) com conf alta. Bar mais
-          // alto que trained (0.60 vs 0.45) e EV mínimo separado.
-          const _heurMinConf = parseFloat(process.env.FB_OVERRIDE_HEURISTIC_MIN_CONF || '0.60');
+          // poisson+form (Poisson genérico + form factor) com conf alta.
+          // 2026-05-01: bar 0.60→0.50. Análise do log 2026-05-01 mostrou tips top-5
+          // EU com conf 0.51-0.56 e mlEv 7-28% bloqueadas. Liverpool×Chelsea conf
+          // 0.56 mlEv 15.01, Manchester United×Liverpool conf 0.51 mlEv 7.36 etc.
+          // Ajuste: conf 0.50 + EV 8 — mantém quality bar mas captura sinais mid-range
+          // que o gate 0.60 deixava escapar. fbTrained ainda preferred (peso maior).
+          const _heurMinConf = parseFloat(process.env.FB_OVERRIDE_HEURISTIC_MIN_CONF || '0.50');
           const _heurMinEv = parseFloat(process.env.FB_OVERRIDE_HEURISTIC_MIN_EV || '8');
           const _heurOk = !fbTrained && fbModel && /poisson/i.test(String(fbModel.method || '')) &&
             (fbModel.confidence ?? 0) >= _heurMinConf &&
@@ -17730,7 +17734,22 @@ async function pollCs(runOnce = false) {
           analyzedCs.set(key, { ts: now, tipSent: false });
           const bonusTag = _segGateCs?.minEdgeBonus > 0 ? ` [seg+${_segGateCs.minEdgeBonus}pp: ${_segGateCs.reason || ''}]` : '';
           const leagueTag = _leagueBonusCs > 0 ? ` [liga+${_leagueBonusCs}pp CLV leak]` : '';
-          log('INFO', 'AUTO-CS', `Sem edge: ${match.team1} vs ${match.team2} | edge=${mlScore.toFixed(1)}pp (min ${csMinEdge.toFixed(1)}pp${bonusTag}${leagueTag}) factors=${factorCount} ${useElo ? '[Elo]' : '[HLTV]'}`);
+          // 2026-05-01: throttle "Sem edge" log por (match,edge) — 10min entre logs
+          // do mesmo edge. Antes G2 vs FaZe edge=1.4pp logava 3× em 16min em ciclos
+          // diferentes (analyzedCs cooldown 30min pregame não cobria todos paths
+          // — match.id pode oscilar entre Pinnacle e PandaScore IDs).
+          global._csNoEdgeLogged = global._csNoEdgeLogged || new Map();
+          const throttleKey = `${key}|${mlScore.toFixed(1)}`;
+          const lastLog = global._csNoEdgeLogged.get(throttleKey) || 0;
+          if (Date.now() - lastLog > 10 * 60 * 1000) {
+            log('INFO', 'AUTO-CS', `Sem edge: ${match.team1} vs ${match.team2} | edge=${mlScore.toFixed(1)}pp (min ${csMinEdge.toFixed(1)}pp${bonusTag}${leagueTag}) factors=${factorCount} ${useElo ? '[Elo]' : '[HLTV]'}`);
+            global._csNoEdgeLogged.set(throttleKey, Date.now());
+            // Cleanup: remove entries >2h old (cap ~200 entries)
+            if (global._csNoEdgeLogged.size > 200) {
+              const cutoff = Date.now() - 2 * 3600 * 1000;
+              for (const [k, t] of global._csNoEdgeLogged) if (t < cutoff) global._csNoEdgeLogged.delete(k);
+            }
+          }
           logRejection('cs', `${match.team1} vs ${match.team2}`, 'edge_below_threshold', { edge: +mlScore.toFixed(2), min: +csMinEdge.toFixed(2) });
           continue;
         }
@@ -19397,6 +19416,24 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   setTimeout(_wrapCron('football_poisson_retrain', runFootballPoissonRetrain), 55 * 60 * 1000);
   // Bootstrap rápido: se não existe params, tenta em 90s ao invés de esperar 55min.
   setTimeout(_wrapCron('football_poisson_retrain', runFootballPoissonRetrain), 90 * 1000);
+
+  // 2026-05-01: startup self-check pra trained model state. Antes silente — usuário
+  // só percebia trained=false rolando em todos os logs após múltiplos ciclos.
+  // Loga 1× ao iniciar com cobertura (leagues+teams+age) ou alerta de gap.
+  setTimeout(() => {
+    try {
+      const { hasTrainedFootballModel, getParams } = require('./lib/football-poisson-trained');
+      if (hasTrainedFootballModel()) {
+        const p = getParams();
+        const ageDays = p?.trainedAt ? Math.round((Date.now() - new Date(p.trainedAt).getTime()) / 86400000) : '?';
+        const leagueCount = Object.keys(p?.leagues || {}).length;
+        const teamCount = Object.keys(p?.teams || {}).length;
+        log('INFO', 'FB-TRAINED', `params loaded: ${leagueCount} leagues, ${teamCount} teams, age=${ageDays}d`);
+      } else {
+        log('WARN', 'FB-TRAINED', 'params missing — bootstrap retrain pendente. Top-5 EU + 2ª divisões dependem do override heurístico (conf≥0.50 + EV≥8).');
+      }
+    } catch (e) { log('WARN', 'FB-TRAINED', `self-check err: ${e.message}`); }
+  }, 30 * 1000);
 
   // Auto-refit MT calibrações (tennis Markov + outros sports quando n>=20).
   // Roda dom 4h UTC (low-traffic). Default ON; opt-out CALIB_AUTO_REFIT_DISABLED=true.
@@ -21586,9 +21623,32 @@ async function checkCLV(caches = {}) {
         else regime = 'out'; // muito passado ou muito distante
 
         if (regime === 'out') {
+          // 2026-05-01: throttle log + terminal write quando too_late >120min.
+          // Antes: Calvin Hemery vs Mmoh logava too_late_164→166→178min em ciclos
+          // consecutivos sem dropar — overhead + ruído. Agora 1 log/h por tip e
+          // após 2h passou-do-match marca close_odds=open (clv_pct=0) via
+          // /admin/set-tip-clv pra que tip.clv_odds != null no próximo ciclo,
+          // caindo no early-skip logic na linha abaixo.
+          if (timeToMatch !== null && timeToMatch < -120 * 60 * 1000 && !tip.clv_odds && tip.id) {
+            try {
+              await serverPost('/admin/set-tip-clv', {
+                tip_id: tip.id, clv_odds: tip.odds, terminal: true,
+              }).catch(() => null);
+            } catch (_) {}
+          }
           if (sport === 'tennis' || sport === 'football') {
             const reason = timeToMatch < 0 ? `too_late_${Math.round(-timeToMatch/60000)}min` : `too_early_${Math.round(timeToMatch/3600000)}h`;
-            log('DEBUG', 'CLV-SKIP', `${sport} ${tip.participant1} vs ${tip.participant2}: ${reason}`);
+            global._clvSkipLogged = global._clvSkipLogged || new Map();
+            const key = `${sport}:${tip.id}:${reason.split('_')[0]}`;
+            const last = global._clvSkipLogged.get(key) || 0;
+            if (Date.now() - last > 60 * 60 * 1000) {
+              log('DEBUG', 'CLV-SKIP', `${sport} ${tip.participant1} vs ${tip.participant2}: ${reason}`);
+              global._clvSkipLogged.set(key, Date.now());
+              if (global._clvSkipLogged.size > 500) {
+                const cutoff = Date.now() - 24 * 3600 * 1000;
+                for (const [k, t] of global._clvSkipLogged) if (t < cutoff) global._clvSkipLogged.delete(k);
+              }
+            }
           }
           continue;
         }
