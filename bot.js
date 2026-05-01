@@ -20208,6 +20208,45 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   setInterval(() => runKellyAutoTuneDaily().catch(e => log('ERROR', 'KELLY-TUNE', e.message)), 60 * 60 * 1000);
   setTimeout(() => runKellyAutoTuneDaily().catch(() => {}), 30 * 60 * 1000);
 
+  // ROI drift CUSUM diário (09h local, depois do Kelly tune). Detecta sport
+  // que "virou" (ROI mudou de regime) entre weekly leak-guard cycles.
+  // CUSUM k=0.5σ + h=4σ (industry default) — ARL ~168 in-control. Opt-out:
+  // ROI_CUSUM_DISABLED=true. Tune via ROI_CUSUM_K / ROI_CUSUM_H.
+  let _lastRoiCusumDay = null;
+  async function runRoiDriftCusumDaily() {
+    if (/^(1|true|yes)$/i.test(String(process.env.ROI_CUSUM_DISABLED || ''))) return;
+    const now = new Date();
+    if (now.getHours() !== 9) return;
+    const today = now.toISOString().slice(0, 10);
+    if (_lastRoiCusumDay === today) return;
+    _lastRoiCusumDay = today;
+    try {
+      const { runRoiDriftCusum } = require('./lib/roi-drift-cusum');
+      const k = parseFloat(process.env.ROI_CUSUM_K || '0.5');
+      const h = parseFloat(process.env.ROI_CUSUM_H || '4');
+      const alerts = runRoiDriftCusum(db, { k, h });
+      if (!alerts.length) {
+        log('INFO', 'ROI-CUSUM', `no drift detected (k=${k} h=${h})`);
+        return;
+      }
+      for (const a of alerts) {
+        log('WARN', 'ROI-CUSUM',
+          `${a.sport} ${a.direction} drift @ tip ${a.breachAtTip}/${a.nTotal} | baseline ROI ${a.baselineRoi}% → recent ${a.recentRoi}% (σ=${a.sigma}, n_breach=${a.nBreachTips})`);
+      }
+      if (ADMIN_IDS.size && !_isCycleMuted('roi-cusum')) {
+        const lines = alerts.map(a => {
+          const arrow = a.direction === 'positive' ? '📈' : '📉';
+          return `${arrow} ${a.sport}: baseline ${a.baselineRoi}% → recent ${a.recentRoi}% (n_breach=${a.nBreachTips}/${a.nTotal})`;
+        });
+        const msg = `🚨 *ROI DRIFT ALARM (CUSUM)*\n\n${lines.join('\n')}\n\nRevisar gates / desativar sport. Knobs: ROI_CUSUM_K (${k}), ROI_CUSUM_H (${h}).`;
+        const token = resolveAlertsToken();
+        if (token) for (const adminId of ADMIN_IDS) sendDM(token, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
+      }
+    } catch (e) { log('ERROR', 'ROI-CUSUM', e.message); }
+  }
+  setInterval(() => runRoiDriftCusumDaily().catch(e => log('ERROR', 'ROI-CUSUM', e.message)), 60 * 60 * 1000);
+  setTimeout(() => runRoiDriftCusumDaily().catch(() => {}), 35 * 60 * 1000);
+
   // Auto-sample bookmaker deltas: cron 1h coleta Pinnacle vs outros books cross-sport
   // (football/lol/dota2). Cap MAX_PER_PAIR_7D=300 por (sport, casa) evita inflação.
   // Opt-out: AUTO_SAMPLE_DELTAS=false.
