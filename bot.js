@@ -11780,6 +11780,106 @@ async function poll(token, sport) {
                 }
               }
             }
+          } else if (text === '/myrecap' || text.startsWith('/myrecap ')) {
+            // Personal recap pra solo: real P&L (via /confirm) + theoretical
+            // (via dashboard) + skipped P&L (would-have). Default 7d, override
+            // via /myrecap 30.
+            if (!ADMIN_IDS.has(chatId)) {
+              await send(token, chatId, '⛔ Comando admin-only.');
+            } else {
+              const arg = text.split(/\s+/)[1];
+              const days = Math.max(1, Math.min(365, parseInt(arg, 10) || 7));
+              try {
+                const placed = db.prepare(`
+                  SELECT t.id, t.sport, t.tip_participant, t.odds, t.result,
+                         t.stake, t.profit_reais, t.stake_reais,
+                         a.real_stake_units
+                  FROM tips t
+                  JOIN tip_user_action a ON a.tip_id = t.id AND a.action = 'placed'
+                  WHERE t.sent_at >= datetime('now', '-' || ? || ' days')
+                  ORDER BY t.sent_at DESC
+                `).all(days);
+                const skipped = db.prepare(`
+                  SELECT t.id, t.sport, t.tip_participant, t.odds, t.result, t.profit_reais
+                  FROM tips t
+                  JOIN tip_user_action a ON a.tip_id = t.id AND a.action = 'skipped'
+                  WHERE t.sent_at >= datetime('now', '-' || ? || ' days')
+                `).all(days);
+                // Theoretical baseline (assume placed every tip with recommended)
+                const allTips = db.prepare(`
+                  SELECT sport, result, stake_reais, profit_reais
+                  FROM tips
+                  WHERE sent_at >= datetime('now', '-' || ? || ' days')
+                    AND COALESCE(is_shadow, 0) = 0
+                    AND COALESCE(archived, 0) = 0
+                    AND result IN ('win','loss')
+                    AND stake_reais > 0
+                `).all(days);
+
+                let realStake = 0, realProfit = 0, realWins = 0, realSettled = 0;
+                for (const t of placed) {
+                  const stk = Number(t.real_stake_units || 0);
+                  if (!stk || (t.result !== 'win' && t.result !== 'loss')) continue;
+                  realSettled++;
+                  realStake += stk;
+                  const pf = t.result === 'win' ? stk * (Number(t.odds) - 1) : -stk;
+                  realProfit += pf;
+                  if (t.result === 'win') realWins++;
+                }
+                let skippedSettled = 0, skippedProfit = 0;
+                for (const t of skipped) {
+                  if (t.result === 'win' || t.result === 'loss') {
+                    skippedSettled++;
+                    skippedProfit += Number(t.profit_reais || 0);
+                  }
+                }
+                let theoStake = 0, theoProfit = 0, theoWins = 0;
+                for (const t of allTips) {
+                  theoStake += Number(t.stake_reais || 0);
+                  theoProfit += Number(t.profit_reais || 0);
+                  if (t.result === 'win') theoWins++;
+                }
+
+                const realRoi = realStake > 0 ? (realProfit / realStake * 100) : null;
+                const realHit = realSettled > 0 ? (realWins / realSettled * 100) : null;
+                const theoRoi = theoStake > 0 ? (theoProfit / theoStake * 100) : null;
+                const theoHit = allTips.length > 0 ? (theoWins / allTips.length * 100) : null;
+                const theoNet = theoProfit - skippedProfit; // tips eu apostei + tips eu skipei
+                const skippedSign = skippedProfit >= 0 ? 'evitei lucro' : 'evitei perda';
+
+                let msg = `📋 *Meu Recap — ${days}d*\n━━━━━━━━━━━━━━━━\n\n`;
+                if (realSettled === 0 && allTips.length === 0) {
+                  msg += `_Nada settled em ${days}d. Use \`/confirm Nu\` em reply ao tip pra logar apostas reais._`;
+                } else {
+                  msg += `*🎯 Real (via /confirm)*\n`;
+                  if (realSettled > 0) {
+                    msg += `${realWins}W ${realSettled - realWins}L (${realHit.toFixed(0)}% hit) | ROI: *${realRoi >= 0 ? '+' : ''}${realRoi.toFixed(1)}%*\n`;
+                    msg += `Profit: *${realProfit >= 0 ? '+' : ''}${realProfit.toFixed(2)}u* | Stake: ${realStake.toFixed(1)}u\n\n`;
+                  } else {
+                    msg += `_Nenhuma tip confirmada com /confirm em ${days}d._\n\n`;
+                  }
+                  msg += `*📊 Theoretical (todas tips, stake recomendado)*\n`;
+                  if (theoStake > 0) {
+                    msg += `${theoWins}W ${allTips.length - theoWins}L (${theoHit.toFixed(0)}% hit) | ROI: *${theoRoi >= 0 ? '+' : ''}${theoRoi.toFixed(1)}%*\n`;
+                    msg += `Profit: *R$ ${theoProfit >= 0 ? '+' : ''}${theoProfit.toFixed(2)}* | Stake: R$ ${theoStake.toFixed(2)}\n\n`;
+                  } else {
+                    msg += `_Sem settled tips em ${days}d._\n\n`;
+                  }
+                  if (skippedSettled > 0) {
+                    msg += `*⏭️ Skipped (${skippedSettled} tips)*\n`;
+                    msg += `Would-have profit: *R$ ${skippedProfit >= 0 ? '+' : ''}${skippedProfit.toFixed(2)}* (${skippedSign})\n\n`;
+                  }
+                  if (realSettled >= 5 && theoStake > 0) {
+                    const gap = realRoi - theoRoi;
+                    msg += `*Gap real vs theoretical:* ${gap >= 0 ? '+' : ''}${gap.toFixed(1)}pp\n`;
+                    if (gap < -3) msg += `_Você está abaixo do theoretical. Investiga viés (skipping winners?)._`;
+                    else if (gap > 3) msg += `_Você está acima — viés positivo (skipping losers ou stake adjust)._`;
+                    else msg += `_Tracking ~theoretical, OK._`;
+                  }
+                }
+                await send(token, chatId, msg);
+              } catch (e) { await send(token, chatId, `❌ ${e.message}`); }
+            }
           } else if (text.startsWith('/notificacoes') || text.startsWith('/notificações')) {
             const action = text.split(' ')[1];
             await handleNotificacoes(token, chatId, sport, action);
