@@ -7401,17 +7401,34 @@ async function autoAnalyzeMatch(token, match) {
             const team1IsBlue2 = _matchStrict2(blueNorm2, t1Norm2);
             const t1Lineup = team1IsBlue2 ? blueLineup : redLineup;
             const t2Lineup = team1IsBlue2 ? redLineup : blueLineup;
-            const t1Expected = getExpectedRoster(db, match.team1, { sinceDays: 30, minGames: 3 });
-            const t2Expected = getExpectedRoster(db, match.team2, { sinceDays: 30, minGames: 3 });
+            // 2026-05-02: sinceDays 30→60. Roster baseline com 30d perdia times
+            // que jogaram pouco (Dplus KIA pre-LCK 2026: lineup novo de Mar/26
+            // mas OE só puxava Fev). 60d cobre janela maior sem ficar antigo demais.
+            const t1Expected = getExpectedRoster(db, match.team1, { sinceDays: 60, minGames: 3 });
+            const t2Expected = getExpectedRoster(db, match.team2, { sinceDays: 60, minGames: 3 });
             let subCount = 0;
             const subSides = [];
+            const _allSubSkipped = [];
+            // 2026-05-02: subCount === total = 100% lineup trocado → baseline
+            // provavelmente errado/missing. Toda escalação trocada é raro;
+            // mais comum é OE missing pra esse team name. Não penalizar.
+            // Caso real: Dplus KIA 5sub (Career,Lucid,ShowMaker,Siwoo,Smash) — esses
+            // são titulares atuais; baseline OE devolveu lineup velho.
             if (t1Expected && t1Lineup.length) {
               const r1 = detectRosterSub(t1Lineup, t1Expected);
-              if (r1.hasSub && r1.total >= 4) { subCount += r1.subCount; subSides.push(`${match.team1}: ${r1.subCount}sub (${r1.missing.join(',')})`); }
+              if (r1.hasSub && r1.total >= 4 && r1.subCount < r1.total) {
+                subCount += r1.subCount; subSides.push(`${match.team1}: ${r1.subCount}sub (${r1.missing.join(',')})`);
+              } else if (r1.hasSub && r1.subCount === r1.total) {
+                _allSubSkipped.push(`${match.team1} (5/5 — baseline suspeito)`);
+              }
             }
             if (t2Expected && t2Lineup.length) {
               const r2 = detectRosterSub(t2Lineup, t2Expected);
-              if (r2.hasSub && r2.total >= 4) { subCount += r2.subCount; subSides.push(`${match.team2}: ${r2.subCount}sub (${r2.missing.join(',')})`); }
+              if (r2.hasSub && r2.total >= 4 && r2.subCount < r2.total) {
+                subCount += r2.subCount; subSides.push(`${match.team2}: ${r2.subCount}sub (${r2.missing.join(',')})`);
+              } else if (r2.hasSub && r2.subCount === r2.total) {
+                _allSubSkipped.push(`${match.team2} (5/5 — baseline suspeito)`);
+              }
             }
             if (subCount > 0 && lolModel?.confidence > 0) {
               const prevConf = lolModel.confidence;
@@ -7419,6 +7436,9 @@ async function autoAnalyzeMatch(token, match) {
               lolModel.confidence = Math.round(prevConf * penalty * 100) / 100;
               lolModel.factors = [...(lolModel.factors || []), 'roster-sub'];
               log('WARN', 'LOL-ROSTER-SUB', `${subSides.join(' | ')} — confidence ${prevConf}→${lolModel.confidence} (×${penalty})`);
+            }
+            if (_allSubSkipped.length) {
+              log('DEBUG', 'LOL-ROSTER-SUB', `skip penalty (lineup completo desconhecido): ${_allSubSkipped.join(' | ')}`);
             }
           } catch (e) { reportBug('LOL-ROSTER-SUB', e, { team1: match.team1, team2: match.team2 }); }
         }
@@ -16832,7 +16852,23 @@ Máximo 200 palavras.`;
           const _heurOk = !fbTrained && fbModel && /poisson/i.test(String(fbModel.method || '')) &&
             (fbModel.confidence ?? 0) >= _heurMinConf &&
             parseFloat(mlScore?.bestEv ?? 0) >= _heurMinEv;
-          const canOverride = _advisoryOn && (fbTrained || _heurOk) &&
+          // 2026-05-02: form-only override pra top-5 EU (Premier/La Liga/Serie A/Bundesliga/
+          // Ligue 1). target_leagues do trained Poisson não cobre top-5 EU + Poisson genérico
+          // requer histórico de gols por team (via match_results). Se time é raro/novo, só
+          // fica `method=form`. Log 2026-05-02 mostrou 5 partidas top-5 EU bloqueadas:
+          // Wolves×Sunderland (conf 0.40 mlEv 13.66), Wolverhampton×Sunderland (10.97),
+          // Alavés×Athletic (10.30), Valencia×Atlético (14.63), Bournemouth×CP (7.73).
+          // Form-only é sinal frágil — barra alta: EV ≥ 12% + conf ≥ 0.55. Stake fixed 1u
+          // BAIXA (não escala). Opt-out: FB_FORM_ONLY_OVERRIDE_DISABLED=true.
+          const _formOnlyOff = /^(1|true|yes)$/i.test(String(process.env.FB_FORM_ONLY_OVERRIDE_DISABLED || ''));
+          const _formMinConf = parseFloat(process.env.FB_FORM_ONLY_MIN_CONF || '0.55');
+          const _formMinEv = parseFloat(process.env.FB_FORM_ONLY_MIN_EV || '12');
+          const _formOnlyOk = !_formOnlyOff && !fbTrained && fbModel &&
+            !/poisson/i.test(String(fbModel.method || '')) &&
+            /form/i.test(String(fbModel.method || '')) &&
+            (fbModel.confidence ?? 0) >= _formMinConf &&
+            parseFloat(mlScore?.bestEv ?? 0) >= _formMinEv;
+          const canOverride = _advisoryOn && (fbTrained || _heurOk || _formOnlyOk) &&
             (fbModel?.confidence ?? 0) >= _minConf &&
             parseFloat(mlScore?.bestEv ?? 0) >= _minEv;
           if (canOverride) {
@@ -19487,7 +19523,8 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
     try {
       const adminKey = process.env.ADMIN_KEY || '';
       // Target leagues expandido: 2ª divisões Europa + América Latina + ligas secundárias
-      const targetLeagues = encodeURIComponent('Brazil,Sweden,Norway,Finland,Denmark,Poland,Japan,USA,Mexico,Russia,Romania,China,Ireland,Championship,League One,League Two,2.Bundesliga,Segunda,Serie B,Ligue 2,Pro League,Primeira Liga,Super Lig,Super League,Superliga,Eliteserien,Allsvenskan,Veikkausliiga,Ekstraklasa');
+      // 2026-05-02: incluído top-5 EU + Brazilian Serie B (Brazil já cobre Serie A/B).
+      const targetLeagues = encodeURIComponent('Brazil,Sweden,Norway,Finland,Denmark,Poland,Japan,USA,Mexico,Russia,Romania,China,Ireland,Championship,League One,League Two,2.Bundesliga,Segunda,Serie B,Ligue 2,Pro League,Primeira Liga,Super Lig,Super League,Superliga,Eliteserien,Allsvenskan,Veikkausliiga,Ekstraklasa,Premier League,La Liga,LaLiga,Serie A,Bundesliga,Ligue 1');
       const r = await serverPost(`/admin/train-football-poisson?min_games=8&years_back=3&target_leagues=${targetLeagues}`, {}, null,
         adminKey ? { 'x-admin-key': adminKey } : {});
       if (r?.ok) {

@@ -901,7 +901,11 @@ function markTennisEspnWindowSync(anchorKey) {
 
 /** Grava jogos com status post de um payload scoreboard ESPN (ATP/WTA). */
 function upsertTennisPostCompetitionsFromEspnJson(j, slug) {
+  // 2026-05-02: wrap em transaction. ESPN scoreboard retorna 600+ matches por
+  // sync (45d span) e cada `.run()` solto fora de tx fazia fsync por row →
+  // 12+ DB-SLOW WARNs (100-356ms) em burst. Tx único reduz fsync ~600×.
   let n = 0;
+  const tx = db.transaction(() => {
   for (const ev of (j?.events || [])) {
     const evName = String(ev?.name || '').trim() || slug.toUpperCase();
     for (const grp of (ev.groupings || [])) {
@@ -975,6 +979,8 @@ function upsertTennisPostCompetitionsFromEspnJson(j, slug) {
       }
     }
   }
+  });
+  tx();
   return n;
 }
 
@@ -16924,7 +16930,11 @@ setInterval(load, 60000);
     const minGames = parseInt(parsed.query.min_games || '5', 10);
     const yearsBack = parseInt(parsed.query.years_back || '3', 10);
     const queryLeagues = String(parsed.query.target_leagues || '').trim();
-    const defaultTargets = 'Brazil,Sweden,Norway,Finland,Denmark,Poland,Japan,USA,Mexico,Russia,Romania,China,Ireland,Championship,League One,2.Bundesliga,Segunda,Serie B,Ligue 2,Pro League,Primeira Liga,Super Lig,Super League,Superliga,Eliteserien,Allsvenskan,Veikkausliiga,Ekstraklasa';
+    // 2026-05-02: incluído top-5 EU + Brazilian Serie B. Dados de PL/La Liga/Serie A/
+    // Bundesliga/Ligue 1 estão em match_results via football-data CSV + Sofascore.
+    // Antes deixava método "form" (conf 0.40) bloquear override em todos jogos top-5
+    // EU. Agora cobre as 5 ligas + Brasileirão Serie B (que não estava coberto).
+    const defaultTargets = 'Brazil,Sweden,Norway,Finland,Denmark,Poland,Japan,USA,Mexico,Russia,Romania,China,Ireland,Championship,League One,2.Bundesliga,Segunda,Serie B,Ligue 2,Pro League,Primeira Liga,Super Lig,Super League,Superliga,Eliteserien,Allsvenskan,Veikkausliiga,Ekstraklasa,Premier League,La Liga,LaLiga,Serie A,Bundesliga,Ligue 1';
     const targetLeaguesEnv = queryLeagues || process.env.FOOTBALL_TARGET_LEAGUES || defaultTargets;
     const targetPatterns = targetLeaguesEnv.split(',').map(s => s.trim()).filter(Boolean);
     const leagueMatches = (l) => targetPatterns.some(p => String(l || '').toLowerCase().includes(p.toLowerCase()));
@@ -17086,6 +17096,13 @@ setInterval(load, 60000);
       const path = require('path');
       const outPath = path.join(path.dirname(DB_PATH), 'football-poisson-params.json');
       fs.writeFileSync(outPath, JSON.stringify(output, null, 2));
+      // 2026-05-02: invalida cache em memória pra forçar re-load no próximo
+      // predictFootball*. Sem isso, TTL 30min servia params antigos por meia
+      // hora após retrain — dava impressão que retrain "não funcionou".
+      try {
+        const { invalidateCache } = require('./lib/football-poisson-trained');
+        if (typeof invalidateCache === 'function') invalidateCache();
+      } catch (_) {}
       log('INFO', 'FOOTBALL-TRAIN', `Poisson params: ${Object.keys(leagueParams).length} leagues, ${qualifiedTeams} teams, ${filtered.length} matches → ${outPath}`);
       sendJson(res, { ok: true, ...output, path: outPath, leaguesCount: Object.keys(leagueParams).length });
     } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
@@ -19231,18 +19248,22 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
       const matches = await getFinishedMatches({ daysBack });
       let inserted = 0, skipped = 0;
       const sample = [];
-      for (const m of matches) {
-        try {
-          const matchId = `sofa_${m.eventId}`;
-          const league = String(m.tournament || 'Football').slice(0, 120);
-          stmts.upsertMatchResultWithDate.run(
-            matchId, 'football',
-            m.home, m.away, m.winner, m.score, league, m.startIso
-          );
-          inserted++;
-          if (sample.length < 8) sample.push({ match_id: matchId, teams: `${m.home} vs ${m.away}`, winner: m.winner, score: m.score, league, at: m.startIso });
-        } catch (_) { skipped++; }
-      }
+      // 2026-05-02: tx batch — mesmo motivo do espn sync (fsync por row).
+      const txInsertSofa = db.transaction((rows) => {
+        for (const m of rows) {
+          try {
+            const matchId = `sofa_${m.eventId}`;
+            const league = String(m.tournament || 'Football').slice(0, 120);
+            stmts.upsertMatchResultWithDate.run(
+              matchId, 'football',
+              m.home, m.away, m.winner, m.score, league, m.startIso
+            );
+            inserted++;
+            if (sample.length < 8) sample.push({ match_id: matchId, teams: `${m.home} vs ${m.away}`, winner: m.winner, score: m.score, league, at: m.startIso });
+          } catch (_) { skipped++; }
+        }
+      });
+      txInsertSofa(matches);
       log('INFO', 'FOOTBALL-SYNC', `sofascore: ${inserted} matches upserted em ${daysBack}d (${skipped} skip)`);
       sendJson(res, { ok: true, days_back: daysBack, inserted, skipped, total_fetched: matches.length, sample,
         hint: !process.env.SOFASCORE_PROXY_BASE && !/^(1|true|yes)$/i.test(String(process.env.SOFASCORE_DIRECT || ''))
@@ -23434,17 +23455,21 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
         const matches = await getFinishedMatches({ daysBack });
         let inserted = 0, skipped = 0;
         const sample = [];
-        for (const m of matches) {
-          try {
-            const matchId = `sofa_ten_${m.eventId}`;
-            const league = String(m.tournament || 'Tennis').slice(0, 200);
-            stmts.upsertMatchResultWithDate.run(
-              matchId, 'tennis', m.home, m.away, m.winner, m.score, league, m.startIso
-            );
-            inserted++;
-            if (sample.length < 8) sample.push({ match_id: matchId, teams: `${m.home} vs ${m.away}`, winner: m.winner, score: m.score, league, at: m.startIso });
-          } catch (_) { skipped++; }
-        }
+        // 2026-05-02: tx batch — fsync por row eliminado.
+        const txInsertSofaTennis = db.transaction((rows) => {
+          for (const m of rows) {
+            try {
+              const matchId = `sofa_ten_${m.eventId}`;
+              const league = String(m.tournament || 'Tennis').slice(0, 200);
+              stmts.upsertMatchResultWithDate.run(
+                matchId, 'tennis', m.home, m.away, m.winner, m.score, league, m.startIso
+              );
+              inserted++;
+              if (sample.length < 8) sample.push({ match_id: matchId, teams: `${m.home} vs ${m.away}`, winner: m.winner, score: m.score, league, at: m.startIso });
+            } catch (_) { skipped++; }
+          }
+        });
+        txInsertSofaTennis(matches);
         log('INFO', 'TENNIS-SYNC', `sofascore: ${inserted} matches upserted em ${daysBack}d (${skipped} skip)`);
         sendJson(res, { ok: true, source: 'sofascore', days_back: daysBack, inserted, skipped, total_fetched: matches.length, sample,
           hint: !process.env.SOFASCORE_PROXY_BASE && !/^(1|true|yes)$/i.test(String(process.env.SOFASCORE_DIRECT || ''))
