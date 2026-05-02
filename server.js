@@ -12635,15 +12635,17 @@ setInterval(load, 60000);
       // Match via syntheticMatchId: bot.js:4985 cria como
       // `${matchIdBase}::mt::${marketKey}::${sideKey}${lineSuffix}`. matchIdBase
       // é match.id (Pinnacle/PandaScore), mas pode variar entre call e shadow.
-      // Fallback robusto: LIKE '%::mt::${market}::${side}%' + sport + sent_at window.
+      // Sport mapping: shadow cs2 → tips 'cs' (bucket bankroll legacy).
+      const _shadowToTipsSport = (sp) => sp === 'cs2' ? 'cs' : sp;
       const out = { ok: true, days, total_dmd_shadow: shadowDmd.length, missing_in_tips: [], present_in_tips: 0, by_sport: {} };
       for (const s of shadowDmd) {
         const sportKey = s.sport;
         out.by_sport[sportKey] = out.by_sport[sportKey] || { dmd: 0, in_tips: 0, missing: 0 };
         out.by_sport[sportKey].dmd++;
+        const tipsSport = _shadowToTipsSport(s.sport);
         const mtLike = `%::mt::${s.market}::${s.side}%`;
         const realRow = db.prepare(`
-          SELECT id, match_id, market_type, tip_participant, odds, sent_at, is_shadow
+          SELECT id, match_id, market_type, tip_participant, odds, sent_at, is_shadow, sport
           FROM tips
           WHERE sport = ?
             AND match_id LIKE ?
@@ -12651,7 +12653,7 @@ setInterval(load, 60000);
             AND sent_at <= datetime(?, '+6 hours')
           ORDER BY ABS(julianday(sent_at) - julianday(?)) ASC
           LIMIT 1
-        `).get(s.sport, mtLike, s.created_at, s.created_at, s.created_at);
+        `).get(tipsSport, mtLike, s.created_at, s.created_at, s.created_at);
 
         if (realRow) {
           out.by_sport[sportKey].in_tips++;
