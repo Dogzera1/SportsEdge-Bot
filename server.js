@@ -4583,6 +4583,18 @@ const server = http.createServer(async (req, res) => {
   if (p === '/live-game') {
     const gameId = parsed.query.gameId;
     if (!gameId) { sendJson(res, { error: 'Missing gameId' }, 400); return; }
+    // 2026-05-02: circuit-breaker para gameIds dead-poll. Riot retorna 204 em todas
+    // as janelas para alguns jogos (LCP, ligas tier-3, jogos pre-draft). Sem isso,
+    // poll a cada 5-8s gerava 16 HTTP requests por ciclo + log warn-once já era
+    // DEBUG mas o `/live-game` ainda batia. Após 4 falhas consecutivas (sem 200
+    // algum nos 16 scans), blacklist 10min. Se um 200 retornar, reseta contador.
+    global._liveGameBreaker = global._liveGameBreaker || new Map();
+    const _brk = global._liveGameBreaker.get(gameId);
+    const _now = Date.now();
+    if (_brk && _brk.blacklistUntil > _now) {
+      sendJson(res, { hasLiveStats: false, gameId, _circuit: 'open', _retryIn: Math.round((_brk.blacklistUntil - _now) / 1000) });
+      return;
+    }
     try {
       const base = `https://feed.lolesports.com/livestats/v1/window/${gameId}`;
 
@@ -4645,8 +4657,21 @@ const server = http.createServer(async (req, res) => {
         const has204 = scanResults.filter(r => r.status === 204).length;
         const logLevel = has200 > 0 ? 'INFO' : 'DEBUG';
         log(logLevel, 'LIVE-GAME', `window/${gameId}: sem gold (200s=${has200} 204s=${has204} frames=${frames.length}, draft=${hasDraft ? 'ok' : 'no'}, melhor: ${scanStatuses.slice(0, 6).join(',')})`);
+        // Circuit-breaker: 4 falhas consecutivas sem nenhum 200 → blacklist 10min.
+        if (has200 === 0 && !statsDisabled) {
+          const cur = global._liveGameBreaker.get(gameId) || { failCount: 0 };
+          cur.failCount = (cur.failCount || 0) + 1;
+          cur.lastFailAt = _now;
+          if (cur.failCount >= 4) {
+            cur.blacklistUntil = _now + 10 * 60 * 1000;
+            log('DEBUG', 'LIVE-GAME', `window/${gameId}: circuit OPEN (4 falhas consecutivas) — blacklist 10min`);
+          }
+          global._liveGameBreaker.set(gameId, cur);
+        }
       } else {
         log('INFO', 'LIVE-GAME', `window/${gameId}: gold encontrado a ${usedTs}s atrás (${frames.length} frames)`);
+        // Reset breaker em sucesso
+        if (global._liveGameBreaker.has(gameId)) global._liveGameBreaker.delete(gameId);
       }
 
       // 4) Último recurso: usar frames iniciais
@@ -20644,7 +20669,17 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
         // evitando que dois ciclos de settlement processem o mesmo tip simultaneamente.
         const tipsNeedingClv = [];
         const settleResult = db.transaction(() => {
-          const tips = db.prepare("SELECT * FROM tips WHERE match_id = ? AND sport = ? AND result IS NULL").all(matchId, sport);
+          // 2026-05-02: filtra archived + is_shadow. Shadow tips settle via propagator;
+          // archived = NON_ML_AUTOARCHIVE já decidiu que é órfã. Sem isso, cada sweep
+          // cycle reprocessava MAP{N}_WINNER zombies (ex: dota2 tip 667/788) e loggava
+          // SETTLE-GUARD WARN infinito.
+          const tips = db.prepare(
+            `SELECT * FROM tips
+             WHERE match_id = ? AND sport = ?
+               AND result IS NULL
+               AND (archived IS NULL OR archived = 0)
+               AND COALESCE(is_shadow, 0) = 0`
+          ).all(matchId, sport);
           // Filtro defensivo extra: mesmo se match_id passou pelo guard acima, qualquer
           // tip individual com market_type non-ML é rejeitada (defesa em profundidade).
           // Exceção: MAP{N}_WINNER esports é settable via sweep detection (vencedor da
