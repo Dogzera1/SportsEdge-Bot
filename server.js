@@ -3028,6 +3028,9 @@ let _dotaPinnacleCache = { data: [], ts: 0 };
 // TTL adaptativo: 45s quando há live (odds vivas mexem rápido), 3min idle.
 const DOTA_PINNACLE_TTL_LIVE = 45 * 1000;
 const DOTA_PINNACLE_TTL_IDLE = 3 * 60 * 1000;
+// Throttle do log "0 partidas": só loga quando count/leaguesSeen muda OU passou ≥10min.
+let _dotaPinnacleLogState = { count: -1, leaguesSeen: -1, ts: 0 };
+const DOTA_PINNACLE_LOG_THROTTLE_MS = 10 * 60 * 1000;
 
 async function getPinnacleDotaMatches() {
   if (process.env.PINNACLE_DOTA !== 'true') return [];
@@ -3067,11 +3070,17 @@ async function getPinnacleDotaMatches() {
       odds: { t1: String(r.oddsT1), t2: String(r.oddsT2), bookmaker: 'Pinnacle' }
     }));
     _dotaPinnacleCache = { data: matches, ts: Date.now() };
-    if (matches.length === 0 && leaguesSeen > 0) {
-      const sample = [...leaguesSkipped].slice(0, 5).join(', ');
-      log('INFO', 'ODDS', `Pinnacle Dota 2: 0 (de ${leaguesSeen} esports markets; ligas vistas: ${sample || '-'})`);
-    } else {
-      log('INFO', 'ODDS', `Pinnacle Dota 2: ${matches.length} partidas cacheadas`);
+    const _stateChanged = matches.length !== _dotaPinnacleLogState.count
+                       || leaguesSeen !== _dotaPinnacleLogState.leaguesSeen;
+    const _throttleExpired = (Date.now() - _dotaPinnacleLogState.ts) >= DOTA_PINNACLE_LOG_THROTTLE_MS;
+    if (_stateChanged || _throttleExpired) {
+      if (matches.length === 0 && leaguesSeen > 0) {
+        const sample = [...leaguesSkipped].slice(0, 5).join(', ');
+        log('INFO', 'ODDS', `Pinnacle Dota 2: 0 (de ${leaguesSeen} esports markets; ligas vistas: ${sample || '-'})`);
+      } else {
+        log('INFO', 'ODDS', `Pinnacle Dota 2: ${matches.length} partidas cacheadas`);
+      }
+      _dotaPinnacleLogState = { count: matches.length, leaguesSeen, ts: Date.now() };
     }
     return matches;
   } catch (e) {

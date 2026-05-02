@@ -619,6 +619,7 @@ const analyzedDarts = new Map();
 const analyzedSnooker = new Map();
 const analyzedTT = new Map();
 const analyzedCs = new Map();
+const _csInFlight = new Set();
 const analyzedValorant = new Map();
 
 // ── Gate global de prioridade LIVE ──────────────────────────────────────
@@ -17597,6 +17598,9 @@ async function pollCs(runOnce = false) {
         const key = `cs_${match.id}_${csMapNum}`;
         const prev = analyzedCs.get(key);
         if (prev?.tipSent) continue;
+        // In-flight guard: ciclos AUTO-CS paralelos não devem chamar record-tip simultâneo
+        // pra mesma key (gera hedge_blocked WARN spurioso). Primeiro a chegar processa.
+        if (_csInFlight.has(key)) continue;
         const csCooldown = isLiveCs ? (3 * 60 * 1000) : (30 * 60 * 1000); // live: 3min, pregame: 30min
         if (prev && (now - prev.ts < csCooldown)) continue;
 
@@ -18126,26 +18130,32 @@ Máximo 150 palavras.`;
           log('INFO', 'AUTO-CS', `[BLOCK] cs/${match.league} — suprimido`);
           continue;
         }
-        const rec = await serverPost('/record-tip', {
-          matchId: String(match.id) + csMapTag, eventName: match.league,
-          p1: match.team1, p2: match.team2, tipParticipant: pickTeam,
-          odds: String(pickOdd), ev: evPct.toFixed(1), stake: stakeAdj,
-          confidence: conf,
-          isLive: match.status === 'live' ? 1 : 0,
-          market_type: 'ML',
-          modelP1, modelP2, modelPPick: pickP,
-          modelLabel: (useElo ? 'cs-elo' : 'cs-ml') + (_csHybridBypass ? '+hybrid' : (_csFromOverride ? '+override' : '')),
-          tipReason,
-          isShadow: csConfig.shadowMode ? 1 : 0,
-          sport: 'cs',
-          lineShopOdds: match.odds || null,
-          pickSide: direction,
-          // tip_context_json:
-          factors: factorCount > 0 ? [{ label: useElo ? 'Elo' : 'HLTV', value: useElo ? `${elo.elo1}/${elo.elo2}` : `factors=${factorCount}` }] : null,
-          mlScore: Number.isFinite(mlScore) ? +mlScore.toFixed(2) : null,
-          factorCount: factorCount || null,
-          divergencePp: isPinnacleOdds && Number.isFinite(divergencePp) ? +divergencePp.toFixed(2) : null,
-        }, 'cs');
+        _csInFlight.add(key);
+        let rec;
+        try {
+          rec = await serverPost('/record-tip', {
+            matchId: String(match.id) + csMapTag, eventName: match.league,
+            p1: match.team1, p2: match.team2, tipParticipant: pickTeam,
+            odds: String(pickOdd), ev: evPct.toFixed(1), stake: stakeAdj,
+            confidence: conf,
+            isLive: match.status === 'live' ? 1 : 0,
+            market_type: 'ML',
+            modelP1, modelP2, modelPPick: pickP,
+            modelLabel: (useElo ? 'cs-elo' : 'cs-ml') + (_csHybridBypass ? '+hybrid' : (_csFromOverride ? '+override' : '')),
+            tipReason,
+            isShadow: csConfig.shadowMode ? 1 : 0,
+            sport: 'cs',
+            lineShopOdds: match.odds || null,
+            pickSide: direction,
+            // tip_context_json:
+            factors: factorCount > 0 ? [{ label: useElo ? 'Elo' : 'HLTV', value: useElo ? `${elo.elo1}/${elo.elo2}` : `factors=${factorCount}` }] : null,
+            mlScore: Number.isFinite(mlScore) ? +mlScore.toFixed(2) : null,
+            factorCount: factorCount || null,
+            divergencePp: isPinnacleOdds && Number.isFinite(divergencePp) ? +divergencePp.toFixed(2) : null,
+          }, 'cs');
+        } finally {
+          _csInFlight.delete(key);
+        }
 
         if (!rec?.tipId) {
           log('WARN', 'AUTO-CS', `record-tip falhou: ${pickTeam} @ ${pickOdd}${rec?.reason ? ` (${rec.reason})` : ''}`);
