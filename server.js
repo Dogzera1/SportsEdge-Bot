@@ -7896,8 +7896,9 @@ setInterval(load, 10000);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     try {
       const { settleShadowTips } = require('./lib/market-tips-shadow');
-      const r = settleShadowTips(db);
-      sendJson(res, { ok: true, ...r });
+      const force = /^(1|true|yes)$/i.test(String(parsed.query.force || ''));
+      const r = settleShadowTips(db, { force });
+      sendJson(res, { ok: true, force, ...r });
     } catch (e) { sendJson(res, { error: e.message }, 500); }
     return;
   }
