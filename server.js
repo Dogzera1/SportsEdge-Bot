@@ -12622,7 +12622,6 @@ setInterval(load, 60000);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     const days = Math.max(1, Math.min(90, parseInt(parsed.query.days || '30', 10) || 30));
     try {
-      const _norm = (s) => String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]/g, '');
       const shadowDmd = db.prepare(`
         SELECT id, sport, team1, team2, league, market, side, line, odd, ev_pct, p_model,
                created_at, admin_dm_sent_at, result
@@ -12633,31 +12632,26 @@ setInterval(load, 60000);
         LIMIT 500
       `).all(String(days));
 
+      // Match via syntheticMatchId: bot.js:4985 cria como
+      // `${matchIdBase}::mt::${marketKey}::${sideKey}${lineSuffix}`. matchIdBase
+      // é match.id (Pinnacle/PandaScore), mas pode variar entre call e shadow.
+      // Fallback robusto: LIKE '%::mt::${market}::${side}%' + sport + sent_at window.
       const out = { ok: true, days, total_dmd_shadow: shadowDmd.length, missing_in_tips: [], present_in_tips: 0, by_sport: {} };
       for (const s of shadowDmd) {
         const sportKey = s.sport;
         out.by_sport[sportKey] = out.by_sport[sportKey] || { dmd: 0, in_tips: 0, missing: 0 };
         out.by_sport[sportKey].dmd++;
-        // Heurística de match: tips real com sport + market_type LIKE %market% + tip_participant = team1 or team2
-        // + sent_at within ±48h do shadow.created_at + odds within 5%
-        const t1n = _norm(s.team1), t2n = _norm(s.team2);
-        const mkt = String(s.market || '').toLowerCase();
-        const mktTypeLike = `%${mkt}%`;
+        const mtLike = `%::mt::${s.market}::${s.side}%`;
         const realRow = db.prepare(`
           SELECT id, match_id, market_type, tip_participant, odds, sent_at, is_shadow
           FROM tips
           WHERE sport = ?
-            AND lower(market_type) LIKE ?
-            AND sent_at >= datetime(?, '-48 hours')
-            AND sent_at <= datetime(?, '+48 hours')
-            AND (
-              REPLACE(REPLACE(REPLACE(lower(tip_participant), ' ', ''), '-', ''), '.', '') LIKE '%' || ? || '%' OR
-              REPLACE(REPLACE(REPLACE(lower(tip_participant), ' ', ''), '-', ''), '.', '') LIKE '%' || ? || '%'
-            )
-            AND ABS(odds - ?) / odds < 0.05
+            AND match_id LIKE ?
+            AND sent_at >= datetime(?, '-6 hours')
+            AND sent_at <= datetime(?, '+6 hours')
           ORDER BY ABS(julianday(sent_at) - julianday(?)) ASC
           LIMIT 1
-        `).get(s.sport, mktTypeLike, s.created_at, s.created_at, t1n, t2n, s.odd, s.created_at);
+        `).get(s.sport, mtLike, s.created_at, s.created_at, s.created_at);
 
         if (realRow) {
           out.by_sport[sportKey].in_tips++;
@@ -12669,7 +12663,8 @@ setInterval(load, 60000);
               shadow_id: s.id, sport: s.sport, team1: s.team1, team2: s.team2,
               league: s.league, market: s.market, side: s.side, line: s.line,
               odd: s.odd, ev_pct: s.ev_pct, created_at: s.created_at,
-              admin_dm_sent_at: s.admin_dm_sent_at, result: s.result
+              admin_dm_sent_at: s.admin_dm_sent_at, result: s.result,
+              search_pattern: mtLike
             });
           }
         }
