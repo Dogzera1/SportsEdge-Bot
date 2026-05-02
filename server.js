@@ -11055,7 +11055,8 @@ setInterval(load, 60000);
           const { syncLeagueSeason } = require('./lib/football-data-csv');
           for (const lg of leagues) {
             const r = await syncLeagueSeason(db, lg, season);
-            log('INFO', 'FD-CSV-SYNC', `${lg} ${season}: ${r.ok ? `${r.inserted}/${r.total}` : 'FAIL ' + r.reason}`);
+            const mr = r.mr_inserted != null ? ` mr=${r.mr_inserted}` : '';
+            log('INFO', 'FD-CSV-SYNC', `${lg} ${season}: ${r.ok ? `${r.inserted}/${r.total}${mr}` : 'FAIL ' + r.reason}`);
             await new Promise(res => setTimeout(res, 800));
           }
         } catch (e) { log('ERROR', 'FD-CSV-SYNC', e.message); }
