@@ -13176,6 +13176,42 @@ setInterval(load, 60000);
     return;
   }
 
+  // GET /admin/mt-auto-promote?key=<KEY>&run=1
+  // Estado atual do MT auto-promote: ligas blocked + decision log + opcional re-run.
+  if (p === '/admin/mt-auto-promote') {
+    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    try {
+      const out = { ok: true };
+      if (parsed.query.run === '1' || parsed.query.run === 'true') {
+        const { runMtAutoPromoteCycle } = require('./lib/mt-auto-promote');
+        out.cycle = await runMtAutoPromoteCycle(db);
+      }
+      const blocks = db.prepare(`
+        SELECT sport, market, league_norm, league_raw, since, source, reason, n, roi_pct
+        FROM mt_market_league_blocklist
+        ORDER BY sport, market, league_raw
+      `).all();
+      const recentLog = db.prepare(`
+        SELECT ts, sport, market, league, action, reason, n, roi_pct, clv_pct
+        FROM mt_auto_promote_log
+        ORDER BY ts DESC LIMIT 100
+      `).all();
+      out.league_blocks = blocks;
+      out.recent_decisions = recentLog;
+      out.envs = {
+        MT_AUTO_PROMOTE: process.env.MT_AUTO_PROMOTE ?? 'true',
+        MT_AUTO_PROMOTE_MIN_SETTLED: process.env.MT_AUTO_PROMOTE_MIN_SETTLED ?? '30',
+        MT_AUTO_PROMOTE_MIN_ROI: process.env.MT_AUTO_PROMOTE_MIN_ROI ?? '2',
+        MT_AUTO_PROMOTE_LEAGUE_MIN_N: process.env.MT_AUTO_PROMOTE_LEAGUE_MIN_N ?? '10',
+        MT_AUTO_PROMOTE_LEAGUE_ROI: process.env.MT_AUTO_PROMOTE_LEAGUE_ROI ?? '-10',
+        MT_AUTO_PROMOTE_WINDOW_DAYS: process.env.MT_AUTO_PROMOTE_WINDOW_DAYS ?? '30',
+      };
+      sendJson(res, out);
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   // GET /admin/mt-promote-status?key=<KEY>
   // Mostra status atual (env + settings persisted) por sport.
   if (p === '/admin/mt-promote-status') {

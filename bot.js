@@ -4807,6 +4807,15 @@ function isMarketTipsEnabled(sport, market = null, side = null, league = null) {
     if (side && league && _marketTipsDisabledRuntime.has(`${sport}|${market}|${side}|${league}`)) return false;
     if (side && _marketTipsDisabledRuntime.has(`${sport}|${market}|${side}`)) return false;
     if (_marketTipsDisabledRuntime.has(`${sport}|${market}`)) return false;
+    // MT auto-promote league block: liga (sport, market) com ROI muito negativo
+    // bloqueada automaticamente pelo cron runMtAutoPromoteCycle. Mantém shadow
+    // (segue logando), mas evita que tip vire real (DM + tabela tips).
+    if (league) {
+      try {
+        const { isMtLeagueBlockedForMarket } = require('./lib/mt-auto-promote');
+        if (isMtLeagueBlockedForMarket(sport, market, league)) return false;
+      } catch (_) {}
+    }
   }
   return true;
 }
@@ -20274,6 +20283,16 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   // Boot offset distinto pra evitar contenção de DM/log.
   setInterval(_wrapCron('mt_bucket_guard', runMtBucketGuardCycle), 12 * 60 * 60 * 1000);
   setTimeout(_wrapCron('mt_bucket_guard', runMtBucketGuardCycle), 65 * 60 * 1000);
+
+  // MT auto-promote — avalia (sport, market) shadow stats e decide promote/revert
+  // automático. Bloqueia ligas problemáticas per-(sport, market). Cron 12h.
+  // Boot offset 70min (post league_guard 45min + bucket_guard 65min).
+  try {
+    const _mtAutoPromote = require('./lib/mt-auto-promote');
+    _mtAutoPromote.loadMtMarketLeagueBlocklist(db);
+    setInterval(_wrapCron('mt_auto_promote', () => _mtAutoPromote.runMtAutoPromoteCycle(db)), 12 * 60 * 60 * 1000);
+    setTimeout(_wrapCron('mt_auto_promote', () => _mtAutoPromote.runMtAutoPromoteCycle(db)), 70 * 60 * 1000);
+  } catch (e) { log('WARN', 'MT-AUTO-PROMOTE', `boot wire err: ${e.message}`); }
 
   setInterval(_wrapCron('gates_autotune', runGatesAutoTuneCycle), 12 * 60 * 60 * 1000);
   setTimeout(_wrapCron('gates_autotune', runGatesAutoTuneCycle), 55 * 60 * 1000);

@@ -1856,6 +1856,48 @@ const migrations = [
     },
   },
   {
+    id: '077_mt_auto_promote',
+    up(db) {
+      // MT auto-promote decision log + per-(sport, market, league) blocklist.
+      //
+      // mt_auto_promote_log: audit trail das decisões (promote/revert/league_block/league_unblock).
+      // Útil pra debug ("por que promoveu agora?") e rollback ("voltar pro estado X").
+      //
+      // mt_market_league_blocklist: liga (sport, market, league_norm) bloqueada
+      // pra emissão de MT real (mesmo que sport/market estejam globalmente promovidos).
+      // league_norm = lowercase + collapse whitespace; league_raw preserva pra log.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS mt_auto_promote_log (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          ts TEXT DEFAULT (datetime('now')),
+          sport TEXT NOT NULL,
+          market TEXT,
+          league TEXT,
+          action TEXT NOT NULL,
+          reason TEXT,
+          n INTEGER,
+          roi_pct REAL,
+          clv_pct REAL
+        );
+        CREATE INDEX IF NOT EXISTS idx_mt_promote_log_ts ON mt_auto_promote_log(ts DESC);
+        CREATE INDEX IF NOT EXISTS idx_mt_promote_log_sport ON mt_auto_promote_log(sport, market, ts DESC);
+
+        CREATE TABLE IF NOT EXISTS mt_market_league_blocklist (
+          sport TEXT NOT NULL,
+          market TEXT NOT NULL,
+          league_norm TEXT NOT NULL,
+          league_raw TEXT,
+          since TEXT DEFAULT (datetime('now')),
+          source TEXT,
+          reason TEXT,
+          n INTEGER,
+          roi_pct REAL,
+          PRIMARY KEY (sport, market, league_norm)
+        );
+      `);
+    },
+  },
+  {
     id: '075_error_log',
     up(db) {
       // Persistent error log — sobrevive restart (in-memory _bugReports zera).
