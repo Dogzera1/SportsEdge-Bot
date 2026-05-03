@@ -7932,6 +7932,51 @@ setInterval(load, 10000);
     return;
   }
 
+  // ── /admin/boot-diag: diagnóstico de crash loop. Expõe last_exit_bot.json,
+  // last_exit_server.json, last_child_exit_server_js.json, boot_count.json.
+  // 2026-05-03: criado pra investigar bot_boot_count_24h>=10 sem reason visível
+  // em /health ou /metrics.
+  if (p === '/admin/boot-diag' && (req.method === 'GET' || req.method === 'POST')) {
+    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    try {
+      const fsLib = require('fs');
+      const pathLib = require('path');
+      const dbDir = pathLib.dirname(pathLib.isAbsolute(process.env.DB_PATH || 'sportsedge.db')
+        ? (process.env.DB_PATH || 'sportsedge.db')
+        : pathLib.resolve(process.env.DB_PATH || 'sportsedge.db'));
+      const readJson = (f) => {
+        try {
+          const full = pathLib.join(dbDir, f);
+          if (!fsLib.existsSync(full)) return null;
+          const stat = fsLib.statSync(full);
+          const content = JSON.parse(fsLib.readFileSync(full, 'utf8'));
+          return { ...content, _file: f, _mtime: stat.mtime.toISOString(), _ageMin: Math.round((Date.now() - stat.mtime.getTime()) / 60000) };
+        } catch (e) { return { _file: f, _error: e.message }; }
+      };
+      sendJson(res, {
+        ok: true,
+        cwd: process.cwd(),
+        dbDir,
+        files: {
+          last_exit_bot: readJson('last_exit_bot.json'),
+          last_exit_server: readJson('last_exit_server.json'),
+          last_child_exit_server_js: readJson('last_child_exit_server_js.json'),
+          boot_count: readJson('boot_count.json'),
+        },
+        process: {
+          uptime_s: Math.round(process.uptime()),
+          memoryMb: {
+            rss: Math.round(process.memoryUsage().rss / 1048576),
+            heap_used: Math.round(process.memoryUsage().heapUsed / 1048576),
+            heap_total: Math.round(process.memoryUsage().heapTotal / 1048576),
+          },
+        },
+      });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
   // ── /admin/forensics: post-mortem completo de uma tip específica.
   // Combina row da tips + tip_context_json parsed + match_result + voided
   // entry (se houver) + tip_factor_log + shadow row equivalente (se MT).
