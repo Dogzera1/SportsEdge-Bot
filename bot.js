@@ -9891,6 +9891,86 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
       await send(token, chatId, txt);
     } catch (e) { await send(token, chatId, `❌ ${e.message}`); }
 
+  } else if (cmd === '/diag' || cmd === '/diag-tip') {
+    // /diag <team_substring> — investiga por que tip pra match com X não chegou.
+    // Filtra _rejections + reporta shadow state + DAILY_TIP_LIMIT + risk caps + league blocklist.
+    if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
+    try {
+      const queryRaw = parts.slice(1).join(' ').trim();
+      const query = String(queryRaw || '').toLowerCase();
+      const lines = [];
+
+      // 1. Shadow state per sport
+      lines.push('🔦 *SHADOW STATE*');
+      const sportsToCheck = ['lol', 'dota2', 'cs', 'valorant', 'tennis', 'football', 'mma'];
+      for (const sp of sportsToCheck) {
+        const envShadow = process.env[`${sp.toUpperCase()}_SHADOW`] === 'true';
+        const sportShadow = !!SPORTS[sp]?.shadowMode;
+        const splitShadow = _splitBucketShadow.has(sp);
+        const bankShadow = _bankrollAutoShadowed.has(sp);
+        const flags = [];
+        if (envShadow) flags.push('env');
+        if (sportShadow) flags.push('SPORTS.shadowMode');
+        if (splitShadow) flags.push('split-bucket');
+        if (bankShadow) flags.push('bankroll-DD');
+        if (flags.length) lines.push(`• \`${sp}\`: 🔴 ${flags.join(' + ')}`);
+      }
+      if (lines.length === 1) lines.push('• Nenhum sport em shadow ✓');
+
+      // 2. Daily tip count vs cap (todos sports)
+      lines.push('\n📊 *DAILY TIP COUNT*');
+      const globalCap = parseInt(process.env.DAILY_TIP_LIMIT || '', 10) || null;
+      for (const sp of sportsToCheck) {
+        const cap = _getDailyTipLimit(sp);
+        if (cap == null) continue;
+        const count = _getDailyTipCount(sp);
+        const pct = cap > 0 ? Math.round(count / cap * 100) : 0;
+        const icon = count >= cap ? '🔴' : count >= cap * 0.8 ? '🟠' : '🟢';
+        lines.push(`• \`${sp}\`: ${icon} ${count}/${cap} (${pct}%)`);
+      }
+
+      // 3. Rejections matching query
+      lines.push('\n🚫 *REJECTIONS*');
+      if (query) {
+        lines.push(`Filtro: \`${queryRaw}\``);
+        const matched = _rejections.filter(r =>
+          (r.teams || '').toLowerCase().includes(query)
+          || (r.extra?.league || '').toLowerCase().includes(query)
+        ).slice(0, 15);
+        if (matched.length) {
+          const now = Date.now();
+          for (const r of matched) {
+            const ageMin = Math.floor((now - r.ts) / 60000);
+            const agoStr = ageMin < 1 ? 'agora' : ageMin < 60 ? `${ageMin}min` : `${Math.floor(ageMin/60)}h${String(ageMin%60).padStart(2,'0')}`;
+            const extraStr = Object.entries(r.extra || {}).slice(0, 4).map(([k, v]) => `${k}=${v}`).join(' ');
+            lines.push(`• \`${r.sport}\` ${r.teams} — *${r.reason}* ${extraStr} · ${agoStr}`);
+          }
+        } else {
+          lines.push('_Nenhum match no buffer (24h)._ Tip pode ter sido dispatched (verifica DB) OU fora do buffer (>24h) OU pre-filter ML cortou silent (não loga em rejections).');
+        }
+      } else {
+        lines.push('_(passe nome do team pra filtrar — ex: `/diag FEARX`)_');
+      }
+
+      // 4. League blocklist
+      lines.push('\n🛑 *LEAGUE BLOCKLIST*');
+      if (_leagueBlocklist.size) {
+        for (const e of [..._leagueBlocklist].slice(0, 8)) lines.push(`• \`${e}\``);
+      } else lines.push('• Vazio ✓');
+
+      // 5. Tokens routing
+      lines.push('\n🔑 *TOKENS*');
+      try {
+        const lolTok = resolveTipsToken('esports') || SPORTS['esports']?.token;
+        const tnsTok = resolveTipsToken('tennis') || SPORTS['tennis']?.token;
+        lines.push(`• esports/lol: ${lolTok ? '✓ ok' : '🔴 NULL'}`);
+        lines.push(`• tennis: ${tnsTok ? '✓ ok' : '🔴 NULL'}`);
+      } catch (_) {}
+
+      lines.push('\n_/diag <team> · /rejections [sport] · /shadow-summary_');
+      await send(token, chatId, lines.join('\n'));
+    } catch (e) { await send(token, chatId, `❌ ${e.message}`); }
+
   } else if (cmd === '/sync-val-history' || cmd === '/sync-history') {
     if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
     try {
