@@ -17099,8 +17099,13 @@ setInterval(load, 60000);
           // default), não substituto. Antes user setando TIP_EV_MAX=35 inflava
           // cap LoL/CS/Dota de 25→35, anulando proteção. Per-sport JSON override
           // continua absoluto (override explícito).
+          // 2026-05-03: basket fase 1 (shadow) ignora TIP_EV_MAX global — Elo cold
+          // gera tips com EV alto que precisamos AUDITAR no shadow. Math.min com
+          // global=35 esconderia 100% das tips NBA underdog (odds 3.5-9 → EV >40%).
           const _globalMax = parseFloat(process.env.TIP_EV_MAX);
-          if (Number.isFinite(_globalMax)) evMax = Math.min(evMax, _globalMax);
+          if (Number.isFinite(_globalMax) && sport !== 'basket') {
+            evMax = Math.min(evMax, _globalMax);
+          }
           try {
             const perSport = process.env.TIP_EV_MAX_PER_SPORT ? JSON.parse(process.env.TIP_EV_MAX_PER_SPORT) : null;
             if (perSport && typeof perSport[sport] === 'number') evMax = perSport[sport];
