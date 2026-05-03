@@ -1918,6 +1918,35 @@ const migrations = [
     },
   },
   {
+    id: '079_basket_match_history',
+    up(db) {
+      // 2026-05-03: histórico de jogos NBA pra treino do modelo. Extraído via
+      // scripts/seed-basket-history.js (ESPN scoreboard, 2 seasons). Features
+      // rolling computadas em scripts/train-basket-model.js. Schema mantém só
+      // raw data — derived features ficam no params JSON.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS basket_match_history (
+          espn_id TEXT PRIMARY KEY,
+          season INTEGER,
+          season_type TEXT,
+          game_date TEXT,
+          home_team TEXT,
+          away_team TEXT,
+          home_team_norm TEXT,
+          away_team_norm TEXT,
+          home_score INTEGER,
+          away_score INTEGER,
+          home_won INTEGER,
+          league TEXT,
+          imported_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_basket_hist_date ON basket_match_history(game_date DESC);
+        CREATE INDEX IF NOT EXISTS idx_basket_hist_home ON basket_match_history(home_team_norm, game_date DESC);
+        CREATE INDEX IF NOT EXISTS idx_basket_hist_away ON basket_match_history(away_team_norm, game_date DESC);
+      `);
+    },
+  },
+  {
     id: '078_basket_elo',
     up(db) {
       // 2026-05-03: novo sport basket (NBA fase 1, shadow-only). Elo por team

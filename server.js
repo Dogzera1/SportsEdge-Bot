@@ -7324,6 +7324,272 @@ setInterval(load, 10000);
     return;
   }
 
+  if (p === '/basket-trained') {
+    const home = parsed.query.home || '';
+    const away = parsed.query.away || '';
+    if (!home || !away) { sendJson(res, { error: 'home/away obrigatórios' }, 400); return; }
+    try {
+      const tr = require('./lib/basket-trained');
+      if (!tr.hasTrainedBasketModel()) {
+        sendJson(res, { ok: false, error: 'no_trained_params', hint: 'POST /admin/basket-train' });
+        return;
+      }
+      const r = tr.predictTrainedBasket(db, home, away);
+      if (!r) { sendJson(res, { ok: false, error: 'compute_failed' }); return; }
+      sendJson(res, r);
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
+  // POST /admin/basket-seed?days=N — kicks off ESPN historical seed em background.
+  // Returns imediato com handle; check progress via /admin/basket-train-status.
+  if (p === '/admin/basket-seed' && (req.method === 'POST' || req.method === 'GET')) {
+    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const days = Math.max(30, Math.min(1095, parseInt(parsed.query.days || '730', 10)));
+    if (global._basketSeedTask?.running) {
+      sendJson(res, { ok: true, status: 'already_running', task: global._basketSeedTask });
+      return;
+    }
+    global._basketSeedTask = { running: true, startedAt: new Date().toISOString(), days, queried: 0, inserted: 0, errors: 0 };
+    sendJson(res, { ok: true, status: 'started', days });
+    // Kick off in background
+    setImmediate(async () => {
+      try {
+        const _norm = (s) => String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]/g, '');
+        const fmtYmd = (d) => `${d.getUTCFullYear()}${String(d.getUTCMonth()+1).padStart(2,'0')}${String(d.getUTCDate()).padStart(2,'0')}`;
+        const espnGet = (p) => new Promise((resolve) => {
+          const httpsLib = require('https');
+          const req = httpsLib.request({ hostname: 'site.api.espn.com', path: p, method: 'GET', headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json' } }, res => {
+            let d = ''; res.on('data', c => d += c); res.on('end', () => { let j = null; try { j = JSON.parse(d); } catch (_) {} resolve({ status: res.statusCode, body: j }); });
+          });
+          req.on('error', () => resolve({ status: 0, body: null }));
+          req.setTimeout(15000, () => { req.destroy(); resolve({ status: 0, body: null }); });
+          req.end();
+        });
+        const ups = db.prepare(`
+          INSERT INTO basket_match_history
+          (espn_id, season, season_type, game_date, home_team, away_team, home_team_norm, away_team_norm, home_score, away_score, home_won, league)
+          VALUES (@espn_id, @season, @season_type, @game_date, @home_team, @away_team, @home_team_norm, @away_team_norm, @home_score, @away_score, @home_won, @league)
+          ON CONFLICT(espn_id) DO UPDATE SET home_score=excluded.home_score, away_score=excluded.away_score, home_won=excluded.home_won, season_type=excluded.season_type
+        `);
+        const today = new Date();
+        for (let i = 0; i <= days; i++) {
+          const d = new Date(today.getTime() - i * 86400000);
+          const ymd = fmtYmd(d);
+          global._basketSeedTask.queried++;
+          const r = await espnGet(`/apis/site/v2/sports/basketball/nba/scoreboard?dates=${ymd}&limit=200`);
+          if (r.status !== 200 || !r.body) { global._basketSeedTask.errors++; await new Promise(rr => setTimeout(rr, 80)); continue; }
+          const events = Array.isArray(r.body?.events) ? r.body.events : [];
+          const rows = [];
+          for (const ev of events) {
+            try {
+              const comp = ev.competitions[0];
+              if (!comp.status?.type?.completed) continue;
+              const cps = comp.competitors;
+              const h = cps.find(c => c.homeAway === 'home');
+              const a = cps.find(c => c.homeAway === 'away');
+              if (!h || !a) continue;
+              const hN = h.team?.displayName || '';
+              const aN = a.team?.displayName || '';
+              const hs = parseInt(h.score, 10), as = parseInt(a.score, 10);
+              if (!hN || !aN || !Number.isFinite(hs) || !Number.isFinite(as) || hs === as) continue;
+              rows.push({
+                espn_id: String(ev.id), season: ev.season?.year || null,
+                season_type: ev.season?.slug || null,
+                game_date: (ev.date || '').slice(0, 10),
+                home_team: hN, away_team: aN,
+                home_team_norm: _norm(hN), away_team_norm: _norm(aN),
+                home_score: hs, away_score: as, home_won: hs > as ? 1 : 0,
+                league: ev.league?.name || 'nba',
+              });
+            } catch (_) {}
+          }
+          const tx = db.transaction((rs) => { for (const row of rs) { try { ups.run(row); global._basketSeedTask.inserted++; } catch (_) { global._basketSeedTask.errors++; } } });
+          tx(rows);
+          await new Promise(rr => setTimeout(rr, 80));
+        }
+        const total = db.prepare(`SELECT COUNT(*) AS n FROM basket_match_history`).get().n;
+        global._basketSeedTask.running = false;
+        global._basketSeedTask.completedAt = new Date().toISOString();
+        global._basketSeedTask.totalInDb = total;
+        log('INFO', 'BASKET-SEED', `complete: queried=${global._basketSeedTask.queried} inserted=${global._basketSeedTask.inserted} errors=${global._basketSeedTask.errors} total=${total}`);
+      } catch (e) {
+        global._basketSeedTask.running = false;
+        global._basketSeedTask.error = e.message;
+        log('ERROR', 'BASKET-SEED', e.message);
+      }
+    });
+    return;
+  }
+
+  // POST /admin/basket-train — treina logistic + isotonic, salva params.
+  // Sync (rápido, ~2-5s pra 2400 samples). Retorna métricas.
+  if (p === '/admin/basket-train' && (req.method === 'POST' || req.method === 'GET')) {
+    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    try {
+      const total = db.prepare(`SELECT COUNT(*) AS n FROM basket_match_history WHERE home_score IS NOT NULL`).get().n;
+      if (total < 200) {
+        sendJson(res, { ok: false, error: 'insufficient_data', n: total, hint: 'POST /admin/basket-seed?days=730 first' });
+        return;
+      }
+      const FEATURE_NAMES = ['elo_diff_home','recent_winrate_diff','recent_margin_diff','rest_days_diff','season_winrate_diff','is_playoffs','h2h_winrate_home'];
+      const ELO_INIT = 1500, ELO_K = 20, HOME_ADV = 85, ROLLING = 10;
+      const _norm = (s) => String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]/g, '');
+      const _expected = (rA, rB) => 1 / (1 + Math.pow(10, (rB - rA) / 400));
+      const sigmoid = (z) => 1 / (1 + Math.exp(-z));
+      // Build features
+      const games = db.prepare(`SELECT * FROM basket_match_history WHERE home_score IS NOT NULL ORDER BY game_date ASC, espn_id ASC`).all();
+      const eloMap = new Map(), formMap = new Map(), seasonMap = new Map(), lastDate = new Map(), h2hMap = new Map();
+      const samples = [];
+      for (const g of games) {
+        const h = g.home_team_norm, a = g.away_team_norm;
+        if (!h || !a) continue;
+        const eloH = eloMap.get(h) ?? ELO_INIT, eloA = eloMap.get(a) ?? ELO_INIT;
+        const fH = formMap.get(h) || [], fA = formMap.get(a) || [];
+        const wrH = fH.length ? fH.filter(x => x.won).length / fH.length : 0.5;
+        const wrA = fA.length ? fA.filter(x => x.won).length / fA.length : 0.5;
+        const mgH = fH.length ? fH.reduce((s, x) => s + x.margin, 0) / fH.length : 0;
+        const mgA = fA.length ? fA.reduce((s, x) => s + x.margin, 0) / fA.length : 0;
+        const restH = lastDate.has(h) ? Math.max(0, Math.min(7, (new Date(g.game_date) - new Date(lastDate.get(h))) / 86400000)) : 3;
+        const restA = lastDate.has(a) ? Math.max(0, Math.min(7, (new Date(g.game_date) - new Date(lastDate.get(a))) / 86400000)) : 3;
+        const sObjH = seasonMap.get(`${h}__${g.season}`); const sObjA = seasonMap.get(`${a}__${g.season}`);
+        const sWrH = (sObjH && (sObjH.wins + sObjH.losses) >= 3) ? sObjH.wins / (sObjH.wins + sObjH.losses) : 0.5;
+        const sWrA = (sObjA && (sObjA.wins + sObjA.losses) >= 3) ? sObjA.wins / (sObjA.wins + sObjA.losses) : 0.5;
+        const isPo = (g.season_type === 'post-season' || g.season_type === 'postseason') ? 1 : 0;
+        const kH2h = h < a ? `${h}__${a}` : `${a}__${h}`;
+        const h2hObj = h2hMap.get(kH2h);
+        const h2hWr = (h2hObj && (h2hObj.home_wins + h2hObj.away_wins) >= 2) ? h2hObj.home_wins / (h2hObj.home_wins + h2hObj.away_wins) : 0.5;
+        samples.push({
+          features: [((eloH + HOME_ADV) - eloA) / 400, wrH - wrA, (mgH - mgA) / 10, (Math.min(restH, 4) - Math.min(restA, 4)) / 4, sWrH - sWrA, isPo, (h2hWr - 0.5) * 2],
+          label: g.home_won, gameDate: g.game_date,
+        });
+        // Update state
+        const sH = g.home_score, sA = g.away_score, hw = sH > sA ? 1 : 0;
+        const expH = _expected(eloH + HOME_ADV, eloA);
+        eloMap.set(h, eloH + ELO_K * (hw - expH));
+        eloMap.set(a, eloA + ELO_K * ((1 - hw) - (1 - expH)));
+        fH.push({ won: !!hw, margin: sH - sA }); if (fH.length > ROLLING) fH.shift(); formMap.set(h, fH);
+        fA.push({ won: !hw, margin: sA - sH }); if (fA.length > ROLLING) fA.shift(); formMap.set(a, fA);
+        const sObjH2 = seasonMap.get(`${h}__${g.season}`) || { wins: 0, losses: 0 };
+        hw ? sObjH2.wins++ : sObjH2.losses++; seasonMap.set(`${h}__${g.season}`, sObjH2);
+        const sObjA2 = seasonMap.get(`${a}__${g.season}`) || { wins: 0, losses: 0 };
+        hw ? sObjA2.losses++ : sObjA2.wins++; seasonMap.set(`${a}__${g.season}`, sObjA2);
+        lastDate.set(h, g.game_date); lastDate.set(a, g.game_date);
+        const h2hObj2 = h2hMap.get(kH2h) || { home_wins: 0, away_wins: 0 };
+        hw ? h2hObj2.home_wins++ : h2hObj2.away_wins++; h2hMap.set(kH2h, h2hObj2);
+      }
+      // Train logistic SGD
+      const sorted = samples.sort((a, b) => (a.gameDate || '').localeCompare(b.gameDate || ''));
+      const splitIdx = Math.floor(sorted.length * 0.8);
+      const train = sorted.slice(0, splitIdx);
+      const val = sorted.slice(splitIdx);
+      const D = FEATURE_NAMES.length;
+      let weights = new Array(D).fill(0), intercept = 0;
+      const lr = 0.05, l2 = 0.001, epochs = 200, bs = 64;
+      for (let ep = 0; ep < epochs; ep++) {
+        for (let i = train.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [train[i], train[j]] = [train[j], train[i]]; }
+        for (let i = 0; i < train.length; i += bs) {
+          const batch = train.slice(i, i + bs);
+          const grad = new Array(D).fill(0); let gradB = 0;
+          for (const s of batch) {
+            let z = intercept;
+            for (let k = 0; k < D; k++) z += weights[k] * s.features[k];
+            const p = sigmoid(z), err = p - s.label;
+            gradB += err;
+            for (let k = 0; k < D; k++) grad[k] += err * s.features[k];
+          }
+          intercept -= lr * (gradB / batch.length);
+          for (let k = 0; k < D; k++) weights[k] -= lr * (grad[k] / batch.length + l2 * weights[k]);
+        }
+      }
+      // Eval
+      const evalFn = (set) => {
+        let brier = 0, ll = 0, correct = 0;
+        for (const s of set) {
+          let z = intercept;
+          for (let k = 0; k < D; k++) z += weights[k] * s.features[k];
+          const p = sigmoid(z);
+          brier += (p - s.label) ** 2;
+          ll += s.label === 1 ? -Math.log(Math.max(1e-9, p)) : -Math.log(Math.max(1e-9, 1 - p));
+          if ((p >= 0.5 ? 1 : 0) === s.label) correct++;
+        }
+        return { brier: brier / set.length, ll: ll / set.length, acc: correct / set.length };
+      };
+      const trainM = evalFn(train), valM = evalFn(val);
+      // ECE val
+      const buckets = Array.from({ length: 10 }, () => ({ n: 0, sumP: 0, sumLabel: 0 }));
+      for (const s of val) {
+        let z = intercept;
+        for (let k = 0; k < D; k++) z += weights[k] * s.features[k];
+        const p = sigmoid(z);
+        const idx = Math.min(9, Math.floor(p * 10));
+        buckets[idx].n++; buckets[idx].sumP += p; buckets[idx].sumLabel += s.label;
+      }
+      let ece = 0;
+      for (const b of buckets) {
+        if (!b.n) continue;
+        ece += (b.n / val.length) * Math.abs(b.sumP / b.n - b.sumLabel / b.n);
+      }
+      // Isotonic se ECE > 0.03
+      let isotonic = null;
+      if (ece > 0.03) {
+        const pts = val.map(s => {
+          let z = intercept;
+          for (let k = 0; k < D; k++) z += weights[k] * s.features[k];
+          return { p: sigmoid(z), y: s.label };
+        }).sort((a, b) => a.p - b.p);
+        const stack = [];
+        for (const pt of pts) {
+          let cur = { sum: pt.y, count: 1, p_lo: pt.p, p_hi: pt.p };
+          while (stack.length && stack[stack.length - 1].sum / stack[stack.length - 1].count > cur.sum / cur.count) {
+            const top = stack.pop();
+            cur.sum += top.sum; cur.count += top.count; cur.p_lo = top.p_lo;
+          }
+          stack.push(cur);
+        }
+        isotonic = stack.map(b => ({ p_lo: b.p_lo, p_hi: b.p_hi, calib: b.sum / b.count }));
+      }
+      const baselineBrier = val.reduce((s, smp) => s + (0.6 - smp.label) ** 2, 0) / val.length;
+      const lift = ((baselineBrier - valM.brier) / baselineBrier) * 100;
+      const params = {
+        version: '1', trained_at: new Date().toISOString(),
+        n_train: train.length, n_val: val.length,
+        val_period: { from: val[0]?.gameDate, to: val[val.length - 1]?.gameDate },
+        metrics: { train_brier: trainM.brier, train_acc: trainM.acc, val_brier: valM.brier, val_ll: valM.ll, val_acc: valM.acc, val_ece: ece, baseline_brier: baselineBrier, lift_pct: lift },
+        features: FEATURE_NAMES, weights, intercept, isotonic,
+        rolling_window: ROLLING, elo_init: ELO_INIT, elo_k: ELO_K, home_adv: HOME_ADV,
+      };
+      const dbDir = path.dirname(path.resolve(process.env.DB_PATH || 'sportsedge.db'));
+      const outPath = path.join(dbDir, 'basket-trained-params.json');
+      fs.writeFileSync(outPath, JSON.stringify(params, null, 2));
+      // Invalida cache lib
+      try { require('./lib/basket-trained').invalidateCache(); } catch (_) {}
+      log('INFO', 'BASKET-TRAIN', `done: brier_val=${valM.brier.toFixed(4)} acc=${(valM.acc*100).toFixed(1)}% ece=${ece.toFixed(4)} lift=${lift.toFixed(1)}% n=${samples.length}`);
+      sendJson(res, { ok: true, n_total: samples.length, ...params.metrics, weights_summary: FEATURE_NAMES.map((n, i) => ({ feature: n, weight: weights[i] })), saved: outPath });
+    } catch (e) {
+      log('ERROR', 'BASKET-TRAIN', e.message);
+      sendJson(res, { ok: false, error: e.message }, 500);
+    }
+    return;
+  }
+
+  if (p === '/admin/basket-train-status') {
+    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const seed = global._basketSeedTask || null;
+    const total = db.prepare(`SELECT COUNT(*) AS n FROM basket_match_history`).get().n;
+    let trained = null;
+    try {
+      const tr = require('./lib/basket-trained');
+      const params = tr.getParams();
+      if (params) trained = { trained_at: params.trained_at, n_train: params.n_train, n_val: params.n_val, metrics: params.metrics };
+    } catch (_) {}
+    sendJson(res, { ok: true, seed, history_count: total, trained });
+    return;
+  }
+
   if (p === '/sync-basket-espn') {
     const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }

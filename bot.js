@@ -19605,10 +19605,32 @@ async function runAutoBasket() {
         analyzedBasket.set(key, { ts: now, tipSent: false });
         continue;
       }
-      // Cold start: skip (não emite tip cega). updateMatch via /sync-basket-espn
-      // popula ratings; após ~5 jogos por team (1-2 semanas NBA) sai do cold start.
-      if (elo.isCold) {
-        log('INFO', 'AUTO-BASKET', `Cold start (h:${elo.hGames}j a:${elo.aGames}j): ${match.team1} vs ${match.team2}`);
+
+      // 2026-05-03: trained model basket via server. Blend trained + Elo se
+      // disponível. Trained tem features ricas (rolling form, rest days,
+      // season WR, h2h) — captura signal além de Elo puro. Cold (hGames<5)
+      // sempre skip mesmo com trained (trained tb usa <5 games rolling).
+      const trained = await serverGet(`/basket-trained?home=${encodeURIComponent(match.team1)}&away=${encodeURIComponent(match.team2)}`)
+        .catch(() => null);
+      const hasTrained = trained && Number.isFinite(trained.pHome) && !trained.isCold;
+      let pHome, pAway, modelLabel;
+      if (hasTrained && !elo.isCold) {
+        // Blend: trained 0.65 + elo 0.35 (trained tem mais features mas precisa
+        // mais data; Elo é grounding)
+        const wT = parseFloat(process.env.BASKET_TRAINED_WEIGHT || '0.65');
+        pHome = wT * trained.pHome + (1 - wT) * elo.pHome;
+        pAway = 1 - pHome;
+        modelLabel = `basket-trained+elo (w=${wT.toFixed(2)})`;
+      } else if (hasTrained) {
+        pHome = trained.pHome;
+        pAway = trained.pAway;
+        modelLabel = 'basket-trained';
+      } else if (!elo.isCold) {
+        pHome = elo.pHome;
+        pAway = elo.pAway;
+        modelLabel = 'basket-elo';
+      } else {
+        log('INFO', 'AUTO-BASKET', `Cold start (h:${elo.hGames}j a:${elo.aGames}j${trained ? ` trained-cold` : ` no-trained`}): ${match.team1} vs ${match.team2}`);
         analyzedBasket.set(key, { ts: now, tipSent: false });
         continue;
       }
@@ -19616,12 +19638,12 @@ async function runAutoBasket() {
       const odd1 = parseFloat(match.odds.t1) || 0;
       const odd2 = parseFloat(match.odds.t2) || 0;
       if (odd1 <= 1.01 || odd2 <= 1.01) continue;
-      const ev1 = elo.pHome * odd1 - 1;
-      const ev2 = elo.pAway * odd2 - 1;
+      const ev1 = pHome * odd1 - 1;
+      const ev2 = pAway * odd2 - 1;
       const direction = ev1 >= ev2 ? 't1' : 't2';
       const pickTeam = direction === 't1' ? match.team1 : match.team2;
       const pickOdd = direction === 't1' ? odd1 : odd2;
-      const pickP = direction === 't1' ? elo.pHome : elo.pAway;
+      const pickP = direction === 't1' ? pHome : pAway;
       const evPct = (pickP * pickOdd - 1) * 100;
 
       const minEv = parseFloat(process.env.BASKET_MIN_EV || '5');
@@ -19654,8 +19676,13 @@ async function runAutoBasket() {
       }
       const stakeAdj = String(riskAdj.units.toFixed(1).replace(/\.0$/, ''));
 
-      const tipReason = `Elo: ${match.team1}=${Math.round(elo.hRating)} (${elo.hGames}j) vs ${match.team2}=${Math.round(elo.aRating)} (${elo.aGames}j) | diff=${Math.round(elo.ratingDiff)}`;
-      const conf = Math.abs(elo.ratingDiff) >= 100 ? 'MÉDIA' : 'BAIXA';
+      const trainedNote = hasTrained
+        ? ` | trained pH=${(trained.pHome*100).toFixed(1)}% conf=${trained.confidence?.toFixed(2)}`
+        : '';
+      const tipReason = `Elo: ${match.team1}=${Math.round(elo.hRating)} (${elo.hGames}j) vs ${match.team2}=${Math.round(elo.aRating)} (${elo.aGames}j) | diff=${Math.round(elo.ratingDiff)}${trainedNote}`;
+      const conf = (hasTrained && (trained.confidence || 0) > 0.4) || Math.abs(elo.ratingDiff) >= 100
+        ? 'MÉDIA'
+        : 'BAIXA';
 
       const rec = await serverPost('/record-tip', {
         matchId: String(match.id), eventName: match.league || 'NBA',
@@ -19664,8 +19691,8 @@ async function runAutoBasket() {
         confidence: conf,
         isLive: isLiveBasket ? 1 : 0,
         market_type: 'ML',
-        modelP1: elo.pHome, modelP2: elo.pAway, modelPPick: pickP,
-        modelLabel: 'basket-elo',
+        modelP1: pHome, modelP2: pAway, modelPPick: pickP,
+        modelLabel,
         tipReason,
         isShadow: basketConfig.shadowMode ? 1 : 0,
         lineShopOdds: match.odds || null,
