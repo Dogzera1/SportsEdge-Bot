@@ -2436,8 +2436,19 @@ async function runAutoAnalysis() {
         const liveCooldown = isLiveMatch
           ? (prev?.hadLiveStats ? LIVE_NORMAL_COOLDOWN : LIVE_FAST_RETRY)
           : (prev?.noEdge ? RE_ANALYZE_INTERVAL * 2 : RE_ANALYZE_INTERVAL);
-        if (prev && (now - prev.ts < liveCooldown)) continue;
+        if (prev && (now - prev.ts < liveCooldown)) {
+          if (isLiveMatch) {
+            const _remainSec = Math.round((liveCooldown - (now - prev.ts)) / 1000);
+            log('DEBUG', 'AUTO-LOL', `Live skip cooldown: ${match.team1} vs ${match.team2} (${match.league}) — ${_remainSec}s restante (hadLiveStats=${!!prev.hadLiveStats})`);
+          }
+          continue;
+        }
 
+        // 2026-05-03 diag: rastreia entrada/saída de autoAnalyzeMatch pra live LoL.
+        // Antes ficava silencioso quando autoAnalyzeMatch retornava undefined/no-tip.
+        if (isLiveMatch) {
+          log('INFO', 'AUTO-LOL', `Live analyze start: ${match.team1} vs ${match.team2} (${match.league}) status=${match.status} odds=${match.oddsT1 || '?'}/${match.oddsT2 || '?'}`);
+        }
         const result = await autoAnalyzeMatch(resolveTipsToken('esports'), match);
         // Persiste se teve stats nesse ciclo pra ajustar cooldown na próxima
         analyzedMatches.set(matchKey, {
@@ -2447,7 +2458,13 @@ async function runAutoAnalysis() {
           hadLiveStats: !!result?.hasLiveStats || prev?.hadLiveStats || false,
         });
 
-        if (!result) continue;
+        if (!result) {
+          if (isLiveMatch) log('INFO', 'AUTO-LOL', `Live no-result: ${match.team1} vs ${match.team2} — autoAnalyzeMatch retornou null (sem odds frescas / IA falhou / pre-filter rejeitou)`);
+          continue;
+        }
+        if (isLiveMatch && !result.tipMatch) {
+          log('INFO', 'AUTO-LOL', `Live no-tip: ${match.team1} vs ${match.team2} — hasLiveStats=${!!result.hasLiveStats} mlEdge=${result.mlScore?.toFixed?.(1) ?? 'n/a'}pp hasOdds=${!!result.o?.t1}`);
+        }
         const hasRealOdds = !!(result.o?.t1 && parseFloat(result.o.t1) > 1);
 
         if (result.tipMatch) {
@@ -3459,6 +3476,10 @@ async function settleCompletedTips() {
         } catch (e) { log('WARN', 'SETTLE', `football pre-sync: ${e.message}`); }
       }
 
+      // 2026-05-03: track match_ids cobertos por /settle neste cycle (uma única
+      // chamada /settle settla todas tips do match; iterações subsequentes do
+      // mesmo match_id retornam settled=0 mesmo tendo "funcionado").
+      const _settledMatchIdsThisCycle = new Set();
       for (const tip of unsettled) {
         if (!tip.match_id) continue;
         // MT-promoted tips (handicap/totais/TB) usam settle por score parseado em
@@ -3525,8 +3546,22 @@ async function settleCompletedTips() {
             settleBody.home = tip.participant1 || '';
             settleBody.away = tip.participant2 || '';
           }
-          await serverPost('/settle', settleBody, sport);
-
+          // 2026-05-03: capturar response real de /settle. Antes o bot logava
+          // WIN/LOSS sem checar — quando /settle silenciosamente excluía a tip
+          // (filtro is_shadow=0, archived=1, market non-ML), tips ficavam pending
+          // forever e o log mentia. Agora: se response.settled===0 E nenhuma
+          // iteração anterior cobriu este match_id (no-op real), loga WARN.
+          // Caso contrário (response.settled>0 OU match_id já settled em call
+          // anterior do mesmo cycle), loga sucesso normalmente.
+          const settleResp = await serverPost('/settle', settleBody, sport).catch(() => null);
+          const respSettled = Number(settleResp?.settled || 0);
+          const alreadyCovered = _settledMatchIdsThisCycle.has(tip.match_id);
+          if (respSettled === 0 && !alreadyCovered) {
+            log('WARN', 'SETTLE',
+              `${sport} ${tip.participant1} vs ${tip.participant2}: /settle no-op (skipped=${settleResp?.skipped || 'unknown'}) — tip ${tip.id} ainda pending`);
+            continue;
+          }
+          if (respSettled > 0) _settledMatchIdsThisCycle.add(tip.match_id);
           log('INFO', 'SETTLE', `${sport}: ${tip.participant1} vs ${tip.participant2} → ${won ? 'WIN ✅' : 'LOSS ❌'} (${result.winner})`);
           settled++;
         } catch(e) {

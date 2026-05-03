@@ -4652,13 +4652,19 @@ const server = http.createServer(async (req, res) => {
         statsDisabled = true;
       }
       if (!statsDisabled) {
-        // Prefere o resultado com mais frames de gold real; preserva ordem (90s primeiro).
+        // Prefere gold recente sobre gold antigo. 2026-05-03 FIX: scoring antigo
+        // (1000 + frames.length) ignorava recência → log mostrava "gold a 600s
+        // atrás (70 frames)" ganhando de "30s atrás (60 frames)". Pricing live
+        // ficava 10min defasado em LoL = estado completamente diferente.
+        // Penalty linear: -secAgo/10 → 30s→-3, 600s→-60. Diferença de 57 supera
+        // diferença típica de frames (5-15).
         let bestScore = -1;
         for (const r of scanResults) {
           if (r.status !== 200) continue;
           const d = safeParse(r.body, {});
           const hasGold = d.frames?.length && d.frames.some(f => f.blueTeam?.totalGold > 0);
-          const score = hasGold ? 1000 + (d.frames.length || 0) : (d.frames?.length || 0);
+          const baseFrames = d.frames?.length || 0;
+          const score = hasGold ? (1000 + baseFrames - r.secAgo / 10) : baseFrames;
           if (score > bestScore) {
             bestScore = score;
             frames = d.frames || [];
@@ -20922,16 +20928,20 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
         // evitando que dois ciclos de settlement processem o mesmo tip simultaneamente.
         const tipsNeedingClv = [];
         const settleResult = db.transaction(() => {
-          // 2026-05-02: filtra archived + is_shadow. Shadow tips settle via propagator;
-          // archived = NON_ML_AUTOARCHIVE já decidiu que é órfã. Sem isso, cada sweep
-          // cycle reprocessava MAP{N}_WINNER zombies (ex: dota2 tip 667/788) e loggava
-          // SETTLE-GUARD WARN infinito.
+          // 2026-05-03: removido filtro is_shadow=0. Confundia sport-level shadow
+          // mode (VALORANT_SHADOW/CS_SHADOW — tips ML normais sem DM) com MT-shadow
+          // (handicap/totais que precisam propagator). MT já é bloqueada por
+          // match_id `::mt::` (linha ~20920) + market_type non-ML (linha ~20948),
+          // tornando is_shadow=0 redundante. Bug observado 2026-05-03: tips
+          // val/cs (shadow sport) ficavam pending forever — /settle excluia,
+          // /unsettled-tips incluía, bot loop infinito logando WIN/LOSS sem
+          // settlement real (bancaDelta=0 todo ciclo).
+          // archived continua filtrado: NON_ML_AUTOARCHIVE já decidiu órfã.
           const tips = db.prepare(
             `SELECT * FROM tips
              WHERE match_id = ? AND sport = ?
                AND result IS NULL
-               AND (archived IS NULL OR archived = 0)
-               AND COALESCE(is_shadow, 0) = 0`
+               AND (archived IS NULL OR archived = 0)`
           ).all(matchId, sport);
           // Filtro defensivo extra: mesmo se match_id passou pelo guard acima, qualquer
           // tip individual com market_type non-ML é rejeitada (defesa em profundidade).
@@ -21044,7 +21054,13 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
                 tipParticipant: tip.tip_participant,
               });
             }
-            bancaDelta += profitR;
+            // 2026-05-03: shadow tips (is_shadow=1) acumulam result+profit_reais
+            // pra ROI/CLV tracking, mas NÃO afetam bankroll (shadow = track-only).
+            // Antes do fix, shadow tips ficavam pending eternamente e bankroll
+            // não era atualizada porque /settle filtrava is_shadow=0. Agora que
+            // /settle processa shadow, o gate move pra cá: profit_reais sim,
+            // bancaDelta não.
+            if (!Number(tip.is_shadow)) bancaDelta += profitR;
             settled++;
           }
           // Atualiza bankroll DENTRO da transaction pra evitar race condition
