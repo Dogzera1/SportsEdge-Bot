@@ -289,66 +289,88 @@ button, select, input { font-family: inherit; font-size: inherit; color: inherit
 
 <main class="canvas" id="canvas">
 
-  <!-- Row 1: KPIs -->
-  <section class="panel span-3"><div class="kpi" id="kpiBanca">
+  <!-- ═══ KPI strip (todas seções exceto Risk usa essas KPIs default) ═══ -->
+  <section class="panel span-3" data-sections="overview,performance,markets,leagues"><div class="kpi" id="kpiBanca">
     <div class="kpi-label">Banca</div>
     <div class="kpi-row"><div class="kpi-value sk sk-line" style="width:120px"></div></div>
     <div class="kpi-foot sk sk-line" style="width:80px"></div>
     <svg class="kpi-spark" viewBox="0 0 100 28" preserveAspectRatio="none"></svg>
   </div></section>
-  <section class="panel span-3"><div class="kpi" id="kpiRoi">
+  <section class="panel span-3" data-sections="overview,performance,markets,leagues"><div class="kpi" id="kpiRoi">
     <div class="kpi-label">ROI realizado</div>
     <div class="kpi-row"><div class="kpi-value sk sk-line" style="width:90px"></div></div>
     <div class="kpi-foot sk sk-line" style="width:100px"></div>
     <svg class="kpi-spark" viewBox="0 0 100 28" preserveAspectRatio="none"></svg>
   </div></section>
-  <section class="panel span-3"><div class="kpi" id="kpiHit">
+  <section class="panel span-3" data-sections="overview,performance,markets,leagues"><div class="kpi" id="kpiHit">
     <div class="kpi-label">Hit rate</div>
     <div class="kpi-row"><div class="kpi-value sk sk-line" style="width:80px"></div></div>
     <div class="kpi-foot sk sk-line" style="width:90px"></div>
     <svg class="kpi-spark" viewBox="0 0 100 28" preserveAspectRatio="none"></svg>
   </div></section>
-  <section class="panel span-3"><div class="kpi" id="kpiClv">
+  <section class="panel span-3" data-sections="overview,performance,markets,leagues"><div class="kpi" id="kpiClv">
     <div class="kpi-label">CLV médio</div>
     <div class="kpi-row"><div class="kpi-value sk sk-line" style="width:90px"></div></div>
     <div class="kpi-foot sk sk-line" style="width:100px"></div>
     <svg class="kpi-spark" viewBox="0 0 100 28" preserveAspectRatio="none"></svg>
   </div></section>
 
-  <!-- Row 2: Equity (8) | ROI por sport (4) -->
-  <section class="panel span-8">
-    <header class="p-head"><h2 class="p-title">Curva de equity</h2><span class="p-sub">acumulado · profit em R$</span></header>
+  <!-- ═══ Risk-specific KPIs (Banca + Drawdown + Pending stake + Open count) ═══ -->
+  <section class="panel span-3" data-sections="risk"><div class="kpi" id="kpiRiskBanca">
+    <div class="kpi-label">Banca</div>
+    <div class="kpi-row"><div class="kpi-value sk sk-line" style="width:120px"></div></div>
+    <div class="kpi-foot sk sk-line" style="width:80px"></div>
+  </div></section>
+  <section class="panel span-3" data-sections="risk"><div class="kpi" id="kpiDD">
+    <div class="kpi-label">Max drawdown</div>
+    <div class="kpi-row"><div class="kpi-value sk sk-line" style="width:90px"></div></div>
+    <div class="kpi-foot sk sk-line" style="width:100px"></div>
+  </div></section>
+  <section class="panel span-3" data-sections="risk"><div class="kpi" id="kpiPending">
+    <div class="kpi-label">Tips pending</div>
+    <div class="kpi-row"><div class="kpi-value sk sk-line" style="width:80px"></div></div>
+    <div class="kpi-foot sk sk-line" style="width:90px"></div>
+  </div></section>
+  <section class="panel span-3" data-sections="risk"><div class="kpi" id="kpiLive">
+    <div class="kpi-label">Live em risco</div>
+    <div class="kpi-row"><div class="kpi-value sk sk-line" style="width:80px"></div></div>
+    <div class="kpi-foot sk sk-line" style="width:90px"></div>
+  </div></section>
+
+  <!-- ═══ Overview row 2: Equity (8) | ROI sport (4) ═══ -->
+  <section class="panel span-8" data-sections="overview">
+    <header class="p-head"><h2 class="p-title">Curva de equity</h2><span class="p-sub">cross-sport · banca em R$</span></header>
     <div class="p-body"><div class="chart-wrap tall" id="equityWrap"><canvas id="cEquity"></canvas></div></div>
   </section>
-  <section class="panel span-4">
+  <section class="panel span-4" data-sections="overview">
     <header class="p-head"><h2 class="p-title">ROI por sport</h2><span class="p-sub">window selecionada · %</span></header>
     <div class="p-body"><div class="chart-wrap tall" id="roiSportWrap"><canvas id="cRoiSport"></canvas></div></div>
   </section>
 
-  <!-- Row 3: 4 charts -->
-  <section class="panel span-3">
+  <!-- ═══ Overview row 3: 4 charts ═══ -->
+  <section class="panel span-3" data-sections="overview">
     <header class="p-head"><h2 class="p-title">CLV histogram</h2><span class="p-sub">distribuição</span></header>
     <div class="p-body"><div class="chart-wrap" id="clvHistWrap"><canvas id="cClvHist"></canvas></div></div>
   </section>
-  <section class="panel span-3">
+  <section class="panel span-3" data-sections="overview">
     <header class="p-head"><h2 class="p-title">ROI por bucket EV</h2><span class="p-sub">amostra ≥ 10</span></header>
     <div class="p-body"><div class="chart-wrap" id="evBucketWrap"><canvas id="cEvBucket"></canvas></div></div>
   </section>
-  <section class="panel span-3">
+  <section class="panel span-3" data-sections="overview">
     <header class="p-head"><h2 class="p-title">Tips por sport</h2><span class="p-sub">contagem</span></header>
     <div class="p-body"><div class="chart-wrap" id="tipsBySportWrap"><canvas id="cTipsBySport"></canvas></div></div>
   </section>
-  <section class="panel span-3">
-    <header class="p-head"><h2 class="p-title">Top 8 leagues</h2><span class="p-sub">profit · R$</span></header>
+  <section class="panel span-3" data-sections="overview">
+    <header class="p-head"><h2 class="p-title">Top 8 leagues</h2><span class="p-sub" id="topLeaguesSub">profit · R$</span></header>
     <div class="p-body"><div class="chart-wrap" id="topLeaguesWrap"><canvas id="cTopLeagues"></canvas></div></div>
   </section>
 
-  <!-- Row 4: Allocation drift (4) | Recent tips (8) -->
-  <section class="panel span-4">
+  <!-- ═══ Overview row 4: Allocation (4) | Recent tips (8) ═══ -->
+  <section class="panel span-4" data-sections="overview">
     <header class="p-head"><h2 class="p-title">Alocação por sport</h2><span class="p-sub">target vs atual · %</span></header>
     <div class="p-body"><div class="chart-wrap tall" id="allocWrap"><canvas id="cAlloc"></canvas></div></div>
   </section>
-  <section class="panel span-8">
+  <section class="panel span-8" data-sections="overview">
     <header class="p-head"><h2 class="p-title">Tips recentes</h2><span class="p-sub" id="tipsRecentMeta">—</span></header>
     <div class="p-body scroll-y">
       <table class="tbl" id="tblRecent">
@@ -361,8 +383,8 @@ button, select, input { font-family: inherit; font-size: inherit; color: inherit
     </div>
   </section>
 
-  <!-- Row 5: Sport performance matrix -->
-  <section class="panel span-12">
+  <!-- ═══ Overview row 5: Performance table ═══ -->
+  <section class="panel span-12" data-sections="overview,performance">
     <header class="p-head">
       <h2 class="p-title">Performance per sport</h2>
       <span class="p-sub">tabela cruzada — janela selecionada</span>
@@ -386,6 +408,111 @@ button, select, input { font-family: inherit; font-size: inherit; color: inherit
     </div>
   </section>
 
+  <!-- ═══════════ PERFORMANCE section ═══════════ -->
+  <section class="panel span-12" data-sections="performance">
+    <header class="p-head"><h2 class="p-title">Equity + drawdown</h2><span class="p-sub">cross-sport · linha=banca · área=drawdown %</span></header>
+    <div class="p-body"><div class="chart-wrap tall" id="equityDdWrap"><canvas id="cEquityDd"></canvas></div></div>
+  </section>
+  <section class="panel span-6" data-sections="performance">
+    <header class="p-head"><h2 class="p-title">Top leagues — profit</h2><span class="p-sub" id="perfTopSub">8 melhores · R$</span></header>
+    <div class="p-body"><div class="chart-wrap tall" id="perfTopLeaguesWrap"><canvas id="cPerfTopLeagues"></canvas></div></div>
+  </section>
+  <section class="panel span-6" data-sections="performance">
+    <header class="p-head"><h2 class="p-title">Bleeding leagues</h2><span class="p-sub" id="perfBleedSub">8 piores · R$</span></header>
+    <div class="p-body"><div class="chart-wrap tall" id="perfBleedLeaguesWrap"><canvas id="cPerfBleedLeagues"></canvas></div></div>
+  </section>
+
+  <!-- ═══════════ MARKETS section ═══════════ -->
+  <section class="panel span-12" data-sections="markets">
+    <header class="p-head"><h2 class="p-title">ROI por mercado</h2><span class="p-sub" id="marketRoiSub">por sport selecionado · %</span></header>
+    <div class="p-body"><div class="chart-wrap tall" id="roiMarketWrap"><canvas id="cRoiMarket"></canvas></div></div>
+  </section>
+  <section class="panel span-6" data-sections="markets">
+    <header class="p-head"><h2 class="p-title">CLV histogram</h2><span class="p-sub">distribuição CLV % entre tips com close</span></header>
+    <div class="p-body"><div class="chart-wrap tall" id="clvHistWrapM"><canvas id="cClvHistM"></canvas></div></div>
+  </section>
+  <section class="panel span-6" data-sections="markets">
+    <header class="p-head"><h2 class="p-title">ROI por bucket EV</h2><span class="p-sub">EV declarado vs ROI real</span></header>
+    <div class="p-body"><div class="chart-wrap tall" id="evBucketWrapM"><canvas id="cEvBucketM"></canvas></div></div>
+  </section>
+  <section class="panel span-12" data-sections="markets">
+    <header class="p-head"><h2 class="p-title">Performance por book</h2><span class="p-sub">tips com best_book registrado</span></header>
+    <div class="p-body scroll-y">
+      <table class="tbl" id="tblBook">
+        <thead><tr>
+          <th>Book</th>
+          <th class="num">Tips</th>
+          <th class="num">Win</th>
+          <th class="num">Hit %</th>
+          <th class="num">Stake R$</th>
+          <th class="num">Profit R$</th>
+          <th class="num">ROI %</th>
+          <th class="num">Δ Pinnacle %</th>
+        </tr></thead>
+        <tbody id="tblBookBody"><tr><td colspan="8" class="muted" style="padding:24px;text-align:center">Carregando…</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ═══════════ LEAGUES section ═══════════ -->
+  <section class="panel span-6" data-sections="leagues">
+    <header class="p-head"><h2 class="p-title">Top profit</h2><span class="p-sub" id="lgTopSub">10 melhores · R$</span></header>
+    <div class="p-body"><div class="chart-wrap tall" id="lgTopWrap"><canvas id="cLgTop"></canvas></div></div>
+  </section>
+  <section class="panel span-6" data-sections="leagues">
+    <header class="p-head"><h2 class="p-title">Bleeding</h2><span class="p-sub" id="lgBleedSub">verdict bleeding · R$</span></header>
+    <div class="p-body"><div class="chart-wrap tall" id="lgBleedWrap"><canvas id="cLgBleed"></canvas></div></div>
+  </section>
+  <section class="panel span-12" data-sections="leagues">
+    <header class="p-head"><h2 class="p-title">Detalhe por liga</h2><span class="p-sub" id="lgTblSub">ordenado por ROI</span></header>
+    <div class="p-body scroll-y">
+      <table class="tbl" id="tblLeagues">
+        <thead><tr>
+          <th>Liga</th>
+          <th class="num">Tips</th>
+          <th class="num">W/L</th>
+          <th class="num">Hit %</th>
+          <th class="num">Profit R$</th>
+          <th class="num">ROI %</th>
+          <th class="num">CLV %</th>
+          <th class="num">Brier</th>
+          <th>Verdict</th>
+        </tr></thead>
+        <tbody id="tblLeaguesBody"><tr><td colspan="9" class="muted" style="padding:24px;text-align:center">Carregando…</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ═══════════ RISK section ═══════════ -->
+  <section class="panel span-12" data-sections="risk">
+    <header class="p-head"><h2 class="p-title">Drawdown sobre o tempo</h2><span class="p-sub">% de queda do peak — ideal próximo de 0%</span></header>
+    <div class="p-body"><div class="chart-wrap tall" id="ddWrap"><canvas id="cDD"></canvas></div></div>
+  </section>
+  <section class="panel span-6" data-sections="risk">
+    <header class="p-head"><h2 class="p-title">Alocação drift</h2><span class="p-sub">target vs atual · %</span></header>
+    <div class="p-body"><div class="chart-wrap tall" id="allocWrapR"><canvas id="cAllocR"></canvas></div></div>
+  </section>
+  <section class="panel span-6" data-sections="risk">
+    <header class="p-head"><h2 class="p-title">Tips em risco (live)</h2><span class="p-sub" id="riskMeta">—</span></header>
+    <div class="p-body scroll-y">
+      <table class="tbl" id="tblRisk">
+        <thead><tr>
+          <th>Sport</th>
+          <th>Match</th>
+          <th>Pick</th>
+          <th class="num">Odd</th>
+          <th class="num">Health</th>
+          <th>Status</th>
+        </tr></thead>
+        <tbody id="tblRiskBody"><tr><td colspan="6" class="muted" style="padding:24px;text-align:center">Carregando…</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+  <section class="panel span-12" data-sections="risk">
+    <header class="p-head"><h2 class="p-title">Pending tips por sport</h2><span class="p-sub">aguardando settle · stake aberta</span></header>
+    <div class="p-body"><div class="chart-wrap" id="pendBySportWrap"><canvas id="cPendBySport"></canvas></div></div>
+  </section>
+
 </main>
 </div>
 
@@ -398,6 +525,7 @@ button, select, input { font-family: inherit; font-size: inherit; color: inherit
 const state = {
   days: 30,
   sports: new Set(), // empty = all
+  section: 'overview',
   charts: {},
   data: {},
 };
@@ -1114,17 +1242,556 @@ async function loadRecent() {
 async function loadAll(force = false) {
   setLoading(true);
   try {
-    await Promise.allSettled([
-      loadOverall(),  // KPIs + equity (cross-sport) + sports breakdown + perf table
-      loadClvHist(),
-      loadEvBucket(),
-      loadTopLeagues(),
-      loadRecent(),
-    ]);
+    // Sempre carrega overall (KPIs + sports breakdown — usado em todas seções).
+    await loadOverall();
+
+    // Section-specific
+    const tasks = [];
+    if (state.section === 'overview') {
+      tasks.push(loadClvHist(), loadEvBucket(), loadTopLeagues(), loadRecent());
+    } else if (state.section === 'performance') {
+      tasks.push(loadEquityWithDD(), loadLeaguesPerformance());
+    } else if (state.section === 'markets') {
+      tasks.push(loadRoiByMarket(), loadClvHistMarkets(), loadEvBucketMarkets(), loadRoiByBook());
+    } else if (state.section === 'leagues') {
+      tasks.push(loadLeaguesFull());
+    } else if (state.section === 'risk') {
+      tasks.push(loadDrawdown(), loadRiskAllocation(), loadTipsEmRisco(), loadPendingBySport(), loadRiskKpis());
+    }
+    await Promise.allSettled(tasks);
     setLastUpdate();
   } finally {
     setLoading(false);
   }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Section switcher — hide/show panels com base em data-sections
+// ─────────────────────────────────────────────────────────────────────────
+function applySection(section) {
+  state.section = section;
+  // Update nav active state
+  document.querySelectorAll('#nav a').forEach(a => {
+    a.classList.toggle('active', a.dataset.section === section);
+  });
+  // Show/hide panels
+  document.querySelectorAll('.panel[data-sections]').forEach(p => {
+    const allowed = (p.dataset.sections || '').split(',').map(s => s.trim());
+    p.style.display = allowed.includes(section) ? '' : 'none';
+  });
+  // Destroy charts that won't be re-rendered nesta seção pra liberar canvas
+  // (Chart.js bind ao canvas — se canvas reaparece, recria limpo no load).
+  for (const k of Object.keys(state.charts)) {
+    try { state.charts[k].destroy(); } catch (_) {}
+    delete state.charts[k];
+  }
+  loadAll();
+}
+
+function initNav() {
+  document.querySelectorAll('#nav a').forEach(a => {
+    a.addEventListener('click', (e) => {
+      e.preventDefault();
+      const sec = a.dataset.section;
+      if (sec && sec !== state.section) applySection(sec);
+    });
+  });
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Performance section loaders
+// ─────────────────────────────────────────────────────────────────────────
+async function loadEquityWithDD() {
+  // Reusa overall.equity.series (já tem cum_banca + n) — agora computa drawdown_pct
+  // usando peak running-max. Renderiza em chart com 2 datasets.
+  const series = state.data.overall?.equity?.series || [];
+  if (!series.length) {
+    showEmpty('equityDdWrap', 'Sem dados de equity');
+    return;
+  }
+  let peak = -Infinity;
+  const enriched = series.map(r => {
+    if (r.cum_banca > peak) peak = r.cum_banca;
+    const dd = peak > 0 ? ((peak - r.cum_banca) / peak) * 100 : 0;
+    return { ...r, dd_pct: +dd.toFixed(2) };
+  });
+
+  const labels = enriched.map(r => r.day);
+  const banca = enriched.map(r => r.cum_banca);
+  const dd = enriched.map(r => -r.dd_pct); // negativo pra ficar abaixo do zero visualmente
+
+  const el = document.getElementById('cEquityDd');
+  destroyChart('equityDd');
+  const ctx = el.getContext('2d');
+  const grad = ctx.createLinearGradient(0, 0, 0, 280);
+  grad.addColorStop(0, 'oklch(0.55 0.18 250 / 0.18)');
+  grad.addColorStop(1, 'oklch(0.55 0.18 250 / 0)');
+
+  state.charts.equityDd = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [
+        {
+          label: 'Banca (R$)',
+          data: banca,
+          borderColor: 'oklch(0.55 0.18 250)',
+          backgroundColor: grad,
+          fill: true,
+          yAxisID: 'y',
+        },
+        {
+          label: 'Drawdown (%)',
+          data: dd,
+          borderColor: 'oklch(0.58 0.21 25)',
+          backgroundColor: 'oklch(0.58 0.21 25 / 0.10)',
+          fill: true,
+          yAxisID: 'y2',
+          borderDash: [4, 3],
+          borderWidth: 1.4,
+        },
+      ],
+    },
+    options: {
+      plugins: { legend: { position: 'bottom', labels: { boxWidth: 10, padding: 10, font: { size: 10 } } } },
+      scales: {
+        x: { grid: { display: false }, ticks: { font: { size: 10 }, autoSkipPadding: 18 } },
+        y: { position: 'left', grid: { color: 'oklch(0.93 0.008 250)' }, ticks: { callback: (v) => 'R$ ' + fmtNum(v, 0), font: { size: 10 } } },
+        y2: { position: 'right', grid: { display: false }, ticks: { callback: (v) => v + '%', font: { size: 10 } } },
+      },
+    },
+  });
+}
+
+async function loadLeaguesPerformance() {
+  const sport = state.sports.size === 1 ? [...state.sports][0] : 'lol';
+  document.getElementById('perfTopSub').textContent = `${sport.toUpperCase()} · 8 melhores · R$`;
+  document.getElementById('perfBleedSub').textContent = `${sport.toUpperCase()} · 8 piores · R$`;
+  try {
+    const data = await fetchJson(`/roi-by-league?sport=${sport}&days=${state.days}`);
+    const all = data?.leagues || [];
+    const top = [...all].sort((a, b) => (b.profit_reais || 0) - (a.profit_reais || 0)).slice(0, 8);
+    const bleed = [...all].sort((a, b) => (a.profit_reais || 0) - (b.profit_reais || 0)).slice(0, 8);
+    renderLeagueBars('cPerfTopLeagues', 'perfTopLeaguesWrap', top, 'pos');
+    renderLeagueBars('cPerfBleedLeagues', 'perfBleedLeaguesWrap', bleed, 'neg');
+  } catch (e) {
+    showError('perfTopLeaguesWrap', 'Falha leagues');
+    showError('perfBleedLeaguesWrap', 'Falha leagues');
+  }
+}
+
+function renderLeagueBars(canvasId, wrapId, items, tone) {
+  const el = document.getElementById(canvasId);
+  if (!el) return;
+  destroyChart(canvasId);
+  if (!items?.length) { showEmpty(wrapId, 'Sem dados'); return; }
+  const labels = items.map(r => (r.league || '?').slice(0, 26));
+  const data = items.map(r => Number(r.profit_reais || 0));
+  const colors = data.map(d =>
+    tone === 'pos' ? (d >= 0 ? 'oklch(0.55 0.18 152 / 0.85)' : 'oklch(0.78 0.05 250 / 0.5)')
+    : tone === 'neg' ? (d < 0 ? 'oklch(0.58 0.21 25 / 0.85)' : 'oklch(0.78 0.05 250 / 0.5)')
+    : 'oklch(0.55 0.18 250 / 0.8)'
+  );
+  state.charts[canvasId] = new Chart(el.getContext('2d'), {
+    type: 'bar',
+    data: { labels, datasets: [{ data, backgroundColor: colors, borderWidth: 0 }] },
+    options: {
+      indexAxis: 'y',
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: (i) => {
+              const r = items[i.dataIndex];
+              return `${fmtBRL(r.profit_reais)} · ROI ${fmtPct(r.roi, 1)} · n=${r.n}`;
+            },
+          },
+        },
+      },
+      scales: {
+        x: { grid: { color: 'oklch(0.93 0.008 250)' }, ticks: { callback: (v) => 'R$ ' + fmtNum(v, 0), font: { size: 10 } } },
+        y: { grid: { display: false }, ticks: { font: { size: 10 } } },
+      },
+    },
+  });
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Markets section loaders
+// ─────────────────────────────────────────────────────────────────────────
+async function loadRoiByMarket() {
+  const sport = state.sports.size === 1 ? [...state.sports][0] : 'lol';
+  document.getElementById('marketRoiSub').textContent = `${sport.toUpperCase()} · ROI por market_type · %`;
+  try {
+    const data = await fetchJson(`/roi-by-market?sport=${sport}`);
+    const rows = Array.isArray(data) ? data : [];
+    const filtered = rows.filter(r => r.market_type && (r.total || 0) >= 1);
+    if (!filtered.length) { showEmpty('roiMarketWrap', 'Sem amostra'); return; }
+    filtered.sort((a, b) => (b.roi || 0) - (a.roi || 0));
+    const labels = filtered.map(r => r.market_type);
+    const rois = filtered.map(r => Number(r.roi || 0));
+    const colors = rois.map(r => r >= 0 ? 'oklch(0.55 0.18 152 / 0.85)' : 'oklch(0.58 0.21 25 / 0.85)');
+    destroyChart('roiMarket');
+    state.charts.roiMarket = new Chart(document.getElementById('cRoiMarket').getContext('2d'), {
+      type: 'bar',
+      data: { labels, datasets: [{ data: rois, backgroundColor: colors, borderWidth: 0 }] },
+      options: {
+        indexAxis: 'y',
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            callbacks: {
+              label: (i) => {
+                const r = filtered[i.dataIndex];
+                return `ROI ${fmtPct(r.roi, 2)} · ${r.wins}W/${r.losses}L · n=${r.total}`;
+              },
+            },
+          },
+        },
+        scales: {
+          x: { grid: { color: 'oklch(0.93 0.008 250)' }, ticks: { callback: (v) => v + '%', font: { size: 10 } } },
+          y: { grid: { display: false }, ticks: { font: { size: 10 } } },
+        },
+      },
+    });
+  } catch (e) {
+    showError('roiMarketWrap', 'Falha ROI por market');
+  }
+}
+
+async function loadClvHistMarkets() {
+  const sport = state.sports.size === 1 ? `&sport=${[...state.sports][0]}` : '';
+  try {
+    const data = await fetchJson(`/clv-histogram?days=${state.days}${sport}`);
+    renderClvHistInto('cClvHistM', 'clvHistWrapM', data);
+  } catch (e) {
+    showError('clvHistWrapM', 'Falha CLV');
+  }
+}
+
+async function loadEvBucketMarkets() {
+  const sport = state.sports.size === 1 ? `&sport=${[...state.sports][0]}` : '';
+  try {
+    const data = await fetchJson(`/roi-by-ev-bucket?days=${state.days}${sport}`);
+    renderEvBucketInto('cEvBucketM', 'evBucketWrapM', data);
+  } catch (e) {
+    showError('evBucketWrapM', 'Falha EV bucket');
+  }
+}
+
+function renderClvHistInto(canvasId, wrapId, data) {
+  const buckets = data?.buckets || [];
+  const el = document.getElementById(canvasId);
+  if (!el) return;
+  destroyChart(canvasId);
+  if (!buckets.length || buckets.every(b => !b.n)) { showEmpty(wrapId, 'Sem amostra de CLV'); return; }
+  const labels = buckets.map(b => b.label);
+  const counts = buckets.map(b => b.n || 0);
+  const colors = buckets.map(b => (b.min ?? 0) >= 0 ? 'oklch(0.55 0.18 152 / 0.85)' : 'oklch(0.58 0.21 25 / 0.85)');
+  state.charts[canvasId] = new Chart(el.getContext('2d'), {
+    type: 'bar',
+    data: { labels, datasets: [{ data: counts, backgroundColor: colors, borderWidth: 0 }] },
+    options: {
+      plugins: { legend: { display: false }, tooltip: { callbacks: { label: (i) => `n=${fmtNum(i.parsed.y)}` } } },
+      scales: {
+        x: { grid: { display: false }, ticks: { font: { size: 9 }, maxRotation: 35 } },
+        y: { grid: { color: 'oklch(0.93 0.008 250)' }, ticks: { precision: 0, font: { size: 10 } } },
+      },
+    },
+  });
+}
+
+function renderEvBucketInto(canvasId, wrapId, data) {
+  const buckets = data?.buckets || [];
+  const el = document.getElementById(canvasId);
+  if (!el) return;
+  destroyChart(canvasId);
+  if (!buckets.length || buckets.every(b => !b.n)) { showEmpty(wrapId, 'Sem amostra'); return; }
+  const labels = buckets.map(b => b.label);
+  const rois = buckets.map(b => Number(b.roi ?? 0));
+  const colors = rois.map(r => r >= 0 ? 'oklch(0.55 0.18 152 / 0.85)' : 'oklch(0.58 0.21 25 / 0.85)');
+  state.charts[canvasId] = new Chart(el.getContext('2d'), {
+    type: 'bar',
+    data: { labels, datasets: [{ data: rois, backgroundColor: colors, borderWidth: 0 }] },
+    options: {
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: (i) => {
+              const b = buckets[i.dataIndex];
+              return `ROI ${fmtPct(b.roi, 2)} · n=${b.n}`;
+            },
+          },
+        },
+      },
+      scales: {
+        x: { grid: { display: false }, ticks: { font: { size: 9 } } },
+        y: { grid: { color: 'oklch(0.93 0.008 250)' }, ticks: { callback: (v) => v + '%', font: { size: 10 } } },
+      },
+    },
+  });
+}
+
+async function loadRoiByBook() {
+  const sport = state.sports.size === 1 ? [...state.sports][0] : null;
+  const params = new URLSearchParams({ days: String(state.days) });
+  if (sport) params.set('sport', sport);
+  try {
+    const data = await fetchJson(`/roi-by-book?${params}`);
+    const rows = data?.byBook || data?.books || data?.rows || [];
+    const tbody = document.getElementById('tblBookBody');
+    if (!rows.length) {
+      tbody.innerHTML = `<tr><td colspan="8" class="muted" style="padding:24px;text-align:center">Sem amostra</td></tr>`;
+      return;
+    }
+    rows.sort((a, b) => (b.profit_reais || 0) - (a.profit_reais || 0));
+    tbody.innerHTML = rows.map(b => {
+      const roi = b.roi;
+      const roiCell = roi != null
+        ? `<span class="pill ${roi > 0 ? 'pos' : roi < 0 ? 'neg' : 'flat'}">${fmtPct(roi, 2)}</span>`
+        : '—';
+      const delta = b.avg_delta_pct ?? b.line_shop_delta_pct;
+      return `<tr>
+        <td><strong>${escapeHtml(b.book || '?')}</strong></td>
+        <td class="num">${fmtNum(b.n || b.total)}</td>
+        <td class="num">${fmtNum(b.wins)}</td>
+        <td class="num">${b.hit_rate != null ? fmtPct(b.hit_rate, 1) : '—'}</td>
+        <td class="num tt">${fmtBRL(b.stake_reais)}</td>
+        <td class="num tt"><span class="${b.profit_reais > 0 ? 'pos' : b.profit_reais < 0 ? 'neg' : ''}">${fmtBRL(b.profit_reais)}</span></td>
+        <td class="num">${roiCell}</td>
+        <td class="num tt">${delta != null ? fmtPct(delta, 2) : '—'}</td>
+      </tr>`;
+    }).join('');
+  } catch (e) {
+    document.getElementById('tblBookBody').innerHTML = `<tr><td colspan="8" class="err">Falha ROI por book</td></tr>`;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Leagues section loaders
+// ─────────────────────────────────────────────────────────────────────────
+async function loadLeaguesFull() {
+  const sport = state.sports.size === 1 ? [...state.sports][0] : 'lol';
+  document.getElementById('lgTopSub').textContent = `${sport.toUpperCase()} · 10 melhores · R$`;
+  document.getElementById('lgBleedSub').textContent = `${sport.toUpperCase()} · ROI ≤ -20% n≥5`;
+  document.getElementById('lgTblSub').textContent = `${sport.toUpperCase()} · ordenado por ROI`;
+  try {
+    const data = await fetchJson(`/roi-by-league?sport=${sport}&days=${state.days}`);
+    const all = data?.leagues || [];
+    const top = [...all].sort((a, b) => (b.profit_reais || 0) - (a.profit_reais || 0)).slice(0, 10);
+    const bleed = all.filter(l => l.verdict === 'bleeding').sort((a, b) => (a.profit_reais || 0) - (b.profit_reais || 0)).slice(0, 10);
+
+    renderLeagueBars('cLgTop', 'lgTopWrap', top, 'pos');
+    renderLeagueBars('cLgBleed', 'lgBleedWrap', bleed.length ? bleed : all.slice(-10).reverse(), 'neg');
+
+    // Table — ordenada por ROI asc (piores no topo pra ação)
+    const tbody = document.getElementById('tblLeaguesBody');
+    if (!all.length) {
+      tbody.innerHTML = `<tr><td colspan="9" class="muted" style="padding:24px;text-align:center">Sem dados</td></tr>`;
+      return;
+    }
+    const sorted = [...all].sort((a, b) => (a.roi ?? 0) - (b.roi ?? 0));
+    tbody.innerHTML = sorted.map(l => {
+      const roi = l.roi;
+      const roiCell = roi != null
+        ? `<span class="pill ${roi > 0 ? 'pos' : roi < 0 ? 'neg' : 'flat'}">${fmtPct(roi, 2)}</span>`
+        : '—';
+      const verdictPill = {
+        bleeding: '<span class="pill neg">bleeding</span>',
+        edge: '<span class="pill pos">edge</span>',
+        negative: '<span class="pill warn">negative</span>',
+        neutral: '<span class="pill flat">neutral</span>',
+        insufficient: '<span class="pill flat">n&lt;3</span>',
+      }[l.verdict] || '—';
+      const clv = l.clv_avg_pct;
+      const clvCell = clv != null ? `<span class="${clv >= 0 ? 'pos' : 'neg'}">${fmtPct(clv, 2)}</span>` : '—';
+      return `<tr>
+        <td>${escapeHtml(l.league || '?')}</td>
+        <td class="num">${fmtNum(l.n)}</td>
+        <td class="num tt">${l.wins}/${l.losses}</td>
+        <td class="num">${l.hit_rate != null ? fmtPct(l.hit_rate, 1) : '—'}</td>
+        <td class="num tt"><span class="${l.profit_reais > 0 ? 'pos' : l.profit_reais < 0 ? 'neg' : ''}">${fmtBRL(l.profit_reais)}</span></td>
+        <td class="num">${roiCell}</td>
+        <td class="num tt">${clvCell}</td>
+        <td class="num tt">${l.brier != null ? l.brier.toFixed(3) : '—'}</td>
+        <td>${verdictPill}</td>
+      </tr>`;
+    }).join('');
+  } catch (e) {
+    showError('lgTopWrap', 'Falha leagues');
+    showError('lgBleedWrap', 'Falha leagues');
+    document.getElementById('tblLeaguesBody').innerHTML = `<tr><td colspan="9" class="err">Falha</td></tr>`;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Risk section loaders
+// ─────────────────────────────────────────────────────────────────────────
+function loadRiskKpis() {
+  const data = state.data.overall || {};
+  const banca = data.banca || {};
+  const equity = data.equity || {};
+  const overall = data.overall || {};
+
+  setKpiSimple('kpiRiskBanca', {
+    value: fmtBRL(banca.total_current),
+    foot: `inicial ${fmtBRL(banca.total_initial || 0)}`,
+  });
+  setKpiSimple('kpiDD', {
+    value: equity.max_drawdown_pct != null ? `-${equity.max_drawdown_pct.toFixed(1)}%` : '—',
+    foot: equity.max_drawdown_pct != null && equity.max_drawdown_pct > 15
+      ? '🔴 alta queda'
+      : equity.max_drawdown_pct > 8
+      ? '🟠 atenção'
+      : '🟢 saudável',
+  });
+  setKpiSimple('kpiPending', {
+    value: overall.pending != null ? String(overall.pending) : '—',
+    foot: 'tips aguardando settle',
+  });
+  setKpiSimple('kpiLive', {
+    value: state.data.tipsEmRisco?.count != null ? String(state.data.tipsEmRisco.count) : '—',
+    foot: state.data.tipsEmRisco?.count > 0 ? '🟠 health < 60%' : '—',
+  });
+}
+
+function setKpiSimple(id, { value, foot }) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  const valueEl = el.querySelector('.kpi-value');
+  if (valueEl) {
+    valueEl.classList.remove('sk', 'sk-line');
+    valueEl.removeAttribute('style');
+    valueEl.textContent = value;
+  }
+  const footEl = el.querySelector('.kpi-foot');
+  if (footEl) {
+    footEl.classList.remove('sk', 'sk-line');
+    footEl.removeAttribute('style');
+    footEl.textContent = foot || '';
+  }
+}
+
+async function loadDrawdown() {
+  const series = state.data.overall?.equity?.series || [];
+  if (!series.length) { showEmpty('ddWrap', 'Sem dados'); return; }
+  let peak = -Infinity;
+  const dd = series.map(r => {
+    if (r.cum_banca > peak) peak = r.cum_banca;
+    return peak > 0 ? -((peak - r.cum_banca) / peak) * 100 : 0;
+  });
+  destroyChart('dd');
+  const el = document.getElementById('cDD');
+  state.charts.dd = new Chart(el.getContext('2d'), {
+    type: 'line',
+    data: {
+      labels: series.map(r => r.day),
+      datasets: [{
+        label: 'Drawdown %',
+        data: dd,
+        borderColor: 'oklch(0.58 0.21 25)',
+        backgroundColor: 'oklch(0.58 0.21 25 / 0.16)',
+        fill: true,
+      }],
+    },
+    options: {
+      plugins: { legend: { display: false }, tooltip: { callbacks: { label: (i) => fmtPct(i.parsed.y, 2) } } },
+      scales: {
+        x: { grid: { display: false }, ticks: { font: { size: 10 }, autoSkipPadding: 18 } },
+        y: { grid: { color: 'oklch(0.93 0.008 250)' }, ticks: { callback: (v) => v + '%', font: { size: 10 } }, suggestedMax: 0 },
+      },
+    },
+  });
+}
+
+function loadRiskAllocation() {
+  // Reusa sports breakdown do overall
+  const sports = state.data.overall?.sports || [];
+  const items = sports.filter(s => s.allocation_target_pct != null);
+  if (!items.length) { showEmpty('allocWrapR', 'Sem baseline'); return; }
+  destroyChart('allocR');
+  state.charts.allocR = new Chart(document.getElementById('cAllocR').getContext('2d'), {
+    type: 'bar',
+    data: {
+      labels: items.map(s => s.sport.toUpperCase()),
+      datasets: [
+        { label: 'Target', data: items.map(s => s.allocation_target_pct), backgroundColor: 'oklch(0.78 0.05 250 / 0.6)', borderWidth: 0 },
+        { label: 'Atual', data: items.map(s => s.allocation_actual_pct), backgroundColor: 'oklch(0.55 0.18 250)', borderWidth: 0 },
+      ],
+    },
+    options: {
+      plugins: { legend: { position: 'bottom', labels: { boxWidth: 10, padding: 10, font: { size: 10 } } } },
+      scales: {
+        x: { grid: { display: false }, ticks: { font: { size: 10 } } },
+        y: { grid: { color: 'oklch(0.93 0.008 250)' }, ticks: { callback: (v) => v + '%', font: { size: 10 } } },
+      },
+    },
+  });
+}
+
+async function loadTipsEmRisco() {
+  // /tips-em-risco exige sport. Loop nas sports principais.
+  const sports = state.sports.size ? [...state.sports] : ['lol', 'tennis', 'football', 'cs', 'dota2'];
+  const all = [];
+  await Promise.all(sports.map(sp =>
+    fetchJson(`/tips-em-risco?sport=${sp}&days=3`)
+      .then(r => {
+        if (Array.isArray(r?.alerts)) all.push(...r.alerts.map(a => ({ ...a, sport: sp })));
+      })
+      .catch(() => {})
+  ));
+  state.data.tipsEmRisco = { count: all.length, items: all };
+  // Atualiza KPI live
+  if (state.section === 'risk') loadRiskKpis();
+
+  const tbody = document.getElementById('tblRiskBody');
+  const meta = document.getElementById('riskMeta');
+  if (meta) meta.textContent = `${all.length} alerta${all.length === 1 ? '' : 's'}`;
+  if (!all.length) {
+    tbody.innerHTML = `<tr><td colspan="6" class="muted" style="padding:24px;text-align:center">Nenhum tip em risco no momento ✓</td></tr>`;
+    return;
+  }
+  tbody.innerHTML = all.slice(0, 30).map(a => {
+    const health = a.health_pct != null ? a.health_pct : (a.health || '?');
+    const healthCls = (typeof health === 'number')
+      ? (health < 40 ? 'neg' : health < 70 ? 'warn' : 'pos')
+      : 'flat';
+    return `<tr>
+      <td><span class="pill flat">${(a.sport || '?').toUpperCase()}</span></td>
+      <td>${escapeHtml(a.match_label || `${a.participant1 || '?'} vs ${a.participant2 || '?'}`)}</td>
+      <td>${escapeHtml(a.tip_participant || '—')}</td>
+      <td class="num tt">${a.odds != null ? fmtNum(parseFloat(a.odds), 2) : '—'}</td>
+      <td class="num"><span class="pill ${healthCls}">${typeof health === 'number' ? health.toFixed(0) + '%' : health}</span></td>
+      <td>${escapeHtml(a.status || a.alert || '—')}</td>
+    </tr>`;
+  }).join('');
+}
+
+async function loadPendingBySport() {
+  // Usa sports breakdown do overall (já tem `pending` count).
+  const sports = state.data.overall?.sports || [];
+  const items = sports.filter(s => (s.pending || 0) > 0).sort((a, b) => (b.pending || 0) - (a.pending || 0));
+  if (!items.length) { showEmpty('pendBySportWrap', 'Sem pending'); return; }
+  destroyChart('pendBySport');
+  state.charts.pendBySport = new Chart(document.getElementById('cPendBySport').getContext('2d'), {
+    type: 'bar',
+    data: {
+      labels: items.map(s => s.sport.toUpperCase()),
+      datasets: [{
+        data: items.map(s => s.pending),
+        backgroundColor: items.map(s => sportColor(s.sport)),
+        borderWidth: 0,
+      }],
+    },
+    options: {
+      plugins: { legend: { display: false }, tooltip: { callbacks: { label: (i) => `${fmtNum(i.parsed.y)} tips pending` } } },
+      scales: {
+        x: { grid: { display: false }, ticks: { font: { size: 10 } } },
+        y: { grid: { color: 'oklch(0.93 0.008 250)' }, ticks: { precision: 0, font: { size: 10 } } },
+      },
+    },
+  });
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -1134,7 +1801,9 @@ function boot() {
   initRangeSeg();
   initSports(KNOWN_SPORTS);
   initRefresh();
-  loadAll();
+  initNav();
+  // Aplica section inicial (esconde panels que não são overview).
+  applySection('overview');
   // Auto-refresh 60s — under the same exponential ease the charts use.
   setInterval(() => loadAll(), 60_000);
 }
