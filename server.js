@@ -2875,6 +2875,62 @@ async function getTheOddsDotaMatches() {
   return matches;
 }
 
+// ── The Odds API — Basketball (NBA fase 1) ──
+// 2026-05-03: novo sport basket. Fase 1 só basketball_nba; expandir com
+// basketball_wnba/_euroleague_basketball quando shadow validar (n≥30 + CLV≥0).
+let _basketOddsCache = { data: [], ts: 0 };
+const BASKET_ODDS_CACHE_TTL = parseInt(process.env.BASKET_ODDS_CACHE_TTL_MS || String(3 * 60 * 1000), 10);
+
+async function getTheOddsBasketMatches() {
+  if (!THE_ODDS_API_KEY) return [];
+  if (_basketOddsCache.data.length && (Date.now() - _basketOddsCache.ts) < BASKET_ODDS_CACHE_TTL) {
+    return _basketOddsCache.data;
+  }
+  // Hardcoded keys (raramente mudam). Fase 1 NBA only — adicionar abaixo conforme expansão.
+  const basketKeys = ['basketball_nba'];
+  const now = Date.now();
+  const matches = [];
+  for (const key of basketKeys) {
+    if (!oddsApiAllowed('ODDS')) break;
+    const url = `https://api.the-odds-api.com/v4/sports/${key}/odds/?apiKey=${THE_ODDS_API_KEY}&regions=eu&markets=h2h&oddsFormat=decimal`;
+    const r = await theOddsGet(url).catch(() => null);
+    if (!r || r.status !== 200) continue;
+    const events = safeParse(r.body, []);
+    for (const e of events) {
+      const commenceTs = new Date(e.commence_time).getTime();
+      // Aceita live (até 3h no passado) + upcoming até 3 dias adiante
+      if (commenceTs < now - 3 * 60 * 60 * 1000) continue;
+      if (commenceTs > now + 3 * 24 * 60 * 60 * 1000) continue;
+      const bm = e.bookmakers?.[0];
+      const market = bm?.markets?.find(m => m.key === 'h2h');
+      const outcomes = market?.outcomes || [];
+      const o1 = outcomes.find(o => o.name === e.home_team);
+      const o2 = outcomes.find(o => o.name === e.away_team);
+      if (!o1 || !o2) continue;
+      matches.push({
+        id: `basket_odds_${e.id}`,
+        sport: 'basket',
+        game: 'basket',
+        status: commenceTs <= now ? 'live' : 'upcoming',
+        team1: e.home_team,
+        team2: e.away_team,
+        league: e.sport_title || 'NBA',
+        time: e.commence_time,
+        sport_key: key,
+        odds: { t1: String(o1.price), t2: String(o2.price), bookmaker: bm.title },
+        _source: 'theodds',
+        _oddsId: e.id,
+      });
+    }
+  }
+  matches.sort((a, b) => new Date(a.time) - new Date(b.time));
+  if (matches.length) {
+    log('INFO', 'BASKET', `The Odds API: ${matches.length} partidas basket com odds`);
+    _basketOddsCache = { data: matches, ts: Date.now() };
+  }
+  return matches;
+}
+
 // ── The Odds API — Table Tennis ──
 let _ttOddsCache = { data: [], ts: 0 };
 const TT_ODDS_CACHE_TTL = parseInt(process.env.TT_ODDS_CACHE_TTL_MS || String(5 * 60 * 1000), 10);
@@ -7074,6 +7130,184 @@ setInterval(load, 10000);
       }
     } catch(e) {
       sendJson(res, { resolved: false, error: e.message });
+    }
+    return;
+  }
+
+  // ── Basketball (NBA) ─────────────────────────────────────────────────
+  // 2026-05-03: novo sport basket fase 1 (shadow). Endpoints:
+  //   GET /basket-matches         — schedule + odds (ESPN ∪ The Odds API)
+  //   GET /basket-result          — settle lookup (ESPN match_results fuzzy norm)
+  //   POST /sync-basket-espn      — popula match_results com finals
+  //   GET /basket-elo?home&away   — predict via Elo
+  if (p === '/basket-matches') {
+    try {
+      const espnLib = require('./lib/espn-basket');
+      const [upcoming, oddsMatches] = await Promise.all([
+        espnLib.getUpcomingMatches({ daysAhead: 2 }).catch(() => []),
+        getTheOddsBasketMatches().catch(() => []),
+      ]);
+      // Merge: ESPN é source of truth pra agenda, The Odds API supplements odds.
+      // Match-up via norm names + same date window. Fallback: incluir ambos sem dedup
+      // perfeito pra sample inicial (pode ter dup; fix depois quando tiver dados).
+      const _norm = (s) => String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]/g, '');
+      const out = [];
+      const seen = new Set();
+      for (const m of upcoming) {
+        const oddsM = oddsMatches.find(o =>
+          (_norm(o.team1) === _norm(m.home) && _norm(o.team2) === _norm(m.away))
+          || (_norm(o.team1) === _norm(m.away) && _norm(o.team2) === _norm(m.home))
+        );
+        const id = `basket_espn_${m.eventId}`;
+        if (seen.has(id)) continue;
+        seen.add(id);
+        out.push({
+          id, sport: 'basket', game: 'basket',
+          team1: m.home, team2: m.away,
+          league: m.tournament, time: m.startIso,
+          status: m.isLive ? 'live' : 'upcoming',
+          odds: oddsM?.odds || null,
+          _source: oddsM ? 'espn+theodds' : 'espn',
+          _oddsId: oddsM?._oddsId || null,
+        });
+      }
+      // Adiciona odds-only matches (sem ESPN match) — caso ESPN não tenha listado mas há line
+      for (const o of oddsMatches) {
+        const matched = out.find(x =>
+          (_norm(x.team1) === _norm(o.team1) && _norm(x.team2) === _norm(o.team2))
+          || (_norm(x.team1) === _norm(o.team2) && _norm(x.team2) === _norm(o.team1))
+        );
+        if (!matched) out.push({ ...o, _source: 'theodds-only' });
+      }
+      sendJson(res, out);
+    } catch (e) {
+      sendJson(res, { error: e.message }, 500);
+    }
+    return;
+  }
+
+  if (p === '/basket-result') {
+    const matchId = (parsed.query.matchId || '').trim();
+    const team1   = (parsed.query.team1   || '').trim();
+    const team2   = (parsed.query.team2   || '').trim();
+    const sentAt  = (parsed.query.sentAt  || '').trim();
+
+    if (!team1 || !team2) {
+      sendJson(res, { resolved: false, error: 'team1 e team2 obrigatórios' }, 400);
+      return;
+    }
+    try {
+      let row = matchId
+        ? db.prepare("SELECT * FROM match_results WHERE match_id = ? AND game = 'basket' LIMIT 1").get(matchId)
+        : null;
+
+      if (!row?.winner) {
+        const t1Like = `%${team1}%`;
+        const t2Like = `%${team2}%`;
+        const stmt = sentAt
+          ? db.prepare(`
+              SELECT * FROM match_results
+              WHERE game = 'basket'
+                AND ((lower(team1) LIKE lower(?) AND lower(team2) LIKE lower(?))
+                  OR (lower(team1) LIKE lower(?) AND lower(team2) LIKE lower(?)))
+                AND resolved_at BETWEEN datetime(?, '-2 days') AND datetime(?, '+3 days')
+              ORDER BY resolved_at DESC LIMIT 1`)
+          : db.prepare(`
+              SELECT * FROM match_results
+              WHERE game = 'basket'
+                AND ((lower(team1) LIKE lower(?) AND lower(team2) LIKE lower(?))
+                  OR (lower(team1) LIKE lower(?) AND lower(team2) LIKE lower(?)))
+              ORDER BY resolved_at DESC LIMIT 1`);
+        row = sentAt
+          ? stmt.get(t1Like, t2Like, t2Like, t1Like, sentAt, sentAt)
+          : stmt.get(t1Like, t2Like, t2Like, t1Like);
+      }
+
+      // Tentativa 3: norm match (NBA team names variam: "LA Lakers" vs "Los Angeles Lakers").
+      // Window ±2d (NBA agenda diária; sem janela longa pra evitar match cruzado).
+      if (!row?.winner && sentAt) {
+        try {
+          const _normB = (s) => String(s || '').toLowerCase().normalize('NFD')
+            .replace(/[̀-ͯ]/g, '')
+            .replace(/\b(the|los|new|golden|state|city|of)\b/g, '')
+            .replace(/[^a-z0-9]/g, '');
+          const candidates = db.prepare(`
+            SELECT * FROM match_results
+            WHERE game = 'basket'
+              AND resolved_at BETWEEN datetime(?, '-2 days') AND datetime(?, '+3 days')
+          `).all(sentAt, sentAt);
+          const t1n = _normB(team1), t2n = _normB(team2);
+          for (const c of candidates) {
+            const cT1 = _normB(c.team1), cT2 = _normB(c.team2);
+            const fwd = (cT1.includes(t1n) || t1n.includes(cT1)) && (cT2.includes(t2n) || t2n.includes(cT2));
+            const rev = (cT1.includes(t2n) || t2n.includes(cT1)) && (cT2.includes(t1n) || t1n.includes(cT2));
+            if (fwd || rev) {
+              row = c;
+              log('INFO', 'BASKET-RESULT', `fuzzy-norm matched: tip "${team1}" vs "${team2}" → results "${c.team1}" vs "${c.team2}" → winner=${c.winner}`);
+              break;
+            }
+          }
+        } catch (_) {}
+      }
+
+      if (row?.winner) {
+        sendJson(res, { resolved: true, winner: row.winner, score: row.final_score || '' });
+      } else {
+        sendJson(res, { resolved: false });
+      }
+    } catch (e) {
+      sendJson(res, { resolved: false, error: e.message });
+    }
+    return;
+  }
+
+  if (p === '/basket-elo') {
+    const home = parsed.query.home || '';
+    const away = parsed.query.away || '';
+    if (!home || !away) { sendJson(res, { error: 'home/away obrigatórios' }, 400); return; }
+    try {
+      const elo = require('./lib/basket-elo');
+      sendJson(res, elo.predictWin(db, home, away));
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
+  if (p === '/sync-basket-espn') {
+    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    try {
+      const daysRaw = parseInt(parsed.query.days);
+      const daysBack = Number.isFinite(daysRaw) ? Math.max(1, Math.min(14, daysRaw)) : 3;
+      const updateElo = parsed.query.update_elo !== '0';
+      const espnLib = require('./lib/espn-basket');
+      const matches = await espnLib.getFinishedMatches({ daysBack });
+      const elo = require('./lib/basket-elo');
+      let inserted = 0, skipped = 0, eloUpdated = 0;
+      const sample = [];
+      const tx = db.transaction((rows) => {
+        for (const m of rows) {
+          try {
+            const matchId = `espn_basket_${m.eventId}`;
+            const league = String(m.tournament || 'NBA').slice(0, 120);
+            stmts.upsertMatchResultWithDate.run(
+              matchId, 'basket',
+              m.home, m.away, m.winner, m.score, league, m.startIso
+            );
+            inserted++;
+            if (updateElo) {
+              elo.updateMatch(db, m.home, m.away, m.winner, m.startIso);
+              eloUpdated++;
+            }
+            if (sample.length < 8) sample.push({ match_id: matchId, teams: `${m.home} vs ${m.away}`, winner: m.winner, score: m.score });
+          } catch (_) { skipped++; }
+        }
+      });
+      tx(matches);
+      log('INFO', 'BASKET-SYNC', `espn: ${inserted} matches upserted ${updateElo ? `+ ${eloUpdated} elo` : ''} em ${daysBack}d (${skipped} skip)`);
+      sendJson(res, { ok: true, source: 'espn', days_back: daysBack, inserted, skipped, elo_updated: eloUpdated, total_fetched: matches.length, sample });
+    } catch (e) {
+      log('ERROR', 'BASKET-SYNC', `espn: ${e.message}`);
+      sendJson(res, { ok: false, error: e.message }, 500);
     }
     return;
   }

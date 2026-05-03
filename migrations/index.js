@@ -1918,6 +1918,30 @@ const migrations = [
     },
   },
   {
+    id: '078_basket_elo',
+    up(db) {
+      // 2026-05-03: novo sport basket (NBA fase 1, shadow-only). Elo por team
+      // separado de futebol/tennis (ratings independentes). Persistência simples:
+      // (team_norm) primary key + rating + games_played + last_updated. Sem
+      // surface/league dimension (NBA tem só 1 league no fase 1; expandir se
+      // adicionar Euroleague/CBB).
+      //
+      // bankroll bucket 'basket' criado lazy no record-tip path (segue padrão
+      // tabletennis/snooker). match_results aceita game='basket' sem schema change.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS basket_elo (
+          team_norm TEXT PRIMARY KEY,
+          team_raw TEXT,
+          rating REAL DEFAULT 1500,
+          games INTEGER DEFAULT 0,
+          last_match_at TEXT,
+          updated_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_basket_elo_updated ON basket_elo(updated_at DESC);
+      `);
+    },
+  },
+  {
     id: '074_consolidate_cs2_into_cs',
     up(db) {
       // Bug histórico: CS market tips foram gravadas com sport='cs2' em `tips` e

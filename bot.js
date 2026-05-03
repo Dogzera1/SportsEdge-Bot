@@ -625,6 +625,7 @@ const analyzedFootball = new Map();
 const analyzedDota = new Map();
 const analyzedDarts = new Map();
 const analyzedSnooker = new Map();
+const analyzedBasket = new Map();
 const analyzedTT = new Map();
 const analyzedCs = new Map();
 const _csInFlight = new Set();
@@ -3476,6 +3477,22 @@ async function settleCompletedTips() {
         } catch (e) { log('WARN', 'SETTLE', `football pre-sync: ${e.message}`); }
       }
 
+      // 2026-05-03: pre-sync basket (NBA shadow). ESPN scoreboard popula
+      // match_results + atualiza basket_elo. Sem isso /basket-result retorna
+      // resolved:false. Usa key=ADMIN_KEY pra autorizar /sync-basket-espn.
+      if (sport === 'basket') {
+        try {
+          const syncDays = Math.max(2, Math.min(7, parseInt(process.env.BASKET_SYNC_DAYS_BACK || '3', 10) || 3));
+          const keyParam = process.env.ADMIN_KEY ? `&key=${encodeURIComponent(process.env.ADMIN_KEY)}` : '';
+          const r = await serverGet(`/sync-basket-espn?days=${syncDays}${keyParam}`, 'basket').catch(() => null);
+          if (r?.ok && (r.inserted || 0) > 0) {
+            log('INFO', 'SETTLE', `basket pre-sync: ${r.inserted} results upserted + ${r.elo_updated || 0} elo (espn ${syncDays}d)`);
+          } else if (r && !r.ok) {
+            log('WARN', 'SETTLE', `basket pre-sync falhou: ${r.error || 'unknown'}`);
+          }
+        } catch (e) { log('WARN', 'SETTLE', `basket pre-sync: ${e.message}`); }
+      }
+
       // 2026-05-03: track match_ids cobertos por /settle neste cycle (uma única
       // chamada /settle settla todas tips do match; iterações subsequentes do
       // mesmo match_id retornam settled=0 mesmo tendo "funcionado").
@@ -3499,6 +3516,8 @@ async function settleCompletedTips() {
             endpoint = `/cs-result?matchId=${encodeURIComponent(tip.match_id)}&team1=${encodeURIComponent(tip.participant1 || '')}&team2=${encodeURIComponent(tip.participant2 || '')}&sentAt=${encodeURIComponent(tip.sent_at || '')}`;
           } else if (sport === 'valorant') {
             endpoint = `/valorant-result?matchId=${encodeURIComponent(tip.match_id)}&team1=${encodeURIComponent(tip.participant1 || '')}&team2=${encodeURIComponent(tip.participant2 || '')}&sentAt=${encodeURIComponent(tip.sent_at || '')}`;
+          } else if (sport === 'basket') {
+            endpoint = `/basket-result?matchId=${encodeURIComponent(tip.match_id)}&team1=${encodeURIComponent(tip.participant1 || '')}&team2=${encodeURIComponent(tip.participant2 || '')}&sentAt=${encodeURIComponent(tip.sent_at || '')}`;
           } else {
             const mid = String(tip.match_id);
             if (mid.startsWith('dota2_')) {
@@ -3916,6 +3935,7 @@ async function runAutoHealerCycle() {
       mma: pollMma,
       darts: runAutoDarts,
       snooker: runAutoSnooker,
+      basket: runAutoBasket,
       tt: pollTableTennis,
       football: pollFootball,
     },
@@ -19532,6 +19552,160 @@ async function runAutoSnooker() {
   }
   return _hadLiveSnooker;
 }
+
+// ── Basket loop (NBA fase 1, shadow-only) ───────────────────────────────
+// 2026-05-03: novo sport. Pull /basket-matches (ESPN ∪ The Odds API),
+// chamar /basket-elo pra pModel, computar EV vs odds, log shadow tip se EV
+// passa threshold. Sem IA (DeepSeek tem AI_DISABLED=true). Settle via
+// /basket-result + cron sync ESPN. Promote quando shadow_summary 2 semanas
+// mostrar n≥30 settled CLV≥0 ROI≥0 (memory project_basket_promote.md).
+async function runAutoBasket() {
+  const basketConfig = SPORTS['basket'];
+  if (!basketConfig?.enabled) return false;
+  const BASKET_LIVE_COOLDOWN = 3 * 60 * 1000;     // live: 3min
+  const BASKET_PREGAME_COOLDOWN = 60 * 60 * 1000; // pregame: 1h
+  let _hadLiveBasket = false;
+  try {
+    const now = Date.now();
+    log('INFO', 'AUTO-BASKET', `Iniciando verificação de basket${basketConfig.shadowMode ? ' [SHADOW]' : ''}...`);
+    markPollHeartbeat('basket');
+    const matches = await serverGet('/basket-matches').catch(() => []);
+    if (!Array.isArray(matches) || !matches.length) {
+      log('INFO', 'AUTO-BASKET', '0 partidas basket');
+      return false;
+    }
+    log('INFO', 'AUTO-BASKET', `${matches.length} partidas basket (${matches.filter(m => m.status === 'live').length} live)`);
+    matches.sort((a, b) => {
+      const la = a.status === 'live' ? 0 : 1;
+      const lb = b.status === 'live' ? 0 : 1;
+      if (la !== lb) return la - lb;
+      return new Date(a.time || 0) - new Date(b.time || 0);
+    });
+    _hadLiveBasket = matches.some(m => m.status === 'live');
+    if (_hadLiveBasket) _livePhaseEnter('basket');
+    let _drainedBasket = false;
+    for (const match of matches) {
+      const isLiveBasket = match.status === 'live';
+      if (!isLiveBasket && !_drainedBasket) {
+        if (_hadLiveBasket) _livePhaseExit('basket');
+        await _waitOthersLiveDone('basket');
+        _drainedBasket = true;
+      }
+      if (!match.odds?.t1 || !match.odds?.t2) continue;
+      const key = `basket_${match.id}`;
+      const prev = analyzedBasket.get(key);
+      if (prev?.tipSent) continue;
+      const cooldown = isLiveBasket ? BASKET_LIVE_COOLDOWN : BASKET_PREGAME_COOLDOWN;
+      if (prev && (now - prev.ts < cooldown)) continue;
+
+      // Elo prediction via server (acessa basket_elo table)
+      const elo = await serverGet(`/basket-elo?home=${encodeURIComponent(match.team1)}&away=${encodeURIComponent(match.team2)}`)
+        .catch(() => null);
+      if (!elo || !elo.pHome) {
+        analyzedBasket.set(key, { ts: now, tipSent: false });
+        continue;
+      }
+      // Cold start: skip (não emite tip cega). updateMatch via /sync-basket-espn
+      // popula ratings; após ~5 jogos por team (1-2 semanas NBA) sai do cold start.
+      if (elo.isCold) {
+        log('INFO', 'AUTO-BASKET', `Cold start (h:${elo.hGames}j a:${elo.aGames}j): ${match.team1} vs ${match.team2}`);
+        analyzedBasket.set(key, { ts: now, tipSent: false });
+        continue;
+      }
+
+      const odd1 = parseFloat(match.odds.t1) || 0;
+      const odd2 = parseFloat(match.odds.t2) || 0;
+      if (odd1 <= 1.01 || odd2 <= 1.01) continue;
+      const ev1 = elo.pHome * odd1 - 1;
+      const ev2 = elo.pAway * odd2 - 1;
+      const direction = ev1 >= ev2 ? 't1' : 't2';
+      const pickTeam = direction === 't1' ? match.team1 : match.team2;
+      const pickOdd = direction === 't1' ? odd1 : odd2;
+      const pickP = direction === 't1' ? elo.pHome : elo.pAway;
+      const evPct = (pickP * pickOdd - 1) * 100;
+
+      const minEv = parseFloat(process.env.BASKET_MIN_EV || '5');
+      if (evPct < minEv) {
+        analyzedBasket.set(key, { ts: now, tipSent: false });
+        log('INFO', 'AUTO-BASKET', `Sem edge: ${match.team1} vs ${match.team2} | EV=${evPct.toFixed(1)}% < ${minEv}%`);
+        continue;
+      }
+
+      // Bucket gate
+      try {
+        const _bk = require('./lib/odds-bucket-gate').isBucketBlocked('basket', pickOdd);
+        if (_bk.blocked) {
+          log('INFO', 'AUTO-BASKET', `Gate bucket: odd ${pickOdd} bloqueado ${_bk.bucket} (${_bk.source})`);
+          analyzedBasket.set(key, { ts: now, tipSent: false });
+          continue;
+        }
+      } catch (_) {}
+
+      const stake = calcKellyWithP(pickP, pickOdd, 1/8, { sport: 'basket' });
+      if (stake === '0u') {
+        analyzedBasket.set(key, { ts: now, tipSent: false });
+        continue;
+      }
+      const desiredU = parseFloat(stake) || 0;
+      const riskAdj = await applyGlobalRisk('basket', desiredU, match.league);
+      if (!riskAdj.ok) {
+        log('INFO', 'RISK', `basket: bloqueada (${riskAdj.reason})`);
+        continue;
+      }
+      const stakeAdj = String(riskAdj.units.toFixed(1).replace(/\.0$/, ''));
+
+      const tipReason = `Elo: ${match.team1}=${Math.round(elo.hRating)} (${elo.hGames}j) vs ${match.team2}=${Math.round(elo.aRating)} (${elo.aGames}j) | diff=${Math.round(elo.ratingDiff)}`;
+      const conf = Math.abs(elo.ratingDiff) >= 100 ? 'MÉDIA' : 'BAIXA';
+
+      const rec = await serverPost('/record-tip', {
+        matchId: String(match.id), eventName: match.league || 'NBA',
+        p1: match.team1, p2: match.team2, tipParticipant: pickTeam,
+        odds: String(pickOdd), ev: evPct.toFixed(1), stake: stakeAdj,
+        confidence: conf,
+        isLive: isLiveBasket ? 1 : 0,
+        market_type: 'ML',
+        modelP1: elo.pHome, modelP2: elo.pAway, modelPPick: pickP,
+        modelLabel: 'basket-elo',
+        tipReason,
+        isShadow: basketConfig.shadowMode ? 1 : 0,
+        lineShopOdds: match.odds || null,
+        pickSide: direction,
+      }, 'basket');
+
+      if (!rec?.tipId) {
+        log('WARN', 'AUTO-BASKET', `record-tip falhou: ${pickTeam} @ ${pickOdd}${rec?.reason ? ` (${rec.reason})` : ''}`);
+        analyzedBasket.set(key, { ts: now, tipSent: false, skipped: true, reason: rec?.reason || null });
+        continue;
+      }
+      analyzedBasket.set(key, { ts: now, tipSent: true });
+      if (rec?.skipped) continue;
+
+      log('INFO', 'AUTO-BASKET', `[${basketConfig.shadowMode ? 'SHADOW' : 'LIVE'}] Tip: ${pickTeam} @ ${pickOdd} | EV:${evPct.toFixed(1)}% | ${stakeAdj}u | ${tipReason}`);
+      // Shadow mode: não envia DM. Promote (BASKET_SHADOW=false) → DM stub abaixo.
+      if (basketConfig.shadowMode) continue;
+      // DM path (futuro, não usado em fase 1):
+      const _matchTimeBk = match.time ? fmtMatchTime(match.time) : '';
+      const _timeLineBk = _matchTimeBk ? `🕐 ${_matchTimeBk} (BRT)\n` : '';
+      const tipMsg = `🏀 💰 *TIP BASKET${isLiveBasket ? ' (AO VIVO 🔴)' : ''}*\n` +
+        `*${match.team1}* vs *${match.team2}*\n📋 ${match.league || 'NBA'}\n${_timeLineBk}\n` +
+        `🎯 Aposta: *${pickTeam}* @ *${pickOdd}*\n` +
+        `📈 EV: *+${evPct.toFixed(1)}%*\n` +
+        `💵 Stake: *${formatStakeWithReais('basket', stakeAdj)}*\n` +
+        `🧠 ${tipReason}\n\n` +
+        `⚠️ _Odds The Odds API._`;
+      for (const [userId, prefs] of subscribedUsers) {
+        if (!prefs.has('basket')) continue;
+        try { await sendDM(basketConfig.token, userId, tipMsg); } catch (_) {}
+      }
+    }
+    if (!_drainedBasket && _hadLiveBasket) _livePhaseExit('basket');
+  } catch (e) {
+    log('ERROR', 'AUTO-BASKET', e.message);
+    _livePhaseExit('basket');
+  }
+  return _hadLiveBasket;
+}
+
 log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
 
 // ── Validação de variáveis de ambiente ──
@@ -19676,6 +19850,19 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
       scheduleSnooker();
     }, scheduleSnooker._nextMs || 60 * 1000);
   })();
+  // Basket: dual-mode scheduling. NBA tem agenda diária 7-22h ET (~10am-1am UTC),
+  // tipoff em janelas. 2min live, 30min idle (jogos curtos 2-3h, evita over-poll).
+  if (SPORTS['basket']?.enabled) {
+    (function scheduleBasket() {
+      setTimeout(async () => {
+        const hadLive = await runAutoBasket().catch(e => { log('ERROR', 'AUTO-BASKET', e.message); return false; });
+        const nextMs = hadLive ? (2 * 60 * 1000) : (30 * 60 * 1000);
+        log('INFO', 'AUTO-BASKET', `Próximo ciclo em ${Math.round(nextMs / 1000)}s (${hadLive ? 'LIVE' : 'idle'})`);
+        scheduleBasket._nextMs = nextMs;
+        scheduleBasket();
+      }, scheduleBasket._nextMs || 75 * 1000);
+    })();
+  }
   // Valorant: scheduler INDEPENDENTE do mutex runAutoAnalysis (fix Abr 2026 mid).
   // Antes: pollValorant rodava só dentro do mutex (a cada 6-15min). Em ciclos longos
   // (MMA com IA cap), ficava 10+min sem analisar — perdíamos partidas live VCT inteiras.
