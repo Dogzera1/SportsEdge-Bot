@@ -9891,6 +9891,25 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
       await send(token, chatId, txt);
     } catch (e) { await send(token, chatId, `❌ ${e.message}`); }
 
+  } else if (cmd === '/resub' || cmd === '/resubscribe') {
+    // /resub — força re-subscribe do admin a todos sports enabled.
+    // Útil quando admin foi unsub'd por TG 403 e tips param de chegar
+    // (subscribedUsers Map fica vazio ou sem 'esports' nas prefs).
+    if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
+    try {
+      const allSports = new Set(Object.keys(SPORTS).filter(k => SPORTS[k]?.enabled && SPORTS[k]?.token));
+      const idNum = parseInt(chatId);
+      subscribedUsers.set(idNum, new Set(allSports));
+      // Persist
+      try { await serverPost('/save-user', { userId: idNum, subscribed: true, sportPrefs: [...allSports] }); } catch (_) {}
+      const total = subscribedUsers.size;
+      let txt = `✅ *RE-SUBSCRIBED*\n\n`;
+      txt += `Sports: ${[...allSports].join(', ') || '_nenhum enabled_'}\n`;
+      txt += `Total inscritos no bot: ${total}\n\n`;
+      txt += `_Próximas tips chegarão por DM automaticamente._`;
+      await send(token, chatId, txt);
+    } catch (e) { await send(token, chatId, `❌ ${e.message}`); }
+
   } else if (cmd === '/diag' || cmd === '/diag-tip') {
     // /diag <team_substring> — investiga por que tip pra match com X não chegou.
     // Filtra _rejections + reporta shadow state + DAILY_TIP_LIMIT + risk caps + league blocklist.
