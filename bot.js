@@ -17175,7 +17175,21 @@ Máximo 200 palavras.`;
             }
           }
           if (!_fbFromOverride) {
-            log('INFO', 'AUTO-FOOTBALL', `Sem tip: ${match.team1} vs ${match.team2}${_advisoryOn ? ` (override skip: trained=${!!fbTrained} conf=${fbModel?.confidence?.toFixed(2) ?? 'n/a'} mlEv=${mlScore?.bestEv ?? 'n/a'})` : ''}`);
+            // 2026-05-03 diag: capturar por que hybrid+override falharam quando
+            // trained+conf+EV parecem suficientes. Pistas: market unsupported,
+            // pickP null (over25 missing pra OVER/UNDER), oddVal inválido,
+            // ou path-guard auto-disabled.
+            let _diag = '';
+            if (_advisoryOn) {
+              const _mkt = mlScore?.market ?? 'n/a';
+              const _o25 = mlScore?.over25Prob;
+              const _bestOdd = parseFloat(mlScore?.bestOdd);
+              const _hybridOff = (() => { try { return isPathDisabled('football', 'hybrid'); } catch { return null; } })();
+              const _overrideOff = (() => { try { return isPathDisabled('football', 'override'); } catch { return null; } })();
+              const _supportedMkt = ['1X2_H','1X2_D','1X2_A','OVER_2.5','UNDER_2.5'].includes(_mkt);
+              _diag = ` mkt=${_mkt} mktOk=${_supportedMkt} bestOdd=${Number.isFinite(_bestOdd) ? _bestOdd.toFixed(2) : 'n/a'} over25=${_o25 ?? 'null'} mH=${mlScore?.modelH ?? 'n/a'} mD=${mlScore?.modelD ?? 'n/a'} mA=${mlScore?.modelA ?? 'n/a'} hybridOff=${_hybridOff} overrideOff=${_overrideOff}`;
+            }
+            log('INFO', 'AUTO-FOOTBALL', `Sem tip: ${match.team1} vs ${match.team2}${_advisoryOn ? ` (override skip: trained=${!!fbTrained} conf=${fbModel?.confidence?.toFixed(2) ?? 'n/a'} mlEv=${mlScore?.bestEv ?? 'n/a'}${_diag})` : ''}`);
             await new Promise(r => setTimeout(r, 3000)); continue;
           }
         }
@@ -21147,6 +21161,9 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
     if (/^(1|true|yes)$/i.test(String(process.env.FEED_HEARTBEAT_DISABLED || ''))) return;
     try {
       const fh = require('./lib/feed-heartbeat');
+      // markFeedSuccess roda em server.js (proc separado); bot.js precisa
+      // recarregar do disco antes de avaliar staleness senão lê snapshot de boot.
+      try { if (typeof fh.refreshFromDisk === 'function') fh.refreshFromDisk(); } catch (_) {}
       const alerts = fh.checkFeedHealth({ staleMultiplier: 3, minObservations: 2 });
       if (!alerts.length) return;
       const cooldownMs = 30 * 60 * 1000;
