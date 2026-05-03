@@ -16940,9 +16940,10 @@ async function pollFootball(runOnce = false) {
 
                 // Promote path: admin DM + recordMarketTipAsRegular se gates passam.
                 // Reusa infra MT (isMarketTipsEnabled, dedup admin, Kelly 0.10).
-                // 2026-04-28: shadow-only por padrão (usuário pediu hold em
-                // football MT). Flip via FOOTBALL_MT_SHADOW_ONLY=false pra re-promover.
-                const _fbMtShadowOnly = !/^(0|false|no)$/i.test(String(process.env.FOOTBALL_MT_SHADOW_ONLY ?? 'true'));
+                // 2026-05-03: PROMOVIDO. Default flipado pra 'false' após shadow-summary
+                // 2 dias mostrar football MT n=28 settled=7 (5W/2L 71.4% hit) ROI +40,9%
+                // CLV +0,02%. Hold via FOOTBALL_MT_SHADOW_ONLY=true se quiser voltar shadow.
+                const _fbMtShadowOnly = !/^(0|false|no)$/i.test(String(process.env.FOOTBALL_MT_SHADOW_ONLY ?? 'false'));
                 if (_fbMtShadowOnly) {
                   log('DEBUG', 'FB-MT-SCAN', `${match.team1} vs ${match.team2}: ${fbMtFound.length} MT tips em shadow (FOOTBALL_MT_SHADOW_ONLY=true)`);
                 } else if (isMarketTipsEnabled('football') && ADMIN_IDS.size) {
@@ -17494,9 +17495,9 @@ Máximo 200 palavras.`;
             // Admin DM path (opt-in via FOOTBALL_MARKET_TIPS_ENABLED=true + leak guard
             // runtime state). Mesmo padrão de tennis/lol/dota/cs — shadow SEMPRE grava
             // acima; DM só sai se sport habilitado + segment (market, side) não disabled.
-            // 2026-04-28: shadow-only por padrão (FOOTBALL_MT_SHADOW_ONLY=true).
+            // 2026-05-03: promovido. Hold via FOOTBALL_MT_SHADOW_ONLY=true se quiser re-shadow.
             try {
-              const _fbMtShadowOnlyP2 = !/^(0|false|no)$/i.test(String(process.env.FOOTBALL_MT_SHADOW_ONLY ?? 'true'));
+              const _fbMtShadowOnlyP2 = !/^(0|false|no)$/i.test(String(process.env.FOOTBALL_MT_SHADOW_ONLY ?? 'false'));
               if (_fbMtShadowOnlyP2) {
                 log('DEBUG', 'FB-MARKET-GATE', `${matchForMt.team1} vs ${matchForMt.team2} ${tipMarket}: shadow-only mode (FOOTBALL_MT_SHADOW_ONLY=true)`);
               } else if (isMarketTipsEnabled('football') && ADMIN_IDS.size) {

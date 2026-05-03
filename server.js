@@ -9065,7 +9065,7 @@ setInterval(load, 60000);
       // Feature flags
       flags: {
         AI_DISABLED: _bool(process.env.AI_DISABLED) || false,
-        FOOTBALL_MT_SHADOW_ONLY: _bool(process.env.FOOTBALL_MT_SHADOW_ONLY ?? 'true'),
+        FOOTBALL_MT_SHADOW_ONLY: _bool(process.env.FOOTBALL_MT_SHADOW_ONLY ?? 'false'),
         TENNIS_ISOTONIC_DISABLED: _bool(process.env.TENNIS_ISOTONIC_DISABLED ?? 'true'),
         LOL_ISOTONIC_DISABLED: _bool(process.env.LOL_ISOTONIC_DISABLED ?? 'true'),
         FB_USE_FD_CSV: process.env.FB_USE_FD_CSV !== 'false',
@@ -9333,7 +9333,7 @@ setInterval(load, 60000);
       const promoteEnabled = process.env[`${up}_MARKET_TIPS_ENABLED`] === 'true'
         || (aliasEnv && process.env[`${aliasEnv}_MARKET_TIPS_ENABLED`] === 'true');
       const shadowOnly = sp === 'football'
-        ? !/^(0|false|no)$/i.test(String(process.env.FOOTBALL_MT_SHADOW_ONLY ?? 'true'))
+        ? !/^(0|false|no)$/i.test(String(process.env.FOOTBALL_MT_SHADOW_ONLY ?? 'false'))
         : null;
       let shadow7d = 0, real7d = 0;
       try {
