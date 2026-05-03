@@ -3794,7 +3794,14 @@ function lolCompScoreFromDraft(stmts, t1Champs, t2Champs) {
 // ── Settle sweep helper: reusado por HTTP handler e cron interno ──
 function runSettleSweep({ sportFilter = '', days = 14 } = {}) {
   const clampedDays = Math.max(1, Math.min(60, parseInt(days, 10) || 14));
-  const sports = sportFilter ? [sportFilter] : ['esports','tennis','mma','football','darts','snooker'];
+  // 2026-05-03: incluir dota2/lol/cs/valorant explicitamente. Antes só 'esports'
+  // (legacy bucket) era iterado, deixando tips dos buckets split (pós-Abr/2026)
+  // sem cobertura de sweep — ex: dota2 MAP1_WINNER id=964 ficou pending sem
+  // qualquer settler porque /dota-result responde só por matchId direto e o
+  // generic settleCompletedTips skipa non-ML markets.
+  const sports = sportFilter
+    ? [sportFilter]
+    : ['esports','lol','dota2','cs','valorant','tennis','mma','football','darts','snooker'];
 
   const deriveGame = (tip) => {
     const mid = String(tip.match_id || '');
