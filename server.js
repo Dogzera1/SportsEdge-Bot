@@ -3862,6 +3862,39 @@ function runSettleSweep({ sportFilter = '', days = 14 } = {}) {
         `).get(game, t1, t2, t2, t1, tip.sent_at || new Date().toISOString(), tip.sent_at || new Date().toISOString());
       }
 
+      // Tentativa 3 (football): match normalizado + alias. Mesmo fix de
+      // /football-result (server.js:6996+) — LIKE falha em "Wolves" vs
+      // "Wolverhampton Wanderers" porque substring não bate. Window ±4d.
+      if (!row?.winner && !isMapMarket && game === 'football' && tip.participant1 && tip.participant2) {
+        try {
+          const { _norm, _TEAM_ALIASES } = require('./lib/football-poisson-trained');
+          const sentRef = tip.sent_at || new Date().toISOString();
+          const candidates = db.prepare(`
+            SELECT * FROM match_results
+            WHERE game = 'football'
+              AND resolved_at BETWEEN datetime(?, '-4 days') AND datetime(?, '+6 days')
+          `).all(sentRef, sentRef);
+          const variants = (n) => {
+            const norm = _norm(n);
+            const alias = _TEAM_ALIASES[norm];
+            return alias ? [norm, alias] : [norm];
+          };
+          const t1v = variants(tip.participant1);
+          const t2v = variants(tip.participant2);
+          for (const c of candidates) {
+            const cT1n = _norm(c.team1), cT2n = _norm(c.team2);
+            const home = t1v.some(v => v === cT1n || _TEAM_ALIASES[v] === cT1n);
+            const away = t2v.some(v => v === cT2n || _TEAM_ALIASES[v] === cT2n);
+            const homeRev = t1v.some(v => v === cT2n || _TEAM_ALIASES[v] === cT2n);
+            const awayRev = t2v.some(v => v === cT1n || _TEAM_ALIASES[v] === cT1n);
+            if ((home && away) || (homeRev && awayRev)) {
+              row = c;
+              break;
+            }
+          }
+        } catch (_) {}
+      }
+
       if (!row?.winner) {
         if (isMapMarket) info.skipped_map++;
         else info.not_found++;
