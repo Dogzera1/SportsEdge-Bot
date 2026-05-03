@@ -4045,8 +4045,20 @@ function _loadBlocklistFromDb() {
 
 // 2026-05-01: defaults baseados em audit ROI 14d. Tratados como env-seeds —
 // usuário pode unblock via /unblock-league (ativa cooldown 7d que respeita aqui).
-// LPL: n=6 W=1 ROI=-78.7% (calibração quebrada pós-split de elenco).
-const _BLOCKLIST_DEFAULTS = ['lol:lpl'];
+//
+// 2026-05-03 (audit ROI 30d sobre tips REAIS, is_shadow=0):
+//   lol:lpl                          n=6  W=1 L=5 ROI=-78.7% (split de elenco quebrou calib)
+//   lol:lck challengers league       n=4  W=2 L=2 ROI=-27.4% (tier 2 LoL underperforma)
+//   cs:esl challenger league         n=12 W=4 L=8 ROI=-30.4% agreg (Europe/NA/SAm somados)
+//   cs:cct europe                    n=4  W=1 L=3 ROI=-31.4% (CCT Europe Challengers + Quals)
+// Match é substring case-insensitive (lg.includes(subPart)) — uma entry cobre
+// todas variants (ex: "esl challenger league" pega Europe + NA + SAm + Asia).
+const _BLOCKLIST_DEFAULTS = [
+  'lol:lpl',
+  'lol:lck challengers league',
+  'cs:esl challenger league',
+  'cs:cct europe',
+];
 
 function _parseBlocklistEnv() {
   const envRaw = String(process.env.LEAGUE_BLOCKLIST || '').trim();
@@ -4772,10 +4784,11 @@ function perMarketEvGate(sport, market, defaultEv) {
 let _MT_PERMANENT_DISABLE = null;
 function _getMtPermanentDisable() {
   if (_MT_PERMANENT_DISABLE !== null) return _MT_PERMANENT_DISABLE;
-  // Default blocklist (audits prod 2026-04-30):
+  // Default blocklist (audits prod 2026-04-30 + 2026-05-03):
   //   tennis|totalGames|over: ROI -20.2% n=57 (sample sólido, leak persistente)
+  //   tennis|totalGames|under: ROI -15.3% n=20 (audit 03/05, completa cobertura do mercado)
   //   lol|total:               ROI -54% n=10 (sample baixo mas magnitude clara)
-  const raw = String(process.env.MT_PERMANENT_DISABLE_LIST ?? 'tennis|totalGames|over,lol|total').trim();
+  const raw = String(process.env.MT_PERMANENT_DISABLE_LIST ?? 'tennis|totalGames|over,tennis|totalGames|under,lol|total').trim();
   _MT_PERMANENT_DISABLE = new Set();
   for (const entry of raw.split(',').map(s => s.trim()).filter(Boolean)) {
     _MT_PERMANENT_DISABLE.add(entry);

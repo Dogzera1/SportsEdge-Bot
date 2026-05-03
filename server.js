@@ -17861,6 +17861,52 @@ setInterval(load, 60000);
     return;
   }
 
+  // POST /admin/blocklist-add?sport=X&substring=Y&reason=Z&key=<KEY>
+  // Escreve em `league_blocklist` (tabela lida por isLeagueBlocked em bot.js).
+  // sport='*' aplica cross-sport. substring é case-insensitive, match parcial.
+  // Espelho HTTP do comando /block-league do Telegram.
+  if (p === '/admin/blocklist-add' && (req.method === 'POST' || req.method === 'GET')) {
+    if (!requireAdmin(req, res)) return;
+    const sport = String(parsed.query.sport || '*').trim().toLowerCase();
+    const substr = String(parsed.query.substring || parsed.query.league || '').trim().toLowerCase();
+    const reason = String(parsed.query.reason || 'manual').trim().slice(0, 200);
+    if (!substr) { sendJson(res, { ok: false, error: 'missing substring' }, 400); return; }
+    const entry = `${sport}:${substr}`;
+    try {
+      const info = db.prepare(`
+        INSERT INTO league_blocklist (entry, source, reason, n_tips, created_at, cooldown_until)
+        VALUES (?, 'manual', ?, 0, datetime('now'), NULL)
+        ON CONFLICT(entry) DO UPDATE SET source='manual', reason=excluded.reason, cooldown_until=NULL
+      `).run(entry, reason);
+      log('WARN', 'BLOCKLIST', `HTTP block ${entry}: ${reason}`);
+      sendJson(res, { ok: true, entry, source: 'manual', reason, changes: info.changes });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
+  // POST /admin/blocklist-remove?entry=sport:substring&key=<KEY>
+  if (p === '/admin/blocklist-remove' && (req.method === 'POST' || req.method === 'GET')) {
+    if (!requireAdmin(req, res)) return;
+    const entry = String(parsed.query.entry || '').trim().toLowerCase();
+    if (!entry || !entry.includes(':')) { sendJson(res, { ok: false, error: 'invalid entry (expected sport:substring)' }, 400); return; }
+    try {
+      const info = db.prepare(`DELETE FROM league_blocklist WHERE entry = ?`).run(entry);
+      log('INFO', 'BLOCKLIST', `HTTP unblock ${entry} (changes=${info.changes})`);
+      sendJson(res, { ok: true, entry, removed: info.changes });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
+  // GET /admin/blocklist-list?key=<KEY>
+  if (p === '/admin/blocklist-list') {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const rows = db.prepare(`SELECT entry, source, reason, roi_pct, clv_pct, n_tips, created_at, cooldown_until FROM league_blocklist ORDER BY source ASC, created_at DESC`).all();
+      sendJson(res, { ok: true, count: rows.length, rows });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   // GET /admin/drift-guard-stats?recent=7&baseline=30&min_n=10&skill_cutoff=-0.02
   // Read-only: mostra (sport, league) brier_model vs brier_market (1/odds), skill score,
   // ratio vs baseline sport. Skill = 1 - brier_model/brier_market. Negative = worse than market.
