@@ -2875,6 +2875,55 @@ async function getTheOddsDotaMatches() {
   return matches;
 }
 
+// ── Pinnacle — Basketball (sportId=4) ──
+// 2026-05-03: fallback primário pra basket NBA quando The Odds API retorna 4xx
+// (key inválida pra basketball_nba ou plan free não cobre). Pinnacle guest API
+// é mesma fonte usada em tennis/dota/cs/snooker — sem auth, funciona do BR.
+let _basketPinnacleCache = { data: [], ts: 0 };
+const BASKET_PINNACLE_TTL_LIVE = 60 * 1000;
+const BASKET_PINNACLE_TTL_IDLE = 3 * 60 * 1000;
+
+async function getPinnacleBasketMatches() {
+  if (process.env.PINNACLE_BASKET === 'false') return [];
+  const hadLive = _basketPinnacleCache.data.some(m => m.status === 'live');
+  const ttl = hadLive ? BASKET_PINNACLE_TTL_LIVE : BASKET_PINNACLE_TTL_IDLE;
+  if (_basketPinnacleCache.data.length && (Date.now() - _basketPinnacleCache.ts) < ttl) {
+    return _basketPinnacleCache.data;
+  }
+  try {
+    const rows = await pinnacle.fetchSportMatchOdds(4, (m) => {
+      const p1 = String(m?.participants?.[0]?.name || '');
+      const p2 = String(m?.participants?.[1]?.name || '');
+      // Filtra mercados de spread/total/quarters (só moneyline H2H)
+      if (/\(games\)|\(period|\(half|\(qtr|\(ot|hcap|spread|total/i.test(p1 + p2)) return false;
+      // NBA primário fase 1; WNBA/Euroleague/CBB virão depois
+      const lg = String(m?.league?.name || '').toLowerCase();
+      if (!/nba|wnba|euroleague|euro\s*cup|liga\s*acb|cba\s/i.test(lg)) return false;
+      return true;
+    });
+    const _fetchedAt = Date.now();
+    const matches = rows.map(r => ({
+      id: `basket_pin_${r.id}`,
+      sport: 'basket', game: 'basket',
+      team1: r.team1, team2: r.team2,
+      league: r.league,
+      sport_key: 'basketball_pinnacle',
+      status: r.status === 'live' ? 'live' : 'upcoming',
+      time: r.startTime,
+      odds: { t1: String(r.oddsT1), t2: String(r.oddsT2), bookmaker: 'Pinnacle', _fetchedAt },
+      _source: 'pinnacle',
+    }));
+    _basketPinnacleCache = { data: matches, ts: Date.now() };
+    if (matches.length) log('INFO', 'BASKET', `Pinnacle: ${matches.length} partidas basket`);
+    try { require('./lib/feed-heartbeat').markFeedSuccess('pinnacle', 'basket', matches.length); } catch (_) {}
+    return matches;
+  } catch (e) {
+    log('ERROR', 'BASKET', `Pinnacle: ${e.message}`);
+    try { require('./lib/feed-heartbeat').markFeedFailure('pinnacle', 'basket', e.message); } catch (_) {}
+    return [];
+  }
+}
+
 // ── The Odds API — Basketball (NBA fase 1) ──
 // 2026-05-03: novo sport basket. Fase 1 só basketball_nba; expandir com
 // basketball_wnba/_euroleague_basketball quando shadow validar (n≥30 + CLV≥0).
@@ -7143,10 +7192,13 @@ setInterval(load, 10000);
   if (p === '/basket-matches') {
     try {
       const espnLib = require('./lib/espn-basket');
-      const [upcoming, oddsMatches] = await Promise.all([
+      const [upcoming, oddsTheOdds, oddsPinnacle] = await Promise.all([
         espnLib.getUpcomingMatches({ daysAhead: 2 }).catch(() => []),
         getTheOddsBasketMatches().catch(() => []),
+        getPinnacleBasketMatches().catch(() => []),
       ]);
+      // Pinnacle prioritário (sharper line + cobre live), TheOdds fallback
+      const oddsMatches = [...oddsPinnacle, ...oddsTheOdds];
       // Merge: ESPN é source of truth pra agenda, The Odds API supplements odds.
       // Match-up via norm names + same date window. Fallback: incluir ambos sem dedup
       // perfeito pra sample inicial (pode ter dup; fix depois quando tiver dados).
