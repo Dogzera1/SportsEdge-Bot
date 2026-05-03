@@ -9123,7 +9123,7 @@ setInterval(load, 60000);
         MARKET_TIP_MAX_EV: parseFloat(process.env.MARKET_TIP_MAX_EV || 'NaN') || null,
         MAX_STAKE_UNITS: parseFloat(process.env.MAX_STAKE_UNITS || 'NaN') || null,
         TENNIS_MARKET_SCAN_MAX_EV: parseFloat(process.env.TENNIS_MARKET_SCAN_MAX_EV || '40'),
-        TENNIS_MARKET_SCAN_MAX_EV_HANDICAPGAMES: parseFloat(process.env.TENNIS_MARKET_SCAN_MAX_EV_HANDICAPGAMES || '55'),
+        TENNIS_MARKET_SCAN_MAX_EV_HANDICAPGAMES: parseFloat(process.env.TENNIS_MARKET_SCAN_MAX_EV_HANDICAPGAMES || '35'),
         TENNIS_MARKET_SCAN_MAX_EV_TOTALGAMES: parseFloat(process.env.TENNIS_MARKET_SCAN_MAX_EV_TOTALGAMES || '40'),
         FB_DIVERGENCE_MAX_PP: parseFloat(process.env.FB_DIVERGENCE_MAX_PP || '12'),
         ANALYZED_TTL_MS: parseInt(process.env.ANALYZED_TTL_MS || String(72 * 3600 * 1000), 10),

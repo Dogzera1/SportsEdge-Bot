@@ -15532,11 +15532,12 @@ async function pollTennis(runOnce = false) {
                 const { scanTennisMarkets } = require('./lib/tennis-market-scanner');
                 const minEv = parseFloat(process.env.TENNIS_MARKET_SCAN_MIN_EV ?? '4');
                 const maxEv = parseFloat(process.env.TENNIS_MARKET_SCAN_MAX_EV ?? '40');
-                // Per-market EV cap (shadow 30d prod): handicapGames ROI +10%
-                // n=118 com avgEV ~30 — cap 40 cortava cauda legítima. Relax pra 55.
-                // totalGames mantém 40 default (over -22.9% leak; under +12.7% mas
-                // sample <30 não justifica relax assimétrico).
-                const _maxEvHG = parseFloat(process.env.TENNIS_MARKET_SCAN_MAX_EV_HANDICAPGAMES ?? '55');
+                // 2026-05-03 audit: handicapGames 30d agora -2.4% (estava +10% quando
+                // cap subiu pra 55). Bucket EV>30 sangra (variance + overconfident
+                // model em ATP Madrid R2/R3/QF + Challenger). Cap default 55→35
+                // pra cortar cauda inflated. totalGames mantém 40 (under já bloqueado
+                // permanente, over leak persistente).
+                const _maxEvHG = parseFloat(process.env.TENNIS_MARKET_SCAN_MAX_EV_HANDICAPGAMES ?? '35');
                 const _maxEvTG = parseFloat(process.env.TENNIS_MARKET_SCAN_MAX_EV_TOTALGAMES ?? '40');
                 const maxEvPerMarket = {
                   handicapGames: _maxEvHG,
