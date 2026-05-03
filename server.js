@@ -6993,6 +6993,47 @@ setInterval(load, 10000);
           : stmt.get(t1Like, t2Like, t2Like, t1Like);
       }
 
+      // 3) Match normalizado + alias. Caso 2026-05-03: tip "Wolves" vs ESPN
+      // "Wolverhampton Wanderers" — LIKE não bate ("wolves" não é substring
+      // de "wolverhampton"). Usa _norm + _TEAM_ALIASES (lib/football-poisson-trained)
+      // pra reconciliar nomes curtos/longos. Window +-4d em torno de sentAt.
+      if (!row?.winner && sentAt) {
+        try {
+          const { _norm, _TEAM_ALIASES } = require('./lib/football-poisson-trained');
+          const candidates = db.prepare(`
+            SELECT * FROM match_results
+            WHERE game = 'football'
+              AND resolved_at BETWEEN datetime(?, '-4 days') AND datetime(?, '+6 days')
+          `).all(sentAt, sentAt);
+          const variants = (n) => {
+            const norm = _norm(n);
+            const alias = _TEAM_ALIASES[norm];
+            return alias ? [norm, alias] : [norm];
+          };
+          const t1v = variants(team1);
+          const t2v = variants(team2);
+          const matches = (a, b) => {
+            if (!a || !b) return false;
+            const av = variants(a), bv = variants(b);
+            return av.some(x => bv.includes(x)) || a.includes(b) || b.includes(a);
+          };
+          for (const c of candidates) {
+            const cT1n = _norm(c.team1), cT2n = _norm(c.team2);
+            const home = t1v.some(v => v === cT1n || _TEAM_ALIASES[v] === cT1n) || matches(cT1n, _norm(team1));
+            const away = t2v.some(v => v === cT2n || _TEAM_ALIASES[v] === cT2n) || matches(cT2n, _norm(team2));
+            const homeRev = t1v.some(v => v === cT2n || _TEAM_ALIASES[v] === cT2n) || matches(cT2n, _norm(team1));
+            const awayRev = t2v.some(v => v === cT1n || _TEAM_ALIASES[v] === cT1n) || matches(cT1n, _norm(team2));
+            if ((home && away) || (homeRev && awayRev)) {
+              row = c;
+              log('INFO', 'FOOTBALL-RESULT', `fuzzy-norm matched: tip "${team1}" vs "${team2}" → results "${c.team1}" vs "${c.team2}" → winner=${c.winner}`);
+              break;
+            }
+          }
+        } catch (e) {
+          log('DEBUG', 'FOOTBALL-RESULT', `norm match failed: ${e.message}`);
+        }
+      }
+
       if (row?.winner) {
         sendJson(res, { resolved: true, winner: row.winner, score: row.final_score || '' });
       } else {
