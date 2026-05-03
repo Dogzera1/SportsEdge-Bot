@@ -17087,12 +17087,13 @@ setInterval(load, 60000);
             tennis: 12, mma: 30,
             football: 25, tabletennis: 25,
             darts: 25, snooker: 25,
-            // 2026-05-03 basket fase 1: cap mais largo (50) porque modelo Elo
-            // ainda está cold (5-10 jogos por team, ratings noisy). Tips com
-            // EV alto são justamente o que queremos AUDITAR em shadow pra
-            // calibrar — bloquear cedo esconde bug de modelo. Tighten pra 25
-            // depois de n≥30 settled CLV≥0.
-            basket: 50,
+            // 2026-05-03 basket fase 1: cap largo (80) porque modelo Elo
+            // ainda está cold (5-10 jogos por team) e Pinnacle NBA underdog
+            // odds 3.5-9.0 geram EV mathematicamente alto (3.76 + p_model 0.41
+            // = +55% EV). Tips com EV alto são justamente o que queremos
+            // AUDITAR em shadow pra calibrar — bloquear cedo esconde bug de
+            // modelo. Tighten pra 25 depois de n≥30 settled CLV≥0.
+            basket: 80,
           };
           let evMax = PER_SPORT_DEFAULTS[sport] != null ? PER_SPORT_DEFAULTS[sport] : 35;
           // 2026-04-28: TIP_EV_MAX agora é TETO ADICIONAL (Math.min com per-sport
