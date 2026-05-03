@@ -3,6 +3,14 @@ const dns = require('dns');
 dns.setDefaultResultOrder('ipv4first');
 const https = require('https');
 const http = require('http');
+// 2026-05-03 FIX: HTTP keep-alive default agents para reduzir overhead de TCP
+// handshake em rajadas (sendAdminDMs múltiplos sports + scanner cycles paralelos).
+// maxSockets 50 evita EMFILE em pico. Override via HTTP_KEEP_ALIVE=false.
+if (!/^(0|false|no)$/i.test(String(process.env.HTTP_KEEP_ALIVE || ''))) {
+  const _maxSockets = parseInt(process.env.HTTP_MAX_SOCKETS || '50', 10);
+  http.globalAgent = new http.Agent({ keepAlive: true, maxSockets: _maxSockets, keepAliveMsecs: 30000 });
+  https.globalAgent = new https.Agent({ keepAlive: true, maxSockets: _maxSockets, keepAliveMsecs: 30000 });
+}
 const fs = require('fs');
 const path = require('path');
 const initDatabase = require('./lib/database');
@@ -1691,7 +1699,9 @@ function scheduleLiveClvCapture(sport, match, tipParticipant, matchId, tipOdds, 
       let clvOdds = null;
       if (pickMatchesT1) clvOdds = o1; else if (pickMatchesT2) clvOdds = o2;
       if (!clvOdds) return;
-      await serverPost('/update-clv', { matchId, clvOdds }, sport).catch(() => {});
+      // 2026-05-03 FIX: passar tipParticipant pro server escopar UPDATE só nessa tip
+      // (evita escrever clv_odds no lado oposto quando há ML em ambas pernas).
+      await serverPost('/update-clv', { matchId, clvOdds, tipParticipant }, sport).catch(() => {});
       const tipN = parseFloat(tipOdds);
       const delta = tipN > 0 ? ((tipN / clvOdds - 1) * 100).toFixed(2) : '?';
       log('INFO', 'CLV-DELAYED', `${sport}: ${match.team1} vs ${match.team2} → CLV ${clvOdds} (vs tip @${tipOdds}, delta ${delta}%)`);
@@ -1785,13 +1795,18 @@ function _getDailyTipLimit(sport) {
 }
 function _getDailyTipCount(sport) {
   try {
+    // 2026-05-03 FIX: SQLite default UTC. `start of day` UTC = 21h BRT do dia anterior;
+    // counter resetava 21h BRT → janelas diárias deslocadas 3h. Aplica TZ_OFFSET_HOURS
+    // (default -3 BRT) ao computar start of day local. Override via env DAILY_TZ_OFFSET_H.
+    const tzH = parseFloat(process.env.DAILY_TZ_OFFSET_H ?? '-3');
+    const offsetMod = `${tzH >= 0 ? '+' : '-'}${Math.abs(tzH)} hours`;
     const r = db.prepare(`
       SELECT COUNT(*) AS n FROM tips
       WHERE sport = ?
-        AND sent_at >= datetime('now', 'start of day')
+        AND sent_at >= datetime(datetime('now', ?), 'start of day', ?)
         AND (archived IS NULL OR archived = 0)
         AND COALESCE(is_shadow, 0) = 0
-    `).get(sport);
+    `).get(sport, offsetMod, `${tzH >= 0 ? '-' : '+'}${Math.abs(tzH)} hours`);
     return r?.n || 0;
   } catch (_) { return 0; }
 }
@@ -3485,9 +3500,16 @@ async function settleCompletedTips() {
             if (mkt === '1X2_D') {
               won = result.winner === 'Draw';
             } else if (mkt === 'OVER_2.5' || mkt === 'UNDER_2.5') {
-              // Settlement de Over/Under: usa score para calcular total de gols
-              const [g1, g2] = (result.score || '0-0').split('-').map(Number);
-              const total = (g1 || 0) + (g2 || 0);
+              // 2026-05-03 FIX: skip (não settle como 0-0) quando score vazio.
+              // Antes default '0-0' fazia OVER=LOSS / UNDER=WIN sempre que feed
+              // retornasse {resolved:true, winner:'X', score:''} — biased gigantesco
+              // em UNDER. Deixa AUTO_VOID_STUCK lidar caso continue sem score.
+              const sm = String(result.score || '').match(/^\s*(\d+)\s*-\s*(\d+)\s*$/);
+              if (!sm) {
+                log('DEBUG', 'SETTLE', `${sport} OU: score vazio/inválido (${result.score || '∅'}) — skip ${tip.participant1} vs ${tip.participant2}`);
+                continue;
+              }
+              const total = (parseInt(sm[1], 10) || 0) + (parseInt(sm[2], 10) || 0);
               won = mkt === 'OVER_2.5' ? total > 2.5 : total < 2.5;
               // Registra winner fictício para compatibilidade com /settle
               result.winner = won ? tip.tip_participant : '__loss__';
@@ -6104,10 +6126,14 @@ async function runOddsBucketGuardCycle() {
 // Loga top correlações detectadas (|c|>0.3).
 function _applyEsportsCorrelation(found, sport, match) {
   const { adjustStakesForCorrelation, computeMarketCorrelation } = require('./lib/esports-correlation');
-  const tipsWithKelly = found.map(t => ({
-    ...t,
-    kellyStake: +((t.pModel - (1 - t.pModel) / (t.odd - 1)) * 100).toFixed(2) || 0,
-  }));
+  const tipsWithKelly = found.map(t => {
+    // 2026-05-03 FIX: || 0 só captura 0/-0/NaN; valores negativos (sem edge real)
+    // passavam, eram multiplicados por (1-discount) na adjustStakes, propagando
+    // negativos pra log + downstream stake calc. Math.max(0, ...) força clamp.
+    const kRaw = (t.pModel - (1 - t.pModel) / (t.odd - 1)) * 100;
+    const kelly = Number.isFinite(kRaw) ? Math.max(0, +kRaw.toFixed(2)) : 0;
+    return { ...t, kellyStake: kelly };
+  });
   const adjusted = adjustStakesForCorrelation(tipsWithKelly);
   const pairs = [];
   for (let i = 0; i < found.length; i++) {
@@ -7452,8 +7478,18 @@ async function autoAnalyzeMatch(token, match) {
               return Math.min(a.length, b.length) / Math.max(a.length, b.length) >= 0.5;
             };
             const team1IsBlue2 = _matchStrict2(blueNorm2, t1Norm2);
-            const t1Lineup = team1IsBlue2 ? blueLineup : redLineup;
-            const t2Lineup = team1IsBlue2 ? redLineup : blueLineup;
+            // 2026-05-03 FIX: quando blue.name não bate strict com team1, _matchStrict2
+            // retorna false → t1Lineup = redLineup silently (default). Pode atribuir
+            // lineup oposto pra team1, gerando false-positive subCount em roster correto.
+            // Tenta também match contra red side; se nenhum bate, skip detection.
+            const redNorm2 = norm(lolLiveStats.redTeam?.name || '');
+            const team1IsRed2 = _matchStrict2(redNorm2, t1Norm2);
+            const _rosterSkip = !team1IsBlue2 && !team1IsRed2;
+            if (_rosterSkip) {
+              log('DEBUG', 'LOL-ROSTER-SUB', `${match.team1} vs ${match.team2}: name não bate blue (${lolLiveStats.blueTeam?.name}) nem red (${lolLiveStats.redTeam?.name}) — skip detection`);
+            }
+            const t1Lineup = _rosterSkip ? [] : (team1IsBlue2 ? blueLineup : redLineup);
+            const t2Lineup = _rosterSkip ? [] : (team1IsBlue2 ? redLineup : blueLineup);
             // 2026-05-02: sinceDays 30→60. Roster baseline com 30d perdia times
             // que jogaram pouco (Dplus KIA pre-LCK 2026: lineup novo de Mar/26
             // mas OE só puxava Fev). 60d cobre janela maior sem ficar antigo demais.
@@ -7498,7 +7534,17 @@ async function autoAnalyzeMatch(token, match) {
 
         // Live series-aware override — combina live map state com pSeries prior
         // via Monte Carlo (similar ao Dota). Só quando temos lolLiveStats e bo>=3.
-        if (hasLiveStats && lolLiveStats && bo >= 3 && Number.isFinite(match.score1) && Number.isFinite(match.score2)) {
+        // 2026-05-03 FIX: freshness check (mesmo padrão usado pelo kills scanner em
+        // 7750+). Antes lolLiveStats podia estar de cache até 60s+, gameTime/goldDiff
+        // stale → pred.p shifted → priceSeriesFromLiveMap rewrite com cap ±15pp em
+        // estado fantasma. Override só com snapshot <60s. Override via env LOL_LIVE_SERIES_MAX_AGE_MS.
+        const _liveSeriesMaxAge = parseInt(process.env.LOL_LIVE_SERIES_MAX_AGE_MS || '60000', 10);
+        const _liveSeriesAgeMs = lolLiveStats?._fetchedAt ? (Date.now() - lolLiveStats._fetchedAt) : 0;
+        const _liveSeriesFresh = !lolLiveStats?._fetchedAt || _liveSeriesAgeMs < _liveSeriesMaxAge;
+        if (lolLiveStats?._fetchedAt && !_liveSeriesFresh) {
+          log('DEBUG', 'LOL-LIVE-SERIES', `${match.team1} vs ${match.team2}: stale (age=${(_liveSeriesAgeMs/1000).toFixed(1)}s > ${_liveSeriesMaxAge/1000}s) — skip override`);
+        }
+        if (hasLiveStats && lolLiveStats && _liveSeriesFresh && bo >= 3 && Number.isFinite(match.score1) && Number.isFinite(match.score2)) {
           try {
             const { predictLolMapWinner } = require('./lib/lol-map-model');
             const { priceSeriesFromLiveMap } = require('./lib/lol-series-model');
@@ -7507,6 +7553,12 @@ async function autoAnalyzeMatch(token, match) {
               seriesScore: { score1: match.score1, score2: match.score2, team1: match.team1, team2: match.team2 },
               baselineP: lolModel.mapP1,
               team1Name: match.team1,
+              // 2026-05-03 FIX: sem pickTeam, retorno é pBlue (perspectiva do blue side).
+              // priceSeriesFromLiveMap espera P(team1 vence mapa atual). Quando team1=red,
+              // P invertia → toda tip live LoL com team1 no red side em playoffs ficava
+              // com modelP1 trocado. Passar pickTeam=team1 força perspectiva correta;
+              // miss strict blue/red retorna baselineP (conf 0.15) → falha gate >= 0.35.
+              pickTeam: match.team1,
             });
             if (pred.confidence >= 0.35) {
               const preSeries = lolModel.modelP1;
@@ -8121,7 +8173,12 @@ async function autoAnalyzeMatch(token, match) {
     // EV recalculado automaticamente de P×odd quando ausente. Layout [1]=team, [2]=odd, [3]=EV, [4]=stake, [5]=conf.
     let tipResult = _parseTipMl(text);
     // Log quando a IA gerou resposta mas o padrão TIP_ML não foi encontrado (ajuda a detectar mudança de formato)
-    if (!tipResult && text && text.length > 20 && !text.toLowerCase().includes('sem edge') && !text.toLowerCase().includes('sem tip') && !/\bsem_?tip\b/i.test(text)) {
+    // 2026-05-03 FIX: heuristic só length>20 disparava em respostas curtas válidas tipo
+    // "SEM_TIP. Pq odds erradas." (length 25). Adicionar check explícito por SEM_EDGE/SEM_TIP/NO_EDGE
+    // patterns + length>60 pra reduzir false-positives. Gate provider via env AI_PARSE_FAIL_LOG.
+    const _aiParseFailLog = !/^(0|false|no)$/i.test(String(process.env.AI_PARSE_FAIL_LOG ?? '1'));
+    if (_aiParseFailLog && !tipResult && text && text.length > 60
+        && !/(sem[\s_-]?edge|sem[\s_-]?tip|no[\s_-]?edge|no[\s_-]?value|no[\s_-]?bet|skip|pass)/i.test(text)) {
       const snippet = text.slice(0, 200).replace(/\n/g, ' ');
       log('DEBUG', 'IA-PARSE', `Sem TIP_ML na resposta para ${match.team1} vs ${match.team2}: "${snippet}"`);
       try { _metrics.incr('ai_parse_fail', { provider: resp?.provider || 'deepseek' }); } catch (_) {}
@@ -13350,6 +13407,9 @@ async function _pollDotaInner(runOnce = false) {
             seriesScore: { score1: match.score1, score2: match.score2, team1: match.team1, team2: match.team2 },
             baselineP: pMapBase,
             team1Name: match.team1,
+            // 2026-05-03 FIX: sem pickTeam, retorno é pBlue. priceSeriesFromLiveMap
+            // espera P(team1). Quando team1=Dire (red), P invertia toda tip live Dota.
+            pickTeam: match.team1,
           });
           if (pred.confidence >= 0.35) {
             const pSeriesLive = priceSeriesFromLiveMap({
@@ -15194,7 +15254,7 @@ async function pollTennis(runOnce = false) {
                     // pra alinhar com inferSurface() do ensemble.
                     const _surfMap = { hard: 'hard', clay: 'clay', grass: 'grass', indoor: 'hard_indoor' };
                     const _h2hSurface = _surfMap[markovSurface] || 'hard';
-                    const ens = computeH2HEnsemble(dbH2h, tennisModelResult.modelP1, { minN, maxWeight: maxW, currentSurface: _h2hSurface });
+                    const ens = computeH2HEnsemble(dbH2h, tennisModelResult.modelP1, { minN, maxWeight: maxW, currentSurface: _h2hSurface, player1Name: match.team1 });
                     if (ens.applied) {
                       const pre = tennisModelResult.modelP1;
                       const delta = Math.abs(ens.pBlend - pre);
@@ -15386,10 +15446,12 @@ async function pollTennis(runOnce = false) {
                   try {
                     const { adjustStakesForCorrelation, computeMarketCorrelation } = require('./lib/tennis-correlation');
                     // adjustStakesForCorrelation espera `kellyStake` — preenche com fração provisória baseada em pModel/odd
-                    const tipsWithKelly = found.map(t => ({
-                      ...t,
-                      kellyStake: +((t.pModel - (1 - t.pModel) / (t.odd - 1)) * 100).toFixed(2) || 0,
-                    }));
+                    // 2026-05-03 FIX: clamp negativo a 0 (mesmo bug do _applyEsportsCorrelation).
+                    const tipsWithKelly = found.map(t => {
+                      const kRaw = (t.pModel - (1 - t.pModel) / (t.odd - 1)) * 100;
+                      const kelly = Number.isFinite(kRaw) ? Math.max(0, +kRaw.toFixed(2)) : 0;
+                      return { ...t, kellyStake: kelly };
+                    });
                     const adjusted = adjustStakesForCorrelation(tipsWithKelly);
                     // Log as maiores correlações detectadas
                     const pairs = [];
@@ -15665,8 +15727,13 @@ async function pollTennis(runOnce = false) {
             _tennisModelMeta: { method: tennisModelResult.method, confidence: tennisModelResult.confidence },
             _eloResult: eloResult,
           };
-          // Se Elo antigo também está disponível, faz blend
-          if (eloResult && eloResult.found1 && eloResult.found2 && eloResult.score > 0) {
+          // 2026-05-03 FIX: blend com Elo legado puxava 40% pra Elo bruto, desfazendo
+          // calib (PAV/Beta) + Markov 40/60 + TB + H2H ensemble + injury shrink já
+          // aplicados no tennisModelResult. Pular blend quando model é trained (já
+          // tem Elo + 5 features GBDT + isotonic embarcado). Só blendar em paths
+          // heurísticos legados (method != 'trained' e ausência de calib).
+          const _isTennisTrainedPath = String(tennisModelResult.method || '').includes('trained');
+          if (!_isTennisTrainedPath && eloResult && eloResult.found1 && eloResult.found2 && eloResult.score > 0) {
             mlResultTennis.modelP1 = mlResultTennis.modelP1 * 0.6 + eloResult.modelP1 * 0.4;
             mlResultTennis.modelP2 = 1 - mlResultTennis.modelP1;
             const blendEdge = Math.max(
@@ -16602,6 +16669,48 @@ async function pollFootball(runOnce = false) {
               if (fbTrained?.markets?.btts?.yes != null) {
                 mlScore.bttsProb = +(fbTrained.markets.btts.yes * 100).toFixed(1);
               }
+              // 2026-05-03 FIX: bestEv/bestOdd/market eram do calcFootballScore com
+              // P raw do Poisson genérico. Quando trained correction muda over25Prob
+              // (ex 74.1→51.1), mlScore.bestEv ficava com 24.5% (raw) enquanto a P
+              // exibida e a usada pelo LINE-SHOP davam EV=-14%. Resultado: tip
+              // OVER_2.5 saía com EV inflado em 30-40pp, contaminando gates e
+              // FB-HYBRID trained-direct. Recompute candidates pós-override.
+              try {
+                const _sn = v => { const n = parseFloat(v); return Number.isFinite(n) ? n : null; };
+                const _oH = _sn(o?.h);
+                const _oD = _sn(o?.d);
+                const _oA = _sn(o?.a);
+                const _oOver  = _sn(o?.ou25?.over);
+                const _oUnder = _sn(o?.ou25?.under);
+                const _oYes   = _sn(o?.btts?.yes);
+                const _oNo    = _sn(o?.btts?.no);
+                const pOv = Number.isFinite(mlScore.over25Prob) ? mlScore.over25Prob / 100 : null;
+                const pBt = Number.isFinite(mlScore.bttsProb)   ? mlScore.bttsProb   / 100 : null;
+                const cands = [];
+                if (_oH > 1 && Number.isFinite(mlScore.modelH)) cands.push({ market: '1X2_H', ev: ((mlScore.modelH/100) * _oH - 1) * 100, odd: _oH, label: 'Casa' });
+                if (_oD > 1 && Number.isFinite(mlScore.modelD)) cands.push({ market: '1X2_D', ev: ((mlScore.modelD/100) * _oD - 1) * 100, odd: _oD, label: 'Empate' });
+                if (_oA > 1 && Number.isFinite(mlScore.modelA)) cands.push({ market: '1X2_A', ev: ((mlScore.modelA/100) * _oA - 1) * 100, odd: _oA, label: 'Fora' });
+                if (pOv != null && _oOver  > 1) cands.push({ market: 'OVER_2.5',  ev: (pOv       * _oOver  - 1) * 100, odd: _oOver,  label: 'Over 2.5' });
+                if (pOv != null && _oUnder > 1) cands.push({ market: 'UNDER_2.5', ev: ((1 - pOv) * _oUnder - 1) * 100, odd: _oUnder, label: 'Under 2.5' });
+                if (pBt != null && _oYes   > 1) cands.push({ market: 'BTTS_YES',  ev: (pBt       * _oYes   - 1) * 100, odd: _oYes,   label: 'Ambas Marcam' });
+                if (pBt != null && _oNo    > 1) cands.push({ market: 'BTTS_NO',   ev: ((1 - pBt) * _oNo    - 1) * 100, odd: _oNo,    label: 'NÃO Ambas Marcam' });
+                cands.sort((a, b) => b.ev - a.ev);
+                const _newBest = cands[0];
+                if (_newBest) {
+                  const _prevEv  = parseFloat(mlScore.bestEv);
+                  const _prevMkt = mlScore.market;
+                  const _newEv   = parseFloat(_newBest.ev.toFixed(2));
+                  if (_prevMkt !== _newBest.market || !Number.isFinite(_prevEv) || Math.abs(_prevEv - _newEv) >= 0.5) {
+                    log('DEBUG', 'FB-MODEL', `${match.team1} vs ${match.team2}: bestEv recompute ${_prevMkt}=${Number.isFinite(_prevEv) ? _prevEv.toFixed(1)+'%' : 'n/a'} → ${_newBest.market}=${_newEv.toFixed(1)}% (post-trained markets)`);
+                  }
+                  mlScore.bestEv    = _newEv;
+                  mlScore.bestOdd   = _newBest.odd;
+                  mlScore.market    = _newBest.market;
+                  mlScore.direction = _newBest.label;
+                  const _evThr = _newBest.market.startsWith('1X2') ? 5.0 : 4.0;
+                  mlScore.pass = _newEv >= _evThr;
+                }
+              } catch (e) { reportBug('FB-MODEL-RECALC', e); }
             }
           }
         } catch (e) { reportBug('FB-MODEL', e); }
@@ -16663,8 +16772,12 @@ async function pollFootball(runOnce = false) {
               // Live tem volatilidade maior — exige EV gate mais alto pra cobrir movimento de odds.
               const fbMtMinEv = parseFloat(process.env[isLiveScan ? 'FOOTBALL_MT_LIVE_MIN_EV' : 'FOOTBALL_MT_MIN_EV'] ?? (isLiveScan ? '8' : '5'));
               const fbMtMinPm = parseFloat(process.env.FOOTBALL_MT_MIN_PMODEL ?? '0.50');
-              const fbMtMinOdd = parseFloat(process.env.FOOTBALL_MT_MIN_ODD ?? '1.50');
-              const fbMtMaxOdd = parseFloat(process.env.FOOTBALL_MT_MAX_ODD ?? '3.50');
+              // 2026-05-03 FIX: usa _resolveMtOddBounds (auto-bucket-guard) como
+              // outros sports. Antes football tinha bounds hardcoded sem auto-tune
+              // por bucket leak — agora gates_runtime_state pode override min/max.
+              const _fbBounds = _resolveMtOddBounds('football');
+              const fbMtMinOdd = _fbBounds?.minOdd ?? parseFloat(process.env.FOOTBALL_MT_MIN_ODD ?? '1.50');
+              const fbMtMaxOdd = _fbBounds?.maxOdd ?? parseFloat(process.env.FOOTBALL_MT_MAX_ODD ?? '3.50');
               // Inject BTTS odds do aggregator (não vem do Pinnacle direct, mas
               // está disponível em match.odds.btts via Supabase/odds-aggregator).
               const pinMktWithBtts = match.odds?.btts ? { ...pinMkt, btts: match.odds.btts } : pinMkt;
@@ -17062,7 +17175,24 @@ Máximo 200 palavras.`;
             if (oOver > 1 && oUnder > 1) {
               const rO = 1/oOver, rU = 1/oUnder, vigOu = rO + rU;
               _impPFb = /OVER/i.test(tipMarket) ? rO/vigOu : rU/vigOu;
-              _modelPFb = 1/tipOdd; // sem modelo dedicado pra OU; usa derivação simples
+              // 2026-05-03 FIX: antes _modelPFb = 1/tipOdd (raw vig). Diff vs _impPFb
+              // (de-vigged) era só o vig do book → gate inerte. Agora usa over25Prob
+              // do modelo (corrigido pelo trained-Poisson via override em 16595+).
+              if (Number.isFinite(mlScore.over25Prob) && mlScore.over25Prob > 0) {
+                const pOv = mlScore.over25Prob / 100;
+                _modelPFb = /OVER/i.test(tipMarket) ? pOv : (1 - pOv);
+              } else {
+                _modelPFb = 1/tipOdd; // fallback quando não há over25Prob
+              }
+            }
+          }
+          else if (/BTTS/i.test(tipMarket) && o.btts && Number.isFinite(mlScore.bttsProb)) {
+            const oYes = parseFloat(o.btts.yes), oNo = parseFloat(o.btts.no);
+            if (oYes > 1 && oNo > 1) {
+              const rY = 1/oYes, rN = 1/oNo, vigBt = rY + rN;
+              _impPFb = /YES/i.test(tipMarket) ? rY/vigBt : rN/vigBt;
+              const pBt = mlScore.bttsProb / 100;
+              _modelPFb = /YES/i.test(tipMarket) ? pBt : (1 - pBt);
             }
           }
           if (_modelPFb != null && _impPFb != null) {
@@ -19793,9 +19923,9 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
     _lastStuckVoidDay = today;
 
     const thresholdsH = {
-      esports: 12, lol: 12, cs: 12, valorant: 12,
+      esports: 12, lol: 12, cs: 12, cs2: 12, valorant: 12, dota2: 12,
       tennis: 36, darts: 36, snooker: 48, mma: 72,
-      football: 24,
+      football: 24, tabletennis: 24,
     };
     const adminKey = process.env.ADMIN_KEY || '';
     const results = [];
@@ -21094,7 +21224,7 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
 
           // 3-way arb football (h, d, a cross-book) — funciona em ambos modos
           const arb3 = arb.detect3WayArb({ sport: 'football', team1: m.team1, team2: m.team2, allOdds: all });
-          if (arb3 && arb.shouldDm(arb3.sport, arb3.matchKey, arb3.marketType, undefined, db)) {
+          if (arb3 && arb.shouldDm(arb3.sport, arb3.matchKey, arb3.marketType, undefined, db, arb3.matchLabel)) {
             arb.persistEvent(db, arb3);
             arbs++;
             if (ADMIN_IDS.size) {
@@ -21159,8 +21289,11 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
               } catch (_) {}
             }
             // Super-odd: Pinnacle anchor se disponível, senão cross-book mediana
+            // 2026-05-03 FIX: pinOddsAll permite devig 3-way (h/d/a) → EV usa true_p
+            // ao invés de 1/pin (vig inflado).
+            const _pinOddsAllFb = pin ? [parseFloat(pin.h), parseFloat(pin.d), parseFloat(pin.a)].filter(o => Number.isFinite(o) && o > 1) : null;
             const superArgs = pin
-              ? { sport: 'football', team1: m.team1, team2: m.team2, side, pinOdd, otherBooks: brBooks }
+              ? { sport: 'football', team1: m.team1, team2: m.team2, side, pinOdd, otherBooks: brBooks, pinOddsAll: _pinOddsAllFb }
               : { sport: 'football', team1: m.team1, team2: m.team2, side, books: allBooksSide };
             const superEvt = sod.detectSuperOdd(superArgs);
             if (superEvt) {
@@ -21254,7 +21387,7 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
 
           // 2-way arb LoL (t1, t2 cross-book)
           const arb2 = arb.detect2WayArb({ sport: 'lol', team1: m.team1, team2: m.team2, allOdds: all });
-          if (arb2 && arb.shouldDm(arb2.sport, arb2.matchKey, arb2.marketType, undefined, db)) {
+          if (arb2 && arb.shouldDm(arb2.sport, arb2.matchKey, arb2.marketType, undefined, db, arb2.matchLabel)) {
             arb.persistEvent(db, arb2);
             arbs++;
             if (ADMIN_IDS.size) {
@@ -21275,8 +21408,10 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
           for (const side of ['t1', 't2']) {
             const pinOdd = parseFloat(pin[side]);
             const brBooks = others.map(b => ({ bookmaker: b.bookmaker, odd: parseFloat(b[side]) })).filter(x => Number.isFinite(x.odd));
+            // 2026-05-03 FIX: pinOddOpposite habilita devig ML 2-way (LoL/Dota/CS/Val).
+            const _pinOpp = side === 't1' ? parseFloat(pin.t2) : parseFloat(pin.t1);
             // Super-odd LoL: persiste silencioso (acumula data antes de DM)
-            const superEvt = sod.detectSuperOdd({ sport: 'lol', team1: m.team1, team2: m.team2, side, pinOdd, otherBooks: brBooks });
+            const superEvt = sod.detectSuperOdd({ sport: 'lol', team1: m.team1, team2: m.team2, side, pinOdd, otherBooks: brBooks, pinOddOpposite: _pinOpp });
             if (superEvt && sod.shouldDm(superEvt.sport, superEvt.matchKey, superEvt.side)) {
               sod.persistEvent(db, superEvt);
               superOdds++;
@@ -21316,7 +21451,7 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
 
           // 2-way arb tennis (t1 vs t2 cross-book)
           const arb2tn = arb.detect2WayArb({ sport: 'tennis', team1: m.team1, team2: m.team2, allOdds: all });
-          if (arb2tn && arb.shouldDm(arb2tn.sport, arb2tn.matchKey, arb2tn.marketType, undefined, db)) {
+          if (arb2tn && arb.shouldDm(arb2tn.sport, arb2tn.matchKey, arb2tn.marketType, undefined, db, arb2tn.matchLabel)) {
             arb.persistEvent(db, arb2tn);
             arbs++;
             if (ADMIN_IDS.size) {
@@ -21336,9 +21471,11 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
             const pinOdd = pin ? parseFloat(pin[side]) : null;
             const brBooks = others.map(b => ({ bookmaker: b.bookmaker, odd: parseFloat(b[side]) })).filter(x => Number.isFinite(x.odd));
             const allBooksSide = all.map(b => ({ bookmaker: b.bookmaker, odd: parseFloat(b[side]) })).filter(x => Number.isFinite(x.odd));
+            // 2026-05-03 FIX: pinOddOpposite habilita devig ML 2-way tennis.
+            const _pinOppTn = pin ? (side === 't1' ? parseFloat(pin.t2) : parseFloat(pin.t1)) : null;
             // Super-odd
             const superArgsTn = pin
-              ? { sport: 'tennis', team1: m.team1, team2: m.team2, side, pinOdd, otherBooks: brBooks }
+              ? { sport: 'tennis', team1: m.team1, team2: m.team2, side, pinOdd, otherBooks: brBooks, pinOddOpposite: _pinOppTn }
               : { sport: 'tennis', team1: m.team1, team2: m.team2, side, books: allBooksSide };
             const superEvtTn = sod.detectSuperOdd(superArgsTn);
             if (superEvtTn && sod.shouldDm(superEvtTn.sport, superEvtTn.matchKey, superEvtTn.side)) {
@@ -22073,7 +22210,8 @@ async function checkCLV(caches = {}) {
             continue;
           }
           const changed = !prevClv || Math.abs(clvN - prevClv) >= 0.005;
-          await serverPost('/update-clv', { matchId: tip.match_id, clvOdds: clvN }, sport).catch(() => {});
+          // 2026-05-03 FIX: incluir tip_participant pra escopar updateTipCLV à tip exata.
+          await serverPost('/update-clv', { matchId: tip.match_id, clvOdds: clvN, tipParticipant: tip.tip_participant }, sport).catch(() => {});
           // Near-regime re-captura a cada ciclo; só loga INFO quando odd muda pra evitar spam.
           const level = changed ? 'INFO' : 'DEBUG';
           const suffix = (changed && prevClv) ? ` (prev=${prevClv})` : '';

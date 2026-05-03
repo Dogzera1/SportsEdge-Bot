@@ -5,6 +5,13 @@ const path = require('path');
 const url = require('url');
 const dns = require('dns');
 dns.setDefaultResultOrder('ipv4first');
+// 2026-05-03 FIX: keep-alive global pra evitar overhead handshake em chamadas
+// frequentes a APIs externas (Pinnacle/PandaScore/Sofascore/etc) e auto-retry.
+if (!/^(0|false|no)$/i.test(String(process.env.HTTP_KEEP_ALIVE || ''))) {
+  const _maxSockets = parseInt(process.env.HTTP_MAX_SOCKETS || '50', 10);
+  http.globalAgent = new http.Agent({ keepAlive: true, maxSockets: _maxSockets, keepAliveMsecs: 30000 });
+  https.globalAgent = new https.Agent({ keepAlive: true, maxSockets: _maxSockets, keepAliveMsecs: 30000 });
+}
 const initDatabase = require('./lib/database');
 const { SPORTS, getSportById } = require('./lib/sports');
 const { ML_MARKETS, ML_MARKETS_LIST, isMlMarket } = require('./lib/constants');
@@ -9496,7 +9503,15 @@ setInterval(load, 60000);
       // outros non-ML caem em "skipped" silencioso. Antes: 31 attempted/0 settled
       // poluia stats (NON_ML_AUTOARCHIVE limpa em 48h via cron, mas attempted
       // inflava enquanto isso). Filtro por upper(market_type) IN supported set.
-      const _SETTLE_MARKETS = ['ML', '1X2_H', '1X2_A', '1X2_D', 'OVER_2.5', 'UNDER_2.5', 'DRAW', 'HANDICAP_GAMES', 'TOTAL_GAMES'];
+      // 2026-05-03 FIX: expand pra incluir BTTS_YES/BTTS_NO (football) e
+      // OVER/UNDER em outras linhas (1.5, 3.5). Antes esses ficavam pending
+      // até auto-void, contaminando metrics (attempted alta, settled baixa).
+      const _SETTLE_MARKETS = [
+        'ML', '1X2_H', '1X2_A', '1X2_D', 'DRAW',
+        'OVER_2.5', 'UNDER_2.5', 'OVER_1.5', 'UNDER_1.5', 'OVER_3.5', 'UNDER_3.5',
+        'BTTS_YES', 'BTTS_NO',
+        'HANDICAP_GAMES', 'TOTAL_GAMES',
+      ];
       const _settlePh = _SETTLE_MARKETS.map(() => '?').join(',');
       const pending = db.prepare(`
         SELECT id, sport, match_id, participant1, participant2, tip_participant, odds, sent_at, market_type, stake, is_shadow
@@ -9821,7 +9836,12 @@ setInterval(load, 60000);
           // 2026-04-29: total_kills_map<N> (LoL) → PandaScore games API.
           // HANDICAP/TOTAL maps esports: skip.
           const mt = String(t.market_type || 'ML').toUpperCase();
-          const isMlLike = ['ML','1X2_H','1X2_A','1X2_D','OVER_2.5','UNDER_2.5','DRAW'].includes(mt);
+          // 2026-05-03 FIX: expand isMlLike pra cobrir todas linhas OU/UNDER e BTTS
+          // que entram em _SETTLE_MARKETS. Branch específico em 9943+ resolve
+          // OU/UNDER por parse final_score + BTTS por home_goals>0 && away>0.
+          const isMlLike = ['ML','1X2_H','1X2_A','1X2_D','DRAW',
+            'OVER_2.5','UNDER_2.5','OVER_1.5','UNDER_1.5','OVER_3.5','UNDER_3.5',
+            'BTTS_YES','BTTS_NO'].includes(mt);
           const isTennisHg = mt === 'HANDICAP_GAMES' && t.sport === 'tennis';
           const isTennisTg = mt === 'TOTAL_GAMES' && t.sport === 'tennis';
           const isKills = /^TOTAL_KILLS_MAP\d+$/.test(mt);
@@ -9927,10 +9947,41 @@ setInterval(load, 60000);
             profitR = 0;
             summary.voided++;
           } else if (isMlLike) {
-            // Match name vs winner: norm comparison
-            const winnerN = _norm(m.winner);
-            const tipN = _norm(t.tip_participant);
-            const isWin = winnerN === tipN || winnerN.includes(tipN) || tipN.includes(winnerN);
+            // 2026-05-03 FIX: branch específico para mercados não-name-match.
+            // Antes 1X2_D / OVER_2.5 / UNDER_2.5 / DRAW caíam no name-match
+            // tipN=norm("Empate"|"Over 2.5") vs winner real → loss determinístico.
+            // Football OU/Draw/BTTS seguem mesma logica do cron settleCompletedTips
+            // — parse m.final_score "X-Y".
+            const ouMatch = mt.match(/^(OVER|UNDER)_(\d+(?:\.\d+)?)$/);
+            const isOu = !!ouMatch;
+            const isDraw = (mt === '1X2_D' || mt === 'DRAW');
+            const isBtts = (mt === 'BTTS_YES' || mt === 'BTTS_NO');
+            let isWin = false;
+            if (isOu) {
+              const sm = String(m.final_score || '').match(/^\s*(\d+)\s*-\s*(\d+)\s*$/);
+              if (!sm) { summary.skipped++; continue; }
+              const total = (parseInt(sm[1], 10) || 0) + (parseInt(sm[2], 10) || 0);
+              const line = parseFloat(ouMatch[2]);
+              isWin = ouMatch[1] === 'OVER' ? total > line : total < line;
+            } else if (isDraw) {
+              const winnerN = _norm(m.winner);
+              const sm = String(m.final_score || '').match(/^\s*(\d+)\s*-\s*(\d+)\s*$/);
+              const drawByScore = sm && parseInt(sm[1], 10) === parseInt(sm[2], 10);
+              isWin = winnerN === _norm('Draw') || winnerN === 'empate' || drawByScore;
+            } else if (isBtts) {
+              const sm = String(m.final_score || '').match(/^\s*(\d+)\s*-\s*(\d+)\s*$/);
+              if (!sm) { summary.skipped++; continue; }
+              const g1 = parseInt(sm[1], 10) || 0;
+              const g2 = parseInt(sm[2], 10) || 0;
+              const bothScored = g1 > 0 && g2 > 0;
+              isWin = mt === 'BTTS_YES' ? bothScored : !bothScored;
+            } else {
+              // ML / 1X2_H / 1X2_A — name match com proteção substring
+              const winnerN = _norm(m.winner);
+              const tipN = _norm(t.tip_participant);
+              if (!tipN || !winnerN) { summary.skipped++; continue; }
+              isWin = winnerN === tipN || winnerN.includes(tipN) || tipN.includes(winnerN);
+            }
             result = isWin ? 'win' : 'loss';
             profitR = isWin ? +(stakeR * (odds - 1)).toFixed(2) : -stakeR;
             summary.settled++;
@@ -16550,13 +16601,20 @@ setInterval(load, 60000);
               AND sent_at > datetime('now', '-48 hours')
               AND (archived IS NULL OR archived = 0)
           `).all(sport, eventName);
+          // 2026-05-03 FIX: parseStakeUnits robusto contra "1,5u" (vírgula PT) +
+          // " 1.5 u" (whitespace). Antes simple replace(/u/i,'') deixava vírgula
+          // → parseFloat("1,5") = 1 (perde 0.5u). Pequeno mas distorce correlation cap.
+          const parseStakeU = (s) => {
+            const c = String(s || '').replace(/u/gi, '').replace(',', '.').trim();
+            const n = parseFloat(c);
+            return Number.isFinite(n) ? n : 0;
+          };
           let openExposureU = 0;
           for (const r of openRows) {
-            const u = parseFloat(String(r.stake || '').replace(/u/i, '')) || 0;
-            openExposureU += u;
+            openExposureU += parseStakeU(r.stake);
           }
           // Stake desired (bot envia em units via t.stake como "2u" ou "2")
-          const desiredU = parseFloat(String(t.stake || '').replace(/u/i, '')) || 0;
+          const desiredU = parseStakeU(t.stake);
           if (openExposureU + desiredU > capU) {
             log('WARN', 'CORRELATION', `${sport} / ${eventName}: exposição ${openExposureU}u + nova ${desiredU}u > cap ${capU}u → rejeitada`);
             _emitSkip('correlation_cap', { open_u: +openExposureU.toFixed(1), desired_u: desiredU, cap_u: capU });
@@ -21076,7 +21134,9 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
                   }
                   const closingOdd = parseFloat(isT1 ? currentOdds.t1 : currentOdds.t2);
                   if (closingOdd > 1) {
-                    stmts.updateTipCLV.run(closingOdd, t.matchId, t.sport);
+                    // 2026-05-03 FIX: usar id direto (precisa) em vez de match+sport
+                    // que escrevia em ambas tips ML opostas do mesmo match.
+                    stmts.updateTipCLVById.run(closingOdd, t.id);
                     const clvPct = ((parseFloat(t.odds) / closingOdd - 1) * 100).toFixed(1);
                     log('INFO', 'CLV', `${t.sport} ${t.p1} vs ${t.p2} (bet ${t.tipParticipant}): closing=${closingOdd} tip=${t.odds} CLV=${clvPct}%`);
                   }
@@ -21178,12 +21238,18 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
         }
         profitBySport[sp] = (profitBySport[sp] || 0) + p;
       }
+      // 2026-05-03 FIX: GET endpoint não deve fazer write side-effect (multiple
+      // hits paralelos do dashboard → updates concorrentes). Apenas reporta drift.
+      // Reconciliation real fica em settle main path / cron dedicado. Opt-in via
+      // OVERALL_SUMMARY_AUTO_SYNC=true para preservar comportamento legacy.
+      const _autoSync = /^(1|true|yes)$/i.test(String(process.env.OVERALL_SUMMARY_AUTO_SYNC || ''));
       const bankrolls = bankrollsRaw.map(b => {
         const recomputed = parseFloat(((b.initial_banca || 0) + (profitBySport[b.sport] || 0)).toFixed(2));
-        if (Math.abs(recomputed - (b.current_banca || 0)) > 0.01) {
+        const drift = Math.abs(recomputed - (b.current_banca || 0));
+        if (drift > 0.01 && _autoSync) {
           stmts.updateBankroll.run(recomputed, b.sport);
         }
-        return { ...b, current_banca: recomputed };
+        return { ...b, current_banca: recomputed, drift_reais: +drift.toFixed(2) };
       });
       const totalInitial = bankrolls.reduce((s, b) => s + (b.initial_banca || 0), 0);
       const totalCurrent = bankrolls.reduce((s, b) => s + (b.current_banca || 0), 0);
@@ -21463,8 +21529,16 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
         if (tms) feeds.tennis_match_stats = { rows: tms.n, last: tms.last?.slice(0, 10), ageDays: tms.last ? Math.floor((nowMs - new Date(tms.last).getTime()) / (24 * 3600000)) : null };
       } catch (_) {}
       try {
-        const mr = db.prepare(`SELECT game, COUNT(*) AS n, MAX(resolved_at) AS last FROM match_results GROUP BY game`).all();
-        feeds.match_results = mr.map(r => ({
+        // 2026-05-03 FIX: query rodava 632ms (DB-SLOW WARN nos logs). Index não cobre
+        // MAX(resolved_at) em GROUP BY — full scan. Cache 5min in-memory pra evitar
+        // recompute em cada hit do dashboard. Override via env MATCH_RESULTS_CACHE_TTL_MS.
+        if (!global._mrAggCache) global._mrAggCache = { data: null, ts: 0 };
+        const cacheTtl = parseInt(process.env.MATCH_RESULTS_CACHE_TTL_MS || '300000', 10);
+        if (!global._mrAggCache.data || (nowMs - global._mrAggCache.ts) > cacheTtl) {
+          const mr = db.prepare(`SELECT game, COUNT(*) AS n, MAX(resolved_at) AS last FROM match_results GROUP BY game`).all();
+          global._mrAggCache = { data: mr, ts: nowMs };
+        }
+        feeds.match_results = global._mrAggCache.data.map(r => ({
           game: r.game, rows: r.n,
           last: r.last?.slice(0, 16),
           ageHours: r.last ? Math.floor((nowMs - new Date(r.last + 'Z').getTime()) / 3600000) : null,
@@ -23441,13 +23515,28 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
     req.on('end', () => {
       try {
         const sport = parsed.query.sport || 'esports';
-        const { matchId, clvOdds } = safeParse(body, {});
+        const { matchId, clvOdds, tipParticipant } = safeParse(body, {});
         const mid = clampStr(matchId, 128);
         const clv = parseFiniteNumber(clvOdds);
         if (!mid) { badRequest(res, 'matchId obrigatório'); return; }
         if (clv == null || clv <= 1) { badRequest(res, 'clvOdds inválido'); return; }
-        stmts.updateTipCLV.run(clv, mid, sport);
-        sendJson(res, { ok: true });
+        // 2026-05-03 FIX: filtro match+sport sem tip_participant atualizava ambas tips
+        // ML opostas com a MESMA clv_odds. Quando tipParticipant ausente (callers legacy),
+        // só atualiza se houver exatamente 1 tip pendente — caso contrário recusa pra
+        // evitar contaminação cross-tip.
+        const tp = clampStr(tipParticipant, 128) || null;
+        if (tp) {
+          stmts.updateTipCLV.run(clv, mid, sport, tp);
+          sendJson(res, { ok: true, scoped: 'match+side' });
+        } else {
+          const tips = db.prepare(`SELECT id, tip_participant FROM tips WHERE match_id = ? AND sport = ?`).all(mid, sport);
+          if (tips.length === 1) {
+            stmts.updateTipCLVById.run(clv, tips[0].id);
+            sendJson(res, { ok: true, scoped: 'sole_tip' });
+          } else {
+            sendJson(res, { ok: false, error: 'tipParticipant requerido (multiple tips)', count: tips.length }, 400);
+          }
+        }
       } catch(e) { sendJson(res, { error: e.message }, 500); }
     });
     return;
