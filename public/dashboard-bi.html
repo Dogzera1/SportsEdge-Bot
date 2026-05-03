@@ -1,0 +1,1146 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SportsEdge BI</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+:root {
+  /* OKLCH-based palette — light analytics theme */
+  --bg:           oklch(0.985 0.005 250);
+  --canvas:       oklch(0.97 0.006 250);
+  --panel:        oklch(1 0 0);
+  --line:         oklch(0.93 0.008 250);
+  --line-strong:  oklch(0.86 0.012 250);
+
+  --ink:          oklch(0.18 0.012 250);
+  --ink-mid:      oklch(0.42 0.012 250);
+  --ink-soft:     oklch(0.62 0.010 250);
+  --ink-faint:    oklch(0.78 0.008 250);
+
+  --accent:       oklch(0.55 0.18 250);   /* committed blue */
+  --accent-soft:  oklch(0.92 0.04 250);
+  --accent-ink:   oklch(0.38 0.20 250);
+
+  --pos:          oklch(0.55 0.18 152);
+  --pos-soft:     oklch(0.92 0.05 152);
+  --neg:          oklch(0.58 0.21 25);
+  --neg-soft:     oklch(0.94 0.04 25);
+  --warn:         oklch(0.74 0.16 75);
+  --warn-soft:    oklch(0.95 0.05 75);
+
+  --shadow-sm:    0 1px 2px oklch(0 0 0 / 0.04);
+
+  --r-sm: 4px; --r: 8px;
+  --t1: 11px; --t2: 13px; --t3: 16px; --t4: 21px; --t5: 28px;
+
+  --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
+  --mono: ui-monospace, "JetBrains Mono", Consolas, Menlo, monospace;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; }
+body {
+  font-family: var(--font);
+  background: var(--canvas);
+  color: var(--ink);
+  font-size: var(--t2);
+  line-height: 1.45;
+  font-variant-numeric: tabular-nums;
+  -webkit-font-smoothing: antialiased;
+}
+
+button, select, input { font-family: inherit; font-size: inherit; color: inherit; }
+
+/* Layout shell */
+.app { display: grid; grid-template-rows: auto auto 1fr; min-height: 100vh; }
+
+.appbar {
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  padding: 14px 24px;
+  display: flex;
+  align-items: center;
+  gap: 28px;
+}
+.brand { font-weight: 600; font-size: var(--t3); letter-spacing: -0.01em; }
+.brand b { color: var(--accent-ink); font-weight: 700; }
+.brand-tag { display: inline-block; margin-left: 8px; padding: 2px 7px; border-radius: var(--r-sm); background: var(--accent-soft); color: var(--accent-ink); font-size: var(--t1); font-weight: 600; vertical-align: 2px; }
+.nav { display: flex; gap: 4px; margin-left: 8px; }
+.nav a {
+  text-decoration: none; color: var(--ink-mid);
+  padding: 7px 12px; border-radius: var(--r-sm);
+  font-size: var(--t2); font-weight: 500;
+}
+.nav a:hover { background: var(--canvas); color: var(--ink); }
+.nav a.active { background: var(--accent-soft); color: var(--accent-ink); }
+.appbar-spacer { flex: 1; }
+.appbar-meta { font-size: var(--t1); color: var(--ink-soft); }
+
+.toolbar {
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  padding: 12px 24px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+.tb-label { font-size: var(--t1); color: var(--ink-soft); text-transform: uppercase; letter-spacing: 0.06em; font-weight: 600; }
+.seg {
+  display: inline-flex;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r);
+  overflow: hidden;
+  background: var(--panel);
+}
+.seg button {
+  background: transparent; border: 0; cursor: pointer;
+  padding: 6px 11px; font-size: var(--t2); color: var(--ink-mid);
+  border-right: 1px solid var(--line);
+}
+.seg button:last-child { border-right: 0; }
+.seg button.active { background: var(--accent-soft); color: var(--accent-ink); font-weight: 600; }
+.seg button:hover:not(.active) { background: var(--canvas); }
+
+.sports-multi {
+  display: flex; gap: 4px; flex-wrap: wrap;
+}
+.sport-chip {
+  padding: 5px 10px; border-radius: 999px;
+  background: var(--canvas); border: 1px solid var(--line-strong);
+  font-size: var(--t1); cursor: pointer; user-select: none;
+  color: var(--ink-mid); transition: all .12s cubic-bezier(.16, 1, .3, 1);
+}
+.sport-chip:hover { background: var(--panel); border-color: var(--ink-faint); }
+.sport-chip.on { background: var(--ink); color: var(--bg); border-color: var(--ink); font-weight: 600; }
+
+.refresh {
+  margin-left: auto;
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 6px 11px; border-radius: var(--r);
+  background: var(--canvas); border: 1px solid var(--line-strong);
+  cursor: pointer; font-size: var(--t1); color: var(--ink-mid);
+}
+.refresh:hover { background: var(--panel); }
+.refresh.loading svg { animation: spin .8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* Canvas: grid de panels */
+.canvas {
+  padding: 18px 24px 28px;
+  display: grid;
+  grid-template-columns: repeat(12, 1fr);
+  gap: 14px;
+  align-content: start;
+}
+
+/* Panel base — sem nested cards. Single layer. */
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.panel.span-3 { grid-column: span 3; }
+.panel.span-4 { grid-column: span 4; }
+.panel.span-6 { grid-column: span 6; }
+.panel.span-8 { grid-column: span 8; }
+.panel.span-9 { grid-column: span 9; }
+.panel.span-12 { grid-column: span 12; }
+
+@media (max-width: 1100px) {
+  .panel.span-3, .panel.span-4 { grid-column: span 6; }
+  .panel.span-6, .panel.span-8, .panel.span-9 { grid-column: span 12; }
+}
+@media (max-width: 640px) {
+  .canvas { padding: 12px; gap: 10px; }
+  .panel.span-3, .panel.span-4, .panel.span-6 { grid-column: span 12; }
+  .appbar, .toolbar { padding: 10px 14px; gap: 10px; }
+}
+
+.p-head {
+  display: flex; align-items: baseline; gap: 10px;
+  margin-bottom: 10px;
+}
+.p-title { font-size: var(--t2); font-weight: 600; color: var(--ink); letter-spacing: -0.005em; }
+.p-sub { font-size: var(--t1); color: var(--ink-soft); }
+.p-body { flex: 1; min-height: 0; }
+
+/* KPI cell — restrained, no big-number-with-gradient template.
+   Numbers + delta + sparkline pequeno. */
+.kpi { display: flex; flex-direction: column; gap: 4px; }
+.kpi-label {
+  font-size: var(--t1); color: var(--ink-soft);
+  text-transform: uppercase; letter-spacing: 0.07em; font-weight: 600;
+}
+.kpi-row { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.kpi-value { font-size: var(--t4); font-weight: 600; color: var(--ink); letter-spacing: -0.015em; }
+.kpi-delta { font-size: var(--t1); font-weight: 600; padding: 1px 6px; border-radius: var(--r-sm); }
+.kpi-delta.pos { color: var(--pos); background: var(--pos-soft); }
+.kpi-delta.neg { color: var(--neg); background: var(--neg-soft); }
+.kpi-delta.flat { color: var(--ink-soft); background: var(--canvas); }
+.kpi-foot { font-size: var(--t1); color: var(--ink-soft); }
+.kpi-spark { height: 28px; margin-top: 6px; }
+
+.muted { color: var(--ink-soft); }
+.tt { font-family: var(--mono); font-size: var(--t1); }
+
+/* Charts — Chart.js renders into <canvas> */
+.chart-wrap { position: relative; height: 220px; }
+.chart-wrap.tall { height: 280px; }
+.chart-wrap.short { height: 160px; }
+
+/* Table */
+.tbl { width: 100%; border-collapse: collapse; font-size: var(--t2); }
+.tbl th, .tbl td { padding: 7px 8px; text-align: left; border-bottom: 1px solid var(--line); }
+.tbl th {
+  font-size: var(--t1); font-weight: 600; color: var(--ink-soft);
+  text-transform: uppercase; letter-spacing: 0.06em;
+  position: sticky; top: 0; background: var(--panel);
+}
+.tbl td { color: var(--ink); }
+.tbl td.num, .tbl th.num { text-align: right; font-variant-numeric: tabular-nums; }
+.tbl tr:hover td { background: var(--canvas); }
+.scroll-y { max-height: 380px; overflow-y: auto; }
+
+.pill { display: inline-block; padding: 1px 7px; border-radius: 999px; font-size: var(--t1); font-weight: 600; }
+.pill.pos { color: var(--pos); background: var(--pos-soft); }
+.pill.neg { color: var(--neg); background: var(--neg-soft); }
+.pill.warn { color: oklch(0.42 0.15 75); background: var(--warn-soft); }
+.pill.flat { color: var(--ink-soft); background: var(--canvas); }
+
+/* Skeleton — exponential ease-out fade. */
+.sk { background: linear-gradient(90deg, var(--canvas), var(--line), var(--canvas)); background-size: 200% 100%; animation: sk 1.6s cubic-bezier(.21, .89, .49, 1) infinite; border-radius: var(--r-sm); }
+.sk-line { height: 11px; margin: 6px 0; }
+.sk-block { height: 200px; }
+@keyframes sk { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+
+/* Empty / error states */
+.empty {
+  height: 100%; display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  color: var(--ink-soft); font-size: var(--t2); padding: 24px;
+}
+.empty .em-icon { width: 28px; height: 28px; opacity: 0.5; margin-bottom: 8px; }
+.err { color: var(--neg); font-size: var(--t1); padding: 12px; background: var(--neg-soft); border-radius: var(--r-sm); }
+
+.divider { height: 1px; background: var(--line); margin: 8px 0; }
+
+.legend { display: flex; gap: 10px; flex-wrap: wrap; font-size: var(--t1); color: var(--ink-soft); }
+.legend .sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; vertical-align: middle; margin-right: 5px; }
+
+/* Sport color tokens — used by charts. Mid-saturation per impeccable color law. */
+.s-lol { --s-color: oklch(0.55 0.18 250); }
+.s-cs { --s-color: oklch(0.55 0.16 75); }
+.s-cs2 { --s-color: oklch(0.55 0.16 75); }
+.s-dota2 { --s-color: oklch(0.55 0.18 25); }
+.s-valorant { --s-color: oklch(0.55 0.16 350); }
+.s-tennis { --s-color: oklch(0.62 0.18 145); }
+.s-football { --s-color: oklch(0.55 0.14 145); }
+.s-mma { --s-color: oklch(0.45 0.13 32); }
+.s-darts { --s-color: oklch(0.60 0.14 80); }
+.s-snooker { --s-color: oklch(0.50 0.16 200); }
+.s-tabletennis { --s-color: oklch(0.55 0.13 305); }
+</style>
+</head>
+<body>
+
+<div class="app">
+
+<header class="appbar">
+  <div class="brand">SportsEdge<b>BI</b><span class="brand-tag">v3</span></div>
+  <nav class="nav" id="nav">
+    <a href="#overview" class="active" data-section="overview">Overview</a>
+    <a href="#performance" data-section="performance">Performance</a>
+    <a href="#markets" data-section="markets">Markets</a>
+    <a href="#leagues" data-section="leagues">Leagues</a>
+    <a href="#risk" data-section="risk">Risk</a>
+  </nav>
+  <div class="appbar-spacer"></div>
+  <div class="appbar-meta" id="lastUpdate">—</div>
+</header>
+
+<div class="toolbar">
+  <span class="tb-label">Período</span>
+  <div class="seg" id="rangeSeg">
+    <button data-d="7">7d</button>
+    <button data-d="30" class="active">30d</button>
+    <button data-d="90">90d</button>
+    <button data-d="180">180d</button>
+    <button data-d="365">365d</button>
+  </div>
+  <span class="tb-label">Sports</span>
+  <div class="sports-multi" id="sportsChips"></div>
+  <button class="refresh" id="refreshBtn" type="button">
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M3 12a9 9 0 0 1 15.5-6.3L21 8"/>
+      <path d="M21 3v5h-5"/>
+      <path d="M21 12a9 9 0 0 1-15.5 6.3L3 16"/>
+      <path d="M3 21v-5h5"/>
+    </svg>
+    <span>Atualizar</span>
+  </button>
+</div>
+
+<main class="canvas" id="canvas">
+
+  <!-- Row 1: KPIs -->
+  <section class="panel span-3"><div class="kpi" id="kpiBanca">
+    <div class="kpi-label">Banca</div>
+    <div class="kpi-row"><div class="kpi-value sk sk-line" style="width:120px"></div></div>
+    <div class="kpi-foot sk sk-line" style="width:80px"></div>
+    <svg class="kpi-spark" viewBox="0 0 100 28" preserveAspectRatio="none"></svg>
+  </div></section>
+  <section class="panel span-3"><div class="kpi" id="kpiRoi">
+    <div class="kpi-label">ROI realizado</div>
+    <div class="kpi-row"><div class="kpi-value sk sk-line" style="width:90px"></div></div>
+    <div class="kpi-foot sk sk-line" style="width:100px"></div>
+    <svg class="kpi-spark" viewBox="0 0 100 28" preserveAspectRatio="none"></svg>
+  </div></section>
+  <section class="panel span-3"><div class="kpi" id="kpiHit">
+    <div class="kpi-label">Hit rate</div>
+    <div class="kpi-row"><div class="kpi-value sk sk-line" style="width:80px"></div></div>
+    <div class="kpi-foot sk sk-line" style="width:90px"></div>
+    <svg class="kpi-spark" viewBox="0 0 100 28" preserveAspectRatio="none"></svg>
+  </div></section>
+  <section class="panel span-3"><div class="kpi" id="kpiClv">
+    <div class="kpi-label">CLV médio</div>
+    <div class="kpi-row"><div class="kpi-value sk sk-line" style="width:90px"></div></div>
+    <div class="kpi-foot sk sk-line" style="width:100px"></div>
+    <svg class="kpi-spark" viewBox="0 0 100 28" preserveAspectRatio="none"></svg>
+  </div></section>
+
+  <!-- Row 2: Equity (8) | ROI por sport (4) -->
+  <section class="panel span-8">
+    <header class="p-head"><h2 class="p-title">Curva de equity</h2><span class="p-sub">acumulado · profit em R$</span></header>
+    <div class="p-body"><div class="chart-wrap tall" id="equityWrap"><canvas id="cEquity"></canvas></div></div>
+  </section>
+  <section class="panel span-4">
+    <header class="p-head"><h2 class="p-title">ROI por sport</h2><span class="p-sub">window selecionada · %</span></header>
+    <div class="p-body"><div class="chart-wrap tall" id="roiSportWrap"><canvas id="cRoiSport"></canvas></div></div>
+  </section>
+
+  <!-- Row 3: 4 charts -->
+  <section class="panel span-3">
+    <header class="p-head"><h2 class="p-title">CLV histogram</h2><span class="p-sub">distribuição</span></header>
+    <div class="p-body"><div class="chart-wrap" id="clvHistWrap"><canvas id="cClvHist"></canvas></div></div>
+  </section>
+  <section class="panel span-3">
+    <header class="p-head"><h2 class="p-title">ROI por bucket EV</h2><span class="p-sub">amostra ≥ 10</span></header>
+    <div class="p-body"><div class="chart-wrap" id="evBucketWrap"><canvas id="cEvBucket"></canvas></div></div>
+  </section>
+  <section class="panel span-3">
+    <header class="p-head"><h2 class="p-title">Tips por sport</h2><span class="p-sub">contagem</span></header>
+    <div class="p-body"><div class="chart-wrap" id="tipsBySportWrap"><canvas id="cTipsBySport"></canvas></div></div>
+  </section>
+  <section class="panel span-3">
+    <header class="p-head"><h2 class="p-title">Top 8 leagues</h2><span class="p-sub">profit · R$</span></header>
+    <div class="p-body"><div class="chart-wrap" id="topLeaguesWrap"><canvas id="cTopLeagues"></canvas></div></div>
+  </section>
+
+  <!-- Row 4: Allocation drift (4) | Recent tips (8) -->
+  <section class="panel span-4">
+    <header class="p-head"><h2 class="p-title">Alocação por sport</h2><span class="p-sub">target vs atual · %</span></header>
+    <div class="p-body"><div class="chart-wrap tall" id="allocWrap"><canvas id="cAlloc"></canvas></div></div>
+  </section>
+  <section class="panel span-8">
+    <header class="p-head"><h2 class="p-title">Tips recentes</h2><span class="p-sub" id="tipsRecentMeta">—</span></header>
+    <div class="p-body scroll-y">
+      <table class="tbl" id="tblRecent">
+        <thead><tr>
+          <th>Quando</th><th>Sport</th><th>Match</th><th>Pick</th>
+          <th class="num">Odd</th><th class="num">Stake</th><th class="num">EV</th><th class="num">Result</th>
+        </tr></thead>
+        <tbody id="tblRecentBody"><tr><td colspan="8" class="muted" style="padding:24px;text-align:center">Carregando…</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- Row 5: Sport performance matrix -->
+  <section class="panel span-12">
+    <header class="p-head">
+      <h2 class="p-title">Performance per sport</h2>
+      <span class="p-sub">tabela cruzada — janela selecionada</span>
+    </header>
+    <div class="p-body">
+      <table class="tbl" id="tblPerf">
+        <thead><tr>
+          <th>Sport</th>
+          <th class="num">Tips</th>
+          <th class="num">Win</th>
+          <th class="num">Loss</th>
+          <th class="num">Hit %</th>
+          <th class="num">Stake R$</th>
+          <th class="num">Profit R$</th>
+          <th class="num">ROI %</th>
+          <th class="num">Banca atual</th>
+          <th class="num">Δ alocação</th>
+        </tr></thead>
+        <tbody id="tblPerfBody"><tr><td colspan="10" class="muted" style="padding:24px;text-align:center">Carregando…</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+
+</main>
+</div>
+
+<script>
+"use strict";
+
+// ─────────────────────────────────────────────────────────────────────────
+// State
+// ─────────────────────────────────────────────────────────────────────────
+const state = {
+  days: 30,
+  sports: new Set(), // empty = all
+  charts: {},
+  data: {},
+};
+
+const KNOWN_SPORTS = ['lol', 'cs', 'dota2', 'valorant', 'tennis', 'football', 'mma', 'darts', 'snooker', 'tabletennis'];
+
+const sportColor = (sport) => {
+  const map = {
+    lol: 'oklch(0.55 0.18 250)',
+    cs: 'oklch(0.55 0.16 75)',
+    cs2: 'oklch(0.55 0.16 75)',
+    dota2: 'oklch(0.55 0.18 25)',
+    valorant: 'oklch(0.55 0.16 350)',
+    tennis: 'oklch(0.62 0.18 145)',
+    football: 'oklch(0.55 0.14 145)',
+    mma: 'oklch(0.45 0.13 32)',
+    darts: 'oklch(0.60 0.14 80)',
+    snooker: 'oklch(0.50 0.16 200)',
+    tabletennis: 'oklch(0.55 0.13 305)',
+  };
+  return map[String(sport || '').toLowerCase()] || 'oklch(0.55 0.012 250)';
+};
+
+const fmtBRL = (n) => {
+  if (n == null || !isFinite(n)) return '—';
+  return n.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL', maximumFractionDigits: 2 });
+};
+const fmtPct = (n, dec = 1) => {
+  if (n == null || !isFinite(n)) return '—';
+  const sign = n > 0 ? '+' : '';
+  return sign + n.toFixed(dec) + '%';
+};
+const fmtNum = (n, dec = 0) => {
+  if (n == null || !isFinite(n)) return '—';
+  return n.toLocaleString('pt-BR', { minimumFractionDigits: dec, maximumFractionDigits: dec });
+};
+const fmtTime = (iso) => {
+  if (!iso) return '—';
+  const d = new Date(iso.includes('T') ? iso : iso.replace(' ', 'T') + 'Z');
+  if (isNaN(d)) return '—';
+  return d.toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+};
+
+const deltaCls = (n) => n > 0.01 ? 'pos' : n < -0.01 ? 'neg' : 'flat';
+
+// ─────────────────────────────────────────────────────────────────────────
+// Fetch
+// ─────────────────────────────────────────────────────────────────────────
+async function fetchJson(url) {
+  const r = await fetch(url, { cache: 'no-store' });
+  if (!r.ok) throw new Error(`${r.status} ${url}`);
+  return r.json();
+}
+
+// Per-sport requests when filter is partial; otherwise the cross-sport endpoint.
+function sportSuffix() {
+  if (!state.sports.size) return '';
+  return Array.from(state.sports).join(',');
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Chart.js global config — tabular nums + light theme
+// ─────────────────────────────────────────────────────────────────────────
+Chart.defaults.font.family = "-apple-system, 'Segoe UI', Inter, sans-serif";
+Chart.defaults.font.size = 11;
+Chart.defaults.color = 'oklch(0.42 0.012 250)';
+Chart.defaults.borderColor = 'oklch(0.93 0.008 250)';
+Chart.defaults.plugins.legend.labels.boxWidth = 10;
+Chart.defaults.plugins.legend.labels.boxHeight = 10;
+Chart.defaults.plugins.legend.labels.padding = 14;
+Chart.defaults.plugins.tooltip.backgroundColor = 'oklch(0.18 0.012 250)';
+Chart.defaults.plugins.tooltip.titleColor = 'oklch(0.99 0 0)';
+Chart.defaults.plugins.tooltip.bodyColor = 'oklch(0.92 0.005 250)';
+Chart.defaults.plugins.tooltip.titleFont = { size: 11, weight: '600' };
+Chart.defaults.plugins.tooltip.bodyFont = { size: 11 };
+Chart.defaults.plugins.tooltip.padding = 8;
+Chart.defaults.plugins.tooltip.cornerRadius = 6;
+Chart.defaults.plugins.tooltip.displayColors = true;
+Chart.defaults.elements.line.tension = 0.32;
+Chart.defaults.elements.line.borderWidth = 2;
+Chart.defaults.elements.point.radius = 0;
+Chart.defaults.elements.point.hoverRadius = 4;
+Chart.defaults.elements.bar.borderRadius = 3;
+Chart.defaults.maintainAspectRatio = false;
+Chart.defaults.responsive = true;
+Chart.defaults.animation.duration = 480;
+Chart.defaults.animation.easing = 'easeOutQuart';
+
+// ─────────────────────────────────────────────────────────────────────────
+// Sparkline — pure SVG, accepts array of numbers
+// ─────────────────────────────────────────────────────────────────────────
+function drawSparkline(svg, values, opts = {}) {
+  if (!svg) return;
+  while (svg.firstChild) svg.removeChild(svg.firstChild);
+  if (!values?.length) return;
+  const w = 100, h = 28, pad = 1.5;
+  const min = Math.min(...values, 0);
+  const max = Math.max(...values, 0);
+  const span = Math.max(0.0001, max - min);
+  const xs = values.map((_, i) => pad + (i * (w - pad * 2)) / Math.max(1, values.length - 1));
+  const ys = values.map(v => h - pad - ((v - min) / span) * (h - pad * 2));
+  const d = xs.map((x, i) => (i ? 'L' : 'M') + x.toFixed(2) + ' ' + ys[i].toFixed(2)).join(' ');
+  const last = values[values.length - 1];
+  const stroke = opts.color || (last > 0 ? 'oklch(0.55 0.18 152)' : last < 0 ? 'oklch(0.58 0.21 25)' : 'oklch(0.55 0.012 250)');
+  const fill = opts.fill || stroke.replace('0.55', '0.55').replace('0.18', '0.18');
+
+  // gradient fill area
+  const ns = 'http://www.w3.org/2000/svg';
+  const path = document.createElementNS(ns, 'path');
+  path.setAttribute('d', d);
+  path.setAttribute('fill', 'none');
+  path.setAttribute('stroke', stroke);
+  path.setAttribute('stroke-width', '1.6');
+  path.setAttribute('stroke-linecap', 'round');
+  path.setAttribute('stroke-linejoin', 'round');
+  svg.appendChild(path);
+
+  // baseline tick
+  const baseY = h - pad - ((0 - min) / span) * (h - pad * 2);
+  if (baseY > 0 && baseY < h) {
+    const ln = document.createElementNS(ns, 'line');
+    ln.setAttribute('x1', '0'); ln.setAttribute('x2', String(w));
+    ln.setAttribute('y1', baseY.toFixed(2)); ln.setAttribute('y2', baseY.toFixed(2));
+    ln.setAttribute('stroke', 'oklch(0.86 0.012 250)');
+    ln.setAttribute('stroke-dasharray', '2 2');
+    ln.setAttribute('stroke-width', '1');
+    svg.insertBefore(ln, path);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Renderers
+// ─────────────────────────────────────────────────────────────────────────
+function renderKpis(ov) {
+  const banca = ov?.banca || {};
+  const overall = ov?.overall || {};
+  const clv = ov?.clv || null;
+
+  setKpi('kpiBanca', {
+    value: fmtBRL(banca.total_current),
+    foot: banca.total_initial != null
+      ? `inicial ${fmtBRL(banca.total_initial)} · profit ${fmtBRL(banca.total_profit || 0)}`
+      : '—',
+    delta: banca.growthPct != null ? banca.growthPct : null,
+  });
+
+  // ROI realizado (settled tips na janela)
+  const roi = overall.roi;
+  // Calcula stake total via sports breakdown
+  const stakeTotal = (ov?.sports || []).reduce((s, x) => s + (x.stake_reais || 0), 0);
+  setKpi('kpiRoi', {
+    value: roi != null ? fmtPct(roi, 2) : '—',
+    foot: overall.profit_reais != null
+      ? `profit ${fmtBRL(overall.profit_reais)} · stake ${fmtBRL(stakeTotal)}`
+      : '—',
+    delta: roi,
+  });
+
+  // Hit rate
+  const hit = overall.hitRate;
+  setKpi('kpiHit', {
+    value: hit != null ? fmtPct(hit, 1) : '—',
+    foot: overall.wins != null
+      ? `${overall.wins}W · ${overall.losses || 0}L · ${overall.pending || 0} pending`
+      : '—',
+    delta: hit != null ? hit - 50 : null,
+  });
+
+  // CLV médio (do overall.clv quando disponível)
+  setKpi('kpiClv', {
+    value: clv?.avg != null ? fmtPct(clv.avg, 2) : '—',
+    foot: clv?.n != null
+      ? `n=${clv.n} · ${clv.positive_rate != null ? clv.positive_rate.toFixed(1) + '% positivos' : ''}`
+      : 'aguardando close odds',
+    delta: clv?.avg ?? null,
+  });
+}
+
+function setKpi(id, { value, foot, delta }) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  // Replace skeletons with real values; preserve sparkline svg if present.
+  const valueEl = el.querySelector('.kpi-value');
+  if (valueEl) {
+    valueEl.classList.remove('sk', 'sk-line');
+    valueEl.removeAttribute('style');
+    valueEl.textContent = value;
+  }
+  const footEl = el.querySelector('.kpi-foot');
+  if (footEl) {
+    footEl.classList.remove('sk', 'sk-line');
+    footEl.removeAttribute('style');
+    footEl.textContent = foot;
+  }
+  // Add delta pill if not present
+  let pill = el.querySelector('.kpi-delta');
+  if (!pill && delta != null) {
+    pill = document.createElement('span');
+    pill.className = 'kpi-delta';
+    el.querySelector('.kpi-row').appendChild(pill);
+  }
+  if (pill && delta != null) {
+    pill.className = 'kpi-delta ' + deltaCls(delta);
+    pill.textContent = (delta > 0 ? '+' : '') + delta.toFixed(1) + '%';
+  }
+}
+
+function renderEquity(series) {
+  const el = document.getElementById('cEquity');
+  if (!el) return;
+  destroyChart('equity');
+
+  if (!series?.length) { showEmpty('equityWrap', 'Sem dados de equity na janela'); return; }
+  const labels = series.map(r => r.day);
+  const banca = series.map(r => Number(r.cum_banca || 0));
+
+  const ctx = el.getContext('2d');
+  const h = el.parentElement.clientHeight || 280;
+  const grad = ctx.createLinearGradient(0, 0, 0, h);
+  grad.addColorStop(0, 'oklch(0.55 0.18 250 / 0.18)');
+  grad.addColorStop(1, 'oklch(0.55 0.18 250 / 0)');
+
+  state.charts.equity = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [{
+        label: 'Banca',
+        data: banca,
+        borderColor: 'oklch(0.55 0.18 250)',
+        backgroundColor: grad,
+        fill: true,
+      }],
+    },
+    options: {
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            title: (items) => items[0].label,
+            label: (item) => {
+              const r = series[item.dataIndex];
+              const profit = r?.profit_reais != null
+                ? ` · dia ${r.profit_reais > 0 ? '+' : ''}${fmtNum(r.profit_reais, 2)} (${r.n} tips)`
+                : '';
+              return `${fmtBRL(item.parsed.y)}${profit}`;
+            },
+          },
+        },
+      },
+      scales: {
+        x: {
+          grid: { display: false },
+          ticks: { autoSkipPadding: 18, maxRotation: 0, font: { size: 10 } },
+        },
+        y: {
+          grid: { color: 'oklch(0.93 0.008 250)' },
+          ticks: { callback: (v) => 'R$ ' + fmtNum(v, 0), font: { size: 10 } },
+        },
+      },
+    },
+  });
+}
+
+function renderRoiSport(sports) {
+  const el = document.getElementById('cRoiSport');
+  if (!el) return;
+  destroyChart('roiSport');
+  if (!sports?.length) { showEmpty('roiSportWrap', 'Sem dados'); return; }
+
+  // Sort desc by ROI; filter sports with at least 5 settled
+  const items = sports
+    .filter(s => (s.wins + s.losses) >= 1 && s.roi != null)
+    .sort((a, b) => (b.roi || 0) - (a.roi || 0));
+
+  const labels = items.map(s => s.sport.toUpperCase());
+  const data = items.map(s => Number(s.roi));
+  const colors = items.map(s => Number(s.roi) >= 0 ? 'oklch(0.55 0.18 152)' : 'oklch(0.58 0.21 25)');
+
+  state.charts.roiSport = new Chart(el.getContext('2d'), {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [{ data, backgroundColor: colors, borderWidth: 0 }],
+    },
+    options: {
+      indexAxis: 'y',
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: (item) => {
+              const s = items[item.dataIndex];
+              return `ROI ${fmtPct(s.roi, 2)} · ${s.wins}W/${s.losses}L · n=${s.total}`;
+            },
+          },
+        },
+      },
+      scales: {
+        x: {
+          grid: { color: 'oklch(0.93 0.008 250)' },
+          ticks: { callback: (v) => v + '%' },
+        },
+        y: { grid: { display: false } },
+      },
+    },
+  });
+}
+
+function renderClvHist(payload) {
+  const el = document.getElementById('cClvHist');
+  if (!el) return;
+  destroyChart('clvHist');
+  const buckets = payload?.buckets || [];
+  if (!buckets.length) { showEmpty('clvHistWrap', 'Sem amostra de CLV'); return; }
+  const labels = buckets.map(b => b.label || `${b.min ?? '?'}…${b.max ?? '?'}`);
+  const counts = buckets.map(b => b.n || b.count || 0);
+  const colors = buckets.map(b => (b.min ?? 0) >= 0 ? 'oklch(0.55 0.18 152 / 0.85)' : 'oklch(0.58 0.21 25 / 0.85)');
+
+  state.charts.clvHist = new Chart(el.getContext('2d'), {
+    type: 'bar',
+    data: { labels, datasets: [{ data: counts, backgroundColor: colors, borderWidth: 0 }] },
+    options: {
+      plugins: {
+        legend: { display: false },
+        tooltip: { callbacks: { label: (i) => `n=${fmtNum(i.parsed.y)}` } },
+      },
+      scales: {
+        x: { grid: { display: false }, ticks: { font: { size: 9 }, maxRotation: 45, minRotation: 0 } },
+        y: { grid: { color: 'oklch(0.93 0.008 250)' }, ticks: { precision: 0 } },
+      },
+    },
+  });
+}
+
+function renderEvBucket(payload) {
+  const el = document.getElementById('cEvBucket');
+  if (!el) return;
+  destroyChart('evBucket');
+  const buckets = payload?.buckets || [];
+  if (!buckets.length) { showEmpty('evBucketWrap', 'Sem amostra'); return; }
+
+  const labels = buckets.map(b => b.label || b.bucket || '');
+  const rois = buckets.map(b => Number(b.roi_pct ?? b.roi ?? 0));
+  const colors = rois.map(r => r >= 0 ? 'oklch(0.55 0.18 152 / 0.85)' : 'oklch(0.58 0.21 25 / 0.85)');
+
+  state.charts.evBucket = new Chart(el.getContext('2d'), {
+    type: 'bar',
+    data: { labels, datasets: [{ data: rois, backgroundColor: colors, borderWidth: 0 }] },
+    options: {
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: (i) => {
+              const b = buckets[i.dataIndex];
+              return `ROI ${fmtPct(b.roi_pct ?? b.roi, 2)} · n=${b.n || b.count || 0}`;
+            },
+          },
+        },
+      },
+      scales: {
+        x: { grid: { display: false }, ticks: { font: { size: 9 } } },
+        y: { grid: { color: 'oklch(0.93 0.008 250)' }, ticks: { callback: (v) => v + '%' } },
+      },
+    },
+  });
+}
+
+function renderTipsBySport(sports) {
+  const el = document.getElementById('cTipsBySport');
+  if (!el) return;
+  destroyChart('tipsBySport');
+  const items = (sports || []).filter(s => s.total > 0);
+  if (!items.length) { showEmpty('tipsBySportWrap', 'Sem tips'); return; }
+
+  const labels = items.map(s => s.sport);
+  const counts = items.map(s => s.total);
+  const colors = items.map(s => sportColor(s.sport));
+
+  state.charts.tipsBySport = new Chart(el.getContext('2d'), {
+    type: 'doughnut',
+    data: { labels, datasets: [{ data: counts, backgroundColor: colors, borderWidth: 2, borderColor: 'oklch(1 0 0)' }] },
+    options: {
+      cutout: '64%',
+      plugins: {
+        legend: {
+          position: 'bottom',
+          labels: { boxWidth: 8, boxHeight: 8, padding: 8, font: { size: 10 } },
+        },
+        tooltip: {
+          callbacks: {
+            label: (i) => `${i.label}: ${fmtNum(i.parsed)} tips (${(i.parsed / counts.reduce((a, b) => a + b, 0) * 100).toFixed(1)}%)`,
+          },
+        },
+      },
+    },
+  });
+}
+
+function renderTopLeagues(rows) {
+  const el = document.getElementById('cTopLeagues');
+  if (!el) return;
+  destroyChart('topLeagues');
+  const items = (rows || []).filter(r => r.profit_reais != null).sort((a, b) => Math.abs(b.profit_reais) - Math.abs(a.profit_reais)).slice(0, 8);
+  if (!items.length) { showEmpty('topLeaguesWrap', 'Sem leagues'); return; }
+  const labels = items.map(r => (r.league || '?').slice(0, 24));
+  const data = items.map(r => Number(r.profit_reais));
+  const colors = data.map(d => d >= 0 ? 'oklch(0.55 0.18 152 / 0.85)' : 'oklch(0.58 0.21 25 / 0.85)');
+
+  state.charts.topLeagues = new Chart(el.getContext('2d'), {
+    type: 'bar',
+    data: { labels, datasets: [{ data, backgroundColor: colors, borderWidth: 0 }] },
+    options: {
+      indexAxis: 'y',
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: (i) => {
+              const r = items[i.dataIndex];
+              return `${fmtBRL(r.profit_reais)} · ROI ${fmtPct(r.roi_pct ?? r.roi, 1)} · n=${r.n || r.total || '?'}`;
+            },
+          },
+        },
+      },
+      scales: {
+        x: {
+          grid: { color: 'oklch(0.93 0.008 250)' },
+          ticks: { callback: (v) => 'R$ ' + fmtNum(v, 0) },
+        },
+        y: { grid: { display: false }, ticks: { font: { size: 10 } } },
+      },
+    },
+  });
+}
+
+function renderAlloc(sports) {
+  const el = document.getElementById('cAlloc');
+  if (!el) return;
+  destroyChart('alloc');
+  const items = (sports || []).filter(s => s.allocation_target_pct != null);
+  if (!items.length) { showEmpty('allocWrap', 'Sem baseline configurado'); return; }
+
+  const labels = items.map(s => s.sport.toUpperCase());
+  const target = items.map(s => Number(s.allocation_target_pct));
+  const actual = items.map(s => Number(s.allocation_actual_pct));
+
+  state.charts.alloc = new Chart(el.getContext('2d'), {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [
+        { label: 'Target', data: target, backgroundColor: 'oklch(0.78 0.05 250 / 0.6)', borderWidth: 0 },
+        { label: 'Atual',  data: actual, backgroundColor: 'oklch(0.55 0.18 250)',       borderWidth: 0 },
+      ],
+    },
+    options: {
+      plugins: {
+        legend: { position: 'bottom', labels: { boxWidth: 10, padding: 10, font: { size: 10 } } },
+        tooltip: {
+          callbacks: {
+            label: (i) => {
+              const s = items[i.dataIndex];
+              const tag = i.dataset.label;
+              const v = i.parsed.y;
+              return `${tag}: ${v.toFixed(1)}% · drift ${fmtPct(s.allocation_drift_pp || 0, 1)}pp`;
+            },
+          },
+        },
+      },
+      scales: {
+        x: { grid: { display: false }, ticks: { font: { size: 10 } } },
+        y: { grid: { color: 'oklch(0.93 0.008 250)' }, ticks: { callback: (v) => v + '%' } },
+      },
+    },
+  });
+}
+
+function renderRecentTips(tips) {
+  const tbody = document.getElementById('tblRecentBody');
+  const meta = document.getElementById('tipsRecentMeta');
+  if (!tbody) return;
+  if (!tips?.length) {
+    tbody.innerHTML = `<tr><td colspan="8" class="muted" style="padding:24px;text-align:center">Sem tips no período</td></tr>`;
+    if (meta) meta.textContent = '0 tips';
+    return;
+  }
+  if (meta) meta.textContent = `${tips.length} tips`;
+
+  const html = tips.slice(0, 60).map(t => {
+    const result = t.result;
+    const profit = t.profit_reais ?? null;
+    const resCell = result === 'win'
+      ? `<span class="pill pos">+${fmtNum(profit ?? 0, 2)}</span>`
+      : result === 'loss'
+        ? `<span class="pill neg">${fmtNum(profit ?? 0, 2)}</span>`
+        : result === 'void'
+          ? `<span class="pill flat">VOID</span>`
+          : `<span class="pill warn">PEND</span>`;
+    const ev = t.ev != null ? fmtPct(parseFloat(String(t.ev).replace('%', '')), 1) : '—';
+    return `<tr>
+      <td class="tt">${fmtTime(t.sent_at)}</td>
+      <td><span class="pill flat">${(t.sport || '?').toUpperCase()}</span></td>
+      <td>${escapeHtml(t.match_label || `${t.participant1 || '?'} vs ${t.participant2 || '?'}`)}</td>
+      <td>${escapeHtml(t.tip_participant || '—')}</td>
+      <td class="num tt">${fmtNum(parseFloat(t.odds), 2)}</td>
+      <td class="num tt">${escapeHtml(t.stake || '—')}</td>
+      <td class="num tt">${ev}</td>
+      <td class="num">${resCell}</td>
+    </tr>`;
+  }).join('');
+  tbody.innerHTML = html;
+}
+
+function renderPerf(sports) {
+  const tbody = document.getElementById('tblPerfBody');
+  if (!tbody) return;
+  if (!sports?.length) {
+    tbody.innerHTML = `<tr><td colspan="10" class="muted" style="padding:24px;text-align:center">Sem dados</td></tr>`;
+    return;
+  }
+  const rows = sports.slice().sort((a, b) => (b.profit_reais || 0) - (a.profit_reais || 0));
+  tbody.innerHTML = rows.map(s => {
+    const drift = s.allocation_drift_pp;
+    const driftCell = drift != null
+      ? `<span class="pill ${drift > 0 ? 'pos' : drift < 0 ? 'neg' : 'flat'}">${fmtPct(drift, 1)}pp</span>`
+      : '<span class="muted">—</span>';
+    const roi = s.roi;
+    const roiCell = roi != null
+      ? `<span class="pill ${roi > 0 ? 'pos' : roi < 0 ? 'neg' : 'flat'}">${fmtPct(roi, 2)}</span>`
+      : '—';
+    return `<tr>
+      <td><strong>${(s.sport || '?').toUpperCase()}</strong></td>
+      <td class="num">${fmtNum(s.total)}</td>
+      <td class="num">${fmtNum(s.wins)}</td>
+      <td class="num">${fmtNum(s.losses)}</td>
+      <td class="num">${s.hitRate != null ? fmtPct(s.hitRate, 1) : '—'}</td>
+      <td class="num tt">${fmtBRL(s.stake_reais)}</td>
+      <td class="num tt"><span class="${s.profit_reais > 0 ? 'pos' : s.profit_reais < 0 ? 'neg' : ''}">${fmtBRL(s.profit_reais)}</span></td>
+      <td class="num">${roiCell}</td>
+      <td class="num tt">${fmtBRL(s.current_banca)}</td>
+      <td class="num">${driftCell}</td>
+    </tr>`;
+  }).join('');
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Helpers
+// ─────────────────────────────────────────────────────────────────────────
+function destroyChart(key) {
+  if (state.charts[key]) {
+    try { state.charts[key].destroy(); } catch (_) {}
+    delete state.charts[key];
+  }
+}
+function showEmpty(wrapId, msg) {
+  const wrap = document.getElementById(wrapId);
+  if (!wrap) return;
+  wrap.innerHTML = `<div class="empty">
+    <svg class="em-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 12h4l3 -8l4 16l3 -8h4"/></svg>
+    <span>${escapeHtml(msg)}</span>
+  </div>`;
+}
+function showError(wrapId, msg) {
+  const wrap = document.getElementById(wrapId);
+  if (!wrap) return;
+  wrap.innerHTML = `<div class="err">${escapeHtml(msg)}</div>`;
+}
+function escapeHtml(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Wire toolbar
+// ─────────────────────────────────────────────────────────────────────────
+function initRangeSeg() {
+  document.querySelectorAll('#rangeSeg button').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('#rangeSeg button').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      state.days = parseInt(btn.dataset.d, 10);
+      loadAll();
+    });
+  });
+}
+
+function initSports(sportList) {
+  const wrap = document.getElementById('sportsChips');
+  const sports = sportList?.length ? sportList : KNOWN_SPORTS;
+  wrap.innerHTML = '';
+  sports.forEach(s => {
+    const chip = document.createElement('span');
+    chip.className = 'sport-chip';
+    chip.textContent = s;
+    chip.dataset.sport = s;
+    chip.addEventListener('click', () => {
+      if (state.sports.has(s)) state.sports.delete(s);
+      else state.sports.add(s);
+      chip.classList.toggle('on', state.sports.has(s));
+      loadAll();
+    });
+    wrap.appendChild(chip);
+  });
+}
+
+function initRefresh() {
+  document.getElementById('refreshBtn').addEventListener('click', () => loadAll(true));
+}
+
+function setLoading(on) {
+  const btn = document.getElementById('refreshBtn');
+  if (on) btn.classList.add('loading'); else btn.classList.remove('loading');
+}
+
+function setLastUpdate() {
+  const el = document.getElementById('lastUpdate');
+  if (!el) return;
+  const t = new Date();
+  el.textContent = `atualizado ${t.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`;
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Loaders
+// ─────────────────────────────────────────────────────────────────────────
+async function loadOverall() {
+  try {
+    const data = await fetchJson(`/overall-summary?days=${state.days}`);
+    state.data.overall = data;
+    renderKpis(data);
+    // Filtra sports pela seleção do usuário (ou todos se vazio)
+    const sportsAll = data.sports || [];
+    const filteredSports = state.sports.size
+      ? sportsAll.filter(s => state.sports.has(s.sport))
+      : sportsAll;
+    renderRoiSport(filteredSports);
+    renderTipsBySport(filteredSports);
+    renderAlloc(filteredSports);
+    renderPerf(sportsAll); // tabela completa, sem filter
+
+    // Equity series está no overall.equity.series (cross-sport agregado)
+    renderEquity(data?.equity?.series || []);
+  } catch (e) {
+    console.error('overall', e);
+    showError('equityWrap', 'Falha ao carregar /overall-summary');
+  }
+}
+
+async function loadClvHist() {
+  try {
+    // Filtro por sport quando exatamente 1 selecionado
+    const sport = state.sports.size === 1 ? `&sport=${[...state.sports][0]}` : '';
+    const data = await fetchJson(`/clv-histogram?days=${state.days}${sport}`);
+    state.data.clvHist = data;
+    renderClvHist(data);
+  } catch (e) {
+    showError('clvHistWrap', 'Falha CLV histogram');
+  }
+}
+
+async function loadEvBucket() {
+  try {
+    const sport = state.sports.size === 1 ? `&sport=${[...state.sports][0]}` : '';
+    const data = await fetchJson(`/roi-by-ev-bucket?days=${state.days}${sport}`);
+    state.data.evBucket = data;
+    renderEvBucket(data);
+  } catch (e) {
+    showError('evBucketWrap', 'Falha ROI bucket');
+  }
+}
+
+async function loadTopLeagues() {
+  // /roi-by-league exige sport. Quando filtro tem 1 sport usa esse; senão pega 'lol'
+  // como default razoável (sport com mais volume) — usuário pode filtrar pra outro.
+  const sport = state.sports.size === 1 ? [...state.sports][0]
+              : state.sports.size > 1 ? [...state.sports][0]
+              : 'lol';
+  try {
+    const data = await fetchJson(`/roi-by-league?sport=${sport}&days=${state.days}`);
+    const rows = data?.leagues || [];
+    state.data.leagues = rows;
+    // Atualiza subtítulo para indicar sport corrente
+    const titleEl = document.querySelector('#topLeaguesWrap')?.closest('.panel')?.querySelector('.p-sub');
+    if (titleEl) titleEl.textContent = `${sport.toUpperCase()} · profit · R$`;
+    renderTopLeagues(rows);
+  } catch (e) {
+    showError('topLeaguesWrap', 'Falha leagues');
+  }
+}
+
+async function loadRecent() {
+  // /tips-history exige sport. Loop nas sports filtradas (ou top 4 default)
+  const sportsToLoad = state.sports.size
+    ? [...state.sports]
+    : ['lol', 'tennis', 'football', 'cs'];
+  try {
+    const all = [];
+    const reqs = sportsToLoad.map(sp =>
+      fetchJson(`/tips-history?sport=${sp}&days=${state.days}&limit=40&include_markets=1`)
+        .then(r => Array.isArray(r) ? r : (r?.rows || []))
+        .catch(() => [])
+    );
+    const results = await Promise.all(reqs);
+    for (const arr of results) all.push(...arr);
+    // Sort por sent_at desc
+    all.sort((a, b) => String(b.sent_at || '').localeCompare(String(a.sent_at || '')));
+    state.data.recent = all;
+    renderRecentTips(all);
+  } catch (e) {
+    document.getElementById('tblRecentBody').innerHTML = `<tr><td colspan="8" class="err">Falha ao carregar tips</td></tr>`;
+  }
+}
+
+async function loadAll(force = false) {
+  setLoading(true);
+  try {
+    await Promise.allSettled([
+      loadOverall(),  // KPIs + equity (cross-sport) + sports breakdown + perf table
+      loadClvHist(),
+      loadEvBucket(),
+      loadTopLeagues(),
+      loadRecent(),
+    ]);
+    setLastUpdate();
+  } finally {
+    setLoading(false);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Boot
+// ─────────────────────────────────────────────────────────────────────────
+function boot() {
+  initRangeSeg();
+  initSports(KNOWN_SPORTS);
+  initRefresh();
+  loadAll();
+  // Auto-refresh 60s — under the same exponential ease the charts use.
+  setInterval(() => loadAll(), 60_000);
+}
+
+document.addEventListener('DOMContentLoaded', boot);
+</script>
+
+</body>
+</html>

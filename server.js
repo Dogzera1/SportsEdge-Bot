@@ -10441,11 +10441,20 @@ setInterval(load, 60000);
     try {
       const days = Math.min(180, Math.max(7, parseInt(parsed.query.days || '30', 10) || 30));
       const sport = parsed.query.sport || null;
-      const conds = [`clv_pct IS NOT NULL`, `result IN ('win','loss')`, `sent_at >= datetime('now', '-${days} days')`];
+      // 2026-05-03 FIX: tabela `tips` não tem coluna clv_pct (existe só em
+      // market_tips_shadow). Computa pct on-the-fly via (odds/clv_odds-1)*100,
+      // mesmo padrão do /roi-by-ev-bucket. Antes query throw "no such column".
+      const conds = [
+        `clv_odds IS NOT NULL AND clv_odds > 1`,
+        `odds > 1`,
+        `result IN ('win','loss')`,
+        `sent_at >= datetime('now', '-${days} days')`,
+      ];
       const params = [];
       if (sport) { conds.push('sport = ?'); params.push(sport); }
       const rows = db.prepare(`
-        SELECT clv_pct, result, COALESCE(stake_reais, 0) AS stake, COALESCE(profit_reais, 0) AS profit
+        SELECT (odds * 1.0 / clv_odds - 1) * 100 AS clv_pct, result,
+               COALESCE(stake_reais, 0) AS stake, COALESCE(profit_reais, 0) AS profit
         FROM tips
         WHERE ${conds.join(' AND ')}
       `).all(...params);
@@ -21912,6 +21921,24 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
       res.end(html);
     } catch(_) {
       res.writeHead(404); res.end('Dashboard not found');
+    }
+    return;
+  }
+
+  // 2026-05-03: PowerBI-style dashboard (Chart.js + impeccable design principles).
+  // Acessível em /bi ou /dashboard-bi. Coexiste com dashboard.html legacy.
+  if (p === '/bi' || p === '/dashboard-bi' || p === '/dashboard-bi.html') {
+    const htmlPath = path.join(__dirname, 'public', 'dashboard-bi.html');
+    try {
+      const html = fs.readFileSync(htmlPath, 'utf8');
+      res.writeHead(200, {
+        'Content-Type': 'text/html; charset=utf-8',
+        'Cache-Control': 'no-store, no-cache, must-revalidate',
+        'Pragma': 'no-cache'
+      });
+      res.end(html);
+    } catch(_) {
+      res.writeHead(404); res.end('Dashboard BI not found');
     }
     return;
   }
