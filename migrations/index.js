@@ -1971,6 +1971,54 @@ const migrations = [
     },
   },
   {
+    id: '082_perf_indexes',
+    up(db) {
+      // Audit perf 2026-05-04: queries lentas por falta de índice em colunas
+      // de filtro frequente.
+      // - market_tips_runtime_state(disabled=1) full scan (lib/market-tips-leak-guard)
+      // - settings WHERE key LIKE 'mt_promote_%' wildcard sem index
+      // - tips WHERE result IS NULL AND archived=0 — covered já por idx_tips_sport_result_sent_at
+      //   mas COALESCE(archived,0) previne uso. Adiciona partial index.
+      try {
+        db.exec(`CREATE INDEX IF NOT EXISTS idx_market_tips_runtime_state_disabled
+                 ON market_tips_runtime_state(disabled, sport, market)`);
+      } catch (_) { /* tabela pode não existir em DB antigo */ }
+      try {
+        db.exec(`CREATE INDEX IF NOT EXISTS idx_settings_key_prefix ON settings(key)`);
+      } catch (_) {}
+      try {
+        // Partial index pra pending tips (query mais comum em workflows)
+        db.exec(`CREATE INDEX IF NOT EXISTS idx_tips_pending
+                 ON tips(sport, sent_at DESC) WHERE result IS NULL`);
+      } catch (_) {}
+    },
+  },
+  {
+    id: '081_analytics_alerts',
+    up(db) {
+      // Histórico de alerts watchdog. Permite throttle por (rule, sport)
+      // 24h pra não spammar admin. status='open' = alert ativo, 'resolved'
+      // = valor voltou ao saudável.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS analytics_alerts (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          rule_id TEXT NOT NULL,
+          sport TEXT,
+          severity TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'open',
+          metric_value REAL,
+          threshold_value REAL,
+          message TEXT,
+          fired_at TEXT NOT NULL DEFAULT (datetime('now')),
+          resolved_at TEXT,
+          context_json TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_alerts_rule_sport ON analytics_alerts(rule_id, sport, status);
+        CREATE INDEX IF NOT EXISTS idx_alerts_fired ON analytics_alerts(fired_at DESC);
+      `);
+    },
+  },
+  {
     id: '080_tips_clv_pct',
     up(db) {
       if (!tableExists(db, 'tips')) return;

@@ -21329,6 +21329,19 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   // (última odd capturada vira close definitivo).
   const runClvCaptureCycle = async () => {
     if (/^(0|false|no)$/i.test(String(process.env.CLV_CAPTURE_ENABLED ?? 'true'))) return;
+    // 2026-05-04 [Audit perf]: skip se runAutoAnalysis está rodando (mutex
+    // auto-analysis cobre checkCLV legacy; capture paralelo escrevia em
+    // mesma coluna tips.clv_odds = race con). Cron volta no próximo ciclo
+    // (CLV_CAPTURE_INTERVAL_MS default 2min — gap aceitável).
+    if (autoAnalysisMutex.locked) {
+      const ageMs = Date.now() - (autoAnalysisMutex.since || 0);
+      // Só skip se mutex é fresh (<5min). Stale mutex provavelmente travou — proceed
+      // pra não bloquear CLV capture indefinidamente.
+      if (ageMs < 5 * 60 * 1000) {
+        log('DEBUG', 'CLV-CAPTURE', `skip: auto-analysis ativo há ${Math.round(ageMs / 1000)}s`);
+        return;
+      }
+    }
     try {
       // 1. Market tips shadow via novo módulo
       const { captureMarketTipsClv, capturePromotedMtTipsClv } = require('./lib/clv-capture');
@@ -21358,6 +21371,104 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   const CLV_CAPTURE_INTERVAL_MS = parseInt(process.env.CLV_CAPTURE_INTERVAL_MS || '120000', 10); // 2min default
   setInterval(runClvCaptureCycle, CLV_CAPTURE_INTERVAL_MS);
   setTimeout(runClvCaptureCycle, 3 * 60 * 1000); // primeira run 3min pós-boot
+
+  // ── Analytics Watchdog: roda 12 métricas DAX, detecta anomalias via rules
+  // (sharpe negativo, drawdown distress, calibration drift, tilt windows,
+  // CLV negativo, EV bucket leak, market×sport leak, etc). Throttle 24h
+  // por (rule, sport) via tabela analytics_alerts (mig 081).
+  // Default ON; opt-out ANALYTICS_WATCHDOG_AUTO=false.
+  const _watchdogEnabled = !/^(0|false|no)$/i.test(String(process.env.ANALYTICS_WATCHDOG_AUTO ?? 'true'));
+  if (_watchdogEnabled) {
+    const runAnalyticsWatchdog = async () => {
+      try {
+        const { runWatchdog, formatTelegramAlerts } = require('./lib/analytics-watchdog');
+        const days = parseInt(process.env.WATCHDOG_DAYS || '30', 10);
+        const result = await runWatchdog(db, { days });
+        if (result.alerts.length) {
+          const counts = result.summary.by_severity || {};
+          log('INFO', 'WATCHDOG', `${result.alerts.length} alerts (P0:${counts.P0||0} P1:${counts.P1||0} P2:${counts.P2||0}) suprimidos:${result.suppressed}`);
+          const msg = formatTelegramAlerts(result);
+          if (msg) {
+            const token = resolveAlertsToken();
+            if (token) await sendAdminDMs(token, msg, { parse_mode: 'HTML' }, 'analytics-watchdog');
+          }
+        } else {
+          log('DEBUG', 'WATCHDOG', `Sem alerts (${result.suppressed} suprimidos por throttle)`);
+        }
+      } catch (e) { log('WARN', 'WATCHDOG', `cycle erro: ${e.message}`); }
+    };
+    const WATCHDOG_INTERVAL_MS = parseInt(process.env.ANALYTICS_WATCHDOG_INTERVAL_H || '6', 10) * 60 * 60 * 1000;
+    setInterval(runAnalyticsWatchdog, WATCHDOG_INTERVAL_MS);
+    setTimeout(runAnalyticsWatchdog, 10 * 60 * 1000); // primeira run 10min pós-boot
+  }
+
+  // ── Daily Analytics Digest: snapshot completo das métricas + top movers
+  // 1×/dia em hora UTC configurável (default 12 = meio-dia BR ≈ 9h). Usa
+  // delay calc until next firing time. Default ON; opt-out
+  // ANALYTICS_DIGEST_AUTO=false.
+  const _digestEnabled = !/^(0|false|no)$/i.test(String(process.env.ANALYTICS_DIGEST_AUTO ?? 'true'));
+  if (_digestEnabled) {
+    const digestHourUtc = parseInt(process.env.ANALYTICS_DIGEST_HOUR_UTC || '12', 10);
+    const runAnalyticsDigest = async () => {
+      try {
+        const { runDigest, formatTelegramDigest } = require('./lib/analytics-watchdog');
+        const days = parseInt(process.env.WATCHDOG_DIGEST_DAYS || '7', 10);
+        const result = await runDigest(db, { days });
+        const msg = formatTelegramDigest(result);
+        if (msg) {
+          const token = resolveAlertsToken();
+          if (token) await sendAdminDMs(token, msg, { parse_mode: 'HTML' }, 'analytics-digest');
+          log('INFO', 'WATCHDOG', `Daily digest enviado (${result.active_alerts?.length || 0} alerts ativos)`);
+        }
+      } catch (e) { log('WARN', 'WATCHDOG', `digest erro: ${e.message}`); }
+    };
+    const scheduleNextDigest = () => {
+      const now = new Date();
+      const next = new Date(now);
+      next.setUTCHours(digestHourUtc, 0, 0, 0);
+      if (next <= now) next.setUTCDate(next.getUTCDate() + 1);
+      const delayMs = next - now;
+      setTimeout(async () => {
+        await runAnalyticsDigest();
+        scheduleNextDigest();
+      }, delayMs);
+      log('INFO', 'WATCHDOG', `Daily digest agendado: próxima run ${next.toISOString()}`);
+    };
+    scheduleNextDigest();
+  }
+
+  // ── PnL Daily Report: notificação 1×/dia com PnL diário (últimos 7d em
+  // formato DD/MM = ±X.Xu) + mensal. Default ON; opt-out via PNL_DAILY_AUTO=false.
+  // Hora UTC configurável (default 9 = ~6h BR matinal).
+  const _pnlEnabled = !/^(0|false|no)$/i.test(String(process.env.PNL_DAILY_AUTO ?? 'true'));
+  if (_pnlEnabled) {
+    const pnlHourUtc = parseInt(process.env.PNL_DAILY_HOUR_UTC || '9', 10);
+    const runPnlDaily = async () => {
+      try {
+        const { runPnlReport, formatTelegramPnl } = require('./lib/analytics-watchdog');
+        const report = await runPnlReport(db, {});
+        const msg = formatTelegramPnl(report);
+        if (msg) {
+          const token = resolveAlertsToken();
+          if (token) await sendAdminDMs(token, msg, { parse_mode: 'HTML' }, 'pnl-daily');
+          log('INFO', 'PNL-DAILY', `Report enviado · MTD ${report.totals.mtd_units}u · 7d total ${report.daily7d.reduce((s,d) => s + (d.units||0), 0).toFixed(2)}u`);
+        }
+      } catch (e) { log('WARN', 'PNL-DAILY', `erro: ${e.message}`); }
+    };
+    const scheduleNextPnl = () => {
+      const now = new Date();
+      const next = new Date(now);
+      next.setUTCHours(pnlHourUtc, 0, 0, 0);
+      if (next <= now) next.setUTCDate(next.getUTCDate() + 1);
+      const delayMs = next - now;
+      setTimeout(async () => {
+        await runPnlDaily();
+        scheduleNextPnl();
+      }, delayMs);
+      log('INFO', 'PNL-DAILY', `Agendado: próxima run ${next.toISOString()}`);
+    };
+    scheduleNextPnl();
+  }
 
   // Esports legacy audit: pós-split (Abr/2026) tips novas devem usar sport='lol'/'dota2'.
   // Se >5% de tips settadas recentes estão com sport='esports', alerta — indica que

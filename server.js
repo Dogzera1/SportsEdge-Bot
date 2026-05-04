@@ -10373,6 +10373,85 @@ setInterval(load, 60000);
     return;
   }
 
+  // ── /admin/watchdog-trigger: força rodar watchdog agora (não respeita
+  // throttle se force=1). Útil pra debug/test sem esperar próximo cron.
+  // GET /admin/watchdog-trigger?days=30&force=1&key=<ADMIN_KEY>
+  if (p === '/admin/watchdog-trigger' && (req.method === 'GET' || req.method === 'POST')) {
+    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const days = Math.max(7, Math.min(180, parseInt(parsed.query.days || '30', 10) || 30));
+    const force = parsed.query.force === '1';
+    (async () => {
+      try {
+        const { runWatchdog, formatTelegramAlerts } = require('./lib/analytics-watchdog');
+        if (force) {
+          // Bypass throttle resetando alertas open recentes
+          db.prepare(`UPDATE analytics_alerts SET status = 'manual_reset' WHERE status = 'open' AND fired_at >= datetime('now', '-1 day')`).run();
+        }
+        const result = await runWatchdog(db, { days });
+        sendJson(res, { ok: true, watchdog: result, telegram_preview: formatTelegramAlerts(result) });
+      } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    })();
+    return;
+  }
+
+  // ── /admin/digest-trigger: força rodar daily digest agora (DM real).
+  // GET /admin/digest-trigger?days=7&dry=1&key=<ADMIN_KEY>
+  if (p === '/admin/digest-trigger' && (req.method === 'GET' || req.method === 'POST')) {
+    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const days = Math.max(1, Math.min(90, parseInt(parsed.query.days || '7', 10) || 7));
+    const dry = parsed.query.dry === '1';
+    (async () => {
+      try {
+        const { runDigest, formatTelegramDigest } = require('./lib/analytics-watchdog');
+        const result = await runDigest(db, { days });
+        const msg = formatTelegramDigest(result);
+        sendJson(res, { ok: true, digest: result, telegram_preview: msg, dry });
+      } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    })();
+    return;
+  }
+
+  // ── /admin/pnl-trigger: força gerar PnL report agora.
+  // GET /admin/pnl-trigger?dry=1&sport=tennis&key=<ADMIN_KEY>
+  // dry=1 retorna preview JSON sem DM real.
+  if (p === '/admin/pnl-trigger' && (req.method === 'GET' || req.method === 'POST')) {
+    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const sport = parsed.query.sport ? String(parsed.query.sport).toLowerCase().trim() : null;
+    const dry = parsed.query.dry === '1';
+    (async () => {
+      try {
+        const { runPnlReport, formatTelegramPnl } = require('./lib/analytics-watchdog');
+        const report = await runPnlReport(db, { sport });
+        const preview = formatTelegramPnl(report);
+        sendJson(res, { ok: true, report, telegram_preview: preview, dry });
+      } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    })();
+    return;
+  }
+
+  // ── /admin/alerts: lista alerts persistidos (analytics_alerts).
+  // GET /admin/alerts?status=open&days=7&key=<ADMIN_KEY>
+  if (p === '/admin/alerts' && (req.method === 'GET' || req.method === 'POST')) {
+    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const status = String(parsed.query.status || 'open').toLowerCase();
+    const days = Math.max(1, Math.min(90, parseInt(parsed.query.days || '7', 10) || 7));
+    try {
+      const rows = db.prepare(`
+        SELECT id, rule_id, sport, severity, status, metric_value, threshold_value,
+               message, fired_at, resolved_at
+          FROM analytics_alerts
+         WHERE status = ? AND fired_at >= datetime('now', ?)
+         ORDER BY severity, fired_at DESC LIMIT 500
+      `).all(status, `-${days} days`);
+      sendJson(res, { ok: true, days, status, n: rows.length, alerts: rows });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   // ── /admin/analytics.html: UI standalone pras 5 métricas.
   if (p === '/admin/analytics.html' || p === '/admin/analytics-ui') {
     const html = `<!doctype html>
@@ -10444,7 +10523,20 @@ function tableHtml(rows) {
   return '<table><thead><tr>' + head + '</tr></thead><tbody>' + body + '</tbody></table>';
 }
 function render(metrics) {
-  const labels = { sharpe: 'Rolling Sharpe Ratio', kelly: 'Kelly Efficiency', variance: 'League Variance', cohort: 'Cohort Survival', clv: 'CLV Drift' };
+  const labels = {
+    sharpe: 'Rolling Sharpe Ratio',
+    kelly: 'Kelly Efficiency',
+    variance: 'League Variance',
+    cohort: 'Cohort Survival',
+    clv: 'CLV Drift',
+    brier: 'Brier Skill Score',
+    evbucket: 'EV Bucket × Sport',
+    timeofday: 'Time-of-day Heatmap (UTC)',
+    drawdown: 'Drawdown Analysis',
+    calibration: 'Calibration Bins',
+    marketsport: 'Market × Sport ROI Matrix',
+    streak: 'Streak Analysis',
+  };
   const grid = document.getElementById('grid');
   grid.innerHTML = '';
   for (const [name, payload] of Object.entries(metrics)) {
