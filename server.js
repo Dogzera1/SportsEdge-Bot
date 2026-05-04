@@ -10317,9 +10317,16 @@ setInterval(load, 60000);
           `SELECT COUNT(*) AS n FROM market_tips_shadow WHERE sport = ? AND created_at >= datetime('now', '-7 days')`
         ).get(sp);
         shadow7d = sh?.n || 0;
+        // 2026-05-04: cs2/dota2 game-id mas tabela tips usa bucket cs/dota2
+        // (mig 074 consolidou cs2→cs). Resolver bucket via resolveSportSet
+        // pra contagem REAL de promoção. Antes mostrava promoted_count_7d=0
+        // pra cs2 mesmo com 9+ tips MT promovidas (display-only bug).
+        const tipsSportSet = (typeof resolveSportSet === 'function')
+          ? resolveSportSet(sp, null).sportSet : [sp];
+        const tipsPh = tipsSportSet.map(() => '?').join(',');
         const re = db.prepare(
-          `SELECT COUNT(*) AS n FROM tips WHERE sport = ? AND match_id LIKE '%::mt::%' AND sent_at >= datetime('now', '-7 days')`
-        ).get(sp);
+          `SELECT COUNT(*) AS n FROM tips WHERE sport IN (${tipsPh}) AND match_id LIKE '%::mt::%' AND sent_at >= datetime('now', '-7 days')`
+        ).get(...tipsSportSet);
         real7d = re?.n || 0;
       } catch (_) {}
       out.sports[sp] = {
@@ -17613,6 +17620,34 @@ setInterval(load, 60000);
         // Blacklist: se já foi VOID por odds errada, não gravar de novo
         const isVoided = stmts.isVoidedMatch.get(sport, String(matchId));
         if (isVoided) { _emitSkip('voided_odds_wrong_match'); return; }
+
+        // 2026-05-04 [Audit leaks 30d]: ML real path sangrando -R$19,20 mensal
+        // (LoL ML -28,9% n=24, CS ML -21,7% n=18). MT path positivo no mesmo
+        // período. Gate per-sport via env <SPORT>_ML_DISABLED=true rejeita
+        // tips com market_type=ML preservando MT (handicapGames, totalGames,
+        // total_kills_mapN). _ML_SHADOW=true grava como shadow=1 (mantém
+        // tracking/CLV mas não envia DM). _ML_TIER1_ONLY restringe ML às
+        // ligas em <SPORT>_ML_TIER1_LEAGUES csv (substring match em event_name).
+        const _mtKindGate = String(t.market_type || 'ML').toUpperCase();
+        if (_mtKindGate === 'ML') {
+          const _spU = String(sport || '').toUpperCase();
+          const _mlDisabled = /^(1|true|yes)$/i.test(String(process.env[`${_spU}_ML_DISABLED`] || ''));
+          if (_mlDisabled) {
+            log('INFO', 'ML-GATE', `${sport}: ${p1} vs ${p2} — ${_spU}_ML_DISABLED=true (audit leaks 2026-05-04). Tip rejeitada.`);
+            _emitSkip('ml_disabled_per_sport', { sport, env: `${_spU}_ML_DISABLED` });
+            return;
+          }
+          const _tier1Csv = String(process.env[`${_spU}_ML_TIER1_LEAGUES`] || '').toLowerCase();
+          if (_tier1Csv) {
+            const _evt = String(eventName || '').toLowerCase();
+            const _tier1Hit = _tier1Csv.split(',').map(s => s.trim()).filter(Boolean).some(lg => _evt.includes(lg));
+            if (!_tier1Hit) {
+              log('INFO', 'ML-GATE', `${sport}: ${p1} vs ${p2} [${eventName}] — fora ${_spU}_ML_TIER1_LEAGUES. Tip rejeitada.`);
+              _emitSkip('ml_not_in_tier1_leagues', { sport, league: eventName });
+              return;
+            }
+          }
+        }
 
         // Time-of-day block: se hora UTC atual está marcada como bleeder (ROI persistentemente ruim),
         // rejeita. Cache per-sport 1h pra evitar query por tip.

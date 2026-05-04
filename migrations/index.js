@@ -1971,6 +1971,24 @@ const migrations = [
     },
   },
   {
+    id: '080_tips_clv_pct',
+    up(db) {
+      if (!tableExists(db, 'tips')) return;
+      const added = addColumnIfMissing(db, 'tips', 'clv_pct', 'clv_pct REAL');
+      if (added) {
+        // Backfill: clv_pct = (open_odds / clv_odds - 1) * 100 (mesmo formula
+        // do clv-capture: ganho de probabilidade implícita ao tomar odd > close).
+        db.prepare(`
+          UPDATE tips
+             SET clv_pct = ROUND((open_odds * 1.0 / clv_odds - 1) * 100, 2)
+           WHERE clv_odds IS NOT NULL AND clv_odds > 0
+             AND open_odds IS NOT NULL AND open_odds > 0
+             AND clv_pct IS NULL
+        `).run();
+      }
+    },
+  },
+  {
     id: '074_consolidate_cs2_into_cs',
     up(db) {
       // Bug histórico: CS market tips foram gravadas com sport='cs2' em `tips` e
