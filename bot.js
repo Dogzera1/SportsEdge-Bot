@@ -4242,7 +4242,10 @@ const _KELLY_SPORT_MULT = {
   lol: 1.00, cs: 1.00, football: 1.00,
   tennis: 0.80,
   mma: 0.70, valorant: 0.70,
-  dota2: 0.20,
+  // 2026-05-04 [Audit leaks]: dota2 MT shadow agora +32,6% n=32 CLV+10,63
+  // (era CLV -45% em 23/04 que motivou cut 0.70→0.20). Restore parcial
+  // 0.20→0.50 sizing apropriado ao novo edge. Override via KELLY_DOTA2_<CONF>.
+  dota2: 0.50,
   darts: 0.40, snooker: 0.40,
   tabletennis: 0.80,
 };
@@ -5115,6 +5118,25 @@ async function recordMarketTipAsRegular({ sport, match, tip, stake, isLive }) {
       }
       trustInfo = t.info;
     } catch (e) { log('DEBUG', 'LEAGUE-TRUST', `err: ${e.message}`); }
+
+    // 2026-05-04 [Audit leaks]: per-market stake multiplier amplifica
+    // mercados com ROI/CLV consistente (ex: cs2 total +15,7%, dota2 total
+    // +64,9%). Env: <SPORT>_<MARKET>_STAKE_MULT (ex: CS2_TOTAL_STAKE_MULT=1.3).
+    // Aplicado APÓS league trust pra que multiplicador de mercado componha
+    // com trust ajustado (0,5–1,2). Cap 2.0× pra prevenir runaway.
+    try {
+      const _spStake = String(sport).toUpperCase().replace(/[^A-Z0-9]/g, '');
+      const _mkStake = String(marketKey).toUpperCase().replace(/[^A-Z0-9_]/g, '');
+      const _stakeKey = `${_spStake}_${_mkStake}_STAKE_MULT`;
+      const _stakeMult = parseFloat(process.env[_stakeKey]);
+      if (Number.isFinite(_stakeMult) && _stakeMult > 0 && _stakeMult <= 2.0) {
+        const stakeNumS = typeof stakeAdjusted === 'number' ? stakeAdjusted
+          : parseFloat(String(stakeAdjusted || '1').replace('u','')) || 1;
+        const stakeNew = Math.round(stakeNumS * _stakeMult * 100) / 100;
+        log('INFO', 'MT-STAKE-MULT', `${sport}/${marketKey}: ${stakeNumS}u × ${_stakeMult} = ${stakeNew}u (env ${_stakeKey})`);
+        stakeAdjusted = stakeNew;
+      }
+    } catch (_) {}
 
     const stakeStr = typeof stakeAdjusted === 'number' ? `${stakeAdjusted}u` : String(stakeAdjusted || '1u');
     const conf = tip.ev >= 15 ? 'ALTA' : tip.ev >= 8 ? 'MÉDIA' : 'BAIXA';
@@ -21309,13 +21331,23 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
     if (/^(0|false|no)$/i.test(String(process.env.CLV_CAPTURE_ENABLED ?? 'true'))) return;
     try {
       // 1. Market tips shadow via novo módulo
-      const { captureMarketTipsClv } = require('./lib/clv-capture');
+      const { captureMarketTipsClv, capturePromotedMtTipsClv } = require('./lib/clv-capture');
       const mt = await captureMarketTipsClv(db, serverGet);
       if (mt.checked > 0) {
         const skipDetail = `match=${mt.skipped?.match||0} sameOdd=${mt.skipped?.sameOdd||0} badOdd=${mt.skipped?.badOdd||0}`;
         const sportDetail = Object.entries(mt.bySport || {}).map(([s, n]) => `${s}=${n}`).join(' ');
         log(mt.updated > 0 || mt.errors > 0 ? 'INFO' : 'DEBUG', 'CLV-CAPTURE',
           `market-tips: checked=${mt.checked} updated=${mt.updated} errors=${mt.errors}${mt.firstError ? ' (' + mt.firstError + ')' : ''} | ${skipDetail} | ${sportDetail}`);
+      }
+      // 1b. Tips MT promovidas (tabela `tips`) — gap descoberto audit 2026-05-04
+      // (tennis real CLV capture 21% / 13 de 62). Parse synthetic match_id
+      // ::mt::market::side::lnTAG e fetch /odds-markets como shadow path.
+      const mtp = await capturePromotedMtTipsClv(db, serverGet);
+      if (mtp.checked > 0) {
+        const skipDetail = `match=${mtp.skipped?.match||0} parse=${mtp.skipped?.parse||0} sameOdd=${mtp.skipped?.sameOdd||0} badOdd=${mtp.skipped?.badOdd||0}`;
+        const sportDetail = Object.entries(mtp.bySport || {}).map(([s, n]) => `${s}=${n}`).join(' ');
+        log(mtp.updated > 0 || mtp.errors > 0 ? 'INFO' : 'DEBUG', 'CLV-CAPTURE',
+          `mt-promoted: checked=${mtp.checked} updated=${mtp.updated} errors=${mtp.errors}${mtp.firstError ? ' (' + mtp.firstError + ')' : ''} | ${skipDetail} | ${sportDetail}`);
       }
       // 2. Regular tips via checkCLV legacy (já cobre cs/val/lol/dota2 pós fix 8dcc948)
       // caches={} força refetch via serverGet — cron não compartilha sharedCaches
