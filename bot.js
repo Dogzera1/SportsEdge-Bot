@@ -21329,6 +21329,19 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   // (última odd capturada vira close definitivo).
   const runClvCaptureCycle = async () => {
     if (/^(0|false|no)$/i.test(String(process.env.CLV_CAPTURE_ENABLED ?? 'true'))) return;
+    // 2026-05-04 [Audit perf]: skip se runAutoAnalysis está rodando (mutex
+    // auto-analysis cobre checkCLV legacy; capture paralelo escrevia em
+    // mesma coluna tips.clv_odds = race con). Cron volta no próximo ciclo
+    // (CLV_CAPTURE_INTERVAL_MS default 2min — gap aceitável).
+    if (autoAnalysisMutex.locked) {
+      const ageMs = Date.now() - (autoAnalysisMutex.since || 0);
+      // Só skip se mutex é fresh (<5min). Stale mutex provavelmente travou — proceed
+      // pra não bloquear CLV capture indefinidamente.
+      if (ageMs < 5 * 60 * 1000) {
+        log('DEBUG', 'CLV-CAPTURE', `skip: auto-analysis ativo há ${Math.round(ageMs / 1000)}s`);
+        return;
+      }
+    }
     try {
       // 1. Market tips shadow via novo módulo
       const { captureMarketTipsClv, capturePromotedMtTipsClv } = require('./lib/clv-capture');

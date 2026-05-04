@@ -1971,6 +1971,29 @@ const migrations = [
     },
   },
   {
+    id: '082_perf_indexes',
+    up(db) {
+      // Audit perf 2026-05-04: queries lentas por falta de índice em colunas
+      // de filtro frequente.
+      // - market_tips_runtime_state(disabled=1) full scan (lib/market-tips-leak-guard)
+      // - settings WHERE key LIKE 'mt_promote_%' wildcard sem index
+      // - tips WHERE result IS NULL AND archived=0 — covered já por idx_tips_sport_result_sent_at
+      //   mas COALESCE(archived,0) previne uso. Adiciona partial index.
+      try {
+        db.exec(`CREATE INDEX IF NOT EXISTS idx_market_tips_runtime_state_disabled
+                 ON market_tips_runtime_state(disabled, sport, market)`);
+      } catch (_) { /* tabela pode não existir em DB antigo */ }
+      try {
+        db.exec(`CREATE INDEX IF NOT EXISTS idx_settings_key_prefix ON settings(key)`);
+      } catch (_) {}
+      try {
+        // Partial index pra pending tips (query mais comum em workflows)
+        db.exec(`CREATE INDEX IF NOT EXISTS idx_tips_pending
+                 ON tips(sport, sent_at DESC) WHERE result IS NULL`);
+      } catch (_) {}
+    },
+  },
+  {
     id: '081_analytics_alerts',
     up(db) {
       // Histórico de alerts watchdog. Permite throttle por (rule, sport)
