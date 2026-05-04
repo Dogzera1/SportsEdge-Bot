@@ -4653,7 +4653,16 @@ async function runLolFreshnessCycle() {
       return;
     }
     let r;
-    try { r = JSON.parse(stdout); } catch (e) { log('WARN', 'FRESHNESS', `parse err: ${e.message}`); return; }
+    // 2026-05-04: stdout pode vir vazio se script crashou após exit() mas antes
+    // do flush, ou timeout 30s atingido. Skip silencioso (próximo cron retentará).
+    if (!stdout || !stdout.trim()) {
+      log('DEBUG', 'FRESHNESS', `stdout vazio (err.code=${err?.code ?? 'null'}) — skip ciclo`);
+      return;
+    }
+    try { r = JSON.parse(stdout); } catch (e) {
+      log('WARN', 'FRESHNESS', `parse err: ${e.message} | stdout[0:120]="${stdout.slice(0, 120)}"`);
+      return;
+    }
     if (r.level === 'fresh') {
       log('DEBUG', 'FRESHNESS', `LoL model fresh (age=${r.ageDays}d)`);
       return;
