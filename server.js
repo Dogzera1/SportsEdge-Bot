@@ -10413,6 +10413,25 @@ setInterval(load, 60000);
     return;
   }
 
+  // ── /admin/pnl-trigger: força gerar PnL report agora.
+  // GET /admin/pnl-trigger?dry=1&sport=tennis&key=<ADMIN_KEY>
+  // dry=1 retorna preview JSON sem DM real.
+  if (p === '/admin/pnl-trigger' && (req.method === 'GET' || req.method === 'POST')) {
+    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const sport = parsed.query.sport ? String(parsed.query.sport).toLowerCase().trim() : null;
+    const dry = parsed.query.dry === '1';
+    (async () => {
+      try {
+        const { runPnlReport, formatTelegramPnl } = require('./lib/analytics-watchdog');
+        const report = await runPnlReport(db, { sport });
+        const preview = formatTelegramPnl(report);
+        sendJson(res, { ok: true, report, telegram_preview: preview, dry });
+      } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    })();
+    return;
+  }
+
   // ── /admin/alerts: lista alerts persistidos (analytics_alerts).
   // GET /admin/alerts?status=open&days=7&key=<ADMIN_KEY>
   if (p === '/admin/alerts' && (req.method === 'GET' || req.method === 'POST')) {

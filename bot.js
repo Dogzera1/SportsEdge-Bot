@@ -21424,6 +21424,39 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
     scheduleNextDigest();
   }
 
+  // ── PnL Daily Report: notificação 1×/dia com PnL diário (últimos 7d em
+  // formato DD/MM = ±X.Xu) + mensal. Default ON; opt-out via PNL_DAILY_AUTO=false.
+  // Hora UTC configurável (default 9 = ~6h BR matinal).
+  const _pnlEnabled = !/^(0|false|no)$/i.test(String(process.env.PNL_DAILY_AUTO ?? 'true'));
+  if (_pnlEnabled) {
+    const pnlHourUtc = parseInt(process.env.PNL_DAILY_HOUR_UTC || '9', 10);
+    const runPnlDaily = async () => {
+      try {
+        const { runPnlReport, formatTelegramPnl } = require('./lib/analytics-watchdog');
+        const report = await runPnlReport(db, {});
+        const msg = formatTelegramPnl(report);
+        if (msg) {
+          const token = resolveAlertsToken();
+          if (token) await sendAdminDMs(token, msg, { parse_mode: 'HTML' }, 'pnl-daily');
+          log('INFO', 'PNL-DAILY', `Report enviado · MTD ${report.totals.mtd_units}u · 7d total ${report.daily7d.reduce((s,d) => s + (d.units||0), 0).toFixed(2)}u`);
+        }
+      } catch (e) { log('WARN', 'PNL-DAILY', `erro: ${e.message}`); }
+    };
+    const scheduleNextPnl = () => {
+      const now = new Date();
+      const next = new Date(now);
+      next.setUTCHours(pnlHourUtc, 0, 0, 0);
+      if (next <= now) next.setUTCDate(next.getUTCDate() + 1);
+      const delayMs = next - now;
+      setTimeout(async () => {
+        await runPnlDaily();
+        scheduleNextPnl();
+      }, delayMs);
+      log('INFO', 'PNL-DAILY', `Agendado: próxima run ${next.toISOString()}`);
+    };
+    scheduleNextPnl();
+  }
+
   // Esports legacy audit: pós-split (Abr/2026) tips novas devem usar sport='lol'/'dota2'.
   // Se >5% de tips settadas recentes estão com sport='esports', alerta — indica que
   // reclassificação não tá rodando ou tem path de código retrógrado.
