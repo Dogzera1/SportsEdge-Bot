@@ -2037,6 +2037,152 @@ const migrations = [
     },
   },
   {
+    id: '084_polymarket_consensus_alerts',
+    up(db) {
+      // Polymarket multi-wallet consensus tracking. Quando ≥3 sharps tomam
+      // mesmo lado de market dentro de janela 24h, persiste alert pra:
+      //   1. Dedup (não re-DM mesmo signal por 6h)
+      //   2. Cross-match com tips ativas (boost EV se aligned, warn se contrarian)
+      //   3. BI dashboard
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS polymarket_consensus_alerts (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          market_slug TEXT NOT NULL,
+          market_title TEXT,
+          directional_pick TEXT NOT NULL,
+          directional_pick_norm TEXT NOT NULL,
+          n_wallets INTEGER NOT NULL,
+          n_trades INTEGER,
+          total_size_usd REAL,
+          avg_price REAL,
+          wallets_json TEXT,
+          fired_at TEXT NOT NULL DEFAULT (datetime('now')),
+          notified_at TEXT,
+          tip_boost_applied INTEGER DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_pmc_alerts_slug_pick
+          ON polymarket_consensus_alerts(market_slug, directional_pick_norm, fired_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_pmc_alerts_fired
+          ON polymarket_consensus_alerts(fired_at DESC);
+      `);
+    },
+  },
+  {
+    id: '085_polymarket_wallet_metadata',
+    up(db) {
+      // Track wallet metadata pra auto-discovery + realized PnL ranking.
+      // discovered_at = quando bot adicionou a watchlist
+      // sport_focus = sport principal detectado (lol, tennis, cs, generic)
+      // realized_pnl_usd = PnL realizado (computed de markets resolved)
+      // sharpness_score = ROI realizado / volume (ranking metric)
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS polymarket_wallets (
+          address TEXT PRIMARY KEY,
+          label TEXT,
+          discovered_at TEXT DEFAULT (datetime('now')),
+          source TEXT DEFAULT 'manual',
+          sport_focus TEXT,
+          n_resolved_markets INTEGER DEFAULT 0,
+          realized_pnl_usd REAL DEFAULT 0,
+          total_volume_usd REAL DEFAULT 0,
+          sharpness_score REAL,
+          win_rate REAL,
+          last_resolved_at TEXT,
+          last_updated TEXT DEFAULT (datetime('now')),
+          active INTEGER DEFAULT 1
+        );
+        CREATE INDEX IF NOT EXISTS idx_pmw_sharpness
+          ON polymarket_wallets(active, sharpness_score DESC);
+        CREATE INDEX IF NOT EXISTS idx_pmw_sport
+          ON polymarket_wallets(sport_focus, sharpness_score DESC);
+      `);
+    },
+  },
+  {
+    id: '088_shadow_regime_tag',
+    up(db) {
+      // 2026-05-04: shadow puro filosofia separation. Marca tips por regime
+      // pra permitir audit/dashboard distinguir:
+      //   - regime_tag NULL: regime ANTIGO (gates aplicados em shadow)
+      //   - regime_tag 'shadow_pure_v1': regime NOVO (shadow capture sem filters)
+      // Default null preserva tips antigas. Inserts novos populam tag via
+      // logShadowTip. ML shadow tips marcam via tip_context_json.regime.
+      addColumnIfMissing(db, 'market_tips_shadow', 'regime_tag', 'regime_tag TEXT');
+      // Index pra filter rápido
+      try {
+        db.exec(`CREATE INDEX IF NOT EXISTS idx_mt_shadow_regime
+                 ON market_tips_shadow(regime_tag, created_at DESC)`);
+      } catch (_) {}
+    },
+  },
+  {
+    id: '087_polymarket_paper_trades',
+    up(db) {
+      // Paper trading: track o que TERIA sido executado seguindo target wallets,
+      // sem mover dinheiro real. Permite validar se copy-trading geraria PnL+
+      // antes de ativar Tier 2/3 com fundos reais.
+      //
+      // Cada trade do target:
+      //   1. evaluateCopyTrade(filters) → decide se copiaria
+      //   2. recordPaperTrade insere c/ filter_decision='copied'|'skipped'
+      //   3. Quando market resolve: PnL refresh atualiza pnl_usd/payout
+      //
+      // UNIQUE(target_wallet, target_tx_hash) → idempotent insert.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS polymarket_paper_trades (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          target_wallet TEXT NOT NULL,
+          target_tx_hash TEXT NOT NULL,
+          target_label TEXT,
+          market_slug TEXT,
+          market_title TEXT,
+          outcome TEXT,
+          side TEXT,
+          target_size_usd REAL,
+          target_price REAL,
+          my_size_usd REAL,
+          my_price REAL,
+          filter_decision TEXT NOT NULL,
+          filter_reason TEXT,
+          copied_at TEXT NOT NULL DEFAULT (datetime('now')),
+          target_ts INTEGER,
+          winning_outcome TEXT,
+          payout_usd REAL,
+          pnl_usd REAL,
+          resolved_at TEXT,
+          UNIQUE(target_wallet, target_tx_hash)
+        );
+        CREATE INDEX IF NOT EXISTS idx_paper_trades_decision
+          ON polymarket_paper_trades(filter_decision, copied_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_paper_trades_resolved
+          ON polymarket_paper_trades(resolved_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_paper_trades_market
+          ON polymarket_paper_trades(market_slug, copied_at DESC);
+      `);
+    },
+  },
+  {
+    id: '086_polymarket_market_resolutions',
+    up(db) {
+      // Cache de Polymarket markets resolvidos (com outcome final) pra evitar
+      // re-fetch na cron de PnL. Refresh quando market_slug não tem resolution.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS polymarket_market_resolutions (
+          market_slug TEXT PRIMARY KEY,
+          condition_id TEXT,
+          market_title TEXT,
+          winning_outcome TEXT,
+          resolved_at TEXT,
+          end_date TEXT,
+          checked_at TEXT DEFAULT (datetime('now')),
+          raw_json TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_pmm_resolved
+          ON polymarket_market_resolutions(resolved_at DESC);
+      `);
+    },
+  },
+  {
     id: '074_consolidate_cs2_into_cs',
     up(db) {
       // Bug histórico: CS market tips foram gravadas com sport='cs2' em `tips` e

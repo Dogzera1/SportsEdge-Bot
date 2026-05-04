@@ -8272,10 +8272,16 @@ setInterval(load, 10000);
           LIMIT ? OFFSET ?`;
       };
       let rows;
+      // 2026-05-04: tenta incluir model_version + regime_tag (mig 055 + 088).
+      // Se DB legacy, cai progressivamente: model_version+regime → só model_version → base.
       try {
-        rows = db.prepare(buildSelectSql(', model_version')).all(...params, limit, offset);
+        rows = db.prepare(buildSelectSql(', model_version, regime_tag')).all(...params, limit, offset);
       } catch (_) {
-        rows = db.prepare(buildSelectSql('')).all(...params, limit, offset);
+        try {
+          rows = db.prepare(buildSelectSql(', model_version')).all(...params, limit, offset);
+        } catch (_) {
+          rows = db.prepare(buildSelectSql('')).all(...params, limit, offset);
+        }
       }
       // Remove rn da resposta (interno)
       for (const r of rows) delete r.rn;
@@ -15204,6 +15210,10 @@ setInterval(load, 60000);
     const days = Math.max(7, Math.min(180, parseInt(parsed.query.days || '60', 10) || 60));
     const minN = Math.max(3, Math.min(50, parseInt(parsed.query.minN || '5', 10) || 5));
     const sportFilter = parsed.query.sport ? String(parsed.query.sport).toLowerCase() : null;
+    const regime = String(parsed.query.regime || 'all').toLowerCase();
+    const regimeFilter = regime === 'new' ? `AND regime_tag IS NOT NULL`
+                       : regime === 'old' ? `AND regime_tag IS NULL`
+                       : '';
     try {
       const { classifyTier } = require('./lib/mt-tier-classifier');
       const sportCond = sportFilter ? ` AND sport = ?` : '';
@@ -15222,6 +15232,7 @@ setInterval(load, 60000);
           FROM market_tips_shadow
          WHERE created_at >= datetime('now', '-' || ? || ' days')
            ${sportCond}
+           ${regimeFilter}
          GROUP BY sport, market, COALESCE(side, 'na'), COALESCE(league, '')
          HAVING SUM(CASE WHEN result IN ('win','loss') THEN 1 ELSE 0 END) >= ?
          ORDER BY total_profit DESC
@@ -15262,7 +15273,7 @@ setInterval(load, 60000);
       const leaks = enriched.filter(r => r.n_settled >= minN && r.roi_pct < -10).slice(0, 30);
 
       sendJson(res, {
-        ok: true, days, minN, sport_filter: sportFilter,
+        ok: true, days, minN, sport_filter: sportFilter, regime,
         n_buckets: enriched.length,
         by_tier: byTierArr,
         winners,
@@ -15273,14 +15284,20 @@ setInterval(load, 60000);
     return;
   }
 
-  // GET /admin/mt-shadow-by-ev?days=60&sport=<opt>&key=<KEY>
+  // GET /admin/mt-shadow-by-ev?days=60&sport=<opt>&regime=new|old|all&key=<KEY>
   // Performance por (sport, market, side, EV bucket) — calibration check.
   // calibration_gap_pp = avg_ev - actual_roi (positivo = modelo sobrestima edge).
+  // EV buckets: <5%, 5-10%, 10-15%, 15-20%, 20-30%, >30%.
+  // regime: new=shadow puro v1; old=banco antigo (regime_tag NULL); all=tudo.
   if (p === '/admin/mt-shadow-by-ev') {
     const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     const days = Math.max(7, Math.min(180, parseInt(parsed.query.days || '60', 10) || 60));
     const sportFilter = parsed.query.sport ? String(parsed.query.sport).toLowerCase() : null;
+    const regime = String(parsed.query.regime || 'all').toLowerCase();
+    const regimeFilter = regime === 'new' ? `AND regime_tag IS NOT NULL`
+                       : regime === 'old' ? `AND regime_tag IS NULL`
+                       : '';
     try {
       const sportCond = sportFilter ? ` AND sport = ?` : '';
       const sportArgs = sportFilter ? [sportFilter] : [];
@@ -15307,6 +15324,7 @@ setInterval(load, 60000);
          WHERE created_at >= datetime('now', '-' || ? || ' days')
            AND result IN ('win','loss')
            ${sportCond}
+           ${regimeFilter}
          GROUP BY sport, market, COALESCE(side, 'na'), ev_bucket
          HAVING n_total >= 5
          ORDER BY sport, market, side, ev_bucket
@@ -15323,7 +15341,7 @@ setInterval(load, 60000);
       });
 
       sendJson(res, {
-        ok: true, days, sport_filter: sportFilter,
+        ok: true, days, sport_filter: sportFilter, regime,
         n_buckets: enriched.length,
         buckets: enriched,
       });
@@ -15331,14 +15349,19 @@ setInterval(load, 60000);
     return;
   }
 
-  // GET /admin/mt-shadow-comprehensive-audit?days=30&minN=10&key=<KEY>
+  // GET /admin/mt-shadow-comprehensive-audit?days=30&minN=10&regime=new|old|all&key=<KEY>
   // Auditoria completa MT shadow: performance por (sport,market,side),
   // detecção de promotion candidates + leaks + config gaps.
+  // regime: new=shadow puro v1+ | old=regime antigo (pre-mig 088) | all (default)
   if (p === '/admin/mt-shadow-comprehensive-audit') {
     const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     const days = Math.max(7, Math.min(180, parseInt(parsed.query.days || '30', 10) || 30));
     const minN = Math.max(5, Math.min(100, parseInt(parsed.query.minN || '10', 10) || 10));
+    const regime = String(parsed.query.regime || 'all').toLowerCase();
+    const regimeFilter = regime === 'new' ? `AND regime_tag IS NOT NULL`
+                       : regime === 'old' ? `AND regime_tag IS NULL`
+                       : '';
     try {
       const buckets = db.prepare(`
         SELECT
@@ -15358,6 +15381,7 @@ setInterval(load, 60000);
           MAX(created_at) AS newest
           FROM market_tips_shadow
          WHERE created_at >= datetime('now', '-' || ? || ' days')
+           ${regimeFilter}
          GROUP BY sport, market, COALESCE(side, 'na')
          HAVING SUM(CASE WHEN result IN ('win','loss') THEN 1 ELSE 0 END) >= ?
          ORDER BY total_profit DESC
@@ -15402,6 +15426,7 @@ setInterval(load, 60000);
           ROUND(AVG(CASE WHEN result IN ('win','loss') THEN ev_pct ELSE NULL END), 1) AS avg_ev_pct
           FROM market_tips_shadow
          WHERE created_at >= datetime('now', '-' || ? || ' days')
+           ${regimeFilter}
          GROUP BY sport
          ORDER BY total_profit DESC
       `).all(days).map(s => {
@@ -15473,7 +15498,7 @@ setInterval(load, 60000);
       }
 
       sendJson(res, {
-        ok: true, days, minN,
+        ok: true, days, minN, regime,
         thresholds: {
           promotion: { minN: promotionMinN, minRoi: promotionMinRoi, minClv: promotionMinClv },
           leak: { minN: leakMinN, roiBelow: leakRoiThreshold, clvBelow: leakClvThreshold },
@@ -18748,6 +18773,11 @@ setInterval(load, 60000);
           if (t.fb_dist && typeof t.fb_dist === 'object'
             && Number.isFinite(t.fb_dist.pH) && Number.isFinite(t.fb_dist.pD) && Number.isFinite(t.fb_dist.pA)) {
             ctx.fb_dist = { pH: +t.fb_dist.pH, pD: +t.fb_dist.pD, pA: +t.fb_dist.pA };
+          }
+          // 2026-05-04: regime tag — distingue ML shadow puro (post-deploy) de tips
+          // antigas que passavam por gates. Permite audit segregado.
+          if (_bypassFiltersForShadow) {
+            ctx.regime = process.env.ML_SHADOW_REGIME_TAG || 'ml_shadow_pure_v1';
           }
           // Polymarket consensus pre-check (read-only — só anota contexto).
           // Se ≥3 sharps tomaram lado MESMO/OPOSTO ao tip pick, registra signal pra
