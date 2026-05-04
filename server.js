@@ -8580,6 +8580,136 @@ setInterval(load, 10000);
     return;
   }
 
+  // POST /admin/settle-mt-shadow-kills?days=14&apply=1&key=<ADMIN_KEY>
+  // Settla market_tips_shadow rows com market='total_kills_map<N>' (LoL) que
+  // settleShadowTips skipa (sem PS API access). Usa Oracle's Elixir DB local
+  // pra resolver totalKills (cobre tier-1 LCK/LPL/LEC/LCS/EWC/MSI/Worlds com
+  // 24-48h lag). CBLOL/Tier-3 sem cobertura — skipped.
+  // 2026-05-04: criado pra fechar gap user reportou (LYON/Sentinels Map1 +
+  // Fluxo/LOS Map2 não settled). Conceitualmente espelha lógica de
+  // /admin/run-settle linhas 10256-10304 mas opera em market_tips_shadow.
+  if (p === '/admin/settle-mt-shadow-kills' && (req.method === 'POST' || req.method === 'GET')) {
+    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const days = Math.max(1, Math.min(60, parseInt(parsed.query.days || '14', 10) || 14));
+    const apply = parsed.query.apply === '1' || parsed.query.apply === 'true';
+    try {
+      const pending = db.prepare(`
+        SELECT id, sport, team1, team2, league, market, line, side, odd, stake_units, created_at
+        FROM market_tips_shadow
+        WHERE result IS NULL
+          AND sport = 'lol'
+          AND market LIKE 'total_kills_map%'
+          AND created_at >= datetime('now', '-' || ? || ' days')
+        ORDER BY id DESC
+      `).all(days);
+
+      const normT = s => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+      const out = { ok: true, days, apply, examined: pending.length, settled: 0, skipped: 0, voided: 0, samples: [], skipped_reasons: {} };
+      const _bumpReason = (r) => { out.skipped_reasons[r] = (out.skipped_reasons[r] || 0) + 1; };
+
+      for (const t of pending) {
+        const mapMatch = String(t.market || '').match(/^total_kills_map(\d+)$/);
+        if (!mapMatch) { out.skipped++; _bumpReason('bad_market_name'); continue; }
+        const mapIndex = parseInt(mapMatch[1], 10);
+        const t1n = normT(t.team1), t2n = normT(t.team2);
+        if (!t1n || !t2n) { out.skipped++; _bumpReason('no_teams'); continue; }
+        const tipMs = Date.parse(String(t.created_at).includes('T') ? t.created_at : t.created_at.replace(' ', 'T'));
+        if (!Number.isFinite(tipMs)) { out.skipped++; _bumpReason('bad_date'); continue; }
+        const before = new Date(tipMs - 10 * 86400000).toISOString().slice(0, 10);
+        const after = new Date(tipMs + 10 * 86400000).toISOString().slice(0, 10);
+
+        // OE query — espelha _fetchKillsOE
+        const games = db.prepare(`
+          SELECT gameid, MIN(date) as date, SUM(kills) as total_kills,
+                 GROUP_CONCAT(lower(replace(replace(replace(teamname,' ',''),'-',''),'.','')), '|') as teams_norm
+          FROM oracleselixir_games
+          WHERE date >= ? AND date <= ?
+          GROUP BY gameid
+          HAVING (instr(teams_norm, ?) > 0 AND instr(teams_norm, ?) > 0)
+          ORDER BY date ASC
+        `).all(before, after, t1n, t2n);
+
+        if (!games.length) { out.skipped++; _bumpReason('oe_no_games'); continue; }
+        const valid = games.filter(g => {
+          const norms = (g.teams_norm || '').split('|');
+          return norms.some(n => n.includes(t1n) || t1n.includes(n))
+              && norms.some(n => n.includes(t2n) || t2n.includes(n));
+        });
+        if (!valid.length) { out.skipped++; _bumpReason('oe_no_team_match'); continue; }
+
+        // Validar guardrail temporal: game.date >= tip.created_at - 5min (mesmo
+        // espírito do pre-zombie fix). Evita match anterior do par liquidar tip.
+        const SLACK_MS = 5 * 60 * 1000;
+        const eligibleGames = valid.filter(g => {
+          const gMs = Date.parse(String(g.date || '').replace(' ', 'T'));
+          return Number.isFinite(gMs) && (gMs >= tipMs - SLACK_MS);
+        });
+        if (!eligibleGames.length) {
+          out.skipped++;
+          _bumpReason('all_games_before_tip');
+          continue;
+        }
+
+        const target = eligibleGames[mapIndex - 1];
+        let result, profitU;
+        if (!target) {
+          // Sweep — mapa pedido > games disponíveis
+          if (eligibleGames.length >= 1) {
+            result = 'void';
+            profitU = 0;
+            out.voided++;
+          } else {
+            out.skipped++; _bumpReason('map_not_played_no_games'); continue;
+          }
+        } else {
+          const totalKills = Number(target.total_kills);
+          if (!Number.isFinite(totalKills) || totalKills <= 0) {
+            out.skipped++; _bumpReason('invalid_kills_data'); continue;
+          }
+          const line = Number(t.line);
+          const isOver = totalKills > line;
+          const cover = t.side === 'over' ? isOver : !isOver;
+          result = cover ? 'win' : 'loss';
+          const stakeU = Number(t.stake_units) || 1;
+          const odd = Number(t.odd) || 1;
+          profitU = cover ? +(stakeU * (odd - 1)).toFixed(3) : -stakeU;
+          out.settled++;
+        }
+
+        if (apply) {
+          db.prepare(`
+            UPDATE market_tips_shadow
+            SET result = ?, settled_at = datetime('now'), profit_units = ?
+            WHERE id = ? AND result IS NULL
+          `).run(result, profitU, t.id);
+
+          // Tenta propagar pra tips reais (se MT promovido — geralmente shadow-only kills)
+          try {
+            const _prop = require('./lib/mt-result-propagator');
+            _prop(db, t, result, profitU);
+          } catch (e) {
+            log('DEBUG', 'MT-KILLS-SETTLE', `propagator err id=${t.id}: ${e.message}`);
+          }
+        }
+
+        if (out.samples.length < 15) {
+          out.samples.push({
+            id: t.id, team1: t.team1, team2: t.team2, league: t.league,
+            market: t.market, side: t.side, line: t.line, odd: t.odd,
+            stake_units: t.stake_units,
+            total_kills: target ? Number(target.total_kills) : null,
+            result, profit_units: profitU,
+            game_date: target?.date || null, gameid: target?.gameid || null,
+            applied: apply,
+          });
+        }
+      }
+      sendJson(res, out);
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
   // ── /admin/boot-diag: diagnóstico de crash loop. Expõe last_exit_bot.json,
   // last_exit_server.json, last_child_exit_server_js.json, boot_count.json.
   // 2026-05-03: criado pra investigar bot_boot_count_24h>=10 sem reason visível
