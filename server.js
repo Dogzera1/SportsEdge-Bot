@@ -10632,6 +10632,18 @@ setInterval(load, 60000);
           const windowDays = ['tennis','football'].includes(t.sport) ? 10 : 7;
           const before = new Date(tipMs - windowDays * 86400_000).toISOString().slice(0, 19).replace('T', ' ');
           const after = new Date(tipMs + windowDays * 86400_000).toISOString().slice(0, 19).replace('T', ' ');
+          // BUG FIX 2026-05-03: guard `resolved_at >= tip.sent_at - SLACK` evita
+          // match_results de partidas ANTERIORES do mesmo par liquidarem tips
+          // futuras. Caso Garin/Echargui Rome Qualifier (tip 982 settled como
+          // loss usando match Cagliari R1 de 5 dias antes — partida real ainda
+          // não tinha acontecido). Espelha guardrail de settleShadowTips.
+          // tennis: 5min (R1 mesmo dia ainda blocked); outros: 30min (PandaScore
+          // commit mid-game tolerância).
+          const slackMs = t.sport === 'tennis' ? 5 * 60 * 1000 : 30 * 60 * 1000;
+          const minResolvedMs = tipMs - slackMs;
+          const minResolved = new Date(minResolvedMs).toISOString().slice(0, 19).replace('T', ' ');
+          // Use o maior entre window-before e min-resolved (forward-only effective).
+          const effectiveBefore = before > minResolved ? before : minResolved;
           const matches = db.prepare(`
             SELECT match_id, winner, final_score, resolved_at, league
             FROM match_results
@@ -10642,7 +10654,7 @@ setInterval(load, 60000);
                 OR (lower(replace(replace(replace(team1,' ',''),'-',''),'.','')) = ? AND lower(replace(replace(replace(team2,' ',''),'-',''),'.','')) = ?))
             ORDER BY ABS(julianday(resolved_at) - julianday(?)) ASC
             LIMIT 1
-          `).all(...games, before, after, n1, n2, n2, n1, t.sent_at);
+          `).all(...games, effectiveBefore, after, n1, n2, n2, n1, t.sent_at);
           if (!matches.length) { summary.skipped++; continue; }
           const m = matches[0];
           // Walkover detection
