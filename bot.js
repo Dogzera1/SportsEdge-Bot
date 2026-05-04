@@ -4135,6 +4135,11 @@ const _BLOCKLIST_DEFAULTS = [
   'lol:lck challengers league',
   'cs:esl challenger league',
   'cs:cct europe',
+  // Audit 2026-05-04: ligas com leak persistente em 30d.
+  //   tennis 'wta 125k la bisbal d'emporda': ROI -41% n=3
+  //   lol 'nacl': ROI -20% n=3
+  'tennis:wta 125k la bisbal',
+  'lol:nacl',
 ];
 
 function _parseBlocklistEnv() {
