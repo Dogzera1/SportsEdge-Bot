@@ -9137,6 +9137,7 @@ input[name=key] { background: #0d1117; border: 1px solid #30363d; color: #c9d1d9
 <li><a href="/admin/clv-capture-trace" class="hk">/admin/clv-capture-trace</a> <span class="tag">CLV capture diag</span></li>
 <li><a href="/admin/clv-coverage" class="hk">/admin/clv-coverage</a> <span class="tag">CLV % cobertura</span></li>
 <li><a href="/admin/oe-status" class="hk">/admin/oe-status</a> <span class="tag">Oracle Elixir status</span></li>
+<li><a href="/admin/analytics.html" class="hk">/admin/analytics.html</a> <span class="tag">📈 DuckDB metrics UI</span> · <a href="/admin/analytics?metric=all" class="hk">JSON</a></li>
 </ul></div>
 
 <div class="card"><h2>⚡ Detection events</h2>
@@ -10337,6 +10338,130 @@ setInterval(load, 60000);
       };
     }
     sendJson(res, out);
+    return;
+  }
+
+  // ── /admin/analytics: métricas DAX-equivalent via DuckDB (lib/analytics-metrics).
+  // GET /admin/analytics?metric=<name>&days=30&sport=<opt>&key=<ADMIN_KEY>
+  // metric ∈ { sharpe, kelly, variance, cohort, clv } (ou 'all' = roda todas)
+  // Use lib/analytics-metrics que ATTACH sportsedge.db read-only ao DuckDB.
+  if (p === '/admin/analytics' && (req.method === 'GET' || req.method === 'POST')) {
+    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const metric = String(parsed.query.metric || 'all').toLowerCase().trim();
+    const days = Math.max(7, Math.min(180, parseInt(parsed.query.days || '30', 10) || 30));
+    const sport = parsed.query.sport ? String(parsed.query.sport).toLowerCase().trim() : null;
+    if (sport && !/^[a-z0-9_]+$/.test(sport)) {
+      sendJson(res, { ok: false, error: 'sport inválido' }, 400); return;
+    }
+    (async () => {
+      try {
+        const am = require('./lib/analytics-metrics');
+        const out = { ok: true, ts: new Date().toISOString(), days, sport };
+        if (metric === 'all') {
+          out.metrics = {};
+          for (const m of am._METRICS_LIST) {
+            try { out.metrics[m] = await am.getMetric(m, { days, sport }); }
+            catch (e) { out.metrics[m] = { ok: false, error: e.message }; }
+          }
+        } else {
+          out.result = await am.getMetric(metric, { days, sport });
+        }
+        sendJson(res, out);
+      } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    })();
+    return;
+  }
+
+  // ── /admin/analytics.html: UI standalone pras 5 métricas.
+  if (p === '/admin/analytics.html' || p === '/admin/analytics-ui') {
+    const html = `<!doctype html>
+<html lang="pt-BR"><head><meta charset="utf-8"><title>Analytics — SportsEdge</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: #0d1117; color: #c9d1d9; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; padding: 20px; }
+h1 { color: #58a6ff; margin-bottom: 16px; font-size: 22px; }
+.controls { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
+.controls input, .controls select, .controls button { background: #161b22; border: 1px solid #30363d; color: #c9d1d9; padding: 6px 10px; border-radius: 4px; font-size: 13px; }
+.controls button { background: #238636; border-color: #2ea043; cursor: pointer; }
+.controls button:hover { background: #2ea043; }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 14px; }
+.card { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 12px 14px; }
+.card h2 { color: #d2a8ff; font-size: 14px; margin-bottom: 4px; }
+.card .note { color: #7d8590; font-size: 11px; margin-bottom: 8px; font-style: italic; }
+.card table { width: 100%; border-collapse: collapse; font-size: 11px; font-family: 'JetBrains Mono', Consolas, monospace; }
+.card th { text-align: left; color: #58a6ff; padding: 4px 6px; border-bottom: 1px solid #30363d; }
+.card td { padding: 3px 6px; border-bottom: 1px solid #21262d; }
+.card td.num { text-align: right; }
+.card .err { color: #f85149; }
+.pos { color: #3fb950; }
+.neg { color: #f85149; }
+.empty { color: #7d8590; padding: 8px; font-size: 12px; }
+</style></head>
+<body>
+<h1>📊 Advanced Analytics (DuckDB)</h1>
+<div class="controls">
+  <label>days: <input id="days" type="number" value="30" min="7" max="180"></label>
+  <label>sport: <select id="sport"><option value="">(all)</option><option>lol</option><option>tennis</option><option>cs</option><option>cs2</option><option>dota2</option><option>football</option><option>valorant</option><option>mma</option><option>basket</option></select></label>
+  <button onclick="load()">↻ refresh</button>
+  <span id="status" style="align-self:center;color:#7d8590;font-size:12px"></span>
+</div>
+<div id="grid" class="grid"></div>
+<script>
+const ADMIN_KEY = new URLSearchParams(location.search).get('key') || prompt('admin key:') || '';
+async function load() {
+  const days = +document.getElementById('days').value || 30;
+  const sport = document.getElementById('sport').value;
+  document.getElementById('status').textContent = 'loading...';
+  const u = new URL('/admin/analytics', location.origin);
+  u.searchParams.set('metric', 'all');
+  u.searchParams.set('days', days);
+  if (sport) u.searchParams.set('sport', sport);
+  u.searchParams.set('key', ADMIN_KEY);
+  try {
+    const r = await fetch(u);
+    const d = await r.json();
+    if (!d.ok) { document.getElementById('status').textContent = 'err: ' + (d.error || 'unknown'); return; }
+    document.getElementById('status').textContent = 'ts: ' + d.ts;
+    render(d.metrics || {});
+  } catch (e) { document.getElementById('status').textContent = 'fetch err: ' + e.message; }
+}
+function fmt(v) {
+  if (v === null || v === undefined) return '<span style="color:#7d8590">—</span>';
+  if (typeof v === 'number') {
+    const s = v.toFixed(Math.abs(v) >= 100 ? 0 : 2);
+    if (v > 0) return '<span class="pos">' + s + '</span>';
+    if (v < 0) return '<span class="neg">' + s + '</span>';
+    return s;
+  }
+  return String(v);
+}
+function tableHtml(rows) {
+  if (!rows || !rows.length) return '<div class="empty">no data</div>';
+  const cols = Object.keys(rows[0]);
+  const head = cols.map(c => '<th>' + c + '</th>').join('');
+  const body = rows.map(r => '<tr>' + cols.map(c => '<td class="' + (typeof r[c] === 'number' ? 'num' : '') + '">' + fmt(r[c]) + '</td>').join('') + '</tr>').join('');
+  return '<table><thead><tr>' + head + '</tr></thead><tbody>' + body + '</tbody></table>';
+}
+function render(metrics) {
+  const labels = { sharpe: 'Rolling Sharpe Ratio', kelly: 'Kelly Efficiency', variance: 'League Variance', cohort: 'Cohort Survival', clv: 'CLV Drift' };
+  const grid = document.getElementById('grid');
+  grid.innerHTML = '';
+  for (const [name, payload] of Object.entries(metrics)) {
+    const card = document.createElement('div');
+    card.className = 'card';
+    if (!payload || !payload.ok) {
+      card.innerHTML = '<h2>' + (labels[name] || name) + '</h2><div class="err">' + (payload?.error || 'error') + '</div>';
+    } else {
+      card.innerHTML = '<h2>' + (labels[name] || name) + '</h2><div class="note">' + (payload.note || '') + '</div>' + tableHtml(payload.rows);
+    }
+    grid.appendChild(card);
+  }
+}
+load();
+</script></body></html>`;
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+    res.end(html);
     return;
   }
 
