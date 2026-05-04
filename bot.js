@@ -22676,7 +22676,19 @@ async function checkCLV(caches = {}) {
           // pegou outro evento do mesmo par (próximo round/torneio). Rejeita pra
           // não contaminar relatório CLV (ex: tennis 3.69 → 84.93 sem motivo).
           if (prevClv >= 1.5 && (clvN / prevClv >= 3 || prevClv / clvN >= 3)) {
-            log('WARN', 'CLV-SKIP', `${sport} ${tip.participant1} vs ${tip.participant2}: outlier rejected (${prevClv} → ${clvN}, likely wrong-event match)`);
+            // Throttle: feed estável geralmente repete o mesmo wrong-event match a cada ciclo
+            // (ex: tennis Snigur 5.95→40.91 hit 3x em 13min). Loga 1×/hora por (sport, tip.id).
+            global._clvOutlierLogged = global._clvOutlierLogged || new Map();
+            const _key = `${sport}:${tip.id || `${tip.participant1}_${tip.participant2}`}`;
+            const _last = global._clvOutlierLogged.get(_key) || 0;
+            if (Date.now() - _last > 60 * 60 * 1000) {
+              log('WARN', 'CLV-SKIP', `${sport} ${tip.participant1} vs ${tip.participant2}: outlier rejected (${prevClv} → ${clvN}, likely wrong-event match)`);
+              global._clvOutlierLogged.set(_key, Date.now());
+              if (global._clvOutlierLogged.size > 500) {
+                const _cutoff = Date.now() - 24 * 3600 * 1000;
+                for (const [k, t] of global._clvOutlierLogged) if (t < _cutoff) global._clvOutlierLogged.delete(k);
+              }
+            }
             continue;
           }
           const changed = !prevClv || Math.abs(clvN - prevClv) >= 0.005;
