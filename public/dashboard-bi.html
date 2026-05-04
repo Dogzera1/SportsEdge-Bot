@@ -207,6 +207,9 @@ button, select, input { font-family: inherit; font-size: inherit; color: inherit
 .tbl td.num, .tbl th.num { text-align: right; font-variant-numeric: tabular-nums; }
 .tbl tr:hover td { background: var(--canvas); }
 .scroll-y { max-height: 380px; overflow-y: auto; }
+.scroll-x { overflow-x: auto; }
+.tbl td.pos { color: var(--pos); }
+.tbl td.neg { color: var(--neg); }
 
 .pill { display: inline-block; padding: 1px 7px; border-radius: 999px; font-size: var(--t1); font-weight: 600; }
 .pill.pos { color: var(--pos); background: var(--pos-soft); }
@@ -260,6 +263,7 @@ button, select, input { font-family: inherit; font-size: inherit; color: inherit
     <a href="#markets" data-section="markets">Markets</a>
     <a href="#leagues" data-section="leagues">Leagues</a>
     <a href="#risk" data-section="risk">Risk</a>
+    <a href="#analytics" data-section="analytics">Analytics</a>
   </nav>
   <div class="appbar-spacer"></div>
   <div class="appbar-meta" id="lastUpdate">—</div>
@@ -511,6 +515,59 @@ button, select, input { font-family: inherit; font-size: inherit; color: inherit
   <section class="panel span-12" data-sections="risk">
     <header class="p-head"><h2 class="p-title">Pending tips por sport</h2><span class="p-sub">aguardando settle · stake aberta</span></header>
     <div class="p-body"><div class="chart-wrap" id="pendBySportWrap"><canvas id="cPendBySport"></canvas></div></div>
+  </section>
+
+  <!-- ═══════════ ANALYTICS section (DuckDB DAX-equivalent) ═══════════ -->
+  <section class="panel span-6" data-sections="analytics">
+    <header class="p-head"><h2 class="p-title">Sharpe Ratio</h2><span class="p-sub">avg(daily_roi)/std × √N · &gt;1 ideal</span></header>
+    <div class="p-body"><div class="chart-wrap" id="anSharpeWrap"><canvas id="cAnSharpe"></canvas></div></div>
+  </section>
+  <section class="panel span-6" data-sections="analytics">
+    <header class="p-head"><h2 class="p-title">Brier Skill Score</h2><span class="p-sub">model accuracy vs coin-flip baseline · &gt;0 ideal</span></header>
+    <div class="p-body"><div class="chart-wrap" id="anBrierWrap"><canvas id="cAnBrier"></canvas></div></div>
+  </section>
+  <section class="panel span-6" data-sections="analytics">
+    <header class="p-head"><h2 class="p-title">CLV Drift &amp; Capture Rate</h2><span class="p-sub">close shift % + % tips com CLV captado</span></header>
+    <div class="p-body"><div class="chart-wrap" id="anClvWrap"><canvas id="cAnClv"></canvas></div></div>
+  </section>
+  <section class="panel span-6" data-sections="analytics">
+    <header class="p-head"><h2 class="p-title">Drawdown analysis</h2><span class="p-sub">max DD % por sport · &lt;-20% distress</span></header>
+    <div class="p-body"><div class="chart-wrap" id="anDdWrap"><canvas id="cAnDd"></canvas></div></div>
+  </section>
+  <section class="panel span-12" data-sections="analytics">
+    <header class="p-head"><h2 class="p-title">EV Bucket × Sport ROI</h2><span class="p-sub">audit 2026-05-01 · bucket &gt;12% leak</span></header>
+    <div class="p-body"><div class="chart-wrap tall" id="anEvWrap"><canvas id="cAnEv"></canvas></div></div>
+  </section>
+  <section class="panel span-12" data-sections="analytics">
+    <header class="p-head"><h2 class="p-title">Time-of-day Heatmap (UTC)</h2><span class="p-sub">hora × sport · ROI%</span></header>
+    <div class="p-body scroll-x"><div id="anTodHeat"></div></div>
+  </section>
+  <section class="panel span-6" data-sections="analytics">
+    <header class="p-head"><h2 class="p-title">Kelly Efficiency</h2><span class="p-sub">stake real / kelly teórico · 1.0 ideal</span></header>
+    <div class="p-body scroll-y">
+      <table class="tbl" id="anKelly"><thead><tr>
+        <th>Sport</th><th>Market</th><th class="num">N</th>
+        <th class="num">Kelly%</th><th class="num">Real%</th><th class="num">Eff</th>
+      </tr></thead><tbody><tr><td colspan="6" class="muted" style="padding:24px;text-align:center">Carregando…</td></tr></tbody></table>
+    </div>
+  </section>
+  <section class="panel span-6" data-sections="analytics">
+    <header class="p-head"><h2 class="p-title">League Variance</h2><span class="p-sub">std/|ROI|×2 ratio · &gt;1 ruído</span></header>
+    <div class="p-body scroll-y">
+      <table class="tbl" id="anVariance"><thead><tr>
+        <th>Sport</th><th>Liga</th><th class="num">N</th>
+        <th class="num">ROI%</th><th class="num">Std%</th><th class="num">Profit</th>
+      </tr></thead><tbody><tr><td colspan="6" class="muted" style="padding:24px;text-align:center">Carregando…</td></tr></tbody></table>
+    </div>
+  </section>
+  <section class="panel span-12" data-sections="analytics">
+    <header class="p-head"><h2 class="p-title">Cohort Survival</h2><span class="p-sub">tips emitidas → settled em 1d/7d + ROI cumulativo</span></header>
+    <div class="p-body scroll-y">
+      <table class="tbl" id="anCohort"><thead><tr>
+        <th>Sport</th><th class="num">Total</th><th class="num">Settled 1d</th><th class="num">Settled 7d</th>
+        <th class="num">Avg days</th><th class="num">Profit 1d</th><th class="num">Profit 7d</th><th class="num">Profit total</th>
+      </tr></thead><tbody><tr><td colspan="8" class="muted" style="padding:24px;text-align:center">Carregando…</td></tr></tbody></table>
+    </div>
   </section>
 
 </main>
@@ -1257,6 +1314,8 @@ async function loadAll(force = false) {
       tasks.push(loadLeaguesFull());
     } else if (state.section === 'risk') {
       tasks.push(loadDrawdown(), loadRiskAllocation(), loadTipsEmRisco(), loadPendingBySport(), loadRiskKpis());
+    } else if (state.section === 'analytics') {
+      tasks.push(loadAnalytics());
     }
     await Promise.allSettled(tasks);
     setLastUpdate();
@@ -1792,6 +1851,244 @@ async function loadPendingBySport() {
       },
     },
   });
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Analytics section (DuckDB DAX-equivalent metrics)
+// ─────────────────────────────────────────────────────────────────────────
+async function loadAnalytics() {
+  const days = state.days || 30;
+  const sportFilter = state.sports.size ? Array.from(state.sports)[0] : '';
+  const url = new URL('/api/analytics', location.origin);
+  url.searchParams.set('metric', 'all');
+  url.searchParams.set('days', String(days));
+  if (sportFilter) url.searchParams.set('sport', sportFilter);
+  let payload;
+  try { payload = await fetchJson(url.toString()); }
+  catch (e) {
+    ['anSharpeWrap','anBrierWrap','anClvWrap','anDdWrap','anEvWrap'].forEach(w => showError(w, 'fetch err: ' + e.message));
+    return;
+  }
+  const m = payload.metrics || {};
+  renderAnSharpe(m.sharpe?.rows || []);
+  renderAnBrier(m.brier?.rows || []);
+  renderAnClv(m.clv?.rows || []);
+  renderAnDrawdown(m.drawdown?.rows || []);
+  renderAnEvBucket(m.evbucket?.rows || []);
+  renderAnTimeOfDay(m.timeofday?.rows || []);
+  renderAnKelly(m.kelly?.rows || []);
+  renderAnVariance(m.variance?.rows || []);
+  renderAnCohort(m.cohort?.rows || []);
+}
+
+function renderAnSharpe(rows) {
+  if (!rows.length) { showEmpty('anSharpeWrap', 'Sem dados settled (need ≥5 dias)'); return; }
+  const data = rows.filter(r => r.sharpe_ratio != null).sort((a,b) => (b.sharpe_ratio||0) - (a.sharpe_ratio||0));
+  destroyChart('anSharpe');
+  state.charts.anSharpe = new Chart(document.getElementById('cAnSharpe').getContext('2d'), {
+    type: 'bar',
+    data: {
+      labels: data.map(r => r.sport.toUpperCase()),
+      datasets: [{
+        label: 'Sharpe',
+        data: data.map(r => r.sharpe_ratio),
+        backgroundColor: data.map(r => (r.sharpe_ratio||0) >= 1 ? 'oklch(0.55 0.18 152)' : (r.sharpe_ratio||0) >= 0 ? 'oklch(0.74 0.16 75)' : 'oklch(0.58 0.21 25)'),
+        borderWidth: 0,
+      }],
+    },
+    options: {
+      indexAxis: 'y',
+      plugins: { legend: { display: false }, tooltip: { callbacks: { label: (i) => `Sharpe ${i.parsed.x.toFixed(3)} · n=${data[i.dataIndex].n_tips}` } } },
+      scales: {
+        x: { grid: { color: 'oklch(0.93 0.008 250)' }, ticks: { font: { size: 10 } } },
+        y: { grid: { display: false }, ticks: { font: { size: 10 } } },
+      },
+    },
+  });
+}
+
+function renderAnBrier(rows) {
+  if (!rows.length) { showEmpty('anBrierWrap', 'Sem tips com model_p (need ≥5)'); return; }
+  const data = rows.sort((a,b) => (b.brier_skill||0) - (a.brier_skill||0));
+  destroyChart('anBrier');
+  state.charts.anBrier = new Chart(document.getElementById('cAnBrier').getContext('2d'), {
+    type: 'bar',
+    data: {
+      labels: data.map(r => r.sport.toUpperCase()),
+      datasets: [
+        { label: 'Brier (lower better)', data: data.map(r => r.brier), backgroundColor: 'oklch(0.74 0.16 75)', borderWidth: 0 },
+        { label: 'Skill score', data: data.map(r => r.brier_skill), backgroundColor: 'oklch(0.55 0.18 152)', borderWidth: 0 },
+      ],
+    },
+    options: {
+      plugins: { legend: { position: 'top' }, tooltip: { callbacks: { label: (i) => `${i.dataset.label}: ${i.parsed.y.toFixed(4)} · n=${data[i.dataIndex].n}` } } },
+      scales: {
+        x: { grid: { display: false }, ticks: { font: { size: 10 } } },
+        y: { grid: { color: 'oklch(0.93 0.008 250)' }, ticks: { font: { size: 10 } } },
+      },
+    },
+  });
+}
+
+function renderAnClv(rows) {
+  if (!rows.length) { showEmpty('anClvWrap', 'Sem dados CLV'); return; }
+  const data = rows.sort((a,b) => (b.avg_clv_pct||0) - (a.avg_clv_pct||0));
+  destroyChart('anClv');
+  state.charts.anClv = new Chart(document.getElementById('cAnClv').getContext('2d'), {
+    type: 'bar',
+    data: {
+      labels: data.map(r => r.sport.toUpperCase()),
+      datasets: [
+        { label: 'avg CLV %', data: data.map(r => r.avg_clv_pct), backgroundColor: 'oklch(0.55 0.18 250)', yAxisID: 'y', borderWidth: 0 },
+        { label: 'capture rate %', data: data.map(r => r.clv_capture_rate_pct), backgroundColor: 'oklch(0.92 0.04 250)', yAxisID: 'y1', borderWidth: 0 },
+      ],
+    },
+    options: {
+      plugins: { legend: { position: 'top' } },
+      scales: {
+        x: { grid: { display: false }, ticks: { font: { size: 10 } } },
+        y: { position: 'left', grid: { color: 'oklch(0.93 0.008 250)' }, ticks: { font: { size: 10 } }, title: { display: true, text: 'CLV %', font: { size: 10 } } },
+        y1: { position: 'right', grid: { display: false }, ticks: { font: { size: 10 } }, title: { display: true, text: 'Capture %', font: { size: 10 } }, max: 100 },
+      },
+    },
+  });
+}
+
+function renderAnDrawdown(rows) {
+  if (!rows.length) { showEmpty('anDdWrap', 'Sem equity curve'); return; }
+  const data = rows.sort((a,b) => (a.max_dd_pct||0) - (b.max_dd_pct||0));
+  destroyChart('anDd');
+  state.charts.anDd = new Chart(document.getElementById('cAnDd').getContext('2d'), {
+    type: 'bar',
+    data: {
+      labels: data.map(r => r.sport.toUpperCase()),
+      datasets: [{
+        label: 'max DD%',
+        data: data.map(r => r.max_dd_pct),
+        backgroundColor: data.map(r => (r.max_dd_pct||0) <= -25 ? 'oklch(0.58 0.21 25)' : (r.max_dd_pct||0) <= -15 ? 'oklch(0.74 0.16 75)' : 'oklch(0.55 0.18 152)'),
+        borderWidth: 0,
+      }],
+    },
+    options: {
+      plugins: { legend: { display: false }, tooltip: { callbacks: { label: (i) => `DD ${i.parsed.y.toFixed(1)}% · current R$${data[i.dataIndex].current_profit}` } } },
+      scales: {
+        x: { grid: { display: false }, ticks: { font: { size: 10 } } },
+        y: { grid: { color: 'oklch(0.93 0.008 250)' }, ticks: { font: { size: 10 } } },
+      },
+    },
+  });
+}
+
+function renderAnEvBucket(rows) {
+  if (!rows.length) { showEmpty('anEvWrap', 'Sem tips por bucket'); return; }
+  const buckets = ['0-3','3-5','5-8','8-12','>12'];
+  const sports = [...new Set(rows.map(r => r.sport))];
+  const colors = ['oklch(0.55 0.18 250)','oklch(0.55 0.18 152)','oklch(0.74 0.16 75)','oklch(0.58 0.21 25)','oklch(0.55 0.18 320)'];
+  const datasets = sports.map((sp, i) => ({
+    label: sp.toUpperCase(),
+    data: buckets.map(b => {
+      const r = rows.find(x => x.sport === sp && x.ev_bucket === b);
+      return r ? (r.roi_pct ?? null) : null;
+    }),
+    backgroundColor: colors[i % colors.length],
+    borderWidth: 0,
+  }));
+  destroyChart('anEv');
+  state.charts.anEv = new Chart(document.getElementById('cAnEv').getContext('2d'), {
+    type: 'bar',
+    data: { labels: buckets, datasets },
+    options: {
+      plugins: { legend: { position: 'top' }, tooltip: { callbacks: { label: (i) => `${i.dataset.label}: ROI ${i.parsed.y?.toFixed(1)}%` } } },
+      scales: {
+        x: { grid: { display: false }, ticks: { font: { size: 10 } }, title: { display: true, text: 'EV bucket', font: { size: 10 } } },
+        y: { grid: { color: 'oklch(0.93 0.008 250)' }, ticks: { font: { size: 10 } }, title: { display: true, text: 'ROI %', font: { size: 10 } } },
+      },
+    },
+  });
+}
+
+function renderAnTimeOfDay(rows) {
+  const el = document.getElementById('anTodHeat');
+  if (!rows.length) { el.innerHTML = '<div class="muted" style="padding:18px">Sem dados</div>'; return; }
+  const sports = [...new Set(rows.map(r => r.sport))].sort();
+  const hours = Array.from({length: 24}, (_, i) => i);
+  const cell = (sport, h) => rows.find(r => r.sport === sport && r.hour_utc === h);
+  const colorFor = (roi) => {
+    if (roi == null) return '#f0f0f0';
+    if (roi >= 20) return 'oklch(0.55 0.18 152)';
+    if (roi >= 5) return 'oklch(0.78 0.13 152)';
+    if (roi >= -5) return 'oklch(0.92 0.04 250)';
+    if (roi >= -20) return 'oklch(0.78 0.13 75)';
+    return 'oklch(0.58 0.21 25)';
+  };
+  let html = '<table style="border-collapse:collapse;font-size:10px;font-family:var(--mono)"><thead><tr><th></th>';
+  for (const h of hours) html += `<th style="padding:2px 4px;color:var(--ink-soft);font-weight:500">${String(h).padStart(2,'0')}</th>`;
+  html += '</tr></thead><tbody>';
+  for (const sp of sports) {
+    html += `<tr><td style="padding:2px 6px;color:var(--ink-mid);font-weight:600">${sp.toUpperCase()}</td>`;
+    for (const h of hours) {
+      const c = cell(sp, h);
+      const roi = c?.roi_pct;
+      const bg = colorFor(roi);
+      const tt = c ? `${sp} h${h}: ROI ${roi?.toFixed(1)}% n=${c.n}` : '';
+      html += `<td title="${tt}" style="padding:0;background:${bg};color:#fff;text-align:center;width:24px;height:18px;font-size:9px">${roi != null ? roi.toFixed(0) : ''}</td>`;
+    }
+    html += '</tr>';
+  }
+  html += '</tbody></table>';
+  el.innerHTML = html;
+}
+
+function renderAnKelly(rows) {
+  const tbody = document.querySelector('#anKelly tbody');
+  if (!rows.length) { tbody.innerHTML = '<tr><td colspan="6" class="muted" style="padding:24px;text-align:center">Sem tips com model_p</td></tr>'; return; }
+  tbody.innerHTML = rows.slice(0, 25).map(r => {
+    const eff = r.avg_efficiency;
+    const cls = eff == null ? '' : eff >= 0.8 && eff <= 1.2 ? 'pos' : 'neg';
+    return `<tr>
+      <td>${escapeHtml(r.sport)}</td>
+      <td>${escapeHtml(r.market_type || 'ML')}</td>
+      <td class="num">${r.n}</td>
+      <td class="num">${r.avg_kelly_theoretical_pct ?? '—'}</td>
+      <td class="num">${r.avg_actual_pct ?? '—'}</td>
+      <td class="num ${cls}">${eff != null ? eff.toFixed(2) : '—'}</td>
+    </tr>`;
+  }).join('');
+}
+
+function renderAnVariance(rows) {
+  const tbody = document.querySelector('#anVariance tbody');
+  if (!rows.length) { tbody.innerHTML = '<tr><td colspan="6" class="muted" style="padding:24px;text-align:center">Sem ligas n≥3</td></tr>'; return; }
+  tbody.innerHTML = rows.slice(0, 25).map(r => {
+    const roi = r.roi_pct;
+    const cls = roi == null ? '' : roi > 0 ? 'pos' : 'neg';
+    return `<tr>
+      <td>${escapeHtml(r.sport)}</td>
+      <td>${escapeHtml((r.league || '').slice(0, 38))}</td>
+      <td class="num">${r.n}</td>
+      <td class="num ${cls}">${roi != null ? roi.toFixed(1) : '—'}</td>
+      <td class="num">${r.std_per_tip_pct ?? '—'}</td>
+      <td class="num ${cls}">${r.profit ?? '—'}</td>
+    </tr>`;
+  }).join('');
+}
+
+function renderAnCohort(rows) {
+  const tbody = document.querySelector('#anCohort tbody');
+  if (!rows.length) { tbody.innerHTML = '<tr><td colspan="8" class="muted" style="padding:24px;text-align:center">Sem cohort</td></tr>'; return; }
+  tbody.innerHTML = rows.map(r => {
+    const cls = (v) => v == null ? '' : v > 0 ? 'pos' : v < 0 ? 'neg' : '';
+    return `<tr>
+      <td>${escapeHtml(r.sport)}</td>
+      <td class="num">${r.n_total}</td>
+      <td class="num">${r.settled_1d}</td>
+      <td class="num">${r.settled_7d}</td>
+      <td class="num">${r.avg_settle_days ?? '—'}</td>
+      <td class="num ${cls(r.profit_1d)}">${r.profit_1d ?? '—'}</td>
+      <td class="num ${cls(r.profit_7d)}">${r.profit_7d ?? '—'}</td>
+      <td class="num ${cls(r.profit_total)}">${r.profit_total ?? '—'}</td>
+    </tr>`;
+  }).join('');
 }
 
 // ─────────────────────────────────────────────────────────────────────────
