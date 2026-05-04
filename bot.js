@@ -15676,12 +15676,16 @@ async function pollTennis(runOnce = false) {
                     _gamesScale = parseFloat(process.env.TENNIS_ATP_NONSLAM_GAMES_SCALE || '0.95');
                   }
                 } catch (_) {}
-                let found = scanTennisMarkets({
+                // 2026-05-04: shadow puro — captura tips com EV ≥ shadowMinEv (default 0)
+                // sem oddOk + sem maxEv. Override: TENNIS_SHADOW_MIN_EV.
+                const _tnShadowMinEv = parseFloat(process.env.TENNIS_SHADOW_MIN_EV ?? '0');
+                const _scanResultTn = scanTennisMarkets({
                   markov: tennisModelResult._markovMarkets,
                   aces: tennisModelResult._markovAces,
                   doubleFaults: tennisModelResult._markovDoubleFaults,
                   markets,
                   minEv,
+                  shadowMinEv: _tnShadowMinEv,
                   maxEv,
                   maxEvPerMarket,
                   bestOf: tnBestOfForScan,
@@ -15690,6 +15694,8 @@ async function pollTennis(runOnce = false) {
                   isLive: isLiveTennis,
                   gamesScale: _gamesScale,
                 });
+                let found = _scanResultTn.promotable || _scanResultTn;
+                const _shadowAllTn = _scanResultTn.shadow || found;
                 if (_gamesScale !== 1.0) {
                   log('DEBUG', 'TENNIS-MARKET-SCAN', `${match.team1} vs ${match.team2} [${match.league}]: ATP non-Slam games shrink ×${_gamesScale.toFixed(2)} aplicado`);
                 }
@@ -15722,17 +15728,24 @@ async function pollTennis(runOnce = false) {
                     found = found.map((t, i) => ({ ...t, correlationDiscount: adjusted[i].correlationDiscount }));
                   } catch (ce) { reportBug('TENNIS-CORR', ce); }
                 }
+                // Shadow puro: log SEMPRE (mesmo se found vazio)
+                const _tnBestOfLog = tnBestOfForScan;
+                if (_shadowAllTn.length) {
+                  try {
+                    const { logShadowTip } = require('./lib/market-tips-shadow');
+                    for (const t of _shadowAllTn) logShadowTip(db, { sport: 'tennis', match, bestOf: _tnBestOfLog, tip: t, isLive: isLiveTennis });
+                  } catch (e) { log('WARN', 'MT-SHADOW', `tennis logShadowTip: ${e.message}`); }
+                  if (_shadowAllTn.length !== found.length) {
+                    log('DEBUG', 'TENNIS-SHADOW-PURE', `${match.team1} vs ${match.team2}: shadow=${_shadowAllTn.length} promotable=${found.length}`);
+                  }
+                }
                 if (found.length) {
                   log('INFO', 'TENNIS-MARKETS',
                     `${match.team1} vs ${match.team2}: ${found.length} mercado(s) EV ≥${minEv}%`);
                   // 2026-04-28: reusa tnBestOfForScan (linha 13738) — antes havia
                   // `tnBestOf` recomputado com mesmo regex. Risco de drift se um
                   // regex mudar e o outro não.
-                  const tnBestOf = tnBestOfForScan;
-                  try {
-                    const { logShadowTip } = require('./lib/market-tips-shadow');
-                    for (const t of found) logShadowTip(db, { sport: 'tennis', match, bestOf: tnBestOf, tip: t, isLive: isLiveTennis });
-                  } catch (e) { log('WARN', 'MT-SHADOW', `tennis logShadowTip: ${e.message}`); }
+                  const tnBestOf = _tnBestOfLog;
                   for (const t of found.slice(0, 5)) {
                     const discTag = t.correlationDiscount > 0 ? ` corr-disc=${(t.correlationDiscount*100).toFixed(0)}%` : '';
                     log('INFO', 'TENNIS-MARKETS',
@@ -17035,21 +17048,33 @@ async function pollFootball(runOnce = false) {
               // Inject BTTS odds do aggregator (não vem do Pinnacle direct, mas
               // está disponível em match.odds.btts via Supabase/odds-aggregator).
               const pinMktWithBtts = match.odds?.btts ? { ...pinMkt, btts: match.odds.btts } : pinMkt;
-              const fbMtFound = scanFootballMarkets({
+              // 2026-05-04: shadow puro — captura tips com EV ≥ shadowMinEv (default 0)
+              // sem oddOk + sem maxEv. Override: FOOTBALL_SHADOW_MIN_EV.
+              const _fbShadowMinEv = parseFloat(process.env.FOOTBALL_SHADOW_MIN_EV ?? '0');
+              const _scanResultFb = scanFootballMarkets({
                 pinMarkets: pinMktWithBtts,
                 trainedMarkets: mtMarkets,
                 minEv: fbMtMinEv,
+                shadowMinEv: _fbShadowMinEv,
                 minPmodel: fbMtMinPm,
                 minOdd: fbMtMinOdd,
                 maxOdd: fbMtMaxOdd,
               });
+              const fbMtFound = _scanResultFb.promotable || _scanResultFb;
+              const _shadowAllFb = _scanResultFb.shadow || fbMtFound;
+              // Shadow log SEMPRE (mesmo se found vazio)
+              if (_shadowAllFb.length) {
+                try {
+                  const { logShadowTip } = require('./lib/market-tips-shadow');
+                  for (const t of _shadowAllFb) logShadowTip(db, { sport: 'football', match, bestOf: null, tip: t, isLive: isLiveScan });
+                } catch (e) { log('WARN', 'MT-SHADOW', `football logShadowTip: ${e.message}`); }
+                if (_shadowAllFb.length !== fbMtFound.length) {
+                  log('DEBUG', 'FB-SHADOW-PURE', `${match.team1} vs ${match.team2}: shadow=${_shadowAllFb.length} promotable=${fbMtFound.length}`);
+                }
+              }
               if (fbMtFound.length) {
                 log('INFO', 'FB-MT-SCAN',
                   `${match.team1} vs ${match.team2} [${match.league}]${isLiveScan ? ' [LIVE]' : ''}: ${fbMtFound.length} mercado(s) EV ≥${fbMtMinEv}%`);
-                try {
-                  const { logShadowTip } = require('./lib/market-tips-shadow');
-                  for (const t of fbMtFound) logShadowTip(db, { sport: 'football', match, bestOf: null, tip: t, isLive: isLiveScan });
-                } catch (e) { log('WARN', 'MT-SHADOW', `football logShadowTip: ${e.message}`); }
                 for (const t of fbMtFound.slice(0, 5)) {
                   log('INFO', 'FB-MT-SCAN',
                     `  • ${t.label} @ ${t.odd.toFixed(2)} | pModel=${(t.pModel*100).toFixed(1)}% pImpl=${t.pImplied ? (t.pImplied*100).toFixed(1)+'%' : '?'} EV=${t.ev.toFixed(1)}%`);
