@@ -8580,19 +8580,20 @@ setInterval(load, 10000);
     return;
   }
 
-  // POST /admin/settle-mt-shadow-kills?days=14&apply=1&key=<ADMIN_KEY>
-  // Settla market_tips_shadow rows com market='total_kills_map<N>' (LoL) que
-  // settleShadowTips skipa (sem PS API access). Usa Oracle's Elixir DB local
-  // pra resolver totalKills (cobre tier-1 LCK/LPL/LEC/LCS/EWC/MSI/Worlds com
-  // 24-48h lag). CBLOL/Tier-3 sem cobertura — skipped.
-  // 2026-05-04: criado pra fechar gap user reportou (LYON/Sentinels Map1 +
-  // Fluxo/LOS Map2 não settled). Conceitualmente espelha lógica de
-  // /admin/run-settle linhas 10256-10304 mas opera em market_tips_shadow.
+  // POST /admin/settle-mt-shadow-kills?days=14&apply=1&riot=1&key=<ADMIN_KEY>
+  // Settla market_tips_shadow rows com market='total_kills_map<N>' (LoL).
+  // Tier 1: Oracle's Elixir DB local (sem HTTP, cobre tier-1 com 24-48h lag).
+  // Tier 2 (riot=1): Riot livestats fallback — cobre matches recentes que OE
+  // ainda não tem (ex: LCS daily lag pra 2026-05-03 até OE re-publicar CSV).
+  // 2026-05-04: criado pra fechar gap user reportou (LYON/Sentinels +
+  // Fluxo/LOS + Shopify/FlyQuest). Espelha /admin/run-settle linhas 10256+.
   if (p === '/admin/settle-mt-shadow-kills' && (req.method === 'POST' || req.method === 'GET')) {
     const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     const days = Math.max(1, Math.min(60, parseInt(parsed.query.days || '14', 10) || 14));
     const apply = parsed.query.apply === '1' || parsed.query.apply === 'true';
+    const useRiot = parsed.query.riot === '1' || parsed.query.riot === 'true';
+    (async () => {
     try {
       const pending = db.prepare(`
         SELECT id, sport, team1, team2, league, market, line, side, odd, stake_units, created_at
@@ -8605,8 +8606,65 @@ setInterval(load, 10000);
       `).all(days);
 
       const normT = s => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-      const out = { ok: true, days, apply, examined: pending.length, settled: 0, skipped: 0, voided: 0, samples: [], skipped_reasons: {} };
+      const out = { ok: true, days, apply, riot: useRiot, examined: pending.length, settled: 0, skipped: 0, voided: 0, samples: [], skipped_reasons: {} };
       const _bumpReason = (r) => { out.skipped_reasons[r] = (out.skipped_reasons[r] || 0) + 1; };
+
+      // Riot livestats helper — só carregado se useRiot=true. Schedule lookup
+      // por team names + getEventDetails + livestats final frame.
+      const _riotResolveKills = async (team1, team2, mapIndex) => {
+        try {
+          const has = (a, b) => a && b && (a.includes(b) || b.includes(a));
+          const t1n = normT(team1), t2n = normT(team2);
+          const teamsMatch = (a, b) => {
+            const na = normT(a), nb = normT(b);
+            return (has(na, t1n) && has(nb, t2n)) || (has(na, t2n) && has(nb, t1n));
+          };
+          const schedules = await Promise.all([
+            httpGet(`${LOL_BASE}/getSchedule?hl=en-US`, LOL_HEADERS).catch(() => ({ body: '{}' })),
+            httpGet(`${LOL_BASE}/getSchedule?hl=zh-CN`, LOL_HEADERS).catch(() => ({ body: '{}' })),
+          ]);
+          const events = [];
+          for (const s of schedules) {
+            const d = safeParse(s.body, {});
+            const evs = d?.data?.schedule?.events || [];
+            for (const e of evs) if (e.type === 'match' && e.match) events.push(e);
+          }
+          events.sort((a, b) => new Date(b.startTime || 0) - new Date(a.startTime || 0));
+          const hit = events.find(e => {
+            const teams = e.match?.teams || [];
+            return teamsMatch(teams[0]?.name, teams[1]?.name);
+          });
+          if (!hit?.match?.id) return { reason: 'riot_no_match_in_schedule' };
+          const dr = await httpGet(`${LOL_BASE}/getEventDetails?hl=en-US&id=${hit.match.id}`, LOL_HEADERS);
+          const dd = safeParse(dr.body, {});
+          const m = dd?.data?.event?.match;
+          const games = (m?.games || []).map(g => ({ gameId: g.id, gameNumber: g.number, state: g.state }));
+          if (!games.length) return { reason: 'riot_no_games' };
+          const target = games.find(g => Number(g.gameNumber) === Number(mapIndex));
+          if (!target) {
+            const allFinished = games.every(g => g.state === 'completed');
+            if (allFinished) return { mapNotPlayed: true };
+            return { reason: 'riot_map_not_found', positions: games.map(g => g.gameNumber) };
+          }
+          if (target.state !== 'completed') return { unfinished: true };
+          const base = `https://feed.lolesports.com/livestats/v1/window/${target.gameId}`;
+          let r = await httpGet(base, LOL_HEADERS);
+          let d = r.status === 200 ? safeParse(r.body, {}) : null;
+          let frames = d?.frames || [];
+          if (!frames.length) {
+            const ts = new Date(Math.floor((Date.now() - 300000) / 10000) * 10000).toISOString();
+            r = await httpGet(`${base}?startingTime=${encodeURIComponent(ts)}`, LOL_HEADERS);
+            d = r.status === 200 ? safeParse(r.body, {}) : null;
+            frames = d?.frames || [];
+          }
+          if (!frames.length) return { reason: 'riot_no_frames' };
+          const last = frames[frames.length - 1];
+          const blueK = Number(last?.blueTeam?.totalKills);
+          const redK = Number(last?.redTeam?.totalKills);
+          if (!Number.isFinite(blueK) || !Number.isFinite(redK)) return { reason: 'riot_no_kills_field' };
+          return { totalKills: blueK + redK, source: 'riot_livestats', gameId: target.gameId };
+        } catch (e) { return { reason: 'riot_exception', msg: e.message }; }
+      };
 
       for (const t of pending) {
         const mapMatch = String(t.market || '').match(/^total_kills_map(\d+)$/);
@@ -8619,7 +8677,13 @@ setInterval(load, 10000);
         const before = new Date(tipMs - 10 * 86400000).toISOString().slice(0, 10);
         const after = new Date(tipMs + 10 * 86400000).toISOString().slice(0, 10);
 
-        // OE query — espelha _fetchKillsOE
+        let totalKills = null;
+        let mapNotPlayed = false;
+        let killSource = null;
+        let gameDate = null;
+        let gameId = null;
+
+        // Tier 1: OE local DB
         const games = db.prepare(`
           SELECT gameid, MIN(date) as date, SUM(kills) as total_kills,
                  GROUP_CONCAT(lower(replace(replace(replace(teamname,' ',''),'-',''),'.','')), '|') as teams_norm
@@ -8629,41 +8693,54 @@ setInterval(load, 10000);
           HAVING (instr(teams_norm, ?) > 0 AND instr(teams_norm, ?) > 0)
           ORDER BY date ASC
         `).all(before, after, t1n, t2n);
-
-        if (!games.length) { out.skipped++; _bumpReason('oe_no_games'); continue; }
         const valid = games.filter(g => {
           const norms = (g.teams_norm || '').split('|');
           return norms.some(n => n.includes(t1n) || t1n.includes(n))
               && norms.some(n => n.includes(t2n) || t2n.includes(n));
         });
-        if (!valid.length) { out.skipped++; _bumpReason('oe_no_team_match'); continue; }
-
-        // Validar guardrail temporal: game.date >= tip.created_at - 5min (mesmo
-        // espírito do pre-zombie fix). Evita match anterior do par liquidar tip.
         const SLACK_MS = 5 * 60 * 1000;
         const eligibleGames = valid.filter(g => {
           const gMs = Date.parse(String(g.date || '').replace(' ', 'T'));
           return Number.isFinite(gMs) && (gMs >= tipMs - SLACK_MS);
         });
-        if (!eligibleGames.length) {
+        if (eligibleGames.length) {
+          const target = eligibleGames[mapIndex - 1];
+          if (!target) {
+            mapNotPlayed = true;
+            killSource = 'oe_sweep';
+          } else {
+            totalKills = Number(target.total_kills);
+            killSource = 'oe';
+            gameDate = target.date;
+            gameId = target.gameid;
+          }
+        }
+
+        // Tier 2: Riot livestats fallback (se OE não resolveu)
+        if (totalKills == null && !mapNotPlayed && useRiot) {
+          const r = await _riotResolveKills(t.team1, t.team2, mapIndex);
+          if (r.totalKills != null) {
+            totalKills = r.totalKills;
+            killSource = r.source;
+            gameId = r.gameId;
+          } else if (r.mapNotPlayed) {
+            mapNotPlayed = true;
+            killSource = 'riot_sweep';
+          }
+        }
+
+        if (totalKills == null && !mapNotPlayed) {
           out.skipped++;
-          _bumpReason('all_games_before_tip');
+          _bumpReason(useRiot ? 'no_data_oe_or_riot' : 'oe_no_games');
           continue;
         }
 
-        const target = eligibleGames[mapIndex - 1];
         let result, profitU;
-        if (!target) {
-          // Sweep — mapa pedido > games disponíveis
-          if (eligibleGames.length >= 1) {
-            result = 'void';
-            profitU = 0;
-            out.voided++;
-          } else {
-            out.skipped++; _bumpReason('map_not_played_no_games'); continue;
-          }
+        if (mapNotPlayed) {
+          result = 'void';
+          profitU = 0;
+          out.voided++;
         } else {
-          const totalKills = Number(target.total_kills);
           if (!Number.isFinite(totalKills) || totalKills <= 0) {
             out.skipped++; _bumpReason('invalid_kills_data'); continue;
           }
@@ -8684,7 +8761,7 @@ setInterval(load, 10000);
             WHERE id = ? AND result IS NULL
           `).run(result, profitU, t.id);
 
-          // Tenta propagar pra tips reais (se MT promovido — geralmente shadow-only kills)
+          // Propagate pra tips reais (geralmente shadow-only kills mas defensive)
           try {
             const _prop = require('./lib/mt-result-propagator');
             _prop(db, t, result, profitU);
@@ -8698,15 +8775,16 @@ setInterval(load, 10000);
             id: t.id, team1: t.team1, team2: t.team2, league: t.league,
             market: t.market, side: t.side, line: t.line, odd: t.odd,
             stake_units: t.stake_units,
-            total_kills: target ? Number(target.total_kills) : null,
+            total_kills: totalKills, source: killSource,
             result, profit_units: profitU,
-            game_date: target?.date || null, gameid: target?.gameid || null,
+            game_date: gameDate, gameid: gameId,
             applied: apply,
           });
         }
       }
       sendJson(res, out);
     } catch (e) { sendJson(res, { error: e.message }, 500); }
+    })();
     return;
   }
 
