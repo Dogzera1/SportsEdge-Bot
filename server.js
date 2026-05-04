@@ -8580,6 +8580,49 @@ setInterval(load, 10000);
     return;
   }
 
+  // POST /admin/settle-mt-shadow-kills-manual?id=N&kills=K&key=<ADMIN_KEY>
+  // Settla manualmente uma shadow kills tip passando totalKills real.
+  // Útil quando OE/PS/Riot resolvers todos falham (ex: Riot livestats aged out).
+  if (p === '/admin/settle-mt-shadow-kills-manual' && (req.method === 'POST' || req.method === 'GET')) {
+    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const id = parseInt(parsed.query.id || '', 10);
+    const kills = parseInt(parsed.query.kills || '', 10);
+    if (!Number.isFinite(id) || id <= 0) { sendJson(res, { error: 'id obrigatório' }, 400); return; }
+    if (!Number.isFinite(kills) || kills < 0) { sendJson(res, { error: 'kills obrigatório (int >= 0)' }, 400); return; }
+    try {
+      const t = db.prepare(`SELECT * FROM market_tips_shadow WHERE id = ?`).get(id);
+      if (!t) { sendJson(res, { error: 'shadow not found' }, 404); return; }
+      if (t.result != null) { sendJson(res, { error: 'já settled', current_result: t.result }); return; }
+      if (!String(t.market || '').startsWith('total_kills_map')) {
+        sendJson(res, { error: 'market não é total_kills_mapN' }, 400); return;
+      }
+      const line = Number(t.line);
+      if (!Number.isFinite(line)) { sendJson(res, { error: 'line inválido' }, 400); return; }
+      const isOver = kills > line;
+      const cover = t.side === 'over' ? isOver : !isOver;
+      const result = cover ? 'win' : 'loss';
+      const stakeU = Number(t.stake_units) || 1;
+      const odd = Number(t.odd) || 1;
+      const profitU = cover ? +(stakeU * (odd - 1)).toFixed(3) : -stakeU;
+      db.prepare(`
+        UPDATE market_tips_shadow
+        SET result = ?, settled_at = datetime('now'), profit_units = ?
+        WHERE id = ? AND result IS NULL
+      `).run(result, profitU, id);
+      try {
+        const _prop = require('./lib/mt-result-propagator');
+        _prop(db, t, result, profitU);
+      } catch (_) {}
+      sendJson(res, {
+        ok: true, id, total_kills: kills, line, side: t.side,
+        result, profit_units: profitU,
+        team1: t.team1, team2: t.team2, league: t.league, market: t.market,
+      });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
   // POST /admin/settle-mt-shadow-kills?days=14&apply=1&riot=1&key=<ADMIN_KEY>
   // Settla market_tips_shadow rows com market='total_kills_map<N>' (LoL).
   // Tier 1: Oracle's Elixir DB local (sem HTTP, cobre tier-1 com 24-48h lag).
