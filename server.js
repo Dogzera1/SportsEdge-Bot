@@ -10317,9 +10317,16 @@ setInterval(load, 60000);
           `SELECT COUNT(*) AS n FROM market_tips_shadow WHERE sport = ? AND created_at >= datetime('now', '-7 days')`
         ).get(sp);
         shadow7d = sh?.n || 0;
+        // 2026-05-04: cs2/dota2 game-id mas tabela tips usa bucket cs/dota2
+        // (mig 074 consolidou cs2→cs). Resolver bucket via resolveSportSet
+        // pra contagem REAL de promoção. Antes mostrava promoted_count_7d=0
+        // pra cs2 mesmo com 9+ tips MT promovidas (display-only bug).
+        const tipsSportSet = (typeof resolveSportSet === 'function')
+          ? resolveSportSet(sp, null).sportSet : [sp];
+        const tipsPh = tipsSportSet.map(() => '?').join(',');
         const re = db.prepare(
-          `SELECT COUNT(*) AS n FROM tips WHERE sport = ? AND match_id LIKE '%::mt::%' AND sent_at >= datetime('now', '-7 days')`
-        ).get(sp);
+          `SELECT COUNT(*) AS n FROM tips WHERE sport IN (${tipsPh}) AND match_id LIKE '%::mt::%' AND sent_at >= datetime('now', '-7 days')`
+        ).get(...tipsSportSet);
         real7d = re?.n || 0;
       } catch (_) {}
       out.sports[sp] = {
