@@ -10444,7 +10444,20 @@ function tableHtml(rows) {
   return '<table><thead><tr>' + head + '</tr></thead><tbody>' + body + '</tbody></table>';
 }
 function render(metrics) {
-  const labels = { sharpe: 'Rolling Sharpe Ratio', kelly: 'Kelly Efficiency', variance: 'League Variance', cohort: 'Cohort Survival', clv: 'CLV Drift' };
+  const labels = {
+    sharpe: 'Rolling Sharpe Ratio',
+    kelly: 'Kelly Efficiency',
+    variance: 'League Variance',
+    cohort: 'Cohort Survival',
+    clv: 'CLV Drift',
+    brier: 'Brier Skill Score',
+    evbucket: 'EV Bucket × Sport',
+    timeofday: 'Time-of-day Heatmap (UTC)',
+    drawdown: 'Drawdown Analysis',
+    calibration: 'Calibration Bins',
+    marketsport: 'Market × Sport ROI Matrix',
+    streak: 'Streak Analysis',
+  };
   const grid = document.getElementById('grid');
   grid.innerHTML = '';
   for (const [name, payload] of Object.entries(metrics)) {
