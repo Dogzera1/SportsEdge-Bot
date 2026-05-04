@@ -1971,6 +1971,7 @@ const migrations = [
     },
   },
   {
+<<<<<<< HEAD
     id: '082_perf_indexes',
     up(db) {
       // Audit perf 2026-05-04: queries lentas por falta de índice em colunas
@@ -2019,6 +2020,8 @@ const migrations = [
     },
   },
   {
+=======
+>>>>>>> 7491895 (feat(audit-leaks-2026-05-04): kill ML real path leak + recover MT settle)
     id: '080_tips_clv_pct',
     up(db) {
       if (!tableExists(db, 'tips')) return;
@@ -2037,6 +2040,7 @@ const migrations = [
     },
   },
   {
+<<<<<<< HEAD
     id: '084_polymarket_consensus_alerts',
     up(db) {
       // Polymarket multi-wallet consensus tracking. Quando ≥3 sharps tomam
@@ -2183,6 +2187,8 @@ const migrations = [
     },
   },
   {
+=======
+>>>>>>> 7491895 (feat(audit-leaks-2026-05-04): kill ML real path leak + recover MT settle)
     id: '074_consolidate_cs2_into_cs',
     up(db) {
       // Bug histórico: CS market tips foram gravadas com sport='cs2' em `tips` e
