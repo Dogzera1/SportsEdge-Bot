@@ -8730,6 +8730,16 @@ setInterval(load, 10000);
         }
 
         if (totalKills == null && !mapNotPlayed) {
+          // Skip com sample diag pra debugging
+          if (out.samples.length < 15) {
+            out.samples.push({
+              id: t.id, team1: t.team1, team2: t.team2, league: t.league,
+              market: t.market, side: t.side, line: t.line,
+              total_kills: null, source: killSource,
+              result: 'skipped',
+              reason: useRiot ? 'no_data_oe_or_riot' : 'oe_no_games',
+            });
+          }
           out.skipped++;
           _bumpReason(useRiot ? 'no_data_oe_or_riot' : 'oe_no_games');
           continue;
@@ -8741,7 +8751,16 @@ setInterval(load, 10000);
           profitU = 0;
           out.voided++;
         } else {
-          if (!Number.isFinite(totalKills) || totalKills <= 0) {
+          // Aceita 0 kills (raro mas tecnicamente válido). Rejeita só NaN/null.
+          if (!Number.isFinite(totalKills)) {
+            if (out.samples.length < 15) {
+              out.samples.push({
+                id: t.id, team1: t.team1, team2: t.team2, league: t.league,
+                market: t.market, side: t.side, line: t.line,
+                total_kills: totalKills, source: killSource,
+                result: 'skipped', reason: 'invalid_kills_data',
+              });
+            }
             out.skipped++; _bumpReason('invalid_kills_data'); continue;
           }
           const line = Number(t.line);
