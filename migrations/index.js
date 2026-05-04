@@ -1971,6 +1971,31 @@ const migrations = [
     },
   },
   {
+    id: '081_analytics_alerts',
+    up(db) {
+      // Histórico de alerts watchdog. Permite throttle por (rule, sport)
+      // 24h pra não spammar admin. status='open' = alert ativo, 'resolved'
+      // = valor voltou ao saudável.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS analytics_alerts (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          rule_id TEXT NOT NULL,
+          sport TEXT,
+          severity TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'open',
+          metric_value REAL,
+          threshold_value REAL,
+          message TEXT,
+          fired_at TEXT NOT NULL DEFAULT (datetime('now')),
+          resolved_at TEXT,
+          context_json TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_alerts_rule_sport ON analytics_alerts(rule_id, sport, status);
+        CREATE INDEX IF NOT EXISTS idx_alerts_fired ON analytics_alerts(fired_at DESC);
+      `);
+    },
+  },
+  {
     id: '080_tips_clv_pct',
     up(db) {
       if (!tableExists(db, 'tips')) return;

@@ -21359,6 +21359,71 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   setInterval(runClvCaptureCycle, CLV_CAPTURE_INTERVAL_MS);
   setTimeout(runClvCaptureCycle, 3 * 60 * 1000); // primeira run 3min pós-boot
 
+  // ── Analytics Watchdog: roda 12 métricas DAX, detecta anomalias via rules
+  // (sharpe negativo, drawdown distress, calibration drift, tilt windows,
+  // CLV negativo, EV bucket leak, market×sport leak, etc). Throttle 24h
+  // por (rule, sport) via tabela analytics_alerts (mig 081).
+  // Default ON; opt-out ANALYTICS_WATCHDOG_AUTO=false.
+  const _watchdogEnabled = !/^(0|false|no)$/i.test(String(process.env.ANALYTICS_WATCHDOG_AUTO ?? 'true'));
+  if (_watchdogEnabled) {
+    const runAnalyticsWatchdog = async () => {
+      try {
+        const { runWatchdog, formatTelegramAlerts } = require('./lib/analytics-watchdog');
+        const days = parseInt(process.env.WATCHDOG_DAYS || '30', 10);
+        const result = await runWatchdog(db, { days });
+        if (result.alerts.length) {
+          const counts = result.summary.by_severity || {};
+          log('INFO', 'WATCHDOG', `${result.alerts.length} alerts (P0:${counts.P0||0} P1:${counts.P1||0} P2:${counts.P2||0}) suprimidos:${result.suppressed}`);
+          const msg = formatTelegramAlerts(result);
+          if (msg) {
+            const token = resolveAlertsToken();
+            if (token) await sendAdminDMs(token, msg, { parse_mode: 'HTML' }, 'analytics-watchdog');
+          }
+        } else {
+          log('DEBUG', 'WATCHDOG', `Sem alerts (${result.suppressed} suprimidos por throttle)`);
+        }
+      } catch (e) { log('WARN', 'WATCHDOG', `cycle erro: ${e.message}`); }
+    };
+    const WATCHDOG_INTERVAL_MS = parseInt(process.env.ANALYTICS_WATCHDOG_INTERVAL_H || '6', 10) * 60 * 60 * 1000;
+    setInterval(runAnalyticsWatchdog, WATCHDOG_INTERVAL_MS);
+    setTimeout(runAnalyticsWatchdog, 10 * 60 * 1000); // primeira run 10min pós-boot
+  }
+
+  // ── Daily Analytics Digest: snapshot completo das métricas + top movers
+  // 1×/dia em hora UTC configurável (default 12 = meio-dia BR ≈ 9h). Usa
+  // delay calc until next firing time. Default ON; opt-out
+  // ANALYTICS_DIGEST_AUTO=false.
+  const _digestEnabled = !/^(0|false|no)$/i.test(String(process.env.ANALYTICS_DIGEST_AUTO ?? 'true'));
+  if (_digestEnabled) {
+    const digestHourUtc = parseInt(process.env.ANALYTICS_DIGEST_HOUR_UTC || '12', 10);
+    const runAnalyticsDigest = async () => {
+      try {
+        const { runDigest, formatTelegramDigest } = require('./lib/analytics-watchdog');
+        const days = parseInt(process.env.WATCHDOG_DIGEST_DAYS || '7', 10);
+        const result = await runDigest(db, { days });
+        const msg = formatTelegramDigest(result);
+        if (msg) {
+          const token = resolveAlertsToken();
+          if (token) await sendAdminDMs(token, msg, { parse_mode: 'HTML' }, 'analytics-digest');
+          log('INFO', 'WATCHDOG', `Daily digest enviado (${result.active_alerts?.length || 0} alerts ativos)`);
+        }
+      } catch (e) { log('WARN', 'WATCHDOG', `digest erro: ${e.message}`); }
+    };
+    const scheduleNextDigest = () => {
+      const now = new Date();
+      const next = new Date(now);
+      next.setUTCHours(digestHourUtc, 0, 0, 0);
+      if (next <= now) next.setUTCDate(next.getUTCDate() + 1);
+      const delayMs = next - now;
+      setTimeout(async () => {
+        await runAnalyticsDigest();
+        scheduleNextDigest();
+      }, delayMs);
+      log('INFO', 'WATCHDOG', `Daily digest agendado: próxima run ${next.toISOString()}`);
+    };
+    scheduleNextDigest();
+  }
+
   // Esports legacy audit: pós-split (Abr/2026) tips novas devem usar sport='lol'/'dota2'.
   // Se >5% de tips settadas recentes estão com sport='esports', alerta — indica que
   // reclassificação não tá rodando ou tem path de código retrógrado.
