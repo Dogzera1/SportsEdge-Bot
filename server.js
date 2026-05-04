@@ -18313,6 +18313,15 @@ setInterval(load, 60000);
         if (!tipParticipant) { badRequest(res, 'tipParticipant obrigatório'); return; }
         if (oddsN == null || oddsN <= 1) { badRequest(res, 'odds inválidas'); return; }
         if (evN == null) { badRequest(res, 'ev inválido'); return; }
+        // 2026-05-04: ML SHADOW PURE MODE — quando t.isShadow=1, bypass filters
+        // (dedup, EV cap, ML gate, voided blacklist) pra que tabela `tips` com
+        // is_shadow=1 sirva como base de dados PURA pra calibração/estudo.
+        // Tips reais (isShadow=0) continuam passando todos gates pra proteção
+        // de banca. Filosofia: shadow = causa (modelo), real = sintoma (dispatch).
+        // Override: ML_SHADOW_PURE_MODE=false desativa bypass (back-compat).
+        const _isShadowTip = !!t.isShadow;
+        const _shadowPureMode = !/^(0|false|no)$/i.test(String(process.env.ML_SHADOW_PURE_MODE ?? 'true'));
+        const _bypassFiltersForShadow = _isShadowTip && _shadowPureMode;
         // Helper centralizado pra skip — incrementa counter por reason+sport
         // ANTES de sendJson. Permite /health/metrics rastrear quais gates
         // estão derrubando volume sem precisar parsear logs.
@@ -18323,8 +18332,10 @@ setInterval(load, 60000);
           } catch (_) {}
           sendJson(res, { ok: true, skipped: true, reason, ...extra });
         };
-        // Guardrail: evita odds absurdas por bug de matching/mercado
-        if (sport === 'esports') {
+        // Guardrail: evita odds absurdas por bug de matching/mercado.
+        // Shadow puro bypass — garante que tips com odds fora do range real
+        // ainda sejam capturadas em shadow pra estudo (ex: leak severo em odd>4).
+        if (sport === 'esports' && !_bypassFiltersForShadow) {
           const minOdds = parseFiniteNumber(process.env.LOL_MIN_ODDS) ?? 1.10;
           const maxOdds = parseFiniteNumber(process.env.LOL_MAX_ODDS) ?? 4.00;
           if (oddsN < minOdds || oddsN > maxOdds) {
@@ -18336,13 +18347,15 @@ setInterval(load, 60000);
         // Pós-split LoL/Dota (Abr/2026): bloqueia também quando match_id existe em
         // bucket irmão (esports↔lol, esports↔dota2) — evita mesma tip gravada duas vezes
         // durante migração quando bot.js passou a usar sport='lol'/'dota2' direto.
+        // Shadow puro bypass: shadow tips podem duplicar (cada cycle pode logar
+        // mesma tip duas vezes — pra rastrear evolução de odds + modelo).
         const { sportSet: dupeSportSet } = (typeof resolveSportSet === 'function')
           ? resolveSportSet(sport, null) : { sportSet: [sport] };
         const dupePlaceholders = dupeSportSet.map(() => '?').join(',');
-        const existingCross = db.prepare(
+        const existingCross = !_bypassFiltersForShadow ? db.prepare(
           `SELECT id, sport FROM tips WHERE match_id = ? AND sport IN (${dupePlaceholders})
            AND (archived IS NULL OR archived = 0) LIMIT 1`
-        ).get(String(matchId), ...dupeSportSet);
+        ).get(String(matchId), ...dupeSportSet) : null;
         if (existingCross) {
           _emitSkip('duplicate', { existing_sport: existingCross.sport });
           return;
@@ -18364,7 +18377,8 @@ setInterval(load, 60000);
         const newIsLive = !!t.isLive;
         const samePickOnlySports = String(process.env.SAME_PICK_ONLY_DEDUP_SPORTS || '').toLowerCase().split(',').map(s => s.trim()).filter(Boolean);
         const samePickOnly = samePickOnlySports.includes(String(sport).toLowerCase());
-        if (p1n_ && p2n_) {
+        // Shadow puro bypass: skip pair dedup
+        if (p1n_ && p2n_ && !_bypassFiltersForShadow) {
           const pickClause = samePickOnly
             ? `AND REPLACE(REPLACE(lower(tip_participant),' ',''),'-','') = ?`
             : ``;
@@ -18407,7 +18421,8 @@ setInterval(load, 60000);
         }
 
         // Blacklist: se já foi VOID por odds errada, não gravar de novo
-        const isVoided = stmts.isVoidedMatch.get(sport, String(matchId));
+        // Shadow puro bypass: shadow registra tudo pra estudo (mesmo voided).
+        const isVoided = !_bypassFiltersForShadow ? stmts.isVoidedMatch.get(sport, String(matchId)) : null;
         if (isVoided) { _emitSkip('voided_odds_wrong_match'); return; }
 
         // 2026-05-04 [Audit leaks 30d]: ML real path sangrando -R$19,20 mensal
@@ -18417,8 +18432,9 @@ setInterval(load, 60000);
         // total_kills_mapN). _ML_SHADOW=true grava como shadow=1 (mantém
         // tracking/CLV mas não envia DM). _ML_TIER1_ONLY restringe ML às
         // ligas em <SPORT>_ML_TIER1_LEAGUES csv (substring match em event_name).
+        // Shadow puro bypass: ML disable é gate do dispatch real, não do study DB.
         const _mtKindGate = String(t.market_type || 'ML').toUpperCase();
-        if (_mtKindGate === 'ML') {
+        if (_mtKindGate === 'ML' && !_bypassFiltersForShadow) {
           const _spU = String(sport || '').toUpperCase();
           const _mlDisabled = /^(1|true|yes)$/i.test(String(process.env[`${_spU}_ML_DISABLED`] || ''));
           if (_mlDisabled) {
@@ -18440,7 +18456,8 @@ setInterval(load, 60000);
 
         // Time-of-day block: se hora UTC atual está marcada como bleeder (ROI persistentemente ruim),
         // rejeita. Cache per-sport 1h pra evitar query por tip.
-        if (/^true$/i.test(String(process.env.TIME_OF_DAY_AUTO || ''))) {
+        // Shadow puro bypass: time-of-day é gate de banca, não de calibration.
+        if (/^true$/i.test(String(process.env.TIME_OF_DAY_AUTO || '')) && !_bypassFiltersForShadow) {
           try {
             if (!global._timeOfDayBlockCache) global._timeOfDayBlockCache = {};
             const cache = global._timeOfDayBlockCache;
@@ -18486,7 +18503,8 @@ setInterval(load, 60000);
         }
 
         // League block: se liga está bloqueada (ROI bleed ou manual), rejeita.
-        if (eventName) {
+        // Shadow puro bypass: league bleed é estudo (pra modelo aprender padrão).
+        if (eventName && !_bypassFiltersForShadow) {
           const block = db.prepare(`
             SELECT reason, blocked_at, auto FROM league_blocks
             WHERE sport = ? AND league = ? AND unblocked_at IS NULL
@@ -18507,7 +18525,7 @@ setInterval(load, 60000);
         // BUG FIX 2026-04-27: MT tips (handicap/totals) já têm correlation discount
         // no Kelly aplicado em bot.js — bypass cap pra não duplicar penalidade.
         // ML continua sob cap (correlation entre múltiplas ML é mais forte).
-        if (/^true$/i.test(String(process.env.CORRELATION_AUTO || '')) && eventName && sport !== 'football' && !isMtTip) {
+        if (/^true$/i.test(String(process.env.CORRELATION_AUTO || '')) && eventName && sport !== 'football' && !isMtTip && !_bypassFiltersForShadow) {
           // 2026-04-28: per-sport sensible defaults (env override sempre ganha).
           // Tennis: 6u (single match, 3-5 markets correlated). LoL/CS: 8u (BO5
           // série tem 3+ mapas, cada com 1-2 markets). MMA/Tennis: 6u (1 fight).
@@ -18546,7 +18564,8 @@ setInterval(load, 60000);
         // BUG FIX 2026-04-27: MT tips passam por seu próprio EV gate em bot.js
         // (TENNIS_MARKET_TIP_MIN_EV, etc) — bypass dinâmico que era calibrado pra
         // ML e estava bloqueando MT 8-14% mesmo com env=8 do user.
-        if (evN != null && !isMtTip) {
+        // Shadow puro bypass: dynamic EV min é gate de banca, não estudo.
+        if (evN != null && !isMtTip && !_bypassFiltersForShadow) {
           try {
             const dyn = db.prepare(`SELECT value FROM dynamic_thresholds WHERE sport = ? AND key = 'ev_min'`).get(sport);
             if (dyn?.value > 0 && evN < dyn.value) {
@@ -18567,7 +18586,9 @@ setInterval(load, 60000);
         // Pinnacle pagava 1.065). Tennis tem mais tolerância (Slam edges reais).
         // Override total via TIP_EV_MAX (legacy global) ou TIP_EV_MAX_PER_SPORT JSON
         // — env vars têm precedência sobre defaults.
-        if (evN != null) {
+        // Shadow puro bypass: EV cap é proteção de banca real, não estudo.
+        // Shadow precisa capturar TIPS COM EV ALTO (calibration leak data).
+        if (evN != null && !_bypassFiltersForShadow) {
           // 2026-05-01: tighten LoL/Tennis/CS após audit ROI por bucket 30d.
           //   bucket EV 8-12%: lol -31.7%, tennis -32.1% (reject)
           //   bucket EV >12%: cs -31.8%, lol -4.8%, tennis -8.2%, overall -9.3%
@@ -18614,7 +18635,9 @@ setInterval(load, 60000);
         // Spread gate: bestOdd vs Pinnacle sharp anchor. Se soft book > 1.5x
         // Pinnacle, é forte indício de odd errada/stale. Rejeita gravação → bot
         // aborta DM (checa rec.skipped). Override via process.env.BOOKMAKER_SPREAD_MAX_RATIO.
-        if (t.lineShopOdds && t.pickSide) {
+        // Shadow puro bypass: spread anomalies são DADOS DE ESTUDO (modelo
+        // precisa ver odds estranhas pra calibrar).
+        if (t.lineShopOdds && t.pickSide && !_bypassFiltersForShadow) {
           try {
             const { checkBookmakerSpread } = require('./lib/line-shopping');
             const maxRatio = parseFloat(process.env.BOOKMAKER_SPREAD_MAX_RATIO || '1.5') || 1.5;
@@ -18635,7 +18658,8 @@ setInterval(load, 60000);
         const p1n = norm(p1), p2n = norm(p2);
         const marketTypeStr = clampStr(t.market_type || 'ML', 20) || 'ML';
         const daysBack = process.env.VOID_TIP_PAIR_DAYS || '90 days';
-        const isVoidedPair = stmts.isVoidedPairRecent.get(sport, marketTypeStr, p1n, p2n, p2n, p1n, `-${daysBack}`);
+        // Shadow puro bypass: voided pair history é gate de banca.
+        const isVoidedPair = !_bypassFiltersForShadow ? stmts.isVoidedPairRecent.get(sport, marketTypeStr, p1n, p2n, p2n, p1n, `-${daysBack}`) : null;
         if (isVoidedPair) { _emitSkip('voided_odds_wrong_pair_recent'); return; }
 
         // 2026-05-01: stop-loss por match — bloqueia novas tips em série
@@ -18644,8 +18668,9 @@ setInterval(load, 60000);
         // Map 2 perderam (2u down), Map 3 não recebe nova tip do mesmo match.
         // Default OFF (env opt-in) pra preservar comportamento existente
         // até validar em shadow. Ativa via MATCH_STOP_LOSS_UNITS=2.
+        // Shadow puro bypass: stop-loss é gate de banca real.
         const _stopLossUnits = parseFloat(process.env.MATCH_STOP_LOSS_UNITS || '0');
-        if (_stopLossUnits > 0) {
+        if (_stopLossUnits > 0 && !_bypassFiltersForShadow) {
           // Strip suffixes pra agrupar mesma série: ::mt::* (MT-promoted),
           // ::ln* (kills line tags), _map\d+ (per-map ML), suffix de fase.
           // Base = match_id antes do primeiro separador `::` ou `_map`.
@@ -18724,6 +18749,35 @@ setInterval(load, 60000);
             && Number.isFinite(t.fb_dist.pH) && Number.isFinite(t.fb_dist.pD) && Number.isFinite(t.fb_dist.pA)) {
             ctx.fb_dist = { pH: +t.fb_dist.pH, pD: +t.fb_dist.pD, pA: +t.fb_dist.pA };
           }
+          // Polymarket consensus pre-check (read-only — só anota contexto).
+          // Se ≥3 sharps tomaram lado MESMO/OPOSTO ao tip pick, registra signal pra
+          // forensics. Boost de EV opt-in via POLYMARKET_CONSENSUS_TIP_BOOST_PP (em pp).
+          // Reject contrarian opt-in via POLYMARKET_CONSENSUS_REJECT_CONTRARIAN=true.
+          try {
+            const pmw = require('./lib/polymarket-watcher');
+            const pmcCheck = pmw.preTipConsensusCheck(db, {
+              sport, participant1: p1, participant2: p2, tipParticipant,
+            });
+            if (pmcCheck && pmcCheck.signal) {
+              ctx.polymarket_consensus = {
+                signal: pmcCheck.signal,
+                n_wallets: pmcCheck.n_wallets,
+                size_usd: pmcCheck.total_size_usd,
+              };
+              if (pmcCheck.signal === 'contrarian') {
+                log('WARN', 'PMC', `${sport} ${p1} vs ${p2} pick=${tipParticipant} CONTRARIAN — sharps backing ${pmcCheck.consensus.directional_pick} (${pmcCheck.n_wallets} wallets, $${pmcCheck.total_size_usd})`);
+                // Shadow puro bypass: contrarian é signal pra estudo, shadow não rejeita.
+                if (/^(1|true|yes)$/i.test(String(process.env.POLYMARKET_CONSENSUS_REJECT_CONTRARIAN ?? 'false')) && !_bypassFiltersForShadow) {
+                  _emitSkip('polymarket_contrarian_consensus', {
+                    n_wallets: pmcCheck.n_wallets, size_usd: pmcCheck.total_size_usd,
+                  });
+                  return;
+                }
+              } else if (pmcCheck.signal === 'aligned') {
+                log('INFO', 'PMC', `${sport} ${p1} vs ${p2} pick=${tipParticipant} ALIGNED w/ ${pmcCheck.n_wallets} sharps ($${pmcCheck.total_size_usd})`);
+              }
+            }
+          } catch (_) { /* defensive */ }
           if (Object.keys(ctx).length > 0) {
             _tipContextJson = JSON.stringify(ctx).slice(0, 4000); // hard cap 4KB
           }

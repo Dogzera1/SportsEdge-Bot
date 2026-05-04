@@ -7739,21 +7739,28 @@ async function autoAnalyzeMatch(token, match) {
               const { scanMarkets } = require('./lib/odds-markets-scanner');
               const lolMarketsLib = require('./lib/lol-markets');
               const minEv = parseFloat(process.env.LOL_MARKET_SCAN_MIN_EV ?? '4');
+              // 2026-05-04: shadow puro — captura tips com EV ≥ shadowMinEv (default 0)
+              // sem aplicar oddOk + maxPerMatch. Permite calibration data não enviesada.
+              // Override: LOL_SHADOW_MIN_EV=N (default 0). Setar 999 desativa split mode.
+              const shadowMinEv = parseFloat(process.env.LOL_SHADOW_MIN_EV ?? '0');
               // Odd cap LoL: shadow mostrou leak severo em >2.0; resolveMtOdd
               // prefere env > DB auto > default. Auto-guard cron (12h) atualiza
               // o DB conforme regime atual.
               const { minOdd: minOddLol, maxOdd: maxOddLol } = _resolveMtOddBounds('lol', { defaultMaxOdd: 2.00 });
-              let found = scanMarkets({
+              const _scanResult = scanMarkets({
                 markets,
                 pMap: lolModel.mapP1,
                 bestOf: lolModel.bestOf || 3,
                 pricingLib: lolMarketsLib,
                 minEv,
+                shadowMinEv,
                 momentum: 0.03, // LoL momentum calibrado (project_lol_series_model)
                 minOdd: minOddLol,
                 maxOdd: maxOddLol,
                 maxPerMatch: parseInt(process.env.LOL_MARKET_MAX_PER_MATCH || '', 10) || null,
               });
+              let found = _scanResult.promotable || _scanResult;
+              const _shadowAll = _scanResult.shadow || found;
               // ── Frente 4: extra markets (dragons/barons/towers) ──
               // Shadow-only por enquanto (LOL_EXTRA_MARKETS=true ativa).
               // Empirical lambda via lol_game_objectives table (Frente 3).
@@ -7778,14 +7785,19 @@ async function autoAnalyzeMatch(token, match) {
               if (found.length >= 2 && process.env.LOL_CORRELATION_ADJ !== 'false') {
                 try { found = _applyEsportsCorrelation(found, 'lol', match); } catch (e) { reportBug('LOL-CORR', e); }
               }
+              // Shadow log SEMPRE (mesmo se found vazio mas shadow tem entries)
+              if (_shadowAll.length) {
+                try {
+                  const { logShadowTip } = require('./lib/market-tips-shadow');
+                  for (const t of _shadowAll) logShadowTip(db, { sport: 'lol', match, bestOf: lolModel.bestOf || 3, tip: t, isLive: isLiveLoL });
+                } catch (e) { log('WARN', 'MT-SHADOW', `lol logShadowTip: ${e.message}`); }
+                if (_shadowAll.length !== found.length) {
+                  log('DEBUG', 'LOL-SHADOW-PURE', `${match.team1} vs ${match.team2}: shadow=${_shadowAll.length} promotable=${found.length} (shadowMinEv=${shadowMinEv}, minEv=${minEv})`);
+                }
+              }
               if (found.length) {
                 log('INFO', 'LOL-MARKETS',
                   `${match.team1} vs ${match.team2} [Bo${lolModel.bestOf}]: ${found.length} mercado(s) com EV ≥${minEv}% (pMap=${(lolModel.mapP1*100).toFixed(1)}%)`);
-                // Shadow log — acumula tips detectadas pra backtest retrospectivo.
-                try {
-                  const { logShadowTip } = require('./lib/market-tips-shadow');
-                  for (const t of found) logShadowTip(db, { sport: 'lol', match, bestOf: lolModel.bestOf || 3, tip: t, isLive: isLiveLoL });
-                } catch (e) { log('WARN', 'MT-SHADOW', `lol logShadowTip: ${e.message}`); }
                 for (const t of found.slice(0, 5)) {
                   log('INFO', 'LOL-MARKETS',
                     `  • ${t.label} @ ${t.odd.toFixed(2)} | pModel=${(t.pModel*100).toFixed(1)}% pImpl=${t.pImplied ? (t.pImplied*100).toFixed(1)+'%' : '?'} EV=${t.ev.toFixed(1)}%`);
@@ -13670,18 +13682,23 @@ async function _pollDotaInner(runOnce = false) {
           if (markets && ((markets.handicaps?.length || 0) + (markets.totals?.length || 0)) > 0) {
             const { scanMarkets } = require('./lib/odds-markets-scanner');
             const minEv = parseFloat(process.env.DOTA_MARKET_SCAN_MIN_EV ?? '4');
+            // 2026-05-04: shadow puro — captura tips com EV ≥ shadowMinEv (default 0).
+            const shadowMinEv = parseFloat(process.env.DOTA_SHADOW_MIN_EV ?? '0');
             // Auto-guard preenche min/max odd quando shadow ROI per-bucket
             // identificar leak. Sem default — Dota ainda sem sample suficiente.
             const { minOdd: minOddDota, maxOdd: maxOddDota } = _resolveMtOddBounds('dota2');
-            let found = scanMarkets({
+            const _scanResultDota = scanMarkets({
               markets, pMap: pMapDota, bestOf: dotaBo,
               pricingLib: require('./lib/lol-markets'),
               minEv,
+              shadowMinEv,
               momentum: 0.04, // Dota2 momentum retrained (project_dota2_momentum_features)
               minOdd: minOddDota,
               maxOdd: maxOddDota,
               maxPerMatch: parseInt(process.env.DOTA_MARKET_MAX_PER_MATCH || '', 10) || null,
             });
+            let found = _scanResultDota.promotable || _scanResultDota;
+            const _shadowAllDota = _scanResultDota.shadow || found;
             if (found.length >= 2 && process.env.DOTA_CORRELATION_ADJ !== 'false') {
               try { found = _applyEsportsCorrelation(found, 'dota2', match); } catch (e) { reportBug('DOTA-CORR', e); }
             }
@@ -13713,13 +13730,19 @@ async function _pollDotaInner(runOnce = false) {
               }
             } catch (e) { reportBug('DOTA-EXTRAS', e); }
 
+            // Shadow log SEMPRE (mesmo se found vazio mas shadow tem entries)
+            if (_shadowAllDota.length) {
+              try {
+                const { logShadowTip } = require('./lib/market-tips-shadow');
+                for (const t of _shadowAllDota) logShadowTip(db, { sport: 'dota2', match, bestOf: dotaBo, tip: t, isLive });
+              } catch (e) { log('WARN', 'MT-SHADOW', `dota2 logShadowTip: ${e.message}`); }
+              if (_shadowAllDota.length !== found.length) {
+                log('DEBUG', 'DOTA-SHADOW-PURE', `${match.team1} vs ${match.team2}: shadow=${_shadowAllDota.length} promotable=${found.length}`);
+              }
+            }
             if (found.length) {
               log('INFO', 'DOTA-MARKETS',
                 `${match.team1} vs ${match.team2} [Bo${dotaBo}]: ${found.length} mercado(s) EV ≥${minEv}% (pMap=${(pMapDota*100).toFixed(1)}%)`);
-              try {
-                const { logShadowTip } = require('./lib/market-tips-shadow');
-                for (const t of found) logShadowTip(db, { sport: 'dota2', match, bestOf: dotaBo, tip: t, isLive });
-              } catch (e) { log('WARN', 'MT-SHADOW', `dota2 logShadowTip: ${e.message}`); }
               for (const t of found.slice(0, 5)) {
                 log('INFO', 'DOTA-MARKETS',
                   `  • ${t.label} @ ${t.odd.toFixed(2)} | pModel=${(t.pModel*100).toFixed(1)}% pImpl=${t.pImplied ? (t.pImplied*100).toFixed(1)+'%' : '?'} EV=${t.ev.toFixed(1)}%`);
@@ -18196,26 +18219,35 @@ async function pollCs(runOnce = false) {
             if (markets && ((markets.handicaps?.length || 0) + (markets.totals?.length || 0)) > 0) {
               const { scanMarkets } = require('./lib/odds-markets-scanner');
               const minEv = parseFloat(process.env.CS_MARKET_SCAN_MIN_EV ?? '4');
+              const shadowMinEv = parseFloat(process.env.CS_SHADOW_MIN_EV ?? '0');
               const { minOdd: minOddCs, maxOdd: maxOddCs } = _resolveMtOddBounds('cs2');
-              let found = scanMarkets({
+              const _scanResultCs = scanMarkets({
                 markets, pMap: pMapCs, bestOf: csBestOf,
                 pricingLib: require('./lib/lol-markets'),
                 minEv,
+                shadowMinEv,
                 momentum: 0.04, // CS2 momentum (project_esports_momentum_wave)
                 minOdd: minOddCs,
                 maxOdd: maxOddCs,
                 maxPerMatch: parseInt(process.env.CS_MARKET_MAX_PER_MATCH || '', 10) || null,
               });
+              let found = _scanResultCs.promotable || _scanResultCs;
+              const _shadowAllCs = _scanResultCs.shadow || found;
               if (found.length >= 2 && process.env.CS_CORRELATION_ADJ !== 'false') {
                 try { found = _applyEsportsCorrelation(found, 'cs2', match); } catch (e) { reportBug('CS-CORR', e); }
+              }
+              if (_shadowAllCs.length) {
+                try {
+                  const { logShadowTip } = require('./lib/market-tips-shadow');
+                  for (const t of _shadowAllCs) logShadowTip(db, { sport: 'cs2', match, bestOf: csBestOf, tip: t, isLive: isLiveCs });
+                } catch (e) { log('WARN', 'MT-SHADOW', `cs2 logShadowTip: ${e.message}`); }
+                if (_shadowAllCs.length !== found.length) {
+                  log('DEBUG', 'CS-SHADOW-PURE', `${match.team1} vs ${match.team2}: shadow=${_shadowAllCs.length} promotable=${found.length}`);
+                }
               }
               if (found.length) {
                 log('INFO', 'CS-MARKETS',
                   `${match.team1} vs ${match.team2} [Bo${csBestOf}]: ${found.length} mercado(s) EV ≥${minEv}% (pMap=${(pMapCs*100).toFixed(1)}%)`);
-                try {
-                  const { logShadowTip } = require('./lib/market-tips-shadow');
-                  for (const t of found) logShadowTip(db, { sport: 'cs2', match, bestOf: csBestOf, tip: t, isLive: isLiveCs });
-                } catch (e) { log('WARN', 'MT-SHADOW', `cs2 logShadowTip: ${e.message}`); }
                 for (const t of found.slice(0, 5)) {
                   log('INFO', 'CS-MARKETS',
                     `  • ${t.label} @ ${t.odd.toFixed(2)} | pModel=${(t.pModel*100).toFixed(1)}% pImpl=${t.pImplied ? (t.pImplied*100).toFixed(1)+'%' : '?'} EV=${t.ev.toFixed(1)}%`);
@@ -18818,26 +18850,35 @@ async function pollValorant(runOnce = false) {
             if (markets && ((markets.handicaps?.length || 0) + (markets.totals?.length || 0)) > 0) {
               const { scanMarkets } = require('./lib/odds-markets-scanner');
               const minEv = parseFloat(process.env.VAL_MARKET_SCAN_MIN_EV ?? '5');
+              const shadowMinEv = parseFloat(process.env.VAL_SHADOW_MIN_EV ?? '0');
               const { minOdd: minOddVal, maxOdd: maxOddVal } = _resolveMtOddBounds('valorant');
-              let found = scanMarkets({
+              const _scanResultVal = scanMarkets({
                 markets, pMap: pMapVal, bestOf: bo,
                 pricingLib: require('./lib/lol-markets'),
                 minEv,
+                shadowMinEv,
                 momentum: 0.04, // Valorant momentum (project_esports_momentum_wave)
                 minOdd: minOddVal,
                 maxOdd: maxOddVal,
                 maxPerMatch: parseInt(process.env.VAL_MARKET_MAX_PER_MATCH || '', 10) || null,
               });
+              let found = _scanResultVal.promotable || _scanResultVal;
+              const _shadowAllVal = _scanResultVal.shadow || found;
               if (found.length >= 2 && process.env.VAL_CORRELATION_ADJ !== 'false') {
                 try { found = _applyEsportsCorrelation(found, 'valorant', match); } catch (e) { reportBug('VAL-CORR', e); }
+              }
+              if (_shadowAllVal.length) {
+                try {
+                  const { logShadowTip } = require('./lib/market-tips-shadow');
+                  for (const t of _shadowAllVal) logShadowTip(db, { sport: 'valorant', match, bestOf: bo, tip: t, isLive: isLiveVal });
+                } catch (e) { log('WARN', 'MT-SHADOW', `valorant logShadowTip: ${e.message}`); }
+                if (_shadowAllVal.length !== found.length) {
+                  log('DEBUG', 'VAL-SHADOW-PURE', `${match.team1} vs ${match.team2}: shadow=${_shadowAllVal.length} promotable=${found.length}`);
+                }
               }
               if (found.length) {
                 log('INFO', 'VAL-MARKETS',
                   `${match.team1} vs ${match.team2} [Bo${bo}]: ${found.length} mercado(s) EV ≥${minEv}% (pMap=${(pMapVal*100).toFixed(1)}%)`);
-                try {
-                  const { logShadowTip } = require('./lib/market-tips-shadow');
-                  for (const t of found) logShadowTip(db, { sport: 'valorant', match, bestOf: bo, tip: t, isLive: isLiveVal });
-                } catch (e) { log('WARN', 'MT-SHADOW', `valorant logShadowTip: ${e.message}`); }
                 for (const t of found.slice(0, 5)) {
                   log('INFO', 'VAL-MARKETS',
                     `  • ${t.label} @ ${t.odd.toFixed(2)} | pModel=${(t.pModel*100).toFixed(1)}% pImpl=${t.pImplied ? (t.pImplied*100).toFixed(1)+'%' : '?'} EV=${t.ev.toFixed(1)}%`);
