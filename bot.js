@@ -1835,15 +1835,22 @@ async function applyGlobalRisk(sport, desiredUnits, leagueSlug) {
   const _ddState = global._drawdownState.get(sport) || { taper: false, soft: false };
   let drawdownMult = 1.0;
   const cached = _drawdownCache.get(sport);
-  const DRAWDOWN_TAPER_LIMIT = parseFloat(process.env.DRAWDOWN_TAPER_LIMIT || '0.20'); // 20% intermediário
+  // 2026-05-04 [Audit log]: thresholds per-sport via env override.
+  // Tennis market data positivo (+R$5,80 últimos 14d, HG ROI +26,6%) mas
+  // bankroll ainda em -30% desde reset 2026-04-24 (peak=100). Hard limit
+  // 25% trava recovery — banca não pode crescer sem volume. Override permite
+  // tennis=0.40 enquanto recovery, taper×0.35 cobre risco.
+  const _spU = String(sport).toUpperCase();
+  const DRAWDOWN_HARD_LIMIT_SPORT = parseFloat(process.env[`DRAWDOWN_HARD_LIMIT_${_spU}`] || process.env.DRAWDOWN_HARD_LIMIT || '0.25');
+  const DRAWDOWN_TAPER_LIMIT = parseFloat(process.env[`DRAWDOWN_TAPER_LIMIT_${_spU}`] || process.env.DRAWDOWN_TAPER_LIMIT || '0.20');
   const RESTORE_BUFFER = parseFloat(process.env.DRAWDOWN_RESTORE_BUFFER || '0.03'); // 3pp histerese
   const applyFromPct = (drawdown) => {
     if (drawdown >= 1) { // banca <= 0 (drenou totalmente a allocation)
       log('WARN', 'RISK', `${sport}: ALOCAÇÃO DRENADA (banca ≤ 0) — BLOQUEADO até rebalance manual`);
       return { ok: false, units: 0, reason: 'banca_drained' };
     }
-    if (drawdown >= DRAWDOWN_HARD_LIMIT) {
-      log('WARN', 'RISK', `${sport}: drawdown ${(drawdown * 100).toFixed(1)}% ≥ ${(DRAWDOWN_HARD_LIMIT * 100).toFixed(0)}% — BLOQUEADO`);
+    if (drawdown >= DRAWDOWN_HARD_LIMIT_SPORT) {
+      log('WARN', 'RISK', `${sport}: drawdown ${(drawdown * 100).toFixed(1)}% ≥ ${(DRAWDOWN_HARD_LIMIT_SPORT * 100).toFixed(0)}% — BLOQUEADO`);
       return { ok: false, units: 0, reason: `drawdown_${(drawdown * 100).toFixed(0)}pct` };
     }
     // TAPER state: enter @ TAPER_LIMIT, exit @ TAPER_LIMIT - RESTORE_BUFFER
