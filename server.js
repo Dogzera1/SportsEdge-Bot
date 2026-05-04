@@ -8609,6 +8609,87 @@ setInterval(load, 10000);
       const out = { ok: true, days, apply, riot: useRiot, examined: pending.length, settled: 0, skipped: 0, voided: 0, samples: [], skipped_reasons: {} };
       const _bumpReason = (r) => { out.skipped_reasons[r] = (out.skipped_reasons[r] || 0) + 1; };
 
+      // PS resolver — usa match_results pra achar PS match_id, então game data.
+      // Tier 2 (entre OE e Riot). Vantagem: dados completos pra games antigos
+      // (não dependem de window TTL como livestats Riot).
+      const _psResolveKills = async (team1, team2, mapIndex, tipMs) => {
+        try {
+          if (!PANDASCORE_TOKEN || PANDASCORE_TOKEN === 'your-pandascore-token') {
+            return { reason: 'ps_no_token' };
+          }
+          const t1n = normT(team1), t2n = normT(team2);
+          // Lookup PS match_id em match_results (lol)
+          const before = new Date(tipMs - 10 * 86400000).toISOString().slice(0, 19).replace('T', ' ');
+          const after = new Date(tipMs + 10 * 86400000).toISOString().slice(0, 19).replace('T', ' ');
+          const candidates = db.prepare(`
+            SELECT match_id, team1, team2, resolved_at
+            FROM match_results
+            WHERE game IN ('lol','esports')
+              AND resolved_at >= ? AND resolved_at <= ?
+              AND ((lower(replace(replace(replace(team1,' ',''),'-',''),'.','')) = ? AND lower(replace(replace(replace(team2,' ',''),'-',''),'.','')) = ?)
+                OR (lower(replace(replace(replace(team1,' ',''),'-',''),'.','')) = ? AND lower(replace(replace(replace(team2,' ',''),'-',''),'.','')) = ?))
+            ORDER BY ABS(julianday(resolved_at) - julianday(?)) ASC
+            LIMIT 5
+          `).all(before, after, t1n, t2n, t2n, t1n, new Date(tipMs).toISOString());
+          if (!candidates.length) return { reason: 'ps_no_match_results' };
+
+          const SLACK_MS = 5 * 60 * 1000;
+          const eligible = candidates.filter(c => {
+            const cMs = Date.parse(String(c.resolved_at || '').replace(' ', 'T'));
+            return Number.isFinite(cMs) && (cMs >= tipMs - SLACK_MS);
+          });
+          if (!eligible.length) return { reason: 'ps_all_resolved_before_tip' };
+
+          // Tenta cada candidate
+          const headers = { 'Authorization': `Bearer ${PANDASCORE_TOKEN}` };
+          for (const c of eligible) {
+            const psId = String(c.match_id || '').replace(/^ps_/, '');
+            if (!/^\d+$/.test(psId)) continue;
+            const mr = await httpGet(`https://api.pandascore.co/matches/${psId}`, headers);
+            if (mr?.status !== 200) continue;
+            const m = safeParse(mr.body, {});
+            const games = Array.isArray(m.games) ? m.games : [];
+            const game = games.find(g => Number(g.position) === Number(mapIndex));
+            if (!game || !game.id) {
+              const allFinished = games.length > 0 && games.every(g => g.status === 'finished');
+              if (allFinished) return { mapNotPlayed: true, source: 'ps' };
+              continue;
+            }
+            if (game.status && game.status !== 'finished') continue;
+            // Inline kills field (newer API) ou players sum
+            if (Number.isFinite(Number(game.kills_team_1)) && Number.isFinite(Number(game.kills_team_2))) {
+              return {
+                totalKills: Number(game.kills_team_1) + Number(game.kills_team_2),
+                source: 'ps_match_inline',
+                gameId: game.id,
+              };
+            }
+            const players = Array.isArray(game.players) ? game.players : [];
+            if (players.length) {
+              return {
+                totalKills: players.reduce((s, p) => s + (Number(p.kills) || 0), 0),
+                source: 'ps_players',
+                gameId: game.id,
+              };
+            }
+            // Fallback: chama /lol/games/{id} pra players
+            const gr = await httpGet(`https://api.pandascore.co/lol/games/${game.id}`, headers);
+            if (gr?.status === 200) {
+              const gd = safeParse(gr.body, {});
+              const gPlayers = Array.isArray(gd.players) ? gd.players : [];
+              if (gPlayers.length) {
+                return {
+                  totalKills: gPlayers.reduce((s, p) => s + (Number(p.kills) || 0), 0),
+                  source: 'ps_game_players',
+                  gameId: game.id,
+                };
+              }
+            }
+          }
+          return { reason: 'ps_no_kills_data' };
+        } catch (e) { return { reason: 'ps_exception', msg: e.message }; }
+      };
+
       // Riot livestats helper — só carregado se useRiot=true. Schedule lookup
       // por team names + getEventDetails + livestats final frame.
       const _riotResolveKills = async (team1, team2, mapIndex) => {
@@ -8716,7 +8797,22 @@ setInterval(load, 10000);
           }
         }
 
-        // Tier 2: Riot livestats fallback (se OE não resolveu)
+        // Tier 2: PandaScore (via match_results lookup) — sempre tenta se token
+        // disponível. Cobre games que OE ainda não tem (lag 24-48h) mas que
+        // PS já populou (poucos minutos pós-finish).
+        if (totalKills == null && !mapNotPlayed) {
+          const r = await _psResolveKills(t.team1, t.team2, mapIndex, tipMs);
+          if (r.totalKills != null) {
+            totalKills = r.totalKills;
+            killSource = r.source;
+            gameId = r.gameId;
+          } else if (r.mapNotPlayed) {
+            mapNotPlayed = true;
+            killSource = 'ps_sweep';
+          }
+        }
+
+        // Tier 3: Riot livestats fallback (se OE/PS não resolveram)
         if (totalKills == null && !mapNotPlayed && useRiot) {
           const r = await _riotResolveKills(t.team1, t.team2, mapIndex);
           if (r.totalKills != null) {
@@ -8751,8 +8847,11 @@ setInterval(load, 10000);
           profitU = 0;
           out.voided++;
         } else {
-          // Aceita 0 kills (raro mas tecnicamente válido). Rejeita só NaN/null.
-          if (!Number.isFinite(totalKills)) {
+          // Real LoL game tem >=10 kills tipicamente. 0 kills indica livestats
+          // stale/aged out (Riot window TTL) ou frames pre-game só. Rejeita
+          // como inválido pra evitar settlement errado (0 kills under sempre
+          // win, mas é falso positivo).
+          if (!Number.isFinite(totalKills) || totalKills < 5) {
             if (out.samples.length < 15) {
               out.samples.push({
                 id: t.id, team1: t.team1, team2: t.team2, league: t.league,
