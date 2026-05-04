@@ -4980,11 +4980,17 @@ const server = http.createServer(async (req, res) => {
       if (parsed.query.game === 'football' && !_footballPinnacleCache.data.length) {
         try { await getPinnacleFootballMatches(); } catch (_) {}
       }
+      // Basket lazy warm: cache vazio → fetch agora pra resolver matchupId em
+      // /odds-markets sem cron prévio. Wired 2026-05-03 com MT basket.
+      if (parsed.query.game === 'basket' && !_basketPinnacleCache.data.length) {
+        try { await getPinnacleBasketMatches(); } catch (_) {}
+      }
       const pinFallbacks = [
         { cache: _tennisPinnacleCache,   prefix: /^tennis_pin_/ },
         { cache: _csPinnacleCache,       prefix: /^pin_cs_/ },
         { cache: _dotaPinnacleCache,     prefix: /^pin_/ },
         { cache: _footballPinnacleCache, prefix: /^pin_fb_/ },
+        { cache: _basketPinnacleCache,   prefix: /^basket_pin_/ },
       ];
       if (!matchupId) {
         for (const { cache, prefix } of pinFallbacks) {
@@ -7335,6 +7341,22 @@ setInterval(load, 10000);
         return;
       }
       const r = tr.predictTrainedBasket(db, home, away);
+      if (!r) { sendJson(res, { ok: false, error: 'compute_failed' }); return; }
+      sendJson(res, r);
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
+  // GET /basket-trained-markets?home=X&away=Y
+  // Retorna { totalMu, totalSigma, marginMu, marginSigma, isCold } pra MT pricing.
+  // Usado pelo runAutoBasket → scanBasketMarkets → tips de totals/handicaps.
+  if (p === '/basket-trained-markets') {
+    const home = parsed.query.home || '';
+    const away = parsed.query.away || '';
+    if (!home || !away) { sendJson(res, { error: 'home/away obrigatórios' }, 400); return; }
+    try {
+      const tr = require('./lib/basket-trained');
+      const r = tr.predictTrainedBasketMarkets(db, home, away);
       if (!r) { sendJson(res, { ok: false, error: 'compute_failed' }); return; }
       sendJson(res, r);
     } catch (e) { sendJson(res, { error: e.message }, 500); }

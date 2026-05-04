@@ -4964,9 +4964,13 @@ function _mtParticipant(match, tip) {
     if (killsMapMatch) {
       return `Mapa ${killsMapMatch[1]} ${s.toUpperCase()} ${tip.line ?? ''} kills`.trim();
     }
+    // Basket totals: line tipicamente 200-260 (NBA points). Heurística simples:
+    // total + line >= 100 → 'pts'. Evita mudar API (sem plumbar sport explícito).
+    const isBasketTotal = mkt === 'total' && Number(tip.line) >= 100;
     const unit = mkt === 'totalGames' ? 'games'
                : mkt === 'totals' ? 'gols'
-               : mkt === 'totalAces' ? 'aces' : 'maps';
+               : mkt === 'totalAces' ? 'aces'
+               : isBasketTotal ? 'pts' : 'maps';
     return `${s.toUpperCase()} ${tip.line ?? ''} ${unit}`.trim();
   }
   if (s === 'yes' || s === 'no') return s.toUpperCase();
@@ -19597,6 +19601,102 @@ async function runAutoBasket() {
       if (prev?.tipSent) continue;
       const cooldown = isLiveBasket ? BASKET_LIVE_COOLDOWN : BASKET_PREGAME_COOLDOWN;
       if (prev && (now - prev.ts < cooldown)) continue;
+
+      // ── MT scan (handicap + totals) ──
+      // 2026-05-03: scanner Pinnacle markets via Normal CDF (μ_total, σ_total,
+      // μ_margin, σ_margin) computados em rolling pace/defense per team. Roda
+      // independente do ML — totals/handicaps podem ter edge mesmo quando ML
+      // está calibrado. Fase 1 shadow-only (BASKET_MT_SHADOW_ONLY=true default);
+      // promote-real só após n≥30 settled+CLV≥0+ROI≥0 em 2sem.
+      try {
+        const trMkt = await serverGet(
+          `/basket-trained-markets?home=${encodeURIComponent(match.team1)}&away=${encodeURIComponent(match.team2)}`
+        ).catch(() => null);
+        if (trMkt && !trMkt.isCold && Number.isFinite(trMkt.totalMu) && Number.isFinite(trMkt.marginMu)) {
+          const pinMkt = await serverGet(
+            `/odds-markets?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}&game=basket&period=0`
+          ).catch(() => null);
+          if (pinMkt && ((pinMkt.totals?.length || 0) + (pinMkt.handicaps?.length || 0)) > 0) {
+            const { scanBasketMarkets } = require('./lib/basket-mt-scanner');
+            const _mtMinEv = parseFloat(process.env.BASKET_MT_MIN_EV ?? '5');
+            const _mtMinPm = parseFloat(process.env.BASKET_MT_MIN_PMODEL ?? '0.50');
+            const _mtMaxEv = parseFloat(process.env.BASKET_MT_MAX_EV ?? '25');
+            const _bkBounds = _resolveMtOddBounds('basket');
+            const _mtMinOdd = _bkBounds?.minOdd ?? parseFloat(process.env.BASKET_MT_MIN_ODD ?? '1.50');
+            const _mtMaxOdd = _bkBounds?.maxOdd ?? parseFloat(process.env.BASKET_MT_MAX_ODD ?? '3.50');
+            const found = scanBasketMarkets({
+              pinMarkets: pinMkt,
+              trainedMarkets: trMkt,
+              minEv: _mtMinEv, maxEv: _mtMaxEv, minPmodel: _mtMinPm,
+              minOdd: _mtMinOdd, maxOdd: _mtMaxOdd,
+            });
+            if (found.length) {
+              log('INFO', 'BASKET-MT-SCAN',
+                `${match.team1} vs ${match.team2}${isLiveBasket ? ' [LIVE]' : ''}: ${found.length} mercado(s) EV ≥${_mtMinEv}% | μT=${trMkt.totalMu} σT=${trMkt.totalSigma} μM=${trMkt.marginMu} σM=${trMkt.marginSigma}`);
+              try {
+                const { logShadowTip } = require('./lib/market-tips-shadow');
+                for (const t of found) {
+                  logShadowTip(db, { sport: 'basket', match, bestOf: null, tip: t, isLive: isLiveBasket });
+                }
+              } catch (e) { log('WARN', 'MT-SHADOW', `basket logShadowTip: ${e.message}`); }
+              for (const t of found.slice(0, 5)) {
+                log('INFO', 'BASKET-MT-SCAN',
+                  `  • ${t.label} @ ${t.odd.toFixed(2)} | pModel=${(t.pModel*100).toFixed(1)}% pImpl=${t.pImplied ? (t.pImplied*100).toFixed(1)+'%' : '?'} EV=${t.ev.toFixed(1)}%`);
+              }
+
+              // Promote path: shadow-only fase 1. Hold via BASKET_MT_SHADOW_ONLY=true
+              // (default true). Flip pra false só após validação de 2 semanas.
+              const _mtShadowOnly = !/^(0|false|no)$/i.test(String(process.env.BASKET_MT_SHADOW_ONLY ?? 'true'));
+              if (_mtShadowOnly) {
+                log('DEBUG', 'BASKET-MT-SCAN', `${match.team1} vs ${match.team2}: ${found.length} MT em shadow (BASKET_MT_SHADOW_ONLY=true)`);
+              } else if (isMarketTipsEnabled('basket') && ADMIN_IDS.size) {
+                try {
+                  const mtp = require('./lib/market-tip-processor');
+                  const { wasAdminDmSentRecently, markAdminDmSent } = require('./lib/market-tips-shadow');
+                  const _minEvPromo = parseFloat(process.env.BASKET_MT_PROMOTE_MIN_EV ?? '8');
+                  const _minPmPromo = parseFloat(process.env.BASKET_MT_PROMOTE_MIN_PMODEL ?? '0.55');
+                  const _eligiblesRaw = found.filter(t =>
+                    Number.isFinite(t.ev) && Number.isFinite(t.pModel) &&
+                    t.ev >= _minEvPromo && t.pModel >= _minPmPromo
+                  );
+                  // Dedup by-market: 1 tip per market type por match (maior EV).
+                  const _byMarketBk = new Map();
+                  for (const t of _eligiblesRaw) {
+                    const k = String(t.market || '');
+                    const prevB = _byMarketBk.get(k);
+                    if (!prevB || (t.ev || 0) > (prevB.ev || 0)) _byMarketBk.set(k, t);
+                  }
+                  const _eligiblesBk = [..._byMarketBk.values()];
+                  for (const t of _eligiblesBk) {
+                    if (!isMarketTipsEnabled('basket', t.market, t.side, match.league)) {
+                      log('INFO', 'MT-GUARD', `basket/${t.market}/${t.side}: DM skipped — disabled por leak guard`);
+                      continue;
+                    }
+                    const dedupKey = `basket|${norm(match.team1)}|${norm(match.team2)}|${t.market}|${t.line}|${t.side}`;
+                    const inMemFresh = Date.now() - (marketTipSent.get(dedupKey) || 0) <= 24 * 60 * 60 * 1000;
+                    const dbFresh = wasAdminDmSentRecently(db, { sport: 'basket', match, market: t.market, line: t.line, side: t.side, hoursAgo: 24 });
+                    if (inMemFresh || dbFresh) continue;
+                    marketTipSent.set(dedupKey, Date.now());
+                    const stake = mtp.kellyStakeForMarket(t.pModel, t.odd, 100, getKellyFraction('basket', 'BAIXA'), { sport: 'basket' });
+                    if (!(stake > 0)) continue;
+                    const dm = mtp.buildMarketTipDM({ match, tip: t, stake, league: match.league, sport: 'basket', isLive: isLiveBasket });
+                    const tokenForMT = resolveTipsToken('basket') || SPORTS['basket']?.token || resolveAlertsToken();
+                    if (!tokenForMT) continue;
+                    const _gateBk = await _mtTryRecordAndShouldDm({ sport: 'basket', match, tip: t, stake, isLive: isLiveBasket });
+                    if (!_gateBk.allowDm) continue;
+                    const _markupBk = mtp.buildMarketTipReplyMarkup({ match, sport: 'basket' });
+                    const r = await sendAdminDMs(tokenForMT, dm, _markupBk ? { reply_markup: _markupBk } : undefined, 'basket-mt-scan-tip');
+                    if (r.sent > 0) {
+                      markAdminDmSent(db, { sport: 'basket', match, market: t.market, line: t.line, side: t.side, odd: t.odd, ev: t.ev });
+                      log('INFO', 'BASKET-MT-TIP', `Admin DM${isLiveBasket ? ' [LIVE]' : ''}: ${t.label} @ ${t.odd} EV ${t.ev}% stake ${stake}u (sent=${r.sent}) tipId=${_gateBk.tipId}`);
+                    }
+                  }
+                } catch (mte) { reportBug('BASKET-MT-PROMOTE', mte); }
+              }
+            }
+          }
+        }
+      } catch (e) { log('WARN', 'BASKET-MT-SCAN', `${match.team1} vs ${match.team2}: ${e.message}`); }
 
       // Elo prediction via server (acessa basket_elo table)
       const elo = await serverGet(`/basket-elo?home=${encodeURIComponent(match.team1)}&away=${encodeURIComponent(match.team2)}`)
