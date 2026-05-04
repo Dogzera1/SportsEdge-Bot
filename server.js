@@ -10341,13 +10341,13 @@ setInterval(load, 60000);
     return;
   }
 
-  // ── /admin/analytics: métricas DAX-equivalent via DuckDB (lib/analytics-metrics).
-  // GET /admin/analytics?metric=<name>&days=30&sport=<opt>&key=<ADMIN_KEY>
-  // metric ∈ { sharpe, kelly, variance, cohort, clv } (ou 'all' = roda todas)
-  // Use lib/analytics-metrics que ATTACH sportsedge.db read-only ao DuckDB.
-  if (p === '/admin/analytics' && (req.method === 'GET' || req.method === 'POST')) {
-    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
-    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+  // ── /admin/analytics + /api/analytics: métricas DAX-equivalent via DuckDB.
+  // GET ?metric=<name>&days=30&sport=<opt>
+  // metric ∈ { sharpe, kelly, variance, cohort, clv, brier, evbucket, timeofday, drawdown, all }
+  // /api/analytics é público (mesma exposure de /overall-summary — só agregações,
+  // sem PII). /admin/analytics aceita key opcional pra UI.
+  if ((p === '/admin/analytics' || p === '/api/analytics' || p === '/analytics-data')
+      && (req.method === 'GET' || req.method === 'POST')) {
     const metric = String(parsed.query.metric || 'all').toLowerCase().trim();
     const days = Math.max(7, Math.min(180, parseInt(parsed.query.days || '30', 10) || 30));
     const sport = parsed.query.sport ? String(parsed.query.sport).toLowerCase().trim() : null;
