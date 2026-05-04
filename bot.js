@@ -4242,7 +4242,10 @@ const _KELLY_SPORT_MULT = {
   lol: 1.00, cs: 1.00, football: 1.00,
   tennis: 0.80,
   mma: 0.70, valorant: 0.70,
-  dota2: 0.20,
+  // 2026-05-04 [Audit leaks]: dota2 MT shadow agora +32,6% n=32 CLV+10,63
+  // (era CLV -45% em 23/04 que motivou cut 0.70→0.20). Restore parcial
+  // 0.20→0.50 sizing apropriado ao novo edge. Override via KELLY_DOTA2_<CONF>.
+  dota2: 0.50,
   darts: 0.40, snooker: 0.40,
   tabletennis: 0.80,
 };
@@ -21383,13 +21386,23 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
     }
     try {
       // 1. Market tips shadow via novo módulo
-      const { captureMarketTipsClv } = require('./lib/clv-capture');
+      const { captureMarketTipsClv, capturePromotedMtTipsClv } = require('./lib/clv-capture');
       const mt = await captureMarketTipsClv(db, serverGet);
       if (mt.checked > 0) {
         const skipDetail = `match=${mt.skipped?.match||0} sameOdd=${mt.skipped?.sameOdd||0} badOdd=${mt.skipped?.badOdd||0}`;
         const sportDetail = Object.entries(mt.bySport || {}).map(([s, n]) => `${s}=${n}`).join(' ');
         log(mt.updated > 0 || mt.errors > 0 ? 'INFO' : 'DEBUG', 'CLV-CAPTURE',
           `market-tips: checked=${mt.checked} updated=${mt.updated} errors=${mt.errors}${mt.firstError ? ' (' + mt.firstError + ')' : ''} | ${skipDetail} | ${sportDetail}`);
+      }
+      // 1b. Tips MT promovidas (tabela `tips`) — gap descoberto audit 2026-05-04
+      // (tennis real CLV capture 21% / 13 de 62). Parse synthetic match_id
+      // ::mt::market::side::lnTAG e fetch /odds-markets como shadow path.
+      const mtp = await capturePromotedMtTipsClv(db, serverGet);
+      if (mtp.checked > 0) {
+        const skipDetail = `match=${mtp.skipped?.match||0} parse=${mtp.skipped?.parse||0} sameOdd=${mtp.skipped?.sameOdd||0} badOdd=${mtp.skipped?.badOdd||0}`;
+        const sportDetail = Object.entries(mtp.bySport || {}).map(([s, n]) => `${s}=${n}`).join(' ');
+        log(mtp.updated > 0 || mtp.errors > 0 ? 'INFO' : 'DEBUG', 'CLV-CAPTURE',
+          `mt-promoted: checked=${mtp.checked} updated=${mtp.updated} errors=${mtp.errors}${mtp.firstError ? ' (' + mtp.firstError + ')' : ''} | ${skipDetail} | ${sportDetail}`);
       }
       // 2. Regular tips via checkCLV legacy (já cobre cs/val/lol/dota2 pós fix 8dcc948)
       // caches={} força refetch via serverGet — cron não compartilha sharedCaches
