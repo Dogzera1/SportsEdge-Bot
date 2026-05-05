@@ -23009,6 +23009,221 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
     return;
   }
 
+  // 2026-05-05: /shadow-readiness?sport=basket&days=30
+  // Veredicto consolidado de promoção shadow→real per sport. Substitui chamadas
+  // separadas a /shadow-vs-active + /ml-shadow-by-sport + audit-leaks pra responder
+  // "promovo agora?" num call só. Volume/perf/CLV/calibração/leak por bucket+liga
+  // + boolean ready_to_promote com reasons. Toda a math usa dedup por
+  // (match_id, tip_participant, market_type) — espelha /shadow-tips dedup block.
+  if (p === '/shadow-readiness') {
+    const sport = String(parsed.query.sport || 'basket').toLowerCase();
+    const daysRaw = parseInt(parsed.query.days);
+    const days = Number.isFinite(daysRaw) ? Math.max(1, Math.min(365, daysRaw)) : 30;
+
+    // Critérios overrideable via query (?min_n=20) ou env (SHADOW_READINESS_MIN_N)
+    const minN = parseInt(parsed.query.min_n || process.env.SHADOW_READINESS_MIN_N || '30', 10);
+    const minRoi = parseFloat(parsed.query.min_roi || process.env.SHADOW_READINESS_MIN_ROI_PCT || '0');
+    const minClv = parseFloat(parsed.query.min_clv || process.env.SHADOW_READINESS_MIN_CLV_PCT || '0');
+    const minClvSamples = parseInt(parsed.query.min_clv_samples || process.env.SHADOW_READINESS_MIN_CLV_SAMPLES || '10', 10);
+    const maxCalibGap = parseFloat(parsed.query.max_calib_gap || process.env.SHADOW_READINESS_MAX_CALIB_GAP_PP || '5');
+
+    try {
+      const { sportSet } = (typeof resolveSportSet === 'function')
+        ? resolveSportSet(sport, null) : { sportSet: [sport] };
+      const sportPh = sportSet.map(() => '?').join(',');
+
+      // Pega rows dedupadas (1 por match_id+pick+market). MAX(id) garante row
+      // mais recente que carrega result final + odds/CLV atualizados.
+      const dedupedRows = db.prepare(`
+        SELECT t.id, t.sport, t.match_id, t.event_name AS league,
+               t.participant1, t.participant2, t.tip_participant,
+               t.odds, t.open_odds, t.clv_odds, t.ev,
+               t.model_p_pick, t.result, t.profit_reais, t.stake_reais,
+               t.market_type, t.is_live, t.sent_at, t.settled_at
+        FROM tips t
+        JOIN (
+          SELECT MAX(id) AS id
+          FROM tips
+          WHERE is_shadow = 1
+            AND sport IN (${sportPh})
+            AND (archived IS NULL OR archived = 0)
+            AND (sent_at >= datetime('now', ?) OR result IS NULL)
+          GROUP BY COALESCE(NULLIF(TRIM(match_id), ''), 'id:' || CAST(id AS TEXT)),
+                   REPLACE(REPLACE(lower(COALESCE(tip_participant, '')), ' ', ''), '-', ''),
+                   UPPER(COALESCE(market_type, 'ML'))
+        ) d ON d.id = t.id
+      `).all(...sportSet, `-${days} days`);
+
+      // ── Volume + perf agregada ─────────────────────────────────────────
+      let wins = 0, losses = 0, voids = 0, pending = 0;
+      let profitR = 0, stakeR = 0;
+      let oddsSum = 0, oddsN = 0, evSum = 0, evN = 0;
+      let pPickSum = 0, pPickN = 0;
+      let clvDeltaSum = 0, clvN = 0;
+      for (const r of dedupedRows) {
+        if (r.result === 'win') wins++;
+        else if (r.result === 'loss') losses++;
+        else if (r.result === 'void' || r.result === 'push') voids++;
+        else pending++;
+        profitR += Number(r.profit_reais) || 0;
+        stakeR += Number(r.stake_reais) || 0;
+        if (Number.isFinite(r.odds) && r.odds > 1) { oddsSum += r.odds; oddsN++; }
+        if (Number.isFinite(r.ev)) { evSum += r.ev; evN++; }
+        if (Number.isFinite(r.model_p_pick) && r.model_p_pick > 0 && r.model_p_pick < 1) {
+          pPickSum += r.model_p_pick;
+          pPickN++;
+        }
+        if (r.clv_odds && r.clv_odds > 1 && r.odds > 1) {
+          clvDeltaSum += (r.odds / r.clv_odds - 1) * 100;
+          clvN++;
+        }
+      }
+      const settled = wins + losses;
+      const winRate = settled > 0 ? +(wins / settled * 100).toFixed(2) : null;
+      const expectedWinRate = pPickN > 0 ? +((pPickSum / pPickN) * 100).toFixed(2) : null;
+      const calibGapPp = (winRate != null && expectedWinRate != null)
+        ? +(winRate - expectedWinRate).toFixed(2) : null;
+      const roi = stakeR > 0 ? +(profitR / stakeR * 100).toFixed(2) : null;
+      const avgClv = clvN > 0 ? +(clvDeltaSum / clvN).toFixed(2) : null;
+      const clvCoverage = settled > 0 ? +(clvN / settled * 100).toFixed(1) : null;
+
+      // ── Buckets por faixa de odds ──────────────────────────────────────
+      const oddBuckets = [
+        { range: '1.10-1.50', min: 1.10, max: 1.50 },
+        { range: '1.50-2.00', min: 1.50, max: 2.00 },
+        { range: '2.00-3.00', min: 2.00, max: 3.00 },
+        { range: '3.00-5.00', min: 3.00, max: 5.00 },
+        { range: '5.00+',     min: 5.00, max: 999  },
+      ];
+      const byOdd = oddBuckets.map(b => ({
+        range: b.range, n: 0, wins: 0, losses: 0, voids: 0, pending: 0,
+        profit_reais: 0, stake_reais: 0, expected_win_pp: 0, _expN: 0,
+      }));
+      const byLeague = new Map();
+      for (const r of dedupedRows) {
+        // bucket por odd
+        const od = Number(r.odds) || 0;
+        const idx = oddBuckets.findIndex(b => od >= b.min && od < b.max);
+        if (idx >= 0) {
+          const x = byOdd[idx];
+          x.n++;
+          if (r.result === 'win') x.wins++;
+          else if (r.result === 'loss') x.losses++;
+          else if (r.result === 'void' || r.result === 'push') x.voids++;
+          else x.pending++;
+          x.profit_reais += Number(r.profit_reais) || 0;
+          x.stake_reais += Number(r.stake_reais) || 0;
+          if (Number.isFinite(r.model_p_pick) && r.model_p_pick > 0 && r.model_p_pick < 1) {
+            x.expected_win_pp += r.model_p_pick * 100;
+            x._expN++;
+          }
+        }
+        // bucket por liga (event_name)
+        const lg = String(r.league || 'unknown').slice(0, 60);
+        let cur = byLeague.get(lg);
+        if (!cur) {
+          cur = { league: lg, n: 0, wins: 0, losses: 0, pending: 0, profit_reais: 0, stake_reais: 0, clv_n: 0, clv_sum: 0 };
+          byLeague.set(lg, cur);
+        }
+        cur.n++;
+        if (r.result === 'win') cur.wins++;
+        else if (r.result === 'loss') cur.losses++;
+        else if (!r.result) cur.pending++;
+        cur.profit_reais += Number(r.profit_reais) || 0;
+        cur.stake_reais += Number(r.stake_reais) || 0;
+        if (r.clv_odds && r.clv_odds > 1 && r.odds > 1) {
+          cur.clv_sum += (r.odds / r.clv_odds - 1) * 100;
+          cur.clv_n++;
+        }
+      }
+      const oddBucketsOut = byOdd.map(b => {
+        const dec = b.wins + b.losses;
+        return {
+          range: b.range, n: b.n, wins: b.wins, losses: b.losses, voids: b.voids, pending: b.pending,
+          win_rate_pct: dec > 0 ? +(b.wins / dec * 100).toFixed(1) : null,
+          expected_win_pct: b._expN > 0 ? +(b.expected_win_pp / b._expN).toFixed(1) : null,
+          roi_pct: b.stake_reais > 0 ? +(b.profit_reais / b.stake_reais * 100).toFixed(2) : null,
+          profit_reais: +b.profit_reais.toFixed(2),
+        };
+      });
+      const leagueOut = Array.from(byLeague.values())
+        .sort((a, b) => b.n - a.n)
+        .slice(0, 12)
+        .map(l => {
+          const dec = l.wins + l.losses;
+          return {
+            league: l.league,
+            n: l.n, wins: l.wins, losses: l.losses, pending: l.pending,
+            win_rate_pct: dec > 0 ? +(l.wins / dec * 100).toFixed(1) : null,
+            roi_pct: l.stake_reais > 0 ? +(l.profit_reais / l.stake_reais * 100).toFixed(2) : null,
+            avg_clv_pct: l.clv_n > 0 ? +(l.clv_sum / l.clv_n).toFixed(2) : null,
+            clv_n: l.clv_n,
+          };
+        });
+
+      // ── Verdict ────────────────────────────────────────────────────────
+      const reasons = [];
+      const checks = {
+        volume: { ok: settled >= minN, current: settled, target: minN, label: 'amostra ≥ n' },
+        roi: { ok: roi != null && roi >= minRoi, current: roi, target: minRoi, label: 'ROI ≥ 0%' },
+        clv: { ok: avgClv != null && avgClv >= minClv, current: avgClv, target: minClv, label: 'CLV médio ≥ 0%' },
+        clv_samples: { ok: clvN >= minClvSamples, current: clvN, target: minClvSamples, label: 'CLV amostra ≥ n' },
+        calibration: {
+          ok: calibGapPp == null || calibGapPp >= -maxCalibGap,
+          current: calibGapPp, target: -maxCalibGap,
+          label: `realizado − esperado ≥ -${maxCalibGap}pp`,
+        },
+      };
+      for (const [k, c] of Object.entries(checks)) {
+        if (!c.ok) {
+          const cur = c.current == null ? 'n/a' : (typeof c.current === 'number' ? c.current.toFixed(2) : String(c.current));
+          reasons.push(`${c.label} (atual=${cur} alvo=${c.target})`);
+        }
+      }
+      const allOk = Object.values(checks).every(c => c.ok);
+      // Score composto 0..1 — useful pra gauge no dashboard
+      const passed = Object.values(checks).filter(c => c.ok).length;
+      const score = +(passed / Object.keys(checks).length).toFixed(2);
+      const verdict = {
+        ready_to_promote: allOk,
+        score,
+        reasons: allOk ? ['todos critérios atendidos'] : reasons,
+        action: allOk ? 'PROMOTE' : (settled < minN ? 'WAIT_VOLUME' : (roi != null && roi < -3 ? 'INVESTIGATE_LEAK' : 'WAIT')),
+      };
+
+      sendJson(res, {
+        sport, days,
+        verdict,
+        volume: {
+          raw_rows_after_dedup: dedupedRows.length,
+          unique_events: dedupedRows.length,
+          wins, losses, voids, pending, settled,
+        },
+        performance: {
+          win_rate_pct: winRate,
+          expected_win_rate_pct: expectedWinRate,
+          calibration_gap_pp: calibGapPp,
+          roi_pct: roi,
+          profit_reais: +profitR.toFixed(2),
+          stake_reais: +stakeR.toFixed(2),
+          avg_odds: oddsN > 0 ? +(oddsSum / oddsN).toFixed(2) : null,
+          avg_ev_pct: evN > 0 ? +(evSum / evN).toFixed(2) : null,
+        },
+        clv: {
+          samples: clvN,
+          avg_pct: avgClv,
+          coverage_pct: clvCoverage,
+        },
+        buckets: { by_odd: oddBucketsOut, by_league: leagueOut },
+        criteria: { min_n: minN, min_roi_pct: minRoi, min_clv_pct: minClv, min_clv_samples: minClvSamples, max_calib_gap_pp: maxCalibGap },
+        checks,
+      });
+    } catch (e) {
+      sendJson(res, { error: e.message }, 500);
+    }
+    return;
+  }
+
   // Equity curve diária: cumulative profit em R$ por dia (após settlement).
   // Inclui drawdown (queda do pico), Sharpe daily ratio, max drawdown.
   // GET /equity-curve?sport=esports&days=30
