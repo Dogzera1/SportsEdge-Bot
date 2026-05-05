@@ -3361,11 +3361,121 @@ async function loadShadowReadinessDetail(sport) {
     html += `</tbody></table>`;
   }
 
+  // ── Correções aplicadas pelo Readiness Learner ─────────────────────
+  // Mostra ações ativas/recentes que o learner aplicou pra esse sport.
+  // Carregado async pra não bloquear render principal.
+  html += `<h4 style="margin:14px 0 8px;font-size:13px">🔧 Auto-correções aplicadas</h4>
+    <div id="readinessCorrectionsList" data-sport="${sport}"><div class="card-meta">Carregando…</div></div>`;
+
   html += `<div class="card-meta" style="margin-top:12px">
-    Eventos únicos via dedup (match_id + tip_participant + market_type). Ajuste critérios via env: <code>SHADOW_READINESS_MIN_N</code>, <code>_MIN_ROI_PCT</code>, <code>_MIN_CLV_PCT</code>, <code>_MIN_CLV_SAMPLES</code>, <code>_MAX_CALIB_GAP_PP</code>.
+    Eventos únicos via dedup (match_id + tip_participant + market_type). Ajuste critérios via env: <code>SHADOW_READINESS_MIN_N</code>, <code>_MIN_ROI_PCT</code>, <code>_MIN_CLV_PCT</code>, <code>_MIN_CLV_SAMPLES</code>, <code>_MAX_CALIB_GAP_PP</code>. Learner opt-in: <code>READINESS_LEARNER_AUTO=true</code>.
   </div>`;
 
   el.innerHTML = html;
+  loadReadinessCorrections(sport);
+}
+
+async function loadReadinessCorrections(sport) {
+  const container = document.getElementById('readinessCorrectionsList');
+  if (!container) return;
+  const data = await apiFetch('/admin/readiness-corrections?days=60');
+  if (!data || data.error) {
+    container.innerHTML = '<div class="card-meta" style="opacity:0.7">Sem acesso ao histórico de correções (admin only)</div>';
+    return;
+  }
+  const items = (data.items || []).filter(i => i.sport === sport);
+  if (!items.length) {
+    container.innerHTML = '<div class="card-meta" style="opacity:0.7">Nenhuma correção aplicada nos últimos 60d. Learner roda weekly se <code>READINESS_LEARNER_AUTO=true</code>.</div>';
+    return;
+  }
+  const statusBadge = (s) => {
+    const map = {
+      active:       { color:'#0891b2', label:'ATIVA' },
+      verified_ok:  { color:'#16a34a', label:'RECUPEROU ✓' },
+      reverted:     { color:'#6b7280', label:'REVERTIDA' },
+      escalated:    { color:'#dc2626', label:'ESCALADA' },
+      expired:      { color:'#6b7280', label:'EXPIRADA' },
+      dry_run:      { color:'#7c3aed', label:'DRY RUN' },
+    };
+    const m = map[s] || { color:'#6b7280', label:s };
+    return `<span style="background:${m.color};color:#fff;padding:1px 6px;border-radius:3px;font-size:0.72em;font-weight:600">${m.label}</span>`;
+  };
+  const actionLabel = {
+    kelly_cut:    '✂️ Kelly cortado',
+    league_block: '🚫 Liga bloqueada',
+    hard_disable: '⛔ Market disabled',
+    prob_shrink:  '📉 Prob shrunk',
+  };
+  let html = `<table class="tips" style="font-size:12px">
+    <thead><tr>
+      <th>Ação</th>
+      <th>Target</th>
+      <th>Status</th>
+      <th style="text-align:right">ROI@trigger</th>
+      <th style="text-align:right">CLV@trigger</th>
+      <th style="text-align:right">n@trigger</th>
+      <th>Aplicada</th>
+      <th>Expira</th>
+      <th></th>
+    </tr></thead><tbody>`;
+  for (const c of items) {
+    const fmt = (v) => v == null ? '—' : (v >= 0 ? '+' : '') + Number(v).toFixed(1) + '%';
+    const target = c.market || c.league || 'sport-wide';
+    const applied = c.applied_at ? c.applied_at.slice(0, 16).replace('T', ' ') : '—';
+    const expires = c.expires_at ? c.expires_at.slice(0, 10) : '—';
+    const revertBtn = c.status === 'active'
+      ? `<button onclick="revertReadinessCorrection(${c.id})" style="background:#dc2626;color:#fff;border:none;padding:2px 8px;border-radius:3px;font-size:11px;cursor:pointer">↩️ revert</button>`
+      : '';
+    html += `<tr>
+      <td>${actionLabel[c.action_type] || c.action_type}</td>
+      <td>${target}</td>
+      <td>${statusBadge(c.status)}</td>
+      <td style="text-align:right">${fmt(c.roi_at_time)}</td>
+      <td style="text-align:right">${fmt(c.clv_at_time)}</td>
+      <td style="text-align:right">${c.n_at_time || '—'}</td>
+      <td style="font-size:11px;opacity:0.8">${applied}</td>
+      <td style="font-size:11px;opacity:0.8">${expires}</td>
+      <td>${revertBtn}</td>
+    </tr>`;
+    if (c.status_reason) {
+      html += `<tr><td colspan="9" style="opacity:0.55;font-size:11px;padding:0 0 6px 4px">↳ ${c.status_reason}</td></tr>`;
+    }
+  }
+  html += `</tbody></table>`;
+  html += `<div style="margin-top:8px;display:flex;gap:6px">
+    <button onclick="runReadinessLearnerNow()" style="background:#7c3aed;color:#fff;border:none;padding:5px 10px;border-radius:4px;font-size:12px;cursor:pointer">🤖 Rodar learner agora</button>
+    <button onclick="runReadinessLearnerNow(true)" style="background:var(--surface-2,#1e293b);color:#fff;border:1px solid var(--border,#334155);padding:5px 10px;border-radius:4px;font-size:12px;cursor:pointer">👁️ Dry-run (preview)</button>
+  </div>`;
+  container.innerHTML = html;
+}
+
+async function revertReadinessCorrection(id) {
+  if (!confirm(`Reverter correção #${id}? Restaura estado anterior (kelly mult / blocklist / market disable).`)) return;
+  try {
+    const r = await adminFetch(`/admin/readiness-correction-revert?id=${id}&reason=manual%20via%20dashboard`, { method: 'POST' });
+    if (r?.ok) {
+      showToast(`✅ Correção #${id} revertida`);
+      loadShadowReadiness();
+    } else {
+      showToast(`❌ Falhou: ${r?.error || 'erro desconhecido'}`);
+    }
+  } catch (e) { showToast(`❌ ${e.message}`); }
+}
+
+async function runReadinessLearnerNow(dryRun = false) {
+  const label = dryRun ? 'DRY RUN' : 'EXECUTAR';
+  if (!confirm(`${label}: Roda Readiness Learner agora. Diagnostica leaks ativos e aplica correções (kelly cut / liga block / market disable). ${dryRun ? 'NÃO altera nada — só preview.' : 'Mudanças são reversíveis via histórico.'} Continuar?`)) return;
+  try {
+    const r = await adminFetch(`/admin/readiness-learner-run?dry_run=${dryRun ? 1 : 0}&days=30`, { method: 'POST' });
+    if (r?.ok) {
+      const applied = r.applied?.length || 0;
+      const verified = r.verified?.length || 0;
+      showToast(`🤖 Learner: ${applied} aplicadas / ${verified} verificadas / ${r.skipped} skip`);
+      loadShadowReadiness();
+    } else {
+      showToast(`❌ Falhou: ${r?.error || 'erro'}`);
+    }
+  } catch (e) { showToast(`❌ ${e.message}`); }
 }
 
 // ML Shadow por esporte — cross-sport breakdown de tips em shadow (sem DM).

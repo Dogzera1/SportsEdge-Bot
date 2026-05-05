@@ -2212,6 +2212,46 @@ const migrations = [
       } catch (_) { /* coluna sport ausente — improvável */ }
     },
   },
+  {
+    id: '089_readiness_corrections_log',
+    up(db) {
+      // 2026-05-05: Readiness Learner — fecha o loop "detectei leak → ajo".
+      // Quando /shadow-readiness?source=real flag uma cell como LEAK, learner
+      // diagnostica raiz (calib drift / market timing / structural) e aplica
+      // correção reversível: kelly_cut / min_ev_raise / league_block / prob_shrink.
+      // Tabela rastreia cada ação aplicada pra permitir verify (ROI melhorou
+      // após N dias?), revert (tirar correção) e escalation (correção fraca →
+      // próxima mais agressiva).
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS readiness_corrections_log (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          sport TEXT NOT NULL,
+          market TEXT,                         -- NULL pra correções sport-wide
+          league TEXT,                         -- NULL pra correções não-liga
+          action_type TEXT NOT NULL,           -- kelly_cut / min_ev_raise / league_block / prob_shrink
+          value_before TEXT,                   -- JSON com snapshot do estado anterior
+          value_after TEXT,                    -- JSON com novo valor aplicado
+          n_at_time INTEGER,
+          roi_at_time REAL,
+          clv_at_time REAL,
+          calib_gap_at_time REAL,
+          applied_at TEXT NOT NULL,
+          expires_at TEXT,                     -- quando re-avaliar (default +14d)
+          status TEXT NOT NULL DEFAULT 'active', -- active / verified_ok / reverted / escalated / expired
+          status_reason TEXT,
+          source TEXT NOT NULL DEFAULT 'auto', -- auto / manual
+          last_verified_at TEXT,
+          escalation_count INTEGER DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_rcl_active
+          ON readiness_corrections_log(status, applied_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_rcl_sport_market
+          ON readiness_corrections_log(sport, market, status);
+        CREATE INDEX IF NOT EXISTS idx_rcl_expires
+          ON readiness_corrections_log(expires_at) WHERE status = 'active';
+      `);
+    },
+  },
 ];
 
 function applyMigrations(db) {

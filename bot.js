@@ -21849,6 +21849,49 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   setInterval(() => runRoiDriftCusumDaily().catch(e => log('ERROR', 'ROI-CUSUM', e.message)), 60 * 60 * 1000);
   setTimeout(() => runRoiDriftCusumDaily().catch(() => {}), 35 * 60 * 1000);
 
+  // 2026-05-05: Readiness Learner — fecha o loop "leak detectado → corrijo →
+  // verifico → escalo ou restauro". Default OFF (opt-in via env). Roda weekly
+  // (6 dias intervalo) — janela longa suficiente pra acumular dados pós-correção.
+  // Verify de correções expirando roda mais frequente (24h).
+  let _lastReadinessLearnerDay = null;
+  async function runReadinessLearnerWeekly() {
+    if (!/^(1|true|yes)$/i.test(String(process.env.READINESS_LEARNER_AUTO || ''))) return;
+    const now = new Date();
+    // Roda domingos 11h UTC (default; tune via env READINESS_LEARNER_DOW/HOUR)
+    const dow = parseInt(process.env.READINESS_LEARNER_DOW || '0', 10); // 0=Sun
+    const hour = parseInt(process.env.READINESS_LEARNER_HOUR || '11', 10);
+    if (now.getUTCDay() !== dow || now.getUTCHours() !== hour) return;
+    const today = now.toISOString().slice(0, 10);
+    if (_lastReadinessLearnerDay === today) return;
+    _lastReadinessLearnerDay = today;
+    try {
+      const { runReadinessLearner } = require('./lib/readiness-learner');
+      const days = parseInt(process.env.READINESS_LEARNER_WINDOW_DAYS || '30', 10);
+      const r = runReadinessLearner(db, { days, source: 'auto' });
+      if (r.error) {
+        log('WARN', 'READINESS-LEARNER', `cycle error: ${r.error}`);
+        return;
+      }
+      const newApplied = (r.applied || []).filter(a => a.applied);
+      const recovered = (r.verified || []).filter(v => v.action === 'recovered');
+      const escalated = (r.verified || []).filter(v => v.action === 'escalated');
+      log('INFO', 'READINESS-LEARNER',
+        `cycle: applied=${newApplied.length} verified=${r.verified.length} (recovered=${recovered.length} escalated=${escalated.length}) skipped=${r.skipped} snapshot=${r.snapshot_n}`);
+      // Alerta admin se houver ações novas
+      if ((newApplied.length || recovered.length || escalated.length) && ADMIN_IDS.size && !_isCycleMuted('readiness-learner')) {
+        const lines = [];
+        for (const a of newApplied) lines.push(`🔧 ${a.sport}/${a.market || a.league || ''}: ${a.action} — ${a.reason}`);
+        for (const v of recovered) lines.push(`✅ ${v.sport}/${v.market || v.league || ''}: recuperou (ROI ${v.roi}%)`);
+        for (const v of escalated) lines.push(`⬆️ ${v.sport}/${v.market || v.league || ''}: escalando (ROI ${v.roi}%)`);
+        const msg = `🤖 *READINESS LEARNER — ${days}d window*\n\n${lines.join('\n')}\n\n_Tracking via /admin/readiness-corrections_`;
+        const token = resolveAlertsToken();
+        if (token) for (const adminId of ADMIN_IDS) sendDM(token, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
+      }
+    } catch (e) { log('ERROR', 'READINESS-LEARNER', e.message); }
+  }
+  setInterval(() => runReadinessLearnerWeekly().catch(e => log('ERROR', 'READINESS-LEARNER', e.message)), 60 * 60 * 1000);
+  setTimeout(() => runReadinessLearnerWeekly().catch(() => {}), 90 * 60 * 1000);
+
   // Feed heartbeat watchdog: cron 5min checa staleness de Pinnacle/PandaScore/etc.
   // Cooldown 30min por (source,sport) pra evitar spam quando feed fica down várias
   // checks. Opt-out: FEED_HEARTBEAT_DISABLED=true.

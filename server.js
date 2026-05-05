@@ -23415,6 +23415,48 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
     return;
   }
 
+  // 2026-05-05: Readiness Learner — fecha o loop "detectei leak → ajo → verifico".
+  // POST /admin/readiness-learner-run?dry_run=1&days=30 — trigger manual
+  // GET  /admin/readiness-corrections?status=active&days=60 — list active+history
+  // POST /admin/readiness-correction-revert?id=N&reason=manual — revert manual
+  if (p === '/admin/readiness-learner-run' && (req.method === 'POST' || req.method === 'GET')) {
+    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    try {
+      const { runReadinessLearner } = require('./lib/readiness-learner');
+      const days = Math.max(7, Math.min(90, parseInt(parsed.query.days || '30', 10) || 30));
+      const dryRun = parsed.query.dry_run === '1' || parsed.query.dry_run === 'true';
+      const r = runReadinessLearner(db, { days, dryRun, source: 'manual' });
+      sendJson(res, { ok: true, dry_run: dryRun, days, ...r });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+  if (p === '/admin/readiness-corrections') {
+    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    try {
+      const { listCorrections } = require('./lib/readiness-learner');
+      const status = parsed.query.status || null;
+      const days = Math.max(1, Math.min(365, parseInt(parsed.query.days || '60', 10) || 60));
+      const items = listCorrections(db, { days, status });
+      sendJson(res, { ok: true, days, status, n: items.length, items });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+  if (p === '/admin/readiness-correction-revert' && (req.method === 'POST' || req.method === 'GET')) {
+    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const id = parseInt(parsed.query.id || '0', 10);
+    if (!id) { sendJson(res, { ok: false, error: 'id obrigatório' }, 400); return; }
+    try {
+      const { revertCorrection } = require('./lib/readiness-learner');
+      const reason = String(parsed.query.reason || 'manual revert via admin');
+      const r = revertCorrection(db, id, reason);
+      sendJson(res, r);
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   // Equity curve diária: cumulative profit em R$ por dia (após settlement).
   // Inclui drawdown (queda do pico), Sharpe daily ratio, max drawdown.
   // GET /equity-curve?sport=esports&days=30
