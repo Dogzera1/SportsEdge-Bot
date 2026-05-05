@@ -68,7 +68,10 @@ const { buildTrainedContext: buildEsportsTrainedContext } = require('./lib/espor
 const _brierEvAdjCache = new Map();
 
 function _brierEvAdjustmentFor(game) {
-  if (!/^true$/i.test(String(process.env.BRIER_AUTO_EV_CAP || ''))) return 0;
+  // Default ON — consistente com refreshBrierEvAdjustments. Desligar via
+  // BRIER_AUTO_EV_CAP=false (era inconsistente: refresh populava cache mas
+  // este reader exigia =true pra USAR; agora ambos default-on).
+  if (/^(0|false|no)$/i.test(String(process.env.BRIER_AUTO_EV_CAP || ''))) return 0;
   const g = String(game || '').toLowerCase();
   // 'lol' e 'cs2' → bucket 'esports'/'cs' respectivamente no tips table
   const key = g === 'cs2' ? 'cs' : (g === 'lol' ? 'esports' : g);
