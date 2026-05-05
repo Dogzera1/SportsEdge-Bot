@@ -2463,7 +2463,9 @@ async function runAutoAnalysis() {
         });
 
         if (!result) {
-          if (isLiveMatch) log('INFO', 'AUTO-LOL', `Live no-result: ${match.team1} vs ${match.team2} — autoAnalyzeMatch retornou null (sem odds frescas / IA falhou / pre-filter rejeitou)`);
+          // 2026-05-05: motivo específico já logado dentro de autoAnalyzeMatch via
+          // _returnNull (reason=draft_incomplete|odds_stale|no_real_odds|ml_prefilter|...).
+          // Este log é só wrapper — pode pular se _returnNull já cobriu.
           continue;
         }
         if (isLiveMatch && !result.tipMatch) {
@@ -7455,6 +7457,19 @@ function buildEnrichmentSection(match, enrich) {
 async function autoAnalyzeMatch(token, match) {
   const game = match.game;
   const matchId = String(match.id);
+  // 2026-05-05: helper centraliza return null + log [AUTO-LOL]. Permite grep
+  // unified do lifecycle (start → end) em logs Railway. Reason values:
+  //   draft_incomplete | odds_stale | no_real_odds | ml_prefilter |
+  //   ai_disabled_no_fallback | deepseek_cooldown_skip | deepseek_backoff_no_fallback |
+  //   ia_no_response | sharp_divergence | other
+  const _returnNull = (reason, extra = '') => {
+    const _live = match.status === 'live' || match.status === 'inprogress';
+    if (_live) {
+      log('INFO', 'AUTO-LOL', `null reason=${reason} ${match.team1} vs ${match.team2}${extra ? ' | ' + extra : ''}`);
+    }
+    try { require('./lib/metrics').incr('auto_lol_return_null', { reason, live: _live ? '1' : '0' }); } catch (_) {}
+    return null;
+  };
   try {
     const [o, gameCtx, enrich] = await Promise.all([
       serverGet(`/odds?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}&game=${encodeURIComponent(game)}`).catch(() => null),
@@ -7472,7 +7487,7 @@ async function autoAnalyzeMatch(token, match) {
     // Draft: só analisar quando draft completo (evita tip com base em comp parcial)
     if (match.status === 'draft' && !hasLiveStats && !draftComplete) {
       log('INFO', 'AUTO', `Draft incompleto: pulando ${match.team1} vs ${match.team2} (aguardando comp completa)`);
-      return null;
+      return _returnNull('draft_incomplete');
     }
 
     // Ao vivo: usar odds do MAPA atual. Se Riot live-game não forneceu liveGameNumber
@@ -7504,7 +7519,7 @@ async function autoAnalyzeMatch(token, match) {
     if (oddsToUse?.t1 && !isOddsFresh(oddsToUse, isLiveLoL, 'lol')) {
       log('INFO', 'AUTO', `Odds stale (${oddsAgeStr(oddsToUse)}): ${match.team1} vs ${match.team2} — pulando`);
       logRejection('lol', `${match.team1} vs ${match.team2}`, 'odds_stale', { age: oddsAgeStr(oddsToUse) });
-      return null;
+      return _returnNull('odds_stale', `age=${oddsAgeStr(oddsToUse)}`);
     }
 
     // ── Layer 1: Pré-filtro ML ──
@@ -8087,7 +8102,7 @@ async function autoAnalyzeMatch(token, match) {
     if (mlPrefilterOn && !mlResult.pass) {
       log('INFO', 'AUTO', `Pré-filtro ML: edge insuficiente (${mlResult.score.toFixed(1)}pp) para ${match.team1} vs ${match.team2}. Pulando IA.`);
       logRejection('lol', `${match.team1} vs ${match.team2}`, 'ml_prefilter_edge', { edge: +mlResult.score.toFixed(2) });
-      return null;
+      return _returnNull('ml_prefilter', `edge=${mlResult.score.toFixed(1)}pp`);
     }
 
     const hasRealOdds = !!(oddsToUse?.t1 && parseFloat(oddsToUse.t1) > 1);
@@ -8097,7 +8112,7 @@ async function autoAnalyzeMatch(token, match) {
       // 2026-05-05: log explícito (era silent → "Live no-result" sem motivo claro).
       log('INFO', 'AUTO', `Sem odds reais: ${match.team1} vs ${match.team2} (status=${match.status} t1=${oddsToUse?.t1 || 'null'} t2=${oddsToUse?.t2 || 'null'} bk=${oddsToUse?.bookmaker || 'none'}) — pulando`);
       logRejection('lol', `${match.team1} vs ${match.team2}`, 'no_real_odds', { status: match.status, t1: oddsToUse?.t1 || null });
-      return null;
+      return _returnNull('no_real_odds', `t1=${oddsToUse?.t1 || 'null'} bk=${oddsToUse?.bookmaker || 'none'}`);
     }
 
     const newsSectionEsports = await fetchMatchNews('esports', match.team1, match.team2).catch(() => '');
@@ -8154,7 +8169,7 @@ async function autoAnalyzeMatch(token, match) {
           }
         };
       }
-      return null;
+      return _returnNull('ai_disabled_no_fallback', `pick=${pickTeam}@${pickOdd} ev=${evPct.toFixed(1)}% edge=${mlResult.score.toFixed(1)}pp`);
     }
     // Cooldown mínimo entre chamadas (evita 429 por múltiplos live matches simultâneos)
     // O backoff pós-429 só é setado após a resposta chegar — este cooldown é preventivo
@@ -8168,7 +8183,7 @@ async function autoAnalyzeMatch(token, match) {
         await _sleep(remainMs + 100);
       } else {
         log('INFO', 'AUTO', `DeepSeek cooldown (${Math.round(remainMs/1000)}s restantes >${Math.round(MAX_WAIT_MS/1000)}s) — pulando ${match.team1} vs ${match.team2}`);
-        return null;
+        return _returnNull('deepseek_cooldown_skip', `remain=${Math.round(remainMs/1000)}s`);
       }
     }
     if (Date.now() < global.__deepseekBackoffUntil) {
@@ -8224,7 +8239,7 @@ async function autoAnalyzeMatch(token, match) {
       if (Number.isFinite(pickOdd)) {
         log('INFO', 'AUTO', `Fallback backoff rejeitado: ${pickTeam} @ ${pickOdd} — fora do range [${FALLBACK_MIN_ODDS}, ${FALLBACK_MAX_ODDS}] ou EV/edge insuficiente`);
       }
-      return null;
+      return _returnNull('deepseek_backoff_no_fallback', Number.isFinite(pickOdd) ? `pick=${pickTeam}@${pickOdd} ev=${evPct.toFixed(1)}%` : 'no_pick');
     }
 
     if (process.env.LOG_IA_PROMPT === 'true') {
@@ -8319,7 +8334,7 @@ async function autoAnalyzeMatch(token, match) {
       const errShort = resp?.error ? String(resp.error).slice(0, 220) : '';
       const st = resp?.__status ? String(resp.__status) : '';
       log('WARN', 'AUTO', `IA sem resposta para ${match.team1} vs ${match.team2} (provider: ${resp.provider || 'deepseek'})${st ? ` | status=${st}` : ''}${errShort ? ` | err=${errShort}` : ''}`);
-      return null;
+      return _returnNull('ia_no_response', `provider=${resp?.provider || 'deepseek'}${st ? ' status=' + st : ''}`);
     }
 
     // Parse via helper — aceita formato novo (|P:X|STAKE:...) e antigo (|EV:X|P:Y|STAKE:...).
@@ -8665,7 +8680,7 @@ async function autoAnalyzeMatch(token, match) {
     };
   } catch(e) {
     log('ERROR', 'AUTO', `Error for ${match.team1} vs ${match.team2}: ${e.message}`);
-    return null;
+    return _returnNull('exception', e.message?.slice(0, 100) || 'unknown');
   }
 }
 
