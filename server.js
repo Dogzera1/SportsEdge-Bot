@@ -7996,6 +7996,74 @@ setInterval(load, 10000);
     return;
   }
 
+  // 2026-05-05: força settle de UM tip — replica server-side o que o bot faria
+  // (pickBestTennisSettleRow + settleTipById + bankroll update). Permite drenar
+  // backlog tennis sem precisar de curl POST. Só funciona pra tennis ML pendentes.
+  // GET /admin/tennis-force-settle-tip?tip_id=1060&key=<KEY>
+  if (p === '/admin/tennis-force-settle-tip') {
+    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const tipId = parseInt(parsed.query.tip_id || '0', 10);
+    if (!tipId) { sendJson(res, { ok: false, error: 'tip_id obrigatório' }, 400); return; }
+    try {
+      const tip = db.prepare(`SELECT * FROM tips WHERE id = ? AND sport = 'tennis'`).get(tipId);
+      if (!tip) { sendJson(res, { ok: false, error: 'tip não encontrado em sport=tennis' }, 404); return; }
+      if (tip.result !== null) { sendJson(res, { ok: false, error: 'tip já settled', result: tip.result }); return; }
+      if (tip.archived === 1) { sendJson(res, { ok: false, error: 'tip arquivada' }); return; }
+      const sentRaw = String(tip.sent_at || '').trim();
+      const tipMs = sentRaw ? Date.parse(sentRaw.includes('T') ? sentRaw : sentRaw.replace(' ', 'T')) : NaN;
+      const lookbackDays = Math.min(800, Math.max(14, parseInt(process.env.TENNIS_SETTLE_LOOKBACK_DAYS || '600', 10) || 600));
+      const rows = getTennisSettleRowsCached(lookbackDays);
+      const best = pickBestTennisSettleRow(rows, tip.participant1, tip.participant2, tipMs, tip.event_name);
+      if (!best?.winner) {
+        sendJson(res, { ok: false, error: 'pickBest retornou null', cache_size: rows.length });
+        return;
+      }
+      // Replica logica de /settle
+      const { tennisSinglePlayerNameMatch } = require('./lib/tennis-match');
+      const winner = best.winner;
+      const score = best.final_score || '';
+      const _walkoverRe = /\b(ret|retir|w\.?o\.?|walkover|abandoned|cancell?ed|no\s*contest|w\/o|wd\b|withdrew|disqualif|\bdq\b|\bnc\b|overturned)\b/i;
+      const isWalkover = score && _walkoverRe.test(score);
+      const nameMatched = tennisSinglePlayerNameMatch(tip.tip_participant, winner);
+      const result = isWalkover ? 'void' : (nameMatched ? 'win' : 'loss');
+      const settleResult = db.transaction(() => {
+        const upd = stmts.settleTipById.run(result, tip.id);
+        if (upd.changes === 0) return { settled: 0, reason: 'race condition or already settled' };
+        // Compute stake_reais if missing
+        const { getSportUnitValue } = require('./lib/sport-unit');
+        const bk = stmts.getBankroll.get('tennis');
+        const uv = getSportUnitValue(bk?.current_banca || 0, bk?.initial_banca || 100);
+        const su = parseFloat(String(tip.stake || '1').replace('u','')) || 1;
+        const stakeR = (Number.isFinite(Number(tip.stake_reais)) && Number(tip.stake_reais) > 0)
+          ? Number(tip.stake_reais)
+          : parseFloat((su * uv).toFixed(2));
+        const odds = parseFloat(tip.odds) || 1;
+        const profitR = result === 'win' ? +(stakeR * (odds - 1)).toFixed(2)
+                      : result === 'void' ? 0
+                      : -stakeR;
+        db.prepare('UPDATE tips SET stake_reais = ?, profit_reais = ? WHERE id = ?').run(stakeR, profitR, tip.id);
+        // Update bankroll
+        if (bk && profitR !== 0 && tip.is_shadow !== 1) {
+          const nova = parseFloat(((Number(bk.current_banca) || 0) + profitR).toFixed(2));
+          stmts.updateBankroll.run(nova, 'tennis');
+        }
+        return { settled: 1, result, stakeR, profitR };
+      })();
+      sendJson(res, {
+        ok: true,
+        tip_id: tipId,
+        match_used: { match_id: best.match_id, team1: best.team1, team2: best.team2, winner: best.winner, score: best.final_score, league: best.league, resolved_at: best.resolved_at },
+        nameMatched,
+        result_applied: settleResult.result || result,
+        ...settleResult,
+      });
+    } catch (e) {
+      sendJson(res, { ok: false, error: e.message, stack: e.stack?.slice(0, 600) }, 500);
+    }
+    return;
+  }
+
   // Debug: tenta resolver cada tip unsettled de tennis e reporta o motivo da falha.
   // GET /tennis-settle-debug?days=30 → [{tip_id, p1, p2, sent_at, status, reason}]
   if (p === '/tennis-settle-debug') {
