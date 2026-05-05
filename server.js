@@ -18344,9 +18344,20 @@ setInterval(load, 60000);
         // Tips reais (isShadow=0) continuam passando todos gates pra proteção
         // de banca. Filosofia: shadow = causa (modelo), real = sintoma (dispatch).
         // Override: ML_SHADOW_PURE_MODE=false desativa bypass (back-compat).
-        const _isShadowTip = !!t.isShadow;
+        let _isShadowTip = !!t.isShadow;
         const _shadowPureMode = !/^(0|false|no)$/i.test(String(process.env.ML_SHADOW_PURE_MODE ?? 'true'));
-        const _bypassFiltersForShadow = _isShadowTip && _shadowPureMode;
+        let _bypassFiltersForShadow = _isShadowTip && _shadowPureMode;
+        // Helper: flip pra shadow quando gate seria rejection. Filosofia shadow puro:
+        // "tips que sangrariam banca real ainda valem como dado pra estudo do modelo".
+        const _autoRouteToShadow = (reason, extra = {}) => {
+          if (!_shadowPureMode) return false;
+          if (_isShadowTip) return false; // já é shadow
+          _isShadowTip = true;
+          _bypassFiltersForShadow = true;
+          log('INFO', 'ML-AUTO-SHADOW', `${sport}: ${p1} vs ${p2} — gate=${reason} → routed to shadow (study DB) em vez de reject`);
+          try { require('./lib/metrics').incr('record_tip_auto_shadow', { sport, reason }); } catch (_) {}
+          return true;
+        };
         // Helper centralizado pra skip — incrementa counter por reason+sport
         // ANTES de sendJson. Permite /health/metrics rastrear quais gates
         // estão derrubando volume sem precisar parsear logs.
@@ -18463,18 +18474,28 @@ setInterval(load, 60000);
           const _spU = String(sport || '').toUpperCase();
           const _mlDisabled = /^(1|true|yes)$/i.test(String(process.env[`${_spU}_ML_DISABLED`] || ''));
           if (_mlDisabled) {
-            log('INFO', 'ML-GATE', `${sport}: ${p1} vs ${p2} — ${_spU}_ML_DISABLED=true (audit leaks 2026-05-04). Tip rejeitada.`);
-            _emitSkip('ml_disabled_per_sport', { sport, env: `${_spU}_ML_DISABLED` });
-            return;
-          }
-          const _tier1Csv = String(process.env[`${_spU}_ML_TIER1_LEAGUES`] || '').toLowerCase();
-          if (_tier1Csv) {
-            const _evt = String(eventName || '').toLowerCase();
-            const _tier1Hit = _tier1Csv.split(',').map(s => s.trim()).filter(Boolean).some(lg => _evt.includes(lg));
-            if (!_tier1Hit) {
-              log('INFO', 'ML-GATE', `${sport}: ${p1} vs ${p2} [${eventName}] — fora ${_spU}_ML_TIER1_LEAGUES. Tip rejeitada.`);
-              _emitSkip('ml_not_in_tier1_leagues', { sport, league: eventName });
+            // Shadow puro filosofia: ao invés de rejeitar, auto-rota pra shadow DB.
+            // Tip não dispatch real (ML_DISABLED protege banca), mas vira sample pra
+            // estudo do modelo. Hard reject opt-in via ML_DISABLED_HARD_REJECT=true.
+            const _hardReject = /^(1|true|yes)$/i.test(String(process.env.ML_DISABLED_HARD_REJECT || ''));
+            if (_hardReject || !_autoRouteToShadow('ml_disabled_per_sport', { env: `${_spU}_ML_DISABLED` })) {
+              log('INFO', 'ML-GATE', `${sport}: ${p1} vs ${p2} — ${_spU}_ML_DISABLED=true. Tip rejeitada.`);
+              _emitSkip('ml_disabled_per_sport', { sport, env: `${_spU}_ML_DISABLED` });
               return;
+            }
+          } else {
+            const _tier1Csv = String(process.env[`${_spU}_ML_TIER1_LEAGUES`] || '').toLowerCase();
+            if (_tier1Csv) {
+              const _evt = String(eventName || '').toLowerCase();
+              const _tier1Hit = _tier1Csv.split(',').map(s => s.trim()).filter(Boolean).some(lg => _evt.includes(lg));
+              if (!_tier1Hit) {
+                const _hardReject = /^(1|true|yes)$/i.test(String(process.env.ML_TIER1_HARD_REJECT || ''));
+                if (_hardReject || !_autoRouteToShadow('ml_not_in_tier1_leagues', { league: eventName })) {
+                  log('INFO', 'ML-GATE', `${sport}: ${p1} vs ${p2} [${eventName}] — fora ${_spU}_ML_TIER1_LEAGUES. Tip rejeitada.`);
+                  _emitSkip('ml_not_in_tier1_leagues', { sport, league: eventName });
+                  return;
+                }
+              }
             }
           }
         }
@@ -18737,7 +18758,9 @@ setInterval(load, 60000);
         const confidenceStr = clampStr(t.confidence || 'MÉDIA', 20) || 'MÉDIA';
         const botTokenStr = clampStr(t.botToken, 180);
         // marketTypeStr já definido acima
-        const isShadow = t.isShadow ? 1 : 0;
+        // Usa _isShadowTip (pode ter sido flipped por _autoRouteToShadow quando
+        // ML_DISABLED ou ML_TIER1 gate hit). Isso garante tip vai pra study DB.
+        const isShadow = _isShadowTip ? 1 : 0;
         // Epoch tracking — captura git SHA + snapshot de env/auto-tunes ativas no momento exato do insert
         let _codeSha = null, _gateState = null;
         try {
@@ -18866,7 +18889,7 @@ setInterval(load, 60000);
           metrics.incr('tips_emitted', {
             sport,
             live: t.isLive ? '1' : '0',
-            shadow: t.isShadow ? '1' : '0',
+            shadow: _isShadowTip ? '1' : '0',
           });
         } catch (_) {}
         sendJson(res, { ok: true, tipId: result?.lastInsertRowid || null });

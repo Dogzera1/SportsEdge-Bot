@@ -20629,10 +20629,12 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
 
   // Nightly Retrain: roda scripts/refresh-all-isotonics.js --all diariamente na
   // janela NIGHTLY_RETRAIN_HOUR_UTC (default 3). Tick de 15min verifica se é a hora
-  // e se ainda não rodou hoje. Gated por NIGHTLY_RETRAIN_AUTO=true.
+  // e se ainda não rodou hoje. Default ON (NIGHTLY_RETRAIN_AUTO=false desativa).
+  // Cobertura: LoL train+isotonic, tennis isotonic+Markov calib, dota2/cs2 isotonic,
+  // CLV calibration all-sports. Auto-rollback on regression (Brier > +5%).
   let _lastNightlyRetrainDay = null;
   async function runNightlyRetrainCheck() {
-    if (!/^true$/i.test(String(process.env.NIGHTLY_RETRAIN_AUTO || ''))) return;
+    if (/^(0|false|no)$/i.test(String(process.env.NIGHTLY_RETRAIN_AUTO ?? 'true'))) return;
     const hourUtc = parseInt(process.env.NIGHTLY_RETRAIN_HOUR_UTC || '3', 10);
     const now = new Date();
     const today = now.toISOString().slice(0, 10);
