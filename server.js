@@ -7897,6 +7897,69 @@ setInterval(load, 10000);
     return;
   }
 
+  // 2026-05-05: trace step-by-step pra UMA tip — mostra EXATAMENTE o que o
+  // matcher encontra. Usa quando /tennis-settle-debug retorna nearby_name_matches=0
+  // mas dados claramente existem. Compara nomes processados pelo matcher.
+  // GET /admin/tennis-tip-match-debug?tip_id=1060&key=<KEY>
+  if (p === '/admin/tennis-tip-match-debug') {
+    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const tipId = parseInt(parsed.query.tip_id || '0', 10);
+    if (!tipId) { sendJson(res, { ok: false, error: 'tip_id obrigatório' }, 400); return; }
+    try {
+      const tip = db.prepare(`SELECT * FROM tips WHERE id = ? AND sport = 'tennis'`).get(tipId);
+      if (!tip) { sendJson(res, { ok: false, error: 'tip não encontrado em sport=tennis' }, 404); return; }
+      const sentRaw = String(tip.sent_at || '').trim();
+      const tipMs = sentRaw ? Date.parse(sentRaw.includes('T') ? sentRaw : sentRaw.replace(' ', 'T')) : NaN;
+      const lookbackDays = Math.min(800, Math.max(14, parseInt(process.env.TENNIS_SETTLE_LOOKBACK_DAYS || '600', 10) || 600));
+      const rows = getTennisSettleRowsCached(lookbackDays);
+      const { tennisPairMatchesPlayers, tennisSinglePlayerNameMatch } = require('./lib/tennis-match');
+      const { norm } = require('./lib/utils');
+
+      // Procura por TODAS rows que envolvem qualquer um dos players
+      const tipP1Norm = norm(tip.participant1);
+      const tipP2Norm = norm(tip.participant2);
+      const involvingPlayer = [];
+      for (const r of rows) {
+        const t1n = norm(r.team1);
+        const t2n = norm(r.team2);
+        if (t1n.includes(tipP1Norm) || t1n.includes(tipP2Norm) || t2n.includes(tipP1Norm) || t2n.includes(tipP2Norm)
+          || tipP1Norm.includes(t1n) || tipP1Norm.includes(t2n) || tipP2Norm.includes(t1n) || tipP2Norm.includes(t2n)) {
+          involvingPlayer.push({
+            team1: r.team1, team2: r.team2, winner: r.winner, league: r.league,
+            resolved_at: r.resolved_at,
+            singleMatch_p1_t1: tennisSinglePlayerNameMatch(tip.participant1, r.team1),
+            singleMatch_p1_t2: tennisSinglePlayerNameMatch(tip.participant1, r.team2),
+            singleMatch_p2_t1: tennisSinglePlayerNameMatch(tip.participant2, r.team1),
+            singleMatch_p2_t2: tennisSinglePlayerNameMatch(tip.participant2, r.team2),
+            pairMatch: tennisPairMatchesPlayers(tip.participant1, tip.participant2, r.team1, r.team2),
+            t1_norm: t1n, t2_norm: t2n,
+          });
+        }
+      }
+      const exact = involvingPlayer.filter(r => r.pairMatch);
+      sendJson(res, {
+        ok: true,
+        tip: {
+          id: tip.id, p1: tip.participant1, p2: tip.participant2,
+          p1_norm: tipP1Norm, p2_norm: tipP2Norm,
+          sent_at: tip.sent_at, tipMs, event_name: tip.event_name, match_id: tip.match_id,
+        },
+        cache_size: rows.length,
+        rows_involving_a_player: involvingPlayer.length,
+        rows_with_pair_match: exact.length,
+        sample_involving: involvingPlayer.slice(0, 10),
+        hint: rows.length === 0 ? 'cache vazio — chame /sync-tennis-espn-results primeiro'
+          : involvingPlayer.length === 0 ? 'NENHUMA row contém qualquer um dos players — match_results sem dado pra esse jogo (Sackmann/Sofascore não capturou)'
+          : exact.length === 0 ? 'players individuais aparecem em rows mas pair não casa — ver singleMatch_* fields no sample'
+          : 'pair casa! pickBestTennisSettleRow deveria estar achando — investigar tennisResolvedAtEligibleForSentTip',
+      });
+    } catch (e) {
+      sendJson(res, { ok: false, error: e.message, stack: e.stack?.slice(0, 600) }, 500);
+    }
+    return;
+  }
+
   // Debug: tenta resolver cada tip unsettled de tennis e reporta o motivo da falha.
   // GET /tennis-settle-debug?days=30 → [{tip_id, p1, p2, sent_at, status, reason}]
   if (p === '/tennis-settle-debug') {
