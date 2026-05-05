@@ -14944,6 +14944,249 @@ setInterval(load, 60000);
     return;
   }
 
+  // GET /admin/mt-historical-learnings?days=90&sport=<opt>&key=<KEY>
+  // Extrai insights do banco antigo (regime_tag IS NULL):
+  //   1. Calibration plot por pModel bucket (overconfidence detection)
+  //   2. CLV ranking per league (leading indicator)
+  //   3. Model version performance comparison
+  //   4. Time-of-day heatmap por sport
+  //   5. Liga lifecycle (mes-a-mes ROI evolution)
+  //   6. Sharp money signature (close_odd movement vs hit rate)
+  if (p === '/admin/mt-historical-learnings') {
+    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const days = Math.max(30, Math.min(180, parseInt(parsed.query.days || '90', 10) || 90));
+    const sportFilter = parsed.query.sport ? String(parsed.query.sport).toLowerCase() : null;
+    try {
+      const sportCond = sportFilter ? ` AND sport = ?` : '';
+      const sportArgs = sportFilter ? [sportFilter] : [];
+      const out = { ok: true, days, sport: sportFilter || 'all' };
+
+      const calibration = db.prepare(`
+        SELECT sport, market,
+          CASE
+            WHEN p_model < 0.40 THEN '01_lt40'
+            WHEN p_model < 0.50 THEN '02_40to50'
+            WHEN p_model < 0.55 THEN '03_50to55'
+            WHEN p_model < 0.60 THEN '04_55to60'
+            WHEN p_model < 0.65 THEN '05_60to65'
+            WHEN p_model < 0.70 THEN '06_65to70'
+            WHEN p_model < 0.80 THEN '07_70to80'
+            ELSE '08_gte80'
+          END AS pmodel_bucket,
+          COUNT(*) AS n,
+          SUM(CASE WHEN result = 'win' THEN 1 ELSE 0 END) AS n_win,
+          ROUND(AVG(p_model), 3) AS avg_pmodel,
+          ROUND(AVG(odd), 2) AS avg_odd,
+          ROUND(SUM(COALESCE(profit_units,0)), 2) AS total_profit,
+          ROUND(SUM(COALESCE(stake_units,1)), 2) AS total_stake
+          FROM market_tips_shadow
+         WHERE created_at >= datetime('now', '-' || ? || ' days')
+           AND result IN ('win','loss')
+           AND p_model IS NOT NULL
+           ${sportCond}
+         GROUP BY sport, market, pmodel_bucket
+         HAVING n >= 10
+         ORDER BY sport, market, pmodel_bucket
+      `).all(...[days, ...sportArgs]).map(r => {
+        const hit = r.n > 0 ? r.n_win / r.n : 0;
+        const expected = r.avg_pmodel || 0;
+        const gap = (hit - expected) * 100;
+        const roi = r.total_stake > 0 ? (r.total_profit / r.total_stake) * 100 : 0;
+        return {
+          ...r,
+          hit_rate: +(hit * 100).toFixed(1),
+          expected_hit: +(expected * 100).toFixed(1),
+          calibration_gap_pp: +gap.toFixed(1),
+          roi_pct: +roi.toFixed(2),
+        };
+      });
+      out.calibration_by_pmodel = calibration;
+      out.overconfident_buckets = calibration.filter(c => c.calibration_gap_pp < -5 && c.n >= 20);
+      out.underconfident_buckets = calibration.filter(c => c.calibration_gap_pp > 5 && c.n >= 20);
+
+      const clvByLeague = db.prepare(`
+        SELECT sport, league, market,
+          COUNT(*) AS n,
+          ROUND(AVG(clv_pct), 2) AS avg_clv,
+          ROUND(SUM(COALESCE(profit_units,0)), 2) AS total_profit,
+          ROUND(SUM(COALESCE(stake_units,1)), 2) AS total_stake,
+          SUM(CASE WHEN result = 'win' THEN 1 ELSE 0 END) AS n_win,
+          SUM(CASE WHEN result IN ('win','loss') THEN 1 ELSE 0 END) AS n_settled
+          FROM market_tips_shadow
+         WHERE created_at >= datetime('now', '-' || ? || ' days')
+           AND clv_pct IS NOT NULL
+           AND clv_pct BETWEEN -50 AND 50
+           AND league IS NOT NULL AND league != ''
+           ${sportCond}
+         GROUP BY sport, league, market
+         HAVING n >= 5
+         ORDER BY avg_clv DESC
+      `).all(...[days, ...sportArgs]).map(r => {
+        const settled = r.n_settled || 0;
+        const roi = r.total_stake > 0 ? (r.total_profit / r.total_stake) * 100 : 0;
+        return {
+          ...r,
+          hit_rate: settled > 0 ? +((r.n_win / settled) * 100).toFixed(1) : null,
+          roi_pct: +roi.toFixed(2),
+        };
+      });
+      out.top_clv_leagues = clvByLeague.slice(0, 15);
+      out.bottom_clv_leagues = clvByLeague.slice(-15).reverse();
+
+      const byModelVersion = db.prepare(`
+        SELECT sport, COALESCE(model_version, 'unknown') AS model_version,
+          COUNT(*) AS n,
+          SUM(CASE WHEN result = 'win' THEN 1 ELSE 0 END) AS n_win,
+          SUM(CASE WHEN result IN ('win','loss') THEN 1 ELSE 0 END) AS n_settled,
+          ROUND(SUM(COALESCE(profit_units,0)), 2) AS total_profit,
+          ROUND(SUM(COALESCE(stake_units,1)), 2) AS total_stake,
+          ROUND(AVG(clv_pct), 2) AS avg_clv,
+          MIN(created_at) AS first_seen,
+          MAX(created_at) AS last_seen
+          FROM market_tips_shadow
+         WHERE created_at >= datetime('now', '-' || ? || ' days')
+           ${sportCond}
+         GROUP BY sport, model_version
+         HAVING n_settled >= 20
+         ORDER BY sport, total_profit DESC
+      `).all(...[days, ...sportArgs]).map(r => {
+        const roi = r.total_stake > 0 ? (r.total_profit / r.total_stake) * 100 : 0;
+        return {
+          ...r,
+          hit_rate: r.n_settled > 0 ? +((r.n_win / r.n_settled) * 100).toFixed(1) : null,
+          roi_pct: +roi.toFixed(2),
+        };
+      });
+      out.by_model_version = byModelVersion;
+
+      const todHeatmap = db.prepare(`
+        SELECT sport, CAST(STRFTIME('%H', created_at) AS INTEGER) AS hour_utc,
+          COUNT(*) AS n,
+          SUM(CASE WHEN result = 'win' THEN 1 ELSE 0 END) AS n_win,
+          SUM(CASE WHEN result IN ('win','loss') THEN 1 ELSE 0 END) AS n_settled,
+          ROUND(SUM(COALESCE(profit_units,0)), 2) AS total_profit,
+          ROUND(SUM(COALESCE(stake_units,1)), 2) AS total_stake
+          FROM market_tips_shadow
+         WHERE created_at >= datetime('now', '-' || ? || ' days')
+           ${sportCond}
+         GROUP BY sport, hour_utc
+         HAVING n_settled >= 10
+         ORDER BY sport, hour_utc
+      `).all(...[days, ...sportArgs]).map(r => {
+        const roi = r.total_stake > 0 ? (r.total_profit / r.total_stake) * 100 : 0;
+        return {
+          ...r,
+          hit_rate: r.n_settled > 0 ? +((r.n_win / r.n_settled) * 100).toFixed(1) : null,
+          roi_pct: +roi.toFixed(2),
+        };
+      });
+      out.time_of_day = todHeatmap;
+      out.tod_best = todHeatmap.filter(t => t.n_settled >= 20 && t.roi_pct > 10);
+      out.tod_worst = todHeatmap.filter(t => t.n_settled >= 20 && t.roi_pct < -15);
+
+      const lifecycle = db.prepare(`
+        SELECT sport, league, strftime('%Y-%m', created_at) AS month,
+          COUNT(*) AS n,
+          SUM(CASE WHEN result = 'win' THEN 1 ELSE 0 END) AS n_win,
+          SUM(CASE WHEN result IN ('win','loss') THEN 1 ELSE 0 END) AS n_settled,
+          ROUND(SUM(COALESCE(profit_units,0)), 2) AS total_profit,
+          ROUND(SUM(COALESCE(stake_units,1)), 2) AS total_stake,
+          ROUND(AVG(clv_pct), 2) AS avg_clv
+          FROM market_tips_shadow
+         WHERE created_at >= datetime('now', '-' || ? || ' days')
+           AND league IS NOT NULL AND league != ''
+           ${sportCond}
+         GROUP BY sport, league, month
+         HAVING n_settled >= 5
+         ORDER BY sport, league, month
+      `).all(...[days, ...sportArgs]).map(r => {
+        const roi = r.total_stake > 0 ? (r.total_profit / r.total_stake) * 100 : 0;
+        return {
+          ...r,
+          hit_rate: r.n_settled > 0 ? +((r.n_win / r.n_settled) * 100).toFixed(1) : null,
+          roi_pct: +roi.toFixed(2),
+        };
+      });
+      const declineFlags = [];
+      const byLeagueMonth = {};
+      for (const r of lifecycle) {
+        const k = `${r.sport}|${r.league}`;
+        if (!byLeagueMonth[k]) byLeagueMonth[k] = [];
+        byLeagueMonth[k].push(r);
+      }
+      for (const k in byLeagueMonth) {
+        const months = byLeagueMonth[k].sort((a, b) => a.month.localeCompare(b.month));
+        if (months.length < 2) continue;
+        const last = months[months.length - 1];
+        const prev = months[months.length - 2];
+        const decline = last.roi_pct - prev.roi_pct;
+        if (decline <= -15 && last.n_settled >= 5) {
+          declineFlags.push({
+            sport: last.sport, league: last.league,
+            prev_month: prev.month, prev_roi: prev.roi_pct,
+            last_month: last.month, last_roi: last.roi_pct,
+            decline_pp: +decline.toFixed(2),
+          });
+        }
+      }
+      out.liga_lifecycle = lifecycle;
+      out.liga_decline_flags = declineFlags.sort((a, b) => a.decline_pp - b.decline_pp);
+
+      const sharpSig = db.prepare(`
+        SELECT sport, market,
+          CASE
+            WHEN close_odd IS NULL THEN 'no_close'
+            WHEN (odd / close_odd - 1) * 100 > 5 THEN 'compressed_5pct_pos'
+            WHEN (odd / close_odd - 1) * 100 > 1 THEN 'compressed_1pct_pos'
+            WHEN (odd / close_odd - 1) * 100 < -5 THEN 'compressed_5pct_neg'
+            WHEN (odd / close_odd - 1) * 100 < -1 THEN 'compressed_1pct_neg'
+            ELSE 'flat'
+          END AS movement,
+          COUNT(*) AS n,
+          SUM(CASE WHEN result = 'win' THEN 1 ELSE 0 END) AS n_win,
+          SUM(CASE WHEN result IN ('win','loss') THEN 1 ELSE 0 END) AS n_settled,
+          ROUND(SUM(COALESCE(profit_units,0)), 2) AS total_profit,
+          ROUND(SUM(COALESCE(stake_units,1)), 2) AS total_stake
+          FROM market_tips_shadow
+         WHERE created_at >= datetime('now', '-' || ? || ' days')
+           AND result IN ('win','loss')
+           ${sportCond}
+         GROUP BY sport, market, movement
+         HAVING n >= 10
+         ORDER BY sport, market, movement
+      `).all(...[days, ...sportArgs]).map(r => {
+        const roi = r.total_stake > 0 ? (r.total_profit / r.total_stake) * 100 : 0;
+        return {
+          ...r,
+          hit_rate: r.n_settled > 0 ? +((r.n_win / r.n_settled) * 100).toFixed(1) : null,
+          roi_pct: +roi.toFixed(2),
+        };
+      });
+      out.sharp_signature = sharpSig;
+
+      const recommendations = [];
+      for (const c of out.overconfident_buckets.slice(0, 5)) {
+        recommendations.push({
+          severity: 'overconfidence',
+          action: `${c.sport}/${c.market} pModel ${c.pmodel_bucket}: shrink ${Math.abs(c.calibration_gap_pp)}pp (atual ${c.expected_hit}% expected, ${c.hit_rate}% real)`,
+          evidence: `n=${c.n} ROI=${c.roi_pct}%`,
+        });
+      }
+      for (const f of out.liga_decline_flags.slice(0, 5)) {
+        recommendations.push({
+          severity: 'liga_decline',
+          action: `${f.sport}/${f.league}: ROI caiu ${f.decline_pp}pp (${f.prev_month} ${f.prev_roi}% → ${f.last_month} ${f.last_roi}%)`,
+          evidence: `Investigar regime change ou block temporariamente`,
+        });
+      }
+      out.recommendations = recommendations;
+
+      sendJson(res, out);
+    } catch (e) { sendJson(res, { ok: false, error: e.message, stack: e.stack?.slice(0, 500) }, 500); }
+    return;
+  }
+
   // GET /admin/mt-shadow-audit?days=14&sport=tennis&apply=0&key=<KEY>
   // Re-computa o result esperado de cada shadow row settled e compara com o
   // stored. Mismatches = bugs históricos. apply=1 reverte os mismatches pra
