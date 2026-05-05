@@ -173,13 +173,38 @@ function getBaseline() {
 // baseline mudar, recomputamos on-the-fly pra consistência.
 // Pós modelo per-sport unit (Abr/2026-III): prefere stake_reais/profit_reais stored
 // (rebuild pelo migration 040 com tier unit per-sport). Fallback recompute só se null.
+//
+// 2026-05-05: pra PENDING tips (stake_reais NULL), recompute com per-sport tier unit
+// (mesmo cálculo do Telegram formatStakeWithReais). Antes usava global baseline=1.0
+// → divergência: Telegram tennis ratio 0.76 = R$0.80/u, dashboard = R$1.00/u →
+// stake 1.25u era R$1.00 no TG e R$1.25 no dashboard.
+const _bankrollUvCache = new Map(); // sport → { uv, ts }
+const _BANKROLL_UV_TTL = 60000; // 1min
+function _getSportUnitForTip(sportKey) {
+  if (!sportKey) return 1.0;
+  const now = Date.now();
+  const c = _bankrollUvCache.get(sportKey);
+  if (c && (now - c.ts) < _BANKROLL_UV_TTL) return c.uv;
+  try {
+    const bk = db.prepare('SELECT initial_banca, current_banca FROM bankroll WHERE sport=?').get(sportKey);
+    if (!bk) { _bankrollUvCache.set(sportKey, { uv: 1.0, ts: now }); return 1.0; }
+    const { getSportUnitValue } = require('./lib/sport-unit');
+    const uv = getSportUnitValue(bk.current_banca || 0, bk.initial_banca || 100);
+    _bankrollUvCache.set(sportKey, { uv, ts: now });
+    return uv;
+  } catch (_) { return 1.0; }
+}
 function tipStakeReais(tip, unitValue) {
   if (tip.stake_reais != null) {
     const stored = Number(tip.stake_reais);
     if (Number.isFinite(stored)) return stored;
   }
   const stakeU = parseFloat(String(tip.stake || '').replace(/u/i, '')) || 0;
-  return +(stakeU * (unitValue || 1)).toFixed(2);
+  // Per-sport tier unit p/ pending tips (alinha com Telegram). Fallback unitValue
+  // mantido pra compat de callers que querem override explícito.
+  const uvSport = tip.sport ? _getSportUnitForTip(tip.sport) : (unitValue || 1);
+  const uv = unitValue && unitValue !== 1.0 ? unitValue : uvSport;
+  return +(stakeU * uv).toFixed(2);
 }
 function tipProfitReais(tip, unitValue) {
   if (tip.profit_reais != null) {
@@ -188,9 +213,11 @@ function tipProfitReais(tip, unitValue) {
   }
   const stakeU = parseFloat(String(tip.stake || '').replace(/u/i, '')) || 0;
   const odds = parseFloat(tip.odds) || 1;
-  if (!stakeU || !unitValue || unitValue <= 0) return null;
-  if (tip.result === 'win')  return +((stakeU * (odds - 1) * unitValue)).toFixed(2);
-  if (tip.result === 'loss') return +(-(stakeU * unitValue)).toFixed(2);
+  const uvSport = tip.sport ? _getSportUnitForTip(tip.sport) : (unitValue || 1);
+  const uv = unitValue && unitValue !== 1.0 ? unitValue : uvSport;
+  if (!stakeU || !uv || uv <= 0) return null;
+  if (tip.result === 'win')  return +((stakeU * (odds - 1) * uv)).toFixed(2);
+  if (tip.result === 'loss') return +(-(stakeU * uv)).toFixed(2);
   if (tip.result === 'push' || tip.result === 'void') return 0;
   return null;
 }
