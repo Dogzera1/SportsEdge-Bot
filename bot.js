@@ -4995,23 +4995,6 @@ async function recordMarketTipAsRegular({ sport, match, tip, stake, isLive }) {
     const marketKey = String(tip.market || 'unknown');
     const sideKey = String(tip.side || 'na');
 
-    // ── EV MAX CAP ──
-    // 2026-05-04 [Audit calibration]: bucket EV>30% mostrou ROI -8 a -75%
-    // (gap +40-115pp vs expected EV). Modelo overshoots edge em high-EV.
-    // Cap rejeita tips marginais antes de promote (shadow continua sendo logged).
-    // Per-sport defaults em lib/mt-tier-classifier.js EV_MAX_DEFAULTS.
-    // Override: <SPORT>_MT_EV_MAX=N ou <SPORT>_MT_EV_MAX_DISABLED=true
-    try {
-      const { getEvMaxCap } = require('./lib/mt-tier-classifier');
-      const evMax = getEvMaxCap(sport);
-      const tipEv = parseFloat(tip.ev);
-      if (Number.isFinite(tipEv) && Number.isFinite(evMax) && tipEv > evMax) {
-        log('INFO', 'MT-EV-CAP',
-          `${sport}/${marketKey}/${sideKey} ${match.team1} vs ${match.team2}: EV ${tipEv.toFixed(1)}% > cap ${evMax}% — skip promote (calibration leak >${evMax}%)`);
-        return null;
-      }
-    } catch (_) { /* defensive */ }
-
     // ── Football: market divergence gate ──
     // Pra sport=football, se model diverge >MAX pp de Pinnacle closing
     // benchmark (H2H direto de football_data_csv), segura tip.
@@ -5127,50 +5110,6 @@ async function recordMarketTipAsRegular({ sport, match, tip, stake, isLive }) {
       }
       trustInfo = t.info;
     } catch (e) { log('DEBUG', 'LEAGUE-TRUST', `err: ${e.message}`); }
-
-    // 2026-05-04 [Audit leaks]: per-market stake multiplier amplifica
-    // mercados com ROI/CLV consistente (ex: cs2 total +15,7%, dota2 total
-    // +64,9%). Env: <SPORT>_<MARKET>_STAKE_MULT (ex: CS2_TOTAL_STAKE_MULT=1.3).
-    // Aplicado APÓS league trust pra que multiplicador de mercado componha
-    // com trust ajustado (0,5–1,2). Cap 2.0× pra prevenir runaway.
-    try {
-      const _spStake = String(sport).toUpperCase().replace(/[^A-Z0-9]/g, '');
-      const _mkStake = String(marketKey).toUpperCase().replace(/[^A-Z0-9_]/g, '');
-      const _stakeKey = `${_spStake}_${_mkStake}_STAKE_MULT`;
-      const _stakeMult = parseFloat(process.env[_stakeKey]);
-      if (Number.isFinite(_stakeMult) && _stakeMult > 0 && _stakeMult <= 2.0) {
-        const stakeNumS = typeof stakeAdjusted === 'number' ? stakeAdjusted
-          : parseFloat(String(stakeAdjusted || '1').replace('u','')) || 1;
-        const stakeNew = Math.round(stakeNumS * _stakeMult * 100) / 100;
-        log('INFO', 'MT-STAKE-MULT', `${sport}/${marketKey}: ${stakeNumS}u × ${_stakeMult} = ${stakeNew}u (env ${_stakeKey})`);
-        stakeAdjusted = stakeNew;
-      }
-    } catch (_) {}
-
-    // ── TIER STAKE MULT ──
-    // 2026-05-04 [Audit by-league]: tiers com ROI consistente recebem boost,
-    // tiers sangrando recebem penalty. Defaults em lib/mt-tier-classifier.js:
-    //   - cs2|tier2_secondary +30% (CCT/ESL Challenger SA, ROI +63%)
-    //   - lol|tier2_regional +20% (LCK CL, ROI +26%)
-    //   - tennis|tier4_challenger -40% (sangra -25-80% leaks)
-    //   - football|tier4_lower -30%
-    // Aplicado APÓS market mult pra compor multipliers. Floor 0.1u.
-    try {
-      const { classifyTier, getTierStakeMult } = require('./lib/mt-tier-classifier');
-      const tier = classifyTier(sport, match.league);
-      const tierMult = getTierStakeMult(sport, tier);
-      if (Number.isFinite(tierMult) && tierMult !== 1.0) {
-        const stakeNumT = typeof stakeAdjusted === 'number' ? stakeAdjusted
-          : parseFloat(String(stakeAdjusted || '1').replace('u','')) || 1;
-        const stakeNewT = Math.round(stakeNumT * tierMult * 100) / 100;
-        log('INFO', 'MT-TIER-MULT', `${sport}/${match.league}/${tier}: ${stakeNumT}u × ${tierMult} = ${stakeNewT}u`);
-        stakeAdjusted = stakeNewT;
-        if (stakeAdjusted < 0.1) {
-          log('INFO', 'MT-TIER-MULT', `${sport}/${match.league}/${tier}: stake_final ${stakeAdjusted}u < 0.1u floor — skip dispatch`);
-          return null;
-        }
-      }
-    } catch (_) {}
 
     const stakeStr = typeof stakeAdjusted === 'number' ? `${stakeAdjusted}u` : String(stakeAdjusted || '1u');
     const conf = tip.ev >= 15 ? 'ALTA' : tip.ev >= 8 ? 'MÉDIA' : 'BAIXA';
