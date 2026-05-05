@@ -1272,6 +1272,15 @@ let _footballMatchesInFlight = null;
 // Backoff em caso de 429
 let esportsBackoffUntil = 0;
 const _serverStartTs = Date.now();
+
+// Cache /health + /alerts (10s default). Railway healthcheck timeout (~30s) batia
+// quando DB estava em integrity_check/settle batch — `pendingBySport` lockava e
+// derrubava o container. Cache curto serve stale enquanto query pesada ainda corre.
+let _healthCache = { ts: 0, response: null, alerts: null };
+const HEALTH_CACHE_MS = (() => {
+  const raw = parseInt(process.env.HEALTH_CACHE_MS || '', 10);
+  return Number.isFinite(raw) && raw >= 0 ? raw : 10000;
+})();
 let _oddsBackoffLogTs = 0;
 const _raw429Backoff = parseInt(process.env.ODDSPAPI_429_BACKOFF_MS || '', 10);
 const ESPORTS_BACKOFF_TTL = Math.max(5 * 60 * 1000, Number.isFinite(_raw429Backoff) && _raw429Backoff > 0 ? _raw429Backoff : 2 * 60 * 60 * 1000);
@@ -6477,6 +6486,27 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (p === '/health' || p === '/alerts') {
+    // Cache hit: serve stale (≤HEALTH_CACHE_MS) sem tocar DB. Evita Railway
+    // healthcheck timeout quando integrity_check/settle batch está rodando.
+    const _now = Date.now();
+    if (HEALTH_CACHE_MS > 0 && _healthCache.ts > 0 && (_now - _healthCache.ts) < HEALTH_CACHE_MS) {
+      const cacheAgeMs = _now - _healthCache.ts;
+      if (p === '/alerts') {
+        sendJson(res, {
+          alerts: _healthCache.alerts || [],
+          ts: new Date(_healthCache.ts).toISOString(),
+          cached: true,
+          cacheAgeMs,
+        });
+      } else if (_healthCache.response) {
+        sendJson(res, { ..._healthCache.response, cached: true, cacheAgeMs });
+      } else {
+        // /health pediu mas só temos cache de /alerts (raro). Cai no compute.
+        _healthCache.ts = 0;
+      }
+      if (_healthCache.ts > 0) return;
+    }
+
     const dbOk = (() => {
       try { db.prepare('SELECT 1').get(); return true; } catch(_) { return false; }
     })();
@@ -6546,7 +6576,11 @@ const server = http.createServer(async (req, res) => {
       }
     } catch (_) {}
 
-    if (p === '/alerts') { sendJson(res, { alerts, ts: new Date().toISOString() }); return; }
+    if (p === '/alerts') {
+      _healthCache = { ts: _now, response: _healthCache.response, alerts };
+      sendJson(res, { alerts, ts: new Date(_now).toISOString() });
+      return;
+    }
 
     // Build identity: code SHA, boot timestamp, metrics cardinality. Antes precisava
     // cruzar tip mais recente pra saber qual SHA está rodando — agora exposto direto.
@@ -6566,7 +6600,7 @@ const server = http.createServer(async (req, res) => {
     } catch (_) {}
 
     const status = !dbOk ? 'error' : (alerts.some(a => a.severity === 'critical') ? 'degraded' : (stale ? 'degraded' : 'ok'));
-    sendJson(res, {
+    const _healthResponse = {
       status,
       db: dbOk ? 'connected' : 'error',
       lastAnalysis: lastAnalysisAt,
@@ -6591,7 +6625,9 @@ const server = http.createServer(async (req, res) => {
       build: buildInfo,
       metricsCardinality,
       metricsLite: getMetricsLite()
-    });
+    };
+    _healthCache = { ts: _now, response: _healthResponse, alerts };
+    sendJson(res, _healthResponse);
     return;
   }
 
