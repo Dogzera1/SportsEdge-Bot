@@ -23015,18 +23015,33 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
   // "promovo agora?" num call só. Volume/perf/CLV/calibração/leak por bucket+liga
   // + boolean ready_to_promote com reasons. Toda a math usa dedup por
   // (match_id, tip_participant, market_type) — espelha /shadow-tips dedup block.
-  if (p === '/shadow-readiness') {
+  if (p === '/shadow-readiness' || p === '/tips-readiness') {
+    // 2026-05-05: dual-mode endpoint. /shadow-readiness avalia is_shadow=1
+    // (decisão de promoção); /tips-readiness avalia is_shadow=0 (saúde do
+    // stream real). Mesma SQL/aggregation com filtro de is_shadow + labels
+    // de action diferentes. Source também passa via ?source=shadow|real
+    // pra compatibilidade caso queiramos consolidar URL no futuro.
+    const sourceQ = String(parsed.query.source || (p === '/tips-readiness' ? 'real' : 'shadow')).toLowerCase();
+    const isShadowVal = sourceQ === 'real' ? 0 : 1;
+    const _envPrefix = sourceQ === 'real' ? 'TIPS_READINESS' : 'SHADOW_READINESS';
+    const _actionLabels = sourceQ === 'real'
+      ? { ready: 'HEALTHY', low_volume: 'LOW_VOLUME', leak: 'LEAK', wait: 'WATCH' }
+      : { ready: 'PROMOTE', low_volume: 'WAIT_VOLUME', leak: 'INVESTIGATE_LEAK', wait: 'WAIT' };
     const sportRaw = String(parsed.query.sport || 'all').toLowerCase();
     const isAll = sportRaw === 'all' || sportRaw === '*' || sportRaw === '__overall__';
     const daysRaw = parseInt(parsed.query.days);
     const days = Number.isFinite(daysRaw) ? Math.max(1, Math.min(365, daysRaw)) : 30;
 
-    // Critérios overrideable via query (?min_n=20) ou env (SHADOW_READINESS_MIN_N)
-    const minN = parseInt(parsed.query.min_n || process.env.SHADOW_READINESS_MIN_N || '30', 10);
-    const minRoi = parseFloat(parsed.query.min_roi || process.env.SHADOW_READINESS_MIN_ROI_PCT || '0');
-    const minClv = parseFloat(parsed.query.min_clv || process.env.SHADOW_READINESS_MIN_CLV_PCT || '0');
-    const minClvSamples = parseInt(parsed.query.min_clv_samples || process.env.SHADOW_READINESS_MIN_CLV_SAMPLES || '10', 10);
-    const maxCalibGap = parseFloat(parsed.query.max_calib_gap || process.env.SHADOW_READINESS_MAX_CALIB_GAP_PP || '5');
+    // Critérios overrideable via query (?min_n=20) ou env (<PREFIX>_MIN_N).
+    // Real tips podem ter critérios diferentes de shadow — fallback pra SHADOW
+    // se TIPS_* não setado, default leak threshold mais permissivo p/ real
+    // (já passou gates de dispatch, foco é detectar regressão pós-deploy).
+    const _envOr = (key, fallback) => process.env[`${_envPrefix}_${key}`] || process.env[`SHADOW_READINESS_${key}`] || fallback;
+    const minN = parseInt(parsed.query.min_n || _envOr('MIN_N', '30'), 10);
+    const minRoi = parseFloat(parsed.query.min_roi || _envOr('MIN_ROI_PCT', '0'));
+    const minClv = parseFloat(parsed.query.min_clv || _envOr('MIN_CLV_PCT', '0'));
+    const minClvSamples = parseInt(parsed.query.min_clv_samples || _envOr('MIN_CLV_SAMPLES', '10'), 10);
+    const maxCalibGap = parseFloat(parsed.query.max_calib_gap || _envOr('MAX_CALIB_GAP_PP', '5'));
 
     // sport=all: detecta sports com is_shadow=1 na janela e retorna array
     // ranqueado por score (proximidade de promoção). Sem dropdown obrigatório.
@@ -23055,7 +23070,7 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
           WITH dedup AS (
             SELECT MAX(id) AS id
             FROM tips
-            WHERE is_shadow = 1
+            WHERE is_shadow = ${isShadowVal}
               AND (archived IS NULL OR archived = 0)
               AND (sent_at >= datetime('now', ?) OR result IS NULL)
             GROUP BY sport,
@@ -23097,10 +23112,10 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
           const passed = Object.values(checks).filter(Boolean).length;
           const score = +(passed / Object.keys(checks).length).toFixed(2);
           const ready = passed === Object.keys(checks).length;
-          const action = ready ? 'PROMOTE'
-                       : settled < minN ? 'WAIT_VOLUME'
-                       : (roi != null && roi < -3) ? 'INVESTIGATE_LEAK'
-                       : 'WAIT';
+          const action = ready ? _actionLabels.ready
+                       : settled < minN ? _actionLabels.low_volume
+                       : (roi != null && roi < -3) ? _actionLabels.leak
+                       : _actionLabels.wait;
           const out = {
             sport: r.sport,
             unique_events: r.unique_events,
@@ -23128,6 +23143,7 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
 
         sendJson(res, {
           mode: 'all',
+          source: sourceQ,
           group_by: groupBy,
           days,
           criteria: { min_n: minN, min_roi_pct: minRoi, min_clv_pct: minClv, min_clv_samples: minClvSamples, max_calib_gap_pp: maxCalibGap },
@@ -23159,7 +23175,7 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
         JOIN (
           SELECT MAX(id) AS id
           FROM tips
-          WHERE is_shadow = 1
+          WHERE is_shadow = ${isShadowVal}
             AND sport IN (${sportPh})
             AND (archived IS NULL OR archived = 0)
             AND (sent_at >= datetime('now', ?) OR result IS NULL)
@@ -23296,10 +23312,10 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
         const passed = Object.values(checks).filter(Boolean).length;
         const score = +(passed / Object.keys(checks).length).toFixed(2);
         const ready = passed === Object.keys(checks).length;
-        const action = ready ? 'PROMOTE'
-                     : dec < minN ? 'WAIT_VOLUME'
-                     : (r != null && r < -3) ? 'INVESTIGATE_LEAK'
-                     : 'WAIT';
+        const action = ready ? _actionLabels.ready
+                     : dec < minN ? _actionLabels.low_volume
+                     : (r != null && r < -3) ? _actionLabels.leak
+                     : _actionLabels.wait;
         return { win_rate_pct: wr, expected_win_pct: expPct, calibration_gap_pp: calibGap, roi_pct: r, avg_clv_pct: c, score, ready_to_promote: ready, action };
       };
       const leagueOut = Array.from(byLeague.values())
@@ -23363,11 +23379,11 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
         ready_to_promote: allOk,
         score,
         reasons: allOk ? ['todos critérios atendidos'] : reasons,
-        action: allOk ? 'PROMOTE' : (settled < minN ? 'WAIT_VOLUME' : (roi != null && roi < -3 ? 'INVESTIGATE_LEAK' : 'WAIT')),
+        action: allOk ? _actionLabels.ready : (settled < minN ? _actionLabels.low_volume : (roi != null && roi < -3 ? _actionLabels.leak : _actionLabels.wait)),
       };
 
       sendJson(res, {
-        sport, days,
+        sport, source: sourceQ, days,
         verdict,
         volume: {
           raw_rows_after_dedup: dedupedRows.length,

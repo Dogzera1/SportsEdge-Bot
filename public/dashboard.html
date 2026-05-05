@@ -766,12 +766,12 @@
     </div>
   </div>
 
-  <!-- Shadow Readiness — veredicto consolidado de promoção (per sport) -->
+  <!-- Readiness — veredicto consolidado (shadow=promoção / real=saúde) -->
   <div class="section" id="secShadowReadiness">
     <div class="section-head" onclick="toggleSection('secShadowReadiness'); loadShadowReadiness()">
       <div class="section-head-left">
         <svg class="section-chevron" viewBox="0 0 16 16"><path d="M6 4l4 4-4 4" stroke="currentColor" fill="none" stroke-width="2"/></svg>
-        <span>✅ Promotion Readiness</span>
+        <span>✅ Readiness Analyzer</span>
       </div>
       <div class="section-head-meta" id="shadowReadinessMeta">—</div>
     </div>
@@ -3029,13 +3029,14 @@ async function loadShadow() {
   `;
 }
 
-// 2026-05-05: Promotion Readiness — veredicto consolidado per sport/market/league.
-// Substitui chamadas separadas a /shadow-vs-active + /ml-shadow-by-sport.
-// Modo default: cross-sport ranqueado (sport=all). Drill-down per sport
-// abrindo cards individuais com badge READY/WAIT/INVESTIGATE + buckets.
+// 2026-05-05: Readiness Analyzer — veredicto consolidado per sport/market/league.
+// Substitui chamadas separadas a /shadow-vs-active + /ml-shadow-by-sport + cards
+// isolados de ROI/sport, ROI/market, Stats/liga.
+// 2 sources: shadow (decisão de promoção) e real (saúde do stream pós-deploy).
 // Toggle: groupBy=sport (default) | sport_market | sport_league.
 let _shadowReadinessSelectedSport = null;
 let _shadowReadinessGroupBy = 'sport';
+let _shadowReadinessSource = 'shadow'; // 'shadow' | 'real'
 
 async function loadShadowReadiness() {
   if (_shadowReadinessSelectedSport) {
@@ -3045,7 +3046,7 @@ async function loadShadowReadiness() {
 }
 
 async function loadShadowReadinessOverview() {
-  const data = await apiFetch('/shadow-readiness?sport=all&groupBy=' + _shadowReadinessGroupBy + '&days=30');
+  const data = await apiFetch('/shadow-readiness?source=' + _shadowReadinessSource + '&sport=all&groupBy=' + _shadowReadinessGroupBy + '&days=30');
   const el = document.getElementById('shadowReadinessBody');
   const meta = document.getElementById('shadowReadinessMeta');
   if (!data || data.error) {
@@ -3055,7 +3056,10 @@ async function loadShadowReadinessOverview() {
   }
   const sports = data.per_sport || [];
   const ready = sports.filter(s => s.ready_to_promote).length;
-  meta.textContent = `${sports.length} sports · ${ready} prontos pra promover`;
+  const isReal = _shadowReadinessSource === 'real';
+  meta.textContent = isReal
+    ? `[REAL] ${sports.length} sports · ${ready} healthy`
+    : `[SHADOW] ${sports.length} sports · ${ready} prontos pra promover`;
 
   if (!sports.length) {
     el.innerHTML = '<div class="empty-state">Nenhum sport com tips em shadow nos últimos ' + data.days + 'd</div>';
@@ -3070,16 +3074,22 @@ async function loadShadowReadinessOverview() {
   const clsSign = v => v == null ? '' : (v >= 0 ? 'positive' : 'negative');
   const actionBadge = (a) => {
     const map = {
+      // shadow source
       PROMOTE: { color:'#16a34a', icon:'✅' },
       INVESTIGATE_LEAK: { color:'#dc2626', icon:'🚨' },
       WAIT_VOLUME: { color:'#ca8a04', icon:'⏳' },
       WAIT: { color:'#6b7280', icon:'⏸️' },
+      // real source
+      HEALTHY: { color:'#16a34a', icon:'✅' },
+      LEAK: { color:'#dc2626', icon:'🚨' },
+      LOW_VOLUME: { color:'#ca8a04', icon:'⏳' },
+      WATCH: { color:'#6b7280', icon:'👀' },
     };
-    const m = map[a] || map.WAIT;
+    const m = map[a] || { color:'#6b7280', icon:'?' };
     return `<span style="background:${m.color};color:#fff;padding:2px 8px;border-radius:3px;font-size:0.78em;font-weight:600">${m.icon} ${a}</span>`;
   };
 
-  // Toggle de groupBy
+  // Toggles: source (shadow vs real) + groupBy
   const tabBtn = (mode, label) => {
     const active = _shadowReadinessGroupBy === mode;
     return `<button onclick="_shadowReadinessGroupBy='${mode}'; loadShadowReadinessOverview()"
@@ -3088,13 +3098,28 @@ async function loadShadowReadinessOverview() {
              border-radius:4px;font-size:12px;cursor:pointer;
              ${active ? 'font-weight:700' : 'opacity:0.75'}">${label}</button>`;
   };
-  let html = `<div style="display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap">
-    ${tabBtn('sport', '📊 Por Esporte')}
-    ${tabBtn('sport_market', '🎯 Esporte + Mercado')}
-    ${tabBtn('sport_league', '🏆 Esporte + Liga')}
+  const sourceBtn = (mode, label, color) => {
+    const active = _shadowReadinessSource === mode;
+    return `<button onclick="_shadowReadinessSource='${mode}'; _shadowReadinessSelectedSport=null; loadShadowReadinessOverview()"
+      style="background:${active ? color : 'var(--surface-2,#1e293b)'};
+             color:#fff;border:1px solid var(--border,#334155);padding:5px 14px;
+             border-radius:4px;font-size:12px;cursor:pointer;
+             ${active ? 'font-weight:700' : 'opacity:0.6'}">${label}</button>`;
+  };
+  let html = `<div style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap;align-items:center">
+    <span style="font-size:11px;color:var(--text-soft,#94a3b8);font-weight:600">SOURCE:</span>
+    ${sourceBtn('shadow', '🥷 Shadow (promoção)', '#7c3aed')}
+    ${sourceBtn('real', '💰 Real (saúde)', '#0891b2')}
+    <span style="margin-left:14px;font-size:11px;color:var(--text-soft,#94a3b8);font-weight:600">GROUP:</span>
+    ${tabBtn('sport', '📊 Esporte')}
+    ${tabBtn('sport_market', '🎯 Esporte+Mercado')}
+    ${tabBtn('sport_league', '🏆 Esporte+Liga')}
   </div>`;
+  const semanticHelp = _shadowReadinessSource === 'real'
+    ? 'Tips reais (is_shadow=0). Action HEALTHY=ok / LEAK=ROI<-3% / LOW_VOLUME=n insuficiente / WATCH=warnings.'
+    : 'Tips shadow (is_shadow=1). Action PROMOTE=pronta promoção / INVESTIGATE_LEAK=ROI<-3% / WAIT_VOLUME=n<min / WAIT=outros warnings.';
   html += `<div class="card-meta" style="margin-bottom:12px">
-    Cross-sport ranqueado por proximidade de promoção. Critério: n≥${data.criteria.min_n} · ROI≥${data.criteria.min_roi_pct}% · CLV≥${data.criteria.min_clv_pct}% · CLV n≥${data.criteria.min_clv_samples} · gap calib ≥-${data.criteria.max_calib_gap_pp}pp. Click numa row pra drill-down completo.
+    ${semanticHelp} Critério: n≥${data.criteria.min_n} · ROI≥${data.criteria.min_roi_pct}% · CLV≥${data.criteria.min_clv_pct}% · CLV n≥${data.criteria.min_clv_samples} · gap calib ≥-${data.criteria.max_calib_gap_pp}pp. Click numa row pra drill-down completo.
   </div>`;
 
   // Header dinâmico conforme groupBy
@@ -3142,7 +3167,7 @@ async function loadShadowReadinessOverview() {
 }
 
 async function loadShadowReadinessDetail(sport) {
-  const data = await apiFetch('/shadow-readiness?sport=' + encodeURIComponent(sport) + '&days=30');
+  const data = await apiFetch('/shadow-readiness?source=' + _shadowReadinessSource + '&sport=' + encodeURIComponent(sport) + '&days=30');
   const el = document.getElementById('shadowReadinessBody');
   const meta = document.getElementById('shadowReadinessMeta');
   if (!data || data.error) {
@@ -3157,13 +3182,19 @@ async function loadShadowReadinessDetail(sport) {
   const clv = data.clv || {};
   const checks = data.checks || {};
 
-  const badgeColor = v.action === 'PROMOTE' ? '#16a34a'
-                   : v.action === 'INVESTIGATE_LEAK' ? '#dc2626'
-                   : '#ca8a04';
-  const badgeIcon = v.action === 'PROMOTE' ? '✅'
-                  : v.action === 'INVESTIGATE_LEAK' ? '🚨'
-                  : '⏳';
-  meta.textContent = `${sport} · ${vol.unique_events || 0} eventos · score ${(v.score * 100).toFixed(0)}%`;
+  const _readyActions = ['PROMOTE', 'HEALTHY'];
+  const _leakActions = ['INVESTIGATE_LEAK', 'LEAK'];
+  const _lowVolActions = ['WAIT_VOLUME', 'LOW_VOLUME'];
+  const badgeColor = _readyActions.includes(v.action) ? '#16a34a'
+                   : _leakActions.includes(v.action) ? '#dc2626'
+                   : _lowVolActions.includes(v.action) ? '#ca8a04'
+                   : '#6b7280';
+  const badgeIcon = _readyActions.includes(v.action) ? '✅'
+                  : _leakActions.includes(v.action) ? '🚨'
+                  : _lowVolActions.includes(v.action) ? '⏳'
+                  : '👀';
+  const _sourceTag = data.source === 'real' ? '[REAL]' : '[SHADOW]';
+  meta.textContent = `${_sourceTag} ${sport} · ${vol.unique_events || 0} eventos · score ${(v.score * 100).toFixed(0)}%`;
 
   const fmtPp = (v) => v == null ? '—' : (v >= 0 ? '+' : '') + v.toFixed(2) + 'pp';
   const fmtPct = (v, prec=2) => v == null ? '—' : (v >= 0 ? '+' : '') + v.toFixed(prec) + '%';
@@ -3271,13 +3302,12 @@ async function loadShadowReadinessDetail(sport) {
           <th style="text-align:right">CLV (n)</th>
         </tr></thead><tbody>`;
     for (const m of markets) {
-      const actBadge = m.action === 'PROMOTE'
-        ? '<span style="background:#16a34a;color:#fff;padding:1px 5px;border-radius:3px;font-size:0.72em">✅</span>'
-        : m.action === 'INVESTIGATE_LEAK'
-          ? '<span style="background:#dc2626;color:#fff;padding:1px 5px;border-radius:3px;font-size:0.72em">🚨</span>'
-          : m.action === 'WAIT_VOLUME'
-            ? '<span style="background:#ca8a04;color:#fff;padding:1px 5px;border-radius:3px;font-size:0.72em">⏳</span>'
-            : '<span style="background:#6b7280;color:#fff;padding:1px 5px;border-radius:3px;font-size:0.72em">⏸️</span>';
+      const actBadge = (a => {
+        if (a === 'PROMOTE' || a === 'HEALTHY') return '<span style="background:#16a34a;color:#fff;padding:1px 5px;border-radius:3px;font-size:0.72em">✅</span>';
+        if (a === 'INVESTIGATE_LEAK' || a === 'LEAK') return '<span style="background:#dc2626;color:#fff;padding:1px 5px;border-radius:3px;font-size:0.72em">🚨</span>';
+        if (a === 'WAIT_VOLUME' || a === 'LOW_VOLUME') return '<span style="background:#ca8a04;color:#fff;padding:1px 5px;border-radius:3px;font-size:0.72em">⏳</span>';
+        return '<span style="background:#6b7280;color:#fff;padding:1px 5px;border-radius:3px;font-size:0.72em">👀</span>';
+      })(m.action);
       html += `<tr>
         <td>${m.market_type}</td>
         <td style="text-align:center">${actBadge}</td>
@@ -3310,13 +3340,12 @@ async function loadShadowReadinessDetail(sport) {
           <th style="text-align:right">CLV</th>
         </tr></thead><tbody>`;
     for (const l of leagues) {
-      const actBadge = l.action === 'PROMOTE'
-        ? '<span style="background:#16a34a;color:#fff;padding:1px 5px;border-radius:3px;font-size:0.72em">✅</span>'
-        : l.action === 'INVESTIGATE_LEAK'
-          ? '<span style="background:#dc2626;color:#fff;padding:1px 5px;border-radius:3px;font-size:0.72em">🚨</span>'
-          : l.action === 'WAIT_VOLUME'
-            ? '<span style="background:#ca8a04;color:#fff;padding:1px 5px;border-radius:3px;font-size:0.72em">⏳</span>'
-            : '<span style="background:#6b7280;color:#fff;padding:1px 5px;border-radius:3px;font-size:0.72em">⏸️</span>';
+      const actBadge = (a => {
+        if (a === 'PROMOTE' || a === 'HEALTHY') return '<span style="background:#16a34a;color:#fff;padding:1px 5px;border-radius:3px;font-size:0.72em">✅</span>';
+        if (a === 'INVESTIGATE_LEAK' || a === 'LEAK') return '<span style="background:#dc2626;color:#fff;padding:1px 5px;border-radius:3px;font-size:0.72em">🚨</span>';
+        if (a === 'WAIT_VOLUME' || a === 'LOW_VOLUME') return '<span style="background:#ca8a04;color:#fff;padding:1px 5px;border-radius:3px;font-size:0.72em">⏳</span>';
+        return '<span style="background:#6b7280;color:#fff;padding:1px 5px;border-radius:3px;font-size:0.72em">👀</span>';
+      })(l.action);
       html += `<tr>
         <td>${l.league}</td>
         <td style="text-align:center">${actBadge}</td>
