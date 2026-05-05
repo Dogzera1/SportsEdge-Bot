@@ -14735,6 +14735,215 @@ setInterval(load, 60000);
     return;
   }
 
+  // GET /admin/mt-refit-calib?sport=tennis&days=90&minBin=6&alpha=8&key=<KEY>
+  // Refit isotônico (PAV + Beta smoothing) direto no Railway DB.
+  // Returns JSON pronto pra salvar em lib/<sport>-markov-calib.json.
+  // Inclui CALIBRATION TABLE + BACKTEST PRE/POST.
+  if (p === '/admin/mt-refit-calib') {
+    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const sport = String(parsed.query.sport || 'tennis').toLowerCase();
+    const days = Math.max(30, Math.min(365, parseInt(parsed.query.days || '90', 10) || 90));
+    const minBin = Math.max(3, Math.min(20, parseInt(parsed.query.minBin || '6', 10) || 6));
+    const ALPHA = parseFloat(parsed.query.alpha || '8');
+    const VIG = parseFloat(parsed.query.vig || '0.025');
+    const filter = String(parsed.query.filter || 'all').toLowerCase();
+    try {
+      const eceFn = (samples) => {
+        if (!samples.length) return null;
+        const buckets = 10;
+        let sumErr = 0;
+        for (let b = 0; b < buckets; b++) {
+          const lo = b / buckets, hi = (b + 1) / buckets;
+          const sub = samples.filter(s => (s.p >= lo && s.p < hi) || (b === buckets - 1 && s.p === 1));
+          if (!sub.length) continue;
+          const avgP = sub.reduce((a, s) => a + s.p, 0) / sub.length;
+          const avgY = sub.reduce((a, s) => a + s.y, 0) / sub.length;
+          sumErr += Math.abs(avgP - avgY) * (sub.length / samples.length);
+        }
+        return sumErr;
+      };
+      const brierFn = (samples) => {
+        if (!samples.length) return null;
+        return samples.reduce((a, s) => a + (s.p - s.y) ** 2, 0) / samples.length;
+      };
+
+      const liveCond = filter === 'live' ? `AND is_live = 1` : filter === 'pre' ? `AND COALESCE(is_live, 0) = 0` : '';
+      const tips = db.prepare(`
+        SELECT market, side, p_model, odd, close_odd, clv_pct, result, ev_pct, is_live
+          FROM market_tips_shadow
+         WHERE sport = ?
+           AND result IN ('win', 'loss')
+           AND p_model IS NOT NULL
+           AND odd IS NOT NULL
+           AND created_at >= datetime('now', '-' || ? || ' days')
+           ${liveCond}
+      `).all(sport, days);
+      const settled = tips.length;
+      if (settled < 30) {
+        sendJson(res, { ok: false, error: `insufficient sample n=${settled} (min 30)` }, 400);
+        return;
+      }
+
+      const pav = (binsArr) => {
+        const arr = binsArr.map(b => ({ ...b }));
+        let changed = true;
+        while (changed) {
+          changed = false;
+          for (let i = 0; i < arr.length - 1; i++) {
+            if (arr[i].pSmoothed > arr[i + 1].pSmoothed) {
+              const totalN = arr[i].n + arr[i + 1].n;
+              const wAvg = (arr[i].pSmoothed * arr[i].n + arr[i + 1].pSmoothed * arr[i + 1].n) / totalN;
+              arr[i].pSmoothed = wAvg;
+              arr[i + 1].pSmoothed = wAvg;
+              changed = true;
+            }
+          }
+        }
+        return arr;
+      };
+
+      const fitMarket = (marketName) => {
+        const lst = tips.filter(t => t.market === marketName);
+        if (lst.length < 12) return { skip: 'insufficient_sample', n: lst.length };
+        const edges = [0.30, 0.55, 0.65, 0.70, 0.75, 0.80, 0.85, 0.92, 1.001];
+        const bins = [];
+        for (let i = 0; i < edges.length - 1; i++) {
+          const lo = edges[i], hi = edges[i + 1];
+          const sub = lst.filter(t => t.p_model >= lo && t.p_model < hi);
+          if (!sub.length) continue;
+          const wins = sub.filter(t => t.result === 'win').length;
+          const closes = sub.filter(t => t.close_odd).map(t => t.close_odd);
+          const priorP = closes.length
+            ? Math.min(0.95, Math.max(0.05, (1 - VIG) / (closes.reduce((a, b) => a + b, 0) / closes.length)))
+            : 0.5;
+          const rawP = wins / sub.length;
+          const smoothedP = (wins + ALPHA * priorP) / (sub.length + ALPHA);
+          const mid = sub.reduce((a, t) => a + t.p_model, 0) / sub.length;
+          bins.push({ lo, hi, mid, n: sub.length, wins, rawP, priorP, pSmoothed: smoothedP });
+        }
+        if (!bins.length) return { skip: 'out_of_range', n: lst.length };
+        let merged = [...bins];
+        let i = 0;
+        while (i < merged.length) {
+          if (merged[i].n < minBin && merged.length > 2) {
+            const left = i > 0 ? merged[i - 1] : null;
+            const right = i < merged.length - 1 ? merged[i + 1] : null;
+            const target = !left ? i + 1 : !right ? i - 1 : (left.n <= right.n ? i - 1 : i + 1);
+            const a = merged[Math.min(i, target)], b = merged[Math.max(i, target)];
+            const totalN = a.n + b.n;
+            const totalW = a.wins + b.wins;
+            const wPriorAvg = (a.priorP * a.n + b.priorP * b.n) / totalN;
+            const wMid = (a.mid * a.n + b.mid * b.n) / totalN;
+            const smoothed = (totalW + ALPHA * wPriorAvg) / (totalN + ALPHA);
+            merged.splice(Math.min(i, target), 2, {
+              lo: a.lo, hi: b.hi, mid: wMid, n: totalN, wins: totalW,
+              rawP: totalW / totalN, priorP: wPriorAvg, pSmoothed: smoothed,
+            });
+            i = 0;
+          } else i++;
+        }
+        merged = pav(merged);
+        return {
+          bins: merged.map(b => ({
+            lo: +b.lo.toFixed(4), hi: +b.hi.toFixed(4), mid: +b.mid.toFixed(4),
+            n: b.n, wins: b.wins,
+            rawP: +b.rawP.toFixed(4), priorP: +b.priorP.toFixed(4),
+            pCalib: +b.pSmoothed.toFixed(4),
+          })),
+          coverage: [merged[0].lo, merged[merged.length - 1].hi],
+          nTotal: lst.length,
+        };
+      };
+
+      const defaultMarkets = {
+        tennis:   ['handicapGames', 'totalGames'],
+        lol:      ['handicap', 'total'],
+        cs2:      ['handicap', 'total'],
+        dota2:    ['handicap', 'total'],
+        valorant: ['handicap', 'total'],
+        football: ['totals'],
+      };
+      const marketsToFit = defaultMarkets[sport] || [];
+      const calibByMarket = {};
+      const skipped = {};
+      for (const m of marketsToFit) {
+        const r = fitMarket(m);
+        if (r.skip) skipped[m] = r;
+        else calibByMarket[m] = r;
+      }
+      if (!Object.keys(calibByMarket).length) {
+        sendJson(res, { ok: false, error: 'no markets fitted', skipped });
+        return;
+      }
+
+      const applyCalib = (pRaw, marketBins) => {
+        if (!marketBins?.length) return pRaw;
+        if (pRaw <= marketBins[0].mid) return marketBins[0].pCalib;
+        if (pRaw >= marketBins[marketBins.length - 1].mid) return marketBins[marketBins.length - 1].pCalib;
+        for (let i = 0; i < marketBins.length - 1; i++) {
+          const a = marketBins[i], b = marketBins[i + 1];
+          if (pRaw >= a.mid && pRaw <= b.mid) {
+            const t = (pRaw - a.mid) / (b.mid - a.mid);
+            return a.pCalib + t * (b.pCalib - a.pCalib);
+          }
+        }
+        return pRaw;
+      };
+
+      const MIN_EV = 4;
+      const bt = { pre: [], post: [] };
+      for (const t of tips) {
+        if (!Number.isFinite(t.p_model) || !Number.isFinite(t.odd)) continue;
+        const pCalib = applyCalib(t.p_model, calibByMarket[t.market]?.bins);
+        const evRaw = (t.p_model * t.odd - 1) * 100;
+        const evCalib = (pCalib * t.odd - 1) * 100;
+        const passRaw = evRaw >= MIN_EV && t.p_model < 0.95 && t.odd >= 1.5;
+        const passCalib = evCalib >= MIN_EV && pCalib < 0.95 && t.odd >= 1.5;
+        const profit = t.result === 'win' ? (t.odd - 1) : -1;
+        if (passRaw) bt.pre.push({ p: t.p_model, ev: evRaw, profit, result: t.result, clv: t.clv_pct });
+        if (passCalib) bt.post.push({ p: pCalib, ev: evCalib, profit, result: t.result, clv: t.clv_pct });
+      }
+      const summarize = (label, lst) => {
+        if (!lst.length) return { label, n: 0 };
+        const wins = lst.filter(t => t.result === 'win').length;
+        const profit = lst.reduce((a, t) => a + t.profit, 0);
+        const samples = lst.map(t => ({ p: t.p, y: t.result === 'win' ? 1 : 0 }));
+        return {
+          label, n: lst.length, wins,
+          hit: +(wins / lst.length * 100).toFixed(1),
+          roi: +(profit / lst.length * 100).toFixed(1),
+          profit: +profit.toFixed(2),
+          avgP: +(lst.reduce((a, t) => a + t.p, 0) / lst.length).toFixed(3),
+          avgEV: +(lst.reduce((a, t) => a + t.ev, 0) / lst.length).toFixed(1),
+          brier: +brierFn(samples).toFixed(4),
+          ece: +eceFn(samples).toFixed(4),
+        };
+      };
+
+      const backtest = { pre: summarize('PRE_raw', bt.pre), post: summarize('POST_calib', bt.post) };
+
+      const payload = {
+        version: 1,
+        sport,
+        fittedAt: new Date().toISOString(),
+        method: 'pav_with_beta_smoothing',
+        target: 'outcome (win/loss)',
+        prior: { source: 'p_implied_close', vig: VIG, alpha: ALPHA },
+        minBin,
+        nSamples: settled,
+        filter,
+        markets: calibByMarket,
+        backtest,
+      };
+
+      sendJson(res, { ok: true, payload, skipped });
+    } catch (e) {
+      sendJson(res, { ok: false, error: e.message, stack: e.stack?.slice(0, 600) }, 500);
+    }
+    return;
+  }
+
   // GET /admin/mt-shadow-audit?days=14&sport=tennis&apply=0&key=<KEY>
   // Re-computa o result esperado de cada shadow row settled e compara com o
   // stored. Mismatches = bugs históricos. apply=1 reverte os mismatches pra
