@@ -3029,11 +3029,13 @@ async function loadShadow() {
   `;
 }
 
-// 2026-05-05: Promotion Readiness — veredicto consolidado per sport.
+// 2026-05-05: Promotion Readiness — veredicto consolidado per sport/market/league.
 // Substitui chamadas separadas a /shadow-vs-active + /ml-shadow-by-sport.
 // Modo default: cross-sport ranqueado (sport=all). Drill-down per sport
 // abrindo cards individuais com badge READY/WAIT/INVESTIGATE + buckets.
+// Toggle: groupBy=sport (default) | sport_market | sport_league.
 let _shadowReadinessSelectedSport = null;
+let _shadowReadinessGroupBy = 'sport';
 
 async function loadShadowReadiness() {
   if (_shadowReadinessSelectedSport) {
@@ -3043,7 +3045,7 @@ async function loadShadowReadiness() {
 }
 
 async function loadShadowReadinessOverview() {
-  const data = await apiFetch('/shadow-readiness?sport=all&days=30');
+  const data = await apiFetch('/shadow-readiness?sport=all&groupBy=' + _shadowReadinessGroupBy + '&days=30');
   const el = document.getElementById('shadowReadinessBody');
   const meta = document.getElementById('shadowReadinessMeta');
   if (!data || data.error) {
@@ -3077,13 +3079,31 @@ async function loadShadowReadinessOverview() {
     return `<span style="background:${m.color};color:#fff;padding:2px 8px;border-radius:3px;font-size:0.78em;font-weight:600">${m.icon} ${a}</span>`;
   };
 
-  let html = `<div class="card-meta" style="margin-bottom:12px">
-    Cross-sport ranqueado por proximidade de promoção. Critério: n≥${data.criteria.min_n} · ROI≥${data.criteria.min_roi_pct}% · CLV≥${data.criteria.min_clv_pct}% · CLV n≥${data.criteria.min_clv_samples} · gap calib ≥-${data.criteria.max_calib_gap_pp}pp. Click no esporte pra drill-down.
+  // Toggle de groupBy
+  const tabBtn = (mode, label) => {
+    const active = _shadowReadinessGroupBy === mode;
+    return `<button onclick="_shadowReadinessGroupBy='${mode}'; loadShadowReadinessOverview()"
+      style="background:${active ? 'var(--primary, #2563eb)' : 'var(--surface-2,#1e293b)'};
+             color:#fff;border:1px solid var(--border,#334155);padding:5px 12px;
+             border-radius:4px;font-size:12px;cursor:pointer;
+             ${active ? 'font-weight:700' : 'opacity:0.75'}">${label}</button>`;
+  };
+  let html = `<div style="display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap">
+    ${tabBtn('sport', '📊 Por Esporte')}
+    ${tabBtn('sport_market', '🎯 Esporte + Mercado')}
+    ${tabBtn('sport_league', '🏆 Esporte + Liga')}
+  </div>`;
+  html += `<div class="card-meta" style="margin-bottom:12px">
+    Cross-sport ranqueado por proximidade de promoção. Critério: n≥${data.criteria.min_n} · ROI≥${data.criteria.min_roi_pct}% · CLV≥${data.criteria.min_clv_pct}% · CLV n≥${data.criteria.min_clv_samples} · gap calib ≥-${data.criteria.max_calib_gap_pp}pp. Click numa row pra drill-down completo.
   </div>`;
 
+  // Header dinâmico conforme groupBy
+  const groupCol = _shadowReadinessGroupBy === 'sport_market' ? '<th>Esporte / Mercado</th>'
+                 : _shadowReadinessGroupBy === 'sport_league' ? '<th>Esporte / Liga</th>'
+                 : '<th>Esporte</th>';
   html += `<table class="tips">
     <thead><tr>
-      <th>Esporte</th>
+      ${groupCol}
       <th style="text-align:center">Action</th>
       <th style="text-align:right">Score</th>
       <th style="text-align:right">n (settled)</th>
@@ -3097,8 +3117,15 @@ async function loadShadowReadinessOverview() {
   for (const s of sports) {
     const emoji = sportEmoji[s.sport] || '📊';
     const label = sportLabel[s.sport] || s.sport.toUpperCase();
+    let rowLabel = `${emoji} ${label}`;
+    if (_shadowReadinessGroupBy === 'sport_market' && s.market_type) {
+      rowLabel = `${emoji} ${label} <span style="opacity:0.55;font-size:0.85em">/ ${s.market_type}</span>`;
+    } else if (_shadowReadinessGroupBy === 'sport_league' && s.league) {
+      const lg = String(s.league).slice(0, 32);
+      rowLabel = `${emoji} ${label} <span style="opacity:0.55;font-size:0.85em">/ ${lg}</span>`;
+    }
     html += `<tr style="cursor:pointer" onclick="event.stopPropagation(); _shadowReadinessSelectedSport='${s.sport}'; loadShadowReadinessDetail('${s.sport}')">
-      <td>${emoji} ${label}</td>
+      <td>${rowLabel}</td>
       <td style="text-align:center">${actionBadge(s.action)}</td>
       <td style="text-align:right;font-weight:600">${(s.score * 100).toFixed(0)}</td>
       <td style="text-align:right">${s.settled}<span style="opacity:0.5;font-size:0.85em">/${data.criteria.min_n}</span></td>
@@ -3227,6 +3254,45 @@ async function loadShadowReadinessDetail(sport) {
     html += `</tbody></table>`;
   }
 
+  // ── Por mercado (ML, handicapGames, totalGames, kills, etc.) ───────
+  const markets = data.buckets?.by_market || [];
+  if (markets.length > 0) {
+    html += `<h4 style="margin:14px 0 8px;font-size:13px">🎯 Por mercado</h4>
+      <table class="tips">
+        <thead><tr>
+          <th>Mercado</th>
+          <th style="text-align:center">Action</th>
+          <th style="text-align:right">Score</th>
+          <th style="text-align:right">n</th>
+          <th style="text-align:right">W/L/P</th>
+          <th style="text-align:right">Hit%</th>
+          <th style="text-align:right">Calib</th>
+          <th style="text-align:right">ROI</th>
+          <th style="text-align:right">CLV (n)</th>
+        </tr></thead><tbody>`;
+    for (const m of markets) {
+      const actBadge = m.action === 'PROMOTE'
+        ? '<span style="background:#16a34a;color:#fff;padding:1px 5px;border-radius:3px;font-size:0.72em">✅</span>'
+        : m.action === 'INVESTIGATE_LEAK'
+          ? '<span style="background:#dc2626;color:#fff;padding:1px 5px;border-radius:3px;font-size:0.72em">🚨</span>'
+          : m.action === 'WAIT_VOLUME'
+            ? '<span style="background:#ca8a04;color:#fff;padding:1px 5px;border-radius:3px;font-size:0.72em">⏳</span>'
+            : '<span style="background:#6b7280;color:#fff;padding:1px 5px;border-radius:3px;font-size:0.72em">⏸️</span>';
+      html += `<tr>
+        <td>${m.market_type}</td>
+        <td style="text-align:center">${actBadge}</td>
+        <td style="text-align:right;font-weight:600">${(m.score * 100).toFixed(0)}</td>
+        <td style="text-align:right">${m.n}</td>
+        <td style="text-align:right">${m.wins}/${m.losses}/${m.pending}</td>
+        <td style="text-align:right">${m.win_rate_pct != null ? m.win_rate_pct.toFixed(1) + '%' : '—'}</td>
+        <td style="text-align:right" class="${clsSign(m.calibration_gap_pp)}">${fmtPp(m.calibration_gap_pp)}</td>
+        <td style="text-align:right" class="${clsSign(m.roi_pct)}">${fmtPct(m.roi_pct)}</td>
+        <td style="text-align:right" class="${clsSign(m.avg_clv_pct)}">${fmtPct(m.avg_clv_pct)} <span style="opacity:0.5;font-size:0.85em">(${m.clv_n})</span></td>
+      </tr>`;
+    }
+    html += `</tbody></table>`;
+  }
+
   // ── Top ligas ──────────────────────────────────────────────────────
   const leagues = data.buckets?.by_league || [];
   if (leagues.length > 0) {
@@ -3234,18 +3300,31 @@ async function loadShadowReadinessDetail(sport) {
       <table class="tips">
         <thead><tr>
           <th>Liga</th>
+          <th style="text-align:center">Action</th>
+          <th style="text-align:right">Score</th>
           <th style="text-align:right">n</th>
           <th style="text-align:right">W/L/P</th>
           <th style="text-align:right">Hit%</th>
+          <th style="text-align:right">Calib</th>
           <th style="text-align:right">ROI</th>
           <th style="text-align:right">CLV</th>
         </tr></thead><tbody>`;
     for (const l of leagues) {
+      const actBadge = l.action === 'PROMOTE'
+        ? '<span style="background:#16a34a;color:#fff;padding:1px 5px;border-radius:3px;font-size:0.72em">✅</span>'
+        : l.action === 'INVESTIGATE_LEAK'
+          ? '<span style="background:#dc2626;color:#fff;padding:1px 5px;border-radius:3px;font-size:0.72em">🚨</span>'
+          : l.action === 'WAIT_VOLUME'
+            ? '<span style="background:#ca8a04;color:#fff;padding:1px 5px;border-radius:3px;font-size:0.72em">⏳</span>'
+            : '<span style="background:#6b7280;color:#fff;padding:1px 5px;border-radius:3px;font-size:0.72em">⏸️</span>';
       html += `<tr>
         <td>${l.league}</td>
+        <td style="text-align:center">${actBadge}</td>
+        <td style="text-align:right;font-weight:600">${l.score != null ? (l.score * 100).toFixed(0) : '—'}</td>
         <td style="text-align:right">${l.n}</td>
         <td style="text-align:right">${l.wins}/${l.losses}/${l.pending}</td>
         <td style="text-align:right">${l.win_rate_pct != null ? l.win_rate_pct.toFixed(1) + '%' : '—'}</td>
+        <td style="text-align:right" class="${clsSign(l.calibration_gap_pp)}">${fmtPp(l.calibration_gap_pp)}</td>
         <td style="text-align:right" class="${clsSign(l.roi_pct)}">${fmtPct(l.roi_pct)}</td>
         <td style="text-align:right" class="${clsSign(l.avg_clv_pct)}">${fmtPct(l.avg_clv_pct)} <span style="opacity:0.5;font-size:0.85em">(n=${l.clv_n})</span></td>
       </tr>`;

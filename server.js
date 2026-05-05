@@ -23031,34 +23031,26 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
     // sport=all: detecta sports com is_shadow=1 na janela e retorna array
     // ranqueado por score (proximidade de promoção). Sem dropdown obrigatório.
     if (isAll) {
-      try {
-        const sportsWithShadow = db.prepare(`
-          SELECT sport, COUNT(*) AS n
-          FROM tips
-          WHERE is_shadow = 1
-            AND (archived IS NULL OR archived = 0)
-            AND (sent_at >= datetime('now', ?) OR result IS NULL)
-          GROUP BY sport
-          HAVING n > 0
-          ORDER BY n DESC
-        `).all(`-${days} days`);
+      // groupBy: 'sport' (default) | 'sport_market' (split por market_type)
+      //        | 'sport_league' (split por event_name)
+      // Mesma agregação per-sport — só muda o GROUP BY + colunas de identificação.
+      const groupBy = String(parsed.query.groupBy || parsed.query.group_by || 'sport').toLowerCase();
+      let groupCols, groupKeys, marketFilter;
+      if (groupBy === 'sport_market') {
+        groupCols = `t.sport, UPPER(COALESCE(t.market_type, 'ML')) AS market_type`;
+        groupKeys = `t.sport, UPPER(COALESCE(t.market_type, 'ML'))`;
+        marketFilter = ''; // todos markets
+      } else if (groupBy === 'sport_league') {
+        groupCols = `t.sport, COALESCE(t.event_name, 'unknown') AS league`;
+        groupKeys = `t.sport, COALESCE(t.event_name, 'unknown')`;
+        marketFilter = `AND (t.market_type IS NULL OR UPPER(t.market_type) = 'ML')`;
+      } else {
+        groupCols = `t.sport`;
+        groupKeys = `t.sport`;
+        marketFilter = `AND (t.market_type IS NULL OR UPPER(t.market_type) = 'ML')`;
+      }
 
-        const items = [];
-        for (const sp of sportsWithShadow) {
-          const subUrl = `/shadow-readiness?sport=${encodeURIComponent(sp.sport)}&days=${days}` +
-            (parsed.query.min_n ? `&min_n=${parsed.query.min_n}` : '') +
-            (parsed.query.min_roi ? `&min_roi=${parsed.query.min_roi}` : '') +
-            (parsed.query.min_clv ? `&min_clv=${parsed.query.min_clv}` : '');
-          // Inline call em vez de HTTP — chama recursivamente mock req/res não vale
-          // a pena. Replica logic via helper inline below (mais simples + 0 overhead).
-          // (helper será extraído quando for refatorar — por enquanto duplica com per_sport)
-          items.push({ sport: sp.sport, raw_n: sp.n, _placeholder: true });
-        }
-        // Substitui placeholders chamando o handler com cada sport (loop in-process).
-        // Pra evitar duplicar 200 LoC, vamos delegar usando uma função helper que extraio
-        // do bloco per-sport abaixo. Quick path: monta resposta simples com counts e
-        // deixa cliente fazer drill-down via sport=X.
-        // Per-sport snapshot SQL (volume + ROI + CLV num único pass):
+      try {
         const snapshot = db.prepare(`
           WITH dedup AS (
             SELECT MAX(id) AS id
@@ -23071,7 +23063,7 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
                      REPLACE(REPLACE(lower(COALESCE(tip_participant, '')), ' ', ''), '-', ''),
                      UPPER(COALESCE(market_type, 'ML'))
           )
-          SELECT t.sport,
+          SELECT ${groupCols},
                  COUNT(*) AS unique_events,
                  SUM(CASE WHEN t.result='win' THEN 1 ELSE 0 END) AS wins,
                  SUM(CASE WHEN t.result='loss' THEN 1 ELSE 0 END) AS losses,
@@ -23083,12 +23075,12 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
                  AVG(CASE WHEN t.model_p_pick > 0 AND t.model_p_pick < 1 THEN t.model_p_pick * 100 END) AS expected_win_pp
           FROM tips t
           JOIN dedup d ON d.id = t.id
-          WHERE (t.market_type IS NULL OR UPPER(t.market_type) = 'ML')
-          GROUP BY t.sport
+          WHERE 1=1 ${marketFilter}
+          GROUP BY ${groupKeys}
           ORDER BY unique_events DESC
         `).all(`-${days} days`);
 
-        const perSport = snapshot.map(r => {
+        const items = snapshot.map(r => {
           const settled = (r.wins || 0) + (r.losses || 0);
           const winRatePct = settled > 0 ? +(r.wins / settled * 100).toFixed(2) : null;
           const expectedPp = r.expected_win_pp != null ? +r.expected_win_pp.toFixed(2) : null;
@@ -23109,7 +23101,7 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
                        : settled < minN ? 'WAIT_VOLUME'
                        : (roi != null && roi < -3) ? 'INVESTIGATE_LEAK'
                        : 'WAIT';
-          return {
+          const out = {
             sport: r.sport,
             unique_events: r.unique_events,
             wins: r.wins, losses: r.losses, pending: r.pending, settled,
@@ -23123,9 +23115,12 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
             score, ready_to_promote: ready, action,
             failed_checks: Object.entries(checks).filter(([_, ok]) => !ok).map(([k]) => k),
           };
+          if (groupBy === 'sport_market') out.market_type = r.market_type;
+          if (groupBy === 'sport_league') out.league = r.league;
+          return out;
         });
         // Rank: PROMOTE primeiro, depois score desc
-        perSport.sort((a, b) => {
+        items.sort((a, b) => {
           if (a.ready_to_promote && !b.ready_to_promote) return -1;
           if (!a.ready_to_promote && b.ready_to_promote) return 1;
           return b.score - a.score;
@@ -23133,9 +23128,11 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
 
         sendJson(res, {
           mode: 'all',
+          group_by: groupBy,
           days,
           criteria: { min_n: minN, min_roi_pct: minRoi, min_clv_pct: minClv, min_clv_samples: minClvSamples, max_calib_gap_pp: maxCalibGap },
-          per_sport: perSport,
+          per_sport: items, // mantém nome legado pro front existente
+          items,            // nome neutro (preferido pra clients novos)
         });
       } catch (e) {
         sendJson(res, { error: e.message }, 500);
@@ -23218,6 +23215,24 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
         profit_reais: 0, stake_reais: 0, expected_win_pp: 0, _expN: 0,
       }));
       const byLeague = new Map();
+      const byMarket = new Map();
+      const accumBucket = (cur, r) => {
+        cur.n++;
+        if (r.result === 'win') cur.wins++;
+        else if (r.result === 'loss') cur.losses++;
+        else if (r.result === 'void' || r.result === 'push') cur.voids = (cur.voids || 0) + 1;
+        else cur.pending++;
+        cur.profit_reais += Number(r.profit_reais) || 0;
+        cur.stake_reais += Number(r.stake_reais) || 0;
+        if (r.clv_odds && r.clv_odds > 1 && r.odds > 1) {
+          cur.clv_sum += (r.odds / r.clv_odds - 1) * 100;
+          cur.clv_n++;
+        }
+        if (Number.isFinite(r.model_p_pick) && r.model_p_pick > 0 && r.model_p_pick < 1) {
+          cur.expected_pp = (cur.expected_pp || 0) + r.model_p_pick * 100;
+          cur.expected_n = (cur.expected_n || 0) + 1;
+        }
+      };
       for (const r of dedupedRows) {
         // bucket por odd
         const od = Number(r.odds) || 0;
@@ -23243,16 +23258,15 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
           cur = { league: lg, n: 0, wins: 0, losses: 0, pending: 0, profit_reais: 0, stake_reais: 0, clv_n: 0, clv_sum: 0 };
           byLeague.set(lg, cur);
         }
-        cur.n++;
-        if (r.result === 'win') cur.wins++;
-        else if (r.result === 'loss') cur.losses++;
-        else if (!r.result) cur.pending++;
-        cur.profit_reais += Number(r.profit_reais) || 0;
-        cur.stake_reais += Number(r.stake_reais) || 0;
-        if (r.clv_odds && r.clv_odds > 1 && r.odds > 1) {
-          cur.clv_sum += (r.odds / r.clv_odds - 1) * 100;
-          cur.clv_n++;
+        accumBucket(cur, r);
+        // bucket por market_type (ML, handicapGames, totalGames, total_kills_mapN, etc.)
+        const mk = String(r.market_type || 'ML').toUpperCase();
+        let mcur = byMarket.get(mk);
+        if (!mcur) {
+          mcur = { market_type: mk, n: 0, wins: 0, losses: 0, pending: 0, profit_reais: 0, stake_reais: 0, clv_n: 0, clv_sum: 0 };
+          byMarket.set(mk, mcur);
         }
+        accumBucket(mcur, r);
       }
       const oddBucketsOut = byOdd.map(b => {
         const dec = b.wins + b.losses;
@@ -23264,18 +23278,61 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
           profit_reais: +b.profit_reais.toFixed(2),
         };
       });
+      // Aplica os mesmos 5 checks per-bucket pra dar veredicto granular.
+      const bucketReadiness = (b) => {
+        const dec = b.wins + b.losses;
+        const wr = dec > 0 ? +(b.wins / dec * 100).toFixed(2) : null;
+        const expPct = b.expected_n ? +(b.expected_pp / b.expected_n).toFixed(2) : null;
+        const calibGap = (wr != null && expPct != null) ? +(wr - expPct).toFixed(2) : null;
+        const r = b.stake_reais > 0 ? +(b.profit_reais / b.stake_reais * 100).toFixed(2) : null;
+        const c = b.clv_n > 0 ? +(b.clv_sum / b.clv_n).toFixed(2) : null;
+        const checks = {
+          volume: dec >= minN,
+          roi: r != null && r >= minRoi,
+          clv: c != null && c >= minClv,
+          clv_samples: (b.clv_n || 0) >= minClvSamples,
+          calibration: calibGap == null || calibGap >= -maxCalibGap,
+        };
+        const passed = Object.values(checks).filter(Boolean).length;
+        const score = +(passed / Object.keys(checks).length).toFixed(2);
+        const ready = passed === Object.keys(checks).length;
+        const action = ready ? 'PROMOTE'
+                     : dec < minN ? 'WAIT_VOLUME'
+                     : (r != null && r < -3) ? 'INVESTIGATE_LEAK'
+                     : 'WAIT';
+        return { win_rate_pct: wr, expected_win_pct: expPct, calibration_gap_pp: calibGap, roi_pct: r, avg_clv_pct: c, score, ready_to_promote: ready, action };
+      };
       const leagueOut = Array.from(byLeague.values())
         .sort((a, b) => b.n - a.n)
         .slice(0, 12)
         .map(l => {
-          const dec = l.wins + l.losses;
+          const v = bucketReadiness(l);
           return {
             league: l.league,
             n: l.n, wins: l.wins, losses: l.losses, pending: l.pending,
-            win_rate_pct: dec > 0 ? +(l.wins / dec * 100).toFixed(1) : null,
-            roi_pct: l.stake_reais > 0 ? +(l.profit_reais / l.stake_reais * 100).toFixed(2) : null,
-            avg_clv_pct: l.clv_n > 0 ? +(l.clv_sum / l.clv_n).toFixed(2) : null,
+            win_rate_pct: v.win_rate_pct,
+            expected_win_pct: v.expected_win_pct,
+            calibration_gap_pp: v.calibration_gap_pp,
+            roi_pct: v.roi_pct,
+            avg_clv_pct: v.avg_clv_pct,
             clv_n: l.clv_n,
+            score: v.score, action: v.action, ready_to_promote: v.ready_to_promote,
+          };
+        });
+      const marketOut = Array.from(byMarket.values())
+        .sort((a, b) => b.n - a.n)
+        .map(m => {
+          const v = bucketReadiness(m);
+          return {
+            market_type: m.market_type,
+            n: m.n, wins: m.wins, losses: m.losses, pending: m.pending,
+            win_rate_pct: v.win_rate_pct,
+            expected_win_pct: v.expected_win_pct,
+            calibration_gap_pp: v.calibration_gap_pp,
+            roi_pct: v.roi_pct,
+            avg_clv_pct: v.avg_clv_pct,
+            clv_n: m.clv_n,
+            score: v.score, action: v.action, ready_to_promote: v.ready_to_promote,
           };
         });
 
@@ -23332,7 +23389,7 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
           avg_pct: avgClv,
           coverage_pct: clvCoverage,
         },
-        buckets: { by_odd: oddBucketsOut, by_league: leagueOut },
+        buckets: { by_odd: oddBucketsOut, by_league: leagueOut, by_market: marketOut },
         criteria: { min_n: minN, min_roi_pct: minRoi, min_clv_pct: minClv, min_clv_samples: minClvSamples, max_calib_gap_pp: maxCalibGap },
         checks,
       });
