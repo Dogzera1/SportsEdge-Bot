@@ -7272,9 +7272,24 @@ setInterval(load, 10000);
       // Match-up via norm names + same date window. Fallback: incluir ambos sem dedup
       // perfeito pra sample inicial (pode ter dup; fix depois quando tiver dados).
       const _norm = (s) => String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]/g, '');
+      // 2026-05-05: ESPN devolve às vezes 2 events distintos pro mesmo matchup
+      // (eventId 401871326 + 327, ambos OKC@LAL) — playoff series com G5+G6 no
+      // window daysAhead, OU bug de feed cross-date. O scanner trata como tips
+      // separadas (mesma odd da Pinnacle) inflando volume em 2x. Dedupe upcoming
+      // por (norm(home), norm(away)) mantendo o startIso mais cedo.
+      const _upcomingDedup = new Map();
+      for (const m of (upcoming || [])) {
+        const k = `${_norm(m.home)}|${_norm(m.away)}`;
+        const cur = _upcomingDedup.get(k);
+        if (!cur) { _upcomingDedup.set(k, m); continue; }
+        const aT = Date.parse(m.startIso || '') || Infinity;
+        const bT = Date.parse(cur.startIso || '') || Infinity;
+        if (aT < bT) _upcomingDedup.set(k, m);
+      }
+      const upcomingDeduped = Array.from(_upcomingDedup.values());
       const out = [];
       const seen = new Set();
-      for (const m of upcoming) {
+      for (const m of upcomingDeduped) {
         const oddsM = oddsMatches.find(o =>
           (_norm(o.team1) === _norm(m.home) && _norm(o.team2) === _norm(m.away))
           || (_norm(o.team1) === _norm(m.away) && _norm(o.team2) === _norm(m.home))
@@ -7813,9 +7828,35 @@ setInterval(load, 10000);
       const settled = wins + losses;
       const winRate = settled > 0 ? +(wins / settled * 100).toFixed(1) : null;
       const avgClvPct = clvN > 0 ? +(clvSum / clvN).toFixed(2) : null;
+      // 2026-05-05: dedup por (match_id, tip_participant) pra winRate honesto —
+      // shadow puro mode pode gravar mesma tip N vezes (tracking de odd evolution),
+      // mas pra aferir performance só interessa o resultado único do evento.
+      const _byEvent = new Map();
+      for (const r of rows) {
+        const k = `${r.match_id}|${(r.tip_participant || '').toLowerCase()}`;
+        const cur = _byEvent.get(k);
+        const score = r.result === 'win' ? 3 : r.result === 'loss' ? 3 : r.result === 'void' ? 2 : 1;
+        const curScore = cur ? (cur.result === 'win' ? 3 : cur.result === 'loss' ? 3 : cur.result === 'void' ? 2 : 1) : 0;
+        if (!cur || score > curScore) _byEvent.set(k, r);
+      }
+      let dWins = 0, dLosses = 0, dVoids = 0, dPending = 0;
+      for (const r of _byEvent.values()) {
+        if (r.result === 'win') dWins++;
+        else if (r.result === 'loss') dLosses++;
+        else if (r.result === 'void') dVoids++;
+        else dPending++;
+      }
+      const dSettled = dWins + dLosses;
+      const dWinRate = dSettled > 0 ? +(dWins / dSettled * 100).toFixed(1) : null;
       sendJson(res, {
         sport,
         summary: { total: rows.length, wins, losses, voids, pending, winRate, avgClvPct, clvSamples: clvN },
+        deduped: {
+          unique_events: _byEvent.size,
+          wins: dWins, losses: dLosses, voids: dVoids, pending: dPending,
+          winRate: dWinRate,
+          note: 'dedup por (match_id, tip_participant) — winRate real ignorando re-emits'
+        },
         tips: rows
       });
     } catch (e) {
@@ -18638,10 +18679,36 @@ setInterval(load, 60000);
         // durante migração quando bot.js passou a usar sport='lol'/'dota2' direto.
         // Shadow puro bypass: shadow tips podem duplicar (cada cycle pode logar
         // mesma tip duas vezes — pra rastrear evolução de odds + modelo).
+        // 2026-05-05: SHADOW_DEDUP_FORCE_SPORTS (default 'basket') re-aplica dedup
+        // mesmo em shadow puro pra sports onde queremos amostra limpa pra promoção
+        // (basket fase 1: 1 evento real virava 12 inserts inflando winRate).
+        const _shadowDedupForceList = String(process.env.SHADOW_DEDUP_FORCE_SPORTS ?? 'basket')
+          .toLowerCase().split(',').map(s => s.trim()).filter(Boolean);
+        const _forceDedupForShadow = _isShadowTip && _shadowDedupForceList.includes(String(sport).toLowerCase());
+        const _applyDedup = !_bypassFiltersForShadow || _forceDedupForShadow;
         const { sportSet: dupeSportSet } = (typeof resolveSportSet === 'function')
           ? resolveSportSet(sport, null) : { sportSet: [sport] };
         const dupePlaceholders = dupeSportSet.map(() => '?').join(',');
-        const existingCross = !_bypassFiltersForShadow ? db.prepare(
+        // Dedup por pair (match_id + tip_participant + market_type, mesmo bucket)
+        // pra sports forçados em shadow: bloqueia re-emit mesmo pick no mesmo match
+        // mesmo após restart (analyzedBasket Map é in-memory).
+        if (_forceDedupForShadow) {
+          const _pickN = norm(tipParticipant || '');
+          const _marketU = String(t.market_type || 'ML').toUpperCase();
+          const _existShadow = db.prepare(
+            `SELECT id FROM tips
+             WHERE match_id = ? AND sport IN (${dupePlaceholders})
+               AND REPLACE(REPLACE(lower(tip_participant),' ',''),'-','') = ?
+               AND upper(COALESCE(market_type,'ML')) = ?
+               AND (archived IS NULL OR archived = 0)
+             LIMIT 1`
+          ).get(String(matchId), ...dupeSportSet, _pickN, _marketU);
+          if (_existShadow) {
+            _emitSkip('shadow_dedup_same_pick', { existing_id: _existShadow.id });
+            return;
+          }
+        }
+        const existingCross = _applyDedup && !_forceDedupForShadow ? db.prepare(
           `SELECT id, sport FROM tips WHERE match_id = ? AND sport IN (${dupePlaceholders})
            AND (archived IS NULL OR archived = 0) LIMIT 1`
         ).get(String(matchId), ...dupeSportSet) : null;

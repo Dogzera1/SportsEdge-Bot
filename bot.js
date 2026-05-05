@@ -20062,6 +20062,17 @@ async function runAutoBasket() {
         continue;
       }
 
+      // 2026-05-05: longshot trap — LAL @ 9.16 com pickP=0.163 (modelo dá 16%
+      // mas mercado precifica 11%, gerando EV "sintético" de 50%). Padrão clássico
+      // de underdog NBA que sangra ROI na realização. Cap default 5.0 (cobre
+      // dogs honestos tipo Wizards@Heat sem deixar entrar moonshot G7 underdog).
+      const maxOdd = parseFloat(process.env.BASKET_MAX_ODD || '5.0');
+      if (pickOdd > maxOdd) {
+        analyzedBasket.set(key, { ts: now, tipSent: false });
+        log('INFO', 'AUTO-BASKET', `Longshot cap: ${pickTeam} @ ${pickOdd} > ${maxOdd} (P=${(pickP*100).toFixed(1)}% EV=${evPct.toFixed(1)}%)`);
+        continue;
+      }
+
       // Bucket gate
       try {
         const _bk = require('./lib/odds-bucket-gate').isBucketBlocked('basket', pickOdd);
@@ -22711,7 +22722,7 @@ async function checkCLV(caches = {}) {
         id === 'esports' || id === 'lol' || id === 'dota2' ||
         id === 'cs' || id === 'valorant' ||
         id === 'football' || id === 'tennis' || id === 'mma' ||
-        id === 'darts' || id === 'snooker'
+        id === 'darts' || id === 'snooker' || id === 'basket'
       ))
       .map(([id]) => id);
     // 'lol'/'dota2' podem não estar em SPORTS (split bucket pós-Abr/2026) mas tips
@@ -22838,6 +22849,21 @@ async function checkCLV(caches = {}) {
         const cacheKey = sport === 'lol' ? 'esports' : 'dota';
         const matches = caches[cacheKey] || await serverGet(endpoint).catch(() => []);
         caches[cacheKey] = matches;
+        if (Array.isArray(matches)) {
+          for (const m of matches) {
+            if (m.time) {
+              const k1 = norm(m.team1 || '') + '_' + norm(m.team2 || '');
+              const k2 = norm(m.team2 || '') + '_' + norm(m.team1 || '');
+              const ts = new Date(m.time).getTime();
+              matchTimeMap[k1] = ts;
+              matchTimeMap[k2] = ts;
+              if (m.id) matchTimeMap[String(m.id)] = ts;
+            }
+          }
+        }
+      } else if (sport === 'basket') {
+        const matches = caches.basket || await serverGet('/basket-matches').catch(() => []);
+        caches.basket = matches;
         if (Array.isArray(matches)) {
           for (const m of matches) {
             if (m.time) {
@@ -23000,6 +23026,24 @@ async function checkCLV(caches = {}) {
           const o = await serverGet(`/odds?team1=${encodeURIComponent(tip.participant1)}&team2=${encodeURIComponent(tip.participant2)}&game=dota2`).catch(() => null);
           if (isFreshOdds(o)) {
             clvOdds = (norm(tip.tip_participant) === norm(tip.participant1)) ? o.t1 : o.t2;
+          }
+        } else if (sport === 'basket') {
+          // 2026-05-05: CLV pra NBA shadow tips. /basket-matches retorna odds.t1/t2
+          // (Pinnacle/TheOdds API merged). Skip MT (kills/totals) — esses passam por
+          // capturePromotedMtTipsClv via match_id sintético ::mt::.
+          const mtKind = String(tip.market_type || 'ML').toUpperCase();
+          if (mtKind === 'ML') {
+            const list = Array.isArray(caches.basket) ? caches.basket : [];
+            const p1n = norm(tip.participant1 || ''), p2n = norm(tip.participant2 || '');
+            const m = list.find(x => {
+              const a1 = norm(x.team1 || ''), a2 = norm(x.team2 || '');
+              return (a1 === p1n && a2 === p2n) || (a1 === p2n && a2 === p1n);
+            });
+            if (m?.odds?.t1 && m?.odds?.t2) {
+              const pickN = norm(tip.tip_participant || '');
+              const a1 = norm(m.team1 || '');
+              clvOdds = pickN === a1 ? m.odds.t1 : m.odds.t2;
+            }
           }
         }
 
