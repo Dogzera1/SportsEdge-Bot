@@ -22934,25 +22934,39 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
     const daysRaw = parseInt(parsed.query.days);
     const days = Number.isFinite(daysRaw) ? Math.max(1, Math.min(365, daysRaw)) : 30;
     try {
+      // 2026-05-05: dedup por (sport, match_id, tip_participant, market_type)
+      // pra contar 1 evento por par tip+pick, não cada re-emission do shadow puro
+      // mode (basket fase 1 inflava 1 jogo real em ~12 inserts → winRate 71%
+      // sintético). Mantém a linha de MAX(id) — a mais recente, com result final
+      // se já settled. Profit/stake também batem porque vêm da row settled.
       const rows = db.prepare(`
-        SELECT sport,
+        WITH dedup AS (
+          SELECT MAX(id) AS id
+          FROM tips
+          WHERE is_shadow = 1
+            AND (archived IS NULL OR archived = 0)
+            AND (market_type IS NULL OR market_type = 'ML')
+            AND (sent_at >= datetime('now', ?) OR result IS NULL)
+          GROUP BY sport,
+                   COALESCE(NULLIF(TRIM(match_id), ''), 'id:' || CAST(id AS TEXT)),
+                   REPLACE(REPLACE(lower(COALESCE(tip_participant, '')), ' ', ''), '-', ''),
+                   UPPER(COALESCE(market_type, 'ML'))
+        )
+        SELECT t.sport,
                COUNT(*) AS n,
-               SUM(CASE WHEN result='win' THEN 1 ELSE 0 END) AS wins,
-               SUM(CASE WHEN result='loss' THEN 1 ELSE 0 END) AS losses,
-               SUM(CASE WHEN result='push' THEN 1 ELSE 0 END) AS pushes,
-               SUM(CASE WHEN result IS NULL THEN 1 ELSE 0 END) AS pending,
-               SUM(COALESCE(profit_reais, 0)) AS profit_r,
-               SUM(COALESCE(stake_reais, 0)) AS stake_r,
-               AVG(odds) AS avg_odds,
-               AVG(ev) AS avg_ev,
-               AVG(CASE WHEN clv_odds > 1 AND odds > 1 THEN (odds / clv_odds - 1) * 100 END) AS avg_clv,
-               SUM(CASE WHEN clv_odds > 1 AND odds > 1 THEN 1 ELSE 0 END) AS clv_n
-        FROM tips
-        WHERE is_shadow = 1
-          AND (archived IS NULL OR archived = 0)
-          AND (market_type IS NULL OR market_type = 'ML')
-          AND (sent_at >= datetime('now', ?) OR result IS NULL)
-        GROUP BY sport
+               SUM(CASE WHEN t.result='win' THEN 1 ELSE 0 END) AS wins,
+               SUM(CASE WHEN t.result='loss' THEN 1 ELSE 0 END) AS losses,
+               SUM(CASE WHEN t.result='push' THEN 1 ELSE 0 END) AS pushes,
+               SUM(CASE WHEN t.result IS NULL THEN 1 ELSE 0 END) AS pending,
+               SUM(COALESCE(t.profit_reais, 0)) AS profit_r,
+               SUM(COALESCE(t.stake_reais, 0)) AS stake_r,
+               AVG(t.odds) AS avg_odds,
+               AVG(t.ev) AS avg_ev,
+               AVG(CASE WHEN t.clv_odds > 1 AND t.odds > 1 THEN (t.odds / t.clv_odds - 1) * 100 END) AS avg_clv,
+               SUM(CASE WHEN t.clv_odds > 1 AND t.odds > 1 THEN 1 ELSE 0 END) AS clv_n
+        FROM tips t
+        JOIN dedup d ON d.id = t.id
+        GROUP BY t.sport
         ORDER BY n DESC
       `).all(`-${days} days`);
 

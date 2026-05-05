@@ -3024,8 +3024,8 @@ async function loadMlShadowBySport() {
     return;
   }
 
-  const sportEmoji = { lol:'🎮', dota2:'🎮', cs:'🔫', valorant:'🎯', tennis:'🎾', football:'⚽', mma:'🥊', darts:'🎯', snooker:'🎱', tabletennis:'🏓' };
-  const sportLabel = { lol:'LoL', dota2:'Dota2', cs:'CS2', valorant:'Valorant', tennis:'Tênis', football:'Futebol', mma:'MMA', darts:'Darts', snooker:'Snooker', tabletennis:'Table Tennis' };
+  const sportEmoji = { lol:'🎮', dota2:'🎮', cs:'🔫', valorant:'🎯', tennis:'🎾', football:'⚽', mma:'🥊', darts:'🎯', snooker:'🎱', tabletennis:'🏓', basket:'🏀' };
+  const sportLabel = { lol:'LoL', dota2:'Dota2', cs:'CS2', valorant:'Valorant', tennis:'Tênis', football:'Futebol', mma:'MMA', darts:'Darts', snooker:'Snooker', tabletennis:'Table Tennis', basket:'Basket (NBA)' };
 
   const fmtOrDash = (v, prec = 1) => v == null ? '—' : (v >= 0 ? '+' : '') + v.toFixed(prec) + '%';
   const fmtProfit = v => v == null ? '—' : (v >= 0 ? '+' : '') + 'R$ ' + v.toFixed(2);
@@ -3128,7 +3128,7 @@ function renderMlShadowTipsList() {
   const end = Math.min(start + perPage, allTips.length);
   const pageTips = allTips.slice(start, end);
 
-  const sportEmoji = { lol:'🎮', dota2:'🎮', cs:'🔫', valorant:'🎯', tennis:'🎾', football:'⚽', mma:'🥊', darts:'🎯', snooker:'🎱', tabletennis:'🏓' };
+  const sportEmoji = { lol:'🎮', dota2:'🎮', cs:'🔫', valorant:'🎯', tennis:'🎾', football:'⚽', mma:'🥊', darts:'🎯', snooker:'🎱', tabletennis:'🏓', basket:'🏀' };
   const resultBadge = r => r === 'win' ? '<span style="color:#16a34a">✓</span>'
     : r === 'loss' ? '<span style="color:#dc2626">✗</span>'
     : r === 'void' ? '<span style="color:#ca8a04">−</span>'
