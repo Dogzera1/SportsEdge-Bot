@@ -15187,6 +15187,170 @@ setInterval(load, 60000);
     return;
   }
 
+  // GET /admin/mt-shadow-comprehensive-audit?days=30&minN=10&key=<KEY>
+  // Auditoria completa MT shadow: performance por (sport,market,side),
+  // detecção de promotion candidates + leaks + config gaps.
+  if (p === '/admin/mt-shadow-comprehensive-audit') {
+    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const days = Math.max(7, Math.min(180, parseInt(parsed.query.days || '30', 10) || 30));
+    const minN = Math.max(5, Math.min(100, parseInt(parsed.query.minN || '10', 10) || 10));
+    try {
+      const buckets = db.prepare(`
+        SELECT
+          sport, market,
+          COALESCE(side, 'na') AS side,
+          COUNT(*) AS n_total,
+          SUM(CASE WHEN result = 'win' THEN 1 ELSE 0 END) AS n_win,
+          SUM(CASE WHEN result = 'loss' THEN 1 ELSE 0 END) AS n_loss,
+          SUM(CASE WHEN result = 'void' THEN 1 ELSE 0 END) AS n_void,
+          SUM(CASE WHEN result IS NULL THEN 1 ELSE 0 END) AS n_pending,
+          ROUND(SUM(CASE WHEN result IN ('win','loss') THEN COALESCE(stake_units,1) ELSE 0 END), 2) AS total_stake,
+          ROUND(SUM(CASE WHEN result IN ('win','loss') THEN COALESCE(profit_units,0) ELSE 0 END), 2) AS total_profit,
+          ROUND(AVG(CASE WHEN clv_pct IS NOT NULL AND clv_pct BETWEEN -50 AND 50 THEN clv_pct ELSE NULL END), 2) AS avg_clv_pct,
+          ROUND(AVG(CASE WHEN result IN ('win','loss') THEN ev_pct ELSE NULL END), 1) AS avg_ev_pct,
+          ROUND(AVG(CASE WHEN result IN ('win','loss') THEN odd ELSE NULL END), 2) AS avg_odd,
+          MIN(created_at) AS oldest,
+          MAX(created_at) AS newest
+          FROM market_tips_shadow
+         WHERE created_at >= datetime('now', '-' || ? || ' days')
+         GROUP BY sport, market, COALESCE(side, 'na')
+         HAVING SUM(CASE WHEN result IN ('win','loss') THEN 1 ELSE 0 END) >= ?
+         ORDER BY total_profit DESC
+      `).all(days, minN);
+
+      const enriched = buckets.map(b => {
+        const settled = (b.n_win || 0) + (b.n_loss || 0);
+        const hitRate = settled > 0 ? (b.n_win / settled) : 0;
+        const roi = b.total_stake > 0 ? (b.total_profit / b.total_stake) * 100 : 0;
+        return { ...b, n_settled: settled, hit_rate: +(hitRate * 100).toFixed(1),
+                 roi_pct: +roi.toFixed(2) };
+      });
+
+      const promotionMinN = Math.max(20, parseInt(process.env.MT_PROMOTE_MIN_N || '30', 10));
+      const promotionMinRoi = parseFloat(process.env.MT_PROMOTE_MIN_ROI || '0');
+      const promotionMinClv = parseFloat(process.env.MT_PROMOTE_MIN_CLV || '0');
+      const promotionCandidates = enriched.filter(b =>
+        b.n_settled >= promotionMinN
+        && b.roi_pct >= promotionMinRoi
+        && (b.avg_clv_pct == null || b.avg_clv_pct >= promotionMinClv)
+      );
+
+      const leakMinN = Math.max(15, parseInt(process.env.MT_LEAK_MIN_N || '20', 10));
+      const leakRoiThreshold = parseFloat(process.env.MT_LEAK_ROI_THRESHOLD || '-10');
+      const leakClvThreshold = parseFloat(process.env.MT_LEAK_CLV_THRESHOLD || '-5');
+      const leakCandidates = enriched.filter(b =>
+        b.n_settled >= leakMinN
+        && (b.roi_pct < leakRoiThreshold || (b.avg_clv_pct != null && b.avg_clv_pct < leakClvThreshold))
+      );
+
+      const bySport = db.prepare(`
+        SELECT
+          sport,
+          COUNT(*) AS n_total,
+          SUM(CASE WHEN result = 'win' THEN 1 ELSE 0 END) AS n_win,
+          SUM(CASE WHEN result = 'loss' THEN 1 ELSE 0 END) AS n_loss,
+          SUM(CASE WHEN result = 'void' THEN 1 ELSE 0 END) AS n_void,
+          SUM(CASE WHEN result IS NULL THEN 1 ELSE 0 END) AS n_pending,
+          ROUND(SUM(CASE WHEN result IN ('win','loss') THEN COALESCE(stake_units,1) ELSE 0 END), 2) AS total_stake,
+          ROUND(SUM(CASE WHEN result IN ('win','loss') THEN COALESCE(profit_units,0) ELSE 0 END), 2) AS total_profit,
+          ROUND(AVG(CASE WHEN clv_pct IS NOT NULL AND clv_pct BETWEEN -50 AND 50 THEN clv_pct ELSE NULL END), 2) AS avg_clv_pct,
+          ROUND(AVG(CASE WHEN result IN ('win','loss') THEN ev_pct ELSE NULL END), 1) AS avg_ev_pct
+          FROM market_tips_shadow
+         WHERE created_at >= datetime('now', '-' || ? || ' days')
+         GROUP BY sport
+         ORDER BY total_profit DESC
+      `).all(days).map(s => {
+        const settled = (s.n_win || 0) + (s.n_loss || 0);
+        const hitRate = settled > 0 ? (s.n_win / settled) : 0;
+        const roi = s.total_stake > 0 ? (s.total_profit / s.total_stake) * 100 : 0;
+        return { ...s, n_settled: settled, hit_rate: +(hitRate * 100).toFixed(1),
+                 roi_pct: +roi.toFixed(2) };
+      });
+
+      const sports = ['lol','dota2','cs2','valorant','tennis','football','mma','basket'];
+      const config = {};
+      for (const sp of sports) {
+        const up = sp.toUpperCase();
+        const aliasEnv = { DOTA2: 'DOTA', CS2: 'CS' }[up];
+        const promoteEnabled = process.env[`${up}_MARKET_TIPS_ENABLED`] === 'true'
+          || (aliasEnv && process.env[`${aliasEnv}_MARKET_TIPS_ENABLED`] === 'true');
+        const shadowOnlyEnv = process.env[`${up}_MT_SHADOW_ONLY`];
+        const shadowOnly = shadowOnlyEnv ? !/^(0|false|no)$/i.test(String(shadowOnlyEnv)) : null;
+        config[sp] = { promote_enabled: promoteEnabled, shadow_only: shadowOnly };
+      }
+      const blocklistEnv = String(process.env.MT_PERMANENT_DISABLE_LIST ?? 'tennis|totalGames|over,lol|total').trim();
+      const blocklist = blocklistEnv.split(',').map(s => s.trim()).filter(Boolean);
+
+      let runtimeDisables = [];
+      try {
+        runtimeDisables = db.prepare(`
+          SELECT sport, market, side, disabled_reason, disabled_at
+            FROM market_tips_runtime_state
+           WHERE disabled = 1
+           ORDER BY disabled_at DESC LIMIT 50
+        `).all();
+      } catch (_) { /* tabela pode não existir em DB antigo */ }
+
+      const recommendations = [];
+      for (const sp of sports) {
+        if (config[sp].promote_enabled) continue;
+        const candidatesThisSport = promotionCandidates.filter(b => b.sport === sp);
+        if (candidatesThisSport.length > 0) {
+          const top = candidatesThisSport[0];
+          recommendations.push({
+            severity: 'promote',
+            action: `Habilitar ${sp.toUpperCase()}_MARKET_TIPS_ENABLED=true`,
+            evidence: `${candidatesThisSport.length} bucket(s) ROI≥${promotionMinRoi}%+CLV≥${promotionMinClv}%; top: ${top.market}/${top.side} ROI=${top.roi_pct}% CLV=${top.avg_clv_pct ?? 'n/a'}% n=${top.n_settled}`,
+          });
+        }
+      }
+      for (const leak of leakCandidates) {
+        recommendations.push({
+          severity: 'leak',
+          action: `Considerar disable ${leak.sport}/${leak.market}/${leak.side} ou auto-runtime block`,
+          evidence: `ROI=${leak.roi_pct}% CLV=${leak.avg_clv_pct ?? 'n/a'}% hit=${leak.hit_rate}% n=${leak.n_settled}`,
+        });
+      }
+      for (const block of blocklist) {
+        const parts = block.split('|');
+        if (parts.length !== 3) continue;
+        const [bSport, bMarket, bSide] = parts;
+        const stillBleed = enriched.find(b =>
+          b.sport === bSport && b.market === bMarket && b.side === bSide
+        );
+        if (stillBleed && stillBleed.roi_pct >= 5) {
+          recommendations.push({
+            severity: 'review_blocklist',
+            action: `Revisitar blocklist ${bSport}|${bMarket}|${bSide}: ROI agora ${stillBleed.roi_pct}% (recovered?)`,
+            evidence: `n=${stillBleed.n_settled} hit=${stillBleed.hit_rate}% CLV=${stillBleed.avg_clv_pct ?? 'n/a'}%`,
+          });
+        }
+      }
+
+      sendJson(res, {
+        ok: true, days, minN,
+        thresholds: {
+          promotion: { minN: promotionMinN, minRoi: promotionMinRoi, minClv: promotionMinClv },
+          leak: { minN: leakMinN, roiBelow: leakRoiThreshold, clvBelow: leakClvThreshold },
+        },
+        n_buckets: enriched.length,
+        n_promotion_candidates: promotionCandidates.length,
+        n_leak_candidates: leakCandidates.length,
+        n_recommendations: recommendations.length,
+        by_sport: bySport,
+        promotion_candidates: promotionCandidates,
+        leak_candidates: leakCandidates,
+        all_buckets: enriched,
+        config,
+        blocklist,
+        runtime_disables: runtimeDisables,
+        recommendations,
+      });
+    } catch (e) { sendJson(res, { ok: false, error: e.message, stack: e.stack?.slice(0, 500) }, 500); }
+    return;
+  }
+
   // GET /admin/mt-shadow-audit?days=14&sport=tennis&apply=0&key=<KEY>
   // Re-computa o result esperado de cada shadow row settled e compara com o
   // stored. Mismatches = bugs históricos. apply=1 reverte os mismatches pra
