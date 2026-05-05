@@ -23016,7 +23016,8 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
   // + boolean ready_to_promote com reasons. Toda a math usa dedup por
   // (match_id, tip_participant, market_type) — espelha /shadow-tips dedup block.
   if (p === '/shadow-readiness') {
-    const sport = String(parsed.query.sport || 'basket').toLowerCase();
+    const sportRaw = String(parsed.query.sport || 'all').toLowerCase();
+    const isAll = sportRaw === 'all' || sportRaw === '*' || sportRaw === '__overall__';
     const daysRaw = parseInt(parsed.query.days);
     const days = Number.isFinite(daysRaw) ? Math.max(1, Math.min(365, daysRaw)) : 30;
 
@@ -23026,6 +23027,123 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
     const minClv = parseFloat(parsed.query.min_clv || process.env.SHADOW_READINESS_MIN_CLV_PCT || '0');
     const minClvSamples = parseInt(parsed.query.min_clv_samples || process.env.SHADOW_READINESS_MIN_CLV_SAMPLES || '10', 10);
     const maxCalibGap = parseFloat(parsed.query.max_calib_gap || process.env.SHADOW_READINESS_MAX_CALIB_GAP_PP || '5');
+
+    // sport=all: detecta sports com is_shadow=1 na janela e retorna array
+    // ranqueado por score (proximidade de promoção). Sem dropdown obrigatório.
+    if (isAll) {
+      try {
+        const sportsWithShadow = db.prepare(`
+          SELECT sport, COUNT(*) AS n
+          FROM tips
+          WHERE is_shadow = 1
+            AND (archived IS NULL OR archived = 0)
+            AND (sent_at >= datetime('now', ?) OR result IS NULL)
+          GROUP BY sport
+          HAVING n > 0
+          ORDER BY n DESC
+        `).all(`-${days} days`);
+
+        const items = [];
+        for (const sp of sportsWithShadow) {
+          const subUrl = `/shadow-readiness?sport=${encodeURIComponent(sp.sport)}&days=${days}` +
+            (parsed.query.min_n ? `&min_n=${parsed.query.min_n}` : '') +
+            (parsed.query.min_roi ? `&min_roi=${parsed.query.min_roi}` : '') +
+            (parsed.query.min_clv ? `&min_clv=${parsed.query.min_clv}` : '');
+          // Inline call em vez de HTTP — chama recursivamente mock req/res não vale
+          // a pena. Replica logic via helper inline below (mais simples + 0 overhead).
+          // (helper será extraído quando for refatorar — por enquanto duplica com per_sport)
+          items.push({ sport: sp.sport, raw_n: sp.n, _placeholder: true });
+        }
+        // Substitui placeholders chamando o handler com cada sport (loop in-process).
+        // Pra evitar duplicar 200 LoC, vamos delegar usando uma função helper que extraio
+        // do bloco per-sport abaixo. Quick path: monta resposta simples com counts e
+        // deixa cliente fazer drill-down via sport=X.
+        // Per-sport snapshot SQL (volume + ROI + CLV num único pass):
+        const snapshot = db.prepare(`
+          WITH dedup AS (
+            SELECT MAX(id) AS id
+            FROM tips
+            WHERE is_shadow = 1
+              AND (archived IS NULL OR archived = 0)
+              AND (sent_at >= datetime('now', ?) OR result IS NULL)
+            GROUP BY sport,
+                     COALESCE(NULLIF(TRIM(match_id), ''), 'id:' || CAST(id AS TEXT)),
+                     REPLACE(REPLACE(lower(COALESCE(tip_participant, '')), ' ', ''), '-', ''),
+                     UPPER(COALESCE(market_type, 'ML'))
+          )
+          SELECT t.sport,
+                 COUNT(*) AS unique_events,
+                 SUM(CASE WHEN t.result='win' THEN 1 ELSE 0 END) AS wins,
+                 SUM(CASE WHEN t.result='loss' THEN 1 ELSE 0 END) AS losses,
+                 SUM(CASE WHEN t.result IS NULL THEN 1 ELSE 0 END) AS pending,
+                 SUM(COALESCE(t.profit_reais, 0)) AS profit_r,
+                 SUM(COALESCE(t.stake_reais, 0)) AS stake_r,
+                 AVG(CASE WHEN t.clv_odds > 1 AND t.odds > 1 THEN (t.odds / t.clv_odds - 1) * 100 END) AS avg_clv,
+                 SUM(CASE WHEN t.clv_odds > 1 AND t.odds > 1 THEN 1 ELSE 0 END) AS clv_n,
+                 AVG(CASE WHEN t.model_p_pick > 0 AND t.model_p_pick < 1 THEN t.model_p_pick * 100 END) AS expected_win_pp
+          FROM tips t
+          JOIN dedup d ON d.id = t.id
+          WHERE (t.market_type IS NULL OR UPPER(t.market_type) = 'ML')
+          GROUP BY t.sport
+          ORDER BY unique_events DESC
+        `).all(`-${days} days`);
+
+        const perSport = snapshot.map(r => {
+          const settled = (r.wins || 0) + (r.losses || 0);
+          const winRatePct = settled > 0 ? +(r.wins / settled * 100).toFixed(2) : null;
+          const expectedPp = r.expected_win_pp != null ? +r.expected_win_pp.toFixed(2) : null;
+          const calibGap = (winRatePct != null && expectedPp != null) ? +(winRatePct - expectedPp).toFixed(2) : null;
+          const roi = r.stake_r > 0 ? +(r.profit_r / r.stake_r * 100).toFixed(2) : null;
+          const avgClv = r.avg_clv != null ? +r.avg_clv.toFixed(2) : null;
+          const checks = {
+            volume: settled >= minN,
+            roi: roi != null && roi >= minRoi,
+            clv: avgClv != null && avgClv >= minClv,
+            clv_samples: (r.clv_n || 0) >= minClvSamples,
+            calibration: calibGap == null || calibGap >= -maxCalibGap,
+          };
+          const passed = Object.values(checks).filter(Boolean).length;
+          const score = +(passed / Object.keys(checks).length).toFixed(2);
+          const ready = passed === Object.keys(checks).length;
+          const action = ready ? 'PROMOTE'
+                       : settled < minN ? 'WAIT_VOLUME'
+                       : (roi != null && roi < -3) ? 'INVESTIGATE_LEAK'
+                       : 'WAIT';
+          return {
+            sport: r.sport,
+            unique_events: r.unique_events,
+            wins: r.wins, losses: r.losses, pending: r.pending, settled,
+            win_rate_pct: winRatePct,
+            expected_win_rate_pct: expectedPp,
+            calibration_gap_pp: calibGap,
+            roi_pct: roi,
+            profit_reais: +(r.profit_r || 0).toFixed(2),
+            avg_clv_pct: avgClv,
+            clv_samples: r.clv_n || 0,
+            score, ready_to_promote: ready, action,
+            failed_checks: Object.entries(checks).filter(([_, ok]) => !ok).map(([k]) => k),
+          };
+        });
+        // Rank: PROMOTE primeiro, depois score desc
+        perSport.sort((a, b) => {
+          if (a.ready_to_promote && !b.ready_to_promote) return -1;
+          if (!a.ready_to_promote && b.ready_to_promote) return 1;
+          return b.score - a.score;
+        });
+
+        sendJson(res, {
+          mode: 'all',
+          days,
+          criteria: { min_n: minN, min_roi_pct: minRoi, min_clv_pct: minClv, min_clv_samples: minClvSamples, max_calib_gap_pp: maxCalibGap },
+          per_sport: perSport,
+        });
+      } catch (e) {
+        sendJson(res, { error: e.message }, 500);
+      }
+      return;
+    }
+
+    const sport = sportRaw;
 
     try {
       const { sportSet } = (typeof resolveSportSet === 'function')

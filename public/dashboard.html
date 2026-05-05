@@ -3031,10 +3031,90 @@ async function loadShadow() {
 
 // 2026-05-05: Promotion Readiness — veredicto consolidado per sport.
 // Substitui chamadas separadas a /shadow-vs-active + /ml-shadow-by-sport.
-// Mostra: badge READY/WAIT/INVESTIGATE, score 0..1, checks falhando,
-// calibração realized vs expected, buckets por odd, top ligas com leak.
+// Modo default: cross-sport ranqueado (sport=all). Drill-down per sport
+// abrindo cards individuais com badge READY/WAIT/INVESTIGATE + buckets.
+let _shadowReadinessSelectedSport = null;
+
 async function loadShadowReadiness() {
-  const sport = currentSport || 'basket';
+  if (_shadowReadinessSelectedSport) {
+    return loadShadowReadinessDetail(_shadowReadinessSelectedSport);
+  }
+  return loadShadowReadinessOverview();
+}
+
+async function loadShadowReadinessOverview() {
+  const data = await apiFetch('/shadow-readiness?sport=all&days=30');
+  const el = document.getElementById('shadowReadinessBody');
+  const meta = document.getElementById('shadowReadinessMeta');
+  if (!data || data.error) {
+    el.innerHTML = '<div class="empty-state">Sem dados shadow</div>';
+    meta.textContent = '—';
+    return;
+  }
+  const sports = data.per_sport || [];
+  const ready = sports.filter(s => s.ready_to_promote).length;
+  meta.textContent = `${sports.length} sports · ${ready} prontos pra promover`;
+
+  if (!sports.length) {
+    el.innerHTML = '<div class="empty-state">Nenhum sport com tips em shadow nos últimos ' + data.days + 'd</div>';
+    return;
+  }
+
+  const sportEmoji = { lol:'🎮', dota2:'🎮', cs:'🔫', valorant:'🎯', tennis:'🎾', football:'⚽', mma:'🥊', darts:'🎯', snooker:'🎱', tabletennis:'🏓', basket:'🏀' };
+  const sportLabel = { lol:'LoL', dota2:'Dota2', cs:'CS2', valorant:'Valorant', tennis:'Tênis', football:'Futebol', mma:'MMA', darts:'Darts', snooker:'Snooker', tabletennis:'Table Tennis', basket:'Basket (NBA)' };
+
+  const fmtPct = (v, prec=2) => v == null ? '—' : (v >= 0 ? '+' : '') + v.toFixed(prec) + '%';
+  const fmtPp = (v) => v == null ? '—' : (v >= 0 ? '+' : '') + v.toFixed(2) + 'pp';
+  const clsSign = v => v == null ? '' : (v >= 0 ? 'positive' : 'negative');
+  const actionBadge = (a) => {
+    const map = {
+      PROMOTE: { color:'#16a34a', icon:'✅' },
+      INVESTIGATE_LEAK: { color:'#dc2626', icon:'🚨' },
+      WAIT_VOLUME: { color:'#ca8a04', icon:'⏳' },
+      WAIT: { color:'#6b7280', icon:'⏸️' },
+    };
+    const m = map[a] || map.WAIT;
+    return `<span style="background:${m.color};color:#fff;padding:2px 8px;border-radius:3px;font-size:0.78em;font-weight:600">${m.icon} ${a}</span>`;
+  };
+
+  let html = `<div class="card-meta" style="margin-bottom:12px">
+    Cross-sport ranqueado por proximidade de promoção. Critério: n≥${data.criteria.min_n} · ROI≥${data.criteria.min_roi_pct}% · CLV≥${data.criteria.min_clv_pct}% · CLV n≥${data.criteria.min_clv_samples} · gap calib ≥-${data.criteria.max_calib_gap_pp}pp. Click no esporte pra drill-down.
+  </div>`;
+
+  html += `<table class="tips">
+    <thead><tr>
+      <th>Esporte</th>
+      <th style="text-align:center">Action</th>
+      <th style="text-align:right">Score</th>
+      <th style="text-align:right">n (settled)</th>
+      <th style="text-align:right">W/L/P</th>
+      <th style="text-align:right">Hit%</th>
+      <th style="text-align:right">Calib</th>
+      <th style="text-align:right">ROI</th>
+      <th style="text-align:right">CLV (n)</th>
+    </tr></thead><tbody>`;
+
+  for (const s of sports) {
+    const emoji = sportEmoji[s.sport] || '📊';
+    const label = sportLabel[s.sport] || s.sport.toUpperCase();
+    html += `<tr style="cursor:pointer" onclick="event.stopPropagation(); _shadowReadinessSelectedSport='${s.sport}'; loadShadowReadinessDetail('${s.sport}')">
+      <td>${emoji} ${label}</td>
+      <td style="text-align:center">${actionBadge(s.action)}</td>
+      <td style="text-align:right;font-weight:600">${(s.score * 100).toFixed(0)}</td>
+      <td style="text-align:right">${s.settled}<span style="opacity:0.5;font-size:0.85em">/${data.criteria.min_n}</span></td>
+      <td style="text-align:right">${s.wins}/${s.losses}/${s.pending}</td>
+      <td style="text-align:right">${s.win_rate_pct != null ? s.win_rate_pct.toFixed(1) + '%' : '—'}</td>
+      <td style="text-align:right" class="${clsSign(s.calibration_gap_pp)}">${fmtPp(s.calibration_gap_pp)}</td>
+      <td style="text-align:right" class="${clsSign(s.roi_pct)}">${fmtPct(s.roi_pct)}</td>
+      <td style="text-align:right" class="${clsSign(s.avg_clv_pct)}">${fmtPct(s.avg_clv_pct)} <span style="opacity:0.5;font-size:0.85em">(${s.clv_samples})</span></td>
+    </tr>`;
+  }
+  html += `</tbody></table>`;
+
+  el.innerHTML = html;
+}
+
+async function loadShadowReadinessDetail(sport) {
   const data = await apiFetch('/shadow-readiness?sport=' + encodeURIComponent(sport) + '&days=30');
   const el = document.getElementById('shadowReadinessBody');
   const meta = document.getElementById('shadowReadinessMeta');
@@ -3056,15 +3136,19 @@ async function loadShadowReadiness() {
   const badgeIcon = v.action === 'PROMOTE' ? '✅'
                   : v.action === 'INVESTIGATE_LEAK' ? '🚨'
                   : '⏳';
-  meta.textContent = `${vol.unique_events || 0} eventos · score ${(v.score * 100).toFixed(0)}%`;
+  meta.textContent = `${sport} · ${vol.unique_events || 0} eventos · score ${(v.score * 100).toFixed(0)}%`;
 
   const fmtPp = (v) => v == null ? '—' : (v >= 0 ? '+' : '') + v.toFixed(2) + 'pp';
   const fmtPct = (v, prec=2) => v == null ? '—' : (v >= 0 ? '+' : '') + v.toFixed(prec) + '%';
   const fmtNum = (v) => v == null ? '—' : v.toFixed(2);
   const clsSign = v => v == null ? '' : (v >= 0 ? 'positive' : 'negative');
 
-  // ── Header: badge + score gauge ─────────────────────────────────────
+  // ── Header: back button + badge + score gauge ───────────────────────
   let html = `
+    <div style="margin-bottom:10px">
+      <button onclick="_shadowReadinessSelectedSport=null; loadShadowReadinessOverview()" style="background:var(--surface-2,#1e293b);border:1px solid var(--border,#334155);color:var(--text,#e2e8f0);padding:5px 10px;border-radius:4px;font-size:12px;cursor:pointer">← voltar pro overview</button>
+      <span style="margin-left:10px;font-weight:700;font-size:14px">${sport.toUpperCase()}</span>
+    </div>
     <div style="display:flex;align-items:center;gap:18px;flex-wrap:wrap;margin-bottom:14px;padding:14px;background:var(--surface-2,#1e293b);border-radius:8px;border-left:4px solid ${badgeColor}">
       <div style="font-size:28px">${badgeIcon}</div>
       <div style="flex:1;min-width:240px">
