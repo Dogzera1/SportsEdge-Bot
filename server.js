@@ -7838,6 +7838,65 @@ setInterval(load, 10000);
     return;
   }
 
+  // 2026-05-05: diag das sources de tennis settle (ESPN/Sackmann/sofascore).
+  // Mostra contagem em match_results, sample de team1/team2 nomes pra comparar
+  // formato, e timestamp do último upsert. Permite ver se pipeline está vazio
+  // (source quebrada) ou cheio mas com nomes em formato divergente do tip.
+  // GET /admin/tennis-sources-diag?days=7&key=<KEY>
+  if (p === '/admin/tennis-sources-diag') {
+    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const days = Math.max(1, Math.min(60, parseInt(parsed.query.days || '7', 10) || 7));
+    try {
+      const totalRows = db.prepare(`SELECT COUNT(*) AS n FROM match_results WHERE game = 'tennis'`).get()?.n || 0;
+      const recentRows = db.prepare(`SELECT COUNT(*) AS n FROM match_results WHERE game = 'tennis' AND datetime(resolved_at) >= datetime('now', '-' || ? || ' days')`).get(String(days))?.n || 0;
+      const lastUpsert = db.prepare(`SELECT MAX(datetime(resolved_at)) AS t FROM match_results WHERE game = 'tennis'`).get()?.t || null;
+      const sampleByLeague = db.prepare(`
+        SELECT league, COUNT(*) AS n, MAX(resolved_at) AS last
+          FROM match_results
+         WHERE game = 'tennis' AND datetime(resolved_at) >= datetime('now', '-' || ? || ' days')
+         GROUP BY league
+         ORDER BY n DESC
+         LIMIT 30
+      `).all(String(days));
+      const sampleNames = db.prepare(`
+        SELECT team1, team2, winner, resolved_at, league
+          FROM match_results
+         WHERE game = 'tennis' AND datetime(resolved_at) >= datetime('now', '-' || ? || ' days')
+         ORDER BY resolved_at DESC
+         LIMIT 20
+      `).all(String(days));
+      // Sample dos pendentes pra ver formato do tip
+      const pendingSample = db.prepare(`
+        SELECT id, participant1, participant2, sent_at, event_name
+          FROM tips
+         WHERE sport = 'tennis' AND result IS NULL
+           AND datetime(sent_at) >= datetime('now', '-' || ? || ' days')
+         ORDER BY sent_at DESC
+         LIMIT 10
+      `).all(String(days));
+      sendJson(res, {
+        ok: true,
+        days,
+        match_results_tennis: { total: totalRows, recent: recentRows, lastUpsert },
+        sources_check: {
+          tip: 'verifique /sync-tennis-espn-results / /sync-tennis-sofascore / scripts/sync-tennis-sackmann',
+        },
+        leagues_in_results: sampleByLeague,
+        sample_team_names_in_results: sampleNames,
+        sample_pending_tips: pendingSample,
+        hint: totalRows === 0
+          ? 'CRITICO: match_results vazio pra tennis. Sources não estão populando. Investigar ESPN/Sackmann/Sofascore.'
+          : recentRows < 30
+          ? 'BAIXO: poucos rows recentes. Source pode estar lenta ou bloqueada.'
+          : 'OK: sources populando. Compare team1/team2 names com tip participant1/2 pra debug fuzzy match.',
+      });
+    } catch (e) {
+      sendJson(res, { ok: false, error: e.message }, 500);
+    }
+    return;
+  }
+
   // Debug: tenta resolver cada tip unsettled de tennis e reporta o motivo da falha.
   // GET /tennis-settle-debug?days=30 → [{tip_id, p1, p2, sent_at, status, reason}]
   if (p === '/tennis-settle-debug') {
