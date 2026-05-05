@@ -2013,7 +2013,14 @@ async function sendDM(token, userId, text, extra) {
     throw Object.assign(new Error(`Telegram 403: ${desc}`), { code: 403 });
   }
   if (code === 400 && /parse|entities|markdown|reserved|unsupported/i.test(desc)) {
-    log('WARN', 'DM-MARKDOWN', `userId=${userId} desc="${desc.slice(0, 160)}" — retry plaintext`);
+    // Throttle: log WARN só primeira ocorrência por desc-substring em 5min,
+    // resto vira DEBUG. Retry plaintext sempre funciona — WARN era spam.
+    const _key = desc.slice(0, 80);
+    if (!global.__dmMarkdownWarnTs) global.__dmMarkdownWarnTs = new Map();
+    const _last = global.__dmMarkdownWarnTs.get(_key) || 0;
+    const _level = (Date.now() - _last) > 5 * 60 * 1000 ? 'WARN' : 'DEBUG';
+    if (_level === 'WARN') global.__dmMarkdownWarnTs.set(_key, Date.now());
+    log(_level, 'DM-MARKDOWN', `userId=${userId} desc="${desc.slice(0, 160)}" — retry plaintext`);
     const plain = String(text).replace(/[*_`[\]]/g, '');
     const retryExtra = { ...(extra || {}) };
     delete retryExtra.parse_mode;
@@ -16414,7 +16421,19 @@ Máximo 200 palavras. Raciocínio breve antes da decisão.`;
           await new Promise(r => setTimeout(r, 3000)); continue;
         }
         if (tipEV > 15) {
-          log('INFO', 'AUTO-TENNIS', `EV alto (${tipEV}%): ${tipPlayer} @ ${tipOdd} | P=${(_modelPPickTn*100).toFixed(1)}% | Elo ${_pickIsT1Tn?mlResultTennis.elo1:mlResultTennis.elo2}/${_pickIsT1Tn?mlResultTennis.elo2:mlResultTennis.elo1}`);
+          const _eloA = _pickIsT1Tn ? mlResultTennis.elo1 : mlResultTennis.elo2;
+          const _eloB = _pickIsT1Tn ? mlResultTennis.elo2 : mlResultTennis.elo1;
+          log('INFO', 'AUTO-TENNIS', `EV alto (${tipEV}%): ${tipPlayer} @ ${tipOdd} | P=${(_modelPPickTn*100).toFixed(1)}% | Elo ${_eloA}/${_eloB}`);
+          // Métrica feature-engineering: Elo missing → modelo sem signal forte.
+          // Permite trackear cobertura via /health/metrics e alertar se >20% das tips
+          // EV-alto tem Elo undef (sinal de scrape Sackmann/sofa stale).
+          try {
+            if (_eloA === undefined || _eloB === undefined) {
+              require('./lib/metrics').incr('tennis_feature_missing', { feature: 'elo' });
+            } else {
+              require('./lib/metrics').incr('tennis_feature_present', { feature: 'elo' });
+            }
+          } catch (_) {}
         }
         // Small-sample gate: Elo com poucos jogos gera EV inflado por ruído.
         // Se qualquer jogador tem <10 partidas no DB OU <5 na superfície, exige EV ≥ 10% e confiança ≥ MÉDIA.
