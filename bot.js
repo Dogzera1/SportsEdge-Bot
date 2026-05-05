@@ -3401,11 +3401,17 @@ async function settleCompletedTips() {
             const dbRes = await serverGet(
               `/tennis-db-result?p1=${encodeURIComponent(tip.participant1 || '')}&p2=${encodeURIComponent(tip.participant2 || '')}&sentAt=${encodeURIComponent(tip.sent_at || '')}&league=${encodeURIComponent(tip.event_name || '')}`,
               'tennis'
-            ).catch(() => null);
+            ).catch((e) => { log('DEBUG', 'SETTLE-TENNIS', `tip ${tip.id} db-result fetch error: ${e.message}`); return null; });
+            // 2026-05-05 diag: log primeiro debug por ciclo pra ver o que /tennis-db-result retornou
+            if (_matchedCount + _noMatchCount < 3) {
+              const r = dbRes || {};
+              log('DEBUG', 'SETTLE-TENNIS', `tip ${tip.id} (${tip.participant1} vs ${tip.participant2}): db-result resolved=${r.resolved} winner=${r.winner || 'null'} match_id=${r.match_id || 'null'} ${r.error ? 'err=' + r.error : ''}`);
+            }
             if (dbRes?.resolved && dbRes.winner) {
               await serverPost('/settle', { matchId: tip.match_id, winner: dbRes.winner, score: dbRes.score || dbRes.final_score || '' }, 'tennis');
               log('INFO', 'SETTLE', `tennis: ${tip.participant1} vs ${tip.participant2} → ${dbRes.winner} (DB)`);
               settled++;
+              _matchedCount++;
               continue;
             }
 

@@ -7938,21 +7938,57 @@ setInterval(load, 10000);
         }
       }
       const exact = involvingPlayer.filter(r => r.pairMatch);
+      // 2026-05-05: testa cada filter de pickBestTennisSettleRow pra mostrar
+      // exatamente onde a row é descartada.
+      const elig = exact.map(r => {
+        const resMs = Date.parse(String(r.resolved_at || '').replace(' ', 'T'));
+        const slackMs = Math.max(0, parseInt(process.env.TENNIS_SETTLE_BEFORE_TIP_SLACK_MS || '0', 10) || 0);
+        const eligibleByDate = Number.isFinite(resMs) && Number.isFinite(tipMs)
+          ? resMs >= tipMs - slackMs : !Number.isFinite(tipMs);
+        const dateDiffH = (Number.isFinite(resMs) && Number.isFinite(tipMs))
+          ? Math.round((resMs - tipMs) / 3600000) : null;
+        return { ...r, resMs, eligibleByDate, dateDiffH };
+      });
+      const eligibleAfterDate = elig.filter(r => r.eligibleByDate);
+      // Simulate league overlap filter
+      const tipLeagueN = tip.event_name ? _normTennisLeague(tip.event_name) : '';
+      const eligibleAfterLeague = eligibleAfterDate.length > 1 && tipLeagueN
+        ? (() => {
+            const hits = eligibleAfterDate.filter(r => _tennisLeagueOverlap(tipLeagueN, _normTennisLeague(r.league || '')));
+            return hits.length ? hits : eligibleAfterDate;
+          })()
+        : eligibleAfterDate;
+      // Run actual pickBest
+      const pickBestResult = pickBestTennisSettleRow(rows, tip.participant1, tip.participant2, tipMs, tip.event_name);
+
       sendJson(res, {
         ok: true,
         tip: {
           id: tip.id, p1: tip.participant1, p2: tip.participant2,
           p1_norm: tipP1Norm, p2_norm: tipP2Norm,
-          sent_at: tip.sent_at, tipMs, event_name: tip.event_name, match_id: tip.match_id,
+          sent_at: tip.sent_at, tipMs, tipMs_iso: new Date(tipMs).toISOString(),
+          event_name: tip.event_name, event_name_norm: tipLeagueN,
+          match_id: tip.match_id,
         },
         cache_size: rows.length,
         rows_involving_a_player: involvingPlayer.length,
         rows_with_pair_match: exact.length,
+        eligible_after_date_filter: eligibleAfterDate.length,
+        eligible_after_league_filter: eligibleAfterLeague.length,
+        pickBest_returned: pickBestResult || null,
+        env: {
+          TENNIS_SETTLE_BEFORE_TIP_SLACK_MS: process.env.TENNIS_SETTLE_BEFORE_TIP_SLACK_MS || '0 (default)',
+          TENNIS_SETTLE_LOOKBACK_DAYS: process.env.TENNIS_SETTLE_LOOKBACK_DAYS || '600 (default)',
+          TENNIS_SETTLE_CACHE_MS: process.env.TENNIS_SETTLE_CACHE_MS || '60000 (default)',
+        },
+        eligibility_breakdown: elig,
         sample_involving: involvingPlayer.slice(0, 10),
-        hint: rows.length === 0 ? 'cache vazio — chame /sync-tennis-espn-results primeiro'
-          : involvingPlayer.length === 0 ? 'NENHUMA row contém qualquer um dos players — match_results sem dado pra esse jogo (Sackmann/Sofascore não capturou)'
-          : exact.length === 0 ? 'players individuais aparecem em rows mas pair não casa — ver singleMatch_* fields no sample'
-          : 'pair casa! pickBestTennisSettleRow deveria estar achando — investigar tennisResolvedAtEligibleForSentTip',
+        hint: rows.length === 0 ? 'cache vazio'
+          : involvingPlayer.length === 0 ? 'sources sem dado'
+          : exact.length === 0 ? 'matcher quebrado em produção'
+          : pickBestResult ? 'pickBest acha! Bug está em /settle ou no caller bot.js'
+          : eligibleAfterDate.length === 0 ? 'TODAS rows pair-match foram filtradas por DATA — eligibleByDate=false. tipMs > resMs?'
+          : 'rows passaram date filter mas pickBest retornou null — bug no filter de league',
       });
     } catch (e) {
       sendJson(res, { ok: false, error: e.message, stack: e.stack?.slice(0, 600) }, 500);
