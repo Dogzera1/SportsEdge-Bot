@@ -3365,7 +3365,7 @@ async function settleCompletedTips() {
 
       if (sport === 'tennis') {
         // ESPN scoreboard → match_results (CSV Sackmann 2025+ costuma 404 no GitHub).
-        await serverGet('/sync-tennis-espn-results?force=1', 'tennis').catch(() => {});
+        const espnSync = await serverGet('/sync-tennis-espn-results?force=1', 'tennis').catch(() => null);
         // The Odds API não publica scores para tênis — settlement via DB + ESPN.
         const scores = await serverGet('/tennis-scores?daysFrom=3', 'tennis').catch(() => []);
         const scoresById = new Map((Array.isArray(scores) ? scores : []).map(s => [String(s.id), s]));
@@ -3378,6 +3378,11 @@ async function settleCompletedTips() {
           ...(atpEvent?.recentResults || []),
           ...(wtaEvent?.recentResults || [])
         ];
+        // 2026-05-05: visibilidade do settle pipeline tennis. Antes 15+ EXPIRY logs
+        // sem nenhum [SETTLE] tennis sugeriam pipeline travado, mas era só sources
+        // sem dados pra matchear. Log dedicado distingue "sources empty" vs "no match".
+        log('INFO', 'SETTLE-TENNIS', `pipeline: unsettled=${unsettled.length} | espnSync=${espnSync?.upserted ?? 0} | theOddsScores=${scoresById.size} | espnATP=${atpEvent?.recentResults?.length || 0} espnWTA=${wtaEvent?.recentResults?.length || 0}`);
+        let _matchedCount = 0, _noMatchCount = 0;
         for (const tip of unsettled) {
           if (!tip.match_id) continue;
           // MT-promoted tennis tips (handicapGames/totalGames/tiebreak) settle via
@@ -3431,15 +3436,17 @@ async function settleCompletedTips() {
               if (!tennisEspnRecentResultEligibleForTip(r, tipMsTn)) return false;
               return tennisPairMatchesPlayers(tip.participant1, tip.participant2, r.p1, r.p2);
             });
-            if (!res) continue;
+            if (!res) { _noMatchCount++; continue; }
             await serverPost('/settle', { matchId: tip.match_id, winner: res.winner, score: res.score || res.final_score || '' }, 'tennis');
             log('INFO', 'SETTLE', `tennis: ${tip.participant1} vs ${tip.participant2} → ${res.winner}`);
             settled++;
+            _matchedCount++;
           } catch(e) {
             log('WARN', 'SETTLE', `tennis tip ${tip.match_id}: ${e.message}`);
           }
         }
         if (settled > 0) log('INFO', 'SETTLE', `tennis: ${settled} tips liquidadas`);
+        else if (unsettled.length > 0) log('INFO', 'SETTLE-TENNIS', `nenhum match: pending=${unsettled.length} no_match=${_noMatchCount} (sources tinham ${(allResults.length + scoresById.size)} jogos finalizados)`);
         continue;
       }
 
@@ -8087,6 +8094,9 @@ async function autoAnalyzeMatch(token, match) {
     // Sem odds reais: não chamar IA (não dá para gerar TIP_ML/EV)
     if (!hasRealOdds) {
       // Ao vivo: esperar mercado abrir; pré-jogo: esperar odds aparecer
+      // 2026-05-05: log explícito (era silent → "Live no-result" sem motivo claro).
+      log('INFO', 'AUTO', `Sem odds reais: ${match.team1} vs ${match.team2} (status=${match.status} t1=${oddsToUse?.t1 || 'null'} t2=${oddsToUse?.t2 || 'null'} bk=${oddsToUse?.bookmaker || 'none'}) — pulando`);
+      logRejection('lol', `${match.team1} vs ${match.team2}`, 'no_real_odds', { status: match.status, t1: oddsToUse?.t1 || null });
       return null;
     }
 
