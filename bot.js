@@ -42,7 +42,22 @@ const { tipBetButton } = require('./lib/book-deeplink');
 function _buildTipBetButton(sport, oddsObj, pickSide, match, stakeStr, fallbackOdd) {
   try {
     const stakeU = parseFloat(String(stakeStr || '0').replace(/u/i, '')) || 0;
-    const unitVal = parseFloat(process.env.BANKROLL_UNIT_VALUE || '9') || 9;
+    // 2026-05-05: alinha com Telegram message (formatStakeWithReais) usando
+    // per-sport tier unit. Antes BANKROLL_UNIT_VALUE=9 fallback gerava button
+    // mostrando R$11.25 enquanto message dizia R$1.00 (ratio 0.76 tier R$0.80/u).
+    let unitVal = parseFloat(process.env.BANKROLL_UNIT_VALUE || '0');
+    if (!Number.isFinite(unitVal) || unitVal <= 0) {
+      try {
+        if (db && sport) {
+          const bk = db.prepare('SELECT initial_banca, current_banca FROM bankroll WHERE sport=?').get(sport);
+          if (bk) {
+            const { getSportUnitValue } = require('./lib/sport-unit');
+            unitVal = getSportUnitValue(bk.current_banca || 0, bk.initial_banca || 100);
+          }
+        }
+      } catch (_) {}
+    }
+    if (!Number.isFinite(unitVal) || unitVal <= 0) unitVal = 1;
     const stakeReais = +(stakeU * unitVal).toFixed(2);
     const ls = oddsObj && pickSide ? computeLineShop(oddsObj, pickSide) : null;
     const book = ls?.bestBook || oddsObj?.bookmaker || 'Pinnacle';
