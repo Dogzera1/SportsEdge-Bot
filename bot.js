@@ -2318,6 +2318,18 @@ function fuzzyPlayerNameMatch(displayA, displayB) {
   if (!na || !nb) return false;
   if (na === nb) return true;
   if (na.length >= 5 && nb.length >= 5 && (na.includes(nb) || nb.includes(na))) return true;
+  // 2026-05-05: tennis doubles — "Player A / Player B" vs feed que pode usar
+  // "A/B", "B/A", ou só sobrenomes. Compara conjunto de sobrenomes (last token
+  // de cada lado do /). CLV-SKIP no_match_in_feed das duplas Kudermetova/Timofeeva
+  // no log de prod era exatamente isso.
+  if (displayA?.includes('/') && displayB?.includes('/')) {
+    const lastnames = (s) => String(s).split('/').map(part => {
+      const tokens = part.trim().split(/\s+/).filter(Boolean);
+      return tokens.length ? norm(tokens[tokens.length - 1]) : '';
+    }).filter(x => x.length >= 3).sort();
+    const lnA = lastnames(displayA), lnB = lastnames(displayB);
+    if (lnA.length >= 2 && lnA.length === lnB.length && lnA.every((x, i) => x === lnB[i])) return true;
+  }
   const tokensA = String(displayA || '').trim().split(/\s+/).filter(Boolean);
   const tokensB = String(displayB || '').trim().split(/\s+/).filter(Boolean);
   const la = tokensA.length ? norm(tokensA[tokensA.length - 1]) : '';
@@ -23104,9 +23116,23 @@ async function checkCLV(caches = {}) {
           // 2026-05-03 FIX: incluir tip_participant pra escopar updateTipCLV à tip exata.
           await serverPost('/update-clv', { matchId: tip.match_id, clvOdds: clvN, tipParticipant: tip.tip_participant }, sport).catch(() => {});
           // Near-regime re-captura a cada ciclo; só loga INFO quando odd muda pra evitar spam.
-          const level = changed ? 'INFO' : 'DEBUG';
-          const suffix = (changed && prevClv) ? ` (prev=${prevClv})` : '';
-          log(level, 'CLV', `Registrado CLV ${clvN} (${sport}) para ${tip.participant1} vs ${tip.participant2}${suffix}`);
+          // 2026-05-05: dedup por (sport,match_id,tip_participant,clvN) — em prod existem
+          // ~30 tips shadow basket por match (Thunder×Lakers/Pistons×Cavaliers no log de
+          // 23:24:30) que produziam 514 lines/10min. Throttle 5min por chave única evita
+          // spam enquanto investigamos a duplicação real (DB local zerado pós-rebalance).
+          global._clvLogDedup = global._clvLogDedup || new Map();
+          const dedupKey = `${sport}|${tip.match_id}|${tip.tip_participant}|${clvN.toFixed(3)}`;
+          const lastLog = global._clvLogDedup.get(dedupKey) || 0;
+          if (Date.now() - lastLog >= 5 * 60 * 1000) {
+            const level = changed ? 'INFO' : 'DEBUG';
+            const suffix = (changed && prevClv) ? ` (prev=${prevClv})` : '';
+            log(level, 'CLV', `Registrado CLV ${clvN} (${sport}) para ${tip.participant1} vs ${tip.participant2}${suffix}`);
+            global._clvLogDedup.set(dedupKey, Date.now());
+            if (global._clvLogDedup.size > 1000) {
+              const cutoff = Date.now() - 60 * 60 * 1000;
+              for (const [k, t] of global._clvLogDedup) if (t < cutoff) global._clvLogDedup.delete(k);
+            }
+          }
         }
       }
     }
