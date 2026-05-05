@@ -15187,6 +15187,143 @@ setInterval(load, 60000);
     return;
   }
 
+  // GET /admin/mt-shadow-by-league?days=60&minN=5&sport=<opt>&key=<KEY>
+  // Performance por (sport, market, side, league) + agg por tier — granularidade
+  // fina pra identificar ligas com leak vs ligas sharp. Tier classification via
+  // lib/mt-tier-classifier (mesmo path da MT real, garante consistência).
+  if (p === '/admin/mt-shadow-by-league') {
+    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const days = Math.max(7, Math.min(180, parseInt(parsed.query.days || '60', 10) || 60));
+    const minN = Math.max(3, Math.min(50, parseInt(parsed.query.minN || '5', 10) || 5));
+    const sportFilter = parsed.query.sport ? String(parsed.query.sport).toLowerCase() : null;
+    try {
+      const { classifyTier } = require('./lib/mt-tier-classifier');
+      const sportCond = sportFilter ? ` AND sport = ?` : '';
+      const sportArgs = sportFilter ? [sportFilter] : [];
+      const rows = db.prepare(`
+        SELECT
+          sport, market, COALESCE(side, 'na') AS side, COALESCE(league, '') AS league,
+          COUNT(*) AS n_total,
+          SUM(CASE WHEN result = 'win' THEN 1 ELSE 0 END) AS n_win,
+          SUM(CASE WHEN result = 'loss' THEN 1 ELSE 0 END) AS n_loss,
+          SUM(CASE WHEN result = 'void' THEN 1 ELSE 0 END) AS n_void,
+          ROUND(SUM(CASE WHEN result IN ('win','loss') THEN COALESCE(stake_units,1) ELSE 0 END), 2) AS total_stake,
+          ROUND(SUM(CASE WHEN result IN ('win','loss') THEN COALESCE(profit_units,0) ELSE 0 END), 2) AS total_profit,
+          ROUND(AVG(CASE WHEN clv_pct IS NOT NULL AND clv_pct BETWEEN -50 AND 50 THEN clv_pct ELSE NULL END), 2) AS avg_clv_pct,
+          ROUND(AVG(CASE WHEN result IN ('win','loss') THEN ev_pct ELSE NULL END), 1) AS avg_ev_pct
+          FROM market_tips_shadow
+         WHERE created_at >= datetime('now', '-' || ? || ' days')
+           ${sportCond}
+         GROUP BY sport, market, COALESCE(side, 'na'), COALESCE(league, '')
+         HAVING SUM(CASE WHEN result IN ('win','loss') THEN 1 ELSE 0 END) >= ?
+         ORDER BY total_profit DESC
+      `).all(...[days, ...sportArgs, minN]);
+
+      const enriched = rows.map(r => {
+        const settled = (r.n_win || 0) + (r.n_loss || 0);
+        const hitRate = settled > 0 ? (r.n_win / settled) : 0;
+        const roi = r.total_stake > 0 ? (r.total_profit / r.total_stake) * 100 : 0;
+        return { ...r, n_settled: settled, hit_rate: +(hitRate * 100).toFixed(1),
+                 roi_pct: +roi.toFixed(2), tier: classifyTier(r.sport, r.league) };
+      });
+
+      const byTier = {};
+      for (const r of enriched) {
+        const k = `${r.sport}|${r.market}|${r.tier}`;
+        if (!byTier[k]) {
+          byTier[k] = { sport: r.sport, market: r.market, tier: r.tier,
+                        n_settled: 0, n_win: 0, n_loss: 0, total_stake: 0, total_profit: 0, leagues: 0 };
+        }
+        const e = byTier[k];
+        e.n_settled += r.n_settled;
+        e.n_win += r.n_win;
+        e.n_loss += r.n_loss;
+        e.total_stake += r.total_stake;
+        e.total_profit += r.total_profit;
+        e.leagues++;
+      }
+      const byTierArr = Object.values(byTier).map(t => ({
+        ...t,
+        roi_pct: t.total_stake > 0 ? +((t.total_profit / t.total_stake) * 100).toFixed(2) : 0,
+        hit_rate: t.n_settled > 0 ? +((t.n_win / t.n_settled) * 100).toFixed(1) : 0,
+        total_stake: +t.total_stake.toFixed(2),
+        total_profit: +t.total_profit.toFixed(2),
+      })).filter(t => t.n_settled >= minN).sort((a, b) => b.roi_pct - a.roi_pct);
+
+      const winners = enriched.filter(r => r.n_settled >= minN && r.roi_pct >= 5).slice(0, 30);
+      const leaks = enriched.filter(r => r.n_settled >= minN && r.roi_pct < -10).slice(0, 30);
+
+      sendJson(res, {
+        ok: true, days, minN, sport_filter: sportFilter,
+        n_buckets: enriched.length,
+        by_tier: byTierArr,
+        winners,
+        leaks,
+        all_buckets: enriched,
+      });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
+  // GET /admin/mt-shadow-by-ev?days=60&sport=<opt>&key=<KEY>
+  // Performance por (sport, market, side, EV bucket) — calibration check.
+  // calibration_gap_pp = avg_ev - actual_roi (positivo = modelo sobrestima edge).
+  if (p === '/admin/mt-shadow-by-ev') {
+    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const days = Math.max(7, Math.min(180, parseInt(parsed.query.days || '60', 10) || 60));
+    const sportFilter = parsed.query.sport ? String(parsed.query.sport).toLowerCase() : null;
+    try {
+      const sportCond = sportFilter ? ` AND sport = ?` : '';
+      const sportArgs = sportFilter ? [sportFilter] : [];
+      const rows = db.prepare(`
+        SELECT sport, market, COALESCE(side, 'na') AS side,
+          CASE
+            WHEN ev_pct < 5 THEN '01_lt5'
+            WHEN ev_pct < 10 THEN '02_5to10'
+            WHEN ev_pct < 15 THEN '03_10to15'
+            WHEN ev_pct < 20 THEN '04_15to20'
+            WHEN ev_pct < 30 THEN '05_20to30'
+            ELSE '06_gt30'
+          END AS ev_bucket,
+          COUNT(*) AS n_total,
+          SUM(CASE WHEN result = 'win' THEN 1 ELSE 0 END) AS n_win,
+          SUM(CASE WHEN result = 'loss' THEN 1 ELSE 0 END) AS n_loss,
+          ROUND(SUM(CASE WHEN result IN ('win','loss') THEN COALESCE(stake_units,1) ELSE 0 END), 2) AS total_stake,
+          ROUND(SUM(CASE WHEN result IN ('win','loss') THEN COALESCE(profit_units,0) ELSE 0 END), 2) AS total_profit,
+          ROUND(AVG(CASE WHEN clv_pct IS NOT NULL AND clv_pct BETWEEN -50 AND 50 THEN clv_pct ELSE NULL END), 2) AS avg_clv_pct,
+          ROUND(AVG(ev_pct), 1) AS avg_ev_pct,
+          ROUND(AVG(p_model), 3) AS avg_pmodel,
+          ROUND(AVG(odd), 2) AS avg_odd
+          FROM market_tips_shadow
+         WHERE created_at >= datetime('now', '-' || ? || ' days')
+           AND result IN ('win','loss')
+           ${sportCond}
+         GROUP BY sport, market, COALESCE(side, 'na'), ev_bucket
+         HAVING n_total >= 5
+         ORDER BY sport, market, side, ev_bucket
+      `).all(...[days, ...sportArgs]);
+
+      const enriched = rows.map(r => {
+        const settled = (r.n_win || 0) + (r.n_loss || 0);
+        const hitRate = settled > 0 ? (r.n_win / settled) : 0;
+        const roi = r.total_stake > 0 ? (r.total_profit / r.total_stake) * 100 : 0;
+        const expectedRoi = r.avg_ev_pct;
+        return { ...r, n_settled: settled, hit_rate: +(hitRate * 100).toFixed(1),
+                 roi_pct: +roi.toFixed(2),
+                 calibration_gap_pp: +(expectedRoi - roi).toFixed(2) };
+      });
+
+      sendJson(res, {
+        ok: true, days, sport_filter: sportFilter,
+        n_buckets: enriched.length,
+        buckets: enriched,
+      });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   // GET /admin/mt-shadow-comprehensive-audit?days=30&minN=10&key=<KEY>
   // Auditoria completa MT shadow: performance por (sport,market,side),
   // detecção de promotion candidates + leaks + config gaps.
