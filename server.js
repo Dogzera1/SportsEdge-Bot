@@ -18632,6 +18632,50 @@ setInterval(load, 60000);
         if (!tipParticipant) { badRequest(res, 'tipParticipant obrigatório'); return; }
         if (oddsN == null || oddsN <= 1) { badRequest(res, 'odds inválidas'); return; }
         if (evN == null) { badRequest(res, 'ev inválido'); return; }
+        // 2026-05-05: Learned corrections (CALIBRATION layer, NÃO gate). Aplica
+        // prob_shrink + ev_shrink derivadas pelo readiness-learner.
+        // - prob_shrink encolhe model_p_pick em direção a 0.5 quando modelo
+        //   estiver overconfident (calib_gap < -3pp). EV recomputado.
+        // - ev_shrink corta ev% quando CLV < -1% e ROI < -3% indicam EV inflado.
+        // Aplicado SOMENTE para is_shadow=0 (real). Shadow recebe valores
+        // originais pra preservar dataset puro pra estudo.
+        // Override: LEARNED_CORRECTIONS_DISABLED=true (default OFF).
+        let _appliedCorrections = [];
+        let _correctedFromOriginal = null;
+        if (!t.isShadow && !/^(1|true|yes)$/i.test(String(process.env.LEARNED_CORRECTIONS_DISABLED || ''))) {
+          try {
+            const lc = require('./lib/learned-corrections');
+            // Lazy load no primeiro request por proc; learner também triggers
+            // após setAuto. Caching evita N queries por tip.
+            if (!global._lcLoadedAt) {
+              try { lc.loadFromDb(db); global._lcLoadedAt = Date.now(); } catch (_) {}
+            }
+            const market = clampStr((t.market_type || 'ML').toUpperCase(), 32);
+            const pIn = parseFiniteNumber(t.modelPPick);
+            const adj = lc.applyToTip({
+              sport, market, league: eventName,
+              p: pIn != null ? pIn : 0.5,
+              ev: evN,
+              odds: oddsN,
+            });
+            if (adj.applied?.length) {
+              _appliedCorrections = adj.applied;
+              _correctedFromOriginal = { p: adj.original.p, ev: adj.original.ev };
+              // Mutate apenas se diferença material (>0.5pp em EV ou >1pp em P)
+              if (Math.abs(adj.ev - adj.original.ev) > 0.5) {
+                t.ev = adj.ev.toFixed(2);
+              }
+              if (pIn != null && Math.abs(adj.p - pIn) > 0.01) {
+                t.modelPPick = adj.p;
+              }
+              log('INFO', 'LEARNED-CORR',
+                `${sport}/${market} ${p1} vs ${p2}: p ${adj.original.p?.toFixed(3)}→${adj.p?.toFixed(3)} ev ${adj.original.ev?.toFixed(1)}%→${adj.ev?.toFixed(1)}% (${adj.applied.map(a => `${a.type}×${a.factor}`).join(', ')})`);
+              try { require('./lib/metrics').incr('learned_correction_applied', { sport, market }); } catch (_) {}
+            }
+          } catch (_) { /* fail-open */ }
+        }
+        // Re-read evN após possível ajuste (caller pode ter mutado t.ev)
+        const evNFinal = parseFiniteNumber(t.ev) ?? evN;
         // 2026-05-04: ML SHADOW PURE MODE — quando t.isShadow=1, bypass filters
         // (dedup, EV cap, ML gate, voided blacklist) pra que tabela `tips` com
         // is_shadow=1 sirva como base de dados PURA pra calibração/estudo.

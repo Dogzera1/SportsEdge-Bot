@@ -2213,6 +2213,35 @@ const migrations = [
     },
   },
   {
+    id: '090_learned_corrections',
+    up(db) {
+      // 2026-05-05: Learned corrections — armazena ajustes da CALIBRAÇÃO do
+      // modelo (não gates). prob_shrink ataca calibration drift; ev_shrink
+      // ataca EV inflado vs realizado. Aplicados em /record-tip ANTES do
+      // gate de EV — adjusta a decisão do modelo, não bloqueia tips.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS learned_corrections (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          sport TEXT NOT NULL,
+          market TEXT,                         -- NULL = sport-wide; UPPER (ML, HANDICAPGAMES, ...)
+          league_pattern TEXT,                 -- NULL = todas; substring match em event_name
+          correction_type TEXT NOT NULL,       -- prob_shrink | ev_shrink
+          factor REAL NOT NULL,                -- 1.0 = identity, <1.0 encolhe; >1.0 amplifica (raro)
+          source TEXT NOT NULL DEFAULT 'auto', -- auto | manual
+          applied_at TEXT NOT NULL,
+          expires_at TEXT,
+          status TEXT NOT NULL DEFAULT 'active', -- active | expired | reverted | superseded
+          evidence TEXT,                       -- JSON com {n, roi, calib_gap, source_correction_id}
+          UNIQUE(sport, market, COALESCE(league_pattern, ''), correction_type, status) ON CONFLICT REPLACE
+        );
+        CREATE INDEX IF NOT EXISTS idx_lc_active
+          ON learned_corrections(sport, status, applied_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_lc_expires
+          ON learned_corrections(expires_at) WHERE status = 'active';
+      `);
+    },
+  },
+  {
     id: '089_readiness_corrections_log',
     up(db) {
       // 2026-05-05: Readiness Learner — fecha o loop "detectei leak → ajo".
