@@ -4900,6 +4900,41 @@ function _getMtPermanentDisable() {
   return _MT_PERMANENT_DISABLE;
 }
 
+// 2026-05-05: helper diagnóstico — quando isMarketTipsEnabled retorna false,
+// retorna string explicativa pra log MT-GATE-SKIP. Permite usuário ver direto
+// no log o env exato que precisa setar (em vez de "mt_disabled" genérico).
+function describeMtGateSkip(sport, market, side, league, opts = {}) {
+  const up = String(sport).toUpperCase();
+  const aliasEnv = { DOTA2: 'DOTA', CS2: 'CS' }[up];
+  const envName = `${up}_MARKET_TIPS_ENABLED`;
+  const aliasName = aliasEnv ? `${aliasEnv}_MARKET_TIPS_ENABLED` : null;
+  if (process.env.MARKET_TIPS_DM_KILL_SWITCH === 'true') {
+    return 'mt_disabled — MARKET_TIPS_DM_KILL_SWITCH=true ativo';
+  }
+  const envSet = process.env[envName] === 'true' || (aliasName && process.env[aliasName] === 'true');
+  if (!envSet && !/^true$/i.test(process.env.MT_SHADOW_DM_ALL || '')) {
+    return `mt_disabled — ${envName}!=true (set Railway env pra ativar promote)`;
+  }
+  if (market) {
+    const perm = (typeof _getMtPermanentDisable === 'function') ? _getMtPermanentDisable() : new Set();
+    if (side && perm.has(`${sport}|${market}|${side}`)) return `mt_disabled — permanent disable [${sport}|${market}|${side}]`;
+    if (perm.has(`${sport}|${market}`)) return `mt_disabled — permanent disable [${sport}|${market}]`;
+    if (side && league && _marketTipsDisabledRuntime.has(`${sport}|${market}|${side}|${league}`)) return `mt_disabled — leak guard runtime[${sport}|${market}|${side}|${league}]`;
+    if (side && _marketTipsDisabledRuntime.has(`${sport}|${market}|${side}`)) return `mt_disabled — leak guard runtime[${sport}|${market}|${side}]`;
+    if (_marketTipsDisabledRuntime.has(`${sport}|${market}`)) return `mt_disabled — leak guard runtime[${sport}|${market}]`;
+    if (league) {
+      try {
+        const { isMtLeagueBlockedForMarket } = require('./lib/mt-auto-promote');
+        if (isMtLeagueBlockedForMarket(sport, market, league)) {
+          return `mt_disabled — auto-promote league block [${sport}|${market}|${league}]`;
+        }
+      } catch (_) {}
+    }
+  }
+  // Fallback genérico — caso isMarketTipsEnabled retorne false por outro motivo
+  return `mt_disabled — ${envName}!=true OR market/league blocked (verificar /admin/leak-disables)`;
+}
+
 function isMarketTipsEnabled(sport, market = null, side = null, league = null) {
   if (process.env.MARKET_TIPS_DM_KILL_SWITCH === 'true') return false;
   const up = String(sport).toUpperCase();
@@ -7837,7 +7872,15 @@ async function autoAnalyzeMatch(token, match) {
 
                 // MVP admin-only tip: seleciona melhor market tip e manda DM pros admins.
                 // Não vai pros subscribers ainda. Dedup via marketTipSent (24h cooldown).
-                if (isMarketTipsEnabled('lol') && ADMIN_IDS.size) {
+                const _lolGateEn = isMarketTipsEnabled('lol');
+                const _lolGateAd = ADMIN_IDS.size > 0;
+                if (!(_lolGateEn && _lolGateAd) && found.length > 0) {
+                  const reasons = [];
+                  if (!_lolGateEn) reasons.push(describeMtGateSkip('lol', found[0].market, found[0].side, match.league));
+                  if (!_lolGateAd) reasons.push('no_admin_ids (set ADMIN_CHAT_IDS)');
+                  log('INFO', 'MT-GATE-SKIP', `lol ${match.team1} vs ${match.team2} [${match.league}]: ${found.length} MT tip(s) found mas DM/promoção bloqueada — ${reasons.join(' | ')}`);
+                }
+                if (_lolGateEn && _lolGateAd) {
                   try {
                     const mtp = require('./lib/market-tip-processor');
                     const minEvGate = parseFloat(process.env.LOL_MARKET_TIP_MIN_EV ?? '8');
@@ -13782,7 +13825,15 @@ async function _pollDotaInner(runOnce = false) {
                 log('INFO', 'DOTA-MARKETS',
                   `  • ${t.label} @ ${t.odd.toFixed(2)} | pModel=${(t.pModel*100).toFixed(1)}% pImpl=${t.pImplied ? (t.pImplied*100).toFixed(1)+'%' : '?'} EV=${t.ev.toFixed(1)}%`);
               }
-              if (isMarketTipsEnabled('dota2') && ADMIN_IDS.size) {
+              const _dotaGateEn = isMarketTipsEnabled('dota2');
+              const _dotaGateAd = ADMIN_IDS.size > 0;
+              if (!(_dotaGateEn && _dotaGateAd) && found.length > 0) {
+                const reasons = [];
+                if (!_dotaGateEn) reasons.push(describeMtGateSkip('dota2', found[0].market, found[0].side, match.league));
+                if (!_dotaGateAd) reasons.push('no_admin_ids (set ADMIN_CHAT_IDS)');
+                log('INFO', 'MT-GATE-SKIP', `dota2 ${match.team1} vs ${match.team2} [${match.league}]: ${found.length} MT tip(s) found mas DM/promoção bloqueada — ${reasons.join(' | ')}`);
+              }
+              if (_dotaGateEn && _dotaGateAd) {
                 try {
                   const mtp = require('./lib/market-tip-processor');
                   const minEvGate = parseFloat(process.env.DOTA_MARKET_TIP_MIN_EV ?? '8');
@@ -15808,26 +15859,8 @@ async function pollTennis(runOnce = false) {
                   if (!(_gateMtEnabled && _gateAdmins && _gateNotShadow) && found.length > 0) {
                     const reasons = [];
                     if (!_gateMtEnabled) {
-                      // Log diagnóstico granular pra distinguir env-not-set vs leak-guard vs market-block.
-                      const _envSet = process.env.TENNIS_MARKET_TIPS_ENABLED === 'true';
-                      const _killSwitch = process.env.MARKET_TIPS_DM_KILL_SWITCH === 'true';
-                      // Verifica leak-guard runtime pra qualquer mercado tennis das tips encontradas
-                      let _runtimeBlock = null;
-                      try {
-                        for (const t of found.slice(0, 1)) { // checa primeira tip
-                          const k1 = `tennis|${t.market}|${t.side}|${match.league || ''}`;
-                          const k2 = `tennis|${t.market}|${t.side}`;
-                          const k3 = `tennis|${t.market}`;
-                          if (_marketTipsDisabledRuntime?.has?.(k1)) { _runtimeBlock = `runtime[${k1}]`; break; }
-                          if (_marketTipsDisabledRuntime?.has?.(k2)) { _runtimeBlock = `runtime[${k2}]`; break; }
-                          if (_marketTipsDisabledRuntime?.has?.(k3)) { _runtimeBlock = `runtime[${k3}]`; break; }
-                        }
-                      } catch (_) {}
-                      const hint = _killSwitch ? 'MARKET_TIPS_DM_KILL_SWITCH=true ativo'
-                        : !_envSet ? 'TENNIS_MARKET_TIPS_ENABLED!=true (set Railway env pra ativar promote)'
-                        : _runtimeBlock ? `leak guard ${_runtimeBlock}`
-                        : 'market in permanent disable list';
-                      reasons.push(`mt_disabled — ${hint}`);
+                      const _t = found[0];
+                      reasons.push(describeMtGateSkip('tennis', _t?.market, _t?.side, match.league));
                     }
                     if (!_gateAdmins) reasons.push('no_admin_ids (set ADMIN_CHAT_IDS)');
                     if (!_gateNotShadow) reasons.push(`shadow_only (topTier=${_tennisTopTier} tier2Promote=${_tennisTier2Promote} chall/itf=${isChallengerOrItf} qualifier=${isQualifier})`);
@@ -18358,7 +18391,15 @@ async function pollCs(runOnce = false) {
                   log('INFO', 'CS-MARKETS',
                     `  • ${t.label} @ ${t.odd.toFixed(2)} | pModel=${(t.pModel*100).toFixed(1)}% pImpl=${t.pImplied ? (t.pImplied*100).toFixed(1)+'%' : '?'} EV=${t.ev.toFixed(1)}%`);
                 }
-                if (isMarketTipsEnabled('cs2') && ADMIN_IDS.size) {
+                const _csGateEn = isMarketTipsEnabled('cs2');
+                const _csGateAd = ADMIN_IDS.size > 0;
+                if (!(_csGateEn && _csGateAd) && found.length > 0) {
+                  const reasons = [];
+                  if (!_csGateEn) reasons.push(describeMtGateSkip('cs2', found[0].market, found[0].side, match.league));
+                  if (!_csGateAd) reasons.push('no_admin_ids (set ADMIN_CHAT_IDS)');
+                  log('INFO', 'MT-GATE-SKIP', `cs2 ${match.team1} vs ${match.team2} [${match.league}]: ${found.length} MT tip(s) found mas DM/promoção bloqueada — ${reasons.join(' | ')}`);
+                }
+                if (_csGateEn && _csGateAd) {
                   try {
                     const mtp = require('./lib/market-tip-processor');
                     const minEvGate = parseFloat(process.env.CS_MARKET_TIP_MIN_EV ?? '8');
