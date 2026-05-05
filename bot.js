@@ -15263,6 +15263,12 @@ async function pollTennis(runOnce = false) {
         const key2 = match.sport_key || '';
         const leagueLow = String(match.league || match.tournament || '').toLowerCase();
         const isChallengerOrItf = /\bchallenger\b|\bitf\b|\b125k?\b|\bw15\b|\bw25\b|\bw50\b|\bm15\b|\bm25\b/.test(leagueLow);
+        // 2026-05-05: detecta qualifier explícito (Q1/Q2/qualifying). Audit 2026-05-04
+        // mostrou que qualifier rounds têm high variance + ranking unreliable.
+        // Override: TENNIS_QUALIFIER_PROMOTE=true desliga (volta tratar como tier).
+        // NOTA: R1/R2 de main draw NÃO entra aqui (jogos legítimos do torneio principal).
+        // Stake penalty (lib/mt-tier-classifier tier_quali_or_early) cobre R1/R2 separado.
+        const isQualifier = /\bqualif|\bq[12]\b/i.test(leagueLow);
         const slamKeys = ['aus_open', 'french_open', 'wimbledon', 'us_open'];
         const slamLeague = ['australian open', 'french open', 'roland garros', 'wimbledon', 'us open'];
         const isGrandSlam = slamKeys.some(k => key2.includes(k))
@@ -15395,9 +15401,16 @@ async function pollTennis(runOnce = false) {
         // sem precisar liberar 100% non-top.
         const _tennisTier2Promote = /^(1|true|yes)$/i.test(String(process.env.TENNIS_MT_TIER2_PROMOTE || ''));
         const _tennisAllowedNonTop = _tennisTier2Promote && !isChallengerOrItf;
-        const _tennisShadowOnly = !_tennisTopTier
-          && !_tennisAllowedNonTop
-          && !/^(0|false|no)$/i.test(String(process.env.TENNIS_NON_SLAM_SHADOW_ONLY ?? 'true'));
+        // 2026-05-05: qualifier (Q1/Q2/R1/R2) força shadow_only mesmo em Masters/Slam.
+        // Audit 2026-05-04: high variance + ranking unreliable em early rounds.
+        // Override: TENNIS_QUALIFIER_PROMOTE=true desliga (volta a tratar qualifier como tier).
+        const _tennisQualifierShadow = isQualifier
+          && !/^(1|true|yes)$/i.test(String(process.env.TENNIS_QUALIFIER_PROMOTE || ''));
+        const _tennisShadowOnly = (
+            !_tennisTopTier
+            && !_tennisAllowedNonTop
+            && !/^(0|false|no)$/i.test(String(process.env.TENNIS_NON_SLAM_SHADOW_ONLY ?? 'true'))
+          ) || _tennisQualifierShadow;
         // Tennis ML em shadow GLOBAL (todos os tiers, incluindo Slam/Masters).
         // Justificativa 2026-04-28: ML path acabou de ser destravado (commit
         // c3229f9 — confidence/method propagation). Antes de promover ML pra
@@ -15794,9 +15807,30 @@ async function pollTennis(runOnce = false) {
                   const _gateNotShadow = !_tennisShadowOnly;
                   if (!(_gateMtEnabled && _gateAdmins && _gateNotShadow) && found.length > 0) {
                     const reasons = [];
-                    if (!_gateMtEnabled) reasons.push('mt_disabled (TENNIS_MARKET_TIPS_ENABLED!=true OR market in leak guard)');
-                    if (!_gateAdmins) reasons.push('no_admin_ids');
-                    if (!_gateNotShadow) reasons.push(`shadow_only (topTier=${_tennisTopTier} tier2Promote=${_tennisTier2Promote} chall/itf=${isChallengerOrItf})`);
+                    if (!_gateMtEnabled) {
+                      // Log diagnóstico granular pra distinguir env-not-set vs leak-guard vs market-block.
+                      const _envSet = process.env.TENNIS_MARKET_TIPS_ENABLED === 'true';
+                      const _killSwitch = process.env.MARKET_TIPS_DM_KILL_SWITCH === 'true';
+                      // Verifica leak-guard runtime pra qualquer mercado tennis das tips encontradas
+                      let _runtimeBlock = null;
+                      try {
+                        for (const t of found.slice(0, 1)) { // checa primeira tip
+                          const k1 = `tennis|${t.market}|${t.side}|${match.league || ''}`;
+                          const k2 = `tennis|${t.market}|${t.side}`;
+                          const k3 = `tennis|${t.market}`;
+                          if (_marketTipsDisabledRuntime?.has?.(k1)) { _runtimeBlock = `runtime[${k1}]`; break; }
+                          if (_marketTipsDisabledRuntime?.has?.(k2)) { _runtimeBlock = `runtime[${k2}]`; break; }
+                          if (_marketTipsDisabledRuntime?.has?.(k3)) { _runtimeBlock = `runtime[${k3}]`; break; }
+                        }
+                      } catch (_) {}
+                      const hint = _killSwitch ? 'MARKET_TIPS_DM_KILL_SWITCH=true ativo'
+                        : !_envSet ? 'TENNIS_MARKET_TIPS_ENABLED!=true (set Railway env pra ativar promote)'
+                        : _runtimeBlock ? `leak guard ${_runtimeBlock}`
+                        : 'market in permanent disable list';
+                      reasons.push(`mt_disabled — ${hint}`);
+                    }
+                    if (!_gateAdmins) reasons.push('no_admin_ids (set ADMIN_CHAT_IDS)');
+                    if (!_gateNotShadow) reasons.push(`shadow_only (topTier=${_tennisTopTier} tier2Promote=${_tennisTier2Promote} chall/itf=${isChallengerOrItf} qualifier=${isQualifier})`);
                     log('INFO', 'MT-GATE-SKIP', `tennis ${match.team1} vs ${match.team2} [${match.league}]: ${found.length} MT tip(s) found mas DM/promoção bloqueada — ${reasons.join(' | ')}`);
                   }
                   if (_gateMtEnabled && _gateAdmins && _gateNotShadow) {
