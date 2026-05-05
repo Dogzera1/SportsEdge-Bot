@@ -3401,12 +3401,16 @@ async function loadReadinessCorrections(sport) {
     return `<span style="background:${m.color};color:#fff;padding:1px 6px;border-radius:3px;font-size:0.72em;font-weight:600">${m.label}</span>`;
   };
   const actionLabel = {
-    // Learning actions (causa)
-    prob_shrink:    '🧠 Prob shrink (calib drift)',
+    // Negative learning (corrige leak)
+    prob_shrink:    '🧠 Prob shrink (overconfident)',
     ev_shrink:      '📉 EV shrink (CLV bleed)',
     ev_calib_refit: '🔄 EV calib refit',
-    // Gate actions (sintoma — last resort)
-    gate_kelly_cut: '⚠️ Kelly cut (gate)',
+    // Positive learning (amplifica winners)
+    prob_amplify:   '🚀 Prob amplify (underconfident)',
+    ev_boost:       '📈 EV boost (edge confirmado)',
+    gate_kelly_up:  '⬆️ Kelly up (sustained edge)',
+    // Gate actions (last resort negativo)
+    gate_kelly_cut: '⚠️ Kelly cut (last resort)',
     kelly_cut:      '⚠️ Kelly cut (legacy)',
     league_block:   '🚫 Liga bloqueada',
     hard_disable:   '⛔ Market disabled',
