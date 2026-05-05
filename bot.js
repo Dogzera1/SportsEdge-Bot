@@ -17200,9 +17200,17 @@ async function pollFootball(runOnce = false) {
                 // 2 dias mostrar football MT n=28 settled=7 (5W/2L 71.4% hit) ROI +40,9%
                 // CLV +0,02%. Hold via FOOTBALL_MT_SHADOW_ONLY=true se quiser voltar shadow.
                 const _fbMtShadowOnly = !/^(0|false|no)$/i.test(String(process.env.FOOTBALL_MT_SHADOW_ONLY ?? 'false'));
+                const _fbGateEn = isMarketTipsEnabled('football');
+                const _fbGateAd = ADMIN_IDS.size > 0;
                 if (_fbMtShadowOnly) {
                   log('DEBUG', 'FB-MT-SCAN', `${match.team1} vs ${match.team2}: ${fbMtFound.length} MT tips em shadow (FOOTBALL_MT_SHADOW_ONLY=true)`);
-                } else if (isMarketTipsEnabled('football') && ADMIN_IDS.size) {
+                } else if (!(_fbGateEn && _fbGateAd) && fbMtFound.length > 0) {
+                  const reasons = [];
+                  if (!_fbGateEn) reasons.push(describeMtGateSkip('football', fbMtFound[0].market, fbMtFound[0].side, match.league));
+                  if (!_fbGateAd) reasons.push('no_admin_ids (set ADMIN_CHAT_IDS)');
+                  log('INFO', 'MT-GATE-SKIP', `football ${match.team1} vs ${match.team2} [${match.league}]: ${fbMtFound.length} MT tip(s) found mas DM/promoção bloqueada — ${reasons.join(' | ')}`);
+                }
+                if (!_fbMtShadowOnly && _fbGateEn && _fbGateAd) {
                   try {
                     const mtp = require('./lib/market-tip-processor');
                     const { wasAdminDmSentRecently, markAdminDmSent } = require('./lib/market-tips-shadow');
@@ -17754,9 +17762,16 @@ Máximo 200 palavras.`;
             // 2026-05-03: promovido. Hold via FOOTBALL_MT_SHADOW_ONLY=true se quiser re-shadow.
             try {
               const _fbMtShadowOnlyP2 = !/^(0|false|no)$/i.test(String(process.env.FOOTBALL_MT_SHADOW_ONLY ?? 'false'));
+              const _fbGateEn2 = isMarketTipsEnabled('football');
+              const _fbGateAd2 = ADMIN_IDS.size > 0;
               if (_fbMtShadowOnlyP2) {
                 log('DEBUG', 'FB-MARKET-GATE', `${matchForMt.team1} vs ${matchForMt.team2} ${tipMarket}: shadow-only mode (FOOTBALL_MT_SHADOW_ONLY=true)`);
-              } else if (isMarketTipsEnabled('football') && ADMIN_IDS.size) {
+              } else if (!(_fbGateEn2 && _fbGateAd2)) {
+                const reasons = [];
+                if (!_fbGateEn2) reasons.push(describeMtGateSkip('football', marketKey, sideMt, match.league));
+                if (!_fbGateAd2) reasons.push('no_admin_ids (set ADMIN_CHAT_IDS)');
+                log('INFO', 'MT-GATE-SKIP', `football ${matchForMt.team1} vs ${matchForMt.team2} [${match.league}] ${tipMarket}: DM/promoção bloqueada — ${reasons.join(' | ')}`);
+              } else if (_fbGateEn2 && _fbGateAd2) {
                 const mtp = require('./lib/market-tip-processor');
                 const minEvFb = parseFloat(process.env.FOOTBALL_MARKET_TIP_MIN_EV ?? '8');
                 const minPmFb = parseFloat(process.env.FOOTBALL_MARKET_TIP_MIN_PMODEL ?? '0.55');
@@ -19030,7 +19045,15 @@ async function pollValorant(runOnce = false) {
                   log('INFO', 'VAL-MARKETS',
                     `  • ${t.label} @ ${t.odd.toFixed(2)} | pModel=${(t.pModel*100).toFixed(1)}% pImpl=${t.pImplied ? (t.pImplied*100).toFixed(1)+'%' : '?'} EV=${t.ev.toFixed(1)}%`);
                 }
-                if (isMarketTipsEnabled('valorant') && ADMIN_IDS.size) {
+                const _valGateEn = isMarketTipsEnabled('valorant');
+                const _valGateAd = ADMIN_IDS.size > 0;
+                if (!(_valGateEn && _valGateAd) && found.length > 0) {
+                  const reasons = [];
+                  if (!_valGateEn) reasons.push(describeMtGateSkip('valorant', found[0].market, found[0].side, match.league));
+                  if (!_valGateAd) reasons.push('no_admin_ids (set ADMIN_CHAT_IDS)');
+                  log('INFO', 'MT-GATE-SKIP', `valorant ${match.team1} vs ${match.team2} [${match.league}]: ${found.length} MT tip(s) found mas DM/promoção bloqueada — ${reasons.join(' | ')}`);
+                }
+                if (_valGateEn && _valGateAd) {
                   try {
                     const mtp = require('./lib/market-tip-processor');
                     const minEvGate = parseFloat(process.env.VAL_MARKET_TIP_MIN_EV ?? '8');
@@ -19904,9 +19927,17 @@ async function runAutoBasket() {
               // Promote path: shadow-only fase 1. Hold via BASKET_MT_SHADOW_ONLY=true
               // (default true). Flip pra false só após validação de 2 semanas.
               const _mtShadowOnly = !/^(0|false|no)$/i.test(String(process.env.BASKET_MT_SHADOW_ONLY ?? 'true'));
+              const _bskGateEn = isMarketTipsEnabled('basket');
+              const _bskGateAd = ADMIN_IDS.size > 0;
               if (_mtShadowOnly) {
                 log('DEBUG', 'BASKET-MT-SCAN', `${match.team1} vs ${match.team2}: ${found.length} MT em shadow (BASKET_MT_SHADOW_ONLY=true)`);
-              } else if (isMarketTipsEnabled('basket') && ADMIN_IDS.size) {
+              } else if (!(_bskGateEn && _bskGateAd) && found.length > 0) {
+                const reasons = [];
+                if (!_bskGateEn) reasons.push(describeMtGateSkip('basket', found[0].market, found[0].side, match.league));
+                if (!_bskGateAd) reasons.push('no_admin_ids (set ADMIN_CHAT_IDS)');
+                log('INFO', 'MT-GATE-SKIP', `basket ${match.team1} vs ${match.team2} [${match.league}]: ${found.length} MT tip(s) found mas DM/promoção bloqueada — ${reasons.join(' | ')}`);
+              }
+              if (!_mtShadowOnly && _bskGateEn && _bskGateAd) {
                 try {
                   const mtp = require('./lib/market-tip-processor');
                   const { wasAdminDmSentRecently, markAdminDmSent } = require('./lib/market-tips-shadow');
