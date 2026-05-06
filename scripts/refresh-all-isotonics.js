@@ -37,6 +37,35 @@ const doSync = argv.includes('--sync') || argv.includes('--all');
 
 const ROOT = path.resolve(__dirname, '..');
 
+// 2026-05-06: lockfile pra evitar concurrent execution. Cron 12h prod + manual
+// run = duas instances escrevendo lol-weights.json em paralelo → corruption.
+// Stale lock após 6h é overrideado (script crashed sem cleanup).
+const LOCK_PATH = path.join(ROOT, 'lib', '.refresh-isotonics-lock');
+function _acquireLock() {
+  try {
+    if (fs.existsSync(LOCK_PATH)) {
+      const stat = fs.statSync(LOCK_PATH);
+      const ageMs = Date.now() - stat.mtimeMs;
+      if (ageMs < 6 * 60 * 60 * 1000) {
+        const content = fs.readFileSync(LOCK_PATH, 'utf8');
+        console.error(`[REFRESH] Lock active (age ${Math.round(ageMs / 60000)}min) — abort. Holder: ${content.slice(0, 100)}`);
+        process.exit(2);
+      }
+      console.error(`[REFRESH] Stale lock (age ${Math.round(ageMs / 60000)}min) — overriding`);
+    }
+    fs.writeFileSync(LOCK_PATH, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }));
+  } catch (e) {
+    console.error(`[REFRESH] Lock setup failed: ${e.message}`);
+  }
+}
+function _releaseLock() {
+  try { fs.unlinkSync(LOCK_PATH); } catch (_) {}
+}
+_acquireLock();
+process.on('exit', _releaseLock);
+process.on('SIGINT', () => { _releaseLock(); process.exit(130); });
+process.on('SIGTERM', () => { _releaseLock(); process.exit(143); });
+
 // Lê metrics antes do refresh (pra comparar depois)
 function readIsotonic(p) {
   try {

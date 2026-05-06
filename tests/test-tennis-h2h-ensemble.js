@@ -1,8 +1,12 @@
 'use strict';
 
+// 2026-05-06 FIX: arquivo precisa exportar function(t) pra tests/run.js. Antes
+// rodava assertions inline em require() → run.js crashava com "mod is not a
+// function" e silenciosamente bloqueava testes posteriores na ordem readdir.
 const assert = require('assert');
 const { computeH2HEnsemble, inferSurface } = require('../lib/tennis-h2h-ensemble');
 
+module.exports = function(t) {
 // inferSurface tests
 assert.strictEqual(inferSurface('ATP Madrid - QF'), 'clay');
 assert.strictEqual(inferSurface('Wimbledon - R64'), 'grass');
@@ -116,3 +120,5 @@ console.log('OK: inferSurface covers Slam/Masters/indoor/unknown');
 }
 
 console.log('\\nAll tennis-h2h-ensemble tests passed.');
+};
+

@@ -446,6 +446,13 @@ async function _aiSecondOpinion(args) {
   const { sport, matchLabel, league, pickTeam, pickOdd, pickP, evPct, contextBlock, isLive = false, tolPp = 10, oddsObj = null, impliedP = null, maxDivPp = null, signalCount = 0, eloMinGames = 0 } = args;
   const tag = `AUTO-${String(sport).toUpperCase()}`;
 
+  // 2026-05-06: AI_DISABLED early-exit. Antes montava prompt + chamada serverPost
+  // mesmo com IA desligada → server retornava text vazio → métrica ai_silent_timeout
+  // falsa-positiva e CPU desperdiçado em prompts grandes (Tennis/Football 800+ chars).
+  if (process.env.AI_DISABLED === 'true') {
+    return { passed: true, reason: 'ai_disabled', conf: null };
+  }
+
   // Pré-gate: divergência modelo vs Pinnacle/Betfair (sharp anchor). Bloqueia ANTES da IA pra economizar tokens.
   if (oddsObj && Number.isFinite(impliedP) && Number.isFinite(maxDivPp)) {
     const _div = _sharpDivergenceGate({

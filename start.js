@@ -133,9 +133,11 @@ function spawnServerWithPortRetry() {
   const env = { ...process.env, PORT: String(PORT), SERVER_PORT: String(PORT) };
   const srv = spawn('node', ['server.js'], { stdio: 'inherit', env });
 
-  // Só inicia bot quando server ficou vivo alguns segundos
+  // 2026-05-06: bot spawn delay 3s→10s. Antes, com server crashing+port-retry,
+  // bot subia em 3s com env stale (PORT/SERVER_PORT do parent já mutado mid-flight),
+  // e logs ingest falhavam silenciosamente. 10s dá tempo do server estabilizar.
   if (botStartTimer) clearTimeout(botStartTimer);
-  botStartTimer = setTimeout(() => startBotOnce(), 3000);
+  botStartTimer = setTimeout(() => startBotOnce(), 10000);
 
   srv.on('exit', (code, signal) => {
     const ranMs = Date.now() - serverStartTs;

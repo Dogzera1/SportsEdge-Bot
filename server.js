@@ -18673,6 +18673,38 @@ setInterval(load, 60000);
         if (!tipParticipant) { badRequest(res, 'tipParticipant obrigatório'); return; }
         if (oddsN == null || oddsN <= 1) { badRequest(res, 'odds inválidas'); return; }
         if (evN == null) { badRequest(res, 'ev inválido'); return; }
+
+        // 2026-05-06: DAILY_TIP_LIMIT enforcement server-side. Antes só ML path
+        // do bot.js (applyGlobalRisk) checava — MT scanners (market-tip-processor,
+        // dota-extras, lol-kills, basket-mt) faziam record-tip direto, bypassando
+        // o gate. Skip pra is_shadow=1 (não consome cota dia real).
+        if (!t.isShadow) {
+          const _dailyLimit = (() => {
+            const sportKey = `DAILY_TIP_LIMIT_${String(sport).toUpperCase()}`;
+            const sportLimit = parseInt(process.env[sportKey] || '', 10);
+            if (Number.isFinite(sportLimit) && sportLimit > 0) return sportLimit;
+            const globalLimit = parseInt(process.env.DAILY_TIP_LIMIT || '', 10);
+            if (Number.isFinite(globalLimit) && globalLimit > 0) return globalLimit;
+            return null;
+          })();
+          if (_dailyLimit) {
+            try {
+              const tzH = parseFloat(process.env.DAILY_TZ_OFFSET_H ?? '-3');
+              const offsetMod = `${tzH >= 0 ? '+' : '-'}${Math.abs(tzH)} hours`;
+              const _row = db.prepare(`
+                SELECT COUNT(*) AS n FROM tips
+                WHERE sport = ?
+                  AND sent_at >= datetime(datetime('now', ?), 'start of day', ?)
+                  AND (archived IS NULL OR archived = 0)
+                  AND COALESCE(is_shadow, 0) = 0
+              `).get(sport, offsetMod, `${tzH >= 0 ? '-' : '+'}${Math.abs(tzH)} hours`);
+              if ((_row?.n || 0) >= _dailyLimit) {
+                sendJson(res, { ok: false, skipped: true, reason: 'daily_tip_limit', count: _row.n, limit: _dailyLimit });
+                return;
+              }
+            } catch (_) {}
+          }
+        }
         // 2026-05-05: Learned corrections (CALIBRATION layer, NÃO gate). Aplica
         // prob_shrink + ev_shrink derivadas pelo readiness-learner.
         // - prob_shrink encolhe model_p_pick em direção a 0.5 quando modelo
@@ -26064,13 +26096,17 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
 
   // ── LoL EV manual: extrair print Bet365 e analisar ──
   if (p === '/lol/ev-manual-365' && req.method === 'POST') {
+    // 2026-05-06: admin gate — endpoint chama DeepSeek com até 24KB de OCR text
+    // (max_tokens 900 = ~6-8k tokens/req). Sem auth, qualquer cliente externo
+    // drena quota DeepSeek. Igual /claude (já em ADMIN_ROUTES_POST).
+    if (!isAdminRequest(req)) { sendJson(res, { error: 'forbidden' }, 403); return; }
     let body = ''; req.on('data', d => { body += d; });
     req.on('end', async () => {
       try {
         if (!DEEPSEEK_KEY) { sendJson(res, { ok: false, error: 'DEEPSEEK_API_KEY ausente' }, 401); return; }
         const json = safeParse(body, null);
-        const ocrText = String(json?.ocrText || '').trim();
-        const ocrTextClean = String(json?.ocrTextClean || '').trim();
+        const ocrText = String(json?.ocrText || '').trim().slice(0, 8000);
+        const ocrTextClean = String(json?.ocrTextClean || '').trim().slice(0, 8000);
         if (!ocrText) {
           sendJson(res, {
             ok: false,
@@ -26458,9 +26494,11 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
         if (!DEEPSEEK_KEY) { sendJson(res, { error: 'DEEPSEEK_API_KEY ausente' }, 401); _emitAiMetric('no_key', _sportTag); return; }
 
         // ── DeepSeek (OpenAI-compatible) ──
+        // 2026-05-06: cap em max_tokens — antes payload externo podia pedir
+        // 100k tokens (DeepSeek max=8192 mas nada impedia tentativa custosa).
         const dsPayload = {
           model: payload.model?.startsWith('deepseek') ? payload.model : 'deepseek-chat',
-          max_tokens: payload.max_tokens || 1800,
+          max_tokens: Math.min(2000, Math.max(64, parseInt(payload.max_tokens, 10) || 1800)),
           messages: payload.messages
         };
         const r = await aiPost('deepseek', 'https://api.deepseek.com/chat/completions', dsPayload, {

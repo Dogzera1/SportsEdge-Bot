@@ -29,7 +29,11 @@ const path = require('path');
 const Database = require('better-sqlite3');
 const https = require('https');
 
-const DB_PATH = path.resolve(__dirname, '..', 'sportsedge.db');
+// 2026-05-06: respeita process.env.DB_PATH — antes hardcoded relative,
+// em Railway com /data/sportsedge.db o script lia DB local errado.
+const DB_PATH = process.env.DB_PATH
+  ? path.resolve(process.env.DB_PATH)
+  : path.resolve(__dirname, '..', 'sportsedge.db');
 const WEIGHTS_PATH = path.resolve(__dirname, '..', 'lib', 'lol-weights.json');
 
 const args = process.argv.slice(2);
