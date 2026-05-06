@@ -2303,6 +2303,46 @@ const migrations = [
       `);
     },
   },
+  {
+    id: '092_baseline_shadow_tips',
+    up(db) {
+      // Tabela isolada pra baseline trivial: "favorito Pinnacle dejuiced via line shop".
+      // Sistema rodando em paralelo SEM gates, SEM modelo, SEM IA. Só usa P_pinnacle_dejuiced
+      // como "fair" e procura best book com EV>=threshold.
+      //
+      // Objetivo: validar se o stack atual (52k LOC) bate baseline em walk-forward 90d.
+      // Se baseline >= stack atual → stack atual não tem edge; complexidade está custando.
+      //
+      // Settled via match_results (mesma fonte do tips). is_baseline_shadow=1 garante
+      // que não confunde com tips reais.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS baseline_shadow_tips (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          sport TEXT NOT NULL,
+          match_id TEXT NOT NULL,
+          team1 TEXT,
+          team2 TEXT,
+          league TEXT,
+          side TEXT NOT NULL,            -- 'team1' | 'team2'
+          pinnacle_odd REAL NOT NULL,    -- raw Pinnacle pick odd
+          pinnacle_p_dejuiced REAL NOT NULL,
+          best_book TEXT NOT NULL,       -- book com melhor odd (não-Pinnacle)
+          best_odd REAL NOT NULL,
+          ev_pct REAL NOT NULL,          -- (P_dej × best_odd - 1) × 100
+          created_at TEXT NOT NULL,
+          settled_at TEXT,
+          result TEXT,                   -- 'win'|'loss'|'push'|'void'
+          profit_units REAL,             -- assumindo 1u flat stake
+          close_odd REAL,
+          clv_pct REAL,
+          regime_tag TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_bst_sport_settled ON baseline_shadow_tips(sport, settled_at);
+        CREATE INDEX IF NOT EXISTS idx_bst_match ON baseline_shadow_tips(sport, match_id, side);
+        CREATE INDEX IF NOT EXISTS idx_bst_unsettled ON baseline_shadow_tips(settled_at) WHERE settled_at IS NULL;
+      `);
+    },
+  },
 ];
 
 function applyMigrations(db) {

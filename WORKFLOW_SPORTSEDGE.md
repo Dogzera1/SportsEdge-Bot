@@ -373,7 +373,8 @@ markAdminDmSent (mig 062 — dedup 24h por (match,market,line,side))
 [Cron close-line capture]
     │  Captura odd Pinnacle no momento do kickoff (cap 1.15× tip_odd)
     ▼
-clv_pct = (1/close_odd_dejuiced - 1/tip_odd) / (1/tip_odd) * 100
+// server.js:13779 — raw/raw (vig cancela na razão quando estável)
+clv_pct = (tip_odd / close_odd - 1) * 100
     ▼
 UPDATE tips SET clv_pct = ?, close_odd = ? WHERE id = ?  (mig 080)
 UPDATE market_tips_shadow SET clv_pct = ?  (mig 026)
@@ -937,7 +938,7 @@ maxPerMatch:
 
 ## 12. CLV tracking
 
-CLV = Closing Line Value = % a favor da odd da tip vs odd Pinnacle no kickoff dejuiced. Métrica gold-standard pra detectar edge real.
+CLV = Closing Line Value = % a favor da odd da tip vs odd Pinnacle no kickoff. Métrica gold-standard pra detectar edge real.
 
 ### 12.1 Capture
 
@@ -945,10 +946,15 @@ CLV = Closing Line Value = % a favor da odd da tip vs odd Pinnacle no kickoff de
 [Cron close-line per match]
     │
     ▼
-clv_pct = (1/close_odd_dejuiced - 1/tip_odd) / (1/tip_odd) * 100
-    │  Cap 1.15× tip_odd (anti-outlier)
-    │  Devig power method (lib/devig.js)
+// server.js:13779 — raw/raw, vig cancela na razão quando estável
+clv_pct = (tip_odd / close_odd - 1) * 100
+    │  Cap 1.15× tip_odd (anti-outlier sameOdd lock)
+    │  Devig power method (lib/devig.js) — usado em outros gates, não no CLV
     │  Lock min age (audit P0 2026-05-03)
+    │
+    │  Por que raw/raw é OK: vig estável (Pinnacle ~2.5%) cancela em
+    │  tip_odd/close_odd = (tip_dej × 1.025) / (close_dej × 1.025).
+    │  Bias só se vig variar entre captura e close (raro em sharp book).
     ▼
 UPDATE tips SET clv_pct = ?, close_odd = ? (mig 080)
 UPDATE market_tips_shadow SET clv_pct = ? (mig 026)
@@ -1038,21 +1044,26 @@ Tips que falharam match lookup repetidamente vão pra quarantine. Manual review 
 - **Tennis:** R$76,59 (drawdown 24%, em taper ×0.35)
 - **LoL/Dota2/CS2/etc:** ver `/dashboard`
 
-### 14.2 Sports
+### 14.2 Sports — clarificação ML vs MT
 
-| Sport | Status | Razão |
-|---|---|---|
-| LoL | ML disabled → MT shadow puro | LoL ML -28,9% audit |
-| CS2 | ML disabled → MT promoted | CS ML -21,7% audit, MT CLV+12 promote |
-| Dota2 | ML disabled → MT promoted | MT CLV+10,6 promote |
-| Tennis | Trained model + Markov ativo | calib refit nightly |
-| Football | MT promoted | ROI +40,9% hit 71% CLV 0 |
-| Valorant | ML shadow only | sample baixo |
-| MMA | Disabled | env MMA_ENABLED=false default |
-| Darts | Disabled | env DARTS_ENABLED=false default |
-| Snooker | Disabled | env SNOOKER_ENABLED=false default |
-| TT | Marginal | shadow opt-in |
-| Basket NBA | Shadow fase 1 | promote critério n≥30+CLV≥0+ROI≥0 em 2sem |
+`<SPORT>_ML_DISABLED=true` desliga **só** o path ML 1X2/match winner (auto-route shadow). MT (markets secundários: handicap, totals, kills, sets, spread) é independente.
+
+| Sport | ML 1X2 | MT (markets) | Razão | Dispatcha real? |
+|---|---|---|---|---|
+| LoL | disabled (LOL_ML_DISABLED=true) | shadow (kills, totals em shadow puro) | ML -28,9% audit | **Não** |
+| CS2 | disabled (CS_ML_DISABLED=true) | **promoted** (CLV+12) | ML -21,7%; MT funciona | **Sim (MT)** |
+| Dota2 | disabled | **promoted** (CLV+10,6) | MT funciona | **Sim (MT)** |
+| Tennis | disabled (TENNIS_ML_DISABLED=true) | **promoted** (handicapGames + totalGames via Markov calib) | ML -33,5% n=161; MT ~99% das tips reais ROI +9,4% | **Sim (MT)** |
+| Football | n/a (sem ML 1X2 path) | **promoted** | ROI +40,9% hit 71% | **Sim (MT)** |
+| Valorant | shadow | shadow | sample baixo | Não |
+| MMA | n/a | n/a | `MMA_ENABLED=false` | Não |
+| Darts | n/a | n/a | `DARTS_ENABLED=false` | Não |
+| Snooker | n/a | n/a | `SNOOKER_ENABLED=false` | Não |
+| TT | shadow | n/a | shadow opt-in | Não |
+| Basket NBA | shadow | shadow | fase 1 | Não |
+
+**Sports que efetivamente dispatcham hoje:** Tennis (MT), CS2 (MT), Dota2 (MT), Football (MT).
+**Total real ativo: 4 sports — todos via MT, nenhum via ML 1X2.**
 
 ### 14.3 Calibração
 

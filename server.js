@@ -10475,6 +10475,78 @@ setInterval(load, 60000);
   // GET /admin/cron-status?key=<ADMIN_KEY>
   // Mostra: lastTs, count, lastResult, lastError, lastDurationMs, age_s,
   // expected_interval_ms, is_stale (age > 2x expected).
+  // GET /admin/holdout-status — mostra FROZEN_HOLDOUT_DAYS atual + cutoff iso
+  // por sistema. Útil pra confirmar que auto-tunes estão respeitando reserva.
+  if (p === '/admin/holdout-status' && (req.method === 'GET' || req.method === 'POST')) {
+    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    try {
+      const status = require('./lib/frozen-holdout').getStatus();
+      sendJson(res, { ok: true, ...status, ts: new Date().toISOString() });
+    } catch (e) {
+      sendJson(res, { ok: false, error: e.message }, 500);
+    }
+    return;
+  }
+
+  // GET /admin/baseline-shadow-stats?days=90 — comparação contrafactual:
+  // baseline trivial (favorito Pinnacle dejuiced + line-shop EV>=5%) vs stack atual.
+  if (p === '/admin/baseline-shadow-stats' && (req.method === 'GET' || req.method === 'POST')) {
+    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    try {
+      const days = parseInt(parsed.query.days || '90', 10) || 90;
+      const baseline = require('./lib/baseline-shadow').getStats(db, { days });
+
+      // Stack atual (tips reais + shadow real, exclui baseline_shadow_tips):
+      const stackOverall = db.prepare(`
+        SELECT COUNT(*) AS total,
+          SUM(CASE WHEN result IN ('win','loss') THEN 1 ELSE 0 END) AS resolved,
+          SUM(CASE WHEN result = 'win' THEN 1 ELSE 0 END) AS wins,
+          SUM(COALESCE(profit_reais, 0)) AS profit_r,
+          SUM(COALESCE(stake_reais, 0)) AS stake_r,
+          AVG(ev_pct) AS avg_ev,
+          AVG(clv_pct) AS avg_clv
+        FROM tips
+        WHERE created_at >= datetime('now', '-' || ? || ' days')
+          AND COALESCE(is_shadow, 0) = 0
+          AND result IN ('win','loss','push')
+      `).get(days);
+
+      const stackFmt = {
+        n: stackOverall.total || 0,
+        resolved: stackOverall.resolved || 0,
+        wins: stackOverall.wins || 0,
+        hit_pct: stackOverall.resolved ? +(stackOverall.wins / stackOverall.resolved * 100).toFixed(1) : null,
+        profit_reais: +(stackOverall.profit_r || 0).toFixed(2),
+        stake_reais: +(stackOverall.stake_r || 0).toFixed(2),
+        roi_pct: stackOverall.stake_r > 0 ? +((stackOverall.profit_r || 0) / stackOverall.stake_r * 100).toFixed(1) : null,
+        avg_ev: stackOverall.avg_ev != null ? +stackOverall.avg_ev.toFixed(2) : null,
+        avg_clv: stackOverall.avg_clv != null ? +stackOverall.avg_clv.toFixed(2) : null,
+      };
+
+      sendJson(res, {
+        ok: true,
+        days,
+        baseline,
+        stack: stackFmt,
+        comparison: {
+          baseline_better: (baseline.overall.roi_pct ?? -999) > (stackFmt.roi_pct ?? -999),
+          delta_roi_pp: (baseline.overall.roi_pct != null && stackFmt.roi_pct != null)
+            ? +(baseline.overall.roi_pct - stackFmt.roi_pct).toFixed(1)
+            : null,
+          interpretation: 'Baseline = "favorito Pinnacle dejuiced + best non-Pinnacle book EV≥5%". ' +
+                          'Se baseline ROI ≥ stack ROI walk-forward 90d, complexidade do stack atual ' +
+                          'não está pagando overhead em evidência.',
+        },
+        ts: new Date().toISOString(),
+      });
+    } catch (e) {
+      sendJson(res, { ok: false, error: e.message, stack: e.stack?.slice(0, 400) }, 500);
+    }
+    return;
+  }
+
   if (p === '/admin/cron-status' && (req.method === 'GET' || req.method === 'POST')) {
     const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
@@ -10501,6 +10573,7 @@ setInterval(load, 60000);
       'mt_calib_validation':      30 * 60 * 1000,
       'mt_calib_refit':     60 * 60 * 1000,
       'tennis_calib_refit': 60 * 60 * 1000, // hourly check, fires once/day at 04h local
+      'baseline_shadow':    15 * 60 * 1000, // contrafactual line-shop sem stack
       // Hourly
       'bankroll_guardian':  60 * 60 * 1000,
       // 6h

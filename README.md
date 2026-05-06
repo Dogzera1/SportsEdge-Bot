@@ -59,9 +59,12 @@ SportsEdge é um bot de Telegram autônomo que:
 
 **Status atual (Maio 2026):**
 - Banca total: ~R$1188 / R$1200 inicial (-0,98% em 30d, em recovery pós-leak audit 2026-05-04)
-- 9 sports ativos: LoL, CS2, Dota2, Valorant, Tennis, Football, MMA, Darts, Snooker, TableTennis, Basket (NBA shadow)
-- ML real ML disabled em LoL/CS (ROI negativo) — auto-rota pra shadow ao invés de rejeitar
-- MT promovido em CS2/Dota2 + Football
+- **Sports configurados:** 11 (LoL, CS2, Dota2, Valorant, Tennis, Football, MMA, Darts, Snooker, TableTennis, Basket NBA)
+- **Dispatcham real DM hoje:** Tennis (MT), CS2 (MT), Dota2 (MT), Football (MT) — 4 sports
+- **Em shadow puro** (não dispatch): LoL ML, CS ML, Tennis ML 1X2 (ROI negativo no path), Valorant, Basket NBA, TT
+- **Disabled hard** (env=false): MMA, Darts, Snooker
+- **ML 1X2 disabled** em LoL/CS/Tennis — auto-rota pra shadow (não hard reject); MT (markets secundários) continua ativo
+- **MT promovido:** CS2, Dota2, Football, Tennis
 - 91 migrations aplicadas
 - Tennis Markov calib refit nightly (cron 04h)
 
@@ -116,22 +119,45 @@ SportsEdge é um bot de Telegram autônomo que:
 
 | Sport | Bot Telegram | Odds primária | Stats live | Modelo P | IA | Status |
 |---|---|---|---|---|---|---|
-| **LoL Esports** | `@Lolbetting_bot` | Pinnacle (per-map via `period=N`) → SX.Bet alt | Riot API + PandaScore + gol.gg | Logistic+GBDT+isotonic (lol-weights.json) | DeepSeek | ML real disabled → MT shadow puro |
-| **Dota 2** | (compartilha bot LoL) | Pinnacle per-map → SX.Bet alt | OpenDota + Steam Realtime API (~15s vs 3min) | Logistic+isotonic+momentum (dota2-weights.json) | DeepSeek | ML disabled → MT promoted |
-| **CS2** | `@Csbettor_bot` | Pinnacle (tier-1 detection) | HLTV scorebot + cs-map-model | Elo + HLTV form + isotonic (cs2-weights.json) | DeepSeek | ML disabled → MT promoted |
-| **Valorant** | (compartilha bot CS) | Pinnacle | VLR.gg (mapa/round/side/score) | Logistic + Bayesian map→série + isotonic (valorant-weights.json) | DeepSeek | ML shadow only |
-| **MMA/Boxe** | `@Ufcbettor_bot` | The Odds API (prefere Pinnacle/Betfair) | ESPN + Sofascore fallback | Record + ufcstats (mma-weights.json) | DeepSeek | Disabled (default 2026-05-04) |
-| **Tennis** | `@Tennisbet1_bot` | Pinnacle → The Odds API | Sofascore live | Sackmann Elo + trained logistic + Markov (tennis-weights.json) | DeepSeek | Trained model + Markov ativo; calib refit nightly |
-| **Football** | `@Betfut1_bot` | The Odds API + Pinnacle | API-Football + Sofascore + ESPN soccer | Poisson trained + DC + home boost + xG/SoT + fd_features | DeepSeek | MT promoted |
-| **Darts** | `@Dartsbet_bot` | Sofascore | Sofascore (sets/legs) | 3DA + WR sample-weighted (darts-weights.json) | DeepSeek | Disabled (default 2026-05-04) |
-| **Snooker** | `@Snookerbet_bot` | Pinnacle / Betfair | CueTracker WR (cache 6h) | ranking-log + WR (snooker-weights.json) | DeepSeek | Disabled (default 2026-05-04) |
-| **Table Tennis** | `@TTbettor_bot` | Pinnacle | Sofascore | Elo + form (sample-weighted) | DeepSeek | Marginal |
-| **Basket NBA** | (admin DM) | Pinnacle + ESPN | ESPN + Pinnacle | logistic + isotonic + Elo blend (basket-trained.js) | — | Shadow fase 1 (promote critério ≥30 + CLV≥0 em 2sem) |
+| Sport | Bot Telegram | Odds primária | Stats live | Modelo P | IA | Status real (Maio/2026) |
+|---|---|---|---|---|---|---|
+| **LoL Esports** | `@Lolbetting_bot` | Pinnacle (per-map via `period=N`) → SX.Bet alt | Riot API + PandaScore + gol.gg | Logistic+GBDT+isotonic | DeepSeek | ML 1X2 disabled (auto-route shadow); MT kills/totals ativo (shadow puro) |
+| **Dota 2** | (compartilha bot LoL) | Pinnacle per-map → SX.Bet alt | OpenDota + Steam RT (~15s) | Logistic+isotonic+momentum | DeepSeek | ML 1X2 disabled; **MT promoted** (CLV+10,6) |
+| **CS2** | `@Csbettor_bot` | Pinnacle (tier-1 detection) | HLTV scorebot + cs-map-model | Elo + HLTV form + isotonic | DeepSeek | ML 1X2 disabled; **MT promoted** (CLV+12) |
+| **Valorant** | (compartilha bot CS) | Pinnacle | VLR.gg (mapa/round/side/score) | Logistic + Bayesian map→série + isotonic | DeepSeek | ML shadow only (sample baixo) |
+| **MMA/Boxe** | `@Ufcbettor_bot` | The Odds API → Pinnacle/Betfair | ESPN + Sofascore fallback | Record + ufcstats | DeepSeek | **Disabled** (`MMA_ENABLED=false`) |
+| **Tennis** | `@Tennisbet1_bot` | Pinnacle → The Odds API | Sofascore live | Sackmann Elo + trained logistic + Markov + isotonic | DeepSeek | **ML 1X2 disabled** (path -33,5% n=161); **MT promoted** (handicapGames/totalGames via Markov calib refit nightly, ~99% das tips reais tennis) |
+| **Football** | `@Betfut1_bot` | The Odds API + Pinnacle | API-Football + Sofascore + ESPN | Poisson trained + DC + xG/SoT + fd_features | DeepSeek | **MT promoted** (ROI +40,9%) |
+| **Darts** | `@Dartsbet_bot` | Sofascore | Sofascore (sets/legs) | 3DA + WR sample-weighted | DeepSeek | **Disabled** (`DARTS_ENABLED=false`) |
+| **Snooker** | `@Snookerbet_bot` | Pinnacle / Betfair | CueTracker WR (cache 6h) | ranking-log + WR | DeepSeek | **Disabled** (`SNOOKER_ENABLED=false`) |
+| **Table Tennis** | `@TTbettor_bot` | Pinnacle | Sofascore | Elo + form (sample-weighted) | DeepSeek | Marginal (shadow opt-in) |
+| **Basket NBA** | (admin DM) | Pinnacle + ESPN | ESPN + Pinnacle | logistic + isotonic + Elo blend (w=0.65) | — | Shadow fase 1 (promote critério n≥30+CLV≥0 em 2sem) |
 
-**Focus funnel (2026-04-24):**
-- **Primary** (full dispatch): LoL, CS2, Tennis
-- **Shadow** (`<SPORT>_SHADOW=true`): Dota2, Valorant, MMA, Darts, Snooker, Football, TT
-- **Disabled hard:** MMA, Darts, Snooker (default 2026-05-04 via `<SPORT>_ENABLED=false`)
+### Estado real do dispatch (Maio/2026)
+
+**Sports que dispatcham DM real hoje:**
+- **Tennis** — via MT (Markov handicapGames/totalGames). ML 1X2 path está disabled.
+- **CS2** — via MT promoted. ML 1X2 path está disabled.
+- **Dota2** — via MT promoted. ML 1X2 path está disabled.
+- **Football** — via MT promoted (incluiu OVER_2.5, totals, AH).
+
+**Sports em shadow puro** (logam tip, não enviam DM):
+- LoL ML 1X2 + extras (kills, totals)
+- CS ML 1X2 (MT já dispatchou)
+- Valorant
+- Tennis ML 1X2 (MT já dispatchou)
+- Basket NBA
+- TT
+
+**Sports disabled hard** (não pollam):
+- MMA, Darts, Snooker (env `<SPORT>_ENABLED=false` desde 2026-05-04)
+
+### Distinção crítica: ML vs MT
+
+- **ML** = Money Line / 1X2 / match winner — path "core" do bot original
+- **MT** (Market Tips) = mercados secundários (handicap, totals, kills, sets, spread, BTTS, etc.) — sistema paralelo via `lib/<sport>-mt-scanner.js`
+
+`<SPORT>_ML_DISABLED=true` desliga **só** o path ML 1X2; MT continua ativo independente. Foi essa separação que permitiu Tennis dispatchar via MT (ROI +9,4%) enquanto ML 1X2 sangrava (-33,5% n=161).
 
 ---
 
@@ -386,7 +412,9 @@ Auto-tune diário (cron 8h local) ajusta `kelly_mult` per-sport baseado em ROI+C
 [Cron close-line — captura odd Pinnacle no kickoff]
     │
     ▼
-[Calcula clv_pct = (1/close_odd - 1/tip_odd) / (1/tip_odd) * 100]
+[Calcula clv_pct = (tip_odd / close_odd - 1) * 100]
+    │   Raw / raw (vig cancela na razão se vig estável entre captura e close)
+    │   Equivalente: ((1/close_odd) / (1/tip_odd) - 1) * 100
     │
     ▼
 [Persiste em tips.clv_pct + market_tips_shadow.clv_pct]
@@ -721,11 +749,18 @@ Toggle global por sport via `<SPORT>_SHADOW=true`. Quando shadow:
 
 ## CLV tracking
 
-CLV = Closing Line Value = % a favor da odd da tip vs odd Pinnacle no kickoff dejuiced. Métrica gold-standard pra detectar edge real.
+CLV = Closing Line Value = % a favor da odd da tip vs odd Pinnacle no kickoff. Métrica gold-standard pra detectar edge real.
+
+**Implementação atual** (server.js:13779) usa raw/raw — vig cancela na razão quando estável entre captura e close (mesmo book, mesmo mercado):
 
 ```
-clv_pct = (1/close_odd_dejuiced - 1/tip_odd) / (1/tip_odd) * 100
+clv_pct = (tip_odd / close_odd - 1) * 100
+       = ((1/close_odd) / (1/tip_odd) - 1) * 100
 ```
+
+**Por que raw/raw é OK:** se vig é estável (ex: Pinnacle ~2.5% nos dois momentos), `tip_dejuiced/close_dejuiced = (tip*1.025)/(close*1.025) = tip/close` — o vig cancela. Bias só entra se vig variou (raro em book sharp em window curta de captura→kickoff).
+
+**Quando NÃO é OK:** comparar tip de book A com close de book B (vigs diferentes). Sistema captura close sempre do mesmo book/mercado da tip.
 
 ### Capture
 

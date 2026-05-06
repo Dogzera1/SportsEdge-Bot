@@ -901,6 +901,25 @@ function _wrapCron(name, fn) {
   };
 }
 
+// setTimeout recursivo com jitter ±jitterMs aleatório a cada tick.
+// Evita N crons coincidentes no mesmo segundo (X:00, X:05) competindo por
+// lock SQLite. Cada tick reagenda com offset random independente.
+//
+// Uso: _setIntervalJittered(_wrapCron('name', fn), 5*60*1000, 60*1000)
+//   → tick em 5min ± 60s aleatório
+//
+// Boot: primeiro tick em [0, baseMs+jitterMs] aleatório (espalha boot inicial).
+function _setIntervalJittered(fn, baseMs, jitterMs = 60000) {
+  const tick = () => {
+    try { fn(); } catch (_) { /* fn já wrapped por _wrapCron */ }
+    const jitter = Math.floor((Math.random() - 0.5) * 2 * jitterMs);
+    setTimeout(tick, Math.max(1000, baseMs + jitter));
+  };
+  // Primeiro tick atrasado random pra spread boot (não roda imediatamente).
+  const bootDelay = Math.floor(Math.random() * (baseMs + jitterMs));
+  setTimeout(tick, bootDelay);
+}
+
 // ── Memory watchdog (com auto-tune dinâmico) ──
 // Monitora process.memoryUsage().rss e mantém histograma das últimas 7d
 // (288 amostras × 5min × 7d). Threshold dinâmico = P95 baseline × 1.3 quando
@@ -20757,7 +20776,8 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
 
   // Auto-Healer: detecta anomalias via Health Sentinel e aplica fixes operacionais.
   // Default ON — desativar via AUTO_HEALER_ENABLED=false
-  setInterval(_wrapCron('auto_healer', runAutoHealerCycle), AUTO_HEALER_CHECK_INTERVAL_MS);
+  // Jittered ±60s pra evitar collision com stale_line/book_bug (todos 5min).
+  _setIntervalJittered(_wrapCron('auto_healer', runAutoHealerCycle), AUTO_HEALER_CHECK_INTERVAL_MS, 60 * 1000);
   setTimeout(_wrapCron('auto_healer', runAutoHealerCycle), 4 * 60 * 1000); // primeiro check 4min pós-boot
 
   // Bankroll Guardian: cron 1h, alerta drawdown alto + auto-shadow temporário.
@@ -22802,7 +22822,8 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
       if (alerts > 0 || superOdds > 0 || arbs > 0 || velocities > 0) log('INFO', 'STALE-LINE', `${alerts} stale, ${superOdds} super-odd, ${arbs} arb, ${velocities} velocity`);
     } catch (e) { log('ERROR', 'STALE-LINE', e.message); }
   }
-  setInterval(() => runStaleLineCron(), 5 * 60 * 1000); // 5min
+  // Jittered ±60s — combina stale + super-odd + arb + velocity em 1 cron.
+  _setIntervalJittered(() => runStaleLineCron(), 5 * 60 * 1000, 60 * 1000);
   setTimeout(() => runStaleLineCron(), 7 * 60 * 1000);  // primeira run 7min boot (após 1ª auto-sample)
 
   // Book bug finder: varre snapshots_odds Supabase, detecta arb intra-book
@@ -22874,8 +22895,71 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
       }
     } catch (e) { log('ERROR', 'BUG-FINDER', e.message); }
   }
-  setInterval(() => runBookBugFinderCron(), 5 * 60 * 1000);
+  // Jittered ±60s — evita collision com auto_healer/stale_line.
+  _setIntervalJittered(() => runBookBugFinderCron(), 5 * 60 * 1000, 60 * 1000);
   setTimeout(() => runBookBugFinderCron(), 8 * 60 * 1000);
+
+  // Baseline shadow: contrafactual "favorito Pinnacle dejuiced + line-shop EV>=5%".
+  // Sistema rodando paralelo SEM gates/modelo/IA. Se ROI baseline >= ROI stack
+  // walk-forward 90d, complexidade do stack atual não tem edge demonstrado.
+  // Opt-out: BASELINE_SHADOW_DISABLED=true.
+  // Cron 15min — itera sports primários, popula baseline_shadow_tips. Settle
+  // junto com settleCompletedTips.
+  async function runBaselineShadowCycle() {
+    if (/^(1|true|yes)$/i.test(String(process.env.BASELINE_SHADOW_DISABLED || ''))) return;
+    try {
+      const baselineLib = require('./lib/baseline-shadow');
+      const http = require('http');
+      const port = process.env.PORT || 3000;
+      const fetchJson = (path) => new Promise((resolve, reject) => {
+        const req = http.get('http://localhost:' + port + path, (r) => {
+          let body = '';
+          r.on('data', c => body += c);
+          r.on('end', () => { try { resolve(JSON.parse(body)); } catch (e) { reject(e); } });
+        });
+        req.on('error', reject);
+        req.setTimeout(30000, () => { req.destroy(new Error('timeout')); });
+      });
+
+      const sportsToScan = [
+        { sport: 'lol', endpoint: '/lol-matches' },
+        { sport: 'dota2', endpoint: '/dota-matches' },
+        { sport: 'cs2', endpoint: '/cs-matches' },
+        { sport: 'tennis', endpoint: '/tennis-matches' },
+        { sport: 'football', endpoint: '/football-matches' },
+      ];
+
+      let totalLogged = 0;
+      for (const { sport, endpoint } of sportsToScan) {
+        try {
+          const matches = await fetchJson(endpoint).catch(() => null);
+          if (!Array.isArray(matches)) continue;
+          for (const m of matches) {
+            try {
+              const r = baselineLib.logBaselineShadowIfQualifies(db, {
+                sport,
+                matchId: m.id || m.match_id || `${m.team1}_vs_${m.team2}`,
+                team1: m.team1,
+                team2: m.team2,
+                league: m.league || m.tournament,
+                oddsObj: m.odds,
+              });
+              totalLogged += r.logged;
+            } catch (_) { /* skip individual match err */ }
+          }
+        } catch (_) { /* skip sport */ }
+      }
+
+      // Settle batch
+      const settleRes = baselineLib.settleBaselineShadow(db);
+
+      if (totalLogged > 0 || settleRes.settled > 0) {
+        log('INFO', 'BASELINE-SHADOW', `logged=${totalLogged} settled=${settleRes.settled}`);
+      }
+    } catch (e) { log('WARN', 'BASELINE-SHADOW', e.message); }
+  }
+  _setIntervalJittered(_wrapCron('baseline_shadow', runBaselineShadowCycle), 15 * 60 * 1000, 90 * 1000);
+  setTimeout(_wrapCron('baseline_shadow', runBaselineShadowCycle), 12 * 60 * 1000); // primeiro 12min boot
 
   // BR Edges auto-DM: dispara DM admin quando edge cross-book persiste em 2
   // ciclos consecutivos (sustentado >5min). Diferente do super-odd-detector
