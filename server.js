@@ -26202,12 +26202,40 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
     ).get(sport);
     const accumulatedProfit = parseFloat((profitRow?.total_profit || 0).toFixed(2));
     const currentBanca = parseFloat((bk.initial_banca + accumulatedProfit).toFixed(2));
+
+    // 2026-05-06: peak_banca via SQL window function (running max do profit cumulativo).
+    // Risk gate em bot.js usa pra DD verdadeiro (peak-based) ao invés de
+    // growth-from-initial (que era misnamed "drawdown"). Fallback: se peak<initial
+    // (banca nunca subiu acima de initial), retorna initial pra DD não ser 0.
+    let peakBanca = bk.initial_banca;
+    try {
+      const peakRow = db.prepare(`
+        SELECT MAX(running) AS max_profit FROM (
+          SELECT SUM(profit_reais) OVER (ORDER BY COALESCE(settled_at, created_at)) AS running
+          FROM tips
+          WHERE sport = ?
+            AND result IS NOT NULL AND result != 'void'
+            AND profit_reais IS NOT NULL
+            AND (archived IS NULL OR archived = 0)
+            AND COALESCE(is_shadow, 0) = 0
+        )
+      `).get(sport);
+      const maxProfit = Number(peakRow?.max_profit) || 0;
+      // Peak >= initial sempre (pode haver profit cumulativo negativo, mas peak não desce abaixo de initial)
+      peakBanca = parseFloat(Math.max(bk.initial_banca, bk.initial_banca + maxProfit).toFixed(2));
+    } catch (_) {
+      // SQLite sem window functions ou erro de query — mantém fallback initial
+    }
+
+    const drawdownVsPeak = peakBanca > 0 ? parseFloat((((peakBanca - currentBanca) / peakBanca) * 100).toFixed(2)) : 0;
     sendJson(res, {
       initialBanca: bk.initial_banca,
       currentBanca: currentBanca,
+      peakBanca: peakBanca,
       unitValue: parseFloat((currentBanca / 100).toFixed(4)),
       profitReais: accumulatedProfit,
       growthPct: parseFloat((accumulatedProfit / bk.initial_banca * 100).toFixed(2)),
+      drawdownVsPeakPct: drawdownVsPeak,
       updatedAt: bk.updated_at
     });
     return;

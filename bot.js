@@ -2008,7 +2008,22 @@ async function applyGlobalRisk(sport, desiredUnits, leagueSlug) {
     try {
       const bk = await serverGet(`/bankroll`, sport).catch(() => null);
       if (bk?.initialBanca && bk.initialBanca > 0 && bk?.currentBanca != null) {
-        const drawdown = (bk.initialBanca - bk.currentBanca) / bk.initialBanca;
+        // 2026-05-06: peak-based DD verdadeiro (vs growth-from-initial misnamed
+        // como "drawdown" antes). Server retorna peakBanca via SQL window function.
+        // Fallback: se peakBanca ausente (server antigo sem deploy), usa
+        // max(initial, current) — preserva DD ≥ 0 quando current > initial.
+        // Opt-out via DD_PEAK_BASED=false (mantém legacy growth-from-initial).
+        const usePeakBased = !/^(0|false|no)$/i.test(String(process.env.DD_PEAK_BASED ?? 'true'));
+        let drawdown;
+        if (usePeakBased && Number.isFinite(bk.peakBanca) && bk.peakBanca > 0) {
+          drawdown = (bk.peakBanca - bk.currentBanca) / bk.peakBanca;
+        } else {
+          // Fallback legacy: growth-from-initial (mais conservador)
+          drawdown = (bk.initialBanca - bk.currentBanca) / bk.initialBanca;
+        }
+        // Clamp: DD não pode ser negativo (current > peak não acontece em peak-based,
+        // mas pode em fallback se current > initial).
+        drawdown = Math.max(0, drawdown);
         _drawdownCache.set(sport, { pct: drawdown, checkedAt: Date.now() });
         const r = applyFromPct(drawdown);
         if (r.ok === false) return r;
