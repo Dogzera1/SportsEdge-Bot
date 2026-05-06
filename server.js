@@ -16068,14 +16068,16 @@ setInterval(load, 60000);
     const minN = Math.max(1, Math.min(50, parseInt(parsed.query.minN || '3', 10) || 3));
     const leagueMatch = String(parsed.query.league_match || '').trim();
     try {
-      const leagueClause = leagueMatch ? `AND (league LIKE '%' || ? || '%' OR event_name LIKE '%' || ? || '%')` : '';
+      // Schema tips não tem coluna `league` — usa event_name (que vem como
+      // "ATP Rome - R1", "WTA Rome - Qualifiers" etc).
+      const leagueClause = leagueMatch ? `AND event_name LIKE '%' || ? || '%'` : '';
       const params = [sport, days];
-      if (leagueMatch) { params.push(leagueMatch); params.push(leagueMatch); }
+      if (leagueMatch) { params.push(leagueMatch); }
       params.push(minN);
       const rows = db.prepare(`
         SELECT
           COALESCE(market_type, 'ML') AS market,
-          COALESCE(league, event_name, 'unknown') AS league,
+          COALESCE(event_name, 'unknown') AS league,
           COALESCE(tip_participant, '') AS pick_side,
           COUNT(*) AS n_total,
           SUM(CASE WHEN result = 'win' THEN 1 ELSE 0 END) AS n_win,
