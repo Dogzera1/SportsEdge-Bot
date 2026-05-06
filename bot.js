@@ -5644,25 +5644,61 @@ async function runMarketTipsRoiGuardSided() {
   const LEAGUE_GUARD = !/^(0|false|no)$/i.test(String(process.env.MT_ROI_GUARD_LEAGUE_AUTO ?? 'true'));
   const TIER_GUARD = !/^(0|false|no)$/i.test(String(process.env.MT_ROI_GUARD_TIER_AUTO ?? 'true'));
 
+  // 2026-05-06 FIX: query agrega tips REAIS (is_shadow=0) ao invés de
+  // market_tips_shadow misturado. Antes, sport com MT promoted (tennis MT
+  // dispatcha real) tinha auto_roi_leak detectado por shadow research negative
+  // mesmo com tips reais positivas. Ex: tennis|totalGames|over auto-disable
+  // ROI -63% mas tips reais +83% (shadow misleading).
+  // INNER JOIN: market_tips_shadow tem o `side` field padronizado, tips usa
+  // tip_participant string. Match via match_key=match_id + market=market_type
+  // + is_shadow=0 garante só tips dispatched reais entram no agregado.
+  // Opt-out legacy: MT_ROI_GUARD_REAL_ONLY=false.
+  const REAL_ONLY = !/^(0|false|no)$/i.test(String(process.env.MT_ROI_GUARD_REAL_ONLY ?? 'true'));
   let rowsSide = [], rowsLeague = [];
   try {
-    rowsSide = db.prepare(`
-      SELECT sport, market, side, NULL AS league,
-        COUNT(*) AS n_settled,
-        SUM(CASE WHEN result = 'win' THEN 1 ELSE 0 END) AS wins,
-        SUM(CASE WHEN result = 'win' THEN COALESCE(stake_units, 1) * (odd - 1) ELSE 0 END)
-        - SUM(CASE WHEN result = 'loss' THEN COALESCE(stake_units, 1) ELSE 0 END) AS profit_u,
-        SUM(CASE WHEN result IN ('win','loss') THEN COALESCE(stake_units, 1) ELSE 0 END) AS stake_u
-      FROM market_tips_shadow
-      WHERE result IN ('win', 'loss')
-        AND created_at >= datetime('now', '-' || ? || ' days')
-        AND side IS NOT NULL
-      GROUP BY sport, market, side
-      HAVING n_settled >= ?
-    `).all(WINDOW_DAYS, N_CUTOFF);
-    if (LEAGUE_GUARD || TIER_GUARD) {
-      rowsLeague = db.prepare(`
-        SELECT sport, market, side, league,
+    if (REAL_ONLY) {
+      rowsSide = db.prepare(`
+        SELECT mts.sport, mts.market, mts.side, NULL AS league,
+          COUNT(*) AS n_settled,
+          SUM(CASE WHEN mts.result = 'win' THEN 1 ELSE 0 END) AS wins,
+          SUM(CASE WHEN mts.result = 'win' THEN COALESCE(mts.stake_units, 1) * (mts.odd - 1) ELSE 0 END)
+          - SUM(CASE WHEN mts.result = 'loss' THEN COALESCE(mts.stake_units, 1) ELSE 0 END) AS profit_u,
+          SUM(CASE WHEN mts.result IN ('win','loss') THEN COALESCE(mts.stake_units, 1) ELSE 0 END) AS stake_u
+        FROM market_tips_shadow mts
+        INNER JOIN tips t ON t.match_id = mts.match_key
+                         AND UPPER(t.market_type) = UPPER(mts.market)
+                         AND COALESCE(t.is_shadow, 0) = 0
+                         AND (t.archived IS NULL OR t.archived = 0)
+        WHERE mts.result IN ('win', 'loss')
+          AND mts.created_at >= datetime('now', '-' || ? || ' days')
+          AND mts.side IS NOT NULL
+        GROUP BY mts.sport, mts.market, mts.side
+        HAVING n_settled >= ?
+      `).all(WINDOW_DAYS, N_CUTOFF);
+      if (LEAGUE_GUARD || TIER_GUARD) {
+        rowsLeague = db.prepare(`
+          SELECT mts.sport, mts.market, mts.side, mts.league,
+            COUNT(*) AS n_settled,
+            SUM(CASE WHEN mts.result = 'win' THEN 1 ELSE 0 END) AS wins,
+            SUM(CASE WHEN mts.result = 'win' THEN COALESCE(mts.stake_units, 1) * (mts.odd - 1) ELSE 0 END)
+            - SUM(CASE WHEN mts.result = 'loss' THEN COALESCE(mts.stake_units, 1) ELSE 0 END) AS profit_u,
+            SUM(CASE WHEN mts.result IN ('win','loss') THEN COALESCE(mts.stake_units, 1) ELSE 0 END) AS stake_u
+          FROM market_tips_shadow mts
+          INNER JOIN tips t ON t.match_id = mts.match_key
+                           AND UPPER(t.market_type) = UPPER(mts.market)
+                           AND COALESCE(t.is_shadow, 0) = 0
+                           AND (t.archived IS NULL OR t.archived = 0)
+          WHERE mts.result IN ('win', 'loss')
+            AND mts.created_at >= datetime('now', '-' || ? || ' days')
+            AND mts.side IS NOT NULL
+            AND mts.league IS NOT NULL AND TRIM(mts.league) != ''
+          GROUP BY mts.sport, mts.market, mts.side, mts.league
+        `).all(WINDOW_DAYS);
+      }
+    } else {
+      // Legacy path (pré-fix): agrega TUDO em market_tips_shadow (mistura shadow+real)
+      rowsSide = db.prepare(`
+        SELECT sport, market, side, NULL AS league,
           COUNT(*) AS n_settled,
           SUM(CASE WHEN result = 'win' THEN 1 ELSE 0 END) AS wins,
           SUM(CASE WHEN result = 'win' THEN COALESCE(stake_units, 1) * (odd - 1) ELSE 0 END)
@@ -5672,9 +5708,25 @@ async function runMarketTipsRoiGuardSided() {
         WHERE result IN ('win', 'loss')
           AND created_at >= datetime('now', '-' || ? || ' days')
           AND side IS NOT NULL
-          AND league IS NOT NULL AND TRIM(league) != ''
-        GROUP BY sport, market, side, league
-      `).all(WINDOW_DAYS);
+        GROUP BY sport, market, side
+        HAVING n_settled >= ?
+      `).all(WINDOW_DAYS, N_CUTOFF);
+      if (LEAGUE_GUARD || TIER_GUARD) {
+        rowsLeague = db.prepare(`
+          SELECT sport, market, side, league,
+            COUNT(*) AS n_settled,
+            SUM(CASE WHEN result = 'win' THEN 1 ELSE 0 END) AS wins,
+            SUM(CASE WHEN result = 'win' THEN COALESCE(stake_units, 1) * (odd - 1) ELSE 0 END)
+            - SUM(CASE WHEN result = 'loss' THEN COALESCE(stake_units, 1) ELSE 0 END) AS profit_u,
+            SUM(CASE WHEN result IN ('win','loss') THEN COALESCE(stake_units, 1) ELSE 0 END) AS stake_u
+          FROM market_tips_shadow
+          WHERE result IN ('win', 'loss')
+            AND created_at >= datetime('now', '-' || ? || ' days')
+            AND side IS NOT NULL
+            AND league IS NOT NULL AND TRIM(league) != ''
+          GROUP BY sport, market, side, league
+        `).all(WINDOW_DAYS);
+      }
     }
   } catch (e) { log('DEBUG', 'MT-ROI-GUARD', `query err: ${e.message}`); return; }
 
