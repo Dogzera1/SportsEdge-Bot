@@ -4968,7 +4968,9 @@ function _getMtPermanentDisable() {
   //   tennis|totalGames|over: ROI -20.2% n=57 (sample sólido, leak persistente)
   //   tennis|totalGames|under: ROI -15.3% n=20 (audit 03/05, completa cobertura do mercado)
   //   lol|total:               ROI -54% n=10 (sample baixo mas magnitude clara)
-  const raw = String(process.env.MT_PERMANENT_DISABLE_LIST ?? 'tennis|totalGames|over,tennis|totalGames|under,lol|total').trim();
+  //   cs|TOTAL|under:          ROI -68% n=9 (audit 06/05, UNDER 2.5 maps tier-2/3
+  //                            ESL Challenger NA/EU/SA + Odyssey Cup + Pro League)
+  const raw = String(process.env.MT_PERMANENT_DISABLE_LIST ?? 'tennis|totalGames|over,tennis|totalGames|under,lol|total,cs|TOTAL|under').trim();
   _MT_PERMANENT_DISABLE = new Set();
   for (const entry of raw.split(',').map(s => s.trim()).filter(Boolean)) {
     _MT_PERMANENT_DISABLE.add(entry);
