@@ -16057,6 +16057,99 @@ setInterval(load, 60000);
   // Performance por (sport, market, side, league) + agg por tier — granularidade
   // fina pra identificar ligas com leak vs ligas sharp. Tier classification via
   // lib/mt-tier-classifier (mesmo path da MT real, garante consistência).
+  // GET /admin/tips-real-by-league?sport=tennis&days=30&league_match=Rome&minN=3&key=<KEY>
+  // Stats agregados de TIPS REAIS (is_shadow=0) na tabela `tips`. Filtra opcionalmente
+  // por substring de league. Retorna por (market, league, side) com hit/ROI/CLV/IC95.
+  // Diferente de /admin/mt-shadow-by-league que olha market_tips_shadow.
+  if (p === '/admin/tips-real-by-league') {
+    if (!requireAdmin(req, res)) return;
+    const sport = String(parsed.query.sport || 'tennis').toLowerCase();
+    const days = Math.max(7, Math.min(180, parseInt(parsed.query.days || '30', 10) || 30));
+    const minN = Math.max(1, Math.min(50, parseInt(parsed.query.minN || '3', 10) || 3));
+    const leagueMatch = String(parsed.query.league_match || '').trim();
+    try {
+      const leagueClause = leagueMatch ? `AND (league LIKE '%' || ? || '%' OR event_name LIKE '%' || ? || '%')` : '';
+      const params = [sport, days];
+      if (leagueMatch) { params.push(leagueMatch); params.push(leagueMatch); }
+      params.push(minN);
+      const rows = db.prepare(`
+        SELECT
+          COALESCE(market_type, 'ML') AS market,
+          COALESCE(league, event_name, 'unknown') AS league,
+          COALESCE(tip_participant, '') AS pick_side,
+          COUNT(*) AS n_total,
+          SUM(CASE WHEN result = 'win' THEN 1 ELSE 0 END) AS n_win,
+          SUM(CASE WHEN result = 'loss' THEN 1 ELSE 0 END) AS n_loss,
+          SUM(CASE WHEN result = 'push' THEN 1 ELSE 0 END) AS n_push,
+          SUM(CASE WHEN result = 'void' THEN 1 ELSE 0 END) AS n_void,
+          SUM(CASE WHEN result IS NULL THEN 1 ELSE 0 END) AS n_pending,
+          ROUND(SUM(CASE WHEN result IN ('win','loss') THEN COALESCE(stake_reais,0) ELSE 0 END), 2) AS total_stake_r,
+          ROUND(SUM(COALESCE(profit_reais,0)), 2) AS total_profit_r,
+          ROUND(AVG(CASE WHEN clv_pct IS NOT NULL AND clv_pct BETWEEN -50 AND 50 THEN clv_pct ELSE NULL END), 2) AS avg_clv_pct,
+          ROUND(AVG(CASE WHEN result IN ('win','loss') THEN ev_pct ELSE NULL END), 1) AS avg_ev_pct,
+          ROUND(AVG(odds), 2) AS avg_odd
+        FROM tips
+        WHERE sport = ?
+          AND created_at >= datetime('now', '-' || ? || ' days')
+          AND COALESCE(is_shadow, 0) = 0
+          AND (archived IS NULL OR archived = 0)
+          ${leagueClause}
+        GROUP BY market, league, pick_side
+        HAVING n_total >= ?
+        ORDER BY total_profit_r ASC
+      `).all(...params);
+
+      const enriched = rows.map(r => {
+        const settled = (r.n_win || 0) + (r.n_loss || 0);
+        const hit = settled > 0 ? +(r.n_win / settled * 100).toFixed(1) : null;
+        const roi = r.total_stake_r > 0 ? +(r.total_profit_r / r.total_stake_r * 100).toFixed(2) : null;
+        return {
+          market: r.market,
+          league: r.league,
+          pick_side: r.pick_side,
+          n_total: r.n_total,
+          n_settled: settled,
+          n_win: r.n_win, n_loss: r.n_loss, n_push: r.n_push, n_void: r.n_void, n_pending: r.n_pending,
+          hit_pct: hit,
+          roi_pct: roi,
+          total_profit_r: r.total_profit_r,
+          total_stake_r: r.total_stake_r,
+          avg_ev_pct: r.avg_ev_pct,
+          avg_clv_pct: r.avg_clv_pct,
+          avg_odd: r.avg_odd,
+        };
+      });
+
+      // Agregado total
+      const totals = enriched.reduce((acc, r) => {
+        acc.n_total += r.n_total; acc.n_settled += r.n_settled;
+        acc.n_win += r.n_win; acc.n_loss += r.n_loss; acc.n_void += r.n_void; acc.n_pending += r.n_pending;
+        acc.profit_r += r.total_profit_r; acc.stake_r += r.total_stake_r;
+        return acc;
+      }, { n_total: 0, n_settled: 0, n_win: 0, n_loss: 0, n_void: 0, n_pending: 0, profit_r: 0, stake_r: 0 });
+
+      sendJson(res, {
+        ok: true, sport, days, league_match: leagueMatch || null, minN,
+        n_buckets: enriched.length,
+        totals: {
+          n_total: totals.n_total,
+          n_settled: totals.n_settled,
+          n_win: totals.n_win,
+          n_loss: totals.n_loss,
+          n_void: totals.n_void,
+          n_pending: totals.n_pending,
+          hit_pct: totals.n_settled > 0 ? +(totals.n_win / totals.n_settled * 100).toFixed(1) : null,
+          roi_pct: totals.stake_r > 0 ? +(totals.profit_r / totals.stake_r * 100).toFixed(2) : null,
+          profit_reais: +totals.profit_r.toFixed(2),
+          stake_reais: +totals.stake_r.toFixed(2),
+        },
+        rows: enriched,
+        note: 'Apenas tips reais (is_shadow=0). Inclui pending. ROI = profit/stake em R$.',
+      });
+    } catch (e) { sendJson(res, { ok: false, error: e.message, stack: e.stack?.slice(0, 400) }, 500); }
+    return;
+  }
+
   if (p === '/admin/mt-shadow-by-league') {
     const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
