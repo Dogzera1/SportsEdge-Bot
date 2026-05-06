@@ -15390,9 +15390,8 @@ setInterval(load, 60000);
 
       const pav = (binsArr) => {
         const arr = binsArr.map(b => ({ ...b }));
-        let changed = true;
-        while (changed) {
-          changed = false;
+        for (let pass = 0; pass < 1000; pass++) {
+          let changed = false;
           for (let i = 0; i < arr.length - 1; i++) {
             if (arr[i].pSmoothed > arr[i + 1].pSmoothed) {
               const totalN = arr[i].n + arr[i + 1].n;
@@ -15402,6 +15401,7 @@ setInterval(load, 60000);
               changed = true;
             }
           }
+          if (!changed) break;
         }
         return arr;
       };
@@ -15427,24 +15427,25 @@ setInterval(load, 60000);
         }
         if (!bins.length) return { skip: 'out_of_range', n: lst.length };
         let merged = [...bins];
-        let i = 0;
-        while (i < merged.length) {
-          if (merged[i].n < minBin && merged.length > 2) {
-            const left = i > 0 ? merged[i - 1] : null;
-            const right = i < merged.length - 1 ? merged[i + 1] : null;
-            const target = !left ? i + 1 : !right ? i - 1 : (left.n <= right.n ? i - 1 : i + 1);
-            const a = merged[Math.min(i, target)], b = merged[Math.max(i, target)];
-            const totalN = a.n + b.n;
-            const totalW = a.wins + b.wins;
-            const wPriorAvg = (a.priorP * a.n + b.priorP * b.n) / totalN;
-            const wMid = (a.mid * a.n + b.mid * b.n) / totalN;
-            const smoothed = (totalW + ALPHA * wPriorAvg) / (totalN + ALPHA);
-            merged.splice(Math.min(i, target), 2, {
-              lo: a.lo, hi: b.hi, mid: wMid, n: totalN, wins: totalW,
-              rawP: totalW / totalN, priorP: wPriorAvg, pSmoothed: smoothed,
-            });
-            i = 0;
-          } else i++;
+        for (let iter = 0; iter < 200; iter++) {
+          let smallIdx = -1;
+          for (let i = 0; i < merged.length; i++) {
+            if (merged[i].n < minBin && merged.length > 2) { smallIdx = i; break; }
+          }
+          if (smallIdx < 0) break;
+          const left = smallIdx > 0 ? merged[smallIdx - 1] : null;
+          const right = smallIdx < merged.length - 1 ? merged[smallIdx + 1] : null;
+          const target = !left ? smallIdx + 1 : !right ? smallIdx - 1 : (left.n <= right.n ? smallIdx - 1 : smallIdx + 1);
+          const a = merged[Math.min(smallIdx, target)], b = merged[Math.max(smallIdx, target)];
+          const totalN = a.n + b.n;
+          const totalW = a.wins + b.wins;
+          const wPriorAvg = (a.priorP * a.n + b.priorP * b.n) / totalN;
+          const wMid = (a.mid * a.n + b.mid * b.n) / totalN;
+          const smoothed = (totalW + ALPHA * wPriorAvg) / (totalN + ALPHA);
+          merged.splice(Math.min(smallIdx, target), 2, {
+            lo: a.lo, hi: b.hi, mid: wMid, n: totalN, wins: totalW,
+            rawP: totalW / totalN, priorP: wPriorAvg, pSmoothed: smoothed,
+          });
         }
         merged = pav(merged);
         return {
@@ -15539,6 +15540,33 @@ setInterval(load, 60000);
         markets: calibByMarket,
         backtest,
       };
+
+      // ?write=true: persiste em lib/<sport>-markov-calib.json e retorna apenas
+      // resumo curto. Evita serializar payload gigante via proxy (Railway/Cloudflare
+      // tem timeout em respostas grandes; auditoria 2026-05-04 mostrou hangs).
+      const writeFlag = /^(1|true|yes)$/i.test(String(parsed.query.write || ''));
+      if (writeFlag) {
+        try {
+          const fs = require('fs');
+          const path = require('path');
+          const targetPath = path.join(__dirname, 'lib', `${sport}-markov-calib.json`);
+          fs.writeFileSync(targetPath, JSON.stringify(payload, null, 2));
+          sendJson(res, {
+            ok: true,
+            written: targetPath,
+            sport,
+            nSamples: settled,
+            markets: Object.fromEntries(Object.entries(calibByMarket).map(([k, v]) => [k, { nBins: v.bins.length, nTotal: v.nTotal }])),
+            backtest,
+            skipped,
+            note: 'Cache TTL 30min — efeito imediato em novas tips. Restart pod pra forçar reload.',
+          });
+          return;
+        } catch (e) {
+          sendJson(res, { ok: false, error: `write_failed: ${e.message}` }, 500);
+          return;
+        }
+      }
 
       sendJson(res, { ok: true, payload, skipped });
     } catch (e) {
