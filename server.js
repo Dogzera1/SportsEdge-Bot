@@ -19086,9 +19086,14 @@ setInterval(load, 60000);
             if (perSportMarket && typeof perSportMarket[k] === 'number') evMax = perSportMarket[k];
           } catch (_) {}
           const effectiveMax = evMax + liveBonus;
-          if (evN > effectiveMax) {
-            log('WARN', 'EV-CAP', `${sport}/${_mtKindUpper}${isLiveCap ? '/LIVE' : ''}: ${p1} vs ${p2} — EV ${evN.toFixed(1)}% > ${effectiveMax}% (cap). Tip rejeitada.`);
-            _emitSkip('ev_too_high', { ev: evN, ev_max: effectiveMax, market: _mtKindUpper, is_live: isLiveCap });
+          // 2026-05-06: cap usa evNFinal (pós learned-corrections) em vez de evN
+          // (pré). Antes: tip com EV original 30% mas pós-shrink 18% era rejeitada
+          // pelo cap=25 olhando o EV pré-correction. Agora cap olha o EV que
+          // realmente vai pra tip (consistência com value gravado).
+          const _capCheckEv = Number.isFinite(evNFinal) ? evNFinal : evN;
+          if (_capCheckEv > effectiveMax) {
+            log('WARN', 'EV-CAP', `${sport}/${_mtKindUpper}${isLiveCap ? '/LIVE' : ''}: ${p1} vs ${p2} — EV ${_capCheckEv.toFixed(1)}% > ${effectiveMax}% (cap). Tip rejeitada.`);
+            _emitSkip('ev_too_high', { ev: _capCheckEv, ev_max: effectiveMax, market: _mtKindUpper, is_live: isLiveCap });
             return;
           }
         }
