@@ -26,6 +26,9 @@ function argVal(name, def) {
   if (a.includes('=')) return a.split('=').slice(1).join('=');
   return argv[i + 1];
 }
+function argFlag(name) {
+  return argv.includes(`--${name}`) || argv.some(a => a === `--${name}=true` || a === `--${name}=1`);
+}
 
 const GAME = argVal('game', 'lol');
 const OUT = path.resolve(argVal('out', `data/${GAME}_features.csv`));

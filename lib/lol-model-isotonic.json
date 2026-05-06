@@ -1,45 +1,39 @@
 {
   "version": 1,
-  "fittedAt": "2026-04-18T17:24:57.780Z",
+  "fittedAt": "2026-05-06T13:31:20.246Z",
   "method": "isotonic_pav",
-  "nCalibSamples": 1537,
+  "nCalibSamples": 1558,
   "w_oe": 0.15,
   "blocks": [
     {
-      "pMin": 0.2091,
-      "pMax": 0.2819,
-      "yMean": 0.1538,
-      "n": 13
+      "pMin": 0.2544,
+      "pMax": 0.4495,
+      "yMean": 0.1795,
+      "n": 78
     },
     {
-      "pMin": 0.3158,
-      "pMax": 0.3492,
-      "yMean": 0.1667,
-      "n": 12
-    },
-    {
-      "pMin": 0.4192,
-      "pMax": 0.4499,
-      "yMean": 0.22,
-      "n": 50
-    },
-    {
-      "pMin": 0.4501,
+      "pMin": 0.45,
       "pMax": 0.5,
-      "yMean": 0.3118,
-      "n": 603
+      "yMean": 0.3366,
+      "n": 609
     },
     {
       "pMin": 0.5,
       "pMax": 0.55,
-      "yMean": 0.7097,
-      "n": 744
+      "yMean": 0.6907,
+      "n": 750
     },
     {
-      "pMin": 0.5503,
-      "pMax": 0.7851,
-      "yMean": 0.7768,
-      "n": 112
+      "pMin": 0.5505,
+      "pMax": 0.7485,
+      "yMean": 0.7909,
+      "n": 110
+    },
+    {
+      "pMin": 0.7582,
+      "pMax": 0.7795,
+      "yMean": 0.8,
+      "n": 5
     }
   ],
   "trainingNote": "Fit sobre período calib (últimos 15% antes do test). Aplicar pós-blend dos sub-models mas antes do clamp final."
