@@ -70,18 +70,45 @@ function httpGetText(url) {
   });
 }
 
+// 2026-05-06 FIX: parser CSV state-machine respeitando quoted fields ("...,...").
+// Sackmann CSVs trazem `tourney_name="Bordeaux, France"` e `score="6-4 6-7(5) 6-3"`
+// — split(',') ingênuo descartava ~10-15% das rows ("cols.length < headers"), causando
+// gap em tennis_match_stats e Markov falhando "no serve stats available" em torneios
+// com vírgula no nome (Bordeaux Challenger, Roland Garros, etc).
+function parseCsvLine(line) {
+  const out = [];
+  let cur = '';
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (inQuotes) {
+      if (ch === '"' && line[i + 1] === '"') { cur += '"'; i++; }
+      else if (ch === '"') { inQuotes = false; }
+      else cur += ch;
+    } else {
+      if (ch === '"') inQuotes = true;
+      else if (ch === ',') { out.push(cur); cur = ''; }
+      else cur += ch;
+    }
+  }
+  out.push(cur);
+  return out;
+}
+
 function parseCsv(text) {
   const lines = text.trim().split('\n');
   if (lines.length < 2) return [];
-  const headers = lines[0].split(',').map(h => h.trim());
+  const headers = parseCsvLine(lines[0]).map(h => h.trim());
   const out = [];
+  let skipped = 0;
   for (let i = 1; i < lines.length; i++) {
-    const cols = lines[i].split(',');
-    if (cols.length < headers.length) continue;
+    const cols = parseCsvLine(lines[i]);
+    if (cols.length < headers.length) { skipped++; continue; }
     const row = {};
     for (let j = 0; j < headers.length; j++) row[headers[j]] = (cols[j] || '').trim();
     out.push(row);
   }
+  if (skipped > 0) console.log(`[parseCsv] skipped=${skipped} lines (col count mismatch)`);
   return out;
 }
 

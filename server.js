@@ -6786,6 +6786,12 @@ setInterval(load, 10000);
   // Sem auth pq é IPC interno (chamadas de localhost via launcher).
   // Defesa: timeout HTTP curto, body cap 256KB, prefix sanitizado.
   if (p === '/metrics/ingest' && req.method === 'POST') {
+    // 2026-05-06: enforcement loopback OR isAdminRequest. Antes era IPC sem auth
+    // — atacante podia injetar counters/gauges falsos (db_integrity_failed,
+    // bot_restart_loop) e disparar alertas falsos.
+    const remote = String(req.socket?.remoteAddress || '');
+    const isLoopback = remote === '127.0.0.1' || remote === '::1' || remote === '::ffff:127.0.0.1';
+    if (!isLoopback && !isAdminRequest(req)) { sendJson(res, { ok: false, error: 'forbidden' }, 403); return; }
     let body = '';
     let bodySize = 0;
     req.on('data', d => {
@@ -7784,8 +7790,14 @@ setInterval(load, 10000);
     req.on('end', () => {
       try {
         const { userId, username, subscribed, sportPrefs } = safeParse(body, {});
-        const uid = clampStr(userId, 80);
-        if (!uid) { badRequest(res, 'userId obrigatório'); return; }
+        // 2026-05-06: validar userId como int positivo Telegram chatId.
+        // Antes aceitava qualquer string até 80 chars → "01234" e "1234" eram
+        // distintos (ParseInt missing) → DB acumulava variantes do mesmo user.
+        const uidInt = parseInt(String(userId || ''), 10);
+        if (!Number.isInteger(uidInt) || uidInt <= 0 || uidInt > 999999999999) {
+          badRequest(res, 'userId obrigatório (int positivo)'); return;
+        }
+        const uid = String(uidInt);
         const uname = clampStr(username, 80);
         const prefs = Array.isArray(sportPrefs) ? sportPrefs.slice(0, 50) : [];
         stmts.upsertUser.run(uid, uname, subscribed ? 1 : 0, JSON.stringify(prefs));
@@ -11882,6 +11894,14 @@ setInterval(load, 60000);
     try {
       const days = Math.min(180, Math.max(7, parseInt(parsed.query.days || '30', 10) || 30));
       const sport = parsed.query.sport || null;
+      // 2026-05-06: cache TTL 5min — endpoint era unbounded, full-table scan tips
+      // (~10k+ rows) sem auth. Memoize por (sport, days).
+      if (!global._clvHistCache) global._clvHistCache = new Map();
+      const _cacheKey = `${sport || 'all'}:${days}`;
+      const _cached = global._clvHistCache.get(_cacheKey);
+      if (_cached && (Date.now() - _cached.ts) < 5 * 60 * 1000) {
+        sendJson(res, _cached.data); return;
+      }
       // 2026-05-03 FIX: tabela `tips` não tem coluna clv_pct (existe só em
       // market_tips_shadow). Computa pct on-the-fly via (odds/clv_odds-1)*100,
       // mesmo padrão do /roi-by-ev-bucket. Antes query throw "no such column".
@@ -11942,13 +11962,20 @@ setInterval(load, 60000);
         hitRate: b.n > 0 ? +(b.wins / b.n * 100).toFixed(1) : null,
         roi: b.stake > 0 ? +(b.profit / b.stake * 100).toFixed(1) : null,
       }));
-      sendJson(res, {
+      const _payload = {
         sport: sport || 'all', days,
         totalN, avgClv: totalN ? +(sum / totalN).toFixed(2) : null,
         positivePct: totalN ? +(posN / totalN * 100).toFixed(1) : null,
         negativePct: totalN ? +(negN / totalN * 100).toFixed(1) : null,
         buckets: enrichedBuckets,
-      });
+      };
+      // Cache LRU bound (max 32 keys)
+      global._clvHistCache.set(_cacheKey, { data: _payload, ts: Date.now() });
+      if (global._clvHistCache.size > 32) {
+        const oldest = global._clvHistCache.keys().next().value;
+        global._clvHistCache.delete(oldest);
+      }
+      sendJson(res, _payload);
     } catch (e) { sendJson(res, { error: e.message }, 500); }
     return;
   }
@@ -19333,7 +19360,15 @@ setInterval(load, 60000);
             shadow: _isShadowTip ? '1' : '0',
           });
         } catch (_) {}
-        sendJson(res, { ok: true, tipId: result?.lastInsertRowid || null });
+        // 2026-05-06: expor isShadow + autoShadowed pra caller bot.js distinguir
+        // tip real vs shadow-rota-automática (ML_DISABLED gate). Antes caller só
+        // checava !rec?.tipId e dispatch DM mesmo em tips que viraram shadow.
+        sendJson(res, {
+          ok: true,
+          tipId: result?.lastInsertRowid || null,
+          isShadow: _isShadowTip ? 1 : 0,
+          autoShadowed: (_isShadowTip && !t.isShadow) ? 1 : 0,
+        });
       } catch(e) {
         try {
           const metrics = require('./lib/metrics');

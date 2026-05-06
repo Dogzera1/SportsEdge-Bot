@@ -2219,6 +2219,11 @@ const migrations = [
       // modelo (não gates). prob_shrink ataca calibration drift; ev_shrink
       // ataca EV inflado vs realizado. Aplicados em /record-tip ANTES do
       // gate de EV — adjusta a decisão do modelo, não bloqueia tips.
+      // 2026-05-06 FIX: SQLite proíbe expressões (COALESCE) dentro de UNIQUE
+      // constraint inline (testado better-sqlite3 12.x). Migration 090 estava
+      // crashando silenciosamente em applyMigrations e bloqueando 091. Solução:
+      // CREATE TABLE com UNIQUE simples (sport, market, correction_type, status)
+      // e adicionar UNIQUE INDEX expressional separado pra cobrir league_pattern NULL.
       db.exec(`
         CREATE TABLE IF NOT EXISTS learned_corrections (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2231,9 +2236,10 @@ const migrations = [
           applied_at TEXT NOT NULL,
           expires_at TEXT,
           status TEXT NOT NULL DEFAULT 'active', -- active | expired | reverted | superseded
-          evidence TEXT,                       -- JSON com {n, roi, calib_gap, source_correction_id}
-          UNIQUE(sport, market, COALESCE(league_pattern, ''), correction_type, status) ON CONFLICT REPLACE
+          evidence TEXT                        -- JSON com {n, roi, calib_gap, source_correction_id}
         );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_lc_unique
+          ON learned_corrections(sport, COALESCE(market, ''), COALESCE(league_pattern, ''), correction_type, status);
         CREATE INDEX IF NOT EXISTS idx_lc_active
           ON learned_corrections(sport, status, applied_at DESC);
         CREATE INDEX IF NOT EXISTS idx_lc_expires

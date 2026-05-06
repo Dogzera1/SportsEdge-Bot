@@ -2818,8 +2818,8 @@ async function runAutoAnalysis() {
           // Semi-auto deeplink — book com odd maior entre preferred.
           const _betBtn = _buildTipBetButton('lol', oddsToUse, _pickSideLs, match, tipStakeAdj, tipOdd);
 
-          if (isBucketShadowed('lol')) {
-            log('INFO', 'AUTO', `[SHADOW] ${tipTeam} @ ${tipOdd} | EV:${tipEV} | ${tipStakeAdj} | ${tipConf} — DM suprimida`);
+          if (_isShadowDispatch(rec, 'lol')) {
+            log('INFO', 'AUTO', `[SHADOW] ${tipTeam} @ ${tipOdd} | EV:${tipEV} | ${tipStakeAdj} | ${tipConf} — DM suprimida${rec?.autoShadowed ? ' (auto-shadow)' : ''}`);
           } else {
             for (const [userId, prefs] of subscribedUsers) {
               if (!prefs.has('esports')) continue;
@@ -3197,8 +3197,8 @@ async function runAutoAnalysis() {
               `⚠️ _Aposte com responsabilidade._`;
 
             const _betBtnUp = _buildTipBetButton('lol', result.o, _pickSideUp, match, tipStakeAdj, tipOdd);
-            if (isBucketShadowed('lol')) {
-              log('INFO', 'AUTO-TIP', `[SHADOW] LoL upcoming ${tipTeam} @ ${tipOdd} — DM suprimida`);
+            if (_isShadowDispatch(recUp, 'lol')) {
+              log('INFO', 'AUTO-TIP', `[SHADOW] LoL upcoming ${tipTeam} @ ${tipOdd} — DM suprimida${recUp?.autoShadowed ? ' (auto-shadow)' : ''}`);
             } else {
               for (const [userId, prefs] of subscribedUsers) {
                 if (!prefs.has('esports')) continue;
@@ -4130,6 +4130,17 @@ for (const b of ['lol', 'dota2']) {
 function isBucketShadowed(sport) {
   if (SPORTS[sport]?.shadowMode) return true;
   return _splitBucketShadow.has(sport);
+}
+
+// 2026-05-06: Helper unificado pra dispatch DM gate. Antes só checava
+// isBucketShadowed(sport), mas server pode ter rotado tip pra shadow via
+// _autoRouteToShadow (ML_DISABLED / ML_TIER1 gates) — caller ignorava o flip
+// e disparava DM mesmo assim. Agora verifica rec.autoShadowed e rec.isShadow
+// retornados por /record-tip.
+function _isShadowDispatch(rec, sport) {
+  if (rec?.autoShadowed === 1) return true;
+  if (rec?.isShadow === 1) return true;
+  return isBucketShadowed(sport);
 }
 
 // League blocklist — substring match case-insensitive. Persistido em DB (table
@@ -12619,6 +12630,7 @@ async function poll(token, sport) {
               `• 🤖 Análise por IA com Kelly Criterion\n` +
               `• 💰 Só tips com EV positivo são enviadas\n` +
               `• 🔔 Ative notificações para receber as tips\n\n` +
+              `⚠️ _+18. Aposte com responsabilidade. Tips informativas; resultado passado não garante futuro._\n\n` +
               `_Use os botões abaixo_ 👇`,
               getMenu(sport)
             );
@@ -14556,8 +14568,8 @@ Máximo 200 palavras.`;
           setDotaAnalyzed({ ts: now, tipSent: true, noEdge: false });
           await _sleep(2000); continue;
         }
-        if (isBucketShadowed('dota2')) {
-          log('INFO', 'AUTO-DOTA', `[SHADOW] ${tipTeam} @ ${tipOdd} | EV:${tipEV} | ${tipStakeAdj} | ${tipConf} — DM suprimida`);
+        if (_isShadowDispatch(rec, 'dota2')) {
+          log('INFO', 'AUTO-DOTA', `[SHADOW] ${tipTeam} @ ${tipOdd} | EV:${tipEV} | ${tipStakeAdj} | ${tipConf} — DM suprimida${rec?.autoShadowed ? ' (auto-shadow)' : ''}`);
         } else {
           const _betBtnDota = _buildTipBetButton('dota2', o, isT1bet ? 't1' : 't2', match, tipStakeAdj, tipOdd);
           for (const [uid, sports] of subscribedUsers) {
@@ -14769,8 +14781,8 @@ async function analyzeDotaMapTip(match, token) {
       analyzedDota.set(mapKey, { ts: now, tipSent: true });
       return;
     }
-    if (isBucketShadowed('dota2')) {
-      log('INFO', 'AUTO-DOTA-MAP', `[SHADOW] MAPA ${mapN}: ${pickTeam} @ ${pickOdd} — DM suprimida`);
+    if (_isShadowDispatch(rec, 'dota2')) {
+      log('INFO', 'AUTO-DOTA-MAP', `[SHADOW] MAPA ${mapN}: ${pickTeam} @ ${pickOdd} — DM suprimida${rec?.autoShadowed ? ' (auto-shadow)' : ''}`);
     } else {
       for (const [uid, sports] of subscribedUsers) {
         if (!sports.has('esports')) continue;
