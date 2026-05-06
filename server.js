@@ -16070,6 +16070,8 @@ setInterval(load, 60000);
     try {
       // Schema tips não tem coluna `league` — usa event_name (que vem como
       // "ATP Rome - R1", "WTA Rome - Qualifiers" etc).
+      // Usa colunas reais: event_name, sent_at, ev (não ev_pct), tip_participant.
+      // GROUP BY usa expressões completas (SQLite não resolve aliases em GROUP BY consistente).
       const leagueClause = leagueMatch ? `AND event_name LIKE '%' || ? || '%'` : '';
       const params = [sport, days];
       if (leagueMatch) { params.push(leagueMatch); }
@@ -16088,16 +16090,16 @@ setInterval(load, 60000);
           ROUND(SUM(CASE WHEN result IN ('win','loss') THEN COALESCE(stake_reais,0) ELSE 0 END), 2) AS total_stake_r,
           ROUND(SUM(COALESCE(profit_reais,0)), 2) AS total_profit_r,
           ROUND(AVG(CASE WHEN clv_pct IS NOT NULL AND clv_pct BETWEEN -50 AND 50 THEN clv_pct ELSE NULL END), 2) AS avg_clv_pct,
-          ROUND(AVG(CASE WHEN result IN ('win','loss') THEN ev_pct ELSE NULL END), 1) AS avg_ev_pct,
+          ROUND(AVG(CASE WHEN result IN ('win','loss') THEN ev ELSE NULL END), 1) AS avg_ev_pct,
           ROUND(AVG(odds), 2) AS avg_odd
         FROM tips
         WHERE sport = ?
-          AND created_at >= datetime('now', '-' || ? || ' days')
+          AND COALESCE(sent_at, settled_at) >= datetime('now', '-' || ? || ' days')
           AND COALESCE(is_shadow, 0) = 0
           AND (archived IS NULL OR archived = 0)
           ${leagueClause}
-        GROUP BY market, league, pick_side
-        HAVING n_total >= ?
+        GROUP BY COALESCE(market_type, 'ML'), COALESCE(event_name, 'unknown'), COALESCE(tip_participant, '')
+        HAVING COUNT(*) >= ?
         ORDER BY total_profit_r ASC
       `).all(...params);
 
