@@ -18867,6 +18867,9 @@ setInterval(load, 60000);
         // Time-of-day block: se hora UTC atual está marcada como bleeder (ROI persistentemente ruim),
         // rejeita. Cache per-sport 1h pra evitar query por tip.
         // Shadow puro bypass: time-of-day é gate de banca, não de calibration.
+        // 2026-05-06: granularidade per-(sport, market_type, hour). Antes leak hora ML
+        // bloqueava também handicap/total nessa hora. Agora cada market tem janela
+        // própria. Cascade: (sport, market, hour) → (sport, hour) sport-wide fallback.
         if (/^true$/i.test(String(process.env.TIME_OF_DAY_AUTO || '')) && !_bypassFiltersForShadow) {
           try {
             if (!global._timeOfDayBlockCache) global._timeOfDayBlockCache = {};
@@ -18875,11 +18878,13 @@ setInterval(load, 60000);
             const now = Date.now();
             if (!cache[cacheKey] || (now - cache[cacheKey].ts) > 60 * 60 * 1000) {
               const _bl = getBaseline();
-              const days = 30;
               const minN = parseInt(process.env.TIME_OF_DAY_MIN_N || '8', 10);
+              // Per-market n cutoff pode ser menor (sample dilui), default = max(min_n/2, 5)
+              const minNMarket = parseInt(process.env.TIME_OF_DAY_MIN_N_MARKET || String(Math.max(5, Math.floor(minN / 2))), 10);
               const roiMax = parseFloat(process.env.TIME_OF_DAY_ROI_MAX || '-25');
               const rows = db.prepare(`
                 SELECT CAST(STRFTIME('%H', settled_at) AS INTEGER) AS hour,
+                       UPPER(COALESCE(market_type, 'ML')) AS market,
                        stake, odds, result
                 FROM tips
                 WHERE sport = ? AND result IN ('win','loss')
@@ -18887,26 +18892,48 @@ setInterval(load, 60000);
                   AND (archived IS NULL OR archived = 0)
                   AND COALESCE(is_shadow, 0) = 0
               `).all(sport);
-              const byH = {};
+              const byH = {};       // hour → { n, profit, stake }  (sport-wide)
+              const byHM = {};      // 'hour|market' → { n, profit, stake }
               for (const r of rows) {
+                const p = tipProfitReais(r, _bl.unit_value);
+                const stakeReais = tipStakeReais(r, _bl.unit_value);
                 const b = byH[r.hour] || (byH[r.hour] = { n: 0, profit: 0, stake: 0 });
                 b.n++;
-                const p = tipProfitReais(r, _bl.unit_value);
                 if (p != null) b.profit += p;
-                b.stake += tipStakeReais(r, _bl.unit_value);
+                b.stake += stakeReais;
+                const km = `${r.hour}|${r.market}`;
+                const bm = byHM[km] || (byHM[km] = { n: 0, profit: 0, stake: 0 });
+                bm.n++;
+                if (p != null) bm.profit += p;
+                bm.stake += stakeReais;
               }
-              const blocked = [];
+              const blocked = [];        // sport-wide hours
+              const blockedByMarket = {}; // 'hour|market' → true
               for (const h in byH) {
                 const b = byH[h];
                 const roi = b.stake > 0 ? (b.profit / b.stake * 100) : null;
                 if (b.n >= minN && roi != null && roi <= roiMax) blocked.push(Number(h));
               }
-              cache[cacheKey] = { ts: now, blocked };
+              for (const k in byHM) {
+                const b = byHM[k];
+                const roi = b.stake > 0 ? (b.profit / b.stake * 100) : null;
+                if (b.n >= minNMarket && roi != null && roi <= roiMax) blockedByMarket[k] = true;
+              }
+              cache[cacheKey] = { ts: now, blocked, blockedByMarket };
             }
             const currentHourUtc = new Date().getUTCHours();
-            if (cache[cacheKey].blocked.includes(currentHourUtc)) {
-              log('WARN', 'TIME-OF-DAY', `${sport}: hora UTC ${currentHourUtc} bloqueada (ROI ruim 30d) — tip rejeitada`);
-              _emitSkip('time_of_day_blocked', { hour_utc: currentHourUtc });
+            const c = cache[cacheKey];
+            const _mtKindTod = String(t.market_type || 'ML').toUpperCase();
+            // Per-market block ganha precedência: bloqueia só esse market nessa hora.
+            if (c.blockedByMarket && c.blockedByMarket[`${currentHourUtc}|${_mtKindTod}`]) {
+              log('WARN', 'TIME-OF-DAY', `${sport}/${_mtKindTod}: hora UTC ${currentHourUtc} bloqueada per-market (ROI ruim 30d)`);
+              _emitSkip('time_of_day_blocked', { hour_utc: currentHourUtc, market: _mtKindTod, scope: 'market' });
+              return;
+            }
+            // Sport-wide block: hora bleed cross-market (mais conservador, n≥min_n).
+            if (c.blocked && c.blocked.includes(currentHourUtc)) {
+              log('WARN', 'TIME-OF-DAY', `${sport}: hora UTC ${currentHourUtc} bloqueada sport-wide (ROI ruim 30d)`);
+              _emitSkip('time_of_day_blocked', { hour_utc: currentHourUtc, scope: 'sport' });
               return;
             }
           } catch (_) {}
@@ -19019,14 +19046,30 @@ setInterval(load, 60000);
             // modelo. Tighten pra 25 depois de n≥30 settled CLV≥0.
             basket: 80,
           };
-          let evMax = PER_SPORT_DEFAULTS[sport] != null ? PER_SPORT_DEFAULTS[sport] : 35;
+          // 2026-05-06: per-market caps. ML usually mais frágil a EV alto
+          // (linha stale → +EV ilusório), MT (handicap/totals) tem distribuição
+          // mais ampla e tolera EV alto sem ser stale-line indicator. Live tips
+          // em particular: micro-burst spikes em odds aceitáveis.
+          // Hierarchy: PER_SPORT_MARKET_DEFAULTS > PER_SPORT > TIP_EV_MAX_PER_SPORT_MARKET env > TIP_EV_MAX_PER_SPORT > TIP_EV_MAX global.
+          const PER_SPORT_MARKET_DEFAULTS = {
+            // tennis MT é particularmente miscalibrado em EV>15 → cap apertado
+            tennis_HANDICAP_GAMES: 18, tennis_TOTAL_GAMES: 18, tennis_TOTAL_ACES: 25,
+            // LoL kills MT mantém cap mais largo (sample escassa)
+            lol_TOTAL_KILLS_MAP1: 25, lol_TOTAL_KILLS_MAP2: 25, lol_TOTAL_KILLS_MAP3: 25,
+            // basket MT tudo largo na fase shadow
+            basket_HANDICAP: 80, basket_TOTAL: 80,
+          };
+          const _mtKindUpper = String(t.market_type || 'ML').toUpperCase();
+          const isLiveCap = !!t.isLive;
+          // Live regime: cap +5pp pra acomodar bursts em odds live (ex: catch-up lines).
+          const liveBonus = isLiveCap ? parseFloat(process.env.TIP_EV_MAX_LIVE_BONUS_PP || '5') : 0;
+
+          let evMax = PER_SPORT_MARKET_DEFAULTS[`${sport}_${_mtKindUpper}`]
+            ?? (PER_SPORT_DEFAULTS[sport] != null ? PER_SPORT_DEFAULTS[sport] : 35);
           // 2026-04-28: TIP_EV_MAX agora é TETO ADICIONAL (Math.min com per-sport
           // default), não substituto. Antes user setando TIP_EV_MAX=35 inflava
           // cap LoL/CS/Dota de 25→35, anulando proteção. Per-sport JSON override
           // continua absoluto (override explícito).
-          // 2026-05-03: basket fase 1 (shadow) ignora TIP_EV_MAX global — Elo cold
-          // gera tips com EV alto que precisamos AUDITAR no shadow. Math.min com
-          // global=35 esconderia 100% das tips NBA underdog (odds 3.5-9 → EV >40%).
           const _globalMax = parseFloat(process.env.TIP_EV_MAX);
           if (Number.isFinite(_globalMax) && sport !== 'basket') {
             evMax = Math.min(evMax, _globalMax);
@@ -19035,9 +19078,17 @@ setInterval(load, 60000);
             const perSport = process.env.TIP_EV_MAX_PER_SPORT ? JSON.parse(process.env.TIP_EV_MAX_PER_SPORT) : null;
             if (perSport && typeof perSport[sport] === 'number') evMax = perSport[sport];
           } catch (_) {}
-          if (evN > evMax) {
-            log('WARN', 'EV-CAP', `${sport}: ${p1} vs ${p2} — EV ${evN.toFixed(1)}% > ${evMax}% (cap). Tip rejeitada.`);
-            _emitSkip('ev_too_high', { ev: evN, ev_max: evMax });
+          // Per-sport-market env override (mais específico que per-sport).
+          // Format: TIP_EV_MAX_PER_SPORT_MARKET={"lol_ML":12, "lol_HANDICAP_GAMES":20, "tennis_TOTAL_GAMES":15}
+          try {
+            const perSportMarket = process.env.TIP_EV_MAX_PER_SPORT_MARKET ? JSON.parse(process.env.TIP_EV_MAX_PER_SPORT_MARKET) : null;
+            const k = `${sport}_${_mtKindUpper}`;
+            if (perSportMarket && typeof perSportMarket[k] === 'number') evMax = perSportMarket[k];
+          } catch (_) {}
+          const effectiveMax = evMax + liveBonus;
+          if (evN > effectiveMax) {
+            log('WARN', 'EV-CAP', `${sport}/${_mtKindUpper}${isLiveCap ? '/LIVE' : ''}: ${p1} vs ${p2} — EV ${evN.toFixed(1)}% > ${effectiveMax}% (cap). Tip rejeitada.`);
+            _emitSkip('ev_too_high', { ev: evN, ev_max: effectiveMax, market: _mtKindUpper, is_live: isLiveCap });
             return;
           }
         }

@@ -2698,7 +2698,7 @@ async function runAutoAnalysis() {
             }
           }
 
-          const _blockedLol1 = isLeagueBlocked('lol', match.league);
+          const _blockedLol1 = isLeagueBlocked('lol', match.league, 'ML');
           if (_blockedLol1) {
             log('INFO', 'AUTO', `[BLOCK] lol/${match.league} — tip suprimida (match "${_blockedLol1}")`);
             analyzedMatches.set(matchKey, { ts: now, tipSent: false, blocked: true });
@@ -2851,7 +2851,7 @@ async function runAutoAnalysis() {
                   `🔵 Confiança: BAIXA\n\n` +
                   `⚠️ _Mercado de handicap — menor liquidez. Aposte com cautela._`;
 
-                if (isLeagueBlocked('lol', match.league)) {
+                if (isLeagueBlocked('lol', match.league, 'ML')) {
                   log('INFO', 'AUTO', `[BLOCK] lol HANDICAP ${match.league} — suprimido`);
                   break;
                 }
@@ -3119,7 +3119,7 @@ async function runAutoAnalysis() {
             const kellyLabel = tipConf === CONF.ALTA ? '¼ Kelly' : tipConf === CONF.BAIXA ? '1/10 Kelly' : '⅙ Kelly';
             const mlEdgeLabel = result.mlScore > 0 ? ` | ML: ${result.mlScore.toFixed(1)}pp` : '';
 
-            const _blockedLolUp = isLeagueBlocked('lol', match.league);
+            const _blockedLolUp = isLeagueBlocked('lol', match.league, 'ML');
             if (_blockedLolUp) {
               log('INFO', 'AUTO-TIP', `[BLOCK] lol upcoming ${match.league} — suprimido`);
               analyzedMatches.set(matchKey, { ts: now, tipSent: false, blocked: true });
@@ -4251,16 +4251,34 @@ try {
   log('INFO', 'EPOCH', `code_sha=${sha || 'unknown'} | env=${Object.keys(gs.env).length} active | auto=${Object.keys(gs.auto).length}`);
 } catch (e) { log('WARN', 'EPOCH', `init: ${e.message}`); }
 
-function isLeagueBlocked(sport, league) {
+// 2026-05-06: granularidade per-market via 3-part entry (sport:market:substring).
+// Retrocompatível: 2-part (sport:substring) bloqueia o sport inteiro na liga.
+// Cascade lookup quando market informado:
+//   1. (sport, market, league)  — match exato per-market
+//   2. (sport, *, league)       — sport-wide (2-part legacy)
+// Quando market omitido, só checa 2-part entries (legacy behavior preservado).
+function isLeagueBlocked(sport, league, market = null) {
   if (!_leagueBlocklist.size) return null;
   const sp = String(sport || '').toLowerCase();
   const lg = String(league || '').toLowerCase();
+  const mk = market ? String(market).toUpperCase() : null;
   if (!lg) return null;
   for (const entry of _leagueBlocklist) {
-    const [sPart, subPart] = entry.split(':', 2);
-    if (!subPart) continue;
-    if (sPart !== '*' && sPart !== sp) continue;
-    if (lg.includes(subPart)) return subPart;
+    const parts = entry.split(':');
+    if (parts.length === 3) {
+      const [sPart, mPart, subPart] = parts;
+      if (!subPart) continue;
+      if (sPart !== '*' && sPart !== sp) continue;
+      // Per-market entry: só bloqueia se market do tip bate (ou wildcard *).
+      if (!mk) continue; // sem market context, ignora per-market entries
+      if (mPart !== '*' && mPart.toUpperCase() !== mk) continue;
+      if (lg.includes(subPart)) return subPart;
+    } else if (parts.length === 2) {
+      const [sPart, subPart] = parts;
+      if (!subPart) continue;
+      if (sPart !== '*' && sPart !== sp) continue;
+      if (lg.includes(subPart)) return subPart;
+    }
   }
   return null;
 }
@@ -4307,11 +4325,21 @@ function _normalizeConfKey(conf) {
   if (c === 'BAIXA' || c === 'LOW') return 'BAIXA';
   return 'MEDIA';
 }
-function getKellyFraction(sport, conf) {
+function getKellyFraction(sport, conf, market = null) {
   const key = _normalizeConfKey(conf);
   const sp = String(sport || '').toLowerCase();
   const spEnv = sp.toUpperCase().replace(/[^A-Z0-9]/g, '');
-  // Per-sport override first (env tem precedência sobre auto-tune)
+  const mktNorm = market ? String(market).toUpperCase() : null;
+  // 2026-05-06: per-market override env (KELLY_<SPORT>_<MARKET>_<CONF>)
+  if (mktNorm) {
+    const mkEnv = mktNorm.replace(/[^A-Z0-9]/g, '');
+    const perSportMarket = process.env[`KELLY_${spEnv}_${mkEnv}_${key}`];
+    if (perSportMarket != null && perSportMarket !== '') {
+      const v = parseFloat(perSportMarket);
+      if (Number.isFinite(v) && v > 0 && v <= 1) return v;
+    }
+  }
+  // Per-sport override (sport-wide env)
   const perSport = process.env[`KELLY_${spEnv}_${key}`];
   if (perSport != null && perSport !== '') {
     const v = parseFloat(perSport);
@@ -4324,8 +4352,16 @@ function getKellyFraction(sport, conf) {
     if (Number.isFinite(v) && v > 0 && v <= 1) return v;
   }
   // Auto-tune runtime state (daily cron runKellyAutoTune)
+  // 2026-05-06: cascade per-market → sport-wide. kelly_mult|MARKET ganha
+  // precedência sobre kelly_mult agregado do sport.
   try {
     const { getGateValue } = require('./lib/gates-runtime-state');
+    if (mktNorm) {
+      const marketMult = getGateValue(sp, `kelly_mult|${mktNorm}`);
+      if (Number.isFinite(marketMult) && marketMult >= 0.2 && marketMult <= 1.2) {
+        return _KELLY_DEFAULTS[key] * marketMult;
+      }
+    }
     const autoMult = getGateValue(sp, 'kelly_mult');
     if (Number.isFinite(autoMult) && autoMult >= 0.2 && autoMult <= 1.2) {
       return _KELLY_DEFAULTS[key] * autoMult;
@@ -6142,11 +6178,14 @@ async function runPathGuardCycle() {
 async function runLeagueGuardCycle() {
   if (/^(0|false|no)$/i.test(String(process.env.LEAGUE_GUARD_AUTO || ''))) return;
   const minN = parseInt(process.env.LEAGUE_GUARD_MIN_N || '20', 10);
+  // 2026-05-06: per-market n menor (sample dilui ao split). Default 10.
+  const minNMarket = parseInt(process.env.LEAGUE_GUARD_MIN_N_MARKET || '10', 10);
   const roiCutoff = parseFloat(process.env.LEAGUE_GUARD_ROI_CUTOFF || '-25');
   const clvCutoff = parseFloat(process.env.LEAGUE_GUARD_CLV_CUTOFF || '-2');
   const roiRestore = parseFloat(process.env.LEAGUE_GUARD_ROI_RESTORE || '-5');
   const daysWin = parseInt(process.env.LEAGUE_GUARD_DAYS || '30', 10);
   const cooldownMs = parseInt(process.env.LEAGUE_GUARD_COOLDOWN_DAYS || '7', 10) * 24 * 60 * 60 * 1000;
+  const PER_MARKET_AUTO = !/^(0|false|no)$/i.test(String(process.env.LEAGUE_GUARD_PER_MARKET_AUTO ?? 'true'));
   try {
     const rows = db.prepare(`
       SELECT sport, event_name,
@@ -6163,6 +6202,23 @@ async function runLeagueGuardCycle() {
       GROUP BY sport, event_name
       HAVING n >= ${minN}
     `).all();
+    // Per-market rows: agrupado por (sport, event_name, market_type)
+    const rowsMarket = PER_MARKET_AUTO ? db.prepare(`
+      SELECT sport, event_name,
+             UPPER(COALESCE(market_type, 'ML')) AS market,
+             COUNT(*) AS n,
+             SUM(COALESCE(stake_reais, 0)) AS staked,
+             SUM(COALESCE(profit_reais, 0)) AS profit,
+             AVG(CASE WHEN clv_odds > 1 AND odds > 1 THEN (odds - clv_odds) / clv_odds * 100 END) AS avg_clv
+      FROM tips
+      WHERE sent_at >= datetime('now', '-${daysWin} days')
+        AND (archived IS NULL OR archived = 0)
+        AND COALESCE(is_shadow, 0) = 0
+        AND result IN ('win','loss')
+        AND event_name IS NOT NULL AND TRIM(event_name) != ''
+      GROUP BY sport, event_name, UPPER(COALESCE(market_type, 'ML'))
+      HAVING n >= ${minNMarket}
+    `).all() : [];
 
     const tokenForAlert = resolveAlertsToken();
     const alerts = [];
@@ -6200,6 +6256,42 @@ async function runLeagueGuardCycle() {
         log('INFO', 'LEAGUE-GUARD', `auto-restored ${entry}: ROI=${roi.toFixed(1)}%`);
       }
     }
+    // 2026-05-06: per-market loop. Bloqueia/restaura entries 3-part
+    // (sport:market:substring) com n cutoff menor e mesma lógica ROI/CLV.
+    // Não bloqueia se sport-wide entry já cobre — entry sport-wide tem precedência.
+    for (const r of rowsMarket) {
+      const sport = String(r.sport || '').toLowerCase();
+      const league = String(r.event_name || '').toLowerCase().trim();
+      const market = String(r.market || 'ML').toUpperCase();
+      if (!sport || !league || !market) continue;
+      const sportEntry = `${sport}:${league}`;
+      const entry = `${sport}:${market}:${league}`;
+      // Skip se sport-wide entry já cobre essa liga (não duplica granularidade fina)
+      if (_leagueBlocklist.has(sportEntry)) continue;
+      const roi = r.staked > 0 ? (Number(r.profit) / Number(r.staked) * 100) : null;
+      const clv = r.avg_clv != null ? Number(r.avg_clv) : null;
+      const already = _leagueBlocklist.has(entry);
+      const autoMeta = _autoBlockedLeagues.get(entry);
+
+      if (!already && roi != null && roi <= roiCutoff && (clv == null || clv <= clvCutoff)) {
+        const cooldownUntil = _leagueUnblockCooldown.get(entry) || 0;
+        if (now < cooldownUntil) continue;
+        _leagueBlocklist.add(entry);
+        const reason = `ROI ${roi.toFixed(1)}% n=${r.n}${clv != null ? ` CLV ${clv.toFixed(1)}%` : ''} (per-market ${market})`;
+        const meta = { reason, since: now, roi, clv, n: r.n };
+        _autoBlockedLeagues.set(entry, meta);
+        _persistBlocklistEntry(entry, 'auto', meta);
+        alerts.push(`🚫 ${entry} — ${reason}`);
+        log('WARN', 'LEAGUE-GUARD', `auto-blocked per-market ${entry}: ${reason}`);
+      } else if (autoMeta && roi != null && roi >= roiRestore && r.n >= minNMarket) {
+        _leagueBlocklist.delete(entry);
+        _autoBlockedLeagues.delete(entry);
+        _deleteBlocklistEntry(entry);
+        restored.push(`✅ ${entry} — ROI recuperou pra ${roi.toFixed(1)}% (n=${r.n})`);
+        log('INFO', 'LEAGUE-GUARD', `auto-restored per-market ${entry}: ROI=${roi.toFixed(1)}%`);
+      }
+    }
+
     // 2026-04-28: TTL absoluto pra liga blocked sem novas tips. Antes deadlock
     // silencioso: ROI ruim → block → bloqueia novas tips → não acumula sample
     // → restore nunca dispara (n<minN sempre). Após LEAGUE_GUARD_AUTO_TTL_DAYS
@@ -14351,7 +14443,7 @@ Máximo 200 palavras.`;
       const _bookDota = formatLineShopDM(o, isT1bet ? 't1' : 't2', { sport: 'dota2', db }).trim();
       const msg = `🎮 *DOTA 2 — ${match.league}*${liveTag}\n${match.team1} vs ${match.team2} | ${match.format || ''}\n📅 ${matchTime} BRT\n\n✅ *TIP: ${tipTeam} @ ${tipOdd}*${minTakeLine}\n💰 Stake: ${formatStakeWithReais('dota2', tipStakeAdj)} | EV: ${tipEV} | Conf: ${tipConf}\n${_bookDota || `🏦 ${o.bookmaker || 'SX.Bet'}`}`;
 
-      const _blockedDota = isLeagueBlocked('dota2', match.league);
+      const _blockedDota = isLeagueBlocked('dota2', match.league, 'ML');
       if (_blockedDota) {
         log('INFO', 'AUTO-DOTA', `[BLOCK] dota2/${match.league} — tip suprimida (match "${_blockedDota}")`);
         setDotaAnalyzed({ ts: now, tipSent: false, noEdge: false, blocked: true });
@@ -14585,7 +14677,7 @@ async function analyzeDotaMapTip(match, token) {
     _bookDotaMap +
     `Modelo: gold/kill diff + momentum (conf ${(pred.confidence*100).toFixed(0)}%)`;
 
-  if (isLeagueBlocked('dota2', match.league)) {
+  if (isLeagueBlocked('dota2', match.league, 'ML')) {
     log('INFO', 'AUTO-DOTA-MAP', `[BLOCK] dota2/${match.league} mapa ${mapN} — suprimido`);
     analyzedDota.set(mapKey, { ts: now, tipSent: false, blocked: true });
     return;
@@ -15298,7 +15390,7 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
         const recEventName = (!_trim || /^mma$/i.test(_trim))
           ? (isBoxing ? 'Boxing (não identificado)' : 'MMA (não identificado)')
           : leagueLine;
-        if (isLeagueBlocked('mma', recEventName)) {
+        if (isLeagueBlocked('mma', recEventName, 'ML')) {
           log('INFO', 'AUTO-MMA', `[BLOCK] mma/${recEventName} — suprimido`);
           continue;
         }
@@ -16772,7 +16864,7 @@ Máximo 200 palavras. Raciocínio breve antes da decisão.`;
         if (!riskAdjTennis.ok) { log('INFO', 'RISK', `tennis: bloqueada (${riskAdjTennis.reason})`); await new Promise(r => setTimeout(r, 3000)); continue; }
         const tipStakeAdjTennis = String(riskAdjTennis.units.toFixed(1).replace(/\.0$/, ''));
 
-        if (isLeagueBlocked('tennis', match.league)) {
+        if (isLeagueBlocked('tennis', match.league, 'ML')) {
           log('INFO', 'AUTO-TENNIS', `[BLOCK] tennis/${match.league} — suprimido`);
           await new Promise(r => setTimeout(r, 3000)); continue;
         }
@@ -17877,7 +17969,7 @@ Máximo 200 palavras.`;
           } catch (_) { /* fbTipReason fica null se erro */ }
         }
 
-        if (isLeagueBlocked('football', match.league)) {
+        if (isLeagueBlocked('football', match.league, 'ML')) {
           log('INFO', 'AUTO-FOOTBALL', `[BLOCK] football/${match.league} — suprimido`);
           continue;
         }
@@ -18234,7 +18326,7 @@ async function pollTableTennis(runOnce = false) {
           ? `Elo: ${match.team1}=${elo.elo1} (${elo.eloMatches1}j) vs ${match.team2}=${elo.elo2} (${elo.eloMatches2}j)`
           : `Sofa form/H2H: factors=${factorCount}, edge=${mlScore.toFixed(1)}pp`;
 
-        if (isLeagueBlocked('tabletennis', match.league)) {
+        if (isLeagueBlocked('tabletennis', match.league, 'ML')) {
           log('INFO', 'AUTO-TT', `[BLOCK] tabletennis/${match.league} — suprimido`);
           continue;
         }
@@ -18920,7 +19012,7 @@ Máximo 150 palavras.`;
           ? `Elo: ${match.team1}=${elo.elo1} (${elo.eloMatches1}j) vs ${match.team2}=${elo.elo2} (${elo.eloMatches2}j)${divTag}${tierTag}`
           : `HLTV form/H2H: factors=${factorCount}, edge=${mlScore.toFixed(1)}pp${divTag}${tierTag}`) + liveCtx + aiTag;
 
-        if (isLeagueBlocked('cs', match.league)) {
+        if (isLeagueBlocked('cs', match.league, 'ML')) {
           log('INFO', 'AUTO-CS', `[BLOCK] cs/${match.league} — suprimido`);
           continue;
         }
@@ -19443,7 +19535,7 @@ async function pollValorant(runOnce = false) {
           : '';
         const tipReason = `Elo: ${match.team1}=${elo.elo1} (${elo.eloMatches1}j) vs ${match.team2}=${elo.elo2} (${elo.eloMatches2}j)${formStr}${h2hStr}${mapStr}${seriesStr}${liveStr}`;
 
-        if (isLeagueBlocked('valorant', match.league)) {
+        if (isLeagueBlocked('valorant', match.league, 'ML')) {
           log('INFO', 'AUTO-VAL', `[BLOCK] valorant/${match.league} — suprimido`);
           continue;
         }
@@ -19736,7 +19828,7 @@ async function runAutoDarts() {
           let _confDarts = ml.factorCount >= 2 ? 'MÉDIA' : 'BAIXA';
           if (_aiConfDarts === 'BAIXA' || (_aiConfDarts === 'MÉDIA' && _confDarts !== 'BAIXA')) _confDarts = _aiConfDarts;
           // Registra tip com flag shadow
-          if (isLeagueBlocked('darts', match.league)) {
+          if (isLeagueBlocked('darts', match.league, 'ML')) {
             log('INFO', 'AUTO-DARTS', `[BLOCK] darts/${match.league} — suprimido`);
             continue;
           }
@@ -19942,7 +20034,7 @@ async function runAutoSnooker() {
 
           let _confSnooker = ml.factorCount >= 2 ? 'MÉDIA' : 'BAIXA';
           if (_aiConfSnooker === 'BAIXA' || (_aiConfSnooker === 'MÉDIA' && _confSnooker !== 'BAIXA')) _confSnooker = _aiConfSnooker;
-          if (isLeagueBlocked('snooker', match.league)) {
+          if (isLeagueBlocked('snooker', match.league, 'ML')) {
             log('INFO', 'AUTO-SNOOKER', `[BLOCK] snooker/${match.league} — suprimido`);
             continue;
           }
