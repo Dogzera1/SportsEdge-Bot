@@ -19199,11 +19199,27 @@ setInterval(load, 60000);
             _tipContextJson = JSON.stringify(ctx).slice(0, 4000); // hard cap 4KB
           }
         } catch (_) { /* opcional */ }
+        // 2026-05-06 FIX: stake_reais deve ser computado ANTES do INSERT pois
+        // commit 6baeea9 adicionou @stake_reais ao insertTip stmt mas esqueceu
+        // de atualizar este caller. Resultado: better-sqlite3 lançava
+        // "Missing named parameter stake_reais" → 500 em TODA tip nova
+        // (real e shadow) desde o deploy. Bot loops continuavam rodando mas
+        // nenhuma tip era gravada (~6h sem tips antes do fix).
+        let _stakeReaisPre = null;
+        try {
+          const { getSportUnitValue } = require('./lib/sport-unit');
+          const bk = stmts.getBankroll.get(sport);
+          if (bk) {
+            const unitValue = getSportUnitValue(bk.current_banca || 0, bk.initial_banca || 100);
+            const stakeUnits = parseFloat(String(t.stake || '1').replace('u','')) || 1;
+            _stakeReaisPre = parseFloat((stakeUnits * unitValue).toFixed(2));
+          }
+        } catch(_) {}
         const result = stmts.insertTip.run({
           sport, matchId: String(matchId), eventName,
           p1, p2,
           tipParticipant, odds: oddsN,
-          ev: evN, stake: stakeStr, confidence: confidenceStr,
+          ev: evN, stake: stakeStr, stake_reais: _stakeReaisPre, confidence: confidenceStr,
           isLive, botToken: botTokenStr, market_type: marketTypeStr,
           model_p1: modelP1,
           model_p2: modelP2,
@@ -19218,17 +19234,6 @@ setInterval(load, 60000);
           gate_state: _gateState,
           tip_context_json: _tipContextJson,
         });
-        // Calcula stake em reais com tier per-sport unit (getSportUnitValue).
-        try {
-          const { getSportUnitValue } = require('./lib/sport-unit');
-          const bk = stmts.getBankroll.get(sport);
-          if (bk && result.lastInsertRowid) {
-            const unitValue = getSportUnitValue(bk.current_banca || 0, bk.initial_banca || 100);
-            const stakeUnits = parseFloat(String(t.stake || '1').replace('u','')) || 1;
-            const stakeReais = parseFloat((stakeUnits * unitValue).toFixed(2));
-            stmts.updateTipFinanceiro.run(stakeReais, null, result.lastInsertRowid);
-          }
-        } catch(_) {}
         // Grava odds de abertura para CLV tracking
         if (oddsN != null) {
           stmts.updateTipOpenOdds.run(oddsN, String(matchId), sport);
