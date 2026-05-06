@@ -5449,7 +5449,13 @@ async function recordMarketTipAsRegular({ sport, match, tip, stake, isLive }) {
     }
     if (rec.tipId) {
       log('INFO', 'MT-RECORD', `${sport}/${marketKey}/${sideKey} → tip id=${rec.tipId} stake=${stakeStr}`);
-      return rec.tipId;
+      // 2026-05-06: retorna {tipId, stakeFinal} pra caller atualizar DM.
+      // Antes só tipId — DM mostrava stake ORIGINAL (antes de league_trust +
+      // market_mult + tier_mult), DB gravava ajustado → divergência reportada
+      // entre Telegram message e dashboard.
+      const stakeFinalNum = typeof stakeAdjusted === 'number' ? stakeAdjusted
+        : parseFloat(String(stakeAdjusted || '1').replace('u','')) || null;
+      return { tipId: rec.tipId, stakeFinal: stakeFinalNum };
     }
     return null;
   } catch (e) {
@@ -5467,10 +5473,18 @@ async function _mtTryRecordAndShouldDm({ sport, recordSport, match, tip, stake, 
   const promoteEnabled = isMarketTipsPromoteEnabled(sport);
   const dmRealOnly = !/^(0|false|no)$/i.test(process.env.MT_DM_REAL_ONLY ?? 'true');
   let tipId = null;
+  let stakeFinal = null;
   if (promoteEnabled) {
     try {
       // recordSport opcional: cs2 game-id mas tabela tips usa bucket 'cs' (mig 074).
-      tipId = await recordMarketTipAsRegular({ sport: recordSport || sport, match, tip, stake, isLive });
+      const r = await recordMarketTipAsRegular({ sport: recordSport || sport, match, tip, stake, isLive });
+      // 2026-05-06: r agora pode ser {tipId, stakeFinal} ou tipId direto (back-compat).
+      if (r && typeof r === 'object') {
+        tipId = r.tipId;
+        stakeFinal = r.stakeFinal;
+      } else {
+        tipId = r;
+      }
     } catch (e) {
       log('WARN', 'MT-DM-GATE', `recordMarketTipAsRegular err: ${e.message}`);
     }
@@ -5478,14 +5492,14 @@ async function _mtTryRecordAndShouldDm({ sport, recordSport, match, tip, stake, 
   if (dmRealOnly) {
     if (!promoteEnabled) {
       log('DEBUG', 'MT-DM-SKIP', `${sport} ${tip.market}/${tip.side ?? '?'}: sport não promovido — DM suprimido (MT_DM_REAL_ONLY)`);
-      return { tipId: null, allowDm: false };
+      return { tipId: null, allowDm: false, stakeFinal: null };
     }
     if (!tipId) {
       log('DEBUG', 'MT-DM-SKIP', `${sport} ${tip.market}/${tip.side ?? '?'} ${match.team1} vs ${match.team2}: record-tip falhou/skipped — DM suprimido (MT_DM_REAL_ONLY)`);
-      return { tipId: null, allowDm: false };
+      return { tipId: null, allowDm: false, stakeFinal: null };
     }
   }
-  return { tipId, allowDm: true };
+  return { tipId, allowDm: true, stakeFinal };
 }
 
 // Side-level ROI auto-guard — complementa o CLV guard por agregação em
@@ -8279,11 +8293,13 @@ async function autoAnalyzeMatch(token, match) {
                         stake = mtp.snapStakeUnits(stake * (1 - t.correlationDiscount));
                       }
                       if (!(stake > 0)) continue;
-                      const dm = mtp.buildMarketTipDM({ match, tip: t, stake, league: match.league, sport: 'lol', isLive: isLiveLoL });
                       const tokenForMT = resolveTipsToken('esports') || resolveAlertsToken();
                       if (!tokenForMT) continue;
+                      // 2026-05-06: gate ANTES de buildDM pra usar stake final ajustado.
                       const _gate_lol = await _mtTryRecordAndShouldDm({ sport: 'lol', match, tip: t, stake, isLive: isLiveLoL });
                       if (!_gate_lol.allowDm) continue;
+                      const _stakeForDm = Number.isFinite(_gate_lol.stakeFinal) ? _gate_lol.stakeFinal : stake;
+                      const dm = mtp.buildMarketTipDM({ match, tip: t, stake: _stakeForDm, league: match.league, sport: 'lol', isLive: isLiveLoL });
                       const _mtMarkup_lol = mtp.buildMarketTipReplyMarkup({ match: match, sport: 'lol' });
                           const r = await sendAdminDMs(tokenForMT, dm, _mtMarkup_lol ? { reply_markup: _mtMarkup_lol } : undefined, 'lol-market-tip');
                       if (r.sent > 0) {
@@ -8455,17 +8471,18 @@ async function autoAnalyzeMatch(token, match) {
                         marketTipSent.set(dedupKey, Date.now());
                         const stake = mtp.kellyStakeForMarket(t.pModel, t.odd, 100, getKellyFraction('lol', 'BAIXA'), { sport: 'lol' });
                         if (!(stake > 0)) continue;
-                        const dm = mtp.buildMarketTipDM({ match, tip: t, stake, league: match.league, sport: 'lol', isLive: isLiveLoL });
                         const tokenForMT = resolveTipsToken('esports') || resolveAlertsToken();
                         if (!tokenForMT) continue;
-                        // Gate MT_DM_REAL_ONLY: tenta record-tip primeiro; se falhou, suprime DM.
+                        // 2026-05-06: gate ANTES de buildDM pra usar stake final ajustado.
                         const _gate = await _mtTryRecordAndShouldDm({ sport: 'lol', match, tip: t, stake, isLive: isLiveLoL });
                         if (!_gate.allowDm) continue;
+                        const _stakeForDm = Number.isFinite(_gate.stakeFinal) ? _gate.stakeFinal : stake;
+                        const dm = mtp.buildMarketTipDM({ match, tip: t, stake: _stakeForDm, league: match.league, sport: 'lol', isLive: isLiveLoL });
                         const _mtMarkup = mtp.buildMarketTipReplyMarkup({ match, sport: 'lol' });
                         const r = await sendAdminDMs(tokenForMT, dm, _mtMarkup ? { reply_markup: _mtMarkup } : undefined, 'lol-kills-tip');
                         if (r.sent > 0) {
                           markAdminDmSent(db, { sport: 'lol', match, market: t.market, line: t.line, side: t.side, odd: t.odd, ev: t.ev });
-                          log('INFO', 'LOL-KILLS-TIP', `Admin DM: ${t.label} @ ${t.odd} EV ${t.ev}% stake ${stake}u (sent=${r.sent}) tipId=${_gate.tipId}`);
+                          log('INFO', 'LOL-KILLS-TIP', `Admin DM: ${t.label} @ ${t.odd} EV ${t.ev}% stake ${_stakeForDm}u (sent=${r.sent}) tipId=${_gate.tipId}`);
                         }
                       }
                     }
@@ -14235,16 +14252,18 @@ async function _pollDotaInner(runOnce = false) {
                       stake = mtp.snapStakeUnits(stake * (1 - t.correlationDiscount));
                     }
                     if (!(stake > 0)) continue;
-                    const dm = mtp.buildMarketTipDM({ match, tip: t, stake, league: match.league, sport: 'dota2', isLive });
                     const tokenForMT = resolveTipsToken('esports') || resolveAlertsToken();
                     if (!tokenForMT) continue;
+                    // 2026-05-06: gate ANTES de buildDM pra usar stake final ajustado.
                     const _gate_dota = await _mtTryRecordAndShouldDm({ sport: 'dota2', match, tip: t, stake, isLive });
                     if (!_gate_dota.allowDm) continue;
+                    const _stakeForDm = Number.isFinite(_gate_dota.stakeFinal) ? _gate_dota.stakeFinal : stake;
+                    const dm = mtp.buildMarketTipDM({ match, tip: t, stake: _stakeForDm, league: match.league, sport: 'dota2', isLive });
                     const _mtMarkup_dota = mtp.buildMarketTipReplyMarkup({ match: match, sport: 'dota2' });
                           const r = await sendAdminDMs(tokenForMT, dm, _mtMarkup_dota ? { reply_markup: _mtMarkup_dota } : undefined, 'dota-market-tip');
                     if (r.sent > 0) {
                       markAdminDmSent(db, { sport: 'dota2', match, market: t.market, line: t.line, side: t.side, odd: t.odd, ev: t.ev });
-                      log('INFO', 'DOTA-MARKET-TIP', `Admin DM: ${t.label} @ ${t.odd} EV ${t.ev}% stake ${stake}u (sent=${r.sent} failed=${r.failed}) tipId=${_gate_dota.tipId}`);
+                      log('INFO', 'DOTA-MARKET-TIP', `Admin DM: ${t.label} @ ${t.odd} EV ${t.ev}% stake ${_stakeForDm}u (sent=${r.sent} failed=${r.failed}) tipId=${_gate_dota.tipId}`);
                     } else {
                       log('WARN', 'DOTA-MARKET-TIP', `Todos admin DM falharam — skip dedup mark (${t.label} @ ${t.odd})`);
                     }
@@ -16321,17 +16340,21 @@ async function pollTennis(runOnce = false) {
                           stake = mtp.snapStakeUnits(stake * t.stakeAdjust);
                         }
                         if (!(stake > 0)) continue;
-                        const dm = mtp.buildMarketTipDM({ match, tip: t, stake, league: match.league, sport: 'tennis', isLive: isLiveTennis, markets });
                         const tnToken = resolveTipsToken('tennis') || SPORTS['tennis']?.token || resolveAlertsToken();
                         if (!tnToken) continue;
+                        // 2026-05-06: gate ANTES de buildDM pra usar stake final ajustado
+                        // (após league_trust + market_mult + tier_mult). Antes DM mostrava
+                        // stake original divergente do DB — bug reportado.
                         const _gate_tn = await _mtTryRecordAndShouldDm({ sport: 'tennis', match, tip: t, stake, isLive: isLiveTennis });
                         if (!_gate_tn.allowDm) continue;
+                        const _stakeForDm = Number.isFinite(_gate_tn.stakeFinal) ? _gate_tn.stakeFinal : stake;
+                        const dm = mtp.buildMarketTipDM({ match, tip: t, stake: _stakeForDm, league: match.league, sport: 'tennis', isLive: isLiveTennis, markets });
                         const _mtMarkup_tennis = mtp.buildMarketTipReplyMarkup({ match: match, sport: 'tennis' });
                           const r = await sendAdminDMs(tnToken, dm, _mtMarkup_tennis ? { reply_markup: _mtMarkup_tennis } : undefined, 'tennis-market-tip');
                         if (r.sent > 0) {
                           markAdminDmSent(db, { sport: 'tennis', match, market: t.market, line: t.line, side: t.side, odd: t.odd, ev: t.ev });
                           const discTag = t.correlationDiscount > 0 ? ` (corr-disc ${(t.correlationDiscount*100).toFixed(0)}%)` : '';
-                          log('INFO', 'TENNIS-MARKET-TIP', `Admin DM: ${t.label} @ ${t.odd} EV ${t.ev}% stake ${stake}u${discTag} (sent=${r.sent} failed=${r.failed}) tipId=${_gate_tn.tipId}`);
+                          log('INFO', 'TENNIS-MARKET-TIP', `Admin DM: ${t.label} @ ${t.odd} EV ${t.ev}% stake ${_stakeForDm}u${discTag} (sent=${r.sent} failed=${r.failed}) tipId=${_gate_tn.tipId}`);
                         } else {
                           log('WARN', 'TENNIS-MARKET-TIP', `Todos admin DM falharam — skip dedup mark (${t.label} @ ${t.odd})`);
                         }
@@ -17611,16 +17634,18 @@ async function pollFootball(runOnce = false) {
                       marketTipSent.set(dedupKey, Date.now());
                       const stake = mtp.kellyStakeForMarket(t.pModel, t.odd, 100, getKellyFraction('football', 'BAIXA'), { sport: 'football' });
                       if (!(stake > 0)) continue;
-                      const dm = mtp.buildMarketTipDM({ match, tip: t, stake, league: match.league, sport: 'football', isLive: isLiveScan });
                       const tokenForMT = resolveTipsToken('football') || SPORTS['football']?.token || resolveAlertsToken();
                       if (!tokenForMT) continue;
+                      // 2026-05-06: gate ANTES de buildDM pra usar stake final ajustado.
                       const _gate_fb = await _mtTryRecordAndShouldDm({ sport: 'football', match, tip: t, stake, isLive: isLiveScan });
                       if (!_gate_fb.allowDm) continue;
+                      const _stakeForDm = Number.isFinite(_gate_fb.stakeFinal) ? _gate_fb.stakeFinal : stake;
+                      const dm = mtp.buildMarketTipDM({ match, tip: t, stake: _stakeForDm, league: match.league, sport: 'football', isLive: isLiveScan });
                       const _mtMarkup_fb = mtp.buildMarketTipReplyMarkup({ match, sport: 'football' });
                       const r = await sendAdminDMs(tokenForMT, dm, _mtMarkup_fb ? { reply_markup: _mtMarkup_fb } : undefined, 'football-mt-scan-tip');
                       if (r.sent > 0) {
                         markAdminDmSent(db, { sport: 'football', match, market: t.market, line: t.line, side: t.side, odd: t.odd, ev: t.ev });
-                        log('INFO', 'FB-MT-TIP', `Admin DM${isLiveScan ? ' [LIVE]' : ''}: ${t.label} @ ${t.odd} EV ${t.ev}% stake ${stake}u (sent=${r.sent}) tipId=${_gate_fb.tipId}`);
+                        log('INFO', 'FB-MT-TIP', `Admin DM${isLiveScan ? ' [LIVE]' : ''}: ${t.label} @ ${t.odd} EV ${t.ev}% stake ${_stakeForDm}u (sent=${r.sent}) tipId=${_gate_fb.tipId}`);
                       }
                     }
                   } catch (mte) { reportBug('FB-MT-PROMOTE', mte); }
@@ -18151,17 +18176,18 @@ Máximo 200 palavras.`;
                   if (!dbFresh) {
                     const stakeFb = mtp.kellyStakeForMarket(fbModelPPick, parseFloat(tipOdd), 100, getKellyFraction('football', 'BAIXA'), { sport: 'football' });
                     if (stakeFb > 0) {
-                      const dmFb = mtp.buildMarketTipDM({ match: matchForMt, tip: tipForMt, stake: stakeFb, league: matchForMt.league, sport: 'football', isLive: isFbLive });
-                      // resolveTipsToken honra TIPS_UNIFIED_TOKEN — todas MT DMs caem no mesmo bot.
                       const fbToken = resolveTipsToken('football') || SPORTS['football']?.token || resolveAlertsToken();
                       if (fbToken) {
+                        // 2026-05-06: gate ANTES de buildDM pra usar stake final ajustado.
                         const _gate_fb2 = await _mtTryRecordAndShouldDm({ sport: 'football', match: matchForMt, tip: tipForMt, stake: stakeFb, isLive: isFbLive });
                         if (_gate_fb2.allowDm) {
+                          const _stakeForDmFb = Number.isFinite(_gate_fb2.stakeFinal) ? _gate_fb2.stakeFinal : stakeFb;
+                          const dmFb = mtp.buildMarketTipDM({ match: matchForMt, tip: tipForMt, stake: _stakeForDmFb, league: matchForMt.league, sport: 'football', isLive: isFbLive });
                           const _mtMarkup_football = mtp.buildMarketTipReplyMarkup({ match: matchForMt, sport: 'football' });
                             const r = await sendAdminDMs(fbToken, dmFb, _mtMarkup_football ? { reply_markup: _mtMarkup_football } : undefined, 'football-market-tip');
                           if (r.sent > 0) {
                             markAdminDmSent(db, { sport: 'football', match: matchForMt, market: marketKey, line: lineVal, side: sideMt });
-                            log('INFO', 'FOOTBALL-MARKET-TIP', `Admin DM: ${tipMarket} @ ${tipOdd} EV ${tipEV}% stake ${stakeFb}u (sent=${r.sent} failed=${r.failed}) tipId=${_gate_fb2.tipId}`);
+                            log('INFO', 'FOOTBALL-MARKET-TIP', `Admin DM: ${tipMarket} @ ${tipOdd} EV ${tipEV}% stake ${_stakeForDmFb}u (sent=${r.sent} failed=${r.failed}) tipId=${_gate_fb2.tipId}`);
                           } else {
                             log('WARN', 'FOOTBALL-MARKET-TIP', `Todos admin DM falharam — skip dedup mark (${tipMarket})`);
                           }
@@ -18815,17 +18841,19 @@ async function pollCs(runOnce = false) {
                         stake = mtp.snapStakeUnits(stake * (1 - t.correlationDiscount));
                       }
                       if (!(stake > 0)) continue;
-                      const dm = mtp.buildMarketTipDM({ match, tip: t, stake, league: match.league, sport: 'cs2', isLive: isLiveCs });
                       const tokenForMT = resolveTipsToken('esports') || resolveAlertsToken();
                       if (!tokenForMT) continue;
                       // 'cs2' = game id; recordMarketTipAsRegular grava com bucket 'cs' (mig 074).
+                      // 2026-05-06: gate ANTES de buildDM pra usar stake final ajustado.
                       const _gate_cs = await _mtTryRecordAndShouldDm({ sport: 'cs2', recordSport: 'cs', match, tip: t, stake, isLive: isLiveCs });
                       if (!_gate_cs.allowDm) continue;
+                      const _stakeForDm = Number.isFinite(_gate_cs.stakeFinal) ? _gate_cs.stakeFinal : stake;
+                      const dm = mtp.buildMarketTipDM({ match, tip: t, stake: _stakeForDm, league: match.league, sport: 'cs2', isLive: isLiveCs });
                       const _mtMarkup_cs = mtp.buildMarketTipReplyMarkup({ match: match, sport: 'cs2' });
                           const r = await sendAdminDMs(tokenForMT, dm, _mtMarkup_cs ? { reply_markup: _mtMarkup_cs } : undefined, 'cs-market-tip');
                       if (r.sent > 0) {
                         markAdminDmSent(db, { sport: 'cs2', match, market: t.market, line: t.line, side: t.side, odd: t.odd, ev: t.ev });
-                        log('INFO', 'CS-MARKET-TIP', `Admin DM: ${t.label} @ ${t.odd} EV ${t.ev}% stake ${stake}u (sent=${r.sent} failed=${r.failed}) tipId=${_gate_cs.tipId}`);
+                        log('INFO', 'CS-MARKET-TIP', `Admin DM: ${t.label} @ ${t.odd} EV ${t.ev}% stake ${_stakeForDm}u (sent=${r.sent} failed=${r.failed}) tipId=${_gate_cs.tipId}`);
                       } else {
                         log('WARN', 'CS-MARKET-TIP', `Todos admin DM falharam — skip dedup mark (${t.label} @ ${t.odd})`);
                       }
@@ -19453,16 +19481,18 @@ async function pollValorant(runOnce = false) {
                         stake = mtp.snapStakeUnits(stake * (1 - t.correlationDiscount));
                       }
                       if (!(stake > 0)) continue;
-                      const dm = mtp.buildMarketTipDM({ match, tip: t, stake, league: match.league, sport: 'valorant', isLive: isLiveVal });
                       const tokenForMT = resolveTipsToken('esports') || resolveAlertsToken();
                       if (!tokenForMT) continue;
+                      // 2026-05-06: gate ANTES de buildDM pra usar stake final ajustado.
                       const _gate_val = await _mtTryRecordAndShouldDm({ sport: 'valorant', match, tip: t, stake, isLive: isLiveVal });
                       if (!_gate_val.allowDm) continue;
+                      const _stakeForDm = Number.isFinite(_gate_val.stakeFinal) ? _gate_val.stakeFinal : stake;
+                      const dm = mtp.buildMarketTipDM({ match, tip: t, stake: _stakeForDm, league: match.league, sport: 'valorant', isLive: isLiveVal });
                       const _mtMarkup_valorant = mtp.buildMarketTipReplyMarkup({ match: match, sport: 'valorant' });
                           const r = await sendAdminDMs(tokenForMT, dm, _mtMarkup_valorant ? { reply_markup: _mtMarkup_valorant } : undefined, 'val-market-tip');
                       if (r.sent > 0) {
                         markAdminDmSent(db, { sport: 'valorant', match, market: t.market, line: t.line, side: t.side, odd: t.odd, ev: t.ev });
-                        log('INFO', 'VAL-MARKET-TIP', `Admin DM: ${t.label} @ ${t.odd} EV ${t.ev}% stake ${stake}u (sent=${r.sent} failed=${r.failed}) tipId=${_gate_val.tipId}`);
+                        log('INFO', 'VAL-MARKET-TIP', `Admin DM: ${t.label} @ ${t.odd} EV ${t.ev}% stake ${_stakeForDm}u (sent=${r.sent} failed=${r.failed}) tipId=${_gate_val.tipId}`);
                       } else {
                         log('WARN', 'VAL-MARKET-TIP', `Todos admin DM falharam — skip dedup mark (${t.label} @ ${t.odd})`);
                       }
@@ -20331,16 +20361,18 @@ async function runAutoBasket() {
                     marketTipSent.set(dedupKey, Date.now());
                     const stake = mtp.kellyStakeForMarket(t.pModel, t.odd, 100, getKellyFraction('basket', 'BAIXA'), { sport: 'basket' });
                     if (!(stake > 0)) continue;
-                    const dm = mtp.buildMarketTipDM({ match, tip: t, stake, league: match.league, sport: 'basket', isLive: isLiveBasket });
                     const tokenForMT = resolveTipsToken('basket') || SPORTS['basket']?.token || resolveAlertsToken();
                     if (!tokenForMT) continue;
+                    // 2026-05-06: gate ANTES de buildDM pra usar stake final ajustado.
                     const _gateBk = await _mtTryRecordAndShouldDm({ sport: 'basket', match, tip: t, stake, isLive: isLiveBasket });
                     if (!_gateBk.allowDm) continue;
+                    const _stakeForDm = Number.isFinite(_gateBk.stakeFinal) ? _gateBk.stakeFinal : stake;
+                    const dm = mtp.buildMarketTipDM({ match, tip: t, stake: _stakeForDm, league: match.league, sport: 'basket', isLive: isLiveBasket });
                     const _markupBk = mtp.buildMarketTipReplyMarkup({ match, sport: 'basket' });
                     const r = await sendAdminDMs(tokenForMT, dm, _markupBk ? { reply_markup: _markupBk } : undefined, 'basket-mt-scan-tip');
                     if (r.sent > 0) {
                       markAdminDmSent(db, { sport: 'basket', match, market: t.market, line: t.line, side: t.side, odd: t.odd, ev: t.ev });
-                      log('INFO', 'BASKET-MT-TIP', `Admin DM${isLiveBasket ? ' [LIVE]' : ''}: ${t.label} @ ${t.odd} EV ${t.ev}% stake ${stake}u (sent=${r.sent}) tipId=${_gateBk.tipId}`);
+                      log('INFO', 'BASKET-MT-TIP', `Admin DM${isLiveBasket ? ' [LIVE]' : ''}: ${t.label} @ ${t.odd} EV ${t.ev}% stake ${_stakeForDm}u (sent=${r.sent}) tipId=${_gateBk.tipId}`);
                     }
                   }
                 } catch (mte) { reportBug('BASKET-MT-PROMOTE', mte); }
