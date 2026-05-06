@@ -15590,7 +15590,10 @@ setInterval(load, 60000);
         return pRaw;
       };
 
-      const MIN_EV = 4;
+      // 2026-05-06: MIN_EV configurável via ?min_ev= (default 4). Walk-forward
+      // tennis 2026-05-06 mostrou min_ev=4 deixa passar tips ROI -7,4% PRE / -4,8% POST.
+      // Apertar pra 8 ou 10 testa se subset high-EV tem edge real.
+      const MIN_EV = parseFloat(parsed.query.min_ev || '4');
       const bt = { pre: [], post: [] };
       // CRITICAL: backtest consome evalTips (out-of-sample) quando eval_days>0.
       // Calib treinado em trainTips; aplicado em tips nunca vistas pelo PAV.
