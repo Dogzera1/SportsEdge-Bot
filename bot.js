@@ -1754,6 +1754,21 @@ const DRAWDOWN_CACHE_TTL = 5 * 60 * 1000; // refresh a cada 5min
 const DRAWDOWN_HARD_LIMIT = parseFloat(process.env.DRAWDOWN_HARD_LIMIT || '0.25'); // 25% = bloqueia
 const DRAWDOWN_SOFT_LIMIT = parseFloat(process.env.DRAWDOWN_SOFT_LIMIT || '0.15'); // 15% = reduz 50%
 
+// Pre-check pra polls: se sport está em hard drawdown block, skip pipeline inteiro.
+// Evita CPU+IA waste em sports onde guardian já bloqueia 100% das tips.
+// Lê _drawdownCache (atualizado a cada applyGlobalRisk). Stale tolerance: 10min.
+// Opt-out via SKIP_BLOCKED_SPORT_POLL=false.
+function _isSportHardBlockedByDrawdown(sport) {
+  if (/^(0|false|no)$/i.test(String(process.env.SKIP_BLOCKED_SPORT_POLL ?? 'true'))) return false;
+  const cached = _drawdownCache.get(sport);
+  if (!cached) return false;
+  const ageMs = Date.now() - (cached.checkedAt || 0);
+  // Cache stale tolerance: 10min (cache TTL é 5min mas damos margem antes de
+  // re-running pipeline pra garantir refresh válido).
+  if (ageMs > 10 * 60 * 1000) return false;
+  return Number.isFinite(cached.pct) && cached.pct >= DRAWDOWN_HARD_LIMIT;
+}
+
 // Sport performance → stake multiplier. Cache per-sport por 1h. Winners +15-30%,
 // bleeders -15-30%. Default OFF (SPORT_PERF_AUTO=true pra ativar).
 const _sportPerfCache = new Map(); // sport → { ts, mult, reason, roi, dd, n }
@@ -15623,6 +15638,14 @@ async function pollTennis(runOnce = false) {
     try {
       log('INFO', 'AUTO-TENNIS', 'Iniciando verificação de partidas de Tênis...');
       markPollHeartbeat('tennis');
+      // Pre-check: se tennis em hard drawdown block, skip pipeline (Guardian
+      // bloqueia 100% downstream). Economiza CPU+IA. Reagenda em intervalo curto
+      // pra detectar quando DD recuperar (cache TTL 5min).
+      if (_isSportHardBlockedByDrawdown('tennis')) {
+        log('INFO', 'AUTO-TENNIS', 'sport bloqueado por drawdown — skip pipeline (re-check em 5min)');
+        if (!runOnce) setTimeout(loop, 5 * 60 * 1000);
+        return [];
+      }
       const matches = await serverGet('/tennis-matches').catch(() => []);
       if (!Array.isArray(matches) || !matches.length) {
         if (!runOnce) setTimeout(loop, 30 * 60 * 1000);
