@@ -4859,7 +4859,14 @@ const server = http.createServer(async (req, res) => {
       if (statsDisabled) {
         // Riot desabilita feed público em muitas ligas tier-2 — limitação externa, sem ação possível.
         // Rebaixado pra DEBUG para não poluir log.
-        log('DEBUG', 'LIVE-GAME', `window/${gameId}: Stats DISABLED pela Riot — draft=${hasDraft ? 'ok' : 'no'}`);
+        // 2026-05-06: blacklist 30min imediato para statsDisabled — sem isto, cada
+        // poll cycle dispara 16 reqs paralelos pra um endpoint que NUNCA retornará
+        // dados nesse jogo. Antes só `has200===0 && !statsDisabled` incrementava.
+        const cur = global._liveGameBreaker.get(gameId) || { failCount: 0 };
+        cur.blacklistUntil = _now + 30 * 60 * 1000;
+        cur.statsDisabled = true;
+        global._liveGameBreaker.set(gameId, cur);
+        log('DEBUG', 'LIVE-GAME', `window/${gameId}: Stats DISABLED pela Riot — draft=${hasDraft ? 'ok' : 'no'} (blacklist 30min)`);
       } else if (usedTs === null) {
         // 204 em todas as janelas — provável liga sem feed público ou jogo ainda no draft
         const has200 = scanResults.filter(r => r.status === 200).length;
@@ -11077,14 +11084,18 @@ setInterval(load, 60000);
           // Fetch livestats final frame: sample múltiplos timestamps recentes pra
           // garantir que pegamos o último frame com dados (jogo já terminou).
           const base = `https://feed.lolesports.com/livestats/v1/window/${target.gameId}`;
-          // Tenta sem startingTime primeiro (retorna últimos frames)
-          let r = await httpGet(base, LOL_HEADERS);
+          // 2026-05-06: replica padrão /live-game — sem-key primeiro, fallback c/ key.
+          // x-api-key causa 204 em jogos completed em algumas ligas (igual inProgress).
+          // Sem isto force-settle Riot kills falhava silencioso → cai em gol.gg desnecessariamente.
+          let r = await httpGet(base, {});
+          if (r.status !== 200) r = await httpGet(base, LOL_HEADERS);
           let d = r.status === 200 ? safeParse(r.body, {}) : null;
           let frames = d?.frames || [];
           // Se vazio, tenta com startingTime há 5min atrás
           if (!frames.length) {
             const ts = new Date(Math.floor((Date.now() - 300000) / 10000) * 10000).toISOString();
-            r = await httpGet(`${base}?startingTime=${encodeURIComponent(ts)}`, LOL_HEADERS);
+            r = await httpGet(`${base}?startingTime=${encodeURIComponent(ts)}`, {});
+            if (r.status !== 200) r = await httpGet(`${base}?startingTime=${encodeURIComponent(ts)}`, LOL_HEADERS);
             d = r.status === 200 ? safeParse(r.body, {}) : null;
             frames = d?.frames || [];
           }
@@ -18594,9 +18605,12 @@ setInterval(load, 60000);
         const hoursParam = parseInt(payload.hours || parsed.query.hours || '0', 10) || 0;
         // Permite passar hours pra granularidade menor que 1 dia
         const cutoffExpr = hoursParam > 0 ? `-${hoursParam} hours` : `-${days} days`;
+        // Filtra is_shadow=0: shadow tips precisam settle natural (match_results)
+        // pra preservar o dataset puro usado por ML_SHADOW_PURE_MODE / shadow learning.
         const r = db.prepare(
           `UPDATE tips SET result = 'void', settled_at = datetime('now'), profit_reais = 0
-           WHERE sport = ? AND result IS NULL AND sent_at < datetime('now', ?)`
+           WHERE sport = ? AND result IS NULL AND COALESCE(is_shadow,0) = 0
+             AND sent_at < datetime('now', ?)`
         ).run(sport, cutoffExpr);
         // Extensão 2026-04-28: void também em market_tips_shadow stuck. Critério
         // mesmo (sport, criação > cutoff, result IS NULL). Antes só cobria tabela
@@ -18962,11 +18976,13 @@ setInterval(load, 60000);
         // BUG FIX 2026-04-27: MT tips (handicap/totals) já têm correlation discount
         // no Kelly aplicado em bot.js — bypass cap pra não duplicar penalidade.
         // ML continua sob cap (correlation entre múltiplas ML é mais forte).
-        if (/^true$/i.test(String(process.env.CORRELATION_AUTO || '')) && eventName && sport !== 'football' && !isMtTip && !_bypassFiltersForShadow) {
+        if (/^true$/i.test(String(process.env.CORRELATION_AUTO || '')) && eventName && !isMtTip && !_bypassFiltersForShadow) {
           // 2026-04-28: per-sport sensible defaults (env override sempre ganha).
           // Tennis: 6u (single match, 3-5 markets correlated). LoL/CS: 8u (BO5
           // série tem 3+ mapas, cada com 1-2 markets). MMA/Tennis: 6u (1 fight).
-          const _CORR_DEFAULTS = { tennis: 6, lol: 8, cs2: 8, dota2: 8, valorant: 7, mma: 6, snooker: 5, darts: 5 };
+          // 2026-05-06 FIX: football re-incluído no cap (3-5 markets correlacionados:
+          // 1X2_H+OVER+BTTS), default 8u dado footprint maior por match.
+          const _CORR_DEFAULTS = { tennis: 6, lol: 8, cs2: 8, dota2: 8, valorant: 7, mma: 6, snooker: 5, darts: 5, football: 8 };
           const perSportKey = `CORRELATION_MAX_EXPOSURE_U_${String(sport).toUpperCase()}`;
           const _defaultCap = _CORR_DEFAULTS[String(sport).toLowerCase()] ?? 6;
           const capU = parseFloat(process.env[perSportKey] || process.env.CORRELATION_MAX_EXPOSURE_U || String(_defaultCap));

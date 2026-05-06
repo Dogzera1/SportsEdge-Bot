@@ -711,6 +711,9 @@ function sweepAnalyzedMaps() {
   total += _sweepTsMap(analyzedDarts, ANALYZED_TTL_MS, now);
   total += _sweepTsMap(analyzedSnooker, ANALYZED_TTL_MS, now);
   total += _sweepTsMap(analyzedTT, ANALYZED_TTL_MS, now);
+  // 2026-05-06: analyzedBasket faltava no sweep (declarado em :646, NBA acumula
+  // ~20 jogos/dia × 365d = ~7300 entries/ano sem cleanup).
+  if (typeof analyzedBasket !== 'undefined') total += _sweepTsMap(analyzedBasket, ANALYZED_TTL_MS, now);
   total += _sweepTsMap(lolSeriesLastTip, ANALYZED_TTL_MS, now);
   total += _sweepTsMap(lineAlerted, ANALYZED_TTL_MS, now);
   // marketTipSent stora ts direto (number), não wrapped em objeto.
@@ -829,8 +832,19 @@ setTimeout(_bridgeBotMetricsToServer, 30 * 1000); // primeiro flush 30s pós-boo
 // Helper genérico pra wrappar cron com heartbeat automático.
 // Usa: setInterval(_wrapCron('name', () => doStuff()), interval).
 // Trata sync e async fns; nunca propaga exception (cron loop não morre).
+// 2026-05-06: re-entry guard. Se anterior ainda rodando (cron pesado >intervalo),
+// próximo tick pula com heartbeat skipped_overlap em vez de duplicar trabalho.
+// Sem isto, runWeeklyRecalc / mt_calib_refit / nightly retrain podiam executar
+// 2x paralelo causando race em DB writes e CPU spike.
+const _cronRunning = new Set();
 function _wrapCron(name, fn) {
   return async () => {
+    if (_cronRunning.has(name)) {
+      try { markCronHeartbeat(name, { result: 'skipped_overlap' }); } catch (_) {}
+      try { require('./lib/metrics').incr('cron_overlap_skip', { name }); } catch (_) {}
+      return;
+    }
+    _cronRunning.add(name);
     const t0 = Date.now();
     try {
       await Promise.resolve(fn());
@@ -838,6 +852,8 @@ function _wrapCron(name, fn) {
     } catch (e) {
       try { markCronHeartbeat(name, { result: 'error', error: String(e?.message || e), durationMs: Date.now() - t0 }); } catch (_) {}
       // Não re-throw: setInterval continua chamando.
+    } finally {
+      _cronRunning.delete(name);
     }
   };
 }
@@ -1320,6 +1336,12 @@ process.on('unhandledRejection', (reason) => {
 process.on('uncaughtException', (err) => {
   reportBug('UNCAUGHT-EXCEPTION', err);
   _writeBotLastExit('uncaught_exception', `${err?.name || 'Error'}: ${err?.message || err}\n${(err?.stack || '').slice(0, 1500)}`);
+  // 2026-05-06: EPIPE em console.log (utils.js:118) já tem try/catch após fix.
+  // Para outros uncaught, exit(1) pra Railway restartar — antes seguia rodando
+  // em estado inconsistente (memória vazada, locks pendentes etc).
+  if (!/EPIPE|ETIMEDOUT|ENETUNREACH|TelegramTimeout/.test(String(err?.message || ''))) {
+    setTimeout(() => process.exit(1), 500);
+  }
 });
 
 // 2026-05-01: persiste exit reason em disco — pareia com server.js BOOT-RESUME log.
@@ -1345,13 +1367,22 @@ function _writeBotLastExit(reason, detail) {
 
 // Graceful shutdown: salva último cron heartbeat antes de morrer.
 // SIGTERM = Railway re-deploy. SIGINT = Ctrl+C local.
+// 2026-05-06: drena pending crons / auto-analysis antes de sair (max 8s).
+// Antes saía imediato → tips em record-tip mid-flight perdiam dispatch DM.
+let _shuttingDown = false;
 ['SIGTERM', 'SIGINT'].forEach((sig) => {
-  process.on(sig, () => {
-    try {
-      dumpCronHeartbeats(CRON_STATE_FILE);
-      _writeBotLastExit(`signal_${sig.toLowerCase()}`, sig);
-      log('INFO', 'BOOT', `${sig} received — heartbeats dumped, exiting`);
-    } catch (_) {}
+  process.on(sig, async () => {
+    if (_shuttingDown) return;
+    _shuttingDown = true;
+    try { dumpCronHeartbeats(CRON_STATE_FILE); } catch (_) {}
+    log('INFO', 'BOOT', `${sig} received — draining (max 8s)`);
+    const t0 = Date.now();
+    while ((typeof autoAnalysisRunning !== 'undefined' && autoAnalysisRunning) || _cronRunning.size > 0) {
+      if (Date.now() - t0 > 8000) break;
+      await new Promise(r => setTimeout(r, 200));
+    }
+    try { _writeBotLastExit(`signal_${sig.toLowerCase()}`, sig); } catch (_) {}
+    log('INFO', 'BOOT', `drain done in ${Date.now() - t0}ms — exiting`);
     process.exit(0);
   });
 });
@@ -1636,6 +1667,8 @@ const _LOL_BLOCK_MAIN = /^(1|true|yes)$/i.test(String(process.env.LOL_BLOCK_MAIN
 const LOL_MAIN_LEAGUES = new Set([
   'lck', 'lcs', 'lec', 'lpl', 'worlds', 'msi',
   'cblol', 'cblolbrazil', 'lla', 'pcs', 'lco', 'vcs',
+  // LCP (Pacific Championship) — formada 2025 fundindo PCS+LCO+LJL+VCS, tier-1 oficial Riot.
+  'lcp',
 ]);
 function isMainLeague(leagueSlug) {
   if (!_LOL_BLOCK_MAIN) return false;
@@ -1650,7 +1683,7 @@ function isLolTier1(leagueOrSlug) {
   const slug = String(leagueOrSlug).toLowerCase().replace(/[^a-z0-9-]/g, '');
   if (LOL_MAIN_LEAGUES.has(slug)) return true;
   // Match por nome também (event_name vs leagueSlug)
-  return /\b(lck|lec|lcs|lpl|msi|worlds|cblol|cbloldbrazil|lla|pcs|lco|vcs|esports world cup)\b/i.test(String(leagueOrSlug));
+  return /\b(lck|lec|lcs|lpl|lcp|msi|worlds|cblol|cbloldbrazil|lla|pcs|lco|vcs|esports world cup)\b/i.test(String(leagueOrSlug));
 }
 
 // Cache de drawdown por sport (atualizado a cada chamada de risk)
@@ -4970,9 +5003,13 @@ function _getMtPermanentDisable() {
   //   lol|total:               ROI -54% n=10 (sample baixo mas magnitude clara)
   //   cs|TOTAL|under:          ROI -68% n=9 (audit 06/05, UNDER 2.5 maps tier-2/3
   //                            ESL Challenger NA/EU/SA + Odyssey Cup + Pro League)
-  const raw = String(process.env.MT_PERMANENT_DISABLE_LIST ?? 'tennis|totalGames|over,tennis|totalGames|under,lol|total,cs|TOTAL|under').trim();
+  // 2026-05-06: lowercase ALL parts (sport|market|side) na construção do Set.
+  // Scanners emitem `total` (lowercase) mas default tinha `cs|TOTAL|under` —
+  // perm.has nunca casava (MT_PERMANENT_DISABLE_LIST default era effectively dead).
+  // Caller (`describeMtGateSkip`, MT scanners) também devem fazer lowercase no probe.
+  const raw = String(process.env.MT_PERMANENT_DISABLE_LIST ?? 'tennis|totalGames|over,tennis|totalGames|under,lol|total,cs|total|under').trim();
   _MT_PERMANENT_DISABLE = new Set();
-  for (const entry of raw.split(',').map(s => s.trim()).filter(Boolean)) {
+  for (const entry of raw.split(',').map(s => s.trim().toLowerCase()).filter(Boolean)) {
     _MT_PERMANENT_DISABLE.add(entry);
   }
   return _MT_PERMANENT_DISABLE;
@@ -4995,8 +5032,11 @@ function describeMtGateSkip(sport, market, side, league, opts = {}) {
   }
   if (market) {
     const perm = (typeof _getMtPermanentDisable === 'function') ? _getMtPermanentDisable() : new Set();
-    if (side && perm.has(`${sport}|${market}|${side}`)) return `mt_disabled — permanent disable [${sport}|${market}|${side}]`;
-    if (perm.has(`${sport}|${market}`)) return `mt_disabled — permanent disable [${sport}|${market}]`;
+    const _sl = String(sport).toLowerCase();
+    const _ml = String(market).toLowerCase();
+    const _sdl = side ? String(side).toLowerCase() : '';
+    if (side && perm.has(`${_sl}|${_ml}|${_sdl}`)) return `mt_disabled — permanent disable [${sport}|${market}|${side}]`;
+    if (perm.has(`${_sl}|${_ml}`)) return `mt_disabled — permanent disable [${sport}|${market}]`;
     if (side && league && _marketTipsDisabledRuntime.has(`${sport}|${market}|${side}|${league}`)) return `mt_disabled — leak guard runtime[${sport}|${market}|${side}|${league}]`;
     if (side && _marketTipsDisabledRuntime.has(`${sport}|${market}|${side}`)) return `mt_disabled — leak guard runtime[${sport}|${market}|${side}]`;
     if (_marketTipsDisabledRuntime.has(`${sport}|${market}`)) return `mt_disabled — leak guard runtime[${sport}|${market}]`;
@@ -5030,8 +5070,11 @@ function isMarketTipsEnabled(sport, market = null, side = null, league = null) {
   if (market) {
     // Permanent blocklist (env-driven, antes de runtime/DB checks).
     const perm = _getMtPermanentDisable();
-    if (side && perm.has(`${sport}|${market}|${side}`)) return false;
-    if (perm.has(`${sport}|${market}`)) return false;
+    const _sl = String(sport).toLowerCase();
+    const _ml = String(market).toLowerCase();
+    const _sdl = side ? String(side).toLowerCase() : '';
+    if (side && perm.has(`${_sl}|${_ml}|${_sdl}`)) return false;
+    if (perm.has(`${_sl}|${_ml}`)) return false;
     // Precedência runtime: (market+side+league) > (market+side+tier) > (market+side) > market inteiro.
     // Tier-level inserido entre side e league: pega leak quando ligas individuais
     // têm sample <10 mas tier total >=20. Tier resolvido on-the-fly via league.
@@ -6624,6 +6667,21 @@ function _resolveMtOddBounds(sport, opts = {}) {
   if (maxOdd == null && Number.isFinite(opts.defaultMaxOdd) && opts.defaultMaxOdd > 1 && !maxDisabled) {
     maxOdd = opts.defaultMaxOdd;
   }
+  // 2026-05-06: per-sport sensible defaults quando caller não passou opts e
+  // sem env nem auto-guard. Antes Dota/CS/Val/Football/Basket retornavam
+  // undefined → cap MT off → tip de odd 1.05 ou 5.00 passava.
+  const _SPORT_DEFAULTS = {
+    lol:      { min: undefined, max: 2.00 },
+    cs2:      { min: undefined, max: 2.00 },
+    dota2:    { min: undefined, max: 2.00 },
+    valorant: { min: undefined, max: 2.00 },
+    tennis:   { min: 1.50,      max: undefined },
+    football: { min: 1.30,      max: 6.00 },
+    basket:   { min: 1.30,      max: 2.50 },
+  };
+  const sd = _SPORT_DEFAULTS[String(sport).toLowerCase()] || {};
+  if (minOdd == null && Number.isFinite(sd.min) && sd.min > 1 && !minDisabled) minOdd = sd.min;
+  if (maxOdd == null && Number.isFinite(sd.max) && sd.max > 1 && !maxDisabled) maxOdd = sd.max;
   return {
     minOdd: minOdd != null ? minOdd : undefined,
     maxOdd: maxOdd != null ? maxOdd : undefined,
@@ -15525,7 +15583,7 @@ async function pollTennis(runOnce = false) {
         if (process.env.TENNIS_ITF_EXCLUDE !== 'false') {
           const proh = tennisProhibitedTournament(match.league || match.tournament || '');
           if (proh.prohibited) {
-            log('INFO', 'AUTO-TENNIS', `Skip ITF exclusion: ${match.team1} vs ${match.team2} [${match.league || 'no-league'}] → ${proh.reason}`);
+            log('DEBUG', 'AUTO-TENNIS', `Skip ITF exclusion: ${match.team1} vs ${match.team2} [${match.league || 'no-league'}] → ${proh.reason}`);
             logRejection('tennis', `${match.team1} vs ${match.team2}`, 'itf_exclusion', { reason: proh.reason, tier: proh.tier });
             analyzedTennis.set(key, { ts: now, tipSent: false, noEdge: true });
             continue;
@@ -22968,18 +23026,32 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
 
 
   // Live odds polling: força atualização de odds para partidas ao vivo a cada 2 min
-  // Captura oportunidades quando casas demoram a ajustar linha mid-game
+  // Captura oportunidades quando casas demoram a ajustar linha mid-game.
+  // 2026-05-06: estendido pra dota2/cs/valorant — antes só LoL refresh dedicado;
+  // Pinnacle ajusta agressivo em CS live e ficava defasado entre poll cycles.
+  // Throttle: só força se idade > 90s (evita force-redundante a cada 2min).
   if (SPORTS.esports?.enabled) {
-    setInterval(async () => {
+    const _LIVE_FORCE_AGE_MS = 90 * 1000;
+    const _liveFetch = async (sportKey, gameKey) => {
       try {
-        const lolRaw = await serverGet('/lol-matches').catch(() => []);
-        const live = Array.isArray(lolRaw) ? lolRaw.filter(m => m.status === 'live') : [];
+        const raw = await serverGet(`/${sportKey}-matches`).catch(() => []);
+        const live = Array.isArray(raw) ? raw.filter(m => m.status === 'live') : [];
         for (const m of live) {
-          await serverGet(`/odds?team1=${encodeURIComponent(m.team1)}&team2=${encodeURIComponent(m.team2)}&force=1&game=lol`).catch(() => null);
+          const cur = await serverGet(`/odds?team1=${encodeURIComponent(m.team1)}&team2=${encodeURIComponent(m.team2)}&game=${gameKey}`).catch(() => null);
+          const age = cur?._fetchedAt ? (Date.now() - Number(cur._fetchedAt)) : Infinity;
+          if (!Number.isFinite(age) || age > _LIVE_FORCE_AGE_MS) {
+            await serverGet(`/odds?team1=${encodeURIComponent(m.team1)}&team2=${encodeURIComponent(m.team2)}&force=1&game=${gameKey}`).catch(() => null);
+          }
         }
-        if (live.length > 0) log('DEBUG', 'LIVE-ODDS', `Refresh odds live: ${live.length} partida(s)`);
-      } catch(e) { /* silencioso */ }
-    }, 2 * 60 * 1000); // a cada 2 min
+        if (live.length > 0) log('DEBUG', 'LIVE-ODDS', `${sportKey}: refresh ${live.length} partida(s)`);
+      } catch (_) { /* silencioso */ }
+    };
+    setInterval(async () => {
+      await _liveFetch('lol', 'lol');
+      await _liveFetch('dota', 'dota2');
+      await _liveFetch('cs', 'cs2');
+      await _liveFetch('valorant', 'valorant');
+    }, 2 * 60 * 1000);
   }
   
   log('INFO', 'BOOT', `Bots ativos: ${Object.keys(bots).join(', ')}`);
@@ -23256,14 +23328,30 @@ async function checkCLV(caches = {}) {
           } else {
             const list = Array.isArray(caches.tennis) ? caches.tennis : [];
             const m = findTheOddsH2hMatch(list, tip);
+            // Throttle 30min/tip pra mesma reason — duplas com `/` no nome
+            // (Kudermetova/Timofeeva vs Aksu/Buyukakcay) ficam fora do feed
+            // h2h Pinnacle e logam todo ciclo (15+ vezes em 14min).
+            const _logSkip = (reason) => {
+              global._clvSkipLogged = global._clvSkipLogged || new Map();
+              const key = `tennis:${tip.id}:${reason}`;
+              const last = global._clvSkipLogged.get(key) || 0;
+              if (Date.now() - last > 30 * 60 * 1000) {
+                log('DEBUG', 'CLV-SKIP', `tennis ${tip.participant1} vs ${tip.participant2}: ${reason} (feed_size=${list.length})`);
+                global._clvSkipLogged.set(key, Date.now());
+                if (global._clvSkipLogged.size > 500) {
+                  const cutoff = Date.now() - 24 * 3600 * 1000;
+                  for (const [k, t] of global._clvSkipLogged) if (t < cutoff) global._clvSkipLogged.delete(k);
+                }
+              }
+            };
             if (!m) {
-              log('DEBUG', 'CLV-SKIP', `tennis ${tip.participant1} vs ${tip.participant2}: no_match_in_feed (feed_size=${list.length})`);
+              _logSkip('no_match_in_feed');
             } else if (!m.odds) {
-              log('DEBUG', 'CLV-SKIP', `tennis ${tip.participant1} vs ${tip.participant2}: match_found_but_no_odds`);
+              _logSkip('match_found_but_no_odds');
             } else {
               const o = h2hDecimalOddsForPick(m, tip.tip_participant);
               if (o && o > 1) clvOdds = String(o);
-              else log('DEBUG', 'CLV-SKIP', `tennis ${tip.participant1} vs ${tip.participant2}: odds_not_parseable (${JSON.stringify(m.odds).slice(0,120)})`);
+              else _logSkip('odds_not_parseable');
             }
           }
         } else if (sport === 'mma') {
