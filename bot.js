@@ -79,7 +79,12 @@ function _buildTipBetButton(sport, oddsObj, pickSide, match, stakeStr, fallbackO
 }
 const { getLolProbability, mapProbFromSeries } = require('./lib/lol-model');
 const { predictTrainedEsports, hasTrainedModel: hasTrainedEsportsModel } = require('./lib/esports-model-trained');
-const { buildTrainedContext: buildEsportsTrainedContext } = require('./lib/esports-runtime-features');
+const {
+  buildTrainedContext: buildEsportsTrainedContext,
+  matchStage: _esportsMatchStage,
+  stageConfidenceMultiplier: _esportsStageConf,
+  detectStakesContext: _esportsDetectStakes,
+} = require('./lib/esports-runtime-features');
 
 // ── EV ceiling condicional ─────────────────────────────────────────────
 // Com modelo treinado ativo + ECE baixa (<0.03), EVs altos (50-80%) são
@@ -14510,10 +14515,9 @@ Máximo 200 palavras.`;
       // Stage boost: TI/Major final → +15%, international grupos → +10%, regional final → +8%
       // + §5b Stakes context (showmatch/exhibition deflate; decider/tiebreaker boost)
       try {
-        const { matchStage, stageConfidenceMultiplier, detectStakesContext } = require('./lib/esports-runtime-features');
-        const stage = matchStage(match.league || '');
-        const stakesCtx = detectStakesContext(match.league || '');
-        const stageMult = stage !== 'regular' ? stageConfidenceMultiplier(stage) : 1.0;
+        const stage = _esportsMatchStage(match.league || '');
+        const stakesCtx = _esportsDetectStakes(match.league || '');
+        const stageMult = stage !== 'regular' ? _esportsStageConf(stage) : 1.0;
         const stakesMult = stakesCtx.multiplier;
         const combined = stageMult * stakesMult;
         if (combined !== 1.0) {
@@ -19060,10 +19064,9 @@ Máximo 150 palavras.`;
           // else default 1/8
         }
         try {
-          const { matchStage, stageConfidenceMultiplier, detectStakesContext } = require('./lib/esports-runtime-features');
-          const stage = matchStage(match.league || '');
-          const stakesCtx = detectStakesContext(match.league || '');
-          const combined = (stage !== 'regular' ? stageConfidenceMultiplier(stage) : 1.0) * stakesCtx.multiplier;
+          const stage = _esportsMatchStage(match.league || '');
+          const stakesCtx = _esportsDetectStakes(match.league || '');
+          const combined = (stage !== 'regular' ? _esportsStageConf(stage) : 1.0) * stakesCtx.multiplier;
           if (combined !== 1.0) {
             const pre = csKellyFrac;
             csKellyFrac = Math.min(0.25, csKellyFrac * combined);

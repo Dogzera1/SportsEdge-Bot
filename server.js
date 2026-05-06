@@ -3711,8 +3711,55 @@ function _stackForReq(req, e) {
   return undefined;
 }
 
+// 2026-05-06: HttpOnly cookie session — auth pra browser/dashboard admin.
+// Antes ADMIN_KEY ficava em localStorage (acessível via JS → XSS lê e exfiltra).
+// Agora: POST /admin/login com {key} → server seta cookie adminSession (HttpOnly).
+// CSRF token retornado em login + JS embeds em x-csrf-token header pra mutations.
+// CLI/API path (x-admin-key header) inalterado — backward-compat preservada.
+const _adminSessions = new Map(); // sessionId → { csrfToken, createdAt, lastSeenAt, ip }
+const ADMIN_SESSION_TTL_MS = parseInt(process.env.ADMIN_SESSION_TTL_MS || String(24 * 60 * 60 * 1000), 10);
+const ADMIN_SESSION_COOKIE = 'adminSession';
+
+function _genSessionToken() {
+  return require('crypto').randomBytes(32).toString('hex');
+}
+
+function _parseCookie(req, name) {
+  const ck = String(req.headers?.cookie || '');
+  if (!ck) return null;
+  const re = new RegExp(`(?:^|;\\s*)${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}=([^;]+)`);
+  const m = ck.match(re);
+  return m ? decodeURIComponent(m[1]) : null;
+}
+
+function _adminSessionValid(sid) {
+  if (!sid) return null;
+  const sess = _adminSessions.get(sid);
+  if (!sess) return null;
+  if (Date.now() - sess.createdAt > ADMIN_SESSION_TTL_MS) {
+    _adminSessions.delete(sid);
+    return null;
+  }
+  sess.lastSeenAt = Date.now();
+  return sess;
+}
+
+function _cleanupAdminSessions() {
+  const cutoff = Date.now() - ADMIN_SESSION_TTL_MS;
+  for (const [sid, sess] of _adminSessions) {
+    if (sess.createdAt < cutoff) _adminSessions.delete(sid);
+  }
+  // Hard cap pra evitar accumulation hostil
+  if (_adminSessions.size > 1000) {
+    const sorted = [..._adminSessions.entries()].sort((a, b) => a[1].lastSeenAt - b[1].lastSeenAt);
+    const toRemove = _adminSessions.size - 1000;
+    for (let i = 0; i < toRemove; i++) _adminSessions.delete(sorted[i][0]);
+  }
+}
+
 function isAdminRequest(req) {
   if (!ADMIN_KEY) return false;
+  // Header path (CLI / API consumers, IPC bot↔server)
   const xk = (req.headers['x-admin-key'] || '').toString().trim();
   if (xk && xk === ADMIN_KEY) return true;
   const auth = (req.headers['authorization'] || '').toString().trim();
@@ -3720,7 +3767,36 @@ function isAdminRequest(req) {
     const token = auth.slice(7).trim();
     if (token && token === ADMIN_KEY) return true;
   }
+  // Cookie path (browser admin pages)
+  const sid = _parseCookie(req, ADMIN_SESSION_COOKIE);
+  if (sid && _adminSessionValid(sid)) return true;
   return false;
+}
+
+// CSRF check apenas pra state-changing methods em sessões cookie.
+// CLI usando x-admin-key header bypass CSRF (autenticação explícita por chamada).
+function _adminCsrfRequired(req) {
+  const m = String(req.method || '').toUpperCase();
+  if (m === 'GET' || m === 'HEAD' || m === 'OPTIONS') return false;
+  const xk = (req.headers['x-admin-key'] || '').toString().trim();
+  if (xk) return false; // CLI path, não exige CSRF
+  return true; // session-cookie path em mutation → exige CSRF
+}
+
+function _adminCsrfValid(req) {
+  const sid = _parseCookie(req, ADMIN_SESSION_COOKIE);
+  if (!sid) return false;
+  const sess = _adminSessionValid(sid);
+  if (!sess) return false;
+  const got = (req.headers['x-csrf-token'] || '').toString().trim();
+  return !!got && got === sess.csrfToken;
+}
+
+// 2026-05-06: paths destrutivos NUNCA passam pelo open-mode dev — mesmo
+// ADMIN_KEY_OPEN=true exige token explícito pra delete/reset/wipe.
+const _DESTRUCTIVE_PATHS = /^(\/reset-tips|\/reset-bankroll|\/admin\/wipe|\/admin\/delete|\/admin\/purge)/;
+function _isDestructive(req) {
+  try { return _DESTRUCTIVE_PATHS.test(req.url || ''); } catch (_) { return false; }
 }
 
 function requireAdmin(req, res) {
@@ -3730,10 +3806,20 @@ function requireAdmin(req, res) {
       sendJson(res, { ok: false, error: 'admin_key_not_configured_strict_mode' }, 503);
       return false;
     }
-    return true; // open mode dev-only
+    // 2026-05-06: open-mode bloqueia destrutivos sempre.
+    if (_isDestructive(req)) {
+      sendJson(res, { ok: false, error: 'destructive_blocked_in_open_mode', tip: 'set ADMIN_KEY' }, 403);
+      return false;
+    }
+    return true; // open mode dev-only para read-only
   }
   if (!isAdminRequest(req)) {
     sendJson(res, { ok: false, error: 'unauthorized' }, 401);
+    return false;
+  }
+  // 2026-05-06: CSRF gate pra session-cookie mutations.
+  if (_adminCsrfRequired(req) && !_adminCsrfValid(req)) {
+    sendJson(res, { ok: false, error: 'csrf_token_invalid_or_missing', tip: 'GET /admin/me retorna csrfToken; envie em x-csrf-token header' }, 403);
     return false;
   }
   return true;
@@ -6520,6 +6606,73 @@ const server = http.createServer(async (req, res) => {
       });
     } catch(e) {
       sendJson(res, { hasData: false, error: e.message });
+    }
+    return;
+  }
+
+  // ── Admin login/logout/me (HttpOnly cookie session) ──
+  if (p === '/admin/login' && req.method === 'POST') {
+    let body = ''; req.on('data', d => body += d);
+    req.on('end', () => {
+      try {
+        if (!ADMIN_KEY) { sendJson(res, { ok: false, error: 'admin_key_not_configured' }, 503); return; }
+        const { key } = safeParse(body, {});
+        const provided = String(key || '').trim();
+        // Compare timing-safe — defense vs side-channel timing attack.
+        const ok = provided.length === ADMIN_KEY.length
+          && require('crypto').timingSafeEqual(Buffer.from(provided), Buffer.from(ADMIN_KEY));
+        if (!ok) {
+          // Rate-limit per IP em login fail
+          const ip = getClientIp(req);
+          global._adminLoginFails = global._adminLoginFails || new Map();
+          const cur = global._adminLoginFails.get(ip) || { n: 0, since: Date.now() };
+          if (Date.now() - cur.since > 15 * 60 * 1000) { cur.n = 0; cur.since = Date.now(); }
+          cur.n++;
+          global._adminLoginFails.set(ip, cur);
+          if (cur.n > 10) {
+            sendJson(res, { ok: false, error: 'rate_limit_login_fails' }, 429);
+            return;
+          }
+          sendJson(res, { ok: false, error: 'invalid_key' }, 401);
+          return;
+        }
+        const sid = _genSessionToken();
+        const csrfToken = _genSessionToken();
+        _adminSessions.set(sid, {
+          csrfToken,
+          createdAt: Date.now(),
+          lastSeenAt: Date.now(),
+          ip: getClientIp(req),
+        });
+        _cleanupAdminSessions();
+        const flags = ['HttpOnly', 'SameSite=Strict', 'Path=/'];
+        if (process.env.NODE_ENV === 'production') flags.push('Secure');
+        flags.push(`Max-Age=${Math.floor(ADMIN_SESSION_TTL_MS / 1000)}`);
+        res.setHeader('Set-Cookie', `${ADMIN_SESSION_COOKIE}=${encodeURIComponent(sid)}; ${flags.join('; ')}`);
+        sendJson(res, { ok: true, csrfToken, ttlMs: ADMIN_SESSION_TTL_MS });
+      } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    });
+    return;
+  }
+
+  if (p === '/admin/logout' && req.method === 'POST') {
+    const sid = _parseCookie(req, ADMIN_SESSION_COOKIE);
+    if (sid) _adminSessions.delete(sid);
+    res.setHeader('Set-Cookie', `${ADMIN_SESSION_COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0`);
+    sendJson(res, { ok: true });
+    return;
+  }
+
+  if (p === '/admin/me' && req.method === 'GET') {
+    const sid = _parseCookie(req, ADMIN_SESSION_COOKIE);
+    const sess = _adminSessionValid(sid);
+    if (sess) {
+      sendJson(res, {
+        ok: true, authenticated: true, csrfToken: sess.csrfToken,
+        ageMs: Date.now() - sess.createdAt,
+      });
+    } else {
+      sendJson(res, { ok: true, authenticated: false });
     }
     return;
   }
@@ -9475,14 +9628,26 @@ a:hover { text-decoration: underline; }
 .warn { color: #d29922; }
 .crit { color: #f85149; }
 .section-meta { font-size: 11px; color: #6e7681; margin-top: 4px; }
-input[name=key] { background: #0d1117; border: 1px solid #30363d; color: #c9d1d9; padding: 4px 8px; border-radius: 4px; font: inherit; width: 100%; box-sizing: border-box; margin-bottom: 12px; }
+input[name=key], #adminKeyLogin { background: #0d1117; border: 1px solid #30363d; color: #c9d1d9; padding: 4px 8px; border-radius: 4px; font: inherit; width: 100%; box-sizing: border-box; margin-bottom: 12px; }
 .note { background: #161b22; border-left: 3px solid #58a6ff; padding: 8px 12px; margin: 12px 0; font-size: 11px; color: #8b949e; }
+.auth-bar { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; }
+.auth-bar input { flex: 1; margin: 0; }
+.auth-bar button { background: #238636; color: white; border: 0; padding: 6px 14px; border-radius: 4px; cursor: pointer; font: inherit; }
+.auth-bar button.logout { background: #6e7681; }
+.auth-bar .auth-status { color: #3fb950; font-size: 11px; }
+.auth-bar .auth-status.off { color: #f85149; }
 </style></head>
 <body>
 <h1>🛠️ Admin Console</h1>
 <div class="sub">SportsEdge Bot · meta-dashboard de endpoints admin</div>
-<input type="text" name="key" id="adminKey" placeholder="ADMIN_KEY (preenche todos links automaticamente)" />
-<div class="note">Cole o ADMIN_KEY acima — todos links abaixo recebem <code>?key=...</code> automaticamente. <a href="/dashboard.html">← Dashboard principal</a></div>
+<!-- 2026-05-06: HttpOnly cookie auth (não usa mais localStorage). -->
+<div class="auth-bar" id="authBar">
+  <input type="password" id="adminKeyLogin" placeholder="ADMIN_KEY (login one-time, cookie HttpOnly)" autocomplete="current-password" />
+  <button onclick="adminLogin()" id="loginBtn">Login</button>
+  <button onclick="adminLogout()" class="logout" id="logoutBtn" style="display:none">Logout</button>
+  <span class="auth-status off" id="authStatus">não autenticado</span>
+</div>
+<div class="note">Login one-time via cookie HttpOnly. <strong>Não há mais ADMIN_KEY em localStorage</strong> (XSS-immune). <a href="/dashboard.html">← Dashboard principal</a></div>
 <div class="grid">
 
 <div class="card"><h2>📊 Status & Health</h2>
@@ -9569,22 +9734,55 @@ input[name=key] { background: #0d1117; border: 1px solid #30363d; color: #c9d1d9
 <a href="/dashboard.html">← Dashboard principal</a> · <a href="/logs.html">📜 logs</a> · <a href="/health/metrics.html">📊 metrics</a>
 </div>
 <script>
-const k = localStorage.getItem('adminKey') || '';
-document.getElementById('adminKey').value = k;
-document.getElementById('adminKey').addEventListener('input', e => {
-  const v = e.target.value.trim();
-  localStorage.setItem('adminKey', v);
-  applyKey();
-});
-function applyKey() {
-  const key = document.getElementById('adminKey').value.trim();
-  document.querySelectorAll('a.hk').forEach(a => {
-    const href = a.getAttribute('href').replace(/[?&]key=[^&]*/g, '');
-    if (!key) { a.setAttribute('href', href); return; }
-    a.setAttribute('href', href + (href.includes('?') ? '&' : '?') + 'key=' + encodeURIComponent(key));
-  });
+// 2026-05-06: cookie auth — substitui localStorage XSS-vulnerável.
+async function adminLogin() {
+  const key = document.getElementById('adminKeyLogin').value.trim();
+  if (!key) { alert('ADMIN_KEY obrigatório'); return; }
+  try {
+    const r = await fetch('/admin/login', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ key }),
+    });
+    const d = await r.json();
+    if (d.ok) {
+      document.getElementById('adminKeyLogin').value = '';
+      checkAuth();
+    } else {
+      alert('Login falhou: ' + (d.error || 'desconhecido'));
+    }
+  } catch (e) { alert('Erro: ' + e.message); }
 }
-applyKey();
+async function adminLogout() {
+  await fetch('/admin/logout', { method: 'POST', credentials: 'same-origin' }).catch(() => {});
+  checkAuth();
+}
+async function checkAuth() {
+  try {
+    const r = await fetch('/admin/me', { credentials: 'same-origin' });
+    const d = await r.json();
+    const stat = document.getElementById('authStatus');
+    if (d.authenticated) {
+      stat.textContent = 'autenticado (cookie HttpOnly)';
+      stat.classList.remove('off');
+      document.getElementById('loginBtn').style.display = 'none';
+      document.getElementById('logoutBtn').style.display = '';
+      document.getElementById('adminKeyLogin').style.display = 'none';
+    } else {
+      stat.textContent = 'não autenticado';
+      stat.classList.add('off');
+      document.getElementById('loginBtn').style.display = '';
+      document.getElementById('logoutBtn').style.display = 'none';
+      document.getElementById('adminKeyLogin').style.display = '';
+    }
+  } catch (_) {}
+}
+// Enter key submete login
+document.getElementById('adminKeyLogin').addEventListener('keydown', e => {
+  if (e.key === 'Enter') adminLogin();
+});
+checkAuth();
 </script>
 </body></html>`;
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
@@ -9618,21 +9816,28 @@ pre { background: #0d1117; padding: 8px; border-radius: 4px; font-size: 11px; ov
 <body>
 <h1>🔍 Forensics — Tip Post-Mortem</h1>
 <div class="sub">Snapshot completo de uma tip: row + context + match_result + factor_log + sibling tips.</div>
-<input type="text" id="adminKey" placeholder="ADMIN_KEY" style="width:300px" />
 <input type="number" id="tipId" placeholder="tip_id" style="width:120px" min="1" />
 <button onclick="load()" style="background:#58a6ff;color:#0d1117;border:none;padding:6px 16px;border-radius:4px;cursor:pointer;font:inherit">Carregar</button>
+<span id="authStatus" style="margin-left:12px;color:#f85149;font-size:11px">não autenticado — <a href="/admin/" style="color:#58a6ff">login em /admin/</a></span>
 <div id="content"></div>
 <div class="note"><a href="/admin/" style="color:#d2a8ff">← Admin Console</a></div>
 <script>
-const k = localStorage.getItem('adminKey') || '';
-document.getElementById('adminKey').value = k;
-document.getElementById('adminKey').addEventListener('input', e => localStorage.setItem('adminKey', e.target.value.trim()));
-async function load() {
-  const key = document.getElementById('adminKey').value.trim();
-  const id = document.getElementById('tipId').value.trim();
-  if (!key || !id) { document.getElementById('content').innerHTML = '<div class="pending">Preencha key + tip_id.</div>'; return; }
+// 2026-05-06: cookie auth — credentials:'same-origin' envia cookie automaticamente.
+async function checkAuth() {
   try {
-    const r = await fetch('/admin/forensics?tip_id=' + encodeURIComponent(id) + '&key=' + encodeURIComponent(key));
+    const r = await fetch('/admin/me', { credentials: 'same-origin' });
+    const d = await r.json();
+    if (d.authenticated) {
+      document.getElementById('authStatus').innerHTML = '<span style="color:#3fb950">✓ autenticado</span>';
+    }
+  } catch (_) {}
+}
+checkAuth();
+async function load() {
+  const id = document.getElementById('tipId').value.trim();
+  if (!id) { document.getElementById('content').innerHTML = '<div class="pending">Preencha tip_id.</div>'; return; }
+  try {
+    const r = await fetch('/admin/forensics?tip_id=' + encodeURIComponent(id), { credentials: 'same-origin' });
     const j = await r.json();
     if (!r.ok || !j?.ok) { document.getElementById('content').innerHTML = '<div class="loss">' + (j?.error || 'HTTP ' + r.status) + '</div>'; return; }
     const t = j.tip;
@@ -9728,21 +9933,29 @@ input { background: #0d1117; border: 1px solid #30363d; color: #c9d1d9; padding:
 <body>
 <h1>📊 Quick Stats</h1>
 <div class="sub" id="meta">carregando…</div>
-<input type="text" id="adminKey" placeholder="ADMIN_KEY" />
+<div id="authStatus" style="margin-bottom:12px;font-size:11px;color:#f85149">não autenticado — <a href="/admin/" style="color:#58a6ff">login em /admin/</a></div>
 <div class="grid3" id="grid"></div>
 <div class="note-line" style="margin-top:12px"><a href="/admin/" style="color:#d2a8ff">← Admin Console</a> · <a href="/admin/today.html" style="color:#d2a8ff">today</a> · <a href="/admin/cron-status.html" style="color:#d2a8ff">cron-status</a> · auto-refresh 2min</div>
 <script>
-const k = localStorage.getItem('adminKey') || '';
-document.getElementById('adminKey').value = k;
-document.getElementById('adminKey').addEventListener('input', e => { localStorage.setItem('adminKey', e.target.value.trim()); load(); });
-async function load() {
-  const key = document.getElementById('adminKey').value.trim();
-  if (!key) { document.getElementById('grid').innerHTML = '<div class="warn">cole ADMIN_KEY.</div>'; return; }
+// 2026-05-06: cookie auth (sem localStorage).
+async function checkAuth() {
   try {
+    const r = await fetch('/admin/me', { credentials: 'same-origin' });
+    const d = await r.json();
+    if (d.authenticated) {
+      document.getElementById('authStatus').innerHTML = '<span style="color:#3fb950">✓ autenticado</span>';
+      load();
+    }
+  } catch (_) {}
+}
+checkAuth();
+async function load() {
+  try {
+    const fopt = { credentials: 'same-origin' };
     const [today, cronS, mtS] = await Promise.all([
-      fetch('/admin/today?key=' + encodeURIComponent(key)).then(r => r.json()),
-      fetch('/admin/cron-status?key=' + encodeURIComponent(key)).then(r => r.json()),
-      fetch('/admin/mt-status?key=' + encodeURIComponent(key)).then(r => r.json()),
+      fetch('/admin/today', fopt).then(r => r.json()),
+      fetch('/admin/cron-status', fopt).then(r => r.json()),
+      fetch('/admin/mt-status', fopt).then(r => r.json()),
     ]);
     document.getElementById('meta').textContent = 'snapshot ' + new Date().toISOString();
 
@@ -9936,23 +10149,30 @@ h2 { color: #58a6ff; font-size: 14px; margin: 16px 0 6px; }
 <body>
 <h1>📅 Today</h1>
 <div class="sub" id="ts">carregando…</div>
-<input type="text" id="adminKey" placeholder="ADMIN_KEY" />
+<div id="authStatus" style="margin-bottom:12px;font-size:11px;color:#f85149">não autenticado — <a href="/admin/" style="color:#58a6ff">login em /admin/</a></div>
 <div id="content"></div>
 <div class="note"><a href="/admin/" style="color:#d2a8ff">← Admin Console</a> · auto-refresh 2min</div>
 <script>
-const k = localStorage.getItem('adminKey') || '';
-document.getElementById('adminKey').value = k;
-document.getElementById('adminKey').addEventListener('input', e => { localStorage.setItem('adminKey', e.target.value.trim()); load(); });
+// 2026-05-06: cookie auth (sem localStorage).
+async function checkAuth() {
+  try {
+    const r = await fetch('/admin/me', { credentials: 'same-origin' });
+    const d = await r.json();
+    if (d.authenticated) {
+      document.getElementById('authStatus').innerHTML = '<span style="color:#3fb950">✓ autenticado</span>';
+      load();
+    }
+  } catch (_) {}
+}
+checkAuth();
 function fmtBrl(v) {
   if (v == null) return '—';
   const n = Number(v);
   return (n >= 0 ? '+' : '') + n.toFixed(2);
 }
 async function load() {
-  const key = document.getElementById('adminKey').value.trim();
-  if (!key) { document.getElementById('content').innerHTML = '<div class="loss">Cole ADMIN_KEY.</div>'; return; }
   try {
-    const r = await fetch('/admin/today?key=' + encodeURIComponent(key));
+    const r = await fetch('/admin/today', { credentials: 'same-origin' });
     const j = await r.json();
     if (!r.ok || !j?.ok) { document.getElementById('content').innerHTML = '<div class="loss">' + (j?.error || 'HTTP ' + r.status) + '</div>'; return; }
     document.getElementById('ts').textContent = 'snapshot ' + j.ts + ' (' + j.tz + ')';
@@ -10055,7 +10275,7 @@ pre { background: #161b22; padding: 8px; border-radius: 4px; font-size: 11px; ov
 <body>
 <h1>🎯 Sport Detail</h1>
 <div class="sub">Drill-down completo per sport. ROI/CLV 7d & 30d, last tip, blocklist matches.</div>
-<input type="text" id="adminKey" placeholder="ADMIN_KEY" style="width:300px" />
+<div id="authStatus" style="margin-bottom:8px;font-size:11px;color:#f85149">não autenticado — <a href="/admin/" style="color:#58a6ff">login em /admin/</a></div>
 <select id="sport">
   <option value="">— sport —</option>
   <option value="lol">lol</option>
@@ -10070,15 +10290,22 @@ pre { background: #161b22; padding: 8px; border-radius: 4px; font-size: 11px; ov
 <div id="content"></div>
 <div class="note"><a href="/admin/" style="color:#d2a8ff">← Admin Console</a></div>
 <script>
-const k = localStorage.getItem('adminKey') || '';
-document.getElementById('adminKey').value = k;
-document.getElementById('adminKey').addEventListener('input', e => localStorage.setItem('adminKey', e.target.value.trim()));
-async function load() {
-  const key = document.getElementById('adminKey').value.trim();
-  const sport = document.getElementById('sport').value;
-  if (!key || !sport) { document.getElementById('content').innerHTML = '<div class="warn">Preencha key + sport.</div>'; return; }
+// 2026-05-06: cookie auth (sem localStorage).
+async function checkAuth() {
   try {
-    const r = await fetch('/admin/sport-detail?sport=' + encodeURIComponent(sport) + '&key=' + encodeURIComponent(key));
+    const r = await fetch('/admin/me', { credentials: 'same-origin' });
+    const d = await r.json();
+    if (d.authenticated) {
+      document.getElementById('authStatus').innerHTML = '<span style="color:#3fb950">✓ autenticado</span>';
+    }
+  } catch (_) {}
+}
+checkAuth();
+async function load() {
+  const sport = document.getElementById('sport').value;
+  if (!sport) { document.getElementById('content').innerHTML = '<div class="warn">Selecione sport.</div>'; return; }
+  try {
+    const r = await fetch('/admin/sport-detail?sport=' + encodeURIComponent(sport), { credentials: 'same-origin' });
     const j = await r.json();
     if (!r.ok || !j?.ok) { document.getElementById('content').innerHTML = '<div class="crit">' + (j?.error || 'HTTP ' + r.status) + '</div>'; return; }
     const fmtRoi = (r) => {
@@ -10155,17 +10382,23 @@ input[name=key] { background: #0d1117; border: 1px solid #30363d; color: #c9d1d9
 <body>
 <h1>⏰ Cron Status</h1>
 <div class="sub">Heartbeats de polls + crons. Auto-refresh 60s.</div>
-<input type="text" name="key" id="adminKey" placeholder="ADMIN_KEY" />
+<div id="authStatus" style="margin-bottom:12px;font-size:11px;color:#f85149">não autenticado — <a href="/admin/" style="color:#58a6ff">login em /admin/</a></div>
 <div id="summary"></div>
 <div id="content">carregando…</div>
 <div class="note" style="margin-top:24px"><a href="/admin/" style="color:#d2a8ff">← Admin Console</a> · <a href="/health/metrics.html" style="color:#d2a8ff">📊 Health</a></div>
 <script>
-const k = localStorage.getItem('adminKey') || '';
-document.getElementById('adminKey').value = k;
-document.getElementById('adminKey').addEventListener('input', e => {
-  localStorage.setItem('adminKey', e.target.value.trim());
-  load();
-});
+// 2026-05-06: cookie auth (sem localStorage).
+async function checkAuth() {
+  try {
+    const r = await fetch('/admin/me', { credentials: 'same-origin' });
+    const d = await r.json();
+    if (d.authenticated) {
+      document.getElementById('authStatus').innerHTML = '<span style="color:#3fb950">✓ autenticado</span>';
+      load();
+    }
+  } catch (_) {}
+}
+checkAuth();
 function fmtAge(s) {
   if (s == null) return '—';
   if (s < 60) return s + 's';
@@ -10179,13 +10412,8 @@ function fmtMs(ms) {
   return (ms/1000).toFixed(1) + 's';
 }
 async function load() {
-  const key = document.getElementById('adminKey').value.trim();
-  if (!key) {
-    document.getElementById('summary').innerHTML = '<div class="summary warn">Cole ADMIN_KEY acima pra carregar.</div>';
-    return;
-  }
   try {
-    const r = await fetch('/admin/cron-status?key=' + encodeURIComponent(key));
+    const r = await fetch('/admin/cron-status', { credentials: 'same-origin' });
     const j = await r.json();
     if (!r.ok || !j?.ok) {
       document.getElementById('summary').innerHTML = '<div class="summary crit">Erro: ' + (j?.error || 'HTTP ' + r.status) + '</div>';

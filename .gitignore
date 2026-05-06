@@ -7,6 +7,7 @@ tokens.txt
 *.db-shm
 data/
 backups/
+_archive/
 start-bot.bat
 mma betting/
 .fuse_hidden*
@@ -17,3 +18,4 @@ hist*.json
 _h*.json
 _hist*.json
 dash_hist.json
+[object Object]*
