@@ -64,7 +64,18 @@ function httpGetJson(url) {
       let data = '';
       res.on('data', c => data += c);
       res.on('end', () => {
-        if (res.statusCode !== 200) return reject(new Error(`HTTP ${res.statusCode}: ${data.slice(0, 200)}`));
+        if (res.statusCode !== 200) {
+          // 2026-05-06: expor Retry-After header em 429 — caller usa pra sleep
+          // dinâmico em vez de fixed 30s. Free tier PS = ~1000 req/h.
+          const err = new Error(`HTTP ${res.statusCode}: ${data.slice(0, 200)}`);
+          err.statusCode = res.statusCode;
+          const ra = res.headers?.['retry-after'];
+          if (ra) {
+            const raSec = parseInt(ra, 10);
+            err.retryAfterMs = Number.isFinite(raSec) ? raSec * 1000 : 60000;
+          }
+          return reject(err);
+        }
         try { resolve(JSON.parse(data)); } catch (e) { reject(e); }
       });
     }).on('error', reject);
@@ -101,8 +112,11 @@ async function main() {
     try {
       rows = await httpGetJson(url);
     } catch (e) {
-      console.warn(`[sync-ps] page ${page} error: ${e.message}. Retry em 30s...`);
-      await sleep(30000);
+      // 2026-05-06: usa Retry-After do servidor em 429 — antes fixed 30s
+      // perdia janela quando rate-limit pedia 60s+.
+      const sleepMs = e.retryAfterMs || (e.statusCode === 429 ? 60000 : 30000);
+      console.warn(`[sync-ps] page ${page} status=${e.statusCode || '?'} error: ${e.message}. Retry em ${Math.round(sleepMs/1000)}s...`);
+      await sleep(sleepMs);
       continue;
     }
     if (!Array.isArray(rows) || !rows.length) break;

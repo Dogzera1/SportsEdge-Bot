@@ -954,8 +954,13 @@ function upsertTennisPostCompetitionsFromEspnJson(j, slug) {
         const t2 = ath(comps[1]);
         const winner = ath(winnerComp);
         if (!t1 || !t2 || !winner) continue;
-        const compId = comp.id != null ? String(comp.id) : `${comp.date || ''}_${norm(t1)}_${norm(t2)}`;
-        const matchId = `espn_${slug}_${compId}`.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 128);
+        // 2026-05-06: matchId slug-agnostic. Antes ESPN ATP+WTA emitiam mesma
+        // partida (mixed doubles, etc.) com 2 IDs distintos (espn_atp_X vs
+        // espn_wta_X) → 2 rows em match_results, settle pickBest podia escolher
+        // ordem errada. Agora compId estável é shared (comp.id é único cross-slug)
+        // e fallback usa data+nomes normalizados (sem slug).
+        const compId = comp.id != null ? String(comp.id) : `${(comp.date || '').slice(0, 10)}_${norm(t1)}_${norm(t2)}`;
+        const matchId = `espn_tennis_${compId}`.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 128);
         // ESPN tennis: shortDetail vem "Final" (literal) sem placar. Constrói score
         // real a partir de comp.competitors[*].linescores (array de sets) quando
         // disponível. Sem score parseável, MT settler trava em handicapGames/totalGames
@@ -19470,12 +19475,35 @@ setInterval(load, 60000);
   }
 
   if (p === '/reset-tips' && req.method === 'POST') {
+    // 2026-05-06: confirm protocol pra evitar wipe acidental.
+    // Antes: POST /reset-tips?sport=lol zerava tips + bankroll sem confirmação.
+    // Em ADMIN_OPEN dev (ADMIN_KEY=''/ADMIN_KEY_OPEN=true) era catastrófico.
+    // Agora: archive (não delete) + exige confirm token explícito.
     const sport = parsed.query.sport || 'esports';
-    const count = db.prepare("SELECT COUNT(*) as c FROM tips WHERE sport = ?").get(sport).c;
-    db.prepare("DELETE FROM tips WHERE sport = ?").run(sport);
-    db.prepare("UPDATE bankroll SET current_banca = initial_banca, updated_at = datetime('now') WHERE sport = ?").run(sport);
-    log('INFO', 'ADMIN', `Tips resetadas: ${count} registros removidos (sport=${sport})`);
-    sendJson(res, { ok: true, deleted: count });
+    const ALLOWED = new Set(['esports', 'lol', 'dota2', 'cs', 'cs2', 'valorant', 'tennis', 'football', 'mma', 'darts', 'snooker', 'tabletennis', 'basket']);
+    if (!ALLOWED.has(sport)) { badRequest(res, `sport inválido: ${sport}`); return; }
+    const count = db.prepare("SELECT COUNT(*) as c FROM tips WHERE sport = ? AND (archived IS NULL OR archived = 0)").get(sport).c;
+    const expectedConfirm = `YES_RESET_${sport.toUpperCase()}_${count}`;
+    let body = ''; req.on('data', d => body += d);
+    req.on('end', () => {
+      try {
+        const payload = safeParse(body, {});
+        const confirm = String(payload.confirm || parsed.query.confirm || '');
+        if (confirm !== expectedConfirm) {
+          sendJson(res, {
+            ok: false, error: 'confirm token mismatch',
+            expected: expectedConfirm,
+            tip: `Pass {"confirm":"${expectedConfirm}"} ou ?confirm=${expectedConfirm}`,
+          }, 400);
+          return;
+        }
+        // Archive em vez de DELETE — recover possível via UPDATE archived=0.
+        const r = db.prepare("UPDATE tips SET archived=1 WHERE sport = ? AND (archived IS NULL OR archived = 0)").run(sport);
+        db.prepare("UPDATE bankroll SET current_banca = initial_banca, updated_at = datetime('now') WHERE sport = ?").run(sport);
+        log('INFO', 'ADMIN', `reset-tips: ${r.changes} archivadas (sport=${sport}, confirm=${expectedConfirm})`);
+        sendJson(res, { ok: true, archived: r.changes, sport });
+      } catch (e) { sendJson(res, { error: e.message }, 500); }
+    });
     return;
   }
 
@@ -24122,8 +24150,23 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
                   // "RNG" vs "Royal Never Give Up" ou "Djokovic" vs "Novak Djokovic".
                   let isT1 = null;
                   if (t.sport === 'tennis') {
-                    if (tennisSinglePlayerNameMatch(t.tipParticipant || '', t.p1 || '')) isT1 = true;
-                    else if (tennisSinglePlayerNameMatch(t.tipParticipant || '', t.p2 || '')) isT1 = false;
+                    const m1 = tennisSinglePlayerNameMatch(t.tipParticipant || '', t.p1 || '');
+                    const m2 = tennisSinglePlayerNameMatch(t.tipParticipant || '', t.p2 || '');
+                    if (m1 && !m2) isT1 = true;
+                    else if (m2 && !m1) isT1 = false;
+                    // 2026-05-06: ambos m1+m2 pode acontecer com sobrenomes idênticos
+                    // (Cerundolo F. vs J.M. Cerundolo). Tentar disambiguar via initial;
+                    // se ainda ambíguo, abortar grava CLV (evita closing odd invertida).
+                    else if (m1 && m2) {
+                      const { tennisAmbiguousSurnameMatch } = require('./lib/tennis-match');
+                      const ambig = tennisAmbiguousSurnameMatch(t.p1 || '', t.p2 || '');
+                      if (ambig) {
+                        log('DEBUG', 'CLV-RETRO', `tennis ${t.tipParticipant}: ambiguous surname p1=${t.p1} p2=${t.p2} — skip CLV`);
+                        continue; // próximo tip do for; NÃO return (mataria loop inteiro)
+                      }
+                      // não ambíguo: fica com primeiro match (defensivo)
+                      isT1 = true;
+                    }
                   } else {
                     const aliases = (t.sport === 'esports' || t.sport === 'lol') ? LOL_ALIASES : null;
                     const r1 = nameMatches(t.tipParticipant || '', t.p1 || '', { aliases });

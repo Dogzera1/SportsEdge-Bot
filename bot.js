@@ -695,9 +695,27 @@ const marketTipSent = new Map(); // key: match|market|line|side → ts (dedup 24
 // Sweep a cada 1h: remove entries cuja ts é mais velha que TTL.
 const ANALYZED_TTL_MS = parseInt(process.env.ANALYZED_TTL_MS || String(72 * 3600 * 1000), 10); // 72h
 const MARKET_TIP_SENT_TTL_MS = parseInt(process.env.MARKET_TIP_SENT_TTL_MS || String(48 * 3600 * 1000), 10); // 48h
+// 2026-05-06: hard cap por Map. Em sport com 1000+ matches/dia, sweep só roda
+// 1×/h — entre sweeps Map cresce sem teto (e.g. analyzedFootball pode passar
+// 10k entries antes do próximo sweep). Cap evita memory pressure.
+const ANALYZED_MAP_MAX = parseInt(process.env.ANALYZED_MAP_MAX || '5000', 10);
 function _sweepTsMap(map, ttlMs, now) {
   if (!map || !map.size) return 0;
   let removed = 0;
+  // Hard cap: deleta os mais antigos quando size > MAX × 1.2 (10% over).
+  // Evita sweep agressivo a cada call mas mantém limite firm.
+  if (map.size > ANALYZED_MAP_MAX * 1.2) {
+    const entries = [...map.entries()].sort((a, b) => {
+      const tsA = (a[1] && Number(a[1].ts)) || (typeof a[1] === 'number' ? a[1] : 0);
+      const tsB = (b[1] && Number(b[1].ts)) || (typeof b[1] === 'number' ? b[1] : 0);
+      return tsA - tsB;
+    });
+    const toRemove = map.size - ANALYZED_MAP_MAX;
+    for (let i = 0; i < toRemove; i++) {
+      map.delete(entries[i][0]);
+      removed++;
+    }
+  }
   for (const [key, value] of map.entries()) {
     const ts = (value && Number(value.ts)) || (typeof value === 'number' ? value : 0);
     if (ts > 0 && (now - ts) > ttlMs) { map.delete(key); removed++; }
