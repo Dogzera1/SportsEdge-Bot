@@ -18,8 +18,13 @@ const { SPORTS, getSportById, getSportByToken, getTokenToSportMap } = require('.
 const { log, calcKelly, calcKellyFraction, calcKellyWithP, norm, fmtDate, fmtDateTime, fmtDuration, safeParse, cachedHttpGet, markPollHeartbeat, getPollHeartbeats, markCronHeartbeat, getCronHeartbeats, dumpCronHeartbeats, loadCronHeartbeats } = require('./lib/utils');
 const { adjustStakeUnits } = require('./lib/risk-manager');
 const { esportsPreFilter } = require('./lib/ml');
-const { formatLineShopDM, computeLineShop } = require('./lib/line-shopping');
+const { formatLineShopDM, computeLineShop, checkBookmakerSpread } = require('./lib/line-shopping');
 const { getSportUnitValue } = require('./lib/sport-unit');
+// 2026-05-06: hoist requires usados em hot paths pra module scope.
+// Antes ~9 sites em bot.js faziam `require('./lib/gates-runtime-state')` per call,
+// custo cumulativo em poll cycles (200 matches × N sports). Module cache lookup
+// é ~1-3μs cada — eliminar overhead.
+const _gatesRuntimeState = require('./lib/gates-runtime-state');
 
 // Helper: formata stake em "Xu (R$Y.YY)" pegando unit tier atual do sport.
 // Tier vem do DB (bankroll do sport). Se DB offline, usa R$1 base.
@@ -2016,8 +2021,7 @@ async function applyGlobalRisk(sport, desiredUnits, leagueSlug) {
   else {
     // DB auto-tune lookup (gates_runtime_state) — só consulta se env não setado
     try {
-      const { getGateValue, GATE_KEYS } = require('./lib/gates-runtime-state');
-      const dbCap = getGateValue(sport, GATE_KEYS.MAX_STAKE_UNITS);
+      const dbCap = _gatesRuntimeState.getGateValue(sport, _gatesRuntimeState.GATE_KEYS.MAX_STAKE_UNITS);
       if (dbCap != null && dbCap > 0) { cap = dbCap; capSource = 'auto'; }
     } catch (_) {}
     if (cap == null && Number.isFinite(globalCap) && globalCap > 0) { cap = globalCap; capSource = 'env_global'; }
@@ -2581,7 +2585,7 @@ async function runAutoAnalysis() {
           // apostar. formatLineShopDM já mostra best book no DM.
           if (process.env.LINE_SHOP_EV_RECALC !== 'false') {
             try {
-              const { checkBookmakerSpread } = require('./lib/line-shopping');
+              // checkBookmakerSpread já em module scope (line 21)
               const _pickLs = norm(tipTeam).includes(norm(match.team1)) || norm(match.team1).includes(norm(tipTeam)) ? 't1' : 't2';
               const _ls = computeLineShop(result.o, _pickLs);
               const _pinOdd = parseFloat(tipOdd);
@@ -3035,7 +3039,7 @@ async function runAutoAnalysis() {
             // Line shopping EV recalc (opt-in LINE_SHOP_EV_RECALC, default true).
             if (process.env.LINE_SHOP_EV_RECALC !== 'false') {
               try {
-                const { checkBookmakerSpread } = require('./lib/line-shopping');
+                // checkBookmakerSpread já em module scope (line 21)
                 const _pickLs = norm(tipTeam).includes(norm(match.team1)) || norm(match.team1).includes(norm(tipTeam)) ? 't1' : 't2';
                 const _ls = computeLineShop(result.o, _pickLs);
                 const _pinOdd = parseFloat(tipOdd);
@@ -4304,8 +4308,7 @@ try {
 
 // Gates runtime state (auto-tune persistente) — pre-match EV bonus + max stake cap
 try {
-  const _grs = require('./lib/gates-runtime-state');
-  const r = _grs.loadFromDb(db);
+  const r = _gatesRuntimeState.loadFromDb(db);
   if (r && !r.error) {
     log('INFO', 'GATES-AUTOTUNE', `Loaded DB: ${r.n} entries`);
   } else if (r?.error) {
@@ -4428,14 +4431,13 @@ function getKellyFraction(sport, conf, market = null) {
   // 2026-05-06: cascade per-market → sport-wide. kelly_mult|MARKET ganha
   // precedência sobre kelly_mult agregado do sport.
   try {
-    const { getGateValue } = require('./lib/gates-runtime-state');
     if (mktNorm) {
-      const marketMult = getGateValue(sp, `kelly_mult|${mktNorm}`);
+      const marketMult = _gatesRuntimeState.getGateValue(sp, `kelly_mult|${mktNorm}`);
       if (Number.isFinite(marketMult) && marketMult >= 0.2 && marketMult <= 1.2) {
         return _KELLY_DEFAULTS[key] * marketMult;
       }
     }
-    const autoMult = getGateValue(sp, 'kelly_mult');
+    const autoMult = _gatesRuntimeState.getGateValue(sp, 'kelly_mult');
     if (Number.isFinite(autoMult) && autoMult >= 0.2 && autoMult <= 1.2) {
       return _KELLY_DEFAULTS[key] * autoMult;
     }
@@ -6140,8 +6142,7 @@ const _PATH_GATE_KEY = { hybrid: 'path_hybrid_disabled', override: 'path_overrid
 
 function _hydratePathDisableFromGates() {
   try {
-    const grs = require('./lib/gates-runtime-state');
-    const all = grs.getAll();
+    const all = _gatesRuntimeState.getAll();
     for (const [k, meta] of all.entries()) {
       const [sport, gateKey] = k.split('|', 2);
       if (gateKey !== _PATH_GATE_KEY.hybrid && gateKey !== _PATH_GATE_KEY.override) continue;
@@ -6165,13 +6166,12 @@ function _hydratePathDisableFromGates() {
 
 function _persistPathDisable(sport, path, disabled, reason) {
   try {
-    const grs = require('./lib/gates-runtime-state');
     const gateKey = _PATH_GATE_KEY[path];
     if (!gateKey) return;
     if (disabled) {
-      grs.setAuto(db, sport, gateKey, 1, { reason: reason || null });
+      _gatesRuntimeState.setAuto(db, sport, gateKey, 1, { reason: reason || null });
     } else {
-      grs.removeAuto(db, sport, gateKey);
+      _gatesRuntimeState.removeAuto(db, sport, gateKey);
     }
   } catch (e) { log('WARN', 'PATH-GUARD', `persist ${sport}/${path}: ${e.message}`); }
 }
@@ -6688,15 +6688,13 @@ function _resolveMtOddBounds(sport, opts = {}) {
   // Consulta DB auto-guard se env não setado (e não desativado).
   if (minOdd == null && !minDisabled) {
     try {
-      const grs = require('./lib/gates-runtime-state');
-      const dbVal = grs.getGateValue(sport, grs.GATE_KEYS.MT_SCAN_MIN_ODD);
+      const dbVal = _gatesRuntimeState.getGateValue(sport, _gatesRuntimeState.GATE_KEYS.MT_SCAN_MIN_ODD);
       if (dbVal != null && dbVal > 1) minOdd = dbVal;
     } catch (_) {}
   }
   if (maxOdd == null && !maxDisabled) {
     try {
-      const grs = require('./lib/gates-runtime-state');
-      const dbVal = grs.getGateValue(sport, grs.GATE_KEYS.MT_SCAN_MAX_ODD);
+      const dbVal = _gatesRuntimeState.getGateValue(sport, _gatesRuntimeState.GATE_KEYS.MT_SCAN_MAX_ODD);
       if (dbVal != null && dbVal > 1) maxOdd = dbVal;
     } catch (_) {}
   }
@@ -6762,7 +6760,7 @@ async function runMtBucketGuardCycle() {
   const clvCutoff = parseFloat(process.env.MT_BUCKET_GUARD_CLV_CUTOFF || '-2');
   const daysWin = parseInt(process.env.MT_BUCKET_GUARD_DAYS || '30', 10);
   try {
-    const grs = require('./lib/gates-runtime-state');
+    const grs = _gatesRuntimeState;
     // Verifica se a coluna existe (ambiente legado pode não ter rodado migration 054)
     let hasShadow = false;
     try {
@@ -6913,7 +6911,7 @@ async function runGatesAutoTuneCycle() {
   const stakeRoiCutoff = parseFloat(process.env.GATES_AUTOTUNE_STAKE_ROI_CUTOFF || '-25');
   const maxBonus = parseFloat(process.env.GATES_AUTOTUNE_MAX_BONUS || '8');
   try {
-    const grs = require('./lib/gates-runtime-state');
+    const grs = _gatesRuntimeState;
     const rows = db.prepare(`
       SELECT sport, is_live, odds, stake, result,
              COALESCE(stake_reais, 0) AS staked,
@@ -17882,7 +17880,7 @@ Máximo 200 palavras.`;
             : null;
           if (_pickKey && _lsOddsObj?._allOdds) {
             try {
-              const { checkBookmakerSpread } = require('./lib/line-shopping');
+              // checkBookmakerSpread já em module scope (line 21)
               const _ls = computeLineShop(_lsOddsObj, _pickKey);
               if (_ls && Number.isFinite(tipOdd) && _ls.bestOdd > tipOdd) {
                 const _maxRatio = parseFloat(process.env.LINE_SHOP_MAX_RATIO || '1.15');
