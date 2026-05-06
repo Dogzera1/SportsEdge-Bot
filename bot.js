@@ -21,10 +21,12 @@ const { esportsPreFilter } = require('./lib/ml');
 const { formatLineShopDM, computeLineShop, checkBookmakerSpread } = require('./lib/line-shopping');
 const { getSportUnitValue } = require('./lib/sport-unit');
 // 2026-05-06: hoist requires usados em hot paths pra module scope.
-// Antes ~9 sites em bot.js faziam `require('./lib/gates-runtime-state')` per call,
-// custo cumulativo em poll cycles (200 matches × N sports). Module cache lookup
-// é ~1-3μs cada — eliminar overhead.
+// Antes vários sites em bot.js faziam `require(...)` per call, custo cumulativo
+// em poll cycles (200 matches × N sports). Module cache lookup é ~1-3μs cada.
 const _gatesRuntimeState = require('./lib/gates-runtime-state');
+const _mtAutoPromote = require('./lib/mt-auto-promote');
+const _leagueTierLib = require('./lib/league-tier');
+const _mtTierClassifier = require('./lib/mt-tier-classifier');
 
 // Helper: formata stake em "Xu (R$Y.YY)" pegando unit tier atual do sport.
 // Tier vem do DB (bankroll do sport). Se DB offline, usa R$1 base.
@@ -802,7 +804,8 @@ function sweepAnalyzedMaps() {
 }
 // Inicia sweep periódico — só quando log() já está disponível (lazy evaluation
 // do setInterval). Roda 1x por hora.
-setInterval(() => { try { sweepAnalyzedMaps(); } catch (_) {} }, 60 * 60 * 1000);
+// .unref() = não impede process.exit (sweep é janitorial, não crítico).
+setInterval(() => { try { sweepAnalyzedMaps(); } catch (_) {} }, 60 * 60 * 1000).unref();
 // Bootstrap: roda 1x 30s pós-boot pra popular gauges (db_size_mb, bot_uptime_s)
 // imediatamente em vez de esperar 1h pro primeiro tick.
 setTimeout(() => { try { sweepAnalyzedMaps(); } catch (_) {} }, 30 * 1000);
@@ -860,8 +863,9 @@ function _bridgeBotMetricsToServer() {
     req.write(payload); req.end();
   } catch (_) {}
 }
-setInterval(_bridgeBotMetricsToServer, 60 * 1000);
-setTimeout(_bridgeBotMetricsToServer, 30 * 1000); // primeiro flush 30s pós-boot
+// .unref() em metrics bridge — não impede process.exit (best-effort flush).
+setInterval(_bridgeBotMetricsToServer, 60 * 1000).unref();
+setTimeout(_bridgeBotMetricsToServer, 30 * 1000).unref?.(); // primeiro flush 30s pós-boot
 
 // Helper genérico pra wrappar cron com heartbeat automático.
 // Usa: setInterval(_wrapCron('name', () => doStuff()), interval).
@@ -5084,8 +5088,7 @@ function describeMtGateSkip(sport, market, side, league, opts = {}) {
     if (_marketTipsDisabledRuntime.has(`${sport}|${market}`)) return `mt_disabled — leak guard runtime[${sport}|${market}]`;
     if (league) {
       try {
-        const { isMtLeagueBlockedForMarket } = require('./lib/mt-auto-promote');
-        if (isMtLeagueBlockedForMarket(sport, market, league)) {
+        if (_mtAutoPromote.isMtLeagueBlockedForMarket(sport, market, league)) {
           return `mt_disabled — auto-promote league block [${sport}|${market}|${league}]`;
         }
       } catch (_) {}
@@ -5123,8 +5126,7 @@ function isMarketTipsEnabled(sport, market = null, side = null, league = null) {
     if (side && league && _marketTipsDisabledRuntime.has(`${sport}|${market}|${side}|${league}`)) return false;
     if (side && league) {
       try {
-        const { getLeagueTier } = require('./lib/league-tier');
-        const tierKey = `tier${getLeagueTier(sport, league)}`;
+        const tierKey = `tier${_leagueTierLib.getLeagueTier(sport, league)}`;
         if (_marketTipsDisabledRuntime.has(`${sport}|${market}|${side}|${tierKey}`)) return false;
       } catch (_) {}
     }
@@ -5135,8 +5137,7 @@ function isMarketTipsEnabled(sport, market = null, side = null, league = null) {
     // (segue logando), mas evita que tip vire real (DM + tabela tips).
     if (league) {
       try {
-        const { isMtLeagueBlockedForMarket } = require('./lib/mt-auto-promote');
-        if (isMtLeagueBlockedForMarket(sport, market, league)) return false;
+        if (_mtAutoPromote.isMtLeagueBlockedForMarket(sport, market, league)) return false;
       } catch (_) {}
     }
   }
@@ -5235,8 +5236,7 @@ async function recordMarketTipAsRegular({ sport, match, tip, stake, isLive }) {
     // Per-sport defaults em lib/mt-tier-classifier.js EV_MAX_DEFAULTS.
     // Override: <SPORT>_MT_EV_MAX=N ou <SPORT>_MT_EV_MAX_DISABLED=true
     try {
-      const { getEvMaxCap } = require('./lib/mt-tier-classifier');
-      const evMax = getEvMaxCap(sport);
+      const evMax = _mtTierClassifier.getEvMaxCap(sport);
       const tipEv = parseFloat(tip.ev);
       if (Number.isFinite(tipEv) && Number.isFinite(evMax) && tipEv > evMax) {
         log('INFO', 'MT-EV-CAP',
@@ -5389,9 +5389,8 @@ async function recordMarketTipAsRegular({ sport, match, tip, stake, isLive }) {
     //   - football|tier4_lower -30%
     // Aplicado APÓS market mult pra compor multipliers. Floor 0.1u.
     try {
-      const { classifyTier, getTierStakeMult } = require('./lib/mt-tier-classifier');
-      const tier = classifyTier(sport, match.league);
-      const tierMult = getTierStakeMult(sport, tier);
+      const tier = _mtTierClassifier.classifyTier(sport, match.league);
+      const tierMult = _mtTierClassifier.getTierStakeMult(sport, tier);
       if (Number.isFinite(tierMult) && tierMult !== 1.0) {
         const stakeNumT = typeof stakeAdjusted === 'number' ? stakeAdjusted
           : parseFloat(String(stakeAdjusted || '1').replace('u','')) || 1;
@@ -5595,11 +5594,8 @@ async function runMarketTipsRoiGuardSided() {
   const disabled = [], restored = [];
   const ts = new Date().toISOString();
 
-  // Resolver tier helper (sport-aware)
-  const { getLeagueTier } = (() => {
-    try { return require('./lib/league-tier'); }
-    catch (_) { return { getLeagueTier: () => 3 }; }
-  })();
+  // Resolver tier helper (sport-aware) — usa _leagueTierLib hoisted
+  const { getLeagueTier } = _leagueTierLib;
 
   // Build segment list cascading: side, tier (agregado), league
   const segments = [...rowsSide.map(r => ({ ...r, kind: 'side', tier: null }))];
