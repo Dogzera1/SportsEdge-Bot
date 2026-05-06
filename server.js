@@ -18435,8 +18435,9 @@ setInterval(load, 60000);
         // Kelly fraction por confidence (alinhado com bot.js): ALTA=¼, MÉDIA=⅙, BAIXA=1/10
         const confNum = Number.isFinite(+pred.confidence) ? +pred.confidence : 0.5;
         const kellyFrac = confNum >= 0.70 ? 0.25 : confNum >= 0.50 ? 0.167 : 0.10;
+        const _confKeyKelly = confNum >= 0.70 ? 'ALTA' : confNum >= 0.50 ? 'MEDIA' : 'BAIXA';
         // Stake só se EV passar threshold; senão força "0u" (sem value)
-        const newStake = newEV >= EV_THRESHOLD ? calcKellyWithP(newPpick, odds, kellyFrac) : '0u';
+        const newStake = newEV >= EV_THRESHOLD ? calcKellyWithP(newPpick, odds, kellyFrac, { confKey: _confKeyKelly }) : '0u';
 
         items.push({
           id: t.id, sport: t.sport, pick: t.tip_participant, match: `${t.participant1} vs ${t.participant2}`,
@@ -26285,8 +26286,9 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
         const ev2 = (mlResult.modelP2 * o2 - 1) * 100;
         const kFrac = parseFloat(payload.kellyFrac);
         const kellyFrac = Number.isFinite(kFrac) && kFrac > 0 && kFrac <= 1 ? kFrac : (1 / 6);
-        const stake1 = calcKellyWithP(mlResult.modelP1, o1, kellyFrac);
-        const stake2 = calcKellyWithP(mlResult.modelP2, o2, kellyFrac);
+        const _confKey = kellyFrac >= 0.25 ? 'ALTA' : kellyFrac >= 0.15 ? 'MEDIA' : 'BAIXA';
+        const stake1 = calcKellyWithP(mlResult.modelP1, o1, kellyFrac, { confKey: _confKey });
+        const stake2 = calcKellyWithP(mlResult.modelP2, o2, kellyFrac, { confKey: _confKey });
         let suggestion = null;
         if (ev1 >= ev2 && ev1 > 0) suggestion = { side: 't1', team: team1, odd: o1, evPercent: Math.round(ev1 * 10) / 10, stake: stake1 };
         else if (ev2 > ev1 && ev2 > 0) suggestion = { side: 't2', team: team2, odd: o2, evPercent: Math.round(ev2 * 10) / 10, stake: stake2 };

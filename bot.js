@@ -2720,7 +2720,7 @@ async function runAutoAnalysis() {
           const isT1bet = norm(tipTeam).includes(norm(match.team1)) || norm(match.team1).includes(norm(tipTeam));
           const modelPForKelly = (result.modelP1 > 0) ? (isT1bet ? result.modelP1 : result.modelP2) : null;
           const tipStake = modelPForKelly
-            ? calcKellyWithP(modelPForKelly, tipOdd, kellyFraction, { sport: 'lol' })
+            ? calcKellyWithP(modelPForKelly, tipOdd, kellyFraction, { sport: 'lol', confKey: tipConf })
             : calcKellyFraction(tipEV, tipOdd, kellyFraction, { sport: 'lol' });
           // Kelly negativo → não apostar
           if (tipStake === '0u') {
@@ -3170,7 +3170,7 @@ async function runAutoAnalysis() {
             const isT1bet = norm(tipTeam).includes(norm(match.team1)) || norm(match.team1).includes(norm(tipTeam));
             const modelPForKelly = (result.modelP1 > 0) ? (isT1bet ? result.modelP1 : result.modelP2) : null;
             const tipStake = modelPForKelly
-              ? calcKellyWithP(modelPForKelly, tipOdd, kellyFraction, { sport: 'lol' })
+              ? calcKellyWithP(modelPForKelly, tipOdd, kellyFraction, { sport: 'lol', confKey: tipConf })
               : calcKellyFraction(tipEV, tipOdd, kellyFraction, { sport: 'lol' });
             if (tipStake === '0u') {
               if (_clvAdj.mult === 0) {
@@ -5393,13 +5393,17 @@ async function recordMarketTipAsRegular({ sport, match, tip, stake, isLive }) {
     //   - tennis|tier4_challenger -40% (sangra -25-80% leaks)
     //   - football|tier4_lower -30%
     // Aplicado APÓS market mult pra compor multipliers. Floor 0.1u.
+    // 2026-05-06 FIX: snap em 0.05u step (era 0.01) — produzia stakes feios em
+    // DM (0.07u, 0.13u). Ainda permite 0.1u floor pra tier3 conservador, mas
+    // valores limpos (0.10/0.15/0.20/0.25/0.30/...).
     try {
       const tier = _mtTierClassifier.classifyTier(sport, match.league);
       const tierMult = _mtTierClassifier.getTierStakeMult(sport, tier);
       if (Number.isFinite(tierMult) && tierMult !== 1.0) {
         const stakeNumT = typeof stakeAdjusted === 'number' ? stakeAdjusted
           : parseFloat(String(stakeAdjusted || '1').replace('u','')) || 1;
-        const stakeNewT = Math.round(stakeNumT * tierMult * 100) / 100;
+        // Snap em 0.05u step.
+        const stakeNewT = Math.round(stakeNumT * tierMult * 20) / 20;
         log('INFO', 'MT-TIER-MULT', `${sport}/${match.league}/${tier}: ${stakeNumT}u × ${tierMult} = ${stakeNewT}u`);
         stakeAdjusted = stakeNewT;
         if (stakeAdjusted < 0.1) {
@@ -8550,7 +8554,7 @@ async function autoAnalyzeMatch(token, match) {
       const pickP = direction === 't2' ? mlResult.modelP2 : mlResult.modelP1;
       const evPct = (pickP && pickOdd) ? ((pickP * pickOdd - 1) * 100) : 0;
       if (pickOdd >= FALLBACK_MIN_ODDS && pickOdd <= FALLBACK_MAX_ODDS && evPct >= 5 && mlResult.score >= 5) {
-        const stake = calcKellyWithP(pickP, pickOdd, 0.15, { sport: 'lol' });
+        const stake = calcKellyWithP(pickP, pickOdd, 0.15, { sport: 'lol', confKey: 'MEDIA' });
         log('INFO', 'AUTO', `AI_DISABLED: fallback modelo ${pickTeam} @ ${pickOdd} EV=${evPct.toFixed(1)}% edge=${mlResult.score.toFixed(1)}pp`);
         return {
           ok: true,
@@ -8605,7 +8609,7 @@ async function autoAnalyzeMatch(token, match) {
       const pickP = direction === 't2' ? mlResult.modelP2 : mlResult.modelP1;
       const evPct = (pickP && pickOdd) ? ((pickP * pickOdd - 1) * 100) : 0;
       if (pickOdd >= FALLBACK_MIN_ODDS && pickOdd <= FALLBACK_MAX_ODDS && evPct >= 5 && mlResult.score >= 5) {
-        const stake = calcKellyWithP(pickP, pickOdd, 0.15, { sport: 'lol' });
+        const stake = calcKellyWithP(pickP, pickOdd, 0.15, { sport: 'lol', confKey: 'MEDIA' });
         log('WARN', 'AUTO', `IA em backoff; fallback modelo: ${pickTeam} @ ${pickOdd} EV=${evPct.toFixed(1)}% edge=${mlResult.score.toFixed(1)}pp`);
         return {
           ok: true,
@@ -8694,7 +8698,7 @@ async function autoAnalyzeMatch(token, match) {
       const pickP = direction === 't2' ? mlResult.modelP2 : mlResult.modelP1;
       const evPct = (pickP && pickOdd) ? ((pickP * pickOdd - 1) * 100) : 0;
       if (pickOdd >= FALLBACK_MIN_ODDS && pickOdd <= FALLBACK_MAX_ODDS && evPct >= 5 && mlResult.score >= 5) {
-        const stake = calcKellyWithP(pickP, pickOdd, 0.15, { sport: 'lol' }); // ~1/6 Kelly
+        const stake = calcKellyWithP(pickP, pickOdd, 0.15, { sport: 'lol', confKey: 'MEDIA' });
         const errShort = resp?.error ? String(resp.error).slice(0, 140) : '';
         const st = resp?.__status ? String(resp.__status) : '';
         log('WARN', 'AUTO', `IA sem resposta; fallback modelo: ${pickTeam} @ ${pickOdd} EV=${evPct.toFixed(1)}% edge=${mlResult.score.toFixed(1)}pp${st ? ` | status=${st}` : ''}${errShort ? ` | err=${errShort}` : ''}`);
@@ -14531,7 +14535,7 @@ Máximo 200 palavras.`;
       } catch (_) {}
       const modelPForKelly = mlResult.modelP1 > 0 ? (isT1bet ? mlResult.modelP1 : mlResult.modelP2) : null;
       const tipStake = modelPForKelly
-        ? calcKellyWithP(modelPForKelly, tipOdd, kellyFraction, { sport: 'dota2' })
+        ? calcKellyWithP(modelPForKelly, tipOdd, kellyFraction, { sport: 'dota2', confKey: tipConf })
         : calcKellyFraction(tipEV, tipOdd, kellyFraction, { sport: 'dota2' });
       if (tipStake === '0u') { log('INFO', 'AUTO-DOTA', `Kelly negativo: ${tipTeam} @ ${tipOdd}`); await _sleep(2000); continue; }
 
@@ -14734,7 +14738,7 @@ async function analyzeDotaMapTip(match, token) {
   }
 
   // Stake Kelly fracionado conservador (1/8 — igual demais tips sem IA)
-  const stake = calcKellyWithP(pickP, pickOdd, 1/8, { sport: 'dota2' });
+  const stake = calcKellyWithP(pickP, pickOdd, 1/8, { sport: 'dota2', confKey: 'BAIXA' });
   if (stake === '0u') { analyzedDota.set(mapKey, { ts: now, tipSent: false, reason: 'zero_stake' }); return; }
   const desiredU = parseFloat(stake) || 0;
   const riskAdj = await applyGlobalRisk('dota2', desiredU, match.league);
@@ -15434,7 +15438,7 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
         // Kelly fracionado: ALTA → ¼ Kelly (max 4u) | MÉDIA → ⅙ Kelly (max 3u)
         const kellyFractionMma = getKellyFraction('mma', _confEffMma);
         const kellyStakeMma = modelPPickMma > 0
-          ? calcKellyWithP(modelPPickMma, tipOdd, kellyFractionMma, { sport: 'mma' })
+          ? calcKellyWithP(modelPPickMma, tipOdd, kellyFractionMma, { sport: 'mma', confKey: _confEffMma })
           : calcKellyFraction(tipEV, tipOdd, kellyFractionMma, { sport: 'mma' });
         if (kellyStakeMma === '0u') {
           log('INFO', 'AUTO-MMA', `Kelly negativo ${tipTeam} @ ${tipOdd} — tip abortada`);
@@ -18415,7 +18419,7 @@ async function pollTableTennis(runOnce = false) {
         }
 
         // Kelly 1/8 conservador (sem IA → fração menor)
-        const stake = calcKellyWithP(pickP, pickOdd, 1/8, { sport: 'tabletennis' });
+        const stake = calcKellyWithP(pickP, pickOdd, 1/8, { sport: 'tabletennis', confKey: 'BAIXA' });
         if (stake === '0u') { analyzedTT.set(key, { ts: now, tipSent: false }); continue; }
         const desiredU = parseFloat(stake) || 0;
         const riskAdj = await applyGlobalRisk('tabletennis', desiredU, match.league);
@@ -19081,7 +19085,7 @@ Máximo 150 palavras.`;
           log('INFO', 'CLV-KELLY', `Ajuste cs [${match.league}]: mult=${_clvAdjCs.mult} reason=${_clvAdjCs.reason} (CLV ${_clvAdjCs.avgClv}% n=${_clvAdjCs.n})`);
           csKellyFrac = csKellyFrac * _clvAdjCs.mult;
         }
-        const stake = calcKellyWithP(pickP, pickOdd, csKellyFrac, { sport: 'cs' });
+        const stake = calcKellyWithP(pickP, pickOdd, csKellyFrac, { sport: 'cs', confKey: aiConf || 'MEDIA' });
         if (stake === '0u') {
           if (_clvAdjCs.mult === 0) {
             log('WARN', 'CLV-KELLY', `Shadow cs por CLV severo: ${match.team1} vs ${match.team2} [${match.league}]`);
@@ -19602,7 +19606,7 @@ async function pollValorant(runOnce = false) {
           log('INFO', 'CLV-KELLY', `Ajuste valorant [${match.league}]: mult=${_clvAdjVal.mult} reason=${_clvAdjVal.reason} (CLV ${_clvAdjVal.avgClv}% n=${_clvAdjVal.n})`);
           _valKellyFrac = _valKellyFrac * _clvAdjVal.mult;
         }
-        const stake = calcKellyWithP(pickP, pickOdd, _valKellyFrac, { sport: 'valorant' });
+        const stake = calcKellyWithP(pickP, pickOdd, _valKellyFrac, { sport: 'valorant', confKey: 'MEDIA' });
         if (stake === '0u') {
           if (_clvAdjVal.mult === 0) {
             log('WARN', 'CLV-KELLY', `Shadow valorant por CLV severo: ${match.team1} vs ${match.team2} [${match.league}]`);
@@ -19911,7 +19915,7 @@ async function runAutoDarts() {
             log('INFO', 'CLV-KELLY', `Ajuste darts [${match.league}]: mult=${_clvAdjDarts.mult} reason=${_clvAdjDarts.reason} (CLV ${_clvAdjDarts.avgClv}% n=${_clvAdjDarts.n})`);
             _dartsKellyFrac = _dartsKellyFrac * _clvAdjDarts.mult;
           }
-          const stake = calcKellyWithP(pickP, pickOdd, _dartsKellyFrac, { sport: 'darts' });
+          const stake = calcKellyWithP(pickP, pickOdd, _dartsKellyFrac, { sport: 'darts', confKey: 'BAIXA' });
           if (stake === '0u') {
             if (_clvAdjDarts.mult === 0) {
               log('WARN', 'CLV-KELLY', `Shadow darts por CLV severo: ${match.team1} vs ${match.team2} [${match.league}]`);
@@ -20125,7 +20129,7 @@ async function runAutoSnooker() {
             _aiConfSnooker = aiR.conf;
           }
 
-          const stake = calcKellyWithP(pickP, pickOdd, 1/8, { sport: 'snooker' });
+          const stake = calcKellyWithP(pickP, pickOdd, 1/8, { sport: 'snooker', confKey: 'BAIXA' });
           if (stake === '0u') { analyzedSnooker.set(key, { ts: now, tipSent: false }); continue; }
           const desiredU = parseFloat(stake) || 0;
           const riskAdj = await applyGlobalRisk('snooker', desiredU, match.league);
@@ -20422,7 +20426,7 @@ async function runAutoBasket() {
         }
       } catch (_) {}
 
-      const stake = calcKellyWithP(pickP, pickOdd, 1/8, { sport: 'basket' });
+      const stake = calcKellyWithP(pickP, pickOdd, 1/8, { sport: 'basket', confKey: 'BAIXA' });
       if (stake === '0u') {
         analyzedBasket.set(key, { ts: now, tipSent: false });
         continue;
@@ -23640,7 +23644,7 @@ async function refreshOpenTips(caches = {}) {
         // Re-calcula stake via Kelly fracionário: conf ALTA→¼, MÉDIA→⅙, BAIXA→1/10.
         // Alinhado com lógica de /rerun-pending-trained (server.js:7284-7288).
         const kellyFracByConf = getKellyFraction(sport, newConf);
-        let newStake = calcKellyWithP(p, currentOdds, kellyFracByConf, { sport });
+        let newStake = calcKellyWithP(p, currentOdds, kellyFracByConf, { sport, confKey: newConf });
         // Força 0u quando EV sub-threshold (tip perdeu edge — sinal pra dashboard)
         if (newEv < 3) newStake = '0u';
 
