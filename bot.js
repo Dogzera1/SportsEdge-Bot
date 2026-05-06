@@ -1756,17 +1756,32 @@ const DRAWDOWN_SOFT_LIMIT = parseFloat(process.env.DRAWDOWN_SOFT_LIMIT || '0.15'
 
 // Pre-check pra polls: se sport está em hard drawdown block, skip pipeline inteiro.
 // Evita CPU+IA waste em sports onde guardian já bloqueia 100% das tips.
-// Lê _drawdownCache (atualizado a cada applyGlobalRisk). Stale tolerance: 10min.
+// Async: lê _drawdownCache se válido (TTL 5min, stale tolerance 10min); senão
+// fetch fresh via /bankroll. Mesma lógica peak-based que applyGlobalRisk.
 // Opt-out via SKIP_BLOCKED_SPORT_POLL=false.
-function _isSportHardBlockedByDrawdown(sport) {
+async function _isSportHardBlockedByDrawdown(sport) {
   if (/^(0|false|no)$/i.test(String(process.env.SKIP_BLOCKED_SPORT_POLL ?? 'true'))) return false;
   const cached = _drawdownCache.get(sport);
-  if (!cached) return false;
-  const ageMs = Date.now() - (cached.checkedAt || 0);
-  // Cache stale tolerance: 10min (cache TTL é 5min mas damos margem antes de
-  // re-running pipeline pra garantir refresh válido).
-  if (ageMs > 10 * 60 * 1000) return false;
-  return Number.isFinite(cached.pct) && cached.pct >= DRAWDOWN_HARD_LIMIT;
+  const now = Date.now();
+  // Cache válido (até 10min): usa cached
+  if (cached && (now - (cached.checkedAt || 0)) <= 10 * 60 * 1000) {
+    return Number.isFinite(cached.pct) && cached.pct >= DRAWDOWN_HARD_LIMIT;
+  }
+  // Cache stale ou empty: fetch fresh (mesma lógica de applyGlobalRisk)
+  try {
+    const bk = await serverGet(`/bankroll`, sport).catch(() => null);
+    if (!bk?.initialBanca || !(bk.initialBanca > 0) || bk?.currentBanca == null) return false;
+    const usePeakBased = !/^(0|false|no)$/i.test(String(process.env.DD_PEAK_BASED ?? 'true'));
+    let dd;
+    if (usePeakBased && Number.isFinite(bk.peakBanca) && bk.peakBanca > 0) {
+      dd = (bk.peakBanca - bk.currentBanca) / bk.peakBanca;
+    } else {
+      dd = (bk.initialBanca - bk.currentBanca) / bk.initialBanca;
+    }
+    dd = Math.max(0, dd);
+    _drawdownCache.set(sport, { pct: dd, checkedAt: now });
+    return dd >= DRAWDOWN_HARD_LIMIT;
+  } catch (_) { return false; }
 }
 
 // Sport performance → stake multiplier. Cache per-sport por 1h. Winners +15-30%,
@@ -15656,7 +15671,8 @@ async function pollTennis(runOnce = false) {
       // Pre-check: se tennis em hard drawdown block, skip pipeline (Guardian
       // bloqueia 100% downstream). Economiza CPU+IA. Reagenda em intervalo curto
       // pra detectar quando DD recuperar (cache TTL 5min).
-      if (_isSportHardBlockedByDrawdown('tennis')) {
+      // Async: cache empty/stale faz fetch fresh /bankroll (mesma logica de applyGlobalRisk).
+      if (await _isSportHardBlockedByDrawdown('tennis')) {
         log('INFO', 'AUTO-TENNIS', 'sport bloqueado por drawdown — skip pipeline (re-check em 5min)');
         if (!runOnce) setTimeout(loop, 5 * 60 * 1000);
         return [];
