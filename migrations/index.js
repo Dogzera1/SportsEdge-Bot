@@ -2242,6 +2242,22 @@ const migrations = [
     },
   },
   {
+    id: '091_market_tips_runtime_state_tier',
+    up(db) {
+      // 2026-05-06: tier-level leak guard — granularidade entre side-level
+      // e league-level. Captura leak cross-league no mesmo tier quando samples
+      // por liga individual <10 mas tier total >=20. Schema cascading: 050 base
+      // · 051 side · 063 league · 091 tier.
+      if (!tableExists(db, 'market_tips_runtime_state')) return;
+      addColumnIfMissing(db, 'market_tips_runtime_state', 'tier',
+        "tier INTEGER"); // 1=top, 2=mid, 3=obscuro/early; NULL pra disables não-tier-level
+      // Índice composto pra lookup rápido em isMarketTipsEnabled
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_mtrs_tier
+        ON market_tips_runtime_state(sport, market, side, tier)
+        WHERE tier IS NOT NULL`);
+    },
+  },
+  {
     id: '089_readiness_corrections_log',
     up(db) {
       // 2026-05-05: Readiness Learner — fecha o loop "detectei leak → ajo".

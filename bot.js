@@ -4847,28 +4847,35 @@ const _marketTipsDisabledRuntime = new Map(); // Map<'sport|market', { reason, s
 
 function _loadMarketTipsRuntimeState() {
   try {
-    // Migrations progressivas: 050 base · 051 add side · 063 add league.
+    // Migrations progressivas: 050 base · 051 add side · 063 add league · 091 add tier.
     // Best-effort cascading downgrade se schema antigo.
     let rows;
     try {
-      rows = db.prepare(`SELECT sport, market, side, league, source, reason, clv_pct, clv_n, updated_at FROM market_tips_runtime_state WHERE disabled = 1`).all();
+      rows = db.prepare(`SELECT sport, market, side, league, tier, source, reason, clv_pct, clv_n, updated_at FROM market_tips_runtime_state WHERE disabled = 1`).all();
     } catch (_) {
       try {
-        rows = db.prepare(`SELECT sport, market, side, source, reason, clv_pct, clv_n, updated_at FROM market_tips_runtime_state WHERE disabled = 1`).all().map(r => ({ ...r, league: null }));
+        rows = db.prepare(`SELECT sport, market, side, league, source, reason, clv_pct, clv_n, updated_at FROM market_tips_runtime_state WHERE disabled = 1`).all().map(r => ({ ...r, tier: null }));
       } catch (__) {
-        rows = db.prepare(`SELECT sport, market, source, reason, clv_pct, clv_n, updated_at FROM market_tips_runtime_state WHERE disabled = 1`).all().map(r => ({ ...r, side: null, league: null }));
+        try {
+          rows = db.prepare(`SELECT sport, market, side, source, reason, clv_pct, clv_n, updated_at FROM market_tips_runtime_state WHERE disabled = 1`).all().map(r => ({ ...r, league: null, tier: null }));
+        } catch (___) {
+          rows = db.prepare(`SELECT sport, market, source, reason, clv_pct, clv_n, updated_at FROM market_tips_runtime_state WHERE disabled = 1`).all().map(r => ({ ...r, side: null, league: null, tier: null }));
+        }
       }
     }
     _marketTipsDisabledRuntime.clear();
     for (const r of rows) {
       const parts = [r.sport, r.market];
       if (r.side) parts.push(r.side);
+      // Tier-level disable: key inclui `tier{N}` entre side e league.
+      if (r.tier && !r.league) parts.push(`tier${r.tier}`);
       if (r.league) parts.push(r.league);
       const key = parts.join('|');
       _marketTipsDisabledRuntime.set(key, {
         reason: r.reason, since: r.updated_at, clv: r.clv_pct, n: r.clv_n, source: r.source,
         side: r.side || null,
         league: r.league || null,
+        tier: r.tier || null,
       });
     }
     if (_marketTipsDisabledRuntime.size) log('INFO', 'MT-GUARD', `Loaded ${_marketTipsDisabledRuntime.size} runtime disables`);
@@ -4987,9 +4994,17 @@ function isMarketTipsEnabled(sport, market = null, side = null, league = null) {
     const perm = _getMtPermanentDisable();
     if (side && perm.has(`${sport}|${market}|${side}`)) return false;
     if (perm.has(`${sport}|${market}`)) return false;
-    // Precedência runtime: (market+side+league) > (market+side) > market inteiro.
-    // League é match completo (não normalize) — leak guard salva exato.
+    // Precedência runtime: (market+side+league) > (market+side+tier) > (market+side) > market inteiro.
+    // Tier-level inserido entre side e league: pega leak quando ligas individuais
+    // têm sample <10 mas tier total >=20. Tier resolvido on-the-fly via league.
     if (side && league && _marketTipsDisabledRuntime.has(`${sport}|${market}|${side}|${league}`)) return false;
+    if (side && league) {
+      try {
+        const { getLeagueTier } = require('./lib/league-tier');
+        const tierKey = `tier${getLeagueTier(sport, league)}`;
+        if (_marketTipsDisabledRuntime.has(`${sport}|${market}|${side}|${tierKey}`)) return false;
+      } catch (_) {}
+    }
     if (side && _marketTipsDisabledRuntime.has(`${sport}|${market}|${side}`)) return false;
     if (_marketTipsDisabledRuntime.has(`${sport}|${market}`)) return false;
     // MT auto-promote league block: liga (sport, market) com ROI muito negativo
@@ -5409,15 +5424,21 @@ async function runMarketTipsRoiGuardSided() {
   if (!ADMIN_IDS.size) return;
   // 2026-04-29 Sprint 1.3: gates relaxados pra detecção mais rápida
   // (Saint Malo -56% n=8 passou batido com n_min=30; agora bloqueia em n=10).
+  // 2026-05-06: estende ROI guard com liga + tier (paridade com CLV guard).
+  // Cascading: market+side > side+tier > side+league.
   const ROI_CUTOFF = parseFloat(process.env.MT_ROI_GUARD_CUTOFF || '-8');
   const N_CUTOFF = parseInt(process.env.MT_ROI_GUARD_N_MIN || '10', 10);
+  const N_CUTOFF_TIER = parseInt(process.env.MT_ROI_GUARD_N_MIN_TIER || '20', 10);
+  const N_CUTOFF_LEAGUE = parseInt(process.env.MT_ROI_GUARD_N_MIN_LEAGUE || '10', 10);
   const ROI_RESTORE = parseFloat(process.env.MT_ROI_GUARD_RESTORE || '3');
   const WINDOW_DAYS = parseInt(process.env.MT_ROI_GUARD_WINDOW_DAYS || '14', 10);
+  const LEAGUE_GUARD = !/^(0|false|no)$/i.test(String(process.env.MT_ROI_GUARD_LEAGUE_AUTO ?? 'true'));
+  const TIER_GUARD = !/^(0|false|no)$/i.test(String(process.env.MT_ROI_GUARD_TIER_AUTO ?? 'true'));
 
-  let rows;
+  let rowsSide = [], rowsLeague = [];
   try {
-    rows = db.prepare(`
-      SELECT sport, market, side,
+    rowsSide = db.prepare(`
+      SELECT sport, market, side, NULL AS league,
         COUNT(*) AS n_settled,
         SUM(CASE WHEN result = 'win' THEN 1 ELSE 0 END) AS wins,
         SUM(CASE WHEN result = 'win' THEN COALESCE(stake_units, 1) * (odd - 1) ELSE 0 END)
@@ -5430,26 +5451,89 @@ async function runMarketTipsRoiGuardSided() {
       GROUP BY sport, market, side
       HAVING n_settled >= ?
     `).all(WINDOW_DAYS, N_CUTOFF);
+    if (LEAGUE_GUARD || TIER_GUARD) {
+      rowsLeague = db.prepare(`
+        SELECT sport, market, side, league,
+          COUNT(*) AS n_settled,
+          SUM(CASE WHEN result = 'win' THEN 1 ELSE 0 END) AS wins,
+          SUM(CASE WHEN result = 'win' THEN COALESCE(stake_units, 1) * (odd - 1) ELSE 0 END)
+          - SUM(CASE WHEN result = 'loss' THEN COALESCE(stake_units, 1) ELSE 0 END) AS profit_u,
+          SUM(CASE WHEN result IN ('win','loss') THEN COALESCE(stake_units, 1) ELSE 0 END) AS stake_u
+        FROM market_tips_shadow
+        WHERE result IN ('win', 'loss')
+          AND created_at >= datetime('now', '-' || ? || ' days')
+          AND side IS NOT NULL
+          AND league IS NOT NULL AND TRIM(league) != ''
+        GROUP BY sport, market, side, league
+      `).all(WINDOW_DAYS);
+    }
   } catch (e) { log('DEBUG', 'MT-ROI-GUARD', `query err: ${e.message}`); return; }
 
   const disabled = [], restored = [];
   const ts = new Date().toISOString();
 
-  for (const s of rows) {
+  // Resolver tier helper (sport-aware)
+  const { getLeagueTier } = (() => {
+    try { return require('./lib/league-tier'); }
+    catch (_) { return { getLeagueTier: () => 3 }; }
+  })();
+
+  // Build segment list cascading: side, tier (agregado), league
+  const segments = [...rowsSide.map(r => ({ ...r, kind: 'side', tier: null }))];
+  if (TIER_GUARD && rowsLeague.length) {
+    const tierAgg = new Map();
+    for (const r of rowsLeague) {
+      const tier = getLeagueTier(r.sport, r.league);
+      const key = `${r.sport}|${r.market}|${r.side}|${tier}`;
+      const cur = tierAgg.get(key) || { sport: r.sport, market: r.market, side: r.side, tier, league: null,
+        n_settled: 0, wins: 0, profit_u: 0, stake_u: 0 };
+      cur.n_settled += r.n_settled;
+      cur.wins += r.wins;
+      cur.profit_u += r.profit_u;
+      cur.stake_u += r.stake_u;
+      tierAgg.set(key, cur);
+    }
+    for (const r of tierAgg.values()) {
+      if (r.n_settled >= N_CUTOFF_TIER) segments.push({ ...r, kind: 'tier' });
+    }
+  }
+  if (LEAGUE_GUARD) {
+    for (const r of rowsLeague) {
+      if (r.n_settled >= N_CUTOFF_LEAGUE) segments.push({ ...r, kind: 'league', tier: null });
+    }
+  }
+
+  for (const s of segments) {
     const roiPct = s.stake_u > 0 ? (s.profit_u / s.stake_u) * 100 : 0;
-    const key = `${s.sport}|${s.market}|${s.side}`;
+    const parts = [s.sport, s.market, s.side];
+    const labelParts = [s.sport, s.market, s.side];
+    if (s.kind === 'tier') { parts.push(`tier${s.tier}`); labelParts.push(`tier${s.tier}`); }
+    if (s.kind === 'league' && s.league) { parts.push(s.league); labelParts.push(s.league); }
+    const key = parts.join('|');
+    const label = labelParts.join('/');
     const wasDisabled = _marketTipsDisabledRuntime.has(key);
 
     if (!wasDisabled && roiPct <= ROI_CUTOFF) {
       const reason = `ROI ${roiPct.toFixed(1)}% n=${s.n_settled} hit=${(s.wins/s.n_settled*100).toFixed(0)}%`;
       try {
-        db.prepare(`INSERT OR REPLACE INTO market_tips_runtime_state
-          (sport, market, side, disabled, source, reason, roi_pct, updated_at)
-          VALUES (?, ?, ?, 1, 'auto_roi_leak', ?, ?, ?)`).run(
-          s.sport, s.market, s.side, reason, +roiPct.toFixed(2), ts
-        );
-        _marketTipsDisabledRuntime.set(key, { reason, since: ts, roi: roiPct, n: s.n_settled, source: 'auto_roi_leak', side: s.side });
-        disabled.push(`🚫 ${s.sport}/${s.market}/${s.side} — ${reason}`);
+        const tierVal = s.kind === 'tier' ? s.tier : null;
+        const leagueVal = s.kind === 'league' ? s.league : null;
+        // Cascading insert (mig 091 tier; fallback pré-091)
+        try {
+          db.prepare(`INSERT OR REPLACE INTO market_tips_runtime_state
+            (sport, market, side, league, tier, disabled, source, reason, roi_pct, updated_at)
+            VALUES (?, ?, ?, ?, ?, 1, 'auto_roi_leak', ?, ?, ?)`).run(
+            s.sport, s.market, s.side, leagueVal, tierVal, reason, +roiPct.toFixed(2), ts
+          );
+        } catch (_eTier) {
+          db.prepare(`INSERT OR REPLACE INTO market_tips_runtime_state
+            (sport, market, side, league, disabled, source, reason, roi_pct, updated_at)
+            VALUES (?, ?, ?, ?, 1, 'auto_roi_leak', ?, ?, ?)`).run(
+            s.sport, s.market, s.side, leagueVal, reason, +roiPct.toFixed(2), ts
+          );
+        }
+        _marketTipsDisabledRuntime.set(key, { reason, since: ts, roi: roiPct, n: s.n_settled, source: 'auto_roi_leak', side: s.side, league: leagueVal, tier: tierVal });
+        disabled.push(`🚫 ${label} — ${reason}`);
         log('WARN', 'MT-ROI-GUARD', `auto-disabled ${key}: ${reason}`);
       } catch (e) { log('WARN', 'MT-ROI-GUARD', `disable err: ${e.message}`); }
     }
@@ -5457,9 +5541,19 @@ async function runMarketTipsRoiGuardSided() {
       const meta = _marketTipsDisabledRuntime.get(key);
       if (meta?.source === 'auto_roi_leak' && roiPct >= ROI_RESTORE) {
         try {
-          db.prepare(`DELETE FROM market_tips_runtime_state WHERE sport = ? AND market = ? AND side = ? AND source = 'auto_roi_leak'`).run(s.sport, s.market, s.side);
+          const sideCond = 'side = ?';
+          const leagueCond = s.kind === 'league' && s.league ? 'league = ?' : 'league IS NULL';
+          const tierCond = s.kind === 'tier' ? 'tier = ?' : 'tier IS NULL';
+          const stmtParams = [s.sport, s.market, s.side];
+          if (s.kind === 'league' && s.league) stmtParams.push(s.league);
+          if (s.kind === 'tier') stmtParams.push(s.tier);
+          try {
+            db.prepare(`DELETE FROM market_tips_runtime_state WHERE sport = ? AND market = ? AND ${sideCond} AND ${leagueCond} AND ${tierCond} AND source = 'auto_roi_leak'`).run(...stmtParams);
+          } catch (_eTier) {
+            db.prepare(`DELETE FROM market_tips_runtime_state WHERE sport = ? AND market = ? AND ${sideCond} AND ${leagueCond} AND source = 'auto_roi_leak'`).run(...stmtParams.filter(p => p !== s.tier));
+          }
           _marketTipsDisabledRuntime.delete(key);
-          restored.push(`✅ ${s.sport}/${s.market}/${s.side} — ROI recuperou pra ${roiPct.toFixed(1)}% (n=${s.n_settled})`);
+          restored.push(`✅ ${label} — ROI recuperou pra ${roiPct.toFixed(1)}% (n=${s.n_settled})`);
           log('INFO', 'MT-ROI-GUARD', `auto-restored ${key}: ROI=${roiPct.toFixed(1)}%`);
         } catch (e) { log('WARN', 'MT-ROI-GUARD', `restore err: ${e.message}`); }
       }
@@ -5488,18 +5582,24 @@ async function runMarketTipsLeakGuard() {
   // que cause prejuízo grande. Default 10. Cutoff CLV mais agressivo (default = CLV_CUTOFF)
   // pra evitar block prematuro em sample apertado.
   const N_CUTOFF_LEAGUE = parseInt(process.env.MT_LEAK_N_CUTOFF_LEAGUE || '10', 10);
+  // 2026-05-06: tier-level — agregação cross-league dentro do mesmo tier.
+  // Pega leak quando ligas individuais têm sample <10 mas tier total >=20.
+  // Tier resolvido via lib/league-tier (sport-aware: esports/tennis/football/basket/mma).
+  const N_CUTOFF_TIER = parseInt(process.env.MT_LEAK_N_CUTOFF_TIER || '20', 10);
   const CLV_RESTORE = parseFloat(process.env.MT_LEAK_CLV_RESTORE || '0');
   const SIDE_GUARD_DISABLED = /^(0|false|no)$/i.test(String(process.env.MT_LEAK_GUARD_SIDE_AUTO ?? 'true'));
   const LEAGUE_GUARD_DISABLED = /^(0|false|no)$/i.test(String(process.env.MT_LEAK_GUARD_LEAGUE_AUTO ?? 'true'));
+  const TIER_GUARD_DISABLED = /^(0|false|no)$/i.test(String(process.env.MT_LEAK_GUARD_TIER_AUTO ?? 'true'));
 
-  let statsMarket, statsBySide, statsByLeague;
+  let statsMarket, statsBySide, statsByLeague, statsByTier;
   try {
     const { getShadowStats } = require('./lib/market-tips-shadow');
     statsMarket = getShadowStats(db, { days: 30 });
     statsBySide = SIDE_GUARD_DISABLED ? [] : getShadowStats(db, { days: 30, bySide: true });
     statsByLeague = LEAGUE_GUARD_DISABLED ? [] : getShadowStats(db, { days: 30, bySide: true, byLeague: true });
+    statsByTier = TIER_GUARD_DISABLED ? [] : getShadowStats(db, { days: 30, bySide: true, byTier: true });
   } catch (_) { return; }
-  if ((!Array.isArray(statsMarket) || !statsMarket.length) && !statsBySide.length && !statsByLeague.length) return;
+  if ((!Array.isArray(statsMarket) || !statsMarket.length) && !statsBySide.length && !statsByLeague.length && !statsByTier.length) return;
 
   const disabled = [], restored = [];
   const ts = new Date().toISOString();
@@ -5507,28 +5607,48 @@ async function runMarketTipsLeakGuard() {
   // Helper compartilhado pra disable/restore. Granularidade decrescente:
   //   1. (sport, market)               — N_CUTOFF, mais conservador
   //   2. (sport, market, side)         — N_CUTOFF_SIDE
-  //   3. (sport, market, side, league) — N_CUTOFF_LEAGUE, mais agressivo
+  //   3. (sport, market, side, tier)   — N_CUTOFF_TIER (agregado cross-league por tier)
+  //   4. (sport, market, side, league) — N_CUTOFF_LEAGUE, mais agressivo
+  // Tier inserido entre side e league pra capturar leak cross-league que
+  // sample por liga sozinha não detecta (n<10 league cutoff).
   const processSegment = (s) => {
     const sideKey = s.side || null;
     const leagueKey = s.league || null;
+    const tierKey = s.tier != null ? `tier${s.tier}` : null;
     const parts = [s.sport, s.market];
     const labelParts = [s.sport, s.market];
     if (sideKey) { parts.push(sideKey); labelParts.push(sideKey); }
+    if (tierKey) { parts.push(tierKey); labelParts.push(tierKey); }
     if (leagueKey) { parts.push(leagueKey); labelParts.push(leagueKey); }
     const key = parts.join('|');
     const label = labelParts.join('/');
-    const nThreshold = leagueKey ? N_CUTOFF_LEAGUE : (sideKey ? N_CUTOFF_SIDE : N_CUTOFF);
+    const nThreshold = leagueKey ? N_CUTOFF_LEAGUE
+                     : tierKey ? N_CUTOFF_TIER
+                     : sideKey ? N_CUTOFF_SIDE
+                     : N_CUTOFF;
     const wasDisabled = _marketTipsDisabledRuntime.has(key);
 
     if (!wasDisabled && s.clvN >= nThreshold && s.avgClv != null && s.avgClv < CLV_CUTOFF) {
       const reason = `CLV ${s.avgClv.toFixed(1)}% n=${s.clvN} ROI=${s.roiPct != null ? s.roiPct.toFixed(1)+'%' : '?'}`;
       try {
-        db.prepare(`INSERT OR REPLACE INTO market_tips_runtime_state
-          (sport, market, side, league, disabled, source, reason, clv_pct, clv_n, roi_pct, updated_at)
-          VALUES (?, ?, ?, ?, 1, 'auto_clv_leak', ?, ?, ?, ?, ?)`).run(
-          s.sport, s.market, sideKey, leagueKey, reason, s.avgClv, s.clvN, s.roiPct, ts,
-        );
-        _marketTipsDisabledRuntime.set(key, { reason, since: ts, clv: s.avgClv, n: s.clvN, source: 'auto_clv_leak', side: sideKey, league: leagueKey });
+        // Schema cascading: tenta com tier (mig 091); fallback sem tier pra ambientes
+        // pré-091. league e tier são mutuamente exclusivos — tier-level seta tier
+        // sem league, league-level seta league sem tier.
+        const tierVal = (tierKey && !leagueKey) ? s.tier : null;
+        try {
+          db.prepare(`INSERT OR REPLACE INTO market_tips_runtime_state
+            (sport, market, side, league, tier, disabled, source, reason, clv_pct, clv_n, roi_pct, updated_at)
+            VALUES (?, ?, ?, ?, ?, 1, 'auto_clv_leak', ?, ?, ?, ?, ?)`).run(
+            s.sport, s.market, sideKey, leagueKey, tierVal, reason, s.avgClv, s.clvN, s.roiPct, ts,
+          );
+        } catch (_eTier) {
+          db.prepare(`INSERT OR REPLACE INTO market_tips_runtime_state
+            (sport, market, side, league, disabled, source, reason, clv_pct, clv_n, roi_pct, updated_at)
+            VALUES (?, ?, ?, ?, 1, 'auto_clv_leak', ?, ?, ?, ?, ?)`).run(
+            s.sport, s.market, sideKey, leagueKey, reason, s.avgClv, s.clvN, s.roiPct, ts,
+          );
+        }
+        _marketTipsDisabledRuntime.set(key, { reason, since: ts, clv: s.avgClv, n: s.clvN, source: 'auto_clv_leak', side: sideKey, league: leagueKey, tier: tierVal });
         disabled.push(`🚫 ${label} — ${reason}`);
         log('WARN', 'MT-GUARD', `auto-disabled ${key}: ${reason}`);
       } catch (e) { log('WARN', 'MT-GUARD', `disable err: ${e.message}`); }
@@ -5537,14 +5657,22 @@ async function runMarketTipsLeakGuard() {
       const meta = _marketTipsDisabledRuntime.get(key);
       if (meta?.source === 'auto_clv_leak' && s.clvN >= nThreshold && s.avgClv != null && s.avgClv >= CLV_RESTORE) {
         try {
-          // DELETE com null-safe match em side/league. Schema mantém NULL pra
-          // segments market-level e side-level, valor explícito pra league-level.
+          // DELETE com null-safe match em side/league/tier. Schema mantém NULL pra
+          // segments mais agregados, valores explícitos pra granularidade fina.
           const sideCond = sideKey ? 'side = ?' : 'side IS NULL';
           const leagueCond = leagueKey ? 'league = ?' : 'league IS NULL';
+          const tierVal = (tierKey && !leagueKey) ? s.tier : null;
           const stmtParams = [s.sport, s.market];
           if (sideKey) stmtParams.push(sideKey);
           if (leagueKey) stmtParams.push(leagueKey);
-          db.prepare(`DELETE FROM market_tips_runtime_state WHERE sport = ? AND market = ? AND ${sideCond} AND ${leagueCond} AND source = 'auto_clv_leak'`).run(...stmtParams);
+          // Tenta with-tier; fallback sem tier pra schemas pré-091.
+          try {
+            const tierCond = tierVal != null ? 'tier = ?' : '(tier IS NULL OR tier IS ?)';
+            const tierParams = tierVal != null ? [tierVal] : [null];
+            db.prepare(`DELETE FROM market_tips_runtime_state WHERE sport = ? AND market = ? AND ${sideCond} AND ${leagueCond} AND ${tierCond} AND source = 'auto_clv_leak'`).run(...stmtParams, ...tierParams);
+          } catch (_eTier) {
+            db.prepare(`DELETE FROM market_tips_runtime_state WHERE sport = ? AND market = ? AND ${sideCond} AND ${leagueCond} AND source = 'auto_clv_leak'`).run(...stmtParams);
+          }
           _marketTipsDisabledRuntime.delete(key);
           restored.push(`✅ ${label} — CLV recuperou pra ${s.avgClv.toFixed(1)}% (n=${s.clvN})`);
           log('INFO', 'MT-GUARD', `auto-restored ${key}: CLV=${s.avgClv.toFixed(1)}%`);
@@ -5558,6 +5686,11 @@ async function runMarketTipsLeakGuard() {
   // Side-level (n cutoff = N_CUTOFF_SIDE menor pra granularidade fina)
   for (const s of statsBySide) {
     if (s.side) processSegment(s);
+  }
+  // Tier-level (cross-league dentro do mesmo tier; n cutoff = N_CUTOFF_TIER).
+  // Detecta leak quando ligas individuais não atingem n=10 mas tier agregado >=20.
+  for (const s of statsByTier) {
+    if (s.side && s.tier) processSegment(s);
   }
   // League-level (n cutoff = N_CUTOFF_LEAGUE — mais agressivo pra detectar leak cedo)
   for (const s of statsByLeague) {
