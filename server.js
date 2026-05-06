@@ -15370,6 +15370,111 @@ setInterval(load, 60000);
     return;
   }
 
+  // POST/GET /admin/mt-block-league?sport=tennis&market=totalGames&league=WTA Rome - R1&reason=...&key=<KEY>
+  // Adiciona liga (sport, market, league) em mt_market_league_blocklist source='manual'.
+  // Diferente de /admin/mt-disable que disable (sport, market, side) global.
+  // Auto-load no próximo cron mt_auto_promote (12h) ou restart.
+  if (p === '/admin/mt-block-league' && (req.method === 'POST' || req.method === 'GET')) {
+    if (!requireAdmin(req, res)) return;
+    const sport = String(parsed.query.sport || '').trim().toLowerCase();
+    const market = String(parsed.query.market || '').trim();
+    const leagueRaw = String(parsed.query.league || '').trim();
+    const reason = String(parsed.query.reason || 'manual block').slice(0, 200);
+    if (!sport || !market || !leagueRaw) {
+      sendJson(res, { ok: false, error: 'missing sport, market, or league' }, 400); return;
+    }
+    const leagueNorm = leagueRaw.toLowerCase().trim().replace(/\s+/g, ' ');
+    try {
+      db.prepare(`
+        INSERT INTO mt_market_league_blocklist
+          (sport, market, league_norm, league_raw, source, reason, since)
+        VALUES (?, ?, ?, ?, 'manual', ?, datetime('now'))
+        ON CONFLICT(sport, market, league_norm) DO UPDATE SET
+          source = 'manual', reason = excluded.reason
+      `).run(sport, market, leagueNorm, leagueRaw, reason);
+      // Refresh cache so /admin/mt-disable-list reflete imediatamente
+      try { require('./lib/mt-auto-promote').loadMtMarketLeagueBlocklist(db); } catch (_) {}
+      sendJson(res, {
+        ok: true, sport, market, league_raw: leagueRaw, league_norm: leagueNorm,
+        note: 'bot.js precisa estar com MT_LEAK_GUARD_AUTO=true. Cache in-memory atualizado server-side; bot.js pega no próximo cron mt_auto_promote (12h) ou restart.',
+      });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
+  // POST/GET /admin/mt-unblock-league?sport=tennis&market=totalGames&league=WTA Rome - R1&key=<KEY>
+  if (p === '/admin/mt-unblock-league' && (req.method === 'POST' || req.method === 'GET')) {
+    if (!requireAdmin(req, res)) return;
+    const sport = String(parsed.query.sport || '').trim().toLowerCase();
+    const market = String(parsed.query.market || '').trim();
+    const leagueRaw = String(parsed.query.league || '').trim();
+    if (!sport || !market || !leagueRaw) {
+      sendJson(res, { ok: false, error: 'missing sport, market, or league' }, 400); return;
+    }
+    const leagueNorm = leagueRaw.toLowerCase().trim().replace(/\s+/g, ' ');
+    try {
+      const info = db.prepare(`
+        DELETE FROM mt_market_league_blocklist
+        WHERE sport=? AND market=? AND league_norm=?
+      `).run(sport, market, leagueNorm);
+      try { require('./lib/mt-auto-promote').loadMtMarketLeagueBlocklist(db); } catch (_) {}
+      sendJson(res, { ok: true, sport, market, league_raw: leagueRaw, removed: info.changes });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
+  // POST/GET /admin/mt-block-tier-leagues?sport=tennis&market=totalGames&tier=tier4_challenger&days=14&key=<KEY>
+  // Bloqueia em batch TODAS as ligas (sport, market) que classificam como `tier`
+  // segundo lib/mt-tier-classifier nos últimos `days` (default 30). Útil quando
+  // tier inteiro está sangrando.
+  if (p === '/admin/mt-block-tier-leagues' && (req.method === 'POST' || req.method === 'GET')) {
+    if (!requireAdmin(req, res)) return;
+    const sport = String(parsed.query.sport || '').trim().toLowerCase();
+    const market = String(parsed.query.market || '').trim();
+    const targetTier = String(parsed.query.tier || '').trim();
+    const days = Math.max(7, Math.min(90, parseInt(parsed.query.days || '30', 10) || 30));
+    if (!sport || !market || !targetTier) {
+      sendJson(res, { ok: false, error: 'missing sport, market, or tier' }, 400); return;
+    }
+    try {
+      const classifier = require('./lib/mt-tier-classifier');
+      const classifyFn = classifier.classifyTier || classifier.getTier || classifier.default;
+      // Pega leagues distintas em market_tips_shadow nos últimos N dias
+      const leagues = db.prepare(`
+        SELECT DISTINCT league
+        FROM market_tips_shadow
+        WHERE sport = ? AND market = ?
+          AND league IS NOT NULL AND TRIM(league) != ''
+          AND created_at >= datetime('now', '-' || ? || ' days')
+      `).all(sport, market, days);
+
+      const blocked = [];
+      const skipped = [];
+      const upsert = db.prepare(`
+        INSERT INTO mt_market_league_blocklist
+          (sport, market, league_norm, league_raw, source, reason, since)
+        VALUES (?, ?, ?, ?, 'manual_tier', ?, datetime('now'))
+        ON CONFLICT(sport, market, league_norm) DO UPDATE SET
+          source = 'manual_tier', reason = excluded.reason
+      `);
+      for (const l of leagues) {
+        const leagueRaw = String(l.league || '').trim();
+        if (!leagueRaw) continue;
+        let detectedTier = null;
+        try {
+          if (typeof classifyFn === 'function') detectedTier = classifyFn(sport, leagueRaw);
+        } catch (_) {}
+        if (detectedTier !== targetTier) { skipped.push({ league: leagueRaw, tier: detectedTier }); continue; }
+        const leagueNorm = leagueRaw.toLowerCase().trim().replace(/\s+/g, ' ');
+        upsert.run(sport, market, leagueNorm, leagueRaw, `tier-block: ${targetTier}`);
+        blocked.push({ league: leagueRaw, tier: detectedTier });
+      }
+      try { require('./lib/mt-auto-promote').loadMtMarketLeagueBlocklist(db); } catch (_) {}
+      sendJson(res, { ok: true, sport, market, tier: targetTier, days, blocked, n_blocked: blocked.length, n_skipped: skipped.length });
+    } catch (e) { sendJson(res, { ok: false, error: e.message, stack: e.stack?.slice(0, 400) }, 500); }
+    return;
+  }
+
   // POST/GET /admin/mt-enable?sport=tennis&market=totalGames&side=over&key=<KEY>
   // Reverte /admin/mt-disable. Remove row de market_tips_runtime_state.
   if (p === '/admin/mt-enable' && (req.method === 'POST' || req.method === 'GET')) {
