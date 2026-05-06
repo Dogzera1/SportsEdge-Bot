@@ -22185,6 +22185,58 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   setInterval(() => runKellyAutoTuneDaily().catch(e => log('ERROR', 'KELLY-TUNE', e.message)), 60 * 60 * 1000);
   setTimeout(() => runKellyAutoTuneDaily().catch(() => {}), 30 * 60 * 1000);
 
+  // Tennis Markov calib refit nightly (04h local). Self-call em
+  // /admin/mt-refit-calib?sport=tennis&days=90&write=true. Único sport com
+  // loader em prod (lib/tennis-markov-calib.js TTL 30min lê o JSON novo sem
+  // restart). Opt-out: TENNIS_CALIB_REFIT_DISABLED=true. DM admin se ROI ou
+  // ECE moverem >5pp/0.05 entre runs.
+  let _lastTennisCalibRefitDay = null;
+  async function runTennisCalibRefitDaily() {
+    if (/^(1|true|yes)$/i.test(String(process.env.TENNIS_CALIB_REFIT_DISABLED || ''))) return;
+    const now = new Date();
+    if (now.getHours() !== 4) return;
+    const today = now.toISOString().slice(0, 10);
+    if (_lastTennisCalibRefitDay === today) return;
+    const adminKey = (process.env.ADMIN_KEY || '').trim();
+    if (!adminKey) { log('WARN', 'TENNIS-CALIB-REFIT', 'ADMIN_KEY ausente — pulando'); _lastTennisCalibRefitDay = today; return; }
+    _lastTennisCalibRefitDay = today;
+    try {
+      const http = require('http');
+      const port = process.env.PORT || 3000;
+      const path = `/admin/mt-refit-calib?sport=tennis&days=90&write=true&key=${encodeURIComponent(adminKey)}`;
+      const r = await new Promise((resolve, reject) => {
+        const req = http.get('http://localhost:' + port + path, (res) => {
+          let body = '';
+          res.on('data', c => body += c);
+          res.on('end', () => { try { resolve(JSON.parse(body)); } catch (e) { reject(e); } });
+        });
+        req.on('error', reject);
+        req.setTimeout(120000, () => { req.destroy(new Error('timeout')); });
+      });
+      if (!r.ok) {
+        log('WARN', 'TENNIS-CALIB-REFIT', `falhou: ${r.error || '?'}`);
+        return;
+      }
+      const pre = r.backtest?.pre || {}; const post = r.backtest?.post || {};
+      log('INFO', 'TENNIS-CALIB-REFIT', `n=${r.nSamples} | PRE roi=${pre.roi}% ece=${pre.ece} | POST roi=${post.roi}% ece=${post.ece} | written=${r.written}`);
+      // Alerta admin se calib piora vs raw OU se ECE alta (>0.10) — sinal de regime change
+      const calibHurts = Number.isFinite(post.roi) && Number.isFinite(pre.roi) && (post.roi - pre.roi) < -3;
+      const eceHigh = Number.isFinite(post.ece) && post.ece > 0.10;
+      if ((calibHurts || eceHigh) && ADMIN_IDS.size) {
+        const tag = calibHurts ? '⚠️ CALIB PIORA' : '⚠️ ECE ALTA';
+        const msg = `🎾 *Tennis calib refit — ${tag}*\n\n` +
+          `n=${r.nSamples}\n` +
+          `PRE: roi=${pre.roi}% hit=${pre.hit}% ece=${pre.ece}\n` +
+          `POST: roi=${post.roi}% hit=${post.hit}% ece=${post.ece}\n\n` +
+          `_Considerar TENNIS_MARKOV_CALIB_DISABLED=true ou refit manual com filtro ajustado._`;
+        const token = resolveAlertsToken();
+        if (token) for (const adminId of ADMIN_IDS) sendDM(token, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
+      }
+    } catch (e) { log('ERROR', 'TENNIS-CALIB-REFIT', e.message); }
+  }
+  setInterval(_wrapCron('tennis_calib_refit', runTennisCalibRefitDaily), 60 * 60 * 1000);
+  setTimeout(() => runTennisCalibRefitDaily().catch(() => {}), 95 * 60 * 1000);
+
   // ROI drift CUSUM diário (09h local, depois do Kelly tune). Detecta sport
   // que "virou" (ROI mudou de regime) entre weekly leak-guard cycles.
   // CUSUM k=0.5σ + h=4σ (industry default) — ARL ~168 in-control. Opt-out:

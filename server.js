@@ -10500,6 +10500,7 @@ setInterval(load, 60000);
       'threshold_auto_apply':     15 * 60 * 1000,
       'mt_calib_validation':      30 * 60 * 1000,
       'mt_calib_refit':     60 * 60 * 1000,
+      'tennis_calib_refit': 60 * 60 * 1000, // hourly check, fires once/day at 04h local
       // Hourly
       'bankroll_guardian':  60 * 60 * 1000,
       // 6h
