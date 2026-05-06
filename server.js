@@ -15412,15 +15412,19 @@ setInterval(load, 60000);
     return;
   }
 
-  // GET /admin/mt-refit-calib?sport=tennis&days=90&minBin=6&alpha=8&key=<KEY>
-  // Refit isotônico (PAV + Beta smoothing) direto no Railway DB.
+  // GET /admin/mt-refit-calib?sport=tennis&days=90&eval_days=30&minBin=6&alpha=8&key=<KEY>
+  // Walk-forward refit: treina calib em [-(days+eval_days), -eval_days],
+  // avalia em últimos eval_days (out-of-sample). eval_days=0 = legacy in-sample.
   // Returns JSON pronto pra salvar em lib/<sport>-markov-calib.json.
-  // Inclui CALIBRATION TABLE + BACKTEST PRE/POST.
+  // Inclui CALIBRATION TABLE + BACKTEST PRE/POST (no eval window quando eval_days>0).
   if (p === '/admin/mt-refit-calib') {
     const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     const sport = String(parsed.query.sport || 'tennis').toLowerCase();
     const days = Math.max(30, Math.min(365, parseInt(parsed.query.days || '90', 10) || 90));
+    const evalDaysRaw = parseInt(parsed.query.eval_days ?? '30', 10);
+    // eval_days=0 mantém comportamento legacy (in-sample). >0 ativa walk-forward.
+    const evalDays = Number.isFinite(evalDaysRaw) && evalDaysRaw >= 0 && evalDaysRaw <= 60 ? evalDaysRaw : 30;
     const minBin = Math.max(3, Math.min(20, parseInt(parsed.query.minBin || '6', 10) || 6));
     const ALPHA = parseFloat(parsed.query.alpha || '8');
     const VIG = parseFloat(parsed.query.vig || '0.025');
@@ -15446,8 +15450,11 @@ setInterval(load, 60000);
       };
 
       const liveCond = filter === 'live' ? `AND is_live = 1` : filter === 'pre' ? `AND COALESCE(is_live, 0) = 0` : '';
-      const tips = db.prepare(`
-        SELECT market, side, p_model, odd, close_odd, clv_pct, result, ev_pct, is_live
+      // Walk-forward split: train = [-(days+evalDays), -evalDays], eval = últimos evalDays.
+      // evalDays=0 → legacy: train = eval = últimos `days` (in-sample, overfitting risk).
+      const totalDays = days + evalDays;
+      const allTips = db.prepare(`
+        SELECT market, side, p_model, odd, close_odd, clv_pct, result, ev_pct, is_live, created_at
           FROM market_tips_shadow
          WHERE sport = ?
            AND result IN ('win', 'loss')
@@ -15455,10 +15462,24 @@ setInterval(load, 60000);
            AND odd IS NOT NULL
            AND created_at >= datetime('now', '-' || ? || ' days')
            ${liveCond}
-      `).all(sport, days);
-      const settled = tips.length;
+      `).all(sport, totalDays);
+
+      // Split temporal por created_at vs cutoff. Cutoff = now - evalDays.
+      const evalCutoffMs = Date.now() - evalDays * 24 * 60 * 60 * 1000;
+      const trainTips = evalDays > 0
+        ? allTips.filter(t => new Date(t.created_at).getTime() < evalCutoffMs)
+        : allTips;
+      const evalTips = evalDays > 0
+        ? allTips.filter(t => new Date(t.created_at).getTime() >= evalCutoffMs)
+        : allTips;
+      const tips = trainTips; // fitMarket consome `tips` (training set)
+      const settled = trainTips.length;
       if (settled < 30) {
-        sendJson(res, { ok: false, error: `insufficient sample n=${settled} (min 30)` }, 400);
+        sendJson(res, { ok: false, error: `insufficient train sample n=${settled} (min 30)`, n_train: trainTips.length, n_eval: evalTips.length, eval_days: evalDays }, 400);
+        return;
+      }
+      if (evalDays > 0 && evalTips.length < 10) {
+        sendJson(res, { ok: false, error: `insufficient eval sample n=${evalTips.length} (min 10) — reduce eval_days or wait for more data`, n_train: trainTips.length, n_eval: evalTips.length }, 400);
         return;
       }
 
@@ -15571,7 +15592,10 @@ setInterval(load, 60000);
 
       const MIN_EV = 4;
       const bt = { pre: [], post: [] };
-      for (const t of tips) {
+      // CRITICAL: backtest consome evalTips (out-of-sample) quando eval_days>0.
+      // Calib treinado em trainTips; aplicado em tips nunca vistas pelo PAV.
+      const backtestSet = evalDays > 0 ? evalTips : tips;
+      for (const t of backtestSet) {
         if (!Number.isFinite(t.p_model) || !Number.isFinite(t.odd)) continue;
         const pCalib = applyCalib(t.p_model, calibByMarket[t.market]?.bins);
         const evRaw = (t.p_model * t.odd - 1) * 100;
@@ -15582,15 +15606,30 @@ setInterval(load, 60000);
         if (passRaw) bt.pre.push({ p: t.p_model, ev: evRaw, profit, result: t.result, clv: t.clv_pct });
         if (passCalib) bt.post.push({ p: pCalib, ev: evCalib, profit, result: t.result, clv: t.clv_pct });
       }
+      // IC 95% bootstrap pra ROI: sem assumir distribuição normal usa SE clássico
+      // baseado em variance dos profits. Wilson n→inf é equivalente a normal SE
+      // quando n>=30. Com n<30 IC é largo e isso é o ponto.
+      const roiCi = (lst) => {
+        if (lst.length < 2) return null;
+        const profits = lst.map(t => t.profit);
+        const mean = profits.reduce((a, b) => a + b, 0) / profits.length;
+        const variance = profits.reduce((a, b) => a + (b - mean) ** 2, 0) / (profits.length - 1);
+        const se = Math.sqrt(variance / profits.length);
+        const lower = (mean - 1.96 * se) * 100;
+        const upper = (mean + 1.96 * se) * 100;
+        return { lower: +lower.toFixed(1), upper: +upper.toFixed(1), se_pp: +(se * 100).toFixed(2) };
+      };
       const summarize = (label, lst) => {
         if (!lst.length) return { label, n: 0 };
         const wins = lst.filter(t => t.result === 'win').length;
         const profit = lst.reduce((a, t) => a + t.profit, 0);
         const samples = lst.map(t => ({ p: t.p, y: t.result === 'win' ? 1 : 0 }));
+        const ci = roiCi(lst);
         return {
           label, n: lst.length, wins,
           hit: +(wins / lst.length * 100).toFixed(1),
           roi: +(profit / lst.length * 100).toFixed(1),
+          roi_ci95: ci, // {lower, upper, se_pp} em pp; null se n<2
           profit: +profit.toFixed(2),
           avgP: +(lst.reduce((a, t) => a + t.p, 0) / lst.length).toFixed(3),
           avgEV: +(lst.reduce((a, t) => a + t.ev, 0) / lst.length).toFixed(1),
@@ -15599,7 +15638,11 @@ setInterval(load, 60000);
         };
       };
 
-      const backtest = { pre: summarize('PRE_raw', bt.pre), post: summarize('POST_calib', bt.post) };
+      const backtest = {
+        eval_window: evalDays > 0 ? `last_${evalDays}_days_out_of_sample` : 'in_sample_legacy',
+        pre: summarize(evalDays > 0 ? 'PRE_raw_eval' : 'PRE_raw', bt.pre),
+        post: summarize(evalDays > 0 ? 'POST_calib_eval' : 'POST_calib', bt.post),
+      };
 
       const payload = {
         version: 1,
@@ -15609,7 +15652,12 @@ setInterval(load, 60000);
         target: 'outcome (win/loss)',
         prior: { source: 'p_implied_close', vig: VIG, alpha: ALPHA },
         minBin,
-        nSamples: settled,
+        nSamples: settled, // = trainTips.length
+        n_train: trainTips.length,
+        n_eval: evalTips.length,
+        train_window_days: days,
+        eval_window_days: evalDays,
+        eval_mode: evalDays > 0 ? 'walk_forward_out_of_sample' : 'in_sample_legacy',
         filter,
         markets: calibByMarket,
         backtest,
@@ -15630,6 +15678,11 @@ setInterval(load, 60000);
             written: targetPath,
             sport,
             nSamples: settled,
+            n_train: trainTips.length,
+            n_eval: evalTips.length,
+            train_window_days: days,
+            eval_window_days: evalDays,
+            eval_mode: evalDays > 0 ? 'walk_forward_out_of_sample' : 'in_sample_legacy',
             markets: Object.fromEntries(Object.entries(calibByMarket).map(([k, v]) => [k, { nBins: v.bins.length, nTotal: v.nTotal }])),
             backtest,
             skipped,

@@ -1595,6 +1595,47 @@ MT_RESTORE_MIN_N=30
 MT_RESTORE_DAYS=14
 MT_RESTORE_MIN_ROI=0
 MT_RESTORE_MIN_CLV=0
+
+# Auto-promote (mais conservador 2026-05-06):
+MT_AUTO_PROMOTE=true
+MT_AUTO_PROMOTE_WINDOW_DAYS=30
+MT_AUTO_PROMOTE_MIN_SETTLED=150       # era 30; reduz P(false positive) em multi-comparison
+MT_AUTO_PROMOTE_MIN_ROI=2             # ROI mín pra promover
+MT_AUTO_PROMOTE_REQUIRE_CI=true       # NOVO: gate IC 95% lower > threshold
+MT_AUTO_PROMOTE_CI_LOWER_THRESHOLD=0  # IC 95% lower bound em pp
+MT_AUTO_PROMOTE_REVERT_DAYS=14
+MT_AUTO_PROMOTE_REVERT_ROI=-5
+MT_AUTO_PROMOTE_LEAGUE_MIN_N=10
+MT_AUTO_PROMOTE_LEAGUE_ROI=-10
+MT_AUTO_PROMOTE_LEAGUE_RESTORE=-3
+```
+
+### Walk-forward Markov refit
+
+```env
+TENNIS_CALIB_REFIT_DISABLED=false   # cron nightly 04h
+TENNIS_CALIB_EVAL_DAYS=30           # NOVO: split temporal (0=in-sample legacy)
+# Endpoint: /admin/mt-refit-calib?sport=tennis&days=90&eval_days=30&write=true&key=<K>
+# Train em [-(days+eval_days), -eval_days]; eval em últimos eval_days (out-of-sample).
+```
+
+### Frozen holdout
+
+```env
+FROZEN_HOLDOUT_DAYS=0               # default OFF (legacy). Setar 60-90 reserva últimos N dias
+FROZEN_HOLDOUT_KELLY_DAYS=          # override per-system (kelly_auto_tune)
+FROZEN_HOLDOUT_MT_AUTO_PROMOTE_DAYS=
+# Endpoint: /admin/holdout-status
+```
+
+### Baseline shadow
+
+```env
+BASELINE_SHADOW_DISABLED=false       # default ativo
+BASELINE_SHADOW_MIN_EV=5             # %
+BASELINE_SHADOW_MIN_ODD=1.30
+BASELINE_SHADOW_MAX_ODD=5.00
+# Endpoint: /admin/baseline-shadow-stats?days=90
 ```
 
 ### Autonomy / loops

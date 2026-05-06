@@ -22223,7 +22223,10 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
     try {
       const http = require('http');
       const port = process.env.PORT || 3000;
-      const path = `/admin/mt-refit-calib?sport=tennis&days=90&write=true&key=${encodeURIComponent(adminKey)}`;
+      // Walk-forward: train 90d, eval últimos 30d (out-of-sample). Reporta IC 95% ROI.
+      // Override eval_days via TENNIS_CALIB_EVAL_DAYS env (0 = legacy in-sample).
+      const evalDays = parseInt(process.env.TENNIS_CALIB_EVAL_DAYS ?? '30', 10);
+      const path = `/admin/mt-refit-calib?sport=tennis&days=90&eval_days=${evalDays}&write=true&key=${encodeURIComponent(adminKey)}`;
       const r = await new Promise((resolve, reject) => {
         const req = http.get('http://localhost:' + port + path, (res) => {
           let body = '';
