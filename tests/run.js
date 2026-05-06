@@ -30,7 +30,11 @@ function makeT(suite) {
 }
 
 const testDir = __dirname;
-const files = fs.readdirSync(testDir).filter(f => f.startsWith('test-') && f.endsWith('.js'));
+// 2026-05-06: ordering determinístico — readdir order varia entre OS,
+// importante quando algum test depende de ordem (DB state etc).
+const files = fs.readdirSync(testDir)
+  .filter(f => f.startsWith('test-') && f.endsWith('.js'))
+  .sort();
 
 for (const file of files) {
   const suite = file.replace(/^test-|\.js$/g, '');

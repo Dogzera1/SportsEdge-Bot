@@ -105,9 +105,12 @@ async function runBackup(opts = {}) {
     // SQLite não aceita bind em VACUUM INTO; sanitizar pra evitar SQL injection
     // se caller passar dest controlado por user (CLI arg). Aqui aceitamos só
     // chars [\w\-./:\\] (ASCII path safe).
-    if (!/^[\w\-./:\\ ]+$/.test(dest)) {
+    // 2026-05-06: bloqueio explícito de `..` (path traversal). Antes regex char
+    // permitia "../../../etc/passwd" — VACUUM INTO escreveria onde quisermos
+    // que apontasse. CLI argv pode vir de hook envoy externo.
+    if (!/^[\w\-./:\\ ]+$/.test(dest) || dest.includes('..')) {
       db.close();
-      return { ok: false, reason: 'unsafe_dest_chars', dest };
+      return { ok: false, reason: 'unsafe_dest_chars_or_traversal', dest };
     }
     // Escape single quotes in path (Windows users).
     const escaped = dest.replace(/'/g, "''");

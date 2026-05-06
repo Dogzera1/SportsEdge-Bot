@@ -7791,6 +7791,28 @@ setInterval(load, 10000);
   }
 
   if (p === '/save-user' && req.method === 'POST') {
+    // 2026-05-06: rate limit per-IP — antes ADMIN_KEY suficiente, IP único do
+    // bot tinha quota infinita pra hijack/flood inserts. 60 reqs/min é limite
+    // generoso pra subscribe loop normal mas detecta abuso.
+    const ip = String(req.socket?.remoteAddress || '');
+    if (ip) {
+      global._saveUserRateMap = global._saveUserRateMap || new Map();
+      const _now = Date.now();
+      const cur = global._saveUserRateMap.get(ip) || { count: 0, windowStart: _now };
+      if (_now - cur.windowStart > 60_000) { cur.count = 0; cur.windowStart = _now; }
+      cur.count++;
+      global._saveUserRateMap.set(ip, cur);
+      if (cur.count > 60) {
+        sendJson(res, { ok: false, error: 'rate_limit', count: cur.count }, 429);
+        return;
+      }
+      // Cleanup ocasional do Map (evita leak)
+      if (global._saveUserRateMap.size > 200) {
+        for (const [k, v] of global._saveUserRateMap) {
+          if (_now - v.windowStart > 5 * 60_000) global._saveUserRateMap.delete(k);
+        }
+      }
+    }
     let body = ''; req.on('data', d => body += d);
     req.on('end', () => {
       try {
@@ -8088,7 +8110,7 @@ setInterval(load, 10000);
       const { tennisSinglePlayerNameMatch } = require('./lib/tennis-match');
       const winner = best.winner;
       const score = best.final_score || '';
-      const _walkoverRe = /\b(ret|retir|w\.?o\.?|walkover|abandoned|cancell?ed|no\s*contest|w\/o|wd\b|withdrew|disqualif|\bdq\b|\bnc\b|overturned)\b/i;
+      const _walkoverRe = /\b(ret|retir|w\.?o\.?|walkover|abandoned|cancell?ed|no\s*contest|w\/o|wd\b|withdrew|disqualif|\bdq\b|\bnc\b|overturned|forfeit|forfeited)\b/i;
       const isWalkover = score && _walkoverRe.test(score);
       const nameMatched = tennisSinglePlayerNameMatch(tip.tip_participant, winner);
       const result = isWalkover ? 'void' : (nameMatched ? 'win' : 'loss');
@@ -8301,13 +8323,13 @@ setInterval(load, 10000);
               VALUES (?, ?, ?, NULL, ?, NULL, ?, ?, ?)
             `).run(row.id, sport, row.result || null, row.profit_reais ?? null, 'admin', 'reopen', '/reopen-tip');
           } catch (_) {}
-          // Reverte o impacto no current_banca (soma inversa do profit_reais).
-          if (Number.isFinite(row.profit_reais) && row.profit_reais !== 0) {
-            const bk = stmts.getBankroll.get(sport);
-            if (bk) {
-              const nova = parseFloat((bk.current_banca - row.profit_reais).toFixed(2));
-              db.prepare(`UPDATE bankroll SET current_banca = ? WHERE sport = ?`).run(nova, sport);
-            }
+          // 2026-05-06: delta-update atômico (bankroll -= profit_reais).
+          // Antes read+sum+write deixava race com /settle paralelo: read pegava
+          // bk stale, depois write sobrescrevia o delta de /settle concurrent.
+          // UPDATE += em SQLite é atômico por single-statement.
+          if (r.changes > 0 && Number.isFinite(row.profit_reais) && row.profit_reais !== 0) {
+            db.prepare(`UPDATE bankroll SET current_banca = round(current_banca - ?, 2), updated_at = datetime('now') WHERE sport = ?`)
+              .run(row.profit_reais, sport);
           }
           return { ok: true, changes: r.changes, revertedProfit: row.profit_reais };
         })();
@@ -8366,9 +8388,10 @@ setInterval(load, 10000);
             : parseFloat((-stakeR).toFixed(2));
           db.prepare(`UPDATE tips SET stake_reais = ?, profit_reais = ? WHERE id = ?`).run(stakeR, profitR, id);
 
-          if (bk && profitR !== 0) {
-            const nova = parseFloat((bk.current_banca + profitR).toFixed(2));
-            db.prepare(`UPDATE bankroll SET current_banca = ? WHERE sport = ?`).run(nova, sport);
+          if (profitR !== 0) {
+            // 2026-05-06: delta-update atômico (sem race com /settle paralelo).
+            db.prepare(`UPDATE bankroll SET current_banca = round(current_banca + ?, 2), updated_at = datetime('now') WHERE sport = ?`)
+              .run(profitR, sport);
           }
           return { ok: true, result, profitR };
         })();
@@ -10975,7 +10998,7 @@ setInterval(load, 60000);
       const _norm = s => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
       // 2026-04-28: regex expandida pra MMA — DQ (disqualification),
       // NC (no contest abreviado), TKO N/A, technical decision overturned.
-      const _walkoverRe = /\b(ret|retir|w\.?o\.?|walkover|abandoned|cancell?ed|no\s*contest|w\/o|wd|withdrew|disqualif|\bdq\b|\bnc\b|overturned)\b/i;
+      const _walkoverRe = /\b(ret|retir|w\.?o\.?|walkover|abandoned|cancell?ed|no\s*contest|w\/o|wd|withdrew|disqualif|\bdq\b|\bnc\b|overturned|forfeit|forfeited)\b/i;
 
       // Map sport→game_in_match_results (CS legado é 'cs' OR 'cs2')
       const gameMap = { lol: ['lol','esports'], dota2: ['dota2','esports'], cs: ['cs','cs2'], cs2: ['cs','cs2'], valorant: ['valorant','esports'], tennis: ['tennis'], football: ['football'], mma: ['mma'], snooker: ['snooker'], darts: ['darts'], tabletennis: ['tabletennis'] };
@@ -14564,15 +14587,17 @@ setInterval(load, 60000);
       const row = db.prepare(`SELECT id, sport, profit_reais, result FROM tips WHERE id = ?`).get(id);
       if (!row) { sendJson(res, { error: 'tip não encontrada' }, 404); return; }
       if (row.result == null) { sendJson(res, { ok: true, skipped: true, reason: 'já está pending' }); return; }
-      // Reverte impacto no bankroll antes de zerar
-      if (Number.isFinite(Number(row.profit_reais))) {
-        const bk = db.prepare(`SELECT current_banca FROM bankroll WHERE sport = ?`).get(row.sport);
-        if (bk) {
-          const nova = +(bk.current_banca - Number(row.profit_reais)).toFixed(2);
-          db.prepare(`UPDATE bankroll SET current_banca = ?, updated_at = datetime('now') WHERE sport = ?`).run(nova, row.sport);
+      // 2026-05-06: tx atômica + delta-update.
+      // Antes: read+sum+write race com /settle paralelo. UPDATE tip + UPDATE
+      // bankroll ficavam fora de tx.
+      const profitToRevert = Number(row.profit_reais) || 0;
+      db.transaction(() => {
+        const r = db.prepare(`UPDATE tips SET result = NULL, profit_reais = NULL, settled_at = NULL WHERE id = ?`).run(id);
+        if (r.changes > 0 && profitToRevert !== 0) {
+          db.prepare(`UPDATE bankroll SET current_banca = round(current_banca - ?, 2), updated_at = datetime('now') WHERE sport = ?`)
+            .run(profitToRevert, row.sport);
         }
-      }
-      db.prepare(`UPDATE tips SET result = NULL, profit_reais = NULL, settled_at = NULL WHERE id = ?`).run(id);
+      })();
       try {
         db.prepare(`
           INSERT INTO tip_settlement_audit (tip_id, sport, prev_result, new_result, prev_profit_reais, new_profit_reais, actor, reason, source)
@@ -14642,16 +14667,16 @@ setInterval(load, 60000);
       const reverts = [];
       if (apply) {
         for (const t of suspects) {
-          if (Number.isFinite(Number(t.profit_reais))) {
-            const bk = db.prepare(`SELECT current_banca FROM bankroll WHERE sport = ?`).get(t.sport);
-            if (bk) {
-              const nova = +(bk.current_banca - Number(t.profit_reais)).toFixed(2);
-              db.prepare(`UPDATE bankroll SET current_banca = ?, updated_at = datetime('now') WHERE sport = ?`)
-                .run(nova, t.sport);
+          // 2026-05-06: tx atômica + delta-update (anti-race com /settle).
+          const profitToRevert = Number(t.profit_reais) || 0;
+          db.transaction(() => {
+            const r = db.prepare(`UPDATE tips SET result = NULL, profit_reais = NULL, settled_at = NULL WHERE id = ?`)
+              .run(t.id);
+            if (r.changes > 0 && profitToRevert !== 0) {
+              db.prepare(`UPDATE bankroll SET current_banca = round(current_banca - ?, 2), updated_at = datetime('now') WHERE sport = ?`)
+                .run(profitToRevert, t.sport);
             }
-          }
-          db.prepare(`UPDATE tips SET result = NULL, profit_reais = NULL, settled_at = NULL WHERE id = ?`)
-            .run(t.id);
+          })();
           try {
             db.prepare(`
               INSERT INTO tip_settlement_audit (tip_id, sport, prev_result, new_result, prev_profit_reais, new_profit_reais, actor, reason, source)
@@ -23929,7 +23954,7 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
         // idem. ESPN sometimes retorna winner mesmo em RET; sem essa guard,
         // tip do perdedor virava loss fantasma.
         const _scoreStr = String(score || '').trim();
-        const _walkoverRe = /\b(ret|retir|w\.?o\.?|walkover|abandoned|cancell?ed|no\s*contest|w\/o|wd\b|withdrew|disqualif|\bdq\b|\bnc\b|overturned)\b/i;
+        const _walkoverRe = /\b(ret|retir|w\.?o\.?|walkover|abandoned|cancell?ed|no\s*contest|w\/o|wd\b|withdrew|disqualif|\bdq\b|\bnc\b|overturned|forfeit|forfeited)\b/i;
         const _isWalkover = _scoreStr && _walkoverRe.test(_scoreStr);
         // HARD GUARD: MT-promoted tips (match_id LIKE '%::mt::%' OR market_type non-ML)
         // jamais passam pelo /settle name-match — esse endpoint só sabe casar winner

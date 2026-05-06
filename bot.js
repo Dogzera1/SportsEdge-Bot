@@ -490,7 +490,11 @@ Máximo 150 palavras.`;
   }
 
   if (!iaResp) return { passed: true, reason: 'ia_no_response', conf: null };
-  if (/SEM_EDGE/i.test(iaResp)) return { passed: false, reason: 'IA SEM_EDGE', conf: null };
+  // 2026-05-06: policy `feedback_ai_p_gate` — IA NUNCA decide P. Antes
+  // SEM_EDGE/pick_diferente retornavam passed:false (kill da tip). Memória
+  // explícita: IA é advisor, só downgrade conf, não bloqueia. Agora retorna
+  // passed:true com conf:BAIXA — caller respeita gate de BAIXA via tier.
+  if (/SEM_EDGE/i.test(iaResp)) return { passed: true, reason: 'IA SEM_EDGE → conf BAIXA', conf: 'BAIXA' };
 
   const iaTip = _parseTipMl(iaResp);
   if (!iaTip) return { passed: true, reason: 'ia_no_tipml', conf: null };
@@ -500,7 +504,7 @@ Máximo 150 palavras.`;
   const samePick = norm(iaPick) === norm(pickTeam)
     || norm(pickTeam).includes(norm(iaPick))
     || norm(iaPick).includes(norm(pickTeam));
-  if (!samePick) return { passed: false, reason: `IA pick diferente (modelo=${pickTeam} IA=${iaPick})`, conf: null };
+  if (!samePick) return { passed: true, reason: `IA pick diferente (modelo=${pickTeam} IA=${iaPick}) → conf BAIXA`, conf: 'BAIXA' };
 
   // Validador P-vs-modelo (soft): nunca rejeita, apenas baixa confidence se diverge.
   const _v = _validateTipPvsModel(iaResp, pickP, tolPp);
@@ -10572,7 +10576,11 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
       if (!psGame) { await send(token, chatId, '❌ Sport inválido. Use: valorant, cs, dota, lol'); return; }
       await send(token, chatId, `🔄 Iniciando sync histórico ${psGame} (PandaScore)... (1-3min)`);
       const { spawn } = require('child_process');
-      const proc = spawn('node', ['scripts/sync-pandascore-history.js', '--game', psGame, '--from', '2024-01-01', '--max', '5000'], {
+      // 2026-05-06: sliding window 90d em vez de fixed 2024-01-01 — script ordenado
+      // -end_at e MAX=5000, então fixed FROM nunca preenche pasado distante quando
+      // dados recentes lotam o limit. 90d cobre janela ELO/form e re-roda incremental.
+      const _fromDate = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+      const proc = spawn('node', ['scripts/sync-pandascore-history.js', '--game', psGame, '--from', _fromDate, '--max', '5000'], {
         cwd: __dirname,
         env: process.env,
       });
