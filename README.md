@@ -1,1220 +1,1920 @@
 # SportsEdge Bot
 
-Bot autônomo de Telegram para análise automática de apostas esportivas, baseado em Valor Esperado (EV) e Kelly Criterion, alimentado por IA (DeepSeek ou Claude) com **modelo determinístico como source of truth** e **Pinnacle/Betfair como sharp anchor**.
+Sistema autônomo multi-esporte de detecção e dispatch de apostas de valor (Value Betting) via Telegram, com ML próprio, calibração isotônica, IA opcional como segunda opinião e dezenas de gates anti-edge-fictício.
 
-> **Status (Abril 2026 — atualização meio-do-mês):** Sistema multi-esporte com **9 esportes ativos**, todos com IA + gates anti-edge-fictício:
+> **Última atualização:** 2026-05-06 (Maio/2026 release)
 >
-> | Esporte | Bot | Fonte odds primária (sharp) | Stats live | Modelo ML | IA |
-> |---|---|---|---|---|---|
-> | **LoL Esports** | `@Lolbetting_bot` | **Pinnacle** (per-map via `period=N`) → SX.Bet alt | Riot API + PandaScore + gol.gg | forma+H2H+comp+Elo | DeepSeek |
-> | **Dota 2** | (compartilha bot LoL) | **Pinnacle** (per-map) → SX.Bet alt | OpenDota + Steam Realtime API | forma+H2H+map model | DeepSeek |
-> | **CS2** | `@Csbettor_bot` | Pinnacle (com tier-1 detection) | HLTV scorebot | Elo + HLTV form | DeepSeek (segunda opinião) |
-> | **Valorant** | (compartilha bot CS) | Pinnacle | VLR.gg (mapa/round/side) | Elo + Bayesian map→série | DeepSeek (segunda opinião) |
-> | **MMA/Boxe** | `@Ufcbettor_bot` | The Odds API (preferindo Pinnacle/Betfair) | ESPN + Sofascore fallback | record histórico | DeepSeek |
-> | **Tênis** | `@Tennisbet1_bot` | Pinnacle → The Odds API | Sofascore live | Sackmann Elo por superfície | DeepSeek |
-> | **Futebol** | `@Betfut1_bot` | The Odds API | API-Football + Sofascore | Poisson + home boost | DeepSeek |
-> | **Darts** | `@Dartsbet_bot` | Sofascore | Sofascore (sets/legs) | 3DA + WR sample-weighted | DeepSeek (segunda opinião) |
-> | **Snooker** | `@Snookerbet_bot` | Pinnacle/Betfair | CueTracker WR temporada | ranking-log + WR | DeepSeek (segunda opinião) |
-> | **Tênis de Mesa** | `@TTbettor_bot` | Pinnacle | Sofascore | Elo + form | DeepSeek (segunda opinião) |
->
-> **Filosofia central (mid-Abr 2026):**
-> - **Pinnacle/Betfair = ground truth** — `/odds` prioriza-os como primary; outras casas vão como `_alternative`
-> - **Modelo determinístico = source of truth da P** — IA só sugere; se P da IA diverge >8pp do modelo → rejeita (`_validateTipPvsModel`)
-> - **Sharp divergence gate** — se P do modelo diverge do Pinnacle dejuiced além do cap por sport → rejeita (edge é provavelmente fictício)
-> - **Caps tier-aware** — em CS tier 2+ (CCT/regional/academy) e MMA non-sharp: conf máx MÉDIA, stake máx 1u, EV mín ↑
->
-> **Produção (Railway):** `start.js` sobe dois processos (`server.js` + `bot.js`). Steam RT firing pra Dota (delay ~15s vs 3min do anti-cheat OpenDota). Live Scout monitora gaps de stats e alerta admin via Telegram quando persistente >5min.
+> **Filosofia central:** modelo determinístico = source of truth. Pinnacle/Betfair = ground truth do mercado. IA (DeepSeek) só sugere — se P da IA diverge >8pp do modelo, tip é rejeitada. Se modelo diverge >cap pp do Pinnacle dejuiced, tip é rejeitada (edge provavelmente fictício).
 
 ---
 
-## Quick Start — Env Vars essenciais
+## Índice
 
-```env
-# ── Telegram (um token por esporte, do @BotFather) ──
-TELEGRAM_TOKEN_ESPORTS=<token>         # cobre LoL + Dota 2
-TELEGRAM_TOKEN_MMA=<token>             # cobre MMA + Boxe
-TELEGRAM_TOKEN_TENNIS=<token>
-TELEGRAM_TOKEN_FOOTBALL=<token>
-TELEGRAM_TOKEN_DARTS=<token>
-TELEGRAM_TOKEN_SNOOKER=<token>
-
-# ── IA (obrigatório) ──
-DEEPSEEK_API_KEY=sk-...
-
-# ── Odds — Pinnacle (guest, sem auth, funciona do BR) ──
-PINNACLE_LOL=true                      # LoL pre-match + live (per-map via period)
-PINNACLE_DOTA=true                     # Dota 2 pre-match + live (per-map)
-PINNACLE_TENNIS=true                   # suplementa The Odds API
-
-# ── Odds — SX.Bet (opcional, melhor para LoL/Dota live per-map) ──
-SXBET_ENABLED=true
-
-# ── Odds — The Odds API (MMA/Tênis/Futebol) ──
-THE_ODDS_API_KEY=<key>
-
-# ── Stats — APIs externas ──
-LOL_API_KEY=<key>                      # Riot
-PANDASCORE_TOKEN=<token>               # PandaScore (LoL/Dota stats)
-API_SPORTS_KEY=<key>                   # API-Football (soccer)
-SOFASCORE_PROXY_BASE=<url>             # Public-Sofascore-API deploy Railway — ver RAILWAY_DEPLOY.md
-
-# ── Admin + Risk ──
-ADMIN_USER_IDS=<id1,id2>               # seu ID do Telegram
-ADMIN_KEY=<chave_aleatoria>
-GLOBAL_RISK_PCT=0.10
-SPORT_RISK_PCT=0.20
-
-# ── Esportes enabled flags ──
-ESPORTS_ENABLED=true
-MMA_ENABLED=true
-TENNIS_ENABLED=true
-FOOTBALL_ENABLED=true
-DARTS_ENABLED=true
-SNOOKER_ENABLED=true
-CS_ENABLED=true                        # CS2 com Elo + HLTV scorebot
-VAL_ENABLED=true                       # Valorant com VLR.gg live
-TT_ENABLED=true                        # Tênis de mesa
-
-# ── Anti-edge-fictício (defaults sensatos por sport) ──
-# Sharp divergence cap por sport (modelo P vs Pinnacle dejuiced):
-LOL_MAX_DIVERGENCE_PP=15
-DOTA_MAX_DIVERGENCE_PP=15
-MMA_MAX_DIVERGENCE_PP=10
-FOOTBALL_MAX_DIVERGENCE_PP=10
-CS_MAX_DIVERGENCE_PP=12
-TENNIS_MAX_DIVERGENCE_PP=12
-VAL_MAX_DIVERGENCE_PP=12
-DARTS_MAX_DIVERGENCE_PP=15
-SNOOKER_MAX_DIVERGENCE_PP=15
-TT_MAX_DIVERGENCE_PP=20
-
-# IA second opinion toggle por sport (default true)
-CS_USE_AI=true
-VAL_USE_AI=true
-DARTS_USE_AI=true
-SNOOKER_USE_AI=true
-TT_USE_AI=true
-
-# CS tier 2+ caps
-CS_TIER2_MIN_EV=8.0
-CS_TIER2_MAX_STAKE=1.0
-
-# MMA non-sharp book caps (TheOddsAPI pode entregar BetOnline/FanDuel)
-MMA_MIN_EV=5.0                         # sharp (Pinnacle/Betfair)
-MMA_MIN_EV_NONSHARP=12.0               # non-sharp
-MMA_MAX_STAKE_NONSHARP=1.0
-
-# ── Dota live (Steam RT acelera 5x) ──
-STEAM_WEBAPI_KEY=<key_steam>           # Anti-cheat OpenDota é 3min — Steam RT é ~15s
-
-# ── Live Scout alerts (Telegram) ──
-LIVE_SCOUT_ALERTS=true
-LIVE_SCOUT_CHECK_INTERVAL_MIN=3
-LIVE_SCOUT_ALERT_THRESHOLD_MIN=5
-LIVE_SCOUT_ALERT_COOLDOWN_MIN=60
-```
-
-**Variáveis opcionais** (com defaults): ver seção "Configuração (`.env`)" abaixo.
+1. [Visão geral](#visão-geral)
+2. [Arquitetura](#arquitetura)
+3. [Esportes suportados](#esportes-suportados)
+4. [Quick start](#quick-start)
+5. [Pipeline de tip (end-to-end)](#pipeline-de-tip-end-to-end)
+6. [Modelos](#modelos)
+7. [Camadas de calibração](#camadas-de-calibração)
+8. [Gates anti-edge-fictício](#gates-anti-edge-fictício)
+9. [Risk management & banca](#risk-management--banca)
+10. [Market Tips (MT)](#market-tips-mt)
+11. [Shadow mode](#shadow-mode)
+12. [CLV tracking](#clv-tracking)
+13. [Settlement](#settlement)
+14. [Crons / loops autônomos](#crons--loops-autônomos)
+15. [Detectores cross-book](#detectores-cross-book)
+16. [Polymarket integration](#polymarket-integration)
+17. [Auto-healer & health sentinel](#auto-healer--health-sentinel)
+18. [Banco de dados](#banco-de-dados)
+19. [HTTP endpoints (server.js)](#http-endpoints-serverjs)
+20. [Comandos Telegram](#comandos-telegram)
+21. [Dashboards](#dashboards)
+22. [Estrutura de pastas](#estrutura-de-pastas)
+23. [Variáveis de ambiente](#variáveis-de-ambiente)
+24. [Deployment (Railway)](#deployment-railway)
+25. [Desenvolvimento local](#desenvolvimento-local)
+26. [Testes](#testes)
+27. [Subprojetos](#subprojetos)
+28. [Memory & decisions log](#memory--decisions-log)
+29. [Troubleshooting](#troubleshooting)
 
 ---
 
-## O que mudou (Abril 2026 — changelog)
+## Visão geral
 
-### 🛡️ Mid-Abril 2026 — Anti-edge-fictício + IA universal + Dashboard pro
+SportsEdge é um bot de Telegram autônomo que:
 
-**1. IA expandida pra TODOS os bots** (`_aiSecondOpinion` em `bot.js`)
-- Antes: IA só rodava em LoL/Dota/MMA/Tennis/Football
-- Agora: + CS, Valorant, Darts, Snooker, TT (todos via helper unificado)
-- Helper recebe `contextBlock` (Elo/form/H2H/live) e valida pick + P do modelo
-- Toggle: `<SPORT>_USE_AI=true` (default) — `false` desativa
-- Fail-open: erro de IA não bloqueia tip
+- **Descobre partidas** em múltiplas APIs (Pinnacle, SX.Bet, PandaScore, Sofascore, ESPN, HLTV, VLR, OpenDota, Steam, Riot, OddsAPI, etc.).
+- **Calcula P (probabilidade real)** com ML treinado por sport (logistic + isotônico, alguns com GBDT, Markov para tennis, Poisson+CSV para futebol).
+- **Compara com odds dejuiced de Pinnacle** (sharp anchor) para detectar edge.
+- **Filtra com 12+ camadas de gates** (sharp divergence, bucket gate, EV cap data-driven, learned corrections, MT leak guard, etc.).
+- **Decide stake via Kelly fracionado** com auto-tune diário per-sport e cap por confidence.
+- **Dispara DM no Telegram** (1 bot por sport).
+- **Settla automaticamente** via match_results + propagation entre `tips` ↔ `market_tips_shadow`.
+- **Registra CLV** (closing line value) pra avaliar quality do edge a posteriori.
+- **Auto-cura** loops travados, isotonic stale, drawdown alto, regime change (CUSUM).
+- **Reporta** tudo em dashboards web (`/dashboard`, `/bi`, `/admin`, `/logs`).
 
-**2. `_validateTipPvsModel` em todos os bots**
-- IA reporta apenas `P` no formato TIP_ML (sistema calcula EV via P × odd − 1)
-- Se IA escreve P divergente do modelo > 8pp → tip rejeitada (IA ignorou modelo)
-- Elimina tips com edge fictício causado por IA "alucinando" probabilidade
-
-**3. Sharp divergence gate** (`_sharpDivergenceGate` em `bot.js`)
-- Roda em todos os bots; só dispara quando odds vêm de Pinnacle/Betfair
-- Bloqueia tip quando `|modelP − impliedP_dejuiced| > cap`
-- Filosofia: se Pinnacle (book sharper do mundo, com volume de profissionais) discorda do modelo em >12-15pp, modelo está provavelmente errado
-
-| Sport | Env | Default cap |
-|---|---|---|
-| MMA | `MMA_MAX_DIVERGENCE_PP` | 10pp |
-| Football | `FOOTBALL_MAX_DIVERGENCE_PP` | 10pp |
-| CS | `CS_MAX_DIVERGENCE_PP` | 12pp |
-| Tennis | `TENNIS_MAX_DIVERGENCE_PP` | 12pp |
-| Valorant | `VAL_MAX_DIVERGENCE_PP` | 12pp |
-| LoL/Dota | `LOL_MAX_DIVERGENCE_PP` / `DOTA_MAX_DIVERGENCE_PP` | 15pp |
-| Darts/Snooker | `DARTS_/SNOOKER_MAX_DIVERGENCE_PP` | 15pp |
-| TT | `TT_MAX_DIVERGENCE_PP` | 20pp |
-
-**4. Tier-aware caps** (CS + MMA)
-- **CS**: regex `CS_TIER1_RE` detecta Major/IEM/ESL Pro/EPL/BLAST/Cologne/Katowice/etc. Em tier 2+ (CCT, NODWIN, regional, academy): EV mín 8% (vs 5%), conf máx **MÉDIA**, stake máx **1u**
-- **MMA**: detecta book sharp; quando TheOddsAPI entrega BetOnline/FanDuel/etc (non-sharp): EV mín 12% (vs 5%), conf rebaixada ALTA→MÉDIA, stake máx 1u, alerta visual no DM
-- **MMA `/mma-matches`**: agora prefere Pinnacle/Betfair na lista de bookmakers (era `bookmakers[0]`)
-
-**5. Pinnacle prioritário no `/odds` (LoL/Dota)**
-- Antes: `reduce` pegava melhor preço (line shopping) → bot calculava EV em cima de SX.Bet (linha melhor) e Pinnacle ia como `_sharp` reference
-- Agora: Pinnacle é **primary** quando disponível; SX.Bet vai como `_alternative`
-- DM mostra `🏦 Casa: *Pinnacle* (alt SX.Bet: 3.52/1.53)` — usuário vê os dois
-- Calibração de EV é sempre vs Pinnacle (sharp) — elimina falsos positivos
-
-**6. Tip Parser unificado** (`_parseTipMl` em `bot.js`)
-- 4 regexes legacy substituídos por um helper que aceita formato novo (`P:X%|STAKE`) e antigo (`EV:X%|P:Y%|STAKE`)
-- EV ausente é recalculado via P × odd − 1
-- IA agora só fornece P; sistema calcula EV (elimina erro aritmético da IA)
-
-**7. Live data fixes**
-- **Dota**: `STEAM_WEBAPI_KEY` ativada → delay live ~15s (vs 3min OpenDota anti-cheat); cooldown adaptativo (90s com RT / 3min sem); poll live 60s (vs 2min); Pinnacle TTL live 45s (vs 3min); gate stale rejeita snapshot defasado
-- **Valorant**: VLR.gg quebrou (mudaram ordem `class`/`href` no HTML); regex reescrito com lookahead → agora pega mapa/round/side/score corretamente
-- **Tennis**: re-validação de odds antes do DM live — se odd da pick caiu >12% desde análise, aborta (evita "odd invertida" perception)
-- **LFL stats**: confirmado funcionando — Riot livestats popula 1-2min após início (era falso alarme)
-- **Live Scout alerts**: `bot.js:checkLiveScoutGaps` poll a cada 3min; alerta admin via Telegram quando gap persiste >5min (DOTA `no_pandascore_data`, LoL `stats_disabled`, tennis `coverage_missing` etc)
-
-**8. Dashboard de tracking profissional** (`public/dashboard.html` + endpoints novos)
-- **`GET /equity-curve?sport=X&days=N`**: série diária de banca cumulativa, drawdown, Sharpe anualizado, max DD
-- **`GET /hourly-roi?sport=X&days=N`**: ROI por hora do dia (BRT) — heatmap visual
-- **`GET /shadow-vs-active?sport=X&days=N`**: compara performance de tips em modo shadow vs ativas
-- **Cards novos no UI**: Equity Curve (Chart.js dual-axis banca/drawdown), Heatmap horários (24-cell grid colorido), Shadow vs Ativo (cards lado-a-lado com ROI/HR/Δ)
-- **`/roi` corrigido**: push agora = profit 0 (era −stake — corrompia ROI); WIN/LOSS exclusivos no agregado; Brier exclui push
-- **Index SQL adicionados**: `idx_tips_sport_result_settled`, `idx_tips_match_sport`, `idx_tips_sport_sent` (reduz `/roi` de ~800ms pra ~50ms em DB com 10k+ tips)
-- **`/tips-history?status=pending`** agora alias de `status=open` (era bug, retornava todas)
-
-### 🎯 Novos esportes
-
-- **Darts** (`lib/sofascore-darts.js`, `lib/darts-ml.js`): 3-dart average + WR via Sofascore. Modelo com **sample-weighted ML** — jogadores com <10 jogos têm sinal atenuado.
-- **Snooker** (`lib/pinnacle-snooker.js`, `lib/cuetracker.js`, `lib/snooker-ml.js`): odds via Pinnacle, enrichment via **scraper CueTracker** (HTML, cache 6h). Win rate da temporada atual usado como fator principal.
-
-### 🔍 Pinnacle map-winner
-
-Descoberta: field `period` em `/0.1/matchups/{id}/markets/related/straight` expõe odds por mapa individual. `lib/pinnacle.js::getMatchupMoneylineByPeriod(id, N)` retorna moneyline do mapa N. Endpoint `/odds?game=lol&map=N` agora:
-
-1. Tenta SX.Bet (per-map nativo)
-2. Fallback Pinnacle period=N (mapa específico)
-3. Fallback Pinnacle period=0 (série — **só se map não foi solicitado**)
-4. Nunca retorna odds de série como se fossem de mapa (bug anterior corrigido)
-
-Inferência de `currentMap` pelo placar (`score1 + score2 + 1`) para partidas PandaScore-only onde Riot API não fornece `live-gameids`.
-
-### 💰 Substituição OddsPapi → Pinnacle para LoL/Dota
-
-OddsPapi free tier (250 req totais) esgotava rapidamente → 429 backoff de 2h. Pinnacle Guest API:
-- Sem quota
-- Odds sharper (book mais afiada do mundo)
-- Cobre LCK, LCS, LFL, CBLOL, LPL, EMEA Masters, NACL, Rift Legends + Dota 2 DreamLeague, European Pro League, etc.
-- Filtra markets "Kills" e "Maps handicap" (só match winner)
-- Refresh adaptativo: 10min default, 2min quando há matches live
-
-### 🐛 Bug fixes críticos
-
-| Bug | Causa | Fix |
-|---|---|---|
-| `AUTO-MMA Cannot access 'tipStakeAdjMma' before initialization` | TDZ — `tipMsg` usava var declarada 26 linhas depois | Reordenado bloco Kelly/risk antes do `tipMsg` |
-| Bot MMA recebia alertas OddsPapi | `checkCriticalAlerts` pegava primeiro token disponível | Roteamento por `_alertSportFor(alertId)` → esports bot |
-| Darts/snooker não rodavam (`now is not defined`) | Var `now` não declarada no bloco | `const now = Date.now()` adicionado |
-| DeepSeek `missing field messages` (Dota) | Body `{ prompt, max_tokens }` sem `messages` | Ajustado para `{ messages: [{role,content}], max_tokens }` |
-| Handler darts respondia como esports | `handleAdmin` default `sport='esports'` | `handleAdmin(token, chatId, text, callerSport)` recebe sport do bot |
-| Settlement fuzzy match false-positive | `includes` aceitava "IG" em "BIG", "T1" em "T10" | `lib/name-match.js` com threshold score ≥ 0.5 + aliases |
-| Snooker sempre edge=0 | Sem enrichment, `factorCount=1`, shift=0 | CueTracker scraping (`lib/cuetracker.js`) fornece WR |
-| Análise live usando odds de série | Só pegava odds de mapa se Riot tinha `liveGameNumber` | Infere mapa pelo placar quando Riot vazio |
-| Endpoints darts/snooker sumiram | Proxy Sofascore não tinha rotas de live/odds/stats | Adicionadas 3 views Django novas |
-
-### 📊 Calibração ML revisada
-
-Todos os pré-filtros (`darts-ml`, `snooker-ml`) agora retornam `sampleConfidence` e aplicam peso por sample size:
-- Jogador com 0 jogos → confiança 0 → fator efetivamente ignorado
-- Jogador com <10 jogos → sinais atenuados + penalty +1pp no gate
-- Previne falso positivo tipo `Jun Jiang (0 jogos) vs Stan Moody (37 jogos) → EV inflado`
-
-### ⚙️ Economia de tokens pré-jogo
-
-| Esporte | Cooldown pré-jogo antigo | Novo |
-|---|---|---|
-| LoL upcoming | 30 min | 2h (`LOL_UPCOMING_INTERVAL_MIN`) |
-| Tennis pré-jogo | 2h | 6h (`TENNIS_PREGAME_INTERVAL_H`) |
-| MMA | 6h | 12h (`MMA_INTERVAL_H`) |
-
-Live cooldown inalterado (10min LoL, 10min Dota) — mercado muda rápido.
+**Status atual (Maio 2026):**
+- Banca total: ~R$1188 / R$1200 inicial (-0,98% em 30d, em recovery pós-leak audit 2026-05-04)
+- 9 sports ativos: LoL, CS2, Dota2, Valorant, Tennis, Football, MMA, Darts, Snooker, TableTennis, Basket (NBA shadow)
+- ML real ML disabled em LoL/CS (ROI negativo) — auto-rota pra shadow ao invés de rejeitar
+- MT promovido em CS2/Dota2 + Football
+- 91 migrations aplicadas
+- Tennis Markov calib refit nightly (cron 04h)
 
 ---
 
 ## Arquitetura
 
 ```
-┌──────────────────────────────────────────────┐
-│                  start.js                    │
-│       spawna server + bot com                │
-│  auto-restart (backoff exp: 3s→6s→12s→60s)  │
-└──────────┬───────────────────────────────────┘
-           │
-┌──────────▼───────────────────────────────────┐
-│           bot.js — Telegram Bot              │
-│                                              │
-│  Esports (LoL):                              │
-│  • Auto-análise ao vivo (ciclo de 6 min)     │
-│  • Auto-análise pré-jogo (upcoming <=24h)    │
-│  • Alertas de draft e line movement          │
-│  • Patch meta auto-fetch (ddragon, 14d)      │
-│                                              │
-│  MMA (UFC only):                             │
-│  • Loop independente a cada 6h               │
-│  • Filtro: apenas lutas na carta ESPN UFC    │
-│  • ESPN scoreboard + athlete search fallback │
-│  • ML pré-filtro (record ESPN → win rate)    │
-│  • Análise DeepSeek com P modelo no prompt   │
-│                                              │
-│  Tênis:                                      │
-│  • Loop independente a cada 20 min           │
-│  • ESPN rankings ATP/WTA + form do torneio   │
-│  • ML pré-filtro (ranking → probabilidade)   │
-│  • Análise DeepSeek com P modelo no prompt   │
-│                                              │
-│  Futebol:                                    │
-│  • Loop independente a cada 6h               │
-│  • Fixtures pré-carregadas em batch (1 call) │
-│  • API-Football (forma, H2H, standings)      │
-│  • ML com dados reais (lib/football-ml.js)   │
-│                                              │
-│  Darts 🆕:                                   │
-│  • Loop independente a cada 15 min           │
-│  • Sofascore (3-dart avg + WR + stats)       │
-│  • ML sample-weighted (lib/darts-ml.js)      │
-│  • Whitelist PDC (World/Premier League/etc.) │
-│                                              │
-│  Snooker 🆕:                                 │
-│  • Loop independente a cada 15 min           │
-│  • Pinnacle (odds) + CueTracker (WR scrape)  │
-│  • ML ranking-log + sample-weight            │
-│  • Cobre World/UK/Masters/Tour Championship  │
-│                                              │
-│  Todos os esportes:                          │
-│  • Fair Odds calculadas pelo modelo ML       │
-│  • Settlement automático a cada 30 min       │
-│  • Bots Telegram independentes por esporte   │
-└──────────┬───────────────────────────────────┘
-           │ HTTP localhost:PORT
-┌──────────▼───────────────────────────────────┐
-│         server.js — API Aggregator           │
-│                                              │
-│  Fontes de partidas:                         │
-│    Riot + PandaScore (LoL/Dota)              │
-│    The Odds API (MMA/Tênis/Futebol)          │
-│    Sofascore (Darts via proxy curl_cffi)     │
-│    Pinnacle Guest API (Snooker + LoL/Dota)   │
-│                                              │
-│  Live LPL:                                   │
-│    3 camadas: getLive zh-CN + PS running +   │
-│    promoção por tempo (startTime past > 2min)│
-│                                              │
-│  Odds cascata (LoL/Dota per-map):            │
-│    1. SX.Bet (mapa via marketId)             │
-│    2. Pinnacle period=N (mapa via API)       │
-│    3. Pinnacle period=0 (série, sem mapa)    │
-│    Inferência mapa: score1+score2+1          │
-│                                              │
-│  Análise IA:                                 │
-│    DeepSeek (padrão) + Claude (fallback)     │
-│    Pré-filtro ML por esporte com sample-wt   │
-│    Contexto de notícias (Google News RSS)    │
-│    Risk Manager cross-sport (GLOBAL/SPORT%)  │
-│                                              │
-│  Enrichment:                                 │
-│    ESPN (MMA records, tênis rankings)        │
-│    Sofascore proxy (fallback universal)      │
-│    CueTracker (snooker WR — HTML scraping)   │
-│    Sackmann (Elo tênis por superfície)       │
-│    API-Football (futebol)                    │
-│                                              │
-│  sportsedge.db (SQLite via volume Railway)   │
-│  users | events | matches | tips             │
-│  odds_history | match_results | api_usage    │
-│  pro_champ_stats | pro_player_champ_stats    │
-│  synced_matches | settings | bankroll        │
-└──────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────────────┐
+│                       RAILWAY (1 deploy)                          │
+│                                                                   │
+│   start.js (launcher) — spawna 2 processos com auto-restart       │
+│      │   exponential backoff 3s → 6s → 12s → 24s → 60s            │
+│      │   port retry on EADDRINUSE                                 │
+│      │   captura stdout/stderr → /logs/ingest do server (batched) │
+│      │   persiste exit signature em last_child_exit_*.json        │
+│      │                                                            │
+│      ├──► server.js (HTTP API + dashboards, port $PORT)           │
+│      │      • /lol-matches, /odds, /record-tip, /claude proxy ... │
+│      │      • /admin/* (login, today, sport-detail, env-audit ...)│
+│      │      • Endpoints de calibração (/admin/mt-refit-calib)     │
+│      │      • SSE /logs/stream                                    │
+│      │      • SQLite via volume Railway (/data/sportsedge.db)     │
+│      │      • WAL mode, checkpoint TRUNCATE, journal_size_limit   │
+│      │      • signal handlers SIGTERM/SIGINT (graceful shutdown)  │
+│      │                                                            │
+│      └──► bot.js (Telegram + análise + crons)                     │
+│             • Polls de cada sport (cron por sport)                │
+│             • runAutoAnalysis (LoL/Dota) + pollSport (CS/Val/...)  │
+│             • IA (DeepSeek) via /claude proxy do server           │
+│             • Cron handlers (auto-shadow, healer, guardian, ...)  │
+│             • Telegram bots (1 token por sport, 6 bots total)     │
+│             • Mesma DB (WAL mode mode garante leitura concorrente)│
+└───────────────────────────────────────────────────────────────────┘
 ```
 
----
+### Por que dois processos?
 
-## Pré-requisitos
+- **Isolamento de falhas:** crash do bot.js (Telegram polling, scrapers) não derruba HTTP API que outros sistemas (dashboard, agentes externos) dependem.
+- **Restart independente:** isotonic refresh ou OOM em scrapers reinicia só bot.js (servidor mantém uptime).
+- **DB compartilhada via WAL:** ambos abrem `sportsedge.db` em modo WAL — leituras paralelas, writes serializados.
 
-- Node.js 18+
-- Bot Telegram criado via [@BotFather](https://t.me/BotFather) — um por esporte ativo
-- Chave **DeepSeek API** (recomendado) ou **Anthropic Claude API**
-- Chave da LoL Esports API (Riot Games) — esports
-- Token PandaScore — torneios fora da Riot (schedules + stats + sync de resultados pro + live LPL) — esports
-- ~~Chave OddsPapi~~ **(descontinuado Abr/2026)** — free tier de 250 req esgotava em horas. Substituído por Pinnacle Guest API (LoL pré-match + live). OddsPapi permanece suportado via `ODDS_API_KEY` mas é opcional
-- **SX.Bet** — odds LoL/Dota 2 ao vivo (API pública, sem chave); ativar via `SXBET_ENABLED=true`
-- Chave **The Odds API** — odds para futebol, MMA e tênis
-- Chave **API-Football** (`api-sports.io`) — dados de forma, H2H e standings para futebol (free tier: 100 req/dia)
-- Chave **football-data.org** (`FOOTBALL_DATA_TOKEN`) — enriquecimento alternativo para futebol (opcional; free tier disponível)
-- **ESPN API** — gratuita, sem chave; usada automaticamente para MMA e Tênis
-- **Sofascore** (via proxy `Public-Sofascore-API`) — fallback quando ESPN/Sherdog/Tapology vazios (tênis e MMA)
+### Comunicação
+
+- **bot.js → server.js:** HTTP localhost (`http://localhost:$PORT/...`). Padrão usado para `/odds`, `/record-tip`, `/claude`, agents/*, e self-call em /admin/*.
+- **server.js → bot.js:** não direta — bot polla DB pra detectar mudanças (ex: tips voided manualmente).
+- **start.js → server.js:** batched POST `/logs/ingest` com stdout dos children.
 
 ---
 
-## Configuração (`.env`)
+## Esportes suportados
 
-```env
-# ── Telegram — um token por esporte ──
-TELEGRAM_TOKEN_ESPORTS=seu_token_bot
-TELEGRAM_TOKEN_MMA=seu_token_mma        # opcional
-TELEGRAM_TOKEN_TENNIS=seu_token_tennis  # opcional
-TELEGRAM_TOKEN_FOOTBALL=seu_token_fb    # opcional
-TELEGRAM_TOKEN_DARTS=seu_token_darts    # opcional (shadow mode por default)
-TELEGRAM_TOKEN_SNOOKER=seu_token_snk    # opcional (odds via Pinnacle, enrichment via CueTracker)
+| Sport | Bot Telegram | Odds primária | Stats live | Modelo P | IA | Status |
+|---|---|---|---|---|---|---|
+| **LoL Esports** | `@Lolbetting_bot` | Pinnacle (per-map via `period=N`) → SX.Bet alt | Riot API + PandaScore + gol.gg | Logistic+GBDT+isotonic (lol-weights.json) | DeepSeek | ML real disabled → MT shadow puro |
+| **Dota 2** | (compartilha bot LoL) | Pinnacle per-map → SX.Bet alt | OpenDota + Steam Realtime API (~15s vs 3min) | Logistic+isotonic+momentum (dota2-weights.json) | DeepSeek | ML disabled → MT promoted |
+| **CS2** | `@Csbettor_bot` | Pinnacle (tier-1 detection) | HLTV scorebot + cs-map-model | Elo + HLTV form + isotonic (cs2-weights.json) | DeepSeek | ML disabled → MT promoted |
+| **Valorant** | (compartilha bot CS) | Pinnacle | VLR.gg (mapa/round/side/score) | Logistic + Bayesian map→série + isotonic (valorant-weights.json) | DeepSeek | ML shadow only |
+| **MMA/Boxe** | `@Ufcbettor_bot` | The Odds API (prefere Pinnacle/Betfair) | ESPN + Sofascore fallback | Record + ufcstats (mma-weights.json) | DeepSeek | Disabled (default 2026-05-04) |
+| **Tennis** | `@Tennisbet1_bot` | Pinnacle → The Odds API | Sofascore live | Sackmann Elo + trained logistic + Markov (tennis-weights.json) | DeepSeek | Trained model + Markov ativo; calib refit nightly |
+| **Football** | `@Betfut1_bot` | The Odds API + Pinnacle | API-Football + Sofascore + ESPN soccer | Poisson trained + DC + home boost + xG/SoT + fd_features | DeepSeek | MT promoted |
+| **Darts** | `@Dartsbet_bot` | Sofascore | Sofascore (sets/legs) | 3DA + WR sample-weighted (darts-weights.json) | DeepSeek | Disabled (default 2026-05-04) |
+| **Snooker** | `@Snookerbet_bot` | Pinnacle / Betfair | CueTracker WR (cache 6h) | ranking-log + WR (snooker-weights.json) | DeepSeek | Disabled (default 2026-05-04) |
+| **Table Tennis** | `@TTbettor_bot` | Pinnacle | Sofascore | Elo + form (sample-weighted) | DeepSeek | Marginal |
+| **Basket NBA** | (admin DM) | Pinnacle + ESPN | ESPN + Pinnacle | logistic + isotonic + Elo blend (basket-trained.js) | — | Shadow fase 1 (promote critério ≥30 + CLV≥0 em 2sem) |
 
-# ── APIs de IA (pelo menos uma obrigatória) ──
-DEEPSEEK_API_KEY=sk-...                 # DeepSeek (recomendado — mais barato)
-CLAUDE_API_KEY=sk-ant-api03-...         # Anthropic Claude (fallback)
-
-# ── APIs de dados — esports ──
-LOL_API_KEY=sua_chave_lol               # LoL Esports API (Riot Games)
-ODDS_API_KEY=sua_chave_oddspapi         # OddsPapi v4 (aceita: ODDSPAPI_KEY, ODDS_PAPI_KEY, ESPORTS_ODDS_KEY)
-PANDASCORE_TOKEN=seu_token              # PandaScore (obrigatório para sync de stats pro + live LPL)
-
-# ── APIs de dados — futebol/MMA/tênis ──
-THE_ODDS_API_KEY=sua_chave              # The Odds API (odds para futebol, MMA, tênis)
-API_SPORTS_KEY=sua_chave               # API-Football / api-sports.io (forma, H2H, standings, settlement)
-                                        # Alias aceito: APIFOOTBALL_KEY
-FOOTBALL_DATA_TOKEN=sua_chave          # football-data.org v4 (enriquecimento alternativo — opcional)
-# Nota: ESPN API é gratuita e sem chave — MMA e Tênis usam automaticamente
-
-# ── Servidor ──
-SERVER_PORT=8080
-DB_PATH=/data/sportsedge.db            # Railway: volume montado em /data
-                                        # Local: use sportsedge.db
-
-# ── Admin ──
-ADMIN_USER_IDS=123456789,987654321      # IDs numéricos Telegram (obtenha via @userinfobot)
-                                        # Admin é inscrito automaticamente a cada boot
-ADMIN_KEY=sua_chave_admin               # Recomendado: protege rotas admin do server.js (header x-admin-key)
-                                        # Sem esta chave, rotas admin ficam abertas — WARNING no boot
-
-# ── Risk Manager global (cross-sport) ──
-GLOBAL_RISK_PCT=0.10                    # Exposição máxima global (tips pendentes) vs banca total (padrão 10%)
-SPORT_RISK_PCT=0.20                     # Exposição máxima por esporte vs banca do esporte (padrão 20%)
-
-# ── Feature flags ──
-ESPORTS_ENABLED=true
-MMA_ENABLED=true                        # false por padrão se token ausente
-TENNIS_ENABLED=true
-FOOTBALL_ENABLED=true
-DARTS_ENABLED=true                      # requer TELEGRAM_TOKEN_DARTS + SOFASCORE_PROXY_BASE
-SNOOKER_ENABLED=true                    # requer TELEGRAM_TOKEN_SNOOKER (odds Pinnacle, zero config extra)
-
-# ── Shadow mode (modo auditoria — tip gerada mas NÃO envia DM) ──
-# Darts + Snooker: ambos GRADUADOS (default não-shadow).
-# Darts: 3-dart avg + WR via Sofascore (proxy Public-Sofascore-API).
-# Snooker: WR temporada via scraper CueTracker (lib/cuetracker.js) + implied Pinnacle.
-# DARTS_SHADOW=true                     # voltar darts pra shadow
-# SNOOKER_SHADOW=true                   # voltar snooker pra shadow
-
-# ── Darts — Sofascore ──
-# Fonte única (odds + 3-dart avg + 180s + checkouts) via Sofascore
-SOFASCORE_PROXY_BASE=https://sofascore-proxy-production.up.railway.app/api/v1/sofascore
-#   ↑ Proxy deploy no próprio Railway como service separado (ver Public-Sofascore-API/sofascore_service/RAILWAY_DEPLOY.md)
-#   Substitui o ngrok antigo — URL permanente, sem expirar.
-# SOFASCORE_DIRECT=true                 # alternativa: chamar api.sofascore.com direto
-DARTS_TOURNAMENT_WHITELIST=pdc,premier-league-darts,world-matchplay,world-grand-prix,uk-open,players-championship,european-tour,grand-slam,world-series-finals
-
-# ── Snooker — Pinnacle guest API ──
-# Usa endpoint público guest.api.arcadia.pinnacle.com (funciona do BR, sem auth).
-# Betfair foi removido porque bloqueia IPs brasileiros.
-# PINNACLE_API_KEY=...                   # opcional: override da X-API-Key pública
-#                                        # (a chave atual está hardcoded em lib/pinnacle-snooker.js)
-
-# ── LoL Pre-match — Pinnacle (substitui OddsPapi travada) ──
-# Pinnacle cobre LCK, LCS, LFL, CBLOL, LPL, EMEA Masters, NACL, Rift Legends, etc.
-# Sem quota mensal — só rate limit soft (cache 3min interno).
-PINNACLE_LOL=true                       # ativa fetcher Pinnacle para LoL (pre-match + live)
-PINNACLE_LOL_REFRESH_MIN=10             # refresh completo (pre + live), default 10min, mínimo 5
-PINNACLE_LOL_LIVE_REFRESH_MIN=2         # refresh rápido quando há matches LIVE cacheados (default 2min)
-
-# ── Futebol — configuração ──
-FOOTBALL_LEAGUES=soccer_brazil_serie_b,soccer_brazil_serie_c  # ligas a monitorar (The Odds API keys)
-FOOTBALL_EV_THRESHOLD=5.0              # EV mínimo % para emitir tip (padrão: 5.0)
-FOOTBALL_DRAW_MIN_ODDS=2.80            # Odds mínimas para tip de empate (padrão: 2.80)
-
-# Ligas disponíveis para FOOTBALL_LEAGUES:
-#   soccer_brazil_campeonato     — Brasileirão Série A
-#   soccer_brazil_serie_b        — Série B
-#   soccer_brazil_serie_c        — Série C
-#   soccer_argentina_primera     — Primera División
-#   soccer_spain_segunda_division
-#   soccer_germany_3liga
-#   soccer_england_league1
-#   soccer_england_league2
-#   soccer_usa_mls
-#   soccer_chile_primera_division
-#   soccer_colombia_primera_a
-#   soccer_uruguay_primera_division
-
-# ── OddsPapi — ajuste fino (opcional) ──
-ODDSPAPI_BATCH_SIZE=3                   # Torneios por requisição (padrão: 3)
-ODDSPAPI_REFRESH_MIN=60                 # Intervalo entre ciclos de fetch em MINUTOS (padrão: 60; mín: 15)
-ESPORTS_ODDS_TTL_H=3                    # Horas entre ciclos round-robin (padrão: 3h)
-ODDSPAPI_BOOTSTRAP=false                # Após deploy: busca vários lotes seguidos p/ encher cache
-                                        # ⚠️ free tier (250 req) — deixe false para economizar quota
-ODDSPAPI_BOOTSTRAP_MS=5000              # Intervalo mínimo entre lotes no bootstrap (ms, padrão 5000)
-ODDSPAPI_ESPORTS_SPORT_ID=18            # sportId LoL na OddsPapi (padrão 18)
-ODDSPAPI_FORCE_COOLDOWN_S=300           # Cooldown do force=1 por par de times (s) — reduz risco de 429
-ODDSPAPI_LIVE_POLL=0                    # ⚠️ NÃO ative em free tier — 6 fixtures × 3 maps a cada 6s esgota quota em segundos
-
-# ── SX.Bet (LoL / Dota 2 ao vivo) ──
-SXBET_ENABLED=true                      # Obrigatório para odds de LoL live (e Dota 2 live)
-SXBET_BASE_URL=https://api.sx.bet       # Padrão — não precisa alterar
-
-# ── PandaScore — cache ──
-PANDA_CACHE_TTL_MS=60000               # TTL do cache PandaScore em ms (padrão 60s — evita rate limit)
-
-# ── LoL — ligas extras além da whitelist interna ──
-LOL_EXTRA_LEAGUES=slug1,slug2           # opcional, separado por vírgula
-
-# ── Meta LoL (atualizado automaticamente a cada 14 dias via ddragon) ──
-LOL_PATCH_META=Patch 26.X — descrição do meta atual
-PATCH_META_DATE=YYYY-MM-DD
-
-# ── Análise pré-jogo — controle de rigidez (opcional) ──
-LOL_PREGAME_BLOCK_BO3=true             # true = só analisa Bo3/Bo5 após Game 1 (draft conhecido)
-                                        # false = analisa upcoming sem restrição de draft
-
-# ── Thresholds de tip LoL (opcional — valores padrão se omitidos) ──
-LOL_EV_THRESHOLD=5                      # EV mínimo % para emitir tip (padrão: 5)
-LOL_PINNACLE_MARGIN=8                   # Mínimo de edge em pp necessário para considerar uma aposta (padrão: 8)
-LOL_NO_ODDS_CONVICTION=70              # Confiança mínima % para tip sem odds de mercado (padrão: 70)
-LOL_MIN_ODDS=1.50                       # Gate pós-IA: odd mínima (padrão 1.50)
-LOL_MAX_ODDS=4.00                       # Gate pós-IA: odd máxima (padrão 4.00)
-LOL_HIGH_ODDS=3.00                      # Acima disso exige EV extra (LOL_HIGH_ODDS_EV_BONUS, padrão +3pp)
-```
+**Focus funnel (2026-04-24):**
+- **Primary** (full dispatch): LoL, CS2, Tennis
+- **Shadow** (`<SPORT>_SHADOW=true`): Dota2, Valorant, MMA, Darts, Snooker, Football, TT
+- **Disabled hard:** MMA, Darts, Snooker (default 2026-05-04 via `<SPORT>_ENABLED=false`)
 
 ---
 
-## Iniciando
+## Quick start
+
+### Pré-requisitos
+
+- Node.js >= 18
+- 6 tokens de bot do Telegram (@BotFather)
+- Chaves de API: DEEPSEEK_API_KEY, THE_ODDS_API_KEY, PANDASCORE_TOKEN, LOL_API_KEY (Riot), API_FOOTBALL_KEY, STEAM_WEBAPI_KEY
+- Volume persistente para `sportsedge.db` (Railway: `/data/`)
+
+### Instalação
 
 ```bash
+git clone https://github.com/Dogzera1/SportsEdge-Bot.git
+cd SportsEdge-Bot
 npm install
-npm start           # inicia servidor + bot via start.js
-
-# Ou separadamente (servidor DEVE iniciar antes)
-npm run server      # node server.js
-npm run bot         # node bot.js
-
-# Testes unitários (sem dependência de framework)
-npm test            # executa tests/run.js — Kelly, parser de TIP_ML, name-match
+cp .env.example .env
+# Editar .env com tokens
+node start.js
 ```
 
-### Testes (`tests/`)
+### .env mínimo
 
-Suíte mínima sem framework externo (Node runner puro):
+```env
+PORT=3000
+DB_PATH=sportsedge.db
 
-| Arquivo | Cobertura |
-|---|---|
-| `tests/test-kelly.js` | `calcKellyWithP`, `calcKellyFraction` — casos negativos, frações, edge cases |
-| `tests/test-tip-parser.js` | Regex `TIP_ML:...\|EV:...\|STAKE:...\|CONF:...` de LoL e MMA |
-| `tests/test-name-match.js` | Matching de settlement: exact, alias, substring com guard, short-alias traps |
+# Telegram
+TELEGRAM_TOKEN_ESPORTS=<token>     # cobre LoL + Dota 2
+TELEGRAM_TOKEN_CS=<token>          # cobre CS2 + Valorant
+TELEGRAM_TOKEN_MMA=<token>
+TELEGRAM_TOKEN_TENNIS=<token>
+TELEGRAM_TOKEN_FOOTBALL=<token>
+TELEGRAM_TOKEN_DARTS=<token>
+TELEGRAM_TOKEN_SNOOKER=<token>
 
-Execute `npm test` antes de qualquer deploy que toque parser da IA, Kelly ou settlement.
+# IA
+DEEPSEEK_API_KEY=sk-...
 
-### Deploy no Railway
+# Odds
+THE_ODDS_API_KEY=<key>
+PINNACLE_LOL=true
+PINNACLE_DOTA=true
+PINNACLE_TENNIS=true
+SXBET_ENABLED=true
 
-1. Push para o repositório GitHub vinculado ao Railway
-2. Configure as variáveis de ambiente no painel **Variables**
-3. Para persistência do banco entre redeploys: crie um Volume e defina `DB_PATH=/data/sportsedge.db`
-4. O `start.js` gerencia os dois processos com **auto-restart exponencial** em falha (3s→6s→12s→24s→60s máx); primeira linha útil nos logs: `[LAUNCHER] PORT=… | DB=…`
-5. Configure `ADMIN_USER_IDS` com seu ID do Telegram — o admin é inscrito automaticamente a cada boot
-6. Configure `ADMIN_KEY` para proteger rotas admin; sem ele, um `WARN [SEC]` é emitido uma vez no boot
-7. O `railway.toml` já está configurado com healthcheck TCP e restart policy `on_failure`
-8. **OddsPapi (descontinuado padrão Abr/2026):** substituído por Pinnacle. Se ainda usar, `ODDSPAPI_BOOTSTRAP=true` acelera cache mas em 429 gera backoff 2h
+# Stats
+LOL_API_KEY=<riot_key>
+PANDASCORE_TOKEN=<token>
+API_SPORTS_KEY=<api_football_key>
+STEAM_WEBAPI_KEY=<steam_key>
+SOFASCORE_PROXY_BASE=https://your-sofascore-proxy.up.railway.app
 
-> **Nota DB_PATH no Railway:** se a variável aparecer com artefatos (`=/data/...`), o sistema sanitiza automaticamente antes de abrir o banco.
+# Admin
+ADMIN_KEY=<chave_aleatoria_longa>
+ADMIN_USER_IDS=<seu_telegram_id>
 
-#### Decodificação rápida dos logs (produção)
+# Sports
+ESPORTS_ENABLED=true
+TENNIS_ENABLED=true
+FOOTBALL_ENABLED=true
+CS_ENABLED=true
+VAL_ENABLED=true
+TT_ENABLED=true
+MMA_ENABLED=false
+DARTS_ENABLED=false
+SNOOKER_ENABLED=false
+```
 
-| Log | Significado |
-|-----|-------------|
-| `[BOOT] ENV: CLAUDE_API_KEY=❌ AUSENTE` | Só **DeepSeek** entra no `/claude`; Claude desligado até configurar a chave. |
-| `[BOOT] … tips existentes carregadas` | Histórico de tips por esporte reidratado do SQLite. |
-| `[BOOT] Sports carregados: […]` | Esportes habilitados e se cada um tem token Telegram. |
-| `[WARN] [SEC] ADMIN_KEY não configurada` | Emitido **uma vez** no boot; rotas admin abertas sem auth. Configure `ADMIN_KEY`. |
-| `[PANDASCORE] N partidas LoL (M live)` | Cache PandaScore renovado (TTL 60s); M partidas ao vivo — usadas para promover LPL live. |
-| `[LOL] … riot=N ps=M psBackoff=0` | N partidas Riot + M PandaScore; `psBackoff=1` quando riot < 10 partidas. |
-| `[AUTO] LoL: N partidas (X live, Y draft)` | X = ao vivo (inclui LPL promovidas por PandaScore ou tempo). |
-| `[AUTO-MMA] Pulando não-UFC: Nome vs Nome` | Luta fora do UFC filtrada (só UFC via ESPN scoreboard é analisado). |
-| `[ODDS] Torneios ativos via sportId=18: N` | OddsPapi retornou lista dinâmica de torneios com fixtures futuras/upcoming/live. |
-| `[ODDS] Buscando odds: lote N/M` | Ciclo OddsPapi (round-robin); no deploy, bootstrap pode enfileirar vários lotes. |
-| `[ODDS] Bootstrap concluído — ~N entradas` | Cache esports aquecido após sequência de lotes. |
-| `[LOL] … odds: A/B \| sem match: slugs` | **A** partidas com par no cache OddsPapi; slugs listados = nomes que não casaram. |
-| `[AUTO] Analisando: X vs Y \| sinais=N/6 \| evThreshold=X%` | Pré-jogo/live LoL: sinais ML disponíveis, threshold adaptativo de EV. |
-| `[AUTO] Sem tip: X vs Y → IA sem edge` | IA ou gates não aprovaram tip; inclui probabilidades e EV estimados. |
-| `[AUTO] Gate odds … [min, max]` | Odd sugerida fora de `LOL_MIN_ODDS` / `LOL_MAX_ODDS` (padrão 1.50–4.00). |
-| `[AUTO-MMA] Gate semana … luta futura` | Confiança não-alta em luta distante → descartada. |
-| `[AUTO-FOOTBALL] … [sem dados]` | Fixture/API-Football não deu forma/H2H/standings (odds-only). |
-| `429 — backoff 2h ativado` | OddsPapi rate limit → 2h sem fetch. |
-
----
-
-## Interface do Bot
-
-O bot opera em **modo totalmente automático**. O usuário interage pelos botões do menu:
-
-| Botão / Comando | Função |
-|---|---|
-| `Notificações` | Ativa/desativa recebimento de tips automáticas por DM |
-| `Tracking` | Exibe ROI, win rate, profit, calibração, split ao vivo vs pré-jogo |
-| `Próximas` | Lista partidas ao vivo e próximas com odds quando disponíveis |
-| `⚖️ Fair Odds` | Exibe odds calculadas pelo modelo ML do sistema |
-| `Ajuda` | Explica como o bot funciona |
-
-### Comandos Admin
-
-| Comando | Função |
-|---|---|
-| `/stats` | ROI total, calibração por confiança (ALTA/MÉDIA/BAIXA), histórico de tips |
-| `/users` | Status do banco de dados |
-| `/pending` | Tips pendentes de settlement |
-| `/settle` | Força settlement imediato |
-| `/refresh-open` | Reanalisa tips pendentes e atualiza `current_odds/current_ev` |
-| `/slugs` | Slugs de liga reconhecidos + desconhecidos vistos (diagnóstico) |
-| `/lolraw` | Dump do schedule Riot por liga (diagnóstico) |
+Lista completa: ver [.env.example](./.env.example) (1043 linhas, ~26KB) e seção [Variáveis de ambiente](#variáveis-de-ambiente).
 
 ---
 
-## Detecção de Partidas ao Vivo (LoL)
+## Pipeline de tip (end-to-end)
 
-A LPL tem comportamento especial na Lolesports API — frequentemente aparece como `unstarted` no schedule mesmo quando ao vivo. O sistema usa **3 camadas** em cascata:
+Para cada sport, o ciclo conceitual é o mesmo:
 
-| Camada | Fonte | Descrição |
-|--------|-------|-----------|
-| 1 | `getLive?hl=zh-CN` | Lolesports API com locale chinês — captura LPL direto |
-| 2 | PandaScore `/running` | Sempre consultado (cache 60s); promove `upcoming→live` quando PS confirma |
-| 3 | Tempo decorrido | Se `startTime` passou há 2–300 min e sem `winner` → promove para live (LPL, LDL, LCK) |
+### 1. Descoberta de partida
 
-> **PandaScore obrigatório para LPL live:** sem `PANDASCORE_TOKEN`, a camada 2 não funciona; a camada 3 ainda detecta por tempo.
+```
+[Bot loop por sport — cron adaptativo 6-24min]
+    │
+    ▼
+serverGet('/<sport>-matches')
+    │
+    ▼
+[Server agrega APIs paralelas]
+    │
+    ├── Pinnacle Guest (LoL, Dota, CS, Val, Tennis, Snk, TT, MMA)
+    ├── SX.Bet (LoL/Dota live per-map)
+    ├── PandaScore (LoL/Dota live status, compositions)
+    ├── Sofascore (Darts, Tennis live, Football)
+    ├── The Odds API (MMA, Tennis, Football, NBA)
+    ├── Riot API (LoL live stats)
+    ├── OpenDota + Steam RT (Dota live snapshots)
+    ├── VLR.gg (Valorant live HTML)
+    ├── HLTV scorebot (CS live scoreboard)
+    ├── ESPN (Football, NBA, MMA, Tennis)
+    ├── API-Football (Soccer fixtures, H2H, standings)
+    ├── football-data.co.uk (CSV histórico — fd_features)
+    ├── gol.gg (LoL kills/objectives scraping)
+    ├── OracleElixir (LoL feature mining)
+    └── Stratz (Dota draft matchups)
+    │
+    ▼
+[Merge/dedup + normalize]
+    │
+    ▼
+[{ id, team1, team2, league, status, time, odds, _allOdds, ... }]
+    │
+    ▼
+[Bot filtra: live + upcoming <6h + relevant league]
+```
+
+### 2. Pré-filtro ML (antes de IA — economiza tokens)
+
+```js
+// lib/ml.js → esportsPreFilter (genérico)
+// lib/<sport>-ml.js → modelo específico
+
+const { modelP1, modelP2, edge, factorCount } = preFilter(match, ctx);
+if (factorCount === 0 || Math.abs(edge) < 3) return; // skip
+```
+
+Modelos chamados:
+- `lib/lol-model.js` + `lib/lol-series-model.js` + `lib/lol-map-model.js`
+- `lib/dota-map-model.js` + `lib/dota-hero-features.js`
+- `lib/cs-ml.js` + `lib/cs-map-model.js`
+- `lib/valorant-ml.js`
+- `lib/tennis-model.js` + `lib/tennis-model-trained.js` + `lib/tennis-markov-model.js`
+- `lib/football-ml.js` + `lib/football-model.js` + `lib/football-poisson-trained.js` + `lib/football-data-features.js`
+- `lib/darts-ml.js` / `lib/snooker-ml.js` / `lib/tabletennis-ml.js`
+
+### 3. Enrichment de contexto (paralelo)
+
+```
+- collectGameContext (live stats: gold, kills, dragons, comp, score, momentum)
+- fetchEnrichment (forma, H2H, ESPN records, Sofascore stats)
+- fetchMatchNews (Google News RSS, 48h)
+- Patch meta (LoL ddragon, 14d cache)
+- Tournament tier classification (lib/league-tier.js, mt-tier-classifier.js)
+- League trust score (lib/league-trust.js)
+- Player-level features (oracleselixir-player-features, tennis-player-stats)
+- Roster sub detection (lol-roster-sub, dota-roster-detect)
+- Tennis Markov (Barnett-Clarke + sets + tiebreak)
+- Tennis fatigue decay (até -70 pts Elo)
+- Tennis injury risk (RET/W/O/bagels)
+- Dota draft matchup (lib/stratz-dota-scraper)
+- CS HLTV form + Elo
+- Football fd_features (CSV-driven xG/SoT/cards/etc.)
+```
+
+### 4. Cálculo de P final + odds
+
+```
+1. preFilter → modelP_raw
+2. Calibração isotonic (lib/<sport>-isotonic.json) → modelP_calib
+3. Calibração Markov (tennis only) → modelP_calib2
+4. CLV calibration layer (puxa em direção close line) → modelP_final
+5. Learned corrections (per regime/tier) → modelP_corrected
+
+Odds:
+1. Pinnacle (sharp anchor)
+2. Devig (lib/devig.js — power method)
+3. impliedP_dejuiced
+4. Edge = modelP_final - impliedP_dejuiced
+5. EV = modelP_final * odd - 1
+```
+
+### 5. IA (DeepSeek) — segunda opinião opcional
+
+```
+- Bot envia contextBlock (Elo, form, H2H, live stats, news) + P do modelo
+- IA retorna {pick, P_ia, conf, reason}
+- _validateTipPvsModel: se |P_ia - P_modelo| > 8pp → rejeita
+- IA NÃO decide P; só sugere; AI_DISABLED=true desativa cross-sport
+```
+
+### 6. Gates (rejeição)
+
+Em ordem:
+
+1. **Dedup** (mesmo match+market+side+line já analisado <TTL)
+2. **Sharp divergence gate** (|modelP - impliedP_pinnacle_dejuiced| > cap) → reject
+3. **Bucket gate** (`ODDS_BUCKET_BLOCK`, `<SPORT>_ODDS_BUCKET_BLOCK`) → reject
+4. **EV gate** (EV < `<SPORT>_MIN_EV` + `PRE_MATCH_EV_BONUS` se pre)
+5. **EV cap** (`TIP_EV_MAX_PER_SPORT` — cap ROI tóxico em EV>30%)
+6. **Brier auto-cap** (`BRIER_AUTO_EV_CAP` reduz cap quando Brier degrada)
+7. **HIGH_EV_THROTTLE** (multiplier 0.6 default ON em buckets EV>12%)
+8. **Conf gate** (BAIXA bloqueada por default em alguns sports)
+9. **Tier gate** (CS tier 2+ exige EV >8%, conf MÉDIA, stake 1u)
+10. **MT leak guard** (auto-disable (sport, market, league) com CLV leak)
+11. **Match stop-loss** (`MATCH_STOP_LOSS_UNITS=2` — máx 2u perda por match)
+12. **Daily tip limit** (`DAILY_TIP_LIMIT` per sport)
+13. **Per-match cap** (`maxPerMatch` LoL/Dota/CS/Val/Tennis)
+14. **Per-tournament cap** (`MAX_TIPS_PER_TOURNAMENT_PER_DAY=8`)
+15. **CLV pre-dispatch gate** (odd subiu >threshold em N min = stale)
+16. **Stale line gate** (Pinnacle moveu mas casa não — possível stale)
+17. **Min/max odds** (`<SPORT>_MIN_ODDS`, `<SPORT>_MAX_ODDS`)
+18. **League blocklist** (manual + auto via league-bleed)
+19. **Path-guard** (rejeita pipeline path com regressão Brier)
+20. **AI validation** (IA reverter divergência grande)
+
+### 7. Risk / staking (Kelly)
+
+```
+Kelly fraction f = (P*(odd-1) - (1-P)) / (odd-1)
+stakeUnits = f * KELLY_MULT_<SPORT>_<CONF>
+            * pre_match_multiplier (default 1.0; reduced em pre-match risk)
+            * stake_context_mult (ultra_low 0.70 / low 0.90 / high 1.05 — cs/dota)
+clamp(MIN_STAKE, MAX_STAKE_UNITS)
+```
+
+Auto-tune diário (cron 8h local) ajusta `kelly_mult` per-sport baseado em ROI+CLV últimos 30d.
+
+### 8. Dispatch DM
+
+```
+- format msg: pick + P + odd + EV + stake + reason
+- inline button "Apostar" (deeplink livro via lib/book-deeplink.js)
+- sendDM via TELEGRAM_TOKEN_<SPORT>
+- markAdminDmSent (dedup 24h)
+- /record-tip persiste em DB (sport, match, market, side, line, P, odd, stake, ev, clv_pct, tip_context, regime_tag, ...)
+```
+
+### 9. Settlement
+
+```
+[Cron 30min — settleCompletedTips]
+    │
+    ▼
+[Pre-sync match_results das APIs (Sofascore, ESPN, Pinnacle, gol.gg, HLTV, ...)]
+    │
+    ▼
+[Para cada pending tip: lookup match_results via fuzzy (lib/name-match.js)]
+    │
+    ▼
+[Settle: result=win/loss/push/void; profit, banca update]
+    │
+    ▼
+[Propagator: tips ↔ market_tips_shadow same match → mesmo result]
+    │
+    ▼
+[Audit: settlement_audit row p/ rastreabilidade]
+```
+
+### 10. CLV capture
+
+```
+[Cron close-line — captura odd Pinnacle no kickoff]
+    │
+    ▼
+[Calcula clv_pct = (1/close_odd - 1/tip_odd) / (1/tip_odd) * 100]
+    │
+    ▼
+[Persiste em tips.clv_pct + market_tips_shadow.clv_pct]
+    │
+    ▼
+[Throttled DMs CLV<-5% pra audit liga]
+```
 
 ---
 
-## Sistema de Fair Odds
+## Modelos
 
-Cada esporte exibe fair odds calculadas pelo **próprio modelo de análise do sistema** — não apenas o de-juice (remoção da margem da bookie). A diferença entre a fair odd do modelo e a odd da bookie é o **edge em pp**.
+### Esports
 
-| Esporte | Fonte dos dados | Método |
-|---------|----------------|--------|
-| LoL Esports | Forma recente + H2H (banco local, 45 dias) | Prior bayesiano logístico |
-| MMA | ESPN scoreboard (carta atual UFC) + ESPN athlete search + Sofascore fallback | Win rate do record histórico |
-| Tênis | Sackmann (Elo superfície) + ESPN rankings ATP/WTA + Sofascore fallback | Modelo Elo-log por superfície |
-| Futebol | API-Football (forma, H2H, standings) + Sofascore home/away split | `calcFootballScore` com Poisson + home boost |
-| Darts | Sofascore (3-dart avg + win rate últimos 10 jogos) | `dartsPreFilter` — 3-dart avg diff é o sinal primário |
-| Snooker | Pinnacle guest API (odds) + ranking fallback | `snookerPreFilter` — log-diff de ranking ± win rate recente |
+| Model | Path | Algoritmo | Features principais |
+|---|---|---|---|
+| LoL series | `lib/lol-series-model.js` | Logistic+isotonic | Bo3/Bo5 series prob via map prob |
+| LoL map | `lib/lol-map-model.js` | Logistic+isotonic + GBDT | Patch meta, comp, regional strength, OE features |
+| LoL kills | `lib/lol-kills-model.js` + `lib/lol-kills-calibration.js` | Poisson player-level | Kills médios + std + opponent allow |
+| Dota map | `lib/dota-map-model.js` | Logistic+isotonic + momentum | Hero matchup (Stratz), draft, side, momentum (streak/wr_trend) |
+| CS map | `lib/cs-map-model.js` | Elo + HLTV form | Per-map CT advantage (Anubis 5%, Dust2 1%), team1IsCT shift |
+| Valorant | `lib/valorant-ml.js` | Logistic + Bayesian map→série | Map prob, side, momentum |
+
+**Trained models:** `lib/{lol,dota2,cs2,valorant,tennis,football}-weights.json` + `lib/<sport>-isotonic.json`. Refit nightly via `scripts/refresh-all-isotonics.js` (cron `NIGHTLY_RETRAIN_AUTO=true`).
+
+### Tennis
+
+- **Sackmann Elo** (per-surface) → P_elo
+- **Trained logistic** (`lib/tennis-model-trained.js`, weights.json) → P_trained, **active default**
+- **Markov motor** (`lib/tennis-markov-model.js`) — Barnett-Clarke ML + sets + totals + tiebreak
+- **Markov calib** (`lib/tennis-markov-calib.js` + `tennis-markov-calib.json`) — PAV + Beta smoothing per market (handicapGames, totalGames). **Refit nightly cron 04h** via `/admin/mt-refit-calib?sport=tennis&days=90&write=true`
+- **Markov shrink universal pós-calib** — `0.5 + k * (pCalib - 0.5)` p/ corrigir overconfidence residual (k=0.75 handicap, 0.65 total)
+- **Edge tiered:** Slam/Masters 2.5pp; demais 4.0pp
+- **Injury risk:** RET/W/O/bagels → downgrade conf + shrink P
+- **Tiebreak rolling:** TB W/L per jogador 12m
+- **Fatigue decay:** até -70 pts Elo
+- **Round/segment stack:** Slam×1.15 + F×1.06 = ×1.22
+
+### Football
+
+- **Poisson trained** (`lib/football-poisson-trained.js`) — μ_home, μ_away, ρ (Dixon-Coles)
+- **fd_features** (`lib/football-data-features.js`) — CSV-driven xG/SoT/cards/corners (football-data.co.uk)
+- **football-ml** (`lib/football-ml.js`) — feature wrapper + ensemble
+- **football-model** (`lib/football-model.js`) — pré-Poisson legacy
+- **xG_per_SoT=0.32** (lit avg 0.30-0.34)
+- **Direction codes** (não labels): H/D/A; **Home boost** controlled
+
+### Outros
+
+- **MMA:** record + ufcstats scraper
+- **Darts:** 3DA + WR sample-weighted (jogadores <10 jogos atenuados)
+- **Snooker:** ranking-log + CueTracker WR
+- **TT:** Elo + form
+- **Basket NBA:** logistic+isotonic 2798 games (2 seasons), Brier 0.188 / lift +24%; blend trained+Elo (w=0.65)
 
 ---
 
-## Ciclos Automáticos
+## Camadas de calibração
 
-| Ciclo | Intervalo | Descrição |
+Em ordem de aplicação:
+
+### 1. Isotonic per-sport
+
+`lib/<sport>-isotonic.json` — função monotônica P_raw → P_calib via PAV (Pool Adjacent Violators). Treinado contra outcome real settled.
+
+- **LoL isotonic disabled** (`LOL_ISOTONIC_DISABLED=true`) — refit Brier 0.25→0.27 piorou em 2026-04-24
+- **Tennis isotonic disabled** (`TENNIS_ISOTONIC_DISABLED=true`) — overshoot bucket 2.20-3.00, ROI -64%
+- **CS2/Dota2/Valorant** ativos (Brier ECE -35-70%)
+
+### 2. Markov calib (tennis only)
+
+`lib/tennis-markov-calib.js` — PAV + Beta smoothing per market sobre P do Markov pre-jogo. Resolve overconfidence sistemática (P_med 0.78 em handicapGames com hit real <70%).
+
+- **Refit nightly** cron 04h local (commit `fe16e55` 2026-05-06)
+- **Cache TTL 30min** sem restart
+- **Shrink universal pós-calib** k=0.75/0.65
+
+### 3. EV → ROI calibration
+
+`lib/ev-calibration.js` — data-driven per (sport, ev_bucket). Sobrescreve `HIGH_EV_THROTTLE` quando n≥10. Cron 6h.
+
+- Endpoint: `/admin/ev-calibration`
+- Preserva CS 8-12% bucket (ROI +29.9%)
+- Aplica throttle severo em EV>30% (gap+50pp em 5 sports)
+
+### 4. CLV calibration layer
+
+`lib/clv-calibration.js` — terceira camada pós-isotonic puxa P em direção da closing line.
+
+- Lit: arxiv 2410.21484
+- Default blend 0.30
+- Wired em LoL/Tennis/Dota2/CS2 trained
+- Opt-out: `CLV_CALIB_DISABLED=true`
+
+### 5. Learned corrections
+
+`lib/learned-corrections.js` (mig 090) — per (sport, regime, tier, market) corrections aprendidas via readiness-learner. Cron noturno.
+
+### 6. Readiness learner
+
+`lib/readiness-learner.js` (mig 089) — observa decisões de readiness (block alert vs OK) e aprende corrections incrementais.
+
+---
+
+## Gates anti-edge-fictício
+
+### Sharp divergence gate
+
+`bot.js::_sharpDivergenceGate` — bloqueia tip se `|modelP - impliedP_pinnacle_dejuiced| > cap_sport`. Tier-aware.
+
+| Sport | Default cap | Env override |
 |---|---|---|
-| Auto-análise | 6 min | Analisa partidas `live` e `upcoming` nas próximas 24h |
-| Re-análise ao vivo | 10 min | Re-analisa a mesma partida ao vivo enquanto sem tip enviada |
-| Re-análise pré-jogo | 30 min | Re-tenta partidas upcoming que ainda não têm odds |
-| Re-análise sem edge | 2× cooldown | Partidas sem edge têm cooldown dobrado para economizar tokens |
-| Notificação ao vivo | 1 min | Avisa sobre draft iniciado e partida ao vivo |
-| Line movement | 30 min | Alerta se odds mudaram >= 10% desde o último snapshot |
-| Settlement | 30 min | Resolve tips pendentes (LoL via Riot/PandaScore, Futebol via API-Football, MMA/Tênis via ESPN) |
-| Sync pro stats | 12h (+ boot) | Busca até 400 partidas pro (últimos 45 dias) via PandaScore |
-| Patch meta auto-fetch | 14 dias | Busca versão atual no ddragon |
-| Fetch de odds (OddsPapi) | 60 min (configurável via `ODDSPAPI_REFRESH_MIN`) | Round-robin: busca 1 lote de 3 torneios por ciclo |
-| Re-fetch urgente | Sob demanda | Partida começa em < 2h → força re-fetch imediato |
-| Cache PandaScore | 60s (configurável) | `PANDA_CACHE_TTL_MS` — evita chamadas excessivas ao PS |
-| Cache fixtures futebol | 6h | Pré-carrega todas as fixtures da semana em batch |
-| Cache ESPN MMA | 1h | Scoreboard de lutas da carta atual do UFC |
-| Cache ESPN atletas | 6h | Records individuais buscados via athlete search |
-| Cache ESPN tênis | 3h | Rankings ATP/WTA (150 por tour) |
+| MMA | 10pp | `MMA_MAX_DIVERGENCE_PP` |
+| Football | 10pp | `FOOTBALL_MAX_DIVERGENCE_PP` |
+| CS | 12pp | `CS_MAX_DIVERGENCE_PP` |
+| Tennis | 20pp | `TENNIS_MAX_DIVERGENCE_PP` (era 15, relaxado 2026-04-18) |
+| Valorant | 12pp | `VAL_MAX_DIVERGENCE_PP` |
+| LoL/Dota | 15pp | `LOL_MAX_DIVERGENCE_PP` / `DOTA_MAX_DIVERGENCE_PP` |
+| Darts/Snooker | 15pp | `<SPORT>_MAX_DIVERGENCE_PP` |
+| TT | 20pp | `TT_MAX_DIVERGENCE_PP` |
+
+### Bucket gate
+
+`lib/odds-bucket-gate.js` — bloqueia odds em faixa com leak comprovado.
+
+```
+ODDS_BUCKET_BLOCK=2.20-3.00            # cross-sport
+LOL_ODDS_BUCKET_BLOCK=3.00-99
+VALORANT_ODDS_BUCKET_BLOCK=2.20-99
+```
+
+**Auto-guard cron 12h** (`ODDS_BUCKET_GUARD_AUTO=true`) — auto-block (sport, bucket) quando n≥30 + ROI≤-10% + CLV≤-2%; auto-restore se ROI recupera.
+
+### EV cap per-sport
+
+`TIP_EV_MAX_PER_SPORT` — cap final no EV alvo (defaults 25-35 dependendo do sport, audit 2026-05-04 mostrou EV>30% sangra catastrófico em todos sports).
+
+```
+LOL_MT_EV_MAX=20, CS2_MT_EV_MAX=20, DOTA_MT_EV_MAX=20
+TENNIS_MT_EV_MAX=25, FOOTBALL_MT_EV_MAX=20
+```
+
+### Pre-match EV bonus
+
+`PRE_MATCH_EV_BONUS` — adiciona EV mínimo em tips PRE (pré-match tem ROI muito pior que LIVE em vários sports — odds estáticas viram fantasma quando mercado move).
+
+```
+CS_PRE_MATCH_EV_BONUS=5      # CS PRE -53% vs LIVE +19% (gap 72pp)
+VAL_PRE_MATCH_EV_BONUS=4
+LOL_PRE_MATCH_EV_BONUS=4
+```
+
+### Gates auto-tune
+
+`lib/gates-runtime-state.js` — DB-backed runtime state com cron 12h. Auto-ajusta `PRE_MATCH_EV_BONUS` e `MAX_STAKE_UNITS` por sport. Env override sempre vence auto-tune.
+
+### Path-guard
+
+`runDriftGuardCycle` — observa pipeline path (combinação de calibrações/gates). Persiste regressão Brier per-path em DB. Bloqueia path com regressão sustentada.
 
 ---
 
-## Sistema de ML — Sinais
+## Risk management & banca
 
-O pré-filtro ML (`lib/ml.js`) calcula um edge score baseado em até 4 fatores.
+### Banca per-sport (tier-based)
 
-| Fator | Fonte | Peso | Disponível quando |
-|-------|-------|------|-------------------|
-| Forma recente (win rate diferencial) | `match_results` (últimos 45 dias) | dinâmico (padrão 0.25) | Após sync pro stats |
-| H2H (histórico direto) | `match_results` (últimos 45 dias) | dinâmico (padrão 0.30) | Após sync pro stats |
-| Comp/meta score (WR médio dos campeões em pro play) | `pro_champ_stats` | dinâmico (padrão 0.35) | Draft disponível + sync feito |
-| Live stats | Riot/PandaScore ao vivo | extra `factorCount` | Partida ao vivo |
+`lib/sport-unit.js` — cada sport tem `unit_value` independente baseado em tier:
 
-Os pesos dinâmicos ficam em `ml_factor_weights` e são recalculados semanalmente. Veja `GET /ml-weights` no dashboard.
+```
+0.5u → low-tier (darts, snk legacy)
+0.6u
+0.8u
+1.0u → default
+1.2u → cs2/dota2 promoted
+1.5u
+2.0u
+3.0u → tennis premium
+```
 
-### Saída do Modelo (`esportsPreFilter`)
+**Banca rebalance** via `scripts/rebalance-bankroll-1000.js` (10 sports × R$100 inicial) e `scripts/reset-equity.js` com `--dry-run`/`--confirm`.
 
-```javascript
+Tabela `bankroll` per-sport: `current_amount`, `initial_amount`, `unit_value`, `last_updated`. Migrações 033-038 split → bump → revert → rebuild → align.
+
+### Kelly
+
+`lib/risk-manager.js::computeKellyStake(P, odd, opts)` — Kelly fracionado:
+
+```
+f_kelly = (P*(odd-1) - (1-P)) / (odd-1)
+stake = f_kelly * KELLY_MULT_<SPORT>_<CONF> * stake_context_mult
+clamp(MIN_STAKE, MAX_STAKE_UNITS)
+```
+
+**Defaults conservadores:**
+- ALTA: 0.40
+- MÉDIA: 0.25
+- BAIXA: 0.10
+- Dota2 cut: 0.20 (CLV -45% leak 2026-04-23)
+
+**Override per-sport:** `KELLY_<SPORT>_<CONF>` → `KELLY_<CONF>` → default
+
+**Auto-tune diário** (`runKellyAutoTune`): rolling 30d ROI+CLV → ajusta `kelly_mult` em `gates_runtime_state`. Step up +0.05 / down -0.10. Bounds [0.20, 1.20]. Cron 8h local. Opt-out `KELLY_AUTO_TUNE=false`.
+
+### Bankroll Guardian
+
+`runBankrollGuardian` — adaptive thresholds por banca:
+- Small (<R$100): DD 45/28/18%
+- Big (≥R$100): DD 35/20/12%
+
+Cron 1h. Auto-skip esports legacy bucket. Pause sport quando DD breach.
+
+### Stake adjuster
+
+`lib/stake-adjuster.js` — `detectStakesContext` → multiplier:
+- ultra_low ×0.70
+- low ×0.90
+- high ×1.05
+
+Wired em Dota/CS.
+
+### Risk peak reset
+
+Sprint 13 pendente — reset peak watermark periodicamente pra DD não acumular regime change.
+
+---
+
+## Market Tips (MT)
+
+Sistema paralelo de detecção de tips em **markets secundários** (handicap, totals, kills, sets, etc.) — separado de ML core (1X2/match winner).
+
+### Pipeline
+
+```
+[Scanner per sport]
+    │ lib/<sport>-mt-scanner.js (tennis, football, basket, lol-extra-markets, dota-extras-scanner, odds-markets-scanner)
+    ▼
+[lib/market-tip-processor.js — gate EV>=8% + pModel>=55% + Kelly 0.10 + tier classifier]
+    │
+    ▼
+[Shadow log primeiro — lib/market-tips-shadow.js]
+    │ Migs 024/025/026: market_tips_shadow + admin_dm + clv
+    │ Mig 054: is_live col
+    │ Mig 055: model_version
+    │ Mig 088: regime_tag
+    │ Mig 091: tier
+    ▼
+[Backtest periódico — scripts/backtest-market-tips.js]
+    │
+    ▼
+[Auto-promote — lib/mt-auto-promote.js]
+    │ Critérios: n≥30 + CLV≥0 + ROI≥0 em 14d
+    │ Mig 077: mt_auto_promote table
+    │ Cron 12h
+    ▼
+[Promote: dispatch real (DM admin → DM users)]
+    │ Mig 050/051/063/091: mt_runtime_state side+league+tier
+    ▼
+[Leak guard — auto-disable (sport,market,league,tier) com CLV leak]
+    │ MT_LEAK_GUARD_AUTO=true (default)
+    ▼
+[Result propagator — lib/mt-result-propagator.js]
+    │ tips ↔ market_tips_shadow same match → mesmo result
+```
+
+### Tier classifier
+
+`lib/mt-tier-classifier.js`:
+- **tennis:** tier1_slam, tier2_atp_500, tier2_masters, tier3_atp_250, tier3_wta125, tier4_challenger, tier_quali_or_early (Q1/Q2/R1/R2)
+- **lol:** tier1_la_liga (footbol Spain), tier2_regional (LCK CL), tier1_brazil_b
+- **cs2:** tier1_premier, tier2_secondary (ESL Challenger SA, CCT SA)
+
+**Stake mults aplicados:**
+- cs2 tier2_secondary 1.3× (+63% ROI CLV+14%)
+- lol tier2_regional 1.2× (+26% ROI)
+- tennis tier4_challenger 0.6× (-10%)
+- football tier1_la_liga totals 0.7×
+- football brasileirão B 1.15× (+42%)
+- tennis Q1/R1/R2 0.5×
+
+### Markets cobertos
+
+- **Tennis:** handicapGames, totalGames, sets handicap, sets total, aces total
+- **Football:** OVER/UNDER 2.5, BTTS, AH, totals, halves
+- **LoL:** total kills (player+map), total dragons, total towers, handicap maps
+- **Dota:** total kills, handicap maps
+- **CS2:** total maps, handicap maps
+- **NBA:** spread + totals (Normal CDF μ=rolling pace/def σ=18/13)
+
+### Promoted (2026-05)
+
+- **Football MT** (2026-05-03) — ROI +40,9%, hit 71%, CLV 0
+- **CS2 MT** (2026-04-25 pending → 2026-05-04 promoted) — CLV+12
+- **Dota2 MT** (2026-05-04) — CLV+10,6
+
+### Audit endpoints (`/admin/...`)
+
+- `mt-status` — promote state per (sport, market, tier)
+- `mt-shadow-audit` — shadow stats
+- `mt-shadow-comprehensive-audit`
+- `mt-shadow-by-league` + `mt-shadow-by-ev`
+- `mt-historical-learnings` (6 análises)
+- `mt-promote-status`
+- `mt-disable-list` (runtime disabled)
+- `mt-calib-validation` (drift detection)
+- `mt-brier-history` (Brier semana)
+- `mt-refit-calib` (refit isotônico)
+
+---
+
+## Shadow mode
+
+Toggle global por sport via `<SPORT>_SHADOW=true`. Quando shadow:
+
+1. Tip passa por todos os gates igual modo real
+2. **Não dispatcha DM**
+3. Persiste em `tips` com `is_shadow=1` (mig 015) e `tip_context.shadow_reason`
+4. Settlement normal pra cálculo retroativo de ROI/CLV/Brier
+5. Cards dashboard "🥷 ML Shadow" mostram performance per sport
+6. **PROMOVER** badge quando n≥30 + ROI≥0 + CLV≥0
+
+**Use cases:**
+- Sport novo (Basket NBA fase 1)
+- ML real disabled (LoL ML, CS ML, Tennis ML — bleeding ROI mas mantém data)
+- A/B test gates (sprint experimental)
+- Pre-deploy validation
+
+**Regime tag** (mig 088): separação entre regimes A/B/C pra audits cruzando datas com mudanças significativas (2026-04-22 bucket gate, 2026-05-03 audit P0).
+
+**ML disabled auto-route** (2026-05-05): em vez de rejeitar tip, rota pra shadow. Hard reject opt-in via `ML_DISABLED_HARD_REJECT=true`.
+
+---
+
+## CLV tracking
+
+CLV = Closing Line Value = % a favor da odd da tip vs odd Pinnacle no kickoff dejuiced. Métrica gold-standard pra detectar edge real.
+
+```
+clv_pct = (1/close_odd_dejuiced - 1/tip_odd) / (1/tip_odd) * 100
+```
+
+### Capture
+
+- **Cron close-line capture** — captura odd Pinnacle no momento do kickoff
+- Persiste em `tips.clv_pct` (mig 080) e `market_tips_shadow.clv_pct` (mig 026)
+- **Throttle DM** quando CLV<-5% (audit liga)
+- **CLV pre-dispatch gate** (`CLV_PREDISPATCH_GATE=true`) — odd subiu >2.5% em 10min = sharp money entrou no lado oposto = stale
+- **CLV race fix** (mig 081/082) — evitava update first-wins corrompendo CLV
+
+### Análises
+
+- `scripts/clv-by-league.js` — flag ligas com CLV neg persistente
+- `scripts/clv-coverage.js` + `clv-coverage-gap.js` — qual % das tips tem CLV capturado
+- `scripts/clv-leak-diagnosis.js` — diagnóstico per (sport, league, market)
+- `/clv-histogram` — distribuição CLV
+- `/admin/clv-capture-trace` — diag granular
+
+### MT skip
+
+`lib/clv-capture.js` — **pula MT (não-ML)** e rejeita CLV >3× prev (mig 080+).
+
+---
+
+## Settlement
+
+### Auto
+
+`bot.js::settleCompletedTips` — cron 30min:
+
+1. **Pre-sync match_results** das APIs (Sofascore, ESPN, Pinnacle, gol.gg, HLTV, OpenDota, ufcstats)
+2. **Iterar tips pendentes** em janela esports -24h/+7d
+3. **Match lookup fuzzy** via `lib/name-match.js` (strict → fuzzy → lastname; threshold ≥0.5 + aliases). Tennis: tiebreak via league overlap.
+4. **Pickbest tennis** quando ambíguo
+5. **Settle** result=win/loss/push/void, profit, banca update
+6. **Propagator** — tips ↔ market_tips_shadow same match → mesmo result
+7. **Audit row** em `tip_settlement_audit` (mig 073)
+
+### Force-settle (admin)
+
+- `/admin/run-settle` — force-settle window (com guardrail temporal — fix Garin/Echargui 2026-05-03)
+- `/admin/tennis-force-settle-tip` — manual single tip
+- `/admin/settle-market-tips-shadow` + `/admin/settle-mt-shadow-kills`
+- `/settle` Telegram cmd (admin only)
+
+### Void
+
+- `/void-tip` (admin) + `/admin/reanalyze-void`
+- `AUTO_VOID_STUCK_AUTO=true` — auto-void tips pendentes >3d (era 14d, reduced 2026-05-01)
+- `LIVE_RISK_MONITOR_AUTO=true` — auto-void tips live com risco extremo (queue collapse)
+- Pattern detection via `/void-audit`
+
+### Settlement quarantine
+
+Tips que falharam match lookup repetidamente vão pra quarantine (counter `settle_quarantine`). Manual review via `/admin/forensics`.
+
+---
+
+## Crons / loops autônomos
+
+| Cron | Cadência | Função |
+|---|---|---|
+| `lol/dota/cs/val/tennis/...` polls | 6-30min adaptativo | Discover + analyze |
+| `auto_shadow` | 6h | Shadow stats summary |
+| `auto_healer` | 5min | Detecta + cura anomalias (mutex stale, polls silentes, ai backoff stuck) |
+| `bankroll_guardian` | 1h | Adaptive DD thresholds per sport |
+| `weekly_recalc` | 7d | Recalc weights/baselines |
+| `autonomy_digest` | 24h | DM admin daily digest |
+| `db_backup` | 24h (4h UTC) | VACUUM INTO snapshot |
+| `leaks_digest` | 24h (13h UTC) | DM top leaks (n≥20, ROI≤-15%) |
+| `mt_restore` | 24h (14h UTC) | Sugere remover bloqueados que recuperaram |
+| `scraper_smoke` | 24h | Daily scraper health check |
+| `weekly_digest` | 7d (Mon 14h UTC) | Weekly summary |
+| `nightly_retrain` | 24h (3h UTC) | refresh-all-isotonics.js |
+| `tennis_calib_refit` | 24h (4h local) | /admin/mt-refit-calib?sport=tennis (commit fe16e55) |
+| `path_guard` | 6h | Pipeline path regression detect |
+| `league_bleed` | 6h | Detect liga sangrando |
+| `pipeline_digest` | 6h | Pipeline summary |
+| `mt_bucket_guard` | 12h | MT scanner odd floor/cap auto-tune |
+| `gates_autotune` | 12h | EV bonus + stake cap auto-tune |
+| `league_guard` | 12h | League-level kelly_mult tune |
+| `odds_bucket_guard` | 12h | (sport, bucket) auto-block leaks |
+| `mt_auto_promote` | 12h | Promote/revert (sport, market, tier) |
+| `model_calibration` | 24h | Calibration drift check |
+| `backtest_validator` | 24h | Validate model via gates retroativos |
+| `post_fix_monitor` | 24h | Alert se sport sangra pós gate-fix |
+| `live_storm` | 10min | Flip into/out-of storm mode |
+| `kelly_auto_tune` | 24h (8h local) | Per-sport kelly_mult tune |
+| `roi_drift_cusum` | 24h (9h local) | CUSUM regime change |
+| `clv_capture` | per match | Captura close line |
+| `mem_watchdog` | continuous | RSS monitoring (P95×1.3 baseline) |
+| `polymarket_watcher` | 5min | Cross-validation copy-trading |
+| `stale_line_detector` | 5min | Pinnacle moveu vs casa não |
+| `super_odd_detector` | 5min | Book>20% acima Pinnacle |
+| `arb_detector` | 5min | Arb 2-way esports + 3-way football |
+| `velocity_tracker` | 5min | Pinnacle >3%/5min = sharp money |
+| `book_bug_finder` | 5min | Anomalias de odds |
+
+Heartbeats em `/cron-heartbeats` ou `/admin/cron-status`.
+
+---
+
+## Detectores cross-book
+
+Loops que comparam odds entre books pra detectar oportunidades sem depender de modelo.
+
+### Stale Line Detector
+
+`lib/stale-line-detector.js` (mig 057) — Pinnacle moveu >5% em 15min mas casa soft permanece na odd antiga = stale → DM admin (cooldown 1h por match). Cobertura: football, LoL silent.
+
+### Super-Odd Detector
+
+`lib/super-odd-detector.js` (mig 058) — book>20% acima Pinnacle (promo/erro de pricing). DM football. Devig aplicado.
+
+### Arb Detector
+
+`lib/arb-detector.js` (mig 059) — arb 2-way esports + 3-way football. DM stake split com payout garantido.
+
+### Velocity Tracker
+
+`lib/velocity-tracker.js` (mig 060) — Pinnacle >3% em 5min = sharp money entrou. Reusa ring buffer compartilhado.
+
+### Book Bug Finder
+
+`lib/book-bug-finder.js` (mig 061) — anomalias de pricing (odd duplicada com line diferente, totals invertidos, etc.).
+
+### Cross-book sem Pinnacle
+
+Quando Pinnacle ausente (rare), detectores funcionam com **mediana** das casas como reference.
+
+### Bookmaker Delta BR
+
+`lib/bookmaker-delta.js` (mig 056) — calibra book BR vs Pinnacle. `/odd-sample` + `/admin/bookmaker-deltas`.
+
+---
+
+## Polymarket integration
+
+Mini-Predex cross-validation copy-trading (2026-05-04, migs 084-086):
+
+- **Notify $1000+ DCA agg** — wallets com DCA agressivo
+- **Multi-wallet consensus** (≥3 sharps) — DM com tip context
+- **Auto-discovery sport sharps** — wallets recorrentes em sports
+- **Realized PnL via outcome resolution** (mig 086)
+- **BI dashboard `/pm`**
+
+`lib/polymarket-watcher.js` cron 5min.
+
+---
+
+## Auto-healer & health sentinel
+
+### Health Sentinel
+
+Detecta anomalias:
+
+- **mutex_stale** (autoAnalysisMutex.locked travado)
+- **poll_silent_<sport>** (poll não roda há >2x cadência esperada)
+- **ai_backoff_long** (DeepSeek backoff travado)
+- **auto_shadow_not_running**
+- **vlr_zero_unexpected** (VLR retorna 0 matches inesperado)
+
+### Auto-healer
+
+`lib/auto-healer.js` — registry de fixes:
+
+```js
 {
-  pass: true,           // se deve chamar a IA
-  direction: 't1',      // direção com maior edge
-  score: 9.3,           // edge máximo em pp
-  modelP1: 0.621,       // probabilidade estimada pelo modelo (0-1)
-  modelP2: 0.379,
-  impliedP1: 0.528,     // probabilidade de-juiced do mercado
-  impliedP2: 0.472,
-  factorCount: 2        // quantos fatores foram usados
+  severity: 'critical' | 'warning',
+  precondition: ({ ctx, anomaly }) => { ok: bool },
+  action: ({ ctx, anomaly, pre }) => { applied: string },
+  validate: ({ ctx, anomaly }) => { ok: bool }
 }
 ```
 
-### Sync de Dados Pro (PandaScore)
-
-No boot e a cada 12h, o sistema busca até **400 partidas finalizadas** dos últimos 45 dias via PandaScore e extrai:
-- **`match_results`** — resultados para forma recente e H2H
-- **`pro_champ_stats`** — WR de cada campeão por role em pro play
-- **`pro_player_champ_stats`** — WR de cada jogador com campeões específicos
-
----
-
-## Sistema de Odds
-
-### LoL / Dota 2 ao vivo — SX.Bet + Pinnacle (com odds PER-MAP)
-
-**Pinnacle expõe odds por mapa individual** via field `period` no endpoint `/0.1/matchups/{id}/markets/related/straight`:
-- `period: 0` → Match Winner da **série**
-- `period: 1..5` → Match Winner do **mapa N**
-- Mapas já finalizados desaparecem do response (status `settled`)
-
-Cascata no endpoint `/odds?game=lol&map=N`:
-
-1. **SX.Bet** (primário) — `sxGetMatchWinnerOdds` per-map quando `map=N`
-2. **Pinnacle per-map** (fallback novo) — `getMatchupMoneylineByPeriod(matchupId, N)` retorna odds do mapa exato
-3. **Pinnacle série** (fallback final) — apenas quando request **não** pediu mapa (`map` ausente). Nunca retorna série quando `map=N` foi solicitado — evita o bug de confundir odds de série com odds de mapa.
-
-**Bug histórico corrigido**: antes, quando SX.Bet falhava com `map=N`, o código caía na Pinnacle série e retornava essas odds como se fossem do mapa. Isso fazia o bot analisar o draft do mapa atual e tipar em odds completamente diferentes. Caso real: Forsaken vs BOMBA tinha série @1.24/3.52 mas mapa 3 @2.00/1.69 — inversão total do favorito.
-
-**Refresh Pinnacle live**: segundo `setInterval` de `PINNACLE_LOL_LIVE_REFRESH_MIN` (default 2min) roda quando há matches live cacheados.
-
-**Dota 2**: mesma cascata — SX.Bet → Pinnacle per-map (`period=N`) → Pinnacle série → The Odds API.
-
-### LoL pré-match — Pinnacle Guest API
-
-Pinnacle (sportId=12 E-Sports) é a fonte primária recomendada para odds pré-match de LoL desde que OddsPapi free tier (250 req) provou ser inviável. Ativar com `PINNACLE_LOL=true`.
-
-**Cobertura confirmada (Abr/2026):** LCK, LCS, LFL, CBLOL, LPL, EMEA Masters, NACL, TCL, LCP, Prime League, Rift Legends, ROL, LES — ~33 match-winners ativos por dia.
-
-**Lacunas:** ligas tier-3/4 fora do circuito principal (Hellenic Legends, Road of Legends pequenas, etc.) podem não estar.
-
-**Implementação** (`lib/pinnacle.js` + `fetchLoLOddsFromPinnacle` em `server.js`):
-- Filtro: `league.name` contém "League of Legends" + descarta participantes com `(Kills)` no nome (mercado kills, não match winner)
-- Cache key: `esports_pin_<matchupId>` no mesmo `oddsCache` que OddsPapi → `findOdds` encontra automaticamente
-- Refresh: `PINNACLE_LOL_REFRESH_MIN` (default 10 min)
-- American odds → decimal via `americanToDecimal()`
-
-### Esports pré-jogo — Pinnacle (OddsPapi descontinuado)
-
-**Default Abr/2026 em diante**: Pinnacle Guest API é a fonte primária para LoL pré-match. OddsPapi foi descontinuado porque o free tier (250 req) esgotava em horas.
-
-Se quiser **reativar OddsPapi** (não recomendado):
-- `ODDS_API_KEY=<key>` + `ODDSPAPI_REFRESH_MIN=60`
-- Funciona em paralelo com Pinnacle (cache compartilhado `esports_*`)
-- Em 429, server entra em `backoff 2h`; ver `backoffRemainingSeconds` em `/debug-odds`
-
-### Re-fetch Urgente (< 2h)
-
-Se uma partida está programada para começar em menos de 2 horas e as odds no cache têm mais de 2 horas, o sistema força um re-fetch imediato (aplicável tanto a Pinnacle quanto OddsPapi quando ativos).
-
----
-
-## Sistema de Análise IA
-
-### Provedor de IA
-
-O bot usa **DeepSeek** (`deepseek-chat`) como provedor padrão. Se `DEEPSEEK_API_KEY` não estiver configurado, cai automaticamente para **Anthropic Claude**. O endpoint `/claude` em `server.js` funciona como proxy unificado para ambos.
-
-### Fluxo Completo
-
-```
-1. Ciclo detecta partida elegível (live ou upcoming <= 24h)
-   |
-2. Re-fetch urgente de odds (se partida começa em < 2h e odds > 2h antigas)
-   |
-3. Coleta em paralelo:
-   |-- Odds do cache OddsPapi (via /odds?team1=X&team2=Y)
-   |-- Contexto ao vivo: composições, gold, kills, dragões, barões, torres
-   |-- WR de campeões em pro play (pro_champ_stats)
-   |-- WR de jogadores com campeões específicos (pro_player_champ_stats)
-   |-- Forma recente dos times (últimas partidas — 45 dias)
-   |-- Histórico H2H (últimos 45 dias)
-   |-- Movimentação de linha (variação de odds)
-   |
-4. Pré-filtro ML local (lib/ml.js)
-   -> Retorna: modelP1, modelP2, t1Edge, t2Edge, factorCount
-   -> Se sem edge matemático com compScore disponível: pula a IA
-   |
-5. Prompt compacto para DeepSeek/Claude (max 600 tokens de resposta)
-   |
-6. IA retorna:
-   |-- TIP_ML:[time]@[odd]|EV:[%]|STAKE:[u]|CONF:[ALTA/MÉDIA/BAIXA]
-   |
-7. Gates pós-IA:
-   |-- Gate 0: rejeita se não há odds reais disponíveis
-   |-- Gate 0.5 (EV-modelo, assimétrico): IA reporta EV > modeloEV + 10pp → rebaixa conf
-   |-- Gate 0.6 (P-magnitude, simétrico): |P_ml − P_ai_implied| > 10pp → rebaixa conf
-   |-- Gate 2: rejeita odds fora de [LOL_MIN_ODDS, LOL_MAX_ODDS]
-   |-- Gate 3 (direção ML×IA): direção diverge com factorCount≥2, score≥3pp → rebaixa conf
-   |-- Gate 3.5 (sem-dados): factorCount=0 → bloqueia BAIXA, exige EV≥8% para MÉDIA
-   |-- Gate 4 (EV adaptativo): rejeita se EV < threshold por confiança
-   |-- Gate 4b: rejeita EV absurdo (> 50%) — erro de cálculo da IA
-   |
-8. Se TIP_ML aprovada: envia DM a todos os inscritos + registra no DB
-   Usuários que bloquearam o bot (403) são removidos e persistidos no DB
-```
-
-### Unidade de stake (`u`) — base do Kelly
-
-**Definição explícita**: `1u = 1% da banca do esporte específico` (não cross-sport).
-
-- Cada esporte tem sua própria banca na tabela `bankroll` (`esports`, `mma`, `tennis`, `football`), com `initial_banca` e `current_banca` próprias.
-- Kelly (`_applyKelly` em `lib/utils.js`) retorna stake em % da banca → multiplica por 100 para converter em `u`.
-- Os caps `4u / 3u / 1.5u` correspondem a `4% / 3% / 1.5%` da banca do esporte — são o **teto hardcoded do Kelly** (não "u fixo"). Abaixo do cap, o stake escala dinamicamente com edge.
-- Valor em reais do settlement: `stake_reais = stake_units × (current_banca_do_sport / 100)`.
-
-**Caps de exposição (independentes do Kelly individual)** em `lib/risk-manager.js`:
-- `GLOBAL_RISK_PCT=0.10` — soma de tips pendentes **cross-sport** não pode exceder 10% da banca total.
-- `SPORT_RISK_PCT=0.20` — soma de tips pendentes de um esporte não pode exceder 20% da banca desse esporte.
-
-Kelly calcula a stake individual, risk-manager reduz ou rejeita se os caps de exposição já estariam violados.
-
-### Política de Kelly/Stake (ML vs IA)
-
-O stake é calculado com **Kelly fracionado** (fração por nível de confiança). A probabilidade `P` usada no Kelly segue esta política explícita:
-
-| Condição | P usada no Kelly | Razão |
-|---|---|---|
-| `factorCount > 0` (ML tem dados) | `modelP` do ML | Calibrado por histórico (Elo/forma/H2H); evita circularidade `p ← EV ← IA` |
-| `factorCount = 0` (sem dados ML) | `calcKellyFraction(tipEV, odd, k)` | Fallback via EV da IA; Gate 3.5 já restringe para ALTA/MÉDIA com EV alto |
-
-**Nunca** é feito blend entre `P_ml` e `P_ai_implied` no stake — divergência ML×IA apenas rebaixa **confiança** (que reduz a fração Kelly e o teto de stake), nunca mistura as probabilidades. Isso evita que alucinações da IA inflem apostas.
-
-**Derivação de `P_ai_implied`** (usada nos gates de consenso):
-```
-P_ai_implied = (1 + EV_ia / 100) / odd
-```
-
-**Gates de consenso (LoL, `autoAnalyzeMatch`):**
-- **Gate 0.5 — EV-modelo (assimétrico)**: se `EV_ia − EV_modelo > 10pp`, IA está otimista demais → rebaixa conf. Assimétrico por design: IA pessimista pode ter razão (sinal qualitativo que ML não captura).
-- **Gate 0.6 — P-magnitude (simétrico)**: se `|P_ml − P_ai| > 10pp` → rebaixa conf (ALTA→MÉDIA, >15pp MÉDIA→BAIXA). **P_ai** preferencialmente lido do campo `|P:XX%|` retornado explicitamente pela IA no formato TIP_ML. Fallback: derivação `(1 + EV/100) / odd`.
-- **Gate 3 — direção**: se `ml.direction ≠ ia.direction` com `factorCount≥2` e `score≥3pp` → rebaixa; score>8pp rejeita BAIXA.
-
-### Formato TIP_ML (Abr/2026+)
-
-```
-TIP_ML:[time]@[odd]|EV:[%]|P:[%]|STAKE:[Nu]|CONF:[ALTA/MÉDIA/BAIXA]
-```
-
-Campo `P` é a probabilidade 0–100% que a IA **explicitamente** atribui ao pick. Consistência: `EV = (P/100 × odd − 1) × 100`. Parser é tolerante — se IA omitir `P`, o sistema deriva do EV+odd. O campo é usado no Gate 0.6 (divergência ML×IA) e no Brier Score do `/roi`.
-
-### Níveis de Confiança e Thresholds de EV
-
-| Confiança | Sinais exigidos | EV mínimo (6 sinais → ≤1 sinal) | Kelly | Stake máx |
-|-----------|----------------|----------------------------------|-------|-----------|
-| 🟢 ALTA   | ≥ 2 sinais     | 2% → 7%                          | ¼ Kelly | 4u |
-| 🟡 MÉDIA  | ≥ 1 sinal      | 1% → 5.5%                        | ⅙ Kelly | 3u |
-| 🔵 BAIXA  | Nenhum         | 0.5% → 4%                        | 1/10 Kelly | 1.5u |
-
----
-
-## MMA — Filtro UFC
-
-O sistema analisa **apenas lutas do UFC**. A cada ciclo:
-1. Busca todas as lutas MMA com odds (`The Odds API — mma_mixed_martial_arts`)
-2. Carrega a carta atual do UFC via ESPN (`/apis/site/v2/sports/mma/ufc/scoreboard`)
-3. Para cada luta com odds: verifica se os lutadores estão na carta ESPN UFC
-4. Lutas não encontradas no ESPN são puladas (`[DEBUG] Pulando não-UFC: X vs Y`)
-
-> **Nota:** lutas UFC muito futuras podem não estar ainda no ESPN scoreboard e seriam temporariamente puladas até serem adicionadas ao scoreboard.
-
----
-
-## Settlement Automático
-
-| Esporte | Fonte de resultado | Endpoint | Frequência |
-|---------|---|---|-----------|
-| LoL (Riot) | LoL Esports API | `/match-result?matchId=X&game=lol` | 30 min |
-| LoL (PandaScore) | PandaScore (prefixo `ps_`) | `/ps-result?matchId=X` | 30 min |
-| Dota 2 | PandaScore | `/dota-result?matchId=X` | 30 min |
-| Futebol | API-Football + DB | `/football-result?matchId=X&team1&team2&sentAt` | 30 min |
-| MMA | ESPN UFC scoreboard | direto via `fetchEspnMmaFights` | 30 min |
-| Tênis | ESPN ATP/WTA + DB | `/tennis-db-result` + ESPN scoreboard | 30 min |
-| **Darts** 🆕 | Sofascore event status | `/darts-result?matchId=X` | 30 min |
-| **Snooker** 🆕 | Sofascore scheduled-events (match por nome+data) | `/snooker-result?matchId=X&team1&team2&sentAt` | 30 min |
-
-**Darts**: `match_id = darts_<sofaEventId>` — extrai o sofaId e consulta `/event/{id}` via `sofascoreDarts.getEventResult`. Lê `status.type === 'finished'` + `winnerCode` (1=home, 2=away).
-
-**Snooker**: `match_id = snooker_<pinnacleMatchupId>` — como Pinnacle não expõe resultado após settlement, busca em Sofascore `scheduled-events/<date>` (janela 7 dias desde `sentAt`) e casa por nome do jogador.
-
-### Matching de nomes no settlement (`lib/name-match.js`)
-
-Settlement unifica o matching de nomes numa função auditável (`nameMatches`) com 5 estratégias em ordem:
-
-| Método | Quando | Score |
-|---|---|---|
-| `exact` | strings normalizadas iguais | 1.0 |
-| `alias` | `LOL_ALIASES` mapeia A↔B (ex: `FNC ↔ Fnatic`) | 0.95 |
-| `substring` | `A.includes(B)` + ambos ≥ 4 chars + `score ≥ 0.5` | `shorter/longer` |
-| `substring_weak` | casaria por substring mas score < 0.5 → **NÃO é match** (registrado como WARN para auditoria) | `shorter/longer` |
-| `none` | nenhum dos acima | 0 |
-
-**Threshold de score mínimo (0.5 default)** evita falsos positivos silenciosos:
-- `"Real"` (4) em `"UnrealTournament"` (16) → score 0.25 → `substring_weak` (rejeitado)
-- `"Bayern"` em `"BayernLeverkusen"` → score 0.375 → `substring_weak` (rejeitado — são times diferentes)
-- `"Liquid"` em `"Team Liquid"` → score 0.55 → `substring` (match legítimo)
-
-Configurável via `opts.minSubstrScore` para casos específicos.
-
-**Tênis** usa matcher dedicado (`lib/tennis-match.js`) com suporte a `"Last, First"` e inicial abreviada (`"J. Last"`).
-
-Cada settlement emite log: `[SETTLE] esports matchId=X tip="Fnatic" vs winner="FNC" → win [method=alias score=0.95]`. Casos `substring_weak` são logados como **WARN** destacando potenciais disputas.
-
----
-
-## Rotas do Servidor
-
-### Partidas e Odds
-
-| Rota | Descrição |
-|------|-----------|
-| `GET /lol-matches` | Combina Riot API + PandaScore; inclui odds quando disponíveis no cache |
-| `GET /mma-matches` | Lutas MMA próximas com odds (The Odds API) |
-| `GET /tennis-matches` | Partidas de tênis próximas com odds (The Odds API) |
-| `GET /football-matches` | Partidas de futebol próximas 7 dias com odds H2H + Over/Under |
-| `GET /odds?team1=X&team2=Y[&force=1]` | Busca odds do cache; `force=1` ignora TTL e força re-fetch |
-| `GET /live-gameids?matchId=X` | IDs dos games em andamento numa série Riot |
-| `GET /live-game?gameId=X` | Stats ao vivo: gold, torres, dragões, kills, players |
-
-### Tips e Banco
-
-| Rota | Descrição |
-|------|-----------|
-| `POST /record-tip` | Registrar tip no banco |
-| `POST /settle` | Liquidar tip por match_id, sport e winner |
-| `POST /settle-manual` | Liquidar tip manualmente (casos quarantine) |
-| `POST /void-tip` | Anular tip (id ou matchId) |
-| `POST /reopen-tip` | Reabrir tip pra reprocessamento |
-| `POST /void-old-pending` | Anula em lote tips pendentes antigas |
-| `GET /unsettled-tips` | Tips aguardando resultado |
-| `GET /tips-history?status=open|pending|settled|win|loss|void` | Histórico com filtros |
-| `GET /roi?sport=X` | ROI total, calibração por confiança, split live/pre, Brier (push corretamente excluído) |
-| `GET /equity-curve?sport=X&days=N` 🆕 | Série diária de banca cumulativa, drawdown, Sharpe anualizado, max DD |
-| `GET /hourly-roi?sport=X&days=N` 🆕 | ROI por hora do dia (BRT) — alimenta heatmap visual |
-| `GET /shadow-vs-active?sport=X&days=N` 🆕 | Compara performance shadow vs ativo (n, ROI, hit rate, profit) |
-| `GET /league-roi?sport=X` | ROI por liga + multiplier de stake |
-| `GET /team-form?team=X&game=X` | Forma recente do time (exato → fuzzy LIKE, últimos 45 dias) |
-| `GET /h2h?team1=X&team2=Y&game=X` | Histórico H2H (exato → fuzzy LIKE, últimos 45 dias) |
-
-### Dashboard / Logs / Agentes
-
-| Rota | Descrição |
-|------|-----------|
-| `GET /dashboard` | UI principal (Chart.js + tabs) |
-| `GET /logs` | Logs em tempo real (SSE) |
-| `GET /logs/status` | Saúde por bot |
-| `GET /logs/tips?limit=N` | Tips enviadas/negadas do buffer |
-| `GET /logs/live-matches` | Partidas live detectadas nos logs |
-| `GET /logs/history` | Buffer bruto classificado |
-| `GET /logs/stream` | Server-Sent Events em tempo real |
-| `GET /agents/live-scout` | Snapshot de partidas live + gaps detectados (no_gameids/stats_disabled/coverage_missing) |
-| `GET /agents/feed-medic` | Health check de fontes externas (Riot/VLR/ESPN/Pinnacle) |
-| `GET /agents/roi-analyst?days=N` | ROI/Brier/calibração por sport+bucket+market, leaks |
-| `GET /debug-vlr?team1=X&team2=Y` | Testa VLR.gg discovery + parsing pra par específico |
-
-### Diagnóstico
-
-| Rota | O que retorna |
-|------|--------------|
-| `GET /health` | Saúde do serviço + métricas-lite |
-| `GET /debug-odds` | Cache completo de odds: slugs, TTL, backoff restante, estado do round-robin |
-| `GET /debug-teams` | Todos os times do schedule com `hasOdds` e `league` — identifica mismatches |
-| `GET /debug-match-odds?team1=X&team2=Y` | Testa matching de odds para um par específico |
-| `GET /lol-slugs` | Slugs de liga reconhecidos na whitelist + slugs desconhecidos |
-| `GET /lol-raw` | Dump bruto do schedule Riot por liga |
-
----
-
-## Dashboard de Tracking (`/dashboard`)
-
-UI principal pra acompanhar performance, calibração e cobertura. Acessa em `https://<deploy>/dashboard` (sem auth pra HTML; endpoints JSON exigem `x-admin-key`).
-
-### Cards principais
-
-| Card | Endpoint | O que mostra |
-|---|---|---|
-| **Equity Curve** 🆕 | `/equity-curve` | Linha dual-axis: banca em R$ (verde) + drawdown % (vermelho). Header: banca atual, growth, peak, max DD, Sharpe anualizado |
-| **Heatmap horários** 🆕 | `/hourly-roi` | Grid 12×2 colorido por ROI (vermelho<0, verde>0). Tooltip com n/W-L/lucro por hora |
-| **Shadow vs Ativo** 🆕 | `/shadow-vs-active` | Cards lado-a-lado verde/amarelo. Δ ativo-shadow + alerta `⚠️ shadow tá ganhando` se < -5pp |
-| **ROI por Liga** | `/league-roi` | Tabela com mult badge, pre/live split, conf split (ALTA/MÉDIA/BAIXA) |
-| **Live Snapshot** | `/live-snapshot` | Partidas live + odds Pinnacle + stats live (LoL/Dota/CS/Valorant/Tennis) |
-| **Upcoming** | `/upcoming-snapshot?hours=24` | Próximas 24h por esporte |
-| **Status Bots** | `/logs/status` | Card por sport (ok/warn/err), métricas, última atividade |
-| **Tips Table** | `/tips-history` | Filtros: q, status, live, conf, sort, limit |
-
-### Agentes (em `/dashboard` aba "Agentes")
-
-- **Live Scout**: detecta gaps em partidas live em tempo real (`no_gameids_in_ps`, `stats_disabled`, `coverage_missing`, `delay_alto`, etc). Quando gap persiste >5min → DM admin via Telegram
-- **Feed Medic**: health check de Riot/VLR/ESPN/Pinnacle/server local com latency e bytes
-- **ROI Analyst**: agregado por sport/bucket/market_type + leaks (ROI<-10% e n≥5)
-
-### Banca / Equity tracking
-
-Stake (units) ≠ stake_reais (R$). `1u = 1% da banca do esporte`. Endpoint `/equity-curve` retorna ambos:
-- `series[]`: `{day, profit_reais, cum_banca, drawdown_pct, n}`
-- Métricas: `initial_banca`, `current_banca`, `peak_banca`, `max_drawdown_pct`, `sharpe_annualized`
-
----
-
-## Banco de Dados (`sportsedge.db`)
-
-| Tabela | Conteúdo |
-|--------|---------|
-| `users` | user_id, username, subscribed, sport_prefs (JSON array) |
-| `tips` | odds, EV, stake, confidence, resultado, isLive, clv_odds, open_odds |
-| `odds_history` | Snapshots de odds (14 dias) para detecção de line movement |
-| `match_results` | Resultados pro (últimos 45 dias) para forma recente e H2H |
-| `pro_champ_stats` | WR de campeões por role em pro play |
-| `pro_player_champ_stats` | WR de jogadores com campeões específicos em pro play |
-| `synced_matches` | IDs de partidas já sincronizadas |
-| `api_usage` | Contador de uso por provedor de IA e mês |
-| `bankroll` | Banca atual por esporte |
-| `ml_factor_weights` | Pesos dinâmicos do pré-filtro ML (recalculados semanalmente) |
-| `tip_factor_log` | Log de fatores ML por tip (para recalibração de pesos) |
-| `settings` | Flags de controle interno (ex: one-time cleanups) |
-| `voided_tips` | Blacklist de tips com odds erradas |
-
----
-
-## Estrutura de Arquivos
-
-```
-lol betting/
-├── server.js           # Servidor HTTP: odds, partidas, banco, endpoints, proxy IA, sync pro stats
-├── bot.js              # Bot Telegram: polling, análise automática, tips, patch meta, fair odds
-├── start.js            # Launcher: spawna server + bot com auto-restart (backoff exponencial)
-├── sync-form.js        # Script avulso: sync histórico de partidas (forma/H2H) sem o servidor rodando
-├── railway.toml        # Deploy Railway (healthcheck TCP, restart on_failure)
-├── nixpacks.toml       # Build config Nixpacks (Railway)
-├── package.json
-├── .env                # Credenciais (nunca commitar)
-├── sportsedge.db       # SQLite (criado automaticamente; path via DB_PATH)
-├── migrations/         # Scripts de migração SQLite
-├── public/             # Dashboard HTML + calculadora EV manual (lol-ev-manual.html)
-└── lib/
-    ├── database.js     # Schema SQLite, statements (exato + fuzzy LIKE), índices de performance
-    ├── ml.js           # Pré-filtro ML esports (forma, H2H, comp score) — retorna modelP1/P2
-    ├── ml-weights.js   # Pesos dinâmicos do ML — recalculados semanalmente por acurácia por fator
-    ├── risk-manager.js # Risk Manager global: ajusta stake por exposição cross-sport (GLOBAL_RISK_PCT/SPORT_RISK_PCT)
-    ├── news.js         # Google News RSS — contexto de lesões/suspensões/escalações no prompt (sem API key)
-    ├── football-data.js# Wrapper football-data.org v4: enriquecimento alternativo para futebol
-    ├── football-ml.js  # Pré-filtro ML futebol: 1X2 + Over/Under via Poisson simplificado
-    ├── tennis-data.js  # Dados ESPN de tênis: rankings ATP/WTA, scoreboard de torneios
-    ├── radar-sport.js  # Wrapper Radar Sport API com cache em memória + throttle
-    ├── sports.js       # Registry de esportes (tokens, feature flags)
-    └── utils.js        # log, calcKelly, calcKellyFraction, norm, fmtDate, httpGet, safeParse
-```
-
----
-
-## Troubleshooting e Erros Comuns
-
-### Banco de Dados
-- **`no such table: settings`**: Reinicie o servidor — a tabela é criada automaticamente no boot pelo schema.
-- **`syntax error` ao criar tabelas**: Verifique se o SQLite está acessível e o `DB_PATH` está correto.
-- **Perda de conexão com DB**: Railway pode reatribuir volume. O sistema fallback para `sportsedge.db` local.
-
-### Odds
-- **`sem match` nos logs**: Nomes de times não casam entre Riot/PandaScore e OddsPapi. Use `/debug-match-odds` para investigar.
-- **HTTP 429 da OddsPapi**: só relevante se ainda usar OddsPapi. Abr/2026+ padrão é Pinnacle que não tem quota. Se 429 aparecer: `ODDS_API_KEY` vazia (desativa) ou `ODDSPAPI_REFRESH_MIN=180+`.
-- **`/debug-odds` mostra `count: 0, lastSync: nunca`**: OddsPapi nunca conseguiu sincronizar — chave ausente/inválida ou backoff ativo. Veja `lastApiResponse` para detalhes.
-- **LPL sem odds**: OddsPapi pode não ter cobertura para esse confronto específico. Verifique se o TID 46121 está na lista dinâmica via `/debug-odds`.
-- **Sem notificação de partida LoL ao vivo com odds**: confira `SXBET_ENABLED=true`. Odds de LoL live vêm exclusivamente do SX.Bet, independente do OddsPapi. O sistema já faz fallback para odds de série quando Riot API não retorna `currentMap` (entre mapas ou partidas PandaScore `ps_`).
-
-### LPL Live
-- **LPL não aparece como live**: Verifique se `PANDASCORE_TOKEN` está configurado. Sem ele, a detecção por PandaScore (camada 2) não funciona; a detecção por tempo (camada 3) ainda atua após 2min do startTime.
-- **LPL aparece como live mas não deveria**: A promoção por tempo usa a janela 2–300min; se o jogo terminou sem atualizar `winner` na API, pode persistir como live por até 5h.
-
-### MMA
-- **Lutas UFC sendo filtradas**: O ESPN scoreboard pode não ter lutas muito futuras. Elas serão adicionadas assim que aparecerem no ESPN.
-- **Lutas não-UFC aparecendo**: Verifique se o filtro `findEspnFight` está funcionando nos logs (`[DEBUG] Pulando não-UFC`).
-
-### IA
-- **`Failed to parse AI response`**: A IA não seguiu o formato esperado. Verifique o prompt e contexto enviado.
-- **Timeout da API**: DeepSeek/Claude pode demorar. Timeout configurado para 45 segundos.
-
-### Settlement
-- **Tips não settled**: Verifique se a API de resultados está funcionando (ESPN para MMA/Tênis, API-Football para futebol).
-- **Winner não detectado**: Nomes podem não casar. O sistema usa fuzzy matching.
-
----
-
-## Darts (shadow mode)
-
-Novo esporte adicionado em modo **shadow** (tip é gerada e registrada no DB, mas **não envia DM**). Objetivo: auditar CLV e win rate dos primeiros 30 tips antes de promover para produção.
-
-### Arquitetura
-
-- **Fonte única**: Sofascore (via proxy `Public-Sofascore-API` no projeto).
-- **`lib/sofascore-darts.js`**: listagem de eventos PDC, odds H2H, stats do match (`Average3Darts`, `Thrown180`, `CheckoutsOver100`, etc.) e rolling average dos últimos N jogos por jogador.
-- **`lib/darts-ml.js`**: pré-filtro com **3-dart avg differential como sinal primário** (equivalente ao xG em futebol) + win rate recente como sinal secundário.
-- **Sem IA**: modelo puramente estatístico (3DA é forte o suficiente; economia de tokens).
-- **Kelly conservador**: 1/8 Kelly + gates de edge ≥4pp (com 2 fatores) ou 5pp (com 1 fator).
-- **Whitelist PDC** via `DARTS_TOURNAMENT_WHITELIST` (default cobre PDC World, Premier League, Matchplay, Grand Prix, UK Open, Players Championship, European Tour, Grand Slam, World Series Finals).
-
-### Shadow Mode
-
-| Flag env | Efeito |
+Fluxo cron 5min:
+1. Run sentinel → anomalies
+2. Build ctx com refs do bot (mutex, pollFns, vlrModule, log)
+3. Run healer → applied/skipped/errors
+4. Filter newApplied (cooldown 30min/anomaly_id anti-spam)
+5. Filter criticalUnresolved (exclui self-resolved)
+6. DM admin
+
+### Agent orchestrator
+
+`lib/agent-orchestrator.js` — workflows compostos:
+
+| Workflow | Steps |
 |---|---|
-| `DARTS_SHADOW=true` (default) | Tips registradas com `is_shadow=1` no DB; sem DM |
-| `DARTS_SHADOW=false` | Tips enviam DM normalmente (após graduação) |
-| `<SPORT>_SHADOW=true` | Qualquer outro esporte também pode rodar em shadow |
+| `full_diagnostic` | sentinel → check_actionable → auto_healer → sentinel_post |
+| `coverage_investigation` | live-scout → check_gaps → feed-medic |
+| `weekly_full` | weekly_review + roi_analyst + health_sentinel |
+| `tip_emergency` | pre-match-check + news-monitor → check_alerts → feed-medic |
+| `daily_health` | weekly_review + bankroll_guardian + health_sentinel + ia_health + cut_advisor |
+| `incident_response` | sentinel → scout + medic + healer → sentinel_post |
+| `model_check` | model_calibration + ia_health + bankroll_guardian |
 
-### Comando admin `/shadow [sport]`
-
-Relatório de auditoria via Telegram:
-```
-🕶️ SHADOW TIPS — DARTS
-Total: 17
-✅ W: 9 | ❌ L: 6 | ⚪ Void: 0 | ⏳ Pend: 2
-Win rate: 60.0%
-CLV médio: +2.15% (n=13)
-```
-
-**Critério de graduação sugerido**: ≥30 tips, CLV médio positivo, win rate calibrado com confiança predita. Ao graduar: setar `DARTS_SHADOW=false` e restart.
-
-### Endpoint `/shadow-tips?sport=X&limit=100`
-
-Retorna JSON com summary + últimas N tips para análise externa (Excel, Python notebook).
+Endpoint: `GET /agents/orchestrator?workflow=daily_health`
 
 ---
 
-## Snooker (Pinnacle guest API)
+## Banco de dados
 
-Novo esporte em shadow mode, alimentado pela **Pinnacle Guest API** — endpoint público usado pelo próprio frontend pinnacle.com, sem auth real.
+**SQLite WAL mode** com `journal_size_limit` + checkpoint TRUNCATE. DB unitário (`sportsedge.db`) compartilhado entre `server.js` e `bot.js`.
 
-### Por que Pinnacle (e não Betfair)
+### Tabelas principais
 
-A primeira tentativa foi usar Betfair Exchange API (delayed key gratuita), mas **Betfair bloqueia IPs brasileiros** (Region: BR → Restricted). Pinnacle aceita acesso de BR e tem endpoint guest público.
+| Tabela | Propósito |
+|---|---|
+| `bankroll` | Banca per-sport (mig 001 split lol/dota; tier-aware unit_value) |
+| `tips` | Tips reais (40+ cols: P, odd, stake, ev, clv_pct, regime_tag, tip_context_json, settlement_audit) |
+| `market_tips_shadow` | MT shadow log (mig 024+) |
+| `match_results` | Resultados settled (sport-agnostic) |
+| `tip_settlement_audit` | Audit row per settlement (mig 073) |
+| `gates_runtime_state` | DB-backed runtime gates state (mig 053) |
+| `mt_runtime_state` | MT promote/disable state (migs 050/051/063/091) |
+| `league_blocklist` | Manual + auto blocklists (mig 045) |
+| `odds_bucket_blocklist` | Auto-bucket blocks (mig 052) |
+| `bookmaker_delta_samples` | BR vs Pinnacle delta calib (mig 056) |
+| `stale_line_events` / `super_odd_events` / `arb_events` / `velocity_events` / `book_bug_events` | Cross-book detector logs |
+| `mt_auto_promote` | Auto-promote state (mig 077) |
+| `polymarket_consensus_alerts` / `wallet_metadata` / `paper_trades` / `market_resolutions` | Polymarket integration |
+| `oracleselixir_games` / `oracleselixir_players` | LoL feature mining (26k+ rows) |
+| `dota_team_rosters` / `dota_hero_stats` / `dota_team_stats` | Dota enrichment |
+| `cs_team_stats` / `valorant_team_stats` | Esports stats |
+| `tennis_match_stats` / `tennis_player_serve_stats` | Tennis enrichment (5765 rows 2024 ATP+WTA) |
+| `understat_matches` | Football xG/SoT |
+| `football_data_csv` (+ shots) | football-data.co.uk integration (3317 rows) |
+| `lol_game_objectives` | LoL gol.gg objectives |
+| `stratz_hero_matchups` | Dota draft |
+| `basket_match_history` / `basket_elo` | NBA shadow |
+| `learned_corrections` | Per (sport, regime, tier, market) corrections (mig 090) |
+| `readiness_corrections_log` | Readiness learner log (mig 089) |
+| `error_log` | Centralized errors (mig 075) |
+| `tips_shadow_regime_tag` | Regime separation A/B/C (mig 088) |
+
+### Migrations
+
+91 migrations em `migrations/index.js` (single file, ~2300 linhas). Cada migration tem `id`, `up(db)` idempotente. Whitelist guard pra DDL (validar ident regex). Aplicadas no boot do server.
+
+```
+GET /migrations-status   # check applied vs available
+```
+
+---
+
+## HTTP endpoints (server.js)
+
+~28k linhas. Endpoints categorizados:
+
+### Discovery / odds
+
+- `/lol-matches`, `/dota-matches`, `/cs-matches`, `/valorant-matches`, `/mma-odds`, `/basket-matches`
+- `/lol-slugs`, `/lol-raw`, `/live-gameids`, `/ps-compositions`, `/debug-livestats`
+- `/opendota-live`, `/ps-dota-live`, `/live-game`
+- `/odds`, `/odds-markets`, `/handicap-odds`, `/player-props-debug`, `/sx-status`, `/debug-odds`
+- `/dota-map-result`, `/live-snapshot`, `/upcoming-snapshot`, `/debug-vlr`, `/debug-teams`, `/debug-match-odds`, `/debug-map-odds`
+
+### Records
+
+- `/record-tip` (POST) — registra tip (com `lineShopOdds`, `pickSide` opcional)
+- `/record-analysis` (POST)
+- `/match-result`, `/ps-result`, `/dota-result`, `/cs-result`, `/valorant-result`, `/darts-result`, `/snooker-result`, `/football-result`, `/basket-result`
+
+### Tips queries
+
+- `/tips-history?limit=N&sport=X&filter=settled|open`
+- `/shadow-tips`, `/unsettled-tips`, `/cashout-alerts`
+- `/market-tips-recent`, `/market-tips-by-sport`, `/market-tips-breakdown`, `/market-tips-by-league`
+- `/equity-curve?sport=X&days=N`, `/hourly-roi`, `/shadow-vs-active`
+- `/clv-histogram`, `/roi`, `/sports-risk-status`, `/pipeline-status`, `/tips-produced-rate`
+
+### Settle / void
+
+- `/reopen-tip` (POST), `/settle-manual` (POST), `/void-tip`
+- `/admin/run-settle`, `/admin/tennis-force-settle-tip`
+- `/admin/settle-market-tips-shadow`, `/admin/settle-mt-shadow-kills`, `/admin/settle-mt-shadow-kills-manual`
+
+### Admin (key-protected)
+
+- `/admin/login`, `/admin/logout`, `/admin/me` — cookie-based session
+- `/admin/today`, `/admin/sport-detail`, `/admin/cron-status`, `/admin/env-audit`, `/admin/tg-commands`
+- `/admin/mt-status`, `/admin/mt-shadow-audit`, `/admin/mt-shadow-comprehensive-audit`, `/admin/mt-shadow-by-league`, `/admin/mt-shadow-by-ev`, `/admin/mt-historical-learnings`, `/admin/mt-promote-status`, `/admin/mt-disable-list`, `/admin/mt-calib-validation`, `/admin/mt-brier-history`, `/admin/mt-refit-calib`
+- `/admin/blocklist-stats`, `/admin/cs-live-debug`, `/admin/repair`, `/admin/force-sync-bankroll`, `/admin/move-football-mt-to-shadow`
+- `/admin/repair-market-tips-dedup`, `/admin/purge-voided-market-tips`
+- `/admin/boot-diag`, `/admin/forensics`, `/admin/quick-stats`
+- `/admin/tennis-sources-diag`, `/admin/tennis-tip-match-debug`
+- `/admin/basket-seed`, `/admin/basket-train`, `/admin/basket-train-status`, `/sync-basket-espn`
+- `/admin/clv-capture-trace`
+- `/admin/ev-calibration`
+- `/admin/bookmaker-deltas`
+- `/admin/oe-status`, `/sync-oe`, `/sync-tennis-espn-range`
+
+### Agentes
+
+- `/agents/orchestrator?workflow=X`
+- `/agents/post-fix-monitor`, `/agents/gate-optimizer`, `/agents/sentinel`, `/agents/scout`, `/agents/medic`, `/agents/healer`, `/agents/cut-advisor`, `/agents/ia-health`
+
+### Health / metrics
+
+- `/health`, `/alerts` (cached 10s)
+- `/metrics-lite`, `/metrics`, `/health/metrics`
+- `/metrics/ingest` (POST — bot heartbeat bridge)
+- `/health/metrics.html`, `/metrics.html`
+
+### Logs
+
+- `/logs/ingest` (POST batched from start.js)
+- `/logs` (HTML), `/logs/stream` (SSE)
+- `/rejections`
+
+### Dashboards
+
+- `/dashboard` (legacy), `/bi` (PowerBI-style v3), `/admin/index.html`, `/admin/today.html`, `/admin/sport-detail.html`, `/admin/cron-status.html`, `/admin/forensics.html`, `/admin/quick-stats.html`
+- `/lol-ev-manual` (manual EV calc UI)
+
+### Misc
+
+- `/tennis-elo`, `/football-elo`, `/basket-elo`, `/basket-trained`, `/basket-trained-markets`
+- `/users`, `/save-user` (POST)
+- `/debug-sport-tips`, `/migrations-status`, `/cron-heartbeats`
+- `/odd-sample` (POST — bookmaker delta sample)
+- `/ai-stats?month=YYYY-MM` (per-sport AI tracking)
+- `/claude` (DeepSeek proxy with rate-limit + retry + per-sport tracking)
+
+---
+
+## Comandos Telegram
+
+### Públicos (todos os bots)
+
+- `/start` — welcome + disclaimer
+- `/help` — lista de comandos
+- `/stats [sport]` — ROI público + calibração
+- `/roi` — alias
+- `/stop` — unsubscribe
+- `/resub` / `/resubscribe` — re-subscribe
+
+### Admin (ADMIN_USER_IDS only)
+
+- `/users` — count subscribers
+- `/resync` — force re-sync
+- `/settle` — force settle now
+- `/pending` — list pending tips
+- `/slugs` — LoL slugs available
+- `/lolraw` — Pinnacle LoL raw response
+- `/reanalise` — re-analyze last
+- `/shadow` — shadow stats summary
+- `/tip` — manual tip dispatch
+- `/alerts` — current alerts
+- `/pipeline-health` / `/pipeline` — sports/tips/modelos/rejections summary
+- `/unsettled` / `/settle-debug` — pending tips diag
+- `/rejections` — rejection counters by reason
+- `/diag` / `/diag-tip` — diag specific tip
+- `/loops` — cron heartbeats
+- `/path-guard` / `/paths` — pipeline paths state
+- `/kelly-config` / `/kelly` — kelly_mult per sport
+- `/explore` / `/exploits` / `/explorar` — opportunities scanner
+- `/scraper-health` / `/scrapers` / `/scrapers-br` — BR scrapers status
+- `/br-edges` / `/edges` / `/edges-now` — BR edges live
+- `/casa-stats` / `/casas` / `/scorecard` — bookmakers scorecard
+- `/book-bugs` / `/bookbugs` / `/bugs` — book bug events
+- `/odd-sample` — sample BR odds
+- `/hybrid-stats` / `/hybrid` — hybrid model performance
+- `/models` — model freshness + Brier per sport
+- `/pause-sport` / `/pause` / `/unpause-sport` / `/unpause` — pause/unpause sport
+- `/run-guardian` / `/guardian` — force bankroll guardian
+- `/migrations` / `/migrations-status` — DB migrations state
+- `/pipeline-status` / `/pipeline` / `/health` — pipeline health
+- `/ai-stats` / `/ai` — AI usage per sport
+- `/health` — server health
+- `/debug` — debug current state
+- `/dedup-tips` / `/archive-dupes` — dedup runner
+- `/shadow-summary` — cross-sport shadow summary
+
+---
+
+## Dashboards
+
+### Public
+
+- **`/dashboard.html`** (legacy v2) — clean UX, equity curve, hourly heatmap, shadow vs active, leaks card, blocklist card, live tips card, ML shadow per sport
+- **`/bi`** (v3 PowerBI-style 2026-05-03) — Chart.js + OKLCH light theme, standalone
+
+### Admin
+
+- **`/admin/index.html`** — admin home with tg-commands list
+- **`/admin/today.html`** — daily summary
+- **`/admin/sport-detail.html`** — per-sport drill-down
+- **`/admin/cron-status.html`** — cron heartbeats grid
+- **`/admin/forensics.html`** — settlement forensics
+- **`/admin/quick-stats.html`** — quick metrics
+
+### Logs
+
+- **`/logs.html`** — live log tail (SSE) + filters
+
+### Manual tools
+
+- **`/lol-ev-manual.html`** — manual EV calc UI
+
+---
+
+## Estrutura de pastas
+
+```
+.
+├── start.js              # Launcher (spawns server.js + bot.js)
+├── server.js             # HTTP API (~28.5k lines)
+├── bot.js                # Telegram + análise + crons (~24k lines)
+├── package.json          # only better-sqlite3 + dotenv (zero framework)
+├── README.md             # este arquivo
+├── WORKFLOW_SPORTSEDGE.md  # Diagrama detalhado pipeline
+├── DECISIONS.md          # Decision log cronológico
+├── .env.example          # ~26KB, ~1043 linhas — todas vars
+├── nixpacks.toml         # Railway build config
+├── railway.toml          # Railway deploy config
+├── docker-compose.n8n.yml  # n8n local dev
+├── sportsedge.db         # SQLite WAL (Railway: /data/sportsedge.db)
+├── boot_count.json       # Boot counter
+├── last_exit_server.json # Exit signature
+├── promote-status.json   # MT promote state cache
+│
+├── lib/                  # 146 módulos
+│   ├── ml.js             # Pre-filter genérico
+│   ├── <sport>-ml.js     # Pre-filter per sport
+│   ├── <sport>-model.js  # Modelo determinístico
+│   ├── <sport>-model-trained.js  # Trained logistic
+│   ├── <sport>-weights.json      # Trained weights
+│   ├── <sport>-isotonic.json     # Isotonic calib
+│   ├── lol-{series,map,kills}-model.js  # LoL hierarchy
+│   ├── dota-{map,hero,roster}-*.js
+│   ├── cs-{ml,map}-model.js
+│   ├── tennis-{markov-model,markov-calib,model-trained,h2h-ensemble,...}.js
+│   ├── football-{ml,model,poisson-trained,data-features,live-model,mt-scanner}.js
+│   ├── basket-{elo,trained,mt-scanner}.js
+│   ├── pinnacle.js       # Pinnacle Guest API client
+│   ├── pinnacle-snooker.js
+│   ├── betfair.js
+│   ├── odds-aggregator-client.js  # Supabase BR
+│   ├── sportsbook-1xbet.js
+│   ├── line-shopping.js  # Line shop computation
+│   ├── devig.js          # Power method devig
+│   ├── name-match.js     # Fuzzy match (lib threshold≥0.5 + aliases)
+│   ├── elo-rating.js
+│   ├── league-tier.js
+│   ├── league-trust.js
+│   ├── league-rollup.js
+│   ├── mt-{auto-promote,result-propagator,tier-classifier}.js
+│   ├── market-tip-processor.js
+│   ├── market-tips-shadow.js
+│   ├── clv-{calibration,capture}.js
+│   ├── ev-calibration.js
+│   ├── learned-corrections.js
+│   ├── readiness-learner.js
+│   ├── kelly-auto-tune.js
+│   ├── stake-adjuster.js
+│   ├── risk-manager.js
+│   ├── gate-optimizer.js
+│   ├── gates-runtime-state.js
+│   ├── pre-match-gate.js
+│   ├── odds-bucket-gate.js
+│   ├── stale-line-detector.js
+│   ├── super-odd-detector.js
+│   ├── arb-detector.js
+│   ├── velocity-tracker.js
+│   ├── book-bug-finder.js
+│   ├── bookmaker-delta.js
+│   ├── auto-healer.js
+│   ├── auto-sample-deltas.js
+│   ├── agent-orchestrator.js
+│   ├── agents-extended.js
+│   ├── feed-heartbeat.js
+│   ├── metrics.js
+│   ├── dashboard.js
+│   ├── database.js       # WAL setup, prepared stmts
+│   ├── model-backup.js
+│   ├── roi-drift-cusum.js
+│   ├── tip-reason.js     # Deterministic tipReason fallback
+│   ├── news.js           # Google News RSS
+│   ├── league-blocklist.js
+│   ├── espn-{soccer,basket}.js
+│   ├── sofascore-{tennis,football,mma,darts,tabletennis}.js
+│   ├── api-football.js
+│   ├── football-data-csv.js
+│   ├── football-data.js
+│   ├── ufcstats.js       # MMA scraper
+│   ├── mma-org-resolver.js
+│   ├── hltv.js           # CS scoreboard
+│   ├── vlr.js            # Valorant
+│   ├── cuetracker.js     # Snooker WR
+│   ├── stratz-dota-scraper.js
+│   ├── thespike-valorant-scraper.js
+│   ├── tennis-abstract-scraper.js
+│   ├── understat-scraper.js
+│   ├── golgg-{kills,objectives}-scraper.js
+│   ├── oracleselixir-{features,player-features}.js
+│   ├── dota-{snapshot-collector,extras-scanner,fraud-blacklist}.js
+│   ├── lol-{extra-markets,markets,regional-strength,source-cross-check}.js
+│   ├── tennis-{correlation,injury-risk,tiebreak-stats,fatigue,player-stats,features-v2}.js
+│   ├── esports-{correlation,model-trained,runtime-features,segment-gate}.js
+│   ├── grid.js           # Tournament structure
+│   ├── epoch.js          # Code epoch tracker (gates_runtime_state)
+│   ├── cashout-monitor.js
+│   ├── polymarket-watcher.js
+│   ├── book-deeplink.js  # Telegram inline button "Apostar"
+│   ├── sport-unit.js     # Per-sport tier-based unit_value
+│   ├── sports.js         # Sport metadata (canonical names, normSport)
+│   ├── ml-weights.js     # Weights loader
+│   ├── constants.js
+│   ├── utils.js
+│   └── backups/          # Model backups
+│
+├── migrations/
+│   └── index.js          # 91 migrations (single file, ~2353 linhas)
+│
+├── scripts/              # 90 scripts utility
+│   ├── train.js          # Generic train
+│   ├── train-{esports,tennis,basket}-model.js
+│   ├── backtest{,-v2,-railway-tips}.js
+│   ├── backtest-{lol,tennis,football,esports,market-tips,new-models,railway-tips}-*.js
+│   ├── backtest-tennis-per-surface.js
+│   ├── backtest-esports-per-segment.js
+│   ├── audit-{all,leaks,leaks-deep,mma,recent-7d,stakes-granular,gates,pending,match-results,market-tips-by-tier,mt-settled-suspects}.js
+│   ├── refit-{mt-calib-all,tennis-markov-calib-inline}.js
+│   ├── refresh-all-isotonics.js
+│   ├── fit-{lol,tennis,esports}-{model,markov}-{isotonic,calibration}.js
+│   ├── extract-{1v1,esports,mma,tennis}-features.js
+│   ├── sync-{golgg-*,opendota-*,oracleselixir,sackmann-tennis,sofascore-history,ufcstats-history,tennis-stats,darts-stats,hltv-results,hltv-cs-teams,pandascore-history}.js
+│   ├── seed-basket-history.js
+│   ├── settle-{mt-shadow-esports,tennis-now}.js
+│   ├── shadow-compare.js
+│   ├── repair-empty-final-scores.js
+│   ├── rerun-{pending-tips,railway-pending}.js
+│   ├── reset-equity.js   # snapshot DB + archive + rebaseline (--dry-run/--confirm)
+│   ├── rebalance-bankroll-1000.js
+│   ├── rollback-model.js
+│   ├── debug-mt-shadow-settle.js
+│   ├── diag-{isotonic-zones,lpl}.js
+│   ├── diagnose-mt-tennis.js
+│   ├── ai-impact-report.js
+│   ├── check-model-freshness.js
+│   ├── clv-{by-league,coverage,coverage-gap,leak-diagnosis}.js
+│   ├── calibrate{,-lol-momentum}.js
+│   ├── backfill-{clv,mma-sherdog}.js
+│   ├── backup-db.js
+│   ├── book-bugs-{find,replay}.js
+│   ├── book-deeplink-test.js
+│   ├── mma-coverage-report.js
+│   ├── predict.js
+│   ├── probe-pinnacle{,-tennis}.js
+│   ├── roi-by-odds-bucket.js
+│   ├── root-cause-{atp-madrid-r3,tennis-clv}.js
+│   ├── scraper-smoke-test.js
+│   ├── tennis-v2-smoke.js
+│   ├── test-tennis-trained.js
+│   ├── tune-oe-weight-temperature.js
+│   ├── void-bad-tennis-tips.js
+│   └── ...
+│
+├── public/               # HTML dashboards
+│   ├── dashboard.html
+│   ├── dashboard-bi.html
+│   ├── dashboard-legacy.html
+│   ├── logs.html
+│   └── lol-ev-manual.html
+│
+├── tests/                # ~25 unit tests (run.js orchestrator)
+│   ├── run.js
+│   ├── test-{calibration,devig,elo-rating,kelly,kelly-cap-confkey,name-match,metrics,constants}.js
+│   ├── test-{darts,football}-ml.js
+│   ├── test-football-data-features.js
+│   ├── test-football-mt-scanner.js
+│   ├── test-tennis-{h2h-ensemble,market-scanner,score-parser}.js
+│   ├── test-{admin-cookie-auth,banca-delta,espn-pen-aet,log-ring-buffer,tip-context-shape}.js
+│   └── ...
+│
+├── data/                 # Datasets + features
+│   ├── tennis_atp/       # Sackmann tennis ATP repo
+│   ├── tennis_wta/       # Sackmann tennis WTA repo
+│   ├── {lol,cs2,dota2,valorant,tennis,football,mma,darts,snooker}_features.csv
+│   ├── {cs2,dota2,valorant,football}-backtest-per-segment.json
+│   ├── tennis-backtest-per-surface.json
+│   └── tipsbot.db (legacy)
+│
+├── docs/
+│   └── PROCESSO-ANALISE-TIPS-BOTS.md
+│
+├── _archive/             # Historical snapshots + audits
+│   ├── _audit_20260504_0749/
+│   ├── debug-snapshots/
+│   ├── sportsedge_snapshot_2026-04-24.db
+│   └── ...
+│
+├── n8n/                  # n8n workflows
+│   ├── README.md
+│   └── workflows/
+│
+├── Public-Sofascore-API/ # Subprojeto Django/Flask Sofascore proxy
+│   ├── README.md
+│   ├── sofascore_service/
+│   ├── docs/
+│   └── venv/
+│
+├── hltv-proxy/           # Subprojeto Python HLTV proxy
+│   ├── main.py
+│   ├── Dockerfile
+│   ├── requirements.txt
+│   └── railway.toml
+│
+└── external/             # External integrations
+```
+
+---
+
+## Variáveis de ambiente
+
+Categoria geral. Lista completa: [.env.example](./.env.example).
+
+### Core
+
+```env
+PORT=3000
+DB_PATH=/data/sportsedge.db
+SERVER_PORT=3000             # alias usado por bot.js → server
+ADMIN_KEY=<chave_aleatoria>  # Header x-admin-key OU Authorization: Bearer
+ADMIN_USER_IDS=<id1,id2>     # @userinfobot
+ADMIN_SESSION_TTL_MS=86400000  # 24h cookie session
+```
+
+### Telegram
+
+```env
+TELEGRAM_TOKEN_ESPORTS=<token>     # cobre LoL + Dota
+TELEGRAM_TOKEN_CS=<token>
+TELEGRAM_TOKEN_MMA=<token>
+TELEGRAM_TOKEN_TENNIS=<token>
+TELEGRAM_TOKEN_FOOTBALL=<token>
+TELEGRAM_TOKEN_DARTS=<token>
+TELEGRAM_TOKEN_SNOOKER=<token>
+TIPS_UNIFIED_TOKEN=<token>         # consolidado dispatch
+SYSTEM_ALERTS_TOKEN=<token>        # alertas roteados
+```
+
+### IA / odds / stats APIs
+
+```env
+DEEPSEEK_API_KEY=sk-...
+CLAUDE_API_KEY=                    # opcional, fallback
+THE_ODDS_API_KEY=<key>
+ODDS_API_KEY=<key>                 # OddsPapi (legacy)
+PINNACLE_LOL=true
+PINNACLE_DOTA=true
+PINNACLE_TENNIS=true
+SXBET_ENABLED=true
+LOL_BLOCK_SX_TIPS=true             # SX não dispatch (LEC liquidez baixa)
+LOL_BLOCK_SX_LIVE=true
+LOL_API_KEY=<riot_key>
+PANDASCORE_TOKEN=<token>
+API_SPORTS_KEY=<api_football_key>
+API_FOOTBALL_KEY=<key>             # alias
+API_FOOTBALL_DAILY_BUDGET=80
+STEAM_WEBAPI_KEY=<steam_key>
+SOFASCORE_PROXY_BASE=<url>
+SUPABASE_URL=<url>                 # BR aggregator
+SUPABASE_ANON_KEY=<key>
+```
+
+### Sports flags
+
+```env
+ESPORTS_ENABLED=true
+TENNIS_ENABLED=true
+FOOTBALL_ENABLED=true
+CS_ENABLED=true
+VAL_ENABLED=true
+TT_ENABLED=true
+MMA_ENABLED=false                  # 2026-05-04 disabled default
+DARTS_ENABLED=false
+SNOOKER_ENABLED=false
+BASKET_ENABLED=true                # NBA shadow
+
+# Shadow mode per sport
+DOTA2_SHADOW=true
+VALORANT_SHADOW=true
+FOOTBALL_SHADOW=false              # promoted 2026-05-03
+MMA_SHADOW=true
+DARTS_SHADOW=true
+SNOOKER_SHADOW=true
+TT_SHADOW=true
+
+# ML disabled (auto-route shadow)
+LOL_ML_DISABLED=true
+CS_ML_DISABLED=true
+TENNIS_ML_DISABLED=true
+ML_DISABLED_HARD_REJECT=false      # opt-in hard reject
+```
+
+### Risk / banca
+
+```env
+GLOBAL_RISK_PCT=0.10
+SPORT_RISK_PCT=0.20
+DAILY_TIP_LIMIT=8                  # per sport
+MATCH_STOP_LOSS_UNITS=2
+MAX_TIPS_PER_TOURNAMENT_PER_DAY=8
+TZ_OFFSET=-3                       # BRT
+TIP_EV_MAX_PER_SPORT={"esports":25,"tennis":25,"cs":30,"valorant":30}
+
+# Per-sport
+LOL_MT_EV_MAX=20
+CS2_MT_EV_MAX=20
+DOTA_MT_EV_MAX=20
+TENNIS_MT_EV_MAX=25
+FOOTBALL_MT_EV_MAX=20
+PRE_MATCH_EV_BONUS=0
+CS_PRE_MATCH_EV_BONUS=5
+LOL_PRE_MATCH_EV_BONUS=4
+VAL_PRE_MATCH_EV_BONUS=4
+MAX_STAKE_UNITS=2.0
+CS_MAX_STAKE_UNITS=2.0
+LOL_MAX_STAKE_UNITS=2.0
+TENNIS_MAX_STAKE_UNITS=2.0
+
+# Stake mults per market
+CS2_TOTAL_STAKE_MULT=1.3
+DOTA2_TOTAL_STAKE_MULT=1.2
+LOL_HANDICAP_STAKE_MULT=1.2
+```
+
+### Kelly
+
+```env
+KELLY_AUTO_TUNE=true               # cron 8h local
+KELLY_<SPORT>_<CONF>=<float>       # override (ex: KELLY_LOL_ALTA=0.40)
+KELLY_<CONF>=<float>               # cross-sport fallback
+```
+
+### Gates
+
+```env
+ODDS_BUCKET_BLOCK=                 # cross-sport (vazio default)
+LOL_ODDS_BUCKET_BLOCK=3.00-99
+VALORANT_ODDS_BUCKET_BLOCK=2.20-99
+ODDS_BUCKET_GUARD_AUTO=true
+ODDS_BUCKET_GUARD_MIN_N=30
+ODDS_BUCKET_GUARD_ROI_CUTOFF=-10
+ODDS_BUCKET_GUARD_CLV_CUTOFF=-2
+ODDS_BUCKET_GUARD_ROI_RESTORE=-2
+ODDS_BUCKET_GUARD_DAYS=30
+
+GATES_AUTOTUNE_AUTO=true
+GATES_AUTOTUNE_MIN_N=20
+GATES_AUTOTUNE_DAYS=30
+
+LOL_MAX_DIVERGENCE_PP=15
+DOTA_MAX_DIVERGENCE_PP=15
+CS_MAX_DIVERGENCE_PP=12
+TENNIS_MAX_DIVERGENCE_PP=20
+VAL_MAX_DIVERGENCE_PP=12
+FOOTBALL_MAX_DIVERGENCE_PP=10
+MMA_MAX_DIVERGENCE_PP=10
+DARTS_MAX_DIVERGENCE_PP=15
+SNOOKER_MAX_DIVERGENCE_PP=15
+TT_MAX_DIVERGENCE_PP=20
+
+CLV_PREDISPATCH_GATE=true
+CLV_PREDISPATCH_THRESHOLD=2.5
+CLV_PREDISPATCH_WINDOW_MIN=10
+HIGH_EV_THROTTLE=true              # default ON
+```
+
+### Tennis
+
+```env
+TENNIS_MIN_EDGE_TOP=2.5            # Slam/Masters
+TENNIS_MIN_EDGE=4.0                # demais
+TENNIS_NON_SLAM_DISABLED=true
+TENNIS_HANDICAP_GAMES_ENABLED=true
+TENNIS_HANDICAP_SETS_LEGACY=false
+TENNIS_MARKOV_CALIB_DISABLED=false
+TENNIS_MARKOV_SHRINK_HANDICAPGAMES=0.75
+TENNIS_MARKOV_SHRINK_TOTALGAMES=0.65
+TENNIS_MARKOV_SHRINK_DISABLED=false
+TENNIS_CALIB_REFIT_DISABLED=false  # cron nightly 04h
+TENNIS_CORRELATION_ADJ=true
+TENNIS_MT_TIER2_PROMOTE=true
+TENNIS_MIN_ODDS=1.40
+TENNIS_MAX_ODDS=5.00
+TENNIS_MARKET_SCAN_MIN_ODD=1.50
+TENNIS_MARKET_SCAN_MIN_EV=5
+TENNIS_MARKET_SCAN_MAX_EV=40
+TENNIS_MARKET_SCAN_MAX_EV_HANDICAPGAMES=55
+TENNIS_MARKET_SCAN_MAX_EV_TOTALGAMES=40
+TENNIS_MARKET_MAX_PER_MATCH=3
+TENNIS_ISOTONIC_DISABLED=true
+TENNIS_ML_DISABLED=true
+VAL_MIN_ELO_GAMES=3
+```
+
+### LoL/Dota
+
+```env
+LOL_PATCH_META=                    # auto-fetched ddragon
+LOL_PREGAME_BLOCK_BO3=false
+LOL_EV_THRESHOLD=1.5
+LOL_PINNACLE_MARGIN=2.5
+LOL_NO_ODDS_CONVICTION=60
+LOL_UPCOMING_INTERVAL_MIN=120
+LOL_ISOTONIC_DISABLED=true
+LOL_KILLS_PROMOTE=false
+LOL_KILLS_SCAN_MIN_EV=5
+DOTA_MAX_DIVERGENCE_PP=15
+```
+
+### Football
+
+```env
+FB_USE_FD_CSV=true
+FB_DIVERGENCE_GATE=true
+FB_DIVERGENCE_MAX_PP=12
+XG_PER_SOT=0.32
+```
+
+### MT
+
+```env
+MT_LEAK_GUARD_AUTO=true
+MT_PERMANENT_DISABLE_LIST=tennis|totalGames|over,lol|total
+MT_RESTORE_AUTO=true
+MT_RESTORE_HOUR_UTC=14
+MT_RESTORE_MIN_N=30
+MT_RESTORE_DAYS=14
+MT_RESTORE_MIN_ROI=0
+MT_RESTORE_MIN_CLV=0
+```
+
+### Autonomy / loops
+
+```env
+AUTONOMY_DIGEST_AUTO=true
+AUTONOMY_DIGEST_HOUR_UTC=12
+NIGHTLY_RETRAIN_AUTO=true
+NIGHTLY_RETRAIN_HOUR_UTC=3
+AUTO_ROLLBACK_ON_REGRESSION=true
+BRIER_AUTO_EV_CAP=true
+LIVE_RISK_MONITOR_AUTO=true
+AUTO_VOID_STUCK_AUTO=true
+DB_BACKUP_AUTO=true
+DB_BACKUP_HOUR_UTC=4
+DB_BACKUP_KEEP_DAYS=7
+DAILY_LEAKS_DIGEST_AUTO=true
+DAILY_LEAKS_DIGEST_HOUR_UTC=13
+DAILY_LEAKS_MIN_N=20
+DAILY_LEAKS_ROI_CUTOFF=-15
+DAILY_LEAKS_DAYS=7
+WEEKLY_DIGEST_AUTO=true
+WEEKLY_DIGEST_DAY_UTC=1
+WEEKLY_DIGEST_HOUR_UTC=14
+WEEKLY_DIGEST_DAYS=7
+LEAGUE_BLEED_AUTO=true
+ROI_CUSUM_DISABLED=false
+ROI_CUSUM_K=0.5
+ROI_CUSUM_H=4
+TIME_OF_DAY_AUTO=true
+POLYMARKET_DISCOVERY_AUTO_APPLY=true
+```
+
+### HTTP / cache / DB
+
+```env
+HTTP_CACHE_DEFAULT_TTL_MS=0
+HTTP_CACHE_MAX_ENTRIES=500
+HTTP_CACHE_THEODDS_TTL_MS=14400000  # 4h
+HTTP_CACHE_ODDSPAPI_TOURNAMENTS_TTL_MS=86400000
+HTTP_CACHE_ODDSPAPI_ODDS_TTL_MS=0
+HTTP_CACHE_ODDSPAPI_FIXTURE_TTL_MS=0
+ANALYZED_TTL_MS=259200000          # 72h
+MARKET_TIP_SENT_TTL_MS=172800000   # 48h
+DB_SYNCHRONOUS=NORMAL              # NORMAL|FULL
+DB_SLOW_QUERY_MS=100
+HEALTH_CACHE_MS=10000
+MEM_WATCHDOG_DISABLED=false
+MEM_WATCHDOG_AUTO=true
+MEM_WATCHDOG_AUTO_MARGIN=1.3
+```
+
+### Detectores cross-book
+
+```env
+STALE_LINE_DISABLED=false
+VELOCITY_WINDOW_MIN=10
+```
+
+---
+
+## Deployment (Railway)
 
 ### Setup
 
-Zero setup extra — a `X-API-Key` pública é hardcoded em `lib/pinnacle.js` (reutilizada em snooker). Se Pinnacle rotacionar, use `PINNACLE_API_KEY` no env para override.
+1. Fork/clone para seu GitHub
+2. Conectar repo no Railway dashboard
+3. Add volume montado em `/data` (SQLite persistente)
+4. Configurar env vars (todas as do .env.example essenciais)
+5. Deploy auto via push
 
-```env
-SNOOKER_ENABLED=true
-TELEGRAM_TOKEN_SNOOKER=<token>
-# SNOOKER_SHADOW=true   # default é false (graduado com CueTracker enrichment)
+### Configs
+
+- **`nixpacks.toml`** — buildpack Node 18+
+- **`railway.toml`** — health check em `/health`, restart policy
+- **`start.js`** — entrypoint (spawna server.js + bot.js)
+
+### Subprojetos paralelos
+
+- **Sofascore proxy** (Public-Sofascore-API) — Django app, deploy separado, retorna `SOFASCORE_PROXY_BASE`
+- **HLTV proxy** (hltv-proxy) — Python FastAPI, deploy separado, retorna URL via env
+- **n8n** (opcional) — workflows automation, docker-compose ou Railway
+
+### Health check
+
+Railway pinga `/health` (cached 10s). Se 3 falhas seguidas → restart container.
+
+```
+GET /health → { status: 'ok'|'degraded', db, lastAnalysis, pendingTips, sources, alerts, botGauges, build, metricsCardinality, metricsLite }
 ```
 
-### Limitações
+### Crash loop diag
 
-- Sem auth oficial — a key é pública mas pode ser rotacionada sem aviso (risco médio)
-- Rate limit soft: cache de 3 min no endpoint `/snooker-matches`
-- Schema pode mudar (mudou uma vez em 2023) — se quebrar, ajustar parser em `lib/pinnacle-snooker.js`
-- Odds em formato **American odds** (+305, -499) → convertidas para decimal via `americanToDecimal()`
+`last_child_exit_<name>.json` persiste {code, signal, uptime_ms} mesmo em SIGKILL. Boot subsequente lê e correlaciona. `boot_count.json` rastreia rapid boots.
 
-### Fluxo (`lib/pinnacle-snooker.js`)
-
-- `GET /0.1/sports/28/matchups?brandId=0` → lista de matchups ativos (sportId 28 = snooker)
-- Para cada matchup: `GET /0.1/matchups/{id}/markets/related/straight` → moneyline + totals
-- Extrai `prices.home` / `prices.away` (American), converte para decimal
-- Cobertura: todos os majors (World, UK, Masters, Tour Championship, German Masters, etc.)
-
-### Modelo ML
-
-`lib/snooker-ml.js` com 2 sinais possíveis:
-- **Log-diff de ranking** (placeholder — snooker.org pendente de aprovação do header `X-Requested-By`)
-- **Win rate da temporada atual** (ATIVO) — via scraper `lib/cuetracker.js` de `cuetracker.net/players/<slug>`
-
-### Enrichment CueTracker (`lib/cuetracker.js`)
-
-CueTracker não tem API oficial — scraping HTML puro do padrão `Won:</span> N (XX.XX%)`.
-
-- **Cache 6h** (stats mudam lentamente — temporadas snooker são longas)
-- **Slug**: nome convertido para lowercase com hífens (ex: `Judd Trump` → `judd-trump`)
-- **Validação**: testado com Trump, Selby, Bingham, Vafaei, Zhou Yuelong, Jackson Page — todos retornaram stats corretas
-- **Risco**: CueTracker pode mudar HTML. Se quebrar, ajustar o regex em `_fetchHtml` + fallback para shadow automático.
-
-### Whitelist
-
-Por default sem whitelist explícita; Betfair já foca em majors (World Championship, UK, Masters, Tour Championship, German Masters, Shanghai, etc.). Filtro adicional por competição pode ser adicionado se necessário.
+`/admin/boot-diag` mostra padrão de crashes recentes.
 
 ---
 
-## Monitoramento e Alertas
+## Desenvolvimento local
 
-### `/health` — status agregado do sistema
+```bash
+# Setup
+cp .env.example .env
+# editar .env com tokens
+npm install
 
-Retorna JSON com status por fonte de dados (não apenas esports):
+# Rodar tudo
+node start.js
 
-```json
-{
-  "status": "ok|degraded|error",
-  "db": "connected",
-  "lastAnalysis": "...",
-  "pendingTips": { "esports": 3, "mma": 1, "tennis": 0 },
-  "sources": {
-    "oddspapi": { "keyConfigured": true, "lastSyncMinAgo": 12, "cacheSize": 18, "backoffActive": false },
-    "theOddsApi": { "keyConfigured": true, "quota": { "used": 410, "cap": 450, "pct": 91.1 } },
-    "sxbet": { "enabled": true },
-    "apiFootball": { "keyConfigured": true }
-  },
-  "alerts": [...],
-  "metricsLite": {...}
-}
+# Ou separado
+node server.js     # terminal 1
+node bot.js        # terminal 2
+
+# Dev mode (nodemon)
+npm run dev
+
+# Backtest
+npm run backtest
+node scripts/backtest-tennis-per-surface.js
+node scripts/backtest-railway-tips.js
+
+# Train
+npm run train
+node scripts/train-tennis-model.js
+node scripts/train-esports-model.js
+node scripts/train-basket-model.js
+
+# Refit calibrations
+node scripts/refresh-all-isotonics.js
+node scripts/refit-mt-calib-all.js
+node scripts/refit-tennis-markov-calib-inline.js
+
+# Audits
+node scripts/audit-leaks-deep.js
+node scripts/audit-recent-7d.js
+node scripts/clv-by-league.js
+node scripts/roi-by-odds-bucket.js
+
+# Utils
+node scripts/reset-equity.js --dry-run
+node scripts/reset-equity.js --confirm
+node scripts/rebalance-bankroll-1000.js
+node scripts/dedup-tips.js
 ```
 
-### `/alerts` — alertas críticos ativos
+### Hot tips
 
-Endpoint dedicado para monitoramento externo. Retorna apenas o array de alertas ativos no momento:
-
-| ID do alerta | Severidade | Dispara quando |
-|---|---|---|
-| `db_error` | critical | SQLite falhou |
-| `oddspapi_key_missing` | critical | `ODDS_API_KEY`/`ODDSPAPI_KEY` ausente |
-| `oddspapi_never_synced` | critical | OddsPapi nunca sincronizou (>30 min pós-boot) |
-| `oddspapi_backoff_long` | warning | backoff 429 ativo há >1h |
-| `theodds_quota_high` | warning / critical | The Odds API ≥80% / ≥95% da quota |
-| `analysis_stale` | warning | nenhuma análise há >2h |
-
-### Notificações Telegram para admin
-
-O bot faz **polling do `/alerts` a cada 10 min** (`checkCriticalAlerts` em `bot.js`) e envia DM para todos os `ADMIN_USER_IDS` quando um alerta novo aparece. Throttle: 1h por `alert.id` (se persistir, re-notifica a cada hora, não a cada ciclo).
-
-Exemplo da mensagem recebida:
-```
-🚨 ALERTA SISTEMA (critical)
-
-`oddspapi_never_synced`
-OddsPapi nunca sincronizou desde o boot (>30min) — verifique chave/quota
-```
-
-**Observação de escopo**: não integramos Sentry/Prometheus — overkill para um único deploy Railway. O modelo de polling do `/alerts` via bot é suficiente e mantém dependências zero.
+- **DB locked errors:** WAL mode + busy_timeout default 5s já mitiga, mas evite múltiplos `node bot.js` paralelos
+- **Pinnacle 403:** rotaciona User-Agent. `lib/pinnacle.js` já tem pool
+- **DeepSeek rate limit:** backoff exponencial built-in. `AI_DISABLED=true` desativa cross-sport
+- **Sofascore proxy down:** scrapers fail-open, retornam null silenciosamente
 
 ---
 
-## Concorrência SQLite
+## Testes
 
-Tanto `server.js` quanto `bot.js` abrem o mesmo arquivo via `lib/database.js`. Concorrência é segura porque:
+```bash
+npm test                            # tests/run.js
+node tests/test-calibration.js      # individual
+```
 
-- `journal_mode = WAL` — leitores concorrentes não bloqueiam escritores
-- `busy_timeout = 5000` — queries esperam até 5s antes de disparar `SQLITE_BUSY`
-- Transações críticas (settlement, record-tip) são wrapped em `db.transaction()` — atômicas
+~25 unit tests cobrindo:
 
-Em cargas muito maiores (>100 req/s de escrita), considerar migrar para PostgreSQL — Railway oferece free tier. Hoje o volume de escritas é baixo (tips individuais + settlements a cada 30 min) e WAL + busy_timeout cobrem o caso com folga.
+- Calibration (PAV, beta smoothing)
+- Devig (power method)
+- Elo rating
+- Kelly cap (confkey)
+- Name match (fuzzy threshold)
+- Metrics (Brier, ECE, ROI)
+- Constants
+- Darts/Football ML
+- Football data features + MT scanner
+- Tennis H2H ensemble + market scanner + score parser
+- Admin cookie auth
+- Banca delta
+- ESPN PEN/AET
+- Log ring buffer
+- Tip context shape
+
+**CI:** sem GHA configurado. Roda local antes de push.
 
 ---
 
-## Segurança
+## Subprojetos
 
-- Todas as credenciais via `.env` — nunca hardcoded
-- `.env` e `*.db` no `.gitignore`
-- Comandos admin protegidos por whitelist `ADMIN_USER_IDS`
-- `ADMIN_KEY` protege rotas admin do servidor via header `x-admin-key` — **configure em produção**; sem ela, WARNING emitido uma vez no boot
-- Usuários que bloqueiam o bot (403) removidos da memória e persistidos no DB (`subscribed: false`)
-- API key da IA transmitida via header, nunca no body
-- OddsPapi key aceita múltiplas variáveis: `ODDS_API_KEY`, `ODDSPAPI_KEY`, `ODDS_PAPI_KEY`, `ESPORTS_ODDS_KEY`
-- `DB_PATH` sanitizado automaticamente (trim + remoção de artefatos `=` do Railway)
-- Índices SQLite otimizados: `odds_history(recorded_at)`, `match_results(lower(team1))`, `tips(sport, result)`, `tips(match_id)`, `tips(sport, result, settled_at)` 🆕, `tips(match_id, sport)` 🆕, `tips(sport, sent_at)` 🆕
+### Public-Sofascore-API (`Public-Sofascore-API/`)
+
+Django/Flask proxy para Sofascore (desbloqueia Cloudflare via headers + venv Python). Deploy separado no Railway. Routes:
+
+- `/tennis/{event_id}` — score live + stats
+- `/football/{event_id}` — score + xG/SoT
+- `/darts/{event_id}` — sets + legs + 3-dart avg
+- `/snooker/{event_id}` — frames + breaks
+- `/tt/{event_id}` — sets + games
+
+Bot consome via `SOFASCORE_PROXY_BASE`. Cache headers respected.
+
+### HLTV proxy (`hltv-proxy/`)
+
+FastAPI Python para HLTV scoreboard (Cloudflare). Endpoints:
+
+- `/match/{id}` — score live + map state
+- `/team/{id}` — recent results
+
+`lib/hltv.js` cliente.
+
+### n8n (`n8n/`)
+
+Workflows opcionais (notification orchestration, sentinel scheduling).
+
+```bash
+docker-compose -f docker-compose.n8n.yml up -d
+```
+
+### data/tennis_atp + data/tennis_wta
+
+Sackmann tennis history repos (cloned). Usados por `lib/tennis-data.js` + `scripts/sync-sackmann-tennis.js`.
+
+### data/oraclesElixir (via DB table)
+
+LoL match data sourced via `lib/oracleselixir-features.js`. Bucket S3: `oracles-elixir.s3.amazonaws.com`.
+
+---
+
+## Memory & decisions log
+
+### `DECISIONS.md`
+
+Log cronológico de decisões significativas (toggle gate, cap change, kill switch). Format:
+
+```
+## YYYY-MM-DD — Título
+**Motivo:** ...
+**Antes:** ...
+**Agora:** ...
+**Reversão:** ...
+**Status:** ✅ aplicado | 🧪 experimental | ⚠️ provisório
+```
+
+### `WORKFLOW_SPORTSEDGE.md`
+
+Documento detalhado do pipeline end-to-end com diagramas, agentes, orchestrator, auto-healer.
+
+### `.claude/memory/MEMORY.md` (auto-memory Claude Code)
+
+Indice de ~80 memory files cobrindo:
+
+- Estado atual (gates / regimes / sessões)
+- MT system (overview + sprints)
+- Per-sport pipelines (tennis, LoL, esports, football)
+- Calibration / detection
+- Banca / settlement
+- Tips / dispatch / dedup
+- Dashboards / observabilidade
+
+Útil para Claude Code agents recuperarem contexto entre sessões.
+
+---
+
+## Troubleshooting
+
+### Bot não dispatcha
+
+1. Check `/health` — sources OK?
+2. Check `/rejections` — gate está rejeitando? (sharp_divergence, bucket, ev_cap, daily_limit, etc.)
+3. Check `/loops` — poll do sport rodou recente?
+4. Check `<SPORT>_ENABLED=true` e `<SPORT>_SHADOW=false`
+5. Check `LOL_ML_DISABLED` / `CS_ML_DISABLED` etc — se true, ML route shadow
+6. `/diag-tip <match_id>` — diag granular
+
+### Settlement travado
+
+1. `/unsettled` — list pending
+2. `/admin/tennis-tip-match-debug` (tennis) — fuzzy match diag
+3. `/admin/run-settle?sport=X` — force-settle window
+4. Verifica match_results pre-sync errors em `/logs`
+5. `AUTO_VOID_STUCK_AUTO=true` faz auto-void após 3d
+
+### Crash loop Railway
+
+1. `/admin/boot-diag` — exit signature pattern
+2. `last_child_exit_*.json` — last crash details
+3. Check `boot_count.json` — rapid boots?
+4. `/health` retorna 200? Se timeout, healthcheck mata container
+5. Mem watchdog: `MEM_WATCHDOG_RSS_MB` override hard se P95 baseline ruim
+
+### CLV negativo persistente
+
+1. `/clv-histogram?sport=X` — distribuição
+2. `node scripts/clv-by-league.js` — qual liga
+3. `/admin/clv-capture-trace?sport=X&days=7`
+4. Check `CLV_PREDISPATCH_GATE=true` ativo
+5. League blocklist via `/admin/blocklist-stats`
+
+### EV inflado / model overconfident
+
+1. Check isotonic ativo: `lib/<sport>-isotonic.json` mtime
+2. `/admin/mt-calib-validation` — drift
+3. `/admin/mt-refit-calib?sport=X&days=90&write=true` — refit on-demand
+4. `BRIER_AUTO_EV_CAP=true` reduz cap automaticamente quando Brier degrada
+
+### Banca dessincronizada
+
+1. `/admin/force-sync-bankroll` — POST recalcula
+2. `node scripts/clv-coverage.js` — coverage gaps
+3. `/bankroll-audit` — diff stored vs recomputed
+4. Mig 044 sincroniza key 'baseline' JSON ↔ keys separadas
+
+### MT scanner não detectando
+
+1. `/admin/mt-status` — promote state per (sport, market, tier)
+2. `/admin/mt-disable-list` — runtime disabled?
+3. `MT_PERMANENT_DISABLE_LIST` — leak permanente
+4. Check `<SPORT>_MT_EV_MAX` cap
+
+### Logs não aparecem
+
+1. `/health` retorna 200?
+2. `/logs/ingest` POST funciona? (check via curl)
+3. `start.js` está propagando stdout? (pipeLineToServer)
+4. `/logs/stream` SSE conecta?
+
+---
+
+## Filosofia & princípios
+
+1. **Modelo determinístico = source of truth** — IA só sugere; divergência >8pp → reject.
+2. **Pinnacle/Betfair = ground truth do mercado** — sharp anchor pra todos cálculos de EV.
+3. **Conservar o capital prevalece sobre maximizar volume** — DAILY_TIP_LIMIT, MAX_STAKE_UNITS, match_stop_loss, tier-aware caps.
+4. **Calibração > tuning** — isotonic + Markov + EV→ROI + CLV layer + learned corrections em vez de chutar EV mín.
+5. **Shadow primeiro, promote por evidência** — n≥30 + ROI≥0 + CLV≥0 em janela 14d.
+6. **Auto-tune > config manual** — gates_runtime_state, kelly_auto_tune, bucket_guard, leak_guard fazem self-correction.
+7. **Audit trail completo** — settlement_audit, regime_tag, tip_context_json, code_sha+gate_state em cada tip.
+8. **Fail-open em providers externos** — Sofascore/HLTV/VLR down não derrubam pipeline.
+9. **Reversibilidade** — cada decisão em DECISIONS.md tem "Reversão:". Migrações idempotentes. Backups `lib/backups/`.
+10. **Dedup obsessivo** — match+market+side+line+book+tier; cross-bucket esports↔lol/dota2; fuzzy via name-match.
+
+---
+
+## Licença & autoria
+
+Projeto privado. Autor: Victor (acgdj12@gmail.com).
+
+Stack: Node.js 18+, better-sqlite3, dotenv. **Zero framework HTTP** (http nativo). **Zero ORM** (raw SQL via prepared statements).
+
+Co-development: Claude Code (Anthropic) com auto-memory persistente.
+
+---
+
+**Última atualização:** 2026-05-06
+**Branch:** main
+**Commits recentes relevantes:**
+- `fe16e55` feat(tennis-calib): cron nightly refit 04h local
+- `3630239` chore(tennis-calib): refit n=537 (era 115)
+- `7d36529` fix(mt-refit-calib): bounded PAV/merge loops + write=true persist mode
+- `f6d9da6` fix BRIER_AUTO_EV_CAP reader/writer inconsistency
+- `ead685b` ML disabled auto-route → shadow + nightly retrain default-on
