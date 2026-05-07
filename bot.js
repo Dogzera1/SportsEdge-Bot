@@ -1531,7 +1531,7 @@ function serverGet(path, sport, extraHeaders) {
   return new Promise((resolve, reject) => {
     const sep = path.includes('?') ? '&' : '?';
     const sportParam = sport ? `${sep}sport=${sport}` : '';
-    http.get({
+    const req = http.get({
       hostname: SERVER,
       port: PORT,
       path: path + sportParam,
@@ -1560,7 +1560,18 @@ function serverGet(path, sport, extraHeaders) {
           reject(err);
         }
       });
-    }).on('error', e => {
+    });
+    // 2026-05-06 FIX: timeout só dispara evento sem destruir socket. Sem o
+    // req.destroy() abaixo, requests ficavam pendurados indefinidamente
+    // quando server aceitava conexão mas travava no body — cada hang ocupa
+    // async slot e múltiplos hangs em CLV-capture/settle empilhavam handles
+    // travando event loop. Espelha pattern de serverPost.
+    req.on('timeout', () => {
+      const err = new Error(`HTTP timeout (15s) on ${SERVER}:${PORT}${path}`);
+      _recordServerError('GET', path + sportParam, err);
+      req.destroy(err);
+    });
+    req.on('error', e => {
       const err = new Error(`HTTP Error on ${SERVER}:${PORT}${path}: ${e.message}`);
       _recordServerError('GET', path + sportParam, err);
       reject(err);
@@ -3494,9 +3505,27 @@ async function checkPendingTipsAlerts() {
 }
 
 // ── Settlement ──
+// 2026-05-06 FIX: re-entry mutex. Antes time-gate (lastSettlementCheck) era
+// quebrável: cmd /settle reseta pra 0, podia disparar 2 execuções simultâneas.
+// Cada uma faz POST /settle por tip + DM por user → DM duplicada possível.
+let _settleRunning = false;
 async function settleCompletedTips() {
+  if (_settleRunning) {
+    try { require('./lib/metrics').incr('settle_overlap_skip'); } catch (_) {}
+    log('DEBUG', 'SETTLE', 'skip: settle anterior ainda rodando');
+    return;
+  }
   if (Date.now() - lastSettlementCheck < SETTLEMENT_INTERVAL) return;
+  _settleRunning = true;
   lastSettlementCheck = Date.now();
+  try {
+    await _settleCompletedTipsInner();
+  } finally {
+    _settleRunning = false;
+  }
+}
+
+async function _settleCompletedTipsInner() {
 
   // 'lol' e 'dota2' são buckets separados pós-Abr/2026 — não existem como chaves em
   // SPORTS, mas precisam ser settle INCONDICIONALMENTE (mesmo se SPORTS.esports=false)
