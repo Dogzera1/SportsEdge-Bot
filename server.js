@@ -13851,20 +13851,51 @@ setInterval(load, 60000);
     return;
   }
 
-  // GET /admin/mt-calib-validation?days=90 — diagnóstico calib MT.
+  // GET /admin/mt-calib-validation?days=90&real_only=1 — diagnóstico calib MT.
   // Para cada (sport, market) com >=10 settled, retorna avg predP vs hit% real
   // + ROI + flag de gap (>10pp = miscalibrado, considerar refit).
+  //
+  // 2026-05-07 (princípio shadow=causa): cron runMtCalibValidationAlert
+  // (bot.js:21326) faz AUTO-DISABLE de markets quando gap≥15pp por 3 runs.
+  // Antes agregava market_tips_shadow direto — mistura research-only + dispatched
+  // → auto-disable real markets baseado em decisões hipotéticas. Fix: REAL_ONLY
+  // default true (espelha runMarketTipsLeakGuard / runMarketTipsRoiGuardSided).
+  // Opt-out: query param real_only=0 ou env MT_VALIDATION_REAL_ONLY=false.
   if (p === '/admin/mt-calib-validation') {
     if (!requireAdmin(req, res)) return;
     const days = Math.max(7, Math.min(365, parseInt(parsed.query.days || '90', 10) || 90));
     const minN = parseInt(parsed.query.min_n || '10', 10);
+    const realOnly = parsed.query.real_only != null
+      ? !/^(0|false|no)$/i.test(String(parsed.query.real_only))
+      : !/^(0|false|no)$/i.test(String(process.env.MT_VALIDATION_REAL_ONLY ?? 'true'));
     try {
+      // _NORM espelha _normTeam em mt-result-propagator.js:37 (lower + remove
+      // space/dash/dot/apostrofe). JOIN com tips real exige same normalização.
+      const _NORM = (col) => `REPLACE(REPLACE(REPLACE(REPLACE(lower(${col}),' ',''),'-',''),'.',''),'''','')`;
+      const realJoin = realOnly ? `
+        INNER JOIN tips t ON
+          t.sport = mts.sport
+          AND UPPER(t.market_type) = UPPER(mts.market)
+          AND COALESCE(t.is_shadow, 0) = 0
+          AND (t.archived IS NULL OR t.archived = 0)
+          AND t.result IN ('win','loss','void','push')
+          AND ABS(julianday(COALESCE(t.sent_at, t.settled_at)) - julianday(mts.created_at)) < 14
+          AND (
+            (${_NORM('t.participant1')} = ${_NORM('mts.team1')} AND ${_NORM('t.participant2')} = ${_NORM('mts.team2')})
+            OR
+            (${_NORM('t.participant1')} = ${_NORM('mts.team2')} AND ${_NORM('t.participant2')} = ${_NORM('mts.team1')})
+          )
+      ` : '';
       const rows = db.prepare(`
-        SELECT sport, market, side, p_model, odd, result, profit_units, stake_units, clv_pct
-        FROM market_tips_shadow
-        WHERE created_at >= datetime('now', '-' || ? || ' days')
-          AND result IN ('win', 'loss')
-          AND p_model IS NOT NULL
+        SELECT mts.sport AS sport, mts.market AS market, mts.side AS side,
+               mts.p_model AS p_model, mts.odd AS odd, mts.result AS result,
+               mts.profit_units AS profit_units, mts.stake_units AS stake_units,
+               mts.clv_pct AS clv_pct
+        FROM market_tips_shadow mts
+        ${realJoin}
+        WHERE mts.created_at >= datetime('now', '-' || ? || ' days')
+          AND mts.result IN ('win', 'loss')
+          AND mts.p_model IS NOT NULL
       `).all(days);
       const buckets = new Map();
       for (const r of rows) {
@@ -13901,7 +13932,7 @@ setInterval(load, 60000);
       }
       out.sort((a, b) => Math.abs(b.gapPp) - Math.abs(a.gapPp));
       const flagged = out.filter(r => r.status !== 'ok');
-      sendJson(res, { ok: true, days, minN, n_buckets: out.length, n_flagged: flagged.length, buckets: out });
+      sendJson(res, { ok: true, days, minN, realOnly, n_buckets: out.length, n_flagged: flagged.length, buckets: out });
     } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
     return;
   }
@@ -16497,6 +16528,84 @@ setInterval(load, 60000);
         note: 'Apenas tips reais (is_shadow=0). Inclui pending. ROI = profit/stake em R$.',
       });
     } catch (e) { sendJson(res, { ok: false, error: e.message, stack: _stackForReq(req, e)?.slice(0, 400) }, 500); }
+    return;
+  }
+
+  // GET /admin/shadow-logging-health[?stale_threshold_h=6]
+  // Detecta silent break em logging de market_tips_shadow per-sport.
+  // Retorna last_logged_at, idade em minutos, e counts em janelas (1h/6h/24h/7d).
+  // Sport flag: silent_break=true se sport ativou nos últimos 30d mas last log
+  // é mais velho que stale_threshold_h horas (default 6h, sob env
+  // SHADOW_LOGGING_STALE_HOURS). Útil pra deploy: chamar pós-boot pra verificar
+  // que cron logging não quebrou silently.
+  if (p === '/admin/shadow-logging-health') {
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const staleH = Math.max(1, Math.min(168, parseInt(
+      parsed.query.stale_threshold_h || process.env.SHADOW_LOGGING_STALE_HOURS || '6', 10
+    ) || 6));
+    try {
+      // Sports que tiveram logging em 30d (universo de "sports ativos")
+      const universe = db.prepare(`
+        SELECT DISTINCT sport FROM market_tips_shadow
+        WHERE created_at >= datetime('now', '-30 days')
+        ORDER BY sport
+      `).all();
+      // Stats per sport — last_created + count em 4 janelas. Single query pra
+      // reduzir round-trips. SUM CASE evita 4 GROUP BYs separados.
+      const statsRows = db.prepare(`
+        SELECT
+          sport,
+          MAX(created_at) AS last_created,
+          SUM(CASE WHEN created_at >= datetime('now','-1 hour')   THEN 1 ELSE 0 END) AS n_1h,
+          SUM(CASE WHEN created_at >= datetime('now','-6 hours')  THEN 1 ELSE 0 END) AS n_6h,
+          SUM(CASE WHEN created_at >= datetime('now','-24 hours') THEN 1 ELSE 0 END) AS n_24h,
+          SUM(CASE WHEN created_at >= datetime('now','-7 days')   THEN 1 ELSE 0 END) AS n_7d,
+          COUNT(*) AS n_30d
+        FROM market_tips_shadow
+        WHERE created_at >= datetime('now', '-30 days')
+        GROUP BY sport
+      `).all();
+      const byKey = new Map(statsRows.map(r => [r.sport, r]));
+      const nowMs = Date.now();
+      const out = [];
+      let silentCount = 0;
+      for (const u of universe) {
+        const r = byKey.get(u.sport) || { last_created: null, n_1h: 0, n_6h: 0, n_24h: 0, n_7d: 0, n_30d: 0 };
+        const lastMs = r.last_created ? new Date(r.last_created.replace(' ', 'T') + 'Z').getTime() : null;
+        const ageMin = lastMs ? Math.round((nowMs - lastMs) / 60000) : null;
+        const silentBreak = ageMin != null && ageMin > staleH * 60;
+        if (silentBreak) silentCount++;
+        out.push({
+          sport: u.sport,
+          last_created: r.last_created,
+          age_minutes: ageMin,
+          age_human: ageMin == null ? null
+            : ageMin < 60 ? `${ageMin}min`
+            : ageMin < 1440 ? `${(ageMin / 60).toFixed(1)}h`
+            : `${(ageMin / 1440).toFixed(1)}d`,
+          n_1h: Number(r.n_1h) || 0,
+          n_6h: Number(r.n_6h) || 0,
+          n_24h: Number(r.n_24h) || 0,
+          n_7d: Number(r.n_7d) || 0,
+          n_30d: Number(r.n_30d) || 0,
+          silent_break: silentBreak,
+        });
+      }
+      out.sort((a, b) => (b.n_30d || 0) - (a.n_30d || 0));
+      // Health overall: ok se nenhum silent OR sample muito pequena (sem expectativa)
+      const overall = silentCount === 0 ? 'ok' : silentCount === 1 ? 'warn' : 'critical';
+      sendJson(res, {
+        ok: true,
+        stale_threshold_h: staleH,
+        n_sports_active: universe.length,
+        n_sports_silent: silentCount,
+        overall,
+        sports: out,
+      });
+    } catch (e) {
+      sendJson(res, { ok: false, error: e.message, stack: _stackForReq(req, e)?.slice(0, 400) }, 500);
+    }
     return;
   }
 
