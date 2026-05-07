@@ -3806,6 +3806,37 @@ function isAdminRequest(req) {
   return false;
 }
 
+// 2026-05-07 (audit #9 phase 1): query.key fallback DEPRECATED — vaza em logs
+// Railway, browser history, Referer header, qualquer outbound URL. Site
+// malicioso pode embed `<img src="prod/admin/destrutivo?key=LEAKED">` se key
+// vazou. Phase 1: log WARN identificando consumers (CLI scripts, bookmarks,
+// integrações). Phase 2 (1 release depois): remover branch query.key, exigir
+// header. Throttle 1 log/IP+endpoint/h pra não inundar logs.
+const _queryKeyDeprWarn = new Map(); // key=`${ip}|${endpoint}` → ts
+function _isAdminQueryKeyDeprecated(req, parsed, endpoint) {
+  if (!ADMIN_KEY) return false;
+  const key = String(parsed?.query?.key || '').trim();
+  if (!key || key !== ADMIN_KEY) return false;
+  try {
+    const ip = (typeof getClientIp === 'function' ? getClientIp(req) : null) ||
+      req.headers['x-forwarded-for']?.split(',')[0]?.trim() ||
+      req.socket?.remoteAddress || '?';
+    const k = `${ip}|${endpoint || '?'}`;
+    const now = Date.now();
+    const last = _queryKeyDeprWarn.get(k) || 0;
+    if (now - last > 60 * 60 * 1000) {
+      log('WARN', 'DEPRECATED', `query.key fallback used by ip=${ip} endpoint=${endpoint || '?'} — migrate to x-admin-key header (will be removed in next release)`);
+      _queryKeyDeprWarn.set(k, now);
+      // Cap defensivo: 5000 entries (mesmo padrão de oddsCache).
+      if (_queryKeyDeprWarn.size > 5000) {
+        const sorted = [..._queryKeyDeprWarn.entries()].sort((a, b) => a[1] - b[1]);
+        for (let i = 0; i < sorted.length - 5000; i++) _queryKeyDeprWarn.delete(sorted[i][0]);
+      }
+    }
+  } catch (_) { /* logging não pode quebrar auth */ }
+  return true;
+}
+
 // CSRF check apenas pra state-changing methods em sessões cookie.
 // CLI usando x-admin-key header bypass CSRF (autenticação explícita por chamada).
 function _adminCsrfRequired(req) {
@@ -7723,7 +7754,7 @@ setInterval(load, 10000);
   // POST /admin/basket-seed?days=N — kicks off ESPN historical seed em background.
   // Returns imediato com handle; check progress via /admin/basket-train-status.
   if (p === '/admin/basket-seed' && (req.method === 'POST' || req.method === 'GET')) {
-    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     const days = Math.max(30, Math.min(1095, parseInt(parsed.query.days || '730', 10)));
     if (global._basketSeedTask?.running) {
@@ -7805,7 +7836,7 @@ setInterval(load, 10000);
   // POST /admin/basket-train — treina logistic + isotonic, salva params.
   // Sync (rápido, ~2-5s pra 2400 samples). Retorna métricas.
   if (p === '/admin/basket-train' && (req.method === 'POST' || req.method === 'GET')) {
-    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     try {
       const total = db.prepare(`SELECT COUNT(*) AS n FROM basket_match_history WHERE home_score IS NOT NULL`).get().n;
@@ -7955,7 +7986,7 @@ setInterval(load, 10000);
   }
 
   if (p === '/admin/basket-train-status') {
-    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     const seed = global._basketSeedTask || null;
     const total = db.prepare(`SELECT COUNT(*) AS n FROM basket_match_history`).get().n;
@@ -7970,7 +8001,7 @@ setInterval(load, 10000);
   }
 
   if (p === '/sync-basket-espn') {
-    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     try {
       const daysRaw = parseInt(parsed.query.days);
@@ -8192,7 +8223,7 @@ setInterval(load, 10000);
   // (source quebrada) ou cheio mas com nomes em formato divergente do tip.
   // GET /admin/tennis-sources-diag?days=7&key=<KEY>
   if (p === '/admin/tennis-sources-diag') {
-    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     const days = Math.max(1, Math.min(60, parseInt(parsed.query.days || '7', 10) || 7));
     try {
@@ -8250,7 +8281,7 @@ setInterval(load, 10000);
   // mas dados claramente existem. Compara nomes processados pelo matcher.
   // GET /admin/tennis-tip-match-debug?tip_id=1060&key=<KEY>
   if (p === '/admin/tennis-tip-match-debug') {
-    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     const tipId = parseInt(parsed.query.tip_id || '0', 10);
     if (!tipId) { sendJson(res, { ok: false, error: 'tip_id obrigatório' }, 400); return; }
@@ -8349,7 +8380,7 @@ setInterval(load, 10000);
   // backlog tennis sem precisar de curl POST. Só funciona pra tennis ML pendentes.
   // GET /admin/tennis-force-settle-tip?tip_id=1060&key=<KEY>
   if (p === '/admin/tennis-force-settle-tip') {
-    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     const tipId = parseInt(parsed.query.tip_id || '0', 10);
     if (!tipId) { sendJson(res, { ok: false, error: 'tip_id obrigatório' }, 400); return; }
@@ -9215,7 +9246,7 @@ setInterval(load, 10000);
   if (p === '/admin/settle-market-tips-shadow' && (req.method === 'POST' || req.method === 'GET')) {
     // GET permitido pra browser — admin-only via header ou ?key=<ADMIN_KEY>.
     // Safe to re-run (idempotente — mesma lógica do cron 30min).
-    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     try {
       const { settleShadowTips } = require('./lib/market-tips-shadow');
@@ -9230,7 +9261,7 @@ setInterval(load, 10000);
   // Settla manualmente uma shadow kills tip passando totalKills real.
   // Útil quando OE/PS/Riot resolvers todos falham (ex: Riot livestats aged out).
   if (p === '/admin/settle-mt-shadow-kills-manual' && (req.method === 'POST' || req.method === 'GET')) {
-    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     const id = parseInt(parsed.query.id || '', 10);
     const kills = parseInt(parsed.query.kills || '', 10);
@@ -9277,7 +9308,7 @@ setInterval(load, 10000);
   // 2026-05-04: criado pra fechar gap user reportou (LYON/Sentinels +
   // Fluxo/LOS + Shopify/FlyQuest). Espelha /admin/run-settle linhas 10256+.
   if (p === '/admin/settle-mt-shadow-kills' && (req.method === 'POST' || req.method === 'GET')) {
-    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     const days = Math.max(1, Math.min(60, parseInt(parsed.query.days || '14', 10) || 14));
     const apply = parsed.query.apply === '1' || parsed.query.apply === 'true';
@@ -9600,7 +9631,7 @@ setInterval(load, 10000);
   // 2026-05-03: criado pra investigar bot_boot_count_24h>=10 sem reason visível
   // em /health ou /metrics.
   if (p === '/admin/boot-diag' && (req.method === 'GET' || req.method === 'POST')) {
-    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     try {
       const fsLib = require('fs');
@@ -9646,7 +9677,7 @@ setInterval(load, 10000);
   // Útil pra investigar por que uma tip virou loss/void inesperado.
   // GET /admin/forensics?tip_id=N&key=<ADMIN_KEY>
   if (p === '/admin/forensics' && (req.method === 'GET' || req.method === 'POST')) {
-    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     const tipId = parseInt(parsed.query.tip_id || parsed.query.id, 10);
     if (!Number.isFinite(tipId) || tipId <= 0) {
@@ -10149,7 +10180,7 @@ setInterval(load, 120000);
   // ── /admin/today: snapshot do que aconteceu hoje (UTC).
   // Tips emitidas, settled, profit por sport, alerts emitidos pelos crons.
   if (p === '/admin/today' && (req.method === 'GET' || req.method === 'POST')) {
-    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     const out = { ok: true, ts: new Date().toISOString(), tz: 'UTC' };
     try {
@@ -10588,7 +10619,7 @@ setInterval(load, 60000);
   // GET /admin/holdout-status — mostra FROZEN_HOLDOUT_DAYS atual + cutoff iso
   // por sistema. Útil pra confirmar que auto-tunes estão respeitando reserva.
   if (p === '/admin/holdout-status' && (req.method === 'GET' || req.method === 'POST')) {
-    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     try {
       const status = require('./lib/frozen-holdout').getStatus();
@@ -10602,7 +10633,7 @@ setInterval(load, 60000);
   // GET /admin/baseline-shadow-stats?days=90 — comparação contrafactual:
   // baseline trivial (favorito Pinnacle dejuiced + line-shop EV>=5%) vs stack atual.
   if (p === '/admin/baseline-shadow-stats' && (req.method === 'GET' || req.method === 'POST')) {
-    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     try {
       const days = parseInt(parsed.query.days || '90', 10) || 90;
@@ -10658,7 +10689,7 @@ setInterval(load, 60000);
   }
 
   if (p === '/admin/cron-status' && (req.method === 'GET' || req.method === 'POST')) {
-    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     const polls = getPollHeartbeats();
     const crons = getCronHeartbeats();
@@ -10807,7 +10838,7 @@ setInterval(load, 60000);
   // GET /admin/env-audit?key=<ADMIN_KEY>
   // Mostra: configurada/null + tipo (bool/string/number) + valor masked se sensitive.
   if (p === '/admin/env-audit' && (req.method === 'GET' || req.method === 'POST')) {
-    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     // 2026-05-06 FIX: revelar APENAS últimos 4 chars (era 8 = 25% de entropy
     // de uma key 32-char). Idealmente nem isso — mas mantemos sufix p/
@@ -10893,7 +10924,7 @@ setInterval(load, 60000);
 
   // ── /admin/tg-commands: lista comandos Telegram disponíveis.
   if (p === '/admin/tg-commands' && (req.method === 'GET' || req.method === 'POST')) {
-    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     // Listagem hardcoded — descoberta direto do bot.js handler. Mantém em sync
     // com bot.js:11409+ cascade. Atualizar quando adicionar comando novo.
@@ -10965,7 +10996,7 @@ setInterval(load, 60000);
   // 7d/30d ROI summary. Útil pra investigação focada.
   // GET /admin/sport-detail?sport=tennis&key=<ADMIN_KEY>
   if (p === '/admin/sport-detail' && (req.method === 'GET' || req.method === 'POST')) {
-    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     const sport = String(parsed.query.sport || '').toLowerCase().trim();
     if (!sport || !/^[a-z0-9_]+$/.test(sport)) {
@@ -11042,7 +11073,7 @@ setInterval(load, 60000);
   // se shadow recuperou (candidato pra remover).
   // GET /admin/blocklist-stats?days=14&key=<ADMIN_KEY>
   if (p === '/admin/blocklist-stats' && (req.method === 'GET' || req.method === 'POST')) {
-    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     const days = Math.max(1, Math.min(180, parseInt(parsed.query.days || '14', 10) || 14));
     const blocklistEnv = String(process.env.MT_PERMANENT_DISABLE_LIST ?? 'tennis|totalGames|over,lol|total').trim();
@@ -11097,7 +11128,7 @@ setInterval(load, 60000);
   // shadow vs real counts 7d. Útil pra ver "tô promovendo o quê?".
   // GET /admin/mt-status?key=<ADMIN_KEY>
   if (p === '/admin/mt-status' && (req.method === 'GET' || req.method === 'POST')) {
-    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     const sports = ['lol','dota2','cs2','valorant','tennis','football','mma'];
     const out = { ok: true, ts: new Date().toISOString(), sports: {}, blocklist: [], global: {} };
@@ -11148,7 +11179,7 @@ setInterval(load, 60000);
   // Útil pra debugar HLTV_PROXY_BASE off ou matchId não encontrado sem
   // depender de ciclo do bot completar.
   if (p === '/admin/cs-live-debug' && (req.method === 'GET' || req.method === 'POST')) {
-    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     const team1 = String(parsed.query.team1 || '').trim();
     const team2 = String(parsed.query.team2 || '').trim();
@@ -11215,7 +11246,7 @@ setInterval(load, 60000);
   // bankroll sem ?apply=1 (operações destrutivas continuam exigir flag).
   // GET/POST /admin/repair?key=<ADMIN_KEY>&apply=0
   if (p === '/admin/repair' && (req.method === 'GET' || req.method === 'POST')) {
-    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     const apply = parsed.query.apply === '1' || parsed.query.apply === 'true';
     const out = { ok: true, started_at: new Date().toISOString(), steps: {}, apply };
@@ -14537,7 +14568,7 @@ setInterval(load, 60000);
   // Default dryRun. Adicione apply=1 pra executar.
   // ?sport=tennis (default) &days=7 (1-30) &guardMin=5 (default 5min)
   if (p === '/admin/void-orphan-market-tips' && (req.method === 'POST' || req.method === 'GET')) {
-    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     const sport = parsed.query.sport || 'tennis';
     const days = Math.max(1, Math.min(30, parseInt(parsed.query.days || '7', 10)));
@@ -14605,7 +14636,7 @@ setInterval(load, 60000);
   // (e.g., /void-old-pending) mas pipeline foi melhorado pra settle aqueles
   // com score disponível.
   if (p === '/admin/mt-unvoid-recent' && (req.method === 'POST' || req.method === 'GET')) {
-    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     const sport = parsed.query.sport && parsed.query.sport !== 'all' ? parsed.query.sport : null;
     const hours = Math.max(1, Math.min(168, parseInt(parsed.query.hours || '12', 10) || 12));
@@ -14647,7 +14678,7 @@ setInterval(load, 60000);
   // Identifica gap entre shadow log e tip real promovida — útil pós mudança
   // de envs (ex: TENNIS_MARKET_TIPS_ENABLED ausente bloqueando promote).
   if (p === '/admin/mt-promote-audit') {
-    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     const days = Math.max(1, Math.min(90, parseInt(parsed.query.days || '30', 10) || 30));
     try {
@@ -14710,7 +14741,7 @@ setInterval(load, 60000);
   // criação), tenta achar match_results match e retorna por que falhou.
   // Helps diagnose stuck-pending issues.
   if (p === '/admin/mt-pending-trace') {
-    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     const sport = parsed.query.sport || null;
     const days = Math.max(1, Math.min(30, parseInt(parsed.query.days || '7', 10) || 7));
@@ -14862,7 +14893,7 @@ setInterval(load, 60000);
   // gravaram final_score em winner-first frame. Esse endpoint identifica todas
   // tennis handicap shadow rows settled e re-roda settle (post-fix).
   if (p === '/admin/mt-resettle-tennis-handicap' && (req.method === 'POST' || req.method === 'GET')) {
-    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     const days = Math.max(1, Math.min(180, parseInt(parsed.query.days || '30', 10) || 30));
     const apply = parsed.query.apply === '1' || parsed.query.apply === 'true';
@@ -14911,7 +14942,7 @@ setInterval(load, 60000);
   // razão). Com ?apply=1 unsettle + chama settleShadowTips → re-roda com
   // lógica nova → tips erradas viram void automático.
   if (p === '/admin/mt-resettle-suspects' && (req.method === 'POST' || req.method === 'GET')) {
-    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     const sport = parsed.query.sport && parsed.query.sport !== 'all' ? parsed.query.sport : null;
     const days = Math.max(1, Math.min(180, parseInt(parsed.query.days || '14', 10) || 14));
@@ -14975,7 +15006,7 @@ setInterval(load, 60000);
   //  - shadow row correspondente teve match_results.resolved_at bem antes do tip.sent_at
   //    (indica que o match casado pelo shadow não é o match da tip)
   if (p === '/admin/mt-tips-suspect') {
-    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     const days = Math.max(1, Math.min(60, parseInt(parsed.query.days || '14', 10) || 14));
     const sport = parsed.query.sport && parsed.query.sport !== 'all' ? parsed.query.sport : null;
@@ -15043,7 +15074,7 @@ setInterval(load, 60000);
   // POST /admin/unsettle-tip-by-id?id=N — reverte settle de uma tip regular
   // (zera result/profit_reais/settled_at + reverte impacto no current_banca).
   if (p === '/admin/unsettle-tip-by-id' && (req.method === 'POST' || req.method === 'GET')) {
-    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     const id = parseInt(parsed.query.id || '', 10);
     if (!Number.isFinite(id) || id <= 0) { sendJson(res, { error: 'id inválido' }, 400); return; }
@@ -15079,7 +15110,7 @@ setInterval(load, 60000);
   // shadow row pending = settler genérico fez name-match (bug 2026-04-27).
   // Retorna lista; apply=1 reverte tudo automaticamente.
   if (p === '/admin/mt-settle-audit') {
-    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     const days = Math.max(1, Math.min(180, parseInt(parsed.query.days || '30', 10) || 30));
     const apply = parsed.query.apply === '1' || parsed.query.apply === 'true';
@@ -15169,7 +15200,7 @@ setInterval(load, 60000);
   // process.env mutation + persiste em settings table. Bot lê process.env por-call,
   // então fica ativo imediatamente. Próximo restart carrega de settings (loadMtPromoteSettings).
   if (p === '/admin/mt-promote' && (req.method === 'POST' || req.method === 'GET')) {
-    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     const enabled = parsed.query.enabled === '1' || parsed.query.enabled === 'true';
     const ALL_SPORTS = ['lol', 'dota2', 'cs', 'valorant', 'tennis', 'football', 'mma', 'tabletennis', 'darts', 'snooker'];
@@ -15201,7 +15232,7 @@ setInterval(load, 60000);
   // GET /admin/mt-auto-promote?key=<KEY>&run=1
   // Estado atual do MT auto-promote: ligas blocked + decision log + opcional re-run.
   if (p === '/admin/mt-auto-promote') {
-    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     try {
       const out = { ok: true };
@@ -15237,7 +15268,7 @@ setInterval(load, 60000);
   // GET /admin/mt-promote-status?key=<KEY>
   // Mostra status atual (env + settings persisted) por sport.
   if (p === '/admin/mt-promote-status') {
-    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     const ALL_SPORTS = ['lol', 'dota2', 'cs', 'valorant', 'tennis', 'football', 'mma', 'tabletennis', 'darts', 'snooker'];
     const out = ALL_SPORTS.map(sport => {
@@ -15685,7 +15716,7 @@ setInterval(load, 60000);
   // Returns JSON pronto pra salvar em lib/<sport>-markov-calib.json.
   // Inclui CALIBRATION TABLE + BACKTEST PRE/POST (no eval window quando eval_days>0).
   if (p === '/admin/mt-refit-calib') {
-    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     const sport = String(parsed.query.sport || 'tennis').toLowerCase();
     const days = Math.max(30, Math.min(365, parseInt(parsed.query.days || '90', 10) || 90));
@@ -15981,7 +16012,7 @@ setInterval(load, 60000);
   //   5. Liga lifecycle (mes-a-mes ROI evolution)
   //   6. Sharp money signature (close_odd movement vs hit rate)
   if (p === '/admin/mt-historical-learnings') {
-    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     const days = Math.max(30, Math.min(180, parseInt(parsed.query.days || '90', 10) || 90));
     const sportFilter = parsed.query.sport ? String(parsed.query.sport).toLowerCase() : null;
@@ -16317,7 +16348,7 @@ setInterval(load, 60000);
   }
 
   if (p === '/admin/mt-shadow-by-league') {
-    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     const days = Math.max(7, Math.min(180, parseInt(parsed.query.days || '60', 10) || 60));
     const minN = Math.max(3, Math.min(50, parseInt(parsed.query.minN || '5', 10) || 5));
@@ -16402,7 +16433,7 @@ setInterval(load, 60000);
   // EV buckets: <5%, 5-10%, 10-15%, 15-20%, 20-30%, >30%.
   // regime: new=shadow puro v1; old=banco antigo (regime_tag NULL); all=tudo.
   if (p === '/admin/mt-shadow-by-ev') {
-    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     const days = Math.max(7, Math.min(180, parseInt(parsed.query.days || '60', 10) || 60));
     const sportFilter = parsed.query.sport ? String(parsed.query.sport).toLowerCase() : null;
@@ -16466,7 +16497,7 @@ setInterval(load, 60000);
   // detecção de promotion candidates + leaks + config gaps.
   // regime: new=shadow puro v1+ | old=regime antigo (pre-mig 088) | all (default)
   if (p === '/admin/mt-shadow-comprehensive-audit') {
-    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     const days = Math.max(7, Math.min(180, parseInt(parsed.query.days || '30', 10) || 30));
     const minN = Math.max(5, Math.min(100, parseInt(parsed.query.minN || '10', 10) || 10));
@@ -16637,7 +16668,7 @@ setInterval(load, 60000);
   // stored. Mismatches = bugs históricos. apply=1 reverte os mismatches pra
   // pending — cron próximo re-settla com lógica atual.
   if (p === '/admin/mt-shadow-audit') {
-    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     const days = Math.max(1, Math.min(60, parseInt(parsed.query.days || '14', 10) || 14));
     const apply = parsed.query.apply === '1' || parsed.query.apply === 'true';
@@ -16826,7 +16857,7 @@ setInterval(load, 60000);
   // todas variáveis intermediárias (mrT1IsShadowT1, gamesT1/T2, margin, covers).
   // Pra depurar deploy: se código novo rodar, deve mostrar mrT1IsShadowT1 calculado.
   if (p === '/admin/mt-settle-diag') {
-    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     const id = parseInt(parsed.query.id || '', 10);
     if (!Number.isFinite(id) || id <= 0) { sendJson(res, { error: 'id inválido' }, 400); return; }
@@ -16899,7 +16930,7 @@ setInterval(load, 60000);
   // de shadow rows com lógica nova: tips ficaram com result velho, esse endpoint
   // sincroniza.
   if (p === '/admin/mt-repropagate') {
-    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     const days = Math.max(1, Math.min(60, parseInt(parsed.query.days || '14', 10) || 14));
     const apply = parsed.query.apply === '1' || parsed.query.apply === 'true';
@@ -17070,7 +17101,7 @@ setInterval(load, 60000);
   // result invertido — após fix, unsettle + esperar cron tick → re-settle correto
   // → propagator re-propaga pra tip.
   if (p === '/admin/mt-shadow-unsettle' && (req.method === 'POST' || req.method === 'GET')) {
-    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     const id = parseInt(parsed.query.id || '', 10);
     if (!Number.isFinite(id) || id <= 0) { sendJson(res, { error: 'id inválido' }, 400); return; }
@@ -17093,7 +17124,7 @@ setInterval(load, 60000);
   // Reverte EM MASSA shadow rows settled no período pra forçar re-settle com lógica
   // nova. Filtros opcionais por sport/market. apply=0 = preview.
   if (p === '/admin/mt-shadow-unsettle-batch' && (req.method === 'POST' || req.method === 'GET')) {
-    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     const days = Math.max(1, Math.min(60, parseInt(parsed.query.days || '14', 10) || 14));
     const apply = parsed.query.apply === '1' || parsed.query.apply === 'true';
@@ -17333,7 +17364,7 @@ setInterval(load, 60000);
   // correspondente resolveu ANTES do shadow.created_at - buffer (= match
   // anterior do par usado no settle errado pré-fix do buffer 5min).
   if (p === '/admin/mt-shadow-revert-suspects' && (req.method === 'POST' || req.method === 'GET')) {
-    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     const days = Math.max(1, Math.min(60, parseInt(parsed.query.days || '14', 10) || 14));
     const bufferMin = Math.max(0, Math.min(60, parseInt(parsed.query.buffer_min || '5', 10) || 5));
@@ -17413,7 +17444,7 @@ setInterval(load, 60000);
   // Procura match_results e settla direto via parseTennisScore + winner-frame fix.
   // Workaround pros 37 tennis HG órfãos identificados em 2026-04-30.
   if (p === '/admin/settle-tennis-hg-orphans' && (req.method === 'POST' || req.method === 'GET')) {
-    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     const days = Math.max(1, Math.min(60, parseInt(parsed.query.days || '14', 10) || 14));
     const apply = parsed.query.apply === '1' || parsed.query.apply === 'true';
@@ -17548,7 +17579,7 @@ setInterval(load, 60000);
   // Calibration analysis: bucketize tips por model_p_pick, mostra hit rate
   // real vs expected. Detecta drift e overconfidence.
   if (p === '/admin/ml-calibration') {
-    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     const sport = String(parsed.query.sport || 'tennis').slice(0, 20);
     const days = Math.max(1, Math.min(365, parseInt(parsed.query.days || '30', 10) || 30));
@@ -17693,7 +17724,7 @@ setInterval(load, 60000);
   // Query PandaScore + OE pra um match específico, retorna kills count + source.
   // Usado pra investigar settle errado de TOTAL_KILLS_MAPN tips.
   if (p === '/admin/lol-kills-debug') {
-    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     const ps = String(parsed.query.ps || '').replace(/[^0-9]/g, '');
     const mapIdx = parseInt(parsed.query.map || '1', 10);
@@ -17753,7 +17784,7 @@ setInterval(load, 60000);
   // Busca tips em tips + market_tips_shadow por participant fuzzy (LIKE).
   // Útil pra localizar tip reportada pelo user sem ter o ID exato.
   if (p === '/admin/tip-find') {
-    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     const q = String(parsed.query.q || '').slice(0, 60).trim();
     if (!q) { sendJson(res, { error: 'q obrigatório' }, 400); return; }
@@ -17792,7 +17823,7 @@ setInterval(load, 60000);
   }
 
   if (p === '/admin/mt-tip-trace') {
-    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     const id = parseInt(parsed.query.id || '', 10);
     if (!Number.isFinite(id) || id <= 0) { sendJson(res, { error: 'id obrigatório' }, 400); return; }
@@ -17856,7 +17887,7 @@ setInterval(load, 60000);
   // o match_results é de evento ANTERIOR (R1/qualifier/diferente torneio)
   // e a tip foi settled errada.
   if (p === '/admin/mt-revert-suspects' && (req.method === 'POST' || req.method === 'GET')) {
-    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     const days = Math.max(1, Math.min(60, parseInt(parsed.query.days || '14', 10) || 14));
     const bufferMin = Math.max(0, Math.min(60, parseInt(parsed.query.buffer_min || '5', 10) || 5));
@@ -17956,7 +17987,7 @@ setInterval(load, 60000);
   // não zerava is_live → tips win/loss apareciam com chip LIVE no dashboard
   // e flagavam como suspect no /admin/mt-tips-suspect).
   if (p === '/admin/clear-stale-is-live' && (req.method === 'POST' || req.method === 'GET')) {
-    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     const apply = parsed.query.apply === '1' || parsed.query.apply === 'true';
     try {
@@ -17976,7 +18007,7 @@ setInterval(load, 60000);
   // (bug do propagator antes do fix 2026-04-27 deixava NULL → bankroll desatualizado).
   // apply=1 atualiza tips + bankroll.current_banca (delta acumulado).
   if (p === '/admin/mt-resync-bankroll' && (req.method === 'POST' || req.method === 'GET')) {
-    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     const apply = parsed.query.apply === '1' || parsed.query.apply === 'true';
     const days = Math.max(1, Math.min(180, parseInt(parsed.query.days || '30', 10) || 30));
@@ -18032,7 +18063,7 @@ setInterval(load, 60000);
   // Tip "Tomas Martin Etcheverry" → "Tomas Martin Etcheverry +2.5" (HG away line=2.5 invertida)
   // Tips novas (pós-aaab32d) já vêm com linha — back-fill ignora se já tem +/-.
   if (p === '/admin/backfill-mt-labels' && (req.method === 'POST' || req.method === 'GET')) {
-    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     const apply = parsed.query.apply === '1' || parsed.query.apply === 'true';
     const days = Math.max(1, Math.min(180, parseInt(parsed.query.days || '30', 10) || 30));
@@ -19367,7 +19398,7 @@ setInterval(load, 60000);
   // Dry-run por default; ?confirm=1 aplica.
   // GET /admin/migrate-football-market-types?confirm=1&key=<ADMIN_KEY>
   if (p === '/admin/migrate-football-market-types') {
-    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     try {
       const confirm = String(parsed.query.confirm || '').trim() === '1';
@@ -21743,7 +21774,7 @@ Pending não-zero após >2h do created_at indica settle falhou. Football requer
   // Admin-only. Aceita key via header x-admin-key OU query ?key=XXX (browser-friendly).
   // GET /ai-impact?days=60&sport=cs&format=html&key=XXX
   if (p === '/ai-impact') {
-    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     try {
       const daysRaw = parseInt(parsed.query.days);
@@ -21937,7 +21968,7 @@ ROI realizado usa <code>profit_reais</code> se presente, senão <code>stake × (
   // se afunilar gates/restringir mercados específicos.
   // GET /mt-tennis-breakdown?days=30&min_n=5&format=html&key=<ADMIN_KEY>
   if (p === '/mt-tennis-breakdown' || p === '/mt-breakdown') {
-    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     try {
       const sport = String(parsed.query.sport || 'tennis');
@@ -22095,7 +22126,7 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
   // Com ?apply=1, marca as pending rejeitadas como result='filter_rejected' (void).
   // GET /admin/mt-reapply-filters?sport=tennis&days=7&apply=0&key=<ADMIN_KEY>
   if (p === '/admin/mt-reapply-filters') {
-    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     try {
       const sport = String(parsed.query.sport || 'tennis');
@@ -22178,7 +22209,7 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
   // Útil pra diagnosticar bypasses de dedup. Default mostra dupes pending; pendingOnly=0 inclui settled.
   // GET /admin/mt-dupes?days=7&sport=tennis&pendingOnly=1&groupBy=match|market|sideline&key=<ADMIN_KEY>
   if (p === '/admin/mt-dupes') {
-    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     try {
       const days = Math.max(1, Math.min(90, parseInt(parsed.query.days || '7', 10) || 7));
@@ -22250,7 +22281,7 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
   // admin com a correção via ?send=1.
   // GET /admin/recompute-market-tip-stakes?sport=tennis&hours=24&send=1&key=<ADMIN_KEY>
   if (p === '/admin/recompute-market-tip-stakes') {
-    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     try {
       const sport = String(parsed.query.sport || 'tennis');
@@ -22313,7 +22344,7 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
   // Útil pra debugar por que shadow loga mas DM não sai.
   // GET /mt-dm-pipeline?sport=tennis&days=7&key=<ADMIN_KEY>
   if (p === '/mt-dm-pipeline') {
-    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     try {
       const sport = String(parsed.query.sport || 'tennis');
@@ -22408,7 +22439,7 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
   // se o sport estivesse habilitado. Ajuda decidir thresholds.
   // GET /mt-gate-check?sport=tennis&days=7&min_ev=8&min_pmodel=0.55&key=XXX
   if (p === '/mt-gate-check') {
-    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     try {
       const sport = String(parsed.query.sport || 'tennis');
@@ -22481,7 +22512,7 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
   // GET /admin/mt-promote-diag?sport=tennis&days=7&key=<ADMIN_KEY>
   // Reporta cada gate em ordem: env enabled → leak guard → DM sent → tip recorded.
   if (p === '/admin/mt-promote-diag') {
-    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     const sport = parsed.query.sport || 'tennis';
     const days = Math.max(1, Math.min(30, parseInt(parsed.query.days || '7', 10) || 7));
@@ -22597,7 +22628,7 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
   // pra cada um, pra diagnosticar por que settle não está pegando. Admin-only.
   // GET /mt-shadow-diag?sport=tennis&limit=20&key=<ADMIN_KEY>
   if (p === '/mt-shadow-diag') {
-    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     try {
       const sport = String(parsed.query.sport || 'tennis');
@@ -22701,7 +22732,7 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
   // brasileirão + libertadores + MLS.
   // GET /sync-football-espn?days=3&key=<ADMIN_KEY>
   if (p === '/sync-football-espn') {
-    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     try {
       const daysRaw = parseInt(parsed.query.days);
@@ -22743,7 +22774,7 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
   // pegando matches finalizados das últimas 24h-7d e re-upsertando com score parseável.
   // GET /sync-pandascore-results?days=3&games=lol,dota2,csgo,valorant&key=<ADMIN_KEY>
   if (p === '/sync-pandascore-results') {
-    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     if (!PANDASCORE_TOKEN) { sendJson(res, { ok: false, error: 'PANDASCORE_TOKEN missing' }, 400); return; }
     try {
@@ -22817,7 +22848,7 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
   // sendo auto-voided por /football-result retornar resolved:false (sem dados).
   // GET /sync-football-sofascore?days=3&key=<ADMIN_KEY>
   if (p === '/sync-football-sofascore') {
-    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     try {
       const daysRaw = parseInt(parsed.query.days);
@@ -22858,7 +22889,7 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
   // Motivação: football com 86% void rate — provável bug de settlement ou market_type.
   // GET /void-audit?sport=football&days=60&format=html&key=XXX
   if (p === '/void-audit') {
-    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     try {
       const daysRaw = parseInt(parsed.query.days);
@@ -24416,7 +24447,7 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
   // GET  /admin/readiness-corrections?status=active&days=60 — list active+history
   // POST /admin/readiness-correction-revert?id=N&reason=manual — revert manual
   if (p === '/admin/readiness-learner-run' && (req.method === 'POST' || req.method === 'GET')) {
-    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     try {
       const { runReadinessLearner } = require('./lib/readiness-learner');
@@ -24428,7 +24459,7 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
     return;
   }
   if (p === '/admin/readiness-corrections') {
-    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     try {
       const { listCorrections } = require('./lib/readiness-learner');
@@ -24440,7 +24471,7 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
     return;
   }
   if (p === '/admin/readiness-correction-revert' && (req.method === 'POST' || req.method === 'GET')) {
-    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     const id = parseInt(parsed.query.id || '0', 10);
     if (!id) { sendJson(res, { ok: false, error: 'id obrigatório' }, 400); return; }
@@ -27594,7 +27625,7 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
   // /sync-tennis-espn-results que só pega scoreboard atual.
   // GET /sync-tennis-espn-range?days=7&key=<ADMIN_KEY>
   if (p === '/sync-tennis-espn-range') {
-    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     (async () => {
       try {
@@ -27614,7 +27645,7 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
   // SOFASCORE_DIRECT=true em produção.
   // GET /sync-tennis-sofascore?days=3&key=<ADMIN_KEY>
   if (p === '/sync-tennis-sofascore') {
-    const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     (async () => {
       try {
