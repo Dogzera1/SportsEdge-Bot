@@ -1295,26 +1295,49 @@
     }
   }
 
+  // 2026-05-07 (audit P1): throttle global + concurrency limit. Antes
+  // refreshAgents disparava 16+ fetches paralelos; click duplo dobrava.
+  // Throttle 3s entre full-refreshes; concurrency cap 4 simultâneos pra não
+  // floodar backend.
+  let _refreshAgentsLastTs = 0;
+  const REFRESH_AGENTS_MIN_GAP_MS = 3000;
+  const AGENT_CONCURRENCY = 4;
+  async function _runWithConcurrency(tasks, limit) {
+    let i = 0;
+    const workers = Array.from({ length: Math.min(limit, tasks.length) }, async () => {
+      while (i < tasks.length) {
+        const idx = i++;
+        try { await tasks[idx](); } catch (_) { /* per-task catch in fetchAgent */ }
+      }
+    });
+    await Promise.all(workers);
+  }
   function refreshAgents() {
-    fetchRoiByBook();
-    fetchAgent('post-fix-monitor');
-    fetchAgent('gate-optimizer');
-    fetchAgent('backtest-validator');
-    fetchAgent('health-sentinel');
-    fetchAgent('weekly-review');
-    fetchAgent('bankroll-guardian');
-    fetchAgent('cut-advisor');
-    fetchAgent('live-scout');
-    fetchAgent('pre-match-check');
-    fetchAgent('news-monitor');
-    fetchAgent('model-calibration');
-    fetchAgent('ia-health');
-    fetchAgent('live-storm');
+    const now = Date.now();
+    if (now - _refreshAgentsLastTs < REFRESH_AGENTS_MIN_GAP_MS) return; // throttle
+    _refreshAgentsLastTs = now;
     const sel = document.getElementById('roiDaysSel');
-    fetchAgent('roi-analyst', '?days=' + (sel?.value || '30'));
-    fetchAgent('feed-medic');
     const orchSel = document.getElementById('orchWorkflow');
-    fetchAgent('orchestrator', '?workflow=' + (orchSel?.value || 'full_diagnostic'));
+    const tasks = [
+      () => fetchRoiByBook(),
+      () => fetchAgent('post-fix-monitor'),
+      () => fetchAgent('gate-optimizer'),
+      () => fetchAgent('backtest-validator'),
+      () => fetchAgent('health-sentinel'),
+      () => fetchAgent('weekly-review'),
+      () => fetchAgent('bankroll-guardian'),
+      () => fetchAgent('cut-advisor'),
+      () => fetchAgent('live-scout'),
+      () => fetchAgent('pre-match-check'),
+      () => fetchAgent('news-monitor'),
+      () => fetchAgent('model-calibration'),
+      () => fetchAgent('ia-health'),
+      () => fetchAgent('live-storm'),
+      () => fetchAgent('roi-analyst', '?days=' + (sel?.value || '30')),
+      () => fetchAgent('feed-medic'),
+      () => fetchAgent('orchestrator', '?workflow=' + (orchSel?.value || 'full_diagnostic')),
+    ];
+    _runWithConcurrency(tasks, AGENT_CONCURRENCY);
   }
 
   document.querySelectorAll('.agent-refresh').forEach(btn => btn.addEventListener('click', (ev) => {
