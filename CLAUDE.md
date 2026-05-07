@@ -98,12 +98,20 @@ INNER JOIN tips t ON
 Use env opt-out `<COMPONENT>_REAL_ONLY=true` (default) para preservar comportamento.
 
 **Status atual no projeto (2026-05-07):**
-- ✅ 5/5 crons que violavam: corrigidos (commits eeb8af8, e anteriores)
+- ✅ 9/9 violators corrigidos. Wave 1 (5 originais, commits eeb8af8 e anteriores):
   - runMarketTipsLeakGuard (`MT_LEAK_REAL_ONLY`)
   - runMarketTipsRoiGuardSided (`MT_ROI_GUARD_REAL_ONLY`)
   - runMtBucketGuardCycle (`MT_BUCKET_GUARD_REAL_ONLY`)
   - /admin/mt-calib-validation auto-disable (`MT_VALIDATION_REAL_ONLY`)
   - computeKillsCalibration (`KILLS_CALIB_REAL_ONLY`)
+- ✅ Wave 2 (re-audit "verifique se shadow está puro", commit c618bd9):
+  - lib/ev-calibration (`EV_CALIB_REAL_ONLY` — flippado false→true; mult que multiplica stake real não pode ter shadow contaminando)
+  - lib/league-trust (`LEAGUE_TRUST_REAL_ONLY` novo; trust ratio aplicado em stake real era misturado com market_tips_shadow)
+  - lib/mt-auto-promote (`MT_AUTO_PROMOTE_REAL_ONLY` novo; PROMOTE shadow=ok/eval, REVERT/LEAGUE=real/sintoma)
+- ✅ Wave 3 (commit cb016b7): readiness-learner snapshot+verify+holdout default flippado is_shadow=1→0
+- ✅ Detectores P2-compliant adicionais:
+  - lib/shadow-vs-real-drift (cron 24h) — early warning quando shadow ROI degrada e real ainda OK
+  - lib/gate-attribution (cron weekly) — counterfactual: saved_loss vs lost_profit per gate
 - ⚠️ Tech debt menor: ~3 endpoints informacionais display shadow data sem disclaimer "research-only" (mt-shadow-by-league é misleading — feedback prévio em memory)
 
 **Quando flagrar shadow ROI ruim:**
@@ -132,3 +140,45 @@ Se em algum momento for necessário violar uma premissa (caso edge raro), o comm
 3. Listar plano de retorno à conformidade (se aplicável)
 
 Sem essa transparência, qualquer violação é code smell que precisa ser refactorada.
+
+---
+
+## Configurações operacionais recomendadas (Railway env)
+
+Defaults que devem estar setados em prod além dos opt-ins padrão:
+
+### Overfitting protection (auto-tunes)
+
+```
+FROZEN_HOLDOUT_DAYS=60
+```
+
+**Por quê:** auto-tunes (kelly_auto_tune, mt_auto_promote, gates_autotune, ev_calibration, learned_corrections, readiness_learner, leak/bucket guards) treinam em janela rolling 30-90d. Sem holdout, decisão "promote MT" / "tune kelly_mult" é tomada usando dados que serão re-avaliados pelos mesmos sistemas — overfitting estrutural. Defaults atuais com `FROZEN_HOLDOUT_DAYS=0` (OFF) deixam todos vulneráveis.
+
+**Tradeoff:** auto-tunes ficam menos reativos (60d pra incorporar regime change novo). Aceitável vs churn em ruído. Override per-sistema disponível (`FROZEN_HOLDOUT_KELLY_DAYS=120` etc).
+
+**Validação:** endpoint `/admin/holdout-status` (TBD) ou `lib/frozen-holdout.js:getStatus()` retorna config atual + cutoff_iso.
+
+### Shadow vs real drift detection
+
+```
+SHADOW_VS_REAL_DRIFT_AUTO=true   # default já é true
+```
+
+P2-compliant: só DM admin, sem auto-action. Cron 24h às 8h local. Detecta modelo base degradando enquanto gates mascaram em real.
+
+### Gate attribution counterfactual
+
+```
+GATE_ATTRIBUTION_AUTO=true       # default já é true
+```
+
+Cron seg 15h UTC. DM admin com top 5 gates por |saved_loss − lost_profit|. Identifica gates cortando edge.
+
+### Readiness learner (opt-in OFF)
+
+```
+# READINESS_LEARNER_AUTO=true    # NÃO ativar sem 1-2 ciclos dry_run validados
+```
+
+Após Wave 3 fix (commit cb016b7) está P2-compliant — snapshot+verify+holdout usam `is_shadow=0`. Recomendação antes de ON: rodar `POST /admin/readiness-learner-run?dry_run=1&days=30` 1-2x e revisar `r.applied` + `r.verified`.

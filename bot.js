@@ -22707,6 +22707,95 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   setInterval(() => runRoiDriftCusumDaily().catch(e => log('ERROR', 'ROI-CUSUM', e.message)), 60 * 60 * 1000);
   setTimeout(() => runRoiDriftCusumDaily().catch(() => {}), 35 * 60 * 1000);
 
+  // 2026-05-07: Shadow-vs-Real drift detector — early warning quando modelo
+  // base degrada (shadow ROI piora) enquanto gates ainda mascaram em real.
+  // P2-compliant: só DM admin, sem auto-action. Decisão (refit calib, model
+  // rollback, revert promote) fica com humano após análise causal.
+  // Janela 14d vs baseline 14-28d. Cron 24h (8h local), dedup 24h.
+  // Opt-out: SHADOW_VS_REAL_DRIFT_AUTO=false.
+  let _lastShadowDriftDay = null;
+  async function runShadowVsRealDriftDaily() {
+    if (/^(0|false|no)$/i.test(String(process.env.SHADOW_VS_REAL_DRIFT_AUTO ?? 'true'))) return;
+    const now = new Date();
+    if (now.getHours() !== 8) return; // 8h local = offset do CUSUM 9h
+    const today = now.toISOString().slice(0, 10);
+    if (_lastShadowDriftDay === today) return;
+    _lastShadowDriftDay = today;
+    try {
+      const { runShadowVsRealDriftCheck } = require('./lib/shadow-vs-real-drift');
+      const r = runShadowVsRealDriftCheck(db);
+      log('INFO', 'SHADOW-DRIFT', `breakdown=${r.breakdown.length} alerts=${r.alerts.length} cfg=${JSON.stringify(r.cfg)}`);
+      if (!r.alerts.length) return;
+      for (const a of r.alerts) {
+        log('WARN', 'SHADOW-DRIFT',
+          `${a.sport}: shadow ${a.delta_shadow >= 0 ? '+' : ''}${a.delta_shadow}pp vs real ${a.delta_real >= 0 ? '+' : ''}${a.delta_real}pp (gap ${a.gap_pp}pp) — modelo base degradando, gates mascarando`);
+      }
+      if (ADMIN_IDS.size && !_isCycleMuted('shadow-drift')) {
+        const lines = r.alerts.map(a => {
+          const dShadow = `${a.delta_shadow >= 0 ? '+' : ''}${a.delta_shadow}pp`;
+          const dReal = `${a.delta_real >= 0 ? '+' : ''}${a.delta_real}pp`;
+          return `🩸 ${a.sport}: shadow ${dShadow} (n=${a.n_shadow}) vs real ${dReal} (n=${a.n_real}) — gap ${a.gap_pp}pp`;
+        });
+        const msg = `⚠️ *SHADOW vs REAL DRIFT — early warning*\n\nModelo base sangrando, gates ainda mascarando em real:\n\n${lines.join('\n')}\n\nInvestigar causa (regime change? data feed? calib stale?). Knobs: SHADOW_VS_REAL_DRIFT_GAP_PP, _SHADOW_DROP_PP, _WINDOW_DAYS.`;
+        const token = resolveAlertsToken();
+        if (token) for (const adminId of ADMIN_IDS) sendDM(token, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
+      }
+    } catch (e) { log('ERROR', 'SHADOW-DRIFT', e.message); }
+  }
+  setInterval(() => runShadowVsRealDriftDaily().catch(e => log('ERROR', 'SHADOW-DRIFT', e.message)), 60 * 60 * 1000);
+  setTimeout(() => runShadowVsRealDriftDaily().catch(() => {}), 40 * 60 * 1000);
+
+  // 2026-05-07: Gate Attribution Weekly — counterfactual analysis. Aplica gates
+  // atuais retroativamente em tips reais settled e mede saved_loss vs lost_profit
+  // per gate. Detecta gate que filtra mais wins do que losses (cortando edge).
+  // Roda segunda 15h UTC (12h BRT). DM admin com top gates por net impact.
+  // Opt-out: GATE_ATTRIBUTION_AUTO=false.
+  let _lastGateAttrWeek = null;
+  async function runGateAttributionWeekly() {
+    if (/^(0|false|no)$/i.test(String(process.env.GATE_ATTRIBUTION_AUTO ?? 'true'))) return;
+    const dow = parseInt(process.env.GATE_ATTRIBUTION_DOW || '1', 10); // 1=Monday
+    const hourUtc = parseInt(process.env.GATE_ATTRIBUTION_HOUR_UTC || '15', 10);
+    const now = new Date();
+    if (now.getUTCDay() !== dow || now.getUTCHours() !== hourUtc) return;
+    const isoWeek = `${now.getUTCFullYear()}-W${Math.ceil((now.getUTCDate() + 6 - now.getUTCDay()) / 7)}`;
+    if (_lastGateAttrWeek === isoWeek) return;
+    _lastGateAttrWeek = isoWeek;
+    try {
+      const { runGateAttribution } = require('./lib/gate-attribution');
+      const days = parseInt(process.env.GATE_ATTRIBUTION_DAYS || '30', 10);
+      const r = runGateAttribution(db, { days });
+      log('INFO', 'GATE-ATTRIB',
+        `${days}d: total=${r.total} blocked=${r.blocked} (${r.blockedPct}%) savedLoss=R$${r.savedLoss} lostProfit=R$${r.lostProfit} net=R$${r.netSaved}`);
+      if (!r.total || !ADMIN_IDS.size || _isCycleMuted('gate-attribution')) return;
+
+      // Top 5 gates por |net| (impacto absoluto)
+      const ranked = Object.entries(r.gates)
+        .map(([reason, g]) => ({ reason, ...g }))
+        .sort((a, b) => Math.abs(b.net) - Math.abs(a.net))
+        .slice(0, 5);
+      const lines = [`📊 *GATE ATTRIBUTION — ${days}d*`, ''];
+      lines.push(`Total tips real settled: ${r.total}`);
+      lines.push(`Bloqueadas pelos gates: ${r.blocked} (${r.blockedPct}%)`);
+      lines.push(`Saved (loss bloqueado): R$ ${r.savedLoss}`);
+      lines.push(`Lost (win bloqueado): R$ ${r.lostProfit}`);
+      lines.push(`Net: ${r.netSaved >= 0 ? '✅' : '❌'} R$ ${r.netSaved}`);
+      lines.push('');
+      lines.push('*Top 5 gates por impacto:*');
+      for (const g of ranked) {
+        const icon = g.net >= 0 ? '✅' : '⚠️';
+        const hr = g.hitRate != null ? ` hit=${g.hitRate}%` : '';
+        lines.push(`${icon} \`${g.reason}\`: n=${g.n}${hr} saved=R$${g.savedLoss} lost=R$${g.lostProfit} → net R$${g.net}`);
+      }
+      lines.push('');
+      lines.push('_Gates com net < 0 estão cortando wins mais do que losses — investigar._');
+      const msg = lines.join('\n');
+      const token = resolveAlertsToken();
+      if (token) for (const adminId of ADMIN_IDS) sendDM(token, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
+    } catch (e) { log('ERROR', 'GATE-ATTRIB', e.message); }
+  }
+  setInterval(() => runGateAttributionWeekly().catch(e => log('ERROR', 'GATE-ATTRIB', e.message)), 60 * 60 * 1000);
+  setTimeout(() => runGateAttributionWeekly().catch(() => {}), 75 * 60 * 1000);
+
   // 2026-05-05: Readiness Learner — fecha o loop "leak detectado → corrijo →
   // verifico → escalo ou restauro". Default OFF (opt-in via env). Roda weekly
   // (6 dias intervalo) — janela longa suficiente pra acumular dados pós-correção.
