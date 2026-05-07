@@ -2176,16 +2176,34 @@ async function loadShadowVsRealDrift(gen = refreshGen) {
     const r = await apiFetch(`/admin/shadow-vs-real-snapshot?windowDays=${encodeURIComponent(windowDays)}`);
     if (shouldAbort(gen)) return;
     if (!r?.ok) { card.style.display = 'none'; return; }
-    const breakdown = (r.breakdown || []).filter(b => b.skip_reason !== 'insufficient_sample' && b.skip_reason !== 'null_roi');
+    // 2026-05-07: filtro permissivo — mostra cells com qualquer volume recente
+    // (shadow >= 10 OU real >= 5), mesmo sem baseline. Cenário comum quando bot
+    // tem histórico recente <14d (ex: pós-promote MT, pós-deploy). Indicador
+    // visual "aguardando baseline" quando comparação ainda não é possível.
+    const breakdown = (r.breakdown || []).filter(b => {
+      const nShadow = b.n_shadow_recent || 0;
+      const nReal = b.n_real_recent || 0;
+      return nShadow >= 10 || nReal >= 5;
+    });
     if (!breakdown.length) { card.style.display = 'none'; return; }
     card.style.display = '';
     const nAlerts = r.n_alerts || 0;
-    meta.textContent = `${breakdown.length} sport(s) com volume · ${nAlerts > 0 ? '⚠️ ' + nAlerts + ' alerta(s)' : '✅ sem alerta'}`;
+    const nWaitingBaseline = breakdown.filter(b => b.skip_reason === 'insufficient_sample' && (b.n_shadow_baseline || 0) === 0 && (b.n_real_baseline || 0) === 0).length;
+    const metaParts = [`${breakdown.length} sport(s)`];
+    if (nAlerts > 0) metaParts.push(`⚠️ ${nAlerts} alerta(s)`);
+    else if (nWaitingBaseline) metaParts.push(`⏳ ${nWaitingBaseline} aguardando baseline`);
+    else metaParts.push('✅ sem alerta');
+    meta.textContent = metaParts.join(' · ');
 
-    // Ranking: alerts primeiro, depois gap mais negativo
+    // Ranking: alerts > comparáveis (gap mais negativo) > sem baseline (volume desc)
     breakdown.sort((a, b) => {
       if (a.alert && !b.alert) return -1;
       if (!a.alert && b.alert) return 1;
+      const aWaiting = a.skip_reason === 'insufficient_sample';
+      const bWaiting = b.skip_reason === 'insufficient_sample';
+      if (aWaiting && !bWaiting) return 1;
+      if (!aWaiting && bWaiting) return -1;
+      if (aWaiting && bWaiting) return (b.n_shadow_recent || 0) - (a.n_shadow_recent || 0);
       return (a.gap_pp ?? 0) - (b.gap_pp ?? 0);
     });
 
@@ -2193,6 +2211,7 @@ async function loadShadowVsRealDrift(gen = refreshGen) {
     const fmtRoi = (v) => v == null ? '—' : `${v >= 0 ? '+' : ''}${v.toFixed(1)}%`;
     const colorRoi = (v) => v == null ? 'var(--text-dim)' : (v >= 5 ? '#22c55e' : v >= 0 ? '#a3a3a3' : v >= -5 ? '#f59e0b' : '#ef4444');
     const colorDelta = (v) => v == null ? 'var(--text-dim)' : (v >= 0 ? '#22c55e' : v >= -3 ? '#f59e0b' : '#ef4444');
+    const fmtBase = (v, n) => n === 0 ? '<span style="color:#3b82f6;font-style:italic">aguardando</span>' : (v == null ? '—' : fmtRoi(v));
 
     const headerRow = `
       <div style="display:grid;grid-template-columns:80px 90px 90px 70px 90px 90px 70px 70px 60px;gap:8px;padding:6px 10px;font-size:11px;color:var(--text-dim);font-weight:500;border-bottom:1px solid var(--border)">
@@ -2207,25 +2226,27 @@ async function loadShadowVsRealDrift(gen = refreshGen) {
         <div>n S/R</div>
       </div>`;
     const rows = breakdown.map(b => {
-      const bgColor = b.alert ? 'rgba(239,68,68,0.10)' : 'transparent';
-      const borderLeft = b.alert ? '3px solid #ef4444' : '3px solid transparent';
-      const icon = b.alert ? '🩸 ' : '';
+      const isWaiting = b.skip_reason === 'insufficient_sample';
+      const bgColor = b.alert ? 'rgba(239,68,68,0.10)' : (isWaiting ? 'rgba(59,130,246,0.05)' : 'transparent');
+      const borderLeft = b.alert ? '3px solid #ef4444' : (isWaiting ? '3px solid #3b82f6' : '3px solid transparent');
+      const icon = b.alert ? '🩸 ' : (isWaiting ? '⏳ ' : '');
+      const opacityCmp = isWaiting ? 'opacity:0.5' : '';
       return `
         <div style="display:grid;grid-template-columns:80px 90px 90px 70px 90px 90px 70px 70px 60px;gap:8px;padding:6px 10px;font-size:12px;background:${bgColor};border-left:${borderLeft};border-bottom:1px solid var(--border)">
           <div><strong>${icon}${b.sport}</strong></div>
           <div style="color:${colorRoi(b.shadow_recent)}">${fmtRoi(b.shadow_recent)}</div>
-          <div style="color:${colorRoi(b.shadow_baseline)}">${fmtRoi(b.shadow_baseline)}</div>
-          <div style="color:${colorDelta(b.delta_shadow)}"><strong>${fmtPp(b.delta_shadow)}</strong></div>
+          <div>${fmtBase(b.shadow_baseline, b.n_shadow_baseline)}</div>
+          <div style="color:${colorDelta(b.delta_shadow)};${opacityCmp}"><strong>${fmtPp(b.delta_shadow)}</strong></div>
           <div style="color:${colorRoi(b.real_recent)}">${fmtRoi(b.real_recent)}</div>
-          <div style="color:${colorRoi(b.real_baseline)}">${fmtRoi(b.real_baseline)}</div>
-          <div style="color:${colorDelta(b.delta_real)}"><strong>${fmtPp(b.delta_real)}</strong></div>
-          <div style="color:${colorDelta(b.gap_pp)}"><strong>${fmtPp(b.gap_pp)}</strong></div>
+          <div>${fmtBase(b.real_baseline, b.n_real_baseline)}</div>
+          <div style="color:${colorDelta(b.delta_real)};${opacityCmp}"><strong>${fmtPp(b.delta_real)}</strong></div>
+          <div style="color:${colorDelta(b.gap_pp)};${opacityCmp}"><strong>${fmtPp(b.gap_pp)}</strong></div>
           <div style="color:var(--text-dim);font-size:11px">${b.n_shadow_recent}/${b.n_real_recent}</div>
         </div>`;
     }).join('');
     const legend = `
       <div style="padding:8px 10px;font-size:11px;color:var(--text-dim);border-top:1px solid var(--border);background:rgba(0,0,0,0.10)">
-        🩸 alerta = shadow piorou ≥3pp E gap ≤ -5pp (modelo base degradando, gates mascarando em real). Investigar causa: regime change? data feed? calib stale? Detector P2-compliant — sem auto-action.
+        🩸 alerta = shadow piorou ≥3pp E gap ≤ -5pp (modelo base degradando, gates mascarando em real). ⏳ aguardando baseline = sem dados em 14-28d (espera mais histórico). Detector P2-compliant — sem auto-action.
       </div>`;
     list.innerHTML = headerRow + rows + legend;
   } catch (e) {
