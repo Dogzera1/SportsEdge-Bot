@@ -5485,8 +5485,12 @@ async function recordMarketTipAsRegular({ sport, match, tip, stake, isLive }) {
     }
 
     // Encode line no match_id pra eliminar line-mismatch no propagator. Format:
-    // `${base}::mt::${market}::${side}::ln<line_sanitized>` (e.g., ::lnN3.5 pra -3.5,
-    // ::lnP4.5 pra +4.5, ::ln21.5 pra over/under). Propagator extrai e valida.
+    // `${base}::mt::${market}::${side}::ln<tag>` onde tag ∈ {N<abs>, P<abs>, 0}.
+    // Exemplos: ::lnN3.5 (-3.5), ::lnP4.5 (+4.5), ::lnP21.5 (over/under 21.5),
+    //           ::ln0 (zero handicap raro). Propagator + parsers extraem e validam.
+    // 2026-05-07 (audit P2): comentário antigo dizia "::ln21.5 pra over/under" SEM
+    // prefix P — mas encoder sempre emite P pra ln>0. Comentário corrigido.
+    // Parsers: regex /::ln(N|P)?([\d.]+)/ aceita os 3 casos (N|P|bare 0).
     // ML/draw sem line: omite suffix ::ln (compat com tips legacy).
     let lineSuffix = '';
     if (Number.isFinite(tip.line)) {

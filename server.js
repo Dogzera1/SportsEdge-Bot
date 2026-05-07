@@ -523,7 +523,16 @@ async function importTennisSackmannCsvForYear(year, tour) {
           ? `${String(d).slice(0, 4)}-${String(d).slice(4, 6)}-${String(d).slice(6, 8)} 00:00:00`
           : `${String(d).slice(0, 10)} 00:00:00`;
 
-        stmts.upsertMatchResultWithDate.run(matchId, 'tennis', String(w), String(l), String(w), score, league, resolvedAt);
+        // 2026-05-07 (audit #50): canonical alphabetic pair pra Sackmann tennis.
+        // Antes gravava team1=winner team2=loser ("winner-first") — ESPN tennis
+        // grava positional (t1=comps[0]) → 2 convenções na mesma tabela. Downstream
+        // já é convention-agnostic (usa coluna winner pra identificar vencedor),
+        // mas alfabético deterministic remove inconsistência pra novos rows
+        // Sackmann. OLD rows ficam winner-first (sem migração — drift mínimo
+        // pq Sackmann é fonte histórica, settlement usa ESPN/SofaScore).
+        const wStr = String(w), lStr = String(l);
+        const [p1, p2] = wStr.toLowerCase() < lStr.toLowerCase() ? [wStr, lStr] : [lStr, wStr];
+        stmts.upsertMatchResultWithDate.run(matchId, 'tennis', p1, p2, wStr, score, league, resolvedAt);
         imported++;
       }
     });
@@ -14502,9 +14511,25 @@ setInterval(load, 60000);
         if (!groups.has(key)) groups.set(key, []);
         groups.get(key).push(t);
       }
+      // 2026-05-07 (audit P2): safety guard — só arquiva grupos onde TODOS membros
+      // têm mesmo result (ou todos NULL pending). Antes arquivava sem checar result,
+      // o que poderia destruir histórico settled se 2 tips na mesma chave (sport,
+      // teams, odds, stake, day) tivessem outcomes diferentes. Bankroll calc
+      // exclui archived → settled real ficava órfã.
+      // Para grupos com results conflitantes: skip e log pra investigação manual.
       const toArchive = [];
+      const conflictGroups = [];
       for (const [key, arr] of groups) {
         if (arr.length <= 1) continue;
+        const distinctResults = new Set(arr.map(t => t.result || 'pending'));
+        if (distinctResults.size > 1) {
+          conflictGroups.push({
+            key, n: arr.length,
+            results: [...distinctResults],
+            sample: arr.slice(0, 3).map(t => ({ id: t.id, result: t.result, sport: t.sport })),
+          });
+          continue;
+        }
         // Ordena por id asc; mantém o último (MAX id), arquiva o resto
         arr.sort((a, b) => a.id - b.id);
         const keep = arr[arr.length - 1].id;
@@ -14515,6 +14540,7 @@ setInterval(load, 60000);
             teams: `${t.participant1} vs ${t.participant2}`,
             match_id: t.match_id,
             keep_id: keep,
+            result: t.result || 'pending',
           });
         }
       }
@@ -14523,6 +14549,8 @@ setInterval(load, 60000);
           ok: true, dry_run: true,
           groups: groups.size, duplicate_groups: [...groups.values()].filter(a => a.length > 1).length,
           would_archive: toArchive.length,
+          conflict_groups_skipped: conflictGroups.length,
+          conflicts_sample: conflictGroups.slice(0, 5),
           examples: toArchive.slice(0, 10),
         });
         return;
@@ -14531,7 +14559,11 @@ setInterval(load, 60000);
       let archived = 0;
       const tx = db.transaction(list => { for (const x of list) { const r = stmt.run(x.id); archived += r.changes; } });
       tx(toArchive);
-      sendJson(res, { ok: true, archived });
+      sendJson(res, {
+        ok: true, archived,
+        conflict_groups_skipped: conflictGroups.length,
+        conflicts_sample: conflictGroups.slice(0, 5),
+      });
     } catch (e) { sendJson(res, { error: e.message }, 500); }
     return;
   }
@@ -17632,9 +17664,11 @@ setInterval(load, 60000);
         const winnerIsT1 = _norm(mr.winner) === _norm(t.participant1) || _norm(mr.winner).includes(_norm(t.participant1));
         const posT1Won = gT1 > gT2;
         if (posT1Won !== winnerIsT1) { [gT1, gT2] = [gT2, gT1]; }
-        // Parse line do match_id (lnPx.x ou lnNx.x), fallback model_label / tip_participant.
+        // Parse line do match_id (lnPx.x ou lnNx.x ou ln0), fallback model_label / tip_participant.
+        // 2026-05-07 (audit P2): regex aceita N|P opcional pra cobrir ln=0 (bare zero
+        // handicap). Antes [NP] strict falhava em ::ln0 → line=NaN forçando fallback.
         let line = NaN, side = '';
-        const lnTag = String(t.match_id || '').match(/::ln([NP])([\d.]+)/);
+        const lnTag = String(t.match_id || '').match(/::ln(N|P)?([\d.]+)/);
         if (lnTag) { line = (lnTag[1] === 'N' ? -1 : 1) * parseFloat(lnTag[2]); }
         const sideTag = String(t.match_id || '').match(/::mt::handicap[a-zA-Z]*::(home|away|team1|team2|over|under)/i);
         if (sideTag) side = sideTag[1].toLowerCase();
