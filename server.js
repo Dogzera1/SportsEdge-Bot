@@ -29029,18 +29029,51 @@ server.listen(PORT, '0.0.0.0', () => {
   // Threshold defaults Railway hobby (512MB cap). Override via env BOOT_MEM_*_MB.
   const _memHeapWarnMb = parseInt(process.env.BOOT_MEM_HEAP_WARN_MB || '256', 10);
   const _memRssWarnMb = parseInt(process.env.BOOT_MEM_RSS_WARN_MB || '400', 10);
+  // 2026-05-07 (OOM fix): emergency threshold + flag global. Quando RSS passa
+  // CRIT (default 440MB pra Railway 512MB cap), seta flag _memCritical=true
+  // que crons heavy podem checar pra defer/skip work. Evita SIGKILL preempting
+  // operações em andamento. Logs WARN periódicos pra audit pós-fato.
+  const _memRssCritMb = parseInt(process.env.BOOT_MEM_RSS_CRIT_MB || '440', 10);
+  global._memCritical = false;
+  global._memCriticalSince = null;
   let _lastMemWarnAt = 0;
+  let _lastMemCritLogAt = 0;
+  // Boot-time check: log RSS imediato pra correlacionar com crash loop pattern
+  try {
+    const bootM = process.memoryUsage();
+    const bootRss = Math.round(bootM.rss / 1048576);
+    log('INFO', 'MEM-GUARD', `boot RSS=${bootRss}MB heap=${Math.round(bootM.heapUsed / 1048576)}MB (warn=${_memRssWarnMb} crit=${_memRssCritMb})`);
+  } catch (_) {}
   setInterval(_wrapServerCron('mem_guard', () => {
     const m = process.memoryUsage();
     const heapMb = Math.round(m.heapUsed / 1048576);
     const rssMb = Math.round(m.rss / 1048576);
+    // CRIT path — sinaliza pra crons defer non-critical
+    if (rssMb >= _memRssCritMb) {
+      if (!global._memCritical) {
+        global._memCritical = true;
+        global._memCriticalSince = Date.now();
+        log('ERROR', 'MEM-CRIT', `🔴 RSS=${rssMb}MB ≥ crit=${_memRssCritMb}MB — defer non-critical work; SIGKILL imminent if cresce`);
+      } else if (Date.now() - _lastMemCritLogAt > 60 * 1000) {
+        log('WARN', 'MEM-CRIT', `RSS=${rssMb}MB persists ≥ crit (${Math.round((Date.now() - global._memCriticalSince) / 1000)}s)`);
+        _lastMemCritLogAt = Date.now();
+      }
+      // Trigger GC se disponível (--expose-gc) — best effort recovery
+      try { if (global.gc) global.gc(); } catch (_) {}
+    } else if (global._memCritical) {
+      // Recovery
+      log('INFO', 'MEM-GUARD', `✅ RSS=${rssMb}MB recovered from crit (was crit por ${Math.round((Date.now() - global._memCriticalSince) / 1000)}s)`);
+      global._memCritical = false;
+      global._memCriticalSince = null;
+    }
     if ((heapMb >= _memHeapWarnMb || rssMb >= _memRssWarnMb) && Date.now() - _lastMemWarnAt > 5 * 60 * 1000) {
       log('WARN', 'MEM-GUARD', `heap=${heapMb}MB (warn=${_memHeapWarnMb}) rss=${rssMb}MB (warn=${_memRssWarnMb}) — proximo OOM se subir mais`);
       _lastMemWarnAt = Date.now();
     }
     try { require('./lib/metrics').gauge('process_heap_mb', heapMb); } catch (_) {}
     try { require('./lib/metrics').gauge('process_rss_mb', rssMb); } catch (_) {}
-  }), 60 * 1000).unref?.();
+    try { require('./lib/metrics').gauge('process_mem_critical', global._memCritical ? 1 : 0); } catch (_) {}
+  }), 30 * 1000).unref?.();  // 30s (era 60s) — detect mais rápido
   if (SXBET_ENABLED) log('INFO', 'ODDS', `SX.Bet ativo: base=${SXBET_BASE_URL}`);
   if (GRID_API_KEY) log('INFO', 'GRID', 'GRID_API_KEY configurada — /grid-enrich ativo (LoL)');
 
