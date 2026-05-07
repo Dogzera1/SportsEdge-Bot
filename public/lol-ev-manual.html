@@ -561,13 +561,22 @@
     document.getElementById('res-odds').textContent =
       'Odds: ' + (od.t1 != null ? od.t1 : '—') + ' / ' + (od.t2 != null ? od.t2 : '—');
 
+    // 2026-05-07 (audit P0 XSS): API data injetada via textContent — antes
+    // innerHTML cru permitia <script> em sug.team se backend fosse comprometido
+    // ou retornasse payload manipulado. Agora label fixo via DOM nodes.
     const sug = data.suggestion;
     const sg = document.getElementById('res-suggest');
+    sg.textContent = ''; // clear
+    const strong = document.createElement('strong');
+    strong.textContent = 'Sugestão:';
+    sg.appendChild(strong);
     if (sug && sug.team) {
-      sg.innerHTML = '<strong>Sugestão:</strong> ' + sug.team + ' @ ' + sug.odd +
-        ' · EV ~' + sug.evPercent + '% · Kelly ' + sug.stake;
+      sg.appendChild(document.createTextNode(
+        ' ' + sug.team + ' @ ' + sug.odd +
+        ' · EV ~' + sug.evPercent + '% · Kelly ' + sug.stake
+      ));
     } else {
-      sg.innerHTML = '<strong>Sugestão:</strong> nenhum lado com EV positivo claro.';
+      sg.appendChild(document.createTextNode(' nenhum lado com EV positivo claro.'));
     }
 
     const ev = data.evPercent || {};
@@ -728,6 +737,7 @@
     const s = String(raw || '').replace(/\r/g, '\n');
     const lines = s.split('\n').map(l => l.trim()).filter(Boolean);
     const out = [];
+    let truncatedCount = 0;
     for (let i = 0; i < lines.length; i++) {
       const l = lines[i];
       // remove lixo comum de logs/progresso
@@ -739,12 +749,18 @@
       const hasDigit = /\d/.test(l);
       const hasLetter = /[a-zA-Z]/.test(l);
       if (!hasDigit && !hasLetter) continue;
-      // corta linhas enormes (geralmente lixo)
+      // 2026-05-07 (audit P1): trunca linhas enormes (>180) e CONTA quantas
+      // foram cortadas pra warning visível no UI. Antes silent slice cortava
+      // odds/nomes mid-numero sem usuário saber.
+      if (l.length > 180) truncatedCount++;
       out.push(l.slice(0, 180));
     }
     // dedupe simples
     const seen = new Set();
-    return out.filter(l => (seen.has(l) ? false : (seen.add(l), true))).join('\n');
+    const text = out.filter(l => (seen.has(l) ? false : (seen.add(l), true))).join('\n');
+    // Expõe count via property pra caller mostrar warning
+    cleanOcrText._lastTruncated = truncatedCount;
+    return text;
   }
 
   (function bind365() {
@@ -760,7 +776,12 @@
     function analyzeOcrText(ocrText) {
       const raw = String(ocrText || '');
       const cleaned = cleanOcrText(raw);
-      out.textContent = 'Enviando…';
+      // 2026-05-07 (audit P1): warn visível quando linhas foram truncadas (>180 chars)
+      const truncated = cleanOcrText._lastTruncated || 0;
+      const truncWarn = truncated > 0
+        ? '⚠️ ' + truncated + ' linha(s) truncada(s) em 180 chars (odds/nomes podem estar cortados)\n\n'
+        : '';
+      out.textContent = truncWarn + 'Enviando…';
       return fetch('/lol/ev-manual-365', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -768,12 +789,19 @@
       })
         .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, status: r.status, j: j }; }); })
         .then(function (x) {
-          if (!x.ok) { out.textContent = (x.j && x.j.error) ? x.j.error : ('HTTP ' + x.status); return; }
+          if (!x.ok) { out.textContent = truncWarn + ((x.j && x.j.error) ? x.j.error : ('HTTP ' + x.status)); return; }
           _last365 = x.j;
           if (x.j.extracted) applyExtracted365(x.j.extracted);
-          if (x.j.ai && x.j.ai.text) out.textContent = x.j.ai.text;
-          else if (x.j.extracted) out.textContent = JSON.stringify(x.j.extracted || {}, null, 2);
-          else out.textContent = (x.j.debug && x.j.debug.contentPreview) ? ('Sem extração.\n' + x.j.debug.contentPreview) : 'Sem extração.';
+          if (x.j.ai && x.j.ai.text) out.textContent = truncWarn + x.j.ai.text;
+          else if (x.j.extracted) out.textContent = truncWarn + JSON.stringify(x.j.extracted || {}, null, 2);
+          else out.textContent = truncWarn + ((x.j.debug && x.j.debug.contentPreview) ? ('Sem extração.\n' + x.j.debug.contentPreview) : 'Sem extração.');
+        })
+        .catch(function (e) {
+          // 2026-05-07 (audit P0): catch error em analyzeOcrText. Antes finally
+          // disabilitava botão mas out.textContent ainda mostrava "OCR: 100%"
+          // → user pensava que funcionou. Agora mostra erro explicit.
+          out.textContent = truncWarn + 'Erro: ' + (e && e.message ? e.message : String(e));
+          throw e;
         });
     }
 

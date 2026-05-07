@@ -1019,39 +1019,109 @@ const _alertKeys = new Set();
 // ─────────────────────────────────────────────────────────────
 // API helper
 // ─────────────────────────────────────────────────────────────
-async function apiFetch(path, timeoutMs = 15000) {
+// 2026-05-07 (audit P0): apiFetch antes retornava null em TODOS os erros
+// (network/4xx/5xx/timeout/parse) — caller não distinguia "sem dados" de
+// "fetch falhou". Agora retorna { ok: true, data } | { ok: false, error, status }.
+// Compat: caller existente que faz `if (!data)` ainda funciona (apiFetchData
+// preserva null-on-error). Caller novo pode usar apiFetchResult pra branching.
+async function apiFetchResult(path, timeoutMs = 15000) {
   const ctrl = new AbortController();
   const to = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
     const r = await fetch(BASE + path, { signal: ctrl.signal });
     clearTimeout(to);
-    if (!r.ok) throw new Error('HTTP ' + r.status);
-    return await r.json();
+    if (!r.ok) {
+      let bodyText = '';
+      try { bodyText = (await r.text()).slice(0, 200); } catch (_) {}
+      return { ok: false, error: 'HTTP ' + r.status, status: r.status, body: bodyText };
+    }
+    const ct = String(r.headers.get('content-type') || '').toLowerCase();
+    if (!ct.includes('json')) {
+      let bodyText = '';
+      try { bodyText = (await r.text()).slice(0, 200); } catch (_) {}
+      return { ok: false, error: 'non-json response', status: r.status, body: bodyText };
+    }
+    try {
+      const data = await r.json();
+      return { ok: true, data };
+    } catch (eParse) {
+      return { ok: false, error: 'parse: ' + eParse.message, status: r.status };
+    }
   } catch (e) {
     clearTimeout(to);
-    console.warn('Fetch', path, e.message);
+    const isAbort = e.name === 'AbortError';
+    return { ok: false, error: isAbort ? 'timeout' : e.message, status: 0 };
+  }
+}
+// Wrapper compat: callers existentes esperam null-on-error.
+async function apiFetch(path, timeoutMs = 15000) {
+  const r = await apiFetchResult(path, timeoutMs);
+  if (!r.ok) {
+    console.warn('Fetch', path, r.error, r.status);
     return null;
   }
+  return r.data;
 }
 
 // Admin fetch — x-admin-key header, prompt cached em sessionStorage.
+// 2026-05-07 (audit P1): _adminKeyDeclined flag impede loop quando user cancela
+// prompt. Antes: cancel → key='' → 401 → removeItem → próxima call prompt → loop.
+// Agora: cancelado uma vez, sessionStorage retém marker e prompt não dispara
+// até reload manual da página (ou clear do storage).
+let _adminKeyDeclined = false;
 function getAdminKey() {
+  if (_adminKeyDeclined) return '';
   let key = sessionStorage.getItem('ADMIN_KEY') || '';
   if (!key) {
-    key = prompt('Admin key (x-admin-key):') || '';
-    if (key) sessionStorage.setItem('ADMIN_KEY', key);
+    if (sessionStorage.getItem('ADMIN_KEY_DECLINED') === '1') {
+      _adminKeyDeclined = true;
+      return '';
+    }
+    const promptResult = prompt('Admin key (x-admin-key):');
+    if (promptResult === null || promptResult === '') {
+      // User clicou cancelar OU deixou vazio → marca declined até reload
+      sessionStorage.setItem('ADMIN_KEY_DECLINED', '1');
+      _adminKeyDeclined = true;
+      return '';
+    }
+    key = promptResult;
+    sessionStorage.setItem('ADMIN_KEY', key);
+    sessionStorage.removeItem('ADMIN_KEY_DECLINED');
   }
   return key;
 }
+// 2026-05-07 (audit P0): adminFetch wrappa response — antes callers chamavam
+// .json() diretamente. Se servidor retorna 500 com HTML error page, .json()
+// crashava em parse. Agora helper adminFetchJson valida content-type e retorna
+// { ok, data } | { ok: false, error }. adminFetch (raw response) preservada
+// pra callers que precisam acesso ao headers/status.
 async function adminFetch(path, opts = {}) {
   const key = getAdminKey();
+  if (!key) throw new Error('Admin key não fornecida — recarregue a página pra inserir');
   const headers = Object.assign({}, opts.headers || {}, { 'x-admin-key': key });
   const r = await fetch(BASE + path, Object.assign({}, opts, { headers }));
   if (r.status === 401 || r.status === 403) {
     sessionStorage.removeItem('ADMIN_KEY');
+    sessionStorage.setItem('ADMIN_KEY_DECLINED', '1');
+    _adminKeyDeclined = true;
     throw new Error('Admin key inválida — recarregue a página');
   }
   return r;
+}
+async function adminFetchJson(path, opts = {}) {
+  const r = await adminFetch(path, opts);
+  if (!r.ok) {
+    let body = '';
+    try { body = (await r.text()).slice(0, 200); } catch (_) {}
+    throw new Error('HTTP ' + r.status + (body ? ' — ' + body : ''));
+  }
+  const ct = String(r.headers.get('content-type') || '').toLowerCase();
+  if (!ct.includes('json')) {
+    let body = '';
+    try { body = (await r.text()).slice(0, 200); } catch (_) {}
+    throw new Error('non-json response (status ' + r.status + ')' + (body ? ': ' + body : ''));
+  }
+  return await r.json();
 }
 
 // Undo toast: pending settles com janela de 5s pra cancelar + 10s pra desfazer após efetivar.
@@ -1933,7 +2003,12 @@ async function loadPipelineHealth(gen = refreshGen) {
       actionsDiv.innerHTML = `<div class="kpi-meta" style="text-align:center;padding:8px;color:var(--text-dim)">_Nenhuma ação recomendada — pipeline saudável_</div>`;
       return;
     }
-    const copyBtn = (text) => `<button onclick="navigator.clipboard.writeText('${text.replace(/'/g, "\\'")}');this.textContent='✓';setTimeout(()=>this.textContent='📋',1500)" style="background:transparent;border:1px solid var(--border);color:var(--text);padding:2px 8px;border-radius:4px;cursor:pointer;font-size:11px" title="Copiar">📋</button>`;
+    // 2026-05-07 (audit P0): copyBtn antes usava `text.replace(/'/g, "\\'")` em
+    // onclick inline — escape insuficiente (backslash em text quebrava). Agora
+    // data-copy attribute (HTML-escape correto) + delegação no document handler
+    // global (registrado abaixo, _bindCopyHandler).
+    const escapeAttr = (s) => String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/'/g, '&#39;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const copyBtn = (text) => `<button class="copy-btn-action" data-copy="${escapeAttr(text)}" style="background:transparent;border:1px solid var(--border);color:var(--text);padding:2px 8px;border-radius:4px;cursor:pointer;font-size:11px" title="Copiar">📋</button>`;
     const renderAction = (a) => {
       if (a.type === 'kelly_env') {
         const envLine = `${a.var}=${a.value}`;
@@ -5069,6 +5144,23 @@ function init() {
   autoRefreshTimer = setInterval(_refreshFn, 60000);
   document.addEventListener('visibilitychange', () => {
     if (!document.hidden) _refreshFn(); // catch-up imediato ao retornar
+  });
+  // 2026-05-07 (audit P0): delegated copy handler — substitui inline onclick
+  // perigoso. Reads data-copy attribute (HTML-escaped no render) e invoca
+  // navigator.clipboard sem injetar conteúdo no DOM. Single registration.
+  document.addEventListener('click', (e) => {
+    const btn = e.target.closest && e.target.closest('.copy-btn-action');
+    if (!btn) return;
+    const text = btn.getAttribute('data-copy') || '';
+    if (!text) return;
+    navigator.clipboard.writeText(text).then(() => {
+      btn.textContent = '✓';
+      setTimeout(() => { btn.textContent = '📋'; }, 1500);
+    }).catch((err) => {
+      console.warn('clipboard write failed:', err.message);
+      btn.textContent = '⚠️';
+      setTimeout(() => { btn.textContent = '📋'; }, 1500);
+    });
   });
   document.getElementById('footerMeta').textContent = `build 2026-04-28`;
 }
