@@ -7030,6 +7030,12 @@ async function runMtBucketGuardCycle() {
   const roiCutoff = parseFloat(process.env.MT_BUCKET_GUARD_ROI_CUTOFF || '-10');
   const clvCutoff = parseFloat(process.env.MT_BUCKET_GUARD_CLV_CUTOFF || '-2');
   const daysWin = parseInt(process.env.MT_BUCKET_GUARD_DAYS || '30', 10);
+  // 2026-05-07 (princípio shadow=causa): cron seta auto min/max odd por sport
+  // baseado em ROI/CLV de bucket. Antes agregava market_tips_shadow direto —
+  // mistura research-only + dispatched → bloqueio incidia em buckets onde
+  // bot não tipa real. REAL_ONLY default true espelha runMarketTipsLeakGuard +
+  // runMarketTipsRoiGuardSided. Opt-out: MT_BUCKET_GUARD_REAL_ONLY=false.
+  const REAL_ONLY = !/^(0|false|no)$/i.test(String(process.env.MT_BUCKET_GUARD_REAL_ONLY ?? 'true'));
   try {
     const grs = _gatesRuntimeState;
     // Verifica se a coluna existe (ambiente legado pode não ter rodado migration 054)
@@ -7040,13 +7046,32 @@ async function runMtBucketGuardCycle() {
     } catch (_) {}
     if (!hasShadow) return;
 
+    // _NORM espelha _normTeam em mt-result-propagator.js:37 (lower + remove
+    // space/dash/dot/apostrofe). JOIN com tips real exige same normalização.
+    const _NORM_BG = (col) => `REPLACE(REPLACE(REPLACE(REPLACE(lower(${col}),' ',''),'-',''),'.',''),'''','')`;
+    const _bgRealJoin = REAL_ONLY ? `
+      INNER JOIN tips t ON
+        t.sport = mts.sport
+        AND UPPER(t.market_type) = UPPER(mts.market)
+        AND COALESCE(t.is_shadow, 0) = 0
+        AND (t.archived IS NULL OR t.archived = 0)
+        AND t.result IN ('win','loss','void','push')
+        AND ABS(julianday(COALESCE(t.sent_at, t.settled_at)) - julianday(mts.created_at)) < 14
+        AND (
+          (${_NORM_BG('t.participant1')} = ${_NORM_BG('mts.team1')} AND ${_NORM_BG('t.participant2')} = ${_NORM_BG('mts.team2')})
+          OR
+          (${_NORM_BG('t.participant1')} = ${_NORM_BG('mts.team2')} AND ${_NORM_BG('t.participant2')} = ${_NORM_BG('mts.team1')})
+        )
+    ` : '';
     const rows = db.prepare(`
-      SELECT sport, odd, p_model, result, COALESCE(stake_units, 1) AS stake,
-             profit_units, clv_pct
-      FROM market_tips_shadow
-      WHERE created_at >= datetime('now', '-${daysWin} days')
-        AND result IN ('win','loss')
-        AND odd IS NOT NULL AND odd > 1
+      SELECT mts.sport AS sport, mts.odd AS odd, mts.p_model AS p_model,
+             mts.result AS result, COALESCE(mts.stake_units, 1) AS stake,
+             mts.profit_units AS profit_units, mts.clv_pct AS clv_pct
+      FROM market_tips_shadow mts
+      ${_bgRealJoin}
+      WHERE mts.created_at >= datetime('now', '-${daysWin} days')
+        AND mts.result IN ('win','loss')
+        AND mts.odd IS NOT NULL AND mts.odd > 1
     `).all();
 
     // Aggregate by (sport, bucket)

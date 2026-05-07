@@ -13851,20 +13851,51 @@ setInterval(load, 60000);
     return;
   }
 
-  // GET /admin/mt-calib-validation?days=90 — diagnóstico calib MT.
+  // GET /admin/mt-calib-validation?days=90&real_only=1 — diagnóstico calib MT.
   // Para cada (sport, market) com >=10 settled, retorna avg predP vs hit% real
   // + ROI + flag de gap (>10pp = miscalibrado, considerar refit).
+  //
+  // 2026-05-07 (princípio shadow=causa): cron runMtCalibValidationAlert
+  // (bot.js:21326) faz AUTO-DISABLE de markets quando gap≥15pp por 3 runs.
+  // Antes agregava market_tips_shadow direto — mistura research-only + dispatched
+  // → auto-disable real markets baseado em decisões hipotéticas. Fix: REAL_ONLY
+  // default true (espelha runMarketTipsLeakGuard / runMarketTipsRoiGuardSided).
+  // Opt-out: query param real_only=0 ou env MT_VALIDATION_REAL_ONLY=false.
   if (p === '/admin/mt-calib-validation') {
     if (!requireAdmin(req, res)) return;
     const days = Math.max(7, Math.min(365, parseInt(parsed.query.days || '90', 10) || 90));
     const minN = parseInt(parsed.query.min_n || '10', 10);
+    const realOnly = parsed.query.real_only != null
+      ? !/^(0|false|no)$/i.test(String(parsed.query.real_only))
+      : !/^(0|false|no)$/i.test(String(process.env.MT_VALIDATION_REAL_ONLY ?? 'true'));
     try {
+      // _NORM espelha _normTeam em mt-result-propagator.js:37 (lower + remove
+      // space/dash/dot/apostrofe). JOIN com tips real exige same normalização.
+      const _NORM = (col) => `REPLACE(REPLACE(REPLACE(REPLACE(lower(${col}),' ',''),'-',''),'.',''),'''','')`;
+      const realJoin = realOnly ? `
+        INNER JOIN tips t ON
+          t.sport = mts.sport
+          AND UPPER(t.market_type) = UPPER(mts.market)
+          AND COALESCE(t.is_shadow, 0) = 0
+          AND (t.archived IS NULL OR t.archived = 0)
+          AND t.result IN ('win','loss','void','push')
+          AND ABS(julianday(COALESCE(t.sent_at, t.settled_at)) - julianday(mts.created_at)) < 14
+          AND (
+            (${_NORM('t.participant1')} = ${_NORM('mts.team1')} AND ${_NORM('t.participant2')} = ${_NORM('mts.team2')})
+            OR
+            (${_NORM('t.participant1')} = ${_NORM('mts.team2')} AND ${_NORM('t.participant2')} = ${_NORM('mts.team1')})
+          )
+      ` : '';
       const rows = db.prepare(`
-        SELECT sport, market, side, p_model, odd, result, profit_units, stake_units, clv_pct
-        FROM market_tips_shadow
-        WHERE created_at >= datetime('now', '-' || ? || ' days')
-          AND result IN ('win', 'loss')
-          AND p_model IS NOT NULL
+        SELECT mts.sport AS sport, mts.market AS market, mts.side AS side,
+               mts.p_model AS p_model, mts.odd AS odd, mts.result AS result,
+               mts.profit_units AS profit_units, mts.stake_units AS stake_units,
+               mts.clv_pct AS clv_pct
+        FROM market_tips_shadow mts
+        ${realJoin}
+        WHERE mts.created_at >= datetime('now', '-' || ? || ' days')
+          AND mts.result IN ('win', 'loss')
+          AND mts.p_model IS NOT NULL
       `).all(days);
       const buckets = new Map();
       for (const r of rows) {
@@ -13901,7 +13932,7 @@ setInterval(load, 60000);
       }
       out.sort((a, b) => Math.abs(b.gapPp) - Math.abs(a.gapPp));
       const flagged = out.filter(r => r.status !== 'ok');
-      sendJson(res, { ok: true, days, minN, n_buckets: out.length, n_flagged: flagged.length, buckets: out });
+      sendJson(res, { ok: true, days, minN, realOnly, n_buckets: out.length, n_flagged: flagged.length, buckets: out });
     } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
     return;
   }
