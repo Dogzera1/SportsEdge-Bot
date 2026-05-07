@@ -16920,6 +16920,7 @@ setInterval(load, 60000);
 
       sendJson(res, {
         ok: true, days, sport_filter: sportFilter, regime,
+        disclaimer: 'shadow data is research-only — do NOT use for automated decisions; symptom treatment requires is_shadow=0 evidence (P2)',
         n_buckets: enriched.length,
         buckets: enriched,
       });
