@@ -532,8 +532,8 @@
       <span class="dot"></span>
       <span id="lastUpdated">agora</span>
     </div>
-    <button class="refresh-btn" id="refreshBtn" onclick="refresh()" title="Atualizar">
-      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+    <button class="refresh-btn" id="refreshBtn" onclick="refresh()" title="Atualizar" aria-label="Atualizar dashboard">
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true">
         <path d="M21 12a9 9 0 11-3-6.7M21 4v5h-5"/>
       </svg>
     </button>
@@ -582,7 +582,7 @@
           <option value="60">60d</option>
           <option value="90">90d</option>
         </select>
-        <button onclick="loadLeagueLeaks()" title="Refresh leaks" style="background:transparent;border:1px solid var(--border);color:var(--text-dim);padding:2px 6px;border-radius:4px;cursor:pointer;font-size:11px;margin-left:4px">↻</button>
+        <button onclick="loadLeagueLeaks()" title="Refresh leaks" aria-label="Refresh league leaks" style="background:transparent;border:1px solid var(--border);color:var(--text-dim);padding:2px 6px;border-radius:4px;cursor:pointer;font-size:11px;margin-left:4px">↻</button>
         <span id="leagueLeaksMeta"></span>
       </div>
     </div>
@@ -609,7 +609,7 @@
             <option value="30" selected>30 dias</option>
             <option value="90">90 dias</option>
           </select>
-          <button onclick="loadEquity()" title="Refresh equity" style="background:transparent;border:1px solid var(--border);color:var(--text-dim);padding:2px 6px;border-radius:4px;cursor:pointer;font-size:11px;margin-left:4px">↻</button>
+          <button onclick="loadEquity()" title="Refresh equity" aria-label="Refresh equity chart" style="background:transparent;border:1px solid var(--border);color:var(--text-dim);padding:2px 6px;border-radius:4px;cursor:pointer;font-size:11px;margin-left:4px">↻</button>
         </div>
       </div>
       <div class="chart-wrap"><canvas id="equityChart"></canvas></div>
@@ -669,7 +669,7 @@
           <option value="50">50/pág</option>
           <option value="100">100/pág</option>
         </select>
-        <button onclick="loadTips()" title="Refresh tips" style="background:transparent;border:1px solid var(--border);color:var(--text-dim);padding:3px 8px;border-radius:4px;cursor:pointer;font-size:11px">↻</button>
+        <button onclick="loadTips()" title="Refresh tips" aria-label="Refresh tips list" style="background:transparent;border:1px solid var(--border);color:var(--text-dim);padding:3px 8px;border-radius:4px;cursor:pointer;font-size:11px">↻</button>
       </div>
     </div>
     <!-- Stats por esporte — só real tips (is_shadow=0). Click filtra dashboard. -->
@@ -2021,12 +2021,12 @@ async function loadPipelineHealth(gen = refreshGen) {
       actionsDiv.innerHTML = `<div class="kpi-meta" style="text-align:center;padding:8px;color:var(--text-dim)">_Nenhuma ação recomendada — pipeline saudável_</div>`;
       return;
     }
-    // 2026-05-07 (audit P0): copyBtn antes usava `text.replace(/'/g, "\\'")` em
+    // 2026-05-07 (audit P0+P2): copyBtn antes usava `text.replace(/'/g, "\\'")` em
     // onclick inline — escape insuficiente (backslash em text quebrava). Agora
     // data-copy attribute (HTML-escape correto) + delegação no document handler
-    // global (registrado abaixo, _bindCopyHandler).
+    // global (registrado abaixo, _bindCopyHandler). aria-label pra a11y.
     const escapeAttr = (s) => String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/'/g, '&#39;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-    const copyBtn = (text) => `<button class="copy-btn-action" data-copy="${escapeAttr(text)}" style="background:transparent;border:1px solid var(--border);color:var(--text);padding:2px 8px;border-radius:4px;cursor:pointer;font-size:11px" title="Copiar">📋</button>`;
+    const copyBtn = (text) => `<button class="copy-btn-action" data-copy="${escapeAttr(text)}" style="background:transparent;border:1px solid var(--border);color:var(--text);padding:2px 8px;border-radius:4px;cursor:pointer;font-size:11px" title="Copiar" aria-label="Copiar para clipboard">📋</button>`;
     const renderAction = (a) => {
       if (a.type === 'kelly_env') {
         const envLine = `${a.var}=${a.value}`;

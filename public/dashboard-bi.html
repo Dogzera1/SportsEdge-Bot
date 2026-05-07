@@ -15,9 +15,13 @@
   --line-strong:  oklch(0.86 0.012 250);
 
   --ink:          oklch(0.18 0.012 250);
-  --ink-mid:      oklch(0.42 0.012 250);
-  --ink-soft:     oklch(0.62 0.010 250);
-  --ink-faint:    oklch(0.78 0.008 250);
+  /* 2026-05-07 (audit P2): contrast bumps pra WCAG AA (4.5:1). Antes
+     ink-mid 0.42 e ink-soft 0.62 davam ~3.6:1 e ~2.5:1 vs canvas 0.97.
+     Agora ink-mid 0.35 (~5.1:1) e ink-soft 0.50 (~3.6:1, OK pra large text).
+     ink-faint mantém pra placeholder/disabled (não-essencial). */
+  --ink-mid:      oklch(0.35 0.014 250);
+  --ink-soft:     oklch(0.50 0.012 250);
+  --ink-faint:    oklch(0.72 0.008 250);
 
   --accent:       oklch(0.55 0.18 250);   /* committed blue */
   --accent-soft:  oklch(0.92 0.04 250);
@@ -291,25 +295,25 @@ button, select, input { font-family: inherit; font-size: inherit; color: inherit
 
   <!-- ═══ KPI strip (todas seções exceto Risk usa essas KPIs default) ═══ -->
   <section class="panel span-3" data-sections="overview,performance,markets,leagues"><div class="kpi" id="kpiBanca">
-    <div class="kpi-label">Banca</div>
+    <div class="kpi-label" title="Soma current_banca de todos sports ativos (exclui esports legacy). Delta mostra growth % vs initial baseline.">Banca <span style="opacity:0.6;font-size:0.85em;cursor:help">ⓘ</span></div>
     <div class="kpi-row"><div class="kpi-value sk sk-line" style="width:120px"></div></div>
     <div class="kpi-foot sk sk-line" style="width:80px"></div>
     <svg class="kpi-spark" viewBox="0 0 100 28" preserveAspectRatio="none"></svg>
   </div></section>
   <section class="panel span-3" data-sections="overview,performance,markets,leagues"><div class="kpi" id="kpiRoi">
-    <div class="kpi-label">ROI realizado</div>
+    <div class="kpi-label" title="ROI = profit/stake na janela. Inclui ML + MT promovidas (handicap/totals). Delta = ROI atual.">ROI realizado <span style="opacity:0.6;font-size:0.85em;cursor:help">ⓘ</span></div>
     <div class="kpi-row"><div class="kpi-value sk sk-line" style="width:90px"></div></div>
     <div class="kpi-foot sk sk-line" style="width:100px"></div>
     <svg class="kpi-spark" viewBox="0 0 100 28" preserveAspectRatio="none"></svg>
   </div></section>
   <section class="panel span-3" data-sections="overview,performance,markets,leagues"><div class="kpi" id="kpiHit">
-    <div class="kpi-label">Hit rate</div>
+    <div class="kpi-label" title="% de tips win/(win+loss). Delta mostra distância de 50% (fair coin baseline) — não é variação vs período anterior.">Hit rate <span style="opacity:0.6;font-size:0.85em;cursor:help">ⓘ</span></div>
     <div class="kpi-row"><div class="kpi-value sk sk-line" style="width:80px"></div></div>
     <div class="kpi-foot sk sk-line" style="width:90px"></div>
     <svg class="kpi-spark" viewBox="0 0 100 28" preserveAspectRatio="none"></svg>
   </div></section>
   <section class="panel span-3" data-sections="overview,performance,markets,leagues"><div class="kpi" id="kpiClv">
-    <div class="kpi-label">CLV médio</div>
+    <div class="kpi-label" title="Closing Line Value médio. Positivo = pegou odd melhor que close (sharp); negativo = pegou pior (recreational/late)">CLV médio <span style="opacity:0.6;font-size:0.85em;cursor:help">ⓘ</span></div>
     <div class="kpi-row"><div class="kpi-value sk sk-line" style="width:90px"></div></div>
     <div class="kpi-foot sk sk-line" style="width:100px"></div>
     <svg class="kpi-spark" viewBox="0 0 100 28" preserveAspectRatio="none"></svg>
