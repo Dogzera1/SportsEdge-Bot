@@ -14421,8 +14421,19 @@ async function _pollDotaInner(runOnce = false) {
           // Parse bestOf from match.format (e.g., 'Bo3' → 3). Default 3 (BO3 dominante em Dota).
           const boMatch = String(match.format || 'Bo3').match(/Bo(\d)/i);
           const bestOf = boMatch ? parseInt(boMatch[1], 10) : 3;
-          // pMap baseline inferred from pSeries (inverse) — assume independence.
-          const pMapBase = mapProbFromSeries(mlResult.modelP1, bestOf);
+          // 2026-05-07 (causa-fix UNDER 2.5 leak audit): mesmo fix do LoL/CS.
+          // Antes hardcoded 0.04 em pricing + momentum=0 em mapProbFromSeries
+          // → inconsistência matemática + duplo-inflate em P(sweep).
+          // Override: DOTA_MOMENTUM_<TIER> > DOTA_MOMENTUM > 0.04 default.
+          const _dotaTierNum = _leagueTierLib.getLeagueTier('dota2', match.league);
+          const _dotaTierKey = _dotaTierNum === 1 ? 'TIER1' : _dotaTierNum === 2 ? 'TIER2' : 'OTHER';
+          const _dotaMomentumTier = parseFloat(process.env[`DOTA_MOMENTUM_${_dotaTierKey}`]);
+          const _dotaMomentumGlobal = parseFloat(process.env.DOTA_MOMENTUM);
+          const _dotaMomentum = Number.isFinite(_dotaMomentumTier) ? _dotaMomentumTier
+            : Number.isFinite(_dotaMomentumGlobal) ? _dotaMomentumGlobal
+            : 0.04;
+          // pMap baseline inferred from pSeries (inverse) — momentum-aware p/ consistency.
+          const pMapBase = mapProbFromSeries(mlResult.modelP1, bestOf, { momentum: _dotaMomentum });
           // Live map prob (db injetado pra draft meta factor via dota-hero-features)
           const pred = predictMapWinner({
             liveStats: { ...od, _db: db },
@@ -14440,7 +14451,7 @@ async function _pollDotaInner(runOnce = false) {
               bestOf,
               setsA: match.score1,
               setsB: match.score2,
-              momentum: 0.04,
+              momentum: _dotaMomentum,
               iters: 8000,
             });
             log('INFO', 'DOTA-LIVE-SERIES',
@@ -14457,7 +14468,16 @@ async function _pollDotaInner(runOnce = false) {
           const { mapProbFromSeries } = require('./lib/lol-series-model');
           const dotaBoM = String(match.format || 'Bo3').match(/Bo(\d)/i);
           const dotaBo = dotaBoM ? parseInt(dotaBoM[1], 10) : 3;
-          const pMapDota = mapProbFromSeries(mlResult.modelP1, dotaBo);
+          // 2026-05-07 (causa-fix): tier-aware momentum env hierarchy. Re-resolve
+          // aqui (escopo separado do live block). DOTA_MOMENTUM_<TIER> > DOTA_MOMENTUM > 0.04.
+          const _dt = _leagueTierLib.getLeagueTier('dota2', match.league);
+          const _dtKey = _dt === 1 ? 'TIER1' : _dt === 2 ? 'TIER2' : 'OTHER';
+          const _dotaMtT = parseFloat(process.env[`DOTA_MOMENTUM_${_dtKey}`]);
+          const _dotaMtG = parseFloat(process.env.DOTA_MOMENTUM);
+          const _dotaMt = Number.isFinite(_dotaMtT) ? _dotaMtT
+            : Number.isFinite(_dotaMtG) ? _dotaMtG
+            : 0.04;
+          const pMapDota = mapProbFromSeries(mlResult.modelP1, dotaBo, { momentum: _dotaMt });
           const markets = await serverGet(`/odds-markets?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}&period=0`).catch(() => null);
           if (markets && ((markets.handicaps?.length || 0) + (markets.totals?.length || 0)) > 0) {
             const { scanMarkets } = require('./lib/odds-markets-scanner');
@@ -14472,7 +14492,7 @@ async function _pollDotaInner(runOnce = false) {
               pricingLib: require('./lib/lol-markets'),
               minEv,
               shadowMinEv,
-              momentum: 0.04, // Dota2 momentum retrained (project_dota2_momentum_features)
+              momentum: _dotaMt, // tier-aware (DOTA_MOMENTUM_<TIER>) — math consistency com mapProbFromSeries
               minOdd: minOddDota,
               maxOdd: maxOddDota,
               maxPerMatch: parseInt(process.env.DOTA_MARKET_MAX_PER_MATCH || '', 10) || null,
@@ -19055,12 +19075,25 @@ async function pollCs(runOnce = false) {
         // quando isLive + scoreboard + bo>=3 + match score known.
         const csBoMatch = String(match.format || 'Bo3').match(/Bo(\d)/i);
         const csBestOf = csBoMatch ? parseInt(csBoMatch[1], 10) : 3;
+        // 2026-05-07 (causa-fix UNDER 2.5 leak audit): momentum env hierarchy
+        // tier-aware. Antes hardcoded 0.04 (scanMarkets) e 0.03 (live) — duas
+        // inconsistências: (1) reverse momentum=0 vs pricing momentum>0
+        // gera duplo-inflate em P(sweep); (2) live e pre-game divergiam.
+        // Espelha fix LoL (commit c69e19e). Override: CS_MOMENTUM_<TIER> >
+        // CS_MOMENTUM > 0.04 default. Tier via lib/league-tier (numeric→semantic).
+        const _csTierNum = _leagueTierLib.getLeagueTier('cs2', match.league);
+        const _csTierKey = _csTierNum === 1 ? 'TIER1' : _csTierNum === 2 ? 'TIER2' : 'OTHER';
+        const _csMomentumTier = parseFloat(process.env[`CS_MOMENTUM_${_csTierKey}`]);
+        const _csMomentumGlobal = parseFloat(process.env.CS_MOMENTUM);
+        const _csMomentum = Number.isFinite(_csMomentumTier) ? _csMomentumTier
+          : Number.isFinite(_csMomentumGlobal) ? _csMomentumGlobal
+          : 0.04;
         if (match.status === 'live' && scoreboard && scoreboard.live && csBestOf >= 3
             && Number.isFinite(match.score1) && Number.isFinite(match.score2)) {
           try {
             const { predictCsMapWinner } = require('./lib/cs-map-model');
             const { mapProbFromSeries, priceSeriesFromLiveMap } = require('./lib/lol-series-model');
-            const pMapBase = mapProbFromSeries(modelP1, csBestOf);
+            const pMapBase = mapProbFromSeries(modelP1, csBestOf, { momentum: _csMomentum });
             // Deriva team1IsCT via nome do team em cada side (se scorebot expuser).
             let team1IsCT = null;
             if (scoreboard.teamCTName && scoreboard.teamTName) {
@@ -19084,7 +19117,7 @@ async function pollCs(runOnce = false) {
                 bestOf: csBestOf,
                 setsA: match.score1,
                 setsB: match.score2,
-                momentum: 0.03,
+                momentum: _csMomentum,
                 iters: 8000,
               });
               log('INFO', 'CS-LIVE-SERIES',
@@ -19099,7 +19132,7 @@ async function pollCs(runOnce = false) {
         if (process.env.CS_MARKET_SCAN !== 'false' && modelP1 > 0) {
           try {
             const { mapProbFromSeries } = require('./lib/lol-series-model');
-            const pMapCs = mapProbFromSeries(modelP1, csBestOf);
+            const pMapCs = mapProbFromSeries(modelP1, csBestOf, { momentum: _csMomentum });
             const markets = await serverGet(`/odds-markets?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}&period=0`).catch(() => null);
             if (markets && ((markets.handicaps?.length || 0) + (markets.totals?.length || 0)) > 0) {
               const { scanMarkets } = require('./lib/odds-markets-scanner');
@@ -19111,7 +19144,7 @@ async function pollCs(runOnce = false) {
                 pricingLib: require('./lib/lol-markets'),
                 minEv,
                 shadowMinEv,
-                momentum: 0.04, // CS2 momentum (project_esports_momentum_wave)
+                momentum: _csMomentum, // tier-aware (CS_MOMENTUM_<TIER>) — math consistency com mapProbFromSeries
                 minOdd: minOddCs,
                 maxOdd: maxOddCs,
                 maxPerMatch: parseInt(process.env.CS_MARKET_MAX_PER_MATCH || '', 10) || null,
@@ -19739,7 +19772,18 @@ async function pollValorant(runOnce = false) {
         if (process.env.VAL_MARKET_SCAN !== 'false' && modelP1 > 0) {
           try {
             const { mapProbFromSeries } = require('./lib/lol-series-model');
-            const pMapVal = mapProbFromSeries(modelP1, bo);
+            // 2026-05-07 (causa-fix UNDER 2.5 leak audit): mesmo fix do LoL/CS/Dota.
+            // Antes momentum=0.04 hardcoded em scanMarkets + momentum=0 em mapProbFromSeries
+            // → inconsistência matemática + duplo-inflate em P(sweep).
+            // Override: VAL_MOMENTUM_<TIER> > VAL_MOMENTUM > 0.04 default.
+            const _vt = _leagueTierLib.getLeagueTier('valorant', match.league);
+            const _vtKey = _vt === 1 ? 'TIER1' : _vt === 2 ? 'TIER2' : 'OTHER';
+            const _valMtT = parseFloat(process.env[`VAL_MOMENTUM_${_vtKey}`]);
+            const _valMtG = parseFloat(process.env.VAL_MOMENTUM);
+            const _valMt = Number.isFinite(_valMtT) ? _valMtT
+              : Number.isFinite(_valMtG) ? _valMtG
+              : 0.04;
+            const pMapVal = mapProbFromSeries(modelP1, bo, { momentum: _valMt });
             const markets = await serverGet(`/odds-markets?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}&period=0`).catch(() => null);
             if (markets && ((markets.handicaps?.length || 0) + (markets.totals?.length || 0)) > 0) {
               const { scanMarkets } = require('./lib/odds-markets-scanner');
@@ -19751,7 +19795,7 @@ async function pollValorant(runOnce = false) {
                 pricingLib: require('./lib/lol-markets'),
                 minEv,
                 shadowMinEv,
-                momentum: 0.04, // Valorant momentum (project_esports_momentum_wave)
+                momentum: _valMt, // tier-aware (VAL_MOMENTUM_<TIER>) — math consistency com mapProbFromSeries
                 minOdd: minOddVal,
                 maxOdd: maxOddVal,
                 maxPerMatch: parseInt(process.env.VAL_MARKET_MAX_PER_MATCH || '', 10) || null,
