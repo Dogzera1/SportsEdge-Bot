@@ -157,7 +157,7 @@ FROZEN_HOLDOUT_DAYS=60
 
 **Tradeoff:** auto-tunes ficam menos reativos (60d pra incorporar regime change novo). Aceitável vs churn em ruído. Override per-sistema disponível (`FROZEN_HOLDOUT_KELLY_DAYS=120` etc).
 
-**Validação:** endpoint `/admin/holdout-status` (TBD) ou `lib/frozen-holdout.js:getStatus()` retorna config atual + cutoff_iso.
+**Validação:** `GET /admin/holdout-status` (admin auth) retorna `{ default_days, per_system: {kelly: {days, cutoff_iso}, mt_auto_promote: {...}, ...} }`. Confirmar que `default_days >= 60` em prod.
 
 ### Shadow vs real drift detection
 

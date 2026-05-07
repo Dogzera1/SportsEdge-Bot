@@ -1,1 +1,1 @@
-{"savedAt":1778167898316,"heartbeats":{"sweep_analyzed":{"lastTs":1778164537435,"count":2,"lastResult":"ok","lastError":null,"lastNote":null,"lastDurationMs":1},"mem_watchdog":{"lastTs":1778167837582,"count":24,"lastResult":"ok","lastError":null,"lastNote":"68.7MB","lastDurationMs":0}}}
+{"savedAt":1778190281260,"heartbeats":{"sweep_analyzed":{"lastTs":1778189737480,"count":9,"lastResult":"ok","lastError":null,"lastNote":null,"lastDurationMs":1},"mem_watchdog":{"lastTs":1778190038081,"count":98,"lastResult":"ok","lastError":null,"lastNote":"69.5MB","lastDurationMs":1}}}
