@@ -469,6 +469,42 @@
     return r;
   }
 
+  // 2026-05-07 (audit P2): EventSource cleanup helper antes de adicionar SSE.
+  // Pattern: trackedEventSource(url) retorna EventSource registrado em
+  // _ssEventSources Set. Auto-close em pagehide (page unmount), visibilitychange
+  // (tab background — opcional via opts.closeOnHide), e fail-fast em error.
+  // Uso futuro:
+  //   const es = trackedEventSource('/logs/stream');
+  //   es.addEventListener('message', handler);
+  // Cleanup automático no unload — sem leak de connections HTTP zombie.
+  const _ssEventSources = new Set();
+  function trackedEventSource(url, opts = {}) {
+    const closeOnHide = opts.closeOnHide ?? false;
+    let es;
+    try { es = new EventSource(url); }
+    catch (e) {
+      console.warn('[ssEventSource]', url, 'failed:', e?.message || e);
+      return null;
+    }
+    _ssEventSources.add(es);
+    es.addEventListener('error', (ev) => {
+      // Failed connection — readyState=2 means closed; remove from set
+      if (es.readyState === 2) _ssEventSources.delete(es);
+    });
+    if (closeOnHide) {
+      const onHide = () => {
+        if (document.hidden) { try { es.close(); } catch (_) {} _ssEventSources.delete(es); }
+      };
+      document.addEventListener('visibilitychange', onHide);
+    }
+    return es;
+  }
+  // Auto-cleanup on unload — best effort (browser pode não rodar)
+  window.addEventListener('pagehide', () => {
+    for (const es of _ssEventSources) { try { es.close(); } catch (_) {} }
+    _ssEventSources.clear();
+  });
+
   // ── Tab switching ──
   let activeTab = 'tips';
   document.querySelectorAll('.tab-btn').forEach(btn => btn.addEventListener('click', () => {
