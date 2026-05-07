@@ -9046,6 +9046,7 @@ setInterval(load, 10000);
   // usou EV ranking (errado) em vez de p_model.
   // POST /admin/repair-market-tips-dedup?sport=tennis&days=14
   if (p === '/admin/repair-market-tips-dedup' && req.method === 'POST') {
+    if (!requireAdmin(req, res)) return;
     const sport = parsed.query.sport || null;
     const days = Math.max(1, Math.min(90, parseInt(parsed.query.days || '14', 10) || 14));
     try {
@@ -9088,6 +9089,7 @@ setInterval(load, 10000);
   // Hard-delete tips voidadas (limpa DB permanente).
   // POST /admin/purge-voided-market-tips?sport=tennis&days=30
   if (p === '/admin/purge-voided-market-tips' && req.method === 'POST') {
+    if (!requireAdmin(req, res)) return;
     const sport = parsed.query.sport || null;
     const days = Math.max(1, Math.min(365, parseInt(parsed.query.days || '30', 10) || 30));
     try {
@@ -11817,9 +11819,17 @@ setInterval(load, 60000);
                 const oppGames = isT1 ? t2Games : t1Games;
                 // line pode ser negativa (-3.5 = side cobre se ganhar por 4+)
                 // ou positiva (+3.5 = side cobre se perder por <4)
-                const cover = (sideGames + line) > oppGames;
-                result = cover ? 'win' : 'loss';
-                profitR = cover ? +(stakeR * (odds - 1)).toFixed(2) : -stakeR;
+                // 2026-05-06 FIX: line inteira (-3, -5) com margin exato vira PUSH.
+                // Antes virava loss.
+                const adjMargin = (sideGames + line) - oppGames;
+                if (adjMargin === 0) {
+                  result = 'void';
+                  profitR = 0;
+                } else {
+                  const cover = adjMargin > 0;
+                  result = cover ? 'win' : 'loss';
+                  profitR = cover ? +(stakeR * (odds - 1)).toFixed(2) : -stakeR;
+                }
                 summary.settled++;
               }
             } catch (e) {
@@ -14153,6 +14163,7 @@ setInterval(load, 60000);
   // Mantém MAX(id), arquiva resto.
   // POST /archive-fuzzy-duplicates?apply=1
   if (p === '/archive-fuzzy-duplicates' && req.method === 'POST') {
+    if (!requireAdmin(req, res)) return;
     const apply = parsed.query.apply === '1' || parsed.query.apply === 'true';
     try {
       const tips = db.prepare(`
@@ -14229,6 +14240,7 @@ setInterval(load, 60000);
   // Mantém tip com MAX(id) por match_id (a mais nova), archived=1 nas demais.
   // POST /archive-cross-bucket-duplicates?apply=1   (sem apply = dry-run)
   if (p === '/archive-cross-bucket-duplicates' && req.method === 'POST') {
+    if (!requireAdmin(req, res)) return;
     const apply = parsed.query.apply === '1' || parsed.query.apply === 'true';
     try {
       // Acha match_ids que tem >1 tip não-arquivada em qualquer um de {esports, lol, dota2}.
@@ -14268,6 +14280,7 @@ setInterval(load, 60000);
   // que geraram match_keys diferentes por mudança de time/date.
   // POST /void-market-tips-duplicates?sport=tennis&days=7
   if (p === '/void-market-tips-duplicates' && req.method === 'POST') {
+    if (!requireAdmin(req, res)) return;
     const sport = parsed.query.sport || null;
     const days = Math.max(1, Math.min(90, parseInt(parsed.query.days || '7', 10) || 7));
     try {
@@ -14306,6 +14319,7 @@ setInterval(load, 60000);
   //                   = sets handicap mispricado pelo virtual bug pré-2026-04-25)
   // Útil pra cleanup pós-bug fix sem precisar de SQL direto.
   if (p === '/void-market-tips-by-criteria' && req.method === 'POST') {
+    if (!requireAdmin(req, res)) return;
     const sport = parsed.query.sport;
     if (!sport) { sendJson(res, { error: 'sport obrigatório' }, 400); return; }
     const days = parseInt(parsed.query.days || '14', 10);
