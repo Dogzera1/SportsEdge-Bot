@@ -7219,10 +7219,21 @@ setInterval(load, 10000);
         if (game.winner.id === t1?.id) winner = t1.name;
         else if (game.winner.id === t2?.id) winner = t2.name;
         if (winner) {
-          // Per-map row: final_score do série ainda útil pra handicap/total markets futuros
-          // que apontem pra mesma rawId. Helper retorna '' se série não terminou.
-          stmts.upsertMatchResult.run(rawId, 'dota2', t1?.name || '', t2?.name || '', winner, _psSeriesScore(m), m.league?.name || '');
-          sendJson(res, { matchId: rawId, winner, resolved: true, map: mapN });
+          // 2026-05-06 FIX: per-map row deve guardar placar do MAPA, não da
+          // série. Antes _psSeriesScore(m) sobrescrevia rawId='..._MAP1' com
+          // placar série inteira (ex: 2-1) → handicap/total per-mapa lia
+          // placar errado (kill totals do mapa virava series score). Quando
+          // série terminou, o map row mostrava 2-1 em vez do placar real
+          // do mapa. Fix: usar score do próprio game se disponível.
+          const _mapScore = (() => {
+            if (game.detailed_stats && game.detailed_stats.team1_score != null) {
+              return `${game.detailed_stats.team1_score}-${game.detailed_stats.team2_score}`;
+            }
+            // Sem detailed_stats: deixa vazio em vez de mentir com series score.
+            return '';
+          })();
+          stmts.upsertMatchResult.run(rawId, 'dota2', t1?.name || '', t2?.name || '', winner, _mapScore, m.league?.name || '');
+          sendJson(res, { matchId: rawId, winner, resolved: true, map: mapN, score: _mapScore || null });
         } else {
           sendJson(res, { matchId: rawId, resolved: false, map: mapN });
         }
@@ -13982,10 +13993,37 @@ setInterval(load, 60000);
   // JSON com checked/updated/skipped/bySport/firstError sem alterar comportamento
   // do cron (que continua rodando 2min).
   // GET /admin/clv-capture-trace
+  // 2026-05-06 FIX: skip se cron principal (bot.js runClvCaptureCycle) rodou
+  // <60s atrás. Antes esse trace + cron escreviam concorrentes em
+  // tips.clv_odds + market_tips_shadow.close_odd via processos separados →
+  // last-write-wins entre snapshots de momentos diferentes corrompia CLV.
+  // Override: ?force=1 (use só pra debug isolado).
   if (p === '/admin/clv-capture-trace') {
     if (!requireAdmin(req, res)) return;
+    const force = parsed.query.force === '1' || parsed.query.force === 'true';
     (async () => {
       try {
+        if (!force) {
+          // Lê heartbeat do cron via metrics. Se rodou recente, skip.
+          try {
+            const m = require('./lib/metrics');
+            const snap = m.snapshot ? m.snapshot() : null;
+            const lastTs = snap?.gauges?.['cron_last_ts:clv_capture']?.value
+              || global._externalHeartbeats?.['bot:clv_capture']?.lastTs;
+            if (Number.isFinite(lastTs)) {
+              const ageS = Math.round((Date.now() - lastTs) / 1000);
+              if (ageS < 60) {
+                sendJson(res, {
+                  ok: false,
+                  skipped: 'cron_ran_recently',
+                  age_s: ageS,
+                  hint: 'use ?force=1 pra rodar mesmo assim (risco de race com cron)',
+                }, 409);
+                return;
+              }
+            }
+          } catch (_) { /* defensive */ }
+        }
         const serverGet = (path) => new Promise((resolve, reject) => {
           const http = require('http');
           http.get({ hostname: '127.0.0.1', port: PORT, path, timeout: 15000 }, (r) => {
@@ -13995,7 +14033,7 @@ setInterval(load, 60000);
         });
         const { captureMarketTipsClv } = require('./lib/clv-capture');
         const out = await captureMarketTipsClv(db, serverGet);
-        sendJson(res, { ok: true, result: out }, 200);
+        sendJson(res, { ok: true, result: out, forced: force }, 200);
       } catch (e) {
         sendJson(res, { ok: false, error: e.message }, 500);
       }
@@ -24810,6 +24848,20 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
               : parseFloat((-stakeR).toFixed(2));
             db.prepare("UPDATE tips SET stake_reais = ?, profit_reais = ? WHERE id = ?")
               .run(stakeR, profitR, tip.id);
+            // 2026-05-06 FIX: tip_settlement_audit row no path principal de
+            // /settle. Antes só /admin/mt-revert e force-settle endpoints
+            // escreviam — incidentes de mass-mark via /settle exigiam
+            // reconstrução por log diff. Mig 073 documenta "audit per
+            // settlement" mas faltava no caminho mais usado.
+            try {
+              db.prepare(`
+                INSERT INTO tip_settlement_audit
+                  (tip_id, sport, prev_result, new_result, prev_profit_reais, new_profit_reais, actor, reason, source)
+                VALUES (?, ?, NULL, ?, NULL, ?, ?, ?, ?)
+              `).run(tip.id, sport, result, profitR, 'system',
+                _isWalkover ? 'walkover_void' : (mapVoidReason || `name_match_${matchMethod}`),
+                '/settle');
+            } catch (_) { /* audit non-blocking */ }
             // CLV: gravar odds de fecho se ainda não tiver (captura retroativa)
             if (!tip.clv_odds && tip.odds) {
               tipsNeedingClv.push({
