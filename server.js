@@ -16851,6 +16851,7 @@ setInterval(load, 60000);
 
       sendJson(res, {
         ok: true, days, minN, sport_filter: sportFilter, regime,
+        disclaimer: 'shadow data is research-only — do NOT use for automated decisions; symptom treatment requires is_shadow=0 evidence (P2)',
         n_buckets: enriched.length,
         by_tier: byTierArr,
         winners,
@@ -22147,8 +22148,9 @@ setInterval(load, 60000);
       }));
 
       const wantHtml = parsed.query.format === 'html' || /text\/html/i.test(req.headers['accept'] || '');
+      const _disclaimer = 'shadow data is research-only — do NOT use for automated decisions; symptom treatment requires is_shadow=0 evidence (P2)';
       if (!wantHtml) {
-        sendJson(res, { ok: true, days, regular, market, market_by_market: marketByMarket });
+        sendJson(res, { ok: true, days, disclaimer: _disclaimer, regular, market, market_by_market: marketByMarket });
         return;
       }
 
@@ -22177,6 +22179,7 @@ setInterval(load, 60000);
   .nav{margin-bottom:16px}.nav a{color:#58a6ff;margin-right:12px;text-decoration:none;font-size:13px}
 </style></head><body>
 <h1>Shadow Summary</h1>
+<div style="background:#3d2410;border-left:3px solid #f0883e;padding:8px 12px;margin-bottom:12px;font-size:12px;color:#ffa657">⚠️ <b>Research-only:</b> shadow data NÃO deve drivar decisões automáticas (block, cap, kelly cut, league trust). Sintoma só é tratado em is_shadow=0 (P2). Use este painel pra investigar CAUSA, não pra agir.</div>
 <div style="color:#7d8590;margin-bottom:12px">janela: <b>${days}d</b></div>
 <div class="nav">
   <a href="?days=7&format=html&key=${esc(parsed.query.key || '')}">7d</a>
@@ -24609,6 +24612,7 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
           source: sourceQ,
           group_by: groupBy,
           days,
+          ...(sourceQ === 'shadow' ? { disclaimer: 'shadow data is research-only — for promote evaluation + cause investigation; symptom treatment requires is_shadow=0 evidence (P2)' } : {}),
           criteria: { min_n: minN, min_roi_pct: minRoi, min_clv_pct: minClv, min_clv_samples: minClvSamples, max_calib_gap_pp: maxCalibGap },
           per_sport: items, // mantém nome legado pro front existente
           items,            // nome neutro (preferido pra clients novos)
@@ -24847,6 +24851,7 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
 
       sendJson(res, {
         sport, source: sourceQ, days,
+        ...(sourceQ === 'shadow' ? { disclaimer: 'shadow data is research-only — for promote evaluation + cause investigation; symptom treatment requires is_shadow=0 evidence (P2)' } : {}),
         verdict,
         volume: {
           raw_rows_after_dedup: dedupedRows.length,
