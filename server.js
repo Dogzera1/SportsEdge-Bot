@@ -16500,6 +16500,171 @@ setInterval(load, 60000);
     return;
   }
 
+  // GET /admin/shadow-tier-divergence?sport=tennis&days=30&market=handicapGames&minN=10
+  // Análise empírica de divergence per-tier — útil pra decidir SE refit
+  // por granularidade (tier) vale a pena pra um sport específico.
+  // Retorna por bucket p_model × tier: hit empírico, n, ROI. Gap entre tiers
+  // mensura distorção que calib monolítica não captura.
+  //
+  // Tier classification:
+  //   tennis: ATP/WTA main, Challenger, WTA 125K, ITF
+  //   esports: por league (top-tier: LCK/LPL/LCS/LEC/Worlds/MSI vs minor)
+  //   football: top-5 main league vs other
+  //
+  // Output: { sport, market, days, minN, buckets: [{ pBucket, tiers: { main: {n,hit,roi}, ... } }], summary }
+  if (p === '/admin/shadow-tier-divergence' && (req.method === 'GET' || req.method === 'POST')) {
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const sport = String(parsed.query.sport || '').toLowerCase().trim();
+    if (!sport) { sendJson(res, { ok: false, error: 'sport obrigatório' }, 400); return; }
+    const days = Math.max(7, Math.min(365, parseInt(parsed.query.days || '30', 10) || 30));
+    const market = parsed.query.market ? String(parsed.query.market).slice(0, 60) : null;
+    const minN = Math.max(3, Math.min(100, parseInt(parsed.query.minN || '5', 10) || 5));
+
+    // Tier classifier — adapta-se ao sport
+    const _classifyTier = (league) => {
+      const lg = String(league || '').trim();
+      if (!lg) return null;
+      if (sport === 'tennis') {
+        if (/ATP Challenger|WTA Challenger/i.test(lg)) return 'challenger';
+        if (/WTA 125K/i.test(lg)) return 'wta125k';
+        if (/^ITF\s|ITF Futures|ITF (Men|Women)/i.test(lg)) return 'itf';
+        if (/^ATP\s|^WTA\s/i.test(lg)) return 'main';
+        return null;
+      }
+      if (sport === 'lol' || sport === 'cs2' || sport === 'cs' || sport === 'dota2' || sport === 'valorant') {
+        if (/^(LCK|LPL|LCS|LEC|Worlds|MSI|Esports World Cup|VCT|TI|EWC|First Stand)/i.test(lg)) return 'tier1';
+        if (/Challengers|Academy|NACL|LFL|CBLOL|Prime League|TCL|LCP|Ultraliga|Arabian|Hitpoint|Ebl|Lit|Lrn|Lrs|Les|Liga Portuguesa|GLL|Hellenic/i.test(lg)) return 'tier2';
+        return 'other';
+      }
+      if (sport === 'football') {
+        if (/Premier League|La Liga|Bundesliga|Serie A|Ligue 1|Champions League|Europa League/i.test(lg)) return 'top5_uefa';
+        if (/Brasileirao|Brasileir|S[eé]rie A.*[Bb]ras|Copa do Brasil|Libertadores|Sudamericana/i.test(lg)) return 'br_continental';
+        return 'other';
+      }
+      return 'unclassified';
+    };
+
+    try {
+      const conds = [`created_at >= datetime('now', '-' || ? || ' days')`, `sport = ?`];
+      const args = [days, sport];
+      if (market) { conds.push(`market = ?`); args.push(market); }
+      conds.push(`result IN ('win', 'loss')`);
+      conds.push(`p_model IS NOT NULL AND p_model > 0 AND p_model < 1`);
+
+      const rows = db.prepare(`
+        SELECT id, league, market, side, line, p_model, odd, result, profit_units, stake_units
+        FROM market_tips_shadow
+        WHERE ${conds.join(' AND ')}
+        ORDER BY created_at DESC
+        LIMIT 5000
+      `).all(...args);
+
+      // Bucketize p_model em faixas discretas (mesmas do calib bins típicos)
+      const bucketEdges = [0.30, 0.45, 0.55, 0.65, 0.70, 0.75, 0.80, 0.85, 1.001];
+      const bucketLabel = (p) => {
+        for (let i = 0; i < bucketEdges.length - 1; i++) {
+          if (p >= bucketEdges[i] && p < bucketEdges[i + 1]) {
+            return `${bucketEdges[i].toFixed(2)}-${bucketEdges[i + 1].toFixed(2)}`;
+          }
+        }
+        return null;
+      };
+
+      // Group: bucket × tier
+      const matrix = new Map(); // bucket -> tier -> { tips }
+      const tierTotals = new Map(); // tier -> { n, w, l, profit, stake }
+      for (const r of rows) {
+        const tier = _classifyTier(r.league);
+        if (!tier) continue;
+        const bk = bucketLabel(Number(r.p_model));
+        if (!bk) continue;
+
+        if (!matrix.has(bk)) matrix.set(bk, new Map());
+        const tierMap = matrix.get(bk);
+        if (!tierMap.has(tier)) tierMap.set(tier, []);
+        tierMap.get(tier).push(r);
+
+        const tt = tierTotals.get(tier) || { n: 0, w: 0, l: 0, profit: 0, stake: 0 };
+        tt.n++;
+        if (r.result === 'win') tt.w++;
+        else if (r.result === 'loss') tt.l++;
+        tt.profit += Number(r.profit_units) || 0;
+        tt.stake += Number(r.stake_units) || 0;
+        tierTotals.set(tier, tt);
+      }
+
+      // Render output sorted
+      const sortedBuckets = [...matrix.keys()].sort();
+      const out = [];
+      for (const bk of sortedBuckets) {
+        const tierMap = matrix.get(bk);
+        const tiers = {};
+        for (const [tier, tips] of tierMap) {
+          if (tips.length < minN) continue;
+          const wins = tips.filter(t => t.result === 'win').length;
+          const losses = tips.filter(t => t.result === 'loss').length;
+          const totalProfit = tips.reduce((s, t) => s + (Number(t.profit_units) || 0), 0);
+          const totalStake = tips.reduce((s, t) => s + (Number(t.stake_units) || 0), 0);
+          const meanP = tips.reduce((s, t) => s + Number(t.p_model), 0) / tips.length;
+          tiers[tier] = {
+            n: tips.length,
+            wins,
+            losses,
+            hit_pct: +(wins * 100 / Math.max(1, wins + losses)).toFixed(1),
+            mean_p: +meanP.toFixed(3),
+            roi_pct: totalStake > 0 ? +(totalProfit * 100 / totalStake).toFixed(1) : null,
+            profit_units: +totalProfit.toFixed(2),
+            // Gap absoluto entre meanP e empirical hit (calib gap signal)
+            calib_gap_pp: +((meanP * 100) - (wins * 100 / Math.max(1, wins + losses))).toFixed(1),
+          };
+        }
+        if (Object.keys(tiers).length > 0) {
+          out.push({ pBucket: bk, tiers });
+        }
+      }
+
+      // Summary per tier (todas buckets)
+      const tierSummary = {};
+      for (const [tier, tt] of tierTotals) {
+        tierSummary[tier] = {
+          n: tt.n,
+          hit_pct: +(tt.w * 100 / Math.max(1, tt.w + tt.l)).toFixed(1),
+          roi_pct: tt.stake > 0 ? +(tt.profit * 100 / tt.stake).toFixed(1) : null,
+          profit_units: +tt.profit.toFixed(2),
+        };
+      }
+
+      // Detect divergence — pra cada bucket, max gap entre tiers (signal de
+      // que calib monolítica falha; refit per-tier valeria a pena se sample OK)
+      const significantBuckets = out.filter(b => {
+        const tiers = Object.values(b.tiers);
+        if (tiers.length < 2) return false;
+        const hits = tiers.map(t => t.hit_pct);
+        const range = Math.max(...hits) - Math.min(...hits);
+        return range >= 10; // ≥10pp gap entre tiers no mesmo bucket
+      });
+
+      sendJson(res, {
+        ok: true,
+        sport,
+        market,
+        days,
+        minN,
+        n_total_rows: rows.length,
+        tier_summary: tierSummary,
+        buckets: out,
+        significant_divergence_buckets: significantBuckets.length,
+        recommendation: significantBuckets.length >= 2
+          ? `Refit tier-aware vale a pena — ${significantBuckets.length} buckets têm gap ≥10pp entre tiers`
+          : `Tier-aware refit baixa prioridade — apenas ${significantBuckets.length} bucket(s) com divergence significativa`,
+      });
+    } catch (e) {
+      sendJson(res, { ok: false, error: e.message, stack: _stackForReq(req, e)?.slice(0, 400) }, 500);
+    }
+    return;
+  }
+
   if (p === '/admin/mt-shadow-by-league') {
     const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
