@@ -2221,7 +2221,10 @@ async function loadTips(gen) {
     if (!el) return;
     setLoading(el);
   let tips = [];
-  const LIMIT_ALL = 1000; // cap hard do backend
+  // 2026-05-07 (audit divergência KPI vs footer): backend cap raised 1000→5000
+  // pra cobrir sports com >100 tips/janela (tennis tipicamente). perSport=300
+  // (era 112 com LIMIT_ALL=1000/9) — cobre tennis 131 sem truncate.
+  const LIMIT_PER_SPORT = 300;
   if (currentSport === '__overall__') {
     // 'esports' query já unifica IN(esports,lol,dota2) via resolveSportSet — NÃO incluir
     // 'lol'/'dota2' separados aqui senão o mesmo tip é retornado 3 vezes (triplicando).
@@ -2230,7 +2233,7 @@ async function loadTips(gen) {
     // 2026-05-07 (audit P2): usa ALL_SPORTS_BUCKET centralizado (era hardcoded)
     const sports = ALL_SPORTS_BUCKET;
     const sq = status ? '&status=' + encodeURIComponent(status) : '';
-    const perSport = Math.ceil(LIMIT_ALL / sports.length);
+    const perSport = LIMIT_PER_SPORT;
     const results = await Promise.all(sports.map(sp =>
       apiFetch(`/tips-history?sport=${sp}&limit=${perSport}&include_markets=1${sq}`).then(r => ({ sp, data: r }))
     ));
@@ -2264,7 +2267,7 @@ async function loadTips(gen) {
   } else {
     const gq = currentGame ? '&game=' + encodeURIComponent(currentGame) : '';
     const sq = status ? '&status=' + encodeURIComponent(status) : '';
-    const data = await apiFetch(`/tips-history?sport=${currentSport}&limit=${LIMIT_ALL}&include_markets=1${gq}${sq}`);
+    const data = await apiFetch(`/tips-history?sport=${currentSport}&limit=2000&include_markets=1${gq}${sq}`);
     if (shouldAbort(gen)) return;
     tips = (data?.tips || data || []).map(x => ({ ...x, sport: x.sport || currentSport }));
     // Fuzzy dedup (mesma tip com match_ids diferentes entre esports↔lol/dota2 etc)
@@ -2798,14 +2801,19 @@ function renderTipsTable() {
   const nVoid = tips.filter(t => t.result === 'void' || t.result === 'push').length;
   const totalProfit = tips.reduce((s, t) => s + (Number(t.profit_reais) || 0), 0);
 
+  // 2026-05-07 (audit divergência KPI vs footer): tooltip clarifica que footer
+  // reflete tips visíveis APÓS dedup match_id no servidor + filtros frontend
+  // (sport, fuzzy dedup). KPI Lucro Acumulado (header) usa /overall-summary
+  // que não deduplica + janela 30d explícita. Pequenas diferenças são esperadas.
+  const _summaryTooltip = `Tips visíveis após dedup match_id servidor + dedup fuzzy frontend. KPI Banca/Lucro (header) usa /overall-summary com semântica diferente — pequenas diferenças (~5-10 tips) são esperadas.`;
   el.innerHTML = `
-    <div class="tips-summary">
+    <div class="tips-summary" title="${_summaryTooltip}">
       <span><b>${tips.length}</b> tips</span>
       <span class="pos">${nWin}W</span>
       <span class="neg">${nLoss}L</span>
       ${nPending ? `<span class="tip-meta">${nPending} pend</span>` : ''}
       ${nVoid ? `<span class="tip-meta">${nVoid} void</span>` : ''}
-      <span class="${totalProfit >= 0 ? 'pos' : 'neg'}" style="margin-left:auto">${totalProfit >= 0 ? '+' : ''}${fmtMoney(totalProfit)}</span>
+      <span class="${totalProfit >= 0 ? 'pos' : 'neg'}" style="margin-left:auto" title="Soma profit_reais das ${tips.length} tips visíveis na tabela. Voids contam profit=0.">${totalProfit >= 0 ? '+' : ''}${fmtMoney(totalProfit)}</span>
       ${nPending > 0 ? `<button onclick="forceSettleTips(this)" title="Tenta settle automático em todas as ${nPending} pendentes via match_results (cobra DM admin)" style="margin-left:8px;background:transparent;border:1px solid var(--accent,#3b82f6);color:var(--accent,#3b82f6);padding:3px 10px;border-radius:4px;cursor:pointer;font-size:11px">⚡ Force settle (${nPending})</button>` : ''}
       <button onclick="exportTipsCsv()" title="Exportar tips visíveis pra CSV" style="margin-left:8px;background:transparent;border:1px solid var(--border);color:var(--text-dim);padding:3px 8px;border-radius:4px;cursor:pointer;font-size:11px">📥 CSV</button>
     </div>
