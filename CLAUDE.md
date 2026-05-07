@@ -159,6 +159,8 @@ FROZEN_HOLDOUT_DAYS=60
 
 **Validação:** `GET /admin/holdout-status` (admin auth) retorna `{ default_days, per_system: {kelly: {days, cutoff_iso}, mt_auto_promote: {...}, ...} }`. Confirmar que `default_days >= 60` em prod.
 
+**Single source of truth P2:** `GET /admin/p2-status` (admin auth) retorna config dos 11 envs P2 + frozen_holdout + lista de issues compliance. Use pra validação rápida antes de deploys ou quando suspeitar de regressão.
+
 ### Shadow vs real drift detection
 
 ```
