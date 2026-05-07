@@ -355,6 +355,21 @@ function _sharpDivergenceGate({ oddsObj, modelP, impliedP, maxPp, context = {} }
   if (!Number.isFinite(modelP) || !Number.isFinite(impliedP) || modelP <= 0 || impliedP <= 0) return { ok: true, divPp: null, reason: null, effCap: null, tier: null, override: false };
   const bookmaker = String(oddsObj?.bookmaker || '').toLowerCase();
   const isSharp = /pinnacle|betfair/.test(bookmaker);
+  // 2026-05-07 (audit P2): warn quando context.sport falta — antes assumia
+  // tier 2 silently, escondendo bugs upstream onde caller não passa sport.
+  // Tier 2 fica como default (middle-ground), mas log permite identificar
+  // consumers ausentes. Throttle 1/h via Map global pra evitar spam.
+  if (!context.sport) {
+    try {
+      global._sharpDivWarnLog = global._sharpDivWarnLog || new Map();
+      const now = Date.now();
+      const lastTs = global._sharpDivWarnLog.get('missing_sport') || 0;
+      if (now - lastTs > 60 * 60 * 1000) {
+        log('WARN', 'DIV-GATE', `_sharpDivergenceGate called without context.sport — defaulting tier 2 (caller bug, fix upstream)`);
+        global._sharpDivWarnLog.set('missing_sport', now);
+      }
+    } catch (_) { /* logging não pode quebrar gate */ }
+  }
   // 2026-04-28: non-sharp book em tier 2/3 exige EV mínimo elevado (compensa
   // ausência de proteção sharp). Antes passava direto sem nenhum gate.
   if (!isSharp) {
