@@ -3372,13 +3372,33 @@ async function runAutoAnalysis() {
     parallel.push(_timed('tabletennis', () => pollTableTennis(true)).then(v => { sharedCaches.tabletennis = v; })
       .catch(e => log('ERROR', 'AUTO', `TableTennis unified: ${e.message}`)));
   }
+  // 2026-05-06 FIX: respeitar in-flight flag setado por scheduleCs/Valorant
+  // pra evitar paralelismo (compartilham analyzedX/_inFlight/sharedCaches).
+  // Se outro path já está rodando, skip aqui (scheduler atualizou cache).
+  const _spIf = global._sportPollInFlight;
   if (SPORTS['cs']?.enabled) {
-    parallel.push(_timed('cs', () => pollCs(true)).then(v => { sharedCaches.cs = v; })
-      .catch(e => log('ERROR', 'AUTO', `CS2 unified: ${e.message}`)));
+    if (_spIf?.get('cs')) {
+      log('DEBUG', 'AUTO', 'CS poll in-flight via scheduler — skip parallel call');
+    } else {
+      parallel.push(_timed('cs', async () => {
+        if (_spIf) _spIf.set('cs', Date.now());
+        try { return await pollCs(true); }
+        finally { if (_spIf) _spIf.delete('cs'); }
+      }).then(v => { sharedCaches.cs = v; })
+        .catch(e => log('ERROR', 'AUTO', `CS2 unified: ${e.message}`)));
+    }
   }
   if (SPORTS['valorant']?.enabled) {
-    parallel.push(_timed('valorant', () => pollValorant(true)).then(v => { sharedCaches.valorant = v; })
-      .catch(e => log('ERROR', 'AUTO', `Valorant unified: ${e.message}`)));
+    if (_spIf?.get('valorant')) {
+      log('DEBUG', 'AUTO', 'Valorant poll in-flight via scheduler — skip parallel call');
+    } else {
+      parallel.push(_timed('valorant', async () => {
+        if (_spIf) _spIf.set('valorant', Date.now());
+        try { return await pollValorant(true); }
+        finally { if (_spIf) _spIf.delete('valorant'); }
+      }).then(v => { sharedCaches.valorant = v; })
+        .catch(e => log('ERROR', 'AUTO', `Valorant unified: ${e.message}`)));
+    }
   }
   await Promise.allSettled(parallel);
 
@@ -13340,9 +13360,25 @@ async function poll(token, sport) {
         if (update.callback_query) {
           const cq = update.callback_query;
           const chatId = cq.message.chat.id;
+          const userId = cq.from?.id;
           const data = cq.data;
           // Always ack the callback to remove the spinner
           await tgRequest(token, 'answerCallbackQuery', { callback_query_id: cq.id }).catch(() => {});
+
+          // 2026-05-06 FIX: defensive admin-only callback gate. Prefixos
+          // listados em ADMIN_CALLBACK_PREFIXES exigem cq.from.id ∈ ADMIN_IDS.
+          // Vazio por default (callbacks atuais não-destrutivos), mas previne
+          // escalation se algum callback state-changing for adicionado depois
+          // sem lembrar do gate. Override env: ADMIN_CALLBACK_PREFIXES=admin_,settle_
+          const _adminCbPrefixes = String(process.env.ADMIN_CALLBACK_PREFIXES || 'admin_,settle_,void_,unsettle_,promote_')
+            .split(',').map(s => s.trim()).filter(Boolean);
+          if (_adminCbPrefixes.some(pref => data.startsWith(pref))) {
+            if (!userId || !ADMIN_IDS.has(userId)) {
+              log('WARN', 'TG-CB-GATE', `non-admin user ${userId} tentou callback admin "${data}" — bloqueado`);
+              try { require('./lib/metrics').incr('tg_callback_blocked', { sport, reason: 'non_admin' }); } catch (_) {}
+              continue; // skip processing
+            }
+          }
           
           if (data.startsWith('notif_')) {
             // notif_{sport}_{on|off}
@@ -20912,10 +20948,28 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   // (MMA com IA cap), ficava 10+min sem analisar — perdíamos partidas live VCT inteiras.
   // Cadência adaptativa: 90s live, 5min idle base, escala até 20min sem matches próximos.
   // Safety: qualquer match <30min força cadência 5min (janela hot pré-game).
+  // 2026-05-06 FIX: per-sport in-flight flag previne paralelismo com runAutoAnalysis.
+  // Antes scheduler + runAutoAnalysis chamavam pollX em paralelo, compartilhando
+  // analyzedX/_inFlight/_livePhase/sharedCaches → tip processada 2× (segundo cai
+  // no dedup mas já gastou IA + record-tip server call). Skip silencioso se outro
+  // path já está rodando.
+  if (!global._sportPollInFlight) global._sportPollInFlight = new Map();
+  const _withSportInFlight = async (sport, fn) => {
+    if (global._sportPollInFlight.get(sport)) {
+      try { require('./lib/metrics').incr('poll_overlap_skip', { sport }); } catch (_) {}
+      log('DEBUG', `AUTO-${sport.toUpperCase()}`, 'scheduler skip: poll já rodando');
+      return [];
+    }
+    global._sportPollInFlight.set(sport, Date.now());
+    try { return await fn(); }
+    finally { global._sportPollInFlight.delete(sport); }
+  };
   if (SPORTS['valorant']?.enabled) {
     (function scheduleValorant() {
       setTimeout(async () => {
-        const matches = await pollValorant(true).catch(e => { log('ERROR', 'AUTO-VAL', `scheduler: ${e.message}`); return []; });
+        const matches = await _withSportInFlight('valorant', () =>
+          pollValorant(true).catch(e => { log('ERROR', 'AUTO-VAL', `scheduler: ${e.message}`); return []; })
+        );
         const nextMs = _computeAdaptivePollMs(90 * 1000, 5 * 60 * 1000, matches || [], { key: 'valorant', maxIdleMs: 20 * 60 * 1000 });
         scheduleValorant._nextMs = nextMs;
         scheduleValorant();
@@ -20926,7 +20980,9 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   if (SPORTS['cs']?.enabled) {
     (function scheduleCs() {
       setTimeout(async () => {
-        const matches = await pollCs(true).catch(e => { log('ERROR', 'AUTO-CS', `scheduler: ${e.message}`); return []; });
+        const matches = await _withSportInFlight('cs', () =>
+          pollCs(true).catch(e => { log('ERROR', 'AUTO-CS', `scheduler: ${e.message}`); return []; })
+        );
         const nextMs = _computeAdaptivePollMs(90 * 1000, 5 * 60 * 1000, matches || [], { key: 'cs', maxIdleMs: 20 * 60 * 1000 });
         scheduleCs._nextMs = nextMs;
         scheduleCs();
