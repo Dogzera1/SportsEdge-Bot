@@ -7,12 +7,16 @@ const { calibrateProbability, getCalibrationStats, invalidateCache } = require('
 
 function _setupDb(rows) {
   const db = new Database(':memory:');
+  // 2026-05-07: schema atualizado pra incluir is_shadow (lib/calibration.js
+  // passou a filtrar `COALESCE(is_shadow, 0) = 0` em commit anterior — Wave 3
+  // do P2 hardening).
   db.exec(`
     CREATE TABLE tips (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       sport TEXT,
       model_p_pick REAL,
       result TEXT,
+      is_shadow INTEGER DEFAULT 0,
       archived INTEGER DEFAULT 0,
       sent_at TEXT DEFAULT (datetime('now'))
     );
