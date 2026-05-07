@@ -10760,6 +10760,86 @@ setInterval(load, 60000);
     return;
   }
 
+  // GET /admin/p2-status — single source of truth de compliance P2.
+  // Reporta config atual dos 11 envs P2-related + frozen_holdout + recomendações.
+  // Útil pra validar que prod respeita "shadow=causa, real=sintoma" antes de deploy.
+  if (p === '/admin/p2-status' && (req.method === 'GET' || req.method === 'POST')) {
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    try {
+      // Resolve cada env com seu default (mirror das libs/crons que usam).
+      const _compliant = (envName, defaultVal = 'true') =>
+        !/^(0|false|no)$/i.test(String(process.env[envName] ?? defaultVal));
+      const _autoOn = (envName, defaultVal = 'true') =>
+        !/^(0|false|no)$/i.test(String(process.env[envName] ?? defaultVal));
+
+      // Wave 1: 5 violators originais (REAL_ONLY guards) — todos default true.
+      const wave1 = {
+        MT_LEAK_REAL_ONLY: _compliant('MT_LEAK_REAL_ONLY'),
+        MT_ROI_GUARD_REAL_ONLY: _compliant('MT_ROI_GUARD_REAL_ONLY'),
+        MT_BUCKET_GUARD_REAL_ONLY: _compliant('MT_BUCKET_GUARD_REAL_ONLY'),
+        MT_VALIDATION_REAL_ONLY: _compliant('MT_VALIDATION_REAL_ONLY'),
+        KILLS_CALIB_REAL_ONLY: _compliant('KILLS_CALIB_REAL_ONLY'),
+      };
+      // Wave 2: 3 descobertos no re-audit — todos default true.
+      const wave2 = {
+        EV_CALIB_REAL_ONLY: _compliant('EV_CALIB_REAL_ONLY'),
+        LEAGUE_TRUST_REAL_ONLY: _compliant('LEAGUE_TRUST_REAL_ONLY'),
+        MT_AUTO_PROMOTE_REAL_ONLY: _compliant('MT_AUTO_PROMOTE_REAL_ONLY'),
+      };
+      // Detectores P2-compliant (DM only, no auto-action).
+      const detectors = {
+        SHADOW_VS_REAL_DRIFT_AUTO: _autoOn('SHADOW_VS_REAL_DRIFT_AUTO'),
+        GATE_ATTRIBUTION_AUTO: _autoOn('GATE_ATTRIBUTION_AUTO'),
+        ROI_CUSUM_DISABLED: !!/^(1|true|yes)$/i.test(String(process.env.ROI_CUSUM_DISABLED || '')),
+      };
+      // Readiness-learner: opt-in OFF default. P2-compliant pós Wave 3 mas
+      // recomenda dry_run validação antes de promote.
+      const readinessLearner = {
+        READINESS_LEARNER_AUTO: !!/^(1|true|yes)$/i.test(String(process.env.READINESS_LEARNER_AUTO || '')),
+        note: 'opt-in OFF default; pós Wave 3 (commit cb016b7) snapshot+verify+holdout default flippado is_shadow=1→0. Validar com POST /admin/readiness-learner-run?dry_run=1 antes de ON.',
+      };
+      // Frozen holdout: overfitting protection.
+      const holdout = require('./lib/frozen-holdout').getStatus();
+
+      // Compliance issues
+      const issues = [];
+      for (const [k, v] of Object.entries({ ...wave1, ...wave2 })) {
+        if (!v) issues.push({ env: k, severity: 'P0', issue: 'opt-out ativo — guard usa shadow data (viola P2)' });
+      }
+      if (!detectors.SHADOW_VS_REAL_DRIFT_AUTO) {
+        issues.push({ env: 'SHADOW_VS_REAL_DRIFT_AUTO', severity: 'P2', issue: 'detector early-warning desativado' });
+      }
+      if (!detectors.GATE_ATTRIBUTION_AUTO) {
+        issues.push({ env: 'GATE_ATTRIBUTION_AUTO', severity: 'P2', issue: 'gate counterfactual semanal desativado' });
+      }
+      if (detectors.ROI_CUSUM_DISABLED) {
+        issues.push({ env: 'ROI_CUSUM_DISABLED', severity: 'P2', issue: 'CUSUM drift detector desativado' });
+      }
+      if (holdout.default_days < 60) {
+        issues.push({ env: 'FROZEN_HOLDOUT_DAYS', severity: 'P1', issue: `valor=${holdout.default_days} (<60). RECOMENDADO setar 60-90 pra evitar overfitting auto-tunes` });
+      }
+
+      sendJson(res, {
+        ok: true,
+        principle: 'P2 — Shadow=causa, Real=sintoma (CLAUDE.md)',
+        wave1_real_only_guards: wave1,
+        wave2_real_only_guards: wave2,
+        detectors_p2_compliant: detectors,
+        readiness_learner: readinessLearner,
+        frozen_holdout: { default_days: holdout.default_days, recommended_min: 60 },
+        compliance_issues: issues,
+        compliance_summary: issues.length === 0
+          ? '✅ Todos guards P2 ativos com defaults. Detectores ON. Holdout configurado.'
+          : `⚠️ ${issues.length} issue(s) — revisar`,
+        ts: new Date().toISOString(),
+      });
+    } catch (e) {
+      sendJson(res, { ok: false, error: e.message }, 500);
+    }
+    return;
+  }
+
   // GET /admin/baseline-shadow-stats?days=90 — comparação contrafactual:
   // baseline trivial (favorito Pinnacle dejuiced + line-shop EV>=5%) vs stack atual.
   if (p === '/admin/baseline-shadow-stats' && (req.method === 'GET' || req.method === 'POST')) {
