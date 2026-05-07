@@ -10856,9 +10856,22 @@ setInterval(load, 60000);
         issues.push({ env: 'FROZEN_HOLDOUT_DAYS', severity: 'P1', issue: `valor=${holdout.default_days} (<60). RECOMENDADO setar 60-90 pra evitar overfitting auto-tunes` });
       }
 
+      // Versioning info — Railway expõe esses envs automaticamente.
+      // Permite confirmar qual commit está rodando sem ssh/dashboard:
+      //   curl /admin/p2-status | jq .version
+      const version = {
+        commit_sha: process.env.RAILWAY_GIT_COMMIT_SHA || 'local',
+        commit_short: (process.env.RAILWAY_GIT_COMMIT_SHA || '').slice(0, 7) || 'local',
+        branch: process.env.RAILWAY_GIT_BRANCH || 'unknown',
+        deploy_id: process.env.RAILWAY_DEPLOYMENT_ID || 'unknown',
+        commit_message: process.env.RAILWAY_GIT_COMMIT_MESSAGE || null,
+        deployed_at: process.env.RAILWAY_DEPLOYMENT_CREATED_AT || null,
+      };
+
       sendJson(res, {
         ok: true,
         principle: 'P2 — Shadow=causa, Real=sintoma (CLAUDE.md)',
+        version,
         wave1_real_only_guards: wave1,
         wave2_real_only_guards: wave2,
         detectors_p2_compliant: detectors,
