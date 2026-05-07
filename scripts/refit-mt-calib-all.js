@@ -98,10 +98,47 @@ function pav(bins) {
   return out;
 }
 
-function fitMarket(tips, marketName) {
-  const lst = tips.filter(t => t.market === marketName && (t.result === 'win' || t.result === 'loss')
+// 2026-05-07 (audit #26): dedup rebroadcasts antes do fit. /market-tips-recent?dedup=0
+// retorna shadow brutos; reboots/cycles loga MESMO match várias vezes em market_tips_shadow.
+// Calib treinada sobre dados duplicados → infla amostra fictícia → distorce empirical hit_rate
+// e overestima EV. Group by (sport, teams_norm, market, side, line) — legítimos distintos
+// (lines diferentes) ficam, rebroadcasts colapsam. Pick row com result settled prioritário,
+// depois p_model maior como tiebreaker.
+function _normTeam(s) {
+  return String(s || '').toLowerCase().replace(/[\s\-.''']/g, '');
+}
+function dedupRebroadcasts(tips) {
+  const groups = new Map();
+  for (const t of tips) {
+    const t1 = _normTeam(t.team1);
+    const t2 = _normTeam(t.team2);
+    const pair = t1 < t2 ? `${t1}|${t2}` : `${t2}|${t1}`;
+    const key = [
+      String(t.sport || '').toLowerCase(),
+      pair,
+      String(t.market || '').toLowerCase(),
+      String(t.side || '').toLowerCase(),
+      String(t.line ?? '').toLowerCase(),
+    ].join('::');
+    const existing = groups.get(key);
+    if (!existing) { groups.set(key, t); continue; }
+    const tSettled = t.result === 'win' || t.result === 'loss';
+    const eSettled = existing.result === 'win' || existing.result === 'loss';
+    if (tSettled && !eSettled) { groups.set(key, t); continue; }
+    if (eSettled && !tSettled) continue;
+    if ((Number(t.p_model) || 0) > (Number(existing.p_model) || 0)) groups.set(key, t);
+  }
+  return [...groups.values()];
+}
+
+function fitMarket(tipsRaw, marketName) {
+  const dedupTips = dedupRebroadcasts(tipsRaw);
+  if (process.env.DEBUG_REFIT_DEDUP) {
+    console.log(`[dedup ${marketName}] raw=${tipsRaw.length} → dedup=${dedupTips.length} (${tipsRaw.length - dedupTips.length} rebroadcasts collapsed)`);
+  }
+  const lst = dedupTips.filter(t => t.market === marketName && (t.result === 'win' || t.result === 'loss')
     && Number.isFinite(t.p_model) && t.p_model > 0 && t.p_model < 1);
-  if (lst.length < MIN_N) return { skipped: true, reason: `n=${lst.length} < ${MIN_N}` };
+  if (lst.length < MIN_N) return { skipped: true, reason: `n=${lst.length} < ${MIN_N} (after dedup)` };
 
   // Edges adaptativas: range observado dos p_model dividido em ~7-8 quantis
   const ps = lst.map(t => t.p_model).sort((a, b) => a - b);
@@ -190,6 +227,7 @@ function fitMarket(tips, marketName) {
       continue;
     }
 
+    const dedupSettled = dedupRebroadcasts(tips).filter(t => t.result === 'win' || t.result === 'loss');
     const out = {
       version: 1,
       sport,
@@ -198,7 +236,9 @@ function fitMarket(tips, marketName) {
       target: 'outcome (win/loss)',
       prior: { source: 'p_implied_close', vig: VIG, alpha: ALPHA },
       minBin: MIN_BIN,
-      nSamples: tips.filter(t => t.result === 'win' || t.result === 'loss').length,
+      nSamples: dedupSettled.length,
+      nSamplesRaw: tips.filter(t => t.result === 'win' || t.result === 'loss').length,
+      dedupedRebroadcasts: tips.filter(t => t.result === 'win' || t.result === 'loss').length - dedupSettled.length,
       markets: calibByMarket,
     };
     if (DRY) {

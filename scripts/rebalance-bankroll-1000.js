@@ -21,6 +21,23 @@
 const fs = require('fs');
 const path = require('path');
 const Database = require('better-sqlite3');
+let getSportUnitValue;
+try { ({ getSportUnitValue } = require('../lib/sport-unit')); }
+catch (_) {
+  // Fallback inline (alinhado com lib/sport-unit.js DEFAULT_TIERS)
+  getSportUnitValue = function(current, initial = 100) {
+    if (!current || current <= 0) return 0.50;
+    const r = current / (initial || 100);
+    if (r >= 3.0) return 3.0;
+    if (r >= 2.0) return 2.0;
+    if (r >= 1.5) return 1.5;
+    if (r >= 1.2) return 1.2;
+    if (r >= 0.8) return 1.0;
+    if (r >= 0.6) return 0.8;
+    if (r >= 0.4) return 0.6;
+    return 0.5;
+  };
+}
 
 const DRY_RUN = process.argv.includes('--dry-run');
 const CONFIRM = process.argv.includes('--confirm');
@@ -93,24 +110,54 @@ for (const t of contaminants) {
 }
 
 // ── 3. Post-reset profit per sport (from currently-active tips) ──
+// 2026-05-07 (audit #24): inclui MT real (sem filtro market_type — antes excluía
+// tennis/football/basket/cs2 promovidos) e usa profit_reais quando disponível
+// (já em R$, com tier per-sport correto). Fallback hierárquico:
+//   1. profit_reais stored (settle pipeline já resolveu unit_value)
+//   2. stake_reais * (odds-1) win / -stake_reais loss / 0 push|void
+//   3. stake_units * unit_value (per-sport tier) * (odds-1)
 const postResetRows = db.prepare(`
-  SELECT sport, result, stake, odds, sent_at, id
+  SELECT sport, result, stake, stake_reais, profit_reais, odds, sent_at, id, market_type
   FROM tips
   WHERE sent_at >= ?
-    AND result IN ('win','loss')
+    AND result IN ('win','loss','push','void')
     AND (archived IS NULL OR archived = 0)
     AND COALESCE(is_shadow, 0) = 0
-    AND (market_type IS NULL OR market_type = 'ML')
 `).all(cutoff);
 
+// Pra fallback unit_value: precisa initial_banca per-sport pra calcular tier.
+const sportInitialMap = new Map();
+const bkRows = db.prepare('SELECT sport, initial_banca FROM bankroll').all();
+for (const b of bkRows) sportInitialMap.set(b.sport, Number(b.initial_banca) || 100);
+
 const profitBySport = new Map();
+let usedStored = 0, usedStakeR = 0, usedFallback = 0;
 for (const r of postResetRows) {
   const s = r.sport === 'esports' ? 'lol' : r.sport; // legado
-  const stakeNum = parseFloat(String(r.stake).replace(/[^\d.]/g, '')) || 0;
-  const oddsNum = parseFloat(r.odds) || 0;
-  const p = r.result === 'win' ? stakeNum * (oddsNum - 1) : -stakeNum;
+  let p = 0;
+  if (r.profit_reais !== null && r.profit_reais !== undefined) {
+    p = Number(r.profit_reais) || 0;
+    usedStored++;
+  } else if (r.result === 'push' || r.result === 'void') {
+    p = 0;
+  } else {
+    const oddsNum = parseFloat(r.odds) || 0;
+    if (Number.isFinite(Number(r.stake_reais)) && Number(r.stake_reais) > 0) {
+      const stakeR = Number(r.stake_reais);
+      p = r.result === 'win' ? stakeR * (oddsNum - 1) : -stakeR;
+      usedStakeR++;
+    } else {
+      const stakeU = parseFloat(String(r.stake || '0').replace(/[^\d.]/g, '')) || 0;
+      const init = sportInitialMap.get(s) || PER_SPORT_INITIAL;
+      // runningBanca aproximado: usa initial como tier base (rebalance assume reset → tier=1.0)
+      const uv = getSportUnitValue(init, init);
+      p = r.result === 'win' ? stakeU * (oddsNum - 1) * uv : -stakeU * uv;
+      usedFallback++;
+    }
+  }
   profitBySport.set(s, (profitBySport.get(s) || 0) + p);
 }
+console.log(`[profit calc] ${postResetRows.length} tips: ${usedStored} stored profit_reais, ${usedStakeR} stake_reais fallback, ${usedFallback} unit-tier fallback`);
 
 console.log('');
 console.log('── POST-RESET REAL P&L (só tips sent_at >= cutoff) ──');

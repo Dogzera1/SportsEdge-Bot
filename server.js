@@ -15,7 +15,7 @@ if (!/^(0|false|no)$/i.test(String(process.env.HTTP_KEEP_ALIVE || ''))) {
 const initDatabase = require('./lib/database');
 const { SPORTS, getSportById } = require('./lib/sports');
 const { ML_MARKETS, ML_MARKETS_LIST, isMlMarket } = require('./lib/constants');
-const { log, sendJson, safeParse, norm, httpGet, cachedHttpGet, aiPost, oddsApiAllowed, oddsApiPeek, oddsApiQuotaStatus, getMetricsLite, calcKellyWithP, getLogBuffer, addLogClient, removeLogClient, ingestExternalLog, getPollHeartbeats, getCronHeartbeats } = require('./lib/utils');
+const { log, sendJson, safeParse, norm, httpGet, cachedHttpGet, aiPost, oddsApiAllowed, oddsApiPeek, oddsApiQuotaStatus, getMetricsLite, calcKellyWithP, getLogBuffer, addLogClient, removeLogClient, ingestExternalLog, getPollHeartbeats, getCronHeartbeats, markCronHeartbeat } = require('./lib/utils');
 const dashboard = require('./lib/dashboard');
 const footballData  = require('./lib/football-data');
 const apiFootball   = require('./lib/api-football');
@@ -664,9 +664,52 @@ try {
 
 // ── Odds Cache ──
 const oddsCache = {};
+// 2026-05-07 (audit P2): track write timestamp p/ TTL eviction. oddsCache (object)
+// não tem `ts` por entry e cresce monotonicamente. Sem cap → memory leak slow burn.
+// Parallel Map + cron sweep dropa entries > ODDS_CACHE_TTL_MS (default 24h).
+const _oddsCacheWriteTs = new Map(); // key → ts
+const ODDS_CACHE_TTL_MS = Math.max(60 * 60 * 1000, parseInt(process.env.ODDS_CACHE_TTL_MS || `${24 * 60 * 60 * 1000}`, 10) || 24 * 60 * 60 * 1000);
+const ODDS_CACHE_MAX_ENTRIES = Math.max(500, parseInt(process.env.ODDS_CACHE_MAX_ENTRIES || '5000', 10) || 5000);
+function _markOddsCacheWrite(key) { _oddsCacheWriteTs.set(key, Date.now()); }
+function _sweepOddsCache() {
+  const now = Date.now();
+  let removedTtl = 0, removedCap = 0;
+  for (const [k, ts] of _oddsCacheWriteTs.entries()) {
+    if ((now - ts) > ODDS_CACHE_TTL_MS) {
+      delete oddsCache[k];
+      _oddsCacheWriteTs.delete(k);
+      removedTtl++;
+    }
+  }
+  // Cap secundário: se ainda passou do limite (caso TTL 24h seja generoso demais),
+  // remove os N mais antigos.
+  const overflow = _oddsCacheWriteTs.size - ODDS_CACHE_MAX_ENTRIES;
+  if (overflow > 0) {
+    const sorted = [..._oddsCacheWriteTs.entries()].sort((a, b) => a[1] - b[1]);
+    for (let i = 0; i < overflow; i++) {
+      const [k] = sorted[i];
+      delete oddsCache[k];
+      _oddsCacheWriteTs.delete(k);
+      removedCap++;
+    }
+  }
+  return { removedTtl, removedCap, current: _oddsCacheWriteTs.size };
+}
 // Cache específico: ML por mapa (quando disponível via OddsPapi marketId 173+)
 // key: `map_${fixtureId}_${mapNumber}` -> { t1, t2, bookmaker, fixtureId, marketId, mapNumber, ts }
 const mapOddsCache = new Map();
+const MAP_ODDS_CACHE_TTL_MS = Math.max(10 * 1000, parseInt(process.env.MAP_ODDS_CACHE_TTL_MS || '60000', 10) || 60000);
+function _sweepMapOddsCache() {
+  const cutoff = Date.now() - MAP_ODDS_CACHE_TTL_MS;
+  let removed = 0;
+  for (const [k, v] of mapOddsCache.entries()) {
+    if (!v || (Number(v.ts) || 0) < cutoff) {
+      mapOddsCache.delete(k);
+      removed++;
+    }
+  }
+  return removed;
+}
 let lastOddsUpdate = 0;
 const ODDS_TTL = 4 * 60 * 60 * 1000; // 4h — conserves The Odds API monthly quota (500 req free tier)
 
@@ -1305,6 +1348,36 @@ let _footballMatchesInFlight = null;
 let esportsBackoffUntil = 0;
 const _serverStartTs = Date.now();
 
+// 2026-05-07 (audit #59): wrapper genérico pra cron com heartbeat + re-entry guard.
+// Antes 9 setIntervals em server.js rodavam sem markCronHeartbeat — /admin/cron-status
+// não mostrava nenhum, e se travassem (DB lock, fetch stuck, OOM partial) ninguém
+// notava até o próximo deploy. Wrappar todos garante visibilidade + cron loop não morre
+// em exception (loops setInterval que dão throw silenciosamente param de chamar).
+//
+// Re-entry guard: cron pesado (>intervalo) não duplica execução paralela; pula com
+// heartbeat skipped_overlap. Espelha bot.js:_wrapCron pattern.
+const _serverCronRunning = new Set();
+function _wrapServerCron(name, fn) {
+  return async () => {
+    if (_serverCronRunning.has(name)) {
+      try { markCronHeartbeat(name, { result: 'skipped_overlap' }); } catch (_) {}
+      try { require('./lib/metrics').incr('cron_overlap_skip', { name }); } catch (_) {}
+      return;
+    }
+    _serverCronRunning.add(name);
+    const t0 = Date.now();
+    try {
+      await Promise.resolve(fn());
+      try { markCronHeartbeat(name, { result: 'ok', durationMs: Date.now() - t0 }); } catch (_) {}
+    } catch (e) {
+      try { markCronHeartbeat(name, { result: 'error', error: String(e?.message || e), durationMs: Date.now() - t0 }); } catch (_) {}
+      log('ERROR', 'CRON', `${name}: ${e?.message || e}`);
+    } finally {
+      _serverCronRunning.delete(name);
+    }
+  };
+}
+
 // Cache /health + /alerts (10s default). Railway healthcheck timeout (~30s) batia
 // quando DB estava em integrity_check/settle batch — `pendingBySport` lockava e
 // derrubava o container. Cache curto serve stale enquanto query pesada ainda corre.
@@ -1430,6 +1503,18 @@ async function oddsApiIoGet(oddsApiIoUrl, ttlMsDefault) {
 // Cache local de /events (Odds-API.io) — reduzir requisições mensais (plano free)
 let _oddsApiIoEventsCache = new Map(); // sportSlug -> { events, ts }
 const ODDSAPIO_EVENTS_TTL = 10 * 60 * 1000;
+// 2026-05-07 (audit P2): sweep periódico (sem cap dedicado — pool pequeno: ~6-12 sportSlugs).
+function _sweepOddsApiIoEventsCache() {
+  const cutoff = Date.now() - (ODDSAPIO_EVENTS_TTL * 3); // 3x TTL = 30min stale
+  let removed = 0;
+  for (const [k, v] of _oddsApiIoEventsCache.entries()) {
+    if (!v || (Number(v.ts) || 0) < cutoff) {
+      _oddsApiIoEventsCache.delete(k);
+      removed++;
+    }
+  }
+  return removed;
+}
 
 async function fetchOddsApiIoEvents(sportSlug) {
   const slug = String(sportSlug || '').trim().toLowerCase();
@@ -1680,6 +1765,7 @@ function ingestEsportsFixtures(allFixtures) {
       fixtureId: f.fixtureId || null,
       tournamentId: f.tournamentId || null,
     };
+    _markOddsCacheWrite(key);
     log('DEBUG', 'ODDS', `Ingest: slug="${norm(combinedSlug)}" t1="${p1Name}" t2="${p2Name}" fid=${f.fixtureId||'?'}`);
     cachedCount++;
   }
@@ -1770,6 +1856,7 @@ async function fetchLoLOddsFromPinnacle() {
         isLive,           // flag explícito para roteamento live vs upcoming
         source: 'pinnacle',
       };
+      _markOddsCacheWrite(key);
       cached++;
     }
     lastPinnacleLoLUpdate = Date.now();
@@ -28844,19 +28931,17 @@ server.listen(PORT, '0.0.0.0', () => {
   const _memHeapWarnMb = parseInt(process.env.BOOT_MEM_HEAP_WARN_MB || '256', 10);
   const _memRssWarnMb = parseInt(process.env.BOOT_MEM_RSS_WARN_MB || '400', 10);
   let _lastMemWarnAt = 0;
-  setInterval(() => {
-    try {
-      const m = process.memoryUsage();
-      const heapMb = Math.round(m.heapUsed / 1048576);
-      const rssMb = Math.round(m.rss / 1048576);
-      if ((heapMb >= _memHeapWarnMb || rssMb >= _memRssWarnMb) && Date.now() - _lastMemWarnAt > 5 * 60 * 1000) {
-        log('WARN', 'MEM-GUARD', `heap=${heapMb}MB (warn=${_memHeapWarnMb}) rss=${rssMb}MB (warn=${_memRssWarnMb}) — proximo OOM se subir mais`);
-        _lastMemWarnAt = Date.now();
-      }
-      try { require('./lib/metrics').gauge('process_heap_mb', heapMb); } catch (_) {}
-      try { require('./lib/metrics').gauge('process_rss_mb', rssMb); } catch (_) {}
-    } catch (_) {}
-  }, 60 * 1000).unref?.();
+  setInterval(_wrapServerCron('mem_guard', () => {
+    const m = process.memoryUsage();
+    const heapMb = Math.round(m.heapUsed / 1048576);
+    const rssMb = Math.round(m.rss / 1048576);
+    if ((heapMb >= _memHeapWarnMb || rssMb >= _memRssWarnMb) && Date.now() - _lastMemWarnAt > 5 * 60 * 1000) {
+      log('WARN', 'MEM-GUARD', `heap=${heapMb}MB (warn=${_memHeapWarnMb}) rss=${rssMb}MB (warn=${_memRssWarnMb}) — proximo OOM se subir mais`);
+      _lastMemWarnAt = Date.now();
+    }
+    try { require('./lib/metrics').gauge('process_heap_mb', heapMb); } catch (_) {}
+    try { require('./lib/metrics').gauge('process_rss_mb', rssMb); } catch (_) {}
+  }), 60 * 1000).unref?.();
   if (SXBET_ENABLED) log('INFO', 'ODDS', `SX.Bet ativo: base=${SXBET_BASE_URL}`);
   if (GRID_API_KEY) log('INFO', 'GRID', 'GRID_API_KEY configurada — /grid-enrich ativo (LoL)');
 
@@ -28879,23 +28964,19 @@ server.listen(PORT, '0.0.0.0', () => {
     await fetchLoLOddsFromPinnacle();
   })().catch(e => log('ERROR', 'ODDS', e.message));
   const refreshMin = Math.max(15, parseInt(process.env.ODDSPAPI_REFRESH_MIN || '60', 10) || 60);
-  setInterval(() => {
-    fetchEsportsOdds();
-  }, refreshMin * 60 * 1000); // Default 60 min (OddsPapi free tier: 250 req total)
+  setInterval(_wrapServerCron('oddspapi_refresh', () => fetchEsportsOdds()), refreshMin * 60 * 1000); // Default 60 min (OddsPapi free tier: 250 req total)
 
   // Pinnacle LoL refresh — independente do OddsPapi (sem quota, só rate limit soft)
   // Dois intervalos: refresh completo (pre-match, default 10min) + refresh rápido de live (default 2min)
   if (process.env.PINNACLE_LOL === 'true') {
     const pinRefreshMin = Math.max(5, parseInt(process.env.PINNACLE_LOL_REFRESH_MIN || '10', 10) || 10);
     const pinLiveMin = Math.max(1, parseInt(process.env.PINNACLE_LOL_LIVE_REFRESH_MIN || '2', 10) || 2);
-    setInterval(() => {
-      fetchLoLOddsFromPinnacle();
-    }, pinRefreshMin * 60 * 1000);
+    setInterval(_wrapServerCron('pinnacle_lol_refresh', () => fetchLoLOddsFromPinnacle()), pinRefreshMin * 60 * 1000);
     // Refresh rápido apenas quando há matches live cacheados (odds live mudam rápido)
-    setInterval(() => {
+    setInterval(_wrapServerCron('pinnacle_lol_live_refresh', () => {
       const hasLive = Object.values(oddsCache).some(v => v?.source === 'pinnacle' && v?.isLive);
-      if (hasLive) fetchLoLOddsFromPinnacle();
-    }, pinLiveMin * 60 * 1000);
+      if (hasLive) return fetchLoLOddsFromPinnacle();
+    }), pinLiveMin * 60 * 1000);
     log('INFO', 'ODDS', `Pinnacle LoL: refresh full=${pinRefreshMin}min, live=${pinLiveMin}min (quando há live)`);
   }
 
@@ -28903,25 +28984,23 @@ server.listen(PORT, '0.0.0.0', () => {
   // Ativa só com ODDSPAPI_LIVE_POLL=1 para não estourar quota.
   if (process.env.ODDSPAPI_LIVE_POLL === '1') {
     const pollMs = Math.max(1500, parseInt(process.env.ODDSPAPI_LIVE_POLL_MS || '6000', 10) || 6000);
-    setInterval(async () => {
-      try {
-        // percorre fixtures recentes no oddsCache; tenta manter maps 1..5 aquecidos
-        const fids = [...new Set(Object.values(oddsCache).map(v => v?.fixtureId).filter(Boolean).map(String))];
-        const maxFixtures = Math.max(1, parseInt(process.env.ODDSPAPI_LIVE_MAX_FIXTURES || '6', 10) || 6);
-        const maxMaps = Math.max(1, parseInt(process.env.ODDSPAPI_LIVE_MAX_MAPS || '3', 10) || 3);
-        const slice = fids.slice(0, maxFixtures);
-        for (const fid of slice) {
-          for (let m = 1; m <= maxMaps; m++) {
-            await fetchMapOddsByFixtureId(fid, m).catch(() => null);
-          }
+    setInterval(_wrapServerCron('oddspapi_live_poll', async () => {
+      // percorre fixtures recentes no oddsCache; tenta manter maps 1..5 aquecidos
+      const fids = [...new Set(Object.values(oddsCache).map(v => v?.fixtureId).filter(Boolean).map(String))];
+      const maxFixtures = Math.max(1, parseInt(process.env.ODDSPAPI_LIVE_MAX_FIXTURES || '6', 10) || 6);
+      const maxMaps = Math.max(1, parseInt(process.env.ODDSPAPI_LIVE_MAX_MAPS || '3', 10) || 3);
+      const slice = fids.slice(0, maxFixtures);
+      for (const fid of slice) {
+        for (let m = 1; m <= maxMaps; m++) {
+          await fetchMapOddsByFixtureId(fid, m).catch(() => null);
         }
-      } catch(_) {}
-    }, pollMs);
+      }
+    }), pollMs);
     log('INFO', 'ODDS', `Live polling ativo: ${pollMs}ms`);
   }
 
   // Stale odds check: 1x/h, força re-fetch se odds > 6h com partidas próximas
-  setInterval(() => checkStaleOddsForUpcoming().catch(() => {}), 60 * 60 * 1000);
+  setInterval(_wrapServerCron('stale_odds_check', () => checkStaleOddsForUpcoming()), 60 * 60 * 1000);
 
   // Sync inicial de stats pro + job recorrente a cada 12h
   if (PANDASCORE_TOKEN) {
@@ -28949,7 +29028,7 @@ server.listen(PORT, '0.0.0.0', () => {
         await syncProStats({ forceResync });
       } catch(e) { log('ERROR', 'SYNC', e.message); }
     }, 5000);
-    setInterval(() => syncProStats().catch(e => log('ERROR', 'SYNC', e.message)), 12 * 60 * 60 * 1000);
+    setInterval(_wrapServerCron('sync_pro_stats', () => syncProStats()), 12 * 60 * 60 * 1000);
   }
 
   // gol.gg Role Impact: sync no boot (30s) + diário
@@ -28960,31 +29039,54 @@ server.listen(PORT, '0.0.0.0', () => {
         : log('WARN', 'GOLGG', `Sync falhou: ${r.error}`))
       .catch(e => log('ERROR', 'GOLGG', e.message));
   }, 30 * 1000);
-  setInterval(() => {
-    syncGolggRoleImpact()
-      .then(r => r.ok
-        ? log('INFO', 'GOLGG', `Role impact sync diário: ${r.written} linha(s)`)
-        : log('WARN', 'GOLGG', `Sync diário falhou: ${r.error}`))
-      .catch(e => log('ERROR', 'GOLGG', e.message));
-  }, 24 * 60 * 60 * 1000);
+  setInterval(_wrapServerCron('sync_golgg_role', async () => {
+    const r = await syncGolggRoleImpact();
+    if (r.ok) log('INFO', 'GOLGG', `Role impact sync diário: ${r.written} linha(s)`);
+    else log('WARN', 'GOLGG', `Sync diário falhou: ${r.error}`);
+  }), 24 * 60 * 60 * 1000);
 
   // Cleanup de DB
-  setInterval(() => {
-    try { stmts.cleanOldOdds.run(); } catch(_) {}
-  }, 6 * 60 * 60 * 1000);
+  setInterval(_wrapServerCron('clean_old_odds', () => {
+    try { stmts.cleanOldOdds.run(); } catch (e) { /* prepared stmt pode falhar; cron heartbeat captura */ throw e; }
+  }), 6 * 60 * 60 * 1000);
+
+  // 2026-05-07 (audit P2): cache eviction sweep — TTL/cap em mapOddsCache,
+  // oddsCache, _oddsApiIoEventsCache. Antes nenhum cache evictava → memory
+  // leak slow burn (Railway 512MB cap). 10min cycle = baixo overhead.
+  // Inclui também _adminLoginFails (Map cresce quando atacante rotaciona IPs).
+  setInterval(_wrapServerCron('cache_sweep', () => {
+    const o = _sweepOddsCache();
+    const m = _sweepMapOddsCache();
+    const e = _sweepOddsApiIoEventsCache();
+    // _adminLoginFails: mesma janela de reset (15min). Antes o reset só
+    // acontecia quando IP fazia novo attempt; IP one-shot ficava forever.
+    let loginFailsRemoved = 0;
+    try {
+      if (global._adminLoginFails instanceof Map) {
+        const cutoff = Date.now() - 15 * 60 * 1000;
+        for (const [ip, v] of global._adminLoginFails.entries()) {
+          if (!v || (Number(v.since) || 0) < cutoff) {
+            global._adminLoginFails.delete(ip);
+            loginFailsRemoved++;
+          }
+        }
+      }
+    } catch (_) {}
+    if (o.removedTtl + o.removedCap + m + e + loginFailsRemoved > 0) {
+      log('INFO', 'CACHE-SWEEP', `oddsCache: ttl=${o.removedTtl} cap=${o.removedCap} (cur=${o.current}); mapOddsCache: ${m}; eventsCache: ${e}; adminLoginFails: ${loginFailsRemoved}`);
+    }
+  }), 10 * 60 * 1000);
 
   // Weekly ML weight recalculation
   const { recalcWeights, settleFactorLogs } = require('./lib/ml-weights');
   // Settle factor logs diariamente (depende do settlement das tips).
-  setInterval(() => {
-    settleFactorLogs(stmts, log);
-  }, 24 * 60 * 60 * 1000); // daily
+  setInterval(_wrapServerCron('settle_factor_logs_daily', () => settleFactorLogs(stmts, log)), 24 * 60 * 60 * 1000); // daily
 
   // Recalcula pesos semanalmente.
-  setInterval(() => {
+  setInterval(_wrapServerCron('ml_weights_weekly', () => {
     settleFactorLogs(stmts, log);
     recalcWeights(stmts, log);
-  }, 7 * 24 * 60 * 60 * 1000); // weekly
+  }), 7 * 24 * 60 * 60 * 1000); // weekly
 
   // Boot: settle rápido + recalc após 5 min
   setTimeout(() => { settleFactorLogs(stmts, log); recalcWeights(stmts, log); }, 5 * 60 * 1000);
@@ -29001,14 +29103,12 @@ server.listen(PORT, '0.0.0.0', () => {
       }
     } catch (e) { log('ERROR', 'SETTLE-SWEEP', `boot: ${e.message}`); }
   }, 2 * 60 * 1000);
-  setInterval(() => {
-    try {
-      const r = runSettleSweep({ days: sweepDays });
-      if (r.total_settled > 0) {
-        log('INFO', 'SETTLE-SWEEP', `cycle: swept=${r.total_swept} settled=${r.total_settled} skipped_map=${r.total_skipped_map} not_found=${r.total_not_found}`);
-      }
-    } catch (e) { log('ERROR', 'SETTLE-SWEEP', `cycle: ${e.message}`); }
-  }, sweepMin * 60 * 1000);
+  setInterval(_wrapServerCron('settle_sweep_cycle', () => {
+    const r = runSettleSweep({ days: sweepDays });
+    if (r.total_settled > 0) {
+      log('INFO', 'SETTLE-SWEEP', `cycle: swept=${r.total_swept} settled=${r.total_settled} skipped_map=${r.total_skipped_map} not_found=${r.total_not_found}`);
+    }
+  }), sweepMin * 60 * 1000);
   log('INFO', 'SETTLE-SWEEP', `Cron ativo: a cada ${sweepMin}min, janela ${sweepDays}d`);
 
   // Auto-archive non-ML tips órfãs em `tips` table — settle-guard rejeita
@@ -29049,7 +29149,7 @@ server.listen(PORT, '0.0.0.0', () => {
       } catch (e) { log('ERROR', 'NON-ML-AUTOARCHIVE', e.message); }
     };
     setTimeout(archiveOrphanNonML, 3 * 60 * 1000);
-    setInterval(archiveOrphanNonML, 60 * 60 * 1000);
+    setInterval(_wrapServerCron('non_ml_autoarchive', archiveOrphanNonML), 60 * 60 * 1000);
     log('INFO', 'NON-ML-AUTOARCHIVE', 'Cron ativo: hourly, threshold 36h non-ML / 48h kills_map');
   }
 });
