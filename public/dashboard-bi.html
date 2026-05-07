@@ -1104,10 +1104,13 @@ function escapeHtml(s) {
 // ─────────────────────────────────────────────────────────────────────────
 function initRangeSeg() {
   document.querySelectorAll('#rangeSeg button').forEach(btn => {
+    // 2026-05-07: aplica state.days restaurado (visual sync no boot)
+    btn.classList.toggle('active', parseInt(btn.dataset.d, 10) === state.days);
     btn.addEventListener('click', () => {
       document.querySelectorAll('#rangeSeg button').forEach(b => b.classList.remove('active'));
       btn.classList.add('active');
       state.days = parseInt(btn.dataset.d, 10);
+      _persistFilters();
       loadAll();
     });
   });
@@ -1122,10 +1125,13 @@ function initSports(sportList) {
     chip.className = 'sport-chip';
     chip.textContent = s;
     chip.dataset.sport = s;
+    // 2026-05-07: aplica state.sports restaurado
+    if (state.sports.has(s)) chip.classList.add('on');
     chip.addEventListener('click', () => {
       if (state.sports.has(s)) state.sports.delete(s);
       else state.sports.add(s);
       chip.classList.toggle('on', state.sports.has(s));
+      _persistFilters();
       loadAll();
     });
     wrap.appendChild(chip);
@@ -1285,7 +1291,39 @@ function applySection(section) {
     try { state.charts[k].destroy(); } catch (_) {}
     delete state.charts[k];
   }
+  // 2026-05-07 (audit P2): URL hash sync — back button + sharable URLs.
+  // Antes navegação por section perdia contexto no reload e back button quebrado.
+  try {
+    const newHash = '#' + section;
+    if (window.location.hash !== newHash) {
+      // replaceState evita poluir history (push só em interação user)
+      history.replaceState(null, '', newHash);
+    }
+  } catch (_) {}
+  _persistFilters();
   loadAll();
+}
+
+// 2026-05-07 (audit P2): localStorage persist — range/sports/section.
+// Antes refresh resetava state.days=30 + state.sports vazio → user perdia contexto.
+const _LS_KEY = 'dashboard-bi-filters-v1';
+function _persistFilters() {
+  try {
+    localStorage.setItem(_LS_KEY, JSON.stringify({
+      days: state.days,
+      sports: [...state.sports],
+      section: state.section,
+    }));
+  } catch (_) { /* quota exceeded / private mode — silent OK */ }
+}
+function _restoreFilters() {
+  try {
+    const raw = localStorage.getItem(_LS_KEY);
+    if (!raw) return null;
+    const j = JSON.parse(raw);
+    if (j && typeof j === 'object') return j;
+  } catch (_) {}
+  return null;
 }
 
 function initNav() {
@@ -1734,22 +1772,37 @@ async function loadTipsEmRisco() {
   // /tips-em-risco exige sport. Loop nas sports principais.
   const sports = state.sports.size ? [...state.sports] : ['lol', 'tennis', 'football', 'cs', 'dota2'];
   const all = [];
+  // 2026-05-07 (audit P1): track success/failure pra distinguir "nada em risco"
+  // de "todos endpoints falharam". Antes UI mostrava "Nenhum tip em risco ✓"
+  // quando backend estava 100% down — falso conforto.
+  let okCount = 0, failCount = 0;
   await Promise.all(sports.map(sp =>
     fetchJson(`/tips-em-risco?sport=${sp}&days=3`)
       .then(r => {
+        okCount++;
         if (Array.isArray(r?.alerts)) all.push(...r.alerts.map(a => ({ ...a, sport: sp })));
       })
-      .catch(() => {})
+      .catch(() => { failCount++; })
   ));
-  state.data.tipsEmRisco = { count: all.length, items: all };
+  state.data.tipsEmRisco = { count: all.length, items: all, okCount, failCount };
   // Atualiza KPI live
   if (state.section === 'risk') loadRiskKpis();
 
   const tbody = document.getElementById('tblRiskBody');
   const meta = document.getElementById('riskMeta');
-  if (meta) meta.textContent = `${all.length} alerta${all.length === 1 ? '' : 's'}`;
+  // Inclui status de coleta no meta — alerta visível se houve fetch fail
+  const collectStatus = failCount > 0
+    ? ` · ⚠️ ${failCount}/${sports.length} sport(s) falharam ao consultar`
+    : '';
+  if (meta) meta.textContent = `${all.length} alerta${all.length === 1 ? '' : 's'}${collectStatus}`;
   if (!all.length) {
-    tbody.innerHTML = `<tr><td colspan="6" class="muted" style="padding:24px;text-align:center">Nenhum tip em risco no momento ✓</td></tr>`;
+    // 2026-05-07: distingue "tudo bem" (okCount > 0, nenhum alerta) de
+    // "tudo falhou" (failCount === sports.length).
+    if (failCount === sports.length && sports.length > 0) {
+      tbody.innerHTML = `<tr><td colspan="6" class="muted" style="padding:24px;text-align:center;color:var(--bad,#ef4444)">⚠️ Todos os ${sports.length} endpoint(s) /tips-em-risco falharam — verificar backend</td></tr>`;
+    } else {
+      tbody.innerHTML = `<tr><td colspan="6" class="muted" style="padding:24px;text-align:center">Nenhum tip em risco no momento ✓</td></tr>`;
+    }
     return;
   }
   tbody.innerHTML = all.slice(0, 30).map(a => {
@@ -1798,14 +1851,39 @@ async function loadPendingBySport() {
 // Boot
 // ─────────────────────────────────────────────────────────────────────────
 function boot() {
+  // 2026-05-07 (audit P2): restore filter state — order: hash > localStorage > defaults.
+  // Hash tem prioridade pra suportar shared URLs apontando seção específica.
+  const restored = _restoreFilters();
+  if (restored) {
+    if (Number.isFinite(restored.days) && restored.days > 0) state.days = restored.days;
+    if (Array.isArray(restored.sports)) {
+      state.sports = new Set(restored.sports.filter(s => KNOWN_SPORTS.includes(s)));
+    }
+    if (typeof restored.section === 'string') state.section = restored.section;
+  }
+  // URL hash override (shared link)
+  const hashSection = String(window.location.hash || '').replace(/^#/, '').trim();
+  const validSections = ['overview', 'performance', 'markets', 'risk', 'allocation'];
+  if (hashSection && validSections.includes(hashSection)) {
+    state.section = hashSection;
+  }
+
   initRangeSeg();
   initSports(KNOWN_SPORTS);
   initRefresh();
   initNav();
-  // Aplica section inicial (esconde panels que não são overview).
-  applySection('overview');
+  // Aplica section inicial — usa state.section restaurado (com fallback overview)
+  applySection(state.section || 'overview');
   // Auto-refresh 60s — under the same exponential ease the charts use.
   setInterval(() => loadAll(), 60_000);
+
+  // 2026-05-07 (audit P2): popstate handler — back/forward button atualiza section.
+  window.addEventListener('popstate', () => {
+    const sec = String(window.location.hash || '').replace(/^#/, '').trim();
+    if (sec && validSections.includes(sec) && sec !== state.section) {
+      applySection(sec);
+    }
+  });
 }
 
 document.addEventListener('DOMContentLoaded', boot);
