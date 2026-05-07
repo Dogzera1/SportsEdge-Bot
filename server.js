@@ -16631,6 +16631,14 @@ setInterval(load, 60000);
     const minN = Math.max(3, Math.min(100, parseInt(parsed.query.minN || '5', 10) || 5));
 
     // Tier classifier — adapta-se ao sport
+    //
+    // 2026-05-07 audit fix: para esports (lol/cs/dota/val), usa lib/league-tier
+    // _esportsTier (cobre IEM/ESL Pro League/BLAST/Major/PGL/TI/etc) em vez de
+    // regex inline LoL-only. Isso alinha com classifier usado por env de
+    // momentum (CS_MOMENTUM_TIER1, etc) e evita "tudo em other" pra CS/Dota
+    // que tinham regex incompleto. Tennis/football mantêm classifier inline
+    // pq usam taxonomia semântica diferente (main/challenger/itf não-numeric).
+    const { getLeagueTier } = require('./lib/league-tier');
     const _classifyTier = (league) => {
       const lg = String(league || '').trim();
       if (!lg) return null;
@@ -16642,9 +16650,8 @@ setInterval(load, 60000);
         return null;
       }
       if (sport === 'lol' || sport === 'cs2' || sport === 'cs' || sport === 'dota2' || sport === 'valorant') {
-        if (/^(LCK|LPL|LCS|LEC|Worlds|MSI|Esports World Cup|VCT|TI|EWC|First Stand)/i.test(lg)) return 'tier1';
-        if (/Challengers|Academy|NACL|LFL|CBLOL|Prime League|TCL|LCP|Ultraliga|Arabian|Hitpoint|Ebl|Lit|Lrn|Lrs|Les|Liga Portuguesa|GLL|Hellenic/i.test(lg)) return 'tier2';
-        return 'other';
+        const t = getLeagueTier(sport, lg);
+        return t === 1 ? 'tier1' : t === 2 ? 'tier2' : 'other';
       }
       if (sport === 'football') {
         if (/Premier League|La Liga|Bundesliga|Serie A|Ligue 1|Champions League|Europa League/i.test(lg)) return 'top5_uefa';
