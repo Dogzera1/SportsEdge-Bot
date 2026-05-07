@@ -141,6 +141,26 @@ function dedupRebroadcasts(tips) {
   return [...groups.values()];
 }
 
+// 2026-05-07 (causa-fix tennis leak): classifica tip.league em tier pra fit
+// per-tier separado. Audit mostrou ATP Challenger entrega 7-17pp menos hit do
+// que ATP main no mesmo bucket p_model — calib monolítica dilui sinal.
+//
+// Tiers retornados:
+//   - 'main'      → ATP/WTA main tour (250+, Masters, Slams)
+//   - 'challenger'→ ATP Challenger circuit
+//   - 'wta125k'   → WTA 125K (≈ tier intermediário)
+//   - 'itf'       → ITF Futures/W15-W100 (lower minor)
+//   - null        → unclassified (raro; fallback usa 'default' bins)
+function _classifyTier(tip) {
+  const lg = String(tip.league || '').trim();
+  if (!lg) return null;
+  if (/ATP Challenger|WTA Challenger/i.test(lg)) return 'challenger';
+  if (/WTA 125K/i.test(lg)) return 'wta125k';
+  if (/^ITF\s|ITF Futures|ITF (Men|Women)/i.test(lg)) return 'itf';
+  if (/^ATP\s|^WTA\s/i.test(lg)) return 'main';
+  return null;
+}
+
 // Auto-detecta markets fitáveis a partir do sample (mercados com >=12 settled, pós-dedup)
 function detectMarkets(tips) {
   const dedup = dedupRebroadcasts(tips);
@@ -197,18 +217,9 @@ function brier(samples) {
   return samples.reduce((a, s) => a + (s.p - s.y) ** 2, 0) / samples.length;
 }
 
-function fitMarket(tipsRaw, marketName) {
-  const dedupTips = dedupRebroadcasts(tipsRaw);
-  const collapsed = tipsRaw.length - dedupTips.length;
-  if (collapsed > 0 && process.env.DEBUG_REFIT_DEDUP) {
-    console.log(`[dedup ${marketName}] raw=${tipsRaw.length} → dedup=${dedupTips.length} (${collapsed} rebroadcasts collapsed)`);
-  }
-  const lst = dedupTips.filter(t => t.market === marketName && (t.result === 'win' || t.result === 'loss'));
-  if (lst.length < 12) {
-    console.log(`[${marketName}] insufficient sample (n=${lst.length} after dedup) — skipping`);
-    return null;
-  }
-
+// Core fit — extrai bins de um list de tips (sem split por tier). Reutilizada
+// por fitMarket pra default e per-tier.
+function _fitBins(lst, marketName, tag = 'all') {
   // Bins: mais finos onde há volume (0.65-0.85), grossos nas pontas.
   const edges = [0.30, 0.55, 0.65, 0.70, 0.75, 0.80, 0.85, 0.92, 1.001];
   const EDGES_MIN = edges[0];
@@ -221,24 +232,19 @@ function fitMarket(tipsRaw, marketName) {
     const closes = sub.filter(t => t.close_odd).map(t => t.close_odd);
     const priorP = closes.length ? Math.min(0.95, Math.max(0.05, (1 - VIG) / (closes.reduce((a, b) => a + b, 0) / closes.length))) : 0.5;
     const rawP = wins / sub.length;
-    // Beta smoothing toward priorP (prior strength = ALPHA pseudo-counts)
     const smoothedP = (wins + ALPHA * priorP) / (sub.length + ALPHA);
     const mid = sub.reduce((a, t) => a + t.p_model, 0) / sub.length;
     bins.push({ lo, hi, mid, n: sub.length, wins, rawP, priorP, pSmoothed: smoothedP });
   }
 
-  // Empty bins — sample fora da janela esperada (ex: football pModel é
-   // implied-style 0.10-0.30 vs tennis Markov 0.50-0.95). Fail-safe early.
   if (!bins.length) {
-    console.log(`[${marketName}] all tips fell outside fitting range [${EDGES_MIN}, 1.001) — skipping (n=${lst.length} settled mas pModel não cobre janela)`);
+    console.log(`[${marketName}/${tag}] all tips fell outside fitting range [${EDGES_MIN}, 1.001) — skipping (n=${lst.length})`);
     return null;
   }
-  // Pool bins com n < MIN_BIN com vizinho mais próximo
   let merged = [...bins];
   let i = 0;
   while (i < merged.length) {
     if (merged[i].n < MIN_BIN && merged.length > 2) {
-      // merge com vizinho de menor n
       const left = i > 0 ? merged[i - 1] : null;
       const right = i < merged.length - 1 ? merged[i + 1] : null;
       const target = !left ? i + 1 : !right ? i - 1 : (left.n <= right.n ? i - 1 : i + 1);
@@ -256,10 +262,7 @@ function fitMarket(tipsRaw, marketName) {
       i = 0;
     } else i++;
   }
-
-  // Aplica PAV pra forçar monotonicidade
   const calibrated = pav(merged);
-
   return {
     bins: calibrated.map(b => ({
       lo: +b.lo.toFixed(4),
@@ -273,6 +276,58 @@ function fitMarket(tipsRaw, marketName) {
     })),
     coverage: [merged[0].lo, merged[merged.length - 1].hi],
     nTotal: lst.length,
+  };
+}
+
+// 2026-05-07: tier-aware refit. Causa-fix do leak Challenger (-12.6% ROI 30d).
+// Calib monolítica não captura divergence: ATP main bucket 0.65 hit 56%, ATP
+// Challenger bucket 0.65 hit 49%. Per-tier fit corrige distorção.
+//
+// MIN_TIER_N: amostra mínima pra fitar um tier separadamente (default 30; abaixo
+// disso o bin pooling já genera resultados ruidosos). Override --min-tier-n.
+const MIN_TIER_N = parseInt(arg('min-tier-n', '30'), 10);
+
+function fitMarket(tipsRaw, marketName) {
+  const dedupTips = dedupRebroadcasts(tipsRaw);
+  const collapsed = tipsRaw.length - dedupTips.length;
+  if (collapsed > 0 && process.env.DEBUG_REFIT_DEDUP) {
+    console.log(`[dedup ${marketName}] raw=${tipsRaw.length} → dedup=${dedupTips.length} (${collapsed} rebroadcasts collapsed)`);
+  }
+  const lst = dedupTips.filter(t => t.market === marketName && (t.result === 'win' || t.result === 'loss'));
+  if (lst.length < 12) {
+    console.log(`[${marketName}] insufficient sample (n=${lst.length} after dedup) — skipping`);
+    return null;
+  }
+
+  // Default fit (todos tiers juntos) — sempre calculado pra fallback compat v1.
+  const defaultFit = _fitBins(lst, marketName, 'default');
+  if (!defaultFit) return null;
+
+  // Per-tier fits — só inclui tiers com sample suficiente.
+  const tierFits = {};
+  const tierGroups = new Map();
+  for (const t of lst) {
+    const tier = _classifyTier(t);
+    if (!tier) continue;
+    if (!tierGroups.has(tier)) tierGroups.set(tier, []);
+    tierGroups.get(tier).push(t);
+  }
+  for (const [tier, sub] of tierGroups) {
+    if (sub.length < MIN_TIER_N) {
+      console.log(`[${marketName}/tier=${tier}] n=${sub.length} < MIN_TIER_N=${MIN_TIER_N}, fold into default`);
+      continue;
+    }
+    const fit = _fitBins(sub, marketName, `tier=${tier}`);
+    if (fit) {
+      tierFits[tier] = fit;
+      console.log(`[${marketName}/tier=${tier}] fitted n=${fit.nTotal} ${fit.bins.length} bins coverage=[${fit.coverage[0].toFixed(3)},${fit.coverage[1].toFixed(3)}]`);
+    }
+  }
+
+  return {
+    ...defaultFit,
+    // Schema v2: tiers presente quando há fits per-tier; default bins fallback.
+    tiers: Object.keys(tierFits).length ? tierFits : undefined,
   };
 }
 
