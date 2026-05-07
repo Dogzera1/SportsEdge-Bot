@@ -80,8 +80,11 @@ async function loadTips() {
     const fullDb = dbPath ? path.resolve(dbPath) : path.resolve(__dirname, '..', 'sportsedge.db');
     console.log(`[db] ${fullDb} (sport=${SPORT})`);
     const db = new Database(fullDb, { readonly: true });
+    // 2026-05-07 (audit #26): inclui team1/team2/match_key pra dedup downstream
+    // funcionar em DB local path (antes só REMOTE tinha team names; DB local
+    // via id-fallback efetivamente não dedupava → calib bias).
     const rows = db.prepare(`
-      SELECT id, sport, market, side, line, p_model, odd, close_odd, clv_pct, result,
+      SELECT id, sport, team1, team2, match_key, market, side, line, p_model, odd, close_odd, clv_pct, result,
              stake_units, profit_units, ev_pct, is_live, created_at
       FROM market_tips_shadow
       WHERE sport = ?
@@ -96,10 +99,53 @@ async function loadTips() {
   return j.tips || [];
 }
 
-// Auto-detecta markets fitáveis a partir do sample (mercados com >=12 settled)
-function detectMarkets(tips) {
-  const counts = {};
+// 2026-05-07 (audit #26): dedup rebroadcasts. /market-tips-recent?dedup=0 e o
+// query DB local trazem TODA row de market_tips_shadow incluindo rebroadcasts
+// (mesma decisão "match X / market Y / side Z / line L" logada várias vezes
+// quando bot reboota mid-cycle). Sem dedup, calib infla amostra fictícia e
+// distorce empirical hit_rate. Group por (sport, teams_norm, market, side, line);
+// quando team1/team2 não vêm na resposta (DB local query atual), usa match_key
+// fallback ou keys que distingam linhas legítimas.
+function _normTeam(s) {
+  return String(s || '').toLowerCase().replace(/[\s\-.''']/g, '');
+}
+function dedupRebroadcasts(tips) {
+  const groups = new Map();
   for (const t of tips) {
+    // Source A (REMOTE /market-tips-recent): tem team1/team2.
+    // Source B (DB local): query atual NÃO seleciona team1/team2 — usa id como fallback
+    // (cada row vira grupo único = no-dedup) E logamos warning.
+    let key;
+    if (t.team1 && t.team2) {
+      const t1 = _normTeam(t.team1), t2 = _normTeam(t.team2);
+      const pair = t1 < t2 ? `${t1}|${t2}` : `${t2}|${t1}`;
+      key = [
+        String(t.sport || '').toLowerCase(),
+        pair,
+        String(t.market || '').toLowerCase(),
+        String(t.side || '').toLowerCase(),
+        String(t.line ?? '').toLowerCase(),
+      ].join('::');
+    } else {
+      // Sem team names → usa id (sem dedup); ainda assim mantém a logica downstream.
+      key = `noteam::${t.id}`;
+    }
+    const existing = groups.get(key);
+    if (!existing) { groups.set(key, t); continue; }
+    const tSettled = t.result === 'win' || t.result === 'loss';
+    const eSettled = existing.result === 'win' || existing.result === 'loss';
+    if (tSettled && !eSettled) { groups.set(key, t); continue; }
+    if (eSettled && !tSettled) continue;
+    if ((Number(t.p_model) || 0) > (Number(existing.p_model) || 0)) groups.set(key, t);
+  }
+  return [...groups.values()];
+}
+
+// Auto-detecta markets fitáveis a partir do sample (mercados com >=12 settled, pós-dedup)
+function detectMarkets(tips) {
+  const dedup = dedupRebroadcasts(tips);
+  const counts = {};
+  for (const t of dedup) {
     if (t.result !== 'win' && t.result !== 'loss') continue;
     if (!t.market) continue;
     counts[t.market] = (counts[t.market] || 0) + 1;
@@ -151,10 +197,15 @@ function brier(samples) {
   return samples.reduce((a, s) => a + (s.p - s.y) ** 2, 0) / samples.length;
 }
 
-function fitMarket(tips, marketName) {
-  const lst = tips.filter(t => t.market === marketName && (t.result === 'win' || t.result === 'loss'));
+function fitMarket(tipsRaw, marketName) {
+  const dedupTips = dedupRebroadcasts(tipsRaw);
+  const collapsed = tipsRaw.length - dedupTips.length;
+  if (collapsed > 0 && process.env.DEBUG_REFIT_DEDUP) {
+    console.log(`[dedup ${marketName}] raw=${tipsRaw.length} → dedup=${dedupTips.length} (${collapsed} rebroadcasts collapsed)`);
+  }
+  const lst = dedupTips.filter(t => t.market === marketName && (t.result === 'win' || t.result === 'loss'));
   if (lst.length < 12) {
-    console.log(`[${marketName}] insufficient sample (n=${lst.length}) — skipping`);
+    console.log(`[${marketName}] insufficient sample (n=${lst.length} after dedup) — skipping`);
     return null;
   }
 
