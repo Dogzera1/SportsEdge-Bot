@@ -2304,6 +2304,73 @@ const migrations = [
     },
   },
   {
+    id: '093_market_tip_dm_sent_dedup_null_side_and_canonical_pair',
+    up(db) {
+      // 2026-05-07 (audit #12): mig 062 PK era (sport, team1_norm, team2_norm, market, side)
+      // com side TEXT (nullable). SQLite trata NULL como distinct em PK → ML (side=NULL)
+      // acumulava múltiplas rows; ON CONFLICT(...,side) NÃO triggera quando side IS NULL
+      // → admin DM enviado várias vezes/match ML.
+      // Adicionalmente: ordenação invariante team1↔team2 ("A vs B" e "B vs A" coexistiam
+      // pq INSERT preservava ordem do caller mesmo que SELECT já fosse OR-pattern.
+      //
+      // Fix: 2 partes.
+      //   (1) Normaliza pair: ensures team1_norm < team2_norm em TODAS rows (canonical).
+      //   (2) UNIQUE INDEX com COALESCE(side, '') — INSERT na lib/market-tips-shadow.js
+      //       já normaliza pair antes de gravar (commit pareado).
+      // PK antiga não é dropada (SQLite ALTER TABLE limitado), mas fica redundante.
+      //
+      // Dedup ANTES de criar índice — senão CREATE UNIQUE INDEX falha com "UNIQUE
+      // constraint failed". Estratégia: pra cada grupo (sport, sorted_pair, market,
+      // COALESCE(side, '')), keep row mais recente (max last_dm_at).
+      if (!tableExists(db, 'market_tip_dm_sent')) return;
+
+      // Estratégia: 3 passes pra evitar conflict com PK durante UPDATE.
+      // (PK antiga inclui side com NULL distinct + ordem distinct → swap direto pode
+      // colidir com row já existente na ordem invertida.)
+      //
+      // (1) Dedup canonical: pra cada (sport, MIN(t1,t2), MAX(t1,t2), market, side OR _NULL_)
+      //     keep ROW com MAX(last_dm_at). Usa rowid pra identificar tied (mesmo timestamp).
+      //     Sorted pair em GROUP BY garante "A vs B" e "B vs A" tratados como mesmo grupo.
+      const deleted = db.prepare(`
+        DELETE FROM market_tip_dm_sent
+        WHERE rowid NOT IN (
+          SELECT rowid FROM (
+            SELECT rowid,
+              ROW_NUMBER() OVER (
+                PARTITION BY sport,
+                  CASE WHEN team1_norm < team2_norm THEN team1_norm ELSE team2_norm END,
+                  CASE WHEN team1_norm < team2_norm THEN team2_norm ELSE team1_norm END,
+                  market,
+                  COALESCE(side, '_NULL_')
+                ORDER BY last_dm_at DESC, rowid ASC
+              ) AS rn
+            FROM market_tip_dm_sent
+          ) ranked
+          WHERE rn = 1
+        )
+      `).run();
+
+      // (2) Sorted pair canonical: pra rows que ficaram com t1>t2, swap.
+      // Não vai conflitar agora pq dedup já removeu cada par (A,B) que tinha
+      // tanto (A,B) quanto (B,A) — sobra só 1 row por grupo canonical.
+      const swapped = db.prepare(`
+        UPDATE market_tip_dm_sent
+        SET team1_norm = team2_norm, team2_norm = team1_norm
+        WHERE team1_norm > team2_norm
+      `).run();
+
+      // (3) UNIQUE INDEX com COALESCE — ON CONFLICT no INSERT targetará este índice.
+      try {
+        db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_mt_dm_sent_unique_canonical
+          ON market_tip_dm_sent(sport, team1_norm, team2_norm, market, COALESCE(side, '_NULL_'))`);
+      } catch (e) {
+        throw new Error(`mig 093: CREATE UNIQUE INDEX failed (likely residual dups): ${e.message}`);
+      }
+
+      console.log(`[mig 093] market_tip_dm_sent: dedup=${deleted.changes} swapped=${swapped.changes} index=created`);
+    },
+  },
+  {
     id: '092_baseline_shadow_tips',
     up(db) {
       // Tabela isolada pra baseline trivial: "favorito Pinnacle dejuiced via line shop".
