@@ -16439,6 +16439,17 @@ async function pollTennis(runOnce = false) {
                 // 2026-05-04: shadow puro — captura tips com EV ≥ shadowMinEv (default 0)
                 // sem oddOk + sem maxEv. Override: TENNIS_SHADOW_MIN_EV.
                 const _tnShadowMinEv = parseFloat(process.env.TENNIS_SHADOW_MIN_EV ?? '0');
+                // 2026-05-07 (causa-fix tennis Challenger leak): classifica tier do match
+                // pela league string. Calib v2 aplica bins per-tier quando disponíveis.
+                const _tnTier = (() => {
+                  const lg = String(match.league || '').trim();
+                  if (!lg) return null;
+                  if (/ATP Challenger|WTA Challenger/i.test(lg)) return 'challenger';
+                  if (/WTA 125K/i.test(lg)) return 'wta125k';
+                  if (/^ITF\s|ITF Futures|ITF (Men|Women)/i.test(lg)) return 'itf';
+                  if (/^ATP\s|^WTA\s/i.test(lg)) return 'main';
+                  return null;
+                })();
                 const _scanResultTn = scanTennisMarkets({
                   markov: tennisModelResult._markovMarkets,
                   aces: tennisModelResult._markovAces,
@@ -16453,6 +16464,7 @@ async function pollTennis(runOnce = false) {
                   maxOdd: maxOddTn,
                   isLive: isLiveTennis,
                   gamesScale: _gamesScale,
+                  tier: _tnTier,
                 });
                 let found = _scanResultTn.promotable || _scanResultTn;
                 const _shadowAllTn = _scanResultTn.shadow || found;
