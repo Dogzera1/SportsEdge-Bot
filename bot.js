@@ -22195,11 +22195,24 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
 
   // Poll heartbeat health: checa se algum sport pol parou de executar.
   // Cron 15min; threshold por sport (LoL 10min, MMA 30min, etc).
+  //
+  // 2026-05-07 (audit logs prod 16:05 stall esports 24min): adaptive cycle
+  // (runAutoAnalysis) tem cap idle = AUTO_MAX_IDLE_MIN (default 24min).
+  // Threshold lol=10 com check `> maxMin * 2` alertava em 20min — falso positivo
+  // sempre que ciclo ficava idle no cap. Fix: derivar threshold do cap idle
+  // efetivo + buffer 10min. Outros sports (dota/cs/etc) têm loops próprios e
+  // não compartilham esse cap, mantêm thresholds originais.
+  const _autoIdleCapMin = parseInt(process.env.AUTO_MAX_IDLE_MIN || '24', 10) || 24;
+  const _esportsThreshMin = _autoIdleCapMin + 10; // cap + buffer
   const _lastPollStall = {};
   const runPollStallCheck = () => {
     try {
       const hbs = getPollHeartbeats();
-      const staleThresh = { lol: 10, dota: 15, cs: 15, valorant: 10, tennis: 15, mma: 30, football: 30, snooker: 60, darts: 60, tt: 30 };
+      // lol/dota/cs/valorant compartilham runAutoAnalysis adaptive cycle; usar threshold dinâmico.
+      const staleThresh = {
+        lol: _esportsThreshMin, dota: _esportsThreshMin, cs: _esportsThreshMin, valorant: _esportsThreshMin,
+        tennis: 15, mma: 30, football: 30, snooker: 60, darts: 60, tt: 30,
+      };
       const now = Date.now();
       for (const [sport, cfg] of Object.entries(SPORTS)) {
         if (!cfg.enabled) continue;
@@ -22208,11 +22221,16 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
         const maxMin = staleThresh[alias] || 30;
         if (!hb) { log('WARN', 'POLL-STALL', `${sport}: sem heartbeat (nunca rodou?)`); continue; }
         const ageMin = Math.floor((now - hb.lastTs) / 60000);
-        if (ageMin > maxMin * 2) {
+        // Threshold check: alerta apenas quando idade > threshold direto (era * 2 → muito conservador).
+        // Para esports, threshold já inclui buffer 10min sobre cap idle.
+        const trueLimit = sport === 'esports' || alias === 'lol' || alias === 'dota' || alias === 'cs' || alias === 'valorant'
+          ? maxMin   // já com buffer
+          : maxMin * 2; // legacy: outros sports mantêm 2x
+        if (ageMin > trueLimit) {
           // Cooldown 2h
           if ((now - (_lastPollStall[sport] || 0)) < 2 * 60 * 60 * 1000) continue;
           _lastPollStall[sport] = now;
-          log('WARN', 'POLL-STALL', `${sport}: poll ${ageMin}min sem rodar (threshold ${maxMin}min) — verificar logs/errors.`);
+          log('WARN', 'POLL-STALL', `${sport}: poll ${ageMin}min sem rodar (threshold ${trueLimit}min) — verificar logs/errors.`);
         }
       }
     } catch (_) {}
@@ -24031,7 +24049,33 @@ async function checkCLV(caches = {}) {
           // pegou outro evento do mesmo par (próximo round/torneio). Rejeita pra
           // não contaminar relatório CLV (ex: tennis 3.69 → 84.93 sem motivo).
           if (prevClv >= 1.5 && (clvN / prevClv >= 3 || prevClv / clvN >= 3)) {
-            log('WARN', 'CLV-SKIP', `${sport} ${tip.participant1} vs ${tip.participant2}: outlier rejected (${prevClv} → ${clvN}, likely wrong-event match)`);
+            // 2026-05-07 (audit logs prod: Siniakova vs Kalinskaya 30+ rejects):
+            // Após 3 rejects consecutivos pra mesma tip, marca skip permanente
+            // (in-memory) — fuzzy lookup continua pegando mesmo wrong-event.
+            // Cooldown 60min entre WARN logs evita spam quando sample fica preso.
+            global._clvOutlierLockMap = global._clvOutlierLockMap || new Map();
+            const lockKey = `${sport}|${tip.id}`;
+            const cur = global._clvOutlierLockMap.get(lockKey) || { count: 0, lastWarn: 0, locked: false };
+            cur.count++;
+            const wasLocked = cur.locked;
+            if (cur.count >= 3) cur.locked = true;
+            const now = Date.now();
+            const shouldWarn = !wasLocked && (now - cur.lastWarn) >= 60 * 60 * 1000;
+            if (shouldWarn) {
+              cur.lastWarn = now;
+              const lockSuffix = cur.locked ? ' [LOCKED — skip permanente]' : ` [attempt ${cur.count}/3]`;
+              log('WARN', 'CLV-SKIP', `${sport} ${tip.participant1} vs ${tip.participant2}: outlier rejected (${prevClv} → ${clvN}, likely wrong-event match)${lockSuffix}`);
+            }
+            global._clvOutlierLockMap.set(lockKey, cur);
+            // Cleanup periódico (>500 entries OR via TTL 24h)
+            if (global._clvOutlierLockMap.size > 500) {
+              const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+              for (const [k, v] of global._clvOutlierLockMap) if (v.lastWarn < cutoff) global._clvOutlierLockMap.delete(k);
+            }
+            continue;
+          }
+          // Pre-check lock: se tip já foi locked por outliers, skip silently
+          if (global._clvOutlierLockMap?.get(`${sport}|${tip.id}`)?.locked) {
             continue;
           }
           const changed = !prevClv || Math.abs(clvN - prevClv) >= 0.005;
