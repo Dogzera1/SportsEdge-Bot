@@ -3694,10 +3694,43 @@ function warnAdminKeyMissingOnce() {
   log('WARN', 'SEC', 'ADMIN_KEY não configurada — rotas admin abertas sem autenticação. Configure ADMIN_KEY em produção.');
 }
 
+// 2026-05-06 FIX: trust XFF apenas quando socket veio de proxy conhecido.
+// Antes atacante mandava header arbitrário e bypassava rate limit per-IP
+// (login fail counter, rate-limit bucket geral). Em Railway sempre tem
+// proxy real (10.x ou Railway internal IP), então XFF é confiável; mas o
+// código não validava. Default Railway: trust 10.0.0.0/8 + 127.0.0.1.
+// Override via TRUSTED_PROXY_CIDRS=csv (ex: "10.0.0.0/8,172.16.0.0/12").
+const _TRUSTED_PROXY_CIDRS = (process.env.TRUSTED_PROXY_CIDRS || '10.0.0.0/8,127.0.0.0/8,::1/128')
+  .split(',').map(s => s.trim()).filter(Boolean);
+function _ipInCidr(ip, cidr) {
+  if (!ip || !cidr) return false;
+  // IPv6 simplificado: só match exato pra ::1
+  if (cidr === '::1/128') return ip === '::1' || ip === '::ffff:127.0.0.1';
+  const [base, bitsStr] = cidr.split('/');
+  if (!base) return false;
+  const bits = parseInt(bitsStr ?? '32', 10);
+  // Strip IPv6-mapped prefix
+  const ip4 = ip.startsWith('::ffff:') ? ip.slice(7) : ip;
+  if (!/^\d+\.\d+\.\d+\.\d+$/.test(ip4) || !/^\d+\.\d+\.\d+\.\d+$/.test(base)) return false;
+  const toInt = (s) => s.split('.').reduce((acc, o) => (acc << 8) | (parseInt(o, 10) & 0xff), 0) >>> 0;
+  const ipInt = toInt(ip4), baseInt = toInt(base);
+  if (bits === 0) return true;
+  const mask = (0xffffffff << (32 - bits)) >>> 0;
+  return (ipInt & mask) === (baseInt & mask);
+}
+function _isTrustedProxy(socketIp) {
+  if (!socketIp) return false;
+  return _TRUSTED_PROXY_CIDRS.some(c => _ipInCidr(socketIp, c));
+}
 function getClientIp(req) {
-  const xf = (req.headers['x-forwarded-for'] || '').toString();
-  const ip = xf.split(',')[0]?.trim();
-  return ip || req.socket?.remoteAddress || 'unknown';
+  const socketIp = req.socket?.remoteAddress || '';
+  // Só confia em XFF se o socket veio de proxy autenticado.
+  if (_isTrustedProxy(socketIp)) {
+    const xf = (req.headers['x-forwarded-for'] || '').toString();
+    const ip = xf.split(',')[0]?.trim();
+    if (ip) return ip;
+  }
+  return socketIp || 'unknown';
 }
 
 // 2026-04-28: gate pra exposição de stack trace em error responses.
@@ -4052,7 +4085,9 @@ function runSettleSweep({ sportFilter = '', days = 14 } = {}) {
     return tip.sport;
   };
 
-  const summary = { sports: {}, total_swept: 0, total_settled: 0, total_skipped_map: 0, total_not_found: 0 };
+  // 2026-05-06 FIX: separa quarantine_substring de not_found no summary.
+  // Antes ambos viravam not_found, mascarando backlog que requer /settle-manual.
+  const summary = { sports: {}, total_swept: 0, total_settled: 0, total_skipped_map: 0, total_not_found: 0, total_quarantine: 0 };
 
   // HARD SKIP: MT-promoted tips (match_id ::mt:: ou market_type non-ML) jamais
   // passam por runSettleSweep — esse sweep usa name-match (tennisSinglePlayerNameMatch
@@ -4062,7 +4097,7 @@ function runSettleSweep({ sportFilter = '', days = 14 } = {}) {
 
   for (const sport of sports) {
     const tips = stmts.getUnsettledTips.all(sport, `-${clampedDays} days`);
-    const info = { swept: 0, settled: 0, skipped_map: 0, not_found: 0, settled_ids: [] };
+    const info = { swept: 0, settled: 0, skipped_map: 0, not_found: 0, quarantine: 0, settled_ids: [] };
 
     for (const tip of tips) {
       info.swept++;
@@ -4146,7 +4181,7 @@ function runSettleSweep({ sportFilter = '', days = 14 } = {}) {
       if (matchMethod === 'substring_weak') {
         log('WARN', 'SETTLE-SWEEP', `QUARANTINE ${sport} tip=${tip.id} "${tip.tip_participant}" vs "${row.winner}" — requer manual`);
         try { require('./lib/metrics').incr('settle_quarantine', { sport, reason: 'substring_weak' }); } catch (_) {}
-        info.not_found++;
+        info.quarantine++; // 2026-05-06 FIX: separado de not_found pra surface backlog manual
         continue;
       }
       const result = nameMatched ? 'win' : 'loss';
@@ -4195,6 +4230,7 @@ function runSettleSweep({ sportFilter = '', days = 14 } = {}) {
     summary.total_settled += info.settled;
     summary.total_skipped_map += info.skipped_map;
     summary.total_not_found += info.not_found;
+    summary.total_quarantine += info.quarantine;
   }
 
   return { days: clampedDays, ...summary };
