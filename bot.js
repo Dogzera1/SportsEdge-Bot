@@ -3728,21 +3728,38 @@ async function settleCompletedTips() {
           let won;
           if (sport === 'football') {
             const mkt = tip.market_type || '';
-            if (mkt === '1X2_D') {
-              won = result.winner === 'Draw';
-            } else if (mkt === 'OVER_2.5' || mkt === 'UNDER_2.5') {
-              // 2026-05-03 FIX: skip (não settle como 0-0) quando score vazio.
-              // Antes default '0-0' fazia OVER=LOSS / UNDER=WIN sempre que feed
-              // retornasse {resolved:true, winner:'X', score:''} — biased gigantesco
-              // em UNDER. Deixa AUTO_VOID_STUCK lidar caso continue sem score.
+            // 2026-05-06 FIX: extender pra OVER_1.5/3.5/UNDER_1.5/3.5/BTTS.
+            // Antes só OVER_2.5/UNDER_2.5/1X2_D eram tratados; outros caíam em
+            // name-match (sempre false → tips ficam stuck até AUTO_VOID_STUCK
+            // voidar 24h depois → perde wins reais). Espelha logic de
+            // server.js:11738-11762.
+            const ouMatch = mkt.match(/^(OVER|UNDER)_(\d+(?:\.\d+)?)$/);
+            if (mkt === '1X2_D' || mkt === 'DRAW') {
+              const sm = String(result.score || '').match(/^\s*(\d+)\s*-\s*(\d+)\s*$/);
+              const drawByScore = sm && parseInt(sm[1], 10) === parseInt(sm[2], 10);
+              won = result.winner === 'Draw' || norm(result.winner) === 'empate' || drawByScore;
+              if (won) result.winner = tip.tip_participant;
+              else result.winner = '__loss__';
+            } else if (ouMatch) {
               const sm = String(result.score || '').match(/^\s*(\d+)\s*-\s*(\d+)\s*$/);
               if (!sm) {
                 log('DEBUG', 'SETTLE', `${sport} OU: score vazio/inválido (${result.score || '∅'}) — skip ${tip.participant1} vs ${tip.participant2}`);
                 continue;
               }
               const total = (parseInt(sm[1], 10) || 0) + (parseInt(sm[2], 10) || 0);
-              won = mkt === 'OVER_2.5' ? total > 2.5 : total < 2.5;
-              // Registra winner fictício para compatibilidade com /settle
+              const line = parseFloat(ouMatch[2]);
+              won = ouMatch[1] === 'OVER' ? total > line : total < line;
+              result.winner = won ? tip.tip_participant : '__loss__';
+            } else if (mkt === 'BTTS_YES' || mkt === 'BTTS_NO') {
+              const sm = String(result.score || '').match(/^\s*(\d+)\s*-\s*(\d+)\s*$/);
+              if (!sm) {
+                log('DEBUG', 'SETTLE', `${sport} BTTS: score vazio/inválido (${result.score || '∅'}) — skip ${tip.participant1} vs ${tip.participant2}`);
+                continue;
+              }
+              const g1 = parseInt(sm[1], 10) || 0;
+              const g2 = parseInt(sm[2], 10) || 0;
+              const bothScored = g1 > 0 && g2 > 0;
+              won = mkt === 'BTTS_YES' ? bothScored : !bothScored;
               result.winner = won ? tip.tip_participant : '__loss__';
             } else {
               won = norm(result.winner).includes(norm(tip.tip_participant));
@@ -5477,6 +5494,34 @@ async function recordMarketTipAsRegular({ sport, match, tip, stake, isLive }) {
       }
     } catch (_) {}
 
+    // ── 2026-05-06 FIX: applyGlobalRisk gate ──
+    // Path MT antes BYPASSAVA applyGlobalRisk inteiro: drawdown taper,
+    // KELLY_<SPORT>_MULT, dynamic perf mult, daily stop-loss e banca drained
+    // não se aplicavam a tips MT promovidas. KELLY_DOTA2_MULT=0.50 não cortava
+    // Dota MT, DD em queda não travava MT. Bug audit P0 #6 (2026-05-06).
+    // Opt-out de emergência: MT_GLOBAL_RISK_DISABLED=true.
+    if (!/^(1|true|yes)$/i.test(String(process.env.MT_GLOBAL_RISK_DISABLED || ''))) {
+      try {
+        const stakeNumGR = typeof stakeAdjusted === 'number' ? stakeAdjusted
+          : parseFloat(String(stakeAdjusted || '1').replace('u','')) || 1;
+        const riskAdj = await applyGlobalRisk(sport, stakeNumGR, match.league);
+        if (!riskAdj.ok) {
+          log('INFO', 'MT-RISK-BLOCK', `${sport}/${marketKey}/${sideKey}: ${riskAdj.reason} — skip dispatch`);
+          return null;
+        }
+        // Snap em 0.05u step (consistente com tier mult).
+        const stakeFinalGR = Math.round(riskAdj.units * 20) / 20;
+        if (stakeFinalGR < 0.1) {
+          log('INFO', 'MT-RISK-BLOCK', `${sport}/${marketKey}/${sideKey}: applyGlobalRisk → ${stakeFinalGR}u < 0.1u floor — skip`);
+          return null;
+        }
+        if (stakeFinalGR !== stakeNumGR) {
+          log('INFO', 'MT-RISK-ADJ', `${sport}/${marketKey}/${sideKey}: applyGlobalRisk ${stakeNumGR}u → ${stakeFinalGR}u (${(riskAdj.reasons || []).join('; ') || 'baseline'})`);
+        }
+        stakeAdjusted = stakeFinalGR;
+      } catch (e) { log('DEBUG', 'MT-RISK', `applyGlobalRisk err: ${e.message}`); }
+    }
+
     const stakeStr = typeof stakeAdjusted === 'number' ? `${stakeAdjusted}u` : String(stakeAdjusted || '1u');
     const conf = tip.ev >= 15 ? 'ALTA' : tip.ev >= 8 ? 'MÉDIA' : 'BAIXA';
     const rec = await serverPost('/record-tip', {
@@ -5644,16 +5689,37 @@ async function runMarketTipsRoiGuardSided() {
   const LEAGUE_GUARD = !/^(0|false|no)$/i.test(String(process.env.MT_ROI_GUARD_LEAGUE_AUTO ?? 'true'));
   const TIER_GUARD = !/^(0|false|no)$/i.test(String(process.env.MT_ROI_GUARD_TIER_AUTO ?? 'true'));
 
-  // 2026-05-06 FIX: query agrega tips REAIS (is_shadow=0) ao invés de
-  // market_tips_shadow misturado. Antes, sport com MT promoted (tennis MT
-  // dispatcha real) tinha auto_roi_leak detectado por shadow research negative
-  // mesmo com tips reais positivas. Ex: tennis|totalGames|over auto-disable
-  // ROI -63% mas tips reais +83% (shadow misleading).
-  // INNER JOIN: market_tips_shadow tem o `side` field padronizado, tips usa
-  // tip_participant string. Match via match_key=match_id + market=market_type
-  // + is_shadow=0 garante só tips dispatched reais entram no agregado.
-  // Opt-out legacy: MT_ROI_GUARD_REAL_ONLY=false.
+  // 2026-05-06 FIX v2: o fix anterior (commit fca8ca6) usava JOIN
+  // `t.match_id = mts.match_key` mas:
+  //   - mts.match_key = team1|team2|YYYY-MM-DD (lib/market-tips-shadow.js _matchKey)
+  //   - tips.match_id = <sport>_ps_<id>::mt::market::side[::lnTAG]
+  // Os formatos NUNCA coincidem → JOIN sempre vazio → guard nunca disparou
+  // mesmo no modo REAL_ONLY. Bug reportado em audit 2026-05-06 (P0 #4).
+  // Fix correto: JOIN por par de teams normalizado + market_type + janela
+  // temporal ±14d (mesmo padrão do propagator em mt-result-propagator.js:155).
+  // Opt-out legacy: MT_ROI_GUARD_REAL_ONLY=false (path antigo continua valendo).
   const REAL_ONLY = !/^(0|false|no)$/i.test(String(process.env.MT_ROI_GUARD_REAL_ONLY ?? 'true'));
+  // Normalização de team name (espelha _normTeam em mt-result-propagator.js:37
+  // e SQL no lookup statements). Aplicada via SQL function abaixo.
+  const _NORM_SQL = `REPLACE(REPLACE(REPLACE(REPLACE(lower($COL),' ',''),'-',''),'.',''),'''','')`;
+  const _normT1 = _NORM_SQL.replace('$COL', 't.participant1');
+  const _normT2 = _NORM_SQL.replace('$COL', 't.participant2');
+  const _normM1 = _NORM_SQL.replace('$COL', 'mts.team1');
+  const _normM2 = _NORM_SQL.replace('$COL', 'mts.team2');
+  const _joinReal = `
+    INNER JOIN tips t ON
+      t.sport = mts.sport
+      AND UPPER(t.market_type) = UPPER(mts.market)
+      AND COALESCE(t.is_shadow, 0) = 0
+      AND (t.archived IS NULL OR t.archived = 0)
+      AND t.result IN ('win','loss','void','push')
+      AND ABS(julianday(COALESCE(t.sent_at, t.settled_at)) - julianday(mts.created_at)) < 14
+      AND (
+        (${_normT1} = ${_normM1} AND ${_normT2} = ${_normM2})
+        OR
+        (${_normT1} = ${_normM2} AND ${_normT2} = ${_normM1})
+      )
+  `;
   let rowsSide = [], rowsLeague = [];
   try {
     if (REAL_ONLY) {
@@ -5665,10 +5731,7 @@ async function runMarketTipsRoiGuardSided() {
           - SUM(CASE WHEN mts.result = 'loss' THEN COALESCE(mts.stake_units, 1) ELSE 0 END) AS profit_u,
           SUM(CASE WHEN mts.result IN ('win','loss') THEN COALESCE(mts.stake_units, 1) ELSE 0 END) AS stake_u
         FROM market_tips_shadow mts
-        INNER JOIN tips t ON t.match_id = mts.match_key
-                         AND UPPER(t.market_type) = UPPER(mts.market)
-                         AND COALESCE(t.is_shadow, 0) = 0
-                         AND (t.archived IS NULL OR t.archived = 0)
+        ${_joinReal}
         WHERE mts.result IN ('win', 'loss')
           AND mts.created_at >= datetime('now', '-' || ? || ' days')
           AND mts.side IS NOT NULL
@@ -5684,10 +5747,7 @@ async function runMarketTipsRoiGuardSided() {
             - SUM(CASE WHEN mts.result = 'loss' THEN COALESCE(mts.stake_units, 1) ELSE 0 END) AS profit_u,
             SUM(CASE WHEN mts.result IN ('win','loss') THEN COALESCE(mts.stake_units, 1) ELSE 0 END) AS stake_u
           FROM market_tips_shadow mts
-          INNER JOIN tips t ON t.match_id = mts.match_key
-                           AND UPPER(t.market_type) = UPPER(mts.market)
-                           AND COALESCE(t.is_shadow, 0) = 0
-                           AND (t.archived IS NULL OR t.archived = 0)
+          ${_joinReal}
           WHERE mts.result IN ('win', 'loss')
             AND mts.created_at >= datetime('now', '-' || ? || ' days')
             AND mts.side IS NOT NULL
@@ -22165,8 +22225,13 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
     } catch (e) { log('WARN', 'CLV-CAPTURE', `cycle erro: ${e.message}`); }
   };
   const CLV_CAPTURE_INTERVAL_MS = parseInt(process.env.CLV_CAPTURE_INTERVAL_MS || '120000', 10); // 2min default
-  setInterval(runClvCaptureCycle, CLV_CAPTURE_INTERVAL_MS);
-  setTimeout(runClvCaptureCycle, 3 * 60 * 1000); // primeira run 3min pós-boot
+  // 2026-05-06 FIX: envolvido em _wrapCron pra prevenir double-execute. Cycle
+  // itera ~1500 tips × HTTP/tip — quando passa 2min, próximo tick entrava
+  // simultâneo, ambos UPDATE clv_odds last-write-wins → CLV histórico
+  // corrompido com snapshots de momentos diferentes. _cronRunning Set garante
+  // skip + heartbeat 'skipped_overlap'.
+  setInterval(_wrapCron('clv_capture', runClvCaptureCycle), CLV_CAPTURE_INTERVAL_MS);
+  setTimeout(_wrapCron('clv_capture', runClvCaptureCycle), 3 * 60 * 1000); // primeira run 3min pós-boot
 
   // Esports legacy audit: pós-split (Abr/2026) tips novas devem usar sport='lol'/'dota2'.
   // Se >5% de tips settadas recentes estão com sport='esports', alerta — indica que
