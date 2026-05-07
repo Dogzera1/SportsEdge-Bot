@@ -25241,12 +25241,28 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
                   return true;
                 }
               } catch (_) {}
-              log('WARN', 'SETTLE-GUARD',
-                `${sport} tip id=${tip.id} market_type=${mkt} rejeitada (non-sweep, precisa per-map data)`);
+              // 2026-05-07 (audit logs prod): tips MAP_WINNER non-sweep ficam pendentes
+              // até cron NON_ML_AUTOARCHIVE (36h). Cada /settle attempt loggava WARN —
+              // tip 1552/1566/1783 spammavam logs cada 30min. Throttle 6h por tip.id.
+              global._settleGuardWarnLog = global._settleGuardWarnLog || new Map();
+              const _sgKey = `nsweep|${tip.id}`;
+              const _sgLast = global._settleGuardWarnLog.get(_sgKey) || 0;
+              if (Date.now() - _sgLast >= 6 * 60 * 60 * 1000) {
+                global._settleGuardWarnLog.set(_sgKey, Date.now());
+                log('WARN', 'SETTLE-GUARD',
+                  `${sport} tip id=${tip.id} market_type=${mkt} rejeitada (non-sweep, precisa per-map data — auto-archive em ≤36h)`);
+              }
               return false;
             }
-            log('WARN', 'SETTLE-GUARD',
-              `${sport} tip id=${tip.id} market_type=${mkt} rejeitada em /settle (non-ML)`);
+            // Mesma throttle pra non-ML genérico
+            global._settleGuardWarnLog = global._settleGuardWarnLog || new Map();
+            const _sgKey2 = `nonml|${tip.id}`;
+            const _sgLast2 = global._settleGuardWarnLog.get(_sgKey2) || 0;
+            if (Date.now() - _sgLast2 >= 6 * 60 * 60 * 1000) {
+              global._settleGuardWarnLog.set(_sgKey2, Date.now());
+              log('WARN', 'SETTLE-GUARD',
+                `${sport} tip id=${tip.id} market_type=${mkt} rejeitada em /settle (non-ML)`);
+            }
             return false;
           });
           let settled = 0;
