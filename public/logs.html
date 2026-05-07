@@ -529,14 +529,30 @@
     return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   }
 
+  // 2026-05-07 (audit P2): in-flight dedup. Antes 10+ cards chamando getHistory()
+  // simultaneamente todos viam cache stale → 10 fetches paralelos pra /logs/history,
+  // último a resolver vencia (race). _historyInFlight retorna a MESMA promise pros
+  // callers concorrentes — 1 fetch real, todos esperam.
   let historyCache = null;
   let historyAt = 0;
+  let _historyInFlight = null;
   async function getHistory() {
-    if (!historyCache || Date.now() - historyAt > 4000) {
-      historyCache = await apiFetch('/logs/history').then(r => r.json()).catch(() => []);
-      historyAt = Date.now();
-    }
-    return historyCache;
+    if (historyCache && Date.now() - historyAt <= 4000) return historyCache;
+    if (_historyInFlight) return _historyInFlight; // outra call já fetching — reuse
+    _historyInFlight = (async () => {
+      try {
+        const r = await apiFetch('/logs/history');
+        const j = r ? await r.json().catch(() => []) : [];
+        historyCache = Array.isArray(j) ? j : [];
+        historyAt = Date.now();
+        return historyCache;
+      } catch (_) {
+        return historyCache || [];
+      } finally {
+        _historyInFlight = null;
+      }
+    })();
+    return _historyInFlight;
   }
 
   async function fillBotLogs(pre) {

@@ -1135,9 +1135,10 @@ async function settleTipManual(id, result, sport, btnOrForce) {
             showToast(`↩ Tip #${id} reaberta`, { ttl: 3000 });
             if (typeof refresh === 'function') refresh();
           } else {
-            alert('Erro ao desfazer: ' + (jj.error || '?'));
+            // 2026-05-07 (audit P2): alert() bloqueante substituído por toast
+            showToast(`❌ Erro ao desfazer: ${jj.error || '?'}`, { ttl: 4000 });
           }
-        } catch (e) { alert('Erro: ' + e.message); }
+        } catch (e) { showToast(`❌ Erro: ${e.message}`, { ttl: 4000 }); }
       };
       if (typeof refresh === 'function') refresh();
       else loadTips();
@@ -1148,10 +1149,10 @@ async function settleTipManual(id, result, sport, btnOrForce) {
         return settleTipManual(id, result, sport, true);
       }
     } else {
-      alert('Erro: ' + (j.error || 'falha desconhecida'));
+      showToast(`❌ Erro: ${j.error || 'falha desconhecida'}`, { ttl: 4000 });
     }
   } catch (e) {
-    alert('Erro: ' + e.message);
+    showToast(`❌ Erro: ${e.message}`, { ttl: 4000 });
   }
 }
 window.settleTipManual = settleTipManual;
@@ -1617,6 +1618,22 @@ const SPORTS_LIST = [
   { sport: 'football', game: '',      label: 'Futebol',           emoji: '⚽' },
 ];
 
+// 2026-05-07 (audit P2): centraliza listas hardcoded antes em 2 sites distintos.
+// Eram diferentes BY DESIGN — pending tips por-sport (granular) vs tips-history
+// que usa bucket 'esports' (unifica lol+dota2 server-side).
+//
+// ALL_SPORTS_GRANULAR: 10 sports per-row, lol/dota2 separados pra pending counts.
+// Usar pra: liveTips pending fetch (cada sport tem endpoint próprio).
+const ALL_SPORTS_GRANULAR = [
+  'lol', 'dota2', 'valorant', 'cs', 'tennis', 'mma', 'football', 'darts', 'snooker', 'tabletennis'
+];
+// ALL_SPORTS_BUCKET: usa 'esports' bucket que server resolve via IN(esports,lol,dota2).
+// 9 entries (esports unifica). Usar pra: tips-history com sport= param onde
+// cs já cobre tudo pós-mig 074 e 'esports' resolve lol+dota2 server-side.
+const ALL_SPORTS_BUCKET = [
+  'esports', 'valorant', 'cs', 'tennis', 'mma', 'football', 'darts', 'snooker', 'tabletennis'
+];
+
 async function loadSportRoi(gen = refreshGen) {
   const container = document.getElementById('sportRoiList');
   setLoading(container);
@@ -1713,8 +1730,9 @@ async function loadLiveTips(gen = refreshGen) {
   if (!card || !list) return;
   try {
     // Busca tips pendentes (result IS NULL) em todos os sports ativos
+    // 2026-05-07 (audit P2): usa ALL_SPORTS_GRANULAR centralizado (era hardcoded)
     const sports = currentSport === '__overall__'
-      ? ['lol', 'dota2', 'valorant', 'cs', 'tennis', 'mma', 'football', 'darts', 'snooker', 'tabletennis']
+      ? ALL_SPORTS_GRANULAR
       : [currentSport];
     const [snapshotData, ...tipsResults] = await Promise.all([
       apiFetch('/live-snapshot').catch(e => { console.warn('liveTips snapshot failed:', e?.message || e); return { sports: {} }; }),
@@ -2106,10 +2124,21 @@ let tipsPage = 1;
 // chamadas concurrentes. Antes user clicando rapidamente disparava 3-4
 // requests sobrepostas e renders intercalados (botões "sumiam" porque
 // render anterior re-popula DOM em ordem indeterminada).
-let _loadingTips = false;
-async function loadTips(gen = refreshGen) {
-  if (_loadingTips) return;
-  _loadingTips = true;
+// 2026-05-07 (audit P2): loadTips race fix.
+// Antes: _loadingTips boolean dropava silenciosamente novos clicks durante load
+// em andamento. User clica "Refresh" → load 1 começa → click 2 → return imediato
+// (load 1 ainda rodando, user pensa que tela não atualizou).
+// Agora: callers sem gen explicit BUMPA refreshGen — antigo load aborta via
+// shouldAbort no próximo await, novo começa imediato. Debounce 100ms previne
+// múltiplos clicks rápidos no mesmo ms.
+let _loadTipsLastTs = 0;
+async function loadTips(gen) {
+  if (gen === undefined) {
+    const now = Date.now();
+    if (now - _loadTipsLastTs < 100) return; // debounce 100ms vs hammering
+    _loadTipsLastTs = now;
+    gen = ++refreshGen; // standalone: bump gen, invalida load anterior
+  }
   try {
     const statusEl = document.getElementById('tipsStatus');
     const status = statusEl ? statusEl.value : '';
@@ -2123,7 +2152,8 @@ async function loadTips(gen = refreshGen) {
     // 'lol'/'dota2' separados aqui senão o mesmo tip é retornado 3 vezes (triplicando).
     // 'esports' query unifica IN(esports,lol,dota2). 'cs' cobre tudo pós-mig 074
     // (cs2 consolidado em cs). Não incluir buckets unified separadamente — duplica.
-    const sports = ['esports', 'valorant', 'cs', 'tennis', 'mma', 'football', 'darts', 'snooker', 'tabletennis'];
+    // 2026-05-07 (audit P2): usa ALL_SPORTS_BUCKET centralizado (era hardcoded)
+    const sports = ALL_SPORTS_BUCKET;
     const sq = status ? '&status=' + encodeURIComponent(status) : '';
     const perSport = Math.ceil(LIMIT_ALL / sports.length);
     const results = await Promise.all(sports.map(sp =>
@@ -2181,9 +2211,7 @@ async function loadTips(gen = refreshGen) {
   loadTipsBySport(gen).catch(() => {});
   loadTipsByLeague(gen).catch(() => {});
   loadTipsByMarket(gen).catch(() => {});
-  } finally {
-    _loadingTips = false;
-  }
+  } catch (e) { console.warn('loadTips error:', e?.message || e); }
 }
 
 // Filtro de liga aplicado no renderTipsTable. null = todas. String = filter event_name.
@@ -2518,15 +2546,16 @@ async function adminFetchPretty(path, title) {
   try {
     const r = await adminFetch(path);
     const j = await r.json();
-    if (!r.ok) { alert('❌ ' + (j?.error || 'HTTP ' + r.status)); return; }
+    // 2026-05-07 (audit P2): alert→toast pra UX consistente
+    if (!r.ok) { showToast(`❌ ${j?.error || 'HTTP ' + r.status}`, { ttl: 4000 }); return; }
     const html = `<!DOCTYPE html><html><head><title>${title || path}</title>
       <style>body{font:13px monospace;background:#0d1117;color:#c9d1d9;padding:16px}h1{color:#58a6ff;font-size:14px;margin:0 0 8px}pre{background:#161b22;padding:12px;border-radius:4px;overflow:auto;white-space:pre-wrap}</style>
       </head><body><h1>${path}</h1><pre>${JSON.stringify(j, null, 2).replace(/</g,'&lt;')}</pre></body></html>`;
     const w = window.open('', '_blank');
     if (w) { w.document.write(html); w.document.close(); }
-    else alert('Popup bloqueado — abra DevTools console pra inspecionar');
+    else showToast('Popup bloqueado — veja DevTools console', { ttl: 5000 });
     console.log(path, j);
-  } catch (e) { alert('❌ ' + e.message); }
+  } catch (e) { showToast(`❌ ${e.message}`, { ttl: 4000 }); }
 }
 
 // Sport-detail prompt
@@ -2542,15 +2571,19 @@ async function adminRepair() {
   try {
     const r = await adminFetch('/admin/repair', { method: 'POST' });
     const j = await r.json();
-    if (!r.ok || !j?.ok) { alert('❌ Repair falhou: ' + (j?.error || 'HTTP ' + r.status)); return; }
+    if (!r.ok || !j?.ok) { showToast(`❌ Repair falhou: ${j?.error || 'HTTP ' + r.status}`, { ttl: 5000 }); return; }
+    // 2026-05-07 (audit P2): alert multilinha → toast com <br> + ttl maior pra leitura
     const lines = [`✅ Repair OK (${j.duration_ms}ms)`];
     if (j.steps?.shadow_settle) lines.push(`shadow_settle: settled=${j.steps.shadow_settle.settled || 0} skipped=${j.steps.shadow_settle.skipped || 0}`);
     if (j.steps?.archive_orphan_non_ml) lines.push(`archive_orphan: ${j.steps.archive_orphan_non_ml.archived || 0} archived`);
     if (j.steps?.bankroll_audit?.drifts?.length) lines.push(`bankroll drifts: ${j.steps.bankroll_audit.drifts.length} sports (cheque /bankroll-audit)`);
     if (j.steps?.tips_stats) lines.push(`tips: total=${j.steps.tips_stats.total} pending=${j.steps.tips_stats.pending} archived=${j.steps.tips_stats.archived}`);
     if (j.steps?.shadow_stats) lines.push(`mt_shadow: total=${j.steps.shadow_stats.total} pending=${j.steps.shadow_stats.pending}`);
-    alert(lines.join('\n'));
-  } catch (e) { alert('❌ ' + e.message); }
+    // Escape HTML pra evitar XSS via error fields
+    const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    showToast(lines.map(esc).join('<br>'), { ttl: 8000 });
+    console.log('[admin/repair]', j);
+  } catch (e) { showToast(`❌ ${e.message}`, { ttl: 4000 }); }
 }
 
 // Quick action: /admin/forensics?tip_id=N
