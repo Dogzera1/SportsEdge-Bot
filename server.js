@@ -3838,7 +3838,13 @@ function _stackForReq(req, e) {
 // CLI/API path (x-admin-key header) inalterado — backward-compat preservada.
 const _adminSessions = new Map(); // sessionId → { csrfToken, createdAt, lastSeenAt, ip }
 const ADMIN_SESSION_TTL_MS = parseInt(process.env.ADMIN_SESSION_TTL_MS || String(24 * 60 * 60 * 1000), 10);
-const ADMIN_SESSION_COOKIE = 'adminSession';
+// 2026-05-07 (audit P2 security): __Host- prefix requer Secure + no Domain + Path=/.
+// Browser bloqueia ataque de subdomain hijack escrevendo cookie pra parent.
+// Em production (HTTPS only) usa __Host-, em dev fica legacy. Read aceita ambos
+// pra transição smooth (sessões ativas pré-deploy continuam válidas até TTL).
+const _isProdLike = String(process.env.NODE_ENV || '').toLowerCase() === 'production';
+const ADMIN_SESSION_COOKIE = _isProdLike ? '__Host-adminSession' : 'adminSession';
+const ADMIN_SESSION_COOKIE_LEGACY = 'adminSession'; // pra read (write é só ADMIN_SESSION_COOKIE)
 
 function _genSessionToken() {
   return require('crypto').randomBytes(32).toString('hex');
@@ -3850,6 +3856,12 @@ function _parseCookie(req, name) {
   const re = new RegExp(`(?:^|;\\s*)${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}=([^;]+)`);
   const m = ck.match(re);
   return m ? decodeURIComponent(m[1]) : null;
+}
+
+// 2026-05-07 (audit P2): Read either __Host- prefixed or legacy cookie pra transição
+// smooth pós-deploy (sessões emitidas antes do upgrade continuam válidas até TTL).
+function _parseAdminCookie(req) {
+  return _parseCookie(req, ADMIN_SESSION_COOKIE) || _parseCookie(req, ADMIN_SESSION_COOKIE_LEGACY);
 }
 
 function _adminSessionValid(sid) {
@@ -3887,8 +3899,8 @@ function isAdminRequest(req) {
     const token = auth.slice(7).trim();
     if (token && token === ADMIN_KEY) return true;
   }
-  // Cookie path (browser admin pages)
-  const sid = _parseCookie(req, ADMIN_SESSION_COOKIE);
+  // Cookie path (browser admin pages) — read aceita __Host- ou legacy
+  const sid = _parseAdminCookie(req);
   if (sid && _adminSessionValid(sid)) return true;
   return false;
 }
@@ -3935,7 +3947,7 @@ function _adminCsrfRequired(req) {
 }
 
 function _adminCsrfValid(req) {
-  const sid = _parseCookie(req, ADMIN_SESSION_COOKIE);
+  const sid = _parseAdminCookie(req);
   if (!sid) return false;
   const sess = _adminSessionValid(sid);
   if (!sess) return false;
@@ -4365,10 +4377,24 @@ const server = http.createServer(async (req, res) => {
   try {
 
   if (req.method === 'OPTIONS') {
+    // 2026-05-07 (audit P2 security): CORS antes era `*` em todas rotas (defesa
+    // em profundidade fraca — credentialed requests bloqueadas pelo browser por
+    // CORS, mas reflete origem do atacante em logs/headers downstream).
+    // Whitelist via env CORS_ALLOWED_ORIGINS=https://a.com,https://b.com.
+    // Default permissivo (`*`) mantém compat pra dashboards públicos sem cookies;
+    // admin endpoints continuam guardadas por ADMIN_KEY/cookie session.
+    const origin = String(req.headers.origin || '').trim();
+    const allowedRaw = String(process.env.CORS_ALLOWED_ORIGINS || '').trim();
+    let allowOrigin = '*';
+    if (allowedRaw) {
+      const allowed = allowedRaw.split(',').map(s => s.trim()).filter(Boolean);
+      allowOrigin = (origin && allowed.includes(origin)) ? origin : allowed[0] || '*';
+    }
     res.writeHead(204, {
-      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Origin': allowOrigin,
       'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-admin-key, x-sport'
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-admin-key, x-sport',
+      'Vary': 'Origin',
     });
     res.end();
     return;
@@ -6807,8 +6833,11 @@ const server = http.createServer(async (req, res) => {
           ip: getClientIp(req),
         });
         _cleanupAdminSessions();
+        // 2026-05-07 (audit P2): __Host- prefix exige Secure obrigatório.
+        // Em prod (NODE_ENV=production) cookie name vai com __Host- + Secure;
+        // em dev cookie continua legacy 'adminSession' sem Secure (HTTP local OK).
         const flags = ['HttpOnly', 'SameSite=Strict', 'Path=/'];
-        if (process.env.NODE_ENV === 'production') flags.push('Secure');
+        if (_isProdLike) flags.push('Secure');
         flags.push(`Max-Age=${Math.floor(ADMIN_SESSION_TTL_MS / 1000)}`);
         res.setHeader('Set-Cookie', `${ADMIN_SESSION_COOKIE}=${encodeURIComponent(sid)}; ${flags.join('; ')}`);
         sendJson(res, { ok: true, csrfToken, ttlMs: ADMIN_SESSION_TTL_MS });
@@ -6818,15 +6847,20 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (p === '/admin/logout' && req.method === 'POST') {
-    const sid = _parseCookie(req, ADMIN_SESSION_COOKIE);
+    const sid = _parseAdminCookie(req);
     if (sid) _adminSessions.delete(sid);
-    res.setHeader('Set-Cookie', `${ADMIN_SESSION_COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0`);
+    // Limpa AMBOS cookies (current __Host- e legacy) — sessão pode estar em qualquer.
+    const expireFlags = `HttpOnly; SameSite=Strict; Path=/; Max-Age=0${_isProdLike ? '; Secure' : ''}`;
+    res.setHeader('Set-Cookie', [
+      `${ADMIN_SESSION_COOKIE}=; ${expireFlags}`,
+      `${ADMIN_SESSION_COOKIE_LEGACY}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0`,
+    ]);
     sendJson(res, { ok: true });
     return;
   }
 
   if (p === '/admin/me' && req.method === 'GET') {
-    const sid = _parseCookie(req, ADMIN_SESSION_COOKIE);
+    const sid = _parseAdminCookie(req);
     const sess = _adminSessionValid(sid);
     if (sess) {
       sendJson(res, {
