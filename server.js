@@ -4151,29 +4151,37 @@ function runSettleSweep({ sportFilter = '', days = 14 } = {}) {
       }
       const result = nameMatched ? 'win' : 'loss';
 
-      // Unit value PER-SPORT tier-based (Abr/2026-III): pega current_banca atual
-      // e initial_banca do sport, retorna tier discretizado. NÃO é baseline global.
-      // SEMPRE computa via tier (ignora tip.stake_reais stored — pode estar em escala
-      // antiga se foi pre-computado via /record-tip com unit global).
-      const stakeR = (() => {
-        const { getSportUnitValue } = require('./lib/sport-unit');
-        const bk = stmts.getBankroll.get(sport);
-        const uv = getSportUnitValue(bk?.current_banca || 0, bk?.initial_banca || 100);
-        const su = parseFloat(String(tip.stake || '1').replace('u','')) || 1;
-        return parseFloat((su * uv).toFixed(2));
-      })();
+      // 2026-05-06 FIX: usar stake_reais stored se disponível (tip foi gravada
+      // em escala correta no momento). Antes sempre recomputava via tier
+      // atual — banca caiu 70%? profit_R em escala errada. Espelha pattern
+      // de /settle (server.js:24669).
+      const _storedStake = parseFloat(tip.stake_reais);
+      const stakeR = (Number.isFinite(_storedStake) && _storedStake > 0)
+        ? _storedStake
+        : (() => {
+            const { getSportUnitValue } = require('./lib/sport-unit');
+            const bk = stmts.getBankroll.get(sport);
+            const uv = getSportUnitValue(bk?.current_banca || 0, bk?.initial_banca || 100);
+            const su = parseFloat(String(tip.stake || '1').replace('u','')) || 1;
+            return parseFloat((su * uv).toFixed(2));
+          })();
       const odds = parseFloat(tip.odds) || 1;
       const profitR = result === 'win'
         ? parseFloat((stakeR * (odds - 1)).toFixed(2))
         : parseFloat((-stakeR).toFixed(2));
 
+      // 2026-05-06 FIX: TOCTOU bankroll + ML shadow filter.
+      // (a) ML shadow tips antes mexiam em current_banca aqui — só MT shadow
+      //     era skipped. Filtro is_shadow protege bankroll de research-only.
+      // (b) UPDATE bankroll antes lia current_banca + escrevia (read+write
+      //     non-atomic). Concurrent settle do mesmo sport duplicava deltas.
+      //     Agora UPDATE += profitR direto (atomic single-row).
       db.transaction(() => {
         db.prepare(`UPDATE tips SET result = ?, settled_at = datetime('now'), stake_reais = ?, profit_reais = ?, is_live = 0 WHERE id = ? AND result IS NULL`)
           .run(result, stakeR, profitR, tip.id);
-        const bk = stmts.getBankroll.get(sport);
-        if (bk) {
-          const nova = parseFloat((bk.current_banca + profitR).toFixed(2));
-          stmts.updateBankroll.run(nova, sport);
+        if (!tip.is_shadow) {
+          db.prepare(`UPDATE bankroll SET current_banca = round(current_banca + ?, 2), updated_at = datetime('now') WHERE sport = ?`)
+            .run(profitR, sport);
         }
       })();
 
@@ -6768,6 +6776,57 @@ const server = http.createServer(async (req, res) => {
       }
     } catch (_) {}
 
+    // 2026-05-06 FIX: incluir feed-heartbeat health no /health. Antes, fontes
+    // externas (Pinnacle/PandaScore/Sofascore/ESPN) podiam estar paradas 1h+
+    // sem alerta no endpoint que Railway monitora — só /admin/feed-health
+    // e /admin/health-overview mostravam.
+    let feedHealthSummary = null;
+    try {
+      const { checkFeedHealth } = require('./lib/feed-heartbeat');
+      const degraded = checkFeedHealth() || []; // returns array de alertas só
+      for (const f of degraded) {
+        // status: 'stale' (warning) | 'never_successful' (critical)
+        const sev = f.status === 'never_successful' ? 'critical' : 'warning';
+        const detail = f.status === 'never_successful'
+          ? `nunca sincronizou (failures=${f.failureCount}, reason=${f.lastReason || '?'})`
+          : `last_ok=${f.lastSuccessMin}min (ratio ${f.ratio}× esperado)`;
+        alerts.push({
+          id: `feed_${f.source}_${f.sport || 'all'}_${f.status}`,
+          severity: sev,
+          msg: `Feed ${f.source}${f.sport ? '/' + f.sport : ''}: ${detail}`,
+        });
+      }
+      feedHealthSummary = {
+        n_degraded: degraded.length,
+        n_critical: degraded.filter(f => f.status === 'never_successful').length,
+      };
+    } catch (_) { /* feed-health opcional */ }
+
+    // 2026-05-06 FIX: last_tip_at por sport — alerta quando sport não emite há >24h.
+    // Antes só pendingTipsAge mostrava tip TRAVADA, não tempo desde último envio.
+    let lastTipBySport = {};
+    try {
+      const rows = db.prepare(`
+        SELECT sport, MAX(sent_at) AS last_sent
+        FROM tips
+        WHERE COALESCE(is_shadow, 0) = 0
+          AND COALESCE(archived, 0) = 0
+        GROUP BY sport
+      `).all();
+      const STALE_HOURS = parseInt(process.env.HEALTH_LAST_TIP_STALE_HOURS || '24', 10);
+      for (const r of rows) {
+        const ageH = r.last_sent ? (Date.now() - new Date(r.last_sent + 'Z').getTime()) / 3600000 : null;
+        lastTipBySport[r.sport] = { last_sent: r.last_sent, age_h: ageH != null ? +ageH.toFixed(1) : null };
+        if (ageH != null && ageH > STALE_HOURS) {
+          alerts.push({
+            id: `sport_silent_${r.sport}`,
+            severity: 'warning',
+            msg: `${r.sport}: nenhuma tip real há ${ageH.toFixed(1)}h (>${STALE_HOURS}h threshold) — modelo desativado ou scanner travado?`,
+          });
+        }
+      }
+    } catch (_) { /* opcional */ }
+
     if (p === '/alerts') {
       _healthCache = { ts: _now, response: _healthCache.response, alerts };
       sendJson(res, { alerts, ts: new Date(_now).toISOString() });
@@ -6816,7 +6875,9 @@ const server = http.createServer(async (req, res) => {
       botGauges,
       build: buildInfo,
       metricsCardinality,
-      metricsLite: getMetricsLite()
+      metricsLite: getMetricsLite(),
+      feedHealth: feedHealthSummary,
+      lastTipBySport,
     };
     _healthCache = { ts: _now, response: _healthResponse, alerts };
     sendJson(res, _healthResponse);
@@ -8231,7 +8292,7 @@ setInterval(load, 10000);
           : 'rows passaram date filter mas pickBest retornou null — bug no filter de league',
       });
     } catch (e) {
-      sendJson(res, { ok: false, error: e.message, stack: e.stack?.slice(0, 600) }, 500);
+      sendJson(res, { ok: false, error: e.message, stack: _stackForReq(req, e)?.slice(0, 600) }, 500);
     }
     return;
   }
@@ -8299,7 +8360,7 @@ setInterval(load, 10000);
         ...settleResult,
       });
     } catch (e) {
-      sendJson(res, { ok: false, error: e.message, stack: e.stack?.slice(0, 600) }, 500);
+      sendJson(res, { ok: false, error: e.message, stack: _stackForReq(req, e)?.slice(0, 600) }, 500);
     }
     return;
   }
@@ -10544,7 +10605,7 @@ setInterval(load, 60000);
         ts: new Date().toISOString(),
       });
     } catch (e) {
-      sendJson(res, { ok: false, error: e.message, stack: e.stack?.slice(0, 400) }, 500);
+      sendJson(res, { ok: false, error: e.message, stack: _stackForReq(req, e)?.slice(0, 400) }, 500);
     }
     return;
   }
@@ -10614,6 +10675,7 @@ setInterval(load, 60000);
       'darts':       30 * 60 * 1000,
       'snooker':     30 * 60 * 1000,
       'tt':          15 * 60 * 1000,
+      'basket':      10 * 60 * 1000, // 2026-05-06 FIX: basket faltava → is_stale nunca disparava
     };
     const _enrich = (hb, name) => {
       if (!hb || !hb.lastTs) return hb;
@@ -10700,11 +10762,17 @@ setInterval(load, 60000);
   if (p === '/admin/env-audit' && (req.method === 'GET' || req.method === 'POST')) {
     const adminOk = isAdminRequest(req) || (ADMIN_KEY && parsed.query.key === ADMIN_KEY);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    // 2026-05-06 FIX: revelar APENAS últimos 4 chars (era 8 = 25% de entropy
+    // de uma key 32-char). Idealmente nem isso — mas mantemos sufix p/
+    // distinguir "key A vs key B" ao trocar/auditar. Set REVEAL_TAIL=0 pra
+    // não revelar nada.
+    const _revealTail = parseInt(process.env.ADMIN_ENV_REVEAL_TAIL ?? '4', 10);
     const _mask = (v) => {
       if (!v) return null;
       const s = String(v);
-      if (s.length <= 8) return '***';
-      return s.slice(0, 4) + '...' + s.slice(-4);
+      if (s.length <= 8 || _revealTail <= 0) return '***';
+      const tail = Math.max(0, Math.min(_revealTail, 4));
+      return tail > 0 ? '***' + s.slice(-tail) : '***';
     };
     const _bool = (v) => v == null ? null : !/^(0|false|no)$/i.test(String(v));
     const out = {
@@ -11945,6 +12013,9 @@ setInterval(load, 60000);
   // Debug: lista todas tips de um sport com profit_reais individual — diagnóstico de drift.
   // GET /debug-sport-tips?sport=valorant
   if (p === '/debug-sport-tips') {
+    // 2026-05-06 FIX: gating admin. Antes público — expunha tip ids, profit/stake,
+    // match_ids, schema (útil pra mapear infra interna).
+    if (!requireAdmin(req, res)) return;
     try {
       const sport = String(parsed.query.sport || 'valorant').toLowerCase();
       const { sportSet } = resolveSportSet(sport, null);
@@ -11983,6 +12054,9 @@ setInterval(load, 60000);
   // Migrations status: lista migrations aplicadas com data — debug pós-deploy.
   // GET /migrations-status
   if (p === '/migrations-status') {
+    // 2026-05-06 FIX: gating admin. Antes público — expunha schema versions
+    // úteis pra mapear quais bugs já foram corrigidos vs ainda exploitable.
+    if (!requireAdmin(req, res)) return;
     try {
       const rows = db.prepare(`SELECT id, applied_at FROM schema_migrations ORDER BY applied_at DESC`).all();
       sendJson(res, {
@@ -12777,7 +12851,7 @@ setInterval(load, 60000);
       const { fetchKillsViaGolgg } = require('./lib/golgg-kills-scraper');
       const r = await fetchKillsViaGolgg({ team1, team2, mapIndex, sentAt, db, leagueHint });
       sendJson(res, { ok: true, input: { team1, team2, mapIndex, sentAt, leagueHint }, result: r });
-    } catch (e) { sendJson(res, { ok: false, error: e.message, stack: e.stack }, 500); }
+    } catch (e) { sendJson(res, { ok: false, error: e.message, stack: _stackForReq(req, e) }, 500); }
     return;
   }
 
@@ -12910,7 +12984,7 @@ setInterval(load, 60000);
         if (model && market) divergence = getMarketDivergence(model, market);
       } catch (_) {}
       sendJson(res, { ok: true, input: { home, away, league }, market, homeForm, awayForm, leagueBaseline, model, divergence });
-    } catch (e) { sendJson(res, { ok: false, error: e.message, stack: e.stack }, 500); }
+    } catch (e) { sendJson(res, { ok: false, error: e.message, stack: _stackForReq(req, e) }, 500); }
     return;
   }
 
@@ -12960,7 +13034,7 @@ setInterval(load, 60000);
       const year = parseInt(parsed.query.year || '2025', 10) || 2025;
       const r = await fetchSeasonMatches(league, year);
       sendJson(res, { ...r, year, deprecated: true, hint: 'use /admin/football-data-test instead', sample: (r.matches || []).slice(0, 3), total: r.matches?.length, matches: undefined });
-    } catch (e) { sendJson(res, { ok: false, error: e.message, stack: e.stack }, 500); }
+    } catch (e) { sendJson(res, { ok: false, error: e.message, stack: _stackForReq(req, e) }, 500); }
     return;
   }
   if (p === '/admin/sync-understat' && (req.method === 'POST' || req.method === 'GET')) {
@@ -12997,7 +13071,7 @@ setInterval(load, 60000);
       if (run) runResult = await runCrossSourceCheck(db, { days, tolerance });
       const flagged = listFlaggedGames(db, { days });
       sendJson(res, { ok: true, ran: !!run, runResult, flagged });
-    } catch (e) { sendJson(res, { ok: false, error: e.message, stack: e.stack }, 500); }
+    } catch (e) { sendJson(res, { ok: false, error: e.message, stack: _stackForReq(req, e) }, 500); }
     return;
   }
 
@@ -13120,7 +13194,7 @@ setInterval(load, 60000);
       const decision = evaluateKillsAutoDisable(db, calib);
       const coverage = getLeagueCoverage(db, { days });
       sendJson(res, { ok: true, calib, decision, coverage });
-    } catch (e) { sendJson(res, { ok: false, error: e.message, stack: e.stack }, 500); }
+    } catch (e) { sendJson(res, { ok: false, error: e.message, stack: _stackForReq(req, e) }, 500); }
     return;
   }
 
@@ -15485,7 +15559,7 @@ setInterval(load, 60000);
       }
       try { require('./lib/mt-auto-promote').loadMtMarketLeagueBlocklist(db); } catch (_) {}
       sendJson(res, { ok: true, sport, market, tier: targetTier, days, blocked, n_blocked: blocked.length, n_skipped: skipped.length });
-    } catch (e) { sendJson(res, { ok: false, error: e.message, stack: e.stack?.slice(0, 400) }, 500); }
+    } catch (e) { sendJson(res, { ok: false, error: e.message, stack: _stackForReq(req, e)?.slice(0, 400) }, 500); }
     return;
   }
 
@@ -15819,7 +15893,7 @@ setInterval(load, 60000);
 
       sendJson(res, { ok: true, payload, skipped });
     } catch (e) {
-      sendJson(res, { ok: false, error: e.message, stack: e.stack?.slice(0, 600) }, 500);
+      sendJson(res, { ok: false, error: e.message, stack: _stackForReq(req, e)?.slice(0, 600) }, 500);
     }
     return;
   }
@@ -16063,7 +16137,7 @@ setInterval(load, 60000);
       out.recommendations = recommendations;
 
       sendJson(res, out);
-    } catch (e) { sendJson(res, { ok: false, error: e.message, stack: e.stack?.slice(0, 500) }, 500); }
+    } catch (e) { sendJson(res, { ok: false, error: e.message, stack: _stackForReq(req, e)?.slice(0, 500) }, 500); }
     return;
   }
 
@@ -16164,7 +16238,7 @@ setInterval(load, 60000);
         rows: enriched,
         note: 'Apenas tips reais (is_shadow=0). Inclui pending. ROI = profit/stake em R$.',
       });
-    } catch (e) { sendJson(res, { ok: false, error: e.message, stack: e.stack?.slice(0, 400) }, 500); }
+    } catch (e) { sendJson(res, { ok: false, error: e.message, stack: _stackForReq(req, e)?.slice(0, 400) }, 500); }
     return;
   }
 
@@ -16480,7 +16554,7 @@ setInterval(load, 60000);
         runtime_disables: runtimeDisables,
         recommendations,
       });
-    } catch (e) { sendJson(res, { ok: false, error: e.message, stack: e.stack?.slice(0, 500) }, 500); }
+    } catch (e) { sendJson(res, { ok: false, error: e.message, stack: _stackForReq(req, e)?.slice(0, 500) }, 500); }
     return;
   }
 
@@ -17392,7 +17466,7 @@ setInterval(load, 60000);
         }
       }
       sendJson(res, results);
-    } catch (e) { sendJson(res, { error: e.message, stack: e.stack }, 500); }
+    } catch (e) { sendJson(res, { error: e.message, stack: _stackForReq(req, e) }, 500); }
     return;
   }
 
@@ -17537,7 +17611,7 @@ setInterval(load, 60000);
           model_label: r.model_label,
         })),
       });
-    } catch (e) { sendJson(res, { error: e.message, stack: e.stack }, 500); }
+    } catch (e) { sendJson(res, { error: e.message, stack: _stackForReq(req, e) }, 500); }
     return;
   }
 
@@ -18516,12 +18590,16 @@ setInterval(load, 60000);
       const { computeStakeMultiplier } = require('./lib/stake-adjuster');
 
       // Busca banca atual do esporte (pra daily stop-loss)
+      // 2026-05-06 FIX: filtrar shadow. Antes profit_reais incluía shadow tips
+      // → currentBanca contaminada → daily_stop_loss em computeStakeMultiplier
+      // recebia value errada vs /bankroll que filtra shadow corretamente.
       const bk = db.prepare(`SELECT * FROM bankroll WHERE sport = ?`).get(sport);
       let currentBanca = 0;
       if (bk) {
         const profit = db.prepare(`
           SELECT COALESCE(SUM(profit_reais), 0) AS p FROM tips
           WHERE sport = ? AND result IN ('win', 'loss')
+            AND COALESCE(is_shadow, 0) = 0
             AND (archived IS NULL OR archived = 0)
         `).get(sport)?.p || 0;
         currentBanca = (bk.initial_banca || 0) + profit;

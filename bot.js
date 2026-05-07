@@ -3768,7 +3768,15 @@ async function settleCompletedTips() {
             won = norm(result.winner).includes(norm(tip.tip_participant));
           }
 
-          const settleBody = { matchId: tip.match_id, winner: result.winner };
+          // 2026-05-06 FIX: incluir score em settleBody pra walkover detection
+          // funcionar pra TODOS sports. Antes esports/football não passavam
+          // score → server.js:24637 _walkoverRe.test('') = false → DQ/W.O./
+          // walkover virava loss do "perdedor" mesmo com forfeit declarado.
+          const settleBody = {
+            matchId: tip.match_id,
+            winner: result.winner,
+            score: result.score || result.final_score || '',
+          };
           if (sport === 'football') {
             settleBody.home = tip.participant1 || '';
             settleBody.away = tip.participant2 || '';
