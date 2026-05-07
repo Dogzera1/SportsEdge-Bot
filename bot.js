@@ -8441,6 +8441,32 @@ async function autoAnalyzeMatch(token, match) {
               // prefere env > DB auto > default. Auto-guard cron (12h) atualiza
               // o DB conforme regime atual.
               const { minOdd: minOddLol, maxOdd: maxOddLol } = _resolveMtOddBounds('lol', { defaultMaxOdd: 2.00 });
+              // 2026-05-07 (causa-fix LoL UNDER 2.5 leak):
+              // Shadow data 30d mostra UNDER 2.5 maps Bo3 hit 51.3% n=39 ROI -22%
+              // (avg odd 1.52 → model implied ~65% vs real ~51% = 14pp overestimate).
+              // momentum=0.03 foi calibrado em 662 séries de 2026-04-18 (3+ semanas
+              // atrás), regime atual (Spring split + EWC) tem mais 2-1 closes.
+              //
+              // Env override hierarquia (mais específico → mais geral):
+              //   LOL_MOMENTUM_<TIER>  — tier1 (LCK/LPL/LEC/LCS/Worlds/MSI/EWC) ou tier2 (CBLOL/LFL/etc)
+              //   LOL_MOMENTUM         — global override
+              //   default 0.03
+              //
+              // Re-fit recomendado: node scripts/calibrate-lol-momentum.js (re-fita c/
+              // dados recent — current 662 sample expandiu pra ~1000+ Apr-May).
+              // Output: momentum candidato + LRT significance.
+              const _lolTier = (() => {
+                const lg = String(match.league || '').trim();
+                if (/^(LCK|LPL|LCS|LEC|Worlds|MSI|Esports World Cup|EWC|First Stand)/i.test(lg)) return 'tier1';
+                if (/Challengers|Academy|NACL|LFL|CBLOL|Prime League|TCL|LCP|Ultraliga|Arabian|Hitpoint|Ebl|Lit|Lrn|Lrs|Les|Liga Portuguesa|GLL|Hellenic/i.test(lg)) return 'tier2';
+                return 'other';
+              })();
+              const _lolMomentumEnvKey = `LOL_MOMENTUM_${_lolTier.toUpperCase()}`;
+              const _lolMomentumTier = parseFloat(process.env[_lolMomentumEnvKey]);
+              const _lolMomentumGlobal = parseFloat(process.env.LOL_MOMENTUM);
+              const _lolMomentum = Number.isFinite(_lolMomentumTier) ? _lolMomentumTier
+                : Number.isFinite(_lolMomentumGlobal) ? _lolMomentumGlobal
+                : 0.03; // default fitted Apr-2026 (662 séries)
               const _scanResult = scanMarkets({
                 markets,
                 pMap: lolModel.mapP1,
@@ -8448,7 +8474,7 @@ async function autoAnalyzeMatch(token, match) {
                 pricingLib: lolMarketsLib,
                 minEv,
                 shadowMinEv,
-                momentum: 0.03, // LoL momentum calibrado (project_lol_series_model)
+                momentum: _lolMomentum,
                 minOdd: minOddLol,
                 maxOdd: maxOddLol,
                 maxPerMatch: parseInt(process.env.LOL_MARKET_MAX_PER_MATCH || '', 10) || null,

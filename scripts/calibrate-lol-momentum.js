@@ -32,11 +32,30 @@ const { mapProbFromSeries, seriesProbFromMap } = require('../lib/lol-series-mode
 const { classifyLeague } = require('../lib/lol-model');
 
 const DB_PATH = path.resolve(__dirname, '..', 'sportsedge.db');
-const MOMENTUM_CANDIDATES = [0, 0.015, 0.03, 0.045, 0.06, 0.08, 0.10];
+// 2026-05-07: expandir candidates pra capturar momentum maior (shadow audit
+// suggests current 0.03 underfits — UNDER 2.5 ROI -22% ⇒ sweep prob overestimate)
+const MOMENTUM_CANDIDATES = [0, 0.015, 0.03, 0.045, 0.06, 0.08, 0.10, 0.12, 0.15, 0.20];
 const PMAP_BUCKETS = 41; // 0.30 .. 0.70 em passos de 0.01 (favoritos extremos são raros)
 const PMAP_MIN = 0.30, PMAP_MAX = 0.70;
 const MC_ITERS = 20000;
 const TRAIN_FRACTION = 0.80;
+
+// 2026-05-07: tier filter — refit por tier separadamente. CLI:
+//   node scripts/calibrate-lol-momentum.js --tier-filter=tier1
+//   --tier-filter=all (default)
+// Tier classification matches bot.js:8451 _lolTier:
+//   tier1: LCK/LPL/LCS/LEC/Worlds/MSI/EWC/First Stand
+//   tier2: Challengers/Academy/CBLOL/LFL/etc
+const _argvLol = process.argv.slice(2);
+const _tierFilterArg = _argvLol.find(a => a.startsWith('--tier-filter='));
+const TIER_FILTER = _tierFilterArg ? _tierFilterArg.split('=')[1].toLowerCase() : 'all';
+function _matchesTierFilter(league) {
+  if (TIER_FILTER === 'all') return true;
+  const lg = String(league || '');
+  if (TIER_FILTER === 'tier1') return /^(LCK|LPL|LCS|LEC|Worlds|MSI|Esports World Cup|EWC|First Stand)/i.test(lg);
+  if (TIER_FILTER === 'tier2') return /Challengers|Academy|NACL|LFL|CBLOL|Prime League|TCL|LCP|Ultraliga|Arabian|Hitpoint|Ebl|Lit|Lrn|Lrs|Les|Liga Portuguesa|GLL|Hellenic/i.test(lg);
+  return true;
+}
 
 function parseScore(finalScore) {
   // "Bo3 2-1" → { bestOf: 3, s1: 2, s2: 1 }
@@ -95,12 +114,16 @@ async function main() {
 
   // Parse + filter series only
   const series = [];
+  let tierFilteredOut = 0;
   for (const r of all) {
     const sc = parseScore(r.final_score);
     if (!sc) continue;
+    // 2026-05-07: tier filter aplicado aqui pra fit per-tier (refit recomendado
+    // quando bot opera com LOL_MOMENTUM_TIER1 / LOL_MOMENTUM_TIER2 envs)
+    if (!_matchesTierFilter(r.league)) { tierFilteredOut++; continue; }
     series.push({ ...r, ...sc });
   }
-  console.log(`BO3/BO5 series: ${series.length}`);
+  console.log(`BO3/BO5 series: ${series.length} (tier-filter='${TIER_FILTER}', filtered out: ${tierFilteredOut})`);
 
   // Split chronológico
   const splitIdx = Math.floor(series.length * TRAIN_FRACTION);
