@@ -1321,6 +1321,7 @@ async function loadEquityWithDD() {
   const dd = enriched.map(r => -r.dd_pct); // negativo pra ficar abaixo do zero visualmente
 
   const el = document.getElementById('cEquityDd');
+  if (!el) return; // 2026-05-07 (audit P1): canvas pode estar fora do DOM
   destroyChart('equityDd');
   const ctx = el.getContext('2d');
   const grad = ctx.createLinearGradient(0, 0, 0, 280);
@@ -1432,7 +1433,9 @@ async function loadRoiByMarket() {
     const rois = filtered.map(r => Number(r.roi || 0));
     const colors = rois.map(r => r >= 0 ? 'oklch(0.55 0.18 152 / 0.85)' : 'oklch(0.58 0.21 25 / 0.85)');
     destroyChart('roiMarket');
-    state.charts.roiMarket = new Chart(document.getElementById('cRoiMarket').getContext('2d'), {
+    const _elRm = document.getElementById('cRoiMarket');
+    if (!_elRm) return; // 2026-05-07 (audit P1)
+    state.charts.roiMarket = new Chart(_elRm.getContext('2d'), {
       type: 'bar',
       data: { labels, datasets: [{ data: rois, backgroundColor: colors, borderWidth: 0 }] },
       options: {
@@ -1711,7 +1714,9 @@ function loadRiskAllocation() {
   const items = sports.filter(s => s.allocation_target_pct != null);
   if (!items.length) { showEmpty('allocWrapR', 'Sem baseline'); return; }
   destroyChart('allocR');
-  state.charts.allocR = new Chart(document.getElementById('cAllocR').getContext('2d'), {
+  const _elAr = document.getElementById('cAllocR');
+  if (!_elAr) return; // 2026-05-07 (audit P1)
+  state.charts.allocR = new Chart(_elAr.getContext('2d'), {
     type: 'bar',
     data: {
       labels: items.map(s => s.sport.toUpperCase()),
@@ -1774,7 +1779,9 @@ async function loadPendingBySport() {
   const items = sports.filter(s => (s.pending || 0) > 0).sort((a, b) => (b.pending || 0) - (a.pending || 0));
   if (!items.length) { showEmpty('pendBySportWrap', 'Sem pending'); return; }
   destroyChart('pendBySport');
-  state.charts.pendBySport = new Chart(document.getElementById('cPendBySport').getContext('2d'), {
+  const _elPbs = document.getElementById('cPendBySport');
+  if (!_elPbs) return; // 2026-05-07 (audit P1)
+  state.charts.pendBySport = new Chart(_elPbs.getContext('2d'), {
     type: 'bar',
     data: {
       labels: items.map(s => s.sport.toUpperCase()),
