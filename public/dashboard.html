@@ -2514,9 +2514,13 @@ async function loadTipsBySport(gen = refreshGen) {
   const cls = (v) => v == null ? '' : (v >= 0 ? 'pos' : 'neg');
   const totalN = data.sports.reduce((s, sp) => s + sp.n, 0);
   const totalProfit = data.sports.reduce((s, sp) => s + (sp.profit || 0), 0);
+  // 2026-05-07: clarifica que profit aqui é só janela ${data.days}d, NÃO bate
+  // com KPI Banca (all-time). Antes "📊 Todos" sem qualificador induzia erro
+  // — user esperava match com banca total. Tooltip detalha discrepância.
+  const overallTooltip = `Soma profit_reais dos últimos ${data.days} dias. NÃO inclui histórico antes da janela — KPI Banca (header) inclui all-time.`;
   const overallBtn = `
-    <div onclick="filterToSport('__overall__')" style="cursor:pointer;border:2px solid ${currentSport === '__overall__' ? '#3b82f6' : 'var(--border,#2a2a2a)'};background:var(--surface,#0f172a);border-radius:8px;padding:10px 12px;min-width:120px;display:flex;flex-direction:column;justify-content:center;align-items:center">
-      <div style="font-size:0.85em;color:#888">📊 Todos</div>
+    <div onclick="filterToSport('__overall__')" title="${overallTooltip}" style="cursor:pointer;border:2px solid ${currentSport === '__overall__' ? '#3b82f6' : 'var(--border,#2a2a2a)'};background:var(--surface,#0f172a);border-radius:8px;padding:10px 12px;min-width:120px;display:flex;flex-direction:column;justify-content:center;align-items:center">
+      <div style="font-size:0.85em;color:#888">📊 Todos <span style="opacity:0.6;font-size:0.85em">(${data.days}d)</span></div>
       <div style="font-size:1.4em;font-weight:600">${totalN}</div>
       <div style="font-size:0.75em;${totalProfit >= 0 ? 'color:#10b981' : 'color:#ef4444'}">${totalProfit >= 0 ? '+' : ''}R$ ${totalProfit.toFixed(2)}</div>
     </div>`;
@@ -2548,8 +2552,8 @@ async function loadTipsBySport(gen = refreshGen) {
       </div>`;
   }).join('');
   el.innerHTML = `
-    <div class="card-meta" style="margin-bottom:6px;font-size:0.8em">
-      🏆 <b>Stats por esporte (${data.days}d)</b> — clique pra filtrar tabela
+    <div class="card-meta" style="margin-bottom:6px;font-size:0.8em" title="Profit aqui é só da janela de ${data.days} dias. KPI Banca total no cabeçalho do dashboard inclui histórico all-time desde baseline.">
+      🏆 <b>Stats por esporte (${data.days}d)</b> — clique pra filtrar tabela <span style="opacity:0.6;font-size:0.9em;cursor:help">ⓘ não bate com banca total (which é all-time)</span>
     </div>
     <div style="display:flex;gap:10px;flex-wrap:wrap">${overallBtn}${cards}</div>`;
 }
