@@ -25041,7 +25041,10 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
     const sport = parsed.query.sport || 'esports';
     const game  = parsed.query.game || '';
     const limitRaw = parseInt(parsed.query.limit);
-    const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(1000, limitRaw)) : 20;
+    // 2026-05-07: cap raised 1000 → 5000 pra evitar truncate per-sport no
+    // dashboard (tennis sozinho pode ter >100 tips em 30d). Frontend dashboard
+    // pede ~300 per sport — bem dentro do novo cap.
+    const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(5000, limitRaw)) : 20;
 
     // status: open/settled (alias para pending/settled)
     const status = String(parsed.query.status || '').toLowerCase();
@@ -25102,7 +25105,11 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
     else if (filter === 'pending') query += " AND t.result IS NULL";
     else if (filter === 'win') query += " AND t.result = 'win'";
     else if (filter === 'loss') query += " AND t.result = 'loss'";
-    else query += " AND COALESCE(t.result, '') != 'void'";
+    // 2026-05-07 (audit divergência KPI vs footer): default INCLUI voids p/ alinhar
+    // com /overall-summary que conta voids no total_tips. Voids têm profit=0 (não
+    // distorcem totalProfit) mas fechavam gap de ~30 tips no count divergente.
+    // Opt-out via ?status=settled / ?status=win|loss / ?filter=...
+    // (else: nenhum filtro adicional — retorna tudo exceto archived/shadow já no WHERE base)
 
     // Default: exclui market tips (OVER/UNDER, 1X2_D, HANDICAP, MAPx_WINNER etc). Dashboard
     // mostra só ML — tips de mercado vivem em market_tips_shadow. Override via
