@@ -598,6 +598,24 @@
     <div id="leagueBlocklistList"></div>
   </div>
 
+  <!-- Shadow vs Real drift early-warning (P2 detector) -->
+  <div class="card" id="shadowVsRealCard" style="display:none;margin-bottom:12px">
+    <div class="card-header">
+      <div class="card-title">🩸 Shadow vs Real (drift early-warning)</div>
+      <div class="card-meta">
+        <select class="select-inline" id="shadowVsRealWindow" onchange="_saveFilter('shadowVsRealWindow', this.value); loadShadowVsRealDrift()">
+          <option value="7">7d</option>
+          <option value="14" selected>14d</option>
+          <option value="21">21d</option>
+          <option value="30">30d</option>
+        </select>
+        <button onclick="loadShadowVsRealDrift()" title="Refresh" aria-label="Refresh shadow vs real drift" style="background:transparent;border:1px solid var(--border);color:var(--text-dim);padding:2px 6px;border-radius:4px;cursor:pointer;font-size:11px;margin-left:4px">↻</button>
+        <span id="shadowVsRealMeta"></span>
+      </div>
+    </div>
+    <div id="shadowVsRealList"></div>
+  </div>
+
   <!-- Main grid: Equity curve + Sport ROI list -->
   <div class="main-grid">
     <div class="card">
@@ -1340,6 +1358,7 @@ async function refresh() {
         loadSportsRisk(gen),
         loadLeagueLeaks(gen),
         loadLeagueBlocklist(gen),
+        loadShadowVsRealDrift(gen),
         loadPipelineHealth(gen),
       ]);
     } else {
@@ -1352,6 +1371,7 @@ async function refresh() {
         loadSportsRisk(gen),
         loadLeagueLeaks(gen),
         loadLeagueBlocklist(gen),
+        loadShadowVsRealDrift(gen),
         loadPipelineHealth(gen),
         loadUpcoming(gen),
         loadTips(gen),
@@ -2137,6 +2157,79 @@ async function loadLeagueBlocklist(gen = refreshGen) {
     list.innerHTML = rows.join('');
   } catch (e) {
     console.warn('loadLeagueBlocklist error:', e);
+    card.style.display = 'none';
+  }
+}
+
+// 2026-05-07: Gap D — UI side-by-side shadow vs real per sport com delta+gap.
+// Reusa /admin/shadow-vs-real-snapshot que envelopa lib/shadow-vs-real-drift.js
+// retornando TODOS os sports (com sample suficiente). Ranking pelo gap (mais
+// negativo primeiro = mais alarmante). Alert visualmente highlighted.
+async function loadShadowVsRealDrift(gen = refreshGen) {
+  const card = document.getElementById('shadowVsRealCard');
+  const list = document.getElementById('shadowVsRealList');
+  const meta = document.getElementById('shadowVsRealMeta');
+  if (!card || !list) return;
+  try {
+    const sel = document.getElementById('shadowVsRealWindow');
+    const windowDays = sel ? sel.value : '14';
+    const r = await apiFetch(`/admin/shadow-vs-real-snapshot?windowDays=${encodeURIComponent(windowDays)}`);
+    if (shouldAbort(gen)) return;
+    if (!r?.ok) { card.style.display = 'none'; return; }
+    const breakdown = (r.breakdown || []).filter(b => b.skip_reason !== 'insufficient_sample' && b.skip_reason !== 'null_roi');
+    if (!breakdown.length) { card.style.display = 'none'; return; }
+    card.style.display = '';
+    const nAlerts = r.n_alerts || 0;
+    meta.textContent = `${breakdown.length} sport(s) com volume · ${nAlerts > 0 ? '⚠️ ' + nAlerts + ' alerta(s)' : '✅ sem alerta'}`;
+
+    // Ranking: alerts primeiro, depois gap mais negativo
+    breakdown.sort((a, b) => {
+      if (a.alert && !b.alert) return -1;
+      if (!a.alert && b.alert) return 1;
+      return (a.gap_pp ?? 0) - (b.gap_pp ?? 0);
+    });
+
+    const fmtPp = (v) => v == null ? '—' : `${v >= 0 ? '+' : ''}${v.toFixed(1)}pp`;
+    const fmtRoi = (v) => v == null ? '—' : `${v >= 0 ? '+' : ''}${v.toFixed(1)}%`;
+    const colorRoi = (v) => v == null ? 'var(--text-dim)' : (v >= 5 ? '#22c55e' : v >= 0 ? '#a3a3a3' : v >= -5 ? '#f59e0b' : '#ef4444');
+    const colorDelta = (v) => v == null ? 'var(--text-dim)' : (v >= 0 ? '#22c55e' : v >= -3 ? '#f59e0b' : '#ef4444');
+
+    const headerRow = `
+      <div style="display:grid;grid-template-columns:80px 90px 90px 70px 90px 90px 70px 70px 60px;gap:8px;padding:6px 10px;font-size:11px;color:var(--text-dim);font-weight:500;border-bottom:1px solid var(--border)">
+        <div>Sport</div>
+        <div>Shadow recente</div>
+        <div>Shadow base</div>
+        <div>Δ shadow</div>
+        <div>Real recente</div>
+        <div>Real base</div>
+        <div>Δ real</div>
+        <div>Gap</div>
+        <div>n S/R</div>
+      </div>`;
+    const rows = breakdown.map(b => {
+      const bgColor = b.alert ? 'rgba(239,68,68,0.10)' : 'transparent';
+      const borderLeft = b.alert ? '3px solid #ef4444' : '3px solid transparent';
+      const icon = b.alert ? '🩸 ' : '';
+      return `
+        <div style="display:grid;grid-template-columns:80px 90px 90px 70px 90px 90px 70px 70px 60px;gap:8px;padding:6px 10px;font-size:12px;background:${bgColor};border-left:${borderLeft};border-bottom:1px solid var(--border)">
+          <div><strong>${icon}${b.sport}</strong></div>
+          <div style="color:${colorRoi(b.shadow_recent)}">${fmtRoi(b.shadow_recent)}</div>
+          <div style="color:${colorRoi(b.shadow_baseline)}">${fmtRoi(b.shadow_baseline)}</div>
+          <div style="color:${colorDelta(b.delta_shadow)}"><strong>${fmtPp(b.delta_shadow)}</strong></div>
+          <div style="color:${colorRoi(b.real_recent)}">${fmtRoi(b.real_recent)}</div>
+          <div style="color:${colorRoi(b.real_baseline)}">${fmtRoi(b.real_baseline)}</div>
+          <div style="color:${colorDelta(b.delta_real)}"><strong>${fmtPp(b.delta_real)}</strong></div>
+          <div style="color:${colorDelta(b.gap_pp)}"><strong>${fmtPp(b.gap_pp)}</strong></div>
+          <div style="color:var(--text-dim);font-size:11px">${b.n_shadow_recent}/${b.n_real_recent}</div>
+        </div>`;
+    }).join('');
+    const legend = `
+      <div style="padding:8px 10px;font-size:11px;color:var(--text-dim);border-top:1px solid var(--border);background:rgba(0,0,0,0.10)">
+        🩸 alerta = shadow piorou ≥3pp E gap ≤ -5pp (modelo base degradando, gates mascarando em real). Investigar causa: regime change? data feed? calib stale? Detector P2-compliant — sem auto-action.
+      </div>`;
+    list.innerHTML = headerRow + rows + legend;
+  } catch (e) {
+    console.warn('loadShadowVsRealDrift error:', e);
     card.style.display = 'none';
   }
 }
