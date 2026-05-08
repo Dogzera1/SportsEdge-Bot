@@ -3313,9 +3313,11 @@ async function getPinnacleDotaMatches() {
       }
       _dotaPinnacleLogState = { count: matches.length, leaguesSeen, ts: Date.now() };
     }
+    try { require('./lib/feed-heartbeat').markFeedSuccess('pinnacle', 'dota2', matches.length); } catch (_) {}
     return matches;
   } catch (e) {
     log('ERROR', 'ODDS', `Pinnacle Dota 2: ${e.message}`);
+    try { require('./lib/feed-heartbeat').markFeedFailure('pinnacle', 'dota2', e.message); } catch (_) {}
     return [];
   }
 }
@@ -3361,9 +3363,11 @@ async function getPinnacleMmaMatches() {
     }));
     _mmaPinnacleCache = { data: matches, ts: Date.now() };
     log('INFO', 'ODDS', `Pinnacle MMA: ${matches.length} lutas cacheadas`);
+    try { require('./lib/feed-heartbeat').markFeedSuccess('pinnacle', 'mma', matches.length); } catch (_) {}
     return matches;
   } catch (e) {
     log('ERROR', 'ODDS', `Pinnacle MMA: ${e.message}`);
+    try { require('./lib/feed-heartbeat').markFeedFailure('pinnacle', 'mma', e.message); } catch (_) {}
     return [];
   }
 }
