@@ -10952,7 +10952,7 @@ setInterval(load, 60000);
       if (Number.isFinite(minNS) && minNS >= 5) opts.minNShadow = minNS;
       const minNR = parseInt(parsed.query.minNReal, 10);
       if (Number.isFinite(minNR) && minNR >= 5) opts.minNReal = minNR;
-      if (parsed.query.groupBy === 'sport_market') opts.groupBy = 'sport_market';
+      if (['sport_market', 'sport_market_tier'].includes(parsed.query.groupBy)) opts.groupBy = parsed.query.groupBy;
       const r = runShadowVsRealDriftCheck(db, opts);
       sendJson(res, {
         ok: true,
@@ -10968,6 +10968,7 @@ setInterval(load, 60000);
           gap_pp: 'delta_shadow − delta_real (pp). Negativo = shadow degradando MAIS que real (gates mascarando).',
           alert: 'true quando delta_shadow ≤ -3pp E gap ≤ -5pp (early warning).',
           market: 'ML = match-winner (1X2, OVER/UNDER 2.5). MT = handicap/totais/kills/etc.',
+          tier: '1=top (Slam, NBA, LCK/LPL...), 2=mid (ATP 250-500, EuroLeague, CBLOL/LLA...), 3=obscuro (Challenger/ITF, regional menor).',
         },
       });
     } catch (e) {
