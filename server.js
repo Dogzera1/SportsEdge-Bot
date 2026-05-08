@@ -29896,6 +29896,40 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
         }
       }
 
+      // ── Fonte 1.5: Pinnacle football (FREE público) ──
+      // 2026-05-08: wirado no cycle. Antes era só lazy via /odds-markets,
+      // resultando em zero matches Pinnacle no /football-matches mesmo
+      // com PINNACLE_FOOTBALL=true. Fix: chamar proativamente cada cycle,
+      // merge com matches já coletados (TheOddsAPI ou nada).
+      // PINNACLE_FOOTBALL flag continua respeitada — função retorna []
+      // se desligada.
+      if (process.env.PINNACLE_FOOTBALL === 'true') {
+        try {
+          const pinFb = await getPinnacleFootballMatches();
+          if (pinFb && pinFb.length) {
+            // Merge: dedup por team1+team2+date. Mantém TheOddsAPI quando
+            // ambos têm o match (TheOddsAPI tem totals/h2h, Pinnacle tem 1X2).
+            const seenKey = new Set(matches.map(m => `${m.team1}|${m.team2}|${String(m.time).slice(0,10)}`));
+            let added = 0;
+            for (const pm of pinFb) {
+              const key = `${pm.team1}|${pm.team2}|${String(pm.time).slice(0,10)}`;
+              if (seenKey.has(key)) continue;
+              const t = new Date(pm.time).getTime();
+              if (t <= now || t > weekAhead) continue;
+              matches.push(pm);
+              seenKey.add(key);
+              added++;
+            }
+            if (added) {
+              oddsSource = oddsSource === 'none' ? 'pinnacle' : `${oddsSource}+pinnacle`;
+              log('INFO', 'AUTO-FOOTBALL', `Pinnacle football: +${added} partidas (total ${matches.length})`);
+            }
+          }
+        } catch (e) {
+          log('WARN', 'AUTO-FOOTBALL', `Pinnacle football fetch falhou: ${e.message}`);
+        }
+      }
+
       // ── Fonte 2: cache da última resposta com odds (quando quota esgotada) ──
       if (!matches.length && _footballMatchesCache && now - _footballMatchesCache.ts < FOOTBALL_MATCHES_CACHE_TTL) {
         matches = _footballMatchesCache.matches.filter(m => new Date(m.time).getTime() > now);
