@@ -10796,6 +10796,138 @@ setInterval(load, 60000);
     return;
   }
 
+  // GET /admin/sport-leak-summary?days=30&minN=10&calibThreshold=-10&roiThreshold=-10
+  // Cross-sport leak audit em 1 chamada. Read-only, lê apenas tips is_shadow=0
+  // (P2-compliant). Agrega cells problemáticas por (sport, market_type) com
+  // severity classification.
+  //
+  // Severity tiers:
+  //   - CRITICAL: ROI < -25% E sample >= minN
+  //   - HIGH: calib_gap < calibThreshold E sample >= minN E Wilson significant
+  //   - MEDIUM: ROI < roiThreshold E sample >= minN
+  //   - LOW: tendência ruim mas sample < minN (pode disparar action manual)
+  //
+  // Útil pra audit operacional rápido: substitui várias chamadas /shadow-readiness
+  // + /admin/mt-shadow-by-* que fizemos no audit 2026-05-07.
+  if (p === '/admin/sport-leak-summary' && (req.method === 'GET' || req.method === 'POST')) {
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    try {
+      const days = Math.max(7, Math.min(180, parseInt(parsed.query.days || '30', 10) || 30));
+      const minN = Math.max(5, parseInt(parsed.query.minN || '10', 10) || 10);
+      const calibThreshold = parseFloat(parsed.query.calibThreshold || '-10');
+      const roiThreshold = parseFloat(parsed.query.roiThreshold || '-10');
+      const criticalRoi = parseFloat(parsed.query.criticalRoi || '-25');
+      // Reusa _readReadinessSnapshot (real-only por default pós Wave 3 readiness fix).
+      const { _readReadinessSnapshot } = require('./lib/readiness-learner');
+      const snap = _readReadinessSnapshot(db, { source: 'real', days });
+      // Wilson CI 95% — copy local pra não importar internal helper.
+      const _wilsonCi = (wins, n, z = 1.96) => {
+        if (!Number.isFinite(n) || n <= 0) return [null, null];
+        const p = wins / n;
+        const denom = 1 + z * z / n;
+        const center = (p + z * z / (2 * n)) / denom;
+        const half = (z * Math.sqrt(p * (1 - p) / n + z * z / (4 * n * n))) / denom;
+        return [center - half, center + half];
+      };
+      const _classify = (cell) => {
+        const n = cell.settled || 0;
+        const roi = cell.roi_pct;
+        const gap = cell.calibration_gap_pp;
+        const expected = cell.expected_win_rate_pct != null ? cell.expected_win_rate_pct / 100 : null;
+        // Wilson significance pra calib_gap
+        let calibSignificant = false;
+        if (n > 0 && expected != null && cell.wins != null) {
+          const [lo, hi] = _wilsonCi(cell.wins, n);
+          if (lo != null) calibSignificant = expected < lo || expected > hi;
+        }
+        const reasons = [];
+        let severity = null;
+        if (n >= minN) {
+          if (roi != null && roi <= criticalRoi) {
+            severity = 'CRITICAL';
+            reasons.push(`ROI ${roi.toFixed(1)}% ≤ ${criticalRoi}%`);
+          } else if (gap != null && gap <= calibThreshold && calibSignificant) {
+            severity = 'HIGH';
+            reasons.push(`calib_gap ${gap.toFixed(1)}pp ≤ ${calibThreshold}pp [significant]`);
+          } else if (roi != null && roi <= roiThreshold) {
+            severity = 'MEDIUM';
+            reasons.push(`ROI ${roi.toFixed(1)}% ≤ ${roiThreshold}%`);
+          }
+        } else if (roi != null && roi <= roiThreshold && gap != null && gap <= calibThreshold) {
+          severity = 'LOW';
+          reasons.push(`tendência ruim mas n=${n} < minN=${minN} (action manual)`);
+        }
+        return { severity, reasons, calibSignificant };
+      };
+      // Agrega per market + per league
+      const leaks = { CRITICAL: [], HIGH: [], MEDIUM: [], LOW: [] };
+      const buildEntry = (cell, scope, classification) => ({
+        scope,
+        sport: cell.sport,
+        market: cell.market_type || null,
+        league: cell.league || null,
+        n: cell.settled,
+        roi_pct: cell.roi_pct,
+        calib_gap_pp: cell.calibration_gap_pp,
+        win_rate_pct: cell.win_rate_pct,
+        expected_win_rate_pct: cell.expected_win_rate_pct,
+        avg_clv_pct: cell.avg_clv_pct,
+        calib_significant: classification.calibSignificant,
+        reasons: classification.reasons,
+        suggested_action: _suggestAction(cell, scope, classification.severity),
+      });
+      function _suggestAction(cell, scope, severity) {
+        if (!severity) return null;
+        if (severity === 'CRITICAL' && scope === 'market') {
+          return `POST /admin/mt-disable?sport=${cell.sport}&market=${cell.market_type}`;
+        }
+        if (severity === 'HIGH' && cell.settled >= 20) {
+          return `readiness-learner aplicará prob_shrink no próximo cron (domingo 11h UTC)`;
+        }
+        if (severity === 'MEDIUM' && scope === 'league') {
+          return `POST /admin/mt-block-league?sport=${cell.sport}&market=${cell.market_type}&league=${encodeURIComponent(cell.league)}`;
+        }
+        if (severity === 'LOW') {
+          return `cap manual via env Railway (KELLY_${cell.sport.toUpperCase()}_<CONF>) ou aguardar mais sample`;
+        }
+        return null;
+      }
+      for (const cell of snap.byMarket) {
+        const c = _classify(cell);
+        if (c.severity) leaks[c.severity].push(buildEntry(cell, 'market', c));
+      }
+      for (const cell of snap.byLeague) {
+        const c = _classify(cell);
+        if (c.severity) leaks[c.severity].push(buildEntry(cell, 'league', c));
+      }
+      // Ordena cada bucket por |roi|
+      for (const sev of Object.keys(leaks)) {
+        leaks[sev].sort((a, b) => (a.roi_pct ?? 0) - (b.roi_pct ?? 0));
+      }
+      const total = leaks.CRITICAL.length + leaks.HIGH.length + leaks.MEDIUM.length + leaks.LOW.length;
+      sendJson(res, {
+        ok: true,
+        ts: new Date().toISOString(),
+        cfg: { days, minN, calibThreshold, roiThreshold, criticalRoi },
+        n_total_leaks: total,
+        n_by_severity: {
+          CRITICAL: leaks.CRITICAL.length,
+          HIGH: leaks.HIGH.length,
+          MEDIUM: leaks.MEDIUM.length,
+          LOW: leaks.LOW.length,
+        },
+        summary: total === 0
+          ? '✅ Nenhum leak detectado nos thresholds configurados'
+          : `⚠️ ${total} cell(s) flagged: ${leaks.CRITICAL.length} CRITICAL, ${leaks.HIGH.length} HIGH, ${leaks.MEDIUM.length} MEDIUM, ${leaks.LOW.length} LOW`,
+        leaks,
+      });
+    } catch (e) {
+      sendJson(res, { ok: false, error: e.message }, 500);
+    }
+    return;
+  }
+
   // GET /admin/p2-status — single source of truth de compliance P2.
   // Reporta config atual dos 11 envs P2-related + frozen_holdout + recomendações.
   // Útil pra validar que prod respeita "shadow=causa, real=sintoma" antes de deploy.
