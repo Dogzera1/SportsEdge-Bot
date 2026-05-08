@@ -7042,6 +7042,98 @@ function _applyEsportsCorrelation(found, sport, match) {
   return found.map((t, i) => ({ ...t, correlationDiscount: adjusted[i].correlationDiscount }));
 }
 
+// 2026-05-08: merge odds BR (KTO/Sportingbet/Bet365/etc via aggregator Supabase)
+// no objeto pinMarkets esperado por football-mt-scanner.
+// Estratégia LINE SHOPPING:
+// - Para cada (line, side) que Pinnacle JÁ tem, mantém a MELHOR odd entre Pinnacle e BR.
+// - Para line que Pinnacle NÃO tem, adiciona entry BR nova.
+// - btts/dc do Pinnacle só são preservadas; BR pode ADICIONAR se Pinnacle não tinha.
+// - Mutates pinMkt in-place.
+function _mergeBrMtIntoPin(pinMkt, brMt) {
+  if (!pinMkt || !brMt) return;
+  // Helper: pega melhor odd entre 2 candidatos (maior odd = mais favorável ao bet).
+  const _best = (a, b) => {
+    const an = Number(a), bn = Number(b);
+    if (!Number.isFinite(an) || an <= 1) return Number.isFinite(bn) && bn > 1 ? bn : null;
+    if (!Number.isFinite(bn) || bn <= 1) return an;
+    return Math.max(an, bn);
+  };
+  // ── TOTALS multi-line ──
+  if (Array.isArray(brMt.ouMulti) && brMt.ouMulti.length) {
+    if (!Array.isArray(pinMkt.totals)) pinMkt.totals = [];
+    // Best per line (BR pode ter múltiplas casas pra mesma line; pega a melhor).
+    const brBestByLine = new Map();
+    for (const it of brMt.ouMulti) {
+      const k = Number(it.point).toFixed(1);
+      const cur = brBestByLine.get(k) || { line: Number(it.point), oddsOver: 0, oddsUnder: 0, _bookOver: null, _bookUnder: null };
+      if (it.over > cur.oddsOver) { cur.oddsOver = it.over; cur._bookOver = it.bookmaker; }
+      if (it.under > cur.oddsUnder) { cur.oddsUnder = it.under; cur._bookUnder = it.bookmaker; }
+      brBestByLine.set(k, cur);
+    }
+    for (const [k, br] of brBestByLine.entries()) {
+      const pinIdx = pinMkt.totals.findIndex(t => Number(t.line).toFixed(1) === k);
+      if (pinIdx < 0) {
+        pinMkt.totals.push({ line: br.line, oddsOver: br.oddsOver, oddsUnder: br.oddsUnder, _book: 'br' });
+      } else {
+        const pin = pinMkt.totals[pinIdx];
+        const bestOver = _best(pin.oddsOver, br.oddsOver);
+        const bestUnder = _best(pin.oddsUnder, br.oddsUnder);
+        if (bestOver === br.oddsOver && bestOver !== Number(pin.oddsOver)) {
+          pin.oddsOver = br.oddsOver; pin._bookOver = br._bookOver;
+        }
+        if (bestUnder === br.oddsUnder && bestUnder !== Number(pin.oddsUnder)) {
+          pin.oddsUnder = br.oddsUnder; pin._bookUnder = br._bookUnder;
+        }
+      }
+    }
+  }
+  // ── HANDICAPS asian multi-line ──
+  if (Array.isArray(brMt.ah) && brMt.ah.length) {
+    if (!Array.isArray(pinMkt.handicaps)) pinMkt.handicaps = [];
+    const brBestByLine = new Map();
+    for (const it of brMt.ah) {
+      const k = Number(it.line).toFixed(1);
+      const cur = brBestByLine.get(k) || { line: Number(it.line), oddsHome: 0, oddsAway: 0, _bookHome: null, _bookAway: null };
+      if (it.home > cur.oddsHome) { cur.oddsHome = it.home; cur._bookHome = it.bookmaker; }
+      if (it.away > cur.oddsAway) { cur.oddsAway = it.away; cur._bookAway = it.bookmaker; }
+      brBestByLine.set(k, cur);
+    }
+    for (const [k, br] of brBestByLine.entries()) {
+      const pinIdx = pinMkt.handicaps.findIndex(h => Number(h.line).toFixed(1) === k);
+      if (pinIdx < 0) {
+        pinMkt.handicaps.push({ line: br.line, oddsHome: br.oddsHome, oddsAway: br.oddsAway, _book: 'br' });
+      } else {
+        const pin = pinMkt.handicaps[pinIdx];
+        const bestHome = _best(pin.oddsHome, br.oddsHome);
+        const bestAway = _best(pin.oddsAway, br.oddsAway);
+        if (bestHome === br.oddsHome && bestHome !== Number(pin.oddsHome)) {
+          pin.oddsHome = br.oddsHome; pin._bookHome = br._bookHome;
+        }
+        if (bestAway === br.oddsAway && bestAway !== Number(pin.oddsAway)) {
+          pin.oddsAway = br.oddsAway; pin._bookAway = br._bookAway;
+        }
+      }
+    }
+  }
+  // ── Double Chance ──
+  if (Array.isArray(brMt.dc) && brMt.dc.length && !pinMkt.dc) {
+    let bestHd = 0, bestHa = 0, bestDa = 0;
+    let bookHd = null, bookHa = null, bookDa = null;
+    for (const it of brMt.dc) {
+      if (it['1x'] > bestHd) { bestHd = it['1x']; bookHd = it.bookmaker; }
+      if (it['12'] > bestHa) { bestHa = it['12']; bookHa = it.bookmaker; }
+      if (it['x2'] > bestDa) { bestDa = it['x2']; bookDa = it.bookmaker; }
+    }
+    if (bestHd > 1 && bestHa > 1 && bestDa > 1) {
+      pinMkt.dc = {
+        h_d: { odd: bestHd, _book: bookHd },
+        h_a: { odd: bestHa, _book: bookHa },
+        d_a: { odd: bestDa, _book: bookDa },
+      };
+    }
+  }
+}
+
 function _resolveMtOddBounds(sport, opts = {}) {
   const envPrefix = sport === 'dota2' ? 'DOTA' : sport === 'cs2' ? 'CS' : String(sport).toUpperCase();
   const envMin = parseFloat(process.env[`${envPrefix}_MARKET_SCAN_MIN_ODD`]);
@@ -18073,6 +18165,23 @@ async function pollFootball(runOnce = false) {
               // Inject BTTS odds do aggregator (não vem do Pinnacle direct, mas
               // está disponível em match.odds.btts via Supabase/odds-aggregator).
               const pinMktWithBtts = match.odds?.btts ? { ...pinMkt, btts: match.odds.btts } : pinMkt;
+              // 2026-05-08: enrich BR MT markets (KTO/Sportingbet/Bet365/Betano/Superbet)
+              // pra MT scanner. Line shopping: quando casa BR oferece odd MELHOR que
+              // Pinnacle (na mesma linha), usa BR. Quando BR tem linha que Pinnacle
+              // não tem, adiciona como entry nova. Opt-out: FOOTBALL_MT_BR_DISABLED=true.
+              if (process.env.FOOTBALL_MT_BR_DISABLED !== 'true') {
+                try {
+                  if (!match._brOddsMt) {
+                    const aggClient = require('./lib/odds-aggregator-client');
+                    await aggClient.enrichFootballMtMarkets([match]).catch(() => null);
+                  }
+                  if (match._brOddsMt) {
+                    _mergeBrMtIntoPin(pinMktWithBtts, match._brOddsMt);
+                  }
+                } catch (e) {
+                  log('DEBUG', 'FB-MT-BR', `merge falhou: ${e.message}`);
+                }
+              }
               // 2026-05-04: shadow puro — captura tips com EV ≥ shadowMinEv (default 0)
               // sem oddOk + sem maxEv. Override: FOOTBALL_SHADOW_MIN_EV.
               const _fbShadowMinEv = parseFloat(process.env.FOOTBALL_SHADOW_MIN_EV ?? '0');
