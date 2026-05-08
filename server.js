@@ -10866,6 +10866,39 @@ setInterval(load, 60000);
     return;
   }
 
+  // GET /admin/gate-attribution-snapshot?days=30&minN=5
+  // Counterfactual gate analysis on-demand (era só cron weekly DM admin).
+  // Pra cada gate: n / saved_loss / lost_profit / net (saved - lost) / hitRate.
+  // net negativo = gate corta edge (candidato relaxar cap)
+  if (p === '/admin/gate-attribution-snapshot' && (req.method === 'GET' || req.method === 'POST')) {
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    try {
+      const { runGateAttribution } = require('./lib/gate-attribution');
+      const days = Math.max(7, Math.min(180, parseInt(parsed.query.days || '30', 10) || 30));
+      const minNPerGate = Math.max(1, Math.min(50, parseInt(parsed.query.minN || '5', 10) || 5));
+      const r = runGateAttribution(db, { days, minNPerGate });
+      const gatesArr = Object.entries(r.gates || {})
+        .map(([reason, g]) => ({ reason, ...g }))
+        .sort((a, b) => (b.lostProfit || 0) - (a.lostProfit || 0));
+      sendJson(res, {
+        ok: true, ts: new Date().toISOString(),
+        cfg: { days, minNPerGate },
+        total: r.total, blocked: r.blocked, blocked_pct: r.blockedPct,
+        saved_loss: r.savedLoss, lost_profit: r.lostProfit, net_saved: r.netSaved,
+        gates_sorted_by_lost_profit: gatesArr,
+        bySport: r.bySport,
+        legend: {
+          saved_loss: 'R$ que gates economizaram bloqueando tips que viriam losing',
+          lost_profit: 'R$ que gates custaram bloqueando tips que viriam winning',
+          net: 'saved_loss - lost_profit. Positivo = gate ajuda. Negativo = gate corta edge',
+          interpretation: 'gates com net negativo são candidatos a relaxar cap',
+        },
+      });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   // GET /admin/ml-gate-rejected-audit?sport=&days=7&limit=200&gate=
   // Lista tips ML que foram rejeitadas por gates pré-DM (Gate EV sanity,
   // league_block, ai_disabled_no_fallback). P2: research-only, sem dispatch.
@@ -16689,6 +16722,14 @@ load();
       };
 
       const liveCond = filter === 'live' ? `AND is_live = 1` : filter === 'pre' ? `AND COALESCE(is_live, 0) = 0` : '';
+      // 2026-05-08: regime filter — espelha /admin/mt-shadow-by-* endpoints.
+      // regime=new (default recomendado): regime_tag IS NOT NULL (shadow puro v1)
+      // regime=old: regime_tag IS NULL (banco antigo, gates aplicados em shadow)
+      // regime=all: ambos (legacy default, contamina calib com regimes mistos)
+      const regime = String(parsed.query.regime || 'new').toLowerCase();
+      const regimeCond = regime === 'new' ? `AND regime_tag IS NOT NULL`
+                       : regime === 'old' ? `AND regime_tag IS NULL`
+                       : '';
       // Walk-forward split: train = [-(days+evalDays), -evalDays], eval = últimos evalDays.
       // evalDays=0 → legacy: train = eval = últimos `days` (in-sample, overfitting risk).
       const totalDays = days + evalDays;
@@ -16700,6 +16741,7 @@ load();
            AND p_model IS NOT NULL
            AND odd IS NOT NULL
            AND created_at >= datetime('now', '-' || ? || ' days')
+           ${regimeCond}
            ${liveCond}
       `).all(sport, totalDays);
 

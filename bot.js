@@ -22961,16 +22961,18 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   // base degrada (shadow ROI piora) enquanto gates ainda mascaram em real.
   // P2-compliant: só DM admin, sem auto-action. Decisão (refit calib, model
   // rollback, revert promote) fica com humano após análise causal.
-  // Janela 14d vs baseline 14-28d. Cron 24h (8h local), dedup 24h.
-  // Opt-out: SHADOW_VS_REAL_DRIFT_AUTO=false.
-  let _lastShadowDriftDay = null;
+  // Janela 14d vs baseline 14-28d.
+  //
+  // 2026-05-08: cadence 24h→6h (env SHADOW_VS_REAL_DRIFT_INTERVAL_H, default 6).
+  // Tennis MT shadow ~22 tips/dia → janela 6h n=5 detecta direção. DM dedup
+  // via _isCycleMuted previne spam. Opt-out: SHADOW_VS_REAL_DRIFT_AUTO=false.
+  let _lastShadowDriftMs = 0;
   async function runShadowVsRealDriftDaily() {
     if (/^(0|false|no)$/i.test(String(process.env.SHADOW_VS_REAL_DRIFT_AUTO ?? 'true'))) return;
-    const now = new Date();
-    if (now.getHours() !== 8) return; // 8h local = offset do CUSUM 9h
-    const today = now.toISOString().slice(0, 10);
-    if (_lastShadowDriftDay === today) return;
-    _lastShadowDriftDay = today;
+    const intervalH = Math.max(1, Math.min(24, parseInt(process.env.SHADOW_VS_REAL_DRIFT_INTERVAL_H || '6', 10) || 6));
+    const intervalMs = intervalH * 60 * 60 * 1000;
+    if (Date.now() - _lastShadowDriftMs < intervalMs) return;
+    _lastShadowDriftMs = Date.now();
     try {
       const { runShadowVsRealDriftCheck } = require('./lib/shadow-vs-real-drift');
       const r = runShadowVsRealDriftCheck(db);
