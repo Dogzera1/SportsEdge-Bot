@@ -184,3 +184,62 @@ Cron seg 15h UTC. DM admin com top 5 gates por |saved_loss − lost_profit|. Ide
 ```
 
 Após Wave 3 fix (commit cb016b7) está P2-compliant — snapshot+verify+holdout usam `is_shadow=0`. Recomendação antes de ON: rodar `POST /admin/readiness-learner-run?dry_run=1&days=30` 1-2x e revisar `r.applied` + `r.verified`.
+
+---
+
+## Workflows operacionais comuns
+
+### Disable manual de market problemático
+
+Quando readiness-learner não pode agir (sample <minN=20) mas leak está confirmado em real:
+
+```
+POST /admin/mt-disable?sport=<sport>&market=<MARKET>&side=<over|under|team1|team2>&reason=<texto>&key=<KEY>
+```
+
+- `side` opcional: omita pra disable do market inteiro pra esse sport
+- Persiste em `market_tips_runtime_state` source='manual'
+- Bot.js refresh in-memory no próximo cron leak guard (1h) ou restart
+
+**Restore manual:**
+```
+DELETE FROM market_tips_runtime_state WHERE sport=? AND market=? AND source='manual';
+```
+(via SQL direto até criar /admin/mt-restore endpoint)
+
+### Audit per sport+market
+
+Visibilidade interna pra investigar leak/edge:
+
+```
+GET /admin/mt-shadow-by-league?sport=<sport>&days=30&minN=5&key=<KEY>
+GET /shadow-readiness?source=real&groupBy=sport_market&sport=<sport>&days=30&key=<KEY>
+GET /admin/mt-shadow-by-ev?sport=<sport>&days=30&key=<KEY>
+```
+
+Inclui disclaimer "research-only" no payload (P2-compliant).
+
+### Cap manual de stake per (sport, market, conf)
+
+Hierarquia de override Kelly mult (mais específico ganha):
+1. `KELLY_<SPORT>_<MARKET>_<CONF>` — ex: `KELLY_TENNIS_HANDICAP_GAMES_MEDIA=0.40`
+2. `KELLY_<SPORT>_<CONF>` — ex: `KELLY_CS_BAIXA=0.30`
+3. `KELLY_<CONF>` — ex: `KELLY_BAIXA=0.50`
+4. Default kelly_mult per sport (gates_runtime_state)
+
+Use pra leaks com sample <20 (abaixo do learner threshold).
+
+### Promover sport/market manualmente
+
+```
+POST /admin/mt-block-league?sport=<sport>&market=<MARKET>&league=<league>&reason=<...>&key=<KEY>
+POST /admin/mt-unblock-league?sport=<sport>&market=<MARKET>&league=<league>&key=<KEY>
+```
+
+### Validar compliance P2 antes de deploy
+
+```
+GET /admin/p2-status?key=<KEY>
+```
+
+`compliance_summary` deve ser `✅`. `version.commit_short` confirma deploy mais recente.

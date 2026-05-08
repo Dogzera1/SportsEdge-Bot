@@ -616,6 +616,18 @@
     <div id="shadowVsRealList"></div>
   </div>
 
+  <!-- Readiness corrections ativas: aplicações reversíveis do learner -->
+  <div class="card" id="readinessCorrectionsCard" style="display:none;margin-bottom:12px">
+    <div class="card-header">
+      <div class="card-title">🤖 Correções ativas (readiness-learner)</div>
+      <div class="card-meta">
+        <button onclick="loadReadinessCorrections()" title="Refresh" aria-label="Refresh readiness corrections" style="background:transparent;border:1px solid var(--border);color:var(--text-dim);padding:2px 6px;border-radius:4px;cursor:pointer;font-size:11px">↻</button>
+        <span id="readinessCorrectionsMeta"></span>
+      </div>
+    </div>
+    <div id="readinessCorrectionsList"></div>
+  </div>
+
   <!-- Main grid: Equity curve + Sport ROI list -->
   <div class="main-grid">
     <div class="card">
@@ -1359,6 +1371,7 @@ async function refresh() {
         loadLeagueLeaks(gen),
         loadLeagueBlocklist(gen),
         loadShadowVsRealDrift(gen),
+        loadReadinessCorrections(gen),
         loadPipelineHealth(gen),
       ]);
     } else {
@@ -1372,6 +1385,7 @@ async function refresh() {
         loadLeagueLeaks(gen),
         loadLeagueBlocklist(gen),
         loadShadowVsRealDrift(gen),
+        loadReadinessCorrections(gen),
         loadPipelineHealth(gen),
         loadUpcoming(gen),
         loadTips(gen),
@@ -2262,6 +2276,97 @@ async function loadShadowVsRealDrift(gen = refreshGen) {
     list.innerHTML = headerRow + rows + legend;
   } catch (e) {
     console.warn('loadShadowVsRealDrift error:', e);
+    card.style.display = 'none';
+  }
+}
+
+// 2026-05-08: card "Correções ativas" — lista readiness_corrections_log status=active.
+// Mostra ações aplicadas pelo learner com countdown pra verify (+14d).
+async function loadReadinessCorrections(gen = refreshGen) {
+  const card = document.getElementById('readinessCorrectionsCard');
+  const list = document.getElementById('readinessCorrectionsList');
+  const meta = document.getElementById('readinessCorrectionsMeta');
+  if (!card || !list) return;
+  try {
+    let r;
+    try {
+      r = await adminFetchJson('/admin/readiness-corrections?status=active&days=60');
+    } catch (eAuth) {
+      card.style.display = 'none';
+      return;
+    }
+    if (shouldAbort(gen)) return;
+    if (!r?.ok) { card.style.display = 'none'; return; }
+    const items = r.items || [];
+    if (!items.length) { card.style.display = 'none'; return; }
+    card.style.display = '';
+    meta.textContent = `${items.length} correção(ões) ativa(s)`;
+
+    const fmtAction = (a) => {
+      const map = {
+        prob_shrink: '🔻 prob shrink',
+        prob_amplify: '🔺 prob amplify',
+        ev_shrink: '📉 EV shrink',
+        ev_boost: '📈 EV boost',
+        gate_kelly_cut: '⛔ kelly cut',
+        gate_kelly_up: '⬆️ kelly up',
+        league_block: '🚫 league block',
+        hard_disable: '🔒 hard disable',
+        ev_calib_refit: '🔧 calib refit',
+      };
+      return map[a] || a;
+    };
+    const fmtFactor = (vb, va) => {
+      if (!vb || !va) return '';
+      if (vb.factor != null && va.factor != null) {
+        return ` (${vb.factor.toFixed(2)} → ${va.factor.toFixed(2)})`;
+      }
+      if (vb.kelly_mult != null && va.kelly_mult != null) {
+        return ` (kelly ${vb.kelly_mult} → ${va.kelly_mult})`;
+      }
+      return '';
+    };
+    const fmtAge = (iso) => {
+      const t = new Date(iso).getTime();
+      const days = (Date.now() - t) / (24 * 60 * 60 * 1000);
+      if (days < 1) return `${(days * 24).toFixed(0)}h atrás`;
+      return `${Math.floor(days)}d atrás`;
+    };
+    const fmtTimeUntilVerify = (iso) => {
+      if (!iso) return '—';
+      const t = new Date(iso).getTime();
+      const days = (t - Date.now()) / (24 * 60 * 60 * 1000);
+      if (days < 0) return '<span style="color:#f59e0b">verify devido</span>';
+      if (days < 1) return `<span style="color:#f59e0b">${(days * 24).toFixed(0)}h</span>`;
+      return `${Math.floor(days)}d`;
+    };
+
+    const rows = items.map(c => {
+      const target = c.market ? `${c.sport}/${c.market}` : `${c.sport}/${c.league || '?'}`;
+      const factorStr = fmtFactor(c.value_before, c.value_after);
+      const reasonShort = String(c.status_reason || '').slice(0, 80).replace(/</g, '&lt;');
+      const escUntil = c.escalation_count > 0 ? ` <span style="color:#f59e0b">↑${c.escalation_count}</span>` : '';
+      return `
+        <div style="padding:8px 12px;border-left:3px solid #7c3aed;background:rgba(124,58,237,0.08);margin-bottom:6px;border-radius:4px">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+              <span style="font-weight:500">${fmtAction(c.action_type)}</span>
+              <code style="background:rgba(255,255,255,0.05);padding:2px 6px;border-radius:3px;font-size:12px">${target.replace(/</g, '&lt;')}</code>
+              <span style="font-size:11px;color:var(--text-dim)">${factorStr}${escUntil}</span>
+            </div>
+            <span class="kpi-meta" style="font-size:11px">aplicado ${fmtAge(c.applied_at)} · verify ${fmtTimeUntilVerify(c.expires_at)}</span>
+          </div>
+          ${reasonShort ? `<div class="kpi-meta" style="font-size:11px;margin-top:4px;color:var(--text-dim)">${reasonShort}${c.n_at_time != null ? ` · n=${c.n_at_time}` : ''}${c.roi_at_time != null ? ` · ROI ${c.roi_at_time.toFixed(1)}%` : ''}</div>` : ''}
+        </div>
+      `;
+    }).join('');
+    const legend = `
+      <div style="padding:8px 10px;font-size:11px;color:var(--text-dim);border-top:1px solid var(--border);background:rgba(0,0,0,0.10)">
+        Aplicações reversíveis do readiness-learner. Cada correção tem expiry (default +14d) — depois disso o cron verify avalia ROI pós-aplicação. Se recovered → reverte; se piorou → escala. Reverter manual: <code>POST /admin/readiness-correction-revert?id=N</code>.
+      </div>`;
+    list.innerHTML = rows + legend;
+  } catch (e) {
+    console.warn('loadReadinessCorrections error:', e);
     card.style.display = 'none';
   }
 }
