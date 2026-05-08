@@ -25205,6 +25205,23 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
     } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
     return;
   }
+  // POST/GET /admin/readiness-corrections-prune?dry_run=1&retentionDays=180&key=<KEY>
+  // Trigger manual da pruneReadinessCorrections. dry_run=1 mostra count sem deletar.
+  if (p === '/admin/readiness-corrections-prune' && (req.method === 'POST' || req.method === 'GET')) {
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    try {
+      const { pruneReadinessCorrections } = require('./lib/readiness-learner');
+      const dryRun = parsed.query.dry_run === '1' || parsed.query.dry_run === 'true';
+      const retentionDays = parsed.query.retentionDays
+        ? Math.max(30, Math.min(730, parseInt(parsed.query.retentionDays, 10) || 180))
+        : undefined;
+      const r = pruneReadinessCorrections(db, { dryRun, retentionDays });
+      sendJson(res, { ok: r.ok, ...r, ts: new Date().toISOString() });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   if (p === '/admin/readiness-correction-revert' && (req.method === 'POST' || req.method === 'GET')) {
     const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }

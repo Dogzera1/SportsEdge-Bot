@@ -22916,6 +22916,33 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   setInterval(() => runP2ComplianceWeekly().catch(e => log('ERROR', 'P2-COMPLIANCE', e.message)), 60 * 60 * 1000);
   setTimeout(() => runP2ComplianceWeekly().catch(() => {}), 95 * 60 * 1000);
 
+  // 2026-05-08: Readiness Corrections Retention Cleanup.
+  // Purga entries finalizadas (verified_ok/reverted/expired) após N dias.
+  // Mantém active+escalated. Default 180d. Roda daily 4h UTC.
+  // Opt-out: READINESS_RETENTION_AUTO=false.
+  let _lastReadinessRetentionDay = null;
+  async function runReadinessRetentionDaily() {
+    if (/^(0|false|no)$/i.test(String(process.env.READINESS_RETENTION_AUTO ?? 'true'))) return;
+    const hourUtc = parseInt(process.env.READINESS_RETENTION_HOUR_UTC || '4', 10);
+    const now = new Date();
+    if (now.getUTCHours() !== hourUtc) return;
+    const today = now.toISOString().slice(0, 10);
+    if (_lastReadinessRetentionDay === today) return;
+    _lastReadinessRetentionDay = today;
+    try {
+      const { pruneReadinessCorrections } = require('./lib/readiness-learner');
+      const r = pruneReadinessCorrections(db);
+      if (r.ok) {
+        log('INFO', 'READINESS-RETENTION',
+          `pruned=${r.deleted} (retention=${r.retentionDays}d, retained_active=${r.retainedActive})`);
+      } else {
+        log('WARN', 'READINESS-RETENTION', `falhou: ${r.error}`);
+      }
+    } catch (e) { log('ERROR', 'READINESS-RETENTION', e.message); }
+  }
+  setInterval(() => runReadinessRetentionDaily().catch(e => log('ERROR', 'READINESS-RETENTION', e.message)), 60 * 60 * 1000);
+  setTimeout(() => runReadinessRetentionDaily().catch(() => {}), 100 * 60 * 1000);
+
   // Feed heartbeat watchdog: cron 5min checa staleness de Pinnacle/PandaScore/etc.
   // Cooldown 30min por (source,sport) pra evitar spam quando feed fica down várias
   // checks. Opt-out: FEED_HEARTBEAT_DISABLED=true.
