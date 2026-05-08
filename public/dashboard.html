@@ -609,6 +609,10 @@
           <option value="21">21d</option>
           <option value="30">30d</option>
         </select>
+        <select class="select-inline" id="shadowVsRealGroupBy" onchange="_saveFilter('shadowVsRealGroupBy', this.value); loadShadowVsRealDrift()" title="Granularidade da agregação" style="margin-left:4px">
+          <option value="sport">por sport</option>
+          <option value="sport_market">por sport × market (ML/MT)</option>
+        </select>
         <button onclick="loadShadowVsRealDrift()" title="Refresh" aria-label="Refresh shadow vs real drift" style="background:transparent;border:1px solid var(--border);color:var(--text-dim);padding:2px 6px;border-radius:4px;cursor:pointer;font-size:11px;margin-left:4px">↻</button>
         <span id="shadowVsRealMeta"></span>
       </div>
@@ -2207,12 +2211,14 @@ async function loadShadowVsRealDrift(gen = refreshGen) {
   try {
     const sel = document.getElementById('shadowVsRealWindow');
     const windowDays = sel ? sel.value : '14';
+    const groupBySel = document.getElementById('shadowVsRealGroupBy');
+    const groupBy = groupBySel?.value === 'sport_market' ? 'sport_market' : 'sport';
     // 2026-05-07 BUG FIX: endpoint /admin/* requer x-admin-key header.
     // apiFetch não passa key → 401 → card sempre hidden. Trocado pra
     // adminFetchJson que injeta header e prompta key via sessionStorage.
     let r;
     try {
-      r = await adminFetchJson(`/admin/shadow-vs-real-snapshot?windowDays=${encodeURIComponent(windowDays)}`);
+      r = await adminFetchJson(`/admin/shadow-vs-real-snapshot?windowDays=${encodeURIComponent(windowDays)}&groupBy=${encodeURIComponent(groupBy)}`);
     } catch (eAuth) {
       // Sem admin key (cancelou prompt, ou key inválida) → esconde card
       // sem poluir console (apiFetch warn é suficiente).
@@ -2232,18 +2238,39 @@ async function loadShadowVsRealDrift(gen = refreshGen) {
     });
     if (!breakdown.length) { card.style.display = 'none'; return; }
     card.style.display = '';
+    const isGranular = groupBy === 'sport_market';
     const nAlerts = r.n_alerts || 0;
     const nWaitingBaseline = breakdown.filter(b => b.skip_reason === 'insufficient_sample' && (b.n_shadow_baseline || 0) === 0 && (b.n_real_baseline || 0) === 0).length;
-    const metaParts = [`${breakdown.length} sport(s)`];
+    const uniqueSports = new Set(breakdown.map(b => b.sport)).size;
+    const metaParts = [isGranular ? `${breakdown.length} cell(s) · ${uniqueSports} sport(s)` : `${breakdown.length} sport(s)`];
     if (nAlerts > 0) metaParts.push(`⚠️ ${nAlerts} alerta(s)`);
     else if (nWaitingBaseline) metaParts.push(`⏳ ${nWaitingBaseline} aguardando baseline`);
     else metaParts.push('✅ sem alerta');
     meta.textContent = metaParts.join(' · ');
 
-    // Ranking: alerts > comparáveis (gap mais negativo) > sem baseline (volume desc)
+    // Ranking: alerts primeiro; depois ordenação contextual.
+    // groupBy=sport: gap mais negativo primeiro (legacy)
+    // groupBy=sport_market: agrupa por sport pra leitura visual,
+    //   dentro do sport ML antes de MT, gap mais negativo decide tie.
     breakdown.sort((a, b) => {
       if (a.alert && !b.alert) return -1;
       if (!a.alert && b.alert) return 1;
+      if (isGranular) {
+        if (a.sport !== b.sport) {
+          // Sports com qualquer alert/dados primeiro
+          const aGapMin = a.gap_pp ?? 999;
+          const bGapMin = b.gap_pp ?? 999;
+          // Mantém sports com mais sample/risco em cima
+          const aWeight = (a.n_shadow_recent || 0) + (a.n_real_recent || 0);
+          const bWeight = (b.n_shadow_recent || 0) + (b.n_real_recent || 0);
+          if (aWeight !== bWeight) return bWeight - aWeight;
+          return a.sport.localeCompare(b.sport);
+        }
+        // Mesmo sport: ML antes de MT
+        const aMlOrder = a.market === 'ML' ? 0 : 1;
+        const bMlOrder = b.market === 'ML' ? 0 : 1;
+        if (aMlOrder !== bMlOrder) return aMlOrder - bMlOrder;
+      }
       const aWaiting = a.skip_reason === 'insufficient_sample';
       const bWaiting = b.skip_reason === 'insufficient_sample';
       if (aWaiting && !bWaiting) return 1;
@@ -2257,10 +2284,18 @@ async function loadShadowVsRealDrift(gen = refreshGen) {
     const colorRoi = (v) => v == null ? 'var(--text-dim)' : (v >= 5 ? '#22c55e' : v >= 0 ? '#a3a3a3' : v >= -5 ? '#f59e0b' : '#ef4444');
     const colorDelta = (v) => v == null ? 'var(--text-dim)' : (v >= 0 ? '#22c55e' : v >= -3 ? '#f59e0b' : '#ef4444');
     const fmtBase = (v, n) => n === 0 ? '<span style="color:#3b82f6;font-style:italic">aguardando</span>' : (v == null ? '—' : fmtRoi(v));
+    const colMkt = (m) => m === 'ML' ? '<span style="background:rgba(99,102,241,0.18);color:#a5b4fc;padding:1px 6px;border-radius:3px;font-size:10px;font-weight:600">ML</span>'
+                       : m === 'MT' ? '<span style="background:rgba(34,197,94,0.18);color:#86efac;padding:1px 6px;border-radius:3px;font-size:10px;font-weight:600">MT</span>'
+                       : '';
 
+    // Layout: groupBy=sport (9 cols), sport_market (10 cols com Mkt)
+    const gridCols = isGranular
+      ? '80px 50px 90px 90px 70px 90px 90px 70px 70px 60px'
+      : '80px 90px 90px 70px 90px 90px 70px 70px 60px';
     const headerRow = `
-      <div style="display:grid;grid-template-columns:80px 90px 90px 70px 90px 90px 70px 70px 60px;gap:8px;padding:6px 10px;font-size:11px;color:var(--text-dim);font-weight:500;border-bottom:1px solid var(--border)">
+      <div style="display:grid;grid-template-columns:${gridCols};gap:8px;padding:6px 10px;font-size:11px;color:var(--text-dim);font-weight:500;border-bottom:1px solid var(--border)">
         <div>Sport</div>
+        ${isGranular ? '<div>Mkt</div>' : ''}
         <div>Shadow recente</div>
         <div>Shadow base</div>
         <div>Δ shadow</div>
@@ -2270,15 +2305,21 @@ async function loadShadowVsRealDrift(gen = refreshGen) {
         <div>Gap</div>
         <div>n S/R</div>
       </div>`;
+    let prevSport = null;
     const rows = breakdown.map(b => {
       const isWaiting = b.skip_reason === 'insufficient_sample';
       const bgColor = b.alert ? 'rgba(239,68,68,0.10)' : (isWaiting ? 'rgba(59,130,246,0.05)' : 'transparent');
       const borderLeft = b.alert ? '3px solid #ef4444' : (isWaiting ? '3px solid #3b82f6' : '3px solid transparent');
       const icon = b.alert ? '🩸 ' : (isWaiting ? '⏳ ' : '');
       const opacityCmp = isWaiting ? 'opacity:0.5' : '';
+      // Em granular, mostra sport name só na primeira row do grupo (visual hierarchy)
+      const showSport = !isGranular || prevSport !== b.sport;
+      const sportLabel = showSport ? `<strong>${icon}${b.sport}</strong>` : `<span style="color:var(--text-dim)">↳</span>`;
+      prevSport = b.sport;
       return `
-        <div style="display:grid;grid-template-columns:80px 90px 90px 70px 90px 90px 70px 70px 60px;gap:8px;padding:6px 10px;font-size:12px;background:${bgColor};border-left:${borderLeft};border-bottom:1px solid var(--border)">
-          <div><strong>${icon}${b.sport}</strong></div>
+        <div style="display:grid;grid-template-columns:${gridCols};gap:8px;padding:6px 10px;font-size:12px;background:${bgColor};border-left:${borderLeft};border-bottom:1px solid var(--border)">
+          <div>${sportLabel}</div>
+          ${isGranular ? `<div>${colMkt(b.market)}</div>` : ''}
           <div style="color:${colorRoi(b.shadow_recent)}">${fmtRoi(b.shadow_recent)}</div>
           <div>${fmtBase(b.shadow_baseline, b.n_shadow_baseline)}</div>
           <div style="color:${colorDelta(b.delta_shadow)};${opacityCmp}"><strong>${fmtPp(b.delta_shadow)}</strong></div>
@@ -2289,9 +2330,12 @@ async function loadShadowVsRealDrift(gen = refreshGen) {
           <div style="color:var(--text-dim);font-size:11px">${b.n_shadow_recent}/${b.n_real_recent}</div>
         </div>`;
     }).join('');
+    const granLegend = isGranular
+      ? ' <span style="color:#a5b4fc">ML</span> = match-winner (1X2/OVER 2.5/UNDER 2.5). <span style="color:#86efac">MT</span> = handicap/totais/kills/etc.'
+      : '';
     const legend = `
       <div style="padding:8px 10px;font-size:11px;color:var(--text-dim);border-top:1px solid var(--border);background:rgba(0,0,0,0.10)">
-        🩸 alerta = shadow piorou ≥3pp E gap ≤ -5pp (modelo base degradando, gates mascarando em real). ⏳ aguardando baseline = sem dados em 14-28d (espera mais histórico). Detector P2-compliant — sem auto-action.
+        🩸 alerta = shadow piorou ≥3pp E gap ≤ -5pp (modelo base degradando, gates mascarando em real). ⏳ aguardando baseline = sem dados em 14-28d (espera mais histórico).${granLegend} Detector P2-compliant — sem auto-action.
       </div>`;
     list.innerHTML = headerRow + rows + legend;
   } catch (e) {
@@ -5501,6 +5545,9 @@ function init() {
   _restoreSelect('tipsPageSize', 'tipsPageSize');
   _restoreSelect('equityDays', 'equityDays');
   _restoreSelect('leagueLeaksDays', 'leagueLeaksDays');
+  _restoreSelect('shadowVsRealWindow', 'shadowVsRealWindow');
+  _restoreSelect('shadowVsRealGroupBy', 'shadowVsRealGroupBy');
+  _restoreSelect('leakSummaryDays', 'leakSummaryDays');
   // sportSelect já está no DOM com options dinâmicos — restaura currentSport
   const ss = document.getElementById('sportSelect');
   if (ss) {

@@ -10936,9 +10936,10 @@ setInterval(load, 60000);
     return;
   }
 
-  // GET /admin/shadow-vs-real-snapshot?windowDays=14&minNShadow=30&minNReal=20
+  // GET /admin/shadow-vs-real-snapshot?windowDays=14&minNShadow=30&minNReal=20&groupBy=sport|sport_market
   // Snapshot completo do detector lib/shadow-vs-real-drift.js — TODOS os sports
   // (incluindo os que não dispararam alert), pra UI ops monitorar regimes.
+  // 2026-05-08: groupBy=sport_market splita ML vs MT (P1 granularidade).
   if (p === '/admin/shadow-vs-real-snapshot' && (req.method === 'GET' || req.method === 'POST')) {
     const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
@@ -10951,11 +10952,13 @@ setInterval(load, 60000);
       if (Number.isFinite(minNS) && minNS >= 5) opts.minNShadow = minNS;
       const minNR = parseInt(parsed.query.minNReal, 10);
       if (Number.isFinite(minNR) && minNR >= 5) opts.minNReal = minNR;
+      if (parsed.query.groupBy === 'sport_market') opts.groupBy = 'sport_market';
       const r = runShadowVsRealDriftCheck(db, opts);
       sendJson(res, {
         ok: true,
         ts: new Date().toISOString(),
         cfg: r.cfg,
+        groupBy: r.groupBy,
         n_alerts: r.alerts.length,
         alerts: r.alerts,
         breakdown: r.breakdown,
@@ -10964,6 +10967,7 @@ setInterval(load, 60000);
           delta_real: 'real_recent − real_baseline (pp). Negativo = real piorando.',
           gap_pp: 'delta_shadow − delta_real (pp). Negativo = shadow degradando MAIS que real (gates mascarando).',
           alert: 'true quando delta_shadow ≤ -3pp E gap ≤ -5pp (early warning).',
+          market: 'ML = match-winner (1X2, OVER/UNDER 2.5). MT = handicap/totais/kills/etc.',
         },
       });
     } catch (e) {
