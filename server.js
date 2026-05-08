@@ -121,6 +121,49 @@ try {
   if (applied > 0) log('INFO', 'BOOT', `MT promote: ${applied} sport(s) ativados via settings`);
 } catch (e) { log('WARN', 'BOOT', `MT promote loader: ${e.message}`); }
 
+// 2026-05-08 (env audit): validators de configuração no boot.
+// (a) Whitespace em nomes de env (Railway permite, mas process.env.X retorna
+//     undefined porque o name real é 'X    '). Bot usa default em código,
+//     comportamento silenciosamente errado.
+// (b) KELLY hierarchy: ALTA confidence deveria stake >= MEDIA >= BAIXA.
+//     Inversão = bug de config (visto: KELLY_CS_ALTA=0.212 < MEDIA=0.30).
+// (c) Envs spurious typo (FOOTBALLMTSHADOWONLY, VAL_MARKET_TIPS_ENABLED, etc).
+// Warns no boot — admin pode corrigir no Railway.
+try {
+  const envKeys = Object.keys(process.env);
+  // (a) whitespace
+  const wsKeys = envKeys.filter(k => /\s/.test(k));
+  if (wsKeys.length) {
+    for (const k of wsKeys) {
+      log('WARN', 'ENV-AUDIT', `whitespace em nome de env: '${k}' (process.env['${k.trim()}'] retorna undefined → bot usa default)`);
+    }
+  }
+  // (b) KELLY hierarchy
+  const sports = ['LOL', 'CS', 'CS2', 'DOTA2', 'TENNIS', 'VALORANT', 'FOOTBALL', 'MMA', 'BASKET'];
+  for (const sp of sports) {
+    const baixa = parseFloat(process.env[`KELLY_${sp}_BAIXA`]);
+    const media = parseFloat(process.env[`KELLY_${sp}_MEDIA`]);
+    const alta = parseFloat(process.env[`KELLY_${sp}_ALTA`]);
+    if (Number.isFinite(media) && Number.isFinite(alta) && alta < media) {
+      log('WARN', 'ENV-AUDIT', `KELLY_${sp}_ALTA=${alta} < KELLY_${sp}_MEDIA=${media} (inversão lógica — ALTA confidence deveria stake mais)`);
+    }
+    if (Number.isFinite(baixa) && Number.isFinite(media) && media < baixa) {
+      log('WARN', 'ENV-AUDIT', `KELLY_${sp}_MEDIA=${media} < KELLY_${sp}_BAIXA=${baixa} (inversão lógica)`);
+    }
+  }
+  // (c) typos conhecidos — match envs sem underscore que código procura com underscore
+  const typoMap = {
+    'FOOTBALLMTSHADOWONLY': 'FOOTBALL_MT_SHADOW_ONLY',
+    'FOOTBALLMAXDIVERGENCEPP': 'FB_DIVERGENCE_MAX_PP',
+    'VAL_MARKET_TIPS_ENABLED': 'VALORANT_MARKET_TIPS_ENABLED',
+  };
+  for (const [typo, correct] of Object.entries(typoMap)) {
+    if (process.env[typo] !== undefined) {
+      log('WARN', 'ENV-AUDIT', `env spurious '${typo}' setada — código lê '${correct}'. Renomeie ou delete.`);
+    }
+  }
+} catch (e) { log('DEBUG', 'ENV-AUDIT', `validator falhou: ${e.message}`); }
+
 // Filtra candidates odds pra manter só books que user aposta.
 // ENV: PREFERRED_BOOKMAKERS=Pinnacle,Bet365 (csv, case-insensitive, substring match).
 // Fallback: se nenhum candidate bate (ex: SX.Bet é único disponível), retorna
@@ -10852,6 +10895,100 @@ setInterval(load, 60000);
   // GET /admin/cron-status?key=<ADMIN_KEY>
   // Mostra: lastTs, count, lastResult, lastError, lastDurationMs, age_s,
   // expected_interval_ms, is_stale (age > 2x expected).
+  // GET /admin/env-audit — reporta envs spurious / whitespace / KELLY inversões
+  // 2026-05-08: criado após audit de prod envs revelar 5+ gotchas (whitespace
+  // em SERVER_PORT/LOL_EV_THRESHOLD, KELLY_CS_ALTA<MEDIA, FOOTBALLMTSHADOWONLY
+  // typo, etc). Admin-only endpoint pra checagem rápida.
+  if (p === '/admin/env-audit' && (req.method === 'GET' || req.method === 'POST')) {
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    try {
+      const envKeys = Object.keys(process.env);
+      const issues = { whitespace: [], kelly_inversion: [], typos: [], suspicious: [] };
+
+      // Whitespace em nomes
+      for (const k of envKeys.filter(k => /\s/.test(k))) {
+        issues.whitespace.push({
+          env: k, trimmed: k.trim(),
+          impact: `process.env['${k.trim()}'] retorna undefined; bot usa default em código`,
+        });
+      }
+
+      // Kelly hierarchy
+      const sports = ['LOL', 'CS', 'CS2', 'DOTA2', 'TENNIS', 'VALORANT', 'FOOTBALL', 'MMA', 'BASKET'];
+      for (const sp of sports) {
+        const b = parseFloat(process.env[`KELLY_${sp}_BAIXA`]);
+        const m = parseFloat(process.env[`KELLY_${sp}_MEDIA`]);
+        const a = parseFloat(process.env[`KELLY_${sp}_ALTA`]);
+        if (Number.isFinite(m) && Number.isFinite(a) && a < m) {
+          issues.kelly_inversion.push({
+            sport: sp, alta: a, media: m,
+            impact: `tip ${sp} CONF=ALTA recebe stake MENOR que CONF=MEDIA (inversão)`,
+          });
+        }
+        if (Number.isFinite(b) && Number.isFinite(m) && m < b) {
+          issues.kelly_inversion.push({
+            sport: sp, media: m, baixa: b,
+            impact: `tip ${sp} CONF=MEDIA recebe stake MENOR que CONF=BAIXA (inversão)`,
+          });
+        }
+      }
+
+      // Typos conhecidos
+      const typoMap = {
+        'FOOTBALLMTSHADOWONLY': 'FOOTBALL_MT_SHADOW_ONLY',
+        'FOOTBALLMAXDIVERGENCEPP': 'FB_DIVERGENCE_MAX_PP',
+        'VAL_MARKET_TIPS_ENABLED': 'VALORANT_MARKET_TIPS_ENABLED',
+      };
+      for (const [typo, correct] of Object.entries(typoMap)) {
+        if (process.env[typo] !== undefined) {
+          issues.typos.push({
+            env: typo, value: process.env[typo],
+            should_be: correct,
+            impact: `código lê '${correct}'; '${typo}' é ignorado`,
+          });
+        }
+      }
+
+      // Tokens duplicados (suspicious)
+      const tokens = {
+        OPPORTUNITY_TOKEN: process.env.OPPORTUNITY_TOKEN,
+        TIPS_UNIFIED_TOKEN: process.env.TIPS_UNIFIED_TOKEN,
+        TELEGRAM_TOKEN_CS: process.env.TELEGRAM_TOKEN_CS,
+        TELEGRAM_TOKEN_SNOOKER: process.env.TELEGRAM_TOKEN_SNOOKER,
+      };
+      const dups = {};
+      for (const [k, v] of Object.entries(tokens)) {
+        if (!v) continue;
+        const sig = String(v).slice(0, 14);
+        if (!dups[sig]) dups[sig] = [];
+        dups[sig].push(k);
+      }
+      for (const [sig, list] of Object.entries(dups)) {
+        if (list.length > 1) {
+          issues.suspicious.push({
+            type: 'duplicate_token', envs: list,
+            note: `mesmo token Telegram em ${list.length} envs (sig=${sig}...)`,
+          });
+        }
+      }
+
+      const total = Object.values(issues).reduce((s, arr) => s + arr.length, 0);
+      sendJson(res, {
+        ok: true, ts: new Date().toISOString(),
+        n_issues: total,
+        issues,
+        recommendations: total > 0 ? [
+          'Whitespace: editar env no Railway dashboard, remover espaços do NOME',
+          'Kelly inversion: setar KELLY_<sport>_ALTA >= KELLY_<sport>_MEDIA',
+          'Typos: deletar env spurious OU renomear pro nome correto',
+          'Tokens duplicados: confirmar intencional (ex: OPPORTUNITY_TOKEN = SNOOKER_TOKEN porque snooker disabled)',
+        ] : ['Sem issues detectadas — config saudável'],
+      });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   // GET /admin/holdout-status — mostra FROZEN_HOLDOUT_DAYS atual + cutoff iso
   // por sistema. Útil pra confirmar que auto-tunes estão respeitando reserva.
   if (p === '/admin/holdout-status' && (req.method === 'GET' || req.method === 'POST')) {
