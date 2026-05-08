@@ -2173,7 +2173,18 @@ async function loadShadowVsRealDrift(gen = refreshGen) {
   try {
     const sel = document.getElementById('shadowVsRealWindow');
     const windowDays = sel ? sel.value : '14';
-    const r = await apiFetch(`/admin/shadow-vs-real-snapshot?windowDays=${encodeURIComponent(windowDays)}`);
+    // 2026-05-07 BUG FIX: endpoint /admin/* requer x-admin-key header.
+    // apiFetch não passa key → 401 → card sempre hidden. Trocado pra
+    // adminFetchJson que injeta header e prompta key via sessionStorage.
+    let r;
+    try {
+      r = await adminFetchJson(`/admin/shadow-vs-real-snapshot?windowDays=${encodeURIComponent(windowDays)}`);
+    } catch (eAuth) {
+      // Sem admin key (cancelou prompt, ou key inválida) → esconde card
+      // sem poluir console (apiFetch warn é suficiente).
+      card.style.display = 'none';
+      return;
+    }
     if (shouldAbort(gen)) return;
     if (!r?.ok) { card.style.display = 'none'; return; }
     // 2026-05-07: filtro permissivo — mostra cells com qualquer volume recente
