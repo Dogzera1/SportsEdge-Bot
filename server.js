@@ -17678,12 +17678,27 @@ load();
       // pattern `<base>::mt::<market>::<side>::ln<tag>` onde tag=P3.5 → +3.5,
       // N3.5 → -3.5, 21.5 → 21.5 (totais). Espelha lib/clv-capture parseSynthetic.
       // Stake real em unidades = stake_reais / unit_value (uniformiza com shadow).
+      // 2026-05-08: filter por market_type (UPPER comparison) em vez de match_id
+      // substring — case-insensitive evita miss em variações handicapGames vs HANDICAP_GAMES.
+      const _marketToType = (m) => {
+        const mu = String(m || '').toLowerCase();
+        if (mu === 'handicapgames') return 'HANDICAP_GAMES';
+        if (mu === 'totalgames') return 'TOTAL_GAMES';
+        if (mu === 'handicapsets') return 'HANDICAP_SETS';
+        if (mu === 'totalsets') return 'TOTAL_SETS';
+        return mu.toUpperCase();
+      };
       if (source === 'real' || source === 'all') {
         const params = [sport, days];
-        let where = `sport = ? AND COALESCE(is_shadow,0)=0 AND COALESCE(archived,0)=0 AND result IN ('win','loss','void') AND sent_at >= datetime('now', '-' || ? || ' days') AND match_id LIKE '%::mt::%'`;
-        if (market) { where += ` AND match_id LIKE ?`; params.push(`%::mt::${String(market).toLowerCase()}::%`); }
+        let where = `sport = ? AND COALESCE(is_shadow,0)=0 AND COALESCE(archived,0)=0 AND result IN ('win','loss','void') AND sent_at >= datetime('now', '-' || ? || ' days')`;
+        if (market) {
+          where += ` AND UPPER(market_type) = ?`;
+          params.push(_marketToType(market));
+        } else {
+          where += ` AND UPPER(market_type) NOT IN ('ML','1X2_H','1X2_A','1X2_D','OVER_2.5','UNDER_2.5')`;
+        }
         const rows = db.prepare(`
-          SELECT match_id, result, stake_reais, profit_reais, ev_pct, odds, clv_pct
+          SELECT match_id, result, stake_reais, profit_reais, ev as ev_pct, odds, clv_pct, market_type
           FROM tips
           WHERE ${where}
         `).all(...params);
@@ -17706,7 +17721,7 @@ load();
         };
         for (const r of rows) {
           const parsed = _parse(r.match_id);
-          if (!parsed) continue;
+          if (!parsed || parsed.line == null) continue; // sem line (ex: ML) → skip
           const line = parsed.line;
           const side = parsed.side || '?';
           const key = `${line}|${side}`;
@@ -17719,7 +17734,11 @@ load();
           const pfU = (Number(r.profit_reais) || 0) / uv;
           b.total_stake += stU;
           b.total_profit += pfU;
-          if (r.ev_pct != null) b.ev_sum += Number(r.ev_pct) || 0;
+          // tips.ev é TEXT formato "+12.3%" — parse pra número
+          if (r.ev_pct != null) {
+            const _evN = parseFloat(String(r.ev_pct).replace(/[%+]/g, ''));
+            if (Number.isFinite(_evN)) b.ev_sum += _evN;
+          }
           if (r.odds != null) b.odd_sum += Number(r.odds) || 0;
           if (r.clv_pct != null) { b.clv_sum += Number(r.clv_pct); b.clv_n += 1; }
         }
