@@ -18976,7 +18976,8 @@ async function pollTableTennis(runOnce = false) {
         }, 'tabletennis');
 
         if (!rec?.tipId) {
-          log('WARN', 'AUTO-TT', `record-tip falhou: ${pickTeam} @ ${pickOdd}${rec?.reason ? ` (${rec.reason})` : ''}`);
+          const _lvl = rec?.skipped ? 'INFO' : 'WARN';
+          log(_lvl, 'AUTO-TT', `record-tip falhou: ${pickTeam} @ ${pickOdd}${rec?.reason ? ` (${rec.reason})` : ''}`);
           analyzedTT.set(key, { ts: now, tipSent: false, skipped: true, reason: rec?.reason || null });
           continue;
         }
@@ -19698,7 +19699,8 @@ Máximo 150 palavras.`;
         }
 
         if (!rec?.tipId) {
-          log('WARN', 'AUTO-CS', `record-tip falhou: ${pickTeam} @ ${pickOdd}${rec?.reason ? ` (${rec.reason})` : ''}`);
+          const _lvl = rec?.skipped ? 'INFO' : 'WARN';
+          log(_lvl, 'AUTO-CS', `record-tip falhou: ${pickTeam} @ ${pickOdd}${rec?.reason ? ` (${rec.reason})` : ''}`);
           analyzedCs.set(key, { ts: now, tipSent: false, skipped: true, reason: rec?.reason || null });
           continue;
         }
@@ -20237,7 +20239,8 @@ async function pollValorant(runOnce = false) {
         }, 'valorant');
 
         if (!rec?.tipId) {
-          log('WARN', 'AUTO-VAL', `record-tip falhou: ${pickTeam} @ ${pickOdd}${rec?.reason ? ` (${rec.reason})` : ''}`);
+          const _lvl = rec?.skipped ? 'INFO' : 'WARN';
+          log(_lvl, 'AUTO-VAL', `record-tip falhou: ${pickTeam} @ ${pickOdd}${rec?.reason ? ` (${rec.reason})` : ''}`);
           // Dedup: marca analyzed mesmo quando skipped/falhou pra não loopar.
           analyzedValorant.set(key, { ts: now, tipSent: false, skipped: true, reason: rec?.reason || null });
           continue;
@@ -20525,7 +20528,8 @@ async function runAutoDarts() {
           }, 'darts');
 
           if (!rec?.tipId) {
-            log('WARN', 'AUTO-DARTS', `record-tip falhou: ${pickTeam} @ ${pickOdd}${rec?.reason ? ` (${rec.reason})` : ''}`);
+            const _lvl = rec?.skipped ? 'INFO' : 'WARN';
+            log(_lvl, 'AUTO-DARTS', `record-tip falhou: ${pickTeam} @ ${pickOdd}${rec?.reason ? ` (${rec.reason})` : ''}`);
             analyzedDarts.set(key, { ts: now, tipSent: false, skipped: true, reason: rec?.reason || null });
             continue;
           }
@@ -20731,7 +20735,8 @@ async function runAutoSnooker() {
           }, 'snooker');
 
           if (!rec?.tipId) {
-            log('WARN', 'AUTO-SNOOKER', `record-tip falhou: ${pickTeam} @ ${pickOdd}${rec?.reason ? ` (${rec.reason})` : ''}`);
+            const _lvl = rec?.skipped ? 'INFO' : 'WARN';
+            log(_lvl, 'AUTO-SNOOKER', `record-tip falhou: ${pickTeam} @ ${pickOdd}${rec?.reason ? ` (${rec.reason})` : ''}`);
             analyzedSnooker.set(key, { ts: now, tipSent: false, skipped: true, reason: rec?.reason || null });
             continue;
           }
@@ -21036,7 +21041,8 @@ async function runAutoBasket() {
       }, 'basket');
 
       if (!rec?.tipId) {
-        log('WARN', 'AUTO-BASKET', `record-tip falhou: ${pickTeam} @ ${pickOdd}${rec?.reason ? ` (${rec.reason})` : ''}`);
+        const _lvl = rec?.skipped ? 'INFO' : 'WARN';
+        log(_lvl, 'AUTO-BASKET', `record-tip falhou: ${pickTeam} @ ${pickOdd}${rec?.reason ? ` (${rec.reason})` : ''}`);
         analyzedBasket.set(key, { ts: now, tipSent: false, skipped: true, reason: rec?.reason || null });
         continue;
       }
