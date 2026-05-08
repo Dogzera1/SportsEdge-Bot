@@ -633,6 +633,45 @@
     <div id="readinessCorrectionsList"></div>
   </div>
 
+  <!-- MT performance per linha — granularidade fina P1 (handicap/total per linha individual) -->
+  <div class="card" id="mtByLineCard" style="display:none;margin-bottom:12px">
+    <div class="card-header">
+      <div class="card-title">📐 MT performance per linha (P1 granular)</div>
+      <div class="card-meta">
+        <select class="select-inline" id="mtByLineSport" onchange="_saveFilter('mtByLineSport', this.value); loadMtByLine()" title="Sport">
+          <option value="tennis" selected>tennis</option>
+          <option value="lol">lol</option>
+          <option value="cs2">cs2</option>
+          <option value="dota2">dota2</option>
+          <option value="football">football</option>
+          <option value="valorant">valorant</option>
+          <option value="basket">basket</option>
+        </select>
+        <select class="select-inline" id="mtByLineMarket" onchange="_saveFilter('mtByLineMarket', this.value); loadMtByLine()" title="Market" style="margin-left:4px">
+          <option value="handicapGames" selected>handicapGames</option>
+          <option value="totalGames">totalGames</option>
+          <option value="handicapSets">handicapSets</option>
+          <option value="totalSets">totalSets</option>
+          <option value="">(qualquer MT)</option>
+        </select>
+        <select class="select-inline" id="mtByLineSource" onchange="_saveFilter('mtByLineSource', this.value); loadMtByLine()" title="Universo de tips" style="margin-left:4px">
+          <option value="real" selected>real (P2-acionável)</option>
+          <option value="shadow">shadow (research)</option>
+          <option value="all">all (somado)</option>
+        </select>
+        <select class="select-inline" id="mtByLineDays" onchange="_saveFilter('mtByLineDays', this.value); loadMtByLine()" title="Janela" style="margin-left:4px">
+          <option value="14">14d</option>
+          <option value="30" selected>30d</option>
+          <option value="60">60d</option>
+          <option value="90">90d</option>
+        </select>
+        <button onclick="loadMtByLine()" title="Refresh" aria-label="Refresh MT by line" style="background:transparent;border:1px solid var(--border);color:var(--text-dim);padding:2px 6px;border-radius:4px;cursor:pointer;font-size:11px;margin-left:4px">↻</button>
+        <span id="mtByLineMeta"></span>
+      </div>
+    </div>
+    <div id="mtByLineList"></div>
+  </div>
+
   <!-- Leaks detectados: cross-sport audit em 1 view -->
   <div class="card" id="leakSummaryCard" style="display:none;margin-bottom:12px">
     <div class="card-header">
@@ -1396,6 +1435,7 @@ async function refresh() {
         loadShadowVsRealDrift(gen),
         loadReadinessCorrections(gen),
         loadLeakSummary(gen),
+        loadMtByLine(gen),
         loadPipelineHealth(gen),
       ]);
     } else {
@@ -1411,6 +1451,7 @@ async function refresh() {
         loadShadowVsRealDrift(gen),
         loadReadinessCorrections(gen),
         loadLeakSummary(gen),
+        loadMtByLine(gen),
         loadPipelineHealth(gen),
         loadUpcoming(gen),
         loadTips(gen),
@@ -2448,6 +2489,101 @@ async function loadReadinessCorrections(gen = refreshGen) {
     list.innerHTML = rows + legend;
   } catch (e) {
     console.warn('loadReadinessCorrections error:', e);
+    card.style.display = 'none';
+  }
+}
+
+// 2026-05-08: card "MT performance per linha" — granularidade fina P1.
+// Reusa /admin/mt-shadow-by-line (criado nesta mesma sessão). Mostra per
+// (line, side) ROI/hit/CLV. Útil pra detectar leak granular dentro de
+// markets agregados (ex: tennis handicapGames +5.5 home -80% real n=6
+// vs +2.5 away +21% n=16 — gates funcionam DIFERENTE per linha).
+async function loadMtByLine(gen = refreshGen) {
+  const card = document.getElementById('mtByLineCard');
+  const list = document.getElementById('mtByLineList');
+  const meta = document.getElementById('mtByLineMeta');
+  if (!card || !list) return;
+  try {
+    const sport = document.getElementById('mtByLineSport')?.value || 'tennis';
+    const market = document.getElementById('mtByLineMarket')?.value || 'handicapGames';
+    const source = document.getElementById('mtByLineSource')?.value || 'real';
+    const days = document.getElementById('mtByLineDays')?.value || '30';
+    const minN = source === 'shadow' ? '5' : '3';
+    const qs = new URLSearchParams({ sport, days, source, minN });
+    if (market) qs.set('market', market);
+    let r;
+    try {
+      r = await adminFetchJson(`/admin/mt-shadow-by-line?${qs.toString()}`);
+    } catch (eAuth) { card.style.display = 'none'; return; }
+    if (shouldAbort(gen)) return;
+    if (!r?.ok) { card.style.display = 'none'; return; }
+    const rows = r.rows || [];
+    if (!rows.length) {
+      card.style.display = '';
+      list.innerHTML = `<div style="padding:16px;text-align:center;color:var(--text-dim);font-size:12px">Sem dados pra ${sport}/${market || 'qualquer MT'} (${source}, ${days}d, n≥${minN}). Mude filtros acima.</div>`;
+      meta.textContent = `0 buckets · ${source}`;
+      return;
+    }
+    card.style.display = '';
+    const sourceLabel = { real: '✓ real', shadow: '🔬 shadow', all: '🔄 all' }[source] || source;
+    meta.textContent = `${rows.length} bucket(s) · ${sourceLabel} · ${days}d`;
+
+    const fmtPp = (v, suffix='%') => v == null ? '—' : `${v >= 0 ? '+' : ''}${v.toFixed(1)}${suffix}`;
+    const fmtRoi = (v) => v == null ? '—' : `${v >= 0 ? '+' : ''}${v.toFixed(1)}%`;
+    const colorRoi = (v) => v == null ? 'var(--text-dim)' : (v >= 10 ? '#22c55e' : v >= 0 ? '#86efac' : v >= -10 ? '#f59e0b' : '#ef4444');
+    const colorClv = (v) => v == null ? 'var(--text-dim)' : (v >= 0 ? '#22c55e' : v >= -3 ? '#f59e0b' : '#ef4444');
+    const colorN = (n) => n >= 15 ? '#22c55e' : n >= 10 ? '#86efac' : n >= 5 ? '#f59e0b' : 'var(--text-dim)';
+    const fmtLine = (l) => l == null ? '—' : `${l >= 0 ? '+' : ''}${l.toFixed(1)}`;
+    const colSide = (s) => {
+      const c = (s === 'home' || s === 'over') ? '#a5b4fc' : (s === 'away' || s === 'under') ? '#86efac' : 'var(--text-dim)';
+      const bg = (s === 'home' || s === 'over') ? 'rgba(99,102,241,0.15)' : (s === 'away' || s === 'under') ? 'rgba(34,197,94,0.15)' : 'rgba(120,113,108,0.15)';
+      return `<span style="background:${bg};color:${c};padding:1px 6px;border-radius:3px;font-size:10px;font-weight:600">${s || '?'}</span>`;
+    };
+
+    const headerRow = `
+      <div style="display:grid;grid-template-columns:60px 60px 50px 80px 70px 80px 80px 80px 70px;gap:8px;padding:6px 10px;font-size:11px;color:var(--text-dim);font-weight:500;border-bottom:1px solid var(--border)">
+        <div>Linha</div>
+        <div>Side</div>
+        <div>n</div>
+        <div>W/L/V</div>
+        <div>Hit%</div>
+        <div>ROI%</div>
+        <div>Stake_u</div>
+        <div>Profit_u</div>
+        <div>CLV%</div>
+      </div>`;
+    const bodyRows = rows.map(b => {
+      const isLeak = b.roi_pct != null && b.roi_pct <= -15 && b.n >= 10;
+      const isSweet = b.roi_pct != null && b.roi_pct >= 10 && b.n >= 10;
+      const bg = isLeak ? 'rgba(239,68,68,0.10)' : isSweet ? 'rgba(34,197,94,0.10)' : 'transparent';
+      const borderL = isLeak ? '3px solid #ef4444' : isSweet ? '3px solid #22c55e' : '3px solid transparent';
+      const icon = isLeak ? '🔴' : isSweet ? '🟢' : '';
+      const wlv = `${b.wins}/${b.losses}/${b.voids}`;
+      return `
+        <div style="display:grid;grid-template-columns:60px 60px 50px 80px 70px 80px 80px 80px 70px;gap:8px;padding:6px 10px;font-size:12px;background:${bg};border-left:${borderL};border-bottom:1px solid var(--border)">
+          <div><strong>${icon} ${fmtLine(b.line)}</strong></div>
+          <div>${colSide(b.side)}</div>
+          <div style="color:${colorN(b.n)};font-weight:600">${b.n}</div>
+          <div style="color:var(--text-dim);font-size:11px">${wlv}</div>
+          <div>${b.hit_rate != null ? b.hit_rate.toFixed(1) + '%' : '—'}</div>
+          <div style="color:${colorRoi(b.roi_pct)};font-weight:600">${fmtRoi(b.roi_pct)}</div>
+          <div style="color:var(--text-dim)">${(b.total_stake || 0).toFixed(1)}</div>
+          <div style="color:${b.total_profit >= 0 ? '#22c55e' : '#ef4444'}">${b.total_profit >= 0 ? '+' : ''}${(b.total_profit || 0).toFixed(2)}</div>
+          <div style="color:${colorClv(b.avg_clv_pct)}">${b.avg_clv_pct != null ? fmtPp(b.avg_clv_pct) : '—'}</div>
+        </div>`;
+    }).join('');
+    const sourceMsg = source === 'shadow'
+      ? '🔬 <strong>shadow</strong> = research universe — P2: NÃO triggua blocks/disables sozinho. Use pra calibração + cross-validation.'
+      : source === 'real'
+      ? '✓ <strong>real</strong> = tips dispatched (is_shadow=0). P2-acionável quando n≥10 + ROI<-15% + CLV<-5% sustentado.'
+      : '🔄 <strong>all</strong> = soma shadow + real. Útil pra ter sample maior; trate como research.';
+    const legend = `
+      <div style="padding:8px 10px;font-size:11px;color:var(--text-dim);border-top:1px solid var(--border);background:rgba(0,0,0,0.10)">
+        🔴 leak (n≥10 + ROI ≤ -15%) · 🟢 sweet spot (n≥10 + ROI ≥ +10%) · ${sourceMsg}
+      </div>`;
+    list.innerHTML = headerRow + bodyRows + legend;
+  } catch (e) {
+    console.warn('loadMtByLine error:', e);
     card.style.display = 'none';
   }
 }
@@ -5565,6 +5701,10 @@ function init() {
   _restoreSelect('shadowVsRealWindow', 'shadowVsRealWindow');
   _restoreSelect('shadowVsRealGroupBy', 'shadowVsRealGroupBy');
   _restoreSelect('leakSummaryDays', 'leakSummaryDays');
+  _restoreSelect('mtByLineSport', 'mtByLineSport');
+  _restoreSelect('mtByLineMarket', 'mtByLineMarket');
+  _restoreSelect('mtByLineSource', 'mtByLineSource');
+  _restoreSelect('mtByLineDays', 'mtByLineDays');
   // sportSelect já está no DOM com options dinâmicos — restaura currentSport
   const ss = document.getElementById('sportSelect');
   if (ss) {
