@@ -3381,6 +3381,54 @@ async function getPinnacleDotaMatches() {
   }
 }
 
+// ── Pinnacle — Mixed Martial Arts (sportId=22) ──
+// 2026-05-08: wirado pra MMA shadow re-evaluation. Memory cita lift modelo
+// 4-6% marginal (audit-modelos 2026-04-21), mas Pinnacle UFC tem ~22 fights
+// ATM e modelo + ESPN MMA + Sherdog backfill já existem. Worth shadow test
+// de 30d antes de re-ativar real dispatch.
+let _mmaPinnacleCache = { data: [], ts: 0 };
+const MMA_PINNACLE_TTL_IDLE = 10 * 60 * 1000;
+const MMA_PINNACLE_TTL_LIVE = 60 * 1000;
+
+async function getPinnacleMmaMatches() {
+  if (process.env.PINNACLE_MMA === 'false') return [];
+  const hadLive = _mmaPinnacleCache.data.some(m => m.status === 'live');
+  const ttl = hadLive ? MMA_PINNACLE_TTL_LIVE : MMA_PINNACLE_TTL_IDLE;
+  if (_mmaPinnacleCache.data.length && (Date.now() - _mmaPinnacleCache.ts) < ttl) {
+    return _mmaPinnacleCache.data;
+  }
+  try {
+    const rows = await pinnacle.fetchSportMatchOdds(22, (m) => {
+      const lg = String(m?.league?.name || '');
+      const p1 = String(m?.participants?.[0]?.name || '');
+      const p2 = String(m?.participants?.[1]?.name || '');
+      // Filtra prop bets (rounds, methods, OUs específicos) — só moneyline H2H
+      if (/\((rounds|method|inside|outside|distance|decision|ko|sub|kos|tkos)\)/i.test(p1 + p2)) return false;
+      // UFC + Bellator + ONE + PFL principalmente; descarta promotions amadoras
+      if (!/\b(ufc|bellator|one championship|pfl|cage warriors|ksw|rizin|invicta)\b/i.test(lg)) return false;
+      return true;
+    });
+    const _fetchedAt = Date.now();
+    const matches = rows.map(r => ({
+      id: `pin_mma_${r.id}`,
+      team1: r.team1, team2: r.team2,
+      league: r.league,
+      sport_key: 'mma',
+      game: 'mma',
+      status: r.status === 'live' ? 'live' : 'upcoming',
+      time: r.startTime,
+      odds: { t1: String(r.oddsT1), t2: String(r.oddsT2), bookmaker: 'Pinnacle', _fetchedAt },
+      _source: 'pinnacle',
+    }));
+    _mmaPinnacleCache = { data: matches, ts: Date.now() };
+    log('INFO', 'ODDS', `Pinnacle MMA: ${matches.length} lutas cacheadas`);
+    return matches;
+  } catch (e) {
+    log('ERROR', 'ODDS', `Pinnacle MMA: ${e.message}`);
+    return [];
+  }
+}
+
 // ── Pinnacle — Soccer (sportId=29) ──
 // Filtro de ligas: top-tier + Brasileirão + 2nd-tier europeias maduras (volume sob controle).
 // Pinnacle soccer é alto volume (200+ jogos/dia globais); filtro evita estourar quota.
@@ -29101,7 +29149,8 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
   }
 
   if (p === '/mma-matches') {
-    if (!THE_ODDS_API_KEY) { sendJson(res, []); return; }
+    // 2026-05-08: removido early-return quando THE_ODDS_API_KEY ausente.
+    // Pinnacle MMA é fonte FREE alternativa — wirar mesmo sem TheOddsAPI.
     const _nowMma = Date.now();
     if (_mmaMatchesResp.data && (_nowMma - _mmaMatchesResp.ts) < MATCHES_RESP_TTL_MS) {
       sendJson(res, _mmaMatchesResp.data);
@@ -29138,15 +29187,38 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
         })
         .filter(f => f.odds);
 
-      const [rMma, rBox] = await Promise.all([
-        theOddsGet(`https://api.the-odds-api.com/v4/sports/mma_mixed_martial_arts/odds/?apiKey=${THE_ODDS_API_KEY}&regions=eu&markets=h2h&oddsFormat=decimal`),
-        theOddsGet(`https://api.the-odds-api.com/v4/sports/boxing_boxing/odds/?apiKey=${THE_ODDS_API_KEY}&regions=eu&markets=h2h&oddsFormat=decimal`)
-      ]);
+      // TheOddsAPI quando disponível
+      let mmaFights = [];
+      let boxFights = [];
+      if (THE_ODDS_API_KEY) {
+        const [rMma, rBox] = await Promise.all([
+          theOddsGet(`https://api.the-odds-api.com/v4/sports/mma_mixed_martial_arts/odds/?apiKey=${THE_ODDS_API_KEY}&regions=eu&markets=h2h&oddsFormat=decimal`),
+          theOddsGet(`https://api.the-odds-api.com/v4/sports/boxing_boxing/odds/?apiKey=${THE_ODDS_API_KEY}&regions=eu&markets=h2h&oddsFormat=decimal`)
+        ]);
+        mmaFights = rMma.status === 200 ? parseFights(safeParse(rMma.body, []), 'mma') : [];
+        boxFights = rBox.status === 200 ? parseFights(safeParse(rBox.body, []), 'boxing') : [];
+      }
 
-      const mmaFights = rMma.status === 200 ? parseFights(safeParse(rMma.body, []), 'mma') : [];
-      const boxFights = rBox.status === 200 ? parseFights(safeParse(rBox.body, []), 'boxing') : [];
+      // 2026-05-08: Pinnacle MMA fallback (FREE, sem auth). Adiciona lutas
+      // que TheOddsAPI não cobre OU quando key está deactivated.
+      let pinFights = [];
+      try {
+        const pinRows = await getPinnacleMmaMatches();
+        if (pinRows && pinRows.length) {
+          // Dedup por team1+team2+date — Pinnacle adiciona só novas
+          const seenKey = new Set([...mmaFights, ...boxFights].map(f => `${f.team1}|${f.team2}|${String(f.time).slice(0,10)}`));
+          for (const r of pinRows) {
+            const key = `${r.team1}|${r.team2}|${String(r.time).slice(0,10)}`;
+            if (seenKey.has(key)) continue;
+            const t = new Date(r.time).getTime();
+            if (t <= now) continue; // skip past
+            pinFights.push(r);
+            seenKey.add(key);
+          }
+        }
+      } catch (e) { log('WARN', 'AUTO-MMA', `Pinnacle MMA fallback err: ${e.message}`); }
 
-      const fights = [...mmaFights, ...boxFights].sort((a, b) => new Date(a.time) - new Date(b.time));
+      const fights = [...mmaFights, ...boxFights, ...pinFights].sort((a, b) => new Date(a.time) - new Date(b.time));
       _mmaMatchesResp = { data: fights, ts: Date.now() };
       sendJson(res, fights);
     } catch(e) {
