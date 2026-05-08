@@ -10877,7 +10877,8 @@ setInterval(load, 60000);
       const { runGateAttribution } = require('./lib/gate-attribution');
       const days = Math.max(7, Math.min(180, parseInt(parsed.query.days || '30', 10) || 30));
       const minNPerGate = Math.max(1, Math.min(50, parseInt(parsed.query.minN || '5', 10) || 5));
-      const r = runGateAttribution(db, { days, minNPerGate });
+      const source = ['shadow', 'real', 'all'].includes(parsed.query.source) ? parsed.query.source : 'real';
+      const r = runGateAttribution(db, { days, minNPerGate, source });
       const gatesArr = Object.entries(r.gates || {})
         .map(([reason, g]) => ({ reason, ...g }))
         .sort((a, b) => (b.lostProfit || 0) - (a.lostProfit || 0));

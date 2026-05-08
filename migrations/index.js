@@ -2449,6 +2449,26 @@ const migrations = [
       `);
     },
   },
+  {
+    id: '095_mts_would_be_rejected_by',
+    up(db) {
+      // 2026-05-08: passo 3 do framework user — pra cada shadow tip,
+      // listar quais gates ATUALMENTE rejeitariam (ev_sanity, bucket, league_block,
+      // sharp_divergence, etc). Permite contrafactual robusto: ROI das que cada
+      // gate rejeitaria — se positivo n>=100, gate corta edge.
+      //
+      // Diferente de ml_gate_rejected_audit (mig 094) que registra tips JÁ
+      // abortadas. Esta flag registra "would_be" sem abortar — tip continua
+      // shadow tape coletando outcome.
+      addColumnIfMissing(db, 'market_tips_shadow', 'would_be_rejected_by', 'would_be_rejected_by TEXT');
+      // Index pra filter "tips que algum gate rejeitaria"
+      try {
+        db.exec(`CREATE INDEX IF NOT EXISTS idx_mts_would_reject
+                 ON market_tips_shadow(would_be_rejected_by, result, created_at)
+                 WHERE would_be_rejected_by IS NOT NULL`);
+      } catch (_) {}
+    },
+  },
 ];
 
 function applyMigrations(db) {
