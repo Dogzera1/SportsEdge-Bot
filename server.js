@@ -51,8 +51,6 @@ const LOL_HEADERS = { 'x-api-key': LOL_KEY };
 const PANDASCORE_TOKEN = process.env.PANDASCORE_TOKEN || '';
 // The Odds API — usado para MMA (20k req/mês)
 const THE_ODDS_API_KEY = process.env.THE_ODDS_API_KEY || '';
-// Odds-API.io (odds-api.io) — alternativa (esports/tennis/etc)
-const ODDS_API_IO_KEY = process.env.ODDS_API_IO_KEY || process.env.ODDSAPIIO_KEY || '';
 const GRID_API_KEY = (process.env.GRID_API_KEY || '').trim();
 
 // DB_PATH allows pointing to a Railway volume (e.g. /data/sportsedge.db)
@@ -1516,9 +1514,6 @@ const oddsPapiQueue = createAsyncQueue(1);
 // The Odds API (tennis/football/mma) — serializa + dedupe por URL
 const theOddsQueue = createAsyncQueue(1);
 
-// Odds-API.io — serializa + dedupe por URL
-const oddsApiIoQueue = createAsyncQueue(1);
-
 function clampStr(v, maxLen) {
   const s = (v == null ? '' : String(v)).trim();
   if (!s) return '';
@@ -1540,62 +1535,6 @@ async function theOddsGet(theOddsUrl) {
     const ttlMs = Number.isFinite(ttlMsRaw) ? ttlMsRaw : 15 * 60 * 1000; // cache de 15 minutos por default!
     return await cachedHttpGet(theOddsUrl, { provider: 'theodds', ttlMs }).catch(() => ({ status: 500, body: '[]' }));
   });
-}
-
-async function oddsApiIoGet(oddsApiIoUrl, ttlMsDefault) {
-  return await oddsApiIoQueue.enqueue(`oddsapiio:${oddsApiIoUrl}`, async () => {
-    const ttlMsRaw = parseInt(process.env.HTTP_CACHE_ODDSAPIO_TTL_MS || '', 10);
-    const ttlMs = Number.isFinite(ttlMsRaw)
-      ? ttlMsRaw
-      : (Number.isFinite(ttlMsDefault) ? ttlMsDefault : 10 * 60 * 1000);
-    return await cachedHttpGet(oddsApiIoUrl, { provider: 'oddsapiio', ttlMs }).catch(() => ({ status: 500, body: '[]' }));
-  });
-}
-
-// Cache local de /events (Odds-API.io) — reduzir requisições mensais (plano free)
-let _oddsApiIoEventsCache = new Map(); // sportSlug -> { events, ts }
-const ODDSAPIO_EVENTS_TTL = 10 * 60 * 1000;
-// 2026-05-07 (audit P2): sweep periódico (sem cap dedicado — pool pequeno: ~6-12 sportSlugs).
-function _sweepOddsApiIoEventsCache() {
-  const cutoff = Date.now() - (ODDSAPIO_EVENTS_TTL * 3); // 3x TTL = 30min stale
-  let removed = 0;
-  for (const [k, v] of _oddsApiIoEventsCache.entries()) {
-    if (!v || (Number(v.ts) || 0) < cutoff) {
-      _oddsApiIoEventsCache.delete(k);
-      removed++;
-    }
-  }
-  return removed;
-}
-
-async function fetchOddsApiIoEvents(sportSlug) {
-  const slug = String(sportSlug || '').trim().toLowerCase();
-  if (!slug || !ODDS_API_IO_KEY) return [];
-  const now = Date.now();
-  const cached = _oddsApiIoEventsCache.get(slug);
-  if (cached && (now - cached.ts) < ODDSAPIO_EVENTS_TTL) return cached.events || [];
-  const r = await oddsApiIoGet(
-    `https://api.odds-api.io/v3/events?apiKey=${encodeURIComponent(ODDS_API_IO_KEY)}&sport=${encodeURIComponent(slug)}`,
-    ODDSAPIO_EVENTS_TTL
-  );
-  const list = r && r.status === 200 ? safeParse(r.body, []) : [];
-  const events = Array.isArray(list) ? list : (Array.isArray(list?.data) ? list.data : []);
-  _oddsApiIoEventsCache.set(slug, { events, ts: now });
-  return events;
-}
-
-async function fetchOddsApiIoEventOdds(eventId, bookmakersCsv) {
-  if (!ODDS_API_IO_KEY) return null;
-  const eid = String(eventId || '').trim();
-  if (!eid) return null;
-  const bks = String(bookmakersCsv || '').trim() || (process.env.ODDSAPIO_BOOKMAKERS || 'Pinnacle');
-  const r = await oddsApiIoGet(
-    `https://api.odds-api.io/v3/odds?apiKey=${encodeURIComponent(ODDS_API_IO_KEY)}&eventId=${encodeURIComponent(eid)}&bookmakers=${encodeURIComponent(bks)}`,
-    2 * 60 * 1000
-  );
-  if (!r || r.status !== 200) return null;
-  const obj = safeParse(r.body, null);
-  return obj && typeof obj === 'object' ? obj : null;
 }
 
 function isWtaTennisOddsKey(k) {
@@ -3528,84 +3467,6 @@ async function getPinnacleCsMatches() {
     try { require('./lib/feed-heartbeat').markFeedFailure('pinnacle', 'cs', e.message); } catch (_) {}
     return [];
   }
-}
-
-// ── Odds-API.io — Dota 2 (esports) ──
-let _dotaOddsApiIoCache = { data: [], ts: 0 };
-
-async function getOddsApiIoDotaMatches() {
-  if (!ODDS_API_IO_KEY) return [];
-  if (_dotaOddsApiIoCache.data.length && (Date.now() - _dotaOddsApiIoCache.ts) < DOTA_ODDS_CACHE_TTL) {
-    return _dotaOddsApiIoCache.data;
-  }
-
-  const now = Date.now();
-  const weekAhead = now + 7 * 24 * 60 * 60 * 1000;
-  const LIVE_WINDOW_MS = parseInt(process.env.DOTA_LIVE_WINDOW_H || '6', 10) * 60 * 60 * 1000;
-  const maxEventsCfg = parseInt(process.env.DOTA_MAX_EVENTS || '12', 10);
-  const maxEvents = Math.min(30, Math.max(4, Number.isFinite(maxEventsCfg) ? maxEventsCfg : 12));
-  const leagueRe = new RegExp(process.env.DOTA_LEAGUE_REGEX || 'dota', 'i');
-
-  const events = await fetchOddsApiIoEvents('esports');
-  const eventCount = Array.isArray(events) ? events.length : 0;
-  const mapped = (events || []).map(e => {
-    const t = new Date(e.date || e.commence_time || e.start_time || e.time || '').getTime();
-    const leagueName = (e.league?.name || e.league || '').toString();
-    const sportName = (e.sport?.name || e.sport || '').toString();
-    const sportSlug = (e.sport?.slug || '').toString();
-    const hay = `${leagueName} ${sportName} ${sportSlug}`.trim();
-    return { e, t, leagueName, hay };
-  });
-  // Alguns eventos vêm sem league; usa sport.* como fallback
-  const matchedLeague = mapped.filter(x => leagueRe.test(x.hay || x.leagueName || ''));
-  const filtered = matchedLeague
-    .filter(x => Number.isFinite(x.t) && x.t <= weekAhead && (x.t > now || (x.t <= now && (now - x.t) <= LIVE_WINDOW_MS)))
-    .sort((a, b) => a.t - b.t)
-    .slice(0, maxEvents);
-  // Diagnóstico quando nada passa: mostra sample de ligas pra identificar gap.
-  if (filtered.length === 0 && eventCount > 0) {
-    const sample = [...new Set(mapped.map(x => x.leagueName).filter(Boolean))].slice(0, 5).join(', ');
-    log('INFO', 'DOTA2', `Odds-API.io: 0 Dota 2 (de ${eventCount} esports events, ${matchedLeague.length} matched league regex; ligas: ${sample || '-'})`);
-  }
-
-  const matches = [];
-  for (const { e, t, leagueName } of filtered) {
-    const oddsObj = await fetchOddsApiIoEventOdds(
-      e.id,
-      process.env.ODDSAPIO_DOTA_BOOKMAKERS || process.env.ODDSAPIO_BOOKMAKERS || 'Pinnacle'
-    );
-    const bmName = oddsObj?.bookmakers ? Object.keys(oddsObj.bookmakers)[0] : null;
-    const mk = bmName ? (oddsObj.bookmakers?.[bmName] || []) : [];
-    const ml = mk.find(m => String(m?.name || '').toLowerCase() === 'ml' || String(m?.name || '').toLowerCase() === 'h2h') || mk[0];
-    const firstOdds = Array.isArray(ml?.odds) ? ml.odds[0] : null;
-    const o1 = firstOdds?.home;
-    const o2 = firstOdds?.away;
-    const team1 = e.home || e.home_team || e.team1 || '';
-    const team2 = e.away || e.away_team || e.team2 || '';
-    if (!team1 || !team2) continue;
-    if (!o1 || !o2) continue;
-    matches.push({
-      id: `dota2_oddsapiio_${e.id}`,
-      game: 'dota2',
-      status: (t <= now ? 'live' : 'upcoming'),
-      team1,
-      team2,
-      league: leagueName || 'Dota 2',
-      time: e.date || e.commence_time || e.time,
-      odds: { t1: String(o1), t2: String(o2), bookmaker: bmName || 'Odds-API.io' },
-      score1: 0, score2: 0,
-      format: 'Bo?',
-      _source: 'oddsapiio',
-      _oddsId: e.id,
-    });
-  }
-
-  matches.sort((a, b) => new Date(a.time) - new Date(b.time));
-  if (matches.length) {
-    log('INFO', 'DOTA2', `Odds-API.io: ${matches.length} partidas Dota 2 com odds`);
-    _dotaOddsApiIoCache = { data: matches, ts: Date.now() };
-  }
-  return matches;
 }
 
 // ── PandaScore Dota 2 ──
@@ -30717,13 +30578,12 @@ server.listen(PORT, '0.0.0.0', () => {
   }), 6 * 60 * 60 * 1000);
 
   // 2026-05-07 (audit P2): cache eviction sweep — TTL/cap em mapOddsCache,
-  // oddsCache, _oddsApiIoEventsCache. Antes nenhum cache evictava → memory
-  // leak slow burn (Railway 512MB cap). 10min cycle = baixo overhead.
+  // oddsCache. Antes nenhum cache evictava → memory leak slow burn
+  // (Railway 512MB cap). 10min cycle = baixo overhead.
   // Inclui também _adminLoginFails (Map cresce quando atacante rotaciona IPs).
   setInterval(_wrapServerCron('cache_sweep', () => {
     const o = _sweepOddsCache();
     const m = _sweepMapOddsCache();
-    const e = _sweepOddsApiIoEventsCache();
     // _adminLoginFails: mesma janela de reset (15min). Antes o reset só
     // acontecia quando IP fazia novo attempt; IP one-shot ficava forever.
     let loginFailsRemoved = 0;
@@ -30738,8 +30598,8 @@ server.listen(PORT, '0.0.0.0', () => {
         }
       }
     } catch (_) {}
-    if (o.removedTtl + o.removedCap + m + e + loginFailsRemoved > 0) {
-      log('INFO', 'CACHE-SWEEP', `oddsCache: ttl=${o.removedTtl} cap=${o.removedCap} (cur=${o.current}); mapOddsCache: ${m}; eventsCache: ${e}; adminLoginFails: ${loginFailsRemoved}`);
+    if (o.removedTtl + o.removedCap + m + loginFailsRemoved > 0) {
+      log('INFO', 'CACHE-SWEEP', `oddsCache: ttl=${o.removedTtl} cap=${o.removedCap} (cur=${o.current}); mapOddsCache: ${m}; adminLoginFails: ${loginFailsRemoved}`);
     }
   }), 10 * 60 * 1000);
 
