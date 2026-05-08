@@ -22839,6 +22839,83 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   setInterval(() => runReadinessLearnerWeekly().catch(e => log('ERROR', 'READINESS-LEARNER', e.message)), 60 * 60 * 1000);
   setTimeout(() => runReadinessLearnerWeekly().catch(() => {}), 90 * 60 * 1000);
 
+  // 2026-05-08: P2 Compliance Weekly Auto-Check.
+  // Detecta drift de config (alguém setou EV_CALIB_REAL_ONLY=false sem querer,
+  // FROZEN_HOLDOUT_DAYS removido em deploy etc). Roda toda segunda 14h UTC.
+  // Replica logic do /admin/p2-status localmente pra DM admin se issues>0.
+  // Opt-out: P2_COMPLIANCE_AUTO=false.
+  let _lastP2ComplianceWeek = null;
+  async function runP2ComplianceWeekly() {
+    if (/^(0|false|no)$/i.test(String(process.env.P2_COMPLIANCE_AUTO ?? 'true'))) return;
+    if (!ADMIN_IDS.size) return;
+    const dow = parseInt(process.env.P2_COMPLIANCE_DOW || '1', 10);
+    const hourUtc = parseInt(process.env.P2_COMPLIANCE_HOUR_UTC || '14', 10);
+    const now = new Date();
+    if (now.getUTCDay() !== dow || now.getUTCHours() !== hourUtc) return;
+    const isoWeek = `${now.getUTCFullYear()}-W${Math.ceil((now.getUTCDate() + 6 - now.getUTCDay()) / 7)}`;
+    if (_lastP2ComplianceWeek === isoWeek) return;
+    _lastP2ComplianceWeek = isoWeek;
+    try {
+      const _isOk = (envName, defaultVal = 'true') =>
+        !/^(0|false|no)$/i.test(String(process.env[envName] ?? defaultVal));
+      const guards = {
+        MT_LEAK_REAL_ONLY: _isOk('MT_LEAK_REAL_ONLY'),
+        MT_ROI_GUARD_REAL_ONLY: _isOk('MT_ROI_GUARD_REAL_ONLY'),
+        MT_BUCKET_GUARD_REAL_ONLY: _isOk('MT_BUCKET_GUARD_REAL_ONLY'),
+        MT_VALIDATION_REAL_ONLY: _isOk('MT_VALIDATION_REAL_ONLY'),
+        KILLS_CALIB_REAL_ONLY: _isOk('KILLS_CALIB_REAL_ONLY'),
+        EV_CALIB_REAL_ONLY: _isOk('EV_CALIB_REAL_ONLY'),
+        LEAGUE_TRUST_REAL_ONLY: _isOk('LEAGUE_TRUST_REAL_ONLY'),
+        MT_AUTO_PROMOTE_REAL_ONLY: _isOk('MT_AUTO_PROMOTE_REAL_ONLY'),
+      };
+      const issues = [];
+      for (const [k, v] of Object.entries(guards)) {
+        if (!v) issues.push({ env: k, severity: 'P0', issue: 'opt-out ativo — guard usa shadow data (viola P2)' });
+      }
+      // Holdout
+      try {
+        const status = require('./lib/frozen-holdout').getStatus();
+        if (status.default_days < 60) {
+          issues.push({ env: 'FROZEN_HOLDOUT_DAYS', severity: 'P1', issue: `valor=${status.default_days} (<60). RECOMENDADO setar 60-90` });
+        }
+      } catch (_) {}
+      // Detectores
+      if (/^(0|false|no)$/i.test(String(process.env.SHADOW_VS_REAL_DRIFT_AUTO ?? 'true'))) {
+        issues.push({ env: 'SHADOW_VS_REAL_DRIFT_AUTO', severity: 'P2', issue: 'detector early-warning desativado' });
+      }
+      if (/^(0|false|no)$/i.test(String(process.env.GATE_ATTRIBUTION_AUTO ?? 'true'))) {
+        issues.push({ env: 'GATE_ATTRIBUTION_AUTO', severity: 'P2', issue: 'gate counterfactual semanal desativado' });
+      }
+      log('INFO', 'P2-COMPLIANCE', `${issues.length} issue(s) detected`);
+      if (!issues.length) return;
+      if (_isCycleMuted('p2-compliance')) return;
+      const lines = [`🛡️ *P2 COMPLIANCE WEEKLY CHECK*`, ''];
+      const byPrio = { P0: [], P1: [], P2: [] };
+      for (const i of issues) (byPrio[i.severity] || byPrio.P2).push(i);
+      if (byPrio.P0.length) {
+        lines.push('🚨 *P0 — guard violando shadow=causa:*');
+        for (const i of byPrio.P0) lines.push(`  • \`${i.env}\` — ${i.issue}`);
+      }
+      if (byPrio.P1.length) {
+        lines.push('');
+        lines.push('⚠️ *P1 — overfitting protection:*');
+        for (const i of byPrio.P1) lines.push(`  • \`${i.env}\` — ${i.issue}`);
+      }
+      if (byPrio.P2.length) {
+        lines.push('');
+        lines.push('💡 *P2 — detector desativado:*');
+        for (const i of byPrio.P2) lines.push(`  • \`${i.env}\` — ${i.issue}`);
+      }
+      lines.push('');
+      lines.push('Bate `/admin/p2-status` pra detalhe completo. Setar/restaurar via Railway env.');
+      const msg = lines.join('\n');
+      const token = resolveAlertsToken();
+      if (token) for (const adminId of ADMIN_IDS) sendDM(token, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
+    } catch (e) { log('ERROR', 'P2-COMPLIANCE', e.message); }
+  }
+  setInterval(() => runP2ComplianceWeekly().catch(e => log('ERROR', 'P2-COMPLIANCE', e.message)), 60 * 60 * 1000);
+  setTimeout(() => runP2ComplianceWeekly().catch(() => {}), 95 * 60 * 1000);
+
   // Feed heartbeat watchdog: cron 5min checa staleness de Pinnacle/PandaScore/etc.
   // Cooldown 30min por (source,sport) pra evitar spam quando feed fica down várias
   // checks. Opt-out: FEED_HEARTBEAT_DISABLED=true.

@@ -16008,6 +16008,38 @@ setInterval(load, 60000);
     return;
   }
 
+  // POST/GET /admin/mt-restore?sport=cs&market=TOTAL&side=under&force=0&key=<KEY>
+  // Simétrico ao /admin/mt-disable. Default só remove source='manual' pra evitar
+  // sobrescrever decisões de auto_clv_leak/auto_roi_leak/auto_readiness ainda
+  // ativas. force=1 remove independente do source (use com cuidado).
+  if (p === '/admin/mt-restore' && (req.method === 'POST' || req.method === 'GET')) {
+    if (!requireAdmin(req, res)) return;
+    const sport = String(parsed.query.sport || '').trim().toLowerCase();
+    const market = String(parsed.query.market || '').trim();
+    const side = parsed.query.side ? String(parsed.query.side).trim().toLowerCase() : null;
+    const force = parsed.query.force === '1' || parsed.query.force === 'true';
+    if (!sport || !market) { sendJson(res, { ok: false, error: 'missing sport or market' }, 400); return; }
+    try {
+      // Build conds null-safe pra side (mig 062 trata side TEXT nullable).
+      const sideCond = side ? 'side = ?' : 'side IS NULL';
+      const sourceCond = force ? '' : "AND source = 'manual'";
+      const sql = `DELETE FROM market_tips_runtime_state
+                   WHERE sport = ? AND market = ? AND ${sideCond} ${sourceCond}`;
+      const params = side ? [sport, market, side] : [sport, market];
+      const info = db.prepare(sql).run(...params);
+      log('INFO', 'MT-RESTORE', `${sport}/${market}${side ? '/' + side : ''} restored (force=${force}, removed=${info.changes})`);
+      sendJson(res, {
+        ok: true, sport, market, side, force, removed: info.changes,
+        note: info.changes === 0
+          ? (force
+            ? 'Nenhuma entry encontrada. Cell já estava unblocked.'
+            : 'Nenhuma entry source=manual encontrada. Use force=1 pra remover entries de auto_clv_leak/auto_roi_leak/auto_readiness.')
+          : 'Bot.js precisa estar com MT_LEAK_GUARD_AUTO=true. Map _marketTipsDisabledRuntime atualizado no próximo cron leak guard (1h) ou restart.',
+      });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   // POST/GET /admin/mt-block-league?sport=tennis&market=totalGames&league=WTA Rome - R1&reason=...&key=<KEY>
   // Adiciona liga (sport, market, league) em mt_market_league_blocklist source='manual'.
   // Diferente de /admin/mt-disable que disable (sport, market, side) global.
