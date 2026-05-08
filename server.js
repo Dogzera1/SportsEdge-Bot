@@ -10798,6 +10798,99 @@ setInterval(load, 60000);
     return;
   }
 
+  // GET /admin/sofascore-proxy-health
+  // Healthcheck do proxy Public-Sofascore-API (Django/curl_cffi). Faz uma
+  // request real ao /schedule/football/<hoje>/ e reporta status, latência, e
+  // se o response tem shape válido. Adicional: compara contra api.sofascore.com
+  // direct pra confirmar diagnóstico (CF block esperado lá quando proxy 200).
+  // Diagnóstico criado 2026-05-08 após observar SOFA-FB 403 logs com proxy
+  // setado — distinguir "proxy quebrado" vs "fallback direct esperado".
+  if (p === '/admin/sofascore-proxy-health' && (req.method === 'GET' || req.method === 'POST')) {
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    (async () => {
+      const proxyBase = (process.env.SOFASCORE_PROXY_BASE || '').trim().replace(/\/+$/, '');
+      const directEnabled = /^(1|true|yes)$/i.test(String(process.env.SOFASCORE_DIRECT || ''));
+      const today = new Date().toISOString().slice(0, 10);
+      const headers = {
+        Accept: 'application/json,text/plain,*/*',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+        Origin: 'https://www.sofascore.com',
+        Referer: 'https://www.sofascore.com/',
+        'ngrok-skip-browser-warning': 'true',
+      };
+      const probe = async (url) => {
+        const t0 = Date.now();
+        try {
+          const r = await httpGet(url, headers);
+          const ms = Date.now() - t0;
+          let payloadOk = false, eventCount = null;
+          try {
+            const j = JSON.parse(r.body || '{}');
+            if (j && typeof j === 'object') {
+              payloadOk = true;
+              if (Array.isArray(j.events)) eventCount = j.events.length;
+              else if (j.tournamentTeamEvents) eventCount = Object.keys(j.tournamentTeamEvents).length;
+            }
+          } catch (_) {}
+          return { url, status: r.status, ms, body_len: (r.body || '').length, payload_ok: payloadOk, event_count: eventCount };
+        } catch (e) {
+          return { url, status: 0, ms: Date.now() - t0, error: e.message };
+        }
+      };
+
+      const result = {
+        ts: new Date().toISOString(),
+        env: {
+          proxy_base_set: !!proxyBase,
+          proxy_base_preview: proxyBase ? proxyBase.replace(/^(https?:\/\/[^/]+).*/, '$1/...') : null,
+          direct_enabled: directEnabled,
+        },
+        proxy: null,
+        direct: null,
+        diagnosis: null,
+        metrics: {},
+      };
+
+      if (proxyBase) {
+        result.proxy = await probe(`${proxyBase}/schedule/football/${today}/`);
+      }
+      // Direct sempre é probed pra comparação (mesmo se SOFASCORE_DIRECT=false).
+      // Não conta como uso real — só pra confirmar "yes, CF bloqueia direct, então
+      // proxy é necessário".
+      result.direct = await probe(`https://api.sofascore.com/api/v1/sport/football/scheduled-events/${today}`);
+
+      // Métricas acumuladas (sofascore_fail counter via metrics lib)
+      try {
+        const metrics = require('./lib/metrics');
+        const snap = (typeof metrics.snapshot === 'function') ? metrics.snapshot() : null;
+        if (snap?.counters) {
+          for (const [k, v] of Object.entries(snap.counters)) {
+            if (k.startsWith('sofascore_fail')) result.metrics[k] = v;
+          }
+        }
+      } catch (_) {}
+
+      // Diagnóstico
+      const proxyOk = result.proxy && result.proxy.status === 200 && result.proxy.payload_ok;
+      const directBlocked = result.direct && (result.direct.status === 403 || result.direct.status === 0 || result.direct.status >= 500);
+      if (proxyOk && directBlocked) {
+        result.diagnosis = 'OK — proxy Django funciona, direct CF-blocked como esperado. SOFA-FB warns são fallbacks ocasionais (proxy retorna não-200 em queries específicas, código tenta direct, CF bloqueia).';
+      } else if (proxyOk && !directBlocked) {
+        result.diagnosis = 'OK — proxy funciona. CF não bloqueou direct hoje (improvável persistir). SOFA-FB warns devem ser raros.';
+      } else if (!proxyBase) {
+        result.diagnosis = 'CONFIG — SOFASCORE_PROXY_BASE não setado. Bot vai cair em direct (CF blocked). Setar env no Railway.';
+      } else if (!proxyOk && proxyBase) {
+        result.diagnosis = `FALHA — proxy ${result.proxy?.status || 'unreachable'}. Verifique deployment Public-Sofascore-API no Railway (logs do serviço, restart). Bot está caindo em direct (CF block).`;
+      } else {
+        result.diagnosis = 'INDETERMINADO';
+      }
+
+      sendJson(res, { ok: true, ...result });
+    })().catch(e => sendJson(res, { ok: false, error: e.message }, 500));
+    return;
+  }
+
   // GET /admin/shadow-vs-real-snapshot?windowDays=14&minNShadow=30&minNReal=20
   // Snapshot completo do detector lib/shadow-vs-real-drift.js — TODOS os sports
   // (incluindo os que não dispararam alert), pra UI ops monitorar regimes.
