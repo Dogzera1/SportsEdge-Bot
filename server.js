@@ -3325,7 +3325,7 @@ let _dotaPinnacleLogState = { count: -1, leaguesSeen: -1, ts: 0 };
 const DOTA_PINNACLE_LOG_THROTTLE_MS = 10 * 60 * 1000;
 
 async function getPinnacleDotaMatches() {
-  if (process.env.PINNACLE_DOTA !== 'true') return [];
+  if (process.env.PINNACLE_DOTA === 'false') return [];
   const hasLiveCached = _dotaPinnacleCache.data.some(m => m.status === 'live');
   const ttl = hasLiveCached ? DOTA_PINNACLE_TTL_LIVE : DOTA_PINNACLE_TTL_IDLE;
   if (_dotaPinnacleCache.data.length && (Date.now() - _dotaPinnacleCache.ts) < ttl) {
@@ -6084,16 +6084,9 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     try {
-      // ── Fonte primária: Pinnacle (se ativado) → Odds-API.io → The Odds API ──
-      let oddsMatches = [];
-      if (process.env.PINNACLE_DOTA === 'true') {
-        oddsMatches = await getPinnacleDotaMatches().catch(() => []);
-      }
-      if (!oddsMatches.length) {
-        oddsMatches = ODDS_API_IO_KEY
-          ? await getOddsApiIoDotaMatches().catch(() => [])
-          : (THE_ODDS_API_KEY ? await getTheOddsDotaMatches().catch(() => []) : []);
-      }
+      // ── Fonte primária: Pinnacle (default; opt-out PINNACLE_DOTA=false) ──
+      // Odds-API.io / TheOdds removidos 2026-05-08 — user descontinuou
+      const oddsMatches = await getPinnacleDotaMatches().catch(() => []);
 
       // ── Fonte secundária: PandaScore (partidas live + formato Bo3/Bo5) ──
       const psMatches = await getPandaScoreDotaMatches().catch(() => []);
@@ -6147,7 +6140,7 @@ const server = http.createServer(async (req, res) => {
       // ── Fase 1: mapOdds para live matches com Pinnacle matchupId ──
       // Busca odds do mapa em andamento (period = score1+score2+1) via Pinnacle.
       // Alimenta tips por mapa (market_type='MAP{N}').
-      if (process.env.PINNACLE_DOTA === 'true') {
+      if (process.env.PINNACLE_DOTA !== 'false') {
         for (const m of combined) {
           if (m.status !== 'live') continue;
           if (!String(m.id || '').startsWith('pin_')) continue;
@@ -6169,7 +6162,7 @@ const server = http.createServer(async (req, res) => {
         }
       }
 
-      const oddsSrc = ODDS_API_IO_KEY ? 'Odds-API.io' : 'TheOdds';
+      const oddsSrc = 'Pinnacle';
       const withMapOdds = combined.filter(m => m.mapOdds).length;
       try {
         if (process.env.SUPABASE_URL && process.env.SUPABASE_ANON_KEY && process.env.AGGREGATOR_DISABLED !== 'true') {
