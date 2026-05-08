@@ -3653,11 +3653,37 @@ async function _settleCompletedTipsInner() {
         // sem dados pra matchear. Log dedicado distingue "sources empty" vs "no match".
         log('INFO', 'SETTLE-TENNIS', `pipeline: unsettled=${unsettled.length} | espnSync=${espnSync?.upserted ?? 0} | theOddsScores=${scoresById.size} | espnATP=${atpEvent?.recentResults?.length || 0} espnWTA=${wtaEvent?.recentResults?.length || 0}`);
         let _matchedCount = 0, _noMatchCount = 0;
+        // Lazy-load lib MT settle (só usada em tennis ::mt:: orphan path)
+        let _mtSettleLib = null;
+        try { _mtSettleLib = require('./lib/tennis-mt-settle'); } catch (_) {}
         for (const tip of unsettled) {
           if (!tip.match_id) continue;
           // MT-promoted tennis tips (handicapGames/totalGames/tiebreak) settle via
           // settleShadowTips → propagator, NÃO por nome do winner.
-          if (String(tip.match_id).includes('::mt::')) continue;
+          // 2026-05-08: tips MT-orphan (real, ::mt:: match_id, sem shadow correspondente
+          // pelo suffix por causa de side-flip no promote) eram zumbi eternas. Tenta
+          // settle via /admin/tennis-mt-force-settle-tip antes do continue cego.
+          if (String(tip.match_id).includes('::mt::')) {
+            const _isMtOrphanCandidate = tip.is_shadow !== 1
+              && String(tip.market_type || 'ML').toUpperCase() !== 'ML'
+              && _mtSettleLib && ADMIN_KEY;
+            if (_isMtOrphanCandidate) {
+              try {
+                const r = await serverGet(
+                  `/admin/tennis-mt-force-settle-tip?tip_id=${tip.id}`,
+                  null,
+                  { 'x-admin-key': ADMIN_KEY }
+                ).catch(() => null);
+                if (r?.results?.[0]?.status === 'settled') {
+                  log('INFO', 'SETTLE-TENNIS-MT', `tip#${tip.id} ${tip.participant1} vs ${tip.participant2} → ${r.results[0].result_applied} (orphan settle)`);
+                  settled++;
+                }
+              } catch (e) {
+                log('DEBUG', 'SETTLE-TENNIS-MT', `tip ${tip.id} mt-orphan err: ${e.message}`);
+              }
+            }
+            continue;
+          }
           try {
             const dbRes = await serverGet(
               `/tennis-db-result?p1=${encodeURIComponent(tip.participant1 || '')}&p2=${encodeURIComponent(tip.participant2 || '')}&sentAt=${encodeURIComponent(tip.sent_at || '')}&league=${encodeURIComponent(tip.event_name || '')}`,

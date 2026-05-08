@@ -8623,6 +8623,108 @@ setInterval(load, 10000);
     return;
   }
 
+  // 2026-05-08: settle de tips MT-promoted tennis órfãs (match_id contendo
+  // ::mt:: + market_type≠ML + is_shadow=0). Pipeline ML em bot.js skipa
+  // ::mt:: esperando propagator de market_tips_shadow, mas shadow pode estar
+  // com side oposto (ex: tip home +5.5, shadow away -6.5) — propagator nunca
+  // casa o suffix. Esses tips ficam zumbi.
+  // GET  /admin/tennis-mt-force-settle-tip?tip_id=1514
+  // POST /admin/tennis-mt-force-settle-tip?all=1 (drena todos)
+  if (p === '/admin/tennis-mt-force-settle-tip') {
+    if (!requireAdmin(req, res)) return;
+    const all = String(parsed.query.all || '') === '1';
+    const dryRun = String(parsed.query.dry_run || '') === '1';
+    const tipIdQ = parseInt(parsed.query.tip_id || '0', 10);
+    if (!all && !tipIdQ) { sendJson(res, { ok: false, error: 'tip_id ou all=1 obrigatório' }, 400); return; }
+    try {
+      const { decodeMtMatchId, computeMtResultFromScore } = require('./lib/tennis-mt-settle');
+      const targetTips = all
+        ? db.prepare(`
+            SELECT * FROM tips
+            WHERE sport = 'tennis' AND result IS NULL
+              AND (archived IS NULL OR archived = 0)
+              AND COALESCE(is_shadow, 0) = 0
+              AND match_id LIKE '%::mt::%'
+              AND COALESCE(market_type,'ML') != 'ML'
+              AND sent_at >= datetime('now', '-120 days')
+          `).all()
+        : [db.prepare(`SELECT * FROM tips WHERE id = ? AND sport = 'tennis'`).get(tipIdQ)].filter(Boolean);
+      if (!targetTips.length) {
+        sendJson(res, { ok: true, processed: 0, message: 'nenhum tip MT-orphan encontrado' });
+        return;
+      }
+      const out = [];
+      let settledN = 0;
+      for (const tip of targetTips) {
+        if (tip.result !== null) { out.push({ tip_id: tip.id, status: 'skip', reason: 'já settled' }); continue; }
+        if (tip.archived === 1) { out.push({ tip_id: tip.id, status: 'skip', reason: 'arquivada' }); continue; }
+        const decoded = decodeMtMatchId(tip.match_id);
+        if (!decoded?.market) { out.push({ tip_id: tip.id, status: 'skip', reason: 'match_id sem ::mt:: decodável' }); continue; }
+        // Lookup match em match_results pelo par de players (reutiliza pickBest)
+        const sentRaw = String(tip.sent_at || '').trim();
+        const tipMs = sentRaw ? Date.parse(sentRaw.includes('T') ? sentRaw : sentRaw.replace(' ', 'T')) : NaN;
+        const lookbackDays = Math.min(800, Math.max(14, parseInt(process.env.TENNIS_SETTLE_LOOKBACK_DAYS || '600', 10) || 600));
+        const rows = getTennisSettleRowsCached(lookbackDays);
+        const best = pickBestTennisSettleRow(rows, tip.participant1, tip.participant2, tipMs, tip.event_name);
+        if (!best?.winner || !best?.final_score) {
+          out.push({ tip_id: tip.id, status: 'skip', reason: 'pickBest sem winner/score', decoded });
+          continue;
+        }
+        // winnerIs1 = winner é tip.participant1?
+        const { tennisSinglePlayerNameMatch } = require('./lib/tennis-match');
+        const winnerIs1 = !!tennisSinglePlayerNameMatch(tip.participant1, best.winner);
+        const result = computeMtResultFromScore({
+          market: decoded.market,
+          side: decoded.side,
+          line: decoded.line,
+          finalScore: best.final_score,
+          winnerIs1,
+        });
+        if (!result) {
+          out.push({ tip_id: tip.id, status: 'skip', reason: `compute returned null (market=${decoded.market})`, decoded, score: best.final_score });
+          continue;
+        }
+        if (dryRun) {
+          out.push({ tip_id: tip.id, status: 'dry_run', would_apply: result, decoded, match_used: { winner: best.winner, score: best.final_score, league: best.league, resolved_at: best.resolved_at } });
+          continue;
+        }
+        // Apply settle (espelha logic de /admin/tennis-force-settle-tip)
+        const settleR = db.transaction(() => {
+          const upd = stmts.settleTipById.run(result, tip.id);
+          if (upd.changes === 0) return { settled: 0, reason: 'race condition' };
+          const { getSportUnitValue } = require('./lib/sport-unit');
+          const bk = stmts.getBankroll.get('tennis');
+          const uv = getSportUnitValue(bk?.current_banca || 0, bk?.initial_banca || 100);
+          const su = parseFloat(String(tip.stake || '1').replace('u','')) || 1;
+          const stakeR = (Number.isFinite(Number(tip.stake_reais)) && Number(tip.stake_reais) > 0)
+            ? Number(tip.stake_reais)
+            : parseFloat((su * uv).toFixed(2));
+          const odds = parseFloat(tip.odds) || 1;
+          const profitR = result === 'win' ? +(stakeR * (odds - 1)).toFixed(2)
+                        : result === 'void' ? 0
+                        : -stakeR;
+          db.prepare('UPDATE tips SET stake_reais = ?, profit_reais = ? WHERE id = ?').run(stakeR, profitR, tip.id);
+          if (bk && profitR !== 0 && tip.is_shadow !== 1) {
+            const nova = parseFloat(((Number(bk.current_banca) || 0) + profitR).toFixed(2));
+            stmts.updateBankroll.run(nova, 'tennis');
+          }
+          return { settled: 1, result, stakeR, profitR };
+        })();
+        if (settleR.settled === 1) settledN++;
+        out.push({
+          tip_id: tip.id, status: settleR.settled ? 'settled' : 'failed',
+          result_applied: result, decoded,
+          match_used: { winner: best.winner, score: best.final_score, league: best.league, resolved_at: best.resolved_at },
+          ...settleR,
+        });
+      }
+      sendJson(res, { ok: true, processed: targetTips.length, settled: settledN, dry_run: dryRun, results: out });
+    } catch (e) {
+      sendJson(res, { ok: false, error: e.message, stack: _stackForReq(req, e)?.slice(0, 600) }, 500);
+    }
+    return;
+  }
+
   // Debug: tenta resolver cada tip unsettled de tennis e reporta o motivo da falha.
   // GET /tennis-settle-debug?days=30 → [{tip_id, p1, p2, sent_at, status, reason}]
   if (p === '/tennis-settle-debug') {
