@@ -5354,12 +5354,23 @@ const server = http.createServer(async (req, res) => {
       if (parsed.query.game === 'basket' && !_basketPinnacleCache.data.length) {
         try { await getPinnacleBasketMatches(); } catch (_) {}
       }
+      // Valorant lazy warm: idem (wired 2026-05-08 quando audit revelou
+      // valorant MT shadow zerado em 60d — fallback Pinnacle valorant
+      // não estava na lista de pinFallbacks → /odds-markets retornava 400
+      // → scanMarkets nunca chamava → logShadowTip nunca disparava).
+      if (parsed.query.game === 'valorant' && !_valorantPinnacleCache.data.length) {
+        try { await getPinnacleValorantMatches(); } catch (_) {}
+      }
       const pinFallbacks = [
         { cache: _tennisPinnacleCache,   prefix: /^tennis_pin_/ },
         { cache: _csPinnacleCache,       prefix: /^pin_cs_/ },
         { cache: _dotaPinnacleCache,     prefix: /^pin_/ },
         { cache: _footballPinnacleCache, prefix: /^pin_fb_/ },
         { cache: _basketPinnacleCache,   prefix: /^basket_pin_/ },
+        // 2026-05-08: prefixo `pin_valorant_` (ver getPinnacleValorantMatches:
+        // server.js:3683). Sem essa entry, valorant nunca resolve matchupId em
+        // /odds-markets → 400 → MT shadow vazio.
+        { cache: _valorantPinnacleCache, prefix: /^pin_valorant_/ },
       ];
       if (!matchupId) {
         for (const { cache, prefix } of pinFallbacks) {
