@@ -4911,13 +4911,41 @@ const server = http.createServer(async (req, res) => {
       let steamSource = false;
       const steamKeyPresent = !!process.env.STEAM_WEBAPI_KEY;
       const steamSid = hit.server_steam_id || null;
-      if (steamKeyPresent && steamSid) {
+      // 2026-05-08: circuit breaker por sid. Steam RT 400 happens quando lobby
+      // ainda não está público (privacy lock ou jogo recém iniciado). Sem
+      // breaker o bot retentava 1×/min indefinidamente — observado em prod
+      // 32× 400 / 7× 200 em sid 90285480275164189 / 19min. Após N 400s
+      // consecutivos, pula chamada por TTL_MS. Override via
+      // STEAM_RT_BREAKER_THRESHOLD (default 3) e STEAM_RT_BREAKER_TTL_MS
+      // (default 5min). Pra desligar: STEAM_RT_BREAKER=false.
+      const _steamRtBreakerOff = /^(0|false|no)$/i.test(String(process.env.STEAM_RT_BREAKER || ''));
+      const _steamRtBreakerThreshold = Math.max(1, parseInt(process.env.STEAM_RT_BREAKER_THRESHOLD || '3', 10) || 3);
+      const _steamRtBreakerTtlMs = Math.max(60_000, parseInt(process.env.STEAM_RT_BREAKER_TTL_MS || `${5 * 60 * 1000}`, 10) || (5 * 60 * 1000));
+      global._steamRtFailures = global._steamRtFailures || new Map(); // sid → { fails, openUntil }
+      const _steamRtBreakerState = !_steamRtBreakerOff && steamSid ? (global._steamRtFailures.get(String(steamSid)) || null) : null;
+      const _steamRtBreakerOpen = _steamRtBreakerState && _steamRtBreakerState.openUntil > Date.now();
+      if (steamKeyPresent && steamSid && !_steamRtBreakerOpen) {
         try {
           const rt = await httpGet(
             `https://api.steampowered.com/IDOTA2MatchStats_570/GetRealtimeStats/v1/?server_steam_id=${encodeURIComponent(steamSid)}&key=${encodeURIComponent(process.env.STEAM_WEBAPI_KEY)}`,
             {}
           );
           log('INFO', 'STEAM-RT', `sid=${steamSid} → status=${rt.status} bodyLen=${(rt.body||'').length}`);
+          // Atualiza estado do breaker conforme resultado.
+          if (!_steamRtBreakerOff) {
+            const sidKey = String(steamSid);
+            if (rt.status === 200) {
+              if (global._steamRtFailures.has(sidKey)) global._steamRtFailures.delete(sidKey);
+            } else {
+              const cur = global._steamRtFailures.get(sidKey) || { fails: 0, openUntil: 0 };
+              cur.fails = (cur.fails || 0) + 1;
+              if (cur.fails >= _steamRtBreakerThreshold) {
+                cur.openUntil = Date.now() + _steamRtBreakerTtlMs;
+                log('WARN', 'STEAM-RT', `sid=${sidKey} circuit breaker OPEN após ${cur.fails} falhas — pause ${Math.round(_steamRtBreakerTtlMs/60000)}min`);
+              }
+              global._steamRtFailures.set(sidKey, cur);
+            }
+          }
           if (rt.status === 200) {
             const rtd = safeParse(rt.body, {});
             const rtTeams = Array.isArray(rtd?.teams) ? rtd.teams : [];
@@ -4961,6 +4989,16 @@ const server = http.createServer(async (req, res) => {
             log('INFO', 'STEAM-RT', `Dota RT ${hit.match_id}: status=${rt.status}`);
           }
         } catch (e) { log('WARN', 'STEAM-RT', `${hit.match_id}: ${e.message}`); }
+      } else if (steamKeyPresent && steamSid && _steamRtBreakerOpen) {
+        // Log throttle 5min — evita spam quando breaker está OPEN por hora.
+        global._steamRtBreakerLastLog = global._steamRtBreakerLastLog || new Map();
+        const _sk = String(steamSid);
+        const _last = global._steamRtBreakerLastLog.get(_sk) || 0;
+        if (Date.now() - _last >= 5 * 60 * 1000) {
+          global._steamRtBreakerLastLog.set(_sk, Date.now());
+          const _remainSec = Math.max(0, Math.round((_steamRtBreakerState.openUntil - Date.now()) / 1000));
+          log('DEBUG', 'STEAM-RT', `sid=${_sk} breaker OPEN — skip (reabre em ${_remainSec}s)`);
+        }
       }
 
       const hasLiveStats = hasPlayerStats || hasAggregateStats;

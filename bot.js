@@ -3752,6 +3752,12 @@ async function _settleCompletedTipsInner() {
       // chamada /settle settla todas tips do match; iterações subsequentes do
       // mesmo match_id retornam settled=0 mesmo tendo "funcionado").
       const _settledMatchIdsThisCycle = new Set();
+      // 2026-05-08: ML_MARKETS lookup pra skip non-ML upstream (server.js /settle
+      // já filtra essas tips, então POST é roundtrip puro + log spam). Antes, dota2
+      // tips MAP_WINNER non-sweep (1552/1566/1783/2107) emitiam WARN
+      // "/settle no-op (skipped=unknown)" todo cycle (4×/30min). Auto-archive
+      // legítimo cron resolve em ≤36h; até lá, silêncio é OK.
+      const { ML_MARKETS: _ML_MARKETS_SET } = require('./lib/constants');
       for (const tip of unsettled) {
         if (!tip.match_id) continue;
         // MT-promoted tips (handicap/totais/TB) usam settle por score parseado em
@@ -3759,6 +3765,18 @@ async function _settleCompletedTipsInner() {
         // do winner — pra HANDICAP_GAMES "+3.5" o nome nunca casa e marca loss
         // determinístico (bug de 2026-04-27 com Karen Khachanov +3.5 vs Mensik).
         if (String(tip.match_id).includes('::mt::')) continue;
+        // Skip non-ML markets (MAP_N_WINNER, HANDICAP_*, TOTAL_*, BTTS_*, etc).
+        // /settle só sabe winner name-match → essas precisam propagator/sweep
+        // path. server.js:25543 já filtra; aqui poupamos roundtrip + log spam.
+        // Exceção: futebol OVER_2.5/UNDER_2.5/1X2_D/BTTS_* tem handler explícito
+        // upstream (linhas 3800-3830) — esses ficam no path normal.
+        const _mktU = String(tip.market_type || 'ML').toUpperCase();
+        const _isFootballOuBtts = sport === 'football' && (
+          /^(OVER|UNDER)_\d+(?:\.\d+)?$/.test(_mktU) ||
+          _mktU === '1X2_D' || _mktU === 'DRAW' ||
+          _mktU === 'BTTS_YES' || _mktU === 'BTTS_NO'
+        );
+        if (!_ML_MARKETS_SET.has(_mktU) && !_isFootballOuBtts) continue;
         try {
           let endpoint;
           if (sport === 'football') {
@@ -3856,8 +3874,17 @@ async function _settleCompletedTipsInner() {
           const respSettled = Number(settleResp?.settled || 0);
           const alreadyCovered = _settledMatchIdsThisCycle.has(tip.match_id);
           if (respSettled === 0 && !alreadyCovered) {
-            log('WARN', 'SETTLE',
-              `${sport} ${tip.participant1} vs ${tip.participant2}: /settle no-op (skipped=${settleResp?.skipped || 'unknown'}) — tip ${tip.id} ainda pending`);
+            // 2026-05-08: throttle 6h por tip.id (espelha server.js:25563).
+            // Antes: WARN spammava todo cycle (a cada 30min) pra mesmas tips
+            // pending — ofuscava settle real e ruidava logs em prod.
+            global._settleNoOpWarnLog = global._settleNoOpWarnLog || new Map();
+            const _noopKey = `${sport}|${tip.id}`;
+            const _noopLast = global._settleNoOpWarnLog.get(_noopKey) || 0;
+            if (Date.now() - _noopLast >= 6 * 60 * 60 * 1000) {
+              global._settleNoOpWarnLog.set(_noopKey, Date.now());
+              log('WARN', 'SETTLE',
+                `${sport} ${tip.participant1} vs ${tip.participant2}: /settle no-op (skipped=${settleResp?.skipped || 'unknown'} mkt=${tip.market_type || 'ML'}) — tip ${tip.id} ainda pending`);
+            }
             continue;
           }
           if (respSettled > 0) _settledMatchIdsThisCycle.add(tip.match_id);
@@ -17233,6 +17260,16 @@ Máximo 200 palavras. Raciocínio breve antes da decisão.`;
         const tennisCeiling = evCeilingFor('tennis', tipOdd);
         if (tipEV > tennisCeiling) {
           log('WARN', 'AUTO-TENNIS', `Gate EV sanity: EV ${tipEV}% > ${tennisCeiling}% (ceiling trained-aware) → rejeitado: ${tipPlayer} @ ${tipOdd}`);
+          // 2026-05-08: marca match como analisado pra evitar re-pipeline
+          // (tennis-trained + Markov + TB + ACES + DF + CORR + CLUTCH) a cada
+          // cycle quando EV permanece > ceiling — observado em prod 3× pra
+          // mesma partida em 19min (Maria Timofeeva @ 4.82, Shevchenko @ 4.29).
+          analyzedTennis.set(key, Object.assign({}, analyzedTennis.get(key) || {}, {
+            ts: now,
+            [isLivePhase ? 'tipSentLive' : 'tipSentPre']: true,
+            [isLivePhase ? 'tsLive' : 'tsPre']: now,
+            evSanityBlock: true,
+          }));
           await new Promise(r => setTimeout(r, 3000)); continue;
         }
         if (tipEV > 15) {
