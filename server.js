@@ -4801,8 +4801,41 @@ const server = http.createServer(async (req, res) => {
           sendJson(res, { hasLiveStats: false, error: `OpenDota fail (${odErr.message}) e sem STEAM_WEBAPI_KEY pra fallback` });
           return;
         }
+        // 2026-05-08: circuit breaker pra Steam GetLiveLeagueGames (mesmo
+        // padrão do Steam-RT em /opendota-live). 36 timeouts em 18min em
+        // prod logs sem backoff = ruído + waste de quota. Após N falhas
+        // consecutivas, pausa M min. Reset no primeiro 200.
+        // Override: STEAM_GLLG_BREAKER=false desliga.
+        const _gllgBreakerOff = /^(0|false|no)$/i.test(String(process.env.STEAM_GLLG_BREAKER || ''));
+        const _gllgThreshold = Math.max(1, parseInt(process.env.STEAM_GLLG_BREAKER_THRESHOLD || '3', 10) || 3);
+        const _gllgTtlMs = Math.max(60_000, parseInt(process.env.STEAM_GLLG_BREAKER_TTL_MS || `${5 * 60 * 1000}`, 10) || (5 * 60 * 1000));
+        global._steamGllgState = global._steamGllgState || { fails: 0, openUntil: 0, lastLog: 0 };
+        const _gllgState = global._steamGllgState;
+        if (!_gllgBreakerOff && _gllgState.openUntil > Date.now()) {
+          // Throttle log 5min — uma linha quando reabrir
+          if (Date.now() - _gllgState.lastLog >= 5 * 60 * 1000) {
+            _gllgState.lastLog = Date.now();
+            const _remainSec = Math.max(0, Math.round((_gllgState.openUntil - Date.now()) / 1000));
+            log('DEBUG', 'OPENDOTA', `GetLiveLeagueGames breaker OPEN — skip (reabre em ${_remainSec}s; ${_gllgState.fails} falhas consecutivas)`);
+          }
+          sendJson(res, { hasLiveStats: false, error: `OpenDota fail + Steam GLLG breaker OPEN (${_gllgState.fails} falhas consecutivas; reabre em ~5min)` });
+          return;
+        }
         log('WARN', 'OPENDOTA', `Fallback Steam GetLiveLeagueGames: ${odErr.message}`);
         const sR = await httpGet(`https://api.steampowered.com/IDOTA2Match_570/GetLiveLeagueGames/v1/?key=${encodeURIComponent(steamKey)}`, {}).catch(e => ({ status: 0, body: '', error: e.message }));
+        // Update breaker state baseado em resultado
+        if (!_gllgBreakerOff) {
+          if (sR.status === 200) {
+            _gllgState.fails = 0;
+            _gllgState.openUntil = 0;
+          } else {
+            _gllgState.fails += 1;
+            if (_gllgState.fails >= _gllgThreshold) {
+              _gllgState.openUntil = Date.now() + _gllgTtlMs;
+              log('WARN', 'OPENDOTA', `GetLiveLeagueGames circuit breaker OPEN após ${_gllgState.fails} falhas — pause ${Math.round(_gllgTtlMs/60000)}min`);
+            }
+          }
+        }
         if (sR.status !== 200) {
           sendJson(res, { hasLiveStats: false, error: `OpenDota+Steam ambos falharam (steam=${sR.status})` });
           return;
