@@ -2712,6 +2712,18 @@ async function runAutoAnalysis() {
           const lolCeilingLive = evCeilingFor('lol', tipOdd);
           if (!isNaN(tipEVnumLive) && tipEVnumLive > lolCeilingLive) {
             log('WARN', 'AUTO', `Gate EV sanity LIVE: ${match.team1} vs ${match.team2} → EV ${tipEVnumLive}% > ${lolCeilingLive}% (ceiling trained-aware) → rejeitado`);
+            try {
+              const _pickIsT1 = norm(tipTeam).includes(norm(match.team1)) || norm(match.team1).includes(norm(tipTeam));
+              const _modelPPick = _pickIsT1 ? result.modelP1 : result.modelP2;
+              require('./lib/ml-rejected-audit').recordMlGateRejection(db, {
+                sport: 'lol', match,
+                tipParticipant: tipTeam, pickSide: _pickIsT1 ? 't1' : 't2',
+                odd: parseFloat(tipOdd), evPct: tipEVnumLive,
+                modelPPick: Number.isFinite(_modelPPick) ? _modelPPick : null,
+                conf: tipConf, isLive: true, rejectedByGate: 'ev_sanity',
+                gateMeta: { ceiling: lolCeilingLive },
+              });
+            } catch (_) {}
             analyzedMatches.set(matchKey, { ts: now, tipSent: false, noEdge: true });
             continue;
           }
@@ -3211,6 +3223,18 @@ async function runAutoAnalysis() {
             const lolCeilingUp = evCeilingFor('lol', tipOdd);
             if (!isNaN(tipEVnum) && tipEVnum > lolCeilingUp) {
               log('WARN', 'AUTO', `Gate EV sanity upcoming: ${match.team1} vs ${match.team2} → EV ${tipEVnum}% > ${lolCeilingUp}% (ceiling trained-aware) → rejeitado`);
+              try {
+                const _pickIsT1Up = norm(tipTeam).includes(norm(match.team1)) || norm(match.team1).includes(norm(tipTeam));
+                const _modelPPickUp = _pickIsT1Up ? result.modelP1 : result.modelP2;
+                require('./lib/ml-rejected-audit').recordMlGateRejection(db, {
+                  sport: 'lol', match,
+                  tipParticipant: tipTeam, pickSide: _pickIsT1Up ? 't1' : 't2',
+                  odd: parseFloat(tipOdd), evPct: tipEVnum,
+                  modelPPick: Number.isFinite(_modelPPickUp) ? _modelPPickUp : null,
+                  conf: tipConf, isLive: false, rejectedByGate: 'ev_sanity',
+                  gateMeta: { ceiling: lolCeilingUp },
+                });
+              } catch (_) {}
               analyzedMatches.set(matchKey, { ts: now, tipSent: false, noEdge: true });
               await new Promise(r => setTimeout(r, 3000)); continue;
             }
@@ -8927,6 +8951,17 @@ async function autoAnalyzeMatch(token, match) {
           }
         };
       }
+      try {
+        require('./lib/ml-rejected-audit').recordMlGateRejection(db, {
+          sport: 'lol', match,
+          tipParticipant: pickTeam, pickSide: direction,
+          odd: pickOdd, evPct: parseFloat(evPct.toFixed(1)),
+          modelPPick: Number.isFinite(pickP) ? pickP : null,
+          conf: null, isLive: match.status === 'live',
+          rejectedByGate: 'ai_disabled_no_fallback',
+          gateMeta: { edge_pp: +mlResult.score.toFixed(1), min_ev: 5, min_edge: 5 },
+        });
+      } catch (_) {}
       return _returnNull('ai_disabled_no_fallback', `pick=${pickTeam}@${pickOdd} ev=${evPct.toFixed(1)}% edge=${mlResult.score.toFixed(1)}pp`);
     }
     // Cooldown mínimo entre chamadas (evita 429 por múltiplos live matches simultâneos)
@@ -9374,6 +9409,18 @@ async function autoAnalyzeMatch(token, match) {
       const lolCeilingAnalyze = evCeilingFor('lol', tipOdd);
       if (filteredTipResult && !isNaN(tipEV) && tipEV > lolCeilingAnalyze) {
         log('WARN', 'AUTO', `Gate EV sanity: ${match.team1} vs ${match.team2} → EV ${tipEV}% > ${lolCeilingAnalyze}% (ceiling trained-aware) → rejeitado`);
+        try {
+          const _pickIsT1An = norm(tipTeam).includes(norm(match.team1)) || norm(match.team1).includes(norm(tipTeam));
+          const _modelPPickAn = _pickIsT1An ? mlResult.modelP1 : mlResult.modelP2;
+          require('./lib/ml-rejected-audit').recordMlGateRejection(db, {
+            sport: 'lol', match,
+            tipParticipant: tipTeam, pickSide: _pickIsT1An ? 't1' : 't2',
+            odd: parseFloat(tipOdd), evPct: tipEV,
+            modelPPick: Number.isFinite(_modelPPickAn) ? _modelPPickAn : null,
+            conf: tipConf, isLive: match.status === 'live',
+            rejectedByGate: 'ev_sanity', gateMeta: { ceiling: lolCeilingAnalyze },
+          });
+        } catch (_) {}
         filteredTipResult = null;
       }
 
@@ -14872,6 +14919,16 @@ Máximo 200 palavras.`;
       // EV sanity: bloqueia EV absurdamente alto (erro de cálculo da IA)
       if (evVal > 50) {
         log('WARN', 'AUTO-DOTA', `Gate EV sanity: EV ${evVal}% > 50% — provável erro de cálculo da IA → rejeitado`);
+        try {
+          require('./lib/ml-rejected-audit').recordMlGateRejection(db, {
+            sport: 'dota2', match,
+            tipParticipant: tipTeam, pickSide: _pickIsT1D ? 't1' : 't2',
+            odd: parseFloat(tipOdd), evPct: evVal,
+            modelPPick: Number.isFinite(_modelPPickD) ? _modelPPickD : null,
+            conf: tipConf, isLive: match.status === 'live',
+            rejectedByGate: 'ev_sanity', gateMeta: { ceiling: 50 },
+          });
+        } catch (_) {}
         setDotaAnalyzed({ ts: now, tipSent: false, noEdge: true });
         await _sleep(2000); continue;
       }
@@ -17260,6 +17317,16 @@ Máximo 200 palavras. Raciocínio breve antes da decisão.`;
         const tennisCeiling = evCeilingFor('tennis', tipOdd);
         if (tipEV > tennisCeiling) {
           log('WARN', 'AUTO-TENNIS', `Gate EV sanity: EV ${tipEV}% > ${tennisCeiling}% (ceiling trained-aware) → rejeitado: ${tipPlayer} @ ${tipOdd}`);
+          try {
+            require('./lib/ml-rejected-audit').recordMlGateRejection(db, {
+              sport: 'tennis', match,
+              tipParticipant: tipPlayer, pickSide: _pickIsT1Tn ? 't1' : 't2',
+              odd: parseFloat(tipOdd), evPct: tipEV,
+              modelPPick: Number.isFinite(_modelPPickTn) ? _modelPPickTn : null,
+              conf: tipConf, isLive: isLivePhase,
+              rejectedByGate: 'ev_sanity', gateMeta: { ceiling: tennisCeiling },
+            });
+          } catch (_) {}
           // 2026-05-08: marca match como analisado pra evitar re-pipeline
           // (tennis-trained + Markov + TB + ACES + DF + CORR + CLUTCH) a cada
           // cycle quando EV permanece > ceiling — observado em prod 3× pra
@@ -17393,6 +17460,17 @@ Máximo 200 palavras. Raciocínio breve antes da decisão.`;
 
         if (isLeagueBlocked('tennis', match.league, 'ML')) {
           log('INFO', 'AUTO-TENNIS', `[BLOCK] tennis/${match.league} — suprimido`);
+          try {
+            require('./lib/ml-rejected-audit').recordMlGateRejection(db, {
+              sport: 'tennis', match,
+              tipParticipant: tipPlayer, pickSide: _pickIsT1Tn ? 't1' : 't2',
+              odd: parseFloat(tipOdd), evPct: tipEV,
+              modelPPick: Number.isFinite(_modelPPickTn) ? _modelPPickTn : null,
+              conf: tipConf, isLive: isLivePhase,
+              rejectedByGate: 'league_block',
+              gateMeta: { league: match.league },
+            });
+          } catch (_) {}
           await new Promise(r => setTimeout(r, 3000)); continue;
         }
         const rec = await serverPost('/record-tip', {
@@ -19355,6 +19433,16 @@ async function pollCs(runOnce = false) {
         if (evPct > csCeiling) {
           analyzedCs.set(key, { ts: now, tipSent: false });
           log('WARN', 'AUTO-CS', `Gate EV sanity: EV ${evPct.toFixed(1)}% > ${csCeiling}% (ceiling trained-aware) → rejeitado: ${match.team1} vs ${match.team2}`);
+          try {
+            require('./lib/ml-rejected-audit').recordMlGateRejection(db, {
+              sport: 'cs2', match,
+              tipParticipant: pickTeam, pickSide: direction,
+              odd: pickOdd, evPct,
+              modelPPick: Number.isFinite(pickP) ? pickP : null,
+              conf: null, isLive: isLiveCs,
+              rejectedByGate: 'ev_sanity', gateMeta: { ceiling: csCeiling },
+            });
+          } catch (_) {}
           continue;
         }
         if (pickOdd < CS_MIN_ODDS || pickOdd > CS_MAX_ODDS) {
@@ -19966,6 +20054,16 @@ async function pollValorant(runOnce = false) {
         if (evPct > valCeiling) {
           analyzedValorant.set(key, { ts: now, tipSent: false });
           log('WARN', 'AUTO-VAL', `Gate EV sanity: EV ${evPct.toFixed(1)}% > ${valCeiling}% → rejeitado: ${match.team1} vs ${match.team2}`);
+          try {
+            require('./lib/ml-rejected-audit').recordMlGateRejection(db, {
+              sport: 'valorant', match,
+              tipParticipant: pickTeam, pickSide: direction,
+              odd: pickOdd, evPct,
+              modelPPick: Number.isFinite(pickP) ? pickP : null,
+              conf: null, isLive: isLiveVal,
+              rejectedByGate: 'ev_sanity', gateMeta: { ceiling: valCeiling },
+            });
+          } catch (_) {}
           continue;
         }
         if (pickOdd < VAL_MIN_ODDS || pickOdd > VAL_MAX_ODDS) {

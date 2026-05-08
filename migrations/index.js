@@ -2410,6 +2410,45 @@ const migrations = [
       `);
     },
   },
+  {
+    id: '094_ml_gate_rejected_audit',
+    up(db) {
+      // Tips ML que entraram nos gates LIVE/upcoming mas foram rejeitadas
+      // (Gate EV sanity, league block, ai_disabled_no_fallback, etc) eram
+      // simplesmente abortadas sem registro. Sem visibility, P2 audit (model
+      // bias / calibração de ceilings) ficava cego — os 5 picks rejeitados
+      // por Gate EV sanity em 19min de logs prod 2026-05-08 (Maria Timofeeva
+      // 3×, Shevchenko 2×, KIWOOM DRX@9.03 ev 74.9%) são research-gold mas
+      // sumiam.
+      //
+      // P2-aligned: research universe, NÃO gera tip dispatch. Settle é
+      // opcional (futuro: rodar settle pra calc realized vs expected).
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS ml_gate_rejected_audit (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          sport TEXT NOT NULL,
+          match_id TEXT,
+          league TEXT,
+          team1 TEXT,
+          team2 TEXT,
+          tip_participant TEXT,
+          pick_side TEXT,
+          odd REAL,
+          ev_pct REAL,
+          model_p_pick REAL,
+          conf TEXT,
+          is_live INTEGER NOT NULL DEFAULT 0,
+          rejected_by_gate TEXT NOT NULL,
+          gate_meta TEXT,
+          rejected_at TEXT NOT NULL,
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_mlgra_sport_at ON ml_gate_rejected_audit(sport, rejected_at);
+        CREATE INDEX IF NOT EXISTS idx_mlgra_gate ON ml_gate_rejected_audit(rejected_by_gate, rejected_at);
+        CREATE INDEX IF NOT EXISTS idx_mlgra_match ON ml_gate_rejected_audit(sport, match_id);
+      `);
+    },
+  },
 ];
 
 function applyMigrations(db) {

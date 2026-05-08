@@ -10798,6 +10798,50 @@ setInterval(load, 60000);
     return;
   }
 
+  // GET /admin/ml-gate-rejected-audit?sport=&days=7&limit=200&gate=
+  // Lista tips ML que foram rejeitadas por gates pré-DM (Gate EV sanity,
+  // league_block, ai_disabled_no_fallback). P2: research-only, sem dispatch.
+  // Criado 2026-05-08. Tabela ml_gate_rejected_audit (mig 094).
+  if (p === '/admin/ml-gate-rejected-audit' && (req.method === 'GET' || req.method === 'POST')) {
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    try {
+      const sport = parsed.query.sport ? String(parsed.query.sport).toLowerCase() : null;
+      const gate = parsed.query.gate ? String(parsed.query.gate) : null;
+      const days = Math.max(1, Math.min(90, parseInt(parsed.query.days || '7', 10) || 7));
+      const limit = Math.max(1, Math.min(500, parseInt(parsed.query.limit || '200', 10) || 200));
+      const cutoff = new Date(Date.now() - days * 86400_000).toISOString();
+      const where = [`rejected_at >= ?`];
+      const params = [cutoff];
+      if (sport) { where.push(`sport = ?`); params.push(sport); }
+      if (gate) { where.push(`rejected_by_gate = ?`); params.push(gate); }
+      const rows = db.prepare(`
+        SELECT id, sport, match_id, league, team1, team2, tip_participant, pick_side,
+               odd, ev_pct, model_p_pick, conf, is_live, rejected_by_gate, gate_meta,
+               rejected_at
+        FROM ml_gate_rejected_audit
+        WHERE ${where.join(' AND ')}
+        ORDER BY rejected_at DESC
+        LIMIT ?
+      `).all(...params, limit);
+      const summary = require('./lib/ml-rejected-audit').summarize(db, { days, sport });
+      sendJson(res, {
+        ok: true, ts: new Date().toISOString(),
+        cfg: { days, sport, gate, limit },
+        n: rows.length, rows,
+        summary,
+        legend: {
+          rejected_by_gate: 'ev_sanity | league_block | ai_disabled_no_fallback (extensível)',
+          is_live: '0=pre-match, 1=in-play',
+          gate_meta: 'JSON com detalhes do gate (ceiling, league, edge_pp etc)',
+        },
+      });
+    } catch (e) {
+      sendJson(res, { ok: false, error: e.message }, 500);
+    }
+    return;
+  }
+
   // GET /admin/sofascore-proxy-health
   // Healthcheck do proxy Public-Sofascore-API (Django/curl_cffi). Faz uma
   // request real ao /schedule/football/<hoje>/ e reporta status, latência, e
