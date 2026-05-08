@@ -17619,6 +17619,158 @@ load();
     return;
   }
 
+  // GET /admin/mt-shadow-by-line?sport=tennis&market=handicapGames&days=30&minN=3&source=shadow|real|all&key=<KEY>
+  // Performance per linha de handicap/total — granularidade P1 fina.
+  // Útil pra: detectar leak em line específica (ex: handicapGames -3.5 home leak vs -2.5 ok)
+  // ou entender se modelo está correlacionado positivamente com line magnitude.
+  //
+  // source: 'shadow' (default) → market_tips_shadow; 'real' → tips is_shadow=0; 'all' → ambos.
+  // 2026-05-08: criado após user pedir granularidade tennis MT por linha (memory P1).
+  if (p === '/admin/mt-shadow-by-line') {
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const sport = String(parsed.query.sport || 'tennis').toLowerCase();
+    const market = parsed.query.market ? String(parsed.query.market).trim() : null;
+    const days = Math.max(1, Math.min(180, parseInt(parsed.query.days || '30', 10) || 30));
+    const minN = Math.max(1, Math.min(50, parseInt(parsed.query.minN || '3', 10) || 3));
+    const source = ['shadow', 'real', 'all'].includes(parsed.query.source)
+      ? parsed.query.source : 'shadow';
+    try {
+      const buckets = new Map(); // 'line|side' → { n, win, loss, void, stake, profit, ev_acc, odd_acc, clv_acc, clv_n }
+      const _ensure = (key, line, side) => {
+        let v = buckets.get(key);
+        if (!v) {
+          v = { line, side, n: 0, wins: 0, losses: 0, voids: 0,
+                total_stake: 0, total_profit: 0, ev_sum: 0, odd_sum: 0,
+                clv_sum: 0, clv_n: 0 };
+          buckets.set(key, v);
+        }
+        return v;
+      };
+
+      // Source: shadow universe (market_tips_shadow)
+      if (source === 'shadow' || source === 'all') {
+        const params = [sport, days];
+        let where = `sport = ? AND created_at >= datetime('now', '-' || ? || ' days') AND result IN ('win','loss','void')`;
+        if (market) { where += ` AND market = ?`; params.push(market); }
+        const rows = db.prepare(`
+          SELECT line, side, result, stake_units, profit_units, ev_pct, odd, p_implied
+          FROM market_tips_shadow
+          WHERE ${where}
+        `).all(...params);
+        for (const r of rows) {
+          const line = r.line != null ? +r.line : null;
+          const side = r.side || '?';
+          const key = `${line}|${side}`;
+          const b = _ensure(key, line, side);
+          b.n += 1;
+          if (r.result === 'win') b.wins += 1;
+          else if (r.result === 'loss') b.losses += 1;
+          else if (r.result === 'void') b.voids += 1;
+          b.total_stake += Number(r.stake_units) || 1;
+          b.total_profit += Number(r.profit_units) || 0;
+          if (r.ev_pct != null) b.ev_sum += Number(r.ev_pct) || 0;
+          if (r.odd != null) b.odd_sum += Number(r.odd) || 0;
+        }
+      }
+
+      // Source: real universe (tips is_shadow=0). Linha vem do match_id sintético
+      // pattern `<base>::mt::<market>::<side>::ln<tag>` onde tag=P3.5 → +3.5,
+      // N3.5 → -3.5, 21.5 → 21.5 (totais). Espelha lib/clv-capture parseSynthetic.
+      // Stake real em unidades = stake_reais / unit_value (uniformiza com shadow).
+      if (source === 'real' || source === 'all') {
+        const params = [sport, days];
+        let where = `sport = ? AND COALESCE(is_shadow,0)=0 AND COALESCE(archived,0)=0 AND result IN ('win','loss','void') AND sent_at >= datetime('now', '-' || ? || ' days') AND match_id LIKE '%::mt::%'`;
+        if (market) { where += ` AND match_id LIKE ?`; params.push(`%::mt::${String(market).toLowerCase()}::%`); }
+        const rows = db.prepare(`
+          SELECT match_id, result, stake_reais, profit_reais, ev_pct, odds, clv_pct
+          FROM tips
+          WHERE ${where}
+        `).all(...params);
+        const _bl = (typeof getBaseline === 'function') ? getBaseline() : { unit_value: 1 };
+        const uv = Math.max(0.01, Number(_bl?.unit_value) || 1);
+        const _parse = (mid) => {
+          if (typeof mid !== 'string' || !mid.includes('::mt::')) return null;
+          const parts = mid.split('::mt::')[1].split('::');
+          if (parts.length < 2) return null;
+          const mkt = String(parts[0] || '').toLowerCase();
+          const side = String(parts[1] || '').toLowerCase();
+          let line = null;
+          if (parts[2] && parts[2].startsWith('ln')) {
+            const tag = parts[2].slice(2);
+            if (tag.startsWith('N')) line = -parseFloat(tag.slice(1));
+            else if (tag.startsWith('P')) line = parseFloat(tag.slice(1));
+            else line = parseFloat(tag);
+          }
+          return { market: mkt, side, line: Number.isFinite(line) ? line : null };
+        };
+        for (const r of rows) {
+          const parsed = _parse(r.match_id);
+          if (!parsed) continue;
+          const line = parsed.line;
+          const side = parsed.side || '?';
+          const key = `${line}|${side}`;
+          const b = _ensure(key, line, side);
+          b.n += 1;
+          if (r.result === 'win') b.wins += 1;
+          else if (r.result === 'loss') b.losses += 1;
+          else if (r.result === 'void') b.voids += 1;
+          const stU = (Number(r.stake_reais) || 0) / uv;
+          const pfU = (Number(r.profit_reais) || 0) / uv;
+          b.total_stake += stU;
+          b.total_profit += pfU;
+          if (r.ev_pct != null) b.ev_sum += Number(r.ev_pct) || 0;
+          if (r.odds != null) b.odd_sum += Number(r.odds) || 0;
+          if (r.clv_pct != null) { b.clv_sum += Number(r.clv_pct); b.clv_n += 1; }
+        }
+      }
+
+      // Aggregate + filter
+      const out = [];
+      for (const b of buckets.values()) {
+        if (b.n < minN) continue;
+        const settled = b.wins + b.losses; // void não conta pra ROI/hit
+        const hit = settled > 0 ? +(b.wins / settled * 100).toFixed(1) : null;
+        const roi = b.total_stake > 0 ? +(b.total_profit / b.total_stake * 100).toFixed(2) : null;
+        const avgOdd = b.n > 0 ? +(b.odd_sum / b.n).toFixed(2) : null;
+        const avgEv = b.n > 0 ? +(b.ev_sum / b.n).toFixed(2) : null;
+        const avgClv = b.clv_n > 0 ? +(b.clv_sum / b.clv_n).toFixed(2) : null;
+        out.push({
+          line: b.line, side: b.side,
+          n: b.n, wins: b.wins, losses: b.losses, voids: b.voids,
+          hit_rate: hit, roi_pct: roi,
+          total_stake: +b.total_stake.toFixed(2),
+          total_profit: +b.total_profit.toFixed(2),
+          avg_odd: avgOdd, avg_ev: avgEv, avg_clv_pct: avgClv,
+        });
+      }
+      // Sort: por n desc primeiro (mais robusto), depois por roi asc (piores em cima)
+      out.sort((a, b) => {
+        if (a.n !== b.n) return b.n - a.n;
+        return (a.roi_pct ?? 0) - (b.roi_pct ?? 0);
+      });
+
+      sendJson(res, {
+        ok: true,
+        ts: new Date().toISOString(),
+        cfg: { sport, market, days, minN, source },
+        n_buckets: out.length,
+        rows: out,
+        legend: {
+          line: 'linha do handicap (-3.5, -2.5, +2.5, etc) ou total (over/under threshold)',
+          side: 'home / away (handicap) ou over / under (totals)',
+          hit_rate: 'wins / (wins + losses) * 100 — exclui voids',
+          roi_pct: 'profit / stake * 100 — em unidades (uniformizado entre shadow units e real reais/unit_value)',
+          source: `${source} — shadow=market_tips_shadow universe / real=tips is_shadow=0 / all=ambos somados`,
+        },
+        disclaimer: source === 'shadow' || source === 'all'
+          ? 'shadow data is research-only — P2: shadow ROI alone NÃO triggers blocks/disables. Cruzar com real (?source=real) antes de decidir ação'
+          : 'real tips — P2-OK pra basear decisões de block/disable se n≥20-30',
+      });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   // GET /admin/mt-shadow-by-ev?days=60&sport=<opt>&regime=new|old|all&key=<KEY>
   // Performance por (sport, market, side, EV bucket) — calibration check.
   // calibration_gap_pp = avg_ev - actual_roi (positivo = modelo sobrestima edge).
