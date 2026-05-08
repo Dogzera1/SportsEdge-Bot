@@ -3743,11 +3743,12 @@ async function _settleCompletedTipsInner() {
           const preferEspn = !(envFlag === '0' || envFlag === 'false' || envFlag === 'no');
           const primary = preferEspn ? 'espn' : 'sofascore';
           const fallback = preferEspn ? 'sofascore' : 'espn';
-          // Mesma cópia em bot.js:16844 já aplicava esse keyParam — sem ele,
-          // /sync-football-* retorna 401 e o pre-sync falha em silêncio toda iteração.
-          const keyParam = process.env.ADMIN_KEY ? `&key=${encodeURIComponent(process.env.ADMIN_KEY)}` : '';
+          // 2026-05-08: trocado query.key (DEPRECATED — vai sumir no próximo
+          // release) por x-admin-key header. Sem auth, /sync-football-* 401 →
+          // pre-sync falha silenciosa.
+          const adminHdr = process.env.ADMIN_KEY ? { 'x-admin-key': process.env.ADMIN_KEY } : undefined;
           const tryOne = async (source) => serverGet(
-            `/sync-football-${source}?days=${syncDays}${keyParam}`, 'football'
+            `/sync-football-${source}?days=${syncDays}`, 'football', adminHdr
           ).catch(() => null);
           let r = await tryOne(primary);
           if (!r?.ok || (r.inserted || 0) === 0) {
@@ -3769,8 +3770,8 @@ async function _settleCompletedTipsInner() {
       if (sport === 'basket') {
         try {
           const syncDays = Math.max(2, Math.min(7, parseInt(process.env.BASKET_SYNC_DAYS_BACK || '3', 10) || 3));
-          const keyParam = process.env.ADMIN_KEY ? `&key=${encodeURIComponent(process.env.ADMIN_KEY)}` : '';
-          const r = await serverGet(`/sync-basket-espn?days=${syncDays}${keyParam}`, 'basket').catch(() => null);
+          const adminHdr = process.env.ADMIN_KEY ? { 'x-admin-key': process.env.ADMIN_KEY } : undefined;
+          const r = await serverGet(`/sync-basket-espn?days=${syncDays}`, 'basket', adminHdr).catch(() => null);
           if (r?.ok && (r.inserted || 0) > 0) {
             log('INFO', 'SETTLE', `basket pre-sync: ${r.inserted} results upserted + ${r.elo_updated || 0} elo (espn ${syncDays}d)`);
           } else if (r && !r.ok) {
@@ -11408,9 +11409,10 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
     try {
       const days = Math.max(1, Math.min(30, parseInt(parts[1] || '7', 10) || 7));
       const port = process.env.PORT || 8080;
-      const adminKey = process.env.ADMIN_KEY ? `&key=${encodeURIComponent(process.env.ADMIN_KEY)}` : '';
+      // 2026-05-08: removido query.key (header x-admin-key já era passado,
+      // query.key duplo gerava DEPRECATED warn em prod logs).
       const r = await new Promise((res) => {
-        require('http').get(`http://127.0.0.1:${port}/admin/casa-scorecard?days=${days}${adminKey}`, {
+        require('http').get(`http://127.0.0.1:${port}/admin/casa-scorecard?days=${days}`, {
           headers: process.env.ADMIN_KEY ? { 'x-admin-key': process.env.ADMIN_KEY } : {},
         }, resp => { let b=''; resp.on('data',c=>b+=c); resp.on('end',()=>{ try{res(JSON.parse(b));}catch{res(null);} }); }).on('error',()=>res(null));
       });
@@ -22397,26 +22399,25 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
       // Pre-sync tennis + football (sources externas) antes de tentar settlar.
       // Tennis: /sync-tennis-espn-range cobre ATP+WTA em 7 dias (> scoreboard atual);
       // fallback sofascore pega Challenger + WTA125 + ITF que ESPN não cobre.
+      // 2026-05-08: trocado query.key (DEPRECATED) por x-admin-key header
+      // em todas as 4 chamadas de pre-sync. Endpoints /sync-* exigem admin
+      // auth — sem header, 401 → pre-sync silenciosamente falhava.
+      const adminHdr = process.env.ADMIN_KEY ? { 'x-admin-key': process.env.ADMIN_KEY } : undefined;
       try {
-        const keyParamT = process.env.ADMIN_KEY ? `&key=${encodeURIComponent(process.env.ADMIN_KEY)}` : '';
-        await serverGet(`/sync-tennis-espn-range?days=7${keyParamT}`, 'tennis').catch(() => {});
-        await serverGet(`/sync-tennis-sofascore?days=5${keyParamT}`, 'tennis').catch(() => {});
+        await serverGet(`/sync-tennis-espn-range?days=7`, 'tennis', adminHdr).catch(() => {});
+        await serverGet(`/sync-tennis-sofascore?days=5`, 'tennis', adminHdr).catch(() => {});
       } catch (_) {}
       try {
-        // Endpoints /sync-football-* exigem admin auth (ADMIN_KEY query param ou header).
-        // Sem isso, endpoint retorna 401 → pre-sync silenciosamente falhava em todo ciclo.
-        const keyParam = process.env.ADMIN_KEY ? `&key=${encodeURIComponent(process.env.ADMIN_KEY)}` : '';
-        const r1 = await serverGet(`/sync-football-sofascore?days=5${keyParam}`, 'football').catch(() => null);
+        const r1 = await serverGet(`/sync-football-sofascore?days=5`, 'football', adminHdr).catch(() => null);
         if (!r1?.ok || (r1.inserted || 0) === 0) {
-          await serverGet(`/sync-football-espn?days=5${keyParam}`, 'football').catch(() => {});
+          await serverGet(`/sync-football-espn?days=5`, 'football', adminHdr).catch(() => {});
         }
       } catch (_) {}
       try {
         // Esports pre-sync: /ps-result e /dota-result legacy não populam final_score
         // (sempre '') → handicap/total nunca liquidavam. Sync dedicado puxa matches
         // finalizados de PandaScore com score "Bo3 2-1" parseável.
-        const keyParamE = process.env.ADMIN_KEY ? `&key=${encodeURIComponent(process.env.ADMIN_KEY)}` : '';
-        await serverGet(`/sync-pandascore-results?days=5${keyParamE}`, 'esports').catch(() => {});
+        await serverGet(`/sync-pandascore-results?days=5`, 'esports', adminHdr).catch(() => {});
       } catch (_) {}
 
       const { settleShadowTips } = require('./lib/market-tips-shadow');

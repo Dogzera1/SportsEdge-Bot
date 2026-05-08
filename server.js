@@ -7050,6 +7050,11 @@ const server = http.createServer(async (req, res) => {
 
     // 2026-05-06 FIX: last_tip_at por sport — alerta quando sport não emite há >24h.
     // Antes só pendingTipsAge mostrava tip TRAVADA, não tempo desde último envio.
+    // 2026-05-08: skipa alert quando sport tem ML_DISABLED + nenhum MT promote
+    // ativo (silêncio é INTENCIONAL, não incident). Ex: lol/cs/tennis tinham
+    // <SPORT>_ML_DISABLED=true desde 2026-05-04 mas alert spammava como
+    // "modelo desativado ou scanner travado?" — falso-positivo (o env É a
+    // intenção). Map sport→bucket esports (cs↔cs2 / lol↔esports) considerado.
     let lastTipBySport = {};
     try {
       const rows = db.prepare(`
@@ -7060,10 +7065,28 @@ const server = http.createServer(async (req, res) => {
         GROUP BY sport
       `).all();
       const STALE_HOURS = parseInt(process.env.HEALTH_LAST_TIP_STALE_HOURS || '24', 10);
+      const _isMlDisabled = (sp) => {
+        const k = String(sp || '').toUpperCase();
+        const v = process.env[`${k}_ML_DISABLED`];
+        return /^(1|true|yes)$/i.test(String(v || ''));
+      };
+      // Verifica se sport tem MT promotido (evita silenciar quando MT REAL devia
+      // emitir mas não emite — isso continua sendo incident, não silêncio intencional).
+      const _hasMtPromoted = (sp) => {
+        try {
+          const row = db.prepare(`
+            SELECT value FROM settings WHERE key = ? LIMIT 1
+          `).get(`mt_promote_${sp}`);
+          return /^(1|true|yes)$/i.test(String(row?.value || ''));
+        } catch (_) { return false; }
+      };
       for (const r of rows) {
         const ageH = r.last_sent ? (Date.now() - new Date(r.last_sent + 'Z').getTime()) / 3600000 : null;
         lastTipBySport[r.sport] = { last_sent: r.last_sent, age_h: ageH != null ? +ageH.toFixed(1) : null };
         if (ageH != null && ageH > STALE_HOURS) {
+          // Skipa alert se ML disabled + MT não promovido (silêncio intencional).
+          // Se MT promovido mas ainda silent, mantém alert (MT pipeline pode estar travado).
+          if (_isMlDisabled(r.sport) && !_hasMtPromoted(r.sport)) continue;
           alerts.push({
             id: `sport_silent_${r.sport}`,
             severity: 'warning',
