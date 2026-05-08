@@ -628,6 +628,24 @@
     <div id="readinessCorrectionsList"></div>
   </div>
 
+  <!-- Leaks detectados: cross-sport audit em 1 view -->
+  <div class="card" id="leakSummaryCard" style="display:none;margin-bottom:12px">
+    <div class="card-header">
+      <div class="card-title">🔍 Leaks detectados (real, P2-compliant)</div>
+      <div class="card-meta">
+        <select class="select-inline" id="leakSummaryDays" onchange="_saveFilter('leakSummaryDays', this.value); loadLeakSummary()">
+          <option value="14">14d</option>
+          <option value="30" selected>30d</option>
+          <option value="60">60d</option>
+          <option value="90">90d</option>
+        </select>
+        <button onclick="loadLeakSummary()" title="Refresh" aria-label="Refresh leak summary" style="background:transparent;border:1px solid var(--border);color:var(--text-dim);padding:2px 6px;border-radius:4px;cursor:pointer;font-size:11px;margin-left:4px">↻</button>
+        <span id="leakSummaryMeta"></span>
+      </div>
+    </div>
+    <div id="leakSummaryList"></div>
+  </div>
+
   <!-- Main grid: Equity curve + Sport ROI list -->
   <div class="main-grid">
     <div class="card">
@@ -1372,6 +1390,7 @@ async function refresh() {
         loadLeagueBlocklist(gen),
         loadShadowVsRealDrift(gen),
         loadReadinessCorrections(gen),
+        loadLeakSummary(gen),
         loadPipelineHealth(gen),
       ]);
     } else {
@@ -1386,6 +1405,7 @@ async function refresh() {
         loadLeagueBlocklist(gen),
         loadShadowVsRealDrift(gen),
         loadReadinessCorrections(gen),
+        loadLeakSummary(gen),
         loadPipelineHealth(gen),
         loadUpcoming(gen),
         loadTips(gen),
@@ -2367,6 +2387,91 @@ async function loadReadinessCorrections(gen = refreshGen) {
     list.innerHTML = rows + legend;
   } catch (e) {
     console.warn('loadReadinessCorrections error:', e);
+    card.style.display = 'none';
+  }
+}
+
+// 2026-05-08: card "Leaks detectados" — agrega cross-sport audit em 1 view.
+// Reusa /admin/sport-leak-summary que classifica cells por severity
+// CRITICAL/HIGH/MEDIUM/LOW + suggested_action. Substitui chamadas manuais
+// múltiplas a /shadow-readiness por sport.
+async function loadLeakSummary(gen = refreshGen) {
+  const card = document.getElementById('leakSummaryCard');
+  const list = document.getElementById('leakSummaryList');
+  const meta = document.getElementById('leakSummaryMeta');
+  if (!card || !list) return;
+  try {
+    const sel = document.getElementById('leakSummaryDays');
+    const days = sel ? sel.value : '30';
+    let r;
+    try {
+      r = await adminFetchJson(`/admin/sport-leak-summary?days=${encodeURIComponent(days)}&minN=10`);
+    } catch (eAuth) {
+      card.style.display = 'none';
+      return;
+    }
+    if (shouldAbort(gen)) return;
+    if (!r?.ok) { card.style.display = 'none'; return; }
+    const total = r.n_total_leaks || 0;
+    if (total === 0) { card.style.display = 'none'; return; }
+    card.style.display = '';
+    const ns = r.n_by_severity || {};
+    const metaParts = [`${total} cell(s)`];
+    if (ns.CRITICAL > 0) metaParts.push(`🚨 ${ns.CRITICAL} CRITICAL`);
+    if (ns.HIGH > 0) metaParts.push(`⚠️ ${ns.HIGH} HIGH`);
+    if (ns.MEDIUM > 0) metaParts.push(`🟡 ${ns.MEDIUM} MEDIUM`);
+    if (ns.LOW > 0) metaParts.push(`💡 ${ns.LOW} LOW`);
+    meta.textContent = metaParts.join(' · ');
+
+    const severityConfig = {
+      CRITICAL: { color: '#ef4444', emoji: '🚨', bg: 'rgba(239,68,68,0.10)' },
+      HIGH:     { color: '#f59e0b', emoji: '⚠️', bg: 'rgba(245,158,11,0.10)' },
+      MEDIUM:   { color: '#facc15', emoji: '🟡', bg: 'rgba(250,204,21,0.08)' },
+      LOW:      { color: '#3b82f6', emoji: '💡', bg: 'rgba(59,130,246,0.06)' },
+    };
+    const sevOrder = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW'];
+    const fmtPct = (v) => v == null ? '—' : `${v >= 0 ? '+' : ''}${v.toFixed(1)}%`;
+    const fmtPp = (v) => v == null ? '—' : `${v >= 0 ? '+' : ''}${v.toFixed(1)}pp`;
+
+    let html = '';
+    for (const sev of sevOrder) {
+      const items = (r.leaks?.[sev] || []);
+      if (!items.length) continue;
+      const cfg = severityConfig[sev];
+      html += `<div style="margin-bottom:10px"><div style="font-size:11px;color:${cfg.color};font-weight:600;padding:4px 12px;background:${cfg.bg};border-radius:4px 4px 0 0">${cfg.emoji} ${sev} (${items.length})</div>`;
+      for (const it of items) {
+        const target = it.scope === 'market'
+          ? `${it.sport}/${it.market || '?'}`
+          : `${it.sport}/${it.league || '?'}`;
+        const reasonsStr = (it.reasons || []).map(r => r.replace(/</g, '&lt;')).join(' · ');
+        const actionLine = it.suggested_action
+          ? `<div style="font-size:11px;color:var(--text-dim);margin-top:4px;font-family:monospace">→ ${it.suggested_action.replace(/</g, '&lt;').slice(0, 200)}</div>`
+          : '';
+        const sigTag = it.calib_significant ? ' <span style="color:#7c3aed;font-size:10px">[significant]</span>' : '';
+        html += `
+          <div style="padding:8px 12px;border-left:3px solid ${cfg.color};background:${cfg.bg};margin-bottom:4px;border-radius:0 4px 4px 0">
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+              <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+                <code style="background:rgba(255,255,255,0.05);padding:2px 6px;border-radius:3px;font-size:12px"><strong>${target.replace(/</g, '&lt;')}</strong></code>
+                <span style="font-size:11px;color:var(--text-dim)">n=${it.n}</span>
+                <span style="font-size:11px">ROI ${fmtPct(it.roi_pct)}</span>
+                ${it.calib_gap_pp != null ? `<span style="font-size:11px">calib_gap ${fmtPp(it.calib_gap_pp)}${sigTag}</span>` : ''}
+              </div>
+              <span class="kpi-meta" style="font-size:11px">${reasonsStr}</span>
+            </div>
+            ${actionLine}
+          </div>
+        `;
+      }
+      html += `</div>`;
+    }
+    const legend = `
+      <div style="padding:8px 10px;font-size:11px;color:var(--text-dim);border-top:1px solid var(--border);background:rgba(0,0,0,0.10)">
+        Audit cross-sport via <code>/admin/sport-leak-summary</code>. Severities: 🚨 CRITICAL ROI<-25% · ⚠️ HIGH calib_gap signif · 🟡 MEDIUM ROI<threshold · 💡 LOW low_sample bad_trend. Read-only — usa <code>is_shadow=0</code> (P2). Suggested actions são URLs prontas pra disable/block.
+      </div>`;
+    list.innerHTML = html + legend;
+  } catch (e) {
+    console.warn('loadLeakSummary error:', e);
     card.style.display = 'none';
   }
 }
