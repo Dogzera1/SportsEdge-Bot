@@ -1705,7 +1705,18 @@ function serverPost(path, body, sport, extraHeaders) {
     // Timeout: protege contra server hang. Sem isso, socket fica em CLOSE_WAIT
     // e bridge bot↔server pode acumular conexões zombie. 5s é generoso pra
     // request loopback (typical p99 < 200ms).
-    req.setTimeout(parseInt(process.env.SERVER_POST_TIMEOUT_MS || '5000', 10) || 5000, () => {
+    //
+    // Exception: /claude proxia DeepSeek (LLM ~8-30s p95). 5s aborta no meio
+    // do generation — bot dropa response, server registra status=ok depois,
+    // métrica fica enganosa (ai_call status=ok mas bot nunca recebeu o text).
+    // Bug latente: enquanto AI_DISABLED=true, /claude retornava instant ({ blocked: true })
+    // e 5s servia. Quando reativamos via <SPORT>_AI_ENABLED (MMA 2026-05-09),
+    // bug emergiu. Per-path timeout: /claude usa SERVER_POST_AI_TIMEOUT_MS (60s default).
+    const _isAiPath = pathBase === '/claude';
+    const _tmoMs = _isAiPath
+      ? (parseInt(process.env.SERVER_POST_AI_TIMEOUT_MS || '60000', 10) || 60000)
+      : (parseInt(process.env.SERVER_POST_TIMEOUT_MS || '5000', 10) || 5000);
+    req.setTimeout(_tmoMs, () => {
       req.destroy(Object.assign(new Error('serverPost timeout'), { code: 'ETIMEDOUT' }));
     });
     req.write(s);
