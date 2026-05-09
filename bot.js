@@ -23210,6 +23210,42 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   setInterval(() => runGateAttributionWeekly().catch(e => log('ERROR', 'GATE-ATTRIB', e.message)), 60 * 60 * 1000);
   setTimeout(() => runGateAttributionWeekly().catch(() => {}), 75 * 60 * 1000);
 
+  // 2026-05-09: HG- (handicapGames negative line) tennis readiness monitor.
+  // User: HG- ROI +52.8% n=24 mas insuficiente. Cron 24h alerta admin
+  // quando atinge n>=50 + ROI>=10% + hit IC95 lower bound > 50%.
+  // P2-compliant: só DM, sem auto-action. Decisão (refit calib byLineSign,
+  // ajustar Kelly hierarchy) fica humana.
+  // Opt-out: HG_NEG_READINESS_AUTO=false. Default ON.
+  let _lastHgNegReadinessMs = 0;
+  let _hgNegArmedNotified = false;
+  async function runHgNegReadinessDaily() {
+    if (/^(0|false|no)$/i.test(String(process.env.HG_NEG_READINESS_AUTO ?? 'true'))) return;
+    const intervalH = Math.max(6, Math.min(48, parseInt(process.env.HG_NEG_READINESS_INTERVAL_H || '24', 10) || 24));
+    if (Date.now() - _lastHgNegReadinessMs < intervalH * 60 * 60 * 1000) return;
+    _lastHgNegReadinessMs = Date.now();
+    try {
+      const { runHgNegReadiness } = require('./lib/hg-neg-readiness');
+      const r = runHgNegReadiness(db, {
+        days: parseInt(process.env.HG_NEG_READINESS_DAYS || '60', 10),
+        minN: parseInt(process.env.HG_NEG_READINESS_MIN_N || '50', 10),
+        minRoi: parseFloat(process.env.HG_NEG_READINESS_MIN_ROI || '10'),
+        minIcLowerHit: parseFloat(process.env.HG_NEG_READINESS_IC_LOWER || '0.50'),
+      });
+      log('INFO', 'HG-NEG-READINESS',
+        `n=${r.stats.n} ROI=${r.stats.roi}% hit=${r.stats.hit}% IC95=[${r.stats.hit_ic95_lower},${r.stats.hit_ic95_upper}]% CLV=${r.stats.clv}% armed=${r.armed}`);
+      if (!r.armed) return;
+      // Idempotência: notifica 1x ao armar; reset quando desarmar
+      if (_hgNegArmedNotified) return;
+      _hgNegArmedNotified = true;
+      if (!ADMIN_IDS.size) return;
+      const msg = `🎯 *HG- TENNIS — readiness threshold atingido*\n\nHandicapGames negative line (favorito dá games) acumulou sample suficiente:\n\n• n=${r.stats.n} settled (≥${r.cfg.minN})\n• ROI=${r.stats.roi}% (≥${r.cfg.minRoi}%)\n• Hit=${r.stats.hit}% (IC95 [${r.stats.hit_ic95_lower}, ${r.stats.hit_ic95_upper}]%)\n• CLV=${r.stats.clv}% (n=${r.stats.clv_n})\n• Profit=R$ ${r.stats.profit} / Stake R$ ${r.stats.staked}\n\nAções recomendadas:\n1. Refit Markov calib v3 byLineSign (schema TODO)\n2. Implementar KELLY_TENNIS_HG_NEG_<CONF> hierarquia\n3. Validar walk-forward 30d antes de write=true\n\nKnobs: HG_NEG_READINESS_MIN_N, _MIN_ROI, _IC_LOWER, _DAYS.`;
+      const token = resolveAlertsToken();
+      if (token) for (const adminId of ADMIN_IDS) sendDM(token, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
+    } catch (e) { log('ERROR', 'HG-NEG-READINESS', e.message); }
+  }
+  setInterval(() => runHgNegReadinessDaily().catch(e => log('ERROR', 'HG-NEG-READINESS', e.message)), 60 * 60 * 1000);
+  setTimeout(() => runHgNegReadinessDaily().catch(() => {}), 50 * 60 * 1000);
+
   // 2026-05-05: Readiness Learner — fecha o loop "leak detectado → corrijo →
   // verifico → escalo ou restauro". Default OFF (opt-in via env). Roda weekly
   // (6 dias intervalo) — janela longa suficiente pra acumular dados pós-correção.

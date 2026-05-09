@@ -11251,6 +11251,25 @@ setInterval(load, 60000);
   // Counterfactual gate analysis on-demand (era só cron weekly DM admin).
   // Pra cada gate: n / saved_loss / lost_profit / net (saved - lost) / hitRate.
   // net negativo = gate corta edge (candidato relaxar cap)
+  // GET /admin/hg-neg-readiness?days=60&minN=50&minRoi=10&minIcLowerHit=0.50&key=<KEY>
+  // 2026-05-09: check on-demand do readiness HG- tennis (mesmo do cron 24h).
+  // Retorna armed=true quando sample suficiente + ROI/IC95 atingem threshold.
+  if (p === '/admin/hg-neg-readiness') {
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    try {
+      const { runHgNegReadiness } = require('./lib/hg-neg-readiness');
+      const r = runHgNegReadiness(db, {
+        days: parseInt(parsed.query.days || '60', 10),
+        minN: parseInt(parsed.query.minN || '50', 10),
+        minRoi: parseFloat(parsed.query.minRoi || '10'),
+        minIcLowerHit: parseFloat(parsed.query.minIcLowerHit || '0.50'),
+      });
+      sendJson(res, { ok: true, ts: new Date().toISOString(), ...r });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   if (p === '/admin/gate-attribution-snapshot' && (req.method === 'GET' || req.method === 'POST')) {
     const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
