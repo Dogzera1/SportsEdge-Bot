@@ -4278,9 +4278,19 @@ async function runReadinessLearnerNow(dryRun = false) {
 // triggers (toggleSection click + refresh() cascade) podiam disparar 2-3
 // loads concurrent. Fetch interno faz N requests paralelos (/tips-history
 // per sport) — race conditions causavam render fora de ordem.
+//
+// 2026-05-09 v2: lock simples descartava 2º trigger silently — quando user
+// trocava sport via filterToSport durante load em curso, ML shadow card NÃO
+// atualizava (mostrava dados antigos = "travado"). Fix: pending-reload pattern
+// — trigger novo durante load marca _pendingMlShadowReload=true. Loop while
+// reroda automaticamente até queue vazio.
 let _loadingMlShadow = false;
+let _pendingMlShadowReload = false;
 async function loadMlShadowBySport() {
-  if (_loadingMlShadow) return;
+  if (_loadingMlShadow) {
+    _pendingMlShadowReload = true;
+    return;
+  }
   _loadingMlShadow = true;
   const el = document.getElementById('mlShadowBody');
   const meta = document.getElementById('mlShadowMeta');
@@ -4290,7 +4300,10 @@ async function loadMlShadowBySport() {
     el.style.pointerEvents = 'none';
   }
   try {
-    await _loadMlShadowBySportInternal(el, meta);
+    do {
+      _pendingMlShadowReload = false;
+      await _loadMlShadowBySportInternal(el, meta);
+    } while (_pendingMlShadowReload);
   } finally {
     _loadingMlShadow = false;
     if (el) {
