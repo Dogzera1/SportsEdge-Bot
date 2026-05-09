@@ -9428,12 +9428,17 @@ setInterval(load, 10000);
     // breakdown por esporte mostra apenas stats DESSA liga. SQL escape via
     // bind parameter (não interpolado, prepared statement é seguro).
     // 2026-05-09 v2: `leagueIn=L1|L2|...` pra filter de TIER (frontend expande).
+    // 2026-05-09 v3: `liveFilter=pre|live|all` — split granular pre vs live.
     const leagueFilter = (parsed.query.league || '').trim();
     const leagueInRaw = (parsed.query.leagueIn || '').trim();
     const leagueIn = leagueInRaw ? leagueInRaw.split('|').map(s => s.trim()).filter(Boolean).slice(0, 50) : [];
+    const liveFilter = String(parsed.query.liveFilter || '').toLowerCase();
     try {
       const conds = [`created_at >= datetime('now', '-${days} days')`];
       if (!includeVoid) conds.push(`(result IS NULL OR result != 'void')`);
+      if (liveFilter === 'pre') conds.push('(is_live IS NULL OR is_live = 0)');
+      else if (liveFilter === 'live') conds.push('is_live = 1');
+      // 'all' or unset → no live filter (current behavior)
       const queryParams = [];
       if (leagueFilter) {
         conds.push(`lower(COALESCE(league, '')) LIKE ?`);
