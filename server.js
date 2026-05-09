@@ -7816,6 +7816,169 @@ setInterval(load, 10000);
     return;
   }
 
+  // 2026-05-09: audit + re-settle de tips basket settled erroneamente.
+  // Sintoma: tip 2343 (sent 2026-05-09 00:01, jogo ao vivo) settled como loss
+  // 7min depois usando jogo de 2026-05-07 (mesmo par Wolves×Spurs playoff).
+  // Causa: match_id prefix invertido (`basket_espn_*` vs `espn_basket_*`) +
+  // janela `-2d/+3d` no name fallback. Fix em /basket-result (acima);
+  // este endpoint reverte tips erradas.
+  // GET /admin/basket-resettle-audit?days=14&dry_run=1 — lista suspeitas
+  // GET /admin/basket-resettle-audit?days=14         — aplica revert/resettle
+  if (p === '/admin/basket-resettle-audit') {
+    if (!requireAdmin(req, res)) return;
+    const days = Math.max(1, Math.min(60, parseInt(parsed.query.days || '14', 10) || 14));
+    const dryRun = String(parsed.query.dry_run || '') !== '0' && String(parsed.query.dry_run || '') !== 'false';
+    try {
+      // Pega todas tips basket settled nos últimos N dias com gap sent→settled < 2.5h
+      // (jogo NBA dura ~2.5h; settle abaixo disso só pode ter pego match anterior)
+      const tips = db.prepare(`
+        SELECT id, sport, match_id, participant1, participant2, tip_participant,
+               odds, stake, stake_reais, profit_reais, result, sent_at, settled_at, is_shadow
+        FROM tips
+        WHERE sport = 'basket'
+          AND result IS NOT NULL
+          AND settled_at IS NOT NULL
+          AND sent_at >= datetime('now', '-' || ? || ' days')
+          AND (julianday(settled_at) - julianday(sent_at)) * 86400 < 9000  -- 2.5h em segs
+          AND (archived IS NULL OR archived = 0)
+        ORDER BY id DESC
+      `).all(days);
+
+      const suspectsByCorrectness = { wrong: [], maybe_correct: [], cant_verify: [] };
+      let revertedN = 0, resettledN = 0;
+
+      for (const tip of tips) {
+        const sentRaw = String(tip.sent_at || '').trim();
+        // Janela ESTREITA correta: jogo só pode ter resolvido entre [sent-12h, sent+30h]
+        const correctMatch = db.prepare(`
+          SELECT * FROM match_results
+          WHERE game = 'basket'
+            AND ((lower(team1) LIKE lower('%' || ? || '%') AND lower(team2) LIKE lower('%' || ? || '%'))
+              OR (lower(team1) LIKE lower('%' || ? || '%') AND lower(team2) LIKE lower('%' || ? || '%')))
+            AND resolved_at BETWEEN datetime(?, '-12 hours') AND datetime(?, '+30 hours')
+          ORDER BY resolved_at DESC LIMIT 1
+        `).get(tip.participant1, tip.participant2, tip.participant2, tip.participant1, sentRaw, sentRaw);
+
+        // Settle prévio teria usado janela larga -2d/+3d
+        const wrongMatch = db.prepare(`
+          SELECT * FROM match_results
+          WHERE game = 'basket'
+            AND ((lower(team1) LIKE lower('%' || ? || '%') AND lower(team2) LIKE lower('%' || ? || '%'))
+              OR (lower(team1) LIKE lower('%' || ? || '%') AND lower(team2) LIKE lower('%' || ? || '%')))
+            AND resolved_at BETWEEN datetime(?, '-2 days') AND datetime(?, '+3 days')
+          ORDER BY resolved_at DESC LIMIT 1
+        `).get(tip.participant1, tip.participant2, tip.participant2, tip.participant1, sentRaw, sentRaw);
+
+        const _normName = s => String(s||'').toLowerCase().replace(/[^a-z0-9]/g, '');
+        const _winnerIsPick = (winner) => {
+          if (!winner) return null;
+          const w = _normName(winner);
+          const pick = _normName(tip.tip_participant || '');
+          return w === pick || w.includes(pick) || pick.includes(w);
+        };
+
+        // Caso 1: janela estreita NÃO acha jogo (jogo ainda em curso ou sem dado)
+        if (!correctMatch?.winner) {
+          // Settle anterior pegou match errado? Se sim, reverte.
+          if (wrongMatch && wrongMatch.match_id) {
+            // Pega resolved_at do wrong vs sentAt — se resolved 12h+ ANTES do sentAt,
+            // claramente match errado (jogo já tinha acabado quando tip foi enviada)
+            const wrongResMs = Date.parse(String(wrongMatch.resolved_at || '').replace(' ', 'T'));
+            const sentMs = Date.parse(sentRaw.includes('T') ? sentRaw : sentRaw.replace(' ', 'T'));
+            const gapH = Number.isFinite(wrongResMs) && Number.isFinite(sentMs)
+              ? (sentMs - wrongResMs) / 3600000 : null;
+            if (gapH != null && gapH > 12) {
+              // Match anterior pego errado — reverte tip pra pending
+              if (!dryRun) {
+                db.transaction(() => {
+                  // Reverte bankroll se for tip real
+                  if (tip.is_shadow !== 1 && Number.isFinite(Number(tip.profit_reais)) && Number(tip.profit_reais) !== 0) {
+                    const bk = stmts.getBankroll.get('basket');
+                    if (bk) {
+                      const nova = parseFloat(((Number(bk.current_banca) || 0) - Number(tip.profit_reais)).toFixed(2));
+                      stmts.updateBankroll.run(nova, 'basket');
+                    }
+                  }
+                  db.prepare(`UPDATE tips SET result = NULL, settled_at = NULL, profit_reais = NULL WHERE id = ?`).run(tip.id);
+                })();
+                revertedN++;
+              }
+              suspectsByCorrectness.wrong.push({
+                tip_id: tip.id, sent_at: sentRaw, settled_at: tip.settled_at,
+                pick: tip.tip_participant, odds: tip.odds, prev_result: tip.result, prev_profit: tip.profit_reais,
+                wrong_match: { match_id: wrongMatch.match_id, winner: wrongMatch.winner, resolved_at: wrongMatch.resolved_at, gap_h_pre_sent: +gapH.toFixed(1) },
+                action: dryRun ? 'WOULD_REVERT_TO_PENDING' : 'REVERTED_TO_PENDING',
+              });
+              continue;
+            }
+          }
+          suspectsByCorrectness.cant_verify.push({
+            tip_id: tip.id, sent_at: sentRaw, pick: tip.tip_participant, prev_result: tip.result,
+            note: 'janela estreita sem match; janela larga ambígua',
+          });
+          continue;
+        }
+
+        // Caso 2: janela estreita acha match — comparar com result atual
+        const correctIsWin = _winnerIsPick(correctMatch.winner);
+        const expected = correctIsWin === true ? 'win' : (correctIsWin === false ? 'loss' : null);
+        if (!expected) {
+          suspectsByCorrectness.cant_verify.push({
+            tip_id: tip.id, pick: tip.tip_participant, correct_winner: correctMatch.winner, prev_result: tip.result,
+          });
+          continue;
+        }
+        if (expected !== tip.result) {
+          // Result errado — re-settle
+          if (!dryRun) {
+            db.transaction(() => {
+              // Reverte profit antigo
+              if (tip.is_shadow !== 1 && Number.isFinite(Number(tip.profit_reais))) {
+                const bk = stmts.getBankroll.get('basket');
+                if (bk) {
+                  const reverted = parseFloat(((Number(bk.current_banca) || 0) - Number(tip.profit_reais)).toFixed(2));
+                  // Calcula profit novo
+                  const odds = parseFloat(tip.odds) || 1;
+                  const stakeR = Number(tip.stake_reais) || 0;
+                  const newProfit = expected === 'win' ? +(stakeR * (odds - 1)).toFixed(2) : -stakeR;
+                  const final = parseFloat((reverted + newProfit).toFixed(2));
+                  stmts.updateBankroll.run(final, 'basket');
+                  db.prepare(`UPDATE tips SET result = ?, profit_reais = ? WHERE id = ?`).run(expected, newProfit, tip.id);
+                }
+              } else {
+                db.prepare(`UPDATE tips SET result = ? WHERE id = ?`).run(expected, tip.id);
+              }
+            })();
+            resettledN++;
+          }
+          suspectsByCorrectness.wrong.push({
+            tip_id: tip.id, sent_at: sentRaw, pick: tip.tip_participant, odds: tip.odds,
+            prev_result: tip.result, correct_result: expected,
+            correct_match: { winner: correctMatch.winner, score: correctMatch.final_score, resolved_at: correctMatch.resolved_at },
+            action: dryRun ? 'WOULD_RESETTLE' : 'RESETTLED',
+          });
+        } else {
+          suspectsByCorrectness.maybe_correct.push({ tip_id: tip.id, prev_result: tip.result });
+        }
+      }
+
+      sendJson(res, {
+        ok: true,
+        dry_run: dryRun,
+        scanned: tips.length,
+        wrong_count: suspectsByCorrectness.wrong.length,
+        maybe_correct_count: suspectsByCorrectness.maybe_correct.length,
+        cant_verify_count: suspectsByCorrectness.cant_verify.length,
+        reverted_to_pending: revertedN,
+        resettled: resettledN,
+        results: suspectsByCorrectness,
+      });
+    } catch (e) {
+      sendJson(res, { ok: false, error: e.message, stack: _stackForReq(req, e)?.slice(0, 600) }, 500);
+    }
+    return;
+  }
+
   if (p === '/basket-result') {
     const matchId = (parsed.query.matchId || '').trim();
     const team1   = (parsed.query.team1   || '').trim();
@@ -7827,10 +7990,31 @@ setInterval(load, 10000);
       return;
     }
     try {
-      let row = matchId
-        ? db.prepare("SELECT * FROM match_results WHERE match_id = ? AND game = 'basket' LIMIT 1").get(matchId)
-        : null;
+      // 2026-05-09 BUG FIX: tips gravam match_id como `basket_espn_<id>` mas
+      // match_results grava como `espn_basket_<id>` (prefix invertido). Direct
+      // lookup nunca casava → fallback fuzzy + janela larga pegava match anterior
+      // do mesmo par (Wolves×Spurs playoff back-to-back) → settle errado.
+      // Sintoma observado tip 2343 (sent 2026-05-09 00:01, settled como loss usando
+      // jogo de 2026-05-07).
+      let row = null;
+      if (matchId) {
+        const altId = matchId.startsWith('basket_espn_')
+          ? matchId.replace(/^basket_espn_/, 'espn_basket_')
+          : matchId.startsWith('espn_basket_')
+            ? matchId.replace(/^espn_basket_/, 'basket_espn_')
+            : null;
+        const ids = altId ? [matchId, altId] : [matchId];
+        const placeholders = ids.map(() => '?').join(',');
+        row = db.prepare(`SELECT * FROM match_results WHERE match_id IN (${placeholders}) AND game = 'basket' LIMIT 1`).get(...ids);
+      }
 
+      // 2026-05-09 BUG FIX: janela name-fallback estreitada de -2d/+3d pra
+      // -12h/+30h. NBA playoffs joga back-to-back (Wolves×Spurs em 05-05, 05-07,
+      // 05-09); janela larga pegava jogo anterior do par e settled tip atual com
+      // resultado errado. Jogo NBA dura ~3h + ESPN sync delay → +30h cobre.
+      // Pra tip pre-game (sentAt antes do jogo), sentAt é início do match → fim
+      // ~+3h, então +30h ainda dá margem ampla; -12h cobre tips emitidas pos-jogo
+      // (raro pra basket — não há live tip basket atualmente).
       if (!row?.winner) {
         const t1Like = `%${team1}%`;
         const t2Like = `%${team2}%`;
@@ -7840,7 +8024,7 @@ setInterval(load, 10000);
               WHERE game = 'basket'
                 AND ((lower(team1) LIKE lower(?) AND lower(team2) LIKE lower(?))
                   OR (lower(team1) LIKE lower(?) AND lower(team2) LIKE lower(?)))
-                AND resolved_at BETWEEN datetime(?, '-2 days') AND datetime(?, '+3 days')
+                AND resolved_at BETWEEN datetime(?, '-12 hours') AND datetime(?, '+30 hours')
               ORDER BY resolved_at DESC LIMIT 1`)
           : db.prepare(`
               SELECT * FROM match_results
@@ -7854,7 +8038,7 @@ setInterval(load, 10000);
       }
 
       // Tentativa 3: norm match (NBA team names variam: "LA Lakers" vs "Los Angeles Lakers").
-      // Window ±2d (NBA agenda diária; sem janela longa pra evitar match cruzado).
+      // Mesma janela estreitada pra evitar match cruzado em playoffs back-to-back.
       if (!row?.winner && sentAt) {
         try {
           const _normB = (s) => String(s || '').toLowerCase().normalize('NFD')
@@ -7864,7 +8048,7 @@ setInterval(load, 10000);
           const candidates = db.prepare(`
             SELECT * FROM match_results
             WHERE game = 'basket'
-              AND resolved_at BETWEEN datetime(?, '-2 days') AND datetime(?, '+3 days')
+              AND resolved_at BETWEEN datetime(?, '-12 hours') AND datetime(?, '+30 hours')
           `).all(sentAt, sentAt);
           const t1n = _normB(team1), t2n = _normB(team2);
           for (const c of candidates) {
