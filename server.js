@@ -25783,19 +25783,28 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
     return;
   }
 
-  // GET /ml-shadow-by-sport?days=30
+  // GET /ml-shadow-by-sport?days=30&league=Slug
   // Agregado cross-sport de tips ML em shadow (is_shadow=1). Mostra pending + settled,
   // hit rate, ROI, CLV, profit por esporte. Usado no dashboard pra observar sports
   // em shadow (sem DM) até amostra ser suficiente pra promover.
+  // 2026-05-09: opt-in &league=X — filtra event_name LIKE %league% pra ML shadow
+  // também respondê ao filter de liga clicado em tips/MT cards.
   if (p === '/ml-shadow-by-sport') {
     const daysRaw = parseInt(parsed.query.days);
     const days = Number.isFinite(daysRaw) ? Math.max(1, Math.min(365, daysRaw)) : 30;
+    const leagueFilter = (parsed.query.league || '').trim();
     try {
       // 2026-05-05: dedup por (sport, match_id, tip_participant, market_type)
       // pra contar 1 evento por par tip+pick, não cada re-emission do shadow puro
       // mode (basket fase 1 inflava 1 jogo real em ~12 inserts → winRate 71%
       // sintético). Mantém a linha de MAX(id) — a mais recente, com result final
       // se já settled. Profit/stake também batem porque vêm da row settled.
+      const params = [`-${days} days`];
+      let leagueWhere = '';
+      if (leagueFilter) {
+        leagueWhere = ` AND lower(COALESCE(event_name, '')) LIKE ? `;
+        params.push('%' + leagueFilter.toLowerCase() + '%');
+      }
       const rows = db.prepare(`
         WITH dedup AS (
           SELECT MAX(id) AS id
@@ -25804,6 +25813,7 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
             AND (archived IS NULL OR archived = 0)
             AND (market_type IS NULL OR market_type = 'ML')
             AND (sent_at >= datetime('now', ?) OR result IS NULL)
+            ${leagueWhere}
           GROUP BY sport,
                    COALESCE(NULLIF(TRIM(match_id), ''), 'id:' || CAST(id AS TEXT)),
                    REPLACE(REPLACE(lower(COALESCE(tip_participant, '')), ' ', ''), '-', ''),
@@ -25825,7 +25835,7 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
         JOIN dedup d ON d.id = t.id
         GROUP BY t.sport
         ORDER BY n DESC
-      `).all(`-${days} days`);
+      `).all(...params);
 
       const per_sport = rows.map(r => {
         const decided = (r.wins || 0) + (r.losses || 0);
@@ -25861,7 +25871,7 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
         stake_reais: parseFloat(tot.stake_reais.toFixed(2)),
       };
 
-      sendJson(res, { days, totals, per_sport });
+      sendJson(res, { days, totals, per_sport, league: leagueFilter || null });
     } catch (e) { sendJson(res, { error: e.message }, 500); }
     return;
   }

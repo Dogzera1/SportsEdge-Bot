@@ -2855,6 +2855,8 @@ function filterTipsByLeague(league) {
   // 2026-05-09: refetch tipsBySport com league filter — breakdown por sport
   // reflete apenas tips da liga selecionada (ou tudo se filter limpo).
   loadTipsBySport(refreshGen).catch(() => {});
+  // 2026-05-09: ML shadow cards também respondem ao filter (consistency)
+  _refreshMlShadowIfExpanded();
 }
 
 function filterTipsByTier(sport, tier) {
@@ -2868,6 +2870,17 @@ function filterTipsByTier(sport, tier) {
   renderTipsTable();
   loadTipsByLeague(refreshGen).catch(() => {});
   loadTipsBySport(refreshGen).catch(() => {});
+  // tier filter limpa league — ML shadow volta pro default
+  _refreshMlShadowIfExpanded();
+}
+
+// 2026-05-09: helper — só recarrega ML shadow se seção tá expandida (evita
+// fetch desnecessário). Lock interno em loadMlShadowBySport previne overlap.
+function _refreshMlShadowIfExpanded() {
+  const sec = document.getElementById('secMlShadow');
+  if (sec && sec.dataset.collapsed === 'false') {
+    loadMlShadowBySport().catch(() => {});
+  }
 }
 
 // 2026-04-28: cross-section deeplink helper. Switch sport + filter liga +
@@ -4185,7 +4198,13 @@ async function loadMlShadowBySport() {
 }
 
 async function _loadMlShadowBySportInternal(el, meta) {
-  const data = await apiFetch('/ml-shadow-by-sport?days=30');
+  // 2026-05-09: ML shadow respeita filtro de liga ativo em tips OU MT shadow.
+  // Cards ficam consistent — clicar liga filtra todas as 3 seções (tips, MT, ML).
+  const lf = (typeof tipsLeagueFilter === 'string' && tipsLeagueFilter)
+    || (window.marketTipsState && marketTipsState.leagueFilter)
+    || null;
+  const lq = lf ? '&league=' + encodeURIComponent(lf) : '';
+  const data = await apiFetch('/ml-shadow-by-sport?days=30' + lq);
   if (!data || data.error) { el.innerHTML = '<div class="empty-state">Sem dados shadow</div>'; meta.textContent = '—'; return; }
   const t = data.totals || {};
   const sports = data.per_sport || [];
@@ -5661,7 +5680,18 @@ function renderMarketTipsByLeagueCards(bl) {
     </div>`;
 }
 
+// 2026-05-09 (UX fix): lock + debounce 350ms — clicks rápidos em cards de
+// liga MT travavam pq loadMarketTipsShadow é pesado (server-side filter +
+// recompute breakdown). Mesmo padrão de filterToSport.
+let _filterMtLeagueInFlight = false;
+let _filterMtLeagueLastTs = 0;
 function filterMarketTipsByLeague(league) {
+  const now = Date.now();
+  if (_filterMtLeagueInFlight) return;
+  if (now - _filterMtLeagueLastTs < 350) return;
+  _filterMtLeagueInFlight = true;
+  _filterMtLeagueLastTs = now;
+  document.body.style.cursor = 'wait';
   // Toggle: clicar no mesmo card limpa filtro
   if (marketTipsState.leagueFilter === league) {
     marketTipsState.leagueFilter = null;
@@ -5670,7 +5700,16 @@ function filterMarketTipsByLeague(league) {
   }
   marketTipsState.page = 0;
   // Filter agora é server-side — refetch pra recalcular total/pages com o filtro
-  loadMarketTipsShadow();
+  loadMarketTipsShadow()
+    .catch(() => {})
+    .finally(() => {
+      _filterMtLeagueInFlight = false;
+      document.body.style.cursor = '';
+    });
+  // ML shadow respeita filter — refresh em background se expandida
+  if (typeof _refreshMlShadowIfExpanded === 'function') {
+    _refreshMlShadowIfExpanded();
+  }
 }
 
 // 2026-05-09 (UX fix): user reportou cards "travados" ao clicar.
