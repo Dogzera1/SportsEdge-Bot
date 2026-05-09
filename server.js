@@ -9559,7 +9559,7 @@ setInterval(load, 10000);
         leagueIn.forEach(l => params.push('%' + l.toLowerCase() + '%'));
       }
       const rows = db.prepare(`
-        SELECT sport, market, side, result, stake_units, profit_units, clv_pct, ev_pct, odd, is_live
+        SELECT sport, market, side, line, result, stake_units, profit_units, clv_pct, ev_pct, odd, is_live
         FROM market_tips_shadow
         WHERE ${conds.join(' AND ')}
       `).all(...params);
@@ -9597,11 +9597,23 @@ setInterval(load, 10000);
         })).sort((a, b) => b.staked - a.staked);
       };
 
+      // 2026-05-09: handicapGames split por sinal da line (positive=underdog
+      // recebe games, negative=favorito dá games). Memory: tennis ROI -9% em
+      // line>0 vs +10% em line<0 — bias direcional do modelo Markov.
+      // Pra outros markets (totalGames, Winner), key continua sport|market|side
+      // (line não aplicável OU line é absoluta como totalGames=22.5).
+      const keyWithLineSign = (r) => {
+        if (r.market === 'handicapGames' && r.line != null) {
+          const sign = r.line > 0 ? '+' : r.line < 0 ? '-' : '0';
+          return `${r.sport}|${r.market} ${sign}|${r.side}`;
+        }
+        return `${r.sport}|${r.market}|${r.side}`;
+      };
       sendJson(res, {
         sport: sport || 'all',
         days,
         total_settled: rows.length,
-        by_market_side: agg(rows, r => `${r.sport}|${r.market}|${r.side}`),
+        by_market_side: agg(rows, keyWithLineSign),
         by_market: agg(rows, r => `${r.sport}|${r.market}`),
         by_side: agg(rows, r => `${r.sport}|${r.side}`),
       });
