@@ -29482,7 +29482,16 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
         // IA virou advisory cosmético. Desligar economiza custo API + elimina
         // latency 1-5s per match em live. Toggle gradual: setar pra true 2-4 semanas,
         // medir ROI shadow — se não piorar, permanente.
-        if (/^(1|true|yes)$/i.test(String(process.env.AI_DISABLED || ''))) {
+        //
+        // Override per-sport: <SPORT>_AI_ENABLED=true (ex: MMA_AI_ENABLED=true)
+        // bypassa o kill switch global só pra esse sport. Útil pra reativar IA
+        // pontualmente (ex: MMA shadow eval 2026-05-08 precisava DeepSeek pra
+        // suprir limitação do trained model em hybrid path conservador).
+        const _aiOverrideSportKey = String(_sportTag || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+        const _aiOverrideOn = _aiOverrideSportKey
+          && /^(1|true|yes)$/i.test(String(process.env[`${_aiOverrideSportKey}_AI_ENABLED`] || ''));
+        const _aiGloballyOff = /^(1|true|yes)$/i.test(String(process.env.AI_DISABLED || ''));
+        if (_aiGloballyOff && !_aiOverrideOn) {
           // Track bloqueio pra visibilidade
           try {
             const month = new Date().toISOString().slice(0, 7);
