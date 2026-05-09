@@ -5626,7 +5626,20 @@ function filterMarketTipsByLeague(league) {
   loadMarketTipsShadow();
 }
 
+// 2026-05-09 (UX fix): user reportou cards "travados" ao clicar.
+// refresh() dispara dezenas de fetchs paralelos (~1-2s); sem feedback,
+// clicks rápidos enfileiravam refreshes sobrepostos. Fix:
+//   1. Lock 400ms entre clicks (debounce visual)
+//   2. cursor:wait body durante refresh — feedback imediato
+//   3. Pointer-events disabled em cards durante refresh — bloqueia duplo
+let _filterToSportInFlight = false;
+let _filterToSportLastTs = 0;
 function filterToSport(sp) {
+  const now = Date.now();
+  if (_filterToSportInFlight || (now - _filterToSportLastTs) < 400) return;
+  _filterToSportInFlight = true;
+  _filterToSportLastTs = now;
+  document.body.style.cursor = 'wait';
   currentSport = sp;
   // 2026-04-28: persist + dropdown sync robusto. Antes if option não existir,
   // dropdown ficava com value antigo (visual desync vs currentSport).
@@ -5640,8 +5653,12 @@ function filterToSport(sp) {
   marketTipsState.page = 0;
   marketTipsState.sport = sp;
   // refresh() já inclui loadMarketTipsShadow agora (commit 2b44c3f+).
-  if (typeof refresh === 'function') refresh();
-  else loadMarketTipsShadow();
+  // Wrap em Promise pra unlock no .finally — funciona se refresh é async ou sync.
+  const result = (typeof refresh === 'function') ? refresh() : loadMarketTipsShadow();
+  Promise.resolve(result).finally(() => {
+    _filterToSportInFlight = false;
+    document.body.style.cursor = '';
+  });
 }
 
 function setMarketTipsView(mode) {
