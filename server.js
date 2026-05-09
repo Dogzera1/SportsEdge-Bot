@@ -19275,7 +19275,7 @@ load();
           result,
           COALESCE(stake_reais, 0) AS stake,
           COALESCE(profit_reais, 0) AS profit,
-          clv_odds, odds, ev, is_live, match_id
+          clv_odds, odds, ev, is_live, match_id, tip_participant
         FROM tips
         WHERE ${conds.join(' AND ')}
       `).all(...params);
@@ -19323,6 +19323,9 @@ load();
       //   tennis_pin_1630293102::mt::handicapGames::home::lnP4.5
       // Outros markets (TOTAL_GAMES, ML, etc) sem split — line não aplicável
       // OU absoluta (totalGames=22.5).
+      // 2026-05-09 v2: tips legacy (pre-pattern ::ln*) caíam em '0'. Fallback
+      // parseia tip_participant ('Player +3.5' ou 'Player -3.5') pra extrair
+      // sinal direto.
       const keyWithLineSign = (r) => {
         const mkt = (r.mkt || '').toUpperCase();
         if (mkt === 'HANDICAP_GAMES' || mkt === 'HANDICAP') {
@@ -19330,6 +19333,11 @@ load();
           let sign = '0';
           if (/::lnP/i.test(mid)) sign = '+';
           else if (/::lnN/i.test(mid)) sign = '-';
+          else {
+            const tp = String(r.tip_participant || '');
+            const m = tp.match(/\s([+-])\d+(?:\.\d+)?\s*$/);
+            if (m) sign = m[1];
+          }
           return `${r.sp}|${r.mkt} ${sign}`;
         }
         return `${r.sp}|${r.mkt}`;
