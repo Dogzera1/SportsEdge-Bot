@@ -15563,7 +15563,7 @@ async function pollMma(runOnce = false) {
         // 2026-05-09: diag temporario pra entender por que factors=1. Se rec1/rec2 saem
         // empty mesmo com espn truthy, parser scoreboard nao está extraindo records.
         if (espn) {
-          log('DEBUG', 'AUTO-MMA-DIAG', `espn.name1='${espn.name1}' rec1='${espn.record1}' name2='${espn.name2}' rec2='${espn.record2}' → resolved rec1='${rec1}' rec2='${rec2}'`);
+          log('INFO', 'AUTO-MMA-DIAG', `espn.name1='${espn.name1}' rec1='${espn.record1}' name2='${espn.name2}' rec2='${espn.record2}' → resolved rec1='${rec1}' rec2='${rec2}'`);
         }
         const weightClass = espn?.weightClass || '';
         const rounds = espn?.rounds || 3;
