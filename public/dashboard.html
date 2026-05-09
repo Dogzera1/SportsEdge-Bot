@@ -755,6 +755,10 @@
           <option value="win">Ganhas</option>
           <option value="loss">Perdidas</option>
         </select>
+        <label class="select-inline" title="Inclui tips com is_shadow=1 (research-only por P2). Útil pra inspecionar tips MMA/sports em shadow eval window que não disparam pra real bankroll." style="display:flex;align-items:center;gap:4px;cursor:pointer;user-select:none">
+          <input type="checkbox" id="tipsIncludeShadow" onchange="_saveFilter('tipsIncludeShadow', this.checked ? '1' : ''); loadTips()" style="margin:0;cursor:pointer">
+          <span style="font-size:11px">Shadow</span>
+        </label>
         <select class="select-inline" id="tipsPageSize" onchange="_saveFilter('tipsPageSize', this.value); tipsPage=1; renderTipsTable()">
           <option value="10">10/pág</option>
           <option value="25" selected>25/pág</option>
@@ -2759,6 +2763,12 @@ async function loadTips(gen) {
   try {
     const statusEl = document.getElementById('tipsStatus');
     const status = statusEl ? statusEl.value : '';
+    const includeShadowEl = document.getElementById('tipsIncludeShadow');
+    const includeShadow = includeShadowEl ? !!includeShadowEl.checked : false;
+    // Inject include_shadow=1 quando toggle ativo. Server filtra is_shadow=0
+    // por default (P2: shadow research-only). Toggle expõe sample shadow pra
+    // inspeção visual (ex: MMA shadow eval window 30d pré-promote).
+    const shadowQ = includeShadow ? '&include_shadow=1' : '';
     const el = document.getElementById('tipsTable');
     if (!el) return;
     setLoading(el);
@@ -2777,7 +2787,7 @@ async function loadTips(gen) {
     const sq = status ? '&status=' + encodeURIComponent(status) : '';
     const perSport = LIMIT_PER_SPORT;
     const results = await Promise.all(sports.map(sp =>
-      apiFetch(`/tips-history?sport=${sp}&limit=${perSport}&include_markets=1${sq}`).then(r => ({ sp, data: r }))
+      apiFetch(`/tips-history?sport=${sp}&limit=${perSport}&include_markets=1${sq}${shadowQ}`).then(r => ({ sp, data: r }))
     ));
     if (shouldAbort(gen)) return;
     for (const { sp, data } of results) {
@@ -2809,7 +2819,7 @@ async function loadTips(gen) {
   } else {
     const gq = currentGame ? '&game=' + encodeURIComponent(currentGame) : '';
     const sq = status ? '&status=' + encodeURIComponent(status) : '';
-    const data = await apiFetch(`/tips-history?sport=${currentSport}&limit=2000&include_markets=1${gq}${sq}`);
+    const data = await apiFetch(`/tips-history?sport=${currentSport}&limit=2000&include_markets=1${gq}${sq}${shadowQ}`);
     if (shouldAbort(gen)) return;
     tips = (data?.tips || data || []).map(x => ({ ...x, sport: x.sport || currentSport }));
     // Fuzzy dedup (mesma tip com match_ids diferentes entre esports↔lol/dota2 etc)
@@ -3537,6 +3547,9 @@ function renderTipsTable() {
           // confunde (parece "match em andamento já settled" — visual bug).
           const isPendingLive = t.is_live && (t.result == null || t.result === 'pending');
           const live = isPendingLive ? '<span class="chip" style="background:var(--danger-bg);color:var(--danger);border-color:transparent">LIVE</span>' : '';
+          // Chip SHADOW pra tips is_shadow=1 (research-only por P2). Visualmente distintiva
+          // pra evitar confusão com tips reais quando user ativa toggle "Shadow".
+          const shadow = t.is_shadow ? '<span class="chip" title="Tip shadow (is_shadow=1) — research-only, não dispatched pra real bankroll. P2: shadow=causa, real=sintoma" style="background:#475569;color:#e2e8f0;border-color:transparent;font-size:0.7em">SHADOW</span>' : '';
           // Badge market_type: ML = sem badge (default), outros = chip colorido (HG/TG/HS/TB/etc)
           const _mtRaw = String(t.market_type || 'ML').toUpperCase();
           // total_kills_map<N> → "K<N>" (ex: TOTAL_KILLS_MAP3 → K3)
@@ -3560,7 +3573,7 @@ function renderTipsTable() {
               <td><span class="tip-status ${statusCls}">${statusCh}</span></td>
               <td>
                 <div class="tip-event">${escHtml(t.participant1 || '?')} <span class="tip-meta">vs</span> ${escHtml(t.participant2 || '?')}</div>
-                <div class="tip-meta">${escHtml(t.event_name || t.league || '')} ${live}</div>
+                <div class="tip-meta">${escHtml(t.event_name || t.league || '')} ${live} ${shadow}</div>
               </td>
               <td><div class="tip-pick">${mtBadge}${escHtml(t.tip_participant || '—')}</div></td>
               <td class="tip-num">${(t.odds != null && t.odds !== '' && Number.isFinite(Number(t.odds))) ? Number(t.odds).toFixed(2) : '—'}</td>
@@ -6049,6 +6062,9 @@ function init() {
   };
   _restoreSelect('tipsStatus', 'tipsStatus');
   _restoreSelect('tipsPageSize', 'tipsPageSize');
+  // Restore checkbox tipsIncludeShadow ('1' = checked, '' = unchecked)
+  const _ts = document.getElementById('tipsIncludeShadow');
+  if (_ts) _ts.checked = _loadFilter('tipsIncludeShadow', '') === '1';
   _restoreSelect('equityDays', 'equityDays');
   _restoreSelect('leagueLeaksDays', 'leagueLeaksDays');
   _restoreSelect('shadowVsRealWindow', 'shadowVsRealWindow');
