@@ -15560,11 +15560,6 @@ async function pollMma(runOnce = false) {
         const espn = findEspnFight(espnFights, fight.team1, fight.team2);
         let rec1 = espn ? (normName(espn.name1).includes(normName(fight.team1)) ? espn.record1 : espn.record2) : '';
         let rec2 = espn ? (normName(espn.name1).includes(normName(fight.team1)) ? espn.record2 : espn.record1) : '';
-        // 2026-05-09: diag temporario pra entender por que factors=1. Se rec1/rec2 saem
-        // empty mesmo com espn truthy, parser scoreboard nao está extraindo records.
-        if (espn) {
-          log('INFO', 'AUTO-MMA-DIAG', `espn.name1='${espn.name1}' rec1='${espn.record1}' name2='${espn.name2}' rec2='${espn.record2}' → resolved rec1='${rec1}' rec2='${rec2}'`);
-        }
         const weightClass = espn?.weightClass || '';
         const rounds = espn?.rounds || 3;
         const isTitleFight = rounds === 5;
