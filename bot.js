@@ -247,7 +247,12 @@ function _parseTipMl(text) {
     /TIP_ML:\s*([^@]+?)\s*@\s*([^|\]]+?)\s*\|\s*(?:EV:\s*([+-]?[\d.]+)\s*%?\s*\|\s*)?P:\s*([\d.]+)\s*%?\s*\|\s*STAKE:\s*([^|\]]+?)(?:\s*\|\s*CONF:\s*([A-Za-zÀ-ÿ]+))?(?=\]|\s|$)/i
   );
   if (!raw) return null;
-  const team = raw[1].trim();
+  // Limpa artefatos markdown do team name. IA as vezes responde
+  // 'TIP_ML:**Sean Brady@2.69|...' (bold markdown), '**Sean Brady', '*Sean Brady*'
+  // ou '_Sean Brady_'. Sem strip, tip_participant fica '** Sean Brady' no DB,
+  // quebra display dashboard, name-match com mma_results e CLV capture.
+  // Caso real: tip 2499 (UFC 328 Buckley vs Brady, 2026-05-09).
+  const team = raw[1].trim().replace(/^[\s*_`'"]+|[\s*_`'"]+$/g, '');
   const oddStr = raw[2].trim();
   const evTxt = raw[3] != null ? String(raw[3]).replace(/[+%\s]/g, '') : null;
   const pTxt = raw[4];
