@@ -4161,55 +4161,95 @@ async function loadMlShadowBySport() {
   const fmtProfit = v => v == null ? '—' : (v >= 0 ? '+' : '') + 'R$ ' + v.toFixed(2);
   const clsSign = v => v == null ? '' : (v >= 0 ? 'positive' : 'negative');
 
+  // 2026-05-09: cards por sport (mesmo padrão de MT shadow + tips recentes).
+  // Antes era tabela linear — agora destaque visual + filtro click pra sport.
+  const sportColor = {
+    lol: '#29b6f6', dota2: '#ef5350', cs2: '#ffa726', valorant: '#ec407a',
+    tennis: '#66bb6a', football: '#ab47bc', mma: '#8d6e63',
+    darts: '#26a69a', snooker: '#5c6bc0', tabletennis: '#ff7043', cs: '#ffa726',
+    basket: '#fb923c',
+  };
+  const sportLabelShort = (s) => s === 'dota2' ? 'DOTA' : (s === 'cs2' || s === 'cs') ? 'CS'
+    : s === 'tabletennis' ? 'TT' : (s || '').toUpperCase();
+
   let html = `<div style="margin-bottom:10px" class="card-meta">
     <b>${data.days}d</b> · ${t.n} tips shadow (${t.wins}W / ${t.losses}L / ${t.pending}P) ·
     ROI <span class="${clsSign(t.roi)}">${fmtOrDash(t.roi, 2)}</span> ·
     Lucro <span class="${clsSign(t.profit_reais)}">${fmtProfit(t.profit_reais)}</span>
   </div>`;
 
-  html += `<table class="tips">
-    <thead><tr>
-      <th>Esporte</th>
-      <th style="text-align:right">Tips</th>
-      <th style="text-align:right">W/L/P</th>
-      <th style="text-align:right">Hit%</th>
-      <th style="text-align:right">ROI</th>
-      <th style="text-align:right">CLV</th>
-      <th style="text-align:right">Lucro</th>
-      <th style="text-align:right">EV méd</th>
-      <th style="text-align:right">Odd méd</th>
-    </tr></thead>
-    <tbody>`;
+  // Total card (cross-sport) + sport cards horizontais
+  const totalNCards = sports.reduce((sum, s) => sum + (s.n || 0), 0);
+  const overallCard = `
+    <div onclick="filterToSport('__overall__')" style="cursor:pointer;border:2px solid ${currentSport === '__overall__' ? '#3b82f6' : 'var(--border,#2a2a2a)'};background:var(--surface,#0f172a);border-radius:8px;padding:10px 12px;min-width:120px;display:flex;flex-direction:column;justify-content:center;align-items:center">
+      <div style="font-size:0.85em;color:#888">📊 Todos <span style="opacity:0.6;font-size:0.85em">(${data.days}d)</span></div>
+      <div style="font-size:1.4em;font-weight:600">${totalNCards}</div>
+      <div style="font-size:0.75em;${(t.profit_reais || 0) >= 0 ? 'color:#10b981' : 'color:#ef4444'}">${(t.profit_reais || 0) >= 0 ? '+' : ''}R$ ${(t.profit_reais || 0).toFixed(2)}</div>
+    </div>`;
 
-  for (const s of sports) {
+  const cards = sports.map(s => {
+    const c = sportColor[s.sport] || '#888';
+    const label = sportLabelShort(s.sport);
     const emoji = sportEmoji[s.sport] || '📊';
-    const label = sportLabel[s.sport] || s.sport.toUpperCase();
+    const isActive = currentSport === s.sport
+      || (currentSport === 'esports' && (s.sport === 'lol' || s.sport === 'dota2'))
+      || (currentSport === 'cs' && s.sport === 'cs2');
     const decided = (s.wins || 0) + (s.losses || 0);
-    // Readiness heuristic — precisa n>=30 settled + ROI>=0 + CLV>=0 pra cogitar promoção
-    const readyForPromo = decided >= 30 && (s.roi ?? -1) >= 0 && (s.avg_clv ?? -1) >= 0;
-    const readyLowN = decided < 30 && decided >= 10;
-    const badge = readyForPromo
-      ? '<span style="background:#16a34a;color:#fff;padding:1px 6px;border-radius:3px;font-size:0.7em;margin-left:4px">PROMOVER</span>'
-      : readyLowN
-        ? '<span style="background:#ca8a04;color:#fff;padding:1px 6px;border-radius:3px;font-size:0.7em;margin-left:4px">n&lt;30</span>'
-        : '';
+    // Readiness heuristic (memory: n>=30 settled, ROI>=0, CLV>=0 com n_clv>=10).
+    const MIN_SETTLED = 30, MIN_CLV_N = 10;
+    let statusTag, statusColor, statusNeed;
+    if (decided >= MIN_SETTLED && (s.roi ?? -1) >= 0 && (s.avg_clv ?? -1) >= 0 && (s.clv_n ?? 0) >= MIN_CLV_N) {
+      statusTag = '🟡 PROMOVER'; statusColor = '#fbbf24';
+      statusNeed = 'Bate threshold — promover via env';
+    } else if (decided >= 20 && (s.roi != null && s.roi < -5)) {
+      statusTag = '🔴 LEAK'; statusColor = '#ef4444';
+      statusNeed = `ROI ${fmtOrDash(s.roi)} (n=${decided})`;
+    } else if (decided >= MIN_CLV_N && s.avg_clv != null && s.avg_clv < -2) {
+      statusTag = '🔴 LEAK'; statusColor = '#ef4444';
+      statusNeed = `CLV ${fmtOrDash(s.avg_clv)} (n=${s.clv_n})`;
+    } else {
+      const need = [];
+      if (decided < MIN_SETTLED) need.push(`+${MIN_SETTLED - decided} settled`);
+      if (s.roi != null && s.roi < 0) need.push(`ROI ${fmtOrDash(s.roi)} < 0%`);
+      if ((s.clv_n ?? 0) < MIN_CLV_N) need.push(`+${MIN_CLV_N - (s.clv_n || 0)} CLV samples`);
+      else if (s.avg_clv != null && s.avg_clv < 0) need.push(`CLV ${fmtOrDash(s.avg_clv)}<0`);
+      statusTag = '⏳ OBSERVAR'; statusColor = '#64748b';
+      statusNeed = need.slice(0, 2).join(' · ') || 'Coletando sample';
+    }
+    const statusBanner = `<div style="margin-top:8px;padding:5px 7px;background:${statusColor}15;border-left:3px solid ${statusColor};border-radius:3px;font-size:0.72em;color:${statusColor}" title="${statusNeed}">
+      <b>${statusTag}</b><br><span style="opacity:0.85">${statusNeed}</span>
+    </div>`;
+    return `
+      <div onclick="filterToSport('${s.sport}')" style="cursor:pointer;border:2px solid ${isActive ? c : 'var(--border,#2a2a2a)'};background:var(--surface,#0f172a);border-radius:8px;padding:10px 12px;min-width:170px;flex:1;transition:transform 0.1s" onmouseover="this.style.transform='translateY(-2px)'" onmouseout="this.style.transform='translateY(0)'">
+        <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">
+          <span style="background:${c};color:#fff;padding:2px 7px;border-radius:3px;font-size:0.75em;font-weight:600">${emoji} ${label}</span>
+          <span style="background:#475569;color:#fff;padding:1px 5px;border-radius:3px;font-size:0.7em;margin-left:6px" title="ML shadow — sem DM">shadow</span>
+        </div>
+        <div style="font-size:1.4em;font-weight:600;color:var(--text,#e2e8f0)">${s.n}<span style="font-size:0.55em;color:#888;margin-left:4px">tips</span></div>
+        <div style="font-size:0.75em;color:#888;margin-top:2px">${s.wins || 0}W · ${s.losses || 0}L · ${s.pending || 0}P</div>
+        <div style="font-size:0.85em;margin-top:6px;display:flex;justify-content:space-between">
+          <span>Hit: <b>${s.hitRate != null ? s.hitRate.toFixed(0) + '%' : '—'}</b></span>
+          <span class="${clsSign(s.roi)}">ROI: <b>${fmtOrDash(s.roi)}</b></span>
+        </div>
+        <div style="font-size:0.85em;margin-top:2px;display:flex;justify-content:space-between">
+          <span class="${clsSign(s.avg_clv)}">CLV: ${fmtOrDash(s.avg_clv)}${(s.clv_n || 0) > 0 ? ` <span style="opacity:0.6">(${s.clv_n})</span>` : ''}</span>
+          <span class="${clsSign(s.profit_reais)}">${(s.profit_reais || 0) >= 0 ? '+' : ''}R$ ${(s.profit_reais || 0).toFixed(0)}</span>
+        </div>
+        <div style="font-size:0.75em;margin-top:4px;color:#888;display:flex;justify-content:space-between">
+          <span>EV: ${s.avg_ev != null ? s.avg_ev.toFixed(1) + '%' : '—'}</span>
+          <span>Odd: ${s.avg_odds != null ? s.avg_odds.toFixed(2) : '—'}</span>
+        </div>
+        ${statusBanner}
+      </div>`;
+  }).join('');
 
-    html += `<tr>
-      <td>${emoji} ${label}${badge}</td>
-      <td style="text-align:right">${s.n}</td>
-      <td style="text-align:right">${s.wins || 0}/${s.losses || 0}/${s.pending || 0}</td>
-      <td style="text-align:right">${s.hitRate != null ? s.hitRate.toFixed(1) + '%' : '—'}</td>
-      <td style="text-align:right" class="${clsSign(s.roi)}">${fmtOrDash(s.roi, 2)}</td>
-      <td style="text-align:right" class="${clsSign(s.avg_clv)}">${fmtOrDash(s.avg_clv, 1)} <span style="opacity:0.5;font-size:0.85em">(n=${s.clv_n})</span></td>
-      <td style="text-align:right" class="${clsSign(s.profit_reais)}">${fmtProfit(s.profit_reais)}</td>
-      <td style="text-align:right">${s.avg_ev != null ? s.avg_ev.toFixed(1) + '%' : '—'}</td>
-      <td style="text-align:right">${s.avg_odds != null ? s.avg_odds.toFixed(2) : '—'}</td>
-    </tr>`;
-  }
+  html += `<div style="margin-bottom:14px">
+    <div class="card-meta" style="margin-bottom:8px"><b>📊 Shadow ML por esporte (${data.days}d)</b> — clique pra filtrar dashboard</div>
+    <div style="display:flex;gap:10px;flex-wrap:wrap">${overallCard}${cards}</div>
+  </div>`;
 
-  html += `</tbody></table>
-  <div class="card-meta" style="margin-top:10px">
-    Shadow = tip gerada mas sem DM. Promover quando: n≥30 settled, ROI≥0%, CLV≥0%. CLV é leading indicator (não espera settle).
+  html += `<div class="card-meta" style="margin-top:10px;font-size:0.8em">
+    Shadow = tip gerada mas sem DM. Critério promover: n≥30 settled · ROI≥0% · CLV≥0% (n_CLV≥10). CLV é leading indicator (não espera settle).
   </div>
   <div id="mlShadowTipsList" style="margin-top:16px"><div class="loading">Carregando tips individuais…</div></div>`;
 
