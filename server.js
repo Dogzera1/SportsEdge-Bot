@@ -17171,11 +17171,23 @@ load();
       const regimeCond = regime === 'new' ? `AND regime_tag IS NOT NULL`
                        : regime === 'old' ? `AND regime_tag IS NULL`
                        : '';
+      // 2026-05-09: opt-in &leagueIn=L1|L2|... — refit subset de ligas (ex: tier
+      // WTA 125K). Útil pra causa-fix tier-specific (P1 granularidade) sem
+      // contaminar refit global. Cap 50 ligas pra evitar SQL gigante.
+      const leagueInRaw = String(parsed.query.leagueIn || '').trim();
+      const leagueIn = leagueInRaw ? leagueInRaw.split('|').map(s => s.trim()).filter(Boolean).slice(0, 50) : [];
+      let leagueCond = '';
+      const leagueParams = [];
+      if (leagueIn.length) {
+        const orParts = leagueIn.map(() => `lower(COALESCE(league, '')) LIKE ?`);
+        leagueCond = ` AND (${orParts.join(' OR ')}) `;
+        leagueIn.forEach(l => leagueParams.push('%' + l.toLowerCase() + '%'));
+      }
       // Walk-forward split: train = [-(days+evalDays), -evalDays], eval = últimos evalDays.
       // evalDays=0 → legacy: train = eval = últimos `days` (in-sample, overfitting risk).
       const totalDays = days + evalDays;
       const allTips = db.prepare(`
-        SELECT market, side, p_model, odd, close_odd, clv_pct, result, ev_pct, is_live, created_at
+        SELECT market, side, p_model, odd, close_odd, clv_pct, result, ev_pct, is_live, created_at, league
           FROM market_tips_shadow
          WHERE sport = ?
            AND result IN ('win', 'loss')
@@ -17184,7 +17196,8 @@ load();
            AND created_at >= datetime('now', '-' || ? || ' days')
            ${regimeCond}
            ${liveCond}
-      `).all(sport, totalDays);
+           ${leagueCond}
+      `).all(sport, totalDays, ...leagueParams);
 
       // Split temporal por created_at vs cutoff. Cutoff = now - evalDays.
       const evalCutoffMs = Date.now() - evalDays * 24 * 60 * 60 * 1000;
