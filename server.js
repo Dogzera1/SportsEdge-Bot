@@ -19317,11 +19317,28 @@ load();
         })).sort((a, b) => b.staked - a.staked);
       };
 
+      // 2026-05-09: HANDICAP_GAMES split por sinal da line (paridade MT shadow).
+      // MT promovidas guardam line no match_id pattern '::lnP4.5' (positive)
+      // ou '::lnN3.5' (negative). Sample real:
+      //   tennis_pin_1630293102::mt::handicapGames::home::lnP4.5
+      // Outros markets (TOTAL_GAMES, ML, etc) sem split — line não aplicável
+      // OU absoluta (totalGames=22.5).
+      const keyWithLineSign = (r) => {
+        const mkt = (r.mkt || '').toUpperCase();
+        if (mkt === 'HANDICAP_GAMES' || mkt === 'HANDICAP') {
+          const mid = String(r.match_id || '');
+          let sign = '0';
+          if (/::lnP/i.test(mid)) sign = '+';
+          else if (/::lnN/i.test(mid)) sign = '-';
+          return `${r.sp}|${r.mkt} ${sign}`;
+        }
+        return `${r.sp}|${r.mkt}`;
+      };
       sendJson(res, {
         sport: sport || 'all',
         days,
         total_settled: rows.length,
-        by_sport_market: aggKey(rows, r => `${r.sp}|${r.mkt}`),
+        by_sport_market: aggKey(rows, keyWithLineSign),
         by_sport: aggKey(rows, r => `${r.sp}`),
         by_market: aggKey(rows, r => `${r.mkt}`),
       });
