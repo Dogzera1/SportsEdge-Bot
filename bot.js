@@ -16699,6 +16699,23 @@ async function pollTennis(runOnce = false) {
                 log('DEBUG', 'TENNIS-ACES-FEED',
                   `${match.team1} vs ${match.team2}: handi=${markets.handicaps?.length||0} tot=${markets.totals?.length||0} aces=${markets.acesTotals?.length||0} df=${markets.dfTotals?.length||0}`);
               }
+              // 2026-05-09: enrich BR MT markets (KTO-tennis Fase 2 + outras casas).
+                // Pinnacle tennis MT real ROI +7% n=134 d30 (sharp); BR softer = potencial
+                // line shopping. Capture overpriced lines via _mergeBrMtIntoPin (genérico
+                // — funciona pra football E tennis pq schema markets.handicaps/totals
+                // é o mesmo). Opt-out: TENNIS_MT_BR_DISABLED=true.
+                if (markets && process.env.TENNIS_MT_BR_DISABLED !== 'true') {
+                  try {
+                    const matchTn = { ...match, game: 'tennis' };
+                    const aggClient = require('./lib/odds-aggregator-client');
+                    await aggClient.enrichTennisMtMarkets([matchTn]).catch(() => null);
+                    if (matchTn._brOddsMtTennis) {
+                      _mergeBrMtIntoPin(markets, matchTn._brOddsMtTennis);
+                    }
+                  } catch (e) {
+                    log('DEBUG', 'TENNIS-MT-BR', `merge falhou: ${e.message}`);
+                  }
+                }
               if (markets && ((markets.handicaps?.length || 0) + (markets.totals?.length || 0) + (markets.acesTotals?.length || 0) + (markets.dfTotals?.length || 0)) > 0) {
                 const { scanTennisMarkets } = require('./lib/tennis-market-scanner');
                 const minEv = parseFloat(process.env.TENNIS_MARKET_SCAN_MIN_EV ?? '4');
