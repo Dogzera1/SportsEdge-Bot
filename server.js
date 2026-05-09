@@ -13925,14 +13925,20 @@ load();
   }
 
   // GET /admin/aggregator-status — status do cliente Supabase BR aggregator
+  // Query params:
+  //   refresh=1     — força re-fetch + sample
+  //   mt_check=1    — lista quais jogos têm markets MT (over-under-multi, handicap-asian, dupla-chance)
+  //                   por casa, pra debug de scraping pos-feature MT 2026-05-08
   if (p === '/admin/aggregator-status') {
     if (!requireAdmin(req, res)) return;
     try {
       const aggClient = require('./lib/odds-aggregator-client');
       const status = aggClient.getStatus();
-      // Optional: refresh + sample first 3 jogos
       let sample = null;
-      if (parsed.query.refresh === '1') {
+      let mtCheck = null;
+      const wantRefresh = parsed.query.refresh === '1' || parsed.query.mt_check === '1';
+      const wantMtCheck = parsed.query.mt_check === '1';
+      if (wantRefresh) {
         const jogos = await aggClient.fetchUpcomingJogos({ daysAhead: 14, force: true });
         if (Array.isArray(jogos)) {
           sample = jogos.slice(0, 5).map(j => ({
@@ -13942,9 +13948,41 @@ load();
             visitante: j.visitante?.nome,
             casas: (j.odds || []).map(o => o.casa),
           }));
+          if (wantMtCheck) {
+            const counts = { ouMulti: 0, handicapAsian: 0, duplaChance: 0, total: jogos.length };
+            const perCasa = {};
+            const samplesWithMt = [];
+            for (const j of jogos) {
+              for (const o of (j.odds || [])) {
+                const m = o.mercados || {};
+                const hasOuMulti = !!(m['over-under-multi'] || m.overUnderMulti);
+                const hasAh = !!(m['handicap-asian'] || m.handicapAsian);
+                const hasDc = !!(m['dupla-chance'] || m.duplaChance);
+                if (!perCasa[o.casa]) perCasa[o.casa] = { jogos: 0, ouMulti: 0, ah: 0, dc: 0, sampleMercadosKeys: null };
+                perCasa[o.casa].jogos++;
+                if (hasOuMulti) { perCasa[o.casa].ouMulti++; counts.ouMulti++; }
+                if (hasAh) { perCasa[o.casa].ah++; counts.handicapAsian++; }
+                if (hasDc) { perCasa[o.casa].dc++; counts.duplaChance++; }
+                if (!perCasa[o.casa].sampleMercadosKeys) {
+                  perCasa[o.casa].sampleMercadosKeys = Object.keys(m);
+                }
+                if ((hasOuMulti || hasAh || hasDc) && samplesWithMt.length < 3) {
+                  samplesWithMt.push({
+                    jogo: `${j.mandante?.nome} vs ${j.visitante?.nome}`,
+                    casa: o.casa,
+                    coletado_em: o.atualizado_em,
+                    over_under_multi: m['over-under-multi'] || m.overUnderMulti || null,
+                    handicap_asian: m['handicap-asian'] || m.handicapAsian || null,
+                    dupla_chance: m['dupla-chance'] || m.duplaChance || null,
+                  });
+                }
+              }
+            }
+            mtCheck = { counts, perCasa, samplesWithMt };
+          }
         }
       }
-      sendJson(res, { ok: true, status, sample });
+      sendJson(res, { ok: true, status, sample, mt_check: mtCheck });
     } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
     return;
   }
