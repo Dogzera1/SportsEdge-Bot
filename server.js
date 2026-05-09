@@ -19223,6 +19223,112 @@ load();
     return;
   }
 
+  // GET /tips-breakdown?sport=X&days=30&league=Y|leagueIn=L1|L2&liveFilter=pre|live|all
+  // Espelho de /market-tips-breakdown mas pra TIPS REAIS (is_shadow=0).
+  // Retorna by_sport_market (paridade visual com MT shadow). Tips ML/MT
+  // reais não têm side/line columns dedicados — agregação é por (sport,
+  // market_type). Pra split de side/line de MT promovidas, ler tip_context_json
+  // (TODO futuro).
+  if (p === '/tips-breakdown') {
+    const sport = parsed.query.sport && parsed.query.sport !== '__overall__' ? parsed.query.sport : null;
+    const days = Math.max(1, Math.min(365, parseInt(parsed.query.days || '30', 10) || 30));
+    const liveFilter = String(parsed.query.liveFilter || '').toLowerCase();
+    const leagueFilter = (parsed.query.league || '').trim();
+    const leagueInRaw = (parsed.query.leagueIn || '').trim();
+    const leagueIn = leagueInRaw ? leagueInRaw.split('|').map(s => s.trim()).filter(Boolean).slice(0, 50) : [];
+    try {
+      const conds = [
+        `sent_at >= datetime('now', '-' || ? || ' days')`,
+        `COALESCE(is_shadow, 0) = 0`,
+        `(archived IS NULL OR archived = 0)`,
+        `result IN ('win','loss')`,
+      ];
+      const params = [days];
+      if (sport) {
+        const { sportSet } = (typeof resolveSportSet === 'function')
+          ? resolveSportSet(sport, null) : { sportSet: [sport] };
+        conds.push(`sport IN (${sportSet.map(() => '?').join(',')})`);
+        params.push(...sportSet);
+      }
+      if (liveFilter === 'pre') conds.push('(is_live IS NULL OR is_live = 0)');
+      else if (liveFilter === 'live') conds.push('is_live = 1');
+      if (leagueFilter) {
+        conds.push(`lower(COALESCE(event_name, '')) LIKE ?`);
+        params.push('%' + leagueFilter.toLowerCase() + '%');
+      } else if (leagueIn.length) {
+        const orParts = leagueIn.map(() => `lower(COALESCE(event_name, '')) LIKE ?`);
+        conds.push(`(${orParts.join(' OR ')})`);
+        leagueIn.forEach(l => params.push('%' + l.toLowerCase() + '%'));
+      }
+
+      const rows = db.prepare(`
+        SELECT
+          CASE
+            WHEN sport = 'esports' THEN
+              CASE
+                WHEN match_id LIKE 'dota2_%' OR lower(COALESCE(event_name,'')) LIKE '%dota%' THEN 'dota2'
+                ELSE 'lol'
+              END
+            ELSE sport
+          END AS sp,
+          COALESCE(NULLIF(TRIM(market_type), ''), 'ML') AS mkt,
+          result,
+          COALESCE(stake_reais, 0) AS stake,
+          COALESCE(profit_reais, 0) AS profit,
+          clv_odds, odds, ev, is_live, match_id
+        FROM tips
+        WHERE ${conds.join(' AND ')}
+      `).all(...params);
+
+      // Agregador idêntico ao /market-tips-breakdown (P1 paridade)
+      const aggKey = (rs, keyFn) => {
+        const map = new Map();
+        for (const r of rs) {
+          const k = keyFn(r);
+          if (!k) continue;
+          const st = map.get(k) || { n: 0, wins: 0, staked: 0, profit: 0, clvSum: 0, clvN: 0, evSum: 0, oddSum: 0, mtN: 0 };
+          st.n++;
+          if (r.result === 'win') st.wins++;
+          st.staked += Number(r.stake || 0);
+          st.profit += Number(r.profit || 0);
+          if (r.clv_odds > 1 && r.odds > 1) {
+            const clv = (r.odds / r.clv_odds - 1) * 100;
+            st.clvSum += clv; st.clvN++;
+          }
+          st.evSum += Number(r.ev || 0);
+          st.oddSum += Number(r.odds || 0);
+          if (String(r.match_id || '').includes('::mt::')) st.mtN++;
+          map.set(k, st);
+        }
+        return [...map.entries()].map(([key, st]) => ({
+          key,
+          n: st.n,
+          wins: st.wins,
+          losses: st.n - st.wins,
+          winRate: st.n ? +(st.wins / st.n * 100).toFixed(1) : null,
+          staked: +st.staked.toFixed(2),
+          profit: +st.profit.toFixed(2),
+          roi: st.staked > 0 ? +(st.profit / st.staked * 100).toFixed(1) : null,
+          avgClv: st.clvN ? +(st.clvSum / st.clvN).toFixed(2) : null,
+          clvN: st.clvN,
+          avgEv: st.n ? +(st.evSum / st.n).toFixed(2) : null,
+          avgOdd: st.n ? +(st.oddSum / st.n).toFixed(2) : null,
+          mtN: st.mtN,
+        })).sort((a, b) => b.staked - a.staked);
+      };
+
+      sendJson(res, {
+        sport: sport || 'all',
+        days,
+        total_settled: rows.length,
+        by_sport_market: aggKey(rows, r => `${r.sp}|${r.mkt}`),
+        by_sport: aggKey(rows, r => `${r.sp}`),
+        by_market: aggKey(rows, r => `${r.mkt}`),
+      });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
   // GET /recent-emitted-match-ids?sport=football&hours=24
   // Lista distinct match_id de tips emitidas nas últimas N horas (não shadow,
   // não arquivadas, ainda pending OU recém settled). Usado pelo bot pra warm

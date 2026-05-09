@@ -770,6 +770,8 @@
     <div id="tipsByLeague" style="margin-bottom:10px"></div>
     <!-- Stats por mercado (ML, HG, TG, etc) — só real tips (is_shadow=0) -->
     <div id="tipsByMarket" style="margin-bottom:10px"></div>
+    <!-- 2026-05-09: Breakdown × esporte × mercado (espelho do MT shadow card) -->
+    <div id="tipsBreakdown" style="margin-bottom:10px"></div>
     <div id="tipsTable"><div class="loading">Carregando</div></div>
   </div>
 
@@ -2829,6 +2831,7 @@ async function loadTips(gen) {
   loadTipsBySport(gen).catch(() => {});
   loadTipsByLeague(gen).catch(() => {});
   loadTipsByMarket(gen).catch(() => {});
+  loadTipsBreakdown(gen).catch(() => {});
   } catch (e) { console.warn('loadTips error:', e?.message || e); }
 }
 
@@ -2855,6 +2858,7 @@ function filterTipsByLeague(league) {
   // 2026-05-09: refetch tipsBySport com league filter — breakdown por sport
   // reflete apenas tips da liga selecionada (ou tudo se filter limpo).
   loadTipsBySport(refreshGen).catch(() => {});
+  loadTipsBreakdown(refreshGen).catch(() => {});
   // 2026-05-09: ML shadow cards também respondem ao filter (consistency)
   _refreshMlShadowIfExpanded();
 }
@@ -2870,6 +2874,7 @@ function filterTipsByTier(sport, tier) {
   renderTipsTable();
   loadTipsByLeague(refreshGen).catch(() => {});
   loadTipsBySport(refreshGen).catch(() => {});
+  loadTipsBreakdown(refreshGen).catch(() => {});
   // tier filter limpa league — ML shadow volta pro default
   _refreshMlShadowIfExpanded();
 }
@@ -3144,6 +3149,84 @@ async function loadTipsBySport(gen = refreshGen) {
 
 // Stats por market_type pras tips REAIS (is_shadow=0). Roda em paralelo
 // ao loadTips() pra não atrasar a tabela. Card é cosmético (sem affecting state).
+// 2026-05-09: Breakdown × esporte × mercado (espelho do MT shadow card).
+// Tips reais (is_shadow=0). Visualmente paralelo ao /market-tips-breakdown
+// pra paridade UX entre as 2 seções. Side dim não aplicável aqui (tips ML
+// não tem coluna side; MT promovidas guardam side em tip_context_json — TODO).
+async function loadTipsBreakdown(gen = refreshGen) {
+  const el = document.getElementById('tipsBreakdown');
+  if (!el) return;
+  const sportQ = currentSport === '__overall__' ? '' : '&sport=' + encodeURIComponent(currentSport);
+  const leagueQ = tipsLeagueFilter
+    ? '&league=' + encodeURIComponent(tipsLeagueFilter)
+    : (tipsTierFilter && tipsTierSport && _tipsByLeagueCache?.leagues
+       ? (() => {
+           const matching = _tipsByLeagueCache.leagues
+             .filter(l => l.sport === tipsTierSport
+                     && _classifyLeagueTier(l.sport, l.league) === tipsTierFilter)
+             .map(l => l.league).slice(0, 50);
+           return matching.length ? '&leagueIn=' + encodeURIComponent(matching.join('|')) : '';
+         })()
+       : '');
+  const data = await apiFetch(`/tips-breakdown?days=30${sportQ}${leagueQ}`).catch(() => null);
+  if (shouldAbort(gen)) return;
+  if (!data || !Array.isArray(data.by_sport_market) || !data.by_sport_market.length) {
+    el.innerHTML = '';
+    return;
+  }
+  const sportColor = {
+    lol: '#29b6f6', dota2: '#ef5350', cs2: '#ffa726', cs: '#ffa726',
+    valorant: '#ec407a', tennis: '#66bb6a', football: '#ab47bc',
+    mma: '#8d6e63', darts: '#26a69a', snooker: '#5c6bc0',
+    tabletennis: '#ff7043', basket: '#fb923c',
+  };
+  const fmtSport = (s) => {
+    const c = sportColor[s] || '#888';
+    const lbl = s === 'dota2' ? 'DOTA' : (s === 'cs2' || s === 'cs') ? 'CS'
+      : s === 'tabletennis' ? 'TT' : (s || '').toUpperCase();
+    return `<span style="background:${c};color:#fff;padding:2px 6px;border-radius:3px;font-size:0.75em;font-weight:600">${lbl}</span>`;
+  };
+  const fmtRoi = (r) => r == null ? '—' : (r >= 0 ? '+' : '') + r + '%';
+  const cls = (v) => v == null ? '' : (v >= 0 ? 'positive' : 'negative');
+  const fmtClv = (c) => c == null ? '—' : (c >= 0 ? '+' : '') + c.toFixed(1) + '%';
+  const rows = data.by_sport_market.slice(0, 30);
+  let html = `<div class="card-meta" style="margin-bottom:6px;font-size:0.8em">
+    📊 <b>Breakdown × esporte × mercado (${data.days}d, ${data.total_settled} settled · tips reais)</b>
+  </div>
+  <table class="tips" style="margin-bottom:10px">
+    <thead><tr>
+      <th>Sport · Mercado</th>
+      <th style="text-align:right">N</th>
+      <th style="text-align:right">Win%</th>
+      <th style="text-align:right">ROI</th>
+      <th style="text-align:right">P&L (R$)</th>
+      <th style="text-align:right">CLV</th>
+      <th style="text-align:right">avg EV</th>
+      <th style="text-align:right">avg Odd</th>
+    </tr></thead>
+    <tbody>`;
+  for (const r of rows) {
+    const parts = r.key.split('|');
+    const sp = parts[0] || '?';
+    const mkt = parts[1] || '?';
+    const mtBadge = r.mtN > 0
+      ? `<span style="background:#7c3aed;color:#fff;padding:1px 5px;border-radius:3px;font-size:0.7em;margin-left:4px" title="${r.mtN} MT promovidas">MT ${r.mtN}</span>`
+      : '';
+    html += `<tr>
+      <td>${fmtSport(sp)} <span style="margin-left:6px">${mkt}</span>${mtBadge}</td>
+      <td style="text-align:right">${r.n}</td>
+      <td style="text-align:right">${r.winRate != null ? r.winRate + '%' : '—'}</td>
+      <td style="text-align:right" class="${cls(r.roi)}">${fmtRoi(r.roi)}</td>
+      <td style="text-align:right" class="${cls(r.profit)}">${r.profit >= 0 ? '+' : ''}R$ ${r.profit.toFixed(2)}</td>
+      <td style="text-align:right">${fmtClv(r.avgClv)}${r.clvN > 0 ? ` <span class="tip-meta">(${r.clvN})</span>` : ''}</td>
+      <td style="text-align:right">${r.avgEv != null ? (r.avgEv >= 0 ? '+' : '') + r.avgEv.toFixed(1) + '%' : '—'}</td>
+      <td style="text-align:right">${r.avgOdd != null ? r.avgOdd.toFixed(2) : '—'}</td>
+    </tr>`;
+  }
+  html += `</tbody></table>`;
+  el.innerHTML = html;
+}
+
 async function loadTipsByMarket(gen = refreshGen) {
   const el = document.getElementById('tipsByMarket');
   if (!el) return;
