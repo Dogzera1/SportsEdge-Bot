@@ -9522,20 +9522,39 @@ setInterval(load, 10000);
     return;
   }
 
-  // GET /market-tips-breakdown?sport=X&days=30&includeLive=0
+  // GET /market-tips-breakdown?sport=X&days=30&includeLive=0&league=X|leagueIn=L1|L2&liveFilter=pre|live|all
   // Agrega tips settled por (sport, market, side) — útil pra ver onde tem edge
   // ou leak. Também retorna agregados só por market e só por side.
+  // 2026-05-09: opt-in `league` / `leagueIn` filters — propaga filter ativo
+  // de tier/liga clicado em cards. liveFilter=pre|live|all explicit substitui
+  // includeLive (mais granular pra split pre vs live).
   if (p === '/market-tips-breakdown') {
     const sport = parsed.query.sport || null;
     const days = Math.max(1, Math.min(365, parseInt(parsed.query.days || '30', 10) || 30));
     const includeLive = parsed.query.includeLive === '1';
+    const liveFilter = String(parsed.query.liveFilter || '').toLowerCase();
+    const leagueFilter = (parsed.query.league || '').trim();
+    const leagueInRaw = (parsed.query.leagueIn || '').trim();
+    const leagueIn = leagueInRaw ? leagueInRaw.split('|').map(s => s.trim()).filter(Boolean).slice(0, 50) : [];
     try {
       const conds = [`created_at >= datetime('now', '-${days} days')`, `result IN ('win','loss')`];
       const params = [];
       if (sport) { conds.push('sport = ?'); params.push(sport); }
-      if (!includeLive) conds.push('(is_live IS NULL OR is_live = 0)');
+      // liveFilter takes precedence over includeLive
+      if (liveFilter === 'pre') conds.push('(is_live IS NULL OR is_live = 0)');
+      else if (liveFilter === 'live') conds.push('is_live = 1');
+      else if (!liveFilter && !includeLive) conds.push('(is_live IS NULL OR is_live = 0)');
+      // 'all' or includeLive=1 → no constraint
+      if (leagueFilter) {
+        conds.push(`lower(COALESCE(league, '')) LIKE ?`);
+        params.push('%' + leagueFilter.toLowerCase() + '%');
+      } else if (leagueIn.length) {
+        const orParts = leagueIn.map(() => `lower(COALESCE(league, '')) LIKE ?`);
+        conds.push(`(${orParts.join(' OR ')})`);
+        leagueIn.forEach(l => params.push('%' + l.toLowerCase() + '%'));
+      }
       const rows = db.prepare(`
-        SELECT sport, market, side, result, stake_units, profit_units, clv_pct, ev_pct, odd
+        SELECT sport, market, side, result, stake_units, profit_units, clv_pct, ev_pct, odd, is_live
         FROM market_tips_shadow
         WHERE ${conds.join(' AND ')}
       `).all(...params);
