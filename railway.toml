@@ -1,5 +1,9 @@
 [build]
-builder = "nixpacks"
+# 2026-05-09: trocado nixpacks → railpack (user request).
+# Railpack auto-detecta Node via engines.node em package.json (>=18.0.0)
+# e instala native deps (better-sqlite3 precisa gcc+python — Railpack
+# default mise traz). Fallback nixpacks.toml mantido pra rollback se necessário.
+builder = "railpack"
 
 [deploy]
 startCommand = "node start.js"
