@@ -13066,7 +13066,9 @@ async function handleFairOdds(token, chatId, sport) {
               const espn = findEspnFight(espnFightsForFair, m.team1, m.team2);
               let rec1 = espn ? (normName(espn.name1).includes(normName(m.team1)) ? espn.record1 : espn.record2) : '';
               let rec2 = espn ? (normName(espn.name1).includes(normName(m.team1)) ? espn.record2 : espn.record1) : '';
-              if (!espn) {
+              // 2026-05-09: rodar fallback tambem quando scoreboard achou a luta mas
+              // records vieram vazios (upcoming fights). Espelha fix em pollMma.
+              if (!rec1 || !rec2) {
                 const [r1, r2] = await Promise.all([
                   fetchEspnFighterRecord(m.team1).catch(() => null),
                   fetchEspnFighterRecord(m.team2).catch(() => null)
@@ -15569,7 +15571,12 @@ async function pollMma(runOnce = false) {
         }
 
         // Fallback: busca record individual (ESPN → Wikipedia → Sherdog → Tapology)
-        if (!isBoxing && !espn) {
+        // 2026-05-09: rodar tambem quando scoreboard achou a luta mas records vieram
+        // vazios (comum em upcoming fights — ESPN so popula competitor.records pra
+        // completed events). Sem isso, hasEspnRecord=false em todo card futuro,
+        // form factor nao fire em esportsPreFilter, factorCount=1 sempre, override
+        // path nunca tem edge >=15pp -> nenhuma tip MMA emitida.
+        if (!isBoxing && (!rec1 || !rec2)) {
           const [e1, e2] = await Promise.all([
             fetchEspnFighterRecord(fight.team1).catch(() => null),
             fetchEspnFighterRecord(fight.team2).catch(() => null)
