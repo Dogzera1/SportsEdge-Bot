@@ -1468,6 +1468,14 @@ async function refresh() {
       const sec = document.getElementById('secShadowReadiness');
       if (sec && sec.dataset.collapsed === 'false') await loadShadowReadiness();
     } catch (_) {}
+    // 2026-05-09: refresh ML shadow card também — user reportou "cards travados"
+    // ao clicar. Causa: filterToSport disparava refresh() mas ML shadow não
+    // estava na lista de sections recarregadas → cards ficavam stale.
+    // Mesmo padrão lazy-load do shadow readiness (só roda se expandido).
+    try {
+      const sec = document.getElementById('secMlShadow');
+      if (sec && sec.dataset.collapsed === 'false') await loadMlShadowBySport();
+    } catch (_) {}
     // Só atualiza timestamp se ainda é o refresh mais recente
     if (gen === refreshGen) {
       document.getElementById('lastUpdated').textContent = new Date().toLocaleTimeString('pt-BR').slice(0, 5);
@@ -4141,10 +4149,35 @@ async function runReadinessLearnerNow(dryRun = false) {
 
 // ML Shadow por esporte — cross-sport breakdown de tips em shadow (sem DM).
 // Usado pra avaliar se sport está pronto pra promover pra produção.
+//
+// 2026-05-09: re-entrant guard. User reportou "cards travados" — múltiplos
+// triggers (toggleSection click + refresh() cascade) podiam disparar 2-3
+// loads concurrent. Fetch interno faz N requests paralelos (/tips-history
+// per sport) — race conditions causavam render fora de ordem.
+let _loadingMlShadow = false;
 async function loadMlShadowBySport() {
-  const data = await apiFetch('/ml-shadow-by-sport?days=30');
+  if (_loadingMlShadow) return;
+  _loadingMlShadow = true;
   const el = document.getElementById('mlShadowBody');
   const meta = document.getElementById('mlShadowMeta');
+  // Feedback imediato: skeleton/loading state
+  if (el && !el.querySelector('.loading')) {
+    el.style.opacity = '0.5';
+    el.style.pointerEvents = 'none';
+  }
+  try {
+    await _loadMlShadowBySportInternal(el, meta);
+  } finally {
+    _loadingMlShadow = false;
+    if (el) {
+      el.style.opacity = '';
+      el.style.pointerEvents = '';
+    }
+  }
+}
+
+async function _loadMlShadowBySportInternal(el, meta) {
+  const data = await apiFetch('/ml-shadow-by-sport?days=30');
   if (!data || data.error) { el.innerHTML = '<div class="empty-state">Sem dados shadow</div>'; meta.textContent = '—'; return; }
   const t = data.totals || {};
   const sports = data.per_sport || [];
