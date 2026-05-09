@@ -4196,17 +4196,27 @@ async function loadMlShadowBySport() {
       || (currentSport === 'cs' && s.sport === 'cs2');
     const decided = (s.wins || 0) + (s.losses || 0);
     // Readiness heuristic (memory: n>=30 settled, ROI>=0, CLV>=0 com n_clv>=10).
+    // 2026-05-09 v2 (debug): granularidade cobrindo edge cases:
+    //   - LEAK red apenas com ROI<-5 (hard signal)
+    //   - CLV<-2 sozinho com ROI≥0 → ALERTA amarelo (não LEAK red)
+    //   - ROI<0 sem ser <-5 → ATENÇÃO amarelo
     const MIN_SETTLED = 30, MIN_CLV_N = 10;
+    const hardLeakRoi = decided >= 20 && s.roi != null && s.roi < -5;
+    const softLeakClv = (s.clv_n ?? 0) >= MIN_CLV_N && s.avg_clv != null && s.avg_clv < -2;
+    const promoOk = decided >= MIN_SETTLED && (s.roi ?? -1) >= 0 && (s.avg_clv ?? -1) >= 0 && (s.clv_n ?? 0) >= MIN_CLV_N;
     let statusTag, statusColor, statusNeed;
-    if (decided >= MIN_SETTLED && (s.roi ?? -1) >= 0 && (s.avg_clv ?? -1) >= 0 && (s.clv_n ?? 0) >= MIN_CLV_N) {
+    if (promoOk) {
       statusTag = '🟡 PROMOVER'; statusColor = '#fbbf24';
       statusNeed = 'Bate threshold — promover via env';
-    } else if (decided >= 20 && (s.roi != null && s.roi < -5)) {
+    } else if (hardLeakRoi) {
       statusTag = '🔴 LEAK'; statusColor = '#ef4444';
       statusNeed = `ROI ${fmtOrDash(s.roi)} (n=${decided})`;
-    } else if (decided >= MIN_CLV_N && s.avg_clv != null && s.avg_clv < -2) {
-      statusTag = '🔴 LEAK'; statusColor = '#ef4444';
-      statusNeed = `CLV ${fmtOrDash(s.avg_clv)} (n=${s.clv_n})`;
+    } else if (softLeakClv && (s.roi == null || s.roi < 5)) {
+      statusTag = '⚠️ CLV NEG'; statusColor = '#f59e0b';
+      statusNeed = `CLV ${fmtOrDash(s.avg_clv)} (n=${s.clv_n}) — closing-line leak`;
+    } else if (s.roi != null && s.roi < 0 && decided >= 20) {
+      statusTag = '⚠️ -ROI'; statusColor = '#f59e0b';
+      statusNeed = `ROI ${fmtOrDash(s.roi)} (n=${decided}) — leve sangria`;
     } else {
       const need = [];
       if (decided < MIN_SETTLED) need.push(`+${MIN_SETTLED - decided} settled`);
@@ -5299,9 +5309,32 @@ function renderMarketTipsBySportCards(bs) {
   const cls = (v) => v == null ? '' : (v >= 0 ? 'positive' : 'negative');
 
   // Critérios de promoção (memory): settled≥30, ROI≥5%, CLV≥0% (n_clv≥10)
+  // 2026-05-09 v2: status mais granular pra cobrir edge cases:
+  //   - tennis ATIVO mas ROI<0 não pode ser só verde (mascara leak ativo)
+  //   - football com ROI alto mas CLV<-2 não deve ser LEAK red puro (lucrativo)
+  //   - LEAK só dispara com ROI<-5 (sinal hard) — CLV<-2 sozinho vira ALERTA amarelo
   const MIN_SETTLED = 30, MIN_ROI = 5, MIN_CLV = 0, MIN_CLV_N = 10;
   const promoStatus = (s) => {
-    if (s.dm_sent > 0) return { tag: '🟢 ATIVO', color: '#10b981', need: null };
+    // Sinais hard de leak (qualquer um → LEAK)
+    const hardLeakRoi = s.settled >= 20 && s.roi != null && s.roi < -5;
+    // Soft leak: CLV<-2 com sample mas ROI ainda positivo — alerta visual mas não LEAK
+    const softLeakClv = s.clvN >= MIN_CLV_N && s.avgClv != null && s.avgClv < -2;
+
+    // Já dispatching real (DM enviadas)
+    if (s.dm_sent > 0) {
+      if (hardLeakRoi) {
+        return { tag: '🔴 LEAK ATIVO', color: '#ef4444', need: `Dispatching real mas ROI ${fmtPct(s.roi)} — review urgente` };
+      }
+      if (s.roi != null && s.roi < 0 && s.settled >= 20) {
+        return { tag: '⚠️ ATIVO -ROI', color: '#f59e0b', need: `${s.dm_sent} DMs mas ROI ${fmtPct(s.roi)} — monitorar` };
+      }
+      if (softLeakClv && s.roi != null && s.roi < 5) {
+        return { tag: '⚠️ ATIVO -CLV', color: '#f59e0b', need: `CLV ${fmtPct(s.avgClv)} < -2% — closing-line leak` };
+      }
+      return { tag: '🟢 ATIVO', color: '#10b981', need: null };
+    }
+
+    // Pré-dispatch: verifica thresholds promoção
     const reasons = [];
     if (s.settled < MIN_SETTLED) reasons.push(`+${MIN_SETTLED - s.settled} settled`);
     if (s.roi == null) reasons.push('ROI?');
@@ -5309,10 +5342,11 @@ function renderMarketTipsBySportCards(bs) {
     if (s.clvN < MIN_CLV_N) reasons.push(`+${MIN_CLV_N - s.clvN} CLV samples`);
     else if (s.avgClv < MIN_CLV) reasons.push(`CLV ${fmtPct(s.avgClv)} < 0%`);
     if (!reasons.length) return { tag: '🟡 PROMOVER', color: '#fbbf24', need: 'Bate threshold — ativar env <SPORT>_MARKET_TIPS_ENABLED=true' };
-    // LEAK red flag: ROI muito negativo ou CLV negativo persistente
-    const isLeak = (s.settled >= 20 && s.roi != null && s.roi < -5) ||
-                   (s.clvN >= MIN_CLV_N && s.avgClv != null && s.avgClv < -2);
-    if (isLeak) return { tag: '🔴 LEAK', color: '#ef4444', need: reasons.join(' · ') };
+
+    // LEAK red apenas com ROI claramente negativo
+    if (hardLeakRoi) return { tag: '🔴 LEAK', color: '#ef4444', need: reasons.join(' · ') };
+    // CLV negativo sem ROI ruim → ALERTA amarelo (não LEAK red)
+    if (softLeakClv) return { tag: '⚠️ CLV NEG', color: '#f59e0b', need: `CLV ${fmtPct(s.avgClv)} < -2% — lucrativo mas pricing perto do close` };
     return { tag: '⏳ OBSERVAR', color: '#64748b', need: reasons.slice(0, 2).join(' · ') };
   };
 
@@ -5320,10 +5354,14 @@ function renderMarketTipsBySportCards(bs) {
     const c = sportColor[s.sport] || '#888';
     const label = sportLabel(s.sport);
     const isActive = currentSport === s.sport;
-    const dmBadge = s.dm_sent > 0
-      ? `<span style="background:#10b981;color:#fff;padding:1px 5px;border-radius:3px;font-size:0.7em;margin-left:6px" title="${s.dm_sent} DM enviadas em ${bs.days}d">DM ${s.dm_sent}</span>`
-      : (s.n > 0 ? `<span style="background:#475569;color:#fff;padding:1px 5px;border-radius:3px;font-size:0.7em;margin-left:6px" title="Nenhum DM enviado — shadow only">shadow</span>` : '');
     const status = promoStatus(s);
+    // 2026-05-09: dmBadge cor reflete status promoStatus pra sinalizar leak
+    // ativo (DM enviadas mas ROI<0 / CLV<-2). Antes sempre verde — mascarava
+    // problemas em sports promoted que viraram LEAK posteriormente.
+    const dmBadgeColor = s.dm_sent > 0 ? status.color : '#475569';
+    const dmBadge = s.dm_sent > 0
+      ? `<span style="background:${dmBadgeColor};color:#fff;padding:1px 5px;border-radius:3px;font-size:0.7em;margin-left:6px" title="${s.dm_sent} DM enviadas em ${bs.days}d · status atual: ${status.tag}">DM ${s.dm_sent}</span>`
+      : (s.n > 0 ? `<span style="background:#475569;color:#fff;padding:1px 5px;border-radius:3px;font-size:0.7em;margin-left:6px" title="Nenhum DM enviado — shadow only">shadow</span>` : '');
     const statusBanner = status.need
       ? `<div style="margin-top:8px;padding:5px 7px;background:${status.color}15;border-left:3px solid ${status.color};border-radius:3px;font-size:0.72em;color:${status.color}" title="${status.need}">
           <b>${status.tag}</b><br><span style="opacity:0.85">${status.need}</span>
