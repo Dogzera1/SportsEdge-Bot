@@ -2923,6 +2923,10 @@ function toggleTipsGroupView() {
 
 // Stats por liga (ou tier agrupado) pras tips REAIS (is_shadow=0). Cards
 // horizontais filtráveis. Toggle entre tipsGroupView='tier' (agrupado) e 'league'.
+// 2026-05-09: cache global de leagues retornadas por /tips-by-league. Permite
+// que loadTipsBySport expanda tipsTierFilter→ligas matching pra filtrar
+// breakdown por sport via &leagueIn= (cards de tier filtram correctly).
+let _tipsByLeagueCache = null;
 async function loadTipsByLeague(gen = refreshGen) {
   const el = document.getElementById('tipsByLeague');
   if (!el) return;
@@ -2930,9 +2934,11 @@ async function loadTipsByLeague(gen = refreshGen) {
   const data = await apiFetch(`/tips-by-league?days=30&min_n=2${sportQ}`).catch(() => null);
   if (shouldAbort(gen)) return;
   if (!data || !Array.isArray(data.leagues) || !data.leagues.length) {
+    _tipsByLeagueCache = null;
     el.innerHTML = '';
     return;
   }
+  _tipsByLeagueCache = data;
   const fmtPctVal = (v, d=1) => v == null ? '—' : (v >= 0 ? '+' : '') + Number(v).toFixed(d) + '%';
   const cls = (v) => v == null ? '' : (v >= 0 ? 'pos' : 'neg');
   const sportColor = {
@@ -3060,7 +3066,21 @@ async function loadTipsBySport(gen = refreshGen) {
   // 2026-05-09: quando user clica card de liga (filterTipsByLeague), breakdown
   // por esporte mostra stats APENAS dessa liga. Param `league` opt-in no
   // backend — sem filter ativo, comportamento original (todas ligas).
-  const leagueQ = tipsLeagueFilter ? '&league=' + encodeURIComponent(tipsLeagueFilter) : '';
+  // 2026-05-09 v2: tipsTierFilter ativo (default tier view) também filtra —
+  // expande tier→ligas matching via _tipsByLeagueCache + envia leagueIn=.
+  let leagueQ = '';
+  if (tipsLeagueFilter) {
+    leagueQ = '&league=' + encodeURIComponent(tipsLeagueFilter);
+  } else if (tipsTierFilter && tipsTierSport && _tipsByLeagueCache?.leagues) {
+    const matching = _tipsByLeagueCache.leagues
+      .filter(l => l.sport === tipsTierSport
+              && _classifyLeagueTier(l.sport, l.league) === tipsTierFilter)
+      .map(l => l.league)
+      .slice(0, 50);
+    if (matching.length) {
+      leagueQ = '&leagueIn=' + encodeURIComponent(matching.join('|'));
+    }
+  }
   const data = await apiFetch(`/tips-by-sport?days=30${leagueQ}`).catch(() => null);
   if (shouldAbort(gen)) return;
   if (!data || !Array.isArray(data.sports) || !data.sports.length) {
@@ -4200,10 +4220,33 @@ async function loadMlShadowBySport() {
 async function _loadMlShadowBySportInternal(el, meta) {
   // 2026-05-09: ML shadow respeita filtro de liga ativo em tips OU MT shadow.
   // Cards ficam consistent — clicar liga filtra todas as 3 seções (tips, MT, ML).
+  // 2026-05-09 v2: TIER filter expand igual loadTipsBySport.
   const lf = (typeof tipsLeagueFilter === 'string' && tipsLeagueFilter)
     || (window.marketTipsState && marketTipsState.leagueFilter)
     || null;
-  const lq = lf ? '&league=' + encodeURIComponent(lf) : '';
+  let lq = '';
+  if (lf) {
+    lq = '&league=' + encodeURIComponent(lf);
+  } else if (tipsTierFilter && tipsTierSport && _tipsByLeagueCache?.leagues) {
+    const matching = _tipsByLeagueCache.leagues
+      .filter(l => l.sport === tipsTierSport
+              && _classifyLeagueTier(l.sport, l.league) === tipsTierFilter)
+      .map(l => l.league)
+      .slice(0, 50);
+    if (matching.length) {
+      lq = '&leagueIn=' + encodeURIComponent(matching.join('|'));
+    }
+  } else if (window.marketTipsState && marketTipsState.tierFilter
+             && marketTipsState.tierSport && marketTipsState.byLeague?.leagues) {
+    const matching = marketTipsState.byLeague.leagues
+      .filter(l => l.sport === marketTipsState.tierSport
+              && _classifyLeagueTier(l.sport, l.league) === marketTipsState.tierFilter)
+      .map(l => l.league)
+      .slice(0, 50);
+    if (matching.length) {
+      lq = '&leagueIn=' + encodeURIComponent(matching.join('|'));
+    }
+  }
   const data = await apiFetch('/ml-shadow-by-sport?days=30' + lq);
   if (!data || data.error) { el.innerHTML = '<div class="empty-state">Sem dados shadow</div>'; meta.textContent = '—'; return; }
   const t = data.totals || {};

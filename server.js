@@ -9427,7 +9427,10 @@ setInterval(load, 10000);
     // 2026-05-09: opt-in `league` filter — quando user clica num card de liga,
     // breakdown por esporte mostra apenas stats DESSA liga. SQL escape via
     // bind parameter (não interpolado, prepared statement é seguro).
+    // 2026-05-09 v2: `leagueIn=L1|L2|...` pra filter de TIER (frontend expande).
     const leagueFilter = (parsed.query.league || '').trim();
+    const leagueInRaw = (parsed.query.leagueIn || '').trim();
+    const leagueIn = leagueInRaw ? leagueInRaw.split('|').map(s => s.trim()).filter(Boolean).slice(0, 50) : [];
     try {
       const conds = [`created_at >= datetime('now', '-${days} days')`];
       if (!includeVoid) conds.push(`(result IS NULL OR result != 'void')`);
@@ -9435,6 +9438,10 @@ setInterval(load, 10000);
       if (leagueFilter) {
         conds.push(`lower(COALESCE(league, '')) LIKE ?`);
         queryParams.push('%' + leagueFilter.toLowerCase() + '%');
+      } else if (leagueIn.length) {
+        const orParts = leagueIn.map(() => `lower(COALESCE(league, '')) LIKE ?`);
+        conds.push(`(${orParts.join(' OR ')})`);
+        leagueIn.forEach(l => queryParams.push('%' + l.toLowerCase() + '%'));
       }
       const T1 = "lower(REPLACE(REPLACE(REPLACE(REPLACE(team1,' ',''),'-',''),'.',''),'''',''))";
       const T2 = "lower(REPLACE(REPLACE(REPLACE(REPLACE(team2,' ',''),'-',''),'.',''),'''',''))";
@@ -19035,19 +19042,27 @@ load();
     return;
   }
 
-  // GET /tips-by-sport?days=30
+  // GET /tips-by-sport?days=30&league=X|leagueIn=L1|L2|...
   // Stats por sport das tips REAIS (is_shadow=0). Inclui ML + MT promovidas.
   // Equivalente ao /market-tips-by-sport mas pra tips que contam pra banca.
   if (p === '/tips-by-sport') {
     const days = Math.max(1, Math.min(365, parseInt(parsed.query.days || '30', 10) || 30));
     // 2026-05-09: opt-in `league` filter — quando user clica num card de liga
     // em tips recentes, breakdown por esporte mostra apenas stats DESSA liga.
+    // 2026-05-09 v2: opt-in `leagueIn=L1|L2|...` — quando user clica card de
+    // TIER, frontend expande tier→ligas matching e envia OR LIKE list.
     const leagueFilter = (parsed.query.league || '').trim();
+    const leagueInRaw = (parsed.query.leagueIn || '').trim();
+    const leagueIn = leagueInRaw ? leagueInRaw.split('|').map(s => s.trim()).filter(Boolean).slice(0, 50) : [];
     const queryParams = [days];
     let leagueCond = '';
     if (leagueFilter) {
       leagueCond = `AND lower(COALESCE(event_name, '')) LIKE ?`;
       queryParams.push('%' + leagueFilter.toLowerCase() + '%');
+    } else if (leagueIn.length) {
+      const orParts = leagueIn.map(() => `lower(COALESCE(event_name, '')) LIKE ?`);
+      leagueCond = `AND (${orParts.join(' OR ')})`;
+      leagueIn.forEach(l => queryParams.push('%' + l.toLowerCase() + '%'));
     }
     try {
       const rows = db.prepare(`
@@ -25793,6 +25808,8 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
     const daysRaw = parseInt(parsed.query.days);
     const days = Number.isFinite(daysRaw) ? Math.max(1, Math.min(365, daysRaw)) : 30;
     const leagueFilter = (parsed.query.league || '').trim();
+    const leagueInRaw = (parsed.query.leagueIn || '').trim();
+    const leagueIn = leagueInRaw ? leagueInRaw.split('|').map(s => s.trim()).filter(Boolean).slice(0, 50) : [];
     try {
       // 2026-05-05: dedup por (sport, match_id, tip_participant, market_type)
       // pra contar 1 evento por par tip+pick, não cada re-emission do shadow puro
@@ -25804,6 +25821,10 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
       if (leagueFilter) {
         leagueWhere = ` AND lower(COALESCE(event_name, '')) LIKE ? `;
         params.push('%' + leagueFilter.toLowerCase() + '%');
+      } else if (leagueIn.length) {
+        const orParts = leagueIn.map(() => `lower(COALESCE(event_name, '')) LIKE ?`);
+        leagueWhere = ` AND (${orParts.join(' OR ')}) `;
+        leagueIn.forEach(l => params.push('%' + l.toLowerCase() + '%'));
       }
       const rows = db.prepare(`
         WITH dedup AS (
