@@ -15119,6 +15119,39 @@ load();
     return;
   }
 
+  // GET /admin/scraper-debug-snapshots?hoursBack=6&casa=kto&limit=20
+  // Lista snapshots HTML/JSON capturados pelos scrapers em casos de regressão
+  // silenciosa (markup mudou, parser falhou). Útil pra debug de KTO ouMulti=0,
+  // Fase 2 do kto-tennis, etc. 2026-05-09.
+  if (p === '/admin/scraper-debug-snapshots') {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const hoursBack = Math.max(1, Math.min(72, parseInt(parsed.query.hoursBack || '6', 10) || 6));
+      const casa = parsed.query.casa || null;
+      const limit = Math.max(1, Math.min(100, parseInt(parsed.query.limit || '20', 10) || 20));
+      const aggClient = require('./lib/odds-aggregator-client');
+      const snaps = await aggClient.fetchScraperDebugSnapshots({ hoursBack, casa, limit });
+      if (snaps?.error) { sendJson(res, { ok: false, error: snaps.error }, 502); return; }
+      sendJson(res, { ok: true, hoursBack, casa: casa || 'all', count: snaps?.length || 0, snapshots: snaps || [] });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
+  // GET /admin/scraper-debug-snapshot?id=N — pega conteudo HTML/JSON de 1 snapshot.
+  // Truncate em 200KB pra response sane. 2026-05-09.
+  if (p === '/admin/scraper-debug-snapshot') {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const id = parseInt(parsed.query.id, 10);
+      if (!Number.isFinite(id)) { sendJson(res, { ok: false, error: 'id query param obrigatorio' }, 400); return; }
+      const aggClient = require('./lib/odds-aggregator-client');
+      const snap = await aggClient.fetchScraperDebugSnapshotContent(id);
+      if (snap?.error) { sendJson(res, { ok: false, error: snap.error, id }, snap.error === 'not_found' ? 404 : 502); return; }
+      sendJson(res, { ok: true, ...snap });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   // GET /admin/br-edges-now?minRatio=1.10&minBooks=3
   // Surface oportunidades cross-book ATIVAS no momento (snapshot pontual,
   // independente de cron). Compara cada casa BR vs mediana das outras casas
