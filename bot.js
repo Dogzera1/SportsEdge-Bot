@@ -481,7 +481,16 @@ async function _aiSecondOpinion(args) {
   // 2026-05-06: AI_DISABLED early-exit. Antes montava prompt + chamada serverPost
   // mesmo com IA desligada → server retornava text vazio → métrica ai_silent_timeout
   // falsa-positiva e CPU desperdiçado em prompts grandes (Tennis/Football 800+ chars).
-  if (process.env.AI_DISABLED === 'true') {
+  //
+  // 2026-05-09: per-sport override <SPORT>_AI_ENABLED espelha killswitch override em
+  // server.js:29485 (commit 9cd1f81 pra MMA). Permite religar IA pontualmente em
+  // sports especificos (ex: DARTS_AI_ENABLED=true) sem reativar global.
+  // Sem isso, _aiSecondOpinion bypass instantaneo (passed:true conf:null) ignorava
+  // o proxy override — darts/tennis/football continuavam sem IA effetiva.
+  const _sportOverrideKey = String(sport || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  const _sportAiEnabled = _sportOverrideKey
+    && /^(1|true|yes)$/i.test(String(process.env[`${_sportOverrideKey}_AI_ENABLED`] || ''));
+  if (process.env.AI_DISABLED === 'true' && !_sportAiEnabled) {
     return { passed: true, reason: 'ai_disabled', conf: null };
   }
 
