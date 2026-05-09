@@ -15926,7 +15926,9 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
         const tipOdd   = parseFloat(tipMatch[2]);
         const tipEvIa  = parseFloat(tipMatch[3]); // EV reportado pela IA (mantido p/ log)
         const tipStake = tipMatch[4];
-        const tipConf  = tipMatch[5].toUpperCase();
+        // _parseTipMl regex trata CONF como opcional. Quando IA omite |CONF:..., raw[6] vem
+        // undefined e tipMatch[5] estoura no toUpperCase. Fallback MÉDIA espelha LoL/CS2.
+        const tipConf  = (tipMatch[5] || 'MÉDIA').toUpperCase();
 
         // Recalcula EV usando P do modelo determinístico (source of truth).
         // IA às vezes erra só o cálculo do EV; validação P-vs-modelo acima garante que P é bom.
@@ -17427,7 +17429,8 @@ Máximo 200 palavras. Raciocínio breve antes da decisão.`;
         const tipOdd    = parseFloat(tipMatch2[2]);
         const tipEvIa   = parseFloat(tipMatch2[3]); // EV reportado pela IA
         const tipStake  = tipMatch2[4];
-        const tipConf   = tipMatch2[5].toUpperCase();
+        // _parseTipMl CONF é opcional; sem fallback estoura quando IA omite |CONF:...
+        const tipConf   = (tipMatch2[5] || 'MÉDIA').toUpperCase();
 
         // Recalcula EV via modelP (Elo/ML) — IA tende a inflar EV em underdogs.
         const _pickIsT1Tn = norm(tipPlayer) === norm(match.team1)
