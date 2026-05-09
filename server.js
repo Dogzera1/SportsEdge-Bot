@@ -9424,9 +9424,18 @@ setInterval(load, 10000);
     const days = Math.max(1, Math.min(180, parseInt(parsed.query.days || '30', 10) || 30));
     const includeVoid = parsed.query.includeVoid === '1';
     const dedup = parsed.query.dedup !== '0';
+    // 2026-05-09: opt-in `league` filter — quando user clica num card de liga,
+    // breakdown por esporte mostra apenas stats DESSA liga. SQL escape via
+    // bind parameter (não interpolado, prepared statement é seguro).
+    const leagueFilter = (parsed.query.league || '').trim();
     try {
       const conds = [`created_at >= datetime('now', '-${days} days')`];
       if (!includeVoid) conds.push(`(result IS NULL OR result != 'void')`);
+      const queryParams = [];
+      if (leagueFilter) {
+        conds.push(`lower(COALESCE(league, '')) LIKE ?`);
+        queryParams.push('%' + leagueFilter.toLowerCase() + '%');
+      }
       const T1 = "lower(REPLACE(REPLACE(REPLACE(REPLACE(team1,' ',''),'-',''),'.',''),'''',''))";
       const T2 = "lower(REPLACE(REPLACE(REPLACE(REPLACE(team2,' ',''),'-',''),'.',''),'''',''))";
       const PAIR = `CASE WHEN ${T1} < ${T2} THEN ${T1}||'|'||${T2} ELSE ${T2}||'|'||${T1} END`;
@@ -9480,7 +9489,7 @@ setInterval(load, 10000);
         WHERE ${conds.join(' AND ')}
         GROUP BY sport
         ORDER BY n DESC
-      `).all();
+      `).all(...queryParams);
       const sports = rows.map(r => ({
         sport: r.sport,
         n: r.n,
@@ -19031,6 +19040,15 @@ load();
   // Equivalente ao /market-tips-by-sport mas pra tips que contam pra banca.
   if (p === '/tips-by-sport') {
     const days = Math.max(1, Math.min(365, parseInt(parsed.query.days || '30', 10) || 30));
+    // 2026-05-09: opt-in `league` filter — quando user clica num card de liga
+    // em tips recentes, breakdown por esporte mostra apenas stats DESSA liga.
+    const leagueFilter = (parsed.query.league || '').trim();
+    const queryParams = [days];
+    let leagueCond = '';
+    if (leagueFilter) {
+      leagueCond = `AND lower(COALESCE(event_name, '')) LIKE ?`;
+      queryParams.push('%' + leagueFilter.toLowerCase() + '%');
+    }
     try {
       const rows = db.prepare(`
         SELECT
@@ -19056,10 +19074,11 @@ load();
         WHERE sent_at >= datetime('now', '-' || ? || ' days')
           AND COALESCE(is_shadow, 0) = 0
           AND (archived IS NULL OR archived = 0)
+          ${leagueCond}
         GROUP BY sp
         HAVING n > 0
         ORDER BY n DESC
-      `).all(days);
+      `).all(...queryParams);
       const out = rows.map(r => ({
         sport: r.sp,
         n: r.n,

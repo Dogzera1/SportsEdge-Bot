@@ -2852,6 +2852,9 @@ function filterTipsByLeague(league) {
   tipsPage = 1;
   renderTipsTable();
   loadTipsByLeague(refreshGen).catch(() => {});
+  // 2026-05-09: refetch tipsBySport com league filter — breakdown por sport
+  // reflete apenas tips da liga selecionada (ou tudo se filter limpo).
+  loadTipsBySport(refreshGen).catch(() => {});
 }
 
 function filterTipsByTier(sport, tier) {
@@ -2864,6 +2867,7 @@ function filterTipsByTier(sport, tier) {
   tipsPage = 1;
   renderTipsTable();
   loadTipsByLeague(refreshGen).catch(() => {});
+  loadTipsBySport(refreshGen).catch(() => {});
 }
 
 // 2026-04-28: cross-section deeplink helper. Switch sport + filter liga +
@@ -3040,7 +3044,11 @@ async function loadTipsByLeague(gen = refreshGen) {
 async function loadTipsBySport(gen = refreshGen) {
   const el = document.getElementById('tipsBySport');
   if (!el) return;
-  const data = await apiFetch(`/tips-by-sport?days=30`).catch(() => null);
+  // 2026-05-09: quando user clica card de liga (filterTipsByLeague), breakdown
+  // por esporte mostra stats APENAS dessa liga. Param `league` opt-in no
+  // backend — sem filter ativo, comportamento original (todas ligas).
+  const leagueQ = tipsLeagueFilter ? '&league=' + encodeURIComponent(tipsLeagueFilter) : '';
+  const data = await apiFetch(`/tips-by-sport?days=30${leagueQ}`).catch(() => null);
   if (shouldAbort(gen)) return;
   if (!data || !Array.isArray(data.sports) || !data.sports.length) {
     el.innerHTML = '';
@@ -4485,10 +4493,16 @@ async function loadMarketTipsShadow() {
   const days = marketTipsState.daysWindow;
   const daysSport = marketTipsState.daysSportWindow;
   // Fetch em paralelo: lista paginada + breakdown agregado + per-sport + per-league
+  // 2026-05-09: bySport agora aceita &league= filter — quando user clica card
+  // de liga (filterMarketTipsByLeague), breakdown por esporte mostra apenas
+  // stats DESSA liga. leagueQ propaga o filter ativo (vazio se sem filter).
+  const bySportLeagueQ = marketTipsState.leagueFilter
+    ? '&league=' + encodeURIComponent(marketTipsState.leagueFilter)
+    : '';
   const [data, breakdown, bySport, byLeague] = await Promise.all([
     apiFetch(`/market-tips-recent?days=${days}&limit=${marketTipsState.perPage}&offset=${offset}${sp}${voidQ}${dedupQ}${viewQ}${leagueQ}`),
     apiFetch(`/market-tips-breakdown?days=30${sp}${liveQ}`),
-    apiFetch(`/market-tips-by-sport?days=${daysSport}${voidQ}${dedupQ}`),
+    apiFetch(`/market-tips-by-sport?days=${daysSport}${voidQ}${dedupQ}${bySportLeagueQ}`),
     apiFetch(`/market-tips-by-league?days=${daysSport}&min_n=2${sp}${voidQ}`),
   ]);
   const el = document.getElementById('marketTipsBody');
