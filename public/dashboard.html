@@ -4441,37 +4441,69 @@ async function _loadMlShadowBySportInternal(el, meta) {
     const statusBanner = `<div style="margin-top:8px;padding:5px 7px;background:${statusColor}15;border-left:3px solid ${statusColor};border-radius:3px;font-size:0.72em;color:${statusColor}" title="${statusNeed}">
       <b>${statusTag}</b><br><span style="opacity:0.85">${statusNeed}</span>
     </div>`;
+
+    // 2026-05-10 (P1 granularidade): mini-breakdown por tier inline + drill-down
+    // por liga em expand. Helper roi-to-color compartilhado.
+    const tiers = (data.per_sport_tier || []).filter(x => x.sport === s.sport);
+    const roiClr = (roi, n) => {
+      if (roi == null || n < 5) return '#64748b';
+      if (roi >= 5) return '#10b981';
+      if (roi <= -5) return '#ef4444';
+      return '#f59e0b';
+    };
+    const tierChips = tiers.length ? `
+      <div style="margin-top:6px;display:flex;gap:3px;flex-wrap:wrap;font-size:0.66em">
+        ${tiers.map(tr => `
+          <span title="Tier ${tr.tier} · ${tr.n} tips · ROI ${fmtOrDash(tr.roi)} · CLV ${fmtOrDash(tr.avg_clv)} (n=${tr.clv_n})"
+                style="padding:1px 5px;border-radius:3px;background:${roiClr(tr.roi, tr.n)}25;color:${roiClr(tr.roi, tr.n)};border:1px solid ${roiClr(tr.roi, tr.n)}55">
+            T${tr.tier} <b>${tr.n}</b> ${tr.roi != null ? (tr.roi >= 0 ? '+' : '') + tr.roi.toFixed(0) + '%' : '—'}
+          </span>`).join('')}
+      </div>` : '';
+    const expandId = `mlShadowExpand_${s.sport}`;
     return `
-      <div onclick="filterToSport('${s.sport}')" style="cursor:pointer;border:2px solid ${isActive ? c : 'var(--border,#2a2a2a)'};background:var(--surface,#0f172a);border-radius:8px;padding:10px 12px;min-width:170px;flex:1;transition:transform 0.1s" onmouseover="this.style.transform='translateY(-2px)'" onmouseout="this.style.transform='translateY(0)'">
-        <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">
-          <span style="background:${c};color:#fff;padding:2px 7px;border-radius:3px;font-size:0.75em;font-weight:600">${emoji} ${label}</span>
-          <span style="background:#475569;color:#fff;padding:1px 5px;border-radius:3px;font-size:0.7em;margin-left:6px" title="ML shadow — sem DM">shadow</span>
+      <div style="border:2px solid ${isActive ? c : 'var(--border,#2a2a2a)'};background:var(--surface,#0f172a);border-radius:8px;padding:10px 12px;min-width:170px;flex:1;transition:transform 0.1s" onmouseover="this.style.transform='translateY(-2px)'" onmouseout="this.style.transform='translateY(0)'">
+        <div onclick="filterToSport('${s.sport}')" style="cursor:pointer">
+          <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">
+            <span style="background:${c};color:#fff;padding:2px 7px;border-radius:3px;font-size:0.75em;font-weight:600">${emoji} ${label}</span>
+            <span style="background:#475569;color:#fff;padding:1px 5px;border-radius:3px;font-size:0.7em;margin-left:6px" title="ML shadow — sem DM">shadow</span>
+          </div>
+          <div style="font-size:1.4em;font-weight:600;color:var(--text,#e2e8f0)">${s.n}<span style="font-size:0.55em;color:#888;margin-left:4px">tips</span></div>
+          <div style="font-size:0.75em;color:#888;margin-top:2px">${s.wins || 0}W · ${s.losses || 0}L · ${s.pending || 0}P</div>
+          <div style="font-size:0.85em;margin-top:6px;display:flex;justify-content:space-between">
+            <span>Hit: <b>${s.hitRate != null ? s.hitRate.toFixed(0) + '%' : '—'}</b></span>
+            <span class="${clsSign(s.roi)}">ROI: <b>${fmtOrDash(s.roi)}</b></span>
+          </div>
+          <div style="font-size:0.85em;margin-top:2px;display:flex;justify-content:space-between">
+            <span class="${clsSign(s.avg_clv)}">CLV: ${fmtOrDash(s.avg_clv)}${(s.clv_n || 0) > 0 ? ` <span style="opacity:0.6">(${s.clv_n})</span>` : ''}</span>
+            <span class="${clsSign(s.profit_reais)}">${(s.profit_reais || 0) >= 0 ? '+' : ''}R$ ${(s.profit_reais || 0).toFixed(0)}</span>
+          </div>
+          <div style="font-size:0.75em;margin-top:4px;color:#888;display:flex;justify-content:space-between">
+            <span>EV: ${s.avg_ev != null ? s.avg_ev.toFixed(1) + '%' : '—'}</span>
+            <span>Odd: ${s.avg_odds != null ? s.avg_odds.toFixed(2) : '—'}</span>
+          </div>
+          ${tierChips}
+          ${statusBanner}
         </div>
-        <div style="font-size:1.4em;font-weight:600;color:var(--text,#e2e8f0)">${s.n}<span style="font-size:0.55em;color:#888;margin-left:4px">tips</span></div>
-        <div style="font-size:0.75em;color:#888;margin-top:2px">${s.wins || 0}W · ${s.losses || 0}L · ${s.pending || 0}P</div>
-        <div style="font-size:0.85em;margin-top:6px;display:flex;justify-content:space-between">
-          <span>Hit: <b>${s.hitRate != null ? s.hitRate.toFixed(0) + '%' : '—'}</b></span>
-          <span class="${clsSign(s.roi)}">ROI: <b>${fmtOrDash(s.roi)}</b></span>
-        </div>
-        <div style="font-size:0.85em;margin-top:2px;display:flex;justify-content:space-between">
-          <span class="${clsSign(s.avg_clv)}">CLV: ${fmtOrDash(s.avg_clv)}${(s.clv_n || 0) > 0 ? ` <span style="opacity:0.6">(${s.clv_n})</span>` : ''}</span>
-          <span class="${clsSign(s.profit_reais)}">${(s.profit_reais || 0) >= 0 ? '+' : ''}R$ ${(s.profit_reais || 0).toFixed(0)}</span>
-        </div>
-        <div style="font-size:0.75em;margin-top:4px;color:#888;display:flex;justify-content:space-between">
-          <span>EV: ${s.avg_ev != null ? s.avg_ev.toFixed(1) + '%' : '—'}</span>
-          <span>Odd: ${s.avg_odds != null ? s.avg_odds.toFixed(2) : '—'}</span>
-        </div>
-        ${statusBanner}
+        ${tiers.length ? `
+          <div style="margin-top:6px;text-align:right">
+            <a href="javascript:void(0)" onclick="event.stopPropagation();toggleMlShadowLeagues('${s.sport}')"
+               style="font-size:0.7em;color:#60a5fa;text-decoration:none">▾ ligas</a>
+          </div>
+          <div id="${expandId}" style="display:none;margin-top:6px;padding-top:6px;border-top:1px dashed var(--border,#2a2a2a)"></div>
+        ` : ''}
       </div>`;
   }).join('');
 
+  // 2026-05-10: cache leagues per sport pro toggle render lazy sem reflow
+  window._mlShadowLeagueCache = data.per_sport_league || [];
+
   html += `<div style="margin-bottom:14px">
-    <div class="card-meta" style="margin-bottom:8px"><b>📊 Shadow ML por esporte (${data.days}d)</b> — clique pra filtrar dashboard</div>
+    <div class="card-meta" style="margin-bottom:8px"><b>📊 Shadow ML por esporte (${data.days}d)</b> — clique no card pra filtrar · "▾ ligas" expande breakdown por liga</div>
     <div style="display:flex;gap:10px;flex-wrap:wrap">${overallCard}${cards}</div>
   </div>`;
 
   html += `<div class="card-meta" style="margin-top:10px;font-size:0.8em">
-    Shadow = tip gerada mas sem DM. Critério promover: n≥30 settled · ROI≥0% · CLV≥0% (n_CLV≥10). CLV é leading indicator (não espera settle).
+    Shadow = tip gerada mas sem DM. Tier chips: <b>T1</b>=top (LCK/LPL/LEC/Slam/NBA/UFC), <b>T2</b>=mid (CBLOL/Challenger/Brasileirão/Bellator), <b>T3</b>=outros. Cor verde ≥+5%, vermelho ≤-5%, cinza n&lt;5. Critério promover: n≥30 · ROI≥0 · CLV≥0 (n_CLV≥10).
   </div>
   <div id="mlShadowTipsList" style="margin-top:16px"><div class="loading">Carregando tips individuais…</div></div>`;
 
@@ -4479,6 +4511,50 @@ async function _loadMlShadowBySportInternal(el, meta) {
 
   // Carrega lista paginada de tips individuais (shadow ML)
   loadMlShadowTipsList(sports.map(s => s.sport));
+}
+
+// 2026-05-10 (P1 granularidade): expand drill-down por liga dentro de um sport.
+// Usa cache window._mlShadowLeagueCache populado por loadMlShadowBySport.
+function toggleMlShadowLeagues(sport) {
+  const div = document.getElementById('mlShadowExpand_' + sport);
+  if (!div) return;
+  if (div.style.display === 'block') { div.style.display = 'none'; return; }
+  const leagues = (window._mlShadowLeagueCache || [])
+    .filter(l => l.sport === sport)
+    .sort((a, b) => (b.n - a.n));
+  if (!leagues.length) {
+    div.innerHTML = '<div style="font-size:0.7em;color:#888;text-align:center">sem dados</div>';
+    div.style.display = 'block';
+    return;
+  }
+  const fmtPct = v => v == null ? '—' : (v >= 0 ? '+' : '') + v.toFixed(1) + '%';
+  const roiClr = (roi, n) => {
+    if (roi == null || n < 5) return '#64748b';
+    if (roi >= 5) return '#10b981';
+    if (roi <= -5) return '#ef4444';
+    return '#f59e0b';
+  };
+  // Group por tier dentro do sport
+  const byTier = { 1: [], 2: [], 3: [] };
+  for (const l of leagues) (byTier[l.tier] || (byTier[l.tier] = [])).push(l);
+  const tierLabel = { 1: 'Tier 1 (top)', 2: 'Tier 2 (mid)', 3: 'Tier 3 (outros)' };
+  const html = [1, 2, 3].filter(t => byTier[t] && byTier[t].length).map(t => {
+    const rows = byTier[t].map(l => `
+      <div style="display:flex;justify-content:space-between;gap:6px;padding:2px 0;font-size:0.7em;border-bottom:1px dotted #2a2a2a">
+        <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100px" title="${l.league}">${l.league}</span>
+        <span style="color:#888">n=${l.n}</span>
+        <span style="color:${roiClr(l.roi, l.n)};min-width:54px;text-align:right"><b>${fmtPct(l.roi)}</b></span>
+        <span style="color:${roiClr(l.avg_clv, l.clv_n)};min-width:60px;text-align:right" title="CLV n=${l.clv_n}">CLV ${fmtPct(l.avg_clv)}</span>
+      </div>
+    `).join('');
+    return `
+      <div style="margin-bottom:6px">
+        <div style="font-size:0.65em;color:#888;font-weight:600;margin-bottom:2px">${tierLabel[t]}</div>
+        ${rows}
+      </div>`;
+  }).join('');
+  div.innerHTML = html;
+  div.style.display = 'block';
 }
 
 // Lista paginada de tips ML shadow individuais (cross-sport)
@@ -5865,18 +5941,15 @@ function renderMarketTipsByLeagueCards(bl) {
     </div>`;
 }
 
-// 2026-05-09 (UX fix): lock + debounce 350ms — clicks rápidos em cards de
-// liga MT travavam pq loadMarketTipsShadow é pesado (server-side filter +
-// recompute breakdown). Mesmo padrão de filterToSport.
-let _filterMtLeagueInFlight = false;
+// 2026-05-10 (UX re-fix): in-flight lock removido — bloqueava clicks pelo
+// tempo todo de loadMarketTipsShadow (5-10s). Mesmo padrão de filterToSport.
 let _filterMtLeagueLastTs = 0;
 function filterMarketTipsByLeague(league) {
   const now = Date.now();
-  if (_filterMtLeagueInFlight) return;
-  if (now - _filterMtLeagueLastTs < 350) return;
-  _filterMtLeagueInFlight = true;
+  if (now - _filterMtLeagueLastTs < 200) return;
   _filterMtLeagueLastTs = now;
   document.body.style.cursor = 'wait';
+  setTimeout(() => { document.body.style.cursor = ''; }, 300);
   // Toggle: clicar no mesmo card limpa filtro
   if (marketTipsState.leagueFilter === league) {
     marketTipsState.leagueFilter = null;
@@ -5885,51 +5958,46 @@ function filterMarketTipsByLeague(league) {
   }
   marketTipsState.page = 0;
   // Filter agora é server-side — refetch pra recalcular total/pages com o filtro
-  loadMarketTipsShadow()
-    .catch(() => {})
-    .finally(() => {
-      _filterMtLeagueInFlight = false;
-      document.body.style.cursor = '';
-    });
+  loadMarketTipsShadow().catch(() => {});
   // ML shadow respeita filter — refresh em background se expandida
   if (typeof _refreshMlShadowIfExpanded === 'function') {
     _refreshMlShadowIfExpanded();
   }
 }
 
-// 2026-05-09 (UX fix): user reportou cards "travados" ao clicar.
-// refresh() dispara dezenas de fetchs paralelos (~1-2s); sem feedback,
-// clicks rápidos enfileiravam refreshes sobrepostos. Fix:
-//   1. Lock 400ms entre clicks (debounce visual)
-//   2. cursor:wait body durante refresh — feedback imediato
-//   3. Pointer-events disabled em cards durante refresh — bloqueia duplo
-let _filterToSportInFlight = false;
+// 2026-05-10 (UX re-fix): user reportou que clicar em outros sport cards
+// "não vai ou demora". Causa: lock _filterToSportInFlight aguardava refresh()
+// inteiro completar (Promise.all de ~14 fetches). Endpoint lento (5-15s)
+// bloqueava clicks subsequentes pelo tempo todo. Fix:
+//   - Remove in-flight lock — refreshGen já aborta loads stale (line 1425)
+//   - Mantém debounce 200ms por timestamp (suficiente pra anti-double-click)
+//   - cursor:wait curto (300ms) só pra acknowledge visual; remove independente
+//     do refresh terminar — assim clicks consecutivos respondem na hora
 let _filterToSportLastTs = 0;
 function filterToSport(sp) {
   const now = Date.now();
-  if (_filterToSportInFlight || (now - _filterToSportLastTs) < 400) return;
-  _filterToSportInFlight = true;
+  if ((now - _filterToSportLastTs) < 200) return;
   _filterToSportLastTs = now;
   document.body.style.cursor = 'wait';
+  setTimeout(() => { document.body.style.cursor = ''; }, 300);
   currentSport = sp;
   // 2026-04-28: persist + dropdown sync robusto. Antes if option não existir,
   // dropdown ficava com value antigo (visual desync vs currentSport).
   _saveFilter('sport', sp);
   const sel = document.getElementById('sportSelect');
   if (sel) {
-    // Dropdown value tem formato "sport|game" — busca opção exata ou prefixo.
     const opt = [...sel.options].find(o => o.value === sp || o.value.startsWith(sp + '|'));
     if (opt) sel.value = opt.value;
   }
   marketTipsState.page = 0;
   marketTipsState.sport = sp;
-  // refresh() já inclui loadMarketTipsShadow agora (commit 2b44c3f+).
-  // Wrap em Promise pra unlock no .finally — funciona se refresh é async ou sync.
-  const result = (typeof refresh === 'function') ? refresh() : loadMarketTipsShadow();
-  Promise.resolve(result).finally(() => {
-    _filterToSportInFlight = false;
-    document.body.style.cursor = '';
-  });
+  // Fire-and-forget — refreshGen bump aborta loads pendentes do click anterior,
+  // garantindo que dado renderizado é sempre do último click. Não bloqueamos
+  // clicks subsequentes esperando completion.
+  try {
+    if (typeof refresh === 'function') refresh().catch(() => {});
+    else loadMarketTipsShadow().catch(() => {});
+  } catch (_) {}
 }
 
 function setMarketTipsView(mode) {

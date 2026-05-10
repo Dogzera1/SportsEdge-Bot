@@ -26627,7 +26627,94 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
         stake_reais: parseFloat(tot.stake_reais.toFixed(2)),
       };
 
-      sendJson(res, { days, totals, per_sport, league: leagueFilter || null });
+      // 2026-05-10 (P1 granularidade): breakdown adicional por (sport, tier) e
+      // (sport, league). Tier classifier via lib/league-tier — aplicado em JS
+      // sobre dedup row-set pra evitar SQL pesada. Permite drill-down liga+tier
+      // no card ML Shadow do dashboard sem extra round-trip.
+      let per_sport_tier = [];
+      let per_sport_league = [];
+      try {
+        const { getLeagueTier } = require('./lib/league-tier');
+        const detailRows = db.prepare(`
+          WITH dedup AS (
+            SELECT MAX(id) AS id
+            FROM tips
+            WHERE is_shadow = 1
+              AND (archived IS NULL OR archived = 0)
+              AND (market_type IS NULL OR market_type = 'ML')
+              AND (sent_at >= datetime('now', ?) OR result IS NULL)
+              ${leagueWhere}
+            GROUP BY sport,
+                     COALESCE(NULLIF(TRIM(match_id), ''), 'id:' || CAST(id AS TEXT)),
+                     REPLACE(REPLACE(lower(COALESCE(tip_participant, '')), ' ', ''), '-', ''),
+                     UPPER(COALESCE(market_type, 'ML'))
+          )
+          SELECT t.sport,
+                 COALESCE(NULLIF(TRIM(t.event_name), ''), '(sem liga)') AS league,
+                 t.result, t.profit_reais, t.stake_reais, t.odds, t.ev, t.clv_odds
+          FROM tips t
+          JOIN dedup d ON d.id = t.id
+        `).all(...params);
+
+        const tierMap = new Map(); // key: sport|tier
+        const leagueMap = new Map(); // key: sport|league
+        for (const r of detailRows) {
+          const tier = getLeagueTier(r.sport, r.league) || 3;
+          const tk = `${r.sport}|tier${tier}`;
+          const lk = `${r.sport}|${r.league}`;
+          for (const [k, key] of [[tk, 'tier'], [lk, 'league']]) {
+            const map = key === 'tier' ? tierMap : leagueMap;
+            let agg = map.get(k);
+            if (!agg) {
+              agg = { sport: r.sport, tier, league: r.league, n: 0, wins: 0, losses: 0, pushes: 0, pending: 0, profit_r: 0, stake_r: 0, odds_sum: 0, odds_n: 0, ev_sum: 0, ev_n: 0, clv_sum: 0, clv_n: 0 };
+              map.set(k, agg);
+            }
+            agg.n += 1;
+            if (r.result === 'win') agg.wins += 1;
+            else if (r.result === 'loss') agg.losses += 1;
+            else if (r.result === 'push') agg.pushes += 1;
+            else if (r.result == null) agg.pending += 1;
+            agg.profit_r += Number(r.profit_reais) || 0;
+            agg.stake_r += Number(r.stake_reais) || 0;
+            if (r.odds > 1) { agg.odds_sum += r.odds; agg.odds_n += 1; }
+            if (r.ev != null) { agg.ev_sum += Number(r.ev); agg.ev_n += 1; }
+            if (r.clv_odds > 1 && r.odds > 1) {
+              agg.clv_sum += (r.odds / r.clv_odds - 1) * 100;
+              agg.clv_n += 1;
+            }
+          }
+        }
+        const finalize = (agg) => {
+          const decided = agg.wins + agg.losses;
+          const hitRate = decided > 0 ? (agg.wins / decided) * 100 : null;
+          const roi = agg.stake_r > 0 ? (agg.profit_r / agg.stake_r) * 100 : null;
+          return {
+            sport: agg.sport,
+            tier: agg.tier,
+            league: agg.league,
+            n: agg.n, wins: agg.wins, losses: agg.losses, pushes: agg.pushes, pending: agg.pending,
+            hitRate: hitRate != null ? parseFloat(hitRate.toFixed(1)) : null,
+            roi: roi != null ? parseFloat(roi.toFixed(2)) : null,
+            profit_reais: parseFloat(agg.profit_r.toFixed(2)),
+            stake_reais: parseFloat(agg.stake_r.toFixed(2)),
+            avg_odds: agg.odds_n > 0 ? parseFloat((agg.odds_sum / agg.odds_n).toFixed(2)) : null,
+            avg_ev: agg.ev_n > 0 ? parseFloat((agg.ev_sum / agg.ev_n).toFixed(2)) : null,
+            avg_clv: agg.clv_n > 0 ? parseFloat((agg.clv_sum / agg.clv_n).toFixed(2)) : null,
+            clv_n: agg.clv_n,
+          };
+        };
+        per_sport_tier = [...tierMap.values()].map(finalize)
+          .sort((a, b) => a.sport.localeCompare(b.sport) || a.tier - b.tier);
+        per_sport_league = [...leagueMap.values()].map(({ tier: _t, ...rest }) => {
+          const fin = finalize({ ...rest, tier: _t });
+          return fin;
+        }).sort((a, b) => a.sport.localeCompare(b.sport) || (b.n - a.n));
+      } catch (e) {
+        // Granularidade adicional é opcional — falha graceful preserva legado
+        console.warn('[/ml-shadow-by-sport] granularity breakdown skipped:', e.message);
+      }
+
+      sendJson(res, { days, totals, per_sport, per_sport_tier, per_sport_league, league: leagueFilter || null });
     } catch (e) { sendJson(res, { error: e.message }, 500); }
     return;
   }
