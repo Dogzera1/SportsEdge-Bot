@@ -21140,7 +21140,10 @@ async function runAutoBasket() {
   const basketConfig = SPORTS['basket'];
   if (!basketConfig?.enabled) return false;
   const BASKET_LIVE_COOLDOWN = 3 * 60 * 1000;     // live: 3min
-  const BASKET_PREGAME_COOLDOWN = 60 * 60 * 1000; // pregame: 1h
+  // 2026-05-10: pregame 60→30min — playoff window curto, odds movem rapidamente
+  // após injury reports/lineups. Re-scan mais frequente captura edge fresh.
+  // Override via BASKET_PREGAME_COOLDOWN_MIN env (em minutos).
+  const BASKET_PREGAME_COOLDOWN = (parseInt(process.env.BASKET_PREGAME_COOLDOWN_MIN || '30', 10) || 30) * 60 * 1000;
   let _hadLiveBasket = false;
   try {
     const now = Date.now();

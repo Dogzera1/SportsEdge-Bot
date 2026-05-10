@@ -7833,8 +7833,12 @@ setInterval(load, 10000);
   if (p === '/basket-matches') {
     try {
       const espnLib = require('./lib/espn-basket');
+      // 2026-05-10: daysAhead 2→4 — playoff window (Mai-Jun) tem só 1-2 jogos/dia.
+      // Bump permite scan capturar matches mais distantes (game 3 da série, etc) e
+      // emitir tips antes da window curta. Override via BASKET_DAYS_AHEAD env.
+      const _daysAhead = Math.max(1, Math.min(7, parseInt(process.env.BASKET_DAYS_AHEAD || '4', 10) || 4));
       const [upcoming, oddsTheOdds, oddsPinnacle] = await Promise.all([
-        espnLib.getUpcomingMatches({ daysAhead: 2 }).catch(() => []),
+        espnLib.getUpcomingMatches({ daysAhead: _daysAhead }).catch(() => []),
         getTheOddsBasketMatches().catch(() => []),
         getPinnacleBasketMatches().catch(() => []),
       ]);
@@ -8211,7 +8215,7 @@ setInterval(load, 10000);
       const gap = n >= 2 ? Math.round(Number(rows[0].rating) - Number(rows[n - 1].rating)) : 0;
       let lastReset = null;
       try {
-        lastReset = db.prepare('SELECT value, updated_at FROM settings WHERE key = ?').get('basket_elo_last_season_reset') || null;
+        lastReset = db.prepare('SELECT value FROM settings WHERE key = ?').get('basket_elo_last_season_reset') || null;
       } catch (_) {}
       sendJson(res, {
         ok: true,
