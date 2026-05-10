@@ -23345,10 +23345,15 @@ load();
   //   - Só aplica se uplift significativo E amostra boa
   if (p === '/threshold-optimizer-apply' && req.method === 'POST') {
     if (!requireAdmin(req, res)) return;
-    const minUplift = parseFloat(process.env.THRESHOLD_AUTO_APPLY_MIN_UPLIFT_PP || '10');
-    const minN = parseInt(process.env.THRESHOLD_AUTO_APPLY_MIN_N || '20', 10);
+    // 2026-05-10: defaults apertados pra ativação segura via THRESHOLD_AUTO_APPLY=true
+    // sem precisar setar 3 envs auxiliares. n=20/uplift=10pp/bootstrap=40pp anteriores
+    // permitiam mudanças bruscas em sample frágil (e.g. tennis EVmin 7→25 com n=27).
+    // Novo perfil: n>=50 (CI95 mais estreito), uplift>=15pp (margem maior de erro),
+    // bootstrap<=20pp (primeira mudança contida). Override via env preserva legacy.
+    const minUplift = parseFloat(process.env.THRESHOLD_AUTO_APPLY_MIN_UPLIFT_PP || '15');
+    const minN = parseInt(process.env.THRESHOLD_AUTO_APPLY_MIN_N || '50', 10);
     const maxDelta = parseFloat(process.env.THRESHOLD_AUTO_APPLY_MAX_DELTA_PP || '15');
-    const bootstrapMaxDelta = parseFloat(process.env.THRESHOLD_AUTO_APPLY_BOOTSTRAP_MAX_DELTA_PP || '40');
+    const bootstrapMaxDelta = parseFloat(process.env.THRESHOLD_AUTO_APPLY_BOOTSTRAP_MAX_DELTA_PP || '20');
     const cooldownH = parseInt(process.env.THRESHOLD_AUTO_APPLY_COOLDOWN_H || '24', 10);
     try {
       // Reusa lógica do /threshold-optimizer inline

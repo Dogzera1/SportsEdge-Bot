@@ -21722,7 +21722,10 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
 
   // Threshold Auto-Apply: semanal (segunda-feira às 4h UTC), roda optimizer +
   // aplica ajustes de EV_min per sport quando guardrails batem. Gated por
-  // THRESHOLD_AUTO_APPLY=true. Guardrails: uplift≥10pp, n≥20, |delta|≤15pp, cooldown 24h.
+  // THRESHOLD_AUTO_APPLY=true.
+  // 2026-05-10: guardrails default apertados — uplift≥15pp, n≥50, |delta|≤15pp,
+  // bootstrap≤20pp, cooldown 24h. Antes era n≥20/uplift≥10pp/bootstrap≤40pp,
+  // permitindo mudanças bruscas em amostra frágil. Override legacy via envs.
   let _lastThresholdApplyDay = null;
   async function runThresholdAutoApply() {
     if (!/^true$/i.test(String(process.env.THRESHOLD_AUTO_APPLY || ''))) return;
