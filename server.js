@@ -12097,10 +12097,10 @@ setInterval(load, 60000);
             ORDER BY created_at DESC LIMIT 30
           `).all(sport2, qPat, qPat);
 
-      // 3. match_results candidates
+      // 3. match_results candidates (table não tem coluna `id`; chave é match_id)
       const mrCandidates = db.prepare(`
-        SELECT id, match_id, game, league, team1, team2, winner, final_score,
-               resolved_at, status
+        SELECT match_id, game, league, team1, team2, winner, final_score,
+               resolved_at
         FROM match_results
         WHERE game = ?
           AND (team1 LIKE ? OR team2 LIKE ?)
