@@ -23355,43 +23355,96 @@ load();
     const maxDelta = parseFloat(process.env.THRESHOLD_AUTO_APPLY_MAX_DELTA_PP || '15');
     const bootstrapMaxDelta = parseFloat(process.env.THRESHOLD_AUTO_APPLY_BOOTSTRAP_MAX_DELTA_PP || '20');
     const cooldownH = parseInt(process.env.THRESHOLD_AUTO_APPLY_COOLDOWN_H || '24', 10);
+    // 2026-05-10: holdout out-of-sample validation. Train fit em [-30d, -holdoutDays],
+    // holdout em [-holdoutDays, now]. Apply só se train_uplift OK E holdout_uplift
+    // >= train_uplift * tolerance. Mitiga overfit em-sample (caso típico: optimizer
+    // escolhe threshold que happens to win em sample window mas degrada out-of-sample).
+    const holdoutDays = parseInt(process.env.THRESHOLD_AUTO_APPLY_HOLDOUT_DAYS || '15', 10);
+    const holdoutTolerance = parseFloat(process.env.THRESHOLD_AUTO_APPLY_HOLDOUT_TOLERANCE || '0.5');
+    const holdoutMinN = parseInt(process.env.THRESHOLD_AUTO_APPLY_HOLDOUT_MIN_N || '10', 10);
+    const holdoutDisabled = /^(1|true|yes)$/i.test(String(process.env.THRESHOLD_AUTO_APPLY_HOLDOUT_DISABLED || ''));
     try {
       // Reusa lógica do /threshold-optimizer inline
       const _bl = getBaseline();
-      const rows = db.prepare(`
-        SELECT sport, ev, stake, odds, result FROM tips
-        WHERE result IN ('win','loss') AND settled_at >= datetime('now', '-30 days')
-          AND ev IS NOT NULL AND (archived IS NULL OR archived = 0)
-          AND COALESCE(is_shadow, 0) = 0
-      `).all();
-      const bySport = {};
-      for (const r of rows) (bySport[r.sport] ||= []).push(r);
+      // Train window: [-30d, -holdoutDays]. Holdout window: [-holdoutDays, now].
+      // Quando holdoutDisabled, train pega janela inteira [-30d, now] (legacy behavior).
+      const rowsTrain = holdoutDisabled
+        ? db.prepare(`
+            SELECT sport, ev, stake, odds, result FROM tips
+            WHERE result IN ('win','loss') AND settled_at >= datetime('now', '-30 days')
+              AND ev IS NOT NULL AND (archived IS NULL OR archived = 0)
+              AND COALESCE(is_shadow, 0) = 0
+          `).all()
+        : db.prepare(`
+            SELECT sport, ev, stake, odds, result FROM tips
+            WHERE result IN ('win','loss')
+              AND settled_at >= datetime('now', '-30 days')
+              AND settled_at < datetime('now', ?)
+              AND ev IS NOT NULL AND (archived IS NULL OR archived = 0)
+              AND COALESCE(is_shadow, 0) = 0
+          `).all(`-${holdoutDays} days`);
+      const rowsHoldout = holdoutDisabled
+        ? []
+        : db.prepare(`
+            SELECT sport, ev, stake, odds, result FROM tips
+            WHERE result IN ('win','loss')
+              AND settled_at >= datetime('now', ?)
+              AND ev IS NOT NULL AND (archived IS NULL OR archived = 0)
+              AND COALESCE(is_shadow, 0) = 0
+          `).all(`-${holdoutDays} days`);
+      const bySportTrain = {};
+      for (const r of rowsTrain) (bySportTrain[r.sport] ||= []).push(r);
+      const bySportHoldout = {};
+      for (const r of rowsHoldout) (bySportHoldout[r.sport] ||= []).push(r);
       const thresholds = [0, 5, 10, 15, 20, 25, 30, 35, 40];
       const applied = [], skipped = [];
-      for (const sport in bySport) {
-        const tips = bySport[sport];
+      // Helper: replay tips com filtro EV ≥ t. Retorna {n, roi}.
+      const _replay = (tipsList, t) => {
+        let profit = 0, stake = 0, n = 0;
+        for (const tip of tipsList) {
+          if (Number(tip.ev) < t) continue;
+          const p = tipProfitReais(tip, _bl.unit_value);
+          if (p != null) profit += p;
+          stake += tipStakeReais(tip, _bl.unit_value);
+          n++;
+        }
+        const roi = stake > 0 ? (profit / stake * 100) : 0;
+        return { n, roi };
+      };
+      for (const sport in bySportTrain) {
+        const tips = bySportTrain[sport];
         if (tips.length < 10) continue;
-        let baseProfit = 0, baseStake = 0;
-        for (const t of tips) { baseProfit += tipProfitReais(t, _bl.unit_value) || 0; baseStake += tipStakeReais(t, _bl.unit_value); }
-        const baseRoi = baseStake > 0 ? (baseProfit / baseStake * 100) : 0;
+        const baseTrain = _replay(tips, 0);
         let bestT = 0, bestScore = -Infinity, bestN = 0, bestRoi = 0;
         // Filtra thresholds que resultam em n muito pequeno (<minN/2) pra evitar
         // overfit a amostras minúsculas. Score = ROI × sqrt(n) penaliza n baixo.
         const minNForCandidate = Math.max(10, Math.floor(minN / 2));
         for (const t of thresholds) {
-          let profit = 0, stake = 0, n = 0;
-          for (const tip of tips) { if (Number(tip.ev) < t) continue; const p = tipProfitReais(tip, _bl.unit_value); if (p != null) profit += p; stake += tipStakeReais(tip, _bl.unit_value); n++; }
-          const roi = stake > 0 ? (profit / stake * 100) : 0;
-          const score = n >= minNForCandidate ? roi * Math.sqrt(n) : -Infinity;
-          if (score > bestScore) { bestScore = score; bestT = t; bestN = n; bestRoi = roi; }
+          const r = _replay(tips, t);
+          const score = r.n >= minNForCandidate ? r.roi * Math.sqrt(r.n) : -Infinity;
+          if (score > bestScore) { bestScore = score; bestT = t; bestN = r.n; bestRoi = r.roi; }
         }
-        const uplift = bestRoi - baseRoi;
+        const upliftTrain = bestRoi - baseTrain.roi;
+        // Holdout validation: roda mesmo bestT em rowsHoldout. Mede uplift OOS.
+        let holdoutInfo = { enabled: !holdoutDisabled, n: 0, roi: null, baseRoi: null, uplift: null };
+        if (!holdoutDisabled) {
+          const tipsH = bySportHoldout[sport] || [];
+          const baseHoldout = _replay(tipsH, 0);
+          const newHoldout = _replay(tipsH, bestT);
+          holdoutInfo = {
+            enabled: true,
+            n: newHoldout.n,
+            roi: +newHoldout.roi.toFixed(2),
+            baseRoi: +baseHoldout.roi.toFixed(2),
+            uplift: +(newHoldout.roi - baseHoldout.roi).toFixed(2),
+          };
+        }
         const prev = db.prepare(`SELECT value FROM dynamic_thresholds WHERE sport = ? AND key = 'ev_min'`).get(sport);
         const prevVal = prev?.value ?? 0;
         const delta = Math.abs(bestT - prevVal);
         // Bootstrap phase: se nunca aplicou antes (prev não existe), permite delta
-        // maior (bootstrapMaxDelta default 40pp) pra sair do zero. Após primeira
-        // aplicação, cai no maxDelta normal (15pp).
+        // maior (bootstrapMaxDelta) pra sair do zero. Após primeira aplicação, cai
+        // no maxDelta normal (15pp).
         const isBootstrap = !prev;
         const effMaxDelta = isBootstrap ? bootstrapMaxDelta : maxDelta;
         // Cooldown check
@@ -23399,23 +23452,35 @@ load();
         const lastAdjTs = lastAdj ? new Date(String(lastAdj.applied_at).replace(' ','T') + 'Z').getTime() : 0;
         const cooldownMs = cooldownH * 3600 * 1000;
         const inCooldown = (Date.now() - lastAdjTs) < cooldownMs;
+        // Holdout guardrail: amostra mínima + uplift mantido (>= train * tolerance).
+        // Permite degradação tolerável (ex: train +15pp, holdout +7.5pp ainda passa
+        // com tolerance 0.5) mas barra reversão (holdout negativo ou pequeno demais).
+        const minHoldoutUplift = upliftTrain * holdoutTolerance;
+        const holdoutSkipReason = holdoutDisabled ? null
+          : holdoutInfo.n < holdoutMinN ? `holdout_n_too_small_${holdoutInfo.n}`
+          : holdoutInfo.uplift < minHoldoutUplift ? `holdout_uplift_${holdoutInfo.uplift}pp_below_${minHoldoutUplift.toFixed(1)}pp`
+          : null;
         const reasonSkip =
-          uplift < minUplift ? `uplift_too_low_${uplift.toFixed(1)}pp` :
+          upliftTrain < minUplift ? `uplift_too_low_${upliftTrain.toFixed(1)}pp` :
           bestN < minN ? `n_too_small_${bestN}` :
           delta > effMaxDelta ? `delta_too_large_${delta.toFixed(1)}pp_cap${effMaxDelta}${isBootstrap?'_bootstrap':''}` :
-          inCooldown ? `cooldown_active` : null;
-        if (reasonSkip) { skipped.push({ sport, suggested: bestT, uplift: +uplift.toFixed(2), n: bestN, reason: reasonSkip }); continue; }
+          inCooldown ? `cooldown_active` :
+          holdoutSkipReason;
+        if (reasonSkip) {
+          skipped.push({ sport, suggested: bestT, uplift: +upliftTrain.toFixed(2), n: bestN, holdout: holdoutInfo, reason: reasonSkip });
+          continue;
+        }
         // Apply
         db.prepare(`
           INSERT INTO dynamic_thresholds (sport, key, value, updated_by) VALUES (?, 'ev_min', ?, 'optimizer')
           ON CONFLICT (sport, key) DO UPDATE SET value = excluded.value, updated_at = datetime('now'), updated_by = 'optimizer'
         `).run(sport, bestT);
         db.prepare(`INSERT INTO threshold_adjustments (sport, key, prev_value, new_value, reason, details, auto) VALUES (?, 'ev_min', ?, ?, ?, ?, 1)`)
-          .run(sport, prevVal, bestT, `auto_uplift_${uplift.toFixed(1)}pp`, JSON.stringify({ baseRoi: +baseRoi.toFixed(2), newRoi: +bestRoi.toFixed(2), n: bestN }));
-        applied.push({ sport, from: prevVal, to: bestT, uplift: +uplift.toFixed(2), n: bestN });
-        log('INFO', 'THRESHOLD-AUTO', `${sport}.ev_min ${prevVal} → ${bestT} (uplift +${uplift.toFixed(1)}pp n=${bestN})`);
+          .run(sport, prevVal, bestT, `auto_uplift_${upliftTrain.toFixed(1)}pp_holdout_${holdoutInfo.uplift ?? 'na'}pp`, JSON.stringify({ baseRoi: +baseTrain.roi.toFixed(2), newRoi: +bestRoi.toFixed(2), n: bestN, holdout: holdoutInfo }));
+        applied.push({ sport, from: prevVal, to: bestT, uplift: +upliftTrain.toFixed(2), n: bestN, holdout: holdoutInfo });
+        log('INFO', 'THRESHOLD-AUTO', `${sport}.ev_min ${prevVal} → ${bestT} (train uplift +${upliftTrain.toFixed(1)}pp n=${bestN} | holdout uplift ${holdoutInfo.uplift != null ? '+'+holdoutInfo.uplift+'pp n='+holdoutInfo.n : 'disabled'})`);
       }
-      sendJson(res, { ok: true, applied, skipped, guardrails: { minUplift, minN, maxDelta, cooldownH } });
+      sendJson(res, { ok: true, applied, skipped, guardrails: { minUplift, minN, maxDelta, cooldownH, holdoutDays, holdoutTolerance, holdoutMinN, holdoutDisabled } });
     } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
     return;
   }
