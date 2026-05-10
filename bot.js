@@ -20585,6 +20585,9 @@ async function runAutoDarts() {
           if (!ml.pass) {
             analyzedDarts.set(key, { ts: now, tipSent: false });
             log('INFO', 'AUTO-DARTS', `Sem edge: ${match.team1} vs ${match.team2} | edge=${ml.score}pp factors=${ml.factorCount}`);
+            // 2026-05-10: log em counters pra observability cross-sport. Antes só
+            // log INFO — bot:rejection|sport=darts ficava zero, dificulta diagnóstico.
+            logRejection('darts', `${match.team1} vs ${match.team2}`, 'prefilter_no_edge', { edgePp: +ml.score.toFixed(2), factorCount: ml.factorCount });
             continue;
           }
 
@@ -20624,6 +20627,7 @@ async function runAutoDarts() {
             if (pickDiff <= -2) {
               analyzedDarts.set(key, { ts: now, tipSent: false });
               log('INFO', 'AUTO-DARTS', `Live guard: ${pickTeam} perdendo ${liveScore.setsHome}-${liveScore.setsAway} em sets — tip rejeitada`);
+              logRejection('darts', `${match.team1} vs ${match.team2}`, 'live_set_deficit', { pickDiff, setsHome: liveScore.setsHome, setsAway: liveScore.setsAway });
               continue;
             }
           }
@@ -20632,12 +20636,14 @@ async function runAutoDarts() {
           const MIN_EV_DARTS = parseFloat(process.env.DARTS_MIN_EV || String(getEvThreshold('darts')));
           if (evPct < MIN_EV_DARTS) {
             analyzedDarts.set(key, { ts: now, tipSent: false });
+            logRejection('darts', `${match.team1} vs ${match.team2}`, 'ev_below_min', { evPct: +evPct.toFixed(2), minEv: MIN_EV_DARTS });
             log('INFO', 'AUTO-DARTS', `EV baixo (${evPct.toFixed(1)}% < ${MIN_EV_DARTS}%): ${match.team1} vs ${match.team2}`);
             continue;
           }
           if (ml.factorCount === 1 && evPct < 8) {
             analyzedDarts.set(key, { ts: now, tipSent: false });
             log('INFO', 'AUTO-DARTS', `BAIXA confiança (1 fator, EV ${evPct.toFixed(1)}%<8%): ${match.team1} vs ${match.team2}`);
+            logRejection('darts', `${match.team1} vs ${match.team2}`, 'low_conf_single_factor', { evPct: +evPct.toFixed(2), factorCount: ml.factorCount });
             continue;
           }
 
