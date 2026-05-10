@@ -21368,9 +21368,17 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   }
 
   // Background tasks - Agora tudo é unificado via runAutoAnalysis
-  // Cadência adaptativa: live→6min, iminente<30min→6min, 30min-2h→6min,
-  // 2-6h→12min, 6-12h→18min, sem nada→24min (cap). Safety: match <30min sempre força rápido.
-  const AUTO_BASE_MS = 6 * 60 * 1000;
+  // Cadência adaptativa: live→base, iminente<30min→base, 30min-2h→base,
+  // 2-6h→2x, 6-12h→3x, sem nada→cap. Safety: match <30min sempre força rápido.
+  //
+  // 2026-05-10: AUTO_BASE_MIN env-tunável (era hardcoded 6min). Ciclo
+  // runAutoAnalysis estava levando ~7min (tennis 365s + mma 161s + football
+  // 78s sequencial dentro de allSettled), mas cron firava a cada 6min →
+  // mutex collision constante (chain B sempre achava lock segurado por
+  // chain A). Sports inside runAutoAnalysis (lol/dota/football/tennis/mma)
+  // só recebiam heartbeat 1× por boot. Bump default 6→10min cobre cycle
+  // average + buffer, dando tempo do mutex limpar antes do próximo trigger.
+  const AUTO_BASE_MS = (parseInt(process.env.AUTO_BASE_MIN || '10', 10) || 10) * 60 * 1000;
   const AUTO_CAP_MS = Math.max(AUTO_BASE_MS, parseInt(process.env.AUTO_MAX_IDLE_MIN || '24', 10) * 60 * 1000);
   setTimeout(() => runAutoAnalysis().catch(e => log('ERROR', 'AUTO', e.message)), 15 * 1000); // 1ª análise 15s após boot
   (function scheduleAutoAnalysis() {
