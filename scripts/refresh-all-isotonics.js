@@ -133,6 +133,10 @@ run('Fit LoL isotonic (blend)', 'node scripts/fit-lol-model-isotonic.js');
 run('Fit tennis isotonic', 'node scripts/fit-tennis-model-isotonic.js');
 run('Fit Dota isotonic', 'node scripts/fit-esports-isotonic.js --game=dota2');
 run('Fit CS2 isotonic', 'node scripts/fit-esports-isotonic.js --game=cs2');
+// 2026-05-10: Valorant isotonic adicionado. Isotonic file estava stale 22d
+// (último refit 2026-04-18). Symptom: 18 ev_sanity rejections com avg_ev 85%
+// (modelo overconfident sem recalibração).
+run('Fit Valorant isotonic', 'node scripts/fit-esports-isotonic.js --game=valorant');
 // Tennis Markov MT calib (handicapGames + totalGames). Pula se sample
 // não cresceu ≥30 settled desde o fit anterior — evita re-fits sobre
 // ruído incremental. ECE regression guard interno aborta se calib piora.
