@@ -5410,7 +5410,11 @@ function _getMtPermanentDisable() {
   // Scanners emitem `total` (lowercase) mas default tinha `cs|TOTAL|under` —
   // perm.has nunca casava (MT_PERMANENT_DISABLE_LIST default era effectively dead).
   // Caller (`describeMtGateSkip`, MT scanners) também devem fazer lowercase no probe.
-  const raw = String(process.env.MT_PERMANENT_DISABLE_LIST ?? 'tennis|totalGames|over,tennis|totalGames|under,lol|total,cs|total|under').trim();
+  // 2026-05-10: lol|total_kills_map2|under default — audit shadow 30d ROI -100%
+  // n=5 (0/5 hit). Map2 UNDER kills é leak claro (Poisson under-prices undersshoot
+  // de Mapa 2 onde dinâmica costuma escalar). MAP1+MAP2 OVER ficam OK (n=24
+  // combined ROI +13.5%); só side UNDER do MAP2 bloqueado.
+  const raw = String(process.env.MT_PERMANENT_DISABLE_LIST ?? 'tennis|totalGames|over,tennis|totalGames|under,lol|total,cs|total|under,lol|total_kills_map2|under').trim();
   _MT_PERMANENT_DISABLE = new Set();
   for (const entry of raw.split(',').map(s => s.trim().toLowerCase()).filter(Boolean)) {
     _MT_PERMANENT_DISABLE.add(entry);
@@ -8941,9 +8945,14 @@ async function autoAnalyzeMatch(token, match) {
               });
               if (predict) {
                 // 2026-05-01: bump 5→12 após audit ROI -32.6% n=7 EWC TOTAL_KILLS_MAP2
-                // avgCLV -16.9% (Pinnacle drift constante contra). Modelo Poisson kills
-                // overshoots overs em mapa 2; threshold mais alto seleciona edges reais.
-                const minEvKills = parseFloat(process.env.LOL_KILLS_SCAN_MIN_EV ?? '12');
+                // avgCLV -16.9% (Pinnacle drift constante contra).
+                // 2026-05-10: rollback 12→8. Audit n=7 foi over-reaction:
+                //   - Bump zerou volume real: 13/17/10 tips/dia (28-30/04) → 0 (02-10/05)
+                //   - 30d agora mostra ROI real KILLS +7.7% n=42 hit 65.5%
+                //   - Leak real é só map2/under (n=5 ROI -100%) — bloqueado via
+                //     MT_PERMANENT_DISABLE_LIST default. map1+map2 over OK.
+                // Threshold 8 captura edges marginais 8-12% que sustentam ROI sample atual.
+                const minEvKills = parseFloat(process.env.LOL_KILLS_SCAN_MIN_EV ?? '8');
                 const bestOf = lolModel.bestOf || 3;
                 // Bo3 → mapas 1,2,3. Bo5 → 1,2,3,4,5. Skip mapa já finalizado.
                 const startMap = (Number.isFinite(match.score1) && Number.isFinite(match.score2))
