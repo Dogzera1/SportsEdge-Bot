@@ -17008,13 +17008,27 @@ async function pollTennis(runOnce = false) {
                         if (m === 'handicapgames') return minEvHg;
                         return minEvGate;
                       };
+                      // 2026-05-10: pModel gate per-market. Default 0.55 herda gate ML
+                      // que faz sentido pra favoritos, mas filtra handicap underdogs
+                      // legítimos (ex: ATP Rome R3 Matteo Arnaldi vs Jodar — HG -6.5
+                      // EV=33% pModel=35.4% perdido). HG default 0.40 captura underdogs
+                      // com EV alto sem mexer TG (que segue leak-prone, mantém 0.55).
+                      // Override hierarchy: <MARKET>_MIN_PMODEL > MARKET_TIP_MIN_PMODEL.
+                      const minPmTg = parseFloat(process.env.TENNIS_TG_MIN_PMODEL ?? String(minPmGate));
+                      const minPmHg = parseFloat(process.env.TENNIS_HG_MIN_PMODEL ?? '0.40');
+                      const pmGateForMarket = (market) => {
+                        const m = String(market || '').toLowerCase();
+                        if (m === 'totalgames') return minPmTg;
+                        if (m === 'handicapgames') return minPmHg;
+                        return minPmGate;
+                      };
                       // 2026-04-27: promove tips elegíveis com 1 por (market_type) por match.
                       // Mesmo mercado mesmo match = 1 tip (lados opostos, ex: HG home + HG away
                       // são correlacionados negativamente — 1 vence só com margin exato).
                       // Mercados DIFERENTES no mesmo match (HG + TG + TB) coexistem.
                       const eligiblesRaw = found.filter(t =>
                         Number.isFinite(t.ev) && Number.isFinite(t.pModel) &&
-                        t.ev >= evGateForMarket(t.market) && t.pModel >= minPmGate
+                        t.ev >= evGateForMarket(t.market) && t.pModel >= pmGateForMarket(t.market)
                       );
                       const _byMarket = new Map();
                       for (const t of eligiblesRaw) {
