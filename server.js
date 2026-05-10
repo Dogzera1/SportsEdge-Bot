@@ -3372,6 +3372,58 @@ async function getPinnacleMmaMatches() {
   }
 }
 
+// ── Pinnacle — Darts (sportId=10) ──
+// 2026-05-09: wirado como fallback primary apos Sofascore retornar 0 events
+// pra darts global (proxy /healthz 200 mas /schedule/darts/{date} 404 todos os
+// dias). Pinnacle cobre European Darts Tour, Premier League, World Matchplay
+// etc — overlap com Sofascore mas funcionando standalone agora.
+// Filtra prop bets (sets/legs/180s/checkout); só H2H moneyline.
+let _dartsPinnacleCache = { data: [], ts: 0 };
+const DARTS_PINNACLE_TTL_IDLE = 10 * 60 * 1000;  // 10min idle
+const DARTS_PINNACLE_TTL_LIVE = 90 * 1000;       // 1.5min live (matches são curtos)
+
+async function getPinnacleDartsMatches() {
+  if (process.env.PINNACLE_DARTS === 'false') return [];
+  const hadLive = _dartsPinnacleCache.data.some(m => m.status === 'live');
+  const ttl = hadLive ? DARTS_PINNACLE_TTL_LIVE : DARTS_PINNACLE_TTL_IDLE;
+  if (_dartsPinnacleCache.data.length && (Date.now() - _dartsPinnacleCache.ts) < ttl) {
+    return _dartsPinnacleCache.data;
+  }
+  try {
+    const rows = await pinnacle.fetchSportMatchOdds(10, (m) => {
+      const lg = String(m?.league?.name || '');
+      const p1 = String(m?.participants?.[0]?.name || '');
+      const p2 = String(m?.participants?.[1]?.name || '');
+      // Filtra prop/specials (sets, legs, 180s, checkout, max-checkout, total-180s)
+      if (/\((sets|legs|180s?|checkout|max\s*checkout|total\s*180|highest)\)/i.test(p1 + p2)) return false;
+      // Aceita PDC (Premier League, European Tour, Pro Tour, World Matchplay, Worlds, Grand Slam)
+      // + WDF + qualquer torneio com 'darts' no nome
+      if (!/\b(pdc|wdf|premier league|european darts|pro tour|world matchplay|world darts|grand slam|world cup|matchplay|championship|masters|darts)\b/i.test(lg)) return false;
+      return true;
+    });
+    const _fetchedAt = Date.now();
+    const matches = rows.map(r => ({
+      id: `pin_darts_${r.id}`,
+      team1: r.team1, team2: r.team2,
+      league: r.league,
+      sport_key: 'darts',
+      game: 'darts',
+      status: r.status === 'live' ? 'live' : 'upcoming',
+      time: r.startTime,
+      odds: { t1: String(r.oddsT1), t2: String(r.oddsT2), bookmaker: 'Pinnacle', _fetchedAt },
+      _source: 'pinnacle',
+    }));
+    _dartsPinnacleCache = { data: matches, ts: Date.now() };
+    log('INFO', 'ODDS', `Pinnacle Darts: ${matches.length} partidas cacheadas`);
+    try { require('./lib/feed-heartbeat').markFeedSuccess('pinnacle', 'darts', matches.length); } catch (_) {}
+    return matches;
+  } catch (e) {
+    log('ERROR', 'ODDS', `Pinnacle Darts: ${e.message}`);
+    try { require('./lib/feed-heartbeat').markFeedFailure('pinnacle', 'darts', e.message); } catch (_) {}
+    return [];
+  }
+}
+
 // ── Pinnacle — Soccer (sportId=29) ──
 // Filtro de ligas: top-tier + Brasileirão + 2nd-tier europeias maduras (volume sob controle).
 // Pinnacle soccer é alto volume (200+ jogos/dia globais); filtro evita estourar quota.
@@ -29934,13 +29986,24 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
   // ── Darts: lista de eventos via Sofascore (fonte única para odds + stats) ──
   if (p === '/darts-matches') {
     try {
-      const events = await sofascoreDarts.listLiveAndUpcoming().catch(e => {
-        log('WARN', 'DARTS', `listLiveAndUpcoming falhou: ${e.message}`);
-        return [];
-      });
+      // 2026-05-09: dual-source (Sofascore + Pinnacle). Sofascore historicamente
+      // primary mas /schedule/darts/* retorna 404 em todos os dias futuros (cobertura
+      // limitada). Pinnacle (sportId=10) tem European Darts Tour, Premier League etc
+      // ativos. Dedup via normalize team1+team2 (ordem agnostica) + tolerancia 1h
+      // no startTime. Sofa wins se ambos casarem (tem playerId pra recent stats).
+      const [sofaEvents, pinMatches] = await Promise.all([
+        sofascoreDarts.listLiveAndUpcoming().catch(e => {
+          log('WARN', 'DARTS', `listLiveAndUpcoming falhou: ${e.message}`);
+          return [];
+        }),
+        getPinnacleDartsMatches().catch(e => {
+          log('WARN', 'DARTS', `Pinnacle darts falhou: ${e.message}`);
+          return [];
+        }),
+      ]);
       const matches = [];
       let noOdds = 0;
-      for (const ev of events) {
+      for (const ev of sofaEvents) {
         const odds = await sofascoreDarts.getOdds(ev.id).catch(() => null);
         if (!odds?.t1 || !odds?.t2) { noOdds++; continue; }
         const status = ev?.status?.type === 'inprogress' ? 'live' : 'upcoming';
@@ -29955,15 +30018,41 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
           playerId2: ev?.awayTeam?.id,
           league: ev?.tournament?.uniqueTournament?.name || ev?.tournament?.name || 'Darts',
           time: ev?.startTimestamp ? new Date(ev.startTimestamp * 1000).toISOString() : null,
-          odds
+          odds,
+          _source: 'sofascore',
         });
+      }
+      // Dedup Pinnacle vs Sofascore: normaliza nome (lowercase, alfanumerico) + tolerancia
+      // 1h no startTime. Skip se ja existe entrada Sofa pro mesmo matchup (Sofa wins —
+      // tem playerId que alimenta sofa-darts.getPlayerRecentAvg / getHeadToHead).
+      const _normTeam = s => String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]/g, '');
+      const _matchKey = m => {
+        const a = _normTeam(m.team1), b = _normTeam(m.team2);
+        return a < b ? `${a}|${b}` : `${b}|${a}`;
+      };
+      const existingKeys = new Set(matches.map(_matchKey));
+      let pinAdded = 0, pinDeduped = 0;
+      for (const pm of pinMatches) {
+        const key = _matchKey(pm);
+        if (existingKeys.has(key)) { pinDeduped++; continue; }
+        // Match dedup adicional por startTime tolerance se nomes nao bateram exato (typo etc)
+        const pmTs = pm.time ? new Date(pm.time).getTime() : 0;
+        const conflict = pmTs && matches.some(m => {
+          const mTs = m.time ? new Date(m.time).getTime() : 0;
+          return mTs && Math.abs(mTs - pmTs) < 60 * 60 * 1000
+            && (_normTeam(m.team1).includes(_normTeam(pm.team1)) || _normTeam(m.team2).includes(_normTeam(pm.team1)));
+        });
+        if (conflict) { pinDeduped++; continue; }
+        matches.push(pm);
+        existingKeys.add(key);
+        pinAdded++;
       }
       matches.sort((a, b) => {
         if (a.status === 'live' && b.status !== 'live') return -1;
         if (b.status === 'live' && a.status !== 'live') return 1;
         return new Date(a.time || 0).getTime() - new Date(b.time || 0).getTime();
       });
-      log('INFO', 'DARTS', `/darts-matches: ${matches.length} partidas com odds (descartados sem odds: ${noOdds})`);
+      log('INFO', 'DARTS', `/darts-matches: ${matches.length} partidas (sofa=${matches.length - pinAdded - 0} no_odds=${noOdds} | pin=+${pinAdded} dedup=${pinDeduped})`);
       sendJson(res, matches);
     } catch (e) {
       log('ERROR', 'DARTS', e.message);
