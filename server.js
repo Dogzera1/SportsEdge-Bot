@@ -7098,7 +7098,19 @@ const server = http.createServer(async (req, res) => {
           AND COALESCE(archived, 0) = 0
         GROUP BY sport
       `).all();
+      // 2026-05-10: shadow tips recentes (<6h) indicam ML_AUTO_SHADOW ativo —
+      // sistema gera tips mas as roteia pra shadow (study DB) em vez de real.
+      // Falso-positivo eliminado: se shadow recente, é shadow mode esperado.
+      const shadowRows = db.prepare(`
+        SELECT sport, MAX(sent_at) AS last_shadow
+        FROM tips
+        WHERE COALESCE(is_shadow, 0) = 1
+          AND COALESCE(archived, 0) = 0
+        GROUP BY sport
+      `).all();
+      const lastShadowBySport = new Map(shadowRows.map(r => [r.sport, r.last_shadow]));
       const STALE_HOURS = parseInt(process.env.HEALTH_LAST_TIP_STALE_HOURS || '24', 10);
+      const SHADOW_FRESH_HOURS = parseInt(process.env.HEALTH_SHADOW_FRESH_HOURS || '6', 10);
       const _isMlDisabled = (sp) => {
         const k = String(sp || '').toUpperCase();
         const v = process.env[`${k}_ML_DISABLED`];
@@ -7121,6 +7133,14 @@ const server = http.createServer(async (req, res) => {
           // Skipa alert se ML disabled + MT não promovido (silêncio intencional).
           // Se MT promovido mas ainda silent, mantém alert (MT pipeline pode estar travado).
           if (_isMlDisabled(r.sport) && !_hasMtPromoted(r.sport)) continue;
+          // 2026-05-10: skip se shadow tip recente — sport está em shadow mode,
+          // não em silêncio bug. Threshold 6h: shadow mais antigo que isso pode
+          // indicar scanner travado.
+          const lastShadow = lastShadowBySport.get(r.sport);
+          if (lastShadow) {
+            const shadowAgeH = (Date.now() - new Date(lastShadow + 'Z').getTime()) / 3600000;
+            if (Number.isFinite(shadowAgeH) && shadowAgeH < SHADOW_FRESH_HOURS) continue;
+          }
           alerts.push({
             id: `sport_silent_${r.sport}`,
             severity: 'warning',
