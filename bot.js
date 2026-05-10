@@ -20753,6 +20753,48 @@ async function runAutoDarts() {
           }
 
           const ml = dartsPreFilter(match, enrich);
+
+          // ── MT scanner (handicap_sets + total_sets) ──
+          // 2026-05-10: shadow puro fase 1. Modelo Normal CDF a partir de
+          // pModel ML + bestOf (extraído de match.format ou default 7). Sem
+          // promote real (DARTS_MT_SHADOW_ONLY default true).
+          if (process.env.DARTS_MT_SCAN !== 'false' && ml.modelP1 > 0) {
+            try {
+              const _dartsMtMarkets = await serverGet(
+                `/odds-markets?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}&period=0&game=darts`
+              ).catch(() => null);
+              if (_dartsMtMarkets && ((_dartsMtMarkets.handicaps?.length || 0) + (_dartsMtMarkets.totals?.length || 0)) > 0) {
+                const { scanDartsMarkets } = require('./lib/darts-mt-scanner');
+                const _dartsBoMatch = String(match.format || '').match(/Bo(\d+)|best of (\d+)/i);
+                const _dartsBo = _dartsBoMatch ? parseInt(_dartsBoMatch[1] || _dartsBoMatch[2], 10) : 7;
+                const _dartsMtTips = scanDartsMarkets({
+                  pinMarkets: _dartsMtMarkets,
+                  pModelT1: ml.modelP1,
+                  bestOf: _dartsBo,
+                  minEv: parseFloat(process.env.DARTS_MT_MIN_EV ?? '5'),
+                  maxEv: parseFloat(process.env.DARTS_MT_MAX_EV ?? '30'),
+                  minPmodel: parseFloat(process.env.DARTS_MT_MIN_PMODEL ?? '0.45'),
+                  minOdd: parseFloat(process.env.DARTS_MT_MIN_ODD ?? '1.40'),
+                  maxOdd: parseFloat(process.env.DARTS_MT_MAX_ODD ?? '4.50'),
+                });
+                if (_dartsMtTips.length) {
+                  log('INFO', 'DARTS-MT-SCAN',
+                    `${match.team1} vs ${match.team2} [Bo${_dartsBo}]: ${_dartsMtTips.length} mercado(s) EV >=${parseFloat(process.env.DARTS_MT_MIN_EV ?? '5')}% (pModelT1=${(ml.modelP1*100).toFixed(1)}%)`);
+                  for (const t of _dartsMtTips.slice(0, 3)) {
+                    log('INFO', 'DARTS-MT-SCAN',
+                      `  • ${t.label} @ ${t.odd} | pModel=${(t.pModel*100).toFixed(1)}% EV=${t.ev}%`);
+                  }
+                  try {
+                    const { logShadowTip } = require('./lib/market-tips-shadow');
+                    for (const t of _dartsMtTips) {
+                      logShadowTip(db, { sport: 'darts', match, bestOf: _dartsBo, tip: t, isLive: isLiveDarts });
+                    }
+                  } catch (e) { log('WARN', 'MT-SHADOW', `darts logShadowTip: ${e.message}`); }
+                }
+              }
+            } catch (e) { log('WARN', 'DARTS-MT-SCAN', `${match.team1} vs ${match.team2}: ${e.message}`); }
+          }
+
           if (!ml.pass) {
             analyzedDarts.set(key, { ts: now, tipSent: false });
             log('INFO', 'AUTO-DARTS', `Sem edge: ${match.team1} vs ${match.team2} | edge=${ml.score}pp factors=${ml.factorCount}`);
@@ -21004,6 +21046,47 @@ async function runAutoSnooker() {
           }
 
           const ml = snookerPreFilter(match, enrich);
+
+          // ── MT scanner (handicap_frames + total_frames) ──
+          // 2026-05-10: shadow puro fase 1. Modelo Normal CDF a partir de
+          // pModel ML + bestOf. Sem promote real.
+          if (process.env.SNOOKER_MT_SCAN !== 'false' && ml.modelP1 > 0) {
+            try {
+              const _snkMtMarkets = await serverGet(
+                `/odds-markets?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}&period=0&game=snooker`
+              ).catch(() => null);
+              if (_snkMtMarkets && ((_snkMtMarkets.handicaps?.length || 0) + (_snkMtMarkets.totals?.length || 0)) > 0) {
+                const { scanSnookerMarkets } = require('./lib/snooker-mt-scanner');
+                const _snkBoMatch = String(match.format || '').match(/Bo(\d+)|best of (\d+)/i);
+                const _snkBo = _snkBoMatch ? parseInt(_snkBoMatch[1] || _snkBoMatch[2], 10) : 9;
+                const _snkMtTips = scanSnookerMarkets({
+                  pinMarkets: _snkMtMarkets,
+                  pModelT1: ml.modelP1,
+                  bestOf: _snkBo,
+                  minEv: parseFloat(process.env.SNOOKER_MT_MIN_EV ?? '5'),
+                  maxEv: parseFloat(process.env.SNOOKER_MT_MAX_EV ?? '30'),
+                  minPmodel: parseFloat(process.env.SNOOKER_MT_MIN_PMODEL ?? '0.45'),
+                  minOdd: parseFloat(process.env.SNOOKER_MT_MIN_ODD ?? '1.40'),
+                  maxOdd: parseFloat(process.env.SNOOKER_MT_MAX_ODD ?? '4.50'),
+                });
+                if (_snkMtTips.length) {
+                  log('INFO', 'SNOOKER-MT-SCAN',
+                    `${match.team1} vs ${match.team2} [Bo${_snkBo}]: ${_snkMtTips.length} mercado(s) EV >=${parseFloat(process.env.SNOOKER_MT_MIN_EV ?? '5')}% (pModelT1=${(ml.modelP1*100).toFixed(1)}%)`);
+                  for (const t of _snkMtTips.slice(0, 3)) {
+                    log('INFO', 'SNOOKER-MT-SCAN',
+                      `  • ${t.label} @ ${t.odd} | pModel=${(t.pModel*100).toFixed(1)}% EV=${t.ev}%`);
+                  }
+                  try {
+                    const { logShadowTip } = require('./lib/market-tips-shadow');
+                    for (const t of _snkMtTips) {
+                      logShadowTip(db, { sport: 'snooker', match, bestOf: _snkBo, tip: t, isLive: isLiveSnooker });
+                    }
+                  } catch (e) { log('WARN', 'MT-SHADOW', `snooker logShadowTip: ${e.message}`); }
+                }
+              }
+            } catch (e) { log('WARN', 'SNOOKER-MT-SCAN', `${match.team1} vs ${match.team2}: ${e.message}`); }
+          }
+
           if (!ml.pass) {
             analyzedSnooker.set(key, { ts: now, tipSent: false });
             log('INFO', 'AUTO-SNOOKER', `Sem edge: ${match.team1} vs ${match.team2} | edge=${ml.score}pp factors=${ml.factorCount}`);
