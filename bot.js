@@ -185,7 +185,15 @@ const { fetchMatchNews } = require('./lib/news');
 const { tennisPairMatchesPlayers } = require('./lib/tennis-match');
 
 const SERVER = '127.0.0.1';
-const PORT = parseInt(process.env.SERVER_PORT) || parseInt(process.env.PORT) || 8080;
+const PORT = (() => {
+  const sp = parseInt(process.env.SERVER_PORT, 10);
+  const p = parseInt(process.env.PORT, 10);
+  const result = Number.isFinite(sp) ? sp : Number.isFinite(p) ? p : 8080;
+  if (!Number.isFinite(result) || result < 1024 || result > 65535) {
+    throw new Error(`Invalid PORT: SERVER_PORT=${process.env.SERVER_PORT} PORT=${process.env.PORT} resolved=${result}`);
+  }
+  return result;
+})();
 const ADMIN_IDS = new Set((process.env.ADMIN_USER_IDS || '').split(',').filter(Boolean));
 const DEEPSEEK_KEY = process.env.DEEPSEEK_API_KEY;
 const _AI_DISABLED = /^(1|true|yes)$/i.test(String(process.env.AI_DISABLED || ''));
@@ -1526,6 +1534,12 @@ setInterval(() => {
     const heapMb = Math.round(m.heapUsed / 1048576);
     const rssMb = Math.round(m.rss / 1048576);
     const isCrit = heapMb >= _BOT_MEM_HEAP_CRIT_MB || rssMb >= _BOT_MEM_RSS_CRIT_MB;
+    
+    // 2026-05-10: Proactive GC when approaching warn threshold (not just at crit)
+    const RSS_PROACTIVE_GC_MB = Math.max(250, parseInt(process.env.BOT_MEM_RSS_PROACTIVE_GC_MB || '300', 10));
+    if (rssMb >= RSS_PROACTIVE_GC_MB && rssMb < _BOT_MEM_RSS_CRIT_MB) {
+      try { if (global.gc) global.gc(); } catch (_) {}
+    }
     const isWarn = heapMb >= _BOT_MEM_HEAP_WARN_MB || rssMb >= _BOT_MEM_RSS_WARN_MB;
     // Set/clear global flag — checado por runAutoAnalysis e outros crons heavy.
     if (isCrit) {
@@ -2692,6 +2706,12 @@ async function runAutoAnalysis() {
       if (_hasLiveLol) _livePhaseEnter('lol');
 
       for (const match of allLive) {
+        // 2026-05-10: Memory guard — abort if RSS critical
+        if (isMemCritical()) {
+          log('WARN', 'AUTO-LOL', `mem crit — aborting LoL live analysis (RSS critical)`);
+          break;
+        }
+        
         // Ao vivo: dedup por mapa atual (uma tip por mapa, não por série inteira).
         // matchId 'ps_*' não resolve em getEventDetails Riot (Path 1 do /live-gameids
         // espera Riot numeric ID). Passa team1/team2 também pra ativar Path 2 (fallback
@@ -22162,8 +22182,8 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
       _hb('ok');
     } catch (e) { log('ERROR', 'AUTONOMY-DIGEST', e.message); _hbErr('error', e.message); }
   }
-  setInterval(() => runAutonomyDigest(), 15 * 60 * 1000);
-  setTimeout(() => runAutonomyDigest(), 35 * 60 * 1000);
+  setInterval(_wrapCron('autonomy_digest', runAutonomyDigest), 15 * 60 * 1000);
+  setTimeout(_wrapCron('autonomy_digest', runAutonomyDigest), 35 * 60 * 1000);
 
   // Nightly Retrain: roda scripts/refresh-all-isotonics.js --all diariamente na
   // janela NIGHTLY_RETRAIN_HOUR_UTC (default 3). Tick de 15min verifica se é a hora
@@ -23181,36 +23201,36 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   // /admin/mt-disable HTTP endpoint (escreve em DB, mas Map é in-memory por
   // processo — bot.js precisa reler).
   setInterval(() => { try { _loadMarketTipsRuntimeState(); } catch (_) {} }, 5 * 60 * 1000);
-  setInterval(() => runMarketTipsLeakGuard().catch(e => log('ERROR', 'MT-GUARD', e.message)), 60 * 60 * 1000);
-  setTimeout(() => runMarketTipsLeakGuard().catch(() => {}), 15 * 60 * 1000); // 15min pós-boot
+  setInterval(_wrapCron('mt_leak_guard', runMarketTipsLeakGuard), 60 * 60 * 1000);
+  setTimeout(_wrapCron('mt_leak_guard', runMarketTipsLeakGuard), 15 * 60 * 1000); // 15min pós-boot
   // ROI-based side guard (complementa CLV guard — operate em market+side granular).
-  setInterval(() => runMarketTipsRoiGuardSided().catch(e => log('ERROR', 'MT-ROI-GUARD', e.message)), 60 * 60 * 1000);
-  setTimeout(() => runMarketTipsRoiGuardSided().catch(() => {}), 20 * 60 * 1000); // 20min pós-boot (offset do CLV)
+  setInterval(_wrapCron('mt_roi_guard_sided', runMarketTipsRoiGuardSided), 60 * 60 * 1000);
+  setTimeout(_wrapCron('mt_roi_guard_sided', runMarketTipsRoiGuardSided), 20 * 60 * 1000); // 20min pós-boot (offset do CLV)
   // Digest: checa 1x/hora se é MT_DIGEST_HOUR (default 8am) e envia no primeiro tick daquele dia.
-  setInterval(() => runMarketTipsDigest().catch(e => log('ERROR', 'MT-DIGEST', e.message)), 60 * 60 * 1000);
-  setTimeout(() => runMarketTipsDigest().catch(() => {}), 5 * 60 * 1000); // 5min pós-boot (caso já seja a hora)
+  setInterval(_wrapCron('mt_digest', runMarketTipsDigest), 60 * 60 * 1000);
+  setTimeout(_wrapCron('mt_digest', runMarketTipsDigest), 5 * 60 * 1000); // 5min pós-boot (caso já seja a hora)
 
   // ML Shadow Digest — mesmo padrão. Hora separada (SHADOW_DIGEST_HOUR, default 8).
   // Cobre tips regulares com is_shadow=1 (sport experimental antes de graduate).
-  setInterval(() => runMlShadowDigest().catch(e => log('ERROR', 'SHADOW-DIGEST', e.message)), 60 * 60 * 1000);
-  setTimeout(() => runMlShadowDigest().catch(() => {}), 6 * 60 * 1000); // 6min pós-boot
+  setInterval(_wrapCron('ml_shadow_digest', runMlShadowDigest), 60 * 60 * 1000);
+  setTimeout(_wrapCron('ml_shadow_digest', runMlShadowDigest), 6 * 60 * 1000); // 6min pós-boot
 
   // ── LoL kills model calibration check ──
   // Roda 1x/dia (3 AM local default). Calcula Brier/ECE/MAE últimas 14d em
   // market_tips_shadow → persist em gates_runtime_state. Auto-recommend
   // disable se brier > 0.30 OU mae > 0.10 com n >= 30.
   // Opt-out: KILLS_CALIB_AUTO=false.
-  setInterval(() => runKillsCalibrationCheck().catch(e => log('ERROR', 'KILLS-CALIB', e.message)), 60 * 60 * 1000);
-  setTimeout(() => runKillsCalibrationCheck().catch(() => {}), 25 * 60 * 1000); // 25min pós-boot
+  setInterval(_wrapCron('kills_calib_check', runKillsCalibrationCheck), 60 * 60 * 1000);
+  setTimeout(_wrapCron('kills_calib_check', runKillsCalibrationCheck), 25 * 60 * 1000); // 25min pós-boot
 
   // ── LoL cross-source kill validation (Frente 5) ──
   // Roda 1x/dia (4 AM default). Compara kills entre gol.gg + OE → flag
   // matches com divergência. Opt-out: LOL_XCHECK_AUTO=false.
-  setInterval(() => runLolCrossCheckDaily().catch(e => log('ERROR', 'LOL-XCHECK', e.message)), 60 * 60 * 1000);
-  setTimeout(() => runLolCrossCheckDaily().catch(() => {}), 35 * 60 * 1000); // 35min pós-boot
+  setInterval(_wrapCron('lol_xcheck_daily', runLolCrossCheckDaily), 60 * 60 * 1000);
+  setTimeout(_wrapCron('lol_xcheck_daily', runLolCrossCheckDaily), 35 * 60 * 1000); // 35min pós-boot
   // Weekly pipeline digest (2ª feira 9h)
-  setInterval(() => runWeeklyPipelineDigest().catch(e => log('ERROR', 'WEEKLY-DIGEST', e.message)), 60 * 60 * 1000);
-  setTimeout(() => runWeeklyPipelineDigest().catch(() => {}), 10 * 60 * 1000);
+  setInterval(_wrapCron('weekly_pipeline_digest', runWeeklyPipelineDigest), 60 * 60 * 1000);
+  setTimeout(_wrapCron('weekly_pipeline_digest', runWeeklyPipelineDigest), 10 * 60 * 1000);
 
   // Gate optimizer weekly (domingo 10h local). Roda runGateOptimizer 90d e DM admin
   // com sports onde ótimo ≠ atual por ≥2pp ROI e n≥20. Só sugere — admin decide aplicar.

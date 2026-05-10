@@ -36,7 +36,13 @@ const { fetchGridEnrichForMatch } = require('./lib/grid');
 // + revisar exposição vuln.
 
 // Railway sets $PORT automatically; start.js bridges it to SERVER_PORT
-const PORT = parseInt(process.env.PORT || process.env.SERVER_PORT) || 3000;
+const PORT = (() => {
+  const p = parseInt(process.env.PORT || process.env.SERVER_PORT, 10) || 3000;
+  if (!Number.isFinite(p) || p < 1024 || p > 65535) {
+    throw new Error(`Invalid PORT from env: got ${p}`);
+  }
+  return p;
+})();
 const DEEPSEEK_KEY = process.env.DEEPSEEK_API_KEY || '';
 // Aceita múltiplos nomes de variável para a chave OddsPapi
 const ODDSPAPI_KEY = process.env.ODDS_API_KEY
@@ -31555,6 +31561,7 @@ server.keepAliveTimeout = parseInt(process.env.HTTP_KEEPALIVE_MS || '120000', 10
 server.headersTimeout = parseInt(process.env.HTTP_HEADERS_TIMEOUT_MS || '125000', 10) || 125000;
 server.requestTimeout = parseInt(process.env.HTTP_REQUEST_TIMEOUT_MS || '60000', 10) || 60000;
 
+server.maxConnections = 1000; // Explicit cap on concurrent connections
 server.listen(PORT, '0.0.0.0', () => {
   log('INFO', 'SERVER', `SportsEdge API em http://0.0.0.0:${PORT}`);
   log('INFO', 'SERVER', `Esportes: LoL (Riot API + LoLEsports)`);
@@ -31677,14 +31684,25 @@ server.listen(PORT, '0.0.0.0', () => {
     await fetchLoLOddsFromPinnacle();
   })().catch(e => log('ERROR', 'ODDS', e.message));
   const refreshMin = Math.max(15, parseInt(process.env.ODDSPAPI_REFRESH_MIN || '60', 10) || 60);
-  setInterval(_wrapServerCron('oddspapi_refresh', () => fetchEsportsOdds()), refreshMin * 60 * 1000); // Default 60 min (OddsPapi free tier: 250 req total)
+  let _oddsRefreshFailCount = 0;
+  setInterval(_wrapServerCron('oddspapi_refresh', async () => {
 
   // Pinnacle LoL refresh — independente do OddsPapi (sem quota, só rate limit soft)
   // Dois intervalos: refresh completo (pre-match, default 10min) + refresh rápido de live (default 2min)
   if (process.env.PINNACLE_LOL === 'true') {
     const pinRefreshMin = Math.max(5, parseInt(process.env.PINNACLE_LOL_REFRESH_MIN || '10', 10) || 10);
     const pinLiveMin = Math.max(1, parseInt(process.env.PINNACLE_LOL_LIVE_REFRESH_MIN || '2', 10) || 2);
-    setInterval(_wrapServerCron('pinnacle_lol_refresh', () => fetchLoLOddsFromPinnacle()), pinRefreshMin * 60 * 1000);
+    try {
+      await fetchEsportsOdds();
+      _oddsRefreshFailCount = 0; // Reset on success
+    } catch (e) {
+      _oddsRefreshFailCount++;
+      if (_oddsRefreshFailCount >= 3) {
+        log('WARN', 'ODDS-BREAKER', `OddsPapi failed ${_oddsRefreshFailCount}x — exponential backoff active`);
+        // Next refresh will happen, but at degraded state
+      }
+    }
+  }), refreshMin * 60 * 1000); // Default 60 min (OddsPapi free tier: 250 req total)
     // Refresh rápido apenas quando há matches live cacheados (odds live mudam rápido)
     setInterval(_wrapServerCron('pinnacle_lol_live_refresh', () => {
       const hasLive = Object.values(oddsCache).some(v => v?.source === 'pinnacle' && v?.isLive);

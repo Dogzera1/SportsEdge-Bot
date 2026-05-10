@@ -12,6 +12,7 @@ let _flushTimer = null;
 function scheduleIngestFlush() {
   if (_flushTimer) return;
   _flushTimer = setTimeout(flushIngest, 500);
+  _flushTimer.unref?.();
 }
 function flushIngest() {
   _flushTimer = null;
