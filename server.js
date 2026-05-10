@@ -12034,6 +12034,58 @@ setInterval(load, 60000);
     return;
   }
 
+  // ── /admin/re-propagate-mt: re-roda propagator pra shadow rows JÁ SETTLED
+  // mas que não tiveram tip real propagada (ex: bug histórico cs2/cs sport mismatch).
+  // GET dry-run, POST apply=1 aplica.
+  if (p === '/admin/re-propagate-mt' && (req.method === 'GET' || req.method === 'POST')) {
+    if (!requireAdmin(req, res)) return;
+    const sport = String(parsed.query.sport || '').toLowerCase().trim();
+    const daysRaw = parseInt(parsed.query.days, 10);
+    const days = Number.isFinite(daysRaw) ? Math.max(1, Math.min(60, daysRaw)) : 14;
+    const apply = String(parsed.query.apply || '').trim() === '1';
+    const sportClause = sport && /^[a-z0-9]+$/.test(sport) ? `AND sport = ?` : '';
+    const sportArgs = sportClause ? [sport] : [];
+    try {
+      // Settled shadows na janela
+      const shadows = db.prepare(`
+        SELECT id, sport, market, line, side, team1, team2, odd, stake_units,
+               result, profit_units, created_at, match_key
+        FROM market_tips_shadow
+        WHERE result IN ('win', 'loss', 'void', 'push')
+          AND created_at >= datetime('now', ?)
+          ${sportClause}
+        ORDER BY created_at DESC LIMIT 500
+      `).all(`-${days} days`, ...sportArgs);
+
+      const _propagateMtResultToTips = require('./lib/mt-result-propagator');
+      const summary = { total_settled_shadows: shadows.length, attempted: 0, propagated: 0, no_tip_match: 0, errors: 0, samples: [] };
+
+      if (apply) {
+        for (const s of shadows) {
+          summary.attempted++;
+          try {
+            const tipId = _propagateMtResultToTips(db, s, s.result, s.profit_units);
+            if (tipId) {
+              summary.propagated++;
+              if (summary.samples.length < 20) {
+                summary.samples.push({ shadow_id: s.id, tip_id: tipId, market: s.market, side: s.side, line: s.line, result: s.result, teams: `${s.team1} vs ${s.team2}` });
+              }
+            } else {
+              summary.no_tip_match++;
+            }
+          } catch (e) { summary.errors++; }
+        }
+      } else {
+        // Dry run: lista possíveis matches sem aplicar
+        summary.dry_run = true;
+        summary.note = 'POST com ?apply=1 pra aplicar. Propagator é idempotente — tips já settled não são re-tocadas.';
+      }
+
+      sendJson(res, { ok: true, sport, days, summary });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   // ── /admin/match-diagnostic: cruza tips + market_tips_shadow + match_results
   // por (game, query). Util pra investigar tips MT pending que não settling —
   // mostra se shadow row existe, se tá settled, e se match_results tem score
