@@ -779,6 +779,34 @@
     <div id="tipsTable"><div class="loading">Carregando</div></div>
   </div>
 
+  <!-- ML Shadow por esporte (expandable) — agrupado com Tips Recentes + MT Shadow -->
+  <div class="section" id="secMlShadow">
+    <div class="section-head" onclick="toggleSection('secMlShadow'); loadMlShadowBySport()">
+      <div class="section-head-left">
+        <svg class="section-chevron" viewBox="0 0 16 16"><path d="M6 4l4 4-4 4" stroke="currentColor" fill="none" stroke-width="2"/></svg>
+        <span>🥷 ML Shadow por Esporte</span>
+      </div>
+      <div class="section-head-meta" id="mlShadowMeta">—</div>
+    </div>
+    <div class="section-body">
+      <div id="mlShadowBody"><div class="loading">Carregando</div></div>
+    </div>
+  </div>
+
+  <!-- Market Tips Shadow (expandable) — agrupado com Tips Recentes + ML Shadow -->
+  <div class="section" id="secMarketTips">
+    <div class="section-head" onclick="toggleSection('secMarketTips'); loadMarketTipsShadow()">
+      <div class="section-head-left">
+        <svg class="section-chevron" viewBox="0 0 16 16"><path d="M6 4l4 4-4 4" stroke="currentColor" fill="none" stroke-width="2"/></svg>
+        <span>🎯 Market Tips Shadow (handicap/totais/TB)</span>
+      </div>
+      <div class="section-head-meta" id="marketTipsMeta">—</div>
+    </div>
+    <div class="section-body">
+      <div id="marketTipsBody"><div class="loading">Carregando</div></div>
+    </div>
+  </div>
+
   <!-- Modelos (expandable) -->
   <div class="section open" id="secModels">
     <div class="section-head" onclick="toggleSection('secModels')">
@@ -878,20 +906,6 @@
     </div>
   </div>
 
-  <!-- ML Shadow por esporte (expandable) -->
-  <div class="section" id="secMlShadow">
-    <div class="section-head" onclick="toggleSection('secMlShadow'); loadMlShadowBySport()">
-      <div class="section-head-left">
-        <svg class="section-chevron" viewBox="0 0 16 16"><path d="M6 4l4 4-4 4" stroke="currentColor" fill="none" stroke-width="2"/></svg>
-        <span>🥷 ML Shadow por Esporte</span>
-      </div>
-      <div class="section-head-meta" id="mlShadowMeta">—</div>
-    </div>
-    <div class="section-body">
-      <div id="mlShadowBody"><div class="loading">Carregando</div></div>
-    </div>
-  </div>
-
   <!-- Tips em Risco (cashout alerts) -->
   <div class="section" id="secRisk">
     <div class="section-head" onclick="toggleSection('secRisk'); loadTipsEmRisco()">
@@ -976,19 +990,6 @@
     </div>
   </div>
 
-  <!-- Market Tips Shadow (expandable) -->
-  <div class="section" id="secMarketTips">
-    <div class="section-head" onclick="toggleSection('secMarketTips'); loadMarketTipsShadow()">
-      <div class="section-head-left">
-        <svg class="section-chevron" viewBox="0 0 16 16"><path d="M6 4l4 4-4 4" stroke="currentColor" fill="none" stroke-width="2"/></svg>
-        <span>🎯 Market Tips Shadow (handicap/totais/TB)</span>
-      </div>
-      <div class="section-head-meta" id="marketTipsMeta">—</div>
-    </div>
-    <div class="section-body">
-      <div id="marketTipsBody"><div class="loading">Carregando</div></div>
-    </div>
-  </div>
 
   <!-- Exploração de Ineficiências BR (expandable) -->
   <div class="section" id="secExploit">
@@ -4306,6 +4307,21 @@ async function runReadinessLearnerNow(dryRun = false) {
 // reroda automaticamente até queue vazio.
 let _loadingMlShadow = false;
 let _pendingMlShadowReload = false;
+// 2026-05-10: filtro de liga ML shadow — toggle por click em card de liga.
+// Aplica-se a loadMlShadowTipsList (paginated table) sem alterar fetch (cards
+// ML shadow continuam mostrando todas ligas; só a tabela individual filtra).
+let mlShadowLeagueFilter = null;
+function filterMlShadowByLeague(league) {
+  if (league == null) {
+    mlShadowLeagueFilter = null;
+  } else if (mlShadowLeagueFilter === league) {
+    mlShadowLeagueFilter = null; // toggle off
+  } else {
+    mlShadowLeagueFilter = league;
+  }
+  // Re-render cards (atualiza borda destacada) + lista paginada de tips
+  loadMlShadowBySport().catch(() => {});
+}
 async function loadMlShadowBySport() {
   if (_loadingMlShadow) {
     _pendingMlShadowReload = true;
@@ -4507,6 +4523,64 @@ async function _loadMlShadowBySportInternal(el, meta) {
     <div style="display:flex;gap:10px;flex-wrap:wrap">${overallCard}${cards}</div>
   </div>`;
 
+  // 2026-05-10: cards top-N por liga cross-sport (ou filtrado se currentSport
+  // não for __overall__). Click toggle mlShadowLeagueFilter, propaga pra
+  // loadMlShadowTipsList. Padrão de UX espelha tipsByLeague (linha ~2952).
+  const leagueRows = (data.per_sport_league || []).filter(l => {
+    if (currentSport === '__overall__' || !currentSport) return true;
+    if (currentSport === 'esports') return ['esports','lol','dota2'].includes(l.sport);
+    if (currentSport === 'lol' || currentSport === 'dota2' || currentSport === 'dota') {
+      const target = currentSport === 'dota' ? 'dota2' : currentSport;
+      return l.sport === 'esports' || l.sport === target;
+    }
+    return l.sport === currentSport;
+  }).slice().sort((a, b) => (b.n || 0) - (a.n || 0));
+  if (leagueRows.length) {
+    const topLeagues = leagueRows.slice(0, 12);
+    const leagueColor = {
+      lol: '#29b6f6', dota2: '#ef5350', cs2: '#ffa726', valorant: '#ec407a',
+      tennis: '#66bb6a', football: '#ab47bc', mma: '#8d6e63',
+      darts: '#26a69a', snooker: '#5c6bc0', tabletennis: '#ff7043',
+      cs: '#ffa726', basket: '#fb923c', esports: '#29b6f6',
+    };
+    const escQ = (s) => String(s).replace(/'/g, "&#39;").replace(/"/g, '&quot;');
+    const leagueCards = topLeagues.map(l => {
+      const c = leagueColor[l.sport] || '#888';
+      const isActive = mlShadowLeagueFilter === l.league;
+      const settled = (l.wins || 0) + (l.losses || 0);
+      const roi = l.roi;
+      const avgClv = l.avg_clv;
+      const profit = l.profit_reais;
+      const sportLbl = (l.sport || '').toUpperCase();
+      return `
+        <div onclick="filterMlShadowByLeague('${escQ(l.league)}')"
+             style="cursor:pointer;border:2px solid ${isActive ? c : 'var(--border,#2a2a2a)'};background:var(--surface,#0f172a);border-radius:6px;padding:9px 11px;min-width:200px;flex:1;transition:transform 0.1s"
+             onmouseover="this.style.transform='translateY(-2px)'" onmouseout="this.style.transform='translateY(0)'">
+          <div style="display:flex;align-items:center;gap:4px;margin-bottom:4px;flex-wrap:wrap">
+            <span style="background:${c};color:#fff;padding:2px 7px;border-radius:3px;font-size:0.7em;font-weight:600" title="${sportLbl}">${sportLbl}</span>
+            <span style="background:#475569;color:#fff;padding:1px 5px;border-radius:3px;font-size:0.65em" title="Tier ${l.tier}">T${l.tier}</span>
+          </div>
+          <div style="font-size:0.78em;color:var(--text,#e2e8f0);font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escQ(l.league)}">${l.league}</div>
+          <div style="font-size:0.7em;color:#888;margin-top:2px">${l.n} tips · ${settled} sett · ${l.pending || 0} pend</div>
+          <div style="display:flex;justify-content:space-between;font-size:0.78em;margin-top:5px">
+            <span>Hit <b>${l.hitRate != null ? l.hitRate.toFixed(0) + '%' : '—'}</b></span>
+            <span class="${clsSign(roi)}">ROI <b>${fmtOrDash(roi)}</b></span>
+          </div>
+          <div style="display:flex;justify-content:space-between;font-size:0.74em;margin-top:1px">
+            <span class="${clsSign(avgClv)}">CLV ${fmtOrDash(avgClv)}${(l.clv_n||0)>0?` <span style="opacity:0.6">(${l.clv_n})</span>`:''}</span>
+            <span class="${clsSign(profit)}">${(profit||0) >= 0 ? '+' : ''}R$ ${(profit||0).toFixed(0)}</span>
+          </div>
+        </div>`;
+    }).join('');
+    const filterHint = mlShadowLeagueFilter
+      ? `<span style="margin-left:8px;color:#3b82f6;cursor:pointer;font-size:0.8em" onclick="filterMlShadowByLeague(null)">✕ limpar filtro: <b>${mlShadowLeagueFilter}</b></span>`
+      : '';
+    html += `<div style="margin-bottom:14px">
+      <div class="card-meta" style="margin-bottom:8px;display:flex;align-items:center"><b>🏆 Shadow ML por liga</b> — top ${topLeagues.length} de ${leagueRows.length}${currentSport && currentSport !== '__overall__' ? ` (${(currentSport||'').toUpperCase()})` : ' cross-sport'} · clique pra filtrar tips${filterHint}</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">${leagueCards}</div>
+    </div>`;
+  }
+
   html += `<div class="card-meta" style="margin-top:10px;font-size:0.8em">
     Shadow = tip gerada mas sem DM. Tier chips: <b>T1</b>=top (LCK/LPL/LEC/Slam/NBA/UFC), <b>T2</b>=mid (CBLOL/Challenger/Brasileirão/Bellator), <b>T3</b>=outros. Cor verde ≥+5%, vermelho ≤-5%, cinza n&lt;5. Critério promover: n≥30 · ROI≥0 · CLV≥0 (n_CLV≥10).
   </div>
@@ -4598,8 +4672,19 @@ async function loadMlShadowTipsList(sportList) {
       tips.push({ ...t, _sport: effectiveSports[idx] });
     }
   });
-  tips.sort((a, b) => String(b.sent_at || '').localeCompare(String(a.sent_at || '')));
-  mlShadowTipsState.allTips = tips;
+  // 2026-05-10: filtra por mlShadowLeagueFilter quando ativo. Match em
+  // event_name (substring case-insensitive — mesma semântica de tipsLeagueFilter
+  // em renderTipsTable, cobre variantes de round como "ATP Madrid - QF").
+  let filteredTips = tips;
+  if (mlShadowLeagueFilter) {
+    const lf = String(mlShadowLeagueFilter).toLowerCase().trim();
+    filteredTips = tips.filter(t => {
+      const en = String(t.event_name || '').toLowerCase();
+      return en === lf || en.includes(lf) || lf.includes(en);
+    });
+  }
+  filteredTips.sort((a, b) => String(b.sent_at || '').localeCompare(String(a.sent_at || '')));
+  mlShadowTipsState.allTips = filteredTips;
   mlShadowTipsState.page = 0;
   renderMlShadowTipsList();
 }
