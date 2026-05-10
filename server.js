@@ -12034,6 +12034,66 @@ setInterval(load, 60000);
     return;
   }
 
+  // ── /admin/football-trained-coverage: cruza leagues do /football-matches com
+  // params do trained Poisson model. Detecta gap (league name no feed live ≠ key
+  // do modelo) que faz fbTrained.markets=null e bloqueia MT scanner.
+  if (p === '/admin/football-trained-coverage' && (req.method === 'GET' || req.method === 'POST')) {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const fbpt = require('./lib/football-poisson-trained');
+      const params = fbpt.getParams();
+      if (!params) { sendJson(res, { ok: false, error: 'trained params not loaded (file missing)' }); return; }
+      const leagueCount = Object.keys(params.leagues || {}).length;
+      const teamCount = Object.keys(params.teams || {}).length;
+
+      // Pull current football matches
+      let matches = [];
+      try {
+        const r = await new Promise((resolve, reject) => {
+          const rq = http.request({ hostname: 'localhost', port: PORT, path: '/football-matches', method: 'GET' }, res2 => {
+            let buf = ''; res2.on('data', c => buf += c); res2.on('end', () => resolve(buf));
+          });
+          rq.on('error', reject); rq.setTimeout(10000, () => rq.destroy(new Error('timeout'))); rq.end();
+        });
+        matches = safeParse(r, []);
+      } catch (e) { /* ignore */ }
+      if (!Array.isArray(matches)) matches = [];
+
+      // Aggregate by league
+      const leagueAgg = new Map();
+      for (const m of matches) {
+        const lg = m.league || m.event_name || '?';
+        const e = leagueAgg.get(lg) || { league: lg, n: 0, sample_match: null, league_match: null, team_home_match: null, team_away_match: null };
+        e.n++;
+        if (!e.sample_match) e.sample_match = `${m.team1} vs ${m.team2}`;
+        // Probe trained model
+        if (!e.league_match) {
+          try { e.league_match = !!fbpt._findLeague(params.leagues, lg); } catch (_) {}
+        }
+        if (!e.team_home_match) {
+          try { e.team_home_match = !!fbpt._findTeam(params.teams, m.team1); } catch (_) {}
+        }
+        if (!e.team_away_match) {
+          try { e.team_away_match = !!fbpt._findTeam(params.teams, m.team2); } catch (_) {}
+        }
+        leagueAgg.set(lg, e);
+      }
+      const rows = Array.from(leagueAgg.values()).sort((a, b) => b.n - a.n);
+      const summary = {
+        params_loaded: true,
+        params_leagues: leagueCount,
+        params_teams: teamCount,
+        feed_total_matches: matches.length,
+        feed_unique_leagues: rows.length,
+        leagues_matched: rows.filter(r => r.league_match).length,
+        leagues_missing: rows.filter(r => !r.league_match).length,
+        coverage_pct: rows.length > 0 ? +(rows.filter(r => r.league_match).length / rows.length * 100).toFixed(1) : 0,
+      };
+      sendJson(res, { ok: true, summary, leagues: rows });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   // ── /admin/re-propagate-mt: re-roda propagator pra shadow rows JÁ SETTLED
   // mas que não tiveram tip real propagada (ex: bug histórico cs2/cs sport mismatch).
   // GET dry-run, POST apply=1 aplica.
