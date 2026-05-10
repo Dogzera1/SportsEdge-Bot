@@ -18213,6 +18213,15 @@ async function pollFootball(runOnce = false) {
             : 'fbtrained_markets_null';
           logRejection('football', `${match.team1} vs ${match.team2}`, `mt_scan_skip_${_skipReason}`, {});
         }
+        // 2026-05-10: filtro upstream — coverage 84.2% das leagues batem no modelo
+        // (audit /admin/football-trained-coverage). Skip imediato pras 16% missing
+        // (Eredivisie, Argentina B, Brazil Women) poupa scanner cycles + reduz noise.
+        // Opt-out via FOOTBALL_MT_REQUIRE_TRAINED=false (default true).
+        const _fbRequireTrained = !/^(0|false|no)$/i.test(String(process.env.FOOTBALL_MT_REQUIRE_TRAINED ?? 'true'));
+        if (_fbRequireTrained && _fbMtScanEnv && _fbPinEnv && !_fbHasMarkets) {
+          // já logamos mt_scan_skip_fbtrained_markets_null acima; counter dedicado pra esse path
+          try { _metrics.incr('fb_mt_skip_no_trained_coverage', {}); } catch (_) {}
+        }
         if (_fbMtScanEnv && _fbPinEnv && _fbHasMarkets) {
           try {
             // Compute trainedMarkets pra usar — pre-game ou live ajustado.
@@ -18308,6 +18317,16 @@ async function pollFootball(runOnce = false) {
               });
               const fbMtFound = _scanResultFb.promotable || _scanResultFb;
               const _shadowAllFb = _scanResultFb.shadow || fbMtFound;
+              // 2026-05-10: counters dedicados pra observability do scanner output.
+              // Sem isso, fbMtFound.length=0 era indistinguível de shadow=0 (modelo
+              // bate com Pinnacle em 100% das lines) vs shadow>0 mas promote=0
+              // (modelo tem edge mas <minEv).
+              try {
+                _metrics.incr('fb_mt_scan_match', {});
+                if (_shadowAllFb.length > 0) _metrics.incr('fb_mt_shadow_emitted', {});
+                _metrics.timing('fb_mt_shadow_size', _shadowAllFb.length, {});
+                _metrics.timing('fb_mt_promotable_size', fbMtFound.length, {});
+              } catch (_) {}
               // Shadow log SEMPRE (mesmo se found vazio)
               if (_shadowAllFb.length) {
                 try {
@@ -18319,7 +18338,12 @@ async function pollFootball(runOnce = false) {
                 }
               }
               if (!fbMtFound.length) {
-                logRejection('football', `${match.team1} vs ${match.team2}`, 'mt_scan_no_promotable', { shadowCount: _shadowAllFb.length, minEv: fbMtMinEv });
+                // Distinguir 2 cenários: shadow=0 (modelo agree com Pinnacle 100%) vs
+                // shadow>0 mas promote=0 (modelo tem edge baixo, abaixo de minEv).
+                const _reason = _shadowAllFb.length === 0
+                  ? 'mt_scan_no_promotable_zero_shadow'
+                  : 'mt_scan_no_promotable_below_min_ev';
+                logRejection('football', `${match.team1} vs ${match.team2}`, _reason, { shadowCount: _shadowAllFb.length, minEv: fbMtMinEv });
               }
               if (fbMtFound.length) {
                 log('INFO', 'FB-MT-SCAN',
