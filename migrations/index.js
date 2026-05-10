@@ -2469,6 +2469,75 @@ const migrations = [
       } catch (_) {}
     },
   },
+  {
+    id: '096_tips_integrity_constraints',
+    up(db) {
+      // 2026-05-10: P0 audit — fortalece integrity de tips.
+      // Causa-fix da P0 audit (sessão 2026-05-10):
+      //   1. is_shadow podia ser NULL → bankroll filter `is_shadow !== 1`
+      //      contava NULL como real (silently). Backfill + DEFAULT.
+      //   2. Sem UNIQUE em (match_id, sport, market_type, tip_participant)
+      //      permitia duplicates. CLV update first-wins escolhia tip errada.
+      //      Archive dupes existentes pré-constraint.
+      //   3. clv_captured_at adicionado pra detectar race CLV (memory
+      //      `clv_update_first_wins_bug` foi PARCIAL — guard temporal completa).
+      //   4. PRAGMA foreign_keys=ON aplicado em lib/database.js no boot;
+      //      essa mig só prepara dados (sem orphans pendentes).
+
+      // ── 1. Backfill is_shadow NULL → 0 ──
+      try {
+        const r = db.prepare(`UPDATE tips SET is_shadow = 0 WHERE is_shadow IS NULL`).run();
+        if (r.changes > 0) console.log(`[mig 096] backfilled is_shadow=0 em ${r.changes} tips`);
+      } catch (e) { console.log(`[mig 096] is_shadow backfill: ${e.message}`); }
+
+      // ── 2. Archive duplicates existentes ──
+      // Strategy: keep oldest (id ASC), archive newer dupes em (match_id, sport,
+      // market_type, tip_participant). archived=2 (special tag pra dedup vs
+      // archived=1 do legacy archive logic).
+      try {
+        const dupRows = db.prepare(`
+          SELECT match_id, sport,
+                 COALESCE(market_type, 'ML') AS mt,
+                 tip_participant,
+                 COUNT(*) AS n,
+                 MIN(id) AS keep_id,
+                 GROUP_CONCAT(id) AS all_ids
+          FROM tips
+          WHERE COALESCE(archived, 0) = 0
+          GROUP BY match_id, sport, COALESCE(market_type, 'ML'), tip_participant
+          HAVING n > 1
+        `).all();
+        let dedupCount = 0;
+        for (const r of dupRows) {
+          const ids = String(r.all_ids).split(',').map(Number).filter(n => n !== r.keep_id);
+          for (const id of ids) {
+            db.prepare(`UPDATE tips SET archived = 2 WHERE id = ?`).run(id);
+            dedupCount++;
+          }
+        }
+        if (dedupCount > 0) console.log(`[mig 096] archived ${dedupCount} duplicate tips (kept oldest per group, ${dupRows.length} groups)`);
+      } catch (e) { console.log(`[mig 096] dup archive: ${e.message}`); }
+
+      // ── 3. UNIQUE INDEX ──
+      // Partial: WHERE archived = 0. Permite arquivos histórico ter qualquer state.
+      // SQLite não suporta CHECK em ALTER TABLE; usar partial index é alternativa
+      // funcionalmente equivalente (UNIQUE viola ON INSERT em archived=0).
+      try {
+        db.exec(`
+          CREATE UNIQUE INDEX IF NOT EXISTS idx_tips_unique_active
+          ON tips(match_id, sport, COALESCE(market_type, 'ML'), tip_participant)
+          WHERE COALESCE(archived, 0) = 0 AND match_id IS NOT NULL
+        `);
+        console.log('[mig 096] created UNIQUE idx_tips_unique_active');
+      } catch (e) { console.log(`[mig 096] unique idx: ${e.message}`); }
+
+      // ── 4. clv_captured_at column ──
+      addColumnIfMissing(db, 'tips', 'clv_captured_at', 'clv_captured_at TEXT');
+      try {
+        db.exec(`CREATE INDEX IF NOT EXISTS idx_tips_clv_captured ON tips(clv_captured_at) WHERE clv_captured_at IS NULL`);
+      } catch (_) {}
+    },
+  },
 ];
 
 function applyMigrations(db) {

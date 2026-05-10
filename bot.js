@@ -22018,6 +22018,52 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   setInterval(_wrapCron('auto_void_stuck', runAutoVoidStuck), 15 * 60 * 1000);
   setTimeout(_wrapCron('auto_void_stuck', runAutoVoidStuck), 65 * 60 * 1000);
 
+  // 2026-05-10 P0 audit: PRAGMA integrity_check diário pra detectar corrupção
+  // SQLite (WAL stale, OOM crashes, FK violations). Gated por
+  // DB_INTEGRITY_CHECK_AUTO=true (default true). DM admin se != 'ok'.
+  // Runtime: ~5-15s em DB 154MB; off-peak (default 4h UTC) pra não competir com
+  // settle pipeline/scanners.
+  let _lastIntegrityCheckDay = null;
+  async function runIntegrityCheck() {
+    if (/^(0|false|no)$/i.test(String(process.env.DB_INTEGRITY_CHECK_AUTO ?? 'true'))) return;
+    const now = new Date();
+    const today = now.toISOString().slice(0, 10);
+    if (_lastIntegrityCheckDay === today) return;
+    const hourUtc = parseInt(process.env.DB_INTEGRITY_CHECK_HOUR_UTC || '4', 10);
+    if (now.getUTCHours() !== hourUtc) return;
+    _lastIntegrityCheckDay = today;
+    const _t0 = Date.now();
+    try {
+      const r = db.pragma('integrity_check', { simple: false });
+      const ok = Array.isArray(r) && r.length === 1 && r[0]?.integrity_check === 'ok';
+      const dur = Date.now() - _t0;
+      try { _metrics.gauge('db_integrity_ok', ok ? 1 : 0); } catch (_) {}
+      if (ok) {
+        log('INFO', 'DB-INTEGRITY', `check ok (${dur}ms)`);
+      } else {
+        const issues = (Array.isArray(r) ? r : []).slice(0, 5).map(x => x?.integrity_check || '?').join(' | ');
+        log('ERROR', 'DB-INTEGRITY', `FAIL after ${dur}ms: ${issues}`);
+        // FK consistency separado — se foreign_keys=ON, lista violations
+        let fkOut = '';
+        try {
+          const fk = db.pragma('foreign_key_check', { simple: false });
+          if (Array.isArray(fk) && fk.length) {
+            fkOut = ` | fk_violations=${fk.length}`;
+            log('ERROR', 'DB-INTEGRITY', `FK violations: ${JSON.stringify(fk.slice(0, 3))}`);
+          }
+        } catch (_) {}
+        if (ADMIN_IDS.size) {
+          const msg = `🚨 *DB integrity_check FAIL*\n\n${issues}${fkOut}\n\n_DB pode estar corrompido. Backup + restore recomendado._`;
+          const routed = _pickTokenForAlert('integrity') || _pickTokenForAlert('system');
+          const token = routed?.token;
+          if (token) for (const adminId of ADMIN_IDS) await sendDM(token, adminId, msg).catch(() => {});
+        }
+      }
+    } catch (e) { log('ERROR', 'DB-INTEGRITY', `pragma falhou: ${e.message}`); }
+  }
+  setInterval(_wrapCron('db_integrity_check', runIntegrityCheck), 15 * 60 * 1000);
+  setTimeout(_wrapCron('db_integrity_check', runIntegrityCheck), 90 * 60 * 1000);
+
   // Daily Autonomy Digest: 1x/dia às AUTONOMY_DIGEST_HOUR_UTC (default 12h UTC = 9h BRT),
   // DM admins com snapshot /autonomy-status. Gated por AUTONOMY_DIGEST_AUTO=true.
   let _lastAutonomyDigestDay = null;

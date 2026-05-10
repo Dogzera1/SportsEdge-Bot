@@ -15776,14 +15776,16 @@ load();
         if (!Number.isFinite(tipId) || !Number.isFinite(clvOdds) || clvOdds <= 1) {
           return sendJson(res, { ok: false, error: 'invalid_tip_id_or_odds' }, 400);
         }
-        const tip = db.prepare('SELECT id, odds, clv_odds FROM tips WHERE id = ?').get(tipId);
+        const tip = db.prepare('SELECT id, odds, clv_odds, clv_captured_at FROM tips WHERE id = ?').get(tipId);
         if (!tip) return sendJson(res, { ok: false, error: 'tip_not_found' }, 404);
-        if (tip.clv_odds != null) {
+        if (tip.clv_odds != null || tip.clv_captured_at != null) {
           return sendJson(res, { ok: true, skipped: 'already_set', clv_odds: tip.clv_odds });
         }
         const openOdd = parseFloat(tip.odds);
         const clvPct = (Number.isFinite(openOdd) && openOdd > 1) ? +(((openOdd / clvOdds) - 1) * 100).toFixed(2) : 0;
-        db.prepare(`UPDATE tips SET clv_odds = ?, clv_pct = ? WHERE id = ?`).run(clvOdds, clvPct, tipId);
+        // 2026-05-10 P0 audit: clv_captured_at guard impede race CLV (mig 096).
+        db.prepare(`UPDATE tips SET clv_odds = ?, clv_pct = ?, clv_captured_at = datetime('now')
+                    WHERE id = ? AND clv_captured_at IS NULL`).run(clvOdds, clvPct, tipId);
         sendJson(res, { ok: true, tip_id: tipId, clv_odds: clvOdds, clv_pct: clvPct, terminal: !!j?.terminal });
       } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
     });
