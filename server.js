@@ -31686,23 +31686,23 @@ server.listen(PORT, '0.0.0.0', () => {
   const refreshMin = Math.max(15, parseInt(process.env.ODDSPAPI_REFRESH_MIN || '60', 10) || 60);
   let _oddsRefreshFailCount = 0;
   setInterval(_wrapServerCron('oddspapi_refresh', async () => {
+    try {
+      await fetchEsportsOdds();
+      _oddsRefreshFailCount = 0;
+    } catch (e) {
+      _oddsRefreshFailCount++;
+      if (_oddsRefreshFailCount >= 3) {
+        log('WARN', 'ODDS-BREAKER', `OddsPapi failed ${_oddsRefreshFailCount}x — degraded`);
+      }
+    }
+  }), refreshMin * 60 * 1000); // Default 60 min (OddsPapi free tier: 250 req total)
 
   // Pinnacle LoL refresh — independente do OddsPapi (sem quota, só rate limit soft)
   // Dois intervalos: refresh completo (pre-match, default 10min) + refresh rápido de live (default 2min)
   if (process.env.PINNACLE_LOL === 'true') {
     const pinRefreshMin = Math.max(5, parseInt(process.env.PINNACLE_LOL_REFRESH_MIN || '10', 10) || 10);
     const pinLiveMin = Math.max(1, parseInt(process.env.PINNACLE_LOL_LIVE_REFRESH_MIN || '2', 10) || 2);
-    try {
-      await fetchEsportsOdds();
-      _oddsRefreshFailCount = 0; // Reset on success
-    } catch (e) {
-      _oddsRefreshFailCount++;
-      if (_oddsRefreshFailCount >= 3) {
-        log('WARN', 'ODDS-BREAKER', `OddsPapi failed ${_oddsRefreshFailCount}x — exponential backoff active`);
-        // Next refresh will happen, but at degraded state
-      }
-    }
-  }), refreshMin * 60 * 1000); // Default 60 min (OddsPapi free tier: 250 req total)
+    setInterval(_wrapServerCron('pinnacle_lol_refresh', () => fetchLoLOddsFromPinnacle()), pinRefreshMin * 60 * 1000);
     // Refresh rápido apenas quando há matches live cacheados (odds live mudam rápido)
     setInterval(_wrapServerCron('pinnacle_lol_live_refresh', () => {
       const hasLive = Object.values(oddsCache).some(v => v?.source === 'pinnacle' && v?.isLive);
