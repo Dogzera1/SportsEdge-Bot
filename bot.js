@@ -18155,9 +18155,19 @@ async function pollFootball(runOnce = false) {
         // Pinnacle football matchup → /odds-markets retorna handicap + totals.
         // Pre-game: cruza com fbTrained.markets (BTTS/OU/AH).
         // Live: cruza com predictFootballLive (Poisson residual baseado em score+minute).
-        if (process.env.FOOTBALL_MT_SCAN === 'true'
-            && process.env.PINNACLE_FOOTBALL === 'true'
-            && fbTrained?.markets) {
+        // 2026-05-10: telemetria — gate é triplo, qualquer falha bloqueia silent.
+        // Sem isso, debug de "zero MT events" exige acesso a log Railway.
+        const _fbMtScanEnv = process.env.FOOTBALL_MT_SCAN === 'true';
+        const _fbPinEnv = process.env.PINNACLE_FOOTBALL === 'true';
+        const _fbHasMarkets = !!(fbTrained?.markets);
+        if (!_fbMtScanEnv || !_fbPinEnv || !_fbHasMarkets) {
+          // Log skip reason 1× per match analysis pra observability
+          const _skipReason = !_fbMtScanEnv ? 'mt_scan_env_off'
+            : !_fbPinEnv ? 'pinnacle_football_env_off'
+            : 'fbtrained_markets_null';
+          logRejection('football', `${match.team1} vs ${match.team2}`, `mt_scan_skip_${_skipReason}`, {});
+        }
+        if (_fbMtScanEnv && _fbPinEnv && _fbHasMarkets) {
           try {
             // Compute trainedMarkets pra usar — pre-game ou live ajustado.
             let mtMarkets = fbTrained.markets;
@@ -18203,7 +18213,11 @@ async function pollFootball(runOnce = false) {
               }
             }
             const pinMkt = await serverGet(`/odds-markets?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}&game=football&period=0`).catch(() => null);
-            if (pinMkt && ((pinMkt.totals?.length || 0) + (pinMkt.handicaps?.length || 0)) > 0) {
+            const _pinHasMarkets = pinMkt && ((pinMkt.totals?.length || 0) + (pinMkt.handicaps?.length || 0)) > 0;
+            if (!_pinHasMarkets) {
+              logRejection('football', `${match.team1} vs ${match.team2}`, 'mt_scan_skip_pin_no_markets', { hasPinMkt: !!pinMkt, totals: pinMkt?.totals?.length || 0, handicaps: pinMkt?.handicaps?.length || 0 });
+            }
+            if (_pinHasMarkets) {
               const { scanFootballMarkets } = require('./lib/football-mt-scanner');
               // Live tem volatilidade maior — exige EV gate mais alto pra cobrir movimento de odds.
               const fbMtMinEv = parseFloat(process.env[isLiveScan ? 'FOOTBALL_MT_LIVE_MIN_EV' : 'FOOTBALL_MT_MIN_EV'] ?? (isLiveScan ? '8' : '5'));
@@ -18257,6 +18271,9 @@ async function pollFootball(runOnce = false) {
                 if (_shadowAllFb.length !== fbMtFound.length) {
                   log('DEBUG', 'FB-SHADOW-PURE', `${match.team1} vs ${match.team2}: shadow=${_shadowAllFb.length} promotable=${fbMtFound.length}`);
                 }
+              }
+              if (!fbMtFound.length) {
+                logRejection('football', `${match.team1} vs ${match.team2}`, 'mt_scan_no_promotable', { shadowCount: _shadowAllFb.length, minEv: fbMtMinEv });
               }
               if (fbMtFound.length) {
                 log('INFO', 'FB-MT-SCAN',
