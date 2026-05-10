@@ -4626,7 +4626,10 @@ function _loadBlocklistFromDb() {
 // todas variants (ex: "esl challenger league" pega Europe + NA + SAm + Asia).
 const _BLOCKLIST_DEFAULTS = [
   'lol:lpl',
-  'lol:lck challengers league',
+  // 2026-05-10: encurtado de "lck challengers league" → "lck challengers"
+  // pra casar variantes (LCK Challengers + LCK Challengers League).
+  // Match é substring `lg.includes(subPart)`; entry maior que league name não casa.
+  'lol:lck challengers',
   'cs:esl challenger league',
   'cs:cct europe',
   // Audit 2026-05-04: ligas com leak persistente em 30d.
@@ -4634,6 +4637,21 @@ const _BLOCKLIST_DEFAULTS = [
   //   lol 'nacl': ROI -20% n=3
   'tennis:wta 125k la bisbal',
   'lol:nacl',
+  // 2026-05-10: feeder/academy LoL leagues bloqueadas por trained model
+  // overconfidence estrutural. T1 Esports Academy vs Gen.G Global Academy:
+  // pmodel=89.4% pra underdog @ odd 2.83 (EV 153% — bate ev_sanity cap).
+  // Re-rejected 11x em 90min pelo mesmo cycle. OracleElixir features
+  // contaminadas com main team data. Bloqueio até modelo separar
+  // Academy ↔ Main reliably (precisa features novas).
+  'lol:lcs challenger',     // LCS Challengers + similares
+  'lol:lcp',                 // Pacific Championship feeder
+  'lol:tcl',                 // Turkish Championship League
+  'lol:prime league',        // German tier 2
+  'lol:hellenic',            // Hellenic Legends
+  'lol:gll',                 // Greek League
+  'lol:hitpoint',            // Czech tier 2
+  'lol:academy',             // catch-all academy/youth (T1 Academy, etc)
+  'lol:rookie',              // catch-all rookies
 ];
 
 function _parseBlocklistEnv() {
