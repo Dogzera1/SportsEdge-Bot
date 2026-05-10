@@ -12034,6 +12034,127 @@ setInterval(load, 60000);
     return;
   }
 
+  // ── /admin/match-diagnostic: cruza tips + market_tips_shadow + match_results
+  // por (game, query). Util pra investigar tips MT pending que não settling —
+  // mostra se shadow row existe, se tá settled, e se match_results tem score
+  // parseável pra alimentar propagator.
+  // GET /admin/match-diagnostic?game=cs&q=GenOne
+  // GET /admin/match-diagnostic?game=cs&match_id=pin_cs_1630406205
+  if (p === '/admin/match-diagnostic' && (req.method === 'GET' || req.method === 'POST')) {
+    if (!requireAdmin(req, res)) return;
+    const game = String(parsed.query.game || '').toLowerCase().trim();
+    const q = String(parsed.query.q || '').trim();
+    const matchIdQ = String(parsed.query.match_id || '').trim();
+    if (!game || !/^[a-z0-9]+$/.test(game)) {
+      sendJson(res, { ok: false, error: 'game obrigatório (e.g. cs, dota2, lol, tennis, football)' }, 400);
+      return;
+    }
+    if (!q && !matchIdQ) {
+      sendJson(res, { ok: false, error: 'q OU match_id obrigatório' }, 400);
+      return;
+    }
+    try {
+      // Map game → sport bucket pra tips (cs2 game vive em sport='cs', etc)
+      const sportFromGame = { cs: 'cs', cs2: 'cs', dota2: 'dota2', dota: 'dota2', lol: 'lol', valorant: 'valorant', tennis: 'tennis', football: 'football', mma: 'mma', basket: 'basket', darts: 'darts', snooker: 'snooker', tabletennis: 'tabletennis' }[game] || game;
+      const _NORM = `REPLACE(REPLACE(REPLACE(REPLACE(lower(?),' ',''),'-',''),'.',''),'''','')`;
+      const qPat = `%${q}%`;
+      const matchIdPat = matchIdQ ? `${matchIdQ}%` : null;
+
+      // 1. Tips com match_id ou participant matching
+      const tips = matchIdQ
+        ? db.prepare(`
+            SELECT id, sport, match_id, market_type, participant1, participant2, tip_participant,
+                   odds, sent_at, result, is_shadow, archived, settled_at
+            FROM tips
+            WHERE sport = ? AND match_id LIKE ?
+            ORDER BY sent_at DESC LIMIT 30
+          `).all(sportFromGame, matchIdPat)
+        : db.prepare(`
+            SELECT id, sport, match_id, market_type, participant1, participant2, tip_participant,
+                   odds, sent_at, result, is_shadow, archived, settled_at
+            FROM tips
+            WHERE sport = ?
+              AND (participant1 LIKE ? OR participant2 LIKE ? OR tip_participant LIKE ?)
+            ORDER BY sent_at DESC LIMIT 30
+          `).all(sportFromGame, qPat, qPat, qPat);
+
+      // 2. market_tips_shadow rows
+      const sport2 = game === 'cs' || game === 'cs2' ? 'cs2' : sportFromGame;
+      const shadows = matchIdQ
+        ? db.prepare(`
+            SELECT id, sport, match_key, market, line, side, team1, team2,
+                   p_model, ev_pct, odd, result, profit_units, created_at, settled_at
+            FROM market_tips_shadow
+            WHERE sport = ? AND (match_key LIKE ? OR match_key = ?)
+            ORDER BY created_at DESC LIMIT 30
+          `).all(sport2, `${matchIdQ}%`, matchIdQ)
+        : db.prepare(`
+            SELECT id, sport, match_key, market, line, side, team1, team2,
+                   p_model, ev_pct, odd, result, profit_units, created_at, settled_at
+            FROM market_tips_shadow
+            WHERE sport = ?
+              AND (team1 LIKE ? OR team2 LIKE ?)
+            ORDER BY created_at DESC LIMIT 30
+          `).all(sport2, qPat, qPat);
+
+      // 3. match_results candidates
+      const mrCandidates = db.prepare(`
+        SELECT id, match_id, game, league, team1, team2, winner, final_score,
+               resolved_at, status
+        FROM match_results
+        WHERE game = ?
+          AND (team1 LIKE ? OR team2 LIKE ?)
+        ORDER BY resolved_at DESC LIMIT 30
+      `).all(game, qPat, qPat);
+
+      // Score parseable? Esports map score parser
+      const _parseEsportsMapScore = (() => {
+        try { return require('./lib/market-tips-shadow').__exports?.parseEsportsMapScore || null; }
+        catch (_) { return null; }
+      })();
+      const parseableTest = (score) => {
+        if (!score) return null;
+        // Format esperado: "2-1", "0-2", "3-2" (BO3/BO5 maps)
+        const m = String(score).match(/^\s*(\d+)\s*[-:x]\s*(\d+)\s*$/);
+        return m ? { winnerMaps: Math.max(+m[1], +m[2]), loserMaps: Math.min(+m[1], +m[2]), totalMaps: +m[1]+(+m[2]) } : null;
+      };
+
+      const mrEnriched = mrCandidates.map(r => ({
+        ...r,
+        score_parseable: parseableTest(r.final_score),
+      }));
+
+      // Diagnostic summary
+      const diag = {
+        game, sport_bucket: sportFromGame, sport_shadow: sport2, query: q || matchIdQ,
+        tips_pending_count: tips.filter(t => !t.result).length,
+        tips_total: tips.length,
+        shadows_pending: shadows.filter(s => !s.result).length,
+        shadows_total: shadows.length,
+        mr_count: mrCandidates.length,
+        mr_with_score: mrCandidates.filter(r => r.final_score).length,
+        mr_parseable: mrEnriched.filter(r => r.score_parseable).length,
+        verdict: null,
+      };
+
+      // Inferir verdict (porque tips/shadows pending não settling)
+      if (diag.tips_pending_count === 0 && diag.shadows_pending === 0) {
+        diag.verdict = 'no pending — nada a investigar';
+      } else if (diag.shadows_pending > 0 && diag.mr_count === 0) {
+        diag.verdict = 'shadow_pending mas ZERO match_results — match não foi sincronizado pelo bot (HLTV/Pinnacle/Sofascore sync gap)';
+      } else if (diag.shadows_pending > 0 && diag.mr_with_score === 0) {
+        diag.verdict = 'shadow_pending + match_results existe mas SEM score (status=running ou final_score vazio) — match ainda não terminou OU sync incompleto';
+      } else if (diag.shadows_pending > 0 && diag.mr_parseable === 0 && diag.mr_with_score > 0) {
+        diag.verdict = 'shadow_pending + score existe mas NÃO PARSEÁVEL — formato inesperado (ex: "Bo3 — interrupted")';
+      } else if (diag.shadows_pending > 0 && diag.mr_parseable > 0) {
+        diag.verdict = 'shadow_pending + score parseável existe — settleShadowTips deveria ter resolvido. Possível: team_norm mismatch, league filter, ou tip outside time window.';
+      }
+
+      sendJson(res, { ok: true, diag, tips, shadows, match_results: mrEnriched });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   // ── /admin/env-audit: sanity check de envs críticas.
   // GET /admin/env-audit?key=<ADMIN_KEY>
   // Mostra: configurada/null + tipo (bool/string/number) + valor masked se sensitive.
