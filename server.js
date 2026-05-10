@@ -21914,6 +21914,44 @@ load();
         if (oddsN == null || oddsN <= 1) { badRequest(res, 'odds inválidas'); return; }
         if (evN == null) { badRequest(res, 'ev inválido'); return; }
 
+        // 2026-05-10 P0 brain audit: gate temporal sent_at < match_end_at.
+        // Caso `garin_echargui_premature_settle_2026_05_03`: tip emitida 12min
+        // após match resolved → settle imediato c/ winner errado. Reject hard
+        // se match já terminou. Slack via TEMPORAL_GATE_SLACK_S (default 60s)
+        // pra cobrir clock skew. Skip se shadow puro (study DB).
+        if (!t.isShadow) {
+          try {
+            const _slackS = parseInt(process.env.TEMPORAL_GATE_SLACK_S || '60', 10) || 60;
+            const mr = db.prepare(`SELECT resolved_at FROM match_results WHERE match_id = ? LIMIT 1`).get(matchId);
+            if (mr?.resolved_at) {
+              const resMs = Date.parse(String(mr.resolved_at).replace(' ', 'T') + 'Z');
+              const nowMs = Date.now();
+              if (Number.isFinite(resMs) && nowMs - resMs > _slackS * 1000) {
+                const ageS = Math.round((nowMs - resMs) / 1000);
+                log('WARN', 'TEMPORAL-GATE', `${sport} ${matchId}: match resolved há ${ageS}s (>${_slackS}s slack) — tip post-match REJECTED`);
+                _emitSkip('temporal_gate_post_match', { matchId, sport, ageS, slackS: _slackS });
+                sendJson(res, { ok: false, skipped: true, reason: 'temporal_gate_post_match', age_s: ageS });
+                return;
+              }
+            }
+          } catch (_) {}
+        }
+
+        // 2026-05-10 P0 brain audit: EV sanity gate (>50% absurdo) replicado
+        // de market-tip-processor.js. Antes ML path em record-tip aceitava EV
+        // qualquer; agora reject EV > MT_EV_CAP_PCT (default 50). Shadow bypass
+        // pra estudar mispricing real. Override via record-tip request: bypass
+        // não disponível — use is_shadow=1 pra studyo.
+        if (!t.isShadow) {
+          const _evCap = parseFloat(process.env.RECORD_TIP_EV_CAP_PCT || '50');
+          if (Number.isFinite(_evCap) && _evCap > 0 && evN > _evCap) {
+            log('WARN', 'EV-SANITY', `${sport} ${tipParticipant} @ ${oddsN}: EV ${evN}% > ${_evCap}% cap (provável calib leak) — REJECTED`);
+            _emitSkip('ev_sanity_cap', { sport, evN, cap: _evCap, matchId });
+            sendJson(res, { ok: false, skipped: true, reason: 'ev_sanity_cap', ev: evN, cap: _evCap });
+            return;
+          }
+        }
+
         // 2026-05-06: DAILY_TIP_LIMIT enforcement server-side. Antes só ML path
         // do bot.js (applyGlobalRisk) checava — MT scanners (market-tip-processor,
         // dota-extras, lol-kills, basket-mt) faziam record-tip direto, bypassando
@@ -22616,6 +22654,31 @@ load();
         // Grava odds de abertura para CLV tracking
         if (oddsN != null) {
           stmts.updateTipOpenOdds.run(oddsN, String(matchId), sport);
+        }
+        // 2026-05-10 P0 brain audit: marca tip com learned_correction_id quando
+        // shrink/amplify aplicado. Verify() do readiness-learner exclui tips
+        // marcadas (evita reusar mesmo holdout que treinou o factor — bias de
+        // auto-confirmação). Pega o primeiro corr (prob_shrink prioridade).
+        if (result?.lastInsertRowid && _appliedCorrections?.length) {
+          try {
+            const _firstCorr = _appliedCorrections.find(c => c.id) || _appliedCorrections[0];
+            if (_firstCorr?.id) {
+              db.prepare(`UPDATE tips SET learned_correction_id = ? WHERE id = ?`)
+                .run(_firstCorr.id, result.lastInsertRowid);
+            }
+          } catch (_) {}
+        }
+        // 2026-05-10 P0 brain audit: capturar match_end_at quando match já
+        // tem resolved_at (refer pra audit temporal futura). Tips emitidas
+        // pré-match têm NULL — caller pode refresh depois.
+        if (result?.lastInsertRowid) {
+          try {
+            const mr = db.prepare(`SELECT resolved_at FROM match_results WHERE match_id = ? LIMIT 1`).get(matchId);
+            if (mr?.resolved_at) {
+              db.prepare(`UPDATE tips SET match_end_at = ? WHERE id = ?`)
+                .run(mr.resolved_at, result.lastInsertRowid);
+            }
+          } catch (_) {}
         }
         // Vetor 3 — Line shopping: se bot passou oddsObj com alternativas, persiste best book/odd + Pinnacle anchor
         if (result?.lastInsertRowid && t.lineShopOdds && t.pickSide) {

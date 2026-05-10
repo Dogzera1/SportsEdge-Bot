@@ -22064,6 +22064,39 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   setInterval(_wrapCron('db_integrity_check', runIntegrityCheck), 15 * 60 * 1000);
   setTimeout(_wrapCron('db_integrity_check', runIntegrityCheck), 90 * 60 * 1000);
 
+  // 2026-05-10 P1 brain audit: cron unificado pra refresh calib in-memory.
+  // Antes cada calib (ev-calibration, tennis-markov, football-poisson) era
+  // refreshed por triggers diferentes (cron 6h, manual, mtime check). Cron
+  // unified garante invalidação consistente. Roda a cada 6h. Skip se mem
+  // critical (defer pra evitar OOM em refresh pesado).
+  // Gated por CALIB_UNIFIED_REFRESH_AUTO=true (default true).
+  async function runCalibUnifiedRefresh() {
+    if (/^(0|false|no)$/i.test(String(process.env.CALIB_UNIFIED_REFRESH_AUTO ?? 'true'))) return;
+    if (isMemCritical()) { log('INFO', 'CALIB-REFRESH', 'memCritical — defer'); return; }
+    const _t0 = Date.now();
+    const out = { ev_calib: null, tennis_markov: null, football_poisson: null };
+    try {
+      const evCalib = require('./lib/ev-calibration');
+      out.ev_calib = evCalib.refreshEvCalibration(db);
+    } catch (e) { out.ev_calib = `err: ${e.message}`; }
+    try {
+      const tnCalib = require('./lib/tennis-markov-calib');
+      // Force reload: invalida cache TTL forçando reread do JSON.
+      if (tnCalib._invalidate) tnCalib._invalidate();
+      out.tennis_markov = tnCalib.getCalibMeta?.() || 'reload_only';
+    } catch (e) { out.tennis_markov = `err: ${e.message}`; }
+    try {
+      const fbModel = require('./lib/football-poisson-trained');
+      // Reload se mtime mudou (built-in mtime check)
+      if (fbModel._invalidate) fbModel._invalidate();
+      out.football_poisson = fbModel.hasTrainedFootballModel?.() ? 'loaded' : 'no_params';
+    } catch (e) { out.football_poisson = `err: ${e.message}`; }
+    const dur = Date.now() - _t0;
+    log('INFO', 'CALIB-REFRESH', `unified ${dur}ms | ev=${typeof out.ev_calib === 'object' ? 'ok' : out.ev_calib} | tennis=${typeof out.tennis_markov === 'object' ? 'ok' : out.tennis_markov} | fb=${out.football_poisson}`);
+  }
+  setInterval(_wrapCron('calib_unified_refresh', runCalibUnifiedRefresh), 6 * 60 * 60 * 1000);
+  setTimeout(_wrapCron('calib_unified_refresh', runCalibUnifiedRefresh), 5 * 60 * 1000); // bootstrap 5min
+
   // Daily Autonomy Digest: 1x/dia às AUTONOMY_DIGEST_HOUR_UTC (default 12h UTC = 9h BRT),
   // DM admins com snapshot /autonomy-status. Gated por AUTONOMY_DIGEST_AUTO=true.
   let _lastAutonomyDigestDay = null;

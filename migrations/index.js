@@ -2538,6 +2538,34 @@ const migrations = [
       } catch (_) {}
     },
   },
+  {
+    id: '097_tips_temporal_gate_and_correction_marker',
+    up(db) {
+      // 2026-05-10: P0 brain audit fixes.
+      //
+      // 1. tips.match_end_at — capturado em record-tip (sent_at + duration estimate
+      //    ou match_results.resolved_at se available). Permite gate temporal:
+      //    se sent_at >= match_end_at, tip foi emitida pós-match → reject.
+      //    Memory `garin_echargui_premature_settle_2026_05_03` documenta o caso.
+      //
+      // 2. tips.learned_correction_id — quando readiness-learner aplica
+      //    prob_shrink/ev_shrink, marca o ID em todas tips do escopo. Verify()
+      //    exclui essas tips do recomputo (evita reusar mesmo holdout que treinou
+      //    o factor — bias de auto-confirmação).
+      addColumnIfMissing(db, 'tips', 'match_end_at', 'match_end_at TEXT');
+      addColumnIfMissing(db, 'tips', 'learned_correction_id', 'learned_correction_id INTEGER');
+      try {
+        db.exec(`CREATE INDEX IF NOT EXISTS idx_tips_correction_id
+                 ON tips(learned_correction_id)
+                 WHERE learned_correction_id IS NOT NULL`);
+      } catch (_) {}
+      try {
+        db.exec(`CREATE INDEX IF NOT EXISTS idx_tips_match_end
+                 ON tips(match_end_at)
+                 WHERE match_end_at IS NOT NULL`);
+      } catch (_) {}
+    },
+  },
 ];
 
 function applyMigrations(db) {
