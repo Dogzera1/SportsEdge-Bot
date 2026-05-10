@@ -1497,20 +1497,53 @@ setTimeout(() => {
 // Memory guard 60s — alinhado com server.js. Threshold defaults p/ Railway hobby (512MB).
 const _BOT_MEM_HEAP_WARN_MB = parseInt(process.env.BOOT_MEM_HEAP_WARN_MB || '256', 10);
 const _BOT_MEM_RSS_WARN_MB = parseInt(process.env.BOOT_MEM_RSS_WARN_MB || '400', 10);
+// 2026-05-10: CRIT threshold pra defer crons pesados antes do SIGKILL.
+// Railway hobby cap 512MB → set CRIT=440MB (72MB margin) pra dar tempo
+// dos crons abortarem + GC liberar antes do kernel matar processo.
+// Memory project_oom_crash_loop_2026_05_07: 47 boots/24h confirmaram que
+// SQLite caps sozinhos não bastam — precisa cron defer quando próximo OOM.
+const _BOT_MEM_RSS_CRIT_MB = parseInt(process.env.BOT_MEM_RSS_CRIT_MB || '440', 10);
+const _BOT_MEM_HEAP_CRIT_MB = parseInt(process.env.BOT_MEM_HEAP_CRIT_MB || '320', 10);
 let _botLastMemWarnAt = 0;
+let _botLastMemCritAt = 0;
 setInterval(() => {
   try {
     const m = process.memoryUsage();
     const heapMb = Math.round(m.heapUsed / 1048576);
     const rssMb = Math.round(m.rss / 1048576);
-    if ((heapMb >= _BOT_MEM_HEAP_WARN_MB || rssMb >= _BOT_MEM_RSS_WARN_MB) && Date.now() - _botLastMemWarnAt > 5 * 60 * 1000) {
+    const isCrit = heapMb >= _BOT_MEM_HEAP_CRIT_MB || rssMb >= _BOT_MEM_RSS_CRIT_MB;
+    const isWarn = heapMb >= _BOT_MEM_HEAP_WARN_MB || rssMb >= _BOT_MEM_RSS_WARN_MB;
+    // Set/clear global flag — checado por runAutoAnalysis e outros crons heavy.
+    if (isCrit) {
+      if (!global._memCritical) {
+        log('ERROR', 'MEM-GUARD', `CRIT heap=${heapMb}MB (crit=${_BOT_MEM_HEAP_CRIT_MB}) rss=${rssMb}MB (crit=${_BOT_MEM_RSS_CRIT_MB}) — defering crons pra evitar OOM`);
+        try { if (global.gc) global.gc(); } catch (_) {} // best-effort GC
+      }
+      global._memCritical = { ts: Date.now(), heapMb, rssMb };
+      _botLastMemCritAt = Date.now();
+    } else if (global._memCritical && !isWarn) {
+      // Recovery: limpa flag quando volta abaixo de WARN (margem maior pra evitar flapping).
+      log('INFO', 'MEM-GUARD', `RECOVERY heap=${heapMb}MB rss=${rssMb}MB — crons re-habilitados`);
+      global._memCritical = null;
+    }
+    if (isWarn && !isCrit && Date.now() - _botLastMemWarnAt > 5 * 60 * 1000) {
       log('WARN', 'MEM-GUARD', `bot heap=${heapMb}MB (warn=${_BOT_MEM_HEAP_WARN_MB}) rss=${rssMb}MB (warn=${_BOT_MEM_RSS_WARN_MB}) — proximo OOM se subir mais`);
       _botLastMemWarnAt = Date.now();
     }
-    try { require('./lib/metrics').gauge('bot_heap_mb', heapMb); } catch (_) {}
-    try { require('./lib/metrics').gauge('bot_rss_mb', rssMb); } catch (_) {}
+    try {
+      const _met = require('./lib/metrics');
+      _met.gauge('bot_heap_mb', heapMb);
+      _met.gauge('bot_rss_mb', rssMb);
+      _met.gauge('bot_mem_critical', isCrit ? 1 : 0);
+    } catch (_) {}
   } catch (_) {}
 }, 60 * 1000).unref?.();
+
+// Helper exportável pra crons checarem se devem skip por mem critical.
+// Usar pattern: if (isMemCritical()) { log(...); return; }
+function isMemCritical() {
+  return !!(global._memCritical && global._memCritical.ts);
+}
 
 // ── Server Helpers ──
 const ADMIN_KEY = (process.env.ADMIN_KEY || '').trim();
@@ -2601,6 +2634,15 @@ async function withAutoAnalysisMutex(fn) {
 }
 
 async function runAutoAnalysis() {
+  // 2026-05-10: defer cycle quando bot está em mem critical (RSS≥440MB).
+  // SIGKILL Railway 512MB chega rápido com 244+267 matches em cache; melhor
+  // skipar análise pesada e deixar GC liberar do que crashar mid-cycle.
+  if (isMemCritical()) {
+    const mc = global._memCritical || {};
+    log('WARN', 'AUTO', `MEM-CRIT skip cycle: rss=${mc.rssMb}MB heap=${mc.heapMb}MB — aguardando recovery`);
+    try { _metrics.incr('auto_analysis_skip', { reason: 'mem_critical' }); } catch (_) {}
+    return;
+  }
   return withAutoAnalysisMutex(async () => {
   const _autoT0 = Date.now();
   const now = Date.now();
@@ -21714,6 +21756,7 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   let _lastCalibRefitDay = null;
   async function runMtCalibRefit() {
     if (/^(1|true|yes)$/i.test(String(process.env.CALIB_AUTO_REFIT_DISABLED || ''))) return;
+    if (isMemCritical()) { log('WARN', 'MT-CALIB-REFIT', 'mem_critical — defer cycle'); return; }
     const now = new Date();
     const today = now.toISOString().slice(0, 10);
     const isBootstrap = !_lastCalibRefitDay;
@@ -21981,6 +22024,7 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   let _lastNightlyRetrainDay = null;
   async function runNightlyRetrainCheck() {
     if (/^(0|false|no)$/i.test(String(process.env.NIGHTLY_RETRAIN_AUTO ?? 'true'))) return;
+    if (isMemCritical()) { log('WARN', 'NIGHTLY-RETRAIN', 'mem_critical — defer'); return; }
     const hourUtc = parseInt(process.env.NIGHTLY_RETRAIN_HOUR_UTC || '3', 10);
     const now = new Date();
     const today = now.toISOString().slice(0, 10);
@@ -23099,6 +23143,7 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   let _lastTennisCalibRefitDay = null;
   async function runTennisCalibRefitDaily() {
     if (/^(1|true|yes)$/i.test(String(process.env.TENNIS_CALIB_REFIT_DISABLED || ''))) return;
+    if (isMemCritical()) { log('WARN', 'TENNIS-CALIB-REFIT', 'mem_critical — defer'); return; }
     const now = new Date();
     if (now.getHours() !== 4) return;
     const today = now.toISOString().slice(0, 10);
