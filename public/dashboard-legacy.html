@@ -1387,7 +1387,10 @@ function renderLiveSnapshot(data) {
     return;
   }
 
-  var esc = function(s) { return String(s == null ? '' : s).replace(/</g, '&lt;'); };
+  // 2026-05-09: escape completo (era só '<'). Antes nomes server-controlled
+  // como participant/league passavam '>', '&', quote, single-quote raw — XSS via
+  // innerHTML. Caso real: 'Sean Brady **<img>' renderia tag.
+  var esc = function(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'); };
   var fmtGold = function(v) { return v >= 1000 ? (v / 1000).toFixed(1) + 'k' : String(v || 0); };
 
   var sections = [];
@@ -1507,7 +1510,10 @@ function renderUpcoming(data) {
     return;
   }
 
-  var esc = function(s) { return String(s == null ? '' : s).replace(/</g, '&lt;'); };
+  // 2026-05-09: escape completo (era só '<'). Antes nomes server-controlled
+  // como participant/league passavam '>', '&', quote, single-quote raw — XSS via
+  // innerHTML. Caso real: 'Sean Brady **<img>' renderia tag.
+  var esc = function(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'); };
   var fmtTime = function(iso) {
     try {
       var d = new Date(iso);
@@ -1572,7 +1578,15 @@ function renderTips(tips) {
     document.getElementById('tipsTable').innerHTML = '<div class="loading">Nenhuma tip encontrada.</div>';
     return;
   }
-
+  // 2026-05-09: escape XSS — antes participant1/tip_participant/tip_reason iam raw
+  // pra innerHTML. Caso real: tip 2499 com tip_participant='** Sean Brady' (parser
+  // bug fixed em 450ccb1, mas legacy renderiza tudo que chega via /tips-history).
+  // Usa text-only escape (5 chars HTML-special).
+  var escHtml = function(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  };
   const rows = tips.map(function(t) {
     const sport = t.sport || currentSport;
     const settled = t.result === 'win' || t.result === 'loss' || t.result === 'void';
@@ -1622,8 +1636,9 @@ function renderTips(tips) {
       ? new Date(t.sent_at).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
       : '\u2013';
 
-    const match = (t.participant1 || '?') + ' vs ' + (t.participant2 || '?');
-    const why = t.tip_reason ? String(t.tip_reason).replace(/"/g, '\\"') : '';
+    const match = escHtml(t.participant1 || '?') + ' vs ' + escHtml(t.participant2 || '?');
+    // why vai pra title="..." attribute — escapa quote E html
+    const why = t.tip_reason ? escHtml(String(t.tip_reason)) : '';
 
     const evCellTitle = (!settled && t.ev != null && t.current_ev != null && t.ev !== t.current_ev)
       ? 'title="EV original: ' + parseFloat(t.ev).toFixed(1) + '% → atual: ' + parseFloat(t.current_ev).toFixed(1) + '%"'
@@ -1638,7 +1653,7 @@ function renderTips(tips) {
     return '<tr title="' + (why ? ('Por quê: ' + why) : '') + '">' +
       '<td style="color:#6b7280;font-size:0.7rem">' + date + reEval + '</td>' +
       '<td title="' + match + '" style="max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + match + '</td>' +
-      '<td><strong>' + (t.tip_participant || '?') + '</strong></td>' +
+      '<td><strong>' + escHtml(t.tip_participant || '?') + '</strong></td>' +
       '<td>' + parseFloat(showOdds || 0).toFixed(2) + '</td>' +
       '<td ' + evCellTitle + ' style="color:' + evColor + '">' + (ev === '\u2013' ? ev : ev + '%') + '</td>' +
       '<td ' + stakeCellTitle + ' ' + stakeStyle + '>' + showStake + '</td>' +
