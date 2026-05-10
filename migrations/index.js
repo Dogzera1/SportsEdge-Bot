@@ -2566,6 +2566,23 @@ const migrations = [
       } catch (_) {}
     },
   },
+  {
+    id: '098_market_tips_shadow_cs_sport_consolidate',
+    up(db) {
+      // 2026-05-10: market_tips_shadow tinha sport='cs2' (orphan); tips table foi
+      // consolidado pra 'cs' em mig 074 mas market_tips_shadow ficou pra trás.
+      // Dashboard /admin/sport-detail?sport=cs filtrava 'cs' → invisíveis (59 rows).
+      // Padroniza pra 'cs' em todas tabelas relacionadas.
+      try {
+        const r = db.prepare(`UPDATE market_tips_shadow SET sport = 'cs' WHERE sport = 'cs2'`).run();
+        if (r.changes > 0) console.log(`[mig 098] consolidated ${r.changes} market_tips_shadow rows cs2→cs`);
+      } catch (e) { console.log(`[mig 098] market_tips_shadow update: ${e.message}`); }
+      try {
+        const r = db.prepare(`UPDATE market_tip_dm_sent SET sport = 'cs' WHERE sport = 'cs2'`).run();
+        if (r.changes > 0) console.log(`[mig 098] consolidated ${r.changes} market_tip_dm_sent rows cs2→cs`);
+      } catch (e) { /* tabela pode não existir */ }
+    },
+  },
 ];
 
 function applyMigrations(db) {

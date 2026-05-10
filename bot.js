@@ -19651,8 +19651,10 @@ async function pollCs(runOnce = false) {
               if (_shadowAllCs.length) {
                 try {
                   const { logShadowTip } = require('./lib/market-tips-shadow');
-                  for (const t of _shadowAllCs) logShadowTip(db, { sport: 'cs2', match, bestOf: csBestOf, tip: t, isLive: isLiveCs });
-                } catch (e) { log('WARN', 'MT-SHADOW', `cs2 logShadowTip: ${e.message}`); }
+                  // 2026-05-10: sport='cs' (mig 074 consolidou cs2→cs em tips table; market_tips_shadow
+                  // estava com 'cs2' órfão — dashboard sport-detail filtra 'cs' → ficavam invisíveis).
+                  for (const t of _shadowAllCs) logShadowTip(db, { sport: 'cs', match, bestOf: csBestOf, tip: t, isLive: isLiveCs });
+                } catch (e) { log('WARN', 'MT-SHADOW', `cs logShadowTip: ${e.message}`); }
                 if (_shadowAllCs.length !== found.length) {
                   log('DEBUG', 'CS-SHADOW-PURE', `${match.team1} vs ${match.team2}: shadow=${_shadowAllCs.length} promotable=${found.length}`);
                 }
