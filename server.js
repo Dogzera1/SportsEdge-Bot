@@ -11959,6 +11959,81 @@ setInterval(load, 60000);
     return;
   }
 
+  // ── /admin/pending-tips-diag: lista tips reais pendentes COM metadata bruto
+  // (archived/is_shadow/market_type/sent_at) sem dedup nem filtros aplicados em
+  // /tips-history. Util pra detectar tips zumbi (archived=1 + result=null) que
+  // run-settle skip por WHERE archived=0 mas aparecem em pending_tips_by_sport.
+  // GET /admin/pending-tips-diag?sport=cs (opt) + apply=void-zombies pra
+  // recuperar (cron auto-void usa janela diferente; este força override).
+  if (p === '/admin/pending-tips-diag' && (req.method === 'GET' || req.method === 'POST')) {
+    if (!requireAdmin(req, res)) return;
+    const sportFilter = String(parsed.query.sport || '').toLowerCase().trim();
+    const sportClause = sportFilter && /^[a-z0-9]+$/.test(sportFilter) ? `AND sport = ?` : '';
+    const sportArgs = sportClause ? [sportFilter] : [];
+    const apply = String(parsed.query.apply || '').toLowerCase().trim();
+    try {
+      const rows = db.prepare(`
+        SELECT id, sport, match_id, participant1, participant2, tip_participant,
+               odds, stake, market_type, sent_at, is_shadow, archived,
+               (julianday('now') - julianday(sent_at)) * 24 AS hours_since_sent
+        FROM tips
+        WHERE result IS NULL
+          ${sportClause}
+        ORDER BY sent_at ASC
+        LIMIT 500
+      `).all(...sportArgs);
+      const summary = {
+        total: rows.length,
+        by_archived: {},
+        by_sport: {},
+        by_market_type: {},
+        zombies: [],  // archived=1 + result=null + > 24h ago
+      };
+      for (const r of rows) {
+        const ar = r.archived ? 1 : 0;
+        summary.by_archived[ar] = (summary.by_archived[ar] || 0) + 1;
+        summary.by_sport[r.sport] = (summary.by_sport[r.sport] || 0) + 1;
+        const mt = (r.market_type || 'ML').toUpperCase();
+        summary.by_market_type[mt] = (summary.by_market_type[mt] || 0) + 1;
+        if (ar === 1 && r.hours_since_sent > 24) {
+          summary.zombies.push({ id: r.id, sport: r.sport, match_id: r.match_id, market_type: mt, sent_at: r.sent_at, hours_since_sent: Math.round(r.hours_since_sent) });
+        }
+      }
+      let applied = null;
+      if (apply === 'void-zombies') {
+        // Marca como void as zombies (archived=1 + result=null + >24h). Audit trail
+        // via tip_settlement_audit (mig 073). Reversivel via /reopen-tip se necessario.
+        const ids = summary.zombies.map(z => z.id);
+        if (ids.length) {
+          const upd = db.transaction((idList) => {
+            const stmtUpd = db.prepare(`UPDATE tips SET result='void', settled_at=datetime('now'), profit_reais=0 WHERE id=? AND result IS NULL`);
+            const stmtAud = db.prepare(`INSERT INTO tip_settlement_audit (tip_id, sport, prev_result, new_result, prev_profit_reais, new_profit_reais, actor, reason, source) VALUES (?, ?, NULL, 'void', NULL, 0, 'admin', 'zombie_recovery_archived_pending', '/admin/pending-tips-diag')`);
+            let n = 0;
+            for (const id of idList) {
+              const z = summary.zombies.find(zz => zz.id === id);
+              if (!z) continue;
+              const r = stmtUpd.run(id);
+              if (r.changes > 0) {
+                try { stmtAud.run(id, z.sport); } catch (_) {}
+                n++;
+              }
+            }
+            return n;
+          });
+          applied = { voided: upd(ids), attempted: ids.length };
+        } else {
+          applied = { voided: 0, attempted: 0, note: 'no zombies found' };
+        }
+      }
+      sendJson(res, { ok: true, summary, applied, sample: rows.slice(0, 30).map(r => ({
+        id: r.id, sport: r.sport, mt: r.market_type, archived: r.archived ? 1 : 0,
+        is_shadow: r.is_shadow ? 1 : 0, sent_at: r.sent_at, hours: Math.round(r.hours_since_sent),
+        match: `${r.participant1} vs ${r.participant2}`, mid: r.match_id,
+      })) });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   // ── /admin/env-audit: sanity check de envs críticas.
   // GET /admin/env-audit?key=<ADMIN_KEY>
   // Mostra: configurada/null + tipo (bool/string/number) + valor masked se sensitive.
