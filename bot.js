@@ -14500,7 +14500,8 @@ async function _pollDotaInner(runOnce = false) {
         && match.score1 === 0 && match.score2 === 0;
       const isStartOfSerie = !isLive || scoreIsKnownZero;
       if (isStartOfSerie && prevBase?.tipSent && (now - prevBase.ts) < 12 * 60 * 60 * 1000) {
-        log('DEBUG', 'AUTO-DOTA', `Skip ${match.team1} vs ${match.team2} (${match.status}): tip já enviada no início dessa série (${Math.round((now-prevBase.ts)/60000)}min atrás)`);
+        // 2026-05-10: DEBUG→INFO. Silent skip era invisível em logs (35h sem tip dota2 sem motivo).
+        log('INFO', 'AUTO-DOTA', `Skip dedup-serie ${match.team1} vs ${match.team2} (${match.status}): tip já enviada no início dessa série (${Math.round((now-prevBase.ts)/60000)}min atrás)`);
         _dotaCycleSkips.dedup_serie++;
         continue;
       }
@@ -14532,7 +14533,9 @@ async function _pollDotaInner(runOnce = false) {
         o = await serverGet(`/odds?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}&game=dota2${liveFlag}${mapFlag}`).catch(() => null);
       }
       if (!o?.t1 || !o?.t2) {
-        log('DEBUG', 'AUTO-DOTA', `Sem odds ${isLive ? 'ao vivo' : ''}${dotaMapNum ? ` (mapa ${dotaMapNum})` : ''}: ${match.team1} vs ${match.team2}`);
+        // 2026-05-10: DEBUG→INFO pra revelar gap Pinnacle dota2 (cache 2-4 vs feed 5-6 partidas).
+        // Provável principal causa do silent 35h em sport_silent_dota2 alert.
+        log('INFO', 'AUTO-DOTA', `Sem odds ${isLive ? 'ao vivo' : ''}${dotaMapNum ? ` (mapa ${dotaMapNum})` : ''}: ${match.team1} vs ${match.team2}`);
         setDotaAnalyzed({ ts: now, tipSent: false, noEdge: true });
         _dotaCycleSkips.no_odds++;
         continue;
