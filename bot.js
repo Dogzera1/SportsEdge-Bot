@@ -1506,11 +1506,18 @@ const _BOT_MEM_RSS_WARN_MB = parseInt(process.env.BOOT_MEM_RSS_WARN_MB || '400',
 // 2026-05-10 v2: 440→380 após teste empírico — bot ainda crashava. RSS
 // sobe rápido (>30MB/tick) com 244 football + 267 Pinnacle. CRIT mais
 // agressivo + tick interval 60s→15s pra interceptar antes de SIGKILL.
-const _BOT_MEM_RSS_CRIT_MB = parseInt(process.env.BOT_MEM_RSS_CRIT_MB || '380', 10);
-const _BOT_MEM_HEAP_CRIT_MB = parseInt(process.env.BOT_MEM_HEAP_CRIT_MB || '280', 10);
+// 2026-05-10 v3: hard cap pra ignorar env Railway stale. 50 boots/24h
+// confirmados em prod com baac4c2 deployed — env override (e.g. =440) estava
+// permitindo SIGKILL antes de defer kick in. Agora CRIT clamp em [200, 380]
+// e default baixou pra 340 (mais margem vs Railway hobby 512MB cap).
+const _BOT_MEM_RSS_CRIT_RAW = parseInt(process.env.BOT_MEM_RSS_CRIT_MB || '340', 10);
+const _BOT_MEM_HEAP_CRIT_RAW = parseInt(process.env.BOT_MEM_HEAP_CRIT_MB || '260', 10);
+const _BOT_MEM_RSS_CRIT_MB = Math.min(380, Math.max(200, Number.isFinite(_BOT_MEM_RSS_CRIT_RAW) ? _BOT_MEM_RSS_CRIT_RAW : 340));
+const _BOT_MEM_HEAP_CRIT_MB = Math.min(300, Math.max(150, Number.isFinite(_BOT_MEM_HEAP_CRIT_RAW) ? _BOT_MEM_HEAP_CRIT_RAW : 260));
 // Boot log thresholds efetivos — facilita debug quando WARN dispara mas CRIT não,
 // indicando env Railway override stale (e.g. BOT_MEM_RSS_CRIT_MB=440 antigo).
-console.log(`[mem-guard] thresholds: heap warn=${_BOT_MEM_HEAP_WARN_MB} crit=${_BOT_MEM_HEAP_CRIT_MB} | rss warn=${_BOT_MEM_RSS_WARN_MB} crit=${_BOT_MEM_RSS_CRIT_MB}`);
+const _critClamped = _BOT_MEM_RSS_CRIT_RAW !== _BOT_MEM_RSS_CRIT_MB || _BOT_MEM_HEAP_CRIT_RAW !== _BOT_MEM_HEAP_CRIT_MB;
+console.log(`[mem-guard] thresholds: heap warn=${_BOT_MEM_HEAP_WARN_MB} crit=${_BOT_MEM_HEAP_CRIT_MB} | rss warn=${_BOT_MEM_RSS_WARN_MB} crit=${_BOT_MEM_RSS_CRIT_MB}${_critClamped ? ` (CLAMPED env raw heap=${_BOT_MEM_HEAP_CRIT_RAW} rss=${_BOT_MEM_RSS_CRIT_RAW})` : ''}`);
 let _botLastMemWarnAt = 0;
 let _botLastMemCritAt = 0;
 setInterval(() => {

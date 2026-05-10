@@ -22181,7 +22181,15 @@ load();
         // 2026-05-06: granularidade per-(sport, market_type, hour). Antes leak hora ML
         // bloqueava também handicap/total nessa hora. Agora cada market tem janela
         // própria. Cascade: (sport, market, hour) → (sport, hour) sport-wide fallback.
-        if (/^true$/i.test(String(process.env.TIME_OF_DAY_AUTO || '')) && !_bypassFiltersForShadow) {
+        // 2026-05-10: per-sport opt-out via TIME_OF_DAY_DISABLED_SPORTS (csv) ou
+        // TIME_OF_DAY_DISABLED_<SPORT>=true. User request: tennis n=8 ROI<-25 amostra
+        // muito pequena pra bloquear hora; ROI agregado 30d é +6.8%. Sport-level
+        // detection ainda ativa pra leaks reais.
+        const _tofdDisabledCsv = String(process.env.TIME_OF_DAY_DISABLED_SPORTS || '').toLowerCase();
+        const _tofdDisabledSet = new Set(_tofdDisabledCsv.split(',').map(s => s.trim()).filter(Boolean));
+        const _tofdDisabledForSport = _tofdDisabledSet.has(String(sport).toLowerCase())
+          || /^(1|true|yes)$/i.test(String(process.env[`TIME_OF_DAY_DISABLED_${String(sport).toUpperCase()}`] || ''));
+        if (/^true$/i.test(String(process.env.TIME_OF_DAY_AUTO || '')) && !_bypassFiltersForShadow && !_tofdDisabledForSport) {
           try {
             if (!global._timeOfDayBlockCache) global._timeOfDayBlockCache = {};
             const cache = global._timeOfDayBlockCache;
@@ -23589,11 +23597,18 @@ load();
           if (p != null) b.profit += p;
           b.stake += tipStakeReais(r, _bl.unit_value);
         }
+        // 2026-05-10: respeita opt-out per-sport TIME_OF_DAY_DISABLED_<SPORT> ou
+        // TIME_OF_DAY_DISABLED_SPORTS csv (mesma lógica do gate em record-tip).
+        const _tofdOff = String(process.env.TIME_OF_DAY_DISABLED_SPORTS || '').toLowerCase()
+          .split(',').map(s => s.trim()).filter(Boolean).includes(String(sport).toLowerCase())
+          || /^(1|true|yes)$/i.test(String(process.env[`TIME_OF_DAY_DISABLED_${String(sport).toUpperCase()}`] || ''));
         const todBlocked = [];
-        for (const h in byH) {
-          const b = byH[h];
-          const roi = b.stake > 0 ? (b.profit / b.stake * 100) : null;
-          if (b.n >= todMinN && roi != null && roi <= todRoiMax) todBlocked.push(Number(h));
+        if (!_tofdOff) {
+          for (const h in byH) {
+            const b = byH[h];
+            const roi = b.stake > 0 ? (b.profit / b.stake * 100) : null;
+            if (b.n >= todMinN && roi != null && roi <= todRoiMax) todBlocked.push(Number(h));
+          }
         }
         out.sports.push({
           sport, n, roi_pct: roi, drawdown_pct: dd,
@@ -23602,7 +23617,7 @@ load();
           loop2_brier_ev: { reduction_pp: brierReduction, reason: brierReason, brier: brierCurrent, baseline: brierBaseline, n: brierN },
           loop3_league_blocks: blocksBySport[sport] || [],
           loop4_sport_perf: { mult: sportMult, reason: sportReason },
-          loop6_time_of_day: { blocked_hours_utc: todBlocked.sort((a,b) => a-b) },
+          loop6_time_of_day: { blocked_hours_utc: todBlocked.sort((a,b) => a-b), disabled: _tofdOff },
           loop9_dynamic_thresholds: dynBySport[sport] || {},
         });
       }
