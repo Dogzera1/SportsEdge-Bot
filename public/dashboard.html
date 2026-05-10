@@ -1470,9 +1470,11 @@ async function refresh() {
     try { await loadMarketTipsShadow(); } catch (_) {}
     // 2026-05-05: refresh readiness card também (per-sport, segue dropdown).
     // Roda só se a section já foi expandida (lazy-load mantém UX rápida).
+    // 2026-05-10: classList.contains('open') ao invés de dataset.collapsed
+    // (toggleSection nunca seta dataset — checks antigos sempre false).
     try {
       const sec = document.getElementById('secShadowReadiness');
-      if (sec && sec.dataset.collapsed === 'false') await loadShadowReadiness();
+      if (sec && sec.classList.contains('open')) await loadShadowReadiness();
     } catch (_) {}
     // 2026-05-09: refresh ML shadow card também — user reportou "cards travados"
     // ao clicar. Causa: filterToSport disparava refresh() mas ML shadow não
@@ -1480,7 +1482,7 @@ async function refresh() {
     // Mesmo padrão lazy-load do shadow readiness (só roda se expandido).
     try {
       const sec = document.getElementById('secMlShadow');
-      if (sec && sec.dataset.collapsed === 'false') await loadMlShadowBySport();
+      if (sec && sec.classList.contains('open')) await loadMlShadowBySport();
     } catch (_) {}
     // Só atualiza timestamp se ainda é o refresh mais recente
     if (gen === refreshGen) {
@@ -2891,9 +2893,14 @@ function filterTipsByTier(sport, tier) {
 
 // 2026-05-09: helper — só recarrega ML shadow se seção tá expandida (evita
 // fetch desnecessário). Lock interno em loadMlShadowBySport previne overlap.
+// 2026-05-10: estado "expandido" é via class .open (toggleSection toggles
+// classList.open) — antigamente checava sec.dataset.collapsed='false' mas
+// toggleSection nunca seta esse attribute, então o check era sempre false e
+// _refresh NUNCA reload. Bug visual: clicar card de sport não atualizava
+// borda destacada do ML shadow card.
 function _refreshMlShadowIfExpanded() {
   const sec = document.getElementById('secMlShadow');
-  if (sec && sec.dataset.collapsed === 'false') {
+  if (sec && sec.classList.contains('open')) {
     loadMlShadowBySport().catch(() => {});
   }
 }
