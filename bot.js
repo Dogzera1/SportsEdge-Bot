@@ -1498,12 +1498,16 @@ setTimeout(() => {
 const _BOT_MEM_HEAP_WARN_MB = parseInt(process.env.BOOT_MEM_HEAP_WARN_MB || '256', 10);
 const _BOT_MEM_RSS_WARN_MB = parseInt(process.env.BOOT_MEM_RSS_WARN_MB || '400', 10);
 // 2026-05-10: CRIT threshold pra defer crons pesados antes do SIGKILL.
-// Railway hobby cap 512MB → set CRIT=440MB (72MB margin) pra dar tempo
+// Railway hobby cap 512MB → set CRIT=380MB (130MB margin) pra dar tempo
 // dos crons abortarem + GC liberar antes do kernel matar processo.
 // Memory project_oom_crash_loop_2026_05_07: 47 boots/24h confirmaram que
 // SQLite caps sozinhos não bastam — precisa cron defer quando próximo OOM.
-const _BOT_MEM_RSS_CRIT_MB = parseInt(process.env.BOT_MEM_RSS_CRIT_MB || '440', 10);
-const _BOT_MEM_HEAP_CRIT_MB = parseInt(process.env.BOT_MEM_HEAP_CRIT_MB || '320', 10);
+//
+// 2026-05-10 v2: 440→380 após teste empírico — bot ainda crashava. RSS
+// sobe rápido (>30MB/tick) com 244 football + 267 Pinnacle. CRIT mais
+// agressivo + tick interval 60s→15s pra interceptar antes de SIGKILL.
+const _BOT_MEM_RSS_CRIT_MB = parseInt(process.env.BOT_MEM_RSS_CRIT_MB || '380', 10);
+const _BOT_MEM_HEAP_CRIT_MB = parseInt(process.env.BOT_MEM_HEAP_CRIT_MB || '280', 10);
 let _botLastMemWarnAt = 0;
 let _botLastMemCritAt = 0;
 setInterval(() => {
@@ -1537,7 +1541,7 @@ setInterval(() => {
       _met.gauge('bot_mem_critical', isCrit ? 1 : 0);
     } catch (_) {}
   } catch (_) {}
-}, 60 * 1000).unref?.();
+}, 15 * 1000).unref?.();  // 60s→15s: RSS pode subir 30+MB/tick com 244 fb + 267 pin caches
 
 // Helper exportável pra crons checarem se devem skip por mem critical.
 // Usar pattern: if (isMemCritical()) { log(...); return; }
