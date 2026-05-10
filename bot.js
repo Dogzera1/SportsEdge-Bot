@@ -124,7 +124,7 @@ async function refreshBrierEvAdjustments() {
   }
 }
 
-function evCeilingFor(game, odds) {
+function evCeilingFor(game, odds, league = null) {
   const oddsNum = parseFloat(odds);
   let base;
   if (Number.isFinite(oddsNum) && oddsNum > 0 && oddsNum < 1.40) base = 40;
@@ -144,6 +144,19 @@ function evCeilingFor(game, odds) {
       const isotonicDisabled = !/^(0|false|no)$/i.test(String(process.env.TENNIS_ISOTONIC_DISABLED ?? 'true'));
       base = ok ? (isotonicDisabled ? 60 : 80) : 50;
     } else base = 50;
+  }
+  // 2026-05-10: feeder/academy leagues reduzem ceiling pra 50.
+  // Sintoma: T1 Esports Academy vs Gen.G Global Academy (LCK Challengers),
+  // modelo dá pmodel=89% @ odd 2.83 → EV 153%. Trained model herda features de
+  // jogadores que jogaram em main team via OracleElixir, mas Academy é roster
+  // diferente — pmodel calibration drift. Cap mais agressivo até modelo
+  // separar Academy de Main reliably.
+  // Match: LCK Challengers, LCS Challengers, NACL, Academy, Youth, Rookies,
+  // Prime League (German tier 2), GLL, Hellenic, etc.
+  const isFeeder = league && /\b(academy|challengers?|youth|rookies?|prime|gll|hellenic|ebl|nacl|lcp|tcl|liga portuguesa|hitpoint)\b/i.test(String(league));
+  if (isFeeder) {
+    const feederCeil = parseFloat(process.env[`${String(game).toUpperCase()}_FEEDER_EV_CEILING`] ?? '50');
+    base = Math.min(base, feederCeil);
   }
   const adj = _brierEvAdjustmentFor(game);
   return Math.max(20, base - adj);
@@ -2817,7 +2830,7 @@ async function runAutoAnalysis() {
           // EV sanity: bloqueia EV absurdamente alto (erro de cálculo da IA) — espelha gate do upcoming.
           // Ceiling condicional: 80% se modelo treinado ativo (ECE baixa), 50% caso contrário.
           const tipEVnumLive = parseFloat(String(tipEV).replace(/[%+]/g, ''));
-          const lolCeilingLive = evCeilingFor('lol', tipOdd);
+          const lolCeilingLive = evCeilingFor('lol', tipOdd, match?.league || null);
           if (!isNaN(tipEVnumLive) && tipEVnumLive > lolCeilingLive) {
             log('WARN', 'AUTO', `Gate EV sanity LIVE: ${match.team1} vs ${match.team2} → EV ${tipEVnumLive}% > ${lolCeilingLive}% (ceiling trained-aware) → rejeitado`);
             try {
@@ -3328,7 +3341,7 @@ async function runAutoAnalysis() {
 
             // EV sanity upcoming: ceiling condicional ao modelo treinado
             const tipEVnum = parseFloat(String(tipEV).replace('%', '').replace('+', ''));
-            const lolCeilingUp = evCeilingFor('lol', tipOdd);
+            const lolCeilingUp = evCeilingFor('lol', tipOdd, match?.league || null);
             if (!isNaN(tipEVnum) && tipEVnum > lolCeilingUp) {
               log('WARN', 'AUTO', `Gate EV sanity upcoming: ${match.team1} vs ${match.team2} → EV ${tipEVnum}% > ${lolCeilingUp}% (ceiling trained-aware) → rejeitado`);
               try {
@@ -9655,7 +9668,7 @@ async function autoAnalyzeMatch(token, match) {
       }
 
       // Gate 4b: EV sanity — ceiling condicional ao modelo treinado (ECE baixa permite EV genuíno maior)
-      const lolCeilingAnalyze = evCeilingFor('lol', tipOdd);
+      const lolCeilingAnalyze = evCeilingFor('lol', tipOdd, match?.league || null);
       if (filteredTipResult && !isNaN(tipEV) && tipEV > lolCeilingAnalyze) {
         log('WARN', 'AUTO', `Gate EV sanity: ${match.team1} vs ${match.team2} → EV ${tipEV}% > ${lolCeilingAnalyze}% (ceiling trained-aware) → rejeitado`);
         try {
@@ -17634,7 +17647,7 @@ Máximo 200 palavras. Raciocínio breve antes da decisão.`;
           await new Promise(r => setTimeout(r, 3000)); continue;
         }
         // EV ceiling trained-aware (Tennis trained: ECE 0.026 → 80% cap)
-        const tennisCeiling = evCeilingFor('tennis', tipOdd);
+        const tennisCeiling = evCeilingFor('tennis', tipOdd, match?.league || null);
         if (tipEV > tennisCeiling) {
           log('WARN', 'AUTO-TENNIS', `Gate EV sanity: EV ${tipEV}% > ${tennisCeiling}% (ceiling trained-aware) → rejeitado: ${tipPlayer} @ ${tipOdd}`);
           try {
@@ -19810,7 +19823,7 @@ async function pollCs(runOnce = false) {
           continue;
         }
         // EV ceiling trained-aware
-        const csCeiling = evCeilingFor('cs2', pickOdd);
+        const csCeiling = evCeilingFor('cs2', pickOdd, match?.league || null);
         if (evPct > csCeiling) {
           analyzedCs.set(key, { ts: now, tipSent: false });
           log('WARN', 'AUTO-CS', `Gate EV sanity: EV ${evPct.toFixed(1)}% > ${csCeiling}% (ceiling trained-aware) → rejeitado: ${match.team1} vs ${match.team2}`);
@@ -20432,7 +20445,7 @@ async function pollValorant(runOnce = false) {
           continue;
         }
         // EV ceiling trained-aware (Valorant trained é marginal → cap 50% default)
-        const valCeiling = evCeilingFor('valorant', pickOdd);
+        const valCeiling = evCeilingFor('valorant', pickOdd, match?.league || null);
         if (evPct > valCeiling) {
           analyzedValorant.set(key, { ts: now, tipSent: false });
           log('WARN', 'AUTO-VAL', `Gate EV sanity: EV ${evPct.toFixed(1)}% > ${valCeiling}% → rejeitado: ${match.team1} vs ${match.team2}`);
