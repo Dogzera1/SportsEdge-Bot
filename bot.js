@@ -1508,6 +1508,9 @@ const _BOT_MEM_RSS_WARN_MB = parseInt(process.env.BOOT_MEM_RSS_WARN_MB || '400',
 // agressivo + tick interval 60s→15s pra interceptar antes de SIGKILL.
 const _BOT_MEM_RSS_CRIT_MB = parseInt(process.env.BOT_MEM_RSS_CRIT_MB || '380', 10);
 const _BOT_MEM_HEAP_CRIT_MB = parseInt(process.env.BOT_MEM_HEAP_CRIT_MB || '280', 10);
+// Boot log thresholds efetivos — facilita debug quando WARN dispara mas CRIT não,
+// indicando env Railway override stale (e.g. BOT_MEM_RSS_CRIT_MB=440 antigo).
+console.log(`[mem-guard] thresholds: heap warn=${_BOT_MEM_HEAP_WARN_MB} crit=${_BOT_MEM_HEAP_CRIT_MB} | rss warn=${_BOT_MEM_RSS_WARN_MB} crit=${_BOT_MEM_RSS_CRIT_MB}`);
 let _botLastMemWarnAt = 0;
 let _botLastMemCritAt = 0;
 setInterval(() => {
@@ -3038,7 +3041,7 @@ async function runAutoAnalysis() {
             `⚠️ _Aposte com responsabilidade._`;
 
           // Semi-auto deeplink — book com odd maior entre preferred.
-          const _betBtn = _buildTipBetButton('lol', oddsToUse, _pickSideLs, match, tipStakeAdj, tipOdd);
+          const _betBtn = _buildTipBetButton('lol', result.o, _pickSideLs, match, tipStakeAdj, tipOdd);
 
           if (_isShadowDispatch(rec, 'lol')) {
             log('INFO', 'AUTO', `[SHADOW] ${tipTeam} @ ${tipOdd} | EV:${tipEV} | ${tipStakeAdj} | ${tipConf} — DM suprimida${rec?.autoShadowed ? ' (auto-shadow)' : ''}`);
@@ -14424,6 +14427,8 @@ async function _pollDotaInner(runOnce = false) {
     const liveCount = matches.filter(m => m.status === 'live').length;
     try { _metrics.gauge('live_matches', liveCount, { sport: 'dota2' }); } catch (_) {}
     log('INFO', 'AUTO-DOTA', `${matches.length} partidas (${liveCount} live, ${matches.length - liveCount} upcoming)`);
+    const _dotaCycleSkips = { dedup_serie: 0, dedup_recent: 0, cooldown: 0, date_filter: 0, no_odds: 0, stale_odds: 0, no_stats: 0, ml_prefilter: 0, fraud: 0, segment: 0, no_tip: 0, ev_low: 0, baixa_blocked: 0, gate_bucket: 0, odd_range: 0, sharp_line: 0, kelly_neg: 0, league_blocked: 0, other: 0 };
+    let _dotaCycleTips = 0;
 
     // Prioridade: live primeiro, depois upcoming por horário asc
     matches.sort((a, b) => {
@@ -14470,6 +14475,7 @@ async function _pollDotaInner(runOnce = false) {
         log('INFO', 'AUTO-DOTA', `Fraud-risk league skip: ${match.team1} vs ${match.team2} [${match.league}] → ${_fraudHit}`);
         logRejection('dota2', `${match.team1} vs ${match.team2}`, 'fraud_risk_league', { league: match.league || '?', pattern: _fraudHit });
         setDotaAnalyzed({ ts: now, tipSent: false, noEdge: true });
+        _dotaCycleSkips.fraud++;
         continue;
       }
 
@@ -14479,6 +14485,7 @@ async function _pollDotaInner(runOnce = false) {
         log('INFO', 'AUTO-DOTA', `Segment skip: ${match.team1} vs ${match.team2} [${match.league}] → ${_segGateD.reason}`);
         logRejection('dota2', `${match.team1} vs ${match.team2}`, 'segment_skip', { league: match.league || '?', reason: _segGateD.reason });
         setDotaAnalyzed({ ts: now, tipSent: false, noEdge: true });
+        _dotaCycleSkips.segment++;
         continue;
       }
       // Bloqueia duplicata pre→live ou re-cadastro com novo event ID no começo.
@@ -14494,17 +14501,18 @@ async function _pollDotaInner(runOnce = false) {
       const isStartOfSerie = !isLive || scoreIsKnownZero;
       if (isStartOfSerie && prevBase?.tipSent && (now - prevBase.ts) < 12 * 60 * 60 * 1000) {
         log('DEBUG', 'AUTO-DOTA', `Skip ${match.team1} vs ${match.team2} (${match.status}): tip já enviada no início dessa série (${Math.round((now-prevBase.ts)/60000)}min atrás)`);
+        _dotaCycleSkips.dedup_serie++;
         continue;
       }
       const prev = analyzedDota.get(key) || analyzedDota.get(pairKey);
-      if (prev?.tipSent) continue;
+      if (prev?.tipSent) { _dotaCycleSkips.dedup_recent++; continue; }
       const cooldown = isLive ? DOTA_LIVE_COOLDOWN : DOTA_INTERVAL;
-      if (prev && (now - prev.ts < cooldown)) continue;
+      if (prev && (now - prev.ts < cooldown)) { _dotaCycleSkips.cooldown++; continue; }
 
       // ── Filtro de data (só upcoming; ao vivo passa sempre) ──
       if (!isLive) {
         const matchTs = match.time ? new Date(match.time).getTime() : 0;
-        if (!matchTs || matchTs < now || matchTs > now + 7 * 24 * 60 * 60 * 1000) continue;
+        if (!matchTs || matchTs < now || matchTs > now + 7 * 24 * 60 * 60 * 1000) { _dotaCycleSkips.date_filter++; continue; }
       }
 
       // ── Odds: ao vivo, infere mapa pelo placar e pede odds do MAPA específico via Pinnacle
@@ -14526,11 +14534,13 @@ async function _pollDotaInner(runOnce = false) {
       if (!o?.t1 || !o?.t2) {
         log('DEBUG', 'AUTO-DOTA', `Sem odds ${isLive ? 'ao vivo' : ''}${dotaMapNum ? ` (mapa ${dotaMapNum})` : ''}: ${match.team1} vs ${match.team2}`);
         setDotaAnalyzed({ ts: now, tipSent: false, noEdge: true });
+        _dotaCycleSkips.no_odds++;
         continue;
       }
       if (!isOddsFresh(o, isLive, 'dota2')) {
         log('INFO', 'AUTO-DOTA', `Odds stale (${oddsAgeStr(o)}): ${match.team1} vs ${match.team2} — pulando`);
         logRejection('dota2', `${match.team1} vs ${match.team2}`, 'odds_stale', { age: oddsAgeStr(o) });
+        _dotaCycleSkips.stale_odds++;
         continue;
       }
       logOddsHistory('dota2', match.id, match.team1, match.team2, o);
@@ -14650,6 +14660,7 @@ async function _pollDotaInner(runOnce = false) {
       if (isLive && !dotaHasLiveStats && /^(1|true|yes)$/i.test(String(process.env.DOTA_LIVE_REQUIRE_STATS ?? 'true'))) {
         log('INFO', 'AUTO-DOTA', `Sem stats live (OpenDota/Steam RT/PS) — pulando: ${match.team1} vs ${match.team2}`);
         setDotaAnalyzed({ ts: now, tipSent: false, noEdge: true });
+        _dotaCycleSkips.no_stats++;
         continue;
       }
 
@@ -14662,6 +14673,7 @@ async function _pollDotaInner(runOnce = false) {
         log('INFO', 'AUTO-DOTA', `Pré-filtro: edge insuficiente (${mlResult.score.toFixed(1)}pp) para ${match.team1} vs ${match.team2}`);
         logRejection('dota2', `${match.team1} vs ${match.team2}`, 'ml_prefilter_edge', { edge: +mlResult.score.toFixed(2) });
         setDotaAnalyzed({ ts: now, tipSent: false, noEdge: true });
+        _dotaCycleSkips.ml_prefilter++;
         continue;
       }
       if ((mlResult.rawEdge || 0) > 15) {
@@ -15050,6 +15062,7 @@ Máximo 200 palavras.`;
       if (!tipMatch) {
         log('INFO', 'AUTO-DOTA', `Sem tip: ${match.team1} vs ${match.team2}`);
         setDotaAnalyzed({ ts: now, tipSent: false, noEdge: true });
+        _dotaCycleSkips.no_tip++;
         await _sleep(2000);
         continue;
       }
@@ -15075,6 +15088,7 @@ Máximo 200 palavras.`;
           log('INFO', 'AUTO-DOTA', `Tier ${_dotaTier} ${match.league}: EV ${_evNumD}% < ${_tier2EvMin}% — rejeitada`);
           logRejection('dota2', `${match.team1} vs ${match.team2}`, 'tier2_ev_low', { tier: _dotaTier, ev: _evNumD, league: match.league });
           setDotaAnalyzed({ ts: now, tipSent: false, noEdge: true });
+          _dotaCycleSkips.ev_low++;
           await _sleep(2000);
           continue;
         }
@@ -15082,6 +15096,7 @@ Máximo 200 palavras.`;
           log('INFO', 'AUTO-DOTA', `Tier ${_dotaTier} ${match.league}: BAIXA bloqueada (variance)`);
           logRejection('dota2', `${match.team1} vs ${match.team2}`, 'tier2_baixa_blocked', { tier: _dotaTier, league: match.league });
           setDotaAnalyzed({ ts: now, tipSent: false, noEdge: true });
+          _dotaCycleSkips.baixa_blocked++;
           await _sleep(2000);
           continue;
         }
@@ -15109,6 +15124,7 @@ Máximo 200 palavras.`;
         log('INFO', 'AUTO-DOTA', `Odd fora do range (${oddVal}): pulando`);
         logRejection('dota2', `${match.team1} vs ${match.team2}`, 'odds_out_of_range', { odd: oddVal, min: minOdds, max: maxOdds });
         setDotaAnalyzed({ ts: now, tipSent: false, noEdge: true });
+        _dotaCycleSkips.odd_range++;
         await _sleep(2000); continue;
       }
       {
@@ -15117,6 +15133,7 @@ Máximo 200 palavras.`;
           log('INFO', 'AUTO-DOTA', `Gate bucket: odd ${oddVal} no bucket bloqueado ${_bk.bucket} (${_bk.source}) — pulando`);
           logRejection('dota2', `${match.team1} vs ${match.team2}`, 'odds_bucket_block', { odd: oddVal, bucket: _bk.bucket, source: _bk.source });
           setDotaAnalyzed({ ts: now, tipSent: false, noEdge: true });
+          _dotaCycleSkips.gate_bucket++;
           await _sleep(2000); continue;
         }
       }
@@ -15127,6 +15144,7 @@ Máximo 200 palavras.`;
         log('INFO', 'AUTO-DOTA', `EV insuficiente (${evVal}% < ${_evReqDota}%${_preBonusDota > 0 ? ` PRE+${_preBonusDota}` : ''}): pulando`);
         logRejection('dota2', `${match.team1} vs ${match.team2}`, 'ev_below_min', { ev: +evVal.toFixed(2), min: _evReqDota, preBonus: _preBonusDota });
         setDotaAnalyzed({ ts: now, tipSent: false, noEdge: true });
+        _dotaCycleSkips.ev_low++;
         await _sleep(2000); continue;
       }
       // EV sanity: bloqueia EV absurdamente alto (erro de cálculo da IA)
@@ -15152,6 +15170,7 @@ Máximo 200 palavras.`;
         log('INFO', 'AUTO-DOTA', `Sharp line gate: ${tipTeam} — ${sharpCheckDota.reason}`);
         logRejection('dota2', `${match.team1} vs ${match.team2}`, 'sharp_line_reject', { tip: tipTeam, reason: sharpCheckDota.reason });
         setDotaAnalyzed({ ts: now, tipSent: false, noEdge: true });
+        _dotaCycleSkips.sharp_line++;
         await _sleep(2000); continue;
       }
 
@@ -15192,7 +15211,7 @@ Máximo 200 palavras.`;
       const tipStake = modelPForKelly
         ? calcKellyWithP(modelPForKelly, tipOdd, kellyFraction, { sport: 'dota2', confKey: tipConf })
         : calcKellyFraction(tipEV, tipOdd, kellyFraction, { sport: 'dota2' });
-      if (tipStake === '0u') { log('INFO', 'AUTO-DOTA', `Kelly negativo: ${tipTeam} @ ${tipOdd}`); await _sleep(2000); continue; }
+      if (tipStake === '0u') { log('INFO', 'AUTO-DOTA', `Kelly negativo: ${tipTeam} @ ${tipOdd}`); _dotaCycleSkips.kelly_neg++; await _sleep(2000); continue; }
 
       const riskAdj = await applyGlobalRisk('dota2', parseFloat(String(tipStake).replace('u', '')) || 0, match.league);
       if (!riskAdj.ok) { log('INFO', 'RISK', `dota2: bloqueada (${riskAdj.reason})`); continue; }
@@ -15209,6 +15228,7 @@ Máximo 200 palavras.`;
       if (_blockedDota) {
         log('INFO', 'AUTO-DOTA', `[BLOCK] dota2/${match.league} — tip suprimida (match "${_blockedDota}")`);
         setDotaAnalyzed({ ts: now, tipSent: false, noEdge: false, blocked: true });
+        _dotaCycleSkips.league_blocked++;
         await _sleep(2000); continue;
       }
       try {
@@ -15269,6 +15289,7 @@ Máximo 200 palavras.`;
         }
         log('INFO', 'AUTO-DOTA', `TIP${isLive ? ' [LIVE]' : ''}: ${tipTeam} @ ${tipOdd} (${tipStakeAdj})`);
         setDotaAnalyzed({ ts: now, tipSent: true, noEdge: false });
+        _dotaCycleTips++;
       } catch(e) {
         log('WARN', 'AUTO-DOTA', `Erro ao gravar tip: ${e.message}`);
       }
@@ -15285,6 +15306,14 @@ Máximo 200 palavras.`;
         log('WARN', 'AUTO-DOTA-MAP', `${match.team1} vs ${match.team2}: ${e.message}`);
       }
     }
+    // Cycle summary — visibilidade dos skips silenciosos pra debug "sport_silent_dota2".
+    try {
+      const _skipPairs = Object.entries(_dotaCycleSkips).filter(([_, v]) => v > 0).map(([k, v]) => `${k}:${v}`);
+      const _totalSkipped = _skipPairs.reduce((acc, p) => acc + parseInt(p.split(':')[1], 10), 0);
+      if (matches.length > 0) {
+        log('INFO', 'AUTO-DOTA', `Ciclo: ${matches.length} partidas | tips=${_dotaCycleTips} | skipped=${_totalSkipped}${_skipPairs.length ? ` (${_skipPairs.join(' ')})` : ''}`);
+      }
+    } catch (_) {}
     } // end else (has matches)
   } catch(e) {
     log('ERROR', 'AUTO-DOTA', e.message);
