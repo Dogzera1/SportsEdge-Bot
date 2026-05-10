@@ -4568,8 +4568,26 @@ let mlShadowTipsState = { allTips: [], page: 0, perPage: 25 };
 async function loadMlShadowTipsList(sportList) {
   const container = document.getElementById('mlShadowTipsList');
   if (!container) return;
-  // Fetch cross-sport — /tips-history precisa ser chamado por sport. Paralelo.
-  const all = await Promise.all(sportList.map(sp =>
+  // 2026-05-10: respeita currentSport. Antes a lista era sempre cross-sport
+  // mesmo após click em card específico — user reportou "mostra todas as tips
+  // de todos esportes mesmo mudando de card". Quando currentSport != __overall__,
+  // restringe fetch ao sport selecionado (com unfold de 'esports' → [esports,
+  // lol, dota2] espelhando loadTips/resolveSportSet do backend).
+  let effectiveSports;
+  if (currentSport === '__overall__' || !currentSport) {
+    effectiveSports = sportList;
+  } else if (currentSport === 'esports') {
+    effectiveSports = ['esports', 'lol', 'dota2'].filter(s => sportList.includes(s));
+    if (!effectiveSports.length) effectiveSports = ['esports', 'lol', 'dota2'];
+  } else if (currentSport === 'lol' || currentSport === 'dota2' || currentSport === 'dota') {
+    const target = currentSport === 'dota' ? 'dota2' : currentSport;
+    effectiveSports = ['esports', target].filter(s => sportList.includes(s));
+    if (!effectiveSports.length) effectiveSports = ['esports', target];
+  } else {
+    effectiveSports = sportList.includes(currentSport) ? [currentSport] : [currentSport];
+  }
+  // Fetch — /tips-history precisa ser chamado por sport. Paralelo.
+  const all = await Promise.all(effectiveSports.map(sp =>
     apiFetch('/tips-history?sport=' + sp + '&include_shadow=1&limit=200').catch(() => null)
   ));
   const tips = [];
@@ -4577,7 +4595,7 @@ async function loadMlShadowTipsList(sportList) {
     if (!Array.isArray(arr)) return;
     for (const t of arr) {
       if (t?.is_shadow !== 1) continue;
-      tips.push({ ...t, _sport: sportList[idx] });
+      tips.push({ ...t, _sport: effectiveSports[idx] });
     }
   });
   tips.sort((a, b) => String(b.sent_at || '').localeCompare(String(a.sent_at || '')));
