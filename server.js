@@ -8197,6 +8197,53 @@ setInterval(load, 10000);
     return;
   }
 
+  // GET /admin/basket-elo-list?limit=N — inspeção das ratings.
+  // 2026-05-10: motivo — LAL=1330 vs OKC=2008 gap 678 (NBA típico 100-300).
+  // Sem endpoint, debug requeria SQL direto. Inclui gap_top_bottom + seasonNow.
+  if (p === '/admin/basket-elo-list') {
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    try {
+      const elo = require('./lib/basket-elo');
+      const limit = Math.max(5, Math.min(100, parseInt(parsed.query.limit || '50', 10) || 50));
+      const rows = elo.listAll(db, { limit });
+      const n = rows.length;
+      const gap = n >= 2 ? Math.round(Number(rows[0].rating) - Number(rows[n - 1].rating)) : 0;
+      let lastReset = null;
+      try {
+        lastReset = db.prepare('SELECT value, updated_at FROM settings WHERE key = ?').get('basket_elo_last_season_reset') || null;
+      } catch (_) {}
+      sendJson(res, {
+        ok: true,
+        n,
+        season_now: elo._seasonOf(new Date()),
+        last_season_reset: lastReset,
+        rating_gap_top_bottom: gap,
+        gap_anomaly: gap > 400,
+        rows,
+      });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
+  // POST /admin/basket-elo-reset?season=YYYY-YY&dry_run=1 — aplica decay 25%.
+  // Idempotente per-season via settings.basket_elo_last_season_reset (force=1 pula dedup).
+  // Use depois de cada playoff final (~Jun) pra evitar Elo drift cumulativo.
+  if (p === '/admin/basket-elo-reset' && (req.method === 'POST' || req.method === 'GET')) {
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    try {
+      const elo = require('./lib/basket-elo');
+      const season = parsed.query.season || undefined;
+      const force = /^(1|true|yes)$/i.test(String(parsed.query.force || ''));
+      const dryRun = /^(1|true|yes)$/i.test(String(parsed.query.dry_run || ''));
+      const resetGames = /^(1|true|yes)$/i.test(String(parsed.query.reset_games || ''));
+      const r = elo.ensureSeasonReset(db, { season, force, dryRun, resetGames });
+      sendJson(res, { ok: true, ...r });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   // POST /admin/basket-seed?days=N — kicks off ESPN historical seed em background.
   // Returns imediato com handle; check progress via /admin/basket-train-status.
   if (p === '/admin/basket-seed' && (req.method === 'POST' || req.method === 'GET')) {
