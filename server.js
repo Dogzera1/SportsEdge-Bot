@@ -12624,6 +12624,218 @@ setInterval(load, 60000);
   // Combina pending counts + last tip + last shadow + blocklist matches +
   // 7d/30d ROI summary. Útil pra investigação focada.
   // GET /admin/sport-detail?sport=tennis&key=<ADMIN_KEY>
+  // 2026-05-11 (audit): risk-adjusted metrics per sport.
+  // GET /admin/risk-metrics?sport=tennis&days=30&key=<KEY>
+  //  - Sharpe ratio (mean return / std return, annualized assumindo ~1 tip/dia)
+  //  - Max drawdown (peak-to-trough %)
+  //  - Concentration (% volume top league)
+  //  - Sortino (downside std only)
+  //  - ROI per stake unit (capital efficiency)
+  // Sem sport=X = retorna todos sports.
+  if (p === '/admin/risk-metrics' && (req.method === 'GET' || req.method === 'POST')) {
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const days = Math.max(7, Math.min(180, parseInt(parsed.query.days || '30', 10) || 30));
+    const sportFilter = String(parsed.query.sport || '').toLowerCase().trim();
+    try {
+      const sports = sportFilter
+        ? [sportFilter]
+        : ['tennis', 'lol', 'cs', 'dota2', 'valorant', 'football', 'basket', 'mma', 'darts', 'snooker', 'tabletennis'];
+      const out = {};
+      for (const sp of sports) {
+        const tips = db.prepare(`
+          SELECT result, stake_reais, profit_reais, settled_at, event_name
+          FROM tips
+          WHERE sport = ?
+            AND result IN ('win','loss','void','push')
+            AND settled_at >= datetime('now', ?)
+            AND (archived IS NULL OR archived = 0)
+            AND COALESCE(is_shadow, 0) = 0
+          ORDER BY settled_at ASC
+        `).all(sp, `-${days} days`);
+        if (!tips.length) {
+          out[sp] = { n: 0, note: 'no settled real tips in window' };
+          continue;
+        }
+        // Per-tip return = profit/stake (-1 a +∞)
+        const returns = tips.map(t => {
+          const stake = Number(t.stake_reais) || 0;
+          const profit = Number(t.profit_reais) || 0;
+          return stake > 0 ? profit / stake : 0;
+        });
+        const totalStake = tips.reduce((a, t) => a + (Number(t.stake_reais) || 0), 0);
+        const totalProfit = tips.reduce((a, t) => a + (Number(t.profit_reais) || 0), 0);
+        const roiPct = totalStake > 0 ? (totalProfit / totalStake) * 100 : 0;
+        const meanReturn = returns.reduce((a, b) => a + b, 0) / returns.length;
+        const variance = returns.reduce((a, b) => a + (b - meanReturn) ** 2, 0) / returns.length;
+        const std = Math.sqrt(variance);
+        // Sharpe (não-anualizado — por tip): mean / std
+        const sharpe = std > 0 ? meanReturn / std : null;
+        // Sortino: usa só downside std
+        const downside = returns.filter(r => r < 0);
+        const downsideVariance = downside.length
+          ? downside.reduce((a, b) => a + b ** 2, 0) / downside.length
+          : 0;
+        const downsideStd = Math.sqrt(downsideVariance);
+        const sortino = downsideStd > 0 ? meanReturn / downsideStd : null;
+        // Max drawdown — cumulative profit peak-to-trough
+        let cumProfit = 0, peak = 0, maxDD = 0, peakStake = 0, runningStake = 0;
+        for (const t of tips) {
+          cumProfit += Number(t.profit_reais) || 0;
+          runningStake += Number(t.stake_reais) || 0;
+          if (cumProfit > peak) { peak = cumProfit; peakStake = runningStake; }
+          const dd = peak - cumProfit;
+          if (dd > maxDD) maxDD = dd;
+        }
+        const maxDDPct = totalStake > 0 ? (maxDD / totalStake) * 100 : 0;
+        // Concentration: % volume top league
+        const byLeague = new Map();
+        for (const t of tips) {
+          const lg = t.event_name || 'unknown';
+          byLeague.set(lg, (byLeague.get(lg) || 0) + (Number(t.stake_reais) || 0));
+        }
+        const sortedLeagues = [...byLeague.entries()].sort((a, b) => b[1] - a[1]);
+        const topLeagueStake = sortedLeagues[0]?.[1] || 0;
+        const concentrationPct = totalStake > 0 ? (topLeagueStake / totalStake) * 100 : 0;
+        const topLeague = sortedLeagues[0]?.[0] || null;
+        // Win rate
+        const settled = tips.filter(t => t.result === 'win' || t.result === 'loss');
+        const wins = settled.filter(t => t.result === 'win').length;
+        const winRate = settled.length > 0 ? (wins / settled.length) * 100 : 0;
+        out[sp] = {
+          n: tips.length,
+          n_settled: settled.length,
+          total_stake_reais: +totalStake.toFixed(2),
+          total_profit_reais: +totalProfit.toFixed(2),
+          roi_pct: +roiPct.toFixed(2),
+          win_rate_pct: +winRate.toFixed(2),
+          mean_return_per_tip: +meanReturn.toFixed(4),
+          std_return_per_tip: +std.toFixed(4),
+          sharpe_per_tip: sharpe != null ? +sharpe.toFixed(3) : null,
+          sortino_per_tip: sortino != null ? +sortino.toFixed(3) : null,
+          max_drawdown_reais: +maxDD.toFixed(2),
+          max_drawdown_pct_of_stake: +maxDDPct.toFixed(2),
+          top_league: topLeague,
+          top_league_concentration_pct: +concentrationPct.toFixed(2),
+          n_leagues: byLeague.size,
+        };
+      }
+      // Cross-sport summary
+      const all = Object.entries(out).filter(([, v]) => v.n > 0);
+      const totalAllStake = all.reduce((a, [, v]) => a + (v.total_stake_reais || 0), 0);
+      const totalAllProfit = all.reduce((a, [, v]) => a + (v.total_profit_reais || 0), 0);
+      sendJson(res, {
+        ok: true,
+        days,
+        per_sport: out,
+        summary: {
+          n_sports_active: all.length,
+          total_stake_reais: +totalAllStake.toFixed(2),
+          total_profit_reais: +totalAllProfit.toFixed(2),
+          overall_roi_pct: totalAllStake > 0 ? +((totalAllProfit / totalAllStake) * 100).toFixed(2) : 0,
+          best_sharpe: all
+            .filter(([, v]) => v.sharpe_per_tip != null)
+            .sort((a, b) => b[1].sharpe_per_tip - a[1].sharpe_per_tip)[0]?.[0] || null,
+          worst_sharpe: all
+            .filter(([, v]) => v.sharpe_per_tip != null)
+            .sort((a, b) => a[1].sharpe_per_tip - b[1].sharpe_per_tip)[0]?.[0] || null,
+        },
+      });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
+  // 2026-05-11 (audit): cross-sport correlation matrix.
+  // GET /admin/sport-correlation?days=30&key=<KEY>
+  // Daily PnL per sport → pairwise Pearson correlation. Sports altamente
+  // correlacionados (>0.5) sugerem reduzir Kelly combined (variance amplifica).
+  // Sports negativamente correlacionados (<-0.3) sugerem diversificação benéfica.
+  if (p === '/admin/sport-correlation' && (req.method === 'GET' || req.method === 'POST')) {
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const days = Math.max(14, Math.min(180, parseInt(parsed.query.days || '30', 10) || 30));
+    try {
+      // Daily PnL per sport: profit_reais agregado por DATE(settled_at)
+      const rows = db.prepare(`
+        SELECT sport, DATE(settled_at) AS day, SUM(profit_reais) AS daily_profit
+        FROM tips
+        WHERE result IN ('win','loss','void','push')
+          AND settled_at >= datetime('now', ?)
+          AND (archived IS NULL OR archived = 0)
+          AND COALESCE(is_shadow, 0) = 0
+        GROUP BY sport, DATE(settled_at)
+        ORDER BY day ASC
+      `).all(`-${days} days`);
+      if (!rows.length) {
+        sendJson(res, { ok: true, days, n_rows: 0, note: 'no real settled tips in window' });
+        return;
+      }
+      // Build pivot: sport → {day → profit}
+      const pivot = new Map();
+      const allDays = new Set();
+      for (const r of rows) {
+        if (!pivot.has(r.sport)) pivot.set(r.sport, new Map());
+        pivot.get(r.sport).set(r.day, Number(r.daily_profit) || 0);
+        allDays.add(r.day);
+      }
+      const sortedDays = [...allDays].sort();
+      // Per sport: array of daily profits (zero-fill missing days)
+      const sportArrays = {};
+      for (const [sp, m] of pivot) {
+        sportArrays[sp] = sortedDays.map(d => m.get(d) || 0);
+      }
+      const sportsList = Object.keys(sportArrays);
+      // Pearson correlation pra cada par
+      const pearson = (xs, ys) => {
+        const n = xs.length;
+        if (n < 5) return null; // sample mínimo
+        const mx = xs.reduce((a, b) => a + b, 0) / n;
+        const my = ys.reduce((a, b) => a + b, 0) / n;
+        let num = 0, dx = 0, dy = 0;
+        for (let i = 0; i < n; i++) {
+          num += (xs[i] - mx) * (ys[i] - my);
+          dx += (xs[i] - mx) ** 2;
+          dy += (ys[i] - my) ** 2;
+        }
+        const denom = Math.sqrt(dx * dy);
+        return denom > 0 ? num / denom : null;
+      };
+      const matrix = {};
+      const flags = [];
+      for (const a of sportsList) {
+        matrix[a] = {};
+        for (const b of sportsList) {
+          if (a === b) { matrix[a][b] = 1.0; continue; }
+          if (matrix[b]?.[a] != null) { matrix[a][b] = matrix[b][a]; continue; }
+          const r = pearson(sportArrays[a], sportArrays[b]);
+          matrix[a][b] = r != null ? +r.toFixed(3) : null;
+          // Flag high correlations
+          if (r != null && Math.abs(r) > 0.5 && a < b) {
+            flags.push({
+              pair: `${a}+${b}`,
+              correlation: +r.toFixed(3),
+              risk: r > 0 ? 'concentrated' : 'hedged',
+              suggestion: r > 0
+                ? `Kelly combined +${(r * 100).toFixed(0)}% variance vs independent — consider reducing one`
+                : `Negative correlation -${(Math.abs(r) * 100).toFixed(0)}% — diversification benefit`,
+            });
+          }
+        }
+      }
+      sendJson(res, {
+        ok: true,
+        days,
+        n_days_observed: sortedDays.length,
+        n_sports: sportsList.length,
+        sports: sportsList,
+        matrix,
+        flags,
+        interpretation: 'r>0.5 = correlated (combined risk higher); r<-0.3 = hedged (diversification value)',
+      });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   if (p === '/admin/sport-detail' && (req.method === 'GET' || req.method === 'POST')) {
     const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
@@ -17920,10 +18132,14 @@ load();
     const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     const sport = String(parsed.query.sport || 'tennis').toLowerCase();
-    const days = Math.max(30, Math.min(365, parseInt(parsed.query.days || '90', 10) || 90));
-    const evalDaysRaw = parseInt(parsed.query.eval_days ?? '30', 10);
+    // 2026-05-11 (audit): days default 90→45 e eval_days default 30→14 pra
+    // walk-forward funcionar com retention market_tips_shadow ~30-90d.
+    // Antes: train=[-120,-30] vazio (sample 30d só) → n_train=0 erro.
+    // Agora: train=[-45,-14] eval=[-14,0] → ambos têm dados.
+    const days = Math.max(14, Math.min(365, parseInt(parsed.query.days || '45', 10) || 45));
+    const evalDaysRaw = parseInt(parsed.query.eval_days ?? '14', 10);
     // eval_days=0 mantém comportamento legacy (in-sample). >0 ativa walk-forward.
-    const evalDays = Number.isFinite(evalDaysRaw) && evalDaysRaw >= 0 && evalDaysRaw <= 60 ? evalDaysRaw : 30;
+    const evalDays = Number.isFinite(evalDaysRaw) && evalDaysRaw >= 0 && evalDaysRaw <= 60 ? evalDaysRaw : 14;
     const minBin = Math.max(3, Math.min(20, parseInt(parsed.query.minBin || '6', 10) || 6));
     const ALPHA = parseFloat(parsed.query.alpha || '8');
     const VIG = parseFloat(parsed.query.vig || '0.025');
