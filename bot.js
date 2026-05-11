@@ -6703,28 +6703,64 @@ async function runMarketTipsLeakGuard() {
     }
     else if (wasDisabled) {
       const meta = _marketTipsDisabledRuntime.get(key);
+      // Helper compartilhado pra DELETE row + delete cache
+      const _doRestore = (sourceFilter, reasonText) => {
+        const sideCond = sideKey ? 'side = ?' : 'side IS NULL';
+        const leagueCond = leagueKey ? 'league = ?' : 'league IS NULL';
+        const tierVal = (tierKey && !leagueKey) ? s.tier : null;
+        const stmtParams = [s.sport, s.market];
+        if (sideKey) stmtParams.push(sideKey);
+        if (leagueKey) stmtParams.push(leagueKey);
+        try {
+          const tierCond = tierVal != null ? 'tier = ?' : '(tier IS NULL OR tier IS ?)';
+          const tierParams = tierVal != null ? [tierVal] : [null];
+          db.prepare(`DELETE FROM market_tips_runtime_state WHERE sport = ? AND market = ? AND ${sideCond} AND ${leagueCond} AND ${tierCond} AND source = ?`).run(...stmtParams, ...tierParams, sourceFilter);
+        } catch (_eTier) {
+          db.prepare(`DELETE FROM market_tips_runtime_state WHERE sport = ? AND market = ? AND ${sideCond} AND ${leagueCond} AND source = ?`).run(...stmtParams, sourceFilter);
+        }
+        _marketTipsDisabledRuntime.delete(key);
+        restored.push(`✅ ${label} — ${reasonText}`);
+        log('INFO', 'MT-GUARD', `auto-restored ${key} (${sourceFilter}): ${reasonText}`);
+      };
+
       if (meta?.source === 'auto_clv_leak' && s.clvN >= nThreshold && s.avgClv != null && s.avgClv >= CLV_RESTORE) {
         try {
-          // DELETE com null-safe match em side/league/tier. Schema mantém NULL pra
-          // segments mais agregados, valores explícitos pra granularidade fina.
-          const sideCond = sideKey ? 'side = ?' : 'side IS NULL';
-          const leagueCond = leagueKey ? 'league = ?' : 'league IS NULL';
-          const tierVal = (tierKey && !leagueKey) ? s.tier : null;
-          const stmtParams = [s.sport, s.market];
-          if (sideKey) stmtParams.push(sideKey);
-          if (leagueKey) stmtParams.push(leagueKey);
-          // Tenta with-tier; fallback sem tier pra schemas pré-091.
-          try {
-            const tierCond = tierVal != null ? 'tier = ?' : '(tier IS NULL OR tier IS ?)';
-            const tierParams = tierVal != null ? [tierVal] : [null];
-            db.prepare(`DELETE FROM market_tips_runtime_state WHERE sport = ? AND market = ? AND ${sideCond} AND ${leagueCond} AND ${tierCond} AND source = 'auto_clv_leak'`).run(...stmtParams, ...tierParams);
-          } catch (_eTier) {
-            db.prepare(`DELETE FROM market_tips_runtime_state WHERE sport = ? AND market = ? AND ${sideCond} AND ${leagueCond} AND source = 'auto_clv_leak'`).run(...stmtParams);
-          }
-          _marketTipsDisabledRuntime.delete(key);
-          restored.push(`✅ ${label} — CLV recuperou pra ${s.avgClv.toFixed(1)}% (n=${s.clvN})`);
-          log('INFO', 'MT-GUARD', `auto-restored ${key}: CLV=${s.avgClv.toFixed(1)}%`);
+          _doRestore('auto_clv_leak', `CLV recuperou pra ${s.avgClv.toFixed(1)}% (n=${s.clvN})`);
         } catch (e) { log('WARN', 'MT-GUARD', `restore err: ${e.message}`); }
+      }
+      // 2026-05-11: restore auto_early_roi_leak quando ROI volta a neutro+
+      // (precisa n adicional ≥ original_n / 2 pra confirmar não-variance).
+      else if (meta?.source === 'auto_early_roi_leak' && s.roiPct != null && s.roiPct >= 0 && s.clvN >= Math.max(8, (meta.n || 4) + 4)) {
+        try {
+          _doRestore('auto_early_roi_leak', `ROI recuperou pra ${s.roiPct.toFixed(1)}% (n=${s.clvN})`);
+        } catch (e) { log('WARN', 'MT-GUARD', `early restore err: ${e.message}`); }
+      }
+      // 2026-05-11: restore auto_loss_streak quando últimas 3 tips são W
+      // (signal de recuperação real, não variance). Cooldown 24h mínimo
+      // desde disable evita oscilação rápida.
+      else if (meta?.source === 'auto_loss_streak') {
+        const hoursSinceDisable = (Date.now() - new Date(meta.since).getTime()) / 3600000;
+        if (hoursSinceDisable >= 24) {
+          try {
+            const params = [s.sport, s.market.toUpperCase()];
+            let sideC = '', leagueC = '';
+            if (sideKey) { sideC = ' AND t.pick_side = ?'; params.push(sideKey); }
+            if (leagueKey) { leagueC = ' AND t.event_name LIKE ?'; params.push(`%${leagueKey}%`); }
+            const recentRows = db.prepare(`
+              SELECT t.result FROM tips t
+              WHERE t.sport = ? AND UPPER(COALESCE(t.market_type, '')) = ?
+                ${sideC} ${leagueC}
+                AND COALESCE(t.is_shadow, 0) = 0
+                AND (t.archived IS NULL OR t.archived = 0)
+                AND t.result IN ('win','loss')
+                AND t.settled_at > ?
+              ORDER BY t.settled_at DESC LIMIT 3
+            `).all(...params, meta.since);
+            if (recentRows.length >= 3 && recentRows.every(r => r.result === 'win')) {
+              _doRestore('auto_loss_streak', `streak quebrado: 3 wins consecutivos pós-disable`);
+            }
+          } catch (e) { log('DEBUG', 'MT-GUARD', `streak restore err: ${e.message}`); }
+        }
       }
     }
   };
