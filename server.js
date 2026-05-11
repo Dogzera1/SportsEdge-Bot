@@ -7131,6 +7131,21 @@ const server = http.createServer(async (req, res) => {
       const lastShadowBySport = new Map(shadowRows.map(r => [r.sport, r.last_shadow]));
       const STALE_HOURS = parseInt(process.env.HEALTH_LAST_TIP_STALE_HOURS || '24', 10);
       const SHADOW_FRESH_HOURS = parseInt(process.env.HEALTH_SHADOW_FRESH_HOURS || '6', 10);
+      // 2026-05-11: threshold per-sport p/ sports com calendário esparso (off-season).
+      // Darts/snooker têm gaps multi-dia entre torneios PDC/WST — alert 24h global gera
+      // falso-positivo. Override via HEALTH_LAST_TIP_STALE_HOURS_<SPORT> env.
+      // Defaults derivados de cobertura típica: darts/snooker 96h (1 PDC ProTour stop),
+      // tabletennis 48h, demais usam STALE_HOURS global.
+      const _STALE_HOURS_DEFAULTS = { darts: 96, snooker: 96, tabletennis: 48, mma: 72 };
+      const _getStaleHoursFor = (sp) => {
+        const k = String(sp || '').toUpperCase();
+        const envVal = process.env[`HEALTH_LAST_TIP_STALE_HOURS_${k}`];
+        if (envVal != null && envVal !== '') {
+          const n = parseInt(envVal, 10);
+          if (Number.isFinite(n) && n > 0) return n;
+        }
+        return _STALE_HOURS_DEFAULTS[String(sp || '').toLowerCase()] || STALE_HOURS;
+      };
       const _isMlDisabled = (sp) => {
         const k = String(sp || '').toUpperCase();
         const v = process.env[`${k}_ML_DISABLED`];
@@ -7149,7 +7164,8 @@ const server = http.createServer(async (req, res) => {
       for (const r of rows) {
         const ageH = r.last_sent ? (Date.now() - new Date(r.last_sent + 'Z').getTime()) / 3600000 : null;
         lastTipBySport[r.sport] = { last_sent: r.last_sent, age_h: ageH != null ? +ageH.toFixed(1) : null };
-        if (ageH != null && ageH > STALE_HOURS) {
+        const sportThreshold = _getStaleHoursFor(r.sport);
+        if (ageH != null && ageH > sportThreshold) {
           // Skipa alert se ML disabled + MT não promovido (silêncio intencional).
           // Se MT promovido mas ainda silent, mantém alert (MT pipeline pode estar travado).
           if (_isMlDisabled(r.sport) && !_hasMtPromoted(r.sport)) continue;
@@ -7164,7 +7180,7 @@ const server = http.createServer(async (req, res) => {
           alerts.push({
             id: `sport_silent_${r.sport}`,
             severity: 'warning',
-            msg: `${r.sport}: nenhuma tip real há ${ageH.toFixed(1)}h (>${STALE_HOURS}h threshold) — modelo desativado ou scanner travado?`,
+            msg: `${r.sport}: nenhuma tip real há ${ageH.toFixed(1)}h (>${sportThreshold}h threshold) — modelo desativado ou scanner travado?`,
           });
         }
       }
@@ -12795,10 +12811,10 @@ setInterval(load, 60000);
     try {
       const { explainMtPromoteGates, runMtPromoteExplainDigest } = require('./lib/mt-promote-explain');
       // Modo digest via ?digest=1 (agrega últimas 24h)
-      const isDigest = u.searchParams.get('digest') === '1' || req.method === 'POST';
+      const isDigest = parsed.searchParams.get('digest') === '1' || req.method === 'POST';
       if (isDigest) {
-        const hoursBack = parseInt(u.searchParams.get('hours') || '24', 10) || 24;
-        const maxTips = parseInt(u.searchParams.get('max') || '500', 10) || 500;
+        const hoursBack = parseInt(parsed.searchParams.get('hours') || '24', 10) || 24;
+        const maxTips = parseInt(parsed.searchParams.get('max') || '500', 10) || 500;
         const result = await runMtPromoteExplainDigest(db, { hoursBack, maxTips });
         sendJson(res, result);
         return;
@@ -12806,16 +12822,16 @@ setInterval(load, 60000);
       // Modo single tip
       const args = {
         db,
-        sport: u.searchParams.get('sport'),
-        market: u.searchParams.get('market'),
-        side: u.searchParams.get('side'),
-        odd: parseFloat(u.searchParams.get('odd')),
-        ev: parseFloat(u.searchParams.get('ev')),
-        pmodel: parseFloat(u.searchParams.get('pmodel')),
-        league: u.searchParams.get('league') || null,
-        team1: u.searchParams.get('team1') || null,
-        team2: u.searchParams.get('team2') || null,
-        line: parseFloat(u.searchParams.get('line')) || null,
+        sport: parsed.searchParams.get('sport'),
+        market: parsed.searchParams.get('market'),
+        side: parsed.searchParams.get('side'),
+        odd: parseFloat(parsed.searchParams.get('odd')),
+        ev: parseFloat(parsed.searchParams.get('ev')),
+        pmodel: parseFloat(parsed.searchParams.get('pmodel')),
+        league: parsed.searchParams.get('league') || null,
+        team1: parsed.searchParams.get('team1') || null,
+        team2: parsed.searchParams.get('team2') || null,
+        line: parseFloat(parsed.searchParams.get('line')) || null,
       };
       const result = explainMtPromoteGates(args);
       sendJson(res, result);
