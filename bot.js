@@ -20223,6 +20223,7 @@ async function pollValorant(runOnce = false) {
       _hadLiveVal = _hasLiveVal;
       if (_hasLiveVal) _livePhaseEnter('valorant');
       let _drainedVal = false;
+      let _valNoOddsLive = 0, _valNoOddsTotal = 0;
 
       for (const match of relevant) {
         if (match.status !== 'live' && !_drainedVal) {
@@ -20248,7 +20249,11 @@ async function pollValorant(runOnce = false) {
           continue;
         }
 
-        if (!match.odds?.t1 || !match.odds?.t2) continue;
+        if (!match.odds?.t1 || !match.odds?.t2) {
+          if (isLiveVal) _valNoOddsLive++;
+          _valNoOddsTotal++;
+          continue;
+        }
         if (!isOddsFresh(match.odds, isLiveVal, 'valorant')) {
           log('INFO', 'AUTO-VAL', `Odds stale (${oddsAgeStr(match.odds)}): ${match.team1} vs ${match.team2} — pulando`);
           logRejection('valorant', `${match.team1} vs ${match.team2}`, 'odds_stale', { age: oddsAgeStr(match.odds) });
@@ -20697,6 +20702,9 @@ async function pollValorant(runOnce = false) {
         await new Promise(r => setTimeout(r, 3000));
       }
       if (!_drainedVal && _hasLiveVal) _livePhaseExit('valorant');
+      if (_valNoOddsLive > 0 || _valNoOddsTotal >= 3) {
+        log('INFO', 'AUTO-VAL', `no_odds skip: live=${_valNoOddsLive} total=${_valNoOddsTotal} (Pinnacle outage? val depende de Pin odds embedded em /valorant-matches)`);
+      }
     } catch (e) {
       log('ERROR', 'AUTO-VAL', e.message);
       _livePhaseExit('valorant');
