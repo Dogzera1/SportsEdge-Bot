@@ -4747,13 +4747,32 @@ try {
 // Cascade lookup quando market informado:
 //   1. (sport, market, league)  — match exato per-market
 //   2. (sport, *, league)       — sport-wide (2-part legacy)
+//   3. (ml_league_blocklist) quando market='ML' — auto-detected pelo cron
+//      runMlAutoPromoteCycle 12h. Consulta isMlLeagueBlocked (cache em memória
+//      populado por loadMlLeagueBlocklist no boot + refresh pós cycle).
 // Quando market omitido, só checa 2-part entries (legacy behavior preservado).
+//
+// 2026-05-11 audit P1-5: isMlLeagueBlocked existia em lib/ml-auto-promote.js
+// e era exportado, mas NUNCA era chamado por nenhum dispatch path. Tabela
+// ml_league_blocklist (mig 099) era populada pelo cron mas dead code. Fix
+// aqui aproveita os 10+ pontos onde isLeagueBlocked já é called per sport
+// pra cobrir ambas tabelas (manual `league_blocklist` + auto `ml_league_blocklist`).
 function isLeagueBlocked(sport, league, market = null) {
-  if (!_leagueBlocklist.size) return null;
   const sp = String(sport || '').toLowerCase();
   const lg = String(league || '').toLowerCase();
   const mk = market ? String(market).toUpperCase() : null;
   if (!lg) return null;
+
+  // Path 1: ml_league_blocklist (auto-detected) quando market='ML'.
+  if (mk === 'ML') {
+    try {
+      const { isMlLeagueBlocked } = require('./lib/ml-auto-promote');
+      if (isMlLeagueBlocked(sp, lg)) return `ml_auto_blocklist:${sp}/${lg}`;
+    } catch (_) { /* lib opcional */ }
+  }
+
+  // Path 2: league_blocklist (manual + readiness_learner) — sport:market:substring.
+  if (!_leagueBlocklist.size) return null;
   for (const entry of _leagueBlocklist) {
     const parts = entry.split(':');
     if (parts.length === 3) {

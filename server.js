@@ -12628,10 +12628,14 @@ setInterval(load, 60000);
     const out = { ok: true, ts: new Date().toISOString(), sport };
     try {
       // Pending counts
+      // 2026-05-11 audit P1-2: real_tips antes contava TODOS pending na tabela
+      // `tips` (incluindo is_shadow=1). Filtro is_shadow=0 adicionado pra alinhar
+      // com nome do campo. Caso real: football pending.real_tips=26 confundia
+      // (todos eram is_shadow=1 conforme pending-tips-diag).
       out.pending = {
-        real_tips: db.prepare(`SELECT COUNT(*) AS n FROM tips WHERE sport=? AND result IS NULL AND COALESCE(archived,0)=0`).get(sport).n,
+        real_tips: db.prepare(`SELECT COUNT(*) AS n FROM tips WHERE sport=? AND result IS NULL AND COALESCE(archived,0)=0 AND COALESCE(is_shadow,0)=0`).get(sport).n,
         mt_shadow: db.prepare(`SELECT COUNT(*) AS n FROM market_tips_shadow WHERE sport=? AND result IS NULL`).get(sport).n,
-        ml_shadow: db.prepare(`SELECT COUNT(*) AS n FROM tips WHERE sport=? AND result IS NULL AND COALESCE(is_shadow,0)=1`).get(sport).n,
+        ml_shadow: db.prepare(`SELECT COUNT(*) AS n FROM tips WHERE sport=? AND result IS NULL AND COALESCE(is_shadow,0)=1 AND COALESCE(archived,0)=0`).get(sport).n,
       };
       // Last tip (real + shadow)
       const lastTip = db.prepare(`
