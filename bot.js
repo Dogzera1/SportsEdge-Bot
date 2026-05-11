@@ -19532,6 +19532,12 @@ async function pollCs(runOnce = false) {
   const hltv = require('./lib/hltv');
 
   // Tier-1 keywords: Major, IEM/ESL/BLAST séries premier, Cologne/Katowice/Rio/Shanghai, EPL.
+  // 2026-05-11 audit P0-2: regex tier1 explícita; tudo que não matcha cai em tier2
+  // (CS_TIER2_MIN_EV=8). Antes CCT/ESL Challenger NA também caíam aqui (eram
+  // tier2 corretamente), mas leagueTier() retornava 1 (other) → segment gate
+  // classificava como tier3 com +2pp edge bonus only. Fix em lib/esports-runtime-features
+  // restaurou tier2 classification. Aqui apenas confirmamos que CCT/Challenger
+  // NÃO são tier1.
   const CS_TIER1_RE = /(major|iem\b|katowice|cologne|esl pro league|epl|blast premier|blast world|blast fall|blast spring|esports world cup|ewc|austin|rio|shanghai|paris)/i;
   const isCsTier1 = (league) => CS_TIER1_RE.test(String(league || ''));
 
