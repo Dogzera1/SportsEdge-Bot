@@ -12646,6 +12646,97 @@ setInterval(load, 60000);
     return;
   }
 
+  // 2026-05-11 (P3 CLAUDE.md): feature inventory live snapshot.
+  // GET /admin/feature-inventory?key=<KEY>
+  // Versão programática do FEATURE_INVENTORY.md — lê state atual.
+  // Útil pra: pré-flight antes de adicionar feature nova ("grep esta lista").
+  // Não polua com filtros — é snapshot canônico.
+  if (p === '/admin/feature-inventory' && req.method === 'GET') {
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    try {
+      const envFlag = (name, defaultVal) => {
+        const v = process.env[name];
+        if (v == null || v === '') return { state: 'unset', default: defaultVal };
+        return { state: v };
+      };
+      // Disable sources ativos com count em 30d
+      const disableSources = db.prepare(`
+        SELECT source, COUNT(*) AS n
+        FROM market_tips_runtime_state
+        WHERE disabled = 1 AND updated_at >= datetime('now', '-30 days')
+        GROUP BY source ORDER BY n DESC
+      `).all();
+      // Total disables ativos
+      const activeDisables = db.prepare(`
+        SELECT COUNT(*) AS n FROM market_tips_runtime_state WHERE disabled = 1
+      `).get();
+      // Cron snapshot
+      const cronStatus = global._cronStatusSnapshot || null;
+      const cronCount = cronStatus ? Object.keys(cronStatus.crons || {}).length : null;
+      const inventory = {
+        ok: true,
+        timestamp: new Date().toISOString(),
+        commit: (process.env.RAILWAY_GIT_COMMIT_SHA || '').slice(0, 7) || 'local',
+        gates: {
+          mt_min_odd: process.env.MT_MIN_ODD || '1.40',
+          mt_ev_cap_pct: process.env.MT_EV_CAP_PCT || '50',
+          sharp_divergence_pp: process.env.SHARP_DIVERGENCE_MAX_PP || '12',
+          pre_match_bonus_pp: process.env.PRE_MATCH_EV_BONUS_PP || '2',
+          time_of_day_auto: envFlag('TIME_OF_DAY_AUTO', 'true'),
+          league_trust: envFlag('LEAGUE_TRUST_DISABLED', 'false (ON)'),
+          clv_auto_kelly: envFlag('CLV_AUTO_KELLY', 'true'),
+          permanent_disable_list: envFlag('MT_PERMANENT_DISABLE_LIST', 'unset'),
+        },
+        kelly: {
+          max_kelly_frac: process.env.MAX_KELLY_FRAC || '0.10',
+          auto_tune_ceiling: process.env.KELLY_AUTO_TUNE_CEILING || '1.50',
+          auto_tune: envFlag('KELLY_AUTO_TUNE', 'true'),
+          tier_mult_disabled: envFlag('KELLY_TIER_MULT_DISABLED', 'false (ON)'),
+        },
+        crons: {
+          mt_leak_guard: envFlag('MT_LEAK_GUARD_AUTO', 'true'),
+          mt_leak_early: envFlag('MT_LEAK_EARLY_AUTO', 'true'),
+          mt_leak_streak: envFlag('MT_LEAK_STREAK_AUTO', 'true'),
+          mt_auto_promote: envFlag('MT_AUTO_PROMOTE_AUTO', 'true'),
+          ml_auto_promote: envFlag('ML_AUTO_PROMOTE_AUTO', 'true'),
+          nightly_retrain: envFlag('NIGHTLY_RETRAIN_AUTO', 'true'),
+          risk_metrics_monitor: envFlag('RISK_METRICS_MONITOR_AUTO', 'true'),
+          overfeaturing_monitor: envFlag('OVERFEATURING_MONITOR_AUTO', 'true'),
+          shadow_vs_real_drift: envFlag('SHADOW_VS_REAL_DRIFT_AUTO', 'true'),
+          gate_attribution: envFlag('GATE_ATTRIBUTION_AUTO', 'true'),
+          live_risk_monitor: envFlag('LIVE_RISK_MONITOR_AUTO', 'true'),
+          auto_void_stuck: envFlag('AUTO_VOID_STUCK_AUTO', 'true'),
+          force_settle: envFlag('FORCE_SETTLE_AUTO', 'true'),
+          scraper_health: envFlag('SCRAPER_HEALTH_DISABLED', 'false (ON)'),
+          total_active: cronCount,
+        },
+        compliance: {
+          frozen_holdout_days: process.env.FROZEN_HOLDOUT_DAYS || '0 (OFF — set 60 em prod)',
+          ev_calib_real_only: envFlag('EV_CALIB_REAL_ONLY', 'true'),
+          league_trust_real_only: envFlag('LEAGUE_TRUST_REAL_ONLY', 'true'),
+          mt_auto_promote_real_only: envFlag('MT_AUTO_PROMOTE_REAL_ONLY', 'true'),
+          mt_leak_real_only: envFlag('MT_LEAK_REAL_ONLY', 'true'),
+          kills_calib_real_only: envFlag('KILLS_CALIB_REAL_ONLY', 'true'),
+          mt_bucket_guard_real_only: envFlag('MT_BUCKET_GUARD_REAL_ONLY', 'true'),
+          mt_validation_real_only: envFlag('MT_VALIDATION_REAL_ONLY', 'true'),
+        },
+        disable_state: {
+          active_total: activeDisables?.n || 0,
+          sources_30d: disableSources,
+        },
+        docs: {
+          feature_inventory: 'FEATURE_INVENTORY.md',
+          common_pitfalls: 'COMMON_PITFALLS.md',
+          architecture: 'ARCHITECTURE.md',
+          principles: 'CLAUDE.md',
+        },
+      };
+      sendJson(res, inventory);
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   // 2026-05-11 (audit): time-of-day analysis per sport.
   // GET /admin/time-of-day-analysis?sport=tennis&days=60&key=<KEY>
   // Agrupa tips real settled por HOUR(settled_at_local) → ROI per hour.

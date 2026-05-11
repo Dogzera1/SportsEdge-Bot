@@ -207,6 +207,78 @@ Use env opt-out `<COMPONENT>_REAL_ONLY=true` (default) para preservar comportame
 
 ---
 
+## P4 — Otimização contínua de código
+
+**Regra:** Em toda task — bug fix, feature, refactor, audit — buscar ativamente oportunidades de otimização (consolidar, deletar dead code, simplificar). Não é "while I'm here" gratuito (vide princípios gerais), mas sim **scan deliberado durante o trabalho normal**.
+
+**Por quê:** Sistema acumula entropy. 26k linhas bot.js + 32k server.js cresceram com camadas históricas. Sem pressão sistemática pra reduzir, codebase fica progressivamente mais difícil. P3 evita ADIÇÃO de overfeaturing; P4 reduz overfeaturing PRÉ-EXISTENTE. Cases:
+- Cleanup 2026-05-11: `external/sportsbook-odds-scraper/` (1422 linhas) + `lib/hour-gate.js` + 7 tests ESPN órfãos = ~4350 linhas mortas removidas.
+- `_leagueTier` paralelo em bot.js → delegate pra `lib/league-tier` (commit `7f9dcc9`).
+- Refit defaults `days=90` quebrado pra shadow retention `45d` → ajustado.
+
+**Como aplicar — durante qualquer task, scan lateral:**
+
+1. **Grep relacionado**: ao tocar arquivo X, grep funções similares — pode ter copy-paste.
+2. **Dead imports**: cada arquivo aberto, conferir se há `require()` não usado.
+3. **Dead branches**: `if (x) {...}` com `x` sempre true/false em uso atual.
+4. **Hot path queries**: query OLTP > 10ms = candidato a index OR cache.
+5. **Configurabilidade morta**: env opt-in nunca setada em prod = hardcode + delete env.
+6. **Comments desatualizados**: comment que descreve old behavior = delete.
+7. **Helpers single-caller**: lib helper usado em só 1 lugar = inline (a não ser que abstraction tenha valor semântico).
+
+**Anti-patterns (NÃO fazer):**
+
+- ❌ Otimização que NÃO foi pedida E mistura intent com bug fix no mesmo commit (split commits).
+- ❌ Refactor profundo sem authorization (vide "Anti-patterns código": refactor não-relacionado).
+- ❌ Deletar arquivo grande sem grep imports + autorização (vide "Perguntar ANTES").
+- ❌ Premature optimization (otimizar algo que não está medido como hot).
+- ❌ Cosmetic optimization (renomear var sem motivo concreto).
+
+**Patterns (fazer):**
+
+- ✅ Ao tocar arquivo: **2 min scan** procurando dead code adjacente → ANOTE no fim da response (não conserte na mesma).
+- ✅ Quando feature está sendo deprecada: marker `// @DORMANT YYYY-MM-DD` no header — próxima sessão decide deletar.
+- ✅ Ao adicionar feature: incluir delete de feature obsoleta no MESMO commit (delete-as-you-go).
+- ✅ Periodic audit via `/admin/overfeaturing-audit` + `/admin/feature-inventory`.
+- ✅ Sempre que detectar 3+ implementações paralelas (P3 trigger), refactor pra delegate.
+- ✅ Antes de fechar response: 1 frase "Otimizações detectadas (não aplicadas): X, Y" — registro pra próxima sessão.
+
+**Pegada (sinais que algo pode otimizar):**
+
+| Sintoma | Otimização candidata |
+|---|---|
+| Função > 100 linhas | Split em sub-functions |
+| Query repetida em 3+ endpoints | Helper em lib/ |
+| Try/catch envolvendo 30+ linhas | Catch narrow ao código que falha |
+| Mesmo regex em 2+ arquivos | Const em lib/utils ou lib/regex.js |
+| Env opt-in que nunca foi setada | Hardcode + delete env |
+| Comment "// TODO" > 30d | Resolve agora ou delete |
+| Test file pra função deletada | Delete teste órfão |
+| Dependência npm com 1 import só | Re-implementar inline OR documenta justificativa |
+
+**Cadência:**
+
+- **Toda sessão**: scan lateral durante task normal, anotar findings no fim.
+- **Semanal**: `/admin/feature-inventory` + `/admin/overfeaturing-audit` review.
+- **Mensal**: sessão dedicada de cleanup quando findings acumulados ≥ 5.
+
+**Documentação live:**
+
+- `FEATURE_INVENTORY.md` — catálogo de features ativas (grep antes de adicionar similar).
+- `COMMON_PITFALLS.md` — top cases de bugs reais (consulta antes de mexer em área similar).
+- `/admin/feature-inventory` — snapshot live programático.
+
+**Status atual (2026-05-11):**
+
+- ✅ ~4350 linhas dead code removidas em sessão única
+- ✅ Tier classifier unificado
+- ✅ Hour-gate redundante revertido
+- ✅ `FEATURE_INVENTORY.md` + `COMMON_PITFALLS.md` criados
+- ✅ Endpoint `/admin/feature-inventory` exposto
+- ⏳ Continuous scan em cada session
+
+---
+
 ## Princípios gerais de execução
 
 - **Faça o mínimo necessário.** Resolva o pedido, nada além. Não adicione "while I'm here" fixes.
