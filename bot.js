@@ -5653,6 +5653,33 @@ async function recordMarketTipAsRegular({ sport, match, tip, stake, isLive }) {
     const marketKey = String(tip.market || 'unknown');
     const sideKey = String(tip.side || 'na');
 
+    // ── MIN ODD FLOOR ──
+    // 2026-05-11: tip Dota UNDER 4.5 maps @ 1.20 escapou (EV+20% / Kelly 1u) —
+    // odds <1.40 têm var assimétrica desfavorável, exposem stake Kelly em
+    // regression. Hierarquia P1 (granularidade):
+    //   MT_MIN_ODD_<SPORT>_<MARKET> > MT_MIN_ODD_<SPORT> > MT_MIN_ODD > 1.40
+    // Mesmo path do gate em logShadowTip e shouldSendMarketTip (defense in depth).
+    try {
+      const _sportKeyOdd = String(sport || '').toUpperCase();
+      const _marketKeyOdd = String(marketKey || '').toUpperCase().replace(/[^A-Z0-9]/g, '_');
+      const _oddCandidates = [
+        _sportKeyOdd && _marketKeyOdd ? `MT_MIN_ODD_${_sportKeyOdd}_${_marketKeyOdd}` : null,
+        _sportKeyOdd ? `MT_MIN_ODD_${_sportKeyOdd}` : null,
+        'MT_MIN_ODD',
+      ].filter(Boolean);
+      let _minOddCap = 1.40;
+      for (const k of _oddCandidates) {
+        const v = parseFloat(process.env[k]);
+        if (Number.isFinite(v) && v > 1) { _minOddCap = v; break; }
+      }
+      const tipOddNum = parseFloat(tip.odd);
+      if (Number.isFinite(tipOddNum) && tipOddNum > 0 && tipOddNum < _minOddCap) {
+        log('INFO', 'MT-ODD-FLOOR',
+          `${sport}/${marketKey}/${sideKey} ${match.team1} vs ${match.team2}: odd ${tipOddNum.toFixed(2)} < ${_minOddCap.toFixed(2)} — skip promote (floor)`);
+        return null;
+      }
+    } catch (_) { /* defensive */ }
+
     // ── EV MAX CAP ──
     // 2026-05-04 [Audit calibration]: bucket EV>30% mostrou ROI -8 a -75%
     // (gap +40-115pp vs expected EV). Modelo overshoots edge em high-EV.
@@ -24796,11 +24823,18 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
       // betano/esportes-da-sorte/kto-tennis) + 1 degradada (sportingbet) = 70%
       // down. Transitions já reportadas individualmente mas operador não tinha
       // sinal "BR aggregator degradado como um todo". Cooldown próprio 30min.
+      // 2026-05-11 (2): Excluir BROKEN-BY-DESIGN do cálculo (bet365 default).
+      // Histórico em execucoes_scraper ainda mostra bet365 morta por janela 6h
+      // mesmo após config remove, então filtro defensivo aqui. Override via
+      // BR_SCRAPER_OUTAGE_EXCLUDE=casa1,casa2 (vazio = sem filtro).
       try {
-        const totalHouses = houses.length;
+        const excludeRaw = String(process.env.BR_SCRAPER_OUTAGE_EXCLUDE ?? 'bet365');
+        const excludeSet = new Set(excludeRaw.split(',').map(s => s.trim().toLowerCase()).filter(Boolean));
+        const eligibleHouses = houses.filter(h => !excludeSet.has(String(h.casa || '').toLowerCase()));
+        const totalHouses = eligibleHouses.length;
         if (totalHouses >= 3) {
-          const morta = houses.filter(h => h.state === 'morta');
-          const degr = houses.filter(h => h.state === 'degradada');
+          const morta = eligibleHouses.filter(h => h.state === 'morta');
+          const degr = eligibleHouses.filter(h => h.state === 'degradada');
           const downPct = (morta.length + degr.length) / totalHouses;
           const minDownPct = Math.max(0.1, Math.min(1, parseFloat(process.env.BR_SCRAPER_OUTAGE_MIN_PCT || '0.5')));
           if (downPct >= minDownPct) {
