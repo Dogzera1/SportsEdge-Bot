@@ -12810,11 +12810,12 @@ setInterval(load, 60000);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     try {
       const { explainMtPromoteGates, runMtPromoteExplainDigest } = require('./lib/mt-promote-explain');
+      const qs = new URL(req.url, 'http://x').searchParams;
       // Modo digest via ?digest=1 (agrega últimas 24h)
-      const isDigest = parsed.searchParams.get('digest') === '1' || req.method === 'POST';
+      const isDigest = qs.get('digest') === '1' || req.method === 'POST';
       if (isDigest) {
-        const hoursBack = parseInt(parsed.searchParams.get('hours') || '24', 10) || 24;
-        const maxTips = parseInt(parsed.searchParams.get('max') || '500', 10) || 500;
+        const hoursBack = parseInt(qs.get('hours') || '24', 10) || 24;
+        const maxTips = parseInt(qs.get('max') || '500', 10) || 500;
         const result = await runMtPromoteExplainDigest(db, { hoursBack, maxTips });
         sendJson(res, result);
         return;
@@ -12822,16 +12823,16 @@ setInterval(load, 60000);
       // Modo single tip
       const args = {
         db,
-        sport: parsed.searchParams.get('sport'),
-        market: parsed.searchParams.get('market'),
-        side: parsed.searchParams.get('side'),
-        odd: parseFloat(parsed.searchParams.get('odd')),
-        ev: parseFloat(parsed.searchParams.get('ev')),
-        pmodel: parseFloat(parsed.searchParams.get('pmodel')),
-        league: parsed.searchParams.get('league') || null,
-        team1: parsed.searchParams.get('team1') || null,
-        team2: parsed.searchParams.get('team2') || null,
-        line: parseFloat(parsed.searchParams.get('line')) || null,
+        sport: qs.get('sport'),
+        market: qs.get('market'),
+        side: qs.get('side'),
+        odd: parseFloat(qs.get('odd')),
+        ev: parseFloat(qs.get('ev')),
+        pmodel: parseFloat(qs.get('pmodel')),
+        league: qs.get('league') || null,
+        team1: qs.get('team1') || null,
+        team2: qs.get('team2') || null,
+        line: parseFloat(qs.get('line')) || null,
       };
       const result = explainMtPromoteGates(args);
       sendJson(res, result);
