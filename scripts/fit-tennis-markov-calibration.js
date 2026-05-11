@@ -283,9 +283,25 @@ function _fitBins(lst, marketName, tag = 'all') {
 // Calib monolítica não captura divergence: ATP main bucket 0.65 hit 56%, ATP
 // Challenger bucket 0.65 hit 49%. Per-tier fit corrige distorção.
 //
-// MIN_TIER_N: amostra mínima pra fitar um tier separadamente (default 30; abaixo
-// disso o bin pooling já genera resultados ruidosos). Override --min-tier-n.
+// 2026-05-11: side-aware refit (schema v2.1). Causa-fix tennis HG home leak
+// (calib_gap +70-94pp consistente em buckets EV 15-30%, n=124 settled).
+// HOME/AWAY tem dinâmicas diferentes (serve advantage, court familiarity);
+// fit monolítico calibra média mas vaza nos lados extremos.
+//
+// MIN_TIER_N / MIN_SIDE_N: amostra mínima pra fitar separado. Sample fold pra
+// fallback menos específico quando insuficiente. Override --min-tier-n / --min-side-n.
 const MIN_TIER_N = parseInt(arg('min-tier-n', '30'), 10);
+const MIN_SIDE_N = parseInt(arg('min-side-n', '30'), 10);
+
+// Normaliza side pra label canônico (tennis market data tem variações).
+function _normSide(s) {
+  const v = String(s || '').toLowerCase().trim();
+  if (v === 'home' || v === 'team1' || v === 'h' || v === '1') return 'home';
+  if (v === 'away' || v === 'team2' || v === 'a' || v === '2') return 'away';
+  if (v === 'over' || v === 'o') return 'over';
+  if (v === 'under' || v === 'u') return 'under';
+  return null;
+}
 
 function fitMarket(tipsRaw, marketName) {
   const dedupTips = dedupRebroadcasts(tipsRaw);
@@ -299,11 +315,33 @@ function fitMarket(tipsRaw, marketName) {
     return null;
   }
 
-  // Default fit (todos tiers juntos) — sempre calculado pra fallback compat v1.
+  // Default fit (todos tiers e sides juntos) — sempre calculado pra fallback v1.
   const defaultFit = _fitBins(lst, marketName, 'default');
   if (!defaultFit) return null;
 
+  // Per-side fits (schema v2.1) — só sample with ≥ MIN_SIDE_N.
+  const sideFits = {};
+  const sideGroups = new Map();
+  for (const t of lst) {
+    const side = _normSide(t.side);
+    if (!side) continue;
+    if (!sideGroups.has(side)) sideGroups.set(side, []);
+    sideGroups.get(side).push(t);
+  }
+  for (const [side, sub] of sideGroups) {
+    if (sub.length < MIN_SIDE_N) {
+      console.log(`[${marketName}/side=${side}] n=${sub.length} < MIN_SIDE_N=${MIN_SIDE_N}, fold into default`);
+      continue;
+    }
+    const fit = _fitBins(sub, marketName, `side=${side}`);
+    if (fit) {
+      sideFits[side] = fit;
+      console.log(`[${marketName}/side=${side}] fitted n=${fit.nTotal} ${fit.bins.length} bins coverage=[${fit.coverage[0].toFixed(3)},${fit.coverage[1].toFixed(3)}]`);
+    }
+  }
+
   // Per-tier fits — só inclui tiers com sample suficiente.
+  // Cada tier pode ter side breakdown adicional quando sample permite.
   const tierFits = {};
   const tierGroups = new Map();
   for (const t of lst) {
@@ -317,16 +355,38 @@ function fitMarket(tipsRaw, marketName) {
       console.log(`[${marketName}/tier=${tier}] n=${sub.length} < MIN_TIER_N=${MIN_TIER_N}, fold into default`);
       continue;
     }
-    const fit = _fitBins(sub, marketName, `tier=${tier}`);
-    if (fit) {
-      tierFits[tier] = fit;
-      console.log(`[${marketName}/tier=${tier}] fitted n=${fit.nTotal} ${fit.bins.length} bins coverage=[${fit.coverage[0].toFixed(3)},${fit.coverage[1].toFixed(3)}]`);
+    const tierFit = _fitBins(sub, marketName, `tier=${tier}`);
+    if (!tierFit) continue;
+
+    // Per-(tier, side) sub-fit — só com sample bem grande (≥MIN_SIDE_N por side dentro do tier).
+    const tierSideFits = {};
+    const tierSideGroups = new Map();
+    for (const t of sub) {
+      const side = _normSide(t.side);
+      if (!side) continue;
+      if (!tierSideGroups.has(side)) tierSideGroups.set(side, []);
+      tierSideGroups.get(side).push(t);
     }
+    for (const [side, sub2] of tierSideGroups) {
+      if (sub2.length < MIN_SIDE_N) continue;
+      const tsFit = _fitBins(sub2, marketName, `tier=${tier}/side=${side}`);
+      if (tsFit) {
+        tierSideFits[side] = tsFit;
+        console.log(`[${marketName}/tier=${tier}/side=${side}] fitted n=${tsFit.nTotal} ${tsFit.bins.length} bins`);
+      }
+    }
+
+    tierFits[tier] = {
+      ...tierFit,
+      sides: Object.keys(tierSideFits).length ? tierSideFits : undefined,
+    };
+    console.log(`[${marketName}/tier=${tier}] fitted n=${tierFit.nTotal} ${tierFit.bins.length} bins coverage=[${tierFit.coverage[0].toFixed(3)},${tierFit.coverage[1].toFixed(3)}]${tierFits[tier].sides ? ` + ${Object.keys(tierSideFits).length} side subfits` : ''}`);
   }
 
   return {
     ...defaultFit,
-    // Schema v2: tiers presente quando há fits per-tier; default bins fallback.
+    // Schema v2.1: sides + tiers (com sub-sides). Defaults bins permanecem como fallback v1.
+    sides: Object.keys(sideFits).length ? sideFits : undefined,
     tiers: Object.keys(tierFits).length ? tierFits : undefined,
   };
 }
