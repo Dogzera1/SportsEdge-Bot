@@ -2583,6 +2583,47 @@ const migrations = [
       } catch (e) { /* tabela pode não existir */ }
     },
   },
+  {
+    id: '099_ml_auto_promote',
+    up(db) {
+      // 2026-05-11: cron lib/ml-auto-promote.js — espelha mt-auto-promote pra
+      // ML shadow tips (tips.is_shadow=1 + market_type='ML'). Decisões:
+      //   - PROMOTE (shadow→real): sport-level, lê shadow puro (pre-promote eval P2).
+      //   - REVERT (real→shadow): sport-level, lê tips real (is_shadow=0).
+      //   - LEAGUE_BLOCK: per (sport, league via event_name), lê real (sintoma).
+      // Granularidade P1: tier + bucket de odd breakdown opcional via report.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS ml_auto_promote_log (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          ts TEXT DEFAULT (datetime('now')),
+          sport TEXT NOT NULL,
+          tier TEXT,
+          bucket TEXT,
+          league TEXT,
+          action TEXT NOT NULL,
+          reason TEXT,
+          n INTEGER,
+          roi_pct REAL,
+          clv_pct REAL
+        );
+        CREATE INDEX IF NOT EXISTS idx_ml_promote_log_ts ON ml_auto_promote_log(ts DESC);
+        CREATE INDEX IF NOT EXISTS idx_ml_promote_log_sport ON ml_auto_promote_log(sport, ts DESC);
+
+        CREATE TABLE IF NOT EXISTS ml_league_blocklist (
+          sport TEXT NOT NULL,
+          league_norm TEXT NOT NULL,
+          league_raw TEXT,
+          since TEXT DEFAULT (datetime('now')),
+          source TEXT,
+          reason TEXT,
+          n INTEGER,
+          roi_pct REAL,
+          PRIMARY KEY (sport, league_norm)
+        );
+        CREATE INDEX IF NOT EXISTS idx_ml_league_blocklist_source ON ml_league_blocklist(source);
+      `);
+    },
+  },
 ];
 
 function applyMigrations(db) {

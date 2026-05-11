@@ -17200,6 +17200,56 @@ load();
     return;
   }
 
+  // GET /admin/ml-auto-promote?key=<KEY>&run=1
+  // Estado atual do ML auto-promote: ligas blocked + decision log + opcional re-run.
+  if (p === '/admin/ml-auto-promote') {
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    try {
+      const out = { ok: true };
+      if (parsed.query.run === '1' || parsed.query.run === 'true') {
+        const { runMlAutoPromoteCycle } = require('./lib/ml-auto-promote');
+        out.cycle = await runMlAutoPromoteCycle(db);
+      }
+      const blocks = db.prepare(`
+        SELECT sport, league_norm, league_raw, since, source, reason, n, roi_pct
+        FROM ml_league_blocklist
+        ORDER BY sport, league_raw
+      `).all();
+      const recentLog = db.prepare(`
+        SELECT ts, sport, tier, bucket, league, action, reason, n, roi_pct, clv_pct
+        FROM ml_auto_promote_log
+        WHERE action NOT LIKE 'audit_%'
+        ORDER BY ts DESC LIMIT 100
+      `).all();
+      const recentAudit = db.prepare(`
+        SELECT ts, sport, tier, bucket, action, n, roi_pct, clv_pct
+        FROM ml_auto_promote_log
+        WHERE action LIKE 'audit_%'
+        ORDER BY ts DESC LIMIT 200
+      `).all();
+      out.league_blocks = blocks;
+      out.recent_decisions = recentLog;
+      out.recent_audit_granular = recentAudit;
+      out.envs = {
+        ML_AUTO_PROMOTE: process.env.ML_AUTO_PROMOTE ?? 'true',
+        ML_AUTO_PROMOTE_REAL_ONLY: process.env.ML_AUTO_PROMOTE_REAL_ONLY ?? 'true',
+        ML_AUTO_PROMOTE_MIN_SETTLED: process.env.ML_AUTO_PROMOTE_MIN_SETTLED ?? '150',
+        ML_AUTO_PROMOTE_MIN_ROI: process.env.ML_AUTO_PROMOTE_MIN_ROI ?? '2',
+        ML_AUTO_PROMOTE_REQUIRE_CI: process.env.ML_AUTO_PROMOTE_REQUIRE_CI ?? 'true',
+        ML_AUTO_PROMOTE_CI_LOWER_THRESHOLD: process.env.ML_AUTO_PROMOTE_CI_LOWER_THRESHOLD ?? '0',
+        ML_AUTO_PROMOTE_REVERT_ROI: process.env.ML_AUTO_PROMOTE_REVERT_ROI ?? '-3',
+        ML_AUTO_PROMOTE_REVERT_DAYS: process.env.ML_AUTO_PROMOTE_REVERT_DAYS ?? '14',
+        ML_AUTO_PROMOTE_LEAGUE_MIN_N: process.env.ML_AUTO_PROMOTE_LEAGUE_MIN_N ?? '10',
+        ML_AUTO_PROMOTE_LEAGUE_ROI: process.env.ML_AUTO_PROMOTE_LEAGUE_ROI ?? '-10',
+        ML_AUTO_PROMOTE_WINDOW_DAYS: process.env.ML_AUTO_PROMOTE_WINDOW_DAYS ?? '30',
+        ML_AUTO_PROMOTE_AUDIT_TIER_BUCKET: process.env.ML_AUTO_PROMOTE_AUDIT_TIER_BUCKET ?? 'true',
+      };
+      sendJson(res, out);
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   // GET /admin/mt-promote-status?key=<KEY>
   // Mostra status atual (env + settings persisted) por sport.
   if (p === '/admin/mt-promote-status') {

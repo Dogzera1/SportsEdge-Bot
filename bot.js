@@ -22779,6 +22779,16 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
     setTimeout(_wrapCron('mt_auto_promote', () => _mtAutoPromote.runMtAutoPromoteCycle(db)), 70 * 60 * 1000);
   } catch (e) { log('WARN', 'MT-AUTO-PROMOTE', `boot wire err: ${e.message}`); }
 
+  // ML auto-promote — espelho do MT mas pra ML tips (is_shadow=1/0).
+  // Sport-level promote/revert + (sport, league) block + audit granular
+  // (tier × bucket). Cron 12h. Boot offset 75min (post mt_auto_promote 70min).
+  try {
+    const _mlAutoPromote = require('./lib/ml-auto-promote');
+    _mlAutoPromote.loadMlLeagueBlocklist(db);
+    setInterval(_wrapCron('ml_auto_promote', () => _mlAutoPromote.runMlAutoPromoteCycle(db)), 12 * 60 * 60 * 1000);
+    setTimeout(_wrapCron('ml_auto_promote', () => _mlAutoPromote.runMlAutoPromoteCycle(db)), 75 * 60 * 1000);
+  } catch (e) { log('WARN', 'ML-AUTO-PROMOTE', `boot wire err: ${e.message}`); }
+
   setInterval(_wrapCron('gates_autotune', runGatesAutoTuneCycle), 12 * 60 * 60 * 1000);
   setTimeout(_wrapCron('gates_autotune', runGatesAutoTuneCycle), 55 * 60 * 1000);
   setTimeout(() => runModelCalibrationCycle().catch(() => {}), 60 * 60 * 1000); // 1h pós-boot
