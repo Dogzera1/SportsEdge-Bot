@@ -22275,10 +22275,23 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
     if (now.getUTCHours() !== hourUtc) return;
     _lastStuckVoidDay = today;
 
+    // 2026-05-11 fix void rate 64% football: 24h→192h (8d). Tips MT football
+    // são emitidas até 7d antes do match — threshold 24h voidava prematuro.
+    // Espelha ZOMBIE_THRESHOLDS_H em lib/market-tips-shadow.js. Override via env
+    // VOID_STUCK_H_<SPORT>.
     const thresholdsH = {
-      esports: 12, lol: 12, cs: 12, cs2: 12, valorant: 12, dota2: 12,
-      tennis: 36, darts: 36, snooker: 48, mma: 72,
-      football: 24, tabletennis: 24,
+      esports: parseInt(process.env.VOID_STUCK_H_ESPORTS || '12', 10),
+      lol: parseInt(process.env.VOID_STUCK_H_LOL || '12', 10),
+      cs: parseInt(process.env.VOID_STUCK_H_CS || '12', 10),
+      cs2: parseInt(process.env.VOID_STUCK_H_CS2 || '12', 10),
+      valorant: parseInt(process.env.VOID_STUCK_H_VALORANT || '12', 10),
+      dota2: parseInt(process.env.VOID_STUCK_H_DOTA2 || '12', 10),
+      tennis: parseInt(process.env.VOID_STUCK_H_TENNIS || '36', 10),
+      darts: parseInt(process.env.VOID_STUCK_H_DARTS || '36', 10),
+      snooker: parseInt(process.env.VOID_STUCK_H_SNOOKER || '48', 10),
+      mma: parseInt(process.env.VOID_STUCK_H_MMA || '72', 10),
+      football: parseInt(process.env.VOID_STUCK_H_FOOTBALL || '192', 10),
+      tabletennis: parseInt(process.env.VOID_STUCK_H_TABLETENNIS || '24', 10),
     };
     const adminKey = process.env.ADMIN_KEY || '';
     const results = [];
