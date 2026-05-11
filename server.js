@@ -16437,6 +16437,71 @@ load();
     return;
   }
 
+  // POST /admin/tip-archive?id=<tipId>&key=<KEY>          — arquiva tip específica
+  // POST /admin/tip-archive?sport=<sport>&team1=...&team2=...&key=<KEY>
+  //                                                       — arquiva tip mais recente matching teams
+  // 2026-05-11: manual archive pra remover tips canceladas/zumbi do dashboard.
+  // Retorna preview se dry_run=1, senão aplica direto.
+  if (p === '/admin/tip-archive' && (req.method === 'POST' || req.method === 'GET')) {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const q = parsed.query;
+      const dryRun = q.dry_run === '1' || q.dry_run === 'true';
+      let candidates = [];
+      const id = parseInt(q.id, 10);
+      if (Number.isFinite(id) && id > 0) {
+        const row = db.prepare(`
+          SELECT id, sport, participant1, participant2, tip_participant, odds, ev,
+                 market_type, sent_at, result, is_shadow, archived
+          FROM tips WHERE id = ?
+        `).get(id);
+        if (row) candidates.push(row);
+      } else if (q.team1 && q.team2) {
+        const team1 = String(q.team1).trim().toLowerCase();
+        const team2 = String(q.team2).trim().toLowerCase();
+        const sportFilter = q.sport ? `AND sport = '${String(q.sport).replace(/'/g, "")}'` : '';
+        // Match qualquer order (team1↔team2) via OR
+        candidates = db.prepare(`
+          SELECT id, sport, participant1, participant2, tip_participant, odds, ev,
+                 market_type, sent_at, result, is_shadow, archived
+          FROM tips
+          WHERE (archived IS NULL OR archived = 0)
+            ${sportFilter}
+            AND (
+              (LOWER(participant1) LIKE ? AND LOWER(participant2) LIKE ?) OR
+              (LOWER(participant1) LIKE ? AND LOWER(participant2) LIKE ?)
+            )
+          ORDER BY sent_at DESC
+          LIMIT 10
+        `).all(`%${team1}%`, `%${team2}%`, `%${team2}%`, `%${team1}%`);
+      } else {
+        sendJson(res, { ok: false, error: 'forneça id OU team1+team2' }, 400);
+        return;
+      }
+      if (!candidates.length) {
+        sendJson(res, { ok: false, error: 'nenhuma tip encontrada', matched: 0 });
+        return;
+      }
+      if (dryRun) {
+        sendJson(res, { ok: true, dry_run: true, matched: candidates.length, candidates });
+        return;
+      }
+      const stmt = db.prepare(`UPDATE tips SET archived = 1 WHERE id = ?`);
+      let archived = 0;
+      const archivedIds = [];
+      for (const c of candidates) {
+        if (c.archived === 1) continue;
+        const r = stmt.run(c.id);
+        if (r.changes > 0) {
+          archived += 1;
+          archivedIds.push(c.id);
+        }
+      }
+      sendJson(res, { ok: true, archived, archived_ids: archivedIds, candidates });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
   // Archive de tips regulares duplicadas cross-bucket (esports↔lol/dota2 após split Abr/2026).
   // Mantém tip com MAX(id) por match_id (a mais nova), archived=1 nas demais.
   // POST /archive-cross-bucket-duplicates?apply=1   (sem apply = dry-run)
