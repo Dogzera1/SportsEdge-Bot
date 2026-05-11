@@ -334,26 +334,20 @@ function _validateTipPvsModel(text, modelP, tolPp = 8) {
  * Tier 2 (Challengers, regional top) → cap +3pp
  * Tier 3 (CCT, VCL, DPC regional, tier2 esports regionais) → cap +5pp
  */
+// 2026-05-11 (audit overfeaturing): DELEGATE pra lib/league-tier — fonte
+// única de verdade. Antes havia 3 implementações paralelas com semantics
+// diferentes (CBLOL = tier1 em bot.js mas tier2 em lib/league-tier).
+// Kelly tier-aware multiplier (commit e864957) inconsistente como resultado.
+//
+// Decisão pragmática:
+//   - CBLOL/LJL/PCS = tier2 (regional, mid) — alinha com lib/league-tier
+//   - Override per liga via env KELLY_TIER_MULT_LOL_2 se quiser CBLOL boost
 function _leagueTier(sport, league) {
-  const l = String(league || '').toLowerCase();
-  const TIER1 = {
-    lol:      /\b(worlds|msi|first stand|red bull|lck|lec|lpl|lcs|cblol|ljl|pcs)\b/i,
-    dota2:    /\b(the international|ti\d|riyadh|blast.*major|esl one birmingham|pgl.*major|dreamleague major)\b/i,
-    cs:       /\b(major|iem|katowice|cologne|esl pro league|epl|blast premier|austin|rio|shanghai|paris|copenhagen)\b/i,
-    valorant: /\b(vct|valorant champions|masters|lock.?in)\b/i,
-    tennis:   /\b(grand slam|wimbledon|us open|roland garros|australian open|atp 1000|wta 1000|atp finals|wta finals|masters)\b/i,
-  };
-  const TIER3 = {
-    lol:      /\b(nacl|prime league|ultraliga|tcl|arabian|pg nationals|ljl academy|cd|superliga)\b/i,
-    dota2:    /\b(division 2|open qualifier|minor league|regional qualifier)\b/i,
-    cs:       /\b(cct|1xbet|fissure|contest|champion of champions|clutch arena)\b/i,
-    valorant: /\b(vcl|challengers|game changers|red bull)\b/i,
-    tennis:   /\b(itf|futures|challenger|\$25k|\$15k|\$50k)\b/i,
-  };
-  const re1 = TIER1[sport], re3 = TIER3[sport];
-  if (re1?.test(l)) return 1;
-  if (re3?.test(l)) return 3;
-  return 2;
+  try {
+    return _leagueTierLib.getLeagueTier(sport, league);
+  } catch (_) {
+    return 2; // fallback neutro
+  }
 }
 
 /**
