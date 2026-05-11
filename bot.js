@@ -2730,6 +2730,17 @@ async function runAutoAnalysis() {
       });
       log('INFO', 'AUTO', `LoL: ${lolRaw?.length||0} partidas (${allLive.filter(m=>m.status==='live').length} live, ${allLive.filter(m=>m.status==='draft').length} draft, ${lolLive.length-allLive.length} dupl. removidas) | inscritos=${subscribedUsers.size}`);
       markPollHeartbeat('lol', { matches: lolRaw?.length || 0, hadLive: allLive.some(m => m.status === 'live') });
+      // 2026-05-11 (audit time-of-day): hour gate opt-in. Audit revelou
+      // LoL 20h BRT +32% hit 75% (sweet spot) / 15h -63% (dead zone).
+      // Set LOL_HOURS_BLOCKED=14,15 OR LOL_HOURS_ALLOWED=19,20,21,22.
+      try {
+        const { checkHourGate } = require('./lib/hour-gate');
+        const _hg = checkHourGate('lol');
+        if (_hg.blocked) {
+          log('INFO', 'AUTO', `[HOUR-GATE] LoL skip ciclo: ${_hg.reason}`);
+          return;
+        }
+      } catch (_) {}
       // Feed do dashboard: lista cada partida live pelos nomes (dashboard só classifica live quando
       // o nome do confronto aparece numa linha com marker "ao vivo"). Partidas puladas pelos gates
       // nunca chegam ao log "Analisando [AO VIVO]", então emitimos aqui ANTES dos filtros.
@@ -16802,6 +16813,17 @@ async function pollTennis(runOnce = false) {
     try {
       log('INFO', 'AUTO-TENNIS', 'Iniciando verificação de partidas de Tênis...');
       markPollHeartbeat('tennis');
+      // 2026-05-11 (audit time-of-day): hour gate opt-in. Audit revelou
+      // 8h-10h BRT ROI -50% / 13h ROI -7%. Set TENNIS_HOURS_BLOCKED=8,9,10
+      // pra skip esses horários. Default OFF (back-compat).
+      try {
+        const { checkHourGate } = require('./lib/hour-gate');
+        const _hg = checkHourGate('tennis');
+        if (_hg.blocked) {
+          log('INFO', 'AUTO-TENNIS', `[HOUR-GATE] skip ciclo: ${_hg.reason}`);
+          return;
+        }
+      } catch (_) {}
       // Pre-check: se tennis em hard drawdown block, skip pipeline (Guardian
       // bloqueia 100% downstream). Economiza CPU+IA. Reagenda em intervalo curto
       // pra detectar quando DD recuperar (cache TTL 5min).
@@ -18397,6 +18419,18 @@ async function pollFootball(runOnce = false) {
       log('INFO', 'AUTO-FOOTBALL', 'Iniciando verificação de partidas de Futebol...');
       markPollHeartbeat('football');
 
+      // 2026-05-11 (audit time-of-day): hour gate opt-in. Default OFF.
+      // Set FOOTBALL_HOURS_BLOCKED=8,10,13 (BRT) pra skip ciclo em horas
+      // identificadas como dead zones via /admin/time-of-day-analysis.
+      try {
+        const { checkHourGate } = require('./lib/hour-gate');
+        const _hg = checkHourGate('football');
+        if (_hg.blocked) {
+          log('INFO', 'AUTO-FOOTBALL', `[HOUR-GATE] skip ciclo: ${_hg.reason}`);
+          return;
+        }
+      } catch (_) {}
+
       // Warm cache from DB on first iteration ou após reset: marca match_ids
       // de tips football emitidas nas últimas 24h como tipSent=true. Evita
       // re-análise+IA+/record-tip de duplicates conhecidos quando o map
@@ -19910,6 +19944,15 @@ async function pollCs(runOnce = false) {
     try {
       log('INFO', 'AUTO-CS', `Iniciando verificação de CS2${csConfig.shadowMode ? ' [SHADOW]' : ''}...`);
       markPollHeartbeat('cs');
+      // 2026-05-11 (audit time-of-day): hour gate opt-in via CS_HOURS_BLOCKED.
+      try {
+        const { checkHourGate } = require('./lib/hour-gate');
+        const _hg = checkHourGate('cs');
+        if (_hg.blocked) {
+          log('INFO', 'AUTO-CS', `[HOUR-GATE] skip ciclo: ${_hg.reason}`);
+          return;
+        }
+      } catch (_) {}
       const matches = await serverGet('/cs-matches').catch(() => []);
       if (!Array.isArray(matches) || !matches.length) {
         log('INFO', 'AUTO-CS', '0 partidas CS2 com odds');
