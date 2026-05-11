@@ -26684,6 +26684,7 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
       // no card ML Shadow do dashboard sem extra round-trip.
       let per_sport_tier = [];
       let per_sport_league = [];
+      let per_sport_segment = [];
       try {
         const { getLeagueTier } = require('./lib/league-tier');
         const detailRows = db.prepare(`
@@ -26702,23 +26703,43 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
           )
           SELECT t.sport,
                  COALESCE(NULLIF(TRIM(t.event_name), ''), '(sem liga)') AS league,
+                 t.match_id,
                  t.result, t.profit_reais, t.stake_reais, t.odds, t.ev, t.clv_odds
           FROM tips t
           JOIN dedup d ON d.id = t.id
         `).all(...params);
 
+        // 2026-05-10 (P1 granularidade — esports map vs série): segment é
+        // dimensão sport-internal pra esports — Bo3/Bo5 series math difere
+        // de single-map math, então leak em mapa pode mascarar série OK (e
+        // vice-versa). Inferido de match_id que contém '_MAP{N}' (padrão
+        // bot.js:15416 dota2 + cs/val *MapTag em bot.js:19486/20212).
+        const ESPORTS_SET = new Set(['lol', 'dota2', 'cs', 'cs2', 'valorant']);
+        const _segmentOf = (sport, matchId) => {
+          if (!ESPORTS_SET.has(sport)) return null;
+          // _MAP\d+ é estrito: bot.js sempre grava com mapN numérico
+          // (dota2:15416 `_MAP${mapN}`, cs:19486 `_MAP${csMapNum}`,
+          // val:20212 `_MAP${valMapNum}`). \d+ evita falso-positivo em
+          // tokens como "MAPLE"/"MAP_WINNER" caso surjam.
+          return matchId && /_MAP\d+/i.test(String(matchId)) ? 'map' : 'series';
+        };
+
         const tierMap = new Map(); // key: sport|tier
         const leagueMap = new Map(); // key: sport|league
+        const segmentMap = new Map(); // key: sport|segment (esports only)
         for (const r of detailRows) {
           const tier = getLeagueTier(r.sport, r.league) || 3;
+          const segment = _segmentOf(r.sport, r.match_id);
           const tk = `${r.sport}|tier${tier}`;
           const lk = `${r.sport}|${r.league}`;
-          for (const [k, key] of [[tk, 'tier'], [lk, 'league']]) {
-            const map = key === 'tier' ? tierMap : leagueMap;
-            let agg = map.get(k);
+          const sk = segment ? `${r.sport}|${segment}` : null;
+          const targets = [[tk, tierMap, { tier }], [lk, leagueMap, { tier, league: r.league }]];
+          if (sk) targets.push([sk, segmentMap, { segment }]);
+          for (const [key, map, extras] of targets) {
+            let agg = map.get(key);
             if (!agg) {
-              agg = { sport: r.sport, tier, league: r.league, n: 0, wins: 0, losses: 0, pushes: 0, pending: 0, profit_r: 0, stake_r: 0, odds_sum: 0, odds_n: 0, ev_sum: 0, ev_n: 0, clv_sum: 0, clv_n: 0 };
-              map.set(k, agg);
+              agg = { sport: r.sport, tier, league: r.league, segment, n: 0, wins: 0, losses: 0, pushes: 0, pending: 0, profit_r: 0, stake_r: 0, odds_sum: 0, odds_n: 0, ev_sum: 0, ev_n: 0, clv_sum: 0, clv_n: 0, ...extras };
+              map.set(key, agg);
             }
             agg.n += 1;
             if (r.result === 'win') agg.wins += 1;
@@ -26743,6 +26764,7 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
             sport: agg.sport,
             tier: agg.tier,
             league: agg.league,
+            segment: agg.segment,
             n: agg.n, wins: agg.wins, losses: agg.losses, pushes: agg.pushes, pending: agg.pending,
             hitRate: hitRate != null ? parseFloat(hitRate.toFixed(1)) : null,
             roi: roi != null ? parseFloat(roi.toFixed(2)) : null,
@@ -26760,12 +26782,17 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
           const fin = finalize({ ...rest, tier: _t });
           return fin;
         }).sort((a, b) => a.sport.localeCompare(b.sport) || (b.n - a.n));
+        per_sport_segment = [...segmentMap.values()].map(finalize)
+          // Ordem fixa: 'series' antes de 'map' pra UI ler como "tip do match
+          // inteiro vs tip de mapa específico" (mais geral → mais específico).
+          .sort((a, b) => a.sport.localeCompare(b.sport)
+                          || (a.segment === 'series' ? -1 : 1));
       } catch (e) {
         // Granularidade adicional é opcional — falha graceful preserva legado
         console.warn('[/ml-shadow-by-sport] granularity breakdown skipped:', e.message);
       }
 
-      sendJson(res, { days, totals, per_sport, per_sport_tier, per_sport_league, league: leagueFilter || null });
+      sendJson(res, { days, totals, per_sport, per_sport_tier, per_sport_league, per_sport_segment, league: leagueFilter || null });
     } catch (e) { sendJson(res, { error: e.message }, 500); }
     return;
   }

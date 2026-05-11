@@ -3576,6 +3576,20 @@ function renderTipsTable() {
           const mtBadge = _mtAbbr
             ? `<span class="chip" title="Market Tip (${_mtRaw}) — promovida do MT scanner" style="background:#7c3aed;color:#fff;border-color:transparent;font-size:0.7em;padding:1px 6px;margin-right:4px">${_mtAbbr}</span>`
             : '';
+          // 2026-05-10 (P1 esports map vs série): chip série/mapa pra esports
+          // ML tips. Mapa quando match_id contém _MAP{N} (CS/Val pattern em
+          // bot.js:19486/20212). Não-esports ou MT-promoted: vazio (mtBadge
+          // já encode market info pra MT).
+          const _spLow = String(t.sport || '').toLowerCase();
+          const _isEsportTip = _spLow === 'lol' || _spLow === 'dota2'
+                            || _spLow === 'cs' || _spLow === 'cs2' || _spLow === 'valorant';
+          let segChip = '';
+          if (_isEsportTip && (_mtRaw === 'ML' || _mtRaw === 'NULL')) {
+            const mm = t.match_id && /_MAP(\d+)/i.exec(String(t.match_id));
+            segChip = mm
+              ? `<span class="chip" title="Tip de mapa específico (match_id _MAP${mm[1]})" style="background:#7c3aed25;color:#a78bfa;border:1px solid #7c3aed55;font-size:0.7em;padding:1px 5px;margin-right:4px">🗺️ M${mm[1]}</span>`
+              : `<span class="chip" title="Tip da série inteira (Bo3/Bo5 winner)" style="background:#0891b225;color:#67e8f9;border:1px solid #0891b255;font-size:0.7em;padding:1px 5px;margin-right:4px">🏆 série</span>`;
+          }
           return `
             <tr>
               <td><span class="tip-status ${statusCls}">${statusCh}</span></td>
@@ -3583,7 +3597,7 @@ function renderTipsTable() {
                 <div class="tip-event">${escHtml(t.participant1 || '?')} <span class="tip-meta">vs</span> ${escHtml(t.participant2 || '?')}</div>
                 <div class="tip-meta">${escHtml(t.event_name || t.league || '')} ${live} ${shadow}</div>
               </td>
-              <td><div class="tip-pick">${mtBadge}${escHtml(t.tip_participant || '—')}</div></td>
+              <td><div class="tip-pick">${mtBadge}${segChip}${escHtml(t.tip_participant || '—')}</div></td>
               <td class="tip-num">${(t.odds != null && t.odds !== '' && Number.isFinite(Number(t.odds))) ? Number(t.odds).toFixed(2) : '—'}</td>
               <td class="tip-num">${t.ev != null ? fmtPct(t.ev) : '—'}</td>
               <td class="tip-num">${escHtml(t.stake || '—')}</td>
@@ -4482,6 +4496,21 @@ async function _loadMlShadowBySportInternal(el, meta) {
             T${tr.tier} <b>${tr.n}</b> ${tr.roi != null ? (tr.roi >= 0 ? '+' : '') + tr.roi.toFixed(0) + '%' : '—'}
           </span>`).join('')}
       </div>` : '';
+    // 2026-05-10 (P1 granularidade — esports map vs série): chips inline
+    // separando tip da série (Bo3/Bo5 inteira) vs tip de mapa específico.
+    // Math difere bastante (sweep prob ≠ single-map P), então leak em mapa
+    // pode mascarar série OK e vice-versa. Backend infere via _MAP{N} em
+    // match_id (esports only). Mesmo color scheme dos tier chips.
+    const segments = (data.per_sport_segment || []).filter(x => x.sport === s.sport);
+    const segLabel = (seg) => seg === 'series' ? '🏆 série' : '🗺️ mapa';
+    const segmentChips = segments.length ? `
+      <div style="margin-top:4px;display:flex;gap:3px;flex-wrap:wrap;font-size:0.66em">
+        ${segments.map(sg => `
+          <span title="${sg.segment === 'series' ? 'Tip da série inteira (Bo3/Bo5 winner)' : 'Tip de mapa específico (MAP_WINNER)'} · ${sg.n} tips (${sg.wins}W/${sg.losses}L/${sg.pending}P) · ROI ${fmtOrDash(sg.roi)} · CLV ${fmtOrDash(sg.avg_clv)} (n=${sg.clv_n})"
+                style="padding:1px 5px;border-radius:3px;background:${roiClr(sg.roi, sg.n)}25;color:${roiClr(sg.roi, sg.n)};border:1px solid ${roiClr(sg.roi, sg.n)}55">
+            ${segLabel(sg.segment)} <b>${sg.n}</b> ${sg.roi != null ? (sg.roi >= 0 ? '+' : '') + sg.roi.toFixed(0) + '%' : '—'}
+          </span>`).join('')}
+      </div>` : '';
     const expandId = `mlShadowExpand_${s.sport}`;
     return `
       <div onclick="filterToSport('${s.sport}')" style="cursor:pointer;border:2px solid ${isActive ? c : 'var(--border,#2a2a2a)'};background:var(--surface,#0f172a);border-radius:8px;padding:10px 12px;min-width:170px;flex:1;transition:transform 0.1s" onmouseover="this.style.transform='translateY(-2px)'" onmouseout="this.style.transform='translateY(0)'">
@@ -4504,6 +4533,7 @@ async function _loadMlShadowBySportInternal(el, meta) {
           <span>Odd: ${s.avg_odds != null ? s.avg_odds.toFixed(2) : '—'}</span>
         </div>
         ${tierChips}
+        ${segmentChips}
         ${statusBanner}
         ${tiers.length ? `
           <div style="margin-top:6px;text-align:right">
@@ -4582,7 +4612,7 @@ async function _loadMlShadowBySportInternal(el, meta) {
   }
 
   html += `<div class="card-meta" style="margin-top:10px;font-size:0.8em">
-    Shadow = tip gerada mas sem DM. Tier chips: <b>T1</b>=top (LCK/LPL/LEC/Slam/NBA/UFC), <b>T2</b>=mid (CBLOL/Challenger/Brasileirão/Bellator), <b>T3</b>=outros. Cor verde ≥+5%, vermelho ≤-5%, cinza n&lt;5. Critério promover: n≥30 · ROI≥0 · CLV≥0 (n_CLV≥10).
+    Shadow = tip gerada mas sem DM. Tier chips: <b>T1</b>=top (LCK/LPL/LEC/Slam/NBA/UFC), <b>T2</b>=mid (CBLOL/Challenger/Brasileirão/Bellator), <b>T3</b>=outros. Segmento (esports): <b>🏆 série</b> = winner Bo3/Bo5 (market <code>ML</code>) · <b>🗺️ mapa</b> = winner do mapa específico (market <code>MAP{N}_WINNER</code>) — math difere bastante (sweep prob ≠ single-map P), por isso vão separados. Cor verde ≥+5%, vermelho ≤-5%, cinza n&lt;5. Critério promover: n≥30 · ROI≥0 · CLV≥0 (n_CLV≥10).
   </div>
   <div id="mlShadowTipsList" style="margin-top:16px"><div class="loading">Carregando tips individuais…</div></div>`;
 
@@ -4710,10 +4740,29 @@ function renderMlShadowTipsList() {
     : r === 'void' ? '<span style="color:#ca8a04">−</span>'
     : '<span style="opacity:0.5">⋯</span>';
 
-  let html = `<div class="card-meta" style="margin-bottom:6px"><b>🗒️ Tips ML shadow individuais</b> (${allTips.length} total, ordenado por data desc)</div>
+  // 2026-05-10 (P1 — esports map vs série): badge Segm derivado de match_id.
+  // Esports = lol/dota2/cs/cs2/valorant; outros sports não exibem badge (—).
+  // Mapa: match_id contém '_MAP{N}' (ex: dota2_ps_1416676_MAP2) → '🗺️ M{N}'.
+  // Série: ML do match inteiro → '🏆 série'. Ajuda inspeção visual sem
+  // precisar abrir o tip individual.
+  const ESPORTS_SEGMENT = new Set(['lol', 'dota2', 'cs', 'cs2', 'valorant']);
+  const segBadge = (sp, mid) => {
+    if (!ESPORTS_SEGMENT.has(sp)) return '<span style="opacity:0.4">—</span>';
+    // _MAP\d+ estrito (espelha server.js _segmentOf). bot.js sempre grava
+    // mapN numérico, então sem digit = não é mapa.
+    const m = mid && /_MAP(\d+)/i.exec(String(mid));
+    if (m) {
+      const n = m[1];
+      return `<span title="Tip de mapa específico (match_id _MAP${n})" style="background:#7c3aed25;color:#a78bfa;border:1px solid #7c3aed55;padding:1px 5px;border-radius:3px;font-size:0.75em;white-space:nowrap">🗺️ M${n}</span>`;
+    }
+    return '<span title="Tip da série inteira (ML — Bo3/Bo5 winner)" style="background:#0891b225;color:#67e8f9;border:1px solid #0891b255;padding:1px 5px;border-radius:3px;font-size:0.75em;white-space:nowrap">🏆 série</span>';
+  };
+
+  let html = `<div class="card-meta" style="margin-bottom:6px"><b>🗒️ Tips ML shadow individuais</b> (${allTips.length} total, ordenado por data desc) · esports: <span style="background:#0891b225;color:#67e8f9;padding:1px 5px;border-radius:3px;font-size:0.85em">🏆 série</span> = match inteiro · <span style="background:#7c3aed25;color:#a78bfa;padding:1px 5px;border-radius:3px;font-size:0.85em">🗺️ M{n}</span> = mapa específico</div>
     <table class="tips">
       <thead><tr>
         <th>Sport</th>
+        <th style="text-align:center">Segm</th>
         <th>Data</th>
         <th>Match</th>
         <th>Pick</th>
@@ -4733,6 +4782,7 @@ function renderMlShadowTipsList() {
     const clvCls = clv == null ? '' : (clv >= 0 ? 'positive' : 'negative');
     html += `<tr>
       <td>${emoji} ${sp}</td>
+      <td style="text-align:center">${segBadge(sp, t.match_id)}</td>
       <td style="white-space:nowrap;font-size:0.85em">${ts}</td>
       <td style="font-size:0.9em">${t.participant1 || '?'} vs ${t.participant2 || '?'}</td>
       <td><b>${t.tip_participant || '—'}</b></td>
@@ -5670,6 +5720,24 @@ function renderMarketTipsPage() {
         </tr>
       </thead>
       <tbody>`;
+  // 2026-05-10 (P1 esports map vs série em MT shadow): classifier por nome
+  // do market. Map = mapWinner / map\d+Winner / qualquer market terminado em
+  // _map\d+ (ex: total_kills_map3, kills_map1). Series = resto (handicap,
+  // total, totalKills, correctScore, etc — todos no nível da série).
+  const _MT_ESPORTS = new Set(['lol', 'dota2', 'cs', 'cs2', 'valorant']);
+  const _mtMapRe = /(_map\d+|^map\d*winner$)/i;
+  const _mtSegBadge = (sport, market) => {
+    if (!_MT_ESPORTS.has(String(sport || '').toLowerCase())) return '';
+    const m = String(market || '');
+    const isMap = _mtMapRe.test(m);
+    if (isMap) {
+      const num = (m.match(/_map(\d+)/i) || m.match(/^map(\d+)winner$/i) || [])[1];
+      const tag = num ? `M${num}` : 'mapa';
+      return `<span title="Market de mapa específico (${m})" style="background:#7c3aed25;color:#a78bfa;border:1px solid #7c3aed55;font-size:0.7em;padding:1px 5px;border-radius:3px;margin-right:4px;white-space:nowrap">🗺️ ${tag}</span>`;
+    }
+    return `<span title="Market da série inteira (${m})" style="background:#0891b225;color:#67e8f9;border:1px solid #0891b255;font-size:0.7em;padding:1px 5px;border-radius:3px;margin-right:4px;white-space:nowrap">🏆 série</span>`;
+  };
+
   for (const t of pageFiltered) {
     const d = (t.created_at || '').slice(5, 16).replace('T', ' ');
     const resEmoji = t.result === 'win' ? '✅' : t.result === 'loss' ? '❌' : t.result === 'void' ? '⚪' : '⏳';
@@ -5697,7 +5765,7 @@ function renderMarketTipsPage() {
         <td>${escHtml(t.sport)}</td>
         <td style="text-align:center">${t.is_live ? '<span style="color:var(--danger,#ef4444)">🔴</span>' : ''}</td>
         <td>${escHtml(t.team1)} vs ${escHtml(t.team2)}<br><span class="tip-meta">${escHtml(t.league || '')}</span></td>
-        <td>${escHtml(t.label || (t.market + ' ' + (t.line || '') + ' ' + t.side))}</td>
+        <td>${_mtSegBadge(t.sport, t.market)}${escHtml(t.label || (t.market + ' ' + (t.line || '') + ' ' + t.side))}</td>
         <td style="text-align:right">${(t.odd != null && Number.isFinite(Number(t.odd))) ? Number(t.odd).toFixed(2) : '—'}</td>
         <td style="text-align:right">${pMod}</td>
         <td style="text-align:right" class="${t.ev_pct >= 8 ? 'positive' : ''}">${evStr}</td>
