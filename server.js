@@ -4965,10 +4965,18 @@ const server = http.createServer(async (req, res) => {
       // consecutivos, pula chamada por TTL_MS. Override via
       // STEAM_RT_BREAKER_THRESHOLD (default 3) e STEAM_RT_BREAKER_TTL_MS
       // (default 5min). Pra desligar: STEAM_RT_BREAKER=false.
+      //
+      // 2026-05-11: exponential backoff. Bug observado em prod: sid 90285610368047130
+      // teve breaker reabrindo 3→4→5→6 falhas em sequência (a cada 5min novo poll
+      // → 400 → reabre). Match já tinha terminado mas poller não tem como saber
+      // (Steam RT 400 = ambíguo: lobby private OR match ended). Solução:
+      // TTL dobra a cada re-open (5→10→20→40→60min cap), reset fails to 0 quando
+      // breaker abre. Sid stale (match terminou) decai pra ~1h pause silencioso.
       const _steamRtBreakerOff = /^(0|false|no)$/i.test(String(process.env.STEAM_RT_BREAKER || ''));
       const _steamRtBreakerThreshold = Math.max(1, parseInt(process.env.STEAM_RT_BREAKER_THRESHOLD || '3', 10) || 3);
       const _steamRtBreakerTtlMs = Math.max(60_000, parseInt(process.env.STEAM_RT_BREAKER_TTL_MS || `${5 * 60 * 1000}`, 10) || (5 * 60 * 1000));
-      global._steamRtFailures = global._steamRtFailures || new Map(); // sid → { fails, openUntil }
+      const _steamRtBreakerTtlMaxMs = Math.max(_steamRtBreakerTtlMs, parseInt(process.env.STEAM_RT_BREAKER_TTL_MAX_MS || `${60 * 60 * 1000}`, 10) || (60 * 60 * 1000));
+      global._steamRtFailures = global._steamRtFailures || new Map(); // sid → { fails, openUntil, openCount }
       const _steamRtBreakerState = !_steamRtBreakerOff && steamSid ? (global._steamRtFailures.get(String(steamSid)) || null) : null;
       const _steamRtBreakerOpen = _steamRtBreakerState && _steamRtBreakerState.openUntil > Date.now();
       if (steamKeyPresent && steamSid && !_steamRtBreakerOpen) {
@@ -4984,11 +4992,17 @@ const server = http.createServer(async (req, res) => {
             if (rt.status === 200) {
               if (global._steamRtFailures.has(sidKey)) global._steamRtFailures.delete(sidKey);
             } else {
-              const cur = global._steamRtFailures.get(sidKey) || { fails: 0, openUntil: 0 };
+              const cur = global._steamRtFailures.get(sidKey) || { fails: 0, openUntil: 0, openCount: 0 };
               cur.fails = (cur.fails || 0) + 1;
               if (cur.fails >= _steamRtBreakerThreshold) {
-                cur.openUntil = Date.now() + _steamRtBreakerTtlMs;
-                log('WARN', 'STEAM-RT', `sid=${sidKey} circuit breaker OPEN após ${cur.fails} falhas — pause ${Math.round(_steamRtBreakerTtlMs/60000)}min`);
+                cur.openCount = (cur.openCount || 0) + 1;
+                const _backoffMs = Math.min(
+                  _steamRtBreakerTtlMs * Math.pow(2, cur.openCount - 1),
+                  _steamRtBreakerTtlMaxMs
+                );
+                cur.openUntil = Date.now() + _backoffMs;
+                cur.fails = 0; // reset — próximo ciclo precisa de N novas falhas
+                log('WARN', 'STEAM-RT', `sid=${sidKey} circuit breaker OPEN (re-open #${cur.openCount}) — pause ${Math.round(_backoffMs/60000)}min`);
               }
               global._steamRtFailures.set(sidKey, cur);
             }
