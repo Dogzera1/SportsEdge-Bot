@@ -24746,6 +24746,44 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
           }
         }
       }
+      // 2026-05-11: alert AGREGADO quando >N% casas BR down (mortas+degradadas).
+      // Caso prod 2026-05-11 11:30 UTC: 6/10 casas mortas (bet365/superbet/betfair/
+      // betano/esportes-da-sorte/kto-tennis) + 1 degradada (sportingbet) = 70%
+      // down. Transitions já reportadas individualmente mas operador não tinha
+      // sinal "BR aggregator degradado como um todo". Cooldown próprio 30min.
+      try {
+        const totalHouses = houses.length;
+        if (totalHouses >= 3) {
+          const morta = houses.filter(h => h.state === 'morta');
+          const degr = houses.filter(h => h.state === 'degradada');
+          const downPct = (morta.length + degr.length) / totalHouses;
+          const minDownPct = Math.max(0.1, Math.min(1, parseFloat(process.env.BR_SCRAPER_OUTAGE_MIN_PCT || '0.5')));
+          if (downPct >= minDownPct) {
+            const k = '__br_scraper_outage__';
+            const lastDm = _scraperHealthDmAt.get(k) || 0;
+            const aggCooldownMs = parseInt(process.env.BR_SCRAPER_OUTAGE_COOLDOWN_MIN || '30', 10) * 60 * 1000;
+            if (now - lastDm >= aggCooldownMs) {
+              _scraperHealthDmAt.set(k, now);
+              const pct = Math.round(downPct * 100);
+              log('WARN', 'BR-SCRAPER-OUTAGE', `${morta.length} mortas + ${degr.length} degradadas / ${totalHouses} casas (${pct}% down)`);
+              if (ADMIN_IDS.size) {
+                const tk = resolveAlertsToken();
+                if (tk) {
+                  const mortasLines = morta.map(h => `💀 ${h.casa}: ${h.reason || 'sem detalhe'}`);
+                  const degrLines = degr.map(h => `⚠️ ${h.casa}: ${h.reason || 'sem detalhe'}`);
+                  const msg = `🔧 *BR SCRAPER OUTAGE — ${pct}% casas down*\n\n${[...mortasLines, ...degrLines].slice(0, 12).join('\n')}\n\nFutebol pode estar com menos cobertura BR. Verificar scrapers Railway / Supabase logs.`;
+                  const sent = new Set();
+                  for (const adminId of ADMIN_IDS) {
+                    if (sent.has(adminId)) continue;
+                    sent.add(adminId);
+                    sendDM(tk, adminId, msg).catch(() => {});
+                  }
+                }
+              }
+            }
+          }
+        }
+      } catch (e) { log('DEBUG', 'BR-SCRAPER-OUTAGE', `detect err: ${e.message}`); }
       // GC: limpa entries de dm cooldown >24h
       for (const [k, ts] of _scraperHealthDmAt) {
         if (now - ts > 24 * 60 * 60 * 1000) _scraperHealthDmAt.delete(k);
