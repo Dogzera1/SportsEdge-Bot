@@ -2975,7 +2975,9 @@ async function runAutoAnalysis() {
 
           // Kelly adaptado por confiança: ALTA → ¼ Kelly (max 4u) | MÉDIA → ⅙ Kelly (max 3u) | BAIXA → 1/10 Kelly (max 1.5u)
           // Override via env KELLY_LOL_<CONF> ou KELLY_<CONF> global.
-          let kellyFraction = getKellyFraction('lol', tipConf);
+          // 2026-05-11: passa league pra tier-aware multiplier (concentra capital
+          // em tier1_major +25% shadow; reduz tier3_minor -26%).
+          let kellyFraction = getKellyFraction('lol', tipConf, null, match.league || match.leagueSlug);
           const _clvAdjLive = await fetchClvMultiplier('lol', match.league);
           if (_clvAdjLive.mult !== 1.0) {
             log('INFO', 'CLV-KELLY', `Ajuste lol live [${match.league}]: mult=${_clvAdjLive.mult} reason=${_clvAdjLive.reason} (CLV ${_clvAdjLive.avgClv}% n=${_clvAdjLive.n})`);
@@ -3447,7 +3449,8 @@ async function runAutoAnalysis() {
 
             // ALTA → ¼ Kelly (max 4u) | MÉDIA → ⅙ Kelly (max 3u) | BAIXA → 1/10 Kelly (max 1.5u)
             // Override via env KELLY_LOL_<CONF> ou KELLY_<CONF> global.
-            let kellyFraction = getKellyFraction('lol', tipConf);
+            // 2026-05-11: tier-aware multiplier (concentração).
+            let kellyFraction = getKellyFraction('lol', tipConf, null, match.league || match.leagueSlug);
             // CLV→Kelly feedback: se CLV 30d negativo em (sport,league), reduz fraction;
             // se CLV ≤ -3% shadowa (mult=0 → tipStake='0u' → aborta abaixo).
             const _clvAdj = await fetchClvMultiplier('lol', match.league);
@@ -4984,50 +4987,103 @@ function _normalizeConfKey(conf) {
   if (c === 'BAIXA' || c === 'LOW') return 'BAIXA';
   return 'MEDIA';
 }
-function getKellyFraction(sport, conf, market = null) {
+// 2026-05-11 (audit cross-sport): tier-aware Kelly multiplier.
+// Concentra capital em sweet spots provados (tier1 lucrativo) e reduz em tier3
+// (leak). Aplicado SOBRE a fração base do Kelly final (preserva todos overrides).
+//
+// Defaults derivados de ROI real/shadow 30d (audit 2026-05-11):
+//   tennis tier1_masters n=72 ROI +13.9% real / Slam +25% → 1.30x
+//   lol tier1_major n=62 ROI +25.4% shadow → 1.30x
+//   lol tier3_minor n=21 ROI -26% shadow / tier4_challenger ROI -55% → 0.50x
+//   cs CCT (tier3) shadow n=14 ROI -55% → 0.40x
+//   tennis tier4_challenger n=14 ROI -55% → 0.30x
+//
+// Override granular via env: KELLY_TIER_MULT_<SPORT>_<TIER> (1=top, 2=mid, 3=other)
+const _KELLY_TIER_MULT_DEFAULTS = {
+  tennis:   { 1: 1.30, 2: 1.00, 3: 0.30 },
+  lol:      { 1: 1.30, 2: 1.00, 3: 0.50 },
+  cs:       { 1: 1.20, 2: 1.00, 3: 0.40 },
+  cs2:      { 1: 1.20, 2: 1.00, 3: 0.40 },
+  dota2:    { 1: 1.20, 2: 1.00, 3: 0.70 },
+  valorant: { 1: 1.10, 2: 0.90, 3: 0.50 },
+};
+
+function _getTierKellyMultiplier(sport, league) {
+  if (!league) return 1.0;
+  const sp = String(sport || '').toLowerCase();
+  let tier;
+  try { tier = _leagueTier(sp, league); } catch (_) { return 1.0; }
+  if (!tier || tier < 1 || tier > 3) return 1.0;
+  // Env override granular: KELLY_TIER_MULT_LOL_1=1.50 → bump tier1 LoL
+  const spEnv = sp.toUpperCase().replace(/[^A-Z0-9]/g, '');
+  const envKey = `KELLY_TIER_MULT_${spEnv}_${tier}`;
+  const v = parseFloat(process.env[envKey]);
+  if (Number.isFinite(v) && v > 0 && v <= 2) return v;
+  return _KELLY_TIER_MULT_DEFAULTS[sp]?.[tier] ?? 1.0;
+}
+
+function getKellyFraction(sport, conf, market = null, league = null) {
   const key = _normalizeConfKey(conf);
   const sp = String(sport || '').toLowerCase();
   const spEnv = sp.toUpperCase().replace(/[^A-Z0-9]/g, '');
   const mktNorm = market ? String(market).toUpperCase() : null;
+  // Resolve base fraction via cascade. Tier mult aplica SOBRE o resultado final
+  // (preserva semantics dos overrides — env explícito ganha mas tier ajusta).
+  let baseFraction = null;
   // 2026-05-06: per-market override env (KELLY_<SPORT>_<MARKET>_<CONF>)
-  if (mktNorm) {
+  if (mktNorm && baseFraction == null) {
     const mkEnv = mktNorm.replace(/[^A-Z0-9]/g, '');
     const perSportMarket = process.env[`KELLY_${spEnv}_${mkEnv}_${key}`];
     if (perSportMarket != null && perSportMarket !== '') {
       const v = parseFloat(perSportMarket);
-      if (Number.isFinite(v) && v > 0 && v <= 1) return v;
+      if (Number.isFinite(v) && v > 0 && v <= 1) baseFraction = v;
     }
   }
   // Per-sport override (sport-wide env)
-  const perSport = process.env[`KELLY_${spEnv}_${key}`];
-  if (perSport != null && perSport !== '') {
-    const v = parseFloat(perSport);
-    if (Number.isFinite(v) && v > 0 && v <= 1) return v;
+  if (baseFraction == null) {
+    const perSport = process.env[`KELLY_${spEnv}_${key}`];
+    if (perSport != null && perSport !== '') {
+      const v = parseFloat(perSport);
+      if (Number.isFinite(v) && v > 0 && v <= 1) baseFraction = v;
+    }
   }
   // Global override
-  const global = process.env[`KELLY_${key}`];
-  if (global != null && global !== '') {
-    const v = parseFloat(global);
-    if (Number.isFinite(v) && v > 0 && v <= 1) return v;
+  if (baseFraction == null) {
+    const global = process.env[`KELLY_${key}`];
+    if (global != null && global !== '') {
+      const v = parseFloat(global);
+      if (Number.isFinite(v) && v > 0 && v <= 1) baseFraction = v;
+    }
   }
   // Auto-tune runtime state (daily cron runKellyAutoTune)
-  // 2026-05-06: cascade per-market → sport-wide. kelly_mult|MARKET ganha
-  // precedência sobre kelly_mult agregado do sport.
-  try {
-    if (mktNorm) {
-      const marketMult = _gatesRuntimeState.getGateValue(sp, `kelly_mult|${mktNorm}`);
-      if (Number.isFinite(marketMult) && marketMult >= 0.2 && marketMult <= 1.2) {
-        return _KELLY_DEFAULTS[key] * marketMult;
+  if (baseFraction == null) {
+    try {
+      if (mktNorm) {
+        const marketMult = _gatesRuntimeState.getGateValue(sp, `kelly_mult|${mktNorm}`);
+        if (Number.isFinite(marketMult) && marketMult >= 0.2 && marketMult <= 1.2) {
+          baseFraction = _KELLY_DEFAULTS[key] * marketMult;
+        }
       }
-    }
-    const autoMult = _gatesRuntimeState.getGateValue(sp, 'kelly_mult');
-    if (Number.isFinite(autoMult) && autoMult >= 0.2 && autoMult <= 1.2) {
-      return _KELLY_DEFAULTS[key] * autoMult;
-    }
-  } catch (_) {}
+      if (baseFraction == null) {
+        const autoMult = _gatesRuntimeState.getGateValue(sp, 'kelly_mult');
+        if (Number.isFinite(autoMult) && autoMult >= 0.2 && autoMult <= 1.2) {
+          baseFraction = _KELLY_DEFAULTS[key] * autoMult;
+        }
+      }
+    } catch (_) {}
+  }
   // Per-sport default (lift-based)
-  const mult = _KELLY_SPORT_MULT[sp] ?? 1.00;
-  return _KELLY_DEFAULTS[key] * mult;
+  if (baseFraction == null) {
+    const mult = _KELLY_SPORT_MULT[sp] ?? 1.00;
+    baseFraction = _KELLY_DEFAULTS[key] * mult;
+  }
+  // 2026-05-11: aplicar tier multiplier (concentração — audit cross-sport).
+  // tier1 receives 1.1-1.3x boost; tier3 0.3-0.7x reduction. Opt-out via
+  // KELLY_TIER_MULT_DISABLED=true (default ON).
+  const tierMultDisabled = /^(1|true|yes)$/i.test(String(process.env.KELLY_TIER_MULT_DISABLED || ''));
+  if (tierMultDisabled || !league) return baseFraction;
+  const tierMult = _getTierKellyMultiplier(sp, league);
+  return baseFraction * tierMult;
 }
 
 // EV threshold default per sport — sports com lift baixo exigem edge maior pra compensar
@@ -9177,7 +9233,7 @@ async function autoAnalyzeMatch(token, match) {
                         continue;
                       }
                       marketTipSent.set(dedupKey, Date.now());
-                      let stake = mtp.kellyStakeForMarket(t.pModel, t.odd, 100, getKellyFraction('lol', 'BAIXA'), { sport: 'lol' });
+                      let stake = mtp.kellyStakeForMarket(t.pModel, t.odd, 100, getKellyFraction('lol', 'BAIXA', null, match.league || match.leagueSlug), { sport: 'lol' });
                       if (t.correlationDiscount > 0 && typeof stake === 'number') {
                         stake = mtp.snapStakeUnits(stake * (1 - t.correlationDiscount));
                       }
@@ -9363,7 +9419,7 @@ async function autoAnalyzeMatch(token, match) {
                         const dbFresh = wasAdminDmSentRecently(db, { sport: 'lol', match, market: t.market, line: t.line, side: t.side, hoursAgo: 24 });
                         if (inMemFresh || dbFresh) continue;
                         marketTipSent.set(dedupKey, Date.now());
-                        const stake = mtp.kellyStakeForMarket(t.pModel, t.odd, 100, getKellyFraction('lol', 'BAIXA'), { sport: 'lol' });
+                        const stake = mtp.kellyStakeForMarket(t.pModel, t.odd, 100, getKellyFraction('lol', 'BAIXA', null, match.league || match.leagueSlug), { sport: 'lol' });
                         if (!(stake > 0)) continue;
                         const tokenForMT = resolveTipsToken('esports') || resolveAlertsToken();
                         if (!tokenForMT) continue;
@@ -15215,7 +15271,7 @@ async function _pollDotaInner(runOnce = false) {
                       continue;
                     }
                     marketTipSent.set(dedupKey, Date.now());
-                    let stake = mtp.kellyStakeForMarket(t.pModel, t.odd, 100, getKellyFraction('dota2', 'BAIXA'), { sport: 'dota2' });
+                    let stake = mtp.kellyStakeForMarket(t.pModel, t.odd, 100, getKellyFraction('dota2', 'BAIXA', null, match.league), { sport: 'dota2' });
                     if (t.correlationDiscount > 0 && typeof stake === 'number') {
                       stake = mtp.snapStakeUnits(stake * (1 - t.correlationDiscount));
                     }
@@ -17366,7 +17422,7 @@ async function pollTennis(runOnce = false) {
                         // ROI +43% n=24 hit 75%. Edge robusto sustenta Kelly maior.
                         // Fração 0.10 (BAIXA) → 0.15 (~50% bump) só em segmento ouro.
                         // Tier detection inline (mesmo regex do gate non-Slam).
-                        const _kellyBaseFrac = getKellyFraction('tennis', 'BAIXA');
+                        const _kellyBaseFrac = getKellyFraction('tennis', 'BAIXA', null, match.league);
                         const _isHgGoldSegment = (() => {
                           if (String(t.market).toLowerCase() !== 'handicapgames') return false;
                           const lg = String(match.league || '');
@@ -20019,7 +20075,7 @@ async function pollCs(runOnce = false) {
                         continue;
                       }
                       marketTipSent.set(dedupKey, Date.now());
-                      let stake = mtp.kellyStakeForMarket(t.pModel, t.odd, 100, getKellyFraction('cs2', 'BAIXA'), { sport: 'cs' });
+                      let stake = mtp.kellyStakeForMarket(t.pModel, t.odd, 100, getKellyFraction('cs2', 'BAIXA', null, match.league), { sport: 'cs' });
                       if (t.correlationDiscount > 0 && typeof stake === 'number') {
                         stake = mtp.snapStakeUnits(stake * (1 - t.correlationDiscount));
                       }
