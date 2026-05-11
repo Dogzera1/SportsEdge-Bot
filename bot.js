@@ -3766,7 +3766,11 @@ async function _settleCompletedTipsInner() {
         // sem nenhum [SETTLE] tennis sugeriam pipeline travado, mas era só sources
         // sem dados pra matchear. Log dedicado distingue "sources empty" vs "no match".
         log('INFO', 'SETTLE-TENNIS', `pipeline: unsettled=${unsettled.length} | espnSync=${espnSync?.upserted ?? 0} | theOddsScores=${scoresById.size} | espnATP=${atpEvent?.recentResults?.length || 0} espnWTA=${wtaEvent?.recentResults?.length || 0}`);
+        // Diagnostic counters 2026-05-11: distinguir onde o settle pipeline está
+        // perdendo tips. Sem isso "no_match=26 sources=160" era opaco — não dava
+        // pra saber se era db-result que falhava ou ESPN allResults ou MT-orphan.
         let _matchedCount = 0, _noMatchCount = 0;
+        let _dbResultFail = 0, _mtOrphanAttempt = 0, _mtOrphanSettled = 0, _stuckMtSkipped = 0;
         // Lazy-load lib MT settle (só usada em tennis ::mt:: orphan path)
         let _mtSettleLib = null;
         try { _mtSettleLib = require('./lib/tennis-mt-settle'); } catch (_) {}
@@ -3782,6 +3786,7 @@ async function _settleCompletedTipsInner() {
               && String(tip.market_type || 'ML').toUpperCase() !== 'ML'
               && _mtSettleLib && ADMIN_KEY;
             if (_isMtOrphanCandidate) {
+              _mtOrphanAttempt++;
               try {
                 const r = await serverGet(
                   `/admin/tennis-mt-force-settle-tip?tip_id=${tip.id}`,
@@ -3791,10 +3796,13 @@ async function _settleCompletedTipsInner() {
                 if (r?.results?.[0]?.status === 'settled') {
                   log('INFO', 'SETTLE-TENNIS-MT', `tip#${tip.id} ${tip.participant1} vs ${tip.participant2} → ${r.results[0].result_applied} (orphan settle)`);
                   settled++;
+                  _mtOrphanSettled++;
                 }
               } catch (e) {
                 log('DEBUG', 'SETTLE-TENNIS-MT', `tip ${tip.id} mt-orphan err: ${e.message}`);
               }
+            } else {
+              _stuckMtSkipped++;
             }
             continue;
           }
@@ -3803,10 +3811,12 @@ async function _settleCompletedTipsInner() {
               `/tennis-db-result?p1=${encodeURIComponent(tip.participant1 || '')}&p2=${encodeURIComponent(tip.participant2 || '')}&sentAt=${encodeURIComponent(tip.sent_at || '')}&league=${encodeURIComponent(tip.event_name || '')}`,
               'tennis'
             ).catch((e) => { log('DEBUG', 'SETTLE-TENNIS', `tip ${tip.id} db-result fetch error: ${e.message}`); return null; });
-            // 2026-05-05 diag: log primeiro debug por ciclo pra ver o que /tennis-db-result retornou
-            if (_matchedCount + _noMatchCount < 3) {
-              const r = dbRes || {};
-              log('DEBUG', 'SETTLE-TENNIS', `tip ${tip.id} (${tip.participant1} vs ${tip.participant2}): db-result resolved=${r.resolved} winner=${r.winner || 'null'} match_id=${r.match_id || 'null'} ${r.error ? 'err=' + r.error : ''}`);
+            if (!dbRes?.resolved) _dbResultFail++;
+            // 2026-05-11: primeiros 3 fails por ciclo em INFO (era DEBUG, invisível
+            // em prod LOG_LEVEL=INFO). Quando pending fica stuck >24h precisamos
+            // dos nomes específicos pra debug ESPN/Sofascore name mismatch.
+            if ((_matchedCount + _noMatchCount + _dbResultFail) <= 3 && !dbRes?.resolved) {
+              log('INFO', 'SETTLE-TENNIS', `tip ${tip.id} (${tip.participant1} vs ${tip.participant2}) [${tip.event_name || '?'}]: db-result NO MATCH (resolved=false)`);
             }
             if (dbRes?.resolved && dbRes.winner) {
               await serverPost('/settle', { matchId: tip.match_id, winner: dbRes.winner, score: dbRes.score || dbRes.final_score || '' }, 'tennis');
@@ -3862,7 +3872,7 @@ async function _settleCompletedTipsInner() {
           }
         }
         if (settled > 0) log('INFO', 'SETTLE', `tennis: ${settled} tips liquidadas`);
-        else if (unsettled.length > 0) log('INFO', 'SETTLE-TENNIS', `nenhum match: pending=${unsettled.length} no_match=${_noMatchCount} (sources tinham ${(allResults.length + scoresById.size)} jogos finalizados)`);
+        else if (unsettled.length > 0) log('INFO', 'SETTLE-TENNIS', `nenhum match: pending=${unsettled.length} no_match=${_noMatchCount} db_fail=${_dbResultFail} mt_orphan=${_mtOrphanSettled}/${_mtOrphanAttempt} mt_skipped=${_stuckMtSkipped} (sources tinham ${(allResults.length + scoresById.size)} jogos finalizados)`);
         continue;
       }
 
@@ -5632,7 +5642,7 @@ async function recordMarketTipAsRegular({ sport, match, tip, stake, isLive }) {
       const tipEv = parseFloat(tip.ev);
       if (Number.isFinite(tipEv) && Number.isFinite(evMax) && tipEv > evMax) {
         log('INFO', 'MT-EV-CAP',
-          `${sport}/${marketKey}/${sideKey} ${match.team1} vs ${match.team2}: EV ${tipEv.toFixed(1)}% > cap ${evMax}% — skip promote (calibration leak >${evMax}%)`);
+          `${sport}/${marketKey}/${sideKey} ${match.team1} vs ${match.team2}: EV ${tipEv.toFixed(1)}% > cap ${evMax}% — skip promote (calibration leak >${evMax}%, shadow logged)`);
         return null;
       }
     } catch (_) { /* defensive */ }
@@ -23889,6 +23899,32 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
       // recarregar do disco antes de avaliar staleness senão lê snapshot de boot.
       try { if (typeof fh.refreshFromDisk === 'function') fh.refreshFromDisk(); } catch (_) {}
       const alerts = fh.checkFeedHealth({ staleMultiplier: 3, minObservations: 2 });
+
+      // 2026-05-11: Pinnacle global outage detector. Caso 10:09 UTC todos sports
+      // Pinnacle zeraram simultaneamente (count=0) sem trigger stale (lastSuccess
+      // recente). Bot caía pra cache stale silenciosamente. Cooldown próprio
+      // 30min via key 'pinnacle|__outage__'.
+      try {
+        if (typeof fh.detectPinnacleOutage === 'function') {
+          const windowMin = Math.max(1, parseFloat(process.env.PINNACLE_OUTAGE_WINDOW_MIN || '5'));
+          const minSports = Math.max(2, parseInt(process.env.PINNACLE_OUTAGE_MIN_SPORTS || '4', 10) || 4);
+          const out = fh.detectPinnacleOutage({ windowMin, minSports });
+          if (out.isOutage) {
+            const k = 'pinnacle|__outage__';
+            const last = _lastFeedAlertAt.get(k) || 0;
+            if (Date.now() - last >= 30 * 60 * 1000) {
+              _lastFeedAlertAt.set(k, Date.now());
+              log('WARN', 'PINNACLE-OUTAGE', `${out.zeroSports.length} sports zerados em ${out.windowMin}min: ${out.zeroSports.join(', ')}`);
+              if (ADMIN_IDS.size && !_isCycleMuted('feed-heartbeat')) {
+                const msg = `⚠️ *PINNACLE OUTAGE — global*\n\n${out.zeroSports.length} sports Pinnacle retornaram 0 partidas em ${out.windowMin}min:\n${out.zeroSports.map(s => `• ${s}`).join('\n')}\n\nBot caiu pra cache stale. Verificar feed-medic ou /admin/p2-status.`;
+                const token = resolveAlertsToken();
+                if (token) for (const adminId of ADMIN_IDS) sendDM(token, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
+              }
+            }
+          }
+        }
+      } catch (e) { log('DEBUG', 'PINNACLE-OUTAGE', `detect err: ${e.message}`); }
+
       if (!alerts.length) return;
       const cooldownMs = 30 * 60 * 1000;
       const fresh = [];

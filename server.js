@@ -17256,7 +17256,7 @@ load();
         ML_AUTO_PROMOTE_REVERT_DAYS: process.env.ML_AUTO_PROMOTE_REVERT_DAYS ?? '14',
         ML_AUTO_PROMOTE_LEAGUE_MIN_N: process.env.ML_AUTO_PROMOTE_LEAGUE_MIN_N ?? '10',
         ML_AUTO_PROMOTE_LEAGUE_ROI: process.env.ML_AUTO_PROMOTE_LEAGUE_ROI ?? '-10',
-        ML_AUTO_PROMOTE_WINDOW_DAYS: process.env.ML_AUTO_PROMOTE_WINDOW_DAYS ?? '30',
+        ML_AUTO_PROMOTE_WINDOW_DAYS: process.env.ML_AUTO_PROMOTE_WINDOW_DAYS ?? '120',
         ML_AUTO_PROMOTE_AUDIT_TIER_BUCKET: process.env.ML_AUTO_PROMOTE_AUDIT_TIER_BUCKET ?? 'true',
       };
       sendJson(res, out);
@@ -18755,6 +18755,149 @@ load();
         disclaimer: 'shadow data is research-only — do NOT use for automated decisions; symptom treatment requires is_shadow=0 evidence (P2)',
         n_buckets: enriched.length,
         by_tier: byTierArr,
+        winners,
+        leaks,
+        all_buckets: enriched,
+      });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
+  // GET /admin/ml-shadow-by-league?sport=valorant&days=120&minN=5&league_match=VCT&key=<KEY>
+  // Espelho ML do /admin/mt-shadow-by-league. Lê `tips is_shadow=1 market_type='ML'`,
+  // event_name como proxy de liga (schema tips não tem coluna `league`).
+  // Saída: by_tier (sport × tier agregado) + by_league (per event_name) + leaks/winners.
+  // Filtra opcional por sport + substring league_match. P2-compliant: disclaimer
+  // research-only e source claro ('shadow' default; 'real' opcional).
+  if (p === '/admin/ml-shadow-by-league') {
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const days = Math.max(7, Math.min(365, parseInt(parsed.query.days || '120', 10) || 120));
+    const minN = Math.max(1, Math.min(50, parseInt(parsed.query.minN || '5', 10) || 5));
+    const sportFilter = parsed.query.sport ? String(parsed.query.sport).toLowerCase() : null;
+    const leagueMatch = String(parsed.query.league_match || '').trim();
+    const source = String(parsed.query.source || 'shadow').toLowerCase();
+    const isShadow = source === 'real' ? 0 : 1; // default shadow
+    try {
+      const { getLeagueTierKey } = require('./lib/league-tier');
+      const params = [isShadow, days];
+      let sportCond = '';
+      if (sportFilter) { sportCond = ` AND sport = ?`; params.push(sportFilter); }
+      let leagueCond = '';
+      if (leagueMatch) { leagueCond = ` AND event_name LIKE '%' || ? || '%'`; params.push(leagueMatch); }
+      // Mínimo n é HAVING settled >= minN
+      params.push(minN);
+      const rows = db.prepare(`
+        SELECT
+          sport,
+          COALESCE(event_name, '') AS league,
+          COALESCE(tip_participant, '') AS pick_side,
+          COUNT(*) AS n_total,
+          SUM(CASE WHEN result = 'win' THEN 1 ELSE 0 END) AS n_win,
+          SUM(CASE WHEN result = 'loss' THEN 1 ELSE 0 END) AS n_loss,
+          SUM(CASE WHEN result = 'void' THEN 1 ELSE 0 END) AS n_void,
+          ROUND(SUM(CASE WHEN result IN ('win','loss') THEN COALESCE(stake_reais, 0) ELSE 0 END), 2) AS total_stake_r,
+          ROUND(SUM(COALESCE(profit_reais, 0)), 2) AS total_profit_r,
+          ROUND(AVG(CASE WHEN clv_pct IS NOT NULL AND clv_pct BETWEEN -50 AND 50 THEN clv_pct ELSE NULL END), 2) AS avg_clv_pct,
+          ROUND(AVG(CASE WHEN result IN ('win','loss') THEN ev ELSE NULL END), 1) AS avg_ev_pct,
+          ROUND(AVG(odds), 2) AS avg_odd
+        FROM tips
+        WHERE is_shadow = ?
+          AND COALESCE(archived, 0) = 0
+          AND COALESCE(market_type, 'ML') = 'ML'
+          AND sent_at >= datetime('now', '-' || ? || ' days')
+          ${sportCond}
+          ${leagueCond}
+        GROUP BY sport, COALESCE(event_name, ''), COALESCE(tip_participant, '')
+        HAVING SUM(CASE WHEN result IN ('win','loss') THEN 1 ELSE 0 END) >= ?
+        ORDER BY total_profit_r DESC
+      `).all(...params);
+
+      const enriched = rows.map(r => {
+        const settled = (r.n_win || 0) + (r.n_loss || 0);
+        const hit = settled > 0 ? +(r.n_win / settled * 100).toFixed(1) : null;
+        const roi = r.total_stake_r > 0 ? +(r.total_profit_r / r.total_stake_r * 100).toFixed(2) : null;
+        return {
+          sport: r.sport,
+          league: r.league,
+          pick_side: r.pick_side,
+          tier: getLeagueTierKey(r.sport, r.league),
+          n_total: r.n_total,
+          n_settled: settled,
+          n_win: r.n_win, n_loss: r.n_loss, n_void: r.n_void,
+          hit_pct: hit,
+          roi_pct: roi,
+          total_profit_r: r.total_profit_r,
+          total_stake_r: r.total_stake_r,
+          avg_ev_pct: r.avg_ev_pct,
+          avg_clv_pct: r.avg_clv_pct,
+          avg_odd: r.avg_odd,
+        };
+      });
+
+      // Aggregate by (sport, tier)
+      const byTier = {};
+      for (const r of enriched) {
+        const k = `${r.sport}|${r.tier}`;
+        if (!byTier[k]) byTier[k] = {
+          sport: r.sport, tier: r.tier,
+          n_settled: 0, n_win: 0, n_loss: 0,
+          total_stake_r: 0, total_profit_r: 0, leagues: 0,
+        };
+        const e = byTier[k];
+        e.n_settled += r.n_settled;
+        e.n_win += r.n_win;
+        e.n_loss += r.n_loss;
+        e.total_stake_r += r.total_stake_r;
+        e.total_profit_r += r.total_profit_r;
+        e.leagues++;
+      }
+      const byTierArr = Object.values(byTier).map(t => ({
+        ...t,
+        roi_pct: t.total_stake_r > 0 ? +((t.total_profit_r / t.total_stake_r) * 100).toFixed(2) : null,
+        hit_rate: t.n_settled > 0 ? +((t.n_win / t.n_settled) * 100).toFixed(1) : null,
+        total_stake_r: +t.total_stake_r.toFixed(2),
+        total_profit_r: +t.total_profit_r.toFixed(2),
+      })).sort((a, b) => (b.roi_pct ?? -999) - (a.roi_pct ?? -999));
+
+      // Aggregate by (sport, league) — consolida pick_sides do mesmo evento
+      const byLeagueMap = {};
+      for (const r of enriched) {
+        const k = `${r.sport}|${r.league}`;
+        if (!byLeagueMap[k]) byLeagueMap[k] = {
+          sport: r.sport, league: r.league, tier: r.tier,
+          n_settled: 0, n_win: 0, n_loss: 0,
+          total_stake_r: 0, total_profit_r: 0, sides: 0,
+        };
+        const e = byLeagueMap[k];
+        e.n_settled += r.n_settled;
+        e.n_win += r.n_win;
+        e.n_loss += r.n_loss;
+        e.total_stake_r += r.total_stake_r;
+        e.total_profit_r += r.total_profit_r;
+        e.sides++;
+      }
+      const byLeague = Object.values(byLeagueMap).map(t => ({
+        ...t,
+        roi_pct: t.total_stake_r > 0 ? +((t.total_profit_r / t.total_stake_r) * 100).toFixed(2) : null,
+        hit_rate: t.n_settled > 0 ? +((t.n_win / t.n_settled) * 100).toFixed(1) : null,
+        total_stake_r: +t.total_stake_r.toFixed(2),
+        total_profit_r: +t.total_profit_r.toFixed(2),
+      })).filter(t => t.n_settled >= minN).sort((a, b) => (b.roi_pct ?? -999) - (a.roi_pct ?? -999));
+
+      const winners = enriched.filter(r => r.n_settled >= minN && r.roi_pct != null && r.roi_pct >= 5).slice(0, 30);
+      const leaks = enriched.filter(r => r.n_settled >= minN && r.roi_pct != null && r.roi_pct <= -10).slice(0, 30);
+
+      const _disclaimer = source === 'shadow'
+        ? 'shadow data is research-only — symptom treatment requires is_shadow=0 evidence (P2)'
+        : 'real tips data (is_shadow=0)';
+
+      sendJson(res, {
+        ok: true, days, minN, sport_filter: sportFilter, league_match: leagueMatch || null,
+        source, disclaimer: _disclaimer,
+        n_buckets: enriched.length,
+        by_tier: byTierArr,
+        by_league: byLeague,
         winners,
         leaks,
         all_buckets: enriched,
