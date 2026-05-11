@@ -5056,17 +5056,19 @@ function getKellyFraction(sport, conf, market = null, league = null) {
     }
   }
   // Auto-tune runtime state (daily cron runKellyAutoTune)
+  // 2026-05-11: cap raised 1.2→1.5 pra permitir +50% boost em sweet spots
+  // validados (alinha com kelly-auto-tune.js multCeiling=1.50).
   if (baseFraction == null) {
     try {
       if (mktNorm) {
         const marketMult = _gatesRuntimeState.getGateValue(sp, `kelly_mult|${mktNorm}`);
-        if (Number.isFinite(marketMult) && marketMult >= 0.2 && marketMult <= 1.2) {
+        if (Number.isFinite(marketMult) && marketMult >= 0.2 && marketMult <= 1.5) {
           baseFraction = _KELLY_DEFAULTS[key] * marketMult;
         }
       }
       if (baseFraction == null) {
         const autoMult = _gatesRuntimeState.getGateValue(sp, 'kelly_mult');
-        if (Number.isFinite(autoMult) && autoMult >= 0.2 && autoMult <= 1.2) {
+        if (Number.isFinite(autoMult) && autoMult >= 0.2 && autoMult <= 1.5) {
           baseFraction = _KELLY_DEFAULTS[key] * autoMult;
         }
       }
