@@ -19226,6 +19226,7 @@ async function pollTableTennis(runOnce = false) {
       const _hasLiveTT = relevant.some(m => m.status === 'live');
       if (_hasLiveTT) _livePhaseEnter('tabletennis');
       let _drainedTT = false;
+      let _ttNoOddsLive = 0, _ttNoOddsTotal = 0;
 
       for (const match of relevant) {
         if (match.status !== 'live' && !_drainedTT) {
@@ -19238,7 +19239,12 @@ async function pollTableTennis(runOnce = false) {
         if (prev?.tipSent) continue;
         if (prev && (now - prev.ts < 30 * 60 * 1000)) continue; // re-check 30min
 
-        if (!match.odds?.t1 || !match.odds?.t2) continue;
+        if (!match.odds?.t1 || !match.odds?.t2) {
+          const _isTTLiveCheck = match.status === 'live';
+          if (_isTTLiveCheck) _ttNoOddsLive++;
+          _ttNoOddsTotal++;
+          continue;
+        }
         const isTTLive = match.status === 'live';
         if (!isOddsFresh(match.odds, isTTLive, 'tabletennis')) {
           log('INFO', 'AUTO-TT', `Odds stale (${oddsAgeStr(match.odds)}): ${match.team1} vs ${match.team2} — pulando`);
@@ -19408,6 +19414,9 @@ async function pollTableTennis(runOnce = false) {
         await new Promise(r => setTimeout(r, 3000));
       }
       if (!_drainedTT && _hasLiveTT) _livePhaseExit('tabletennis');
+      if (_ttNoOddsLive > 0 || _ttNoOddsTotal >= 3) {
+        log('INFO', 'AUTO-TT', `no_odds skip: live=${_ttNoOddsLive} total=${_ttNoOddsTotal} (Pinnacle outage? TT depende de Pin odds embedded em /tt-matches)`);
+      }
     } catch (e) {
       log('ERROR', 'AUTO-TT', e.message);
       _livePhaseExit('tabletennis');
@@ -21320,6 +21329,7 @@ async function runAutoBasket() {
     _hadLiveBasket = matches.some(m => m.status === 'live');
     if (_hadLiveBasket) _livePhaseEnter('basket');
     let _drainedBasket = false;
+    let _basketNoOddsLive = 0, _basketNoOddsTotal = 0;
     for (const match of matches) {
       const isLiveBasket = match.status === 'live';
       if (!isLiveBasket && !_drainedBasket) {
@@ -21327,7 +21337,11 @@ async function runAutoBasket() {
         await _waitOthersLiveDone('basket');
         _drainedBasket = true;
       }
-      if (!match.odds?.t1 || !match.odds?.t2) continue;
+      if (!match.odds?.t1 || !match.odds?.t2) {
+        if (isLiveBasket) _basketNoOddsLive++;
+        _basketNoOddsTotal++;
+        continue;
+      }
       const key = `basket_${match.id}`;
       const prev = analyzedBasket.get(key);
       if (prev?.tipSent) continue;
@@ -21580,6 +21594,9 @@ async function runAutoBasket() {
       }
     }
     if (!_drainedBasket && _hadLiveBasket) _livePhaseExit('basket');
+    if (_basketNoOddsLive > 0 || _basketNoOddsTotal >= 3) {
+      log('INFO', 'AUTO-BASKET', `no_odds skip: live=${_basketNoOddsLive} total=${_basketNoOddsTotal} (Pinnacle outage? basket depende de Pin odds embedded em /basket-matches)`);
+    }
   } catch (e) {
     log('ERROR', 'AUTO-BASKET', e.message);
     _livePhaseExit('basket');
