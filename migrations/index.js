@@ -2624,6 +2624,27 @@ const migrations = [
       `);
     },
   },
+  {
+    id: '100_tips_settle_notified_at',
+    up(db) {
+      // 2026-05-11: coluna pra dedup de DM "tip liquidada" no canal de tips.
+      // Cron notifySettledTips lê tips com result IS NOT NULL + is_shadow=0
+      // + settle_notified_at IS NULL e dispara DM pro mesmo público do envio
+      // original. Backfill marca tudo que já estava settled antes deste deploy
+      // como já-notificado pra evitar spam histórico.
+      const added = addColumnIfMissing(db, 'tips', 'settle_notified_at', 'settle_notified_at TEXT');
+      if (added) {
+        db.exec(`
+          UPDATE tips
+             SET settle_notified_at = COALESCE(settled_at, datetime('now'))
+           WHERE result IS NOT NULL
+             AND settle_notified_at IS NULL
+        `);
+      }
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_tips_settle_notify_pending
+               ON tips(settled_at) WHERE settle_notified_at IS NULL AND result IS NOT NULL`);
+    },
+  },
 ];
 
 function applyMigrations(db) {
