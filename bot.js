@@ -22492,6 +22492,58 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   setInterval(_wrapCron('risk_metrics_monitor', runRiskMetricsMonitor), 12 * 60 * 60 * 1000);
   setTimeout(_wrapCron('risk_metrics_monitor', runRiskMetricsMonitor), 90 * 60 * 1000); // primeiro check 90min pós-boot (evita colidir com boot warmup)
 
+  // 2026-05-11 (P3 CLAUDE.md): overfeaturing monitor cron — semanal (seg 14 UTC).
+  // Detecta features dormentes (disable sources count=0, crons low-count, envs
+  // opt-in nunca setadas). DM admin se findings > threshold. Sem auto-action.
+  // Opt-out: OVERFEATURING_MONITOR_AUTO=false.
+  let _lastOverfeaturingAuditDay = null;
+  async function runOverfeaturingAuditCycle() {
+    if (/^(0|false|no)$/i.test(String(process.env.OVERFEATURING_MONITOR_AUTO ?? 'true'))) return;
+    if (isMemCritical()) return;
+    const targetDay = parseInt(process.env.OVERFEATURING_AUDIT_DAY_OF_WEEK || '1', 10) || 1; // 1=Mon
+    const targetHour = parseInt(process.env.OVERFEATURING_AUDIT_HOUR_UTC || '14', 10) || 14;
+    const now = new Date();
+    if (now.getUTCDay() !== targetDay || now.getUTCHours() !== targetHour) return;
+    const today = now.toISOString().slice(0, 10);
+    if (_lastOverfeaturingAuditDay === today) return;
+    _lastOverfeaturingAuditDay = today;
+    try {
+      const { runOverfeaturingAudit } = require('./lib/overfeaturing-monitor');
+      const days = parseInt(process.env.OVERFEATURING_AUDIT_DAYS || '30', 10) || 30;
+      const cronStatus = global._cronStatusSnapshot || null;
+      const findings = runOverfeaturingAudit(db, { days, cronStatus });
+      const summary = findings.summary || { n_issues: 0, issues: [], health: '?' };
+      log('INFO', 'OVERFEATURING-AUDIT', `health=${summary.health} issues=${summary.n_issues}`);
+      // DM admin só se houver issues (n_issues > 0)
+      const minIssues = parseInt(process.env.OVERFEATURING_AUDIT_MIN_DM_ISSUES || '1', 10) || 1;
+      if (summary.n_issues >= minIssues && ADMIN_IDS.size) {
+        const tk = resolveAlertsToken();
+        if (tk) {
+          const dormantSources = (findings.dormant_disable_sources?.dormant || []).join(', ') || '(none)';
+          const lowCrons = (findings.low_count_crons || []).slice(0, 5).map(c => `${c.cron} (${c.count}/${c.expected_runs_24h})`).join(', ') || '(none)';
+          const deadEnvs = (findings.dead_opt_in_envs?.unset || []).slice(0, 8).join(', ') || '(none)';
+          const msg = `🔍 *Overfeaturing Audit* — ${summary.health}\n\n` +
+            `*Issues* (${summary.n_issues}):\n${summary.issues.map(i => '• ' + i).join('\n')}\n\n` +
+            `*Dormant disable sources (${days}d):* ${dormantSources}\n\n` +
+            `*Low-count crons:* ${lowCrons}\n\n` +
+            `*Dead opt-in envs:* ${deadEnvs}\n\n` +
+            `_Detalhes: \`/admin/overfeaturing-audit?days=${days}\`_\n` +
+            `_P3 CLAUDE.md — review manual, sem auto-action._`;
+          const sent = new Set();
+          for (const id of ADMIN_IDS) {
+            if (sent.has(id)) continue;
+            sent.add(id);
+            sendDM(tk, id, msg).catch(() => {});
+          }
+        }
+      }
+    } catch (e) { log('ERROR', 'OVERFEATURING-AUDIT', e.message); }
+  }
+  // Tick 1h verifica se é horário do audit (semanal). Cron real é 7d mas
+  // tick frequente garante que detecta a janela mesmo após reboot.
+  setInterval(_wrapCron('overfeaturing_audit', runOverfeaturingAuditCycle), 60 * 60 * 1000);
+  setTimeout(_wrapCron('overfeaturing_audit', runOverfeaturingAuditCycle), 5 * 60 * 1000); // primeiro check 5min pós-boot (caso reboot aconteça durante a janela)
+
   // Threshold Auto-Apply: semanal (segunda-feira às 4h UTC), roda optimizer +
   // aplica ajustes de EV_min per sport quando guardrails batem. Gated por
   // THRESHOLD_AUTO_APPLY=true.

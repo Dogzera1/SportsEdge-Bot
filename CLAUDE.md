@@ -122,6 +122,70 @@ Use env opt-out `<COMPONENT>_REAL_ONLY=true` (default) para preservar comportame
 
 ---
 
+## P3 — Anti-overfeaturing (cuidado com features redundantes)
+
+**Regra:** Antes de adicionar feature/cron/env/endpoint nova, **verificar via grep se algo similar já existe**. Refactor/delegate preferível a paralelo. Overfeaturing amplifica variance, dilui edge real, e cria surface area enorme de bugs.
+
+**Por quê:** Sistema atual tem 26k linhas bot.js + 32k linhas server.js + **1.039 envs únicas** + **84 crons**. Cada feature nova multiplica interações imprevisíveis. Cases reais:
+
+- **3 tier classifiers paralelos** (bot.js inline + lib/league-tier + lib/esports-runtime-features) com semantics diferentes. Resultado: CBLOL classified como tier1 em bot.js mas tier2 em lib → Kelly mult inconsistente. Fix em commit `7f9dcc9` (delegate).
+- **hour-gate manual adicionado em sessão de audit** (commit `fec26df`) era redundante com `TIME_OF_DAY_AUTO` já existente em server.js:23081 (auto, granular per market). Revertido em `f28587f`.
+- **4 multipliers Kelly compostos** (clv × trust × auto-tune × tier) amplificam variance quando aplicados juntos. Mantidos pq usam proxy diferente, mas overlap monitored.
+
+**Como aplicar antes de adicionar feature:**
+
+1. **Grep extensivo**: nome similar + função similar + comment similar
+   ```bash
+   grep -rE "function.*<feature_name>|<feature_concept>" bot.js server.js lib/
+   ```
+2. **Verificar envs existentes**: `process.env\.[A-Z_]+` — pode já ter env pra esse use case
+3. **Verificar crons existentes**: `setInterval.*_wrapCron|setTimeout` — frequência similar?
+4. **Olhar memory** (`memory/MEMORY.md`): feature já foi tentada e descontinuada?
+5. **Se feature similar existe**: delegate/extend em vez de paralelo
+
+**Anti-patterns (NÃO fazer):**
+
+- ❌ Adicionar feature sem grep prévio
+- ❌ Reimplementar regex/lógica que já existe em lib helper
+- ❌ Adicionar cron que duplica intent de cron existente
+- ❌ Env opt-in nova quando env legacy similar já existe e nunca foi limpa
+- ❌ Endpoint admin paralelo a endpoint existente (mesmo nome plural/singular)
+- ❌ Defensive layers redundantes (4 disable sources com overlap)
+- ❌ "Por garantia" implementations (vai adicionar safety mas amplifica complexity)
+
+**Patterns (fazer):**
+
+- ✅ Delegate pra fonte canônica (`lib/league-tier`, `lib/utils`)
+- ✅ Marker `DORMANT` no header de arquivos a deletar (próxima sessão decide)
+- ✅ Comment "differente de X porque Y" quando 2 features fazem coisas similares
+- ✅ Sunset envs legacy via env audit (`/admin/env-audit`)
+- ✅ Cron `runOverfeaturingAuditCycle` (semanal) detecta features dormentes
+- ✅ Antes de mergear PR, perguntar "isso já existe?"
+
+**Pegada de "feature que parece útil mas é overfeature":**
+
+| Sintoma | Sinal |
+|---|---|
+| 2 features com nome similar | `*HOURS_BLOCKED` + `TIME_OF_DAY_AUTO` |
+| Env opt-in que nunca foi setada em prod | Dead opt-in |
+| Cron com `count=0` em 30d | Cron sem trigger |
+| Disable source com `count=0` no `mt_disable_list` | Auto-detection nunca dispara |
+| Multiplier que retorna `1.0` em 95% dos calls | No-op em majoria |
+| Audit grep retorna 3+ implementações | Paralelismo, refactor candidate |
+
+**Status atual (2026-05-11):**
+
+- ✅ Tier classifier unificado (commit `7f9dcc9`)
+- ✅ hour-gate revertido (commit `f28587f`)
+- ⚠️ `lib/esports-runtime-features.leagueTier` ainda paralela (numeração invertida, conversão consciente em esports-segment-gate) — não unificada
+- ⚠️ 5 disable sources mantidas — cada captura signal diferente
+- ⚠️ 4 Kelly multipliers compostos — variance amplification monitored
+- ⏳ Cron `runOverfeaturingAuditCycle` deployed pra alerta automático
+
+**Auditoria periódica:** `/admin/overfeaturing-audit` endpoint + cron 7d DM admin se findings > threshold.
+
+---
+
 ## Como adicionar premissas novas
 
 Quando o user lembrar de outro princípio fundamental:

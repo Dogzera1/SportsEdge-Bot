@@ -12624,6 +12624,28 @@ setInterval(load, 60000);
   // Combina pending counts + last tip + last shadow + blocklist matches +
   // 7d/30d ROI summary. Útil pra investigação focada.
   // GET /admin/sport-detail?sport=tennis&key=<ADMIN_KEY>
+  // 2026-05-11 (P3 CLAUDE.md): overfeaturing audit on-demand.
+  // GET /admin/overfeaturing-audit?days=30&key=<KEY>
+  // Detecta:
+  //   - Disable sources dormentes (auto_X com count=0 em janela)
+  //   - Crons low-count vs expected interval
+  //   - Envs opt-in nunca setadas em prod
+  // Output: findings consolidados + severity score.
+  if (p === '/admin/overfeaturing-audit' && (req.method === 'GET' || req.method === 'POST')) {
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const days = Math.max(7, Math.min(180, parseInt(parsed.query.days || '30', 10) || 30));
+    try {
+      const { runOverfeaturingAudit } = require('./lib/overfeaturing-monitor');
+      // Cron status pra detectar low-count crons (sem HTTP round-trip — passa
+      // diretamente via global._cronStatus se disponível, senão null).
+      const cronStatus = global._cronStatusSnapshot || null;
+      const findings = runOverfeaturingAudit(db, { days, cronStatus });
+      sendJson(res, { ok: true, ...findings });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   // 2026-05-11 (audit): time-of-day analysis per sport.
   // GET /admin/time-of-day-analysis?sport=tennis&days=60&key=<KEY>
   // Agrupa tips real settled por HOUR(settled_at_local) → ROI per hour.
