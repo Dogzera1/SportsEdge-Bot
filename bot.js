@@ -2924,18 +2924,37 @@ async function runAutoAnalysis() {
           const isT1betCheck = norm(tipTeam).includes(norm(match.team1)) || norm(match.team1).includes(norm(tipTeam));
           const modelPPickPre = (result.modelP1 > 0) ? (isT1betCheck ? result.modelP1 : result.modelP2) : null;
           // EV mínimo per-tier (LCK/LPL/LEC/LCS = tier 1, PCS/LJL = tier 2, LFL/Prime = tier 3)
-          // Defaults baseados em audit: tier 1 modelo confiável → 3%, tier 2 → 5%, tier 3 → 8%
+          // Defaults baseados em audit: tier 1 modelo confiável → 3%, tier 2 → 5%, tier 3 → 10%
+          // 2026-05-11 audit cross-sport: tier3_minor LoL shadow n=21 ROI -26.17%
+          // (bucket >30 ROI -81% hit 8%) — bump tier3 8→10. EV calib data-driven
+          // já corta 8-12 com mult=0.52 mas tier3 sangra acima 12 também.
           const _evMinByTier = {
             1: parseFloat(process.env.LOL_TIER1_EV_MIN || '3') || 3,
             2: parseFloat(process.env.LOL_TIER2_EV_MIN || '5') || 5,
-            3: parseFloat(process.env.LOL_TIER3_EV_MIN || '8') || 8,
+            3: parseFloat(process.env.LOL_TIER3_EV_MIN || '10') || 10,
+          };
+          // 2026-05-11 audit: cap EV máximo per tier — bloqueia overshoot modelo.
+          // Tier3 LoL bucket 06_gt30 shadow ROI -81% (hit 8% gap +146pp) é claro
+          // overshoot, não edge. Default 25 cap pra tier3 (Kelly capa stake em low
+          // EV é melhor que ignorar). Override LOL_TIER3_MAX_EV pra liberar.
+          const _evMaxByTier = {
+            1: parseFloat(process.env.LOL_TIER1_MAX_EV || '999') || 999,
+            2: parseFloat(process.env.LOL_TIER2_MAX_EV || '40') || 40,
+            3: parseFloat(process.env.LOL_TIER3_MAX_EV || '25') || 25,
           };
           const _preBonusLolLive = require('./lib/pre-match-gate').preMatchEvBonus('lol', isLiveMatch);
           const _evReqLolLive = (_evMinByTier[_lolTier] || 5) + _preBonusLolLive;
+          const _evMaxLolLive = _evMaxByTier[_lolTier] || 40;
           const tipEVnum = parseFloat(tipEV) || 0;
           if (tipEVnum < _evReqLolLive) {
             log('INFO', 'AUTO-LOL', `Tier ${_lolTier} ${match.league}: EV ${tipEVnum.toFixed(1)}% < ${_evReqLolLive}% min${_preBonusLolLive > 0 ? ` PRE+${_preBonusLolLive}` : ''} — tip rejeitada`);
             logRejection('lol', `${match.team1} vs ${match.team2}`, `tier${_lolTier}_ev_low`, { tier: _lolTier, ev: tipEVnum, min: _evReqLolLive, league: match.league, preBonus: _preBonusLolLive });
+            analyzedMatches.set(matchKey, { ts: now, tipSent: false, noEdge: true });
+            continue;
+          }
+          if (tipEVnum > _evMaxLolLive) {
+            log('WARN', 'AUTO-LOL', `Tier ${_lolTier} ${match.league}: EV ${tipEVnum.toFixed(1)}% > ${_evMaxLolLive}% cap (overshoot guard) — tip rejeitada`);
+            logRejection('lol', `${match.team1} vs ${match.team2}`, `tier${_lolTier}_ev_overshoot`, { tier: _lolTier, ev: tipEVnum, max: _evMaxLolLive, league: match.league });
             analyzedMatches.set(matchKey, { ts: now, tipSent: false, noEdge: true });
             continue;
           }
@@ -3315,21 +3334,34 @@ async function runAutoAnalysis() {
               } catch (e) { reportBug('LINE-SHOP-UP', e, { team1: match.team1, team2: match.team2 }); }
             }
 
-            // EV mínimo per-tier upcoming (LCK/LPL/LEC = tier 1, etc)
+            // EV mínimo + máximo per-tier upcoming (LCK/LPL/LEC = tier 1, etc)
+            // 2026-05-11 audit: tier3 min 8→10, add tier3 max 25 (overshoot guard).
             const _lolTierUp = _leagueTier('lol', match.league || match.leagueSlug || '');
             const _isT1bet = norm(tipTeam).includes(norm(match.team1)) || norm(match.team1).includes(norm(tipTeam));
             const _modelPPickUp = (result.modelP1 > 0) ? (_isT1bet ? result.modelP1 : result.modelP2) : null;
             const _evMinByTierUp = {
               1: parseFloat(process.env.LOL_TIER1_EV_MIN || '3') || 3,
               2: parseFloat(process.env.LOL_TIER2_EV_MIN || '5') || 5,
-              3: parseFloat(process.env.LOL_TIER3_EV_MIN || '8') || 8,
+              3: parseFloat(process.env.LOL_TIER3_EV_MIN || '10') || 10,
+            };
+            const _evMaxByTierUp = {
+              1: parseFloat(process.env.LOL_TIER1_MAX_EV || '999') || 999,
+              2: parseFloat(process.env.LOL_TIER2_MAX_EV || '40') || 40,
+              3: parseFloat(process.env.LOL_TIER3_MAX_EV || '25') || 25,
             };
             const _preBonusLolUp = require('./lib/pre-match-gate').preMatchEvBonus('lol', false);
             const _evReqLolUp = (_evMinByTierUp[_lolTierUp] || 5) + _preBonusLolUp;
+            const _evMaxLolUp = _evMaxByTierUp[_lolTierUp] || 40;
             const _evNumUp = parseFloat(String(tipEV).replace(/[%+]/g, '')) || 0;
             if (_evNumUp < _evReqLolUp) {
               log('INFO', 'AUTO', `Tier ${_lolTierUp} ${match.league}: EV ${_evNumUp}% < ${_evReqLolUp}%${_preBonusLolUp > 0 ? ` PRE+${_preBonusLolUp}` : ''} — rejeitada`);
               logRejection('lol', `${match.team1} vs ${match.team2}`, `tier${_lolTierUp}_ev_low_upcoming`, { tier: _lolTierUp, ev: _evNumUp, league: match.league, preBonus: _preBonusLolUp });
+              analyzedMatches.set(matchKey, { ts: now, tipSent: false, noEdge: true });
+              await new Promise(r => setTimeout(r, 3000)); continue;
+            }
+            if (_evNumUp > _evMaxLolUp) {
+              log('WARN', 'AUTO', `Tier ${_lolTierUp} ${match.league}: EV ${_evNumUp}% > ${_evMaxLolUp}% cap (overshoot guard) — rejeitada`);
+              logRejection('lol', `${match.team1} vs ${match.team2}`, `tier${_lolTierUp}_ev_overshoot_upcoming`, { tier: _lolTierUp, ev: _evNumUp, max: _evMaxLolUp, league: match.league });
               analyzedMatches.set(matchKey, { ts: now, tipSent: false, noEdge: true });
               await new Promise(r => setTimeout(r, 3000)); continue;
             }
@@ -3722,6 +3754,7 @@ async function settleCompletedTips() {
   lastSettlementCheck = Date.now();
   try {
     await _settleCompletedTipsInner();
+    await notifySettledTips().catch(e => log('WARN', 'SETTLE-NOTIFY', e.message));
   } finally {
     _settleRunning = false;
   }
@@ -4126,6 +4159,122 @@ async function _settleCompletedTipsInner() {
       }
     } catch(e) {
       log('WARN', 'SETTLE', `${sport}: ${e.message}`);
+    }
+  }
+}
+
+// ── Settle notifications (DM pro mesmo canal da tip original) ──
+// Roda após _settleCompletedTipsInner. Lê tips reais (is_shadow=0) que tiveram
+// result preenchido desde a última execução, dispara DM com resultado + P/L
+// pros usuários inscritos no sport correspondente, e marca settle_notified_at
+// pra evitar re-envio. Backfill da mig 100 já marcou tips antigas como
+// notificadas — só dispara pra liquidações novas.
+const _SETTLE_NOTIFY_SPORT_PREF = {
+  lol: 'esports', dota2: 'esports', esports: 'esports',
+  cs: 'cs', cs2: 'cs', valorant: 'valorant',
+  tennis: 'tennis', football: 'football', basket: 'basket',
+  mma: 'mma', darts: 'darts', snooker: 'snooker',
+  tt: 'tabletennis', tabletennis: 'tabletennis',
+};
+const _SETTLE_NOTIFY_EMOJI = {
+  lol: '🎮', dota2: '🕹️', esports: '🎮',
+  cs: '🔫', cs2: '🔫', valorant: '🎯',
+  tennis: '🎾', football: '⚽', basket: '🏀',
+  mma: '🥊', darts: '🎯', snooker: '🎱',
+  tt: '🏓', tabletennis: '🏓',
+};
+function _settleNotifyResultLabel(result) {
+  if (result === 'win')  return '✅ *VITÓRIA*';
+  if (result === 'loss') return '❌ *DERROTA*';
+  if (result === 'void') return '⚪ *VOID*';
+  if (result === 'push') return '🟦 *PUSH*';
+  return `▫️ *${String(result || '').toUpperCase()}*`;
+}
+async function notifySettledTips() {
+  if (String(process.env.TIP_SETTLE_NOTIFY_DISABLED || '').toLowerCase() === 'true') return;
+  if (subscribedUsers.size === 0) return;
+  let rows;
+  try {
+    rows = db.prepare(`
+      SELECT id, sport, match_id, event_name, participant1, participant2,
+             tip_participant, market_type, odds, stake, stake_reais,
+             profit_reais, result, settled_at, is_live
+        FROM tips
+       WHERE result IN ('win','loss','void','push')
+         AND (is_shadow IS NULL OR is_shadow = 0)
+         AND (archived IS NULL OR archived = 0)
+         AND settle_notified_at IS NULL
+         AND settled_at IS NOT NULL
+         AND settled_at >= datetime('now', '-3 days')
+       ORDER BY settled_at ASC
+       LIMIT 50
+    `).all();
+  } catch (e) {
+    log('WARN', 'SETTLE-NOTIFY', `query err: ${e.message}`);
+    return;
+  }
+  if (!rows.length) return;
+  const markStmt = db.prepare(`UPDATE tips SET settle_notified_at = datetime('now') WHERE id = ?`);
+  for (const tip of rows) {
+    try {
+      const sport = String(tip.sport || '').toLowerCase();
+      const prefKey = _SETTLE_NOTIFY_SPORT_PREF[sport] || sport;
+      const tokenSport = (sport === 'lol' || sport === 'dota2') ? 'esports' : sport;
+      const token = resolveTipsToken(tokenSport) || resolveTipsToken('esports');
+      if (!token) { markStmt.run(tip.id); continue; }
+      const emoji = _SETTLE_NOTIFY_EMOJI[sport] || '📌';
+      const resLabel = _settleNotifyResultLabel(tip.result);
+      const profit = Number(tip.profit_reais);
+      const stakeR = Number(tip.stake_reais);
+      const odd = Number(tip.odds);
+      const mkt = String(tip.market_type || 'ML').toUpperCase();
+      const liveTag = Number(tip.is_live) ? ' 🔴 LIVE' : '';
+      let profitLine = '';
+      if (tip.result === 'void' || tip.result === 'push') {
+        profitLine = Number.isFinite(stakeR) && stakeR > 0
+          ? `↩️ Stake devolvida: *R$${stakeR.toFixed(2)}*`
+          : '↩️ Stake devolvida';
+      } else if (Number.isFinite(profit)) {
+        const sign = profit >= 0 ? '+' : '';
+        const stakeNote = Number.isFinite(stakeR) && stakeR > 0 ? ` _(stake R$${stakeR.toFixed(2)})_` : '';
+        profitLine = `💰 P/L: *${sign}R$${profit.toFixed(2)}*${stakeNote}`;
+      }
+      const matchupLine = (tip.participant1 && tip.participant2)
+        ? `*${tip.participant1}* vs *${tip.participant2}*`
+        : '';
+      const leagueLine = (tip.event_name && tip.event_name !== matchupLine)
+        ? `📋 ${tip.event_name}`
+        : '';
+      const pickLine = tip.tip_participant
+        ? `🎯 Aposta: *${tip.tip_participant}*${mkt !== 'ML' ? ` (${mkt})` : ''}${Number.isFinite(odd) && odd > 0 ? ` @ ${odd.toFixed(2)}` : ''}`
+        : '';
+      const msg = [
+        `${emoji} ${resLabel}${liveTag}`,
+        matchupLine,
+        leagueLine,
+        pickLine,
+        profitLine ? `\n${profitLine}` : '',
+      ].filter(Boolean).join('\n');
+      let sent = 0;
+      for (const [userId, prefs] of subscribedUsers) {
+        if (!prefs || !prefs.has(prefKey)) continue;
+        try {
+          await sendDM(token, userId, msg);
+          sent++;
+        } catch (e) {
+          if (e.message && e.message.includes('403')) {
+            subscribedUsers.delete(userId);
+            serverPost('/save-user', { userId: String(userId), subscribed: false }, tokenSport).catch(() => {});
+          } else {
+            log('DEBUG', 'SETTLE-NOTIFY', `tip ${tip.id} userId=${userId}: ${e.message}`);
+          }
+        }
+      }
+      markStmt.run(tip.id);
+      log('INFO', 'SETTLE-NOTIFY', `${sport} tip#${tip.id} ${tip.result} → DM enviada pra ${sent} user(s)`);
+    } catch (e) {
+      log('WARN', 'SETTLE-NOTIFY', `tip ${tip.id}: ${e.message}`);
+      try { markStmt.run(tip.id); } catch (_) {}
     }
   }
 }
