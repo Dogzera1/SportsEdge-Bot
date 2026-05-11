@@ -5680,6 +5680,39 @@ async function recordMarketTipAsRegular({ sport, match, tip, stake, isLive }) {
       }
     } catch (_) { /* defensive */ }
 
+    // ── PMODEL MAX CEILING ──
+    // 2026-05-11: tip football La Liga handicap +0.5 home @ 1.31 com pModel
+    // 85.2% — modelo overconfident em mercado sem calibração (handicap shadow
+    // n=1 em 90d). pModel extremo é proxy pra leak de calibração.
+    // Defaults: football 0.75, basket 0.80, mma/darts/snk/tt 0.85, esports/tennis 0.90.
+    // Hierarquia P1: MT_PMODEL_MAX_<SPORT>_<MARKET> > MT_PMODEL_MAX_<SPORT> > MT_PMODEL_MAX
+    try {
+      const _PMODEL_DEFAULTS = {
+        football: 0.75, basket: 0.80, mma: 0.85,
+        tennis: 0.90, lol: 0.90, cs2: 0.90, dota2: 0.90, valorant: 0.90,
+        darts: 0.85, snooker: 0.85, tt: 0.85,
+      };
+      const _sportKeyPm = String(sport || '').toLowerCase();
+      const _sportUpperPm = _sportKeyPm.toUpperCase();
+      const _marketKeyPm = String(marketKey || '').toUpperCase().replace(/[^A-Z0-9]/g, '_');
+      const _pmCandidates = [
+        _sportUpperPm && _marketKeyPm ? `MT_PMODEL_MAX_${_sportUpperPm}_${_marketKeyPm}` : null,
+        _sportUpperPm ? `MT_PMODEL_MAX_${_sportUpperPm}` : null,
+        'MT_PMODEL_MAX',
+      ].filter(Boolean);
+      let _pmCap = _PMODEL_DEFAULTS[_sportKeyPm] ?? 0.90;
+      for (const k of _pmCandidates) {
+        const v = parseFloat(process.env[k]);
+        if (Number.isFinite(v) && v > 0 && v <= 1) { _pmCap = v; break; }
+      }
+      const tipPmNum = parseFloat(tip.pModel);
+      if (Number.isFinite(tipPmNum) && tipPmNum > _pmCap) {
+        log('INFO', 'MT-PMODEL-CAP',
+          `${sport}/${marketKey}/${sideKey} ${match.team1} vs ${match.team2}: pModel ${(tipPmNum * 100).toFixed(1)}% > cap ${(_pmCap * 100).toFixed(1)}% — skip promote (calibration overshoot, shadow logged)`);
+        return null;
+      }
+    } catch (_) { /* defensive */ }
+
     // ── EV MAX CAP ──
     // 2026-05-04 [Audit calibration]: bucket EV>30% mostrou ROI -8 a -75%
     // (gap +40-115pp vs expected EV). Modelo overshoots edge em high-EV.
