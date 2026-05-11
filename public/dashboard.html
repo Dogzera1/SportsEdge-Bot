@@ -5853,6 +5853,19 @@ function renderMarketTipsBySportCards(bs) {
     return { tag: '⏳ OBSERVAR', color: '#64748b', need: reasons.slice(0, 2).join(' · ') };
   };
 
+  // 2026-05-10 (P1 — esports map vs série em MT shadow): chips de segmento
+  // mostram split map vs série dentro do card de esport. Backend agrega via
+  // /market-tips-by-sport per_sport_segment (classificador por nome do market:
+  // _map\d+ / mapNwinner → 'map', resto → 'series'). Cor segue mesmo padrão
+  // dos tierChips (ROI-based threshold).
+  const segRoiClr = (roi, n) => {
+    if (roi == null || n < 5) return '#64748b';
+    if (roi >= 5) return '#10b981';
+    if (roi <= -5) return '#ef4444';
+    return '#f59e0b';
+  };
+  const segLabel = (seg) => seg === 'series' ? '🏆 série' : '🗺️ mapa';
+
   const cards = bs.sports.map(s => {
     const c = sportColor[s.sport] || '#888';
     const label = sportLabel(s.sport);
@@ -5865,6 +5878,15 @@ function renderMarketTipsBySportCards(bs) {
     const dmBadge = s.dm_sent > 0
       ? `<span style="background:${dmBadgeColor};color:#fff;padding:1px 5px;border-radius:3px;font-size:0.7em;margin-left:6px" title="${s.dm_sent} DM enviadas em ${bs.days}d · status atual: ${status.tag}">DM ${s.dm_sent}</span>`
       : (s.n > 0 ? `<span style="background:#475569;color:#fff;padding:1px 5px;border-radius:3px;font-size:0.7em;margin-left:6px" title="Nenhum DM enviado — shadow only">shadow</span>` : '');
+    const segments = (bs.per_sport_segment || []).filter(x => x.sport === s.sport);
+    const segChipsRow = segments.length ? `
+      <div style="margin-top:6px;display:flex;gap:3px;flex-wrap:wrap;font-size:0.66em">
+        ${segments.map(sg => `
+          <span title="${sg.segment === 'series' ? 'Markets da série (totals, handicap, totalKills, correctScore, etc)' : 'Markets de mapa específico (total_kills_mapN, mapNwinner)'} · ${sg.n} tips (${sg.wins}W/${sg.losses}L/${sg.pending}P) · ROI ${fmtPct(sg.roi)} · CLV ${fmtPct(sg.avgClv)} (n=${sg.clvN})"
+                style="padding:1px 5px;border-radius:3px;background:${segRoiClr(sg.roi, sg.n)}25;color:${segRoiClr(sg.roi, sg.n)};border:1px solid ${segRoiClr(sg.roi, sg.n)}55">
+            ${segLabel(sg.segment)} <b>${sg.n}</b> ${sg.roi != null ? (sg.roi >= 0 ? '+' : '') + sg.roi.toFixed(0) + '%' : '—'}
+          </span>`).join('')}
+      </div>` : '';
     const statusBanner = status.need
       ? `<div style="margin-top:8px;padding:5px 7px;background:${status.color}15;border-left:3px solid ${status.color};border-radius:3px;font-size:0.72em;color:${status.color}" title="${status.need}">
           <b>${status.tag}</b><br><span style="opacity:0.85">${status.need}</span>
@@ -5888,6 +5910,7 @@ function renderMarketTipsBySportCards(bs) {
           <span class="${cls(s.avgClv)}">CLV: ${fmtPct(s.avgClv)}${s.clvN > 0 ? ` <span style="opacity:0.6">(${s.clvN})</span>` : ''}</span>
           <span class="${cls(s.profit)}">${s.profit >= 0 ? '+' : ''}${s.profit.toFixed(1)}u</span>
         </div>
+        ${segChipsRow}
         ${statusBanner}
       </div>`;
   }).join('');

@@ -9651,7 +9651,88 @@ setInterval(load, 10000);
         clvPosPct: r.clv_n > 0 ? +((r.clv_pos / r.clv_n) * 100).toFixed(0) : null,
         lastAt: r.last_at,
       }));
-      sendJson(res, { days, dedup, sports });
+
+      // 2026-05-10 (P1 esports map vs série em MT shadow): breakdown adicional
+      // por (sport, segment). Segment derivado do nome do market — map quando
+      // contém '_map\d+' OU é mapWinner/map\d+Winner; series caso contrário.
+      // Apenas pra esports (lol/dota2/cs/cs2/valorant) — outros sports ignoram.
+      // Reusa mesmo CTE/dedup pattern, GROUP BY (sport, segment_expr).
+      let per_sport_segment = [];
+      try {
+        const ESPORTS_LIST = ['lol', 'dota2', 'cs', 'cs2', 'valorant'];
+        const segmentExpr = `CASE
+          WHEN lower(market) LIKE '%\\_map%' ESCAPE '\\' THEN 'map'
+          WHEN lower(market) GLOB 'map[0-9]*winner' THEN 'map'
+          WHEN lower(market) = 'mapwinner' THEN 'map'
+          ELSE 'series'
+        END`;
+        const sportInClause = `sport IN (${ESPORTS_LIST.map(() => '?').join(',')})`;
+        const segConds = [...conds, sportInClause];
+        const segRows = db.prepare(dedup ? `
+          WITH ranked AS (
+            SELECT *,
+              ROW_NUMBER() OVER (
+                PARTITION BY sport, ${PAIR}, market, COALESCE(side, '')
+                ORDER BY COALESCE(p_model, 0) DESC, created_at DESC
+              ) AS rn
+            FROM market_tips_shadow
+            WHERE ${segConds.join(' AND ')}
+          )
+          SELECT
+            sport,
+            ${segmentExpr} AS segment,
+            COUNT(*) AS n,
+            SUM(CASE WHEN result IS NULL THEN 1 ELSE 0 END) AS pending,
+            SUM(CASE WHEN result IN ('win','loss') THEN 1 ELSE 0 END) AS settled,
+            SUM(CASE WHEN result = 'win' THEN 1 ELSE 0 END) AS wins,
+            SUM(CASE WHEN result IN ('win','loss') THEN COALESCE(stake_units,1) ELSE 0 END) AS staked,
+            SUM(COALESCE(profit_units, 0)) AS profit,
+            AVG(ev_pct) AS avg_ev,
+            AVG(clv_pct) AS avg_clv,
+            SUM(CASE WHEN clv_pct IS NOT NULL THEN 1 ELSE 0 END) AS clv_n
+          FROM ranked WHERE rn = 1
+          GROUP BY sport, segment
+          ORDER BY sport, segment
+        ` : `
+          SELECT
+            sport,
+            ${segmentExpr} AS segment,
+            COUNT(*) AS n,
+            SUM(CASE WHEN result IS NULL THEN 1 ELSE 0 END) AS pending,
+            SUM(CASE WHEN result IN ('win','loss') THEN 1 ELSE 0 END) AS settled,
+            SUM(CASE WHEN result = 'win' THEN 1 ELSE 0 END) AS wins,
+            SUM(CASE WHEN result IN ('win','loss') THEN COALESCE(stake_units,1) ELSE 0 END) AS staked,
+            SUM(COALESCE(profit_units, 0)) AS profit,
+            AVG(ev_pct) AS avg_ev,
+            AVG(clv_pct) AS avg_clv,
+            SUM(CASE WHEN clv_pct IS NOT NULL THEN 1 ELSE 0 END) AS clv_n
+          FROM market_tips_shadow
+          WHERE ${segConds.join(' AND ')}
+          GROUP BY sport, segment
+          ORDER BY sport, segment
+        `).all(...queryParams, ...ESPORTS_LIST);
+        per_sport_segment = segRows.map(r => ({
+          sport: r.sport,
+          segment: r.segment,
+          n: r.n,
+          pending: r.pending || 0,
+          settled: r.settled || 0,
+          wins: r.wins || 0,
+          losses: (r.settled || 0) - (r.wins || 0),
+          hitRate: r.settled > 0 ? +((r.wins / r.settled) * 100).toFixed(1) : null,
+          staked: +(r.staked || 0).toFixed(2),
+          profit: +(r.profit || 0).toFixed(2),
+          roi: r.staked > 0 ? +((r.profit / r.staked) * 100).toFixed(1) : null,
+          avgEv: r.n > 0 ? +(r.avg_ev || 0).toFixed(1) : null,
+          avgClv: r.clv_n > 0 ? +(r.avg_clv || 0).toFixed(2) : null,
+          clvN: r.clv_n || 0,
+        }));
+      } catch (e) {
+        // Granularidade adicional opcional — falha graceful preserva legado
+        console.warn('[/market-tips-by-sport] segment breakdown skipped:', e.message);
+      }
+
+      sendJson(res, { days, dedup, sports, per_sport_segment });
     } catch (e) { sendJson(res, { error: e.message }, 500); }
     return;
   }

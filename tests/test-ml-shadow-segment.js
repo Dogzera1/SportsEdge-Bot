@@ -62,3 +62,41 @@ test('match_id real prod (CS shadow tip) → segment correto', () => {
   assert.equal(segmentOf('cs', 'ps_1234_MAP1'), 'map');
   assert.equal(segmentOf('cs', 'ps_1234'), 'series');
 });
+
+// 2026-05-10: classifier de market name (MT shadow). Espelha:
+//   - frontend public/dashboard.html _mtMapRe + _mtSegBadge
+//   - backend server.js /market-tips-by-sport segmentExpr (CASE WHEN ... GLOB ...)
+const _mtMapRe = /(_map\d+|^map\d*winner$)/i;
+const segmentOfMtMarket = (sport, market) => {
+  if (!ESPORTS_SET.has(sport)) return null;
+  return _mtMapRe.test(String(market || '')) ? 'map' : 'series';
+};
+
+test('MT shadow market classifier — markets reais prod LoL → map', () => {
+  // Sample real prod 2026-05-10 LoL: total_kills_map1/2/3 são map-level
+  assert.equal(segmentOfMtMarket('lol', 'total_kills_map1'), 'map');
+  assert.equal(segmentOfMtMarket('lol', 'total_kills_map2'), 'map');
+  assert.equal(segmentOfMtMarket('lol', 'total_kills_map3'), 'map');
+});
+
+test('MT shadow market classifier — series-level markets', () => {
+  assert.equal(segmentOfMtMarket('lol', 'total'), 'series');
+  assert.equal(segmentOfMtMarket('lol', 'handicap'), 'series');
+  assert.equal(segmentOfMtMarket('cs', 'total'), 'series');
+  assert.equal(segmentOfMtMarket('cs', 'handicap'), 'series');
+  assert.equal(segmentOfMtMarket('dota2', 'totalKills'), 'series');
+  assert.equal(segmentOfMtMarket('dota2', 'correctScore'), 'series');
+  assert.equal(segmentOfMtMarket('valorant', 'firstBlood'), 'series');
+});
+
+test('MT shadow market classifier — mapWinner / mapNwinner pattern', () => {
+  assert.equal(segmentOfMtMarket('dota2', 'mapWinner'), 'map'); // legacy = map1
+  assert.equal(segmentOfMtMarket('dota2', 'map1Winner'), 'map');
+  assert.equal(segmentOfMtMarket('dota2', 'map2Winner'), 'map');
+  assert.equal(segmentOfMtMarket('cs', 'map3winner'), 'map');
+});
+
+test('MT shadow market classifier — non-esports → null', () => {
+  assert.equal(segmentOfMtMarket('tennis', 'handicapGames'), null);
+  assert.equal(segmentOfMtMarket('football', 'over25'), null);
+});
