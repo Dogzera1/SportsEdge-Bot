@@ -22294,6 +22294,99 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   setInterval(_wrapCron('live_risk_monitor', runLiveRiskMonitor), 10 * 60 * 1000);
   setTimeout(_wrapCron('live_risk_monitor', runLiveRiskMonitor), 8 * 60 * 1000); // primeiro check 8min pós-boot
 
+  // 2026-05-11 (audit): Risk-adjusted metrics monitor — alerta DM admin
+  // quando sport tem Sharpe negativo, DD > 30%, ou concentração > 70%.
+  // P2-compliant: research-only (DM, sem auto-action). Roda 6h.
+  // Opt-out: RISK_METRICS_MONITOR_AUTO=false
+  let _lastRiskMetricsAlert = new Map(); // sport → ts (cooldown 24h por sport)
+  async function runRiskMetricsMonitor() {
+    if (/^(0|false|no)$/i.test(String(process.env.RISK_METRICS_MONITOR_AUTO ?? 'true'))) return;
+    if (isMemCritical()) return;
+    try {
+      const days = parseInt(process.env.RISK_METRICS_DAYS || '30', 10) || 30;
+      // Replica logic do endpoint /admin/risk-metrics (sem HTTP round-trip).
+      const sports = ['tennis', 'lol', 'cs', 'dota2', 'valorant', 'football', 'basket', 'mma'];
+      const alerts = [];
+      const sharpeThreshold = parseFloat(process.env.RISK_SHARPE_MIN || '0');
+      const ddThreshold = parseFloat(process.env.RISK_DD_MAX_PCT || '30');
+      const concentrationThreshold = parseFloat(process.env.RISK_CONCENTRATION_MAX_PCT || '70');
+      const minN = parseInt(process.env.RISK_MIN_N || '20', 10) || 20;
+      const cooldownMs = parseInt(process.env.RISK_ALERT_COOLDOWN_HOURS || '24', 10) * 3600 * 1000;
+      const now = Date.now();
+      for (const sp of sports) {
+        const tips = db.prepare(`
+          SELECT result, stake_reais, profit_reais, event_name
+          FROM tips
+          WHERE sport = ?
+            AND result IN ('win','loss','void','push')
+            AND settled_at >= datetime('now', ?)
+            AND (archived IS NULL OR archived = 0)
+            AND COALESCE(is_shadow, 0) = 0
+          ORDER BY settled_at ASC
+        `).all(sp, `-${days} days`);
+        if (tips.length < minN) continue;
+        // Sharpe
+        const returns = tips.map(t => {
+          const stake = Number(t.stake_reais) || 0;
+          const profit = Number(t.profit_reais) || 0;
+          return stake > 0 ? profit / stake : 0;
+        });
+        const mean = returns.reduce((a, b) => a + b, 0) / returns.length;
+        const variance = returns.reduce((a, b) => a + (b - mean) ** 2, 0) / returns.length;
+        const std = Math.sqrt(variance);
+        const sharpe = std > 0 ? mean / std : null;
+        // Max DD
+        let cum = 0, peak = 0, dd = 0;
+        for (const t of tips) {
+          cum += Number(t.profit_reais) || 0;
+          if (cum > peak) peak = cum;
+          if (peak - cum > dd) dd = peak - cum;
+        }
+        const totalStake = tips.reduce((a, t) => a + (Number(t.stake_reais) || 0), 0);
+        const ddPct = totalStake > 0 ? (dd / totalStake) * 100 : 0;
+        // Concentration
+        const byLeague = new Map();
+        for (const t of tips) {
+          const lg = t.event_name || 'unknown';
+          byLeague.set(lg, (byLeague.get(lg) || 0) + (Number(t.stake_reais) || 0));
+        }
+        const topStake = Math.max(...byLeague.values(), 0);
+        const concPct = totalStake > 0 ? (topStake / totalStake) * 100 : 0;
+        // Check thresholds
+        const flags = [];
+        if (sharpe != null && sharpe < sharpeThreshold) flags.push(`Sharpe=${sharpe.toFixed(2)} < ${sharpeThreshold}`);
+        if (ddPct > ddThreshold) flags.push(`DD=${ddPct.toFixed(1)}% > ${ddThreshold}%`);
+        if (concPct > concentrationThreshold) flags.push(`Conc=${concPct.toFixed(1)}% top liga > ${concentrationThreshold}%`);
+        if (!flags.length) continue;
+        // Cooldown check
+        const last = _lastRiskMetricsAlert.get(sp) || 0;
+        if (now - last < cooldownMs) continue;
+        _lastRiskMetricsAlert.set(sp, now);
+        alerts.push({ sport: sp, n: tips.length, sharpe, ddPct, concPct, flags });
+      }
+      if (alerts.length && ADMIN_IDS.size) {
+        const tk = resolveAlertsToken();
+        if (tk) {
+          const lines = alerts.map(a =>
+            `⚠️ *${a.sport}* (n=${a.n}, ${days}d): ${a.flags.join(' | ')}`,
+          );
+          const msg = `📊 *Risk Metrics Monitor*\n\n${lines.join('\n\n')}\n\n_Detalhes: \`/admin/risk-metrics?days=${days}\`_`;
+          const sent = new Set();
+          for (const id of ADMIN_IDS) {
+            if (sent.has(id)) continue;
+            sent.add(id);
+            sendDM(tk, id, msg).catch(() => {});
+          }
+          log('WARN', 'RISK-MONITOR', `${alerts.length} sport(s) flagged: ${alerts.map(a => a.sport).join(', ')}`);
+        }
+      } else if (alerts.length) {
+        log('WARN', 'RISK-MONITOR', `${alerts.length} sport(s) flagged (no admin tokens): ${alerts.map(a => a.sport).join(', ')}`);
+      }
+    } catch (e) { log('ERROR', 'RISK-MONITOR', e.message); }
+  }
+  setInterval(_wrapCron('risk_metrics_monitor', runRiskMetricsMonitor), 6 * 60 * 60 * 1000);
+  setTimeout(_wrapCron('risk_metrics_monitor', runRiskMetricsMonitor), 30 * 60 * 1000); // primeiro check 30min pós-boot
+
   // Threshold Auto-Apply: semanal (segunda-feira às 4h UTC), roda optimizer +
   // aplica ajustes de EV_min per sport quando guardrails batem. Gated por
   // THRESHOLD_AUTO_APPLY=true.
