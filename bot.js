@@ -6624,6 +6624,58 @@ async function runMarketTipsLeakGuard() {
       return; // skip CLV check (já tomamos ação)
     }
 
+    // 2026-05-11 (audit): Streak detection — N losses consecutivas em segment
+    // dispara disable. Captura padrão que ROI puro pode mascarar (ex: 3L+1W em
+    // 4 tips = ROI -50% mas variance possible; 4L consecutivas = signal real).
+    // P2-compliant: usa tips is_shadow=0 (real evidence).
+    const STREAK_DISABLED = /^(0|false|no)$/i.test(String(process.env.MT_LEAK_STREAK_AUTO ?? 'true'));
+    const STREAK_N = parseInt(process.env.MT_LEAK_STREAK_N || '4', 10) || 4;
+    if (!STREAK_DISABLED && !wasDisabled && STREAK_N >= 3 && STREAK_N <= 10) {
+      try {
+        const params = [s.sport, s.market.toUpperCase()];
+        let sideClause = '';
+        if (sideKey) { sideClause = ' AND t.pick_side = ?'; params.push(sideKey); }
+        let leagueClause = '';
+        if (leagueKey) { leagueClause = ' AND t.event_name LIKE ?'; params.push(`%${leagueKey}%`); }
+        const streakRows = db.prepare(`
+          SELECT t.result
+          FROM tips t
+          WHERE t.sport = ?
+            AND UPPER(COALESCE(t.market_type, '')) = ?
+            ${sideClause}
+            ${leagueClause}
+            AND COALESCE(t.is_shadow, 0) = 0
+            AND (t.archived IS NULL OR t.archived = 0)
+            AND t.result IN ('win','loss')
+            AND t.settled_at >= datetime('now', '-14 days')
+          ORDER BY t.settled_at DESC
+          LIMIT ?
+        `).all(...params, STREAK_N);
+        const allLoss = streakRows.length >= STREAK_N && streakRows.every(r => r.result === 'loss');
+        if (allLoss) {
+          const reason = `LOSS_STREAK ${STREAK_N} consecutive losses (14d)`;
+          const tierVal = (tierKey && !leagueKey) ? s.tier : null;
+          try {
+            db.prepare(`INSERT OR REPLACE INTO market_tips_runtime_state
+              (sport, market, side, league, tier, disabled, source, reason, clv_pct, clv_n, roi_pct, updated_at)
+              VALUES (?, ?, ?, ?, ?, 1, 'auto_loss_streak', ?, ?, ?, ?, ?)`).run(
+              s.sport, s.market, sideKey, leagueKey, tierVal, reason, s.avgClv, s.clvN, s.roiPct, ts,
+            );
+          } catch (_eTier) {
+            db.prepare(`INSERT OR REPLACE INTO market_tips_runtime_state
+              (sport, market, side, league, disabled, source, reason, clv_pct, clv_n, roi_pct, updated_at)
+              VALUES (?, ?, ?, ?, 1, 'auto_loss_streak', ?, ?, ?, ?, ?)`).run(
+              s.sport, s.market, sideKey, leagueKey, reason, s.avgClv, s.clvN, s.roiPct, ts,
+            );
+          }
+          _marketTipsDisabledRuntime.set(key, { reason, since: ts, clv: s.avgClv, n: STREAK_N, source: 'auto_loss_streak', side: sideKey, league: leagueKey, tier: tierVal });
+          disabled.push(`🔥 ${label} — ${reason}`);
+          log('WARN', 'MT-GUARD', `auto-disabled-streak ${key}: ${reason}`);
+          return;
+        }
+      } catch (e) { log('DEBUG', 'MT-GUARD', `streak check err: ${e.message}`); }
+    }
+
     if (!wasDisabled && s.clvN >= nThreshold && s.avgClv != null && s.avgClv < CLV_CUTOFF) {
       const reason = `CLV ${s.avgClv.toFixed(1)}% n=${s.clvN} ROI=${s.roiPct != null ? s.roiPct.toFixed(1)+'%' : '?'}`;
       try {
