@@ -22296,16 +22296,30 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
 
   // 2026-05-11 (audit): Risk-adjusted metrics monitor — alerta DM admin
   // quando sport tem Sharpe negativo, DD > 30%, ou concentração > 70%.
-  // P2-compliant: research-only (DM, sem auto-action). Roda 6h.
+  // P2-compliant: research-only (DM, sem auto-action). Roda 12h.
   // Opt-out: RISK_METRICS_MONITOR_AUTO=false
+  // 2026-05-11 v2: frequência 6h→12h + mem guard + limit query scope pra
+  // evitar contribuir pra OOM (Railway 512MB cap). Boot loop detectado +6
+  // reboots/h logo após deploy v1 — provavelmente coincidência mas defensive.
   let _lastRiskMetricsAlert = new Map(); // sport → ts (cooldown 24h por sport)
   async function runRiskMetricsMonitor() {
     if (/^(0|false|no)$/i.test(String(process.env.RISK_METRICS_MONITOR_AUTO ?? 'true'))) return;
-    if (isMemCritical()) return;
+    if (isMemCritical()) { log('DEBUG', 'RISK-MONITOR', 'mem_critical — defer'); return; }
+    if (global._memCritical) { return; }
     try {
       const days = parseInt(process.env.RISK_METRICS_DAYS || '30', 10) || 30;
-      // Replica logic do endpoint /admin/risk-metrics (sem HTTP round-trip).
-      const sports = ['tennis', 'lol', 'cs', 'dota2', 'valorant', 'football', 'basket', 'mma'];
+      // Filtra sports ativos (>=20 tips real settled) pra reduzir queries.
+      // Sport silent (mma/snooker/tt) skip antes de gastar query.
+      const activeSports = db.prepare(`
+        SELECT sport, COUNT(*) AS n FROM tips
+        WHERE result IN ('win','loss')
+          AND settled_at >= datetime('now', ?)
+          AND (archived IS NULL OR archived = 0)
+          AND COALESCE(is_shadow, 0) = 0
+        GROUP BY sport
+        HAVING n >= 20
+      `).all(`-${days} days`).map(r => r.sport);
+      const sports = activeSports.length ? activeSports : [];
       const alerts = [];
       const sharpeThreshold = parseFloat(process.env.RISK_SHARPE_MIN || '0');
       const ddThreshold = parseFloat(process.env.RISK_DD_MAX_PCT || '30');
@@ -22384,8 +22398,8 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
       }
     } catch (e) { log('ERROR', 'RISK-MONITOR', e.message); }
   }
-  setInterval(_wrapCron('risk_metrics_monitor', runRiskMetricsMonitor), 6 * 60 * 60 * 1000);
-  setTimeout(_wrapCron('risk_metrics_monitor', runRiskMetricsMonitor), 30 * 60 * 1000); // primeiro check 30min pós-boot
+  setInterval(_wrapCron('risk_metrics_monitor', runRiskMetricsMonitor), 12 * 60 * 60 * 1000);
+  setTimeout(_wrapCron('risk_metrics_monitor', runRiskMetricsMonitor), 90 * 60 * 1000); // primeiro check 90min pós-boot (evita colidir com boot warmup)
 
   // Threshold Auto-Apply: semanal (segunda-feira às 4h UTC), roda optimizer +
   // aplica ajustes de EV_min per sport quando guardrails batem. Gated por
