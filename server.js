@@ -10560,6 +10560,7 @@ input[name=key], #adminKeyLogin { background: #0d1117; border: 1px solid #30363d
 <li><a href="/admin/mt-promote-status" class="hk">/admin/mt-promote-status</a> <span class="tag">promote state</span></li>
 <li><a href="/admin/mt-disable-list" class="hk">/admin/mt-disable-list</a> <span class="tag">runtime disabled</span></li>
 <li><a href="/admin/mt-promote-preflight?sport=lol&days=14" class="hk">/admin/mt-promote-preflight</a> <span class="tag">disables × shadow recent</span></li>
+<li><a href="/admin/mt-promote-explain?digest=1&hours=24" class="hk">/admin/mt-promote-explain?digest=1</a> <span class="tag">gates bloqueando tips 24h</span></li>
 <li><a href="/admin/mt-calib-validation?days=90&min_n=10" class="hk">/admin/mt-calib-validation</a> <span class="tag">calib drift</span></li>
 <li><a href="/admin/mt-brier-history?days=90&window=7" class="hk">/admin/mt-brier-history</a> <span class="tag">Brier semana</span></li>
 </ul></div>
@@ -12776,6 +12777,51 @@ setInterval(load, 60000);
       };
     }
     sendJson(res, out);
+    return;
+  }
+
+  // ── /admin/mt-promote-explain: simula gates pra tip MT hipotética.
+  // Roda todos os gates (env + DB) sem side-effects e retorna pass/fail por
+  // gate com env fix sugerido. Útil pra debug "por que essa tip ficou shadow?".
+  //
+  // GET /admin/mt-promote-explain?sport=lol&market=total&side=under&odd=1.62&
+  //     ev=24.9&pmodel=0.77&league=Esports World Cup&team1=Hanwha&team2=Dplus&key=...
+  //
+  // POST /admin/mt-promote-explain  (modo digest — agrega blockers em tips shadow
+  //     últimas 24h, retorna top blockers + tips com blocker único).
+  if (p === '/admin/mt-promote-explain') {
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    try {
+      const { explainMtPromoteGates, runMtPromoteExplainDigest } = require('./lib/mt-promote-explain');
+      // Modo digest via ?digest=1 (agrega últimas 24h)
+      const isDigest = u.searchParams.get('digest') === '1' || req.method === 'POST';
+      if (isDigest) {
+        const hoursBack = parseInt(u.searchParams.get('hours') || '24', 10) || 24;
+        const maxTips = parseInt(u.searchParams.get('max') || '500', 10) || 500;
+        const result = await runMtPromoteExplainDigest(db, { hoursBack, maxTips });
+        sendJson(res, result);
+        return;
+      }
+      // Modo single tip
+      const args = {
+        db,
+        sport: u.searchParams.get('sport'),
+        market: u.searchParams.get('market'),
+        side: u.searchParams.get('side'),
+        odd: parseFloat(u.searchParams.get('odd')),
+        ev: parseFloat(u.searchParams.get('ev')),
+        pmodel: parseFloat(u.searchParams.get('pmodel')),
+        league: u.searchParams.get('league') || null,
+        team1: u.searchParams.get('team1') || null,
+        team2: u.searchParams.get('team2') || null,
+        line: parseFloat(u.searchParams.get('line')) || null,
+      };
+      const result = explainMtPromoteGates(args);
+      sendJson(res, result);
+    } catch (e) {
+      sendJson(res, { ok: false, error: e.message }, 500);
+    }
     return;
   }
 

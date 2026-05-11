@@ -22859,6 +22859,29 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
     setTimeout(_wrapCron('ml_auto_promote', () => _mlAutoPromote.runMlAutoPromoteCycle(db)), 75 * 60 * 1000);
   } catch (e) { log('WARN', 'ML-AUTO-PROMOTE', `boot wire err: ${e.message}`); }
 
+  // MT promote explain digest — cron diário agrega blockers em tips shadow das
+  // últimas 24h e DM admin com top gates bloqueando. Útil pra detectar tuning
+  // errado (e.g. MT_EV_CAP cortando muito) e tips com blocker único (low-hanging
+  // fruit). Default 24h, primeiro check 80min pós-boot. Opt-out: MT_PROMOTE_EXPLAIN_AUTO=false.
+  if (!/^(0|false|no)$/i.test(String(process.env.MT_PROMOTE_EXPLAIN_AUTO ?? 'true'))) {
+    try {
+      const _mtExplain = require('./lib/mt-promote-explain');
+      const runExplainDigest = async () => {
+        try {
+          await _mtExplain.runMtPromoteExplainDigest(db, {
+            hoursBack: parseInt(process.env.MT_PROMOTE_EXPLAIN_HOURS || '24', 10) || 24,
+            maxTips: parseInt(process.env.MT_PROMOTE_EXPLAIN_MAX || '500', 10) || 500,
+            dmFn: async (text) => {
+              await sendAdminDMs(resolveAlertsToken(), text, { parse_mode: 'Markdown' }, 'mt-promote-explain');
+            },
+          });
+        } catch (e) { log('WARN', 'MT-PROMOTE-EXPLAIN', `cycle err: ${e.message}`); }
+      };
+      setInterval(_wrapCron('mt_promote_explain', runExplainDigest), 24 * 60 * 60 * 1000);
+      setTimeout(_wrapCron('mt_promote_explain', runExplainDigest), 80 * 60 * 1000);
+    } catch (e) { log('WARN', 'MT-PROMOTE-EXPLAIN', `boot wire err: ${e.message}`); }
+  }
+
   setInterval(_wrapCron('gates_autotune', runGatesAutoTuneCycle), 12 * 60 * 60 * 1000);
   setTimeout(_wrapCron('gates_autotune', runGatesAutoTuneCycle), 55 * 60 * 1000);
   setTimeout(() => runModelCalibrationCycle().catch(() => {}), 60 * 60 * 1000); // 1h pós-boot
