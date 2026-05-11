@@ -4,6 +4,27 @@ Este arquivo lista os princípios fundamentais do projeto. **Toda análise, corr
 
 ---
 
+## Contexto do projeto
+
+**Bot de apostas esportivas multi-sport (SportsEdge-Bot).**
+
+- **Stack runtime**: Node.js 18+ (bot.js + server.js + lib/*.js) — sem TypeScript, sem framework HTTP (http nativo).
+- **DB**: SQLite via better-sqlite3 (`sportsedge.db` ~155MB) + WAL mode.
+- **Deploy**: Railway — 2 services:
+  - Bot principal em `us-east4` (Virginia)
+  - Scraper worker em `sa-east-1` (São Paulo) — repo separado `agregador-odds` (Python + Playwright)
+- **Sports cobertos**: lol, cs, dota2, valorant, tennis, football, basket, mma, darts, snooker, tabletennis.
+- **Fontes de odds**:
+  - Pinnacle Guest API (esports/tennis/football/dota) — sharp anchor
+  - Sofascore proxy (`Public-Sofascore-API/`) — football/tennis/darts stats
+  - HLTV proxy (`hltv-proxy/`) — CS scoreboard live
+  - PandaScore (esports backup)
+  - Aggregator BR (`agregador-odds` repo) — line shopping casas BR
+- **Telegram**: bots multi-token (`TELEGRAM_TOKEN_<SPORT>` per sport) + admin DM via `ADMIN_CHAT_IDS`.
+- **Volume**: 26k linhas bot.js + 32k linhas server.js + 148 libs/*.js + **1.039 envs** + **84 crons**.
+
+---
+
 ## P1 — Granularidade primeiro
 
 **Regra:** Toda análise e correção deve considerar a granularidade adequada — não tratar o sport/sistema como bloco único quando há sub-partições com comportamento heterogêneo.
@@ -186,6 +207,149 @@ Use env opt-out `<COMPONENT>_REAL_ONLY=true` (default) para preservar comportame
 
 ---
 
+## Princípios gerais de execução
+
+- **Faça o mínimo necessário.** Resolva o pedido, nada além. Não adicione "while I'm here" fixes.
+- **Ambíguo → PERGUNTE antes de codar.** Não invente requisitos.
+- **Editar > criar.** Prefira modificar arquivo existente a criar novo.
+- **Não adicionar dependências npm sem avisar e justificar.** package.json é sagrado — toda nova lib precisa autorização explícita.
+- **Não refatorar não-relacionado.** Mesmo vendo problema óbvio, anote no fim da resposta. Refactor mistura intentions e quebra blame.
+- **Pre-flight obrigatório**: antes de editar >1 arquivo OU >50 linhas, descreva em 3-5 linhas o que vai fazer + arquivos. Espere confirmação.
+- **Bugs não-relacionados achados durante o pedido**: ANOTE no final, não conserte na mesma resposta.
+
+---
+
+## Anti-patterns código (NÃO escrever)
+
+- ❌ **`try/catch` genérico sem motivo concreto.** Catch só onde sabe-se o que pode falhar + como recuperar. Catch silencioso (`catch (_) {}`) é code smell, exceto em logging best-effort documentado.
+- ❌ **Logging novo sem pedido explícito.** Use o helper `log('LEVEL', 'TAG', message)` existente. Não adicione `console.log` ou loggers paralelos.
+- ❌ **Comentários óbvios** (`// incrementa i`). Comment = explicação do **WHY**, nunca do **WHAT**. Code já diz "what".
+- ❌ **Classes/factories/abstrações com 1 implementação concreta** (vide P3). Achata via inline OR mantém só se há plano concreto pra 2ª impl em ≤30d.
+- ❌ **Parâmetros configuráveis pra valores que nunca mudam.** `function foo(x = 5)` quando x é sempre 5 = ruído. Hardcode + comment explicando se for crítico.
+- ❌ **Wrappers de wrappers.** Se a lib já faz, chama a lib direto. Camadas extra adicionam surface area de bugs.
+- ❌ **TODO/FIXME no código.** Resolve agora ou não faz. Memory + commit message são history; código é estado atual.
+- ❌ **Defensive sem motivo**: validar input que vem de outro código teu (não de boundary externa) é ruído. Trust internal contracts.
+- ❌ **Re-emit do mesmo error em catch** sem agregar info: `catch (e) { throw e; }` é dead block.
+
+---
+
+## Antes de escrever código
+
+1. **Pre-flight** (sempre): em 3-5 linhas, diga o que vai fazer + arquivos a tocar.
+2. **Espere confirmação** se o pedido envolve **>1 arquivo** OU **>50 linhas** OU mexer em fluxo crítico (Kelly/stake/DB schema/credenciais).
+3. **Bug não-relacionado encontrado**: ANOTE no fim da resposta com 1 linha + caminho/linha. Não conserte na mesma response.
+
+---
+
+## Dinheiro e apostas (CRÍTICO)
+
+- **Toda mudança que afeta `stake`, `bankroll`, `kelly_fraction`, `EV` cálculo, ou emit de tip real** precisa:
+  1. Pre-flight explícito (qual fórmula muda, quem chama)
+  2. Confirmação user
+  3. Teste se houver test runner OR validation manual via endpoint admin
+- **Float vs Decimal em JS**: JS não tem Decimal nativo. Aceitamos `Number` mas:
+  - Sempre `.toFixed(N)` ao apresentar (DM, log, response)
+  - Sempre `Math.abs(a - b) < EPSILON` em comparações (não `a === b`)
+  - Arredondamento na fronteira de output (não no meio do cálculo)
+- **Erro em fluxo de aposta = NÃO APOSTA + LOG + DM admin.** Nunca silenciar com `catch (_) {}` em path de tip real.
+- **Limites SAGRADOS — não alterar sem pedido explícito**:
+  - `MAX_KELLY_FRAC = 0.10` (em lib/market-tip-processor.js)
+  - `KELLY_AUTO_TUNE_CEILING` (cap mult auto-tune, default 1.50)
+  - `KELLY_TIER_MULT_<SPORT>_<TIER>` (mult por tier, default em `_KELLY_TIER_MULT_DEFAULTS`)
+  - `DAILY_TIP_LIMIT` per sport (cap diário)
+  - `MT_MIN_ODD = 1.40` floor
+  - `MT_EV_CAP_PCT = 50` ceiling
+  - Permanent disable list (`MT_PERMANENT_DISABLE_LIST`)
+- **Mock de Telegram/casa em teste.** Nunca rodar teste contra `ADMIN_CHAT_IDS` production OR DB production. Use DB cópia + token de dev (`TELEGRAM_TOKEN_TEST` se existir).
+- **P2 estrito**: tratamento de sintoma (block/disable/cap) só dispara em real evidence (`is_shadow=0 AND archived=0`). Shadow alimenta refit/calib (research), nunca decisão.
+
+---
+
+## Scraping / integração com casas (repo agregador-odds separado)
+
+- **Rate limit respeitado.** Cada casa tem `rate_limit_sec` em config. Se não souber o limite real, perguntar.
+- **Selectors em config** (`LIGAS_<CASA>` dict em `scraper/src/casas/<casa>.py`), nunca hardcoded no meio da lógica de coleta.
+- **Toda HTTP/Playwright request tem timeout explícito** (default 60s). Sem timeout = não merge.
+- **Captcha/login/2FA: não tente "dar um jeito" criativo.** Perguntar — pode requerer proxy residencial OR mudança de approach.
+- **Anti-bot bypass**: usar `tf-playwright-stealth` (importado como `from playwright_stealth import stealth_async`) + `Sec-Fetch-*` headers + webdriver flag removal. Documentado em `betano.py` / `betfair.py`.
+- **Proxy**: `SCRAPER_PROXY_URL` env (Webshare residential BR). Validar quota Webshare antes de deploy (`X-Webshare-Reason: bandwidthlimit` = 402).
+
+---
+
+## Banco de dados (SQLite better-sqlite3)
+
+- **Migrations sempre** via `migrations/index.js` (numeradas sequencialmente). Nada de `ALTER TABLE` manual em prod.
+- **Toda query nova**: declare se é **OLTP** (path quente, indexada, ≤10ms) ou **OLAP** (admin endpoint / cron, relatório, pode demorar).
+- **Soft delete only** pra tips: `archived=1`, não `DELETE`. Histórico preserva auditoria.
+- **WHERE archived=0 AND is_shadow=0** = real-only canonical path. Use `EV_CALIB_REAL_ONLY=true` etc env opt-outs pra preservar.
+- **Cuidado com OLAP em path quente**: Railway tem 512MB cap. Queries agregadas grandes em cron rodam em peaks de memória — `isMemCritical()` check antes.
+- **WAL mode + cache_size cap**: `PRAGMA cache_size=-8000` (8MB cap) + `PRAGMA mmap_size=0`. Defaults Railway pós OOM fix (commit `8401ffe`).
+
+---
+
+## Testes
+
+- **Teste só lógica de verdade.** Não testar getter/setter, não testar wrappers triviais.
+- **1 teste = 1 comportamento.** Testes que verificam 8 coisas mascaram falhas.
+- **Mocks elaborados = code smell** — provavelmente design errado. Refactor antes de testar.
+- **Não rodar teste contra prod** — DB cópia + tokens dev only.
+
+---
+
+## Estilo (JavaScript)
+
+- **Funções > 40 linhas**: candidate a split. Provavelmente faz coisa demais.
+- **Arquivo > 1000 linhas**: split. Exceção: `bot.js` (26k) e `server.js` (32k) são legacy monoliths — split é refactor maior, mas novos arquivos devem respeitar limite.
+- **Nomes descritivos**: `getKellyFraction()` > `kf()`. `recordMarketTipAsRegular()` > `record()`.
+- **Linhas ≤ 120 chars** (não 100 — mais permissivo pra JS verboso).
+- **`async/await` > `.then` chains**. Promise chaining é code smell pós-Node 14.
+- **`const` > `let` > `var`**. `var` é proibido em código novo.
+- **Module exports explícitos**: `module.exports = { fn1, fn2 }` no fim do arquivo. Não exports espalhados.
+- **Helpers em lib/**: nada de copy-paste cross-file. Se 2+ lugares fazem mesma coisa, criar/usar helper em `lib/`.
+
+---
+
+## Comandos do projeto
+
+```bash
+# Validar syntax
+node -c bot.js && node -c server.js
+
+# Rodar bot localmente (precisa .env)
+node bot.js
+
+# Subir scraper worker localmente
+cd "../agregador de odds + ferramentas/scraper"
+$env:PLAYWRIGHT_MODE="headed"
+python -m src capture-fixture <casa> --liga brasileirao-serie-a
+
+# Health prod
+KEY="<admin_key>"
+BASE="https://sportsedge-bot-production.up.railway.app"
+curl -s "$BASE/health"
+curl -s -H "x-admin-key: $KEY" "$BASE/admin/p2-status"
+curl -s -H "x-admin-key: $KEY" "$BASE/admin/risk-metrics?days=30"
+curl -s -H "x-admin-key: $KEY" "$BASE/admin/overfeaturing-audit?days=30"
+
+# Logs Railway: dashboard → service → Deployments → Logs
+```
+
+---
+
+## Perguntar ANTES de fazer (não decisão unilateral)
+
+- **Cálculo de stake / EV / Kelly fraction** — mudança em lógica financeira
+- **Schema DB** — nova migration, alter table, novo índice
+- **Credenciais / .env / Railway envs sensíveis** — TELEGRAM_TOKEN_*, ADMIN_KEY, DEEPSEEK_KEY, etc.
+- **Nova biblioteca npm** — justifique alternativa nativa, lib leve preferida
+- **Adicionar cron novo** — sempre verificar P3 (sistema já tem 84, surface area enorme)
+- **Adicionar feature similar a algo existente** — vide P3, grep antes
+- **Deletar arquivos tracked** — soft delete (`git rm`) requer autorização explícita pra >2 arquivos OR >200 linhas
+- **Push pra `main`** — classifier exige autorização direta em alguns paths
+- **Alterar limites SAGRADOS** (vide seção Dinheiro)
+
+---
+
 ## Como adicionar premissas novas
 
 Quando o user lembrar de outro princípio fundamental:
@@ -307,3 +471,10 @@ GET /admin/p2-status?key=<KEY>
 ```
 
 `compliance_summary` deve ser `✅`. `version.commit_short` confirma deploy mais recente.
+
+- NÃO adicione tratamento de erro especulativo. Só capture exceções que sabemos que acontecem.
+- NÃO crie camadas de abstração (interfaces, factories, strategies) sem 2+ implementações reais.
+- NÃO adicione configuração para valores que nunca mudaram.
+- NÃO adicione logging novo sem pedido explícito.
+- Antes de criar arquivo novo, verifique se cabe em um existente.
+- Responda com o mínimo de código que resolve. Se houver dúvida, pergunte antes de codar.
