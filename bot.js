@@ -1516,8 +1516,15 @@ setTimeout(() => {
 }, 5000).unref?.();
 
 // Memory guard 60s — alinhado com server.js. Threshold defaults p/ Railway hobby (512MB).
-const _BOT_MEM_HEAP_WARN_MB = parseInt(process.env.BOOT_MEM_HEAP_WARN_MB || '256', 10);
-const _BOT_MEM_RSS_WARN_MB = parseInt(process.env.BOOT_MEM_RSS_WARN_MB || '400', 10);
+// 2026-05-11: env name typo fix — antes era BOOT_MEM_*_WARN_MB (typo), agora
+// aceita o nome correto BOT_MEM_*_WARN_MB. Fallback p/ legacy BOOT_* pra não
+// quebrar prod com env antigo. Invariante warn<crit aplicado no final.
+const _RSS_WARN_RAW = parseInt(
+  process.env.BOT_MEM_RSS_WARN_MB || process.env.BOOT_MEM_RSS_WARN_MB || '300', 10
+);
+const _HEAP_WARN_RAW = parseInt(
+  process.env.BOT_MEM_HEAP_WARN_MB || process.env.BOOT_MEM_HEAP_WARN_MB || '230', 10
+);
 // 2026-05-10: CRIT threshold pra defer crons pesados antes do SIGKILL.
 // Railway hobby cap 512MB → set CRIT=380MB (130MB margin) pra dar tempo
 // dos crons abortarem + GC liberar antes do kernel matar processo.
@@ -1535,10 +1542,25 @@ const _BOT_MEM_RSS_CRIT_RAW = parseInt(process.env.BOT_MEM_RSS_CRIT_MB || '340',
 const _BOT_MEM_HEAP_CRIT_RAW = parseInt(process.env.BOT_MEM_HEAP_CRIT_MB || '260', 10);
 const _BOT_MEM_RSS_CRIT_MB = Math.min(380, Math.max(200, Number.isFinite(_BOT_MEM_RSS_CRIT_RAW) ? _BOT_MEM_RSS_CRIT_RAW : 340));
 const _BOT_MEM_HEAP_CRIT_MB = Math.min(300, Math.max(150, Number.isFinite(_BOT_MEM_HEAP_CRIT_RAW) ? _BOT_MEM_HEAP_CRIT_RAW : 260));
+// 2026-05-11: invariante WARN < CRIT. Se config criar inversão (warn>=crit,
+// causa do crash loop 50 boots/24h observado em 2026-05-11), auto-corrige
+// warn = crit - 40 (rss) / crit - 20 (heap) pra restaurar ordem.
+let _BOT_MEM_RSS_WARN_MB = _RSS_WARN_RAW;
+let _BOT_MEM_HEAP_WARN_MB = _HEAP_WARN_RAW;
+const _warnRepaired = [];
+if (_BOT_MEM_RSS_WARN_MB >= _BOT_MEM_RSS_CRIT_MB) {
+  _BOT_MEM_RSS_WARN_MB = Math.max(200, _BOT_MEM_RSS_CRIT_MB - 40);
+  _warnRepaired.push(`rss ${_RSS_WARN_RAW}→${_BOT_MEM_RSS_WARN_MB}`);
+}
+if (_BOT_MEM_HEAP_WARN_MB >= _BOT_MEM_HEAP_CRIT_MB) {
+  _BOT_MEM_HEAP_WARN_MB = Math.max(150, _BOT_MEM_HEAP_CRIT_MB - 20);
+  _warnRepaired.push(`heap ${_HEAP_WARN_RAW}→${_BOT_MEM_HEAP_WARN_MB}`);
+}
 // Boot log thresholds efetivos — facilita debug quando WARN dispara mas CRIT não,
 // indicando env Railway override stale (e.g. BOT_MEM_RSS_CRIT_MB=440 antigo).
 const _critClamped = _BOT_MEM_RSS_CRIT_RAW !== _BOT_MEM_RSS_CRIT_MB || _BOT_MEM_HEAP_CRIT_RAW !== _BOT_MEM_HEAP_CRIT_MB;
-console.log(`[mem-guard] thresholds: heap warn=${_BOT_MEM_HEAP_WARN_MB} crit=${_BOT_MEM_HEAP_CRIT_MB} | rss warn=${_BOT_MEM_RSS_WARN_MB} crit=${_BOT_MEM_RSS_CRIT_MB}${_critClamped ? ` (CLAMPED env raw heap=${_BOT_MEM_HEAP_CRIT_RAW} rss=${_BOT_MEM_RSS_CRIT_RAW})` : ''}`);
+const _repairNote = _warnRepaired.length ? ` (WARN auto-repaired: ${_warnRepaired.join(', ')} — invariante warn<crit)` : '';
+console.log(`[mem-guard] thresholds: heap warn=${_BOT_MEM_HEAP_WARN_MB} crit=${_BOT_MEM_HEAP_CRIT_MB} | rss warn=${_BOT_MEM_RSS_WARN_MB} crit=${_BOT_MEM_RSS_CRIT_MB}${_critClamped ? ` (CLAMPED env raw heap=${_BOT_MEM_HEAP_CRIT_RAW} rss=${_BOT_MEM_RSS_CRIT_RAW})` : ''}${_repairNote}`);
 let _botLastMemWarnAt = 0;
 let _botLastMemCritAt = 0;
 setInterval(() => {
