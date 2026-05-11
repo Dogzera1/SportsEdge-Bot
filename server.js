@@ -18750,11 +18750,48 @@ load();
       const winners = enriched.filter(r => r.n_settled >= minN && r.roi_pct >= 5).slice(0, 30);
       const leaks = enriched.filter(r => r.n_settled >= minN && r.roi_pct < -10).slice(0, 30);
 
+      // 2026-05-11: by_league agrupa fases do mesmo torneio ("ATP Rome - R1" +
+      // "ATP Rome - QF" + ...). Mesmo normalizer do /admin/ml-shadow-by-league.
+      // Consolida (sport, market, league_base) somando sides + fases.
+      const { stripPhase: _stripPhaseMT } = require('./lib/league-phase-normalizer');
+      const byLeagueMtMap = {};
+      for (const r of enriched) {
+        if (!r.league) continue;
+        const leagueBase = _stripPhaseMT(r.league);
+        const k = `${r.sport}|${r.market}|${leagueBase}`;
+        if (!byLeagueMtMap[k]) byLeagueMtMap[k] = {
+          sport: r.sport, market: r.market, league: leagueBase, tier: r.tier,
+          n_settled: 0, n_win: 0, n_loss: 0,
+          total_stake: 0, total_profit: 0,
+          sides: 0, phases: new Set(),
+        };
+        const e = byLeagueMtMap[k];
+        e.n_settled += r.n_settled;
+        e.n_win += r.n_win;
+        e.n_loss += r.n_loss;
+        e.total_stake += r.total_stake;
+        e.total_profit += r.total_profit;
+        e.sides++;
+        if (r.league !== leagueBase) {
+          const phase = r.league.slice(leagueBase.length).replace(/^\s*-\s*/, '').trim();
+          if (phase) e.phases.add(phase);
+        }
+      }
+      const byLeagueMt = Object.values(byLeagueMtMap).map(t => ({
+        ...t,
+        phases: [...t.phases].sort(),
+        roi_pct: t.total_stake > 0 ? +((t.total_profit / t.total_stake) * 100).toFixed(2) : null,
+        hit_rate: t.n_settled > 0 ? +((t.n_win / t.n_settled) * 100).toFixed(1) : null,
+        total_stake: +t.total_stake.toFixed(2),
+        total_profit: +t.total_profit.toFixed(2),
+      })).filter(t => t.n_settled >= minN).sort((a, b) => (b.roi_pct ?? -999) - (a.roi_pct ?? -999));
+
       sendJson(res, {
         ok: true, days, minN, sport_filter: sportFilter, regime,
         disclaimer: 'shadow data is research-only — do NOT use for automated decisions; symptom treatment requires is_shadow=0 evidence (P2)',
         n_buckets: enriched.length,
         by_tier: byTierArr,
+        by_league: byLeagueMt,
         winners,
         leaks,
         all_buckets: enriched,
@@ -18860,33 +18897,7 @@ load();
         total_profit_r: +t.total_profit_r.toFixed(2),
       })).sort((a, b) => (b.roi_pct ?? -999) - (a.roi_pct ?? -999));
 
-      // Strip suffix de fase do nome do torneio pra agrupar "ATP Rome - R1" +
-      // "ATP Rome - QF" + "ATP Rome - SF" sob "ATP Rome". Padrões cobertos:
-      // R\d+ (R1/R16/R32/R64/R128), Q\d* (Q/Q1/Q2), QF/SF/F/Final[s],
-      // Quarter|Semifinal[s], Round of N, Qualifiers, Round/Matchday/Week/Day/Stage N,
-      // Group [A-Z], Regular Season, Playoff[s], Group Stage, Knockout.
-      // Se sufixo não casa, mantém nome inteiro (defensivo).
-      const _PHASE_RE = new RegExp(
-        '\\s*-\\s*(' +
-          'R\\d{1,3}|Q\\d{0,2}|QF|SF|F|' +
-          '(?:Quarter|Semi)?[Ff]inal[s]?|' +
-          'Round\\s+of\\s+\\d+|Round\\s+\\d+|' +
-          'Qualifiers?|Qualifying|' +
-          '(?:Matchday|Week|Day|Stage|Phase)\\s+\\d+|' +
-          'Group\\s+[A-Z0-9]+|' +
-          'Regular\\s+Season|Play-?offs?|Group\\s+Stage|Knockout|Bracket|' +
-          'Main\\s+Draw|Doubles?' +
-        ')\\s*$',
-        'i'
-      );
-      function _stripPhase(name) {
-        if (!name) return '';
-        let prev, cur = String(name).trim();
-        // Loop pra sufixos compostos tipo "ATP Rome - SF - Day 2"
-        do { prev = cur; cur = cur.replace(_PHASE_RE, '').trim(); } while (cur !== prev);
-        return cur || name;
-      }
-
+      const { stripPhase: _stripPhase } = require('./lib/league-phase-normalizer');
       // Aggregate by (sport, league_base) — consolida pick_sides + fases do mesmo
       // torneio. league_base = event_name com sufixo de round/fase stripped.
       const byLeagueMap = {};
