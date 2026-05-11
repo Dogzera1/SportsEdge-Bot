@@ -11879,6 +11879,11 @@ setInterval(load, 60000);
         LEAGUE_TRUST_REAL_ONLY: _compliant('LEAGUE_TRUST_REAL_ONLY'),
         MT_AUTO_PROMOTE_REAL_ONLY: _compliant('MT_AUTO_PROMOTE_REAL_ONLY'),
       };
+      // Wave 4 (2026-05-11 audit P2-1): gate-optimizer recommendations não usavam
+      // is_shadow filter — recommend-only (não auto-action) mas enviesa output.
+      const wave4 = {
+        GATE_OPTIMIZER_REAL_ONLY: _compliant('GATE_OPTIMIZER_REAL_ONLY'),
+      };
       // Detectores P2-compliant (DM only, no auto-action).
       const detectors = {
         SHADOW_VS_REAL_DRIFT_AUTO: _autoOn('SHADOW_VS_REAL_DRIFT_AUTO'),
@@ -11896,7 +11901,7 @@ setInterval(load, 60000);
 
       // Compliance issues
       const issues = [];
-      for (const [k, v] of Object.entries({ ...wave1, ...wave2 })) {
+      for (const [k, v] of Object.entries({ ...wave1, ...wave2, ...wave4 })) {
         if (!v) issues.push({ env: k, severity: 'P0', issue: 'opt-out ativo — guard usa shadow data (viola P2)' });
       }
       if (!detectors.SHADOW_VS_REAL_DRIFT_AUTO) {
@@ -11930,6 +11935,7 @@ setInterval(load, 60000);
         version,
         wave1_real_only_guards: wave1,
         wave2_real_only_guards: wave2,
+        wave4_real_only_guards: wave4,
         detectors_p2_compliant: detectors,
         readiness_learner: readinessLearner,
         frozen_holdout: { default_days: holdout.default_days, recommended_min: 60 },

@@ -23992,6 +23992,7 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
         EV_CALIB_REAL_ONLY: _isOk('EV_CALIB_REAL_ONLY'),
         LEAGUE_TRUST_REAL_ONLY: _isOk('LEAGUE_TRUST_REAL_ONLY'),
         MT_AUTO_PROMOTE_REAL_ONLY: _isOk('MT_AUTO_PROMOTE_REAL_ONLY'),
+        GATE_OPTIMIZER_REAL_ONLY: _isOk('GATE_OPTIMIZER_REAL_ONLY'),
       };
       const issues = [];
       for (const [k, v] of Object.entries(guards)) {
