@@ -23581,6 +23581,58 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   setInterval(() => runShadowVsRealDriftDaily().catch(e => log('ERROR', 'SHADOW-DRIFT', e.message)), 60 * 60 * 1000);
   setTimeout(() => runShadowVsRealDriftDaily().catch(() => {}), 40 * 60 * 1000);
 
+  // 2026-05-10: MT Promote Preflight Cron — daily check pra detectar disables
+  // stale (auto-disable triggered com sample velho/pequeno, agora contradito por
+  // shadow recente maior). DM admin com lista de stales + recommended_action.
+  // P2-compliant: SÓ recomenda — jamais auto-aplica restore/unblock.
+  // Resolve antipattern "auto-disable write-once never-revalidated" que motivou
+  // este endpoint (caso lol|total|under 30/04 n=10 bloqueando LCK UNDER +78% n=14).
+  // Cadência 24h. Dedup hash dos scopes stale (não DM 2x mesmo set consecutivo).
+  // Opt-out: MT_PREFLIGHT_CRON_AUTO=false.
+  let _lastPreflightMs = 0;
+  let _lastPreflightStaleHash = '';
+  async function runMtPreflightCron() {
+    if (/^(0|false|no)$/i.test(String(process.env.MT_PREFLIGHT_CRON_AUTO ?? 'true'))) return;
+    const intervalH = Math.max(6, Math.min(72, parseInt(process.env.MT_PREFLIGHT_CRON_INTERVAL_H || '24', 10) || 24));
+    const intervalMs = intervalH * 60 * 60 * 1000;
+    if (Date.now() - _lastPreflightMs < intervalMs) return;
+    _lastPreflightMs = Date.now();
+    try {
+      const { runPreflightAllSports } = require('./lib/mt-preflight');
+      const days = parseInt(process.env.MT_PREFLIGHT_DAYS || '14', 10);
+      const minRecent = parseInt(process.env.MT_PREFLIGHT_MIN_RECENT || '15', 10);
+      const r = runPreflightAllSports(db, { days, minRecent });
+      log('INFO', 'MT-PREFLIGHT',
+        `sports_with_stales=${r.sports_with_stales.length} total_stales=${r.total_stales} window=${days}d min_n=${minRecent}`);
+      if (!r.total_stales) return;
+      // Dedup: hash do set de scopes stale. Se igual ao último, skip DM.
+      const staleHash = r.all_stales.map(s => `${s.sport}:${s.scope}`).sort().join('|');
+      if (staleHash === _lastPreflightStaleHash) {
+        log('INFO', 'MT-PREFLIGHT', `mesmo set de stales que último ciclo — skip DM (${r.total_stales} stales)`);
+        return;
+      }
+      _lastPreflightStaleHash = staleHash;
+      if (!ADMIN_IDS.size || _isCycleMuted('mt-preflight')) return;
+      // DM: top 5 stales por |recent.roi_pct| desc (impacto)
+      const top = r.all_stales
+        .slice()
+        .sort((a, b) => Math.abs(b.recent_shadow?.roi_pct || 0) - Math.abs(a.recent_shadow?.roi_pct || 0))
+        .slice(0, 5);
+      const lines = top.map(s => {
+        const recent = s.recent_shadow || {};
+        const orig = s.original_sample || {};
+        const ageStr = orig.age_days != null ? ` (${orig.age_days}d ago)` : '';
+        return `🔓 *${s.sport}* \`${s.scope}\` (${s.type})\n  recent ${days}d: n=${recent.n} ROI=${recent.roi_pct}% CLV=${recent.avg_clv_pct ?? '?'}%\n  original${ageStr}: ${orig.reason || 'sem sample original'}\n  ➜ \`${s.recommended_action}\``;
+      });
+      const more = r.total_stales > 5 ? `\n\n_+${r.total_stales - 5} stales adicionais (full list em /admin/mt-promote-preflight?all=1)_` : '';
+      const msg = `🩺 *MT PREFLIGHT — disables stale detectados*\n\n${r.total_stales} block(s) ativos contradito(s) por shadow recente. Decisão humana — P2-compliant.\n\n${lines.join('\n\n')}${more}\n\nNext: aplicar recommended_action de cada e re-rodar /admin/mt-promote-preflight?sport=<X>`;
+      const token = resolveAlertsToken();
+      if (token) for (const adminId of ADMIN_IDS) sendDM(token, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
+    } catch (e) { log('ERROR', 'MT-PREFLIGHT', e.message); }
+  }
+  setInterval(() => runMtPreflightCron().catch(e => log('ERROR', 'MT-PREFLIGHT', e.message)), 60 * 60 * 1000);
+  setTimeout(() => runMtPreflightCron().catch(() => {}), 50 * 60 * 1000); // 50min pós-boot
+
   // 2026-05-07: Gate Attribution Weekly — counterfactual analysis. Aplica gates
   // atuais retroativamente em tips reais settled e mede saved_loss vs lost_profit
   // per gate. Detecta gate que filtra mais wins do que losses (cortando edge).

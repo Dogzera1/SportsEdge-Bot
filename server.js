@@ -17688,213 +17688,23 @@ load();
   // Resolve antipattern "auto-disable write-once never-revalidated bloqueia tier1
   // mesmo após sample recente contradizer" (caso lol|total|under 30/04 n=10
   // bloqueando LCK UNDER +78% n=14 em 14d recentes).
+  // Lógica em lib/mt-preflight.js (compartilhada com cron runMtPreflightCron).
   if (p === '/admin/mt-promote-preflight' && (req.method === 'GET' || req.method === 'POST')) {
     if (!requireAdmin(req, res)) return;
     const sport = String(parsed.query.sport || '').trim().toLowerCase();
-    if (!sport) { sendJson(res, { ok: false, error: 'missing sport (e.g. ?sport=lol)' }, 400); return; }
-    const days = Math.max(7, Math.min(60, parseInt(parsed.query.days || '14', 10) || 14));
-    const minRecent = Math.max(5, Math.min(50, parseInt(parsed.query.min_recent || '15', 10) || 15));
+    if (!sport && parsed.query.all !== '1') {
+      sendJson(res, { ok: false, error: 'missing sport (e.g. ?sport=lol) or use ?all=1' }, 400); return;
+    }
+    const days = parseInt(parsed.query.days || '14', 10);
+    const minRecent = parseInt(parsed.query.min_recent || '15', 10);
     try {
-      // Helper: query shadow recente no scope (sport, market, side?, league?).
-      // Usa LIKE com %lower(league)% pra robustez (league pode ter sufixos como
-      // "Spring Split", "Stage 2"). market lowercase pra match consistente.
-      const queryShadow = (market, side, league) => {
-        const conds = [
-          'sport = ?',
-          `created_at >= datetime('now', '-' || ? || ' days')`,
-          `result IN ('win','loss','void')`,
-        ];
-        const args = [sport, days];
-        if (market) { conds.push('LOWER(market) = LOWER(?)'); args.push(market); }
-        if (side) { conds.push('LOWER(side) = LOWER(?)'); args.push(side); }
-        if (league) { conds.push("LOWER(COALESCE(league,'')) LIKE ?"); args.push('%' + String(league).toLowerCase() + '%'); }
-        try {
-          const r = db.prepare(`
-            SELECT
-              COUNT(*) AS n,
-              SUM(CASE WHEN result='win' THEN 1 ELSE 0 END) AS wins,
-              SUM(CASE WHEN result='loss' THEN 1 ELSE 0 END) AS losses,
-              SUM(CASE WHEN result='void' THEN 1 ELSE 0 END) AS voids,
-              ROUND(SUM(profit_units)*1.0/NULLIF(SUM(stake_units),0)*100,2) AS roi_pct,
-              ROUND(AVG(clv_pct),2) AS avg_clv_pct,
-              ROUND(AVG(ev_pct),1) AS avg_ev_pct
-            FROM market_tips_shadow
-            WHERE ${conds.join(' AND ')}
-          `).get(...args);
-          return r || { n: 0 };
-        } catch (e) { return { n: 0, error: e.message }; }
-      };
-
-      // Verdict logic: compara original (se existir) com recente.
-      // Threshold: stale_contradicted requer n_recent >= minRecent E (ROI_recent > 0
-      // ou direção oposta ao original). Conservador: insufficient_recent quando
-      // sample recente abaixo do floor — não age sem evidência.
-      const computeVerdict = (original, recent) => {
-        if (!recent || recent.n < minRecent) return 'insufficient_recent';
-        const recRoi = recent.roi_pct;
-        if (recRoi == null) return 'insufficient_recent';
-        if (!original || original.roi_pct == null) {
-          return recRoi > 0 ? 'stale_contradicted' : 'still_leak';
-        }
-        const origRoi = original.roi_pct;
-        // Original era leak (ROI<0) e recente positivo → contradicted
-        if (origRoi < 0 && recRoi > 0) return 'stale_contradicted';
-        // Direção mantida (ambos negativos) → still leak
-        if (origRoi < 0 && recRoi <= 0) return 'still_leak';
-        // Edge case: original positivo e ainda bloqueado (raro) → considerar contradicted
-        if (origRoi >= 0 && recRoi > 0) return 'stale_contradicted';
-        return 'still_leak';
-      };
-
-      const blockers = [];
-
-      // 1) PERMANENT (env MT_PERMANENT_DISABLE_LIST) — entries que matcham sport
-      const permRaw = String(process.env.MT_PERMANENT_DISABLE_LIST ?? 'tennis|totalGames|over,lol|total').trim();
-      const permEntries = permRaw.split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
-      for (const entry of permEntries) {
-        const parts = entry.split('|');
-        if (parts.length < 2 || parts[0] !== sport) continue;
-        const market = parts[1], side = parts[2] || null;
-        const recent = queryShadow(market, side, null);
-        const verdict = computeVerdict(null, recent);
-        const scopeLabel = side ? `${sport}|${market}|${side}` : `${sport}|${market}`;
-        blockers.push({
-          scope: scopeLabel,
-          type: 'PERMANENT',
-          source: 'MT_PERMANENT_DISABLE_LIST env',
-          original_sample: null,
-          recent_shadow: recent,
-          verdict,
-          recommended_action: verdict === 'stale_contradicted'
-            ? `Edit Railway env: remove "${entry}" from MT_PERMANENT_DISABLE_LIST`
-            : 'keep',
-          rationale: verdict === 'stale_contradicted'
-            ? `recent ${days}d shadow n=${recent.n} ROI=${recent.roi_pct}% — block contradicted`
-            : verdict === 'insufficient_recent'
-              ? `recent shadow n=${recent.n} < min ${minRecent} — keep by precaution`
-              : `recent ROI=${recent.roi_pct}% confirms leak`,
-        });
+      const { runPreflightForSport, runPreflightAllSports } = require('./lib/mt-preflight');
+      if (parsed.query.all === '1') {
+        sendJson(res, runPreflightAllSports(db, { days, minRecent }));
+        return;
       }
-
-      // 2) RUNTIME (market_tips_runtime_state)
-      let runtimeRows = [];
-      try {
-        runtimeRows = db.prepare(`
-          SELECT sport, market, side, league, source, reason, roi_pct, clv_pct, clv_n, updated_at
-          FROM market_tips_runtime_state
-          WHERE disabled = 1 AND sport = ?
-        `).all(sport);
-      } catch (_) {
-        try {
-          runtimeRows = db.prepare(`
-            SELECT sport, market, side, source, reason, roi_pct, clv_pct, clv_n, updated_at
-            FROM market_tips_runtime_state
-            WHERE disabled = 1 AND sport = ?
-          `).all(sport);
-        } catch (__) { runtimeRows = []; }
-      }
-      for (const row of runtimeRows) {
-        const recent = queryShadow(row.market, row.side, row.league);
-        const original = {
-          roi_pct: row.roi_pct,
-          clv_pct: row.clv_pct,
-          n: row.clv_n,
-          ts: row.updated_at,
-          reason: row.reason,
-          source: row.source,
-          age_days: row.updated_at
-            ? Math.round((Date.now() - new Date(row.updated_at).getTime()) / 86400000)
-            : null,
-        };
-        const verdict = computeVerdict(original, recent);
-        const scopeParts = [sport, row.market, row.side, row.league].filter(Boolean);
-        const scopeLabel = scopeParts.join('|');
-        blockers.push({
-          scope: scopeLabel,
-          type: 'RUNTIME',
-          source: row.source,
-          original_sample: original,
-          recent_shadow: recent,
-          verdict,
-          recommended_action: verdict === 'stale_contradicted'
-            ? `POST /admin/mt-restore?sport=${sport}&market=${encodeURIComponent(row.market)}${row.side ? '&side=' + encodeURIComponent(row.side) : ''}&force=1`
-            : 'keep',
-          rationale: verdict === 'stale_contradicted'
-            ? `original ${original.ts ? String(original.ts).slice(0, 10) : '?'} (${original.age_days}d ago) n=${original.n} ROI=${original.roi_pct}% vs recent n=${recent.n} ROI=${recent.roi_pct}% — direction reversed`
-            : verdict === 'insufficient_recent'
-              ? `recent shadow n=${recent.n} < min ${minRecent} — keep`
-              : `recent ROI=${recent.roi_pct}% confirms leak`,
-        });
-      }
-
-      // 3) LEAGUE_BLOCKLIST (mt_market_league_blocklist)
-      let leagueRows = [];
-      try {
-        leagueRows = db.prepare(`
-          SELECT sport, market, league_norm, league_raw, source, reason, since, n, roi_pct
-          FROM mt_market_league_blocklist
-          WHERE sport = ?
-        `).all(sport);
-      } catch (_) { leagueRows = []; }
-      for (const row of leagueRows) {
-        const recent = queryShadow(row.market, null, row.league_raw);
-        const original = {
-          roi_pct: row.roi_pct,
-          n: row.n,
-          ts: row.since,
-          reason: row.reason,
-          source: row.source,
-          age_days: row.since
-            ? Math.round((Date.now() - new Date(row.since).getTime()) / 86400000)
-            : null,
-        };
-        const verdict = computeVerdict(original, recent);
-        const scopeLabel = `${sport}|${row.market}|${row.league_raw}`;
-        blockers.push({
-          scope: scopeLabel,
-          type: 'LEAGUE_BLOCKLIST',
-          source: row.source,
-          original_sample: original,
-          recent_shadow: recent,
-          verdict,
-          recommended_action: verdict === 'stale_contradicted'
-            ? `POST /admin/mt-unblock-league?sport=${sport}&market=${encodeURIComponent(row.market)}&league=${encodeURIComponent(row.league_raw)}`
-            : 'keep',
-          rationale: verdict === 'stale_contradicted'
-            ? `original (${original.age_days}d ago) n=${original.n} ROI=${original.roi_pct}% vs recent n=${recent.n} ROI=${recent.roi_pct}% — contradicted`
-            : verdict === 'insufficient_recent'
-              ? `recent shadow n=${recent.n} < min ${minRecent} — keep`
-              : `recent ROI=${recent.roi_pct}% confirms leak`,
-        });
-      }
-
-      // 4) Summary + readiness
-      const stale = blockers.filter(b => b.verdict === 'stale_contradicted').length;
-      const stillLeak = blockers.filter(b => b.verdict === 'still_leak').length;
-      const insufficient = blockers.filter(b => b.verdict === 'insufficient_recent').length;
-
-      sendJson(res, {
-        ok: true,
-        sport,
-        ts: new Date().toISOString(),
-        window_days: days,
-        min_recent_n: minRecent,
-        disclaimer: 'preflight cruza disables ativos × shadow recente. recommended_action é decisão humana — NÃO auto-execute. P2-compliant (no auto symptom treatment).',
-        summary: {
-          total_blockers: blockers.length,
-          stale_contradicted: stale,
-          still_leak: stillLeak,
-          insufficient_recent: insufficient,
-        },
-        blockers,
-        ready_to_promote: blockers.length === 0,
-        ready_after_recommended_actions: stale > 0 && stillLeak === 0,
-        next_steps: stale > 0
-          ? `${stale} stale block(s) detected. Execute recommended_action de cada e re-rode preflight.`
-          : (blockers.length === 0
-            ? 'no blockers found — promote pode prosseguir após verificar shadow performance via /shadow-readiness'
-            : 'all blockers ainda válidos ou sem evidência recente — manter shadow-only por agora'),
-      });
+      sendJson(res, runPreflightForSport(db, sport, { days, minRecent }));
+      return;
     } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
     return;
   }
