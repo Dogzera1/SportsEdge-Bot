@@ -19482,6 +19482,10 @@ async function pollCs(runOnce = false) {
       _hadLiveCs = _hasLiveCs;
       if (_hasLiveCs) _livePhaseEnter('cs');
       let _drainedCs = false;
+      // 2026-05-11: counter pra visibility quando Pinnacle outage zera todos
+      // odds.t1 dos live matches. Antes era silent skip → operador via "X partidas
+      // CS2" + zero análise sem causa visível.
+      let _csNoOddsLive = 0, _csNoOddsTotal = 0;
 
       for (const match of relevant) {
         if (match.status !== 'live' && !_drainedCs) {
@@ -19512,7 +19516,11 @@ async function pollCs(runOnce = false) {
           continue;
         }
 
-        if (!match.odds?.t1 || !match.odds?.t2) continue;
+        if (!match.odds?.t1 || !match.odds?.t2) {
+          if (isLiveCs) _csNoOddsLive++;
+          _csNoOddsTotal++;
+          continue;
+        }
         if (!isOddsFresh(match.odds, isLiveCs, 'cs')) {
           log('INFO', 'AUTO-CS', `Odds stale (${oddsAgeStr(match.odds)}): ${match.team1} vs ${match.team2} — pulando`);
           logRejection('cs', `${match.team1} vs ${match.team2}`, 'odds_stale', { age: oddsAgeStr(match.odds) });
@@ -20148,6 +20156,11 @@ Máximo 150 palavras.`;
         await new Promise(r => setTimeout(r, 3000));
       }
       if (!_drainedCs && _hasLiveCs) _livePhaseExit('cs');
+      // 2026-05-11: log de visibility quando muitos matches caem por no_odds —
+      // tipicamente indica Pinnacle outage ou PS-only feed sem cobertura odds.
+      if (_csNoOddsLive > 0 || _csNoOddsTotal >= 3) {
+        log('INFO', 'AUTO-CS', `no_odds skip: live=${_csNoOddsLive} total=${_csNoOddsTotal} (Pinnacle outage? cs depende de Pin odds embedded em /cs-matches)`);
+      }
     } catch (e) {
       log('ERROR', 'AUTO-CS', e.message);
       _livePhaseExit('cs');
