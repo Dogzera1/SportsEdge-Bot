@@ -6572,6 +6572,56 @@ async function runMarketTipsLeakGuard() {
                      : N_CUTOFF;
     const wasDisabled = _marketTipsDisabledRuntime.has(key);
 
+    // 2026-05-11 (audit cross-sport): Bayesian-inspired early-warning. CLV
+    // guard tradicional aguarda n>=10-30 — em sport baixo-volume são dias
+    // de sangria antes de disparar. Stepwise: ROI extremo + n baixo já
+    // sinaliza leak forte (Beta-binomial: n=4 com 100% loss → P(true_ROI<
+    // -10%)>=80% mesmo sem CLV). Trade-off: ~5-10% false-positive vs cortar
+    // 5-10 tips de sangria. Configurável via env.
+    const EARLY_ROI_STEPS = (() => {
+      try {
+        const raw = process.env.MT_LEAK_EARLY_ROI_STEPS;
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (Array.isArray(parsed) && parsed.every(s => s.n != null && s.roi != null)) return parsed;
+        }
+      } catch (_) {}
+      return [
+        { n: 4, roi: -70 },   // n=4 ROI≤-70% (4/4 losses odds ~2.0)
+        { n: 6, roi: -50 },   // n=6 ROI≤-50%
+        { n: 8, roi: -35 },   // n=8 ROI≤-35%
+      ];
+    })();
+    const EARLY_DISABLED = /^(0|false|no)$/i.test(String(process.env.MT_LEAK_EARLY_AUTO ?? 'true'));
+    const isEarlyTrigger = !EARLY_DISABLED && !wasDisabled
+      && s.roiPct != null
+      && EARLY_ROI_STEPS.some(step => s.clvN >= step.n && s.roiPct <= step.roi);
+
+    if (isEarlyTrigger) {
+      const matchedStep = EARLY_ROI_STEPS.find(step => s.clvN >= step.n && s.roiPct <= step.roi);
+      const reason = `EARLY_ROI ${s.roiPct.toFixed(1)}% n=${s.clvN} (step n>=${matchedStep.n} roi<=${matchedStep.roi}%)`;
+      try {
+        const tierVal = (tierKey && !leagueKey) ? s.tier : null;
+        try {
+          db.prepare(`INSERT OR REPLACE INTO market_tips_runtime_state
+            (sport, market, side, league, tier, disabled, source, reason, clv_pct, clv_n, roi_pct, updated_at)
+            VALUES (?, ?, ?, ?, ?, 1, 'auto_early_roi_leak', ?, ?, ?, ?, ?)`).run(
+            s.sport, s.market, sideKey, leagueKey, tierVal, reason, s.avgClv, s.clvN, s.roiPct, ts,
+          );
+        } catch (_eTier) {
+          db.prepare(`INSERT OR REPLACE INTO market_tips_runtime_state
+            (sport, market, side, league, disabled, source, reason, clv_pct, clv_n, roi_pct, updated_at)
+            VALUES (?, ?, ?, ?, 1, 'auto_early_roi_leak', ?, ?, ?, ?, ?)`).run(
+            s.sport, s.market, sideKey, leagueKey, reason, s.avgClv, s.clvN, s.roiPct, ts,
+          );
+        }
+        _marketTipsDisabledRuntime.set(key, { reason, since: ts, clv: s.avgClv, n: s.clvN, source: 'auto_early_roi_leak', side: sideKey, league: leagueKey, tier: tierVal });
+        disabled.push(`⚡ ${label} — ${reason}`);
+        log('WARN', 'MT-GUARD', `auto-disabled-early ${key}: ${reason}`);
+      } catch (e) { log('WARN', 'MT-GUARD', `early disable insert err: ${e.message}`); }
+      return; // skip CLV check (já tomamos ação)
+    }
+
     if (!wasDisabled && s.clvN >= nThreshold && s.avgClv != null && s.avgClv < CLV_CUTOFF) {
       const reason = `CLV ${s.avgClv.toFixed(1)}% n=${s.clvN} ROI=${s.roiPct != null ? s.roiPct.toFixed(1)+'%' : '?'}`;
       try {
