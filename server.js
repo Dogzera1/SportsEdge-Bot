@@ -27055,6 +27055,7 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
       let per_sport_segment = [];
       try {
         const { getLeagueTier } = require('./lib/league-tier');
+        const { stripPhase: _stripLeaguePhase } = require('./lib/league-phase-normalizer');
         const detailRows = db.prepare(`
           WITH dedup AS (
             SELECT MAX(id) AS id
@@ -27096,18 +27097,27 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
         const leagueMap = new Map(); // key: sport|league
         const segmentMap = new Map(); // key: sport|segment (esports only)
         for (const r of detailRows) {
-          const tier = getLeagueTier(r.sport, r.league) || 3;
+          // 2026-05-11: strip sufixo de fase ("ATP Rome - R1" → "ATP Rome")
+          // pra agrupar cards. Tier classifier roda no nome base (R1 não muda
+          // tier). Para esports map_winner não há fase no nome (event=liga).
+          const leagueBase = _stripLeaguePhase(r.league) || r.league;
+          const tier = getLeagueTier(r.sport, leagueBase) || 3;
           const segment = _segmentOf(r.sport, r.match_id);
           const tk = `${r.sport}|tier${tier}`;
-          const lk = `${r.sport}|${r.league}`;
+          const lk = `${r.sport}|${leagueBase}`;
           const sk = segment ? `${r.sport}|${segment}` : null;
-          const targets = [[tk, tierMap, { tier }], [lk, leagueMap, { tier, league: r.league }]];
+          const targets = [[tk, tierMap, { tier }], [lk, leagueMap, { tier, league: leagueBase }]];
           if (sk) targets.push([sk, segmentMap, { segment }]);
           for (const [key, map, extras] of targets) {
             let agg = map.get(key);
             if (!agg) {
-              agg = { sport: r.sport, tier, league: r.league, segment, n: 0, wins: 0, losses: 0, pushes: 0, pending: 0, profit_r: 0, stake_r: 0, odds_sum: 0, odds_n: 0, ev_sum: 0, ev_n: 0, clv_sum: 0, clv_n: 0, ...extras };
+              agg = { sport: r.sport, tier, league: leagueBase, segment, n: 0, wins: 0, losses: 0, pushes: 0, pending: 0, profit_r: 0, stake_r: 0, odds_sum: 0, odds_n: 0, ev_sum: 0, ev_n: 0, clv_sum: 0, clv_n: 0, _phases: new Set(), ...extras };
               map.set(key, agg);
+            }
+            // Captura fase original (R1/QF/SF/etc) — só faz sentido em leagueMap.
+            if (map === leagueMap && r.league !== leagueBase) {
+              const phase = r.league.slice(leagueBase.length).replace(/^\s*-\s*/, '').trim();
+              if (phase) agg._phases.add(phase);
             }
             agg.n += 1;
             if (r.result === 'win') agg.wins += 1;
@@ -27142,6 +27152,7 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
             avg_ev: agg.ev_n > 0 ? parseFloat((agg.ev_sum / agg.ev_n).toFixed(2)) : null,
             avg_clv: agg.clv_n > 0 ? parseFloat((agg.clv_sum / agg.clv_n).toFixed(2)) : null,
             clv_n: agg.clv_n,
+            phases: agg._phases ? [...agg._phases].sort() : undefined,
           };
         };
         per_sport_tier = [...tierMap.values()].map(finalize)
