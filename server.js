@@ -12624,6 +12624,76 @@ setInterval(load, 60000);
   // Combina pending counts + last tip + last shadow + blocklist matches +
   // 7d/30d ROI summary. Útil pra investigação focada.
   // GET /admin/sport-detail?sport=tennis&key=<ADMIN_KEY>
+  // 2026-05-11 (audit): time-of-day analysis per sport.
+  // GET /admin/time-of-day-analysis?sport=tennis&days=60&key=<KEY>
+  // Agrupa tips real settled por HOUR(settled_at_local) → ROI per hour.
+  // Identifica dead zones (hora c/ ROI consistentemente negativo) e sweet spots.
+  // Útil pra rate-limit / TIME_OF_DAY_AUTO env tuning.
+  if (p === '/admin/time-of-day-analysis' && (req.method === 'GET' || req.method === 'POST')) {
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const days = Math.max(14, Math.min(180, parseInt(parsed.query.days || '60', 10) || 60));
+    const sportFilter = String(parsed.query.sport || '').toLowerCase().trim();
+    const tzOffset = parseFloat(parsed.query.tz_offset_hours || '-3'); // BRT default
+    try {
+      const sportClause = sportFilter && /^[a-z0-9_]+$/.test(sportFilter) ? `AND sport = '${sportFilter}'` : '';
+      // Hora UTC + tzOffset → hora local. SQLite julianday-based hour calc.
+      const rows = db.prepare(`
+        SELECT sport,
+          CAST(strftime('%H', datetime(settled_at, '${tzOffset} hours')) AS INTEGER) AS hour,
+          COUNT(*) AS n,
+          SUM(CASE WHEN result = 'win' THEN 1 ELSE 0 END) AS wins,
+          SUM(CASE WHEN result = 'loss' THEN 1 ELSE 0 END) AS losses,
+          SUM(COALESCE(stake_reais, 0)) AS stake,
+          SUM(COALESCE(profit_reais, 0)) AS profit
+        FROM tips
+        WHERE result IN ('win','loss')
+          AND settled_at >= datetime('now', ?)
+          AND (archived IS NULL OR archived = 0)
+          AND COALESCE(is_shadow, 0) = 0
+          ${sportClause}
+        GROUP BY sport, hour
+        ORDER BY sport, hour
+      `).all(`-${days} days`);
+      // Pivot: sport → array de 24 horas
+      const bySport = new Map();
+      for (const r of rows) {
+        if (!bySport.has(r.sport)) bySport.set(r.sport, new Array(24).fill(null).map(() => ({ n: 0, wins: 0, losses: 0, stake: 0, profit: 0 })));
+        bySport.get(r.sport)[r.hour] = {
+          n: r.n, wins: r.wins, losses: r.losses,
+          stake: +Number(r.stake).toFixed(2),
+          profit: +Number(r.profit).toFixed(2),
+          roi_pct: r.stake > 0 ? +((r.profit / r.stake) * 100).toFixed(2) : null,
+          hit_pct: (r.wins + r.losses) > 0 ? +((r.wins / (r.wins + r.losses)) * 100).toFixed(2) : null,
+        };
+      }
+      // Identifica patterns: dead zones e sweet spots per sport
+      const patterns = {};
+      for (const [sp, hours] of bySport) {
+        const validHours = hours
+          .map((h, i) => ({ hour: i, ...h }))
+          .filter(h => h.n >= 5 && h.roi_pct != null);
+        if (!validHours.length) { patterns[sp] = { note: 'sample insuficiente (n<5 per hour)' }; continue; }
+        const sortedRoi = [...validHours].sort((a, b) => a.roi_pct - b.roi_pct);
+        patterns[sp] = {
+          best_hours: sortedRoi.slice(-3).reverse().map(h => ({ hour: h.hour, n: h.n, roi_pct: h.roi_pct, hit_pct: h.hit_pct })),
+          worst_hours: sortedRoi.slice(0, 3).map(h => ({ hour: h.hour, n: h.n, roi_pct: h.roi_pct, hit_pct: h.hit_pct })),
+          n_total: validHours.reduce((a, h) => a + h.n, 0),
+        };
+      }
+      sendJson(res, {
+        ok: true,
+        days,
+        tz_offset_hours: tzOffset,
+        sport_filter: sportFilter || 'all',
+        by_sport_hourly: Object.fromEntries(bySport),
+        patterns,
+        note: 'hour é local time (default BRT -3). Use tz_offset_hours pra ajustar.',
+      });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   // 2026-05-11 (audit): risk-adjusted metrics per sport.
   // GET /admin/risk-metrics?sport=tennis&days=30&key=<KEY>
   //  - Sharpe ratio (mean return / std return, annualized assumindo ~1 tip/dia)
