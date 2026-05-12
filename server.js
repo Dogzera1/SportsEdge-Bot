@@ -18334,6 +18334,61 @@ load();
     return;
   }
 
+  // POST/GET /admin/tip-resettle?tip_id=X[&new_result=win|loss|void][&dry_run=1]
+  // 2026-05-12: fix cirúrgico pra tips com settle errado OU profit_reais inconsistente.
+  // Modo 1: new_result fornecido → força result + recalcula profit_reais via formula
+  //   canônica (win=stake*(odd-1), loss=-stake, void=0). Bankroll só atualiza pra
+  //   tips reais (is_shadow=0).
+  // Modo 2: new_result omitido → recalcula profit_reais via formula canônica usando
+  //   o `result` atual (não muda result, só conserta profit inconsistente).
+  // Use cases: 3 settle mismatches + 3 profit bugs em ML basket shadow (audit 2026-05-12).
+  if (p === '/admin/tip-resettle') {
+    if (!requireAdmin(req, res)) return;
+    const tipId = parseInt(parsed.query.tip_id || '', 10);
+    const newResult = (parsed.query.new_result || '').trim().toLowerCase();
+    const dryRun = String(parsed.query.dry_run || '') === '1' || String(parsed.query.dry_run || '') === 'true';
+    if (!Number.isInteger(tipId) || tipId <= 0) {
+      sendJson(res, { ok: false, error: 'tip_id obrigatório (int)' }, 400); return;
+    }
+    if (newResult && !['win','loss','void'].includes(newResult)) {
+      sendJson(res, { ok: false, error: 'new_result deve ser win|loss|void' }, 400); return;
+    }
+    try {
+      const tip = db.prepare(`SELECT * FROM tips WHERE id = ?`).get(tipId);
+      if (!tip) { sendJson(res, { ok: false, error: 'tip não encontrada' }, 404); return; }
+      const odds = parseFloat(tip.odds) || 1;
+      const stakeR = Number(tip.stake_reais) || 0;
+      const targetResult = newResult || tip.result;
+      if (!targetResult || !['win','loss','void'].includes(targetResult)) {
+        sendJson(res, { ok: false, error: 'tip sem result e new_result não fornecido' }, 400); return;
+      }
+      let newProfit;
+      if (targetResult === 'win') newProfit = +(stakeR * (odds - 1)).toFixed(2);
+      else if (targetResult === 'loss') newProfit = +(-stakeR).toFixed(2);
+      else newProfit = 0;
+      const change = {
+        tip_id: tipId, sport: tip.sport,
+        prev: { result: tip.result, profit_reais: tip.profit_reais },
+        next: { result: targetResult, profit_reais: newProfit },
+        is_shadow: tip.is_shadow,
+        bankroll_delta: tip.is_shadow ? 0 : +(newProfit - (Number(tip.profit_reais) || 0)).toFixed(2),
+      };
+      if (dryRun) { sendJson(res, { ok: true, dry_run: true, change }); return; }
+      db.transaction(() => {
+        db.prepare(`UPDATE tips SET result = ?, profit_reais = ?, settled_at = COALESCE(settled_at, datetime('now')) WHERE id = ?`)
+          .run(targetResult, newProfit, tipId);
+        // Bankroll só pra tip real. Reverte profit antigo + aplica novo (atomic).
+        if (!tip.is_shadow && Number.isFinite(Number(tip.profit_reais))) {
+          db.prepare(`UPDATE bankroll SET current_banca = round(current_banca + ?, 2), updated_at = datetime('now') WHERE sport = ?`)
+            .run(change.bankroll_delta, tip.sport);
+        }
+      })();
+      log('INFO', 'TIP-RESETTLE', `tip#${tipId} ${tip.sport} ${tip.participant1}/${tip.participant2} pick=${tip.tip_participant} ${change.prev.result}/${change.prev.profit_reais} → ${targetResult}/${newProfit} (Δbk=${change.bankroll_delta})`);
+      sendJson(res, { ok: true, applied: change });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   // GET /admin/tips-list?sport=basket&days=30&is_shadow=1&market_type=ML&limit=100
   // 2026-05-12: lista individual de tips (ML+MT) filtráveis por sport/shadow/market.
   // Necessário pra audit manual de shadow promotion candidates onde /shadow-readiness
