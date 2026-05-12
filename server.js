@@ -11931,6 +11931,17 @@ setInterval(load, 60000);
     return;
   }
 
+  // GET /admin/news-impact — snapshot do cache in-memory de news alerts.
+  // Mostra entries ativos populados pelo news_monitor cron (15min).
+  if (p === '/admin/news-impact' && req.method === 'GET') {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const { getStats } = require('./lib/news-impact');
+      sendJson(res, { ok: true, stats: getStats() });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   // GET /admin/sport-mt-calib-meta?sport=lol|cs|cs2|dota2|valorant — expõe meta
   // da calib MT esports via factory lib/sport-mt-calib.js.
   if (p === '/admin/sport-mt-calib-meta' && req.method === 'GET') {
@@ -23338,6 +23349,34 @@ load();
             sendJson(res, { ok: false, skipped: true, reason: 'ev_sanity_cap', ev: evN, cap: _evCap });
             return;
           }
+        }
+
+        // 2026-05-12: news-impact gate. Fecha gap "news só DM admin, não bloqueia
+        // tip ruim". News monitor cron 15min popula lib/news-impact cache com
+        // entries {sport, team_norm, severity, ttl 3h}. Consulta aqui antes do
+        // tip ser persistido.
+        // critical (cancelled/withdrawal/DQ/ban) → skip hard (não grava tip)
+        // warning (injury/sub/roster change) → log + flag forensics (continua)
+        // P2-compliance: news é causa REAL (publicada por fonte), tip é real,
+        // ação em real é OK.
+        // Opt-out: NEWS_IMPACT_GATE_DISABLED=true. Bypass shadow.
+        let _newsImpactFlag = null;
+        if (!t.isShadow && !/^(1|true|yes)$/i.test(String(process.env.NEWS_IMPACT_GATE_DISABLED || ''))) {
+          try {
+            const { getImpact } = require('./lib/news-impact');
+            const impact = getImpact(sport, p1, p2, tipParticipant);
+            if (impact) {
+              if (impact.severity === 'critical') {
+                log('WARN', 'NEWS-IMPACT', `${sport} ${tipParticipant}: news ${impact.severity} affecting ${impact.team} (${impact.source}) — tip REJECTED | "${impact.title.slice(0, 80)}"`);
+                _emitSkip('news_critical', { sport, matchId, team: impact.team, title: impact.title.slice(0, 100) });
+                sendJson(res, { ok: false, skipped: true, reason: 'news_critical', news: { severity: impact.severity, team: impact.team, title: impact.title.slice(0, 100), source: impact.source } });
+                return;
+              }
+              // warning: continua mas registra
+              _newsImpactFlag = { severity: 'warning', team: impact.team, source: impact.source, title: impact.title.slice(0, 100) };
+              log('INFO', 'NEWS-IMPACT', `${sport} ${tipParticipant}: news warning re ${impact.team} (${impact.source}) — tip emitida com flag`);
+            }
+          } catch (e) { log('DEBUG', 'NEWS-IMPACT', `gate err: ${e.message}`); }
         }
 
         // 2026-05-06: DAILY_TIP_LIMIT enforcement server-side. Antes só ML path

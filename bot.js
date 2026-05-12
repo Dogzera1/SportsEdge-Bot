@@ -5362,6 +5362,17 @@ async function runNewsMonitorCycle() {
     return;
   }
 
+  // 2026-05-12: popula news-impact cache pra pre-emission gate em /record-tip.
+  // TTL 3h por entry. Fecha gap "news só DM admin, não bloqueia tip ruim".
+  try {
+    const { updateImpactFromAlerts, getStats } = require('./lib/news-impact');
+    const upserts = updateImpactFromAlerts(result.alerts);
+    if (upserts > 0) {
+      const s = getStats();
+      log('INFO', 'NEWS-IMPACT', `+${upserts} entries | total=${s.total_entries} ${JSON.stringify(s.by_sport)}`);
+    }
+  } catch (e) { log('WARN', 'NEWS-IMPACT', `update falhou: ${e.message}`); }
+
   // Filtra alerts novos (não vistos)
   const newAlerts = result.alerts.filter(a => {
     const key = `${a.source}::${a.title.slice(0, 80)}`;
