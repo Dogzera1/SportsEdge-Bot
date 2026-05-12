@@ -1388,9 +1388,9 @@ const UPCOMING_SNAPSHOT_TTL_MS = parseInt(process.env.UPCOMING_SNAPSHOT_TTL_MS |
 // já evitam fetch externo duplicado, mas enrichment body + log rodavam 2x.
 // TTL 3s absorve near-simultaneous calls sem ofuscar dados live-stats.
 const MATCHES_RESP_TTL_MS = parseInt(process.env.MATCHES_RESP_TTL_MS || '3000', 10);
-let _dotaMatchesResp = { data: null, ts: 0 };
-let _csMatchesResp = { data: null, ts: 0 };
-let _valorantMatchesResp = { data: null, ts: 0 };
+let _dotaMatchesResp = { data: null, ts: 0, inflight: null };
+let _csMatchesResp = { data: null, ts: 0, inflight: null };
+let _valorantMatchesResp = { data: null, ts: 0, inflight: null };
 let _tennisMatchesResp = { data: null, ts: 0 };
 let _mmaMatchesResp = { data: null, ts: 0 };
 // Football-matches: itera 14 ligas TheOddsAPI (14 quota units/call). TTL mais
@@ -6020,6 +6020,15 @@ const server = http.createServer(async (req, res) => {
       sendJson(res, _dotaMatchesResp.data);
       return;
     }
+    // 2026-05-12: inflight dedup — 2 cycles paralelos missavam o cache (set DEPOIS do work)
+    // e ambos chamavam PandaScore+Pinnacle. Logs mostravam DOTA2 lines duplicadas no mesmo ts.
+    if (_dotaMatchesResp.inflight) {
+      try { await _dotaMatchesResp.inflight; } catch (_) {}
+      sendJson(res, _dotaMatchesResp.data || []);
+      return;
+    }
+    let _resolveDmInflight;
+    _dotaMatchesResp.inflight = new Promise((resolve) => { _resolveDmInflight = resolve; });
     try {
       // ── Fonte primária: Pinnacle (default; opt-out PINNACLE_DOTA=false) ──
       // Odds-API.io / TheOdds removidos 2026-05-08 — user descontinuou
@@ -6109,9 +6118,12 @@ const server = http.createServer(async (req, res) => {
         }
       } catch (e) { log('WARN', 'AGGREGATOR-DOTA', `enrich err: ${e.message}`); }
       log('INFO', 'DOTA2', `/dota-matches: ${combined.length} total (${liveFromPs.length} live PS, ${oddsMatches.length} odds ${oddsSrc}${withMapOdds ? `, ${withMapOdds} com mapOdds` : ''})`);
-      _dotaMatchesResp = { data: combined, ts: Date.now() };
+      _dotaMatchesResp = { data: combined, ts: Date.now(), inflight: null };
+      _resolveDmInflight(combined);
       sendJson(res, combined);
     } catch(e) {
+      _dotaMatchesResp.inflight = null;
+      _resolveDmInflight(null);
       sendJson(res, []);
     }
     return;
@@ -6156,6 +6168,13 @@ const server = http.createServer(async (req, res) => {
       sendJson(res, _csMatchesResp.data);
       return;
     }
+    if (_csMatchesResp.inflight) {
+      try { await _csMatchesResp.inflight; } catch (_) {}
+      sendJson(res, _csMatchesResp.data || []);
+      return;
+    }
+    let _resolveCsInflight;
+    _csMatchesResp.inflight = new Promise((resolve) => { _resolveCsInflight = resolve; });
     try {
       const [pinMatches, psMatches] = await Promise.all([
         getPinnacleCsMatches().catch(() => []),
@@ -6207,9 +6226,12 @@ const server = http.createServer(async (req, res) => {
         }
       } catch (e) { log('WARN', 'AGGREGATOR-CS', `enrich err: ${e.message}`); }
       log('INFO', 'CS', `/cs-matches: ${combined.length} total (${liveFromPs.length} live PS, ${pinMatches.length} odds Pinnacle)`);
-      _csMatchesResp = { data: combined, ts: Date.now() };
+      _csMatchesResp = { data: combined, ts: Date.now(), inflight: null };
+      _resolveCsInflight(combined);
       sendJson(res, combined);
     } catch (e) {
+      _csMatchesResp.inflight = null;
+      _resolveCsInflight(null);
       log('ERROR', 'CS', `/cs-matches: ${e.message}`);
       sendJson(res, []);
     }
@@ -6222,6 +6244,13 @@ const server = http.createServer(async (req, res) => {
       sendJson(res, _valorantMatchesResp.data);
       return;
     }
+    if (_valorantMatchesResp.inflight) {
+      try { await _valorantMatchesResp.inflight; } catch (_) {}
+      sendJson(res, _valorantMatchesResp.data || []);
+      return;
+    }
+    let _resolveValInflight;
+    _valorantMatchesResp.inflight = new Promise((resolve) => { _resolveValInflight = resolve; });
     try {
       const [pinMatches, psMatches] = await Promise.all([
         getPinnacleValorantMatches().catch(() => []),
@@ -6269,9 +6298,12 @@ const server = http.createServer(async (req, res) => {
         }
       } catch (e) { log('WARN', 'AGGREGATOR-VAL', `enrich err: ${e.message}`); }
       log('INFO', 'VALORANT', `/valorant-matches: ${combined.length} total (${liveFromPs.length} live PS, ${pinMatches.length} odds Pinnacle)`);
-      _valorantMatchesResp = { data: combined, ts: Date.now() };
+      _valorantMatchesResp = { data: combined, ts: Date.now(), inflight: null };
+      _resolveValInflight(combined);
       sendJson(res, combined);
     } catch (e) {
+      _valorantMatchesResp.inflight = null;
+      _resolveValInflight(null);
       log('ERROR', 'VALORANT', `/valorant-matches: ${e.message}`);
       sendJson(res, []);
     }
