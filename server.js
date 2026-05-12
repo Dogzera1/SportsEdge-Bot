@@ -5432,6 +5432,11 @@ const server = http.createServer(async (req, res) => {
         // server.js:3683). Sem essa entry, valorant nunca resolve matchupId em
         // /odds-markets → 400 → MT shadow vazio.
         { cache: _valorantPinnacleCache, prefix: /^pin_valorant_/ },
+        // 2026-05-12: prefixo `pin_darts_` (ver getPinnacleDartsMatches: server.js:3412).
+        // Sem essa entry, darts MT scanner (bot.js:21438) sempre recebia null de
+        // /odds-markets → DARTS-MT-SCAN nunca disparava. Bug latente desde
+        // commit que adicionou darts MT (2026-05-10).
+        { cache: _dartsPinnacleCache,    prefix: /^pin_darts_/ },
       ];
       if (!matchupId) {
         for (const { cache, prefix } of pinFallbacks) {
