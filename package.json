@@ -19,6 +19,9 @@
     "better-sqlite3": "^11.0.0",
     "dotenv": "^16.0.0"
   },
+  "devDependencies": {
+    "fast-check": "^3.23.2"
+  },
   "engines": {
     "node": ">=18.0.0"
   }
