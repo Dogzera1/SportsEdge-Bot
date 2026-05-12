@@ -2645,6 +2645,32 @@ const migrations = [
                ON tips(settled_at) WHERE settle_notified_at IS NULL AND result IS NOT NULL`);
     },
   },
+  {
+    id: '101_market_tips_shadow_match_id_ref',
+    up(db) {
+      // 2026-05-12: identificador determinístico de match na shadow row pra
+      // settle preciso em séries playoff back-to-back (NBA 4-7 jogos same teams
+      // em 21d, ATP series consecutivas, esports tier-2 torneios concatenados).
+      //
+      // Antes: match_key="team1|team2|YYYY-MM-DD" + window proximity selecionava
+      // candidato. Em série playoff isso pega o jogo errado quando há 2+ jogos
+      // entre mesmos times dentro da window. Caso real basket 2026-05-12: 3
+      // tips com result swap (audit guardrail temporal fix em c644fd7 mascarou).
+      //
+      // Com match_id_ref preenchido: settle faz lookup direto em match_results
+      // por ESPN/PandaScore/Pinnacle id → deterministic. Vazio = fallback path
+      // atual (team+date proximity), preserva compatibilidade rows pré-mig.
+      //
+      // Scanner passa match.id automaticamente — sem necessidade de mudar
+      // callers em bot.js (10+ sites).
+      addColumnIfMissing(db, 'market_tips_shadow', 'match_id_ref', 'match_id_ref TEXT');
+      // Index pra lookup direto no settle path. Partial index só rows com
+      // match_id_ref populado (rows antigas sem o valor não inflam o index).
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_mt_shadow_match_id_ref
+               ON market_tips_shadow(sport, match_id_ref)
+               WHERE match_id_ref IS NOT NULL`);
+    },
+  },
 ];
 
 function applyMigrations(db) {

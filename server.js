@@ -19957,9 +19957,17 @@ load();
       const params = [days];
       if (sportFilter) { conds.push('sport = ?'); params.push(sportFilter); }
       if (marketFilter) { conds.push('market = ?'); params.push(marketFilter); }
+      // 2026-05-12 (mig 101): inclui match_id_ref pra audit deterministic em
+      // séries playoff. SELECT defensivo — coluna pode não existir em DB legado.
+      let _selectCols = 'id, sport, team1, team2, league, market, side, line, odd, best_of, result, profit_units, created_at, settled_at, stake_units';
+      try {
+        const _cols = db.prepare(`PRAGMA table_info(market_tips_shadow)`).all();
+        if (_cols.some(c => c.name === 'match_id_ref')) {
+          _selectCols += ', match_id_ref';
+        }
+      } catch (_) {}
       const rows = db.prepare(`
-        SELECT id, sport, team1, team2, league, market, side, line, odd, best_of,
-          result, profit_units, created_at, settled_at, stake_units
+        SELECT ${_selectCols}
         FROM market_tips_shadow
         WHERE ${conds.join(' AND ')}
         ORDER BY id DESC LIMIT 500
@@ -19974,7 +19982,22 @@ load();
         // Recreate same lookup logic of settleShadowTips primary query
         const windowBefore = r.sport === 'tennis' ? '-10 days' : r.sport === 'football' ? '-48 hours' : '-24 hours';
         const windowAfter = r.sport === 'tennis' ? '+10 days' : r.sport === 'football' ? '+72 hours' : '+7 days';
-        const candidates = db.prepare(`
+
+        // 2026-05-12 (mig 101): preferir match_id_ref quando disponível —
+        // deterministic, sem ambiguidade de série playoff. Espelha settle path.
+        let candidates = [];
+        if (r.match_id_ref) {
+          try {
+            candidates = db.prepare(`
+              SELECT match_id, league, team1, team2, winner, final_score, resolved_at
+              FROM match_results
+              WHERE game = ? AND match_id = ?
+                AND winner IS NOT NULL AND winner != ''
+              LIMIT 1
+            `).all(r.sport, r.match_id_ref);
+          } catch (_) {}
+        }
+        if (!candidates.length) candidates = db.prepare(`
           SELECT match_id, league, team1, team2, winner, final_score, resolved_at
           FROM match_results
           WHERE game = ?
