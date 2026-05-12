@@ -4741,7 +4741,7 @@ async function loadMlShadowTipsList(sportList) {
   renderMlShadowTipsList();
 }
 
-function renderMlShadowTipsList() {
+async function renderMlShadowTipsList() {
   const container = document.getElementById('mlShadowTipsList');
   if (!container) return;
   const { allTips, page, perPage } = mlShadowTipsState;
@@ -4762,13 +4762,39 @@ function renderMlShadowTipsList() {
     : r === 'void' ? '<span style="color:#ca8a04">−</span>'
     : '<span style="opacity:0.5">⋯</span>';
 
+  // 2026-05-12 (P1 — basket playoff series): batch fetch ESPN series info pra
+  // basket match_ids da página atual. Cache backend 1h. Sem isso, mostraria só
+  // "🏆 série" sem distinguir G1/G2/...
+  window._basketSeriesInfoCache = window._basketSeriesInfoCache || {};
+  const basketMids = pageTips
+    .filter(t => (t._sport || t.sport) === 'basket' && t.match_id && t.match_id.startsWith('basket_espn_'))
+    .map(t => t.match_id)
+    .filter(mid => !window._basketSeriesInfoCache[mid]);
+  if (basketMids.length) {
+    try {
+      const r = await adminFetchJson('/admin/basket-series-info?match_ids=' + encodeURIComponent(basketMids.join(',')));
+      if (r?.ok && r.info) {
+        Object.assign(window._basketSeriesInfoCache, r.info);
+      }
+    } catch (_) { /* silent — degrade pra 🏆 série */ }
+  }
+
   // 2026-05-10 (P1 — esports map vs série): badge Segm derivado de match_id.
-  // Esports = lol/dota2/cs/cs2/valorant; outros sports não exibem badge (—).
-  // Mapa: match_id contém '_MAP{N}' (ex: dota2_ps_1416676_MAP2) → '🗺️ M{N}'.
-  // Série: ML do match inteiro → '🏆 série'. Ajuda inspeção visual sem
-  // precisar abrir o tip individual.
+  // Esports = lol/dota2/cs/cs2/valorant; basket via ESPN series info; outros sports = —.
+  // Mapa: match_id contém '_MAP{N}' → '🗺️ M{N}'.
+  // Basket: lookup playoff round + game N → 'Semis G4' etc.
+  // Série esports: ML do match inteiro → '🏆 série'.
   const ESPORTS_SEGMENT = new Set(['lol', 'dota2', 'cs', 'cs2', 'valorant']);
   const segBadge = (sp, mid) => {
+    if (sp === 'basket' && mid && mid.startsWith('basket_espn_')) {
+      const info = window._basketSeriesInfoCache[mid];
+      if (info?.round && info?.game_n) {
+        // Abbrev round: "West Semifinals" → "W Semis", "Eastern Conf Finals" → "E Finals"
+        let r = String(info.round).replace(/Western/i,'W').replace(/Eastern/i,'E').replace(/Conference/i,'').replace(/Semifinals/i,'Semis').replace(/Quarterfinals/i,'QF').replace(/\s+/g,' ').trim();
+        return `<span title="${info.round} — Game ${info.game_n}${info.series_summary ? ' (' + info.series_summary + ')' : ''}" style="background:#fb923c25;color:#fdba74;border:1px solid #fb923c55;padding:1px 5px;border-radius:3px;font-size:0.75em;white-space:nowrap">🏀 ${r} G${info.game_n}</span>`;
+      }
+      return '<span title="Basket — sem series info" style="opacity:0.4">—</span>';
+    }
     if (!ESPORTS_SEGMENT.has(sp)) return '<span style="opacity:0.4">—</span>';
     // _MAP\d+ estrito (espelha server.js _segmentOf). bot.js sempre grava
     // mapN numérico, então sem digit = não é mapa.

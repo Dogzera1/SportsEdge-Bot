@@ -18334,6 +18334,74 @@ load();
     return;
   }
 
+  // GET /admin/basket-series-info?match_ids=basket_espn_X,basket_espn_Y[,...]
+  // 2026-05-12: lookup batch ESPN summary pra mapear match_id → playoff round + Game N.
+  // Usado pelo dashboard ML Shadow render pra mostrar contexto série em tips basket
+  // (e.g. "West Semifinals G4" em vez de só "🏆 série"). Cache in-memory 1h por
+  // match_id (ESPN raramente muda round/game info post-creation).
+  if (p === '/admin/basket-series-info') {
+    if (!requireAdmin(req, res)) return;
+    const raw = (parsed.query.match_ids || '').trim();
+    if (!raw) { sendJson(res, { ok: true, info: {} }); return; }
+    const idsParam = raw.split(',').map(s => s.trim()).filter(Boolean).slice(0, 100);
+    const espnIds = idsParam.map(mid => {
+      const m = String(mid).match(/^(basket_espn|espn_basket)_(\d+)$/);
+      return m ? { mid, espn_id: m[2] } : { mid, espn_id: null };
+    });
+    // Cache 1h por espn_id em memória global
+    global._basketSeriesCache = global._basketSeriesCache || new Map();
+    const TTL_MS = 60 * 60 * 1000;
+    const now = Date.now();
+    const result = {};
+    const toFetch = [];
+    for (const { mid, espn_id } of espnIds) {
+      if (!espn_id) { result[mid] = null; continue; }
+      const cached = global._basketSeriesCache.get(espn_id);
+      if (cached && (now - cached.ts) < TTL_MS) {
+        result[mid] = cached.data;
+      } else {
+        toFetch.push({ mid, espn_id });
+      }
+    }
+    // Fetch ESPN summary em paralelo (limit concurrency 5)
+    const fetchOne = async (espn_id) => {
+      try {
+        const url = `https://site.api.espn.com/apis/site/v2/sports/basketball/nba/summary?event=${espn_id}`;
+        const r = await httpGet(url, {}).catch(() => null);
+        if (!r || r.status !== 200) return null;
+        const d = safeParse(r.body, null);
+        const comp = ((d?.header?.competitions) || [{}])[0];
+        const series = (comp.series || []).find(s => s.type === 'playoff');
+        if (!series) return null;
+        const round = series.description || '';
+        let game_n = null;
+        for (let i = 0; i < (series.events || []).length; i++) {
+          if (String(series.events[i].id) === String(espn_id)) { game_n = i + 1; break; }
+        }
+        return { round, game_n, series_summary: series.summary || null };
+      } catch { return null; }
+    };
+    (async () => {
+      const CHUNK = 5;
+      for (let i = 0; i < toFetch.length; i += CHUNK) {
+        const batch = toFetch.slice(i, i + CHUNK);
+        await Promise.all(batch.map(async ({ mid, espn_id }) => {
+          const data = await fetchOne(espn_id);
+          global._basketSeriesCache.set(espn_id, { ts: now, data });
+          result[mid] = data;
+        }));
+      }
+      // Cleanup cache se ficar > 500 entries
+      if (global._basketSeriesCache.size > 500) {
+        for (const [k, v] of global._basketSeriesCache) {
+          if (now - v.ts > TTL_MS) global._basketSeriesCache.delete(k);
+        }
+      }
+      sendJson(res, { ok: true, info: result, fetched: toFetch.length, cached: idsParam.length - toFetch.length });
+    })().catch(e => sendJson(res, { ok: false, error: e.message }, 500));
+    return;
+  }
+
   // POST/GET /admin/tip-resettle?tip_id=X[&new_result=win|loss|void][&dry_run=1]
   // 2026-05-12: fix cirúrgico pra tips com settle errado OU profit_reais inconsistente.
   // Modo 1: new_result fornecido → força result + recalcula profit_reais via formula
