@@ -1733,6 +1733,42 @@ function oddsAgeStr(odds) {
   return sec < 60 ? `${sec}s` : `${Math.floor(sec / 60)}m${sec % 60}s`;
 }
 
+// 2026-05-12: gate "match já terminou" baseado em match.time + typical_max_duration.
+// Audit cross-sport identificou 22 tips fast-settled (<threshold do sport): bot emitia
+// tips quando match real já tinha terminado mas Pinnacle ainda servia odds stale (cleanup
+// delay ~30-60min pós-match). isOddsFresh detecta odds antigas mas Pinnacle continua
+// atualizando timestamp das odds → gap. Este gate complementa: independente de odds age,
+// se match.time + duração_max < now, skip emit.
+//
+// Duração max por sport (cobre Bo5/longas):
+//   lol/dota/cs/valorant: 5h (Bo5 longo + overtime)
+//   tennis: 5h (Slam Bo5 longo)
+//   football: 3h (90min + ET + pen)
+//   basket: 3h (NBA + OT)
+//   mma: 2h (5 rounds 5min + breaks)
+//   darts: 4h (PDC matches longos)
+//   snooker: 8h (World Champ frames extensos)
+//   tabletennis: 2h
+//
+// Opt-out por sport: <SPORT>_MATCH_ENDED_GATE_DISABLED=true
+const _MATCH_MAX_DURATION_H = {
+  lol: 5, dota2: 5, dota: 5, cs: 5, cs2: 5, valorant: 5,
+  tennis: 5, football: 3, basket: 3, mma: 2,
+  darts: 4, snooker: 8, tabletennis: 2,
+};
+function isMatchAlreadyEnded(match, sport) {
+  const sportKey = String(sport || '').toLowerCase();
+  const envKey = `${sportKey.toUpperCase()}_MATCH_ENDED_GATE_DISABLED`;
+  if (/^(1|true|yes)$/i.test(String(process.env[envKey] || ''))) return false;
+  const matchTime = match?.time || match?.beginAt || match?.start_time || match?.commence_time;
+  if (!matchTime) return false; // sem time → não bloquear
+  const startMs = Date.parse(String(matchTime).includes('T') ? matchTime : String(matchTime).replace(' ', 'T'));
+  if (!Number.isFinite(startMs)) return false;
+  const maxH = _MATCH_MAX_DURATION_H[sportKey] || 4;
+  const elapsedH = (Date.now() - startMs) / 3600000;
+  return elapsedH > maxH;
+}
+
 // ── Sharp line validation (Pinnacle como referência) ──
 // Se temos a linha sharp (Pinnacle) e a odd usada é PIOR que Pinnacle para o lado apostado,
 // não há edge real — o soft book já ajustou ou o mercado é eficiente.
@@ -9019,6 +9055,15 @@ async function autoAnalyzeMatch(token, match) {
 
     // ── Odds freshness gate ──
     const isLiveLoL = match.status === 'live' || match.status === 'inprogress';
+    // 2026-05-12: gate "match já terminou" complementa isOddsFresh. Pinnacle continua
+    // atualizando timestamp das odds por 30-60min pós-match (cleanup delayed) — odds
+    // permanecem "fresh" mas match real terminou. Audit identificou 2 LoL tips fast-
+    // settle (#822 #546) onde match já tinha terminado mas bot emitiu mesmo assim.
+    if (!isLiveLoL && isMatchAlreadyEnded(match, 'lol')) {
+      log('INFO', 'AUTO', `Match já terminou (start ${match.time}, +5h+): ${match.team1} vs ${match.team2} — pulando`);
+      logRejection('lol', `${match.team1} vs ${match.team2}`, 'match_ended', { start: match.time });
+      return _returnNull('match_ended', `start=${match.time}`);
+    }
     if (oddsToUse?.t1 && !isOddsFresh(oddsToUse, isLiveLoL, 'lol')) {
       log('INFO', 'AUTO', `Odds stale (${oddsAgeStr(oddsToUse)}): ${match.team1} vs ${match.team2} — pulando`);
       logRejection('lol', `${match.team1} vs ${match.team2}`, 'odds_stale', { age: oddsAgeStr(oddsToUse) });
@@ -16908,6 +16953,15 @@ async function pollTennis(runOnce = false) {
         }
 
         const isLiveTennis = match.status === 'live';
+        // 2026-05-12: gate "match já terminou". Audit cross-sport encontrou 8 tennis
+        // tips fast-settle (#1920 #2739 #1518 #725 etc) emitidas pós-match (Pinnacle
+        // odds stale mas com _fetchedAt recente → isOddsFresh passa). Complementar:
+        // if match.time + 5h < now, skip independente de odds age.
+        if (!isLiveTennis && isMatchAlreadyEnded(match, 'tennis')) {
+          log('INFO', 'AUTO-TENNIS', `Match já terminou (start ${match.time}, +5h+): ${match.team1} vs ${match.team2} — pulando`);
+          logRejection('tennis', `${match.team1} vs ${match.team2}`, 'match_ended', { start: match.time });
+          continue;
+        }
         if (!isOddsFresh(o, isLiveTennis, 'tennis')) {
           log('INFO', 'AUTO-TENNIS', `Odds stale (${oddsAgeStr(o)}): ${match.team1} vs ${match.team2} — pulando`);
           logRejection('tennis', `${match.team1} vs ${match.team2}`, 'odds_stale', { age: oddsAgeStr(o) });
@@ -20044,6 +20098,11 @@ async function pollCs(runOnce = false) {
           _csNoOddsTotal++;
           continue;
         }
+        if (!isLiveCs && isMatchAlreadyEnded(match, 'cs')) {
+          log('INFO', 'AUTO-CS', `Match já terminou (start ${match.time}, +5h+): ${match.team1} vs ${match.team2} — pulando`);
+          logRejection('cs', `${match.team1} vs ${match.team2}`, 'match_ended', { start: match.time });
+          continue;
+        }
         if (!isOddsFresh(match.odds, isLiveCs, 'cs')) {
           log('INFO', 'AUTO-CS', `Odds stale (${oddsAgeStr(match.odds)}): ${match.team1} vs ${match.team2} — pulando`);
           logRejection('cs', `${match.team1} vs ${match.team2}`, 'odds_stale', { age: oddsAgeStr(match.odds) });
@@ -20775,6 +20834,11 @@ async function pollValorant(runOnce = false) {
         if (!match.odds?.t1 || !match.odds?.t2) {
           if (isLiveVal) _valNoOddsLive++;
           _valNoOddsTotal++;
+          continue;
+        }
+        if (!isLiveVal && isMatchAlreadyEnded(match, 'valorant')) {
+          log('INFO', 'AUTO-VAL', `Match já terminou (start ${match.time}, +5h+): ${match.team1} vs ${match.team2} — pulando`);
+          logRejection('valorant', `${match.team1} vs ${match.team2}`, 'match_ended', { start: match.time });
           continue;
         }
         if (!isOddsFresh(match.odds, isLiveVal, 'valorant')) {
