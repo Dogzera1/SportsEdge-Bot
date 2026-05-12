@@ -18661,13 +18661,41 @@ async function pollFootball(runOnce = false) {
               const _mdMsg = _md ? ` mkt_div=${(_md.max_divergence*100).toFixed(1)}pp${_md.suspect ? ' [SUSPECT]' : ''}` : '';
               log('INFO', 'FB-TRAINED', `${match.team1} vs ${match.team2} [${fbTrained.league_key}]: pH=${(fbTrained.pH*100).toFixed(1)}% pD=${(fbTrained.pD*100).toFixed(1)}% pA=${(fbTrained.pA*100).toFixed(1)}% conf=${fbTrained.confidence.toFixed(2)}${_mdMsg}`);
             } else if (simpleName || richLeague) {
-              // Diagnóstico: log warn-once por league name desconhecido. Ajuda
-              // usuário ver gap entre nomes do feed live e keys nos params trained.
-              const keyForLog = simpleName || richLeague;
-              global._fbUnknownLeagues = global._fbUnknownLeagues || new Set();
-              if (!global._fbUnknownLeagues.has(keyForLog)) {
-                global._fbUnknownLeagues.add(keyForLog);
-                log('WARN', 'FB-TRAINED', `league not found (tried both '${simpleName}' and '${richLeague}'): params has ${Object.keys(require('./lib/football-poisson-trained').getParams()?.leagues || {}).length} leagues`);
+              // Diagnóstico: distingue league-fail vs team-fail. Antes log dizia
+              // "league not found" mesmo quando league existia mas teams não
+              // batiam aliases — caso La Liga "Espanhol" vs trained "espanyol".
+              // 2026-05-12: warn-once por (team1, team2, reason) — diferentes pairs
+              // que falham por team logam separado pra mostrar quais alias faltam.
+              try {
+                const _fp = require('./lib/football-poisson-trained');
+                const _params = _fp.getParams();
+                const _leagueFound = !!(_fp._findLeague(_params?.leagues || {}, simpleName)
+                  || _fp._findLeague(_params?.leagues || {}, richLeague));
+                const _thOk = _leagueFound ? !!_fp._findTeam(_params?.teams || {}, match.team1) : false;
+                const _taOk = _leagueFound ? !!_fp._findTeam(_params?.teams || {}, match.team2) : false;
+                const _reason = !_leagueFound ? 'league' : (!_thOk || !_taOk ? 'team' : 'unknown');
+                const keyForLog = `${simpleName}|${match.team1}|${match.team2}|${_reason}`;
+                global._fbUnknownLeagues = global._fbUnknownLeagues || new Set();
+                if (!global._fbUnknownLeagues.has(keyForLog)) {
+                  global._fbUnknownLeagues.add(keyForLog);
+                  const _nLeagues = Object.keys(_params?.leagues || {}).length;
+                  const _nTeams = Object.keys(_params?.teams || {}).length;
+                  if (_reason === 'league') {
+                    log('WARN', 'FB-TRAINED', `league not found: '${simpleName}' (rich='${richLeague}') — params: ${_nLeagues} leagues / ${_nTeams} teams`);
+                  } else if (_reason === 'team') {
+                    log('WARN', 'FB-TRAINED', `team not found: '${match.team1}'(${_thOk?'ok':'NO'}) vs '${match.team2}'(${_taOk?'ok':'NO'}) [league='${simpleName}'=ok] — adicionar alias em lib/football-poisson-trained.js _TEAM_ALIASES`);
+                  } else {
+                    log('WARN', 'FB-TRAINED', `unknown failure: league='${simpleName}' teams=${match.team1}/${match.team2} (league found, teams found, mas predict retornou null — verificar form_ppg?)`);
+                  }
+                }
+              } catch (_) {
+                // fallback se _findLeague/_findTeam não exportados
+                const keyForLog = simpleName || richLeague;
+                global._fbUnknownLeagues = global._fbUnknownLeagues || new Set();
+                if (!global._fbUnknownLeagues.has(keyForLog)) {
+                  global._fbUnknownLeagues.add(keyForLog);
+                  log('WARN', 'FB-TRAINED', `trained null: league='${simpleName}' teams=${match.team1}/${match.team2}`);
+                }
               }
             }
           }
