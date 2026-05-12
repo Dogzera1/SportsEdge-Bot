@@ -19988,11 +19988,27 @@ load();
           validations.push({ id: r.id, status: 'no_match_results', stored: r.result });
           continue;
         }
+        // 2026-05-12: guardrail temporal — espelha lib/market-tips-shadow.js:945-963.
+        // Filtra candidatos com resolved_at >= tip.created_at - guard (5min tennis,
+        // 30min outros). Sem isso, audit pegava jogo ANTERIOR à tip em séries com
+        // back-to-back (NBA playoffs: 4 games Spurs×T-Wolves em 7d → audit pickava
+        // game 1 quando tip era pro game 2). Causa raiz dos 3 "mismatches" finais
+        // após fix mrT1IsShadowT1 — falso positivo de audit.
+        const _tipTs = new Date(r.created_at).getTime();
+        const _guardMs = (r.sport === 'tennis') ? 5 * 60 * 1000 : 30 * 60 * 1000;
+        const _validCands = candidates.filter(c => {
+          const cTs = new Date(c.resolved_at).getTime();
+          return Number.isFinite(cTs) && (cTs >= _tipTs - _guardMs);
+        });
+        if (!_validCands.length) {
+          validations.push({ id: r.id, status: 'no_post_guard_candidates', stored: r.result });
+          continue;
+        }
         // Pick most parseable + closest in time (mimics settleShadowTips)
-        const mr = candidates.find(c => {
+        const mr = _validCands.find(c => {
           if (r.sport === 'tennis') return parseTennisScore(c.final_score) != null;
           return /\d+-\d+/.test(String(c.final_score || ''));
-        }) || candidates[0];
+        }) || _validCands[0];
         if (!mr) {
           validations.push({ id: r.id, status: 'no_parseable_score', stored: r.result });
           continue;
