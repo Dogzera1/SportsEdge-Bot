@@ -9400,6 +9400,11 @@ async function autoAnalyzeMatch(token, match) {
                 minOdd: minOddLol,
                 maxOdd: maxOddLol,
                 maxPerMatch: parseInt(process.env.LOL_MARKET_MAX_PER_MATCH || '', 10) || null,
+                // 2026-05-12: causa-fix LoL total over EV>30% leak (gap+124pp / ROI-60%).
+                // Calib pós-pricing aplica isotonic em pRaw antes de calcular EV.
+                // No-op se lib/lol-mt-calib.json não existe (caller atual deploy).
+                calibLib: require('./lib/sport-mt-calib').getSportMtCalib('lol'),
+                calibOpts: { tier: _lolTier },
               });
               let found = _scanResult.promotable || _scanResult;
               const _shadowAll = _scanResult.shadow || found;
@@ -15436,6 +15441,8 @@ async function _pollDotaInner(runOnce = false) {
               minOdd: minOddDota,
               maxOdd: maxOddDota,
               maxPerMatch: parseInt(process.env.DOTA_MARKET_MAX_PER_MATCH || '', 10) || null,
+              // 2026-05-12: calib opcional pós-pricing. No-op até dota2-mt-calib.json existir.
+              calibLib: require('./lib/sport-mt-calib').getSportMtCalib('dota2'),
             });
             let found = _scanResultDota.promotable || _scanResultDota;
             const _shadowAllDota = _scanResultDota.shadow || found;
@@ -20332,6 +20339,8 @@ async function pollCs(runOnce = false) {
                 minOdd: minOddCs,
                 maxOdd: maxOddCs,
                 maxPerMatch: parseInt(process.env.CS_MARKET_MAX_PER_MATCH || '', 10) || null,
+                // 2026-05-12: calib opcional pós-pricing. No-op até cs-mt-calib.json existir.
+                calibLib: require('./lib/sport-mt-calib').getSportMtCalib('cs'),
               });
               let found = _scanResultCs.promotable || _scanResultCs;
               const _shadowAllCs = _scanResultCs.shadow || found;
@@ -21011,6 +21020,8 @@ async function pollValorant(runOnce = false) {
                 minOdd: minOddVal,
                 maxOdd: maxOddVal,
                 maxPerMatch: parseInt(process.env.VAL_MARKET_MAX_PER_MATCH || '', 10) || null,
+                // 2026-05-12: calib opcional pós-pricing. No-op até valorant-mt-calib.json existir.
+                calibLib: require('./lib/sport-mt-calib').getSportMtCalib('valorant'),
               });
               let found = _scanResultVal.promotable || _scanResultVal;
               const _shadowAllVal = _scanResultVal.shadow || found;

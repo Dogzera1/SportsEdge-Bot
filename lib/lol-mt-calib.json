@@ -1,0 +1,155 @@
+{
+  "version": 1,
+  "sport": "lol",
+  "fittedAt": "2026-05-12T18:46:43.576Z",
+  "method": "pav_with_beta_smoothing",
+  "target": "outcome (win/loss)",
+  "prior": {
+    "source": "p_implied_close",
+    "vig": 0.025,
+    "alpha": 8
+  },
+  "minBin": 6,
+  "nSamples": 168,
+  "filter": "pre",
+  "markets": {
+    "total": {
+      "bins": [
+        {
+          "lo": 0.3,
+          "hi": 0.55,
+          "mid": 0.4272,
+          "n": 16,
+          "wins": 7,
+          "rawP": 0.4375,
+          "priorP": 0.3653,
+          "pCalib": 0.4134
+        },
+        {
+          "lo": 0.55,
+          "hi": 0.65,
+          "mid": 0.6177,
+          "n": 28,
+          "wins": 19,
+          "rawP": 0.6786,
+          "priorP": 0.5427,
+          "pCalib": 0.6126
+        },
+        {
+          "lo": 0.65,
+          "hi": 0.7,
+          "mid": 0.6745,
+          "n": 20,
+          "wins": 12,
+          "rawP": 0.6,
+          "priorP": 0.5742,
+          "pCalib": 0.6126
+        },
+        {
+          "lo": 0.7,
+          "hi": 0.75,
+          "mid": 0.7214,
+          "n": 7,
+          "wins": 3,
+          "rawP": 0.4286,
+          "priorP": 0.6129,
+          "pCalib": 0.6126
+        },
+        {
+          "lo": 0.75,
+          "hi": 0.92,
+          "mid": 0.8239,
+          "n": 10,
+          "wins": 6,
+          "rawP": 0.6,
+          "priorP": 0.6498,
+          "pCalib": 0.6222
+        }
+      ],
+      "coverage": [
+        0.3,
+        0.92
+      ],
+      "nTotal": 82,
+      "sides": {
+        "under": {
+          "bins": [
+            {
+              "lo": 0.3,
+              "hi": 0.65,
+              "mid": 0.6153,
+              "n": 29,
+              "wins": 19,
+              "rawP": 0.6552,
+              "priorP": 0.5423,
+              "pCalib": 0.6202
+            },
+            {
+              "lo": 0.65,
+              "hi": 0.7,
+              "mid": 0.674,
+              "n": 18,
+              "wins": 12,
+              "rawP": 0.6667,
+              "priorP": 0.5779,
+              "pCalib": 0.6202
+            },
+            {
+              "lo": 0.7,
+              "hi": 0.75,
+              "mid": 0.7214,
+              "n": 7,
+              "wins": 3,
+              "rawP": 0.4286,
+              "priorP": 0.6129,
+              "pCalib": 0.6202
+            },
+            {
+              "lo": 0.75,
+              "hi": 0.92,
+              "mid": 0.8239,
+              "n": 10,
+              "wins": 6,
+              "rawP": 0.6,
+              "priorP": 0.6498,
+              "pCalib": 0.6222
+            }
+          ],
+          "coverage": [
+            0.3,
+            0.92
+          ],
+          "nTotal": 64
+        }
+      }
+    }
+  },
+  "backtest": {
+    "pre": {
+      "label": "PRE  (raw)",
+      "n": 147,
+      "wins": 88,
+      "hit": 59.9,
+      "profit": 19.16,
+      "roi": 13,
+      "avgP": 0.643,
+      "avgEV": 24.1,
+      "avgClv": 0.06,
+      "brier": 0.2398,
+      "ece": 0.1249
+    },
+    "post": {
+      "label": "POST (calib)",
+      "n": 128,
+      "wins": 80,
+      "hit": 62.5,
+      "profit": 23.92,
+      "roi": 18.7,
+      "avgP": 0.627,
+      "avgEV": 24.7,
+      "avgClv": 0.03,
+      "brier": 0.2299,
+      "ece": 0.1048
+    }
+  }
+}
