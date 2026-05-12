@@ -924,6 +924,43 @@ setTimeout(_bridgeBotMetricsToServer, 30 * 1000).unref?.(); // primeiro flush 30
 // Sem isto, runWeeklyRecalc / mt_calib_refit / nightly retrain podiam executar
 // 2x paralelo causando race em DB writes e CPU spike.
 const _cronRunning = new Set();
+// Atribuição de memory spikes per cron — quando RSS/heap delta > threshold
+// loga {cron, deltaRss, deltaHeap, durationMs}. Ajuda investigar MEM-CRIT
+// (linhas 329, 788 do log 2026-05-12: RSS spike 152→426MB heap sem source).
+// Threshold env: CRON_MEM_DELTA_LOG_MB (default 40MB heap OR 60MB RSS).
+const _CRON_MEM_HEAP_DELTA_MB = Number(process.env.CRON_MEM_HEAP_DELTA_LOG_MB || 40);
+const _CRON_MEM_RSS_DELTA_MB = Number(process.env.CRON_MEM_RSS_DELTA_LOG_MB || 60);
+function _checkMemDelta(name, memBefore, durationMs) {
+  if (!memBefore) return;
+  try {
+    const memAfter = process.memoryUsage();
+    const deltaHeapMb = +((memAfter.heapUsed - memBefore.heapUsed) / 1024 / 1024).toFixed(1);
+    const deltaRssMb = +((memAfter.rss - memBefore.rss) / 1024 / 1024).toFixed(1);
+    if (deltaHeapMb >= _CRON_MEM_HEAP_DELTA_MB || deltaRssMb >= _CRON_MEM_RSS_DELTA_MB) {
+      const heapNowMb = +(memAfter.heapUsed / 1024 / 1024).toFixed(0);
+      const rssNowMb = +(memAfter.rss / 1024 / 1024).toFixed(0);
+      log('WARN', 'CRON-MEM', `${name} Δheap=+${deltaHeapMb}MB Δrss=+${deltaRssMb}MB | heap=${heapNowMb}MB rss=${rssNowMb}MB | ${durationMs}ms`);
+      try { require('./lib/metrics').incr('cron_mem_spike', { name }); } catch (_) {}
+    }
+  } catch (_) {}
+}
+// Wrap arbitrary async fn (não wrapped por _wrapCron) só pra mem tracking.
+// Uso: setTimeout(_memTracked('auto_analysis', () => runAutoAnalysis()), ...)
+function _memTracked(name, fn) {
+  return async () => {
+    const t0 = Date.now();
+    let memBefore = null;
+    try { memBefore = process.memoryUsage(); } catch (_) {}
+    try {
+      const r = await Promise.resolve(fn());
+      _checkMemDelta(name, memBefore, Date.now() - t0);
+      return r;
+    } catch (e) {
+      _checkMemDelta(name, memBefore, Date.now() - t0);
+      throw e;
+    }
+  };
+}
 function _wrapCron(name, fn) {
   return async () => {
     if (_cronRunning.has(name)) {
@@ -933,9 +970,13 @@ function _wrapCron(name, fn) {
     }
     _cronRunning.add(name);
     const t0 = Date.now();
+    let memBefore = null;
+    try { memBefore = process.memoryUsage(); } catch (_) {}
     try {
       await Promise.resolve(fn());
-      try { markCronHeartbeat(name, { result: 'ok', durationMs: Date.now() - t0 }); } catch (_) {}
+      const durationMs = Date.now() - t0;
+      try { markCronHeartbeat(name, { result: 'ok', durationMs }); } catch (_) {}
+      _checkMemDelta(name, memBefore, durationMs);
     } catch (e) {
       try { markCronHeartbeat(name, { result: 'error', error: String(e?.message || e), durationMs: Date.now() - t0 }); } catch (_) {}
       // Não re-throw: setInterval continua chamando.
@@ -22332,10 +22373,11 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   // average + buffer, dando tempo do mutex limpar antes do próximo trigger.
   const AUTO_BASE_MS = (parseInt(process.env.AUTO_BASE_MIN || '10', 10) || 10) * 60 * 1000;
   const AUTO_CAP_MS = Math.max(AUTO_BASE_MS, parseInt(process.env.AUTO_MAX_IDLE_MIN || '24', 10) * 60 * 1000);
-  setTimeout(() => runAutoAnalysis().catch(e => log('ERROR', 'AUTO', e.message)), 15 * 1000); // 1ª análise 15s após boot
+  const _trackedAutoAnalysis = _memTracked('auto_analysis', () => runAutoAnalysis());
+  setTimeout(() => _trackedAutoAnalysis().catch(e => log('ERROR', 'AUTO', e.message)), 15 * 1000); // 1ª análise 15s após boot
   (function scheduleAutoAnalysis() {
     setTimeout(async () => {
-      try { await runAutoAnalysis(); } catch (e) { log('ERROR', 'AUTO', e.message); }
+      try { await _trackedAutoAnalysis(); } catch (e) { log('ERROR', 'AUTO', e.message); }
       const snap = global.__lastPollSnapshot;
       const matches = (snap && Array.isArray(snap.matches)) ? snap.matches : [];
       const nextMs = _computeAdaptivePollMs(AUTO_BASE_MS, AUTO_BASE_MS, matches, { key: 'lol', maxIdleMs: AUTO_CAP_MS });
@@ -22347,9 +22389,10 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   // Darts e Snooker: loops independentes (fora do mutex runAutoAnalysis) para não ser
   // bloqueados pelo Football que serializa ~25min por ciclo.
   // Darts: dual-mode scheduling (rápido se live, lento se idle)
+  const _trackedDarts = _memTracked('auto_darts', () => runAutoDarts());
   (function scheduleDarts() {
     setTimeout(async () => {
-      const hadLive = await runAutoDarts().catch(e => { log('ERROR', 'AUTO-DARTS', e.message); return false; });
+      const hadLive = await _trackedDarts().catch(e => { log('ERROR', 'AUTO-DARTS', e.message); return false; });
       const nextMs = hadLive ? (2 * 60 * 1000) : (15 * 60 * 1000); // 2min live, 15min idle
       log('INFO', 'AUTO-DARTS', `Próximo ciclo em ${Math.round(nextMs / 1000)}s (${hadLive ? 'LIVE' : 'idle'})`);
       scheduleDarts._nextMs = nextMs;
@@ -22357,9 +22400,10 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
     }, scheduleDarts._nextMs || 45 * 1000);
   })();
   // Snooker: dual-mode scheduling (rápido se live, lento se idle)
+  const _trackedSnooker = _memTracked('auto_snooker', () => runAutoSnooker());
   (function scheduleSnooker() {
     setTimeout(async () => {
-      const hadLive = await runAutoSnooker().catch(e => { log('ERROR', 'AUTO-SNOOKER', e.message); return false; });
+      const hadLive = await _trackedSnooker().catch(e => { log('ERROR', 'AUTO-SNOOKER', e.message); return false; });
       const nextMs = hadLive ? (2 * 60 * 1000) : (15 * 60 * 1000); // 2min live, 15min idle
       log('INFO', 'AUTO-SNOOKER', `Próximo ciclo em ${Math.round(nextMs / 1000)}s (${hadLive ? 'LIVE' : 'idle'})`);
       scheduleSnooker._nextMs = nextMs;
@@ -22369,9 +22413,10 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   // Basket: dual-mode scheduling. NBA tem agenda diária 7-22h ET (~10am-1am UTC),
   // tipoff em janelas. 2min live, 30min idle (jogos curtos 2-3h, evita over-poll).
   if (SPORTS['basket']?.enabled) {
+    const _trackedBasket = _memTracked('auto_basket', () => runAutoBasket());
     (function scheduleBasket() {
       setTimeout(async () => {
-        const hadLive = await runAutoBasket().catch(e => { log('ERROR', 'AUTO-BASKET', e.message); return false; });
+        const hadLive = await _trackedBasket().catch(e => { log('ERROR', 'AUTO-BASKET', e.message); return false; });
         const nextMs = hadLive ? (2 * 60 * 1000) : (30 * 60 * 1000);
         log('INFO', 'AUTO-BASKET', `Próximo ciclo em ${Math.round(nextMs / 1000)}s (${hadLive ? 'LIVE' : 'idle'})`);
         scheduleBasket._nextMs = nextMs;
