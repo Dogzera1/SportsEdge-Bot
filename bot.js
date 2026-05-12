@@ -9432,11 +9432,19 @@ async function autoAnalyzeMatch(token, match) {
               const _lolMomentum = Number.isFinite(_lolMomentumTier) ? _lolMomentumTier
                 : Number.isFinite(_lolMomentumGlobal) ? _lolMomentumGlobal
                 : 0.03; // default fitted Apr-2026 (662 séries)
+              // 2026-05-12: live-aware pricing quando isLiveLoL E score parcial.
+              // Mesmo pattern do CS (lib cs-live-pricing é sport-agnostic, reusable).
+              // Score 0-0 cai em lol-markets (legacy pre-game behavior).
+              const _lolIsLivePartial = (match.status === 'live' || match.status === 'inprogress')
+                && ((Number(match.score1) || 0) + (Number(match.score2) || 0) > 0);
+              const _lolPricingLib = _lolIsLivePartial
+                ? require('./lib/cs-live-pricing')
+                : lolMarketsLib;
               const _scanResult = scanMarkets({
                 markets,
                 pMap: lolModel.mapP1,
                 bestOf: lolModel.bestOf || 3,
-                pricingLib: lolMarketsLib,
+                pricingLib: _lolPricingLib,
                 minEv,
                 shadowMinEv,
                 momentum: _lolMomentum,
@@ -9448,7 +9456,12 @@ async function autoAnalyzeMatch(token, match) {
                 // No-op se lib/lol-mt-calib.json não existe (caller atual deploy).
                 calibLib: require('./lib/sport-mt-calib').getSportMtCalib('lol'),
                 calibOpts: { tier: _lolTier },
+                score1: _lolIsLivePartial ? (Number(match.score1) || 0) : undefined,
+                score2: _lolIsLivePartial ? (Number(match.score2) || 0) : undefined,
               });
+              if (_lolIsLivePartial) {
+                log('INFO', 'LOL-LIVE-PRICING', `${match.team1} vs ${match.team2} [Bo${lolModel.bestOf || 3}]: live ${match.score1}-${match.score2} → dist filtering ativo`);
+              }
               let found = _scanResult.promotable || _scanResult;
               const _shadowAll = _scanResult.shadow || found;
               // ── Frente 4: extra markets (dragons/barons/towers) ──
@@ -15475,9 +15488,15 @@ async function _pollDotaInner(runOnce = false) {
             // Auto-guard preenche min/max odd quando shadow ROI per-bucket
             // identificar leak. Sem default — Dota ainda sem sample suficiente.
             const { minOdd: minOddDota, maxOdd: maxOddDota } = _resolveMtOddBounds('dota2');
+            // 2026-05-12: live-aware pricing quando isLive E score parcial.
+            // cs-live-pricing é sport-agnostic (mesma estrutura Bo3/Bo5).
+            const _dotaIsLivePartial = isLive && ((Number(match.score1) || 0) + (Number(match.score2) || 0) > 0);
+            const _dotaPricingLib = _dotaIsLivePartial
+              ? require('./lib/cs-live-pricing')
+              : require('./lib/lol-markets');
             const _scanResultDota = scanMarkets({
               markets, pMap: pMapDota, bestOf: dotaBo,
-              pricingLib: require('./lib/lol-markets'),
+              pricingLib: _dotaPricingLib,
               minEv,
               shadowMinEv,
               momentum: _dotaMt, // tier-aware (DOTA_MOMENTUM_<TIER>) — math consistency com mapProbFromSeries
@@ -15486,7 +15505,12 @@ async function _pollDotaInner(runOnce = false) {
               maxPerMatch: parseInt(process.env.DOTA_MARKET_MAX_PER_MATCH || '', 10) || null,
               // 2026-05-12: calib opcional pós-pricing. No-op até dota2-mt-calib.json existir.
               calibLib: require('./lib/sport-mt-calib').getSportMtCalib('dota2'),
+              score1: _dotaIsLivePartial ? (Number(match.score1) || 0) : undefined,
+              score2: _dotaIsLivePartial ? (Number(match.score2) || 0) : undefined,
             });
+            if (_dotaIsLivePartial) {
+              log('INFO', 'DOTA-LIVE-PRICING', `${match.team1} vs ${match.team2} [Bo${dotaBo}]: live ${match.score1}-${match.score2} → dist filtering ativo`);
+            }
             let found = _scanResultDota.promotable || _scanResultDota;
             const _shadowAllDota = _scanResultDota.shadow || found;
             if (found.length >= 2 && process.env.DOTA_CORRELATION_ADJ !== 'false') {
@@ -21082,9 +21106,15 @@ async function pollValorant(runOnce = false) {
               const minEv = parseFloat(process.env.VAL_MARKET_SCAN_MIN_EV ?? '5');
               const shadowMinEv = parseFloat(process.env.VAL_SHADOW_MIN_EV ?? '0');
               const { minOdd: minOddVal, maxOdd: maxOddVal } = _resolveMtOddBounds('valorant');
+              // 2026-05-12: live-aware pricing quando isLiveVal E score parcial.
+              // cs-live-pricing é sport-agnostic (Markov maps independence).
+              const _valIsLivePartial = isLiveVal && ((Number(match.score1) || 0) + (Number(match.score2) || 0) > 0);
+              const _valPricingLib = _valIsLivePartial
+                ? require('./lib/cs-live-pricing')
+                : require('./lib/lol-markets');
               const _scanResultVal = scanMarkets({
                 markets, pMap: pMapVal, bestOf: bo,
-                pricingLib: require('./lib/lol-markets'),
+                pricingLib: _valPricingLib,
                 minEv,
                 shadowMinEv,
                 momentum: _valMt, // tier-aware (VAL_MOMENTUM_<TIER>) — math consistency com mapProbFromSeries
@@ -21093,7 +21123,12 @@ async function pollValorant(runOnce = false) {
                 maxPerMatch: parseInt(process.env.VAL_MARKET_MAX_PER_MATCH || '', 10) || null,
                 // 2026-05-12: calib opcional pós-pricing. No-op até valorant-mt-calib.json existir.
                 calibLib: require('./lib/sport-mt-calib').getSportMtCalib('valorant'),
+                score1: _valIsLivePartial ? (Number(match.score1) || 0) : undefined,
+                score2: _valIsLivePartial ? (Number(match.score2) || 0) : undefined,
               });
+              if (_valIsLivePartial) {
+                log('INFO', 'VAL-LIVE-PRICING', `${match.team1} vs ${match.team2} [Bo${bo}]: live ${match.score1}-${match.score2} → dist filtering ativo`);
+              }
               let found = _scanResultVal.promotable || _scanResultVal;
               const _shadowAllVal = _scanResultVal.shadow || found;
               if (found.length >= 2 && process.env.VAL_CORRELATION_ADJ !== 'false') {
