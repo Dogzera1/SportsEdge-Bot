@@ -18323,6 +18323,46 @@ load();
     return;
   }
 
+  // GET /admin/tips-list?sport=basket&days=30&is_shadow=1&market_type=ML&limit=100
+  // 2026-05-12: lista individual de tips (ML+MT) filtráveis por sport/shadow/market.
+  // Necessário pra audit manual de shadow promotion candidates onde /shadow-readiness
+  // só retorna agregados. Retorna campos suficientes pra cruzar com playoff data
+  // (match_id ESPN, sent_at, participant1/2, pick, odds, result, profit, clv_odds).
+  if (p === '/admin/tips-list') {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const days = Math.max(1, Math.min(365, parseInt(parsed.query.days || '30', 10) || 30));
+      const limit = Math.max(1, Math.min(500, parseInt(parsed.query.limit || '100', 10) || 100));
+      const conds = [`sent_at >= datetime('now', '-' || ? || ' days')`, `(archived IS NULL OR archived = 0)`];
+      const params = [days];
+      if (parsed.query.sport && parsed.query.sport !== '__overall__') {
+        const sportSet = (typeof resolveSportSet === 'function')
+          ? resolveSportSet(parsed.query.sport, null).sportSet : [parsed.query.sport];
+        conds.push(`sport IN (${sportSet.map(() => '?').join(',')})`);
+        params.push(...sportSet);
+      }
+      if (parsed.query.is_shadow != null) {
+        conds.push(`COALESCE(is_shadow, 0) = ?`);
+        params.push(parseInt(parsed.query.is_shadow, 10) || 0);
+      }
+      if (parsed.query.market_type) {
+        conds.push(`UPPER(market_type) = ?`);
+        params.push(String(parsed.query.market_type).toUpperCase());
+      }
+      const rows = db.prepare(`
+        SELECT id, sport, match_id, event_name, participant1, participant2, tip_participant,
+               odds, ev, stake, stake_reais, confidence, is_live, sent_at, result, settled_at,
+               profit_reais, market_type, is_shadow, clv_odds, open_odds, model_label, tip_reason
+        FROM tips
+        WHERE ${conds.join(' AND ')}
+        ORDER BY sent_at DESC
+        LIMIT ?
+      `).all(...params, limit);
+      sendJson(res, { ok: true, count: rows.length, filters: { days, limit, sport: parsed.query.sport, is_shadow: parsed.query.is_shadow, market_type: parsed.query.market_type }, tips: rows });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   // GET /admin/mt-promote-preflight?sport=lol&days=14&min_recent=15&key=<KEY>
   // Pre-flight check ANTES de remover blocks pra promover MT real. Cruza
   // TODOS os disables ativos (PERMANENT env + RUNTIME state + LEAGUE_BLOCKLIST)
