@@ -149,6 +149,13 @@ button, select, input { font-family: inherit; font-size: inherit; color: inherit
   display: flex;
   flex-direction: column;
   min-height: 0;
+  /* 2026-05-12 audit fluidity: section switch (applySection) usava style.display='none'
+     direto sem transition → painéis "piscavam" ao trocar de seção.
+     Adicionado fade via opacity + classe .panel-hidden controlada pelo JS. */
+  transition: opacity 0.18s ease;
+}
+.panel.panel-hidden {
+  display: none;
 }
 .panel.span-3 { grid-column: span 3; }
 .panel.span-4 { grid-column: span 4; }
@@ -1360,10 +1367,23 @@ function applySection(section) {
   document.querySelectorAll('#nav a').forEach(a => {
     a.classList.toggle('active', a.dataset.section === section);
   });
-  // Show/hide panels
+  // Show/hide panels com fade suave.
+  // 2026-05-12 audit fluidity: antes style.display='none' direto = "piscada" no switch.
+  // Agora: fade-out 180ms (opacity 0), depois display:none via classe — transition CSS suaviza.
+  // Panels que aparecem: remove .panel-hidden + force reflow + opacity:1.
   document.querySelectorAll('.panel[data-sections]').forEach(p => {
     const allowed = (p.dataset.sections || '').split(',').map(s => s.trim());
-    p.style.display = allowed.includes(section) ? '' : 'none';
+    const show = allowed.includes(section);
+    if (show) {
+      p.classList.remove('panel-hidden');
+      // Trigger reflow para o transition aplicar do estado anterior
+      p.style.opacity = '0';
+      // eslint-disable-next-line no-unused-expressions
+      p.offsetHeight;
+      requestAnimationFrame(() => { p.style.opacity = ''; });
+    } else {
+      p.classList.add('panel-hidden');
+    }
   });
   // Destroy charts that won't be re-rendered nesta seção pra liberar canvas
   // (Chart.js bind ao canvas — se canvas reaparece, recria limpo no load).
