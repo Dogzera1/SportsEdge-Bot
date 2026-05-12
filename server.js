@@ -11918,6 +11918,33 @@ setInterval(load, 60000);
     return;
   }
 
+  // POST /admin/fit-tennis-markov — força refit Markov tennis SEM o gate
+  // --min-new-samples (que o refresh-all-isotonics impõe). Útil quando schema
+  // v2.1 precisa ser regerado mesmo sem +30 novos samples desde fit anterior.
+  // Background spawn — response imediata.
+  if (p === '/admin/fit-tennis-markov' && (req.method === 'POST' || req.method === 'GET')) {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const path = require('path');
+      const { spawn } = require('child_process');
+      const scriptPath = path.join(__dirname, 'scripts', 'fit-tennis-markov-calibration.js');
+      const minNew = String(parsed.query.min_new || '0');
+      const child = spawn(process.execPath, [scriptPath, `--min-new-samples=${minNew}`], { cwd: __dirname });
+      let stdout = '', stderr = '';
+      child.stdout.on('data', d => { stdout += d.toString('utf8'); });
+      child.stderr.on('data', d => { stderr += d.toString('utf8'); });
+      const startedAt = Date.now();
+      child.on('close', (code) => {
+        const dur = Math.round((Date.now() - startedAt) / 1000);
+        log(code === 0 ? 'INFO' : 'WARN', 'FIT-TENNIS-MARKOV',
+          `done in ${dur}s exit=${code} | stdout_tail: ${stdout.slice(-500).replace(/\n/g, ' | ')}${stderr ? ' || stderr: ' + stderr.slice(-300).replace(/\n/g, ' | ') : ''}`);
+      });
+      setTimeout(() => { try { child.kill('SIGKILL'); } catch (_) {} }, 5 * 60 * 1000).unref?.();
+      sendJson(res, { ok: true, started_at: new Date().toISOString(), min_new_samples: minNew, message: 'Background fit disparado. Check /admin/tennis-calib-meta pra fittedAt updated.' });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   // GET /admin/p2-status — single source of truth de compliance P2.
   // Reporta config atual dos 11 envs P2-related + frozen_holdout + recomendações.
   // Útil pra validar que prod respeita "shadow=causa, real=sintoma" antes de deploy.
