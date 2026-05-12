@@ -3100,7 +3100,9 @@ async function runAutoAnalysis() {
 
           // Aborta se DB recusou (erro ou duplicata já registrada)
           if (!rec?.tipId) {
-            const why = rec?.reason ? ` (${rec.reason})` : '';
+            const why = (rec?.reason || rec?.error)
+              ? ` (${rec.reason || rec.error}${rec?.__status ? ' [HTTP ' + rec.__status + ']' : ''})`
+              : '';
             const lvl = rec?.skipped ? 'INFO' : 'WARN';
             log(lvl, 'AUTO', `record-tip falhou para ${tipTeam} @ ${tipOdd} (${match.team1} vs ${match.team2})${why} — tip abortada`);
             if (rec?.skipped) analyzedMatches.set(matchKey, { ts: now, tipSent: true });
@@ -16812,7 +16814,14 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
         }, 'mma');
 
         if (!rec?.tipId) {
-          const why = rec?.reason ? ` (${rec.reason})` : '';
+          // 2026-05-12: fallback rec.error pra capturar badRequest 400 (validation fail
+          // sem `reason` no payload). Log "record-tip falhou" antes saía sem motivo
+          // quando server rejeitou via badRequest (audit identificou 3 tennis tips
+          // abortadas sem reason). HTTP status anexado pra distinguir 400 (payload) de
+          // 500 (server err) de timeout (rec=null caught upstream).
+          const why = (rec?.reason || rec?.error)
+            ? ` (${rec.reason || rec.error}${rec?.__status ? ' [HTTP ' + rec.__status + ']' : ''})`
+            : '';
           const lvl = rec?.skipped ? 'INFO' : 'WARN';
           log(lvl, 'AUTO-MMA', `record-tip falhou para ${tipTeam} @ ${tipOdd} (${fight.team1} vs ${fight.team2})${why} — tip abortada`);
           if (rec?.skipped) analyzedMma.set(key, { ts: now, tipSent: true });
@@ -18384,7 +18393,14 @@ Máximo 200 palavras. Raciocínio breve antes da decisão.`;
         }, 'tennis');
 
         if (!rec?.tipId) {
-          const why = rec?.reason ? ` (${rec.reason})` : '';
+          // 2026-05-12: fallback rec.error pra capturar badRequest 400 (validation fail
+          // sem `reason` no payload). Log "record-tip falhou" antes saía sem motivo
+          // quando server rejeitou via badRequest (audit identificou 3 tennis tips
+          // abortadas sem reason). HTTP status anexado pra distinguir 400 (payload) de
+          // 500 (server err) de timeout (rec=null caught upstream).
+          const why = (rec?.reason || rec?.error)
+            ? ` (${rec.reason || rec.error}${rec?.__status ? ' [HTTP ' + rec.__status + ']' : ''})`
+            : '';
           const lvl = rec?.skipped ? 'INFO' : 'WARN';
           log(lvl, 'AUTO-TENNIS', `record-tip falhou para ${tipPlayer} @ ${tipOdd} (${match.team1} vs ${match.team2})${why} — tip abortada`);
           if (rec?.skipped) analyzedTennis.set(key, Object.assign({}, analyzedTennis.get(key) || {}, { ts: now, [isLivePhase ? 'tipSentLive' : 'tipSentPre']: true, [isLivePhase ? 'tsLive' : 'tsPre']: now }));
@@ -19693,7 +19709,9 @@ Máximo 200 palavras.`;
         }, 'football');
 
         if (!recFb?.tipId) {
-          const why = recFb?.reason ? ` (${recFb.reason})` : '';
+          const why = (recFb?.reason || recFb?.error)
+            ? ` (${recFb.reason || recFb.error}${recFb?.__status ? ' [HTTP ' + recFb.__status + ']' : ''})`
+            : '';
           const lvl = recFb?.skipped ? 'INFO' : 'WARN';
           log(lvl, 'AUTO-FOOTBALL', `record-tip falhou para ${tipTeam} @ ${tipOdd} (${match.team1} vs ${match.team2})${why} — tip abortada`);
           if (recFb?.skipped) analyzedFootball.set(key, { ts: now, tipSent: true });
