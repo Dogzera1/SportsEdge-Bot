@@ -3825,6 +3825,7 @@ async function _settleCompletedTipsInner() {
         // pra saber se era db-result que falhava ou ESPN allResults ou MT-orphan.
         let _matchedCount = 0, _noMatchCount = 0;
         let _dbResultFail = 0, _mtOrphanAttempt = 0, _mtOrphanSettled = 0, _stuckMtSkipped = 0;
+        const _noMatchTips = [];
         // Lazy-load lib MT settle (só usada em tennis ::mt:: orphan path)
         let _mtSettleLib = null;
         try { _mtSettleLib = require('./lib/tennis-mt-settle'); } catch (_) {}
@@ -3866,12 +3867,6 @@ async function _settleCompletedTipsInner() {
               'tennis'
             ).catch((e) => { log('DEBUG', 'SETTLE-TENNIS', `tip ${tip.id} db-result fetch error: ${e.message}`); return null; });
             if (!dbRes?.resolved) _dbResultFail++;
-            // 2026-05-11: primeiros 3 fails por ciclo em INFO (era DEBUG, invisível
-            // em prod LOG_LEVEL=INFO). Quando pending fica stuck >24h precisamos
-            // dos nomes específicos pra debug ESPN/Sofascore name mismatch.
-            if ((_matchedCount + _noMatchCount + _dbResultFail) <= 3 && !dbRes?.resolved) {
-              log('INFO', 'SETTLE-TENNIS', `tip ${tip.id} (${tip.participant1} vs ${tip.participant2}) [${tip.event_name || '?'}]: db-result NO MATCH (resolved=false)`);
-            }
             if (dbRes?.resolved && dbRes.winner) {
               await serverPost('/settle', { matchId: tip.match_id, winner: dbRes.winner, score: dbRes.score || dbRes.final_score || '' }, 'tennis');
               log('INFO', 'SETTLE', `tennis: ${tip.participant1} vs ${tip.participant2} → ${dbRes.winner} (DB)`);
@@ -3916,7 +3911,11 @@ async function _settleCompletedTipsInner() {
               if (!tennisEspnRecentResultEligibleForTip(r, tipMsTn)) return false;
               return tennisPairMatchesPlayers(tip.participant1, tip.participant2, r.p1, r.p2);
             });
-            if (!res) { _noMatchCount++; continue; }
+            if (!res) {
+              _noMatchCount++;
+              _noMatchTips.push(`#${tip.id} ${tip.participant1}/${tip.participant2}${tip.event_name ? ` [${tip.event_name}]` : ''}`);
+              continue;
+            }
             await serverPost('/settle', { matchId: tip.match_id, winner: res.winner, score: res.score || res.final_score || '' }, 'tennis');
             log('INFO', 'SETTLE', `tennis: ${tip.participant1} vs ${tip.participant2} → ${res.winner}`);
             settled++;
@@ -3926,7 +3925,10 @@ async function _settleCompletedTipsInner() {
           }
         }
         if (settled > 0) log('INFO', 'SETTLE', `tennis: ${settled} tips liquidadas`);
-        else if (unsettled.length > 0) log('INFO', 'SETTLE-TENNIS', `nenhum match: pending=${unsettled.length} no_match=${_noMatchCount} db_fail=${_dbResultFail} mt_orphan=${_mtOrphanSettled}/${_mtOrphanAttempt} mt_skipped=${_stuckMtSkipped} (sources tinham ${(allResults.length + scoresById.size)} jogos finalizados)`);
+        else if (unsettled.length > 0) {
+          log('INFO', 'SETTLE-TENNIS', `nenhum match: pending=${unsettled.length} no_match=${_noMatchCount} db_fail=${_dbResultFail} mt_orphan=${_mtOrphanSettled}/${_mtOrphanAttempt} mt_skipped=${_stuckMtSkipped} (sources tinham ${(allResults.length + scoresById.size)} jogos finalizados)`);
+          if (_noMatchTips.length > 0) log('INFO', 'SETTLE-TENNIS', `stuck: ${_noMatchTips.join(' | ')}`);
+        }
         continue;
       }
 
