@@ -1,0 +1,4 @@
+# Bash hooks devem ter line endings LF — Windows git converte pra CRLF por
+# default, o que quebra `#!/usr/bin/env bash` (bad interpreter: /usr/bin/env\r).
+.githooks/pre-commit text eol=lf
+.githooks/*.sh text eol=lf
