@@ -6191,14 +6191,27 @@ const server = http.createServer(async (req, res) => {
         getPandaScoreCsMatches().catch(() => []),
       ]);
 
-      const normTeam = s => String(s||'').toLowerCase().replace(/[^a-z0-9]/g,'');
+      const _CS_TEAM_ALIASES = {
+        'bbteam': 'betboomteam',
+        'bb': 'betboomteam',
+        'mouznxt': 'mouznxt',
+        'g2a': 'g2',
+      };
+      const normTeam = s => {
+        const base = String(s||'').toLowerCase().replace(/[^a-z0-9]/g,'');
+        return _CS_TEAM_ALIASES[base] || base;
+      };
+      // Match cruzado: aceita inclusão OU igualdade pós-alias.
+      const teamsMatch = (a1, a2, b1, b2) =>
+        (a1 === b1 || a1.includes(b1) || b1.includes(a1)) &&
+        (a2 === b2 || a2.includes(b2) || b2.includes(a2));
 
-      // Enriquece Pinnacle com formato/score do PandaScore
+      // Enriquece Pinnacle com formato/score do PandaScore (testa ambas ordens — PS pode inverter t1/t2)
       for (const om of pinMatches) {
         const n1 = normTeam(om.team1), n2 = normTeam(om.team2);
         const ps = psMatches.find(p => {
           const pn1 = normTeam(p.team1), pn2 = normTeam(p.team2);
-          return (pn1.includes(n1) || n1.includes(pn1)) && (pn2.includes(n2) || n2.includes(pn2));
+          return teamsMatch(n1, n2, pn1, pn2) || teamsMatch(n1, n2, pn2, pn1);
         });
         if (ps) {
           om.format = ps.format;
@@ -6214,7 +6227,7 @@ const server = http.createServer(async (req, res) => {
         const pn1 = normTeam(p.team1), pn2 = normTeam(p.team2);
         return !pinMatches.some(om => {
           const n1 = normTeam(om.team1), n2 = normTeam(om.team2);
-          return (pn1.includes(n1) || n1.includes(pn1)) && (pn2.includes(n2) || n2.includes(pn2));
+          return teamsMatch(n1, n2, pn1, pn2) || teamsMatch(n1, n2, pn2, pn1);
         });
       });
 
@@ -11914,6 +11927,52 @@ setInterval(load, 60000);
       const { getCalibMeta } = require('./lib/tennis-markov-calib');
       const meta = getCalibMeta();
       sendJson(res, { ok: true, meta });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
+  // GET /admin/sport-mt-calib-meta?sport=lol|cs|cs2|dota2|valorant — expõe meta
+  // da calib MT esports via factory lib/sport-mt-calib.js.
+  if (p === '/admin/sport-mt-calib-meta' && req.method === 'GET') {
+    if (!requireAdmin(req, res)) return;
+    const sport = String(parsed.query.sport || 'lol').trim().toLowerCase();
+    try {
+      const { getSportMtCalib } = require('./lib/sport-mt-calib');
+      const calib = getSportMtCalib(sport);
+      const meta = calib.getCalibMeta();
+      sendJson(res, { ok: true, sport, calib_path: calib.CALIB_PATH, meta });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
+  // POST /admin/fit-sport-mt?sport=X[&filter=pre|all] — força refit imediato pra
+  // sport esports (não espera cron 05h). Default filter=pre por estabilidade.
+  if (p === '/admin/fit-sport-mt' && (req.method === 'POST' || req.method === 'GET')) {
+    if (!requireAdmin(req, res)) return;
+    const sport = String(parsed.query.sport || '').trim().toLowerCase();
+    const filter = String(parsed.query.filter || 'pre').toLowerCase();
+    if (!['lol', 'cs', 'cs2', 'dota2', 'valorant'].includes(sport)) {
+      sendJson(res, { ok: false, error: 'sport invalido (lol|cs|cs2|dota2|valorant)' }, 400);
+      return;
+    }
+    try {
+      const path = require('path');
+      const { spawn } = require('child_process');
+      const scriptPath = path.join(__dirname, 'scripts', 'fit-tennis-markov-calibration.js');
+      const dbPath = process.env.DB_PATH || './sportsedge.db';
+      const child = spawn(process.execPath, [scriptPath, `--sport=${sport}`, '--min-new-samples=0', `--db=${dbPath}`, `--filter=${filter}`], { cwd: __dirname });
+      let stdout = '', stderr = '';
+      child.stdout.on('data', d => { stdout += d.toString('utf8'); });
+      child.stderr.on('data', d => { stderr += d.toString('utf8'); });
+      const startedAt = Date.now();
+      child.on('close', (code) => {
+        const dur = Math.round((Date.now() - startedAt) / 1000);
+        const tail = (stdout + (stderr ? ' || ' + stderr : '')).slice(-600).replace(/\n/g, ' | ');
+        log(code === 0 ? 'INFO' : 'WARN', 'FIT-SPORT-MT', `${sport} done in ${dur}s exit=${code} | ${tail}`);
+        try { require('./lib/sport-mt-calib').getSportMtCalib(sport)._invalidate(); } catch (_) {}
+      });
+      setTimeout(() => { try { child.kill('SIGKILL'); } catch (_) {} }, 3 * 60 * 1000).unref?.();
+      sendJson(res, { ok: true, sport, filter, started_at: new Date().toISOString(), message: `fit ${sport} disparado. Check /admin/sport-mt-calib-meta?sport=${sport}` });
     } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
     return;
   }
