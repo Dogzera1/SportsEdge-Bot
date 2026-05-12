@@ -24536,6 +24536,62 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   setInterval(_wrapCron('tennis_calib_refit', runTennisCalibRefitDaily), 60 * 60 * 1000);
   setTimeout(() => runTennisCalibRefitDaily().catch(() => {}), 95 * 60 * 1000);
 
+  // Esports MT calib refit daily (05h local). Multi-sport (lol/cs2/dota2/valorant).
+  // Usa scripts/fit-tennis-markov-calibration.js (sport-agnostic apesar do nome
+  // legacy) com --sport=X --filter=pre. Live tips skipped por instabilidade
+  // ocasional do PAV em LoL filter=all (TODO investigar).
+  //
+  // Schema v2.1 side-aware materializado em lib/<sport>-mt-calib.json.
+  // Consumido por scanMarkets via calibLib (lib/sport-mt-calib.js factory).
+  //
+  // Opt-out: ESPORTS_CALIB_REFIT_DISABLED=true.
+  // Filter sports: ESPORTS_CALIB_REFIT_SPORTS=lol,cs2 (default = todos 4).
+  let _lastEsportsCalibRefitDay = null;
+  async function runEsportsCalibRefitDaily() {
+    if (/^(1|true|yes)$/i.test(String(process.env.ESPORTS_CALIB_REFIT_DISABLED || ''))) return;
+    if (isMemCritical()) { log('WARN', 'ESPORTS-CALIB-REFIT', 'mem_critical — defer'); return; }
+    const now = new Date();
+    if (now.getHours() !== 5) return;
+    const today = now.toISOString().slice(0, 10);
+    if (_lastEsportsCalibRefitDay === today) return;
+    _lastEsportsCalibRefitDay = today;
+    const sports = String(process.env.ESPORTS_CALIB_REFIT_SPORTS || 'lol,cs2,dota2,valorant')
+      .split(',').map(s => s.trim()).filter(Boolean);
+    const path = require('path');
+    const { spawn } = require('child_process');
+    const script = path.join(__dirname, 'scripts', 'fit-tennis-markov-calibration.js');
+    const results = [];
+    for (const sport of sports) {
+      try {
+        const dbPath = process.env.DB_PATH || './sportsedge.db';
+        const out = await new Promise((resolve) => {
+          const child = spawn(process.execPath, [script, `--sport=${sport}`, '--min-new-samples=0', `--db=${dbPath}`, '--filter=pre'], { cwd: __dirname });
+          let stdout = '';
+          child.stdout.on('data', d => stdout += d);
+          child.stderr.on('data', d => stdout += d);
+          child.on('close', (code) => resolve({ code, stdout }));
+          setTimeout(() => { try { child.kill('SIGKILL'); } catch (_) {} }, 120_000);
+        });
+        const postLine = out.stdout.split('\n').find(l => l.includes('POST (calib)')) || '';
+        const savedLine = out.stdout.includes('[saved]') ? 'saved' : (out.stdout.includes('[ABORT]') ? 'aborted' : 'no-write');
+        results.push(`${sport}: ${savedLine} | ${postLine.trim().slice(0, 120)}`);
+        log('INFO', 'ESPORTS-CALIB-REFIT', `${sport} exit=${out.code} ${savedLine}`);
+        // 2026-05-12: invalida cache da lib factory pós-write pra próximo cycle pegar imediato
+        try { require('./lib/sport-mt-calib').getSportMtCalib(sport)._invalidate(); } catch (_) {}
+      } catch (e) {
+        results.push(`${sport}: ERROR ${e.message}`);
+        log('ERROR', 'ESPORTS-CALIB-REFIT', `${sport}: ${e.message}`);
+      }
+    }
+    if (ADMIN_IDS.size && results.length) {
+      const msg = `🎮 *Esports MT calib refit (daily)*\n\n${results.map(r => '• ' + r).join('\n')}`;
+      const token = resolveAlertsToken();
+      if (token) for (const adminId of ADMIN_IDS) sendDM(token, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `${adminId}: ${e.message}`));
+    }
+  }
+  setInterval(_wrapCron('esports_calib_refit', runEsportsCalibRefitDaily), 60 * 60 * 1000);
+  setTimeout(() => runEsportsCalibRefitDaily().catch(() => {}), 100 * 60 * 1000);
+
   // ROI drift CUSUM diário (09h local, depois do Kelly tune). Detecta sport
   // que "virou" (ROI mudou de regime) entre weekly leak-guard cycles.
   // CUSUM k=0.5σ + h=4σ (industry default) — ARL ~168 in-control. Opt-out:
