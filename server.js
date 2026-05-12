@@ -11942,6 +11942,29 @@ setInterval(load, 60000);
     return;
   }
 
+  // GET /admin/portfolio-kelly?sport=lol — dry-run discount pra match hipotético.
+  // Mostra tips abertas + total exposure + correlation com pickSide proposto.
+  if (p === '/admin/portfolio-kelly' && req.method === 'GET') {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const sport = String(parsed.query.sport || '').trim().toLowerCase();
+      const team1 = String(parsed.query.team1 || '').trim();
+      const team2 = String(parsed.query.team2 || '').trim();
+      const market = String(parsed.query.market || 'ML').trim();
+      const side = String(parsed.query.side || 'team1').trim();
+      const stakeU = parseFloat(parsed.query.stake || '1.5');
+      if (!sport) { sendJson(res, { ok: false, error: 'sport obrigatório' }, 400); return; }
+      const { applyPortfolioDiscount } = require('./lib/portfolio-kelly');
+      const adj = applyPortfolioDiscount(db, {
+        sport,
+        match: { team1, team2 },
+        newTip: { market, side, line: null, pModel: 0.55, kellyStake: stakeU },
+      });
+      sendJson(res, { ok: true, input: { sport, team1, team2, market, side, stakeU }, result: adj });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   // GET /admin/sport-mt-calib-meta?sport=lol|cs|cs2|dota2|valorant — expõe meta
   // da calib MT esports via factory lib/sport-mt-calib.js.
   if (p === '/admin/sport-mt-calib-meta' && req.method === 'GET') {
@@ -23349,6 +23372,42 @@ load();
             sendJson(res, { ok: false, skipped: true, reason: 'ev_sanity_cap', ev: evN, cap: _evCap });
             return;
           }
+        }
+
+        // 2026-05-12: Portfolio Kelly cross-cycle discount.
+        // Reduz stake quando há tips abertas correlatas (mesma série Bo3 ou
+        // mesmo sport recent). Cap total exposure per sport via env. Sport-aware
+        // via correlation libs existentes (esports / tennis).
+        // Bypass shadow + opt-out PORTFOLIO_KELLY_DISABLED=true.
+        let _portfolioAdj = null;
+        let _stakeUnitsCurrent = (() => {
+          const m = String(t.stake || '').match(/(\d+(?:\.\d+)?)/);
+          return m ? parseFloat(m[1]) : 0;
+        })();
+        if (!t.isShadow && _stakeUnitsCurrent > 0
+            && !/^(1|true|yes)$/i.test(String(process.env.PORTFOLIO_KELLY_DISABLED || ''))) {
+          try {
+            const { applyPortfolioDiscount } = require('./lib/portfolio-kelly');
+            const newTipShape = {
+              market: t.marketType || t.market || 'ML',
+              side: t.pickSide || t.side || 'team1',
+              line: Number.isFinite(t.line) ? Number(t.line) : null,
+              pModel: Number(t.modelPPick || t.modelP1) || 0,
+              kellyStake: _stakeUnitsCurrent,
+            };
+            const adj = applyPortfolioDiscount(db, {
+              sport,
+              match: { team1: p1, team2: p2 },
+              newTip: newTipShape,
+            });
+            if (adj.discount > 0 && adj.adjustedStake < _stakeUnitsCurrent) {
+              log('INFO', 'PORTFOLIO-KELLY', `${sport} ${p1} vs ${p2}: stake ${_stakeUnitsCurrent}u → ${adj.adjustedStake}u (-${adj.discount}%) | ${adj.reason} | open=${adj.openCount} totalU=${adj.totalExposure}`);
+              // Sobrescreve stake na request (será gravado com novo valor)
+              t.stake = `${adj.adjustedStake}u`;
+              _stakeUnitsCurrent = adj.adjustedStake;
+              _portfolioAdj = adj;
+            }
+          } catch (e) { log('DEBUG', 'PORTFOLIO-KELLY', `err: ${e.message}`); }
         }
 
         // 2026-05-12: news-impact gate. Fecha gap "news só DM admin, não bloqueia

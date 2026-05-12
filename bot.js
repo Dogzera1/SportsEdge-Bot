@@ -3081,6 +3081,7 @@ async function runAutoAnalysis() {
             log('INFO', 'STEAM-BOOST', `lol live ${match.team1} vs ${match.team2} ${tipTeam}: mult=${_steamLive.mult} (${_steamLive.evt?.oldOdd}→${_steamLive.evt?.newOdd}, ${_steamLive.evt?.velocityPct}% in ${_steamLive.evt?.windowMin}min)`);
             kellyFraction = kellyFraction * _steamLive.mult;
           }
+          // Portfolio Kelly aplicado central em server.js /record-tip (cross-cycle).
           const isT1bet = norm(tipTeam).includes(norm(match.team1)) || norm(match.team1).includes(norm(tipTeam));
           const modelPForKelly = (result.modelP1 > 0) ? (isT1bet ? result.modelP1 : result.modelP2) : null;
           const tipStake = modelPForKelly
