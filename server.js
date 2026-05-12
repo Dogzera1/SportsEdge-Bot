@@ -11942,6 +11942,88 @@ setInterval(load, 60000);
     return;
   }
 
+  // GET /admin/live-tips-debug?sport=X&hours=24 — visibility per sport.
+  // Identifica se zero live tips é falta de dados (Pinnacle no live odds),
+  // EV gate, ou ausência de match live na janela.
+  // Retorna: contagens shadow+real live N horas, last tip ts, scanner stats.
+  if (p === '/admin/live-tips-debug' && req.method === 'GET') {
+    if (!requireAdmin(req, res)) return;
+    const sport = String(parsed.query.sport || '').trim().toLowerCase();
+    const hours = Math.max(1, Math.min(168, parseInt(parsed.query.hours || '24', 10) || 24));
+    if (!sport) { sendJson(res, { ok: false, error: 'sport obrigatório' }, 400); return; }
+    try {
+      const out = { sport, hours };
+      // Shadow tips live
+      const shadowLive = db.prepare(`
+        SELECT COUNT(*) AS n, MAX(created_at) AS last_at
+        FROM market_tips_shadow
+        WHERE sport = ? AND is_live = 1
+          AND created_at >= datetime('now', '-' || ? || ' hours')
+      `).get(sport, hours);
+      out.shadow_live = { n: shadowLive?.n || 0, last_at: shadowLive?.last_at || null };
+      // Shadow tips total (pra ratio)
+      const shadowTotal = db.prepare(`
+        SELECT COUNT(*) AS n FROM market_tips_shadow
+        WHERE sport = ? AND created_at >= datetime('now', '-' || ? || ' hours')
+      `).get(sport, hours);
+      out.shadow_total = shadowTotal?.n || 0;
+      out.shadow_live_pct = out.shadow_total > 0 ? +((out.shadow_live.n / out.shadow_total) * 100).toFixed(1) : 0;
+      // Real tips live (sport mapping: cs→cs2 alias) — tabela tips
+      const realLive = db.prepare(`
+        SELECT COUNT(*) AS n, MAX(sent_at) AS last_at
+        FROM tips
+        WHERE sport = ? AND is_live = 1
+          AND (archived IS NULL OR archived = 0)
+          AND sent_at >= datetime('now', '-' || ? || ' hours')
+      `).get(sport, hours);
+      out.real_live = { n: realLive?.n || 0, last_at: realLive?.last_at || null };
+      // Última tip real qualquer (pra ver se sport tá emitindo nada vs zero live)
+      const realLast = db.prepare(`
+        SELECT MAX(sent_at) AS last_at, COUNT(*) AS n
+        FROM tips
+        WHERE sport = ? AND (archived IS NULL OR archived = 0)
+          AND sent_at >= datetime('now', '-' || ? || ' hours')
+      `).get(sport, hours);
+      out.real_total = { n: realLast?.n || 0, last_at: realLast?.last_at || null };
+      // Rejections relevantes a live (in-memory bot via metrics fallback)
+      // Como rejections são in-memory no bot process, pegamos via /metrics se exposto.
+      // Aqui só agregamos métrica acumulada se disponível.
+      try {
+        const m = require('./lib/metrics');
+        const snap = (m.snapshot && m.snapshot()) || {};
+        // Filtra counters de rejection com label sport=X (formato lib/metrics)
+        const rejBySport = {};
+        for (const [key, val] of Object.entries(snap.counters || {})) {
+          if (key.startsWith('rejection') && key.includes(`sport=${sport}`)) {
+            const reasonMatch = key.match(/reason=([^,}]+)/);
+            const reason = reasonMatch ? reasonMatch[1] : 'unknown';
+            rejBySport[reason] = (rejBySport[reason] || 0) + val;
+          }
+        }
+        out.rejection_counters_total = rejBySport;
+      } catch (_) {}
+      // Diagnóstico: se shadow_total > 0 mas shadow_live = 0 → match.status='live'
+      // não detectado nesse window (gap dados upstream).
+      // Se shadow_live > 0 mas real_live = 0 → gates bloqueando dispatch live
+      // (provavelmente promote env disabled OU EV cap restrictive).
+      let diagnosis;
+      if (out.shadow_total === 0) {
+        diagnosis = 'no_shadow_tips — sport sem volume MT geral (pre nem live). Possível: sport disabled, Pinnacle sem odds, ou nenhum match recente.';
+      } else if (out.shadow_live.n === 0) {
+        diagnosis = 'no_live_detected — código wired mas match.status="live" não detectado upstream. Possível: feed sem live status, gap timing janela.';
+      } else if (out.real_live.n === 0 && out.real_total.n > 0) {
+        diagnosis = 'live_shadow_only — tips live geradas mas não promovidas pra real. Possível: gate live + MT_DM_REAL_ONLY restritivo OU sport.shadowMode=true.';
+      } else if (out.real_live.n === 0) {
+        diagnosis = 'sport_shadow_only_total — sport em shadowMode global (sem real tips). Live segue padrão do sport.';
+      } else {
+        diagnosis = `working — ${out.real_live.n} live tips real ${hours}h, ${out.shadow_live.n} shadow.`;
+      }
+      out.diagnosis = diagnosis;
+      sendJson(res, { ok: true, ...out });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   // GET /admin/portfolio-kelly?sport=lol — dry-run discount pra match hipotético.
   // Mostra tips abertas + total exposure + correlation com pickSide proposto.
   if (p === '/admin/portfolio-kelly' && req.method === 'GET') {
