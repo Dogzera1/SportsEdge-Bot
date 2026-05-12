@@ -46,9 +46,13 @@ fi
 
 # ────────────────────────────────────────────────────────────────────────
 # HARD GATE 3: limites SAGRADOS alterados (CLAUDE.md "não alterar sem pedido")
+# 2-step grep evita false positive em comentários (+ // MAX_KELLY_FRAC = 0.10)
 # ────────────────────────────────────────────────────────────────────────
 if [ -n "$STAGED_JS" ]; then
-  SAGRADO=$(git diff --cached -U0 -- $STAGED_JS 2>/dev/null | grep -E '^\+.*(MAX_KELLY_FRAC|KELLY_AUTO_TUNE_CEILING|MT_MIN_ODD|MT_EV_CAP_PCT|DAILY_TIP_LIMIT)\s*=\s*[0-9]' | head -5 || true)
+  SAGRADO=$(git diff --cached -U0 -- $STAGED_JS 2>/dev/null \
+    | grep -vE '^\+\s*(\*|//|/\*)' \
+    | grep -E '^\+\s*(const|let|var)?\s*(MAX_KELLY_FRAC|KELLY_AUTO_TUNE_CEILING|MT_MIN_ODD|MT_EV_CAP_PCT|DAILY_TIP_LIMIT)\s*=\s*[0-9]' \
+    | head -5 || true)
   if [ -n "$SAGRADO" ]; then
     echo "❌ [pre-commit] Limite SAGRADO alterado em código:"
     echo "$SAGRADO"
