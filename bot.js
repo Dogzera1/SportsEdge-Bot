@@ -21725,10 +21725,16 @@ async function runAutoSnooker() {
           // ── MT scanner (handicap_frames + total_frames) ──
           // 2026-05-10: shadow puro fase 1. Modelo Normal CDF a partir de
           // pModel ML + bestOf. Sem promote real.
+          // 2026-05-12: usa pinMatchupId direto (mais robusto) — snooker prefix
+          // é `snooker_` não `pin_snooker_`, então /odds-markets pinFallback não
+          // resolve. Match field pinMatchupId é populado em server.js:32257.
           if (process.env.SNOOKER_MT_SCAN !== 'false' && ml.modelP1 > 0) {
             try {
+              const _snkMatchupQ = match.pinMatchupId
+                ? `matchupId=${encodeURIComponent(match.pinMatchupId)}`
+                : `team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}&game=snooker`;
               const _snkMtMarkets = await serverGet(
-                `/odds-markets?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}&period=0&game=snooker`
+                `/odds-markets?${_snkMatchupQ}&period=0`
               ).catch(() => null);
               if (_snkMtMarkets && ((_snkMtMarkets.handicaps?.length || 0) + (_snkMtMarkets.totals?.length || 0)) > 0) {
                 const { scanSnookerMarkets } = require('./lib/snooker-mt-scanner');

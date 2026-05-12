@@ -5437,6 +5437,11 @@ const server = http.createServer(async (req, res) => {
         // /odds-markets → DARTS-MT-SCAN nunca disparava. Bug latente desde
         // commit que adicionou darts MT (2026-05-10).
         { cache: _dartsPinnacleCache,    prefix: /^pin_darts_/ },
+        // 2026-05-12: prefixo `pin_mma_` (ver getPinnacleMmaMatches: server.js:3340).
+        // MMA não tem MT scanner atualmente, mas fix defensivo pra futuro (caso
+        // venhamos adicionar handicap_rounds ou total_rounds). Consistência com
+        // outros sports que têm cache Pinnacle dedicado.
+        { cache: _mmaPinnacleCache,      prefix: /^pin_mma_/ },
       ];
       if (!matchupId) {
         for (const { cache, prefix } of pinFallbacks) {
