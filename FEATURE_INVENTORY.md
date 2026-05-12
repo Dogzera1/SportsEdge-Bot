@@ -113,3 +113,22 @@ Effective stake = baseline × 6 multipliers. **Não adicionar 7º sem evidência
 | `mt_bucket_guard` | shadow + real | Bucket-level disable |
 | `mt_validation` | `tips` (real) | Validation auto-disable |
 | `league_guard` | `tips` (real) | League-level decisions |
+
+## Análises não-numéricas
+
+| Feature | Arquivo | Pipeline | Default |
+|---|---|---|---|
+| **DeepSeek API** | `bot.js callAI` | Scoreboard JSON → opinião structured | ON (`AI_DISABLED=false`) |
+| **Claude API fallback** | `bot.js callClaude` | Fallback se DeepSeek down | ON |
+| **News monitor** | `lib/agents-extended.runNewsMonitor` | RSS scrape per sport (cron 15min) → classify critical/warning → match tip → DM admin + populate cache | ON |
+| **News-impact gate** | `lib/news-impact.js` + `/record-tip` | Cache in-memory team_norm→severity; critical→skip emit / warning→flag forensics | ON (`NEWS_IMPACT_GATE_DISABLED=true` opt-out) |
+| **Tip-reason** | `lib/tip-reason.js` | Gera texto justificativa pra DM user | ON |
+| **MT-promote-explain** | `lib/mt-promote-explain.js` | Explica decisão promote/revert pra DM admin | ON |
+
+## DORMANT (não usar — marker pra cron overfeaturing-audit)
+
+| Feature | Arquivo | Status | Razão |
+|---|---|---|---|
+| **Polymarket consensus** | `lib/polymarket-watcher.js` | stub return null | Cobertura esports/tennis fraca, ROI duvidoso vs custo dev ~5-7d. Decisão 2026-05-12 audit "corrija gaps". Revisitar 30d se API estruturada surgir. |
+| **Social sentiment (Twitter/Reddit)** | (não existe) | not-implemented | Out-of-scope: infraestrutura grande (API keys, scraping rate-limits, NLP pipeline). Signal-to-noise ratio em esports/tennis curtos não justifica vs alternativas (news monitor já cobre lineup/injury). |
+| **Computer vision scoreboard** | (não existe) | not-implemented | Out-of-scope: requires CV pipeline + video ingestion. Scoreboards textuais já cobertos por Sofascore/ESPN/VLR/HLTV. Não é gap real, é overkill. |
