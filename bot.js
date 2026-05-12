@@ -20398,7 +20398,8 @@ async function pollCs(runOnce = false) {
                       }
                       const dedupKey = `cs2|${norm(match.team1)}|${norm(match.team2)}|${t.market}|${t.line}|${t.side}`;
                       const inMemFresh = Date.now() - (marketTipSent.get(dedupKey) || 0) <= 24 * 60 * 60 * 1000;
-                      const dbFresh = wasAdminDmSentRecently(db, { sport: 'cs2', match, market: t.market, line: t.line, side: t.side, hoursAgo: 24 });
+                      // 2026-05-12: sport='cs' (mig 074 — tips/shadow gravam como 'cs'); cs2 era key órfã.
+                      const dbFresh = wasAdminDmSentRecently(db, { sport: 'cs', match, market: t.market, line: t.line, side: t.side, hoursAgo: 24 });
                       if (inMemFresh || dbFresh) {
                         log('DEBUG', 'CS-MARKET-TIP', `Dedup skip (${inMemFresh ? 'mem' : 'db'}): ${dedupKey}`);
                         continue;
@@ -20420,7 +20421,7 @@ async function pollCs(runOnce = false) {
                       const _mtMarkup_cs = mtp.buildMarketTipReplyMarkup({ match: match, sport: 'cs2' });
                           const r = await sendAdminDMs(tokenForMT, dm, _mtMarkup_cs ? { reply_markup: _mtMarkup_cs } : undefined, 'cs-market-tip');
                       if (r.sent > 0) {
-                        markAdminDmSent(db, { sport: 'cs2', match, market: t.market, line: t.line, side: t.side, odd: t.odd, ev: t.ev });
+                        markAdminDmSent(db, { sport: 'cs', match, market: t.market, line: t.line, side: t.side, odd: t.odd, ev: t.ev });
                         log('INFO', 'CS-MARKET-TIP', `Admin DM: ${t.label} @ ${t.odd} EV ${t.ev}% stake ${_stakeForDm}u (sent=${r.sent} failed=${r.failed}) tipId=${_gate_cs.tipId}`);
                       } else {
                         log('WARN', 'CS-MARKET-TIP', `Todos admin DM falharam — skip dedup mark (${t.label} @ ${t.odd})`);
@@ -20515,7 +20516,7 @@ async function pollCs(runOnce = false) {
           log('WARN', 'AUTO-CS', `Gate EV sanity: EV ${evPct.toFixed(1)}% > ${csCeiling}% (ceiling trained-aware) → rejeitado: ${match.team1} vs ${match.team2}`);
           try {
             require('./lib/ml-rejected-audit').recordMlGateRejection(db, {
-              sport: 'cs2', match,
+              sport: 'cs', match,
               tipParticipant: pickTeam, pickSide: direction,
               odd: pickOdd, evPct,
               modelPPick: Number.isFinite(pickP) ? pickP : null,

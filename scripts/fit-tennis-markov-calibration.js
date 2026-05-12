@@ -475,6 +475,7 @@ function backtest(tips, calibByMarket) {
   const defaultMarkets = {
     tennis:   ['handicapGames', 'totalGames'],
     lol:      ['handicap', 'total'],
+    cs:       ['handicap', 'total'],
     cs2:      ['handicap', 'total'],
     dota2:    ['handicap', 'total'],
     valorant: ['handicap', 'total'],
