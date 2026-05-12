@@ -20068,6 +20068,35 @@ load();
             else expected = ((r.side === 'over') === (totalMaps > r.line)) ? 'win' : 'loss';
             debug = `bo=${bo} total=${totalMaps} line=${r.line}`;
           }
+        } else if (r.sport === 'basket' && r.market === 'handicap') {
+          // 2026-05-12: audit basket spread. Espelha lib/market-tips-shadow.js:1133-1147.
+          // final_score "homePts-awayPts"; team1Diff alinha por mrT1IsT1.
+          const m = String(mr.final_score || '').match(/^\s*(\d+)\s*[-–]\s*(\d+)/);
+          if (m) {
+            const homePts = parseInt(m[1], 10);
+            const awayPts = parseInt(m[2], 10);
+            if (Number.isFinite(homePts) && Number.isFinite(awayPts)) {
+              const team1Diff = mrT1IsT1 ? (homePts - awayPts) : (awayPts - homePts);
+              const sideIsT1 = r.side === 'team1' || r.side === 'home';
+              const adjMargin = sideIsT1 ? (team1Diff + r.line) : (-team1Diff + r.line);
+              expected = adjMargin === 0 ? 'void' : (adjMargin > 0 ? 'win' : 'loss');
+              debug = `homePts=${homePts} awayPts=${awayPts} team1Diff=${team1Diff} sideIsT1=${sideIsT1} line=${r.line} adjMargin=${adjMargin}`;
+            }
+          }
+        } else if (r.sport === 'basket' && r.market === 'total') {
+          // 2026-05-12: audit basket total points. Espelha lib/market-tips-shadow.js:1148-1159.
+          const m = String(mr.final_score || '').match(/^\s*(\d+)\s*[-–]\s*(\d+)/);
+          if (m) {
+            const homePts = parseInt(m[1], 10);
+            const awayPts = parseInt(m[2], 10);
+            const line = Number(r.line);
+            if (Number.isFinite(homePts) && Number.isFinite(awayPts) && Number.isFinite(line)) {
+              const totalPts = homePts + awayPts;
+              const over = totalPts > line;
+              expected = (r.side === 'over') === over ? 'win' : 'loss';
+              debug = `totalPts=${totalPts} line=${line} over=${over}`;
+            }
+          }
         } else if (r.sport === 'football' && r.market === 'draw') {
           const isDraw = /^draw$/i.test(String(mr.winner || '').trim());
           expected = isDraw ? 'win' : 'loss';
