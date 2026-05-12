@@ -3826,6 +3826,21 @@ async function _settleCompletedTipsInner() {
         let _matchedCount = 0, _noMatchCount = 0;
         let _dbResultFail = 0, _mtOrphanAttempt = 0, _mtOrphanSettled = 0, _stuckMtSkipped = 0;
         const _noMatchTips = [];
+        // 2026-05-12: tier breakdown dos stuck distingue "ESPN não cobre essa liga
+        // (gap esperado em Challenger/125k/Doubles/Qualifiers)" de "main tour stuck
+        // = bug real (ESPN deveria cobrir Rome/Madrid/Slams)". Sem isso, db_fail=54
+        // mascarava 2-3 main tour tips em meio a 50+ Challengers esperados.
+        const _stuckTier = { main: 0, chall: 0, wta125: 0, quali: 0, doubles: 0, itf: 0, other: 0 };
+        const _classifyStuckTier = (eventName) => {
+          const ev = String(eventName || '').toLowerCase();
+          if (/doubles?\b|\/.*\/|\bdupla/i.test(ev)) return 'doubles';
+          if (/quali/i.test(ev)) return 'quali';
+          if (/challenger/i.test(ev)) return 'chall';
+          if (/wta 125k|wta125|125k/i.test(ev)) return 'wta125';
+          if (/\bitf\b/i.test(ev)) return 'itf';
+          if (/atp rome|atp madrid|atp paris|atp miami|atp indian wells|wta rome|wta madrid|wta paris|wta miami|wta indian wells|roland garros|wimbledon|us open|australian open|french open|grand slam|masters|atp 1000|atp 500|atp 250|wta 1000|wta 500|wta 250/i.test(ev)) return 'main';
+          return 'other';
+        };
         // Lazy-load lib MT settle (só usada em tennis ::mt:: orphan path)
         let _mtSettleLib = null;
         try { _mtSettleLib = require('./lib/tennis-mt-settle'); } catch (_) {}
@@ -3913,6 +3928,7 @@ async function _settleCompletedTipsInner() {
             });
             if (!res) {
               _noMatchCount++;
+              _stuckTier[_classifyStuckTier(tip.event_name)]++;
               _noMatchTips.push(`#${tip.id} ${tip.participant1}/${tip.participant2}${tip.event_name ? ` [${tip.event_name}]` : ''}`);
               continue;
             }
@@ -3926,7 +3942,11 @@ async function _settleCompletedTipsInner() {
         }
         if (settled > 0) log('INFO', 'SETTLE', `tennis: ${settled} tips liquidadas`);
         else if (unsettled.length > 0) {
-          log('INFO', 'SETTLE-TENNIS', `nenhum match: pending=${unsettled.length} no_match=${_noMatchCount} db_fail=${_dbResultFail} mt_orphan=${_mtOrphanSettled}/${_mtOrphanAttempt} mt_skipped=${_stuckMtSkipped} (sources tinham ${(allResults.length + scoresById.size)} jogos finalizados)`);
+          const _tierTag = Object.entries(_stuckTier).filter(([_, v]) => v > 0).map(([k, v]) => `${k}=${v}`).join(' ');
+          log('INFO', 'SETTLE-TENNIS', `nenhum match: pending=${unsettled.length} no_match=${_noMatchCount} db_fail=${_dbResultFail} mt_orphan=${_mtOrphanSettled}/${_mtOrphanAttempt} mt_skipped=${_stuckMtSkipped} (sources tinham ${(allResults.length + scoresById.size)} jogos finalizados)${_tierTag ? ` | tier: ${_tierTag}` : ''}`);
+          // 2026-05-12: alerta se main tour stuck — gap esperado é tier3 (chall/125k/quali/doubles/itf).
+          // main>0 indica regressão real (ESPN não está capturando Slam/1000/500 — bug).
+          if (_stuckTier.main > 0) log('WARN', 'SETTLE-TENNIS', `main_tour stuck=${_stuckTier.main} — ESPN scoreboard deveria cobrir; investigar tennisPairMatchesPlayers / event_name regex`);
           if (_noMatchTips.length > 0) log('INFO', 'SETTLE-TENNIS', `stuck: ${_noMatchTips.join(' | ')}`);
         }
         continue;
@@ -4624,14 +4644,19 @@ async function runAutoHealerCycle() {
   //   precondition    — precondition falhou por motivo não self-resolve
   const skipBreakdown = { non_actionable: 0, self_resolved: 0, no_fix: 0, precondition: 0 };
   const noFixIds = [];
+  // 2026-05-12: capturar IDs também de non_actionable + precondition pra triage
+  // (antes só no_fix tinha visibility; ciclos persistentes com `non_actionable:1`
+  // não diziam QUAL anomaly era — opaco se é uma só recorrendo ou várias).
+  const nonActionableIds = [];
+  const preconditionIds = [];
   for (const s of healer.skipped) {
     const r = s.reason || '';
-    if (/não actionable/.test(r)) skipBreakdown.non_actionable++;
+    if (/não actionable/.test(r)) { skipBreakdown.non_actionable++; nonActionableIds.push(s.id); }
     else if (/fix não registrado/.test(r)) { skipBreakdown.no_fix++; noFixIds.push(s.id); }
     else if (/precondition falhou/.test(r)) {
       if (/não está locked|válido ou inativo|já rodando|não exposto/.test(r)) skipBreakdown.self_resolved++;
-      else skipBreakdown.precondition++;
-    } else skipBreakdown.precondition++;
+      else { skipBreakdown.precondition++; preconditionIds.push(s.id); }
+    } else { skipBreakdown.precondition++; preconditionIds.push(s.id); }
   }
   const skipTag = healer.skipped.length > 0
     ? ` (${Object.entries(skipBreakdown).filter(([_, v]) => v > 0).map(([k, v]) => `${k}:${v}`).join(', ')})`
@@ -4639,6 +4664,10 @@ async function runAutoHealerCycle() {
   log('INFO', 'AUTO-HEALER', `Ciclo: ${sentinel.anomalies.length} anomalia(s) | ${healer.applied.length} fix(es) aplicado(s) | ${healer.skipped.length} skip(s)${skipTag} | ${healer.errors.length} erro(s)`);
   // Gap alert: se skip for "no_fix", temos anomaly sem FIXES registrado — bug latente.
   if (noFixIds.length > 0) log('WARN', 'AUTO-HEALER', `Anomalies sem FIX registrado: ${noFixIds.slice(0, 5).join(', ')}`);
+  // Visibility: quais anomalies estão recorrentes como non_actionable / precondition?
+  // Hint pra debug quando ciclos persistentes flagram mesmas anomalies (regressão silenciosa).
+  if (nonActionableIds.length > 0) log('DEBUG', 'AUTO-HEALER', `non_actionable: ${nonActionableIds.slice(0, 5).join(', ')}`);
+  if (preconditionIds.length > 0) log('DEBUG', 'AUTO-HEALER', `precondition_fail: ${preconditionIds.slice(0, 5).join(', ')}`);
 
   // DM admin: agrupa fixes recentes (cooldown anti-spam por anomaly_id)
   if (!ADMIN_IDS.size) return;
@@ -19892,7 +19921,7 @@ async function pollTableTennis(runOnce = false) {
       }
       if (!_drainedTT && _hasLiveTT) _livePhaseExit('tabletennis');
       if (_ttNoOddsLive > 0 || _ttNoOddsTotal >= 3) {
-        log('INFO', 'AUTO-TT', `no_odds skip: live=${_ttNoOddsLive} total=${_ttNoOddsTotal} (Pinnacle outage? TT depende de Pin odds embedded em /tt-matches)`);
+        log('INFO', 'AUTO-TT', `no_odds skip: live=${_ttNoOddsLive} total=${_ttNoOddsTotal} (Pinnacle Guest sem odds embedded — gap esperado em tier3 OU outage; persistente >30min = investigar /tt-matches)`);
       }
     } catch (e) {
       log('ERROR', 'AUTO-TT', e.message);
@@ -20653,7 +20682,7 @@ Máximo 150 palavras.`;
       // 2026-05-11: log de visibility quando muitos matches caem por no_odds —
       // tipicamente indica Pinnacle outage ou PS-only feed sem cobertura odds.
       if (_csNoOddsLive > 0 || _csNoOddsTotal >= 3) {
-        log('INFO', 'AUTO-CS', `no_odds skip: live=${_csNoOddsLive} total=${_csNoOddsTotal} (Pinnacle outage? cs depende de Pin odds embedded em /cs-matches)`);
+        log('INFO', 'AUTO-CS', `no_odds skip: live=${_csNoOddsLive} total=${_csNoOddsTotal} (Pinnacle Guest sem odds embedded — gap esperado em tier3 OU outage; persistente >30min = investigar /cs-matches)`);
       }
     } catch (e) {
       log('ERROR', 'AUTO-CS', e.message);
@@ -21205,7 +21234,7 @@ async function pollValorant(runOnce = false) {
       }
       if (!_drainedVal && _hasLiveVal) _livePhaseExit('valorant');
       if (_valNoOddsLive > 0 || _valNoOddsTotal >= 3) {
-        log('INFO', 'AUTO-VAL', `no_odds skip: live=${_valNoOddsLive} total=${_valNoOddsTotal} (Pinnacle outage? val depende de Pin odds embedded em /valorant-matches)`);
+        log('INFO', 'AUTO-VAL', `no_odds skip: live=${_valNoOddsLive} total=${_valNoOddsTotal} (Pinnacle Guest sem odds embedded — gap esperado em tier3 OU outage; persistente >30min = investigar /valorant-matches)`);
       }
     } catch (e) {
       log('ERROR', 'AUTO-VAL', e.message);
@@ -22088,7 +22117,7 @@ async function runAutoBasket() {
     }
     if (!_drainedBasket && _hadLiveBasket) _livePhaseExit('basket');
     if (_basketNoOddsLive > 0 || _basketNoOddsTotal >= 3) {
-      log('INFO', 'AUTO-BASKET', `no_odds skip: live=${_basketNoOddsLive} total=${_basketNoOddsTotal} (Pinnacle outage? basket depende de Pin odds embedded em /basket-matches)`);
+      log('INFO', 'AUTO-BASKET', `no_odds skip: live=${_basketNoOddsLive} total=${_basketNoOddsTotal} (Pinnacle Guest sem odds embedded — gap esperado em tier3 OU outage; persistente >30min = investigar /basket-matches)`);
     }
   } catch (e) {
     log('ERROR', 'AUTO-BASKET', e.message);
