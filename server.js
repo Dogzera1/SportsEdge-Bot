@@ -12678,6 +12678,23 @@ setInterval(load, 60000);
     return;
   }
 
+  // 2026-05-12: reconciliação on-demand. Detecta:
+  //   1. Bankroll drift (current_banca vs SUM(profit_reais))
+  //   2. Result divergence (tip.result vs match_results atual — fonte atualizou pós-settle)
+  // Read-only por default. Cron daily 8h UTC roda automatico (RECONCILIATION_AUTO=true).
+  if (p === '/admin/reconciliation' && req.method === 'GET') {
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const days = Math.max(1, Math.min(90, parseInt(parsed.query.days || '14', 10) || 14));
+    const sport = parsed.query.sport ? String(parsed.query.sport).slice(0, 20) : null;
+    try {
+      const { runReconciliation } = require('./lib/reconciliation');
+      const report = runReconciliation(db, { days, sport });
+      sendJson(res, { ok: true, ...report });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   // 2026-05-11 (P3 CLAUDE.md): feature inventory live snapshot.
   // GET /admin/feature-inventory?key=<KEY>
   // Versão programática do FEATURE_INVENTORY.md — lê state atual.

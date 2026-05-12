@@ -22582,6 +22582,46 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   setInterval(_wrapCron('overfeaturing_audit', runOverfeaturingAuditCycle), 60 * 60 * 1000);
   setTimeout(_wrapCron('overfeaturing_audit', runOverfeaturingAuditCycle), 5 * 60 * 1000); // primeiro check 5min pós-boot (caso reboot aconteça durante a janela)
 
+  // 2026-05-12: reconciliação noturna — detecta bankroll drift + result divergence.
+  // Bug por consequência (não por leitura de código). Conselho original do user:
+  // "mais valioso que qualquer auditoria de código, porque pega bug por consequência".
+  // DM admin daily às 8h UTC (~5h BRT) quando findings>0. Sem auto-action.
+  // Opt-out: RECONCILIATION_AUTO=false. Override hora: RECONCILIATION_HOUR_UTC.
+  let _lastReconciliationDay = null;
+  async function runReconciliationCycle() {
+    if (/^(0|false|no)$/i.test(String(process.env.RECONCILIATION_AUTO ?? 'true'))) return;
+    if (isMemCritical()) return;
+    const targetHour = parseInt(process.env.RECONCILIATION_HOUR_UTC || '8', 10) || 8;
+    const now = new Date();
+    if (now.getUTCHours() !== targetHour) return;
+    const today = now.toISOString().slice(0, 10);
+    if (_lastReconciliationDay === today) return;
+    _lastReconciliationDay = today;
+    try {
+      const { runReconciliation, renderReconciliationDM } = require('./lib/reconciliation');
+      const days = parseInt(process.env.RECONCILIATION_DAYS || '14', 10) || 14;
+      const report = runReconciliation(db, { days });
+      const n_issues = report.bankroll.drifts_count + report.results.divergences_count;
+      log('INFO', 'RECONCILIATION',
+        `bankroll_drifts=${report.bankroll.drifts_count}/${report.bankroll.sports_checked} sports | result_divergences=${report.results.divergences_count}/${report.results.examined} tips`);
+      if (n_issues > 0 && ADMIN_IDS.size) {
+        const tk = resolveAlertsToken();
+        if (tk) {
+          const body = renderReconciliationDM(report);
+          const msg = `🔍 *Reconciliação noturna* — ${n_issues} issue(s)\n\n${body}\n\n_Detalhes: \`/admin/reconciliation?days=${days}\`_\n_P2 — research, sem auto-action._`;
+          const sent = new Set();
+          for (const id of ADMIN_IDS) {
+            if (sent.has(id)) continue;
+            sent.add(id);
+            sendDM(tk, id, msg).catch(() => {});
+          }
+        }
+      }
+    } catch (e) { log('ERROR', 'RECONCILIATION', e.message); }
+  }
+  setInterval(_wrapCron('reconciliation', runReconciliationCycle), 60 * 60 * 1000);
+  setTimeout(_wrapCron('reconciliation', runReconciliationCycle), 10 * 60 * 1000); // primeiro check 10min pós-boot
+
   // Threshold Auto-Apply: semanal (segunda-feira às 4h UTC), roda optimizer +
   // aplica ajustes de EV_min per sport quando guardrails batem. Gated por
   // THRESHOLD_AUTO_APPLY=true.
