@@ -8076,21 +8076,25 @@ setInterval(load, 10000);
           // Result errado — re-settle
           if (!dryRun) {
             db.transaction(() => {
-              // Reverte profit antigo
+              // 2026-05-12 BUG FIX: ANTES o branch shadow só atualizava `result` sem
+              // recalcular profit_reais. Resultado: tips shadow re-settled ficavam
+              // com result novo mas profit ANTIGO (e.g. tip#1488 result=win profit=-1.50).
+              // Métricas /shadow-readiness ROI inflado/contaminado por profits errados.
+              // Agora SEMPRE recalcula profit_reais via formula canônica, e atualiza
+              // bankroll só pra tips reais (shadow não toca banca).
+              const odds = parseFloat(tip.odds) || 1;
+              const stakeR = Number(tip.stake_reais) || 0;
+              const newProfit = expected === 'win' ? +(stakeR * (odds - 1)).toFixed(2) : -stakeR;
+              db.prepare(`UPDATE tips SET result = ?, profit_reais = ? WHERE id = ?`)
+                .run(expected, newProfit, tip.id);
+              // Bankroll só pra tip real com profit antigo válido (reverte + aplica novo).
               if (tip.is_shadow !== 1 && Number.isFinite(Number(tip.profit_reais))) {
                 const bk = stmts.getBankroll.get('basket');
                 if (bk) {
                   const reverted = parseFloat(((Number(bk.current_banca) || 0) - Number(tip.profit_reais)).toFixed(2));
-                  // Calcula profit novo
-                  const odds = parseFloat(tip.odds) || 1;
-                  const stakeR = Number(tip.stake_reais) || 0;
-                  const newProfit = expected === 'win' ? +(stakeR * (odds - 1)).toFixed(2) : -stakeR;
                   const final = parseFloat((reverted + newProfit).toFixed(2));
                   stmts.updateBankroll.run(final, 'basket');
-                  db.prepare(`UPDATE tips SET result = ?, profit_reais = ? WHERE id = ?`).run(expected, newProfit, tip.id);
                 }
-              } else {
-                db.prepare(`UPDATE tips SET result = ? WHERE id = ?`).run(expected, tip.id);
               }
             })();
             resettledN++;
@@ -8152,14 +8156,20 @@ setInterval(load, 10000);
         row = db.prepare(`SELECT * FROM match_results WHERE match_id IN (${placeholders}) AND game = 'basket' LIMIT 1`).get(...ids);
       }
 
-      // 2026-05-09 BUG FIX: janela name-fallback estreitada de -2d/+3d pra
-      // -12h/+30h. NBA playoffs joga back-to-back (Wolves×Spurs em 05-05, 05-07,
-      // 05-09); janela larga pegava jogo anterior do par e settled tip atual com
-      // resultado errado. Jogo NBA dura ~3h + ESPN sync delay → +30h cobre.
-      // Pra tip pre-game (sentAt antes do jogo), sentAt é início do match → fim
-      // ~+3h, então +30h ainda dá margem ampla; -12h cobre tips emitidas pos-jogo
-      // (raro pra basket — não há live tip basket atualmente).
-      if (!row?.winner) {
+      // 2026-05-12 BUG FIX: ESPN matchId é authoritative — NÃO usar name fallback
+      // quando matchId é formato espn_basket_X OU basket_espn_X. Audit ML basket
+      // shadow 30d encontrou 3 settle mismatches + 5 pre-settles em jogos futuros:
+      // tip 2343 (G4 MIN×SA played 5/10) tinha matchId 401871155 (G4) mas direct
+      // lookup falhou (G4 ainda não terminado quando tip foi settled) → fallback
+      // name pegou G3 (5/9) com janela -12h/+30h → result errado.
+      // ESPN ID 401XXX é único per game; direct lookup falhar significa jogo
+      // ainda não terminou — tip deve permanecer pending até /sync-basket-espn
+      // popular match_results. AUTO_VOID_STUCK voida >36h se não settlar.
+      // Name fallback mantido só pra match_ids legacy (basket_pin_*, basket_test_*).
+      const _isAuthoritativeEspnId = matchId && (
+        matchId.startsWith('basket_espn_') || matchId.startsWith('espn_basket_')
+      );
+      if (!row?.winner && !_isAuthoritativeEspnId) {
         const t1Like = `%${team1}%`;
         const t2Like = `%${team2}%`;
         const stmt = sentAt
@@ -8183,7 +8193,8 @@ setInterval(load, 10000);
 
       // Tentativa 3: norm match (NBA team names variam: "LA Lakers" vs "Los Angeles Lakers").
       // Mesma janela estreitada pra evitar match cruzado em playoffs back-to-back.
-      if (!row?.winner && sentAt) {
+      // 2026-05-12 BUG FIX: também skipa quando ESPN matchId é authoritative (vide acima).
+      if (!row?.winner && sentAt && !_isAuthoritativeEspnId) {
         try {
           const _normB = (s) => String(s || '').toLowerCase().normalize('NFD')
             .replace(/[̀-ͯ]/g, '')
