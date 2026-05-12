@@ -23150,6 +23150,24 @@ load();
            WHERE sport = ? AND result IS NULL AND COALESCE(is_shadow,0) = 0
              AND sent_at < datetime('now', ?)`
         ).run(sport, cutoffExpr);
+        // 2026-05-12: shadow tips com match FANTASMA (Pinnacle expôs odds preliminares
+        // antes do bracket draw final, depois removeu) NUNCA settlam via match_results.
+        // Audit identificou tip#1534 Ostapenko vs Anisimova [WTA Rome R2] stuck 5d
+        // (match nunca aconteceu — Ostapenko jogou contra outros em R2/R3/R4).
+        // Solução: void shadow após threshold MAIOR que real (default 14d).
+        // Threshold via SHADOW_VOID_DAYS_<SPORT> > SHADOW_VOID_DAYS > 14 default.
+        const shadowDays = (() => {
+          const sportKey = String(sport).toUpperCase();
+          const sportSpecific = parseInt(process.env[`SHADOW_VOID_DAYS_${sportKey}`] || '', 10);
+          if (Number.isFinite(sportSpecific) && sportSpecific > 0) return sportSpecific;
+          const globalDays = parseInt(process.env.SHADOW_VOID_DAYS || '14', 10);
+          return Number.isFinite(globalDays) && globalDays > 0 ? globalDays : 14;
+        })();
+        const rShadow = db.prepare(
+          `UPDATE tips SET result = 'void', settled_at = datetime('now'), profit_reais = 0
+           WHERE sport = ? AND result IS NULL AND COALESCE(is_shadow,0) = 1
+             AND sent_at < datetime('now', '-' || ? || ' days')`
+        ).run(sport, shadowDays);
         // Extensão 2026-04-28: void também em market_tips_shadow stuck. Critério
         // mesmo (sport, criação > cutoff, result IS NULL). Antes só cobria tabela
         // tips regular — MT shadow ficava acumulando pendings para sempre.
@@ -23157,8 +23175,8 @@ load();
           `UPDATE market_tips_shadow SET result = 'void', settled_at = datetime('now'), profit_units = 0
            WHERE sport = ? AND result IS NULL AND created_at < datetime('now', ?)`
         ).run(sport, cutoffExpr);
-        log('INFO', 'ADMIN', `void-old-pending: sport=${sport} cutoff=${cutoffExpr} → tips=${r.changes} mt_shadow=${mtR.changes}`);
-        sendJson(res, { ok: true, voided: r.changes, voided_mt: mtR.changes, sport, cutoff: cutoffExpr });
+        log('INFO', 'ADMIN', `void-old-pending: sport=${sport} cutoff=${cutoffExpr} shadow_cutoff=-${shadowDays}d → tips=${r.changes} tips_shadow=${rShadow.changes} mt_shadow=${mtR.changes}`);
+        sendJson(res, { ok: true, voided: r.changes, voided_shadow: rShadow.changes, voided_mt: mtR.changes, sport, cutoff: cutoffExpr, shadow_cutoff_days: shadowDays });
       } catch(e) {
         sendJson(res, { error: e.message }, 500);
       }
