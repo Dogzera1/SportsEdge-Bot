@@ -2142,6 +2142,25 @@ async function fetchClvMultiplier(sport, league) {
   return fallback;
 }
 
+// 2026-05-12: Steam BOOST helper — espelho inverso do CLV pre-dispatch gate.
+// Sharp money confirmou nosso side (Pinnacle odd CAIU >X% em N min) → boost stake.
+// Block já existente (sharp contra) continua no market-tip-processor.
+//
+// Retorna mult≥1.0; aplicar como `kellyFraction *= mult`. Caller loga separadamente.
+// Opt-out: STEAM_BOOST_DISABLED=true.
+function getSteamBoostMult(sport, team1, team2, side) {
+  if (/^(1|true|yes)$/i.test(String(process.env.STEAM_BOOST_DISABLED || ''))) {
+    return { mult: 1.0, reason: 'disabled' };
+  }
+  try {
+    const slDet = require('./lib/stale-line-detector');
+    const vel = require('./lib/velocity-tracker');
+    return vel.getSteamBoost(slDet._ringBuf, { sport, team1, team2, side });
+  } catch (_) {
+    return { mult: 1.0, reason: 'lib_unavailable' };
+  }
+}
+
 // ── Daily tip limit ────────────────────────────────────────────────────────
 // Defesa contra bug em scanner / loop que possa emitir tips em rajada (50/h).
 // Stake cap não protege contra concentração temporal — DAILY_TIP_LIMIT sim.
@@ -3056,6 +3075,12 @@ async function runAutoAnalysis() {
             log('INFO', 'CLV-KELLY', `Ajuste lol live [${match.league}]: mult=${_clvAdjLive.mult} reason=${_clvAdjLive.reason} (CLV ${_clvAdjLive.avgClv}% n=${_clvAdjLive.n})`);
             kellyFraction = kellyFraction * _clvAdjLive.mult;
           }
+          // Steam BOOST — sharp money confirmou nosso side → ×1.2 default
+          const _steamLive = getSteamBoostMult('lol', match.team1, match.team2, tipTeam);
+          if (_steamLive.mult > 1.0) {
+            log('INFO', 'STEAM-BOOST', `lol live ${match.team1} vs ${match.team2} ${tipTeam}: mult=${_steamLive.mult} (${_steamLive.evt?.oldOdd}→${_steamLive.evt?.newOdd}, ${_steamLive.evt?.velocityPct}% in ${_steamLive.evt?.windowMin}min)`);
+            kellyFraction = kellyFraction * _steamLive.mult;
+          }
           const isT1bet = norm(tipTeam).includes(norm(match.team1)) || norm(match.team1).includes(norm(tipTeam));
           const modelPForKelly = (result.modelP1 > 0) ? (isT1bet ? result.modelP1 : result.modelP2) : null;
           const tipStake = modelPForKelly
@@ -3532,6 +3557,12 @@ async function runAutoAnalysis() {
             if (_clvAdj.mult !== 1.0) {
               log('INFO', 'CLV-KELLY', `Ajuste lol upcoming [${match.league}]: mult=${_clvAdj.mult} reason=${_clvAdj.reason} (CLV ${_clvAdj.avgClv}% n=${_clvAdj.n})`);
               kellyFraction = kellyFraction * _clvAdj.mult;
+            }
+            // Steam BOOST — sharp money confirmou nosso side
+            const _steamUp = getSteamBoostMult('lol', match.team1, match.team2, tipTeam);
+            if (_steamUp.mult > 1.0) {
+              log('INFO', 'STEAM-BOOST', `lol upcoming ${match.team1} vs ${match.team2} ${tipTeam}: mult=${_steamUp.mult} (${_steamUp.evt?.oldOdd}→${_steamUp.evt?.newOdd}, ${_steamUp.evt?.velocityPct}% in ${_steamUp.evt?.windowMin}min)`);
+              kellyFraction = kellyFraction * _steamUp.mult;
             }
             // Usa p do modelo ML quando disponível (evita circularidade p←EV←IA)
             const isT1bet = norm(tipTeam).includes(norm(match.team1)) || norm(match.team1).includes(norm(tipTeam));
@@ -15866,6 +15897,12 @@ Máximo 200 palavras.`;
           if (kellyFraction !== kellyPre) log('INFO', 'AUTO-DOTA', `Kelly adj: ${tags.join(' + ')} → ${kellyPre.toFixed(3)} → ${kellyFraction.toFixed(3)}`);
         }
       } catch (_) {}
+      // Steam BOOST — sharp confirmou nosso side
+      const _steamDota = getSteamBoostMult('dota2', match.team1, match.team2, tipTeam);
+      if (_steamDota.mult > 1.0) {
+        log('INFO', 'STEAM-BOOST', `dota2 ${match.team1} vs ${match.team2} ${tipTeam}: mult=${_steamDota.mult} (${_steamDota.evt?.oldOdd}→${_steamDota.evt?.newOdd}, ${_steamDota.evt?.velocityPct}% in ${_steamDota.evt?.windowMin}min)`);
+        kellyFraction = kellyFraction * _steamDota.mult;
+      }
       const modelPForKelly = mlResult.modelP1 > 0 ? (isT1bet ? mlResult.modelP1 : mlResult.modelP2) : null;
       const tipStake = modelPForKelly
         ? calcKellyWithP(modelPForKelly, tipOdd, kellyFraction, { sport: 'dota2', confKey: tipConf })
@@ -20703,6 +20740,12 @@ Máximo 150 palavras.`;
           log('INFO', 'CLV-KELLY', `Ajuste cs [${match.league}]: mult=${_clvAdjCs.mult} reason=${_clvAdjCs.reason} (CLV ${_clvAdjCs.avgClv}% n=${_clvAdjCs.n})`);
           csKellyFrac = csKellyFrac * _clvAdjCs.mult;
         }
+        // Steam BOOST
+        const _steamCs = getSteamBoostMult('cs', match.team1, match.team2, pickTeam);
+        if (_steamCs.mult > 1.0) {
+          log('INFO', 'STEAM-BOOST', `cs ${match.team1} vs ${match.team2} ${pickTeam}: mult=${_steamCs.mult} (${_steamCs.evt?.oldOdd}→${_steamCs.evt?.newOdd}, ${_steamCs.evt?.velocityPct}% in ${_steamCs.evt?.windowMin}min)`);
+          csKellyFrac = csKellyFrac * _steamCs.mult;
+        }
         const stake = calcKellyWithP(pickP, pickOdd, csKellyFrac, { sport: 'cs', confKey: aiConf || 'MEDIA' });
         if (stake === '0u') {
           if (_clvAdjCs.mult === 0) {
@@ -21264,6 +21307,12 @@ async function pollValorant(runOnce = false) {
         if (_clvAdjVal.mult !== 1.0) {
           log('INFO', 'CLV-KELLY', `Ajuste valorant [${match.league}]: mult=${_clvAdjVal.mult} reason=${_clvAdjVal.reason} (CLV ${_clvAdjVal.avgClv}% n=${_clvAdjVal.n})`);
           _valKellyFrac = _valKellyFrac * _clvAdjVal.mult;
+        }
+        // Steam BOOST
+        const _steamVal = getSteamBoostMult('valorant', match.team1, match.team2, pickTeam);
+        if (_steamVal.mult > 1.0) {
+          log('INFO', 'STEAM-BOOST', `valorant ${match.team1} vs ${match.team2} ${pickTeam}: mult=${_steamVal.mult} (${_steamVal.evt?.oldOdd}→${_steamVal.evt?.newOdd}, ${_steamVal.evt?.velocityPct}% in ${_steamVal.evt?.windowMin}min)`);
+          _valKellyFrac = _valKellyFrac * _steamVal.mult;
         }
         const stake = calcKellyWithP(pickP, pickOdd, _valKellyFrac, { sport: 'valorant', confKey: 'MEDIA' });
         if (stake === '0u') {
