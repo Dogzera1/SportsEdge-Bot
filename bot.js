@@ -23551,14 +23551,77 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   setInterval(_wrapCron('mt_bucket_guard', runMtBucketGuardCycle), 12 * 60 * 60 * 1000);
   setTimeout(_wrapCron('mt_bucket_guard', runMtBucketGuardCycle), 65 * 60 * 1000);
 
+  // 2026-05-12 audit: comentários em mt-auto-promote.js:38 e ml-auto-promote.js
+  // mencionavam "DM admin a cada decisão" mas implementação NUNCA notificava —
+  // callsites descartavam o `decisions` retornado pelo runCycle. Helper abaixo
+  // captura return e DM admin agregado (skip se total=0, evita spam noop).
+  async function _dmAutoPromoteDecisions(label, result) {
+    try {
+      if (!ADMIN_IDS.size) return;
+      const decisions = result?.decisions;
+      if (!decisions) return;
+      const promoted = decisions.promoted || [];
+      const reverted = decisions.reverted || [];
+      const blocked = decisions.league_blocked || [];
+      const unblocked = decisions.league_unblocked || [];
+      const rejected = decisions.rejected_by_ci || [];
+      const total = promoted.length + reverted.length + blocked.length + unblocked.length;
+      // Só DM se houver mudança REAL (skip ciclos noop). rejected_by_ci entra
+      // só como rodapé informativo quando há outras mudanças.
+      if (total === 0) return;
+      const today = new Date().toISOString().slice(0, 10);
+      const lines = [`📈 *${label} Auto-Promote* — _${today}_`, ''];
+      if (promoted.length) {
+        lines.push('✅ *Promovidos:*');
+        for (const p of promoted.slice(0, 10)) {
+          const ciStr = p.ci ? ` IC[${p.ci.lower_pp},${p.ci.upper_pp}]pp` : '';
+          lines.push(`  • ${p.sport}${p.market ? '/' + p.market : ''} ROI ${p.roi >= 0 ? '+' : ''}${p.roi}% n=${p.n}${ciStr}`);
+        }
+      }
+      if (reverted.length) {
+        lines.push('❌ *Revertidos pra shadow:*');
+        for (const r of reverted.slice(0, 10)) {
+          lines.push(`  • ${r.sport}${r.market ? '/' + r.market : ''} ROI ${r.roi}% n=${r.n}`);
+        }
+      }
+      if (blocked.length) {
+        lines.push('🚫 *Ligas bloqueadas:*');
+        for (const b of blocked.slice(0, 10)) {
+          lines.push(`  • ${b.sport}/${b.market || '?'} ${b.league} (ROI ${b.roi}% n=${b.n})`);
+        }
+      }
+      if (unblocked.length) {
+        lines.push('🔓 *Ligas desbloqueadas:*');
+        for (const u of unblocked.slice(0, 10)) {
+          lines.push(`  • ${u.sport}/${u.market || '?'} ${u.league} (ROI ${u.roi}% n=${u.n})`);
+        }
+      }
+      if (rejected.length) {
+        lines.push('');
+        lines.push(`⏸️ _${rejected.length} candidato(s) rejeitado(s) por IC (mean OK mas IC95% lower ≤ 0)_`);
+      }
+      const msg = lines.join('\n');
+      const routed = _pickTokenForAlert('promote') || _pickTokenForAlert('digest') || _pickTokenForAlert('system');
+      const token = routed?.token || resolveAlertsToken();
+      if (!token) return;
+      await sendAdminDMs(token, msg, { parse_mode: 'Markdown' }, `${label.toLowerCase()}-auto-promote`);
+    } catch (e) {
+      log('WARN', `${label}-AUTO-PROMOTE-DM`, `err: ${e.message}`);
+    }
+  }
+
   // MT auto-promote — avalia (sport, market) shadow stats e decide promote/revert
   // automático. Bloqueia ligas problemáticas per-(sport, market). Cron 12h.
   // Boot offset 70min (post league_guard 45min + bucket_guard 65min).
   try {
     const _mtAutoPromote = require('./lib/mt-auto-promote');
     _mtAutoPromote.loadMtMarketLeagueBlocklist(db);
-    setInterval(_wrapCron('mt_auto_promote', () => _mtAutoPromote.runMtAutoPromoteCycle(db)), 12 * 60 * 60 * 1000);
-    setTimeout(_wrapCron('mt_auto_promote', () => _mtAutoPromote.runMtAutoPromoteCycle(db)), 70 * 60 * 1000);
+    const _mtAutoPromoteRun = async () => {
+      const r = await _mtAutoPromote.runMtAutoPromoteCycle(db);
+      await _dmAutoPromoteDecisions('MT', r);
+    };
+    setInterval(_wrapCron('mt_auto_promote', _mtAutoPromoteRun), 12 * 60 * 60 * 1000);
+    setTimeout(_wrapCron('mt_auto_promote', _mtAutoPromoteRun), 70 * 60 * 1000);
   } catch (e) { log('WARN', 'MT-AUTO-PROMOTE', `boot wire err: ${e.message}`); }
 
   // ML auto-promote — espelho do MT mas pra ML tips (is_shadow=1/0).
@@ -23567,8 +23630,12 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   try {
     const _mlAutoPromote = require('./lib/ml-auto-promote');
     _mlAutoPromote.loadMlLeagueBlocklist(db);
-    setInterval(_wrapCron('ml_auto_promote', () => _mlAutoPromote.runMlAutoPromoteCycle(db)), 12 * 60 * 60 * 1000);
-    setTimeout(_wrapCron('ml_auto_promote', () => _mlAutoPromote.runMlAutoPromoteCycle(db)), 75 * 60 * 1000);
+    const _mlAutoPromoteRun = async () => {
+      const r = await _mlAutoPromote.runMlAutoPromoteCycle(db);
+      await _dmAutoPromoteDecisions('ML', r);
+    };
+    setInterval(_wrapCron('ml_auto_promote', _mlAutoPromoteRun), 12 * 60 * 60 * 1000);
+    setTimeout(_wrapCron('ml_auto_promote', _mlAutoPromoteRun), 75 * 60 * 1000);
   } catch (e) { log('WARN', 'ML-AUTO-PROMOTE', `boot wire err: ${e.message}`); }
 
   // MT promote explain digest — cron diário agrega blockers em tips shadow das
