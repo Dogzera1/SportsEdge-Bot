@@ -36,10 +36,22 @@ curl -s -H "x-admin-key: $KEY" "$BASE/admin/analytics?sport=X"     # variance/Br
 
 Roda esses ANTES de chamar slash command. O slash command foca em coisa que endpoint não cobre (path novo / commit recente / log inspection).
 
+## Pre-commit hook (.githooks/)
+
+Hook fast-gate (1-2s) versionado em `.githooks/pre-commit`. Ver `.githooks/README.md` pra ativação.
+
+Ativação (1× por máquina):
+```bash
+git config core.hooksPath .githooks
+```
+
+Hard gates: syntax error, DELETE FROM tips, limite SAGRADO alterado. Soft warnings: catch silent, console.*, var, TODO/FIXME, env não-documentada. Escape: `--no-verify`.
+
+Pra revisão profunda (AI-powered), use os slash commands acima.
+
 ## Não adicionar sem autorização
 
 - **devDependencies novas** (eslint/knip/depcheck/jest) — `package.json` é sagrado, requer autorização explícita pelo CLAUDE.md
-- **Pre-commit hook** — afeta workflow, perguntar antes
 - **Test suite** — não existe atualmente; adicionar é decisão de produto
 
 ## Property-based testing (futuro)

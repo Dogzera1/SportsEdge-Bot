@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+# SportsEdge-Bot pre-commit hook
+# Hard gates: bloqueiam commit. Soft warnings: imprimem mas deixam passar.
+# Skip total: git commit --no-verify (CLAUDE.md desencoraja sem motivo).
+#
+# Ativação (1× por máquina): git config core.hooksPath .githooks
+
+set -e
+
+STAGED_JS=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.js$' || true)
+STAGED_ALL=$(git diff --cached --name-only --diff-filter=ACM || true)
+
+# ────────────────────────────────────────────────────────────────────────
+# HARD GATE 1: syntax check JS staged
+# ────────────────────────────────────────────────────────────────────────
+if [ -n "$STAGED_JS" ]; then
+  for f in $STAGED_JS; do
+    if [ -f "$f" ]; then
+      if ! node -c "$f" 2>/tmp/precommit-syntax.err; then
+        echo "❌ [pre-commit] SYNTAX ERROR em $f:"
+        cat /tmp/precommit-syntax.err
+        rm -f /tmp/precommit-syntax.err
+        echo ""
+        echo "Commit bloqueado. Corrija ou: git commit --no-verify (não recomendado)"
+        exit 1
+      fi
+    fi
+  done
+  rm -f /tmp/precommit-syntax.err
+fi
+
+# ────────────────────────────────────────────────────────────────────────
+# HARD GATE 2: DELETE FROM tips (CLAUDE.md "Soft delete only")
+# ────────────────────────────────────────────────────────────────────────
+if [ -n "$STAGED_ALL" ]; then
+  HARD_DELETE=$(git diff --cached -U0 -- $STAGED_ALL 2>/dev/null | grep -iE '^\+.*DELETE\s+FROM\s+tips\b' | head -5 || true)
+  if [ -n "$HARD_DELETE" ]; then
+    echo "❌ [pre-commit] DELETE FROM tips detectado:"
+    echo "$HARD_DELETE"
+    echo ""
+    echo "CLAUDE.md: 'Soft delete only pra tips: archived=1, não DELETE.'"
+    echo "Use UPDATE tips SET archived=1 WHERE ... ou --no-verify se intencional."
+    exit 1
+  fi
+fi
+
+# ────────────────────────────────────────────────────────────────────────
+# HARD GATE 3: limites SAGRADOS alterados (CLAUDE.md "não alterar sem pedido")
+# ────────────────────────────────────────────────────────────────────────
+if [ -n "$STAGED_JS" ]; then
+  SAGRADO=$(git diff --cached -U0 -- $STAGED_JS 2>/dev/null | grep -E '^\+.*(MAX_KELLY_FRAC|KELLY_AUTO_TUNE_CEILING|MT_MIN_ODD|MT_EV_CAP_PCT|DAILY_TIP_LIMIT)\s*=\s*[0-9]' | head -5 || true)
+  if [ -n "$SAGRADO" ]; then
+    echo "❌ [pre-commit] Limite SAGRADO alterado em código:"
+    echo "$SAGRADO"
+    echo ""
+    echo "CLAUDE.md lista esses como 'não alterar sem pedido explícito'."
+    echo "Se intencional + autorizado, --no-verify (commit message deve citar autorização)."
+    exit 1
+  fi
+fi
+
+# ────────────────────────────────────────────────────────────────────────
+# SOFT WARNINGS (imprimem, não bloqueiam)
+# ────────────────────────────────────────────────────────────────────────
+WARNINGS=""
+
+if [ -n "$STAGED_JS" ]; then
+  # catch silencioso novo
+  CATCH_SILENT=$(git diff --cached -U0 -- $STAGED_JS 2>/dev/null | grep -E '^\+.*catch\s*\(\s*_?\s*\)\s*\{\s*\}' | head -3 || true)
+  if [ -n "$CATCH_SILENT" ]; then
+    WARNINGS="${WARNINGS}
+⚠️  catch silencioso adicionado (CLAUDE.md exige justificativa documentada):
+$CATCH_SILENT
+"
+  fi
+
+  # console.log adicionado (deveria usar helper log())
+  CONSOLE_LOG=$(git diff --cached -U0 -- $STAGED_JS 2>/dev/null | grep -E '^\+\s*console\.(log|error|warn)' | head -3 || true)
+  if [ -n "$CONSOLE_LOG" ]; then
+    WARNINGS="${WARNINGS}
+⚠️  console.* adicionado (CLAUDE.md: usar helper log('LEVEL','TAG',msg)):
+$CONSOLE_LOG
+"
+  fi
+
+  # var em código novo (CLAUDE.md: var proibido)
+  VAR_USE=$(git diff --cached -U0 -- $STAGED_JS 2>/dev/null | grep -E '^\+\s*var\s+[a-zA-Z_]' | head -3 || true)
+  if [ -n "$VAR_USE" ]; then
+    WARNINGS="${WARNINGS}
+⚠️  var declaração adicionada (CLAUDE.md: usar const/let):
+$VAR_USE
+"
+  fi
+
+  # TODO/FIXME novo (CLAUDE.md: resolve agora ou não faz)
+  TODO_USE=$(git diff --cached -U0 -- $STAGED_JS 2>/dev/null | grep -E '^\+.*//\s*(TODO|FIXME)' | head -3 || true)
+  if [ -n "$TODO_USE" ]; then
+    WARNINGS="${WARNINGS}
+⚠️  TODO/FIXME adicionado (CLAUDE.md: 'resolve agora ou não faz'):
+$TODO_USE
+"
+  fi
+
+  # process.env nova sem .env.example doc
+  NEW_ENV=$(git diff --cached -U0 -- $STAGED_JS 2>/dev/null | grep -oE '^\+.*process\.env\.[A-Z][A-Z0-9_]+' | sed -E 's/.*process\.env\.//; s/[^A-Z0-9_].*//' | sort -u | head -5 || true)
+  if [ -n "$NEW_ENV" ]; then
+    UNDOCUMENTED=""
+    for env in $NEW_ENV; do
+      if ! grep -q "$env" .env.example 2>/dev/null; then
+        UNDOCUMENTED="${UNDOCUMENTED}  - $env
+"
+      fi
+    done
+    if [ -n "$UNDOCUMENTED" ]; then
+      WARNINGS="${WARNINGS}
+⚠️  Env vars novas sem entrada em .env.example:
+$UNDOCUMENTED"
+    fi
+  fi
+fi
+
+# ────────────────────────────────────────────────────────────────────────
+# Output warnings (passa por padrão)
+# ────────────────────────────────────────────────────────────────────────
+if [ -n "$WARNINGS" ]; then
+  echo "$WARNINGS"
+  echo "⚠️  [pre-commit] Warnings acima são advisory. Commit prossegue."
+  echo "    Rode /audit-dinheiro ou /audit-shadow-real pra revisão profunda."
+fi
+
+exit 0
