@@ -14,7 +14,7 @@ if (!/^(0|false|no)$/i.test(String(process.env.HTTP_KEEP_ALIVE || ''))) {
 const fs = require('fs');
 const path = require('path');
 const initDatabase = require('./lib/database');
-const { SPORTS, getSportById, getSportByToken, getTokenToSportMap } = require('./lib/sports');
+const { SPORTS, getSportById, getSportByToken, getTokenToSportMap, isLeagueRealOverride } = require('./lib/sports');
 const { log, calcKelly, calcKellyFraction, calcKellyWithP, norm, fmtDate, fmtDateTime, fmtDuration, safeParse, cachedHttpGet, markPollHeartbeat, getPollHeartbeats, markCronHeartbeat, getCronHeartbeats, dumpCronHeartbeats, loadCronHeartbeats } = require('./lib/utils');
 const { adjustStakeUnits } = require('./lib/risk-manager');
 const { esportsPreFilter } = require('./lib/ml');
@@ -21129,6 +21129,11 @@ async function pollValorant(runOnce = false) {
           log('INFO', 'AUTO-VAL', `[BLOCK] valorant/${match.league} — suprimido`);
           continue;
         }
+        // 2026-05-12: promote seletivo por liga. VALORANT_REAL_LEAGUES override
+        // shadowMode pra ligas whitelisted (decisão granular após audit shadow
+        // 30d: Champions Tour Americas ROI +48% n=21 calib +10pp; resto sangra).
+        const _leagueRealOverride = valConfig.shadowMode && isLeagueRealOverride('valorant', match.league);
+        const effectiveShadow = valConfig.shadowMode && !_leagueRealOverride;
         const rec = await serverPost('/record-tip', {
           matchId: String(match.id) + valMapTag, eventName: match.league,
           p1: match.team1, p2: match.team2, tipParticipant: pickTeam,
@@ -21139,7 +21144,7 @@ async function pollValorant(runOnce = false) {
           modelP1, modelP2, modelPPick: pickP,
           modelLabel: 'valorant-elo',
           tipReason,
-          isShadow: valConfig.shadowMode ? 1 : 0,
+          isShadow: effectiveShadow ? 1 : 0,
           sport: 'valorant',
           lineShopOdds: match.odds || null,
           pickSide: direction,
@@ -21159,7 +21164,10 @@ async function pollValorant(runOnce = false) {
         analyzedValorant.set(key, { ts: now, tipSent: true });
         if (rec?.skipped) continue;
 
-        if (valConfig.shadowMode) {
+        if (_leagueRealOverride) {
+          log('INFO', 'AUTO-VAL', `[REAL-OVERRIDE] valorant/${match.league} promoted via VALORANT_REAL_LEAGUES: ${pickTeam} @ ${pickOdd} | EV:${evPct.toFixed(1)}%`);
+        }
+        if (effectiveShadow) {
           log('INFO', 'AUTO-VAL', `[SHADOW] ${pickTeam} @ ${pickOdd} | EV:${evPct.toFixed(1)}% | ${stakeAdj}u | ${conf} | ${tipReason}`);
           continue;
         }
