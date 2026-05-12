@@ -20379,9 +20379,18 @@ async function pollCs(runOnce = false) {
               const minEv = parseFloat(process.env.CS_MARKET_SCAN_MIN_EV ?? '4');
               const shadowMinEv = parseFloat(process.env.CS_SHADOW_MIN_EV ?? '0');
               const { minOdd: minOddCs, maxOdd: maxOddCs } = _resolveMtOddBounds('cs2');
+              // 2026-05-12: live-aware pricing quando isLiveCs E score parcial.
+              // cs-live-pricing filtra dist condicional a (score1, score2).
+              // Reage ao estado in-play — fix CS_MIN_PMODEL gate boundary
+              // (5 shadow live/24h, 0 real → gate stale com pMap pre-game).
+              // Pre-game OU 0-0 cai em lol-markets (mesmo comportamento).
+              const _csIsLivePartial = isLiveCs && ((Number(match.score1) || 0) + (Number(match.score2) || 0) > 0);
+              const _csPricingLib = _csIsLivePartial
+                ? require('./lib/cs-live-pricing')
+                : require('./lib/lol-markets');
               const _scanResultCs = scanMarkets({
                 markets, pMap: pMapCs, bestOf: csBestOf,
-                pricingLib: require('./lib/lol-markets'),
+                pricingLib: _csPricingLib,
                 minEv,
                 shadowMinEv,
                 momentum: _csMomentum, // tier-aware (CS_MOMENTUM_<TIER>) — math consistency com mapProbFromSeries
@@ -20390,7 +20399,13 @@ async function pollCs(runOnce = false) {
                 maxPerMatch: parseInt(process.env.CS_MARKET_MAX_PER_MATCH || '', 10) || null,
                 // 2026-05-12: calib opcional pós-pricing. No-op até cs-mt-calib.json existir.
                 calibLib: require('./lib/sport-mt-calib').getSportMtCalib('cs'),
+                // Live-aware: score parcial propaga via pricingOpts em cs-live-pricing.
+                score1: _csIsLivePartial ? (Number(match.score1) || 0) : undefined,
+                score2: _csIsLivePartial ? (Number(match.score2) || 0) : undefined,
               });
+              if (_csIsLivePartial) {
+                log('INFO', 'CS-LIVE-PRICING', `${match.team1} vs ${match.team2} [Bo${csBestOf}]: live ${match.score1}-${match.score2} → dist filtering ativo`);
+              }
               let found = _scanResultCs.promotable || _scanResultCs;
               const _shadowAllCs = _scanResultCs.shadow || found;
               if (found.length >= 2 && process.env.CS_CORRELATION_ADJ !== 'false') {
