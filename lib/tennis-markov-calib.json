@@ -1,7 +1,7 @@
 {
   "version": 1,
   "sport": "tennis",
-  "fittedAt": "2026-05-10T11:43:58.051Z",
+  "fittedAt": "2026-05-12T18:06:09.764Z",
   "method": "pav_with_beta_smoothing",
   "target": "outcome (win/loss)",
   "prior": {
@@ -10,7 +10,7 @@
     "alpha": 8
   },
   "minBin": 6,
-  "nSamples": 448,
+  "nSamples": 459,
   "filter": "all",
   "markets": {
     "handicapGames": {
@@ -18,156 +18,296 @@
         {
           "lo": 0.3,
           "hi": 0.55,
-          "mid": 0.4457,
-          "n": 132,
-          "wins": 38,
-          "rawP": 0.2879,
-          "priorP": 0.4314,
-          "pCalib": 0.2961
+          "mid": 0.4219,
+          "n": 174,
+          "wins": 43,
+          "rawP": 0.2471,
+          "priorP": 0.4405,
+          "pCalib": 0.2556
         },
         {
           "lo": 0.55,
-          "hi": 0.65,
-          "mid": 0.6163,
-          "n": 105,
-          "wins": 37,
-          "rawP": 0.3524,
-          "priorP": 0.456,
-          "pCalib": 0.3597
-        },
-        {
-          "lo": 0.65,
-          "hi": 0.7,
-          "mid": 0.6571,
-          "n": 54,
-          "wins": 25,
-          "rawP": 0.463,
-          "priorP": 0.469,
-          "pCalib": 0.4637
+          "hi": 0.85,
+          "mid": 0.6169,
+          "n": 134,
+          "wins": 45,
+          "rawP": 0.3358,
+          "priorP": 0.4643,
+          "pCalib": 0.3431
         }
       ],
       "coverage": [
         0.3,
-        0.7
+        0.85
       ],
-      "nTotal": 292,
-      "tiers": {
-        "main": {
+      "nTotal": 308,
+      "sides": {
+        "away": {
           "bins": [
             {
               "lo": 0.3,
               "hi": 0.55,
-              "mid": 0.4367,
-              "n": 71,
-              "wins": 21,
-              "rawP": 0.2958,
-              "priorP": 0.441,
-              "pCalib": 0.3105
+              "mid": 0.423,
+              "n": 81,
+              "wins": 20,
+              "rawP": 0.2469,
+              "priorP": 0.4948,
+              "pCalib": 0.2692
             },
             {
               "lo": 0.55,
-              "hi": 0.65,
-              "mid": 0.6156,
-              "n": 74,
+              "hi": 0.8,
+              "mid": 0.6154,
+              "n": 66,
               "wins": 23,
-              "rawP": 0.3108,
-              "priorP": 0.4453,
-              "pCalib": 0.3239
-            },
-            {
-              "lo": 0.65,
-              "hi": 0.7,
-              "mid": 0.657,
-              "n": 34,
-              "wins": 17,
-              "rawP": 0.5,
-              "priorP": 0.4661,
-              "pCalib": 0.4936
+              "rawP": 0.3485,
+              "priorP": 0.4896,
+              "pCalib": 0.3637
             }
           ],
           "coverage": [
             0.3,
-            0.7
+            0.8
           ],
-          "nTotal": 179
+          "nTotal": 147
         },
+        "home": {
+          "bins": [
+            {
+              "lo": 0.3,
+              "hi": 0.55,
+              "mid": 0.421,
+              "n": 93,
+              "wins": 23,
+              "rawP": 0.2473,
+              "priorP": 0.402,
+              "pCalib": 0.2596
+            },
+            {
+              "lo": 0.55,
+              "hi": 0.85,
+              "mid": 0.6184,
+              "n": 68,
+              "wins": 22,
+              "rawP": 0.3235,
+              "priorP": 0.4424,
+              "pCalib": 0.336
+            }
+          ],
+          "coverage": [
+            0.3,
+            0.85
+          ],
+          "nTotal": 161
+        }
+      },
+      "tiers": {
         "challenger": {
           "bins": [
             {
               "lo": 0.3,
               "hi": 0.55,
-              "mid": 0.4572,
-              "n": 42,
-              "wins": 12,
-              "rawP": 0.2857,
-              "priorP": 0.4352,
-              "pCalib": 0.3096
+              "mid": 0.419,
+              "n": 81,
+              "wins": 19,
+              "rawP": 0.2346,
+              "priorP": 0.4275,
+              "pCalib": 0.2519
             },
             {
               "lo": 0.55,
-              "hi": 0.65,
-              "mid": 0.6159,
-              "n": 20,
-              "wins": 7,
-              "rawP": 0.35,
-              "priorP": 0.4826,
-              "pCalib": 0.3583
-            },
-            {
-              "lo": 0.65,
-              "hi": 0.7,
-              "mid": 0.6596,
-              "n": 14,
-              "wins": 3,
-              "rawP": 0.2143,
-              "priorP": 0.4941,
-              "pCalib": 0.3583
+              "hi": 0.85,
+              "mid": 0.6342,
+              "n": 32,
+              "wins": 10,
+              "rawP": 0.3125,
+              "priorP": 0.4795,
+              "pCalib": 0.3459
             }
           ],
           "coverage": [
             0.3,
-            0.7
+            0.85
           ],
-          "nTotal": 77
+          "nTotal": 113,
+          "sides": {
+            "away": {
+              "bins": [
+                {
+                  "lo": 0.3,
+                  "hi": 0.55,
+                  "mid": 0.4315,
+                  "n": 42,
+                  "wins": 10,
+                  "rawP": 0.2381,
+                  "priorP": 0.497,
+                  "pCalib": 0.2795
+                },
+                {
+                  "lo": 0.55,
+                  "hi": 0.8,
+                  "mid": 0.6248,
+                  "n": 19,
+                  "wins": 6,
+                  "rawP": 0.3158,
+                  "priorP": 0.4937,
+                  "pCalib": 0.3685
+                }
+              ],
+              "coverage": [
+                0.3,
+                0.8
+              ],
+              "nTotal": 61
+            },
+            "home": {
+              "bins": [
+                {
+                  "lo": 0.3,
+                  "hi": 0.55,
+                  "mid": 0.4055,
+                  "n": 39,
+                  "wins": 9,
+                  "rawP": 0.2308,
+                  "priorP": 0.3715,
+                  "pCalib": 0.2547
+                },
+                {
+                  "lo": 0.55,
+                  "hi": 0.85,
+                  "mid": 0.6479,
+                  "n": 13,
+                  "wins": 4,
+                  "rawP": 0.3077,
+                  "priorP": 0.4611,
+                  "pCalib": 0.3662
+                }
+              ],
+              "coverage": [
+                0.3,
+                0.85
+              ],
+              "nTotal": 52
+            }
+          }
         },
         "wta125k": {
           "bins": [
             {
               "lo": 0.3,
               "hi": 0.55,
-              "mid": 0.4543,
-              "n": 19,
-              "wins": 5,
-              "rawP": 0.2632,
-              "priorP": 0.3921,
-              "pCalib": 0.3014
+              "mid": 0.4278,
+              "n": 21,
+              "wins": 4,
+              "rawP": 0.1905,
+              "priorP": 0.427,
+              "pCalib": 0.2557
             },
             {
               "lo": 0.55,
               "hi": 0.65,
-              "mid": 0.6217,
-              "n": 11,
-              "wins": 7,
-              "rawP": 0.6364,
-              "priorP": 0.4866,
-              "pCalib": 0.5733
+              "mid": 0.5922,
+              "n": 19,
+              "wins": 8,
+              "rawP": 0.4211,
+              "priorP": 0.5064,
+              "pCalib": 0.4464
+            }
+          ],
+          "coverage": [
+            0.3,
+            0.65
+          ],
+          "nTotal": 40
+        },
+        "main": {
+          "bins": [
+            {
+              "lo": 0.3,
+              "hi": 0.55,
+              "mid": 0.4236,
+              "n": 72,
+              "wins": 20,
+              "rawP": 0.2778,
+              "priorP": 0.4606,
+              "pCalib": 0.2961
             },
             {
-              "lo": 0.65,
+              "lo": 0.55,
               "hi": 0.7,
-              "mid": 0.6515,
-              "n": 6,
-              "wins": 5,
-              "rawP": 0.8333,
-              "priorP": 0.4323,
-              "pCalib": 0.6042
+              "mid": 0.6159,
+              "n": 83,
+              "wins": 27,
+              "rawP": 0.3253,
+              "priorP": 0.4502,
+              "pCalib": 0.3363
             }
           ],
           "coverage": [
             0.3,
             0.7
           ],
-          "nTotal": 36
+          "nTotal": 155,
+          "sides": {
+            "away": {
+              "bins": [
+                {
+                  "lo": 0.3,
+                  "hi": 0.55,
+                  "mid": 0.4098,
+                  "n": 30,
+                  "wins": 9,
+                  "rawP": 0.3,
+                  "priorP": 0.4873,
+                  "pCalib": 0.3394
+                },
+                {
+                  "lo": 0.55,
+                  "hi": 0.65,
+                  "mid": 0.6152,
+                  "n": 39,
+                  "wins": 14,
+                  "rawP": 0.359,
+                  "priorP": 0.4835,
+                  "pCalib": 0.3802
+                }
+              ],
+              "coverage": [
+                0.3,
+                0.65
+              ],
+              "nTotal": 69
+            },
+            "home": {
+              "bins": [
+                {
+                  "lo": 0.3,
+                  "hi": 0.55,
+                  "mid": 0.4334,
+                  "n": 42,
+                  "wins": 11,
+                  "rawP": 0.2619,
+                  "priorP": 0.4432,
+                  "pCalib": 0.2909
+                },
+                {
+                  "lo": 0.55,
+                  "hi": 0.7,
+                  "mid": 0.6166,
+                  "n": 44,
+                  "wins": 13,
+                  "rawP": 0.2955,
+                  "priorP": 0.4244,
+                  "pCalib": 0.3153
+                }
+              ],
+              "coverage": [
+                0.3,
+                0.7
+              ],
+              "nTotal": 86
+            }
+          }
         }
       }
     },
@@ -176,87 +316,209 @@
         {
           "lo": 0.3,
           "hi": 0.55,
-          "mid": 0.4261,
-          "n": 83,
-          "wins": 25,
-          "rawP": 0.3012,
-          "priorP": 0.4344,
-          "pCalib": 0.3129
+          "mid": 0.4133,
+          "n": 112,
+          "wins": 30,
+          "rawP": 0.2679,
+          "priorP": 0.4001,
+          "pCalib": 0.2767
         },
         {
           "lo": 0.55,
-          "hi": 0.65,
-          "mid": 0.5846,
-          "n": 30,
-          "wins": 9,
-          "rawP": 0.3,
-          "priorP": 0.4675,
-          "pCalib": 0.3353
+          "hi": 0.7,
+          "mid": 0.5853,
+          "n": 14,
+          "wins": 3,
+          "rawP": 0.2143,
+          "priorP": 0.4598,
+          "pCalib": 0.3036
         }
       ],
       "coverage": [
         0.3,
-        0.65
+        0.7
       ],
-      "nTotal": 113,
-      "tiers": {
-        "main": {
+      "nTotal": 126,
+      "sides": {
+        "under": {
           "bins": [
             {
               "lo": 0.3,
               "hi": 0.55,
-              "mid": 0.4315,
-              "n": 54,
-              "wins": 17,
-              "rawP": 0.3148,
-              "priorP": 0.453,
-              "pCalib": 0.3317
+              "mid": 0.4175,
+              "n": 60,
+              "wins": 23,
+              "rawP": 0.3833,
+              "priorP": 0.3795,
+              "pCalib": 0.3644
             },
             {
               "lo": 0.55,
-              "hi": 0.65,
-              "mid": 0.579,
-              "n": 18,
-              "wins": 5,
-              "rawP": 0.2778,
-              "priorP": 0.444,
-              "pCalib": 0.3317
+              "hi": 0.7,
+              "mid": 0.5774,
+              "n": 10,
+              "wins": 1,
+              "rawP": 0.1,
+              "priorP": 0.4455,
+              "pCalib": 0.3644
             }
           ],
           "coverage": [
             0.3,
-            0.65
+            0.7
           ],
-          "nTotal": 72
+          "nTotal": 70
         },
+        "over": {
+          "bins": [
+            {
+              "lo": 0.3,
+              "hi": 0.55,
+              "mid": 0.4086,
+              "n": 52,
+              "wins": 7,
+              "rawP": 0.1346,
+              "priorP": 0.4267,
+              "pCalib": 0.1736
+            },
+            {
+              "lo": 0.55,
+              "hi": 0.7,
+              "mid": 0.6048,
+              "n": 4,
+              "wins": 2,
+              "rawP": 0.5,
+              "priorP": 0.4975,
+              "pCalib": 0.4983
+            }
+          ],
+          "coverage": [
+            0.3,
+            0.7
+          ],
+          "nTotal": 56
+        }
+      },
+      "tiers": {
         "challenger": {
           "bins": [
             {
               "lo": 0.3,
               "hi": 0.55,
-              "mid": 0.4101,
-              "n": 16,
-              "wins": 4,
-              "rawP": 0.25,
-              "priorP": 0.4017,
-              "pCalib": 0.3006
+              "mid": 0.3948,
+              "n": 44,
+              "wins": 10,
+              "rawP": 0.2273,
+              "priorP": 0.3854,
+              "pCalib": 0.2516
+            },
+            {
+              "lo": 0.55,
+              "hi": 0.7,
+              "mid": 0.6023,
+              "n": 6,
+              "wins": 1,
+              "rawP": 0.1667,
+              "priorP": 0.5173,
+              "pCalib": 0.367
+            }
+          ],
+          "coverage": [
+            0.3,
+            0.7
+          ],
+          "nTotal": 50,
+          "sides": {
+            "under": {
+              "bins": [
+                {
+                  "lo": 0.3,
+                  "hi": 0.55,
+                  "mid": 0.3916,
+                  "n": 27,
+                  "wins": 9,
+                  "rawP": 0.3333,
+                  "priorP": 0.3523,
+                  "pCalib": 0.3367
+                },
+                {
+                  "lo": 0.55,
+                  "hi": 0.7,
+                  "mid": 0.5946,
+                  "n": 4,
+                  "wins": 0,
+                  "rawP": 0,
+                  "priorP": 0.4949,
+                  "pCalib": 0.3367
+                }
+              ],
+              "coverage": [
+                0.3,
+                0.7
+              ],
+              "nTotal": 31
+            }
+          }
+        },
+        "main": {
+          "bins": [
+            {
+              "lo": 0.3,
+              "hi": 0.55,
+              "mid": 0.4348,
+              "n": 48,
+              "wins": 15,
+              "rawP": 0.3125,
+              "priorP": 0.4224,
+              "pCalib": 0.3175
             },
             {
               "lo": 0.55,
               "hi": 0.65,
-              "mid": 0.5938,
-              "n": 10,
-              "wins": 2,
-              "rawP": 0.2,
-              "priorP": 0.5112,
-              "pCalib": 0.3383
+              "mid": 0.5688,
+              "n": 6,
+              "wins": 0,
+              "rawP": 0,
+              "priorP": 0.4058,
+              "pCalib": 0.3175
             }
           ],
           "coverage": [
             0.3,
             0.65
           ],
-          "nTotal": 26
+          "nTotal": 54,
+          "sides": {
+            "under": {
+              "bins": [
+                {
+                  "lo": 0.3,
+                  "hi": 0.55,
+                  "mid": 0.4452,
+                  "n": 25,
+                  "wins": 10,
+                  "rawP": 0.4,
+                  "priorP": 0.4197,
+                  "pCalib": 0.3791
+                },
+                {
+                  "lo": 0.55,
+                  "hi": 0.65,
+                  "mid": 0.5641,
+                  "n": 5,
+                  "wins": 0,
+                  "rawP": 0,
+                  "priorP": 0.407,
+                  "pCalib": 0.3791
+                }
+              ],
+              "coverage": [
+                0.3,
+                0.65
+              ],
+              "nTotal": 30
+            }
+          }
         }
       }
     }
@@ -264,29 +526,29 @@
   "backtest": {
     "pre": {
       "label": "PRE  (raw)",
-      "n": 426,
-      "wins": 145,
-      "hit": 34,
-      "profit": -15.99,
-      "roi": -3.8,
-      "avgP": 0.529,
-      "avgEV": 58.2,
-      "avgClv": 2.92,
-      "brier": 0.2634,
-      "ece": 0.1924
+      "n": 428,
+      "wins": 118,
+      "hit": 27.6,
+      "profit": -67.28,
+      "roi": -15.7,
+      "avgP": 0.489,
+      "avgEV": 52.7,
+      "avgClv": 9.38,
+      "brier": 0.2496,
+      "ece": 0.2142
     },
     "post": {
       "label": "POST (calib)",
-      "n": 144,
-      "wins": 32,
-      "hit": 22.2,
-      "profit": 12.67,
-      "roi": 8.8,
-      "avgP": 0.319,
-      "avgEV": 57.4,
-      "avgClv": 7.05,
-      "brier": 0.1869,
-      "ece": 0.1031
+      "n": 122,
+      "wins": 25,
+      "hit": 20.5,
+      "profit": 7.88,
+      "roi": 6.5,
+      "avgP": 0.281,
+      "avgEV": 41.2,
+      "avgClv": 7.7,
+      "brier": 0.1739,
+      "ece": 0.0764
     }
   }
 }
