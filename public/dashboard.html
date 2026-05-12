@@ -4886,12 +4886,34 @@ let marketTipsState = {
 
 // 2026-04-28: race protection MT shadow. Antes click rápido em sport cards
 // disparava 3-4 fetches sobrepostos; render último a chegar dependia de
-// network timing, mostrando lista errada vs sport selecionado. Bloqueia
-// chamadas concurrentes; nova chamada só roda após current acabar.
+// network timing, mostrando lista errada vs sport selecionado.
+// 2026-05-12 audit fluidity: o `if (_loadingMtShadow) return` ANTIGO dropava
+// silenciosamente clicks novos durante load em andamento — usuário trocava de
+// sport e card ficava no anterior (precisava clicar 2-3x esperando network).
+// Agora: enfileira reload pendente (igual loadMlShadowBySport) — último click
+// SEMPRE renderiza, garantindo card sincronizado com sport ativo. Safety break
+// iter<5 evita loop teórico em filter spam.
 let _loadingMtShadow = false;
+let _pendingMtShadowReload = false;
 async function loadMarketTipsShadow() {
-  if (_loadingMtShadow) return;
+  if (_loadingMtShadow) {
+    _pendingMtShadowReload = true;
+    return;
+  }
   _loadingMtShadow = true;
+  let _iter = 0;
+  try {
+    do {
+      _pendingMtShadowReload = false;
+      await _loadMarketTipsShadowInternal();
+      _iter++;
+    } while (_pendingMtShadowReload && _iter < 5);
+  } finally {
+    _loadingMtShadow = false;
+  }
+}
+
+async function _loadMarketTipsShadowInternal() {
   try {
   // Reset página/sport
   if (marketTipsState.sport !== currentSport) {
@@ -4967,8 +4989,11 @@ async function loadMarketTipsShadow() {
     : '';
   meta.textContent = `${data.total || 0} tips únicas (${days}d) · ${data.pending || 0} pend · ROI ${data.roi != null ? (data.roi >= 0 ? '+' : '') + data.roi + '%' : '—'} · CLV ${data.avgClvPct != null ? (data.avgClvPct >= 0 ? '+' : '') + data.avgClvPct + '%' : '—'}${dedupSuffix}`;
   renderMarketTipsPage();
-  } finally {
-    _loadingMtShadow = false;
+  } catch (e) {
+    // Sem fail-silent: log + render error pra não deixar card vazio "stuck"
+    console.error('[loadMarketTipsShadow] error:', e);
+    const el = document.getElementById('marketTipsBody');
+    if (el) el.innerHTML = `<div class="empty-state" style="color:var(--danger,#ef4444)">⚠ erro: ${e.message || e}</div>`;
   }
 }
 
