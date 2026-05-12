@@ -11905,6 +11905,19 @@ setInterval(load, 60000);
     return;
   }
 
+  // GET /admin/tennis-calib-meta — expõe fittedAt + sides/tiers do tennis-markov-calib.json
+  // atual (file persistido), pra validar quando refresh-isotonics terminou e se schema
+  // v2.1 side-aware foi aplicado.
+  if (p === '/admin/tennis-calib-meta' && req.method === 'GET') {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const { getCalibMeta } = require('./lib/tennis-markov-calib');
+      const meta = getCalibMeta();
+      sendJson(res, { ok: true, meta });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   // GET /admin/p2-status — single source of truth de compliance P2.
   // Reporta config atual dos 11 envs P2-related + frozen_holdout + recomendações.
   // Útil pra validar que prod respeita "shadow=causa, real=sintoma" antes de deploy.
