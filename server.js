@@ -28475,6 +28475,41 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
       stake_reais: tipStakeReais(t, _bl.unit_value),
       profit_reais: tipProfitReais(t, _bl.unit_value),
     }));
+
+    // 2026-05-12: enriquece basket tips com series_game (NBA playoffs Game N).
+    // Conta match_results entre mesmos times nos últimos 21d antes da tip
+    // (cobre 1 round de playoffs ~7-12d entre games + folga). Regular season
+    // raramente tem jogos consecutivos same pair em 21d → false positive baixo.
+    // Sem alteração na shape — campo é opcional na response.
+    try {
+      const _basketTips = rows.filter(t => t.sport === 'basket' && t.participant1 && t.participant2 && t.sent_at);
+      if (_basketTips.length) {
+        const _seriesStmt = db.prepare(`
+          SELECT COUNT(*) AS n
+          FROM match_results
+          WHERE game = 'basket'
+            AND ((lower(REPLACE(REPLACE(REPLACE(REPLACE(team1,' ',''),'-',''),'.',''),'''','')) = ?
+                  AND lower(REPLACE(REPLACE(REPLACE(REPLACE(team2,' ',''),'-',''),'.',''),'''','')) = ?)
+              OR (lower(REPLACE(REPLACE(REPLACE(REPLACE(team1,' ',''),'-',''),'.',''),'''','')) = ?
+                  AND lower(REPLACE(REPLACE(REPLACE(REPLACE(team2,' ',''),'-',''),'.',''),'''','')) = ?))
+            AND resolved_at >= datetime(?, '-21 days')
+            AND resolved_at < ?
+            AND winner IS NOT NULL AND winner != ''
+        `);
+        const _normT = s => String(s || '').toLowerCase().replace(/[\s\-.']/g, '');
+        for (const t of _basketTips) {
+          const n1 = _normT(t.participant1);
+          const n2 = _normT(t.participant2);
+          if (!n1 || !n2) continue;
+          try {
+            const r = _seriesStmt.get(n1, n2, n2, n1, t.sent_at, t.sent_at);
+            const prior = r?.n || 0;
+            t.series_game = prior + 1;
+          } catch (_) {}
+        }
+      }
+    } catch (_) { /* fallback: campo simplesmente ausente, frontend handle */ }
+
     if (formatPaginated) {
       sendJson(res, { rows, total: totalCount, offset, limit });
     } else {

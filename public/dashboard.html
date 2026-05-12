@@ -3589,6 +3589,11 @@ function renderTipsTable() {
             segChip = mm
               ? `<span class="chip" title="Tip de mapa específico (match_id _MAP${mm[1]})" style="background:#7c3aed25;color:#a78bfa;border:1px solid #7c3aed55;font-size:0.7em;padding:1px 5px;margin-right:4px">🗺️ M${mm[1]}</span>`
               : `<span class="chip" title="Tip da série inteira (Bo3/Bo5 winner)" style="background:#0891b225;color:#67e8f9;border:1px solid #0891b255;font-size:0.7em;padding:1px 5px;margin-right:4px">🏆 série</span>`;
+          } else if (_spLow === 'basket' && Number.isFinite(t.series_game) && t.series_game >= 1) {
+            // 2026-05-12: NBA playoffs Game N. Backend conta match_results entre
+            // mesmos times nos últimos 21d (1 round). G1=primeira tip da série,
+            // G2+ = jogos subsequentes. Caveat: temporada regular pode inflar contagem.
+            segChip = `<span class="chip" title="Jogo ${t.series_game} da série (NBA playoffs). Backend conta match_results entre os mesmos times nos últimos 21d. Pode inflar se houver jogos regular season recentes." style="background:#fb923c25;color:#fb923c;border:1px solid #fb923c55;font-size:0.7em;padding:1px 5px;margin-right:4px">🏀 G${t.series_game}</span>`;
           }
           return `
             <tr>
