@@ -7644,9 +7644,22 @@ setInterval(load, 10000);
   async function resolveEsportsResult({ sport, game, pandaPath, rawId, t1, t2, sentAt }) {
     if (!PANDASCORE_TOKEN) return { resolved: false, error: 'PANDASCORE_TOKEN missing' };
     // Tips podem ter sufixo _MAP{N} (per-phase tip) — usa o ID da série pra resolver.
-    // Settlement per-map não é suportado (fonte PS paywall + VLR per-match); usa série winner
-    // como best-effort. Pode ser incorreto quando map winner != series winner — aceitável
-    // pq tip é de uma fase específica, e resultado final da série ainda informa calibração.
+    // Settlement per-map não é suportado (fonte PS paywall + VLR per-match); usa série
+    // winner como best-effort apenas em sweep (detecção em /settle:29154+ via
+    // settleMapWinnerFromSweep). Para non-sweep o /settle filter rejeita a tip
+    // (auto-void via NON_ML_AUTOARCHIVE em 36h) — NÃO usa series winner como map winner.
+    // 2026-05-13: WARN throttled quando match_id tem _MAP{N} pra rastrear caller.
+    const _mapSuffix = rawId.match(/_MAP(\d+)$/);
+    if (_mapSuffix) {
+      global._mapResultWarnLog = global._mapResultWarnLog || new Map();
+      const _wk = `${sport}|${rawId}`;
+      const _wl = global._mapResultWarnLog.get(_wk) || 0;
+      if (Date.now() - _wl >= 6 * 60 * 60 * 1000) {
+        global._mapResultWarnLog.set(_wk, Date.now());
+        log('DEBUG', 'RESOLVE-MAP',
+          `${sport} rawId=${rawId} map=${_mapSuffix[1]} → resolvendo pelo series winner (sweep guard aplicado em /settle filter)`);
+      }
+    }
     const baseId = rawId.replace(/_MAP\d+$/, '');
     const psMatch = baseId.match(new RegExp('^' + sport + '_ps_(\\d+)$'));
     if (psMatch) {
@@ -17297,6 +17310,45 @@ load();
       const sql = `UPDATE market_tips_shadow SET result='void', settled_at=datetime('now'), profit_units=0 WHERE ${conds.join(' AND ')}`;
       const r = db.prepare(sql).run(...params);
       sendJson(res, { ok: true, voided: r.changes, sport, criteria: { days, market, minEv, maxPModel, minPModel, maxAbsLine, includeSettled } });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
+  // POST /admin/void-tips-batch?ids=1,2,3 — void tips em massa (tabela `tips`).
+  // 2026-05-13: criado pra cleanup de tips MAP*-specific settled erroneamente pelo
+  // series winner (audit 2026-05-13, 26 tips em range 2200-2935). Reversível via
+  // /reopen-tip. Bankroll é ajustado: shadow tips têm profit_reais=null (no-op);
+  // tips reais com profit_reais != 0 revertem o delta (igual /reopen-tip).
+  if (p === '/admin/void-tips-batch' && req.method === 'POST') {
+    if (!requireAdmin(req, res)) return;
+    const ids = String(parsed.query.ids || '').split(',').map(s => parseInt(s.trim(), 10)).filter(n => Number.isFinite(n) && n > 0);
+    if (!ids.length) { sendJson(res, { error: 'ids obrigatório (csv de inteiros)' }, 400); return; }
+    const reason = String(parsed.query.reason || 'admin void batch').slice(0, 200);
+    try {
+      const placeholders = ids.map(() => '?').join(',');
+      const out = db.transaction(() => {
+        const rows = db.prepare(`SELECT id, sport, result, profit_reais FROM tips WHERE id IN (${placeholders})`).all(...ids);
+        let voided = 0;
+        let bankrollDelta = {};
+        for (const row of rows) {
+          if (row.result === 'void') continue;
+          db.prepare(`UPDATE tips SET result='void', settled_at=datetime('now'), profit_reais=0 WHERE id=?`).run(row.id);
+          try {
+            db.prepare(`
+              INSERT INTO tip_settlement_audit (tip_id, sport, prev_result, new_result, prev_profit_reais, new_profit_reais, actor, reason, source)
+              VALUES (?, ?, ?, 'void', ?, 0, 'admin', ?, '/admin/void-tips-batch')
+            `).run(row.id, row.sport, row.result, row.profit_reais ?? null, reason);
+          } catch (_) {}
+          if (Number.isFinite(row.profit_reais) && row.profit_reais !== 0) {
+            db.prepare(`UPDATE bankroll SET current_banca = round(current_banca - ?, 2), updated_at=datetime('now') WHERE sport = ?`)
+              .run(row.profit_reais, row.sport);
+            bankrollDelta[row.sport] = (bankrollDelta[row.sport] || 0) + (-row.profit_reais);
+          }
+          voided++;
+        }
+        return { voided, bankroll_delta: bankrollDelta, requested: ids.length };
+      })();
+      sendJson(res, { ok: true, ...out });
     } catch (e) { sendJson(res, { error: e.message }, 500); }
     return;
   }
@@ -29153,7 +29205,37 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
           const _esportsSports = new Set(['esports','dota2','lol','cs','cs2','valorant']);
           const eligibleTips = tips.filter(tip => {
             const mkt = String(tip.market_type || 'ML').toUpperCase();
-            if (ML_MARKETS.has(mkt)) return true;
+            // 2026-05-13: ML tips com match_id sufixado _MAP{N} (Pinnacle live map ML —
+            // scanMarkets bot.js:2850/16146/20295/21060) também precisam guard sweep.
+            // Antes passavam livres pelo filter ML_MARKETS → name_match contra series
+            // winner → 15+ tips settled erradas em range 2625-2904 (Bo3 2-1 / Bo3 1-2
+            // / Bo5 3-1, etc). Detecta mapN do market_type OU do match_id, prioriza
+            // market_type quando ambos presentes.
+            const _mapTipMatchMid = String(tip.match_id || '').match(/_MAP(\d+)(?:$|_)/);
+            const _mapTipMatchMkt = mkt.match(/^MAP(\d+)_WINNER$/);
+            const _mapN = _mapTipMatchMkt
+              ? parseInt(_mapTipMatchMkt[1], 10)
+              : (_mapTipMatchMid ? parseInt(_mapTipMatchMid[1], 10) : null);
+            const _isMapSpecific = Number.isFinite(_mapN) && _mapN > 0 && _esportsSports.has(sport);
+            if (ML_MARKETS.has(mkt) && !_isMapSpecific) return true;
+            if (ML_MARKETS.has(mkt) && _isMapSpecific) {
+              try {
+                const { settleMapWinnerFromSweep } = require('./lib/market-tips-shadow');
+                const probe = settleMapWinnerFromSweep(_mapN, _scoreStr, true);
+                if (probe.result === 'win' || probe.result === 'loss' || probe.result === 'void') {
+                  return true;
+                }
+              } catch (_) {}
+              global._settleGuardWarnLog = global._settleGuardWarnLog || new Map();
+              const _sgKey = `nsweep_ml|${tip.id}`;
+              const _sgLast = global._settleGuardWarnLog.get(_sgKey) || 0;
+              if (Date.now() - _sgLast >= 6 * 60 * 60 * 1000) {
+                global._settleGuardWarnLog.set(_sgKey, Date.now());
+                log('WARN', 'SETTLE-GUARD',
+                  `${sport} tip id=${tip.id} ML map${_mapN}-specific (match_id=${tip.match_id}) rejeitada (non-sweep, precisa per-map data — auto-void em ≤36h via NON_ML_AUTOARCHIVE)`);
+              }
+              return false;
+            }
             const mapMatch = mkt.match(/^MAP(\d+)_WINNER$/);
             if (mapMatch && _esportsSports.has(sport)) {
               try {
