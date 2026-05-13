@@ -505,6 +505,94 @@
     #calibChart { max-height: 200px; }
     #clvChart { max-height: 180px; }
     #equityChart { max-height: 220px; }
+
+    /* ─────────────────────────────────────────────────────────
+       Mobile (≤640px) — override consolidado
+       2026-05-13: versão mobile do dashboard PC. Mantém estrutura
+       e UX desktop — só compacta paddings/fonts e força scroll
+       horizontal em grids inline que têm colunas px hardcoded.
+       ───────────────────────────────────────────────────────── */
+    @media (max-width: 640px) {
+      body { font-size: 13px; }
+
+      /* Header sticky compacto */
+      .top-inner { padding: 10px 12px; gap: 8px; flex-wrap: wrap; }
+      .brand { font-size: 13px; gap: 6px; }
+      .brand a { font-size: 10px; padding: 2px 6px; margin-left: 8px; }
+      .sport-selector { margin-left: auto; }
+      .sport-select { font-size: 12px; padding: 6px 26px 6px 10px; }
+      .top-meta { font-size: 11px; gap: 6px; }
+      .refresh-btn { padding: 5px 8px; font-size: 11px; min-height: 32px; }
+
+      /* Main padding reduzido */
+      main { padding: 12px; }
+      .section-title { font-size: 10px; margin-bottom: 8px; }
+
+      /* KPI cards (já viram 1col em <520px, só tighten) */
+      .kpi { padding: 12px; }
+      .kpi-label { font-size: 10px; }
+      .kpi-value { font-size: 22px; }
+      .kpi-sub, .kpi-meta { font-size: 11px; }
+
+      /* Cards genéricos */
+      .card { padding: 12px; margin-bottom: 8px; }
+      .card-header { gap: 8px; margin-bottom: 8px; }
+      .card-title { font-size: 12px; }
+      .card-meta { font-size: 10px; }
+      .select-inline { font-size: 11px; padding: 5px 22px 5px 8px; min-height: 30px; }
+
+      /* Collapsible sections */
+      .section { margin-bottom: 8px; }
+      .section-head { padding: 10px 12px; }
+      .section-head-left { font-size: 12px; gap: 6px; }
+      .section-head-meta { font-size: 10px; }
+      .section.open .section-body {
+        padding: 0 12px 12px;
+        /* override do overflow:visible desktop. Inline grids c/ colunas
+           px hardcoded (shadow breakdown, mt-shadow-by-line, etc) ficam
+           wider que viewport mobile — scroll horizontal evita squish. */
+        overflow-x: auto;
+        overflow-y: visible;
+        -webkit-overflow-scrolling: touch;
+      }
+
+      /* Main grid Equity+Sport ROI já vira 1col em <900px */
+      .chart-wrap, .chart-wrap canvas { height: 180px; max-height: 180px; }
+
+      /* Sport ROI list */
+      .sport-roi-row { font-size: 12px; padding: 6px 0; gap: 8px; }
+      .sport-roi-bar { width: 40px; }
+      .sport-roi-value { min-width: 50px; font-size: 12px; }
+
+      /* Live rows: drop última col (4→3) — score sai, prob fica */
+      .live-row {
+        grid-template-columns: auto 1fr auto;
+        gap: 8px; padding: 8px 10px; font-size: 12px;
+      }
+      .live-score { display: none; }
+
+      /* Alerts pills */
+      .alerts { gap: 6px; margin-bottom: 12px; }
+      .alert-pill { font-size: 11px; padding: 4px 8px; }
+
+      /* Tabela tips (wrapper já tem overflow-x:auto) — só compacta */
+      table.tips th { padding: 6px 8px; font-size: 9px; }
+      table.tips td { padding: 8px 8px; font-size: 12px; }
+      .tip-pick { font-size: 11px; }
+      .tip-meta { font-size: 10px; }
+      .tips-summary { font-size: 12px; padding: 6px 10px; gap: 8px; flex-wrap: wrap; }
+      .tips-pager { font-size: 12px; padding: 8px; }
+      .tips-pager button { min-height: 32px; padding: 5px 10px; }
+      .btn-settle { width: 26px; height: 26px; }
+
+      /* Models grid (auto-fit, reduz min) */
+      .models-grid { grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)) !important; gap: 8px; }
+      .model-card { padding: 10px; }
+      .model-brier { font-size: 16px; }
+
+      /* Charts */
+      #calibChart, #clvChart, #equityChart { max-height: 160px; }
+    }
   </style>
 </head>
 <body>
