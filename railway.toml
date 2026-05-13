@@ -14,3 +14,7 @@ restartPolicyMaxRetries = 5
 type = "http"
 path = "/health"
 initialDelaySeconds = 15
+# 2026-05-13: timeout 30→60s. /health pode fazer SELECT em tips table (~157MB)
+# que ocasionalmente leva 30+s sob WAL contention. Default 30s causava 3
+# consecutive fails → container restart loop (~43/24h observado).
+timeoutSeconds = 60

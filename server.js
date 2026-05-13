@@ -1443,9 +1443,15 @@ function _wrapServerCron(name, fn) {
 // quando DB estava em integrity_check/settle batch — `pendingBySport` lockava e
 // derrubava o container. Cache curto serve stale enquanto query pesada ainda corre.
 let _healthCache = { ts: 0, response: null, alerts: null };
+// 2026-05-13: default 10000→30000ms. Railway healthcheck pulse é ~30s; cache
+// TTL <pulse interval gerava re-compute em TODO health check. /health hot path
+// faz 2 queries SQLite (SELECT 1 + GROUP BY tips) — sob lock contention pode
+// levar 70s+ (observado em prod). Cache 30s alinha com pulse → maioria hits
+// cached (1-2ms vs 70s) → Railway healthcheck nunca timeout.
+// Override via HEALTH_CACHE_MS=N (ms).
 const HEALTH_CACHE_MS = (() => {
   const raw = parseInt(process.env.HEALTH_CACHE_MS || '', 10);
-  return Number.isFinite(raw) && raw >= 0 ? raw : 10000;
+  return Number.isFinite(raw) && raw >= 0 ? raw : 30000;
 })();
 let _oddsBackoffLogTs = 0;
 const _raw429Backoff = parseInt(process.env.ODDSPAPI_429_BACKOFF_MS || '', 10);
