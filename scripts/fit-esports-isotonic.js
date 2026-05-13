@@ -125,14 +125,24 @@ function main() {
     if (!state.has(k)) state.set(k, { overall: 1500, games: 0 });
     return state.get(k);
   }
+  // 2026-05-13: canonical alphabetic order pra evitar label leak em sports
+  // onde match_results preserva ordem semântica (UFCStats MMA: team1=winner
+  // sempre → y=1 sempre → PAV calibrava all yMean=1). Outros sports (lol/cs/
+  // dota/etc) team1 já é aleatório-ish e y balanced; sort idempotente é safe.
+  function canonOrder(r) {
+    const a = norm(r.team1), b = norm(r.team2);
+    return a < b ? { p1: r.team1, p2: r.team2 } : { p1: r.team2, p2: r.team1 };
+  }
   function predict(r) {
-    const p1 = getP(r.team1), p2 = getP(r.team2);
+    const { p1: p1Name, p2: p2Name } = canonOrder(r);
+    const p1 = getP(p1Name), p2 = getP(p2Name);
     if (p1.games < 5 || p2.games < 5) return null;
-    return { pA: eloExpected(p1.overall, p2.overall), y: norm(r.winner) === norm(r.team1) ? 1 : 0 };
+    return { pA: eloExpected(p1.overall, p2.overall), y: norm(r.winner) === norm(p1Name) ? 1 : 0 };
   }
   function update(r) {
-    const p1 = getP(r.team1), p2 = getP(r.team2);
-    const y = norm(r.winner) === norm(r.team1) ? 1 : 0;
+    const { p1: p1Name, p2: p2Name } = canonOrder(r);
+    const p1 = getP(p1Name), p2 = getP(p2Name);
+    const y = norm(r.winner) === norm(p1Name) ? 1 : 0;
     const pA = eloExpected(p1.overall, p2.overall);
     const k = 32 * (1 + 0.3 * Math.max(0, 1 - p1.games / 50));
     const delta = k * (y - pA);

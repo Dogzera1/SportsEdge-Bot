@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "game": "mma",
+  "fittedAt": "2026-05-13T18:05:34.108Z",
+  "method": "isotonic_pav",
+  "nCalibSamples": 464,
+  "blocks": [
+    {
+      "pMin": 0.3547,
+      "pMax": 0.45,
+      "yMean": 0.4271,
+      "n": 96
+    },
+    {
+      "pMin": 0.4512,
+      "pMax": 0.4995,
+      "yMean": 0.4524,
+      "n": 126
+    },
+    {
+      "pMin": 0.5001,
+      "pMax": 0.5998,
+      "yMean": 0.5297,
+      "n": 202
+    },
+    {
+      "pMin": 0.603,
+      "pMax": 0.6462,
+      "yMean": 0.6154,
+      "n": 26
+    },
+    {
+      "pMin": 0.6505,
+      "pMax": 0.6926,
+      "yMean": 0.6667,
+      "n": 9
+    }
+  ],
+  "trainingNote": "Walk-forward surface-agnostic Elo; aplicar pós-trained model output."
+}

@@ -127,10 +127,19 @@ async function fetchEventFights(eventId, eventName) {
     const method = ps.length >= 10 ? ps[ps.length - 4] : null;
     const round = ps.length >= 10 ? parseInt(ps[ps.length - 2], 10) || null : null;
 
+    // 2026-05-13: canonical alphabetic order pra evitar label leak.
+    // UFCStats lista winner primeiro → preservar gerava winner=team1 em 100%
+    // das rows, quebrando calibração isotônica (yMean=1 em todos blocos).
+    // Solução: ordenar alphabetic team1/team2; winner field guarda nome real.
+    // Compatible com extract-mma-features.js linha 162 (já fazia sort no consumer).
+    const t1lower = String(fighter1).toLowerCase().trim();
+    const t2lower = String(fighter2).toLowerCase().trim();
+    const [team1Sorted, team2Sorted] = t1lower < t2lower ? [fighter1, fighter2] : [fighter2, fighter1];
+
     fights.push({
       match_id: `ufcstats_${fightId}`,
       game: 'mma',
-      team1: fighter1, team2: fighter2,
+      team1: team1Sorted, team2: team2Sorted,
       winner,
       final_score: `${method || ''} R${round || '?'}`.trim(),
       league: eventName,
