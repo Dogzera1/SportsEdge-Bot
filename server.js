@@ -16769,6 +16769,57 @@ load();
     return;
   }
 
+  // 2026-05-13: rollback de modelo treinado via backup. Espelha scripts/rollback-model.js
+  // mas exposto via HTTP pra prod (onde backups vivem em lib/backups/ ephemeral).
+  // Pós-restore, sync de volta pra persistent (Railway Volume) pra sobreviver redeploy.
+  // GET  /admin/rollback-model?file=lib/dota2-weights.json[&name=<backup-name>]  → restaura
+  // GET  /admin/rollback-model?list=1[&file=lib/X.json]                           → lista backups
+  if (p === '/admin/rollback-model') {
+    if (!requireAdmin(req, res)) return;
+    const wantList = parsed.query.list === '1';
+    const file = parsed.query.file ? String(parsed.query.file).replace(/^\/+/, '') : null;
+    const name = parsed.query.name ? String(parsed.query.name) : null;
+    try {
+      const { listBackups, restoreLatest } = require('./lib/model-backup');
+      const KNOWN_FILES = [
+        'lib/lol-weights.json', 'lib/dota2-weights.json', 'lib/cs2-weights.json',
+        'lib/valorant-weights.json', 'lib/tennis-weights.json',
+        'lib/lol-model-isotonic.json', 'lib/tennis-model-isotonic.json',
+        'lib/dota2-isotonic.json', 'lib/cs2-isotonic.json',
+      ];
+      if (wantList) {
+        const files = file ? [file] : KNOWN_FILES;
+        const out = files.map(f => {
+          const abs = path.resolve(__dirname, f);
+          const backups = listBackups(abs).map(b => ({ name: b.name, mtime: new Date(b.mtime).toISOString() }));
+          return { file: f, backups };
+        });
+        sendJson(res, { ok: true, files: out });
+        return;
+      }
+      if (!file) { sendJson(res, { error: 'file param required (ex: lib/dota2-weights.json)' }, 400); return; }
+      const abs = path.resolve(__dirname, file);
+      const backups = listBackups(abs);
+      if (!backups.length) { sendJson(res, { ok: false, error: 'no_backups', file }, 404); return; }
+      // restoreLatest default = mais recente (que é o backup criado PRE-write do retrain
+      // que regrediu — exatamente o estado "antes do bad fit").
+      const chosen = name || backups[0].name;
+      restoreLatest(abs, { name: chosen });
+      // Sync de volta pra persistent (se MODEL_PERSISTENT_DIR setado), senão o
+      // próximo boot overlay traria a versão ruim de volta.
+      let persistResult = null;
+      try {
+        const persist = require('./lib/model-persistence');
+        persistResult = persist.syncFromLibToPersistent();
+      } catch (_) {}
+      log('INFO', 'ROLLBACK-MODEL', `restored ${file} from ${chosen} (persist: ${persistResult ? persistResult.copied + ' arquivo(s)' : 'no-op'})`);
+      sendJson(res, { ok: true, file, restored_from: chosen, persistence: persistResult });
+    } catch (e) {
+      sendJson(res, { error: e.message }, 500);
+    }
+    return;
+  }
+
   // 2026-05-01: terminal CLV-set pra tips fora da janela de captura (regime
   // 'out' too_late >2h). Antes: bot.js loop CLV recapturava mesma tip todo ciclo
   // só pra logar too_late_164min→166min→178min. Aqui marca clv_odds=open (sem
