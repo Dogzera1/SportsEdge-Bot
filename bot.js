@@ -23290,9 +23290,12 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
     const thresholdsH = {
       esports: parseInt(process.env.VOID_STUCK_H_ESPORTS || '36', 10),
       lol: parseInt(process.env.VOID_STUCK_H_LOL || '36', 10),
-      cs: parseInt(process.env.VOID_STUCK_H_CS || '12', 10),
-      cs2: parseInt(process.env.VOID_STUCK_H_CS2 || '12', 10),
-      valorant: parseInt(process.env.VOID_STUCK_H_VALORANT || '12', 10),
+      // 2026-05-13 P5 cross-sport: CS/CS2/Valorant também sofrem reschedules ≥24h
+      // (IEM/ESL Pro / VCT atrasam por production delays). Mesmo motivo do LoL/Dota2
+      // fix 12h→36h (commit 9b18934). Aplicado em audit retroativo P5.
+      cs: parseInt(process.env.VOID_STUCK_H_CS || '36', 10),
+      cs2: parseInt(process.env.VOID_STUCK_H_CS2 || '36', 10),
+      valorant: parseInt(process.env.VOID_STUCK_H_VALORANT || '36', 10),
       dota2: parseInt(process.env.VOID_STUCK_H_DOTA2 || '36', 10),
       tennis: parseInt(process.env.VOID_STUCK_H_TENNIS || '36', 10),
       darts: parseInt(process.env.VOID_STUCK_H_DARTS || '36', 10),
