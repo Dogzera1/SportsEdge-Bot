@@ -14450,7 +14450,7 @@ load();
           const minResolved = new Date(minResolvedMs).toISOString().slice(0, 19).replace('T', ' ');
           // Use o maior entre window-before e min-resolved (forward-only effective).
           const effectiveBefore = before > minResolved ? before : minResolved;
-          const matches = db.prepare(`
+          let matches = db.prepare(`
             SELECT match_id, winner, final_score, resolved_at, league
             FROM match_results
             WHERE game IN (${placeholders})
@@ -14461,6 +14461,32 @@ load();
             ORDER BY ABS(julianday(resolved_at) - julianday(?)) ASC
             LIMIT 1
           `).all(...games, effectiveBefore, after, n1, n2, n2, n1, t.sent_at);
+          // 2026-05-13: pre-zombie force-settle fallback (espelha settleShadowTips
+          // linha 1041+). Tip emitida APÓS match resolveu (scanner cache stale ou
+          // live cycle late) cai no guard temporal strict. Caso clássico tennis
+          // Challenger: tip 2197 sent_at 16:36, sofa MR resolved 16:10 — apenas
+          // 26min de lag mas guard bloqueia. Aceita lag ≤4h + tip age ≥2h + score
+          // parseável. Opt-out via PRE_ZOMBIE_RUN_SETTLE_DISABLED=true.
+          if (!matches.length && !/^(1|true|yes)$/i.test(String(process.env.PRE_ZOMBIE_RUN_SETTLE_DISABLED || ''))) {
+            const _preZombieMinH = parseFloat(process.env.MT_PRE_ZOMBIE_MIN_HOURS || '2');
+            const _preZombieMaxLagH = parseFloat(process.env.MT_PRE_ZOMBIE_MAX_LAG_HOURS || '4');
+            const tipAgeH = (Date.now() - tipMs) / 3600000;
+            if (tipAgeH >= _preZombieMinH) {
+              const lagThresholdMs = _preZombieMaxLagH * 3600 * 1000;
+              const wideBefore = new Date(tipMs - lagThresholdMs).toISOString().slice(0, 19).replace('T', ' ');
+              matches = db.prepare(`
+                SELECT match_id, winner, final_score, resolved_at, league
+                FROM match_results
+                WHERE game IN (${placeholders})
+                  AND winner IS NOT NULL AND winner != ''
+                  AND resolved_at >= ? AND resolved_at <= ?
+                  AND ((lower(replace(replace(replace(team1,' ',''),'-',''),'.','')) = ? AND lower(replace(replace(replace(team2,' ',''),'-',''),'.','')) = ?)
+                    OR (lower(replace(replace(replace(team1,' ',''),'-',''),'.','')) = ? AND lower(replace(replace(replace(team2,' ',''),'-',''),'.','')) = ?))
+                ORDER BY ABS(julianday(resolved_at) - julianday(?)) ASC
+                LIMIT 1
+              `).all(...games, wideBefore, after, n1, n2, n2, n1, t.sent_at);
+            }
+          }
           if (!matches.length) { summary.skipped++; continue; }
           const m = matches[0];
           // Walkover detection
