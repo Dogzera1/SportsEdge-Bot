@@ -2331,6 +2331,24 @@ async function applyGlobalRisk(sport, desiredUnits, leagueSlug) {
   const dynMult = Number(sportPerf.mult) || 1.0;
 
   let adjusted = Math.max(0.5, Math.round(desiredUnits * leagueMult * drawdownMult * perfMult * sportMult * dynMult * 2) / 2);
+
+  // ── Cap composto: limita amplificação total dos multipliers em applyGlobalRisk ──
+  // 2026-05-13 (audit ROI 30d): 5 multipliers compostos (league × dd × perf ×
+  // sport × dyn) sem cap superior. Combined com upstream (Kelly tier × trust ×
+  // market × tier2 ≤ 4.05×), produto teórico chegava 13×+. Variance amplificada
+  // em tips perdedoras. Cap ratio adjusted/desiredUnits ≤ COMPOSED_MULT_CAP
+  // (default 1.5). NÃO afeta cuts: drawdown taper × 0.35 continua funcionando.
+  // Opt-out via COMPOSED_MULT_CAP=99 (efetivamente desativa).
+  const composedCap = parseFloat(process.env.COMPOSED_MULT_CAP || '1.5');
+  if (Number.isFinite(composedCap) && composedCap > 0 && desiredUnits > 0) {
+    const maxAdjusted = desiredUnits * composedCap;
+    if (adjusted > maxAdjusted) {
+      const capped = Math.max(0.5, Math.round(maxAdjusted * 2) / 2);
+      log('INFO', 'RISK', `${sport}: composed mult cap ${adjusted}u → ${capped}u (ratio=${(adjusted/desiredUnits).toFixed(2)}× > ${composedCap}× cap)`);
+      adjusted = capped;
+    }
+  }
+
   // Cap global e per-sport (audit-leaks 2026-04-22 mostrou stake 3u tóxico em
   // esports/cs/tennis — modelo overconfident em casos extremos). Clamp final
   // protege mesmo se Kelly + multipliers escalarem desordenadamente.
