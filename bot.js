@@ -6743,13 +6743,26 @@ async function runMarketTipsLeakGuard() {
         { n: 8, roi: -35 },   // n=8 ROI≤-35%
       ];
     })();
+    // 2026-05-13 (log audit): granularidade-scaled minN floor. Step n=4 é
+    // estatisticamente OK pra sport-overall (sample agregado), mas em league
+    // granularity vira ~20% false-positive (vide log 2026-05-13: cs|total|
+    // under|CCT European Series 1 disable em n=5). Floor escala com narrowing:
+    //   sport+market         → n>=4 (status quo)
+    //   sport+side OU +tier  → n>=6 (Beta-binom 80% conf c/ 5/6 losses)
+    //   sport+side+league    → n>=8 (Beta-binom 88% conf c/ 7/8 losses)
+    const EARLY_ROI_MIN_N = (() => {
+      if (leagueKey) return parseInt(process.env.MT_LEAK_EARLY_MIN_N_LEAGUE || '8', 10) || 8;
+      if (sideKey || tierKey) return parseInt(process.env.MT_LEAK_EARLY_MIN_N_SIDE || '6', 10) || 6;
+      return parseInt(process.env.MT_LEAK_EARLY_MIN_N || '4', 10) || 4;
+    })();
+    const EARLY_ROI_EFFECTIVE_STEPS = EARLY_ROI_STEPS.filter(step => step.n >= EARLY_ROI_MIN_N);
     const EARLY_DISABLED = /^(0|false|no)$/i.test(String(process.env.MT_LEAK_EARLY_AUTO ?? 'true'));
     const isEarlyTrigger = !EARLY_DISABLED && !wasDisabled
       && s.roiPct != null
-      && EARLY_ROI_STEPS.some(step => s.clvN >= step.n && s.roiPct <= step.roi);
+      && EARLY_ROI_EFFECTIVE_STEPS.some(step => s.clvN >= step.n && s.roiPct <= step.roi);
 
     if (isEarlyTrigger) {
-      const matchedStep = EARLY_ROI_STEPS.find(step => s.clvN >= step.n && s.roiPct <= step.roi);
+      const matchedStep = EARLY_ROI_EFFECTIVE_STEPS.find(step => s.clvN >= step.n && s.roiPct <= step.roi);
       const reason = `EARLY_ROI ${s.roiPct.toFixed(1)}% n=${s.clvN} (step n>=${matchedStep.n} roi<=${matchedStep.roi}%)`;
       try {
         const tierVal = (tierKey && !leagueKey) ? s.tier : null;
