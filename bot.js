@@ -23187,13 +23187,17 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
     // são emitidas até 7d antes do match — threshold 24h voidava prematuro.
     // Espelha ZOMBIE_THRESHOLDS_H em lib/market-tips-shadow.js. Override via env
     // VOID_STUCK_H_<SPORT>.
+    // 2026-05-13: LoL/Dota2 12h→36h. Caso DN SOOPers vs Dplus KIA (LCK
+    // tip#2823): match postponed 2026-05-12→2026-05-13, voidado em 17h
+    // antes do match acontecer. LCK/EWC reschedules de 24h+ são regulares.
+    // Espelha football 24h→192h (commit 2026-05-11).
     const thresholdsH = {
-      esports: parseInt(process.env.VOID_STUCK_H_ESPORTS || '12', 10),
-      lol: parseInt(process.env.VOID_STUCK_H_LOL || '12', 10),
+      esports: parseInt(process.env.VOID_STUCK_H_ESPORTS || '36', 10),
+      lol: parseInt(process.env.VOID_STUCK_H_LOL || '36', 10),
       cs: parseInt(process.env.VOID_STUCK_H_CS || '12', 10),
       cs2: parseInt(process.env.VOID_STUCK_H_CS2 || '12', 10),
       valorant: parseInt(process.env.VOID_STUCK_H_VALORANT || '12', 10),
-      dota2: parseInt(process.env.VOID_STUCK_H_DOTA2 || '12', 10),
+      dota2: parseInt(process.env.VOID_STUCK_H_DOTA2 || '36', 10),
       tennis: parseInt(process.env.VOID_STUCK_H_TENNIS || '36', 10),
       darts: parseInt(process.env.VOID_STUCK_H_DARTS || '36', 10),
       snooker: parseInt(process.env.VOID_STUCK_H_SNOOKER || '48', 10),
