@@ -9822,6 +9822,72 @@ async function autoAnalyzeMatch(token, match) {
       return _returnNull('no_real_odds', `t1=${oddsToUse?.t1 || 'null'} bk=${oddsToUse?.bookmaker || 'none'}`);
     }
 
+    // 2026-05-13: LOL-HYBRID trained-direct (espelha FB/TENNIS/MMA-HYBRID).
+    // Com AI_DISABLED=true em prod (memory project_lol_ai_disabled_clarification),
+    // fallback gate (odd∈[1.50,4.00] + EV≥5 + edge≥5) bloqueava 128 tips LIVE em
+    // 2d com trained model confiante (mP 70-90%, edge 10-30pp) mas fora do range
+    // de odd (LCK/LPL favs <1.50 pós-objetivo, underdogs >4). Hybrid path emite
+    // direto quando trained model dá signal robusto, bypass fallback restritivo.
+    // Pick por MAIOR edge positivo (mesmo fix tennis/MMA — fav sempre tem edge≤0).
+    let _lolHybridTip = null;
+    if (lolModel && Number.isFinite(lolModel.confidence) && mlResult?.modelP1 && oddsToUse?.t1) {
+      const _hybMinConf = parseFloat(process.env.LOL_HYBRID_MIN_CONF || '0.65');
+      const _hybMinEdge = parseFloat(process.env.LOL_HYBRID_MIN_EDGE_PP || '8');
+      const _hybMinOdd = parseFloat(process.env.LOL_HYBRID_MIN_ODD || '1.30');
+      const _hybMaxOdd = parseFloat(process.env.LOL_HYBRID_MAX_ODD || '6.00');
+      const _hybMinP = parseFloat(process.env.LOL_HYBRID_MIN_P || '0.30');
+      if (lolModel.confidence >= _hybMinConf) {
+        const _odd1 = parseFloat(oddsToUse?.t1) || 0;
+        const _odd2 = parseFloat(oddsToUse?.t2) || 0;
+        const _imp1 = mlResult.impliedP1 || (_odd1 > 1 ? 1/_odd1 : 0);
+        const _imp2 = mlResult.impliedP2 || (_odd2 > 1 ? 1/_odd2 : 0);
+        const _e1 = (mlResult.modelP1 - _imp1) * 100;
+        const _e2 = (mlResult.modelP2 - _imp2) * 100;
+        const pickP1 = _e1 >= _e2;
+        const pickP = pickP1 ? mlResult.modelP1 : mlResult.modelP2;
+        const pickOdd = pickP1 ? _odd1 : _odd2;
+        const pickTeam = pickP1 ? match.team1 : match.team2;
+        const edgePp = pickP1 ? _e1 : _e2;
+        const evMult = pickP * pickOdd;
+        const evPp = (evMult - 1) * 100;
+        const isLiveLolH = match.status === 'live' || match.status === 'inprogress';
+        if (
+          edgePp >= _hybMinEdge && evMult >= 1.05 &&
+          pickOdd >= _hybMinOdd && pickOdd <= _hybMaxOdd &&
+          pickP >= _hybMinP
+        ) {
+          const confLabel = lolModel.confidence >= 0.75 && edgePp >= 12 ? CONF.ALTA
+            : lolModel.confidence >= 0.70 && edgePp >= 10 ? CONF.MEDIA
+            : CONF.BAIXA;
+          const stake = calcKellyWithP(pickP, pickOdd, 0.15, { sport: 'lol', confKey: confLabel });
+          const stakeU = String(stake || (confLabel === CONF.ALTA ? '2u' : '1u'));
+          log('INFO', 'LOL-HYBRID',
+            `${match.team1} vs ${match.team2}${isLiveLolH ? ' [LIVE]' : ''}: trained-direct ${pickTeam}@${pickOdd} | P=${(pickP*100).toFixed(1)}% impP=${((pickP1?_imp1:_imp2)*100).toFixed(1)}% edge=${edgePp.toFixed(1)}pp EV=${evPp.toFixed(1)}% conf=${confLabel} trainedConf=${lolModel.confidence.toFixed(2)}`);
+          _lolHybridTip = {
+            ok: true,
+            tipMatch: [
+              `TIP_ML: ${pickTeam} @ ${pickOdd} |EV: +${evPp.toFixed(1)}% |STAKE: ${stakeU} |CONF: ${confLabel}`,
+              String(pickTeam), String(pickOdd), `+${evPp.toFixed(1)}%`, stakeU, confLabel
+            ],
+            tipTeam: pickTeam, tipOdd: pickOdd, tipEV: parseFloat(evPp.toFixed(1)),
+            tipStake: stakeU, tipConf: confLabel,
+            tipReason: 'LOL-HYBRID trained-direct',
+            modelP1: mlResult.modelP1, modelP2: mlResult.modelP2,
+            debugVars: {
+              source: 'lol_hybrid_trained_direct', game, status: match.status, league: match.league,
+              t1: match.team1, t2: match.team2, hasLiveStats, liveGameNumber,
+              odds: { t1: oddsToUse?.t1, t2: oddsToUse?.t2, bookmaker: oddsToUse?.bookmaker, market: oddsToUse?.market, mapMarket: oddsToUse?.mapMarket },
+              modelP1: mlResult.modelP1, modelP2: mlResult.modelP2,
+              pick: { team: pickTeam, odd: pickOdd, p: pickP, evPct: parseFloat(evPp.toFixed(1)), stake: stakeU, conf: confLabel, edgePp: parseFloat(edgePp.toFixed(1)) },
+              trained: { confidence: lolModel.confidence, method: lolModel.method || null, factors: (lolModel.factors||[]).map(f => typeof f==='string' ? f : f?.name || '?') },
+              ml: { pass: mlResult.pass, direction: mlResult.direction, edgePp: parseFloat((mlResult.score||0).toFixed(1)), factors: mlResult.factorActive || [], factorCount: mlResult.factorCount || 0 }
+            }
+          };
+        }
+      }
+    }
+    if (_lolHybridTip) return _lolHybridTip;
+
     const newsSectionEsports = await fetchMatchNews('esports', match.team1, match.team2).catch(() => '');
     const { text: prompt, evThreshold: adaptiveEV, sigCount } = buildEsportsPrompt(match, game, gamesContext, oddsToUse, enrichSection, mlResult, newsSectionEsports);
     const liveTag = (match.status === 'live' || match.status === 'inprogress') ? ' [AO VIVO]' : '';
