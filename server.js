@@ -18380,28 +18380,34 @@ load();
     return;
   }
 
-  // POST/GET /admin/mt-restore?sport=cs&market=TOTAL&side=under&force=0&key=<KEY>
+  // POST/GET /admin/mt-restore?sport=cs&market=TOTAL&side=under&league=...&force=0&key=<KEY>
   // Simétrico ao /admin/mt-disable. Default só remove source='manual' pra evitar
   // sobrescrever decisões de auto_clv_leak/auto_roi_leak/auto_readiness ainda
   // ativas. force=1 remove independente do source (use com cuidado).
+  // league opt: filtra restore pra granularidade league-specific (evita
+  // remover sport+market+side overall quando só league deve ser restaurada).
   if (p === '/admin/mt-restore' && (req.method === 'POST' || req.method === 'GET')) {
     if (!requireAdmin(req, res)) return;
     const sport = String(parsed.query.sport || '').trim().toLowerCase();
     const market = String(parsed.query.market || '').trim();
     const side = parsed.query.side ? String(parsed.query.side).trim().toLowerCase() : null;
+    const league = parsed.query.league ? String(parsed.query.league).trim() : null;
     const force = parsed.query.force === '1' || parsed.query.force === 'true';
     if (!sport || !market) { sendJson(res, { ok: false, error: 'missing sport or market' }, 400); return; }
     try {
-      // Build conds null-safe pra side (mig 062 trata side TEXT nullable).
+      // Build conds null-safe pra side e league (mig 062 trata nullable).
       const sideCond = side ? 'side = ?' : 'side IS NULL';
+      const leagueCond = league ? 'league = ?' : 'league IS NULL';
       const sourceCond = force ? '' : "AND source = 'manual'";
       const sql = `DELETE FROM market_tips_runtime_state
-                   WHERE sport = ? AND market = ? AND ${sideCond} ${sourceCond}`;
-      const params = side ? [sport, market, side] : [sport, market];
+                   WHERE sport = ? AND market = ? AND ${sideCond} AND ${leagueCond} ${sourceCond}`;
+      const params = [sport, market];
+      if (side) params.push(side);
+      if (league) params.push(league);
       const info = db.prepare(sql).run(...params);
-      log('INFO', 'MT-RESTORE', `${sport}/${market}${side ? '/' + side : ''} restored (force=${force}, removed=${info.changes})`);
+      log('INFO', 'MT-RESTORE', `${sport}/${market}${side ? '/' + side : ''}${league ? '/' + league : ''} restored (force=${force}, removed=${info.changes})`);
       sendJson(res, {
-        ok: true, sport, market, side, force, removed: info.changes,
+        ok: true, sport, market, side, league, force, removed: info.changes,
         note: info.changes === 0
           ? (force
             ? 'Nenhuma entry encontrada. Cell já estava unblocked.'
