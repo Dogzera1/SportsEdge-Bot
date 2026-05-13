@@ -237,6 +237,17 @@ for (const k of Object.keys(AFTER)) {
 }
 results.changes = changes;
 
+// 2026-05-13: Persist fit outputs pra Railway Volume (gated por
+// MODEL_PERSISTENT_DIR). Sem env = no-op. Garante que próximo boot
+// recupera os refits via overlay em vez de cair pro seed git.
+try {
+  const persist = require(path.join(ROOT, 'lib', 'model-persistence'));
+  const r = persist.syncFromLibToPersistent();
+  results.persistence = r;
+} catch (e) {
+  results.persistence = { error: e.message };
+}
+
 if (asJson) {
   console.log(JSON.stringify(results, null, 2));
 } else {

@@ -13,6 +13,11 @@ if (!/^(0|false|no)$/i.test(String(process.env.HTTP_KEEP_ALIVE || ''))) {
 }
 const fs = require('fs');
 const path = require('path');
+// 2026-05-13: Persistent model overlay (Railway Volume). DEVE rodar ANTES
+// de qualquer require de lib/* que carregue arquivos de modelo (lib/ml,
+// lib/lol-model, lib/clv-calibration etc). Sem MODEL_PERSISTENT_DIR = no-op.
+try { require('./lib/model-persistence').syncFromPersistentToLib(); }
+catch (e) { console.error('[MODEL-PERSIST] boot sync err:', e.message); }
 const initDatabase = require('./lib/database');
 const { SPORTS, getSportById, getSportByToken, getTokenToSportMap, isLeagueRealOverride } = require('./lib/sports');
 const { log, calcKelly, calcKellyFraction, calcKellyWithP, norm, fmtDate, fmtDateTime, fmtDuration, safeParse, cachedHttpGet, markPollHeartbeat, getPollHeartbeats, markCronHeartbeat, getCronHeartbeats, dumpCronHeartbeats, loadCronHeartbeats } = require('./lib/utils');

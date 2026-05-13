@@ -12,6 +12,11 @@ if (!/^(0|false|no)$/i.test(String(process.env.HTTP_KEEP_ALIVE || ''))) {
   http.globalAgent = new http.Agent({ keepAlive: true, maxSockets: _maxSockets, keepAliveMsecs: 30000 });
   https.globalAgent = new https.Agent({ keepAlive: true, maxSockets: _maxSockets, keepAliveMsecs: 30000 });
 }
+// 2026-05-13: Persistent model overlay (Railway Volume). DEVE rodar ANTES
+// de qualquer require de lib/* que carregue arquivos de modelo. Sem
+// MODEL_PERSISTENT_DIR = no-op (dev/local intactos).
+try { require('./lib/model-persistence').syncFromPersistentToLib(); }
+catch (e) { console.error('[MODEL-PERSIST] boot sync err:', e.message); }
 const initDatabase = require('./lib/database');
 const { SPORTS, getSportById } = require('./lib/sports');
 const { ML_MARKETS, ML_MARKETS_LIST, isMlMarket } = require('./lib/constants');
