@@ -7059,12 +7059,13 @@ const server = http.createServer(async (req, res) => {
 
   if (p === '/health' || p === '/alerts') {
     const _now = Date.now();
-    const _force = parsed.query._force === '1';
-    // 2026-05-13: stale-while-revalidate. Sempre serve cache se existe (any
-    // age) exceto quando _force=1 (refresh interno). Background refresh
-    // disparado via setImmediate quando cache stale > HEALTH_CACHE_MS. Railway
-    // healthcheck NUNCA bloqueia em DB — /health <1ms sempre.
-    if (!_force && _healthCache.ts > 0 && _healthCache.response) {
+    // 2026-05-13 v3: cache permanente, NUNCA refresh em background.
+    // Background refresh via internal HTTP triggava sync compute que bloqueia
+    // event loop (db.prepare.get serializa SQLite), paralisando server.js E
+    // próximo healthcheck Railway — pior que original. Cache fica "stale" mas
+    // /health sempre <1ms. Refresh único na first request pós-boot.
+    // Consumers que precisam fresh data devem usar /admin/risk-metrics etc.
+    if (_healthCache.ts > 0 && _healthCache.response) {
       const cacheAgeMs = _now - _healthCache.ts;
       if (p === '/alerts') {
         sendJson(res, {
@@ -7075,26 +7076,6 @@ const server = http.createServer(async (req, res) => {
         });
       } else {
         sendJson(res, { ..._healthCache.response, cached: true, cacheAgeMs });
-      }
-      // Trigger background refresh se stale + não há refresh ativo. Cleanup
-      // _healthRefreshInFlight via timeout pra evitar deadlock se HTTP falhar.
-      const inFlightStale = _healthRefreshInFlight && (_now - _healthRefreshLastStart) > 120000;
-      if (cacheAgeMs > HEALTH_CACHE_MS && (!_healthRefreshInFlight || inFlightStale)) {
-        _healthRefreshInFlight = true;
-        _healthRefreshLastStart = _now;
-        setImmediate(() => {
-          try {
-            const http = require('http');
-            const port = process.env.PORT || process.env.SERVER_PORT || 3000;
-            const r = http.get(`http://127.0.0.1:${port}/health?_force=1`, (resp) => {
-              resp.resume();
-              resp.on('end', () => { _healthRefreshInFlight = false; });
-              resp.on('error', () => { _healthRefreshInFlight = false; });
-            });
-            r.on('error', () => { _healthRefreshInFlight = false; });
-            r.setTimeout(110000, () => { try { r.destroy(); } catch (_) {} _healthRefreshInFlight = false; });
-          } catch (_) { _healthRefreshInFlight = false; }
-        });
       }
       return;
     }
