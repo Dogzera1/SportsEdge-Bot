@@ -15868,6 +15868,8 @@ Máximo 200 palavras.`;
       }
 
       // AI_DISABLED fallback Dota: pick por MAIOR EV POSITIVO baseado no model.
+      // CONF tier-aware (espelha MAP path 16293 + escala lol fallback 9959): BAIXA
+      // hardcoded bloqueava tier 2/3 (DreamLeague etc) + live → 0 ML real em 30d.
       if (!tipMatch && _AI_DISABLED && o && Number.isFinite(mlResult.modelP1) && Number.isFinite(mlResult.modelP2)) {
         const _o1d = parseFloat(o.t1) || 0;
         const _o2d = parseFloat(o.t2) || 0;
@@ -15880,11 +15882,13 @@ Máximo 200 palavras.`;
         const _evPctD = (_pickPd * _pickOddD - 1) * 100;
         const _minEvD = parseFloat(process.env.DOTA_FALLBACK_MIN_EV || '5');
         if (_evPctD >= _minEvD && _pickPd >= 0.20 && _pickOddD >= 1.30 && _pickOddD <= 4.0 && mlResult.score >= 5) {
+          const _confD = _evPctD >= 15 ? 'ALTA' : _evPctD >= 8 ? 'MÉDIA' : 'BAIXA';
+          const _stakeD = _confD === 'ALTA' ? '1.5u' : '1u';
           tipMatch = [
-            `TIP_ML: ${_pickTeamD} @ ${_pickOddD.toFixed(2)} |EV: +${_evPctD.toFixed(1)}% |STAKE: 1u |CONF: BAIXA`,
-            String(_pickTeamD), String(_pickOddD.toFixed(2)), `+${_evPctD.toFixed(1)}%`, '1u', 'BAIXA',
+            `TIP_ML: ${_pickTeamD} @ ${_pickOddD.toFixed(2)} |EV: +${_evPctD.toFixed(1)}% |STAKE: ${_stakeD} |CONF: ${_confD}`,
+            String(_pickTeamD), String(_pickOddD.toFixed(2)), `+${_evPctD.toFixed(1)}%`, _stakeD, _confD,
           ];
-          log('INFO', 'DOTA-AI-DISABLED', `${match.team1} vs ${match.team2}: fallback ${_pickTeamD}@${_pickOddD.toFixed(2)} EV=${_evPctD.toFixed(1)}% pickP=${(_pickPd*100).toFixed(1)}% edge=${mlResult.score.toFixed(1)}pp`);
+          log('INFO', 'DOTA-AI-DISABLED', `${match.team1} vs ${match.team2}: fallback ${_pickTeamD}@${_pickOddD.toFixed(2)} EV=${_evPctD.toFixed(1)}% pickP=${(_pickPd*100).toFixed(1)}% edge=${mlResult.score.toFixed(1)}pp conf=${_confD}`);
         }
       }
 
