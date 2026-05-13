@@ -20318,7 +20318,7 @@ async function pollTableTennis(runOnce = false) {
 
         if (!rec?.tipId) {
           const _lvl = rec?.skipped ? 'INFO' : 'WARN';
-          log(_lvl, 'AUTO-TT', `record-tip falhou: ${pickTeam} @ ${pickOdd}${rec?.reason ? ` (${rec.reason})` : ''}`);
+          log(_lvl, 'AUTO-TT', `record-tip falhou: ${pickTeam} @ ${pickOdd}${rec?.reason ? ` (${rec.reason})` : rec?.error ? ` ERROR: ${rec.error}` : ` [no_reason: rec=${rec===null?'null':rec===undefined?'undefined':JSON.stringify(rec).slice(0,80)}]`}`);
           analyzedTT.set(key, { ts: now, tipSent: false, skipped: true, reason: rec?.reason || null });
           continue;
         }
@@ -21091,7 +21091,7 @@ Máximo 150 palavras.`;
 
         if (!rec?.tipId) {
           const _lvl = rec?.skipped ? 'INFO' : 'WARN';
-          log(_lvl, 'AUTO-CS', `record-tip falhou: ${pickTeam} @ ${pickOdd}${rec?.reason ? ` (${rec.reason})` : ''}`);
+          log(_lvl, 'AUTO-CS', `record-tip falhou: ${pickTeam} @ ${pickOdd}${rec?.reason ? ` (${rec.reason})` : rec?.error ? ` ERROR: ${rec.error}` : ` [no_reason: rec=${rec===null?'null':rec===undefined?'undefined':JSON.stringify(rec).slice(0,80)}]`}`);
           analyzedCs.set(key, { ts: now, tipSent: false, skipped: true, reason: rec?.reason || null });
           continue;
         }
@@ -21670,7 +21670,7 @@ async function pollValorant(runOnce = false) {
 
         if (!rec?.tipId) {
           const _lvl = rec?.skipped ? 'INFO' : 'WARN';
-          log(_lvl, 'AUTO-VAL', `record-tip falhou: ${pickTeam} @ ${pickOdd}${rec?.reason ? ` (${rec.reason})` : ''}`);
+          log(_lvl, 'AUTO-VAL', `record-tip falhou: ${pickTeam} @ ${pickOdd}${rec?.reason ? ` (${rec.reason})` : rec?.error ? ` ERROR: ${rec.error}` : ` [no_reason: rec=${rec===null?'null':rec===undefined?'undefined':JSON.stringify(rec).slice(0,80)}]`}`);
           // Dedup: marca analyzed mesmo quando skipped/falhou pra não loopar.
           analyzedValorant.set(key, { ts: now, tipSent: false, skipped: true, reason: rec?.reason || null });
           continue;
@@ -22013,7 +22013,7 @@ async function runAutoDarts() {
 
           if (!rec?.tipId) {
             const _lvl = rec?.skipped ? 'INFO' : 'WARN';
-            log(_lvl, 'AUTO-DARTS', `record-tip falhou: ${pickTeam} @ ${pickOdd}${rec?.reason ? ` (${rec.reason})` : ''}`);
+            log(_lvl, 'AUTO-DARTS', `record-tip falhou: ${pickTeam} @ ${pickOdd}${rec?.reason ? ` (${rec.reason})` : rec?.error ? ` ERROR: ${rec.error}` : ` [no_reason: rec=${rec===null?'null':rec===undefined?'undefined':JSON.stringify(rec).slice(0,80)}]`}`);
             analyzedDarts.set(key, { ts: now, tipSent: false, skipped: true, reason: rec?.reason || null });
             continue;
           }
@@ -22267,7 +22267,7 @@ async function runAutoSnooker() {
 
           if (!rec?.tipId) {
             const _lvl = rec?.skipped ? 'INFO' : 'WARN';
-            log(_lvl, 'AUTO-SNOOKER', `record-tip falhou: ${pickTeam} @ ${pickOdd}${rec?.reason ? ` (${rec.reason})` : ''}`);
+            log(_lvl, 'AUTO-SNOOKER', `record-tip falhou: ${pickTeam} @ ${pickOdd}${rec?.reason ? ` (${rec.reason})` : rec?.error ? ` ERROR: ${rec.error}` : ` [no_reason: rec=${rec===null?'null':rec===undefined?'undefined':JSON.stringify(rec).slice(0,80)}]`}`);
             analyzedSnooker.set(key, { ts: now, tipSent: false, skipped: true, reason: rec?.reason || null });
             continue;
           }
@@ -22581,7 +22581,7 @@ async function runAutoBasket() {
 
       if (!rec?.tipId) {
         const _lvl = rec?.skipped ? 'INFO' : 'WARN';
-        log(_lvl, 'AUTO-BASKET', `record-tip falhou: ${pickTeam} @ ${pickOdd}${rec?.reason ? ` (${rec.reason})` : ''}`);
+        log(_lvl, 'AUTO-BASKET', `record-tip falhou: ${pickTeam} @ ${pickOdd}${rec?.reason ? ` (${rec.reason})` : rec?.error ? ` ERROR: ${rec.error}` : ` [no_reason: rec=${rec===null?'null':rec===undefined?'undefined':JSON.stringify(rec).slice(0,80)}]`}`);
         analyzedBasket.set(key, { ts: now, tipSent: false, skipped: true, reason: rec?.reason || null });
         continue;
       }
