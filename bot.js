@@ -22435,7 +22435,7 @@ async function runAutoBasket() {
         : 'BAIXA';
 
       const rec = await serverPost('/record-tip', {
-        matchId: String(match.id), eventName: match.league || 'NBA',
+        matchId: String(match.id), eventName: match.league || 'nba',
         p1: match.team1, p2: match.team2, tipParticipant: pickTeam,
         odds: String(pickOdd), ev: evPct.toFixed(1), stake: stakeAdj,
         confidence: conf,
