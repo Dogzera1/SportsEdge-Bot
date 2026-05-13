@@ -84,6 +84,21 @@ function readWeights(p) {
     return { trainedAt: j.trainedAt, brier: m?.brier, acc: m?.acc };
   } catch { return null; }
 }
+// Schema basket: trained_at (snake) + metrics.val_brier (não ensemble/logistic_test).
+// Normaliza pra trainedAt camelCase pra diff loop genérico funcionar.
+function readBasketTrained(p) {
+  try {
+    const full = path.join(ROOT, p);
+    if (!fs.existsSync(full)) return null;
+    const j = JSON.parse(fs.readFileSync(full, 'utf8'));
+    return { trainedAt: j.trained_at, brier: j.metrics?.val_brier, acc: j.metrics?.val_acc };
+  } catch { return null; }
+}
+
+// basket params: salvos em `path.dirname(DB_PATH)/basket-trained-params.json`
+// (default = root do projeto quando DB_PATH não setado).
+const BASKET_PARAMS = path.join(path.dirname(path.resolve(process.env.DB_PATH || 'sportsedge.db')), 'basket-trained-params.json');
+const BASKET_PARAMS_REL = path.relative(ROOT, BASKET_PARAMS);
 
 const BEFORE = {
   lol_weights: readWeights('lib/lol-weights.json'),
@@ -92,6 +107,7 @@ const BEFORE = {
   dota_iso: readIsotonic('lib/dota2-isotonic.json'),
   cs_iso: readIsotonic('lib/cs2-isotonic.json'),
   tennis_markov_calib: readIsotonic('lib/tennis-markov-calib.json'),
+  basket_trained: readBasketTrained(BASKET_PARAMS_REL),
   // CLV calibration (layer pós-isotonic, treinada em closing line)
   lol_clv: readIsotonic('lib/lol-clv-calibration.json'),
   tennis_clv: readIsotonic('lib/tennis-clv-calibration.json'),
@@ -127,6 +143,10 @@ if (doSync) {
 if (doRetrain) {
   run('Extract LoL features', 'node scripts/extract-esports-features.js --game lol');
   run('Train LoL model', 'node scripts/train-esports-model.js --game lol');
+  // 2026-05-13: basket trained model (logistic + isotonic NBA). Antes ficava
+  // stale — só rodava via POST /admin/basket-train manual. Re-treina em --all
+  // pra cobrir regime change pós-trade deadline / playoffs.
+  run('Train basket model', 'node scripts/train-basket-model.js');
 }
 
 run('Fit LoL isotonic (blend)', 'node scripts/fit-lol-model-isotonic.js');
@@ -153,6 +173,7 @@ const AFTER = {
   dota_iso: readIsotonic('lib/dota2-isotonic.json'),
   cs_iso: readIsotonic('lib/cs2-isotonic.json'),
   tennis_markov_calib: readIsotonic('lib/tennis-markov-calib.json'),
+  basket_trained: readBasketTrained(BASKET_PARAMS_REL),
   lol_clv: readIsotonic('lib/lol-clv-calibration.json'),
   tennis_clv: readIsotonic('lib/tennis-clv-calibration.json'),
   dota_clv: readIsotonic('lib/dota2-clv-calibration.json'),
