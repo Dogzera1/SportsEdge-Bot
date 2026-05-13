@@ -8986,9 +8986,25 @@ setInterval(load, 10000);
         },
         eligibility_breakdown: elig,
         sample_involving: involvingPlayer.slice(0, 10),
+        // 2026-05-13: pair_match=0 com involving>0 frequentemente NÃO é matcher bug —
+        // é tip pre-tournament (Match Props) em pair que nunca se enfrentou (chaves
+        // diferentes). Detecta: p1 jogou contra alguém ≠ p2, e p2 jogou contra ≠ p1.
+        // Cleanup correto pra esse padrão é void (vide /admin/void-tips-batch).
+        players_did_not_meet: (() => {
+          if (involvingPlayer.length === 0 || exact.length > 0) return false;
+          const p1Alone = involvingPlayer.some(r => (r.singleMatch_p1_t1 && !r.singleMatch_p2_t2) || (r.singleMatch_p1_t2 && !r.singleMatch_p2_t1));
+          const p2Alone = involvingPlayer.some(r => (r.singleMatch_p2_t1 && !r.singleMatch_p1_t2) || (r.singleMatch_p2_t2 && !r.singleMatch_p1_t1));
+          return p1Alone && p2Alone;
+        })(),
         hint: rows.length === 0 ? 'cache vazio'
           : involvingPlayer.length === 0 ? 'sources sem dado'
-          : exact.length === 0 ? 'matcher quebrado em produção'
+          : exact.length === 0 ? (() => {
+              const p1Alone = involvingPlayer.some(r => (r.singleMatch_p1_t1 && !r.singleMatch_p2_t2) || (r.singleMatch_p1_t2 && !r.singleMatch_p2_t1));
+              const p2Alone = involvingPlayer.some(r => (r.singleMatch_p2_t1 && !r.singleMatch_p1_t2) || (r.singleMatch_p2_t2 && !r.singleMatch_p1_t1));
+              return (p1Alone && p2Alone)
+                ? 'players_did_not_meet — ambos jogaram contra OUTROS oponentes; tip pre-tournament em pair que nunca se enfrentou. Void via /admin/void-tips-batch.'
+                : 'matcher quebrado em produção (involving>0 mas pair=0 sem evidência de chaves separadas — check name normalization)';
+            })()
           : pickBestResult ? 'pickBest acha! Bug está em /settle ou no caller bot.js'
           : eligibleAfterDate.length === 0 ? 'TODAS rows pair-match foram filtradas por DATA — eligibleByDate=false. tipMs > resMs?'
           : 'rows passaram date filter mas pickBest retornou null — bug no filter de league',
