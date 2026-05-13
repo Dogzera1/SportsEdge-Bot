@@ -10009,10 +10009,25 @@ async function autoAnalyzeMatch(token, match) {
         }
       }
     }
-    if (_lolHybridTip) return _lolHybridTip;
-
+    // 2026-05-13: AI shadow POC — prompt construido AQUI (antes do HYBRID return)
+    // pra permitir fire-and-forget shadow regardless do outcome (HYBRID-trained,
+    // fallback model, ou rejeição downstream). Custo: 1 fetchMatchNews extra mesmo
+    // quando HYBRID retorna early — ~100ms, aceitável pra capturar toda população.
     const newsSectionEsports = await fetchMatchNews('esports', match.team1, match.team2).catch(() => '');
     const { text: prompt, evThreshold: adaptiveEV, sigCount } = buildEsportsPrompt(match, game, gamesContext, oddsToUse, enrichSection, mlResult, newsSectionEsports);
+
+    // AI shadow LoL — dispara em TODOS os matches lol analisados (com mlResult+odds válidos)
+    // independente do path real (HYBRID/fallback/AI). Tips persistidas isShadow=1
+    // + emission_source='lol_ai_shadow'. Gate: env LOL_AI_SHADOW=true.
+    if (match.game === 'lol' && /^(1|true|yes)$/i.test(String(process.env.LOL_AI_SHADOW || ''))) {
+      setImmediate(() => {
+        _runLolAiShadow({ match, mlResult, oddsToUse, prompt, hasLiveStats })
+          .catch(e => { try { log('WARN', 'AI-SHADOW', `dispatch err: ${e?.message || e}`); } catch (_) {} });
+      });
+    }
+
+    if (_lolHybridTip) return _lolHybridTip;
+
     const liveTag = (match.status === 'live' || match.status === 'inprogress') ? ' [AO VIVO]' : '';
     log('INFO', 'AUTO', `Analisando${liveTag}: ${match.team1} vs ${match.team2} | sinais=${sigCount}/6 | evThreshold=${adaptiveEV}% | mlEdge=${mlResult.score.toFixed(1)}pp`);
 
@@ -10025,16 +10040,6 @@ async function autoAnalyzeMatch(token, match) {
     // nem chamar /claude. Evita 15-25s desperdiçados por análise quando provider
     // está degradado (status=200 vazio).
     if (_AI_DISABLED) {
-      // 2026-05-13: AI shadow POC LoL — kicka off DeepSeek em paralelo (fire-and-forget)
-      // pra coletar tips IA como shadow durante a janela de AI_DISABLED. Não awaita —
-      // não bloqueia o loop. Helper persiste via /record-tip isShadow=1 + emission_source.
-      // Disponível só pra lol; outros esports nesse bloco fallback são unaffected.
-      if (match.game === 'lol' && /^(1|true|yes)$/i.test(String(process.env.LOL_AI_SHADOW || ''))) {
-        setImmediate(() => {
-          _runLolAiShadow({ match, mlResult, oddsToUse, prompt, hasLiveStats })
-            .catch(e => { try { log('WARN', 'AI-SHADOW', `dispatch err: ${e?.message || e}`); } catch (_) {} });
-        });
-      }
       // BUG FIX 2026-04-27: pick por MAIOR EV POSITIVO (não favorito do model).
       // Com AI removida, fallback é o único path. Pickar favorito do model
       // quando model concorda com market = sempre EV pequeno/negativo no fav.
