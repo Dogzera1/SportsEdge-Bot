@@ -10507,6 +10507,7 @@ setInterval(load, 10000);
           last_exit_bot: readJson('last_exit_bot.json'),
           last_exit_server: readJson('last_exit_server.json'),
           last_child_exit_server_js: readJson('last_child_exit_server_js.json'),
+          last_child_exit_bot_js: readJson('last_child_exit_bot_js.json'),
           boot_count: readJson('boot_count.json'),
         },
         process: {
