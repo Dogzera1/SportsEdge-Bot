@@ -146,6 +146,11 @@ if (doRetrain) {
   // 2026-05-13: basket trained model (logistic + isotonic NBA). Antes ficava
   // stale — só rodava via POST /admin/basket-train manual. Re-treina em --all
   // pra cobrir regime change pós-trade deadline / playoffs.
+  // Seed incremental antes — basket_match_history só é populado via seed
+  // (não há ingest contínuo). Sem seed, train re-treina nos mesmos dados.
+  // 14 dias cobre gap entre nightly runs com margem (cron 24h, ESPN backfill
+  // de score se game ainda IN_PROGRESS na última checagem).
+  run('Seed basket history (+14d)', 'node scripts/seed-basket-history.js 14');
   run('Train basket model', 'node scripts/train-basket-model.js');
 }
 
