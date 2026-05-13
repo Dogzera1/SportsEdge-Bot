@@ -4827,7 +4827,13 @@ async function runAutoHealerCycle() {
   const skipTag = healer.skipped.length > 0
     ? ` (${Object.entries(skipBreakdown).filter(([_, v]) => v > 0).map(([k, v]) => `${k}:${v}`).join(', ')})`
     : '';
-  log('INFO', 'AUTO-HEALER', `Ciclo: ${sentinel.anomalies.length} anomalia(s) | ${healer.applied.length} fix(es) aplicado(s) | ${healer.skipped.length} skip(s)${skipTag} | ${healer.errors.length} erro(s)`);
+  // 2026-05-13: ciclo "all-skip" (sem fix novo, sem erro, sem no_fix bug) é noise —
+  // tipicamente cooldown ativo pós-fix. Demota pra DEBUG; INFO só quando algo
+  // realmente aconteceu (applied > 0 OU error > 0 OU no_fix indica gap registrado).
+  const _healerNoise = healer.applied.length === 0
+    && healer.errors.length === 0
+    && noFixIds.length === 0;
+  log(_healerNoise ? 'DEBUG' : 'INFO', 'AUTO-HEALER', `Ciclo: ${sentinel.anomalies.length} anomalia(s) | ${healer.applied.length} fix(es) aplicado(s) | ${healer.skipped.length} skip(s)${skipTag} | ${healer.errors.length} erro(s)`);
   // Gap alert: se skip for "no_fix", temos anomaly sem FIXES registrado — bug latente.
   if (noFixIds.length > 0) log('WARN', 'AUTO-HEALER', `Anomalies sem FIX registrado: ${noFixIds.slice(0, 5).join(', ')}`);
   // Visibility: quais anomalies estão recorrentes como non_actionable / precondition?
