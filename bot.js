@@ -23464,6 +23464,79 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   setInterval(_wrapCron('auto_void_stuck', runAutoVoidStuck), 15 * 60 * 1000);
   setTimeout(_wrapCron('auto_void_stuck', runAutoVoidStuck), 65 * 60 * 1000);
 
+  // 2026-05-13: DD per-sport early-warning. DRAWDOWN_HARD_LIMIT_<SPORT> bloqueia
+  // em runtime quando DD ≥ hard (default 25%), mas user não tem visibility do
+  // approach. Esse cron DM admin quando DD ∈ [warn, hard) — chance de pause
+  // manual / re-calibrar antes do hard block. Cooldown 24h per sport evita
+  // spam. Threshold: DD_WARN_PCT default 15. Disable: DD_WARN_AUTO=false.
+  let _lastDdWarnDay = null;
+  const _ddWarnLastDm = new Map(); // sport → ts
+  async function runDdWarning() {
+    if (/^(0|false|no)$/i.test(String(process.env.DD_WARN_AUTO ?? 'true'))) return;
+    const now = new Date();
+    const today = now.toISOString().slice(0, 10);
+    if (_lastDdWarnDay === today) return;
+    const hourUtc = parseInt(process.env.DD_WARN_HOUR_UTC || '12', 10);
+    if (now.getUTCHours() !== hourUtc) return;
+    _lastDdWarnDay = today;
+    if (!ADMIN_IDS.size) return;
+    const warnPct = parseFloat(process.env.DD_WARN_PCT || '15') / 100;
+    const cooldownMs = parseInt(process.env.DD_WARN_COOLDOWN_H || '24', 10) * 3600 * 1000;
+    const nowMs = Date.now();
+    const sports = ['lol', 'dota2', 'cs', 'valorant', 'tennis', 'football', 'mma', 'darts', 'snooker', 'tabletennis', 'basket'];
+    const alerts = [];
+    // Peak via SQL window function (running max do profit). Mirror de
+    // server.js /bankroll endpoint. Bankroll table não armazena peak.
+    const _peakStmt = db.prepare(`
+      SELECT MAX(running) AS max_profit FROM (
+        SELECT SUM(profit_reais) OVER (ORDER BY COALESCE(settled_at, created_at)) AS running
+        FROM tips
+        WHERE sport = ?
+          AND result IS NOT NULL AND result != 'void'
+          AND profit_reais IS NOT NULL
+          AND (archived IS NULL OR archived = 0)
+          AND COALESCE(is_shadow, 0) = 0
+      )
+    `);
+    for (const sport of sports) {
+      try {
+        const bk = stmts.getBankroll.get(sport);
+        if (!bk || !Number.isFinite(bk.current_banca)) continue;
+        let peak = bk.initial_banca || 0;
+        try {
+          const peakRow = _peakStmt.get(sport);
+          const maxProfit = Number(peakRow?.max_profit) || 0;
+          peak = Math.max(bk.initial_banca || 0, (bk.initial_banca || 0) + maxProfit, bk.current_banca);
+        } catch (_) {}
+        if (peak <= 0) continue;
+        const dd = (peak - bk.current_banca) / peak;
+        const _spU = sport.toUpperCase();
+        const hardLimit = parseFloat(process.env[`DRAWDOWN_HARD_LIMIT_${_spU}`] || process.env.DRAWDOWN_HARD_LIMIT || '0.25');
+        if (dd >= warnPct && dd < hardLimit) {
+          const last = _ddWarnLastDm.get(sport) || 0;
+          if (nowMs - last < cooldownMs) continue;
+          alerts.push({ sport, dd_pct: (dd * 100).toFixed(1), peak, current: bk.current_banca, hard_pct: (hardLimit * 100).toFixed(0) });
+          _ddWarnLastDm.set(sport, nowMs);
+        }
+      } catch (_) {}
+    }
+    if (!alerts.length) return;
+    let msg = `⚠️ *Drawdown warning*  _${today}_\n\n`;
+    for (const a of alerts) {
+      msg += `• ${a.sport}: DD ${a.dd_pct}% (hard=${a.hard_pct}%) — peak R$${a.peak.toFixed(2)} → atual R$${a.current.toFixed(2)}\n`;
+    }
+    msg += `\n_Approach do hard block. Considere pause/re-calib antes._`;
+    const routed = _pickTokenForAlert('dd_warn') || _pickTokenForAlert('system');
+    const token = routed?.token;
+    if (!token) return;
+    for (const adminId of ADMIN_IDS) {
+      await sendDM(token, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
+    }
+    log('INFO', 'DD-WARN', `${alerts.length} sport(s) em DD warning: ${alerts.map(a => `${a.sport}(${a.dd_pct}%)`).join(', ')}`);
+  }
+  setInterval(_wrapCron('dd_warn', runDdWarning), 15 * 60 * 1000);
+  setTimeout(_wrapCron('dd_warn', runDdWarning), 50 * 60 * 1000);
+
   // 2026-05-10 P0 audit: PRAGMA integrity_check diário pra detectar corrupção
   // SQLite (WAL stale, OOM crashes, FK violations). Gated por
   // DB_INTEGRITY_CHECK_AUTO=true (default true). DM admin se != 'ok'.
