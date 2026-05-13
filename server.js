@@ -2802,12 +2802,15 @@ async function getLoLMatches() {
 let _pandaBackoffUntil = 0;
 let _pandaLast429LogTs = 0;
 let _pandaCache = { data: [], ts: 0 };
+let _pandaInflight = null; // 2026-05-13: inflight dedup (espelha _dotaMatchesResp). Sem isso, /lol-matches paralelo no boot/peak disparava 2 fetches → dup log "PANDASCORE 33 partidas LoL" mesmo segundo + waste quota.
 const PANDA_CACHE_TTL = parseInt(process.env.PANDA_CACHE_TTL_MS || '60000', 10); // 60s default
 async function getPandaScoreLolMatches() {
   if (!PANDASCORE_TOKEN || PANDASCORE_TOKEN === 'your-pandascore-token') return [];
   if (Date.now() < _pandaBackoffUntil) return [];
   // Cache TTL: evita chamar PandaScore em cada /lol-matches (chamado ~1/min pelo bot)
   if (_pandaCache.data.length && (Date.now() - _pandaCache.ts) < PANDA_CACHE_TTL) return _pandaCache.data;
+  if (_pandaInflight) return _pandaInflight;
+  _pandaInflight = (async () => {
   try {
     const headers = { 'Authorization': `Bearer ${PANDASCORE_TOKEN}` };
     const [runningRaw, upcomingRaw] = await Promise.all([
@@ -2930,6 +2933,8 @@ async function getPandaScoreLolMatches() {
     }
     return _pandaCache.data;
   }
+  })();
+  try { return await _pandaInflight; } finally { _pandaInflight = null; }
 }
 
 // ── The Odds API — Dota 2 ──
