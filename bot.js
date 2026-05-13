@@ -3894,6 +3894,13 @@ async function _settleCompletedTipsInner() {
 
       if (sport === 'mma') {
         const espnFights = await fetchEspnMmaFights().catch(() => []);
+        // 2026-05-13: também rastreia matches resolvidos pra upsertar em match_results.
+        // Antes /settle direto via POST cobria só is_shadow=0 ML tips reais; shadow=1
+        // tips e MT-promoted ficavam pending forever porque /admin/run-settle/
+        // settleShadowTips dependem de match_results (que NUNCA era populada pra MMA).
+        // Agora upsertamos via /admin/upsert-mma-result (ou direct route equivalente)
+        // sempre que ESPN tem winner — ativa pipeline shadow + MT.
+        const _resolvedFights = new Map(); // matchId → { p1, p2, winner, score }
         for (const tip of unsettled) {
           if (!tip.match_id) continue;
           // MT-promoted tips (match_id ::mt::) usam shadow pipeline + propagator
@@ -3901,12 +3908,35 @@ async function _settleCompletedTipsInner() {
           try {
             const espn = findEspnFight(espnFights, tip.participant1, tip.participant2);
             if (!espn || espn.statusState !== 'post' || !espn.winner) continue;
-            await serverPost('/settle', { matchId: tip.match_id, winner: espn.winner, score: espn.method || espn.detail || '' }, 'mma');
-            log('INFO', 'SETTLE', `mma: ${tip.participant1} vs ${tip.participant2} → ${espn.winner}`);
+            const winnerName = espn.winner;
+            const scoreStr = espn.method || espn.detail || '';
+            // Rastreia matches únicos pra upsert no fim (evita re-upsert do mesmo match
+            // quando há múltiplas tips do mesmo par).
+            if (!_resolvedFights.has(tip.match_id)) {
+              _resolvedFights.set(tip.match_id, { p1: tip.participant1, p2: tip.participant2, winner: winnerName, score: scoreStr });
+            }
+            await serverPost('/settle', { matchId: tip.match_id, winner: winnerName, score: scoreStr }, 'mma');
+            log('INFO', 'SETTLE', `mma: ${tip.participant1} vs ${tip.participant2} → ${winnerName}`);
             settled++;
           } catch(e) {
             log('WARN', 'SETTLE', `mma tip ${tip.match_id}: ${e.message}`);
           }
+        }
+        // 2026-05-13: upsert match_results pra MMA. Ativa settle path shadow/MT.
+        if (_resolvedFights.size > 0) {
+          let upserted = 0;
+          for (const [mid, info] of _resolvedFights) {
+            try {
+              await serverPost('/admin/upsert-match-result', {
+                match_id: mid, game: 'mma',
+                team1: info.p1, team2: info.p2,
+                winner: info.winner, final_score: info.score,
+                league: 'UFC',
+              }, 'mma').catch(() => null);
+              upserted++;
+            } catch (_) {}
+          }
+          if (upserted > 0) log('INFO', 'SETTLE', `mma: ${upserted} match_results upserted (ativa shadow+MT settle)`);
         }
         if (settled > 0) log('INFO', 'SETTLE', `mma: ${settled} tips liquidadas`);
         continue;

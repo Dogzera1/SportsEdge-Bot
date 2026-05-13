@@ -14487,6 +14487,60 @@ load();
               `).all(...games, wideBefore, after, n1, n2, n2, n1, t.sent_at);
             }
           }
+          // 2026-05-13: fuzzy name fallback (Gap 1). SQL strict eq não strip
+          // diacrítico nem middle name — falha em casos legítimos:
+          //   tip 'Pablo Carreno Busta' vs sofa 'Pablo Carreño Busta'
+          //   tip 'Joel Josef Schwaerzler' vs sofa 'Joel Schwaerzler'
+          //   tip 'Dominic Stephan Stricker' vs sofa 'Dominic Stricker'
+          // Após strict + pre-zombie sem hit, tenta query single-side LIKE em
+          // partial token (≥4 chars de cada nome) e valida com tennisPairMatchesPlayers
+          // (já tem fuzzy NFD/diacritic + surname + substring). Opt-out
+          // FUZZY_NAME_SETTLE_DISABLED=true.
+          if (!matches.length && !/^(1|true|yes)$/i.test(String(process.env.FUZZY_NAME_SETTLE_DISABLED || '')) && (t.sport === 'tennis' || t.sport === 'football')) {
+            try {
+              const tipAgeH = (Date.now() - tipMs) / 3600000;
+              if (tipAgeH >= 1) {  // só pós-1h (evita disputas com match ainda live)
+                // pega tokens >=4 chars de cada nome (cobre last name + first se >=4)
+                const tokens = (s) => String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').split(/[\s\-]+/).filter(t => t.length >= 4);
+                const p1Tokens = tokens(t.participant1);
+                const p2Tokens = tokens(t.participant2);
+                if (p1Tokens.length && p2Tokens.length) {
+                  // pega last token de cada (heurística surname pra tennis, equivalente pra football)
+                  const p1Last = p1Tokens[p1Tokens.length - 1];
+                  const p2Last = p2Tokens[p2Tokens.length - 1];
+                  const _preZombieMaxLagH = parseFloat(process.env.MT_PRE_ZOMBIE_MAX_LAG_HOURS || '4');
+                  const wideBefore = new Date(tipMs - _preZombieMaxLagH * 3600 * 1000).toISOString().slice(0, 19).replace('T', ' ');
+                  // Query LIKE em ambos teams (case-insensitive via lower)
+                  const candidates = db.prepare(`
+                    SELECT match_id, team1, team2, winner, final_score, resolved_at, league
+                    FROM match_results
+                    WHERE game IN (${placeholders})
+                      AND winner IS NOT NULL AND winner != ''
+                      AND resolved_at >= ? AND resolved_at <= ?
+                      AND (lower(team1) LIKE ? OR lower(team2) LIKE ?)
+                      AND (lower(team1) LIKE ? OR lower(team2) LIKE ?)
+                    ORDER BY ABS(julianday(resolved_at) - julianday(?)) ASC
+                    LIMIT 5
+                  `).all(...games, wideBefore, after, `%${p1Last}%`, `%${p1Last}%`, `%${p2Last}%`, `%${p2Last}%`, t.sent_at);
+                  // JS-level validation com função fuzzy
+                  const { tennisPairMatchesPlayers } = require('./lib/tennis-match');
+                  for (const c of candidates) {
+                    if (t.sport === 'tennis') {
+                      if (tennisPairMatchesPlayers(t.participant1, t.participant2, c.team1, c.team2)) {
+                        matches = [c]; break;
+                      }
+                    } else {
+                      // football: name match básico (token-level includes em qualquer direção)
+                      const ta = (c.team1 + '|' + c.team2).toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+                      const p1Hit = p1Tokens.every(tok => ta.includes(tok)) || p1Tokens.some(tok => tok.length >= 5 && ta.includes(tok));
+                      const p2Hit = p2Tokens.every(tok => ta.includes(tok)) || p2Tokens.some(tok => tok.length >= 5 && ta.includes(tok));
+                      if (p1Hit && p2Hit) { matches = [c]; break; }
+                    }
+                  }
+                }
+              }
+            } catch (e) { /* fuzzy fallback best-effort, swallow */ }
+          }
           if (!matches.length) { summary.skipped++; continue; }
           const m = matches[0];
           // Walkover detection
@@ -17337,6 +17391,37 @@ load();
       const r = db.prepare(sql).run(...params);
       sendJson(res, { ok: true, voided: r.changes, sport, criteria: { days, market, minEv, maxPModel, minPModel, maxAbsLine, includeSettled } });
     } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
+  // POST /admin/upsert-match-result — upsert manual em match_results.
+  // 2026-05-13: criado pra MMA settle pipeline (Gap 3 audit 2026-05-13). bot.js
+  // mma settle path chama /settle direto mas NUNCA populava match_results, então
+  // shadow tips MMA + MT-promoted ficavam pending forever sem MR pra settleShadowTips
+  // / /admin/run-settle. Agora bot.js:3895+ rastreia matches resolvidos e chama
+  // este endpoint pra ativar pipeline shadow.
+  if (p === '/admin/upsert-match-result' && req.method === 'POST') {
+    if (!requireAdmin(req, res)) return;
+    let body = ''; req.on('data', d => body += d);
+    req.on('end', () => {
+      try {
+        const j = safeParse(body, {});
+        const matchId = String(j.match_id || j.matchId || '').trim();
+        const game = String(j.game || '').trim().toLowerCase();
+        const team1 = String(j.team1 || '').trim();
+        const team2 = String(j.team2 || '').trim();
+        const winner = String(j.winner || '').trim();
+        const finalScore = String(j.final_score || j.finalScore || '').trim();
+        const league = String(j.league || '').trim();
+        if (!matchId || !game || !team1 || !team2 || !winner) {
+          sendJson(res, { ok: false, error: 'missing match_id, game, team1, team2, ou winner' }, 400); return;
+        }
+        try {
+          stmts.upsertMatchResult.run(matchId, game, team1, team2, winner, finalScore, league);
+          sendJson(res, { ok: true, match_id: matchId, game, winner });
+        } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+      } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    });
     return;
   }
 
