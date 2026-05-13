@@ -17,6 +17,7 @@ require('dotenv').config({ override: true });
 const fs = require('fs');
 const path = require('path');
 const initDatabase = require('../lib/database');
+const { getDaysSincePatch, isPostPatchWindow } = require('../lib/lol-patches');
 
 const argv = process.argv.slice(2);
 function argVal(name, def) {
@@ -205,7 +206,7 @@ function rosterStatsAt(team, tMs, sinceDays = 60, minGamesPerPlayer = 10) {
 // Default OFF (ver LEAKY_FEATURES). Habilita c/ --leaky-snapshot-features.
 const csTeamByName = new Map();
 const csTeamBySlug = new Map();
-if (GAME === 'cs' && LEAKY_FEATURES) {
+if ((GAME === 'cs' || GAME === 'cs2') && LEAKY_FEATURES) {
   try {
     const rows = db.prepare(`
       SELECT name, slug, ranking, ranking_points, recent_n, recent_wr,
@@ -424,6 +425,10 @@ const HEADERS = [
   // cs_rank_diff: lower ranking = stronger; usa -rank pra positivo = forte
   'cs_rank_diff', 'cs_points_diff', 'cs_recent_wr_diff', 'cs_streak_diff',
   'has_cs_team_stats',
+  // Patch features (só LoL; CS/Val/Dota retornam 0). days_since_patch cap 60d,
+  // post_patch_window=1 se ≤14d. Captura ineficiência de mercado pós-patch
+  // segundo literatura (janela 2-3 sem onde Pinnacle reage mais lento que meta).
+  'days_since_patch', 'post_patch_window',
   'y',
 ];
 
@@ -556,7 +561,7 @@ for (const r of rows) {
     }
     // CS2 HLTV team stats (ranking + recent form)
     let csRankDiff = 0, csPointsDiff = 0, csRecentWrDiff = 0, csStreakDiff = 0, hasCsTeamStats = 0;
-    if (GAME === 'cs' && csTeamByName.size > 0) {
+    if ((GAME === 'cs' || GAME === 'cs2') && csTeamByName.size > 0) {
       const c1 = csTeamLookup(p1Raw);
       const c2 = csTeamLookup(p2Raw);
       if (c1 && c2) {
@@ -570,6 +575,12 @@ for (const r of rows) {
         }
         csStreakDiff = (c1.streak ?? 0) - (c2.streak ?? 0);
       }
+    }
+    // Patch features (LoL only). CS/Val/Dota → 0/0.
+    let daysSincePatchVal = 0, postPatchWindow = 0;
+    if (GAME === 'lol') {
+      daysSincePatchVal = getDaysSincePatch(t);
+      postPatchWindow = isPostPatchWindow(t, 14);
     }
     // Dota2 OpenDota team stats
     let dotaRatingDiff = 0, dotaWrDiff = 0, dotaGamesDiff = 0, hasDotaTeamStats = 0;
@@ -624,6 +635,7 @@ for (const r of rows) {
       dotaRecentWrDiff.toFixed(4), dotaKillMarginDiff.toFixed(2), dotaDurationDiff.toFixed(2),
       dotaStreakDiff, dotaDaysIdleDiff, hasDotaRollingStats,
       csRankDiff, csPointsDiff, csRecentWrDiff.toFixed(4), csStreakDiff, hasCsTeamStats,
+      daysSincePatchVal, postPatchWindow,
       p1Won,
     ]);
     kept++;

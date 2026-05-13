@@ -143,14 +143,18 @@ if (doSync) {
 }
 
 if (doRetrain) {
+  // Sync LoL patch dates antes do extract — append patches novos ddragon
+  // (feature days_since_patch lê data/lol-patch-dates.json). Idempotente:
+  // se ddragon retorna versões já conhecidas, no-op.
+  run('Sync LoL patch dates (ddragon)', 'node scripts/sync-lol-patch-dates.js');
   run('Extract LoL features', 'node scripts/extract-esports-features.js --game lol');
   run('Train LoL model', 'node scripts/train-esports-model.js --game lol');
   // 2026-05-13: CS2 + Dota2 weights retrain (P5 retroativo). Antes só LoL
   // tinha retrain wired — CS2 ficou 25d stale, Dota2 3d. Lifts confirmados
   // sobre Elo baseline: CS2 +20.4%, Dota2 +4.1% (borderline — auto-rollback
   // protege). Valorant SKIP intencional: lift +4.2% + memory "regredia Brier".
-  run('Extract CS2 features', 'node scripts/extract-esports-features.js --game cs');
-  run('Train CS2 model', 'node scripts/train-esports-model.js --game cs');
+  run('Extract CS2 features', 'node scripts/extract-esports-features.js --game cs2');
+  run('Train CS2 model', 'node scripts/train-esports-model.js --game cs2');
   run('Extract Dota2 features', 'node scripts/extract-esports-features.js --game dota2');
   run('Train Dota2 model', 'node scripts/train-esports-model.js --game dota2');
   // 2026-05-13: basket trained model (logistic + isotonic NBA). Antes ficava
