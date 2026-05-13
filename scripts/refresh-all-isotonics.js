@@ -102,6 +102,8 @@ const BASKET_PARAMS_REL = path.relative(ROOT, BASKET_PARAMS);
 
 const BEFORE = {
   lol_weights: readWeights('lib/lol-weights.json'),
+  cs_weights: readWeights('lib/cs2-weights.json'),
+  dota_weights: readWeights('lib/dota2-weights.json'),
   lol_iso: readIsotonic('lib/lol-model-isotonic.json'),
   tennis_iso: readIsotonic('lib/tennis-model-isotonic.json'),
   dota_iso: readIsotonic('lib/dota2-isotonic.json'),
@@ -143,6 +145,14 @@ if (doSync) {
 if (doRetrain) {
   run('Extract LoL features', 'node scripts/extract-esports-features.js --game lol');
   run('Train LoL model', 'node scripts/train-esports-model.js --game lol');
+  // 2026-05-13: CS2 + Dota2 weights retrain (P5 retroativo). Antes só LoL
+  // tinha retrain wired — CS2 ficou 25d stale, Dota2 3d. Lifts confirmados
+  // sobre Elo baseline: CS2 +20.4%, Dota2 +4.1% (borderline — auto-rollback
+  // protege). Valorant SKIP intencional: lift +4.2% + memory "regredia Brier".
+  run('Extract CS2 features', 'node scripts/extract-esports-features.js --game cs');
+  run('Train CS2 model', 'node scripts/train-esports-model.js --game cs');
+  run('Extract Dota2 features', 'node scripts/extract-esports-features.js --game dota2');
+  run('Train Dota2 model', 'node scripts/train-esports-model.js --game dota2');
   // 2026-05-13: basket trained model (logistic + isotonic NBA). Antes ficava
   // stale — só rodava via POST /admin/basket-train manual. Re-treina em --all
   // pra cobrir regime change pós-trade deadline / playoffs.
@@ -173,6 +183,8 @@ run('Fit CLV calibration (all sports)', 'node scripts/fit-clv-calibration.js --s
 
 const AFTER = {
   lol_weights: readWeights('lib/lol-weights.json'),
+  cs_weights: readWeights('lib/cs2-weights.json'),
+  dota_weights: readWeights('lib/dota2-weights.json'),
   lol_iso: readIsotonic('lib/lol-model-isotonic.json'),
   tennis_iso: readIsotonic('lib/tennis-model-isotonic.json'),
   dota_iso: readIsotonic('lib/dota2-isotonic.json'),
@@ -196,27 +208,32 @@ const REGRESSION_THRESHOLD = parseFloat(process.env.REGRESSION_THRESHOLD_PCT || 
 results.rollbacks = [];
 
 if (autoRollback && doRetrain) {
-  const b = BEFORE.lol_weights, a = AFTER.lol_weights;
-  if (b?.brier && a?.brier && a.brier > b.brier * (1 + REGRESSION_THRESHOLD)) {
+  // 2026-05-13: generalizado pra cobrir lol/cs/dota. Cada sport: compara Brier
+  // antes/depois; se regrediu mais que threshold, restaura backup criado antes
+  // do write (lib/model-backup auto-cria pre-write).
+  const ROLLBACK_TARGETS = [
+    { key: 'lol_weights', label: 'LoL', file: 'lib/lol-weights.json' },
+    { key: 'cs_weights', label: 'CS2', file: 'lib/cs2-weights.json' },
+    { key: 'dota_weights', label: 'Dota2', file: 'lib/dota2-weights.json' },
+  ];
+  for (const t of ROLLBACK_TARGETS) {
+    const b = BEFORE[t.key], a = AFTER[t.key];
+    if (!(b?.brier && a?.brier)) continue;
+    if (a.brier <= b.brier * (1 + REGRESSION_THRESHOLD)) continue;
     const pctWorse = ((a.brier - b.brier) / b.brier * 100).toFixed(1);
-    if (!asJson) console.log(`\n⚠️ Regression detected: LoL Brier ${b.brier.toFixed(4)} → ${a.brier.toFixed(4)} (+${pctWorse}%)`);
+    if (!asJson) console.log(`\n⚠️ Regression detected: ${t.label} Brier ${b.brier.toFixed(4)} → ${a.brier.toFixed(4)} (+${pctWorse}%)`);
     try {
-      const { restoreLatest } = require('../lib/model-backup');
-      // restoreLatest restaura o MAIS RECENTE backup. Mas agora o mais recente é o que acabamos de salvar.
-      // Queremos o ANTES: o segundo mais recente.
-      const { listBackups } = require('../lib/model-backup');
-      const weightsPath = path.join(ROOT, 'lib', 'lol-weights.json');
+      const { restoreLatest, listBackups } = require('../lib/model-backup');
+      const weightsPath = path.join(ROOT, t.file);
       const backups = listBackups(weightsPath);
-      // Backups sorted by mtime desc. O mais recente é o backup criado AGORA (train-esports-model)
-      // antes do novo write. Pra rollback queremos ele mesmo (pre-refresh state).
       if (backups.length) {
-        const r = restoreLatest(weightsPath, { name: backups[0].name });
-        results.rollbacks.push({ file: 'lib/lol-weights.json', restoredFrom: backups[0].name, reasonPct: +pctWorse });
+        restoreLatest(weightsPath, { name: backups[0].name });
+        results.rollbacks.push({ file: t.file, restoredFrom: backups[0].name, reasonPct: +pctWorse });
         if (!asJson) console.log(`  ↺ Rolled back from ${backups[0].name}`);
       }
     } catch (e) {
-      if (!asJson) console.log(`  ✗ Rollback falhou: ${e.message}`);
-      results.rollbacks.push({ file: 'lib/lol-weights.json', error: e.message });
+      if (!asJson) console.log(`  ✗ Rollback ${t.label} falhou: ${e.message}`);
+      results.rollbacks.push({ file: t.file, error: e.message });
     }
   }
 }
