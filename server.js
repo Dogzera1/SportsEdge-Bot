@@ -24560,7 +24560,7 @@ load();
     // Bundesliga/Ligue 1 estão em match_results via football-data CSV + Sofascore.
     // Antes deixava método "form" (conf 0.40) bloquear override em todos jogos top-5
     // EU. Agora cobre as 5 ligas + Brasileirão Serie B (que não estava coberto).
-    const defaultTargets = 'Brazil,Sweden,Norway,Finland,Denmark,Poland,Japan,USA,Mexico,Russia,Romania,China,Ireland,Championship,League One,2.Bundesliga,Segunda,Serie B,Ligue 2,Pro League,Primeira Liga,Super Lig,Super League,Superliga,Eliteserien,Allsvenskan,Veikkausliiga,Ekstraklasa,Premier League,La Liga,LaLiga,Serie A,Bundesliga,Ligue 1';
+    const defaultTargets = 'Brazil,Brasil,Sweden,Norway,Finland,Denmark,Poland,Japan,USA,Mexico,Russia,Romania,China,Ireland,Championship,League One,2.Bundesliga,Segunda,Serie B,Ligue 2,Pro League,Primeira Liga,Super Lig,Super League,Superliga,Eliteserien,Allsvenskan,Veikkausliiga,Ekstraklasa,Premier League,La Liga,LaLiga,Serie A,Bundesliga,Ligue 1';
     const targetLeaguesEnv = queryLeagues || process.env.FOOTBALL_TARGET_LEAGUES || defaultTargets;
     const targetPatterns = targetLeaguesEnv.split(',').map(s => s.trim()).filter(Boolean);
     const leagueMatches = (l) => targetPatterns.some(p => String(l || '').toLowerCase().includes(p.toLowerCase()));
