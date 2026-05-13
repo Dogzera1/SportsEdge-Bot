@@ -23597,6 +23597,46 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
           }
         }
       } catch (_) {}
+
+      // 2026-05-13: audit-pulse — visibility diária de findings que precisam
+      // ação humana (env audit, shadow stuck pendings). Não auto-fixa, só
+      // reporta. Crons existentes (shadow-vs-real-drift, overfeaturing-audit)
+      // já cobrem os outros eixos com DM próprio — aqui agrega só o que falta.
+      try {
+        const auditLines = [];
+        // Env audit findings (excluindo duplicate_token que é design alias)
+        try {
+          const adminKey = process.env.ADMIN_KEY || '';
+          const ea = await serverGet('/admin/env-audit', null, adminKey ? { 'x-admin-key': adminKey } : {}).catch(() => null);
+          if (ea?.issues) {
+            const counts = [];
+            if (ea.issues.whitespace?.length) counts.push(`whitespace=${ea.issues.whitespace.length}`);
+            if (ea.issues.kelly_inversion?.length) counts.push(`kelly_inv=${ea.issues.kelly_inversion.length}`);
+            if (ea.issues.typos?.length) counts.push(`typos=${ea.issues.typos.length}`);
+            const realSuspicious = (ea.issues.suspicious || []).filter(s => s.type !== 'duplicate_token');
+            if (realSuspicious.length) counts.push(`suspicious=${realSuspicious.length}`);
+            if (counts.length) auditLines.push(`• Env audit: ${counts.join(', ')} → \`/admin/env-audit\``);
+          }
+        } catch (_) {}
+        // Shadow stuck >24h por sport (do /admin/sport-detail.pending.ml_shadow_stuck_24h)
+        try {
+          const adminKey = process.env.ADMIN_KEY || '';
+          const sportsList = ['tennis', 'lol', 'cs', 'dota2', 'valorant', 'football', 'basket', 'mma'];
+          const stuckBySport = [];
+          for (const sp of sportsList) {
+            const sd = await serverGet(`/admin/sport-detail?sport=${sp}`, null, adminKey ? { 'x-admin-key': adminKey } : {}).catch(() => null);
+            const n = sd?.pending?.ml_shadow_stuck_24h || 0;
+            if (n > 0) stuckBySport.push(`${sp}=${n}`);
+          }
+          if (stuckBySport.length) {
+            auditLines.push(`• Shadow stuck >24h: ${stuckBySport.join(', ')} (rodar diag p/ triagem)`);
+          }
+        } catch (_) {}
+        if (auditLines.length) {
+          msg += `\n🔍 *Audit findings:*\n${auditLines.join('\n')}\n`;
+        }
+      } catch (_) {}
+
       msg += `\n_Digest diário. Use /loops pra snapshot ao vivo._`;
       const routed = _pickTokenForAlert('digest') || _pickTokenForAlert('system');
       const token = routed?.token;

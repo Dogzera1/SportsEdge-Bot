@@ -13370,6 +13370,8 @@ setInterval(load, 60000);
         real_tips: db.prepare(`SELECT COUNT(*) AS n FROM tips WHERE sport=? AND result IS NULL AND COALESCE(archived,0)=0 AND COALESCE(is_shadow,0)=0`).get(sport).n,
         mt_shadow: db.prepare(`SELECT COUNT(*) AS n FROM market_tips_shadow WHERE sport=? AND result IS NULL`).get(sport).n,
         ml_shadow: db.prepare(`SELECT COUNT(*) AS n FROM tips WHERE sport=? AND result IS NULL AND COALESCE(is_shadow,0)=1 AND COALESCE(archived,0)=0`).get(sport).n,
+        // 2026-05-13: stuck >24h pra audit-pulse visibility (DM autonomy-digest)
+        ml_shadow_stuck_24h: db.prepare(`SELECT COUNT(*) AS n FROM tips WHERE sport=? AND result IS NULL AND COALESCE(is_shadow,0)=1 AND COALESCE(archived,0)=0 AND sent_at < datetime('now','-24 hours')`).get(sport).n,
       };
       // Last tip (real + shadow)
       const lastTip = db.prepare(`
