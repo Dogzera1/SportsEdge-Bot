@@ -9156,7 +9156,11 @@ function buildEnrichmentSection(match, enrich) {
 async function _runLolAiShadow(ctx) {
   const { match, mlResult, oddsToUse, prompt, hasLiveStats } = ctx;
   try {
-    if (!prompt || !mlResult || !oddsToUse) return;
+    if (!prompt || !mlResult || !oddsToUse) {
+      log('WARN', 'AI-SHADOW', `entry guard fail: prompt=${!!prompt} mlR=${!!mlResult} odd=${!!oddsToUse} match=${match?.team1}`);
+      return;
+    }
+    log('INFO', 'AI-SHADOW', `entry: ${match.team1} vs ${match.team2} promptLen=${prompt.length}`);
     const resp = await serverPost('/claude', {
       model: 'deepseek-chat',
       max_tokens: 600,
@@ -9164,6 +9168,7 @@ async function _runLolAiShadow(ctx) {
       sport: 'lol',
       shadowBypass: true,
     });
+    log('INFO', 'AI-SHADOW', `claude resp: blocked=${resp?.blocked} status=${resp?.__status} provider=${resp?.provider} hasContent=${!!resp?.content?.[0]?.text} err=${resp?.error || '-'}`);
     const text = resp?.content?.map(b => b.text || '').join('') || '';
     if (!text) {
       try { _metrics.incr('ai_shadow_no_text', { sport: 'lol' }); } catch (_) {}
@@ -9171,6 +9176,7 @@ async function _runLolAiShadow(ctx) {
     }
     const tipResult = _parseTipMl(text);
     if (!tipResult) {
+      log('INFO', 'AI-SHADOW', `parse fail snippet="${text.slice(0,120).replace(/\n/g,' ')}"`);
       try { _metrics.incr('ai_shadow_no_parse', { sport: 'lol' }); } catch (_) {}
       return;
     }
@@ -10019,11 +10025,17 @@ async function autoAnalyzeMatch(token, match) {
     // AI shadow LoL — dispara em TODOS os matches lol analisados (com mlResult+odds válidos)
     // independente do path real (HYBRID/fallback/AI). Tips persistidas isShadow=1
     // + emission_source='lol_ai_shadow'. Gate: env LOL_AI_SHADOW=true.
-    if (match.game === 'lol' && /^(1|true|yes)$/i.test(String(process.env.LOL_AI_SHADOW || ''))) {
-      setImmediate(() => {
-        _runLolAiShadow({ match, mlResult, oddsToUse, prompt, hasLiveStats })
-          .catch(e => { try { log('WARN', 'AI-SHADOW', `dispatch err: ${e?.message || e}`); } catch (_) {} });
-      });
+    const _lolAiShadowEnv = String(process.env.LOL_AI_SHADOW || '');
+    if (match.game === 'lol') {
+      if (/^(1|true|yes)$/i.test(_lolAiShadowEnv)) {
+        log('INFO', 'AI-SHADOW', `trigger fire: ${match.team1} vs ${match.team2} (env=${_lolAiShadowEnv})`);
+        setImmediate(() => {
+          _runLolAiShadow({ match, mlResult, oddsToUse, prompt, hasLiveStats })
+            .catch(e => { try { log('WARN', 'AI-SHADOW', `dispatch err: ${e?.message || e}`); } catch (_) {} });
+        });
+      } else {
+        log('DEBUG', 'AI-SHADOW', `skip ${match.team1} vs ${match.team2} env=${JSON.stringify(_lolAiShadowEnv)}`);
+      }
     }
 
     if (_lolHybridTip) return _lolHybridTip;
