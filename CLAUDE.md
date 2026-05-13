@@ -279,6 +279,60 @@ Use env opt-out `<COMPONENT>_REAL_ONLY=true` (default) para preservar comportame
 
 ---
 
+## P5 — Cross-sport bug verification
+
+**Regra:** Toda vez que achar bug/falha em um sport, **verificar imediatamente se os outros sports têm o mesmo bug** antes de fechar o fix. Bug raramente é isolado — código compartilhado (libs, helpers, pipelines genéricas) propaga o mesmo defeito por múltiplos sports silenciosamente.
+
+**Por quê:** Sistema usa MUITO código compartilhado per-sport (lib/market-tip-processor, lib/calibration, lib/league-tier, propagators MT, settle paths, hierarchy de envs `<SPORT>_<PARAM>`). Bug numa lib afeta TODOS os sports que chamam. Casos reais:
+
+- **2026-05-07 LoL UNDER 2.5 leak** (momentum hardcoded 0.03 em bot.js underfitting regime atual). User: "verifique CS e Dota também" → audit revelou **CS2/Dota2/Val compartilhavam pricingLib lol-markets** + tinham MESMO bug arquitetural (momentum hardcoded 0.04 + mapProbFromSeries momentum=0). Bonus: CS2 live momentum=0.03 vs scanMarkets 0.04 = inconsistência interna. Fix `95cc4a0` cobre TODOS via `<SPORT>_MOMENTUM_<TIER>` env hierarchy. Sem cross-check, fix seria só LoL e bug permaneceria latente nos outros 3.
+- **2026-05-07 P2 violators re-audit**. User: "verifique se shadow está puro" → re-audit do mesmo princípio P2 (já com 5 fixes em wave 1) encontrou **3 violators adicionais** (ev-calibration, league-trust, mt-auto-promote) que tinham padrão similar mas não foram pegos no audit inicial. Wave 2 essencial.
+- **2026-05-09 propagator sport mismatch** (cs2→cs causou MT cs/cs2 pending forever). Propagator é GENÉRICO cross-sport → mesma classe de bug podia afetar lol/dota/valorant. Audit confirmou só cs2 (sport key alias único), mas o instinto de checar foi correto.
+- **2026-05-13 basket ML `NBA`/`nba` lowercase bug**. Fallback hardcoded `'NBA'` em bot.js:22438. Poluía breakdown `/admin/*-by-league` shadow-readiness. Single sport (basket) mas vale pattern: TODO fallback literal `'<LEAGUE>'` em todos sports deveria ser lowercase. Cross-check rápido: nenhum outro sport tinha esse pattern, mas a verificação custou 30s.
+
+**Como aplicar — após identificar bug em sport X, ANTES de fechar fix:**
+
+1. **Grep cross-sport**: o código onde está o bug é compartilhado?
+   ```bash
+   grep -rE "<função_bugada>|<padrão_problema>" bot.js server.js lib/
+   ```
+   Se sim → 99% dos sports que chamam essa função têm o mesmo bug.
+
+2. **Variantes per-sport**: tem `lib/<sport>-X.js` paralelos? (`lib/basket-trained.js`, `lib/tennis-trained.js`, `lib/lol-markets.js`)
+   - Mesma classe de bug pode estar replicada em cada arquivo paralelo
+   - Pattern: bug arquitetural num sport → grep nome similar nos outros
+
+3. **Envs hierárquicos**: bug é em `<SPORT>_<PARAM>` default? Cheque todos os SPORTS:
+   - LOL_X, CS_X, DOTA2_X, VALORANT_X, TENNIS_X, FOOTBALL_X, BASKET_X, MMA_X, etc.
+   - Hardcoded fallback (`process.env.X || '<DEFAULT>'`) que era certo pra um sport mas errado pra outro?
+
+4. **Crons genéricos**: cron itera `for (sport of SPORTS)`? Bug afeta TODOS (e talvez nenhum sport-specific guard exista).
+
+5. **Documente decisão**: no commit message OU no fim da response — "Cross-check: verifiquei lol/cs/dota/val (idem affected | only X | not applicable porque Y)". Sem isso, próxima sessão re-audit do zero.
+
+**Anti-patterns (NÃO fazer):**
+
+- ❌ Fechar fix do sport X sem grep mínimo nos arquivos compartilhados (`lib/market-tip-processor`, `lib/calibration`, propagators)
+- ❌ Assumir "bug é único deste sport" sem evidência (default suspeito é o oposto)
+- ❌ Fix per-sport quando código é compartilhado — duplica fix e gera inconsistência
+- ❌ "Não tenho tempo de checar os outros" — custo de cross-check é < 1min vs custo de bug latente em prod
+
+**Patterns (fazer):**
+
+- ✅ Após fix, **2-3 min cross-sport grep** mesmo se bug parece isolado
+- ✅ Quando bug é em código compartilhado (lib/), fix DEVE ser cross-sport por construção (não per-sport)
+- ✅ Anotar em commit message: "Affected: lol/cs/dota/val (compartilham lib X)" ou "Only basket (variant em lib/basket-trained não replica padrão)"
+- ✅ Quando user diz "verifique X também" — esse instinto sempre pega bugs. Adotar como rotina pessoal (não esperar user pedir)
+- ✅ Se cross-check revela paralelismo (3+ implementações similares), aplica P3 → refactor pra delegate
+
+**Status atual:**
+
+- ✅ Padrão estabelecido em 2026-05-07 (CS/Dota cross-check momentum) + 2026-05-07 P2 re-audit
+- ✅ CLAUDE.md P5 documenta (2026-05-13)
+- ⏳ Aplicar em toda sessão de fix daqui pra frente — cross-sport check antes do commit
+
+---
+
 ## Princípios gerais de execução
 
 - **Faça o mínimo necessário.** Resolva o pedido, nada além. Não adicione "while I'm here" fixes.
