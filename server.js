@@ -24396,6 +24396,10 @@ load();
             };
           }
           if (t.pickSide) ctx.pick_side = t.pickSide;
+          // 2026-05-13: emission_source — discrimina path que gerou a tip (ml_only / ml_only_fallback /
+          // lol_ai_shadow / hybrid_trained / etc). Habilita A/B analysis cross-path mesmo dentro
+          // do mesmo sport+market. Caller bot.js passa string curta; aqui só persistimos.
+          if (t.emissionSource) ctx.emission_source = String(t.emissionSource).slice(0, 60);
           if (t.kellyFrac != null) ctx.kelly_frac = t.kellyFrac;
           if (t.stakeAdjust != null) ctx.stake_adjust = t.stakeAdjust;
           if (t.preMatchBonus != null) ctx.pre_match_bonus = t.preMatchBonus;
@@ -32051,7 +32055,15 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
         const _aiOverrideOn = _aiOverrideSportKey
           && /^(1|true|yes)$/i.test(String(process.env[`${_aiOverrideSportKey}_AI_ENABLED`] || ''));
         const _aiGloballyOff = /^(1|true|yes)$/i.test(String(process.env.AI_DISABLED || ''));
-        if (_aiGloballyOff && !_aiOverrideOn) {
+        // 2026-05-13: shadowBypass — caller (bot.js _runLolAiShadow) seta payload.shadowBypass=true
+        // pra rodar DeepSeek em paralelo ao path ML-only fallback. Escopo restrito por env
+        // <SPORT>_AI_SHADOW=true — sem env setada, bypass não tem efeito (defesa em profundidade).
+        // Tip resultante é persistida via /record-tip com isShadow=1 + emission_source='<sport>_ai_shadow'.
+        const _shadowBypassReq = !!payload.shadowBypass;
+        const _shadowEnvOn = _aiOverrideSportKey
+          && /^(1|true|yes)$/i.test(String(process.env[`${_aiOverrideSportKey}_AI_SHADOW`] || ''));
+        const _shadowBypassAllowed = _shadowBypassReq && _shadowEnvOn;
+        if (_aiGloballyOff && !_aiOverrideOn && !_shadowBypassAllowed) {
           // Track bloqueio pra visibilidade
           try {
             const month = new Date().toISOString().slice(0, 7);
@@ -32063,6 +32075,12 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
           // Resposta que callers interpretam como "IA sem texto" → fallback path
           sendJson(res, { ok: true, blocked: true, reason: 'AI_DISABLED=true', content: [{ text: '' }] });
           return;
+        }
+        if (_shadowBypassAllowed) {
+          try {
+            const month = new Date().toISOString().slice(0, 7);
+            stmts.incrApiUsage.run(`deepseek_shadow_${_sportTag}`, month);
+          } catch (_) {}
         }
 
         if (!DEEPSEEK_KEY) { sendJson(res, { error: 'DEEPSEEK_API_KEY ausente' }, 401); _emitAiMetric('no_key', _sportTag); return; }

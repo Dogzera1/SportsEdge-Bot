@@ -3186,6 +3186,7 @@ async function runAutoAnalysis() {
             factors: result.factorActive || null,
             mlScore: Number.isFinite(result.mlScore) ? +result.mlScore.toFixed(2) : null,
             factorCount: (result.factorActive || []).length || null,
+            emissionSource: result.debugVars?.source || 'ml_only',
           }, 'lol');
 
           // Aborta se DB recusou (erro ou duplicata já registrada)
@@ -3636,6 +3637,7 @@ async function runAutoAnalysis() {
               pickSide: _pickSideUp,
               sport: 'lol',
               isShadow: isBucketShadowed('lol') ? 1 : 0,
+              emissionSource: result.debugVars?.source || 'ml_only',
             }, 'lol');
 
             if (!recUp?.tipId) {
@@ -9145,6 +9147,74 @@ function buildEnrichmentSection(match, enrich) {
   return txt;
 }
 
+// 2026-05-13: AI shadow POC LoL — chama DeepSeek em paralelo ao path ML-only
+// fallback (que continua emitindo real como hoje). Tip resultante persistida
+// como is_shadow=1 + emission_source='lol_ai_shadow' pra A/B analysis.
+// Fire-and-forget: não bloqueia loop principal. Gate: env LOL_AI_SHADOW=true
+// + server-side <SPORT>_AI_SHADOW=true (defesa em profundidade).
+// DM Telegram suprimida automaticamente (is_shadow=1 já dedupa em dispatch).
+async function _runLolAiShadow(ctx) {
+  const { match, mlResult, oddsToUse, prompt, hasLiveStats } = ctx;
+  try {
+    if (!prompt || !mlResult || !oddsToUse) return;
+    const resp = await serverPost('/claude', {
+      model: 'deepseek-chat',
+      max_tokens: 600,
+      messages: [{ role: 'user', content: prompt }],
+      sport: 'lol',
+      shadowBypass: true,
+    });
+    const text = resp?.content?.map(b => b.text || '').join('') || '';
+    if (!text) {
+      try { _metrics.incr('ai_shadow_no_text', { sport: 'lol' }); } catch (_) {}
+      return;
+    }
+    const tipResult = _parseTipMl(text);
+    if (!tipResult) {
+      try { _metrics.incr('ai_shadow_no_parse', { sport: 'lol' }); } catch (_) {}
+      return;
+    }
+    const tipTeam = String(tipResult[1]).trim();
+    const tipOdd = parseFloat(tipResult[2]);
+    const tipEvNum = parseFloat(String(tipResult[3]).replace(/[+%\s]/g, ''));
+    const tipStake = String(tipResult[4] || '1u').trim();
+    const tipConfRaw = String(tipResult[5] || 'MEDIA').toUpperCase();
+    const tipConf = tipConfRaw.startsWith('ALT') ? CONF.ALTA
+      : tipConfRaw.startsWith('BAI') ? CONF.BAIXA : CONF.MEDIA;
+    if (!tipTeam || !Number.isFinite(tipOdd) || tipOdd < 1.01) {
+      try { _metrics.incr('ai_shadow_invalid', { sport: 'lol' }); } catch (_) {}
+      return;
+    }
+    const pickSide = norm(tipTeam) === norm(match.team1) ? 't1'
+      : norm(tipTeam) === norm(match.team2) ? 't2'
+      : (norm(match.team1).includes(norm(tipTeam)) ? 't1' : 't2');
+    const modelPPick = pickSide === 't1' ? mlResult.modelP1 : mlResult.modelP2;
+    await serverPost('/record-tip', {
+      matchId: canonicalMatchId('esports', String(match.id)),
+      eventName: match.league,
+      p1: match.team1, p2: match.team2,
+      tipParticipant: tipTeam,
+      odds: tipOdd, ev: Number.isFinite(tipEvNum) ? tipEvNum : 0,
+      stake: tipStake,
+      confidence: tipConf, isLive: !!hasLiveStats,
+      modelP1: mlResult.modelP1, modelP2: mlResult.modelP2,
+      modelPPick,
+      tipReason: 'AI shadow POC (LOL_AI_SHADOW)',
+      pickSide,
+      sport: 'lol',
+      isShadow: 1,
+      emissionSource: 'lol_ai_shadow',
+      mlScore: Number.isFinite(mlResult.score) ? +mlResult.score.toFixed(2) : null,
+      factorCount: (mlResult.factorActive || []).length || null,
+    }, 'lol');
+    try { _metrics.incr('ai_shadow_emit', { sport: 'lol' }); } catch (_) {}
+    log('INFO', 'AI-SHADOW', `lol AI tip: ${tipTeam} @ ${tipOdd} EV=${tipEvNum}% conf=${tipConf} (is_shadow=1)`);
+  } catch (e) {
+    try { log('WARN', 'AI-SHADOW', `lol shadow err: ${e?.message || e}`); } catch (_) {}
+    try { _metrics.incr('ai_shadow_exception', { sport: 'lol' }); } catch (_) {}
+  }
+}
+
 async function autoAnalyzeMatch(token, match) {
   const game = match.game;
   const matchId = String(match.id);
@@ -9955,6 +10025,16 @@ async function autoAnalyzeMatch(token, match) {
     // nem chamar /claude. Evita 15-25s desperdiçados por análise quando provider
     // está degradado (status=200 vazio).
     if (_AI_DISABLED) {
+      // 2026-05-13: AI shadow POC LoL — kicka off DeepSeek em paralelo (fire-and-forget)
+      // pra coletar tips IA como shadow durante a janela de AI_DISABLED. Não awaita —
+      // não bloqueia o loop. Helper persiste via /record-tip isShadow=1 + emission_source.
+      // Disponível só pra lol; outros esports nesse bloco fallback são unaffected.
+      if (match.game === 'lol' && /^(1|true|yes)$/i.test(String(process.env.LOL_AI_SHADOW || ''))) {
+        setImmediate(() => {
+          _runLolAiShadow({ match, mlResult, oddsToUse, prompt, hasLiveStats })
+            .catch(e => { try { log('WARN', 'AI-SHADOW', `dispatch err: ${e?.message || e}`); } catch (_) {} });
+        });
+      }
       // BUG FIX 2026-04-27: pick por MAIOR EV POSITIVO (não favorito do model).
       // Com AI removida, fallback é o único path. Pickar favorito do model
       // quando model concorda com market = sempre EV pequeno/negativo no fav.
