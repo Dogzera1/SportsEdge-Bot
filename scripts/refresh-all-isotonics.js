@@ -240,9 +240,11 @@ results.changes = changes;
 // 2026-05-13: Persist fit outputs pra Railway Volume (gated por
 // MODEL_PERSISTENT_DIR). Sem env = no-op. Garante que próximo boot
 // recupera os refits via overlay em vez de cair pro seed git.
+// Log silenciado em --json (senão polui stdout que server.js parseia).
 try {
   const persist = require(path.join(ROOT, 'lib', 'model-persistence'));
-  const r = persist.syncFromLibToPersistent();
+  const persistLog = asJson ? (() => {}) : ((lvl, tag, msg) => console.log(`[${tag}] ${msg}`));
+  const r = persist.syncFromLibToPersistent({ log: persistLog });
   results.persistence = r;
 } catch (e) {
   results.persistence = { error: e.message };
