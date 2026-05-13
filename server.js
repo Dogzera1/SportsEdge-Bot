@@ -1443,16 +1443,17 @@ function _wrapServerCron(name, fn) {
 // quando DB estava em integrity_check/settle batch — `pendingBySport` lockava e
 // derrubava o container. Cache curto serve stale enquanto query pesada ainda corre.
 let _healthCache = { ts: 0, response: null, alerts: null };
-// 2026-05-13: default 10000→30000ms. Railway healthcheck pulse é ~30s; cache
-// TTL <pulse interval gerava re-compute em TODO health check. /health hot path
-// faz 2 queries SQLite (SELECT 1 + GROUP BY tips) — sob lock contention pode
-// levar 70s+ (observado em prod). Cache 30s alinha com pulse → maioria hits
-// cached (1-2ms vs 70s) → Railway healthcheck nunca timeout.
+// 2026-05-13: stale-while-revalidate. Default cache window 30s pra trigger
+// background refresh, mas /health SEMPRE retorna cache se existe (any age) —
+// Railway healthcheck NUNCA bloqueia em DB compute. Refit isotonics ou settle
+// batch podiam segurar /health 70s+ (boot 535 confirmou).
 // Override via HEALTH_CACHE_MS=N (ms).
 const HEALTH_CACHE_MS = (() => {
   const raw = parseInt(process.env.HEALTH_CACHE_MS || '', 10);
   return Number.isFinite(raw) && raw >= 0 ? raw : 30000;
 })();
+let _healthRefreshInFlight = false;
+let _healthRefreshLastStart = 0;
 let _oddsBackoffLogTs = 0;
 const _raw429Backoff = parseInt(process.env.ODDSPAPI_429_BACKOFF_MS || '', 10);
 const ESPORTS_BACKOFF_TTL = Math.max(5 * 60 * 1000, Number.isFinite(_raw429Backoff) && _raw429Backoff > 0 ? _raw429Backoff : 2 * 60 * 60 * 1000);
@@ -7057,10 +7058,13 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (p === '/health' || p === '/alerts') {
-    // Cache hit: serve stale (≤HEALTH_CACHE_MS) sem tocar DB. Evita Railway
-    // healthcheck timeout quando integrity_check/settle batch está rodando.
     const _now = Date.now();
-    if (HEALTH_CACHE_MS > 0 && _healthCache.ts > 0 && (_now - _healthCache.ts) < HEALTH_CACHE_MS) {
+    const _force = parsed.query._force === '1';
+    // 2026-05-13: stale-while-revalidate. Sempre serve cache se existe (any
+    // age) exceto quando _force=1 (refresh interno). Background refresh
+    // disparado via setImmediate quando cache stale > HEALTH_CACHE_MS. Railway
+    // healthcheck NUNCA bloqueia em DB — /health <1ms sempre.
+    if (!_force && _healthCache.ts > 0 && _healthCache.response) {
       const cacheAgeMs = _now - _healthCache.ts;
       if (p === '/alerts') {
         sendJson(res, {
@@ -7069,13 +7073,30 @@ const server = http.createServer(async (req, res) => {
           cached: true,
           cacheAgeMs,
         });
-      } else if (_healthCache.response) {
-        sendJson(res, { ..._healthCache.response, cached: true, cacheAgeMs });
       } else {
-        // /health pediu mas só temos cache de /alerts (raro). Cai no compute.
-        _healthCache.ts = 0;
+        sendJson(res, { ..._healthCache.response, cached: true, cacheAgeMs });
       }
-      if (_healthCache.ts > 0) return;
+      // Trigger background refresh se stale + não há refresh ativo. Cleanup
+      // _healthRefreshInFlight via timeout pra evitar deadlock se HTTP falhar.
+      const inFlightStale = _healthRefreshInFlight && (_now - _healthRefreshLastStart) > 120000;
+      if (cacheAgeMs > HEALTH_CACHE_MS && (!_healthRefreshInFlight || inFlightStale)) {
+        _healthRefreshInFlight = true;
+        _healthRefreshLastStart = _now;
+        setImmediate(() => {
+          try {
+            const http = require('http');
+            const port = process.env.PORT || process.env.SERVER_PORT || 3000;
+            const r = http.get(`http://127.0.0.1:${port}/health?_force=1`, (resp) => {
+              resp.resume();
+              resp.on('end', () => { _healthRefreshInFlight = false; });
+              resp.on('error', () => { _healthRefreshInFlight = false; });
+            });
+            r.on('error', () => { _healthRefreshInFlight = false; });
+            r.setTimeout(110000, () => { try { r.destroy(); } catch (_) {} _healthRefreshInFlight = false; });
+          } catch (_) { _healthRefreshInFlight = false; }
+        });
+      }
+      return;
     }
 
     const dbOk = (() => {
