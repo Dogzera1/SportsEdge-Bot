@@ -23690,6 +23690,7 @@ load();
         if (!t.isShadow || !_temporalShadowBypass) {
           try {
             const _slackS = parseInt(process.env.TEMPORAL_GATE_SLACK_S || '60', 10) || 60;
+            let _gateFired = false;
             const mr = db.prepare(`SELECT resolved_at FROM match_results WHERE match_id = ? LIMIT 1`).get(matchId);
             if (mr?.resolved_at) {
               const resMs = Date.parse(String(mr.resolved_at).replace(' ', 'T') + 'Z');
@@ -23699,9 +23700,41 @@ load();
                 log('WARN', 'TEMPORAL-GATE', `${sport} ${matchId}${t.isShadow ? '/SHADOW' : ''}: match resolved há ${ageS}s (>${_slackS}s slack) — tip post-match REJECTED`);
                 _emitSkip('temporal_gate_post_match', { matchId, sport, ageS, slackS: _slackS, isShadow: !!t.isShadow });
                 sendJson(res, { ok: false, skipped: true, reason: 'temporal_gate_post_match', age_s: ageS });
-                return;
+                _gateFired = true;
               }
             }
+            // 2026-05-13: fallback fuzzy pra tennis. Pinnacle match_id !== ESPN
+            // match_id, então direct lookup acima falha (lookup `tennis_pin_X`
+            // não acha row ESPN `tennis_espn_Y`). Audit encontrou 11 tier3 stuck
+            // por exatamente isso: bot recebia odds stale Pinnacle pós-jogo,
+            // gate passava (match_id miss), tip emitida, settle path rejeitava
+            // por mesmo timestamp gap → zumbi eterno.
+            //
+            // Janela 4h: tier3 challenger raramente dura >4h; reduz scan size.
+            if (!_gateFired && sport === 'tennis') {
+              const { tennisPairMatchesPlayers } = require('./lib/tennis-match');
+              const recent = db.prepare(`
+                SELECT team1, team2, resolved_at FROM match_results
+                WHERE game = 'tennis'
+                  AND resolved_at IS NOT NULL
+                  AND resolved_at > datetime('now', '-4 hours')
+                LIMIT 200
+              `).all();
+              for (const r of recent) {
+                if (!tennisPairMatchesPlayers(p1, p2, r.team1, r.team2)) continue;
+                const resMs = Date.parse(String(r.resolved_at).replace(' ', 'T') + 'Z');
+                const nowMs = Date.now();
+                if (Number.isFinite(resMs) && nowMs - resMs > _slackS * 1000) {
+                  const ageS = Math.round((nowMs - resMs) / 1000);
+                  log('WARN', 'TEMPORAL-GATE', `tennis ${matchId}${t.isShadow ? '/SHADOW' : ''} [fuzzy ${r.team1} vs ${r.team2}]: match resolved há ${ageS}s — REJECTED`);
+                  _emitSkip('temporal_gate_post_match_fuzzy', { matchId, sport, ageS, slackS: _slackS, isShadow: !!t.isShadow, espn_team1: r.team1, espn_team2: r.team2 });
+                  sendJson(res, { ok: false, skipped: true, reason: 'temporal_gate_post_match', age_s: ageS, via: 'fuzzy_tennis' });
+                  _gateFired = true;
+                  break;
+                }
+              }
+            }
+            if (_gateFired) return;
           } catch (_) {}
         }
 
