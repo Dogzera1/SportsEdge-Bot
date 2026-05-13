@@ -2671,6 +2671,38 @@ const migrations = [
                WHERE match_id_ref IS NOT NULL`);
     },
   },
+  {
+    id: '102_tips_unique_active_exclude_void',
+    up(db) {
+      // 2026-05-13: idx_tips_unique_active criado em mig 096 com WHERE
+      // `archived=0 AND match_id IS NOT NULL`. Void via /admin/void-tips-batch
+      // (e demais paths) marca result='void' MAS não toca archived → tip
+      // voidada continua dentro do scope unique, bloqueando re-emit do mesmo
+      // (match_id, sport, market_type, tip_participant).
+      //
+      // Caso real (log 22:13:39Z 2026-05-13): tip #2987 Martin Landaluce vs
+      // Daniil Medvedev voidada via /admin/void-tips-batch ~21:55Z. Scanner
+      // tennis às 22:13 detectou match novamente, tentou record-tip →
+      // "UNIQUE constraint failed [HTTP 500] — tip abortada". 4 tips perdidas
+      // em janela de 2min (Keegan Smith, Rei Sakamoto, Landaluce, Kovacevic).
+      //
+      // Fix: drop+recreate index com WHERE adicional `result IS NULL OR
+      // result NOT IN ('void','push')`. Tips voidadas/push (cancelamento
+      // terminal sem outcome) saem do scope; pending + win/loss continuam
+      // protegidas contra duplicate emit.
+      try {
+        db.exec(`DROP INDEX IF EXISTS idx_tips_unique_active`);
+        db.exec(`
+          CREATE UNIQUE INDEX idx_tips_unique_active
+          ON tips(match_id, sport, COALESCE(market_type, 'ML'), tip_participant)
+          WHERE COALESCE(archived, 0) = 0
+            AND match_id IS NOT NULL
+            AND (result IS NULL OR result NOT IN ('void','push'))
+        `);
+        console.log('[mig 102] re-created idx_tips_unique_active excluding void/push');
+      } catch (e) { console.log(`[mig 102] unique idx refine: ${e.message}`); }
+    },
+  },
 ];
 
 function applyMigrations(db) {
