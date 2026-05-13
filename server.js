@@ -24736,7 +24736,21 @@ load();
         if (typeof invalidateCache === 'function') invalidateCache();
       } catch (_) {}
       log('INFO', 'FOOTBALL-TRAIN', `Poisson params: ${Object.keys(leagueParams).length} leagues, ${qualifiedTeams} teams, ${filtered.length} matches → ${outPath}`);
-      sendJson(res, { ok: true, ...output, path: outPath, leaguesCount: Object.keys(leagueParams).length });
+      // 2026-05-13: response slim — antes spreadava ...output que incluía teams
+      // (~800 × 12 fields) e h2h (milhares de pairs × 5 fields), causando 2x
+      // stringify (file + response) e OOM 512MB em years_back=3.
+      // Mantém leagues (~50KB) pra inspeção.
+      sendJson(res, {
+        ok: true,
+        trainedAt: output.trainedAt,
+        yearsBack, minGames, targetPatterns,
+        totalMatches: filtered.length,
+        leagues: leagueParams,
+        leaguesCount: Object.keys(leagueParams).length,
+        teamsCount: qualifiedTeams,
+        h2hCount: h2hQualified,
+        path: outPath,
+      });
     } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
     return;
   }
