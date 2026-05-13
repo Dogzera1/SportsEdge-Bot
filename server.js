@@ -23677,8 +23677,17 @@ load();
         // Caso `garin_echargui_premature_settle_2026_05_03`: tip emitida 12min
         // após match resolved → settle imediato c/ winner errado. Reject hard
         // se match já terminou. Slack via TEMPORAL_GATE_SLACK_S (default 60s)
-        // pra cobrir clock skew. Skip se shadow puro (study DB).
-        if (!t.isShadow) {
+        // pra cobrir clock skew.
+        //
+        // 2026-05-13: estendido a shadow. Bug original (`!t.isShadow`) deixava
+        // shadow tips post-match emitirem em odds stale, criando zumbis
+        // eternos (settle path rejeita por mesmo motivo → stuck). Audit
+        // 2026-05-13 encontrou 11 tennis tier3 stuck nesse padrão. Shadow
+        // tips com odds stale NÃO são research signal útil — odds não eram
+        // o que modelo realmente veria em produção. Opt-out via
+        // TEMPORAL_GATE_SHADOW_BYPASS=true (default false, gate ativo).
+        const _temporalShadowBypass = /^(1|true|yes)$/i.test(String(process.env.TEMPORAL_GATE_SHADOW_BYPASS ?? 'false'));
+        if (!t.isShadow || !_temporalShadowBypass) {
           try {
             const _slackS = parseInt(process.env.TEMPORAL_GATE_SLACK_S || '60', 10) || 60;
             const mr = db.prepare(`SELECT resolved_at FROM match_results WHERE match_id = ? LIMIT 1`).get(matchId);
@@ -23687,8 +23696,8 @@ load();
               const nowMs = Date.now();
               if (Number.isFinite(resMs) && nowMs - resMs > _slackS * 1000) {
                 const ageS = Math.round((nowMs - resMs) / 1000);
-                log('WARN', 'TEMPORAL-GATE', `${sport} ${matchId}: match resolved há ${ageS}s (>${_slackS}s slack) — tip post-match REJECTED`);
-                _emitSkip('temporal_gate_post_match', { matchId, sport, ageS, slackS: _slackS });
+                log('WARN', 'TEMPORAL-GATE', `${sport} ${matchId}${t.isShadow ? '/SHADOW' : ''}: match resolved há ${ageS}s (>${_slackS}s slack) — tip post-match REJECTED`);
+                _emitSkip('temporal_gate_post_match', { matchId, sport, ageS, slackS: _slackS, isShadow: !!t.isShadow });
                 sendJson(res, { ok: false, skipped: true, reason: 'temporal_gate_post_match', age_s: ageS });
                 return;
               }
