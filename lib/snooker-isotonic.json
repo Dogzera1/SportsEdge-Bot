@@ -1,0 +1,58 @@
+{
+  "version": 1,
+  "game": "snooker",
+  "fittedAt": "2026-05-13T17:58:12.999Z",
+  "method": "isotonic_pav",
+  "nCalibSamples": 679,
+  "blocks": [
+    {
+      "pMin": 0.2001,
+      "pMax": 0.2475,
+      "yMean": 0.2,
+      "n": 10
+    },
+    {
+      "pMin": 0.2516,
+      "pMax": 0.3487,
+      "yMean": 0.2581,
+      "n": 31
+    },
+    {
+      "pMin": 0.3508,
+      "pMax": 0.3973,
+      "yMean": 0.4857,
+      "n": 35
+    },
+    {
+      "pMin": 0.4006,
+      "pMax": 0.4997,
+      "yMean": 0.4885,
+      "n": 131
+    },
+    {
+      "pMin": 0.5003,
+      "pMax": 0.549,
+      "yMean": 0.5333,
+      "n": 90
+    },
+    {
+      "pMin": 0.5502,
+      "pMax": 0.6496,
+      "yMean": 0.6,
+      "n": 180
+    },
+    {
+      "pMin": 0.6504,
+      "pMax": 0.7495,
+      "yMean": 0.6615,
+      "n": 130
+    },
+    {
+      "pMin": 0.7508,
+      "pMax": 0.8978,
+      "yMean": 0.8462,
+      "n": 65
+    }
+  ],
+  "trainingNote": "Walk-forward surface-agnostic Elo; aplicar pós-trained model output."
+}

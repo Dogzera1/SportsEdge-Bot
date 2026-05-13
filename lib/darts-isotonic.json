@@ -1,0 +1,88 @@
+{
+  "version": 1,
+  "game": "darts",
+  "fittedAt": "2026-05-13T17:58:12.360Z",
+  "method": "isotonic_pav",
+  "nCalibSamples": 2160,
+  "blocks": [
+    {
+      "pMin": 0.1014,
+      "pMax": 0.1493,
+      "yMean": 0.1923,
+      "n": 26
+    },
+    {
+      "pMin": 0.1508,
+      "pMax": 0.3499,
+      "yMean": 0.305,
+      "n": 341
+    },
+    {
+      "pMin": 0.351,
+      "pMax": 0.3999,
+      "yMean": 0.3975,
+      "n": 161
+    },
+    {
+      "pMin": 0.4005,
+      "pMax": 0.45,
+      "yMean": 0.4643,
+      "n": 168
+    },
+    {
+      "pMin": 0.4502,
+      "pMax": 0.4999,
+      "yMean": 0.4714,
+      "n": 227
+    },
+    {
+      "pMin": 0.5007,
+      "pMax": 0.55,
+      "yMean": 0.4955,
+      "n": 224
+    },
+    {
+      "pMin": 0.5502,
+      "pMax": 0.6494,
+      "yMean": 0.606,
+      "n": 434
+    },
+    {
+      "pMin": 0.6501,
+      "pMax": 0.7,
+      "yMean": 0.6875,
+      "n": 160
+    },
+    {
+      "pMin": 0.7006,
+      "pMax": 0.75,
+      "yMean": 0.6933,
+      "n": 163
+    },
+    {
+      "pMin": 0.7502,
+      "pMax": 0.7995,
+      "yMean": 0.7037,
+      "n": 135
+    },
+    {
+      "pMin": 0.8001,
+      "pMax": 0.849,
+      "yMean": 0.7714,
+      "n": 70
+    },
+    {
+      "pMin": 0.8504,
+      "pMax": 0.9,
+      "yMean": 0.8929,
+      "n": 28
+    },
+    {
+      "pMin": 0.9024,
+      "pMax": 0.948,
+      "yMean": 0.9444,
+      "n": 18
+    }
+  ],
+  "trainingNote": "Walk-forward surface-agnostic Elo; aplicar pós-trained model output."
+}

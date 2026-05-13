@@ -1,39 +1,39 @@
 {
   "version": 1,
-  "fittedAt": "2026-05-06T13:31:20.246Z",
+  "fittedAt": "2026-05-13T17:58:57.369Z",
   "method": "isotonic_pav",
-  "nCalibSamples": 1558,
+  "nCalibSamples": 1547,
   "w_oe": 0.15,
   "blocks": [
     {
-      "pMin": 0.2544,
-      "pMax": 0.4495,
-      "yMean": 0.1795,
-      "n": 78
+      "pMin": 0.3025,
+      "pMax": 0.3493,
+      "yMean": 0.1538,
+      "n": 13
     },
     {
-      "pMin": 0.45,
+      "pMin": 0.4247,
+      "pMax": 0.4498,
+      "yMean": 0.1818,
+      "n": 55
+    },
+    {
+      "pMin": 0.4502,
       "pMax": 0.5,
-      "yMean": 0.3366,
-      "n": 609
+      "yMean": 0.3317,
+      "n": 603
     },
     {
       "pMin": 0.5,
-      "pMax": 0.55,
-      "yMean": 0.6907,
-      "n": 750
+      "pMax": 0.5499,
+      "yMean": 0.6908,
+      "n": 747
     },
     {
-      "pMin": 0.5505,
-      "pMax": 0.7485,
-      "yMean": 0.7909,
-      "n": 110
-    },
-    {
-      "pMin": 0.7582,
-      "pMax": 0.7795,
-      "yMean": 0.8,
-      "n": 5
+      "pMin": 0.5507,
+      "pMax": 0.7384,
+      "yMean": 0.789,
+      "n": 109
     }
   ],
   "trainingNote": "Fit sobre período calib (últimos 15% antes do test). Aplicar pós-blend dos sub-models mas antes do clamp final."

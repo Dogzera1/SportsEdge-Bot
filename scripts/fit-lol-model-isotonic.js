@@ -27,7 +27,12 @@ const { classifyLeague } = require('../lib/lol-model');
 const DB_PATH = (process.env.DB_PATH || path.resolve(__dirname, '..', 'sportsedge.db')).trim().replace(/^=+/, '');
 const OUT_PATH = path.resolve(__dirname, '..', 'lib', 'lol-model-isotonic.json');
 const BIN_WIDTH = 0.05;
-const MIN_BIN = 5; // mínimo de obs por bin pra considerar
+// MIN_BIN: mínimo de obs por bin pra considerar. Default 10 (era 5 — bumped
+// 2026-05-13 pra evitar bloco extremo n=5 com yMean=0.8 risk overfit).
+// Override via --min-bin=N argument.
+const argv = process.argv.slice(2);
+const _minBinArg = argv.find(a => a.startsWith('--min-bin='));
+const MIN_BIN = _minBinArg ? parseInt(_minBinArg.split('=')[1], 10) || 10 : 10;
 
 const W_OE = 0.15;
 
