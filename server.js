@@ -7224,6 +7224,17 @@ const server = http.createServer(async (req, res) => {
         const v = process.env[`${k}_ML_DISABLED`];
         return /^(1|true|yes)$/i.test(String(v || ''));
       };
+      // 2026-05-14: sport configurado em shadow-only mode via <SPORT>_SHADOW=true
+      // (memory project_mma_shadow_eval_2026_05_08 + bot.js:4908 seed). Quando ON,
+      // emit real é intencionalmente bloqueado pra eval window (30d ROI/CLV) —
+      // alert "scanner travado" é falso-positivo. Audit log 2026-05-14:
+      // sport_silent_valorant 40.7h c/ VALORANT_SHADOW=true (valorant em re-eval
+      // após audit).
+      const _isShadowOnly = (sp) => {
+        const k = String(sp || '').toUpperCase();
+        const v = process.env[`${k}_SHADOW`];
+        return /^(1|true|yes)$/i.test(String(v || ''));
+      };
       // Verifica se sport tem MT promotido (evita silenciar quando MT REAL devia
       // emitir mas não emite — isso continua sendo incident, não silêncio intencional).
       const _hasMtPromoted = (sp) => {
@@ -7242,6 +7253,10 @@ const server = http.createServer(async (req, res) => {
           // Skipa alert se ML disabled + MT não promovido (silêncio intencional).
           // Se MT promovido mas ainda silent, mantém alert (MT pipeline pode estar travado).
           if (_isMlDisabled(r.sport) && !_hasMtPromoted(r.sport)) continue;
+          // 2026-05-14: shadow-only sports (<SPORT>_SHADOW=true) não emitem real
+          // por design durante eval window. Sem MT promovido pra dar fallback de
+          // real-emit, manter alert é spam — silêncio é intencional.
+          if (_isShadowOnly(r.sport) && !_hasMtPromoted(r.sport)) continue;
           // 2026-05-10: skip se shadow tip recente — sport está em shadow mode,
           // não em silêncio bug. Threshold 6h: shadow mais antigo que isso pode
           // indicar scanner travado.

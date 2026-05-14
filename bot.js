@@ -9182,8 +9182,17 @@ async function _runLolAiShadow(ctx) {
     }
     const tipResult = _parseTipMl(text);
     if (!tipResult) {
-      log('INFO', 'AI-SHADOW', `parse fail snippet="${text.slice(0,120).replace(/\n/g,' ')}"`);
-      try { _metrics.incr('ai_shadow_no_parse', { sport: 'lol' }); } catch (_) {}
+      // 2026-05-14: distingue "IA disse SEM_TIP" (resposta válida) vs "format
+      // bug" (parser quebrado). Audit log mostrou 2/3 calls c/ SEM_TIP marcados
+      // erradamente como parse_fail — pollui research counters + log noise.
+      // Pattern espelha o gate de IA-PARSE em path normal (bot.js:10289).
+      const _isNoTipResp = /(sem[\s_-]?edge|sem[\s_-]?tip|no[\s_-]?edge|no[\s_-]?value|no[\s_-]?bet|skip|pass)/i.test(text);
+      if (_isNoTipResp) {
+        try { _metrics.incr('ai_shadow_no_tip', { sport: 'lol' }); } catch (_) {}
+      } else {
+        log('INFO', 'AI-SHADOW', `parse fail snippet="${text.slice(0,120).replace(/\n/g,' ')}"`);
+        try { _metrics.incr('ai_shadow_no_parse', { sport: 'lol' }); } catch (_) {}
+      }
       return;
     }
     const tipTeam = String(tipResult[1]).trim();
