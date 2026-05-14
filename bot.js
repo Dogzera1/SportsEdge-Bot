@@ -15124,9 +15124,46 @@ async function fetchEspnMmaFights() {
       }
     }
 
-    const fights = [...merged.values()];
+    let fights = [...merged.values()];
+
+    // 2026-05-14: amplia coverage MMA pra orgs regionais (LFA/Oktagon/KSW/RIZIN)
+    // que NÃO têm endpoint ESPN dedicado. Sofascore tem todos via sport=mma.
+    // Skipa duplicatas com fights ESPN existentes (match por team names).
+    // Opt-out: MMA_SOFASCORE_FEED_DISABLED=true.
+    if (!/^(1|true|yes)$/i.test(String(process.env.MMA_SOFASCORE_FEED_DISABLED ?? ''))) {
+      try {
+        const sofaMma = require('./lib/sofascore-mma');
+        const sofaFights = await sofaMma.fetchUpcomingFights({
+          futureDays: Math.min(28, futureWeeks * 7),
+          pastDays: Math.min(14, pastWeeks * 7),
+        }).catch(() => []);
+        const norm = s => String(s||'').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/[^a-z0-9]/g,'');
+        const existingPairs = new Set();
+        for (const f of fights) {
+          const n1 = norm(f.team1), n2 = norm(f.team2);
+          if (n1 && n2) {
+            const k = [n1, n2].sort().join('|');
+            existingPairs.add(k);
+          }
+        }
+        let added = 0;
+        for (const sf of sofaFights) {
+          const n1 = norm(sf.team1), n2 = norm(sf.team2);
+          if (!n1 || !n2) continue;
+          const k = [n1, n2].sort().join('|');
+          if (existingPairs.has(k)) continue;
+          fights.push(sf);
+          existingPairs.add(k);
+          added++;
+        }
+        if (added > 0) {
+          log('INFO', 'SOFA-MMA-FEED', `${added} lutas adicionadas via Sofascore (orgs regionais não-ESPN)`);
+        }
+      } catch (e) { log('WARN', 'SOFA-MMA-FEED', `${e.message}`); }
+    }
+
     espnMmaCache = { data: fights, ts: Date.now() };
-    log('INFO', 'ESPN-MMA', `${fights.length} lutas carregadas da ESPN (${paths.length} janelas: ${futureWeeks}f+${pastWeeks}p semanas, UFC+Boxe)`);
+    log('INFO', 'ESPN-MMA', `${fights.length} lutas carregadas (${paths.length} ESPN paths: ${futureWeeks}f+${pastWeeks}p semanas, orgs: ${_mmaOrgs.join('+')}+Boxe + Sofa regionais)`);
     return fights;
   } catch(e) {
     log('WARN', 'ESPN-MMA', `Falha ao buscar dados ESPN: ${e.message}`);
