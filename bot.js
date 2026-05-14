@@ -2391,20 +2391,44 @@ async function applyGlobalRisk(sport, desiredUnits, leagueSlug) {
 // Remove user de todas as subscriptions. Usado por /stop cmd e auto-trigger
 // em Telegram 403 (bot bloqueado). Best-effort — falha de DB persistence não
 // impede o flush local.
+// 2026-05-14: in-mem block set evita loop forever em TG403. Adversarial audit:
+// server down → /save-user falha silent → subscribedUsers.delete só local →
+// próximo restart loadSubscribedUsers traz user de volta (DB ainda subscribed=1)
+// → DM dispara → 403 → repeat. Block-set acumula entre runs; sendDM consulta
+// antes de tgRequest pra skip cold path. Survives até restart (limpa via cron
+// flush-persist OR next 403 re-adds).
+const _tg403BlockedThisSession = new Set();
+
 async function _unsubscribeUserAll(userId, reason) {
-  try {
-    subscribedUsers.delete(userId);
-    await serverPost('/save-user', {
-      userId,
-      subscribed: false,
-      sportPrefs: [],
-    }).catch(() => null);
-    log('INFO', 'OPT-OUT', `userId=${userId} unsubscribed (reason=${reason})`);
-    return true;
-  } catch (e) {
-    log('WARN', 'OPT-OUT', `userId=${userId} fail: ${e.message}`);
-    return false;
+  // Adiciona ao block-set ANTES de tentar serverPost — garante skip mesmo
+  // se DB persist falhar.
+  _tg403BlockedThisSession.add(String(userId));
+  subscribedUsers.delete(userId);
+  // 2026-05-14: retry com backoff (3 tentativas) em vez de catch silencioso.
+  // Server down (restart, OOM, deploy) → save falha → user fica órfão em DB.
+  // Retry com pequeno backoff cobre transient errors.
+  let lastErr = null;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const r = await serverPost('/save-user', {
+        userId,
+        subscribed: false,
+        sportPrefs: [],
+      });
+      if (r) {
+        log('INFO', 'OPT-OUT', `userId=${userId} unsubscribed (reason=${reason})${attempt > 0 ? ` retry=${attempt}` : ''}`);
+        return true;
+      }
+    } catch (e) {
+      lastErr = e;
+    }
+    if (attempt < 2) {
+      await new Promise(r => setTimeout(r, 500 * Math.pow(2, attempt))); // 500ms, 1s
+    }
   }
+  log('WARN', 'OPT-OUT', `userId=${userId} fail após 3 tentativas (reason=${reason}, last err=${lastErr?.message || '?'}). User adicionado a _tg403BlockedThisSession — DMs skipados até restart OR persist manual.`);
+  try { _metrics.incr('opt_out_persist_fail', { reason: String(reason || 'unknown').slice(0, 24) }); } catch (_) {}
+  return false;
 }
 
 // ── Send Helpers ──
@@ -2418,6 +2442,12 @@ function send(token, chatId, text, extra) {
 }
 
 async function sendDM(token, userId, text, extra) {
+  // 2026-05-14: early skip pra users 403-blocked nesta sessão. Antes
+  // _unsubscribeUserAll DB-persist falhava silent → próximo cycle re-tentava
+  // → log noise + rate-limit Telegram. Cache em-mem persistente até restart.
+  if (_tg403BlockedThisSession.has(String(userId))) {
+    throw Object.assign(new Error('Telegram 403: skipped (cached this session)'), { code: 403 });
+  }
   const res = await tgRequest(token, 'sendMessage', {
     chat_id: userId,
     text,
