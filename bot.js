@@ -19503,6 +19503,56 @@ async function pollFootball(runOnce = false) {
           } catch (e) { log('WARN', 'FB-MT-SCAN', `${match.team1} vs ${match.team2}: ${e.message}`); }
         }
 
+        // 2026-05-14 Wave 2B: Football 1H Markets (1H ML, 1H totals, 1H BTTS).
+        // Modelo Poisson sub-rate 0.42 (top-5 leagues empirical). Shadow-only default.
+        // Opt-out FB_1H_SCAN=false. Requer fbTrained.lamH/lamA disponíveis (pre-game).
+        const _fb1hEnabled = !/^(0|false|no)$/i.test(String(process.env.FB_1H_SCAN ?? '1'));
+        if (_fb1hEnabled && fbTrained && fbTrained.lamH > 0 && fbTrained.lamA > 0 && !isFbLive) {
+          try {
+            const pin1H = await serverGet(
+              `/odds-markets?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}&game=football&period=1`
+            ).catch(() => null);
+            const _has1HData = pin1H && (
+              (pin1H.totals?.length || 0) +
+              (pin1H.handicaps?.length || 0) +
+              (pin1H.ml ? 1 : 0) +
+              (pin1H.btts ? 1 : 0) > 0
+            );
+            if (_has1HData) {
+              const { scanFootball1HMarkets } = require('./lib/football-1h-model');
+              // Normaliza Pinnacle handicaps formato (oddsHome/oddsAway) → ml home/draw/away.
+              // Soccer 1H period sometimes returns ml direct via Pinnacle period.spread. Fallback: skip ML se não há.
+              const pinMkt1HMapped = {
+                ml: pin1H.ml || null,
+                totals: pin1H.totals || [],
+                btts: pin1H.btts || null,
+                swap: pin1H.swap,
+              };
+              const _fb1HTips = scanFootball1HMarkets({
+                pinMarkets1H: pinMkt1HMapped,
+                lamH: fbTrained.lamH,
+                lamA: fbTrained.lamA,
+              });
+              if (_fb1HTips.length) {
+                log('INFO', 'FB-1H-SCAN', `${match.team1} vs ${match.team2}: ${_fb1HTips.length} tip(s) 1H EV ≥${parseFloat(process.env.FB_1H_MIN_EV ?? '5')}%`);
+                for (const t of _fb1HTips.slice(0, 5)) {
+                  log('INFO', 'FB-1H-SCAN', `  • ${t.label} @ ${t.odd.toFixed(2)} | pModel=${(t.pModel*100).toFixed(1)}% pImpl=${t.pImplied ? (t.pImplied*100).toFixed(1)+'%' : '?'} EV=${t.ev.toFixed(1)}%`);
+                }
+                const _fb1hShadowOnly = !/^(0|false|no)$/i.test(String(process.env.FB_1H_SHADOW ?? 'true'));
+                try {
+                  const { logShadowTip } = require('./lib/market-tips-shadow');
+                  for (const t of _fb1HTips) {
+                    logShadowTip(db, { sport: 'football', match, bestOf: null, tip: t, isLive: false });
+                  }
+                } catch (e) { log('WARN', 'MT-SHADOW', `fb-1h logShadowTip: ${e.message}`); }
+                if (!_fb1hShadowOnly) {
+                  log('DEBUG', 'FB-1H-SCAN', `${match.team1} vs ${match.team2}: promote path não implementado em Wave 2B`);
+                }
+              }
+            }
+          } catch (e) { reportBug('FB-1H-SCAN', e, { team1: match.team1, team2: match.team2 }); }
+        }
+
         // Se temos dados reais e o ML diz sem edge → pular (economiza chamada de IA)
         if (fixtureInfo && !mlScore.pass) {
           log('INFO', 'AUTO-FOOTBALL', `ML sem edge: ${match.team1} vs ${match.team2} | best EV: ${mlScore.bestEv}%`);
