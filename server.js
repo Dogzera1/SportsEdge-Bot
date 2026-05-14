@@ -24662,11 +24662,22 @@ load();
           autoShadowed: (_isShadowTip && !t.isShadow) ? 1 : 0,
         });
       } catch(e) {
+        // 2026-05-14: race condition em /record-tip. 2 cycles paralelos podem
+        // passar dedup SELECT (recentDupe linha 24097) e ambos INSERT — idx_tips_unique_active
+        // (mig 096+102) pega via UNIQUE constraint, mas retornar 500 confunde caller
+        // (bot interpreta como erro de servidor e pode retry). Classifica UNIQUE
+        // constraint como dedup hit (409 + log INFO).
+        const isUniqueViolation = /UNIQUE constraint failed/i.test(String(e?.message || ''));
         try {
           const metrics = require('./lib/metrics');
-          metrics.incr('record_tip_error', { sport: parsed.query.sport || 'unknown' });
+          metrics.incr(isUniqueViolation ? 'record_tip_dedup_race' : 'record_tip_error', { sport: parsed.query.sport || 'unknown' });
         } catch (_) {}
-        sendJson(res, { error: e.message }, 500);
+        if (isUniqueViolation) {
+          log('INFO', 'DEDUP', `${parsed.query.sport || 'unknown'} ${p1 || '?'} vs ${p2 || '?'}: UNIQUE constraint race detected (idx_tips_unique_active) — caller cycle paralelo`);
+          sendJson(res, { ok: false, skipped: true, reason: 'race_dedup_unique', error: 'duplicate tip blocked by db constraint' }, 409);
+        } else {
+          sendJson(res, { error: e.message }, 500);
+        }
       }
     });
     return;

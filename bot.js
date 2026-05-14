@@ -24384,6 +24384,7 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   try {
     const _mlAutoPromote = require('./lib/ml-auto-promote');
     _mlAutoPromote.loadMlLeagueBlocklist(db);
+    _mlAutoPromote.loadMlBucketBlocklist(db);
     const _mlAutoPromoteRun = async () => {
       const r = await _mlAutoPromote.runMlAutoPromoteCycle(db);
       await _dmAutoPromoteDecisions('ML', r);

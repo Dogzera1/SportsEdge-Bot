@@ -2749,6 +2749,35 @@ const migrations = [
       } catch (e) { console.log(`[mig 104] idx_tfl_settled_logged: ${e.message}`); }
     },
   },
+  {
+    id: '105_ml_bucket_blocklist',
+    up(db) {
+      // 2026-05-14: bucket-level blocklist pra ML auto-promote.
+      // audit_granular em ml-auto-promote.js:407-433 já loga (sport, tier, bucket)
+      // breakdown mas action era só AUDIT (log-only). Caso real:
+      //   tennis tier3 bucket "2.5-4.0" n=55 ROI -50.6% (shadow) → bleeder
+      //   visível mas não-bloqueado (P1 violation granularidade).
+      // Tabela permite registro persistente + consumer (bot.js Wave 5.2) consulta
+      // antes de emit ML tip. PK garante 1 entry per (sport, tier, bucket).
+      try {
+        db.exec(`
+          CREATE TABLE IF NOT EXISTS ml_bucket_blocklist (
+            sport TEXT NOT NULL,
+            tier TEXT NOT NULL,
+            bucket TEXT NOT NULL,
+            since TEXT NOT NULL DEFAULT (datetime('now')),
+            source TEXT NOT NULL DEFAULT 'manual',
+            reason TEXT,
+            n INTEGER,
+            roi_pct REAL,
+            PRIMARY KEY (sport, tier, bucket)
+          );
+          CREATE INDEX IF NOT EXISTS idx_ml_bucket_blocklist_source ON ml_bucket_blocklist(source);
+        `);
+        console.log('[mig 105] ml_bucket_blocklist created (P1 granularidade — bucket-level ML block)');
+      } catch (e) { console.log(`[mig 105] ml_bucket_blocklist: ${e.message}`); }
+    },
+  },
 ];
 
 function applyMigrations(db) {
