@@ -15096,12 +15096,20 @@ async function fetchEspnMmaFights() {
       return out;
     };
 
+    // 2026-05-14: amplia ESPN MMA scoreboards pra outros campeonatos além de UFC.
+    // ESPN tem endpoints separados per org. Opt-out via MMA_EXTRA_ORGS_DISABLED=true.
+    // LFA/Oktagon não têm endpoints ESPN — coberto via Sofascore (já scrapa per data).
+    const _mmaExtraEnabled = !/^(1|true|yes)$/i.test(String(process.env.MMA_EXTRA_ORGS_DISABLED ?? ''));
+    const _mmaOrgs = _mmaExtraEnabled
+      ? ['ufc', 'bellator', 'pfl', 'one']
+      : ['ufc'];
+    const _mmaBasePaths = _mmaOrgs.map(o => `/apis/site/v2/sports/mma/${o}/scoreboard`);
     const paths = [
-      '/apis/site/v2/sports/mma/ufc/scoreboard',
+      ..._mmaBasePaths,
       '/apis/site/v2/sports/boxing/scoreboard',
-      ...addWindows('/apis/site/v2/sports/mma/ufc/scoreboard',     base, futureWeeks,  1),
+      ..._mmaBasePaths.flatMap(p => addWindows(p, base, futureWeeks, 1)),
       ...addWindows('/apis/site/v2/sports/boxing/scoreboard',      base, futureWeeks,  1),
-      ...addWindows('/apis/site/v2/sports/mma/ufc/scoreboard',     base, pastWeeks,   -1),
+      ..._mmaBasePaths.flatMap(p => addWindows(p, base, pastWeeks, -1)),
       ...addWindows('/apis/site/v2/sports/boxing/scoreboard',      base, pastWeeks,   -1),
     ];
 
