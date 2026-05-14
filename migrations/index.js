@@ -2730,6 +2730,25 @@ const migrations = [
       } catch (e) { console.log(`[mig 103] idx_tips_realonly: ${e.message}`); }
     },
   },
+  {
+    id: '104_tip_factor_log_index',
+    up(db) {
+      // 2026-05-14: `getFactorAccuracyLast45d` em lib/database.js:683 usa
+      //   WHERE actual_winner IS NOT NULL AND logged_at >= datetime('now', '-45 days')
+      //   GROUP BY factor
+      // Tabela cresce ~5-10× tips/dia. PK (tip_id, factor) não cobre logged_at.
+      // Cron recalc weights faz full-scan + GROUP BY até pegar.
+      // Partial index com NOT NULL filter + logged_at sort minimiza pages lidas.
+      try {
+        db.exec(`
+          CREATE INDEX IF NOT EXISTS idx_tfl_settled_logged
+          ON tip_factor_log(logged_at, factor)
+          WHERE actual_winner IS NOT NULL
+        `);
+        console.log('[mig 104] idx_tfl_settled_logged created (getFactorAccuracyLast45d hot path)');
+      } catch (e) { console.log(`[mig 104] idx_tfl_settled_logged: ${e.message}`); }
+    },
+  },
 ];
 
 function applyMigrations(db) {

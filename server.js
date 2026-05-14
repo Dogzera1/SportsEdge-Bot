@@ -3985,6 +3985,18 @@ function _isAdminQueryKeyDeprecated(req, parsed, endpoint) {
   if (!ADMIN_KEY) return false;
   const key = String(parsed?.query?.key || '').trim();
   if (!key || key !== ADMIN_KEY) return false;
+  // 2026-05-14: query.key REJECTED em destructive paths — exige header
+  // x-admin-key. Mitiga CSRF + secret leak via URL logs (proxy, browser
+  // history, Referer header, screenshots). Adversarial audit catalogou
+  // CSRF bypass via ?key= em rotas state-changing.
+  try {
+    if (_isDestructive(req)) {
+      try {
+        log('WARN', 'AUTH-BLOCK', `query.key REJECTED em destructive path ${endpoint} — use x-admin-key header (CSRF mitigation)`);
+      } catch (_) {}
+      return false;
+    }
+  } catch (_) { /* _isDestructive defensive — bug aqui não pode mascarar auth */ }
   try {
     const ip = (typeof getClientIp === 'function' ? getClientIp(req) : null) ||
       req.headers['x-forwarded-for']?.split(',')[0]?.trim() ||
@@ -4026,7 +4038,13 @@ function _adminCsrfValid(req) {
 
 // 2026-05-06: paths destrutivos NUNCA passam pelo open-mode dev — mesmo
 // ADMIN_KEY_OPEN=true exige token explícito pra delete/reset/wipe.
-const _DESTRUCTIVE_PATHS = /^(\/reset-tips|\/reset-bankroll|\/admin\/wipe|\/admin\/delete|\/admin\/purge)/;
+// 2026-05-14: expandido pra cobrir mutate-state endpoints existentes:
+// - force-sync-bankroll: rewrite bankroll.current_banca
+// - void-tips-batch + unsettle-market-tips + restore-voided-market-tips: mutate tips.result
+// - mt-block-league + mt-unblock-league + mt-disable + mt-restore: blocklist mutations
+// - mt-promote: muta runtime env + settings table
+// Esses agora bloqueiam ?key= query, exigindo header x-admin-key.
+const _DESTRUCTIVE_PATHS = /^(\/reset-tips|\/reset-bankroll|\/admin\/wipe|\/admin\/delete|\/admin\/purge|\/admin\/force-sync-bankroll|\/admin\/void-tips-batch|\/admin\/unsettle-market-tips|\/admin\/restore-voided-market-tips|\/admin\/mt-block-league|\/admin\/mt-unblock-league|\/admin\/mt-disable|\/admin\/mt-restore|\/admin\/mt-promote)/;
 function _isDestructive(req) {
   try { return _DESTRUCTIVE_PATHS.test(req.url || ''); } catch (_) { return false; }
 }

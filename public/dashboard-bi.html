@@ -2041,17 +2041,22 @@ function renderAnMarketMatrix(rows) {
     if (roi >= -20) return 'oklch(0.78 0.13 75)';
     return 'oklch(0.58 0.21 25)';
   };
+  // 2026-05-14: escapeHtml em sp/mk/tt user-derived. Sport/market_type vem do DB
+  // mas event_name foi caso de tip injection histórico (memory audit). Outras
+  // render funcs no arquivo já usam escapeHtml — esta era a única inconsistente.
   let html = '<table style="border-collapse:collapse;font-size:11px;font-family:var(--mono)"><thead><tr><th style="padding:6px 8px"></th>';
-  for (const mk of markets) html += `<th style="padding:6px 8px;color:var(--ink-soft);font-weight:600">${mk}</th>`;
+  for (const mk of markets) html += `<th style="padding:6px 8px;color:var(--ink-soft);font-weight:600">${escapeHtml(mk)}</th>`;
   html += '</tr></thead><tbody>';
   for (const sp of sports) {
-    html += `<tr><td style="padding:4px 8px;color:var(--ink-mid);font-weight:600">${sp.toUpperCase()}</td>`;
+    html += `<tr><td style="padding:4px 8px;color:var(--ink-mid);font-weight:600">${escapeHtml(String(sp).toUpperCase())}</td>`;
     for (const mk of markets) {
       const c = cell(sp, mk);
       const roi = c?.roi_pct;
       const bg = colorFor(roi);
-      const tt = c ? `${sp}/${mk}: ROI ${roi?.toFixed(1)}% n=${c.n} W=${c.wins}` : '';
-      const txt = c ? `${roi != null ? roi.toFixed(0) + '%' : '—'}<br><span style="font-size:9px;opacity:0.8">n=${c.n}</span>` : '';
+      // tt vai pro attribute title="..." — atacante com sp/mk hostil quebraria o "
+      const tt = c ? escapeHtml(`${sp}/${mk}: ROI ${roi?.toFixed(1)}% n=${c.n} W=${c.wins}`) : '';
+      // roi/c.n são numéricos — toFixed/String safe. Mas defensive escape.
+      const txt = c ? `${roi != null ? escapeHtml(roi.toFixed(0)) + '%' : '—'}<br><span style="font-size:9px;opacity:0.8">n=${escapeHtml(String(c.n))}</span>` : '';
       html += `<td title="${tt}" style="padding:6px 10px;background:${bg};color:#fff;text-align:center;min-width:70px;line-height:1.3">${txt}</td>`;
     }
     html += '</tr>';
