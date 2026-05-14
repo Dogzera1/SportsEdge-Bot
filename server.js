@@ -496,6 +496,7 @@ async function importFootballMatchesCsvOnce() {
         const matchId = `fd_${String(mid).trim()}`;
         const resolvedAt = String(date).replace('T', ' ').slice(0, 19); // "YYYY-MM-DD HH:MM:SS"
         stmts.upsertMatchResultWithDate.run(matchId, 'football', String(home), String(away), String(winner), score, league, resolvedAt);
+        try { stmts.insertMatchResultSource.run(matchId, 'football', 'dataset_csv_kaggle', String(home), String(away), String(winner), score); } catch (_) {}
         imported++;
       }
     });
@@ -7617,6 +7618,7 @@ setInterval(load, 10000);
         if (winner) {
           // Persist com o mesmo ID recebido (mantém compatibilidade com tips já gravadas)
           stmts.upsertMatchResult.run(String(raw || matchId), 'lol', t1?.name||'', t2?.name||'', winner, `${t1?.result?.gameWins||0}-${t2?.result?.gameWins||0}`, ev.league?.name||'');
+          try { stmts.insertMatchResultSource.run(String(raw || matchId), 'lol', 'riot_esports', t1?.name||'', t2?.name||'', winner, `${t1?.result?.gameWins||0}-${t2?.result?.gameWins||0}`); } catch (_) {}
           sendJson(res, { matchId: String(raw || matchId), game, winner, resolved: true });
           return;
         }
@@ -7643,6 +7645,7 @@ setInterval(load, 10000);
         const t1 = m.opponents?.[0]?.opponent?.name || '';
         const t2 = m.opponents?.[1]?.opponent?.name || '';
         stmts.upsertMatchResult.run(rawId, 'lol', t1, t2, winner, _psSeriesScore(m), m.league?.name || '');
+        try { stmts.insertMatchResultSource.run(rawId, 'lol', 'pandascore', t1, t2, winner, _psSeriesScore(m)); } catch (_) {}
         sendJson(res, { matchId: rawId, winner, resolved: true });
       } else {
         sendJson(res, { matchId: rawId, resolved: false });
@@ -8713,6 +8716,7 @@ setInterval(load, 10000);
               matchId, 'basket',
               m.home, m.away, m.winner, m.score, league, m.startIso
             );
+            try { stmts.insertMatchResultSource.run(matchId, 'basket', 'espn', m.home, m.away, m.winner, m.score); } catch (_) {}
             inserted++;
             if (updateElo) {
               elo.updateMatch(db, m.home, m.away, m.winner, m.startIso);
@@ -17712,6 +17716,7 @@ load();
         }
         try {
           stmts.upsertMatchResult.run(matchId, game, team1, team2, winner, finalScore, league);
+          try { stmts.insertMatchResultSource.run(matchId, game, String(j.source || 'manual_api'), team1, team2, winner, finalScore); } catch (_) {}
           sendJson(res, { ok: true, match_id: matchId, game, winner });
         } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
       } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
