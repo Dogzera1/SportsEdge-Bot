@@ -25177,6 +25177,39 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   setInterval(_wrapCron('tennis_calib_refit', runTennisCalibRefitDaily), 60 * 60 * 1000);
   setTimeout(() => runTennisCalibRefitDaily().catch(() => {}), 95 * 60 * 1000);
 
+  // 2026-05-14: rotation policy — archive (NÃO delete) tips/market_tips_shadow
+  // antigos. Anti-OOM Railway 512MB (memory project_oom_crash_loop_2026_05_07).
+  // tips archived >180d; market_tips_shadow >90d (turnover maior — research).
+  // Default ON. Opt-out: ROTATION_POLICY_DISABLED=true.
+  async function runRotationPolicyCycle() {
+    if (/^(1|true|yes)$/i.test(String(process.env.ROTATION_POLICY_DISABLED || ''))) return;
+    try {
+      const tipsAgeDays = parseInt(process.env.ROTATION_TIPS_AGE_DAYS || '180', 10);
+      const shadowAgeDays = parseInt(process.env.ROTATION_SHADOW_AGE_DAYS || '90', 10);
+      // Only settled tips — pending NUNCA archive (perdem chance settle).
+      const rTips = db.prepare(`
+        UPDATE tips SET archived = 1
+        WHERE COALESCE(archived, 0) = 0
+          AND result IS NOT NULL
+          AND settled_at IS NOT NULL
+          AND settled_at < datetime('now', '-' || ? || ' days')
+      `).run(tipsAgeDays);
+      const rShadow = db.prepare(`
+        UPDATE market_tips_shadow SET archived = 1
+        WHERE COALESCE(archived, 0) = 0
+          AND result IS NOT NULL
+          AND settled_at IS NOT NULL
+          AND settled_at < datetime('now', '-' || ? || ' days')
+      `).run(shadowAgeDays);
+      const totalArchived = (rTips.changes || 0) + (rShadow.changes || 0);
+      if (totalArchived > 0) {
+        log('INFO', 'ROTATION', `archived tips=${rTips.changes} mts=${rShadow.changes} (tips>${tipsAgeDays}d, shadow>${shadowAgeDays}d settled)`);
+      }
+    } catch (e) { log('ERROR', 'ROTATION', e.message); }
+  }
+  setInterval(_wrapCron('rotation_policy', runRotationPolicyCycle), 24 * 60 * 60 * 1000);
+  setTimeout(() => runRotationPolicyCycle().catch(() => {}), 110 * 60 * 1000);
+
   // Tennis MT real promote readiness watch — DM admin quando verdict virar READY.
   // 2026-05-14: tennis MT real em HOLD desde 11/05 (calibração off -10pp pós refit
   // 12/05 + ROI 14d -0.46%). Cron polls /shadow-readiness 12h, DM admin se

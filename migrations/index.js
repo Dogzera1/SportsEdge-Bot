@@ -2807,6 +2807,35 @@ const migrations = [
       } catch (e) { console.log(`[mig 106] propagator idx: ${e.message}`); }
     },
   },
+  {
+    id: '107_rotation_policy_tables',
+    up(db) {
+      // 2026-05-14: rotation policy via flag archived=1 (NÃO delete). Preserva
+      // dados pra rollback/audit, exclui hot path via WHERE archived=0 (já em uso).
+      //
+      // Targets:
+      //   - tips: archive >180d settled
+      //   - market_tips_shadow: archive >90d settled (research universe — turnover maior)
+      //
+      // Cron `runRotationPolicy` em bot.js executa daily 04:00 UTC. Counters
+      // via metric. Default ON; opt-out ROTATION_POLICY_DISABLED=true.
+      try {
+        // market_tips_shadow não tem coluna archived — adiciona pra paridade com tips.
+        const cols = db.prepare(`PRAGMA table_info(market_tips_shadow)`).all();
+        if (!cols.some(c => c.name === 'archived')) {
+          db.exec(`ALTER TABLE market_tips_shadow ADD COLUMN archived INTEGER NOT NULL DEFAULT 0`);
+          console.log('[mig 107] market_tips_shadow.archived column added');
+        }
+        // Index pra rotation cron WHERE archived=0 AND result IS NOT NULL AND settled_at < ?
+        db.exec(`
+          CREATE INDEX IF NOT EXISTS idx_mts_archived_settled
+          ON market_tips_shadow(settled_at)
+          WHERE COALESCE(archived, 0) = 0 AND result IS NOT NULL
+        `);
+        console.log('[mig 107] rotation indexes created (P1 banco — anti-OOM Railway 512MB)');
+      } catch (e) { console.log(`[mig 107] rotation: ${e.message}`); }
+    },
+  },
 ];
 
 function applyMigrations(db) {
