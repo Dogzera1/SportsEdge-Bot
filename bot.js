@@ -25602,8 +25602,8 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
       if (token) for (const adminId of ADMIN_IDS) sendDM(token, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
     } catch (e) { log('ERROR', 'GATE-ATTRIB', e.message); }
   }
-  setInterval(() => runGateAttributionWeekly().catch(e => log('ERROR', 'GATE-ATTRIB', e.message)), 60 * 60 * 1000);
-  setTimeout(() => runGateAttributionWeekly().catch(() => {}), 75 * 60 * 1000);
+  setInterval(_wrapCron('gate_attribution', runGateAttributionWeekly), 60 * 60 * 1000);
+  setTimeout(_wrapCron('gate_attribution', runGateAttributionWeekly), 75 * 60 * 1000);
 
   // 2026-05-14: CLV-by-book monitor. Detecta books com avg_clv<<-3% + alta
   // loss rate pós-CLV-negativo = padrão latência artificial (book inflou pre,
@@ -25664,8 +25664,8 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
       if (token) for (const adminId of ADMIN_IDS) sendDM(token, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
     } catch (e) { log('ERROR', 'CLV-BOOK', e.message); _hb('error', e.message); }
   }
-  setInterval(() => runClvByBookMonitor().catch(e => log('ERROR', 'CLV-BOOK', e.message)), 60 * 60 * 1000);
-  setTimeout(() => runClvByBookMonitor().catch(() => {}), 6 * 60 * 1000);
+  setInterval(_wrapCron('clv_by_book', runClvByBookMonitor), 60 * 60 * 1000);
+  setTimeout(_wrapCron('clv_by_book', runClvByBookMonitor), 6 * 60 * 1000);
 
   // 2026-05-14: match_results dual-source reconcile (mig 109 FASE 1).
   // Detecta mismatches winner cross-source últimos 7d. Sources wired tennis
@@ -25703,8 +25703,8 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
       if (token) for (const adminId of ADMIN_IDS) sendDM(token, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
     } catch (e) { log('ERROR', 'MR-RECONCILE', e.message); _hb('error', e.message); }
   }
-  setInterval(() => runMatchResultsReconcile().catch(e => log('ERROR', 'MR-RECONCILE', e.message)), 60 * 60 * 1000);
-  setTimeout(() => runMatchResultsReconcile().catch(() => {}), 8 * 60 * 1000);
+  setInterval(_wrapCron('mr_reconcile', runMatchResultsReconcile), 60 * 60 * 1000);
+  setTimeout(_wrapCron('mr_reconcile', runMatchResultsReconcile), 8 * 60 * 1000);
 
   // 2026-05-09: HG- (handicapGames negative line) tennis readiness monitor.
   // User: HG- ROI +52.8% n=24 mas insuficiente. Cron 24h alerta admin
