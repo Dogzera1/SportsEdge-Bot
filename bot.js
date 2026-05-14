@@ -21558,6 +21558,63 @@ async function pollValorant(runOnce = false) {
           } catch (e) { reportBug('VAL-MARKETS', e); }
         }
 
+        // 2026-05-14 Wave 2A: Valorant rounds-level scanner per-map (handicap_rounds + total_rounds).
+        // Modelo Normal(μ, σ) delegate ao cs-rounds-model via lib/valorant-rounds-model.
+        // Shadow-only por default (VAL_ROUNDS_SHADOW=true). Replica Wave 1 CS (commit 197fef4).
+        const _valRoundsEnabled = !/^(0|false|no)$/i.test(String(process.env.VAL_ROUNDS_SCAN ?? '1'));
+        if (_valRoundsEnabled && modelP1 > 0) {
+          try {
+            const { scanValorantRoundsMarkets } = require('./lib/valorant-rounds-model');
+            const { mapProbFromSeries } = require('./lib/lol-series-model');
+            const _vrMinEv = parseFloat(process.env.VAL_ROUNDS_MIN_EV ?? '4');
+            const _vrMaxEv = parseFloat(process.env.VAL_ROUNDS_MAX_EV ?? '30');
+            const _vrMinPm = parseFloat(process.env.VAL_ROUNDS_MIN_PMODEL ?? '0.50');
+            const { minOdd: _vrMinOdd, maxOdd: _vrMaxOdd } = _resolveMtOddBounds('valorant', { defaultMinOdd: 1.50 });
+            const _valCurrentMap = (Number(match.score1) || 0) + (Number(match.score2) || 0) + 1;
+            const _valMtFor = parseFloat(process.env.VAL_MOMENTUM ?? '0.04');
+            for (let p = 1; p <= bo; p++) {
+              if (p < _valCurrentMap) continue;
+              const periodMarkets = await serverGet(
+                `/odds-markets?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}&period=${p}`
+              ).catch(() => null);
+              if (!periodMarkets) continue;
+              const hasRoundData = (periodMarkets.handicaps?.length || 0) + (periodMarkets.totals?.length || 0);
+              if (!hasRoundData) continue;
+              const _pMapPeriod = mapProbFromSeries(modelP1, bo, { momentum: _valMtFor });
+              // Live: se mapa em curso, VLR scorebot pode trazer score parcial (vlrLive).
+              let _score1Map = 0, _score2Map = 0;
+              if (isLiveVal && p === _valCurrentMap && typeof vlrLive === 'object' && vlrLive) {
+                _score1Map = Number(vlrLive?.t1?.score) || 0;
+                _score2Map = Number(vlrLive?.t2?.score) || 0;
+              }
+              const _vrTips = scanValorantRoundsMarkets({
+                pinMarkets: periodMarkets,
+                pMap: _pMapPeriod,
+                score: { score1: _score1Map, score2: _score2Map },
+                minEv: _vrMinEv, maxEv: _vrMaxEv, minPmodel: _vrMinPm,
+                minOdd: _vrMinOdd, maxOdd: _vrMaxOdd,
+                isLive: isLiveVal && p === _valCurrentMap,
+              });
+              if (!_vrTips.length) continue;
+              log('INFO', 'VAL-ROUNDS', `${match.team1} vs ${match.team2} [map${p}${isLiveVal && p === _valCurrentMap ? ` live ${_score1Map}-${_score2Map}` : ''}]: ${_vrTips.length} tip(s) EV ≥${_vrMinEv}% (pMap=${(_pMapPeriod*100).toFixed(1)}%)`);
+              for (const t of _vrTips.slice(0, 5)) {
+                log('INFO', 'VAL-ROUNDS', `  • ${t.label} @ ${t.odd.toFixed(2)} | pModel=${(t.pModel*100).toFixed(1)}% pImpl=${t.pImplied ? (t.pImplied*100).toFixed(1)+'%' : '?'} EV=${t.ev.toFixed(1)}% (map ${p})`);
+              }
+              const _vrShadowOnly = !/^(0|false|no)$/i.test(String(process.env.VAL_ROUNDS_SHADOW ?? 'true'));
+              try {
+                const { logShadowTip } = require('./lib/market-tips-shadow');
+                for (const t of _vrTips) {
+                  const _tipWithPeriod = { ...t, market: `${t.market}_map${p}` };
+                  logShadowTip(db, { sport: 'valorant', match, bestOf: bo, tip: _tipWithPeriod, isLive: isLiveVal && p === _valCurrentMap });
+                }
+              } catch (e) { log('WARN', 'MT-SHADOW', `val-rounds logShadowTip: ${e.message}`); }
+              if (!_vrShadowOnly) {
+                log('DEBUG', 'VAL-ROUNDS', `${match.team1} vs ${match.team2} map${p}: promote path não implementado em Wave 2A`);
+              }
+            }
+          } catch (e) { reportBug('VAL-ROUNDS', e); }
+        }
+
         let direction = elo.direction === 'p1' ? 't1' : elo.direction === 'p2' ? 't2' : null;
         const mlScore = elo.score;
         const factorCount = elo.factorCount;
