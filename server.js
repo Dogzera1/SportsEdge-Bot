@@ -13762,6 +13762,52 @@ setInterval(load, 60000);
     return;
   }
 
+  // ── /admin/alerts-resolve: bulk resolve open alerts.
+  // Resolve sintoma corrigido ou silencia alerts antigos.
+  // Filtros: rule_id, sport, age_min_days (resolver só alerts >N dias).
+  // POST/GET /admin/alerts-resolve?rule_id=X&sport=Y&age_min_days=7&dry_run=1&reason=...
+  if (p === '/admin/alerts-resolve' && (req.method === 'POST' || req.method === 'GET')) {
+    if (!requireAdmin(req, res)) return;
+    const ruleId = parsed.query.rule_id ? String(parsed.query.rule_id).trim() : null;
+    const sport = parsed.query.sport ? String(parsed.query.sport).trim().toLowerCase() : null;
+    const ageMinDays = parsed.query.age_min_days ? Math.max(0, parseInt(parsed.query.age_min_days, 10) || 0) : 0;
+    const dryRun = parsed.query.dry_run === '1' || parsed.query.dry_run === 'true' || (!parsed.query.dry_run && req.method === 'GET');
+    const reason = String(parsed.query.reason || 'manual_admin_resolve').slice(0, 240);
+    try {
+      const conds = [`status = 'open'`];
+      const params = [];
+      if (ruleId) { conds.push('rule_id = ?'); params.push(ruleId); }
+      if (sport) { conds.push('sport = ?'); params.push(sport); }
+      if (ageMinDays > 0) { conds.push(`fired_at <= datetime('now', '-' || ? || ' days')`); params.push(ageMinDays); }
+      const where = conds.join(' AND ');
+      const preview = db.prepare(`
+        SELECT id, rule_id, sport, severity, metric_value, fired_at, message
+          FROM analytics_alerts WHERE ${where}
+         ORDER BY fired_at DESC LIMIT 500
+      `).all(...params);
+      if (dryRun) {
+        sendJson(res, {
+          ok: true, dry_run: true, would_resolve_n: preview.length, alerts: preview,
+          note: 'Add ?dry_run=0 (POST) to apply.',
+        });
+        return;
+      }
+      const updRes = db.prepare(`
+        UPDATE analytics_alerts
+           SET status = 'resolved',
+               resolved_at = datetime('now'),
+               context_json = json_patch(COALESCE(context_json, '{}'), json_object('resolved_reason', ?))
+         WHERE ${where}
+      `).run(reason, ...params);
+      log('INFO', 'ALERTS-RESOLVE', `resolved ${updRes.changes} alerts (rule=${ruleId || '*'} sport=${sport || '*'} age>=${ageMinDays}d reason="${reason}")`);
+      sendJson(res, {
+        ok: true, dry_run: false, resolved_n: updRes.changes,
+        filters: { rule_id: ruleId, sport, age_min_days: ageMinDays }, reason,
+      });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   // ── /admin/analytics.html: UI standalone pras 5 métricas.
   if (p === '/admin/analytics.html' || p === '/admin/analytics-ui') {
     const html = `<!doctype html>
