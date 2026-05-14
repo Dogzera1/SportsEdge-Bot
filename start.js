@@ -57,6 +57,38 @@ console.log(`[LAUNCHER] PORT=${PORT} | DB=${DB_PATH}`);
 const _crashCount = {};
 const _spawnTs = {};
 
+// 2026-05-14: launcher heartbeat persisted file pra diagnose container restarts.
+// Antes _writeChildExit só rodava em child.on('exit'), mas se container morre
+// (Railway recycle / Linux OOM kill nível root), launcher também morre sem
+// rodar exit handler. Heartbeat 30s persiste {pid, mem_mb, children, ts} em disco.
+// Boot subsequente lê e correlaciona pra detectar parent kill.
+function _writeLauncherHeartbeat() {
+  try {
+    const fs = require('fs');
+    const path = require('path');
+    const dbDir = path.dirname(path.isAbsolute(DB_PATH) ? DB_PATH : path.resolve(DB_PATH));
+    const out = path.join(dbDir, 'launcher_heartbeat.json');
+    const mem = process.memoryUsage();
+    const payload = {
+      ts: new Date().toISOString(),
+      pid: process.pid,
+      uptime_s: Math.round(process.uptime()),
+      rss_mb: Math.round(mem.rss / 1024 / 1024),
+      heap_used_mb: Math.round(mem.heapUsed / 1024 / 1024),
+      children: Object.fromEntries(
+        Object.entries(_spawnTs).map(([name, ts]) => [
+          name,
+          { spawn_ts: ts, uptime_s: Math.round((Date.now() - ts) / 1000), crash_count: _crashCount[name] || 0 }
+        ])
+      ),
+    };
+    fs.writeFileSync(out, JSON.stringify(payload));
+  } catch (_) {}
+}
+setInterval(_writeLauncherHeartbeat, 30_000).unref();
+// Inicial logo após launcher subir
+setTimeout(_writeLauncherHeartbeat, 5_000).unref?.();
+
 // 2026-05-01: persiste exit signature do child em disco. Se SIGKILL/OOM (sem
 // grace period), o próprio child não tem chance de escrever last_exit_*.json,
 // mas o launcher captura via 'exit' event e persiste {code, signal, uptime_ms}.
