@@ -24158,6 +24158,26 @@ load();
               }
             }
           }
+
+          // 2026-05-14 Wave 5.2: bucket_block consumer (ml_bucket_blocklist mig 105).
+          // ml-auto-promote audit_granular detecta (sport, tier, bucket) bleeders
+          // em shadow (ROI ≤ -30% n ≥ 10) e upserta. Aqui bloqueia ML real tip
+          // quando (sport, tier_of_league, bucket_of_odds) bate. Auto-route pra
+          // shadow (preserva research universe). Hard reject opt-in via
+          // ML_BUCKET_BLOCK_HARD_REJECT.
+          try {
+            const { isMlBucketBlocked } = require('./lib/ml-auto-promote');
+            const { getLeagueTierKey } = require('./lib/league-tier');
+            const _tier = getLeagueTierKey(sport, eventName || '');
+            if (_tier && isMlBucketBlocked(sport, _tier, oddsN)) {
+              const _hardReject = /^(1|true|yes)$/i.test(String(process.env.ML_BUCKET_BLOCK_HARD_REJECT || ''));
+              if (_hardReject || !_autoRouteToShadow('ml_bucket_blocked', { tier: _tier, odds: oddsN })) {
+                log('INFO', 'ML-GATE', `${sport}: ${p1} vs ${p2} [${eventName}] — bucket_block (tier=${_tier} odds=${oddsN}). Tip rejeitada.`);
+                _emitSkip('ml_bucket_blocked', { sport, tier: _tier, odds: oddsN });
+                return;
+              }
+            }
+          } catch (_) { /* ml-auto-promote lib opcional — sem block se require falhar */ }
         }
 
         // Time-of-day block: se hora UTC atual está marcada como bleeder (ROI persistentemente ruim),
