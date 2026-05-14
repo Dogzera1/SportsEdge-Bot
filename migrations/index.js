@@ -2836,6 +2836,48 @@ const migrations = [
       } catch (e) { console.log(`[mig 107] rotation: ${e.message}`); }
     },
   },
+  {
+    id: '108_mt_permanent_disable_list',
+    up(db) {
+      // 2026-05-14: migrar MT_PERMANENT_DISABLE_LIST de env-csv pra DB.
+      //
+      // Motivação: inconsistência detectada — bot.js default tinha 5 entries,
+      // mt-preflight.js + server.js endpoints tinham 2 entries default. Audit
+      // visivel mostrava "OK" pra mercado que bot bloqueava silenciosamente.
+      //
+      // DB vira source-of-truth; envar MT_PERMANENT_DISABLE_LIST vira fallback
+      // (deprecada, removível após confirmação). Audit trail via added_by.
+      try {
+        db.exec(`
+          CREATE TABLE IF NOT EXISTS mt_permanent_disable_list (
+            sport TEXT NOT NULL,
+            market TEXT NOT NULL,
+            side TEXT,
+            reason TEXT,
+            added_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            added_by TEXT,
+            PRIMARY KEY (sport, market, side)
+          );
+          CREATE INDEX IF NOT EXISTS idx_mt_perm_disable_sport ON mt_permanent_disable_list(sport);
+        `);
+        // Seed só se vazia. Defaults consolidados (audits prod 04-30/05-03/05-06/05-10):
+        const seed = db.prepare(`SELECT COUNT(*) AS n FROM mt_permanent_disable_list`).get();
+        if (!seed || !seed.n) {
+          const ins = db.prepare(`
+            INSERT INTO mt_permanent_disable_list (sport, market, side, reason, added_by)
+            VALUES (?, ?, ?, ?, 'mig108_seed')
+          `);
+          ins.run('tennis', 'totalgames', 'over',  'audit prod 2026-04-30 — ROI -20.2% n=57 (leak persistente)');
+          ins.run('tennis', 'totalgames', 'under', 'audit prod 2026-05-03 — ROI -15.3% n=20 (completa cobertura)');
+          ins.run('lol',    'total',      '',      'audit prod 2026-04-30 — ROI -54% n=10 (sample baixo, magnitude clara)');
+          ins.run('cs',     'total',      'under', 'audit prod 2026-05-06 — ROI -68% n=9 (UNDER 2.5 tier2/3)');
+          ins.run('lol',    'total_kills_map2', 'under', 'audit shadow 30d 2026-05-10 — ROI -100% n=5 (0/5 hit)');
+          console.log('[mig 108] mt_permanent_disable_list seeded with 5 default entries');
+        }
+        console.log('[mig 108] mt_permanent_disable_list created (DB-driven source-of-truth)');
+      } catch (e) { console.log(`[mig 108] mt_permanent_disable: ${e.message}`); }
+    },
+  },
 ];
 
 function applyMigrations(db) {

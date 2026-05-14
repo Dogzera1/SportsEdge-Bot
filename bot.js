@@ -5921,34 +5921,13 @@ function perMarketEvGate(sport, market, defaultEv) {
   return defaultEv;
 }
 
-// MT_PERMANENT_DISABLE_LIST — env-driven blocklist permanente, csv com
-// `sport|market` ou `sport|market|side` (case-sensitive na parte do market).
-// Aplica-se ANTES do runtime guard, sem precisar persistir em DB.
-// Ex: MT_PERMANENT_DISABLE_LIST=tennis|totalGames|over,lol|total_kills_map3
-// Default inclui leak conhecido (audit prod 2026-04-30): tennis totalGames over.
-let _MT_PERMANENT_DISABLE = null;
+// MT permanent disable: source-of-truth DB (mig 108) via lib/mt-permanent-disable.
+// Env MT_PERMANENT_DISABLE_LIST mantida como fallback transicional — quando
+// env explícita, suas entries fazem UNION com DB (helper loadSet).
+// Aplica-se ANTES do runtime guard. Lowercase em ambos store e probe.
+const _mtPermDisable = require('./lib/mt-permanent-disable');
 function _getMtPermanentDisable() {
-  if (_MT_PERMANENT_DISABLE !== null) return _MT_PERMANENT_DISABLE;
-  // Default blocklist (audits prod 2026-04-30 + 2026-05-03):
-  //   tennis|totalGames|over: ROI -20.2% n=57 (sample sólido, leak persistente)
-  //   tennis|totalGames|under: ROI -15.3% n=20 (audit 03/05, completa cobertura do mercado)
-  //   lol|total:               ROI -54% n=10 (sample baixo mas magnitude clara)
-  //   cs|TOTAL|under:          ROI -68% n=9 (audit 06/05, UNDER 2.5 maps tier-2/3
-  //                            ESL Challenger NA/EU/SA + Odyssey Cup + Pro League)
-  // 2026-05-06: lowercase ALL parts (sport|market|side) na construção do Set.
-  // Scanners emitem `total` (lowercase) mas default tinha `cs|TOTAL|under` —
-  // perm.has nunca casava (MT_PERMANENT_DISABLE_LIST default era effectively dead).
-  // Caller (`describeMtGateSkip`, MT scanners) também devem fazer lowercase no probe.
-  // 2026-05-10: lol|total_kills_map2|under default — audit shadow 30d ROI -100%
-  // n=5 (0/5 hit). Map2 UNDER kills é leak claro (Poisson under-prices undersshoot
-  // de Mapa 2 onde dinâmica costuma escalar). MAP1+MAP2 OVER ficam OK (n=24
-  // combined ROI +13.5%); só side UNDER do MAP2 bloqueado.
-  const raw = String(process.env.MT_PERMANENT_DISABLE_LIST ?? 'tennis|totalGames|over,tennis|totalGames|under,lol|total,cs|total|under,lol|total_kills_map2|under').trim();
-  _MT_PERMANENT_DISABLE = new Set();
-  for (const entry of raw.split(',').map(s => s.trim().toLowerCase()).filter(Boolean)) {
-    _MT_PERMANENT_DISABLE.add(entry);
-  }
-  return _MT_PERMANENT_DISABLE;
+  return _mtPermDisable.loadSet(db);
 }
 
 // 2026-05-05: helper diagnóstico — quando isMarketTipsEnabled retorna false,
@@ -24217,8 +24196,10 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
       const days = parseInt(process.env.MT_RESTORE_DAYS || '14', 10);
       const minRoi = parseFloat(process.env.MT_RESTORE_MIN_ROI || '0');
       const minClv = parseFloat(process.env.MT_RESTORE_MIN_CLV || '0');
-      const permList = String(process.env.MT_PERMANENT_DISABLE_LIST ?? 'tennis|totalGames|over')
-        .split(',').map(s => s.trim()).filter(Boolean);
+      // 2026-05-14: lista vem do DB (mig 108) via lib/mt-permanent-disable.
+      // Env fallback é UNION-ed automaticamente em loadSet.
+      const permSet = _mtPermDisable.loadSet(db);
+      const permList = Array.from(permSet);
       if (!permList.length) return;
       const candidates = [];
       for (const entry of permList) {

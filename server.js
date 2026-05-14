@@ -12914,9 +12914,9 @@ setInterval(load, 60000);
         ANALYZED_TTL_MS: parseInt(process.env.ANALYZED_TTL_MS || String(72 * 3600 * 1000), 10),
         MEM_WATCHDOG_RSS_MB: process.env.MEM_WATCHDOG_RSS_MB ? parseFloat(process.env.MEM_WATCHDOG_RSS_MB) : null,
       },
-      // Lists / blocklists
+      // Lists / blocklists (mt_permanent DB-driven via mig 108)
       lists: {
-        MT_PERMANENT_DISABLE_LIST: String(process.env.MT_PERMANENT_DISABLE_LIST ?? 'tennis|totalGames|over,lol|total').split(',').map(s => s.trim()).filter(Boolean),
+        MT_PERMANENT_DISABLE_LIST: Array.from(require('./lib/mt-permanent-disable').loadSet(db)),
         ODDS_BUCKET_BLOCK: String(process.env.ODDS_BUCKET_BLOCK || '').split(',').map(s => s.trim()).filter(Boolean),
       },
     };
@@ -13083,7 +13083,13 @@ setInterval(load, 60000);
           time_of_day_auto: envFlag('TIME_OF_DAY_AUTO', 'true'),
           league_trust: envFlag('LEAGUE_TRUST_DISABLED', 'false (ON)'),
           clv_auto_kelly: envFlag('CLV_AUTO_KELLY', 'true'),
-          permanent_disable_list: envFlag('MT_PERMANENT_DISABLE_LIST', 'unset'),
+          permanent_disable_list: (() => {
+            try {
+              const n = require('./lib/mt-permanent-disable').loadSet(db).size;
+              const hasEnv = process.env.MT_PERMANENT_DISABLE_LIST !== undefined;
+              return `${n} entries (DB-driven, mig 108${hasEnv ? ' + env fallback' : ''})`;
+            } catch (_) { return 'unavailable'; }
+          })(),
         },
         kelly: {
           max_kelly_frac: process.env.MAX_KELLY_FRAC || '0.10',
@@ -13475,9 +13481,9 @@ setInterval(load, 60000);
         `).get(sport, `-${days} days`);
         out.roi_shadow[`d${days}`] = r;
       }
-      // Blocklist matches (entries que afetam esse sport)
-      const blocklistEnv = String(process.env.MT_PERMANENT_DISABLE_LIST ?? 'tennis|totalGames|over,lol|total').trim();
-      out.blocklist_entries = blocklistEnv.split(',').map(s => s.trim()).filter(e => e.startsWith(sport + '|'));
+      // Blocklist matches (DB-driven via mig 108)
+      const _permSet = require('./lib/mt-permanent-disable').loadSet(db);
+      out.blocklist_entries = Array.from(_permSet).filter(e => e.startsWith(sport + '|'));
       // Top markets shadow 30d
       try {
         out.top_markets_shadow_30d = db.prepare(`
@@ -13503,8 +13509,8 @@ setInterval(load, 60000);
     const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     const days = Math.max(1, Math.min(180, parseInt(parsed.query.days || '14', 10) || 14));
-    const blocklistEnv = String(process.env.MT_PERMANENT_DISABLE_LIST ?? 'tennis|totalGames|over,lol|total').trim();
-    const entries = blocklistEnv.split(',').map(s => s.trim()).filter(Boolean);
+    const _permSet = require('./lib/mt-permanent-disable').loadSet(db);
+    const entries = Array.from(_permSet);
     const out = { ok: true, ts: new Date().toISOString(), days, entries: [] };
     for (const entry of entries) {
       const parts = entry.split('|');
@@ -13538,7 +13544,7 @@ setInterval(load, 60000);
           ...r,
           restore_eligible: restoreEligible,
           recommendation: restoreEligible
-            ? 'considerar remover do MT_PERMANENT_DISABLE_LIST'
+            ? `considerar remover via POST /admin/mt-permanent-remove?sport=${sport}&market=${market}${side ? `&side=${side}` : ''}`
             : (r?.n < 10 ? 'sample insuficiente, manter bloqueado'
               : (r?.roi_pct < 0 ? 'leak persistente, manter' : 'observar — sample marginal')),
         });
@@ -13561,8 +13567,7 @@ setInterval(load, 60000);
     const out = { ok: true, ts: new Date().toISOString(), sports: {}, blocklist: [], global: {} };
     out.global.mt_shadow_dm_all = /^(1|true|yes)$/i.test(String(process.env.MT_SHADOW_DM_ALL || ''));
     out.global.market_tips_dm_kill_switch = process.env.MARKET_TIPS_DM_KILL_SWITCH === 'true';
-    const blocklistEnv = String(process.env.MT_PERMANENT_DISABLE_LIST ?? 'tennis|totalGames|over,lol|total').trim();
-    out.blocklist = blocklistEnv.split(',').map(s => s.trim()).filter(Boolean);
+    out.blocklist = Array.from(require('./lib/mt-permanent-disable').loadSet(db));
     for (const sp of sports) {
       const up = sp.toUpperCase();
       const aliasEnv = { DOTA2: 'DOTA', CS2: 'CS' }[up];
@@ -18809,6 +18814,72 @@ load();
     return;
   }
 
+  // ── MT permanent disable list — CRUD endpoints (mig 108).
+  // DB-driven source-of-truth (env MT_PERMANENT_DISABLE_LIST é fallback transicional).
+
+  // GET /admin/mt-permanent-list — lista entries DB
+  if (p === '/admin/mt-permanent-list' && (req.method === 'GET' || req.method === 'POST')) {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const _mtPerm = require('./lib/mt-permanent-disable');
+      const rows = _mtPerm.listAll(db);
+      const effectiveSet = Array.from(_mtPerm.loadSet(db));
+      sendJson(res, {
+        ok: true,
+        n_db: rows.length,
+        n_effective: effectiveSet.length,
+        env_fallback_active: process.env.MT_PERMANENT_DISABLE_LIST !== undefined,
+        rows,
+        effective_set: effectiveSet,
+        note: 'effective_set = union(db rows, env MT_PERMANENT_DISABLE_LIST entries).',
+      });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
+  // POST/GET /admin/mt-permanent-add?sport=X&market=Y&side=Z&reason=...&key=<KEY>
+  if (p === '/admin/mt-permanent-add' && (req.method === 'POST' || req.method === 'GET')) {
+    if (!requireAdmin(req, res)) return;
+    const sport = String(parsed.query.sport || '').trim().toLowerCase();
+    const market = String(parsed.query.market || '').trim().toLowerCase();
+    const side = parsed.query.side ? String(parsed.query.side).trim().toLowerCase() : '';
+    const reason = String(parsed.query.reason || 'manual').slice(0, 240);
+    if (!sport || !market) { sendJson(res, { ok: false, error: 'missing sport or market' }, 400); return; }
+    try {
+      const _mtPerm = require('./lib/mt-permanent-disable');
+      const inserted = _mtPerm.addEntry(db, sport, market, side, { reason, addedBy: 'admin_api' });
+      log('INFO', 'MT-PERM-ADD', `${sport}|${market}${side ? '|' + side : ''} reason="${reason}" inserted=${inserted}`);
+      sendJson(res, {
+        ok: true, sport, market, side: side || null, reason, inserted,
+        note: inserted
+          ? 'Entry adicionada. Bot.js pega no próximo refresh cache (60s) ou restart.'
+          : 'Entry já existia (reason atualizada).',
+      });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
+  // POST/GET /admin/mt-permanent-remove?sport=X&market=Y&side=Z&key=<KEY>
+  if (p === '/admin/mt-permanent-remove' && (req.method === 'POST' || req.method === 'GET')) {
+    if (!requireAdmin(req, res)) return;
+    const sport = String(parsed.query.sport || '').trim().toLowerCase();
+    const market = String(parsed.query.market || '').trim().toLowerCase();
+    const side = parsed.query.side ? String(parsed.query.side).trim().toLowerCase() : '';
+    if (!sport || !market) { sendJson(res, { ok: false, error: 'missing sport or market' }, 400); return; }
+    try {
+      const _mtPerm = require('./lib/mt-permanent-disable');
+      const removed = _mtPerm.removeEntry(db, sport, market, side);
+      log('INFO', 'MT-PERM-REMOVE', `${sport}|${market}${side ? '|' + side : ''} removed=${removed}`);
+      sendJson(res, {
+        ok: true, sport, market, side: side || null, removed,
+        note: removed
+          ? 'Entry removida. Bot.js pega no próximo refresh cache (60s) ou restart. Se env MT_PERMANENT_DISABLE_LIST tem entry equivalente, ela continua ativa via fallback.'
+          : 'Entry não encontrada no DB.',
+      });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   // POST/GET /admin/mt-block-league?sport=tennis&market=totalGames&league=WTA Rome - R1&reason=...&key=<KEY>
   // Adiciona liga (sport, market, league) em mt_market_league_blocklist source='manual'.
   // Diferente de /admin/mt-disable que disable (sport, market, side) global.
@@ -20679,8 +20750,7 @@ load();
         const shadowOnly = shadowOnlyEnv ? !/^(0|false|no)$/i.test(String(shadowOnlyEnv)) : null;
         config[sp] = { promote_enabled: promoteEnabled, shadow_only: shadowOnly };
       }
-      const blocklistEnv = String(process.env.MT_PERMANENT_DISABLE_LIST ?? 'tennis|totalGames|over,lol|total').trim();
-      const blocklist = blocklistEnv.split(',').map(s => s.trim()).filter(Boolean);
+      const blocklist = Array.from(require('./lib/mt-permanent-disable').loadSet(db));
 
       let runtimeDisables = [];
       try {
