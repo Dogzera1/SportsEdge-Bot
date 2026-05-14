@@ -7700,6 +7700,7 @@ setInterval(load, 10000);
             return '';
           })();
           stmts.upsertMatchResult.run(rawId, 'dota2', t1?.name || '', t2?.name || '', winner, _mapScore, m.league?.name || '');
+          try { stmts.insertMatchResultSource.run(rawId, 'dota2', 'pandascore', t1?.name || '', t2?.name || '', winner, _mapScore); } catch (_) {}
           sendJson(res, { matchId: rawId, winner, resolved: true, map: mapN, score: _mapScore || null });
         } else {
           sendJson(res, { matchId: rawId, resolved: false, map: mapN });
@@ -7711,6 +7712,7 @@ setInterval(load, 10000);
       const winner = m.winner?.name || null;
       if (winner) {
         stmts.upsertMatchResult.run(rawId, 'dota2', t1?.name || '', t2?.name || '', winner, _psSeriesScore(m), m.league?.name || '');
+        try { stmts.insertMatchResultSource.run(rawId, 'dota2', 'pandascore', t1?.name || '', t2?.name || '', winner, _psSeriesScore(m)); } catch (_) {}
         sendJson(res, { matchId: rawId, winner, resolved: true });
       } else {
         sendJson(res, { matchId: rawId, resolved: false });
@@ -7757,6 +7759,7 @@ setInterval(load, 10000);
         // Use baseId (sem _MAP) pra evitar Elo inflation quando múltiplas phase-tips
         // do mesmo match são settled — INSERT OR IGNORE dedupe series result.
         stmts.upsertMatchResult.run(baseId, game, p1, p2, winner, _psSeriesScore(m), m.league?.name || '');
+        try { stmts.insertMatchResultSource.run(baseId, game, 'pandascore', p1, p2, winner, _psSeriesScore(m)); } catch (_) {}
         return { resolved: true, winner };
       }
       return { resolved: false };
@@ -7787,6 +7790,7 @@ setInterval(load, 10000);
         const winner = m.winner?.name;
         if (winner) {
           stmts.upsertMatchResult.run(baseId, game, a, b, winner, _psSeriesScore(m), m.league?.name || '');
+          try { stmts.insertMatchResultSource.run(baseId, game, 'pandascore', a, b, winner, _psSeriesScore(m)); } catch (_) {}
           return { resolved: true, winner };
         }
       }
@@ -7836,6 +7840,7 @@ setInterval(load, 10000);
       if (!r) { sendJson(res, { matchId: rawId, resolved: false, error: 'event não encontrado' }); return; }
       if (r.resolved && r.winner) {
         stmts.upsertMatchResult.run(rawId, 'darts', '', '', r.winner, r.score || '', '');
+        try { stmts.insertMatchResultSource.run(rawId, 'darts', 'sofascore', '', '', r.winner, r.score || ''); } catch (_) {}
       }
       sendJson(res, { matchId: rawId, resolved: r.resolved, winner: r.winner, status: r.status, score: r.score });
     } catch (e) {
@@ -7908,6 +7913,7 @@ setInterval(load, 10000);
         const s1 = found.homeScore?.current ?? 0;
         const s2 = found.awayScore?.current ?? 0;
         stmts.upsertMatchResult.run(rawId, 'snooker', found.homeTeam?.name || t1, found.awayTeam?.name || t2, winner, `${s1}-${s2}`, '');
+        try { stmts.insertMatchResultSource.run(rawId, 'snooker', 'sofascore', found.homeTeam?.name || t1, found.awayTeam?.name || t2, winner, `${s1}-${s2}`); } catch (_) {}
         sendJson(res, { matchId: rawId, resolved: true, winner, score: `${s1}-${s2}` });
         return;
       }
@@ -27526,6 +27532,7 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
               matchId, 'football',
               m.home, m.away, m.winner, m.score, league, m.startIso
             );
+            try { stmts.insertMatchResultSource.run(matchId, 'football', 'espn', m.home, m.away, m.winner, m.score); } catch (_) {}
             inserted++;
             if (sample.length < 8) sample.push({ match_id: matchId, teams: `${m.home} vs ${m.away}`, winner: m.winner, score: m.score, league, at: m.startIso });
           } catch (_) { skipped++; }
@@ -27597,6 +27604,7 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
                   ? new Date(m.end_at).toISOString().replace('T', ' ').slice(0, 19)
                   : new Date().toISOString().replace('T', ' ').slice(0, 19);
                 stmts.upsertMatchResultWithDate.run(matchId, cfg.mr, t1, t2, winner, score, league, resolvedAt);
+                try { stmts.insertMatchResultSource.run(matchId, cfg.mr, 'pandascore', t1, t2, winner, score); } catch (_) {}
                 inserted++;
               } catch (_) { skipped++; }
             }
