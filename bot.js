@@ -1621,6 +1621,36 @@ setInterval(() => {
       if (!global._memCritical) {
         log('ERROR', 'MEM-GUARD', `CRIT heap=${heapMb}MB (crit=${_BOT_MEM_HEAP_CRIT_MB}) rss=${rssMb}MB (crit=${_BOT_MEM_RSS_CRIT_MB}) — defering crons pra evitar OOM`);
         try { if (global.gc) global.gc(); } catch (_) {} // best-effort GC
+        // 2026-05-14: persist pre-OOM snapshot pra diagnose pós-restart.
+        // V8 heap stats distinguem heap JS vs native (Buffer/ArrayBuffer).
+        // Próximo boot lê /data/last_oom_snapshot.json em /admin/boot-diag.
+        try {
+          const v8 = require('v8');
+          const stats = v8.getHeapStatistics();
+          const snap = {
+            ts: new Date().toISOString(),
+            uptime_s: Math.round(process.uptime()),
+            mem: {
+              rss_mb: rssMb,
+              heap_used_mb: heapMb,
+              heap_total_mb: Math.round(m.heapTotal / 1048576),
+              external_mb: Math.round(m.external / 1048576),
+              array_buffers_mb: Math.round((m.arrayBuffers || 0) / 1048576),
+            },
+            v8: {
+              total_heap_size_mb: Math.round(stats.total_heap_size / 1048576),
+              used_heap_size_mb: Math.round(stats.used_heap_size / 1048576),
+              heap_size_limit_mb: Math.round(stats.heap_size_limit / 1048576),
+              malloced_memory_mb: Math.round(stats.malloced_memory / 1048576),
+              native_contexts: stats.number_of_native_contexts,
+              detached_contexts: stats.number_of_detached_contexts,
+            },
+          };
+          const fs_oom = require('fs');
+          const path_oom = require('path');
+          const dbDir_oom = path_oom.dirname(path_oom.isAbsolute(DB_PATH) ? DB_PATH : path_oom.resolve(DB_PATH));
+          fs_oom.writeFileSync(path_oom.join(dbDir_oom, 'last_oom_snapshot.json'), JSON.stringify(snap));
+        } catch (_) {}
       }
       global._memCritical = { ts: Date.now(), heapMb, rssMb };
       _botLastMemCritAt = Date.now();

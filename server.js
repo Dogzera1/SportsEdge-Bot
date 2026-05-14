@@ -10612,6 +10612,7 @@ setInterval(load, 10000);
           last_child_exit_bot_js: readJson('last_child_exit_bot_js.json'),
           boot_count: readJson('boot_count.json'),
           launcher_heartbeat: readJson('launcher_heartbeat.json'),
+          last_oom_snapshot: readJson('last_oom_snapshot.json'),
         },
         process: {
           uptime_s: Math.round(process.uptime()),
