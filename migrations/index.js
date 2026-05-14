@@ -2778,6 +2778,35 @@ const migrations = [
       } catch (e) { console.log(`[mig 105] ml_bucket_blocklist: ${e.message}`); }
     },
   },
+  {
+    id: '106_tips_participant_norm_index',
+    up(db) {
+      // 2026-05-14: propagator REPLACE×4 OR (lib/mt-result-propagator.js:50-99)
+      // 3 lookups × 50 shadow rows/settle batch = 150 full-scans em `tips`
+      // (cresce indefinidamente). REPLACE em ambos lados da OR + lower() impede
+      // SQLite de usar índice — REPLACE não é função determinística-pra-índice
+      // sem expression index.
+      //
+      // Fix: expression index sobre o canonical form usado em todas as queries
+      // do propagator. SQLite usa expression index quando query expression
+      // matches exato (REPLACE×4 + lower).
+      try {
+        const expr = `REPLACE(REPLACE(REPLACE(REPLACE(lower(participant1),' ',''),'-',''),'.',''),'''','')`;
+        const expr2 = `REPLACE(REPLACE(REPLACE(REPLACE(lower(participant2),' ',''),'-',''),'.',''),'''','')`;
+        db.exec(`
+          CREATE INDEX IF NOT EXISTS idx_tips_p1_norm_propagator
+          ON tips(sport, market_type, ${expr})
+          WHERE result IS NULL AND COALESCE(archived,0)=0 AND COALESCE(is_shadow,0)=0
+        `);
+        db.exec(`
+          CREATE INDEX IF NOT EXISTS idx_tips_p2_norm_propagator
+          ON tips(sport, market_type, ${expr2})
+          WHERE result IS NULL AND COALESCE(archived,0)=0 AND COALESCE(is_shadow,0)=0
+        `);
+        console.log('[mig 106] idx_tips_p1_norm_propagator + p2 created (mt-result-propagator hot path)');
+      } catch (e) { console.log(`[mig 106] propagator idx: ${e.message}`); }
+    },
+  },
 ];
 
 function applyMigrations(db) {
