@@ -25468,6 +25468,68 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   setInterval(() => runGateAttributionWeekly().catch(e => log('ERROR', 'GATE-ATTRIB', e.message)), 60 * 60 * 1000);
   setTimeout(() => runGateAttributionWeekly().catch(() => {}), 75 * 60 * 1000);
 
+  // 2026-05-14: CLV-by-book monitor. Detecta books com avg_clv<<-3% + alta
+  // loss rate pós-CLV-negativo = padrão latência artificial (book inflou pre,
+  // reverteu, tip perdeu). Cron diário 14h UTC (após daily digest). DM admin
+  // com books suspeitos. Opt-out CLV_BOOK_MONITOR_AUTO=false. Default ON.
+  // P2-compliant: só DM (research/observability), sem auto-block/disable.
+  let _lastClvBookCheckDay = null;
+  async function runClvByBookMonitor() {
+    const _t0 = Date.now();
+    const _hb = (result, note) => { try { markCronHeartbeat('clv_by_book', { result, note, durationMs: Date.now() - _t0 }); } catch (_) {} };
+    if (/^(0|false|no)$/i.test(String(process.env.CLV_BOOK_MONITOR_AUTO ?? 'true'))) { _hb('disabled'); return; }
+    const hourUtc = parseInt(process.env.CLV_BOOK_MONITOR_HOUR_UTC || '14', 10);
+    const now = new Date();
+    const today = now.toISOString().slice(0, 10);
+    if (_lastClvBookCheckDay === today) return;
+    if (now.getUTCHours() !== hourUtc) return;
+    _lastClvBookCheckDay = today;
+    try {
+      const days = parseInt(process.env.CLV_BOOK_MONITOR_DAYS || '30', 10);
+      const minN = parseInt(process.env.CLV_BOOK_MONITOR_MIN_N || '20', 10);
+      const rows = db.prepare(`
+        SELECT
+          COALESCE(best_book, 'Pinnacle') AS book,
+          COUNT(*) AS n,
+          AVG(clv_pct) AS avg_clv_pct,
+          SUM(CASE WHEN result = 'win' THEN 1 ELSE 0 END) AS wins,
+          SUM(CASE WHEN result = 'loss' THEN 1 ELSE 0 END) AS losses,
+          SUM(CASE WHEN result = 'loss' AND clv_pct < -2 THEN 1 ELSE 0 END) AS loss_after_clv_neg,
+          SUM(CASE WHEN clv_pct < -2 THEN 1 ELSE 0 END) AS n_clv_neg
+        FROM tips
+        WHERE COALESCE(is_shadow, 0) = 0
+          AND COALESCE(archived, 0) = 0
+          AND clv_pct IS NOT NULL
+          AND result IN ('win', 'loss')
+          AND sent_at >= datetime('now', '-' || ? || ' days')
+        GROUP BY COALESCE(best_book, 'Pinnacle')
+        HAVING n >= ?
+      `).all(days, minN);
+      const suspicious = [];
+      for (const r of rows) {
+        const lossAfterNegRate = r.n_clv_neg > 0 ? (r.loss_after_clv_neg / r.n_clv_neg) * 100 : null;
+        if (r.avg_clv_pct < -3 && lossAfterNegRate != null && lossAfterNegRate > 55) {
+          suspicious.push({ ...r, lossAfterNegRate });
+        }
+      }
+      log('INFO', 'CLV-BOOK', `${days}d: n_books=${rows.length} suspicious=${suspicious.length}`);
+      _hb('ok', `books=${rows.length} susp=${suspicious.length}`);
+      if (!suspicious.length || !ADMIN_IDS.size || _isCycleMuted('clv-book-monitor')) return;
+      const lines = [`🚨 *CLV-BY-BOOK — books suspeitos (${days}d)*`, ''];
+      for (const s of suspicious) {
+        lines.push(`*${s.book}*: avg_clv=${s.avg_clv_pct.toFixed(2)}% n=${s.n}`);
+        lines.push(`  loss_after_clv_neg: ${s.lossAfterNegRate.toFixed(1)}% (${s.loss_after_clv_neg}/${s.n_clv_neg})`);
+      }
+      lines.push('');
+      lines.push('_Padrão: book inflou odd pre-match → reverteu fortemente → tip perdeu. Investigar antes de bloquear via /admin/clv-by-book._');
+      const msg = lines.join('\n');
+      const token = resolveAlertsToken();
+      if (token) for (const adminId of ADMIN_IDS) sendDM(token, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
+    } catch (e) { log('ERROR', 'CLV-BOOK', e.message); _hb('error', e.message); }
+  }
+  setInterval(() => runClvByBookMonitor().catch(e => log('ERROR', 'CLV-BOOK', e.message)), 60 * 60 * 1000);
+  setTimeout(() => runClvByBookMonitor().catch(() => {}), 6 * 60 * 1000);
+
   // 2026-05-09: HG- (handicapGames negative line) tennis readiness monitor.
   // User: HG- ROI +52.8% n=24 mas insuficiente. Cron 24h alerta admin
   // quando atinge n>=50 + ROI>=10% + hit IC95 lower bound > 50%.
