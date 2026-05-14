@@ -20770,6 +20770,90 @@ async function pollCs(runOnce = false) {
           } catch (e) { reportBug('CS-MARKETS', e); }
         }
 
+        // 2026-05-14: CS2 rounds-level scanner (handicap_rounds + total_rounds
+        // per-map). Pinnacle expõe spread+total em period=1..csBestOf — não
+        // capturávamos antes. Modelo Normal(μ, σ) round-diff em cs-rounds-model.
+        // Shadow-only por default (CS_ROUNDS_SHADOW=true). Live conditional via
+        // HLTV scorebot (current map score) pra mapa em curso.
+        const _csRoundsEnabled = !/^(0|false|no)$/i.test(String(process.env.CS_ROUNDS_SCAN ?? '1'));
+        if (_csRoundsEnabled && modelP1 > 0) {
+          try {
+            const { scanCsRoundsMarkets } = require('./lib/cs-rounds-model');
+            const { mapProbFromSeries } = require('./lib/lol-series-model');
+            const _rdMinEv = parseFloat(process.env.CS_ROUNDS_MIN_EV ?? '4');
+            const _rdMaxEv = parseFloat(process.env.CS_ROUNDS_MAX_EV ?? '30');
+            const _rdMinPm = parseFloat(process.env.CS_ROUNDS_MIN_PMODEL ?? '0.50');
+            const { minOdd: _rdMinOdd, maxOdd: _rdMaxOdd } = _resolveMtOddBounds('cs2', { defaultMinOdd: 1.50 });
+            const _csCurrentMap = (Number(match.score1) || 0) + (Number(match.score2) || 0) + 1;
+            // Per-map scan: period=1..csBestOf. Skipa mapas já decididos
+            // (currentMap > N significa que mapa N já acabou).
+            for (let p = 1; p <= csBestOf; p++) {
+              if (p < _csCurrentMap) continue; // mapa anterior já decidido
+              const periodMarkets = await serverGet(
+                `/odds-markets?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}&game=cs&period=${p}`
+              ).catch(() => null);
+              if (!periodMarkets) continue;
+              const hasRoundData = (periodMarkets.handicaps?.length || 0) + (periodMarkets.totals?.length || 0);
+              if (!hasRoundData) continue;
+              // pMap pre-game: P de team1 vencer ESSE mapa específico. Sem
+              // map-by-map differentiation no series model, assume mesmo pMap.
+              // mapProbFromSeries é P de vencer 1 mapa dado P série.
+              const _pMapPeriod = mapProbFromSeries(modelP1, csBestOf, { momentum: _csMomentum });
+              // Live: se mapa em curso, usa scoreboard pra current rounds.
+              let _score1Map = 0, _score2Map = 0;
+              if (isLiveCs && p === _csCurrentMap && scoreboard && scoreboard.live) {
+                // Match team1 a CT/T side via name match (mesmo logic do series).
+                let team1IsCT = null;
+                if (scoreboard.teamCTName && scoreboard.teamTName) {
+                  const n1 = norm(match.team1);
+                  const ct = norm(scoreboard.teamCTName);
+                  const tt = norm(scoreboard.teamTName);
+                  if (ct && n1 && (ct === n1 || ct.includes(n1) || n1.includes(ct))) team1IsCT = true;
+                  else if (tt && n1 && (tt === n1 || tt.includes(n1) || n1.includes(tt))) team1IsCT = false;
+                }
+                if (team1IsCT === true) {
+                  _score1Map = Number(scoreboard.scoreCT) || 0;
+                  _score2Map = Number(scoreboard.scoreT) || 0;
+                } else if (team1IsCT === false) {
+                  _score1Map = Number(scoreboard.scoreT) || 0;
+                  _score2Map = Number(scoreboard.scoreCT) || 0;
+                }
+              }
+              const _rdTips = scanCsRoundsMarkets({
+                pinMarkets: periodMarkets,
+                pMap: _pMapPeriod,
+                score: { score1: _score1Map, score2: _score2Map },
+                minEv: _rdMinEv, maxEv: _rdMaxEv, minPmodel: _rdMinPm,
+                minOdd: _rdMinOdd, maxOdd: _rdMaxOdd,
+                isLive: isLiveCs && p === _csCurrentMap,
+              });
+              if (!_rdTips.length) continue;
+              log('INFO', 'CS-ROUNDS', `${match.team1} vs ${match.team2} [map${p}${isLiveCs && p === _csCurrentMap ? ` live ${_score1Map}-${_score2Map}` : ''}]: ${_rdTips.length} tip(s) EV ≥${_rdMinEv}% (pMap=${(_pMapPeriod*100).toFixed(1)}%)`);
+              for (const t of _rdTips.slice(0, 5)) {
+                log('INFO', 'CS-ROUNDS', `  • ${t.label} @ ${t.odd.toFixed(2)} | pModel=${(t.pModel*100).toFixed(1)}% pImpl=${t.pImplied ? (t.pImplied*100).toFixed(1)+'%' : '?'} EV=${t.ev.toFixed(1)}% (map ${p})`);
+              }
+              // Shadow log all — promote=disabled em Wave 1 (CS_ROUNDS_SHADOW=true default).
+              // Encode period no market name (handicap_rounds_map1 etc.) — match-level
+              // dedup do logShadowTip seleciona top-EV across maps; sem suffix, mesmo
+              // market (handicap_rounds) cross-map colidiria + perderiamos signal de
+              // qual mapa carrega o edge. Suffix evita colisão; aceitamos top-EV per
+              // match enquanto shadow (Wave 1). Refactor dedup per-map vem em Wave 2
+              // se signal justificar.
+              const _rdShadowOnly = !/^(0|false|no)$/i.test(String(process.env.CS_ROUNDS_SHADOW ?? 'true'));
+              try {
+                const { logShadowTip } = require('./lib/market-tips-shadow');
+                for (const t of _rdTips) {
+                  const _tipWithPeriod = { ...t, market: `${t.market}_map${p}` };
+                  logShadowTip(db, { sport: 'cs', match, bestOf: csBestOf, tip: _tipWithPeriod, isLive: isLiveCs && p === _csCurrentMap });
+                }
+              } catch (e) { log('WARN', 'MT-SHADOW', `cs-rounds logShadowTip: ${e.message}`); }
+              if (!_rdShadowOnly) {
+                log('DEBUG', 'CS-ROUNDS', `${match.team1} vs ${match.team2} map${p}: promote path não implementado em Wave 1`);
+              }
+            }
+          } catch (e) { reportBug('CS-ROUNDS', e); }
+        }
+
         let direction = useElo
           ? (elo.direction === 'p1' ? 't1' : elo.direction === 'p2' ? 't2' : null)
           : mlResult.direction;
@@ -22472,6 +22556,52 @@ async function runAutoBasket() {
                 } catch (mte) { reportBug('BASKET-MT-PROMOTE', mte); }
               }
             }
+          }
+
+          // 2026-05-14: Per-quarter scan (Q1..Q4 NBA). Pinnacle expõe spread
+          // + total em period=1..4 — não capturávamos antes. Scanner re-scala
+          // μ/σ trained pra quarter scope (÷4 / ÷2 respectivamente).
+          // Shadow-only por padrão (BASKET_QUARTER_SHADOW=true).
+          const _bsQuarterEnabled = !/^(0|false|no)$/i.test(String(process.env.BASKET_QUARTER_SCAN ?? '1'));
+          if (_bsQuarterEnabled && trMkt && !trMkt.isCold) {
+            try {
+              const { scanBasketQuartersMarkets } = require('./lib/basket-mt-scanner');
+              const _qMinEv = parseFloat(process.env.BASKET_QUARTER_MIN_EV ?? '5');
+              const _qMaxEv = parseFloat(process.env.BASKET_QUARTER_MAX_EV ?? '30');
+              const _qMinPm = parseFloat(process.env.BASKET_QUARTER_MIN_PMODEL ?? '0.50');
+              for (let q = 1; q <= 4; q++) {
+                const qMkt = await serverGet(
+                  `/odds-markets?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}&game=basket&period=${q}`
+                ).catch(() => null);
+                if (!qMkt) continue;
+                const qHasData = (qMkt.totals?.length || 0) + (qMkt.handicaps?.length || 0);
+                if (!qHasData) continue;
+                const qTips = scanBasketQuartersMarkets({
+                  quarter: q,
+                  pinMarkets: qMkt,
+                  trainedMarkets: trMkt,
+                  minEv: _qMinEv, maxEv: _qMaxEv, minPmodel: _qMinPm,
+                  minOdd: _mtMinOdd, maxOdd: _mtMaxOdd,
+                });
+                if (!qTips.length) continue;
+                log('INFO', 'BASKET-Q-SCAN', `${match.team1} vs ${match.team2} Q${q}: ${qTips.length} mercado(s) EV ≥${_qMinEv}%`);
+                for (const t of qTips.slice(0, 3)) {
+                  log('INFO', 'BASKET-Q-SCAN', `  • ${t.label} @ ${t.odd.toFixed(2)} | pModel=${(t.pModel*100).toFixed(1)}% EV=${t.ev.toFixed(1)}%`);
+                }
+                try {
+                  const { logShadowTip } = require('./lib/market-tips-shadow');
+                  // Market names já carregam _q<N> suffix do scanner — dedup
+                  // match-level seleciona top-EV across Q1..Q4.
+                  for (const t of qTips) {
+                    logShadowTip(db, { sport: 'basket', match, bestOf: null, tip: t, isLive: isLiveBasket });
+                  }
+                } catch (e) { log('WARN', 'MT-SHADOW', `basket-q${q} logShadowTip: ${e.message}`); }
+                const _qShadowOnly = !/^(0|false|no)$/i.test(String(process.env.BASKET_QUARTER_SHADOW ?? 'true'));
+                if (!_qShadowOnly) {
+                  log('DEBUG', 'BASKET-Q-SCAN', `Q${q}: promote path não implementado em Wave 1`);
+                }
+              }
+            } catch (e) { reportBug('BASKET-Q-SCAN', e); }
           }
         }
       } catch (e) { log('WARN', 'BASKET-MT-SCAN', `${match.team1} vs ${match.team2}: ${e.message}`); }
