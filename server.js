@@ -17008,6 +17008,68 @@ load();
     return;
   }
 
+  // 2026-05-14: per-book CLV reversion tracker (adversarial finding).
+  // Casa BR pode propositadamente inflar odd 30-60s pós-tip pra aceitar nossa aposta,
+  // depois reverter — book CLV negativo sustentado + win_rate baixo quando reversão
+  // ocorreu = padrão de latência artificial. Detect via aggregate per best_book.
+  // GET /admin/clv-by-book?days=30&min_n=10
+  if (p === '/admin/clv-by-book') {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const days = Math.max(1, Math.min(120, parseInt(parsed.query.days || '30', 10) || 30));
+      const minN = Math.max(1, parseInt(parsed.query.min_n || '10', 10) || 10);
+      const rows = db.prepare(`
+        SELECT
+          COALESCE(best_book, 'Pinnacle') AS book,
+          COUNT(*) AS n,
+          AVG(clv_pct) AS avg_clv_pct,
+          SUM(CASE WHEN result = 'win' THEN 1 ELSE 0 END) AS wins,
+          SUM(CASE WHEN result = 'loss' THEN 1 ELSE 0 END) AS losses,
+          SUM(CASE WHEN result = 'loss' AND clv_pct < -2 THEN 1 ELSE 0 END) AS loss_after_clv_neg,
+          SUM(CASE WHEN clv_pct < -2 THEN 1 ELSE 0 END) AS n_clv_neg,
+          AVG(odds) AS avg_odds_open
+        FROM tips
+        WHERE COALESCE(is_shadow, 0) = 0
+          AND COALESCE(archived, 0) = 0
+          AND clv_pct IS NOT NULL
+          AND result IN ('win', 'loss')
+          AND sent_at >= datetime('now', '-' || ? || ' days')
+        GROUP BY COALESCE(best_book, 'Pinnacle')
+        HAVING n >= ?
+        ORDER BY avg_clv_pct ASC
+      `).all(days, minN);
+      // Anotar suspicious: avg_clv_pct < -3% + loss_rate_after_clv_neg > 50% =
+      // padrão latência (book inflou pre, reverteu, tip perdeu).
+      const enriched = rows.map(r => {
+        const settled = (r.wins || 0) + (r.losses || 0);
+        const hitRate = settled > 0 ? +((r.wins / settled) * 100).toFixed(1) : null;
+        const lossAfterNegRate = r.n_clv_neg > 0 ? +((r.loss_after_clv_neg / r.n_clv_neg) * 100).toFixed(1) : null;
+        const suspicious = (r.avg_clv_pct < -3) && (lossAfterNegRate != null && lossAfterNegRate > 55);
+        return {
+          book: r.book,
+          n: r.n,
+          avg_clv_pct: r.avg_clv_pct != null ? +r.avg_clv_pct.toFixed(2) : null,
+          hit_rate_pct: hitRate,
+          n_clv_neg: r.n_clv_neg,
+          loss_after_clv_neg_rate_pct: lossAfterNegRate,
+          avg_odds_open: r.avg_odds_open != null ? +r.avg_odds_open.toFixed(2) : null,
+          suspicious_latency_pattern: suspicious,
+          note: suspicious ? 'avg_clv<-3 + loss_after_clv_neg>55% = padrão latência artificial (book inflou pre, reverteu)' : null,
+        };
+      });
+      sendJson(res, {
+        ok: true,
+        days,
+        min_n: minN,
+        n_books: enriched.length,
+        suspicious_count: enriched.filter(r => r.suspicious_latency_pattern).length,
+        books: enriched,
+        note: 'Métrica adversarial: book com avg_clv<<-3 + loss_rate alto pós-CLV-negativo sugere latência artificial. Investigar antes de bloquear.',
+      });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
   // Admin: diagnósticos CLV em JSON. Aceita ?snapshot=1 pra ler DB histórico.
   // GET /admin/clv-leak?days=30&snapshot=1
   // GET /admin/clv-coverage?days=30&snapshot=1
