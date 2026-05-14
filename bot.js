@@ -25146,6 +25146,45 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   setInterval(_wrapCron('tennis_calib_refit', runTennisCalibRefitDaily), 60 * 60 * 1000);
   setTimeout(() => runTennisCalibRefitDaily().catch(() => {}), 95 * 60 * 1000);
 
+  // Tennis MT real promote readiness watch — DM admin quando verdict virar READY.
+  // 2026-05-14: tennis MT real em HOLD desde 11/05 (calibração off -10pp pós refit
+  // 12/05 + ROI 14d -0.46%). Cron polls /shadow-readiness 12h, DM admin se
+  // ready_to_promote=true. Throttle 24h pra não spam. Opt-out via
+  // TENNIS_MT_READINESS_WATCH=false.
+  let _tennisMtReadyDmAtMs = 0;
+  async function runTennisMtReadinessWatch() {
+    if (/^(0|false|no)$/i.test(String(process.env.TENNIS_MT_READINESS_WATCH ?? 'true'))) return;
+    try {
+      const r = await serverGet('/shadow-readiness?source=real&sport=tennis&days=14');
+      const verdict = r?.verdict || {};
+      if (!verdict.ready_to_promote) {
+        log('INFO', 'TENNIS-MT-WATCH', `verdict=${verdict.action || '?'} score=${verdict.score ?? '?'} (não pronto ainda)`);
+        return;
+      }
+      const cooldownMs = 24 * 60 * 60 * 1000;
+      if (Date.now() - _tennisMtReadyDmAtMs < cooldownMs) {
+        log('DEBUG', 'TENNIS-MT-WATCH', 'READY mas DM em cooldown 24h');
+        return;
+      }
+      _tennisMtReadyDmAtMs = Date.now();
+      const perf = r.performance || {};
+      const checks = r.checks || {};
+      const msg = `🎾 *TENNIS MT REAL — READY PROMOTE*\n\n`
+        + `Verdict: ✅ ready_to_promote (score=${verdict.score})\n`
+        + `Volume settled 14d: ${r.volume?.settled ?? '?'}\n`
+        + `ROI: ${perf.roi_pct}% (target ≥0)\n`
+        + `Calib gap: ${perf.calibration_gap_pp}pp (target ≥-5)\n`
+        + `CLV: ${perf.avg_clv_pct}% (n=${checks.clv_samples?.current ?? '?'})\n\n`
+        + `Sistema retomará promote MT real no próximo cron mt_auto_promote (12h).\n`
+        + `Audit: /shadow-readiness?source=real&sport=tennis&days=14`;
+      const token = resolveAlertsToken();
+      if (token) for (const adminId of ADMIN_IDS) sendDM(token, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
+      log('INFO', 'TENNIS-MT-WATCH', `DM admin enviado — tennis MT real READY (ROI ${perf.roi_pct}%, calib_gap ${perf.calibration_gap_pp}pp)`);
+    } catch (e) { log('ERROR', 'TENNIS-MT-WATCH', e.message); }
+  }
+  setInterval(_wrapCron('tennis_mt_readiness_watch', runTennisMtReadinessWatch), 12 * 60 * 60 * 1000);
+  setTimeout(() => runTennisMtReadinessWatch().catch(() => {}), 100 * 60 * 1000);
+
   // Esports MT calib refit daily (05h local). Multi-sport (lol/cs2/dota2/valorant).
   // Usa scripts/fit-tennis-markov-calibration.js (sport-agnostic apesar do nome
   // legacy) com --sport=X --filter=pre. Live tips skipped por instabilidade
