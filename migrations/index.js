@@ -2878,6 +2878,47 @@ const migrations = [
       } catch (e) { console.log(`[mig 108] mt_permanent_disable: ${e.message}`); }
     },
   },
+  {
+    id: '109_match_result_sources',
+    up(db) {
+      // 2026-05-14: dual-source match_results observability (P0 adversarial).
+      //
+      // Problema: tabela match_results tem PK (match_id, game) — ON CONFLICT
+      // UPSERT sempre overwrite. Se ESPN diz "A won" e Sackmann diz "B won"
+      // pro mesmo match, último a escrever ganha. Sem detection de mismatch.
+      //
+      // FASE 1 (observability only — NÃO bloqueia settle):
+      // - Multi-row log por (match_id, game, source). Cada source preserva seu
+      //   próprio winner. Settle path continua usando match_results (last-wins).
+      // - Cron reconcile 24h detecta mismatches winner cross-source últimos 7d.
+      // - DM admin pra investigar manual. Tip pode estar settled errado.
+      //
+      // FASE 2 (futura — ainda não implementada): settle só após 2+ sources
+      // confirmarem mesmo winner; senão flag tip 'ambiguous_match_result'.
+      try {
+        db.exec(`
+          CREATE TABLE IF NOT EXISTS match_result_sources (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            match_id TEXT NOT NULL,
+            game TEXT NOT NULL,
+            source TEXT NOT NULL,
+            team1 TEXT, team2 TEXT,
+            winner TEXT NOT NULL,
+            final_score TEXT,
+            recorded_at TEXT NOT NULL DEFAULT (datetime('now'))
+          );
+          CREATE INDEX IF NOT EXISTS idx_mrs_match
+            ON match_result_sources(match_id, game);
+          CREATE INDEX IF NOT EXISTS idx_mrs_recent
+            ON match_result_sources(recorded_at DESC);
+          -- Index pra reconcile cron: queries cross-source últimos 7d
+          CREATE INDEX IF NOT EXISTS idx_mrs_game_recorded
+            ON match_result_sources(game, recorded_at DESC);
+        `);
+        console.log('[mig 109] match_result_sources created (FASE 1 observability — dual-source detection)');
+      } catch (e) { console.log(`[mig 109] match_result_sources: ${e.message}`); }
+    },
+  },
 ];
 
 function applyMigrations(db) {

@@ -585,6 +585,8 @@ async function importTennisSackmannCsvForYear(year, tour) {
         const wStr = String(w), lStr = String(l);
         const [p1, p2] = wStr.toLowerCase() < lStr.toLowerCase() ? [wStr, lStr] : [lStr, wStr];
         stmts.upsertMatchResultWithDate.run(matchId, 'tennis', p1, p2, wStr, score, league, resolvedAt);
+        // Mig 109 (FASE 1 dual-source): log source pra reconcile cron detectar mismatches
+        try { stmts.insertMatchResultSource.run(matchId, 'tennis', 'sackmann', p1, p2, wStr, score); } catch (_) {}
         imported++;
       }
     });
@@ -1117,6 +1119,8 @@ function upsertTennisPostCompetitionsFromEspnJson(j, slug) {
         if (!resolvedAt) continue;
         try {
           stmts.upsertMatchResultWithDate.run(matchId, 'tennis', t1, t2, winner, score, league, resolvedAt);
+          // Mig 109 (FASE 1 dual-source): ESPN tennis path
+          try { stmts.insertMatchResultSource.run(matchId, 'tennis', 'espn', t1, t2, winner, score); } catch (_) {}
           n++;
         } catch (_) { /* ignore row */ }
       }
@@ -13758,6 +13762,24 @@ setInterval(load, 60000);
          ORDER BY severity, fired_at DESC LIMIT 500
       `).all(status, `-${days} days`);
       sendJson(res, { ok: true, days, status, n: rows.length, alerts: rows });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
+  // ── /admin/match-results-reconcile: detect winner mismatch cross-source.
+  // Mig 109 FASE 1 observability. P2-compliant: só DM admin, sem block.
+  // GET /admin/match-results-reconcile?days=7&game=tennis&key=<KEY>
+  if (p === '/admin/match-results-reconcile' && (req.method === 'GET' || req.method === 'POST')) {
+    if (!requireAdmin(req, res)) return;
+    const days = Math.max(1, Math.min(60, parseInt(parsed.query.days || '7', 10) || 7));
+    const game = parsed.query.game ? String(parsed.query.game).toLowerCase().trim() : null;
+    try {
+      const { findMismatches } = require('./lib/match-result-reconcile');
+      const r = findMismatches(db, { days, game });
+      sendJson(res, {
+        ok: true, ...r,
+        note: 'FASE 1 observability — mismatches sugerem possível mis-settle. Investigar tip impactada manualmente.',
+      });
     } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
     return;
   }

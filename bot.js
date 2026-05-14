@@ -25530,6 +25530,45 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   setInterval(() => runClvByBookMonitor().catch(e => log('ERROR', 'CLV-BOOK', e.message)), 60 * 60 * 1000);
   setTimeout(() => runClvByBookMonitor().catch(() => {}), 6 * 60 * 1000);
 
+  // 2026-05-14: match_results dual-source reconcile (mig 109 FASE 1).
+  // Detecta mismatches winner cross-source últimos 7d. Sources wired tennis
+  // (sackmann + espn). Cron daily 15h UTC. DM admin se mismatches > 0.
+  // Opt-out MATCH_RESULTS_RECONCILE_AUTO=false. P2-compliant: só DM, sem block.
+  let _lastReconcileDay = null;
+  async function runMatchResultsReconcile() {
+    const _t0 = Date.now();
+    const _hb = (result, note) => { try { markCronHeartbeat('mr_reconcile', { result, note, durationMs: Date.now() - _t0 }); } catch (_) {} };
+    if (/^(0|false|no)$/i.test(String(process.env.MATCH_RESULTS_RECONCILE_AUTO ?? 'true'))) { _hb('disabled'); return; }
+    const hourUtc = parseInt(process.env.MATCH_RESULTS_RECONCILE_HOUR_UTC || '15', 10);
+    const now = new Date();
+    const today = now.toISOString().slice(0, 10);
+    if (_lastReconcileDay === today) return;
+    if (now.getUTCHours() !== hourUtc) return;
+    _lastReconcileDay = today;
+    try {
+      const { findMismatches } = require('./lib/match-result-reconcile');
+      const days = parseInt(process.env.MATCH_RESULTS_RECONCILE_DAYS || '7', 10);
+      const r = findMismatches(db, { days });
+      log('INFO', 'MR-RECONCILE', `${days}d: n_mismatches=${r.n_mismatches}`);
+      _hb('ok', `mismatches=${r.n_mismatches}`);
+      if (!r.n_mismatches || !ADMIN_IDS.size || _isCycleMuted('mr-reconcile')) return;
+      const lines = [`⚠️ *MATCH RESULTS RECONCILE — mismatches (${days}d)*`, ''];
+      for (const m of r.mismatches.slice(0, 10)) {
+        lines.push(`*${m.game}* \`${m.match_id}\`: ${m.n_sources}s/${m.n_winners}w`);
+        lines.push(`  sources: ${m.sources_csv}`);
+        lines.push(`  winners: ${m.winners_csv}`);
+      }
+      if (r.n_mismatches > 10) lines.push(`...e mais ${r.n_mismatches - 10}`);
+      lines.push('');
+      lines.push('_Possível mis-settle. /admin/match-results-reconcile pra detail._');
+      const msg = lines.join('\n');
+      const token = resolveAlertsToken();
+      if (token) for (const adminId of ADMIN_IDS) sendDM(token, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
+    } catch (e) { log('ERROR', 'MR-RECONCILE', e.message); _hb('error', e.message); }
+  }
+  setInterval(() => runMatchResultsReconcile().catch(e => log('ERROR', 'MR-RECONCILE', e.message)), 60 * 60 * 1000);
+  setTimeout(() => runMatchResultsReconcile().catch(() => {}), 8 * 60 * 1000);
+
   // 2026-05-09: HG- (handicapGames negative line) tennis readiness monitor.
   // User: HG- ROI +52.8% n=24 mas insuficiente. Cron 24h alerta admin
   // quando atinge n>=50 + ROI>=10% + hit IC95 lower bound > 50%.
