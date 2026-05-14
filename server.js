@@ -14009,12 +14009,19 @@ load();
           AND result IN ('win','loss','push','void')
       `).all();
       const profitBySport = {};
+      let ambiguousEsportsTips = 0;
       for (const t of allTips) {
         let sp = t.sport;
         if (sp === 'esports') {
+          // 2026-05-14: remap heurístico era candidato pro drift R$6.58 lol↔dota2.
+          // Antes: name-contains('dota') fallback default 'lol' — qualquer evento
+          // tipo "LoL/Dota Pro League" virava dota2; "DoubleStrike" também dispara.
+          // Agora: prefer match_id prefix exclusivo. Sem match seguro → skip + counter
+          // (não silenciosamente mis-attribute).
           const mid = String(t.match_id || '');
-          const ev = String(t.event_name || '').toLowerCase();
-          sp = (mid.startsWith('dota2_') || ev.includes('dota')) ? 'dota2' : 'lol';
+          if (mid.startsWith('dota2_') || mid.startsWith('dota_')) sp = 'dota2';
+          else if (mid.startsWith('lol_') || mid.startsWith('riot_') || mid.startsWith('pin_lol_')) sp = 'lol';
+          else { ambiguousEsportsTips++; continue; }
         }
         profitBySport[sp] = (profitBySport[sp] || 0) + Number(t.profit_reais || 0);
       }
@@ -14038,6 +14045,7 @@ load();
         dry_run: !apply,
         changes_count: changes.length,
         changes,
+        ambiguous_esports_tips: ambiguousEsportsTips,
       });
     } catch (e) { sendJson(res, { error: e.message }, 500); }
     return;
@@ -14501,7 +14509,10 @@ load();
               db.prepare(`UPDATE tips SET result = ?, settled_at = datetime('now'), stake_reais = ?, profit_reais = ? WHERE id = ?`)
                 .run(result, stakeR, profitR, t.id);
               if (profitR !== 0 && !t.is_shadow) {
-                db.prepare(`UPDATE bankroll SET current_banca = current_banca + ?, updated_at = datetime('now') WHERE sport = ?`)
+                // 2026-05-14: round(...,2) consistency — outros 10 UPDATE bankroll paths usam round().
+                // Sem round, float drift acumula em settle batch (candidate causa drift R$6.58
+                // memory project_bankroll_avg_bug_2026_05_12 root cause não identificado).
+                db.prepare(`UPDATE bankroll SET current_banca = round(current_banca + ?, 2), updated_at = datetime('now') WHERE sport = ?`)
                   .run(profitR, t.sport);
               }
             });
@@ -14745,7 +14756,8 @@ load();
             db.prepare(`UPDATE tips SET result = ?, settled_at = datetime('now'), stake_reais = ?, profit_reais = ? WHERE id = ?`)
               .run(result, stakeR, profitR, t.id);
             if (profitR !== 0 && !t.is_shadow) {
-              db.prepare(`UPDATE bankroll SET current_banca = current_banca + ?, updated_at = datetime('now') WHERE sport = ?`)
+              // 2026-05-14: round(...,2) consistency — outros 10 UPDATE bankroll paths usam round().
+              db.prepare(`UPDATE bankroll SET current_banca = round(current_banca + ?, 2), updated_at = datetime('now') WHERE sport = ?`)
                 .run(profitR, t.sport);
             }
           });

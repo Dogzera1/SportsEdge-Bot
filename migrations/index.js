@@ -2703,6 +2703,33 @@ const migrations = [
       } catch (e) { console.log(`[mig 102] unique idx refine: ${e.message}`); }
     },
   },
+  {
+    id: '103_tips_realonly_index',
+    up(db) {
+      // 2026-05-14: real-only canonical path (CLAUDE.md) usa
+      //   WHERE archived=0 AND is_shadow=0 AND sport=?
+      // em 5+ crons (mt-leak-guard, kelly-auto-tune, league-trust,
+      // ev-calibration, mt-bucket-guard, gate-attribution, mt-auto-promote).
+      //
+      // Índices anteriores cobriam (sport, sent_at), (sport, result, sent_at),
+      // (sport, is_live, sent_at) — nenhum cobria is_shadow + archived.
+      // Resultado: full scan em `tips` (cresce indefinidamente — 5k+ rows
+      // em DB 155MB hoje, taxa ~50/dia tier1 + shadow ~75-100/dia).
+      //
+      // Partial index com WHERE matching o filter canônico → SQLite usa
+      // somente quando WHERE da query bate (archived=0 AND is_shadow=0).
+      // Tamanho minimal (subset real-tips), serve as covering pra (sport, sent_at)
+      // dentro do scope.
+      try {
+        db.exec(`
+          CREATE INDEX IF NOT EXISTS idx_tips_realonly
+          ON tips(sport, sent_at, result)
+          WHERE COALESCE(archived, 0) = 0 AND COALESCE(is_shadow, 0) = 0
+        `);
+        console.log('[mig 103] idx_tips_realonly created (real-only canonical path)');
+      } catch (e) { console.log(`[mig 103] idx_tips_realonly: ${e.message}`); }
+    },
+  },
 ];
 
 function applyMigrations(db) {
