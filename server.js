@@ -5456,7 +5456,7 @@ const server = http.createServer(async (req, res) => {
     let homeTeam = null, awayTeam = null;
     // Resolve via teams se matchupId não vier
     if (!matchupId && parsed.query.team1 && parsed.query.team2) {
-      const normTeam = s => String(s||'').toLowerCase().replace(/[^a-z0-9]/g,'');
+      const normTeam = s => String(s||'').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/[^a-z0-9]/g,'');
       const n1 = normTeam(parsed.query.team1), n2 = normTeam(parsed.query.team2);
       for (const [k, v] of Object.entries(oddsCache)) {
         if (!k.startsWith('esports_pin_') && !k.startsWith('pin_')) continue;
@@ -5781,7 +5781,7 @@ const server = http.createServer(async (req, res) => {
       const dotaMapNumber = parsed.query.map ? parseInt(parsed.query.map, 10) : null;
       const candidates = [];
 
-      const normTeam = s => String(s||'').toLowerCase().replace(/[^a-z0-9]/g,'');
+      const normTeam = s => String(s||'').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/[^a-z0-9]/g,'');
       const n1 = normTeam(t1), n2 = normTeam(t2);
       const matchesTeams = (mt1, mt2) => {
         const mn1 = normTeam(mt1), mn2 = normTeam(mt2);
@@ -6119,7 +6119,7 @@ const server = http.createServer(async (req, res) => {
       const psMatches = await getPandaScoreDotaMatches().catch(() => []);
 
       // Normaliza nome para matching entre fontes
-      const normTeam = s => String(s||'').toLowerCase().replace(/[^a-z0-9]/g,'');
+      const normTeam = s => String(s||'').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/[^a-z0-9]/g,'');
 
       // Enriquece The Odds API matches com formato e placar ao vivo do PandaScore
       for (const om of oddsMatches) {
@@ -6351,7 +6351,13 @@ const server = http.createServer(async (req, res) => {
         getPandaScoreValorantMatches().catch(() => []),
       ]);
 
-      const normTeam = s => String(s||'').toLowerCase().replace(/[^a-z0-9]/g,'');
+      // 2026-05-14 fix: NFD normalize antes do strip pra acentos não quebrarem merge.
+      // Bug: "Leviatán Esports" (PS) vs "Leviatan" (Pin) — `á` era stripped resultando
+      // "leviatn" vs "leviatan" — nenhuma inclusão funcionava → duplicata em
+      // /valorant-matches output. Reportado live-scout 2026-05-14.
+      const normTeam = s => String(s||'').toLowerCase()
+        .normalize('NFD').replace(/[̀-ͯ]/g, '')
+        .replace(/[^a-z0-9]/g,'');
 
       for (const om of pinMatches) {
         const n1 = normTeam(om.team1), n2 = normTeam(om.team2);
