@@ -2416,6 +2416,35 @@ const LOL_ALIASES = {
   'detonationfocusme': ['dfm'],
 };
 
+// ── Football team aliases (settle path) ──
+// 2026-05-14: caller `nameMatches(tip, winner, {aliases: null})` em football
+// não tinha dicionário → QUARANTINE substring_weak recorrente. Audit log
+// captou "Clube do Remo" vs winner="Remo" 3× em 22min sem resolver.
+// Match seguir convenção LOL_ALIASES: key = norm(canonical), value = [norm variantes].
+// Brasileirão Série A/B precisam mais aliases — adicionar conforme audit logs.
+const FOOTBALL_ALIASES = {
+  // Brasileirão (Série A / B / Copa do Brasil)
+  'clubedoremo': ['remo'],
+  'remo': ['clubedoremo'],
+  'vascodagama': ['vasco'],
+  'vasco': ['vascodagama'],
+  'atleticomineiro': ['atleticomg', 'galo'],
+  'atleticomg': ['atleticomineiro'],
+  'athleticoparanaense': ['athleticopr', 'furacao'],
+  'athleticopr': ['athleticoparanaense'],
+  'saopaulofc': ['saopaulo'],
+  'saopaulo': ['saopaulofc'],
+  'internacional': ['inter'],
+  'cruzeiroec': ['cruzeiro'],
+  'cruzeiro': ['cruzeiroec'],
+  'bahiaec': ['bahia'],
+  'bahia': ['bahiaec'],
+  'botafogofr': ['botafogo'],
+  'botafogo': ['botafogofr'],
+  'gremio': ['gremiofbpa'],
+  'gremiofbpa': ['gremio'],
+};
+
 function findOdds(sport, t1, t2) {
   const nt1 = norm(t1), nt2 = norm(t2);
   if (!nt1 || !nt2) return null;
@@ -4343,7 +4372,9 @@ function runSettleSweep({ sportFilter = '', days = 14 } = {}) {
         nameMatched = tennisSinglePlayerNameMatch(tip.tip_participant, row.winner);
         matchMethod = nameMatched ? 'tennis' : 'none';
       } else {
-        const aliases = sport === 'esports' ? LOL_ALIASES : null;
+        const aliases = sport === 'esports' ? LOL_ALIASES
+          : sport === 'football' ? FOOTBALL_ALIASES
+          : null;
         const r = nameMatches(tip.tip_participant, row.winner, { aliases });
         nameMatched = r.match;
         matchMethod = r.method;
@@ -29537,7 +29568,9 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
               matchMethod = nameMatched ? 'tennis' : 'none';
               matchScore = nameMatched ? 1.0 : 0;
             } else {
-              const aliases = sport === 'esports' ? LOL_ALIASES : null;
+              const aliases = sport === 'esports' ? LOL_ALIASES
+                : sport === 'football' ? FOOTBALL_ALIASES
+                : null;
               const r = nameMatches(tip.tip_participant, winner, { aliases });
               nameMatched = r.match;
               matchMethod = r.method;
