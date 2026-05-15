@@ -19808,7 +19808,17 @@ load();
         try {
           const fs = require('fs');
           const path = require('path');
-          const targetPath = path.join(__dirname, 'lib', `${sport}-markov-calib.json`);
+          // 2026-05-15 P0 fix: refit endpoint escreve em path consistent com
+          // o que consumer LÊ. Tennis usa lib/tennis-markov-calib.json (legacy
+          // name, lib/tennis-markov-calib.js consumer). Outros sports usam
+          // lib/<sport>-mt-calib.json (lib/sport-mt-calib.js factory) — pattern
+          // confirmado em scripts/fit-tennis-markov-calibration.js:52.
+          // ANTES: sempre escrevia <sport>-markov-calib.json → silent no-op
+          // pra lol/cs2/dota2/valorant (file órfão, nada consumia).
+          const filename = sport === 'tennis'
+            ? 'tennis-markov-calib.json'
+            : `${sport}-mt-calib.json`;
+          const targetPath = path.join(__dirname, 'lib', filename);
           fs.writeFileSync(targetPath, JSON.stringify(payload, null, 2));
           sendJson(res, {
             ok: true,
