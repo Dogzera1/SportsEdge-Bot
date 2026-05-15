@@ -175,6 +175,77 @@ module.exports = async function runTests(t) {
       t.assert('ok' in r.body || 'error' in r.body, `expected ok/error key, got ${JSON.stringify(r.body)}`);
     });
 
+    // ─── Test 7a: ev_sanity_cap → skipped quando ev > RECORD_TIP_EV_CAP_PCT ──
+    // server.js L24054-24067: !t.isShadow + evN > _evCap (default 50%) → reject.
+    // Note: handler chama _emitSkip (que envia {ok:true,skipped,reason,sport,evN,cap,matchId})
+    // + sendJson duplicado depois (no-op porque headers já enviados). Resposta visível
+    // ao client vem do _emitSkip. NÃO assertar shape específico do segundo sendJson.
+    await t.test('ev_sanity_cap: ev=75 não-shadow → skipped reason=ev_sanity_cap', async () => {
+      const r = await httpJson(port, 'POST', '/record-tip?sport=dota2', {
+        matchId: 'test_dota2_ev_high_' + Date.now(),
+        eventName: 'Test League',
+        p1: 'EVAlpha',
+        p2: 'EVBeta',
+        tipParticipant: 'EVAlpha',
+        odds: 2.5,
+        ev: 75, // > cap 50
+      }, AUTH);
+      t.assert(r.status === 200, `expected 200 (skipped), got ${r.status}`);
+      t.assert(r.body.skipped === true, `expected skipped=true, got ${JSON.stringify(r.body)}`);
+      t.assert(r.body.reason === 'ev_sanity_cap', `expected reason=ev_sanity_cap, got ${r.body.reason}`);
+      t.assert(r.body.cap === 50, `expected cap=50 (default RECORD_TIP_EV_CAP_PCT), got ${r.body.cap}`);
+    });
+
+    // ─── Test 7b: ev_sanity_cap bypassed for shadow tip ────────────────────
+    // Mesma EV alta + isShadow=true → NÃO deve cair em ev_sanity_cap.
+    await t.test('ev_sanity_cap: isShadow=true bypassa cap mesmo com ev=75', async () => {
+      const r = await httpJson(port, 'POST', '/record-tip?sport=dota2', {
+        matchId: 'test_dota2_ev_shadow_' + Date.now(),
+        eventName: 'Test League',
+        p1: 'EVShadowA',
+        p2: 'EVShadowB',
+        tipParticipant: 'EVShadowA',
+        odds: 2.5,
+        ev: 75,
+        isShadow: true,
+      }, AUTH);
+      // NÃO deve ser ev_sanity_cap (pode ser outra reason ou ok). Asserta apenas
+      // que reason ≠ ev_sanity_cap — comprova bypass.
+      t.assert(r.status >= 200 && r.status < 500, `expected non-5xx, got ${r.status}`);
+      t.assert(r.body.reason !== 'ev_sanity_cap', `shadow should bypass ev_sanity_cap, got reason=${r.body.reason}`);
+    });
+
+    // ─── Test 7c: sequential duplicate POST → segundo dedup ────────────────
+    // 2 POSTs serializados com mesmo matchId+pick. Primeiro INSERT, segundo
+    // detecta via recentDupe SELECT (L24286+) e retorna skipped=true reason=duplicate
+    // OU race-loser 409 (caso o race se materialize em sqlite).
+    await t.test('sequential duplicate POST → segundo skipped (não crasha)', async () => {
+      const body = {
+        matchId: 'test_dota2_dupe_seq_' + Date.now(),
+        eventName: 'Dedup League',
+        p1: 'DupeA',
+        p2: 'DupeB',
+        tipParticipant: 'DupeA',
+        tipTeam: 'DupeA',
+        odds: 1.85,
+        ev: 8.5,
+        modelP: 0.62,
+        confidence: 'MEDIA',
+        stakeUnits: 1.0,
+      };
+      const r1 = await httpJson(port, 'POST', '/record-tip?sport=dota2', body, AUTH);
+      const r2 = await httpJson(port, 'POST', '/record-tip?sport=dota2', body, AUTH);
+      t.assert(r1.status >= 200 && r1.status < 500, `r1: expected non-5xx, got ${r1.status}`);
+      t.assert(r2.status >= 200 && r2.status < 500, `r2: expected non-5xx, got ${r2.status}`);
+      // r2 deve ter skipped=true OU status 409. Não pode crashar (5xx) nem
+      // duplicar INSERT (caso aceitasse, integration semantic quebrada).
+      const r2Body = JSON.stringify(r2.body);
+      t.assert(
+        r2.body.skipped === true || r2.status === 409,
+        `r2 should be skipped or 409 race, got status=${r2.status} body=${r2Body}`
+      );
+    });
+
     // ─── Test 7: UNIQUE constraint race → 409 sem crash (P0 fix 593607a) ──
     // Disparar 2 POSTs simultâneos com mesma matchId. Um ganha race + insert
     // OK; outro pega UNIQUE constraint → catch fire → 409 retornado.
