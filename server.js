@@ -7744,6 +7744,10 @@ setInterval(load, 10000);
           try { stmts.insertMatchResultSource.run(rawId, 'dota2', 'pandascore', t1?.name || '', t2?.name || '', winner, _mapScore); } catch (_) {}
           sendJson(res, { matchId: rawId, winner, resolved: true, map: mapN, score: _mapScore || null });
         } else {
+          // 2026-05-15: log silent fails — pre-fix /dota-result returned resolved=false
+          // silently. Memory project_tip_emission_audit_2026_05_15 flagged Dota2
+          // single-source PandaScore risk. Future fallback design needs this data.
+          log('INFO', 'DOTA-SETTLE', `map ${mapN} no_winner — t1=${t1?.name || '?'} t2=${t2?.name || '?'} game_id=${game.id || '?'} winner_data=${JSON.stringify(game.winner || null).slice(0, 80)}`);
           sendJson(res, { matchId: rawId, resolved: false, map: mapN });
         }
         return;
@@ -7756,9 +7760,11 @@ setInterval(load, 10000);
         try { stmts.insertMatchResultSource.run(rawId, 'dota2', 'pandascore', t1?.name || '', t2?.name || '', winner, _psSeriesScore(m)); } catch (_) {}
         sendJson(res, { matchId: rawId, winner, resolved: true });
       } else {
+        log('INFO', 'DOTA-SETTLE', `series no_winner — t1=${t1?.name || '?'} t2=${t2?.name || '?'} status=${m.status || '?'} end_at=${m.end_at || '?'} ps_id=${psId}`);
         sendJson(res, { matchId: rawId, resolved: false });
       }
     } catch(e) {
+      log('WARN', 'DOTA-SETTLE', `error settling ${rawId}: ${e.message}`);
       sendJson(res, { matchId: rawId, resolved: false, error: e.message });
     }
     return;
