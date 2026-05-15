@@ -1714,6 +1714,10 @@ setInterval(() => {
     // global._memCritical. Escreve state em arquivo shared pra outro processo
     // poder consultar via isAnyProcessCritical().
     try { require('./lib/mem-shared').writeMemState('bot', isCrit, rssMb); } catch (_) {}
+    // 2026-05-15 observability: snapshot detalhado (V8 stats + uptime + heap)
+    // pra /admin/memory-breakdown consumir e diagnose restart loop em sessões
+    // futuras. Cheap ~200B/15s.
+    try { require('./lib/bot-mem-heartbeat').writeBotMemSnapshot(); } catch (_) {}
   } catch (_) {}
 }, 15 * 1000).unref?.();  // 60s→15s: RSS pode subir 30+MB/tick com 244 fb + 267 pin caches
 

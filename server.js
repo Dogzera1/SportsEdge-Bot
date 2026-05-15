@@ -10667,6 +10667,8 @@ setInterval(load, 10000);
       const ml = (require('./lib/utils').getMetricsLite && require('./lib/utils').getMetricsLite()) || {};
       let crossProcess = [];
       try { crossProcess = require('./lib/mem-shared').listProcessStates(); } catch (_) {}
+      let botSnapshot = null;
+      try { botSnapshot = require('./lib/bot-mem-heartbeat').readBotMemSnapshot(); } catch (_) {}
       sendJson(res, {
         ok: true,
         ts: new Date().toISOString(),
@@ -10690,7 +10692,8 @@ setInterval(load, 10000);
           memCritical: !!global._memCritical,
           memCriticalSince: global._memCriticalSince || null,
         },
-        cross_process: crossProcess, // bot.js mem state from shared file
+        cross_process: crossProcess, // bot.js mem state critical signal
+        bot_snapshot: botSnapshot, // bot.js full mem snapshot (rss + V8 + uptime, _ageMs)
         caches: {
           httpCache: ml.httpCache || null,
           liveSnapshot: { hasResult: !!_liveSnapshotCache.result, age_s: _liveSnapshotCache.ts ? Math.round((Date.now() - _liveSnapshotCache.ts) / 1000) : null },
