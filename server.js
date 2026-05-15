@@ -10746,6 +10746,45 @@ setInterval(load, 10000);
     return;
   }
 
+  // ── /admin/db-stats: tamanho DB + breakdown per table (row counts).
+  // Resposta ao alert db_size_high recorrente. Identifica candidato
+  // pra archive/cleanup (memory project_audit_completo_2026_05_06 ~155MB
+  // → hoje 332+ MB). VACUUM apenas reclama páginas pós-DELETE, não reduz
+  // sem cleanup primeiro.
+  // GET /admin/db-stats?key=<ADMIN_KEY>
+  if (p === '/admin/db-stats' && (req.method === 'GET' || req.method === 'POST')) {
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    try {
+      const pageSize = db.pragma('page_size', { simple: true });
+      const pageCount = db.pragma('page_count', { simple: true });
+      const freelistCount = db.pragma('freelist_count', { simple: true });
+      const totalBytes = pageSize * pageCount;
+      const freelistBytes = pageSize * freelistCount;
+      const tables = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name`).all();
+      const byTable = [];
+      for (const t of tables) {
+        try {
+          const row = db.prepare(`SELECT COUNT(*) AS n FROM "${t.name}"`).get();
+          byTable.push({ name: t.name, rows: row.n });
+        } catch (_) { byTable.push({ name: t.name, rows: null, error: 'count_failed' }); }
+      }
+      byTable.sort((a, b) => (b.rows || 0) - (a.rows || 0));
+      sendJson(res, {
+        ok: true,
+        ts: new Date().toISOString(),
+        total_size_mb: Math.round(totalBytes / 1048576 * 10) / 10,
+        page_size_b: pageSize,
+        page_count: pageCount,
+        freelist_pages: freelistCount,
+        freelist_mb: Math.round(freelistBytes / 1048576 * 10) / 10,
+        reclaimable_via_vacuum_mb: Math.round(freelistBytes / 1048576 * 10) / 10,
+        tables: byTable,
+      });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
   // ── /admin/forensics: post-mortem completo de uma tip específica.
   // Combina row da tips + tip_context_json parsed + match_result + voided
   // entry (se houver) + tip_factor_log + shadow row equivalente (se MT).
