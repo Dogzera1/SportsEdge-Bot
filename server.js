@@ -7248,8 +7248,14 @@ const server = http.createServer(async (req, res) => {
       if (botGauges.db_integrity_ok === 0) {
         alerts.push({ id: 'db_integrity_failed', severity: 'critical', msg: 'PRAGMA integrity_check retornou erro — investigar urgente' });
       }
-      if (Number.isFinite(botGauges.db_size_mb) && botGauges.db_size_mb > 300) {
-        alerts.push({ id: 'db_size_high', severity: 'warning', msg: `DB ${botGauges.db_size_mb}MB (>300MB threshold) — considerar VACUUM ou archive de tips antigas` });
+      // 2026-05-15: threshold hardcoded 300MB era false alarm (DB cresceu
+      // organicamente pra 332MB, Volume cost Railway = $0.09/mês — negligível).
+      // Bump default 300→500MB + env override DB_SIZE_ALERT_MB. /admin/db-stats
+      // (deployed mesma sessão) revelou freelist=0 → VACUUM não ajudaria sem
+      // archive prior. Threshold 500MB ainda cobre runaway growth real.
+      const _dbSizeAlertMb = parseInt(process.env.DB_SIZE_ALERT_MB || '500', 10);
+      if (Number.isFinite(botGauges.db_size_mb) && botGauges.db_size_mb > _dbSizeAlertMb) {
+        alerts.push({ id: 'db_size_high', severity: 'warning', msg: `DB ${botGauges.db_size_mb}MB (>${_dbSizeAlertMb}MB threshold) — considerar archive antigo + VACUUM (consulte /admin/db-stats)` });
       }
       // Restart loop: usa rapid_boot_count_1h (deploys de dev não acionam) + uptime curto pra
       // só alertar quando bot ainda está fragilizado. Threshold: 5+ boots/1h E uptime atual <10min.
