@@ -23256,10 +23256,18 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
       }, scheduleCs._nextMs || 45 * 1000);
     })();
   }
+  // 2026-05-15 Sprint 4 #3: wrap settle path com _wrapCron pra overlap
+  // protection + heartbeat tracking. settleCompletedTips faz heavy DB writes
+  // (bankroll update + tip result + propagator); se cycle anterior > interval,
+  // next call paralela cause race em bankroll/tips updates. _wrapCron skip
+  // overlap + log heartbeat per cycle.
+  const _settleWrapped = _wrapCron('settle_completed', settleCompletedTips);
+  const _alertsWrapped = _wrapCron('check_pending_alerts', checkPendingTipsAlerts);
+  const _dailyWrapped = _wrapCron('daily_summary', sendDailySummary);
   setInterval(() => {
-    settleCompletedTips().catch(e => log('ERROR', 'SETTLE', e.message));
-    checkPendingTipsAlerts().catch(e => log('WARN', 'ALERTS', e.message));
-    sendDailySummary().catch(e => log('WARN', 'DAILY', e.message));
+    _settleWrapped().catch(e => log('ERROR', 'SETTLE', e.message));
+    _alertsWrapped().catch(e => log('WARN', 'ALERTS', e.message));
+    _dailyWrapped().catch(e => log('WARN', 'DAILY', e.message));
   }, SETTLEMENT_INTERVAL);
 
   // Auto-tune de pesos ML: recalcWeights roda 1x/semana (segunda às 06:00 UTC).
