@@ -246,6 +246,40 @@ module.exports = async function runTests(t) {
       );
     });
 
+    // ─── Test 7d: temporal_gate_post_match — match já resolved > slack ──
+    // server.js L24003-24018: query match_results WHERE match_id = ?; se
+    // resolved_at > 60s no passado → skip reason=temporal_gate_post_match.
+    // Test usa SEGUNDA conexão SQLite (WAL allows multi-conn) pra seed
+    // direto. /admin/upsert-match-result usa DEFAULT resolved_at=now,
+    // não satisfaz gate. INSERT explícito com resolved_at antigo dispara.
+    await t.test('temporal_gate_post_match: match resolved >60s atrás → rejected', async () => {
+      const Database = require('better-sqlite3');
+      const matchId = 'test_dota2_temporal_' + Date.now();
+      const seedDb = new Database(tmpDb, { timeout: 5000 });
+      try {
+        seedDb.prepare(`
+          INSERT OR REPLACE INTO match_results
+            (match_id, game, team1, team2, winner, final_score, league, resolved_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(matchId, 'dota2', 'TemporalA', 'TemporalB', 'TemporalA', 'Bo3 2-0', 'Test League', '2024-01-01 00:00:00');
+      } finally {
+        seedDb.close();
+      }
+      const r = await httpJson(port, 'POST', '/record-tip?sport=dota2', {
+        matchId,
+        eventName: 'Test League',
+        p1: 'TemporalA',
+        p2: 'TemporalB',
+        tipParticipant: 'TemporalA',
+        odds: 1.85,
+        ev: 8.5,
+      }, AUTH);
+      t.assert(r.status === 200, `expected 200 (skipped), got ${r.status} body=${JSON.stringify(r.body)}`);
+      t.assert(r.body.skipped === true, `expected skipped=true, got ${JSON.stringify(r.body)}`);
+      t.assert(r.body.reason === 'temporal_gate_post_match', `expected reason=temporal_gate_post_match, got ${r.body.reason}`);
+      t.assert(typeof r.body.ageS === 'number' || typeof r.body.age_s === 'number', `expected age in seconds, got ${JSON.stringify(r.body)}`);
+    });
+
     // ─── Test 7: UNIQUE constraint race → 409 sem crash (P0 fix 593607a) ──
     // Disparar 2 POSTs simultâneos com mesma matchId. Um ganha race + insert
     // OK; outro pega UNIQUE constraint → catch fire → 409 retornado.
