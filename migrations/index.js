@@ -2922,6 +2922,27 @@ const migrations = [
 ];
 
 function applyMigrations(db) {
+  // 2026-05-15 audit P2: validar order ascending dos IDs. applyMigrations itera
+  // o array por ORDEM DE DECLARAÇÃO (não por ID lex sort) — se '082_...' for
+  // declarada antes de '081_...', em DBs frescos 082 aplica primeiro. Hoje
+  // migrations 074/082/088 estão out-of-order; nenhuma quebra ativa (idempotency
+  // cobre) mas é landmine pra future migrations com dependências cross-migration.
+  // Warn não-fatal — orienta cleanup, não bloqueia boot.
+  try {
+    let prevId = '';
+    const outOfOrder = [];
+    for (const m of migrations) {
+      if (typeof m.id !== 'string') continue;
+      if (prevId && m.id < prevId) outOfOrder.push(`${m.id} declared after ${prevId}`);
+      prevId = m.id;
+    }
+    if (outOfOrder.length > 0) {
+      console.warn(`[migrations] WARN: ${outOfOrder.length} ID(s) out-of-order in declaration:`);
+      for (const o of outOfOrder.slice(0, 5)) console.warn(`  - ${o}`);
+      if (outOfOrder.length > 5) console.warn(`  ...+${outOfOrder.length - 5} more`);
+    }
+  } catch (_) { /* validation best-effort, não bloqueia */ }
+
   db.exec(`
     CREATE TABLE IF NOT EXISTS schema_migrations (
       id TEXT PRIMARY KEY,

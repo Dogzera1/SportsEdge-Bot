@@ -18862,21 +18862,37 @@ load();
     const sport = String(parsed.query.sport || '').trim().toLowerCase();
     const market = String(parsed.query.market || '').trim();
     const side = parsed.query.side ? String(parsed.query.side).trim().toLowerCase() : null;
+    // 2026-05-15 audit P2 (granularidade): league opt pra disable cirúrgico
+    // (ex: ATP Challenger Mauthausen sem afetar resto da ATP Challenger). Era
+    // sport+market+side global → CLAUDE.md P1 viola monoblock. /mt-restore
+    // já suporta league filter; simétrico aqui.
+    const league = parsed.query.league ? String(parsed.query.league).trim() : null;
     const reason = String(parsed.query.reason || 'manual').trim();
     if (!sport || !market) { sendJson(res, { ok: false, error: 'missing sport or market' }, 400); return; }
     try {
       const ts = new Date().toISOString();
-      if (side) {
+      // INSERT OR REPLACE — dimensões nullables (side, league) determinam scope.
+      // 4 combinações: (sport,market) global / +side / +league / +side+league.
+      if (side && league) {
+        db.prepare(`INSERT OR REPLACE INTO market_tips_runtime_state
+          (sport, market, side, league, disabled, source, reason, updated_at)
+          VALUES (?, ?, ?, ?, 1, 'manual', ?, ?)`).run(sport, market, side, league, reason, ts);
+      } else if (side) {
         db.prepare(`INSERT OR REPLACE INTO market_tips_runtime_state
           (sport, market, side, disabled, source, reason, updated_at)
           VALUES (?, ?, ?, 1, 'manual', ?, ?)`).run(sport, market, side, reason, ts);
+      } else if (league) {
+        db.prepare(`INSERT OR REPLACE INTO market_tips_runtime_state
+          (sport, market, league, disabled, source, reason, updated_at)
+          VALUES (?, ?, ?, 1, 'manual', ?, ?)`).run(sport, market, league, reason, ts);
       } else {
         db.prepare(`INSERT OR REPLACE INTO market_tips_runtime_state
           (sport, market, disabled, source, reason, updated_at)
           VALUES (?, ?, 1, 'manual', ?, ?)`).run(sport, market, reason, ts);
       }
-      log('INFO', 'MT-DISABLE', `${sport}/${market}${side ? '/' + side : ''} disabled (${reason})`);
-      sendJson(res, { ok: true, sport, market, side, reason, applied_at: ts,
+      const scope = [sport, market, side, league].filter(Boolean).join('/');
+      log('INFO', 'MT-DISABLE', `${scope} disabled (${reason})`);
+      sendJson(res, { ok: true, sport, market, side, league, reason, applied_at: ts,
         note: 'bot.js precisa estar com MT_LEAK_GUARD_AUTO=true (default true) — Map _marketTipsDisabledRuntime é repopulada na próxima execução do cron leak guard (1h) ou no próximo restart. Pra applicar imediato, restart o bot.' });
     } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
     return;
