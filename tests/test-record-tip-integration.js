@@ -419,6 +419,25 @@ module.exports = async function runTests(t) {
   // Pattern reutilizável pra paths env-gated: ml_disabled_per_sport,
   // ml_not_in_tier1_leagues, match_stop_loss, time_of_day_blocked. Cada um
   // requer env distinto no boot, então cada test instancia subprocess próprio.
+  // Helper: spawn subprocess com env override + run single POST. Retorna response.
+  async function withEnvServer(envOverride, doRequest) {
+    const tmpDbX = path.join(os.tmpdir(), `test-rt-env-${Date.now()}-${Math.random().toString(36).slice(2,8)}.db`);
+    const portX = 30000 + Math.floor(Math.random() * 10000);
+    const envX = { ...env, DB_PATH: tmpDbX, PORT: String(portX), ...envOverride };
+    const procX = spawn('node', ['server.js'], { env: envX, cwd: REPO_ROOT, stdio: ['ignore', 'pipe', 'pipe'] });
+    procX.stdout.on('data', () => {});
+    procX.stderr.on('data', () => {});
+    try {
+      await waitHealth(portX, HEALTH_TIMEOUT_MS);
+      return await doRequest(portX);
+    } finally {
+      try { procX.kill(); } catch (_) {}
+      try { fs.unlinkSync(tmpDbX); } catch (_) {}
+      try { fs.unlinkSync(tmpDbX + '-shm'); } catch (_) {}
+      try { fs.unlinkSync(tmpDbX + '-wal'); } catch (_) {}
+    }
+  }
+
   await t.test('ml_disabled_per_sport: DOTA2_ML_DISABLED=true + HARD_REJECT → rejected', async () => {
     const tmpDb2 = path.join(os.tmpdir(), `test-rt-mldis-${Date.now()}.db`);
     const port2 = 30000 + Math.floor(Math.random() * 10000);
@@ -454,5 +473,31 @@ module.exports = async function runTests(t) {
       try { fs.unlinkSync(tmpDb2 + '-shm'); } catch (_) {}
       try { fs.unlinkSync(tmpDb2 + '-wal'); } catch (_) {}
     }
+  });
+
+  // ─── ml_not_in_tier1_leagues via env DOTA2_ML_TIER1_LEAGUES csv ────────
+  // server.js L24370-24383: se env <SPORT>_ML_TIER1_LEAGUES set + eventName
+  // NÃO substring-match nenhuma liga csv → _emitSkip('ml_not_in_tier1_leagues').
+  // HARD_REJECT bypassa _autoRouteToShadow.
+  await t.test('ml_not_in_tier1_leagues: eventName fora csv DOTA2_ML_TIER1_LEAGUES → rejected', async () => {
+    const r = await withEnvServer(
+      {
+        DOTA2_ML_TIER1_LEAGUES: 'the international,esl one,riyadh masters',
+        ML_TIER1_HARD_REJECT: 'true',
+      },
+      (portX) => httpJson(portX, 'POST', '/record-tip?sport=dota2', {
+        matchId: 'test_dota2_tier1_' + Date.now(),
+        eventName: 'Some Random Regional League',
+        p1: 'Tier1A',
+        p2: 'Tier1B',
+        tipParticipant: 'Tier1A',
+        odds: 1.85,
+        ev: 8.5,
+      }, { 'x-admin-key': 'test' })
+    );
+    t.assert(r.status === 200, `expected 200 (skipped), got ${r.status} body=${JSON.stringify(r.body)}`);
+    t.assert(r.body.skipped === true, `expected skipped=true, got ${JSON.stringify(r.body)}`);
+    t.assert(r.body.reason === 'ml_not_in_tier1_leagues', `expected reason=ml_not_in_tier1_leagues, got ${r.body.reason}`);
+    t.assert(r.body.league === 'Some Random Regional League', `expected league echo, got ${r.body.league}`);
   });
 };
