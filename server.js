@@ -4975,8 +4975,18 @@ const server = http.createServer(async (req, res) => {
 
       if (!Array.isArray(live) || !live.length) { sendJson(res, { hasLiveStats: false, error: 'sem partidas ao vivo', _source: liveSource }); return; }
 
+      // 2026-05-15: expand alias antes de normName. Pinnacle usa abbreviations
+      // ("BB Team", "NaVi") enquanto OpenDota canonical é completo ("BetBoom
+      // Team", "Natus Vincere"). Sem alias, includes-based match falha.
+      // Case observado: pin_1630783559 PlayTime vs BB Team @ 2.2/1.625 com
+      // OpenDota live (PlayTime vs BetBoom Team) mas /opendota-live retornava
+      // hasLiveStats=false. Fix unlocks live stat enrichment pra
+      // Pinnacle-anchored matches com abbreviations.
+      let _expandAlias;
+      try { _expandAlias = require('./lib/dota-team-aliases').expandAlias; }
+      catch (_) { _expandAlias = (s) => s; }
       const normName = (s) => String(s||'').toLowerCase().replace(/[^a-z0-9]/g,'');
-      const n1 = normName(t1), n2 = normName(t2);
+      const n1 = normName(_expandAlias(t1)), n2 = normName(_expandAlias(t2));
       const nameMatches = (a, b) => {
         // Ambos lados precisam ter ≥3 chars para evitar false-positive
         // (string vazia sempre está "contida", casaria partida errada)
