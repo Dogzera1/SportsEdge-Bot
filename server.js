@@ -17755,22 +17755,26 @@ load();
     const reason = String(parsed.query.reason || 'admin void batch').slice(0, 200);
     try {
       const placeholders = ids.map(() => '?').join(',');
+      // 2026-05-15 audit P1: hoist db.prepare fora do loop (re-compile era O(N)
+      // batched em transaction; better-sqlite3 cacheia SQL string mas overhead
+      // de lookup permanece em batches grandes).
+      const voidStmt = db.prepare(`UPDATE tips SET result='void', settled_at=datetime('now'), profit_reais=0 WHERE id=?`);
+      const auditStmt = db.prepare(`
+        INSERT INTO tip_settlement_audit (tip_id, sport, prev_result, new_result, prev_profit_reais, new_profit_reais, actor, reason, source)
+        VALUES (?, ?, ?, 'void', ?, 0, 'admin', ?, '/admin/void-tips-batch')
+      `);
+      const bankStmt = db.prepare(`UPDATE bankroll SET current_banca = round(current_banca - ?, 2), updated_at=datetime('now') WHERE sport = ?`);
+      const selectStmt = db.prepare(`SELECT id, sport, result, profit_reais FROM tips WHERE id IN (${placeholders})`);
       const out = db.transaction(() => {
-        const rows = db.prepare(`SELECT id, sport, result, profit_reais FROM tips WHERE id IN (${placeholders})`).all(...ids);
+        const rows = selectStmt.all(...ids);
         let voided = 0;
         let bankrollDelta = {};
         for (const row of rows) {
           if (row.result === 'void') continue;
-          db.prepare(`UPDATE tips SET result='void', settled_at=datetime('now'), profit_reais=0 WHERE id=?`).run(row.id);
-          try {
-            db.prepare(`
-              INSERT INTO tip_settlement_audit (tip_id, sport, prev_result, new_result, prev_profit_reais, new_profit_reais, actor, reason, source)
-              VALUES (?, ?, ?, 'void', ?, 0, 'admin', ?, '/admin/void-tips-batch')
-            `).run(row.id, row.sport, row.result, row.profit_reais ?? null, reason);
-          } catch (_) {}
+          voidStmt.run(row.id);
+          try { auditStmt.run(row.id, row.sport, row.result, row.profit_reais ?? null, reason); } catch (_) {}
           if (Number.isFinite(row.profit_reais) && row.profit_reais !== 0) {
-            db.prepare(`UPDATE bankroll SET current_banca = round(current_banca - ?, 2), updated_at=datetime('now') WHERE sport = ?`)
-              .run(row.profit_reais, row.sport);
+            bankStmt.run(row.profit_reais, row.sport);
             bankrollDelta[row.sport] = (bankrollDelta[row.sport] || 0) + (-row.profit_reais);
           }
           voided++;
@@ -18388,17 +18392,19 @@ load();
       const T2 = "lower(REPLACE(REPLACE(REPLACE(REPLACE(team2,' ',''),'-',''),'.',''),'''',''))";
       const _norm = s => String(s||'').toLowerCase().replace(/[\s\-.']/g, '');
       const suspects = [];
+      // 2026-05-15 audit P1: hoist prepare fora do loop (re-compile per mtSettled row).
+      const shadowSelectStmt = db.prepare(`
+        SELECT id, market, side, result, settled_at
+        FROM market_tips_shadow
+        WHERE sport = ?
+          AND ((${T1} = ? AND ${T2} = ?) OR (${T1} = ? AND ${T2} = ?))
+          AND created_at >= datetime(?, '-7 days')
+          AND created_at <= datetime(?, '+1 days')
+        ORDER BY id DESC LIMIT 5
+      `);
       for (const t of mtSettled) {
         const n1 = _norm(t.participant1), n2 = _norm(t.participant2);
-        const shadow = db.prepare(`
-          SELECT id, market, side, result, settled_at
-          FROM market_tips_shadow
-          WHERE sport = ?
-            AND ((${T1} = ? AND ${T2} = ?) OR (${T1} = ? AND ${T2} = ?))
-            AND created_at >= datetime(?, '-7 days')
-            AND created_at <= datetime(?, '+1 days')
-          ORDER BY id DESC LIMIT 5
-        `).all(t.sport, n1, n2, n2, n1, t.sent_at, t.sent_at);
+        const shadow = shadowSelectStmt.all(t.sport, n1, n2, n2, n1, t.sent_at, t.sent_at);
         const anyPending = shadow.some(s => s.result == null);
         const anySettled = shadow.some(s => s.result === 'win' || s.result === 'loss');
         const noShadow = shadow.length === 0;
@@ -18414,23 +18420,23 @@ load();
       let reverted = 0;
       const reverts = [];
       if (apply) {
+        // 2026-05-15 audit P1: hoist prepare fora do loop (era re-prepare per suspect).
+        const revertTipStmt = db.prepare(`UPDATE tips SET result = NULL, profit_reais = NULL, settled_at = NULL WHERE id = ?`);
+        const revertBankStmt = db.prepare(`UPDATE bankroll SET current_banca = round(current_banca - ?, 2), updated_at = datetime('now') WHERE sport = ?`);
+        const auditRevertStmt = db.prepare(`
+          INSERT INTO tip_settlement_audit (tip_id, sport, prev_result, new_result, prev_profit_reais, new_profit_reais, actor, reason, source)
+          VALUES (?, ?, ?, NULL, ?, NULL, ?, ?, ?)
+        `);
         for (const t of suspects) {
           // 2026-05-06: tx atômica + delta-update (anti-race com /settle).
           const profitToRevert = Number(t.profit_reais) || 0;
           db.transaction(() => {
-            const r = db.prepare(`UPDATE tips SET result = NULL, profit_reais = NULL, settled_at = NULL WHERE id = ?`)
-              .run(t.id);
+            const r = revertTipStmt.run(t.id);
             if (r.changes > 0 && profitToRevert !== 0) {
-              db.prepare(`UPDATE bankroll SET current_banca = round(current_banca - ?, 2), updated_at = datetime('now') WHERE sport = ?`)
-                .run(profitToRevert, t.sport);
+              revertBankStmt.run(profitToRevert, t.sport);
             }
           })();
-          try {
-            db.prepare(`
-              INSERT INTO tip_settlement_audit (tip_id, sport, prev_result, new_result, prev_profit_reais, new_profit_reais, actor, reason, source)
-              VALUES (?, ?, ?, NULL, ?, NULL, ?, ?, ?)
-            `).run(t.id, t.sport, t.result || null, t.profit_reais ?? null, 'admin', 'mt_settle_audit_revert', '/admin/mt-settle-audit');
-          } catch (_) {}
+          try { auditRevertStmt.run(t.id, t.sport, t.result || null, t.profit_reais ?? null, 'admin', 'mt_settle_audit_revert', '/admin/mt-settle-audit'); } catch (_) {}
           reverts.push({ id: t.id, sport: t.sport, prev_result: t.result, reverted_profit: t.profit_reais });
           reverted++;
           log('WARN', 'MT-AUDIT', `revert id=${t.id} ${t.sport} ${t.market_type} ${t.participant1} vs ${t.participant2}: ${t.result} profit=${t.profit_reais} → pending (shadow=${t.shadow_pending ? 'pending' : 'none'})`);
