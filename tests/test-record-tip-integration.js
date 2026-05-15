@@ -341,6 +341,41 @@ module.exports = async function runTests(t) {
       t.assert(r.body.reason === 'voided_odds_wrong_match', `expected reason=voided_odds_wrong_match, got ${r.body.reason}`);
     });
 
+    // ─── Test 7g: voided_odds_wrong_pair_recent ────────────────────────────
+    // server.js L24674-24679: stmts.isVoidedPairRecent SELECT 1 FROM voided_tips
+    // WHERE sport=? AND market_type=? AND (p1_norm,p2_norm) OR (p2_norm,p1_norm)
+    // AND created_at >= now-90 days.
+    // Seed: INSERT voided_tips com pair + market_type=ML (default) + match_id
+    // DIFERENTE do POST (pra wrong_match não disparar antes).
+    await t.test('voided_odds_wrong_pair_recent: pair previamente voidada → rejected', async () => {
+      const Database = require('better-sqlite3');
+      const p1Norm = 'pairvoida'; // normalized lowercase, sem espaços
+      const p2Norm = 'pairvoidb';
+      const seedDb = new Database(tmpDb, { timeout: 5000 });
+      try {
+        seedDb.prepare(`
+          INSERT INTO voided_tips (sport, match_id, p1_norm, p2_norm, market_type, reason)
+          VALUES (?, ?, ?, ?, ?, ?)
+        `).run('dota2', 'test_voided_pair_seed_' + Date.now(), p1Norm, p2Norm, 'ML', 'pair_test_seed');
+      } finally {
+        seedDb.close();
+      }
+      // POST com matchId NOVO (não conflita com wrong_match) mas pair MATCH.
+      // Note: handler norm() lowercase + strip — então p1='PairVoidA' vira 'pairvoida'.
+      const r = await httpJson(port, 'POST', '/record-tip?sport=dota2', {
+        matchId: 'test_dota2_pair_NEW_' + Date.now(),
+        eventName: 'Pair Void Test League',
+        p1: 'PairVoidA',
+        p2: 'PairVoidB',
+        tipParticipant: 'PairVoidA',
+        odds: 1.85,
+        ev: 8.5,
+      }, AUTH);
+      t.assert(r.status === 200, `expected 200 (skipped), got ${r.status} body=${JSON.stringify(r.body)}`);
+      t.assert(r.body.skipped === true, `expected skipped=true, got ${JSON.stringify(r.body)}`);
+      t.assert(r.body.reason === 'voided_odds_wrong_pair_recent', `expected reason=voided_odds_wrong_pair_recent, got ${r.body.reason}`);
+    });
+
     // ─── Test 7: UNIQUE constraint race → 409 sem crash (P0 fix 593607a) ──
     // Disparar 2 POSTs simultâneos com mesma matchId. Um ganha race + insert
     // OK; outro pega UNIQUE constraint → catch fire → 409 retornado.
