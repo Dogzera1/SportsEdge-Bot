@@ -494,7 +494,23 @@ const migrations = [
     },
   },
   {
-    id: '029_dota_hero_stats_extend',
+    id: '028_tips_archived_flag',
+    up(db) {
+      if (!tableExists(db, 'tips')) return;
+      addColumnIfMissing(db, 'tips', 'archived', 'archived INTEGER DEFAULT 0');
+      // Tips até 2026-04-16 são "contaminadas" (bugs de dedup/Kelly/dados antigos).
+      // Marca como arquivadas pra não poluírem dashboard/ROI/métricas.
+      db.prepare(`UPDATE tips SET archived = 1 WHERE date(sent_at) <= '2026-04-16'`).run();
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_tips_archived_sport ON tips(archived, sport);`);
+    },
+  },
+  {
+    // 2026-05-15 Sprint 3: renomeado de '029_dota_hero_stats_extend' →
+    // '028a_dota_hero_stats_extend' pra eliminar dup prefix 029 (era 029
+    // antes de 028_tips_archived_flag em declaration order + outro 029
+    // depois). Backward-compat via _ID_RENAMES em applyMigrations: prod DBs
+    // que aplicaram o ID antigo são marcados como already-applied pro novo.
+    id: '028a_dota_hero_stats_extend',
     up(db) {
       // Table já existe de versão anterior — adiciona columns faltantes + index.
       if (!tableExists(db, 'dota_hero_stats')) {
@@ -519,17 +535,6 @@ const migrations = [
       addColumnIfMissing(db, 'dota_hero_stats', 'attack_type', 'attack_type TEXT');
       addColumnIfMissing(db, 'dota_hero_stats', 'source', "source TEXT DEFAULT 'opendota'");
       db.exec(`CREATE INDEX IF NOT EXISTS idx_dota_hero_stats_name ON dota_hero_stats(localized_name);`);
-    },
-  },
-  {
-    id: '028_tips_archived_flag',
-    up(db) {
-      if (!tableExists(db, 'tips')) return;
-      addColumnIfMissing(db, 'tips', 'archived', 'archived INTEGER DEFAULT 0');
-      // Tips até 2026-04-16 são "contaminadas" (bugs de dedup/Kelly/dados antigos).
-      // Marca como arquivadas pra não poluírem dashboard/ROI/métricas.
-      db.prepare(`UPDATE tips SET archived = 1 WHERE date(sent_at) <= '2026-04-16'`).run();
-      db.exec(`CREATE INDEX IF NOT EXISTS idx_tips_archived_sport ON tips(archived, sport);`);
     },
   },
   {
@@ -2978,6 +2983,16 @@ function applyMigrations(db) {
   const applied = new Set(
     db.prepare('SELECT id FROM schema_migrations ORDER BY applied_at').all().map(r => r.id)
   );
+
+  // 2026-05-15 Sprint 3: ID renames pra cleanup de dup prefixes. Prod DBs
+  // que aplicaram o ID antigo são automaticamente considerados applied pro
+  // ID novo — evita re-execução de migration idempotente já feita.
+  const _ID_RENAMES = {
+    '028a_dota_hero_stats_extend': '029_dota_hero_stats_extend',
+  };
+  for (const [newId, oldId] of Object.entries(_ID_RENAMES)) {
+    if (applied.has(oldId)) applied.add(newId);
+  }
 
   const pending = migrations.filter(m => !applied.has(m.id));
   if (pending.length === 0) return { applied: 0 };
