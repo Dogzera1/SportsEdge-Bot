@@ -9343,6 +9343,15 @@ async function _runLolAiShadow(ctx) {
       try { _metrics.incr('ai_shadow_invalid', { sport: 'lol' }); } catch (_) {}
       return;
     }
+    // 2026-05-15: AI tips com EV<0 = DeepSeek alucinando edge em pick com odds
+    // piores que sua propria p_model. Polui A/B ROI ml-only vs ai-added (caso
+    // Francesinhas @ 1.22 EV=-6.1% conf=ALTA). modelPPick continua disponivel
+    // pra calib refit via outcomes — não dependemos do shadow tip pra isso.
+    if (Number.isFinite(tipEvNum) && tipEvNum < 0) {
+      try { _metrics.incr('ai_shadow_neg_ev', { sport: 'lol' }); } catch (_) {}
+      log('INFO', 'AI-SHADOW', `skip ${tipTeam} @ ${tipOdd} EV=${tipEvNum}% conf=${tipConfRaw} (EV<0 — AI hallucinated edge)`);
+      return;
+    }
     const pickSide = norm(tipTeam) === norm(match.team1) ? 't1'
       : norm(tipTeam) === norm(match.team2) ? 't2'
       : (norm(match.team1).includes(norm(tipTeam)) ? 't1' : 't2');
