@@ -6378,16 +6378,27 @@ const server = http.createServer(async (req, res) => {
       // Bug: "Leviatán Esports" (PS) vs "Leviatan" (Pin) — `á` era stripped resultando
       // "leviatn" vs "leviatan" — nenhuma inclusão funcionava → duplicata em
       // /valorant-matches output. Reportado live-scout 2026-05-14.
-      const normTeam = s => String(s||'').toLowerCase()
+      // 2026-05-15: alias expansion + swap check. Case observado prod
+      // /live-snapshot: "Vitality vs FUT" (Pinnacle) vs "FUT Esports vs Team
+      // Vitality" (PandaScore canonical). Forward check (t1↔t1, t2↔t2)
+      // falhava porque ORDER era reverso. Adicionado swap check (t1↔t2,
+      // t2↔t1) + alias expand pra cobrir variants "VIT"/"FaZe"/"KC" etc.
+      let _expandValAlias;
+      try { _expandValAlias = require('./lib/valorant-team-aliases').expandAlias; }
+      catch (_) { _expandValAlias = (s) => s; }
+      const normTeam = s => String(_expandValAlias(s) || '').toLowerCase()
         .normalize('NFD').replace(/[̀-ͯ]/g, '')
         .replace(/[^a-z0-9]/g,'');
+      const _pairMatch = (n1, n2, pn1, pn2) => {
+        const fwd = (pn1.includes(n1) || n1.includes(pn1)) && (pn2.includes(n2) || n2.includes(pn2));
+        if (fwd) return true;
+        // Swap: source pode ter team order reverso
+        return (pn1.includes(n2) || n2.includes(pn1)) && (pn2.includes(n1) || n1.includes(pn2));
+      };
 
       for (const om of pinMatches) {
         const n1 = normTeam(om.team1), n2 = normTeam(om.team2);
-        const ps = psMatches.find(p => {
-          const pn1 = normTeam(p.team1), pn2 = normTeam(p.team2);
-          return (pn1.includes(n1) || n1.includes(pn1)) && (pn2.includes(n2) || n2.includes(pn2));
-        });
+        const ps = psMatches.find(p => _pairMatch(n1, n2, normTeam(p.team1), normTeam(p.team2)));
         if (ps) {
           om.format = ps.format;
           om.leagueSlug = ps.leagueSlug || '';
@@ -6399,10 +6410,7 @@ const server = http.createServer(async (req, res) => {
       const liveFromPs = psMatches.filter(p => {
         if (p.status !== 'live') return false;
         const pn1 = normTeam(p.team1), pn2 = normTeam(p.team2);
-        return !pinMatches.some(om => {
-          const n1 = normTeam(om.team1), n2 = normTeam(om.team2);
-          return (pn1.includes(n1) || n1.includes(pn1)) && (pn2.includes(n2) || n2.includes(pn2));
-        });
+        return !pinMatches.some(om => _pairMatch(normTeam(om.team1), normTeam(om.team2), pn1, pn2));
       });
 
       const combined = [...liveFromPs, ...pinMatches];
