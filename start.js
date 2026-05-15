@@ -104,9 +104,21 @@ function _writeChildExit(name, code, signal, uptimeMs) {
   } catch (_) {}
 }
 
+// 2026-05-15 audit P0: restart loop 50 boots/24h root cause = V8 default
+// heap_size_limit ~4GB (unbounded vs Railway 512MB cap). Bot.js grew
+// ~46 MB/h até container OOM @ ~3-5h uptime. SIGKILL pre exit handler.
+// Last OOM snapshot 07:04Z mostrou bot RSS 383 MB.
+// Fix: cap heap explicit per process. V8 GCs aggressive at cap → throws
+// "JavaScript heap OOM" gracefully (catchable) BEFORE container OOM SIGKILL.
+// Budget Railway 512 MB: launcher 50 + server cap 150 = ~200 RSS +
+// bot cap 180 = ~260 RSS = ~500 total. Env tunável.
+const BOT_HEAP_MB = parseInt(process.env.BOT_HEAP_MB || '180', 10);
+const SERVER_HEAP_MB = parseInt(process.env.SERVER_HEAP_MB || '150', 10);
+console.log(`[LAUNCHER] heap caps: bot=${BOT_HEAP_MB}MB server=${SERVER_HEAP_MB}MB (Railway 512 cap)`);
+
 function spawnChild(name, file) {
   // Captura stdout/stderr via pipe pra espelhar no Railway console E ingerir no buffer do server.
-  const child = spawn('node', [file], {
+  const child = spawn('node', [`--max-old-space-size=${BOT_HEAP_MB}`, file], {
     stdio: ['inherit', 'pipe', 'pipe'],
     env: process.env
   });
@@ -164,7 +176,7 @@ function spawnServerWithPortRetry() {
   serverStartTs = Date.now();
   // Sempre passa PORT+SERVER_PORT para o child (evita usar valor "antigo")
   const env = { ...process.env, PORT: String(PORT), SERVER_PORT: String(PORT) };
-  const srv = spawn('node', ['server.js'], { stdio: 'inherit', env });
+  const srv = spawn('node', [`--max-old-space-size=${SERVER_HEAP_MB}`, 'server.js'], { stdio: 'inherit', env });
 
   // 2026-05-06: bot spawn delay 3s→10s. Antes, com server crashing+port-retry,
   // bot subia em 3s com env stale (PORT/SERVER_PORT do parent já mutado mid-flight),
