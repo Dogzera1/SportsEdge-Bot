@@ -4060,6 +4060,14 @@ function _isDestructive(req) {
 }
 
 function requireAdmin(req, res) {
+  // 2026-05-15 audit P1 (defense-in-depth): rate limit cross-admin antes do
+  // auth check. Era ausente em 84 admin endpoints (só /admin/login tinha 10/15min).
+  // Insider autenticado OR atacante com key vazada poderia 10k req/min em
+  // /admin/run-settle, /admin/mt-refit-calib (DB-heavy) → OOM/DB lock.
+  // Override via env (ADMIN_RATE_LIMIT_PER_MIN, default 60 req/min/IP).
+  // CLAUDE.md: limits SAGRADOS não tocados; este é gate operacional novo.
+  const adminRl = Math.max(10, Math.min(600, parseInt(process.env.ADMIN_RATE_LIMIT_PER_MIN || '60', 10) || 60));
+  if (!rateLimit(req, res, adminRl, 'admin_global')) return false;
   if (!ADMIN_KEY) {
     warnAdminKeyMissingOnce();
     if (ADMIN_STRICT) {
