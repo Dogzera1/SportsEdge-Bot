@@ -64,6 +64,28 @@ if [ -n "$STAGED_JS" ]; then
 fi
 
 # ────────────────────────────────────────────────────────────────────────
+# HARD GATE 4: npm test (regression net)
+# Skip quando só docs/markdown/githooks/.env.example staged (perf preserva).
+# Runner é sync, ~3-4s. Property test + smoke test pegam class de bugs
+# (orphan exports, TDZ top-level, MAP-settle bug class, etc).
+# ────────────────────────────────────────────────────────────────────────
+NEEDS_TEST=$(echo "$STAGED_ALL" | grep -vE '^(\.githooks/|docs/|.*\.md$|\.env\.example$|^$)' | head -1 || true)
+if [ -n "$NEEDS_TEST" ]; then
+  echo "[pre-commit] Rodando tests..."
+  if ! node tests/run.js > /tmp/precommit-test.out 2>&1; then
+    echo "❌ [pre-commit] tests/run.js falhou:"
+    tail -30 /tmp/precommit-test.out
+    rm -f /tmp/precommit-test.out
+    echo ""
+    echo "Commit bloqueado. Corrija ou: git commit --no-verify (não recomendado)"
+    exit 1
+  fi
+  TEST_SUMMARY=$(grep -E '[0-9]+ passed' /tmp/precommit-test.out | tail -1)
+  echo "  ✓ $TEST_SUMMARY"
+  rm -f /tmp/precommit-test.out
+fi
+
+# ────────────────────────────────────────────────────────────────────────
 # SOFT WARNINGS (imprimem, não bloqueiam)
 # ────────────────────────────────────────────────────────────────────────
 WARNINGS=""

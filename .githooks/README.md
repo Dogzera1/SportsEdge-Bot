@@ -27,6 +27,7 @@ git config --get core.hooksPath
 1. **Syntax check** `node -c` em todo `.js` staged. Erro = commit blocked.
 2. **`DELETE FROM tips`** detectado em diff. CLAUDE.md: soft-delete only.
 3. **Limite SAGRADO** alterado em código: `MAX_KELLY_FRAC`, `KELLY_AUTO_TUNE_CEILING`, `MT_MIN_ODD`, `MT_EV_CAP_PCT`, `DAILY_TIP_LIMIT`.
+4. **`node tests/run.js`** roda quando code/test files staged (skipa se só docs/githooks/.env.example). Regression net pra bug classes cobertas (orphan exports, TDZ top-level, MAP-settle, Kelly, parsers, calibration etc).
 
 **Soft warnings (printa, exit 0):**
 - `catch (_) {}` ou `catch (e) {}` silencioso adicionado
@@ -37,7 +38,10 @@ git config --get core.hooksPath
 
 ## Performance
 
-Roda em ~1-2s típico (só inspeciona arquivos staged). Diff parsing via `git diff --cached -U0` — não toca files outside diff.
+- **Só docs/markdown/githooks staged**: ~1-2s (skipa npm test)
+- **Code/test files staged**: ~4-6s (1-2s diff parsing + 3-4s `tests/run.js`)
+
+Diff parsing via `git diff --cached -U0` — não toca files outside diff.
 
 ## Escape hatch
 
