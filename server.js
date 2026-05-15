@@ -23986,6 +23986,14 @@ load();
         // o que modelo realmente veria em produção. Opt-out via
         // TEMPORAL_GATE_SHADOW_BYPASS=true (default false, gate ativo).
         const _temporalShadowBypass = /^(1|true|yes)$/i.test(String(process.env.TEMPORAL_GATE_SHADOW_BYPASS ?? 'false'));
+        // _emitSkip declarado early — temporal_gate/ev_sanity_cap/news_critical (abaixo) chamam ANTES do bloco helpers original e TDZ crasha o handler.
+        const _emitSkip = (reason, extra = {}) => {
+          try {
+            const m = require('./lib/metrics');
+            m.incr('record_tip_skip', { sport, reason });
+          } catch (_) {}
+          sendJson(res, { ok: true, skipped: true, reason, ...extra });
+        };
         if (!t.isShadow || !_temporalShadowBypass) {
           try {
             const _slackS = parseInt(process.env.TEMPORAL_GATE_SLACK_S || '60', 10) || 60;
@@ -24210,16 +24218,6 @@ load();
           log('INFO', 'ML-AUTO-SHADOW', `${sport}: ${p1} vs ${p2} — gate=${reason} → routed to shadow (study DB) em vez de reject`);
           try { require('./lib/metrics').incr('record_tip_auto_shadow', { sport, reason }); } catch (_) {}
           return true;
-        };
-        // Helper centralizado pra skip — incrementa counter por reason+sport
-        // ANTES de sendJson. Permite /health/metrics rastrear quais gates
-        // estão derrubando volume sem precisar parsear logs.
-        const _emitSkip = (reason, extra = {}) => {
-          try {
-            const m = require('./lib/metrics');
-            m.incr('record_tip_skip', { sport, reason });
-          } catch (_) {}
-          sendJson(res, { ok: true, skipped: true, reason, ...extra });
         };
         // Guardrail: evita odds absurdas por bug de matching/mercado.
         // Shadow puro bypass — garante que tips com odds fora do range real
