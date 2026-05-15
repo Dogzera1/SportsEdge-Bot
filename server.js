@@ -89,13 +89,18 @@ try {
   }, parseInt(process.env.EV_CALIB_REFRESH_MS || String(6 * 60 * 60 * 1000), 10));
 } catch (e) { log('WARN', 'EV-CALIB', `init: ${e.message}`); }
 
-// Limpeza única de integridade: só executa se nunca rodou (evita deletar tips legítimas no futuro)
+// Limpeza única de integridade — odds > 4.0 soft-archived (CLAUDE.md "Soft delete only pra tips").
+// 2026-05-15 audit P0: era hard-delete (viola CLAUDE.md + sem audit trail).
+// Migrado pra archived=1 — preserva rows pra reopening manual via /reopen-tip se
+// necessário. Settings guard mantém one-shot. Reason no log (sem coluna dedicada).
 try {
   const alreadyCleaned = db.prepare("SELECT 1 FROM settings WHERE key='odds_cleanup_v1' LIMIT 1").get();
   if (!alreadyCleaned) {
-    const cleaned = db.prepare("DELETE FROM tips WHERE CAST(odds AS REAL) > 4.0").run();
+    const cleaned = db.prepare(
+      "UPDATE tips SET archived=1 WHERE CAST(odds AS REAL) > 4.0 AND (archived IS NULL OR archived=0)"
+    ).run();
     db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('odds_cleanup_v1', datetime('now'))").run();
-    if (cleaned.changes > 0) log('INFO', 'BOOT', `Limpeza única: ${cleaned.changes} tip(s) com odds > 4.0 removidas`);
+    if (cleaned.changes > 0) log('INFO', 'BOOT', `Limpeza única (odds_cleanup_v1, soft-archive): ${cleaned.changes} tip(s) com odds > 4.0 archived`);
   }
 } catch(e) { log('WARN', 'BOOT', `Limpeza odds: ${e.message}`); }
 
@@ -31033,6 +31038,12 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
     const results = [];
     let totalInserted = 0;
 
+    // 2026-05-15 audit P0: era INSERT OR REPLACE, mas demais paths usam OR IGNORE
+    // (server.js:22647/22698/22781/22879). Mig 109 (dual-source observability) avisa
+    // que multi-source mismatch = last-wins silent → settle path lê winner errado.
+    // Mantém first-write-wins consistente. Backfill Sackmann tennis quer overwrite
+    // intencional pra correções históricas → continua OR REPLACE explicit + grava
+    // ao match_result_sources via insertMatchResultSource pra audit dual-source.
     const insertStmt = db.prepare(`
       INSERT OR REPLACE INTO match_results (match_id, game, team1, team2, winner, final_score, league, resolved_at)
       VALUES (?, 'tennis', ?, ?, ?, ?, ?, ?)
@@ -31652,7 +31663,13 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
         const { valor, sport: sportParam } = safeParse(body, {});
         const sport = (sportParam || parsed.query.sport || 'esports');
         const v = parseFloat(valor);
-        if (!v || v <= 0) { sendJson(res, { error: 'valor inválido' }, 400); return; }
+        // 2026-05-15 audit P0: parseFloat aceita 1e308. Bound superior R$1M cobre
+        // qualquer uso legítimo + bloqueia DoS state corruption via banca = MAX_VALUE
+        // (que faria Kelly calc produzir stakes infinitos + Bankroll Guardian panic).
+        if (!Number.isFinite(v) || v <= 0 || v > 1_000_000) {
+          sendJson(res, { error: 'valor inválido (faixa permitida: 0 < v ≤ 1,000,000)' }, 400);
+          return;
+        }
         stmts.resetBankroll.run(v, v, sport);
         log('INFO', 'BANCA', `Banca [${sport}] redefinida para R$${v.toFixed(2)}`);
         sendJson(res, { ok: true, currentBanca: v, unitValue: parseFloat((v / 100).toFixed(4)) });

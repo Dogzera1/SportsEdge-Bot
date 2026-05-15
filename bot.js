@@ -1411,6 +1411,23 @@ const CONF = { ALTA: 'ALTA', MEDIA: 'MÉDIA', BAIXA: 'BAIXA' };
 
 
 // ── Telegram Request ──
+// 2026-05-15 audit P0: per-token cooldown pra 429 retry_after + parse fail
+// estruturado (CF HTML response não throwa mais — retorna shape consistente
+// com error_code=status pra caller distinguir).
+const _tgCooldown = new Map(); // token → epochMs when cooldown expires
+function _tgGetCooldownRemainingMs(token) {
+  const until = _tgCooldown.get(token);
+  if (!until) return 0;
+  const remaining = until - Date.now();
+  if (remaining <= 0) { _tgCooldown.delete(token); return 0; }
+  return remaining;
+}
+function _tgSetCooldown(token, retryAfterSec) {
+  // Clamp 1-300s — Telegram raramente pede >5min; bug poderia pedir 9999
+  const ms = Math.max(1, Math.min(300, parseInt(retryAfterSec, 10) || 30)) * 1000;
+  _tgCooldown.set(token, Date.now() + ms);
+}
+
 function tgRequestOnce(token, method, params, timeoutMs) {
   return new Promise((resolve, reject) => {
     const body = JSON.stringify(params || {});
@@ -1428,7 +1445,17 @@ function tgRequestOnce(token, method, params, timeoutMs) {
       res.on('data', c => d += c);
       res.on('end', () => {
         try { resolve(JSON.parse(d)); }
-        catch(e) { reject(e); }
+        catch(e) {
+          // Non-JSON body (CF challenge HTML, 502/504 gateway error). Preserve
+          // statusCode pra caller distinguir parse-fail vs network-fail. Antes
+          // throwava → tgRequest tratava como ETIMEDOUT-style erro silencioso.
+          resolve({
+            ok: false,
+            error_code: res.statusCode || 0,
+            description: String(d || '').slice(0, 200),
+            _parseError: true,
+          });
+        }
       });
     });
     req.on('error', reject);
@@ -1442,11 +1469,24 @@ function tgRequest(token, method, params) {
   const timeoutMs = Math.max(15000, Math.min(120000, parseInt(process.env.TELEGRAM_HTTP_TIMEOUT_MS || '50000', 10) || 50000));
   const maxAttempts = Math.max(1, Math.min(4, parseInt(process.env.TELEGRAM_HTTP_ATTEMPTS || '2', 10) || 2));
   return (async () => {
+    // 429 cooldown gate antes do attempt loop — todas as broadcasts concurrentes
+    // aguardam até retry_after passar (vs hammerar Telegram em throttle window).
+    const waitMs = _tgGetCooldownRemainingMs(token);
+    if (waitMs > 0) {
+      try { _metrics.incr('tg_cooldown_wait', { method }); } catch (_) {}
+      await new Promise(r => setTimeout(r, Math.min(waitMs, 60000)));
+    }
     let lastErr;
     const t0 = Date.now();
     for (let a = 1; a <= maxAttempts; a++) {
       try {
         const r = await tgRequestOnce(token, method, params, timeoutMs);
+        // 429 → seta cooldown per-token pra futuras calls
+        if (r && r.ok === false && r.error_code === 429) {
+          const retryAfter = (r.parameters && r.parameters.retry_after) || 30;
+          _tgSetCooldown(token, retryAfter);
+          try { _metrics.incr('tg_429', { method, retry_after: String(retryAfter) }); } catch (_) {}
+        }
         // Telemetry: latency + outcome code (200/400/403/429/500...). Antes era
         // 100% caixa preta — DM lenta ou 403 silencioso só apareciam em log scan.
         try {
