@@ -2469,10 +2469,53 @@ async function applyGlobalRisk(sport, desiredUnits, leagueSlug) {
 // flush-persist OR next 403 re-adds).
 const _tg403BlockedThisSession = new Set();
 
+// 2026-05-15 audit P1: persist disk pra preservar block-set entre restarts.
+// Antes era in-memory only — pós Railway redeploy (~6-8h) users 403-blocked
+// volavam pra subscribedUsers e re-tentavam DM até próximo 403 → log noise +
+// rate-limit Telegram. DB persist (/save-user POST) é o source-of-truth, mas
+// falha (server.js down, race) deixava órfãos. Disk file é redundância barata
+// que carrega no boot ANTES de qualquer DM cycle iniciar.
+const _fsTg = require('fs');
+const _pathTg = require('path');
+function _tg403FilePath() {
+  try {
+    const dbDir = _pathTg.dirname(_pathTg.isAbsolute(DB_PATH) ? DB_PATH : _pathTg.resolve(DB_PATH));
+    return _pathTg.join(dbDir, 'tg403_blocked.json');
+  } catch (_) { return null; }
+}
+function _tg403LoadFromDisk() {
+  const p = _tg403FilePath();
+  if (!p) return;
+  try {
+    const raw = _fsTg.readFileSync(p, 'utf8');
+    const arr = JSON.parse(raw);
+    if (Array.isArray(arr)) {
+      for (const id of arr) _tg403BlockedThisSession.add(String(id));
+      log('INFO', 'TG-PERSIST', `boot: ${_tg403BlockedThisSession.size} users 403-blocked carregados de disco`);
+    }
+  } catch (e) {
+    // File não existe (primeiro boot) OR JSON corrupt — silent (boot non-fatal)
+    if (e.code !== 'ENOENT') log('WARN', 'TG-PERSIST', `load fail: ${e.message}`);
+  }
+}
+function _tg403SaveToDisk() {
+  const p = _tg403FilePath();
+  if (!p) return;
+  try {
+    const tmp = p + '.tmp';
+    _fsTg.writeFileSync(tmp, JSON.stringify([..._tg403BlockedThisSession]));
+    _fsTg.renameSync(tmp, p);
+  } catch (e) {
+    log('WARN', 'TG-PERSIST', `save fail: ${e.message}`);
+  }
+}
+_tg403LoadFromDisk(); // boot-time load
+
 async function _unsubscribeUserAll(userId, reason) {
   // Adiciona ao block-set ANTES de tentar serverPost — garante skip mesmo
-  // se DB persist falhar.
+  // se DB persist falhar. Persist disk após add cobre restart edge case.
   _tg403BlockedThisSession.add(String(userId));
+  _tg403SaveToDisk();
   subscribedUsers.delete(userId);
   // 2026-05-14: retry com backoff (3 tentativas) em vez de catch silencioso.
   // Server down (restart, OOM, deploy) → save falha → user fica órfão em DB.
