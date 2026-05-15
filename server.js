@@ -10650,6 +10650,59 @@ setInterval(load, 10000);
     return;
   }
 
+  // ── /admin/memory-breakdown: snapshot memória cross-process (audit P0
+  // architectural 2026-05-15). Restart loop diagnose pattern:
+  //   - server.js memória (here)
+  //   - bot.js memória (via lib/mem-shared shared file)
+  //   - V8 heap stats detalhado (heap_size_limit, malloced, contexts)
+  //   - server.js cache sizes (httpCache, liveSnapshot, pandaScore)
+  // GET /admin/memory-breakdown?key=<ADMIN_KEY>
+  if (p === '/admin/memory-breakdown' && (req.method === 'GET' || req.method === 'POST')) {
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    try {
+      const m = process.memoryUsage();
+      const v8 = require('v8');
+      const stats = v8.getHeapStatistics();
+      const ml = (require('./lib/utils').getMetricsLite && require('./lib/utils').getMetricsLite()) || {};
+      let crossProcess = [];
+      try { crossProcess = require('./lib/mem-shared').listProcessStates(); } catch (_) {}
+      sendJson(res, {
+        ok: true,
+        ts: new Date().toISOString(),
+        server_process: {
+          uptime_s: Math.round(process.uptime()),
+          memoryMb: {
+            rss: Math.round(m.rss / 1048576),
+            heap_used: Math.round(m.heapUsed / 1048576),
+            heap_total: Math.round(m.heapTotal / 1048576),
+            external: Math.round((m.external || 0) / 1048576),
+            array_buffers: Math.round((m.arrayBuffers || 0) / 1048576),
+          },
+          v8: {
+            total_heap_size_mb: Math.round(stats.total_heap_size / 1048576),
+            used_heap_size_mb: Math.round(stats.used_heap_size / 1048576),
+            heap_size_limit_mb: Math.round(stats.heap_size_limit / 1048576),
+            malloced_memory_mb: Math.round(stats.malloced_memory / 1048576),
+            native_contexts: stats.number_of_native_contexts,
+            detached_contexts: stats.number_of_detached_contexts,
+          },
+          memCritical: !!global._memCritical,
+          memCriticalSince: global._memCriticalSince || null,
+        },
+        cross_process: crossProcess, // bot.js mem state from shared file
+        caches: {
+          httpCache: ml.httpCache || null,
+          liveSnapshot: { hasResult: !!_liveSnapshotCache.result, age_s: _liveSnapshotCache.ts ? Math.round((Date.now() - _liveSnapshotCache.ts) / 1000) : null },
+          panda: { items: Array.isArray(_pandaCache.data) ? _pandaCache.data.length : 0, age_s: _pandaCache.ts ? Math.round((Date.now() - _pandaCache.ts) / 1000) : null },
+          pandaDota: { items: Array.isArray(_pandaDotaCache.data) ? _pandaDotaCache.data.length : 0, age_s: _pandaDotaCache.ts ? Math.round((Date.now() - _pandaDotaCache.ts) / 1000) : null },
+        },
+        railway_cap_mb: 512,
+      });
+    } catch (e) { sendJson(res, { error: e.message }, 500); }
+    return;
+  }
+
   // ── /admin/forensics: post-mortem completo de uma tip específica.
   // Combina row da tips + tip_context_json parsed + match_result + voided
   // entry (se houver) + tip_factor_log + shadow row equivalente (se MT).
