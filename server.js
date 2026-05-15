@@ -6479,8 +6479,12 @@ const server = http.createServer(async (req, res) => {
           const hasProgress = (m.score1 || 0) > 0 || (m.score2 || 0) > 0;
           return alreadyStarted || hasProgress;
         });
-        const rows = [];
-        for (const m of live) {
+        // 2026-05-15: parallel inner enrichment. Sequential await em loop
+        // por match resultava em ~13s cold path (16 tennis × 500ms sofa +
+        // 5 dota × 400ms opendota + 1 valorant × 800ms vlr + 1 lol × 800ms).
+        // Per-match branches já têm try/catch internos — Promise.all preserva
+        // isolation: 1 match falha não derruba o batch.
+        const rows = await Promise.all(live.map(async (m) => {
           const odds = m.odds || null;
           const bookmaker = odds ? String(odds.bookmaker || '').trim() : '';
           const pinnacle = /pinnacle/i.test(bookmaker)
@@ -6653,8 +6657,8 @@ const server = http.createServer(async (req, res) => {
               summary: hasScore ? { score: `${m.score1 || 0}-${m.score2 || 0}` } : null,
             };
           }
-          rows.push(row);
-        }
+          return row;
+        }));
         rows.sort((a, b) => (b.pinnacle ? 1 : 0) - (a.pinnacle ? 1 : 0));
         out[sport] = rows;
       }
