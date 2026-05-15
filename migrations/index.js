@@ -2919,6 +2919,31 @@ const migrations = [
       } catch (e) { console.log(`[mig 109] match_result_sources: ${e.message}`); }
     },
   },
+  {
+    id: '110_bankroll_drift_log',
+    up(db) {
+      // 2026-05-15 audit P0 architectural: detection cron pra drift entre
+      // bankroll.current_banca e sum(profit_reais real). Trending pra
+      // identificar drift recorrente vs one-off.
+      // Spec: docs/superpowers/specs/2026-05-15-bankroll-integrity-design.md (E)
+      try {
+        db.exec(`
+          CREATE TABLE IF NOT EXISTS bankroll_drift_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            sport TEXT NOT NULL,
+            expected_delta REAL NOT NULL,
+            stored_delta REAL NOT NULL,
+            drift_amount REAL NOT NULL,
+            threshold REAL NOT NULL DEFAULT 0.10,
+            detected_at TEXT NOT NULL DEFAULT (datetime('now'))
+          );
+          CREATE INDEX IF NOT EXISTS idx_bankroll_drift_log_sport_ts
+            ON bankroll_drift_log(sport, detected_at DESC);
+        `);
+        console.log('[mig 110] bankroll_drift_log created (audit P0 reconciliation trending)');
+      } catch (e) { console.log(`[mig 110] bankroll_drift_log: ${e.message}`); }
+    },
+  },
 ];
 
 function applyMigrations(db) {

@@ -14126,12 +14126,13 @@ load();
     try {
       const rows = db.prepare(`SELECT sport, initial_banca, current_banca FROM bankroll`).all();
       const allTips = db.prepare(`
-        SELECT sport, profit_reais, match_id, event_name FROM tips
+        SELECT id, sport, profit_reais, match_id, event_name FROM tips
         WHERE (archived IS NULL OR archived = 0) AND COALESCE(is_shadow, 0) = 0
           AND result IN ('win','loss','push','void')
       `).all();
       const profitBySport = {};
       let ambiguousEsportsTips = 0;
+      const ambiguousSamples = [];
       for (const t of allTips) {
         let sp = t.sport;
         if (sp === 'esports') {
@@ -14143,9 +14144,30 @@ load();
           const mid = String(t.match_id || '');
           if (mid.startsWith('dota2_') || mid.startsWith('dota_')) sp = 'dota2';
           else if (mid.startsWith('lol_') || mid.startsWith('riot_') || mid.startsWith('pin_lol_')) sp = 'lol';
-          else { ambiguousEsportsTips++; continue; }
+          else {
+            ambiguousEsportsTips++;
+            if (ambiguousSamples.length < 10) ambiguousSamples.push({ id: t.id, match_id: t.match_id, event_name: t.event_name, profit_reais: t.profit_reais });
+            continue;
+          }
         }
         profitBySport[sp] = (profitBySport[sp] || 0) + Number(t.profit_reais || 0);
+      }
+      // 2026-05-15 audit P0 architectural: block apply quando ambiguous esports
+      // tips presentes. Antes, ambíguas eram SILENTLY SKIPPED → REGRAVA
+      // current_banca sem contar profit ambíguo → drift permanente entre
+      // stored banca e profit real.
+      // Workflow: admin resolve tip.sport pra bucket específico via SQL UPDATE
+      // antes de apply (UPDATE tips SET sport='lol' WHERE id IN (...)).
+      // Spec: docs/superpowers/specs/2026-05-15-bankroll-integrity-design.md (D)
+      if (apply && ambiguousEsportsTips > 0) {
+        sendJson(res, {
+          ok: false,
+          error: 'ambiguous_esports_tips_blocked',
+          ambiguous_count: ambiguousEsportsTips,
+          sample_tips: ambiguousSamples,
+          detail: 'Resolve tip.sport pra bucket específico (lol/cs/dota2/val) antes de force-sync com apply=1. Use SQL UPDATE tips SET sport=? WHERE id IN (...). Re-run /admin/force-sync-bankroll?apply=0 pra preview pós-resolução.',
+        }, 409);
+        return;
       }
       const changes = [];
       for (const r of rows) {
@@ -14168,6 +14190,7 @@ load();
         changes_count: changes.length,
         changes,
         ambiguous_esports_tips: ambiguousEsportsTips,
+        ambiguous_samples: ambiguousSamples.length > 0 ? ambiguousSamples : undefined,
       });
     } catch (e) { sendJson(res, { error: e.message }, 500); }
     return;

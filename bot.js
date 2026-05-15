@@ -26018,6 +26018,91 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   setInterval(() => runReadinessRetentionDaily().catch(e => log('ERROR', 'READINESS-RETENTION', e.message)), 60 * 60 * 1000);
   setTimeout(() => runReadinessRetentionDaily().catch(() => {}), 100 * 60 * 1000);
 
+  // 2026-05-15 audit P0 architectural: bankroll reconciliation daily cron.
+  // Compara stored current_banca − initial_banca vs sum(profit_reais real)
+  // por sport; DM admin se drift > R$0.10 (default). Threshold env override.
+  // Spec: docs/superpowers/specs/2026-05-15-bankroll-integrity-design.md (E)
+  let _lastBankrollReconcileDay = null;
+  async function runBankrollReconcileDaily() {
+    if (/^(0|false|no)$/i.test(String(process.env.BANKROLL_RECONCILE_AUTO ?? 'true'))) return;
+    const hourUtc = parseInt(process.env.BANKROLL_RECONCILE_HOUR_UTC || '4', 10);
+    const now = new Date();
+    if (now.getUTCHours() !== hourUtc) return;
+    const today = now.toISOString().slice(0, 10);
+    if (_lastBankrollReconcileDay === today) return;
+    _lastBankrollReconcileDay = today;
+    try {
+      const { reconcileBankrollDrift, logDrifts } = require('./lib/bankroll-reconciliation');
+      const threshold = parseFloat(process.env.BANKROLL_RECONCILE_THRESHOLD || '0.10');
+      const r = reconcileBankrollDrift(db, { threshold });
+      logDrifts(db, r.drifts, threshold);
+      if (r.drifts.length > 0) {
+        log('WARN', 'BANKROLL-DRIFT', `${r.drifts.length} sport(s) com drift > R$${threshold.toFixed(2)}: ${r.drifts.map(d => `${d.sport}=R$${d.drift_amount.toFixed(2)}`).join(', ')}`);
+        if (ADMIN_IDS.size && !_isCycleMuted('bankroll-reconcile')) {
+          const lines = r.drifts.slice(0, 8).map(d =>
+            `🏦 ${d.sport}: stored=R$${d.stored_delta.toFixed(2)} expected=R$${d.expected_delta.toFixed(2)} drift=R$${d.drift_amount.toFixed(2)}`
+          );
+          const msg = `⚠️ *BANKROLL DRIFT — daily reconciliation*\n\nThreshold: R$${threshold.toFixed(2)}\n\n${lines.join('\n')}\n\nInvestigue via /admin/force-sync-bankroll?apply=0 pra preview.`;
+          const token = resolveAlertsToken();
+          if (token) for (const adminId of ADMIN_IDS) sendDM(token, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
+        }
+      } else {
+        log('INFO', 'BANKROLL-RECONCILE', `clean — 0 drifts > R$${threshold.toFixed(2)} threshold`);
+      }
+    } catch (e) { log('ERROR', 'BANKROLL-RECONCILE', e.message); }
+  }
+  setInterval(() => runBankrollReconcileDaily().catch(e => log('ERROR', 'BANKROLL-RECONCILE', e.message)), 60 * 60 * 1000);
+  setTimeout(() => runBankrollReconcileDaily().catch(() => {}), 100 * 60 * 1000);
+
+  // 2026-05-15 audit P0 architectural: settle gap detector cron.
+  // Encontra market_tips_shadow.result NOT NULL + tips.result NULL (race
+  // entre shadow commit + propagator). Re-fire propagator (idempotent via
+  // audit guard em lib/mt-result-propagator.js). DM admin se gaps > 5.
+  // Spec: docs/superpowers/specs/2026-05-15-bankroll-integrity-design.md (C)
+  let _lastSettleGapDay = null;
+  async function runSettleGapDetectorDaily() {
+    if (/^(0|false|no)$/i.test(String(process.env.SETTLE_GAP_DETECTOR_AUTO ?? 'true'))) return;
+    const hourUtc = parseInt(process.env.SETTLE_GAP_HOUR_UTC || '5', 10);
+    const now = new Date();
+    if (now.getUTCHours() !== hourUtc) return;
+    const today = now.toISOString().slice(0, 10);
+    if (_lastSettleGapDay === today) return;
+    _lastSettleGapDay = today;
+    try {
+      const { findSettleGaps } = require('./lib/settle-gap-detector');
+      const propagateMtResultToTips = require('./lib/mt-result-propagator');
+      const windowDays = parseInt(process.env.SETTLE_GAP_WINDOW_DAYS || '30', 10);
+      const gaps = findSettleGaps(db, { windowDays });
+      log('INFO', 'SETTLE-GAP', `${gaps.length} gap(s) detectados (window ${windowDays}d)`);
+      let refired = 0;
+      for (const gap of gaps) {
+        try {
+          // Re-fire propagator com shadow row reconstructed. profitUnits=0 deixa
+          // propagator computar profit_reais via Kelly + bankroll unit value
+          // (preserva math correta vs override raw). Idempotency guard previne
+          // double-credit se shadow já tinha propagado (race window incomum).
+          const shadowRow = {
+            id: gap.shadow_id, sport: gap.sport, market: gap.market, side: gap.side,
+            team1: gap.team1, team2: gap.team2, line: gap.line, odd: gap.odd,
+            stake_units: 1, created_at: new Date().toISOString(),
+          };
+          const tipId = propagateMtResultToTips(db, shadowRow, gap.result, 0);
+          if (tipId) refired++;
+        } catch (e) {
+          log('WARN', 'SETTLE-GAP', `shadow#${gap.shadow_id} re-fire failed: ${e.message}`);
+        }
+      }
+      if (refired > 0) log('INFO', 'SETTLE-GAP', `re-fired ${refired}/${gaps.length} successfully`);
+      if (gaps.length > 5 && ADMIN_IDS.size && !_isCycleMuted('settle-gap')) {
+        const msg = `⚠️ *SETTLE GAP DETECTOR — daily*\n\n${gaps.length} gaps detectados (re-fired: ${refired}). Signal de crash recorrente entre shadow commit + propagator.\n\nInvestigar OOM / SIGKILL / deploy race em logs Railway.`;
+        const token = resolveAlertsToken();
+        if (token) for (const adminId of ADMIN_IDS) sendDM(token, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
+      }
+    } catch (e) { log('ERROR', 'SETTLE-GAP', e.message); }
+  }
+  setInterval(() => runSettleGapDetectorDaily().catch(e => log('ERROR', 'SETTLE-GAP', e.message)), 60 * 60 * 1000);
+  setTimeout(() => runSettleGapDetectorDaily().catch(() => {}), 105 * 60 * 1000);
+
   // Feed heartbeat watchdog: cron 5min checa staleness de Pinnacle/PandaScore/etc.
   // Cooldown 30min por (source,sport) pra evitar spam quando feed fica down várias
   // checks. Opt-out: FEED_HEARTBEAT_DISABLED=true.
