@@ -280,6 +280,67 @@ module.exports = async function runTests(t) {
       t.assert(typeof r.body.ageS === 'number' || typeof r.body.age_s === 'number', `expected age in seconds, got ${JSON.stringify(r.body)}`);
     });
 
+    // ─── Test 7e: league_blocked via league_blocks table ──────────────────
+    // server.js L24493-24501: query league_blocks WHERE sport=? AND league=?
+    // AND unblocked_at IS NULL → _emitSkip('league_blocked').
+    // Seed: INSERT em league_blocks com unblocked_at=NULL (entry ativo).
+    await t.test('league_blocked: eventName em league_blocks → rejected', async () => {
+      const Database = require('better-sqlite3');
+      const blockedLeague = 'TestBlockedLeague_' + Date.now();
+      const seedDb = new Database(tmpDb, { timeout: 5000 });
+      try {
+        seedDb.prepare(`
+          INSERT INTO league_blocks (sport, league, reason, auto)
+          VALUES (?, ?, ?, ?)
+        `).run('dota2', blockedLeague, 'test_seed', 0);
+      } finally {
+        seedDb.close();
+      }
+      const r = await httpJson(port, 'POST', '/record-tip?sport=dota2', {
+        matchId: 'test_dota2_leagueblock_' + Date.now(),
+        eventName: blockedLeague,
+        p1: 'LeagueBlockA',
+        p2: 'LeagueBlockB',
+        tipParticipant: 'LeagueBlockA',
+        odds: 1.85,
+        ev: 8.5,
+      }, AUTH);
+      t.assert(r.status === 200, `expected 200 (skipped), got ${r.status} body=${JSON.stringify(r.body)}`);
+      t.assert(r.body.skipped === true, `expected skipped=true, got ${JSON.stringify(r.body)}`);
+      t.assert(r.body.reason === 'league_blocked', `expected reason=league_blocked, got ${r.body.reason}`);
+      t.assert(r.body.block && r.body.block.reason === 'test_seed', `expected block.reason=test_seed, got ${JSON.stringify(r.body.block)}`);
+    });
+
+    // ─── Test 7f: voided_odds_wrong_match via voided_tips table ────────────
+    // server.js L24343-24345: isVoidedMatch SELECT 1 FROM voided_tips
+    // WHERE sport=? AND match_id=? → _emitSkip('voided_odds_wrong_match').
+    // Seed: INSERT em voided_tips com sport+match_id.
+    await t.test('voided_odds_wrong_match: matchId previamente voidado → rejected', async () => {
+      const Database = require('better-sqlite3');
+      const matchId = 'test_dota2_voided_' + Date.now();
+      const seedDb = new Database(tmpDb, { timeout: 5000 });
+      try {
+        seedDb.prepare(`
+          INSERT INTO voided_tips (sport, match_id, p1_norm, p2_norm, reason)
+          VALUES (?, ?, ?, ?, ?)
+        `).run('dota2', matchId, 'voida', 'voidb', 'odds_wrong_test');
+      } finally {
+        seedDb.close();
+      }
+      const r = await httpJson(port, 'POST', '/record-tip?sport=dota2', {
+        matchId,
+        eventName: 'Voided Test League',
+        p1: 'VoidA',
+        p2: 'VoidB',
+        tipParticipant: 'VoidA',
+        odds: 1.85,
+        ev: 8.5,
+      }, AUTH);
+      t.assert(r.status === 200, `expected 200 (skipped), got ${r.status} body=${JSON.stringify(r.body)}`);
+      t.assert(r.body.skipped === true, `expected skipped=true, got ${JSON.stringify(r.body)}`);
+      t.assert(r.body.reason === 'voided_odds_wrong_match', `expected reason=voided_odds_wrong_match, got ${r.body.reason}`);
+    });
+
     // ─── Test 7: UNIQUE constraint race → 409 sem crash (P0 fix 593607a) ──
     // Disparar 2 POSTs simultâneos com mesma matchId. Um ganha race + insert
     // OK; outro pega UNIQUE constraint → catch fire → 409 retornado.
