@@ -414,4 +414,45 @@ module.exports = async function runTests(t) {
   } finally {
     teardown();
   }
+
+  // ─── Bloco env-driven: spawn segundo subprocess com env override ─────────
+  // Pattern reutilizável pra paths env-gated: ml_disabled_per_sport,
+  // ml_not_in_tier1_leagues, match_stop_loss, time_of_day_blocked. Cada um
+  // requer env distinto no boot, então cada test instancia subprocess próprio.
+  await t.test('ml_disabled_per_sport: DOTA2_ML_DISABLED=true + HARD_REJECT → rejected', async () => {
+    const tmpDb2 = path.join(os.tmpdir(), `test-rt-mldis-${Date.now()}.db`);
+    const port2 = 30000 + Math.floor(Math.random() * 10000);
+    const env2 = {
+      ...env,
+      DB_PATH: tmpDb2,
+      PORT: String(port2),
+      DOTA2_ML_DISABLED: 'true',
+      ML_DISABLED_HARD_REJECT: 'true', // bypass auto-route → emite skip reason
+    };
+    const proc2 = spawn('node', ['server.js'], { env: env2, cwd: REPO_ROOT, stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout2 = '', stderr2 = '';
+    proc2.stdout.on('data', d => { stdout2 += d.toString(); });
+    proc2.stderr.on('data', d => { stderr2 += d.toString(); });
+    try {
+      await waitHealth(port2, HEALTH_TIMEOUT_MS);
+      const r = await httpJson(port2, 'POST', '/record-tip?sport=dota2', {
+        matchId: 'test_dota2_mldis_' + Date.now(),
+        eventName: 'ML Disabled Test',
+        p1: 'MLDisA',
+        p2: 'MLDisB',
+        tipParticipant: 'MLDisA',
+        odds: 1.85,
+        ev: 8.5,
+      }, { 'x-admin-key': 'test' });
+      t.assert(r.status === 200, `expected 200 (skipped), got ${r.status} body=${JSON.stringify(r.body)}`);
+      t.assert(r.body.skipped === true, `expected skipped=true, got ${JSON.stringify(r.body)}`);
+      t.assert(r.body.reason === 'ml_disabled_per_sport', `expected reason=ml_disabled_per_sport, got ${r.body.reason}`);
+      t.assert(r.body.env === 'DOTA2_ML_DISABLED', `expected env echo, got ${r.body.env}`);
+    } finally {
+      try { proc2.kill(); } catch (_) {}
+      try { fs.unlinkSync(tmpDb2); } catch (_) {}
+      try { fs.unlinkSync(tmpDb2 + '-shm'); } catch (_) {}
+      try { fs.unlinkSync(tmpDb2 + '-wal'); } catch (_) {}
+    }
+  });
 };
