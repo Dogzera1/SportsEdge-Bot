@@ -3516,15 +3516,24 @@ async function getPinnacleFootballMatches() {
     return _footballPinnacleCache.data;
   }
   try {
-    const rows = await pinnacle.fetchSportMatchOdds(29, (m) => {
+    // 2026-05-15: explicit diagnostic — audit log mostrou "0 partidas" 50× sem
+    // distinção entre "Pinnacle Guest sem soccer" vs "filter rejeita tudo".
+    // Quebrar fetchSportMatchOdds em 2 etapas pra log raw + filtered counts.
+    const allMatchups = await pinnacle.listSportMatchups(29);
+    const filterFn = (m) => {
       const name = String(m?.league?.name || '');
       if (!FOOTBALL_PINNACLE_LEAGUE_PATTERNS.some(rx => rx.test(name))) return false;
       const p1 = String(m?.participants?.[0]?.name || '');
       const p2 = String(m?.participants?.[1]?.name || '');
-      // Descarta props/corners/cards
       if (/\((corners|cards|bookings|fouls|shots)\)/i.test(p1 + p2)) return false;
       return true;
-    });
+    };
+    const filteredMatchups = allMatchups.filter(filterFn);
+    const rows = [];
+    for (const m of filteredMatchups) {
+      const row = await pinnacle.extractMoneyline(m);
+      if (row) rows.push(row);
+    }
     const _fetchedAt = Date.now();
     const matches = rows.map(r => ({
       id: `pin_fb_${r.id}`,
@@ -3536,7 +3545,14 @@ async function getPinnacleFootballMatches() {
       odds: { t1: String(r.oddsT1), t2: String(r.oddsT2), bookmaker: 'Pinnacle', _fetchedAt }
     }));
     _footballPinnacleCache = { data: matches, ts: Date.now() };
-    log('INFO', 'ODDS', `Pinnacle Football: ${matches.length} partidas cacheadas`);
+    // Diagnostic log: raw / filtered / with_odds counts
+    if (matches.length === 0) {
+      // Sample league names from raw pra debug filter mismatch
+      const sampleLeagues = [...new Set(allMatchups.slice(0, 30).map(m => m?.league?.name).filter(Boolean))].slice(0, 5);
+      log('WARN', 'ODDS', `Pinnacle Football: 0 partidas (raw=${allMatchups.length} filtered=${filteredMatchups.length} with_odds=0)${sampleLeagues.length ? ` | sample_leagues=${sampleLeagues.join(' | ')}` : ''}`);
+    } else {
+      log('INFO', 'ODDS', `Pinnacle Football: ${matches.length} partidas cacheadas (raw=${allMatchups.length} filtered=${filteredMatchups.length})`);
+    }
     return matches;
   } catch (e) {
     log('ERROR', 'ODDS', `Pinnacle Football: ${e.message}`);
