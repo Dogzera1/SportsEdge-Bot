@@ -40,6 +40,10 @@ for (const file of files) {
   const suite = file.replace(/^test-|\.js$/g, '');
   console.log(`\n[${suite}]`);
   const mod = require(path.join(testDir, file));
+  if (typeof mod !== 'function') {
+    console.log(`  (skipped — uses node:test runner, run directly via 'node --test ${file}')`);
+    continue;
+  }
   mod(makeT(suite));
 }
 
