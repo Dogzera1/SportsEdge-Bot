@@ -1709,13 +1709,24 @@ setInterval(() => {
       _met.gauge('bot_rss_mb', rssMb);
       _met.gauge('bot_mem_critical', isCrit ? 1 : 0);
     } catch (_) {}
+    // 2026-05-15 Sprint 4 #2: cross-process visibility. bot.js + server.js
+    // são processos separados (start.js spawn) — cada um tem seu próprio
+    // global._memCritical. Escreve state em arquivo shared pra outro processo
+    // poder consultar via isAnyProcessCritical().
+    try { require('./lib/mem-shared').writeMemState('bot', isCrit, rssMb); } catch (_) {}
   } catch (_) {}
 }, 15 * 1000).unref?.();  // 60s→15s: RSS pode subir 30+MB/tick com 244 fb + 267 pin caches
 
 // Helper exportável pra crons checarem se devem skip por mem critical.
 // Usar pattern: if (isMemCritical()) { log(...); return; }
+// 2026-05-15 Sprint 4 #2: checa também state cross-process — se server.js
+// está crítico, bot.js skipa crons heavy preventivamente (combined memory
+// pode estourar 512MB cap Railway).
 function isMemCritical() {
-  return !!(global._memCritical && global._memCritical.ts);
+  if (global._memCritical && global._memCritical.ts) return true;
+  try {
+    return require('./lib/mem-shared').isAnyProcessCritical();
+  } catch (_) { return false; }
 }
 
 // ── Server Helpers ──

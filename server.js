@@ -34150,6 +34150,9 @@ server.listen(PORT, '0.0.0.0', () => {
     try { require('./lib/metrics').gauge('process_heap_mb', heapMb); } catch (_) {}
     try { require('./lib/metrics').gauge('process_rss_mb', rssMb); } catch (_) {}
     try { require('./lib/metrics').gauge('process_mem_critical', global._memCritical ? 1 : 0); } catch (_) {}
+    // 2026-05-15 Sprint 4 #2: cross-process visibility — escreve state em
+    // arquivo shared pra bot.js poder consultar via isAnyProcessCritical().
+    try { require('./lib/mem-shared').writeMemState('server', !!global._memCritical, rssMb); } catch (_) {}
   }), 30 * 1000).unref?.();  // 30s (era 60s) — detect mais rápido
   if (SXBET_ENABLED) log('INFO', 'ODDS', `SX.Bet ativo: base=${SXBET_BASE_URL}`);
   if (GRID_API_KEY) log('INFO', 'GRID', 'GRID_API_KEY configurada — /grid-enrich ativo (LoL)');
