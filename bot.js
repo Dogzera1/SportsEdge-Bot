@@ -24173,7 +24173,27 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   // e se ainda não rodou hoje. Default ON (NIGHTLY_RETRAIN_AUTO=false desativa).
   // Cobertura: LoL train+isotonic, tennis isotonic+Markov calib, dota2/cs2 isotonic,
   // CLV calibration all-sports. Auto-rollback on regression (Brier > +5%).
+  //
+  // 2026-05-15 fix: missed-window recovery. Antes, hour check era === hourUtc
+  // exato. Restart loop (50 boots/24h observado) causou janela 03:00-03:59
+  // UTC PERDIDA quando bot dead. Resultado: retrain não rodou 2026-05-15
+  // (gap boot 02:04Z → 11:01Z). Fix:
+  //   1. Persistent state file _nightly_retrain_last.json (sobrevive restarts)
+  //   2. Hour check >= (não exato) cobre missed windows
+  //   3. Persiste before run (prevent re-run em mid-execution crash)
+  const _NIGHTLY_RETRAIN_STATE_FILE = (() => {
+    try {
+      const dbDir = path.dirname(path.isAbsolute(DB_PATH) ? DB_PATH : path.resolve(DB_PATH));
+      return path.join(dbDir, '_nightly_retrain_last.json');
+    } catch (_) { return path.resolve('_nightly_retrain_last.json'); }
+  })();
   let _lastNightlyRetrainDay = null;
+  try {
+    if (fs.existsSync(_NIGHTLY_RETRAIN_STATE_FILE)) {
+      const data = safeParse(fs.readFileSync(_NIGHTLY_RETRAIN_STATE_FILE, 'utf8'), {});
+      if (data && typeof data.day === 'string') _lastNightlyRetrainDay = data.day;
+    }
+  } catch (_) {}
   async function runNightlyRetrainCheck() {
     if (/^(0|false|no)$/i.test(String(process.env.NIGHTLY_RETRAIN_AUTO ?? 'true'))) return;
     if (isMemCritical()) { log('WARN', 'NIGHTLY-RETRAIN', 'mem_critical — defer'); return; }
@@ -24181,8 +24201,11 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
     const now = new Date();
     const today = now.toISOString().slice(0, 10);
     if (_lastNightlyRetrainDay === today) return;
-    if (now.getUTCHours() !== hourUtc) return;
+    // >= permite missed-window recovery (bot dead durante hour 3 → roda em next boot pós-3)
+    if (now.getUTCHours() < hourUtc) return;
     _lastNightlyRetrainDay = today;
+    // Persist immediately (before script). Crash mid-run não auto re-trigger.
+    try { fs.writeFileSync(_NIGHTLY_RETRAIN_STATE_FILE, JSON.stringify({ day: today, ts: now.toISOString() })); } catch (_) {}
     log('INFO', 'NIGHTLY-RETRAIN', `Iniciando retrain + isotonic refresh (hourUTC=${hourUtc})`);
     const { spawn } = require('child_process');
     const args = ['scripts/refresh-all-isotonics.js', '--all', '--json'];
