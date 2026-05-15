@@ -22763,14 +22763,18 @@ async function runAutoBasket() {
           const pinMkt = await serverGet(
             `/odds-markets?team1=${encodeURIComponent(match.team1)}&team2=${encodeURIComponent(match.team2)}&game=basket&period=0`
           ).catch(() => null);
+          // 2026-05-15 fix: hoist odd bounds OUT do if (pinMkt) block —
+          // Q-scanner abaixo (line ~22860) também usa _mtMinOdd/_mtMaxOdd
+          // mas estava em scope paralelo → ReferenceError observed em logs
+          // (4× per cycle BASKET-Q-SCAN).
+          const _bkBounds = _resolveMtOddBounds('basket');
+          const _mtMinOdd = _bkBounds?.minOdd ?? parseFloat(process.env.BASKET_MT_MIN_ODD ?? '1.50');
+          const _mtMaxOdd = _bkBounds?.maxOdd ?? parseFloat(process.env.BASKET_MT_MAX_ODD ?? '3.50');
           if (pinMkt && ((pinMkt.totals?.length || 0) + (pinMkt.handicaps?.length || 0)) > 0) {
             const { scanBasketMarkets } = require('./lib/basket-mt-scanner');
             const _mtMinEv = parseFloat(process.env.BASKET_MT_MIN_EV ?? '5');
             const _mtMinPm = parseFloat(process.env.BASKET_MT_MIN_PMODEL ?? '0.50');
             const _mtMaxEv = parseFloat(process.env.BASKET_MT_MAX_EV ?? '25');
-            const _bkBounds = _resolveMtOddBounds('basket');
-            const _mtMinOdd = _bkBounds?.minOdd ?? parseFloat(process.env.BASKET_MT_MIN_ODD ?? '1.50');
-            const _mtMaxOdd = _bkBounds?.maxOdd ?? parseFloat(process.env.BASKET_MT_MAX_ODD ?? '3.50');
             const found = scanBasketMarkets({
               pinMarkets: pinMkt,
               trainedMarkets: trMkt,
