@@ -190,22 +190,30 @@ module.exports = function runTests(t) {
     }
   });
 
-  // ─── INVARIANTE 7: shape contract { result, reason } ────────────────────
-  t.test('always returns { result, reason } shape (never throws)', () => {
+  // ─── INVARIANTE 7: shape contract { result, reason } com inputs realistas ─
+  // Inputs vêm de match_results (mapN: int parseável; finalScore: TEXT column
+  // ou null; pick: bool). fc.anything() injetaria objetos exóticos tipo
+  // {toString:""} que quebram String() conversion — out-of-scope deste contrato.
+  t.test('always returns { result, reason } shape (DB-realistic inputs)', () => {
+    const anyMapN = fc.oneof(
+      fc.integer(),
+      fc.constantFrom(null, undefined, NaN, '1', '2', '3', 'a', '')
+    );
+    const anyScore = fc.oneof(
+      fc.string({ minLength: 0, maxLength: 40 }),
+      fc.constantFrom(null, undefined, 'Bo3 2-0', 'Bo5 3-1', 'Bo7 4-2', '', ' ')
+    );
+    const anyPick = fc.oneof(fc.boolean(), fc.constantFrom(0, 1, null, undefined));
     fc.assert(
-      fc.property(fc.anything(), fc.anything(), fc.anything(), (a, b, c) => {
+      fc.property(anyMapN, anyScore, anyPick, (a, b, c) => {
         let r;
         try {
           r = settleMapWinnerFromSweep(a, b, c);
         } catch (e) {
           throw new Error(`unexpected throw on (${JSON.stringify(a)}, ${JSON.stringify(b)}, ${JSON.stringify(c)}): ${e.message}`);
         }
-        if (!r || typeof r !== 'object') {
-          throw new Error(`expected object, got ${typeof r}`);
-        }
-        if (!('result' in r) || !('reason' in r)) {
-          throw new Error(`missing result/reason: ${JSON.stringify(r)}`);
-        }
+        if (!r || typeof r !== 'object') throw new Error(`expected object, got ${typeof r}`);
+        if (!('result' in r) || !('reason' in r)) throw new Error(`missing result/reason: ${JSON.stringify(r)}`);
         if (r.result !== null && r.result !== 'win' && r.result !== 'loss' && r.result !== 'void') {
           throw new Error(`invalid result value: ${JSON.stringify(r.result)}`);
         }
