@@ -3545,11 +3545,19 @@ async function getPinnacleFootballMatches() {
       odds: { t1: String(r.oddsT1), t2: String(r.oddsT2), bookmaker: 'Pinnacle', _fetchedAt }
     }));
     _footballPinnacleCache = { data: matches, ts: Date.now() };
-    // Diagnostic log: raw / filtered / with_odds counts
+    // 2026-05-15: log level adaptativo. raw=0 sustained = Pinnacle Guest API
+    // sem soccer (Case A, confirmed via audit logs.1778869825145 — 50× WARN
+    // em 30min com raw=0). DEBUG quando raw=0 (não actionable, esperado).
+    // WARN apenas quando raw>0 mas filter rejeita tudo (Case B: actionable —
+    // filter regex mismatch). INFO quando matches retornados (Case OK).
     if (matches.length === 0) {
-      // Sample league names from raw pra debug filter mismatch
-      const sampleLeagues = [...new Set(allMatchups.slice(0, 30).map(m => m?.league?.name).filter(Boolean))].slice(0, 5);
-      log('WARN', 'ODDS', `Pinnacle Football: 0 partidas (raw=${allMatchups.length} filtered=${filteredMatchups.length} with_odds=0)${sampleLeagues.length ? ` | sample_leagues=${sampleLeagues.join(' | ')}` : ''}`);
+      if (allMatchups.length === 0) {
+        log('DEBUG', 'ODDS', `Pinnacle Football: 0 partidas (Guest API sem soccer — esperado)`);
+      } else {
+        // Sample league names from raw pra debug filter mismatch
+        const sampleLeagues = [...new Set(allMatchups.slice(0, 30).map(m => m?.league?.name).filter(Boolean))].slice(0, 5);
+        log('WARN', 'ODDS', `Pinnacle Football: 0 partidas (raw=${allMatchups.length} filtered=${filteredMatchups.length} with_odds=0)${sampleLeagues.length ? ` | sample_leagues=${sampleLeagues.join(' | ')}` : ''}`);
+      }
     } else {
       log('INFO', 'ODDS', `Pinnacle Football: ${matches.length} partidas cacheadas (raw=${allMatchups.length} filtered=${filteredMatchups.length})`);
     }
