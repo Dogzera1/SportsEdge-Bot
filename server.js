@@ -23956,14 +23956,20 @@ load();
   if (p === '/record-tip' && req.method === 'POST') {
     let body = ''; req.on('data', d => body += d);
     req.on('end', async () => {
+      // p1/p2 hoisted pra escopo do callback: outer catch referencia `${p1}` em
+      // log UNIQUE-race; try-block const não é visível em catch (ReferenceError
+      // "p1 is not defined" → unhandledRejection + handler nunca responde →
+      // bot.js serverPost timeout 5s). Cross-sport: /record-tip serve todos
+      // sports, race em qualquer um propaga o crash.
+      let p1 = '', p2 = '';
       try {
         const sport = parsed.query.sport || 'esports';
         const t = safeParse(body, {});
         const matchId = clampStr(t.matchId, 128);
         if (!matchId) { badRequest(res, 'matchId obrigatório'); return; }
         const eventName = clampStr(t.eventName, 220);
-        const p1 = clampStr(t.p1 || t.team1 || t.fighter1, 120);
-        const p2 = clampStr(t.p2 || t.team2 || t.fighter2, 120);
+        p1 = clampStr(t.p1 || t.team1 || t.fighter1, 120);
+        p2 = clampStr(t.p2 || t.team2 || t.fighter2, 120);
         const tipParticipant = clampStr(t.tipParticipant || t.tipTeam, 120);
         const oddsN = parseFiniteNumber(t.odds);
         const evN = parseFiniteNumber(t.ev);
