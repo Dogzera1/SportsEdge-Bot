@@ -16337,6 +16337,12 @@ Máximo 200 palavras.`;
       let kellyFraction = getKellyFraction('dota2', tipConf);
       // Stage boost: TI/Major final → +15%, international grupos → +10%, regional final → +8%
       // + §5b Stakes context (showmatch/exhibition deflate; decider/tiebreaker boost)
+      // 2026-05-15 audit P0 verificação: Math.min(0.30) abaixo é legacy soft cap.
+      // _applyKelly em lib/utils.js:328 aplica SAGRADO cap KELLY_PRODUCT_CAP_FRAC=0.15
+      // ANTES de kellyFull × _effFrac (via calcKellyWithP → _applyKelly chain).
+      // Local cap 0.30 nunca passa do _applyKelly final. Mantido pra consistency
+      // histórica + log "Kelly adj" abaixo. LoL path NÃO tem cap intermediário
+      // (linhas 3257/3263/3742/3748) — DOTA2 único com legacy pattern.
       try {
         const stage = _esportsMatchStage(match.league || '');
         const stakesCtx = _esportsDetectStakes(match.league || '');
