@@ -16471,6 +16471,25 @@ Máximo 200 palavras.`;
           setDotaAnalyzed({ ts: now, tipSent: true, noEdge: false });
           await _sleep(2000); continue;
         }
+        // 2026-05-16 audit adversarial #1: live odds drift guard cross-sport.
+        // Dota fights podem mover odds 40%+ rapidamente. Mirror tennis/LoL/CS pattern.
+        if (isLive) {
+          try {
+            const _freshDota = await serverGet('/dota-matches').catch(() => null);
+            const _freshMatchDota = Array.isArray(_freshDota) ? _freshDota.find(x => String(x.id) === String(match.id)) : null;
+            if (_freshMatchDota?.odds?.t1 && _freshMatchDota?.odds?.t2) {
+              const _pickIsT1Dota = norm(tipTeam) === norm(match.team1);
+              const _freshPickOddDota = parseFloat(_pickIsT1Dota ? _freshMatchDota.odds.t1 : _freshMatchDota.odds.t2);
+              const _driftDota = checkLiveOddsDrift({ tipOdd, freshOdd: _freshPickOddDota, sport: 'dota' });
+              if (_driftDota.stale) {
+                log('WARN', 'AUTO-DOTA', `Odds stale: tip @ ${tipOdd} mercado ${_freshPickOddDota} (drift ${_driftDota.driftPct}% > cap ${_driftDota.cap}) — abortando ${tipTeam}`);
+                setDotaAnalyzed({ ts: now, tipSent: false, noEdge: false, staleAbort: true });
+                await _sleep(2000); continue;
+              }
+            }
+          } catch (_) {}
+        }
+
         if (_isShadowDispatch(rec, 'dota2')) {
           log('INFO', 'AUTO-DOTA', `[SHADOW] ${tipTeam} @ ${tipOdd} | EV:${tipEV} | ${tipStakeAdj} | ${tipConf} — DM suprimida${rec?.autoShadowed ? ' (auto-shadow)' : ''}`);
         } else {
@@ -21482,6 +21501,25 @@ Máximo 150 palavras.`;
           continue;
         }
 
+        // 2026-05-16 audit adversarial #1: live odds drift guard cross-sport.
+        // Mirror tennis (bot.js:18861) e LoL (3411) usando helper lib/utils. CS rounds
+        // movem odds 30%+ entre rounds — sem refetch pre-DM = stale-edge tips.
+        if (isLiveCs) {
+          try {
+            const _freshCs = await serverGet('/cs-matches').catch(() => null);
+            const _freshMatchCs = Array.isArray(_freshCs) ? _freshCs.find(x => String(x.id) === String(match.id)) : null;
+            if (_freshMatchCs?.odds?.t1 && _freshMatchCs?.odds?.t2) {
+              const _pickIsT1Cs = norm(pickTeam) === norm(match.team1);
+              const _freshPickOddCs = parseFloat(_pickIsT1Cs ? _freshMatchCs.odds.t1 : _freshMatchCs.odds.t2);
+              const _driftCs = checkLiveOddsDrift({ tipOdd: pickOdd, freshOdd: _freshPickOddCs, sport: 'cs' });
+              if (_driftCs.stale) {
+                log('WARN', 'AUTO-CS', `Odds stale: tip @ ${pickOdd} mercado ${_freshPickOddCs} (drift ${_driftCs.driftPct}% > cap ${_driftCs.cap}) — abortando ${pickTeam}`);
+                continue;
+              }
+            }
+          } catch (_) {}
+        }
+
         const confEmoji = { ALTA: '🟢', MÉDIA: '🟡', BAIXA: '🔴' }[conf] || '🟡';
         const matchTime = match.time ? new Date(match.time).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—';
         const phaseLabel = csMapNum > 0 ? ` — MAPA ${csMapNum} (série ${match.score1||0}-${match.score2||0})` : '';
@@ -22116,6 +22154,24 @@ async function pollValorant(runOnce = false) {
         if (!confAllowed) {
           log('INFO', 'AUTO-VAL', `[GATE ${VAL_LIVE_CONF}] ${pickTeam} @ ${pickOdd} | EV:${evPct.toFixed(1)}% | ${conf} — tip gravada mas DM suprimido`);
           continue;
+        }
+
+        // 2026-05-16 audit adversarial #1: live odds drift guard cross-sport.
+        // Mirror tennis/LoL/CS pattern. Valorant rounds = mesma classe que CS.
+        if (isLiveVal) {
+          try {
+            const _freshVal = await serverGet('/valorant-matches').catch(() => null);
+            const _freshMatchVal = Array.isArray(_freshVal) ? _freshVal.find(x => String(x.id) === String(match.id)) : null;
+            if (_freshMatchVal?.odds?.t1 && _freshMatchVal?.odds?.t2) {
+              const _pickIsT1Val = norm(pickTeam) === norm(match.team1);
+              const _freshPickOddVal = parseFloat(_pickIsT1Val ? _freshMatchVal.odds.t1 : _freshMatchVal.odds.t2);
+              const _driftVal = checkLiveOddsDrift({ tipOdd: pickOdd, freshOdd: _freshPickOddVal, sport: 'valorant' });
+              if (_driftVal.stale) {
+                log('WARN', 'AUTO-VAL', `Odds stale: tip @ ${pickOdd} mercado ${_freshPickOddVal} (drift ${_driftVal.driftPct}% > cap ${_driftVal.cap}) — abortando ${pickTeam}`);
+                continue;
+              }
+            }
+          } catch (_) {}
         }
 
         const confEmoji = { ALTA: '🟢', MÉDIA: '🟡', BAIXA: '🔴' }[conf] || '🟡';
