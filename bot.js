@@ -23601,6 +23601,32 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   setInterval(_wrapCron('reconciliation', runReconciliationCycle), 60 * 60 * 1000);
   setTimeout(_wrapCron('reconciliation', runReconciliationCycle), 10 * 60 * 1000); // primeiro check 10min pós-boot
 
+  // 2026-05-16: cleanup match_result_sources antigos. Mig 109 (FASE 1 observability)
+  // só precisa últimos 7d pra reconcile cron detectar mismatches cross-source.
+  // Sem cleanup, tabela cresce ~800K/dia (cada ESPN sync + PandaScore + Sackmann insere
+  // 1 row por match × source) → 1.6M+ em 2d = 95% do DB size (logs 2026-05-16: DB 532MB,
+  // alert db_size_high active). Retention 30d = janela segura pra debug pós-hoc.
+  let _lastMatchResultSourcesCleanupDay = null;
+  async function runMatchResultSourcesCleanup() {
+    if (/^(0|false|no)$/i.test(String(process.env.MATCH_RESULT_SOURCES_CLEANUP_AUTO ?? 'true'))) return;
+    if (isMemCritical()) return;
+    const targetHour = parseInt(process.env.MATCH_RESULT_SOURCES_CLEANUP_HOUR_UTC || '5', 10) || 5;
+    const now = new Date();
+    if (now.getUTCHours() !== targetHour) return;
+    const today = now.toISOString().slice(0, 10);
+    if (_lastMatchResultSourcesCleanupDay === today) return;
+    _lastMatchResultSourcesCleanupDay = today;
+    try {
+      const retentionDays = Math.max(7, Math.min(180, parseInt(process.env.MATCH_RESULT_SOURCES_RETENTION_DAYS || '30', 10) || 30));
+      const r = db.prepare(`DELETE FROM match_result_sources WHERE recorded_at < datetime('now', '-' || ? || ' days')`).run(retentionDays);
+      if (r.changes > 0) {
+        log('INFO', 'CLEANUP', `match_result_sources: deleted ${r.changes} rows >${retentionDays}d retention`);
+      }
+    } catch (e) { log('WARN', 'CLEANUP', `match_result_sources cleanup err: ${e.message}`); }
+  }
+  setInterval(_wrapCron('match_result_sources_cleanup', runMatchResultSourcesCleanup), 60 * 60 * 1000);
+  setTimeout(_wrapCron('match_result_sources_cleanup', runMatchResultSourcesCleanup), 15 * 60 * 1000);
+
   // Threshold Auto-Apply: semanal (segunda-feira às 4h UTC), roda optimizer +
   // aplica ajustes de EV_min per sport quando guardrails batem. Gated por
   // THRESHOLD_AUTO_APPLY=true.
@@ -23945,7 +23971,7 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
     // server.js /bankroll endpoint. Bankroll table não armazena peak.
     const _peakStmt = db.prepare(`
       SELECT MAX(running) AS max_profit FROM (
-        SELECT SUM(profit_reais) OVER (ORDER BY COALESCE(settled_at, created_at)) AS running
+        SELECT SUM(profit_reais) OVER (ORDER BY COALESCE(settled_at, sent_at)) AS running
         FROM tips
         WHERE sport = ?
           AND result IS NOT NULL AND result != 'void'

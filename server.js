@@ -10810,6 +10810,56 @@ setInterval(load, 10000);
     return;
   }
 
+  // ── /admin/match-result-sources-cleanup: one-shot DELETE de rows antigos +
+  // opt VACUUM. Pareia com cron diário em bot.js (runMatchResultSourcesCleanup).
+  // 2026-05-16: criado pra resolver DB bloat 1.6M rows (mig 109 FASE 1 sem TTL).
+  // Dry-run default. apply=1 executa DELETE. vacuum=1 (só com apply=1) reclama espaço.
+  // GET/POST /admin/match-result-sources-cleanup?apply=1&vacuum=1&retention_days=30&key=<ADMIN_KEY>
+  if (p === '/admin/match-result-sources-cleanup' && (req.method === 'GET' || req.method === 'POST')) {
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    try {
+      const retentionDays = Math.max(7, Math.min(180, parseInt(parsed.query.retention_days || '30', 10) || 30));
+      const apply = String(parsed.query.apply || '0') === '1';
+      const doVacuum = String(parsed.query.vacuum || '0') === '1';
+      const before = db.prepare(`SELECT COUNT(*) AS n FROM match_result_sources`).get().n;
+      const eligible = db.prepare(`SELECT COUNT(*) AS n FROM match_result_sources WHERE recorded_at < datetime('now', '-' || ? || ' days')`).get(retentionDays).n;
+      let deleted = 0;
+      let vacuumed = false;
+      let reclaimed_mb = 0;
+      let elapsed_ms = 0;
+      if (apply && eligible > 0) {
+        const t0 = Date.now();
+        const r = db.prepare(`DELETE FROM match_result_sources WHERE recorded_at < datetime('now', '-' || ? || ' days')`).run(retentionDays);
+        deleted = r.changes;
+        if (doVacuum) {
+          const pageSize = db.pragma('page_size', { simple: true });
+          const before_pages = db.pragma('page_count', { simple: true });
+          db.exec('VACUUM');
+          const after_pages = db.pragma('page_count', { simple: true });
+          reclaimed_mb = Math.round((before_pages - after_pages) * pageSize / 1048576 * 10) / 10;
+          vacuumed = true;
+        }
+        elapsed_ms = Date.now() - t0;
+      }
+      sendJson(res, {
+        ok: true,
+        ts: new Date().toISOString(),
+        retention_days: retentionDays,
+        rows_before: before,
+        rows_eligible_for_delete: eligible,
+        rows_after: before - deleted,
+        deleted,
+        apply,
+        vacuumed,
+        reclaimed_mb,
+        elapsed_ms,
+        next_step: apply ? null : `Run with ?apply=1${eligible > 10000 ? '&vacuum=1' : ''} to execute (vacuum recommended if eligible >10k)`,
+      });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   // ── /admin/forensics: post-mortem completo de uma tip específica.
   // Combina row da tips + tip_context_json parsed + match_result + voided
   // entry (se houver) + tip_factor_log + shadow row equivalente (se MT).
