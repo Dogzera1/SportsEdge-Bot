@@ -20,7 +20,7 @@ try { require('./lib/model-persistence').syncFromPersistentToLib(); }
 catch (e) { console.error('[MODEL-PERSIST] boot sync err:', e.message); }
 const initDatabase = require('./lib/database');
 const { SPORTS, getSportById, getSportByToken, getTokenToSportMap, isLeagueRealOverride } = require('./lib/sports');
-const { log, calcKelly, calcKellyFraction, calcKellyWithP, norm, fmtDate, fmtDateTime, fmtDuration, safeParse, cachedHttpGet, markPollHeartbeat, getPollHeartbeats, markCronHeartbeat, getCronHeartbeats, dumpCronHeartbeats, loadCronHeartbeats } = require('./lib/utils');
+const { log, calcKelly, calcKellyFraction, calcKellyWithP, norm, fmtDate, fmtDateTime, fmtDuration, safeParse, cachedHttpGet, markPollHeartbeat, getPollHeartbeats, markCronHeartbeat, getCronHeartbeats, dumpCronHeartbeats, loadCronHeartbeats, checkLiveOddsDrift } = require('./lib/utils');
 const { adjustStakeUnits } = require('./lib/risk-manager');
 const { esportsPreFilter } = require('./lib/ml');
 const { formatLineShopDM, computeLineShop, checkBookmakerSpread } = require('./lib/line-shopping');
@@ -3408,6 +3408,28 @@ async function runAutoAnalysis() {
 
           // Semi-auto deeplink — book com odd maior entre preferred.
           const _betBtn = _buildTipBetButton('lol', result.o, _pickSideLs, match, tipStakeAdj, tipOdd);
+
+          // 2026-05-16 audit adversarial #1: live odds drift guard (helper lib/utils).
+          // Tennis tinha check inline (bot.js:18861); LoL/CS/Dota/Val não — odds
+          // movem 30-50% em poucos minutos in-play (gold swing, fight). Sem re-fetch
+          // pré-DM, tip emite com odd já desatualizada → edge sumiu. Wire LoL primeiro
+          // (highest volume sport). Threshold LOL_LIVE_DRIFT_PP=12 default.
+          if (isLiveMatch) {
+            try {
+              const _freshLol = await serverGet('/lol-matches').catch(() => null);
+              const _freshMatchLol = Array.isArray(_freshLol) ? _freshLol.find(x => String(x.id) === String(match.id)) : null;
+              if (_freshMatchLol?.odds?.t1 && _freshMatchLol?.odds?.t2) {
+                const _pickIsT1Lol = norm(tipTeam) === norm(match.team1);
+                const _freshPickOddLol = parseFloat(_pickIsT1Lol ? _freshMatchLol.odds.t1 : _freshMatchLol.odds.t2);
+                const _driftLol = checkLiveOddsDrift({ tipOdd, freshOdd: _freshPickOddLol, sport: 'lol' });
+                if (_driftLol.stale) {
+                  log('WARN', 'AUTO-LOL', `Odds stale: tip @ ${tipOdd} mercado agora ${_freshPickOddLol} (drift ${_driftLol.driftPct}% > cap ${_driftLol.cap}) — abortando ${tipTeam}`);
+                  analyzedMatches.set(matchKey, { ts: now, tipSent: false, noEdge: false, hadLiveStats: !!result?.hasLiveStats || prev?.hadLiveStats || false, staleAbort: true });
+                  continue;
+                }
+              }
+            } catch (_) {}
+          }
 
           if (_isShadowDispatch(rec, 'lol')) {
             log('INFO', 'AUTO', `[SHADOW] ${tipTeam} @ ${tipOdd} | EV:${tipEV} | ${tipStakeAdj} | ${tipConf} — DM suprimida${rec?.autoShadowed ? ' (auto-shadow)' : ''}`);
