@@ -3424,7 +3424,18 @@ async function getPinnacleMmaMatches() {
       _source: 'pinnacle',
     }));
     _mmaPinnacleCache = { data: matches, ts: Date.now() };
-    log('INFO', 'ODDS', `Pinnacle MMA: ${matches.length} lutas cacheadas`);
+    // 2026-05-15: breakdown per-org pra audit de unlock non-UFC.
+    // Quando Bellator/PFL/ONE/etc card week, deve aparecer >0 aqui — confirma
+    // que regex (server.js:3411) está deixando passar e que Pinnacle cobre.
+    const _orgKeys = ['ufc', 'bellator', 'pfl', 'one championship', 'cage warriors', 'ksw', 'rizin', 'invicta'];
+    const _orgCounts = matches.reduce((acc, m) => {
+      const lg = String(m.league || '').toLowerCase();
+      const k = _orgKeys.find(o => lg.includes(o)) || 'other';
+      acc[k] = (acc[k] || 0) + 1;
+      return acc;
+    }, {});
+    const _orgStr = Object.entries(_orgCounts).filter(([_,v]) => v > 0).map(([k,v]) => `${k}:${v}`).join(' ');
+    log('INFO', 'ODDS', `Pinnacle MMA: ${matches.length} lutas cacheadas (${_orgStr || 'empty'})`);
     try { require('./lib/feed-heartbeat').markFeedSuccess('pinnacle', 'mma', matches.length); } catch (_) {}
     return matches;
   } catch (e) {
