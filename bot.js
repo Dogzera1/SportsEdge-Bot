@@ -10207,6 +10207,11 @@ async function autoAnalyzeMatch(token, match) {
     // Backoff IA: evita spam quando DeepSeek responde 429 (rate_limited)
     const FALLBACK_MIN_ODDS = parseFloat(process.env.LOL_MIN_ODDS ?? '1.50');
     const FALLBACK_MAX_ODDS = parseFloat(process.env.LOL_MAX_ODDS ?? '4.00');
+    // 2026-05-16: env tunable mirror DOTA_FALLBACK_MIN_EV (audit memory project_tip_emission_audit_2026_05_15
+    // identificou ZeroZone @3.57 edge 11.1pp rejected — min_ev=5 strict bloqueia
+    // positive-edge longshots). Default mantém 5/5; loosen via env quando user A/B-testa.
+    const FALLBACK_MIN_EV = parseFloat(process.env.LOL_FALLBACK_MIN_EV ?? '5');
+    const FALLBACK_MIN_EDGE = parseFloat(process.env.LOL_FALLBACK_MIN_EDGE ?? '5');
     if (!global.__deepseekBackoffUntil) global.__deepseekBackoffUntil = 0;
     if (!global.__deepseekLastCallTs) global.__deepseekLastCallTs = 0;
     // AI_DISABLED early-exit: pula direto pra fallback model sem esperar cooldown
@@ -10226,7 +10231,7 @@ async function autoAnalyzeMatch(token, match) {
       const pickOdd = direction === 't2' ? _odd2 : _odd1;
       const pickP = direction === 't2' ? mlResult.modelP2 : mlResult.modelP1;
       const evPct = (pickP && pickOdd) ? ((pickP * pickOdd - 1) * 100) : 0;
-      if (pickOdd >= FALLBACK_MIN_ODDS && pickOdd <= FALLBACK_MAX_ODDS && evPct >= 5 && mlResult.score >= 5) {
+      if (pickOdd >= FALLBACK_MIN_ODDS && pickOdd <= FALLBACK_MAX_ODDS && evPct >= FALLBACK_MIN_EV && mlResult.score >= FALLBACK_MIN_EDGE) {
         const stake = calcKellyWithP(pickP, pickOdd, 0.15, { sport: 'lol', confKey: 'MEDIA' });
         log('INFO', 'AUTO', `AI_DISABLED: fallback modelo ${pickTeam} @ ${pickOdd} EV=${evPct.toFixed(1)}% edge=${mlResult.score.toFixed(1)}pp`);
         return {
@@ -10261,7 +10266,7 @@ async function autoAnalyzeMatch(token, match) {
           modelPPick: Number.isFinite(pickP) ? pickP : null,
           conf: null, isLive: match.status === 'live',
           rejectedByGate: 'ai_disabled_no_fallback',
-          gateMeta: { edge_pp: +mlResult.score.toFixed(1), min_ev: 5, min_edge: 5 },
+          gateMeta: { edge_pp: +mlResult.score.toFixed(1), min_ev: FALLBACK_MIN_EV, min_edge: FALLBACK_MIN_EDGE },
         });
       } catch (_) {}
       return _returnNull('ai_disabled_no_fallback', `pick=${pickTeam}@${pickOdd} ev=${evPct.toFixed(1)}% edge=${mlResult.score.toFixed(1)}pp`);
@@ -10292,7 +10297,7 @@ async function autoAnalyzeMatch(token, match) {
       const pickOdd = direction === 't2' ? _odd2 : _odd1;
       const pickP = direction === 't2' ? mlResult.modelP2 : mlResult.modelP1;
       const evPct = (pickP && pickOdd) ? ((pickP * pickOdd - 1) * 100) : 0;
-      if (pickOdd >= FALLBACK_MIN_ODDS && pickOdd <= FALLBACK_MAX_ODDS && evPct >= 5 && mlResult.score >= 5) {
+      if (pickOdd >= FALLBACK_MIN_ODDS && pickOdd <= FALLBACK_MAX_ODDS && evPct >= FALLBACK_MIN_EV && mlResult.score >= FALLBACK_MIN_EDGE) {
         const stake = calcKellyWithP(pickP, pickOdd, 0.15, { sport: 'lol', confKey: 'MEDIA' });
         log('WARN', 'AUTO', `IA em backoff; fallback modelo: ${pickTeam} @ ${pickOdd} EV=${evPct.toFixed(1)}% edge=${mlResult.score.toFixed(1)}pp`);
         return {
@@ -10381,7 +10386,7 @@ async function autoAnalyzeMatch(token, match) {
       const pickOdd = direction === 't2' ? _odd2 : _odd1;
       const pickP = direction === 't2' ? mlResult.modelP2 : mlResult.modelP1;
       const evPct = (pickP && pickOdd) ? ((pickP * pickOdd - 1) * 100) : 0;
-      if (pickOdd >= FALLBACK_MIN_ODDS && pickOdd <= FALLBACK_MAX_ODDS && evPct >= 5 && mlResult.score >= 5) {
+      if (pickOdd >= FALLBACK_MIN_ODDS && pickOdd <= FALLBACK_MAX_ODDS && evPct >= FALLBACK_MIN_EV && mlResult.score >= FALLBACK_MIN_EDGE) {
         const stake = calcKellyWithP(pickP, pickOdd, 0.15, { sport: 'lol', confKey: 'MEDIA' });
         const errShort = resp?.error ? String(resp.error).slice(0, 140) : '';
         const st = resp?.__status ? String(resp.__status) : '';
