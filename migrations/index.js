@@ -2949,6 +2949,43 @@ const migrations = [
       } catch (e) { console.log(`[mig 110] bankroll_drift_log: ${e.message}`); }
     },
   },
+  {
+    id: '111_league_blocklist_market_normalize',
+    up(db) {
+      // 2026-05-16 audit MT escape: league_blocklist 2-part (sport:substring)
+      // bloqueava SÓ ML em runtime — isLeagueBlocked chamada com market='ML'
+      // em todos 13 callsites bot.js. MT path (TOTAL/HANDICAP/KILLS) escapava:
+      // Prime League/EWC/Italian/Circuito emitiam MT real apesar de blocked.
+      // Fix raiz: entries 2-part source IN env/auto (intent ML-only) → 3-part
+      // sport:ML:substring. Após mig, 2-part = "block all markets" (intent
+      // explícito), 3-part = market-specific. Manual entries preservadas 2-part.
+      try {
+        if (!tableExists(db, 'league_blocklist')) {
+          console.log('[mig 111] league_blocklist absent — skip');
+          return;
+        }
+        const rows = db.prepare(
+          "SELECT entry, source, reason, roi_pct, clv_pct, n_tips, created_at, cooldown_until " +
+          "FROM league_blocklist WHERE source IN ('env','auto') AND entry NOT LIKE '%:%:%'"
+        ).all();
+        let migrated = 0, skipped = 0;
+        for (const r of rows) {
+          const parts = r.entry.split(':');
+          if (parts.length !== 2) { skipped++; continue; }
+          const [sport, sub] = parts;
+          if (!sport || !sub) { skipped++; continue; }
+          const newEntry = `${sport}:ml:${sub}`;
+          db.prepare(
+            "INSERT INTO league_blocklist (entry, source, reason, roi_pct, clv_pct, n_tips, created_at, cooldown_until) " +
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(entry) DO NOTHING"
+          ).run(newEntry, r.source, r.reason, r.roi_pct, r.clv_pct, r.n_tips, r.created_at, r.cooldown_until);
+          db.prepare("DELETE FROM league_blocklist WHERE entry = ?").run(r.entry);
+          migrated++;
+        }
+        console.log(`[mig 111] league_blocklist normalize: ${migrated} entries 2-part→3-part ML (skipped=${skipped})`);
+      } catch (e) { console.log(`[mig 111] failed: ${e.message}`); }
+    },
+  },
 ];
 
 function applyMigrations(db) {

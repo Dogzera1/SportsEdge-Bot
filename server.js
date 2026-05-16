@@ -26439,8 +26439,13 @@ load();
     const sport = String(parsed.query.sport || '*').trim().toLowerCase();
     const substr = String(parsed.query.substring || parsed.query.league || '').trim().toLowerCase();
     const reason = String(parsed.query.reason || 'manual').trim().slice(0, 200);
+    // 2026-05-16: market param opcional. Sem market → entry 2-part 'sport:substring'
+    // = block all markets (ML + MT). Com market → entry 3-part 'sport:MARKET:substring'
+    // = market-specific (ex: 'lol:TOTAL:prime league' bloqueia só MT TOTAL Prime League,
+    // preserva ML emission). Use '*' explicit pra wildcard market (equivalente a 2-part).
+    const market = String(parsed.query.market || '').trim().toLowerCase();
     if (!substr) { sendJson(res, { ok: false, error: 'missing substring' }, 400); return; }
-    const entry = `${sport}:${substr}`;
+    const entry = market ? `${sport}:${market}:${substr}` : `${sport}:${substr}`;
     try {
       const info = db.prepare(`
         INSERT INTO league_blocklist (entry, source, reason, n_tips, created_at, cooldown_until)
@@ -26448,7 +26453,7 @@ load();
         ON CONFLICT(entry) DO UPDATE SET source='manual', reason=excluded.reason, cooldown_until=NULL
       `).run(entry, reason);
       log('WARN', 'BLOCKLIST', `HTTP block ${entry}: ${reason}`);
-      sendJson(res, { ok: true, entry, source: 'manual', reason, changes: info.changes });
+      sendJson(res, { ok: true, entry, sport, market: market || null, substring: substr, source: 'manual', reason, changes: info.changes, note: 'bot.js loads from DB at boot — entry ativa após próximo restart OR reload manual' });
     } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
     return;
   }

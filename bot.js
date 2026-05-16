@@ -5226,7 +5226,14 @@ function _parseBlocklistEnv() {
   for (const e of sources) {
     const v = String(e || '').trim().toLowerCase();
     if (!v) continue;
-    const entry = v.includes(':') ? v : `*:${v}`;
+    let entry = v.includes(':') ? v : `*:${v}`;
+    // 2026-05-16: env-driven entries (LEAGUE_BLOCKLIST + _BLOCKLIST_DEFAULTS)
+    // sempre serviram intent ML-only (isLeagueBlocked called com market='ML'
+    // em 13 callsites bot.js). MT path escapava. Backward-compat: auto-expand
+    // 2-part 'sport:substring' → 3-part 'sport:ml:substring' (mesmo intent ML).
+    // Bypass: usar explicit 3-part 'sport:*:substring' no env pra block all markets,
+    // ou 'sport:TOTAL:substring' pra market-specific.
+    if (entry.split(':').length === 2) entry = entry.replace(':', ':ml:');
     // 2026-04-28: respeita cooldown manual unblock. Antes env re-adicionava
     // entry mesmo durante cooldown (manual unblock recente) → cooldown ineficaz.
     const cooldownUntil = _leagueUnblockCooldown.get(entry) || 0;
@@ -6250,6 +6257,25 @@ async function recordMarketTipAsRegular({ sport, match, tip, stake, isLive }) {
     const matchIdBase = String(match.id || `mt_${sport}_${Date.now()}`);
     const marketKey = String(tip.market || 'unknown');
     const sideKey = String(tip.side || 'na');
+
+    // ── LEAGUE BLOCKLIST (MT path) ──
+    // 2026-05-16 audit MT escape: league_blocklist era checada SOMENTE no path
+    // ML (isLeagueBlocked called com market='ML' em ~13 callsites bot.js). MT
+    // path (TOTAL/HANDICAP/KILLS) escapava — Prime League/EWC/Italian/Circuito
+    // emitiam MT real apesar de blocked. Fix raiz: 1 ponto centralizado aqui
+    // cobre todos sports (lol/cs/dota/val/tennis/football/basket). Mig 111
+    // normalizou entries 2-part legacy → 3-part 'sport:ml:substring' preservando
+    // intent ML-only. Entries 2-part 'sport:substring' agora = "block all markets",
+    // 3-part 'sport:MARKET:substring' = market-specific (HANDICAP/TOTAL/etc).
+    try {
+      const marketTypeUp = String(marketKey || '').toUpperCase();
+      const blocked = isLeagueBlocked(sport, match.league, marketTypeUp);
+      if (blocked) {
+        log('INFO', 'MT-LEAGUE-BLOCK',
+          `${sport}/${marketKey}/${sideKey} ${match.team1} vs ${match.team2} [${match.league}]: liga bloqueada (${blocked}) — skip promote (shadow continua logado)`);
+        return null;
+      }
+    } catch (_) { /* defensive — fail-open consistente com gates seguintes */ }
 
     // ── MIN ODD FLOOR ──
     // 2026-05-11: tip Dota UNDER 4.5 maps @ 1.20 escapou (EV+20% / Kelly 1u) —
