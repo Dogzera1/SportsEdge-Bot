@@ -23951,6 +23951,64 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   setInterval(_wrapCron('auto_void_stuck', runAutoVoidStuck), 15 * 60 * 1000);
   setTimeout(_wrapCron('auto_void_stuck', runAutoVoidStuck), 65 * 60 * 1000);
 
+  // 2026-05-16: stuck-pending early-warning per-sport. auto_void_stuck só age
+  // em 36h+ (dota2/lol/cs default). High-risk sports com single-source settle
+  // (dota2 PandaScore only — memory project_tip_emission_audit_2026_05_15)
+  // ficam silently broken até 36h. Esse cron DM admin antes (default 12h
+  // dota2, 18h outros esports) pra ação manual: checar PandaScore status,
+  // re-rodar settle, ou subir VOID_STUCK_H_<SPORT> se reschedule legítimo.
+  // Cooldown 12h per sport. Disable: STUCK_PENDING_WARN_AUTO=false.
+  const _stuckWarnLastDm = new Map(); // sport → ts
+  async function runStuckPendingEarlyWarn() {
+    if (/^(0|false|no)$/i.test(String(process.env.STUCK_PENDING_WARN_AUTO ?? 'true'))) return;
+    if (isMemCritical()) return;
+    const cooldownMs = parseInt(process.env.STUCK_PENDING_WARN_COOLDOWN_H || '12', 10) * 3600 * 1000;
+    const minN = parseInt(process.env.STUCK_PENDING_WARN_MIN_N || '2', 10);
+    // Per-sport warn threshold (h). Default agressivo pra dota2 (single-source
+    // settle = mais frágil), conservador pra outros.
+    const warnH = {
+      dota2: parseInt(process.env.STUCK_PENDING_WARN_H_DOTA2 || '12', 10),
+      lol: parseInt(process.env.STUCK_PENDING_WARN_H_LOL || '18', 10),
+      cs: parseInt(process.env.STUCK_PENDING_WARN_H_CS || '18', 10),
+      cs2: parseInt(process.env.STUCK_PENDING_WARN_H_CS2 || '18', 10),
+      valorant: parseInt(process.env.STUCK_PENDING_WARN_H_VALORANT || '18', 10),
+      tennis: parseInt(process.env.STUCK_PENDING_WARN_H_TENNIS || '18', 10),
+    };
+    const alerts = [];
+    const nowMs = Date.now();
+    for (const [sport, hours] of Object.entries(warnH)) {
+      try {
+        const rows = db.prepare(`
+          SELECT COUNT(*) AS n, MIN(sent_at) AS oldest
+          FROM tips
+          WHERE sport = ?
+            AND result IS NULL
+            AND (archived IS NULL OR archived = 0)
+            AND COALESCE(is_shadow, 0) = 0
+            AND sent_at <= datetime('now', '-' || ? || ' hours')
+        `).get(sport, hours);
+        if (!rows || (rows.n || 0) < minN) continue;
+        const last = _stuckWarnLastDm.get(sport) || 0;
+        if (nowMs - last < cooldownMs) continue;
+        _stuckWarnLastDm.set(sport, nowMs);
+        alerts.push({ sport, n: rows.n, oldest: rows.oldest, warnH: hours });
+      } catch (e) { log('DEBUG', 'STUCK-WARN', `${sport}: ${e.message}`); }
+    }
+    if (!alerts.length) return;
+    log('WARN', 'STUCK-WARN', `${alerts.length} sport(s): ${alerts.map(a => `${a.sport}(${a.n}/>${a.warnH}h)`).join(', ')}`);
+    if (!ADMIN_IDS.size) return;
+    let msg = `⏳ *Stuck pending early-warn*\n\n`;
+    for (const a of alerts) {
+      msg += `• ${a.sport}: ${a.n} tips pendentes >${a.warnH}h (oldest: ${a.oldest})\n`;
+    }
+    msg += `\n_Auto-void age em 36h+ (per-sport tunable). Investigar source feed ${alerts.map(a => a.sport).join('/')} antes do void._`;
+    const routed = _pickTokenForAlert('stuck_pending') || _pickTokenForAlert('system');
+    const token = routed?.token;
+    if (token) for (const adminId of ADMIN_IDS) sendDM(token, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
+  }
+  setInterval(_wrapCron('stuck_pending_warn', runStuckPendingEarlyWarn), 60 * 60 * 1000);
+  setTimeout(_wrapCron('stuck_pending_warn', runStuckPendingEarlyWarn), 20 * 60 * 1000);
+
   // 2026-05-13: DD per-sport early-warning. DRAWDOWN_HARD_LIMIT_<SPORT> bloqueia
   // em runtime quando DD ≥ hard (default 25%), mas user não tem visibility do
   // approach. Esse cron DM admin quando DD ∈ [warn, hard) — chance de pause
