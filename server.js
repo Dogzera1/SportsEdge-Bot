@@ -24318,6 +24318,28 @@ load();
         if (oddsN == null || oddsN <= 1) { badRequest(res, 'odds inválidas'); return; }
         if (evN == null) { badRequest(res, 'ev inválido'); return; }
 
+        // 2026-05-16: per-league shadow override. Permite manter ligas específicas
+        // em shadow mesmo quando sport está real. Use case: MMA com MMA_SHADOW=false
+        // (sport real) + MMA_SHADOW_LEAGUES=UFC força UFC tips pra shadow, libera
+        // resto (PFL/Bellator/Oktagon/regional). Cross-sport reusable (qualquer
+        // sport: <SPORT>_SHADOW_LEAGUES=csv,substrings,case-insensitive).
+        // Override só FORÇA shadow=1 (não pode forçar real=0); preserva is_shadow=1
+        // já existente. Caller bot.js decide is_shadow inicial baseado em sport-level
+        // shadowMode; este check adiciona granularidade per-liga em cima.
+        try {
+          const _sportShadowLeagues = String(process.env[`${String(sport).toUpperCase()}_SHADOW_LEAGUES`] || '').trim();
+          if (_sportShadowLeagues && eventName) {
+            const _evLow = String(eventName).toLowerCase();
+            const _matches = _sportShadowLeagues.split(',').map(s => s.trim().toLowerCase()).filter(Boolean)
+              .some(sub => sub && _evLow.includes(sub));
+            if (_matches && !t.isShadow) {
+              log('INFO', 'SHADOW-LEAGUE-OVERRIDE',
+                `${sport}/${eventName}: forced is_shadow=1 (matches ${String(sport).toUpperCase()}_SHADOW_LEAGUES=${_sportShadowLeagues})`);
+              t.isShadow = 1;
+            }
+          }
+        } catch (_) { /* defensive */ }
+
         // 2026-05-10 P0 brain audit: gate temporal sent_at < match_end_at.
         // Caso `garin_echargui_premature_settle_2026_05_03`: tip emitida 12min
         // após match resolved → settle imediato c/ winner errado. Reject hard
