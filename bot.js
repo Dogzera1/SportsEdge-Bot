@@ -27835,6 +27835,17 @@ async function reanalyzeAndVoidFailing(opts = {}) {
       // Skip esports/lol/dota por mapa (série em andamento)
       if ((sport === 'esports' || sport === 'lol' || sport === 'dota2') && String(tip.match_id || '').includes('_MAP')) continue;
 
+      // 2026-05-15 — P2 defensive guard: shadow tips (is_shadow=1) NÃO devem
+      // ser voidadas por EV drift. Shadow é research universe — preserva
+      // dataset puro pra settle natural via match outcome (win/loss/void real).
+      // Caso 2026-05-13 13:25Z: 6 shadow MMA tips voidadas pré-fight (fights
+      // 16/05) por edge ter fechado entre emit 11/05 e reanalyze 13/05.
+      // Resultado: roi_shadow.d30.n=0, eval window vazia.
+      // Opt-out: REANAL_VOID_INCLUDE_SHADOW=true (preserva legacy comportamento).
+      if (tip.is_shadow && !/^(1|true|yes)$/i.test(String(process.env.REANAL_VOID_INCLUDE_SHADOW || ''))) {
+        continue;
+      }
+
       const p1 = tip.participant1 || '';
       const p2 = tip.participant2 || '';
       const pick = tip.tip_participant || '';
