@@ -597,8 +597,11 @@ function _runIntegrityCheck() {
       log('INFO', 'BOOT', `db integrity check: ok (${dt}ms)`);
       try { require('./lib/metrics').gauge('db_integrity_ok', 1); } catch (_) {}
     } else {
-      log('WARN', 'BOOT', `DB INTEGRITY FAILED: ${result} (${dt}ms) — investigar urgente`);
+      log('ERROR', 'BOOT', `DB INTEGRITY FAILED: ${result} (${dt}ms) — investigar urgente`);
       try { require('./lib/metrics').gauge('db_integrity_ok', 0); } catch (_) {}
+      // 2026-05-16: sinaliza pra runIntegrityCheck cron disparar DM admin imediato.
+      // Boot scope não tem acesso a ADMIN_IDS/sendDM (declarados depois); delega.
+      global._bootIntegrityFail = { result, ts: Date.now() };
     }
   } catch (e) {
     log('WARN', 'BOOT', `db integrity check threw: ${e.message}`);
@@ -24160,21 +24163,25 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   setInterval(_wrapCron('dd_warn', runDdWarning), 15 * 60 * 1000);
   setTimeout(_wrapCron('dd_warn', runDdWarning), 50 * 60 * 1000);
 
-  // 2026-05-10 P0 audit: PRAGMA integrity_check diário pra detectar corrupção
-  // SQLite (WAL stale, OOM crashes, FK violations). Gated por
+  // 2026-05-10 P0 audit: PRAGMA integrity_check pra detectar corrupção SQLite
+  // (WAL stale, OOM crashes, FK violations). Gated por
   // DB_INTEGRITY_CHECK_AUTO=true (default true). DM admin se != 'ok'.
-  // Runtime: ~5-15s em DB 154MB; off-peak (default 4h UTC) pra não competir com
-  // settle pipeline/scanners.
-  let _lastIntegrityCheckDay = null;
+  // 2026-05-16: gate daily 1x/dia → interval cada 4h (default).
+  //   Corrupção pós-OOM (caso 14:48-15:08 UTC) ficava invisível ~24h. Custo: 5-15s
+  //   × 6 = ~1min/dia I/O off-peak (_wrapCron já tem isMemCritical guard).
+  //   DB_INTEGRITY_CHECK_INTERVAL_HOURS=4 (default). Boot-time _bootIntegrityFail
+  //   força run imediato no primeiro tick.
+  let _lastIntegrityCheckTs = 0;
   async function runIntegrityCheck() {
     if (/^(0|false|no)$/i.test(String(process.env.DB_INTEGRITY_CHECK_AUTO ?? 'true'))) return;
     const now = new Date();
-    const today = now.toISOString().slice(0, 10);
-    if (_lastIntegrityCheckDay === today) return;
-    const hourUtc = parseInt(process.env.DB_INTEGRITY_CHECK_HOUR_UTC || '4', 10);
-    const { shouldRunDaily: _srdInteg } = require('./lib/cron-stagger');
-    if (!_srdInteg('db_integrity_check', hourUtc, now)) return;
-    _lastIntegrityCheckDay = today;
+    const intervalH = Math.max(1, parseInt(process.env.DB_INTEGRITY_CHECK_INTERVAL_HOURS || '4', 10) || 4);
+    const intervalMs = intervalH * 60 * 60 * 1000;
+    const bootFail = global._bootIntegrityFail && !global._bootIntegrityFail.processed
+      ? global._bootIntegrityFail : null;
+    if (!bootFail && (now.getTime() - _lastIntegrityCheckTs) < intervalMs) return;
+    _lastIntegrityCheckTs = now.getTime();
+    if (bootFail) bootFail.processed = true;
     const _t0 = Date.now();
     try {
       const r = db.pragma('integrity_check', { simple: false });
@@ -24205,7 +24212,8 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
     } catch (e) { log('ERROR', 'DB-INTEGRITY', `pragma falhou: ${e.message}`); }
   }
   setInterval(_wrapCron('db_integrity_check', runIntegrityCheck), 15 * 60 * 1000);
-  setTimeout(_wrapCron('db_integrity_check', runIntegrityCheck), 90 * 60 * 1000);
+  // 2026-05-16: 5min pós-boot pra pegar global._bootIntegrityFail antes do interval.
+  setTimeout(_wrapCron('db_integrity_check', runIntegrityCheck), 5 * 60 * 1000);
 
   // 2026-05-10 P1 brain audit: cron unificado pra refresh calib in-memory.
   // Antes cada calib (ev-calibration, tennis-markov, football-poisson) era

@@ -110,10 +110,13 @@ function _writeChildExit(name, code, signal, uptimeMs) {
 // Last OOM snapshot 07:04Z mostrou bot RSS 383 MB.
 // Fix: cap heap explicit per process. V8 GCs aggressive at cap → throws
 // "JavaScript heap OOM" gracefully (catchable) BEFORE container OOM SIGKILL.
-// Budget Railway 512 MB: launcher 50 + server cap 150 = ~200 RSS +
-// bot cap 180 = ~260 RSS = ~500 total. Env tunável.
+// Budget Railway 512 MB: launcher 50 + server cap 200 = ~250 RSS +
+// bot cap 180 = ~260 RSS = ~510 total (margem apertada mas viável).
+// 2026-05-16: SERVER_HEAP_MB 150→200 (server.js OOM SIGABRT 14:49:57 UTC
+// estourou cap 150 em JSON parse cumulative — heap 149/151 MB no crash).
+// Pode ter causado corrupção SQLite WAL via SIGABRT mid-write.
 const BOT_HEAP_MB = parseInt(process.env.BOT_HEAP_MB || '180', 10);
-const SERVER_HEAP_MB = parseInt(process.env.SERVER_HEAP_MB || '150', 10);
+const SERVER_HEAP_MB = parseInt(process.env.SERVER_HEAP_MB || '200', 10);
 console.log(`[LAUNCHER] heap caps: bot=${BOT_HEAP_MB}MB server=${SERVER_HEAP_MB}MB (Railway 512 cap)`);
 
 function spawnChild(name, file) {
