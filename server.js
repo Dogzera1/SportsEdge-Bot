@@ -4089,7 +4089,7 @@ function _adminCsrfValid(req) {
 // - mt-block-league + mt-unblock-league + mt-disable + mt-restore: blocklist mutations
 // - mt-promote: muta runtime env + settings table
 // Esses agora bloqueiam ?key= query, exigindo header x-admin-key.
-const _DESTRUCTIVE_PATHS = /^(\/reset-tips|\/reset-bankroll|\/admin\/wipe|\/admin\/delete|\/admin\/purge|\/admin\/force-sync-bankroll|\/admin\/void-tips-batch|\/admin\/unsettle-market-tips|\/admin\/restore-voided-market-tips|\/admin\/mt-block-league|\/admin\/mt-unblock-league|\/admin\/mt-disable|\/admin\/mt-restore|\/admin\/mt-promote)/;
+const _DESTRUCTIVE_PATHS = /^(\/reset-tips|\/reset-bankroll|\/admin\/wipe|\/admin\/delete|\/admin\/purge|\/admin\/force-sync-bankroll|\/admin\/void-tips-batch|\/admin\/unsettle-market-tips|\/admin\/restore-voided-market-tips|\/admin\/mt-block-league|\/admin\/mt-unblock-league|\/admin\/mt-disable|\/admin\/mt-restore|\/admin\/mt-promote|\/admin\/reanalyze-void|\/admin\/match-result-sources-cleanup)/;
 function _isDestructive(req) {
   try { return _DESTRUCTIVE_PATHS.test(req.url || ''); } catch (_) { return false; }
 }
