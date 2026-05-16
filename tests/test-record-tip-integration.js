@@ -176,10 +176,7 @@ module.exports = async function runTests(t) {
     });
 
     // ─── Test 7a: ev_sanity_cap → skipped quando ev > RECORD_TIP_EV_CAP_PCT ──
-    // server.js L24054-24067: !t.isShadow + evN > _evCap (default 50%) → reject.
-    // Note: handler chama _emitSkip (que envia {ok:true,skipped,reason,sport,evN,cap,matchId})
-    // + sendJson duplicado depois (no-op porque headers já enviados). Resposta visível
-    // ao client vem do _emitSkip. NÃO assertar shape específico do segundo sendJson.
+    // Handler chama _emitSkip → {ok:true,skipped:true,reason:'ev_sanity_cap',sport,evN,cap,matchId}.
     await t.test('ev_sanity_cap: ev=75 não-shadow → skipped reason=ev_sanity_cap', async () => {
       const r = await httpJson(port, 'POST', '/record-tip?sport=dota2', {
         matchId: 'test_dota2_ev_high_' + Date.now(),

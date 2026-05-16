@@ -24233,7 +24233,6 @@ load();
                 const ageS = Math.round((nowMs - resMs) / 1000);
                 log('WARN', 'TEMPORAL-GATE', `${sport} ${matchId}${t.isShadow ? '/SHADOW' : ''}: match resolved há ${ageS}s (>${_slackS}s slack) — tip post-match REJECTED`);
                 _emitSkip('temporal_gate_post_match', { matchId, sport, ageS, slackS: _slackS, isShadow: !!t.isShadow });
-                sendJson(res, { ok: false, skipped: true, reason: 'temporal_gate_post_match', age_s: ageS });
                 _gateFired = true;
               }
             }
@@ -24262,14 +24261,13 @@ load();
                   const ageS = Math.round((nowMs - resMs) / 1000);
                   log('WARN', 'TEMPORAL-GATE', `tennis ${matchId}${t.isShadow ? '/SHADOW' : ''} [fuzzy ${r.team1} vs ${r.team2}]: match resolved há ${ageS}s — REJECTED`);
                   _emitSkip('temporal_gate_post_match_fuzzy', { matchId, sport, ageS, slackS: _slackS, isShadow: !!t.isShadow, espn_team1: r.team1, espn_team2: r.team2 });
-                  sendJson(res, { ok: false, skipped: true, reason: 'temporal_gate_post_match', age_s: ageS, via: 'fuzzy_tennis' });
                   _gateFired = true;
                   break;
                 }
               }
             }
             if (_gateFired) return;
-          } catch (_) {}
+          } catch (e) { log('DEBUG', 'TEMPORAL-GATE', `err: ${e.message}`); }
         }
 
         // 2026-05-10 P0 brain audit: EV sanity gate (>50% absurdo) replicado
@@ -24282,7 +24280,6 @@ load();
           if (Number.isFinite(_evCap) && _evCap > 0 && evN > _evCap) {
             log('WARN', 'EV-SANITY', `${sport} ${tipParticipant} @ ${oddsN}: EV ${evN}% > ${_evCap}% cap (provável calib leak) — REJECTED`);
             _emitSkip('ev_sanity_cap', { sport, evN, cap: _evCap, matchId });
-            sendJson(res, { ok: false, skipped: true, reason: 'ev_sanity_cap', ev: evN, cap: _evCap });
             return;
           }
         }
@@ -24341,7 +24338,6 @@ load();
               if (impact.severity === 'critical') {
                 log('WARN', 'NEWS-IMPACT', `${sport} ${tipParticipant}: news ${impact.severity} affecting ${impact.team} (${impact.source}) — tip REJECTED | "${impact.title.slice(0, 80)}"`);
                 _emitSkip('news_critical', { sport, matchId, team: impact.team, title: impact.title.slice(0, 100) });
-                sendJson(res, { ok: false, skipped: true, reason: 'news_critical', news: { severity: impact.severity, team: impact.team, title: impact.title.slice(0, 100), source: impact.source } });
                 return;
               }
               // warning: continua mas registra
