@@ -10814,24 +10814,52 @@ setInterval(load, 10000);
   // opt VACUUM. Pareia com cron diário em bot.js (runMatchResultSourcesCleanup).
   // 2026-05-16: criado pra resolver DB bloat 1.6M rows (mig 109 FASE 1 sem TTL).
   // Dry-run default. apply=1 executa DELETE. vacuum=1 (só com apply=1) reclama espaço.
+  //
+  // Modo retention: ?retention_days=N (clamp 1..180). Deleta rows > N dias antigos.
+  // Modo truncate: ?truncate=1&confirm=truncate_all_match_result_sources — wipe full
+  //   table. Pra usar quando mig 109 ainda jovem (todas rows <retention min) mas DB
+  //   bloated. Reconcile cron perde audit history (FASE 1 observability only).
   // GET/POST /admin/match-result-sources-cleanup?apply=1&vacuum=1&retention_days=30&key=<ADMIN_KEY>
   if (p === '/admin/match-result-sources-cleanup' && (req.method === 'GET' || req.method === 'POST')) {
     const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
     try {
-      const retentionDays = Math.max(7, Math.min(180, parseInt(parsed.query.retention_days || '30', 10) || 30));
+      const retentionDays = Math.max(1, Math.min(180, parseInt(parsed.query.retention_days || '30', 10) || 30));
       const apply = String(parsed.query.apply || '0') === '1';
       const doVacuum = String(parsed.query.vacuum || '0') === '1';
+      const truncate = String(parsed.query.truncate || '0') === '1';
+      const confirmToken = String(parsed.query.confirm || '');
       const before = db.prepare(`SELECT COUNT(*) AS n FROM match_result_sources`).get().n;
-      const eligible = db.prepare(`SELECT COUNT(*) AS n FROM match_result_sources WHERE recorded_at < datetime('now', '-' || ? || ' days')`).get(retentionDays).n;
+      let eligible = 0;
+      let mode = 'retention';
+      if (truncate) {
+        mode = 'truncate';
+        if (confirmToken !== 'truncate_all_match_result_sources') {
+          sendJson(res, {
+            ok: false,
+            error: 'truncate requires confirm=truncate_all_match_result_sources',
+            rows_before: before,
+            mode,
+          }, 400);
+          return;
+        }
+        eligible = before;
+      } else {
+        eligible = db.prepare(`SELECT COUNT(*) AS n FROM match_result_sources WHERE recorded_at < datetime('now', '-' || ? || ' days')`).get(retentionDays).n;
+      }
       let deleted = 0;
       let vacuumed = false;
       let reclaimed_mb = 0;
       let elapsed_ms = 0;
       if (apply && eligible > 0) {
         const t0 = Date.now();
-        const r = db.prepare(`DELETE FROM match_result_sources WHERE recorded_at < datetime('now', '-' || ? || ' days')`).run(retentionDays);
-        deleted = r.changes;
+        if (truncate) {
+          const r = db.prepare(`DELETE FROM match_result_sources`).run();
+          deleted = r.changes;
+        } else {
+          const r = db.prepare(`DELETE FROM match_result_sources WHERE recorded_at < datetime('now', '-' || ? || ' days')`).run(retentionDays);
+          deleted = r.changes;
+        }
         if (doVacuum) {
           const pageSize = db.pragma('page_size', { simple: true });
           const before_pages = db.pragma('page_count', { simple: true });
@@ -10845,6 +10873,7 @@ setInterval(load, 10000);
       sendJson(res, {
         ok: true,
         ts: new Date().toISOString(),
+        mode,
         retention_days: retentionDays,
         rows_before: before,
         rows_eligible_for_delete: eligible,
@@ -10854,7 +10883,9 @@ setInterval(load, 10000);
         vacuumed,
         reclaimed_mb,
         elapsed_ms,
-        next_step: apply ? null : `Run with ?apply=1${eligible > 10000 ? '&vacuum=1' : ''} to execute (vacuum recommended if eligible >10k)`,
+        next_step: apply ? null : (truncate
+          ? `Run with ?apply=1&vacuum=1&truncate=1&confirm=truncate_all_match_result_sources to wipe entire table`
+          : `Run with ?apply=1${eligible > 10000 ? '&vacuum=1' : ''} to execute (vacuum recommended if eligible >10k)`),
       });
     } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
     return;
