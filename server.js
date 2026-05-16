@@ -24144,8 +24144,15 @@ load();
         const hoursParam = parseInt(payload.hours || parsed.query.hours || '0', 10) || 0;
         // Permite passar hours pra granularidade menor que 1 dia
         const cutoffExpr = hoursParam > 0 ? `-${hoursParam} hours` : `-${days} days`;
-        // Filtra is_shadow=0: shadow tips precisam settle natural (match_results)
-        // pra preservar o dataset puro usado por ML_SHADOW_PURE_MODE / shadow learning.
+        // 2026-05-15: SELECT-then-UPDATE-with-audit pattern. Antes UPDATE silent
+        // sem registro em tip_settlement_audit — investigação MMA shadow voids 13/05
+        // 13:25 ficou impossível de rastrear (forensics retornava voided_entry=null).
+        // Agora: capture IDs, write audit per-tip, log IDs no return + console.
+        const realIdsRow = db.prepare(
+          `SELECT id FROM tips WHERE sport = ? AND result IS NULL AND COALESCE(is_shadow,0) = 0
+             AND sent_at < datetime('now', ?)`
+        ).all(sport, cutoffExpr);
+        const realIds = realIdsRow.map(x => x.id);
         const r = db.prepare(
           `UPDATE tips SET result = 'void', settled_at = datetime('now'), profit_reais = 0
            WHERE sport = ? AND result IS NULL AND COALESCE(is_shadow,0) = 0
@@ -24164,11 +24171,28 @@ load();
           const globalDays = parseInt(process.env.SHADOW_VOID_DAYS || '14', 10);
           return Number.isFinite(globalDays) && globalDays > 0 ? globalDays : 14;
         })();
+        const shadowIdsRow = db.prepare(
+          `SELECT id FROM tips WHERE sport = ? AND result IS NULL AND COALESCE(is_shadow,0) = 1
+             AND sent_at < datetime('now', '-' || ? || ' days')`
+        ).all(sport, shadowDays);
+        const shadowIds = shadowIdsRow.map(x => x.id);
         const rShadow = db.prepare(
           `UPDATE tips SET result = 'void', settled_at = datetime('now'), profit_reais = 0
            WHERE sport = ? AND result IS NULL AND COALESCE(is_shadow,0) = 1
              AND sent_at < datetime('now', '-' || ? || ' days')`
         ).run(sport, shadowDays);
+        // Audit trail: registrar em tip_settlement_audit pra rastreio futuro.
+        // Cobre real + shadow. Idempotente (INSERT — no conflict possível).
+        try {
+          const auditStmt = db.prepare(
+            `INSERT INTO tip_settlement_audit (tip_id, sport, prev_result, new_result, prev_profit_reais, new_profit_reais, actor, reason, source)
+             VALUES (?, ?, NULL, 'void', NULL, 0, 'cron', ?, '/void-old-pending')`
+          );
+          const reasonReal = `stale_real cutoff=${cutoffExpr}`;
+          const reasonShadow = `stale_shadow cutoff=-${shadowDays}d`;
+          for (const id of realIds) try { auditStmt.run(id, sport, reasonReal); } catch (_) {}
+          for (const id of shadowIds) try { auditStmt.run(id, sport, reasonShadow); } catch (_) {}
+        } catch (_) {}
         // Extensão 2026-04-28: void também em market_tips_shadow stuck. Critério
         // mesmo (sport, criação > cutoff, result IS NULL). Antes só cobria tabela
         // tips regular — MT shadow ficava acumulando pendings para sempre.
@@ -24176,8 +24200,11 @@ load();
           `UPDATE market_tips_shadow SET result = 'void', settled_at = datetime('now'), profit_units = 0
            WHERE sport = ? AND result IS NULL AND created_at < datetime('now', ?)`
         ).run(sport, cutoffExpr);
-        log('INFO', 'ADMIN', `void-old-pending: sport=${sport} cutoff=${cutoffExpr} shadow_cutoff=-${shadowDays}d → tips=${r.changes} tips_shadow=${rShadow.changes} mt_shadow=${mtR.changes}`);
-        sendJson(res, { ok: true, voided: r.changes, voided_shadow: rShadow.changes, voided_mt: mtR.changes, sport, cutoff: cutoffExpr, shadow_cutoff_days: shadowDays });
+        const idsLog = (realIds.length || shadowIds.length)
+          ? ` real_ids=[${realIds.join(',')}] shadow_ids=[${shadowIds.join(',')}]`
+          : '';
+        log('INFO', 'ADMIN', `void-old-pending: sport=${sport} cutoff=${cutoffExpr} shadow_cutoff=-${shadowDays}d → tips=${r.changes} tips_shadow=${rShadow.changes} mt_shadow=${mtR.changes}${idsLog}`);
+        sendJson(res, { ok: true, voided: r.changes, voided_shadow: rShadow.changes, voided_mt: mtR.changes, sport, cutoff: cutoffExpr, shadow_cutoff_days: shadowDays, voided_ids: realIds, voided_shadow_ids: shadowIds });
       } catch(e) {
         sendJson(res, { error: e.message }, 500);
       }
