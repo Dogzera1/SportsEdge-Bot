@@ -9531,9 +9531,13 @@ setInterval(load, 10000);
           if (idStr) {
             const id = parseInt(idStr, 10);
             if (!Number.isFinite(id)) return { ok: false, error: 'id inválido' };
-            row = db.prepare(`SELECT id, result, profit_reais FROM tips WHERE id = ? AND sport = ?`).get(id, sport);
+            // 2026-05-17 FIX: SELECT is_shadow pra guard contra deduzir bankroll real
+            // de shadow tip que nunca foi creditado. Reopen sobre shadow tip ainda zera
+            // result/settled_at/profit_reais (research universe pode reopen) mas pula
+            // bankroll UPDATE.
+            row = db.prepare(`SELECT id, result, profit_reais, is_shadow FROM tips WHERE id = ? AND sport = ?`).get(id, sport);
           } else {
-            row = db.prepare(`SELECT id, result, profit_reais FROM tips WHERE match_id = ? AND sport = ? ORDER BY sent_at DESC LIMIT 1`).get(matchId, sport);
+            row = db.prepare(`SELECT id, result, profit_reais, is_shadow FROM tips WHERE match_id = ? AND sport = ? ORDER BY sent_at DESC LIMIT 1`).get(matchId, sport);
           }
           if (!row) return { ok: true, changes: 0 };
 
@@ -9549,11 +9553,13 @@ setInterval(load, 10000);
           // Antes read+sum+write deixava race com /settle paralelo: read pegava
           // bk stale, depois write sobrescrevia o delta de /settle concurrent.
           // UPDATE += em SQLite é atômico por single-statement.
-          if (r.changes > 0 && Number.isFinite(row.profit_reais) && row.profit_reais !== 0) {
+          // 2026-05-17 P2 fix: shadow tips não creditam bankroll real no settle path,
+          // logo reopen sobre shadow não deve decrementar. is_shadow guard previne drift.
+          if (r.changes > 0 && row.is_shadow !== 1 && Number.isFinite(row.profit_reais) && row.profit_reais !== 0) {
             db.prepare(`UPDATE bankroll SET current_banca = round(current_banca - ?, 2), updated_at = datetime('now') WHERE sport = ?`)
               .run(row.profit_reais, sport);
           }
-          return { ok: true, changes: r.changes, revertedProfit: row.profit_reais };
+          return { ok: true, changes: r.changes, revertedProfit: row.is_shadow === 1 ? 0 : row.profit_reais, was_shadow: row.is_shadow === 1 };
         })();
         if (out && out.error) { sendJson(res, { error: out.error }, 400); return; }
         sendJson(res, out);
@@ -9610,12 +9616,14 @@ setInterval(load, 10000);
             : parseFloat((-stakeR).toFixed(2));
           db.prepare(`UPDATE tips SET stake_reais = ?, profit_reais = ? WHERE id = ?`).run(stakeR, profitR, id);
 
-          if (profitR !== 0) {
+          // 2026-05-17 P2 fix: shadow tip nunca creditou bankroll real no settle,
+          // logo /settle-manual sobre shadow não deve UPDATE bankroll.
+          if (profitR !== 0 && tip.is_shadow !== 1) {
             // 2026-05-06: delta-update atômico (sem race com /settle paralelo).
             db.prepare(`UPDATE bankroll SET current_banca = round(current_banca + ?, 2), updated_at = datetime('now') WHERE sport = ?`)
               .run(profitR, sport);
           }
-          return { ok: true, result, profitR };
+          return { ok: true, result, profitR, was_shadow: tip.is_shadow === 1 };
         })();
 
         if (!settled.ok) { sendJson(res, { error: settled.error }, 400); return; }
@@ -18186,22 +18194,29 @@ load();
         VALUES (?, ?, ?, 'void', ?, 0, 'admin', ?, '/admin/void-tips-batch')
       `);
       const bankStmt = db.prepare(`UPDATE bankroll SET current_banca = round(current_banca - ?, 2), updated_at=datetime('now') WHERE sport = ?`);
-      const selectStmt = db.prepare(`SELECT id, sport, result, profit_reais FROM tips WHERE id IN (${placeholders})`);
+      // 2026-05-17 P2 fix: SELECT inclui is_shadow (commit comment original L18149 dizia
+      // "shadow têm profit_reais=null no-op" — falso pós-2026-05-03 quando settle path
+      // passou a popular shadow profit_reais. Guard agora explícito.
+      const selectStmt = db.prepare(`SELECT id, sport, result, profit_reais, is_shadow FROM tips WHERE id IN (${placeholders})`);
       const out = db.transaction(() => {
         const rows = selectStmt.all(...ids);
         let voided = 0;
         let bankrollDelta = {};
+        let skippedShadow = 0;
         for (const row of rows) {
           if (row.result === 'void') continue;
           voidStmt.run(row.id);
           try { auditStmt.run(row.id, row.sport, row.result, row.profit_reais ?? null, reason); } catch (_) {}
-          if (Number.isFinite(row.profit_reais) && row.profit_reais !== 0) {
+          // is_shadow=1 → tip nunca creditou bankroll real; void apenas marca DB mas pula UPDATE bankroll.
+          if (row.is_shadow === 1) {
+            skippedShadow++;
+          } else if (Number.isFinite(row.profit_reais) && row.profit_reais !== 0) {
             bankStmt.run(row.profit_reais, row.sport);
             bankrollDelta[row.sport] = (bankrollDelta[row.sport] || 0) + (-row.profit_reais);
           }
           voided++;
         }
-        return { voided, bankroll_delta: bankrollDelta, requested: ids.length };
+        return { voided, bankroll_delta: bankrollDelta, skipped_shadow_bankroll: skippedShadow, requested: ids.length };
       })();
       sendJson(res, { ok: true, ...out });
     } catch (e) { sendJson(res, { error: e.message }, 500); }
@@ -18758,7 +18773,8 @@ load();
     const id = parseInt(parsed.query.id || '', 10);
     if (!Number.isFinite(id) || id <= 0) { sendJson(res, { error: 'id inválido' }, 400); return; }
     try {
-      const row = db.prepare(`SELECT id, sport, profit_reais, result FROM tips WHERE id = ?`).get(id);
+      // 2026-05-17 P2 fix: SELECT is_shadow pra guard bankroll UPDATE.
+      const row = db.prepare(`SELECT id, sport, profit_reais, result, is_shadow FROM tips WHERE id = ?`).get(id);
       if (!row) { sendJson(res, { error: 'tip não encontrada' }, 404); return; }
       if (row.result == null) { sendJson(res, { ok: true, skipped: true, reason: 'já está pending' }); return; }
       // 2026-05-06: tx atômica + delta-update.
@@ -18767,7 +18783,8 @@ load();
       const profitToRevert = Number(row.profit_reais) || 0;
       db.transaction(() => {
         const r = db.prepare(`UPDATE tips SET result = NULL, profit_reais = NULL, settled_at = NULL WHERE id = ?`).run(id);
-        if (r.changes > 0 && profitToRevert !== 0) {
+        // 2026-05-17 P2 fix: shadow tip nunca creditou bankroll real, pula UPDATE.
+        if (r.changes > 0 && row.is_shadow !== 1 && profitToRevert !== 0) {
           db.prepare(`UPDATE bankroll SET current_banca = round(current_banca - ?, 2), updated_at = datetime('now') WHERE sport = ?`)
             .run(profitToRevert, row.sport);
         }
@@ -22929,9 +22946,12 @@ load();
     const bufferMin = Math.max(0, Math.min(60, parseInt(parsed.query.buffer_min || '5', 10) || 5));
     const apply = parsed.query.apply === '1' || parsed.query.apply === 'true';
     try {
+      // 2026-05-17 P2 fix: SELECT is_shadow pra guard bankroll UPDATE. Shadow tips
+      // MT também podem aparecer como settle-suspects (mesmo matcher), mas reverter
+      // não deve tocar bankroll real.
       const tips = db.prepare(`
         SELECT t.id, t.sport, t.match_id, t.participant1, t.participant2, t.result, t.profit_reais,
-          t.is_live, t.sent_at, t.settled_at
+          t.is_live, t.sent_at, t.settled_at, t.is_shadow
         FROM tips t
         WHERE t.match_id LIKE '%::mt::%'
           AND t.result IN ('win','loss','void')
@@ -22973,6 +22993,7 @@ load();
             candidate_league: cand.league,
             gap_minutes: +gapMin.toFixed(1),
             result: t.result, profit_reais: t.profit_reais,
+            is_shadow: t.is_shadow ? 1 : 0,
             reason: `match_results resolved ${(-gapMin).toFixed(0)}min ANTES da tip — match anterior do par`,
           });
         }
@@ -22981,11 +23002,11 @@ load();
       if (apply && suspects.length) {
         const tx = db.transaction(() => {
           for (const s of suspects) {
-            // Estorna bankroll
-            const bk = db.prepare(`SELECT current_banca FROM bankroll WHERE sport = ?`).get(s.sport);
-            if (bk && Number.isFinite(s.profit_reais)) {
-              const nova = +(bk.current_banca - s.profit_reais).toFixed(2);
-              db.prepare(`UPDATE bankroll SET current_banca = ?, updated_at = datetime('now') WHERE sport = ?`).run(nova, s.sport);
+            // 2026-05-17 P2 fix: shadow tip não creditou bankroll real, pula estorno.
+            // Também: usar delta-update (current_banca - ?) atomic em vez de read+write.
+            if (s.is_shadow !== 1 && Number.isFinite(s.profit_reais) && s.profit_reais !== 0) {
+              db.prepare(`UPDATE bankroll SET current_banca = round(current_banca - ?, 2), updated_at = datetime('now') WHERE sport = ?`)
+                .run(s.profit_reais, s.sport);
             }
             db.prepare(`UPDATE tips SET result = NULL, profit_reais = NULL, settled_at = NULL, is_live = 0 WHERE id = ?`).run(s.id);
             try {
@@ -23048,12 +23069,16 @@ load();
     const apply = parsed.query.apply === '1' || parsed.query.apply === 'true';
     const days = Math.max(1, Math.min(180, parseInt(parsed.query.days || '30', 10) || 30));
     try {
+      // 2026-05-17 P2 fix: filter is_shadow=0. Shadow MT tips com profit_reais=NULL
+      // (legacy state) NÃO devem ser creditadas em bankroll real. Shadow path tem
+      // próprio settle pipeline e populated profit_units (não profit_reais).
       const tips = db.prepare(`
         SELECT id, sport, stake, odds, result, profit_reais, stake_reais
         FROM tips
         WHERE match_id LIKE '%::mt::%'
           AND result IN ('win','loss')
           AND profit_reais IS NULL
+          AND COALESCE(is_shadow, 0) = 0
           AND sent_at >= datetime('now', '-' || ? || ' days')
           AND (archived IS NULL OR archived = 0)
       `).all(days);
