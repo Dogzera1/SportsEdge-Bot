@@ -4025,15 +4025,27 @@ function _cleanupAdminSessions() {
   }
 }
 
+// 2026-05-17: constant-time key comparison defensive contra timing attacks.
+// Padrão usado em /admin/login (server.js:7147). Sem isso, `===` short-circuit
+// no primeiro byte diferente vaza microseconds de info por req — exploit em
+// LAN/co-tenant viável teoricamente. WAN jitter mitiga mas defesa em depth.
+function _adminKeyEq(provided) {
+  if (!provided || !ADMIN_KEY) return false;
+  if (provided.length !== ADMIN_KEY.length) return false;
+  try {
+    return require('crypto').timingSafeEqual(Buffer.from(provided), Buffer.from(ADMIN_KEY));
+  } catch (_) { return false; }
+}
+
 function isAdminRequest(req) {
   if (!ADMIN_KEY) return false;
   // Header path (CLI / API consumers, IPC bot↔server)
   const xk = (req.headers['x-admin-key'] || '').toString().trim();
-  if (xk && xk === ADMIN_KEY) return true;
+  if (_adminKeyEq(xk)) return true;
   const auth = (req.headers['authorization'] || '').toString().trim();
   if (auth.toLowerCase().startsWith('bearer ')) {
     const token = auth.slice(7).trim();
-    if (token && token === ADMIN_KEY) return true;
+    if (_adminKeyEq(token)) return true;
   }
   // Cookie path (browser admin pages) — read aceita __Host- ou legacy
   const sid = _parseAdminCookie(req);
@@ -4051,7 +4063,8 @@ const _queryKeyDeprWarn = new Map(); // key=`${ip}|${endpoint}` → ts
 function _isAdminQueryKeyDeprecated(req, parsed, endpoint) {
   if (!ADMIN_KEY) return false;
   const key = String(parsed?.query?.key || '').trim();
-  if (!key || key !== ADMIN_KEY) return false;
+  // 2026-05-17: constant-time via _adminKeyEq pra mitigar timing attack.
+  if (!_adminKeyEq(key)) return false;
   // 2026-05-14: query.key REJECTED em destructive paths — exige header
   // x-admin-key. Mitiga CSRF + secret leak via URL logs (proxy, browser
   // history, Referer header, screenshots). Adversarial audit catalogou
