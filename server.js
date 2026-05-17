@@ -12590,17 +12590,19 @@ setInterval(load, 60000);
       };
 
       // 2026-05-17 — per-sport auto-promote overrides (A: WINDOW_DAYS_<SPORT>,
-      // B: EVAL_SINCE_<SPORT>). Lista só os sports com env setado pra visibility.
+      // B: EVAL_SINCE_<SPORT>, MIN_SETTLED_<SPORT>). Lista só os sports com env setado.
       const P2_AP_SPORTS = ['lol', 'dota2', 'cs', 'cs2', 'valorant', 'tennis', 'football', 'basket', 'mma', 'tabletennis', 'darts', 'snooker'];
       const p2AutoPromoteOverrides = { ml: {}, mt: {} };
       for (const sp of P2_AP_SPORTS) {
         const up = sp.toUpperCase();
         const mlW = process.env[`ML_AUTO_PROMOTE_WINDOW_DAYS_${up}`];
         const mlS = process.env[`ML_AUTO_PROMOTE_EVAL_SINCE_${up}`];
-        if (mlW || mlS) p2AutoPromoteOverrides.ml[sp] = { window_days: mlW || null, eval_since: mlS || null };
+        const mlMin = process.env[`ML_AUTO_PROMOTE_MIN_SETTLED_${up}`];
+        if (mlW || mlS || mlMin) p2AutoPromoteOverrides.ml[sp] = { window_days: mlW || null, eval_since: mlS || null, min_settled: mlMin || null };
         const mtW = process.env[`MT_AUTO_PROMOTE_WINDOW_DAYS_${up}`];
         const mtS = process.env[`MT_AUTO_PROMOTE_EVAL_SINCE_${up}`];
-        if (mtW || mtS) p2AutoPromoteOverrides.mt[sp] = { window_days: mtW || null, eval_since: mtS || null };
+        const mtMin = process.env[`MT_AUTO_PROMOTE_MIN_SETTLED_${up}`];
+        if (mtW || mtS || mtMin) p2AutoPromoteOverrides.mt[sp] = { window_days: mtW || null, eval_since: mtS || null, min_settled: mtMin || null };
       }
 
       sendJson(res, {
@@ -18817,8 +18819,13 @@ load();
         const up = sp.toUpperCase();
         const winDays = process.env[`MT_AUTO_PROMOTE_WINDOW_DAYS_${up}`];
         const evalSince = process.env[`MT_AUTO_PROMOTE_EVAL_SINCE_${up}`];
-        if (winDays || evalSince) {
-          mtPerSportEnvs[sp] = { window_days: winDays || null, eval_since: evalSince || null };
+        const minSettled = process.env[`MT_AUTO_PROMOTE_MIN_SETTLED_${up}`];
+        if (winDays || evalSince || minSettled) {
+          mtPerSportEnvs[sp] = {
+            window_days: winDays || null,
+            eval_since: evalSince || null,
+            min_settled: minSettled || null,
+          };
         }
       }
       out.per_sport_envs = mtPerSportEnvs;
@@ -18881,8 +18888,13 @@ load();
         const up = sp.toUpperCase();
         const winDays = process.env[`ML_AUTO_PROMOTE_WINDOW_DAYS_${up}`];
         const evalSince = process.env[`ML_AUTO_PROMOTE_EVAL_SINCE_${up}`];
-        if (winDays || evalSince) {
-          perSportEnvs[sp] = { window_days: winDays || null, eval_since: evalSince || null };
+        const minSettled = process.env[`ML_AUTO_PROMOTE_MIN_SETTLED_${up}`];
+        if (winDays || evalSince || minSettled) {
+          perSportEnvs[sp] = {
+            window_days: winDays || null,
+            eval_since: evalSince || null,
+            min_settled: minSettled || null,
+          };
         }
       }
       out.per_sport_envs = perSportEnvs;
