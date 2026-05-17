@@ -2850,14 +2850,23 @@ async function getLoLMatches() {
 }
 
 // ── PandaScore LoL (cobre torneios fora do lolesports.com, ex: EWC Qualifier China) ──
-let _pandaBackoffUntil = 0;
+// 2026-05-17: backoff per-game (audit externos P1-1) — antes 429 em /lol/matches
+// pausava dota2/cs/valorant também por 15min. Map per-game limita blast radius.
+const _pandaBackoffByGame = new Map(); // game ('lol'|'dota2'|'csgo'|'valorant') → ts
+const _pandaIsBackedOff = (game) => Date.now() < (_pandaBackoffByGame.get(game) || 0);
+const _pandaSetBackoff = (game) => {
+  const ttl = Math.max(60 * 1000, parseInt(process.env.PANDASCORE_BACKOFF_MS || '900000', 10) || 900000);
+  _pandaBackoffByGame.set(game, Date.now() + ttl);
+  return ttl;
+};
+let _pandaBackoffUntil = 0; // mantido pra compat com tests; nunca lido em prod
 let _pandaLast429LogTs = 0;
 let _pandaCache = { data: [], ts: 0 };
 let _pandaInflight = null; // 2026-05-13: inflight dedup (espelha _dotaMatchesResp). Sem isso, /lol-matches paralelo no boot/peak disparava 2 fetches → dup log "PANDASCORE 33 partidas LoL" mesmo segundo + waste quota.
 const PANDA_CACHE_TTL = parseInt(process.env.PANDA_CACHE_TTL_MS || '60000', 10); // 60s default
 async function getPandaScoreLolMatches() {
   if (!PANDASCORE_TOKEN || PANDASCORE_TOKEN === 'your-pandascore-token') return [];
-  if (Date.now() < _pandaBackoffUntil) return [];
+  if (_pandaIsBackedOff('lol')) return [];
   // Cache TTL: evita chamar PandaScore em cada /lol-matches (chamado ~1/min pelo bot)
   if (_pandaCache.data.length && (Date.now() - _pandaCache.ts) < PANDA_CACHE_TTL) return _pandaCache.data;
   if (_pandaInflight) return _pandaInflight;
@@ -2882,12 +2891,12 @@ async function getPandaScoreLolMatches() {
           const msg = String(errMsg || '');
           const is429 = status === 429 || msg.toLowerCase().includes('too many') || String(body || '').toLowerCase().includes('too many requests');
           if (is429) {
-            const ttl = Math.max(60 * 1000, parseInt(process.env.PANDASCORE_BACKOFF_MS || '900000', 10) || 900000); // default 15min
-            _pandaBackoffUntil = Date.now() + ttl;
+            // 2026-05-17: backoff per-game (lol path). Outros sports não afetados.
+            const ttl = _pandaSetBackoff('lol');
             const now = Date.now();
             if (now - _pandaLast429LogTs > 60 * 1000) {
               _pandaLast429LogTs = now;
-              log('WARN', 'PANDASCORE', `${fallbackLabel}: 429 — backoff ${Math.round(ttl/60000)}min | msg=${msg.slice(0, 120) || '-'} body=${String(body || '').slice(0, 180)}`);
+              log('WARN', 'PANDASCORE', `${fallbackLabel}: 429 — backoff lol ${Math.round(ttl/60000)}min | msg=${msg.slice(0, 120) || '-'} body=${String(body || '').slice(0, 180)}`);
             }
           } else {
             log('WARN', 'PANDASCORE', `${fallbackLabel}: erro status=${status || '-'} msg=${msg.slice(0, 180) || '-'} body=${String(body || '').slice(0, 220)}`);
@@ -3642,7 +3651,7 @@ const PANDA_DOTA_CACHE_TTL_IDLE = parseInt(process.env.PANDA_DOTA_CACHE_TTL_IDLE
 
 async function getPandaScoreDotaMatches() {
   if (!PANDASCORE_TOKEN || PANDASCORE_TOKEN === 'your-pandascore-token') return [];
-  if (Date.now() < _pandaBackoffUntil) return [];
+  if (_pandaIsBackedOff('dota2')) return [];
   const hadLive = _pandaDotaCache.data.some(m => m.status === 'live');
   const ttl = hadLive ? PANDA_DOTA_CACHE_TTL_LIVE : PANDA_DOTA_CACHE_TTL_IDLE;
   if (_pandaDotaCache.data.length && (Date.now() - _pandaDotaCache.ts) < ttl) return _pandaDotaCache.data;
@@ -3715,7 +3724,7 @@ const PANDA_CS_CACHE_TTL = parseInt(process.env.PANDA_CS_CACHE_TTL_MS || '90000'
 
 async function getPandaScoreCsMatches() {
   if (!PANDASCORE_TOKEN || PANDASCORE_TOKEN === 'your-pandascore-token') return [];
-  if (Date.now() < _pandaBackoffUntil) return [];
+  if (_pandaIsBackedOff('csgo')) return [];
   if (_pandaCsCache.data.length && (Date.now() - _pandaCsCache.ts) < PANDA_CS_CACHE_TTL) return _pandaCsCache.data;
   try {
     const headers = { 'Authorization': `Bearer ${PANDASCORE_TOKEN}` };
@@ -3830,7 +3839,7 @@ const PANDA_VALORANT_CACHE_TTL = parseInt(process.env.PANDA_VALORANT_CACHE_TTL_M
 
 async function getPandaScoreValorantMatches() {
   if (!PANDASCORE_TOKEN || PANDASCORE_TOKEN === 'your-pandascore-token') return [];
-  if (Date.now() < _pandaBackoffUntil) return [];
+  if (_pandaIsBackedOff('valorant')) return [];
   if (_pandaValorantCache.data.length && (Date.now() - _pandaValorantCache.ts) < PANDA_VALORANT_CACHE_TTL) return _pandaValorantCache.data;
   try {
     const headers = { 'Authorization': `Bearer ${PANDASCORE_TOKEN}` };
