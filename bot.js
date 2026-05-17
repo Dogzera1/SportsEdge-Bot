@@ -4296,7 +4296,32 @@ async function _settleCompletedTipsInner() {
           log('INFO', 'SETTLE-TENNIS', `nenhum match: pending=${unsettled.length} no_match=${_noMatchCount} db_fail=${_dbResultFail} mt_orphan=${_mtOrphanSettled}/${_mtOrphanAttempt} mt_skipped=${_stuckMtSkipped} (sources tinham ${(allResults.length + scoresById.size)} jogos finalizados)${_tierTag ? ` | tier: ${_tierTag}` : ''}`);
           // 2026-05-12: alerta se main tour stuck — gap esperado é tier3 (chall/125k/quali/doubles/itf).
           // main>0 indica regressão real (ESPN não está capturando Slam/1000/500 — bug).
-          if (_stuckTier.main > 0) log('WARN', 'SETTLE-TENNIS', `main_tour stuck=${_stuckTier.main} — ESPN scoreboard deveria cobrir; investigar tennisPairMatchesPlayers / event_name regex`);
+          if (_stuckTier.main > 0) {
+            log('WARN', 'SETTLE-TENNIS', `main_tour stuck=${_stuckTier.main} — ESPN scoreboard deveria cobrir; investigar tennisPairMatchesPlayers / event_name regex`);
+            // 2026-05-17 (audit externos P0-3): DM admin quando main >= threshold consecutive.
+            // Threshold default 3 evita false-positive (1-2 podem ser Madrid week edge cases).
+            // Cooldown 6h evita spam DM enquanto regressão persiste.
+            const _stuckMainTh = parseInt(process.env.SETTLE_TENNIS_STUCK_MAIN_DM_MIN || '3', 10) || 3;
+            const _stuckMainCooldownMs = parseInt(process.env.SETTLE_TENNIS_STUCK_MAIN_DM_COOLDOWN_MS || String(6 * 3600 * 1000), 10) || (6 * 3600 * 1000);
+            if (_stuckTier.main >= _stuckMainTh && ADMIN_IDS.size && !/^(0|false|no)$/i.test(String(process.env.SETTLE_TENNIS_STUCK_MAIN_DM ?? 'true'))) {
+              global._tennisStuckMainAlertedAt = global._tennisStuckMainAlertedAt || 0;
+              if (Date.now() - global._tennisStuckMainAlertedAt > _stuckMainCooldownMs) {
+                global._tennisStuckMainAlertedAt = Date.now();
+                const tkAlert = resolveAlertsToken();
+                if (tkAlert) {
+                  const samples = (_noMatchTips || []).slice(0, 3).join(' | ');
+                  const msg = `⚠️ *SETTLE-TENNIS main tour STUCK*\n\n` +
+                    `Tier breakdown: ${Object.entries(_stuckTier).filter(([_, v]) => v > 0).map(([k, v]) => `${k}=${v}`).join(' ')}\n\n` +
+                    `Main count: *${_stuckTier.main}* (threshold ${_stuckMainTh})\n\n` +
+                    (samples ? `Samples:\n${samples}\n\n` : '') +
+                    `_ESPN deveria cobrir Slam/Masters/500. Investigar tennisPairMatchesPlayers / event_name regex._\n` +
+                    `_Cooldown ${Math.round(_stuckMainCooldownMs/3600000)}h. Opt-out SETTLE_TENNIS_STUCK_MAIN_DM=false._`;
+                  const sent = new Set();
+                  for (const id of ADMIN_IDS) { if (sent.has(id)) continue; sent.add(id); sendDM(tkAlert, id, msg).catch(() => {}); }
+                }
+              }
+            }
+          }
           if (_noMatchTips.length > 0) log('INFO', 'SETTLE-TENNIS', `stuck: ${_noMatchTips.join(' | ')}`);
         }
         continue;
