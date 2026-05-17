@@ -3589,11 +3589,23 @@ async function getPinnacleCsMatches() {
   }
   try {
     const rows = await pinnacle.fetchSportMatchOdds(12, (m) => {
+      // 2026-05-17 FIX: filter dupla check (audit log 17/05 "CS 0 odds 15+ ciclos
+      // persistente"). Pinnacle nomeia ligas como "IEM Dallas 2026" / "BLAST
+      // Premier Fall Groups" SEM "counter-strike" no nome — segunda regex
+      // rejeitava todas. Pinnacle sportId=12 já expõe `league.group` que
+      // discrimina ('Counter-Strike' / 'League of Legends' / 'Dota 2'). Usar
+      // group field como sinal primário evita LoL leak quando torneios genéricos.
+      const group = String(m?.league?.group || '').toLowerCase();
       const name = String(m?.league?.name || '').toLowerCase();
-      if (!/(counter-?strike|cs\s*2|cs:?go|esea|esl|blast|iem|major)/i.test(name)) return false;
-      if (!/(counter-?strike|cs\s*2|cs:?go)/i.test(name)) {
-        // se league é torneio (BLAST/IEM/ESL) ainda exige menção CS para evitar misturar com LoL
-        return false;
+      const isCsGroup = /counter.?strike|cs\s*2|cs:?go/.test(group);
+      const isCsName = /(counter-?strike|cs\s*2|cs:?go)/.test(name);
+      const isCsTournament = /(esea|esl|blast|iem|major|katowice|cologne|riyadh|ewc|cct|epl)/i.test(name);
+      // Accept se: group confirma CS OR name explicit CS OR (tournament-only AND group nao-LoL).
+      if (!isCsGroup && !isCsName) {
+        if (!isCsTournament) return false;
+        // Tournament name sem "cs" e sem group field — só aceita se group ausente
+        // (Pinnacle inconsistente) OR group nao é League of Legends/Dota 2/Valorant.
+        if (group && /league of legends|dota|valorant|starcraft|overwatch|rocket league|king of glory/.test(group)) return false;
       }
       const p1 = String(m?.participants?.[0]?.name || '');
       const p2 = String(m?.participants?.[1]?.name || '');
@@ -3776,8 +3788,18 @@ async function getPinnacleValorantMatches() {
   }
   try {
     const rows = await pinnacle.fetchSportMatchOdds(12, (m) => {
+      // 2026-05-17 FIX (mesma class do CS filter): aceitar group field como
+      // discriminator quando name não contém "valorant" literal. VCT regional
+      // (Americas/EMEA/Pacific) e Champions Tour podem não ter "valorant" no name.
+      const group = String(m?.league?.group || '').toLowerCase();
       const name = String(m?.league?.name || '').toLowerCase();
-      if (!name.includes('valorant')) return false;
+      const isValGroup = group === 'valorant';
+      const isValName = name.includes('valorant');
+      const isValTournament = /(vct|champions tour|game changers|challengers|masters|red bull home ground)/i.test(name);
+      if (!isValGroup && !isValName) {
+        if (!isValTournament) return false;
+        if (group && /counter.?strike|league of legends|dota|starcraft|overwatch|rocket league/.test(group)) return false;
+      }
       const p1 = String(m?.participants?.[0]?.name || '');
       const p2 = String(m?.participants?.[1]?.name || '');
       if (/\((kills|rounds|maps|handicap)\)/i.test(p1) || /\((kills|rounds|maps|handicap)\)/i.test(p2)) return false;
