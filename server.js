@@ -32951,6 +32951,47 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
     return;
   }
 
+  // 2026-05-16: debug endpoint pra Sofascore MMA discovery — investiga
+  // quando /mma-matches retorna 0 non-UFC fights. Bypassa cache + retorna
+  // rawCount, sample events, proxy env state, err detail.
+  if (p === '/admin/mma-sofa-probe') {
+    if (!requireAdmin(req, res)) return;
+    (async () => {
+      try {
+        const sofaMma = require('./lib/sofascore-mma');
+        const futureDays = Math.max(1, Math.min(30, parseInt(parsed.query.futureDays || '7', 10) || 7));
+        const pastDays = Math.max(0, Math.min(10, parseInt(parsed.query.pastDays || '1', 10) || 1));
+        let errMsg = null;
+        const t0 = Date.now();
+        const rows = await sofaMma.fetchUpcomingFights({ futureDays, pastDays })
+          .catch(e => { errMsg = e?.message || String(e); return []; });
+        const elapsedMs = Date.now() - t0;
+        const byOrg = {};
+        (rows || []).forEach(r => {
+          const lg = String(r.league || '?').slice(0, 40);
+          byOrg[lg] = (byOrg[lg] || 0) + 1;
+        });
+        sendJson(res, {
+          ok: true,
+          env: {
+            SOFASCORE_PROXY_BASE_set: !!process.env.SOFASCORE_PROXY_BASE,
+            SOFASCORE_DIRECT: process.env.SOFASCORE_DIRECT || null,
+            SOFASCORE_ENRICH_MMA: process.env.SOFASCORE_ENRICH_MMA || null,
+            SOFASCORE_MMA_DISCOVERY: process.env.SOFASCORE_MMA_DISCOVERY || null,
+            SOFA_MIN_GAP_MS: process.env.SOFA_MIN_GAP_MS || null,
+          },
+          window: { futureDays, pastDays },
+          elapsedMs,
+          rawCount: rows?.length || 0,
+          byOrg,
+          sample: (rows || []).slice(0, 8).map(r => ({ id: r.id, team1: r.team1, team2: r.team2, league: r.league, time: r.time, status: r.status })),
+          err: errMsg,
+        });
+      } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    })();
+    return;
+  }
+
   if (p === '/mma-matches') {
     // 2026-05-08: removido early-return quando THE_ODDS_API_KEY ausente.
     // Pinnacle MMA é fonte FREE alternativa — wirar mesmo sem TheOddsAPI.
@@ -33029,10 +33070,14 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
       // Pinnacle eventualmente adicionar (dedup match na próxima cycle).
       // Opt-out: SOFASCORE_MMA_DISCOVERY=false.
       let sofaFights = [];
+      let sofaRawCount = 0;
+      let sofaErrMsg = null;
       if (process.env.SOFASCORE_MMA_DISCOVERY !== 'false') {
         try {
           const sofaMma = require('./lib/sofascore-mma');
-          const sofaRows = await sofaMma.fetchUpcomingFights({ futureDays: 7, pastDays: 1 }).catch(() => []);
+          const sofaRows = await sofaMma.fetchUpcomingFights({ futureDays: 7, pastDays: 1 })
+            .catch(e => { sofaErrMsg = e?.message || String(e); return []; });
+          sofaRawCount = Array.isArray(sofaRows) ? sofaRows.length : 0;
           if (Array.isArray(sofaRows) && sofaRows.length) {
             const seenKey2 = new Set([...mmaFights, ...boxFights, ...pinFights].map(f => `${f.team1}|${f.team2}|${String(f.time).slice(0,10)}`));
             for (const r of sofaRows) {
@@ -33051,6 +33096,10 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
               const orgStr = Object.entries(orgs).map(([k,v]) => `${k}:${v}`).join(' ');
               log('INFO', 'MMA-DISCOVERY', `Sofascore: ${sofaFights.length} fights detectados sem odds (${orgStr}) — aguardando Pinnacle pickup`);
             }
+          }
+          // Log diagnostic mesmo quando 0 — visibility quando proxy/env quebra silenciosamente.
+          if (sofaRawCount === 0 || sofaFights.length === 0) {
+            log('INFO', 'MMA-DISCOVERY', `Sofascore: rawCount=${sofaRawCount} kept=${sofaFights.length}${sofaErrMsg ? ` err="${sofaErrMsg}"` : ''} | proxy_set=${!!process.env.SOFASCORE_PROXY_BASE}`);
           }
         } catch (e) { log('WARN', 'MMA-DISCOVERY', `Sofascore MMA discovery err: ${e.message}`); }
       }
