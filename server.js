@@ -11973,9 +11973,10 @@ setInterval(load, 60000);
         try { parsedGateState = JSON.parse(tip.gate_state); }
         catch (e) { gateStateParseErr = e.message; }
       }
-      let parsedTipCtx = null;
+      let parsedTipCtx = null, tipCtxParseErr = null;
       if (tip.tip_context_json) {
-        try { parsedTipCtx = JSON.parse(tip.tip_context_json); } catch (_) {}
+        try { parsedTipCtx = JSON.parse(tip.tip_context_json); }
+        catch (e) { tipCtxParseErr = e.message; }
       }
       const gatesEvaluated = parsedGateState && Array.isArray(parsedGateState.gates_evaluated)
         ? parsedGateState.gates_evaluated : null;
@@ -12004,7 +12005,7 @@ setInterval(load, 60000);
           gates_evaluated: gatesEvaluated,
           summary,
         },
-        tip_context_json: parsedTipCtx,
+        tip_context_json: { parsed: parsedTipCtx, parse_error: tipCtxParseErr },
         ts: new Date().toISOString(),
       });
     } catch (e) {
