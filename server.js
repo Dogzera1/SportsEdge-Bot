@@ -18927,6 +18927,49 @@ load();
     return;
   }
 
+  // GET /admin/mt-market-promote-status?sport=lol&key=<KEY>
+  // 2026-05-17 Phase 1: lista per (sport, market) state + legacy env per sport.
+  if (p === '/admin/mt-market-promote-status') {
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    try {
+      const sportFilter = parsed.query.sport ? String(parsed.query.sport).toLowerCase() : null;
+      let q = `SELECT sport, market, enabled, promoted_at, reverted_at, source, reason FROM mt_market_promote_state`;
+      const args = [];
+      if (sportFilter) { q += ` WHERE sport = ?`; args.push(sportFilter); }
+      q += ` ORDER BY sport, market`;
+      const rows = db.prepare(q).all(...args);
+      const ALL = ['lol', 'dota2', 'cs', 'cs2', 'valorant', 'tennis', 'football', 'mma', 'tabletennis', 'darts', 'snooker'];
+      const legacy = {};
+      for (const sp of ALL) {
+        if (!sportFilter || sp === sportFilter) {
+          const v = process.env[`${sp.toUpperCase()}_MARKET_TIPS_ENABLED`];
+          if (v) legacy[sp] = v;
+        }
+      }
+      sendJson(res, { ok: true, state_rows: rows, legacy_env: legacy });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
+  // POST /admin/mt-market-promote-set?sport=lol&market=HANDICAP_GAMES&enabled=1&reason=...&key=<KEY>
+  // 2026-05-17 Phase 1: manual override per (sport, market). source='manual'.
+  if (p === '/admin/mt-market-promote-set' && (req.method === 'POST' || req.method === 'GET')) {
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    const sport = parsed.query.sport ? String(parsed.query.sport).toLowerCase() : null;
+    const market = parsed.query.market ? String(parsed.query.market).toUpperCase() : null;
+    const enabled = parsed.query.enabled === '1' || parsed.query.enabled === 'true';
+    const reason = parsed.query.reason ? String(parsed.query.reason) : null;
+    if (!sport || !market) { sendJson(res, { ok: false, error: 'sport+market required' }, 400); return; }
+    try {
+      const { setMtMarketPromote } = require('./lib/mt-market-promote');
+      setMtMarketPromote(db, sport, market, enabled, { source: 'manual', reason });
+      sendJson(res, { ok: true, sport, market, enabled });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   // POST /admin/tips-clv-clean-suspect?sport=tennis&cutoff=-25&apply=0&key=<KEY>
   // Sprint 4 (rec #5): espelho de /admin/clv-clean-suspect mas pra `tips` table
   // (ML real + MT promovidas). Limpa clv_odds + open_odds quando clv ratio
