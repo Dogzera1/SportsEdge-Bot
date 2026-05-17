@@ -12589,6 +12589,20 @@ setInterval(load, 60000);
         deployed_at: process.env.RAILWAY_DEPLOYMENT_CREATED_AT || null,
       };
 
+      // 2026-05-17 — per-sport auto-promote overrides (A: WINDOW_DAYS_<SPORT>,
+      // B: EVAL_SINCE_<SPORT>). Lista só os sports com env setado pra visibility.
+      const P2_AP_SPORTS = ['lol', 'dota2', 'cs', 'cs2', 'valorant', 'tennis', 'football', 'basket', 'mma', 'tabletennis', 'darts', 'snooker'];
+      const p2AutoPromoteOverrides = { ml: {}, mt: {} };
+      for (const sp of P2_AP_SPORTS) {
+        const up = sp.toUpperCase();
+        const mlW = process.env[`ML_AUTO_PROMOTE_WINDOW_DAYS_${up}`];
+        const mlS = process.env[`ML_AUTO_PROMOTE_EVAL_SINCE_${up}`];
+        if (mlW || mlS) p2AutoPromoteOverrides.ml[sp] = { window_days: mlW || null, eval_since: mlS || null };
+        const mtW = process.env[`MT_AUTO_PROMOTE_WINDOW_DAYS_${up}`];
+        const mtS = process.env[`MT_AUTO_PROMOTE_EVAL_SINCE_${up}`];
+        if (mtW || mtS) p2AutoPromoteOverrides.mt[sp] = { window_days: mtW || null, eval_since: mtS || null };
+      }
+
       sendJson(res, {
         ok: true,
         principle: 'P2 — Shadow=causa, Real=sintoma (CLAUDE.md)',
@@ -12599,6 +12613,7 @@ setInterval(load, 60000);
         detectors_p2_compliant: detectors,
         readiness_learner: readinessLearner,
         frozen_holdout: { default_days: holdout.default_days, recommended_min: 60 },
+        auto_promote_per_sport_overrides: p2AutoPromoteOverrides,
         compliance_issues: issues,
         compliance_summary: issues.length === 0
           ? '✅ Todos guards P2 ativos com defaults. Detectores ON. Holdout configurado.'
@@ -18795,6 +18810,18 @@ load();
         MT_AUTO_PROMOTE_LEAGUE_ROI: process.env.MT_AUTO_PROMOTE_LEAGUE_ROI ?? '-10',
         MT_AUTO_PROMOTE_WINDOW_DAYS: process.env.MT_AUTO_PROMOTE_WINDOW_DAYS ?? '30',
       };
+      // 2026-05-17 — per-sport overrides (só sports com env setado).
+      const MT_AP_SPORTS = ['lol', 'dota2', 'cs', 'cs2', 'valorant', 'tennis', 'football', 'mma', 'tabletennis', 'darts', 'snooker'];
+      const mtPerSportEnvs = {};
+      for (const sp of MT_AP_SPORTS) {
+        const up = sp.toUpperCase();
+        const winDays = process.env[`MT_AUTO_PROMOTE_WINDOW_DAYS_${up}`];
+        const evalSince = process.env[`MT_AUTO_PROMOTE_EVAL_SINCE_${up}`];
+        if (winDays || evalSince) {
+          mtPerSportEnvs[sp] = { window_days: winDays || null, eval_since: evalSince || null };
+        }
+      }
+      out.per_sport_envs = mtPerSportEnvs;
       sendJson(res, out);
     } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
     return;
@@ -18847,6 +18874,18 @@ load();
         ML_AUTO_PROMOTE_WINDOW_DAYS: process.env.ML_AUTO_PROMOTE_WINDOW_DAYS ?? '120',
         ML_AUTO_PROMOTE_AUDIT_TIER_BUCKET: process.env.ML_AUTO_PROMOTE_AUDIT_TIER_BUCKET ?? 'true',
       };
+      // 2026-05-17 — per-sport overrides (lista só sports com env setado).
+      const AP_SPORTS = ['lol', 'dota2', 'cs', 'cs2', 'valorant', 'tennis', 'football', 'basket', 'mma', 'tabletennis', 'darts', 'snooker'];
+      const perSportEnvs = {};
+      for (const sp of AP_SPORTS) {
+        const up = sp.toUpperCase();
+        const winDays = process.env[`ML_AUTO_PROMOTE_WINDOW_DAYS_${up}`];
+        const evalSince = process.env[`ML_AUTO_PROMOTE_EVAL_SINCE_${up}`];
+        if (winDays || evalSince) {
+          perSportEnvs[sp] = { window_days: winDays || null, eval_since: evalSince || null };
+        }
+      }
+      out.per_sport_envs = perSportEnvs;
       sendJson(res, out);
     } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
     return;
