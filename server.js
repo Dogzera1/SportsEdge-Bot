@@ -32954,6 +32954,8 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
   // 2026-05-16: debug endpoint pra Sofascore MMA discovery — investiga
   // quando /mma-matches retorna 0 non-UFC fights. Bypassa cache + retorna
   // rawCount, sample events, proxy env state, err detail.
+  // raw=1: também testa proxy URL e direct URL diretamente, retorna HTTP
+  // status + 600 chars body pra cada (debug API path issues).
   if (p === '/admin/mma-sofa-probe') {
     if (!requireAdmin(req, res)) return;
     (async () => {
@@ -32961,6 +32963,7 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
         const sofaMma = require('./lib/sofascore-mma');
         const futureDays = Math.max(1, Math.min(30, parseInt(parsed.query.futureDays || '7', 10) || 7));
         const pastDays = Math.max(0, Math.min(10, parseInt(parsed.query.pastDays || '1', 10) || 1));
+        const wantRaw = /^(1|true|yes)$/i.test(String(parsed.query.raw || ''));
         let errMsg = null;
         const t0 = Date.now();
         const rows = await sofaMma.fetchUpcomingFights({ futureDays, pastDays })
@@ -32971,7 +32974,7 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
           const lg = String(r.league || '?').slice(0, 40);
           byOrg[lg] = (byOrg[lg] || 0) + 1;
         });
-        sendJson(res, {
+        const out = {
           ok: true,
           env: {
             SOFASCORE_PROXY_BASE_set: !!process.env.SOFASCORE_PROXY_BASE,
@@ -32986,7 +32989,50 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
           byOrg,
           sample: (rows || []).slice(0, 8).map(r => ({ id: r.id, team1: r.team1, team2: r.team2, league: r.league, time: r.time, status: r.status })),
           err: errMsg,
-        });
+        };
+        if (wantRaw) {
+          // Probe proxy URL + direct URL pra today
+          const today = new Date().toISOString().slice(0, 10);
+          const probes = [];
+          const proxyBase = String(process.env.SOFASCORE_PROXY_BASE || '').trim().replace(/\/+$/, '');
+          if (proxyBase) probes.push({ kind: 'proxy', url: `${proxyBase}/schedule/mma/${today}/` });
+          probes.push({ kind: 'direct', url: `https://api.sofascore.com/api/v1/sport/mma/scheduled-events/${today}` });
+          out.probes = [];
+          for (const pr of probes) {
+            try {
+              const u = new URL(pr.url);
+              const lib = u.protocol === 'https:' ? require('https') : require('http');
+              const result = await new Promise((resolve) => {
+                const rq = lib.request({
+                  host: u.hostname, path: u.pathname + (u.search || ''), method: 'GET',
+                  port: u.port || (u.protocol === 'https:' ? 443 : 80),
+                  headers: {
+                    Accept: 'application/json,text/plain,*/*',
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64) AppleWebKit/537.36 Chrome/131.0',
+                    Origin: 'https://www.sofascore.com',
+                    Referer: 'https://www.sofascore.com/',
+                    'ngrok-skip-browser-warning': 'true',
+                  },
+                  timeout: 15000,
+                  rejectUnauthorized: false,
+                }, rr => {
+                  let b = ''; rr.on('data', c => b += c); rr.on('end', () => resolve({ status: rr.statusCode, body: b }));
+                });
+                rq.on('error', e => resolve({ status: 0, body: 'ERR:' + e.message }));
+                rq.on('timeout', () => { rq.destroy(); resolve({ status: 0, body: 'TIMEOUT' }); });
+                rq.end();
+              });
+              out.probes.push({
+                kind: pr.kind, url: pr.url, status: result.status,
+                bodyLen: (result.body || '').length,
+                bodyPreview: String(result.body || '').slice(0, 600),
+              });
+            } catch (e) {
+              out.probes.push({ kind: pr.kind, url: pr.url, err: e.message });
+            }
+          }
+        }
+        sendJson(res, out);
       } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
     })();
     return;
