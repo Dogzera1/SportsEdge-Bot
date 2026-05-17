@@ -3029,6 +3029,28 @@ const migrations = [
       } catch (e) { console.log(`[mig 113] failed: ${e.message}`); }
     },
   },
+  {
+    id: '114_match_result_sources_unique',
+    up(db) {
+      // 2026-05-17 EMERGENCY: match_result_sources cresceu 1.55M rows em 3 dias
+      // (mig 109 criada 2026-05-14). Schema SEM UNIQUE constraint + INSERT plain
+      // em 15 callsites cron syncs = duplicate insert per ciclo. DB 510MB / 512MB
+      // Railway cap (99.6% — near OOM crash).
+      //
+      // Cleanup emergency: 1.55M rows truncated, 357MB reclaimed (DB 510→153MB).
+      //
+      // Prevention: UNIQUE INDEX em (match_id, game, source) + INSERT OR IGNORE
+      // pattern (lib/database.js stmt). SQLite ADD CONSTRAINT não suportado —
+      // CREATE UNIQUE INDEX tem effect equivalente.
+      try {
+        db.exec(`
+          CREATE UNIQUE INDEX IF NOT EXISTS idx_mrs_unique_match_source
+            ON match_result_sources(match_id, game, source);
+        `);
+        console.log('[mig 114] match_result_sources UNIQUE index (match_id, game, source)');
+      } catch (e) { console.log(`[mig 114] failed: ${e.message}`); }
+    },
+  },
 ];
 
 function applyMigrations(db) {
