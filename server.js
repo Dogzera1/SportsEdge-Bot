@@ -20730,30 +20730,19 @@ load();
     // momentum (CS_MOMENTUM_TIER1, etc) e evita "tudo em other" pra CS/Dota
     // que tinham regex incompleto. Tennis/football mantêm classifier inline
     // pq usam taxonomia semântica diferente (main/challenger/itf não-numeric).
-    const { getLeagueTier } = require('./lib/league-tier');
+    // 2026-05-17 (P3 unify): delega pra lib/tier-classifier. Fallback 'unclassified'
+    // preservado pra sports sem coverage (basket/mma/darts/snooker/tabletennis).
+    const { classifyTierString } = require('./lib/tier-classifier');
     const _classifyTier = (league) => {
       const lg = String(league || '').trim();
       if (!lg) return null;
-      if (sport === 'tennis') {
-        // 2026-05-17 tour-aware split (memory project_session_2026_05_17)
-        if (/ATP Challenger/i.test(lg)) return 'atp_challenger';
-        if (/WTA Challenger/i.test(lg)) return 'wta_challenger';
-        if (/WTA 125K/i.test(lg)) return 'wta125k';
-        if (/^ITF\s|ITF Futures|ITF (Men|Women)/i.test(lg)) return 'itf';
-        if (/^ATP\s/i.test(lg)) return 'atp_main';
-        if (/^WTA\s/i.test(lg)) return 'wta_main';
-        return null;
+      const t = classifyTierString(sport, lg);
+      // canonical helper retorna null fallback; aqui mantém 'unclassified' pra
+      // sports não-tier-aware ainda visíveis no audit (legacy contract).
+      if (t === null && !['tennis','lol','cs','cs2','dota2','valorant','football'].includes(sport)) {
+        return 'unclassified';
       }
-      if (sport === 'lol' || sport === 'cs2' || sport === 'cs' || sport === 'dota2' || sport === 'valorant') {
-        const t = getLeagueTier(sport, lg);
-        return t === 1 ? 'tier1' : t === 2 ? 'tier2' : 'other';
-      }
-      if (sport === 'football') {
-        if (/Premier League|La Liga|Bundesliga|Serie A|Ligue 1|Champions League|Europa League/i.test(lg)) return 'top5_uefa';
-        if (/Brasileirao|Brasileir|S[eé]rie A.*[Bb]ras|Copa do Brasil|Libertadores|Sudamericana/i.test(lg)) return 'br_continental';
-        return 'other';
-      }
-      return 'unclassified';
+      return t;
     };
 
     try {

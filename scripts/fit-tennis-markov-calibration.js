@@ -165,32 +165,10 @@ function dedupRebroadcasts(tips) {
 //   esports (lol/cs/cs2/dota2/valorant): tier1/tier2/other (via getLeagueTier)
 //   football: top5_uefa/br_continental/other
 //   basket/mma/outros: null (fallback default bins)
+// 2026-05-17 (P3 unify): delega pra lib/tier-classifier (single source of truth).
+const { classifyTierString } = require('../lib/tier-classifier');
 function _classifyTier(tip) {
-  const lg = String(tip.league || '').trim();
-  if (!lg) return null;
-  const sp = String(tip.sport || SPORT || '').toLowerCase();
-  if (sp === 'tennis') {
-    if (/ATP Challenger/i.test(lg)) return 'atp_challenger';
-    if (/WTA Challenger/i.test(lg)) return 'wta_challenger';
-    if (/WTA 125K/i.test(lg)) return 'wta125k';
-    if (/^ITF\s|ITF Futures|ITF (Men|Women)/i.test(lg)) return 'itf';
-    if (/^ATP\s/i.test(lg)) return 'atp_main';
-    if (/^WTA\s/i.test(lg)) return 'wta_main';
-    return null;
-  }
-  if (sp === 'lol' || sp === 'cs' || sp === 'cs2' || sp === 'dota2' || sp === 'valorant') {
-    try {
-      const { getLeagueTier } = require('../lib/league-tier');
-      const t = getLeagueTier(sp, lg);
-      return t === 1 ? 'tier1' : t === 2 ? 'tier2' : 'other';
-    } catch (_) { return null; }
-  }
-  if (sp === 'football') {
-    if (/Premier League|La Liga|Bundesliga|Serie A\b|Ligue 1|Champions League|Europa League/i.test(lg)) return 'top5_uefa';
-    if (/Brasileir|Copa do Brasil|Libertadores|Sudamericana/i.test(lg)) return 'br_continental';
-    return 'other';
-  }
-  return null;
+  return classifyTierString(tip?.sport || SPORT, tip?.league);
 }
 
 // Auto-detecta markets fitáveis a partir do sample (mercados com >=12 settled, pós-dedup)

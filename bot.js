@@ -18208,20 +18208,11 @@ async function pollTennis(runOnce = false) {
                 // 2026-05-04: shadow puro — captura tips com EV ≥ shadowMinEv (default 0)
                 // sem oddOk + sem maxEv. Override: TENNIS_SHADOW_MIN_EV.
                 const _tnShadowMinEv = parseFloat(process.env.TENNIS_SHADOW_MIN_EV ?? '0');
-                // 2026-05-07 (causa-fix tennis Challenger leak): classifica tier do match
-                // pela league string. Calib v2 aplica bins per-tier quando disponíveis.
-                // 2026-05-17 tour-aware split (ATP/WTA): handicapGames -7.16% e
-                // totalGames -7.77% no v2 monolítico (memory project_session_2026_05_17).
+                // 2026-05-17 (P3 unify): delega pra lib/tier-classifier (canonical).
                 const _tnTier = (() => {
-                  const lg = String(match.league || '').trim();
-                  if (!lg) return null;
-                  if (/ATP Challenger/i.test(lg)) return 'atp_challenger';
-                  if (/WTA Challenger/i.test(lg)) return 'wta_challenger';
-                  if (/WTA 125K/i.test(lg)) return 'wta125k';
-                  if (/^ITF\s|ITF Futures|ITF (Men|Women)/i.test(lg)) return 'itf';
-                  if (/^ATP\s/i.test(lg)) return 'atp_main';
-                  if (/^WTA\s/i.test(lg)) return 'wta_main';
-                  return null;
+                  try {
+                    return require('./lib/tier-classifier').classifyTierString('tennis', match.league);
+                  } catch (_) { return null; }
                 })();
                 const _scanResultTn = scanTennisMarkets({
                   markov: tennisModelResult._markovMarkets,
