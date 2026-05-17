@@ -208,4 +208,24 @@ describe('runMtAutoPromoteCycle granular', () => {
     expect(isMtMarketPromoted('lol', 'HANDICAP_GAMES')).toBe(true);
     expect(isMtMarketPromoted('lol', 'HANDICAP_SETS')).toBe(false);
   });
+
+  test('per (sport,market) MIN_SETTLED override is applied', async () => {
+    // Seed: 35 lol/HANDICAP_GAMES wins (+8% ROI), passes 30 but not 50
+    db.prepare(`DELETE FROM market_tips_shadow`).run();
+    const stmt = db.prepare(`
+      INSERT INTO market_tips_shadow (sport, market, side, team1, team2, league, created_at,
+        result, stake_units, profit_units, clv_pct)
+      VALUES (?, ?, ?, ?, ?, ?, datetime('now', '-2 days'), ?, 1, ?, NULL)
+    `);
+    for (let i = 0; i < 35; i++) stmt.run('lol', 'HANDICAP_GAMES', 'over', 'A', 'B', 'LCS', 'win', 0.08);
+    process.env.MT_AUTO_PROMOTE_MIN_SETTLED = '50';
+    process.env.MT_AUTO_PROMOTE_MIN_SETTLED_LOL_HANDICAP_GAMES = '30';
+    jest.resetModules();
+    const { _clearCache } = require('../../lib/mt-market-promote');
+    _clearCache();
+    const { runMtAutoPromoteCycle } = require('../../lib/mt-auto-promote');
+    const result = await runMtAutoPromoteCycle(db);
+    expect(result.decisions.promoted).toContainEqual(expect.objectContaining({ sport: 'lol', market: 'HANDICAP_GAMES' }));
+    delete process.env.MT_AUTO_PROMOTE_MIN_SETTLED_LOL_HANDICAP_GAMES;
+  });
 });
