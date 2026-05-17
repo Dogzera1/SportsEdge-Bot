@@ -2986,6 +2986,31 @@ const migrations = [
       } catch (e) { console.log(`[mig 111] failed: ${e.message}`); }
     },
   },
+  {
+    id: '112_mt_market_promote_state',
+    up(db) {
+      // 2026-05-17 Phase 1: granular MT auto-promote by (sport, market)
+      // Replaces ml_league_blocklist promote/revert pattern with per-market tracking.
+      // State machine: (sport, market) → enabled + promoted_at + reverted_at + source + reason.
+      // Composite PK (sport, market); indexed by enabled for quick filter (promote-ready scan).
+      try {
+        db.exec(`
+          CREATE TABLE IF NOT EXISTS mt_market_promote_state (
+            sport TEXT NOT NULL,
+            market TEXT NOT NULL,
+            enabled INTEGER NOT NULL DEFAULT 0,
+            promoted_at TEXT,
+            reverted_at TEXT,
+            source TEXT NOT NULL DEFAULT 'auto',
+            reason TEXT,
+            PRIMARY KEY (sport, market)
+          );
+          CREATE INDEX IF NOT EXISTS idx_mt_market_promote_state_enabled
+            ON mt_market_promote_state(sport, enabled);
+        `);
+      } catch (e) { console.log(`[mig 112] failed: ${e.message}`); }
+    },
+  },
 ];
 
 function applyMigrations(db) {
