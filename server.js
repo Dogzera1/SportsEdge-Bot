@@ -33325,6 +33325,120 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
   // rawCount, sample events, proxy env state, err detail.
   // raw=1: também testa proxy URL e direct URL diretamente, retorna HTTP
   // status + 600 chars body pra cada (debug API path issues).
+  // GET /admin/sofa-tennis-probe?team1=X&team2=Y&commenceIso=2026-05-17T09:30:00Z
+  // Diagnose live-snapshot tennis 100% no_sofascore_match issue (audit live-scout
+  // 2026-05-17). Retorna step-by-step do getLiveMatchScore:
+  //   - dates tentadas
+  //   - schedule fetched per date (event count, sample team names)
+  //   - namesMatch result per event
+  //   - eventId found OR reason fail
+  if (p === '/admin/sofa-tennis-probe') {
+    if (!requireAdmin(req, res)) return;
+    (async () => {
+      try {
+        const team1 = String(parsed.query.team1 || '').trim();
+        const team2 = String(parsed.query.team2 || '').trim();
+        const commenceIso = String(parsed.query.commenceIso || parsed.query.commence_iso || new Date().toISOString()).trim();
+        if (!team1 || !team2) { sendJson(res, { ok: false, error: 'team1, team2 obrigatórios (commenceIso opcional)' }, 400); return; }
+        const sofaTn = require('./lib/sofascore-tennis');
+        // Re-implementa parte da lógica de getLiveMatchScore com instrumentação
+        const env = String(process.env.SOFASCORE_ENRICH_TENNIS || '').toLowerCase();
+        const hasProxy = !!(process.env.SOFASCORE_PROXY_BASE || '').trim();
+        const enabled = env === 'true' || env === '1' || env === 'yes'
+          || (env !== 'false' && env !== '0' && env !== 'no' && hasProxy);
+        const d0 = String(commenceIso || '').slice(0, 10);
+        const dates = [];
+        if (/^\d{4}-\d{2}-\d{2}$/.test(d0)) {
+          dates.push(d0);
+          try {
+            const t = new Date(commenceIso);
+            const prev = new Date(t); prev.setUTCDate(prev.getUTCDate() - 1);
+            dates.push(prev.toISOString().slice(0, 10));
+          } catch (_) {}
+        }
+        const out = {
+          ok: true,
+          env: {
+            SOFASCORE_ENRICH_TENNIS: process.env.SOFASCORE_ENRICH_TENNIS || null,
+            SOFASCORE_PROXY_BASE_set: hasProxy,
+            SOFASCORE_DIRECT: process.env.SOFASCORE_DIRECT || null,
+            SOFASCORE_IMPERSONATE: process.env.SOFASCORE_IMPERSONATE || null,
+            SOFASCORE_IMPERSONATE_TENNIS: process.env.SOFASCORE_IMPERSONATE_TENNIS || null,
+            enrich_enabled: enabled,
+          },
+          input: { team1, team2, commenceIso },
+          dates,
+        };
+        if (!enabled) { out.result = { enabled: false, reason: 'SOFASCORE_ENRICH_TENNIS desabilitado E SOFASCORE_PROXY_BASE não setado' }; sendJson(res, out); return; }
+        if (!dates.length) { out.result = { reason: 'commenceIso inválido' }; sendJson(res, out); return; }
+        // Direct call via lib (mantém parity)
+        const wrapped = await sofaTn.getLiveMatchScore(team1, team2, commenceIso).catch(e => ({ _err: e.message }));
+        out.live_match_score = wrapped || null;
+        // Adicional: faz schedule probe direto pra ver event count + sample names
+        out.schedule_probes = [];
+        const proxyBase = String(process.env.SOFASCORE_PROXY_BASE || '').trim().replace(/\/+$/, '');
+        for (const d of dates) {
+          const urls = [];
+          if (proxyBase) urls.push(`${proxyBase}/schedule/tennis/${d}/`);
+          urls.push(`https://api.sofascore.com/api/v1/sport/tennis/scheduled-events/${d}`);
+          for (const url of urls) {
+            try {
+              const u = new URL(url);
+              const lib = u.protocol === 'https:' ? require('https') : require('http');
+              const result = await new Promise((resolve) => {
+                const rq = lib.request({
+                  host: u.hostname, path: u.pathname + (u.search || ''), method: 'GET',
+                  port: u.port || (u.protocol === 'https:' ? 443 : 80),
+                  headers: {
+                    Accept: 'application/json,*/*',
+                    'User-Agent': 'Mozilla/5.0',
+                    Origin: 'https://www.sofascore.com',
+                    Referer: 'https://www.sofascore.com/',
+                    'ngrok-skip-browser-warning': 'true',
+                  },
+                  timeout: 15000,
+                  rejectUnauthorized: false,
+                }, rr => {
+                  let b = ''; rr.on('data', c => b += c); rr.on('end', () => resolve({ status: rr.statusCode, body: b }));
+                });
+                rq.on('error', e => resolve({ status: 0, body: 'ERR:' + e.message }));
+                rq.on('timeout', () => { rq.destroy(); resolve({ status: 0, body: 'TIMEOUT' }); });
+                rq.end();
+              });
+              let events = 0;
+              let sampleNames = [];
+              let matchHit = null;
+              try {
+                const j = JSON.parse(result.body || '{}');
+                const evts = j.events || j.scheduledEvents || j.matches || [];
+                events = Array.isArray(evts) ? evts.length : 0;
+                sampleNames = (Array.isArray(evts) ? evts : []).slice(0, 5).map(e => `${e?.homeTeam?.name || '?'} vs ${e?.awayTeam?.name || '?'}`);
+                // Try matcher on each event
+                const matches = (Array.isArray(evts) ? evts : []).filter(e => {
+                  const hn = e?.homeTeam?.name || '';
+                  const an = e?.awayTeam?.name || '';
+                  try {
+                    return (sofaTn.namesMatch(hn, team1) && sofaTn.namesMatch(an, team2))
+                      || (sofaTn.namesMatch(hn, team2) && sofaTn.namesMatch(an, team1));
+                  } catch (_) { return false; }
+                });
+                if (matches.length > 0) matchHit = { count: matches.length, first: { home: matches[0].homeTeam?.name, away: matches[0].awayTeam?.name, id: matches[0].id } };
+              } catch (_) {}
+              out.schedule_probes.push({
+                date: d, url, status: result.status, body_len: (result.body || '').length,
+                events_count: events, sample_names: sampleNames, matcher_hit: matchHit,
+              });
+            } catch (e) {
+              out.schedule_probes.push({ date: d, url, err: e.message });
+            }
+          }
+        }
+        sendJson(res, out);
+      } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    })();
+    return;
+  }
+
   if (p === '/admin/mma-sofa-probe') {
     if (!requireAdmin(req, res)) return;
     (async () => {
