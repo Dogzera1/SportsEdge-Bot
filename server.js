@@ -20599,10 +20599,13 @@ load();
       const lg = String(league || '').trim();
       if (!lg) return null;
       if (sport === 'tennis') {
-        if (/ATP Challenger|WTA Challenger/i.test(lg)) return 'challenger';
+        // 2026-05-17 tour-aware split (memory project_session_2026_05_17)
+        if (/ATP Challenger/i.test(lg)) return 'atp_challenger';
+        if (/WTA Challenger/i.test(lg)) return 'wta_challenger';
         if (/WTA 125K/i.test(lg)) return 'wta125k';
         if (/^ITF\s|ITF Futures|ITF (Men|Women)/i.test(lg)) return 'itf';
-        if (/^ATP\s|^WTA\s/i.test(lg)) return 'main';
+        if (/^ATP\s/i.test(lg)) return 'atp_main';
+        if (/^WTA\s/i.test(lg)) return 'wta_main';
         return null;
       }
       if (sport === 'lol' || sport === 'cs2' || sport === 'cs' || sport === 'dota2' || sport === 'valorant') {

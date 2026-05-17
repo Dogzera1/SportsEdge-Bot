@@ -145,19 +145,29 @@ function dedupRebroadcasts(tips) {
 // per-tier separado. Audit mostrou ATP Challenger entrega 7-17pp menos hit do
 // que ATP main no mesmo bucket p_model — calib monolítica dilui sinal.
 //
-// Tiers retornados:
-//   - 'main'      → ATP/WTA main tour (250+, Masters, Slams)
-//   - 'challenger'→ ATP Challenger circuit
-//   - 'wta125k'   → WTA 125K (≈ tier intermediário)
-//   - 'itf'       → ITF Futures/W15-W100 (lower minor)
-//   - null        → unclassified (raro; fallback usa 'default' bins)
+// 2026-05-17 (causa-fix tennis ATP vs WTA heterogêneo): tour-aware split.
+// Audit /admin/mt-historical-learnings?sport=tennis revelou handicapGames -7.16%
+// (n=813) e totalGames -7.77% (n=376) no model v2_virtual_matchup_fix monolítico.
+// Memory project_session_2026_05_15 documenta ATP totalGames leak vs WTA edge —
+// calib unitária ATP/WTA juntos dilui ambos. Split por tour expõe.
+//
+// Tiers retornados (tour-aware):
+//   - 'atp_main'        → ATP main tour (250+, Masters, Slams)
+//   - 'wta_main'        → WTA main tour (250+, Masters/Premier, Slams)
+//   - 'atp_challenger'  → ATP Challenger circuit
+//   - 'wta_challenger'  → WTA Challenger (raro)
+//   - 'wta125k'         → WTA 125K (≈ tier intermediário)
+//   - 'itf'             → ITF Futures/W15-W100 (lower minor; M/F juntos por sample)
+//   - null              → unclassified (fallback default bins)
 function _classifyTier(tip) {
   const lg = String(tip.league || '').trim();
   if (!lg) return null;
-  if (/ATP Challenger|WTA Challenger/i.test(lg)) return 'challenger';
+  if (/ATP Challenger/i.test(lg)) return 'atp_challenger';
+  if (/WTA Challenger/i.test(lg)) return 'wta_challenger';
   if (/WTA 125K/i.test(lg)) return 'wta125k';
   if (/^ITF\s|ITF Futures|ITF (Men|Women)/i.test(lg)) return 'itf';
-  if (/^ATP\s|^WTA\s/i.test(lg)) return 'main';
+  if (/^ATP\s/i.test(lg)) return 'atp_main';
+  if (/^WTA\s/i.test(lg)) return 'wta_main';
   return null;
 }
 
