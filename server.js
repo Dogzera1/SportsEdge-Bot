@@ -25182,12 +25182,18 @@ load();
         // Usa _isShadowTip (pode ter sido flipped por _autoRouteToShadow quando
         // ML_DISABLED ou ML_TIER1 gate hit). Isso garante tip vai pra study DB.
         const isShadow = _isShadowTip ? 1 : 0;
-        // Epoch tracking — captura git SHA + snapshot de env/auto-tunes ativas no momento exato do insert
+        // Epoch tracking — captura git SHA + snapshot de env/auto-tunes ativas no momento exato do insert.
+        // 2026-05-17: gates_evaluated (lista per-tip dos gates rodados, vinda de shouldSendMarketTip
+        // ou ML scanner) é mergada no gate_state quando o scanner envia, pra forensics retroativa
+        // ("que gates essa tip específica passou no emit?"). Backward compat: tip sem gates_evaluated
+        // continua persistindo apenas {env, auto} como antes.
         let _codeSha = null, _gateState = null;
         try {
           const { getCodeSha, captureGateState } = require('./lib/epoch');
           _codeSha = getCodeSha() || null;
-          _gateState = captureGateState();
+          const _gatesEvaluated = Array.isArray(t.gates_evaluated) && t.gates_evaluated.length
+            ? t.gates_evaluated : undefined;
+          _gateState = captureGateState(_gatesEvaluated ? { gates_evaluated: _gatesEvaluated } : undefined);
         } catch (_) {}
         // Snapshot estruturado pra forensics: pega campos opcionais que bot
         // envia (factors, mlScore details, gate decisions). NULL se nada

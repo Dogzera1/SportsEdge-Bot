@@ -6596,6 +6596,12 @@ async function recordMarketTipAsRegular({ sport, match, tip, stake, isLive }) {
       factors: [{ label: 'MT', value: `${tip.market}/${tip.side}${tip.line != null ? ` line=${tip.line}` : ''}` }],
       stakeAdjust: Number.isFinite(tip.stakeAdjust) ? tip.stakeAdjust : null,
       pickSide: tip.side || null,
+      // 2026-05-17: gates_evaluated snapshot — quando scanner roda shouldSendMarketTip
+      // antes desse helper e seta tip.gates_evaluated, propagamos pro /record-tip
+      // pra persistir em tips.gate_state. Permite audit retroativo dos gates que
+      // a tip específica passou no momento exato do emit. Backward compat: undefined
+      // se scanner não setou (server lê via Array.isArray check em /record-tip handler).
+      gates_evaluated: Array.isArray(tip.gates_evaluated) ? tip.gates_evaluated : undefined,
     }, sport).catch(e => { log('WARN', 'MT-RECORD', `serverPost err: ${e.message}`); return null; });
     if (!rec) return null;
     if (rec.skipped) {
@@ -20347,6 +20353,11 @@ Máximo 200 palavras.`;
                 const minEvFb = parseFloat(process.env.FOOTBALL_MARKET_TIP_MIN_EV ?? '8');
                 const minPmFb = parseFloat(process.env.FOOTBALL_MARKET_TIP_MIN_PMODEL ?? '0.55');
                 const gateFb = mtp.shouldSendMarketTip(tipForMt, { minEv: minEvFb, minPmodel: minPmFb });
+                // 2026-05-17: propaga snapshot dos gates rodados pra downstream record-tip
+                // (recordMarketTipAsRegular lê tip.gates_evaluated e inclui no POST body).
+                // Set incondicional pós-gate — vale tanto pra promote quanto pra disabled
+                // path (forensics se segment vier a ser habilitado depois). <2KB típico.
+                if (Array.isArray(gateFb.gates_evaluated)) tipForMt.gates_evaluated = gateFb.gates_evaluated;
                 if (!gateFb.ok) {
                   log('DEBUG', 'FB-MARKET-GATE', `${matchForMt.team1} vs ${matchForMt.team2} ${tipMarket}: ${gateFb.reason}`);
                 } else if (!isMarketTipsEnabled('football', marketKey, sideMt, match.league)) {
