@@ -31,7 +31,23 @@ def _build_proxies():
         return None
     return {"http": proxy, "https": proxy}
 
-def _resolve_impersonate():
+def _resolve_impersonate(path_category: str = None):
+    # 2026-05-17 (memory project_mma_sofascore_discovery_2026_05_16): per-path
+    # impersonate overrides (chrome124 football, safari260 MMA, chrome146 tennis).
+    # Cloudflare WAF rules variam per path. Permite SOFASCORE_IMPERSONATE_<CATEGORY>
+    # override antes do global SOFASCORE_IMPERSONATE.
+    if path_category:
+        env_key = f"SOFASCORE_IMPERSONATE_{path_category.upper()}"
+        per_path = os.environ.get(env_key, "").strip()
+        if per_path:
+            if per_path in _VALID_IMPERSONATE:
+                return per_path
+            logger.warning(
+                "sofascore_impersonate_per_path_invalid",
+                env_key=env_key,
+                env_value=per_path,
+                fallback="global",
+            )
     raw = os.environ.get("SOFASCORE_IMPERSONATE", DEFAULT_IMPERSONATE).strip() or DEFAULT_IMPERSONATE
     if raw not in _VALID_IMPERSONATE:
         logger.warning(
@@ -43,21 +59,44 @@ def _resolve_impersonate():
         return DEFAULT_IMPERSONATE
     return raw
 
+def _category_from_url(url: str) -> str:
+    # 2026-05-17: extrai categoria da URL pra match SOFASCORE_IMPERSONATE_<CAT> env.
+    # Pattern URL: https://api.sofascore.com/api/v1/sport/{sport}/... OR
+    #              /api/v1/sport/{sport}/scheduled-events/... OR
+    #              /schedule/{sport}/{date}/ (proxy own format)
+    if not url:
+        return None
+    lower = url.lower()
+    # Order matters: mma before football (mma fights vs football)
+    for cat in ("mma", "tennis", "football", "basketball", "ice-hockey", "esports"):
+        if f"/sport/{cat}/" in lower or f"/schedule/{cat}/" in lower or f"/{cat}/" in lower:
+            return cat
+    return None
+
 class SofascoreClient:
     """A client to interact with the Sofascore API using WAF bypass."""
 
     BASE_URL = "https://api.sofascore.com/api/v1"
 
     def __init__(self):
-        impersonate = _resolve_impersonate()
+        # 2026-05-17: impersonate resolved lazy per request (path-aware).
+        # Manté default session impersonate como fallback global pra calls
+        # sem URL pattern conhecido. Per-path sessions são created on-demand
+        # e cached em _sessions_by_category.
+        default_impersonate = _resolve_impersonate()
         try:
             timeout = int(os.environ.get("SOFASCORE_TIMEOUT", DEFAULT_TIMEOUT))
         except (TypeError, ValueError):
             timeout = DEFAULT_TIMEOUT
         self._timeout = timeout
-        self._impersonate = impersonate
+        self._impersonate = default_impersonate
         self._proxies = _build_proxies()
-        self.session = requests.Session(
+        self._sessions_by_category = {}
+        # Session padrão (compat com callers que não usam _get).
+        self.session = self._build_session(default_impersonate)
+
+    def _build_session(self, impersonate: str):
+        return requests.Session(
             impersonate=impersonate,
             headers={
                 "Origin": "https://www.sofascore.com",
@@ -68,11 +107,20 @@ class SofascoreClient:
             }
         )
 
+    def _get_session(self, category: str = None):
+        if not category:
+            return self.session
+        if category not in self._sessions_by_category:
+            self._sessions_by_category[category] = self._build_session(_resolve_impersonate(category))
+        return self._sessions_by_category[category]
+
     def _get(self, url: str):
         kwargs = {"timeout": self._timeout}
         if self._proxies:
             kwargs["proxies"] = self._proxies
-        response = self.session.get(url, **kwargs)
+        category = _category_from_url(url)
+        session = self._get_session(category)
+        response = session.get(url, **kwargs)
         response.raise_for_status()
         return response
 
