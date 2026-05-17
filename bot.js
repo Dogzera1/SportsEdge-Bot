@@ -24007,7 +24007,12 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
     try {
       const path = require('path');
       const { spawn } = require('child_process');
-      const script = path.join(__dirname, 'scripts', 'refit-tennis-markov-calib-inline.js');
+      // 2026-05-17: switch para fit-tennis-markov-calibration.js (script principal
+      // tour-aware com sides/tiers). O inline anterior era MONOLITHIC — só default
+      // bins. Bootstrap pos-deploy re-rodando inline a cada restart overwrite
+      // JSON tour-aware gerado por /admin/fit-tennis-markov OR nightly retrain.
+      // Memory project_session_2026_05_17 documenta investigação completa.
+      const script = path.join(__dirname, 'scripts', 'fit-tennis-markov-calibration.js');
       const fs = require('fs');
       if (!fs.existsSync(script)) {
         log('WARN', 'CALIB-REFIT', `Script não encontrado: ${script}`);
