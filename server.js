@@ -31174,7 +31174,20 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
       const accumulatedProfit = +(Number(settledProfitsRow?.total || 0)).toFixed(2);
       const currentBanca = parseFloat(((bk.initial_banca || 0) + accumulatedProfit).toFixed(2));
       // Sync bankroll rows se diferirem (mantém dashboard consistente).
-      if (!game && !effectiveGame) {
+      // 2026-05-17 ROOT-CAUSE FIX (drift R$6.58/R$9.64 mirror lol↔dota2):
+      // Write side-effect em /roi GET endpoint distribuía POOLED accumulatedProfit
+      // proporcionalmente por initial_banca share. Quando sport='esports' (rollup)
+      // sportSet expande pra ['esports','lol','dota2'] e initial_banca de lol=dota2=100
+      // → share 50/50 → ambos recebem (profit_lol+profit_dota2)/2 = MÉDIA EXATA,
+      // erasing per-sport progress real. Dashboard auto-refresh chamava /roi
+      // repetidamente, re-aplicando a média a cada hit.
+      // Pattern P2-like: GET endpoint não deve write side-effect (vide /overall-summary
+      // OVERALL_SUMMARY_AUTO_SYNC=false default L30717). Multi-sport rollup é
+      // visualização; persistência tem que vir do propagator settle path real.
+      // Single-sport (sportSet.length===1) write é safe e mantido pra consistência
+      // legacy. Multi-sport rollup write removed.
+      const isMultiSportRollup = sportSet.length > 1;
+      if (!game && !effectiveGame && !isMultiSportRollup) {
         for (const r of bkRows) {
           const share = bk.initial_banca > 0 ? (r.initial_banca / bk.initial_banca) : (1 / bkRows.length);
           const sportCurrent = parseFloat(((r.initial_banca || 0) + accumulatedProfit * share).toFixed(2));
