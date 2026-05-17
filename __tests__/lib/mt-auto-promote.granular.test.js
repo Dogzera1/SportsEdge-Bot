@@ -166,3 +166,46 @@ describe('mt-auto-promote granular stats (Phase 1.3 + 1.4)', () => {
     expect(rows.length).toBe(0);
   });
 });
+
+describe('runMtAutoPromoteCycle granular', () => {
+  let db;
+  beforeEach(() => {
+    db = new Database(':memory:');
+    applyMigrations(db);
+    delete process.env.FROZEN_HOLDOUT_DAYS;
+    delete process.env.FROZEN_HOLDOUT_MT_AUTO_PROMOTE_DAYS;
+    delete process.env.LOL_MARKET_TIPS_ENABLED;
+    process.env.MT_AUTO_PROMOTE = 'true';
+    process.env.MT_AUTO_PROMOTE_MIN_SETTLED = '50';
+    process.env.MT_AUTO_PROMOTE_MIN_ROI = '2';
+    process.env.MT_AUTO_PROMOTE_REQUIRE_CI = 'false';
+    jest.resetModules();
+    // Clear lib/mt-market-promote cache
+    const { _clearCache } = require('../../lib/mt-market-promote');
+    _clearCache();
+    // Seed: 60 lol/HANDICAP_GAMES wins (+8%), 55 lol/HANDICAP_SETS losses (-12%)
+    const stmt = db.prepare(`
+      INSERT INTO market_tips_shadow (sport, market, side, team1, team2, league, created_at,
+        result, stake_units, profit_units, clv_pct)
+      VALUES (?, ?, ?, ?, ?, ?, datetime('now', '-2 days'), ?, 1, ?, NULL)
+    `);
+    for (let i = 0; i < 60; i++) stmt.run('lol', 'HANDICAP_GAMES', 'over', 'A', 'B', 'LCS', 'win', 0.08);
+    for (let i = 0; i < 55; i++) stmt.run('lol', 'HANDICAP_SETS', 'over', 'A', 'B', 'LCS', 'loss', -0.12);
+  });
+
+  afterEach(() => {
+    delete process.env.MT_AUTO_PROMOTE_MIN_SETTLED;
+    delete process.env.MT_AUTO_PROMOTE_REQUIRE_CI;
+  });
+
+  test('promotes lol/HANDICAP_GAMES but NOT lol/HANDICAP_SETS', async () => {
+    const { runMtAutoPromoteCycle } = require('../../lib/mt-auto-promote');
+    const { isMtMarketPromoted, loadMtMarketPromoteCache } = require('../../lib/mt-market-promote');
+    const result = await runMtAutoPromoteCycle(db);
+    loadMtMarketPromoteCache(db);
+    expect(result.decisions.promoted).toContainEqual(expect.objectContaining({ sport: 'lol', market: 'HANDICAP_GAMES' }));
+    expect(result.decisions.promoted.find(p => p.market === 'HANDICAP_SETS')).toBeUndefined();
+    expect(isMtMarketPromoted('lol', 'HANDICAP_GAMES')).toBe(true);
+    expect(isMtMarketPromoted('lol', 'HANDICAP_SETS')).toBe(false);
+  });
+});
