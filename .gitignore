@@ -12,6 +12,8 @@ start-bot.bat
 mma betting/
 .fuse_hidden*
 .tmp_*.json
+tmp_*.json
+tmp_*.txt
 *.log
 tmp_server.log
 hist*.json
