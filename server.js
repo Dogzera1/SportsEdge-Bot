@@ -24697,6 +24697,12 @@ load();
         // 2026-05-05: SHADOW_DEDUP_FORCE_SPORTS (default 'basket') re-aplica dedup
         // mesmo em shadow puro pra sports onde queremos amostra limpa pra promoção
         // (basket fase 1: 1 evento real virava 12 inserts inflando winRate).
+        // 2026-05-17 (P2 fix): dedups filtram is_shadow pra respeitar separação
+        // shadow=research / real=dispatch. Bug observado: BASKET_SHADOW=false (promote
+        // real) mas record-tip retornava 'duplicate' porque shadow tips antigas com
+        // mesmo match_id bloqueavam. Sport_silent_basket 27h foi sintoma.
+        // existingCross → real-vs-real only. _existShadow (forçado p/ basket
+        // shadow) → shadow-vs-shadow only.
         const _shadowDedupForceList = String(process.env.SHADOW_DEDUP_FORCE_SPORTS ?? 'basket')
           .toLowerCase().split(',').map(s => s.trim()).filter(Boolean);
         const _forceDedupForShadow = _isShadowTip && _shadowDedupForceList.includes(String(sport).toLowerCase());
@@ -24706,7 +24712,8 @@ load();
         const dupePlaceholders = dupeSportSet.map(() => '?').join(',');
         // Dedup por pair (match_id + tip_participant + market_type, mesmo bucket)
         // pra sports forçados em shadow: bloqueia re-emit mesmo pick no mesmo match
-        // mesmo após restart (analyzedBasket Map é in-memory).
+        // mesmo após restart (analyzedBasket Map é in-memory). Filtra is_shadow=1
+        // pra dedup só contra outras shadows (P2: real é universe separado).
         if (_forceDedupForShadow) {
           const _pickN = norm(tipParticipant || '');
           const _marketU = String(t.market_type || 'ML').toUpperCase();
@@ -24716,6 +24723,7 @@ load();
                AND REPLACE(REPLACE(lower(tip_participant),' ',''),'-','') = ?
                AND upper(COALESCE(market_type,'ML')) = ?
                AND (archived IS NULL OR archived = 0)
+               AND COALESCE(is_shadow, 0) = 1
              LIMIT 1`
           ).get(String(matchId), ...dupeSportSet, _pickN, _marketU);
           if (_existShadow) {
@@ -24723,9 +24731,13 @@ load();
             return;
           }
         }
+        // existingCross só dispara pra new tip REAL (_applyDedup && !_force).
+        // is_shadow=0 garante real-vs-real only — shadow tips antigas (arquivadas=0,
+        // result=NULL) não bloqueiam novas tips reais após promote shadow→real.
         const existingCross = _applyDedup && !_forceDedupForShadow ? db.prepare(
           `SELECT id, sport FROM tips WHERE match_id = ? AND sport IN (${dupePlaceholders})
-           AND (archived IS NULL OR archived = 0) LIMIT 1`
+           AND (archived IS NULL OR archived = 0)
+           AND COALESCE(is_shadow, 0) = 0 LIMIT 1`
         ).get(String(matchId), ...dupeSportSet) : null;
         if (existingCross) {
           _emitSkip('duplicate', { existing_sport: existingCross.sport });
@@ -24769,9 +24781,13 @@ load();
           const pairDupeSet = (typeof resolveSportSet === 'function')
             ? resolveSportSet(sport, null).sportSet : [sport];
           const pairDupePh = pairDupeSet.map(() => '?').join(',');
+          // 2026-05-17 (P2 fix): filtra is_shadow=0 — pair dedup só dispara pra
+          // new REAL (guard !_bypassFiltersForShadow acima), então shadow-vs-real
+          // não deve bloquear (research não bloqueia dispatch).
           const recentDupe = db.prepare(
             `SELECT id, tip_participant, result, is_live FROM tips WHERE sport IN (${pairDupePh}) ${resultFilter}
              AND (archived IS NULL OR archived = 0)
+             AND COALESCE(is_shadow, 0) = 0
              AND sent_at > datetime('now', '-24 hours')
              AND upper(COALESCE(market_type, 'ML')) = ?
              ${liveOverrideClause}
