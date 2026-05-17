@@ -497,4 +497,81 @@ module.exports = async function runTests(t) {
     t.assert(r.body.reason === 'ml_not_in_tier1_leagues', `expected reason=ml_not_in_tier1_leagues, got ${r.body.reason}`);
     t.assert(r.body.league === 'Some Random Regional League', `expected league echo, got ${r.body.league}`);
   });
+
+  // ─── P2 dedup is_shadow filter (commit 0e14ae7 hoje 2026-05-17) ─────────
+  // Validate: shadow tip com mesmo match_id NÃO bloqueia real subsequente.
+  // Antes do fix: existingCross / recentDupe não filtravam is_shadow → shadow
+  // legacy archived=0 result=NULL bloqueava real (bug basket P0 fix hoje).
+  // Test:
+  //   1. POST shadow tip
+  //   2. POST real tip mesmo matchId → deve passar (dedup só real-vs-real)
+  await t.test('P2 dedup: shadow tip não bloqueia real subsequente (commit 0e14ae7)', async () => {
+    const tmpDbZ = path.join(os.tmpdir(), `test-rt-shadow-dedup-${Date.now()}.db`);
+    const portZ = 30000 + Math.floor(Math.random() * 10000);
+    const envZ = { ...env, DB_PATH: tmpDbZ, PORT: String(portZ) };
+    const procZ = spawn('node', ['server.js'], { env: envZ, cwd: REPO_ROOT, stdio: ['ignore', 'pipe', 'pipe'] });
+    procZ.stdout.on('data', () => {});
+    procZ.stderr.on('data', () => {});
+    try {
+      await waitHealth(portZ, HEALTH_TIMEOUT_MS);
+      const matchId = 'test_dedup_p2_' + Date.now();
+      const body = (isShadow) => ({
+        matchId, eventName: 'P2 Dedup Test',
+        p1: 'P2A', p2: 'P2B', tipParticipant: 'P2A',
+        odds: 1.85, ev: 8.5,
+        modelP: 0.62, confidence: 'MEDIA', stakeUnits: 1.0,
+        marketType: 'ML',
+        isShadow,
+      });
+      // 1) Shadow tip first
+      const rShadow = await httpJson(portZ, 'POST', '/record-tip?sport=dota2', body(1), { 'x-admin-key': 'test' });
+      t.assert(rShadow.status >= 200 && rShadow.status < 500, `shadow tip should not 5xx, got ${rShadow.status}`);
+      // 2) Real tip MESMO matchId — antes do fix bloqueado, agora deve passar
+      const rReal = await httpJson(portZ, 'POST', '/record-tip?sport=dota2', body(0), { 'x-admin-key': 'test' });
+      t.assert(rReal.status >= 200 && rReal.status < 500, `real tip non-5xx, got ${rReal.status}`);
+      // Real DEVE conseguir gravar (não bloqueado por shadow). Status 200 (ok ou skipped por outro motivo) OR 409 race aceitos.
+      // O essencial: reason NÃO pode ser 'duplicate' (=existingCross block by shadow).
+      if (rReal.body && rReal.body.skipped === true) {
+        t.assert(rReal.body.reason !== 'duplicate',
+          `real should not be blocked by shadow (P2): got reason=${rReal.body.reason}`);
+      }
+    } finally {
+      try { procZ.kill(); } catch (_) {}
+      try { fs.unlinkSync(tmpDbZ); } catch (_) {}
+      try { fs.unlinkSync(tmpDbZ + '-shm'); } catch (_) {}
+      try { fs.unlinkSync(tmpDbZ + '-wal'); } catch (_) {}
+    }
+  });
+
+  // ─── /admin/tip-debug endpoint (commit b2e8151 hoje 2026-05-17) ─────────
+  // Endpoint admin read-only retorna gate_state + tip data por id. Pega:
+  //   - parse error handling (commit aaa711a parse_error symmetric)
+  //   - 404 tip not found
+  //   - auth gate
+  await t.test('/admin/tip-debug: 404 tip not found + 401 auth', async () => {
+    const tmpDbQ = path.join(os.tmpdir(), `test-rt-debug-${Date.now()}.db`);
+    const portQ = 30000 + Math.floor(Math.random() * 10000);
+    const envQ = { ...env, DB_PATH: tmpDbQ, PORT: String(portQ) };
+    const procQ = spawn('node', ['server.js'], { env: envQ, cwd: REPO_ROOT, stdio: ['ignore', 'pipe', 'pipe'] });
+    procQ.stdout.on('data', () => {});
+    procQ.stderr.on('data', () => {});
+    try {
+      await waitHealth(portQ, HEALTH_TIMEOUT_MS);
+      // 1) No auth → 401
+      const rNoAuth = await httpJson(portQ, 'GET', '/admin/tip-debug?id=9999', undefined);
+      t.assert(rNoAuth.status === 401, `expected 401 no-auth, got ${rNoAuth.status}`);
+      // 2) Auth + non-existent id → 404
+      const r404 = await httpJson(portQ, 'GET', '/admin/tip-debug?id=999999999', undefined, { 'x-admin-key': 'test' });
+      t.assert(r404.status === 404, `expected 404 not_found, got ${r404.status}`);
+      t.assert(r404.body.error === 'tip_not_found', `expected error=tip_not_found, got ${JSON.stringify(r404.body)}`);
+      // 3) Auth + invalid id (no param) → 400
+      const r400 = await httpJson(portQ, 'GET', '/admin/tip-debug', undefined, { 'x-admin-key': 'test' });
+      t.assert(r400.status === 400, `expected 400 missing-id, got ${r400.status}`);
+    } finally {
+      try { procQ.kill(); } catch (_) {}
+      try { fs.unlinkSync(tmpDbQ); } catch (_) {}
+      try { fs.unlinkSync(tmpDbQ + '-shm'); } catch (_) {}
+      try { fs.unlinkSync(tmpDbQ + '-wal'); } catch (_) {}
+    }
+  });
 };
