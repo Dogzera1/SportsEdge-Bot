@@ -22656,8 +22656,12 @@ load();
           db.transaction(() => {
             db.prepare(`UPDATE tips SET result=?, settled_at=datetime('now'), stake_reais=?, profit_reais=? WHERE id=?`)
               .run(result, stakeR, profitR, t.id);
-            db.prepare(`UPDATE bankroll SET current_banca = current_banca + ?, updated_at = datetime('now') WHERE sport = 'tennis'`)
-              .run(profitR);
+            // 2026-05-17 P2 fix: skip bankroll UPDATE pra shadow (consistent com
+            // outros settle paths + commit 21e33e1). Plus: round() defensive.
+            if (t.is_shadow !== 1) {
+              db.prepare(`UPDATE bankroll SET current_banca = round(current_banca + ?, 2), updated_at = datetime('now') WHERE sport = 'tennis'`)
+                .run(profitR);
+            }
           })();
         }
         results.settled++;
