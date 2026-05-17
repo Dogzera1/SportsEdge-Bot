@@ -33021,7 +33021,41 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
         }
       } catch (e) { log('WARN', 'AUTO-MMA', `Pinnacle MMA fallback err: ${e.message}`); }
 
-      const fights = [...mmaFights, ...boxFights, ...pinFights].sort((a, b) => new Date(a.time) - new Date(b.time));
+      // 2026-05-16: Sofascore MMA discovery — orgs regionais (LFA/Oktagon/KSW/
+      // RIZIN/PFL/Bellator) que Pinnacle não lista até 3-5d pré-card. Sofascore
+      // tem coverage ampla mas SEM odds. Fights Sofascore-only entram aqui com
+      // odds=null → scanner bot.js skip (current `if (!o?.t1 || !o?.t2) continue`).
+      // Valor: visibility admin (logs "MMA event detected") + pickup quando
+      // Pinnacle eventualmente adicionar (dedup match na próxima cycle).
+      // Opt-out: SOFASCORE_MMA_DISCOVERY=false.
+      let sofaFights = [];
+      if (process.env.SOFASCORE_MMA_DISCOVERY !== 'false') {
+        try {
+          const sofaMma = require('./lib/sofascore-mma');
+          const sofaRows = await sofaMma.fetchUpcomingFights({ futureDays: 7, pastDays: 1 }).catch(() => []);
+          if (Array.isArray(sofaRows) && sofaRows.length) {
+            const seenKey2 = new Set([...mmaFights, ...boxFights, ...pinFights].map(f => `${f.team1}|${f.team2}|${String(f.time).slice(0,10)}`));
+            for (const r of sofaRows) {
+              const key = `${r.team1}|${r.team2}|${String(r.time).slice(0,10)}`;
+              if (seenKey2.has(key)) continue;
+              const t = new Date(r.time || 0).getTime();
+              if (t <= now) continue; // skip past
+              sofaFights.push({ ...r, odds: null }); // explicit null — scanner skip mas log
+              seenKey2.add(key);
+            }
+            if (sofaFights.length) {
+              const orgs = sofaFights.reduce((acc, f) => {
+                const lg = String(f.league || '?').slice(0, 30);
+                acc[lg] = (acc[lg] || 0) + 1; return acc;
+              }, {});
+              const orgStr = Object.entries(orgs).map(([k,v]) => `${k}:${v}`).join(' ');
+              log('INFO', 'MMA-DISCOVERY', `Sofascore: ${sofaFights.length} fights detectados sem odds (${orgStr}) — aguardando Pinnacle pickup`);
+            }
+          }
+        } catch (e) { log('WARN', 'MMA-DISCOVERY', `Sofascore MMA discovery err: ${e.message}`); }
+      }
+
+      const fights = [...mmaFights, ...boxFights, ...pinFights, ...sofaFights].sort((a, b) => new Date(a.time) - new Date(b.time));
       _mmaMatchesResp = { data: fights, ts: Date.now() };
       sendJson(res, fights);
     } catch(e) {
