@@ -24,3 +24,12 @@ test('mig 112 creates mt_market_promote_state with index', () => {
   ).get();
   expect(idx).toBeTruthy();
 });
+
+test('mig 112 is idempotent on re-run', () => {
+  const db = new Database(':memory:');
+  applyMigrations(db);
+  expect(() => applyMigrations(db)).not.toThrow();
+  // Confirm table still exists with intact schema after re-run
+  const tableInfo = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='mt_market_promote_state'`).get();
+  expect(tableInfo).toBeTruthy();
+});
