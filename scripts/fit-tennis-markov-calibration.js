@@ -211,10 +211,15 @@ function detectMarkets(tips) {
 // ── PAV (Pool Adjacent Violators) ───────────────────────────────
 function pav(bins) {
   // bins ja ordenados por mid asc; campo .pSmoothed sera ajustado pra monotone increasing.
+  // 2026-05-17 BUG FIX: bounded passes (1000 max). Comment original do
+  // refit-tennis-markov-calib-inline.js documenta: "script principal hang em
+  // loops desconhecidos". Casos pathological (float oscillation) faziam PAV
+  // `while (changed)` infinito → script timeout 3min SIGKILL → JSON não
+  // atualiza. Descoberto durante diagnose LoL fit stale (sample 369 raw → 7
+  // após dedup → fit aborta cedo mas eventually loop pega em outra iteração).
   const out = bins.map(b => ({ ...b }));
-  let changed = true;
-  while (changed) {
-    changed = false;
+  for (let pass = 0; pass < 1000; pass++) {
+    let changed = false;
     for (let i = 0; i < out.length - 1; i++) {
       if (out[i].pSmoothed > out[i + 1].pSmoothed) {
         const wA = out[i].n, wB = out[i + 1].n;
@@ -224,6 +229,7 @@ function pav(bins) {
         changed = true;
       }
     }
+    if (!changed) break;
   }
   return out;
 }
