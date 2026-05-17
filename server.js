@@ -6639,6 +6639,46 @@ const server = http.createServer(async (req, res) => {
             } catch (e) {
               row.liveStats.reason = `error:${(e.message || '').slice(0, 60)}`;
             }
+          } else if (sport === 'cs') {
+            // 2026-05-17: HLTV scoreboard wire (audit live-scout — antes só
+            // score plano). Resolve HLTV matchId via hltv.getHltvMatchId
+            // (team1/team2/time), pega scorebot snapshot, projeta.
+            const hasScore = m.score1 != null || m.score2 != null;
+            let enriched = null;
+            try {
+              const hltv = require('./lib/hltv');
+              const found = await hltv.getHltvMatchId(m.team1, m.team2, m.time).catch(() => null);
+              if (found?.matchId) {
+                const raw = await hltv.getScoreboard(found.matchId, 10).catch(() => null);
+                if (raw) enriched = hltv.summarizeScoreboard(raw);
+              }
+            } catch (_) { /* fail-open — fallback score-only abaixo */ }
+            row.liveStats = enriched
+              ? {
+                  available: true,
+                  gameState: enriched.live ? 'in_progress' : (enriched.frozen ? 'frozen' : 'between_rounds'),
+                  gameNumber: null,
+                  reason: null,
+                  summary: {
+                    score: `${m.score1 || 0}-${m.score2 || 0}`,
+                    mapName: enriched.mapName,
+                    round: enriched.round,
+                    scoreT: enriched.scoreT,
+                    scoreCT: enriched.scoreCT,
+                    teamT: enriched.teamTName,
+                    teamCT: enriched.teamCTName,
+                    bombPlanted: enriched.bombPlanted,
+                    nPlayers: enriched.players?.length || 0,
+                    source: 'hltv',
+                  },
+                }
+              : {
+                  available: hasScore,
+                  gameState: hasScore ? 'in_progress' : null,
+                  gameNumber: null,
+                  reason: hasScore ? null : 'no_hltv_match',
+                  summary: hasScore ? { score: `${m.score1 || 0}-${m.score2 || 0}` } : null,
+                };
           } else if (sport === 'valorant') {
             // Enriquece com VLR.gg quando possível (mapa, lado, round atual).
             const hasScore = m.score1 != null || m.score2 != null;
