@@ -152,26 +152,44 @@ function dedupRebroadcasts(tips) {
 // 2026-05-17 (causa-fix tennis ATP vs WTA heterogêneo): tour-aware split.
 // Audit /admin/mt-historical-learnings?sport=tennis revelou handicapGames -7.16%
 // (n=813) e totalGames -7.77% (n=376) no model v2_virtual_matchup_fix monolítico.
-// Memory project_session_2026_05_15 documenta ATP totalGames leak vs WTA edge —
-// calib unitária ATP/WTA juntos dilui ambos. Split por tour expõe.
 //
-// Tiers retornados (tour-aware):
-//   - 'atp_main'        → ATP main tour (250+, Masters, Slams)
-//   - 'wta_main'        → WTA main tour (250+, Masters/Premier, Slams)
-//   - 'atp_challenger'  → ATP Challenger circuit
-//   - 'wta_challenger'  → WTA Challenger (raro)
-//   - 'wta125k'         → WTA 125K (≈ tier intermediário)
-//   - 'itf'             → ITF Futures/W15-W100 (lower minor; M/F juntos por sample)
-//   - null              → unclassified (fallback default bins)
+// 2026-05-17 (P5 cross-sport bug): _classifyTier era tennis-only — retornava null
+// pra todos lol/cs/dota2/valorant/football. Calib desses sports NUNCA teve tier
+// fit (sample agrupava sempre em default). Audit /admin/shadow-tier-divergence
+// mostrou LoL n=227 tier1+11.4% / tier2+32.8% / other-6.0% (Δ38.8pp = heterogêneo
+// claro). Extensão cross-sport baseada em lib/league-tier (esports) + classifier
+// inline (football) — mirror de server.js:20602 (P3 candidate: unificar futuro).
+//
+// Tiers retornados (per sport):
+//   tennis: atp_main/wta_main/atp_challenger/wta_challenger/wta125k/itf
+//   esports (lol/cs/cs2/dota2/valorant): tier1/tier2/other (via getLeagueTier)
+//   football: top5_uefa/br_continental/other
+//   basket/mma/outros: null (fallback default bins)
 function _classifyTier(tip) {
   const lg = String(tip.league || '').trim();
   if (!lg) return null;
-  if (/ATP Challenger/i.test(lg)) return 'atp_challenger';
-  if (/WTA Challenger/i.test(lg)) return 'wta_challenger';
-  if (/WTA 125K/i.test(lg)) return 'wta125k';
-  if (/^ITF\s|ITF Futures|ITF (Men|Women)/i.test(lg)) return 'itf';
-  if (/^ATP\s/i.test(lg)) return 'atp_main';
-  if (/^WTA\s/i.test(lg)) return 'wta_main';
+  const sp = String(tip.sport || SPORT || '').toLowerCase();
+  if (sp === 'tennis') {
+    if (/ATP Challenger/i.test(lg)) return 'atp_challenger';
+    if (/WTA Challenger/i.test(lg)) return 'wta_challenger';
+    if (/WTA 125K/i.test(lg)) return 'wta125k';
+    if (/^ITF\s|ITF Futures|ITF (Men|Women)/i.test(lg)) return 'itf';
+    if (/^ATP\s/i.test(lg)) return 'atp_main';
+    if (/^WTA\s/i.test(lg)) return 'wta_main';
+    return null;
+  }
+  if (sp === 'lol' || sp === 'cs' || sp === 'cs2' || sp === 'dota2' || sp === 'valorant') {
+    try {
+      const { getLeagueTier } = require('../lib/league-tier');
+      const t = getLeagueTier(sp, lg);
+      return t === 1 ? 'tier1' : t === 2 ? 'tier2' : 'other';
+    } catch (_) { return null; }
+  }
+  if (sp === 'football') {
+    if (/Premier League|La Liga|Bundesliga|Serie A\b|Ligue 1|Champions League|Europa League/i.test(lg)) return 'top5_uefa';
+    if (/Brasileir|Copa do Brasil|Libertadores|Sudamericana/i.test(lg)) return 'br_continental';
+    return 'other';
+  }
   return null;
 }
 
