@@ -6633,6 +6633,24 @@ async function recordMarketTipAsRegular({ sport, match, tip, stake, isLive }) {
 async function _mtTryRecordAndShouldDm({ sport, recordSport, match, tip, stake, isLive }) {
   const promoteEnabled = isMarketTipsPromoteEnabled(sport, tip?.market);
   const dmRealOnly = !/^(0|false|no)$/i.test(process.env.MT_DM_REAL_ONLY ?? 'true');
+  // 2026-05-17: gates_evaluated fallback populator. Cobre LoL/Dota/Tennis/CS/Val/Basket
+  // scanners que NÃO chamam mtp.shouldSendMarketTip explicitamente (Football MT já
+  // popula upstream — line 20355). Aqui rodamos shouldSendMarketTip apenas pra
+  // CAPTAR snapshot — ignoramos result.ok pq scanner próprio é authoritative pra
+  // decisão de emit. Resultado: tips.gate_state passa a guardar snapshot mesmo
+  // pra sports cujo gate inline é diferente do mtp generic. Útil pra forensics:
+  // "no emit, generic gate teria visto isso". Defensive try/catch pra não quebrar
+  // se tip shape exótica.
+  if (tip && typeof tip === 'object' && !Array.isArray(tip.gates_evaluated)) {
+    try {
+      const _mtp = require('./lib/market-tip-processor');
+      const _upper = String(sport || '').toUpperCase();
+      const _evMin = parseFloat(process.env[`${_upper}_MARKET_TIP_MIN_EV`] ?? process.env.MARKET_TIP_MIN_EV ?? '8');
+      const _pmMin = parseFloat(process.env[`${_upper}_MARKET_TIP_MIN_PMODEL`] ?? process.env.MARKET_TIP_MIN_PMODEL ?? '0.55');
+      const _r = _mtp.shouldSendMarketTip(tip, { minEv: _evMin, minPmodel: _pmMin, sport });
+      if (Array.isArray(_r?.gates_evaluated)) tip.gates_evaluated = _r.gates_evaluated;
+    } catch (_) { /* best-effort snapshot, non-blocking */ }
+  }
   let tipId = null;
   let stakeFinal = null;
   if (promoteEnabled) {
