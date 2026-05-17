@@ -1,7 +1,7 @@
 {
   "version": 1,
   "sport": "tennis",
-  "fittedAt": "2026-05-12T18:06:09.764Z",
+  "fittedAt": "2026-05-17T22:38:12.667Z",
   "method": "pav_with_beta_smoothing",
   "target": "outcome (win/loss)",
   "prior": {
@@ -10,7 +10,12 @@
     "alpha": 8
   },
   "minBin": 6,
-  "nSamples": 459,
+  "nSamples": 410,
+  "n_train": 410,
+  "n_eval": 823,
+  "train_window_days": 60,
+  "eval_window_days": 14,
+  "eval_mode": "walk_forward_out_of_sample",
   "filter": "all",
   "markets": {
     "handicapGames": {
@@ -18,537 +23,195 @@
         {
           "lo": 0.3,
           "hi": 0.55,
-          "mid": 0.4219,
-          "n": 174,
-          "wins": 43,
-          "rawP": 0.2471,
-          "priorP": 0.4405,
-          "pCalib": 0.2556
+          "mid": 0.4668,
+          "n": 101,
+          "wins": 28,
+          "rawP": 0.2772,
+          "priorP": 0.4288,
+          "pCalib": 0.2883
         },
         {
           "lo": 0.55,
+          "hi": 0.65,
+          "mid": 0.6176,
+          "n": 45,
+          "wins": 19,
+          "rawP": 0.4222,
+          "priorP": 0.5039,
+          "pCalib": 0.4345
+        },
+        {
+          "lo": 0.65,
+          "hi": 0.7,
+          "mid": 0.6522,
+          "n": 87,
+          "wins": 49,
+          "rawP": 0.5632,
+          "priorP": 0.494,
+          "pCalib": 0.5574
+        },
+        {
+          "lo": 0.7,
+          "hi": 0.75,
+          "mid": 0.7323,
+          "n": 11,
+          "wins": 8,
+          "rawP": 0.7273,
+          "priorP": 0.5769,
+          "pCalib": 0.6586
+        },
+        {
+          "lo": 0.75,
+          "hi": 0.8,
+          "mid": 0.7833,
+          "n": 14,
+          "wins": 12,
+          "rawP": 0.8571,
+          "priorP": 0.5904,
+          "pCalib": 0.6586
+        },
+        {
+          "lo": 0.8,
           "hi": 0.85,
-          "mid": 0.6169,
-          "n": 134,
-          "wins": 45,
-          "rawP": 0.3358,
-          "priorP": 0.4643,
-          "pCalib": 0.3431
+          "mid": 0.8283,
+          "n": 7,
+          "wins": 3,
+          "rawP": 0.4286,
+          "priorP": 0.5202,
+          "pCalib": 0.6586
+        },
+        {
+          "lo": 0.85,
+          "hi": 0.92,
+          "mid": 0.8841,
+          "n": 11,
+          "wins": 8,
+          "rawP": 0.7273,
+          "priorP": 0.5872,
+          "pCalib": 0.6586
+        },
+        {
+          "lo": 0.92,
+          "hi": 1.001,
+          "mid": 0.9448,
+          "n": 8,
+          "wins": 5,
+          "rawP": 0.625,
+          "priorP": 0.6128,
+          "pCalib": 0.6586
         }
       ],
       "coverage": [
         0.3,
-        0.85
+        1.001
       ],
-      "nTotal": 308,
-      "sides": {
-        "away": {
-          "bins": [
-            {
-              "lo": 0.3,
-              "hi": 0.55,
-              "mid": 0.423,
-              "n": 81,
-              "wins": 20,
-              "rawP": 0.2469,
-              "priorP": 0.4948,
-              "pCalib": 0.2692
-            },
-            {
-              "lo": 0.55,
-              "hi": 0.8,
-              "mid": 0.6154,
-              "n": 66,
-              "wins": 23,
-              "rawP": 0.3485,
-              "priorP": 0.4896,
-              "pCalib": 0.3637
-            }
-          ],
-          "coverage": [
-            0.3,
-            0.8
-          ],
-          "nTotal": 147
-        },
-        "home": {
-          "bins": [
-            {
-              "lo": 0.3,
-              "hi": 0.55,
-              "mid": 0.421,
-              "n": 93,
-              "wins": 23,
-              "rawP": 0.2473,
-              "priorP": 0.402,
-              "pCalib": 0.2596
-            },
-            {
-              "lo": 0.55,
-              "hi": 0.85,
-              "mid": 0.6184,
-              "n": 68,
-              "wins": 22,
-              "rawP": 0.3235,
-              "priorP": 0.4424,
-              "pCalib": 0.336
-            }
-          ],
-          "coverage": [
-            0.3,
-            0.85
-          ],
-          "nTotal": 161
-        }
-      },
-      "tiers": {
-        "challenger": {
-          "bins": [
-            {
-              "lo": 0.3,
-              "hi": 0.55,
-              "mid": 0.419,
-              "n": 81,
-              "wins": 19,
-              "rawP": 0.2346,
-              "priorP": 0.4275,
-              "pCalib": 0.2519
-            },
-            {
-              "lo": 0.55,
-              "hi": 0.85,
-              "mid": 0.6342,
-              "n": 32,
-              "wins": 10,
-              "rawP": 0.3125,
-              "priorP": 0.4795,
-              "pCalib": 0.3459
-            }
-          ],
-          "coverage": [
-            0.3,
-            0.85
-          ],
-          "nTotal": 113,
-          "sides": {
-            "away": {
-              "bins": [
-                {
-                  "lo": 0.3,
-                  "hi": 0.55,
-                  "mid": 0.4315,
-                  "n": 42,
-                  "wins": 10,
-                  "rawP": 0.2381,
-                  "priorP": 0.497,
-                  "pCalib": 0.2795
-                },
-                {
-                  "lo": 0.55,
-                  "hi": 0.8,
-                  "mid": 0.6248,
-                  "n": 19,
-                  "wins": 6,
-                  "rawP": 0.3158,
-                  "priorP": 0.4937,
-                  "pCalib": 0.3685
-                }
-              ],
-              "coverage": [
-                0.3,
-                0.8
-              ],
-              "nTotal": 61
-            },
-            "home": {
-              "bins": [
-                {
-                  "lo": 0.3,
-                  "hi": 0.55,
-                  "mid": 0.4055,
-                  "n": 39,
-                  "wins": 9,
-                  "rawP": 0.2308,
-                  "priorP": 0.3715,
-                  "pCalib": 0.2547
-                },
-                {
-                  "lo": 0.55,
-                  "hi": 0.85,
-                  "mid": 0.6479,
-                  "n": 13,
-                  "wins": 4,
-                  "rawP": 0.3077,
-                  "priorP": 0.4611,
-                  "pCalib": 0.3662
-                }
-              ],
-              "coverage": [
-                0.3,
-                0.85
-              ],
-              "nTotal": 52
-            }
-          }
-        },
-        "wta125k": {
-          "bins": [
-            {
-              "lo": 0.3,
-              "hi": 0.55,
-              "mid": 0.4278,
-              "n": 21,
-              "wins": 4,
-              "rawP": 0.1905,
-              "priorP": 0.427,
-              "pCalib": 0.2557
-            },
-            {
-              "lo": 0.55,
-              "hi": 0.65,
-              "mid": 0.5922,
-              "n": 19,
-              "wins": 8,
-              "rawP": 0.4211,
-              "priorP": 0.5064,
-              "pCalib": 0.4464
-            }
-          ],
-          "coverage": [
-            0.3,
-            0.65
-          ],
-          "nTotal": 40
-        },
-        "main": {
-          "bins": [
-            {
-              "lo": 0.3,
-              "hi": 0.55,
-              "mid": 0.4236,
-              "n": 72,
-              "wins": 20,
-              "rawP": 0.2778,
-              "priorP": 0.4606,
-              "pCalib": 0.2961
-            },
-            {
-              "lo": 0.55,
-              "hi": 0.7,
-              "mid": 0.6159,
-              "n": 83,
-              "wins": 27,
-              "rawP": 0.3253,
-              "priorP": 0.4502,
-              "pCalib": 0.3363
-            }
-          ],
-          "coverage": [
-            0.3,
-            0.7
-          ],
-          "nTotal": 155,
-          "sides": {
-            "away": {
-              "bins": [
-                {
-                  "lo": 0.3,
-                  "hi": 0.55,
-                  "mid": 0.4098,
-                  "n": 30,
-                  "wins": 9,
-                  "rawP": 0.3,
-                  "priorP": 0.4873,
-                  "pCalib": 0.3394
-                },
-                {
-                  "lo": 0.55,
-                  "hi": 0.65,
-                  "mid": 0.6152,
-                  "n": 39,
-                  "wins": 14,
-                  "rawP": 0.359,
-                  "priorP": 0.4835,
-                  "pCalib": 0.3802
-                }
-              ],
-              "coverage": [
-                0.3,
-                0.65
-              ],
-              "nTotal": 69
-            },
-            "home": {
-              "bins": [
-                {
-                  "lo": 0.3,
-                  "hi": 0.55,
-                  "mid": 0.4334,
-                  "n": 42,
-                  "wins": 11,
-                  "rawP": 0.2619,
-                  "priorP": 0.4432,
-                  "pCalib": 0.2909
-                },
-                {
-                  "lo": 0.55,
-                  "hi": 0.7,
-                  "mid": 0.6166,
-                  "n": 44,
-                  "wins": 13,
-                  "rawP": 0.2955,
-                  "priorP": 0.4244,
-                  "pCalib": 0.3153
-                }
-              ],
-              "coverage": [
-                0.3,
-                0.7
-              ],
-              "nTotal": 86
-            }
-          }
-        }
-      }
+      "nTotal": 286
     },
     "totalGames": {
       "bins": [
         {
           "lo": 0.3,
           "hi": 0.55,
-          "mid": 0.4133,
-          "n": 112,
-          "wins": 30,
-          "rawP": 0.2679,
-          "priorP": 0.4001,
-          "pCalib": 0.2767
+          "mid": 0.4163,
+          "n": 34,
+          "wins": 12,
+          "rawP": 0.3529,
+          "priorP": 0.4396,
+          "pCalib": 0.3694
         },
         {
           "lo": 0.55,
+          "hi": 0.65,
+          "mid": 0.6026,
+          "n": 27,
+          "wins": 15,
+          "rawP": 0.5556,
+          "priorP": 0.5015,
+          "pCalib": 0.4694
+        },
+        {
+          "lo": 0.65,
           "hi": 0.7,
-          "mid": 0.5853,
-          "n": 14,
-          "wins": 3,
-          "rawP": 0.2143,
-          "priorP": 0.4598,
-          "pCalib": 0.3036
+          "mid": 0.672,
+          "n": 20,
+          "wins": 6,
+          "rawP": 0.3,
+          "priorP": 0.5442,
+          "pCalib": 0.4694
+        },
+        {
+          "lo": 0.7,
+          "hi": 0.75,
+          "mid": 0.718,
+          "n": 15,
+          "wins": 7,
+          "rawP": 0.4667,
+          "priorP": 0.5425,
+          "pCalib": 0.4931
+        },
+        {
+          "lo": 0.75,
+          "hi": 0.8,
+          "mid": 0.7725,
+          "n": 18,
+          "wins": 10,
+          "rawP": 0.5556,
+          "priorP": 0.563,
+          "pCalib": 0.5578
+        },
+        {
+          "lo": 0.8,
+          "hi": 1.001,
+          "mid": 0.8806,
+          "n": 10,
+          "wins": 7,
+          "rawP": 0.7,
+          "priorP": 0.5684,
+          "pCalib": 0.6415
         }
       ],
       "coverage": [
         0.3,
-        0.7
+        1.001
       ],
-      "nTotal": 126,
-      "sides": {
-        "under": {
-          "bins": [
-            {
-              "lo": 0.3,
-              "hi": 0.55,
-              "mid": 0.4175,
-              "n": 60,
-              "wins": 23,
-              "rawP": 0.3833,
-              "priorP": 0.3795,
-              "pCalib": 0.3644
-            },
-            {
-              "lo": 0.55,
-              "hi": 0.7,
-              "mid": 0.5774,
-              "n": 10,
-              "wins": 1,
-              "rawP": 0.1,
-              "priorP": 0.4455,
-              "pCalib": 0.3644
-            }
-          ],
-          "coverage": [
-            0.3,
-            0.7
-          ],
-          "nTotal": 70
-        },
-        "over": {
-          "bins": [
-            {
-              "lo": 0.3,
-              "hi": 0.55,
-              "mid": 0.4086,
-              "n": 52,
-              "wins": 7,
-              "rawP": 0.1346,
-              "priorP": 0.4267,
-              "pCalib": 0.1736
-            },
-            {
-              "lo": 0.55,
-              "hi": 0.7,
-              "mid": 0.6048,
-              "n": 4,
-              "wins": 2,
-              "rawP": 0.5,
-              "priorP": 0.4975,
-              "pCalib": 0.4983
-            }
-          ],
-          "coverage": [
-            0.3,
-            0.7
-          ],
-          "nTotal": 56
-        }
-      },
-      "tiers": {
-        "challenger": {
-          "bins": [
-            {
-              "lo": 0.3,
-              "hi": 0.55,
-              "mid": 0.3948,
-              "n": 44,
-              "wins": 10,
-              "rawP": 0.2273,
-              "priorP": 0.3854,
-              "pCalib": 0.2516
-            },
-            {
-              "lo": 0.55,
-              "hi": 0.7,
-              "mid": 0.6023,
-              "n": 6,
-              "wins": 1,
-              "rawP": 0.1667,
-              "priorP": 0.5173,
-              "pCalib": 0.367
-            }
-          ],
-          "coverage": [
-            0.3,
-            0.7
-          ],
-          "nTotal": 50,
-          "sides": {
-            "under": {
-              "bins": [
-                {
-                  "lo": 0.3,
-                  "hi": 0.55,
-                  "mid": 0.3916,
-                  "n": 27,
-                  "wins": 9,
-                  "rawP": 0.3333,
-                  "priorP": 0.3523,
-                  "pCalib": 0.3367
-                },
-                {
-                  "lo": 0.55,
-                  "hi": 0.7,
-                  "mid": 0.5946,
-                  "n": 4,
-                  "wins": 0,
-                  "rawP": 0,
-                  "priorP": 0.4949,
-                  "pCalib": 0.3367
-                }
-              ],
-              "coverage": [
-                0.3,
-                0.7
-              ],
-              "nTotal": 31
-            }
-          }
-        },
-        "main": {
-          "bins": [
-            {
-              "lo": 0.3,
-              "hi": 0.55,
-              "mid": 0.4348,
-              "n": 48,
-              "wins": 15,
-              "rawP": 0.3125,
-              "priorP": 0.4224,
-              "pCalib": 0.3175
-            },
-            {
-              "lo": 0.55,
-              "hi": 0.65,
-              "mid": 0.5688,
-              "n": 6,
-              "wins": 0,
-              "rawP": 0,
-              "priorP": 0.4058,
-              "pCalib": 0.3175
-            }
-          ],
-          "coverage": [
-            0.3,
-            0.65
-          ],
-          "nTotal": 54,
-          "sides": {
-            "under": {
-              "bins": [
-                {
-                  "lo": 0.3,
-                  "hi": 0.55,
-                  "mid": 0.4452,
-                  "n": 25,
-                  "wins": 10,
-                  "rawP": 0.4,
-                  "priorP": 0.4197,
-                  "pCalib": 0.3791
-                },
-                {
-                  "lo": 0.55,
-                  "hi": 0.65,
-                  "mid": 0.5641,
-                  "n": 5,
-                  "wins": 0,
-                  "rawP": 0,
-                  "priorP": 0.407,
-                  "pCalib": 0.3791
-                }
-              ],
-              "coverage": [
-                0.3,
-                0.65
-              ],
-              "nTotal": 30
-            }
-          }
-        }
-      }
+      "nTotal": 124
     }
   },
   "backtest": {
+    "eval_window": "last_14_days_out_of_sample",
     "pre": {
-      "label": "PRE  (raw)",
-      "n": 428,
-      "wins": 118,
-      "hit": 27.6,
-      "profit": -67.28,
-      "roi": -15.7,
-      "avgP": 0.489,
-      "avgEV": 52.7,
-      "avgClv": 9.38,
-      "brier": 0.2496,
-      "ece": 0.2142
+      "label": "PRE_raw_eval",
+      "n": 784,
+      "wins": 245,
+      "hit": 31.3,
+      "roi": -8.8,
+      "roi_ci95": {
+        "lower": -19.5,
+        "upper": 1.9,
+        "se_pp": 5.46
+      },
+      "profit": -69.37,
+      "avgP": 0.479,
+      "avgEV": 45.2,
+      "brier": 0.2442,
+      "ece": 0.169
     },
     "post": {
-      "label": "POST (calib)",
-      "n": 122,
-      "wins": 25,
-      "hit": 20.5,
-      "profit": 7.88,
-      "roi": 6.5,
-      "avgP": 0.281,
-      "avgEV": 41.2,
-      "avgClv": 7.7,
-      "brier": 0.1739,
-      "ece": 0.0764
+      "label": "POST_calib_eval",
+      "n": 416,
+      "wins": 111,
+      "hit": 26.7,
+      "roi": -4.6,
+      "roi_ci95": {
+        "lower": -21.8,
+        "upper": 12.5,
+        "se_pp": 8.73
+      },
+      "profit": -19.34,
+      "avgP": 0.383,
+      "avgEV": 40,
+      "brier": 0.2089,
+      "ece": 0.1161
     }
   }
 }
