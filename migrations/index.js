@@ -3011,6 +3011,24 @@ const migrations = [
       } catch (e) { console.log(`[mig 112] failed: ${e.message}`); }
     },
   },
+  {
+    id: '113_market_tips_shadow_gate_state',
+    up(db) {
+      // 2026-05-17 (memory project_gates_evaluated_pendencies_2026_05_17 P3):
+      // Persist gate_state snapshot por shadow tip — paridade com tips.gate_state
+      // (commit 4bdd35d). Permite forensics shadow-only quando research path emite
+      // tips que não chegam a `tips` (tail filtering, low EV).
+      //
+      // Sample size: ~150k rows. ALTER TABLE ADD COLUMN é O(1) em SQLite (não
+      // re-escreve rows existentes). Safe em prod sem janela morta.
+      //
+      // Consumer plumb: lib/market-tips-shadow.js logShadowTip() aceita opcional
+      // tip.gates_evaluated + grava via captureGateState helper (lib/epoch.js).
+      try {
+        addColumnIfMissing(db, 'market_tips_shadow', 'gate_state', 'gate_state TEXT');
+      } catch (e) { console.log(`[mig 113] failed: ${e.message}`); }
+    },
+  },
 ];
 
 function applyMigrations(db) {
