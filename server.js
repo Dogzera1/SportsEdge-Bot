@@ -20226,6 +20226,39 @@ load();
       });
       out.by_model_version = byModelVersion;
 
+      // 2026-05-17 P5 (gates_evaluated pendency): per-market breakdown.
+      // Modelo é treinado per market (ex: tennis Markov calib v2 tier+side); aggregar
+      // só por sport mascara market-specific regressions (caso ATP totalGames leak
+      // vs WTA handicapGames edge no mesmo model_version). Inclui dim `market`.
+      // minN reduzido pra 10 pq fragmentação 3-dim corta sample.
+      const byModelVersionMarket = db.prepare(`
+        SELECT sport, market, COALESCE(model_version, 'unknown') AS model_version,
+          COUNT(*) AS n,
+          SUM(CASE WHEN result = 'win' THEN 1 ELSE 0 END) AS n_win,
+          SUM(CASE WHEN result IN ('win','loss') THEN 1 ELSE 0 END) AS n_settled,
+          ROUND(SUM(COALESCE(profit_units,0)), 2) AS total_profit,
+          ROUND(SUM(COALESCE(stake_units,1)), 2) AS total_stake,
+          ROUND(AVG(clv_pct), 2) AS avg_clv,
+          MIN(created_at) AS first_seen,
+          MAX(created_at) AS last_seen
+          FROM market_tips_shadow
+         WHERE created_at >= datetime('now', '-' || ? || ' days')
+           ${sportCond}
+         GROUP BY sport, market, model_version
+         HAVING n_settled >= 10
+         ORDER BY sport, market, total_profit DESC
+      `).all(...[days, ...sportArgs]).map(r => {
+        const roi = r.total_stake > 0 ? (r.total_profit / r.total_stake) * 100 : 0;
+        return {
+          ...r,
+          hit_rate: r.n_settled > 0 ? +((r.n_win / r.n_settled) * 100).toFixed(1) : null,
+          roi_pct: +roi.toFixed(2),
+        };
+      });
+      out.by_model_version_market = byModelVersionMarket;
+      out.market_version_negative_outliers = byModelVersionMarket.filter(r => r.roi_pct < -15 && r.n_settled >= 20);
+      out.market_version_positive_outliers = byModelVersionMarket.filter(r => r.roi_pct > 15 && r.n_settled >= 20);
+
       const todHeatmap = db.prepare(`
         SELECT sport, CAST(STRFTIME('%H', created_at) AS INTEGER) AS hour_utc,
           COUNT(*) AS n,
