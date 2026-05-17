@@ -53,6 +53,7 @@ Effective stake = baseline × 6 multipliers. **Não adicionar 7º sem evidência
 | Tabela | Descrição |
 |---|---|
 | `mt_market_promote_state` (mig 112) | Per (sport, market) promote state (Phase 1 granularidade). Helper: `lib/mt-market-promote.js`. Backward compat via 2-layer lookup (state OVERRIDE legacy env `<SPORT>_MARKET_TIPS_ENABLED`). |
+| `tips.gate_state` (col, commits 4bdd35d+ac45a24) | JSON snapshot dos gates avaliados no momento do emit. Estrutura: `{env: {...}, auto: {...}, gates_evaluated: [{gate, passed, value, threshold, ...}]}`. Permite forensics fiel sem recálculo retroativo. Cross-sport via `_mtTryRecordAndShouldDm`. Pendente: estender pra `market_tips_shadow` (mig nova). |
 
 ## Crons (84 total em bot.js — top significativos)
 
@@ -103,6 +104,10 @@ Effective stake = baseline × 6 multipliers. **Não adicionar 7º sem evidência
 | `/admin/mt-shadow-by-league?sport=X` | Shadow ROI per liga |
 | `/admin/scraper-health` | Status casas BR aggregator |
 | `/admin/tip-archive?id=X` | Archive tip manualmente |
+| `/admin/tip-debug?id=X` | Tip details + `gate_state` parsed + `tip_context_json` (commit b2e8151) |
+| `/admin/mt-historical-learnings?breakdown=by_market_version` | (sport, market, model_version) ROI + outliers ±15% n≥20 (commit b5069cf) |
+| `/admin/shadow-tier-divergence?sport=X` | Cross-tier ROI/calib_gap; flagga buckets ≥10pp gap |
+| `/admin/mt-auto-promote` | MT league_blocks + recent decisions + per-sport envs |
 
 ## Auto-tunes (com FROZEN_HOLDOUT 60d default)
 
