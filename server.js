@@ -12632,15 +12632,50 @@ setInterval(load, 60000);
       child.stdout.on('data', d => { stdout += d.toString('utf8'); });
       child.stderr.on('data', d => { stderr += d.toString('utf8'); });
       const startedAt = Date.now();
+      // 2026-05-17: persist last spawn result em global pra /admin/fit-sport-mt-status
+      // inspect post-mortem. Resolve pendency LoL fit não atualiza desde 12/05 sem
+      // acesso direto a Railway logs.
+      global._lastFitSportMt = global._lastFitSportMt || {};
+      global._lastFitSportMt[`${sport}|${filter}`] = { sport, filter, started_at: new Date().toISOString(), running: true };
       child.on('close', (code) => {
         const dur = Math.round((Date.now() - startedAt) / 1000);
         const tail = (stdout + (stderr ? ' || ' + stderr : '')).slice(-600).replace(/\n/g, ' | ');
         log(code === 0 ? 'INFO' : 'WARN', 'FIT-SPORT-MT', `${sport} done in ${dur}s exit=${code} | ${tail}`);
         try { require('./lib/sport-mt-calib').getSportMtCalib(sport)._invalidate(); } catch (_) {}
+        global._lastFitSportMt[`${sport}|${filter}`] = {
+          sport, filter,
+          started_at: new Date(startedAt).toISOString(),
+          ended_at: new Date().toISOString(),
+          duration_s: dur,
+          exit_code: code,
+          stdout_tail: stdout.slice(-2000),
+          stderr_tail: stderr.slice(-2000),
+          running: false,
+        };
       });
       setTimeout(() => { try { child.kill('SIGKILL'); } catch (_) {} }, 3 * 60 * 1000).unref?.();
-      sendJson(res, { ok: true, sport, filter, started_at: new Date().toISOString(), message: `fit ${sport} disparado. Check /admin/sport-mt-calib-meta?sport=${sport}` });
+      sendJson(res, { ok: true, sport, filter, started_at: new Date().toISOString(), message: `fit ${sport} disparado. Check /admin/fit-sport-mt-status?sport=${sport}&filter=${filter} OU /admin/sport-mt-calib-meta?sport=${sport}` });
     } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
+  // GET /admin/fit-sport-mt-status?sport=lol&filter=all — inspect last spawn result
+  // (stdout/stderr/exit_code). Permite debug do "ok=true mas JSON não atualiza"
+  // sem acesso a Railway logs. Persiste em global, perde no restart.
+  if (p === '/admin/fit-sport-mt-status' && req.method === 'GET') {
+    if (!requireAdmin(req, res)) return;
+    const sport = String(parsed.query.sport || '').trim().toLowerCase();
+    const filter = String(parsed.query.filter || 'pre').toLowerCase();
+    const all = parsed.query.all === '1' || parsed.query.all === 'true';
+    const store = global._lastFitSportMt || {};
+    if (all) {
+      sendJson(res, { ok: true, all: store });
+      return;
+    }
+    const key = `${sport}|${filter}`;
+    const data = store[key];
+    if (!data) { sendJson(res, { ok: false, error: 'no_record_for_sport_filter', sport, filter, available_keys: Object.keys(store) }, 404); return; }
+    sendJson(res, { ok: true, ...data });
     return;
   }
 
