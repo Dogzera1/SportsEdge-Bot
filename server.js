@@ -6677,7 +6677,13 @@ const server = http.createServer(async (req, res) => {
             // Sofascore live score (sets, game atual, saque, %saque)
             try {
               const sofaTn = require('./lib/sofascore-tennis');
-              const wrapped = await sofaTn.getLiveMatchScore(m.team1, m.team2, m.time).catch(() => null);
+              // 2026-05-17 BUG FIX: m.time era undefined em /live-snapshot row schema
+              // (campo correto é startTime). commenceIso=undefined → matcher dates
+              // vazias → 100% no_sofascore_match (audit live-scout). Fallback chain
+              // pega ambos. Probe /admin/sofa-tennis-probe confirmou matcher OK
+              // com commenceIso correto.
+              const commenceIso = m.startTime || m.time || null;
+              const wrapped = await sofaTn.getLiveMatchScore(m.team1, m.team2, commenceIso).catch(() => null);
               const ls = wrapped?.liveScore || null;
               if (ls?.isLive) {
                 row.liveStats = {
