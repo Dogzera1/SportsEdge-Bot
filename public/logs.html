@@ -76,36 +76,87 @@
   /* ── Tips ── */
   .tips-section { padding: 18px; }
   .tips-section h2 { font-size: 14px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; margin: 0 0 10px; }
+
+  /* Summary bar acima das colunas */
+  .tips-summary { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 12px; padding: 10px 14px; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; }
+  .tips-summary .chip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; background: var(--panel2); border-radius: 999px; font-size: 12px; }
+  .tips-summary .chip b { font-size: 13px; font-weight: 700; }
+  .tips-summary .chip.ok b   { color: var(--ok); }
+  .tips-summary .chip.err b  { color: var(--err); }
+  .tips-summary .chip.live b { color: var(--err); }
+  .tips-summary .chip.acc b  { color: var(--accent); }
+  .tips-summary .spark { display: inline-flex; align-items: end; gap: 1px; height: 18px; margin-left: 4px; }
+  .tips-summary .spark span { display: inline-block; width: 3px; background: var(--accent); border-radius: 1px; min-height: 2px; opacity: .65; }
+  .tips-summary .grow { flex: 1; }
+  .tips-summary .label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .5px; }
+
   .tips-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
   @media (max-width: 900px) { .tips-cols { grid-template-columns: 1fr; } }
-  .tips-col { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; max-height: 380px; overflow: auto; }
+  .tips-col { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; max-height: 480px; overflow: auto; }
   .tips-col.sent   { border-left: 4px solid var(--ok); }
   .tips-col.denied { border-left: 4px solid var(--err); }
-  .tips-col h3 { margin: 0 0 8px; font-size: 13px; display: flex; align-items: center; gap: 8px; }
+  .tips-col h3 { margin: 0 0 8px; font-size: 13px; display: flex; align-items: center; gap: 8px; position: sticky; top: -12px; background: var(--panel); padding: 8px 0 6px; z-index: 2; }
   .tips-col h3 .count { background: var(--panel2); padding: 1px 8px; border-radius: 999px; font-size: 11px; color: var(--muted); }
   .tips-col.sent h3   { color: var(--ok); }
   .tips-col.denied h3 { color: var(--err); }
-  .tip-row { display: grid; grid-template-columns: 60px 70px 1fr; gap: 8px; padding: 5px 6px; border-radius: 4px; font-size: 12px; align-items: baseline; }
+
+  /* Reason filter pills (Negadas only) */
+  .reason-filters { display: flex; gap: 4px; flex-wrap: wrap; margin: 0 0 8px; position: sticky; top: 24px; background: var(--panel); padding: 4px 0; z-index: 2; }
+  .reason-filters .rpill { display: inline-flex; align-items: center; gap: 5px; background: var(--panel2); border: 1px solid var(--border); padding: 2px 8px; border-radius: 999px; font-size: 10.5px; cursor: pointer; user-select: none; color: var(--text); text-transform: uppercase; letter-spacing: .3px; }
+  .reason-filters .rpill .rc { background: rgba(124,134,147,.2); color: var(--muted); padding: 0 6px; border-radius: 999px; font-size: 9.5px; font-weight: 700; }
+  .reason-filters .rpill.active { background: var(--accent); color: #051119; border-color: var(--accent); font-weight: 700; }
+  .reason-filters .rpill.active .rc { background: rgba(0,0,0,.18); color: #051119; }
+  .reason-filters .rpill[data-r="risk"].active,
+  .reason-filters .rpill[data-r="ev-sanity"].active,
+  .reason-filters .rpill[data-r="mt-leak-guard"].active,
+  .reason-filters .rpill[data-r="invalid"].active { background: var(--err); color: #1a0000; border-color: var(--err); }
+  .reason-filters .rpill[data-r="mt-ev-cap"].active,
+  .reason-filters .rpill[data-r="baixa-gate"].active,
+  .reason-filters .rpill[data-r="gate"].active { background: var(--warn); color: #2a1900; border-color: var(--warn); }
+
+  /* Tip rows v2 — richer layout */
+  .tip-row { display: grid; grid-template-columns: 56px 56px 1fr auto; gap: 8px; padding: 6px 8px; border-radius: 6px; font-size: 12px; align-items: center; transition: background .12s; }
   .tip-row + .tip-row { border-top: 1px solid var(--border); }
-  .tip-row .tt { color: var(--muted); font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; }
-  .tip-row .bb { color: var(--accent); font-weight: 600; font-size: 11px; text-transform: uppercase; }
-  .tip-row .reason { display: inline-block; padding: 1px 6px; border-radius: 4px; background: var(--panel2); color: var(--muted); font-size: 10px; margin-right: 6px; text-transform: uppercase; letter-spacing: .5px; }
-  .tip-row.r-risk      .reason { background: rgba(248,113,113,.15); color: var(--err); }
-  .tip-row.r-baixa-gate .reason { background: rgba(251,191,36,.15); color: var(--warn); }
-  .tip-row.r-sem-dados .reason { background: rgba(124,134,147,.2); color: var(--muted); }
-  .tip-row.r-mt-dedup     .reason { background: rgba(96,165,250,.15); color: #60a5fa; }
-  .tip-row.r-mt-filter    .reason { background: rgba(168,85,247,.15); color: #c084fc; }
-  .tip-row.r-mt-leak-guard .reason { background: rgba(248,113,113,.20); color: var(--err); }
-  .tip-row.r-mt-ev-cap    .reason { background: rgba(251,191,36,.15); color: var(--warn); }
-  .tips-empty { color: var(--muted); font-size: 12px; padding: 16px; text-align: center; }
+  .tip-row:hover { background: rgba(74,163,255,.06); }
+  .tip-row .tt { color: var(--muted); font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 10.5px; }
+  .tip-row .bb { display: inline-flex; align-items: center; gap: 4px; color: var(--accent); font-weight: 600; font-size: 11px; text-transform: uppercase; }
+  .tip-row .bb .se { font-size: 14px; line-height: 1; }
+  .tip-row .label { color: var(--text); font-size: 12px; line-height: 1.35; word-break: break-word; overflow: hidden; }
+  .tip-row .label .conf { display: inline-block; padding: 0 5px; border-radius: 3px; font-size: 9.5px; font-weight: 700; margin-right: 4px; letter-spacing: .3px; vertical-align: middle; }
+  .tip-row .label .conf.ALTA  { background: rgba(52,211,153,.18); color: var(--ok); }
+  .tip-row .label .conf.MEDIA { background: rgba(251,191,36,.18); color: var(--warn); }
+  .tip-row .label .conf.BAIXA { background: rgba(124,134,147,.2); color: var(--muted); }
+  .tip-row .stats { display: inline-flex; gap: 4px; align-items: center; flex-shrink: 0; }
+  .tip-row .stats .s { padding: 1px 5px; border-radius: 3px; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 10.5px; font-weight: 600; }
+  .tip-row .stats .s.odd { background: rgba(74,163,255,.12); color: var(--accent); }
+  .tip-row .stats .s.ev-pos { background: rgba(52,211,153,.14); color: var(--ok); }
+  .tip-row .stats .s.ev-neg { background: rgba(248,113,113,.14); color: var(--err); }
+  .tip-row .stats .s.stake { background: var(--panel2); color: var(--text); }
+  .tip-row .stats .s.kind-ml { background: rgba(74,163,255,.12); color: var(--accent); text-transform: uppercase; font-size: 9.5px; letter-spacing: .3px; }
+  .tip-row .stats .s.kind-mt { background: rgba(124,58,237,.18); color: #a78bfa; text-transform: uppercase; font-size: 9.5px; letter-spacing: .3px; }
+  .tip-row .stats .s.kind-mt-record { background: rgba(167,139,250,.14); color: #a78bfa; text-transform: uppercase; font-size: 9.5px; letter-spacing: .3px; }
+  .tip-row .reason { display: inline-block; padding: 1px 6px; border-radius: 4px; background: var(--panel2); color: var(--muted); font-size: 10px; margin-right: 4px; text-transform: uppercase; letter-spacing: .5px; font-weight: 600; flex-shrink: 0; }
+  .tip-row.r-risk          .reason,
+  .tip-row.r-mt-leak-guard .reason,
+  .tip-row.r-ev-sanity     .reason,
+  .tip-row.r-invalid       .reason { background: rgba(248,113,113,.18); color: var(--err); }
+  .tip-row.r-baixa-gate    .reason,
+  .tip-row.r-mt-ev-cap     .reason,
+  .tip-row.r-gate          .reason { background: rgba(251,191,36,.15); color: var(--warn); }
+  .tip-row.r-sem-dados     .reason,
+  .tip-row.r-sem-edge      .reason { background: rgba(124,134,147,.2); color: var(--muted); }
+  .tip-row.r-mt-dedup      .reason { background: rgba(96,165,250,.15); color: #60a5fa; }
+  .tip-row.r-mt-filter     .reason,
+  .tip-row.r-fallback      .reason { background: rgba(168,85,247,.15); color: #c084fc; }
+  .tips-empty { color: var(--muted); font-size: 12px; padding: 20px; text-align: center; font-style: italic; }
   .tip-filters { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 8px; }
   .tip-filters .pill { background: var(--panel2); border: 1px solid var(--border); padding: 2px 8px; border-radius: 999px; font-size: 11px; cursor: pointer; user-select: none; color: var(--text); }
   .tip-filters .pill.active { background: var(--accent); color: #051119; border-color: var(--accent); font-weight: 600; }
   .tip-filters .pill.live { background: rgba(248,113,113,.15); border-color: rgba(248,113,113,.4); color: #ff9a9a; }
   .tip-filters .pill.live.active { background: var(--err); border-color: var(--err); color: #1a0000; }
-  .live-badge { display: inline-flex; align-items: center; gap: 4px; margin-left: 6px; padding: 1px 7px; border-radius: 4px; background: rgba(248,113,113,.18); color: var(--err); font-size: 10px; font-weight: 700; letter-spacing: .5px; }
+  .live-badge { display: inline-flex; align-items: center; gap: 4px; margin-left: 4px; padding: 0 6px; border-radius: 4px; background: rgba(248,113,113,.18); color: var(--err); font-size: 9.5px; font-weight: 700; letter-spacing: .5px; }
   .live-badge::before { content: ''; width: 6px; height: 6px; background: var(--err); border-radius: 50%; animation: blink 1.2s infinite; }
-  .tip-row.live { background: rgba(248,113,113,.05); border-left: 2px solid var(--err); padding-left: 4px; }
+  .tip-row.live { background: rgba(248,113,113,.05); border-left: 2px solid var(--err); padding-left: 6px; }
 
   /* ── Live Matches ── */
   .live-section { padding: 18px; }
@@ -171,7 +222,41 @@
 
   /* ── Errors ── */
   .errors-section { padding: 18px; }
-  .err-log { background: var(--panel); border: 1px solid var(--border); border-left: 4px solid var(--err); border-radius: 10px; max-height: 500px; overflow: auto; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; padding: 10px 14px; }
+  .err-toolbar { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 12px; padding: 10px 14px; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; }
+  .err-toolbar .label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .5px; }
+  .err-toolbar .err-filters { display: flex; gap: 4px; flex-wrap: wrap; }
+  .err-toolbar .epill { background: var(--panel2); border: 1px solid var(--border); padding: 2px 8px; border-radius: 999px; font-size: 11px; cursor: pointer; user-select: none; color: var(--text); }
+  .err-toolbar .epill.active { background: var(--err); color: #1a0000; border-color: var(--err); font-weight: 600; }
+  .err-toolbar .err-mode { display: flex; gap: 2px; background: var(--panel2); border-radius: 6px; padding: 2px; }
+  .err-toolbar .err-mode button { background: none; border: none; color: var(--muted); padding: 3px 10px; font-size: 11px; font-weight: 600; border-radius: 4px; cursor: pointer; font-family: inherit; }
+  .err-toolbar .err-mode button.active { background: var(--accent); color: #051119; }
+  .err-toolbar .chip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; background: var(--panel2); border-radius: 999px; font-size: 12px; }
+  .err-toolbar .chip b { font-size: 13px; font-weight: 700; color: var(--err); }
+  .err-toolbar .chip.acc b { color: var(--accent); }
+  .err-toolbar .grow { flex: 1; }
+
+  .err-log { background: var(--panel); border: 1px solid var(--border); border-left: 4px solid var(--err); border-radius: 10px; max-height: 580px; overflow: auto; font-size: 12px; padding: 10px 14px; }
+  .err-row { display: grid; grid-template-columns: 60px 70px 1fr; gap: 8px; padding: 6px 6px; border-bottom: 1px solid var(--border); align-items: baseline; line-height: 1.4; font-family: ui-monospace, Menlo, Consolas, monospace; }
+  .err-row:last-child { border-bottom: none; }
+  .err-row:hover { background: rgba(248,113,113,.05); }
+  .err-row .tt { color: var(--muted); font-size: 10.5px; }
+  .err-row .bb { color: var(--accent); font-weight: 600; font-size: 11px; text-transform: uppercase; }
+  .err-row .txt { color: var(--err); word-break: break-word; }
+  .err-row .txt .sigtag { display: inline-block; padding: 1px 6px; border-radius: 4px; background: rgba(248,113,113,.15); color: var(--err); font-size: 10px; font-weight: 700; margin-right: 6px; text-transform: uppercase; letter-spacing: .3px; }
+
+  /* Grouped (signature) view */
+  .err-group { background: var(--panel2); border-left: 2px solid var(--err); border-radius: 6px; padding: 8px 10px; margin-bottom: 8px; }
+  .err-group .gh { display: flex; align-items: center; gap: 8px; cursor: pointer; user-select: none; }
+  .err-group .gh .count { background: rgba(248,113,113,.2); color: var(--err); padding: 1px 9px; border-radius: 999px; font-size: 11px; font-weight: 700; }
+  .err-group .gh .sig { flex: 1; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; color: var(--err); word-break: break-word; }
+  .err-group .gh .last { color: var(--muted); font-size: 10.5px; font-family: ui-monospace, Menlo, Consolas, monospace; }
+  .err-group .gh .bots { display: inline-flex; gap: 3px; flex-wrap: wrap; }
+  .err-group .gh .bots .bt { background: rgba(74,163,255,.12); color: var(--accent); padding: 0 6px; border-radius: 3px; font-size: 9.5px; font-weight: 600; text-transform: uppercase; }
+  .err-group.expanded .samples { display: block; }
+  .err-group .samples { display: none; margin-top: 6px; padding-top: 6px; border-top: 1px dashed var(--border); }
+  .err-group .samples .err-row { background: transparent; padding: 4px 6px; }
+  .err-group .toggle { color: var(--muted); font-size: 11px; }
+  .err-group.expanded .toggle { color: var(--accent); }
 </style>
 </head>
 <body>
@@ -197,16 +282,27 @@
 <!-- ═══ Tab: Tips ═══ -->
 <div class="tab-pane active" id="pane-tips">
   <div class="tips-section">
+    <div class="tips-summary" id="tipsSummary">
+      <span class="chip ok"><b id="sumSent">0</b><span class="label">enviadas</span></span>
+      <span class="chip err"><b id="sumDenied">0</b><span class="label">negadas</span></span>
+      <span class="chip live"><b id="sumLive">0</b><span class="label">live</span></span>
+      <span class="chip acc"><b id="sumRate">—</b><span class="label">aprov %</span></span>
+      <span class="chip"><b id="sumTopReason">—</b><span class="label">top razão</span></span>
+      <span class="grow"></span>
+      <span class="label">distribuição</span><span class="spark" id="sumSpark"></span>
+    </div>
     <div class="tip-filters" id="tipFilters">
       <span class="pill live" data-live="1">so LIVE</span>
       <span class="pill active" data-bot="all">todos</span>
       <span class="pill" data-bot="lol">lol</span>
       <span class="pill" data-bot="dota">dota</span>
       <span class="pill" data-bot="cs">cs2</span>
+      <span class="pill" data-bot="valorant">valorant</span>
       <span class="pill" data-bot="tennis">tennis</span>
       <span class="pill" data-bot="tabletennis">tt</span>
       <span class="pill" data-bot="mma">mma</span>
       <span class="pill" data-bot="football">football</span>
+      <span class="pill" data-bot="basket">basket</span>
       <span class="pill" data-bot="snooker">snooker</span>
       <span class="pill" data-bot="darts">darts</span>
     </div>
@@ -217,6 +313,7 @@
       </div>
       <div class="tips-col denied">
         <h3>Negadas <span class="count" id="cntDenied">0</span></h3>
+        <div class="reason-filters" id="reasonFilters"></div>
         <div id="listDenied"><div class="tips-empty">aguardando...</div></div>
       </div>
     </div>
@@ -253,6 +350,34 @@
 <!-- ═══ Tab: Erros ═══ -->
 <div class="tab-pane" id="pane-errors">
   <div class="errors-section">
+    <div class="err-toolbar">
+      <span class="chip"><b id="errCountTotal">0</b><span class="label">total</span></span>
+      <span class="chip acc"><b id="errCountRecent">0</b><span class="label">últimos 5min</span></span>
+      <span class="chip"><b id="errUniqueSig">0</b><span class="label">assinaturas</span></span>
+      <span class="grow"></span>
+      <div class="err-mode" id="errMode">
+        <button data-em="grouped" class="active">agrupado</button>
+        <button data-em="flat">linha-a-linha</button>
+      </div>
+    </div>
+    <div class="err-toolbar">
+      <span class="label">bot</span>
+      <div class="err-filters" id="errFilters">
+        <span class="epill active" data-ef="all">todos</span>
+        <span class="epill" data-ef="lol">lol</span>
+        <span class="epill" data-ef="dota">dota</span>
+        <span class="epill" data-ef="cs">cs</span>
+        <span class="epill" data-ef="valorant">valorant</span>
+        <span class="epill" data-ef="tennis">tennis</span>
+        <span class="epill" data-ef="mma">mma</span>
+        <span class="epill" data-ef="football">football</span>
+        <span class="epill" data-ef="basket">basket</span>
+        <span class="epill" data-ef="tabletennis">tt</span>
+        <span class="epill" data-ef="snooker">snooker</span>
+        <span class="epill" data-ef="darts">darts</span>
+        <span class="epill" data-ef="system">system</span>
+      </div>
+    </div>
     <div class="err-log" id="errLog">
       <div class="tips-empty" id="errEmpty">sem erros no buffer</div>
       <div id="errList"></div>
@@ -619,29 +744,151 @@
       p.classList.add('active');
       tipFilter = p.dataset.bot;
     }
+    reasonFilter = 'all'; // reset razão ao trocar bot/live — evita lista vazia
     refreshTips();
   }));
 
   let lastTipsData = null;
+  let reasonFilter = 'all';
+
+  // Sport icon per bot — escolha curta + visualmente distinguível
+  const BOT_EMOJI = { lol:'🟦', dota:'🟥', cs:'🔫', cs2:'🔫', valorant:'🎯', tennis:'🎾', tabletennis:'🏓', mma:'🥊', football:'⚽', basket:'🏀', snooker:'🎱', darts:'🎯', system:'⚙️' };
+
+  // Labels curtos por código de razão (usados nos filtros)
+  const REASON_LABELS = {
+    'sem-edge':       'Sem edge',
+    'mt-dedup':       'Dedup',
+    'mt-filter':      'MT filter',
+    'mt-leak-guard':  'Leak guard',
+    'mt-ev-cap':      'EV cap',
+    'gate':           'Gate ML',
+    'sem-dados':      'Sem dados',
+    'ev-sanity':      'EV sanity',
+    'risk':           'Risk',
+    'baixa-gate':     'Baixa',
+    'fallback':       'Fallback',
+    'invalid':        'Inválida',
+  };
+
+  // Extrai odd / EV / stake / confidence do texto de tip — best-effort regex.
+  function parseTipFields(text) {
+    const out = { odd: null, ev: null, stake: null, conf: null };
+    const oddM = text.match(/@\s*([0-9]+(?:\.[0-9]+)?)/);
+    if (oddM) out.odd = oddM[1];
+    const evM = text.match(/EV\s*([+\-]?[0-9]+(?:\.[0-9]+)?)\s*%/i);
+    if (evM) out.ev = parseFloat(evM[1]);
+    const stkM = text.match(/stake\s*([0-9]+(?:\.[0-9]+)?)\s*u/i);
+    if (stkM) out.stake = stkM[1];
+    const cfM = text.match(/\b(ALTA|M[ÉE]DIA|BAIXA)\b/);
+    if (cfM) out.conf = cfM[1].replace('É','E').toUpperCase();
+    return out;
+  }
+
+  function tipRowHTML(i, denied) {
+    const parsed = parseTipFields(i.text || '');
+    const liveTag = i.isLive ? `<span class="live-badge">LIVE</span>` : '';
+    const emoji = BOT_EMOJI[i.bot] || '·';
+
+    // Stats coluna direita: odd + EV + stake + kind
+    const stats = [];
+    if (!denied && i.kind && i.kind !== 'ML') {
+      const klass = 'kind-' + i.kind.toLowerCase();
+      stats.push(`<span class="s ${klass}">${i.kind}</span>`);
+    }
+    if (parsed.odd) stats.push(`<span class="s odd">@${parsed.odd}</span>`);
+    if (parsed.ev != null) {
+      const cls = parsed.ev >= 0 ? 'ev-pos' : 'ev-neg';
+      const sign = parsed.ev >= 0 ? '+' : '';
+      stats.push(`<span class="s ${cls}">EV ${sign}${parsed.ev.toFixed(1)}%</span>`);
+    }
+    if (parsed.stake) stats.push(`<span class="s stake">${parsed.stake}u</span>`);
+
+    // Label: limpa EV/stake/conf do texto pra reduzir ruído visual
+    let label = String(i.text || '');
+    label = label
+      .replace(/\b(ALTA|M[ÉE]DIA|BAIXA)\b\s*/i, '')
+      .replace(/EV\s*[+\-]?[0-9]+(?:\.[0-9]+)?\s*%\s*/i, '')
+      .replace(/stake\s*[0-9]+(?:\.[0-9]+)?\s*u\s*/i, '')
+      .trim();
+    const confTag = parsed.conf ? `<span class="conf ${parsed.conf}">${parsed.conf}</span>` : '';
+
+    const reasonTag = denied && i.reason
+      ? `<span class="reason">${REASON_LABELS[i.reason] || i.reason}</span>`
+      : '';
+
+    const cls = (denied ? `tip-row r-${i.reason || ''}` : 'tip-row') + (i.isLive ? ' live' : '');
+    return `<div class="${cls}">`
+      + `<span class="tt">${fmtTime(i.t)}</span>`
+      + `<span class="bb"><span class="se">${emoji}</span>${i.bot}</span>`
+      + `<span class="label">${reasonTag}${confTag}${escapeHtml(label)}${liveTag}</span>`
+      + `<span class="stats">${stats.join('')}</span>`
+      + `</div>`;
+  }
+
   function renderTipsList(items, container, denied) {
     let filt = tipFilter === 'all' ? items : items.filter(i => i.bot === tipFilter);
     if (liveOnly) filt = filt.filter(i => i.isLive);
+    if (denied && reasonFilter !== 'all') filt = filt.filter(i => i.reason === reasonFilter);
     if (!filt.length) {
-      const msg = liveOnly ? 'sem live no momento' : (tipFilter === 'all' ? 'nenhuma no buffer' : 'nenhuma deste bot');
+      let msg;
+      if (liveOnly) msg = 'sem live no momento';
+      else if (denied && reasonFilter !== 'all') msg = `nenhuma "${REASON_LABELS[reasonFilter] || reasonFilter}"`;
+      else if (tipFilter === 'all') msg = denied ? 'nenhuma tip negada no buffer' : 'nenhuma tip enviada no buffer';
+      else msg = `nenhuma deste bot`;
       container.innerHTML = `<div class="tips-empty">${msg}</div>`;
       return;
     }
-    container.innerHTML = filt.map(i => {
-      const reasonTag = denied && i.reason ? `<span class="reason">${i.reason}</span>` : '';
-      const liveTag = i.isLive ? `<span class="live-badge">LIVE</span>` : '';
-      // Badge de tipo (ML/MT/MT-RECORD) pra sent — distingue Moneyline tradicional
-      // de Market Tip (handicap/totals/etc) promovida ou shadow-DM.
-      const kindTag = (!denied && i.kind && i.kind !== 'ML')
-        ? `<span class="reason" style="background:rgba(124,58,237,.18);color:#a78bfa">${i.kind}</span>`
-        : '';
-      const cls = (denied ? `tip-row r-${i.reason || ''}` : 'tip-row') + (i.isLive ? ' live' : '');
-      return `<div class="${cls}"><span class="tt">${fmtTime(i.t)}</span><span class="bb">${i.bot}</span><span>${kindTag}${reasonTag}${liveTag}${escapeHtml(i.text)}</span></div>`;
-    }).join('');
+    container.innerHTML = filt.map(i => tipRowHTML(i, denied)).join('');
+  }
+
+  function renderReasonFilters(denied) {
+    const $rf = document.getElementById('reasonFilters');
+    if (!$rf) return;
+    // Sempre limita ao set filtrado por bot+live (mesma lente da lista)
+    let src = denied;
+    if (tipFilter !== 'all') src = src.filter(i => i.bot === tipFilter);
+    if (liveOnly) src = src.filter(i => i.isLive);
+    const counts = {};
+    for (const x of src) counts[x.reason] = (counts[x.reason] || 0) + 1;
+    const reasons = Object.keys(counts).sort((a,b) => counts[b] - counts[a]);
+    const pills = [`<span class="rpill ${reasonFilter==='all'?'active':''}" data-r="all">todas <span class="rc">${src.length}</span></span>`];
+    for (const r of reasons) {
+      const lbl = REASON_LABELS[r] || r;
+      pills.push(`<span class="rpill r-${r} ${reasonFilter===r?'active':''}" data-r="${r}">${lbl} <span class="rc">${counts[r]}</span></span>`);
+    }
+    $rf.innerHTML = pills.join('');
+    $rf.querySelectorAll('.rpill').forEach(p => p.addEventListener('click', () => {
+      reasonFilter = p.dataset.r;
+      renderReasonFilters(denied);
+      renderTipsList(lastTipsData.denied, document.getElementById('listDenied'), true);
+    }));
+  }
+
+  function renderTipsSummary(data) {
+    const c = data.countsTotal || {};
+    const sent = c.sent || 0, denied = c.denied || 0;
+    document.getElementById('sumSent').textContent = c.sentLive ? `${sent} (${c.sentLive}L)` : sent;
+    document.getElementById('sumDenied').textContent = c.deniedLive ? `${denied} (${c.deniedLive}L)` : denied;
+    document.getElementById('sumLive').textContent = (c.sentLive || 0) + (c.deniedLive || 0);
+    const tot = sent + denied;
+    document.getElementById('sumRate').textContent = tot ? `${Math.round((sent/tot)*100)}%` : '—';
+
+    // Top reason
+    const cnt = {};
+    for (const d of (data.denied || [])) cnt[d.reason] = (cnt[d.reason] || 0) + 1;
+    const top = Object.entries(cnt).sort((a,b) => b[1]-a[1])[0];
+    document.getElementById('sumTopReason').textContent = top ? `${REASON_LABELS[top[0]] || top[0]} ·${top[1]}` : '—';
+
+    // Sparkline: distribution por bot (sent)
+    const byBot = {};
+    for (const s of (data.sent || [])) byBot[s.bot] = (byBot[s.bot] || 0) + 1;
+    const maxV = Math.max(1, ...Object.values(byBot));
+    const order = ['lol','dota','cs','valorant','tennis','football','basket','mma','tabletennis','snooker','darts'];
+    const bars = order
+      .filter(b => byBot[b])
+      .map(b => `<span title="${b}: ${byBot[b]}" style="height:${Math.max(2, (byBot[b]/maxV)*18)}px"></span>`)
+      .join('');
+    document.getElementById('sumSpark').innerHTML = bars || '<span style="height:2px;opacity:.3"></span>';
   }
 
   async function refreshTips() {
@@ -653,6 +900,8 @@
     document.getElementById('cntSent').textContent = c.sentLive ? `${c.sent} (${c.sentLive} live)` : c.sent;
     document.getElementById('cntDenied').textContent = c.deniedLive ? `${c.denied} (${c.deniedLive} live)` : c.denied;
     document.getElementById('tabTipCount').textContent = c.sent;
+    renderTipsSummary(lastTipsData);
+    renderReasonFilters(lastTipsData.denied || []);
     renderTipsList(lastTipsData.sent, document.getElementById('listSent'), false);
     renderTipsList(lastTipsData.denied, document.getElementById('listDenied'), true);
   }
@@ -716,28 +965,116 @@
   }
 
   // ── Errors ──
+  let errBotFilter = 'all';
+  let errMode = 'grouped'; // 'grouped' | 'flat'
+
+  document.querySelectorAll('#errFilters .epill').forEach(p => p.addEventListener('click', () => {
+    document.querySelectorAll('#errFilters .epill').forEach(x => x.classList.remove('active'));
+    p.classList.add('active');
+    errBotFilter = p.dataset.ef;
+    refreshErrors();
+  }));
+  document.querySelectorAll('#errMode button').forEach(b => b.addEventListener('click', () => {
+    document.querySelectorAll('#errMode button').forEach(x => x.classList.remove('active'));
+    b.classList.add('active');
+    errMode = b.dataset.em;
+    refreshErrors();
+  }));
+
+  // Normaliza linha de erro pra detectar duplicatas: substitui números, ids hex,
+  // timestamps e URLs por placeholders. Mantém o estilo da mensagem.
+  function errSignature(text) {
+    return String(text || '')
+      .replace(/https?:\/\/\S+/g, 'URL')
+      .replace(/\b[0-9a-f]{8,}\b/gi, 'HEX')
+      .replace(/\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[^\s]*/g, 'TS')
+      .replace(/\b\d+(?:\.\d+)?\b/g, 'N')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 160);
+  }
+
+  function shortSig(sig) {
+    return sig.length > 110 ? sig.slice(0, 107) + '...' : sig;
+  }
+
   async function refreshErrors() {
     const hist = await getHistory();
-    const errs = hist.filter(e =>
+    let errs = hist.filter(e =>
       e.level === 'error' ||
       /\[stderr\]|ECONN|ETIMEDOUT|ENOTFOUND|exception|panic|fatal/i.test(e.text)
-    ).slice(-50);
+    );
+    if (errBotFilter !== 'all') errs = errs.filter(e => (e.bot || 'system') === errBotFilter);
+    errs = errs.slice(-200);
+
     document.getElementById('tabErrCount').textContent = errs.length;
+    document.getElementById('errCountTotal').textContent = errs.length;
+
+    const cutoff = Date.now() - 5 * 60 * 1000;
+    document.getElementById('errCountRecent').textContent = errs.filter(e => e.t >= cutoff).length;
+
     const $errList = document.getElementById('errList');
     const $errEmpty = document.getElementById('errEmpty');
     if (!errs.length) {
       $errEmpty.style.display = 'block';
+      $errEmpty.textContent = errBotFilter === 'all' ? 'sem erros no buffer' : `sem erros para ${errBotFilter}`;
       $errList.innerHTML = '';
+      document.getElementById('errUniqueSig').textContent = 0;
       return;
     }
     $errEmpty.style.display = 'none';
-    $errList.innerHTML = errs.map(e => {
-      const bot = e.bot && e.bot !== 'system' ? `<span style="color:var(--accent);font-weight:600;text-transform:uppercase;margin-right:6px;">${e.bot}</span>` : '';
-      return `<div style="padding:4px 0;border-bottom:1px solid var(--border);line-height:1.4;word-break:break-word;">` +
-        `<span style="color:var(--muted);margin-right:8px;">${fmtTime(e.t)}</span>` +
-        bot +
-        `<span style="color:var(--err);">${escapeHtml(e.text)}</span></div>`;
+
+    // Agrupa por assinatura — útil quando mesma stack/erro repete N vezes
+    const sigMap = new Map();
+    for (const e of errs) {
+      const sig = errSignature(e.text);
+      if (!sigMap.has(sig)) sigMap.set(sig, { sig, count: 0, last: e, first: e, samples: [], bots: new Set() });
+      const g = sigMap.get(sig);
+      g.count++;
+      g.samples.push(e);
+      g.bots.add(e.bot || 'system');
+      if (e.t > g.last.t) g.last = e;
+      if (e.t < g.first.t) g.first = e;
+    }
+    document.getElementById('errUniqueSig').textContent = sigMap.size;
+
+    if (errMode === 'flat') {
+      // Linha-a-linha simples, mas com grid e cor por bot
+      const rows = errs.slice(-100).reverse().map(e => {
+        const bot = e.bot && e.bot !== 'system' ? e.bot : 'system';
+        return `<div class="err-row">`
+          + `<span class="tt">${fmtTime(e.t)}</span>`
+          + `<span class="bb">${bot}</span>`
+          + `<span class="txt">${escapeHtml(e.text)}</span>`
+          + `</div>`;
+      }).join('');
+      $errList.innerHTML = rows;
+      return;
+    }
+
+    // Grouped view (default): card per signature, sorted by last seen
+    const groups = [...sigMap.values()].sort((a, b) => b.last.t - a.last.t);
+    $errList.innerHTML = groups.map((g, idx) => {
+      const botPills = [...g.bots].slice(0, 5).map(b => `<span class="bt">${b}</span>`).join('');
+      const samples = g.samples.slice(-5).reverse().map(e => `<div class="err-row">`
+        + `<span class="tt">${fmtTime(e.t)}</span>`
+        + `<span class="bb">${(e.bot || 'system')}</span>`
+        + `<span class="txt">${escapeHtml(e.text)}</span>`
+        + `</div>`).join('');
+      return `<div class="err-group" data-gi="${idx}">`
+        + `<div class="gh">`
+        + `<span class="count">×${g.count}</span>`
+        + `<span class="sig">${escapeHtml(shortSig(g.sig))}</span>`
+        + `<span class="bots">${botPills}</span>`
+        + `<span class="last">último ${fmtTime(g.last.t)}</span>`
+        + `<span class="toggle">▾</span>`
+        + `</div>`
+        + `<div class="samples">${samples}</div>`
+        + `</div>`;
     }).join('');
+    $errList.querySelectorAll('.err-group .gh').forEach(gh => gh.addEventListener('click', () => {
+      gh.parentElement.classList.toggle('expanded');
+    }));
   }
 
   // ── Main refresh ──
