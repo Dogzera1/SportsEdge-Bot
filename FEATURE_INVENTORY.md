@@ -48,6 +48,12 @@ Effective stake = baseline × 6 multipliers. **Não adicionar 7º sem evidência
 | `auto_bucket` | bucket de odd com leak | (auto via cron) |
 | `manual` | `/admin/mt-disable` | `/admin/mt-restore` |
 
+## DB Tables (state persistido)
+
+| Tabela | Descrição |
+|---|---|
+| `mt_market_promote_state` (mig 112) | Per (sport, market) promote state (Phase 1 granularidade). Helper: `lib/mt-market-promote.js`. Backward compat via 2-layer lookup (state OVERRIDE legacy env `<SPORT>_MARKET_TIPS_ENABLED`). |
+
 ## Crons (84 total em bot.js — top significativos)
 
 | Cron | Freq | Função | Opt-out |
