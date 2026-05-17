@@ -23742,6 +23742,81 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   setInterval(_wrapCron('overfeaturing_audit', runOverfeaturingAuditCycle), 60 * 60 * 1000);
   setTimeout(_wrapCron('overfeaturing_audit', runOverfeaturingAuditCycle), 5 * 60 * 1000); // primeiro check 5min pós-boot (caso reboot aconteça durante a janela)
 
+  // 2026-05-17 (P1 CLAUDE.md): stale-blocks audit cron — semanal (ter 15 UTC).
+  // Anti-pattern documentado em memory project_blocks_lift_session_2026_05_15_pm:
+  // sistema acumulou 22 blocks com n<20 em ~5d. Manual disables bypassam auto-promote
+  // P1 threshold (n>=20 default), e o cron de auto-promote não revisita manuais.
+  // Cron reporta blocks com sample insuficiente pra review user (sem auto-action).
+  // Tabelas auditadas: league_blocklist, ml_league_blocklist, mt_market_league_blocklist,
+  // market_tips_runtime_state(disabled=1).
+  // Opt-out: STALE_BLOCKS_AUDIT_AUTO=false.
+  let _lastStaleBlocksAuditDay = null;
+  async function runStaleBlocksAuditCycle() {
+    if (/^(0|false|no)$/i.test(String(process.env.STALE_BLOCKS_AUDIT_AUTO ?? 'true'))) return;
+    if (isMemCritical()) return;
+    const targetDay = parseInt(process.env.STALE_BLOCKS_AUDIT_DAY_OF_WEEK || '2', 10) || 2; // 2=Tue
+    const targetHour = parseInt(process.env.STALE_BLOCKS_AUDIT_HOUR_UTC || '15', 10) || 15;
+    const now = new Date();
+    if (now.getUTCDay() !== targetDay || now.getUTCHours() !== targetHour) return;
+    const today = now.toISOString().slice(0, 10);
+    if (_lastStaleBlocksAuditDay === today) return;
+    _lastStaleBlocksAuditDay = today;
+    const minN = parseInt(process.env.STALE_BLOCKS_MIN_N || '20', 10) || 20;
+    try {
+      const findings = { league: [], ml_league: [], mt_market_league: [], mt_runtime: [] };
+      try {
+        findings.league = db.prepare(
+          `SELECT entry, source, n_tips, roi_pct FROM league_blocklist
+           WHERE n_tips IS NULL OR n_tips < ?
+           ORDER BY COALESCE(n_tips, 0) ASC LIMIT 30`
+        ).all(minN);
+      } catch (_) {}
+      try {
+        findings.ml_league = db.prepare(
+          `SELECT sport, league_raw, source, n, roi_pct FROM ml_league_blocklist
+           WHERE n IS NULL OR n < ?
+           ORDER BY COALESCE(n, 0) ASC LIMIT 30`
+        ).all(minN);
+      } catch (_) {}
+      try {
+        findings.mt_market_league = db.prepare(
+          `SELECT sport, market, league_raw, source, n, roi_pct FROM mt_market_league_blocklist
+           WHERE n IS NULL OR n < ?
+           ORDER BY COALESCE(n, 0) ASC LIMIT 30`
+        ).all(minN);
+      } catch (_) {}
+      try {
+        findings.mt_runtime = db.prepare(
+          `SELECT sport, market, side, source, clv_n, clv_pct, roi_pct FROM market_tips_runtime_state
+           WHERE disabled = 1 AND (clv_n IS NULL OR clv_n < ?)
+           ORDER BY COALESCE(clv_n, 0) ASC LIMIT 30`
+        ).all(minN);
+      } catch (_) {}
+      const total = findings.league.length + findings.ml_league.length + findings.mt_market_league.length + findings.mt_runtime.length;
+      log('INFO', 'STALE-BLOCKS-AUDIT', `total=${total} (league=${findings.league.length} ml=${findings.ml_league.length} mt_market=${findings.mt_market_league.length} mt_runtime=${findings.mt_runtime.length})`);
+      const minDm = parseInt(process.env.STALE_BLOCKS_AUDIT_MIN_DM || '1', 10) || 1;
+      if (total < minDm || !ADMIN_IDS.size) return;
+      const tk = resolveAlertsToken();
+      if (!tk) return;
+      const fmtRows = (rows, labelFn) => rows.slice(0, 6).map(r => '• ' + labelFn(r)).join('\n') || '(none)';
+      const msg = `🔍 *STALE BLOCKS AUDIT* — ${total} entries com n<${minN}\n\n` +
+        `*league_blocklist* (${findings.league.length}):\n${fmtRows(findings.league, r => `${r.entry} n=${r.n_tips ?? '?'} roi=${r.roi_pct ?? '?'}% src=${r.source}`)}\n\n` +
+        `*ml_league_blocklist* (${findings.ml_league.length}):\n${fmtRows(findings.ml_league, r => `${r.sport}/${r.league_raw} n=${r.n ?? '?'} roi=${r.roi_pct ?? '?'}% src=${r.source}`)}\n\n` +
+        `*mt_market_league* (${findings.mt_market_league.length}):\n${fmtRows(findings.mt_market_league, r => `${r.sport}/${r.market}/${r.league_raw} n=${r.n ?? '?'} roi=${r.roi_pct ?? '?'}% src=${r.source}`)}\n\n` +
+        `*mt_runtime (disabled)* (${findings.mt_runtime.length}):\n${fmtRows(findings.mt_runtime, r => `${r.sport}/${r.market}${r.side ? '/' + r.side : ''} clv_n=${r.clv_n ?? '?'} roi=${r.roi_pct ?? '?'}% src=${r.source}`)}\n\n` +
+        `_CLAUDE.md P1: blocks com n<${minN} violam "quando sample tier é insuficiente, fallback default (não decidir)". Review + lift se ainda válido._\n` +
+        `_Opt-out: STALE_BLOCKS_AUDIT_AUTO=false. Threshold: STALE_BLOCKS_MIN_N (default 20)._`;
+      const sent = new Set();
+      for (const id of ADMIN_IDS) {
+        if (sent.has(id)) continue;
+        sent.add(id);
+        sendDM(tk, id, msg).catch(() => {});
+      }
+    } catch (e) { log('ERROR', 'STALE-BLOCKS-AUDIT', e.message); }
+  }
+  setInterval(_wrapCron('stale_blocks_audit', runStaleBlocksAuditCycle), 60 * 60 * 1000);
+  setTimeout(_wrapCron('stale_blocks_audit', runStaleBlocksAuditCycle), 5 * 60 * 1000);
+
   // 2026-05-12: reconciliação noturna — detecta bankroll drift + result divergence.
   // Bug por consequência (não por leitura de código). Conselho original do user:
   // "mais valioso que qualquer auditoria de código, porque pega bug por consequência".
