@@ -12390,6 +12390,46 @@ setInterval(load, 60000);
     return;
   }
 
+  // GET /admin/tennis-calib-raw — dump literal do JSON file (debug-only,
+  // truncado em 30KB pra evitar payload gigante via proxy).
+  if (p === '/admin/tennis-calib-raw' && req.method === 'GET') {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const fs = require('fs');
+      const path = require('path');
+      const calibPath = path.join(__dirname, 'lib', 'tennis-markov-calib.json');
+      if (!fs.existsSync(calibPath)) {
+        sendJson(res, { ok: false, error: 'file_not_found', path: calibPath }, 404);
+        return;
+      }
+      const stat = fs.statSync(calibPath);
+      const raw = fs.readFileSync(calibPath, 'utf8');
+      const parsed = JSON.parse(raw);
+      // Resume estrutura: top-level keys + markets keys + per-market sub-keys
+      const structure = { top_keys: Object.keys(parsed), markets_summary: {} };
+      for (const [k, v] of Object.entries(parsed.markets || {})) {
+        structure.markets_summary[k] = {
+          keys: Object.keys(v),
+          n_bins: v.bins?.length || 0,
+          nTotal: v.nTotal,
+          sides_keys: v.sides ? Object.keys(v.sides) : null,
+          tiers_keys: v.tiers ? Object.keys(v.tiers) : null,
+        };
+      }
+      sendJson(res, {
+        ok: true,
+        path: calibPath,
+        bytes: stat.size,
+        mtime: stat.mtime,
+        structure,
+        // raw_preview last 8KB pra ver tier/side data sem payload gigante
+        raw_preview_head: raw.slice(0, 4000),
+        raw_size: raw.length,
+      });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   // GET /admin/news-impact — snapshot do cache in-memory de news alerts.
   // Mostra entries ativos populados pelo news_monitor cron (15min).
   if (p === '/admin/news-impact' && req.method === 'GET') {
