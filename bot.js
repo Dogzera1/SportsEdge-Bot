@@ -17857,7 +17857,16 @@ async function pollTennis(runOnce = false) {
         // GERADAS e GRAVADAS em shadow (tips.is_shadow=1 + market_tips_shadow),
         // mas sem DM admin/subs e sem promoção pra tabela tips regular. Mantém
         // pipeline de aprendizado (CLV/calib) sem expor ao bankroll.
-        // Override via TENNIS_NON_SLAM_SHADOW_ONLY=false (libera DM normal).
+        //
+        // 2026-05-17 (user-authorized): default flipped 'true' → 'false'. Audit
+        // tennis real 30d revelou ROI +5.51% / CLV +3.49% / n=156 (memory
+        // project_tennis_blocks_2026_05_17). Challengers winners (Santos +120%,
+        // Jiujiang +38%, Istanbul +28%, WTA Madrid +50%) estavam forçados shadow.
+        // 7 leak Challenger/Masters leagues bloqueados via mt-block-league hoje
+        // (n>=10 ROI<-15%). Override pra voltar ao default protective:
+        //   railway variables --set TENNIS_NON_SLAM_SHADOW_ONLY=true
+        // P1-aligned: deciding granular per-league via mt_market_league_blocklist
+        // em vez de monolithic env.
         //
         // 2026-04-28: novo gate TENNIS_MT_TIER2_PROMOTE=true permite tier 2
         // (ATP/WTA 500/250) promover, mantendo Challenger/ITF/W125 em shadow.
@@ -17873,7 +17882,7 @@ async function pollTennis(runOnce = false) {
         const _tennisShadowOnly = (
             !_tennisTopTier
             && !_tennisAllowedNonTop
-            && !/^(0|false|no)$/i.test(String(process.env.TENNIS_NON_SLAM_SHADOW_ONLY ?? 'true'))
+            && !/^(0|false|no)$/i.test(String(process.env.TENNIS_NON_SLAM_SHADOW_ONLY ?? 'false'))
           ) || _tennisQualifierShadow;
         // Tennis ML em shadow GLOBAL (todos os tiers, incluindo Slam/Masters).
         // Justificativa 2026-04-28: ML path acabou de ser destravado (commit
