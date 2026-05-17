@@ -83,8 +83,12 @@ async function loadTips() {
     // 2026-05-07 (audit #26): inclui team1/team2/match_key pra dedup downstream
     // funcionar em DB local path (antes só REMOTE tinha team names; DB local
     // via id-fallback efetivamente não dedupava → calib bias).
+    // 2026-05-17 BUG FIX: league era omitido do SELECT em DB-local path → _classifyTier(tip)
+    // recebia tip.league=undefined → return null → fit caía em default monolítico,
+    // SEM per-tier bins. Per-tier fit só funcionava em REMOTE mode (API retorna league).
+    // Nightly retrain prod (DB-local) silentemente skipa tier fit há ~10 dias.
     const rows = db.prepare(`
-      SELECT id, sport, team1, team2, match_key, market, side, line, p_model, odd, close_odd, clv_pct, result,
+      SELECT id, sport, team1, team2, match_key, league, market, side, line, p_model, odd, close_odd, clv_pct, result,
              stake_units, profit_units, ev_pct, is_live, created_at
       FROM market_tips_shadow
       WHERE sport = ?
