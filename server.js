@@ -11947,6 +11947,72 @@ setInterval(load, 60000);
     return;
   }
 
+  // GET /admin/tip-debug?id=N — forensics rápida do gate_state snapshot por tip.
+  // Consumer do gates_evaluated foundation (commits 4bdd35d + ac45a24). Permite
+  // ver decomposto quais gates a tip rodou no emit, valor/threshold/reason,
+  // sem recalcular retroativamente (que perde fidelidade quando regras mudam).
+  if (p === '/admin/tip-debug' && (req.method === 'GET' || req.method === 'POST')) {
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    try {
+      const tipId = parseInt(parsed.query.id || parsed.query.tip_id || '0', 10);
+      if (!Number.isFinite(tipId) || tipId <= 0) {
+        sendJson(res, { ok: false, error: 'missing/invalid id (use ?id=<tip_id>)' }, 400);
+        return;
+      }
+      const tip = db.prepare(`
+        SELECT id, sport, market_type, match_id, participant1, participant2,
+               tip_participant, odds, ev, confidence, stake, result, is_shadow,
+               archived, sent_at, settled_at, event_name, is_live, model_version,
+               gate_state, tip_context_json
+        FROM tips WHERE id = ? LIMIT 1
+      `).get(tipId);
+      if (!tip) { sendJson(res, { ok: false, error: 'tip_not_found', tip_id: tipId }, 404); return; }
+      let parsedGateState = null, gateStateParseErr = null;
+      if (tip.gate_state) {
+        try { parsedGateState = JSON.parse(tip.gate_state); }
+        catch (e) { gateStateParseErr = e.message; }
+      }
+      let parsedTipCtx = null;
+      if (tip.tip_context_json) {
+        try { parsedTipCtx = JSON.parse(tip.tip_context_json); } catch (_) {}
+      }
+      const gatesEvaluated = parsedGateState && Array.isArray(parsedGateState.gates_evaluated)
+        ? parsedGateState.gates_evaluated : null;
+      const summary = gatesEvaluated ? {
+        n_gates: gatesEvaluated.length,
+        n_passed: gatesEvaluated.filter(g => g && g.passed).length,
+        n_failed: gatesEvaluated.filter(g => g && g.passed === false).length,
+        first_failure: gatesEvaluated.find(g => g && g.passed === false) || null,
+      } : null;
+      sendJson(res, {
+        ok: true,
+        tip: {
+          id: tip.id, sport: tip.sport, market_type: tip.market_type,
+          match_id: tip.match_id,
+          pair: `${tip.participant1} vs ${tip.participant2}`,
+          pick: tip.tip_participant, odds: tip.odds, ev: tip.ev,
+          confidence: tip.confidence, stake: tip.stake,
+          result: tip.result, is_shadow: tip.is_shadow ? 1 : 0,
+          archived: tip.archived ? 1 : 0, is_live: tip.is_live ? 1 : 0,
+          sent_at: tip.sent_at, settled_at: tip.settled_at,
+          event_name: tip.event_name, model_version: tip.model_version,
+        },
+        gate_state: {
+          parsed: parsedGateState,
+          parse_error: gateStateParseErr,
+          gates_evaluated: gatesEvaluated,
+          summary,
+        },
+        tip_context_json: parsedTipCtx,
+        ts: new Date().toISOString(),
+      });
+    } catch (e) {
+      sendJson(res, { ok: false, error: e.message }, 500);
+    }
+    return;
+  }
+
   // GET /admin/gate-attribution-snapshot?days=30&minN=5
   // Counterfactual gate analysis on-demand (era só cron weekly DM admin).
   // Pra cada gate: n / saved_loss / lost_profit / net (saved - lost) / hitRate.
