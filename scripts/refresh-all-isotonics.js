@@ -179,7 +179,12 @@ run('Fit Valorant isotonic', 'node scripts/fit-esports-isotonic.js --game=valora
 // Tennis Markov MT calib (handicapGames + totalGames). Pula se sample
 // não cresceu ≥30 settled desde o fit anterior — evita re-fits sobre
 // ruído incremental. ECE regression guard interno aborta se calib piora.
-run('Fit tennis Markov MT calib', 'node scripts/fit-tennis-markov-calibration.js --min-new-samples=30');
+// 2026-05-17 (audit granularidade P1): fit pre + live separados pra cascade
+// `live > tier+side > tier > side > default` funcionar com bins live populados.
+// Pre fitta markets.X (default flow), live fitta markets.live.X (preserva pre).
+// Live precisa >=30 samples per market — script auto-skip se insuficiente.
+run('Fit tennis Markov MT calib (pre)', 'node scripts/fit-tennis-markov-calibration.js --filter=pre --min-new-samples=30');
+run('Fit tennis Markov MT calib (live)', 'node scripts/fit-tennis-markov-calibration.js --filter=live --min-new-samples=15');
 // 2026-05-01: CLV calibration layer (camada pós-isotonic). Treina pra puxar
 // model_p_pick em direção a closing line — signal de menor variância.
 // Skip safe quando n<50 settled tips com clv_odds. Lit: arxiv 2410.21484.
