@@ -21834,6 +21834,21 @@ async function pollValorant(runOnce = false) {
           continue;
         }
 
+        // 2026-05-17 (audit Challengers Spain shadow leak): valorant-elo overcalla
+        // em tier 2/3 quando sample por time é pequeno. 10 tips Spain (HGE 15j,
+        // KPI 26j, NOVO 27j, FALKE 31j…) ROI -76% n=10 calib_gap -39pp 60d.
+        // Pinnacle precifica info que elo não captura (form recente, roster swap,
+        // scrim leaks). Gate sample mínimo per non-tier1; tier1 (Champions Tour)
+        // inalterado pois sample lá é grande e modelo calibrado.
+        const VAL_NON_TIER1_MIN_GAMES = parseInt(process.env.VAL_NON_TIER1_MIN_GAMES ?? '40', 10);
+        const _valTierForGate = _leagueTierLib.getLeagueTier('valorant', match.league);
+        if (_valTierForGate >= 2 && minGames < VAL_NON_TIER1_MIN_GAMES) {
+          analyzedValorant.set(key, { ts: now, tipSent: false });
+          log('INFO', 'AUTO-VAL', `Gate non-tier1 min_games: tier${_valTierForGate} [${match.league}] ${match.team1}=${elo.eloMatches1}j ${match.team2}=${elo.eloMatches2}j min=${minGames}<${VAL_NON_TIER1_MIN_GAMES} — rejeitado`);
+          logRejection('valorant', `${match.team1} vs ${match.team2}`, 'non_tier1_min_games', { tier: _valTierForGate, minGames, threshold: VAL_NON_TIER1_MIN_GAMES, league: match.league });
+          continue;
+        }
+
         let modelP1 = elo.modelP1;
         let modelP2 = elo.modelP2;
 
