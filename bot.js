@@ -30,6 +30,7 @@ const { getSportUnitValue } = require('./lib/sport-unit');
 // em poll cycles (200 matches × N sports). Module cache lookup é ~1-3μs cada.
 const _gatesRuntimeState = require('./lib/gates-runtime-state');
 const _mtAutoPromote = require('./lib/mt-auto-promote');
+const _mtMarketPromote = require('./lib/mt-market-promote');
 const _leagueTierLib = require('./lib/league-tier');
 const _mtTierClassifier = require('./lib/mt-tier-classifier');
 
@@ -6046,9 +6047,19 @@ function _loadMarketTipsRuntimeState() {
 // Promove tip MT pra `tips` (regular)? Apenas quando env `<SPORT>_MARKET_TIPS_ENABLED=true`.
 // Diferente de `isMarketTipsEnabled` que pode retornar true só pra DM (via
 // MT_SHADOW_DM_ALL) sem promover — promoção é mais estrita.
-function isMarketTipsPromoteEnabled(sport) {
+// 2026-05-17 — Phase 1: granular per (sport, market). Quando market provided,
+// usa state DB (mt_market_promote_state) com fallback legacy env. Quando market
+// null, mantém comportamento legacy (any market enabled pra sport).
+function isMarketTipsPromoteEnabled(sport, market = null) {
   const up = String(sport).toUpperCase();
   const aliasEnv = { DOTA2: 'DOTA', CS2: 'CS' }[up];
+  if (market) {
+    if (_mtMarketPromote.isMtMarketPromoted(sport, market)) return true;
+    // Alias fallback (DOTA2 → DOTA env-driven legacy)
+    if (aliasEnv && _mtMarketPromote.isMtMarketPromoted(aliasEnv.toLowerCase(), market)) return true;
+    return false;
+  }
+  // Legacy: any market enabled = sport enabled
   return process.env[`${up}_MARKET_TIPS_ENABLED`] === 'true'
     || (aliasEnv && process.env[`${aliasEnv}_MARKET_TIPS_ENABLED`] === 'true');
 }
@@ -6132,8 +6143,17 @@ function isMarketTipsEnabled(sport, market = null, side = null, league = null) {
   const up = String(sport).toUpperCase();
   // Aceita alias histórico: DOTA_* pra 'dota2', CS_* pra 'cs2'
   const aliasEnv = { DOTA2: 'DOTA', CS2: 'CS' }[up];
-  const envEnabled = process.env[`${up}_MARKET_TIPS_ENABLED`] === 'true'
-    || (aliasEnv && process.env[`${aliasEnv}_MARKET_TIPS_ENABLED`] === 'true');
+  // 2026-05-17 — Phase 1 granular. Quando market provided, consulta state DB
+  // (isMtMarketPromoted faz 2-layer lookup com legacy env como fallback).
+  // Quando market null, mantém legacy check (any market = sport enabled).
+  let envEnabled;
+  if (market) {
+    envEnabled = _mtMarketPromote.isMtMarketPromoted(sport, market)
+      || (aliasEnv && _mtMarketPromote.isMtMarketPromoted(aliasEnv.toLowerCase(), market));
+  } else {
+    envEnabled = process.env[`${up}_MARKET_TIPS_ENABLED`] === 'true'
+      || (aliasEnv && process.env[`${aliasEnv}_MARKET_TIPS_ENABLED`] === 'true');
+  }
   // MT_SHADOW_DM_ALL=true: força DM pra todos sports MT (mesmo sem promoção
   // ativa). Útil pra centralizar visibilidade de TODAS oportunidades MT em
   // um bot único antes de decidir promover. recordMarketTipAsRegular continua
@@ -6605,7 +6625,7 @@ async function recordMarketTipAsRegular({ sport, match, tip, stake, isLive }) {
 // só permite DM quando a tip foi efetivamente gravada em `tips` (=conta na banca).
 // Comportamento legado (DM sempre + record-tip best-effort): MT_DM_REAL_ONLY=false.
 async function _mtTryRecordAndShouldDm({ sport, recordSport, match, tip, stake, isLive }) {
-  const promoteEnabled = isMarketTipsPromoteEnabled(sport);
+  const promoteEnabled = isMarketTipsPromoteEnabled(sport, tip?.market);
   const dmRealOnly = !/^(0|false|no)$/i.test(process.env.MT_DM_REAL_ONLY ?? 'true');
   let tipId = null;
   let stakeFinal = null;
@@ -24915,6 +24935,7 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   try {
     const _mtAutoPromote = require('./lib/mt-auto-promote');
     _mtAutoPromote.loadMtMarketLeagueBlocklist(db);
+    _mtMarketPromote.loadMtMarketPromoteCache(db);
     const _mtAutoPromoteRun = async () => {
       const r = await _mtAutoPromote.runMtAutoPromoteCycle(db);
       await _dmAutoPromoteDecisions('MT', r);
