@@ -13442,15 +13442,35 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
   } else if (cmd === '/split-bankroll') {
     if (!ADMIN_IDS.has(String(chatId))) { await send(token, chatId, '❌ Admin only.'); return; }
     try {
-      // parts: ['/split-bankroll', [total?], [confirm?]]
+      // parts: ['/split-bankroll', [total?], [confirm?], [force?]]
       // Aceita: /split-bankroll                 → dry-run (metade de esports cada)
       //         /split-bankroll 200             → dry-run (100 cada)
       //         /split-bankroll 200 confirm     → executa
       //         /split-bankroll confirm         → executa default
-      let totalArg = null, confirm = false;
+      //         /split-bankroll confirm force   → bypass guard activity (perigoso)
+      let totalArg = null, confirm = false, force = false;
       for (const p of parts.slice(1)) {
         if (p.toLowerCase() === 'confirm') confirm = true;
+        else if (p.toLowerCase() === 'force') force = true;
         else if (/^\d+(\.\d+)?$/.test(p)) totalArg = parseFloat(p);
+      }
+      // 2026-05-17 DEFENSIVE GUARD: split-bankroll era pra ser one-shot na época
+      // do split esports→lol+dota2 (Abr/2026). Re-invocação acidental sobrescreve
+      // initial+current de lol/dota2 com mesma metade — erasing progresso real.
+      // Causa raiz do drift R$6.58/R$9.64 mirror foi /roi rollup write (fix
+      // commit e46e0e7), mas /split-bankroll é o vetor manual equivalent.
+      // Bloqueia se lol OU dota2 tem tip settled real (archived=0, is_shadow=0).
+      // Override via `force` keyword.
+      const lolSettled = db.prepare("SELECT COUNT(*) AS n FROM tips WHERE sport='lol' AND COALESCE(is_shadow,0)=0 AND result IN ('win','loss') AND (archived IS NULL OR archived=0)").get();
+      const dotaSettled = db.prepare("SELECT COUNT(*) AS n FROM tips WHERE sport='dota2' AND COALESCE(is_shadow,0)=0 AND result IN ('win','loss') AND (archived IS NULL OR archived=0)").get();
+      const hasActivity = (lolSettled?.n || 0) > 0 || (dotaSettled?.n || 0) > 0;
+      if (confirm && hasActivity && !force) {
+        const guardMsg = `❌ *BLOCK split-bankroll:* lol=${lolSettled?.n || 0} dota2=${dotaSettled?.n || 0} tips reais settled.\n\n` +
+          `Split foi pra one-shot Abr/2026; re-invocar agora ZERA initial_banca + sobrescreve current_banca, erasing progresso.\n\n` +
+          `_Override: \`/split-bankroll ${totalArg != null ? totalArg + ' ' : ''}confirm force\` (perigoso, requer intenção explícita)._`;
+        await send(token, chatId, guardMsg);
+        log('WARN', 'BANKROLL', `split-bankroll BLOCKED: lol=${lolSettled?.n} dota2=${dotaSettled?.n} settled (sem force keyword)`);
+        return;
       }
       const espRow = db.prepare('SELECT initial_banca, current_banca FROM bankroll WHERE sport=?').get('esports');
       const lolRow = db.prepare('SELECT initial_banca, current_banca FROM bankroll WHERE sport=?').get('lol');
