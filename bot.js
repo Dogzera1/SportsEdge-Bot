@@ -24290,6 +24290,31 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
     const now = new Date();
     const today = now.toISOString().slice(0, 10);
     const isBootstrap = !_lastCalibRefitDay;
+    // 2026-05-18: skip bootstrap se calib JSON já tem fittedAt recente (default <6h).
+    // Causa: bot reinicia ~33×/24h em restart loop e bootstrap path overwriteava
+    // refit manual + daily cron output. Bootstrap usa /market-tips-recent (limit
+    // 2000 dedup=0) — dataset menor/diferente do POST /admin/mt-refit-calib que o
+    // tennis_calib_refit daily cron + /admin/fit-tennis-markov manual usam. Sem
+    // este skip, refits de qualidade duravam <10min até próximo boot.
+    // Override: CALIB_BOOTSTRAP_FRESH_HOURS=0 = sempre rodar (legacy behavior).
+    if (isBootstrap) {
+      try {
+        const fs = require('fs');
+        const path = require('path');
+        const calibFile = path.join(__dirname, 'lib', 'tennis-markov-calib.json');
+        const freshH = parseFloat(process.env.CALIB_BOOTSTRAP_FRESH_HOURS ?? '6');
+        if (freshH > 0 && fs.existsSync(calibFile)) {
+          const data = JSON.parse(fs.readFileSync(calibFile, 'utf8'));
+          const fittedMs = data?.fittedAt ? Date.parse(data.fittedAt) : 0;
+          const ageH = (Date.now() - fittedMs) / 3600000;
+          if (ageH < freshH) {
+            log('INFO', 'CALIB-REFIT', `bootstrap skip — calib fittedAt ${data.fittedAt} (age=${ageH.toFixed(2)}h < ${freshH}h)`);
+            _lastCalibRefitDay = today;
+            return;
+          }
+        }
+      } catch (e) { log('WARN', 'CALIB-REFIT', `bootstrap freshness check failed: ${e.message}`); }
+    }
     if (!isBootstrap) {
       // Weekly: domingo (UTC), hora 4
       if (_lastCalibRefitDay === today) return;
