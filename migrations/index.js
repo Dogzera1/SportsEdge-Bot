@@ -3051,6 +3051,49 @@ const migrations = [
       } catch (e) { console.log(`[mig 114] failed: ${e.message}`); }
     },
   },
+  {
+    id: '115_market_tips_shadow_match_start_at',
+    up(db) {
+      // 2026-05-18 (P6 multi-window CLV pendency — memory project_pendencies_session_2026_05_17_2026_05_18):
+      // Persist match start time per shadow tip. Habilita multi-window CLV capture
+      // (T-30/-15/-5/-1min antes do kickoff) — sem isso, captureMarketTipsClv não
+      // distingue tips "muitas horas pre-match" (closing line ainda formando) de
+      // "minutos pre-match" (closing line consolidado).
+      //
+      // Audit 2026-05-17: 10/10 Spain Valorant tips com clv_odds=null. Multi-window
+      // priority-based capture resolve quando /odds-markets cobertura falha em T-X
+      // específicos.
+      //
+      // ALTER TABLE ADD COLUMN é O(1) em SQLite (não re-escreve rows). Safe em
+      // prod sem janela morta. Plumb logShadowTip(args.match.time) → INSERT.
+      try {
+        addColumnIfMissing(db, 'market_tips_shadow', 'match_start_at', 'match_start_at TEXT');
+        console.log('[mig 115] market_tips_shadow.match_start_at added (P6 multi-window CLV)');
+      } catch (e) { console.log(`[mig 115] failed: ${e.message}`); }
+    },
+  },
+  {
+    id: '116_market_tips_shadow_readiness_index',
+    up(db) {
+      // 2026-05-18 (DB-SLOW pendency — audit log 2026-05-18 mostrou 4× DB-SLOW
+      // 836-854ms em SELECT shadow_readiness aggregate WHERE result IN (...) GROUP
+      // BY sport, market, side, league). Index composto bate WHERE + GROUP BY.
+      //
+      // Coverage: /admin/mt-shadow-by-league + /shadow-readiness?source=real path.
+      // OLAP mas executado em cron+admin queries; queries 800ms+ degradam UX e
+      // consomem Railway memory budget (peaks de query coincidentes c/ heap pressure).
+      //
+      // Composite (sport, market, side, league, result) — match exato do GROUP BY.
+      // result no fim pra cobrir filter WHERE result IN (...).
+      try {
+        db.exec(`
+          CREATE INDEX IF NOT EXISTS idx_mts_readiness_agg
+            ON market_tips_shadow(sport, market, side, league, result);
+        `);
+        console.log('[mig 116] market_tips_shadow readiness aggregate index');
+      } catch (e) { console.log(`[mig 116] failed: ${e.message}`); }
+    },
+  },
 ];
 
 function applyMigrations(db) {
