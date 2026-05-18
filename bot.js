@@ -9531,6 +9531,15 @@ function buildEnrichmentSection(match, enrich) {
 // Fire-and-forget: não bloqueia loop principal. Gate: env LOL_AI_SHADOW=true
 // + server-side <SPORT>_AI_SHADOW=true (defesa em profundidade).
 // DM Telegram suprimida automaticamente (is_shadow=1 já dedupa em dispatch).
+// 2026-05-18: AI shadow economy state — protege DeepSeek API budget.
+// Per-match cooldown (evita re-análise mesmo match em ciclos consecutivos),
+// daily call cap (limit total por sport por dia), edge pre-filter (skip se
+// modelo não tem signal). Configurável via envs <SPORT>_AI_COOLDOWN_H,
+// <SPORT>_AI_MIN_EDGE, <SPORT>_AI_DAILY_CAP. Defaults razoáveis pra LoL
+// (50 matches/dia × 1 call cada = ~$0.60/mês DeepSeek).
+const _aiShadowMatchCooldown = new Map(); // key: sport|matchId → lastCallTs
+const _aiShadowDailyCount = new Map();    // key: sport|YYYY-MM-DD → count
+
 // 2026-05-18: refactor LoL-only → generic _runAiShadow(sport, ctx).
 // Suporta multi-sport A/B test (LoL primeiro, MMA next). Per-sport overrides
 // via opts: canonicalSport (matchId), subPrefs (subscribedUsers gating),
@@ -9549,6 +9558,47 @@ async function _runAiShadow(sport, ctx, opts = {}) {
     if (!prompt || !mlResult || !oddsToUse) {
       log('WARN', TAG, `entry guard fail: prompt=${!!prompt} mlR=${!!mlResult} odd=${!!oddsToUse} match=${match?.team1}`);
       return;
+    }
+    // ── Economy gates ──
+    // 1. Per-match cooldown — não re-analisa mesmo match dentro do window
+    const cooldownH = parseFloat(process.env[`${sportU}_AI_COOLDOWN_H`] ?? '4');
+    if (cooldownH > 0 && match?.id) {
+      const ck = `${sport}|${match.id}`;
+      const lastTs = _aiShadowMatchCooldown.get(ck);
+      const cooldownMs = cooldownH * 60 * 60 * 1000;
+      if (lastTs && (Date.now() - lastTs) < cooldownMs) {
+        try { _metrics.incr('ai_shadow_skip_cooldown', { sport }); } catch (_) {}
+        const remainMin = ((cooldownMs - (Date.now() - lastTs)) / 60000).toFixed(0);
+        log('DEBUG', TAG, `skip cooldown ${match.team1} vs ${match.team2} (${remainMin}min restante)`);
+        return;
+      }
+    }
+    // 2. Daily cap por sport — limite total de calls/dia (proteção custo DeepSeek)
+    const dailyCap = parseInt(process.env[`${sportU}_AI_DAILY_CAP`] ?? '50', 10);
+    if (dailyCap > 0) {
+      const today = new Date().toISOString().slice(0, 10);
+      const dk = `${sport}|${today}`;
+      const used = _aiShadowDailyCount.get(dk) || 0;
+      if (used >= dailyCap) {
+        try { _metrics.incr('ai_shadow_skip_dailycap', { sport }); } catch (_) {}
+        log('INFO', TAG, `skip daily_cap reached: ${used}/${dailyCap} (env ${sportU}_AI_DAILY_CAP)`);
+        return;
+      }
+    }
+    // 3. Edge pre-filter — só fire se modelo tem signal mínimo (economiza calls inúteis)
+    const minEdge = parseFloat(process.env[`${sportU}_AI_MIN_EDGE`] ?? '3');
+    const _edgePp = Number.isFinite(mlResult?.score) ? Number(mlResult.score) : null;
+    if (minEdge > 0 && _edgePp !== null && _edgePp < minEdge) {
+      try { _metrics.incr('ai_shadow_skip_edge', { sport }); } catch (_) {}
+      log('DEBUG', TAG, `skip min_edge ${match.team1} vs ${match.team2} edge=${_edgePp.toFixed(1)}pp < ${minEdge}pp`);
+      return;
+    }
+    // Reserva slot — incrementa cooldown + daily BEFORE call (atomico, evita double-count em fire-and-forget)
+    if (match?.id) _aiShadowMatchCooldown.set(`${sport}|${match.id}`, Date.now());
+    {
+      const today = new Date().toISOString().slice(0, 10);
+      const dk = `${sport}|${today}`;
+      _aiShadowDailyCount.set(dk, (_aiShadowDailyCount.get(dk) || 0) + 1);
     }
     log('INFO', TAG, `entry: ${match.team1} vs ${match.team2} promptLen=${prompt.length}`);
     const resp = await serverPost('/claude', {
