@@ -575,6 +575,87 @@ module.exports = async function runTests(t) {
     }
   });
 
+  // ─── time_of_day_blocked: 2026-05-18 P4 TDD pending coverage ───────────
+  // server.js L25330-25395: gate consulta global._timeOfDayBlockCache lazy
+  // (TTL 1h). SELECT tips do sport agg (n, profit, stake) per hour UTC.
+  // Hour com ROI ≤ TIME_OF_DAY_ROI_MAX (-25 default) + n ≥ TIME_OF_DAY_MIN_N
+  // (8 default) → bloqueada. Env TIME_OF_DAY_AUTO=true ativa.
+  //
+  // Setup test: reduzir thresholds (MIN_N=2, ROI_MAX=-10) + seed 2 tips loss
+  // em current UTC hour. Cache rebuild lazy ao POST. Sport-wide scope.
+  await t.test('time_of_day_blocked: current hour ROI bleed → rejected (sport scope)', async () => {
+    const Database = require('better-sqlite3');
+    const tmpDbT = path.join(os.tmpdir(), `test-rt-tod-${Date.now()}.db`);
+    const portT1 = 30000 + Math.floor(Math.random() * 10000);
+    const envT = {
+      ...env, DB_PATH: tmpDbT, PORT: String(portT1),
+      TIME_OF_DAY_AUTO: 'true',
+      TIME_OF_DAY_MIN_N: '2',
+      TIME_OF_DAY_ROI_MAX: '-10',
+    };
+
+    // STEP 1: Spawn server v1 (mig + schema setup)
+    const procT1 = spawn('node', ['server.js'], { env: envT, cwd: REPO_ROOT, stdio: ['ignore', 'pipe', 'pipe'] });
+    procT1.stdout.on('data', () => {});
+    procT1.stderr.on('data', () => {});
+
+    try {
+      await waitHealth(portT1, HEALTH_TIMEOUT_MS);
+
+      // STEP 2: Kill v1 (libera DB lock)
+      procT1.kill();
+      await new Promise(r => setTimeout(r, 500));
+
+      // STEP 3: Seed 2 tips loss settled em current UTC hour. ROI = (-1+-1)/(1+1)*100
+      // = -100% ≤ -10% threshold + n=2 ≥ min_n=2 → hora atual UTC blocklisted.
+      const seedDb = new Database(tmpDbT, { timeout: 5000 });
+      try {
+        const insertStmt = `INSERT INTO tips
+          (sport, match_id, tip_participant, participant1, participant2,
+           odds, ev, stake, confidence, result, sent_at, settled_at, is_shadow, archived)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                  datetime('now', '-30 minutes'), datetime('now'), 0, 0)`;
+        const r1 = seedDb.prepare(insertStmt).run('dota2', 'tod_seed_1_' + Date.now(), 'A', 'A', 'B', 1.85, 8.5, '1u', 'MEDIA', 'loss');
+        const r2 = seedDb.prepare(insertStmt).run('dota2', 'tod_seed_2_' + Date.now(), 'B', 'A', 'B', 2.10, 6.2, '1u', 'MEDIA', 'loss');
+        t.assert(r1.changes === 1 && r2.changes === 1, `seed should insert 2 rows, got r1=${r1.changes} r2=${r2.changes}`);
+      } finally {
+        seedDb.close();
+      }
+
+      // STEP 4: Spawn server v2 (cache lazy build no primeiro /record-tip)
+      const portT2 = 30000 + Math.floor(Math.random() * 10000);
+      const envT2 = { ...envT, PORT: String(portT2) };
+      const procT2 = spawn('node', ['server.js'], { env: envT2, cwd: REPO_ROOT, stdio: ['ignore', 'pipe', 'pipe'] });
+      procT2.stdout.on('data', () => {});
+      procT2.stderr.on('data', () => {});
+      try {
+        await waitHealth(portT2, HEALTH_TIMEOUT_MS);
+
+        // STEP 5: POST tip — cache rebuilds → current hour UTC blocked → skipped
+        const r = await httpJson(portT2, 'POST', '/record-tip?sport=dota2', {
+          matchId: 'test_dota2_tod_' + Date.now(),
+          eventName: 'Time of Day Test League',
+          p1: 'TodA',
+          p2: 'TodB',
+          tipParticipant: 'TodA',
+          odds: 1.85,
+          ev: 8.5,
+        }, { 'x-admin-key': 'test' });
+        t.assert(r.status === 200, `expected 200 (skipped), got ${r.status} body=${JSON.stringify(r.body)}`);
+        t.assert(r.body.skipped === true, `expected skipped=true, got ${JSON.stringify(r.body)}`);
+        t.assert(r.body.reason === 'time_of_day_blocked', `expected reason=time_of_day_blocked, got ${r.body.reason}`);
+        t.assert(typeof r.body.hour_utc === 'number', `expected hour_utc number, got ${JSON.stringify(r.body)}`);
+      } finally {
+        try { procT2.kill(); } catch (_) {}
+      }
+    } finally {
+      try { procT1.kill(); } catch (_) {}
+      try { fs.unlinkSync(tmpDbT); } catch (_) {}
+      try { fs.unlinkSync(tmpDbT + '-shm'); } catch (_) {}
+      try { fs.unlinkSync(tmpDbT + '-wal'); } catch (_) {}
+    }
+  });
+
   // ─── ml_bucket_blocked: 2026-05-18 P4 TDD pending coverage ─────────────
   // server.js L25295-25313: gate ml_bucket_blocked consulta _bucketBlockCache
   // (in-memory Set in lib/ml-auto-promote.js). Cache populado por
