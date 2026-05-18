@@ -2861,6 +2861,42 @@ const _pandaSetBackoff = (game) => {
 };
 let _pandaBackoffUntil = 0; // mantido pra compat com tests; nunca lido em prod
 let _pandaLast429LogTs = 0;
+const _pandaLast429LogByGame = new Map(); // game → ts (throttle log per-game)
+
+// 2026-05-18 (EXT-2 P5 propagation): shared PandaScore response parser com
+// 429 detection + backoff. Antes só LoL (server.js:2881-2918) tinha logic
+// completa — dota2/csgo/valorant usavam parsePsArr stub que retornava []
+// silenciosamente em 429 (quota burn invisível). Pattern aplica cross-sport
+// via _pandaSetBackoff(game) que JÁ é per-game.
+function _psParseMatchList(raw, game, fallbackLabel) {
+  const status = raw?.status;
+  const body = raw?.body;
+  const p = safeParse(body, []);
+  if (Array.isArray(p)) return p;
+  if (p && typeof p === 'object') {
+    const keys = Object.keys(p);
+    const errMsg = (p?.error && (p.error.message || p.error)) || p?.message || '';
+    if (keys.includes('error') || errMsg) {
+      const msg = String(errMsg || '');
+      const is429 = status === 429
+        || msg.toLowerCase().includes('too many')
+        || String(body || '').toLowerCase().includes('too many requests');
+      if (is429) {
+        const ttl = _pandaSetBackoff(game);
+        const now = Date.now();
+        const lastLog = _pandaLast429LogByGame.get(game) || 0;
+        if (now - lastLog > 60 * 1000) {
+          _pandaLast429LogByGame.set(game, now);
+          log('WARN', 'PANDASCORE', `${fallbackLabel}: 429 — backoff ${game} ${Math.round(ttl/60000)}min | msg=${msg.slice(0, 120) || '-'} body=${String(body || '').slice(0, 180)}`);
+        }
+      } else {
+        log('WARN', 'PANDASCORE', `${fallbackLabel}: erro status=${status || '-'} msg=${msg.slice(0, 180) || '-'} body=${String(body || '').slice(0, 220)}`);
+      }
+      return [];
+    }
+  }
+  return [];
+}
 let _pandaCache = { data: [], ts: 0 };
 let _pandaInflight = null; // 2026-05-13: inflight dedup (espelha _dotaMatchesResp). Sem isso, /lol-matches paralelo no boot/peak disparava 2 fetches → dup log "PANDASCORE 33 partidas LoL" mesmo segundo + waste quota.
 const PANDA_CACHE_TTL = parseInt(process.env.PANDA_CACHE_TTL_MS || '60000', 10); // 60s default
@@ -3661,12 +3697,9 @@ async function getPandaScoreDotaMatches() {
       httpGet('https://api.pandascore.co/dota2/matches/running?per_page=20', headers).catch(() => ({ status: 0, body: '[]' })),
       httpGet('https://api.pandascore.co/dota2/matches/upcoming?per_page=30&sort=begin_at', headers).catch(() => ({ status: 0, body: '[]' }))
     ]);
-    const parsePsArr = (raw) => {
-      const p = safeParse(raw?.body, []);
-      return Array.isArray(p) ? p : [];
-    };
-    const running = parsePsArr(runningRaw);
-    const upcoming = parsePsArr(upcomingRaw);
+    // 2026-05-18 (EXT-2 P5): shared _psParseMatchList detecta 429 + backoff.
+    const running = _psParseMatchList(runningRaw, 'dota2', 'PandaScore Dota 2 running');
+    const upcoming = _psParseMatchList(upcomingRaw, 'dota2', 'PandaScore Dota 2 upcoming');
 
     const mapDota = (m, status) => {
       const t1 = m.opponents?.[0]?.opponent, t2 = m.opponents?.[1]?.opponent;
@@ -3732,12 +3765,9 @@ async function getPandaScoreCsMatches() {
       httpGet('https://api.pandascore.co/csgo/matches/running?per_page=20', headers).catch(() => ({ status: 0, body: '[]' })),
       httpGet('https://api.pandascore.co/csgo/matches/upcoming?per_page=30&sort=begin_at', headers).catch(() => ({ status: 0, body: '[]' }))
     ]);
-    const parsePsArr = (raw) => {
-      const p = safeParse(raw?.body, []);
-      return Array.isArray(p) ? p : [];
-    };
-    const running = parsePsArr(runningRaw);
-    const upcoming = parsePsArr(upcomingRaw);
+    // 2026-05-18 (EXT-2 P5): shared _psParseMatchList detecta 429 + backoff.
+    const running = _psParseMatchList(runningRaw, 'csgo', 'PandaScore CS2 running');
+    const upcoming = _psParseMatchList(upcomingRaw, 'csgo', 'PandaScore CS2 upcoming');
 
     const mapCs = (m, status) => {
       const t1 = m.opponents?.[0]?.opponent, t2 = m.opponents?.[1]?.opponent;
@@ -3847,12 +3877,9 @@ async function getPandaScoreValorantMatches() {
       httpGet('https://api.pandascore.co/valorant/matches/running?per_page=20', headers).catch(() => ({ status: 0, body: '[]' })),
       httpGet('https://api.pandascore.co/valorant/matches/upcoming?per_page=30&sort=begin_at', headers).catch(() => ({ status: 0, body: '[]' }))
     ]);
-    const parsePsArr = (raw) => {
-      const p = safeParse(raw?.body, []);
-      return Array.isArray(p) ? p : [];
-    };
-    const running = parsePsArr(runningRaw);
-    const upcoming = parsePsArr(upcomingRaw);
+    // 2026-05-18 (EXT-2 P5): shared _psParseMatchList detecta 429 + backoff.
+    const running = _psParseMatchList(runningRaw, 'valorant', 'PandaScore Valorant running');
+    const upcoming = _psParseMatchList(upcomingRaw, 'valorant', 'PandaScore Valorant upcoming');
 
     const mapVal = (m, status) => {
       const t1 = m.opponents?.[0]?.opponent, t2 = m.opponents?.[1]?.opponent;
