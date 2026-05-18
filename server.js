@@ -24895,6 +24895,21 @@ load();
   }
 
   if (p === '/record-tip' && req.method === 'POST') {
+    // 2026-05-18 (SEG-3 adversarial audit fix): shared-secret token gate.
+    // Antes /record-tip era PUBLIC unauth — attacker via Railway URL podia
+    // injetar tips arbitrárias bypassando bot.js. Opt-in pra backward compat:
+    // se RECORD_TIP_TOKEN_REQUIRED=true, verifica x-record-tip-token header.
+    // Bot.js inclui header automaticamente quando RECORD_TIP_TOKEN env set.
+    // Production rollout: deploy fix → set RECORD_TIP_TOKEN em bot+server →
+    // após confirmar token chega via logs → flip RECORD_TIP_TOKEN_REQUIRED=true.
+    if (/^(1|true|yes)$/i.test(String(process.env.RECORD_TIP_TOKEN_REQUIRED || ''))) {
+      const expectedToken = String(process.env.RECORD_TIP_TOKEN || '');
+      const gotToken = String(req.headers['x-record-tip-token'] || '');
+      if (!expectedToken || gotToken !== expectedToken) {
+        sendJson(res, { ok: false, error: 'unauthorized', reason: 'record_tip_token_mismatch' }, 401);
+        return;
+      }
+    }
     let body = ''; req.on('data', d => body += d);
     req.on('end', async () => {
       // p1/p2 hoisted pra escopo do callback: outer catch referencia `${p1}` em

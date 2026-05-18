@@ -1950,6 +1950,12 @@ function serverPost(path, body, sport, extraHeaders) {
     const adminHeaders = (ADMIN_KEY && ADMIN_POST_PATHS.has(pathBase))
       ? { 'x-admin-key': ADMIN_KEY }
       : null;
+    // 2026-05-18 (SEG-3 audit fix): /record-tip shared-secret token. Bot inclui
+    // automaticamente quando RECORD_TIP_TOKEN env set; server.js valida (também
+    // gated por flag REQUIRED). Opt-in pra backward compat — sem env, no-op.
+    const recordTipHeaders = (pathBase === '/record-tip' && process.env.RECORD_TIP_TOKEN)
+      ? { 'x-record-tip-token': String(process.env.RECORD_TIP_TOKEN) }
+      : null;
     const req = http.request({
       hostname: SERVER,
       port: PORT,
@@ -1959,6 +1965,7 @@ function serverPost(path, body, sport, extraHeaders) {
         'Content-Type': 'application/json',
         'Content-Length': Buffer.byteLength(s),
         ...(adminHeaders || {}),
+        ...(recordTipHeaders || {}),
         ...extraHeaders
       }
     }, res => {
