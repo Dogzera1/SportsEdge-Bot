@@ -120,6 +120,20 @@ const BEFORE = {
 
 const results = { ranAt: new Date().toISOString(), jobs: [], before: BEFORE };
 
+// 2026-05-18 (P3 brier holdout eval): captura brier do isotonic ATUAL em shadow
+// sample 14d ANTES do refit. Pós-refit re-eval em SAME sample → comparison.
+// Best-effort: null = sample insuficiente OR DB unreachable (não bloqueia).
+const ISOTONIC_TARGETS_BRIER = [
+  { key: 'lol_iso',    sport: 'lol',      file: 'lib/lol-model-isotonic.json',    label: 'LoL iso' },
+  { key: 'tennis_iso', sport: 'tennis',   file: 'lib/tennis-model-isotonic.json', label: 'Tennis iso' },
+  { key: 'dota_iso',   sport: 'dota2',    file: 'lib/dota2-isotonic.json',        label: 'Dota iso' },
+  { key: 'cs_iso',     sport: 'cs2',      file: 'lib/cs2-isotonic.json',          label: 'CS2 iso' },
+];
+const brierPre = {};
+for (const t of ISOTONIC_TARGETS_BRIER) {
+  brierPre[t.key] = _evalBrier(t.sport, t.file);
+}
+
 function run(label, cmd) {
   const started = Date.now();
   let ok = true, err = null, out = '';
@@ -254,7 +268,42 @@ if (autoRollback && doRetrain) {
 // — data filter cortou demais, regime cutoff erroneo, ou sport com sample stale.
 // Fit normal varia 5-15% entre refits. Não cobre overfitting (precisaria holdout).
 // Roda sempre (não gated por doRetrain) pq isotonic fitta toda invocação.
+//
+// 2026-05-18 (P3 minimal-viable enhancement): adiciona brier holdout eval —
+// load isotonic BEFORE refit, eval em shadow sample 14d → brier_pre.
+// Pós-fit, eval NEW isotonic em SAME sample → brier_post. Compare.
+// Sample = market_tips_shadow tips reais settled (p_model + result win/loss).
+// Caveat: sample pode incluir tips usadas no training (não é true disjoint
+// holdout). Comparison OLD vs NEW em SAME sample ainda detect regression.
+// Auto-rollback se brier_post > brier_pre * (1 + ISOTONIC_BRIER_REGRESSION_THRESHOLD).
 const ISOTONIC_SAMPLE_DROP_PCT = parseFloat(process.env.ISOTONIC_SAMPLE_DROP_THRESHOLD_PCT || '50') / 100;
+const ISOTONIC_BRIER_REGRESSION_PCT = parseFloat(process.env.ISOTONIC_BRIER_REGRESSION_THRESHOLD_PCT || '5') / 100;
+const ISOTONIC_HOLDOUT_DAYS = parseInt(process.env.ISOTONIC_HOLDOUT_DAYS || '14', 10);
+const ISOTONIC_HOLDOUT_MIN_N = parseInt(process.env.ISOTONIC_HOLDOUT_MIN_N || '30', 10);
+
+// Brier eval per-sport pre/post-fit. Lazy-loaded pra evitar require em runs
+// onde lib/brier-holdout-eval ainda não foi pulled (graceful fallback).
+function _evalBrier(sport, isoPath) {
+  try {
+    const { evalIsotonicOnShadow } = require('../lib/brier-holdout-eval');
+    const Database = require('better-sqlite3');
+    const dbPath = path.resolve(ROOT, process.env.DB_PATH || 'sportsedge.db');
+    if (!fs.existsSync(dbPath)) return null;
+    const fullJsonPath = path.join(ROOT, isoPath);
+    if (!fs.existsSync(fullJsonPath)) return null;
+    const json = JSON.parse(fs.readFileSync(fullJsonPath, 'utf8'));
+    // Conexão readonly evita conflitos com fit scripts em paralelo.
+    const db = new Database(dbPath, { readonly: true, timeout: 5000 });
+    try {
+      return evalIsotonicOnShadow(db, sport, json, {
+        days: ISOTONIC_HOLDOUT_DAYS,
+        minSamples: ISOTONIC_HOLDOUT_MIN_N,
+      });
+    } finally {
+      db.close();
+    }
+  } catch (_) { return null; }
+}
 const ISOTONIC_TARGETS = [
   { key: 'lol_iso', label: 'LoL iso', file: 'lib/lol-model-isotonic.json' },
   { key: 'tennis_iso', label: 'Tennis iso', file: 'lib/tennis-model-isotonic.json' },
@@ -283,6 +332,45 @@ if (autoRollback) {
       }
     } catch (e) {
       if (!asJson) console.log(`  ✗ Rollback ${t.label} falhou: ${e.message}`);
+      results.rollbacks.push({ file: t.file, error: e.message });
+    }
+  }
+}
+
+// 2026-05-18 (P3 brier holdout eval): pós-fit re-eval + comparison.
+// Auto-rollback se brier_post > brier_pre * (1 + ISOTONIC_BRIER_REGRESSION_PCT).
+// Skip silencioso se sample insuficiente OR DB unreachable (preservação fail-soft).
+const brierPost = {};
+for (const t of ISOTONIC_TARGETS_BRIER) {
+  brierPost[t.key] = _evalBrier(t.sport, t.file);
+}
+results.brier_holdout = { pre: brierPre, post: brierPost };
+
+if (autoRollback) {
+  for (const t of ISOTONIC_TARGETS_BRIER) {
+    const pre = brierPre[t.key];
+    const post = brierPost[t.key];
+    if (!pre || !post) continue;
+    if (post.brier <= pre.brier * (1 + ISOTONIC_BRIER_REGRESSION_PCT)) continue;
+    const pctWorse = ((post.brier - pre.brier) / pre.brier * 100).toFixed(1);
+    if (!asJson) console.log(`\n⚠️ Brier regression: ${t.label} ${pre.brier} → ${post.brier} (+${pctWorse}%) [n=${pre.n}/${post.n}]`);
+    try {
+      const { restoreLatest, listBackups } = require('../lib/model-backup');
+      const isoPath = path.join(ROOT, t.file);
+      const backups = listBackups(isoPath);
+      if (backups.length) {
+        restoreLatest(isoPath, { name: backups[0].name });
+        results.rollbacks = results.rollbacks || [];
+        results.rollbacks.push({ file: t.file, restoredFrom: backups[0].name, reasonBrierPct: +pctWorse, brier_pre: pre.brier, brier_post: post.brier });
+        if (!asJson) console.log(`  ↺ Rolled back from ${backups[0].name}`);
+      } else {
+        if (!asJson) console.log(`  ✗ No backup available — manual review needed`);
+        results.rollbacks = results.rollbacks || [];
+        results.rollbacks.push({ file: t.file, error: 'no_backup_available', reasonBrierPct: +pctWorse });
+      }
+    } catch (e) {
+      if (!asJson) console.log(`  ✗ Rollback ${t.label} falhou: ${e.message}`);
+      results.rollbacks = results.rollbacks || [];
       results.rollbacks.push({ file: t.file, error: e.message });
     }
   }
