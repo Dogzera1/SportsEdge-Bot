@@ -26834,6 +26834,16 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
     const matchId = `${baseMid}::pinfollow::${side}`;
     const stake = String(process.env.PINNACLE_FOLLOWER_STAKE || '1');
 
+    // 2026-05-18 (P5 cross-sport): gates_evaluated pinnacle-follower path.
+    // Sharp signal-based, não-modelo — captura gates específicos: drop magnitude,
+    // EV no book lagging, cooldown, book count. Shape compat com foundation.
+    const _mlGatesPinFollow = [
+      { gate: 'pin_drop_magnitude', passed: true, value: +Math.abs(velEvt.velocityPct).toFixed(1), threshold: parseFloat(process.env.PINNACLE_FOLLOWER_MIN_DROP_PCT || '3') },
+      { gate: 'pin_drop_direction', passed: true, value: velEvt.direction, threshold: 'down (sharp money entered)' },
+      { gate: 'best_book_ev', passed: true, value: +ev.toFixed(2), threshold: parseFloat(process.env.PINNACLE_FOLLOWER_MIN_EV || '5') },
+      { gate: 'book_count', passed: true, value: allBooksSide.length, threshold: '>= 2 (book lagging available)' },
+      { gate: 'cooldown_clear', passed: true, value: cdKey, threshold: '30min per (sport, matchKey)' },
+    ];
     try {
       const rec = await serverPost('/record-tip', {
         matchId, eventName: match.league || sport,
@@ -26850,6 +26860,7 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
         modelLabel: 'pinnacle-follower',
         tipReason: `Pinnacle ${side}: ${velEvt.oldOdd}→${velEvt.newOdd} (${velEvt.velocityPct.toFixed(1)}% em ${velEvt.windowMin}min) — sharp money entered. Best book ${bestBook.bookmaker} ainda em ${bestBook.odd.toFixed(2)} (lag).`,
         pickSide: side,
+        gates_evaluated: _mlGatesPinFollow,
       }, sport);
       if (rec?.tipId) {
         log('INFO', 'PIN-FOLLOWER',
