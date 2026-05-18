@@ -20464,6 +20464,16 @@ load();
           }
 
           fs.writeFileSync(targetPath, JSON.stringify(toWrite, null, 2));
+          // 2026-05-18 P0 fix: sync pra MODEL_PERSISTENT_DIR (Railway /data volume).
+          // Sem isso, refit /app/lib é perdido em deploy/restart — pod novo boota
+          // de syncFromPersistentToLib overlay com versão antiga. Reproduzido hoje:
+          // refit manual 16:49Z → deploy 16:54Z → fittedAt voltou pra 03:01Z
+          // (versão do nightly_retrain anterior em /data). Sem env = no-op (dev).
+          let persistResult = null;
+          try {
+            const persist = require('./lib/model-persistence');
+            persistResult = persist.syncFromLibToPersistent({ log: (lvl, tag, msg) => log(lvl, tag, msg) });
+          } catch (e) { log('WARN', 'MT-REFIT-CALIB', `persist sync failed (non-fatal): ${e.message}`); }
           sendJson(res, {
             ok: true,
             written: targetPath,
@@ -20483,6 +20493,7 @@ load();
             backtest,
             skipped,
             tier_stratified: stratify === 'tier' ? tierStratified : undefined,
+            persisted: persistResult,
             note: writeMode === 'tiers_only_merge'
               ? 'tiers_only: flat bins preservados. Cache TTL 30min — efeito imediato.'
               : 'Cache TTL 30min — efeito imediato em novas tips. Restart pod pra forçar reload.',
