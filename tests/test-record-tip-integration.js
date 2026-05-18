@@ -575,6 +575,92 @@ module.exports = async function runTests(t) {
     }
   });
 
+  // ─── ml_bucket_blocked: 2026-05-18 P4 TDD pending coverage ─────────────
+  // server.js L25295-25313: gate ml_bucket_blocked consulta _bucketBlockCache
+  // (in-memory Set in lib/ml-auto-promote.js). Cache populado por
+  // loadMlBucketBlocklist no boot do server.js (fix commit 0387d50).
+  // ML_BUCKET_BLOCK_HARD_REJECT=true bypassa _autoRouteToShadow → emit skip.
+  //
+  // Pattern: seed → spawn. Migrations rodam em server boot, então table
+  // ml_bucket_blocklist é criada antes do seed. Order:
+  //   1. Spawn server v1 (cria table via mig 105, cache loads empty)
+  //   2. Kill v1
+  //   3. Seed ml_bucket_blocklist via Database direct
+  //   4. Spawn server v2 pointing mesmo DB (cache loads seeded row no boot)
+  //   5. POST tip em (sport, tier, bucket) blocklisted → match_stop_loss
+  //
+  // Buckets em lib/ml-auto-promote._bucketOf: <1.4 | 1.4-1.6 | 1.6-2.0 |
+  //   2.0-2.5 | 2.5-4.0 | >4.0
+  // Sport=dota2, tier=tier1 (lib/league-tier.getLeagueTierKey resolves "The
+  // International" → tier1), bucket=1.6-2.0 (odds=1.85).
+  await t.test('ml_bucket_blocked: (sport,tier,bucket) blocklisted + HARD_REJECT → rejected', async () => {
+    const Database = require('better-sqlite3');
+    const tmpDbB = path.join(os.tmpdir(), `test-rt-bucket-${Date.now()}.db`);
+    const portB1 = 30000 + Math.floor(Math.random() * 10000);
+    const envB = { ...env, DB_PATH: tmpDbB, PORT: String(portB1), ML_BUCKET_BLOCK_HARD_REJECT: 'true' };
+
+    // STEP 1: Spawn server v1 (migrations criam table)
+    const procB1 = spawn('node', ['server.js'], { env: envB, cwd: REPO_ROOT, stdio: ['ignore', 'pipe', 'pipe'] });
+    procB1.stdout.on('data', () => {});
+    procB1.stderr.on('data', () => {});
+
+    try {
+      await waitHealth(portB1, HEALTH_TIMEOUT_MS);
+
+      // STEP 2: Kill v1 (libera DB lock pra seed exclusivo)
+      procB1.kill();
+      await new Promise(r => setTimeout(r, 500));
+
+      // STEP 3: Seed ml_bucket_blocklist com 1 entry
+      // Liga "The International" → classifier resolve tier1 esports.
+      // Odd 1.85 → bucket "1.5-2.0" (per _bucketOf em lib/ml-auto-promote).
+      const seedDb = new Database(tmpDbB, { timeout: 5000 });
+      try {
+        const tableExists = seedDb.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='ml_bucket_blocklist'").get();
+        t.assert(!!tableExists, 'ml_bucket_blocklist table should exist post-boot (mig 105)');
+        const r = seedDb.prepare(`
+          INSERT INTO ml_bucket_blocklist (sport, tier, bucket, since, source, reason, n, roi_pct)
+          VALUES (?, ?, ?, datetime('now'), 'test_seed', 'integration_test', 10, -30)
+        `).run('dota2', 'tier1', '1.6-2.0');
+        t.assert(r.changes === 1, `seed insert should succeed, got changes=${r.changes}`);
+      } finally {
+        seedDb.close();
+      }
+
+      // STEP 4: Spawn server v2 pointing mesmo DB — cache loads seed no boot
+      const portB2 = 30000 + Math.floor(Math.random() * 10000);
+      const envB2 = { ...envB, PORT: String(portB2) };
+      const procB2 = spawn('node', ['server.js'], { env: envB2, cwd: REPO_ROOT, stdio: ['ignore', 'pipe', 'pipe'] });
+      procB2.stdout.on('data', () => {});
+      procB2.stderr.on('data', () => {});
+      try {
+        await waitHealth(portB2, HEALTH_TIMEOUT_MS);
+
+        // STEP 5: POST tip em bucket blocklisted
+        const r = await httpJson(portB2, 'POST', '/record-tip?sport=dota2', {
+          matchId: 'test_dota2_bucket_' + Date.now(),
+          eventName: 'The International', // tier1
+          p1: 'BucketA',
+          p2: 'BucketB',
+          tipParticipant: 'BucketA',
+          odds: 1.85, // bucket 1.5-2.0
+          ev: 8.5,
+        }, { 'x-admin-key': 'test' });
+        t.assert(r.status === 200, `expected 200 (skipped), got ${r.status} body=${JSON.stringify(r.body)}`);
+        t.assert(r.body.skipped === true, `expected skipped=true, got ${JSON.stringify(r.body)}`);
+        t.assert(r.body.reason === 'ml_bucket_blocked', `expected reason=ml_bucket_blocked, got ${r.body.reason}`);
+        t.assert(r.body.tier === 'tier1', `expected tier=tier1, got ${r.body.tier}`);
+      } finally {
+        try { procB2.kill(); } catch (_) {}
+      }
+    } finally {
+      try { procB1.kill(); } catch (_) {}
+      try { fs.unlinkSync(tmpDbB); } catch (_) {}
+      try { fs.unlinkSync(tmpDbB + '-shm'); } catch (_) {}
+      try { fs.unlinkSync(tmpDbB + '-wal'); } catch (_) {}
+    }
+  });
+
   // ─── match_stop_loss: 2026-05-18 P4 TDD pending coverage ───────────────
   // server.js L25597-25627: env MATCH_STOP_LOSS_UNITS > 0 + cumulative loss
   // ≥ threshold em mesma série (Bo3/Bo5) últimas 6h → _emitSkip('match_stop_loss').
