@@ -14060,6 +14060,68 @@ setInterval(load, 60000);
     return;
   }
 
+  // 2026-05-18: diagnostic endpoint pra inspecionar QUAIS envs estão forçando
+  // sport pra shadow. Retorna boolean (truthy/falsy) por env relevante sem
+  // expor valores. Use case: user setou LOL_SHADOW=false + LOL_ML_DISABLED=false
+  // mas LoL ML continua shadow → checa que outros envs (LOL_AI_SHADOW,
+  // LOL_SHADOW_LEAGUES, LOL_ML_TIER1_LEAGUES, ESPORTS_SHADOW) estão setados.
+  if (p === '/admin/sport-shadow-envs' && (req.method === 'GET' || req.method === 'POST')) {
+    if (!requireAdmin(req, res)) return;
+    const sport = String(parsed.query.sport || '').toLowerCase().trim();
+    const sports = sport ? [sport] : ['lol','cs','dota2','valorant','tennis','football','basket','mma','darts','snooker','tabletennis','esports'];
+    const out = {};
+    const truthy = v => /^(1|true|yes)$/i.test(String(v || ''));
+    const present = v => v !== undefined && String(v).trim() !== '';
+    for (const s of sports) {
+      const U = s.toUpperCase();
+      const entry = {};
+      const envs = [
+        `${U}_SHADOW`,
+        `${U}_ML_DISABLED`,
+        `${U}_AI_SHADOW`,
+        `${U}_SHADOW_LEAGUES`,
+        `${U}_REAL_LEAGUES`,
+        `${U}_ML_TIER1_LEAGUES`,
+        `${U}_ML_DISABLED_HARD_REJECT`,
+        `${U}_SHADOW_MIN_EV`,
+        `${U}_FALLBACK_MIN_EV`,
+        `${U}_FALLBACK_MIN_EDGE`,
+        `${U}_MIN_ODDS`,
+        `${U}_MAX_ODDS`,
+        `${U}_ENABLED`,
+      ];
+      for (const e of envs) {
+        const v = process.env[e];
+        if (present(v)) {
+          entry[e] = {
+            set: true,
+            truthy: truthy(v),
+            value_length: String(v).length,
+            value_preview: String(v).length <= 60 ? String(v) : String(v).slice(0, 60) + '...',
+          };
+        }
+      }
+      out[s] = entry;
+    }
+    // Globals relevantes
+    const globalEnvs = ['AI_DISABLED','ML_SHADOW_PURE_MODE','ML_DISABLED_HARD_REJECT','ML_TIER1_HARD_REJECT','ML_BUCKET_BLOCK_HARD_REJECT'];
+    const globals = {};
+    for (const e of globalEnvs) {
+      const v = process.env[e];
+      if (present(v)) {
+        globals[e] = { set: true, truthy: truthy(v), value_preview: String(v).slice(0, 30) };
+      }
+    }
+    sendJson(res, {
+      ok: true,
+      ts: new Date().toISOString(),
+      note: 'Lista envs SETADOS (não-vazios) relacionados a shadow per sport. Use truthy=true pra ver quais estão forçando shadow.',
+      per_sport: out,
+      globals,
+    });
+    return;
+  }
+
   if (p === '/admin/sport-detail' && (req.method === 'GET' || req.method === 'POST')) {
     const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
