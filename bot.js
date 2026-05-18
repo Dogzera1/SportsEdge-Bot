@@ -16583,6 +16583,15 @@ Máximo 200 palavras.`;
         _dotaCycleSkips.league_blocked++;
         await _sleep(2000); continue;
       }
+      // 2026-05-18 (P5 cross-sport): gates_evaluated forensics. Shape compat
+      // com lib/market-tip-processor.shouldSendMarketTip output (P5 memory
+      // project_p5_gates_evaluated_cross_sport_2026_05_18).
+      const _mlGatesDota = [
+        { gate: 'league_allowed', passed: true, value: match.league || null, threshold: 'isLeagueBlocked(dota2,ML)=false' },
+        { gate: 'kelly_positive', passed: true, value: tipStakeAdj, threshold: '> 0u after risk_manager' },
+        { gate: 'risk_manager_ok', passed: true, value: riskAdj.units, threshold: 'cross-sport risk OK' },
+        { gate: 'steam_boost', passed: true, value: _steamDota?.mult ?? 1.0, threshold: 'mult applied if >1.0' },
+      ];
       try {
         const rec = await serverPost('/record-tip', {
           matchId,
@@ -16600,6 +16609,7 @@ Máximo 200 palavras.`;
           modelP2: mlResult.modelP2,
           modelPPick: modelPForKelly,
           modelLabel: `dota-ml (${mlResult.factorActive?.join('+') || 'base'})`,
+          gates_evaluated: _mlGatesDota,
           tipReason: (() => {
             const _ia = iaResp ? iaResp.split('TIP_ML:')[0].trim().split('\n').filter(Boolean).pop()?.slice(0, 160) || null : null;
             const _forceDet = /^(1|true|yes)$/i.test(String(process.env.DOTA_FORCE_DETERMINISTIC_REASON || ''));
@@ -16844,6 +16854,14 @@ async function analyzeDotaMapTip(match, token) {
     analyzedDota.set(mapKey, { ts: now, tipSent: false, blocked: true });
     return;
   }
+  // 2026-05-18 (P5 cross-sport): gates_evaluated dota2 MAP_WINNER live path.
+  // Gates inline checados antes do POST: divergence guard, EV ceiling, league.
+  const _mlGatesDotaMap = [
+    { gate: 'league_allowed', passed: true, value: match.league || null, threshold: 'isLeagueBlocked(dota2,ML)=false' },
+    { gate: 'map_ev_ceiling', passed: true, value: +pickEv.toFixed(1), threshold: parseFloat(process.env.DOTA_MAP_EV_CEILING || '40') },
+    { gate: 'map_divergence', passed: true, value: 'within bound', threshold: parseFloat(process.env.DOTA_MAP_MAX_DIVERGENCE_PP || '20') },
+    { gate: 'map_model_confidence', passed: true, value: +(pred.confidence ?? 0).toFixed(2), threshold: 'pred.confidence captured' },
+  ];
   try {
     const rec = await serverPost('/record-tip', {
       matchId: mapMatchId,
@@ -16865,6 +16883,7 @@ async function analyzeDotaMapTip(match, token) {
       lineShopOdds: match.mapOdds || null,
       pickSide: pickDir,
       sport: 'dota2',
+      gates_evaluated: _mlGatesDotaMap,
     }, 'dota2');
     if (rec?.skipped) {
       log('INFO', 'AUTO-DOTA-MAP', `Tip mapa ${mapN} duplicada: ${pickTeam} @ ${pickOdd}`);
@@ -17564,6 +17583,14 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
           continue;
         }
         const _pickSideMma = norm(tipTeam) === norm(fight.team1) ? 't1' : 't2';
+        // 2026-05-18 (P5 cross-sport): gates_evaluated mma ML. Captura gates
+        // inline (event resolution, league policy, kelly, modelo override).
+        const _mlGatesMma = [
+          { gate: 'event_resolved', passed: true, value: recEventName, threshold: 'fight._org/_eventName + fallback "(não identificado)"' },
+          { gate: 'league_allowed', passed: true, value: recEventName, threshold: 'isLeagueBlocked(mma,ML)=false' },
+          { gate: 'kelly_positive', passed: true, value: tipStakeAdjMma, threshold: '> 0u after risk_manager' },
+          { gate: 'model_source', passed: true, value: fairLabelMma + (_mmaHybridTip ? '+hybrid' : (_mmaFromOverride ? '+override' : '')), threshold: 'trained|elo|hybrid|override' },
+        ];
         const rec = await serverPost('/record-tip', {
           matchId: String(fight.id), eventName: recEventName,
           p1: fight.team1, p2: fight.team2, tipParticipant: tipTeam,
@@ -17577,6 +17604,7 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
           isShadow: mmaConfig.shadowMode ? 1 : 0,
           lineShopOdds: fight.odds || null,
           pickSide: _pickSideMma,
+          gates_evaluated: _mlGatesMma,
           // tip_context_json:
           factors: mlResultMma.factorActive || null,
           mlScore: Number.isFinite(mlResultMma.score) ? +mlResultMma.score.toFixed(2) : null,
@@ -19171,6 +19199,15 @@ Máximo 200 palavras. Raciocínio breve antes da decisão.`;
           factors: mlResultTennis.factorActive || null,
           mlScore: Number.isFinite(mlResultTennis.score) ? +mlResultTennis.score.toFixed(2) : null,
           factorCount: mlResultTennis.factorCount || null,
+          // 2026-05-18 (P5 cross-sport): gates_evaluated tennis ML.
+          gates_evaluated: [
+            { gate: 'league_allowed', passed: true, value: match.league || null, threshold: 'isLeagueBlocked(tennis,ML)=false' },
+            { gate: 'kelly_positive', passed: true, value: tipStakeAdjTennis + 'u', threshold: '> 0u after risk_manager' },
+            { gate: 'clv_mult_ok', passed: true, value: _clvAdjTn?.mult ?? 1.0, threshold: '> 0 (0 → shadow)' },
+            { gate: 'risk_manager_ok', passed: true, value: riskAdjTennis.units, threshold: 'cross-sport risk OK' },
+            { gate: 'surface_tier', passed: true, value: `${surface}/${isGrandSlam ? 'slam' : isMasters ? 'masters' : 'regular'}`, threshold: 'tier-aware classifier' },
+            { gate: 'model_source', passed: true, value: fairLabelTennis + (_tennisHybridText ? '+hybrid' : (_tennisFromOverride ? '+override' : '')), threshold: 'trained|markov|hybrid|override' },
+          ],
         }, 'tennis');
 
         if (!rec?.tipId) {
@@ -20542,6 +20579,13 @@ Máximo 200 palavras.`;
           // RPS prep: distribuição 1X2 completa (apenas pra markets 1X2_*).
           // /record-tip persiste como ctx.fb_dist em tip_context_json.
           fb_dist: (_fbDist && /^1X2_/.test(_recordMarketType)) ? _fbDist : null,
+          // 2026-05-18 (P5 cross-sport): gates_evaluated football ML/markets.
+          gates_evaluated: [
+            { gate: 'market_resolved', passed: true, value: _recordMarketType, threshold: 'ML|OVER|UNDER|HANDICAP|1X2_*' },
+            { gate: 'kelly_positive', passed: true, value: tipStakeAdjFb, threshold: '> 0u after risk_manager' },
+            { gate: 'model_source', passed: true, value: (elo ? 'elo+poisson' : 'poisson') + (_fbHybridText ? '+hybrid' : (_fbFromOverride ? '+override' : '')), threshold: 'poisson|elo+poisson|hybrid|override' },
+            { gate: 'fb_dist_available', passed: true, value: _fbDist ? '1X2 distribuição completa' : 'binary', threshold: 'RPS-ready when /^1X2_/' },
+          ],
         }, 'football');
 
         if (!recFb?.tipId) {
@@ -21626,6 +21670,16 @@ Máximo 150 palavras.`;
           continue;
         }
         _csInFlight.add(key);
+        // 2026-05-18 (P5 cross-sport): gates_evaluated cs ML. Captura gates
+        // inline (tier policy, kelly + clv, risk manager, dedup _csInFlight).
+        const _mlGatesCs = [
+          { gate: 'league_allowed', passed: true, value: match.league || null, threshold: 'isLeagueBlocked(cs,ML)=false' },
+          { gate: 'kelly_positive', passed: true, value: stakeAdj + 'u', threshold: '> 0u after risk + tier cap' },
+          { gate: 'clv_mult_ok', passed: true, value: _clvAdjCs?.mult ?? 1.0, threshold: '> 0 (0 → shadow)' },
+          { gate: 'risk_manager_ok', passed: true, value: riskAdj.units, threshold: 'cross-sport risk OK' },
+          { gate: 'tier_stake_cap', passed: true, value: isTier1 ? 'tier1' : 'tier2+', threshold: isTier1 ? 'no cap' : `CS_TIER2_MAX_STAKE=${CS_TIER2_MAX_STAKE}u` },
+          { gate: 'dedup_clear', passed: true, value: key, threshold: 'analyzedCs + _csInFlight' },
+        ];
         let rec;
         try {
           rec = await serverPost('/record-tip', {
@@ -21647,6 +21701,7 @@ Máximo 150 palavras.`;
             mlScore: Number.isFinite(mlScore) ? +mlScore.toFixed(2) : null,
             factorCount: factorCount || null,
             divergencePp: isPinnacleOdds && Number.isFinite(divergencePp) ? +divergencePp.toFixed(2) : null,
+            gates_evaluated: _mlGatesCs,
           }, 'cs');
         } finally {
           _csInFlight.delete(key);
@@ -22304,6 +22359,16 @@ async function pollValorant(runOnce = false) {
         // 30d: Champions Tour Americas ROI +48% n=21 calib +10pp; resto sangra).
         const _leagueRealOverride = valConfig.shadowMode && isLeagueRealOverride('valorant', match.league);
         const effectiveShadow = valConfig.shadowMode && !_leagueRealOverride;
+        // 2026-05-18 (P5 cross-sport): gates_evaluated valorant ML. Captura
+        // gates inline (AI gate, clv mult, kelly+risk, league override real).
+        const _mlGatesVal = [
+          { gate: 'league_allowed', passed: true, value: match.league || null, threshold: 'isLeagueBlocked(valorant,ML)=false' },
+          { gate: 'kelly_positive', passed: true, value: stakeAdj + 'u', threshold: '> 0u after risk_manager' },
+          { gate: 'clv_mult_ok', passed: true, value: _clvAdjVal?.mult ?? 1.0, threshold: '> 0 (0 → shadow)' },
+          { gate: 'risk_manager_ok', passed: true, value: riskAdj.units, threshold: 'cross-sport risk OK' },
+          { gate: 'league_real_override', passed: true, value: _leagueRealOverride ? 'override_active' : 'default', threshold: 'shadowMode bypass via VALORANT_REAL_LEAGUES' },
+          { gate: 'ai_gate_ok', passed: true, value: typeof _aiConfVal !== 'undefined' ? _aiConfVal : 'no_ai', threshold: 'aiR.passed=true' },
+        ];
         const rec = await serverPost('/record-tip', {
           matchId: String(match.id) + valMapTag, eventName: match.league,
           p1: match.team1, p2: match.team2, tipParticipant: pickTeam,
@@ -22322,6 +22387,7 @@ async function pollValorant(runOnce = false) {
           factors: factorCount > 0 ? [{ label: 'Valorant', value: `factors=${factorCount}` }] : null,
           mlScore: Number.isFinite(mlScore) ? +mlScore.toFixed(2) : null,
           factorCount: factorCount || null,
+          gates_evaluated: _mlGatesVal,
         }, 'valorant');
 
         if (!rec?.tipId) {
@@ -22683,6 +22749,12 @@ async function runAutoDarts() {
             isShadow: dartsConfig.shadowMode ? 1 : 0,
             lineShopOdds: match.odds || null,
             pickSide: ml.direction,
+            // 2026-05-18 (P5 cross-sport): gates_evaluated darts ML.
+            gates_evaluated: [
+              { gate: 'league_allowed', passed: true, value: match.league || null, threshold: 'isLeagueBlocked(darts,ML)=false' },
+              { gate: 'kelly_positive', passed: true, value: stakeAdj + 'u', threshold: '> 0u (1/8 Kelly)' },
+              { gate: 'model_edge', passed: true, value: Number.isFinite(ml?.score) ? +ml.score.toFixed(2) : null, threshold: 'darts-ml 3DA + WR factors' },
+            ],
           }, 'darts');
 
           if (!rec?.tipId) {
@@ -23301,6 +23373,13 @@ async function runAutoBasket() {
         isShadow: basketConfig.shadowMode ? 1 : 0,
         lineShopOdds: match.odds || null,
         pickSide: direction,
+        // 2026-05-18 (P5 cross-sport): gates_evaluated basket ML.
+        gates_evaluated: [
+          { gate: 'league_allowed', passed: true, value: match.league || 'nba', threshold: 'isLeagueBlocked(basket,ML)=false' },
+          { gate: 'kelly_positive', passed: true, value: stakeAdj + 'u', threshold: '> 0u' },
+          { gate: 'elo_rating_diff', passed: true, value: Math.round(elo?.ratingDiff ?? 0), threshold: 'sample size + edge available' },
+          { gate: 'trained_used', passed: true, value: hasTrained ? `trained pH=${(trained.pHome*100).toFixed(1)}%` : 'elo_only', threshold: 'hasTrained + confidence > 0.4' },
+        ],
       }, 'basket');
 
       if (!rec?.tipId) {
