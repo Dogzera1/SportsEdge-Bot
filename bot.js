@@ -10483,19 +10483,24 @@ async function autoAnalyzeMatch(token, match) {
     const newsSectionEsports = await fetchMatchNews('esports', match.team1, match.team2).catch(() => '');
     const { text: prompt, evThreshold: adaptiveEV, sigCount } = buildEsportsPrompt(match, game, gamesContext, oddsToUse, enrichSection, mlResult, newsSectionEsports);
 
-    // AI shadow LoL — dispara em TODOS os matches lol analisados (com mlResult+odds válidos)
-    // independente do path real (HYBRID/fallback/AI). Tips persistidas isShadow=1
-    // + emission_source='lol_ai_shadow'. Gate: env LOL_AI_SHADOW=true.
+    // AI shadow/real LoL — dispara em TODOS os matches lol analisados (com mlResult+odds válidos)
+    // independente do path real (HYBRID/fallback/AI). Gate: env LOL_AI_SHADOW=true (research,
+    // is_shadow=1 + emission_source='lol_ai_shadow') OU LOL_AI_REAL=true (promove real,
+    // is_shadow=0 + emission_source='lol_ai_real' + DM dispatch).
+    // 2026-05-18: bug fix — antes só checava LOL_AI_SHADOW, então LOL_AI_REAL=true sozinho
+    // não disparava o path (user precisava setar AMBOS). Agora qualquer um dispara.
     const _lolAiShadowEnv = String(process.env.LOL_AI_SHADOW || '');
+    const _lolAiRealEnv = String(process.env.LOL_AI_REAL || '');
+    const _lolAiActive = /^(1|true|yes)$/i.test(_lolAiShadowEnv) || /^(1|true|yes)$/i.test(_lolAiRealEnv);
     if (match.game === 'lol') {
-      if (/^(1|true|yes)$/i.test(_lolAiShadowEnv)) {
-        log('INFO', 'AI-SHADOW', `trigger fire: ${match.team1} vs ${match.team2} (env=${_lolAiShadowEnv})`);
+      if (_lolAiActive) {
+        log('INFO', 'AI-SHADOW', `trigger fire: ${match.team1} vs ${match.team2} (shadow=${_lolAiShadowEnv}|real=${_lolAiRealEnv})`);
         setImmediate(() => {
           _runLolAiShadow({ match, mlResult, oddsToUse, prompt, hasLiveStats })
             .catch(e => { try { log('WARN', 'AI-SHADOW', `dispatch err: ${e?.message || e}`); } catch (_) {} });
         });
       } else {
-        log('DEBUG', 'AI-SHADOW', `skip ${match.team1} vs ${match.team2} env=${JSON.stringify(_lolAiShadowEnv)}`);
+        log('DEBUG', 'AI-SHADOW', `skip ${match.team1} vs ${match.team2} shadow=${JSON.stringify(_lolAiShadowEnv)} real=${JSON.stringify(_lolAiRealEnv)}`);
       }
     }
 
@@ -17443,7 +17448,9 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
         // melhor. Gate: MMA_AI_SHADOW=true (research) | MMA_AI_REAL=true (promove).
         // Fire-and-forget — não bloqueia loop. Memory project_lol_ai_vs_noai_comparison
         // mostrou AI +15.65% vs no-AI -7.89% LoL; MMA shadow d30 -54% pode beneficiar.
-        if (/^(1|true|yes)$/i.test(String(process.env.MMA_AI_SHADOW || ''))) {
+        const _mmaAiActive = /^(1|true|yes)$/i.test(String(process.env.MMA_AI_SHADOW || ''))
+          || /^(1|true|yes)$/i.test(String(process.env.MMA_AI_REAL || ''));
+        if (_mmaAiActive) {
           log('INFO', 'AI-SHADOW-MMA', `trigger fire: ${fight.team1} vs ${fight.team2}`);
           setImmediate(() => {
             _runMmaAiShadow({ match: fight, mlResult: mlResultMma, oddsToUse: o, prompt, hasLiveStats: false })
