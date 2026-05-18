@@ -3094,6 +3094,26 @@ const migrations = [
       } catch (e) { console.log(`[mig 116] failed: ${e.message}`); }
     },
   },
+  {
+    id: '117_market_tips_shadow_model_p_raw',
+    up(db) {
+      // 2026-05-18 (P3 full true-holdout step 1): persist prob pre-isotonic
+      // pra eval de overfit. Hoje p_model em shadow é post-isotonic (passou
+      // por _applyIsotonic em lib/lol-model:757 + lib/tennis-model:1015 etc).
+      // Sem raw, brier holdout eval mede performance do modelo POS-calibração
+      // — não detecta overfit do FIT cycle.
+      //
+      // Coluna nova model_p_raw nullable. Scanners plumbam caller-side
+      // incremental (per sport). Helper lib/brier-holdout-eval prefere
+      // model_p_raw quando NOT NULL, fallback p_model.
+      //
+      // ALTER TABLE ADD COLUMN é O(1) em SQLite. Safe em prod sem janela morta.
+      try {
+        addColumnIfMissing(db, 'market_tips_shadow', 'model_p_raw', 'model_p_raw REAL');
+        console.log('[mig 117] market_tips_shadow.model_p_raw added (P3 true-holdout)');
+      } catch (e) { console.log(`[mig 117] failed: ${e.message}`); }
+    },
+  },
 ];
 
 function applyMigrations(db) {
