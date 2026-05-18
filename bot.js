@@ -4389,23 +4389,39 @@ async function _settleCompletedTipsInner() {
               LIMIT 100
             `).all(_voidHours);
             if (staleRows.length > 0) {
+              // 2026-05-18 (SEG-2 adversarial audit fix): AND result IS NULL
+              // guard idempotente — previne TOCTOU race entre SELECT (filtra
+              // result IS NULL) e UPDATE quando settle path concurrent finaliza
+              // tip como win/loss no intervalo. Sem guard, autovoid sobrescreve
+              // winnings reais → bankroll lost. Same pattern de voidTipById
+              // canônico em lib/database.js:487.
               const updStmt = db.prepare(`
                 UPDATE tips
                 SET result = 'void',
                     profit_units = 0,
                     settled_at = datetime('now')
                 WHERE id = ?
+                  AND result IS NULL
               `);
               let voided = 0;
+              let racedSkipped = 0;
               for (const r of staleRows) {
                 try {
-                  updStmt.run(r.id);
-                  voided++;
-                  log('INFO', 'SETTLE-TENNIS-AUTOVOID',
-                    `tip#${r.id} [${r.event_name}] ${r.participant1} vs ${r.participant2} → void (>${_voidHours}h sem match, Challenger/Doubles/ITF feed sem cobertura)`);
+                  const _res = updStmt.run(r.id);
+                  if (_res.changes === 1) {
+                    voided++;
+                    log('INFO', 'SETTLE-TENNIS-AUTOVOID',
+                      `tip#${r.id} [${r.event_name}] ${r.participant1} vs ${r.participant2} → void (>${_voidHours}h sem match, Challenger/Doubles/ITF feed sem cobertura)`);
+                  } else {
+                    racedSkipped++;
+                    log('DEBUG', 'SETTLE-TENNIS-AUTOVOID', `tip#${r.id} race: settle path settled antes do autovoid — no-op`);
+                  }
                 } catch (e) {
                   log('WARN', 'SETTLE-TENNIS-AUTOVOID', `tip#${r.id} void falhou: ${e.message}`);
                 }
+              }
+              if (racedSkipped > 0) {
+                log('INFO', 'SETTLE-TENNIS-AUTOVOID', `${racedSkipped} race-skipped (settled by other path between SELECT and UPDATE)`);
               }
               if (voided > 0) {
                 log('INFO', 'SETTLE-TENNIS-AUTOVOID', `voided ${voided} stale Challenger/Doubles/ITF tips (>${_voidHours}h pending — sem cobertura ESPN/Sackmann)`);

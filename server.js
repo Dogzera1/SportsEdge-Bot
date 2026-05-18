@@ -14698,6 +14698,10 @@ load();
   // Não toca tips — só corrige drift entre bankroll stored e profit real.
   // POST /admin/force-sync-bankroll?apply=1  (sem apply = dry-run)
   if (p === '/admin/force-sync-bankroll' && req.method === 'POST') {
+    // 2026-05-18 (SEG-1 adversarial audit): handler era UNAUTH em prod —
+    // attacker anonymous via Railway public URL podia UPDATE bankroll
+    // (current_banca) cross-sport sem traceability. Adicionar requireAdmin.
+    if (!requireAdmin(req, res)) return;
     const apply = parsed.query.apply === '1' || parsed.query.apply === 'true';
     try {
       const rows = db.prepare(`SELECT sport, initial_banca, current_banca FROM bankroll`).all();
@@ -17965,6 +17969,9 @@ load();
   // recalculado a cada tip, profit aplicado, runningBanca avança. Reclassifica esports→lol/dota2.
   // POST /admin/rebuild-tip-reais?sport=X&apply=1 (sem apply = dry-run)
   if (p === '/admin/rebuild-tip-reais' && req.method === 'POST') {
+    // 2026-05-18 (SEG-1 adversarial audit): handler era UNAUTH — attacker
+    // podia UPDATE stake_reais/profit_reais cross-sport sem traceability.
+    if (!requireAdmin(req, res)) return;
     const apply = parsed.query.apply === '1' || parsed.query.apply === 'true';
     const sportFilter = parsed.query.sport ? String(parsed.query.sport).trim() : null;
     try {
@@ -24100,6 +24107,10 @@ load();
   //   POST /admin/recompute-ev-pending?apply=1            (persiste; sem apply = dry-run)
   //   POST /admin/recompute-ev-pending?sport=mma&apply=1  (filtra por esporte)
   if (p === '/admin/recompute-ev-pending' && req.method === 'POST') {
+    // 2026-05-18 (SEG-1 adversarial audit): handler era UNAUTH — attacker
+    // podia UPDATE ev/current_ev cross-sport. Downstream gates filtram por
+    // EV threshold → inflar EV permite bypass min_ev gate em emit subsequente.
+    if (!requireAdmin(req, res)) return;
     try {
       const apply = parsed.query.apply === '1' || parsed.query.apply === 'true';
       const sportFilter = parsed.query.sport ? String(parsed.query.sport).trim().toLowerCase() : null;
@@ -24687,6 +24698,9 @@ load();
   // Atualiza event_name para "{org} — {eventName}" quando resolver encontra.
   //   POST /admin/backfill-mma-events?dryRun=1&limit=50
   if (p === '/admin/backfill-mma-events' && req.method === 'POST') {
+    // 2026-05-18 (SEG-1 adversarial audit): handler era UNAUTH — attacker
+    // podia UPDATE event_name em massa em tips MMA. Severity menor mas mesma class.
+    if (!requireAdmin(req, res)) return;
     (async () => {
       try {
         const { resolveOrg } = require('./lib/mma-org-resolver');
@@ -27752,25 +27766,37 @@ ROI realizado usa <code>profit_reais</code> se presente, senão <code>stake × (
       for (const r of rows) {
         const stake = Number(r.stake_units) || 1;
         const odd = Number(r.odd) || 0;
-        const profit = r.result === 'win' ? stake * (odd - 1) : -stake;
+        // 2026-05-18 (FIN-1 audit): bug `r.result === 'win' ? ... : -stake`
+        // tratava void/push como loss (-stake). ROI por bucket artificialmente
+        // negativo → poderia disparar disable manual baseado em dado falso.
+        // Esports voids são frequentes (sweep + map-not-played) — bug amplificado.
+        const profit = r.result === 'win' ? stake * (odd - 1)
+                     : r.result === 'loss' ? -stake
+                     : 0; // void/push/outro: neutral
 
         const k1 = `${r.market}|${r.side}`;
-        if (!bySide.has(k1)) bySide.set(k1, { n: 0, wins: 0, stake: 0, profit: 0, ev_sum: 0 });
+        if (!bySide.has(k1)) bySide.set(k1, { n: 0, wins: 0, voids: 0, stake: 0, profit: 0, ev_sum: 0 });
         const a = bySide.get(k1);
-        a.n++; if (r.result === 'win') a.wins++;
+        a.n++;
+        if (r.result === 'win') a.wins++;
+        else if (r.result === 'void' || r.result === 'push') a.voids++;
         a.stake += stake; a.profit += profit;
         a.ev_sum += Number(r.ev_pct) || 0;
 
         const k2 = `${r.market}|${r.side}|${evBucket(r.ev_pct)}`;
-        if (!byEv.has(k2)) byEv.set(k2, { n: 0, wins: 0, stake: 0, profit: 0 });
+        if (!byEv.has(k2)) byEv.set(k2, { n: 0, wins: 0, voids: 0, stake: 0, profit: 0 });
         const b = byEv.get(k2);
-        b.n++; if (r.result === 'win') b.wins++;
+        b.n++;
+        if (r.result === 'win') b.wins++;
+        else if (r.result === 'void' || r.result === 'push') b.voids++;
         b.stake += stake; b.profit += profit;
 
         const k3 = `${r.market}|${r.side}|${pmBucket(r.p_model)}`;
-        if (!byPm.has(k3)) byPm.set(k3, { n: 0, wins: 0, stake: 0, profit: 0 });
+        if (!byPm.has(k3)) byPm.set(k3, { n: 0, wins: 0, voids: 0, stake: 0, profit: 0 });
         const c = byPm.get(k3);
-        c.n++; if (r.result === 'win') c.wins++;
+        c.n++;
+        if (r.result === 'win') c.wins++;
+        else if (r.result === 'void' || r.result === 'push') c.voids++;
         c.stake += stake; c.profit += profit;
       }
 
@@ -27781,8 +27807,13 @@ ROI realizado usa <code>profit_reais</code> se presente, senão <code>stake × (
           splitCols.forEach((col, i) => out[col] = parts[i]);
           out.n = v.n;
           out.wins = v.wins;
-          out.losses = v.n - v.wins;
-          out.hit_pct = +(v.wins / v.n * 100).toFixed(1);
+          out.voids = v.voids || 0;
+          // 2026-05-18 (FIN-1 fix): losses = n - wins - voids (corretamente
+          // excluindo voids). Antes: n - wins → contava voids como losses.
+          out.losses = v.n - v.wins - (v.voids || 0);
+          // hit_pct usa wins / (wins + losses) excl voids (denominador menor reflete sample real).
+          const settled = v.wins + (v.n - v.wins - (v.voids || 0));
+          out.hit_pct = settled > 0 ? +(v.wins / settled * 100).toFixed(1) : 0;
           out.roi_pct = v.stake > 0 ? +(v.profit / v.stake * 100).toFixed(1) : 0;
           out.profit_u = +v.profit.toFixed(2);
           if (v.ev_sum != null) out.avg_ev_pct = +(v.ev_sum / v.n).toFixed(1);

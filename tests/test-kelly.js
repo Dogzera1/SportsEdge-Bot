@@ -18,19 +18,19 @@ module.exports = function runTests(t) {
     t.assert(units > 0, `esperado > 0, got ${stake}`);
   });
 
-  t.test('Kelly com p inválido (>1) retorna 0.5u', () => {
+  t.test('Kelly com p inválido (>1) retorna 0u (FIN-4)', () => {
     const stake = calcKellyWithP(1.5, '2.00', 0.25);
-    t.assert(stake === '0.5u', `got ${stake}`);
+    t.assert(stake === '0u', `got ${stake} (post-FIN-4 fix: invalid input → '0u' fail-safe, era '0.5u')`);
   });
 
-  t.test('Kelly com odds <= 1 retorna 0.5u', () => {
+  t.test('Kelly com odds <= 1 retorna 0u (FIN-4)', () => {
     const stake = calcKellyWithP(0.60, '1.00', 0.25);
-    t.assert(stake === '0.5u', `got ${stake}`);
+    t.assert(stake === '0u', `got ${stake} (post-FIN-4 fix: invalid input → '0u' fail-safe, era '0.5u')`);
   });
 
-  t.test('calcKellyFraction com EV zero retorna 0.5u', () => {
+  t.test('calcKellyFraction com EV zero retorna 0u (FIN-4)', () => {
     const stake = calcKellyFraction('0%', '2.00', 0.25);
-    t.assert(stake === '0.5u', `got ${stake}`);
+    t.assert(stake === '0u', `got ${stake} (post-FIN-4 fix: invalid input → '0u' fail-safe, era '0.5u')`);
   });
 
   t.test('Fração menor resulta em stake menor ou igual (edge pequeno, sem cap)', () => {
