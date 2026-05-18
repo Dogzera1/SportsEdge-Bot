@@ -5387,7 +5387,10 @@ const _KELLY_DEFAULTS = { ALTA: 0.25, MEDIA: 1/6, BAIXA: 0.10 };
 // Multiplicador per-sport aplicado sobre _KELLY_DEFAULTS
 const _KELLY_SPORT_MULT = {
   lol: 1.00, cs: 1.00, football: 1.00,
-  tennis: 0.80,
+  // 2026-05-17: tennis 0.80→1.00. Real 30d ROI +6.3% n=157 (positivo);
+  // refit calib 22:30Z (commit dd2bb7f) brier 0.244→0.209 OOS. Conservadorismo
+  // 0.80 hist era pre-refit. Override via KELLY_TENNIS_<CONF>.
+  tennis: 1.00,
   mma: 0.70, valorant: 0.70,
   // 2026-05-04 [Audit leaks]: dota2 MT shadow agora +32,6% n=32 CLV+10,63
   // (era CLV -45% em 23/04 que motivou cut 0.70→0.20). Restore parcial
@@ -18392,10 +18395,16 @@ async function pollTennis(runOnce = false) {
                         const _isHgGoldSegment = (() => {
                           if (String(t.market).toLowerCase() !== 'handicapgames') return false;
                           const lg = String(match.league || '');
+                          // Tier 1 (Slam + Masters 1000) — sample grande, edge validado historicamente
                           const isTopTier = /grand slam|wimbledon|us open|roland|french open|australian open|atp 1000|wta 1000|masters/i.test(lg)
                             || /madrid|monte carlo|cincinnati|miami|indian wells|paris|rome|toronto|montreal|shanghai/i.test(lg);
+                          // 2026-05-17: expanded to ATP 250 events com real ROI validado (audit stakes):
+                          // Geneva, Estoril, Marrakech, Bastad, Umag, Stockholm, Sofia, Antwerp.
+                          // Real tennis 30d ROI +6.3% n=157 justifica boost cirúrgico nesses ATP 250.
+                          // Mantém min EV 15% pra dispatch só em high-conviction picks.
+                          const isMidTier = /\bgeneva\b|\bestoril\b|\bmarrakech\b|\bbastad\b|\bumag\b|\bstockholm\b|\bsofia\b|\bantwerp\b/i.test(lg);
                           const minEvForBoost = parseFloat(process.env.TENNIS_HG_BOOST_MIN_EV ?? '15');
-                          return isTopTier && Number.isFinite(t.ev) && t.ev >= minEvForBoost;
+                          return (isTopTier || isMidTier) && Number.isFinite(t.ev) && t.ev >= minEvForBoost;
                         })();
                         const _kellyFracForTip = _isHgGoldSegment
                           ? parseFloat(process.env.TENNIS_HG_GOLD_KELLY_FRAC ?? '0.15')
