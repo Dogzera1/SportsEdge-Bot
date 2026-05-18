@@ -3330,6 +3330,17 @@ async function runAutoAnalysis() {
             continue;
           }
           const _pickSideLs = norm(tipTeam) === norm(match.team1) ? 't1' : 't2';
+          // 2026-05-18 (P2 pendency): gates_evaluated symmetry com MT scanners
+          // — ML callsites diretas em serverPost('/record-tip') não passavam por
+          // shouldSendMarketTip, então gate_state ficava sem forensics. Snapshot
+          // dos gates inline ML que passaram até este ponto (best-effort) —
+          // shape compat com lib/market-tip-processor.shouldSendMarketTip output.
+          const _mlGatesLolLs = [
+            { gate: 'league_allowed', passed: true, value: match.league || null, threshold: 'isLeagueBlocked(lol,ML)=false' },
+            { gate: 'dedup_clear', passed: true, value: matchKey, threshold: 'analyzedMatches + lolSeriesLastTip' },
+            { gate: 'kelly_positive', passed: true, value: tipStakeAdj, threshold: '> 0u after risk_manager' },
+            { gate: 'ml_emission', passed: true, value: result.debugVars?.source || 'ml_only', threshold: 'modelPPick available' },
+          ];
           const rec = await serverPost('/record-tip', {
             matchId: canonicalMatchId('esports', String(match.id) + mapTag), eventName: match.league,
             p1: match.team1, p2: match.team2, tipParticipant: tipTeam,
@@ -3349,6 +3360,7 @@ async function runAutoAnalysis() {
             mlScore: Number.isFinite(result.mlScore) ? +result.mlScore.toFixed(2) : null,
             factorCount: (result.factorActive || []).length || null,
             emissionSource: result.debugVars?.source || 'ml_only',
+            gates_evaluated: _mlGatesLolLs,
           }, 'lol');
 
           // Aborta se DB recusou (erro ou duplicata já registrada)
@@ -3505,6 +3517,15 @@ async function runAutoAnalysis() {
                   log('INFO', 'AUTO', `[BLOCK] lol HANDICAP ${match.league} — suprimido`);
                   break;
                 }
+                // 2026-05-18 (P2 pendency): gates_evaluated forensics symmetry
+                // — handicap path tem gates inline próprios. Snapshot best-effort
+                // dos checks que passaram. Compat com shouldSendMarketTip shape.
+                const _mlGatesLolH = [
+                  { gate: 'h_ev_min', passed: true, value: +hEV.toFixed(1), threshold: 5.0 },
+                  { gate: 'h_odd_min', passed: true, value: hOdd, threshold: 1.30 },
+                  { gate: 'h_odd_max', passed: true, value: hOdd, threshold: 4.00 },
+                  { gate: 'league_allowed', passed: true, value: match.league || null, threshold: 'isLeagueBlocked(lol,ML)=false' },
+                ];
                 await serverPost('/record-tip', {
                   matchId: canonicalMatchId('esports', String(match.id) + '_H'), eventName: match.league,
                   p1: match.team1, p2: match.team2, tipParticipant: favTeam,
@@ -3512,6 +3533,7 @@ async function runAutoAnalysis() {
                   confidence: 'BAIXA', isLive: true, market_type: 'HANDICAP',
                   sport: 'lol',
                   isShadow: isBucketShadowed('lol') ? 1 : 0,
+                  gates_evaluated: _mlGatesLolH,
                 }, 'lol');
 
                 if (!isBucketShadowed('lol')) {
@@ -3808,6 +3830,17 @@ async function runAutoAnalysis() {
               continue;
             }
             const _pickSideUp = norm(tipTeam) === norm(match.team1) ? 't1' : 't2';
+            // 2026-05-18 (P2 pendency): gates_evaluated forensics symmetry pra
+            // ML upcoming. Captura gates inline que passaram (CLV mult, risk
+            // manager, kelly positive, tier policy, league). Shape compat com
+            // shouldSendMarketTip output.
+            const _mlGatesLolUp = [
+              { gate: 'pregame_tier2_allowed', passed: true, value: _lolTier1Up ? 'tier1' : 'tier2_other', threshold: 'ESPORTS_PREGAME_TIER2_DISABLE not forcing reject' },
+              { gate: 'kelly_positive', passed: true, value: tipStake, threshold: '> 0u' },
+              { gate: 'clv_mult_ok', passed: true, value: _clvAdj?.mult ?? 1.0, threshold: '> 0 (shadow at 0)' },
+              { gate: 'risk_manager_ok', passed: true, value: riskAdjUp.units, threshold: 'cross-sport risk OK' },
+              { gate: 'league_allowed', passed: true, value: match.league || null, threshold: 'isLeagueBlocked(lol,ML)=false' },
+            ];
             const recUp = await serverPost('/record-tip', {
               matchId: canonicalMatchId('esports', match.id), eventName: match.league,
               p1: match.team1, p2: match.team2, tipParticipant: tipTeam,
@@ -3822,6 +3855,7 @@ async function runAutoAnalysis() {
               sport: 'lol',
               isShadow: isBucketShadowed('lol') ? 1 : 0,
               emissionSource: result.debugVars?.source || 'ml_only',
+              gates_evaluated: _mlGatesLolUp,
             }, 'lol');
 
             if (!recUp?.tipId) {
