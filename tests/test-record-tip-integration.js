@@ -574,4 +574,70 @@ module.exports = async function runTests(t) {
       try { fs.unlinkSync(tmpDbQ + '-wal'); } catch (_) {}
     }
   });
+
+  // ─── match_stop_loss: 2026-05-18 P4 TDD pending coverage ───────────────
+  // server.js L25597-25627: env MATCH_STOP_LOSS_UNITS > 0 + cumulative loss
+  // ≥ threshold em mesma série (Bo3/Bo5) últimas 6h → _emitSkip('match_stop_loss').
+  // Test: env override = 2 units. Seed 2 prior tips loss em mesmo baseMatchId
+  // (cada 1u = 2u total). POST nova tip → expect skipped reason=match_stop_loss.
+  // is_shadow=0 obrigatório (gate só conta perdas reais).
+  await t.test('match_stop_loss: cumulative loss em série >= threshold → rejected', async () => {
+    const Database = require('better-sqlite3');
+    const tmpDbS = path.join(os.tmpdir(), `test-rt-stoploss-${Date.now()}.db`);
+    const portS = 30000 + Math.floor(Math.random() * 10000);
+    const envS = { ...env, DB_PATH: tmpDbS, PORT: String(portS), MATCH_STOP_LOSS_UNITS: '2' };
+    const procS = spawn('node', ['server.js'], { env: envS, cwd: REPO_ROOT, stdio: ['ignore', 'pipe', 'pipe'] });
+    procS.stdout.on('data', () => {});
+    procS.stderr.on('data', () => {});
+    try {
+      await waitHealth(portS, HEALTH_TIMEOUT_MS);
+      const baseMatchId = 'test_stoploss_' + Date.now();
+
+      // Seed 2 prior LOSSES (cada 1u stake) no MESMO base series. Total 2u loss
+      // ≥ threshold 2u → gate dispara. is_shadow=0 obrigatório (loss conta real).
+      // sent_at recente garante dentro da janela 6h do gate.
+      //
+      // IMPORTANTE: usar pair DIFERENTE nas seed rows pra evitar trigger do gate
+      // pair-level `recent_loss_same_pair` (server.js:25243), que precede o
+      // match_stop_loss. Match_stop_loss usa SOMENTE match_id LIKE — pair
+      // irrelevante. Em prod o pair-level dispara primeiro quando aplicável,
+      // match_stop_loss cobre o case "pair diferente mesma série" (ex: trade
+      // de team1/team2 entre maps Bo5 raramente — mas semanticamente o gate
+      // captura cumulative loss na série independent do pair).
+      const seedDb = new Database(tmpDbS, { timeout: 5000 });
+      try {
+        const cols = seedDb.prepare('PRAGMA table_info(tips)').all();
+        t.assert(cols.length > 0, `tips table should exist post-boot, got ${cols.length} cols`);
+        const insertStmt = `INSERT OR IGNORE INTO tips
+          (sport, match_id, tip_participant, participant1, participant2, odds, ev, stake, confidence, result, sent_at, is_shadow, archived)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now', '-30 minutes'), 0, 0)`;
+        const r1 = seedDb.prepare(insertStmt).run('dota2', baseMatchId + '_map1', 'PriorAlpha', 'PriorAlpha', 'PriorBeta', 1.85, 8.5, '1u', 'MEDIA', 'loss');
+        const r2 = seedDb.prepare(insertStmt).run('dota2', baseMatchId + '_map2', 'PriorBeta', 'PriorAlpha', 'PriorBeta', 2.10, 6.2, '1u', 'MEDIA', 'loss');
+        t.assert(r1.changes === 1 && r2.changes === 1, `seed should insert 2 rows, got r1=${r1.changes} r2=${r2.changes}`);
+      } finally {
+        seedDb.close();
+      }
+
+      // POST new tip same baseMatchId, DIFFERENT pair (pra evitar recent_loss_same_pair)
+      const r = await httpJson(portS, 'POST', '/record-tip?sport=dota2', {
+        matchId: baseMatchId + '_map3',
+        eventName: 'Stop Loss Test League',
+        p1: 'NewTeamA',
+        p2: 'NewTeamB',
+        tipParticipant: 'NewTeamA',
+        odds: 1.85,
+        ev: 8.5,
+      }, { 'x-admin-key': 'test' });
+      t.assert(r.status === 200, `expected 200 (skipped), got ${r.status} body=${JSON.stringify(r.body)}`);
+      t.assert(r.body.skipped === true, `expected skipped=true, got ${JSON.stringify(r.body)}`);
+      t.assert(r.body.reason === 'match_stop_loss', `expected reason=match_stop_loss, got ${r.body.reason}`);
+      t.assert(r.body.units_lost >= 2.0, `expected units_lost >= 2.0, got ${r.body.units_lost}`);
+      t.assert(r.body.threshold === 2, `expected threshold=2, got ${r.body.threshold}`);
+    } finally {
+      try { procS.kill(); } catch (_) {}
+      try { fs.unlinkSync(tmpDbS); } catch (_) {}
+      try { fs.unlinkSync(tmpDbS + '-shm'); } catch (_) {}
+      try { fs.unlinkSync(tmpDbS + '-wal'); } catch (_) {}
+    }
+  });
 };
