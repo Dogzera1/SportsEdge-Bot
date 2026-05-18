@@ -9531,39 +9531,47 @@ function buildEnrichmentSection(match, enrich) {
 // Fire-and-forget: não bloqueia loop principal. Gate: env LOL_AI_SHADOW=true
 // + server-side <SPORT>_AI_SHADOW=true (defesa em profundidade).
 // DM Telegram suprimida automaticamente (is_shadow=1 já dedupa em dispatch).
-async function _runLolAiShadow(ctx) {
+// 2026-05-18: refactor LoL-only → generic _runAiShadow(sport, ctx).
+// Suporta multi-sport A/B test (LoL primeiro, MMA next). Per-sport overrides
+// via opts: canonicalSport (matchId), subPrefs (subscribedUsers gating),
+// dmTokenEnv (Telegram bot token), displayName, eventName resolver.
+// _runLolAiShadow + outros wrappers chamam essa função com config sport-specific.
+async function _runAiShadow(sport, ctx, opts = {}) {
+  const sportU = String(sport).toUpperCase();
+  const TAG = `AI-SHADOW-${sportU}`;
   const { match, mlResult, oddsToUse, prompt, hasLiveStats } = ctx;
+  const canonicalSport = opts.canonicalSport || (sport === 'lol' ? 'esports' : sport);
+  const subPrefs = opts.subPrefs || [sport]; // prefs that get DM
+  const dmTokenEnv = opts.dmTokenEnv || `TELEGRAM_TOKEN_${sport === 'lol' ? 'ESPORTS' : sportU}`;
+  const displayName = opts.displayName || sportU;
+  const eventName = opts.eventName || match.league || match.event || match.tournament || '';
   try {
     if (!prompt || !mlResult || !oddsToUse) {
-      log('WARN', 'AI-SHADOW', `entry guard fail: prompt=${!!prompt} mlR=${!!mlResult} odd=${!!oddsToUse} match=${match?.team1}`);
+      log('WARN', TAG, `entry guard fail: prompt=${!!prompt} mlR=${!!mlResult} odd=${!!oddsToUse} match=${match?.team1}`);
       return;
     }
-    log('INFO', 'AI-SHADOW', `entry: ${match.team1} vs ${match.team2} promptLen=${prompt.length}`);
+    log('INFO', TAG, `entry: ${match.team1} vs ${match.team2} promptLen=${prompt.length}`);
     const resp = await serverPost('/claude', {
       model: 'deepseek-chat',
       max_tokens: 600,
       messages: [{ role: 'user', content: prompt }],
-      sport: 'lol',
+      sport,
       shadowBypass: true,
     });
-    log('INFO', 'AI-SHADOW', `claude resp: blocked=${resp?.blocked} status=${resp?.__status} provider=${resp?.provider} hasContent=${!!resp?.content?.[0]?.text} err=${resp?.error || '-'}`);
+    log('INFO', TAG, `claude resp: blocked=${resp?.blocked} status=${resp?.__status} provider=${resp?.provider} hasContent=${!!resp?.content?.[0]?.text} err=${resp?.error || '-'}`);
     const text = resp?.content?.map(b => b.text || '').join('') || '';
     if (!text) {
-      try { _metrics.incr('ai_shadow_no_text', { sport: 'lol' }); } catch (_) {}
+      try { _metrics.incr('ai_shadow_no_text', { sport }); } catch (_) {}
       return;
     }
     const tipResult = _parseTipMl(text);
     if (!tipResult) {
-      // 2026-05-14: distingue "IA disse SEM_TIP" (resposta válida) vs "format
-      // bug" (parser quebrado). Audit log mostrou 2/3 calls c/ SEM_TIP marcados
-      // erradamente como parse_fail — pollui research counters + log noise.
-      // Pattern espelha o gate de IA-PARSE em path normal (bot.js:10289).
       const _isNoTipResp = /(sem[\s_-]?edge|sem[\s_-]?tip|no[\s_-]?edge|no[\s_-]?value|no[\s_-]?bet|skip|pass)/i.test(text);
       if (_isNoTipResp) {
-        try { _metrics.incr('ai_shadow_no_tip', { sport: 'lol' }); } catch (_) {}
+        try { _metrics.incr('ai_shadow_no_tip', { sport }); } catch (_) {}
       } else {
-        log('INFO', 'AI-SHADOW', `parse fail snippet="${text.slice(0,120).replace(/\n/g,' ')}"`);
-        try { _metrics.incr('ai_shadow_no_parse', { sport: 'lol' }); } catch (_) {}
+        log('INFO', TAG, `parse fail snippet="${text.slice(0,120).replace(/\n/g,' ')}"`);
+        try { _metrics.incr('ai_shadow_no_parse', { sport }); } catch (_) {}
       }
       return;
     }
@@ -9575,32 +9583,27 @@ async function _runLolAiShadow(ctx) {
     const tipConf = tipConfRaw.startsWith('ALT') ? CONF.ALTA
       : tipConfRaw.startsWith('BAI') ? CONF.BAIXA : CONF.MEDIA;
     if (!tipTeam || !Number.isFinite(tipOdd) || tipOdd < 1.01) {
-      try { _metrics.incr('ai_shadow_invalid', { sport: 'lol' }); } catch (_) {}
+      try { _metrics.incr('ai_shadow_invalid', { sport }); } catch (_) {}
       return;
     }
-    // 2026-05-15: AI tips com EV<0 = DeepSeek alucinando edge em pick com odds
-    // piores que sua propria p_model. Polui A/B ROI ml-only vs ai-added (caso
-    // Francesinhas @ 1.22 EV=-6.1% conf=ALTA). modelPPick continua disponivel
-    // pra calib refit via outcomes — não dependemos do shadow tip pra isso.
     if (Number.isFinite(tipEvNum) && tipEvNum < 0) {
-      try { _metrics.incr('ai_shadow_neg_ev', { sport: 'lol' }); } catch (_) {}
-      log('INFO', 'AI-SHADOW', `skip ${tipTeam} @ ${tipOdd} EV=${tipEvNum}% conf=${tipConfRaw} (EV<0 — AI hallucinated edge)`);
+      try { _metrics.incr('ai_shadow_neg_ev', { sport }); } catch (_) {}
+      log('INFO', TAG, `skip ${tipTeam} @ ${tipOdd} EV=${tipEvNum}% conf=${tipConfRaw} (EV<0 — AI hallucinated edge)`);
       return;
     }
     const pickSide = norm(tipTeam) === norm(match.team1) ? 't1'
       : norm(tipTeam) === norm(match.team2) ? 't2'
       : (norm(match.team1).includes(norm(tipTeam)) ? 't1' : 't2');
     const modelPPick = pickSide === 't1' ? mlResult.modelP1 : mlResult.modelP2;
-    // 2026-05-18: LOL_AI_REAL=true promove path AI shadow pra real tips.
-    // A/B comparison 14d revelou AI ROI +15.65% n=61 hit 73.8% CLV -0.05pp
-    // vs no-AI -7.89% n=28 hit 50% CLV -7.65pp (memory project_lol_ai_vs_noai_comparison).
+    // <SPORT>_AI_REAL=true promove path AI shadow pra real tips.
     // Default OFF — set explícito reativa real emit + DM dispatch.
-    const _lolAiReal = /^(1|true|yes)$/i.test(String(process.env.LOL_AI_REAL ?? ''));
-    const _emissionTag = _lolAiReal ? 'lol_ai_real' : 'lol_ai_shadow';
-    const _reasonTag = _lolAiReal ? 'AI ML LoL real (DeepSeek)' : 'AI shadow POC (LOL_AI_SHADOW)';
+    const _aiRealEnv = process.env[`${sportU}_AI_REAL`];
+    const _aiReal = /^(1|true|yes)$/i.test(String(_aiRealEnv ?? ''));
+    const _emissionTag = _aiReal ? `${sport}_ai_real` : `${sport}_ai_shadow`;
+    const _reasonTag = _aiReal ? `AI ML ${displayName} real (DeepSeek)` : `AI shadow POC (${sportU}_AI_SHADOW)`;
     const tipResp = await serverPost('/record-tip', {
-      matchId: canonicalMatchId('esports', String(match.id)),
-      eventName: match.league,
+      matchId: canonicalMatchId(canonicalSport, String(match.id)),
+      eventName,
       p1: match.team1, p2: match.team2,
       tipParticipant: tipTeam,
       odds: tipOdd, ev: Number.isFinite(tipEvNum) ? tipEvNum : 0,
@@ -9610,48 +9613,73 @@ async function _runLolAiShadow(ctx) {
       modelPPick,
       tipReason: _reasonTag,
       pickSide,
-      sport: 'lol',
-      isShadow: _lolAiReal ? 0 : 1,
+      sport,
+      isShadow: _aiReal ? 0 : 1,
       emissionSource: _emissionTag,
       mlScore: Number.isFinite(mlResult.score) ? +mlResult.score.toFixed(2) : null,
       factorCount: (mlResult.factorActive || []).length || null,
-    }, 'lol');
-    try { _metrics.incr(_lolAiReal ? 'ai_real_emit' : 'ai_shadow_emit', { sport: 'lol' }); } catch (_) {}
+    }, sport);
+    try { _metrics.incr(_aiReal ? 'ai_real_emit' : 'ai_shadow_emit', { sport }); } catch (_) {}
     // DM dispatch: só quando real path E record-tip retornou tipId E não foi auto-shadowed
     // server-side (autoShadowed=1 quando gate como ml_bucket_blocked rota pra shadow).
-    if (_lolAiReal && tipResp?.tipId && tipResp?.isShadow === 0 && tipResp?.autoShadowed !== 1) {
+    const REAL_TAG = `AI-REAL-${sportU}`;
+    if (_aiReal && tipResp?.tipId && tipResp?.isShadow === 0 && tipResp?.autoShadowed !== 1) {
       try {
-        const _aiToken = process.env.TELEGRAM_TOKEN_ESPORTS;
+        const _aiToken = process.env[dmTokenEnv];
         if (_aiToken && subscribedUsers.size > 0) {
           const _liveTag = hasLiveStats ? ' [AO VIVO]' : '';
           const _confEmoji = tipConf === CONF.ALTA ? '🟢' : tipConf === CONF.BAIXA ? '🔴' : '🟡';
-          const _aiMsg = `🤖 *TIP LoL AI (DeepSeek)${_liveTag}*\n` +
-            `*${match.team1}* vs *${match.team2}*\n📋 ${match.league}\n` +
+          const _aiMsg = `🤖 *TIP ${displayName} AI (DeepSeek)${_liveTag}*\n` +
+            `*${match.team1}* vs *${match.team2}*\n📋 ${eventName}\n` +
             `\n🎯 Aposta: *${tipTeam}* ML @ *${tipOdd}*\n` +
             `📈 EV: *+${tipEvNum.toFixed(1)}%*\n💵 Stake: *${tipStake}*\n` +
             `${_confEmoji} Confiança: *${tipConf}*\n` +
-            `🧠 Análise AI (LOL_AI_REAL)\n\n` +
+            `🧠 Análise AI (${sportU}_AI_REAL)\n\n` +
             `⚠️ _Aposte com responsabilidade._`;
           let _dmsSent = 0;
           for (const [userId, prefs] of subscribedUsers) {
-            if (prefs && (prefs.has('lol') || prefs.has('esports'))) {
+            if (prefs && subPrefs.some(p => prefs.has(p))) {
               sendDM(_aiToken, userId, _aiMsg)
                 .then(() => { _dmsSent++; })
                 .catch(e => { if (e.message?.includes('403')) subscribedUsers.delete(userId); });
             }
           }
-          log('INFO', 'AI-REAL', `lol AI REAL emit: ${tipTeam} @ ${tipOdd} EV=${tipEvNum}% conf=${tipConf} | tip_id=${tipResp.tipId} | DMs dispatched`);
+          log('INFO', REAL_TAG, `${sport} AI REAL emit: ${tipTeam} @ ${tipOdd} EV=${tipEvNum}% conf=${tipConf} | tip_id=${tipResp.tipId} | DMs dispatched`);
         } else {
-          log('INFO', 'AI-REAL', `lol AI REAL tip recorded tip_id=${tipResp.tipId} (token missing or 0 subscribers — no DM)`);
+          log('INFO', REAL_TAG, `${sport} AI REAL tip recorded tip_id=${tipResp.tipId} (token missing or 0 subscribers — no DM)`);
         }
-      } catch (e) { log('WARN', 'AI-REAL', `DM dispatch err: ${e?.message || e}`); }
+      } catch (e) { log('WARN', REAL_TAG, `DM dispatch err: ${e?.message || e}`); }
     } else {
-      log('INFO', 'AI-SHADOW', `lol AI tip: ${tipTeam} @ ${tipOdd} EV=${tipEvNum}% conf=${tipConf} (is_shadow=${_lolAiReal ? 0 : 1}, autoShadowed=${tipResp?.autoShadowed||0})`);
+      log('INFO', TAG, `${sport} AI tip: ${tipTeam} @ ${tipOdd} EV=${tipEvNum}% conf=${tipConf} (is_shadow=${_aiReal ? 0 : 1}, autoShadowed=${tipResp?.autoShadowed||0})`);
     }
   } catch (e) {
-    try { log('WARN', 'AI-SHADOW', `lol shadow err: ${e?.message || e}`); } catch (_) {}
-    try { _metrics.incr('ai_shadow_exception', { sport: 'lol' }); } catch (_) {}
+    try { log('WARN', TAG, `${sport} shadow err: ${e?.message || e}`); } catch (_) {}
+    try { _metrics.incr('ai_shadow_exception', { sport }); } catch (_) {}
   }
+}
+
+// LoL wrapper — backward compat. Mantém call site em bot.js:10429 inalterado.
+async function _runLolAiShadow(ctx) {
+  return _runAiShadow('lol', ctx, {
+    canonicalSport: 'esports',
+    subPrefs: ['lol', 'esports'],
+    dmTokenEnv: 'TELEGRAM_TOKEN_ESPORTS',
+    displayName: 'LoL',
+  });
+}
+
+// MMA wrapper — 2026-05-18: A/B test infrastructure pra MMA.
+// MMA já usa AI no path principal (bot.js:17424 serverPost /claude sport:mma).
+// Esse shadow POC roda EM PARALELO com gates mais soltos pra comparar
+// "AI puro" vs "AI + heurísticas/divergence/override do main path".
+// Gate: MMA_AI_SHADOW=true (research) | MMA_AI_REAL=true (promove DM dispatch).
+async function _runMmaAiShadow(ctx) {
+  return _runAiShadow('mma', ctx, {
+    canonicalSport: 'mma',
+    subPrefs: ['mma'],
+    dmTokenEnv: 'TELEGRAM_TOKEN_MMA',
+    displayName: 'MMA',
+  });
 }
 
 async function autoAnalyzeMatch(token, match) {
@@ -17408,6 +17436,20 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
         const espnTag = espn ? ` (ESPN card: ${weightClass}, ${rounds}R)` : hasEspnRecord ? ` (ESPN athlete: ${rec1||'?'} | ${rec2||'?'})` : ' (sem dados ESPN)';
         log('INFO', 'AUTO-MMA', `Analisando: ${fight.team1} vs ${fight.team2}${espnTag}`);
         analyzedMma.set(key, { ts: now, tipSent: false });
+
+        // 2026-05-18: MMA AI shadow POC (A/B mirror do LoL).
+        // Dispara em paralelo com main flow MMA — main usa AI + heurísticas/divergence/
+        // override; shadow usa AI puro sem extra gates. Compara qual approach gera ROI
+        // melhor. Gate: MMA_AI_SHADOW=true (research) | MMA_AI_REAL=true (promove).
+        // Fire-and-forget — não bloqueia loop. Memory project_lol_ai_vs_noai_comparison
+        // mostrou AI +15.65% vs no-AI -7.89% LoL; MMA shadow d30 -54% pode beneficiar.
+        if (/^(1|true|yes)$/i.test(String(process.env.MMA_AI_SHADOW || ''))) {
+          log('INFO', 'AI-SHADOW-MMA', `trigger fire: ${fight.team1} vs ${fight.team2}`);
+          setImmediate(() => {
+            _runMmaAiShadow({ match: fight, mlResult: mlResultMma, oddsToUse: o, prompt, hasLiveStats: false })
+              .catch(e => { try { log('WARN', 'AI-SHADOW-MMA', `dispatch err: ${e?.message || e}`); } catch (_) {} });
+          });
+        }
 
         // Hybrid path: se trained model já deu tip forte, pula IA (economiza cap + evita SEM_EDGE).
         let text = '';
