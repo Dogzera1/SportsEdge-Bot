@@ -7410,12 +7410,23 @@ const server = http.createServer(async (req, res) => {
     // intenção). Map sport→bucket esports (cs↔cs2 / lol↔esports) considerado.
     let lastTipBySport = {};
     try {
+      // 2026-05-18: include `league` do último tip per sport pra threshold
+      // tier-aware (audit log 2026-05-18: sport_silent_lol 51h gerado por
+      // janela tier2/tier3 sem matches tier1 — false positive). Pre-existing
+      // GROUP BY MAX wrapped em JOIN pra preservar league da row max.
       const rows = db.prepare(`
-        SELECT sport, MAX(sent_at) AS last_sent
-        FROM tips
-        WHERE COALESCE(is_shadow, 0) = 0
-          AND COALESCE(archived, 0) = 0
-        GROUP BY sport
+        SELECT t.sport, j.last_sent, t.league AS last_league
+        FROM tips t
+        JOIN (
+          SELECT sport, MAX(sent_at) AS last_sent
+          FROM tips
+          WHERE COALESCE(is_shadow, 0) = 0
+            AND COALESCE(archived, 0) = 0
+          GROUP BY sport
+        ) j ON t.sport = j.sport AND t.sent_at = j.last_sent
+        WHERE COALESCE(t.is_shadow, 0) = 0
+          AND COALESCE(t.archived, 0) = 0
+        GROUP BY t.sport
       `).all();
       // 2026-05-10: shadow tips recentes (<6h) indicam ML_AUTO_SHADOW ativo —
       // sistema gera tips mas as roteia pra shadow (study DB) em vez de real.
@@ -7436,12 +7447,50 @@ const server = http.createServer(async (req, res) => {
       // Defaults derivados de cobertura típica: darts/snooker 96h (1 PDC ProTour stop),
       // tabletennis 48h, demais usam STALE_HOURS global.
       const _STALE_HOURS_DEFAULTS = { darts: 96, snooker: 96, tabletennis: 48, mma: 72 };
-      const _getStaleHoursFor = (sp) => {
+      // 2026-05-18 (log audit followup): tier-aware override pra esports + tennis.
+      // Audit log 2026-05-18 mostrou sport_silent_lol 51h c/ janela só tier2/tier3
+      // (LCK CL/EWC) — false positive (liquidez/cobertura tier3 é esparsa por design).
+      // Classifica tier do ÚLTIMO tip real do sport como proxy pra "qual segmento
+      // está ativo agora". Quando tier1 silent 24h+ = real concern; tier3 silent
+      // 72h+ ainda alerta. Hierarchy: per-(sport,tier) env → per-sport env →
+      // tier default → sport default → global.
+      // Tier keys derivados de lib/tier-classifier (output varia per sport):
+      //   esports: tier1/tier2/tier3/other
+      //   tennis:  atp_main/atp_challenger/wta_main/wta125k/itf
+      //   football: top5_uefa/br_serie_a/uefa/continental/regional
+      const _STALE_HOURS_BY_TIER_DEFAULTS = {
+        lol:      { tier1: 24, tier2: 48, tier3: 72, other: 96 },
+        cs:       { tier1: 24, tier2: 48, tier3: 72, other: 96 },
+        dota2:    { tier1: 24, tier2: 48, tier3: 72, other: 96 },
+        valorant: { tier1: 24, tier2: 48, tier3: 96, other: 120 },
+        tennis:   { atp_main: 12, atp_challenger: 48, wta_main: 12, wta125k: 48, itf: 96 },
+        football: { top5_uefa: 12, br_serie_a: 24, uefa: 24, continental: 48, regional: 72 },
+      };
+      const _tierOf = (sp, lg) => {
+        if (!sp || !lg) return null;
+        try {
+          const { classifyTierString } = require('./lib/tier-classifier');
+          return classifyTierString(sp, lg) || null;
+        } catch (_) { return null; }
+      };
+      const _getStaleHoursFor = (sp, lastLeague) => {
         const k = String(sp || '').toUpperCase();
+        const tier = _tierOf(sp, lastLeague);
+        if (tier) {
+          const envTier = process.env[`HEALTH_LAST_TIP_STALE_HOURS_${k}_${tier.toUpperCase()}`];
+          if (envTier != null && envTier !== '') {
+            const n = parseInt(envTier, 10);
+            if (Number.isFinite(n) && n > 0) return n;
+          }
+        }
         const envVal = process.env[`HEALTH_LAST_TIP_STALE_HOURS_${k}`];
         if (envVal != null && envVal !== '') {
           const n = parseInt(envVal, 10);
           if (Number.isFinite(n) && n > 0) return n;
+        }
+        if (tier) {
+          const tierDef = _STALE_HOURS_BY_TIER_DEFAULTS[String(sp || '').toLowerCase()]?.[tier];
+          if (Number.isFinite(tierDef) && tierDef > 0) return tierDef;
         }
         return _STALE_HOURS_DEFAULTS[String(sp || '').toLowerCase()] || STALE_HOURS;
       };
@@ -7473,8 +7522,9 @@ const server = http.createServer(async (req, res) => {
       };
       for (const r of rows) {
         const ageH = r.last_sent ? (Date.now() - new Date(r.last_sent + 'Z').getTime()) / 3600000 : null;
-        lastTipBySport[r.sport] = { last_sent: r.last_sent, age_h: ageH != null ? +ageH.toFixed(1) : null };
-        const sportThreshold = _getStaleHoursFor(r.sport);
+        const _tier = _tierOf(r.sport, r.last_league);
+        lastTipBySport[r.sport] = { last_sent: r.last_sent, age_h: ageH != null ? +ageH.toFixed(1) : null, last_league: r.last_league || null, last_tier: _tier };
+        const sportThreshold = _getStaleHoursFor(r.sport, r.last_league);
         if (ageH != null && ageH > sportThreshold) {
           // Skipa alert se ML disabled + MT não promovido (silêncio intencional).
           // Se MT promovido mas ainda silent, mantém alert (MT pipeline pode estar travado).
