@@ -26235,6 +26235,85 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   setInterval(_wrapCron('tennis_mt_readiness_watch', runTennisMtReadinessWatch), 12 * 60 * 60 * 1000);
   setTimeout(() => runTennisMtReadinessWatch().catch(() => {}), 100 * 60 * 1000);
 
+  // Tennis MT REAL health watch — DM admin se métricas degradarem.
+  // 2026-05-18: tennis MT real retomou emit em ~14/05 (ATP Geneva/Hamburg, WTA
+  // Rabat/Strasbourg, etc — HG+TG markets). Audit revelou amostra n=8 settled,
+  // ROI +2.4% MAS CLV -4.71% (sinal de regime mismatch). User pediu watch
+  // P2-compliant: warn-only DM, sem auto-action.
+  //
+  // Triggers (cada um independente):
+  //   • avg CLV ≤-10% após n≥10 settled
+  //   • loss streak ≥5 consecutivas
+  //   • ROI ≤-15% após n≥15 settled
+  //
+  // Cooldown 24h por trigger pra não spam. Diferente de tennis_mt_readiness_watch
+  // (que monitora promote signal); este monitora degradação pós-emit.
+  //
+  // Opt-out: TENNIS_MT_REAL_HEALTH_WATCH=false.
+  // Overrides: TENNIS_MT_HEALTH_CLV_THRESHOLD (default -10),
+  //            TENNIS_MT_HEALTH_LOSS_STREAK (default 5),
+  //            TENNIS_MT_HEALTH_ROI_THRESHOLD (default -15).
+  const _tennisMtHealthDmAtMs = { clv: 0, streak: 0, roi: 0 };
+  async function runTennisMtRealHealthWatch() {
+    if (/^(0|false|no)$/i.test(String(process.env.TENNIS_MT_REAL_HEALTH_WATCH ?? 'true'))) return;
+    if (isMemCritical()) return;
+    try {
+      const clvThr = parseFloat(process.env.TENNIS_MT_HEALTH_CLV_THRESHOLD ?? '-10');
+      const streakThr = parseInt(process.env.TENNIS_MT_HEALTH_LOSS_STREAK ?? '5', 10);
+      const roiThr = parseFloat(process.env.TENNIS_MT_HEALTH_ROI_THRESHOLD ?? '-15');
+      const cooldownMs = 24 * 60 * 60 * 1000;
+      const rows = db.prepare(`
+        SELECT id, result, profit_reais, stake_reais, odds, clv_odds, sent_at
+        FROM tips
+        WHERE sport='tennis'
+          AND COALESCE(is_shadow,0)=0
+          AND COALESCE(archived,0)=0
+          AND UPPER(market_type) IN ('HANDICAP_GAMES','TOTAL_GAMES')
+          AND sent_at >= datetime('now','-14 days')
+        ORDER BY sent_at DESC
+      `).all();
+      const settled = rows.filter(r => r.result === 'win' || r.result === 'loss' || r.result === 'void');
+      const nonVoid = settled.filter(r => r.result !== 'void');
+      const stake = nonVoid.reduce((s,r) => s + (Number(r.stake_reais)||0), 0);
+      const profit = nonVoid.reduce((s,r) => s + (Number(r.profit_reais)||0), 0);
+      const roi = stake > 0 ? (100*profit/stake) : 0;
+      const clvSamples = nonVoid.filter(r => r.clv_odds && Number.isFinite(Number(r.clv_odds)) && Number(r.odds));
+      const avgClv = clvSamples.length
+        ? clvSamples.reduce((s,r) => s + ((Number(r.clv_odds)-Number(r.odds))/Number(r.odds))*100, 0) / clvSamples.length
+        : null;
+      // Loss streak: contar consecutivas a partir da mais recente settled
+      let lossStreak = 0;
+      for (const r of nonVoid) { if (r.result === 'loss') lossStreak++; else break; }
+      const triggers = [];
+      const now = Date.now();
+      if (avgClv !== null && avgClv <= clvThr && clvSamples.length >= 10 && (now - _tennisMtHealthDmAtMs.clv) >= cooldownMs) {
+        triggers.push({ key: 'clv', msg: `avg CLV=${avgClv.toFixed(2)}% (≤${clvThr}% threshold, n=${clvSamples.length})` });
+        _tennisMtHealthDmAtMs.clv = now;
+      }
+      if (lossStreak >= streakThr && (now - _tennisMtHealthDmAtMs.streak) >= cooldownMs) {
+        triggers.push({ key: 'streak', msg: `loss streak=${lossStreak} consecutivas (≥${streakThr} threshold)` });
+        _tennisMtHealthDmAtMs.streak = now;
+      }
+      if (roi <= roiThr && nonVoid.length >= 15 && (now - _tennisMtHealthDmAtMs.roi) >= cooldownMs) {
+        triggers.push({ key: 'roi', msg: `ROI=${roi.toFixed(2)}% (≤${roiThr}% threshold, n=${nonVoid.length})` });
+        _tennisMtHealthDmAtMs.roi = now;
+      }
+      if (!triggers.length) {
+        log('INFO', 'TENNIS-MT-HEALTH', `n=${rows.length} settled=${nonVoid.length} ROI=${roi.toFixed(2)}% CLV=${avgClv?.toFixed?.(2) ?? '-'}% streak=${lossStreak} — healthy`);
+        return;
+      }
+      const msg = `🎾 *TENNIS MT REAL — HEALTH ALERT*\n\n`
+        + triggers.map(t => `• ${t.msg}`).join('\n')
+        + `\n\nMétricas 14d:\nn=${rows.length} settled=${nonVoid.length}\nROI=${roi.toFixed(2)}% CLV avg=${avgClv?.toFixed?.(2) ?? 'n/a'}%\nLoss streak atual=${lossStreak}\n\n`
+        + `_Investigar via /admin/sport-detail?sport=tennis ou /admin/mt-shadow-by-league?sport=tennis. P2: NÃO auto-disable._`;
+      const token = resolveAlertsToken();
+      if (token) for (const adminId of ADMIN_IDS) sendDM(token, adminId, msg).catch(e => log('WARN', 'ALERT-FAIL', `adminId=${adminId}: ${e.message}`));
+      log('WARN', 'TENNIS-MT-HEALTH', `DM admin — ${triggers.map(t=>t.key).join('+')} | ROI=${roi.toFixed(2)}% CLV=${avgClv?.toFixed?.(2) ?? '-'} streak=${lossStreak}`);
+    } catch (e) { log('ERROR', 'TENNIS-MT-HEALTH', e.message); }
+  }
+  setInterval(_wrapCron('tennis_mt_real_health_watch', runTennisMtRealHealthWatch), 6 * 60 * 60 * 1000);
+  setTimeout(() => runTennisMtRealHealthWatch().catch(() => {}), 105 * 60 * 1000);
+
   // Esports MT calib refit daily (05h local). Multi-sport (lol/cs2/dota2/valorant).
   // Usa scripts/fit-tennis-markov-calibration.js (sport-agnostic apesar do nome
   // legacy) com --sport=X --filter=pre. Live tips skipped por instabilidade
