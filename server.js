@@ -20078,8 +20078,9 @@ load();
         return arr;
       };
 
-      const fitMarket = (marketName) => {
-        const lst = tips.filter(t => t.market === marketName);
+      const fitMarket = (marketName, extraFilter = null) => {
+        let lst = tips.filter(t => t.market === marketName);
+        if (typeof extraFilter === 'function') lst = lst.filter(extraFilter);
         if (lst.length < 12) return { skip: 'insufficient_sample', n: lst.length };
         const edges = [0.30, 0.55, 0.65, 0.70, 0.75, 0.80, 0.85, 0.92, 1.001];
         const bins = [];
@@ -20151,6 +20152,37 @@ load();
       if (!Object.keys(calibByMarket).length) {
         sendJson(res, { ok: false, error: 'no markets fitted', skipped });
         return;
+      }
+
+      // 2026-05-17: stratify=tier — fit additional bins per (market, tier).
+      // Consumers (lib/tennis-markov-calib + lib/sport-mt-calib) já leem schema
+      // v2 (markets[m].tiers[tier].bins) e fallback pra flat (markets[m].bins)
+      // quando tier-specific ausente. Backwards-compat: sem stratify, comportamento
+      // inalterado (só flat bins).
+      // Trigger: /admin/shadow-tier-divergence recomenda "Refit tier-aware vale
+      // a pena — 5 buckets gap ≥10pp entre tiers" (tennis 2026-05-17).
+      const stratify = String(parsed.query.stratify || '').toLowerCase();
+      const tierStratified = {};
+      if (stratify === 'tier') {
+        try {
+          const { getLeagueTier } = require('./lib/league-tier');
+          const tierFor = (lg) => `tier${getLeagueTier(sport, lg)}`;
+          for (const market of Object.keys(calibByMarket)) {
+            const tiersFit = {};
+            for (const tierKey of ['tier1', 'tier2', 'tier3']) {
+              const tierFilter = (t) => tierFor(t.league) === tierKey;
+              const r = fitMarket(market, tierFilter);
+              if (!r.skip) tiersFit[tierKey] = r;
+              else tierStratified[`${market}/${tierKey}_skipped`] = r;
+            }
+            if (Object.keys(tiersFit).length) {
+              calibByMarket[market].tiers = tiersFit;
+              tierStratified[market] = Object.keys(tiersFit);
+            }
+          }
+        } catch (e) {
+          tierStratified._error = e.message;
+        }
       }
 
       const applyCalib = (pRaw, marketBins) => {
@@ -20273,9 +20305,14 @@ load();
             train_window_days: days,
             eval_window_days: evalDays,
             eval_mode: evalDays > 0 ? 'walk_forward_out_of_sample' : 'in_sample_legacy',
-            markets: Object.fromEntries(Object.entries(calibByMarket).map(([k, v]) => [k, { nBins: v.bins.length, nTotal: v.nTotal }])),
+            markets: Object.fromEntries(Object.entries(calibByMarket).map(([k, v]) => [k, {
+              nBins: v.bins.length,
+              nTotal: v.nTotal,
+              tiers: v.tiers ? Object.fromEntries(Object.entries(v.tiers).map(([tk, tv]) => [tk, { nBins: tv.bins.length, nTotal: tv.nTotal }])) : undefined,
+            }])),
             backtest,
             skipped,
+            tier_stratified: stratify === 'tier' ? tierStratified : undefined,
             note: 'Cache TTL 30min — efeito imediato em novas tips. Restart pod pra forçar reload.',
           });
           return;
@@ -20285,7 +20322,12 @@ load();
         }
       }
 
-      sendJson(res, { ok: true, payload, skipped });
+      sendJson(res, {
+        ok: true,
+        payload,
+        skipped,
+        tier_stratified: stratify === 'tier' ? tierStratified : undefined,
+      });
     } catch (e) {
       sendJson(res, { ok: false, error: e.message, stack: _stackForReq(req, e)?.slice(0, 600) }, 500);
     }
