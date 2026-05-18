@@ -247,6 +247,47 @@ if (autoRollback && doRetrain) {
   }
 }
 
+// ── Isotonic + Markov calib sample-count regression check ──
+// 2026-05-18 (P3 pendency): isotonic JSONs não têm brier comparável entre refits
+// (memory), então não dá pra reusar threshold REGRESSION_THRESHOLD baseado em brier.
+// Sinal alternativo: nCalibSamples drop dramático (default 50%) é proxy de fit bug
+// — data filter cortou demais, regime cutoff erroneo, ou sport com sample stale.
+// Fit normal varia 5-15% entre refits. Não cobre overfitting (precisaria holdout).
+// Roda sempre (não gated por doRetrain) pq isotonic fitta toda invocação.
+const ISOTONIC_SAMPLE_DROP_PCT = parseFloat(process.env.ISOTONIC_SAMPLE_DROP_THRESHOLD_PCT || '50') / 100;
+const ISOTONIC_TARGETS = [
+  { key: 'lol_iso', label: 'LoL iso', file: 'lib/lol-model-isotonic.json' },
+  { key: 'tennis_iso', label: 'Tennis iso', file: 'lib/tennis-model-isotonic.json' },
+  { key: 'dota_iso', label: 'Dota iso', file: 'lib/dota2-isotonic.json' },
+  { key: 'cs_iso', label: 'CS2 iso', file: 'lib/cs2-isotonic.json' },
+  { key: 'tennis_markov_calib', label: 'Tennis Markov calib', file: 'lib/tennis-markov-calib.json' },
+];
+if (autoRollback) {
+  for (const t of ISOTONIC_TARGETS) {
+    const b = BEFORE[t.key], a = AFTER[t.key];
+    if (!(b?.nCalib && a?.nCalib)) continue;
+    if (a.nCalib >= b.nCalib * (1 - ISOTONIC_SAMPLE_DROP_PCT)) continue;
+    const pctDrop = ((b.nCalib - a.nCalib) / b.nCalib * 100).toFixed(1);
+    if (!asJson) console.log(`\n⚠️ Sample drop: ${t.label} nCalib ${b.nCalib} → ${a.nCalib} (-${pctDrop}%)`);
+    try {
+      const { restoreLatest, listBackups } = require('../lib/model-backup');
+      const isoPath = path.join(ROOT, t.file);
+      const backups = listBackups(isoPath);
+      if (backups.length) {
+        restoreLatest(isoPath, { name: backups[0].name });
+        results.rollbacks.push({ file: t.file, restoredFrom: backups[0].name, reasonSampleDropPct: +pctDrop });
+        if (!asJson) console.log(`  ↺ Rolled back from ${backups[0].name}`);
+      } else {
+        if (!asJson) console.log(`  ✗ No backup available — manual review needed`);
+        results.rollbacks.push({ file: t.file, error: 'no_backup_available', reasonSampleDropPct: +pctDrop });
+      }
+    } catch (e) {
+      if (!asJson) console.log(`  ✗ Rollback ${t.label} falhou: ${e.message}`);
+      results.rollbacks.push({ file: t.file, error: e.message });
+    }
+  }
+}
+
 // Diff summary
 const changes = [];
 for (const k of Object.keys(AFTER)) {
@@ -285,8 +326,13 @@ if (asJson) {
   if (results.rollbacks?.length) {
     console.log('\n── Rollbacks ──');
     for (const rb of results.rollbacks) {
-      if (rb.error) console.log(`  ✗ ${rb.file}: ${rb.error}`);
-      else console.log(`  ↺ ${rb.file} restored from ${rb.restoredFrom} (new Brier was +${rb.reasonPct}%)`);
+      if (rb.error && !rb.restoredFrom) console.log(`  ✗ ${rb.file}: ${rb.error}${rb.reasonSampleDropPct ? ` (sample -${rb.reasonSampleDropPct}%)` : ''}`);
+      else {
+        const reason = rb.reasonSampleDropPct
+          ? `sample dropped -${rb.reasonSampleDropPct}%`
+          : `new Brier +${rb.reasonPct}%`;
+        console.log(`  ↺ ${rb.file} restored from ${rb.restoredFrom} (${reason})`);
+      }
     }
   }
   const allOk = results.jobs.every(j => j.ok);
