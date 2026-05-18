@@ -17813,7 +17813,7 @@ load();
                  SUM(CASE WHEN clv_odds IS NOT NULL AND open_odds IS NOT NULL THEN 1 ELSE 0 END) n_clv,
                  SUM(CASE WHEN odds_fetched_at IS NOT NULL AND sent_at IS NOT NULL THEN 1 ELSE 0 END) n_delay
             FROM tips
-           WHERE sent_at >= datetime('now', ?) AND UPPER(result) IN ('WIN','LOSS')
+           WHERE sent_at >= datetime('now', ?) AND result IN ('win','loss')
         `).get(`-${days} days`);
 
         const bySport = analysisDb.prepare(`
@@ -17824,7 +17824,7 @@ load();
                  ROUND(AVG(open_odds), 3) avg_open,
                  ROUND(AVG(clv_odds), 3) avg_close
             FROM tips
-           WHERE sent_at >= datetime('now', ?) AND UPPER(result) IN ('WIN','LOSS')
+           WHERE sent_at >= datetime('now', ?) AND result IN ('win','loss')
              AND open_odds IS NOT NULL AND clv_odds IS NOT NULL
            GROUP BY sport ORDER BY avg_clv_pct ASC
         `).all(`-${days} days`);
@@ -17844,7 +17844,7 @@ load();
                  ROUND(AVG((open_odds - clv_odds) / clv_odds * 100), 2) avg_clv_pct,
                  ROUND(AVG((julianday(sent_at) - julianday(odds_fetched_at)) * 86400), 1) avg_delay_s
             FROM tips
-           WHERE sent_at >= datetime('now', ?) AND UPPER(result) IN ('WIN','LOSS')
+           WHERE sent_at >= datetime('now', ?) AND result IN ('win','loss')
              AND open_odds IS NOT NULL AND clv_odds IS NOT NULL
            GROUP BY sport, is_live ORDER BY sport, is_live
         `).all(`-${days} days`);
@@ -17854,7 +17854,7 @@ load();
                  ROUND(AVG((open_odds - clv_odds) / clv_odds * 100), 2) avg_clv_pct,
                  ROUND(SUM(profit_reais), 2) profit
             FROM tips
-           WHERE sent_at >= datetime('now', ?) AND UPPER(result) IN ('WIN','LOSS')
+           WHERE sent_at >= datetime('now', ?) AND result IN ('win','loss')
              AND open_odds IS NOT NULL AND clv_odds IS NOT NULL
            GROUP BY sport, league HAVING n >= 3
            ORDER BY avg_clv_pct ASC LIMIT 50
@@ -17869,7 +17869,7 @@ load();
                  SUM(CASE WHEN is_live = 1 AND clv_odds IS NOT NULL THEN 1 ELSE 0 END) n_live_clv,
                  SUM(CASE WHEN (is_live IS NULL OR is_live = 0) AND clv_odds IS NOT NULL THEN 1 ELSE 0 END) n_pre_clv
             FROM tips
-           WHERE sent_at >= datetime('now', ?) AND UPPER(result) IN ('WIN','LOSS')
+           WHERE sent_at >= datetime('now', ?) AND result IN ('win','loss')
            GROUP BY sport ORDER BY n DESC
         `).all(`-${days} days`);
 
@@ -17880,7 +17880,7 @@ load();
                  SUM(CASE WHEN clv_odds IS NULL AND is_live = 1 AND (julianday(settled_at) - julianday(sent_at)) * 1440 >= 15 THEN 1 ELSE 0 END) gap_live,
                  SUM(CASE WHEN clv_odds IS NULL AND (is_live IS NULL OR is_live = 0) AND (julianday(settled_at) - julianday(sent_at)) * 1440 >= 15 THEN 1 ELSE 0 END) gap_pre
             FROM tips
-           WHERE sent_at >= datetime('now', ?) AND UPPER(result) IN ('WIN','LOSS')
+           WHERE sent_at >= datetime('now', ?) AND result IN ('win','loss')
            GROUP BY sport HAVING n >= 5 ORDER BY n DESC
         `).all(`-${days} days`);
 

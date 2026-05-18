@@ -24129,6 +24129,49 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   setInterval(_wrapCron('match_result_sources_cleanup', runMatchResultSourcesCleanup), 60 * 60 * 1000);
   setTimeout(_wrapCron('match_result_sources_cleanup', runMatchResultSourcesCleanup), 15 * 60 * 1000);
 
+  // 2026-05-18 (DB-1 audit pendency): retention cron pra 4 audit tables
+  // crescendo unbounded (next mig-114 emergency candidate). Targets:
+  // - ml_gate_rejected_audit (rejected_at, ~9 callsites bot.js inserindo per
+  //   shadow scan): 60d retention. Tabela atual sem GC — comment do lib
+  //   explicitamente diz "Cron retention 60d recomendado".
+  // - analytics_alerts (fired_at): 90d retention, só fechados (status != 'open'
+  //   preservados pra alert ativo continue visible).
+  // - bankroll_drift_log (detected_at): 90d retention (insert hourly em
+  //   bankroll-reconciliation, mig 110 sem cleanup).
+  // - polymarket_paper_trades (copied_at): 60d retention (Polymarket
+  //   research-only — paper trades não affect bankroll).
+  // Defaults: 60/90/90/60d, override via env. Idempotente — roda 1×/dia
+  // às target_hour UTC (default 5 — same horário match_result_sources).
+  let _lastAuditRetentionDay = null;
+  function runAuditTablesRetention() {
+    const targetHour = parseInt(process.env.AUDIT_TABLES_RETENTION_HOUR_UTC || '5', 10) || 5;
+    const now = new Date();
+    if (now.getUTCHours() !== targetHour) return;
+    const today = now.toISOString().slice(0, 10);
+    if (_lastAuditRetentionDay === today) return;
+    _lastAuditRetentionDay = today;
+    const _mlgraDays = Math.max(14, Math.min(180, parseInt(process.env.ML_GATE_REJECTED_AUDIT_RETENTION_DAYS || '60', 10) || 60));
+    const _alertsDays = Math.max(14, Math.min(365, parseInt(process.env.ANALYTICS_ALERTS_RETENTION_DAYS || '90', 10) || 90));
+    const _driftDays = Math.max(14, Math.min(365, parseInt(process.env.BANKROLL_DRIFT_LOG_RETENTION_DAYS || '90', 10) || 90));
+    const _polyDays = Math.max(14, Math.min(180, parseInt(process.env.POLYMARKET_PAPER_TRADES_RETENTION_DAYS || '60', 10) || 60));
+    const targets = [
+      { table: 'ml_gate_rejected_audit', col: 'rejected_at', days: _mlgraDays, extraWhere: '' },
+      { table: 'analytics_alerts',       col: 'fired_at',    days: _alertsDays, extraWhere: " AND status != 'open'" },
+      { table: 'bankroll_drift_log',     col: 'detected_at', days: _driftDays, extraWhere: '' },
+      { table: 'polymarket_paper_trades',col: 'copied_at',   days: _polyDays, extraWhere: '' },
+    ];
+    for (const t of targets) {
+      try {
+        const r = db.prepare(`DELETE FROM ${t.table} WHERE ${t.col} < datetime('now', '-' || ? || ' days')${t.extraWhere}`).run(t.days);
+        if (r.changes > 0) {
+          log('INFO', 'CLEANUP', `${t.table}: deleted ${r.changes} rows >${t.days}d retention`);
+        }
+      } catch (e) { log('DEBUG', 'CLEANUP', `${t.table} retention skip: ${e.message}`); }
+    }
+  }
+  setInterval(_wrapCron('audit_tables_retention', runAuditTablesRetention), 60 * 60 * 1000);
+  setTimeout(_wrapCron('audit_tables_retention', runAuditTablesRetention), 30 * 60 * 1000);
+
   // Threshold Auto-Apply: semanal (segunda-feira às 4h UTC), roda optimizer +
   // aplica ajustes de EV_min per sport quando guardrails batem. Gated por
   // THRESHOLD_AUTO_APPLY=true.
