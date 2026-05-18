@@ -4358,6 +4358,61 @@ async function _settleCompletedTipsInner() {
           }
           if (_noMatchTips.length > 0) log('INFO', 'SETTLE-TENNIS', `stuck: ${_noMatchTips.join(' | ')}`);
         }
+        // 2026-05-18 (P1.B audit log 2026-05-18T12:24-12:37): auto-void tennis
+        // tips em Challenger/Doubles eventos quando pending >24h sem match.
+        // Histórico: SETTLE-TENNIS unsettled crescendo (92 → 103 → 104+) com
+        // doubles + ATP Challenger sempre stuck. Doubles ESPN não cobre;
+        // Challenger Sackmann match feed lag/name mismatch.
+        // Acumular pending bloqueia dedup (existingMatch shadow gate), poluí
+        // metrics, e mantém model exposto à uncertainty (banca não fecha).
+        // Solution: mark void quando stale >24h, profit_units=0, ativa cleanup.
+        // Opt-out: TENNIS_AUTO_VOID_CHALLENGER_DOUBLES_DISABLED=true.
+        try {
+          if (!/^(1|true|yes)$/i.test(String(process.env.TENNIS_AUTO_VOID_CHALLENGER_DOUBLES_DISABLED || ''))) {
+            const _voidHours = Math.max(12, Math.min(72,
+              parseInt(process.env.TENNIS_CHALLENGER_DOUBLES_VOID_HOURS || '24', 10) || 24));
+            const staleRows = db.prepare(`
+              SELECT id, participant1, participant2, event_name, sent_at
+              FROM tips
+              WHERE sport = 'tennis'
+                AND result IS NULL
+                AND (archived IS NULL OR archived = 0)
+                AND COALESCE(is_shadow, 0) = 0
+                AND sent_at < datetime('now', '-' || ? || ' hours')
+                AND (
+                  event_name LIKE '%Challenger%'
+                  OR event_name LIKE '%Doubles%'
+                  OR event_name LIKE '%ITF%'
+                  OR event_name LIKE '%W125%'
+                  OR event_name LIKE '%WTA 125%'
+                )
+              LIMIT 100
+            `).all(_voidHours);
+            if (staleRows.length > 0) {
+              const updStmt = db.prepare(`
+                UPDATE tips
+                SET result = 'void',
+                    profit_units = 0,
+                    settled_at = datetime('now')
+                WHERE id = ?
+              `);
+              let voided = 0;
+              for (const r of staleRows) {
+                try {
+                  updStmt.run(r.id);
+                  voided++;
+                  log('INFO', 'SETTLE-TENNIS-AUTOVOID',
+                    `tip#${r.id} [${r.event_name}] ${r.participant1} vs ${r.participant2} → void (>${_voidHours}h sem match, Challenger/Doubles/ITF feed sem cobertura)`);
+                } catch (e) {
+                  log('WARN', 'SETTLE-TENNIS-AUTOVOID', `tip#${r.id} void falhou: ${e.message}`);
+                }
+              }
+              if (voided > 0) {
+                log('INFO', 'SETTLE-TENNIS-AUTOVOID', `voided ${voided} stale Challenger/Doubles/ITF tips (>${_voidHours}h pending — sem cobertura ESPN/Sackmann)`);
+              }
+            }
+          }
+        } catch (e) { log('DEBUG', 'SETTLE-TENNIS-AUTOVOID', `cycle err: ${e.message}`); }
         continue;
       }
 
