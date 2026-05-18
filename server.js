@@ -18210,30 +18210,59 @@ load();
           ORDER BY sent_at DESC
           LIMIT 10
         `).all(`%${team1}%`, `%${team2}%`, `%${team2}%`, `%${team1}%`);
+      } else if (q.before_date) {
+        // 2026-05-18: bulk archive por data — sent_at < before_date.
+        // Use case: reset dashboard, mover tips antigas pra archived (soft delete
+        // preserva histórico em DB pra audit). dry_run=1 default safety.
+        // Limite 10000 por chamada pra evitar lock longo na transação.
+        const beforeDate = String(q.before_date).trim();
+        if (!/^\d{4}-\d{2}-\d{2}/.test(beforeDate)) {
+          sendJson(res, { ok: false, error: 'before_date deve ser YYYY-MM-DD ou YYYY-MM-DD HH:MM:SS' }, 400);
+          return;
+        }
+        const sportFilter = q.sport ? `AND sport = '${String(q.sport).replace(/'/g, "")}'` : '';
+        const includeShadowFilter = q.include_shadow === '1' || q.include_shadow === 'true' ? '' : 'AND COALESCE(is_shadow,0) = 0';
+        candidates = db.prepare(`
+          SELECT id, sport, participant1, participant2, tip_participant, odds, ev,
+                 market_type, sent_at, result, is_shadow, archived
+          FROM tips
+          WHERE (archived IS NULL OR archived = 0)
+            ${sportFilter}
+            ${includeShadowFilter}
+            AND sent_at < ?
+          ORDER BY sent_at DESC
+          LIMIT 10000
+        `).all(beforeDate);
       } else {
-        sendJson(res, { ok: false, error: 'forneça id OU team1+team2' }, 400);
+        sendJson(res, { ok: false, error: 'forneça id OU team1+team2 OU before_date=YYYY-MM-DD' }, 400);
         return;
       }
       if (!candidates.length) {
         sendJson(res, { ok: false, error: 'nenhuma tip encontrada', matched: 0 });
         return;
       }
+      // Summary by sport + market + is_shadow pra UX (especialmente bulk).
+      const summary = {};
+      for (const c of candidates) {
+        const k = `${c.sport}|${(c.market_type||'ML').toUpperCase()}|sh=${c.is_shadow??0}`;
+        summary[k] = (summary[k] || 0) + 1;
+      }
       if (dryRun) {
-        sendJson(res, { ok: true, dry_run: true, matched: candidates.length, candidates });
+        sendJson(res, { ok: true, dry_run: true, matched: candidates.length, summary, sample: candidates.slice(0, 20) });
         return;
       }
       const stmt = db.prepare(`UPDATE tips SET archived = 1 WHERE id = ?`);
       let archived = 0;
       const archivedIds = [];
-      for (const c of candidates) {
-        if (c.archived === 1) continue;
-        const r = stmt.run(c.id);
-        if (r.changes > 0) {
-          archived += 1;
-          archivedIds.push(c.id);
+      const tx = db.transaction(rows => {
+        for (const c of rows) {
+          if (c.archived === 1) continue;
+          const r = stmt.run(c.id);
+          if (r.changes > 0) { archived += 1; archivedIds.push(c.id); }
         }
-      }
-      sendJson(res, { ok: true, archived, archived_ids: archivedIds, candidates });
+      });
+      tx(candidates);
+      sendJson(res, { ok: true, archived, summary, archived_ids_sample: archivedIds.slice(0, 50), total_candidates: candidates.length });
     } catch (e) { sendJson(res, { error: e.message }, 500); }
     return;
   }
