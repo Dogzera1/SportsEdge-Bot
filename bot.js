@@ -9591,7 +9591,14 @@ async function _runLolAiShadow(ctx) {
       : norm(tipTeam) === norm(match.team2) ? 't2'
       : (norm(match.team1).includes(norm(tipTeam)) ? 't1' : 't2');
     const modelPPick = pickSide === 't1' ? mlResult.modelP1 : mlResult.modelP2;
-    await serverPost('/record-tip', {
+    // 2026-05-18: LOL_AI_REAL=true promove path AI shadow pra real tips.
+    // A/B comparison 14d revelou AI ROI +15.65% n=61 hit 73.8% CLV -0.05pp
+    // vs no-AI -7.89% n=28 hit 50% CLV -7.65pp (memory project_lol_ai_vs_noai_comparison).
+    // Default OFF — set explícito reativa real emit + DM dispatch.
+    const _lolAiReal = /^(1|true|yes)$/i.test(String(process.env.LOL_AI_REAL ?? ''));
+    const _emissionTag = _lolAiReal ? 'lol_ai_real' : 'lol_ai_shadow';
+    const _reasonTag = _lolAiReal ? 'AI ML LoL real (DeepSeek)' : 'AI shadow POC (LOL_AI_SHADOW)';
+    const tipResp = await serverPost('/record-tip', {
       matchId: canonicalMatchId('esports', String(match.id)),
       eventName: match.league,
       p1: match.team1, p2: match.team2,
@@ -9601,16 +9608,46 @@ async function _runLolAiShadow(ctx) {
       confidence: tipConf, isLive: !!hasLiveStats,
       modelP1: mlResult.modelP1, modelP2: mlResult.modelP2,
       modelPPick,
-      tipReason: 'AI shadow POC (LOL_AI_SHADOW)',
+      tipReason: _reasonTag,
       pickSide,
       sport: 'lol',
-      isShadow: 1,
-      emissionSource: 'lol_ai_shadow',
+      isShadow: _lolAiReal ? 0 : 1,
+      emissionSource: _emissionTag,
       mlScore: Number.isFinite(mlResult.score) ? +mlResult.score.toFixed(2) : null,
       factorCount: (mlResult.factorActive || []).length || null,
     }, 'lol');
-    try { _metrics.incr('ai_shadow_emit', { sport: 'lol' }); } catch (_) {}
-    log('INFO', 'AI-SHADOW', `lol AI tip: ${tipTeam} @ ${tipOdd} EV=${tipEvNum}% conf=${tipConf} (is_shadow=1)`);
+    try { _metrics.incr(_lolAiReal ? 'ai_real_emit' : 'ai_shadow_emit', { sport: 'lol' }); } catch (_) {}
+    // DM dispatch: só quando real path E record-tip retornou tipId E não foi auto-shadowed
+    // server-side (autoShadowed=1 quando gate como ml_bucket_blocked rota pra shadow).
+    if (_lolAiReal && tipResp?.tipId && tipResp?.isShadow === 0 && tipResp?.autoShadowed !== 1) {
+      try {
+        const _aiToken = process.env.TELEGRAM_TOKEN_ESPORTS;
+        if (_aiToken && subscribedUsers.size > 0) {
+          const _liveTag = hasLiveStats ? ' [AO VIVO]' : '';
+          const _confEmoji = tipConf === CONF.ALTA ? '🟢' : tipConf === CONF.BAIXA ? '🔴' : '🟡';
+          const _aiMsg = `🤖 *TIP LoL AI (DeepSeek)${_liveTag}*\n` +
+            `*${match.team1}* vs *${match.team2}*\n📋 ${match.league}\n` +
+            `\n🎯 Aposta: *${tipTeam}* ML @ *${tipOdd}*\n` +
+            `📈 EV: *+${tipEvNum.toFixed(1)}%*\n💵 Stake: *${tipStake}*\n` +
+            `${_confEmoji} Confiança: *${tipConf}*\n` +
+            `🧠 Análise AI (LOL_AI_REAL)\n\n` +
+            `⚠️ _Aposte com responsabilidade._`;
+          let _dmsSent = 0;
+          for (const [userId, prefs] of subscribedUsers) {
+            if (prefs && (prefs.has('lol') || prefs.has('esports'))) {
+              sendDM(_aiToken, userId, _aiMsg)
+                .then(() => { _dmsSent++; })
+                .catch(e => { if (e.message?.includes('403')) subscribedUsers.delete(userId); });
+            }
+          }
+          log('INFO', 'AI-REAL', `lol AI REAL emit: ${tipTeam} @ ${tipOdd} EV=${tipEvNum}% conf=${tipConf} | tip_id=${tipResp.tipId} | DMs dispatched`);
+        } else {
+          log('INFO', 'AI-REAL', `lol AI REAL tip recorded tip_id=${tipResp.tipId} (token missing or 0 subscribers — no DM)`);
+        }
+      } catch (e) { log('WARN', 'AI-REAL', `DM dispatch err: ${e?.message || e}`); }
+    } else {
+      log('INFO', 'AI-SHADOW', `lol AI tip: ${tipTeam} @ ${tipOdd} EV=${tipEvNum}% conf=${tipConf} (is_shadow=${_lolAiReal ? 0 : 1}, autoShadowed=${tipResp?.autoShadowed||0})`);
+    }
   } catch (e) {
     try { log('WARN', 'AI-SHADOW', `lol shadow err: ${e?.message || e}`); } catch (_) {}
     try { _metrics.incr('ai_shadow_exception', { sport: 'lol' }); } catch (_) {}
