@@ -35175,6 +35175,23 @@ server.listen(PORT, '0.0.0.0', () => {
   log('INFO', 'SERVER', `Esportes: LoL (Riot API + LoLEsports)`);
   log('INFO', 'SERVER', `HTTP timeouts: keepAlive=${server.keepAliveTimeout}ms headers=${server.headersTimeout}ms request=${server.requestTimeout}ms`);
 
+  // 2026-05-18 (memory project_ml_bucket_cache_server_bug_2026_05_18): server.js
+  // process tinha _bucketBlockCache vazio porque loadMlBucketBlocklist só era
+  // chamado em bot.js process (diferente). Gate ml_bucket_blocked em
+  // /record-tip ficava dead code até admin trigger manual de
+  // /admin/ml-auto-promote (que dispara runMlAutoPromoteCycle → reload).
+  // Mesmo bug aplicável a loadMlLeagueBlocklist se algum dia server.js
+  // consumir isMlLeagueBlocked (hoje só bot.js consome — preemptive).
+  // Try/catch swallow: se mig 105 não aplicada OU lib falhar, gate retorna
+  // false (comportamento atual) — backward compat absoluta.
+  try {
+    const { loadMlBucketBlocklist, loadMlLeagueBlocklist } = require('./lib/ml-auto-promote');
+    loadMlBucketBlocklist(db);
+    loadMlLeagueBlocklist(db);
+  } catch (e) {
+    log('DEBUG', 'BOOT', `ml-auto-promote cache load skipped: ${e.message}`);
+  }
+
   // 2026-05-01: log da causa do exit anterior. Cruzamos 2 fontes:
   //   - last_exit_server.json (escrito pelo próprio server.js em SIGTERM/uncaught)
   //   - last_child_exit_server_js.json (escrito pelo launcher start.js no 'exit' event)
