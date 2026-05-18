@@ -16553,14 +16553,31 @@ FORMA RECENTE (DB interno, últimos 45 dias):
 ${formSection}
 ${h2hSection}
 
+REGRAS DE CONVICÇÃO (não negociáveis):
+• ALTA (EV ≥ +12%): exige ≥3 sinais do checklist confirmando
+• MÉDIA (EV ≥ +8%): exige ≥2 sinais confirmando
+• BAIXA (EV ≥ +5%): apenas 1 sinal — stake reduzido (max 1.5u)
+• EV negativo nos dois lados → SEM_EDGE
+• Forma 0V em 3+ jogos recentes OU oposição fraca (academy) → SEM_EDGE
+
 ANÁLISE (seja específico — Dota 2):
 1. Forma e momentum: série atual, consistência, nível de oposição.
 2. Estilo: teamfight/Roshan vs split push/farm — qual favorece cada time.
-3. Meta do patch: estilos/heróis dominantes e adaptação de cada time.
+3. Meta do patch atual: estilos/heróis dominantes e adaptação de cada time.
 4. Vantagem individual: carry (pos 1), mid (pos 2), offlaner, suportes.
 5. Contexto da série ao vivo (se aplicável): placar, pressão psicológica, fadiga.
 
+CHECKLIST DE SINAIS (marque os confirmados):
+[ ] Forma clara (≥60% wr últimos 10j, diff >15pp)
+[ ] H2H favorável (≥60% wr direto, ≥3 jogos)
+[ ] Estilo matchup superior (clara vantagem teamfight ou farm)
+[ ] Meta patch favorece composição do time
+[ ] Vantagem individual em ≥2 posições (carry/mid/off)
+[ ] Roster estável (>2 meses sem mudança)
+[ ] Modelo + book direção alinhadas (divergência <10pp)
+
 REGRAS: Odds ${minOdds}–${maxOdds} | EV ≥ ${evThreshold}%${isLive ? ' | Ao vivo: só ALTA ou MÉDIA com edge claro' : ''}
+Margem ${marginPct}% ${parseFloat(marginPct) > 6 ? '⚠️ (alta — book pouco confiável)' : ''}
 
 CÁLCULO DE EV — OBRIGATÓRIO VALIDAR ANTES DE REPORTAR:
   Fórmula: EV% = (P/100 × odd − 1) × 100
@@ -17536,16 +17553,34 @@ Evento: ${fight.league} | Data: ${fightTime} (BRT)${espnSection}${ufcStatsSectio
 
 ODDS (${o.bookmaker || 'EU'}):
 ${fight.team1}: ${o.t1} | ${fight.team2}: ${o.t2}
-Margem bookie: ${marginPct}%
+Margem bookie: ${marginPct}% ${parseFloat(marginPct) > 7 ? '⚠️ (alta — book pouco confiável)' : ''}
 ${fairOddsRef}
 AVISO: ${hasModelDataMma ? `modelo base usa record histórico como prior — sua estimativa deve superar a P do modelo em ≥8pp para ter edge real.` : `fair odds calculadas via de-juice (sem record ESPN) — use apenas como referência mínima; para edge real, sua estimativa deve superar ≥8pp.`}
 ${newsSectionMma ? `\n${newsSectionMma}\n` : ''}
+
+REGRAS DE CONVICÇÃO (não negociáveis):
+• ALTA (conf ≥8): exige ≥3 advantages claras (técnica + form + matchup) + dados ESPN/UFC
+• MÉDIA (conf ≥7): exige ≥2 advantages
+• BAIXA (conf ≥6): apenas 1 advantage clara + edge > +8pp — stake reduzido
+• Lutadores desconhecidos OU sem ESPN OU rookie debut → SEM_EDGE
+• MMA é high variance — KO/submission early surprise possível em qualquer luta
 
 ANÁLISE REQUERIDA — seja específico:
 1. Vantagem técnica: quem domina grappling, striking e wrestling?
 2. Form recente: últimas 3 lutas de cada — tendência de melhora ou queda?
 3. Matchup estilístico: por que esse estilo X bate estilo Y nessa luta?
-4. Confiança (1-10): você tem dados suficientes sobre ambos?
+4. Camp/coaching: TKO/AKA/Jackson Wink vs camp regional sem visibility.
+5. Weight cut: corte forçado/missed weight = -20% performance histórica.
+6. Confiança (1-10): você tem dados suficientes sobre ambos?
+
+CHECKLIST DE SINAIS (marque os confirmados):
+[ ] Vantagem técnica clara em ≥2 áreas (striking/grappling/wrestling)
+[ ] Form trend positivo (3W recentes ou venceu top opponents)
+[ ] Matchup estilístico favorável (striker vs grappler weak, etc)
+[ ] Camp/coaching superior (top 5 gyms)
+[ ] Sem missed weight / sem retorno pós long layoff
+[ ] Records ESPN confirmados (não rookie/regional)
+[ ] Modelo + book direção alinhadas (divergência <10pp)
 
 DECISÃO FINAL:
 ${hasModelDataMma
@@ -19063,18 +19098,35 @@ ${fairOddsLineTennis}
 ${isFav1 ? match.team1 : match.team2} é o favorito do mercado.
 
 ${dataSection ? `DADOS REAIS (ESPN/DB):\n${dataSection}\n` : 'AVISO: sem dados ESPN/DB disponíveis — use apenas conhecimento de treino confiável.\n'}${newsSectionTennis ? `${newsSectionTennis}\n` : ''}${liveInstructions}
+REGRAS DE CONVICÇÃO (não negociáveis):
+• ALTA (EV ≥ +8%, confiança ≥8): exige ≥3 sinais do checklist + sample H2H ≥3 jogos
+• MÉDIA (EV ≥ +6%, confiança ≥7): exige ≥2 sinais
+• BAIXA (EV ≥ +8%, confiança ≥6): apenas 1 sinal — stake reduzido
+• Dados ESPN/DB ausentes → máximo MÉDIA
+• Margem bookie ${marginPct}% ${parseFloat(marginPct) > 7 ? '⚠️ (alta — book pouco confiável)' : ''}
+
 INSTRUÇÕES:
-1. Analise: ranking, superfície (peso ALTO — clay specialists, grass specialists), H2H direto, forma recente (últimos 5 jogos), estilo de jogo vs superfície.
+1. Analise: ranking ATP/WTA, superfície (peso ALTO — clay/grass specialists), H2H direto, forma recente (últimos 5 jogos), estilo de jogo vs superfície, contexto do torneio (Slam/Masters/250/Challenger).
 2. O modelo Elo calculou: ${match.team1}=${modelP1Tennis}% | ${match.team2}=${modelP2Tennis}% (${fairLabelTennis}).
-   - Use o modelo como ÂNCORA. Só desvie se tiver motivo CONCRETO (H2H dominante, lesão confirmada, forma terrível recente, especialista em superfície).
+   - Use o modelo como ÂNCORA. Só desvie se tiver motivo CONCRETO (H2H dominante, lesão confirmada, forma terrível recente, especialista em superfície, retorno pós-lesão).
    - Sem motivo concreto para desviar → SEM_EDGE.
-3. Se identificar edge: calcule EV = (sua_prob/100 * odd) - 1. Exija EV ≥ +5%.
-4. Confiança (1-10): baseada em quão bem conhece os jogadores E na superfície.
-   - Dados insuficientes ou dúvida sobre contexto atual → máximo 6 → SEM_EDGE.
-   - Apenas ALTA (≥8) ou MÉDIA (7): exige edge claro. BAIXA (≤6): apenas se edge > +8%.
+
+CHECKLIST DE SINAIS (marque os confirmados):
+[ ] Ranking ATP/WTA diff >20 posições (favorito real)
+[ ] Surface specialist confirmado (clay/grass/hard expertise)
+[ ] H2H favorável (≥60% wr, ≥3 jogos)
+[ ] Forma últimos 5 jogos clara (4V+ ou 4D-)
+[ ] Tier torneio adequado (Slam/Masters >250/Challenger — variance maior em Challenger)
+[ ] Sem lesão recente / sem retorno pós-pausa longa
+[ ] Modelo + book direção alinhadas (divergência <8pp)
+
+CÁLCULO DE EV — OBRIGATÓRIO:
+  EV% = (P/100 × odd − 1) × 100
+  Exemplo: P=60%, odd=1.80 → EV = (0.60 × 1.80 − 1) × 100 = +8%
+⚠️ EV > 30% provavelmente erro (modelo Markov já corrige) — revise.
 
 DECISÃO:
-- P × odd ≥ 1.05 E confiança ≥ 7: TIP_ML:[jogador]@[odd]|P:[%]|STAKE:[1-3]u|CONF:[ALTA/MÉDIA/BAIXA] (P = sua prob 0-100 inteiro; sistema calcula EV automaticamente)
+- P × odd ≥ 1.05 E confiança ≥ 7 E ≥1 sinal: TIP_ML:[jogador]@[odd]|P:[%]|STAKE:[1-3]u|CONF:[ALTA/MÉDIA/BAIXA] (P = sua prob 0-100 inteiro; sistema calcula EV automaticamente)
 - Caso contrário: SEM_EDGE
 
 Máximo 200 palavras. Raciocínio breve antes da decisão.`;
@@ -20343,17 +20395,35 @@ Casa: ${oH} → de-juiced: ${mktH}% | Empate: ${oD} → ${mktD}% | Fora: ${oA} �
 Margem bookie: ${marginPct}%
 ${hasRealData && contextBlock ? '' : `Fair odds (de-juice, sem dados quantitativos): Casa=${mktH}% | Empate=${mktD}% | Fora=${mktA}% — use como referência mínima; sua estimativa deve superar ≥8pp para ter edge real.\n`}Totais: ${ou25Line}
 ${contextBlock}${newsSection ? `\n${newsSection}\n` : ''}
+REGRAS DE CONVICÇÃO (não negociáveis):
+• ALTA (EV ≥ +${EV_THRESHOLD}%, conf ≥8): exige ≥3 sinais do checklist + dados quantitativos disponíveis
+• MÉDIA (EV ≥ +${EV_THRESHOLD}%, conf ≥7): exige ≥2 sinais
+• BAIXA (EV ≥ +8%, conf ≥6): apenas 1 sinal — stake reduzido, sem dados quantitativos
+• Margem bookie ${marginPct}% ${parseFloat(marginPct) > 8 ? '⚠️ (alta — book pouco confiável)' : ''}
+• Empate odds < ${DRAW_MIN_ODDS} → raramente vale, prefira SEM_EDGE
+• Liga desconhecida + sem dados ESPN/Sofa → SEM_EDGE
+
 INSTRUÇÕES:
 1. ${hasRealData ? 'Use os dados quantitativos acima como base. Complemente com seu conhecimento contextual (lesões, motivação, histórico recente não capturado).' : 'Use seu conhecimento sobre os times nessa liga. Se não conhecer os times, seja conservador na estimativa de probabilidade e na confiança.'}
 2. Estime probabilidades reais (home%, draw%, away%) somando 100%.
-3. Calcule EV: EV = (prob/100 × odd) − 1 × 100
-   Casa: (X/100 × ${oH} − 1) × 100 | Empate: (X/100 × ${oD} − 1) × 100 | Fora: (X/100 × ${oA} − 1) × 100
-4. Para Over/Under 2.5, use médias de gols${hasRealData ? ' (já calculadas acima)' : ''} + contexto tático.
-5. Confiança (1-10): ${hasRealData ? 'reflita incerteza residual após dados quantitativos.' : 'reflita quanto você conhece os times e o quão claro é o edge. Confiança 7+ só se o edge for real e você tiver base para estimar.'}
-   - Empate com odds < ${DRAW_MIN_ODDS}? Raramente tem valor.
+3. Para Over/Under 2.5, use médias de gols${hasRealData ? ' (já calculadas acima)' : ''} + contexto tático.
+
+CHECKLIST DE SINAIS (marque os confirmados):
+[ ] Form 5j claro (≥3V casa ou ≥3D fora, ou inverso)
+[ ] H2H favorável (≥60% wr direto, ≥3 jogos recentes)
+[ ] Home advantage forte (>15pp) nessa liga/contexto
+[ ] xG/finalização vantagem clara (se hasRealData)
+[ ] Sem lesões/ausências chave reportadas
+[ ] Motivação clara (top da tabela, evita rebaixamento, copa final)
+[ ] Modelo + book direção alinhadas (divergência <8pp)
+
+CÁLCULO DE EV — OBRIGATÓRIO:
+  EV% = (P/100 × odd − 1) × 100
+  Casa: (Ph/100 × ${oH} − 1) × 100 | Empate: (Pd/100 × ${oD} − 1) × 100 | Fora: (Pa/100 × ${oA} − 1) × 100
+⚠️ EV > 30% em 1X2 provavelmente erro (sharp markets) — revise.
 
 DECISÃO (melhor opção apenas):
-- Edge (EV ≥ +${EV_THRESHOLD}%) E confiança ≥ 7:
+- Edge (EV ≥ +${EV_THRESHOLD}%) E confiança ≥ 7 E ≥2 sinais:
   TIP_FB:[mercado]:[seleção]@[odd]|EV:[%]|P:[%]|STAKE:[1-3]u|CONF:[ALTA/MÉDIA/BAIXA] (P = sua prob 0-100; EV = (P/100×odd−1)×100)
   Mercados: 1X2_H, 1X2_D, 1X2_A, OVER_2.5, UNDER_2.5
 - Caso contrário: SEM_EDGE
@@ -21806,26 +21876,72 @@ async function pollCs(runOnce = false) {
           const liveStr = scoreboard
             ? `\nLIVE: ${scoreboard.mapName} T:${scoreboard.scoreT}-CT:${scoreboard.scoreCT} round ${scoreboard.round}${scoreboard.bombPlanted ? ' (bomba)' : ''}`
             : '';
-          const prompt = `Análise CS2 — ${match.team1} vs ${match.team2} (${match.league}) ${match.status === 'live' ? '[AO VIVO]' : '[PRÉ-JOGO]'}
+          // 2026-05-18 upgrade: prompt CS alinhado ao padrão LoL (gold standard).
+          // Adiciona 7-sinal checklist, sample-size discipline, bookmaker margin
+          // warning, conviction calibration ALTA/MÉDIA/BAIXA com signal counting.
+          const _csMargin = ((1/parseFloat(o1) + 1/parseFloat(o2)) - 1) * 100;
+          const _csEloSample = Math.min(elo.eloMatches1||0, elo.eloMatches2||0);
+          const _sampleHint = _csEloSample < 5
+            ? '⚠️ Sample Elo MUITO baixo (<5j) — sinal fraco, prefira SEM_EDGE'
+            : _csEloSample < 15
+            ? '⚠️ Sample Elo baixo (5-14j) — modelo pode ter ruído'
+            : _csEloSample < 30
+            ? 'Sample Elo médio (15-29j) — sinal médio'
+            : 'Sample Elo robusto (≥30j)';
+          const prompt = `Você é um analista especializado em CS2 esports. Seja conservador — prefira SEM_EDGE a apostar em margem duvidosa.
+
+PARTIDA: ${match.team1} vs ${match.team2} (${match.league}) ${match.status === 'live' ? '[AO VIVO]' : '[PRÉ-JOGO]'}
 Liga: ${tierLabel}
-Odds Pinnacle: ${match.team1}@${o1} | ${match.team2}@${o2}
-Implied: ${(impliedP1*100).toFixed(1)}% / ${(impliedP2*100).toFixed(1)}% (de-juiced)
+
+ODDS Pinnacle: ${match.team1}@${o1} | ${match.team2}@${o2}
+Implied (de-juiced): ${(impliedP1*100).toFixed(1)}% / ${(impliedP2*100).toFixed(1)}%
+Margem bookie: ${_csMargin.toFixed(1)}% ${_csMargin > 5 ? '⚠️ (alta — book pouco confiável)' : ''}
+
 Modelo Elo: ${match.team1}=${elo.elo1||'?'} (${elo.eloMatches1||0}j) | ${match.team2}=${elo.elo2||'?'} (${elo.eloMatches2||0}j)
 Modelo P: ${(modelP1*100).toFixed(1)}% / ${(modelP2*100).toFixed(1)}%
+${_sampleHint}
+
 ${formStr}
 ${h2hStr}${liveStr}
 
 Pick proposta pelo modelo: ${pickTeam} @ ${pickOdd} (P=${(pickP*100).toFixed(1)}%, EV=${evPct.toFixed(1)}%)
 
-Avalie:
-1. P do modelo é razoável dado contexto (roster, tier, form, H2H)?
-2. Se for time academy/feeder ou tier 3-4, modelo pode estar inflando edge.
-3. Pinnacle é sharp em CS — se modelo diverge muito de Pinnacle (>10pp) sem razão clara, modelo está errado.
+REGRAS OBRIGATÓRIAS:
+• ALTA (EV ≥ +10%): exige ≥3 sinais independentes do checklist confirmando
+• MÉDIA (EV ≥ +6%): exige ≥2 sinais confirmando
+• BAIXA (EV ≥ +4%): apenas 1 sinal + sample ≥15j — stake reduzido
+• EV negativo nos dois lados → SEM_EDGE
+• Sample <5j em algum time + tier3 → SEM_EDGE
 
-DECISÃO:
+ANÁLISE (responda cada ponto):
+1. Form recente: streak, % vitórias últimos 10j, qualidade oposição.
+2. H2H: histórico direto relevante (>3 jogos recentes).
+3. Map pool: forças/fraquezas (Mirage/Inferno/Nuke/Anubis/Ancient/Dust2/Vertigo) — quem tem map veto vantagem?
+4. Roster: jogadores ativos, sub recente, IGL stability (>3 meses).
+5. Meta/LAN: torneio online vs LAN (alguns times caem 20% em LAN), última patch impacta cs2.
+6. Sharp money: divergência modelo vs Pinnacle (>8pp sem razão = modelo errado).
+7. Tier liga vs sample: tier3 academy + sample <10j = ruído estatístico.
+
+CHECKLIST DE SINAIS (marque os confirmados):
+[ ] Forma clara (≥60% wr últimos 10j, diff >15pp)
+[ ] H2H favorável (≥60% wr direto, ≥4 jogos)
+[ ] Map pool advantage (>2 maps fortes onde adversário fraco)
+[ ] Roster estável + IGL definido
+[ ] Modelo + Pinnacle direção alinhadas (divergência <8pp)
+[ ] Sharp money: line movement favorável
+[ ] Sample Elo robusto (≥15j ambos)
+
+CÁLCULO DE EV — OBRIGATÓRIO VALIDAR:
+  EV% = (P/100 × odd − 1) × 100
+  Exemplo: P=55%, odd=2.00 → EV=+10%
+⚠️ EV > 40% provavelmente erro de cálculo — revise.
+
+DECISÃO FINAL:
 TIP_ML:[time]@[odd]|P:[%]|STAKE:[1-3]u|CONF:[ALTA/MÉDIA/BAIXA]
-(Só forneça P inteiro 0-100; sistema calcula EV. Use a MESMA pick do modelo se concordar.)
-ou SEM_EDGE (se modelo está errado / dados insuficientes / time academy não confiável)
+(P = sua prob 0-100 inteiro; sistema calcula EV automaticamente)
+ou SEM_EDGE (se EV negativo / dados insuficientes / academy não confiável / sample <5j)
+
+Máximo 200 palavras.
 
 Máximo 150 palavras.`;
 
@@ -22524,12 +22640,28 @@ Modelo Elo: ${match.team1}=${(modelP1*100).toFixed(1)}% | ${match.team2}=${(mode
 Sample Elo: ${match.team1}=${elo?.eloMatches1 ?? '?'}j | ${match.team2}=${elo?.eloMatches2 ?? '?'}j
 Edge ML: ${mlScore.toFixed(1)}pp | Pick modelo: ${pickTeam} @ ${pickOdd}
 
+REGRAS DE CONVICÇÃO (não negociáveis):
+• ALTA (EV ≥ +10%, conf ≥8): exige ≥3 sinais do checklist + sample ambos ≥10j
+• MÉDIA (EV ≥ +6%, conf ≥7): exige ≥2 sinais
+• BAIXA (EV ≥ +5%, conf ≥6): apenas 1 sinal — stake reduzido
+• Sample <5j em algum time OU T3 sem dados → SEM_EDGE
+• Roster mudança recente (<2 semanas) → SEM_EDGE
+
 ANÁLISE (seja específico — Valorant):
 1. Forma e meta: composições/agentes meta, último patch, performance recente das equipes.
 2. Mapa pool: forças/fraquezas conhecidas em mapas que provavelmente sairão (Bind, Haven, Split, Ascent, Icebox, Breeze, Fracture, Pearl, Lotus, Sunset).
 3. Roster: jogadores chave (duelist, controller, sentinel, initiator), sub recente, IGL e estilo de jogo.
 4. Contexto torneio: playoffs/group/regional, importância da partida, motivação, fadiga.
 5. Tier liga: T1 (VCT internacional) vs T2 (Challengers regionais) vs T3 (Game Changers/sub-21) — variance maior em ligas menores.
+
+CHECKLIST DE SINAIS (marque os confirmados):
+[ ] Forma clara (≥60% wr últimos 10j, diff >15pp)
+[ ] H2H direto favorável (≥3 jogos, ≥60% wr)
+[ ] Map pool advantage (>2 mapas fortes onde adversário fraco)
+[ ] Roster estável >2 semanas + IGL definido
+[ ] Tier liga alinhado com sample (T1+ sample robusto)
+[ ] Agentes meta patch atual aproveitados pela composição do time
+[ ] Modelo Elo direção alinhada com mercado (divergência <10pp)
 
 REGRAS: Odds 1.40-6.00 | EV ≥ 5%${isLiveVal ? ' | Live: só ALTA/MÉDIA com edge claro' : ''}
 
