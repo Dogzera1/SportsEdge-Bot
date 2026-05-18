@@ -9732,6 +9732,64 @@ async function _runMmaAiShadow(ctx) {
   });
 }
 
+// CS wrapper — 2026-05-18: A/B expansion (commit 3ed29ec+).
+// Memory project_cross_sport_analysis: CS|ML shadow n=18 ROI +22% positivo
+// (small sample). AI A/B pode confirmar edge ou identificar leak.
+async function _runCsAiShadow(ctx) {
+  return _runAiShadow('cs', ctx, {
+    canonicalSport: 'cs',
+    subPrefs: ['cs'],
+    dmTokenEnv: 'TELEGRAM_TOKEN_CS',
+    displayName: 'CS',
+  });
+}
+
+// Dota2 wrapper — A/B expansion.
+// Memory cross-sport: dota2|ML shadow n=11 ROI +7.6% borderline.
+async function _runDotaAiShadow(ctx) {
+  return _runAiShadow('dota2', ctx, {
+    canonicalSport: 'dota2',
+    subPrefs: ['dota2', 'dota'],
+    dmTokenEnv: 'TELEGRAM_TOKEN_ESPORTS',
+    displayName: 'Dota 2',
+  });
+}
+
+// Tennis wrapper — A/B expansion.
+// Tennis ML shadow n=339 ROI -3.7% — high volume, potencial AI cobertura.
+async function _runTennisAiShadow(ctx) {
+  return _runAiShadow('tennis', ctx, {
+    canonicalSport: 'tennis',
+    subPrefs: ['tennis'],
+    dmTokenEnv: 'TELEGRAM_TOKEN_TENNIS',
+    displayName: 'Tênis',
+  });
+}
+
+// Football wrapper — A/B expansion.
+// Football MT shadow alto volume, ROI mixed. AI pode otimizar tier1.
+async function _runFootballAiShadow(ctx) {
+  return _runAiShadow('football', ctx, {
+    canonicalSport: 'football',
+    subPrefs: ['football'],
+    dmTokenEnv: 'TELEGRAM_TOKEN_FOOTBALL',
+    displayName: 'Futebol',
+  });
+}
+
+// Valorant wrapper — A/B expansion. 2026-05-18: Valorant main path não usava
+// AI (só Elo + Pinnacle implied). Este shadow path constrói prompt LLM próprio
+// + chama DeepSeek. Token compartilhado com CS (TELEGRAM_TOKEN_VALORANT
+// opcional, fallback TELEGRAM_TOKEN_CS per memory project_session_valorant).
+async function _runValorantAiShadow(ctx) {
+  return _runAiShadow('valorant', ctx, {
+    canonicalSport: 'valorant',
+    subPrefs: ['valorant'],
+    dmTokenEnv: process.env.TELEGRAM_TOKEN_VALORANT ? 'TELEGRAM_TOKEN_VALORANT' : 'TELEGRAM_TOKEN_CS',
+    displayName: 'Valorant',
+  });
+}
+
 async function autoAnalyzeMatch(token, match) {
   const game = match.game;
   const matchId = String(match.id);
@@ -16521,6 +16579,17 @@ Máximo 200 palavras.`;
       log('INFO', 'AUTO-DOTA', `Analisando${isLive ? ' [AO VIVO]' : ''}: ${match.team1} vs ${match.team2} (${match.league}) | mlEdge=${mlResult.score.toFixed(1)}pp`);
       setDotaAnalyzed({ ts: now, tipSent: false, noEdge: false });
 
+      // 2026-05-18: Dota AI shadow POC (A/B expansion mirror LoL/MMA).
+      // Gate: DOTA2_AI_SHADOW=true (research) | DOTA2_AI_REAL=true (promove).
+      // Economy gates (cooldown 4h, daily_cap 50, min_edge 3pp) aplicam.
+      if (/^(1|true|yes)$/i.test(String(process.env.DOTA2_AI_SHADOW || '')) ||
+          /^(1|true|yes)$/i.test(String(process.env.DOTA2_AI_REAL || ''))) {
+        setImmediate(() => {
+          _runDotaAiShadow({ match, mlResult, oddsToUse: o, prompt, hasLiveStats: isLive })
+            .catch(e => { try { log('WARN', 'AI-SHADOW-DOTA2', `dispatch err: ${e?.message || e}`); } catch (_) {} });
+        });
+      }
+
       let iaResp = '';
       try {
         const iaRaw = await serverPost('/claude', {
@@ -19072,6 +19141,15 @@ Máximo 200 palavras. Raciocínio breve antes da decisão.`;
         if (_tennisHybridText) {
           text = _tennisHybridText + '\n';
         } else {
+          // 2026-05-18: Tennis AI shadow POC (A/B expansion).
+          // Gate: TENNIS_AI_SHADOW=true (research) | TENNIS_AI_REAL=true (promove).
+          if (/^(1|true|yes)$/i.test(String(process.env.TENNIS_AI_SHADOW || '')) ||
+              /^(1|true|yes)$/i.test(String(process.env.TENNIS_AI_REAL || ''))) {
+            setImmediate(() => {
+              _runTennisAiShadow({ match, mlResult: mlResultTennis, oddsToUse: o, prompt, hasLiveStats: false })
+                .catch(e => { try { log('WARN', 'AI-SHADOW-TENNIS', `dispatch err: ${e?.message || e}`); } catch (_) {} });
+            });
+          }
           try {
             resp = await serverPost('/claude', {
               model: 'deepseek-chat',
@@ -20328,6 +20406,15 @@ Máximo 200 palavras.`;
         if (_fbHybridText) {
           text = _fbHybridText + '\n';
         } else {
+          // 2026-05-18: Football AI shadow POC (A/B expansion).
+          // Gate: FOOTBALL_AI_SHADOW=true (research) | FOOTBALL_AI_REAL=true (promove).
+          if (/^(1|true|yes)$/i.test(String(process.env.FOOTBALL_AI_SHADOW || '')) ||
+              /^(1|true|yes)$/i.test(String(process.env.FOOTBALL_AI_REAL || ''))) {
+            setImmediate(() => {
+              _runFootballAiShadow({ match, mlResult: fbModel, oddsToUse: o, prompt, hasLiveStats: false })
+                .catch(e => { try { log('WARN', 'AI-SHADOW-FOOTBALL', `dispatch err: ${e?.message || e}`); } catch (_) {} });
+            });
+          }
           try {
             resp = await serverPost('/claude', {
               model: 'deepseek-chat',
@@ -21742,6 +21829,16 @@ ou SEM_EDGE (se modelo está errado / dados insuficientes / time academy não co
 
 Máximo 150 palavras.`;
 
+          // 2026-05-18: CS AI shadow POC (A/B expansion).
+          // Gate: CS_AI_SHADOW=true (research) | CS_AI_REAL=true (promove).
+          if (/^(1|true|yes)$/i.test(String(process.env.CS_AI_SHADOW || '')) ||
+              /^(1|true|yes)$/i.test(String(process.env.CS_AI_REAL || ''))) {
+            setImmediate(() => {
+              _runCsAiShadow({ match, mlResult, oddsToUse: match.odds, prompt, hasLiveStats: isLiveCs })
+                .catch(e => { try { log('WARN', 'AI-SHADOW-CS', `dispatch err: ${e?.message || e}`); } catch (_) {} });
+            });
+          }
+
           let iaResp = '';
           try {
             const iaRaw = await serverPost('/claude', { messages: [{ role: 'user', content: prompt }], max_tokens: 350, sport: 'cs' }).catch(() => null);
@@ -22408,6 +22505,63 @@ async function pollValorant(runOnce = false) {
         const pickOdd  = direction === 't1' ? o1 : o2;
         const pickP    = direction === 't1' ? modelP1 : modelP2;
         const evPct = (pickP * pickOdd - 1) * 100;
+
+        // 2026-05-18: Valorant AI shadow POC (A/B expansion).
+        // Valorant main path NÃO usava AI (só Elo + Pinnacle). Este shadow
+        // constrói prompt LLM Val-specific (forma + meta + tier) e chama
+        // DeepSeek pra comparar contra modelo solo. Gate: VALORANT_AI_SHADOW=true
+        // (research) | VALORANT_AI_REAL=true (promove). Economy gates aplicam.
+        if (/^(1|true|yes)$/i.test(String(process.env.VALORANT_AI_SHADOW || '')) ||
+            /^(1|true|yes)$/i.test(String(process.env.VALORANT_AI_REAL || ''))) {
+          const _valPrompt = `Você é um analista especializado em Valorant esports. Analise este match e identifique edge real se existir.
+
+MATCH: ${match.team1} vs ${match.team2}
+Liga: ${match.league || 'desconhecida'} | Status: ${isLiveVal ? 'AO VIVO' : 'pré-jogo'}${bo ? ` (Bo${bo})` : ''}
+${(match.score1 != null && match.score2 != null) ? `Placar série: ${match.score1}-${match.score2}\n` : ''}
+ODDS (${match.odds?.bookmaker || 'Pinnacle'}):
+${match.team1}: ${o1} | ${match.team2}: ${o2}
+Modelo Elo: ${match.team1}=${(modelP1*100).toFixed(1)}% | ${match.team2}=${(modelP2*100).toFixed(1)}%
+Sample Elo: ${match.team1}=${elo?.eloMatches1 ?? '?'}j | ${match.team2}=${elo?.eloMatches2 ?? '?'}j
+Edge ML: ${mlScore.toFixed(1)}pp | Pick modelo: ${pickTeam} @ ${pickOdd}
+
+ANÁLISE (seja específico — Valorant):
+1. Forma e meta: composições/agentes meta, último patch, performance recente das equipes.
+2. Mapa pool: forças/fraquezas conhecidas em mapas que provavelmente sairão (Bind, Haven, Split, Ascent, Icebox, Breeze, Fracture, Pearl, Lotus, Sunset).
+3. Roster: jogadores chave (duelist, controller, sentinel, initiator), sub recente, IGL e estilo de jogo.
+4. Contexto torneio: playoffs/group/regional, importância da partida, motivação, fadiga.
+5. Tier liga: T1 (VCT internacional) vs T2 (Challengers regionais) vs T3 (Game Changers/sub-21) — variance maior em ligas menores.
+
+REGRAS: Odds 1.40-6.00 | EV ≥ 5%${isLiveVal ? ' | Live: só ALTA/MÉDIA com edge claro' : ''}
+
+CÁLCULO DE EV — OBRIGATÓRIO VALIDAR:
+  EV% = (P/100 × odd − 1) × 100
+  Exemplo: P=55%, odd=2.00 → EV = (0.55 × 2.00 − 1) × 100 = +10%
+⚠️ Se EV reportado ≠ cálculo, tip REJEITADA. EV > 40% provavelmente erro.
+
+DECISÃO FINAL (escolha UMA):
+TIP_ML:[time]@[odd]|P:[%]|STAKE:[1-3]u|CONF:[ALTA/MÉDIA/BAIXA]
+(P = sua prob 0-100 inteiro; sistema calcula EV.)
+ou SEM_EDGE
+
+Máximo 180 palavras.`;
+          const _valMlResult = {
+            modelP1, modelP2,
+            score: mlScore,
+            factorActive: elo?.factors || [],
+            factorCount: factorCount || 0,
+            impliedP1: o1 > 1 ? 1/o1 : null,
+            impliedP2: o2 > 1 ? 1/o2 : null,
+          };
+          setImmediate(() => {
+            _runValorantAiShadow({
+              match,
+              mlResult: _valMlResult,
+              oddsToUse: { t1: o1, t2: o2, bookmaker: match.odds?.bookmaker },
+              prompt: _valPrompt,
+              hasLiveStats: isLiveVal
+            }).catch(e => { try { log('WARN', 'AI-SHADOW-VALORANT', `dispatch err: ${e?.message || e}`); } catch (_) {} });
+          });
+        }
 
         const _preBonusVal = require('./lib/pre-match-gate').preMatchEvBonus('valorant', isLiveVal);
         const _evReqVal = VAL_MIN_EV + _preBonusVal;
