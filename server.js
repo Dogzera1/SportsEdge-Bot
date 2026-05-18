@@ -20119,13 +20119,46 @@ load();
       const rows = db.prepare(`
         SELECT id, sport, match_id, event_name, participant1, participant2, tip_participant,
                odds, ev, stake, stake_reais, confidence, is_live, sent_at, result, settled_at,
-               profit_reais, market_type, is_shadow, clv_odds, open_odds, model_label, tip_reason
+               profit_reais, market_type, is_shadow, clv_odds, open_odds, model_label, tip_reason,
+               tip_context_json
         FROM tips
         WHERE ${conds.join(' AND ')}
         ORDER BY sent_at DESC
         LIMIT ?
       `).all(...params, limit);
-      sendJson(res, { ok: true, count: rows.length, filters: { days, limit, sport: parsed.query.sport, is_shadow: parsed.query.is_shadow, market_type: parsed.query.market_type }, tips: rows });
+      // 2026-05-18: enrich com ai_emitted + emission_source pra dashboard visibility.
+      // Pattern: emission_source termina em _ai_shadow ou _ai_real = LLM-emitted.
+      // tip_reason 'AI...' também marca (fallback). Engine assumido DeepSeek atual.
+      const enriched = rows.map(r => {
+        let emissionSource = null;
+        if (r.tip_context_json) {
+          try {
+            const c = JSON.parse(r.tip_context_json);
+            emissionSource = c?.emission_source || null;
+          } catch (_) { /* parse fail tolerado */ }
+        }
+        const reasonAi = /AI|deepseek/i.test(String(r.tip_reason || ''));
+        const srcAi = /_ai_(shadow|real)$|^ai_|deepseek/i.test(String(emissionSource || ''));
+        const aiEmitted = !!(srcAi || reasonAi);
+        return {
+          ...r,
+          tip_context_json: undefined, // strip raw JSON da response
+          emission_source: emissionSource,
+          ai_emitted: aiEmitted,
+          ai_engine: aiEmitted ? 'DeepSeek' : null,
+        };
+      });
+      // Summary counts for dashboard at-a-glance
+      const summary = {
+        total: enriched.length,
+        ai_emitted: enriched.filter(t => t.ai_emitted).length,
+        model_only: enriched.filter(t => !t.ai_emitted).length,
+        real: enriched.filter(t => t.is_shadow === 0).length,
+        shadow: enriched.filter(t => t.is_shadow === 1).length,
+        ai_real: enriched.filter(t => t.ai_emitted && t.is_shadow === 0).length,
+        ai_shadow: enriched.filter(t => t.ai_emitted && t.is_shadow === 1).length,
+      };
+      sendJson(res, { ok: true, count: enriched.length, summary, filters: { days, limit, sport: parsed.query.sport, is_shadow: parsed.query.is_shadow, market_type: parsed.query.market_type }, tips: enriched });
     } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
     return;
   }
