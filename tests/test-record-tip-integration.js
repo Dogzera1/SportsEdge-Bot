@@ -575,6 +575,62 @@ module.exports = async function runTests(t) {
     }
   });
 
+  // ─── news_critical: 2026-05-18 P4 TDD pending coverage ────────────────
+  // server.js L25010-25021: gate consulta lib/news-impact getImpact pre-emit.
+  // Se severity='critical' em (sport, team1 OR team2) → _emitSkip('news_critical').
+  // Cache populado por news_monitor cron 15min (em prod) ou via novo endpoint
+  // POST /admin/news-impact-inject (test path).
+  //
+  // Setup: spawn server → POST /admin/news-impact-inject c/ critical alert pra
+  // team='NewsAlpha' → POST /record-tip com team1=NewsAlpha → expect skipped
+  // reason=news_critical + body.team echo.
+  await t.test('news_critical: critical news em team → rejected', async () => {
+    const tmpDbN = path.join(os.tmpdir(), `test-rt-news-${Date.now()}.db`);
+    const portN = 30000 + Math.floor(Math.random() * 10000);
+    const envN = { ...env, DB_PATH: tmpDbN, PORT: String(portN) };
+    const procN = spawn('node', ['server.js'], { env: envN, cwd: REPO_ROOT, stdio: ['ignore', 'pipe', 'pipe'] });
+    procN.stdout.on('data', () => {});
+    procN.stderr.on('data', () => {});
+    try {
+      await waitHealth(portN, HEALTH_TIMEOUT_MS);
+
+      // Inject critical news alert via novo endpoint admin
+      const injRes = await httpJson(portN, 'POST', '/admin/news-impact-inject', {
+        alerts: [{
+          sport: 'dota2',
+          severity: 'critical',
+          title: 'TEST: Player withdraws from match (P4 integration test)',
+          source: 'test_seed',
+          pub_ts: Date.now(),
+          affected_teams: ['NewsAlpha'],
+        }],
+      }, { 'x-admin-key': 'test' });
+      t.assert(injRes.status === 200, `inject should 200, got ${injRes.status} body=${JSON.stringify(injRes.body)}`);
+      t.assert(injRes.body.upserts === 1, `expected 1 upsert, got ${injRes.body.upserts}`);
+
+      // POST tip com team1=NewsAlpha → gate dispara
+      const r = await httpJson(portN, 'POST', '/record-tip?sport=dota2', {
+        matchId: 'test_dota2_news_' + Date.now(),
+        eventName: 'News Test League',
+        p1: 'NewsAlpha',
+        p2: 'NewsBeta',
+        tipParticipant: 'NewsAlpha',
+        odds: 1.85,
+        ev: 8.5,
+      }, { 'x-admin-key': 'test' });
+      t.assert(r.status === 200, `expected 200 (skipped), got ${r.status} body=${JSON.stringify(r.body)}`);
+      t.assert(r.body.skipped === true, `expected skipped=true, got ${JSON.stringify(r.body)}`);
+      t.assert(r.body.reason === 'news_critical', `expected reason=news_critical, got ${r.body.reason}`);
+      t.assert(typeof r.body.team === 'string' && r.body.team.length > 0, `expected team echo, got ${JSON.stringify(r.body)}`);
+      t.assert(typeof r.body.title === 'string' && /TEST/.test(r.body.title), `expected title echo with TEST, got ${r.body.title}`);
+    } finally {
+      try { procN.kill(); } catch (_) {}
+      try { fs.unlinkSync(tmpDbN); } catch (_) {}
+      try { fs.unlinkSync(tmpDbN + '-shm'); } catch (_) {}
+      try { fs.unlinkSync(tmpDbN + '-wal'); } catch (_) {}
+    }
+  });
+
   // ─── time_of_day_blocked: 2026-05-18 P4 TDD pending coverage ───────────
   // server.js L25330-25395: gate consulta global._timeOfDayBlockCache lazy
   // (TTL 1h). SELECT tips do sport agg (n, profit, stake) per hour UTC.

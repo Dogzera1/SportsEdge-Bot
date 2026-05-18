@@ -12589,6 +12589,30 @@ setInterval(load, 60000);
     return;
   }
 
+  // POST /admin/news-impact-inject — inject alert manualmente em cache.
+  // Usado por integration tests (P4 news_critical coverage 2026-05-18) e
+  // debug ops (e.g. injetar critical alert pra player out durante incident).
+  // Body: { alerts: [{ sport, severity, title, source, pub_ts, affected_teams }] }
+  // Honra mesma logic do news_monitor: updateImpactFromAlerts (severity rank +
+  // TTL 3h pós pub_ts). Retorna { upserts, stats }.
+  if (p === '/admin/news-impact-inject' && req.method === 'POST') {
+    if (!requireAdmin(req, res)) return;
+    let body = '';
+    req.on('data', c => { body += c; if (body.length > 50000) req.destroy(); });
+    req.on('end', () => {
+      try {
+        const payload = JSON.parse(body || '{}');
+        const alerts = Array.isArray(payload?.alerts) ? payload.alerts : [];
+        if (!alerts.length) { sendJson(res, { ok: false, error: 'alerts array required' }, 400); return; }
+        const { updateImpactFromAlerts, getStats } = require('./lib/news-impact');
+        const upserts = updateImpactFromAlerts(alerts);
+        sendJson(res, { ok: true, upserts, stats: getStats() });
+      } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    });
+    req.on('error', () => { try { sendJson(res, { ok: false, error: 'request error' }, 500); } catch (_) {} });
+    return;
+  }
+
   // GET /admin/live-tips-debug?sport=X&hours=24 — visibility per sport.
   // Identifica se zero live tips é falta de dados (Pinnacle no live odds),
   // EV gate, ou ausência de match live na janela.
