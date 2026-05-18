@@ -16088,6 +16088,10 @@ async function _pollDotaInner(runOnce = false) {
               maxPerMatch: parseInt(process.env.DOTA_MARKET_MAX_PER_MATCH || '', 10) || null,
               // 2026-05-12: calib opcional pós-pricing. No-op até dota2-mt-calib.json existir.
               calibLib: require('./lib/sport-mt-calib').getSportMtCalib('dota2'),
+              // P1 tier-aware: passa tier key canônico (mesmo classifier do refit writer
+              // em /admin/mt-refit-calib), consumer lê markets[m].tiers[tier].bins
+              // com fallback flat. No-op enquanto refit cross-sport não rodar com stratify=tier.
+              calibOpts: { tier: require('./lib/tier-classifier').classifyTierString('dota2', match.league) },
               score1: _dotaIsLivePartial ? (Number(match.score1) || 0) : undefined,
               score2: _dotaIsLivePartial ? (Number(match.score2) || 0) : undefined,
             });
@@ -21100,6 +21104,9 @@ async function pollCs(runOnce = false) {
                 maxPerMatch: parseInt(process.env.CS_MARKET_MAX_PER_MATCH || '', 10) || null,
                 // 2026-05-12: calib opcional pós-pricing. No-op até cs-mt-calib.json existir.
                 calibLib: require('./lib/sport-mt-calib').getSportMtCalib('cs'),
+                // P1 tier-aware: passa tier key canônico (mesmo classifier do refit writer).
+                // CS sport key 'cs2' no classifier (esports tier table); calib file persiste em 'cs'.
+                calibOpts: { tier: require('./lib/tier-classifier').classifyTierString('cs2', match.league) },
                 // Live-aware: score parcial propaga via pricingOpts em cs-live-pricing.
                 score1: _csIsLivePartial ? (Number(match.score1) || 0) : undefined,
                 score2: _csIsLivePartial ? (Number(match.score2) || 0) : undefined,
@@ -21918,6 +21925,8 @@ async function pollValorant(runOnce = false) {
                 maxPerMatch: parseInt(process.env.VAL_MARKET_MAX_PER_MATCH || '', 10) || null,
                 // 2026-05-12: calib opcional pós-pricing. No-op até valorant-mt-calib.json existir.
                 calibLib: require('./lib/sport-mt-calib').getSportMtCalib('valorant'),
+                // P1 tier-aware: passa tier key canônico (mesmo classifier do refit writer).
+                calibOpts: { tier: require('./lib/tier-classifier').classifyTierString('valorant', match.league) },
                 score1: _valIsLivePartial ? (Number(match.score1) || 0) : undefined,
                 score2: _valIsLivePartial ? (Number(match.score2) || 0) : undefined,
               });

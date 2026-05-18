@@ -20290,7 +20290,14 @@ load();
       // ?write=true: persiste em lib/<sport>-markov-calib.json e retorna apenas
       // resumo curto. Evita serializar payload gigante via proxy (Railway/Cloudflare
       // tem timeout em respostas grandes; auditoria 2026-05-04 mostrou hangs).
+      //
+      // 2026-05-18 (P9 pendency): &tiers_only=true preserva markets[m].bins
+      // (flat) existente e só sobrescreve markets[m].tiers — pra incremental
+      // refit per-tier sem risco de degradar flat global. Requer stratify=tier
+      // E file existente (no flat to preserve = bail). Idempotent: re-rodar
+      // só atualiza tiers + tiers_fittedAt timestamp.
       const writeFlag = /^(1|true|yes)$/i.test(String(parsed.query.write || ''));
+      const tiersOnly = /^(1|true|yes)$/i.test(String(parsed.query.tiers_only || ''));
       if (writeFlag) {
         try {
           const fs = require('fs');
@@ -20306,10 +20313,53 @@ load();
             ? 'tennis-markov-calib.json'
             : `${sport}-mt-calib.json`;
           const targetPath = path.join(__dirname, 'lib', filename);
-          fs.writeFileSync(targetPath, JSON.stringify(payload, null, 2));
+
+          let toWrite = payload;
+          let writeMode = 'full_rewrite';
+          if (tiersOnly) {
+            if (stratify !== 'tier') {
+              sendJson(res, { ok: false, error: 'tiers_only=true requires stratify=tier' }, 400);
+              return;
+            }
+            if (!fs.existsSync(targetPath)) {
+              sendJson(res, { ok: false, error: 'tiers_only=true requires existing calib file (no flat to preserve)' }, 400);
+              return;
+            }
+            try {
+              const existing = JSON.parse(fs.readFileSync(targetPath, 'utf8'));
+              if (!existing.markets || typeof existing.markets !== 'object') {
+                throw new Error('existing file has no markets object');
+              }
+              let mergedAny = false;
+              for (const [marketName, marketCalib] of Object.entries(calibByMarket)) {
+                if (!marketCalib.tiers) continue;
+                if (!existing.markets[marketName]) {
+                  existing.markets[marketName] = marketCalib;
+                } else {
+                  existing.markets[marketName].tiers = marketCalib.tiers;
+                }
+                mergedAny = true;
+              }
+              if (!mergedAny) {
+                sendJson(res, { ok: false, error: 'no tiers fitted to merge (insufficient sample per tier)', tier_stratified: tierStratified }, 400);
+                return;
+              }
+              existing.tiers_fittedAt = new Date().toISOString();
+              existing.tiers_n_train = trainTips.length;
+              existing.tiers_n_eval = evalTips.length;
+              toWrite = existing;
+              writeMode = 'tiers_only_merge';
+            } catch (e) {
+              sendJson(res, { ok: false, error: `tiers_only merge failed: ${e.message}` }, 500);
+              return;
+            }
+          }
+
+          fs.writeFileSync(targetPath, JSON.stringify(toWrite, null, 2));
           sendJson(res, {
             ok: true,
             written: targetPath,
+            write_mode: writeMode,
             sport,
             nSamples: settled,
             n_train: trainTips.length,
@@ -20325,7 +20375,9 @@ load();
             backtest,
             skipped,
             tier_stratified: stratify === 'tier' ? tierStratified : undefined,
-            note: 'Cache TTL 30min — efeito imediato em novas tips. Restart pod pra forçar reload.',
+            note: writeMode === 'tiers_only_merge'
+              ? 'tiers_only: flat bins preservados. Cache TTL 30min — efeito imediato.'
+              : 'Cache TTL 30min — efeito imediato em novas tips. Restart pod pra forçar reload.',
           });
           return;
         } catch (e) {
