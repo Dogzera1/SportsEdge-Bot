@@ -20161,15 +20161,27 @@ load();
       // inalterado (só flat bins).
       // Trigger: /admin/shadow-tier-divergence recomenda "Refit tier-aware vale
       // a pena — 5 buckets gap ≥10pp entre tiers" (tennis 2026-05-17).
+      //
+      // 2026-05-17 BUG FIX: usa classifier CANÔNICO (lib/tier-classifier) em vez
+      // de getLeagueTier (numérico 1/2/3). Consumer scanner passa keys nomeadas
+      // ('atp_main','atp_challenger','wta125k','itf' p/ tennis; 'tier1','tier2',
+      // 'other' p/ esports), então write com keys numéricas era dead-code (consumer
+      // missed lookup, fallback flat). Mesmo classifier do fit-tennis-markov-calibration.js.
       const stratify = String(parsed.query.stratify || '').toLowerCase();
       const tierStratified = {};
       if (stratify === 'tier') {
         try {
-          const { getLeagueTier } = require('./lib/league-tier');
-          const tierFor = (lg) => `tier${getLeagueTier(sport, lg)}`;
+          const { classifyTierString } = require('./lib/tier-classifier');
+          const tierFor = (lg) => classifyTierString(sport, lg);
+          // Discover unique tier keys present in training data (não hardcode)
+          const tierKeysPresent = new Set();
+          for (const t of tips) {
+            const tk = tierFor(t.league);
+            if (tk) tierKeysPresent.add(tk);
+          }
           for (const market of Object.keys(calibByMarket)) {
             const tiersFit = {};
-            for (const tierKey of ['tier1', 'tier2', 'tier3']) {
+            for (const tierKey of tierKeysPresent) {
               const tierFilter = (t) => tierFor(t.league) === tierKey;
               const r = fitMarket(market, tierFilter);
               if (!r.skip) tiersFit[tierKey] = r;
