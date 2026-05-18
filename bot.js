@@ -159,7 +159,12 @@ function evCeilingFor(game, odds, league = null) {
   // separar Academy de Main reliably.
   // Match: LCK Challengers, LCS Challengers, NACL, Academy, Youth, Rookies,
   // Prime League (German tier 2), GLL, Hellenic, etc.
-  const isFeeder = league && /\b(academy|challengers?|youth|rookies?|prime|gll|hellenic|ebl|nacl|lcp|tcl|liga portuguesa|hitpoint)\b/i.test(String(league));
+  // 2026-05-18: add "desafiante" (Circuito Desafiante BR — tier3 LoL).
+  // Log 20:22Z mostrou Estral vs RED Academy CD: trainedP1=74% conf=0.8 vs
+  // odds @6.9 (implícita 14%) → EV 82.8% pingou ceiling 80% generic. Tier-aware
+  // cap LOL_TIER3_MAX_EV=25 em bot.js:3239 roda DEPOIS, então 80% catched first.
+  // CD não casava no regex feeder (português BR) — agora cap pra 50.
+  const isFeeder = league && /\b(academy|challengers?|youth|rookies?|prime|gll|hellenic|ebl|nacl|lcp|tcl|liga portuguesa|hitpoint|desafiante)\b/i.test(String(league));
   if (isFeeder) {
     const feederCeil = parseFloat(process.env[`${String(game).toUpperCase()}_FEEDER_EV_CEILING`] ?? '50');
     base = Math.min(base, feederCeil);
@@ -18949,6 +18954,15 @@ async function pollTennis(runOnce = false) {
             // todas tips tennis eram MT promovidas. Propagação direta resolve.
             confidence: tennisModelResult.confidence,
             method: tennisModelResult.method,
+            // 2026-05-18: gate _sharpDivergenceGate (linha ~19259) lê
+            // mlResultTennis.eloMatches1/2 pra strongSignals override
+            // (signalCount>=6 && eloMinGames>=20). Sem propagação, override
+            // nunca ativava → cap 18-20pp sempre limitava → tips legítimas
+            // tier1 com Elo robusto eram rejeitadas (log 2026-05-18 20:23-24Z
+            // Moller/Skatov Δ19.2pp e Pavlovic/Wendelken Δ22.5pp). Outros
+            // sports (LoL 10887, CS 21793) usam local var direta, sem leak.
+            eloMatches1: eloResult?.eloMatches1 || 0,
+            eloMatches2: eloResult?.eloMatches2 || 0,
             _tennisModel: tennisModelResult,
             _tennisModelMeta: { method: tennisModelResult.method, confidence: tennisModelResult.confidence },
             _eloResult: eloResult,
@@ -18978,6 +18992,8 @@ async function pollTennis(runOnce = false) {
             score: eloResult.score,
             factorCount: eloResult.factorCount,
             direction: eloResult.direction,
+            eloMatches1: eloResult?.eloMatches1 || 0,
+            eloMatches2: eloResult?.eloMatches2 || 0,
             _eloResult: eloResult,
           };
         } else {
