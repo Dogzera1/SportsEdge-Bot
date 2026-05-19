@@ -30727,6 +30727,7 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
             SELECT MAX(tdx.id) FROM tips tdx
             WHERE tdx.sport IN ${sportInSql}
               AND (tdx.archived IS NULL OR tdx.archived = 0)
+              AND COALESCE(tdx.is_shadow, 0) = 0
               ${marketFilterSql.replace(/market_type/g, 'tdx.market_type')}
             GROUP BY COALESCE(NULLIF(TRIM(tdx.match_id), ''), 'id:' || CAST(tdx.id AS TEXT))
           )
@@ -30860,7 +30861,17 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
     // foi gravada antes em 'esports' e depois em 'lol'/'dota2' (bot migrou mid-flight).
     const { sportSet, effectiveGame } = resolveSportSet(sport, game);
     const sportInSql = `(${sportSet.map(() => '?').join(',')})`;
-    const dedupSql = `t.id IN (SELECT MAX(tdx.id) FROM tips tdx WHERE tdx.sport IN ${sportInSql} AND (tdx.archived IS NULL OR tdx.archived = 0) GROUP BY COALESCE(NULLIF(TRIM(tdx.match_id), ''), 'id:' || CAST(tdx.id AS TEXT)))`;
+    // 2026-05-19 audit BUG FIX: dedup MAX(id) GROUP BY match_id sem filtro is_shadow
+    // fazia shadow tip com id maior "engolir" real tip com mesmo match_id. Outer
+    // filtro is_shadow=0 depois removia o shadow id → real tip ficava invisível.
+    // Caso real: basket #3630 REAL loss -1.50 match_id 401873199 shadowed por
+    // #3643 SHADOW win match_id 401873199 → /tips-history?sport=basket retornava
+    // só 2 de 3 real tips. Dashboard mostrava lucro -1.50 enquanto bankroll
+    // refletia -3.00 (real). User reportou discrepância valor banca vs lucro tips.
+    // Fix: espelha outer is_shadow filter no inner dedup — dedup acontece DENTRO
+    // do universo shadow ou real, nunca cross-universe.
+    const dedupShadowFilter = includeShadow ? '' : ' AND COALESCE(tdx.is_shadow, 0) = 0';
+    const dedupSql = `t.id IN (SELECT MAX(tdx.id) FROM tips tdx WHERE tdx.sport IN ${sportInSql} AND (tdx.archived IS NULL OR tdx.archived = 0)${dedupShadowFilter} GROUP BY COALESCE(NULLIF(TRIM(tdx.match_id), ''), 'id:' || CAST(tdx.id AS TEXT)))`;
     let query = `
       SELECT t.*
       FROM tips t
