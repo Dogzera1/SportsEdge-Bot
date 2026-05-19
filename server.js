@@ -15164,9 +15164,8 @@ load();
 
         // ── Tier 1: PandaScore ──
         if (PANDASCORE_TOKEN && PANDASCORE_TOKEN !== 'your-pandascore-token' && psMatchId) {
-          const headers = { 'Authorization': `Bearer ${PANDASCORE_TOKEN}` };
           try {
-            const mr = await httpGet(`https://api.pandascore.co/matches/${psMatchId}`, headers);
+            const mr = await _pandaGet(`/matches/${psMatchId}`);
             if (mr && mr.status === 200) {
               const m = safeParse(mr.body, {});
               const games = Array.isArray(m.games) ? m.games : [];
@@ -23287,8 +23286,7 @@ load();
     try {
       // PandaScore raw
       if (PANDASCORE_TOKEN) {
-        const headers = { 'Authorization': `Bearer ${PANDASCORE_TOKEN}` };
-        const mr = await httpGet(`https://api.pandascore.co/matches/${ps}`, headers).catch(e => ({ status: 0, error: e.message }));
+        const mr = await _pandaGet(`/matches/${ps}`);
         if (mr?.status === 200) {
           const m = safeParse(mr.body, {});
           const games = Array.isArray(m.games) ? m.games : [];
@@ -23306,7 +23304,7 @@ load();
             };
             // Try /lol/games/<id> for full player data
             if (game.id) {
-              const gr = await httpGet(`https://api.pandascore.co/lol/games/${game.id}`, headers).catch(() => null);
+              const gr = await _pandaGet(`/lol/games/${game.id}`);
               if (gr?.status === 200) {
                 const gd = safeParse(gr.body, {});
                 const players = Array.isArray(gd.players) ? gd.players : [];
@@ -24037,7 +24035,7 @@ load();
       const path = id
         ? `/valorant/matches/${id}`
         : '/valorant/matches/past?per_page=1&sort=-end_at&filter[finished]=true';
-      const r = await httpGet(`https://api.pandascore.co${path}`, headers);
+      const r = await _pandaGet(path);
       const body = safeParse(r.body, null);
       const sample = Array.isArray(body) ? body[0] : body;
       const firstGame = sample?.games?.[0] || null;
@@ -24046,7 +24044,7 @@ load();
       let gameDetail = null;
       let gameDetailKeys = [];
       if (firstGame?.id) {
-        const gr = await httpGet(`https://api.pandascore.co/valorant/games/${firstGame.id}`, headers).catch(() => null);
+        const gr = await _pandaGet(`/valorant/games/${firstGame.id}`);
         if (gr) {
           const gb = safeParse(gr.body, null);
           gameDetail = { status: gr.status, body: gb };
@@ -35266,7 +35264,7 @@ async function syncProStats({ forceResync = false } = {}) {
     try {
       // PandaScore: precisa de include para popular players/champions em alguns planos/versões
       const include = 'games.teams.players.player,games.teams.players.champion,games.winner';
-      const detR = await httpGet(`https://api.pandascore.co/lol/matches/${m.id}?include=${encodeURIComponent(include)}`, headers);
+      const detR = await _pandaGet(`/lol/matches/${m.id}?include=${encodeURIComponent(include)}`);
       if (detR.status === 200) {
         const det = safeParse(detR.body, {});
         // m.games pode já estar populado na resposta lista ou precisar do detalhe
