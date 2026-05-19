@@ -2580,16 +2580,39 @@ async function _unsubscribeUserAll(userId, reason) {
 }
 
 // ── Send Helpers ──
+// 2026-05-19 audit: DM-MARKDOWN parse errors recorrentes (2× em 26min log
+// 17:32-17:58Z, byte offset 181/414). Causa: event_name/team com `*` `_` `[` `]`
+// `` ` `` unbalanced quebra Markdown parser. Telegram retorna 400 → bot retry
+// plaintext (perde formatação). Fix: pre-sanitize text antes do send — conta
+// delimitadores e strip se ímpar.
+function _sanitizeMarkdownForTelegram(text) {
+  if (text == null) return text;
+  let s = String(text);
+  // Bold/italic delimiters — strip ALL se contagem ímpar (unbalanced).
+  for (const ch of ['*', '_', '`']) {
+    const re = new RegExp('\\' + ch, 'g');
+    const count = (s.match(re) || []).length;
+    if (count % 2 !== 0) s = s.replace(re, '');
+  }
+  // Square brackets — usados em [text](url). Strip se desbalanceado.
+  const opens = (s.match(/\[/g) || []).length;
+  const closes = (s.match(/\]/g) || []).length;
+  if (opens !== closes) s = s.replace(/[\[\]]/g, '');
+  return s;
+}
+
 function send(token, chatId, text, extra) {
   return tgRequest(token, 'sendMessage', {
     chat_id: chatId,
-    text,
+    text: _sanitizeMarkdownForTelegram(text),
     parse_mode: 'Markdown',
     ...extra
   });
 }
 
 async function sendDM(token, userId, text, extra) {
+  text = _sanitizeMarkdownForTelegram(text);
+
   // 2026-05-14: early skip pra users 403-blocked nesta sessão. Antes
   // _unsubscribeUserAll DB-persist falhava silent → próximo cycle re-tentava
   // → log noise + rate-limit Telegram. Cache em-mem persistente até restart.
