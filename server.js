@@ -2956,10 +2956,9 @@ async function getPandaScoreLolMatches() {
   if (_pandaInflight) return _pandaInflight;
   _pandaInflight = (async () => {
   try {
-    const headers = { 'Authorization': `Bearer ${PANDASCORE_TOKEN}` };
     const [runningRaw, upcomingRaw] = await Promise.all([
-      httpGet('https://api.pandascore.co/lol/matches/running?per_page=20', headers).catch(() => ({ status: 0, body: '[]' })),
-      httpGet('https://api.pandascore.co/lol/matches/upcoming?per_page=30&sort=begin_at', headers).catch(() => ({ status: 0, body: '[]' }))
+      _pandaGet('/lol/matches/running?per_page=20'),
+      _pandaGet('/lol/matches/upcoming?per_page=30&sort=begin_at')
     ]);
 
     function psMatchList(raw, fallbackLabel) {
@@ -3740,10 +3739,9 @@ async function getPandaScoreDotaMatches() {
   const ttl = hadLive ? PANDA_DOTA_CACHE_TTL_LIVE : PANDA_DOTA_CACHE_TTL_IDLE;
   if (_pandaDotaCache.data.length && (Date.now() - _pandaDotaCache.ts) < ttl) return _pandaDotaCache.data;
   try {
-    const headers = { 'Authorization': `Bearer ${PANDASCORE_TOKEN}` };
     const [runningRaw, upcomingRaw] = await Promise.all([
-      httpGet('https://api.pandascore.co/dota2/matches/running?per_page=20', headers).catch(() => ({ status: 0, body: '[]' })),
-      httpGet('https://api.pandascore.co/dota2/matches/upcoming?per_page=30&sort=begin_at', headers).catch(() => ({ status: 0, body: '[]' }))
+      _pandaGet('/dota2/matches/running?per_page=20'),
+      _pandaGet('/dota2/matches/upcoming?per_page=30&sort=begin_at')
     ]);
     // 2026-05-18 (EXT-2 P5): shared _psParseMatchList detecta 429 + backoff.
     const running = _psParseMatchList(runningRaw, 'dota2', 'PandaScore Dota 2 running');
@@ -3808,10 +3806,9 @@ async function getPandaScoreCsMatches() {
   if (_pandaIsBackedOff('csgo')) return [];
   if (_pandaCsCache.data.length && (Date.now() - _pandaCsCache.ts) < PANDA_CS_CACHE_TTL) return _pandaCsCache.data;
   try {
-    const headers = { 'Authorization': `Bearer ${PANDASCORE_TOKEN}` };
     const [runningRaw, upcomingRaw] = await Promise.all([
-      httpGet('https://api.pandascore.co/csgo/matches/running?per_page=20', headers).catch(() => ({ status: 0, body: '[]' })),
-      httpGet('https://api.pandascore.co/csgo/matches/upcoming?per_page=30&sort=begin_at', headers).catch(() => ({ status: 0, body: '[]' }))
+      _pandaGet('/csgo/matches/running?per_page=20'),
+      _pandaGet('/csgo/matches/upcoming?per_page=30&sort=begin_at')
     ]);
     // 2026-05-18 (EXT-2 P5): shared _psParseMatchList detecta 429 + backoff.
     const running = _psParseMatchList(runningRaw, 'csgo', 'PandaScore CS2 running');
@@ -3920,10 +3917,9 @@ async function getPandaScoreValorantMatches() {
   if (_pandaIsBackedOff('valorant')) return [];
   if (_pandaValorantCache.data.length && (Date.now() - _pandaValorantCache.ts) < PANDA_VALORANT_CACHE_TTL) return _pandaValorantCache.data;
   try {
-    const headers = { 'Authorization': `Bearer ${PANDASCORE_TOKEN}` };
     const [runningRaw, upcomingRaw] = await Promise.all([
-      httpGet('https://api.pandascore.co/valorant/matches/running?per_page=20', headers).catch(() => ({ status: 0, body: '[]' })),
-      httpGet('https://api.pandascore.co/valorant/matches/upcoming?per_page=30&sort=begin_at', headers).catch(() => ({ status: 0, body: '[]' }))
+      _pandaGet('/valorant/matches/running?per_page=20'),
+      _pandaGet('/valorant/matches/upcoming?per_page=30&sort=begin_at')
     ]);
     // 2026-05-18 (EXT-2 P5): shared _psParseMatchList detecta 429 + backoff.
     const running = _psParseMatchList(runningRaw, 'valorant', 'PandaScore Valorant running');
@@ -4890,7 +4886,6 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     try {
-      const headers = { 'Authorization': `Bearer ${PANDASCORE_TOKEN}` };
       const r = await _pandaGet(`/lol/matches/${psId}`);
       if (r.status !== 200) {
         sendJson(res, { hasCompositions: false, error: `PS status ${r.status}` });
@@ -5356,7 +5351,6 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     try {
-      const headers = { 'Authorization': `Bearer ${PANDASCORE_TOKEN}` };
       const r = await _pandaGet(`/dota2/matches/${psId}`);
       if (r.status !== 200) {
         sendJson(res, { hasLiveStats: false, error: `PS status ${r.status}` });
@@ -10625,7 +10619,6 @@ setInterval(load, 10000);
           if (!eligible.length) return { reason: 'ps_all_resolved_before_tip' };
 
           // Tenta cada candidate
-          const headers = { 'Authorization': `Bearer ${PANDASCORE_TOKEN}` };
           for (const c of eligible) {
             const psId = String(c.match_id || '').replace(/^ps_/, '');
             if (!/^\d+$/.test(psId)) continue;
@@ -24031,7 +24024,6 @@ load();
     try {
       if (!PANDASCORE_TOKEN) { sendJson(res, { error: 'no token' }, 400); return; }
       const id = parsed.query.id || '';
-      const headers = { 'Authorization': `Bearer ${PANDASCORE_TOKEN}` };
       const path = id
         ? `/valorant/matches/${id}`
         : '/valorant/matches/past?per_page=1&sort=-end_at&filter[finished]=true';
