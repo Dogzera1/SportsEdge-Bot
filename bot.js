@@ -25750,6 +25750,27 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
       const days = parseInt(process.env.MT_RESTORE_DAYS || '14', 10);
       const minRoi = parseFloat(process.env.MT_RESTORE_MIN_ROI || '0');
       const minClv = parseFloat(process.env.MT_RESTORE_MIN_CLV || '0');
+      // 2026-05-19 (audit P1-6 — P2 compliance): MT_PERMANENT_DISABLE bloqueia
+      // tip REAL — sintoma de leak real. Restore deve usar evidence REAL, não
+      // shadow puro (que tem EV≥0 bias inflando ROI/CLV). Espelha pattern de
+      // runMtBucketGuardCycle (bot.js:8479 _bgRealJoin) e runMtAutoPromoteCycle.
+      // Opt-out: MT_RESTORE_REAL_ONLY=false (não recomendado — vira P2 violator).
+      const REAL_ONLY = !/^(0|false|no)$/i.test(String(process.env.MT_RESTORE_REAL_ONLY ?? 'true'));
+      const _NORM_R = (col) => `REPLACE(REPLACE(REPLACE(REPLACE(lower(${col}),' ',''),'-',''),'.',''),'''','')`;
+      const _restoreRealJoin = REAL_ONLY ? `
+        INNER JOIN tips t ON
+          t.sport = mts.sport
+          AND UPPER(t.market_type) = UPPER(mts.market)
+          AND COALESCE(t.is_shadow, 0) = 0
+          AND (t.archived IS NULL OR t.archived = 0)
+          AND t.result IN ('win','loss','void','push')
+          AND ABS(julianday(COALESCE(t.sent_at, t.settled_at)) - julianday(mts.created_at)) < 14
+          AND (
+            (${_NORM_R('t.participant1')} = ${_NORM_R('mts.team1')} AND ${_NORM_R('t.participant2')} = ${_NORM_R('mts.team2')})
+            OR
+            (${_NORM_R('t.participant1')} = ${_NORM_R('mts.team2')} AND ${_NORM_R('t.participant2')} = ${_NORM_R('mts.team1')})
+          )
+      ` : '';
       // 2026-05-14: lista vem do DB (mig 108) via lib/mt-permanent-disable.
       // Env fallback é UNION-ed automaticamente em loadSet.
       const permSet = _mtPermDisable.loadSet(db);
@@ -25762,18 +25783,19 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
         const sport = parts[0], market = parts[1], side = parts[2] || null;
         try {
           const where = side
-            ? `sport=? AND market=? AND side=?`
-            : `sport=? AND market=?`;
+            ? `mts.sport=? AND mts.market=? AND mts.side=?`
+            : `mts.sport=? AND mts.market=?`;
           const args = side ? [sport, market, side] : [sport, market];
           const r = db.prepare(`
             SELECT COUNT(*) AS n,
-              ROUND(SUM(profit_units)*1.0/NULLIF(SUM(stake_units),0)*100,1) AS roi_pct,
-              ROUND(AVG(clv_pct),1) AS avg_clv,
-              ROUND(SUM(profit_units),2) AS profit_u
-            FROM market_tips_shadow
+              ROUND(SUM(mts.profit_units)*1.0/NULLIF(SUM(mts.stake_units),0)*100,1) AS roi_pct,
+              ROUND(AVG(mts.clv_pct),1) AS avg_clv,
+              ROUND(SUM(mts.profit_units),2) AS profit_u
+            FROM market_tips_shadow mts
+            ${_restoreRealJoin}
             WHERE ${where}
-              AND created_at >= datetime('now', '-' || ? || ' days')
-              AND result IN ('win','loss')
+              AND mts.created_at >= datetime('now', '-' || ? || ' days')
+              AND mts.result IN ('win','loss')
           `).get(...args, days);
           if (!r || r.n < minN) continue;
           if (r.roi_pct >= minRoi && (r.avg_clv == null || r.avg_clv >= minClv)) {
