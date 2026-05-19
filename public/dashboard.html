@@ -2076,6 +2076,17 @@ async function loadLiveTips(gen = refreshGen) {
       const evCls = evN >= 0 ? 'pos' : 'neg';
       const sportLabel = sportDisplayLabel(t.sport, '');
       const scoreLine = score ? `<span class="live-score" style="color:var(--text-dim);font-size:11px">${escHtml(score)}</span>` : '';
+      // 2026-05-19: AI badge mirror renderTipsTable. emission_source via tip_context_json parse.
+      let _aiEmissionSourceLive = null;
+      if (t.tip_context_json) {
+        try { _aiEmissionSourceLive = JSON.parse(t.tip_context_json)?.emission_source || null; }
+        catch (_) { /* tolerado */ }
+      }
+      const _aiLive = /_ai_(shadow|real)$|^ai_|deepseek/i.test(String(_aiEmissionSourceLive || ''))
+        || /\bAI\b|\bIA\b|\bdeepseek\b/i.test(String(t.tip_reason || ''));
+      const aiBadgeLive = _aiLive
+        ? `<span class="chip" title="Tip emitida via LLM (DeepSeek)${_aiEmissionSourceLive ? ' — source: ' + _aiEmissionSourceLive : ''}" style="background:#8b5cf625;color:#a78bfa;border:1px solid #8b5cf655;font-size:10px;padding:1px 5px">🤖 IA</span>`
+        : '';
       return `
         <div class="live-row" style="border-bottom:1px solid var(--border);padding:10px 0">
           <div style="flex:1;min-width:0">
@@ -2084,6 +2095,7 @@ async function loadLiveTips(gen = refreshGen) {
               <strong>${escHtml(t.tip_participant)}</strong>
               <span style="color:var(--text-dim)">@ ${escHtml(t.odds)}</span>
               <span class="chip" style="font-size:10px;padding:1px 5px">${escHtml(sportLabel)}</span>
+              ${aiBadgeLive}
               ${scoreLine}
             </div>
             <div style="font-size:11px;color:var(--text-dim);margin-top:4px">
@@ -3654,6 +3666,23 @@ function renderTipsTable() {
           // Chip SHADOW pra tips is_shadow=1 (research-only por P2). Visualmente distintiva
           // pra evitar confusão com tips reais quando user ativa toggle "Shadow".
           const shadow = t.is_shadow ? '<span class="chip" title="Tip shadow (is_shadow=1) — research-only, não dispatched pra real bankroll. P2: shadow=causa, real=sintoma" style="background:#475569;color:#e2e8f0;border-color:transparent;font-size:0.7em">SHADOW</span>' : '';
+          // 2026-05-19: chip 🤖 IA pra tips emitidas via LLM (DeepSeek). Detecção
+          // mirror do backend /admin/tips-list (server.js:20143-20145):
+          //   - emission_source termina em _ai_shadow/_ai_real OU começa com ai_ OU contém deepseek
+          //   - tip_reason contém \bAI\b OU \bIA\b OU \bdeepseek\b (word boundary evita falsos positivos
+          //     "trAIned"/"TAIyo"/"ainda" — fix audit F2 2026-05-19)
+          // emission_source vive dentro de tip_context_json (string JSON). Parse defensivo.
+          let _aiEmissionSource = null;
+          if (t.tip_context_json) {
+            try { _aiEmissionSource = JSON.parse(t.tip_context_json)?.emission_source || null; }
+            catch (_) { /* parse fail tolerado — fallback pra tip_reason */ }
+          }
+          const _aiSrc = /_ai_(shadow|real)$|^ai_|deepseek/i.test(String(_aiEmissionSource || ''));
+          const _aiReason = /\bAI\b|\bIA\b|\bdeepseek\b/i.test(String(t.tip_reason || ''));
+          const _aiEmitted = _aiSrc || _aiReason;
+          const aiBadge = _aiEmitted
+            ? `<span class="chip" title="Tip emitida via LLM (DeepSeek)${_aiEmissionSource ? ' — source: ' + _aiEmissionSource : ''}" style="background:#8b5cf625;color:#a78bfa;border:1px solid #8b5cf655;font-size:0.7em;padding:1px 5px;margin-left:4px">🤖 IA</span>`
+            : '';
           // Badge market_type: ML = sem badge (default), outros = chip colorido (HG/TG/HS/TB/etc)
           const _mtRaw = String(t.market_type || 'ML').toUpperCase();
           // total_kills_map<N> → "K<N>" (ex: TOTAL_KILLS_MAP3 → K3)
@@ -3696,7 +3725,7 @@ function renderTipsTable() {
               <td><span class="tip-status ${statusCls}">${statusCh}</span></td>
               <td>
                 <div class="tip-event">${escHtml(t.participant1 || '?')} <span class="tip-meta">vs</span> ${escHtml(t.participant2 || '?')}</div>
-                <div class="tip-meta">${escHtml(t.event_name || t.league || '')} ${live} ${shadow}</div>
+                <div class="tip-meta">${escHtml(t.event_name || t.league || '')} ${live} ${shadow}${aiBadge}</div>
               </td>
               <td><div class="tip-pick">${mtBadge}${segChip}${escHtml(t.tip_participant || '—')}</div></td>
               <td class="tip-num">${(t.odds != null && t.odds !== '' && Number.isFinite(Number(t.odds))) ? Number(t.odds).toFixed(2) : '—'}</td>
@@ -4916,12 +4945,22 @@ async function renderMlShadowTipsList() {
     const ts = (t.sent_at || '').replace('T', ' ').slice(5, 16);
     const clv = (t.clv_odds && t.odds) ? ((t.odds / t.clv_odds - 1) * 100) : null;
     const clvCls = clv == null ? '' : (clv >= 0 ? 'positive' : 'negative');
+    // 2026-05-19: AI badge (ML shadow research table — AI emit é variável de interesse).
+    let _aiSrcMl = null;
+    if (t.tip_context_json) {
+      try { _aiSrcMl = JSON.parse(t.tip_context_json)?.emission_source || null; } catch (_) {}
+    }
+    const _aiMl = /_ai_(shadow|real)$|^ai_|deepseek/i.test(String(_aiSrcMl || ''))
+      || /\bAI\b|\bIA\b|\bdeepseek\b/i.test(String(t.tip_reason || ''));
+    const aiBadgeMl = _aiMl
+      ? `<span title="Tip emitida via LLM (DeepSeek)${_aiSrcMl ? ' — source: ' + _aiSrcMl : ''}" style="background:#8b5cf625;color:#a78bfa;border:1px solid #8b5cf655;font-size:0.7em;padding:1px 4px;margin-left:4px;border-radius:3px">🤖 IA</span>`
+      : '';
     html += `<tr>
       <td>${emoji} ${sp}</td>
       <td style="text-align:center">${segBadge(sp, t.match_id)}</td>
       <td style="white-space:nowrap;font-size:0.85em">${ts}</td>
       <td style="font-size:0.9em">${t.participant1 || '?'} vs ${t.participant2 || '?'}</td>
-      <td><b>${t.tip_participant || '—'}</b></td>
+      <td><b>${t.tip_participant || '—'}</b>${aiBadgeMl}</td>
       <td style="text-align:right">${t.odds != null ? Number(t.odds).toFixed(2) : '—'}</td>
       <td style="text-align:right">${t.ev != null ? Number(t.ev).toFixed(1) + '%' : '—'}</td>
       <td style="text-align:right">${t.stake || '—'}</td>
