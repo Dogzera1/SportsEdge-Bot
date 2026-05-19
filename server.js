@@ -18947,7 +18947,7 @@ load();
       const conds = [
         `result IN ('win','loss')`,
         `created_at >= datetime('now', '-${days} days')`,
-        `sport IN ('lol','dota2','cs2','valorant')`,
+        `sport IN ('lol','dota2','cs','cs2','valorant')`,
         `market IN ('handicap','handicapSets','total')`,
         `best_of IS NOT NULL AND best_of > 0`,
         `line IS NOT NULL`,
@@ -20129,6 +20129,9 @@ load();
       // 2026-05-18: enrich com ai_emitted + emission_source pra dashboard visibility.
       // Pattern: emission_source termina em _ai_shadow ou _ai_real = LLM-emitted.
       // tip_reason 'AI...' também marca (fallback). Engine assumido DeepSeek atual.
+      // 2026-05-19 audit F2: regex /AI|deepseek/i matchava substring "ai" em
+      // "trAIned", "TAIyo Yamanaka", "ainda" → 13/30 falsos positivos no dashboard.
+      // Fix: word boundary \bAI\b|\bIA\b|\bdeepseek\b (suporta "AI" inglês e "IA" PT).
       const enriched = rows.map(r => {
         let emissionSource = null;
         if (r.tip_context_json) {
@@ -20137,7 +20140,7 @@ load();
             emissionSource = c?.emission_source || null;
           } catch (_) { /* parse fail tolerado */ }
         }
-        const reasonAi = /AI|deepseek/i.test(String(r.tip_reason || ''));
+        const reasonAi = /\bAI\b|\bIA\b|\bdeepseek\b/i.test(String(r.tip_reason || ''));
         const srcAi = /_ai_(shadow|real)$|^ai_|deepseek/i.test(String(emissionSource || ''));
         const aiEmitted = !!(srcAi || reasonAi);
         return {
@@ -22086,7 +22089,7 @@ load();
             expected = (r.side === 'yes') === parsed.hasTiebreak ? 'win' : 'loss';
             debug = `hasTB=${parsed.hasTiebreak}`;
           }
-        } else if (['lol','dota2','cs2','valorant'].includes(r.sport) && (r.market === 'handicap' || r.market === 'handicapSets')) {
+        } else if (['lol','dota','dota2','cs','cs2','valorant'].includes(r.sport) && (r.market === 'handicap' || r.market === 'handicapSets')) {
           const m = String(mr.final_score || '').match(/(?:bo(\d+)\s+)?(\d+)\s*-\s*(\d+)/i);
           if (m) {
             const bo = m[1] ? parseInt(m[1], 10) : null;
@@ -22102,7 +22105,7 @@ load();
             else expected = (sideIsT1 ? (diff + r.line > 0) : (-diff + r.line > 0)) ? 'win' : 'loss';
             debug = `bo=${bo} maps=${t1Sets}-${t2Sets} diff=${diff} line=${r.line}`;
           }
-        } else if (['lol','dota2','cs2','valorant'].includes(r.sport) && r.market === 'total') {
+        } else if (['lol','dota','dota2','cs','cs2','valorant'].includes(r.sport) && r.market === 'total') {
           const m = String(mr.final_score || '').match(/(?:bo(\d+)\s+)?(\d+)\s*-\s*(\d+)/i);
           if (m) {
             const bo = m[1] ? parseInt(m[1], 10) : null;
@@ -33636,6 +33639,47 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
             const month = new Date().toISOString().slice(0, 7);
             stmts.incrApiUsage.run(`deepseek_shadow_${_sportTag}`, month);
           } catch (_) {}
+        }
+
+        // 2026-05-19 audit F1 + user request: hard monthly budget cap (USD)
+        // pra DeepSeek. Default $10/mês. Lê tokens registrados em api_usage,
+        // computa custo via pricing $0.14/M prompt + $0.28/M completion, bloqueia
+        // /claude se >= cap. Estimate fallback quando DeepSeek não retorna tokens:
+        // ~600 prompt + 300 completion = $0.000168/call. Defesa em profundidade
+        // sobre <SPORT>_AI_DAILY_CAP (per-sport, shadow only).
+        // Override: AI_MONTHLY_BUDGET_USD=0 desativa cap (custo ilimitado).
+        const _budgetCapStr = process.env.AI_MONTHLY_BUDGET_USD;
+        const _budgetCap = _budgetCapStr !== undefined ? parseFloat(_budgetCapStr) : 10;
+        if (Number.isFinite(_budgetCap) && _budgetCap > 0) {
+          try {
+            const month = new Date().toISOString().slice(0, 7);
+            const ptokRow = db.prepare(`SELECT count FROM api_usage WHERE provider = 'deepseek_prompt_tokens' AND month = ?`).get(month);
+            const ctokRow = db.prepare(`SELECT count FROM api_usage WHERE provider = 'deepseek_completion_tokens' AND month = ?`).get(month);
+            const callsRow = db.prepare(`SELECT count FROM api_usage WHERE provider = 'deepseek' AND month = ?`).get(month);
+            const ptok = ptokRow?.count || 0;
+            const ctok = ctokRow?.count || 0;
+            const dsCalls = callsRow?.count || 0;
+            // Custo conhecido a partir de tokens
+            let costUSD = (ptok / 1_000_000 * 0.14) + (ctok / 1_000_000 * 0.28);
+            // Fallback: se tokens não registrados mas calls > 0, estima
+            if (costUSD === 0 && dsCalls > 0) {
+              costUSD = dsCalls * 0.000168;
+            }
+            if (costUSD >= _budgetCap) {
+              try { stmts.incrApiUsage.run('deepseek_blocked_by_budget_cap', month); } catch (_) {}
+              log('WARN', 'AI', `Budget cap reached: $${costUSD.toFixed(4)} >= $${_budgetCap} (mês ${month}) — blocking /claude. Set AI_MONTHLY_BUDGET_USD=0 pra desativar cap.`);
+              _emitAiMetric('budget_cap_block', _sportTag);
+              sendJson(res, {
+                ok: true, blocked: true,
+                reason: `AI_MONTHLY_BUDGET_USD cap atingido ($${costUSD.toFixed(2)} >= $${_budgetCap})`,
+                content: [{ text: '' }]
+              });
+              return;
+            }
+          } catch (e) {
+            // DB read fail — não bloqueia (fail-open com aviso)
+            log('WARN', 'AI', `Budget cap check failed (fail-open): ${e.message}`);
+          }
         }
 
         if (!DEEPSEEK_KEY) { sendJson(res, { error: 'DEEPSEEK_API_KEY ausente' }, 401); _emitAiMetric('no_key', _sportTag); return; }

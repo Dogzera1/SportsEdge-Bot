@@ -1286,7 +1286,11 @@ function runPipelineStuckCheck() {
         WHERE sport = ?
           AND (archived IS NULL OR archived = 0)
           AND sent_at >= datetime('now', '-1 hour')
-      `).get(sport === 'cs' ? 'cs' : sport === 'dota2' ? 'esports' : sport);
+      `).get(sport);
+      // 2026-05-18: removed legacy mapping dota2→'esports'. Pós-split Abr/2026
+      // tips.sport='dota2' direto; mapping antigo fazia query buscar bucket
+      // 'esports' (legacy) → 0 rows → false-positive "pipeline stuck" pra
+      // dota2 mesmo quando emitindo. CS mapping também era no-op (cs→cs).
       if (tipsRow.n > 0) continue;
       // Sport tem muitas rejections + 0 tips. Alert com cooldown.
       if ((now - (_lastStuckAlert[sport] || 0)) < COOLDOWN) continue;
@@ -9540,8 +9544,13 @@ function buildEnrichmentSection(match, enrich) {
 // Per-match cooldown (evita re-análise mesmo match em ciclos consecutivos),
 // daily call cap (limit total por sport por dia), edge pre-filter (skip se
 // modelo não tem signal). Configurável via envs <SPORT>_AI_COOLDOWN_H,
-// <SPORT>_AI_MIN_EDGE, <SPORT>_AI_DAILY_CAP. Defaults razoáveis pra LoL
-// (50 matches/dia × 1 call cada = ~$0.60/mês DeepSeek).
+// <SPORT>_AI_MIN_EDGE, <SPORT>_AI_DAILY_CAP.
+// 2026-05-19 audit F1: cap é SHADOW-only — main /claude calls (Dota/CS/Tennis/
+// Football/MMA) NÃO incrementam esse counter. Defesa global está em
+// server.js /claude proxy via AI_MONTHLY_BUDGET_USD (default $10/mês) — quando
+// custo mensal acumulado >= cap, bloqueia TODAS as chamadas /claude até virar
+// o mês ou aumentar/zerar a env. Daily cap aqui reduzido 50→15 pra dar
+// margem ao cap global considerando 7 sports × shadow + main concorrendo.
 const _aiShadowMatchCooldown = new Map(); // key: sport|matchId → lastCallTs
 const _aiShadowDailyCount = new Map();    // key: sport|YYYY-MM-DD → count
 
@@ -9578,8 +9587,11 @@ async function _runAiShadow(sport, ctx, opts = {}) {
         return;
       }
     }
-    // 2. Daily cap por sport — limite total de calls/dia (proteção custo DeepSeek)
-    const dailyCap = parseInt(process.env[`${sportU}_AI_DAILY_CAP`] ?? '50', 10);
+    // 2. Daily cap por sport — limite total de calls/dia (proteção custo DeepSeek).
+    // 2026-05-19 audit F1: default reduzido 50→15. 7 sports × 15 = 105 calls/dia
+    // shadow ≈ $0.50/mês — junto com main /claude calls preexistentes ainda fica
+    // sob o AI_MONTHLY_BUDGET_USD global ($10) com folga.
+    const dailyCap = parseInt(process.env[`${sportU}_AI_DAILY_CAP`] ?? '15', 10);
     if (dailyCap > 0) {
       const today = new Date().toISOString().slice(0, 10);
       const dk = `${sport}|${today}`;
@@ -9633,7 +9645,19 @@ async function _runAiShadow(sport, ctx, opts = {}) {
     const tipTeam = String(tipResult[1]).trim();
     const tipOdd = parseFloat(tipResult[2]);
     const tipEvNum = parseFloat(String(tipResult[3]).replace(/[+%\s]/g, ''));
-    const tipStake = String(tipResult[4] || '1u').trim();
+    // 2026-05-19 audit F6 def-in-depth: AI text pode hallucinar stake fora do
+    // range 1-3u solicitado no prompt. Clamp [0.5, 3.0] antes de enviar pro
+    // /record-tip (server-side caps adicionais aplicam).
+    const _stakeRaw = String(tipResult[4] || '1u').trim();
+    const _stakeNum = parseFloat(_stakeRaw);
+    const _stakeClamped = Number.isFinite(_stakeNum)
+      ? Math.min(3, Math.max(0.5, _stakeNum))
+      : 1;
+    const tipStake = `${_stakeClamped}u`;
+    if (Number.isFinite(_stakeNum) && (_stakeNum < 0.5 || _stakeNum > 3)) {
+      try { _metrics.incr('ai_shadow_stake_clamped', { sport }); } catch (_) {}
+      log('WARN', TAG, `stake clamped ${_stakeRaw}→${tipStake} (AI fora do range 0.5-3u)`);
+    }
     const tipConfRaw = String(tipResult[5] || 'MEDIA').toUpperCase();
     const tipConf = tipConfRaw.startsWith('ALT') ? CONF.ALTA
       : tipConfRaw.startsWith('BAI') ? CONF.BAIXA : CONF.MEDIA;
@@ -9646,9 +9670,47 @@ async function _runAiShadow(sport, ctx, opts = {}) {
       log('INFO', TAG, `skip ${tipTeam} @ ${tipOdd} EV=${tipEvNum}% conf=${tipConfRaw} (EV<0 — AI hallucinated edge)`);
       return;
     }
-    const pickSide = norm(tipTeam) === norm(match.team1) ? 't1'
-      : norm(tipTeam) === norm(match.team2) ? 't2'
-      : (norm(match.team1).includes(norm(tipTeam)) ? 't1' : 't2');
+    // 2026-05-19 audit F5: pickSide fallback robusto. Antes `.includes()` cego
+    // podia atribuir lado errado quando tipTeam é substring curta (ex: "T1" match
+    // em "LT1"). Estratégia: exact match → token-equality (split por espaço/dash
+    // pra suportar nomes 2-char como G2/T1/KC) → strict substring 1-side only →
+    // reject se ambíguo. Word-boundary via token-eq evita falso positivo "T1"
+    // dentro de "LT1" enquanto suporta "T1 Esports" via token.
+    const _t1n = norm(match.team1);
+    const _t2n = norm(match.team2);
+    const _tipn = norm(tipTeam);
+    const _tokenize = s => String(s || '').split(/[\s\-_.]+/).filter(Boolean);
+    let pickSide;
+    if (_tipn === _t1n) pickSide = 't1';
+    else if (_tipn === _t2n) pickSide = 't2';
+    else if (_tipn.length >= 2) {
+      const _tk1 = _tokenize(_t1n);
+      const _tk2 = _tokenize(_t2n);
+      const _tokIn1 = _tk1.includes(_tipn);
+      const _tokIn2 = _tk2.includes(_tipn);
+      if (_tokIn1 && !_tokIn2) pickSide = 't1';
+      else if (_tokIn2 && !_tokIn1) pickSide = 't2';
+      else if (_tipn.length >= 4) {
+        // Token-equality não bateu — fallback substring só pra nomes longos (≥4 chars)
+        const _in1 = _t1n.includes(_tipn);
+        const _in2 = _t2n.includes(_tipn);
+        if (_in1 && !_in2) pickSide = 't1';
+        else if (_in2 && !_in1) pickSide = 't2';
+        else {
+          try { _metrics.incr('ai_shadow_pick_ambiguous', { sport }); } catch (_) {}
+          log('WARN', TAG, `pickSide ambiguous: tipTeam="${tipTeam}" team1="${match.team1}" team2="${match.team2}" — skip emit`);
+          return;
+        }
+      } else {
+        try { _metrics.incr('ai_shadow_pick_ambiguous', { sport }); } catch (_) {}
+        log('WARN', TAG, `pickSide short-name no-token-match: tipTeam="${tipTeam}" team1="${match.team1}" team2="${match.team2}" — skip emit`);
+        return;
+      }
+    } else {
+      try { _metrics.incr('ai_shadow_pick_ambiguous', { sport }); } catch (_) {}
+      log('WARN', TAG, `pickSide tipTeam too short (<2 chars): "${tipTeam}" — skip emit`);
+      return;
+    }
     const modelPPick = pickSide === 't1' ? mlResult.modelP1 : mlResult.modelP2;
     // <SPORT>_AI_REAL=true promove path AI shadow pra real tips.
     // Default OFF — set explícito reativa real emit + DM dispatch.
@@ -12313,11 +12375,12 @@ async function handleAdmin(token, chatId, command, callerSport = 'esports') {
       for (const [sport, count] of Object.entries(rejBySport)) {
         if (count < 20) continue;
         try {
-          const sportKey = sport === 'dota2' ? 'esports' : sport === 'valorant' ? 'valorant' : sport === 'cs' ? 'cs' : sport;
+          // 2026-05-18: legacy dota2→'esports' map removido (split Abr/2026).
+          // Tips dota2 stale bucket esports → false alert. Outros mappings eram no-op.
           const tipsRow = db.prepare(`
             SELECT COUNT(*) AS n FROM tips
             WHERE sport = ? AND (archived IS NULL OR archived = 0) AND sent_at >= datetime('now','-1 hour')
-          `).get(sportKey);
+          `).get(sport);
           if (tipsRow.n === 0) alerts.push(`🔴 Pipeline stuck: ${sport} ${count} rejections / 0 tips (1h)`);
         } catch (_) {}
       }
@@ -19204,20 +19267,25 @@ Máximo 200 palavras. Raciocínio breve antes da decisão.`;
           }
         }
 
+        // 2026-05-19 audit F3 (P5): Tennis AI shadow trigger movido pra ANTES
+        // do hybrid bypass check. Antes ficava dentro do `else` → sample A/B
+        // enviesado (perdia matches onde hybrid bypassava). LoL/MMA/Dota/CS já
+        // disparam shadow regardless de hybrid; Tennis/Football eram assimétricos.
+        // Cap: 1 /claude call extra por match em A/B (já contabilizado em
+        // <SPORT>_AI_DAILY_CAP=15 + cap mensal global AI_MONTHLY_BUDGET_USD).
+        if (/^(1|true|yes)$/i.test(String(process.env.TENNIS_AI_SHADOW || '')) ||
+            /^(1|true|yes)$/i.test(String(process.env.TENNIS_AI_REAL || ''))) {
+          setImmediate(() => {
+            _runTennisAiShadow({ match, mlResult: mlResultTennis, oddsToUse: o, prompt, hasLiveStats: false })
+              .catch(e => { try { log('WARN', 'AI-SHADOW-TENNIS', `dispatch err: ${e?.message || e}`); } catch (_) {} });
+          });
+        }
+
         let text;
         let resp;
         if (_tennisHybridText) {
           text = _tennisHybridText + '\n';
         } else {
-          // 2026-05-18: Tennis AI shadow POC (A/B expansion).
-          // Gate: TENNIS_AI_SHADOW=true (research) | TENNIS_AI_REAL=true (promove).
-          if (/^(1|true|yes)$/i.test(String(process.env.TENNIS_AI_SHADOW || '')) ||
-              /^(1|true|yes)$/i.test(String(process.env.TENNIS_AI_REAL || ''))) {
-            setImmediate(() => {
-              _runTennisAiShadow({ match, mlResult: mlResultTennis, oddsToUse: o, prompt, hasLiveStats: false })
-                .catch(e => { try { log('WARN', 'AI-SHADOW-TENNIS', `dispatch err: ${e?.message || e}`); } catch (_) {} });
-            });
-          }
           try {
             resp = await serverPost('/claude', {
               model: 'deepseek-chat',
@@ -20487,20 +20555,21 @@ Máximo 200 palavras.`;
           }
         }
 
+        // 2026-05-19 audit F3 (P5): Football AI shadow trigger movido pra ANTES
+        // do hybrid bypass check (simetria com LoL/MMA/Dota/CS).
+        if (/^(1|true|yes)$/i.test(String(process.env.FOOTBALL_AI_SHADOW || '')) ||
+            /^(1|true|yes)$/i.test(String(process.env.FOOTBALL_AI_REAL || ''))) {
+          setImmediate(() => {
+            _runFootballAiShadow({ match, mlResult: fbModel, oddsToUse: o, prompt, hasLiveStats: false })
+              .catch(e => { try { log('WARN', 'AI-SHADOW-FOOTBALL', `dispatch err: ${e?.message || e}`); } catch (_) {} });
+          });
+        }
+
         let text;
         let resp;
         if (_fbHybridText) {
           text = _fbHybridText + '\n';
         } else {
-          // 2026-05-18: Football AI shadow POC (A/B expansion).
-          // Gate: FOOTBALL_AI_SHADOW=true (research) | FOOTBALL_AI_REAL=true (promove).
-          if (/^(1|true|yes)$/i.test(String(process.env.FOOTBALL_AI_SHADOW || '')) ||
-              /^(1|true|yes)$/i.test(String(process.env.FOOTBALL_AI_REAL || ''))) {
-            setImmediate(() => {
-              _runFootballAiShadow({ match, mlResult: fbModel, oddsToUse: o, prompt, hasLiveStats: false })
-                .catch(e => { try { log('WARN', 'AI-SHADOW-FOOTBALL', `dispatch err: ${e?.message || e}`); } catch (_) {} });
-            });
-          }
           try {
             resp = await serverPost('/claude', {
               model: 'deepseek-chat',
@@ -21957,9 +22026,7 @@ TIP_ML:[time]@[odd]|P:[%]|STAKE:[1-3]u|CONF:[ALTA/MÉDIA/BAIXA]
 (P = sua prob 0-100 inteiro; sistema calcula EV automaticamente)
 ou SEM_EDGE (se EV negativo / dados insuficientes / academy não confiável / sample <5j)
 
-Máximo 200 palavras.
-
-Máximo 150 palavras.`;
+Máximo 200 palavras.`;
 
           // 2026-05-18: CS AI shadow POC (A/B expansion).
           // Gate: CS_AI_SHADOW=true (research) | CS_AI_REAL=true (promove).
