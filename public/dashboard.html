@@ -4923,7 +4923,28 @@ async function renderMlShadowTipsList() {
     return '<span title="Tip da série inteira (ML — Bo3/Bo5 winner)" style="background:#0891b225;color:#67e8f9;border:1px solid #0891b255;padding:1px 5px;border-radius:3px;font-size:0.75em;white-space:nowrap">🏆 série</span>';
   };
 
+  // 2026-05-19: AI shadow stats per sport no cabeçalho. Mirror da detecção
+  // do row badge (emission_source via tip_context_json OR tip_reason regex).
+  const _aiBySport = {};
+  const _totalBySport = {};
+  let _aiTotal = 0;
+  for (const t of allTips) {
+    const sp = t._sport || t.sport || '?';
+    _totalBySport[sp] = (_totalBySport[sp] || 0) + 1;
+    let _srcHdr = null;
+    if (t.tip_context_json) {
+      try { _srcHdr = JSON.parse(t.tip_context_json)?.emission_source || null; } catch (_) {}
+    }
+    const _isAi = /_ai_(shadow|real)$|^ai_|deepseek/i.test(String(_srcHdr || ''))
+      || /\bAI\b|\bIA\b|\bdeepseek\b/i.test(String(t.tip_reason || ''));
+    if (_isAi) { _aiBySport[sp] = (_aiBySport[sp] || 0) + 1; _aiTotal++; }
+  }
+  const _aiStatsStr = _aiTotal > 0
+    ? Object.entries(_aiBySport).sort((a, b) => b[1] - a[1])
+        .map(([sp, n]) => `<span title="${n} tips IA de ${_totalBySport[sp] || 0} total ${sp} (${((n / (_totalBySport[sp] || 1)) * 100).toFixed(0)}%)" style="background:#8b5cf625;color:#a78bfa;border:1px solid #8b5cf655;padding:1px 6px;border-radius:3px;font-size:0.8em;margin-right:4px">${sp} ${n}</span>`).join('')
+    : '<span style="color:var(--text-dim);font-size:0.85em">nenhuma</span>';
   let html = `<div class="card-meta" style="margin-bottom:6px"><b>🗒️ Tips ML shadow individuais</b> (${allTips.length} total, ordenado por data desc) · esports: <span style="background:#0891b225;color:#67e8f9;padding:1px 5px;border-radius:3px;font-size:0.85em">🏆 série</span> = match inteiro · <span style="background:#7c3aed25;color:#a78bfa;padding:1px 5px;border-radius:3px;font-size:0.85em">🗺️ M{n}</span> = mapa específico</div>
+    <div class="card-meta" style="margin-bottom:8px;padding:6px 8px;background:#8b5cf608;border-left:3px solid #8b5cf6;border-radius:3px"><b>🤖 IA emit por sport</b> (${_aiTotal}/${allTips.length} total · ${((_aiTotal / Math.max(1, allTips.length)) * 100).toFixed(1)}%): ${_aiStatsStr}</div>
     <table class="tips">
       <thead><tr>
         <th>Sport</th>
