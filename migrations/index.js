@@ -3114,6 +3114,31 @@ const migrations = [
       } catch (e) { console.log(`[mig 117] failed: ${e.message}`); }
     },
   },
+  {
+    id: '118_market_tips_shadow_clv_pending_index',
+    up(db) {
+      // 2026-05-19 (audit-banco P1-8): partial index pra captureMarketTipsClv
+      // (lib/clv-capture.js:180-198). Query WHERE result IS NULL AND close_odd IS NULL
+      // AND market IN (8 valores) AND created_at BETWEEN escaneava ~30k rows + sort
+      // em CASE expression (priority window match_start_at ±30min vs now) sem index
+      // match. Cron roda a cada poucos minutos → CPU/RAM repetitivo Railway 512MB.
+      //
+      // Partial index (WHERE clause filtra ~95% das rows settled): leftmost columns
+      // result + close_odd permitem index scan rápido. created_at fora do partial
+      // pra permitir ORDER BY usar index quando match_start_at fallback triggar.
+      //
+      // SQLite partial index é O(N_pending) onde N_pending ~50-200 rows steady-state
+      // (tips aguardando close capture). Reduz query ~30-200ms → <5ms.
+      try {
+        db.exec(`
+          CREATE INDEX IF NOT EXISTS idx_mts_clv_pending
+            ON market_tips_shadow(created_at, match_start_at)
+            WHERE result IS NULL AND close_odd IS NULL;
+        `);
+        console.log('[mig 118] market_tips_shadow CLV pending partial index');
+      } catch (e) { console.log(`[mig 118] failed: ${e.message}`); }
+    },
+  },
 ];
 
 function applyMigrations(db) {
