@@ -4923,11 +4923,12 @@ async function renderMlShadowTipsList() {
     return '<span title="Tip da série inteira (ML — Bo3/Bo5 winner)" style="background:#0891b225;color:#67e8f9;border:1px solid #0891b255;padding:1px 5px;border-radius:3px;font-size:0.75em;white-space:nowrap">🏆 série</span>';
   };
 
-  // 2026-05-19: AI shadow stats per sport no cabeçalho. Mirror da detecção
+  // 2026-05-19: AI shadow stats per sport no cabeçalho — count + settled (W/L)
+  // + WR + ROI calculado a partir de profit_reais/stake_reais. Mirror da detecção
   // do row badge (emission_source via tip_context_json OR tip_reason regex).
-  const _aiBySport = {};
+  const _aiAgg = {}; // {sport: {n, wins, losses, pend, profit, staked}}
   const _totalBySport = {};
-  let _aiTotal = 0;
+  let _aiTotal = 0, _aiWins = 0, _aiLosses = 0, _aiPend = 0, _aiProfit = 0, _aiStaked = 0;
   for (const t of allTips) {
     const sp = t._sport || t.sport || '?';
     _totalBySport[sp] = (_totalBySport[sp] || 0) + 1;
@@ -4937,14 +4938,40 @@ async function renderMlShadowTipsList() {
     }
     const _isAi = /_ai_(shadow|real)$|^ai_|deepseek/i.test(String(_srcHdr || ''))
       || /\bAI\b|\bIA\b|\bdeepseek\b/i.test(String(t.tip_reason || ''));
-    if (_isAi) { _aiBySport[sp] = (_aiBySport[sp] || 0) + 1; _aiTotal++; }
+    if (!_isAi) continue;
+    _aiTotal++;
+    if (!_aiAgg[sp]) _aiAgg[sp] = { n: 0, wins: 0, losses: 0, pend: 0, profit: 0, staked: 0 };
+    const a = _aiAgg[sp];
+    a.n++;
+    const r = String(t.result || '').toLowerCase();
+    const stakeR = Number.isFinite(parseFloat(t.stake_reais)) ? parseFloat(t.stake_reais) : 0;
+    const profitR = Number.isFinite(parseFloat(t.profit_reais)) ? parseFloat(t.profit_reais) : 0;
+    if (r === 'win') { a.wins++; _aiWins++; a.profit += profitR; _aiProfit += profitR; a.staked += stakeR; _aiStaked += stakeR; }
+    else if (r === 'loss') { a.losses++; _aiLosses++; a.profit += profitR; _aiProfit += profitR; a.staked += stakeR; _aiStaked += stakeR; }
+    else if (r === 'void' || r === 'push') { /* não conta em wins/losses, profit=0 */ }
+    else { a.pend++; _aiPend++; }
   }
   const _aiStatsStr = _aiTotal > 0
-    ? Object.entries(_aiBySport).sort((a, b) => b[1] - a[1])
-        .map(([sp, n]) => `<span title="${n} tips IA de ${_totalBySport[sp] || 0} total ${sp} (${((n / (_totalBySport[sp] || 1)) * 100).toFixed(0)}%)" style="background:#8b5cf625;color:#a78bfa;border:1px solid #8b5cf655;padding:1px 6px;border-radius:3px;font-size:0.8em;margin-right:4px">${sp} ${n}</span>`).join('')
+    ? Object.entries(_aiAgg).sort((a, b) => b[1].n - a[1].n).map(([sp, a]) => {
+        const settled = a.wins + a.losses;
+        const wr = settled > 0 ? ((a.wins / settled) * 100).toFixed(0) + '%' : '—';
+        const roi = a.staked > 0 ? (((a.profit / a.staked) * 100)) : null;
+        const roiStr = roi == null ? '—' : `${roi >= 0 ? '+' : ''}${roi.toFixed(1)}%`;
+        const roiColor = roi == null ? '#94a3b8' : roi >= 0 ? '#10b981' : '#ef4444';
+        const tooltip = `${a.n} tips IA · ${a.wins}W ${a.losses}L ${a.pend} pend · WR ${wr} · ROI ${roiStr} · profit R$${a.profit.toFixed(2)} de R$${a.staked.toFixed(2)} stakeado`;
+        return `<span title="${tooltip}" style="background:#8b5cf625;color:#a78bfa;border:1px solid #8b5cf655;padding:2px 7px;border-radius:3px;font-size:0.8em;margin-right:5px;display:inline-block">${sp} <b>${a.n}</b> <span style="opacity:0.75">(${a.wins}W ${a.losses}L${a.pend ? ' ' + a.pend + 'p' : ''})</span> <span style="color:${roiColor};font-weight:600">${roiStr}</span></span>`;
+      }).join('')
     : '<span style="color:var(--text-dim);font-size:0.85em">nenhuma</span>';
+  const _globAiSettled = _aiWins + _aiLosses;
+  const _globAiWr = _globAiSettled > 0 ? ((_aiWins / _globAiSettled) * 100).toFixed(0) + '%' : '—';
+  const _globAiRoi = _aiStaked > 0 ? ((_aiProfit / _aiStaked) * 100) : null;
+  const _globAiRoiStr = _globAiRoi == null ? '—' : `${_globAiRoi >= 0 ? '+' : ''}${_globAiRoi.toFixed(1)}%`;
+  const _globAiRoiColor = _globAiRoi == null ? 'inherit' : _globAiRoi >= 0 ? '#10b981' : '#ef4444';
   let html = `<div class="card-meta" style="margin-bottom:6px"><b>🗒️ Tips ML shadow individuais</b> (${allTips.length} total, ordenado por data desc) · esports: <span style="background:#0891b225;color:#67e8f9;padding:1px 5px;border-radius:3px;font-size:0.85em">🏆 série</span> = match inteiro · <span style="background:#7c3aed25;color:#a78bfa;padding:1px 5px;border-radius:3px;font-size:0.85em">🗺️ M{n}</span> = mapa específico</div>
-    <div class="card-meta" style="margin-bottom:8px;padding:6px 8px;background:#8b5cf608;border-left:3px solid #8b5cf6;border-radius:3px"><b>🤖 IA emit por sport</b> (${_aiTotal}/${allTips.length} total · ${((_aiTotal / Math.max(1, allTips.length)) * 100).toFixed(1)}%): ${_aiStatsStr}</div>
+    <div class="card-meta" style="margin-bottom:8px;padding:6px 8px;background:#8b5cf608;border-left:3px solid #8b5cf6;border-radius:3px">
+      <div style="margin-bottom:4px"><b>🤖 IA emit por sport</b> · ${_aiTotal} tips (${((_aiTotal / Math.max(1, allTips.length)) * 100).toFixed(1)}% do total) · ${_aiWins}W ${_aiLosses}L ${_aiPend} pend · WR <b>${_globAiWr}</b> · ROI <b style="color:${_globAiRoiColor}">${_globAiRoiStr}</b></div>
+      <div>${_aiStatsStr}</div>
+    </div>`;
     <table class="tips">
       <thead><tr>
         <th>Sport</th>
