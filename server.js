@@ -60,6 +60,26 @@ const LOL_PUBLIC_KEY = '0TvQnueqKa5mxJntVWt0w4LpLfEkrV1Ta8rQBb9Z';
 const LOL_KEY = process.env.LOL_API_KEY || process.env.NEXT_PUBLIC_LOL_API || LOL_PUBLIC_KEY;
 const LOL_HEADERS = { 'x-api-key': LOL_KEY };
 const PANDASCORE_TOKEN = process.env.PANDASCORE_TOKEN || '';
+// 2026-05-19 audit P3 consolidation: helper unificado pra chamadas PandaScore.
+// Antes: 'Authorization: Bearer ${PANDASCORE_TOKEN}' header rebuilt 32× +
+// httpGet sem .catch em 13 sites (parcialmente fixado em commit bf800e4).
+// Centraliza: bearer header + .catch defensivo + error classification minimal.
+// Caller usa _pandaGet(path) — path com ou sem prefix base aceito.
+// Retorna { status, body, error? } shape consistente — status=0 quando
+// network/timeout/token missing (caller usa if status !== 200 existing check).
+const PANDASCORE_BASE = 'https://api.pandascore.co';
+const _PANDA_HEADERS = Object.freeze({ 'Authorization': `Bearer ${PANDASCORE_TOKEN}` });
+async function _pandaGet(pathOrUrl) {
+  if (!PANDASCORE_TOKEN || PANDASCORE_TOKEN === 'your-pandascore-token') {
+    return { status: 0, body: '{}', error: 'token_missing' };
+  }
+  const url = pathOrUrl.startsWith('http') ? pathOrUrl : `${PANDASCORE_BASE}${pathOrUrl}`;
+  try {
+    return await httpGet(url, _PANDA_HEADERS);
+  } catch (e) {
+    return { status: 0, body: '{}', error: e?.message || 'fetch_error' };
+  }
+}
 // The Odds API — usado para MMA (20k req/mês)
 const THE_ODDS_API_KEY = process.env.THE_ODDS_API_KEY || '';
 const GRID_API_KEY = (process.env.GRID_API_KEY || '').trim();
@@ -4871,7 +4891,7 @@ const server = http.createServer(async (req, res) => {
     }
     try {
       const headers = { 'Authorization': `Bearer ${PANDASCORE_TOKEN}` };
-      const r = await httpGet(`https://api.pandascore.co/lol/matches/${psId}`, headers).catch(e => ({ status: 0, body: '', error: e?.message }));
+      const r = await _pandaGet(`/lol/matches/${psId}`);
       if (r.status !== 200) {
         sendJson(res, { hasCompositions: false, error: `PS status ${r.status}` });
         return;
@@ -4902,7 +4922,7 @@ const server = http.createServer(async (req, res) => {
       // Se game running mas sem gold, tenta /lol/games/{gameId} que pode ter dados mais frescos
       if (activeGame.status === 'running' && activeGame.id && !players.some(pl => pl.total_gold > 0)) {
         try {
-          const gr = await httpGet(`https://api.pandascore.co/lol/games/${activeGame.id}`, headers).catch(e => ({ status: 0, body: '', error: e?.message }));
+          const gr = await _pandaGet(`/lol/games/${activeGame.id}`);
           if (gr.status === 200) {
             const gd = safeParse(gr.body, {});
             const gPlayers = Array.isArray(gd.players) ? gd.players : [];
@@ -5337,7 +5357,7 @@ const server = http.createServer(async (req, res) => {
     }
     try {
       const headers = { 'Authorization': `Bearer ${PANDASCORE_TOKEN}` };
-      const r = await httpGet(`https://api.pandascore.co/dota2/matches/${psId}`, headers).catch(e => ({ status: 0, body: '', error: e?.message }));
+      const r = await _pandaGet(`/dota2/matches/${psId}`);
       if (r.status !== 200) {
         sendJson(res, { hasLiveStats: false, error: `PS status ${r.status}` });
         return;
@@ -6378,7 +6398,7 @@ const server = http.createServer(async (req, res) => {
         sendJson(res, { error: 'psId e map (1..5) obrigatórios' }, 400);
         return;
       }
-      const r = await httpGet(`https://api.pandascore.co/dota2/matches/${psId}`, { 'Authorization': `Bearer ${PANDASCORE_TOKEN}` }).catch(e => ({ status: 0, body: '', error: e?.message }));
+      const r = await _pandaGet(`/dota2/matches/${psId}`);
       if (r.status !== 200) { sendJson(res, { resolved: false, error: `ps_http_${r.status}` }); return; }
       const match = safeParse(r.body, {});
       const games = Array.isArray(match?.games) ? match.games : [];
@@ -7915,7 +7935,7 @@ setInterval(load, 10000);
     if (!PANDASCORE_TOKEN) { sendJson(res, { resolved: false, error: 'PANDASCORE_TOKEN não configurado' }); return; }
     try {
       // PS rota correta é /matches/{id} (generic). /lol/matches/{id} retorna "Route not found".
-      const r = await httpGet(`https://api.pandascore.co/matches/${psId}`, { 'Authorization': `Bearer ${PANDASCORE_TOKEN}` }).catch(e => ({ status: 0, body: '{}', error: e?.message }));
+      const r = await _pandaGet(`/matches/${psId}`);
       const m = safeParse(r.body, {});
       const winner = m.winner?.name || null;
       if (winner) {
@@ -7945,7 +7965,7 @@ setInterval(load, 10000);
     if (!PANDASCORE_TOKEN) { sendJson(res, { resolved: false, error: 'PANDASCORE_TOKEN não configurado' }); return; }
     try {
       // PS rota correta é /matches/{id} (generic). /dota2/matches/{id} retorna "Route not found".
-      const r = await httpGet(`https://api.pandascore.co/matches/${psId}`, { 'Authorization': `Bearer ${PANDASCORE_TOKEN}` }).catch(e => ({ status: 0, body: '{}', error: e?.message }));
+      const r = await _pandaGet(`/matches/${psId}`);
       const m = safeParse(r.body, {});
       const t1 = m.opponents?.[0]?.opponent;
       const t2 = m.opponents?.[1]?.opponent;
@@ -8033,7 +8053,7 @@ setInterval(load, 10000);
     const psMatch = baseId.match(new RegExp('^' + sport + '_ps_(\\d+)$'));
     if (psMatch) {
       // PS rota correta é /matches/{id} (generic). /{pandaPath}/matches/{id} retorna "Route not found".
-      const r = await httpGet(`https://api.pandascore.co/matches/${psMatch[1]}`, { 'Authorization': `Bearer ${PANDASCORE_TOKEN}` }).catch(e => ({ status: 0, body: '{}', error: e?.message }));
+      const r = await _pandaGet(`/matches/${psMatch[1]}`);
       const m = safeParse(r.body, {});
       const winner = m.winner?.name || null;
       if (winner) {
@@ -10609,7 +10629,7 @@ setInterval(load, 10000);
           for (const c of eligible) {
             const psId = String(c.match_id || '').replace(/^ps_/, '');
             if (!/^\d+$/.test(psId)) continue;
-            const mr = await httpGet(`https://api.pandascore.co/matches/${psId}`, headers).catch(e => ({ status: 0, body: '{}', error: e?.message }));
+            const mr = await _pandaGet(`/matches/${psId}`);
             if (mr?.status !== 200) continue;
             const m = safeParse(mr.body, {});
             const games = Array.isArray(m.games) ? m.games : [];
@@ -10637,7 +10657,7 @@ setInterval(load, 10000);
               };
             }
             // Fallback: chama /lol/games/{id} pra players
-            const gr = await httpGet(`https://api.pandascore.co/lol/games/${game.id}`, headers).catch(e => ({ status: 0, body: '{}', error: e?.message }));
+            const gr = await _pandaGet(`/lol/games/${game.id}`);
             if (gr?.status === 200) {
               const gd = safeParse(gr.body, {});
               const gPlayers = Array.isArray(gd.players) ? gd.players : [];
@@ -15170,7 +15190,7 @@ load();
                   totalKillsFromMatch = Number(game.kills_team_1) + Number(game.kills_team_2);
                 }
                 if (!players.length && totalKillsFromMatch == null) {
-                  const gr = await httpGet(`https://api.pandascore.co/lol/games/${game.id}`, headers).catch(e => ({ status: 0, body: '{}', error: e?.message }));
+                  const gr = await _pandaGet(`/lol/games/${game.id}`);
                   if (gr && gr.status === 200) {
                     const gd = safeParse(gr.body, {});
                     players = Array.isArray(gd.players) ? gd.players : [];
