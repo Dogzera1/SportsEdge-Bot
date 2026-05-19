@@ -7165,6 +7165,35 @@ async function runMarketTipsLeakGuard() {
                      : N_CUTOFF;
     const wasDisabled = _marketTipsDisabledRuntime.has(key);
 
+    // 2026-05-19 audit followup (P5 cross-sport): respeita admin side-specific
+    // manual override. Quando admin manualmente desabilitou só um lado de um
+    // mercado (ex: /admin/mt-disable sport=lol market=total side=over), o loop
+    // market-level (sideKey=null) NÃO deve re-disable o (sport, market) inteiro
+    // baseado em loss_streak/CLV agregados — isso sobrescreveria a surgery
+    // manual que deliberadamente preservou o outro lado emitindo real.
+    // Side-level loop e league/tier loops continuam rodando normalmente.
+    // Caso real (audit 2026-05-19): LoL total ROI shadow +5% n=323 com under
+    // edge +7%/n=198 e over leak -15%/n=65. Admin disabilitou over manualmente
+    // pra preservar under emit. Sem este guard, cron auto-disable broad em 1h
+    // por LL streak n=4 sobrescreveria. Skip só pra market-level puro (sem
+    // sideKey/league/tier) — outras granularidades continuam ativas.
+    if (sideKey === null && !leagueKey && !tierKey) {
+      try {
+        const manualSideExists = db.prepare(`
+          SELECT 1 FROM market_tips_runtime_state
+          WHERE sport = ? AND market = ?
+            AND side IS NOT NULL AND side != ''
+            AND disabled = 1 AND source = 'manual'
+          LIMIT 1
+        `).get(s.sport, s.market);
+        if (manualSideExists) {
+          log('DEBUG', 'MT-GUARD',
+            `${s.sport}/${s.market}: skip market-level guard — manual side-specific disable exists (admin override preserved)`);
+          return;
+        }
+      } catch (_) { /* DB read fail — fail-open (proceed with guard) */ }
+    }
+
     // 2026-05-11 (audit cross-sport): Bayesian-inspired early-warning. CLV
     // guard tradicional aguarda n>=10-30 — em sport baixo-volume são dias
     // de sangria antes de disparar. Stepwise: ROI extremo + n baixo já
