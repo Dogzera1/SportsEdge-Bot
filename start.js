@@ -99,7 +99,48 @@ function _writeChildExit(name, code, signal, uptimeMs) {
     const path = require('path');
     const dbDir = path.dirname(path.isAbsolute(DB_PATH) ? DB_PATH : path.resolve(DB_PATH));
     const out = path.join(dbDir, `last_child_exit_${name.replace(/\W+/g,'_')}.json`);
-    const payload = { name, code, signal, uptime_ms: uptimeMs, at: new Date().toISOString() };
+    // 2026-05-19 audit boot-loop forensics: enrich exit record com:
+    //   - signal_category: SIGKILL=oom_likely, SIGTERM=scheduler_likely,
+    //     SIGSEGV/SIGBUS=native_crash, code=1=uncaught_error, code=0=clean
+    //   - launcher_heap/rss at exit time (proxy for container mem pressure)
+    //   - uptime_class: rapid (<5min) / short (<30min) / normal (>30min)
+    //   - last_heartbeat: latest launcher heartbeat (mem snapshot 30s antes)
+    // Bot subsequente lê via /admin/boot-diag → diagnose padrão crashes 47/24h.
+    let signalCategory = 'unknown';
+    if (signal === 'SIGKILL') signalCategory = 'oom_likely';
+    else if (signal === 'SIGTERM') signalCategory = 'scheduler_likely';
+    else if (signal === 'SIGSEGV' || signal === 'SIGBUS' || signal === 'SIGABRT') signalCategory = 'native_crash';
+    else if (signal == null && code === 0) signalCategory = 'clean_exit';
+    else if (signal == null && code === 1) signalCategory = 'uncaught_error';
+    else if (signal == null && Number.isFinite(code)) signalCategory = `exit_${code}`;
+    let uptimeClass = 'normal';
+    if (uptimeMs < 5 * 60 * 1000) uptimeClass = 'rapid';
+    else if (uptimeMs < 30 * 60 * 1000) uptimeClass = 'short';
+    const mem = process.memoryUsage ? process.memoryUsage() : {};
+    const launcherMem = {
+      rss_mb: mem.rss ? Math.round(mem.rss / 1048576) : null,
+      heap_used_mb: mem.heapUsed ? Math.round(mem.heapUsed / 1048576) : null,
+    };
+    // Last heartbeat lookup — pode capturar mem do child via launcher heartbeat
+    let lastHeartbeat = null;
+    try {
+      const hbFile = path.join(dbDir, 'launcher_heartbeat.json');
+      if (fs.existsSync(hbFile)) {
+        const hbRaw = fs.readFileSync(hbFile, 'utf8');
+        const hb = JSON.parse(hbRaw);
+        const hbMs = hb?.ts ? new Date(hb.ts).getTime() : 0;
+        const ageS = hbMs ? Math.round((Date.now() - hbMs) / 1000) : null;
+        lastHeartbeat = { ts: hb?.ts, age_s: ageS, rss_mb: hb?.rss_mb, heap_used_mb: hb?.heap_used_mb };
+      }
+    } catch (_) { /* heartbeat optional */ }
+    const payload = {
+      name, code, signal,
+      signal_category: signalCategory,
+      uptime_ms: uptimeMs, uptime_class: uptimeClass,
+      launcher_mem: launcherMem,
+      last_heartbeat: lastHeartbeat,
+      at: new Date().toISOString(),
+    };
     fs.writeFileSync(out, JSON.stringify(payload));
   } catch (_) {}
 }
