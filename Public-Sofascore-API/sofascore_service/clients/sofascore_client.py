@@ -12,6 +12,24 @@ DEFAULT_IMPERSONATE = "chrome146"
 DEFAULT_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
 DEFAULT_TIMEOUT = 12
 
+# 2026-05-19: auto-rotation per category quando Cloudflare WAF bloqueia
+# (HTTP 403 ou 429). Memory project_mma_sofascore_discovery_2026_05_16
+# confirmou: safari260 unlocks MMA enquanto chromeN falham. Por categoria
+# rotacionamos pela lista até achar um impersonate que passa. Estado é
+# cacheado in-process; restart zera (aceitável — CF rules mudam devagar).
+_ROTATION_BY_CATEGORY = {
+    "mma":        ["safari260", "chrome146", "chrome145", "firefox147", "chrome124"],
+    "tennis":     ["chrome146", "chrome145", "safari260", "chrome142", "firefox147"],
+    "football":   ["chrome124", "chrome146", "chrome145", "safari260", "firefox147"],
+    "basketball": ["chrome146", "chrome145", "safari260", "chrome142", "firefox147"],
+    "ice-hockey": ["chrome146", "chrome145", "safari260", "firefox147"],
+    "esports":    ["chrome146", "chrome145", "safari260", "firefox147"],
+    None:         ["chrome146", "chrome145", "safari260", "firefox147", "chrome124"],
+}
+
+# Cache: last successful impersonate per category (in-process)
+_last_success_impersonate = {}
+
 # Targets válidos curl_cffi (manter alinhado com venv impersonate.py). Lista
 # usada pra fallback gracioso em caso de env value typo / target removido em
 # upgrade da lib. Não-exaustivo — só os comumente usados pra Sofascore bypass.
@@ -107,22 +125,82 @@ class SofascoreClient:
             }
         )
 
-    def _get_session(self, category: str = None):
-        if not category:
-            return self.session
-        if category not in self._sessions_by_category:
-            self._sessions_by_category[category] = self._build_session(_resolve_impersonate(category))
-        return self._sessions_by_category[category]
+    def _get_session(self, category: str = None, impersonate: str = None):
+        # Per (category, impersonate) cache. Multiple impersonates per category
+        # podem coexistir durante rotação ativa.
+        key = (category, impersonate)
+        if key not in self._sessions_by_category:
+            target = impersonate or _resolve_impersonate(category)
+            self._sessions_by_category[key] = self._build_session(target)
+        return self._sessions_by_category[key]
+
+    def _rotation_candidates(self, category: str):
+        # Ordem: env override → last-success cache → rotation list (de-duped).
+        env_target = _resolve_impersonate(category)
+        cached = _last_success_impersonate.get(category)
+        rotation = _ROTATION_BY_CATEGORY.get(category) or _ROTATION_BY_CATEGORY[None]
+        seen = set()
+        ordered = []
+        for cand in [env_target, cached, *rotation]:
+            if cand and cand not in seen and cand in _VALID_IMPERSONATE:
+                seen.add(cand)
+                ordered.append(cand)
+        return ordered
 
     def _get(self, url: str):
         kwargs = {"timeout": self._timeout}
         if self._proxies:
             kwargs["proxies"] = self._proxies
         category = _category_from_url(url)
-        session = self._get_session(category)
-        response = session.get(url, **kwargs)
-        response.raise_for_status()
-        return response
+        candidates = self._rotation_candidates(category)
+
+        last_exc = None
+        last_status = None
+        for idx, impersonate in enumerate(candidates):
+            session = self._get_session(category, impersonate)
+            try:
+                response = session.get(url, **kwargs)
+            except Exception as exc:
+                last_exc = exc
+                last_status = None
+                if idx + 1 < len(candidates):
+                    logger.warning(
+                        "sofascore_impersonate_transport_error_rotating",
+                        category=category, tried=impersonate,
+                        next=candidates[idx + 1], error=str(exc)[:200],
+                    )
+                continue
+            status = response.status_code
+            if status in (403, 429):
+                last_status = status
+                if idx + 1 < len(candidates):
+                    logger.warning(
+                        "sofascore_impersonate_blocked_rotating",
+                        category=category, tried=impersonate,
+                        next=candidates[idx + 1], status=status,
+                    )
+                    continue
+            # Sucesso OU erro não-WAF (4xx outros / 5xx) → cache + raise/return
+            if 200 <= status < 300:
+                _last_success_impersonate[category] = impersonate
+            response.raise_for_status()
+            return response
+
+        # Exauriu candidatos
+        if last_exc is not None:
+            logger.error(
+                "sofascore_rotation_exhausted_transport",
+                category=category, tried=candidates, error=str(last_exc)[:200],
+            )
+            raise last_exc
+        logger.error(
+            "sofascore_rotation_exhausted_blocked",
+            category=category, tried=candidates, last_status=last_status,
+        )
+        # Re-raise última 403/429 propagando pro caller (views convertem em UpstreamError)
+        raise requests.errors.RequestsError(
+            f"Sofascore WAF blocked all impersonate candidates (status={last_status})"
+        )
 
     def __enter__(self):
         return self
