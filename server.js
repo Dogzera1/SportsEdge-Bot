@@ -15762,16 +15762,22 @@ load();
         ORDER BY sent_at DESC
         LIMIT 50
       `).all(...sportSet);
+      // 2026-05-19 audit BUG: bankroll-audit comparava bankroll stored (real-only)
+      // vs sumDeduped que incluía shadow profits + dedup cross-universe (mesma
+      // classe do bug /tips-history commit 97b23e2). Bankroll só move com is_shadow=0,
+      // então sum válido pra integrity check MUST filter is_shadow=0 em outer +
+      // inner dedup.
       const dedupedSql = `
         SELECT id, profit_reais FROM tips
         WHERE sport IN ${sportInSql}
           AND (archived IS NULL OR archived = 0)
+          AND COALESCE(is_shadow, 0) = 0
           AND result IN ('win','loss','push','void')
-          AND id IN (SELECT MAX(id) FROM tips WHERE sport IN ${sportInSql} AND (archived IS NULL OR archived = 0) GROUP BY COALESCE(NULLIF(TRIM(match_id), ''), 'id:' || CAST(id AS TEXT)))
+          AND id IN (SELECT MAX(id) FROM tips WHERE sport IN ${sportInSql} AND (archived IS NULL OR archived = 0) AND COALESCE(is_shadow, 0) = 0 GROUP BY COALESCE(NULLIF(TRIM(match_id), ''), 'id:' || CAST(id AS TEXT)))
       `;
       const deduped = db.prepare(dedupedSql).all(...sportSet, ...sportSet);
       const sumDeduped = deduped.reduce((s, t) => s + Number(t.profit_reais || 0), 0);
-      const sumAll = db.prepare(`SELECT COALESCE(SUM(profit_reais), 0) AS total FROM tips WHERE sport IN ${sportInSql} AND (archived IS NULL OR archived = 0) AND result IN ('win','loss','push','void')`).get(...sportSet).total;
+      const sumAll = db.prepare(`SELECT COALESCE(SUM(profit_reais), 0) AS total FROM tips WHERE sport IN ${sportInSql} AND (archived IS NULL OR archived = 0) AND COALESCE(is_shadow, 0) = 0 AND result IN ('win','loss','push','void')`).get(...sportSet).total;
       sendJson(res, {
         ok: true,
         sport,
