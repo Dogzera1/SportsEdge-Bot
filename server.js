@@ -26118,7 +26118,7 @@ load();
           sendJson(res, { error: e.message }, 500);
         }
       }
-    });
+    }, _maxRecordTipBody);
     return;
   }
 
