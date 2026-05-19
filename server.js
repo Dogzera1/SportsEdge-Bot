@@ -25048,8 +25048,23 @@ load();
         return;
       }
     }
-    let body = ''; req.on('data', d => body += d);
+    // 2026-05-19 audit P0-2: cap body size em 64KB pra prevenir OOM Railway 512MB
+    // via POST body unbounded (atacante envia 500MB JSON → V8 alloc → SIGKILL).
+    // Tip JSON real fica em ~2-4KB; 64KB tem margem 16× pra payload legit.
+    // Override via env RECORD_TIP_MAX_BODY_BYTES (atenção: aumenta risk OOM).
+    const _maxRecordTipBody = parseInt(process.env.RECORD_TIP_MAX_BODY_BYTES || '65536', 10);
+    let body = ''; let _bodyOverflow = false;
+    req.on('data', d => {
+      if (_bodyOverflow) return;
+      body += d;
+      if (body.length > _maxRecordTipBody) { _bodyOverflow = true; body = ''; }
+    });
     req.on('end', async () => {
+      if (_bodyOverflow) {
+        log('WARN', 'RECORD-TIP', `body > ${_maxRecordTipBody} bytes rejected (cap audit P0-2 2026-05-19)`);
+        sendJson(res, { ok: false, error: 'body_too_large', max_bytes: _maxRecordTipBody }, 413);
+        return;
+      }
       // p1/p2 hoisted pra escopo do callback: outer catch referencia `${p1}` em
       // log UNIQUE-race; try-block const não é visível em catch (ReferenceError
       // "p1 is not defined" → unhandledRejection + handler nunca responde →
@@ -25189,6 +25204,20 @@ load();
           const m = String(t.stake || '').match(/(\d+(?:\.\d+)?)/);
           return m ? parseFloat(m[1]) : 0;
         })();
+        // 2026-05-19 audit P0-3: clamp stake units hard cap ANTES de portfolio adjust.
+        // /record-tip aceita t.stake string ("50u") direto do payload, baipassando
+        // _applyKelly product cap (lib/utils.js MAX_KELLY_FRAC=0.15). Atacante OR bug
+        // propagator injetando stake="50u" drenaria 25% bankroll por tip.
+        // SAGRADO SOFT: MAX_STAKE_UNITS (CLAUDE.md "Dinheiro CRÍTICO"). Default 15u.
+        // Override via env MAX_STAKE_UNITS (atenção: cap em prod só sobe com audit).
+        if (_stakeUnitsCurrent > 0) {
+          const _maxStakeUnits = Math.max(1, parseFloat(process.env.MAX_STAKE_UNITS || '15'));
+          if (_stakeUnitsCurrent > _maxStakeUnits) {
+            log('WARN', 'RECORD-TIP', `stake clamp: ${_stakeUnitsCurrent}u → ${_maxStakeUnits}u (sport=${sport} p1=${p1} p2=${p2} — cap audit P0-3 2026-05-19)`);
+            _stakeUnitsCurrent = _maxStakeUnits;
+            t.stake = `${_maxStakeUnits}u`;
+          }
+        }
         if (!t.isShadow && _stakeUnitsCurrent > 0
             && !/^(1|true|yes)$/i.test(String(process.env.PORTFOLIO_KELLY_DISABLED || ''))) {
           try {
