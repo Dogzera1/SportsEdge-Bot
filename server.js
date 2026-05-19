@@ -20662,8 +20662,13 @@ load();
       const sportArgs = sportFilter ? [sportFilter] : [];
       const out = { ok: true, days, sport: sportFilter || 'all' };
 
+      // 2026-05-19 audit P1-2: side adicionado ao GROUP BY pra revelar leaks
+      // direcionais. Antes agregava (sport, market, bucket) — tennis UNDER 2.5
+      // leak -15% + OVER 2.5 +8% colapsavam em ROI ~0 (média esconde sintoma
+      // unilateral). Anti-pattern "granular GROUP BY parcial" (CLAUDE.md P1).
+      // COALESCE(side,'na') preserva rows ML sem side. HAVING continua ≥10.
       const calibration = db.prepare(`
-        SELECT sport, market,
+        SELECT sport, market, COALESCE(side, 'na') AS side,
           CASE
             WHEN p_model < 0.40 THEN '01_lt40'
             WHEN p_model < 0.50 THEN '02_40to50'
@@ -20685,9 +20690,9 @@ load();
            AND result IN ('win','loss')
            AND p_model IS NOT NULL
            ${sportCond}
-         GROUP BY sport, market, pmodel_bucket
+         GROUP BY sport, market, COALESCE(side, 'na'), pmodel_bucket
          HAVING n >= 10
-         ORDER BY sport, market, pmodel_bucket
+         ORDER BY sport, market, side, pmodel_bucket
       `).all(...[days, ...sportArgs]).map(r => {
         const hit = r.n > 0 ? r.n_win / r.n : 0;
         const expected = r.avg_pmodel || 0;
