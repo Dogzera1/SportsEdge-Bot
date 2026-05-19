@@ -1557,6 +1557,34 @@ function badRequest(res, msg) {
   sendJson(res, { error: String(msg || 'invalid_payload') }, 400);
 }
 
+// 2026-05-19 audit P0-2: helper centralizado pra cap body POST endpoints.
+// Antes pattern inline replicado 17× (let body = ''; req.on('data', d => body += d))
+// sem cap → atacante POST 500MB → OOM Railway 512MB → SIGKILL. /record-tip
+// + 4 endpoints destructive/financial já tinham inline cap (commits 9cd741c
+// + c5a6135). Helper consolida pattern, facilita aplicar nos demais 12 sites.
+//
+// Uso: _readPostBody(req, res, (body) => { ... existing logic ... })
+//      _readPostBody(req, res, async (body) => { ... }, customMax)
+// body=null indica overflow (helper já respondeu com 413). Caller deve return.
+function _readPostBody(req, res, cb, maxBytes) {
+  const _max = Number.isFinite(maxBytes) ? maxBytes
+    : parseInt(process.env.POST_MAX_BODY_BYTES || '65536', 10) || 65536;
+  let body = ''; let overflow = false;
+  req.on('data', d => {
+    if (overflow) return;
+    body += d;
+    if (body.length > _max) {
+      overflow = true; body = '';
+      try { sendJson(res, { ok: false, error: 'body_too_large', max_bytes: _max }, 413); } catch (_) {}
+      try { cb(null); } catch (_) {} // notify caller que já respondemos
+    }
+  });
+  req.on('end', () => { if (!overflow) { try { cb(body); } catch (e) {
+    try { log('WARN', 'POST-BODY', `cb error: ${e.message}`); } catch (_) {}
+  } } });
+  req.on('error', () => { if (!overflow) { try { cb(null); } catch (_) {} } });
+}
+
 async function theOddsGet(theOddsUrl) {
   return await theOddsQueue.enqueue(`theodds:${theOddsUrl}`, async () => {
     const ttlMsRaw = parseInt(process.env.HTTP_CACHE_THEODDS_TTL_MS || '', 10);
@@ -7231,8 +7259,8 @@ const server = http.createServer(async (req, res) => {
 
   // ── Admin login/logout/me (HttpOnly cookie session) ──
   if (p === '/admin/login' && req.method === 'POST') {
-    let body = ''; req.on('data', d => body += d);
-    req.on('end', () => {
+    _readPostBody(req, res, (body) => {
+      if (body == null) return;
       try {
         if (!ADMIN_KEY) { sendJson(res, { ok: false, error: 'admin_key_not_configured' }, 503); return; }
         const { key } = safeParse(body, {});
@@ -9062,8 +9090,8 @@ setInterval(load, 10000);
         }
       }
     }
-    let body = ''; req.on('data', d => body += d);
-    req.on('end', () => {
+    _readPostBody(req, res, (body) => {
+      if (body == null) return;
       try {
         const { userId, username, subscribed, sportPrefs } = safeParse(body, {});
         // 2026-05-06: validar userId como int positivo Telegram chatId.
@@ -9661,8 +9689,8 @@ setInterval(load, 10000);
 
   // Reabre uma tip já liquidada (volta result → NULL) para re-liquidação futura
   if (p === '/reopen-tip' && req.method === 'POST') {
-    let body = ''; req.on('data', d => body += d);
-    req.on('end', () => {
+    _readPostBody(req, res, (body) => {
+      if (body == null) return;
       try {
         const payload = safeParse(body, {});
         const sport   = payload.sport || parsed.query.sport || 'esports';
@@ -9717,16 +9745,8 @@ setInterval(load, 10000);
 
   // Liquidação manual de tip por ID (Win ou Loss)
   if (p === '/settle-manual' && req.method === 'POST') {
-    // 2026-05-19 audit P0-2 extension: body cap 64KB. /settle-manual é financial.
-    let body = ''; let _bodyOverflow = false;
-    const _maxBody = parseInt(process.env.POST_MAX_BODY_BYTES || '65536', 10);
-    req.on('data', d => {
-      if (_bodyOverflow) return;
-      body += d;
-      if (body.length > _maxBody) { _bodyOverflow = true; body = ''; }
-    });
-    req.on('end', () => {
-      if (_bodyOverflow) { sendJson(res, { ok: false, error: 'body_too_large', max_bytes: _maxBody }, 413); return; }
+    _readPostBody(req, res, (body) => {
+      if (body == null) return;
       try {
         const payload = safeParse(body, {});
         const sport  = payload.sport || parsed.query.sport || 'esports';
@@ -17619,8 +17639,8 @@ load();
     if (!requireAdmin(req, res)) return;
     const { getAllDeltas, addSample } = require('./lib/bookmaker-delta');
     if (req.method === 'POST') {
-      let body = ''; req.on('data', c => body += c);
-      req.on('end', () => {
+      _readPostBody(req, res, (body) => {
+        if (body == null) return;
         try {
           const j = JSON.parse(body || '{}');
           const r = addSample(db, j.sport, j.bookmaker, j.pinnacleOdd, j.brOdd, j.matchLabel || null);
@@ -17734,8 +17754,8 @@ load();
   // POST /admin/set-tip-clv  body { tip_id, clv_odds, terminal: true }
   if (p === '/admin/set-tip-clv' && req.method === 'POST') {
     if (!requireAdmin(req, res)) return;
-    let body = ''; req.on('data', c => body += c);
-    req.on('end', () => {
+    _readPostBody(req, res, (body) => {
+      if (body == null) return;
       try {
         const j = JSON.parse(body || '{}');
         const tipId = parseInt(j?.tip_id, 10);
@@ -18459,8 +18479,8 @@ load();
   // este endpoint pra ativar pipeline shadow.
   if (p === '/admin/upsert-match-result' && req.method === 'POST') {
     if (!requireAdmin(req, res)) return;
-    let body = ''; req.on('data', d => body += d);
-    req.on('end', () => {
+    _readPostBody(req, res, (body) => {
+      if (body == null) return;
       try {
         const j = safeParse(body, {});
         const matchId = String(j.match_id || j.matchId || '').trim();
@@ -24968,16 +24988,8 @@ load();
 
   // Anula em lote todas as tips pendentes mais antigas que N dias (padrão: 60)
   if (p === '/void-old-pending' && req.method === 'POST') {
-    // 2026-05-19 audit P0-2 extension: body cap 64KB. /void-old-pending é DESTRUCTIVE financial.
-    let body = ''; let _bodyOverflow = false;
-    const _maxBody = parseInt(process.env.POST_MAX_BODY_BYTES || '65536', 10);
-    req.on('data', d => {
-      if (_bodyOverflow) return;
-      body += d;
-      if (body.length > _maxBody) { _bodyOverflow = true; body = ''; }
-    });
-    req.on('end', () => {
-      if (_bodyOverflow) { sendJson(res, { ok: false, error: 'body_too_large', max_bytes: _maxBody }, 413); return; }
+    _readPostBody(req, res, (body) => {
+      if (body == null) return;
       try {
         const payload = safeParse(body, {});
         const sport = payload.sport || parsed.query.sport || 'esports';
@@ -25074,18 +25086,8 @@ load();
     // Tip JSON real fica em ~2-4KB; 64KB tem margem 16× pra payload legit.
     // Override via env RECORD_TIP_MAX_BODY_BYTES (atenção: aumenta risk OOM).
     const _maxRecordTipBody = parseInt(process.env.RECORD_TIP_MAX_BODY_BYTES || '65536', 10);
-    let body = ''; let _bodyOverflow = false;
-    req.on('data', d => {
-      if (_bodyOverflow) return;
-      body += d;
-      if (body.length > _maxRecordTipBody) { _bodyOverflow = true; body = ''; }
-    });
-    req.on('end', async () => {
-      if (_bodyOverflow) {
-        log('WARN', 'RECORD-TIP', `body > ${_maxRecordTipBody} bytes rejected (cap audit P0-2 2026-05-19)`);
-        sendJson(res, { ok: false, error: 'body_too_large', max_bytes: _maxRecordTipBody }, 413);
-        return;
-      }
+    _readPostBody(req, res, async (body) => {
+      if (body == null) return; // helper já respondeu com 413 (cap audit P0-2)
       // p1/p2 hoisted pra escopo do callback: outer catch referencia `${p1}` em
       // log UNIQUE-race; try-block const não é visível em catch (ReferenceError
       // "p1 is not defined" → unhandledRejection + handler nunca responde →
@@ -26111,8 +26113,8 @@ load();
   }
 
   if (p === '/log-tip-factors' && req.method === 'POST') {
-    let body = ''; req.on('data', d => body += d);
-    req.on('end', () => {
+    _readPostBody(req, res, (body) => {
+      if (body == null) return;
       try {
         const { tipId, factors, predictedDir } = safeParse(body, {});
         const id = parseInt(tipId, 10);
@@ -26134,8 +26136,8 @@ load();
   }
 
   if (p === '/log-odds-history' && req.method === 'POST') {
-    let body = ''; req.on('data', d => body += d);
-    req.on('end', () => {
+    _readPostBody(req, res, (body) => {
+      if (body == null) return;
       try {
         const t = safeParse(body, {});
         const sport = parsed.query.sport || t.sport || 'esports';
@@ -26154,8 +26156,8 @@ load();
   }
 
   if (p === '/resync-stats' && req.method === 'POST') {
-    let body = ''; req.on('data', d => body += d);
-    req.on('end', async () => {
+    _readPostBody(req, res, async (body) => {
+      if (body == null) return;
       try {
         const payload = safeParse(body, {});
         const force = payload.force === true;
@@ -26178,15 +26180,8 @@ load();
     const count = db.prepare("SELECT COUNT(*) as c FROM tips WHERE sport = ? AND (archived IS NULL OR archived = 0)").get(sport).c;
     const expectedConfirm = `YES_RESET_${sport.toUpperCase()}_${count}`;
     // 2026-05-19 audit P0-2 extension: body cap 64KB. /reset-tips é DESTRUCTIVE.
-    let body = ''; let _bodyOverflow = false;
-    const _maxBody = parseInt(process.env.POST_MAX_BODY_BYTES || '65536', 10);
-    req.on('data', d => {
-      if (_bodyOverflow) return;
-      body += d;
-      if (body.length > _maxBody) { _bodyOverflow = true; body = ''; }
-    });
-    req.on('end', () => {
-      if (_bodyOverflow) { sendJson(res, { ok: false, error: 'body_too_large', max_bytes: _maxBody }, 413); return; }
+    _readPostBody(req, res, (body) => {
+      if (body == null) return;
       try {
         const payload = safeParse(body, {});
         const confirm = String(payload.confirm || parsed.query.confirm || '');
@@ -30929,8 +30924,8 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
   }
 
   if (p === '/settle' && req.method === 'POST') {
-    let body = ''; req.on('data', d => body += d);
-    req.on('end', () => {
+    _readPostBody(req, res, (body) => {
+      if (body == null) return;
       const _settleT0 = Date.now();
       const _emitSettleMetric = (status, sport, settledCount = 0) => {
         try {
@@ -32881,15 +32876,8 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
   if (p === '/set-bankroll' && req.method === 'POST') {
     // 2026-05-19 audit P0-2 extension: body cap 64KB. /set-bankroll é financial-
     // critical (modifica bankroll value). Sem cap, atacante POST 500MB → OOM.
-    let body = ''; let _bodyOverflow = false;
-    const _maxBody = parseInt(process.env.POST_MAX_BODY_BYTES || '65536', 10);
-    req.on('data', d => {
-      if (_bodyOverflow) return;
-      body += d;
-      if (body.length > _maxBody) { _bodyOverflow = true; body = ''; }
-    });
-    req.on('end', () => {
-      if (_bodyOverflow) { sendJson(res, { ok: false, error: 'body_too_large', max_bytes: _maxBody }, 413); return; }
+    _readPostBody(req, res, (body) => {
+      if (body == null) return;
       try {
         const { valor, sport: sportParam } = safeParse(body, {});
         const sport = (sportParam || parsed.query.sport || 'esports');
@@ -33276,9 +33264,8 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
       return;
     }
     if (req.method === 'POST') {
-      let body = '';
-      req.on('data', d => { body += d; });
-      req.on('end', () => {
+      _readPostBody(req, res, (body) => {
+        if (body == null) return;
         const json = safeParse(body, {});
         runManualEv({ ...parsed.query, ...json });
       });
@@ -33294,8 +33281,9 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
     // (max_tokens 900 = ~6-8k tokens/req). Sem auth, qualquer cliente externo
     // drena quota DeepSeek. Igual /claude (já em ADMIN_ROUTES_POST).
     if (!isAdminRequest(req)) { sendJson(res, { error: 'forbidden' }, 403); return; }
-    let body = ''; req.on('data', d => { body += d; });
-    req.on('end', async () => {
+    // 2026-05-19 audit P0-2: helper cap. Default 64KB OK pra OCR text 24KB típico.
+    _readPostBody(req, res, async (body) => {
+      if (body == null) return;
       try {
         if (!DEEPSEEK_KEY) { sendJson(res, { ok: false, error: 'DEEPSEEK_API_KEY ausente' }, 401); return; }
         const json = safeParse(body, null);
@@ -33649,8 +33637,8 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
 
   // ── AI Proxy (DeepSeek apenas) ──
   if (p === '/claude' && req.method === 'POST') {
-    let body = ''; req.on('data', d => body += d);
-    req.on('end', async () => {
+    _readPostBody(req, res, async (body) => {
+      if (body == null) return;
       const _aiT0 = Date.now();
       const _emitAiMetric = (status, sport) => {
         try {
@@ -33812,8 +33800,8 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
 
   // ── CLV e Abertura ──
   if (p === '/update-clv' && req.method === 'POST') {
-    let body = ''; req.on('data', d => body += d);
-    req.on('end', () => {
+    _readPostBody(req, res, (body) => {
+      if (body == null) return;
       try {
         const sport = parsed.query.sport || 'esports';
         const { matchId, clvOdds, tipParticipant } = safeParse(body, {});
@@ -33844,8 +33832,8 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
   }
 
   if (p === '/update-open-tip' && req.method === 'POST') {
-    let body = ''; req.on('data', d => body += d);
-    req.on('end', () => {
+    _readPostBody(req, res, (body) => {
+      if (body == null) return;
       try {
         const sport = parsed.query.sport || 'esports';
         const { matchId, currentOdds, currentEV, currentConfidence, currentStake, markNotified } = safeParse(body, {});
