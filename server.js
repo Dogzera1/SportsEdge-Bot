@@ -5085,7 +5085,28 @@ const server = http.createServer(async (req, res) => {
           return;
         }
         log('WARN', 'OPENDOTA', `Fallback Steam GetLiveLeagueGames: ${odErr.message}`);
-        const sR = await httpGet(`https://api.steampowered.com/IDOTA2Match_570/GetLiveLeagueGames/v1/?key=${encodeURIComponent(steamKey)}`, {}).catch(e => ({ status: 0, body: '', error: e.message }));
+        // 2026-05-19 audit P1: singleflight pattern. Audit log 16:07:15Z mostrou
+        // 19 timeouts Steam SIMULTÂNEOS — 19 /opendota-live em paralelo, todos
+        // entraram em fallback Steam, todos timed out. Breaker tripou tarde demais
+        // (state.fails atualiza só após cada timeout completar, mas as 19 chamadas
+        // já estavam em flight).
+        // Fix: deduplicate inflight calls via global._steamGllgInflight promise.
+        // Primeira call faz request real; concorrentes piggyback no resultado.
+        // GetLiveLeagueGames retorna ALL live games (global query) — share OK.
+        let sR;
+        if (global._steamGllgInflight) {
+          sR = await global._steamGllgInflight;
+        } else {
+          global._steamGllgInflight = httpGet(
+            `https://api.steampowered.com/IDOTA2Match_570/GetLiveLeagueGames/v1/?key=${encodeURIComponent(steamKey)}`,
+            {}
+          ).catch(e => ({ status: 0, body: '', error: e.message }));
+          try {
+            sR = await global._steamGllgInflight;
+          } finally {
+            global._steamGllgInflight = null;
+          }
+        }
         // Update breaker state baseado em resultado
         if (!_gllgBreakerOff) {
           if (sR.status === 200) {
