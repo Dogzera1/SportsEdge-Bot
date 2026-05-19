@@ -5056,8 +5056,24 @@ const server = http.createServer(async (req, res) => {
         const _gllgBreakerOff = /^(0|false|no)$/i.test(String(process.env.STEAM_GLLG_BREAKER || ''));
         const _gllgThreshold = Math.max(1, parseInt(process.env.STEAM_GLLG_BREAKER_THRESHOLD || '3', 10) || 3);
         const _gllgTtlMs = Math.max(60_000, parseInt(process.env.STEAM_GLLG_BREAKER_TTL_MS || `${5 * 60 * 1000}`, 10) || (5 * 60 * 1000));
-        global._steamGllgState = global._steamGllgState || { fails: 0, openUntil: 0, lastLog: 0 };
+        // 2026-05-19 audit P1 persist: state em settings table sobrevive restarts.
+        // Antes (in-memory only) perdia openUntil em cada boot — com 50 boots/24h
+        // (memory project_audit_logs_session_2026_05_19), breaker re-aprendia
+        // 3 fails/boot = ~150 wasted Steam calls/dia durante outages OpenDota.
+        // Lazy load on first call: lê settings.steam_gllg_state se global vazio.
+        if (!global._steamGllgState) {
+          try {
+            const row = db.prepare(`SELECT value FROM settings WHERE key='steam_gllg_state'`).get();
+            global._steamGllgState = row ? JSON.parse(row.value) : { fails: 0, openUntil: 0, lastLog: 0 };
+          } catch (_) { global._steamGllgState = { fails: 0, openUntil: 0, lastLog: 0 }; }
+        }
         const _gllgState = global._steamGllgState;
+        const _persistGllgState = () => {
+          try {
+            db.prepare(`INSERT OR REPLACE INTO settings (key, value) VALUES ('steam_gllg_state', ?)`)
+              .run(JSON.stringify({ fails: _gllgState.fails, openUntil: _gllgState.openUntil, lastLog: _gllgState.lastLog }));
+          } catch (_) { /* persist best-effort */ }
+        };
         if (!_gllgBreakerOff && _gllgState.openUntil > Date.now()) {
           // Throttle log 5min — uma linha quando reabrir
           if (Date.now() - _gllgState.lastLog >= 5 * 60 * 1000) {
@@ -5082,6 +5098,7 @@ const server = http.createServer(async (req, res) => {
               log('WARN', 'OPENDOTA', `GetLiveLeagueGames circuit breaker OPEN após ${_gllgState.fails} falhas — pause ${Math.round(_gllgTtlMs/60000)}min`);
             }
           }
+          _persistGllgState(); // persist em settings table — sobrevive restart (audit P1 2026-05-19)
         }
         if (sR.status !== 200) {
           sendJson(res, { hasLiveStats: false, error: `OpenDota+Steam ambos falharam (steam=${sR.status})` });

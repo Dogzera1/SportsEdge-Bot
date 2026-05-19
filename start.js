@@ -98,7 +98,16 @@ setTimeout(_writeLauncherHeartbeat, 5_000).unref?.();
 //   - SIGINT = manual stop
 //   - exit(0) = clean shutdown via code
 //   - uncaughtException = bug não-tratado em launcher
+// 2026-05-19 audit fix: race condition entre signal handlers e process.on('exit').
+// start.js:319 tem SIGTERM/SIGINT handlers que chamam process.exit(0) → triggera
+// process.on('exit') → segunda chamada overwrite a primeira (signal_SIGTERM).
+// Resultado: last_launcher_exit sempre mostrava 'process_exit' mesmo com SIGTERM.
+// Flag _exitReasonRecorded preserva o PRIMEIRO write (signal real captured).
+let _exitReasonRecorded = false;
 function _writeLauncherExit(reason, extra = {}) {
+  // process_exit é o catch-all default — skip se signal handler já gravou
+  if (_exitReasonRecorded && reason === 'process_exit') return;
+  _exitReasonRecorded = true;
   try {
     const fs = require('fs');
     const path = require('path');
