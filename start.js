@@ -89,6 +89,58 @@ setInterval(_writeLauncherHeartbeat, 30_000).unref();
 // Inicial logo após launcher subir
 setTimeout(_writeLauncherHeartbeat, 5_000).unref?.();
 
+// 2026-05-19 audit boot-loop forensics: launcher-level exit recorder. Quando
+// container muere (Railway recycle / kernel OOM SIGKILL), child.on('exit') do
+// child pode não disparar a tempo de _writeChildExit. Launcher captura próprios
+// sinais síncronamente — boot subsequente lê last_launcher_exit pra distinguir:
+//   - SIGTERM = Railway redeploy/recycle (clean)
+//   - SIGKILL = container OOM (impossível registrar — process já morto)
+//   - SIGINT = manual stop
+//   - exit(0) = clean shutdown via code
+//   - uncaughtException = bug não-tratado em launcher
+function _writeLauncherExit(reason, extra = {}) {
+  try {
+    const fs = require('fs');
+    const path = require('path');
+    const dbDir = path.dirname(path.isAbsolute(DB_PATH) ? DB_PATH : path.resolve(DB_PATH));
+    const out = path.join(dbDir, 'last_launcher_exit.json');
+    const mem = process.memoryUsage();
+    const payload = {
+      reason,
+      at: new Date().toISOString(),
+      uptime_s: Math.round(process.uptime()),
+      rss_mb: Math.round(mem.rss / 1024 / 1024),
+      heap_used_mb: Math.round(mem.heapUsed / 1024 / 1024),
+      children: Object.fromEntries(
+        Object.entries(_spawnTs).map(([name, ts]) => [
+          name,
+          { uptime_s: Math.round((Date.now() - ts) / 1000), crash_count: _crashCount[name] || 0 }
+        ])
+      ),
+      ...extra,
+    };
+    fs.writeFileSync(out, JSON.stringify(payload));
+  } catch (_) {}
+}
+for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP', 'SIGQUIT']) {
+  try {
+    process.on(sig, () => {
+      _writeLauncherExit(`signal_${sig}`);
+      // Não chamamos process.exit() — deixa Node propagar default behavior.
+      // Children recebem mesmo signal via subprocess inheritance.
+    });
+  } catch (_) {}
+}
+process.on('uncaughtException', (err) => {
+  _writeLauncherExit('uncaught_exception', { message: String(err?.message || err).slice(0, 500), stack: String(err?.stack || '').slice(0, 1000) });
+});
+process.on('unhandledRejection', (reason) => {
+  _writeLauncherExit('unhandled_rejection', { reason: String(reason).slice(0, 500) });
+});
+process.on('exit', (code) => {
+  _writeLauncherExit('process_exit', { exit_code: code });
+});
+
 // 2026-05-01: persiste exit signature do child em disco. Se SIGKILL/OOM (sem
 // grace period), o próprio child não tem chance de escrever last_exit_*.json,
 // mas o launcher captura via 'exit' event e persiste {code, signal, uptime_ms}.
