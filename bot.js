@@ -24660,7 +24660,11 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
     if (_lastMatchResultSourcesCleanupDay === today) return;
     _lastMatchResultSourcesCleanupDay = today;
     try {
-      const retentionDays = Math.max(7, Math.min(180, parseInt(process.env.MATCH_RESULT_SOURCES_RETENTION_DAYS || '30', 10) || 30));
+      // 2026-05-19: lowered default 30→3, floor 7→1. Table cresce ~750k rows/dia
+      // (audit log Railway 19/05: 2.258M rows = 95% do DB 669MB). Retention 30d
+      // era inalcançável (DB OOM antes). 3d default + floor=1 mantém janela
+      // mínima pra reconcile audit + permite override via env pra mais retenção.
+      const retentionDays = Math.max(1, Math.min(180, parseInt(process.env.MATCH_RESULT_SOURCES_RETENTION_DAYS || '3', 10) || 3));
       const r = db.prepare(`DELETE FROM match_result_sources WHERE recorded_at < datetime('now', '-' || ? || ' days')`).run(retentionDays);
       if (r.changes > 0) {
         log('INFO', 'CLEANUP', `match_result_sources: deleted ${r.changes} rows >${retentionDays}d retention`);
