@@ -9717,8 +9717,16 @@ setInterval(load, 10000);
 
   // Liquidação manual de tip por ID (Win ou Loss)
   if (p === '/settle-manual' && req.method === 'POST') {
-    let body = ''; req.on('data', d => body += d);
+    // 2026-05-19 audit P0-2 extension: body cap 64KB. /settle-manual é financial.
+    let body = ''; let _bodyOverflow = false;
+    const _maxBody = parseInt(process.env.POST_MAX_BODY_BYTES || '65536', 10);
+    req.on('data', d => {
+      if (_bodyOverflow) return;
+      body += d;
+      if (body.length > _maxBody) { _bodyOverflow = true; body = ''; }
+    });
     req.on('end', () => {
+      if (_bodyOverflow) { sendJson(res, { ok: false, error: 'body_too_large', max_bytes: _maxBody }, 413); return; }
       try {
         const payload = safeParse(body, {});
         const sport  = payload.sport || parsed.query.sport || 'esports';
@@ -24960,8 +24968,16 @@ load();
 
   // Anula em lote todas as tips pendentes mais antigas que N dias (padrão: 60)
   if (p === '/void-old-pending' && req.method === 'POST') {
-    let body = ''; req.on('data', d => body += d);
+    // 2026-05-19 audit P0-2 extension: body cap 64KB. /void-old-pending é DESTRUCTIVE financial.
+    let body = ''; let _bodyOverflow = false;
+    const _maxBody = parseInt(process.env.POST_MAX_BODY_BYTES || '65536', 10);
+    req.on('data', d => {
+      if (_bodyOverflow) return;
+      body += d;
+      if (body.length > _maxBody) { _bodyOverflow = true; body = ''; }
+    });
     req.on('end', () => {
+      if (_bodyOverflow) { sendJson(res, { ok: false, error: 'body_too_large', max_bytes: _maxBody }, 413); return; }
       try {
         const payload = safeParse(body, {});
         const sport = payload.sport || parsed.query.sport || 'esports';
@@ -26161,8 +26177,16 @@ load();
     if (!ALLOWED.has(sport)) { badRequest(res, `sport inválido: ${sport}`); return; }
     const count = db.prepare("SELECT COUNT(*) as c FROM tips WHERE sport = ? AND (archived IS NULL OR archived = 0)").get(sport).c;
     const expectedConfirm = `YES_RESET_${sport.toUpperCase()}_${count}`;
-    let body = ''; req.on('data', d => body += d);
+    // 2026-05-19 audit P0-2 extension: body cap 64KB. /reset-tips é DESTRUCTIVE.
+    let body = ''; let _bodyOverflow = false;
+    const _maxBody = parseInt(process.env.POST_MAX_BODY_BYTES || '65536', 10);
+    req.on('data', d => {
+      if (_bodyOverflow) return;
+      body += d;
+      if (body.length > _maxBody) { _bodyOverflow = true; body = ''; }
+    });
     req.on('end', () => {
+      if (_bodyOverflow) { sendJson(res, { ok: false, error: 'body_too_large', max_bytes: _maxBody }, 413); return; }
       try {
         const payload = safeParse(body, {});
         const confirm = String(payload.confirm || parsed.query.confirm || '');
@@ -32855,8 +32879,17 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
   }
 
   if (p === '/set-bankroll' && req.method === 'POST') {
-    let body = ''; req.on('data', d => body += d);
+    // 2026-05-19 audit P0-2 extension: body cap 64KB. /set-bankroll é financial-
+    // critical (modifica bankroll value). Sem cap, atacante POST 500MB → OOM.
+    let body = ''; let _bodyOverflow = false;
+    const _maxBody = parseInt(process.env.POST_MAX_BODY_BYTES || '65536', 10);
+    req.on('data', d => {
+      if (_bodyOverflow) return;
+      body += d;
+      if (body.length > _maxBody) { _bodyOverflow = true; body = ''; }
+    });
     req.on('end', () => {
+      if (_bodyOverflow) { sendJson(res, { ok: false, error: 'body_too_large', max_bytes: _maxBody }, 413); return; }
       try {
         const { valor, sport: sportParam } = safeParse(body, {});
         const sport = (sportParam || parsed.query.sport || 'esports');
