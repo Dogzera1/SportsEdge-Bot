@@ -5545,6 +5545,18 @@ const _KELLY_TIER_MULT_DEFAULTS = {
   cs2:      { 1: 1.20, 2: 1.00, 3: 0.40 },
   dota2:    { 1: 1.20, 2: 1.00, 3: 0.70 },
   valorant: { 1: 1.10, 2: 0.90, 3: 0.50 },
+  // 2026-05-19 audit P1-1: defaults conservadores pros 6 sports faltantes.
+  // Antes caíam em fallback 1.0 (tier-agnostic) — Champions League e Liga Argentina B
+  // recebiam mesmo Kelly em football, idem UFC vs regional MMA. Sample real per
+  // sport-tier ainda baixo → spread conservador (tier1<=1.20, tier3>=0.40).
+  // Override granular: KELLY_TIER_MULT_<SPORT>_<TIER>=N. Refit defaults após
+  // sample size >50/tier per sport.
+  football:    { 1: 1.20, 2: 1.00, 3: 0.50 }, // tier1 top5+UEFA / tier2 BR+segunda / tier3 regional
+  mma:         { 1: 1.10, 2: 0.90, 3: 0.40 }, // tier1 UFC+Bellator / tier2 ONE+PFL / tier3 regional
+  basket:      { 1: 1.10, 2: 0.90, 3: 0.40 }, // tier1 NBA+Euroleague / tier2 regional pro / tier3 lower (promoted real 2026-05-14)
+  tabletennis: { 1: 1.00, 2: 0.90, 3: 0.50 }, // tier1 WTT pro / tier2 cup / tier3 lower (low volume = pouco spread)
+  darts:       { 1: 1.00, 2: 0.90, 3: 0.50 }, // tier1 PDC majors / tier2 PDC tours / tier3 BDO+regional
+  snooker:     { 1: 1.00, 2: 0.90, 3: 0.50 }, // tier1 triple crown / tier2 ranking events / tier3 qualifiers
 };
 
 function _getTierKellyMultiplier(sport, league) {
