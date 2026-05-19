@@ -24701,6 +24701,12 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
   // às target_hour UTC (default 5 — same horário match_result_sources).
   let _lastAuditRetentionDay = null;
   function runAuditTablesRetention() {
+    // 2026-05-19 audit-banco P1: mem guard — DELETE em batch é heavy IO + holds
+    // page locks. Skip se RSS já critical pra não amplificar OOM pressure.
+    // Espelha pattern de runMatchResultSourcesCleanup (bot.js:24655). Mig
+    // retention é diária — perder 1 ciclo durante mem crisis é OK (idempotente,
+    // pega no próximo dia).
+    if (isMemCritical()) return;
     const targetHour = parseInt(process.env.AUDIT_TABLES_RETENTION_HOUR_UTC || '5', 10) || 5;
     const now = new Date();
     if (now.getUTCHours() !== targetHour) return;
