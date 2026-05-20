@@ -12637,14 +12637,22 @@ setInterval(load, 60000);
     if (!requireAdmin(req, res)) return;
     const chatId = String(parsed.query.chat_id || '').trim();
     const text = String(parsed.query.text || `🧪 Test broadcast ${new Date().toISOString()} — Csbettor_bot conectado e funcionando`);
+    const photo = String(parsed.query.photo || '').trim();  // optional: filename in /img/ OR full URL
     if (!chatId) { sendJson(res, { ok: false, error: 'chat_id obrigatório' }, 400); return; }
     const token = (process.env.TIPS_UNIFIED_TOKEN || process.env.TELEGRAM_TOKEN_ESPORTS || '').trim();
     if (!token) { sendJson(res, { ok: false, error: 'no token configured (TIPS_UNIFIED_TOKEN/TELEGRAM_TOKEN_ESPORTS)' }, 500); return; }
     const https = require('https');
-    const body = JSON.stringify({ chat_id: chatId, text });
+    // Build photo URL se photo param dado (pode ser nome de arquivo ou URL completa)
+    const baseUrl = (process.env.PUBLIC_BASE_URL || 'https://sportsedge-bot-production.up.railway.app').replace(/\/+$/, '');
+    const photoUrl = photo ? (photo.startsWith('http') ? photo : `${baseUrl}/img/${photo}`) : null;
+    const useSendPhoto = !!photoUrl;
+    const body = JSON.stringify(useSendPhoto
+      ? { chat_id: chatId, photo: photoUrl, caption: text, parse_mode: 'Markdown' }
+      : { chat_id: chatId, text }
+    );
     const tgReq = https.request({
       hostname: 'api.telegram.org', port: 443,
-      path: `/bot${token}/sendMessage`,
+      path: `/bot${token}/${useSendPhoto ? 'sendPhoto' : 'sendMessage'}`,
       method: 'POST',
       headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) },
       timeout: 10000,
