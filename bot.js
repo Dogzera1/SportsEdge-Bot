@@ -9755,6 +9755,16 @@ async function _runAiShadow(sport, ctx, opts = {}) {
       try { _metrics.incr('ai_shadow_invalid', { sport }); } catch (_) {}
       return;
     }
+    // 2026-05-20: min odd floor gate per-sport. Antes AI emitia tips com odd <1.4
+    // (ex: Weibo vs Bilibili @1.143, Team Secret Whales @1.267) — short-favorito
+    // sem edge defensável vs risco implied. Default 1.40 (mirror MT_MIN_ODD=1.40).
+    // Override Railway: <SPORT>_AI_MIN_ODDS=1.50 (mais restritivo) ou =0 (disable).
+    const aiMinOdds = parseFloat(process.env[`${sportU}_AI_MIN_ODDS`] ?? '1.40');
+    if (Number.isFinite(aiMinOdds) && aiMinOdds > 1.01 && tipOdd < aiMinOdds) {
+      try { _metrics.incr('ai_shadow_below_min_odds', { sport }); } catch (_) {}
+      log('INFO', TAG, `skip ${tipTeam} @ ${tipOdd} (below ${sportU}_AI_MIN_ODDS=${aiMinOdds})`);
+      return;
+    }
     if (Number.isFinite(tipEvNum) && tipEvNum < 0) {
       try { _metrics.incr('ai_shadow_neg_ev', { sport }); } catch (_) {}
       log('INFO', TAG, `skip ${tipTeam} @ ${tipOdd} EV=${tipEvNum}% conf=${tipConfRaw} (EV<0 — AI hallucinated edge)`);
