@@ -9246,8 +9246,13 @@ setInterval(load, 10000);
         // Antes aceitava qualquer string até 80 chars → "01234" e "1234" eram
         // distintos (ParseInt missing) → DB acumulava variantes do mesmo user.
         const uidInt = parseInt(String(userId || ''), 10);
-        if (!Number.isInteger(uidInt) || uidInt <= 0 || uidInt > 999999999999) {
-          badRequest(res, 'userId obrigatório (int positivo)'); return;
+        // 2026-05-20: aceita chat_ids negativos pra Telegram groups/supergroups.
+        // Formato: private chat = positive int (user_id); group = small negative;
+        // supergroup/channel = -100xxxxxxxxxx (até 14 chars total).
+        // Antes só positivos eram aceitos → loadSubscribedUsers groups persist
+        // falhava silenciosamente (.catch swallowed error).
+        if (!Number.isInteger(uidInt) || uidInt === 0 || Math.abs(uidInt) > 9999999999999) {
+          badRequest(res, 'userId obrigatório (int não-zero, max abs 10^13)'); return;
         }
         const uid = String(uidInt);
         const uname = clampStr(username, 80);
