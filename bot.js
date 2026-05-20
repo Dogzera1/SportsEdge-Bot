@@ -3343,6 +3343,18 @@ async function runAutoAnalysis() {
           const liveMapa = result.hasLiveStats ? result.liveGameNumber : null;
           const mapTag = (result.hasLiveStats && liveMapa) ? `_MAP${liveMapa}` : '';
 
+          // 2026-05-20 Sprint 1 — ML per-mapa LoL (shadow default).
+          // Gate: LOL_ML_PER_MAP=true + live + liveMapa. Quando ativo emite
+          // market_type='MAP{N}_WINNER' (vs 'ML' série) — modelP1/P2 já vem de
+          // lol-map-model.js quando hasLiveStats=true.
+          // Settle MAP{N}_WINNER ML requer Sprint 2 (handler em
+          // _settleCompletedTipsInner) — shadow tips ficam pending até lá ou
+          // void por AUTO_VOID_STUCK após VOID_STUCK_H_LOL.
+          // Promote real: LOL_ML_PER_MAP_SHADOW=false após n>=30 + ROI>=0% + CLV>=0%.
+          const _perMapEnabled = !!(result.hasLiveStats && liveMapa)
+            && /^(1|true|yes)$/i.test(String(process.env.LOL_ML_PER_MAP || ''));
+          const _perMapShadow = !/^(0|false|no)$/i.test(String(process.env.LOL_ML_PER_MAP_SHADOW ?? 'true'));
+
           // Dedup por FASE (pregame / map1 / map2 / ...): suprime re-tip na MESMA fase
           // quando placar e EV mal mexeram. Transição entre fases (pregame→map1, map1→map2)
           // passa livre — max 1 tip por mapa é garantido por analyzedMatches + matchId+_MAP{N}.
@@ -3389,16 +3401,24 @@ async function runAutoAnalysis() {
             modelP2: result.modelP2,
             modelPPick: modelPPick,
             modelLabel: modelLabel,
-            tipReason: result.tipReason || null,
+            // Per-map ML override: market_type MAP{N}_WINNER + shadow gate
+            market_type: _perMapEnabled ? `MAP${liveMapa}_WINNER` : undefined,
+            tipReason: _perMapEnabled
+              ? `LOL ML per-map (live map ${liveMapa}, lol-map-model)`
+              : (result.tipReason || null),
             lineShopOdds: result.o || null,
             pickSide: _pickSideLs,
             sport: 'lol',
-            isShadow: isBucketShadowed('lol') ? 1 : 0,
+            isShadow: _perMapEnabled
+              ? (_perMapShadow ? 1 : (isBucketShadowed('lol') ? 1 : 0))
+              : (isBucketShadowed('lol') ? 1 : 0),
             // tip_context_json fields (forensics):
             factors: result.factorActive || null,
             mlScore: Number.isFinite(result.mlScore) ? +result.mlScore.toFixed(2) : null,
             factorCount: (result.factorActive || []).length || null,
-            emissionSource: result.debugVars?.source || 'ml_only',
+            emissionSource: _perMapEnabled
+              ? 'lol_ml_per_map_live'
+              : (result.debugVars?.source || 'ml_only'),
             gates_evaluated: _mlGatesLolLs,
           }, 'lol');
 
