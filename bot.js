@@ -2873,6 +2873,12 @@ async function loadExistingTips() {
 
 // ── Load Subscribers ──
 async function loadSubscribedUsers() {
+  // 2026-05-20: clear in-memory antes do reload. Antes: refresh só ADD, nunca
+  // remove. User que altera group ID via env (ou unsubscribe via /save-user)
+  // continuava recebendo tips até bot restart. Agora periodic refresh purga.
+  // Admins/groups ainda no DB ou env são re-adicionados no flow abaixo.
+  subscribedUsers.clear();
+
   try {
     const users = await serverGet('/users?subscribed=1');
     if (Array.isArray(users)) {
@@ -2913,14 +2919,43 @@ async function loadSubscribedUsers() {
   //   5. Redeploy/restart → bot dispatches tips ao grupo
   const _groupIdsAll = String(process.env.TELEGRAM_GROUP_CHAT_IDS_ALL || '')
     .split(',').map(s => s.trim()).filter(Boolean);
+  const _envGroupSet = new Set();
   for (const gid of _groupIdsAll) {
     const id = parseInt(gid, 10);
     if (isNaN(id)) { log('WARN', 'BOOT', `TELEGRAM_GROUP_CHAT_IDS_ALL: chat_id inválido "${gid}"`); continue; }
-    if (!subscribedUsers.has(id) || subscribedUsers.get(id).size === 0) {
+    _envGroupSet.add(id);
+    // 2026-05-20: SEMPRE force allSports pra grupos no env (não só first-time).
+    // Antes: if size > 0, skip. Resultado: grupo adicionado via /save-user antigo
+    // com sport_prefs parcial nunca pegava sports novos. Agora env é source of truth.
+    const existing = subscribedUsers.get(id);
+    const sportsChanged = !existing || existing.size !== allSports.size || [...allSports].some(s => !existing.has(s));
+    if (sportsChanged) {
       subscribedUsers.set(id, new Set(allSports));
       log('INFO', 'BOOT', `Telegram group ${id} subscribed em: ${[...allSports].join(', ')}`);
       serverPost('/save-user', { userId: id, subscribed: true, sportPrefs: [...allSports] }).catch(() => {});
     }
+  }
+  // 2026-05-20: env-driven cleanup. Groups (id<0) em DB que NÃO estão no env
+  // TELEGRAM_GROUP_CHAT_IDS_ALL atual → unsubscribe. Env é source of truth.
+  // User troca canal Telegram: muda env → próximo refresh purga canal antigo.
+  // Per-sport groups (TELEGRAM_GROUP_CHAT_IDS_<SPORT>) preservados via loop abaixo.
+  const _envPerSportGroups = new Set();
+  for (const sport of allSports) {
+    const envKey = `TELEGRAM_GROUP_CHAT_IDS_${sport.toUpperCase()}`;
+    String(process.env[envKey] || '').split(',').map(s => s.trim()).filter(Boolean)
+      .forEach(gid => { const id = parseInt(gid, 10); if (!isNaN(id)) _envPerSportGroups.add(id); });
+  }
+  const _adminIdSet = new Set(ADMIN_IDS.map(a => parseInt(a, 10)).filter(Number.isFinite));
+  const _toUnsubscribe = [];
+  for (const [id] of subscribedUsers) {
+    if (id < 0 && !_envGroupSet.has(id) && !_envPerSportGroups.has(id) && !_adminIdSet.has(id)) {
+      _toUnsubscribe.push(id);
+    }
+  }
+  for (const id of _toUnsubscribe) {
+    subscribedUsers.delete(id);
+    log('INFO', 'BOOT', `Group ${id} não está em TELEGRAM_GROUP_CHAT_IDS_* env → unsubscribed`);
+    serverPost('/save-user', { userId: id, subscribed: false, sportPrefs: [] }).catch(() => {});
   }
   // Per-sport groups: TELEGRAM_GROUP_CHAT_IDS_LOL, _CS, _FOOTBALL, etc.
   for (const sport of allSports) {
