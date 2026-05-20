@@ -3139,6 +3139,32 @@ const migrations = [
       } catch (e) { console.log(`[mig 118] failed: ${e.message}`); }
     },
   },
+  {
+    id: '119_analyzed_dedup_persist',
+    up(db) {
+      // 2026-05-20 (audit R2 pipeline live tips): analyzed_dedup tabela pra
+      // persistir Maps in-memory (analyzedMatches, analyzedDota, analyzedCs, etc.)
+      // cross-restart. Antes: Boot → Maps vazios → primeiro ciclo re-tentava emit
+      // pra matches já analisados nos últimos 72h. UNIQUE constraint em tips bloqueava
+      // duplicate insert mas custo era: 1 ciclo wasteful + log noise "UNIQUE race".
+      //
+      // Schema: composto (sport, cache_key). value_json armazena payload arbitrário
+      // ({ts, tipSent, reason, ...}). idx_ts pra cleanup eficiente por TTL.
+      try {
+        db.exec(`
+          CREATE TABLE IF NOT EXISTS analyzed_dedup (
+            sport TEXT NOT NULL,
+            cache_key TEXT NOT NULL,
+            ts INTEGER NOT NULL,
+            value_json TEXT,
+            PRIMARY KEY (sport, cache_key)
+          );
+        `);
+        db.exec(`CREATE INDEX IF NOT EXISTS idx_analyzed_dedup_ts ON analyzed_dedup(ts);`);
+        console.log('[mig 119] analyzed_dedup table + ts index');
+      } catch (e) { console.log(`[mig 119] failed: ${e.message}`); }
+    },
+  },
 ];
 
 function applyMigrations(db) {

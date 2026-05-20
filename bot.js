@@ -908,6 +908,92 @@ function sweepAnalyzedMaps() {
   try { markCronHeartbeat('sweep_analyzed', { result: 'ok', durationMs: Date.now() - _t0 }); } catch (_) {}
   return total;
 }
+// R2 audit 2026-05-20 — persist analyzed_dedup maps em SQLite.
+// Boot reidrata Maps com entries dos últimos ANALYZED_TTL_MS (72h default).
+// Antes: restart → Maps vazios → primeiro ciclo re-emit tips pra matches já
+// analisados → UNIQUE constraint bloqueava INSERT mas custo era ciclo wasteful.
+// Cron 5min flush in-mem → DB. Boot load 1x.
+const _analyzedMapRegistry = {
+  lol: () => analyzedMatches,
+  dota2: () => analyzedDota,
+  cs: () => analyzedCs,
+  valorant: () => analyzedValorant,
+  tennis: () => analyzedTennis,
+  football: () => analyzedFootball,
+  mma: () => analyzedMma,
+  darts: () => analyzedDarts,
+  snooker: () => analyzedSnooker,
+  basket: () => (typeof analyzedBasket !== 'undefined' ? analyzedBasket : null),
+  tabletennis: () => (typeof analyzedTT !== 'undefined' ? analyzedTT : null),
+};
+function _persistAnalyzedDedup() {
+  if (!db) return { persisted: 0 };
+  const _t0 = Date.now();
+  const now = Date.now();
+  const cutoff = now - ANALYZED_TTL_MS;
+  let persisted = 0;
+  let purged = 0;
+  try {
+    const upsert = db.prepare(`
+      INSERT INTO analyzed_dedup (sport, cache_key, ts, value_json)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(sport, cache_key) DO UPDATE SET ts=excluded.ts, value_json=excluded.value_json
+    `);
+    const purgeStmt = db.prepare(`DELETE FROM analyzed_dedup WHERE ts < ?`);
+    const tx = db.transaction(() => {
+      for (const [sport, getMap] of Object.entries(_analyzedMapRegistry)) {
+        const m = getMap();
+        if (!m || !m.size) continue;
+        for (const [key, value] of m.entries()) {
+          const ts = (value && Number(value.ts)) || (typeof value === 'number' ? value : 0);
+          if (!ts || ts < cutoff) continue;
+          const payload = (value && typeof value === 'object') ? JSON.stringify(value) : String(value);
+          upsert.run(sport, String(key), ts, payload);
+          persisted++;
+        }
+      }
+      purged = purgeStmt.run(cutoff).changes || 0;
+    });
+    tx();
+    if (persisted > 0 || purged > 0) {
+      log('DEBUG', 'DEDUP-PERSIST', `${persisted} entries persisted, ${purged} purged (TTL ${Math.round(ANALYZED_TTL_MS/3600000)}h) in ${Date.now()-_t0}ms`);
+    }
+  } catch (e) {
+    log('WARN', 'DEDUP-PERSIST', `failed: ${e.message}`);
+  }
+  try { markCronHeartbeat('analyzed_dedup_persist', { result: 'ok', durationMs: Date.now() - _t0, persisted, purged }); } catch (_) {}
+  return { persisted, purged };
+}
+function _loadAnalyzedDedup() {
+  if (!db) return { loaded: 0 };
+  const _t0 = Date.now();
+  const cutoff = Date.now() - ANALYZED_TTL_MS;
+  let loaded = 0;
+  try {
+    const rows = db.prepare(`SELECT sport, cache_key, ts, value_json FROM analyzed_dedup WHERE ts > ?`).all(cutoff);
+    for (const r of rows) {
+      const getMap = _analyzedMapRegistry[r.sport];
+      if (!getMap) continue;
+      const m = getMap();
+      if (!m) continue;
+      let value;
+      try { value = JSON.parse(r.value_json); } catch (_) { value = { ts: r.ts }; }
+      if (!value || typeof value !== 'object') value = { ts: r.ts };
+      if (!Number.isFinite(value.ts)) value.ts = r.ts;
+      m.set(r.cache_key, value);
+      loaded++;
+    }
+    log('INFO', 'DEDUP-LOAD', `${loaded} analyzed_dedup entries reidratadas (last ${Math.round(ANALYZED_TTL_MS/3600000)}h) em ${Date.now()-_t0}ms`);
+  } catch (e) {
+    log('WARN', 'DEDUP-LOAD', `failed: ${e.message}`);
+  }
+  return { loaded };
+}
+// Boot reidrata 1x (após DB init na linha 602)
+setTimeout(() => { try { _loadAnalyzedDedup(); } catch (_) {} }, 5 * 1000);
+// Cron 5min flush in-mem → DB
+setInterval(() => { try { _persistAnalyzedDedup(); } catch (_) {} }, 5 * 60 * 1000).unref();
+
 // Inicia sweep periódico — só quando log() já está disponível (lazy evaluation
 // do setInterval). Roda 1x por hora.
 // .unref() = não impede process.exit (sweep é janitorial, não crítico).
