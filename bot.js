@@ -2853,6 +2853,46 @@ async function loadSubscribedUsers() {
     }
   }
 
+  // 2026-05-20 — Telegram group chat_ids via env. Cobre caso "adicionar bot em
+  // grupo" sem requerer comando /start no grupo. Chat_ids de grupo são negativos
+  // (-100xxxxx pra supergroups). Bot precisa ser membro do grupo (admin opcional)
+  // pra sendMessage funcionar. Per-sport via TELEGRAM_GROUP_CHAT_IDS_<SPORT>
+  // OR global TELEGRAM_GROUP_CHAT_IDS_ALL pra todos sports habilitados.
+  //
+  // Setup:
+  //   1. @BotFather: /mybots → bot → Bot Settings → Group Privacy → OFF (opcional, só pra ler /start)
+  //   2. Add bot ao grupo via Telegram UI
+  //   3. Pegar chat_id: forwarda msg pra @userinfobot OR @RawDataBot
+  //   4. Setar env TELEGRAM_GROUP_CHAT_IDS_ALL=-1001234567890,-1009876543210
+  //   5. Redeploy/restart → bot dispatches tips ao grupo
+  const _groupIdsAll = String(process.env.TELEGRAM_GROUP_CHAT_IDS_ALL || '')
+    .split(',').map(s => s.trim()).filter(Boolean);
+  for (const gid of _groupIdsAll) {
+    const id = parseInt(gid, 10);
+    if (isNaN(id)) { log('WARN', 'BOOT', `TELEGRAM_GROUP_CHAT_IDS_ALL: chat_id inválido "${gid}"`); continue; }
+    if (!subscribedUsers.has(id) || subscribedUsers.get(id).size === 0) {
+      subscribedUsers.set(id, new Set(allSports));
+      log('INFO', 'BOOT', `Telegram group ${id} subscribed em: ${[...allSports].join(', ')}`);
+      serverPost('/save-user', { userId: id, subscribed: true, sportPrefs: [...allSports] }).catch(() => {});
+    }
+  }
+  // Per-sport groups: TELEGRAM_GROUP_CHAT_IDS_LOL, _CS, _FOOTBALL, etc.
+  for (const sport of allSports) {
+    const envKey = `TELEGRAM_GROUP_CHAT_IDS_${sport.toUpperCase()}`;
+    const ids = String(process.env[envKey] || '').split(',').map(s => s.trim()).filter(Boolean);
+    for (const gid of ids) {
+      const id = parseInt(gid, 10);
+      if (isNaN(id)) { log('WARN', 'BOOT', `${envKey}: chat_id inválido "${gid}"`); continue; }
+      const existing = subscribedUsers.get(id) || new Set();
+      if (!existing.has(sport)) {
+        existing.add(sport);
+        subscribedUsers.set(id, existing);
+        log('INFO', 'BOOT', `Telegram group ${id} subscribed em ${sport} (via ${envKey})`);
+        serverPost('/save-user', { userId: id, subscribed: true, sportPrefs: [...existing] }).catch(() => {});
+      }
+    }
+  }
+
   if (subscribedUsers.size === 0) {
     log('WARN', 'BOOT', 'Nenhum usuário inscrito. Configure ADMIN_USER_IDS no .env para receber tips automaticamente.');
   } else {
@@ -9842,7 +9882,11 @@ async function _runAiShadow(sport, ctx, opts = {}) {
     const REAL_TAG = `AI-REAL-${sportU}`;
     if (_aiReal && tipResp?.tipId && tipResp?.isShadow === 0 && tipResp?.autoShadowed !== 1) {
       try {
-        const _aiToken = process.env[dmTokenEnv];
+        // 2026-05-20: TIPS_UNIFIED_TOKEN override pra AI dispatch.
+        // Antes AI dispatch usava dmTokenEnv direto (TELEGRAM_TOKEN_ESPORTS pra LoL),
+        // ignorando override unified. Memory bot.js:2668 já tem este pattern global.
+        // Resultado: tips AI iam pro bot ESPORTS (alertas) em vez do unified (tips).
+        const _aiToken = (process.env.TIPS_UNIFIED_TOKEN || '').trim() || process.env[dmTokenEnv];
         if (_aiToken && subscribedUsers.size > 0) {
           const _liveTag = hasLiveStats ? ' [AO VIVO]' : '';
           const _confEmoji = tipConf === CONF.ALTA ? '🟢' : tipConf === CONF.BAIXA ? '🔴' : '🟡';
