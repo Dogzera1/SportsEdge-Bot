@@ -713,6 +713,22 @@ const bots = {};
 const tokenToSport = getTokenToSportMap();
 const subscribedUsers = new Map(); // userId → Set<sport>
 
+// 2026-05-20: helper de auto-unsub seguro pra groups.
+// Telegram bot 403 em groups pode ser transient (bot kicked + readded, perm
+// temporariamente revoked, rate-limit que aparece como 403). Auto-unsub
+// imediato remove grupo permanentemente da Map → tips param de ser dispatched
+// até user re-subscribe manualmente. Pra groups (chat_id negativo), skip
+// auto-unsub e log warn — user investiga.
+function _safeUnsub(userId) {
+  const uidInt = typeof userId === 'number' ? userId : parseInt(String(userId), 10);
+  if (Number.isFinite(uidInt) && uidInt < 0) {
+    // Group — não auto-unsub. User precisa investigar (bot kicked? rate-limit?)
+    return false;
+  }
+  subscribedUsers.delete(userId);
+  return true;
+}
+
 // Auto-analysis state
 const analyzedMatches = new Map();
 // Serie-level dedup LoL: evita re-tip entre mapas quando placar nao mudou e EV e semelhante.
@@ -2631,7 +2647,15 @@ async function sendDM(token, userId, text, extra) {
   if (code === 403) {
     // Auto-unsubscribe — Telegram 403 = user bloqueou o bot. Continuar tentando
     // gera log noise + rate-limit. Best-effort (não throw se save falhar).
-    _unsubscribeUserAll(userId, 'tg_403_blocked').catch(() => {});
+    // 2026-05-20: skip auto-unsub pra groups (chat_id negativo) — 403 em group
+    // pode ser bot kicked + readded, perm revoked transient, etc. Group user
+    // investiga manual via Telegram.
+    const _uidNum = typeof userId === 'number' ? userId : parseInt(String(userId), 10);
+    if (Number.isFinite(_uidNum) && _uidNum < 0) {
+      log('WARN', 'TG-403-GROUP', `groupId=${userId} 403 — skipping auto-unsub. desc="${desc}"`);
+    } else {
+      _unsubscribeUserAll(userId, 'tg_403_blocked').catch(() => {});
+    }
     throw Object.assign(new Error(`Telegram 403: ${desc}`), { code: 403 });
   }
   if (code === 400 && /parse|entities|markdown|reserved|unsupported/i.test(desc)) {
@@ -3576,9 +3600,12 @@ async function runAutoAnalysis() {
               try { await sendDM(resolveTipsToken('esports'), userId, tipMsg, _betBtn || undefined); }
               catch(e) {
                 if (e.message?.includes('403')) {
-                  log('WARN', 'AUTO-TIP', `403 lol userId=${userId} — auto-unsub. desc="${e.message}"`);
-                  subscribedUsers.delete(userId);
-                  serverPost('/save-user', { userId: String(userId), subscribed: false }, 'esports').catch(() => {});
+                  if (_safeUnsub(userId)) {
+                    log('WARN', 'AUTO-TIP', `403 lol userId=${userId} — auto-unsub. desc="${e.message}"`);
+                    serverPost('/save-user', { userId: String(userId), subscribed: false }, 'esports').catch(() => {});
+                  } else {
+                    log('WARN', 'AUTO-TIP', `403 lol groupId=${userId} — keeping subscribed (groups skip auto-unsub). desc="${e.message}"`);
+                  }
                 } else {
                   log('WARN', 'AUTO-TIP', `sendDM falhou lol userId=${userId}: ${e.message}`);
                 }
@@ -4008,7 +4035,7 @@ async function runAutoAnalysis() {
               for (const [userId, prefs] of subscribedUsers) {
                 if (!prefs.has('esports')) continue;
                 try { await sendDM(resolveTipsToken('esports'), userId, tipMsg, _betBtnUp || undefined); }
-                catch(e) { if (e.message?.includes('403')) subscribedUsers.delete(userId); }
+                catch(e) { if (e.message?.includes('403')) _safeUnsub(userId); }
               }
             }
             analyzedMatches.set(matchKey, { ts: now, tipSent: true });
@@ -4891,8 +4918,11 @@ async function notifySettledTips() {
           sent++;
         } catch (e) {
           if (e.message && e.message.includes('403')) {
-            subscribedUsers.delete(userId);
-            serverPost('/save-user', { userId: String(userId), subscribed: false }, tokenSport).catch(() => {});
+            if (_safeUnsub(userId)) {
+              serverPost('/save-user', { userId: String(userId), subscribed: false }, tokenSport).catch(() => {});
+            } else {
+              log('DEBUG', 'SETTLE-NOTIFY', `403 groupId=${userId} — keeping subscribed (group)`);
+            }
           } else {
             log('DEBUG', 'SETTLE-NOTIFY', `tip ${tip.id} userId=${userId}: ${e.message}`);
           }
@@ -4959,7 +4989,7 @@ async function checkLineMovement() {
       for (const [userId, prefs] of subscribedUsers) {
         if (!prefs.has('esports')) continue;
         try { await sendDM(resolveTipsToken('esports'), userId, msg); }
-        catch(e) { if (e.message?.includes('403')) subscribedUsers.delete(userId); }
+        catch(e) { if (e.message?.includes('403')) _safeUnsub(userId); }
       }
 
       log('INFO', 'LINE', `esports: ${t1} vs ${t2} Δ${(Math.max(d1,d2)*100).toFixed(1)}%`);
@@ -9334,7 +9364,7 @@ async function checkLiveNotifications() {
 
             await sendDM(token, userId, txt);
           } catch(e) {
-            if (e.message?.includes('403')) subscribedUsers.delete(userId);
+            if (e.message?.includes('403')) _safeUnsub(userId);
           }
         }
       }
@@ -9365,7 +9395,7 @@ async function checkLiveNotifications() {
               `_Fonte: ${o.bookmaker || 'odds'}_`;
             await sendDM(token, userId, txt);
           } catch(e) {
-            if (e.message?.includes('403')) subscribedUsers.delete(userId);
+            if (e.message?.includes('403')) _safeUnsub(userId);
           }
         }
       }
@@ -9924,7 +9954,7 @@ async function _runAiShadow(sport, ctx, opts = {}) {
             if (prefs && subPrefs.some(p => prefs.has(p))) {
               sendDM(_aiToken, userId, _aiMsg)
                 .then(() => { _dmsSent++; })
-                .catch(e => { if (e.message?.includes('403')) subscribedUsers.delete(userId); });
+                .catch(e => { if (e.message?.includes('403')) _safeUnsub(userId); });
             }
           }
           log('INFO', REAL_TAG, `${sport} AI REAL emit: ${tipTeam} @ ${tipOdd} EV=${tipEvNum}% conf=${tipConf} | tip_id=${tipResp.tipId} | DMs dispatched`);
