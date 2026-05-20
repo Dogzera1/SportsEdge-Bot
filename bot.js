@@ -743,6 +743,19 @@ function _safeUnsub(userId) {
   return true;
 }
 
+// R6 audit 2026-05-20: dispatch unificado ML + MT. Antes: per-subscriber loop
+// usava `prefs.has(sport)` que skippava groups sem sport_prefs matching string
+// exato (ex: grupo com 'esports' mas tip sport='lol' → tip não dispatched).
+// Agora groups (chat_id<0) broadcastam todos sports quando TIPS_BROADCAST_TO_GROUPS=true
+// (default true, mirror sendAdminDMs). Users individuais (chat_id>0) seguem prefs check.
+function _shouldDispatchToSubscriber(userId, prefs, sport) {
+  const uidInt = typeof userId === 'number' ? userId : parseInt(String(userId), 10);
+  if (Number.isFinite(uidInt) && uidInt < 0) {
+    return !/^(0|false|no)$/i.test(String(process.env.TIPS_BROADCAST_TO_GROUPS ?? 'true'));
+  }
+  return !!(prefs && prefs.has && prefs.has(sport));
+}
+
 // Auto-analysis state
 const analyzedMatches = new Map();
 // Serie-level dedup LoL: evita re-tip entre mapas quando placar nao mudou e EV e semelhante.
@@ -3712,7 +3725,7 @@ async function runAutoAnalysis() {
             log('INFO', 'AUTO', `[SHADOW] ${tipTeam} @ ${tipOdd} | EV:${tipEV} | ${tipStakeAdj} | ${tipConf} — DM suprimida${rec?.autoShadowed ? ' (auto-shadow)' : ''}`);
           } else {
             for (const [userId, prefs] of subscribedUsers) {
-              if (!prefs.has('esports')) continue;
+              if (!_shouldDispatchToSubscriber(userId, prefs, 'esports')) continue;
               try { await sendDM(resolveTipsToken('esports'), userId, tipMsg, _betBtn || undefined); }
               catch(e) {
                 if (e.message?.includes('403')) {
@@ -3802,7 +3815,7 @@ async function runAutoAnalysis() {
 
                 if (!isBucketShadowed('lol')) {
                   for (const [userId, prefs] of subscribedUsers) {
-                    if (!prefs.has('esports')) continue;
+                    if (!_shouldDispatchToSubscriber(userId, prefs, 'esports')) continue;
                     try { await sendDM(resolveTipsToken('esports'), userId, hMsg); } catch(_) {}
                   }
                 } else {
@@ -4149,7 +4162,7 @@ async function runAutoAnalysis() {
               log('INFO', 'AUTO-TIP', `[SHADOW] LoL upcoming ${tipTeam} @ ${tipOdd} — DM suprimida${recUp?.autoShadowed ? ' (auto-shadow)' : ''}`);
             } else {
               for (const [userId, prefs] of subscribedUsers) {
-                if (!prefs.has('esports')) continue;
+                if (!_shouldDispatchToSubscriber(userId, prefs, 'esports')) continue;
                 try { await sendDM(resolveTipsToken('esports'), userId, tipMsg, _betBtnUp || undefined); }
                 catch(e) { if (e.message?.includes('403')) _safeUnsub(userId); }
               }
@@ -5035,7 +5048,7 @@ async function notifySettledTips() {
         : (tip.result === 'loss' ? `${_baseUrl}/img/tip_loss.jpg` : null);
       let sent = 0;
       for (const [userId, prefs] of subscribedUsers) {
-        if (!prefs || !prefs.has(prefKey)) continue;
+        if (!_shouldDispatchToSubscriber(userId, prefs, prefKey)) continue;
         try {
           if (_photoUrl) {
             await sendPhotoFromUrl(token, userId, _photoUrl, msg);
@@ -5114,7 +5127,7 @@ async function checkLineMovement() {
         `💡 _Movimentos bruscos = sharp money ou lesão_`;
 
       for (const [userId, prefs] of subscribedUsers) {
-        if (!prefs.has('esports')) continue;
+        if (!_shouldDispatchToSubscriber(userId, prefs, 'esports')) continue;
         try { await sendDM(resolveTipsToken('esports'), userId, msg); }
         catch(e) { if (e.message?.includes('403')) _safeUnsub(userId); }
       }
@@ -9469,7 +9482,7 @@ async function checkLiveNotifications() {
       if (!notifiedMatches.has(matchKey)) {
         notifiedMatches.set(matchKey, now);
         for (const [userId, prefs] of subscribedUsers) {
-          if (!prefs.has('esports')) continue;
+          if (!_shouldDispatchToSubscriber(userId, prefs, 'esports')) continue;
           try {
             const o = mapOdds;
             const gameIcon = '🎮';
@@ -9513,7 +9526,7 @@ async function checkLiveNotifications() {
         if (notifiedMatches.has(matchKey)) continue;
         notifiedMatches.set(matchKey, now);
         for (const [userId, prefs] of subscribedUsers) {
-          if (!prefs.has('esports')) continue;
+          if (!_shouldDispatchToSubscriber(userId, prefs, 'esports')) continue;
           try {
             const txt = `🕹️ 🔴 *DOTA 2 AO VIVO (ODDS AO VIVO DISPONÍVEIS)!*\n\n` +
               `*${match.team1}* ${match.score1||0}-${match.score2||0} *${match.team2}*\n` +
@@ -10084,7 +10097,7 @@ async function _runAiShadow(sport, ctx, opts = {}) {
                 `💰 *${tipStake}* | EV *+${tipEvNum.toFixed(1)}%* | ${tipConf}`);
           let _dmsSent = 0;
           for (const [userId, prefs] of subscribedUsers) {
-            if (prefs && subPrefs.some(p => prefs.has(p))) {
+            if (subPrefs.some(p => _shouldDispatchToSubscriber(userId, prefs, p))) {
               sendDM(_aiToken, userId, _aiMsg)
                 .then(() => { _dmsSent++; })
                 .catch(e => { if (e.message?.includes('403')) _safeUnsub(userId); });
@@ -18364,7 +18377,7 @@ Máximo 220 palavras. Seja direto e fundamentado.`;
 
         const _betBtnMma = _buildTipBetButton('mma', fight.odds, _pickSideMma, fight, tipStake, tipOdd);
         for (const [userId, prefs] of subscribedUsers) {
-          if (!prefs.has('mma')) continue;
+          if (!_shouldDispatchToSubscriber(userId, prefs, 'mma')) continue;
           try { await sendDM(token, userId, tipMsg, _betBtnMma || undefined); } catch(_) {}
         }
         analyzedMma.set(key, { ts: now, tipSent: true });
@@ -20005,7 +20018,7 @@ Máximo 200 palavras. Raciocínio breve antes da decisão.`;
         const _betBtnTen = _buildTipBetButton('tennis', o, pickIsT1 ? 't1' : 't2', match, tipStakeAdjTennis, tipOdd);
         if (!_tennisMlShadow) {
           for (const [userId, prefs] of subscribedUsers) {
-            if (!prefs.has('tennis')) continue;
+            if (!_shouldDispatchToSubscriber(userId, prefs, 'tennis')) continue;
             try { await sendDM(token, userId, tipMsg, _betBtnTen || undefined); } catch(_) {}
           }
         }
@@ -21449,7 +21462,7 @@ Máximo 200 palavras.`;
 
         const _betBtnFb = _buildTipBetButton('football', match.odds, _pickSideFb, match, tipStakeAdjFb, tipOdd);
         for (const [userId, prefs] of subscribedUsers) {
-          if (!prefs.has('football')) continue;
+          if (!_shouldDispatchToSubscriber(userId, prefs, 'football')) continue;
           try { await sendDM(token, userId, tipMsg, _betBtnFb || undefined); } catch(_) {}
         }
         analyzedFootball.set(key, { ts: now, tipSent: true });
@@ -21707,7 +21720,7 @@ async function pollTableTennis(runOnce = false) {
 
         const _betBtnTt = _buildTipBetButton('tabletennis', match.odds, direction, match, String(stakeAdj), pickOdd);
         for (const [userId, prefs] of subscribedUsers) {
-          if (!prefs.has('tabletennis')) continue;
+          if (!_shouldDispatchToSubscriber(userId, prefs, 'tabletennis')) continue;
           try { await sendDM(token, userId, msg, _betBtnTt || undefined); } catch (_) {}
         }
         log('INFO', 'AUTO-TT', `Tip enviada: ${pickTeam} @ ${pickOdd} | EV:${evPct.toFixed(1)}% | ${conf}`);
@@ -22724,7 +22737,7 @@ Máximo 200 palavras.`;
 
         const _betBtnCs = _buildTipBetButton('cs', match.odds, direction, match, String(stakeAdj), pickOdd);
         for (const [userId, prefs] of subscribedUsers) {
-          if (!prefs.has('cs')) continue;
+          if (!_shouldDispatchToSubscriber(userId, prefs, 'cs')) continue;
           try { await sendDM(token, userId, msg, _betBtnCs || undefined); } catch (_) {}
         }
         log('INFO', 'AUTO-CS', `Tip enviada: ${pickTeam} @ ${pickOdd} | EV:${evPct.toFixed(1)}% | ${conf}`);
@@ -23538,7 +23551,7 @@ Máximo 180 palavras.`;
 
         const _betBtnVal = _buildTipBetButton('valorant', match.odds, direction, match, String(stakeAdj), pickOdd);
         for (const [userId, prefs] of subscribedUsers) {
-          if (!prefs.has('valorant')) continue;
+          if (!_shouldDispatchToSubscriber(userId, prefs, 'valorant')) continue;
           try { await sendDM(token, userId, msg, _betBtnVal || undefined); } catch (_) {}
         }
         log('INFO', 'AUTO-VAL', `Tip enviada: ${pickTeam} @ ${pickOdd} | EV:${evPct.toFixed(1)}% | ${conf}`);
@@ -23874,7 +23887,7 @@ async function runAutoDarts() {
 
           const _betBtnDarts = _buildTipBetButton('darts', match.odds, ml.direction, match, String(stakeAdj), pickOdd);
           for (const [userId, prefs] of subscribedUsers) {
-            if (!prefs.has('darts')) continue;
+            if (!_shouldDispatchToSubscriber(userId, prefs, 'darts')) continue;
             try { await sendDM(dartsConfig.token, userId, tipMsg, _betBtnDarts || undefined); } catch(_) {}
           }
           log('INFO', 'AUTO-DARTS', `Tip enviada: ${pickTeam} @ ${pickOdd} | EV:${evPct.toFixed(1)}%`);
@@ -24127,7 +24140,7 @@ async function runAutoSnooker() {
 
           const _betBtnSn = _buildTipBetButton('snooker', match.odds, ml.direction, match, String(stakeAdj), pickOdd);
           for (const [userId, prefs] of subscribedUsers) {
-            if (!prefs.has('snooker')) continue;
+            if (!_shouldDispatchToSubscriber(userId, prefs, 'snooker')) continue;
             try { await sendDM(snookerConfig.token, userId, tipMsg, _betBtnSn || undefined); } catch(_) {}
           }
           log('INFO', 'AUTO-SNOOKER', `Tip enviada: ${pickTeam} @ ${pickOdd} | EV:${evPct.toFixed(1)}%`);
@@ -24537,7 +24550,7 @@ async function runAutoBasket() {
         `🧠 ${tipReason}\n\n` +
         `⚠️ _Odds The Odds API._`;
       for (const [userId, prefs] of subscribedUsers) {
-        if (!prefs.has('basket')) continue;
+        if (!_shouldDispatchToSubscriber(userId, prefs, 'basket')) continue;
         try { await sendDM(basketConfig.token, userId, tipMsg); } catch (_) {}
       }
     }
@@ -29723,7 +29736,7 @@ async function refreshOpenTips(caches = {}) {
           `🕒 ${new Date(now).toLocaleString('pt-BR')}`;
 
         for (const [userId, prefs] of subscribedUsers.entries()) {
-          if (prefs && prefs.has && prefs.has(sport)) {
+          if (_shouldDispatchToSubscriber(userId, prefs, sport)) {
             await sendDM(SPORTS[sport].token, userId, msg).catch(() => {});
           }
         }
