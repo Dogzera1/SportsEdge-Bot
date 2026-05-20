@@ -1265,6 +1265,19 @@ async function apiFetch(path, timeoutMs = 15000) {
 // até reload manual da página (ou clear do storage).
 let _adminKeyDeclined = false;
 function getAdminKey() {
+  // 2026-05-20 FIX: ler ?key= da URL FIRST. User acessa /admin/?key=XXX e
+  // dashboard deve usar essa key automaticamente. Antes só lia sessionStorage,
+  // ignorando URL → user via alert 'key não fornecida' mesmo com ?key=YYY no URL.
+  // URL key SEMPRE prevalece (permite trocar key via URL sem clear sessionStorage).
+  try {
+    const urlKey = new URLSearchParams(location.search).get('key') || '';
+    if (urlKey) {
+      sessionStorage.setItem('ADMIN_KEY', urlKey);
+      sessionStorage.removeItem('ADMIN_KEY_DECLINED');
+      _adminKeyDeclined = false;
+      return urlKey;
+    }
+  } catch (_) { /* URL parse defensive */ }
   if (_adminKeyDeclined) return '';
   let key = sessionStorage.getItem('ADMIN_KEY') || '';
   if (!key) {
