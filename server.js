@@ -12376,6 +12376,64 @@ setInterval(load, 60000);
     return;
   }
 
+  // 2026-05-20: /admin/nightly-retrain-status — confirma se retrain rodou hoje.
+  // Lê _nightly_retrain_last.json (persistent state) + mtime de model files
+  // criticos. State file fica em mesmo dir do DB (DB_PATH parent).
+  if (p === '/admin/nightly-retrain-status' && (req.method === 'GET' || req.method === 'POST')) {
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    try {
+      const fs = require('fs');
+      const path = require('path');
+      const dbPath = process.env.DB_PATH || 'sportsedge.db';
+      const stateFile = path.join(
+        path.dirname(path.isAbsolute(dbPath) ? dbPath : path.resolve(dbPath)),
+        '_nightly_retrain_last.json'
+      );
+      const today = new Date().toISOString().slice(0, 10);
+      let state = null;
+      try {
+        if (fs.existsSync(stateFile)) {
+          state = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+        }
+      } catch (_) {}
+      const ranToday = state && state.day === today;
+      // Mtime de model files (best-effort — alguns sports não tem isotonic files)
+      const modelDir = process.env.MODEL_PERSISTENT_DIR || path.resolve('models');
+      const sampleFiles = ['lol-weights.json', 'cs2-weights.json', 'tennis-weights.json'];
+      const filesInfo = {};
+      for (const f of sampleFiles) {
+        try {
+          const fp = path.join(modelDir, f);
+          if (fs.existsSync(fp)) {
+            const st = fs.statSync(fp);
+            const mtime = st.mtime.toISOString();
+            const ageH = Math.round((Date.now() - st.mtimeMs) / 3600000 * 10) / 10;
+            filesInfo[f] = { mtime, age_hours: ageH, size_kb: Math.round(st.size / 1024 * 10) / 10 };
+          } else {
+            filesInfo[f] = { exists: false };
+          }
+        } catch (e) { filesInfo[f] = { error: e.message }; }
+      }
+      sendJson(res, {
+        ok: true,
+        ts: new Date().toISOString(),
+        today_utc: today,
+        state_file: stateFile,
+        state,
+        ran_today: ranToday,
+        hours_since_last_run: state?.ts ? Math.round((Date.now() - Date.parse(state.ts)) / 3600000 * 10) / 10 : null,
+        nightly_retrain_auto: !/^(0|false|no)$/i.test(String(process.env.NIGHTLY_RETRAIN_AUTO ?? 'true')),
+        hour_utc_threshold: parseInt(process.env.NIGHTLY_RETRAIN_HOUR_UTC || '3', 10),
+        model_files: filesInfo,
+        model_dir: modelDir,
+      });
+    } catch (e) {
+      sendJson(res, { ok: false, error: e.message }, 500);
+    }
+    return;
+  }
+
   // GET /admin/tip-debug?id=N — forensics rápida do gate_state snapshot por tip.
   // Consumer do gates_evaluated foundation (commits 4bdd35d + ac45a24). Permite
   // ver decomposto quais gates a tip rodou no emit, valor/threshold/reason,
