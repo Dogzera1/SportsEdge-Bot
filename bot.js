@@ -20478,7 +20478,52 @@ async function pollFootball(runOnce = false) {
                   }
                 } catch (e) { log('WARN', 'MT-SHADOW', `fb-1h logShadowTip: ${e.message}`); }
                 if (!_fb1hShadowOnly) {
-                  log('DEBUG', 'FB-1H-SCAN', `${match.team1} vs ${match.team2}: promote path não implementado em Wave 2B`);
+                  // Wave 2 promote: espelha football MT main. Markets já vêm
+                  // suffixed (1h_ml/1h_totals/1h_btts) do scanFootball1HMarkets.
+                  // Phase 1 granular promote DB: user precisa promover
+                  // (`/admin/mt-promote?sport=football&market=1h_ml`) APÓS validar
+                  // shadow stats. Defense-in-depth dual-gate.
+                  const _fb1hGateAd = ADMIN_IDS.size > 0;
+                  if (_fb1hGateAd) {
+                    try {
+                      const mtp = require('./lib/market-tip-processor');
+                      const minEvGate = parseFloat(process.env.FB_1H_TIP_MIN_EV ?? '6');
+                      const minPmGate = parseFloat(process.env.FB_1H_TIP_MIN_PMODEL ?? '0.55');
+                      const { wasAdminDmSentRecently, markAdminDmSent } = require('./lib/market-tips-shadow');
+                      for (const t of _fb1HTips) {
+                        if (!(Number.isFinite(t.ev) && Number.isFinite(t.pModel))) continue;
+                        if (t.ev < perMarketEvGate('football', t.market, minEvGate) || t.pModel < minPmGate) continue;
+                        if (!isMarketTipsEnabled('football', t.market, t.side, match.league)) {
+                          log('INFO', 'MT-GATE-SKIP', `football/${t.market}/${t.side}: ${describeMtGateSkip('football', t.market, t.side, match.league)}`);
+                          continue;
+                        }
+                        const dedupKey = `football|${norm(match.team1)}|${norm(match.team2)}|${t.market}|${t.line}|${t.side}`;
+                        const inMemFresh = Date.now() - (marketTipSent.get(dedupKey) || 0) <= 24 * 60 * 60 * 1000;
+                        const dbFresh = wasAdminDmSentRecently(db, { sport: 'football', match, market: t.market, line: t.line, side: t.side, hoursAgo: 24 });
+                        if (inMemFresh || dbFresh) {
+                          log('DEBUG', 'FB-1H-TIP', `Dedup skip (${inMemFresh ? 'mem' : 'db'}): ${dedupKey}`);
+                          continue;
+                        }
+                        marketTipSent.set(dedupKey, Date.now());
+                        const stake = mtp.kellyStakeForMarket(t.pModel, t.odd, 100, getKellyFraction('football', 'BAIXA', null, match.league), { sport: 'football' });
+                        if (!(stake > 0)) continue;
+                        const tokenForMT = resolveTipsToken('football') || resolveAlertsToken();
+                        if (!tokenForMT) continue;
+                        const _gateFb1h = await _mtTryRecordAndShouldDm({ sport: 'football', match, tip: t, stake, isLive: false });
+                        if (!_gateFb1h.allowDm) continue;
+                        const _stakeForDm = Number.isFinite(_gateFb1h.stakeFinal) ? _gateFb1h.stakeFinal : stake;
+                        const dm = mtp.buildMarketTipDM({ match, tip: t, stake: _stakeForDm, league: match.league, sport: 'football', isLive: false });
+                        const _markupFb1h = mtp.buildMarketTipReplyMarkup({ match, sport: 'football' });
+                        const r = await sendAdminDMs(tokenForMT, dm, _markupFb1h ? { reply_markup: _markupFb1h } : undefined, 'fb-1h-tip');
+                        if (r.sent > 0) {
+                          markAdminDmSent(db, { sport: 'football', match, market: t.market, line: t.line, side: t.side, odd: t.odd, ev: t.ev });
+                          log('INFO', 'FB-1H-TIP', `Admin DM: ${t.label} @ ${t.odd} EV ${t.ev}% stake ${_stakeForDm}u (sent=${r.sent}) tipId=${_gateFb1h.tipId}`);
+                        } else {
+                          log('WARN', 'FB-1H-TIP', `Todos admin DM falharam — skip dedup mark (${t.label} @ ${t.odd})`);
+                        }
+                      }
+                    } catch (mte) { reportBug('FB-1H-TIP', mte, { team1: match.team1, team2: match.team2, league: match.league }); }
+                  }
                 }
               }
             }
@@ -24000,7 +24045,51 @@ async function runAutoBasket() {
                 } catch (e) { log('WARN', 'MT-SHADOW', `basket-q${q} logShadowTip: ${e.message}`); }
                 const _qShadowOnly = !/^(0|false|no)$/i.test(String(process.env.BASKET_QUARTER_SHADOW ?? 'true'));
                 if (!_qShadowOnly) {
-                  log('DEBUG', 'BASKET-Q-SCAN', `Q${q}: promote path não implementado em Wave 1`);
+                  // Wave 2 promote: espelha basket MT main (bot.js ~23914).
+                  // Markets já vêm suffixed (handicap_q<N>/total_q<N>) do scanner.
+                  // Phase 1 granular promote DB per (market_quarter):
+                  // `/admin/mt-promote?sport=basket&market=total_q1`. Defense-in-depth.
+                  const _qGateAd = ADMIN_IDS.size > 0;
+                  if (_qGateAd) {
+                    try {
+                      const mtp = require('./lib/market-tip-processor');
+                      const minEvGate = parseFloat(process.env.BASKET_QUARTER_TIP_MIN_EV ?? '7');
+                      const minPmGate = parseFloat(process.env.BASKET_QUARTER_TIP_MIN_PMODEL ?? '0.55');
+                      const { wasAdminDmSentRecently, markAdminDmSent } = require('./lib/market-tips-shadow');
+                      for (const t of qTips) {
+                        if (!(Number.isFinite(t.ev) && Number.isFinite(t.pModel))) continue;
+                        if (t.ev < perMarketEvGate('basket', t.market, minEvGate) || t.pModel < minPmGate) continue;
+                        if (!isMarketTipsEnabled('basket', t.market, t.side, match.league)) {
+                          log('INFO', 'MT-GATE-SKIP', `basket/${t.market}/${t.side}: ${describeMtGateSkip('basket', t.market, t.side, match.league)}`);
+                          continue;
+                        }
+                        const dedupKey = `basket|${norm(match.team1)}|${norm(match.team2)}|${t.market}|${t.line}|${t.side}`;
+                        const inMemFresh = Date.now() - (marketTipSent.get(dedupKey) || 0) <= 24 * 60 * 60 * 1000;
+                        const dbFresh = wasAdminDmSentRecently(db, { sport: 'basket', match, market: t.market, line: t.line, side: t.side, hoursAgo: 24 });
+                        if (inMemFresh || dbFresh) {
+                          log('DEBUG', 'BASKET-Q-TIP', `Dedup skip (${inMemFresh ? 'mem' : 'db'}): ${dedupKey}`);
+                          continue;
+                        }
+                        marketTipSent.set(dedupKey, Date.now());
+                        const stake = mtp.kellyStakeForMarket(t.pModel, t.odd, 100, getKellyFraction('basket', 'BAIXA'), { sport: 'basket' });
+                        if (!(stake > 0)) continue;
+                        const tokenForMT = resolveTipsToken('basket') || SPORTS['basket']?.token || resolveAlertsToken();
+                        if (!tokenForMT) continue;
+                        const _gateBq = await _mtTryRecordAndShouldDm({ sport: 'basket', match, tip: t, stake, isLive: isLiveBasket });
+                        if (!_gateBq.allowDm) continue;
+                        const _stakeForDm = Number.isFinite(_gateBq.stakeFinal) ? _gateBq.stakeFinal : stake;
+                        const dm = mtp.buildMarketTipDM({ match, tip: t, stake: _stakeForDm, league: match.league, sport: 'basket', isLive: isLiveBasket });
+                        const _markupBq = mtp.buildMarketTipReplyMarkup({ match, sport: 'basket' });
+                        const r = await sendAdminDMs(tokenForMT, dm, _markupBq ? { reply_markup: _markupBq } : undefined, 'basket-q-tip');
+                        if (r.sent > 0) {
+                          markAdminDmSent(db, { sport: 'basket', match, market: t.market, line: t.line, side: t.side, odd: t.odd, ev: t.ev });
+                          log('INFO', 'BASKET-Q-TIP', `Admin DM${isLiveBasket ? ' [LIVE]' : ''}: ${t.label} @ ${t.odd} EV ${t.ev}% Q${q} stake ${_stakeForDm}u (sent=${r.sent}) tipId=${_gateBq.tipId}`);
+                        } else {
+                          log('WARN', 'BASKET-Q-TIP', `Todos admin DM falharam — skip dedup mark (${t.label} @ ${t.odd} Q${q})`);
+                        }
+                      }
+                    } catch (mte) { reportBug('BASKET-Q-TIP', mte, { team1: match.team1, team2: match.team2, league: match.league, quarter: q }); }
+                  }
                 }
               }
             } catch (e) { reportBug('BASKET-Q-SCAN', e); }
