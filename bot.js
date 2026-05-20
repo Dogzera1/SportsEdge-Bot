@@ -73,12 +73,26 @@ function _buildTipBetButton(sport, oddsObj, pickSide, match, stakeStr, fallbackO
     if (!Number.isFinite(unitVal) || unitVal <= 0) unitVal = 1;
     const stakeReais = +(stakeU * unitVal).toFixed(2);
     const ls = oddsObj && pickSide ? computeLineShop(oddsObj, pickSide) : null;
-    const book = ls?.bestBook || oddsObj?.bookmaker || 'Pinnacle';
-    const odd = ls?.bestOdd || fallbackOdd;
+    // 2026-05-20: prefere Pinnacle BR quando matchupId disponível — URL vai
+    // direto pra partida (/matchup/<id>) em vez de categoria. Antes: line shop
+    // best book era priorizado (Bet365 com odd marginal melhor caía em
+    // /search?q=teams). UX preferida pelo user: 1-click bet > odd marginal.
+    const matchupId = match?.pinMatchupId || match?.matchupId
+                   || oddsObj?.matchupId || oddsObj?.pinMatchupId
+                   || (typeof match?.id === 'string' && match.id.startsWith('pin_') ? match.id.replace(/^pin_/, '') : null)
+                   || null;
+    let book = ls?.bestBook || oddsObj?.bookmaker || 'Pinnacle';
+    let odd = ls?.bestOdd || fallbackOdd;
+    if (matchupId && !/pinnacle/i.test(String(book))) {
+      // Pinnacle tem matchupId disponível → override pra deeplink direto
+      book = 'Pinnacle';
+      odd = oddsObj?.[`${pickSide}_pinnacle`] || oddsObj?.[pickSide] || fallbackOdd;
+    }
     return tipBetButton(book, {
       sport,
       team1: match?.team1 || match?.participant1 || match?.home_name || '',
       team2: match?.team2 || match?.participant2 || match?.away_name || '',
+      matchupId,
       odd, stakeReais,
     });
   } catch (_) { return null; }
