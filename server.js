@@ -1041,6 +1041,12 @@ function pickBestTennisSettleRow(rows, p1, p2, tipMs, tipLeague = null) {
 
 let _tennisEspnMatchSyncLastMs = 0;
 const _tennisEspnWindowSyncAt = new Map();
+// 2026-05-20 mitigation #2: global rate-limit cross-anchor. Per-tip anchor TTL
+// (600s) controla mesmo anchor; ainda 113 pending tennis tips × ~10 unique
+// anchor days = ~10 syncs/cycle = 78k rows/h ingest. Global throttle adiciona
+// "any anchor wait" — qualquer chamada respeita min interval cross-anchor.
+// Default 120s = 5 syncs max/cycle 10min = ~95% redução adicional sobre #1.
+let _tennisEspnAnyWindowSyncLastMs = 0;
 
 function espnDateYmdUtc(d) {
   const y = d.getUTCFullYear();
@@ -1169,8 +1175,14 @@ async function syncTennisEspnCompletedAroundSentAt(sentAtRaw) {
     ? Date.parse(sentRaw.includes('T') ? sentRaw : sentRaw.replace(' ', 'T'))
     : NaN;
   if (!Number.isFinite(tipMs)) tipMs = Date.now();
+  // 2026-05-20 mitigation #2: global rate-limit ANTES de per-anchor.
+  // Qualquer sync respeita min interval cross-anchor — evita 10+ syncs/cycle
+  // por unique anchor days. Default 120s = ~5 syncs/cycle 10min.
+  const globalMinMs = Math.min(600000, Math.max(30000, parseInt(process.env.TENNIS_ESPN_ANY_WINDOW_MIN_MS || '120000', 10) || 120000));
+  if ((Date.now() - _tennisEspnAnyWindowSyncLastMs) < globalMinMs) return 0;
   const anchorKey = `day:${utcDayAnchorMs(tipMs)}`;
   if (shouldSkipTennisEspnWindowSync(anchorKey)) return 0;
+  _tennisEspnAnyWindowSyncLastMs = Date.now();
   // 2026-05-20: BEFORE/AFTER defaults 21d → 7d. Window 42d → 14d (3× redução).
   // Tennis matches finalizam em horas, settle típico cobre janela pequena (~7d).
   // ±21d era over-engineered: cada tip pulla 42d de ATP+WTA scoreboard ~1200 matches.
