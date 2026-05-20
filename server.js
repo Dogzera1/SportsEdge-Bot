@@ -15480,7 +15480,25 @@ load();
   // GET/POST /admin/run-settle?sport=lol&days=30&key=<KEY>
   // Retorna: { ok, attempted, settled, voided, skipped, errors, samples }
   if (p === '/admin/run-settle') {
-    if (!requireAdmin(req, res)) return;
+    // 2026-05-20: aceita query.key (deprecation warn) OR header. User reportou
+    // 'admin key não fornecida' usando ?key= via dashboard JS. requireAdmin
+    // sozinho rejeitava query.key (só header/cookie). Path NÃO é destructive
+    // (não está em _DESTRUCTIVE_PATHS), então query.key fallback é aceitável.
+    // Mantém lockout + IP allowlist + rate limit via inline checks.
+    const _ipRs = getClientIp(req);
+    if (_isAdminLocked(_ipRs)) { sendJson(res, { ok: false, error: 'ip_locked_too_many_failures', retry_after_min: Math.ceil((_adminFailureMap.get(_ipRs).lockedUntil - Date.now()) / 60000) }, 429); return; }
+    if (!_isIpInAllowlist(_ipRs)) { sendJson(res, { ok: false, error: 'ip_not_authorized' }, 403); return; }
+    const _rlRs = Math.max(10, Math.min(600, parseInt(process.env.ADMIN_RATE_LIMIT_PER_MIN || '60', 10) || 60));
+    if (!rateLimit(req, res, _rlRs, 'admin_global')) return;
+    const _adminOkRs = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
+    if (!_adminOkRs) {
+      _recordAdminFail(_ipRs, p);
+      _appendAdminAudit(req, false, 'unauthorized');
+      sendJson(res, { ok: false, error: 'unauthorized', tip: 'use header x-admin-key OR query ?key=<ADMIN_KEY>' }, 401);
+      return;
+    }
+    _recordAdminSuccess(_ipRs);
+    _appendAdminAudit(req, true, null);
     const sportFilter = String(parsed.query.sport || '').toLowerCase().trim();
     const daysRaw = parseInt(parsed.query.days, 10);
     const days = Number.isFinite(daysRaw) ? Math.max(1, Math.min(180, daysRaw)) : 30;
