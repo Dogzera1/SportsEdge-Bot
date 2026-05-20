@@ -4573,11 +4573,11 @@ async function _settleCompletedTipsInner() {
           _mktU === '1X2_D' || _mktU === 'DRAW' ||
           _mktU === 'BTTS_YES' || _mktU === 'BTTS_NO'
         );
-        // 2026-05-20 Sprint 2: esports per-map ML (MAP{N}_WINNER) suportado em
-        // /ps-result + /dota-result com sufixo _MAP{N}. Tips LoL/Dota2 com
-        // market_type='MAP1_WINNER' (etc) match_id contendo '_MAP1' pegam
-        // winner do MAPA específico via game.winner.id lookup.
-        const _isEsportsPerMap = (sport === 'lol' || sport === 'dota2')
+        // 2026-05-20 Sprint 2+4: esports per-map ML (MAP{N}_WINNER) por sport:
+        //   - lol/dota2: /ps-result + /dota-result (PS games array)
+        //   - cs: /cs-result via resolveEsportsResult → HLTV match page parser (Sprint 4)
+        //   - valorant: ainda não suportado (auto-void via VOID_STUCK_H)
+        const _isEsportsPerMap = (sport === 'lol' || sport === 'dota2' || sport === 'cs')
           && /^MAP\d+_WINNER$/.test(_mktU);
         if (!_ML_MARKETS_SET.has(_mktU) && !_isFootballOuBtts && !_isEsportsPerMap) continue;
         try {

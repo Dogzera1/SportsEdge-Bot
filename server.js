@@ -8114,12 +8114,13 @@ setInterval(load, 10000);
   //   pin_<sport>_<id>  → match por nomes nos últimos finalizados (Pinnacle ID ≠ PS ID)
   async function resolveEsportsResult({ sport, game, pandaPath, rawId, t1, t2, sentAt }) {
     if (!PANDASCORE_TOKEN) return { resolved: false, error: 'PANDASCORE_TOKEN missing' };
-    // Tips podem ter sufixo _MAP{N} (per-phase tip) — usa o ID da série pra resolver.
-    // Settlement per-map não é suportado (fonte PS paywall + VLR per-match); usa série
-    // winner como best-effort apenas em sweep (detecção em /settle:29154+ via
-    // settleMapWinnerFromSweep). Para non-sweep o /settle filter rejeita a tip
-    // (auto-void via NON_ML_AUTOARCHIVE em 36h) — NÃO usa series winner como map winner.
-    // 2026-05-13: WARN throttled quando match_id tem _MAP{N} pra rastrear caller.
+    // Tips podem ter sufixo _MAP{N} (per-phase tip).
+    // 2026-05-20 Sprint 4: CS per-map settle via HLTV match page HTML parsing.
+    //   scorebot (live-only) NÃO funciona post-match; match page mantém scoreboard
+    //   final per-map. hltv.getCsMatchMapResults(hltvId) parseia.
+    //   Mapping PS rawId → HLTV ID via getHltvMatchId(t1, t2, sentAt).
+    // Valorant per-map: ainda não suportado (PS/VLR sem games array). Auto-void.
+    // LoL/Dota2 per-map: cobertos por /ps-result e /dota-result (PS games array).
     const _mapSuffix = rawId.match(/_MAP(\d+)$/);
     if (_mapSuffix) {
       global._mapResultWarnLog = global._mapResultWarnLog || new Map();
@@ -8128,9 +8129,43 @@ setInterval(load, 10000);
       if (Date.now() - _wl >= 6 * 60 * 60 * 1000) {
         global._mapResultWarnLog.set(_wk, Date.now());
         log('DEBUG', 'RESOLVE-MAP',
-          `${sport} rawId=${rawId} map=${_mapSuffix[1]} → resolvendo pelo series winner (sweep guard aplicado em /settle filter)`);
+          `${sport} rawId=${rawId} map=${_mapSuffix[1]} → CS HLTV parse OR auto-void`);
       }
     }
+
+    // CS per-map: HLTV match page parser
+    if (_mapSuffix && sport === 'cs' && t1 && t2) {
+      const mapN = parseInt(_mapSuffix[1], 10);
+      try {
+        const hltv = require('./lib/hltv');
+        const hltvMatch = await hltv.getHltvMatchId(t1, t2, sentAt);
+        if (hltvMatch?.matchId) {
+          const results = await hltv.getCsMatchMapResults(hltvMatch.matchId);
+          const mapResult = Array.isArray(results) ? results.find(r => r.map === mapN) : null;
+          if (mapResult?.winner && mapResult.played) {
+            stmts.upsertMatchResult.run(rawId, 'cs', t1, t2, mapResult.winner, mapResult.score || '', hltvMatch.event || '');
+            try { stmts.insertMatchResultSource.run(rawId, 'cs', 'hltv_match_page', t1, t2, mapResult.winner, mapResult.score || ''); } catch (_) {}
+            log('INFO', 'CS-MAP-SETTLE', `${rawId} map ${mapN} → ${mapResult.winner} (${mapResult.score || '?-?'}) via HLTV ${hltvMatch.matchId}`);
+            return { resolved: true, winner: mapResult.winner, map: mapN, score: mapResult.score };
+          }
+          if (mapResult && !mapResult.played) {
+            log('INFO', 'CS-MAP-SETTLE', `${rawId} map ${mapN} not_played (Bo3 ended early)`);
+            return { resolved: false, reason: 'map_not_played', map: mapN };
+          }
+        }
+        log('DEBUG', 'CS-MAP-SETTLE', `${rawId} map ${mapN} unresolved (hltv_id=${hltvMatch?.matchId || 'null'})`);
+      } catch (e) {
+        log('WARN', 'CS-MAP-SETTLE', `${rawId} map ${mapN} err: ${e.message}`);
+      }
+      // CS per-map sem resolução HLTV — NÃO fallback pra series winner (settle errado)
+      return { resolved: false, reason: 'cs_map_no_hltv_result', map: mapN };
+    }
+
+    // Valorant per-map: feature gap — auto-void via VOID_STUCK_H_VALORANT.
+    if (_mapSuffix && sport === 'valorant') {
+      return { resolved: false, reason: 'val_per_map_unsupported', map: parseInt(_mapSuffix[1], 10) };
+    }
+
     const baseId = rawId.replace(/_MAP\d+$/, '');
     const psMatch = baseId.match(new RegExp('^' + sport + '_ps_(\\d+)$'));
     if (psMatch) {
