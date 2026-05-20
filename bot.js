@@ -17011,7 +17011,15 @@ Máximo 200 palavras.`;
       if (!riskAdj.ok) { log('INFO', 'RISK', `dota2: bloqueada (${riskAdj.reason})`); continue; }
       const tipStakeAdj = `${riskAdj.units.toFixed(1).replace(/\.0$/, '')}u`;
 
-      const matchId = `dota2_${match.id}`;
+      // 2026-05-20 Sprint 5 — Dota2 ML per-mapa (mirror LoL Sprint 1 + CS Sprint 5).
+      // Gate: DOTA2_ML_PER_MAP=true + isLive + dotaMapNum (já inferido em 16252).
+      // Settle covered by /dota-result _MAP{N} parsing (pre-existing).
+      // Reusa dotaMapNum declarado upstream (linha 16252).
+      const _dotaMapTag = (dotaMapNum && dotaMapNum > 0) ? `_MAP${dotaMapNum}` : '';
+      const _dotaPerMapEnabled = isLive && dotaMapNum && dotaMapNum > 0
+        && /^(1|true|yes)$/i.test(String(process.env.DOTA2_ML_PER_MAP || ''));
+      const _dotaPerMapShadow = !/^(0|false|no)$/i.test(String(process.env.DOTA2_ML_PER_MAP_SHADOW ?? 'true'));
+      const matchId = `dota2_${match.id}` + _dotaMapTag;
       const liveTag = isLive ? ' 🔴 AO VIVO' : '';
       const minTakeOdds = calcMinTakeOdds(tipOdd);
       const minTakeLine = minTakeOdds ? `\n📉 Odd mínima: *${minTakeOdds}*` : '';
@@ -17046,13 +17054,15 @@ Máximo 200 palavras.`;
           stake: tipStakeAdj,
           confidence: tipConf,
           isLive: isLive ? 1 : 0,
-          market_type: 'ML',
+          market_type: _dotaPerMapEnabled ? `MAP${dotaMapNum}_WINNER` : 'ML',
           modelP1: mlResult.modelP1,
           modelP2: mlResult.modelP2,
           modelPPick: modelPForKelly,
           modelLabel: `dota-ml (${mlResult.factorActive?.join('+') || 'base'})`,
           gates_evaluated: _mlGatesDota,
-          tipReason: (() => {
+          tipReason: _dotaPerMapEnabled
+            ? `Dota2 ML per-map (live map ${dotaMapNum})`
+            : (() => {
             const _ia = iaResp ? iaResp.split('TIP_ML:')[0].trim().split('\n').filter(Boolean).pop()?.slice(0, 160) || null : null;
             const _forceDet = /^(1|true|yes)$/i.test(String(process.env.DOTA_FORCE_DETERMINISTIC_REASON || ''));
             if (_ia && !_forceDet) return _ia;
@@ -17067,7 +17077,9 @@ Máximo 200 palavras.`;
               }) || null;
             } catch (_) { return null; }
           })(),
-          isShadow: isBucketShadowed('dota2') ? 1 : 0,
+          isShadow: _dotaPerMapEnabled
+            ? (_dotaPerMapShadow ? 1 : (isBucketShadowed('dota2') ? 1 : 0))
+            : (isBucketShadowed('dota2') ? 1 : 0),
           oddsFetchedAt: o._fetchedAt || null,
           lineShopOdds: o || null,
           pickSide: isT1bet ? 't1' : 't2',
@@ -22374,6 +22386,13 @@ Máximo 200 palavras.`;
           { gate: 'tier_stake_cap', passed: true, value: isTier1 ? 'tier1' : 'tier2+', threshold: isTier1 ? 'no cap' : `CS_TIER2_MAX_STAKE=${CS_TIER2_MAX_STAKE}u` },
           { gate: 'dedup_clear', passed: true, value: key, threshold: 'analyzedCs + _csInFlight' },
         ];
+        // 2026-05-20 Sprint 5 — CS ML per-mapa (mirror LoL Sprint 1).
+        // Gate: CS_ML_PER_MAP=true + isLiveCs + csMapNum>0.
+        // market_type='MAP{N}_WINNER' (vs 'ML' série). Settle via Sprint 4 HLTV path.
+        // Default shadow ON (CS_ML_PER_MAP_SHADOW=true) — promote real após validação.
+        const _csPerMapEnabled = isLiveCs && csMapNum > 0
+          && /^(1|true|yes)$/i.test(String(process.env.CS_ML_PER_MAP || ''));
+        const _csPerMapShadow = !/^(0|false|no)$/i.test(String(process.env.CS_ML_PER_MAP_SHADOW ?? 'true'));
         let rec;
         try {
           rec = await serverPost('/record-tip', {
@@ -22382,11 +22401,15 @@ Máximo 200 palavras.`;
             odds: String(pickOdd), ev: evPct.toFixed(1), stake: stakeAdj,
             confidence: conf,
             isLive: match.status === 'live' ? 1 : 0,
-            market_type: 'ML',
+            market_type: _csPerMapEnabled ? `MAP${csMapNum}_WINNER` : 'ML',
             modelP1, modelP2, modelPPick: pickP,
             modelLabel: (useElo ? 'cs-elo' : 'cs-ml') + (_csHybridBypass ? '+hybrid' : (_csFromOverride ? '+override' : '')),
-            tipReason,
-            isShadow: csConfig.shadowMode ? 1 : 0,
+            tipReason: _csPerMapEnabled
+              ? `CS ML per-map (live map ${csMapNum}, cs-map-model)`
+              : tipReason,
+            isShadow: _csPerMapEnabled
+              ? (_csPerMapShadow ? 1 : (csConfig.shadowMode ? 1 : 0))
+              : (csConfig.shadowMode ? 1 : 0),
             sport: 'cs',
             lineShopOdds: match.odds || null,
             pickSide: direction,
