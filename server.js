@@ -4408,6 +4408,14 @@ function _appendAdminAudit(req, success, reason) {
 }
 
 function _isIpInAllowlist(ip) {
+  // 2026-05-20 CRITICAL FIX: loopback IPs SEMPRE permitidos (IPC interno).
+  // bot.js → server.js via 127.0.0.1 não pode ser bloqueado pelo allowlist
+  // OR /record-tip, /claude, /log-odds-history, /save-user, etc. quebram TODOS.
+  // Detectado em logs prod: 'AUTO-TENNIS record-tip falhou ... ip_not_authorized'.
+  if (!ip) return true; // sem IP = chamada interna pre-handler
+  if (ip === '127.0.0.1' || ip === '::1' || ip === 'localhost' || ip.startsWith('::ffff:127.')) return true;
+  // Private network ranges (também loopback-ish, contêineres Docker/Railway interno)
+  if (/^10\./.test(ip) || /^192\.168\./.test(ip) || /^172\.(1[6-9]|2[0-9]|3[01])\./.test(ip)) return true;
   const allowlist = String(process.env.ADMIN_IP_ALLOWLIST || '').trim();
   if (!allowlist) return true; // empty = allow all (legacy)
   const list = allowlist.split(',').map(s => s.trim()).filter(Boolean);
