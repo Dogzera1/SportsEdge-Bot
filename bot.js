@@ -2945,7 +2945,8 @@ async function loadSubscribedUsers() {
     String(process.env[envKey] || '').split(',').map(s => s.trim()).filter(Boolean)
       .forEach(gid => { const id = parseInt(gid, 10); if (!isNaN(id)) _envPerSportGroups.add(id); });
   }
-  const _adminIdSet = new Set(ADMIN_IDS.map(a => parseInt(a, 10)).filter(Number.isFinite));
+  // ADMIN_IDS is Set, spread to array antes do .map()
+  const _adminIdSet = new Set([...ADMIN_IDS].map(a => parseInt(a, 10)).filter(Number.isFinite));
   const _toUnsubscribe = [];
   for (const [id] of subscribedUsers) {
     if (id < 0 && !_envGroupSet.has(id) && !_envPerSportGroups.has(id) && !_adminIdSet.has(id)) {
