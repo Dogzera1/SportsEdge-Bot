@@ -4241,37 +4241,160 @@ function _isDestructive(req) {
   try { return _DESTRUCTIVE_PATHS.test(req.url || ''); } catch (_) { return false; }
 }
 
+// 2026-05-20: heavy security layer. Multiple defenses against admin attacks.
+//
+// Layer 1 — IP lockout: após N falhas consecutivas (default 10) em janela
+//   (default 15min), bloqueia IP por X (default 30min). Mitiga bruteforce
+//   de ADMIN_KEY mesmo se vazar parcial.
+// Layer 2 — IP allowlist: ADMIN_IP_ALLOWLIST=10.0.0.1,192.168.1.0/24 — só
+//   esses IPs passam auth admin. Default vazio = todos permitidos (legacy).
+// Layer 3 — Security response headers: HSTS, X-Frame-Options DENY,
+//   X-Content-Type-Options nosniff, Referrer-Policy strict-origin,
+//   permissions-policy minimal. Aplicado em todas respostas admin.
+// Layer 4 — Audit log: registra cada admin access (success/fail) em memória
+//   ring buffer. Visível em /admin/audit-log endpoint (admin-only, dogfood).
+const _adminFailureMap = new Map(); // ip → { count, firstFailMs, lockedUntil }
+const _adminAuditLog = []; // ring buffer (cap 1000)
+const ADMIN_AUDIT_MAX = 1000;
+
+function _adminLockoutConfig() {
+  return {
+    threshold: Math.max(3, parseInt(process.env.ADMIN_LOCKOUT_THRESHOLD || '10', 10)),
+    windowMs: Math.max(60000, parseInt(process.env.ADMIN_LOCKOUT_WINDOW_MS || '900000', 10)), // 15min
+    lockMs:   Math.max(60000, parseInt(process.env.ADMIN_LOCKOUT_DURATION_MS || '1800000', 10)), // 30min
+  };
+}
+
+function _isAdminLocked(ip) {
+  if (!ip) return false;
+  const entry = _adminFailureMap.get(ip);
+  if (!entry) return false;
+  if (entry.lockedUntil && Date.now() < entry.lockedUntil) return true;
+  return false;
+}
+
+function _recordAdminFail(ip, endpoint) {
+  if (!ip) return;
+  const cfg = _adminLockoutConfig();
+  const now = Date.now();
+  let entry = _adminFailureMap.get(ip);
+  if (!entry || (now - entry.firstFailMs) > cfg.windowMs) {
+    entry = { count: 0, firstFailMs: now, lockedUntil: 0 };
+  }
+  entry.count++;
+  if (entry.count >= cfg.threshold) {
+    entry.lockedUntil = now + cfg.lockMs;
+    try { log('WARN', 'AUTH-LOCKOUT', `IP ${ip} locked ${Math.round(cfg.lockMs/60000)}min após ${entry.count} falhas — endpoint=${endpoint || '?'}`); } catch (_) {}
+  }
+  _adminFailureMap.set(ip, entry);
+  // Cap defensivo
+  if (_adminFailureMap.size > 5000) {
+    const sorted = [..._adminFailureMap.entries()].sort((a, b) => a[1].firstFailMs - b[1].firstFailMs);
+    for (let i = 0; i < sorted.length - 5000; i++) _adminFailureMap.delete(sorted[i][0]);
+  }
+}
+
+function _recordAdminSuccess(ip) {
+  if (!ip) return;
+  _adminFailureMap.delete(ip);
+}
+
+function _appendAdminAudit(req, success, reason) {
+  try {
+    const ip = (typeof getClientIp === 'function' ? getClientIp(req) : null) || '?';
+    _adminAuditLog.push({
+      ts: new Date().toISOString(),
+      ip,
+      method: req.method,
+      path: (req.url || '').split('?')[0],
+      success: !!success,
+      reason: reason || null,
+    });
+    if (_adminAuditLog.length > ADMIN_AUDIT_MAX) _adminAuditLog.shift();
+  } catch (_) {}
+}
+
+function _isIpInAllowlist(ip) {
+  const allowlist = String(process.env.ADMIN_IP_ALLOWLIST || '').trim();
+  if (!allowlist) return true; // empty = allow all (legacy)
+  const list = allowlist.split(',').map(s => s.trim()).filter(Boolean);
+  if (!list.length) return true;
+  // Simple match: exact IP or CIDR /N (basic /24, /16, /8 prefix match)
+  for (const entry of list) {
+    if (entry === ip) return true;
+    if (entry.includes('/')) {
+      const [base, bits] = entry.split('/');
+      const b = parseInt(bits, 10);
+      if (b === 24 && ip.startsWith(base.split('.').slice(0, 3).join('.') + '.')) return true;
+      if (b === 16 && ip.startsWith(base.split('.').slice(0, 2).join('.') + '.')) return true;
+      if (b === 8 && ip.startsWith(base.split('.')[0] + '.')) return true;
+    }
+  }
+  return false;
+}
+
+function _applySecurityHeaders(res) {
+  try {
+    if (!res.getHeader('Strict-Transport-Security')) res.setHeader('Strict-Transport-Security', 'max-age=63072000; includeSubDomains');
+    if (!res.getHeader('X-Frame-Options')) res.setHeader('X-Frame-Options', 'DENY');
+    if (!res.getHeader('X-Content-Type-Options')) res.setHeader('X-Content-Type-Options', 'nosniff');
+    if (!res.getHeader('Referrer-Policy')) res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+    if (!res.getHeader('Permissions-Policy')) res.setHeader('Permissions-Policy', 'geolocation=(), microphone=(), camera=()');
+  } catch (_) {}
+}
+
 function requireAdmin(req, res) {
+  // Layer 1: lockout check (antes de rate limit)
+  const ip = (typeof getClientIp === 'function' ? getClientIp(req) : null) || req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket?.remoteAddress || '';
+  if (_isAdminLocked(ip)) {
+    _applySecurityHeaders(res);
+    _appendAdminAudit(req, false, 'ip_locked');
+    sendJson(res, { ok: false, error: 'ip_locked_too_many_failures', retry_after_min: Math.ceil((_adminFailureMap.get(ip).lockedUntil - Date.now()) / 60000) }, 429);
+    return false;
+  }
+  // Layer 2: IP allowlist check
+  if (!_isIpInAllowlist(ip)) {
+    _applySecurityHeaders(res);
+    _appendAdminAudit(req, false, 'ip_not_allowlisted');
+    try { log('WARN', 'AUTH-BLOCK', `IP ${ip} fora ADMIN_IP_ALLOWLIST — endpoint=${(req.url || '').split('?')[0]}`); } catch (_) {}
+    sendJson(res, { ok: false, error: 'ip_not_authorized' }, 403);
+    return false;
+  }
   // 2026-05-15 audit P1 (defense-in-depth): rate limit cross-admin antes do
   // auth check. Era ausente em 84 admin endpoints (só /admin/login tinha 10/15min).
-  // Insider autenticado OR atacante com key vazada poderia 10k req/min em
-  // /admin/run-settle, /admin/mt-refit-calib (DB-heavy) → OOM/DB lock.
-  // Override via env (ADMIN_RATE_LIMIT_PER_MIN, default 60 req/min/IP).
-  // CLAUDE.md: limits SAGRADOS não tocados; este é gate operacional novo.
   const adminRl = Math.max(10, Math.min(600, parseInt(process.env.ADMIN_RATE_LIMIT_PER_MIN || '60', 10) || 60));
   if (!rateLimit(req, res, adminRl, 'admin_global')) return false;
   if (!ADMIN_KEY) {
     warnAdminKeyMissingOnce();
     if (ADMIN_STRICT) {
+      _applySecurityHeaders(res);
       sendJson(res, { ok: false, error: 'admin_key_not_configured_strict_mode' }, 503);
       return false;
     }
-    // 2026-05-06: open-mode bloqueia destrutivos sempre.
     if (_isDestructive(req)) {
+      _applySecurityHeaders(res);
       sendJson(res, { ok: false, error: 'destructive_blocked_in_open_mode', tip: 'set ADMIN_KEY' }, 403);
       return false;
     }
-    return true; // open mode dev-only para read-only
+    return true;
   }
   if (!isAdminRequest(req)) {
+    _recordAdminFail(ip, (req.url || '').split('?')[0]);
+    _appendAdminAudit(req, false, 'unauthorized');
+    _applySecurityHeaders(res);
     sendJson(res, { ok: false, error: 'unauthorized' }, 401);
     return false;
   }
-  // 2026-05-06: CSRF gate pra session-cookie mutations.
   if (_adminCsrfRequired(req) && !_adminCsrfValid(req)) {
+    _appendAdminAudit(req, false, 'csrf_invalid');
+    _applySecurityHeaders(res);
     sendJson(res, { ok: false, error: 'csrf_token_invalid_or_missing', tip: 'GET /admin/me retorna csrfToken; envie em x-csrf-token header' }, 403);
     return false;
   }
+  // Success — clear failure count + audit
+  _recordAdminSuccess(ip);
+  _appendAdminAudit(req, true, null);
+  _applySecurityHeaders(res);
   return true;
 }
 
@@ -12373,6 +12496,49 @@ setInterval(load, 60000);
     } catch (e) {
       sendJson(res, { ok: false, error: e.message }, 500);
     }
+    return;
+  }
+
+  // 2026-05-20 security: /admin/security-status — visibilidade defesas ativas
+  // + IPs lockados + audit log recent. Admin-only.
+  if (p === '/admin/security-status' && (req.method === 'GET' || req.method === 'POST')) {
+    if (!requireAdmin(req, res)) return;
+    const limit = Math.min(200, parseInt(parsed.query.limit || '50', 10) || 50);
+    const cfg = _adminLockoutConfig();
+    const now = Date.now();
+    const lockedIps = [];
+    for (const [ip, e] of _adminFailureMap) {
+      if (e.lockedUntil && e.lockedUntil > now) {
+        lockedIps.push({ ip, count: e.count, locked_until: new Date(e.lockedUntil).toISOString(), remaining_min: Math.ceil((e.lockedUntil - now) / 60000) });
+      }
+    }
+    const allowlist = String(process.env.ADMIN_IP_ALLOWLIST || '').trim();
+    const recentAudit = _adminAuditLog.slice(-limit).reverse();
+    sendJson(res, {
+      ok: true,
+      ts: new Date().toISOString(),
+      lockout_config: {
+        threshold: cfg.threshold,
+        window_min: Math.round(cfg.windowMs / 60000),
+        lock_duration_min: Math.round(cfg.lockMs / 60000),
+      },
+      ip_allowlist_enabled: !!allowlist,
+      ip_allowlist_entries: allowlist ? allowlist.split(',').map(s => s.trim()).filter(Boolean).length : 0,
+      currently_locked_ips: lockedIps,
+      failed_attempts_tracked: _adminFailureMap.size,
+      audit_log_size: _adminAuditLog.length,
+      audit_log_recent: recentAudit,
+      defenses_active: [
+        'constant_time_admin_key_eq',
+        'rate_limit_per_ip',
+        'ip_lockout_after_failures',
+        allowlist ? 'ip_allowlist' : null,
+        'csrf_session_mutations',
+        'destructive_path_query_key_rejected',
+        'security_headers_hsts_frame_options',
+        'audit_log_ring_buffer',
+      ].filter(Boolean),
+    });
     return;
   }
 
