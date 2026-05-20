@@ -2893,7 +2893,16 @@ async function loadSubscribedUsers() {
   }
 
   // Auto-subscribe admin users to all enabled sports (ensures tips are sent after cold redeploys)
-  const allSports = new Set(Object.keys(SPORTS).filter(k => SPORTS[k]?.enabled && SPORTS[k]?.token));
+  // 2026-05-20: incluir BOTH bucket IDs (SPORTS keys) AND game IDs (SPORTS.*.games).
+  // Tips reais dispatcham com sport=game_id (ex: 'lol', 'dota2') não bucket. Sem game IDs
+  // em sport_prefs, subscriber filter (prefs.has(sport)) skipa esses tips.
+  const allSports = new Set();
+  for (const [bucketId, cfg] of Object.entries(SPORTS)) {
+    if (cfg?.enabled && cfg?.token) {
+      allSports.add(bucketId);
+      for (const g of (cfg.games || [])) allSports.add(g);
+    }
+  }
   for (const adminId of ADMIN_IDS) {
     const id = parseInt(adminId);
     if (isNaN(id)) continue;
