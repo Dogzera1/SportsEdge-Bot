@@ -1205,9 +1205,15 @@ async function syncTennisEspnCompletedAroundSentAt(sentAtRaw) {
 
 /** Fallback: últimos N dias até amanhã (throttle próprio) — cobre tips com sent_at ruim ou buracos na janela. */
 async function syncTennisEspnCompletedRecentSpan(spanDays) {
+  // 2026-05-20 mit #3: global rate-limit shared com aroundSentAt.
+  // Mit #2 só cobria aroundSentAt — recent_span fica fora e contribui pra ingest residual.
+  // Compartilha _tennisEspnAnyWindowSyncLastMs pra cap total tennis ESPN syncs.
+  const globalMinMs = Math.min(600000, Math.max(30000, parseInt(process.env.TENNIS_ESPN_ANY_WINDOW_MIN_MS || '120000', 10) || 120000));
+  if ((Date.now() - _tennisEspnAnyWindowSyncLastMs) < globalMinMs) return 0;
   const span = Math.min(90, Math.max(14, parseInt(String(spanDays), 10) || 45));
   const anchorKey = `recent:${span}`;
   if (shouldSkipTennisEspnWindowSync(anchorKey)) return 0;
+  _tennisEspnAnyWindowSyncLastMs = Date.now();
   const now = Date.now();
   const start = new Date(now - span * 86400000);
   const end = new Date(now + 2 * 86400000);
@@ -1225,6 +1231,11 @@ async function syncTennisEspnCompletedRecentSpan(spanDays) {
 
 /** Grava jogos com status post do scoreboard ESPN ATP/WTA em match_results (não depende do CSV Sackmann). */
 async function syncTennisEspnCompletedToMatchResults() {
+  // 2026-05-20 mit #3: global rate-limit shared. Cobre o último sync path tennis ESPN
+  // não throttled — chamado per settle cycle via maybeSyncTennisEspnMatchResults.
+  const globalMinMs = Math.min(600000, Math.max(30000, parseInt(process.env.TENNIS_ESPN_ANY_WINDOW_MIN_MS || '120000', 10) || 120000));
+  if ((Date.now() - _tennisEspnAnyWindowSyncLastMs) < globalMinMs) return 0;
+  _tennisEspnAnyWindowSyncLastMs = Date.now();
   const tennisData = require('./lib/tennis-data');
   let n = 0;
   for (const slug of ['atp', 'wta']) {
