@@ -7841,14 +7841,8 @@ setInterval(load, 10000);
     const remote = String(req.socket?.remoteAddress || '');
     const isLoopback = remote === '127.0.0.1' || remote === '::1' || remote === '::ffff:127.0.0.1';
     if (!isLoopback && !isAdminRequest(req)) { sendJson(res, { ok: false, error: 'forbidden' }, 403); return; }
-    let body = '';
-    let bodySize = 0;
-    req.on('data', d => {
-      bodySize += d.length;
-      if (bodySize > 256 * 1024) { req.destroy(); return; }
-      body += d;
-    });
-    req.on('end', () => {
+    _readPostBody(req, res, (body) => {
+      if (body === null) return;
       try {
         const payload = safeParse(body, null);
         if (!payload || !payload.snapshot) { sendJson(res, { ok: false, error: 'bad payload' }, 400); return; }
@@ -7856,7 +7850,6 @@ setInterval(load, 10000);
         const tagged = prefix ? `${prefix}:` : '';
         const metrics = require('./lib/metrics');
         const ok = metrics.mergeSnapshot(payload.snapshot, { prefix: tagged });
-        // Heartbeats: armazena em cache global (visível via /admin/cron-status)
         if (payload.heartbeats) {
           if (!global._externalHeartbeats) global._externalHeartbeats = {};
           global._externalHeartbeats[prefix || 'unknown'] = {
@@ -7867,7 +7860,7 @@ setInterval(load, 10000);
         }
         sendJson(res, { ok, prefix: tagged });
       } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
-    });
+    }, 256 * 1024);
     return;
   }
 
@@ -12704,9 +12697,8 @@ setInterval(load, 60000);
   // TTL 3h pós pub_ts). Retorna { upserts, stats }.
   if (p === '/admin/news-impact-inject' && req.method === 'POST') {
     if (!requireAdmin(req, res)) return;
-    let body = '';
-    req.on('data', c => { body += c; if (body.length > 50000) req.destroy(); });
-    req.on('end', () => {
+    _readPostBody(req, res, (body) => {
+      if (body === null) return;
       try {
         const payload = JSON.parse(body || '{}');
         const alerts = Array.isArray(payload?.alerts) ? payload.alerts : [];
@@ -12715,8 +12707,7 @@ setInterval(load, 60000);
         const upserts = updateImpactFromAlerts(alerts);
         sendJson(res, { ok: true, upserts, stats: getStats() });
       } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
-    });
-    req.on('error', () => { try { sendJson(res, { ok: false, error: 'request error' }, 500); } catch (_) {} });
+    }, 50000);
     return;
   }
 
@@ -24467,9 +24458,8 @@ load();
   // Proteção: ADMIN_KEY (x-admin-key header ou Bearer). Retorna contagem aplicada.
   if (p === '/admin/apply-trained-predictions' && req.method === 'POST') {
     if (!requireAdmin(req, res)) return;
-    let body = '';
-    req.on('data', c => { if (body.length < 2_000_000) body += c; });
-    req.on('end', () => {
+    _readPostBody(req, res, (body) => {
+      if (body === null) return;
       try {
         const j = JSON.parse(body || '{}');
         const updates = Array.isArray(j.updates) ? j.updates : null;
@@ -24502,7 +24492,7 @@ load();
       } catch (e) {
         sendJson(res, { error: e.message }, 500);
       }
-    });
+    }, 2_000_000);
     return;
   }
 
@@ -32204,9 +32194,8 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
     const ra = String(req.socket?.remoteAddress || '');
     const isLoopback = ra === '127.0.0.1' || ra === '::1' || ra === '::ffff:127.0.0.1';
     if (!isLoopback && !requireAdmin(req, res)) return;
-    let body = '';
-    req.on('data', c => { if (body.length < 500_000) body += c; });
-    req.on('end', () => {
+    _readPostBody(req, res, (body) => {
+      if (body === null) return;
       try {
         const j = JSON.parse(body || '{}');
         const lines = Array.isArray(j.lines) ? j.lines : (j.line ? [j.line] : []);
@@ -32215,7 +32204,7 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
       } catch (e) {
         sendJson(res, { ok: false, error: e.message }, 400);
       }
-    });
+    }, 500_000);
     return;
   }
 
