@@ -4241,6 +4241,99 @@ function _isDestructive(req) {
   try { return _DESTRUCTIVE_PATHS.test(req.url || ''); } catch (_) { return false; }
 }
 
+// 2026-05-20: HexStrike defense — anti-scanner/WAF/honeypot/UA-blocklist.
+//
+// HexStrike-AI orchestra ~150 tools (nmap, nuclei, sqlmap, gobuster, ffuf,
+// hydra, nikto, wfuzz, dirbuster, amass, subfinder, etc) via AI loop.
+// Defesas espelham WAF cloud (Cloudflare/Akamai patterns):
+//
+// 1. Scanner UA blocklist — User-Agent regex catch tooling signature
+// 2. Honeypot paths — fake /wp-admin, /.env, /phpinfo, etc → auto-ban
+// 3. Attack pattern WAF — regex SQL injection, XSS, path traversal em URL/headers
+// 4. Scanner ban (separado de admin lockout) — 24h ban
+const _scannerBanMap = new Map(); // ip → bannedUntil
+const _HEXSTRIKE_SCANNER_UAS = /sqlmap|nuclei|gobuster|ffuf|hydra|nikto|nmap|metasploit|hexstrike|wpscan|dirbuster|wfuzz|sqlninja|httpscreenshot|aquatone|amass|subfinder|httpx[-\/\s]|katana[-\/\s]|qsreplace|gau[-\/\s]|hakrawler|paramspider|burpsuite|owasp|acunetix|appscan|netsparker|sqlninja|skipfish|w3af|whatweb|masscan|zmap|zgrab|dirsearch|feroxbuster|kxss/i;
+const _HEXSTRIKE_HONEYPOT_PATHS = new Set([
+  '/.env', '/.env.local', '/.env.production', '/.env.backup',
+  '/.git/config', '/.git/HEAD', '/.gitignore',
+  '/wp-admin', '/wp-admin/', '/wp-admin.php', '/wp-login.php', '/wp-config.php',
+  '/wordpress', '/wordpress/wp-login.php', '/wp-includes/',
+  '/phpmyadmin', '/phpmyadmin/', '/pma', '/pma/', '/myadmin', '/dbadmin',
+  '/admin.php', '/administrator', '/administrator/index.php',
+  '/phpinfo.php', '/phpinfo', '/info.php', '/test.php',
+  '/.aws/credentials', '/.aws/config', '/.ssh/id_rsa', '/.ssh/known_hosts',
+  '/.docker/config.json', '/.dockercfg',
+  '/server-status', '/server-info', '/struts2-blank',
+  '/jenkins', '/jenkins/', '/.well-known/security.txt',
+  '/sitemap.xml.gz', '/robots.txt.bak',
+  '/api/v1/swagger.json', '/swagger', '/swagger-ui', '/swagger.yaml',
+  '/console', '/eval-stdin.php', '/CGI-BIN/test-cgi',
+  '/xmlrpc.php', '/.htaccess', '/.htpasswd',
+  '/joomla', '/drupal', '/magento',
+  '/manager/html', '/host-manager/html', // Tomcat
+  '/_search?pretty', // Elasticsearch
+  '/api/db/sd', '/api/admin/login', '/cgi-bin/php',
+  '/owa/', '/ews/', '/Autodiscover/',
+]);
+const _HEXSTRIKE_ATTACK_PATTERNS = [
+  /\/\.\.[\/\\]/,                                // path traversal
+  /\.\.%2[fF]|%2[eE]%2[eE]/,                     // url-encoded path traversal
+  /<script[\s>]/i,                               // XSS basic
+  /javascript:|onerror=|onload=/i,               // XSS event handlers
+  /UNION\s+(ALL\s+)?SELECT/i,                    // SQL injection union
+  /OR\s+1\s*=\s*1|AND\s+1\s*=\s*1/i,             // SQL injection tautology
+  /'\s*OR\s+'1'\s*=\s*'1/i,                      // SQL injection quote
+  /;\s*(DROP|DELETE|UPDATE|INSERT)\s+/i,         // SQL DDL/DML injection
+  /\$\{.*\}/,                                    // JNDI/expression injection
+  /\bsleep\s*\(\s*\d+\s*\)/i,                    // SQL time-based
+  /benchmark\s*\(/i,                             // SQL benchmark
+  /pg_sleep|waitfor\s+delay/i,                   // SQL time-based pg/mssql
+  /char\s*\(\s*\d+\s*\)/i,                       // SQL char obfuscation
+  /\\x[0-9a-f]{2}\\x[0-9a-f]{2}/i,               // shell hex encoding
+  /\b(curl|wget|nc|netcat|bash|sh)\s+[\-\w\/]/i, // command injection
+  /\bphp:\/\/(input|filter|expect)/i,            // PHP wrapper injection
+];
+
+function _hexstrikeIsBanned(ip) {
+  if (!ip) return false;
+  const until = _scannerBanMap.get(ip);
+  if (!until) return false;
+  if (Date.now() > until) { _scannerBanMap.delete(ip); return false; }
+  return true;
+}
+function _hexstrikeBan(ip, reason) {
+  if (!ip) return;
+  const durationH = Math.max(1, parseInt(process.env.HEXSTRIKE_BAN_HOURS || '24', 10));
+  const until = Date.now() + (durationH * 3600 * 1000);
+  _scannerBanMap.set(ip, until);
+  try { log('WARN', 'HEXSTRIKE-BAN', `IP ${ip} banned ${durationH}h — reason=${reason}`); } catch (_) {}
+  if (_scannerBanMap.size > 5000) {
+    const sorted = [..._scannerBanMap.entries()].sort((a, b) => a[1] - b[1]);
+    for (let i = 0; i < sorted.length - 5000; i++) _scannerBanMap.delete(sorted[i][0]);
+  }
+}
+function _hexstrikeDetect(req) {
+  // Returns reason string if attack detected, else null.
+  const ua = String(req.headers['user-agent'] || '');
+  if (ua && _HEXSTRIKE_SCANNER_UAS.test(ua)) return `scanner_ua:${ua.slice(0, 40)}`;
+  const urlPath = (req.url || '').split('?')[0];
+  if (_HEXSTRIKE_HONEYPOT_PATHS.has(urlPath) || _HEXSTRIKE_HONEYPOT_PATHS.has(urlPath.toLowerCase())) {
+    return `honeypot_path:${urlPath.slice(0, 60)}`;
+  }
+  const fullUrl = String(req.url || '');
+  for (const pat of _HEXSTRIKE_ATTACK_PATTERNS) {
+    if (pat.test(fullUrl)) return `attack_pattern_url:${pat.source.slice(0, 30)}`;
+  }
+  // Also check Referer + custom headers (X-Forwarded-Host etc)
+  const referer = String(req.headers['referer'] || '');
+  if (referer) {
+    for (const pat of _HEXSTRIKE_ATTACK_PATTERNS) {
+      if (pat.test(referer)) return `attack_pattern_referer:${pat.source.slice(0, 30)}`;
+    }
+  }
+  return null;
+}
+
 // 2026-05-20: heavy security layer. Multiple defenses against admin attacks.
 //
 // Layer 1 — IP lockout: após N falhas consecutivas (default 10) em janela
@@ -4787,6 +4880,27 @@ const server = http.createServer(async (req, res) => {
   // Global safety net — prevents hanging requests on unhandled async errors
   res.on('error', (e) => log('ERROR', 'RES', e.message));
   try {
+
+  // 2026-05-20: HexStrike defense — BEFORE any routing. Detect + ban scanner
+  // traffic at entry point. Saves CPU/bandwidth, hides endpoints from probe.
+  const _ip = getClientIp(req);
+  // Hide tech fingerprints (anti reconnaissance)
+  try {
+    res.removeHeader('X-Powered-By');
+    res.setHeader('Server', 'nginx'); // Generic — no version info
+  } catch (_) {}
+  // Already banned IP → drop connection (no body, conserve resources)
+  if (_hexstrikeIsBanned(_ip)) {
+    try { res.writeHead(444); res.end(); } catch (_) {}
+    return;
+  }
+  // Detect attack signature → ban + drop
+  const _attackReason = _hexstrikeDetect(req);
+  if (_attackReason) {
+    _hexstrikeBan(_ip, _attackReason);
+    try { res.writeHead(444); res.end(); } catch (_) {}
+    return;
+  }
 
   if (req.method === 'OPTIONS') {
     // 2026-05-07 (audit P2 security): CORS antes era `*` em todas rotas (defesa
@@ -12537,7 +12651,22 @@ setInterval(load, 60000);
         'destructive_path_query_key_rejected',
         'security_headers_hsts_frame_options',
         'audit_log_ring_buffer',
+        'hexstrike_scanner_ua_blocklist',
+        'hexstrike_honeypot_paths',
+        'hexstrike_attack_pattern_waf',
+        'tech_fingerprint_hidden',
       ].filter(Boolean),
+      hexstrike: {
+        banned_ips_count: _scannerBanMap.size,
+        ban_duration_hours: parseInt(process.env.HEXSTRIKE_BAN_HOURS || '24', 10),
+        scanner_ua_pattern_active: true,
+        honeypot_paths_count: _HEXSTRIKE_HONEYPOT_PATHS.size,
+        attack_patterns_count: _HEXSTRIKE_ATTACK_PATTERNS.length,
+        recently_banned: [..._scannerBanMap.entries()].slice(-20).map(([ip, until]) => ({
+          ip, until: new Date(until).toISOString(),
+          remaining_hours: Math.round((until - Date.now()) / 3600000 * 10) / 10,
+        })),
+      },
     });
     return;
   }
