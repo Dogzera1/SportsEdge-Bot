@@ -2710,6 +2710,28 @@ async function sendAdminDMs(token, text, extra, context) {
       log('WARN', 'ADMIN-DM-FAIL', `${context || '?'} adminId=${adminId}: ${e.message}`);
     }
   }
+  // 2026-05-20: broadcast tip dispatches to subscribed groups (chat_id<0).
+  // User explicit: "todas tips reais sejam emitidas no grupo".
+  // Gate: context includes 'tip' (matches *-market-tip / *-rounds-tip / *-kills-tip).
+  // Non-tip contexts (audit, calib, watchdog, digest, promote-explain) stay
+  // admin-only — não floodam grupo com management messages.
+  // Override env: TIPS_BROADCAST_TO_GROUPS=false desabilita.
+  const _broadcastTips = !/^(0|false|no)$/i.test(String(process.env.TIPS_BROADCAST_TO_GROUPS ?? 'true'));
+  const _isTipContext = String(context || '').toLowerCase().includes('tip');
+  if (_broadcastTips && _isTipContext) {
+    for (const [userId] of subscribedUsers) {
+      const uidInt = typeof userId === 'number' ? userId : parseInt(String(userId), 10);
+      if (!Number.isFinite(uidInt) || uidInt >= 0) continue; // só groups (chat_id negativo)
+      try {
+        const r = await sendDM(token, uidInt, text, extra);
+        if (r && r.ok !== false) sent++;
+        else failed++;
+      } catch (e) {
+        failed++;
+        log('WARN', 'GROUP-DM-FAIL', `${context || '?'} groupId=${uidInt}: ${e.message}`);
+      }
+    }
+  }
   return { sent, failed };
 }
 
