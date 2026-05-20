@@ -7962,19 +7962,55 @@ setInterval(load, 10000);
   }
 
   // ── Resultado PandaScore (settlement de tips ps_*) ──
+  // 2026-05-20 Sprint 2: suporta sufixo _MAP{N} — resolve winner do mapa
+  // específico (em vez da série). Mirror /dota-result (server.js:7990+).
+  // Cobre tips LoL ML per-mapa emitidas via Sprint 1 (LOL_ML_PER_MAP=true).
   if (p === '/ps-result') {
     const rawId = parsed.query.matchId || '';
-    const psId = rawId.replace('ps_', '');
+    const mapMatch = rawId.match(/_MAP(\d+)$/);
+    const mapN = mapMatch ? parseInt(mapMatch[1], 10) : null;
+    const baseId = rawId.replace(/_MAP\d+$/, '');
+    const psId = baseId.replace(/^ps_/, '');
     if (!psId) { sendJson(res, { resolved: false, error: 'matchId obrigatório' }, 400); return; }
     if (!PANDASCORE_TOKEN) { sendJson(res, { resolved: false, error: 'PANDASCORE_TOKEN não configurado' }); return; }
     try {
       // PS rota correta é /matches/{id} (generic). /lol/matches/{id} retorna "Route not found".
       const r = await _pandaGet(`/matches/${psId}`);
       const m = safeParse(r.body, {});
+      const t1Obj = m.opponents?.[0]?.opponent;
+      const t2Obj = m.opponents?.[1]?.opponent;
+
+      // Per-map settlement: lookup game N em m.games, retorna winner do MAPA
+      if (mapN) {
+        const games = Array.isArray(m.games) ? m.games : [];
+        const game = games.find(g => g.position === mapN || g.number === mapN);
+        if (!game) { sendJson(res, { matchId: rawId, resolved: false, reason: 'map_not_found', map: mapN }); return; }
+        if (game.status !== 'finished' || !game.winner) {
+          sendJson(res, { matchId: rawId, resolved: false, reason: 'map_in_progress', map: mapN, status: game.status });
+          return;
+        }
+        let mapWinner = null;
+        if (game.winner.id === t1Obj?.id) mapWinner = t1Obj.name;
+        else if (game.winner.id === t2Obj?.id) mapWinner = t2Obj.name;
+        if (mapWinner) {
+          // Per-map row mantém placar do MAPA (não da série). Mirror /dota-result.
+          const mapScore = (game.score_kills_blue != null && game.score_kills_red != null)
+            ? `${game.score_kills_blue}-${game.score_kills_red}`
+            : '1-0';
+          stmts.upsertMatchResult.run(rawId, 'lol', t1Obj?.name || '', t2Obj?.name || '', mapWinner, mapScore, m.league?.name || '');
+          try { stmts.insertMatchResultSource.run(rawId, 'lol', 'pandascore', t1Obj?.name || '', t2Obj?.name || '', mapWinner, mapScore); } catch (_) {}
+          sendJson(res, { matchId: rawId, winner: mapWinner, resolved: true, map: mapN, score: mapScore });
+        } else {
+          sendJson(res, { matchId: rawId, resolved: false, reason: 'map_winner_unmatched', map: mapN });
+        }
+        return;
+      }
+
+      // Series-level settlement (path original)
       const winner = m.winner?.name || null;
       if (winner) {
-        const t1 = m.opponents?.[0]?.opponent?.name || '';
-        const t2 = m.opponents?.[1]?.opponent?.name || '';
+        const t1 = t1Obj?.name || '';
+        const t2 = t2Obj?.name || '';
         stmts.upsertMatchResult.run(rawId, 'lol', t1, t2, winner, _psSeriesScore(m), m.league?.name || '');
         try { stmts.insertMatchResultSource.run(rawId, 'lol', 'pandascore', t1, t2, winner, _psSeriesScore(m)); } catch (_) {}
         sendJson(res, { matchId: rawId, winner, resolved: true });
