@@ -743,6 +743,52 @@ function _safeUnsub(userId) {
   return true;
 }
 
+// R4 audit 2026-05-20: failure budget per stage + admin alerts.
+// Track failures em rolling window 1h. Threshold default 10/h → DM admin (throttled 1h).
+// Stages exemplo: fetch_matches_lol, predict_lol, record_tip_post, telegram_dispatch.
+// Visibilidade via endpoint /admin/failure-budget (server.js).
+const _failureCounts = new Map();   // key: stage → ts[]
+const _failureAlertSent = new Map(); // key: stage → last_alert_ts
+const _failureLastErr = new Map();   // key: stage → last_err_msg
+function _recordStageFailure(stage, errMsg = '') {
+  const now = Date.now();
+  const arr = _failureCounts.get(stage) || [];
+  arr.push(now);
+  const windowMs = parseInt(process.env.FAILURE_BUDGET_WINDOW_MS || String(60 * 60 * 1000), 10);
+  const cutoff = now - windowMs;
+  while (arr.length && arr[0] < cutoff) arr.shift();
+  _failureCounts.set(stage, arr);
+  if (errMsg) _failureLastErr.set(stage, String(errMsg).substring(0, 200));
+  // Expose count via metrics gauge — visível em /health/metrics
+  try { require('./lib/metrics').gauge('failure_count_window', arr.length, { stage }); } catch (_) {}
+  const threshold = parseInt(process.env.FAILURE_BUDGET_THRESHOLD || '10', 10);
+  if (arr.length >= threshold) {
+    const lastAlert = _failureAlertSent.get(stage) || 0;
+    if (now - lastAlert > 60 * 60 * 1000) {
+      _failureAlertSent.set(stage, now);
+      const sample = _failureLastErr.get(stage) || '';
+      const alertText = `⚠️ *Failure budget exceeded*\n\nStage: \`${stage}\`\nCount: ${arr.length} failures in last ${Math.round(windowMs/60000)}min (threshold ${threshold})${sample ? `\nLast: \`${sample}\`` : ''}\n\n*Investigar:* logs WARN/ERROR pra esse stage.`;
+      const token = (typeof resolveAlertsToken === 'function') ? resolveAlertsToken() : null;
+      if (token) {
+        sendAdminDMs(token, alertText, { parse_mode: 'Markdown' }, 'failure-budget-alert').catch(e => {
+          log('WARN', 'FAILURE-BUDGET', `DM alert failed for stage=${stage}: ${e.message}`);
+        });
+      }
+    }
+  }
+}
+function _getFailureBudgetSnapshot() {
+  const out = {};
+  for (const [stage, arr] of _failureCounts.entries()) {
+    out[stage] = {
+      count_1h: arr.length,
+      last_err: _failureLastErr.get(stage) || null,
+      last_alert_at: _failureAlertSent.get(stage) || null,
+    };
+  }
+  return out;
+}
+
 // R6 audit 2026-05-20: dispatch unificado ML + MT. Antes: per-subscriber loop
 // usava `prefs.has(sport)` que skippava groups sem sport_prefs matching string
 // exato (ex: grupo com 'esports' mas tip sport='lol' → tip não dispatched).
@@ -4264,7 +4310,7 @@ async function runAutoAnalysis() {
       }
 
     } catch(e) {
-      log('ERROR', 'AUTO-ESPORTS', e.message);
+      log('ERROR', 'AUTO-ESPORTS', e.message); _recordStageFailure('poll_esports', e.message);
       _livePhaseExit('lol');
     }
   }
@@ -4285,22 +4331,22 @@ async function runAutoAnalysis() {
   const parallel = [];
   if (SPORTS['esports']?.enabled) {
     parallel.push(_timed('dota2', () => pollDota(true)).then(v => { sharedCaches.dota = v; })
-      .catch(e => log('ERROR', 'AUTO', `Dota2 unified: ${e.message}`)));
+      .catch(e => { log('ERROR', 'AUTO', `Dota2 unified: ${e.message}`); _recordStageFailure('poll_dota2', e.message); }));
   }
   if (SPORTS['mma']?.enabled) {
-    parallel.push(_timed('mma', () => pollMma(true)).catch(e => log('ERROR', 'AUTO', `MMA unified: ${e.message}`)));
+    parallel.push(_timed('mma', () => pollMma(true)).catch(e => { log('ERROR', 'AUTO', `MMA unified: ${e.message}`); _recordStageFailure('poll_mma', e.message); }));
   }
   if (SPORTS['football']?.enabled) {
     parallel.push(_timed('football', () => pollFootball(true)).then(v => { sharedCaches.football = v; })
-      .catch(e => log('ERROR', 'AUTO', `Football unified: ${e.message}`)));
+      .catch(e => { log('ERROR', 'AUTO', `Football unified: ${e.message}`); _recordStageFailure('poll_football', e.message); }));
   }
   if (SPORTS['tennis']?.enabled) {
     parallel.push(_timed('tennis', () => pollTennis(true)).then(v => { sharedCaches.tennis = v; })
-      .catch(e => log('ERROR', 'AUTO', `Tennis unified: ${e.message}`)));
+      .catch(e => { log('ERROR', 'AUTO', `Tennis unified: ${e.message}`); _recordStageFailure('poll_tennis', e.message); }));
   }
   if (SPORTS['tabletennis']?.enabled) {
     parallel.push(_timed('tabletennis', () => pollTableTennis(true)).then(v => { sharedCaches.tabletennis = v; })
-      .catch(e => log('ERROR', 'AUTO', `TableTennis unified: ${e.message}`)));
+      .catch(e => { log('ERROR', 'AUTO', `TableTennis unified: ${e.message}`); _recordStageFailure('poll_tabletennis', e.message); }));
   }
   // 2026-05-06 FIX: respeitar in-flight flag setado por scheduleCs/Valorant
   // pra evitar paralelismo (compartilham analyzedX/_inFlight/sharedCaches).
@@ -4315,7 +4361,7 @@ async function runAutoAnalysis() {
         try { return await pollCs(true); }
         finally { if (_spIf) _spIf.delete('cs'); }
       }).then(v => { sharedCaches.cs = v; })
-        .catch(e => log('ERROR', 'AUTO', `CS2 unified: ${e.message}`)));
+        .catch(e => { log('ERROR', 'AUTO', `CS2 unified: ${e.message}`); _recordStageFailure('poll_cs', e.message); }));
     }
   }
   if (SPORTS['valorant']?.enabled) {
@@ -4327,7 +4373,7 @@ async function runAutoAnalysis() {
         try { return await pollValorant(true); }
         finally { if (_spIf) _spIf.delete('valorant'); }
       }).then(v => { sharedCaches.valorant = v; })
-        .catch(e => log('ERROR', 'AUTO', `Valorant unified: ${e.message}`)));
+        .catch(e => { log('ERROR', 'AUTO', `Valorant unified: ${e.message}`); _recordStageFailure('poll_valorant', e.message); }));
     }
   }
   await Promise.allSettled(parallel);
