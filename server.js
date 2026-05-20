@@ -32724,6 +32724,23 @@ ROI em amostra pequena tem variance alta — só considere cortes com <b>n ≥ 3
     return;
   }
 
+  // 2026-05-20: static serve /img/<file>.<ext> — usado por sendPhoto Telegram
+  // (notifySettledTips: green pra win, red pra loss). Whitelist extensões.
+  if (p.startsWith('/img/')) {
+    const safeName = p.replace(/^\/img\//, '').replace(/[^a-zA-Z0-9._-]/g, '');
+    if (!safeName || safeName.includes('..')) { res.writeHead(404); res.end(); return; }
+    const ext = (safeName.split('.').pop() || '').toLowerCase();
+    const ctype = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', webp: 'image/webp' }[ext];
+    if (!ctype) { res.writeHead(404); res.end(); return; }
+    const imgPath = path.join(__dirname, 'public', 'img', safeName);
+    try {
+      const buf = fs.readFileSync(imgPath);
+      res.writeHead(200, { 'Content-Type': ctype, 'Cache-Control': 'public, max-age=86400' });
+      res.end(buf);
+    } catch (_) { res.writeHead(404); res.end(); }
+    return;
+  }
+
   if (p === '/dashboard' || p === '/') {
     const htmlPath = path.join(__dirname, 'public', 'dashboard.html');
     try {

@@ -2698,6 +2698,48 @@ async function sendDM(token, userId, text, extra) {
   return res;
 }
 
+// 2026-05-20: sendPhoto via URL (Telegram fetcha do public/img static).
+// Usado em notifySettledTips: green pra win, red pra loss. Caption suporta
+// Markdown igual sendDM. Em failure (URL inacessível, 403, etc.) fallback
+// pra sendDM text-only não acontece — caller deve catch e tentar sendDM.
+async function sendPhotoFromUrl(token, userId, photoUrl, caption, extra) {
+  caption = _sanitizeMarkdownForTelegram(String(caption || ''));
+  if (_tg403BlockedThisSession.has(String(userId))) {
+    throw Object.assign(new Error('Telegram 403: skipped (cached this session)'), { code: 403 });
+  }
+  const res = await tgRequest(token, 'sendPhoto', {
+    chat_id: userId,
+    photo: photoUrl,
+    caption,
+    parse_mode: 'Markdown',
+    ...extra,
+  });
+  if (!res || res.ok !== false) return res;
+  const code = res.error_code;
+  const desc = String(res.description || '');
+  if (code === 403) {
+    const _uidNum = typeof userId === 'number' ? userId : parseInt(String(userId), 10);
+    if (Number.isFinite(_uidNum) && _uidNum < 0) {
+      log('WARN', 'TG-403-GROUP', `sendPhoto groupId=${userId} 403 — skipping auto-unsub. desc="${desc}"`);
+    } else {
+      _unsubscribeUserAll(userId, 'tg_403_blocked').catch(() => {});
+    }
+    throw Object.assign(new Error(`Telegram 403: ${desc}`), { code: 403 });
+  }
+  // 400 com parse/entities: retry plaintext caption
+  if (code === 400 && /parse|entities|markdown|reserved|unsupported/i.test(desc)) {
+    const plain = String(caption).replace(/[*_`[\]]/g, '');
+    const retryExtra = { ...(extra || {}) };
+    delete retryExtra.parse_mode;
+    const res2 = await tgRequest(token, 'sendPhoto', {
+      chat_id: userId, photo: photoUrl, caption: plain, ...retryExtra,
+    });
+    return res2;
+  }
+  log('WARN', 'DM-FAIL', `sendPhoto userId=${userId} code=${code} desc="${desc.slice(0, 160)}"`);
+  return res;
+}
+
 // ── Token routing helpers ──
 // Quando TIPS_UNIFIED_TOKEN está setado, TODAS tips (qualquer sport) usam
 // esse token único — útil pra consolidar deliveries num só bot Telegram.
@@ -4969,11 +5011,22 @@ async function notifySettledTips() {
         pickLine,
         profitLine ? `\n${profitLine}` : '',
       ].filter(Boolean).join('\n');
+      // 2026-05-20: tip settle com foto custom — win=green/loss=red. Photo URL
+      // serve do server.js static (/img/tip_win.jpg, /img/tip_loss.jpg). Caption
+      // herda Markdown formatting do msg. Void/push stay text-only (sendDM).
+      const _baseUrl = (process.env.PUBLIC_BASE_URL || 'https://sportsedge-bot-production.up.railway.app').replace(/\/+$/, '');
+      const _photoUrl = tip.result === 'win'
+        ? `${_baseUrl}/img/tip_win.jpg`
+        : (tip.result === 'loss' ? `${_baseUrl}/img/tip_loss.jpg` : null);
       let sent = 0;
       for (const [userId, prefs] of subscribedUsers) {
         if (!prefs || !prefs.has(prefKey)) continue;
         try {
-          await sendDM(token, userId, msg);
+          if (_photoUrl) {
+            await sendPhotoFromUrl(token, userId, _photoUrl, msg);
+          } else {
+            await sendDM(token, userId, msg);
+          }
           sent++;
         } catch (e) {
           if (e.message && e.message.includes('403')) {
