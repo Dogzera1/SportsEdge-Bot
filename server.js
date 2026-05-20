@@ -8440,7 +8440,7 @@ setInterval(load, 10000);
           if (mapResult?.winner && mapResult.played) {
             stmts.upsertMatchResult.run(rawId, 'valorant', t1, t2, mapResult.winner, mapResult.score || '', '');
             try { stmts.insertMatchResultSource.run(rawId, 'valorant', 'vlr_match_page', t1, t2, mapResult.winner, mapResult.score || ''); } catch (_) {}
-            log('INFO', 'VAL-MAP-SETTLE', `${rawId} map ${mapN} → ${mapResult.winner} via VLR ${results.vlrMatchId}`);
+            log('INFO', 'VAL-MAP-SETTLE', `${rawId} map ${mapN} → ${mapResult.winner} (${mapResult.score || '?-?'}) via VLR ${results.vlrMatchId}`);
             return { resolved: true, winner: mapResult.winner, map: mapN, score: mapResult.score };
           }
           if (mapResult && !mapResult.played) {
