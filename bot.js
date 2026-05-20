@@ -26910,17 +26910,87 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
       : parseInt(process.env.PNL_DAILY_HOUR_UTC || '0', 10); // default 0 UTC = 21h BRT
     const runPnlDaily = async () => {
       try {
-        const { runPnlReport, formatTelegramPnl } = require('./lib/analytics-watchdog');
-        const report = await runPnlReport(db, {});
-        const msg = formatTelegramPnl(report);
-        if (msg) {
-          // Prefer tips token pra que broadcast group funcione + admins recebem.
-          const token = (process.env.TIPS_UNIFIED_TOKEN || '').trim()
-            || (typeof resolveTipsToken === 'function' ? resolveTipsToken('') : null)
-            || resolveAlertsToken();
-          if (token) await sendAdminDMs(token, msg, { parse_mode: 'HTML' }, 'pnl-daily-tips-summary');
-          log('INFO', 'PNL-DAILY', `Report enviado · MTD ${report.totals.mtd_units}u · 7d total ${report.daily7d.reduce((s,d) => s + (d.units||0), 0).toFixed(2)}u`);
+        // 2026-05-20 fix: aggregate ML + MT pra evitar bug runPnlReport (lib query
+        // só tips table, ignora market_tips_shadow). User reportou tennis MT
+        // (handicap/totais) NÃO contadas no daily PnL.
+        const today = new Date().toISOString().slice(0, 10);
+        const lines = [`🌙 *Lucro de Hoje* — ${today}`, ''];
+
+        // ML tips: tabela `tips` is_shadow=0 + archived=0, settled today
+        const mlRows = db.prepare(`
+          SELECT sport, result,
+                 COALESCE(profit_reais, 0) AS profit_reais,
+                 CAST(REPLACE(REPLACE(stake, 'u', ''), 'U', '') AS REAL) AS stake_units
+            FROM tips
+           WHERE COALESCE(is_shadow, 0) = 0
+             AND COALESCE(archived, 0) = 0
+             AND result IN ('win', 'loss', 'void')
+             AND DATE(settled_at) = ?
+        `).all(today);
+
+        // MT tips: tabela market_tips_shadow settled today (real path: stake>0 OR algum heuristic)
+        // Schema: profit_units (já em units), stake_units, result, settled_at, sport
+        const mtRows = db.prepare(`
+          SELECT sport, result,
+                 COALESCE(profit_units, 0) AS profit_units,
+                 COALESCE(stake_units, 0) AS stake_units
+            FROM market_tips_shadow
+           WHERE result IN ('win', 'loss', 'void')
+             AND DATE(settled_at) = ?
+        `).all(today);
+
+        const bySport = {};
+        let totW = 0, totL = 0, totV = 0, totProfit = 0, totStake = 0;
+        for (const r of mlRows) {
+          const s = r.sport || '?';
+          bySport[s] = bySport[s] || { mlN: 0, mlP: 0, mtN: 0, mtP: 0, w: 0, l: 0, v: 0 };
+          bySport[s].mlN++;
+          bySport[s].mlP += r.profit_reais || 0;
+          totProfit += r.profit_reais || 0;
+          totStake += r.stake_units || 0;
+          if (r.result === 'win') { bySport[s].w++; totW++; }
+          else if (r.result === 'loss') { bySport[s].l++; totL++; }
+          else if (r.result === 'void') { bySport[s].v++; totV++; }
         }
+        for (const r of mtRows) {
+          const s = r.sport || '?';
+          bySport[s] = bySport[s] || { mlN: 0, mlP: 0, mtN: 0, mtP: 0, w: 0, l: 0, v: 0 };
+          bySport[s].mtN++;
+          bySport[s].mtP += r.profit_units || 0;
+          totProfit += r.profit_units || 0;
+          totStake += r.stake_units || 0;
+          if (r.result === 'win') { bySport[s].w++; totW++; }
+          else if (r.result === 'loss') { bySport[s].l++; totL++; }
+          else if (r.result === 'void') { bySport[s].v++; totV++; }
+        }
+        const totSettled = totW + totL + totV;
+        const roi = totStake > 0 ? (totProfit / totStake * 100) : 0;
+        lines.push(`📊 ${totSettled} liquidadas (${totW}W ${totL}L ${totV}V)`);
+        lines.push(`💰 *${totProfit >= 0 ? '+' : ''}${totProfit.toFixed(2)}u* (${totProfit >= 0 ? '+' : ''}${roi.toFixed(1)}% ROI · ${totStake.toFixed(1)}u stake)`);
+
+        const sportsSorted = Object.entries(bySport).sort((a, b) => (b[1].mlP + b[1].mtP) - (a[1].mlP + a[1].mtP));
+        if (sportsSorted.length > 0) {
+          lines.push('', '*Por sport:*');
+          for (const [s, d] of sportsSorted) {
+            const c = d.mlN + d.mtN;
+            const p = d.mlP + d.mtP;
+            if (c === 0) continue;
+            const parts = [];
+            if (d.mlN > 0) parts.push(`ML ${d.mlN}`);
+            if (d.mtN > 0) parts.push(`MT ${d.mtN}`);
+            const emoji = p > 0 ? '🟢' : p < 0 ? '🔴' : '⚪';
+            lines.push(`${emoji} ${s}: ${parts.join(' + ')} (${d.w}W${d.l}L${d.v}V) → ${p >= 0 ? '+' : ''}${p.toFixed(2)}u`);
+          }
+        } else {
+          lines.push('', '_Nenhuma tip liquidada hoje._');
+        }
+
+        const msg = lines.join('\n');
+        const token = (process.env.TIPS_UNIFIED_TOKEN || '').trim()
+          || (typeof resolveTipsToken === 'function' ? resolveTipsToken('') : null)
+          || resolveAlertsToken();
+        if (token) await sendAdminDMs(token, msg, { parse_mode: 'Markdown' }, 'pnl-daily-tips-summary');
+        log('INFO', 'PNL-DAILY', `Report enviado · ML+MT total ${totProfit.toFixed(2)}u (ML ${mlRows.length}, MT ${mtRows.length})`);
       } catch (e) { log('WARN', 'PNL-DAILY', `erro: ${e.message}`); }
     };
     const scheduleNextPnl = () => {
