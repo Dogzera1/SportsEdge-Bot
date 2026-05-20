@@ -3172,6 +3172,21 @@ async function withAutoAnalysisMutex(fn) {
       // Lock stale: ciclo antigo ainda pode estar rodando (não dá pra cancelar Promise em JS).
       // Bump generation pra que o `finally` do ciclo antigo vire no-op e não clobbere estado novo.
       log('WARN', 'AUTO', `Mutex stale (${Math.round(age / 60000)}min) — liberando lock forçado (ciclo antigo continua em background)`);
+      // R5 audit 2026-05-20: alert admin quando stale-unlock dispara. Throttled
+      // 1h pra evitar spam quando ciclo permanece stuck (auto-recovery falha).
+      // Indica causa subjacente: rede travada, model lento, deadlock externo.
+      global.__mutexStaleUnlockTs = global.__mutexStaleUnlockTs || 0;
+      if (now - global.__mutexStaleUnlockTs > 60 * 60 * 1000) {
+        global.__mutexStaleUnlockTs = now;
+        const _ageMin = Math.round(age / 60000);
+        const _alertText = `⚠️ *Mutex auto-analysis stale unlock*\n\nCiclo anterior travou por ${_ageMin}min (threshold ${Math.round(AUTO_ANALYSIS_MUTEX_STALE_MS/60000)}min).\nForçado unlock — generation bumped, ciclo antigo agora é no-op.\n\n*Investigar:* última poll que rodou, network, model load, fetch externo travado.`;
+        const _alertToken = (typeof resolveAlertsToken === 'function') ? resolveAlertsToken() : null;
+        if (_alertToken) {
+          sendAdminDMs(_alertToken, _alertText, { parse_mode: 'Markdown' }, 'mutex-stale-alert').catch(e => {
+            log('WARN', 'AUTO', `Mutex stale DM falhou: ${e.message}`);
+          });
+        }
+      }
       autoAnalysisMutex.generation++;
       autoAnalysisMutex.locked = false;
     } else {
