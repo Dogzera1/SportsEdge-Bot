@@ -4358,8 +4358,24 @@ function _adminLockoutConfig() {
   };
 }
 
+// 2026-05-20 CRITICAL: loopback IPs SEMPRE bypass lockout. Mirror _isIpInAllowlist
+// pattern. Sem isso, bot.js→server.js loopback acumula failures de tentativas
+// antigas com key inválida e fica auto-locked → tips reais paralisam.
+// Log evidence: AUTO-BASKET/AUTO-TENNIS tips abortadas com "ip_locked_too_many_failures
+// [HTTP 429]" em 2026-05-20T23:03-23:30.
+function _isLoopbackIp(ip) {
+  if (!ip) return false;
+  if (ip === '127.0.0.1' || ip === '::1' || ip === 'localhost' || ip.startsWith('::ffff:127.')) return true;
+  // Private network ranges (Railway internal CGNAT)
+  if (/^10\./.test(ip) || /^192\.168\./.test(ip) || /^172\.(1[6-9]|2[0-9]|3[01])\./.test(ip)) return true;
+  // Railway internal CGNAT 100.64.0.0/10 (seen em audit_log earlier 100.64.0.6-8)
+  if (/^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(ip)) return true;
+  return false;
+}
+
 function _isAdminLocked(ip) {
   if (!ip) return false;
+  if (_isLoopbackIp(ip)) return false;  // loopback nunca lockado (bot interno)
   const entry = _adminFailureMap.get(ip);
   if (!entry) return false;
   if (entry.lockedUntil && Date.now() < entry.lockedUntil) return true;
@@ -4368,6 +4384,7 @@ function _isAdminLocked(ip) {
 
 function _recordAdminFail(ip, endpoint) {
   if (!ip) return;
+  if (_isLoopbackIp(ip)) return;  // loopback failures não contam (bot interno)
   const cfg = _adminLockoutConfig();
   const now = Date.now();
   let entry = _adminFailureMap.get(ip);
