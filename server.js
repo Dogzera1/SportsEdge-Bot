@@ -1055,7 +1055,12 @@ function utcDayAnchorMs(tipMs) {
 }
 
 function shouldSkipTennisEspnWindowSync(anchorKey) {
-  const ttl = Math.min(300000, Math.max(20000, parseInt(process.env.TENNIS_ESPN_WINDOW_SYNC_MIN_MS || '90000', 10) || 90000));
+  // 2026-05-20: TTL default 90s → 600s (10min) + clamp ceiling 5min → 30min.
+  // Cada anchor (per tip date) re-syncava a cada settle cycle (10min) — 113 tennis
+  // pending tips × ~30 unique anchor days = ~30 syncs/cycle de janela 42d (1200 inserts
+  // OR IGNORE cada). Ingest tennis_espn 1.74M rows/24h = 93.8% do DB. TTL=600s alinha
+  // sync ao settle interval (1× sync por cycle por anchor). Override Railway env.
+  const ttl = Math.min(1800000, Math.max(20000, parseInt(process.env.TENNIS_ESPN_WINDOW_SYNC_MIN_MS || '600000', 10) || 600000));
   const k = String(anchorKey);
   const t = _tennisEspnWindowSyncAt.get(k);
   return t != null && (Date.now() - t) < ttl;
@@ -1166,8 +1171,12 @@ async function syncTennisEspnCompletedAroundSentAt(sentAtRaw) {
   if (!Number.isFinite(tipMs)) tipMs = Date.now();
   const anchorKey = `day:${utcDayAnchorMs(tipMs)}`;
   if (shouldSkipTennisEspnWindowSync(anchorKey)) return 0;
-  const beforeD = Math.min(50, Math.max(7, parseInt(process.env.TENNIS_ESPN_DATE_WINDOW_BEFORE_DAYS || '21', 10) || 21));
-  const afterD = Math.min(50, Math.max(7, parseInt(process.env.TENNIS_ESPN_DATE_WINDOW_AFTER_DAYS || '21', 10) || 21));
+  // 2026-05-20: BEFORE/AFTER defaults 21d → 7d. Window 42d → 14d (3× redução).
+  // Tennis matches finalizam em horas, settle típico cobre janela pequena (~7d).
+  // ±21d era over-engineered: cada tip pulla 42d de ATP+WTA scoreboard ~1200 matches.
+  // Combinado com TTL=600s (anti-thrashing), ingest tennis reduz ~10×. Override Railway env.
+  const beforeD = Math.min(50, Math.max(3, parseInt(process.env.TENNIS_ESPN_DATE_WINDOW_BEFORE_DAYS || '7', 10) || 7));
+  const afterD = Math.min(50, Math.max(3, parseInt(process.env.TENNIS_ESPN_DATE_WINDOW_AFTER_DAYS || '7', 10) || 7));
   const start = new Date(tipMs - beforeD * 86400000);
   const end = new Date(tipMs + afterD * 86400000);
   const dates = `${espnDateYmdUtc(start)}-${espnDateYmdUtc(end)}`;
