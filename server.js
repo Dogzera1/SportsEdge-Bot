@@ -4445,20 +4445,12 @@ function _applySecurityHeaders(res) {
 }
 
 function requireAdmin(req, res) {
-  // Layer 1: lockout check (antes de rate limit)
+  // Layer 1: lockout check (antes de rate limit) — mesmo key válida não bypassa
   const ip = (typeof getClientIp === 'function' ? getClientIp(req) : null) || req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket?.remoteAddress || '';
   if (_isAdminLocked(ip)) {
     _applySecurityHeaders(res);
     _appendAdminAudit(req, false, 'ip_locked');
     sendJson(res, { ok: false, error: 'ip_locked_too_many_failures', retry_after_min: Math.ceil((_adminFailureMap.get(ip).lockedUntil - Date.now()) / 60000) }, 429);
-    return false;
-  }
-  // Layer 2: IP allowlist check
-  if (!_isIpInAllowlist(ip)) {
-    _applySecurityHeaders(res);
-    _appendAdminAudit(req, false, 'ip_not_allowlisted');
-    try { log('WARN', 'AUTH-BLOCK', `IP ${ip} fora ADMIN_IP_ALLOWLIST — endpoint=${(req.url || '').split('?')[0]}`); } catch (_) {}
-    sendJson(res, { ok: false, error: 'ip_not_authorized' }, 403);
     return false;
   }
   // 2026-05-15 audit P1 (defense-in-depth): rate limit cross-admin antes do
@@ -4479,7 +4471,19 @@ function requireAdmin(req, res) {
     }
     return true;
   }
+  // 2026-05-20: admin_key check ANTES de IP allowlist. Valid key bypassa IP
+  // allowlist (defense-in-depth contínua — sem key, IP ainda gate). Antes:
+  // user com key válida de IP dinâmico (mobile, casa, trabalho) bloqueado.
   if (!isAdminRequest(req)) {
+    // Layer 2: IP allowlist — só aplicado quando key missing/invalid (catch
+    // attackers sem key, mas valid key passa sem IP check).
+    if (!_isIpInAllowlist(ip)) {
+      _applySecurityHeaders(res);
+      _appendAdminAudit(req, false, 'ip_not_allowlisted');
+      try { log('WARN', 'AUTH-BLOCK', `IP ${ip} fora ADMIN_IP_ALLOWLIST (sem key válida) — endpoint=${(req.url || '').split('?')[0]}`); } catch (_) {}
+      sendJson(res, { ok: false, error: 'ip_not_authorized' }, 403);
+      return false;
+    }
     _recordAdminFail(ip, (req.url || '').split('?')[0]);
     _appendAdminAudit(req, false, 'unauthorized');
     _applySecurityHeaders(res);
@@ -15492,14 +15496,20 @@ load();
     // 'admin key não fornecida' usando ?key= via dashboard JS. requireAdmin
     // sozinho rejeitava query.key (só header/cookie). Path NÃO é destructive
     // (não está em _DESTRUCTIVE_PATHS), então query.key fallback é aceitável.
-    // Mantém lockout + IP allowlist + rate limit via inline checks.
+    // 2026-05-20 v2: admin_key ANTES de IP allowlist (mesmo pattern requireAdmin).
+    // Valid key bypassa IP check; IP só aplica se key missing/invalid.
     const _ipRs = getClientIp(req);
     if (_isAdminLocked(_ipRs)) { sendJson(res, { ok: false, error: 'ip_locked_too_many_failures', retry_after_min: Math.ceil((_adminFailureMap.get(_ipRs).lockedUntil - Date.now()) / 60000) }, 429); return; }
-    if (!_isIpInAllowlist(_ipRs)) { sendJson(res, { ok: false, error: 'ip_not_authorized' }, 403); return; }
     const _rlRs = Math.max(10, Math.min(600, parseInt(process.env.ADMIN_RATE_LIMIT_PER_MIN || '60', 10) || 60));
     if (!rateLimit(req, res, _rlRs, 'admin_global')) return;
     const _adminOkRs = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
     if (!_adminOkRs) {
+      // Key missing/invalid → check IP allowlist como fallback
+      if (!_isIpInAllowlist(_ipRs)) {
+        _appendAdminAudit(req, false, 'ip_not_allowlisted');
+        sendJson(res, { ok: false, error: 'ip_not_authorized' }, 403);
+        return;
+      }
       _recordAdminFail(_ipRs, p);
       _appendAdminAudit(req, false, 'unauthorized');
       sendJson(res, { ok: false, error: 'unauthorized', tip: 'use header x-admin-key OR query ?key=<ADMIN_KEY>' }, 401);
