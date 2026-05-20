@@ -11543,6 +11543,71 @@ setInterval(load, 10000);
     return;
   }
 
+  // 2026-05-20 audit A: diagnose + fix UNIQUE index em match_result_sources.
+  // Hipótese: mig 114 declarou UNIQUE INDEX mas se table tinha duplicates no
+  // momento, CREATE UNIQUE INDEX falhou silenciosamente → INSERT OR IGNORE não
+  // tem o que ignorar → 1M rows/dia tennis ESPN steady-state.
+  //
+  // GET /admin/match-result-sources-unique-check?apply=1&key=<KEY>
+  // - Check: existe index UNIQUE em (match_id, game, source)?
+  // - Conta duplicatas: total - distinct(match_id||game||source)
+  // - apply=1: dedup (keep MAX(id)) + recria UNIQUE INDEX
+  if (p === '/admin/match-result-sources-unique-check' && (req.method === 'GET' || req.method === 'POST')) {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const apply = String(parsed.query.apply || '0') === '1';
+      // Check existing UNIQUE indices
+      const indices = db.prepare(`
+        SELECT name, sql FROM sqlite_master
+        WHERE type='index' AND tbl_name='match_result_sources'
+      `).all();
+      const uniqueIdx = indices.filter(i => /UNIQUE/i.test(i.sql || ''));
+      const totalRows = db.prepare(`SELECT COUNT(*) AS n FROM match_result_sources`).get().n;
+      const distinctRows = db.prepare(`
+        SELECT COUNT(*) AS n FROM (SELECT 1 FROM match_result_sources GROUP BY match_id, game, source)
+      `).get().n;
+      const duplicates = totalRows - distinctRows;
+      const result = {
+        ok: true,
+        ts: new Date().toISOString(),
+        total_rows: totalRows,
+        distinct_rows: distinctRows,
+        duplicate_rows: duplicates,
+        duplicate_pct: totalRows > 0 ? +(duplicates / totalRows * 100).toFixed(2) : 0,
+        indices: indices.map(i => ({ name: i.name, unique: /UNIQUE/i.test(i.sql || '') })),
+        has_unique_match_source: uniqueIdx.length > 0,
+        apply,
+      };
+      if (apply && duplicates > 0) {
+        const t0 = Date.now();
+        // Step 1: delete duplicates (keep max id per natural key)
+        const delRes = db.prepare(`
+          DELETE FROM match_result_sources
+          WHERE id NOT IN (
+            SELECT MAX(id) FROM match_result_sources GROUP BY match_id, game, source
+          )
+        `).run();
+        result.deduped_rows = delRes.changes;
+        // Step 2: drop old index if exists (não-unique) e cria UNIQUE
+        try { db.exec(`DROP INDEX IF EXISTS idx_mrs_unique_match_source`); } catch (_) {}
+        try {
+          db.exec(`CREATE UNIQUE INDEX idx_mrs_unique_match_source ON match_result_sources(match_id, game, source)`);
+          result.unique_index_created = true;
+        } catch (e) {
+          result.unique_index_created = false;
+          result.index_error = e.message;
+        }
+        result.apply_elapsed_ms = Date.now() - t0;
+        // Re-check total
+        result.total_rows_after = db.prepare(`SELECT COUNT(*) AS n FROM match_result_sources`).get().n;
+      }
+      sendJson(res, result);
+    } catch (e) {
+      sendJson(res, { ok: false, error: e.message }, 500);
+    }
+    return;
+  }
+
   // ── /admin/match-result-sources-breakdown: diagnostic read-only.
   // Identifica quem domina ingest em match_result_sources (por game + source +
   // janela de tempo). Use pra investigar DB bloat antes de mexer em retention.
