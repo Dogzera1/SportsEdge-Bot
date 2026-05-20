@@ -597,6 +597,39 @@
 </head>
 <body>
 
+<!-- 2026-05-20: Admin key inline banner — sempre visível enquanto não há key.
+     Substitui prompt() bloqueante que ficava "declined" em sessionStorage. -->
+<div id="adminKeyBanner" style="display:none;background:#1f2937;border-bottom:2px solid #fbbf24;padding:12px 20px;color:#fef3c7;font-size:14px;position:sticky;top:0;z-index:9999">
+  <div style="max-width:1280px;margin:0 auto;display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+    <span style="font-weight:600">🔑 Admin key:</span>
+    <span id="adminKeyBannerMsg" style="color:#fcd34d;font-size:13px">Cole sua admin key e tecle Enter (ou clique Salvar).</span>
+    <input type="password" id="adminKeyInput" placeholder="x-admin-key" style="flex:1;min-width:280px;padding:6px 10px;border-radius:4px;border:1px solid #4b5563;background:#111827;color:#fef3c7;font-family:monospace;font-size:13px" autocomplete="off"/>
+    <button onclick="setAdminKey(document.getElementById('adminKeyInput').value)" style="padding:6px 14px;border-radius:4px;border:none;background:#10b981;color:white;font-weight:600;cursor:pointer">Salvar</button>
+  </div>
+</div>
+<script>
+// Mostra banner imediato se não há key (URL ou storage)
+(function() {
+  try {
+    const urlKey = new URLSearchParams(location.search).get('key') || '';
+    if (urlKey) { sessionStorage.setItem('ADMIN_KEY', urlKey); return; }
+    if (!sessionStorage.getItem('ADMIN_KEY')) {
+      document.addEventListener('DOMContentLoaded', () => {
+        const b = document.getElementById('adminKeyBanner');
+        if (b) b.style.display = 'block';
+        const i = document.getElementById('adminKeyInput');
+        if (i) {
+          try { i.focus(); } catch (_) {}
+          i.addEventListener('keydown', e => {
+            if (e.key === 'Enter') setAdminKey(i.value);
+          });
+        }
+      });
+    }
+  } catch (_) {}
+})();
+</script>
+
 <div class="top">
   <div class="top-inner">
     <div class="brand">
@@ -1258,45 +1291,45 @@ async function apiFetch(path, timeoutMs = 15000) {
   return r.data;
 }
 
-// Admin fetch — x-admin-key header, prompt cached em sessionStorage.
-// 2026-05-07 (audit P1): _adminKeyDeclined flag impede loop quando user cancela
-// prompt. Antes: cancel → key='' → 401 → removeItem → próxima call prompt → loop.
-// Agora: cancelado uma vez, sessionStorage retém marker e prompt não dispara
-// até reload manual da página (ou clear do storage).
-let _adminKeyDeclined = false;
+// Admin fetch — x-admin-key header, cached em sessionStorage.
+// 2026-05-20 v3: prompt() removido, declined-state removido. Inline banner
+// (#adminKeyBanner) é a UNICA fonte de entrada de key. URL `?key=` ainda
+// suportado e sobreescreve. Bug anterior: prompt declinado uma vez setava
+// ADMIN_KEY_DECLINED=1 em sessionStorage persistente → bloqueava todas chamadas
+// futuras mesmo após reload. Fix: input field sempre visível quando sem key.
 function getAdminKey() {
-  // 2026-05-20 FIX: ler ?key= da URL FIRST. User acessa /admin/?key=XXX e
-  // dashboard deve usar essa key automaticamente. Antes só lia sessionStorage,
-  // ignorando URL → user via alert 'key não fornecida' mesmo com ?key=YYY no URL.
-  // URL key SEMPRE prevalece (permite trocar key via URL sem clear sessionStorage).
   try {
     const urlKey = new URLSearchParams(location.search).get('key') || '';
     if (urlKey) {
       sessionStorage.setItem('ADMIN_KEY', urlKey);
-      sessionStorage.removeItem('ADMIN_KEY_DECLINED');
-      _adminKeyDeclined = false;
       return urlKey;
     }
   } catch (_) { /* URL parse defensive */ }
-  if (_adminKeyDeclined) return '';
-  let key = sessionStorage.getItem('ADMIN_KEY') || '';
-  if (!key) {
-    if (sessionStorage.getItem('ADMIN_KEY_DECLINED') === '1') {
-      _adminKeyDeclined = true;
-      return '';
-    }
-    const promptResult = prompt('Admin key (x-admin-key):');
-    if (promptResult === null || promptResult === '') {
-      // User clicou cancelar OU deixou vazio → marca declined até reload
-      sessionStorage.setItem('ADMIN_KEY_DECLINED', '1');
-      _adminKeyDeclined = true;
-      return '';
-    }
-    key = promptResult;
-    sessionStorage.setItem('ADMIN_KEY', key);
-    sessionStorage.removeItem('ADMIN_KEY_DECLINED');
+  return sessionStorage.getItem('ADMIN_KEY') || '';
+}
+function setAdminKey(k) {
+  const key = String(k || '').trim();
+  if (!key) return;
+  sessionStorage.setItem('ADMIN_KEY', key);
+  const banner = document.getElementById('adminKeyBanner');
+  if (banner) banner.style.display = 'none';
+  // Recarrega só pra reaplicar fetches falhados — page state preservado via sessionStorage
+  try { location.reload(); } catch (_) {}
+}
+function clearAdminKey() {
+  sessionStorage.removeItem('ADMIN_KEY');
+  showAdminKeyBanner();
+}
+function showAdminKeyBanner(msg) {
+  const banner = document.getElementById('adminKeyBanner');
+  if (!banner) return;
+  banner.style.display = 'block';
+  if (msg) {
+    const msgEl = document.getElementById('adminKeyBannerMsg');
+    if (msgEl) msgEl.textContent = msg;
   }
-  return key;
+  const input = document.getElementById('adminKeyInput');
+  if (input) { try { input.focus(); } catch (_) {} }
 }
 // 2026-05-07 (audit P0): adminFetch wrappa response — antes callers chamavam
 // .json() diretamente. Se servidor retorna 500 com HTML error page, .json()
@@ -1305,14 +1338,16 @@ function getAdminKey() {
 // pra callers que precisam acesso ao headers/status.
 async function adminFetch(path, opts = {}) {
   const key = getAdminKey();
-  if (!key) throw new Error('Admin key não fornecida — recarregue a página pra inserir');
+  if (!key) {
+    showAdminKeyBanner('Cole sua admin key acima pra continuar.');
+    throw new Error('Admin key não fornecida — preencha no banner topo');
+  }
   const headers = Object.assign({}, opts.headers || {}, { 'x-admin-key': key });
   const r = await fetch(BASE + path, Object.assign({}, opts, { headers }));
   if (r.status === 401 || r.status === 403) {
     sessionStorage.removeItem('ADMIN_KEY');
-    sessionStorage.setItem('ADMIN_KEY_DECLINED', '1');
-    _adminKeyDeclined = true;
-    throw new Error('Admin key inválida — recarregue a página');
+    showAdminKeyBanner('Admin key inválida ou expirada — cole a key correta.');
+    throw new Error('Admin key inválida');
   }
   return r;
 }
