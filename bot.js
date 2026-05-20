@@ -26928,14 +26928,18 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
              AND DATE(settled_at) = ?
         `).all(today);
 
-        // MT tips: tabela market_tips_shadow settled today (real path: stake>0 OR algum heuristic)
-        // Schema: profit_units (já em units), stake_units, result, settled_at, sport
+        // MT tips: tabela market_tips_shadow settled today.
+        // CRÍTICO: filtra admin_dm_sent_at NOT NULL — só inclui MT que foi
+        // DISPATCHED ao user (admin DM). Tips shadow puro (research only, sem
+        // dispatch) NÃO entram em PnL real — ROI inflado se incluir.
+        // Schema mig 025: addColumnIfMissing admin_dm_sent_at TEXT.
         const mtRows = db.prepare(`
           SELECT sport, result,
                  COALESCE(profit_units, 0) AS profit_units,
                  COALESCE(stake_units, 0) AS stake_units
             FROM market_tips_shadow
            WHERE result IN ('win', 'loss', 'void')
+             AND admin_dm_sent_at IS NOT NULL
              AND DATE(settled_at) = ?
         `).all(today);
 
