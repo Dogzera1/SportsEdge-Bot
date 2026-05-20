@@ -11139,6 +11139,53 @@ setInterval(load, 10000);
     return;
   }
 
+  // ── /admin/match-result-sources-breakdown: diagnostic read-only.
+  // Identifica quem domina ingest em match_result_sources (por game + source +
+  // janela de tempo). Use pra investigar DB bloat antes de mexer em retention.
+  // GET /admin/match-result-sources-breakdown?days=3&key=<ADMIN_KEY>
+  if (p === '/admin/match-result-sources-breakdown' && (req.method === 'GET' || req.method === 'POST')) {
+    const adminOk = isAdminRequest(req) || _isAdminQueryKeyDeprecated(req, parsed, p);
+    if (!adminOk) { sendJson(res, { ok: false, error: 'unauthorized' }, 401); return; }
+    try {
+      const days = Math.max(1, Math.min(30, parseInt(parsed.query.days || '3', 10) || 3));
+      const total = db.prepare(`SELECT COUNT(*) AS n FROM match_result_sources`).get().n;
+      const byGameSource = db.prepare(`
+        SELECT game, source, COUNT(*) AS n,
+               MIN(recorded_at) AS oldest, MAX(recorded_at) AS newest
+          FROM match_result_sources
+         WHERE recorded_at >= datetime('now', '-' || ? || ' days')
+         GROUP BY game, source
+         ORDER BY n DESC
+         LIMIT 50
+      `).all(days);
+      const byBucket = db.prepare(`
+        SELECT
+          SUM(CASE WHEN recorded_at >= datetime('now', '-1 hour') THEN 1 ELSE 0 END) AS last_1h,
+          SUM(CASE WHEN recorded_at >= datetime('now', '-6 hours') AND recorded_at < datetime('now', '-1 hour') THEN 1 ELSE 0 END) AS h_1_6,
+          SUM(CASE WHEN recorded_at >= datetime('now', '-24 hours') AND recorded_at < datetime('now', '-6 hours') THEN 1 ELSE 0 END) AS h_6_24,
+          SUM(CASE WHEN recorded_at >= datetime('now', '-72 hours') AND recorded_at < datetime('now', '-24 hours') THEN 1 ELSE 0 END) AS h_24_72,
+          SUM(CASE WHEN recorded_at < datetime('now', '-72 hours') THEN 1 ELSE 0 END) AS gt_72h
+        FROM match_result_sources
+      `).get();
+      const topMatchIds = db.prepare(`
+        SELECT match_id, game, COUNT(DISTINCT source) AS n_sources, GROUP_CONCAT(DISTINCT source) AS sources
+          FROM match_result_sources
+         WHERE recorded_at >= datetime('now', '-' || ? || ' days')
+         GROUP BY match_id, game
+         ORDER BY n_sources DESC, MAX(recorded_at) DESC
+         LIMIT 15
+      `).all(days);
+      sendJson(res, {
+        ok: true, ts: new Date().toISOString(),
+        days_window: days, total_rows: total,
+        by_game_source: byGameSource.map(r => ({ ...r, pct: total > 0 ? Math.round(r.n / total * 1000) / 10 : 0 })),
+        by_recorded_at_bucket: byBucket,
+        top_match_ids_multisource: topMatchIds,
+      });
+    } catch (e) { sendJson(res, { ok: false, error: e.message }, 500); }
+    return;
+  }
+
   // ── /admin/forensics: post-mortem completo de uma tip específica.
   // Combina row da tips + tip_context_json parsed + match_result + voided
   // entry (se houver) + tip_factor_log + shadow row equivalente (se MT).
