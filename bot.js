@@ -9940,15 +9940,21 @@ async function _runAiShadow(sport, ctx, opts = {}) {
         // Resultado: tips AI iam pro bot ESPORTS (alertas) em vez do unified (tips).
         const _aiToken = (process.env.TIPS_UNIFIED_TOKEN || '').trim() || process.env[dmTokenEnv];
         if (_aiToken && subscribedUsers.size > 0) {
-          const _liveTag = hasLiveStats ? ' [AO VIVO]' : '';
-          const _confEmoji = tipConf === CONF.ALTA ? '🟢' : tipConf === CONF.BAIXA ? '🔴' : '🟡';
-          const _aiMsg = `🤖 *TIP ${displayName} AI (DeepSeek)${_liveTag}*\n` +
-            `*${match.team1}* vs *${match.team2}*\n📋 ${eventName}\n` +
-            `\n🎯 Aposta: *${tipTeam}* ML @ *${tipOdd}*\n` +
-            `📈 EV: *+${tipEvNum.toFixed(1)}%*\n💵 Stake: *${tipStake}*\n` +
-            `${_confEmoji} Confiança: *${tipConf}*\n` +
-            `🧠 Análise AI (${sportU}_AI_REAL)\n\n` +
-            `⚠️ _Aposte com responsabilidade._`;
+          const _liveTag = hasLiveStats ? ' 🔴 LIVE' : '';
+          // 2026-05-20: simplificado (user request). Verbose via AI_DM_FORMAT=verbose.
+          const _verbose = /^(1|true|yes|verbose)$/i.test(String(process.env.AI_DM_FORMAT || 'simple'));
+          const _aiMsg = _verbose
+            ? (`🤖 *TIP ${displayName} AI (DeepSeek)${_liveTag}*\n` +
+                `*${match.team1}* vs *${match.team2}*\n📋 ${eventName}\n` +
+                `\n🎯 Aposta: *${tipTeam}* ML @ *${tipOdd}*\n` +
+                `📈 EV: *+${tipEvNum.toFixed(1)}%*\n💵 Stake: *${tipStake}*\n` +
+                `${tipConf === CONF.ALTA ? '🟢' : tipConf === CONF.BAIXA ? '🔴' : '🟡'} Confiança: *${tipConf}*\n` +
+                `🧠 Análise AI (${sportU}_AI_REAL)\n\n` +
+                `⚠️ _Aposte com responsabilidade._`)
+            : (`🤖 *${displayName}* AI${_liveTag}${eventName ? ` — ${String(eventName).slice(0,60)}` : ''}\n` +
+                `${match.team1} vs ${match.team2}\n` +
+                `\n📍 *${tipTeam}* ML @ *${tipOdd}*\n` +
+                `💰 *${tipStake}* | EV *+${tipEvNum.toFixed(1)}%* | ${tipConf}`);
           let _dmsSent = 0;
           for (const [userId, prefs] of subscribedUsers) {
             if (prefs && subPrefs.some(p => prefs.has(p))) {
