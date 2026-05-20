@@ -26890,18 +26890,29 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
 
   // ── PnL Daily Report: notificação 1×/dia com PnL diário (últimos 7d em
   // formato DD/MM = ±X.Xu) + mensal. Default ON; opt-out via PNL_DAILY_AUTO=false.
-  // Hora UTC configurável (default 9 = ~6h BR matinal).
+  // 2026-05-20: schedule defaults 9 UTC → 0 UTC (= 21h BRT, "9 da noite" no Brasil).
+  // PNL_DAILY_BR_HOUR=21 prevalece sobre PNL_DAILY_HOUR_UTC se setado (BRT-anchored).
+  // Token: TIPS_UNIFIED_TOKEN > resolveTipsToken() > resolveAlertsToken (fallback).
+  // Context 'pnl-daily-tips-summary' inclui 'tip' → broadcast a subscribed groups
+  // via sendAdminDMs (commit 907a524). Group recebe lucro do dia automaticamente.
   const _pnlEnabled = !/^(0|false|no)$/i.test(String(process.env.PNL_DAILY_AUTO ?? 'true'));
   if (_pnlEnabled) {
-    const pnlHourUtc = parseInt(process.env.PNL_DAILY_HOUR_UTC || '9', 10);
+    // BR hour override (mais natural pro user BR). BRT = UTC-3.
+    const brHour = parseInt(process.env.PNL_DAILY_BR_HOUR || '', 10);
+    const pnlHourUtc = Number.isFinite(brHour) && brHour >= 0 && brHour <= 23
+      ? ((brHour + 3) % 24)
+      : parseInt(process.env.PNL_DAILY_HOUR_UTC || '0', 10); // default 0 UTC = 21h BRT
     const runPnlDaily = async () => {
       try {
         const { runPnlReport, formatTelegramPnl } = require('./lib/analytics-watchdog');
         const report = await runPnlReport(db, {});
         const msg = formatTelegramPnl(report);
         if (msg) {
-          const token = resolveAlertsToken();
-          if (token) await sendAdminDMs(token, msg, { parse_mode: 'HTML' }, 'pnl-daily');
+          // Prefer tips token pra que broadcast group funcione + admins recebem.
+          const token = (process.env.TIPS_UNIFIED_TOKEN || '').trim()
+            || (typeof resolveTipsToken === 'function' ? resolveTipsToken('') : null)
+            || resolveAlertsToken();
+          if (token) await sendAdminDMs(token, msg, { parse_mode: 'HTML' }, 'pnl-daily-tips-summary');
           log('INFO', 'PNL-DAILY', `Report enviado · MTD ${report.totals.mtd_units}u · 7d total ${report.daily7d.reduce((s,d) => s + (d.units||0), 0).toFixed(2)}u`);
         }
       } catch (e) { log('WARN', 'PNL-DAILY', `erro: ${e.message}`); }
