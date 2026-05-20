@@ -21882,7 +21882,56 @@ async function pollCs(runOnce = false) {
                 }
               } catch (e) { log('WARN', 'MT-SHADOW', `cs-rounds logShadowTip: ${e.message}`); }
               if (!_rdShadowOnly) {
-                log('DEBUG', 'CS-ROUNDS', `${match.team1} vs ${match.team2} map${p}: promote path não implementado em Wave 1`);
+                // Wave 2 promote: espelha CS MT main (bot.js ~21746). Market name
+                // suffixed `_map${p}` consistente com shadow path acima. Phase 1
+                // granular promote check (isMarketTipsEnabled consulta DB per-market):
+                // user precisa promover (`/admin/mt-promote?sport=cs&market=handicap_rounds_mapN`)
+                // APÓS validar shadow stats — defense-in-depth contra promote
+                // acidental ao flippar CS_ROUNDS_SHADOW=false.
+                const _csRdGateAd = ADMIN_IDS.size > 0;
+                if (_csRdGateAd) {
+                  try {
+                    const mtp = require('./lib/market-tip-processor');
+                    const minEvGate = parseFloat(process.env.CS_ROUNDS_TIP_MIN_EV ?? '6');
+                    const minPmGate = parseFloat(process.env.CS_ROUNDS_TIP_MIN_PMODEL ?? '0.55');
+                    const { wasAdminDmSentRecently, markAdminDmSent } = require('./lib/market-tips-shadow');
+                    const _isLiveThisMap = isLiveCs && p === _csCurrentMap;
+                    for (const t of _rdTips) {
+                      if (!(Number.isFinite(t.ev) && Number.isFinite(t.pModel))) continue;
+                      if (t.ev < perMarketEvGate('cs2', t.market, minEvGate) || t.pModel < minPmGate) continue;
+                      const marketPeriod = `${t.market}_map${p}`;
+                      if (!isMarketTipsEnabled('cs2', marketPeriod, t.side, match.league)) {
+                        log('INFO', 'MT-GATE-SKIP', `cs2/${marketPeriod}/${t.side}: ${describeMtGateSkip('cs2', marketPeriod, t.side, match.league)}`);
+                        continue;
+                      }
+                      const dedupKey = `cs2|${norm(match.team1)}|${norm(match.team2)}|${marketPeriod}|${t.line}|${t.side}`;
+                      const inMemFresh = Date.now() - (marketTipSent.get(dedupKey) || 0) <= 24 * 60 * 60 * 1000;
+                      const dbFresh = wasAdminDmSentRecently(db, { sport: 'cs', match, market: marketPeriod, line: t.line, side: t.side, hoursAgo: 24 });
+                      if (inMemFresh || dbFresh) {
+                        log('DEBUG', 'CS-ROUNDS-TIP', `Dedup skip (${inMemFresh ? 'mem' : 'db'}): ${dedupKey}`);
+                        continue;
+                      }
+                      marketTipSent.set(dedupKey, Date.now());
+                      const stake = mtp.kellyStakeForMarket(t.pModel, t.odd, 100, getKellyFraction('cs2', 'BAIXA', null, match.league), { sport: 'cs' });
+                      if (!(stake > 0)) continue;
+                      const tokenForMT = resolveTipsToken('esports') || resolveAlertsToken();
+                      if (!tokenForMT) continue;
+                      const tipWithPeriod = { ...t, market: marketPeriod };
+                      const _gateRd = await _mtTryRecordAndShouldDm({ sport: 'cs2', recordSport: 'cs', match, tip: tipWithPeriod, stake, isLive: _isLiveThisMap });
+                      if (!_gateRd.allowDm) continue;
+                      const _stakeForDm = Number.isFinite(_gateRd.stakeFinal) ? _gateRd.stakeFinal : stake;
+                      const dm = mtp.buildMarketTipDM({ match, tip: tipWithPeriod, stake: _stakeForDm, league: match.league, sport: 'cs2', isLive: _isLiveThisMap });
+                      const _mtMarkupRd = mtp.buildMarketTipReplyMarkup({ match, sport: 'cs2' });
+                      const r = await sendAdminDMs(tokenForMT, dm, _mtMarkupRd ? { reply_markup: _mtMarkupRd } : undefined, 'cs-rounds-tip');
+                      if (r.sent > 0) {
+                        markAdminDmSent(db, { sport: 'cs', match, market: marketPeriod, line: t.line, side: t.side, odd: t.odd, ev: t.ev });
+                        log('INFO', 'CS-ROUNDS-TIP', `Admin DM: ${t.label} @ ${t.odd} EV ${t.ev}% map${p} stake ${_stakeForDm}u (sent=${r.sent} failed=${r.failed}) tipId=${_gateRd.tipId}`);
+                      } else {
+                        log('WARN', 'CS-ROUNDS-TIP', `Todos admin DM falharam — skip dedup mark (${t.label} @ ${t.odd} map${p})`);
+                      }
+                    }
+                  } catch (mte) { reportBug('CS-ROUNDS-TIP', mte, { team1: match.team1, team2: match.team2, league: match.league, map: p }); }
+                }
               }
             }
           } catch (e) { reportBug('CS-ROUNDS', e); }
@@ -22735,7 +22784,56 @@ async function pollValorant(runOnce = false) {
                 }
               } catch (e) { log('WARN', 'MT-SHADOW', `val-rounds logShadowTip: ${e.message}`); }
               if (!_vrShadowOnly) {
-                log('DEBUG', 'VAL-ROUNDS', `${match.team1} vs ${match.team2} map${p}: promote path não implementado em Wave 2A`);
+                // Wave 2 promote: espelha VAL MT main (bot.js ~22670). Market name
+                // suffixed `_map${p}` consistente com shadow path acima. Phase 1
+                // granular promote check (isMarketTipsEnabled consulta DB per-market):
+                // user precisa promover (`/admin/mt-promote?sport=valorant&market=handicap_rounds_mapN`)
+                // APÓS validar shadow stats — defense-in-depth contra promote
+                // acidental ao flippar VAL_ROUNDS_SHADOW=false.
+                const _valRdGateAd = ADMIN_IDS.size > 0;
+                if (_valRdGateAd) {
+                  try {
+                    const mtp = require('./lib/market-tip-processor');
+                    const minEvGate = parseFloat(process.env.VAL_ROUNDS_TIP_MIN_EV ?? '6');
+                    const minPmGate = parseFloat(process.env.VAL_ROUNDS_TIP_MIN_PMODEL ?? '0.55');
+                    const { wasAdminDmSentRecently, markAdminDmSent } = require('./lib/market-tips-shadow');
+                    const _isLiveThisMap = isLiveVal && p === _valCurrentMap;
+                    for (const t of _vrTips) {
+                      if (!(Number.isFinite(t.ev) && Number.isFinite(t.pModel))) continue;
+                      if (t.ev < perMarketEvGate('valorant', t.market, minEvGate) || t.pModel < minPmGate) continue;
+                      const marketPeriod = `${t.market}_map${p}`;
+                      if (!isMarketTipsEnabled('valorant', marketPeriod, t.side, match.league)) {
+                        log('INFO', 'MT-GATE-SKIP', `valorant/${marketPeriod}/${t.side}: ${describeMtGateSkip('valorant', marketPeriod, t.side, match.league)}`);
+                        continue;
+                      }
+                      const dedupKey = `valorant|${norm(match.team1)}|${norm(match.team2)}|${marketPeriod}|${t.line}|${t.side}`;
+                      const inMemFresh = Date.now() - (marketTipSent.get(dedupKey) || 0) <= 24 * 60 * 60 * 1000;
+                      const dbFresh = wasAdminDmSentRecently(db, { sport: 'valorant', match, market: marketPeriod, line: t.line, side: t.side, hoursAgo: 24 });
+                      if (inMemFresh || dbFresh) {
+                        log('DEBUG', 'VAL-ROUNDS-TIP', `Dedup skip (${inMemFresh ? 'mem' : 'db'}): ${dedupKey}`);
+                        continue;
+                      }
+                      marketTipSent.set(dedupKey, Date.now());
+                      const stake = mtp.kellyStakeForMarket(t.pModel, t.odd, 100, getKellyFraction('valorant', 'BAIXA'), { sport: 'valorant' });
+                      if (!(stake > 0)) continue;
+                      const tokenForMT = resolveTipsToken('esports') || resolveAlertsToken();
+                      if (!tokenForMT) continue;
+                      const tipWithPeriod = { ...t, market: marketPeriod };
+                      const _gateVrd = await _mtTryRecordAndShouldDm({ sport: 'valorant', match, tip: tipWithPeriod, stake, isLive: _isLiveThisMap });
+                      if (!_gateVrd.allowDm) continue;
+                      const _stakeForDm = Number.isFinite(_gateVrd.stakeFinal) ? _gateVrd.stakeFinal : stake;
+                      const dm = mtp.buildMarketTipDM({ match, tip: tipWithPeriod, stake: _stakeForDm, league: match.league, sport: 'valorant', isLive: _isLiveThisMap });
+                      const _mtMarkupVrd = mtp.buildMarketTipReplyMarkup({ match, sport: 'valorant' });
+                      const r = await sendAdminDMs(tokenForMT, dm, _mtMarkupVrd ? { reply_markup: _mtMarkupVrd } : undefined, 'val-rounds-tip');
+                      if (r.sent > 0) {
+                        markAdminDmSent(db, { sport: 'valorant', match, market: marketPeriod, line: t.line, side: t.side, odd: t.odd, ev: t.ev });
+                        log('INFO', 'VAL-ROUNDS-TIP', `Admin DM: ${t.label} @ ${t.odd} EV ${t.ev}% map${p} stake ${_stakeForDm}u (sent=${r.sent} failed=${r.failed}) tipId=${_gateVrd.tipId}`);
+                      } else {
+                        log('WARN', 'VAL-ROUNDS-TIP', `Todos admin DM falharam — skip dedup mark (${t.label} @ ${t.odd} map${p})`);
+                      }
+                    }
+                  } catch (mte) { reportBug('VAL-ROUNDS-TIP', mte, { team1: match.team1, team2: match.team2, league: match.league, map: p }); }
+                }
               }
             }
           } catch (e) { reportBug('VAL-ROUNDS', e); }
