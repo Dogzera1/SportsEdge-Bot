@@ -24390,6 +24390,18 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
 (async () => {
   await loadSubscribedUsers();
 
+  // 2026-05-20: periodic refresh — hot-reload subscribers sem restart.
+  // Caso de uso: novo group/user adicionado via /save-user runtime → in-memory
+  // atualiza no próximo interval (sem esperar restart natural ou redeploy).
+  // Default 5min. Override SUBSCRIBERS_REFRESH_INTERVAL_MS env; =0 desabilita.
+  const _subsRefreshMs = parseInt(process.env.SUBSCRIBERS_REFRESH_INTERVAL_MS || String(5 * 60 * 1000), 10);
+  if (Number.isFinite(_subsRefreshMs) && _subsRefreshMs >= 30000) {
+    setInterval(() => {
+      loadSubscribedUsers().catch(e => log('WARN', 'BOOT', `refresh subscribers: ${e.message}`));
+    }, _subsRefreshMs);
+    log('INFO', 'BOOT', `Subscribers refresh interval: ${Math.round(_subsRefreshMs/1000)}s`);
+  }
+
   // Garantir que admins estão inscritos em todos os sports ativos
   const allEnabledSports = Object.entries(SPORTS).filter(([,v]) => v.enabled).map(([k]) => k);
   for (const adminId of ADMIN_IDS) {
