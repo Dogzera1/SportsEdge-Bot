@@ -8172,9 +8172,35 @@ setInterval(load, 10000);
       return { resolved: false, reason: 'cs_map_no_hltv_result', map: mapN };
     }
 
-    // Valorant per-map: feature gap — auto-void via VOID_STUCK_H_VALORANT.
-    if (_mapSuffix && sport === 'valorant') {
-      return { resolved: false, reason: 'val_per_map_unsupported', map: parseInt(_mapSuffix[1], 10) };
+    // 2026-05-20 Sprint 6: Valorant per-map settle via VLR.gg scraper.
+    // Mirror Sprint 4 CS HLTV pattern: getValorantMatchMapResults(t1, t2, sentAt)
+    // → busca match na /matches/results VLR + fetchMatchMaps per matchId.
+    // PS valorant /matches/{id} não expõe games array com winners; VLR é fonte.
+    if (_mapSuffix && sport === 'valorant' && t1 && t2) {
+      const mapN = parseInt(_mapSuffix[1], 10);
+      try {
+        const vlr = require('./lib/vlr');
+        const sentMs = sentAt ? Date.parse(sentAt) : Date.now();
+        const results = await vlr.getValorantMatchMapResults(t1, t2, sentMs);
+        if (results?.maps) {
+          const mapResult = results.maps.find(r => r.map === mapN);
+          if (mapResult?.winner && mapResult.played) {
+            stmts.upsertMatchResult.run(rawId, 'valorant', t1, t2, mapResult.winner, mapResult.score || '', '');
+            try { stmts.insertMatchResultSource.run(rawId, 'valorant', 'vlr_match_page', t1, t2, mapResult.winner, mapResult.score || ''); } catch (_) {}
+            log('INFO', 'VAL-MAP-SETTLE', `${rawId} map ${mapN} → ${mapResult.winner} via VLR ${results.vlrMatchId}`);
+            return { resolved: true, winner: mapResult.winner, map: mapN, score: mapResult.score };
+          }
+          if (mapResult && !mapResult.played) {
+            log('INFO', 'VAL-MAP-SETTLE', `${rawId} map ${mapN} not_played (Bo3 ended early)`);
+            return { resolved: false, reason: 'map_not_played', map: mapN };
+          }
+        }
+        log('DEBUG', 'VAL-MAP-SETTLE', `${rawId} map ${mapN} unresolved (vlr=${results?.vlrMatchId || 'null'})`);
+      } catch (e) {
+        log('WARN', 'VAL-MAP-SETTLE', `${rawId} map ${mapN} err: ${e.message}`);
+      }
+      // Val per-map sem resolução VLR — NÃO fallback pra series winner
+      return { resolved: false, reason: 'val_map_no_vlr_result', map: mapN };
     }
 
     const baseId = rawId.replace(/_MAP\d+$/, '');

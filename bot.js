@@ -4662,11 +4662,11 @@ async function _settleCompletedTipsInner() {
           _mktU === '1X2_D' || _mktU === 'DRAW' ||
           _mktU === 'BTTS_YES' || _mktU === 'BTTS_NO'
         );
-        // 2026-05-20 Sprint 2+4: esports per-map ML (MAP{N}_WINNER) por sport:
+        // 2026-05-20 Sprint 2+4+6: esports per-map ML (MAP{N}_WINNER) por sport:
         //   - lol/dota2: /ps-result + /dota-result (PS games array)
-        //   - cs: /cs-result via resolveEsportsResult → HLTV match page parser (Sprint 4)
-        //   - valorant: ainda não suportado (auto-void via VOID_STUCK_H)
-        const _isEsportsPerMap = (sport === 'lol' || sport === 'dota2' || sport === 'cs')
+        //   - cs: /cs-result via resolveEsportsResult → HLTV match page (Sprint 4)
+        //   - valorant: /valorant-result via resolveEsportsResult → VLR.gg (Sprint 6)
+        const _isEsportsPerMap = (sport === 'lol' || sport === 'dota2' || sport === 'cs' || sport === 'valorant')
           && /^MAP\d+_WINNER$/.test(_mktU);
         if (!_ML_MARKETS_SET.has(_mktU) && !_isFootballOuBtts && !_isEsportsPerMap) continue;
         try {
@@ -23314,17 +23314,27 @@ Máximo 180 palavras.`;
           { gate: 'league_real_override', passed: true, value: _leagueRealOverride ? 'override_active' : 'default', threshold: 'shadowMode bypass via VALORANT_REAL_LEAGUES' },
           { gate: 'ai_gate_ok', passed: true, value: typeof _aiConfVal !== 'undefined' ? _aiConfVal : 'no_ai', threshold: 'aiR.passed=true' },
         ];
+        // 2026-05-20 Sprint 6 — Valorant ML per-mapa (mirror LoL Sprint 1 + CS Sprint 5).
+        // Gate: VALORANT_ML_PER_MAP=true + isLiveVal + valMapNum>0.
+        // Settle via Sprint 6 VLR.gg scraper. Default shadow ON.
+        const _valPerMapEnabled = isLiveVal && valMapNum > 0
+          && /^(1|true|yes)$/i.test(String(process.env.VALORANT_ML_PER_MAP || ''));
+        const _valPerMapShadow = !/^(0|false|no)$/i.test(String(process.env.VALORANT_ML_PER_MAP_SHADOW ?? 'true'));
         const rec = await serverPost('/record-tip', {
           matchId: String(match.id) + valMapTag, eventName: match.league,
           p1: match.team1, p2: match.team2, tipParticipant: pickTeam,
           odds: String(pickOdd), ev: evPct.toFixed(1), stake: stakeAdj,
           confidence: conf,
           isLive: match.status === 'live' ? 1 : 0,
-          market_type: 'ML',
+          market_type: _valPerMapEnabled ? `MAP${valMapNum}_WINNER` : 'ML',
           modelP1, modelP2, modelPPick: pickP,
           modelLabel: 'valorant-elo',
-          tipReason,
-          isShadow: effectiveShadow ? 1 : 0,
+          tipReason: _valPerMapEnabled
+            ? `Valorant ML per-map (live map ${valMapNum}, VLR.gg settle)`
+            : tipReason,
+          isShadow: _valPerMapEnabled
+            ? (_valPerMapShadow ? 1 : (effectiveShadow ? 1 : 0))
+            : (effectiveShadow ? 1 : 0),
           sport: 'valorant',
           lineShopOdds: match.odds || null,
           pickSide: direction,
