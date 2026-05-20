@@ -12629,6 +12629,48 @@ setInterval(load, 60000);
     return;
   }
 
+  // 2026-05-20: /admin/test-broadcast?chat_id=<id>&text=<msg> — testa envio
+  // direto pra chat Telegram via TIPS_UNIFIED_TOKEN (ou TELEGRAM_TOKEN_ESPORTS
+  // fallback). Útil pra validar bot member + send permission em groups/channels
+  // sem esperar tip natural. Admin-only.
+  if (p === '/admin/test-broadcast' && (req.method === 'GET' || req.method === 'POST')) {
+    if (!requireAdmin(req, res)) return;
+    const chatId = String(parsed.query.chat_id || '').trim();
+    const text = String(parsed.query.text || `🧪 Test broadcast ${new Date().toISOString()} — Csbettor_bot conectado e funcionando`);
+    if (!chatId) { sendJson(res, { ok: false, error: 'chat_id obrigatório' }, 400); return; }
+    const token = (process.env.TIPS_UNIFIED_TOKEN || process.env.TELEGRAM_TOKEN_ESPORTS || '').trim();
+    if (!token) { sendJson(res, { ok: false, error: 'no token configured (TIPS_UNIFIED_TOKEN/TELEGRAM_TOKEN_ESPORTS)' }, 500); return; }
+    const https = require('https');
+    const body = JSON.stringify({ chat_id: chatId, text });
+    const tgReq = https.request({
+      hostname: 'api.telegram.org', port: 443,
+      path: `/bot${token}/sendMessage`,
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) },
+      timeout: 10000,
+    }, (tgRes) => {
+      let bodyResp = '';
+      tgRes.on('data', c => bodyResp += c);
+      tgRes.on('end', () => {
+        let parsed = {};
+        try { parsed = JSON.parse(bodyResp); } catch (_) {}
+        sendJson(res, {
+          ok: !!parsed.ok,
+          tg_status: tgRes.statusCode,
+          tg_response: parsed,
+          chat_id: chatId,
+          token_prefix: token.substring(0, 10) + '...',
+          token_source: process.env.TIPS_UNIFIED_TOKEN ? 'TIPS_UNIFIED_TOKEN' : 'TELEGRAM_TOKEN_ESPORTS',
+        });
+      });
+    });
+    tgReq.on('error', (e) => sendJson(res, { ok: false, error: 'telegram_request_failed: ' + e.message }, 502));
+    tgReq.on('timeout', () => { tgReq.destroy(); sendJson(res, { ok: false, error: 'timeout' }, 504); });
+    tgReq.write(body);
+    tgReq.end();
+    return;
+  }
+
   // 2026-05-20 security: /admin/security-status — visibilidade defesas ativas
   // + IPs lockados + audit log recent. Admin-only.
   if (p === '/admin/security-status' && (req.method === 'GET' || req.method === 'POST')) {
