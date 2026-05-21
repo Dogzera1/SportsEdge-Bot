@@ -22,14 +22,20 @@ PINNACLE_EXECUTOR_TOKEN=<gerar token: openssl rand -hex 32>
 PINNACLE_EXECUTOR_MODE=mock                   # 'mock' pra primeiro teste; 'playwright' depois
 ```
 
-**Para Playwright (real bets):**
+**Para Playwright (real bets) — Pinnacle BR (default):**
 ```
 PINNACLE_EXECUTOR_MODE=playwright
 PINNACLE_USERNAME=<seu Customer ID Pinnacle>
 PINNACLE_PASSWORD=<sua senha — USE RAILWAY SECRETS>
+PINNACLE_BASE_URL=https://pinnacle.bet.br/
+PINNACLE_EVENT_URL_TEMPLATE=https://pinnacle.bet.br/event/{event_id}
+PLAYWRIGHT_HEADLESS=true
+```
+
+**OU Pinnacle internacional (.com):**
+```
 PINNACLE_BASE_URL=https://www.pinnacle.com/pt/
 PINNACLE_EVENT_URL_TEMPLATE=https://www.pinnacle.com/pt/event/{event_id}
-PLAYWRIGHT_HEADLESS=true
 ```
 
 ### 4. Validar deploy

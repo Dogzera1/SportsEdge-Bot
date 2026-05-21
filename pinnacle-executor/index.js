@@ -115,7 +115,9 @@ async function _ensureLoggedIn(context) {
   const password = process.env.PINNACLE_PASSWORD;
   if (!username || !password) throw new Error('PINNACLE_USERNAME/PASSWORD não configuradas');
   const page = await context.newPage();
-  const base = process.env.PINNACLE_BASE_URL || 'https://www.pinnacle.com/pt/';
+  // 2026-05-21: BR default — pinnacle.bet.br (apex domain pós-regulação jul/2024).
+  // pinnacle.com/pt/ ainda funciona internacional (PINNACLE_BASE_URL override).
+  const base = process.env.PINNACLE_BASE_URL || 'https://pinnacle.bet.br/';
   await page.goto(base, { waitUntil: 'domcontentloaded', timeout: 30000 });
   // Detect logged in via balance/account elements
   const isLogged = await page.locator(
@@ -158,7 +160,7 @@ async function placeBetPlaywright(payload) {
 
   const page = await context.newPage();
   try {
-    const eventUrl = (process.env.PINNACLE_EVENT_URL_TEMPLATE || 'https://www.pinnacle.com/pt/event/{event_id}')
+    const eventUrl = (process.env.PINNACLE_EVENT_URL_TEMPLATE || 'https://pinnacle.bet.br/event/{event_id}')
       .replace('{event_id}', payload.event_id);
     await page.goto(eventUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
     await page.waitForLoadState('networkidle', { timeout: 15000 });
