@@ -27446,18 +27446,23 @@ log('INFO', 'BOOT', 'SportsEdge Bot iniciando...');
     try {
       const http = require('http');
       const port = process.env.PORT || 3000;
-      // Walk-forward: train 90d, eval últimos 30d (out-of-sample). Reporta IC 95% ROI.
-      // Override eval_days via TENNIS_CALIB_EVAL_DAYS env (0 = legacy in-sample).
-      const evalDays = parseInt(process.env.TENNIS_CALIB_EVAL_DAYS ?? '30', 10);
+      // 2026-05-21 audit: train=90 eval=30 → window [-120,-30] vazio pós
+      // retention shadow ~90d (memory project_audit_logs_2026_05_19). Endpoint
+      // defaults JÁ foram 45/14 desde 2026-05-11 fix mas cron URL hardcoded
+      // ficou legacy 90/30 → cron retornava n_train=0 silently há ~10 dias.
+      // Calib última atualização 2026-05-18 (manual). Override via env.
+      const evalDays = parseInt(process.env.TENNIS_CALIB_EVAL_DAYS ?? '14', 10);
+      const trainDays = parseInt(process.env.TENNIS_CALIB_TRAIN_DAYS ?? '45', 10);
       // 2026-05-12: regime=all fallback. Audit revelou calib stuck em fittedAt
       // 2026-05-10 porque endpoint default regime=new filter exige
       // regime_tag IS NOT NULL. Tips antigas (pré 14d) NULL regime_tag → train
-      // window [-90, -30] retorna n=0 → HTTP 400 → cron WARN "falhou: insufficient
-      // train sample" → calib não atualiza. Validação 2026-05-12 13:55Z confirmou
-      // que regime=all funciona: train=185 eval=808, Brier -0.018, ECE -0.021,
-      // ROI +2.2pp out-of-sample. Override: TENNIS_CALIB_REGIME=new pra reverter.
+      // window retorna n=0. Override: TENNIS_CALIB_REGIME=new pra reverter.
       const regime = String(process.env.TENNIS_CALIB_REGIME || 'all').toLowerCase();
-      const path = `/admin/mt-refit-calib?sport=tennis&days=90&eval_days=${evalDays}&regime=${regime}&write=true&key=${encodeURIComponent(adminKey)}`;
+      // 2026-05-21 audit: stratify=tier ativa per-tier bins (v2 schema).
+      // tiers_only=true preserva flat bins (v1 fallback) — sobrescreve só tiers.
+      // Sem stratify, endpoint escrevia full rewrite sem tiers → apagava
+      // tier-aware fit do JSON existente.
+      const path = `/admin/mt-refit-calib?sport=tennis&days=${trainDays}&eval_days=${evalDays}&regime=${regime}&stratify=tier&tiers_only=true&write=true&key=${encodeURIComponent(adminKey)}`;
       const r = await new Promise((resolve, reject) => {
         const req = http.get('http://localhost:' + port + path, (res) => {
           let body = '';
